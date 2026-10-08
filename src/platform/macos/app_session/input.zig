@@ -380,6 +380,7 @@ pub fn imeSetPreedit(self: *AppSession, bytes: []const u8) void {
         .symbol_picker => self.chrome_host.symbol_picker.input.setPreedit(self.allocator, bytes) catch {},
         .reference_picker => self.chrome_host.reference_picker.input.setPreedit(self.allocator, bytes) catch {},
         .recovery_picker => self.chrome_host.recovery_picker.input.setPreedit(self.allocator, bytes) catch {},
+        .trust_picker => self.chrome_host.trust_picker.input.setPreedit(self.allocator, bytes) catch {},
         // 커밋 상자 조합. **NFC 조합을 하지 않는다** — 주소창이 그것을 하는 이유는 codepoint당 셀
         // 하나로 그리기 때문이고(자모가 안 합쳐진다), 이 상자는 CoreText 셰이핑 경로라 NFD 자모도
         // 한 글자로 합쳐 그려진다(터미널·find와 같다).
@@ -420,6 +421,7 @@ pub fn imeComposingActive(self: *AppSession) bool {
         .symbol_picker => self.chrome_host.symbol_picker.input.preedit.items.len > 0,
         .reference_picker => self.chrome_host.reference_picker.input.preedit.items.len > 0,
         .recovery_picker => self.chrome_host.recovery_picker.input.preedit.items.len > 0,
+        .trust_picker => self.chrome_host.trust_picker.input.preedit.items.len > 0,
         .addr_edit => self.addr_field.preedit.items.len > 0, // 주소창 조합 중이면 true
         .scm_commit => self.scm_commit_field.preedit.items.len > 0,
         .terminal => blk: {
@@ -1376,6 +1378,7 @@ pub fn imeCursorRect(self: *AppSession) ImeCursorRect {
         .symbol_picker => chrome.components.palette.caretRect(&self.chrome_host.symbol_picker, props),
         .reference_picker => chrome.components.palette.caretRect(&self.chrome_host.reference_picker, props),
         .recovery_picker => chrome.components.palette.caretRect(&self.chrome_host.recovery_picker, props),
+        .trust_picker => chrome.components.palette.caretRect(&self.chrome_host.trust_picker, props),
         // 주소창 편집 caret은 밴드가 자체 block caret으로 그린다 — 후보창을 그 caret 셀 옆에 띄운다(addrEditCaretRect가
         // 렌더 "1c"와 같은 밴드·nav_end·편집폭 셈법으로 위치 단일 소스). null이면(밴드 못 찾음) 아래 폴백. web term 활성 중
         // (activeTermIsTerminal=false) 본문 origin 폴백은 caret과 어긋나므로 이 rect가 필요하다(리뷰 [4]).

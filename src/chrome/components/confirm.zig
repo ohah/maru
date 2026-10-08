@@ -105,7 +105,7 @@ pub const State = struct {
         self.cancel_label = buttons.cancel;
         self.has_alternate = false;
         self.has_extra = false;
-        self.focused = .confirm; // 열 때마다 기본 포커스 = 확정 버튼(Enter=확정, ←/→로 이동)
+        self.focused = .confirm; // 열 때마다 기본 포커스 = 확정 버튼(Enter=확정, ←/→로 이동). 동작이 전부 파괴적인 상자는 호출자가 show 뒤 .cancel 로 둔다
         self.body = &.{}; // 이전 확인이 남긴 미리보기가 새 모달에 새지 않게 리셋(붙여넣기 경로가 show 뒤 다시 주입)
         self.notes = &.{}; // 안내 줄도 같다(신뢰 시트가 show 뒤 다시 주입)
         self.open = true;

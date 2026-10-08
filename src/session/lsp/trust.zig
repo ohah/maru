@@ -1,7 +1,8 @@
 //! 워크스페이스 신뢰(docs/editor-surface-tooling.md §8.1·§8.2a 「신뢰」, 계획 docs/plans/workspace-trust.md WT2) — **앱 전체에 표 하나**.
 //! 순수 계산: 표·세대 번호·묻는 자리·줄 형식·옛 형식 이관. 파일 읽기·쓰기와 키 정규화(실제 경로·볼륨)는 호출자.
 //!
-//! 파일은 줄마다 `allow\t‹볼륨 16진›\t‹실제 경로›` / `deny\t…` 이고 마지막 줄이 이긴다 — 결정을 바꾸면 뒤에 붙이기만 한다.
+//! 파일은 줄마다 `allow\t‹볼륨 16진›\t‹실제 경로›` / `deny\t…` / `forget\t…`(결정을 지운다 — 계획 WT4a) 이고 마지막 줄이 이긴다 —
+//! 결정을 바꾸거나 잊으면 뒤에 붙이기만 한다.
 //! **개행으로 끝나지 않은 줄은 읽지 않는다** — 덧붙이다 끊긴 줄(디스크가 찼다)은 경로가 잘려 있어 부모 폴더의 결정으로 읽힐 수 있다.
 //! 옛 형식(`allow\t‹root›` — 창마다 따로 읽던 설정 옆 `lsp-trust`)은 이관할 때만 읽는다(`Store.mergeLegacy`).
 
@@ -20,7 +21,8 @@ pub const Key = struct {
     }
 };
 
-pub const Entry = struct { key: Key, decision: Decision };
+/// 한 줄. `decision == null` 은 `forget` 줄이다 — 그 키의 결정을 지운다(계획 WT4 「잊기」).
+pub const Entry = struct { key: Key, decision: ?Decision };
 
 /// 한 줄을 읽는다(빌린 경로). 모르는 동사·칸 수가 다른 줄·16진이 아닌 볼륨·상대 경로는 `null` — 무시한다.
 pub fn parseLine(raw: []const u8) ?Entry {
@@ -30,17 +32,19 @@ pub fn parseLine(raw: []const u8) ?Entry {
     const vol = it.next() orelse return null;
     const path = it.next() orelse return null;
     if (it.next() != null) return null;
-    const decision: Decision = if (std.mem.eql(u8, verb, "allow")) .allow else if (std.mem.eql(u8, verb, "deny")) .deny else return null;
+    const decision: ?Decision = if (std.mem.eql(u8, verb, "allow")) .allow else if (std.mem.eql(u8, verb, "deny")) .deny else if (std.mem.eql(u8, verb, "forget")) null else return null;
     if (vol.len == 0) return null;
     const volume = std.fmt.parseInt(u64, vol, 16) catch return null;
     if (path.len == 0 or path[0] != '/') return null;
     return .{ .key = .{ .volume = volume, .path = path }, .decision = decision };
 }
 
-/// 붙일 한 줄(개행 포함). `out` 이 모자라면 `null`. 경로에 탭·개행이 있으면 `null` — 그런 경로는 기억할 수 없다(줄 형식이 깨진다).
-pub fn line(decision: Decision, key: Key, out: []u8) ?[]const u8 {
+/// 붙일 한 줄(개행 포함). `decision == null` 이면 `forget` 줄. `out` 이 모자라면 `null`. 경로에 탭·개행이 있으면 `null` — 그런 경로는
+/// 기억할 수 없다(줄 형식이 깨진다).
+pub fn line(decision: ?Decision, key: Key, out: []u8) ?[]const u8 {
     if (std.mem.indexOfAny(u8, key.path, "\t\n\r") != null) return null;
-    return std.fmt.bufPrint(out, "{s}\t{x}\t{s}\n", .{ @tagName(decision), key.volume, key.path }) catch null;
+    const verb = if (decision) |d| @tagName(d) else "forget";
+    return std.fmt.bufPrint(out, "{s}\t{x}\t{s}\n", .{ verb, key.volume, key.path }) catch null;
 }
 
 /// 개행으로 끝난 줄만 돈다 — 마지막 개행 뒤의 조각(끊긴 줄)은 버린다.
@@ -71,7 +75,30 @@ pub const Store = struct {
     generation: u64 = 0,
 
     /// `changed_at` — 그 항목의 결정이 마지막으로 바뀐 세대(다시 묻는 중인 창이 「그 뒤에 다른 데서 답이 왔나」를 본다).
-    const Owned = struct { volume: u64, path: []u8, decision: Decision, changed_at: u64 };
+    /// `decision == null` 은 **실행 중에 잊은** 표시다(`forget`) — 결정은 없고, 각 창이 「언제 잊었나」를 보고 제 서버를 내린다. 파일에서
+    /// 읽은 `forget` 줄은 이 표시를 남기지 않고 항목을 지운다(시작할 때 잊은 것은 그냥 결정이 없는 것이다).
+    const Owned = struct { volume: u64, path: []const u8, decision: ?Decision, changed_at: u64 };
+
+    /// 결정이 있는 항목을 **읽기 전용으로** 돈다(경로는 빌린 `[]const u8`) — 표 밖에서 항목을 고치는 길을 열지 않는다(계획 WT2a
+    /// 「신뢰 부여는 사용자의 답으로만」). 이번 실행에 잊은 것은 건너뛴다.
+    pub fn decided(self: *const Store) Decided {
+        return .{ .items = self.entries.items };
+    }
+
+    pub const Decided = struct {
+        items: []const Owned,
+        i: usize = 0,
+
+        pub fn next(self: *Decided) ?struct { key: Key, decision: Decision } {
+            while (self.i < self.items.len) {
+                const e = self.items[self.i];
+                self.i += 1;
+                const d = e.decision orelse continue;
+                return .{ .key = .{ .volume = e.volume, .path = e.path }, .decision = d };
+            }
+            return null;
+        }
+    };
     const Claim = struct { volume: u64, path: []u8, owner: usize };
 
     pub fn deinit(self: *Store, allocator: std.mem.Allocator) void {
@@ -110,6 +137,29 @@ pub const Store = struct {
         return true;
     }
 
+    /// 결정을 잊는다(계획 WT4) — 표시(`decision = null`)를 남겨 세대를 올린다. 결정이 없었으면 `false`.
+    pub fn forget(self: *Store, key: Key) bool {
+        for (self.entries.items) |*e| {
+            if (e.volume != key.volume or !std.mem.eql(u8, e.path, key.path)) continue;
+            if (e.decision == null) return false;
+            self.generation +%= 1;
+            e.decision = null;
+            e.changed_at = self.generation;
+            return true;
+        }
+        return false;
+    }
+
+    /// 항목을 통째로 지운다(파일의 `forget` 줄 — 표시를 남기지 않는다).
+    fn drop(self: *Store, allocator: std.mem.Allocator, key: Key) void {
+        for (self.entries.items, 0..) |e, i| {
+            if (e.volume != key.volume or !std.mem.eql(u8, e.path, key.path)) continue;
+            allocator.free(e.path);
+            _ = self.entries.orderedRemove(i);
+            return;
+        }
+    }
+
     /// 같은 결정을 다시 답했다 — 결정은 그대로지만 「그 뒤에 답이 섰다」를 남긴다(세대·`changed_at` 이 오른다). 다른 창에서 같은 저장소를
     /// 「다시 묻기」 중이던 클라이언트가 이 답을 제 물음의 답으로 본다(같은 질문을 또 하지 않게). 항목이 없으면 아무것도 안 한다.
     pub fn touch(self: *Store, key: Key) void {
@@ -126,7 +176,9 @@ pub const Store = struct {
         var it = completeLines(contents);
         while (it.next()) |raw| {
             const e = parseLine(raw) orelse continue;
-            _ = try self.put(allocator, e.key, e.decision);
+            if (e.decision) |d| {
+                _ = try self.put(allocator, e.key, d);
+            } else self.drop(allocator, e.key);
         }
     }
 
@@ -170,6 +222,7 @@ pub const Store = struct {
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
         for (self.entries.items) |e| {
+            if (e.decision == null) continue; // 잊은 것은 적지 않는다
             var buf: [std.fs.max_path_bytes + 32]u8 = undefined;
             const l = line(e.decision, .{ .volume = e.volume, .path = e.path }, &buf) orelse continue;
             try out.appendSlice(allocator, l);
@@ -240,7 +293,9 @@ test "LST2 줄 만들기·읽기 — 되읽으면 같은 키와 결정; 탭·개
     try testing.expectEqualStrings("allow\t1000012\t/x/y z\n", l);
     const e = parseLine(std.mem.trimEnd(u8, l, "\n")).?;
     try testing.expect(e.key.eql(k));
-    try testing.expectEqual(Decision.allow, e.decision);
+    try testing.expectEqual(@as(?Decision, .allow), e.decision);
+    try testing.expectEqualStrings("forget\t1000012\t/x/y z\n", line(null, k, &buf).?);
+    try testing.expectEqual(@as(?Decision, null), parseLine("forget\t1\t/x").?.decision);
     try testing.expect(line(.deny, .{ .volume = 1, .path = "/bad\tpath" }, &buf) == null);
     try testing.expect(line(.deny, .{ .volume = 1, .path = "/bad\npath" }, &buf) == null);
     var tiny: [4]u8 = undefined;
@@ -251,7 +306,7 @@ test "LST2 줄 만들기·읽기 — 되읽으면 같은 키와 결정; 탭·개
     try testing.expect(parseLine("allow\t1\tx") == null); // 상대 경로
     try testing.expect(parseLine("allow\t1\t/x\textra") == null);
     try testing.expect(parseLine("maybe\t1\t/x") == null);
-    try testing.expectEqual(Decision.deny, parseLine("deny\t1\t/x\r").?.decision);
+    try testing.expectEqual(@as(?Decision, .deny), parseLine("deny\t1\t/x\r").?.decision);
 }
 
 test "LST3 표 — 키는 볼륨과 경로 둘 다; 결정이 바뀔 때만 세대가 오르고, 읽으면 마지막 줄이 이긴다" {
@@ -349,4 +404,39 @@ test "LST5 묻는 자리 — 한 키는 한 창만; 제 것은 다시 잡혀도 
     s.release(a, null, 20); // 창이 닫혔다
     try testing.expectEqual(@as(usize, 0), s.claims.items.len);
     try testing.expectEqual(@as(u64, 0), s.generation); // 묻는 자리는 결정이 아니다
+}
+
+test "LST13 잊기 — 실행 중에는 표시를 남겨 세대를 올리고(창들이 제 서버를 내린다), 파일의 `forget` 줄은 항목을 지운다; 다시 쓰면 잊은 것은 빠진다 (계획 WT4)" {
+    const a = testing.allocator;
+    var s: Store = .{};
+    defer s.deinit(a);
+    const k: Key = .{ .volume = 1, .path = "/r" };
+    try testing.expect(!s.forget(k)); // 결정이 없으면 잊을 것도 없다
+    _ = try s.put(a, k, .allow);
+    const g = s.generation;
+    try testing.expect(s.forget(k));
+    try testing.expect(s.get(k) == null);
+    try testing.expectEqual(g + 1, s.generation);
+    try testing.expectEqual(@as(?u64, g + 1), s.changedAt(k)); // 언제 잊었나
+    try testing.expect(!s.forget(k)); // 두 번은 아니다
+    try testing.expect(try s.put(a, k, .deny)); // 잊은 뒤 다시 답하면 바뀐 것이다
+    try testing.expectEqual(@as(?Decision, .deny), s.get(k));
+    try testing.expect(s.forget(k));
+    _ = try s.put(a, .{ .volume = 1, .path = "/q" }, .allow);
+    const text = try s.serialize(a);
+    defer a.free(text);
+    try testing.expectEqualStrings("allow\t1\t/q\n", text); // 잊은 /r 은 적지 않는다
+    var d = s.decided();
+    const only = d.next().?; // 잊은 /r 은 목록에도 없다
+    try testing.expectEqualStrings("/q", only.key.path);
+    try testing.expect(d.next() == null);
+
+    var t: Store = .{};
+    defer t.deinit(a);
+    try t.load(a, "allow\t1\t/r\nforget\t1\t/r\nallow\t1\t/q\nforget\t1\t/none\n");
+    try testing.expect(t.get(k) == null);
+    try testing.expect(t.changedAt(k) == null); // 시작할 때 잊은 것은 표시 없이 지운다
+    try testing.expectEqual(@as(usize, 1), t.entries.items.len);
+    try t.load(a, "deny\t1\t/r\n"); // 잊은 뒤의 결정은 다시 선다
+    try testing.expectEqual(@as(?Decision, .deny), t.get(k));
 }

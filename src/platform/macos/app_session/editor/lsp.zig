@@ -58,6 +58,8 @@ pub const Phase = enum {
     /// 묻지 않는 root(계획 WT2b): 홈이거나 그 위(`/` 포함) — 홈의 dotfiles `.git` 이 홈 아래 모든 파일의 root 가 된다. 홈 전체를 한 번의
     /// 허락으로 열지 않는다. 클릭하면 다시 본다.
     home_root,
+    /// 신뢰 결정을 잊었다(계획 WT4 「잊기」) — 서버를 내리고 묻지 않은 채 둔다. 클릭하면 묻는다(다음에 앱을 열면 열 때 묻는다).
+    unasked,
     /// 묻지 않는 root(계획 WT2b): git 저장소 밖 — 가장 가까운 `.git` 이 없어 파일의 부모 폴더가 root 가 됐다. 클릭하면 다시 본다
     /// (그 사이 `git init` 했으면 묻는다).
     outside_repo,
@@ -232,6 +234,12 @@ pub const State = struct {
     asking_key: ?OwnedKey = null,
     /// 마지막으로 적용한 앱 전역 신뢰 표의 세대(`applyTrustChanges`).
     seen_trust_generation: u64 = 0,
+    /// 신뢰 관리 확인 상자(계획 WT4)의 대상과 두 자리의 동작 — 상자가 떠 있는 동안만. 안내 줄은 상자가 빌려 그린다.
+    manage_key: ?OwnedKey = null,
+    manage_primary: ManageAction = .forget,
+    manage_alternate: ?ManageAction = null,
+    manage_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
+    manage_notes: [5]maru.chrome.components.confirm.Note = undefined,
     /// 신뢰 시트의 안내 줄(`setTrustSheetNotes`) — 모달이 빌려 그리므로 모달이 떠 있는 동안 여기 산다. 경로 줄만 버퍼를 쓰고
     /// 나머지는 번역 표의 정적 문장이다.
     trust_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
@@ -284,6 +292,7 @@ pub const State = struct {
         self.clients.deinit(allocator);
         if (self.asking_root) |r| allocator.free(r);
         if (self.asking_key) |k| k.deinit(allocator);
+        if (self.manage_key) |k| k.deinit(allocator);
         self.* = .{};
     }
 };
@@ -432,9 +441,10 @@ fn trustOf(self: *AppSession, key: lsp.trust.Key) ?lsp.trust.Decision {
 }
 
 /// 결정을 앱 전역 표에 둔다(파일에 한 줄 — 마지막 줄이 이긴다). 다른 창은 세대를 보고 따른다(`applyTrustChanges`).
-fn recordTrust(self: *AppSession, key: lsp.trust.Key, decision: lsp.trust.Decision) void {
+/// 파일에 남지 못했으면 `false` — 이번 실행에만 먹는다(`trust_store.decide`).
+fn recordTrust(self: *AppSession, key: lsp.trust.Key, decision: lsp.trust.Decision) bool {
     ensureTrustLoaded(self);
-    trust_store.decide(self.io, key, decision);
+    return trust_store.decide(self.io, key, decision);
 }
 
 /// 묻던 자리를 비운다 — 앱 전역 자리도 놓는다(그 키를 기다리던 다른 창이 다음 gate 에 묻는다).
@@ -458,6 +468,7 @@ fn applyTrustChanges(self: *AppSession) void {
     const st = &self.editor_lsp;
     const gen = trust_store.generation();
     if (st.seen_trust_generation == gen) return;
+    const prev = st.seen_trust_generation;
     st.seen_trust_generation = gen;
     for (st.clients.items) |*c| {
         const k = c.trust_key orelse continue;
@@ -469,10 +480,30 @@ fn applyTrustChanges(self: *AppSession) void {
             if ((trust_store.changedAt(k.key()) orelse 0) <= c.reask_gen) continue;
             c.reask = false;
         }
-        const decision = trust_store.get(k.key()) orelse continue;
+        const decision = trust_store.get(k.key()) orelse {
+            // 잊었다(계획 WT4) — 이 창이 마지막으로 본 뒤에 잊었으면 떠 있는 서버를 내리고 묻지 않은 채 둔다.
+            if ((trust_store.changedAt(k.key()) orelse 0) > prev) forgetClient(self, c);
+            continue;
+        };
         applyDecision(self, c, decision);
     }
     self.metal_dirty = true;
+}
+
+/// 결정을 잊은 저장소의 클라이언트 — 서버를 유예 없이 그룹째 내리고(기다리던 요청도 놓는다 — `dropProcess`) 진단·연 문서를 걷어
+/// 「결정 없음 — 묻기」로 둔다. 곧바로 묻지 않는다(잊기는 「다시 묻기」가 아니다 — 누르면 묻는다).
+fn forgetClient(self: *AppSession, c: *Client) void {
+    switch (c.phase) {
+        .missing, .home_root, .outside_repo, .unasked => return,
+        .asking, .starting, .ready, .restarting, .failed, .denied => {},
+    }
+    dropProcess(self, c);
+    clearClientDiagnostics(self, c);
+    for (c.docs.items) |d| d.release(self.allocator);
+    c.docs.clearRetainingCapacity();
+    c.trust_pending = false;
+    c.reask = false;
+    c.phase = .unasked;
 }
 
 /// 한 클라이언트에 결정을 적용한다(이 창의 답·다른 창의 답이 같은 길). 거부면 떠 있는 서버를 내리고 그 진단을 걷어 「거부됨」으로,
@@ -482,7 +513,7 @@ fn applyDecision(self: *AppSession, c: *Client, decision: lsp.trust.Decision) vo
     switch (decision) {
         .deny => switch (c.phase) {
             .missing, .denied, .home_root, .outside_repo => {},
-            .asking, .starting, .ready, .restarting, .failed => {
+            .asking, .starting, .ready, .restarting, .failed, .unasked => {
                 dropProcess(self, c);
                 clearClientDiagnostics(self, c);
                 for (c.docs.items) |d| d.release(self.allocator);
@@ -491,7 +522,7 @@ fn applyDecision(self: *AppSession, c: *Client, decision: lsp.trust.Decision) vo
                 c.phase = .denied;
             },
         },
-        .allow => if (c.phase == .denied or c.phase == .asking or (c.phase == .restarting and c.trust_pending)) {
+        .allow => if (c.phase == .denied or c.phase == .asking or c.phase == .unasked or (c.phase == .restarting and c.trust_pending)) {
             c.trust_pending = false;
             c.phase = .restarting;
             c.retry_at_ms = std.math.maxInt(u64);
@@ -550,7 +581,8 @@ pub fn answerTrust(self: *AppSession, allow: bool) void {
     const ak = st.asking_key orelse return;
     defer clearAsking(self);
     const decision: lsp.trust.Decision = if (allow) .allow else .deny;
-    recordTrust(self, ak.key(), decision);
+    // 파일에 못 남은 답은 말하지 않는다 — 다음 실행이 다시 묻는다(계획 WT4a 「한계」: 「다시 묻기」의 거부만 옛 허용으로 돌아간다).
+    _ = recordTrust(self, ak.key(), decision);
     // 같은 저장소의 이 창 클라이언트 **전부** — 묻던 것만이 아니라 「다시 묻기」로 기다리던 것(문서가 닫혀 gate 를 안 지나는 것까지).
     for (st.clients.items) |*c| {
         if (!sameKey(c, ak.key())) continue;
@@ -561,6 +593,133 @@ pub fn answerTrust(self: *AppSession, allow: bool) void {
         applyDecision(self, c, decision);
     }
     self.metal_dirty = true;
+}
+
+// ── 신뢰 관리(계획 WT4) ───────────────────────────────────────────────────────
+
+/// 신뢰 관리 확인 상자의 동작 — **철회**는 거부로 기억(다시 안 묻는다), **잊기**는 결정을 지운다(다음에 열 때 묻는다). 둘 다 그
+/// 저장소의 언어 서버를 모든 창에서 바로 내린다(`applyTrustChanges` — 거부·잊기 둘 다 그 길). 허용은 여기 없다 — 신뢰를 주는 것은
+/// 신뢰 시트의 답뿐이다(LSPB23).
+pub const ManageAction = enum { revoke, forget };
+
+/// 신뢰 관리 확인 상자를 띄운다. `only` 가 없으면 결정에 맞춰 — 허용이면 [철회][잊기][취소], 거부면 [잊기][취소]; 있으면 그 동작
+/// 하나만(팔레트의 「이 저장소」 명령).
+fn askManage(self: *AppSession, key: lsp.trust.Key, decision: lsp.trust.Decision, only: ?ManageAction) void {
+    const owned = OwnedKey.dupe(self.allocator, key) catch return;
+    const primary: ManageAction = only orelse if (decision == .allow) .revoke else .forget;
+    const alternate: ?ManageAction = if (only == null and decision == .allow) .forget else null;
+    if (alternate) |alt| {
+        self.showConfirmChoiceKeys(.lsp_trust_manage, .lsp_trust_manage_prompt, .{ .primary = manageLabel(primary), .alternate = manageLabel(alt) });
+    } else {
+        self.showConfirmText(.lsp_trust_manage, maru.i18n.t(.lsp_trust_manage_prompt), .{ .confirm = manageLabel(primary), .cancel = .common_cancel });
+    }
+    // **Enter 는 아무것도 바꾸지 않는다** — 두 동작 모두 모든 창의 서버를 내리므로 처음 포커스를 취소에 둔다(확인 상자 규칙: Enter
+    // 자리에는 버리지 않는 것만). 고르는 것은 버튼·←/→ 다(Y 는 첫 버튼을 고른다는 명시적 키라 그대로).
+    self.chrome_host.confirm.focused = .cancel;
+    // `show` 가 앞 상자(같은 주인이면 그 대상까지 — `cancelPendingConfirm`)를 비운 **뒤에** 채운다.
+    const st = &self.editor_lsp;
+    if (st.manage_key) |k| k.deinit(self.allocator);
+    st.manage_key = owned;
+    st.manage_primary = primary;
+    st.manage_alternate = alternate;
+    setManageNotes(self, owned.key(), primary, alternate);
+}
+
+fn manageLabel(a: ManageAction) maru.i18n.Key {
+    return switch (a) {
+        .revoke => .lsp_trust_revoke,
+        .forget => .lsp_trust_forget,
+    };
+}
+
+/// 관리 상자의 안내 줄 — 저장소 경로, 고를 수 있는 동작마다 그 뜻, 모든 창에서 바로 내린다는 것, **되돌리지 않는 것**(서버가 이미
+/// 만든 캐시·빌드 산출물, 적용한 포맷·수정, 따로 떠난 데몬). **경로가 맨 앞이다** — 높이가 모자라면 모달이 끝부터 줄이는데, 이 상자의
+/// 질문은 「이 저장소의…?」뿐이라 경로가 대상을 알리는 유일한 줄이다(신뢰 시트는 반대로 경고를 앞에 둔다 — 그쪽 질문에는 서버 이름이
+/// 있고, 줄어서 안 되는 것은 대가다). 「이 저장소」 명령은 사용자가 대상을 직접 고르지 않았다.
+fn setManageNotes(self: *AppSession, key: lsp.trust.Key, primary: ManageAction, alternate: ?ManageAction) void {
+    const st = &self.editor_lsp;
+    var n: usize = 0;
+    var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_line = maru.i18n.format(&st.manage_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(key.path, &shown_buf) }});
+    st.manage_notes[n] = .{ .text = root_line, .fit = .path };
+    n += 1;
+    const offers_revoke = primary == .revoke or alternate == .revoke;
+    const offers_forget = primary == .forget or alternate == .forget;
+    if (offers_revoke) {
+        st.manage_notes[n] = .{ .text = maru.i18n.t(.lsp_trust_manage_note_revoke) };
+        n += 1;
+    }
+    if (offers_forget) {
+        st.manage_notes[n] = .{ .text = maru.i18n.t(.lsp_trust_manage_note_forget) };
+        n += 1;
+    }
+    st.manage_notes[n] = .{ .text = maru.i18n.t(.lsp_trust_manage_note_lower) };
+    n += 1;
+    st.manage_notes[n] = .{ .text = maru.i18n.t(.lsp_trust_manage_note_irreversible) };
+    n += 1;
+    self.chrome_host.confirm.notes = st.manage_notes[0..n];
+}
+
+/// 관리 상자의 답 — `primary`(Enter·첫 버튼) 또는 `alternate`.
+pub fn answerManage(self: *AppSession, slot: enum { primary, alternate }) void {
+    const st = &self.editor_lsp;
+    const k = st.manage_key orelse return;
+    defer clearManage(self);
+    const action = switch (slot) {
+        .primary => st.manage_primary,
+        .alternate => st.manage_alternate orelse return,
+    };
+    const saved = switch (action) {
+        .revoke => recordTrust(self, k.key(), .deny),
+        .forget => forgetTrust(self, k.key()),
+    };
+    // 파일에 못 남았다 — 표에는 서서 서버는 내렸지만 다음 실행은 파일의 옛 결정을 읽는다(철회했는데 허용이 돌아온다). 말 없이 두면
+    // 사용자는 거둔 줄 안다.
+    if (!saved) self.showNoticeKey(.lsp_trust_manage_not_saved);
+    self.metal_dirty = true;
+}
+
+/// 관리 상자가 답 없이 닫혔다(취소·다른 상자가 덮었다) — 대상을 놓는다. 아무것도 안 바꾼다.
+pub fn clearManage(self: *AppSession) void {
+    const st = &self.editor_lsp;
+    if (st.manage_key) |k| k.deinit(self.allocator);
+    st.manage_key = null;
+}
+
+/// 결정을 잊는다(관리 상자의 답) — 앱 전역 표에 「잊었다」를 남긴다. 각 창이 세대를 보고 제 서버를 내린다(`forgetClient`).
+/// 파일에 남지 못했으면 `false`.
+fn forgetTrust(self: *AppSession, key: lsp.trust.Key) bool {
+    ensureTrustLoaded(self);
+    return trust_store.forget(self.io, key);
+}
+
+/// 팔레트 「이 저장소 신뢰 철회·잊기」 — 지금 편집기 문서의 저장소. 할 것이 없으면(언어 서버를 쓰지 않는 문서·결정이 없다·이미 거부다)
+/// 알림으로 말하고 상자를 띄우지 않는다.
+pub fn manageCurrent(self: *AppSession, action: ManageAction) void {
+    if (!self.loaded_config.config.lsp.enabled) return self.showNoticeKey(.lsp_trust_current_disabled);
+    if (self.tabs.items.len == 0) return self.showNoticeKey(.lsp_trust_current_unavailable);
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return self.showNoticeKey(.lsp_trust_current_unavailable);
+    const server = serverFor(self, term.rt.editor_grammar) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
+    const root = rootFor(self, term) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
+    const c = clientFor(self, root, server) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
+    const key = trustKey(self, c) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
+    const decision = trustOf(self, key) orelse return self.showNoticeKey(.lsp_trust_current_none);
+    if (action == .revoke and decision != .allow) return self.showNoticeKey(.lsp_trust_current_not_allowed);
+    askManage(self, key, decision, action);
+}
+
+/// 신뢰 목록에서 고른 저장소의 관리 상자 — **지금** 표의 결정으로 띄운다. 목록은 연 순간의 사본이라 그 사이 다른 창이 잊었거나
+/// 바꿨을 수 있다(사본대로 띄우면 결정이 없는 저장소를 「철회」해 거부가 새로 선다 — `manageCurrent` 가 거절하는 것). 결정이 없어졌으면
+/// 알림.
+pub fn manageListed(self: *AppSession, key: lsp.trust.Key) void {
+    const decision = trustOf(self, key) orelse return self.showNoticeKey(.lsp_trust_current_none);
+    askManage(self, key, decision, null);
+}
+
+/// 신뢰 목록이 그릴 표를 읽어 둔다(앱을 띄운 뒤 아직 아무 문서도 신뢰를 보지 않았을 수 있다).
+pub fn loadTrustForList(self: *AppSession) void {
+    ensureTrustLoaded(self);
 }
 
 // ── 클라이언트 찾기·띄우기 ───────────────────────────────────────────────────
@@ -758,7 +917,7 @@ fn pumpClient(self: *AppSession, c: *Client, now_ms: u64) void {
     switch (c.phase) {
         .restarting => if (!c.trust_pending and now_ms >= c.retry_at_ms) spawnClient(self, c, now_ms),
         .starting, .ready => {},
-        .missing, .asking, .denied, .failed, .home_root, .outside_repo => return,
+        .missing, .asking, .denied, .failed, .home_root, .outside_repo, .unasked => return,
     }
     const p = &(c.proc orelse return);
     // 밀린 쓰기가 상한을 넘었다 — 서버가 stdin 을 안 읽는다. 죽은 것으로 보고 재시작 경로로(§8.2a).
@@ -1106,7 +1265,7 @@ fn gateTrust(self: *AppSession, c: *Client) void {
     const stored = if (c.reask) null else trustOf(self, key);
     const decision = stored orelse {
         if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {
-            recordTrust(self, key, ans);
+            _ = recordTrust(self, key, ans);
             c.trust_pending = false;
             c.reask = false;
             if (ans == .deny) c.phase = .denied;
@@ -1233,6 +1392,7 @@ pub fn statusText(view: StatusView, buf: *[status_text_cap]u8) []const u8 {
         .denied => .lsp_status_denied,
         .home_root => .lsp_status_home_root,
         .outside_repo => .lsp_status_outside_repo,
+        .unasked => .lsp_status_unasked,
         .ready => return maru.i18n.format(buf, "{0}", &.{.{ .s = view.exe }}),
     };
     return maru.i18n.format(buf, maru.i18n.t(key), &.{.{ .s = view.exe }});
@@ -1752,6 +1912,21 @@ pub fn activateStatus(self: *AppSession) void {
             c.restarts = 0;
             c.phase = .restarting;
             c.retry_at_ms = 0;
+        },
+        .unasked => {
+            // 잊은 저장소를 이제 묻는다 — 같은 저장소의 이 창 클라이언트가 함께 기다린다(띄우지 않는다 — 문서 닫힌 것까지).
+            const root = rootFor(self, term) orelse return;
+            const c = clientFor(self, root, server) orelse return;
+            const key = (c.trust_key orelse return).key();
+            for (self.editor_lsp.clients.items) |*o| {
+                if (!sameKey(o, key) or o.phase != .unasked) continue;
+                o.trust_pending = true;
+                // 묻지 않는 root 판정부터 다시(`rekeyRoot` 와 같다) — 잊은 뒤 `.git` 을 지웠으면 이제 저장소가 아니다. 문서가 닫힌
+                // 것은 gate 를 안 지나 판정 전으로 남고, 다시 열 때 판정·표를 처음부터 본다.
+                o.scope_checked = false;
+                o.phase = .restarting;
+                o.retry_at_ms = 0;
+            }
         },
         .home_root, .outside_repo => {
             // 다시 본다 — **root 부터** 다시 푼다: 그 사이 상위 폴더에서 `git init` 했으면 root 가 바뀐다(굳힌 root 의 `.git` 만 보면 영영

@@ -18,7 +18,8 @@ const trust = maru.session.editor.lsp.trust;
 /// 표가 쓰는 allocator — 창보다 오래 사는 앱 전역 수명이라 `app_runtime` 과 같은 `smp_allocator`.
 const gpa = std.heap.smp_allocator;
 
-/// 앱 전역 표. **이 파일 밖에서는 못 고친다** — 쓰는 길은 `decide`(사용자의 답) 하나다(계획 WT2 「신뢰 부여는 사용자 클릭으로만」).
+/// 앱 전역 표. **이 파일 밖에서는 못 고친다** — 쓰는 길은 `decide`(사용자의 답)와 `forget`(관리 상자의 잊기 — 결정을 지울 뿐) 둘이다
+/// (계획 WT2 「신뢰 부여는 사용자 클릭으로만」, WT4a).
 var store: trust.Store = .{};
 var loaded = false;
 /// 새 표를 못 읽었다(권한·크기) — 이번 실행은 그 파일에 덧붙이지도 덮어쓰지도 않는다(메모리로만 쓴다).
@@ -176,21 +177,41 @@ pub fn ensureLoaded(io: std.Io, legacy_path: ?[]const u8) void {
 
 /// 결정을 둔다 — 표를 고치고(세대가 오른다) 파일에 한 줄 덧붙인다(마지막 줄이 이긴다). **사용자의 답만** 여기로 온다
 /// (`lsp.zig` `recordTrust` ← `answerTrust` — 계획 WT2 「신뢰 부여는 사용자 클릭으로만」, LSPB23).
-pub fn decide(io: std.Io, key: trust.Key, decision: trust.Decision) void {
-    const changed = store.put(gpa, key, decision) catch return;
+/// 파일에 남지 못했으면(못 읽은 파일이라 손대지 않는다·자리를 못 만들었다·쓰다 실패했다) `false` — 표에는 섰으니 이번 실행에만
+/// 먹고, 다음 실행은 파일의 옛 결정을 읽는다(관리 상자의 철회라면 허용이 돌아온다 — 호출자가 사용자에게 말한다).
+pub fn decide(io: std.Io, key: trust.Key, decision: trust.Decision) bool {
+    const changed = store.put(gpa, key, decision) catch return false;
     if (!changed) {
         store.touch(key); // 같은 답 — 파일은 그대로, 다시 묻던 다른 창이 이것을 답으로 본다
-        return;
+        return true;
     }
-    if (!file_writable) return;
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = dirPath(&dir_buf) orelse return;
-    if (!ensureDir(io, dir)) return;
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "{s}/" ++ file_name, .{dir}) catch return;
     var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
-    const l = trust.line(decision, key, &line_buf) orelse return;
-    appendSmall(path, l);
+    return persist(io, trust.line(decision, key, &line_buf) orelse return false);
+}
+
+/// 결정을 잊는다(사용자의 답 — 팔레트의 신뢰 목록, 계획 WT4). 표에 「잊었다」 표시를 남기고(세대가 오른다 — 각 창이 제 서버를 내린다)
+/// 파일에 `forget` 줄을 덧붙인다. 다시 읽을 때 그 줄이 항목을 지워 다음 실행은 결정이 없다(열면 묻는다). 파일에 남지 못했으면 `false`
+/// (`decide` 와 같다 — 다음 실행은 옛 결정을 읽는다). 잊을 결정이 없었으면 할 일이 없어 `true`.
+pub fn forget(io: std.Io, key: trust.Key) bool {
+    if (!store.forget(key)) return true;
+    var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    return persist(io, trust.line(null, key, &line_buf) orelse return false);
+}
+
+/// 표에 선 변경을 파일에 한 줄 덧붙인다 — 못 읽은 파일(`file_writable == false`)에는 손대지 않는다.
+fn persist(io: std.Io, line: []const u8) bool {
+    if (!file_writable) return false;
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dirPath(&dir_buf) orelse return false;
+    if (!ensureDir(io, dir)) return false;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/" ++ file_name, .{dir}) catch return false;
+    return appendSmall(path, line);
+}
+
+/// 결정이 있는 항목(신뢰 목록이 그린다) — 읽기 전용 반복자. 빌린 경로라 다음 결정까지만 쓴다.
+pub fn decided() trust.Store.Decided {
+    return store.decided();
 }
 
 /// 그 창이 잡은 묻는 자리를 놓는다(`key == null` 이면 전부 — 창이 닫힌다).
@@ -241,19 +262,20 @@ fn readSmall(io: std.Io, path: []const u8) Read {
 /// 한 줄을 덧붙인다. 파일 끝이 개행이 아니면(앞서 덧붙이다 끊긴 줄) 그 줄을 **`\t\n` 으로 닫는다** — 개행만 붙이면 끊긴 줄이 완성된
 /// 줄이 되어 잘린 경로(`/r/sub` → `/r`)가 부모의 결정으로 읽힌다. 칸이 하나 남는 줄은 어느 형식으로도 읽히지 않고, 이 줄은 그 줄에
 /// 붙지 않는다.
-fn appendSmall(path: []const u8, line: []const u8) void {
+fn appendSmall(path: []const u8, line: []const u8) bool {
     var zbuf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const z = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return;
+    const z = std.fmt.bufPrintZ(&zbuf, "{s}", .{path}) catch return false;
     const fd = std.c.open(z.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
-    if (fd < 0) return;
+    if (fd < 0) return false;
     defer _ = std.c.close(fd);
     const size = std.c.lseek(fd, 0, std.c.SEEK.END);
+    if (size < 0) return false;
     if (size > 0) {
         var last: [1]u8 = undefined;
-        if (std.c.pread(fd, &last, 1, size - 1) != 1) return;
-        if (last[0] != '\n' and !writeAll(fd, "\t\n")) return;
+        if (std.c.pread(fd, &last, 1, size - 1) != 1) return false;
+        if (last[0] != '\n' and !writeAll(fd, "\t\n")) return false;
     }
-    _ = writeAll(fd, line);
+    return writeAll(fd, line);
 }
 
 fn writeAll(fd: c_int, bytes: []const u8) bool {
@@ -314,7 +336,7 @@ test "LST7 테스트 빌드는 주입 없이 사용자 자리로 떨어지지 �
     try testing.expect(dirPath(&buf) == null);
     try testing.expect(legacyPathFor("/Users/someone/.config/maru/config", &buf) == null); // 사용자의 옛 파일을 지우지 않는다
     ensureLoaded(testing.io, null);
-    decide(testing.io, .{ .volume = 1, .path = "/never/written" }, .allow);
+    try testing.expect(!decide(testing.io, .{ .volume = 1, .path = "/never/written" }, .allow)); // 파일에 안 남았다고 말한다
     try testing.expectEqual(@as(?trust.Decision, .allow), get(.{ .volume = 1, .path = "/never/written" }));
 
     var tmp = testing.tmpDir(.{});
@@ -331,8 +353,8 @@ test "LST7 테스트 빌드는 주입 없이 사용자 자리로 떨어지지 �
     try testing.expect(get(.{ .volume = 1, .path = "/never/written" }) == null); // 주입을 바꾸면 표가 빈다
     try testing.expectEqual(gen_before, generation()); // 세대는 이어 간다(되돌리면 살아 있는 창이 전파를 건너뛴다)
     ensureLoaded(testing.io, null);
-    decide(testing.io, .{ .volume = 7, .path = "/r" }, .deny);
-    decide(testing.io, .{ .volume = 7, .path = "/r" }, .deny); // 같은 답은 줄을 늘리지 않는다
+    try testing.expect(decide(testing.io, .{ .volume = 7, .path = "/r" }, .deny));
+    try testing.expect(decide(testing.io, .{ .volume = 7, .path = "/r" }, .deny)); // 같은 답은 줄을 늘리지 않는다(이미 남아 있다)
     const text = try tmp.dir.readFileAlloc(testing.io, "state/maru/" ++ file_name, testing.allocator, .limited(4096));
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("deny\t7\t/r\n", text);
@@ -467,7 +489,7 @@ test "LST11 새 표를 못 읽으면(권한) 옛 파일을 이관하지도, 새 
     ensureLoaded(io, try joinBuf(&legacy_buf, root, "legacy"));
     try testing.expectEqual(@as(usize, 0), store.entries.items.len); // 옛 허용을 들이지 않았다
     _ = try tmp.dir.statFile(io, "legacy", .{});
-    decide(io, .{ .volume = 1, .path = "/new" }, .allow);
+    try testing.expect(!decide(io, .{ .volume = 1, .path = "/new" }, .allow)); // 메모리에만 — 그렇다고 말한다
     try testing.expectEqual(@as(?trust.Decision, .allow), get(.{ .volume = 1, .path = "/new" }));
     try tmp.dir.setFilePermissions(io, "state/" ++ file_name, @enumFromInt(0o600), .{});
     const after = try tmp.dir.readFileAlloc(io, "state/" ++ file_name, testing.allocator, .limited(4096));
@@ -491,7 +513,7 @@ test "LST12 덧붙이다 끊긴 줄 — 그 줄은 읽지 않고(잘린 경로�
     ensureLoaded(io, null);
     try testing.expect(get(.{ .volume = 1, .path = "/r" }) == null);
     try testing.expectEqual(@as(?trust.Decision, .deny), get(.{ .volume = 1, .path = "/a" }));
-    decide(io, .{ .volume = 1, .path = "/q" }, .deny);
+    try testing.expect(decide(io, .{ .volume = 1, .path = "/q" }, .deny));
     resetForTest();
     ensureLoaded(io, null);
     try testing.expectEqual(@as(?trust.Decision, .deny), get(.{ .volume = 1, .path = "/q" }));
@@ -499,4 +521,32 @@ test "LST12 덧붙이다 끊긴 줄 — 그 줄은 읽지 않고(잘린 경로�
     const text = try tmp.dir.readFileAlloc(io, "state/" ++ file_name, testing.allocator, .limited(4096));
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("deny\t1\t/a\nallow\t1\t/r\t\ndeny\t1\t/q\n", text);
+}
+
+test "LST14 못 읽은 표(1 MB 넘음 — 권한은 있다)에는 결정도 잊기도 덧붙이지 않고 「못 남겼다」고 돌려준다; 잊을 결정이 없으면 할 일이 없다 (계획 WT4a)" {
+    const io = testing.io;
+    const saved = dir_override;
+    defer setDirForTest(saved);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "state");
+    // 읽기·쓰기 권한은 있다 — 덧붙이기를 막는 것은 「못 읽었다」 판정(`file_writable`)뿐이다.
+    const big = try testing.allocator.alloc(u8, (1 << 20) + 1);
+    defer testing.allocator.free(big);
+    @memset(big, '#');
+    big[big.len - 1] = '\n';
+    try tmp.dir.writeFile(io, .{ .sub_path = "state/" ++ file_name, .data = big });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    setDirForTest(try joinBuf(&dir_buf, root, "state"));
+    ensureLoaded(io, null);
+    try testing.expect(!file_writable);
+    const k: trust.Key = .{ .volume = 1, .path = "/r" };
+    try testing.expect(!decide(io, k, .allow));
+    try testing.expect(!forget(io, k));
+    try testing.expect(get(k) == null); // 표에는 섰다(이번 실행은 잊은 채다)
+    try testing.expect(forget(io, k)); // 이미 잊었다 — 할 일이 없다
+    const st = try tmp.dir.statFile(io, "state/" ++ file_name, .{});
+    try testing.expectEqual(@as(u64, big.len), st.size); // 한 줄도 안 붙었다
 }

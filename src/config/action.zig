@@ -24,6 +24,7 @@ pub const Action = union(enum) {
     recover_editor_backups,
     /// 활성 문서의 계층 목록을 도크에 연다.
     show_editor_outline,
+    show_project_search,
     /// 언어 서버 신뢰 관리(계획 WT4) — 신뢰한 저장소 목록, 지금 문서 저장소의 철회·잊기. **부여는 없다**(신뢰 시트의 답뿐).
     lsp_trusted_repositories,
     lsp_revoke_trust,
@@ -326,6 +327,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "recover_editor_backups")) return .recover_editor_backups;
     if (std.mem.eql(u8, value, "open_file_panel")) return .open_file_panel;
     if (std.mem.eql(u8, value, "show_editor_outline")) return .show_editor_outline;
+    if (std.mem.eql(u8, value, "show_project_search")) return .show_project_search;
     if (std.mem.eql(u8, value, "lsp_trusted_repositories")) return .lsp_trusted_repositories;
     if (std.mem.eql(u8, value, "lsp_revoke_trust")) return .lsp_revoke_trust;
     if (std.mem.eql(u8, value, "lsp_forget_trust")) return .lsp_forget_trust;

@@ -16,7 +16,7 @@ pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
 /// v1 슬롯 수. 어떤 뷰가 몇 번째인지는 **호출자(session)가 안다** — chrome은 도메인 enum을 모르고 자리만 센다
 /// (레이어 경계: chrome 컴포넌트는 session을 import하지 않는다). 목업의 나머지 칸은 **그리지 않는다** —
 /// 누를 수 없는 아이콘을 띄우지 않는다(§3.5).
-pub const slot_count: usize = 5;
+pub const slot_count: usize = 6;
 
 /// 슬롯 하나의 **기본** 셀 수(테마가 pt 토큰을 안 줄 때 = tui). **아이콘이 2셀**(사이드바 에이전트 아이콘과
 /// 같은 `width=2` — 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로 2칸이면 또렷하고 크다)이고 좌우 여백 1셀씩이라
@@ -61,6 +61,12 @@ pub const Grid = struct {
     ///
     /// `slot_cols >= icon_cols`는 `init`이 보장하므로 포화 뺄셈의 0은 `slot_cols == icon_cols`일 때뿐이고,
     /// 그때 아이콘이 슬롯을 꽉 채운다.
+    /// 슬롯이 늘어도 좁은 도크에서 일부만 그리지 않는다. 아이콘 폭 아래로는 줄이지 않는다.
+    pub fn fitWidth(self: Grid, width_px: u32) Grid {
+        if (self.cell_width_px == 0) return self;
+        const available = width_px / self.cell_width_px / @as(u32, @intCast(slot_count));
+        return .{ .cell_width_px = self.cell_width_px, .slot_cols = if (available < icon_cols) 0 else @min(self.slot_cols, available) };
+    }
     pub fn iconOffsetCols(self: Grid) u32 {
         return (self.slot_cols -| icon_cols) / 2;
     }
@@ -140,7 +146,7 @@ fn cellGrid(cell_width_px: u32) Grid {
 }
 
 test "슬롯은 셀 정렬 폭으로 좌측부터 이어 붙는다" {
-    const bar = Rect{ .x = 100, .y = 20, .w = 180, .h = 18 };
+    const bar = Rect{ .x = 100, .y = 20, .w = default_slot_cols * 8 * slot_count, .h = 18 };
     const g = cellGrid(8);
     const a = slotRect(bar, g, 0).?;
     const b = slotRect(bar, g, 1).?;
@@ -162,6 +168,11 @@ test "바가 접혔거나 폭이 모자라면 슬롯을 하나도 그리지 않�
     try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = slots_px - 4, .h = 18 }, g, 0) == null);
     try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = slots_px, .h = 18 }, g, 0) != null);
     try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 200, .h = 18 }, cellGrid(0), 0) == null);
+    const fitted = g.fitWidth(180);
+    try testing.expectEqual(@as(u32, 3), fitted.slot_cols);
+    try testing.expect(slotRect(.{ .x = 0, .y = 0, .w = 180, .h = 18 }, fitted, slot_count - 1) != null);
+    try testing.expectEqual(@as(u32, 0), g.fitWidth(icon_cols * g.cell_width_px * @as(u32, @intCast(slot_count)) - 1).slot_cols);
+    try testing.expectEqual(g.slot_cols, g.fitWidth(1000).slot_cols);
 }
 
 test "hit-test는 슬롯 안에서만 자리를 돌려준다" {
@@ -170,7 +181,7 @@ test "hit-test는 슬롯 안에서만 자리를 돌려준다" {
     try testing.expectEqual(@as(usize, 0), slotAtPoint(bar, g, 12, 10).?);
     try testing.expectEqual(@as(usize, 1), slotAtPoint(bar, g, 50, 10).?);
     // 슬롯 오른쪽 여백·바 위아래는 no-op이다.
-    try testing.expect(slotAtPoint(bar, g, 190, 10) == null);
+    try testing.expect(slotAtPoint(bar, g, bar.x + g.slot_cols * g.cell_width_px * @as(u32, @intCast(slot_count)) + 1, 10) == null);
     try testing.expect(slotAtPoint(bar, g, 12, 4) == null);
     try testing.expect(slotAtPoint(bar, g, 12, 23) == null);
     try testing.expect(slotAtPoint(.{ .x = 10, .y = 5, .w = 200, .h = 0 }, g, 12, 5) == null);

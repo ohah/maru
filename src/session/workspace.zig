@@ -2868,7 +2868,7 @@ test "workspace dock FP1: 기본 상태는 키를 생략하고 옛 파일은 기
 
 test "workspace: 도크 뷰는 왕복하고 모르는 뷰는 탐색기로 clamp된다" {
     // 뷰는 도크의 **표시 선택**이라, 못 읽는 값을 만나도 창을 버리지 않고 탐색기로 연다(docs/file-explorer.md §3.5).
-    inline for (.{ dock_panel.View.source_control, dock_panel.View.outline }) |view| {
+    inline for (.{ dock_panel.View.source_control, dock_panel.View.outline, dock_panel.View.project_search }) |view| {
         const windows = [_]Window{.{ .tabs = &.{}, .dock = .{ .view = view, .presented = true } }};
         const text = try serialize(std.testing.allocator, .{ .windows = &windows });
         defer std.testing.allocator.free(text);

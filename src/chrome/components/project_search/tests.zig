@@ -14,7 +14,7 @@ fn make(a: std.mem.Allocator, p: types.Props) !build.Frame {
     return build.build(p, .{ .nodes = try a.alloc(tree.UiNode, n), .entries = try a.alloc(tree.RectEntry, n), .items = try a.alloc(layout.Item, n), .flex = try a.alloc(layout.FlexScratch, n), .rects = try a.alloc(layout.UiRect, n), .actions = try a.alloc(ids.Entry, n) });
 }
 fn props(width: f32, height: f32, scale: u32) types.Props {
-    return .{ .viewport = .{ .width = width, .height = height }, .scale = scale, .generation = 7, .fields = .{ "한글", "", "" }, .field_labels = .{ "검색", "포함", "제외" }, .focused = 0, .options = .{ false, false, false }, .option_labels = .{ "대소문자", "단어", "정규식", "필터", "검색", "취소" }, .status = "검색 중", .scopes = "프로젝트", .expanded = false, .running = true, .rows = &.{ .{ .label = "a.zig", .index = 99, .file = true }, .{ .label = "foo", .index = 100 } }, .shift = 11 };
+    return .{ .viewport = .{ .width = width, .height = height }, .scale = scale, .generation = 7, .fields = .{ "한글", "", "" }, .field_labels = .{ "검색", "포함", "제외" }, .focused = 0, .options = .{ false, false, false }, .option_labels = .{ "대소문자", "단어", "정규식", "필터", "검색", "취소" }, .status = "검색 중", .scopes = "프로젝트", .expanded = false, .running = true, .can_search = true, .rows = &.{ .{ .label = "a.zig", .index = 99, .file = true }, .{ .label = "foo", .index = 100 } }, .shift = 11 };
 }
 test "project search dock fixed header and row identity share published geometry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -61,6 +61,7 @@ test "project search dock hidden fields and unavailable search commands have no 
     defer arena.deinit();
     var p = props(240, 200, 1000);
     p.fields[0] = "";
+    p.can_search = false;
     p.running = false;
     const f = try make(arena.allocator(), p);
     var table = ids.Table.init(@constCast(f.actions));
@@ -111,6 +112,7 @@ test "project search dock disabled command semantics agree with pointer actions"
     defer arena.deinit();
     var p = props(240, 200, 1000);
     p.fields[0] = "";
+    p.can_search = false;
     p.running = false;
     const f = try make(arena.allocator(), p);
     for ([_]usize{ 4, 5 }) |index| {

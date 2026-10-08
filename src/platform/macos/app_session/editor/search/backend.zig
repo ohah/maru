@@ -10,7 +10,7 @@ pub const path = @import("path.zig");
 // 창 owner를 놓은 뒤에도 마지막 앱 종료는 worker의 최종 참조 해제를 관측한다.
 var workers = std.atomic.Value(usize).init(0);
 pub fn outstandingWorkers() usize {
-    return workers.load(.acquire);
+    return workers.load(.acquire) + @import("verify.zig").outstandingWorkers();
 }
 pub const Batch = struct {
     identity: search.request.Identity,
@@ -29,7 +29,7 @@ pub const Completion = struct {
     excluded: usize,
     failure: ?anyerror,
 };
-pub const Budget = struct { timing: process.Timing, snapshot_bytes: usize, preview_bytes: usize, expected_root: ?@import("maru").session.file_tree.Identity = null, selection_bytes: usize = 0 };
+pub const Budget = struct { timing: process.Timing, snapshot_bytes: usize, preview_bytes: usize, expected_root: ?@import("maru").session.file_tree.Identity = null, selection_bytes: usize = 0, navigation_bytes: usize = 0 };
 const Job = struct {
     a: std.mem.Allocator,
     io: std.Io,
@@ -50,6 +50,8 @@ const Job = struct {
     summary_seen: bool = false,
     roots: ?[]coordinator.Input = null,
     root_index: usize = 0,
+    target_path: ?[]u8 = null,
+    target_hash: ?[32]u8 = null,
     selected: ?*const std.StringHashMapUnmanaged(usize) = null,
     logical_root: []const u8 = "",
     batch_paths: ?[]const []const u8 = null,
@@ -130,6 +132,7 @@ const Job = struct {
             self.environment.deinit();
             self.a.free(self.root);
             self.a.free(self.query);
+            if (self.target_path) |target| self.a.free(target);
             if (self.roots) |roots| coordinator.freeInputs(self.a, roots);
         }
         if (self.roots != null) {
@@ -225,7 +228,7 @@ pub const Backend = struct {
     }
     /// 성공 시 state와 models 소유권이 이동한다. 공유 allocator는 스레드 안전해야 한다.
     pub fn start(self: *Backend, helper: []const u8, root: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
-        return self.startInternal(helper, root, query, opts, state, models, budget, null);
+        return self.startInternal(helper, root, query, opts, state, models, budget, null, null);
     }
     /// 요청 전체가 한 worker와 결과 예산을 소유한다. root 사본은 성공 전까지 caller 소유다.
     pub fn startRoots(self: *Backend, helper: []const u8, roots: []const coordinator.Input, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
@@ -233,7 +236,7 @@ pub const Backend = struct {
         if (self.active != null) return error.Busy;
         if (budget.timing.execution_ms <= 0 or budget.timing.reap_ms <= 0) return error.InvalidTiming;
         if (roots.len == 0 or budget.selection_bytes == 0) return error.InvalidSelectionBudget;
-        return self.startInternal(helper, "/", query, opts, state, models, budget, roots);
+        return self.startInternal(helper, "/", query, opts, state, models, budget, roots, null);
     }
     pub fn startBundledRoots(self: *Backend, roots: []const coordinator.Input, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
         if (self.closed) return error.Closed;
@@ -242,11 +245,28 @@ pub const Backend = struct {
         defer self.a.free(helper);
         return self.startRoots(helper, roots, query, opts, state, models, budget);
     }
-    fn startInternal(self: *Backend, helper: []const u8, root: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget, inputs: ?[]const coordinator.Input) !void {
+    /// 원래 glob·ignore 선정은 유지하되 클릭한 상대 경로만 다시 검색한다.
+    pub fn startBundledTarget(self: *Backend, input: coordinator.Input, target: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
+        const helper = try @import("helper.zig").locate(self.a, self.io);
+        defer self.a.free(helper);
+        return self.startTarget(helper, input, target, query, opts, state, models, budget);
+    }
+    pub fn startTarget(self: *Backend, helper: []const u8, input: coordinator.Input, target: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget) !void {
+        if (self.closed) return error.Closed;
+        if (self.active != null) return error.Busy;
+        if (budget.timing.execution_ms <= 0 or budget.timing.reap_ms <= 0) return error.InvalidTiming;
+        if (budget.selection_bytes == 0) return error.InvalidSelectionBudget;
+        if (budget.navigation_bytes == 0) return error.InvalidNavigationBudget;
+        _ = try search.request.relativePath(target);
+        return self.startInternal(helper, "/", query, opts, state, models, budget, &.{input}, target);
+    }
+    fn startInternal(self: *Backend, helper: []const u8, root: []const u8, query: []const u8, opts: search.query.Options, state: *search.request.State, models: *std.ArrayList(model.Captured), budget: Budget, inputs: ?[]const coordinator.Input, target: ?[]const u8) !void {
         if (self.closed) return error.Closed;
         if (self.active != null) return error.Busy;
         const roots = if (inputs) |items| try coordinator.copyInputs(self.a, items) else null;
         errdefer if (roots) |items| coordinator.freeInputs(self.a, items);
+        const owned_target = if (target) |value| try self.a.dupe(u8, try search.request.relativePath(value)) else null;
+        errdefer if (owned_target) |value| self.a.free(value);
         const job = try self.a.create(Job);
         errdefer self.a.destroy(job);
         var args = try search.query.build(self.a, helper, query, opts);
@@ -263,7 +283,7 @@ pub const Backend = struct {
         var owned_opts = opts;
         owned_opts.includes = &.{};
         owned_opts.excludes = &.{};
-        job.* = .{ .a = self.a, .io = self.io, .args = args, .environment = environment, .root = owned_root, .query = owned_query, .opts = owned_opts, .state = state.*, .models = models.*, .budget = budget, .roots = roots };
+        job.* = .{ .a = self.a, .io = self.io, .args = args, .environment = environment, .root = owned_root, .query = owned_query, .opts = owned_opts, .state = state.*, .models = models.*, .budget = budget, .roots = roots, .target_path = owned_target };
         _ = workers.fetchAdd(1, .acq_rel);
         const thread = std.Thread.spawn(.{}, Job.execute, .{job}) catch |err| {
             _ = workers.fetchSub(1, .acq_rel);
@@ -298,6 +318,11 @@ pub const Backend = struct {
         const job = self.active orelse return null;
         if (!job.done.load(.acquire)) return null;
         return .{ .identity = job.state.identity, .status = if (job.control.cancelled.load(.acquire)) .cancelled else job.state.status, .excluded = job.state.excluded, .failure = job.failure };
+    }
+    pub fn targetHash(self: *const Backend) ?[32]u8 {
+        const job = self.active orelse return null;
+        if (!job.done.load(.acquire)) return null;
+        return job.target_hash;
     }
     pub fn stats(self: *const Backend) ?process.Stats {
         const job = self.active orelse return null;

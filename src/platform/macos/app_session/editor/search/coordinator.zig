@@ -36,10 +36,12 @@ const Selection = struct {
     occupied: *const std.StringHashMapUnmanaged(void),
     logical: []const u8,
     root_index: usize,
+    target: ?[]const u8 = null,
     control: *process.Control,
     fn accept(self: *@This(), input: []const u8) !void {
         if (self.control.cancelled.load(.acquire)) return error.Cancelled;
         const name = try search.request.relativePath(input);
+        if (self.target) |target| if (!std.mem.eql(u8, name, target)) return;
         const full = std.fmt.allocPrint(self.a, "{s}{s}{s}", .{ self.logical, if (self.logical.len == 0) "" else "/", name }) catch return error.SelectionBudget;
         if (self.occupied.contains(full) or self.candidates.contains(full)) {
             self.a.free(full);
@@ -52,6 +54,7 @@ const Selection = struct {
 pub fn execute(job: anytype) !void {
     const a = job.a;
     const started = std.Io.Timestamp.now(job.io, .awake);
+    const before_hash = if (job.target_path) |target| try @import("verify.zig").disk(a, job.io, job.roots.?[0].path, target, &job.control, job.budget.navigation_bytes, job.roots.?[0].identity) else null;
     var opened: std.ArrayList(Opened) = .empty;
     defer {
         for (opened.items) |item| a.free(item.logical);
@@ -94,7 +97,7 @@ pub fn execute(job: anytype) !void {
     const storage = try a.alloc(u8, job.budget.selection_bytes);
     defer a.free(storage);
     var arena = std.heap.FixedBufferAllocator.init(storage);
-    var selection: Selection = .{ .a = arena.allocator(), .occupied = &job.state.occupied, .logical = "", .root_index = 0, .control = &job.control };
+    var selection: Selection = .{ .a = arena.allocator(), .occupied = &job.state.occupied, .logical = "", .root_index = 0, .control = &job.control, .target = job.target_path };
     var files = try search.query.filesFromSearch(a, &job.args);
     defer files.deinit(a);
     var partial = job.state.excluded > 0;
@@ -141,6 +144,11 @@ pub fn execute(job: anytype) !void {
         }
     }
     for (opened.items) |item| try validateInput(a, job.io, item.input);
+    if (job.target_path) |target| {
+        const after_hash = try @import("verify.zig").disk(a, job.io, job.roots.?[0].path, target, &job.control, job.budget.navigation_bytes, job.roots.?[0].identity);
+        if (!std.mem.eql(u8, &before_hash.?, &after_hash)) return error.FileChanged;
+        job.target_hash = after_hash;
+    }
     job.finish(if (partial) .partial else .complete);
 }
 

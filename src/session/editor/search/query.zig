@@ -19,6 +19,70 @@ pub const Options = struct {
     excludes: []const []const u8 = &default_excludes,
 };
 
+/// 목록 쉼표와 경로 slash는 같은 glob 범위 규칙을 따른다. 실제 매칭은 ripgrep에 맡긴다.
+pub const GlobScope = struct {
+    braces: usize = 0,
+    in_class: bool = false,
+    first_in_class: bool = false,
+    negator_allowed: bool = false,
+    escaped: bool = false,
+    pub fn feed(self: *GlobScope, byte: u8) !bool {
+        if (self.in_class) {
+            if (self.negator_allowed) {
+                self.negator_allowed = false;
+                if (byte == '!' or byte == '^') return false;
+            }
+            if (byte == ']' and !self.first_in_class) self.in_class = false else self.first_in_class = false;
+            return false;
+        }
+        if (self.escaped) {
+            self.escaped = false;
+            return byte == '/' and self.braces == 0;
+        }
+        switch (byte) {
+            '\\' => {
+                self.escaped = true;
+                return false;
+            },
+            '[' => {
+                self.in_class = true;
+                self.first_in_class = true;
+                self.negator_allowed = true;
+                return false;
+            },
+            '{' => {
+                self.braces += 1;
+                return false;
+            },
+            '}' => {
+                if (self.braces == 0) return error.InvalidInclude;
+                self.braces -= 1;
+                return false;
+            },
+            else => return self.braces == 0,
+        }
+    }
+    pub fn finish(self: GlobScope) !void {
+        if (self.braces != 0 or self.in_class or self.escaped) return error.InvalidInclude;
+    }
+};
+
+pub fn splitList(a: std.mem.Allocator, input: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var scope: GlobScope = .{};
+    var first: usize = 0;
+    for (input, 0..) |byte, index| {
+        const outside = try scope.feed(byte);
+        if (byte == ',' and outside) {
+            const value = std.mem.trim(u8, input[first..index], " \t\r\n");
+            if (value.len != 0) try out.append(a, value);
+            first = index + 1;
+        }
+    }
+    try scope.finish();
+    const value = std.mem.trim(u8, input[first..], " \t\r\n");
+    if (value.len != 0) try out.append(a, value);
+}
+
 pub const Args = struct {
     items: std.ArrayList([]const u8) = .empty,
     pub fn deinit(self: *Args, a: std.mem.Allocator) void {
@@ -67,38 +131,15 @@ fn addInclude(args: *Args, a: std.mem.Allocator, glob: []const u8) !void {
     if (glob.len == 0 or glob[0] == '!' or std.mem.indexOfScalar(u8, glob, 0) != null) return error.InvalidInclude;
     if (std.mem.startsWith(u8, glob, "**")) return addGlob(args, a, glob, false);
     // 경로의 부모도 허용해야 traverser가 그 아래를 볼 수 있다. brace/class 안 slash는 분해하지 않는다.
-    var braces: usize = 0;
-    var classes: usize = 0;
-    var escaped = false;
+    var scope: GlobScope = .{};
     for (glob, 0..) |byte, index| {
-        if (escaped) {
-            escaped = false;
-            continue;
-        }
-        if (byte == '\\') {
-            escaped = true;
-            continue;
-        }
-        switch (byte) {
-            '{' => if (classes == 0) {
-                braces += 1;
-            },
-            '}' => if (classes == 0) {
-                if (braces == 0) return error.InvalidInclude;
-                braces -= 1;
-            },
-            '[' => {
-                classes += 1;
-            },
-            ']' => {
-                classes -|= 1;
-            },
-            '/' => if (index != 0 and braces == 0 and classes == 0) {
-                try addGlob(args, a, glob[0..index], false);
-            },
-            else => {},
+        const escaped = scope.escaped;
+        if (try scope.feed(byte) and byte == '/' and index != 0) {
+            const end = index - @intFromBool(escaped);
+            if (end != 0) try addGlob(args, a, glob[0..end], false);
         }
     }
+    try scope.finish();
     try addGlob(args, a, glob, false);
     const descendants = try std.fmt.allocPrint(a, "{s}{s}**", .{ glob, if (std.mem.endsWith(u8, glob, "/")) "" else "/" });
     defer a.free(descendants);

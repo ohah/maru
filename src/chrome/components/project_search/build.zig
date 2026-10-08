@@ -82,5 +82,5 @@ fn selected(p: types.Props, index: usize) bool {
 }
 
 fn commandEnabled(p: types.Props, index: usize) bool {
-    return if (index == 4) p.fields[0].len != 0 else if (index == 5) p.running else true;
+    return if (index == 4) p.can_search else if (index == 5) p.running else true;
 }

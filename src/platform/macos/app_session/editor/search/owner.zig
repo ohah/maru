@@ -151,7 +151,7 @@ fn composingView(session: *app.AppSession, term: *app.Term) ?*app.Term {
     };
     return null;
 }
-fn compositionStamp(term: ?*app.Term) u64 {
+pub fn compositionStamp(term: ?*app.Term) u64 {
     const owner = term orelse return 0;
     if (owner.rt.editor_preedit.len == 0) return 0;
     var hash = std.hash.Wyhash.init(0);

@@ -317,6 +317,7 @@ pub const editor_context_bindings = [_]EditorContextBinding{
 };
 
 pub const default_app_bindings = [_]AppBinding{
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'F' } }, .action = .show_project_search },
     // Cmd+Ctrl+D: 편집기에서 다음 일치에 커서 추가(VSCode ⌘D). **임시 chord다** — §9.1이 확정한
     // 것은 `⌘D`이지만 편집기 포커스 컨텍스트가 서야 터미널의 pane split과 갈라 쓸 수 있다.
     // 자세한 근거는 `action.zig`의 `add_next_occurrence`가 든다.

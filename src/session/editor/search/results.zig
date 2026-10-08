@@ -16,6 +16,7 @@ pub const Model = struct {
     groups: std.ArrayList(Group) = .empty,
     keys: std.StringHashMapUnmanaged(usize) = .{},
     visible: std.ArrayList(Visible) = .empty,
+    matches: usize = 0,
     pub fn deinit(self: *Model, a: std.mem.Allocator) void {
         for (self.groups.items) |*group| group.rows.deinit(a);
         self.groups.deinit(a);
@@ -52,6 +53,7 @@ pub const Model = struct {
             self.groups.appendAssumeCapacity(.{ .root_index = row.root_index, .path = row.match.path, .source = row.source, .rows = indices, .matches = row.match.ranges.len });
         }
         self.rows.appendAssumeCapacity(row);
+        self.matches += row.match.ranges.len;
     }
     /// 전체 결과가 아니라 viewport와 겹치는 인덱스 창을 반환한다. 입력과 그리기가 같은 창을 쓴다.
     pub fn window(self: *const Model, row_height: u32, viewport: u32, requested_offset: u32) Window {

@@ -55378,6 +55378,175 @@ const ProjectSearchSink = struct {
         return false;
     }
 };
+// 도크 입력과 worker 수명은 실제 AppSession을 사용해 검증한다.
+test "EDPSD1 빈 입력과 조합 중 Enter는 worker를 시작하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    const d = @import("search/dock.zig");
+    d.open(fx.session);
+    try testing.expect(!d.canSearch(fx.session));
+    try fx.session.editor_search.fields[0].insertText(testing.allocator, "foo");
+    d.changed(fx.session);
+    d.setPreedit(fx.session, "한");
+    try testing.expect(!d.canSearch(fx.session));
+    try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .enter } }));
+    try testing.expect(fx.session.editor_project_search_query == null);
+    try testing.expectEqualStrings("한", fx.session.editor_search.fields[0].preedit.items);
+}
+test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try projectSearchRootForTest(&fx);
+    const d = @import("search/dock.zig");
+    d.open(fx.session);
+    d.setPreedit(fx.session, "한");
+    const generation = fx.session.editor_search.result.generation;
+    d.commitPreedit(fx.session);
+    try testing.expectEqualStrings("한", fx.session.editor_search.fields[0].text.items);
+    try testing.expect(fx.session.editor_search.result.generation > generation);
+    try testing.expectEqual(maru.session.editor.search.presentation.Phase.waiting, fx.session.editor_search.result.phase);
+    d.cancel(fx.session);
+    try testing.expectEqual(maru.session.editor.search.presentation.Phase.cancelled, fx.session.editor_search.result.phase);
+    try testing.expect(fx.session.editor_project_search_query == null);
+    fx.session.editor_search.fields[0].selectAll();
+    d.setPreedit(fx.session, "가");
+    try testing.expect(@import("../input.zig").routeCommittedTextAccepted(fx.session, "간"));
+    d.setPreedit(fx.session, "");
+    try testing.expectEqualStrings("간", fx.session.editor_search.fields[0].text.items);
+    try testing.expectEqual(maru.session.editor.search.presentation.Phase.waiting, fx.session.editor_search.result.phase);
+    const due = fx.session.editor_search.result.due_ms.?;
+    fx.session.ime_active = true;
+    fx.session.ime_had_marked = false;
+    try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .enter } }));
+    try testing.expect(fx.session.editor_search.result.due_ms.? < due);
+    try testing.expect(fx.session.editor_project_search_query == null);
+    fx.session.ime_active = false;
+    fx.session.editor_search.fields[0].selectAll();
+    d.setPreedit(fx.session, "나");
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    const huge = [_]u8{'x'} ** 4096;
+    const accepted = d.commitText(fx.session, &huge);
+    fx.session.allocator = testing.allocator;
+    try testing.expect(!accepted);
+    try testing.expectEqualStrings("간", fx.session.editor_search.fields[0].text.items);
+    try testing.expectEqualStrings("나", fx.session.editor_search.fields[0].preedit.items);
+    try testing.expect(fx.session.editor_search.fields[0].selection != null);
+}
+test "EDPSD3 glob 쉼표는 brace와 class 안에서 나누지 않는다" {
+    const d = @import("search/dock.zig");
+    var items: std.ArrayList([]const u8) = .empty;
+    defer items.deinit(testing.allocator);
+    try d.patterns(testing.allocator, " src/{a,b}/**, [a,b]*, foo\\,bar ", &items);
+    try testing.expectEqual(@as(usize, 3), items.items.len);
+    try testing.expectEqualStrings("src/{a,b}/**", items.items[0]);
+    try testing.expectEqualStrings("foo\\,bar", items.items[2]);
+    items.clearRetainingCapacity();
+    try d.patterns(testing.allocator, "[[], []a], ]literal", &items);
+    try testing.expectEqual(@as(usize, 3), items.items.len);
+    try testing.expectEqualStrings("[[]", items.items[0]);
+    try testing.expectEqualStrings("[]a]", items.items[1]);
+    try testing.expectError(error.InvalidInclude, d.patterns(testing.allocator, "{a,b", &items));
+}
+test "EDPSD4 선택을 덮는 조합 표시는 정본을 변경하지 않는다" {
+    const d = @import("search/dock.zig");
+    var field: maru.chrome.components.text_field.TextField = .{};
+    defer field.deinit(testing.allocator);
+    try field.insertText(testing.allocator, "prefix suffix");
+    field.selectAll();
+    try field.preedit.appendSlice(testing.allocator, "한");
+    const display = try d.makeDisplay(testing.allocator, &field, "|", 40);
+    defer testing.allocator.free(display.text);
+    try testing.expectEqualStrings("한|", display.text);
+    try testing.expectEqualStrings("prefix suffix", field.text.items);
+    try testing.expect(display.selected == null);
+}
+test "EDPSD5 불변 문서 해시는 worker가 종료된 뒤 일치한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var file = try maru.session.editor.edit_doc.EditableFile.init(testing.allocator, "한글\nfoo\r\n", false);
+    defer file.deinit();
+    const verify = @import("search/verify.zig");
+    const loaded = try verify.Loaded.start(testing.allocator, &file);
+    defer loaded.deinit();
+    while (!loaded.done.load(.acquire)) try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(file.content, &expected, .{});
+    try testing.expectEqualSlices(u8, &expected, &loaded.hash.?);
+    try testing.expect(loaded.failure == null);
+}
+test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]u2{ 0, 1, 2 }) |mode| {
+        const modified = mode == 1;
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo model");
+        try fx.dir.dir.createDirPath(testing.io, "src/[");
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "src/[/disk.txt", .data = "\xef\xbb\xbffoo disk\r\n" });
+        try projectSearchRootForTest(&fx);
+        fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+        const d = @import("search/dock.zig");
+        const owner = @import("search/owner.zig");
+        d.open(fx.session);
+        try fx.session.editor_search.fields[0].insertText(testing.allocator, "foo");
+        try fx.session.editor_search.fields[1].insertText(testing.allocator, "search.txt, src/[[]/disk.txt");
+        d.changed(fx.session);
+        d.run(fx.session);
+        var helper_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const helper = helper_buf[0..try std.Io.Dir.cwd().realPathFile(testing.io, "zig-out/ripgrep/rg", &helper_buf)];
+        fx.session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+        const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+        while (fx.session.editor_search.result.phase == .running) {
+            owner.poll(fx.session);
+            d.pump(fx.session);
+            if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+            try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+        }
+        try testing.expectEqual(maru.session.editor.search.presentation.Phase.complete, fx.session.editor_search.result.phase);
+        var disk_row: ?usize = null;
+        for (fx.session.editor_search.result.model.rows.items, 0..) |row, index| if (row.source == .disk and std.mem.eql(u8, row.match.path, "src/[/disk.txt")) {
+            disk_row = index;
+            break;
+        };
+        try testing.expect(disk_row != null);
+        // watcher 알림을 일부러 보내지 않는다. 요청 신원이 같아도 파일 내용은 이미 달라졌다.
+        if (modified) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "src/[/disk.txt", .data = "bar disk\n" });
+        const nav = @import("search/navigation.zig");
+        try nav.start(fx.session, disk_row.?, 0);
+        if (mode == 2) {
+            while (!fx.session.editor_search.nav.?.job.done()) {
+                if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+                try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+            }
+            // 재검색 뒤의 변경은 preview만으로 검출되지 않는다. 실제 열린 내용의 hash로 거부한다.
+            try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "src/[/disk.txt", .data = "\xef\xbb\xbffoo disk\r\ntrailing mutation\r\n" });
+        }
+        while (fx.session.editor_search.nav != null) {
+            nav.poll(fx.session);
+            if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+            try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+        }
+        const active = @import("../pane.zig").activePane(fx.session).activeTerm();
+        if (modified) {
+            try testing.expectEqual(term.surface.id, active.surface.id);
+            try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+        } else if (mode == 2) {
+            try testing.expect(active.surface.id != term.surface.id);
+            try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
+            try testing.expect(active.rt.editor_selection == null or active.rt.editor_selection.?.isEmpty());
+        } else {
+            try testing.expect(active.surface.id != term.surface.id);
+            try testing.expectEqualStrings("foo disk\r\n", active.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(@as(usize, 0), active.rt.editor_selection.?.start());
+            try testing.expectEqual(@as(usize, 3), active.rt.editor_selection.?.end());
+        }
+    }
+}
 test "EDPS1 실제 owner 조합 사본은 여러 커서에 적용하고 정본을 바꾸지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try PaneFixture.init(testing.allocator);

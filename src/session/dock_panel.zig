@@ -34,6 +34,7 @@ pub const View = enum {
     agent_activity,
     /// 활성 편집 문서의 함수·클래스 계층.
     outline,
+    project_search,
 
     /// 뷰 스위처 바의 **슬롯 순서**. 화면 왼쪽부터 이 차례다.
     ///
@@ -47,6 +48,7 @@ pub const View = enum {
             2 => .agent_sessions,
             3 => .agent_activity,
             4 => .outline,
+            5 => .project_search,
             else => null,
         };
     }
@@ -59,6 +61,7 @@ pub const View = enum {
             .agent_sessions => 2,
             .agent_activity => 3,
             .outline => 4,
+            .project_search => 5,
         };
     }
 

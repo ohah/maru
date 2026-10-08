@@ -87,6 +87,10 @@ pub fn lower(
     defer allocator.free(cp);
     const cwid = try allocator.alloc(u2, n);
     defer allocator.free(cwid);
+    // 셀마다 「마지막으로 쓴 draw」(= 오버레이). 뒤 오버레이의 패널이 앞 오버레이의 셀을 덮게 하는 데 쓴다(아래 `hideCellsUnder`).
+    const owner = try allocator.alloc(u16, n);
+    defer allocator.free(owner);
+    @memset(owner, no_owner);
     const surface_bg = terminal.Color{ .rgb = tk.get(.surface_bg) };
     @memset(bg, surface_bg);
     @memset(fg, terminal.Color{ .rgb = tk.get(.surface_fg) });
@@ -102,9 +106,11 @@ pub fn lower(
     // 가정하므로 둘이 갈렸다. host 의 수집 함수는 오버레이 하나당 draw 하나를 내므로(`ChromeHost.collect*Draws`) draw 가
     // 곧 패널 단위다. `independent_panel` 은 이제 「모서리 0 인 첫 quad 도 GPU 패널로 친다」만 가른다(각 열의 찾기).
     var cursor: ?terminal.Cursor = null;
+    var cursor_owner: u16 = no_owner;
     var clip_rect: ?chrome.draw.Rect = null;
     var modal_bg_quad = false;
-    for (draws) |d| {
+    for (draws, 0..) |d, draw_index| {
+        const who: u16 = @intCast(@min(draw_index, no_owner - 1));
         var panel_bg_quad = false;
         const background_seen = &panel_bg_quad;
         for (d.ops) |op| switch (op) {
@@ -112,8 +118,10 @@ pub fn lower(
                 if (f.role == .cursor) {
                     const col = @divTrunc(f.rect.x - @as(i32, @intCast(origin_x)), @as(i32, @intCast(cw)));
                     const row = @divTrunc(f.rect.y - @as(i32, @intCast(origin_y)), @as(i32, @intCast(ch)));
-                    if (col >= 0 and col < cols and row >= 0 and row < rows)
+                    if (col >= 0 and col < cols and row >= 0 and row < rows) {
                         cursor = .{ .row = @intCast(row), .col = @intCast(col), .visible = true };
+                        cursor_owner = who;
+                    }
                 } else if (isHairline(f.rect, cw, ch)) {
                     // 셀보다 얇은 fill(구분선 등)은 **셀 격자로 표현할 수 없다.** paintRectBg는 픽셀 rect를
                     // `trunc(y/ch) .. trunc((y+h)/ch)` 행 범위로 내리므로, 1px이 행 마지막 픽셀에 걸리면 그 행이
@@ -124,14 +132,14 @@ pub fn lower(
                     // quad로"와 같은 규칙이고, 여기서는 '두께'가 그 이유다. 모달 배경 quad보다 **뒤에** append돼
                     // 같은 over 버킷 안에서 위에 그려진다(배경이 먼저 나오는 것은 lowerer의 painter 규칙).
                     appendHairline(&gpu_quads, allocator, f.rect, f.role, tk);
-                } else paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
+                } else paintRectBg(bg, owner, who, cols, rows, origin_x, origin_y, cw, ch, f.rect, .{ .rgb = tk.get(f.role) }, null);
             },
-            .border => |b| if (!background_seen.*) paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
-            .text => |t| placeText(cp, fg, cwid, cols, rows, origin_x, origin_y, cw, ch, t, tk),
+            .border => |b| if (!background_seen.*) paintRectBg(bg, owner, who, cols, rows, origin_x, origin_y, cw, ch, b.rect, .{ .rgb = tk.get(b.role) }, b.sides),
+            .text => |t| placeText(cp, fg, cwid, owner, who, cols, rows, origin_x, origin_y, cw, ch, t, tk),
             .swatch => |sw| {
                 const rounded = sw.corner_radii[0] != 0 or sw.corner_radii[1] != 0 or sw.corner_radii[2] != 0 or sw.corner_radii[3] != 0;
                 if (!rounded) {
-                    paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null);
+                    paintRectBg(bg, owner, who, cols, rows, origin_x, origin_y, cw, ch, sw.rect, .{ .rgb = sw.rgb }, null);
                 } else appendSwatch(&gpu_quads, allocator, sw);
             },
             .rule => {},
@@ -139,13 +147,24 @@ pub fn lower(
             .quad => |q| {
                 const rounded = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
                 if (!rounded and (!d.independent_panel or background_seen.*)) {
-                    paintRectBg(bg, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
+                    paintRectBg(bg, owner, who, cols, rows, origin_x, origin_y, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
                 } else if (background_seen.*) {
                     appendWidgetQuad(&gpu_quads, allocator, q, tk);
                 } else {
                     appendModalQuad(&gpu_quads, &gpu_shadows, allocator, q, tk);
                     background_seen.* = true;
                     modal_bg_quad = true;
+                    // **이 패널 아래의 앞 오버레이 셀을 지운다**(2026-10-08). 렌더러는 오버레이의 모든 패널을 그린 **뒤** 모든 셀을
+                    // 그리므로(`maru_draw_overlay_layer`), 찾기 막대 위로 우클릭 메뉴가 열리면 찾기 막대의 글자가 메뉴 패널을
+                    // 뚫고 보였다(실제 앱 1배율 캡처로 재현). 셀이 패널 순서를 따르게, 보이는 패널(패딩 포함) 안에 중심이 든
+                    // 앞 draw 의 셀을 비운다 — 패널은 그 draw 의 첫 op 이라 이 draw 의 셀은 아직 없다.
+                    const p = tk.space.modal_padding_px;
+                    const box = q.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
+                    hideCellsUnder(bg, fg, cp, cwid, owner, who, cols, rows, origin_x, origin_y, cw, ch, box, surface_bg, .{ .rgb = tk.get(.surface_fg) });
+                    if (cursor) |c| if (cursor_owner != who and cellCenterIn(c.col, c.row, origin_x, origin_y, cw, ch, box)) {
+                        cursor = null; // 앞 오버레이의 caret 도 셀 다음에 그려진다 — 덮인 caret 은 안 그린다
+                        cursor_owner = no_owner;
+                    };
                 }
             },
         };
@@ -217,7 +236,35 @@ fn appendQuad(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.mem.All
     quads.append(allocator, .{ .x = @floatFromInt(rect.x), .y = @floatFromInt(rect.y), .w = @floatFromInt(rect.w), .h = @floatFromInt(rect.h), .corner_radii = .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) }, .border_widths = .{ @floatFromInt(widths[0]), @floatFromInt(widths[1]), @floatFromInt(widths[2]), @floatFromInt(widths[3]) }, .fill_color0 = fill, .fill_color1 = fill, .border_color = border, .gradient_kind = 0, .layer = layer, .clip_x = if (clip) |c| @floatFromInt(c.x) else 0, .clip_y = if (clip) |c| @floatFromInt(c.y) else 0, .clip_w = if (clip) |c| @floatFromInt(c.w) else 0, .clip_h = if (clip) |c| @floatFromInt(c.h) else 0 }) catch {};
 }
 
-fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, rect: chrome.draw.Rect, color: terminal.Color, sides: ?chrome.draw.Sides) void {
+const no_owner = std.math.maxInt(u16);
+
+/// 셀 (col,row) 의 중심이 `box`(px) 안인가.
+fn cellCenterIn(col: u16, row: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, box: chrome.draw.Rect) bool {
+    const cx: i64 = @as(i64, origin_x) + @as(i64, col) * cw + @divTrunc(@as(i64, cw), 2);
+    const cy: i64 = @as(i64, origin_y) + @as(i64, row) * ch + @divTrunc(@as(i64, ch), 2);
+    return cx >= box.x and cx < @as(i64, box.x) + box.w and cy >= box.y and cy < @as(i64, box.y) + box.h;
+}
+
+/// `box` 안에 중심이 든 셀 중 **다른 draw(`who` 가 아닌)** 가 쓴 것을 비운다 — 뒤 오버레이의 패널이 앞 오버레이의 글자·배경을
+/// 덮는 painter 순서를 셀 격자에 옮긴다. 비운 셀은 「아무도 안 쓴」 상태로 돌아간다(패널 위라 투명 처리된다).
+fn hideCellsUnder(bg: []terminal.Color, fg: []terminal.Color, cp: []u21, cwid: []u2, owner: []u16, who: u16, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, box: chrome.draw.Rect, surface_bg: terminal.Color, surface_fg: terminal.Color) void {
+    var row: u16 = 0;
+    while (row < rows) : (row += 1) {
+        var col: u16 = 0;
+        while (col < cols) : (col += 1) {
+            const idx = @as(usize, row) * @as(usize, cols) + col;
+            if (owner[idx] == no_owner or owner[idx] == who) continue;
+            if (!cellCenterIn(col, row, origin_x, origin_y, cw, ch, box)) continue;
+            bg[idx] = surface_bg;
+            fg[idx] = surface_fg;
+            cp[idx] = ' ';
+            cwid[idx] = 1;
+            owner[idx] = no_owner;
+        }
+    }
+}
+
+fn paintRectBg(bg: []terminal.Color, owner: []u16, who: u16, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, rect: chrome.draw.Rect, color: terminal.Color, sides: ?chrome.draw.Sides) void {
     const ox: i32 = @intCast(origin_x);
     const oy: i32 = @intCast(origin_y);
     const c0 = std.math.clamp(@divTrunc(rect.x - ox, @as(i32, @intCast(cw))), 0, @as(i32, cols));
@@ -229,12 +276,16 @@ fn paintRectBg(bg: []terminal.Color, cols: u16, rows: u16, origin_x: u32, origin
         var col: i32 = c0;
         while (col < c1) : (col += 1) {
             const on_edge = if (sides) |s| (s.top and row == r0) or (s.bottom and row == r1 - 1) or (s.left and col == c0) or (s.right and col == c1 - 1) else true;
-            if (on_edge) bg[@as(usize, @intCast(row)) * @as(usize, cols) + @as(usize, @intCast(col))] = color;
+            if (on_edge) {
+                const idx = @as(usize, @intCast(row)) * @as(usize, cols) + @as(usize, @intCast(col));
+                bg[idx] = color;
+                owner[idx] = who;
+            }
         }
     }
 }
 
-fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, tk: *const chrome.Tokens) void {
+fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, owner: []u16, who: u16, cols: u16, rows: u16, origin_x: u32, origin_y: u32, cw: u32, ch: u32, t: chrome.draw.Op.Text, tk: *const chrome.Tokens) void {
     // 이 경로는 셀 격자에 찍으므로 부분 클립이 불가능하다. 대신 셀 단위로 판정한다 — 같은 행의 배경
     // quad는 GPU가 픽셀 단위로 자르는데 글자만 그대로 남으면 배경 반쪽에 글자가 떠 있는 그림이 된다.
     // ⚠️ 이 남김/버림 규칙(origin 이 clip 안 · 행 = trunc)을 알림 패널이 **그대로 옮겨 쓴다**
@@ -272,6 +323,7 @@ fn placeText(cp: []u21, fg: []terminal.Color, cwid: []u2, cols: u16, rows: u16, 
                 @max(1, terminal.width.cellWidth(codepoint));
             if (col_i >= 0 and col_i < cols) {
                 const idx = row * @as(usize, cols) + @as(usize, @intCast(col_i));
+                owner[idx] = who;
                 cp[idx] = codepoint;
                 fg[idx] = color;
                 cwid[idx] = @intCast(@min(width, 2));
@@ -390,6 +442,78 @@ test "ML4 오버레이 둘이 한 프레임에 모여도 각자 패널(패딩·�
     // 메뉴 draw 안의 둘째 둥근 quad 는 widget 그대로 — 키우지 않고 layer 3.
     try std.testing.expectEqual([4]f32{ 100, 216, 160, 16 }, [4]f32{ menu_row.x, menu_row.y, menu_row.w, menu_row.h });
     try std.testing.expectEqual(@as(u32, 3), menu_row.layer);
+}
+
+// 찾기 막대 위로 우클릭 메뉴가 열리면 찾기 막대의 글자가 메뉴 패널을 뚫고 보였다(2026-10-08 실제 앱 재현) — 렌더러가 모든 패널 뒤에
+// 모든 셀을 그리기 때문이다. 뒤 오버레이의 패널(패딩 포함) 아래에 중심이 든 앞 오버레이의 셀·caret 은 지워지고, 덮이지 않은 셀과
+// 뒤 오버레이 자신의 셀은 남는다.
+test "ML5 뒤 오버레이의 패널은 그 아래 앞 오버레이의 글자·caret 을 가린다 — 덮이지 않은 것과 자기 글자는 남는다" {
+    var tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
+    tk.space.modal_padding_px = 12;
+    const r: u16 = 8;
+    // 찾기 막대: 패널 x[0..320) y[0..16) · 글자 「FFFFFFFFFF」 열 0..9 · caret 열 2.
+    const find_runs = [_]chrome.draw.Run{.{ .text = "FFFFFFFFFF" }};
+    const find_ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 320, .h = 16 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } },
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &find_runs, .role = .surface_fg } },
+        .{ .fill = .{ .rect = .{ .x = 16, .y = 0, .w = 8, .h = 16 }, .role = .cursor } },
+    };
+    // 메뉴: 패널 x[16..96) y[16..48) — 패딩 12 를 더하면 x[4..108) y[4..60) 이라 찾기 글자 행(y 0..16, 중심 8)을 열 1..12 에서 덮는다.
+    const menu_runs = [_]chrome.draw.Run{.{ .text = "MM" }};
+    const menu_ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 16, .y = 16, .w = 80, .h = 32 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } },
+        .{ .text = .{ .origin = .{ .x = 16, .y = 16 }, .runs = &menu_runs, .role = .surface_fg } },
+    };
+    var raster = try lower(std.testing.allocator, &.{
+        .{ .layer = .modal, .ops = &find_ops },
+        .{ .layer = .modal, .ops = &menu_ops },
+    }, &tk, 8, 16, false);
+    defer {
+        raster.cells.deinit(std.testing.allocator);
+        raster.gpu_quads.deinit(std.testing.allocator);
+        raster.gpu_shadows.deinit(std.testing.allocator);
+    }
+    var seen_f = [_]bool{false} ** 10;
+    var seen_m: usize = 0;
+    for (raster.cells.items) |c| {
+        if (c.codepoint == 'F' and c.row == 0 and c.col < 10) seen_f[c.col] = true;
+        if (c.codepoint == 'M' and c.row == 1) seen_m += 1;
+    }
+    // 열 0 의 중심(x=4)은 메뉴 패널 x[4..108) 의 경계 위라 덮인다 — 열 0 부터 9 까지 모두 덮인다(중심 4..76 < 108, 행 중심 8 ≥ 4).
+    for (seen_f) |v| try std.testing.expect(!v);
+    try std.testing.expectEqual(@as(usize, 2), seen_m); // 메뉴 자기 글자는 남는다
+    try std.testing.expect(raster.cursor == null); // 덮인 caret 은 안 그린다
+}
+
+// 덮이지 않은 앞 오버레이 글자는 그대로다 — 패널이 덮는 자리만 가린다.
+test "ML5b 뒤 패널이 닿지 않는 앞 오버레이 글자·caret 은 그대로 남는다" {
+    var tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
+    tk.space.modal_padding_px = 12;
+    const r: u16 = 8;
+    const find_runs = [_]chrome.draw.Run{.{ .text = "FFFFFFFFFFFFFFFFFFFF" }}; // 열 0..19
+    const find_ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 320, .h = 16 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } },
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &find_runs, .role = .surface_fg } },
+        .{ .fill = .{ .rect = .{ .x = 152, .y = 0, .w = 8, .h = 16 }, .role = .cursor } }, // 열 19
+    };
+    // 메뉴 패널 x[16..96) → 보이는 x[4..108): 열 0(중심 4)…열 12(중심 100) 를 덮고 열 13(중심 108)부터는 안 덮는다.
+    const menu_ops = [_]chrome.draw.Op{.{ .quad = .{ .rect = .{ .x = 16, .y = 16, .w = 80, .h = 32 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } }};
+    var raster = try lower(std.testing.allocator, &.{
+        .{ .layer = .modal, .ops = &find_ops },
+        .{ .layer = .modal, .ops = &menu_ops },
+    }, &tk, 8, 16, false);
+    defer {
+        raster.cells.deinit(std.testing.allocator);
+        raster.gpu_quads.deinit(std.testing.allocator);
+        raster.gpu_shadows.deinit(std.testing.allocator);
+    }
+    var seen = [_]bool{false} ** 20;
+    for (raster.cells.items) |c| if (c.codepoint == 'F' and c.row == 0 and c.col < 20) {
+        seen[c.col] = true;
+    };
+    for (seen, 0..) |v, col| try std.testing.expectEqual(col >= 13, v);
+    try std.testing.expect(raster.cursor != null); // 열 19 caret 은 덮이지 않았다
+    try std.testing.expectEqual(@as(u16, 19), raster.cursor.?.col);
 }
 
 // ML3b 경계: 알림 패널을 스크롤해 카드가 뷰포트 경계(위·아래)에 걸치면, 그 카드의 강조 배경(선택·호버)은 **헤더와

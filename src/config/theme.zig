@@ -1674,9 +1674,13 @@ pub const WorkspaceConfig = struct {
 pub const LspConfig = struct {
     /// 언어 서버를 쓸지. **기본 true** — 끄면 서버를 찾지도 묻지도 않고 상태바 항목도 없다.
     enabled: bool = true,
+    /// 서버를 찾고 띄울 환경으로 **사용자 셸 환경**을 읽을지(로그인 셸 설정 — `.zprofile`·`.zshrc` — 을 한 번 실행한다; 계획
+    /// workspace-trust WT3). **기본 true**. 끄면 셸을 띄우지 않고 앱 환경 + 통상 설치 위치로 찾는다.
+    shell_environment: bool = true,
 
-    pub const schema = .{ // 키: lsp.enabled
+    pub const schema = .{ // 키: lsp.enabled · lsp.shell-environment
         .enabled = Meta{ .doc = .cfg_lsp_enabled, .widget = .toggle, .section = .editor },
+        .shell_environment = Meta{ .doc = .cfg_lsp_shell_environment, .widget = .toggle, .section = .editor },
     };
 };
 

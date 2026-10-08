@@ -333,7 +333,9 @@ def main():
         root.mkdir()
         (root / "home").mkdir()
         (root / "backups").mkdir(mode=0o700)
-        (root / "config").write_text("session.keep-alive-after-quit = false\n" + ("ui.language = ko\n" if args.move_refusal else ""))
+        # clangd 는 위 PATH 의 늦추는 launcher 로 찾아야 한다 — 사용자 셸 환경(lsp.shell-environment)이면 로그인 셸의 PATH 가 그것을 가린다.
+        (root / "config").write_text("session.keep-alive-after-quit = false\n" + ("ui.language = ko\n" if args.move_refusal else "") +
+                                     ("lsp.shell-environment = false\n" if args.clangd else ""))
         if args.clangd:
             # An output below another Git checkout otherwise inherits its parent's LSP root.
             # Give only this generated fixture its own root; never trust the user's parent repo.

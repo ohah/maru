@@ -11322,6 +11322,7 @@ pub const AppSession = struct {
             // 않으므로 `tabsBlocked` 게이트를 지나지 않는다(chrome 최소 세션에서도 팔레트에 보이는 대로 먹는다).
             .lsp_trusted_repositories => editor_ops.trust_ui.open(self),
             .lsp_revoke_trust => editor_ops.lsp_client.manageCurrent(self, .revoke),
+            .lsp_reload_shell_environment => editor_ops.lsp_client.reloadShellEnvironment(self),
             .lsp_forget_trust => editor_ops.lsp_client.manageCurrent(self, .forget),
             .show_editor_outline => if (!self.tabsBlocked()) dock_ops.openDockTo(self, .outline),
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),

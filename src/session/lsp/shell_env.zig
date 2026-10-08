@@ -173,10 +173,10 @@ fn containsEntry(joined: []const u8, part: []const u8) bool {
     return false;
 }
 
-/// 저장소(`root`) 자신이거나 그 아래인 PATH 항목을 뺀다 — **신뢰 전** 실행 파일 해석용(저장소가 넣어 둔 실행 파일이 서버 이름으로
-/// 잡히지 않게). `out` 은 `path.len` 이상. 경로 성분 경계에서 가른다(`/r` 은 `/rx` 의 조상이 아니다). **글자로만 가른다** —
-/// `//`·`.`·`..`·심링크(`/tmp`↔`/private/tmp`) 표기는 같은 자리로 보지 못하므로, 호출자(WT3b)가 항목과 root 를 실제 경로로 푼 뒤
-/// 부른다. `cleanPath` 를 거친 값을 받는다(상대 경로 항목은 이미 없다).
+/// 저장소(`root`) 자신이거나 그 아래인 PATH 항목을 뺀다 — 신뢰 전에 **실행하는** 일(계획 WT5 의 버전 조회)용(저장소가 넣어 둔
+/// 실행 파일이 서버 이름으로 잡혀 신뢰 전에 돌지 않게; 서버 **찾기**는 거르지 않는다 — 계획 WT3b). `out` 은 `path.len` 이상. 경로
+/// 성분 경계에서 가른다(`/r` 은 `/rx` 의 조상이 아니다). **글자로만 가른다** — `//`·`.`·`..`·심링크(`/tmp`↔`/private/tmp`) 표기는
+/// 같은 자리로 보지 못하므로, 호출자가 항목과 root 를 실제 경로로 푼 뒤 부른다. `cleanPath` 를 거친 값을 받는다(상대 경로 항목은 이미 없다).
 pub fn pathWithout(path: []const u8, root: []const u8, out: []u8) []const u8 {
     std.debug.assert(out.len >= path.len);
     std.debug.assert(root.len > 0); // 빈 root 는 모든 절대 경로를 지운다 — 호출자 오용

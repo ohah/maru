@@ -729,7 +729,7 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
                     const icon: ?u21 = switch (view.phase) {
                         .ready, .home_root, .outside_repo => null, // 꺼짐은 알림이 아니라 사실이다
                         .missing, .denied, .failed, .unasked => icons.codepoint(.bell),
-                        .asking, .starting, .restarting => icons.codepoint(.hourglass),
+                        .asking, .starting, .restarting, .preparing => icons.codepoint(.hourglass),
                     };
                     if (buildStatusBarItem(self, icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {
                         right_frames[rn] = dl;

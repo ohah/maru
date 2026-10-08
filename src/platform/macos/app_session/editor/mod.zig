@@ -84,6 +84,7 @@ pub const syntax_color = @import("syntax.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const lsp_client = @import("lsp.zig");
 const trust_store = @import("trust_store.zig");
+const tool_env = @import("../../tool_env.zig");
 /// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
 pub const hover_client = @import("hover.zig");
 /// 정의로 이동(tooling §8.2c) — `textDocument/definition` → §5.2 `navigateTo`.
@@ -14714,6 +14715,7 @@ test "LSPB9 TS 계열 후보 셋 — PATH 에 typescript-language-server 만 있
     // ⑴ 아무것도 없다 — 첫 후보 tsgo 의 이름으로 「없음」, 설치 명령은 native-preview.
     lsp_client.pump(fx.session);
     const v0 = lsp_client.statusFor(fx.session, term) orelse return error.NoStatus;
+    try testing.expect(v0.phase != .preparing); // 판정자 기본 환경은 바로 정해진다 — 「셸 환경 읽는 중」에 걸려 조용히 건너뛰지 않는다
     if (v0.phase != .missing) return error.SkipZigTest; // 폴백 디렉터리에 진짜 tsgo/tsc 가 있으면 이 판정은 못 한다
     try testing.expectEqualStrings("tsgo", v0.exe);
     try testing.expect(std.mem.indexOf(u8, lsp_client.serverFor(fx.session, .typescript).?.install, "@typescript/native-preview") != null);
@@ -14928,6 +14930,7 @@ test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣
                 .home_root => .lsp_status_home_root,
                 .outside_repo => .lsp_status_outside_repo,
                 .unasked => .lsp_status_unasked,
+                .preparing => .lsp_status_preparing,
                 .ready => null, // 연결되면 이름만
             };
             var want_buf: [lsp_client.status_text_cap]u8 = undefined;
@@ -15248,14 +15251,14 @@ test "LSPB15 서버 자식은 제 프로세스 그룹을 세우고, root 로 chd
     const fds_before = openFdCount();
     {
         // 그룹은 **살아 있는** 자식으로 잰다 — 이미 끝난(좀비) 자식에는 getpgid 가 ESRCH 를 낼 수 있다.
-        var sleeper = try lsp_process.spawn(allocator, "/bin/sleep", &.{"5"}, root);
+        var sleeper = try lsp_process.spawn(allocator, "/bin/sleep", &.{"5"}, root, null);
         defer {
             lsp_process.stopNow(&sleeper, allocator);
         }
         try testing.expectEqual(sleeper.pid, getpgid(sleeper.pid));
     }
     {
-        var p = try lsp_process.spawn(allocator, "/bin/pwd", &.{}, root);
+        var p = try lsp_process.spawn(allocator, "/bin/pwd", &.{}, root, null);
         defer {
             lsp_process.stopNow(&p, allocator);
         }
@@ -15266,7 +15269,7 @@ test "LSPB15 서버 자식은 제 프로세스 그룹을 세우고, root 로 chd
     }
     // ⑵ 없는 root — 앱의 작업 디렉터리에서 엉뚱하게 돌지 않는다: 아무것도 출력하지 않고 끝난다.
     {
-        var p = try lsp_process.spawn(allocator, "/bin/pwd", &.{}, "/nonexistent-maru-lsp-root");
+        var p = try lsp_process.spawn(allocator, "/bin/pwd", &.{}, "/nonexistent-maru-lsp-root", null);
         defer {
             lsp_process.stopNow(&p, allocator);
         }
@@ -15278,7 +15281,7 @@ test "LSPB15 서버 자식은 제 프로세스 그룹을 세우고, root 로 chd
     try testing.expectEqual(fds_before, openFdCount()); // 내리기가 파이프 fd 를 새지 않는다
     // ⑶ 밀린 쓰기는 **순서대로 한 번씩** 나간다 — `cat` 이 받은 그대로 돌려준다. 파이프(64 KB)를 넘겨 밀리게 한다.
     {
-        var p = try lsp_process.spawn(allocator, "/bin/cat", &.{}, root);
+        var p = try lsp_process.spawn(allocator, "/bin/cat", &.{}, root, null);
         defer lsp_process.stopNow(&p, allocator);
         const total = 1 << 20;
         const sent = try allocator.alloc(u8, total);
@@ -15304,7 +15307,7 @@ test "LSPB16 제품의 내리기는 메인 스레드를 막지 않는다 — 떼
     const allocator = testing.allocator;
     // EOF 를 무시하는 「서버」 — 손자 하나를 띄우고 그 pid 를 알린 뒤 기다리기만 한다(stdin 을 안 읽는다).
     const fds_before = openFdCount();
-    var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "sleep 300 & echo $!; wait" }, "/");
+    var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "sleep 300 & echo $!; wait" }, "/", null);
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     var tries: usize = 0;
@@ -15362,7 +15365,7 @@ test "LSPB18 내리기는 EOF 유예를 지키고 그동안 stdout 을 비우며
     // ⑴ 유예를 지킨다 — EOF 뒤 0.2 초 걸려 정리하고 끝나는 서버는 죽이기 전에 끝난다(표식이 남는다).
     {
         const mark = try std.fmt.bufPrint(&mark_buf, "{s}/graceful", .{root});
-        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "read x; sleep 0.2; : > \"$0\"", mark }, root);
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "read x; sleep 0.2; : > \"$0\"", mark }, root, null);
         var l = lsp_process.handOff(&p, allocator);
         lsp_process.lowerAll((&l)[0..1], 2000);
         try tmp.dir.access(testing.io, "graceful", .{});
@@ -15370,14 +15373,14 @@ test "LSPB18 내리기는 EOF 유예를 지키고 그동안 stdout 을 비우며
     // ⑵ 유예 동안 stdout 을 비운다 — EOF 뒤 파이프(64 KB)를 넘게 쓰고 끝나는 서버가 쓰다 멈추지 않는다.
     {
         const mark = try std.fmt.bufPrint(&mark_buf, "{s}/drained", .{root});
-        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "cat >/dev/null; head -c 300000 /dev/zero; : > \"$0\"", mark }, root);
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "cat >/dev/null; head -c 300000 /dev/zero; : > \"$0\"", mark }, root, null);
         var l = lsp_process.handOff(&p, allocator);
         lsp_process.lowerAll((&l)[0..1], 2000);
         try tmp.dir.access(testing.io, "drained", .{});
     }
     // ⑶ 거두기 스레드는 **제 사본**을 든다 — 돌아온 뒤 호출자가 그 자리를 덮어도 서버를 내린다.
     {
-        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "sleep 300 & echo $!; wait" }, root);
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "sleep 300 & echo $!; wait" }, root, null);
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(allocator);
         var tries: usize = 0;
@@ -15395,7 +15398,7 @@ test "LSPB18 내리기는 EOF 유예를 지키고 그동안 stdout 을 비우며
     }
     // ⑷ 이미 거둔 서버는 그 사실을 들고 넘어간다 — 같은 pid 를 다시 기다리거나 신호하지 않게.
     {
-        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "exit 0" }, root);
+        var p = try lsp_process.spawn(allocator, "/bin/sh", &.{ "-c", "exit 0" }, root, null);
         var tries: usize = 0;
         while (!lsp_process.reapIfExited(&p) and tries < 300) : (tries += 1) _ = usleep(10_000);
         try testing.expect(p.reaped);
@@ -16701,6 +16704,750 @@ test "LSPB37 신뢰 시트는 거부에 포커스를 두고 글자 단축키를 
     _ = try fx.session.handleKeyEvent(.{ .key = .enter });
     _ = try fx.session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
     try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trust_store.get(key));
+}
+
+/// 판정자 — 가짜 로그인 셸(`dir/name`, sh 스크립트 — 마지막 인자가 우리 명령 `$cmd`)을 쓰고 그 절대 경로를 낸다.
+fn writeFakeLoginShell(dir: std.Io.Dir, root: []const u8, name: []const u8, body: []const u8, out: []u8) ![]const u8 {
+    var script: [2048]u8 = undefined;
+    try dir.writeFile(testing.io, .{ .sub_path = name, .data = try std.fmt.bufPrint(&script, "#!/bin/sh\nfor a; do cmd=$a; done\n{s}\n", .{body}) });
+    const p = try std.fmt.bufPrint(out, "{s}/{s}", .{ root, name });
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}", .{p})).ptr, 0o755);
+    return p;
+}
+
+/// 판정자 — 워커 스레드가 셸을 `n` 번 띄울 때까지 기다린다(횟수는 워커가 올린다).
+fn waitSpawnCount(n: u32) bool {
+    var ms: u32 = 0;
+    while (ms < 5000) : (ms += 10) {
+        if (tool_env.spawnCountForTest() >= n) return true;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    return false;
+}
+
+/// 판정자 — 이 판정자만의 저장소(`proj/.git`)와 그 밖의 홈(`home`)을 만들고 그 저장소의 문서를 연다(픽스처 root 는 이 작업 트리 안이라
+/// 홈을 거기 두면 바깥 저장소가 홈의 조상 — 「홈 root」 — 이 된다).
+fn openProjDoc(fx: *PaneFixture, root: []const u8) !*Term {
+    try fx.dir.dir.createDirPath(testing.io, "proj/.git");
+    try fx.dir.dir.createDirPath(testing.io, "home/fakebin");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/a.zig", .data = "const a = 1;\n" });
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    return openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/proj/a.zig", .{root}));
+}
+
+const EnvGuard = struct {
+    name: [:0]const u8,
+    saved: ?[:0]u8,
+    fn set(name: [:0]const u8, value: ?[]const u8) !EnvGuard {
+        const old: ?[:0]u8 = if (std.c.getenv(name.ptr)) |v| try testing.allocator.dupeZ(u8, std.mem.span(v)) else null;
+        if (value) |v| {
+            var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+            _ = setenv(name.ptr, (try std.fmt.bufPrintZ(&z, "{s}", .{v})).ptr, 1);
+        } else _ = unsetenv(name.ptr);
+        return .{ .name = name, .saved = old };
+    }
+    fn restore(self: *EnvGuard) void {
+        if (self.saved) |v| {
+            _ = setenv(self.name.ptr, v.ptr, 1);
+            testing.allocator.free(v);
+        } else _ = unsetenv(self.name.ptr);
+    }
+};
+
+test "LSPE1 사용자 셸 환경을 읽는 동안은 「없음」이 아니라 「셸 환경 읽는 중」이고, 다 읽으면 그 PATH 에서 서버를 찾아 묻고 그 환경으로 띄운다 (계획 workspace-trust WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", null); // PATH 로 찾게
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    const term = try openProjDoc(&fx, root);
+    // 사용자 셸 설정만 아는 자리(`~/fakebin`)에 서버가 있다 — 앱의 PATH 에는 없다.
+    var wrapper_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    // 래퍼가 받은 환경을 남기고 가짜 서버로 넘어간다 — 서버가 어떤 환경으로 떴는지 본다.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/zls", .{root})).ptr, 0o755);
+    }
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nexport PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    var term_env = try EnvGuard.set("TERM", "xterm-from-app"); // 서버 환경에 TERM 이 없다는 단언이 헛돌지 않게(CI 러너엔 없을 수 있다)
+    defer term_env.restore();
+    tool_env.setShellForTest(shell, null);
+    // 첫 pump 전(클라이언트도 아직 없다)에도 「없음」이 아니다 — 문서를 연 첫 프레임의 상태바.
+    try testing.expectEqual(lsp_client.Phase.preparing, lsp_client.statusFor(fx.session, term).?.phase);
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    const v = lsp_client.statusFor(fx.session, term).?;
+    try testing.expectEqual(lsp_client.Phase.preparing, v.phase); // 「없음」을 판정하지 않는다
+    try testing.expect(fx.session.pending_confirm == .none);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }); // 셸을 놓아 준다(시간이 아니라 순서로)
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.pending_confirm == .lsp_trust;
+        }
+    }.f));
+    try testing.expectEqual(tool_env.Status.ready, tool_env.status());
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            const s = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return s.phase == .ready;
+        }
+    }.f));
+    // 서버는 사용자 셸 환경(거른 것)으로 떴다 — 셸이 세운 PATH, 표식·터미널 변수 없음.
+    const server_env = try fx.dir.dir.readFileAlloc(testing.io, "home/server.env", allocator, .limited(1 << 16));
+    defer allocator.free(server_env);
+    var want_path_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, server_env, try std.fmt.bufPrint(&want_path_buf, "\nPATH={s}/home/fakebin:", .{root})) != null or
+        std.mem.startsWith(u8, server_env, (try std.fmt.bufPrint(&want_path_buf, "PATH={s}/home/fakebin:", .{root}))));
+    try testing.expect(std.mem.indexOf(u8, server_env, "MARU_RESOLVING_ENVIRONMENT") == null);
+    try testing.expect(std.mem.indexOf(u8, server_env, "\nTERM=") == null and !std.mem.startsWith(u8, server_env, "TERM="));
+    // (`SHLVL` 은 못 본다 — 래퍼 `/bin/sh` 가 스스로 세운다.)
+}
+
+test "LSPE2 스위치(lsp.shell-environment)를 끄면 셸을 띄우지 않고 「셸 환경 읽는 중」도 없다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    const term = try openProjDoc(&fx, root);
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "exec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    fx.session.loaded_config.config.lsp.shell_environment = false;
+    for (0..5) |_| lsp_client.pump(fx.session);
+    try testing.expectEqual(@as(u32, 0), tool_env.spawnCountForTest());
+    try testing.expectEqual(tool_env.Reason.disabled, tool_env.reason());
+    try testing.expect(lsp_client.statusFor(fx.session, term).?.phase != .preparing);
+    // 켜면(세팅 토글 — 사용자의 명시 행동) 그때 띄운다.
+    fx.session.loaded_config.config.lsp.shell_environment = true;
+    lsp_client.setShellEnvironmentEnabled(true);
+    try testing.expectEqual(tool_env.Status.idle, tool_env.status()); // 켜기만으로는 안 띄운다 — 다음 gate 가
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(tool_env.Status.resolving, tool_env.status());
+    try testing.expect(waitSpawnCount(1));
+}
+
+test "LSPE5 셸 환경을 다시 읽는 사이 서버가 죽어 「준비 중」으로 간 클라이언트(문서·진단을 든 채)도 다른 창의 거부를 따라 걷히고 「거부됨」으로 선다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", fake);
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    const Ctx = struct { fx: *PaneFixture };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            const s = lsp_client.statusFor(c.fx.session, c.fx.term) orelse return false;
+            return s.phase == .ready and c.fx.term.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.f));
+    // 셸 환경을 다시 읽기 시작한다(느린 셸) — 그 사이 서버가 죽는다. 재시작은 옛 환경으로 띄우지 않고 「준비 중」으로 선다.
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var body_buf: [std.fs.max_path_bytes + 128]u8 = undefined;
+    // 판정자가 놓아 줄 때까지 읽는 중이다(시간이 아니라 순서로) — 끝내기 전에 놓아 준다(`resetForTest` 가 워커를 기다린다).
+    const body = try std.fmt.bufPrint(&body_buf, "while [ ! -f '{s}/go' ]; do /bin/sleep 0.02; done\nexec /bin/sh -c \"$cmd\"", .{root});
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", body, &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    defer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "go", .data = "" }) catch {};
+    lsp_client.reloadShellEnvironment(fx.session); // 팔레트 「Reload Shell Environment」
+    try testing.expectEqual(tool_env.Status.resolving, tool_env.status());
+    const c = &fx.session.editor_lsp.clients.items[0];
+    _ = std.c.kill((c.proc orelse return error.NoProc).pid, std.c.SIG.KILL);
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(x: Ctx) bool {
+            return x.fx.session.editor_lsp.clients.items[0].phase == .preparing;
+        }
+    }.f));
+    try testing.expect(c.docs.items.len > 0);
+    // 다른 창이 거부했다.
+    _ = trust_store.decide(testing.io, (c.trust_key orelse return error.NoKey).key(), .deny);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.denied, c.phase);
+    try testing.expectEqual(@as(usize, 0), c.docs.items.len);
+    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diagnostics.lsp.items.len);
+}
+
+test "LSPE6 서버가 필요한 문서가 없으면 사용자 셸을 띄우지 않는다 — 처음 그런 문서를 열 때 읽기 시작한다 (계획 WT3 「언제」)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "exec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    // 서버가 없는 문서만 남긴다(픽스처의 doc.zig 를 닫는다).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "notes.txt", .data = "plain\n" });
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/notes.txt", .{root}));
+    {
+        const pane = pane_ops.activePane(fx.session);
+        const idx = std.mem.indexOfScalar(*Term, pane.terms.items, fx.term) orelse return error.NoTerm;
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    for (0..10) |_| lsp_client.pump(fx.session);
+    try testing.expectEqual(tool_env.Status.idle, tool_env.status());
+    try testing.expectEqual(@as(u32, 0), tool_env.spawnCountForTest());
+    // 서버가 필요한 문서를 연다 — 그때 읽기 시작한다.
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/doc.zig", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(tool_env.Status.resolving, tool_env.status());
+    try testing.expect(waitSpawnCount(1));
+}
+
+test "LSPE6b 신뢰 범위 밖 문서(홈 root)의 서버 클라이언트가 있어도 pump 는 사용자 셸을 띄우지 않는다 — 시작은 gate 만 한다; 다 읽으면 모든 창이 다시 그린다 (계획 WT3 「언제」)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var other = try PaneFixture.init(allocator); // 다른 창 — 결과를 받지 않는 창도 다시 그려야 한다
+    defer other.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    // 홈이 곧 저장소 root — 묻지 않고 「홈 root」로 선다.
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/proj", .{root}));
+    defer home.restore();
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "exec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    // 픽스처의 doc.zig 를 닫고 홈 root 의 문서만 남긴다.
+    {
+        const pane = pane_ops.activePane(fx.session);
+        const idx = std.mem.indexOfScalar(*Term, pane.terms.items, fx.term) orelse return error.NoTerm;
+        _ = try openProjDoc(&fx, root);
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    for (0..10) |_| lsp_client.pump(fx.session);
+    try testing.expect(fx.session.editor_lsp.clients.items.len > 0);
+    try testing.expectEqual(lsp_client.Phase.home_root, fx.session.editor_lsp.clients.items[0].phase);
+    try testing.expectEqual(tool_env.Status.idle, tool_env.status());
+    try testing.expectEqual(@as(u32, 0), tool_env.spawnCountForTest());
+    // 사용자가 다시 읽으면(팔레트) 그때 띄운다 — 다 읽은 tick 의 pump 는 다시 그리게 한다(워커 스레드의 완료라 다른 무엇도 그리게
+    // 하지 않는다 — 「셸 환경 읽는 중」이 남는다). 이 클라이언트는 phase 가 안 바뀌어 gate 가 대신 그리게 하지도 않는다.
+    lsp_client.pump(other.session); // 다른 창의 첫 pump(신뢰 표 따라잡기 등)가 세우는 다시 그리기를 먼저 치운다
+    other.session.metal_dirty = false;
+    lsp_client.reloadShellEnvironment(fx.session);
+    try testing.expectEqual(tool_env.Status.resolving, tool_env.status());
+    lsp_client.pump(other.session);
+    try testing.expect(other.session.metal_dirty); // 읽기 시작도 다른 창이 다시 그린다(「못 읽음」 문구가 남지 않게)
+    other.session.metal_dirty = false;
+    var ms: u32 = 0;
+    while (!tool_env.settled()) : (ms += 10) {
+        if (ms > 5000) return error.Timeout;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+        fx.session.metal_dirty = false;
+        lsp_client.pump(fx.session);
+    }
+    try testing.expect(fx.session.metal_dirty);
+    try testing.expectEqual(tool_env.Status.ready, tool_env.status());
+    other.session.metal_dirty = false;
+    lsp_client.pump(other.session);
+    try testing.expect(other.session.metal_dirty); // 결과는 fx 의 pump 가 받았다
+    other.session.metal_dirty = false;
+    lsp_client.pump(other.session);
+    try testing.expect(!other.session.metal_dirty); // 한 번만
+}
+
+test "LSPE8 스위치를 꺼 둔 채 아직 아무도 셸을 시작하지 않았을 때 다시 읽기는 셸을 띄우지 않는다; 언어 서버가 꺼져 있으면 그렇다고 말한다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "exec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    // 언어 서버가 꺼져 있다 — 읽지 않고 알린다.
+    fx.session.loaded_config.config.lsp.enabled = false;
+    fx.session.dispatchAppAction(.lsp_reload_shell_environment);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_reload_env_disabled), fx.session.chrome_host.notice.message);
+    fx.session.chrome_host.notice.dismiss();
+    try testing.expectEqual(tool_env.Status.idle, tool_env.status());
+    fx.session.loaded_config.config.lsp.enabled = true;
+    // 스위치를 꺼 뒀다(아직 아무도 시작하지 않았다 — 앱 전역 값이 정해지지 않았다).
+    fx.session.loaded_config.config.lsp.shell_environment = false;
+    fx.session.dispatchAppAction(.lsp_reload_shell_environment);
+    try testing.expectEqual(tool_env.Reason.disabled, tool_env.reason());
+    try testing.expectEqual(@as(?bool, false), lsp_client.shellEnvironmentOverride());
+    var ts: std.c.timespec = .{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&ts, null);
+    try testing.expectEqual(@as(u32, 0), tool_env.spawnCountForTest());
+}
+
+test "LSPE9 후보가 여럿인 언어(TS·JS) — 셸 환경을 읽는 동안 첫 후보 이름으로 선 「준비 중」 클라이언트를 다 읽은 뒤 고른 서버가 이어 쓴다(그것을 세운 문서가 닫혀 다른 문법의 문서만 남아도) — 버려진 클라이언트가 남지 않는다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    _ = try openProjDoc(&fx, root); // proj/.git·home/fakebin
+    // 둘째 후보만 셸 PATH 에 있다(첫 후보 tsgo 는 없다).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/typescript-language-server", .data = "#!/bin/sh\nexit 0\n" });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/typescript-language-server", .{root})).ptr, 0o755);
+    }
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/t.ts", .data = "const a = 1;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/u.js", .data = "const b = 2;\n" });
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nexport PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ts_term = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/proj/t.ts", .{root}));
+    lsp_client.pump(fx.session);
+    const term = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/proj/u.js", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.preparing, lsp_client.statusFor(fx.session, term).?.phase);
+    // 클라이언트를 세운 TS 문서를 닫는다 — JS 문서만 남는다(같은 첫 후보 이름의 클라이언트를 나눠 쓴다).
+    {
+        const pane = pane_ops.activePane(fx.session);
+        const idx = std.mem.indexOfScalar(*Term, pane.terms.items, ts_term) orelse return error.NoTerm;
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            const s = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return tool_env.settled() and s.phase != .preparing;
+        }
+    }.f));
+    const chosen = lsp_client.serverFor(fx.session, .javascript).?;
+    if (!std.mem.eql(u8, chosen.exe, "typescript-language-server")) return error.SkipZigTest; // 통상 설치 위치에 진짜 tsgo 가 있다
+    var ts_clients: usize = 0;
+    for (fx.session.editor_lsp.clients.items) |c| {
+        try testing.expect(c.phase != .preparing); // 버려진 「준비 중」이 없다
+        if (c.grammar == .typescript or c.grammar == .javascript) {
+            ts_clients += 1;
+            try testing.expectEqualStrings("typescript-language-server", c.server.exe);
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), ts_clients);
+}
+
+test "LSPE10 다시 읽는 동안 처음 보는 문법의 서버는 이미 담아 둔 환경으로 찾는다(기억하지 않는다) — 첫 후보로 세워 떠 있는 서버를 두고 새 클라이언트가 생기지 않게 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    try fx.dir.dir.createDirPath(testing.io, "home/fakebin");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/typescript-language-server", .data = "#!/bin/sh\nexit 0\n" });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/typescript-language-server", .{root})).ptr, 0o755);
+    }
+    // 처음은 바로 담고, 다시 읽기는 판정자가 놓아 줄 때까지 붙잡힌다.
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "if [ -f \"$HOME/first\" ]; then while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done; fi\n: > \"$HOME/first\"\nexport PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    tool_env.tick(true);
+    var ms: u32 = 0;
+    while (!tool_env.settled()) : (ms += 10) {
+        if (ms > 5000) return error.Timeout;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+        tool_env.tick(true);
+    }
+    {
+        var lb: [std.fs.max_path_bytes]u8 = undefined;
+        if (lsp_process.locate("tsgo", tool_env.path(), &lb) != null) return error.SkipZigTest; // 통상 설치 위치에 진짜 tsgo 가 있다
+    }
+    defer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {};
+    lsp_client.reloadShellEnvironment(fx.session);
+    try testing.expect(!tool_env.settled());
+    const picked = lsp_client.serverFor(fx.session, .javascript).?;
+    try testing.expectEqualStrings("typescript-language-server", picked.exe);
+    try testing.expect(fx.session.editor_lsp.resolved.get(.javascript) == null); // 다시 읽는 동안은 기억하지 않는다
+}
+
+test "LSPE11 셸 환경을 읽는 동안 다른 창의 허용·거부가 와도 문서 없는 「준비 중」은 그대로 — 다 읽은 뒤 서버가 없으면 「없음」이 거부보다 먼저다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/zls"); // 어디서도 못 찾는다
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    const term = try openProjDoc(&fx, root);
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    defer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {};
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    var cidx: ?usize = null;
+    for (fx.session.editor_lsp.clients.items, 0..) |c, i| if (std.mem.endsWith(u8, c.root, "/proj")) {
+        cidx = i;
+    };
+    const c = &fx.session.editor_lsp.clients.items[cidx orelse return error.NoClient];
+    try testing.expectEqual(lsp_client.Phase.preparing, c.phase);
+    try testing.expectEqual(@as(usize, 0), c.docs.items.len);
+    // 다른 창이 이 저장소를 허용했다가 거부했다 — 걷을 것이 없으니 둘 다 그대로 둔다(다 담은 뒤 gate 가 표를 읽는다).
+    var kbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var proj_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{root}), &kbuf) orelse return error.NoKey;
+    _ = trust_store.decide(testing.io, key, .allow);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.preparing, c.phase);
+    _ = trust_store.decide(testing.io, key, .deny);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.preparing, c.phase);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(x: Ctx) bool {
+            return tool_env.settled() and lsp_client.statusFor(x.fx.session, x.term).?.phase != .preparing;
+        }
+    }.f));
+    try testing.expectEqual(lsp_client.Phase.missing, lsp_client.statusFor(fx.session, term).?.phase);
+}
+
+test "LSPE12 셸 환경을 읽는 동안 그 저장소의 신뢰를 잊으면 문서 없는 「준비 중」도 「결정 없음」이 되고, 다 읽은 뒤 곧바로 묻지 않는다(잊기는 다시 묻기가 아니다) (계획 WT3b·WT4a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", fake); // 서버는 찾아진다
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    const term = try openProjDoc(&fx, root);
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    defer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {};
+    var kbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var proj_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(try std.fmt.bufPrint(&proj_buf, "{s}/proj", .{root}), &kbuf) orelse return error.NoKey;
+    _ = trust_store.decide(testing.io, key, .allow); // 앞서 허용했던 저장소
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    var cidx: ?usize = null;
+    for (fx.session.editor_lsp.clients.items, 0..) |cl, i| if (std.mem.endsWith(u8, cl.root, "/proj")) {
+        cidx = i;
+    };
+    const c = &fx.session.editor_lsp.clients.items[cidx orelse return error.NoClient];
+    try testing.expectEqual(lsp_client.Phase.preparing, c.phase);
+    try testing.expectEqual(@as(usize, 0), c.docs.items.len);
+    _ = trust_store.forget(testing.io, key); // 다른 창(또는 이 창의 관리 상자)에서 잊었다
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.unasked, c.phase);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(x: Ctx) bool {
+            _ = x;
+            return tool_env.settled();
+        }
+    }.f));
+    for (0..10) |_| lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.unasked, c.phase);
+    try testing.expect(fx.session.editor_lsp.asking_key == null);
+    try testing.expect(fx.session.pending_confirm == .none);
+}
+
+test "LSPE13 서버를 설치하고 셸 환경을 다시 읽는 사이 다른 문법(JS)이 그 서버를 세웠으면, 기억해 둔 첫 후보의 「없음」 클라이언트는 이름을 바꾸지 않는다 — 같은 (root, 서버) 클라이언트가 둘이 되지 않는다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    _ = try openProjDoc(&fx, root);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/a.ts", .data = "const a = 1;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/b.js", .data = "const b = 2;\n" });
+    // 처음은 바로 담고, 다시 읽기는 판정자가 놓아 줄 때까지 붙잡힌다.
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "if [ -f \"$HOME/first\" ]; then while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done; fi\n: > \"$HOME/first\"\nexport PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    defer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {};
+    // ⑴ TS 서버가 하나도 없다 — a.ts 는 첫 후보(tsgo)로 「없음」.
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var a_term = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/proj/a.ts", .{root}));
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = a_term }, struct {
+        fn f(x: Ctx) bool {
+            return tool_env.settled() and lsp_client.statusFor(x.fx.session, x.term).?.phase == .missing;
+        }
+    }.f));
+    for (maru.session.editor.lsp.servers.candidatesFor(.typescript)) |sv| {
+        var lb: [std.fs.max_path_bytes]u8 = undefined;
+        if (lsp_process.locate(sv.exe, tool_env.path(), &lb) != null) return error.SkipZigTest; // 통상 설치 위치에 진짜 TS 서버가 있다
+    }
+    {
+        const pane = pane_ops.activePane(fx.session);
+        const idx = std.mem.indexOfScalar(*Term, pane.terms.items, a_term) orelse return error.NoTerm;
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    // ⑵ 둘째 후보를 설치하고 다시 읽는다 — 읽는 동안 a.ts 를 다시 열고(기억한 tsgo 의 클라이언트가 「준비 중」) b.js 를 연다(처음 보는
+    // 문법 — 담아 둔 환경으로 찾아 typescript-language-server).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/typescript-language-server", .data = "#!/bin/sh\nexit 0\n" });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/typescript-language-server", .{root})).ptr, 0o755);
+    }
+    lsp_client.reloadShellEnvironment(fx.session);
+    a_term = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/proj/a.ts", .{root}));
+    lsp_client.pump(fx.session);
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/proj/b.js", .{root}));
+    lsp_client.pump(fx.session);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = a_term }, struct {
+        fn f(x: Ctx) bool {
+            _ = x;
+            return tool_env.settled();
+        }
+    }.f));
+    for (0..10) |_| lsp_client.pump(fx.session);
+    // 같은 (root, 서버) 클라이언트는 하나다.
+    const items = fx.session.editor_lsp.clients.items;
+    for (items, 0..) |x, i| for (items[i + 1 ..]) |y| {
+        try testing.expect(!(std.mem.eql(u8, x.root, y.root) and std.mem.eql(u8, x.server.exe, y.server.exe)));
+    };
+    try testing.expectEqualStrings("typescript-language-server", lsp_client.statusFor(fx.session, a_term).?.exe);
+}
+
+test "LSPE14 앞서 담은 셸 환경을 지킨 실패(다시 읽기가 못 읽음)에서 서버를 못 찾으면 보통 「없음 — 설치」다 — 그 환경에서 못 찾은 것은 셸 탓이 아니다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/zls"); // 어디서도 못 찾는다
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    const term = try openProjDoc(&fx, root);
+    // 처음은 담고, 다시 읽기는 아무것도 안 남기고 끝난다(Malformed).
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "if [ -f \"$HOME/first\" ]; then exit 0; fi\n: > \"$HOME/first\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(x: Ctx) bool {
+            return tool_env.status() == .ready and lsp_client.statusFor(x.fx.session, x.term).?.phase == .missing;
+        }
+    }.f));
+    lsp_client.reloadShellEnvironment(fx.session);
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(x: Ctx) bool {
+            _ = x;
+            return tool_env.status() == .failed;
+        }
+    }.f));
+    const v = lsp_client.statusFor(fx.session, term).?;
+    try testing.expectEqual(lsp_client.Phase.missing, v.phase);
+    try testing.expect(!v.env_failed);
+    var tb: [lsp_client.status_text_cap]u8 = undefined;
+    var want: [lsp_client.status_text_cap]u8 = undefined;
+    try testing.expectEqualStrings(maru.i18n.format(&want, maru.i18n.t(.lsp_status_missing), &.{.{ .s = v.exe }}), lsp_client.statusText(v, &tb));
+}
+
+test "LSPE7 다른 창에서 스위치를 바꾸면 이 창의 세팅 화면도 그 값을 보이고, 이 창에서 누르면 옛 값으로 되돌리지 않고 뒤집는다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var a = try PaneFixture.init(allocator);
+    defer a.deinit(allocator);
+    var b = try PaneFixture.init(allocator);
+    defer b.deinit(allocator);
+    a.session.loaded_config.config.lsp.shell_environment = false;
+    b.session.loaded_config.config.lsp.shell_environment = false;
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try settings_ops.buildSectionList(b.session, scratch.allocator());
+    for (sections, 0..) |entry, si| if (entry.section == .editor) {
+        b.session.chrome_host.settings.section = si;
+    };
+    settings_ops.refreshSettingsFieldCount(b.session);
+    // 아무도 정하지 않았으면(셸을 아직 안 띄웠다) 창의 설정을 그대로 보인다 — 전역 기본값(켬)으로 덮지 않는다.
+    _ = try settings_ops.currentSectionFields(b.session, scratch.allocator());
+    try testing.expectEqual(@as(?bool, null), lsp_client.shellEnvironmentOverride());
+    try testing.expect(!b.session.loaded_config.config.lsp.shell_environment);
+    lsp_client.setShellEnvironmentEnabled(true); // 창 A 의 세팅 토글
+    const cf = try settings_ops.currentSectionFields(b.session, scratch.allocator());
+    try testing.expect(b.session.loaded_config.config.lsp.shell_environment); // 창 B 의 미러가 따라왔다
+    var row: ?usize = null;
+    for (cf.bools, 0..) |f, i| if (std.mem.eql(u8, f.key, "lsp.shell-environment")) {
+        try testing.expect(f.value);
+        row = i;
+    };
+    b.session.chrome_host.settings.selected = row orelse return error.MissingSettingsRow;
+    settings_ops.toggleSelectedSetting(b.session); // 창 B 에서 누른다 — 끈다(옛 미러였다면 「켬」을 다시 보냈다)
+    try testing.expectEqual(@as(?bool, false), lsp_client.shellEnvironmentOverride());
+    settings_ops.clearConfigDirty(b.session);
+}
+
+test "LSPE4 스위치는 앱 전역이라 창마다 다른 설정 미러로 셸이 폭주하지 않는다 — 두 창이 다른 값을 들고 번갈아 돌아도 셸은 한 번; 바꾸는 자리는 사용자의 명시 행동 넷뿐 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var a = try PaneFixture.init(allocator);
+    defer a.deinit(allocator);
+    var b = try PaneFixture.init(allocator);
+    defer b.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try a.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    _ = try openProjDoc(&a, root);
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(a.dir.dir, root, "zsh", "exec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    // 자동 reload 를 끈 창 B 는 파일이 바뀐 뒤에도 옛 값을 든다.
+    a.session.loaded_config.config.lsp.shell_environment = true;
+    b.session.loaded_config.config.lsp.shell_environment = false;
+    for (0..20) |_| {
+        lsp_client.pump(a.session);
+        lsp_client.pump(b.session);
+    }
+    try testing.expect(waitSpawnCount(1));
+    var ts: std.c.timespec = .{ .sec = 0, .nsec = 200 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&ts, null);
+    for (0..20) |_| {
+        lsp_client.pump(a.session);
+        lsp_client.pump(b.session);
+    }
+    try testing.expectEqual(@as(u32, 1), tool_env.spawnCountForTest());
+    // 바꾸는 자리 — 세팅 토글·행 되돌리기·Reload Config·전체 리셋(`window.quit-after-last-window-closed` 와 같은 규율). tick 은 처음 한 번만 읽는다.
+    const settings_src = @embedFile("../settings.zig");
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, settings_src, "editor_ops.lsp_client.setShellEnvironmentEnabled("));
+    // 앱 전역 값을 바꾸는 길은 그 래퍼 하나뿐이다(허용된 자리를 센다 — 다른 파일이 `tool_env.setEnabled` 를 직접 부르는 우회도 잡는다).
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("lsp.zig"), "tool_env." ++ "setEnabled("));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, @embedFile("mod.zig"), "tool_env." ++ "setEnabled("));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, settings_src, "tool_env."));
+}
+
+test "LSPE3 셸 환경을 못 읽었으면(셸이 아무것도 안 남겼다) 서버 「없음」이 그렇다고 말하고, 누르면 설치 대신 다시 읽는다; 다시 읽어도 못 읽으면 원인은 그대로 말하고 누르면 설치로 간다 (계획 WT3b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/zls"); // 어디서도 못 찾는다
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    const term = try openProjDoc(&fx, root);
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "exit 0", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            const s = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return s.phase == .missing;
+        }
+    }.f));
+    const v = lsp_client.statusFor(fx.session, term).?;
+    try testing.expect(v.env_failed);
+    var tb: [lsp_client.status_text_cap]u8 = undefined;
+    var want: [lsp_client.status_text_cap]u8 = undefined;
+    try testing.expectEqualStrings(maru.i18n.format(&want, maru.i18n.t(.lsp_status_missing_env), &.{.{ .s = v.exe }}), lsp_client.statusText(v, &tb));
+    // 가장 긴 서버 이름에서도 두 언어 모두 상태바 버퍼(`status_text_cap`)에 들어간다(「…」 없음).
+    {
+        const saved_lang = maru.i18n.lang();
+        defer maru.i18n.setLang(saved_lang);
+        var longest: []const u8 = "";
+        for (std.enums.values(maru.session.editor.language.Grammar)) |g| for (maru.session.editor.lsp.servers.candidatesFor(g)) |sv| if (sv.exe.len > longest.len) {
+            longest = sv.exe;
+        };
+        inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |l| {
+            maru.i18n.setLang(l);
+            inline for (.{ false, true }) |retried| {
+                var lb: [lsp_client.status_text_cap]u8 = undefined;
+                const text = lsp_client.statusText(.{ .phase = .missing, .exe = longest, .env_failed = true, .env_retried = retried }, &lb);
+                try testing.expect(std.mem.indexOf(u8, text, "…") == null);
+                try testing.expect(std.mem.indexOf(u8, text, longest) != null);
+            }
+        }
+    }
+    const tabs_before = fx.session.tabs.items.len;
+    lsp_client.activateStatus(fx.session);
+    try testing.expectEqual(tabs_before, fx.session.tabs.items.len); // 설치 탭을 열지 않았다
+    try testing.expectEqual(tool_env.Status.resolving, tool_env.status());
+    try testing.expect(waitSpawnCount(2));
+    // 다시 읽었는데도 못 읽었다 — 다시 읽기를 더 권하지 않고 보통 「없음 — 설치」로 돌아간다(늘 실패하는 셸 설정에서 설치로 갈 길이 남는다).
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            _ = c;
+            return tool_env.settled();
+        }
+    }.f));
+    try testing.expectEqual(tool_env.Status.failed, tool_env.status());
+    const again = lsp_client.statusFor(fx.session, term).?;
+    try testing.expectEqual(lsp_client.Phase.missing, again.phase);
+    try testing.expect(again.env_failed and again.env_retried);
+    try testing.expectEqualStrings(maru.i18n.format(&want, maru.i18n.t(.lsp_status_missing_env_install), &.{.{ .s = again.exe }}), lsp_client.statusText(again, &tb));
+    lsp_client.activateStatus(fx.session);
+    try testing.expectEqual(tabs_before + 1, fx.session.tabs.items.len); // 설치 탭
+    // 다시 읽기가 아닌 시작(스위치를 껐다 켬)이 실패하면 다시 읽기를 다시 권한다 — 「다시 읽었는데도」는 그 시작에만 붙는다.
+    lsp_client.setShellEnvironmentEnabled(false);
+    lsp_client.setShellEnvironmentEnabled(true);
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            _ = c;
+            return tool_env.settled();
+        }
+    }.f));
+    try testing.expectEqual(tool_env.Status.failed, tool_env.status());
+    const third = lsp_client.statusFor(fx.session, term).?;
+    try testing.expect(third.env_failed and !third.env_retried);
 }
 
 test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리는 recordTrust 하나(표는 그 파일 밖에서 못 고친다), 허용으로 답하는 자리는 confirm 수락 하나, 하니스 스위치는 테스트 빌드에서만 읽힌다 (계획 WT2)" {
@@ -23042,8 +23789,9 @@ const PaneFixture = struct {
 
     fn init(allocator: std.mem.Allocator) !PaneFixture {
         const io = std.testing.io;
-        // 신뢰 표는 앱 전역이다 — 앞 판정자의 결정이 이 픽스처로 새지 않게 비운다(계획 WT2).
+        // 신뢰 표·도구 환경은 앱 전역이다 — 앞 판정자의 결정·환경이 이 픽스처로 새지 않게 비운다(계획 WT2·WT3b).
         trust_store.setDirForTest(null);
+        tool_env.resetForTest();
         var dir = testing.tmpDir(.{});
         errdefer dir.cleanup();
         try dir.dir.writeFile(io, .{ .sub_path = "doc.zig", .data = "const a = 1;\nconst b = 2;\nconst c = 3;\n" });
@@ -23077,6 +23825,7 @@ const PaneFixture = struct {
         allocator.destroy(self.session);
         self.dir.cleanup();
         trust_store.setDirForTest(null);
+        tool_env.resetForTest();
     }
 };
 

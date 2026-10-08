@@ -28,6 +28,8 @@ pub const Action = union(enum) {
     lsp_trusted_repositories,
     lsp_revoke_trust,
     lsp_forget_trust,
+    /// 언어 서버 도구 환경(사용자 셸 환경 — 계획 workspace-trust WT3b)을 다시 읽는다 — 셸 설정을 고친 뒤.
+    lsp_reload_shell_environment,
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와
     // 사용자 keybind에서도 같은 액션을 쓴다. 파일 선택/경로 I/O는 Swift, 종류·도크 라우팅 정책은 Zig가 소유한다.
     open_file_panel,
@@ -323,6 +325,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "lsp_trusted_repositories")) return .lsp_trusted_repositories;
     if (std.mem.eql(u8, value, "lsp_revoke_trust")) return .lsp_revoke_trust;
     if (std.mem.eql(u8, value, "lsp_forget_trust")) return .lsp_forget_trust;
+    if (std.mem.eql(u8, value, "lsp_reload_shell_environment")) return .lsp_reload_shell_environment;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;
     if (std.mem.eql(u8, value, "toggle_file_panel_mode")) return .toggle_file_panel_mode;

@@ -720,6 +720,8 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
             // 되돌려진다** — 껐는데 켜진 채로 남고 그 값이 파일로 간다. 순서 하나가 그 창을 닫는다.
             if (std.mem.eql(u8, f.key, "window.quit-after-last-window-closed"))
                 app_session_mod.setAppQuitAfterLastWindowClosed(new_value); // 앱 전역 — 다른 창의 마지막 닫기도 이 값을 본다
+            if (std.mem.eql(u8, f.key, "lsp.shell-environment"))
+                editor_ops.lsp_client.setShellEnvironmentEnabled(new_value); // 앱 전역 — 도구 환경 해석기는 하나다(계획 WT3b)
             if (std.mem.eql(u8, f.key, "session.keep-alive-after-quit")) {
                 setAppKeepAlivePolicy(new_value);
                 const snapshot = appKeepAliveSnapshot();
@@ -918,6 +920,8 @@ pub fn resetSelectedSettingRow(self: *AppSession) void {
             // 되돌려, 파일은 기본값인데 이번 실행은 옛 값으로 동작한다(적대적 검증 B1).
             if (std.mem.eql(u8, key, "window.quit-after-last-window-closed"))
                 app_session_mod.setAppQuitAfterLastWindowClosed(dv);
+            if (std.mem.eql(u8, key, "lsp.shell-environment"))
+                editor_ops.lsp_client.setShellEnvironmentEnabled(dv);
             if (std.mem.eql(u8, key, "theme.follow-system")) {
                 if (self.loaded_config.config.theme_follow_system) self.applyFollowSystemTheme() else disableFollowSystemTheme(self);
                 refreshSettingsFieldCount(self);
@@ -2314,6 +2318,7 @@ pub fn reloadConfig(self: *AppSession) void {
     old_loaded.deinit(); // appearance를 새것으로 갈아끼운 뒤라 옛 arena를 버려도 안전
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 파일이 정본
+    editor_ops.lsp_client.setShellEnvironmentEnabled(self.loaded_config.config.lsp.shell_environment); // 파일이 정본(앱 전역)
     // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
     // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
     self.theme_pre_follow = null;
@@ -2435,6 +2440,7 @@ pub fn resetAllSettings(self: *AppSession) void {
     self.loaded_config.terminal_bindings = &.{};
     self.loaded_config.global_bindings = &.{};
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 기본값(앱 전역)
+    editor_ops.lsp_client.setShellEnvironmentEnabled(self.loaded_config.config.lsp.shell_environment); // 기본값(앱 전역)
     self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
     self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
     self.allow_scrollback_shrink = true; // 전체 리셋 — 사용자가 고른 시점(스크롤백도 기본값으로)
@@ -3295,6 +3301,7 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     // toggle의 `new_value` 계산이 같은 SSOT를 보므로 stale 창이 값을 되돌리지 않는다.
     self.loaded_config.config.session.keep_alive_after_quit = app_session_mod.appKeepAlivePolicyValue();
     if (app_session_mod.appQuitAfterLastWindowClosedOverride()) |v| self.loaded_config.config.window_quit_after_last_window_closed = v;
+    if (editor_ops.lsp_client.shellEnvironmentOverride()) |v| self.loaded_config.config.lsp.shell_environment = v;
     const sections = try buildSectionList(self, arena);
     const sel_sec: ?config_mod.Section = if (sections.len > 0)
         sections[@min(self.chrome_host.settings.section, sections.len - 1)].section

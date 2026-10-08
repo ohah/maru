@@ -18,6 +18,8 @@
 //!   dl-same-file   maru 처럼 경로를 O_EXCL 로 미리 만들어 주면 Chromium 은 받는 동안 그 파일(같은 inode)에 쓴다 — maru 는 만든
 //!                  파일의 dev·ino 로만 지우므로 덜 받은 파일을 놓치지 않는다. 미리 만든 파일은 취소해도 Chromium 이 **남기고**(maru 가
 //!                  지운다), 완료 때는 **다른 inode** 로 바꿔 놓는다(maru 는 경로로 옮긴다) — 2 회차 실측, 보고 줄에 남긴다
+//!   dl-late-decide 결정을 2 초 늦게 보내도(보류 뒤 받기·TCC 질문) 받기를 이어 가고, 받는 동안·취소 뒤의 그 경로 파일을 보고 줄에
+//!                  남긴다(늦은 결정이면 Chromium 이 자기 임시 파일에서 옮겨 와 inode 가 바뀌는지 — 3 회차 실측)
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
@@ -364,6 +366,33 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         const content = sameContent(done_path, http.download_body);
         report(started.received > 0 and during != null and during.? == slow_ino and finished.last == .complete and after_done != null and content, "dl-same-file", std.fmt.bufPrint(&detail_buf, "받는 중({d} 바이트) 같은 파일 {} · 취소 뒤 남음 {} · 완료 뒤 같은 파일 {} · 내용 같음 {}", .{
             started.received, during != null and during.? == slow_ino, after_cancel != null, after_done != null and after_done.? == done_ino, content,
+        }) catch "");
+    }
+
+    // ── 늦은 결정 ──
+    check: {
+        var late_buf: [1100]u8 = undefined;
+        const late_path = try std.fmt.bufPrintZ(&late_buf, "{s}/late.bin.maru-part", .{dir});
+        try open(&host, 70, &u, port, "/dlp?a=slow");
+        const late = waitBegin(&host, 70, 5000) orelse {
+            report(false, "dl-late-decide", "download_begin 이 오지 않았다");
+            break :check;
+        };
+        const before = watch(&host, 70, late.download, 2000, false, 0); // 결정 전 2 초 — Chromium 이 어디에 받아 두나
+        const late_ino = precreate(late_path) orelse {
+            report(false, "dl-late-decide", "미리 만들지 못했다");
+            break :check;
+        };
+        try host.send(.{ .download_decide = .{ .browser = 70, .download = late.download, .path = late_path } });
+        const progressed = watch(&host, 70, late.download, 4000, false, before.received + 200_000);
+        const during = inodeOf(late_path);
+        try host.send(.{ .download_control = .{ .browser = 70, .download = late.download, .action = .cancel } });
+        const canceled = watch(&host, 70, late.download, 3000, true, 0);
+        os.sleepMs(300);
+        const after_cancel = inodeOf(late_path);
+        // maru 의 가정 — 늦게 결정해도 그 파일(같은 inode)에 이어 쓰고 취소 뒤에도 남는다(maru 가 dev·ino 로 확인해 지운다).
+        report(progressed.received > before.received and canceled.last == .canceled and during != null and during.? == late_ino and after_cancel != null and after_cancel.? == late_ino, "dl-late-decide", std.fmt.bufPrint(&detail_buf, "결정 전 2 초 받은 양 {d} · 결정 뒤 {d} · 받는 중 같은 파일 {} · 취소 뒤 남음 {}(같은 파일 {})", .{
+            before.received, progressed.received, during != null and during.? == late_ino, after_cancel != null, after_cancel != null and after_cancel.? == late_ino,
         }) catch "");
     }
 }

@@ -168,6 +168,7 @@ fn onUpdated(_: [*c]c.cef_download_handler_t, browser: [*c]c.cef_browser_t, item
     if (s.cancel_pending and callback != null) {
         s.cancel_pending = false;
         callback.*.cancel.?(callback);
+        return; // 취소의 갱신이 따로 온다(같은 자리에서 다시 불리면 이 슬롯은 이미 놓였을 수 있다 — 적대 리뷰 3 회차)
     }
     const state = stateOf(item);
     const received = item.*.get_received_bytes.?(item);

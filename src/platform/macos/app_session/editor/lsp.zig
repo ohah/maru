@@ -1305,6 +1305,10 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         var msg_buf: [512]u8 = undefined;
         const text = maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = c.server.exe }});
         self.showConfirmText(.lsp_trust, text, .{ .confirm = .lsp_trust_allow, .cancel = .lsp_trust_deny });
+        // 이 시트는 **비동기로 뜬다**(문서를 열고 서버를 찾은 뒤) — 사용자가 편집기에 치던 Enter·`y`·화살표가 그대로 「허용」이 되면
+        // 안 된다(`guardAsync` — 거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더 묻는다). 잘못 들어간 Enter 는 거부로 기억되고
+        // 상태바에서 다시 물을 수 있다(보수적인 쪽 — tooling §8.2a).
+        self.chrome_host.confirm.guardAsync(maru.i18n.t(.lsp_trust_recheck));
         setTrustSheetNotes(self, c.root); // `show` 가 안내를 비우므로 그 뒤에 채운다
         return;
     };

@@ -14278,6 +14278,17 @@ pub const AppSession = struct {
         return false;
     }
 
+    /// 사용자가 **입력을 주고 있는 오버레이**가 열려 있는가 — 입력을 받는 모달(`anyModalOverlayOpen`) + 팝업 이름 바꾸기 상자
+    /// (`ChromeHost` 필드가 아니라 `self.rename` 상태라 그 집합에 없다). 지나가는 토스트(notice)는 넣지 않는다.
+    ///
+    /// **늦게 온 LSP 응답의 게이트다**(2026-10-08). 빠른 수정 메뉴·참조 피커는 키를 누른 순간이 아니라 **응답이 도착한 순간**
+    /// 열린다 — 기다리는 사이 사용자가 알림 패널·설정 등을 열면, 응답이 그 위에 메뉴를 함께 띄웠다(재현: 메뉴와 알림 패널이
+    /// 동시에 열림). 오버레이는 모인 순서대로 그려져 메뉴가 알림 패널 **아래**에 깔리기도 했다. 응답 쪽이 이것을 묻고 결과를
+    /// 버린다 — 사용자가 그 뒤에 한 일을 늦은 응답이 덮지 않는다.
+    pub fn interactiveOverlayOpen(self: *const AppSession) bool {
+        return self.anyModalOverlayOpen() or self.rename != null;
+    }
+
     /// 도크 검색이 키/IME를 받는 상태인가. `inputFocus`·`terminalOwnsInput`·caret rect가 **같은 게이트**를 쓰도록
     /// 하는 단일 출처다. 플래그만 보면 도크를 닫거나 다른 뷰로 바꾼 뒤에도 참이 되어, 키를 못 받는 화면이
     /// first responder를 요구한다.

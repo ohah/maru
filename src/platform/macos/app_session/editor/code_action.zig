@@ -57,6 +57,8 @@ pub const State = struct {
     applied: u64 = 0,
     resolved: u64 = 0,
     hidden: u64 = 0,
+    /// 기다리는 사이 사용자가 다른 오버레이를 열어 버린 응답 수(`AppSession.interactiveOverlayOpen`).
+    dropped_behind_overlay: u64 = 0,
 
     pub fn clearItems(self: *State, allocator: std.mem.Allocator) void {
         for (self.items.items) |*it| it.deinit(allocator);
@@ -94,6 +96,12 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, is_error
     const st = &self.editor_code_action;
     if (!st.waiting or seq != st.waiting_seq) return;
     st.waiting = false;
+    // **기다리는 사이 사용자가 다른 오버레이를 열었으면 버린다** — 메뉴도, 「없습니다」·오류 알림도(알림은 열린 오버레이를
+    // 닫는다). 응답은 키를 누른 순간이 아니라 도착한 순간이라, 안 버리면 메뉴가 알림 패널·설정과 함께 열렸다(2026-10-08 재현).
+    if (self.interactiveOverlayOpen()) {
+        st.dropped_behind_overlay += 1;
+        return;
+    }
     if (is_error) {
         st.notified_error += 1;
         self.showNoticeFmt(.ca_error, &.{.{ .s = error_message orelse "" }});

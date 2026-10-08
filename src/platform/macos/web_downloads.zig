@@ -977,10 +977,11 @@ pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
         received;
     return switch (e.state) {
         .preparing => copyText(buf, i18n.t(.dl_state_preparing)),
+        // 실행될 수 있는 파일만 그렇다고 말한다 — 묻기(W10b)는 사용자 동작 없는 보통 파일도 보류한다.
         .held => if (e.origin_len > 0)
-            i18n.format(buf, i18n.t(.dl_state_held_from), &.{.{ .s = e.origin_buf[0..e.origin_len] }})
+            i18n.format(buf, i18n.t(if (e.risky) .dl_state_held_from else .dl_state_held_plain_from), &.{.{ .s = e.origin_buf[0..e.origin_len] }})
         else
-            copyText(buf, i18n.t(.dl_state_held)),
+            copyText(buf, i18n.t(if (e.risky) .dl_state_held else .dl_state_held_plain)),
         .active => i18n.format(buf, i18n.t(.dl_status_active), &.{.{ .s = sizes }}),
         .interrupted => i18n.format(buf, i18n.t(.dl_status_interrupted), &.{.{ .s = sizes }}),
         .done => i18n.format(buf, i18n.t(.dl_status_done), &.{.{ .s = formatBytes(@max(e.received, e.total), &total_buf) }}),
@@ -1361,6 +1362,8 @@ test "status lines are Zig sentences with Finder-style sizes (W10a)" {
     e.total = -1; // 크기를 모르면 받은 양만
     try std.testing.expect(std.mem.indexOf(u8, statusText(&e, &line), "3.0 MB") == null);
     e.state = .held;
+    try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_held_plain), statusText(&e, &line)); // 보통 파일(묻기의 보류)
+    e.risky = true;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_held), statusText(&e, &line));
     // 보류 행은 받으려 한 곳을 보인다.
     e.origin_len = originOf("blob:https://user@evil.example:8443/x?y", &e.origin_buf).len;

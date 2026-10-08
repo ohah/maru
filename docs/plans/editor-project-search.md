@@ -345,6 +345,8 @@ CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길�
 
 ### S2 표시 모델과 컴포넌트 작업 중 (2026-10-08)
 
+추가로 재현해 수정한 결함·판정 범위·남은 제품 경계는 [도크 기반 검증](editor-project-search-dock.md)에 정리한다.
+
 - `session/editor/search/results.zig`가 파일별 그룹과 펼침 상태를 소유한다. root와 출처 신원을 키에 포함하여
   같은 경로의 독립 문서를 합치지 않는다. 행을 추가하다 할당에 실패하면 소유권은 호출자에게 남는다.
 - `session/editor/search/presentation.zig`가 입력 변경·조합·300ms 대기와 적용된 요청을 구분한다.

@@ -717,12 +717,6 @@ test "a page that closes itself while downloading keeps its browser: the tab clo
     apply(gpa, .{ .page_close_kept = 42 }, 0);
     try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
     try std.testing.expectEqual(@as(u64, 42), sent[0].destroy_browser);
-    // 그 pane 의 유일한 탭이면 되살리지 않고 빈 페이지로 보낸다(같은 번호를 다시 만들지 않는다).
-    outbox_pending.clearRetainingCapacity();
-    blankKeptPage(gpa, 7);
-    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
-    try std.testing.expect(sent[0].navigate.browser == 7 and std.mem.eql(u8, sent[0].navigate.url, "about:blank"));
-    try std.testing.expect(browserLive(7) and !surfaces.getPtr(7).?.page_closed);
 }
 
 test "losing the sidecar forgets parked browsers with their downloads (W10c)" {
@@ -1976,6 +1970,7 @@ pub fn takeStoppedNotice(surface_id: u64) ?Notice {
 /// 앱 종료 — shutdown 을 보내고 잠시 기다린 뒤 남았으면 죽인다. sidecar 는 부모(maru)가 사라지면 스스로도 끝난다.
 pub fn shutdownForExit() void {
     const gpa = gpa_ref orelse return;
+    web_downloads.waitFinalizing(2000); // 고른 폴더로 옮기는 중이면 잠깐 기다린다(받은 파일이 숨은 임시 이름으로 남지 않게 — W10d)
     stop(gpa);
     // 받던 다운로드는 sidecar 와 함께 멈췄다 — 덜 받은 임시 파일(격리 표지 없음)을 남기지 않는다(W10a 적대 리뷰 3 회차). 종료 확인이 받는 중인 수를 알렸다(W10c).
     web_downloads.sidecarLost();
@@ -2808,18 +2803,6 @@ pub fn popupOpener(surface_id: u64) u64 {
     return s.popup_opener;
 }
 
-/// 페이지가 닫으려 했지만 받는 중이라 브라우저가 남은 탭이 그 pane 의 유일한 탭이다(W10d) — 되살리지 않는다(같은 번호로 다시
-/// 만들면 sidecar 가 거절했다). 빈 페이지로 보내고 보통 탭으로 둔다(사용자가 닫으면 주차한다).
-pub fn blankKeptPage(gpa: std.mem.Allocator, surface_id: u64) void {
-    const s = surfaces.getPtr(surface_id) orelse return;
-    s.page_closed = false;
-    s.popup_opener = 0;
-    s.page_opened = false;
-    s.download_blank = false;
-    settleClosedPark(gpa, surface_id);
-    if (s.created) send(gpa, .{ .navigate = .{ .browser = surface_id, .url = "about:blank" } });
-}
-
 /// 꺼내 간 창이 지금 닫지 못했다(탭을 끄는 중·닫기 확인) — 다음 tick 에 다시.
 pub fn markPageClosed(surface_id: u64) void {
     if (surfaces.getPtr(surface_id)) |s| s.page_closed = true;
@@ -3201,8 +3184,7 @@ fn sweepLeftoverParts() void {
     var path_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/maru-download-parts", .{profile}) catch return;
     web_downloads.setPartJournal(path);
-    const removed = web_downloads.sweepPartJournal();
-    if (removed > 0) std.log.scoped(.web_osr).info("removed {d} leftover download part file(s) from an earlier run", .{removed});
+    web_downloads.startSweep(); // 작업 스레드 — 기록에 망·외장 볼륨 경로가 있을 수 있다(W10d 리뷰 1 회차)
 }
 
 fn clearDownloadStaging(held: bool) void {

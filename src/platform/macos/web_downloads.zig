@@ -6,15 +6,18 @@
 //! `.webloc` 등 — Gatekeeper 를 피해 간 전례가 있는 종류)은 저장하지 않고 보류해 묻는다(사용자 결정).
 //!
 //! 파일은 이렇게 다룬다(W10a 설계 적대 검토):
-//! - 받는 동안은 `이름.maru-part`(maru 가 `O_CREAT|O_EXCL|O_NOFOLLOW` 로 미리 만든 빈 파일 — Chromium 은 그 경로를 덮어쓴다, 실측) —
-//!   받는 동안 Chromium 은 최종 이름 그대로 파일을 키우고 격리 표지는 완료 때에야 붙인다(실측). 그래서 비정상 종료 뒤 잘린 파일이
-//!   완성본처럼, 표지 없이 남을 수 있었다. 완료되면 `renameatx_np(RENAME_EXCL)` 로 최종 이름으로 옮긴다(표지는 inode 에 붙어 함께 간다).
+//! - 받는 동안은 `이름.maru-part` 쪽 — maru 가 그 이름을 `O_CREAT|O_EXCL|O_NOFOLLOW` 로 미리 만들어(이름 맡아 두기) 그 경로로 받게
+//!   하면, Chromium 은 그 이름이 있다고 보고 **` (1)` 을 붙인 형제**(`이름 (1).maru-part`)에 받다가 완료 때 그것을 미리 만든 경로 위로
+//!   옮긴다(W10d 실측 — 판정 `dl-same-file`: 받는 동안 미리 만든 파일은 0 바이트). 받는 동안 Chromium 은 최종 이름 그대로 파일을
+//!   키우고 격리 표지는 완료 때에야 붙인다(실측) — 그래서 최종 이름이 아니라 이 임시 이름으로 받게 한다(비정상 종료 뒤 잘린 파일이
+//!   완성본처럼, 표지 없이 남지 않게). 완료되면 `renameatx_np(RENAME_EXCL)` 로 최종 이름으로 옮긴다(표지는 inode 에 붙어 함께 간다).
 //! - 이름이 겹치는지는 파일 시스템이 정한다 — APFS 는 대소문자·정규화를 가리지 않고, 끊긴 심볼릭 링크는 stat 으로 「없음」이다.
 //!   최종 이름이 있으면(lstat — 끊긴 링크도) 다음 번호, 임시 파일을 O_EXCL 로 못 만들면 다음 번호.
 //! - 파일 작업은 메인 스레드 밖에서(첫 쓰기에 macOS 가 「다운로드 폴더 접근」을 물으면 그 시스템 호출이 막힌다 — 앱이 멈추지 않게).
 //! - sidecar 가 죽으면 진행 중이던 것을 「엔진이 다시 시작됨」으로 끝내고 임시 파일을 지운다. 다운로드 번호는 sidecar 마다 1 부터라
 //!   세대로 가린다(옛 행의 취소가 새 sidecar 의 다른 다운로드를 취소하지 않게).
 
+const builtin = @import("builtin");
 const std = @import("std");
 const maru = @import("maru");
 const web_osr = @import("web_osr.zig");
@@ -604,8 +607,8 @@ fn finalize(e: *Entry) bool {
 }
 
 /// 임시 파일을 지운다 — 만든 그 파일일 때만(경로가 같은 다른 다운로드의 임시 파일은 두고). 실측(판정 `dl-same-file`): Chromium 은
-/// 받는 동안 미리 만든 그 파일(같은 inode)에 쓰고, 취소해도 그 파일을 **지우지 않는다**(Chromium 이 만든 파일만 지운다) — 그래서
-/// maru 가 지운다. 완료 때는 다른 inode 로 바꿔 놓지만 완료는 경로로 옮기므로(`finalize`) 상관없다.
+/// 받는 동안 ` (1)` 을 붙인 형제에 쓰고 취소하면 그것만 지운다 — 미리 만든 빈 파일은 **남긴다**(maru 가 지운다). 완료 때는 형제를
+/// 미리 만든 경로 위로 옮겨 다른 inode 가 되지만 완료는 경로로 옮기므로(`finalize`) 상관없다.
 fn unlinkPart(e: *const Entry) void {
     if (e.part_len == 0 or e.finalizing) return; // 옮기는 중이면 작업 스레드가 끝낸다(W10d)
     var part_z: [max_path_bytes + 1]u8 = undefined;
@@ -748,7 +751,9 @@ pub fn sidecarRetired() void {
 fn endAll(end: State) void {
     var any = false;
     for (entries.items) |*e| {
-        if (finished(e.state)) continue;
+        // 옮기는 중인 것은 받기가 이미 끝났다 — 작업 스레드의 결과가 끝낸다(끝내 두면 결과 전에 행이 지워져 파일이 행도 기록도 없이
+        // 남을 수 있었다 — W10d 리뷰 1 회차).
+        if (finished(e.state) or e.finalizing) continue;
         e.state = end;
         unlinkPart(e);
         any = true;
@@ -842,7 +847,9 @@ var finalized: std.ArrayListUnmanaged(Finalized) = .empty;
 fn startFinalize(e: *Entry) bool {
     const job = allocator().create(Entry) catch return false;
     job.* = e.*;
+    _ = finalizing_threads.fetchAdd(1, .seq_cst);
     const thread = std.Thread.spawn(.{}, runFinalize, .{job}) catch {
+        _ = finalizing_threads.fetchSub(1, .seq_cst);
         allocator().destroy(job);
         return false;
     };
@@ -851,8 +858,27 @@ fn startFinalize(e: *Entry) bool {
     return true;
 }
 
+/// 옮기는 작업 스레드 수 — 앱이 끝날 때 잠깐 기다린다(옮기기 전에 끝나면 받은 파일이 숨은 임시 이름으로 남았다 — W10d 리뷰 1 회차).
+var finalizing_threads = std.atomic.Value(u32).init(0);
+/// 시험 전용 — 옮기는 작업 스레드를 붙잡는다(`finalizing` 동안의 보호를 시험이 본다).
+var test_hold_finalize = std.atomic.Value(bool).init(false);
+
+/// 옮기는 작업 스레드가 끝나기를 `max_ms` 까지 기다린다(W10d — 앱 종료).
+pub fn waitFinalizing(max_ms: u32) void {
+    var waited: u32 = 0;
+    while (finalizing_threads.load(.seq_cst) > 0 and waited < max_ms) : (waited += 10) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+}
+
 fn runFinalize(job: *Entry) void {
     defer allocator().destroy(job);
+    defer _ = finalizing_threads.fetchSub(1, .seq_cst);
+    if (builtin.is_test) while (test_hold_finalize.load(.seq_cst)) {
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    };
     var result: Finalized = .{ .key = job.key, .ok = finalize(job) };
     @memcpy(result.final_buf[0..job.final_len], job.finalPath());
     result.final_len = job.final_len;
@@ -869,10 +895,66 @@ fn runUnlink(job: *PartUnlink) void {
 }
 
 fn unlinkMatching(path: [:0]const u8, dev: i64, ino: u64) void {
+    _ = unlinkInDir(path, dev, ino, false);
+}
+
+const UnlinkResult = enum { removed, gone, other, failed };
+
+/// 그 경로의 파일이 그 dev·ino 이면 지운다 — 부모 폴더를 열어(마지막 요소는 링크를 따라가지 않는다) 그 안에서 보고 지운다(보고 지우는
+/// 사이 부모 경로를 링크로 바꿔치기해 다른 곳의 파일을 지우게 하지 못하게 — W10d 리뷰 1 회차). `siblings` 면 Chromium 이 ` (n)` 을 붙여
+/// 받던 형제(`이름 (1).maru-part`·`.maru-5 (1).part`)도 지운다 — 그 파일이 맞을 때만.
+fn unlinkInDir(path: []const u8, dev: i64, ino: u64, siblings: bool) UnlinkResult {
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/') orelse return .failed;
+    const base = path[slash + 1 ..];
+    if (base.len == 0) return .failed;
+    var dir_z: [max_path_bytes + 1]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&dir_z, "{s}", .{if (slash == 0) "/" else path[0..slash]}) catch return .failed;
+    var base_z: [max_name_bytes + 32]u8 = undefined;
+    const base0 = std.fmt.bufPrintZ(&base_z, "{s}", .{base}) catch return .failed;
+    const dfd = std.c.open(dir, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    if (dfd < 0) return if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) .gone else .failed;
+    defer _ = std.c.close(dfd);
     var st: std.c.Stat = undefined;
-    if (std.c.fstatat(at_fdcwd, path, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return;
-    if (@as(i64, @intCast(st.dev)) != dev or @as(u64, @intCast(st.ino)) != ino) return;
-    _ = std.c.unlink(path);
+    if (std.c.fstatat(dfd, base0, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return if (std.c._errno().* == @intFromEnum(std.c.E.NOENT)) .gone else .failed;
+    if (@as(i64, @intCast(st.dev)) != dev or @as(u64, @intCast(st.ino)) != ino) return .other;
+    if (std.c.unlinkat(dfd, base0, 0) != 0) return .failed;
+    if (siblings) removeUniquified(dfd, base);
+    return .removed;
+}
+
+extern "c" fn fdopendir(fd: c_int) ?*std.c.DIR;
+
+/// `이름 (n).확장자` — Chromium 이 이미 있는 이름에 붙이는 번호(확장자 앞, 점 하나 기준)인가.
+fn isUniquifiedOf(name: []const u8, base: []const u8) bool {
+    const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse base.len;
+    const stem = base[0..dot];
+    const ext = base[dot..];
+    if (!std.mem.startsWith(u8, name, stem) or !std.mem.endsWith(u8, name, ext)) return false;
+    if (name.len < stem.len + ext.len + 4) return false;
+    const mid = name[stem.len .. name.len - ext.len];
+    if (!std.mem.startsWith(u8, mid, " (") or !std.mem.endsWith(u8, mid, ")")) return false;
+    const digits = mid[2 .. mid.len - 1];
+    if (digits.len == 0 or digits.len > 3) return false;
+    for (digits) |ch| if (!std.ascii.isDigit(ch)) return false;
+    return true;
+}
+
+fn removeUniquified(dfd: c_int, base: []const u8) void {
+    const listing = std.c.dup(dfd);
+    if (listing < 0) return;
+    const d = fdopendir(listing) orelse {
+        _ = std.c.close(listing);
+        return;
+    };
+    defer _ = std.c.closedir(d);
+    while (std.c.readdir(d)) |ent| {
+        const nm = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
+        if (!isUniquifiedOf(nm, base)) continue;
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(dfd, @ptrCast(&ent.name), &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) continue;
+        if (!std.c.S.ISREG(st.mode)) continue;
+        _ = std.c.unlinkat(dfd, @ptrCast(&ent.name), 0);
+    }
 }
 
 // ── 남은 임시 파일 기록(W10d) ─────────────────────────────────────────────────────────────────────────────
@@ -916,38 +998,79 @@ fn isPartName(base: []const u8) bool {
     return true;
 }
 
-/// 지난 실행이 남긴 임시 파일을 지우고 기록을 비운다(W10d). 지운 수.
+/// 지난 실행이 남긴 임시 파일을 지우고 기록을 비운다(W10d). 지운 수. 기록을 먼저 옆 이름(`.sweeping`)으로 옮긴 뒤 읽는다 — 그 사이 이
+/// 실행의 작업 스레드가 붙이는 줄은 새 기록에 간다(잃지 않는다). 볼륨이 붙어 있지 않아 못 본 것(`/Volumes/…`)은 새 기록에 다시 적는다
+/// (다음 실행이 다시 본다 — W10d 리뷰 1 회차). 파일 작업이라 작업 스레드에서 부른다(`startSweep` — 망 볼륨이 멈춰도 창이 멈추지 않게).
 pub fn sweepPartJournal() usize {
     const jp = journalPath() orelse return 0;
-    const fd = std.c.open(jp, .{ .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    var old_buf: [max_path_bytes + 16]u8 = undefined;
+    const old = std.fmt.bufPrintZ(&old_buf, "{s}.sweeping", .{jp}) catch return 0;
+    var st: std.c.Stat = undefined;
+    // 지난 정리가 중간에 끝났으면 그 남은 것부터(새로 옮기지 않는다 — 덮어쓰면 잃는다).
+    if (std.c.fstatat(at_fdcwd, old, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0 and std.c.rename(jp, old) != 0) return 0;
+    const fd = std.c.open(old, .{ .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
     if (fd < 0) return 0;
-    var data: [256 * 1024]u8 = undefined;
-    var len: usize = 0;
-    while (len < data.len) {
-        const n = std.c.read(fd, data[len..].ptr, data.len - len);
+    var removed: usize = 0;
+    var chunk: [16 * 1024]u8 = undefined;
+    var line_buf: [max_path_bytes + 64]u8 = undefined;
+    var line_len: usize = 0;
+    var overflow = false;
+    while (true) {
+        const n = std.c.read(fd, &chunk, chunk.len);
         if (n <= 0) break;
-        len += @intCast(n);
+        for (chunk[0..@intCast(n)]) |ch| {
+            if (ch == '\n') {
+                if (!overflow) removed += sweepLine(line_buf[0..line_len]);
+                line_len = 0;
+                overflow = false;
+            } else if (line_len < line_buf.len) {
+                line_buf[line_len] = ch;
+                line_len += 1;
+            } else overflow = true;
+        }
     }
     _ = std.c.close(fd);
-    var removed: usize = 0;
-    var lines = std.mem.splitScalar(u8, data[0..len], '\n');
-    while (lines.next()) |line| {
-        var fields = std.mem.splitScalar(u8, line, ' ');
-        const dev = std.fmt.parseInt(i64, fields.next() orelse continue, 10) catch continue;
-        const ino = std.fmt.parseInt(u64, fields.next() orelse continue, 10) catch continue;
-        const path = fields.rest();
-        if (path.len == 0 or path.len > max_path_bytes or path[0] != '/') continue;
-        if (!isPartName(std.fs.path.basename(path))) continue;
-        var path_z: [max_path_bytes + 1]u8 = undefined;
-        const z = std.fmt.bufPrintZ(&path_z, "{s}", .{path}) catch continue;
-        var st: std.c.Stat = undefined;
-        if (std.c.fstatat(at_fdcwd, z, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) continue;
-        if (@as(i64, @intCast(st.dev)) != dev or @as(u64, @intCast(st.ino)) != ino) continue;
-        if (std.c.unlink(z) == 0) removed += 1;
-    }
-    const trunc = std.c.open(jp, .{ .ACCMODE = .WRONLY, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
-    if (trunc >= 0) _ = std.c.close(trunc);
+    _ = std.c.unlink(old);
     return removed;
+}
+
+fn sweepLine(line: []const u8) usize {
+    var fields = std.mem.splitScalar(u8, line, ' ');
+    const dev = std.fmt.parseInt(i64, fields.next() orelse return 0, 10) catch return 0;
+    const ino = std.fmt.parseInt(u64, fields.next() orelse return 0, 10) catch return 0;
+    const path = fields.rest();
+    if (path.len == 0 or path.len > max_path_bytes or path[0] != '/') return 0;
+    if (!isPartName(std.fs.path.basename(path))) return 0;
+    return switch (unlinkInDir(path, dev, ino, true)) {
+        .removed => 1,
+        .other => 0,
+        .gone, .failed => blk: {
+            // 볼륨이 붙어 있지 않다(`/Volumes/<이름>` 이 없다) — 다음에 다시 본다. 그 밖의 「없음」은 이미 지워졌다.
+            if (volumeMissing(path)) appendJournal(dev, ino, path);
+            break :blk 0;
+        },
+    };
+}
+
+fn volumeMissing(path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/Volumes/")) return false;
+    const rest = path["/Volumes/".len..];
+    const end = std.mem.indexOfScalar(u8, rest, '/') orelse return false;
+    var root_z: [max_path_bytes + 1]u8 = undefined;
+    const root = std.fmt.bufPrintZ(&root_z, "/Volumes/{s}", .{rest[0..end]}) catch return false;
+    var st: std.c.Stat = undefined;
+    return std.c.fstatat(at_fdcwd, root, &st, 0) != 0;
+}
+
+/// 작업 스레드에서 정리한다(W10d).
+pub fn startSweep() void {
+    const thread = std.Thread.spawn(.{}, runSweep, .{}) catch return;
+    thread.detach();
+}
+
+fn runSweep() void {
+    const removed = sweepPartJournal();
+    if (removed > 0) std.log.scoped(.web_downloads).info("removed {d} leftover download part file(s) from an earlier run", .{removed});
 }
 
 fn sendQueued(gpa: std.mem.Allocator) void {
@@ -1644,10 +1767,17 @@ test "a chosen download is moved into place on a worker thread, and ending it me
     e.part_dev = @intCast(st.dev);
     e.part_ino = @intCast(st.ino);
     try entries.append(allocator(), e);
+    test_hold_finalize.store(true, .seq_cst);
+    defer test_hold_finalize.store(false, .seq_cst);
     onUpdate(.{ .browser = 7, .download = 5, .state = .complete, .received = 4, .total = 4, .reason = 0 });
     // 옮기는 중 — 받는 중으로 남고, 그 사이 엔진이 다시 떠도(끝내기) 그 파일을 지우지 않는다.
     try std.testing.expect(entryOfKey(5).?.finalizing);
+    // 옮기는 작업 스레드를 붙잡아 둔 채 엔진이 다시 떴다 — 그 행을 끝내지 않고 그 파일을 지우지 않는다.
+    test_hold_finalize.store(true, .seq_cst);
     sidecarLost();
+    try std.testing.expect(entryOfKey(5).?.finalizing and entryOfKey(5).?.state == .active);
+    try std.testing.expect(exists(testPath(dir, ".maru-5.part", &part_buf)));
+    test_hold_finalize.store(false, .seq_cst);
     var waited: usize = 0;
     while (entryOfKey(5).?.finalizing and waited < 200) : (waited += 1) {
         reapPrepared();
@@ -1670,6 +1800,9 @@ test "the part journal deletes only leftover part files it recorded, by name sha
     setPartJournal(jpath);
     defer journal_len = 0;
     const names = [_][]const u8{ "a.txt.maru-part", ".maru-12.part", ".maru-12-3.part", "b.maru-part", "c.txt", ".maru-x.part" };
+    // Chromium 이 ` (n)` 을 붙여 받던 형제 — 기록된 그 파일이 맞을 때만 함께 지운다(b 의 형제는 남는다).
+    const siblings = [_][]const u8{ "a.txt (1).maru-part", ".maru-12 (2).part", "b (1).maru-part", "a.txt (x).maru-part" };
+    for (siblings) |n| try testWrite(dir, n, "data");
     for (names) |n| try testWrite(dir, n, "x");
     var p_buf: [max_path_bytes + 1]u8 = undefined;
     for (names, 0..) |n, i| {
@@ -1685,7 +1818,14 @@ test "the part journal deletes only leftover part files it recorded, by name sha
     try std.testing.expect(exists(testPath(dir, "b.maru-part", &p_buf))); // 같은 파일이 아니다
     try std.testing.expect(exists(testPath(dir, "c.txt", &p_buf))); // 임시 파일 꼴이 아니다
     try std.testing.expect(exists(testPath(dir, ".maru-x.part", &p_buf)));
+    try std.testing.expect(!exists(testPath(dir, "a.txt (1).maru-part", &p_buf)));
+    try std.testing.expect(!exists(testPath(dir, ".maru-12 (2).part", &p_buf)));
+    try std.testing.expect(exists(testPath(dir, "b (1).maru-part", &p_buf))); // 그 임시 파일이 맞지 않았다
+    try std.testing.expect(exists(testPath(dir, "a.txt (x).maru-part", &p_buf))); // 번호 꼴이 아니다
     try std.testing.expectEqual(@as(usize, 0), sweepPartJournal()); // 비웠다
+    try std.testing.expect(!exists(testPath(dir, "journal.sweeping", &p_buf)));
+    try std.testing.expect(isUniquifiedOf("x.zip (12).maru-part", "x.zip.maru-part"));
+    try std.testing.expect(!isUniquifiedOf("x.zip (1).maru-part.bak", "x.zip.maru-part"));
 }
 
 test "a chosen location keeps the chosen name with a short hidden part file, numbers unless replacing, and replace overwrites (W10b)" {

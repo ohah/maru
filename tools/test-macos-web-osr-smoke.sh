@@ -1925,8 +1925,9 @@ check(len(groups) == 2 and len(groups[1]) == 2 and groups[1][1][2] == '4' and gr
 check(files == ['big (1).zip', 'big.zip'], f'both files are in ~/Downloads ({files})')
 sys.exit(0 if ok else 1)
 PY
-# 받는 중에 앱이 죽으면(여기서는 이 시험이 띄운 그 앱만 SIGKILL) 덜 받은 `.maru-part` 가 남는다 — 다음 실행이 프로필을 잡을 때 그
-# 기록(프로필의 `maru-download-parts`)에 있는 것만 지운다(사용자 결정 2026-10-09). 같은 HOME 으로 두 번 띄운다(`run_app` 은 HOME 을 비운다).
+# 받는 중에 앱과 sidecar 가 함께 죽으면(여기서는 이 시험이 띄운 그 앱과 그 자식만 SIGKILL) 미리 만든 빈 `.maru-part` 와 Chromium 이
+# 받던 ` (1)` 형제(데이터)가 남는다 — 다음 실행이 프로필을 잡을 때 그 기록(프로필의 `maru-download-parts`)에 있는 것과 그 형제만
+# 지운다(사용자 결정 2026-10-09). 같은 HOME 으로 두 번 띄운다(`run_app` 은 HOME 을 비운다).
 rm -rf "$root/home" && mkdir -p "$root/home"
 printf 'sleep 7000\nmouse 1 0 0 338 302 0\nmouse 3 0 0 338 302 0\nsleep 30000\n' > "$root/dlcrash.txt"
 : > "$root/requests.log"
@@ -1936,8 +1937,9 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$ro
 crash_pid=$!
 sleep 11
 part_before=$(ls -A "$root/home/Downloads" 2>/dev/null | tr '\n' ' ')
+pkill -KILL -P "$crash_pid" 2>/dev/null || true # 그 앱의 자식(sidecar 등) 먼저 — Chromium 이 정리할 틈 없이
 kill -KILL "$crash_pid" 2>/dev/null; wait "$crash_pid" 2>/dev/null || true
-sleep 3 # 부모가 죽으면 sidecar 도 끝난다(W1b 판정) — 프로필 잠금이 풀릴 때까지
+sleep 3 # 남은 helper 가 끝나 프로필 잠금이 풀릴 때까지
 journal=$(find "$root/home/Library/Application Support/maru/web" -maxdepth 3 -name maru-download-parts | head -1)
 journal_lines=$( [ -n "$journal" ] && wc -l < "$journal" | tr -d ' ' || echo 0)
 part_after_kill=$(ls -A "$root/home/Downloads" 2>/dev/null | tr '\n' ' ')
@@ -1945,13 +1947,15 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$ro
     MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/solid" \
     MARU_MACOS_APP_SMOKE_MS=12000 MARU_APP_SUMMARY_PATH="$root/dlcrash2.summary" MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel "$app" > "$root/app-dlcrash2.log" 2>&1
 part_after_restart=$(ls -A "$root/home/Downloads" 2>/dev/null | tr '\n' ' ')
-journal_after=$( [ -n "$journal" ] && wc -c < "$journal" | tr -d ' ' || echo -)
+journal_after=$( [ -n "$journal" ] && { [ -e "$journal" ] && wc -c < "$journal" | tr -d ' ' || echo 0; } || echo -)
+[ -n "$journal" ] && [ -e "$journal.sweeping" ] && fail "the part journal sweep did not finish (a .sweeping file is left)"
 echo "downloads while downloading: [$part_before] · after kill: [$part_after_kill] · journal lines $journal_lines · after restart: [$part_after_restart] · journal bytes $journal_after"
 case "$part_after_kill" in *big.zip.maru-part*) ;; *) fail "killing the app mid-download did not leave the part file to clean (got [$part_after_kill])" ;; esac
+case "$part_after_kill" in *"big.zip (1).maru-part"*) ;; *) echo "WARN the data sibling (big.zip (1).maru-part) was not left by the kill ([$part_after_kill]) — the sibling cleanup was not exercised" ;; esac
 [ "${journal_lines:-0}" -ge 1 ] || fail "the part file was not recorded in the profile's part journal"
 case "$part_after_restart" in *maru-part*) fail "the next launch did not remove the leftover part file ([$part_after_restart])" ;; esac
-[ "$journal_after" = 0 ] || fail "the part journal was not emptied after cleaning ($journal_after bytes)"
-echo "PASS a part file left by a killed app is removed by the next launch and the journal is emptied"
+[ "$journal_after" = 0 ] || fail "the part journal was not emptied after cleaning ($journal_after bytes — 정리 뒤 기록은 없거나 비어 있어야 한다)"
+echo "PASS part files left by a killed app and sidecar (the empty placeholder and Chromium's data sibling) are removed by the next launch and the journal is emptied"
 
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그

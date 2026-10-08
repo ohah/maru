@@ -1314,7 +1314,7 @@ pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.Clo
 /// 페이지가 그 탭의 브라우저를 닫았다(`window.close` — maru 가 닫지 않았다, W6f②) — 그 탭을 닫는다(Chrome 처럼 확인 없이). 활성
 /// 탭이었으면 연 탭으로 돌아가고, 그 pane 의 유일한 탭이면 닫지 않고 빈 보통 탭으로 새로 만든다. 자리로 잡아 둔 닫기 확인이 떠 있거나
 /// 탭을 끄는 중이면(빼면 그 자리가 다른 탭을 가리킨다) 다음 tick 에 — 다시 표시한다.
-fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
+pub fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
     switch (self.pending_confirm) {
         .close => |target| if (target != .window) return web_osr.markPageClosed(surface_id),
         else => {},
@@ -1331,8 +1331,14 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
                 // 검증: 해제된 surface 에 써서 죽었다). 페이지의 `window.close` 가 사용자 확인 없이 창을 닫게 두지 않는다. 탭은 빈 보통 탭으로
                 // 남는다(사용자가 닫는다).
                 if (pane.terms.items.len == 1) {
-                    // W10d: 받는 중이라 sidecar 가 브라우저를 남겼다 — 되살리지 않고 빈 페이지로(같은 번호를 다시 만들면 거절된다).
-                    if (web_osr.browserLive(surface_id)) web_osr.blankKeptPage(self.allocator, surface_id) else web_osr.revivePageClosed(self.allocator, surface_id);
+                    // W10d: 받는 중이라 sidecar 가 브라우저를 남겼다(`page_close_kept`) — 같은 번호로 되살리지 않는다(sidecar 가
+                    // 거절한다). 닫히는 중이던 그 페이지를 계속 쓰지도 않는다(Blink 는 닫기를 시작한 페이지를 되돌리지 않는다 — 리뷰 1
+                    // 회차). 새 빈 웹 탭을 옆에 두고 그 탭을 닫는다(브라우저는 `destroy` 가 주차한다).
+                    if (web_osr.browserLive(surface_id)) {
+                        replaceKeptTab(self, tab_index, pane, index);
+                        return;
+                    }
+                    web_osr.revivePageClosed(self.allocator, surface_id);
                     setWebNavState(self, surface_id, false, false, ""); // 팝업의 주소·뒤로 상태를 지운다(새 빈 탭)
                     if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed revived\n", .{});
                     return;
@@ -1358,6 +1364,24 @@ fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
             }
         }
     }
+}
+
+/// 그 pane 의 유일한 탭을 새 빈 웹 탭으로 바꾼다(W10d — 받는 중이라 브라우저가 남은 탭). 만들지 못하면 다음 tick 에 다시.
+fn replaceKeptTab(self: *AppSession, tab_index: usize, pane: *app_session_mod.Pane, index: usize) void {
+    const old_id = pane.terms.items[index].surfaceId();
+    const fresh = createWebTerm(self, .browser) catch return web_osr.markPageClosed(old_id);
+    pane.terms.insert(self.allocator, index + 1, fresh) catch {
+        term_ops.destroyTerm(self, fresh);
+        return web_osr.markPageClosed(old_id);
+    };
+    const was_active = pane.active_term == index;
+    term_ops.closeTermAt(self, tab_index, pane, index);
+    if (was_active) {
+        if (pane == pane_ops.activePane(self) and tab_index == self.app_window.active_tab) self.focusTerm(index) else pane.active_term = index;
+    }
+    self.workspaceChanged(.topology);
+    self.metal_dirty = true;
+    if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed replaced\n", .{});
 }
 
 /// 페이지가 연 탭이 문서 없이 다운로드만 했다(W10c) — 빈 탭으로 남기지 않고 닫는다(받던 것은 `web_osr.destroy` 가 브라우저를 숨겨

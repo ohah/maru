@@ -78,6 +78,10 @@ pub const Entry = struct {
     final_len: usize = 0,
     part_buf: [max_path_bytes]u8 = undefined,
     part_len: usize = 0,
+    /// 만든 임시 파일의 정체 — 지울 때 같은 파일인지 본다(Chromium 이 취소하며 먼저 지운 뒤 같은 이름의 다른 다운로드가 그 경로를
+    /// 다시 만들었으면 그것을 지우지 않게 — W10a 적대 리뷰 1 회차).
+    part_dev: i64 = 0,
+    part_ino: u64 = 0,
 
     pub fn name(self: *const Entry) []const u8 {
         return self.name_buf[0..self.name_len];
@@ -137,21 +141,34 @@ fn isTroublesome(cp: u21) bool {
 /// 제안 이름을 저장할 파일 이름으로(`out` 안): 문제 글자는 `_`, 앞뒤 공백·점은 지운다, 비면 `download`. 번호·임시 꼬리가 붙을
 /// 자리(`reserve` 바이트)를 남기고 확장자를 지키며 글자 경계에서 자른다.
 pub fn sanitizeName(raw: []const u8, reserve: usize, out: []u8) []const u8 {
+    // 다듬는 동안은 넉넉한 버퍼에 — `out` 길이에서 먼저 자르면 확장자를 지키기 전에 잘려 확장자가 사라졌다(단위 시험이 잡았다).
+    var work: [4 * max_name_bytes]u8 = undefined;
     var len: usize = 0;
     const view = std.unicode.Utf8View.init(raw) catch return fallbackName(out);
     var it = view.iterator();
     while (it.nextCodepointSlice()) |slice| {
         const cp = std.unicode.utf8Decode(slice) catch continue;
         const piece: []const u8 = if (isTroublesome(cp)) "_" else slice;
-        if (len + piece.len > out.len) break;
-        @memcpy(out[len..][0..piece.len], piece);
+        if (len + piece.len > work.len) break;
+        @memcpy(work[len..][0..piece.len], piece);
         len += piece.len;
     }
+    const kept = trimAndCut(work[0..len], reserve);
+    if (kept.len == 0) return fallbackName(out);
+    const n = @min(kept.len, out.len);
+    @memcpy(out[0..n], kept[0..n]);
+    return out[0..n];
+}
+
+/// 앞뒤의 빈칸·점을 지우고 `max_name_bytes - reserve` 안으로(확장자를 지키며, 글자 경계에서) 자른다. 제자리에서.
+fn trimAndCut(buf: []u8, reserve: usize) []u8 {
+    const out = buf;
+    var len = buf.len;
     var start: usize = 0;
     while (start < len and (out[start] == ' ' or out[start] == '.')) start += 1;
     var end = len;
     while (end > start and (out[end - 1] == ' ' or out[end - 1] == '.')) end -= 1;
-    if (end == start) return fallbackName(out);
+    if (end == start) return out[0..0];
     std.mem.copyForwards(u8, out[0 .. end - start], out[start..end]);
     len = end - start;
     const limit = max_name_bytes -| reserve;
@@ -207,10 +224,13 @@ pub fn numberedName(file_name: []const u8, n: u32, out: []u8) []const u8 {
 
 /// 실행될 수 있는 파일(열면 무언가 돌거나 설치되거나 다른 것을 연다) — 사용자 동작 없이 받게 하면 보류한다.
 const risky_extensions = [_][]const u8{
-    ".command",    ".terminal", ".tool",     ".webloc", ".inetloc",  ".fileloc",      ".pkg",         ".mpkg", ".dmg",
-    ".app",        ".app.zip",  ".workflow", ".action", ".scpt",     ".scptd",        ".applescript", ".jar",  ".sh",
-    ".zsh",        ".bash",     ".csh",      ".ksh",    ".prefpane", ".mobileconfig", ".kext",        ".osax", ".definition",
+    ".command",    ".terminal", ".tool",     ".webloc", ".inetloc",  ".fileloc",      ".pkg",         ".mpkg",        ".dmg",
+    ".app",        ".app.zip",  ".workflow", ".action", ".scpt",     ".scptd",        ".applescript", ".jar",         ".sh",
+    ".zsh",        ".bash",     ".csh",      ".ksh",    ".prefpane", ".mobileconfig", ".kext",        ".osax",        ".definition",
     ".safariextz", ".url",
+    // 디스크 이미지(열면 마운트된다)·위치 파일·Python Launcher 가 곧바로 돌리는 스크립트(W10a 적대 리뷰 1 회차).
+         ".iso",      ".img",    ".smi",      ".cdr",          ".toast",       ".sparseimage", ".sparsebundle",
+    ".dmgpart",    ".udif",     ".afploc",   ".ftploc", ".atloc",    ".py",           ".pyw",
 };
 
 pub fn isRisky(file_name: []const u8) bool {
@@ -229,6 +249,8 @@ const Prepared = struct {
     final_len: usize = 0,
     part_buf: [max_path_bytes]u8 = undefined,
     part_len: usize = 0,
+    part_dev: i64 = 0,
+    part_ino: u64 = 0,
 };
 
 /// 작업 스레드와 메인 스레드가 함께 쓴다(짧은 구간만 — pthread 뮤텍스, 세션 밖이라 `std.Io` 가 없다).
@@ -299,6 +321,11 @@ pub fn prepare(dir: []const u8, file_name: []const u8, out: *Prepared) void {
             return;
         }
         _ = std.c.close(fd);
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(at_fdcwd, part, &st, std.c.AT.SYMLINK_NOFOLLOW) == 0) {
+            out.part_dev = @intCast(st.dev);
+            out.part_ino = @intCast(st.ino);
+        }
         out.final_len = final.len;
         out.part_len = part.len;
         out.ok = true;
@@ -306,34 +333,63 @@ pub fn prepare(dir: []const u8, file_name: []const u8, out: *Prepared) void {
     }
 }
 
-/// 완료 — 임시 파일을 최종 이름으로(겹치면 다음 번호). 옮긴 최종 경로를 `e` 에 적는다.
+extern "c" fn link(from: [*:0]const u8, to: [*:0]const u8) c_int;
+
+const Move = enum { moved, taken, failed };
+
+/// `part` 를 `target` 으로 — 있으면 덮어쓰지 않는다. RENAME_EXCL 을 못 쓰는 볼륨(ENOTSUP — exFAT·SMB 등, 리뷰 지적이고 실측은
+/// 안 했다)은 hard link 뒤 지우기(이것도 있으면 실패한다), 그것도 못 하면 있는지 본 뒤 rename(짧은 틈이 남는다).
+fn moveExclusive(part: [*:0]const u8, target: [*:0]const u8) Move {
+    if (renameatx_np(at_fdcwd, part, at_fdcwd, target, rename_excl) == 0) return .moved;
+    const err = std.c._errno().*;
+    if (err == @intFromEnum(std.c.E.EXIST)) return .taken;
+    if (err != @intFromEnum(std.c.E.OPNOTSUPP) and err != @intFromEnum(std.c.E.INVAL)) return .failed;
+    if (link(part, target) == 0) {
+        _ = std.c.unlink(part);
+        return .moved;
+    }
+    if (std.c._errno().* == @intFromEnum(std.c.E.EXIST) or exists(target)) return .taken;
+    return if (std.c.rename(part, target) == 0) .moved else .failed;
+}
+
+/// 완료 — 임시 파일을 최종 이름으로(겹치면 다음 번호 — 제안 이름에서 다시 센다, 번호가 붙은 이름에 또 붙이지 않게). 옮긴 최종 경로를
+/// `e` 에 적는다. 못 옮기면 받은 데이터는 임시 파일에 있다 — 행이 그 파일을 가리키게 한다(Finder 에서 찾을 수 있게).
 fn finalize(e: *Entry) bool {
     var part_z: [max_path_bytes + 1]u8 = undefined;
     const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return false;
     const dir_end = std.mem.lastIndexOfScalar(u8, e.finalPath(), '/') orelse return false;
     const dir = e.finalPath()[0..dir_end];
-    const file_name = e.finalPath()[dir_end + 1 ..];
     var n: u32 = 0;
     while (n < 100) : (n += 1) {
         var name_buf: [max_name_bytes + 16]u8 = undefined;
-        const candidate = numberedName(file_name, n, &name_buf);
-        if (candidate.len == 0) return false;
+        const candidate = numberedName(e.name(), n, &name_buf);
+        if (candidate.len == 0) break;
         var target_buf: [max_path_bytes + 1]u8 = undefined;
-        const target = std.fmt.bufPrintZ(&target_buf, "{s}/{s}", .{ dir, candidate }) catch return false;
-        if (renameatx_np(at_fdcwd, part, at_fdcwd, target, rename_excl) == 0) {
-            @memcpy(e.final_buf[0..target.len], target);
-            e.final_len = target.len;
-            return true;
+        const target = std.fmt.bufPrintZ(&target_buf, "{s}/{s}", .{ dir, candidate }) catch break;
+        switch (moveExclusive(part, target)) {
+            .moved => {
+                @memcpy(e.final_buf[0..target.len], target);
+                e.final_len = target.len;
+                e.part_len = 0; // 옮겼다 — 더는 지울 임시 파일이 없다
+                return true;
+            },
+            .taken => {},
+            .failed => break,
         }
-        if (std.c._errno().* != @intFromEnum(std.c.E.EXIST)) return false;
     }
+    @memcpy(e.final_buf[0..e.part_len], e.partPath());
+    e.final_len = e.part_len;
     return false;
 }
 
+/// 임시 파일을 지운다 — 만든 그 파일일 때만(경로가 같은 다른 다운로드의 임시 파일은 두고).
 fn unlinkPart(e: *const Entry) void {
     if (e.part_len == 0) return;
     var part_z: [max_path_bytes + 1]u8 = undefined;
     const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return;
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(at_fdcwd, part, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return;
+    if (@as(i64, @intCast(st.dev)) != e.part_dev or @as(u64, @intCast(st.ino)) != e.part_ino) return;
     _ = std.c.unlink(part);
 }
 
@@ -429,12 +485,23 @@ pub fn onUpdate(v: message.DownloadUpdate) void {
     changed();
 }
 
-/// sidecar 를 잃었다 — 진행 중이던 것을 끝내고 임시 파일을 지운다. 새 sidecar 의 번호와 섞이지 않게 세대를 올린다.
+/// sidecar 를 잃었다(죽었다) — 진행 중이던 것을 끝내고 임시 파일을 지운다. 새 sidecar 의 번호와 섞이지 않게 세대를 올린다.
 pub fn sidecarLost() void {
+    endAll(.engine_restarted);
+}
+
+/// 마지막 Chromium 탭을 닫아 sidecar 를 내렸다 — 그 다운로드는 CEF 가 알림 없이 멈추고(실측) 내리는 sidecar 의 알림은 읽지 않는다.
+/// 끝내지 않으면 행이 「받는 중」으로 남아 상한에 셈되고, 다음 sidecar 가 같은 번호를 쓰면 그 다운로드가 행도 없이 취소됐다
+/// (W10a 적대 리뷰 1 회차). 탭을 닫은 뒤 이어 받기는 W10c.
+pub fn sidecarRetired() void {
+    endAll(.tab_closed);
+}
+
+fn endAll(end: State) void {
     var any = false;
     for (entries.items) |*e| {
         if (finished(e.state)) continue;
-        e.state = .engine_restarted;
+        e.state = end;
         unlinkPart(e);
         any = true;
     }
@@ -461,6 +528,8 @@ pub fn drain(gpa: std.mem.Allocator) void {
                 if (p.ok) { // 그 사이 끝났다(엔진 재시작 등) — 만든 임시 파일을 지운다
                     @memcpy(e.part_buf[0..p.part_len], p.part_buf[0..p.part_len]);
                     e.part_len = p.part_len;
+                    e.part_dev = p.part_dev;
+                    e.part_ino = p.part_ino;
                     unlinkPart(e);
                 }
                 continue;
@@ -473,6 +542,8 @@ pub fn drain(gpa: std.mem.Allocator) void {
                 e.final_len = p.final_len;
                 @memcpy(e.part_buf[0..p.part_len], p.part_buf[0..p.part_len]);
                 e.part_len = p.part_len;
+                e.part_dev = p.part_dev;
+                e.part_ino = p.part_ino;
                 e.state = .active;
                 queue(e.key, .decide_path);
             }
@@ -602,12 +673,37 @@ test "download names are sanitized, keep their extension when cut, and number be
     try std.testing.expect(!isRisky(".command"));
 }
 
+extern "c" fn symlink(target: [*:0]const u8, path: [*:0]const u8) c_int;
+
+// 시험의 파일은 libc 로 다룬다(임시 디렉터리의 절대 경로 그대로 — 제품 코드가 쓰는 길).
+fn testPath(dir: []const u8, file_name: []const u8, buf: *[max_path_bytes + 1]u8) [*:0]const u8 {
+    return (std.fmt.bufPrintZ(buf, "{s}/{s}", .{ dir, file_name }) catch unreachable).ptr;
+}
+
+fn testWrite(dir: []const u8, file_name: []const u8, data: []const u8) !void {
+    var buf: [max_path_bytes + 1]u8 = undefined;
+    const fd = std.c.open(testPath(dir, file_name, &buf), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+    if (fd < 0) return error.TestOpenFailed;
+    defer _ = std.c.close(fd);
+    if (std.c.write(fd, data.ptr, data.len) != @as(isize, @intCast(data.len))) return error.TestWriteFailed;
+}
+
+fn testRead(dir: []const u8, file_name: []const u8, out: []u8) ![]const u8 {
+    var buf: [max_path_bytes + 1]u8 = undefined;
+    const fd = std.c.open(testPath(dir, file_name, &buf), .{}, @as(std.c.mode_t, 0));
+    if (fd < 0) return error.TestOpenFailed;
+    defer _ = std.c.close(fd);
+    const n = std.c.read(fd, out.ptr, out.len);
+    if (n < 0) return error.TestReadFailed;
+    return out[0..@intCast(n)];
+}
+
 test "prepare picks a name the file system has free — case, dangling symlinks and in-flight parts all count (W10a)" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var dir_buf: [max_path_bytes]u8 = undefined;
-    const dir = try tmp.dir.realpath(".", &dir_buf);
-    try tmp.dir.writeFile(.{ .sub_path = "a.txt", .data = "old" });
+    const dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    try testWrite(dir, "a.txt", "old");
     var first: Prepared = .{ .key = 1, .ok = false };
     prepare(dir, "A.TXT", &first); // 대소문자만 다르다(APFS 기본은 가리지 않는다) — 번호로
     try std.testing.expect(first.ok);
@@ -616,21 +712,124 @@ test "prepare picks a name the file system has free — case, dangling symlinks 
     prepare(dir, "a.txt", &second); // 받는 중인 임시 파일(`A (1).TXT.maru-part`)도 자리를 차지한다
     try std.testing.expect(second.ok);
     try std.testing.expect(std.mem.endsWith(u8, second.final_buf[0..second.final_len], "a (2).txt"));
-    try tmp.dir.symLink("/nonexistent/target", "b.txt", .{}); // 끊긴 링크 — 따라가지 않는다
+    var link_buf: [max_path_bytes + 1]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), symlink("/nonexistent/target", testPath(dir, "b.txt", &link_buf))); // 끊긴 링크 — 따라가지 않는다
     var third: Prepared = .{ .key = 3, .ok = false };
     prepare(dir, "b.txt", &third);
     try std.testing.expect(third.ok);
     try std.testing.expect(std.mem.endsWith(u8, third.final_buf[0..third.final_len], "b (1).txt"));
     // 완료 — 임시 파일을 최종 이름으로, 그 사이 누가 최종 이름을 만들었으면 다음 번호로.
     var e: Entry = .{ .key = 9, .generation = 1, .download = 1, .browser = 1, .state = .active, .risky = false };
+    @memcpy(e.name_buf[0.."b.txt".len], "b.txt");
+    e.name_len = "b.txt".len;
     @memcpy(e.final_buf[0..third.final_len], third.final_buf[0..third.final_len]);
     e.final_len = third.final_len;
     @memcpy(e.part_buf[0..third.part_len], third.part_buf[0..third.part_len]);
     e.part_len = third.part_len;
-    try tmp.dir.writeFile(.{ .sub_path = "b (1).txt", .data = "raced" });
+    try testWrite(dir, "b (1).txt", "raced");
     try std.testing.expect(finalize(&e));
-    try std.testing.expect(std.mem.endsWith(u8, e.finalPath(), "b (2).txt"));
-    const raced = try tmp.dir.readFileAlloc(std.testing.allocator, "b (1).txt", 16);
-    defer std.testing.allocator.free(raced);
+    // 제안 이름 `b.txt` 에서 다시 센다 — `b (1) (1).txt` 가 아니다(적대 리뷰 1 회차).
+    try std.testing.expect(std.mem.endsWith(u8, e.finalPath(), "/b (2).txt"));
+    var raced_buf: [16]u8 = undefined;
+    const raced = try testRead(dir, "b (1).txt", &raced_buf);
     try std.testing.expectEqualStrings("raced", raced); // 덮어쓰지 않았다
+    // 임시 파일이 없어 못 옮기면 행은 그 임시 경로를 가리키고 실패다.
+    var gone: Entry = e;
+    @memcpy(gone.final_buf[0..third.final_len], third.final_buf[0..third.final_len]);
+    gone.final_len = third.final_len;
+    @memcpy(gone.part_buf[0..third.part_len], third.part_buf[0..third.part_len]);
+    gone.part_len = third.part_len;
+    try std.testing.expect(!finalize(&gone));
+    try std.testing.expectEqualStrings(third.part_buf[0..third.part_len], gone.finalPath());
+}
+
+test "removing a part file only removes the file this download made (W10a)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    var p: Prepared = .{ .key = 1, .ok = false };
+    prepare(dir, "c.txt", &p);
+    try std.testing.expect(p.ok and p.part_ino != 0);
+    var e: Entry = .{ .key = 1, .generation = 1, .download = 1, .browser = 1, .state = .active, .risky = false };
+    @memcpy(e.part_buf[0..p.part_len], p.part_buf[0..p.part_len]);
+    e.part_len = p.part_len;
+    e.part_dev = p.part_dev;
+    e.part_ino = p.part_ino;
+    // Chromium 이 지운 뒤 같은 이름의 다른 다운로드가 그 경로를 다시 만들었다 — 두고 간다.
+    var c_buf: [max_path_bytes + 1]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.unlink(testPath(dir, "c.txt.maru-part", &c_buf)));
+    try testWrite(dir, "c.txt.maru-part", "other");
+    unlinkPart(&e);
+    var kept_buf: [16]u8 = undefined;
+    const kept = try testRead(dir, "c.txt.maru-part", &kept_buf);
+    try std.testing.expectEqualStrings("other", kept);
+    // 만든 그 파일이면 지운다.
+    var q: Prepared = .{ .key = 2, .ok = false };
+    prepare(dir, "d.txt", &q);
+    var f: Entry = e;
+    @memcpy(f.part_buf[0..q.part_len], q.part_buf[0..q.part_len]);
+    f.part_len = q.part_len;
+    f.part_dev = q.part_dev;
+    f.part_ino = q.part_ino;
+    unlinkPart(&f);
+    var d_buf: [max_path_bytes + 1]u8 = undefined;
+    try std.testing.expect(!exists(testPath(dir, "d.txt.maru-part", &d_buf)));
+}
+
+fn resetForTest() void {
+    entries.clearAndFree(allocator());
+    outgoing.clearAndFree(allocator());
+    changed();
+}
+
+fn rowForTest(key: u64, download: u32, state: State) Entry {
+    return .{ .key = key, .generation = sidecar_generation, .download = download, .browser = 7, .state = state, .risky = false };
+}
+
+test "rows follow the sidecar: progress before the path keeps preparing, interrupted comes back, other tabs are ignored (W10a)" {
+    resetForTest();
+    defer resetForTest();
+    try entries.append(allocator(), rowForTest(1, 11, .preparing));
+    try entries.append(allocator(), rowForTest(2, 12, .active));
+    onUpdate(.{ .browser = 7, .download = 11, .state = .in_progress, .received = 5, .total = 10, .reason = 0 });
+    try std.testing.expectEqual(State.preparing, entryOfKey(1).?.state); // 경로를 정하기 전 갱신(실측)은 상태를 두고 양만
+    try std.testing.expectEqual(@as(i64, 5), entryOfKey(1).?.received);
+    onUpdate(.{ .browser = 7, .download = 12, .state = .interrupted, .received = 1, .total = 10, .reason = 38 });
+    try std.testing.expectEqual(State.interrupted, entryOfKey(2).?.state);
+    onUpdate(.{ .browser = 7, .download = 12, .state = .in_progress, .received = 2, .total = 10, .reason = 0 });
+    try std.testing.expectEqual(State.active, entryOfKey(2).?.state);
+    onUpdate(.{ .browser = 8, .download = 12, .state = .canceled, .received = 0, .total = 10, .reason = 0 }); // 다른 탭
+    try std.testing.expectEqual(State.active, entryOfKey(2).?.state);
+    onUpdate(.{ .browser = 7, .download = 12, .state = .browser_closed, .received = 2, .total = 10, .reason = 0 });
+    try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
+    onUpdate(.{ .browser = 7, .download = 12, .state = .in_progress, .received = 3, .total = 10, .reason = 0 }); // 끝난 뒤는 받지 않는다
+    try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
+}
+
+test "a retired or lost sidecar ends unfinished rows, keeps finished ones and numbers afresh (W10a)" {
+    resetForTest();
+    defer resetForTest();
+    try entries.append(allocator(), rowForTest(1, 1, .done));
+    try entries.append(allocator(), rowForTest(2, 2, .active));
+    try entries.append(allocator(), rowForTest(3, 3, .held));
+    queue(2, .cancel);
+    const before = sidecar_generation;
+    sidecarRetired();
+    try std.testing.expect(sidecar_generation != before);
+    try std.testing.expectEqual(State.done, entryOfKey(1).?.state);
+    try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
+    try std.testing.expectEqual(State.tab_closed, entryOfKey(3).?.state);
+    try std.testing.expectEqual(@as(usize, 0), outgoing.items.len); // 옛 sidecar 에 보낼 것은 버린다
+    try std.testing.expectEqual(@as(usize, 0), activeTotal());
+    // 새 sidecar 의 같은 번호는 옛 행이 아니다.
+    try std.testing.expect(entryOfDownload(sidecar_generation, 1) == null);
+    try std.testing.expect(entryOfDownload(sidecar_generation, 2) == null);
+    // 옛 행의 늦은 갱신·보류 받기는 받지 않는다.
+    onUpdate(.{ .browser = 7, .download = 2, .state = .complete, .received = 10, .total = 10, .reason = 0 });
+    try std.testing.expectEqual(State.tab_closed, entryOfKey(2).?.state);
+    try std.testing.expect(!act(3, .accept));
+    try entries.append(allocator(), rowForTest(4, 1, .active));
+    sidecarLost();
+    try std.testing.expectEqual(State.engine_restarted, entryOfKey(4).?.state);
 }

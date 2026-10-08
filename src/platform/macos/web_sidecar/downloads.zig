@@ -48,6 +48,8 @@ const Slot = struct {
     before: [*c]c.cef_before_download_callback_t = null,
     /// 마지막 진행 갱신의 item 콜백(취소·다시 받기용) — 끝(완료·취소)이나 브라우저가 닫히면 놓는다.
     item: [*c]c.cef_download_item_callback_t = null,
+    /// 결정 직후 첫 진행 갱신(item 콜백) 전에 온 취소 — 그 갱신에서 취소한다(버리지 않게 — W10a 적대 리뷰 1 회차).
+    cancel_pending: bool = false,
     last_state: ?message.DownloadState = null,
     last_sent_ms: i64 = 0,
     received: i64 = 0,
@@ -162,6 +164,10 @@ fn onUpdated(_: [*c]c.cef_download_handler_t, browser: [*c]c.cef_browser_t, item
     };
     object.release(s.item);
     s.item = callback;
+    if (s.cancel_pending and callback != null) {
+        s.cancel_pending = false;
+        callback.*.cancel.?(callback);
+    }
     const state = stateOf(item);
     const received = item.*.get_received_bytes.?(item);
     const total_raw = item.*.get_total_bytes.?(item);
@@ -208,7 +214,10 @@ pub fn control(value: message.DownloadControl) void {
         return;
     }
     const cb = s.item;
-    if (cb == null) return;
+    if (cb == null) {
+        if (value.action == .cancel) s.cancel_pending = true;
+        return;
+    }
     switch (value.action) {
         .cancel => cb.*.cancel.?(cb),
         .resume_download => cb.*.@"resume".?(cb),

@@ -1209,8 +1209,10 @@ const Table = struct {
     dl_button_reveal: [:0]const u8,
     dl_button_clear: [:0]const u8,
     dl_empty: [:0]const u8,
-    /// 상태 줄 — `{0}` 상태, `{1}` 크기(받은 양 / 크기).
-    dl_status_with: [:0]const u8,
+    /// 상태 줄 — `{0}` 크기(받은 양 / 크기, 끝나면 크기). 상태마다 따로 둔다(한국어 표의 모든 항목에 한글이 있어야 한다).
+    dl_status_active: [:0]const u8,
+    dl_status_interrupted: [:0]const u8,
+    dl_status_done: [:0]const u8,
     /// 보류 — `{0}` 받으려 한 곳(호스트).
     dl_state_held_from: [:0]const u8,
     /// `{0}` 받은 양, `{1}` 크기.
@@ -1861,7 +1863,9 @@ const en: Table = .{
     .dl_button_reveal = "Show in Finder",
     .dl_button_clear = "Clear Finished",
     .dl_empty = "No downloads",
-    .dl_status_with = "{0} \u{2014} {1}",
+    .dl_status_active = "Downloading \u{2014} {0}",
+    .dl_status_interrupted = "Interrupted \u{2014} {0}",
+    .dl_status_done = "Done \u{2014} {0}",
     .dl_state_held_from = "Held \u{2014} {0} wants to save a file that could run code. Download it?",
     .dl_sizes_of = "{0} of {1}",
     .scm_show_all_more = "Show all ({0} more)",
@@ -2743,7 +2747,9 @@ const ko: Table = .{
     .dl_button_reveal = "Finder에서 보기",
     .dl_button_clear = "끝난 것 지우기",
     .dl_empty = "다운로드가 없습니다",
-    .dl_status_with = "{0} \u{2014} {1}",
+    .dl_status_active = "받는 중 \u{2014} {0}",
+    .dl_status_interrupted = "중단됨 \u{2014} {0}",
+    .dl_status_done = "완료 \u{2014} {0}",
     .dl_state_held_from = "보류됨 \u{2014} {0}에서 실행될 수 있는 파일을 저장하려 합니다. 받을까요?",
     .dl_sizes_of = "{1} 중 {0}",
     .scm_show_all_more = "모두 보기 ({0}개 더)",

@@ -73,9 +73,11 @@ pub fn askEnabled() bool {
     return ask_enabled;
 }
 
-/// 결정 전(보류·묻는 중)에 받아 두게 두는 양 — 넘으면 멈춘다(페이지가 사용자 모르게 큰 파일을 프로필에 쌓지 못하게 — W10b 적대
-/// 리뷰 1 회차). 받기를 다시 누르면 처음부터 받는다.
-const max_waiting_bytes: i64 = 256 * 1024 * 1024;
+/// 아무도 보지 않는 결정 전 행(보류·저장 창을 맡지 않은 묻는 중)에 받아 두게 두는 양 — 넘으면 멈춘다(페이지가 사용자 모르게
+/// 터무니없이 큰 파일을 프로필에 쌓지 못하게 — W10b 적대 리뷰 1 회차). 2 회차: 256 MB 는 빠른 회선에서 사용자가 저장 창에서 고르는
+/// 사이 다운로드를 끊었다 — 저장 창이 떠 있는 행에는 걸지 않고 4 GB 로. 결정 전 멈춤(`pause`)은 먹지 않는다(실측 — 멈춘 뒤에도 같은
+/// 빠르기로 받아 뒀다). Chrome 도 결정 전 데이터를 임시 파일에 받아 둔다. 다시 받으면 처음부터 받는다.
+const max_waiting_bytes: i64 = 4 * 1024 * 1024 * 1024;
 /// 묻는 행을 아무 창도 맡지 않으면 목록 창을 내기까지.
 const ask_nudge_ms: i64 = 1000;
 
@@ -238,8 +240,17 @@ pub fn sanitizeChosenName(raw: []const u8, out: []u8) []const u8 {
         @memcpy(out[len..][0..piece.len], piece);
         len += piece.len;
     }
-    const name = out[0..len];
+    var name = out[0..len];
     if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return fallbackName(out);
+    if (len == out.len and raw.len > out.len) {
+        // 바이트로 255 를 넘는 이름(HFS+·SMB 는 UTF-16 단위로 센다) — 확장자를 지키며 글자 경계에서 자른다(2 회차).
+        const ext = extensionOf(raw);
+        if (ext.len > 0 and ext.len < out.len / 2) {
+            const cut = utf8Floor(out[0..len], out.len - ext.len);
+            @memcpy(out[cut .. cut + ext.len], ext);
+            name = out[0 .. cut + ext.len];
+        }
+    }
     return name;
 }
 
@@ -580,7 +591,6 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
         // 상관없이 보류: 목록에서 「받기」를 누르면 묻는다). 한 탭에는 한 번에 하나만 묻는다(누를 때마다 창이 줄을 서지 않게 —
         // 설계 공격 H3).
         e.state = if (by_user and !askingIn(v.browser)) .asking else .held;
-        e.ask_since_ms = now_ms;
     } else if (e.risky and !by_user) {
         e.state = .held;
     } else if (!startPrepare(&e)) {
@@ -605,11 +615,14 @@ pub fn onUpdate(v: message.DownloadUpdate) void {
     e.received = v.received;
     e.total = v.total;
     e.reason = v.reason;
-    if ((e.state == .held or e.state == .asking) and v.state == .in_progress and v.received > max_waiting_bytes) {
+    const unattended = e.state == .held or (e.state == .asking and !e.ask_claimed);
+    if (unattended and v.state == .in_progress and v.received > max_waiting_bytes) {
         e.state = .canceled;
         e.stopped_waiting = true;
-        e.ask_claimed = false;
         queue(e.key, .decide_cancel);
+        // 멈춘 것을 알린다 — 목록 창을 낸다(2 회차: 아무 표시 없이 사라졌다).
+        show_request +%= 1;
+        show_surface = e.browser;
         changed();
         return;
     }
@@ -698,6 +711,8 @@ pub fn reapPrepared() void {
                 e.state = .asking;
                 e.ask_claimed = false;
                 e.ask_retry = true;
+                e.ask_since_ms = 0;
+                e.ask_nudged = false;
             } else if (!p.ok) {
                 e.state = .failed;
                 queue(e.key, .decide_cancel);
@@ -759,6 +774,8 @@ pub fn act(key: u64, action: Action) bool {
                 // 묻기 — 받기를 누른 목록 창이 저장 창을 띄운다(Swift 가 곧바로 `claimAsk`).
                 e.state = .asking;
                 e.ask_claimed = false;
+                e.ask_since_ms = 0;
+                e.ask_nudged = false;
                 changed();
                 return true;
             }
@@ -792,6 +809,11 @@ pub fn act(key: u64, action: Action) bool {
 pub fn nudgeAsking(now_ms: i64) void {
     for (entries.items) |*e| {
         if (e.state != .asking or e.ask_claimed or e.ask_nudged) continue;
+        // 묻기로 바뀐 때는 여기서 적는다(처음·목록의 받기·다시 묻기 — 옛 시각으로 곧바로 목록 창이 나가 저장 창을 가렸다, 2 회차).
+        if (e.ask_since_ms == 0) {
+            e.ask_since_ms = now_ms;
+            continue;
+        }
         if (now_ms - e.ask_since_ms < ask_nudge_ms) continue;
         e.ask_nudged = true;
         show_request +%= 1;
@@ -1185,6 +1207,9 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     var chosen_buf: [max_name_bytes]u8 = undefined;
     try std.testing.expectEqualStrings(".env", sanitizeChosenName(".env", &chosen_buf));
     try std.testing.expectEqualStrings("download", sanitizeChosenName("..", &chosen_buf));
+    const long_chosen = sanitizeChosenName(("가" ** 100) ++ ".pdf", &chosen_buf); // 300 바이트 — 확장자를 지키며
+    try std.testing.expect(long_chosen.len <= max_name_bytes and std.mem.endsWith(u8, long_chosen, ".pdf"));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(long_chosen));
     // 띄운 준비 스레드 셋(행 2·3·4 — 없는 폴더라 곧 실패)이 끝나기를 기다렸다 비운다(다음 시험으로 새지 않게).
     var waited: u32 = 0;
     while (waited < 200) : (waited += 1) {
@@ -1249,17 +1274,24 @@ test "waiting rows stop past the cap and unclaimed asking rows bring the list wi
     var row = rowForTest(1, 1, .held);
     row.browser = 7;
     try entries.append(allocator(), row);
+    var watched = rowForTest(5, 5, .asking);
+    watched.browser = 7;
+    watched.ask_claimed = true; // 저장 창이 떠 있다 — 상한을 걸지 않는다(2 회차)
+    try entries.append(allocator(), watched);
+    var surface: u64 = 0;
+    const before_stop = showRequest(&surface);
+    onUpdate(.{ .browser = 7, .download = 5, .state = .in_progress, .received = max_waiting_bytes + 1, .total = -1, .reason = 0 });
+    try std.testing.expectEqual(State.asking, entryOfKey(5).?.state);
     onUpdate(.{ .browser = 7, .download = 1, .state = .in_progress, .received = max_waiting_bytes + 1, .total = -1, .reason = 0 });
     const one = entryOfKey(1).?;
     try std.testing.expectEqual(State.canceled, one.state);
     try std.testing.expect(one.stopped_waiting);
+    try std.testing.expect(showRequest(&surface) != before_stop); // 멈춘 것을 목록 창으로 알린다
     var line: [256]u8 = undefined;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_stopped_waiting), statusText(one, &line));
-    var asking = rowForTest(2, 2, .asking);
-    asking.ask_since_ms = 1000;
-    try entries.append(allocator(), asking);
-    var surface: u64 = 0;
+    try entries.append(allocator(), rowForTest(2, 2, .asking));
     const before = showRequest(&surface);
+    nudgeAsking(1000); // 묻기로 바뀐 때를 적는다
     nudgeAsking(1500);
     try std.testing.expectEqual(before, showRequest(&surface)); // 아직 1 초가 안 됐다
     nudgeAsking(2000);

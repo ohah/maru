@@ -77,7 +77,7 @@ pub fn askEnabled() bool {
 /// 터무니없이 큰 파일을 프로필에 쌓지 못하게 — W10b 적대 리뷰 1 회차). 2 회차: 256 MB 는 빠른 회선에서 사용자가 저장 창에서 고르는
 /// 사이 다운로드를 끊었다 — 저장 창이 떠 있는 행에는 걸지 않고 4 GB 로. 결정 전 멈춤(`pause`)은 먹지 않는다(실측 — 멈춘 뒤에도 같은
 /// 빠르기로 받아 뒀다). Chrome 도 결정 전 데이터를 임시 파일에 받아 둔다. 다시 받으면 처음부터 받는다.
-const max_waiting_bytes: i64 = 4 * 1024 * 1024 * 1024;
+const max_waiting_bytes: i64 = 4_000_000_000; // 상태 줄의 「4 GB」(Finder 처럼 십진)
 /// 묻는 행을 아무 창도 맡지 않으면 목록 창을 내기까지.
 const ask_nudge_ms: i64 = 1000;
 
@@ -230,28 +230,46 @@ fn trimAndCut(buf: []u8, reserve: usize) []u8 {
 /// 사용자가 저장 창에서 친 이름(W10b) — 경로 구분자·제어·양방향 문자만 바꾸고 앞 점·끝 공백은 둔다(`.env` 를 고르면 `.env` 다 —
 /// 서버가 준 이름의 규칙을 쓰면 다른 이름이 되어 바꾸기를 확인한 파일과 달라졌다, 1 회차). 비거나 `.`·`..` 면 `download`.
 pub fn sanitizeChosenName(raw: []const u8, out: []u8) []const u8 {
+    // 다 다듬은 뒤 자른다 — 다듬는 버퍼에서 먼저 자르면 여러 바이트 글자가 경계에 걸릴 때 확장자를 잃었고, 원본의 확장자를 그대로
+    // 붙이면 다듬지 않은 글자가 들어갔다(3 회차).
+    var work: [4 * max_name_bytes]u8 = undefined;
     var len: usize = 0;
     const view = std.unicode.Utf8View.init(raw) catch return fallbackName(out);
     var it = view.iterator();
     while (it.nextCodepointSlice()) |slice| {
         const cp = std.unicode.utf8Decode(slice) catch continue;
         const piece: []const u8 = if (isTroublesome(cp)) "_" else slice;
-        if (len + piece.len > out.len) break;
-        @memcpy(out[len..][0..piece.len], piece);
+        if (len + piece.len > work.len) break;
+        @memcpy(work[len..][0..piece.len], piece);
         len += piece.len;
     }
-    var name = out[0..len];
+    const name = work[0..len];
     if (name.len == 0 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return fallbackName(out);
-    if (len == out.len and raw.len > out.len) {
-        // 바이트로 255 를 넘는 이름(HFS+·SMB 는 UTF-16 단위로 센다) — 확장자를 지키며 글자 경계에서 자른다(2 회차).
-        const ext = extensionOf(raw);
-        if (ext.len > 0 and ext.len < out.len / 2) {
-            const cut = utf8Floor(out[0..len], out.len - ext.len);
-            @memcpy(out[cut .. cut + ext.len], ext);
-            name = out[0 .. cut + ext.len];
-        }
-    }
-    return name;
+    return fitName(name, "", out);
+}
+
+/// `name` 뒤에 `suffix`(번호 ` (n)` 등 — 확장자 앞에 끼운다)를 붙여 `out` 안에 — 넘치면 줄기를 글자 경계에서 줄이고 확장자는 지킨다
+/// (바이트로 255 를 넘는 이름 — HFS+·SMB 는 UTF-16 단위로 센다, 2·3 회차).
+fn fitName(name: []const u8, suffix: []const u8, out: []u8) []const u8 {
+    const ext_full = extensionOf(name);
+    const ext = if (ext_full.len < out.len / 2) ext_full else "";
+    const stem = name[0 .. name.len - ext.len];
+    const room = out.len -| (suffix.len + ext.len);
+    const cut = utf8Floor(stem, @min(stem.len, room));
+    if (cut == 0 and stem.len > 0) return out[0..0];
+    @memcpy(out[0..cut], stem[0..cut]);
+    @memcpy(out[cut..][0..suffix.len], suffix);
+    @memcpy(out[cut + suffix.len ..][0..ext.len], ext);
+    return out[0 .. cut + suffix.len + ext.len];
+}
+
+/// 번호 붙은 이름이 이름 상한(255)을 넘지 않게(고른 긴 이름 — 3 회차: 넘쳐 「그 폴더에 저장할 수 없습니다」가 엉뚱하게 되풀이되거나
+/// 완료가 숨은 임시 파일에 남았다).
+fn numberedFit(file_name: []const u8, n: u32, out: []u8) []const u8 {
+    if (n == 0) return fitName(file_name, "", out[0..@min(out.len, max_name_bytes)]);
+    var suffix_buf: [16]u8 = undefined;
+    const suffix = std.fmt.bufPrint(&suffix_buf, " ({d})", .{n}) catch return out[0..0];
+    return fitName(file_name, suffix, out[0..@min(out.len, max_name_bytes)]);
 }
 
 fn fallbackName(out: []u8) []const u8 {
@@ -432,8 +450,8 @@ pub fn prepareChosen(dir: []const u8, file_name: []const u8, key: u64, replace: 
     if (!replace) {
         var n: u32 = 0;
         while (n < 100) : (n += 1) {
-            const candidate = numberedName(file_name, n, &final_name_buf);
-            if (candidate.len == 0 or candidate.len > max_name_bytes) return;
+            const candidate = numberedFit(file_name, n, &final_name_buf);
+            if (candidate.len == 0) return;
             var probe_buf: [max_path_bytes + 1]u8 = undefined;
             const probe = std.fmt.bufPrintZ(&probe_buf, "{s}/{s}", .{ dir, candidate }) catch return;
             if (!exists(probe)) {
@@ -507,7 +525,7 @@ fn finalize(e: *Entry) bool {
     var n: u32 = 0;
     while (n < 100) : (n += 1) {
         var name_buf: [max_name_bytes + 16]u8 = undefined;
-        const candidate = numberedName(e.name(), n, &name_buf);
+        const candidate = if (e.chosen) numberedFit(e.name(), n, &name_buf) else numberedName(e.name(), n, &name_buf);
         if (candidate.len == 0) break;
         var target_buf: [max_path_bytes + 1]u8 = undefined;
         const target = std.fmt.bufPrintZ(&target_buf, "{s}/{s}", .{ dir, candidate }) catch break;
@@ -821,6 +839,12 @@ pub fn nudgeAsking(now_ms: i64) void {
     }
 }
 
+fn reask(e: *Entry) bool {
+    e.ask_retry = true;
+    changed();
+    return true;
+}
+
 fn askingIn(browser: u64) bool {
     for (entries.items) |e| if (e.state == .asking and e.browser == browser) return true;
     return false;
@@ -867,6 +891,8 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
     const e = entryOfKey(key) orelse return false;
     if (e.state != .asking) return false;
     e.ask_claimed = false;
+    e.ask_since_ms = 0;
+    e.ask_nudged = false;
     switch (answer) {
         .cancel => {
             e.state = .canceled;
@@ -874,10 +900,12 @@ pub fn answerAsk(key: u64, answer: AskAnswer) bool {
         },
         .dismissed => e.state = .held,
         .path => |p| {
-            const slash = std.mem.lastIndexOfScalar(u8, p.path, '/') orelse return false;
-            const dir = p.path[0..slash];
+            const slash = std.mem.lastIndexOfScalar(u8, p.path, '/') orelse return reask(e);
+            // 루트 바로 아래(`/x.txt`)면 폴더는 `/`.
+            const dir = if (slash == 0) "/" else p.path[0..slash];
             const raw_name = p.path[slash + 1 ..];
-            if (dir.len == 0 or dir.len > max_path_bytes or raw_name.len == 0) return false;
+            // 쓸 수 없는 답이면 다시 묻는다(그대로 두면 맡은 이 없는 묻는 행이 옛 시각을 들고 남았다 — 3 회차).
+            if (dir.len > max_path_bytes or raw_name.len == 0) return reask(e);
             var name_buf: [max_name_bytes]u8 = undefined;
             const name = sanitizeChosenName(raw_name, &name_buf);
             // 바꾸기는 저장 창이 그 이름으로 물었을 때만 — maru 가 이름을 다듬어 달라졌으면(`:`·끝 점·길이) 다른 파일을 묻지 않고
@@ -1210,6 +1238,12 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
     const long_chosen = sanitizeChosenName(("가" ** 100) ++ ".pdf", &chosen_buf); // 300 바이트 — 확장자를 지키며
     try std.testing.expect(long_chosen.len <= max_name_bytes and std.mem.endsWith(u8, long_chosen, ".pdf"));
     try std.testing.expect(std.unicode.utf8ValidateSlice(long_chosen));
+    const odd = sanitizeChosenName("a" ++ ("가" ** 100) ++ ".pdf", &chosen_buf); // 글자 경계가 255 에 맞지 않는다(3 회차)
+    try std.testing.expect(odd.len <= max_name_bytes and std.mem.endsWith(u8, odd, ".pdf") and std.unicode.utf8ValidateSlice(odd));
+    try std.testing.expect(std.mem.endsWith(u8, sanitizeChosenName(("가" ** 100) ++ ".p:f", &chosen_buf), ".p_f")); // 확장자도 다듬는다
+    var fit_buf: [max_name_bytes + 16]u8 = undefined;
+    const numbered = numberedFit("n" ** 251 ++ ".txt", 12, &fit_buf); // 255 꽉 찬 이름에 번호 — 줄기를 줄인다
+    try std.testing.expect(numbered.len <= max_name_bytes and std.mem.endsWith(u8, numbered, " (12).txt"));
     // 띄운 준비 스레드 셋(행 2·3·4 — 없는 폴더라 곧 실패)이 끝나기를 기다렸다 비운다(다음 시험으로 새지 않게).
     var waited: u32 = 0;
     while (waited < 200) : (waited += 1) {
@@ -1220,6 +1254,12 @@ test "asking rows: one claim, cancel, dismissal back to held, and replace only f
         const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = std.c.nanosleep(&ts, null);
     }
+    // 쓸 수 없는 답(이름 없음)은 다시 묻는다 — 맡은 이 없이 묻는 상태로 다시 센다.
+    try entries.append(allocator(), rowForTest(6, 6, .asking));
+    _ = claimAsk(6);
+    try std.testing.expect(answerAsk(6, .{ .path = .{ .path = "/tmp/", .existed = false } }));
+    try std.testing.expect(entryOfKey(6).?.state == .asking and entryOfKey(6).?.ask_retry and !entryOfKey(6).?.ask_claimed);
+    try std.testing.expectEqual(@as(i64, 0), entryOfKey(6).?.ask_since_ms);
     // 고른 폴더에 쓸 수 없었다 — 다시 묻는다(상태 줄이 까닭을 말한다).
     _ = std.c.pthread_mutex_lock(&prepared_mutex);
     prepared.clearRetainingCapacity();

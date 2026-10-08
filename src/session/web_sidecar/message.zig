@@ -145,6 +145,10 @@ pub const Tag = enum(u8) {
     /// 다운로드가 된 이동에는 오지 않는다 — maru 는 이것으로 「이 탭에서 누른 것이 지금 문서의 사용자 동작인가」를 가른다(누른 링크가
     /// 연 페이지가 곧바로 실행 파일을 받게 하는 것을 막는다, 적대 리뷰 1·2 회차).
     page_started = 62,
+    /// 페이지가 스스로(`window.close`) 또는 연 페이지가(`w.close()`) 브라우저를 닫으려 했는데 받는 중인 다운로드가 있어 sidecar 가 닫지
+    /// 않았다(W10d — 닫으면 Chromium 이 서버 연결을 끊고 받던 파일을 지운다, 판정 `dl-closed`·`dl-selfclose`). maru 는 그 탭을 닫고
+    /// 브라우저는 주차해 끝까지 받는다(W10c). maru 가 닫는 것(`destroy_browser`·shutdown)은 그대로 닫힌다.
+    page_close_kept = 63,
 
     /// 사용자가 제안 목록의 한 항목을 골랐다(W6m①). `list` 는 마지막으로 받은 `datalist_show` 의 번호다 — sidecar 는 그 번호가
     /// 지금 목록이 아니면 버리고, 맞으면 그 문서의 대리 스크립트가 칸에 값을 넣고 `input`·`change` 를 보낸다. 둘째 구간의 첫 번호.
@@ -1079,6 +1083,7 @@ pub const Message = union(Tag) {
     download_begin: DownloadBegin,
     download_update: DownloadUpdate,
     page_started: BrowserId,
+    page_close_kept: BrowserId,
 
     datalist_pick: DatalistPick,
     download_decide: DownloadDecide,

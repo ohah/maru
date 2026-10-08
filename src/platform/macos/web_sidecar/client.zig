@@ -92,6 +92,7 @@ pub fn get() *c.cef_client_t {
         life_span.on_before_popup_aborted = &new_tab.onBeforePopupAborted;
         life_span.on_after_created = &new_tab.onAfterCreated;
         life_span.on_before_close = &onBeforeClose;
+        life_span.do_close = &doClose;
         render.get_view_rect = &getViewRect;
         render.get_screen_info = &getScreenInfo;
         render.on_paint = &onPaint;
@@ -143,6 +144,18 @@ fn onFrameDetached(_: [*c]c.cef_frame_handler_t, browser: [*c]c.cef_browser_t, f
     defer object.releaseArg(frame);
     if (frame == null) return;
     if (entryOf(browser)) |entry| @import("datalist.zig").closeFrame(entry.id, frame);
+}
+
+/// W10d: 페이지가 스스로(`window.close`) 또는 연 페이지가(`w.close()`) 닫으려 한다 — maru 가 닫는 것(`destroy_browser`·shutdown)은
+/// `closing` 이다. 받는 중인 다운로드가 있으면 닫지 않고(닫으면 Chromium 이 서버 연결을 끊고 받던 파일을 지운다 — 판정 `dl-closed`)
+/// maru 에 알린다(`page_close_kept`) — maru 가 그 탭을 닫고 브라우저는 주차해 끝까지 받는다(W10c). 실측(판정 `dl-selfclose`): 1 을
+/// 돌려주면 브라우저가 남아 받기를 잇고, 그 뒤 about:blank 이동·`destroy_browser` 가 그대로 된다.
+fn doClose(_: [*c]c.cef_life_span_handler_t, browser: [*c]c.cef_browser_t) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    const entry = entryOf(browser) orelse return 0;
+    if (entry.closing or !@import("downloads.zig").hasSlotsFor(entry.id)) return 0;
+    browsers.state.writer.send(.{ .page_close_kept = entry.id }) catch {};
+    return 1;
 }
 
 fn getLifeSpan(_: [*c]c.cef_client_t) callconv(.c) [*c]c.cef_life_span_handler_t {

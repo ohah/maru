@@ -94,6 +94,13 @@ DLW_BLANK = (b"<!doctype html><title>dlw blank</title><style>html,body{margin:0;
     b"<a href='/dlw-att' target=_blank style='top:0'>A</a><a href='/dlw-att' style='top:50%;background:#00f'>B</a>")
 # 위 칸이 느린 3 MB(`big.zip`)인 판 — 닫힌 빈 탭의 받기가 주차로 이어지는지(적대 리뷰 5 회차: 작은 첨부는 탭이 닫히기 전에 끝났다).
 DLW_BLANK_BIG = DLW_BLANK.replace(b"href='/dlw-att' target=_blank", b"href='/dlw-big' target=_blank")
+# W10d: 위 절반 — 새 탭(이어 받은 팝업)이 문서를 연 뒤 느린 3 MB 를 받고 1.5 초 뒤 스스로 닫는다(`window.close`). 아래 절반 — 누르면
+# 느린 3 MB 팝업을 열고(문서 없이 받기만 해 maru 가 그 탭을 닫아 주차한다) 4 초 뒤 연 페이지가 그 팝업을 닫는다(`w.close()`).
+DLW_SELFCLOSE = (b"<!doctype html><title>dlw selfclose</title><style>html,body{margin:0;height:100%}a,div{position:fixed;left:0;width:100%;height:50%;display:block;background:#f00}</style><body>"
+    b"<a href='/dlw-selfclose-pop' target=_blank style='top:0'>A</a><div id=b style='top:50%;background:#00f'>B</div><script>"
+    b"document.getElementById('b').onclick=function(){var w=window.open('/dlw-big');setTimeout(function(){w.close()},4000)}</script>")
+DLW_SELFCLOSE_POP = (b"<!doctype html><title>pop</title><body><script>var a=document.createElement('a');a.href='/dlw-big';document.body.appendChild(a);"
+    b"a.click();setTimeout(function(){window.close()},1500)</script>")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -182,6 +189,10 @@ class H(http.server.BaseHTTPRequestHandler):
             body = DLW_BLANK
         elif self.path == "/dlw-blank-big":
             body = DLW_BLANK_BIG
+        elif self.path == "/dlw-selfclose":
+            body = DLW_SELFCLOSE
+        elif self.path == "/dlw-selfclose-pop":
+            body = DLW_SELFCLOSE_POP
         elif self.path in ("/dlw-file", "/dlw-att"):
             att = self.path == "/dlw-att"
             body = b"attached\n" if att else b"hello\n"
@@ -1867,6 +1878,80 @@ check(any('download-blank closed' in l for l in seen), f'the blank tab was close
 check(len(rows) == 1 and rows[0][2] == '4' and os.path.exists(os.path.join(root, 'picked', 'blank.txt')), f'saved where the panel said ({rows})')
 sys.exit(0 if ok else 1)
 PY
+
+# ── W10d: 스스로 닫는 다운로드 페이지 ─────────────────────────────────────────────────────────────────────────
+# 받는 중인 페이지가 스스로 닫거나(`window.close`) 연 페이지가 닫아도(`w.close()`) 받기는 끝까지 간다 — sidecar 가 브라우저를 닫지 않고
+# 알리고(`page_close_kept`), maru 는 그 탭을 닫고 브라우저를 주차한다(이미 주차한 것이면 그대로). 전에는 Chromium 이 받기를 끊었다.
+# 시험 서버는 한 스레드라 두 3 MB 를 차례로 보낸다 — 두 번째 누름은 첫 받기가 끝난 뒤에.
+cat > "$root/dlself.txt" <<'SCRIPT'
+sleep 7000
+view down 0.5 0.25 0 0
+sleep 60
+view up 0.5 0.25 0 0
+sleep 13000
+downloads
+view down 0.5 0.75 0 0
+sleep 60
+view up 0.5 0.75 0 0
+sleep 14000
+downloads
+SCRIPT
+: > "$root/requests.log"
+run_app /dlw-selfclose 40000 "$root/dlself.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlself.txt"
+dl_check dlw-selfclose
+grep -ao 'osr-test \(download-park[ a-z]*=[0-9]*\( tabs=[0-9]*\)\{0,1\}\|newtab page-closed [a-z-]*=[a-z]*\|newtab download-blank closed tabs=[0-9]*\)' "$root/app-dlw-selfclose.log" | sed 's/^osr-test //' > "$root/dlself.events" || true
+cat "$root/dlself.events"
+python3 - "$root" <<'PY' || fail "a page that closed itself while downloading stopped the download"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, 'dlw-selfclose.report')) if l.strip()]
+groups, cur = [], None
+for l in lines:
+    if l.startswith('downloads '):
+        cur = []; groups.append(cur)
+    elif l.startswith('download ') and cur is not None:
+        cur.append(l.split(' ', 1)[1].split('|'))
+ev = [l.strip() for l in open(os.path.join(root, 'dlself.events')) if l.strip()]
+files = sorted(l.strip() for l in open(os.path.join(root, 'dlw-selfclose.files')) if l.strip())
+check(any(e.startswith('newtab page-closed') for e in ev), f'the popup that closed itself closed its tab ({ev})')
+check(len(groups) == 2 and len(groups[0]) == 1 and groups[0][0][2] == '4' and groups[0][0][3] == str(30 * 104858), f'its download kept going to the end ({groups[:1]})')
+check(any(e.startswith('newtab download-blank closed') for e in ev) and ev.count('download-park parked=1') >= 2, f'the second popup only downloaded — its tab was closed and parked ({ev})')
+check(len(groups) == 2 and len(groups[1]) == 2 and groups[1][1][2] == '4' and groups[1][1][3] == str(30 * 104858), f'the opener closing that popup did not stop its download ({groups[1:]})')
+check(files == ['big (1).zip', 'big.zip'], f'both files are in ~/Downloads ({files})')
+sys.exit(0 if ok else 1)
+PY
+# 받는 중에 앱이 죽으면(여기서는 이 시험이 띄운 그 앱만 SIGKILL) 덜 받은 `.maru-part` 가 남는다 — 다음 실행이 프로필을 잡을 때 그
+# 기록(프로필의 `maru-download-parts`)에 있는 것만 지운다(사용자 결정 2026-10-09). 같은 HOME 으로 두 번 띄운다(`run_app` 은 HOME 을 비운다).
+rm -rf "$root/home" && mkdir -p "$root/home"
+printf 'sleep 7000\nmouse 1 0 0 338 302 0\nmouse 3 0 0 338 302 0\nsleep 30000\n' > "$root/dlcrash.txt"
+: > "$root/requests.log"
+env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+    MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/dlw-app" \
+    MARU_MACOS_APP_SMOKE_MS=40000 MARU_WEB_OSR_TEST_INPUT="$root/dlcrash.txt" MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel "$app" > "$root/app-dlcrash.log" 2>&1 &
+crash_pid=$!
+sleep 11
+part_before=$(ls -A "$root/home/Downloads" 2>/dev/null | tr '\n' ' ')
+kill -KILL "$crash_pid" 2>/dev/null; wait "$crash_pid" 2>/dev/null || true
+sleep 3 # 부모가 죽으면 sidecar 도 끝난다(W1b 판정) — 프로필 잠금이 풀릴 때까지
+journal=$(find "$root/home/Library/Application Support/maru/web" -maxdepth 3 -name maru-download-parts | head -1)
+journal_lines=$( [ -n "$journal" ] && wc -l < "$journal" | tr -d ' ' || echo 0)
+part_after_kill=$(ls -A "$root/home/Downloads" 2>/dev/null | tr '\n' ' ')
+env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+    MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/solid" \
+    MARU_MACOS_APP_SMOKE_MS=12000 MARU_APP_SUMMARY_PATH="$root/dlcrash2.summary" MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel "$app" > "$root/app-dlcrash2.log" 2>&1
+part_after_restart=$(ls -A "$root/home/Downloads" 2>/dev/null | tr '\n' ' ')
+journal_after=$( [ -n "$journal" ] && wc -c < "$journal" | tr -d ' ' || echo -)
+echo "downloads while downloading: [$part_before] · after kill: [$part_after_kill] · journal lines $journal_lines · after restart: [$part_after_restart] · journal bytes $journal_after"
+case "$part_after_kill" in *big.zip.maru-part*) ;; *) fail "killing the app mid-download did not leave the part file to clean (got [$part_after_kill])" ;; esac
+[ "${journal_lines:-0}" -ge 1 ] || fail "the part file was not recorded in the profile's part journal"
+case "$part_after_restart" in *maru-part*) fail "the next launch did not remove the leftover part file ([$part_after_restart])" ;; esac
+[ "$journal_after" = 0 ] || fail "the part journal was not emptied after cleaning ($journal_after bytes)"
+echo "PASS a part file left by a killed app is removed by the next launch and the journal is emptied"
 
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그

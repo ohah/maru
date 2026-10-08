@@ -142,6 +142,9 @@ pub const Entry = struct {
     /// W10b: 묻기 시작한 때와, 아무 창도 맡지 않아 목록 창을 냈는가(그 탭이 활성이 아니면 저장 창이 뜰 곳이 없다 — 1 초 뒤 목록).
     ask_since_ms: i64 = 0,
     ask_nudged: bool = false,
+    /// W10d: 고른 폴더에 옮기는 중(작업 스레드 — 망 볼륨에서 메인 스레드를 막지 않게). 그동안은 받는 중으로 두고 늦은 알림·끝내기가
+    /// 그 파일을 건드리지 않는다.
+    finalizing: bool = false,
     /// 결정 전(보류·묻는 중)에 받아 둔 양이 상한을 넘어 멈췄다(Chromium 은 결정 전에도 끝까지 받아 둔다 — 실측 `dl-ask-wait`).
     stopped_waiting: bool = false,
     /// 받으려 한 곳(주소의 호스트 — 보류 행에 보인다, Chrome 처럼; data: 처럼 호스트가 없으면 비었다).
@@ -439,6 +442,8 @@ fn runPrepare(job: *Job) void {
         prepareChosen(job.dir_buf[0..job.dir_len], job.name_buf[0..job.name_len], job.key, job.replace, &result)
     else
         prepare(job.dir_buf[0..job.dir_len], job.name_buf[0..job.name_len], &result);
+    // W10d: 만든 임시 파일을 적어 둔다 — 앱이 죽으면 다음 실행이 지운다(`sweepPartJournal`).
+    if (result.ok) appendJournal(result.part_dev, result.part_ino, result.part_buf[0..result.part_len]);
     _ = std.c.pthread_mutex_lock(&prepared_mutex);
     defer _ = std.c.pthread_mutex_unlock(&prepared_mutex);
     prepared.append(allocator(), result) catch {};
@@ -602,13 +607,22 @@ fn finalize(e: *Entry) bool {
 /// 받는 동안 미리 만든 그 파일(같은 inode)에 쓰고, 취소해도 그 파일을 **지우지 않는다**(Chromium 이 만든 파일만 지운다) — 그래서
 /// maru 가 지운다. 완료 때는 다른 inode 로 바꿔 놓지만 완료는 경로로 옮기므로(`finalize`) 상관없다.
 fn unlinkPart(e: *const Entry) void {
-    if (e.part_len == 0) return;
+    if (e.part_len == 0 or e.finalizing) return; // 옮기는 중이면 작업 스레드가 끝낸다(W10d)
     var part_z: [max_path_bytes + 1]u8 = undefined;
     const part = std.fmt.bufPrintZ(&part_z, "{s}", .{e.partPath()}) catch return;
-    var st: std.c.Stat = undefined;
-    if (std.c.fstatat(at_fdcwd, part, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return;
-    if (@as(i64, @intCast(st.dev)) != e.part_dev or @as(u64, @intCast(st.ino)) != e.part_ino) return;
-    _ = std.c.unlink(part);
+    // 고른 폴더(외장·망 볼륨일 수 있다)는 작업 스레드에서 지운다(W10d) — 메인 스레드를 막지 않게.
+    if (e.chosen) chosen: {
+        const job = allocator().create(PartUnlink) catch break :chosen;
+        job.* = .{ .path = undefined, .dev = e.part_dev, .ino = e.part_ino };
+        @memcpy(job.path[0 .. part.len + 1], part[0 .. part.len + 1]);
+        const thread = std.Thread.spawn(.{}, runUnlink, .{job}) catch {
+            allocator().destroy(job);
+            break :chosen;
+        };
+        thread.detach();
+        return;
+    }
+    unlinkMatching(part, e.part_dev, e.part_ino);
 }
 
 // ── sidecar 로 보낼 것 — maru 의 gpa 로 `pump` 안에서 보낸다(ABI 는 세션 밖이라 gpa 가 없다) ─────────────────────
@@ -682,7 +696,7 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
 
 pub fn onUpdate(v: message.DownloadUpdate) void {
     const e = entryOfDownload(sidecar_generation, v.download) orelse return;
-    if (e.browser != v.browser or finished(e.state)) return;
+    if (e.browser != v.browser or finished(e.state) or e.finalizing) return;
     e.received = v.received;
     e.total = v.total;
     e.reason = v.reason;
@@ -703,7 +717,9 @@ pub fn onUpdate(v: message.DownloadUpdate) void {
             e.state = .interrupted;
         },
         .complete => {
-            e.state = if (finalize(e)) .done else .failed;
+            // 고른 폴더(외장·망 볼륨일 수 있다)는 작업 스레드에서 옮긴다 — 결과는 `reapPrepared` 가 적는다(W10d). 받는 폴더는 그대로.
+            e.received = v.received;
+            if (!(e.chosen and startFinalize(e))) e.state = if (finalize(e)) .done else .failed;
         },
         .canceled => {
             e.state = .canceled;
@@ -799,7 +815,139 @@ pub fn reapPrepared() void {
             changed();
         }
         prepared.clearRetainingCapacity();
+        // W10d: 작업 스레드가 옮긴 것(고른 폴더). 그 사이 엔진이 다시 떴어도(행이 끝났어도) 받기는 끝났다 — 결과대로 적는다.
+        for (finalized.items) |*f| {
+            const e = entryOfKey(f.key) orelse continue;
+            e.finalizing = false;
+            @memcpy(e.final_buf[0..f.final_len], f.final_buf[0..f.final_len]);
+            e.final_len = f.final_len;
+            if (f.ok) e.part_len = 0;
+            e.state = if (f.ok) .done else .failed;
+            changed();
+        }
+        finalized.clearRetainingCapacity();
     }
+}
+
+const Finalized = struct {
+    key: u64,
+    ok: bool,
+    final_buf: [max_path_bytes]u8 = undefined,
+    final_len: usize = 0,
+};
+/// 작업 스레드가 옮긴 결과(`prepared_mutex` 아래).
+var finalized: std.ArrayListUnmanaged(Finalized) = .empty;
+
+/// 고른 폴더로 옮기기를 작업 스레드에서(W10d — SMB·외장 볼륨이면 rename 이 오래 걸려 창 tick 이 멈췄다). 행을 통째로 복사해 넘긴다.
+fn startFinalize(e: *Entry) bool {
+    const job = allocator().create(Entry) catch return false;
+    job.* = e.*;
+    const thread = std.Thread.spawn(.{}, runFinalize, .{job}) catch {
+        allocator().destroy(job);
+        return false;
+    };
+    thread.detach();
+    e.finalizing = true;
+    return true;
+}
+
+fn runFinalize(job: *Entry) void {
+    defer allocator().destroy(job);
+    var result: Finalized = .{ .key = job.key, .ok = finalize(job) };
+    @memcpy(result.final_buf[0..job.final_len], job.finalPath());
+    result.final_len = job.final_len;
+    _ = std.c.pthread_mutex_lock(&prepared_mutex);
+    defer _ = std.c.pthread_mutex_unlock(&prepared_mutex);
+    finalized.append(allocator(), result) catch {};
+}
+
+const PartUnlink = struct { path: [max_path_bytes + 1]u8, dev: i64, ino: u64 };
+
+fn runUnlink(job: *PartUnlink) void {
+    defer allocator().destroy(job);
+    unlinkMatching(std.mem.sliceTo(&job.path, 0)[0.. :0], job.dev, job.ino);
+}
+
+fn unlinkMatching(path: [:0]const u8, dev: i64, ino: u64) void {
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(at_fdcwd, path, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) return;
+    if (@as(i64, @intCast(st.dev)) != dev or @as(u64, @intCast(st.ino)) != ino) return;
+    _ = std.c.unlink(path);
+}
+
+// ── 남은 임시 파일 기록(W10d) ─────────────────────────────────────────────────────────────────────────────
+// 만든 임시 파일마다 「dev ino 경로」 한 줄을 프로필의 기록에 붙인다(작업 스레드 — O_APPEND 한 번 쓰기). 앱이 받는 중에 죽으면 다음
+// 실행의 sidecar 가 프로필을 잡았을 때(같은 프로필의 다른 maru 가 받는 중이 아닐 때) 그 기록의 것만 — 이름이 임시 파일 꼴이고 같은
+// 파일(dev·ino)일 때만 — 지우고 기록을 비운다(사용자 결정 2026-10-09). 끝난 것은 이미 옮겨 경로가 없다.
+
+var journal_buf: [max_path_bytes + 1]u8 = undefined;
+var journal_len: usize = 0;
+
+/// 기록 파일 경로(프로필 안). 비우면 적지 않는다(시험).
+pub fn setPartJournal(path: []const u8) void {
+    if (path.len >= journal_buf.len) return;
+    @memcpy(journal_buf[0..path.len], path);
+    journal_buf[path.len] = 0;
+    journal_len = path.len;
+}
+
+fn journalPath() ?[:0]const u8 {
+    if (journal_len == 0) return null;
+    return journal_buf[0..journal_len :0];
+}
+
+fn appendJournal(dev: i64, ino: u64, path: []const u8) void {
+    const jp = journalPath() orelse return;
+    var line_buf: [max_path_bytes + 64]u8 = undefined;
+    const line = std.fmt.bufPrint(&line_buf, "{d} {d} {s}\n", .{ dev, ino, path }) catch return;
+    const fd = std.c.open(jp, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return;
+    defer _ = std.c.close(fd);
+    _ = std.c.write(fd, line.ptr, line.len);
+}
+
+/// maru 가 만든 임시 파일 이름 꼴인가 — `이름.maru-part`·고른 폴더의 `.maru-<번호>.part`·`.maru-<번호>-<n>.part`.
+fn isPartName(base: []const u8) bool {
+    if (std.mem.endsWith(u8, base, part_suffix)) return base.len > part_suffix.len;
+    if (!std.mem.startsWith(u8, base, ".maru-") or !std.mem.endsWith(u8, base, ".part")) return false;
+    const mid = base[".maru-".len .. base.len - ".part".len];
+    if (mid.len == 0) return false;
+    for (mid) |ch| if (!std.ascii.isDigit(ch) and ch != '-') return false;
+    return true;
+}
+
+/// 지난 실행이 남긴 임시 파일을 지우고 기록을 비운다(W10d). 지운 수.
+pub fn sweepPartJournal() usize {
+    const jp = journalPath() orelse return 0;
+    const fd = std.c.open(jp, .{ .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return 0;
+    var data: [256 * 1024]u8 = undefined;
+    var len: usize = 0;
+    while (len < data.len) {
+        const n = std.c.read(fd, data[len..].ptr, data.len - len);
+        if (n <= 0) break;
+        len += @intCast(n);
+    }
+    _ = std.c.close(fd);
+    var removed: usize = 0;
+    var lines = std.mem.splitScalar(u8, data[0..len], '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.splitScalar(u8, line, ' ');
+        const dev = std.fmt.parseInt(i64, fields.next() orelse continue, 10) catch continue;
+        const ino = std.fmt.parseInt(u64, fields.next() orelse continue, 10) catch continue;
+        const path = fields.rest();
+        if (path.len == 0 or path.len > max_path_bytes or path[0] != '/') continue;
+        if (!isPartName(std.fs.path.basename(path))) continue;
+        var path_z: [max_path_bytes + 1]u8 = undefined;
+        const z = std.fmt.bufPrintZ(&path_z, "{s}", .{path}) catch continue;
+        var st: std.c.Stat = undefined;
+        if (std.c.fstatat(at_fdcwd, z, &st, std.c.AT.SYMLINK_NOFOLLOW) != 0) continue;
+        if (@as(i64, @intCast(st.dev)) != dev or @as(u64, @intCast(st.ino)) != ino) continue;
+        if (std.c.unlink(z) == 0) removed += 1;
+    }
+    const trunc = std.c.open(jp, .{ .ACCMODE = .WRONLY, .TRUNC = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(std.c.mode_t, 0o600));
+    if (trunc >= 0) _ = std.c.close(trunc);
+    return removed;
 }
 
 fn sendQueued(gpa: std.mem.Allocator) void {
@@ -1321,6 +1469,7 @@ fn resetForTest() void {
     outgoing.clearAndFree(allocator());
     _ = std.c.pthread_mutex_lock(&prepared_mutex);
     prepared.clearAndFree(allocator());
+    finalized.clearAndFree(allocator());
     _ = std.c.pthread_mutex_unlock(&prepared_mutex);
     ask_enabled = false;
     last_dir_len = 0;
@@ -1468,6 +1617,75 @@ test "a chosen path past the length limits says so, a folder that can't be writt
     out = .{ .key = 3, .ok = false };
     prepareChosen(missing, "a.txt", 3, true, &out);
     try std.testing.expect(!out.ok and !out.too_long);
+}
+
+test "a chosen download is moved into place on a worker thread, and ending it meanwhile does not delete the file (W10d)" {
+    resetForTest();
+    defer resetForTest();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    var prep: Prepared = .{ .key = 5, .ok = false };
+    prepareChosen(dir, "pick.txt", 5, false, &prep);
+    try std.testing.expect(prep.ok);
+    try testWrite(dir, ".maru-5.part", "data");
+    var e = rowForTest(5, 5, .active);
+    e.chosen = true;
+    @memcpy(e.name_buf[0.."pick.txt".len], "pick.txt");
+    e.name_len = "pick.txt".len;
+    @memcpy(e.final_buf[0..prep.final_len], prep.final_buf[0..prep.final_len]);
+    e.final_len = prep.final_len;
+    @memcpy(e.part_buf[0..prep.part_len], prep.part_buf[0..prep.part_len]);
+    e.part_len = prep.part_len;
+    var part_buf: [max_path_bytes + 1]u8 = undefined;
+    var st: std.c.Stat = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(at_fdcwd, testPath(dir, ".maru-5.part", &part_buf), &st, std.c.AT.SYMLINK_NOFOLLOW));
+    e.part_dev = @intCast(st.dev);
+    e.part_ino = @intCast(st.ino);
+    try entries.append(allocator(), e);
+    onUpdate(.{ .browser = 7, .download = 5, .state = .complete, .received = 4, .total = 4, .reason = 0 });
+    // 옮기는 중 — 받는 중으로 남고, 그 사이 엔진이 다시 떠도(끝내기) 그 파일을 지우지 않는다.
+    try std.testing.expect(entryOfKey(5).?.finalizing);
+    sidecarLost();
+    var waited: usize = 0;
+    while (entryOfKey(5).?.finalizing and waited < 200) : (waited += 1) {
+        reapPrepared();
+        const ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    try std.testing.expectEqual(State.done, entryOfKey(5).?.state);
+    var out: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("data", try testRead(dir, "pick.txt", &out));
+    try std.testing.expect(!exists(testPath(dir, ".maru-5.part", &part_buf)));
+}
+
+test "the part journal deletes only leftover part files it recorded, by name shape and identity, then empties (W10d)" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [max_path_bytes]u8 = undefined;
+    const dir = dir_buf[0..try tmp.dir.realPath(std.testing.io, &dir_buf)];
+    var jbuf: [max_path_bytes + 1]u8 = undefined;
+    const jpath = std.mem.span(testPath(dir, "journal", &jbuf));
+    setPartJournal(jpath);
+    defer journal_len = 0;
+    const names = [_][]const u8{ "a.txt.maru-part", ".maru-12.part", ".maru-12-3.part", "b.maru-part", "c.txt", ".maru-x.part" };
+    for (names) |n| try testWrite(dir, n, "x");
+    var p_buf: [max_path_bytes + 1]u8 = undefined;
+    for (names, 0..) |n, i| {
+        var st: std.c.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.fstatat(at_fdcwd, testPath(dir, n, &p_buf), &st, std.c.AT.SYMLINK_NOFOLLOW));
+        const ino: u64 = if (i == 3) @as(u64, @intCast(st.ino)) + 1 else @intCast(st.ino); // b — 다른 파일이 그 이름을 쓴다
+        appendJournal(@intCast(st.dev), ino, std.mem.span(testPath(dir, n, &p_buf)));
+    }
+    try std.testing.expectEqual(@as(usize, 3), sweepPartJournal());
+    try std.testing.expect(!exists(testPath(dir, "a.txt.maru-part", &p_buf)));
+    try std.testing.expect(!exists(testPath(dir, ".maru-12.part", &p_buf)));
+    try std.testing.expect(!exists(testPath(dir, ".maru-12-3.part", &p_buf)));
+    try std.testing.expect(exists(testPath(dir, "b.maru-part", &p_buf))); // 같은 파일이 아니다
+    try std.testing.expect(exists(testPath(dir, "c.txt", &p_buf))); // 임시 파일 꼴이 아니다
+    try std.testing.expect(exists(testPath(dir, ".maru-x.part", &p_buf)));
+    try std.testing.expectEqual(@as(usize, 0), sweepPartJournal()); // 비웠다
 }
 
 test "a chosen location keeps the chosen name with a short hidden part file, numbers unless replacing, and replace overwrites (W10b)" {

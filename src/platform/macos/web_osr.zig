@@ -1445,6 +1445,7 @@ pub fn shutdownForExit() void {
     // 받던 다운로드는 sidecar 와 함께 멈췄다 — 덜 받은 임시 파일(격리 표지 없음)을 남기지 않는다(W10a 적대 리뷰 3 회차). 종료 전에 묻기는 W10c.
     web_downloads.sidecarLost();
     web_downloads.reapPrepared(); // 작업 스레드가 만들었지만 아직 반영하지 않은 임시 파일도(4 회차) — 아직 도는 스레드는 W10c
+    clearDownloadStaging(); // W10b: 결정 전에 받아 둔 것(sidecar 는 이미 끝났다)
     if (retiring) |*old| {
         // 앱이 끝난다 — 물러나던 sidecar 도 기한 안에 거둔다(앱 종료는 기다려도 된다).
         var waited: i64 = 0;
@@ -2623,6 +2624,24 @@ fn fail(notice: Notice) void {
 /// 죽은 sidecar 가 쥐던 것을 버린다. 대화상자 콜백은 사라졌다 — 기다리던 요청을 버린다(떠 있는 창은 그 창이 닫는다). 알림
 /// 번호도 새 sidecar 에서 다시 매겨지므로 아직 내보내지 않은 알림과 누를 수 있던 기록을 지운다(옛 번호가 새 알림을 누르지
 /// 않게 — 적대 검증).
+/// W10b: 프로필의 `download-staging`(sidecar 가 결정 전 다운로드를 받아 두는 곳 — `web_sidecar/preferences.zig`)의 파일을 지운다.
+/// sidecar 가 없을 때만 부른다(죽었거나 끝났다 — 다시 뜨면 sidecar 도 비운다).
+fn clearDownloadStaging() void {
+    var profile_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const profile = profileDir(&profile_buf) orelse return;
+    var dir_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const dir = std.fmt.bufPrintZ(&dir_buf, "{s}/download-staging", .{profile}) catch return;
+    const handle = std.c.opendir(dir) orelse return;
+    defer _ = std.c.closedir(handle);
+    while (std.c.readdir(handle)) |entry| {
+        const name = entry.name[0..@min(entry.namlen, entry.name.len)];
+        if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..") or entry.type == 4) continue;
+        var file_buf: [std.fs.max_path_bytes + 300]u8 = undefined;
+        const file = std.fmt.bufPrintZ(&file_buf, "{s}/{s}", .{ dir, name }) catch continue;
+        _ = std.c.unlink(file);
+    }
+}
+
 fn forgetSidecar(gpa: std.mem.Allocator) void {
     for (surfaces.values()) |*s| {
         dropDialogs(gpa, s);
@@ -2639,6 +2658,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
     }
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
     web_downloads.sidecarLost(); // 받던 다운로드는 끝났다(W10a) — 임시 파일을 지우고 새 sidecar 의 번호와 섞이지 않게
+    clearDownloadStaging(); // W10b: 죽은 sidecar 가 결정 전에 받아 둔 것(다시 뜨지 않으면 다음 실행까지 남았다 — 4 회차)
     shown_notes = [_]?ShownNote{null} ** shown_notes.len;
 }
 

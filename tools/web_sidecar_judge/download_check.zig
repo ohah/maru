@@ -20,6 +20,7 @@
 //!                  지운다), 완료 때는 **다른 inode** 로 바꿔 놓는다(maru 는 경로로 옮긴다) — 2 회차 실측, 보고 줄에 남긴다
 //!   dl-ask-wait    결정을 10 초 미뤄도(W10b 「매번 묻기」의 저장 창이 떠 있는 동안) 다운로드는 이어지고, 그동안 host 가 연 파일 중
 //!                  다운로드 임시 파일(`.crdownload`·`Unconfirmed`)이 없는지와 받아 둔 양을 보고 줄에 남긴다(W10b 설계 공격 M1 실측)
+//!   dl-staging-cleared host 가 프로필을 잡은 뒤 지난번이 결정 전에 받아 둔 것(`download-staging`)을 비운다(W10b)
 //!   dl-late-decide 결정을 2 초 늦게 보내도(보류 뒤 받기·TCC 질문) 받기를 이어 가고, 받는 동안·취소 뒤의 그 경로 파일을 보고 줄에
 //!                  남긴다(늦은 결정이면 Chromium 이 자기 임시 파일에서 옮겨 와 inode 가 바뀌는지 — 3 회차 실측)
 const std = @import("std");
@@ -189,12 +190,30 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
     var dir_buf: [1024]u8 = undefined;
     const dir = try std.fmt.bufPrintZ(&dir_buf, "{s}/dl-out", .{out_root});
     _ = std.c.mkdir(dir, 0o700);
+    // 지난번 sidecar 가 남긴 것 — host 가 프로필을 잡은 뒤 비워야 한다.
+    var staging_buf: [1100]u8 = undefined;
+    var leftover_buf: [1200]u8 = undefined;
+    const leftover = blk: {
+        const profile_dir = try std.fmt.bufPrintZ(&staging_buf, "{s}/s", .{out_root});
+        _ = std.c.mkdir(profile_dir, 0o700);
+        const staging = try std.fmt.bufPrintZ(&staging_buf, "{s}/s/download-staging", .{out_root});
+        _ = std.c.mkdir(staging, 0o700);
+        const path = try std.fmt.bufPrintZ(&leftover_buf, "{s}/..leftover", .{staging});
+        const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+        if (fd >= 0) _ = std.c.close(fd);
+        break :blk path;
+    };
+    const planted = exists(leftover);
     var host = try Host.spawn(host_path, profile_arg);
     defer {
         host.send(.shutdown) catch {};
         os.sleepMs(500);
     }
     try browsers_check.handshake(&host);
+    // handshake 는 CEF 초기화 전에도 답한다 — 비우는 것은 초기화(프로필 잡기) 뒤라 잠시 지켜본다.
+    var cleared_wait: u32 = 0;
+    while (exists(leftover) and cleared_wait < 50) : (cleared_wait += 1) os.sleepMs(100);
+    report(planted and !exists(leftover), "dl-staging-cleared", if (!planted) "남은 파일을 심지 못했다" else if (exists(leftover)) "지난번 것이 남았다" else "지난번이 받아 둔 것을 비웠다");
 
     // ── 첨부: 결정 → 완료 ──
     check: {

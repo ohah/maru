@@ -8,6 +8,7 @@
 //! 계약: [docs/windows-platform.md](../../docs/windows-platform.md) §4.2.
 
 const std = @import("std");
+const inherited_env = @import("../inherited_env.zig");
 
 /// 커맨드라인 토큰 하나를 Windows 규칙으로 인용해 `buf`에 붙인다.
 ///
@@ -119,30 +120,10 @@ fn isWellFormedEntry(entry: []const u8) bool {
     return std.mem.indexOfScalar(u8, entry, '=') != null;
 }
 
-/// 부모 환경에서 **자식에게 물려주면 거짓이 되는** 항목인가.
-///
-/// macOS 백엔드(`EnvStorage.appendParentEnv`)와 **같은 정책**이다. 두 백엔드가 각자 구현하는 이유는 주입
-/// 메커니즘이 다르기 때문이지(zsh `ZDOTDIR` vs 인라인 `-Command`) 정책이 달라서가 아니다 — 목록이 갈리면
-/// 같은 오염이 한쪽에서만 막힌다. 바꿀 때 반드시 양쪽을 함께 본다.
+/// 부모 환경에서 **자식에게 물려주면 거짓이 되는** 항목인가 — 목록은 `inherited_env.zig` 하나(macOS 백엔드·언어 서버 환경
+/// 해석기와 같은 목록 — 갈리면 같은 오염이 한쪽에서만 막힌다). Windows 는 환경 이름의 대소문자를 가리지 않는다.
 fn isDroppedParentEntry(entry: []const u8) bool {
-    const drop = [_][]const u8{
-        // 아래에서 우리 값으로 다시 넣는다(중복 키를 남기지 않기 위해 부모 것을 먼저 뺀다).
-        "TERM",               "COLORTERM",      "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
-        // 부모(런처·상위 터미널)의 terminfo DB를 가리키면 우리 TERM을 엉뚱한 곳에서 찾는다.
-        "TERMINFO",
-        // 런처·CI가 남긴 색 강제 override. maru는 색 capability를 TERM/COLORTERM으로만 알린다.
-                  "CLICOLOR_FORCE", "FORCE_COLOR",
-        // 컨트롤 플레인 self selector — 부모 값을 물려받으면 다른 surface를 자기로 오인한다.
-         "MARU_PANE_ID",
-        // 에이전트 훅 로그 경로의 두 칸(docs/agent-hooks.md §4). Windows 는 아직 이 값을 **주입하지 않지만**
-        // (인라인 훅이 셸로 실행되는지 미확인 — 계약 §4.1), 부모에게서 상속된 값이 남으면 자식이 **부모
-        // 인스턴스·부모 pane 의 로그 파일에** append 한다. 주입 없이도 떨구는 것은 그래서다.
-        "MARU_HOOK_INSTANCE", "MARU_HOOK_PANE",
-        // 바깥 멀티플렉서의 신원. maru가 spawn하는 셸은 그 pane이 **아니다**.
-        "TMUX",         "TMUX_PANE",
-    };
-    for (drop) |key| if (envKeyIs(entry, key)) return true;
-    return false;
+    return inherited_env.isTerminalSession(entry, true);
 }
 
 /// 환경 블록의 재료. 순수하게 만들기 위해 **부모 환경도 인자로** 받는다 — 실제 프로세스 환경을 읽는 것은
@@ -401,6 +382,8 @@ test "buildEnvEntries: 부모를 물려받되 오염 항목은 떨구고 우리 
         "TMUX_PANE=%3",         "HOME=C:\\Users\\me",
         // 훅 로그 경로의 두 칸도 상속되면 안 된다 — 남으면 자식이 부모 pane 의 로그에 append 한다.
         "MARU_HOOK_INSTANCE=99", "MARU_HOOK_PANE=99",
+        // Windows 의 환경 이름은 대소문자를 가리지 않는다 — 대소문자만 다른 오염 항목도 같은 것이다.
+        "Tmux_Pane=%4",         "maru_pane_id=98",
         "=C:=C:\\work", // 드라이브별 cwd — 그대로 상속돼야 한다
     };
     const entries = try buildEnvEntries(a, .{ .parent_env = &parent, .term = "xterm-256color" });

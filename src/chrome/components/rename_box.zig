@@ -12,6 +12,7 @@ const tokens = @import("../tokens.zig");
 const popup_box = @import("popup_box.zig");
 const input_box = @import("input_box.zig");
 const overlay_input = @import("overlay_input.zig");
+const grapheme = @import("../../grapheme.zig"); // UAX#29 글자 묶음 경계(`text_field` 와 같은 출처)
 
 pub const layer = draw.Layer.modal;
 
@@ -79,6 +80,36 @@ pub fn shownCaretCols(text: []const u8, caret_cols: u32) u32 {
     const shown = overlay_input.tailWindow(text, max_cols - 3).text;
     const hidden_cols = overlay_input.displayCols(text) - overlay_input.displayCols(shown);
     return @min(caret_cols -| hidden_cols, overlay_input.displayCols(shown));
+}
+
+/// **누른 x 를 글의 바이트 위치로**(`view` 의 역함수). 그리는 쪽과 같은 셈 — 상자 왼쪽 + 좌패딩 1칸에서 글이 시작하고,
+/// 길면 `tailWindow` 의 꼬리만 보인다(앞이 잘린 만큼 바이트를 더한다). 글자 묶음 경계 중 누른 칸에 가장 가까운 곳이고,
+/// 같으면 뒤다(셀 경계를 누르면 다음 글자 앞 — `TextField.caretAtColumn` 과 같은 규칙). 상자가 없으면 null.
+/// `TextField.caretAtColumn` 을 쓰지 않는 이유: 그쪽은 텍스트 필드 자신의 가로 스크롤(`scrollWindow`)로 그려진 글의 역이다 —
+/// 이 상자는 그 모델로 그리지 않으므로 같은 함수를 쓰면 그려진 caret 과 누른 caret 이 갈린다.
+pub fn caretOffsetAt(state: *const State, text: []const u8, x_px: f64, p: props.ChromeProps) ?usize {
+    const rect = boxRect(state, text, p) orelse return null;
+    const cw = @max(p.metrics.cell_width_px, 1);
+    const shown = overlay_input.tailWindow(text, max_cols - 3).text;
+    const hidden = text.len - shown.len; // 꼬리 창은 원본의 뒤쪽 부분 슬라이스다
+    const text_x: f64 = @floatFromInt(rect.x + @as(i32, @intCast(cw)));
+    const target = (x_px - text_x) / @as(f64, @floatFromInt(cw)); // 칸 단위(소수) — 왼쪽 패딩이면 음수
+    var best: usize = 0;
+    var best_dist = std.math.inf(f64);
+    var b: usize = 0;
+    var acc: u32 = 0;
+    while (true) {
+        const dist = @abs(@as(f64, @floatFromInt(acc)) - target);
+        if (dist <= best_dist) { // <= — 같으면 뒤 경계
+            best_dist = dist;
+            best = b;
+        }
+        if (b >= shown.len) break;
+        const e = grapheme.clusterEnd(shown, b);
+        acc += overlay_input.displayCols(shown[b..e]);
+        b = e;
+    }
+    return hidden + best;
 }
 
 // ── 판정 ────────────────────────────────────────────────────────────────────────
@@ -186,4 +217,31 @@ test "RNB3 rename_box — 글이 상한을 넘어 앞이 잘리면 caret 도 잘
         else => {},
     };
     try testing.expectEqual(@as(?i32, r.x + 10 + @as(i32, @intCast((90 - hidden) * 10))), caret_x);
+}
+
+test "RNB5 caretOffsetAt — 그리는 쪽의 역함수: 좌패딩은 0, 글자 가운데 기준 가까운 경계(같으면 뒤), 끝 너머는 끝, 넓은 글자는 두 칸, 꼬리 창은 잘린 바이트를 더한다 (§8.2f)" {
+    var p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 10, .cell_height_px = 20, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
+    p.shape.border_width_px = 1;
+    var st = State{};
+    try testing.expect(caretOffsetAt(&st, "add", 0, p) == null); // 닫히면 없다
+    st.show(100, 200, 20);
+    const r = boxRect(&st, "add", p).?;
+    const tx: f64 = @floatFromInt(r.x + 10); // 글 시작 = 상자 + 좌패딩 1칸
+    try testing.expectEqual(@as(?usize, 0), caretOffsetAt(&st, "add", @floatFromInt(r.x + 2), p)); // 좌패딩 → 처음
+    try testing.expectEqual(@as(?usize, 0), caretOffsetAt(&st, "add", tx + 4, p)); // 첫 글자 왼쪽 절반 → 그 앞
+    try testing.expectEqual(@as(?usize, 1), caretOffsetAt(&st, "add", tx + 6, p)); // 오른쪽 절반 → 그 뒤
+    try testing.expectEqual(@as(?usize, 1), caretOffsetAt(&st, "add", tx + 5, p)); // 정확히 가운데 → 같으면 뒤
+    try testing.expectEqual(@as(?usize, 2), caretOffsetAt(&st, "add", tx + 20, p)); // 셀 경계 → 그 경계
+    try testing.expectEqual(@as(?usize, 3), caretOffsetAt(&st, "add", tx + 200, p)); // 끝 너머 → 끝
+    // 넓은 글자(한글 — 두 칸, 3바이트): 경계는 칸 0·2·4 = 바이트 0·3·6.
+    try testing.expectEqual(@as(?usize, 3), caretOffsetAt(&st, "가나", tx + 21, p)); // 칸 2.1 → 첫 글자 뒤
+    try testing.expectEqual(@as(?usize, 0), caretOffsetAt(&st, "가나", tx + 9, p)); // 칸 0.9 → 앞(1.0 은 가운데라 뒤)
+    try testing.expectEqual(@as(?usize, 6), caretOffsetAt(&st, "가나", tx + 35, p));
+    // 꼬리 창 — 90칸 글은 앞 13칸이 잘려 77칸만 보인다. 보이는 첫 칸을 누르면 13(잘린 바이트), 보이는 셋째 칸 경계면 15.
+    const long = "a" ** 90;
+    const lr = boxRect(&st, long, p).?;
+    const ltx: f64 = @floatFromInt(lr.x + 10);
+    try testing.expectEqual(@as(?usize, 13), caretOffsetAt(&st, long, ltx + 1, p));
+    try testing.expectEqual(@as(?usize, 15), caretOffsetAt(&st, long, ltx + 20, p));
+    try testing.expectEqual(@as(?usize, 90), caretOffsetAt(&st, long, ltx + 2000, p));
 }

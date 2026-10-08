@@ -1672,7 +1672,7 @@ sleep 9000
 downloads
 dlanswer $root/picked/plain.txt
 dlact 0 2
-sleep 2000
+sleep 3500
 downloads
 SCRIPT
 : > "$root/requests.log"
@@ -1692,6 +1692,37 @@ rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download '
 check(len(rows) == 2 and rows[0][1] == 'plain.txt' and rows[0][2] == '1' and rows[0][5] == '0', f'a plain file the page started is held when asking ({rows[:1]})')
 check(len(heads) == 2 and 'window=true' in heads[0], f'the held download brings the list window forward ({heads})')
 check(len(rows) == 2 and rows[1][2] == '4' and rows[1][6] == 'plain.txt' and os.path.exists(os.path.join(root, 'picked', 'plain.txt')), f'taking it from the list asks and saves to the chosen place ({rows[1:]})')
+sys.exit(0 if ok else 1)
+PY
+
+# 진짜 저장 창(대본이 답하지 않는다)을 종료·창 닫힘과 같은 길(.abort)로 치우면 그 다운로드는 보류로 돌아온다(다시 받을 수 있게).
+cat > "$root/dlask-abort.txt" <<SCRIPT
+sleep 7000
+mouse 1 0 0 338 142 0
+mouse 3 0 0 338 142 0
+sleep 2500
+downloads
+dlpanels abort
+sleep 1500
+downloads
+SCRIPT
+: > "$root/requests.log"
+run_app /dlw-app 16000 "$root/dlask-abort.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlask-abort.txt" MARU_CONFIG="$root/ask.conf"
+dl_check dlw-app
+grep -ao 'osr-test dlpanels [0-9]*' "$root/app-dlw-app.log" > "$root/dlask-abort.panels" || true
+python3 - "$root" <<'PY' || fail "a dismissed save panel did not put the download back on hold"
+import sys, os
+root = sys.argv[1]
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+lines = [l.strip() for l in open(os.path.join(root, 'dlw-app.report')) if l.strip()]
+rows = [l.split(' ', 1)[1].split('|') for l in lines if l.startswith('download ')]
+panels = open(os.path.join(root, 'dlask-abort.panels')).read().split()
+check(len(rows) == 2 and rows[0][2] == '10' and panels[-1:] == ['1'], f'a clicked download shows a real save panel and waits (asking) ({rows[:1]} · panels {panels})')
+check(len(rows) == 2 and rows[1][2] == '1', f'dismissing the panel the way quit and window close do puts it back on hold ({rows[1:]})')
 sys.exit(0 if ok else 1)
 PY
 

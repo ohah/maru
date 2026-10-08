@@ -107,6 +107,8 @@ fn run(init: std.process.Init) ExitCode {
     const staging: ?[]const u8 = blk: {
         const path = std.fmt.bufPrintZ(&staging_buf, "{s}/download-staging", .{profile_dir}) catch break :blk null;
         profile.ensurePrivateDir(path) catch break :blk null;
+        // 프로필을 잡은 뒤(cef_initialize 가 같은 프로필의 다른 host 를 막았다) 지난번이 남긴 것을 비운다.
+        _ = profile.clearFiles(path);
         break :blk path;
     };
     const unset = preferences.apply(&g_api, staging);

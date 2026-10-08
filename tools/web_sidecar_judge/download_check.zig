@@ -471,7 +471,7 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         try host.send(.{ .download_decide = .{ .browser = 71, .download = wait.download, .path = path } });
         const finished = watch(&host, 71, wait.download, 15_000, true, 0);
         // 결정 전에 받아 둔 것은 프로필 안에 있어야 한다(사용자의 ~/Downloads 가 아니라 — `preferences.zig`).
-        report(finished.last == .complete and finished.received == http.huge_bytes and staged >= 1 and sameContentPrefix(path, 's'), "dl-ask-wait", std.fmt.bufPrint(&detail_buf, "결정 전 10 초 받은 양 {d}/{d}(갱신 {d}) · 프로필 download-staging 항목 {d} · host 가 연 다운로드 임시 파일 {d}({s}) · 결정 뒤 {s} {d}", .{
+        report(finished.last == .complete and finished.received == http.huge_bytes and staged >= 1 and temp_files == 0 and sameContentPrefix(path, 's'), "dl-ask-wait", std.fmt.bufPrint(&detail_buf, "결정 전 10 초 받은 양 {d}/{d}(갱신 {d}) · 프로필 download-staging 항목 {d} · host 가 연 다운로드 임시 파일 {d}({s}) · 결정 뒤 {s} {d}", .{
             held.received,     http.huge_bytes, held.updates, staged, temp_files, temp_name,
             if (finished.last) |st| @tagName(st) else "없음",
             finished.received,

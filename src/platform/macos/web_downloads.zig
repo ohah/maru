@@ -691,9 +691,9 @@ pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
             i18n.format(buf, i18n.t(.dl_state_held_from), &.{.{ .s = e.origin_buf[0..e.origin_len] }})
         else
             copyText(buf, i18n.t(.dl_state_held)),
-        .active => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_active) }, .{ .s = sizes } }),
-        .interrupted => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_interrupted) }, .{ .s = sizes } }),
-        .done => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_done) }, .{ .s = formatBytes(@max(e.received, e.total), &total_buf) } }),
+        .active => i18n.format(buf, i18n.t(.dl_status_active), &.{.{ .s = sizes }}),
+        .interrupted => i18n.format(buf, i18n.t(.dl_status_interrupted), &.{.{ .s = sizes }}),
+        .done => i18n.format(buf, i18n.t(.dl_status_done), &.{.{ .s = formatBytes(@max(e.received, e.total), &total_buf) }}),
         .canceled => copyText(buf, i18n.t(.dl_state_canceled)),
         .failed => copyText(buf, i18n.t(.dl_state_failed)),
         .tab_closed => copyText(buf, i18n.t(.dl_state_tab_closed)),

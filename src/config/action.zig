@@ -24,6 +24,10 @@ pub const Action = union(enum) {
     recover_editor_backups,
     /// 활성 문서의 계층 목록을 도크에 연다.
     show_editor_outline,
+    /// 언어 서버 신뢰 관리(계획 WT4) — 신뢰한 저장소 목록, 지금 문서 저장소의 철회·잊기. **부여는 없다**(신뢰 시트의 답뿐).
+    lsp_trusted_repositories,
+    lsp_revoke_trust,
+    lsp_forget_trust,
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와
     // 사용자 keybind에서도 같은 액션을 쓴다. 파일 선택/경로 I/O는 Swift, 종류·도크 라우팅 정책은 Zig가 소유한다.
     open_file_panel,
@@ -316,6 +320,9 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "recover_editor_backups")) return .recover_editor_backups;
     if (std.mem.eql(u8, value, "open_file_panel")) return .open_file_panel;
     if (std.mem.eql(u8, value, "show_editor_outline")) return .show_editor_outline;
+    if (std.mem.eql(u8, value, "lsp_trusted_repositories")) return .lsp_trusted_repositories;
+    if (std.mem.eql(u8, value, "lsp_revoke_trust")) return .lsp_revoke_trust;
+    if (std.mem.eql(u8, value, "lsp_forget_trust")) return .lsp_forget_trust;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;
     if (std.mem.eql(u8, value, "toggle_file_panel_mode")) return .toggle_file_panel_mode;

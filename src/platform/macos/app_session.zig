@@ -2905,6 +2905,7 @@ fn modalInputRole(field: ChromeHostField) ModalInputRole {
         .symbol_picker => .{ .routes_text = .symbol_picker },
         .reference_picker => .{ .routes_text = .reference_picker }, // §8.2l — 심볼 피커와 같은 컴포넌트·같은 역할
         .recovery_picker => .{ .routes_text = .recovery_picker },
+        .trust_picker => .{ .routes_text = .trust_picker },
         .settings => .{ .routes_text = .settings },
         .context_menu, .notifications => .blocks_without_text,
         // **헬퍼는 입력을 안 막는다**(NSH — §6.2). 선택을 마쳤을 뿐인 사용자에게서 키를 뺏으면
@@ -2949,6 +2950,8 @@ const PendingConfirm = union(enum) {
     remote_file_tree_delete,
     /// 언어 서버 신뢰(§8.2a) — 주인 root 는 `editor_lsp.asking_root` 가 든다.
     lsp_trust,
+    /// 언어 서버 신뢰 관리(계획 WT4 — 철회·잊기). 대상 키는 `editor_lsp.manage_key` 가 든다.
+    lsp_trust_manage,
     /// 이름 없는 문서를 **있는 파일 위에** 저장할까(U2 — §3.11). 고른 경로는
     /// `pending_untitled_save` 가 든다(오버레이가 하나뿐이라 상자를 닫고 확인을 띄우므로).
     untitled_overwrite: u64,
@@ -6047,6 +6050,8 @@ pub const AppSession = struct {
     symbol_picker_followed_selected: ?usize = null,
     /// 복구 후보와 검색 결과의 수명은 창마다 독립적이다.
     editor_recovery: editor_ops.recovery_ui.State = .{},
+    /// 신뢰한 저장소 목록(계획 WT4) — 연 순간의 표 사본과 목록 역학.
+    editor_trust_list: editor_ops.trust_ui.State = .{},
     /// 참조 피커(tooling §8.2l) — 굳힌 행(값)·프롬프트 버퍼·목록 역학(심볼 피커와 같은 셋).
     reference_picker_rows: reference_picker.Picker = .{},
     reference_picker_prompt: [96]u8 = undefined,
@@ -10521,6 +10526,7 @@ pub const AppSession = struct {
             editor_ops.references_client.closed(self); // §8.2l — 행도 함께 놓는다
         }
         editor_ops.recovery_ui.closed(self);
+        if (self.chrome_host.trust_picker.open) editor_ops.trust_ui.closed(self);
         self.chrome_host.context_menu.hide();
         self.context_menu_target = null;
         self.file_tree_context_target = null;
@@ -10551,6 +10557,7 @@ pub const AppSession = struct {
             // 굳혀 둔 대상을 **비운다** — 안 비우면 다음 확인이 옛 대상을 지울 수 있다.
             .remote_file_tree_delete => self.pending_remote_delete.name_len = 0,
             .lsp_trust => editor_ops.lsp_client.dismissTrustPrompt(self), // 프로그램이 닫은 것 — 기억하지 않고 다음에 다시 묻는다
+            .lsp_trust_manage => editor_ops.lsp_client.clearManage(self), // 답 없이 닫혔다 — 아무것도 안 바꾼다
             // **취소는 무상태다**(§3.11) — 들고 있던 경로를 비운다. 안 비우면 다음 확인이 옛 경로에 쓴다.
             // U3 의 두 물음도 같은 자리에서 같은 이유로 비운다(목적지·경로를 함께 들고 있다).
             .untitled_overwrite, .untitled_where, .untitled_remote_overwrite => self.pending_untitled_save = .{},
@@ -10578,7 +10585,8 @@ pub const AppSession = struct {
         /// 그 자리에 놓으면 Esc 가 그것을 실행한다(§4).
         ///
         /// ⚠️ **`primary` 에는 아무것도 버리지 않는 선택만 둔다.** 상자는 열 때 `primary` 에 포커스를
-        /// 두므로 Enter 가 그것을 실행한다 — 파괴적인 것을 거기 두면 확인 상자가 아니라 지뢰다.
+        /// 두므로 Enter 가 그것을 실행한다 — 파괴적인 것을 거기 두면 확인 상자가 아니라 지뢰다. 고를 동작이
+        /// **전부** 파괴적이면(언어 서버 신뢰 관리의 철회·잊기) 열고 나서 처음 포커스를 `cancel` 로 둔다.
         extra: ?maru.i18n.Key = null,
     };
 
@@ -11299,6 +11307,11 @@ pub const AppSession = struct {
                 _ = editor_ops.openUntitledInActivePane(self) catch {};
             },
             .recover_editor_backups => if (!self.tabsBlocked()) editor_ops.recovery_ui.open(self),
+            // 신뢰 관리(계획 WT4) — 목록 피커, 그리고 지금 문서 저장소의 철회·잊기(둘 다 확인 상자를 거친다). 탭을 만들지
+            // 않으므로 `tabsBlocked` 게이트를 지나지 않는다(chrome 최소 세션에서도 팔레트에 보이는 대로 먹는다).
+            .lsp_trusted_repositories => editor_ops.trust_ui.open(self),
+            .lsp_revoke_trust => editor_ops.lsp_client.manageCurrent(self, .revoke),
+            .lsp_forget_trust => editor_ops.lsp_client.manageCurrent(self, .forget),
             .show_editor_outline => if (!self.tabsBlocked()) dock_ops.openDockTo(self, .outline),
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),
             .toggle_file_panel_dock_side => file_panel_ops.toggleFilePanelDockSide(self),
@@ -13144,6 +13157,10 @@ pub const AppSession = struct {
             .recovery_picker_query_changed => editor_ops.recovery_ui.recompute(self),
             .recovery_picker_selection_changed => {},
             .recovery_picker_accept => editor_ops.recovery_ui.accept(self),
+            .trust_picker_close => editor_ops.trust_ui.closed(self),
+            .trust_picker_query_changed => editor_ops.trust_ui.recompute(self),
+            .trust_picker_selection_changed => {},
+            .trust_picker_accept => editor_ops.trust_ui.accept(self),
             .reference_picker_query_changed => editor_ops.references_client.recompute(self),
             .reference_picker_selection_changed => {}, // 창 갱신은 렌더 직전 follow 가 값 비교로 잡는다
             .reference_picker_accept => editor_ops.references_client.accept(self), // 닫고 나서 간다
@@ -13192,6 +13209,7 @@ pub const AppSession = struct {
                     .file_tree_delete => file_panel_ops.confirmFileTreeDelete(self),
                     .remote_file_tree_delete => file_panel_ops.confirmRemoteFileTreeDelete(self),
                     .lsp_trust => editor_ops.lsp_client.answerTrust(self, true),
+                    .lsp_trust_manage => editor_ops.lsp_client.answerManage(self, .primary),
                     .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
                     .quit => {
                         self.quit_decision = .accepted;
@@ -13230,6 +13248,9 @@ pub const AppSession = struct {
                 } else if (owner == .untitled_where) {
                     // **`alternate` = 이쪽**(U3) — 굳힌 목적지를 버리고 로컬 base 로 간다.
                     editor_untitled_save_ops.chooseHere(self, owner.untitled_where);
+                } else if (owner == .lsp_trust_manage) {
+                    // **`alternate` = 잊기**(허용된 저장소의 관리 상자 — `primary` 는 철회).
+                    editor_ops.lsp_client.answerManage(self, .alternate);
                 } else if (owner == .save_conflict) {
                     // **`alternate` = 덮어쓰기**(C1b 가 `primary` 를 비교로 올렸다 — §4). CAS 를
                     // 건너뛰는 그 길이고, 부르는 자리는 이것 하나다.
@@ -14240,7 +14261,7 @@ pub const AppSession = struct {
     /// 자동 닫힘 타이머가 없어 아무 입력으로나 닫지 않으면 토스트 동안 입력이 영구히 막히기 때문이다.
     pub fn anyOverlayOpen(self: *const AppSession) bool {
         const h = &self.chrome_host;
-        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or (h.find.open and h.find.input_focused) or h.palette.open or h.symbol_picker.open or h.reference_picker.open or h.recovery_picker.open or h.settings.open;
+        return h.confirm.open or h.notice.open or h.context_menu.open or h.notifications.open or (h.find.open and h.find.input_focused) or h.palette.open or h.symbol_picker.open or h.reference_picker.open or h.recovery_picker.open or h.trust_picker.open or h.settings.open;
     }
 
     /// 오버레이 frame 을 **그려야** 하는가. `anyOverlayOpen` 과 갈리는 이유는 **패시브 표면**이다 —
@@ -14886,6 +14907,12 @@ pub const AppSession = struct {
         if (self.chrome_host.recovery_picker.open) {
             if (kind == 1 and button == 0) {
                 if (!scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) editor_ops.recovery_ui.click(self, x_px, y_px);
+            }
+            return;
+        }
+        if (self.chrome_host.trust_picker.open) {
+            if (kind == 1 and button == 0) {
+                if (!scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) editor_ops.trust_ui.click(self, x_px, y_px);
             }
             return;
         }
@@ -15933,7 +15960,7 @@ pub const AppSession = struct {
         // 텍스트 blink(SGR 5): config text.blink가 켜졌고 보이는 뷰포트에 blink 셀이 있을 때만 위상 진행. viewport_has_blink는
         // need_blink_scan(idle + blink_text)일 때만 스냅샷이 실제 스캔한 값이라, blink_text off면 false로 접혀 안전.
         const text_blinks = self.appearance.blink_text and snap.viewport_has_blink;
-        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open or self.chrome_host.reference_picker.open or self.chrome_host.recovery_picker.open;
+        const overlay_open = self.chrome_host.find.open or self.chrome_host.palette.open or self.chrome_host.symbol_picker.open or self.chrome_host.reference_picker.open or self.chrome_host.recovery_picker.open or self.chrome_host.trust_picker.open;
         // 인라인 rename 편집 caret도 깜빡인다 — 사이드바/탭/라벨 셀 스트림의 '|' 글자라(터미널 커서처럼 suffix-trim
         // 으로 못 숨김) text-blink와 같이 full rebuild가 필요하다(renameEditText가 blink_visible로 '|'↔공백 토글).
         const rename_active = self.rename != null;
@@ -16053,7 +16080,7 @@ pub const AppSession = struct {
     /// notice는 텍스트 입력 대상이 아니지만(dismiss만) IME가
     /// 뒤(터미널/find)로 새지 않게 **최우선**으로 잡아 무시한다. 모든 IME 연산(preedit set·조합 판정·caret)이 이걸로
     /// 분기해, 라우팅이 콜백마다 흩어져 일부를 누락하던 단일-출처 위반을 없앤다.
-    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, recovery_picker, addr_edit, scm_commit };
+    pub const InputFocus = enum { terminal, file_tree, dock_pending, confirm, notice, settings, rename, sidebar_search, agent_session_search, agent_activity_search, find, palette, symbol_picker, reference_picker, recovery_picker, trust_picker, addr_edit, scm_commit };
     pub fn inputFocus(self: *const AppSession) InputFocus {
         if (self.chrome_host.confirm.open) return .confirm; // 닫기 확인 — 파괴적 동작 게이트라 최우선(notice와 동형: IME 비대상)
         if (self.chrome_host.notice.open) return .notice; // 최우선 모달 — 텍스트/IME를 받지 않고 무시(뒤로 안 샘)
@@ -16067,6 +16094,7 @@ pub const AppSession = struct {
         if (self.chrome_host.palette.open) return .palette;
         if (self.chrome_host.symbol_picker.open) return .symbol_picker;
         if (self.chrome_host.recovery_picker.open) return .recovery_picker;
+        if (self.chrome_host.trust_picker.open) return .trust_picker;
         if (self.chrome_host.reference_picker.open) return .reference_picker; // §8.2l
         if (self.rename != null) return .rename; // 인라인 rename(find/palette와 배타적 — startRename이 닫음)
         if (self.sidebar_search_active) return .sidebar_search; // 사이드바 검색바(상주 — 활성이면 키/IME를 받는다)
@@ -16173,6 +16201,10 @@ pub const AppSession = struct {
             },
             .recovery_picker => if (self.chrome_host.recovery_picker.input.commitPreedit(self.allocator)) {
                 editor_ops.recovery_ui.recompute(self);
+                self.metal_dirty = true;
+            },
+            .trust_picker => if (self.chrome_host.trust_picker.input.commitPreedit(self.allocator)) {
+                editor_ops.trust_ui.recompute(self);
                 self.metal_dirty = true;
             },
             .reference_picker => if (self.chrome_host.reference_picker.input.commitPreedit(self.allocator)) {
@@ -23778,6 +23810,11 @@ pub const AppSession = struct {
             const rows = try editor_ops.recovery_ui.rows(self, arena);
             try self.chrome_host.collectRecoveryPickerDraws(rows, props, &tokens, arena, &draws);
         }
+        if (self.chrome_host.trust_picker.open) {
+            followListSelection(self.chrome_host.trust_picker.selected, self.editor_trust_list.shown.items.len, @max(self.cell_height_px, 1), &self.editor_trust_list.scroll, &self.editor_trust_list.followed);
+            const rows = try editor_ops.trust_ui.rows(self, arena);
+            try self.chrome_host.collectTrustPickerDraws(rows, props, &tokens, arena, &draws);
+        }
         if (self.chrome_host.reference_picker.open) {
             self.followReferencePickerSelection(); // §8.2l — 같은 역학
             const rows = try self.buildReferencePickerRows(arena);
@@ -24401,6 +24438,7 @@ pub const AppSession = struct {
         self.symbol_picker_prompt.deinit(self.allocator);
         self.reference_picker_rows.deinit(self.allocator);
         self.editor_recovery.deinit(self.allocator);
+        self.editor_trust_list.deinit(self.allocator);
         self.editor_nav_back.deinit(self.allocator);
         self.editor_nav_forward.deinit(self.allocator);
         self.editor_find_matches.deinit(self.allocator);
@@ -85157,6 +85195,7 @@ fn expectedTerminalResponder(focus: AppSession.InputFocus) bool {
         .symbol_picker,
         .reference_picker,
         .recovery_picker,
+        .trust_picker,
         .addr_edit,
         .scm_commit,
         .file_tree,
@@ -85177,6 +85216,7 @@ fn activateSoleFocus(session: *AppSession, focus: AppSession.InputFocus) bool {
         .symbol_picker => session.chrome_host.symbol_picker.open = true,
         .reference_picker => session.chrome_host.reference_picker.open = true,
         .recovery_picker => session.chrome_host.recovery_picker.open = true,
+        .trust_picker => session.chrome_host.trust_picker.open = true,
         .rename => settings_ops.startRename(session, .{ .workspace = session.tabs.items[0] }),
         .sidebar_search => session.sidebar_search_active = true,
         .addr_edit => session.addr_edit = 1,

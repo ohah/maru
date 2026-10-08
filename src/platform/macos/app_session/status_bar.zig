@@ -728,7 +728,7 @@ pub fn collectStatusBarItems(self: *AppSession, collected: *std.ArrayList(Collec
                     const text = editor_ops.lsp_client.statusText(view, &lsp_buf);
                     const icon: ?u21 = switch (view.phase) {
                         .ready, .home_root, .outside_repo => null, // 꺼짐은 알림이 아니라 사실이다
-                        .missing, .denied, .failed => icons.codepoint(.bell),
+                        .missing, .denied, .failed, .unasked => icons.codepoint(.bell),
                         .asking, .starting, .restarting => icons.codepoint(.hourglass),
                     };
                     if (buildStatusBarItem(self, icon, text, bar_cols, fg, icon_fg, .plain)) |dl| {

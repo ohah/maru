@@ -38,6 +38,10 @@ pub const entries = [_]Entry{
     .{ .action = .new_web_tab, .key = "new_web_tab", .title = "New Browser Tab", .search_ko = "새 브라우저 탭" },
     .{ .action = .show_editor_outline, .key = "show_editor_outline", .title = "Editor: Show Outline", .search_ko = "편집기 아웃라인 함수 클래스 목록" },
     .{ .action = .recover_editor_backups, .key = "recover_editor_backups", .title = "Editor: Recover Unsaved Edits", .search_ko = "편집기 미저장 편집 백업 복구" },
+    // 언어 서버 신뢰 관리(계획 WT4 — workspace-trust.md). 목록·철회·잊기만 — 신뢰를 주는 명령은 없다(신뢰 시트의 답뿐).
+    .{ .action = .lsp_trusted_repositories, .key = "lsp_trusted_repositories", .title = "Language Server: Repository Trust…", .search_ko = "언어 서버 저장소 신뢰 결정 목록" },
+    .{ .action = .lsp_revoke_trust, .key = "lsp_revoke_trust", .title = "Language Server: Revoke Trust for This Repository", .search_ko = "언어 서버 이 저장소 신뢰 철회" },
+    .{ .action = .lsp_forget_trust, .key = "lsp_forget_trust", .title = "Language Server: Forget Trust for This Repository", .search_ko = "언어 서버 이 저장소 신뢰 잊기" },
     .{ .action = .new_editor_tab, .key = "new_editor_tab", .title = "New Editor Tab", .search_ko = "새 편집기 탭" },
     .{ .action = .open_file_panel, .key = "open_file_panel", .title = "Open File Panel…", .search_ko = "파일 패널 열기" },
     .{ .action = .close_focused, .key = "close_focused", .title = "Close", .search_ko = "닫기" },

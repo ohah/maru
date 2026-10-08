@@ -16,6 +16,8 @@
 //!   dl-park        받는 중(결정 뒤) 브라우저를 숨기고 about:blank 로 보내도 끝까지 받는다 — 새 문서 표지(`page_started`)도 온다(W10c:
 //!                  maru 는 받는 중인 탭을 닫으면 브라우저를 이렇게 남기고, 물은 닫기는 이 표지로 닫힌 것을 안다)
 //!   dl-park-held   결정 전(보류·묻는 중)에 그렇게 보낸 뒤 1.5 초 뒤 결정해도 끝까지 받는다(닫은 탭의 보류를 목록에서 받기)
+//!   dl-selfclose   다운로드를 시작한 페이지가 스스로 닫으면(`window.close`) sidecar 가 닫지 않고 `page_close_kept` 를 보내고(W10d —
+//!                  닫으면 끊긴다), maru 처럼 숨겨 about:blank 로 보내면 끝까지 받고, 그 뒤 maru 의 닫기(`destroy_browser`)는 그대로 닫힌다
 //!   dl-multiple    사용자 동작 없는 둘째 자동 다운로드는 「여러 파일 받기」 권한을 묻고, 허용하면 begin 이 온다
 //!   dl-page-started 새 문서 표지(`page_started`)는 페이지를 불러오거나 다른 문서로 갈 때 오고, pushState·다운로드가 된 이동에는
 //!                  오지 않는다(maru 가 「이 문서의 사용자 동작」을 가르는 표지 — 적대 리뷰 2 회차)
@@ -408,6 +410,60 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
             page_starts[id],
         }) catch "");
         try host.send(.{ .destroy_browser = id });
+    }
+
+    // ── 다운로드를 시작한 뒤 스스로 닫는 페이지(W10d) ──
+    check: {
+        var path_buf: [1100]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/selfclose.bin", .{dir});
+        try open(&host, 82, &u, port, "/dlp?a=selfclose");
+        const begin = waitBegin(&host, 82, 5000) orelse {
+            report(false, "dl-selfclose", "download_begin 이 오지 않았다");
+            break :check;
+        };
+        try host.send(.{ .download_decide = .{ .browser = 82, .download = begin.download, .path = path } });
+        var close_kept = false;
+        var closed_msg = false;
+        var last: ?message_mod.DownloadState = null;
+        const deadline = os.nowMs() + 4000;
+        while (os.nowMs() < deadline) {
+            const message = (host.next(@intCast(@max(deadline - os.nowMs(), 1))) catch break) orelse break;
+            countPageStart(message);
+            switch (message) {
+                .page_close_kept => |id| if (id == 82) {
+                    close_kept = true;
+                },
+                .browser_closed => |id| if (id == 82) {
+                    closed_msg = true;
+                },
+                .download_update => |v| if (v.browser == 82 and v.download == begin.download) {
+                    last = v.state;
+                },
+                else => {},
+            }
+        }
+        // maru 처럼 숨기고 about:blank 로 보낸 뒤 끝까지 받고, 그 뒤 maru 의 닫기는 그대로 닫는다.
+        const before = page_starts[82];
+        try host.send(.{ .set_hidden = .{ .browser = 82, .value = true } });
+        try host.send(.{ .navigate = .{ .browser = 82, .url = "about:blank" } });
+        const end = watch(&host, 82, begin.download, 10_000, true, 0);
+        const size_now = fileSize(path);
+        try host.send(.{ .destroy_browser = 82 });
+        var gone = false;
+        const d2 = os.nowMs() + 4000;
+        while (os.nowMs() < d2 and !gone) {
+            const message = (host.next(@intCast(@max(d2 - os.nowMs(), 1))) catch break) orelse break;
+            countPageStart(message);
+            if (message == .browser_closed and message.browser_closed == 82) gone = true;
+        }
+        report(close_kept and !closed_msg and last != null and last.? == .in_progress and page_starts[82] > before and end.last == .complete and size_now == http.slow_bytes and gone, "dl-selfclose", std.fmt.bufPrint(&detail_buf, "page_close_kept {} · 닫힘 알림 {} · 4 초 뒤 {s} · about:blank 표지 {d} → {d} · 끝 {s} · 파일 {d}/{d} · 닫기 뒤 닫힘 {}", .{
+            kept,     closed_msg,
+            if (last) |st| @tagName(st) else "없음",
+            before,   page_starts[82],
+            if (end.last) |st| @tagName(st) else "없음",
+            size_now, http.slow_bytes,
+            gone,
+        }) catch "");
     }
 
     // ── 둘째 자동 다운로드 ──

@@ -689,6 +689,42 @@ test "when the watch closes the last parked browser and no tab is left, the side
     try std.testing.expectEqual(State.off, state);
 }
 
+test "a page that closes itself while downloading keeps its browser: the tab closes and parks, a parked or unknown one is handled (W10d)" {
+    const gpa = std.testing.allocator;
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    state = .starting;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 7, 8, 9 });
+    try web_downloads.testAddActive(1, 7);
+    try web_downloads.testAddActive(2, 9);
+    apply(gpa, .{ .page_close_kept = 7 }, 0);
+    try std.testing.expect(takePageClosed(7)); // 창이 그 탭을 닫는다
+    try std.testing.expect(browserLive(7)); // 브라우저는 살아 있다 — 닫힌 것으로 보지 않는다
+    // 물은 닫기 중이었으면 그 닫기가 끝난 것이다.
+    surfaces.getPtr(8).?.close_ask = .asking;
+    apply(gpa, .{ .page_close_kept = 8 }, 0);
+    try std.testing.expectEqual(CloseAskOutcome.closed, takeCloseAsk(8, 0));
+    // 주차한 번호(연 페이지가 쥔 팝업을 닫았다)는 그대로 둔다 — 받기를 잇는다.
+    destroy(gpa, 9);
+    try std.testing.expectEqual(@as(usize, 1), parkedCount());
+    outbox_pending.clearRetainingCapacity();
+    apply(gpa, .{ .page_close_kept = 9 }, 0);
+    try std.testing.expectEqual(@as(usize, 1), parkedCount());
+    var sent: [4]Message = undefined;
+    try std.testing.expectEqual(@as(usize, 0), sentFrames(&sent));
+    // 모르는 번호(maru 가 이미 닫았다)는 닫으라고 한다.
+    apply(gpa, .{ .page_close_kept = 42 }, 0);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expectEqual(@as(u64, 42), sent[0].destroy_browser);
+    // 그 pane 의 유일한 탭이면 되살리지 않고 빈 페이지로 보낸다(같은 번호를 다시 만들지 않는다).
+    outbox_pending.clearRetainingCapacity();
+    blankKeptPage(gpa, 7);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expect(sent[0].navigate.browser == 7 and std.mem.eql(u8, sent[0].navigate.url, "about:blank"));
+    try std.testing.expect(browserLive(7) and !surfaces.getPtr(7).?.page_closed);
+}
+
 test "losing the sidecar forgets parked browsers with their downloads (W10c)" {
     const gpa = std.testing.allocator;
     web_downloads.testReset();
@@ -2772,6 +2808,18 @@ pub fn popupOpener(surface_id: u64) u64 {
     return s.popup_opener;
 }
 
+/// 페이지가 닫으려 했지만 받는 중이라 브라우저가 남은 탭이 그 pane 의 유일한 탭이다(W10d) — 되살리지 않는다(같은 번호로 다시
+/// 만들면 sidecar 가 거절했다). 빈 페이지로 보내고 보통 탭으로 둔다(사용자가 닫으면 주차한다).
+pub fn blankKeptPage(gpa: std.mem.Allocator, surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.page_closed = false;
+    s.popup_opener = 0;
+    s.page_opened = false;
+    s.download_blank = false;
+    settleClosedPark(gpa, surface_id);
+    if (s.created) send(gpa, .{ .navigate = .{ .browser = surface_id, .url = "about:blank" } });
+}
+
 /// 꺼내 간 창이 지금 닫지 못했다(탭을 끄는 중·닫기 확인) — 다음 tick 에 다시.
 pub fn markPageClosed(surface_id: u64) void {
     if (surfaces.getPtr(surface_id)) |s| s.page_closed = true;
@@ -3141,6 +3189,22 @@ var retiring_profile_held = false;
 
 /// W10b: 프로필의 `download-staging`(sidecar 가 결정 전 다운로드를 받아 두는 곳 — `web_sidecar/preferences.zig`)의 파일을 지운다.
 /// sidecar 가 없을 때만 부른다(죽었거나 끝났다 — 다시 뜨면 sidecar 도 비운다).
+/// W10d: 지난 실행이 받는 중에 죽어 남긴 임시 파일을 지운다 — 이 실행에서 처음 프로필을 잡았을 때 한 번(같은 프로필의 다른 maru 가
+/// 받는 중이면 잡지 못해 여기 오지 않는다). 기록은 프로필 안(`maru-download-parts`) — 작업 스레드가 임시 파일을 만들 때마다 적는다.
+var parts_swept = false;
+
+fn sweepLeftoverParts() void {
+    if (builtin.is_test or parts_swept) return;
+    parts_swept = true;
+    var profile_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const profile = profileDir(&profile_buf) orelse return;
+    var path_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/maru-download-parts", .{profile}) catch return;
+    web_downloads.setPartJournal(path);
+    const removed = web_downloads.sweepPartJournal();
+    if (removed > 0) std.log.scoped(.web_osr).info("removed {d} leftover download part file(s) from an earlier run", .{removed});
+}
+
 fn clearDownloadStaging(held: bool) void {
     // 시험은 실제 홈의 프로필을 건드리지 않는다(5 회차). 끝난 sidecar 가 프로필을 잡지 않았으면(잠금에 막혔다 — 같은 프로필의 다른
     // maru 가 받아 두는 중일 수 있다) 비우지 않는다.
@@ -3351,6 +3415,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // W10b: 브라우저가 만들어졌다 — CEF 초기화(프로필 잠금)가 끝났다는 뜻이라 이 sidecar 가 프로필을 잡았다. handshake 는
             // 초기화 전에도 답한다 — hello_ack 로 세우면 잠금에 막힌 sidecar 가 같은 프로필의 다른 maru 가 받아 둔 것을 비웠다(7 회차).
             profile_held = true;
+            sweepLeftoverParts();
             break :blk surfaces.getPtr(id);
         }) |s| {
             s.created = true;
@@ -3418,6 +3483,15 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             if (s.focused and s.created) send(gpa, .{ .set_focus = .{ .browser = v.browser, .value = true } });
             s.composing = false; // 이동하면 페이지의 조합은 사라진다
         } else parkedDocument(gpa, v.browser, v.url),
+        // W10d: 페이지가 스스로(또는 연 페이지가) 닫으려 했는데 받는 중이라 sidecar 가 남겼다 — 브라우저는 살아 있다(`created` 그대로).
+        // 닫힌 것처럼 그 탭을 닫는다(창이 꺼내 가 — `destroy` 가 주차한다). 주차한 번호면(연 페이지가 쥔 팝업을 닫았다) 그대로 둔다.
+        // 모르는 번호(이미 닫았다)면 닫으라고 한다(maru 가 닫는 것은 그대로 닫힌다).
+        .page_close_kept => |id| if (surfaces.getPtr(id)) |s| {
+            if (s.close_ask == .asking or s.close_ask == .asked) {
+                s.close_ask = .closed; // 물은 닫기 중이었다(그 사이 받기가 시작됐다)
+                s.close_park = false;
+            } else if (dropPendingAdopt(gpa, id)) abandonPopup(gpa, id) else s.page_closed = true;
+        } else if (!parked.contains(id)) send(gpa, .{ .destroy_browser = id }),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
             s.last_nav_ms = monotonicNow();
             // (아래 `else` — 주차한 브라우저의 새 문서는 `parkedDocument` 가 본다.)

@@ -14884,7 +14884,7 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
 
 test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣고 원문 자리표시자를 남기지 않는다 (§8.2a)" {
     // 번역 틀에서 `{0}` 이 빠지면 상태바가 「시작 중」만 보여 어느 서버인지 모른다 — 언어 대칭 판정자는 양쪽이 같이 빠지면 못 잡는다.
-    // phase 마다 제 문구(§8.2a 상태바 행)를 내고, 일곱 문구가 서로 달라야 사용자가 상태를 가린다.
+    // phase 마다 제 문구(§8.2a 상태바 행)를 내고, 문구가 서로 달라야 사용자가 상태를 가린다.
     const saved = maru.i18n.lang();
     defer maru.i18n.setLang(saved);
     var exe: []const u8 = ""; // 내장 표에서 가장 긴 이름 — 표가 늘어도 그대로 따라간다
@@ -14911,6 +14911,8 @@ test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣
                 .restarting => .lsp_status_restarting,
                 .failed => .lsp_status_failed,
                 .denied => .lsp_status_denied,
+                .home_root => .lsp_status_home_root,
+                .outside_repo => .lsp_status_outside_repo,
                 .ready => null, // 연결되면 이름만
             };
             var want_buf: [lsp_client.status_text_cap]u8 = undefined;
@@ -15771,6 +15773,14 @@ fn clientByExe(session: *AppSession, exe: []const u8) ?*lsp_client.Client {
     return null;
 }
 
+/// 그 서버·root(끝이 `root_suffix`) 의 클라이언트 — 픽스처의 doc.zig 도 zls 라 서버 이름만으로는 다른 것을 집는다.
+fn clientAt(session: *AppSession, exe: []const u8, root_suffix: []const u8) ?*lsp_client.Client {
+    for (session.editor_lsp.clients.items) |*c| {
+        if (std.mem.eql(u8, c.server.exe, exe) and std.mem.endsWith(u8, c.root, root_suffix)) return c;
+    }
+    return null;
+}
+
 test "LSPB24 「다시 묻기」는 문서가 닫힌 같은 저장소의 서버를 묻지 않고 띄우지 않는다 — 답은 그 클라이언트에도 서고, 허용이면 문서를 다시 열 때 묻지 않고 뜬다 (계획 WT2)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -15856,8 +15866,8 @@ test "LSPB25 신뢰 키를 못 구하면(root 가 사라졌다) 묻지도 띄우
     const c = clientByExe(fx.session, "zls").?;
     try testing.expect(c.proc == null and c.trust_key == null);
     try testing.expectEqual(lsp_client.Phase.failed, lsp_client.statusFor(fx.session, fx.term).?.phase);
-    // 누르면 다시 시도한다 — 이제 그 자리가 있으면 정상 경로로 간다.
-    try fx.dir.dir.createDirPath(testing.io, "gone");
+    // 누르면 다시 시도한다 — 이제 그 자리(저장소)가 있으면 정상 경로로 간다.
+    try fx.dir.dir.createDirPath(testing.io, "gone/.git");
     lsp_client.activateStatus(fx.session);
     const Ctx = struct { fx: *PaneFixture };
     try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
@@ -15909,6 +15919,291 @@ test "LSPB27 옛 키를 묻는 모달이 떠 있는 사이 그 root 의 새 키�
     fx.session.chrome_host.confirm.dismiss();
     fx.session.dispatchChromeAction(.confirm_accept);
     try testing.expect(trust_store.get(repo_key) == null);
+}
+
+test "LSPB28 묻지 않는 root — 홈(dotfiles `.git`) 아래 파일과 git 저장소 밖 파일은 묻지도 띄우지도 않고 상태바에 이유를 보이며 표에 아무것도 안 적는다; 누르면 root 부터 다시 보고(상위 폴더의 `git init` 까지) 묻되, 문서가 닫힌 같은 root 의 서버는 띄우지 않는다 (계획 WT2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    lsp_client.pump(fx.session); // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+
+    // ⑴ 홈 — dotfiles `.git` 이 있는 홈 아래, 자기 `.git` 이 없는 폴더의 파일 둘(서버도 둘). root 는 홈이다.
+    try fx.dir.dir.createDirPath(testing.io, "home/.git");
+    try fx.dir.dir.createDirPath(testing.io, "home/notes");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/notes/n.c", .data = "int n;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/notes/s.zig", .data = "const s = 1;\n" });
+    const saved_home = std.c.getenv("HOME");
+    var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    defer if (saved_home_z) |h| {
+        _ = setenv("HOME", h.ptr, 1);
+    } else {
+        _ = unsetenv("HOME");
+    };
+    var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}/home", .{root})).ptr, 1);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 서버가 **없어도** 「설치」가 아니라 이유가 먼저다 — 어차피 띄우지 않을 곳에 설치를 권하지 않는다.
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/clangd", 1);
+    const t_zig = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/home/notes/s.zig", .{root}));
+    const t_home = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/home/notes/n.c", .{root}));
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expect(std.mem.endsWith(u8, t_home.rt.editor_lsp_root.?, "/home"));
+    const hv = lsp_client.statusFor(fx.session, t_home).?;
+    try testing.expectEqual(lsp_client.Phase.home_root, hv.phase);
+    try testing.expectEqual(lsp_client.Phase.home_root, lsp_client.statusFor(fx.session, t_zig).?.phase);
+    var tb: [lsp_client.status_text_cap]u8 = undefined;
+    var want: [lsp_client.status_text_cap]u8 = undefined;
+    try testing.expectEqualStrings(maru.i18n.format(&want, maru.i18n.t(.lsp_status_home_root), &.{.{ .s = hv.exe }}), lsp_client.statusText(hv, &tb));
+    // 홈에는 WT2b 이전의 「거부」가 표에 남아 있다(이관된 옛 결정) — 묻지 않는 root 에 그 결정을 적용하면 「거부됨」으로 굳는다.
+    var hk_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var hp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.decide(testing.io, trust_store.keyFor(try std.fmt.bufPrint(&hp_buf, "{s}/home", .{root}), &hk_buf).?, .deny);
+    // s.zig 를 닫고(zls 는 문서 없이 남는다) n.c 에서 누른다 — 같은 이유로 다시 서고, 문서 없는 zls 는 **뜨지 않는다**.
+    {
+        const pane = pane_ops.activePane(fx.session);
+        const idx = std.mem.indexOfScalar(*Term, pane.terms.items, t_zig) orelse return error.NoTerm;
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == t_home);
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.home_root, lsp_client.statusFor(fx.session, t_home).?.phase);
+    const home_zls = clientAt(fx.session, "zls", "/home") orelse return error.NoClient;
+    try testing.expect(home_zls.proc == null and home_zls.phase != .starting and home_zls.phase != .ready);
+    try testing.expect(fx.session.pending_confirm == .none);
+    // 다른 저장소에서 답이 선다(세대가 오른다) — 대기 중인 홈 zls 가 표의 옛 거부로 「거부됨」이 되지 않는다.
+    var ok_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.decide(testing.io, trust_store.keyFor(root, &ok_buf).?, .allow);
+    lsp_client.pump(fx.session);
+    try testing.expect(home_zls.phase != .denied);
+    try testing.expectEqual(lsp_client.Phase.home_root, lsp_client.statusFor(fx.session, t_home).?.phase);
+    const gen_before = trust_store.generation(); // 여기부터 이 판정자는 아무 결정도 적지 않는다
+
+    // ⑵ git 저장소 밖 — 이 판정자의 tmp 는 저장소(.zig-cache) 안이라 가장 가까운 `.git` 이 저장소다. 그래서 `/tmp` 바로 아래에 만든다.
+    //    파일은 하위 폴더에 둔다 — root 는 그 하위 폴더(파일의 부모)다.
+    var out_buf: [96]u8 = undefined;
+    const outside = try std.fmt.bufPrint(&out_buf, "/tmp/maru-lspb28-{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(testing.io, outside) catch {}; // 앞 실행이 죽어 남긴 것(같은 pid)
+    var sub_buf: [128]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&sub_buf, "{s}/sub", .{outside}));
+    defer std.Io.Dir.cwd().deleteTree(testing.io, outside) catch {};
+    var o_buf: [128]u8 = undefined;
+    const o_path = try std.fmt.bufPrint(&o_buf, "{s}/sub/o.c", .{outside});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = o_path, .data = "int o;\n" });
+    const t_out = try openPathInActivePane(fx.session, o_path);
+    lsp_client.pump(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expectEqual(lsp_client.Phase.outside_repo, lsp_client.statusFor(fx.session, t_out).?.phase);
+    try testing.expect(std.mem.endsWith(u8, t_out.rt.editor_lsp_root.?, "/sub"));
+    // 둘 다 서버가 없고, 표에는 아무것도 안 적었다(묻지 않았으니 답도 없다).
+    for (fx.session.editor_lsp.clients.items) |c| if (c.phase == .home_root or c.phase == .outside_repo) try testing.expect(c.proc == null);
+    try testing.expectEqual(gen_before, trust_store.generation());
+    // ⑶ 누르면 root 부터 다시 본다 — 그대로면 같은 이유로, **상위 폴더**에서 `git init` 한 뒤에는 그 저장소를 묻는다.
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == t_out);
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.outside_repo, lsp_client.statusFor(fx.session, t_out).?.phase);
+    var g_buf: [128]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&g_buf, "{s}/.git", .{outside}));
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_key.?.path, outside["/tmp".len..]));
+    try testing.expect(std.mem.endsWith(u8, t_out.rt.editor_lsp_root.?, outside));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    // ⑷ **그 폴더에서** `git init` — root 는 그대로라 같은 클라이언트가 다시 판정을 거쳐 묻는다.
+    var out2_buf: [96]u8 = undefined;
+    const outside2 = try std.fmt.bufPrint(&out2_buf, "/tmp/maru-lspb28-{d}-b", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(testing.io, outside2) catch {};
+    try std.Io.Dir.cwd().createDirPath(testing.io, outside2);
+    defer std.Io.Dir.cwd().deleteTree(testing.io, outside2) catch {};
+    var q_buf: [128]u8 = undefined;
+    const q_path = try std.fmt.bufPrint(&q_buf, "{s}/q.c", .{outside2});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = q_path, .data = "int q;\n" });
+    const t_q = try openPathInActivePane(fx.session, q_path);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.outside_repo, lsp_client.statusFor(fx.session, t_q).?.phase);
+    try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&g_buf, "{s}/.git", .{outside2}));
+    lsp_client.activateStatus(fx.session);
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_key.?.path, outside2["/tmp".len..]));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+}
+
+test "LSPB29 떠 있던 서버를 다시 띄울 때 root 의 심링크가 저장소 밖을 가리키게 됐으면 묻지 않고 「저장소 밖」으로 선다 — 키를 다시 맞추면 묻지 않는 root 판정도 다시 한다 (계획 WT2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.createDirPath(testing.io, "plain");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "plain/a.c", .data = "int a;\n" });
+    try fx.dir.dir.symLink(testing.io, "repo", "alias", .{ .is_directory = true });
+    lsp_client.pump(fx.session); // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const t_a = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/a.c", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    const Ctx = struct { fx: *PaneFixture, t: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .t = t_a }, struct {
+        fn f(c: Ctx) bool {
+            return c.t.rt.editor_diagnostics.lsp.items.len >= 1; // 서버가 떠서 진단까지 냈다
+        }
+    }.f));
+    // 대상이 저장소가 아닌 폴더로 바뀌고, 서버가 죽는다 — 재시작이 띄우기 직전에 키를 다시 푼다.
+    try fx.dir.dir.deleteFile(testing.io, "alias");
+    try fx.dir.dir.symLink(testing.io, "plain", "alias", .{ .is_directory = true });
+    const pid = clientByExe(fx.session, "clangd").?.proc.?.pid;
+    _ = std.c.kill(pid, .KILL);
+    try testing.expect(pumpLspUntil(&fx, 6000, Ctx{ .fx = &fx, .t = t_a }, struct {
+        fn f(c: Ctx) bool {
+            return (lsp_client.statusFor(c.fx.session, c.t) orelse return false).phase == .outside_repo;
+        }
+    }.f));
+    try testing.expect(fx.session.pending_confirm == .none); // 저장소가 아닌 곳을 묻지 않았다
+    try testing.expect(clientByExe(fx.session, "clangd").?.proc == null);
+    // 옛 서버의 진단은 걷혔다 — 「꺼짐」인데 옛 밑줄이 남으면 안 된다.
+    try testing.expectEqual(@as(usize, 0), t_a.rt.editor_diagnostics.lsp.items.len);
+    try testing.expectEqual(@as(usize, 0), clientByExe(fx.session, "clangd").?.docs.items.len);
+}
+
+test "LSPB30 키가 바뀌어 판정을 기다리는 클라이언트에는 이 창의 거부를 세우지 않는다 — 다른 창의 허용이 서면 문서를 다시 열 때 묻지 않고 뜬다 (계획 WT2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.createDirPath(testing.io, "other/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "other/x.zig", .data = "const x = 1;\n" });
+    try fx.dir.dir.symLink(testing.io, "repo", "alias", .{ .is_directory = true });
+    lsp_client.pump(fx.session); // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const t_a = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/a.c", .{root}));
+    lsp_client.pump(fx.session);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    const Ctx = struct { fx: *PaneFixture };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            return (clientAt(c.fx.session, "clangd", "/alias") orelse return false).phase == .ready;
+        }
+    }.f));
+    // a.c 를 닫는다(clangd 는 문서 없이 남는다). alias 가 other 를 가리키게 되고, 그 이름으로 x.zig 를 연다 — zls 가 root 의 새 키를
+    // 풀어 clangd 도 새 키로 맞춘다(판정을 다시 기다린다, 문서가 없어 gate 를 안 지난다).
+    {
+        const pane = pane_ops.activePane(fx.session);
+        const idx = std.mem.indexOfScalar(*Term, pane.terms.items, t_a) orelse return error.NoTerm;
+        term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, idx);
+    }
+    lsp_client.pump(fx.session);
+    try fx.dir.dir.deleteFile(testing.io, "alias");
+    try fx.dir.dir.symLink(testing.io, "other", "alias", .{ .is_directory = true });
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/x.zig", .{root}));
+    var tries: usize = 0;
+    while (fx.session.pending_confirm != .lsp_trust and tries < 4) : (tries += 1) lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    // 이 창에서 거부 — 판정 전인 clangd 에는 「거부됨」을 세우지 않는다.
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    const clangd = clientAt(fx.session, "clangd", "/alias").?;
+    try testing.expect(clangd.phase != .denied);
+    // 다른 창에서 허용 — a.c 를 다시 열면 clangd 가 묻지 않고 뜬다.
+    trust_store.decide(testing.io, (clangd.trust_key orelse return error.NoKey).key(), .allow);
+    lsp_client.pump(fx.session);
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/a.c", .{root}));
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            return (clientAt(c.fx.session, "clangd", "/alias") orelse return false).phase == .ready;
+        }
+    }.f));
+    try testing.expect(fx.session.pending_confirm == .none);
+}
+
+test "LSPB31 「꺼짐」을 누르면 root 의 키도 다시 푼다 — 심링크가 홈을 가리키다 저장소를 가리키게 됐으면 그 저장소를 묻는다 (계획 WT2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "home/.git");
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/n.c", .data = "int n;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/n.c", .data = "int n;\n" });
+    try fx.dir.dir.symLink(testing.io, "home", "alias", .{ .is_directory = true });
+    const saved_home = std.c.getenv("HOME");
+    var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const saved_home_z: ?[:0]const u8 = if (saved_home) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    defer if (saved_home_z) |h| {
+        _ = setenv("HOME", h.ptr, 1);
+    } else {
+        _ = unsetenv("HOME");
+    };
+    var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}/home", .{root})).ptr, 1);
+    lsp_client.pump(fx.session); // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const t_n = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/n.c", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.home_root, lsp_client.statusFor(fx.session, t_n).?.phase);
+    try fx.dir.dir.deleteFile(testing.io, "alias");
+    try fx.dir.dir.symLink(testing.io, "repo", "alias", .{ .is_directory = true });
+    lsp_client.activateStatus(fx.session);
+    var tries: usize = 0;
+    while (fx.session.pending_confirm != .lsp_trust and tries < 4) : (tries += 1) lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(std.mem.endsWith(u8, fx.session.editor_lsp.asking_key.?.path, "/repo"));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
 }
 
 test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리는 recordTrust 하나(표는 그 파일 밖에서 못 고친다), 허용으로 답하는 자리는 confirm 수락 하나, 하니스 스위치는 테스트 빌드에서만 읽힌다 (계획 WT2)" {

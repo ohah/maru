@@ -68504,8 +68504,13 @@ test "SBL4 상태바 LSP 항목 — 서버가 없으면 「설치」 항목이 �
     }
     const builder = pane_ops.paneFrameBuilder(session);
     const colors: metal_frame.CellColors = .{ .default_fg = session.appearance.theme.foreground };
-    _ = editor_ops.openPathInActivePane(session, "src/platform/macos/session_host_notification_route.c") catch
-        return error.SkipZigTest;
+    // **절대 경로로** 연다 — 제품이 그렇게 연다. 상대 경로면 root 도 상대라 신뢰 키를 못 구해 「실패」로 선다(키가 서버 찾기보다 먼저다 —
+    // 계획 WT2b). 테스트의 cwd 는 저장소라 root 는 저장소(`.git`)다.
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd_ptr = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse return error.NoCwd;
+    var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const file = try std.fmt.bufPrint(&file_buf, "{s}/src/platform/macos/session_host_notification_route.c", .{std.mem.sliceTo(cwd_ptr, 0)});
+    _ = editor_ops.openPathInActivePane(session, file) catch return error.SkipZigTest;
     editor_ops.lsp_client.pump(session); // tick 이 하는 일 — 클라이언트가 「없음」이 된다
     status_bar_ops.collectStatusBarItems(session, &collected, builder, colors);
 

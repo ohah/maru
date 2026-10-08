@@ -59825,6 +59825,36 @@ test "W6j: 창의 유일한 탭이 Chromium 탭이면 물은 뒤 탭을 부수�
     }
 }
 
+test "W10c: 마지막 창의 유일한 탭이 받는 중이면 물은 닫기 뒤 그 브라우저를 되살리지 않고 종료 확인에 다운로드 수를 적는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    web_osr.downloads.testReset();
+    defer web_osr.downloads.testReset();
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    maru.i18n.setLang(.ko); // 창을 만든 뒤에 — 만들 때 설정의 언어를 적용한다
+    const pane = pane_ops.activePane(session);
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    term_ops.closeTermAt(session, 0, pane, 0); // 웹 탭만 남는다
+    try web_osr.testHold(allocator, sid);
+    web_osr.testRunning(sid);
+    try web_osr.downloads.testAddActive(1, sid);
+    session.is_last_window = true;
+    web_ops.closeAskingPage(session, .term_or_pane);
+    try std.testing.expectEqual(web_osr.CloseAskOutcome.waiting, web_osr.takeCloseAsk(sid, 0));
+    // about:blank 가 열렸다(물은 닫기가 끝났다) — 브라우저는 살아 있다(받는 중).
+    web_osr.testApply(allocator, .{ .page_started = sid });
+    try std.testing.expectEqual(web_osr.CloseAskOutcome.closed, web_osr.takeCloseAsk(sid, 0));
+    web_ops.osrCloseAskedTab(session, sid, .closed);
+    try std.testing.expect(web_osr.browserLive(sid)); // 되살리지 않았다(같은 번호로 다시 만들면 sidecar 가 거절해 먹통 탭이 됐다)
+    try std.testing.expect(session.pending_confirm == .quit);
+    try std.testing.expectEqualStrings("maru를 종료할까요? 받는 중인 다운로드 1개가 멈춥니다.", session.chrome_host.confirm.message);
+}
+
 test "activeWebSurfaceIdAnyKind: web term(browser·markdown)이면 id, terminal이면 0 (4g-0 헤드리스)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

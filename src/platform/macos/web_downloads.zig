@@ -82,6 +82,9 @@ pub const Entry = struct {
     /// 다시 만들었으면 그것을 지우지 않게 — W10a 적대 리뷰 1 회차).
     part_dev: i64 = 0,
     part_ino: u64 = 0,
+    /// 받으려 한 곳(주소의 호스트 — 보류 행에 보인다, Chrome 처럼; data: 처럼 호스트가 없으면 비었다).
+    origin_buf: [128]u8 = undefined,
+    origin_len: usize = 0,
 
     pub fn name(self: *const Entry) []const u8 {
         return self.name_buf[0..self.name_len];
@@ -231,7 +234,22 @@ const risky_extensions = [_][]const u8{
     // 디스크 이미지(열면 마운트된다)·위치 파일·Python Launcher 가 곧바로 돌리는 스크립트(W10a 적대 리뷰 1 회차).
          ".iso",      ".img",    ".smi",      ".cdr",          ".toast",       ".sparseimage", ".sparsebundle",
     ".dmgpart",    ".udif",     ".afploc",   ".ftploc", ".atloc",    ".py",           ".pyw",
+    // 로컬 브라우저로 열리는 문서와 남은 위치 파일 — Chrome 도 사용자 동작을 요구한다(적대 리뷰 3 회차).
+            ".html",        ".htm",
+    ".xhtml",      ".shtml",    ".svg",      ".mht",    ".mhtml",    ".webarchive",   ".vncloc",      ".mailloc",     ".newsloc",
 };
+
+/// 주소의 호스트(`blob:` 은 벗긴다) — 보이는 ASCII 만(그 밖은 `?`), 사용자 정보(`a@`)는 뺀다. 호스트가 없으면 빈 글.
+pub fn originOf(url: []const u8, out: []u8) []const u8 {
+    const rest = if (std.mem.startsWith(u8, url, "blob:")) url["blob:".len..] else url;
+    const scheme_end = std.mem.indexOf(u8, rest, "://") orelse return out[0..0];
+    var host = rest[scheme_end + 3 ..];
+    if (std.mem.indexOfAny(u8, host, "/?#")) |end| host = host[0..end];
+    if (std.mem.lastIndexOfScalar(u8, host, '@')) |user_end| host = host[user_end + 1 ..];
+    const n = @min(host.len, out.len);
+    for (host[0..n], 0..) |c, i| out[i] = if (c > 0x20 and c < 0x7f) c else '?';
+    return out[0..n];
+}
 
 pub fn isRisky(file_name: []const u8) bool {
     for (risky_extensions) |ext| {
@@ -431,6 +449,7 @@ pub fn onBegin(v: message.DownloadBegin, now_ms: i64) bool {
     var e: Entry = .{ .key = next_key, .generation = sidecar_generation, .download = v.download, .browser = v.browser, .state = .preparing, .risky = false, .total = v.total };
     next_key += 1;
     e.name_len = sanitizeName(v.name, part_suffix.len + 8, &e.name_buf).len;
+    e.origin_len = originOf(v.url, &e.origin_buf).len;
     e.risky = isRisky(e.name());
     const by_user = web_osr.recentUserInput(v.browser, user_gesture_window_ms, now_ms);
     if (activeCount(null) >= max_active_app or activeCount(v.browser) >= max_active_tab) {
@@ -668,7 +687,10 @@ pub fn statusText(e: *const Entry, buf: []u8) []const u8 {
         received;
     return switch (e.state) {
         .preparing => copyText(buf, i18n.t(.dl_state_preparing)),
-        .held => copyText(buf, i18n.t(.dl_state_held)),
+        .held => if (e.origin_len > 0)
+            i18n.format(buf, i18n.t(.dl_state_held_from), &.{.{ .s = e.origin_buf[0..e.origin_len] }})
+        else
+            copyText(buf, i18n.t(.dl_state_held)),
         .active => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_active) }, .{ .s = sizes } }),
         .interrupted => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_interrupted) }, .{ .s = sizes } }),
         .done => i18n.format(buf, i18n.t(.dl_status_with), &.{ .{ .s = i18n.t(.dl_state_done) }, .{ .s = formatBytes(@max(e.received, e.total), &total_buf) } }),
@@ -694,7 +716,12 @@ pub fn formatBytes(bytes: i64, buf: []u8) []const u8 {
     var unit: u64 = 1000;
     var i: usize = 0;
     while (i + 1 < units.len and n >= unit * 1000) : (i += 1) unit *= 1000;
-    const tenths: u64 = @intCast((@as(u128, n) * 10 + unit / 2) / unit);
+    var tenths: u64 = @intCast((@as(u128, n) * 10 + unit / 2) / unit);
+    if (tenths >= 10_000 and i + 1 < units.len) { // 반올림이 다음 단위에 닿았다 — `1000.0 KB` 가 아니라 `1.0 MB`
+        i += 1;
+        unit *= 1000;
+        tenths = @intCast((@as(u128, n) * 10 + unit / 2) / unit);
+    }
     return std.fmt.bufPrint(buf, "{d}.{d} {s}", .{ tenths / 10, tenths % 10, units[i] }) catch buf[0..0];
 }
 
@@ -832,6 +859,17 @@ test "removing a part file only removes the file this download made (W10a)" {
     try std.testing.expect(!exists(testPath(dir, "d.txt.maru-part", &d_buf)));
 }
 
+/// 시험 전용(web_osr 의 시험) — 받는 중인 행 하나를 넣는다.
+pub fn testAddActive(key: u64, browser: u64) !void {
+    var e = rowForTest(key, @intCast(key), .active);
+    e.browser = browser;
+    try entries.append(allocator(), e);
+}
+
+pub fn testReset() void {
+    resetForTest();
+}
+
 fn resetForTest() void {
     entries.clearAndFree(allocator());
     outgoing.clearAndFree(allocator());
@@ -869,6 +907,8 @@ test "status lines are Zig sentences with Finder-style sizes (W10a)" {
     try std.testing.expectEqualStrings("1.5 MB", formatBytes(1_450_000, &buf));
     try std.testing.expectEqualStrings("3.3 MB", formatBytes(3_276_800, &buf));
     try std.testing.expectEqualStrings("0 B", formatBytes(-5, &buf));
+    try std.testing.expectEqualStrings("1.0 MB", formatBytes(999_950, &buf)); // 반올림이 다음 단위로
+    try std.testing.expectEqualStrings("999.9 KB", formatBytes(999_949, &buf));
     var e = rowForTest(1, 1, .active);
     e.received = 1_500_000;
     e.total = 3_000_000;
@@ -881,6 +921,14 @@ test "status lines are Zig sentences with Finder-style sizes (W10a)" {
     try std.testing.expect(std.mem.indexOf(u8, statusText(&e, &line), "3.0 MB") == null);
     e.state = .held;
     try std.testing.expectEqualStrings(maru.i18n.t(.dl_state_held), statusText(&e, &line));
+    // 보류 행은 받으려 한 곳을 보인다.
+    e.origin_len = originOf("blob:https://user@evil.example:8443/x?y", &e.origin_buf).len;
+    try std.testing.expectEqualStrings("evil.example:8443", e.origin_buf[0..e.origin_len]);
+    try std.testing.expect(std.mem.indexOf(u8, statusText(&e, &line), "evil.example:8443") != null);
+    var host_buf: [16]u8 = undefined;
+    try std.testing.expectEqualStrings("", originOf("data:text/plain,x", &host_buf));
+    try std.testing.expectEqualStrings("a?b", originOf("http://a\x01b/", &host_buf));
+    try std.testing.expect(isRisky("index.html") and isRisky("x.webarchive"));
 }
 
 test "a retired or lost sidecar ends unfinished rows, keeps finished ones and numbers afresh (W10a)" {

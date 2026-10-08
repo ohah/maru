@@ -2614,6 +2614,7 @@ pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
         // OSR 탭은 Swift 에 WKWebView 가 없다 — sidecar 로 보낸다(W3b).
         if (isOsrSurface(sid)) {
             web_osr.navigate(self.allocator, sid, url);
+            web_osr.noteUserNavigation(sid); // W10a: 주소창에 친 파일 주소는 사용자가 시작한 다운로드
             return takeRestoredBrowserNavigate(self);
         }
         return .{ .surface_id = sid, .url = url };

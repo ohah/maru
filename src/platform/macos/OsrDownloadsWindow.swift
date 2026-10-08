@@ -118,8 +118,11 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
                 }
             }
         } else {
+            // 이미 맨 아래를 보고 있었을 때만 새 행으로 내린다 — 다운로드를 계속 일으키는 페이지가 누르려던 행을 커서 아래에서 밀지
+            // 않게(적대 리뷰 3 회차).
+            let atBottom = table.visibleRect.maxY >= table.bounds.maxY - table.rowHeight
             table.reloadData()
-            if !rows.isEmpty { table.scrollRowToVisible(rows.count - 1) }
+            if atBottom, !rows.isEmpty { table.scrollRowToVisible(rows.count - 1) }
         }
         updateChrome()
     }
@@ -134,6 +137,10 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     private func updateChrome() {
+        // 실행 중 UI 언어를 바꿀 수 있다 — 창의 글도 Zig 에서 다시 받는다(적대 리뷰 3 회차).
+        window.title = text(0)
+        emptyLabel.stringValue = text(18)
+        clearButton.title = text(17)
         emptyLabel.isHidden = !rows.isEmpty
         clearButton.isEnabled = rows.contains { Self.finished($0.state) }
     }
@@ -207,7 +214,7 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
         default: buttons = []
         }
         // 단추는 모양이 바뀔 때만 새로 만든다 — 진행 갱신(초당 4 번)마다 만들면 누르는 사이 단추가 빠져 취소가 버려졌다(2 회차).
-        cell.setButtons(buttons, target: self, signature: "\(row.key):\(row.state):\(missing):\(buttons.count):\(fileExists(row.path))")
+        cell.setButtons(buttons, target: self, signature: "\(row.key):\(row.state):\(missing):\(buttons.count):\(fileExists(row.path)):\(text(12))")
     }
 
     // ── 누름 ──
@@ -242,6 +249,14 @@ final class OsrDownloadsWindow: NSObject, NSTableViewDataSource, NSTableViewDele
     }
 
     // ── 시험 전용 ──
+    /// 창 내용을 PNG 로(화면을 찍지 않는다 — 창 view 를 그린다) — 대본 `dlwinsnap`.
+    func testSnapshot(to path: String) -> Bool {
+        guard window.isVisible, let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return false }
+        return (try? data.write(to: URL(fileURLWithPath: path))) != nil
+    }
+
     /// 그 행의 단추를 누른 것처럼(동작) — 대본 `dlact`.
     func testAct(index: Int, action: Action) -> Bool {
         guard index >= 0, index < rows.count else { return false }

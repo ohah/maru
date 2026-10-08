@@ -495,6 +495,15 @@ pub fn decide(config_wants_chromium: bool) void {
     }
 }
 
+test "closing the last Chromium tab ends its downloads instead of leaving them active (W10a)" {
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    try web_downloads.testAddActive(1, 7);
+    try std.testing.expectEqual(@as(usize, 1), web_downloads.activeTotal());
+    retire(std.testing.allocator, 0); // 마지막 탭을 닫아 sidecar 를 내린다(여기서는 프로세스가 없다 — 상태만)
+    try std.testing.expectEqual(@as(usize, 0), web_downloads.activeTotal());
+}
+
 test "a click counts as the user starting a download only until the page moves on (W10a)" {
     const gpa = std.testing.allocator;
     defer {
@@ -517,6 +526,11 @@ test "a click counts as the user starting a download only until the page moves o
     try std.testing.expect(!recentUserInput(7, 3000, monotonicNow()));
     surfaces.getPtr(7).?.last_user_input_ms = monotonicNow() + 1; // 새 페이지에서 다시 눌렀다
     try std.testing.expect(recentUserInput(7, 3000, monotonicNow() + 1));
+    // 주소창에 친 주소는 사용자 동작이다(문서를 열면 `page_started` 가 지운다).
+    apply(gpa, .{ .page_started = 7 }, 0);
+    surfaces.getPtr(7).?.last_nav_ms = monotonicNow() - 1;
+    noteUserNavigation(7);
+    try std.testing.expect(recentUserInput(7, 3000, monotonicNow()));
     try std.testing.expect(!recentUserInput(8, 3000, now)); // 모르는 탭
 }
 
@@ -1105,6 +1119,13 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
     if (s.created) send(gpa, .{ .navigate = .{ .browser = surface_id, .url = url } });
 }
 
+/// 사용자가 주소창에서 이 탭을 이동시켰다(W10a) — 친 주소가 곧바로 파일이면(문서를 커밋하지 않는다) 사용자가 시작한 다운로드다. 복원·
+/// 페이지가 연 새 탭의 이동은 부르지 않는다. 주소가 문서를 열면 `page_started` 가 지운다.
+pub fn noteUserNavigation(surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.last_user_input_ms = monotonicNow();
+}
+
 pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.NavActionKind) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action } });
@@ -1403,6 +1424,8 @@ pub fn takeStoppedNotice(surface_id: u64) ?Notice {
 pub fn shutdownForExit() void {
     const gpa = gpa_ref orelse return;
     stop(gpa);
+    // 받던 다운로드는 sidecar 와 함께 멈췄다 — 덜 받은 임시 파일(격리 표지 없음)을 남기지 않는다(W10a 적대 리뷰 3 회차). 종료 전에 묻기는 W10c.
+    web_downloads.sidecarLost();
     if (retiring) |*old| {
         // 앱이 끝난다 — 물러나던 sidecar 도 기한 안에 거둔다(앱 종료는 기다려도 된다).
         var waited: i64 = 0;
@@ -2149,6 +2172,9 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
         return;
     }
     const size = surfaces.getPtr(v.opener).?.record.size;
+    // 누른 `target=_blank` 링크가 첨부를 돌려주면 다운로드는 이 팝업 브라우저의 것이다 — 연 탭에서 누른 것을 물려받는다(W10a 적대
+    // 리뷰 3 회차: 사용자가 누른 실행 파일이 보류됐다). 팝업이 문서를 열면 `page_started` 가 지운다.
+    const opener_input_ms = surfaces.getPtr(v.opener).?.last_user_input_ms;
     const queued_url = gpa.dupe(u8, v.url) catch null;
     const last_url = gpa.dupe(u8, v.url) catch null;
     if (queued_url == null or last_url == null) {
@@ -2166,6 +2192,7 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
         .created = true,
         .last_url = last_url,
         .popup_opener = v.opener,
+        .last_user_input_ms = opener_input_ms,
     }) catch {
         gpa.free(queued_url.?);
         gpa.free(last_url.?);

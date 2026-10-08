@@ -180,10 +180,11 @@ const slow_chunk: usize = 64 * 1024;
 /// (한 스레드 서버를 묶지 않게 따로 스레드에서 보낸다).
 fn download(conn: c_int, kind: []const u8) void {
     var hb: [512]u8 = undefined;
-    if (std.mem.eql(u8, kind, "slow")) {
+    if (std.mem.eql(u8, kind, "slow") or std.mem.eql(u8, kind, "huge")) {
+        const huge = std.mem.eql(u8, kind, "huge");
         const own = std.c.dup(conn);
         if (own < 0) return;
-        const thread = std.Thread.spawn(.{}, slowDownload, .{own}) catch {
+        const thread = std.Thread.spawn(.{}, slowDownload, .{ own, huge }) catch {
             _ = std.c.close(own);
             return;
         };
@@ -199,16 +200,20 @@ fn download(conn: c_int, kind: []const u8) void {
     _ = std.c.write(conn, download_body.ptr, download_body.len);
 }
 
-fn slowDownload(conn: c_int) void {
+/// `huge` 는 64 MiB 를 쉬지 않고(받는 쪽이 읽는 만큼) — 결정을 미루는 동안 Chromium 이 어디에 얼마나 쌓는지(W10b 설계 공격 M1).
+pub const huge_bytes: usize = 1024 * slow_chunk;
+
+fn slowDownload(conn: c_int, huge: bool) void {
     defer _ = std.c.close(conn);
     var hb: [320]u8 = undefined;
-    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nContent-Disposition: attachment; filename=\"slow.bin\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{slow_bytes}) catch return;
+    const total = if (huge) huge_bytes else slow_bytes;
+    const head = std.fmt.bufPrint(&hb, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nContent-Disposition: attachment; filename=\"slow.bin\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", .{total}) catch return;
     _ = std.c.write(conn, head.ptr, head.len);
     const chunk = [_]u8{'s'} ** slow_chunk;
     var sent: usize = 0;
-    while (sent < slow_bytes) : (sent += slow_chunk) {
+    while (sent < total) : (sent += slow_chunk) {
         if (std.c.write(conn, &chunk, chunk.len) != @as(isize, @intCast(chunk.len))) return; // 받는 쪽이 끊었다
-        @import("os.zig").sleepMs(100);
+        if (!huge) @import("os.zig").sleepMs(100);
     }
 }
 

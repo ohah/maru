@@ -18,6 +18,8 @@
 //!   dl-same-file   maru 처럼 경로를 O_EXCL 로 미리 만들어 주면 Chromium 은 받는 동안 그 파일(같은 inode)에 쓴다 — maru 는 만든
 //!                  파일의 dev·ino 로만 지우므로 덜 받은 파일을 놓치지 않는다. 미리 만든 파일은 취소해도 Chromium 이 **남기고**(maru 가
 //!                  지운다), 완료 때는 **다른 inode** 로 바꿔 놓는다(maru 는 경로로 옮긴다) — 2 회차 실측, 보고 줄에 남긴다
+//!   dl-ask-wait    결정을 10 초 미뤄도(W10b 「매번 묻기」의 저장 창이 떠 있는 동안) 다운로드는 이어지고, 그동안 host 가 연 파일 중
+//!                  다운로드 임시 파일(`.crdownload`·`Unconfirmed`)이 없는지와 받아 둔 양을 보고 줄에 남긴다(W10b 설계 공격 M1 실측)
 //!   dl-late-decide 결정을 2 초 늦게 보내도(보류 뒤 받기·TCC 질문) 받기를 이어 가고, 받는 동안·취소 뒤의 그 경로 파일을 보고 줄에
 //!                  남긴다(늦은 결정이면 Chromium 이 자기 임시 파일에서 옮겨 와 inode 가 바뀌는지 — 3 회차 실측)
 const std = @import("std");
@@ -163,6 +165,18 @@ fn sameContent(path: [:0]const u8, want: []const u8) bool {
     var buf: [4096]u8 = undefined;
     const n = std.c.read(fd, &buf, buf.len);
     return n == @as(isize, @intCast(want.len)) and std.mem.eql(u8, buf[0..want.len], want);
+}
+
+/// 받은 파일의 앞 4 KiB 가 모두 `byte` 인가(느린·큰 다운로드의 내용).
+fn sameContentPrefix(path: [:0]const u8, byte: u8) bool {
+    const fd = std.c.open(path, .{});
+    if (fd < 0) return false;
+    defer _ = std.c.close(fd);
+    var buf: [4096]u8 = undefined;
+    const n = std.c.read(fd, &buf, buf.len);
+    if (n <= 0) return false;
+    for (buf[0..@intCast(n)]) |b| if (b != byte) return false;
+    return true;
 }
 
 fn quarantined(path: [:0]const u8) bool {
@@ -393,6 +407,74 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         // maru 의 가정 — 늦게 결정해도 그 파일(같은 inode)에 이어 쓰고 취소 뒤에도 남는다(maru 가 dev·ino 로 확인해 지운다).
         report(progressed.received > before.received and canceled.last == .canceled and during != null and during.? == late_ino and after_cancel != null and after_cancel.? == late_ino, "dl-late-decide", std.fmt.bufPrint(&detail_buf, "결정 전 2 초 받은 양 {d} · 결정 뒤 {d} · 받는 중 같은 파일 {} · 취소 뒤 남음 {}(같은 파일 {})", .{
             before.received, progressed.received, during != null and during.? == late_ino, after_cancel != null, after_cancel != null and after_cancel.? == late_ino,
+        }) catch "");
+    }
+
+    // ── 오래 미룬 결정(W10b 묻기) ──
+    check: {
+        try open(&host, 71, &u, port, "/dlp?a=huge");
+        const wait = waitBegin(&host, 71, 5000) orelse {
+            report(false, "dl-ask-wait", "download_begin 이 오지 않았다");
+            break :check;
+        };
+        const held = watch(&host, 71, wait.download, 10_000, false, 0);
+        var lsof_buf: [1100]u8 = undefined;
+        const lsof_path = try std.fmt.bufPrintZ(&lsof_buf, "{s}/lsof.txt", .{dir});
+        var cmd_buf: [1300]u8 = undefined;
+        const cmd = try std.fmt.bufPrintZ(&cmd_buf, "/usr/sbin/lsof -p {d} > '{s}' 2>/dev/null", .{ host.pid, lsof_path });
+        _ = os.run(&.{ "/bin/sh", "-c", cmd.ptr });
+        // 메모리(RSS)와 판정 뿌리 아래 1 MiB 넘는 새 파일 — 받아 둔 데이터가 어디에 있나.
+        var rss_cmd_buf: [1400]u8 = undefined;
+        const rss_cmd = try std.fmt.bufPrintZ(&rss_cmd_buf, "(ps -o rss= -p {d}; for c in $(pgrep -P {d}); do ps -o rss=,command= -p $c | cut -c1-90; done; find '{s}' /private/var/folders -newer '{s}' -size +1M -type f 2>/dev/null | head -5) >> '{s}'", .{ host.pid, host.pid, out_root, lsof_path, lsof_path });
+        _ = os.run(&.{ "/bin/sh", "-c", rss_cmd.ptr });
+        var temp_files: u32 = 0;
+        var temp_name_buf: [200]u8 = undefined;
+        var temp_name: []const u8 = "";
+        {
+            const fd = std.c.open(lsof_path, .{});
+            if (fd >= 0) {
+                defer _ = std.c.close(fd);
+                var text: [65536]u8 = undefined;
+                const n = std.c.read(fd, &text, text.len);
+                if (n > 0) {
+                    var lines = std.mem.splitScalar(u8, text[0..@intCast(n)], '\n');
+                    while (lines.next()) |line| {
+                        if (std.mem.indexOf(u8, line, "crdownload") != null or std.mem.indexOf(u8, line, "Unconfirmed") != null or std.mem.indexOf(u8, line, "/Downloads/") != null) {
+                            temp_files += 1;
+                            const tail = line[@max(line.len, 80) - 80 ..];
+                            const k = @min(tail.len, temp_name_buf.len);
+                            @memcpy(temp_name_buf[0..k], tail[0..k]);
+                            temp_name = temp_name_buf[0..k];
+                        }
+                    }
+                }
+            }
+        }
+        // 받아 둔 곳 — 프로필(`<뿌리>/s`) 안 `download-staging` 의 항목 수(Chromium 의 숨은 임시 파일).
+        var staged_buf: [1100]u8 = undefined;
+        const staged_path = try std.fmt.bufPrintZ(&staged_buf, "{s}/staged.txt", .{dir});
+        var ls_buf: [2400]u8 = undefined;
+        const ls_cmd = try std.fmt.bufPrintZ(&ls_buf, "ls -A '{s}/s/download-staging' > '{s}' 2>/dev/null", .{ out_root, staged_path });
+        _ = os.run(&.{ "/bin/sh", "-c", ls_cmd.ptr });
+        var staged: usize = 0;
+        {
+            const fd = std.c.open(staged_path, .{});
+            if (fd >= 0) {
+                defer _ = std.c.close(fd);
+                var text: [4096]u8 = undefined;
+                const n = std.c.read(fd, &text, text.len);
+                if (n > 0) staged = std.mem.count(u8, text[0..@intCast(n)], "\n");
+            }
+        }
+        var path_buf: [1100]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&path_buf, "{s}/ask-wait.bin", .{dir});
+        try host.send(.{ .download_decide = .{ .browser = 71, .download = wait.download, .path = path } });
+        const finished = watch(&host, 71, wait.download, 15_000, true, 0);
+        // 결정 전에 받아 둔 것은 프로필 안에 있어야 한다(사용자의 ~/Downloads 가 아니라 — `preferences.zig`).
+        report(finished.last == .complete and finished.received == http.huge_bytes and staged >= 1 and sameContentPrefix(path, 's'), "dl-ask-wait", std.fmt.bufPrint(&detail_buf, "결정 전 10 초 받은 양 {d}/{d}(갱신 {d}) · 프로필 download-staging 항목 {d} · host 가 연 다운로드 임시 파일 {d}({s}) · 결정 뒤 {s} {d}", .{
+            held.received,     http.huge_bytes, held.updates, staged, temp_files, temp_name,
+            if (finished.last) |st| @tagName(st) else "없음",
+            finished.received,
         }) catch "");
     }
 }

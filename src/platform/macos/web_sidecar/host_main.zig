@@ -102,7 +102,14 @@ fn run(init: std.process.Init) ExitCode {
         return fail(.cef_initialize_failed, .cef_initialize_failed, "cef_initialize failed");
     }
     // 브라우저를 만들기 전에 — 명령은 메시지 루프가 돌아야 처리된다.
-    const unset = preferences.apply(&g_api);
+    // 결정 전 다운로드를 받아 둘 곳 — 프로필 안 0700(W10b, `preferences.zig`). 만들지 못하면 Chromium 기본(~/Downloads)으로 둔다.
+    var staging_buf: [1100]u8 = undefined;
+    const staging: ?[]const u8 = blk: {
+        const path = std.fmt.bufPrintZ(&staging_buf, "{s}/download-staging", .{profile_dir}) catch break :blk null;
+        profile.ensurePrivateDir(path) catch break :blk null;
+        break :blk path;
+    };
+    const unset = preferences.apply(&g_api, staging);
     if (unset != 0) std.debug.print("maru-web-host: {d} product preference(s) not applied\n", .{unset});
 
     g_inbox = .{ .io = init.io };

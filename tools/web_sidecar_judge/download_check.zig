@@ -389,12 +389,22 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, o
         }
         const end = watch(&host, id, begin.download, 12_000, true, 0);
         const size_now = fileSize(path);
-        report(end.last == .complete and end.received == http.slow_bytes and size_now == http.slow_bytes and page_starts[id] > starts_before, name, std.fmt.bufPrint(&detail_buf, "끝 {s} · 받은 양 {d}/{d} · 파일 {d} · about:blank 의 새 문서 표지 {d} → {d}", .{
+        // about:blank 에서 about:blank 로 다시 보내도 새 문서 표지가 오는가 — maru 는 물은 닫기로 이미 about:blank 인 탭을 주차하며 다시
+        // 보내고, 그 표지로 주차 감시를 켠다(W10c 적대 리뷰 4 회차).
+        const starts_blank = page_starts[id];
+        try host.send(.{ .navigate = .{ .browser = id, .url = "about:blank" } });
+        const again_deadline = os.nowMs() + 3000;
+        while (os.nowMs() < again_deadline and page_starts[id] == starts_blank) {
+            const message = (host.next(@intCast(@max(again_deadline - os.nowMs(), 1))) catch break) orelse break;
+            countPageStart(message);
+        }
+        report(end.last == .complete and end.received == http.slow_bytes and size_now == http.slow_bytes and starts_blank > starts_before and page_starts[id] > starts_blank, name, std.fmt.bufPrint(&detail_buf, "끝 {s} · 받은 양 {d}/{d} · 파일 {d} · about:blank 의 새 문서 표지 {d} → {d} · about:blank 에서 다시 about:blank 로 → {d}", .{
             if (end.last) |st| @tagName(st) else "없음",
             end.received,
             http.slow_bytes,
             size_now,
             starts_before,
+            starts_blank,
             page_starts[id],
         }) catch "");
         try host.send(.{ .destroy_browser = id });

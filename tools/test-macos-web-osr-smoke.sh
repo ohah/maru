@@ -92,6 +92,8 @@ DLW_AUTO_PLAIN = DLW_AUTO.replace(b"run me.command", b"plain.txt")
 # 새 탭). 새 탭은 문서 없이 다운로드만 한다.
 DLW_BLANK = (b"<!doctype html><title>dlw blank</title><style>html,body{margin:0;height:100%}a{position:fixed;left:0;width:100%;height:50%;display:block;background:#f00}</style><body>"
     b"<a href='/dlw-att' target=_blank style='top:0'>A</a><a href='/dlw-att' style='top:50%;background:#00f'>B</a>")
+# 위 칸이 느린 3 MB(`big.zip`)인 판 — 닫힌 빈 탭의 받기가 주차로 이어지는지(적대 리뷰 5 회차: 작은 첨부는 탭이 닫히기 전에 끝났다).
+DLW_BLANK_BIG = DLW_BLANK.replace(b"href='/dlw-att' target=_blank", b"href='/dlw-big' target=_blank")
 # W6b: 툴팁 — 왼쪽 위(본문 폭 50%·높이 60%)에 두 줄 title, 나머지는 title 없음.
 TIP = ("<!doctype html><title>tip</title><style>html,body{margin:0;height:100%;background:#20a060}"
     "#a{position:fixed;left:0;top:0;width:50%;height:60%;background:#ff0000}</style><body>"
@@ -178,6 +180,8 @@ class H(http.server.BaseHTTPRequestHandler):
             body = DLW_AUTO_PLAIN
         elif self.path == "/dlw-blank":
             body = DLW_BLANK
+        elif self.path == "/dlw-blank-big":
+            body = DLW_BLANK_BIG
         elif self.path in ("/dlw-file", "/dlw-att"):
             att = self.path == "/dlw-att"
             body = b"attached\n" if att else b"hello\n"
@@ -1787,6 +1791,7 @@ check(len(groups) == 3 and big(groups[2])[2] == '4' and size == 30 * 104858 and 
 check('download-park released parked=0 tabs=0' in park, f'once done the hidden browser was closed — no web tab is left, so the engine can go too ({park})')
 sys.exit(0 if ok else 1)
 PY
+# 시험 서버는 한 스레드다 — 3 MB 를 보내는 약 9 초 동안 가운데 클릭의 첨부는 기다렸다가 받는다.
 cat > "$root/dlblank.txt" <<'SCRIPT'
 sleep 7000
 view down 0.5 0.25 0 0
@@ -1796,13 +1801,15 @@ sleep 3000
 view down 0.5 0.75 0 0 2
 sleep 60
 view up 0.5 0.75 0 0 2
-sleep 3500
+sleep 12000
 downloads
 SCRIPT
 : > "$root/requests.log"
-run_app /dlw-blank 16000 "$root/dlblank.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlblank.txt"
-dl_check dlw-blank
-grep -ao 'osr-test newtab \(download-blank closed tabs=[0-9]*\|at=[0-9]* tabs=[0-9]* opener=[0-9]* active=[0-9]* placement=[a-z_]* adopted=[a-z]*\)' "$root/app-dlw-blank.log" > "$root/dlblank.tabs" || true
+run_app /dlw-blank-big 26000 "$root/dlblank.summary" MARU_WEB_OSR_TEST_INPUT="$root/dlblank.txt"
+dl_check dlw-blank-big
+cp "$root/dlw-blank-big.report" "$root/dlw-blank.report"; cp "$root/dlw-blank-big.files" "$root/dlw-blank.files"
+grep -ao 'osr-test download-park[ a-z]*=[0-9]*\( tabs=[0-9]*\)\{0,1\}' "$root/app-dlw-blank-big.log" | sed 's/^osr-test //' > "$root/dlblank.park" || true
+grep -ao 'osr-test newtab \(download-blank closed tabs=[0-9]*\|at=[0-9]* tabs=[0-9]* opener=[0-9]* active=[0-9]* placement=[a-z_]* adopted=[a-z]*\)' "$root/app-dlw-blank-big.log" > "$root/dlblank.tabs" || true
 cat "$root/dlblank.tabs"
 python3 - "$root" <<'PY' || fail "a new tab that only downloaded was left open"
 import sys, os
@@ -1822,7 +1829,9 @@ check(len(opened) == 2 and 'adopted=true' in opened[0] and 'adopted=false' in op
 # 보고 차례: 연 탭 · 닫음 · 연 탭 · 닫음 — 닫을 때마다 탭 수가 연 뒤보다 하나 적다.
 pairs = list(zip(tabs[0::2], tabs[1::2]))
 check(len(pairs) == 2 and all(' at=' in a and 'download-blank closed' in b and int(b.split('tabs=')[1]) == int(a.split('tabs=')[1].split()[0]) - 1 for a, b in pairs), f'both new tabs that only downloaded were closed ({tabs})')
-check(len(rows) == 2 and all(r[2] == '4' for r in rows) and files == ['report (1).txt', 'report.txt'], f'both files were still downloaded ({rows} · {files})')
+park = [l.strip() for l in open(os.path.join(root, 'dlblank.park')) if l.strip()]
+check(len(rows) == 2 and all(r[2] == '4' for r in rows) and files == ['big.zip', 'report.txt'], f'both files were still downloaded ({rows} · {files})')
+check('download-park parked=1' in park and any(l.startswith('download-park released parked=0') for l in park), f'the closed popup tab kept downloading the 3 MB file hidden, then was closed ({park})')
 sys.exit(0 if ok else 1)
 PY
 # 「매번 묻기」면 새 탭이 받는 다운로드의 저장 창이 그 새 탭에서 곧바로 뜬다 — 저장 창이 뜨기 전에 탭을 닫으면 목록 창으로 밀렸다

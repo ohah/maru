@@ -447,7 +447,20 @@ var surfaces: std.AutoArrayHashMapUnmanaged(u64, Surface) = .empty;
 /// 탭은 닫혔지만 받던 다운로드가 끝나지 않아 숨겨 남긴 브라우저(W10c — 주차). 그 페이지는 about:blank 로 보냈다(소리·스크립트가
 /// 멈춘다). maru 에는 그 탭이 없으니 그 브라우저의 대화상자·권한·새 탭·다운로드는 「모르는 브라우저」로 곧바로 거절된다(떠나기
 /// 확인은 떠나기). 다운로드가 모두 끝나면 `releaseParked` 가 닫는다. sidecar 를 잃으면 비운다(다운로드도 함께 끝났다).
-var parked: std.AutoArrayHashMapUnmanaged(u64, void) = .empty;
+var parked: std.AutoArrayHashMapUnmanaged(u64, Parked) = .empty;
+/// 주차한 날의 기록(W10c 적대 리뷰 4 회차). 주차하며 보낸 about:blank 가 열리면(첫 새 문서 표지 — about:blank 에서 다시 about:blank
+/// 로 보내도 온다, 판정 `dl-park`) 감시를 켠다. 그 뒤 다른 문서가 오면(연 페이지가 쥔 팝업을 다른 주소로 보냈다 — 숨은 채 스크립트·
+/// 소리·네트워크가 돌았다) 곧바로 닫는다(받기는 끊긴다). about:blank 가 `park_arm_wait_ms` 안에 열리지 않으면(떠나기 처리기가 멈춘
+/// 페이지·막힌 렌더러) 그것도 닫는다.
+const Parked = struct {
+    since_ms: i64,
+    armed: bool = false,
+};
+/// 주차 상한 — sidecar 의 브라우저 표(32)를 주차가 다 차지해 새 웹 탭을 막지 않게. 넘으면 가장 오래된 것부터 닫는다(받기는 끊긴다).
+const max_parked = 8;
+const park_arm_wait_ms: i64 = 10_000;
+/// 주차가 다 비었다(내쫓음·감시) — `releaseParked` 가 sidecar 를 내릴지 본다(`apply` 안에서는 내리지 않는다).
+var parked_emptied = false;
 /// 페이지가 연 새 탭으로 만들 번호(W10c — `open_tab` 의 새 탭은 배치가 와야 기록이 생긴다. 생기면 `page_opened` 로 옮긴다).
 var page_opened_pending: [16]u64 = @splat(0);
 var page_opened_next: usize = 0;
@@ -515,12 +528,12 @@ pub fn decide(config_wants_chromium: bool) void {
     }
 }
 
-test "closing the last Chromium tab ends its downloads instead of leaving them active (W10a)" {
+test "retiring the sidecar ends its downloads instead of leaving them active (W10a)" {
     web_downloads.testReset();
     defer web_downloads.testReset();
     try web_downloads.testAddActive(1, 7);
     try std.testing.expectEqual(@as(usize, 1), web_downloads.activeTotal());
-    retire(std.testing.allocator, 0); // 마지막 탭을 닫아 sidecar 를 내린다(여기서는 프로세스가 없다 — 상태만)
+    retire(std.testing.allocator, 0); // sidecar 를 내린다(W10c 부터 받는 탭·주차가 없을 때만 — 여기서는 프로세스가 없다, 상태만)
     try std.testing.expectEqual(@as(usize, 0), web_downloads.activeTotal());
 }
 
@@ -574,6 +587,88 @@ test "closing a tab that is still downloading hides it on about:blank and closes
     try std.testing.expectEqual(@as(u64, 7), sent[0].destroy_browser);
     try std.testing.expectEqual(@as(usize, 0), parkedCount());
     try std.testing.expectEqual(State.off, state); // 마지막이었다 — sidecar 를 내렸다
+}
+
+test "a parked browser that gets another document is closed, and one that never reaches about:blank is closed after a while (W10c)" {
+    const gpa = std.testing.allocator;
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    state = .starting;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 7, 8, 9, 10 });
+    for ([_]u64{ 7, 8, 9 }, 1..) |id, key| try web_downloads.testAddActive(key, id);
+    destroy(gpa, 7);
+    destroy(gpa, 8);
+    destroy(gpa, 9);
+    try std.testing.expectEqual(@as(usize, 3), parkedCount());
+    outbox_pending.clearRetainingCapacity();
+    var sent: [8]Message = undefined;
+    // 7: 감시를 켜기 전의 옛 페이지 알림은 본다 — 닫지 않는다. about:blank 가 열리면(첫 새 문서) 켠다.
+    apply(gpa, .{ .url_changed = .{ .browser = 7, .url = "https://old.example/pushed" } }, 0);
+    apply(gpa, .{ .page_started = 7 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 7, .url = "about:blank" } }, 0);
+    try std.testing.expectEqual(@as(usize, 3), parkedCount());
+    try std.testing.expectEqual(@as(usize, 0), sentFrames(&sent));
+    // 연 페이지가 쥔 팝업을 다른 주소로 보냈다 — 닫는다.
+    apply(gpa, .{ .url_changed = .{ .browser = 7, .url = "https://evil.example/miner" } }, 0);
+    try std.testing.expectEqual(@as(usize, 2), parkedCount());
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expectEqual(@as(u64, 7), sent[0].destroy_browser);
+    // 8: 주소 알림 없이(32 KiB 넘는 주소) 둘째 새 문서가 왔다 — 닫는다.
+    apply(gpa, .{ .page_started = 8 }, 0);
+    apply(gpa, .{ .page_started = 8 }, 0);
+    try std.testing.expectEqual(@as(usize, 1), parkedCount());
+    // 9: about:blank 가 열리지 않은 채 시한이 지났다 — 닫는다. 주차가 비고 탭(10)이 남았으니 sidecar 는 그대로.
+    outbox_pending.clearRetainingCapacity();
+    releaseParked(gpa, monotonicNow() + park_arm_wait_ms + 1);
+    try std.testing.expectEqual(@as(usize, 0), parkedCount());
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expectEqual(@as(u64, 9), sent[0].destroy_browser);
+    try std.testing.expectEqual(State.starting, state);
+    // 마지막 탭도 닫으면(받는 것 없음) sidecar 를 내린다. 감시가 비운 뒤 탭 없이 남은 경우도 `releaseParked` 가 내린다.
+    destroy(gpa, 10);
+    try std.testing.expectEqual(State.off, state);
+}
+
+test "parking answers what the page was waiting for, ends held rows, and a full park closes the oldest (W10c)" {
+    const gpa = std.testing.allocator;
+    web_downloads.testReset();
+    defer web_downloads.testReset();
+    state = .starting;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 7, 6 });
+    try web_downloads.testAddActive(1, 7);
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .alert, .origin = "", .message = "a" } }, 0);
+    apply(gpa, .{ .file_dialog = .{ .browser = 7, .request = 4, .mode = .open } }, 0);
+    outbox_pending.clearRetainingCapacity();
+    destroy(gpa, 7);
+    var sent: [8]Message = undefined;
+    const n = sentFrames(&sent);
+    try std.testing.expectEqual(@as(usize, 5), n);
+    try std.testing.expect(sent[0].dialog_reply.request == 3 and !sent[0].dialog_reply.accept); // alert — 취소
+    try std.testing.expect(sent[1].file_dialog_reply.request == 4 and !sent[1].file_dialog_reply.accept);
+    try std.testing.expectEqual(@as(u64, 7), sent[4].navigate.browser); // 그다음 주차
+    // 보류만 남은 탭은 주차하지 않는다 — 보류는 끝나고(탭이 닫혀 멈춤) 브라우저는 닫힌다.
+    try web_downloads.testAddRow(2, 6, .held);
+    outbox_pending.clearRetainingCapacity();
+    destroy(gpa, 6);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&sent));
+    try std.testing.expectEqual(@as(u64, 6), sent[0].destroy_browser);
+    try std.testing.expectEqual(web_downloads.State.tab_closed, web_downloads.testState(2).?);
+    // 상한: 여덟이 차면 아홉째가 가장 오래된 것(7)을 닫는다.
+    for (20..27) |id| {
+        try testSurfaces(gpa, &.{id});
+        try web_downloads.testAddActive(100 + id, id);
+        destroy(gpa, id);
+    }
+    try std.testing.expectEqual(@as(usize, max_parked), parkedCount());
+    try testSurfaces(gpa, &.{30});
+    try web_downloads.testAddActive(130, 30);
+    outbox_pending.clearRetainingCapacity();
+    destroy(gpa, 30);
+    try std.testing.expectEqual(@as(usize, max_parked), parkedCount());
+    _ = sentFrames(&sent);
+    try std.testing.expectEqual(@as(u64, 7), sent[0].destroy_browser);
 }
 
 test "losing the sidecar forgets parked browsers with their downloads (W10c)" {
@@ -666,6 +761,16 @@ test "a page-opened tab that only downloaded is closed, one with a document or a
     try std.testing.expect(!takeDownloadBlank(11));
     try std.testing.expect(web_downloads.claimAskFor(11) != null);
     try std.testing.expect(takeDownloadBlank(11));
+    // 미루는 사이 사용자가 그 탭을 썼다 — 닫지 않는다(3 회차).
+    try testSurfaces(gpa, &.{12});
+    const s12 = surfaces.getPtr(12).?;
+    s12.page_opened = true;
+    s12.download_gesture_ms = monotonicNow();
+    apply(gpa, .{ .download_begin = .{ .browser = 12, .download = 10, .url = "https://a.example/f", .name = "h.txt", .mime = "text/plain", .total = 10 } }, 0);
+    try std.testing.expect(!takeDownloadBlank(12)); // 저장 창을 기다린다
+    surfaces.getPtr(12).?.last_user_input_ms = monotonicNow();
+    _ = web_downloads.claimAskFor(12);
+    try std.testing.expect(!takeDownloadBlank(12));
     try std.testing.expect(!takeDownloadBlank(8));
     try std.testing.expect(!takeDownloadBlank(9));
     try std.testing.expect(!takeDownloadBlank(10));
@@ -1279,6 +1384,13 @@ pub fn testRunning(surface_id: u64) void {
     if (surfaces.getPtr(surface_id)) |s| s.created = true;
 }
 
+/// 시험 전용(W10c): 다시 뜬 sidecar 가 그 탭을 처음 불러올 주소.
+pub fn testLastUrl(surface_id: u64) ?[]const u8 {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return s.last_url;
+}
+
 /// 시험 전용(W10c): sidecar 의 메시지 하나를 적용한다.
 pub fn testApply(gpa: std.mem.Allocator, message: Message) void {
     if (!builtin.is_test) @compileError("test only");
@@ -1348,8 +1460,9 @@ pub fn noteUserNavigation(surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.download_gesture_ms = monotonicNow();
     // W10c: 사용자가 이 탭을 쓴다 — 페이지가 연 빈 탭이어도 이제 사용자의 탭이다(주소창에 친 파일 주소에 그 탭이 닫혔다 — 적대
-    // 리뷰 2 회차).
+    // 리뷰 2 회차). 미뤄 둔 닫기도 거둔다(3 회차).
     s.page_opened = false;
+    s.download_blank = false;
 }
 
 /// 이 탭의 다운로드용 사용자 동작 시각 — 페이지 입력과 다운로드만의 것 중 나중 것, 그 뒤로 새 문서가 오지 않았을 때만.
@@ -1504,19 +1617,42 @@ pub fn destroy(gpa: std.mem.Allocator, surface_id: u64) void {
     // 쥐고 있어 여기서 놓아도 안전하다.
     for (kv.value.view.clear()) |ring| if (ring) |r| r.release();
     for (kv.value.popup_view.clear()) |ring| if (ring) |r| r.release();
-    const was_created = kv.value.created;
-    freeSurface(gpa, &kv.value);
     const live = state == .running or state == .starting;
+    web_downloads.closeHeldFor(surface_id); // 보류(받기로 한 적이 없다)는 탭과 함께 끝난다 — 그것만으로는 주차하지 않는다(3 회차)
     // W10c: 받던 다운로드가 있으면 닫지 않고 숨겨 남긴다 — 닫으면 Chromium 이 서버 연결을 끊고 받던 파일을 지운다(실측 — 판정
     // `dl-closed`). about:blank 로 보내 페이지는 끝낸다(숨김·이동만으로 끝까지 받는다 — 판정 `dl-park`).
-    if (live and was_created and web_downloads.unfinishedFor(surface_id) > 0) {
+    const park_it = live and kv.value.created and web_downloads.unfinishedFor(surface_id) > 0;
+    // 브라우저가 살아 남는다 — 쌓인 요청에 답한다(버리면 sidecar 가 그 콜백을 끝없이 쥐었다 — 닫을 때는 브라우저와 함께 사라졌다,
+    // 적대 리뷰 4 회차).
+    if (park_it) settleForPark(gpa, &kv.value);
+    freeSurface(gpa, &kv.value);
+    if (park_it) {
         park(gpa, surface_id);
     } else if (live) send(gpa, .{ .destroy_browser = surface_id });
     if (surfaces.count() == 0 and parked.count() == 0) retire(gpa, monotonicNow());
 }
 
+/// 주차하는 탭의 쌓인 요청에 답한다 — 떠나기 확인은 떠나기(사용자가 닫았다), JS 대화상자·파일 선택은 취소, 권한은 「못 물음」,
+/// 우클릭 메뉴는 취소.
+fn settleForPark(gpa: std.mem.Allocator, s: *Surface) void {
+    const id = s.record.surface_id;
+    for (s.dialogs.items) |d| switch (d.kind) {
+        .before_unload => send(gpa, .{ .dialog_reply = .{ .browser = id, .request = d.request, .accept = true } }),
+        .alert, .confirm, .prompt => send(gpa, .{ .dialog_reply = .{ .browser = id, .request = d.request, .accept = false } }),
+        .permission => send(gpa, .{ .permission_reply = .{ .browser = id, .request = d.request, .result = .ignore } }),
+        .file_open, .file_open_multiple, .file_open_folder, .file_save => send(gpa, .{ .file_dialog_reply = .{ .browser = id, .request = d.request, .accept = false } }),
+    };
+    cancelContextMenu(gpa, s);
+}
+
 fn park(gpa: std.mem.Allocator, surface_id: u64) void {
-    parked.put(gpa, surface_id, {}) catch {
+    if (parked.count() >= max_parked) {
+        // 가장 오래된 주차를 닫는다(그 받기는 끊긴다 — 목록에 「탭이 닫혀 멈춤」).
+        const oldest = parked.keys()[0];
+        parked.orderedRemoveAt(0);
+        send(gpa, .{ .destroy_browser = oldest });
+    }
+    parked.put(gpa, surface_id, .{ .since_ms = monotonicNow() }) catch {
         send(gpa, .{ .destroy_browser = surface_id }); // 기록할 수 없다 — 쥐지 못할 브라우저는 닫는다(다운로드는 끊긴다)
         return;
     };
@@ -1533,19 +1669,46 @@ fn testReporting() bool {
 
 /// 주차한 브라우저 중 다운로드가 모두 끝난 것을 닫는다(W10c — `pump`). 마지막이면 sidecar 도 내린다.
 fn releaseParked(gpa: std.mem.Allocator, now_ms: i64) void {
-    if (parked.count() == 0) return;
+    if (parked.count() == 0) {
+        if (parked_emptied) {
+            parked_emptied = false;
+            if (surfaces.count() == 0) retire(gpa, now_ms);
+        }
+        return;
+    }
     var i: usize = 0;
     while (i < parked.count()) {
         const id = parked.keys()[i];
-        if (web_downloads.unfinishedFor(id) > 0) {
+        const p = parked.values()[i];
+        // about:blank 가 시한 안에 열리지 않았다(떠나기 처리기가 멈춘 페이지·막힌 렌더러) — 숨은 채 돌게 두지 않는다(받기는 끊긴다).
+        const stuck = !p.armed and now_ms - p.since_ms > park_arm_wait_ms;
+        if (!stuck and web_downloads.unfinishedFor(id) > 0) {
             i += 1;
             continue;
         }
-        parked.swapRemoveAt(i);
+        parked.orderedRemoveAt(i); // 차례(오래된 것부터)를 지킨다 — 상한이 넘치면 맨 앞을 닫는다
         send(gpa, .{ .destroy_browser = id });
         if (testReporting()) std.debug.print("osr-test download-park released parked={d} tabs={d}\n", .{ parked.count(), surfaces.count() });
     }
+    parked_emptied = false;
     if (parked.count() == 0 and surfaces.count() == 0) retire(gpa, now_ms);
+}
+
+/// 주차한 브라우저에 새 문서가 왔다(W10c 적대 리뷰 4 회차) — 첫 것은 주차하며 보낸 about:blank 다(감시를 켠다). 그 뒤의 문서는 누가
+/// 보냈든(연 페이지가 쥔 팝업을 옮겼다) 숨은 채 돌게 두지 않는다 — 닫는다(받기는 끊긴다).
+fn parkedDocument(gpa: std.mem.Allocator, id: u64, url: ?[]const u8) void {
+    const p = parked.getPtr(id) orelse return;
+    if (url) |u| {
+        // 주소 알림 — 감시가 켜진 뒤 about:blank 가 아니면.
+        if (!p.armed or std.mem.startsWith(u8, u, "about:blank")) return;
+    } else if (!p.armed) {
+        p.armed = true;
+        return;
+    }
+    _ = parked.orderedRemove(id);
+    send(gpa, .{ .destroy_browser = id });
+    if (parked.count() == 0) parked_emptied = true;
+    if (testReporting()) std.debug.print("osr-test download-park evicted parked={d}\n", .{parked.count()});
 }
 
 /// 그 탭의 브라우저가 sidecar 에 살아 있는가(W10c — 물은 닫기가 about:blank 로 끝나면 브라우저는 그대로다).
@@ -1586,7 +1749,18 @@ pub fn takeDownloadBlank(surface_id: u64) bool {
     // 목록 창으로 밀렸다(W10c 적대 리뷰 1 회차). 저장 창이 뜨면(맡으면) 닫는다 — 답은 행 번호로 간다.
     if (web_downloads.unclaimedAskFor(surface_id)) return false;
     s.download_blank = false;
-    return true;
+    // 미루는 사이 사용자가 그 탭을 쓰기 시작했으면(누름·주소창) 닫지 않는다(3 회차).
+    return s.page_opened and s.last_user_input_ms == std.math.minInt(i64) / 2;
+}
+
+/// 물은 닫기가 about:blank 로 끝났는데 탭이 남는다(W10c — 마지막 창의 유일한 탭, 종료를 그만둠). 그 브라우저는 about:blank 다 —
+/// sidecar 가 다시 뜨면 닫으려던 페이지를 되살리지 않게 처음 주소도 about:blank 로(적대 리뷰 3 회차).
+pub fn settleClosedPark(gpa: std.mem.Allocator, surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    const blank = gpa.dupe(u8, "about:blank") catch return;
+    if (s.last_url) |u| gpa.free(u);
+    s.last_url = blank;
+    s.close_park = false;
 }
 
 /// 창 tick 마다 부른다 — 파이프를 비우고 알림을 적용하고, 죽었으면 다시 띄운다. 여러 창이 불러도 값싸다.
@@ -2562,6 +2736,7 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64) void {
     s.page_closed = false;
     s.popup_opener = 0; // 이제 보통 탭이다 — 나중에 닫혀도 옛 연 탭으로 가지 않는다
     s.page_opened = false; // W10c: 빈 다운로드 탭으로 닫지 않는다(사용자가 쓰는 보통 탭이다 — 적대 리뷰 2 회차)
+    s.download_blank = false;
     s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
     dropDialogs(gpa, s);
     dropNotes(gpa, s);
@@ -3224,15 +3399,16 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // 가 안 오고 입력기 조합이 버려졌다(W4c 실측). 포커스를 줘야 하는 탭이면 다시 준다.
             if (s.focused and s.created) send(gpa, .{ .set_focus = .{ .browser = v.browser, .value = true } });
             s.composing = false; // 이동하면 페이지의 조합은 사라진다
-        },
+        } else parkedDocument(gpa, v.browser, v.url),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
             s.last_nav_ms = monotonicNow();
+            // (아래 `else` — 주차한 브라우저의 새 문서는 `parkedDocument` 가 본다.)
             // W10c: 닫기 대신 보낸 about:blank 가 열렸다(떠나기 확인이 없었거나 떠나기) — 창이 그 탭을 닫는다.
             if (s.close_park and (s.close_ask == .asking or s.close_ask == .asked)) {
                 s.close_park = false;
                 s.close_ask = .closed;
             }
-        },
+        } else parkedDocument(gpa, id, null),
         .nav_state => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.can_go_back = v.can_go_back;
             s.can_go_forward = v.can_go_forward;

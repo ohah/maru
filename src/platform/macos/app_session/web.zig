@@ -1294,7 +1294,10 @@ pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.Clo
                         if (outcome == .closed and !web_osr.browserLive(surface_id)) {
                             web_osr.revivePageClosed(self.allocator, surface_id);
                             setWebNavState(self, surface_id, false, false, "");
-                        } else if (outcome == .closed) setWebNavState(self, surface_id, false, false, "");
+                        } else if (outcome == .closed) {
+                            web_osr.settleClosedPark(self.allocator, surface_id);
+                            setWebNavState(self, surface_id, false, false, "");
+                        }
                         self.requestAppQuit();
                     } else if (!file_panel_ops.blockSessionExitForFilePanels(self)) self.latchSessionClose();
                     return;

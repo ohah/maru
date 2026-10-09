@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import socket
+import threading
 from urllib.parse import quote
 
 INTERPOSER = r'''
@@ -88,9 +90,69 @@ def main():
     for arguments in [[], ['--help'], ['-h']]:
         result = subprocess.run([str(cli), 'editor', *arguments], cwd=cwd, env=env, capture_output=True, timeout=15)
         assert result.returncode == 0 and b'Editor commands:' in result.stdout and not capture.exists()
-    for arguments in [['editor', 'unknown'], ['open', 'a']]:
+    for arguments in [['editor', 'unknown'], ['editor', 'editor'], ['editor', 'editor', 'open', 'a'], ['editor', 'open', 'editor', 'editor'], ['editor', 'open', '--help', 'editor'], ['editor', '--', 'editor'], ['editor', 'lsp', 'editor'], ['editor', 'lsp', 'trust', 'editor'], ['open', 'a']]:
         result = subprocess.run([str(cli), *arguments], cwd=cwd, env=env, capture_output=True, timeout=15)
         assert result.returncode == 1 and not capture.exists()
+    run('filename-editor', ['editor'], 'maru://open?path='+quote(str(cwd)+'/editor', safe='~'))
+    run('filename-help', ['--', '--help'], 'maru://open?path='+quote(str(cwd)+'/--help', safe='~'))
+    capture.unlink(missing_ok=True)
+    canonical = subprocess.run([str(cli), 'editor', 'lsp', '--help'], cwd=cwd, env=env, capture_output=True, timeout=15)
+    legacy = subprocess.run([str(cli), 'lsp', '--help'], cwd=cwd, env=env, capture_output=True, timeout=15)
+    assert canonical.returncode == legacy.returncode == 0
+    assert canonical.stdout == legacy.stdout and b'maru editor lsp trust' in canonical.stdout
+    assert not capture.exists()
+    # Fail before IPC: compare both entrypoints without changing live trust state.
+    for arguments in [[], ['editor'], ['trust', 'grant'], ['trust', 'revoke'], ['trust', 'list', 'editor']]:
+        canonical = subprocess.run([str(cli), 'editor', 'lsp', *arguments], cwd=cwd, env=env, capture_output=True, timeout=15)
+        legacy = subprocess.run([str(cli), 'lsp', *arguments], cwd=cwd, env=env, capture_output=True, timeout=15)
+        assert canonical.returncode == legacy.returncode == 1
+        assert canonical.stderr == legacy.stderr and not capture.exists()
+    # A private fake socket verifies successful dispatch and exact wire parity;
+    # revoke/forget never reach a real application's trust table.
+    control = out/'ipc/maru/control'
+    control.mkdir(parents=True, mode=0o700)
+    socket_path = control/'fixture.sock'
+    requests, failures = [], []
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(socket_path))
+    listener.listen()
+    listener.settimeout(10)
+
+    def serve():
+        try:
+            for _ in range(6):
+                connection, _ = listener.accept()
+                with connection:
+                    connection.settimeout(10)
+                    stream = connection.makefile('rb')
+                    auth = json.loads(stream.readline())
+                    request = json.loads(stream.readline())
+                    requests.append((auth, request))
+                    payload = {'decisions': []} if request['method'] == 'lsp.trust.list' else {'previous': None, 'changed': False, 'saved': True}
+                    connection.sendall((json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': payload})+'\n').encode())
+        except Exception as error:
+            failures.append(str(error))
+        finally:
+            listener.close()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+    private_env = dict(env, HOME=str(out/'home'), XDG_CACHE_HOME=str(out/'ipc'), MARU_PANE_ID='987654321')
+    for operation in ['list', 'revoke', 'forget']:
+        arguments = ['trust', operation]+([] if operation == 'list' else ['/fixture/repository', '--volume', 'ab'])
+        canonical = subprocess.run([str(cli), 'editor', 'lsp', *arguments], cwd=cwd, env=private_env, capture_output=True, timeout=15)
+        legacy = subprocess.run([str(cli), 'lsp', *arguments], cwd=cwd, env=private_env, capture_output=True, timeout=15)
+        assert canonical.returncode == legacy.returncode == 0, (operation, canonical.stderr, legacy.stderr)
+        assert canonical.stdout == legacy.stdout and canonical.stdout
+        first, second = requests[-2:]
+        assert first[0] == {'jsonrpc': '2.0', 'method': 'auth.self', 'params': {}}
+        assert first == second and first[1]['method'] == 'lsp.trust.'+operation
+        if operation != 'list':
+            assert first[1]['params'] == {'path': '/fixture/repository', 'volume': 'ab'}
+        assert not capture.exists()
+    server.join(timeout=10)
+    assert not server.is_alive() and not failures and len(requests) == 6
+    (out/'lsp-wire.json').write_text(json.dumps(requests, indent=2)+'\n')
     root_help = subprocess.run([str(cli), '--help'], cwd=cwd, env=env, capture_output=True, timeout=15)
     assert root_help.returncode == 0 and b'maru editor open' in root_help.stdout
     assert b'  editor ' in root_help.stdout

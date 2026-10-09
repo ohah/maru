@@ -78,3 +78,17 @@ alias와 혼합 중복 거부, unknown subcommand 무전달, 기존 루트 open 
 receiver validation·short line 오해 변이는 assertion에서 거부됐고 정상/동등 대조군은 통과했다.
 추가 제품 결함은 발견되지 않았다. source SHA에 귀속된 로컬 집계는
 `~/.cache/maru-editor-cli-rebase-adversarial-20261009/summary.json`이다.
+
+LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget …`이며,
+기존 `maru lsp …`는 동일한 parser와 request 실행 경로를 쓰는 호환 별칭이다.
+`maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.
+
+LSP namespace는 기존 신뢰 정책과 wire 메서드를 바꾸지 않는다. 실제 process의 격리 fake socket에서
+list/revoke/forget의 canonical·legacy 요청 바이트와 결과가 같고 auth selector가 없는 것을 확인했다.
+실제 앱의 신뢰 표는 변경하지 않았다. `editor editor`는 무전달 오류이며 `editor open editor`는
+파일명 editor로 전달한다. 로컬 증거: `~/.cache/maru-editor-lsp-process-final-20261009/result.json`과
+같은 폴더의 `lsp-wire.json`. namespace 자체의 topic 누락과 unknown command 허용 변이를 추가했다.
+
+최종 LSP namespace도 독립 캐시의 적대적 검증 5회와 Debug/ReleaseFast·전체 boundary·Windows 교차 빌드를
+통과했다. 추가 제품 결함은 없으며 topic 전달 훼손과 unknown namespace 허용 변이는 assertion에서 거부됐다.
+집계: `~/.cache/maru-editor-lsp-adversarial-20261009/summary.json`.

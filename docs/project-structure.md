@@ -228,7 +228,7 @@ src/
                         그 형태이고 facade `<name>.zig`가 네 파일을 re-export한다. types(platform 중립 입력 DTO)·build(bounded geometry와
                         action 투영)·ids(frame-local intent 표)·view(semantic paint와 text 투영)는 서로 다른 이유로 바뀐다.
                         editor_view/는 facade 없이 폴더만 두고 편집기 본문 렌더를 content·frame·diff_frame·geometry·gutter·scrollbar·surface·viewport로 가른다.
-  cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; lsp_trust: `maru lsp trust list|revoke|forget` 파서·`--help`·client wire — 언어 서버 신뢰 조회·철회·잊기(부여 없음, 워크스페이스 신뢰 WT4b); sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다.
+  cli/                  CLI 서브커맨드의 테스트 가능한 순수 로직(ssh: 원격 terminfo 전파 — 파싱·셸 스크립트·exec argv; install: maru CLI를 PATH에 symlink하는 경로/PATH 헬퍼; terminfo: `maru terminfo` 캐시 관리 인자 파싱 — 캐시 메커니즘은 top-level terminfo_cache.zig; lsp_trust: `maru editor lsp trust list|revoke|forget` 파서·`--help`·client wire — 언어 서버 신뢰 조회·철회·잊기(부여 없음, 워크스페이스 신뢰 WT4b); sessions: 컨트롤 플레인 `sessions list`/`session get` 파서·`--help`·client wire — 1d — 및 소켓 발견 순수 정책 `controlDir`/`pickSocket` — A2a; persistent-session P5는 runtime.zig(`host status`, `runtime list/get/end`)와 attach.zig(ANSI adapter·detach chord)를 추가하되 protocol codec은 아래 session_host/를 재사용; trace: `maru trace anonymize` 인자 파싱 — 익명화 로직은 observability.trace/redact). main.zig는 얇은 디스패처로 두고 실질 로직을 여기 둔다.
                         **이 폴더의 제품 코드는 순수하다**(std + 계약 모듈만, 소켓·OS 0) — 그 순수성이 파서·wire·validator를 테스트 가능하게 만드는 근거다.
                         `test` 블록은 이 규칙 밖이다(실제 동작을 실측하느라 fork/pipe를 쓸 수 있다 — `ssh.zig`의 신호 수명 헬퍼가 그 예다).
                         **이 규칙은 산문이 아니라 `tests/boundary/cli_purity.zig`가 기계로 고정한다** — 재고에 없는 파일은 impure 토큰 0이고,
@@ -605,3 +605,7 @@ L2 `session/editor/search/request.zig`는 요청 전체 예산과 행의 root �
 `src/cli/editor.zig`는 editor 명령 namespace와 도움말 선택을 소유한다.
 `src/cli/editor/open.zig`는 `maru editor open`의 인자 해석과 앱 URL 생성만 소유한다. 현재 디렉터리 조회와
 `/usr/bin/open`의 직접 exec는 `main.zig`가 맡는다. 기존 CLI 순수 경계를 유지한다.
+
+LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget …`이며,
+기존 `maru lsp …`는 동일한 parser와 request 실행 경로를 쓰는 호환 별칭이다.
+`maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.

@@ -294,7 +294,7 @@ fn dispatch(
     }
 
     if (std.mem.eql(u8, command, "editor")) {
-        try runEditorCli(allocator, &args, stdout, stderr);
+        try runEditorCli(io, allocator, &args, stdout, stderr);
         return;
     }
 
@@ -15138,7 +15138,7 @@ fn runAgentEvents(
 }
 
 /// CLI only requests OS URL delivery; the app owns file validation and navigation.
-fn runEditorCli(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+fn runEditorCli(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     const cli = maru.cli.editor;
     var collected: [9][]const u8 = undefined;
     var count: usize = 0;
@@ -15156,6 +15156,10 @@ fn runEditorCli(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Wri
         try stderr.writeAll(usage);
         return error.UnknownCommand;
     };
+    if (parsed == .lsp) {
+        try runLspTrustArgs(io, allocator, parsed.lsp, stdout, stderr);
+        return;
+    }
     if (parsed == .help or parsed == .open_help) {
         try stdout.writeAll(if (parsed == .open_help) cli.open.help else cli.help);
         try stdout.flush();
@@ -15812,7 +15816,7 @@ fn runSessionCli(
     }
 }
 
-/// `maru lsp trust list|revoke|forget`(계획 WT4b) — 언어 서버 신뢰 결정을 조회·철회·잊는다(부여 없음). 셀렉터 없이 붙는다(앱 전역 표 —
+/// `maru editor lsp trust list|revoke|forget` (legacy `maru lsp` alias)(계획 WT4b) — 언어 서버 신뢰 결정을 조회·철회·잊는다(부여 없음). 셀렉터 없이 붙는다(앱 전역 표 —
 /// `control_client.Anchor`). 상대 경로는 현재 디렉터리 기준으로 편다(서버는 CLI 의 cwd 를 모른다). 오류 응답이면 exit 1.
 fn runLspTrustCli(
     io: std.Io,
@@ -15827,8 +15831,14 @@ fn runLspTrustCli(
         collected.deinit(allocator);
     }
     while (args.next()) |a| try collected.append(allocator, try allocator.dupe(u8, a));
+    try runLspTrustArgs(io, allocator, collected.items, stdout, stderr);
+}
+
+/// Both canonical editor namespace and legacy alias use exactly the same request
+/// policy and socket adapter, so aliases cannot diverge on authorization or requests.
+fn runLspTrustArgs(io: std.Io, allocator: std.mem.Allocator, collected: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     const cli = maru.cli.lsp_trust;
-    const parsed = cli.parse(collected.items) catch |err| {
+    const parsed = cli.parse(collected) catch |err| {
         const reason = switch (err) {
             error.MissingTopic => "a topic is required (trust)",
             error.UnknownTopic => "unknown topic",
@@ -15840,7 +15850,7 @@ fn runLspTrustCli(
             error.UnknownOption => "unknown option",
             error.UnexpectedArgument => "too many arguments",
         };
-        try stderr.print("maru lsp: {s}\n\n", .{reason});
+        try stderr.print("maru editor lsp: {s}\n\n", .{reason});
         try stderr.writeAll(cli.help);
         try stderr.flush();
         return error.UnknownCommand;
@@ -15863,7 +15873,7 @@ fn runLspTrustCli(
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             const cwd: []const u8 = if (std.fs.path.isAbsolute(t.path)) "/" else blk: {
                 _ = std.c.getcwd(&cwd_buf, cwd_buf.len) orelse {
-                    try stderr.writeAll("maru lsp: cannot read the current directory — pass an absolute path\n");
+                    try stderr.writeAll("maru editor lsp: cannot read the current directory — pass an absolute path\n");
                     try stderr.flush();
                     return error.UnknownCommand;
                 };
@@ -15973,7 +15983,8 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru terminfo [--status|--refresh|--clear|--path]
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
-        \\  maru lsp trust list | revoke <path> [--volume <hex>] | forget <path> [--volume <hex>]
+        \\  maru editor lsp trust list | revoke <path> [--volume <hex>] | forget <path> [--volume <hex>]
+        \\  maru lsp ...  (compatibility alias for maru editor lsp)
         \\  maru host status [--json]
         \\  maru runtime list [--json]
         \\  maru runtime get <32-lower-hex-runtime-id> [--json]
@@ -15998,7 +16009,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\                        with <expected>: read what another app put there and compare.
         \\                        with --paste-encode: run the current clipboard through the paste rules.
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
-        \\  editor       open an editor file at a line/UTF-16 column (macOS; `editor --help`)
+        \\  editor       open editor files and manage LSP trust (`editor --help`)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
         \\  sessions   list running Maru sessions (surfaces) as read-only metadata (`sessions --help`)

@@ -2093,7 +2093,7 @@ end_all_shells() { # 이 스모크의 session host 아래 시험 셸 수(앞 단
     done
     echo "$n"
 }
-end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0)
+end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0) $4=고르기 직전(8 초)에 떠 있어야 할 새 시험 셸 수
     ea_before=$(end_all_shells)
     rm -rf "$root/home" && mkdir -p "$root/home"
     printf '%b' "$2" > "$root/endall-$1.txt"
@@ -2104,25 +2104,33 @@ end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0)
             MARU_WEB_OSR_TEST_INPUT="$root/endall-$1.txt" MARU_CONFIG="$root/endedshell.conf" "$app" > "$root/app-endall-$1.log" 2>&1 &
     else
         env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
-            MARU_MACOS_APP_SMOKE_MS=30000 MARU_WEB_OSR_TEST_INPUT="$root/endall-$1.txt" MARU_CONFIG="$root/endedshell.conf" \
-            "$app" > "$root/app-endall-$1.log" 2>&1 &
+            MARU_MACOS_APP_SMOKE_MS=30000 MARU_APP_SUMMARY_PATH="$root/endall-$1.summary" MARU_WEB_OSR_TEST_INPUT="$root/endall-$1.txt" \
+            MARU_CONFIG="$root/endedshell.conf" "$app" > "$root/app-endall-$1.log" 2>&1 &
     fi
     ea_pid=$!
+    sleep 8
+    ea_mid=$(( $(end_all_shells) - ea_before ))
     ea_rc=0
     wait "$ea_pid" || ea_rc=$?
     ea_elapsed=$(( $(date +%s) - ea_start ))
     sleep 1
     ea_left=$(( $(end_all_shells) - ea_before ))
     grep -ao "fatal integrity: reason=[a-z_]*([0-9]*)" "$root/app-endall-$1.log" | head -1
+    # 이 길을 정말 탔는가 — 셸 셋은 고르기 전에 셋이 떠 있었어야 하고, 끝난 셸 창은 그 셸이 정말 끝났어야 한다.
+    [ "$ea_mid" -ge "$4" ] || fail "quit and end sessions ($1): only $ea_mid new test shells were running before choosing it (expected $4)"
+    if [ "$3" = 0 ] && ! grep -aq "fatal integrity" "$root/app-endall-$1.log"; then
+        grep -aq '^exit_events=[1-9]' "$root/endall-$1.summary" 2>/dev/null \
+            || fail "quit and end sessions ($1): the window's shell had not ended — this run did not reach the ended-shell case"
+    fi
     if [ "$ea_rc" = 0 ] && [ "$ea_elapsed" -lt 25 ] && [ "$ea_left" -le 0 ] && ! grep -aq "fatal integrity" "$root/app-endall-$1.log"; then
         echo "PASS quit and end sessions ($1) ended every shell and quit cleanly ($ea_elapsed s · exit 0)"
     else
         fail "quit and end sessions ($1) did not end cleanly ($ea_elapsed s · exit $ea_rc · test shells left $ea_left)"
     fi
 }
-end_all_run ended-shell 'sleep 4000\nkey 53 U+1B U+1B 0\nsleep 600\naction close_tab\nsleep 1000\nkey 2 U+64 U+64 0\nsleep 26000\n' 0
+end_all_run ended-shell 'sleep 9000\nkey 53 U+1B U+1B 0\nsleep 600\naction close_tab\nsleep 1000\nkey 2 U+64 U+64 0\nsleep 19000\n' 0 0
 for ea_i in 1 2 3; do
-    end_all_run "three-shells-$ea_i" 'sleep 6000\naction new_term\nsleep 800\naction new_term\nsleep 800\naction close_tab\nsleep 1000\nkey 2 U+64 U+64 0\nsleep 24000\n' 1
+    end_all_run "three-shells-$ea_i" 'sleep 6000\naction new_term\nsleep 800\naction new_term\nsleep 2000\naction close_tab\nsleep 1000\nkey 2 U+64 U+64 0\nsleep 19000\n' 1 3
 done
 
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────

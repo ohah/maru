@@ -1069,6 +1069,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                 switch (self.scm_log_failure) {
                     .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
                     .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
+                    .partial_clone => git_ops.partialCloneNotice(self),
                     .generic => maru.i18n.t(.scm_log_read_failed),
                 }
             else
@@ -1114,6 +1115,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                         switch (self.scm_commit_files_failure) {
                             .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
                             .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
+                            .partial_clone => git_ops.partialCloneNotice(self),
                             .generic => maru.i18n.t(.scm_commit_files_failed),
                         }
                     else
@@ -2101,7 +2103,7 @@ fn submitFetch(self: *AppSession) void {
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
     }
     self.scm_fetch_seq += 1;
     if (!self.git_backend.?.submitFetch(git_exe, repo, self.scm_fetch_seq)) return;
@@ -2471,7 +2473,8 @@ pub fn shouldRetryScmLog(
 ) bool {
     if (!failed) return false;
     return switch (failure) {
-        .generic => false,
+        // partial clone 은 신뢰가 바뀌어야 풀린다 — 신뢰가 바뀌면 도크가 통째로 다시 읽는다(계획 workspace-trust WT6b-1a).
+        .generic, .partial_clone => false,
         .remote_git_missing, .remote_transport => now - read_ns >= scm_log_retry_ns,
     };
 }
@@ -2547,7 +2550,7 @@ pub fn pumpScmLog(self: *AppSession) void {
     else
         git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
     }
     self.scm_log_seq += 1;
     if (!self.git_backend.?.submitLog(git_exe, repo, self.scm_log_limit, self.scm_log_seq, remote)) return;
@@ -2755,6 +2758,13 @@ fn expandedTurnKey(self: *AppSession) ?[]const u8 {
     return self.scm_expanded_turn;
 }
 
+/// 펼친 커밋·턴의 파일 원문을 버리고 도는 요청을 끊는다 — 다음 tick 이 다시 읽는다(신뢰가 바뀌었다 — 계획 workspace-trust
+/// WT6b-1a). 턴 요약(`scm_turn_summary_inflight`)은 건드리지 않는다 — 신뢰 전엔 턴 스냅샷을 안 찍는다.
+pub fn invalidateScmCommitFiles(self: *AppSession) void {
+    dropCommitFiles(self);
+    self.scm_commit_files_inflight = 0;
+}
+
 /// 펼친 커밋의 파일 원문을 버린다(다른 커밋을 펼쳤거나 접었다).
 fn dropCommitFiles(self: *AppSession) void {
     if (self.scm_commit_files_oid) |old| self.allocator.free(old);
@@ -2821,7 +2831,7 @@ pub fn pumpCommitFiles(self: *AppSession) void {
     else
         git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
     }
     self.scm_commit_files_seq += 1;
     const submitted = switch (self.scm_tab) {
@@ -2918,7 +2928,7 @@ pub fn pumpTurnSummaries(self: *AppSession) void {
     else
         git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
     }
 
     var key_buf: [maru.session.turn_snapshot.max_oid_len * 2 + 2]u8 = undefined;
@@ -3480,7 +3490,7 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
     else
         git_backend_mod.locate(&exe_buf) orelse return false;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return false;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return false;
     }
     self.scm_write_seq += 1;
     // **판정자용 기록**(S4b): 무엇을 걸었는지 — 종류와 경로 수. 백엔드 큐를 들여다보지 않고 이 경계를 잰다.
@@ -4142,7 +4152,7 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     // 곳이 갈린다.
     const repo = repo_path;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
     }
     self.scm_write_seq += 1;
     // **커밋도 원격으로 간다**(RS4b). 메시지 파일은 여전히 **로컬에** 쓰고, 원격이면 실행 층이 그
@@ -4744,7 +4754,7 @@ fn submitRepoStatus(self: *AppSession, repo: []const u8, remote: ?maru.session.g
     else
         git_backend_mod.locate(&exe_buf) orelse return;
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
     }
     self.scm_repo_status_seq += 1;
     if (!self.git_backend.?.submitRepoStatus(git_exe, repo, self.scm_repo_status_seq, remote)) return;

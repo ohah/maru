@@ -7316,6 +7316,9 @@ pub const AppSession = struct {
     /// 반영되지 않은 채 조용히 사라진다 — "골랐는데 안 바뀐다"가 이 기능의 가장 나쁜 실패다.
     /// 낙관하지 않고 **사실로 남겨** 다음 tick이 다시 건다(제출에 성공한 자리에서만 내린다).
     scm_base_reread_pending: bool = false,
+    /// 마지막으로 본 신뢰 표의 세대(계획 workspace-trust WT6b-1a) — 바뀌면 도크의 git 읽기를 다시 건다(신뢰 전 결과가 신뢰한 뒤에도
+    /// 남지 않게, 그 반대도). null 은 아직 git 이 신뢰를 묻지 않았다(다시 읽을 것이 없다) — 첫 판정이 세운다.
+    git_trust_generation: ?u64 = null,
     /// 마지막으로 만든 프레임에서 **목록이 창을 넘쳤나**(그래서 오른쪽에 스크롤바 자리를 비웠나).
     ///
     /// 커밋 상자의 랩 계산이 이 값을 쓴다: 상자는 목록 줄이라 그 자리만큼 좁아지는데, host가 그 조건을
@@ -12252,7 +12255,7 @@ pub const AppSession = struct {
             return;
         };
         if (self.git_backend == null) {
-            self.git_backend = git_backend_mod.Backend.init(self.io) catch {
+            self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch {
                 entry.diff_failed = true;
                 return;
             };
@@ -20696,6 +20699,7 @@ pub const AppSession = struct {
         file_panel_ops.updateFileTreeMutations(self); // mutation completion memory queue only; at most one result per frame // path-pinned rename recreation is bounded to one visible WebView per frame
         git_ops.drainGitStatus(self); // 완료된 git 읽기를 싣는다 + 활성 터미널이 옮겨 갔는지 확인(저주기 cwd 조회)
         git_ops.pumpBaseReread(self); // 고른 기준으로 아직 못 읽었으면 다시 건다(§3.5 — 조용히 잊지 않는다)
+        git_ops.pumpTrustReread(self); // 신뢰가 바뀌었으면 도크를 다시 읽는다(계획 workspace-trust WT6b-1a)
         // 끝난 쓰기를 **읽기보다 먼저** 거둔다 — 거두는 순간 목록 읽기를 한 번 걸므로, 순서가 반대면
         // 그 읽기가 같은 tick에 안 돌고 화면이 한 프레임 늦게 갱신된다(쓰기 문서 §6-1).
         scm_dock_ops.drainScmWrite(self);
@@ -24192,6 +24196,19 @@ pub const AppSession = struct {
         // 경로처럼 긴 값이 끼는 자리(파일 트리 수동 복구 안내)가 있어 256 으로는 모자랐다.
         var buf: [512]u8 = undefined;
         self.showNotice(maru.i18n.format(&buf, maru.i18n.t(key), args));
+    }
+
+    /// git 읽기의 신뢰 판정(계획 workspace-trust WT6b-1a) — `git_backend` 에 꽂는다(그 층은 편집기의 신뢰 표를 모른다).
+    pub fn gitTrustCheck(self: *AppSession) git_backend_mod.Backend.TrustCheck {
+        return .{ .ctx = self, .trusted = gitRepoTrustedThunk };
+    }
+
+    fn gitRepoTrustedThunk(ctx: *anyopaque, repo: []const u8) bool {
+        const self: *AppSession = @ptrCast(@alignCast(ctx));
+        const trusted = editor_ops.lsp_client.repoTrusted(self, repo); // 표가 아직 안 읽혔으면 여기서 읽는다
+        // 첫 판정이 신뢰 세대의 기준을 잡는다 — 이 읽기가 쓴 그 표(`git.pumpTrustReread`).
+        if (self.git_trust_generation == null) self.git_trust_generation = editor_ops.lsp_client.trustGeneration();
+        return trusted;
     }
 
     /// 문자열 진입점 — **전환 중에만 남는다**(계약 §7.2). 호출부가 전부 키로 옮겨지고 ABI 경로가
@@ -83543,6 +83560,9 @@ test "턴 스냅샷이 링에 실리고 base 는 직전 턴의 키·제목을 �
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    // 이 판정자는 신뢰와 무관한 턴 축을 잰다 — 판정 함수 없는 백엔드(판정자에서는 신뢰)를 미리 둔다. 제품 생성
+    // (`initWithTrust`)이면 신뢰 표에 결정이 없어 신뢰 전으로 스냅샷을 건너뛴다(계획 workspace-trust WT6b-1a).
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
     // 저장소를 목록의 root로 세운다 — 제품에서 파일을 열면 root가 추론되는 그 경로다.
     var opened_buf: [std.fs.max_path_bytes]u8 = undefined;
     const opened = try std.fmt.bufPrint(&opened_buf, "{s}/kept.txt", .{repo});
@@ -83932,6 +83952,9 @@ test "에이전트 화면이 running → idle이 되는 순간 작업트리가 �
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
+    // 판정 함수 없는 백엔드(판정자 — 신뢰)를 미리 둔다 — 제품 경로가 게으르게 만들면 세션의 신뢰 판정이 꽂혀, 결정이 없는
+    // 이 저장소는 신뢰 전이라 스냅샷을 건너뛴다(계획 workspace-trust WT6b-1a).
+    session.git_backend = try git_backend_mod.Backend.init(session.io);
     var opened_buf: [std.fs.max_path_bytes]u8 = undefined;
     try session.file_tree.recordOpened(try std.fmt.bufPrint(&opened_buf, "{s}/a.txt", .{repo}), repo);
     git_ops.rememberGitRepo(session, repo);

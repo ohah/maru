@@ -84,6 +84,7 @@ pub const syntax_color = @import("syntax.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const lsp_client = @import("lsp.zig");
 const trust_store = @import("trust_store.zig");
+const git_ops = @import("../git.zig"); // 신뢰 세대 펌프(계획 workspace-trust WT6b-1a)
 const tool_env = @import("../../tool_env.zig");
 /// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
 pub const hover_client = @import("hover.zig");
@@ -14943,6 +14944,72 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .none);
     fx.session.loaded_config.config.lsp.enabled = true;
+}
+
+test "WT6b-1a git 읽기의 신뢰 판정은 언어 서버와 같은 표다(허용만 신뢰 — 저장소 밖·결정 없음·거부는 신뢰 전), 첫 판정이 기준 세대를 잡고 표가 바뀌면 도크의 git 읽기를 한 번 다시 건다(도는 펼침 요청은 끊는다) (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null; // `MARU_CONFIG` 를 다시 읽게
+
+    const check = fx.session.gitTrustCheck(); // 제품이 `git_backend` 에 꽂는 그 판정
+    fx.session.scm_base_reread_pending = false;
+    // git 이 아직 신뢰를 안 물었으면 다시 읽을 것이 없다 — 표가 바뀌어도(여기선 적재) 아무것도 안 한다.
+    try testing.expect(fx.session.git_trust_generation == null);
+    git_ops.pumpTrustReread(fx.session);
+    try testing.expect(!fx.session.scm_base_reread_pending);
+    try testing.expect(!check.trusted(check.ctx, root)); // 저장소 밖 — 묻지 않는 root 는 결정이 생길 수 없다
+    // 첫 판정이 기준 세대를 잡는다(표를 읽은 뒤의 세대 — 그 적재를 「바뀜」으로 읽지 않는다).
+    try testing.expectEqual(@as(?u64, trust_store.generation()), fx.session.git_trust_generation);
+    try fx.dir.dir.createDirPath(testing.io, ".git");
+    try testing.expect(!check.trusted(check.ctx, root)); // 결정 없음
+    git_ops.pumpTrustReread(fx.session);
+    try testing.expect(!fx.session.scm_base_reread_pending); // 바뀐 게 없으면 다시 안 읽는다(매 tick 도는 자리)
+
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return error.TrustKeyMissing;
+    try testing.expect(trust_store.decide(testing.io, key, .allow));
+    try testing.expect(check.trusted(check.ctx, root));
+    // 신뢰 전 규칙으로 펼친 커밋 파일이 있고 그 요청이 아직 돌고 있다 — 신뢰한 뒤에는 버리고, 도는 요청의 답도 안 받는다.
+    fx.session.scm_commit_files_oid = try allocator.dupe(u8, "0123abcd");
+    fx.session.scm_commit_files_inflight = 7;
+    git_ops.pumpTrustReread(fx.session);
+    try testing.expect(fx.session.scm_base_reread_pending);
+    try testing.expect(fx.session.scm_commit_files_oid == null);
+    try testing.expectEqual(@as(u64, 0), fx.session.scm_commit_files_inflight);
+    fx.session.scm_base_reread_pending = false;
+    git_ops.pumpTrustReread(fx.session);
+    try testing.expect(!fx.session.scm_base_reread_pending); // 한 번만
+
+    // 철회(거부)도 같은 길 — 신뢰 때 읽은 결과가 남지 않는다.
+    try testing.expect(trust_store.decide(testing.io, key, .deny));
+    try testing.expect(!check.trusted(check.ctx, root));
+    git_ops.pumpTrustReread(fx.session);
+    try testing.expect(fx.session.scm_base_reread_pending);
+
+    // 표에 허용이 남아 있어도 묻지 않는 root(여기선 저장소가 아니게 됨)는 신뢰 전 — 언어 서버와 같은 거절(`refusalFor`).
+    try testing.expect(trust_store.decide(testing.io, key, .allow));
+    try testing.expect(check.trusted(check.ctx, root));
+    var git_z: [std.fs.max_path_bytes + 8]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.rmdir((try std.fmt.bufPrintZ(&git_z, "{s}/.git", .{root})).ptr));
+    try testing.expect(!check.trusted(check.ctx, root));
+
+    // partial clone 안내는 원격에서 「신뢰하면 받아 온다」를 말하지 않는다 — 원격은 신뢰할 수 없다(적대적 검증 2회차).
+    try testing.expectEqualStrings(maru.i18n.t(.scm_partial_clone_untrusted), git_ops.partialCloneNotice(fx.session));
+    const saved_dest = fx.session.git_repo_dest;
+    fx.session.git_repo_dest = @constCast("user@host");
+    defer fx.session.git_repo_dest = saved_dest;
+    try testing.expectEqualStrings(maru.i18n.t(.scm_partial_clone_remote), git_ops.partialCloneNotice(fx.session));
 }
 
 test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣고 원문 자리표시자를 남기지 않는다 (§8.2a)" {

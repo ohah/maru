@@ -237,10 +237,20 @@ test "감시자는 PATH 처방과 «같은» 굳히기 목록을 받는다" {
 
     // ⚠️ **굳히기 목록을 두 벌로 두지 않는다**(RW7b). 감시자가 저쪽에서 git 을 돌리는데 그 목록이
     // 갈리면 «감시자만» 문이 열린 채 돈다. 앱이 L2 의 단일 출처를 그대로 실어 보내야 한다.
+    // 주석이 아니라 **코드**로 본다 — 실어 보내는 자리는 `watchArgs` 이고 `spawnRemoteWatch` 가 그것을 부른다(WT6a 적대적
+    // 검증 2회차: 주석에 이름이 남아 있으면 배선을 끊어도 통과했다).
     const spawn = try bodyOf(up, "pub fn spawnRemoteWatch(", "\n}\n", 4096);
-    try std.testing.expect(std.mem.indexOf(u8, spawn, "git_command.config_overrides") != null);
     const spawn_code = try stripComments(allocator, spawn);
     defer allocator.free(spawn_code);
+    try std.testing.expect(std.mem.indexOf(u8, spawn_code, "watchArgs(") != null);
+    const args_fn = try bodyOf(up, "fn watchArgs(", "\n}\n", 2048);
+    const args_code = try stripComments(allocator, args_fn);
+    defer allocator.free(args_code);
+    try std.testing.expect(std.mem.indexOf(u8, args_code, "git_command.config_overrides") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args_code, "watch_env_lists") != null);
+    const lists = try bodyOf(up, "const watch_env_lists = ", ";\n", 512);
+    try std.testing.expect(std.mem.indexOf(u8, lists, "git_command.env_overrides") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lists, "git_command.untrusted_env_overrides") != null);
     // 목록을 손으로 다시 적지 않는다 — 적었다면 그 문자열이 여기 보인다.
     try std.testing.expect(std.mem.indexOf(u8, spawn_code, "core.hooksPath") == null);
 }

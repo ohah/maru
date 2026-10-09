@@ -689,7 +689,7 @@ git diff --numstat --find-renames --no-ext-diff --no-textconv --cached  ← 행�
 | `core.hooksPath` · `diff.external` · `core.pager` · `credential.helper` · `protocol.ext.allow` | 각자 | ✅ 이미 막혀 있었다 |
 | `diff.<name>.textconv` | `diff` | ✅ 이미 막혀 있었다 — `build` 의 두 `diff` 가 모두 `--no-textconv` 를 건다 |
 | `core.fsmonitor` | **`status` 마다** | ✅ **이번에 막았다**(`-c core.fsmonitor=`) |
-| partial clone 의 지연 가져오기(`remote.<n>.uploadpack`·`core.sshCommand`·`core.gitProxy`·`git-remote-*`) | 빠진 blob 을 읽는 `diff --numstat` 등 | ❌ 아직 열려 있다 — 늘 막으면 정상 partial clone 사용자의 읽기가 실패해(실측) 신뢰에 따라 막는다([workspace-trust](workspace-trust.md) WT6b) |
+| partial clone 의 지연 가져오기(`remote.<n>.uploadpack`·`core.sshCommand`·`core.gitProxy`·`git-remote-*`) | 빠진 blob 을 읽는 `diff --numstat` 등 | ✅ 신뢰 전에 막는다([workspace-trust](workspace-trust.md) WT6b-1a — `GIT_NO_LAZY_FETCH=1`·`GIT_ALLOW_PROTOCOL=`(빈 목록) — 각자 혼자서도 막는다). 감시자 앞머리엔 `-c status.renames=false` 도 싣는다 — 안 받은 blob 으로 다이제스트의 `status` 가 실패하지 않게. 원격은 늘 신뢰 전이라 원격 읽기·감시자 앞머리에 늘 싣는다. 늘 막지 않는 이유: 신뢰한 partial clone 사용자의 읽기가 실패한다(실측) |
 | `log.showSignature` + `gpg.program` | `log`·`show` | ✅ 막았다(WT6a — `-c log.showSignature=false`) |
 | **`filter.<name>.clean` · `.smudge`** | **`status` · `diff` · `diff --numstat`** | ❌ **아직 열려 있다** |
 

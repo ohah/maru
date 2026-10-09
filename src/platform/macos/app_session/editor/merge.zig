@@ -187,7 +187,7 @@ pub fn request(self: *AppSession, term: *Term) void {
         return;
     };
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch {
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch {
             state.failed = true;
             return;
         };

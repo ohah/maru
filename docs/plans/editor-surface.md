@@ -90,5 +90,5 @@ E0.5A~E4 단계와 각 단계의 종료 gate다. 계약은 [에디터 Surface](.
 - git stage/unstage, 파괴적 discard UX
 - TextMate/WASM
 - 증분 대형 문서 전송과 virtualized diff
-- LSP 신뢰 모달·신뢰 저장소·도구 환경(tooling §8.1) — [워크스페이스 신뢰와 도구 환경 구현 계획](workspace-trust.md)이 소유한다(WT1~WT5).
+- LSP 신뢰 모달·신뢰 저장소·도구 환경(tooling §8.1) — [워크스페이스 신뢰와 도구 환경 구현 계획](workspace-trust.md)이 소유한다(WT1~WT6).
 - 다중 root·동시 여러 repository, remote/SSH workspace. 단일 linked worktree의 `.git` file 처리는 E1 범위다.

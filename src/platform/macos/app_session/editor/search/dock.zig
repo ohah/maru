@@ -145,6 +145,8 @@ pub fn changed(self: *AppSession) void {
 pub fn setPreedit(self: *AppSession, bytes: []const u8) void {
     const field = focused(self) orelse return;
     if (bytes.len == 0 and field.preedit.items.len == 0) return;
+    // 기존 조합을 비우기 전에 예약한다. 새 조합의 할당 실패도 이전 조합을 보존한다.
+    field.preedit.ensureTotalCapacity(self.allocator, bytes.len) catch return;
     field.setPreedit(self.allocator, bytes) catch return;
     stopRequest(self);
     self.editor_search.invalidate();

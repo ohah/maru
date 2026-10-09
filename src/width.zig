@@ -55,6 +55,11 @@ pub fn cellWidthAmbiguous(codepoint: u21, ambiguous_wide: bool) u2 {
 /// (❤+VS16=❤️) — 별도 셀이면 base 만 텍스트 폰트로 단색이 된다.
 pub fn isCombiningMark(codepoint: u21) bool {
     if (codepoint < combining_ranges[0][0]) return false; // ASCII·라틴 기본은 표를 안 탄다(핫 경로)
+    // 결합 부호가 하나도 없는 넓은 구간(CJK·한글 음절·이모지)도 표를 안 탄다. 실측(ReleaseFast): 이게
+    // 없으면 한글 출력에서 `cellWidth` 가 글자당 2.7 ns → 8.1 ns 로 세 배가 됐다.
+    for (no_mark_spans) |s| {
+        if (codepoint >= s[0] and codepoint <= s[1]) return false;
+    }
     // 이진 탐색: 셀마다 불리는 함수라 364 구간을 선형으로 훑지 않는다(9 비교).
     var lo: usize = 0;
     var hi: usize = combining_ranges.len;
@@ -69,6 +74,11 @@ pub fn isCombiningMark(codepoint: u21) bool {
     }
     return false;
 }
+
+/// 결합 부호가 **하나도 없는** 구간 — `isCombiningMark` 의 빠른 거절. 각각 CJK 통합 한자·가나 뒤쪽
+/// (U+309B–A66E), 한글 음절을 담은 구간(U+ABEE–FB1D), 이모지·기호 평면(U+1E94B–E00FF)이다.
+/// 표와 겹치면 결합 부호를 놓치므로 아래 comptime 이 «어느 구간과도 안 겹친다»를 지킨다.
+const no_mark_spans = [_][2]u21{ .{ 0x309B, 0xA66E }, .{ 0xABEE, 0xFB1D }, .{ 0x1E94B, 0xE00FF } };
 
 /// Mn·Me 구간표(Unicode 18.0.0) — `isCombiningMark` 머리말 참조. 오름차순·겹침 없음은 아래 comptime 이 지킨다.
 const combining_ranges = [_][2]u21{
@@ -141,6 +151,9 @@ comptime {
     for (combining_ranges, 0..) |r, i| {
         if (r[0] > r[1]) @compileError("combining_ranges: start > end");
         if (i > 0 and r[0] <= combining_ranges[i - 1][1] + 1) @compileError("combining_ranges must be strictly ascending and merged");
+        for (no_mark_spans) |s| {
+            if (r[0] <= s[1] and r[1] >= s[0]) @compileError("no_mark_spans overlaps a combining range");
+        }
     }
 }
 
@@ -285,6 +298,7 @@ test "cellWidth: Mn·Me 는 블록과 상관없이 0폭이고, 바로 옆 비결
     // 예전 표가 몰랐던 블록들 — 구간 **양끝**과 그 **바깥 이웃**을 함께 잰다. 끝만 재면 구간이 한 칸 짧거나
     // 길어도 통과하고, 이진 탐색의 경계 비교(`<` 와 `>`)가 하나 틀려도 통과한다.
     const zero = [_]u21{
+        0x0300, // COMBINING GRAVE ACCENT — 표의 첫 칸. 빠른 거절이 `<` 가 아니라 `<=` 로 새면 여기서만 드러난다(변이로 확인)
         0x0483, // COMBINING CYRILLIC TITLO — kitty placeholder 좌표표의 30번, 예전 표의 첫 구멍
         0x0489, // COMBINING CYRILLIC MILLIONS SIGN (Me)
         0x0591, 0x05BD, // 히브리 악센트

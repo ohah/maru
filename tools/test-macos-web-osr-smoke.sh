@@ -2093,7 +2093,7 @@ end_all_shells() { # 이 스모크의 session host 아래 시험 셸 수(앞 단
     done
     echo "$n"
 }
-end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0) $4=고르기 직전(8 초)에 떠 있어야 할 새 시험 셸 수
+end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0) $4=고르기 직전(7~9 초)에 떠 있어야 할 새 시험 셸 수(0 이면 하나도 없어야 한다)
     ea_before=$(end_all_shells)
     rm -rf "$root/home" && mkdir -p "$root/home"
     printf '%b' "$2" > "$root/endall-$1.txt"
@@ -2108,8 +2108,13 @@ end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0) $4=고르기 직전(8 �
             MARU_CONFIG="$root/endedshell.conf" "$app" > "$root/app-endall-$1.log" 2>&1 &
     fi
     ea_pid=$!
-    sleep 8
-    ea_mid=$(( $(end_all_shells) - ea_before ))
+    sleep 7
+    ea_mid=0 # 7~9 초의 가장 큰 값 — 부하로 셸이 늦게 떠도 고르기(약 9.8 초) 전의 수를 본다
+    for ea_k in 1 2 3 4 5 6 7 8; do
+        ea_now=$(( $(end_all_shells) - ea_before ))
+        [ "$ea_now" -gt "$ea_mid" ] && ea_mid=$ea_now
+        sleep 0.25
+    done
     ea_rc=0
     wait "$ea_pid" || ea_rc=$?
     ea_elapsed=$(( $(date +%s) - ea_start ))
@@ -2117,7 +2122,12 @@ end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0) $4=고르기 직전(8 �
     ea_left=$(( $(end_all_shells) - ea_before ))
     grep -ao "fatal integrity: reason=[a-z_]*([0-9]*)" "$root/app-endall-$1.log" | head -1
     # 이 길을 정말 탔는가 — 셸 셋은 고르기 전에 셋이 떠 있었어야 하고, 끝난 셸 창은 그 셸이 정말 끝났어야 한다.
-    [ "$ea_mid" -ge "$4" ] || fail "quit and end sessions ($1): only $ea_mid new test shells were running before choosing it (expected $4)"
+    if [ "$4" = 0 ]; then
+        # 셸이 시작 직후 끝났어야 끝난 runtime 의 길이다 — 살아 있다가 end-all 에 죽어도 exit_events 는 선다.
+        [ "$ea_mid" -le 0 ] || fail "quit and end sessions ($1): $ea_mid new test shells were still running — this run did not reach the ended-shell case"
+    else
+        [ "$ea_mid" -ge "$4" ] || fail "quit and end sessions ($1): only $ea_mid new test shells were running before choosing it (expected $4)"
+    fi
     if [ "$3" = 0 ] && ! grep -aq "fatal integrity" "$root/app-endall-$1.log"; then
         grep -aq '^exit_events=[1-9]' "$root/endall-$1.summary" 2>/dev/null \
             || fail "quit and end sessions ($1): the window's shell had not ended — this run did not reach the ended-shell case"

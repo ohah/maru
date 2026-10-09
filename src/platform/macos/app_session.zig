@@ -20645,8 +20645,8 @@ pub const AppSession = struct {
         editor_backup_ops.tick(self); // §3.10: 편집이 멎고 debounce 가 지났으면 미저장 내용을 백업한다
         editor_backup_ops.drainRevivals(self); // §3.10(U4d): 신원을 잃은 문서를 이름 없는 문서로 — 프레임당 하나
         self.advancePendingAppQuitShutdown();
-        // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
-        // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
+        // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 이 창의 end-all 진행이나
+        // Term drain을 더 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
         // terminal Runtime을 다시 만져 close authority를 이중 소비할 수 있다. 승인 뒤 앱이 끝나기 전에 도는 frame도 같다
         // (`endAllQuitInFlight` — 승인 frame 은 `quit_decision` 을 한 번 싣고 비운다).
         if (self.quit_decision == .accepted or self.endAllQuitInFlight()) {
@@ -72072,14 +72072,15 @@ test "「종료 및 세션 끝내기」가 종료 승인을 게시한 뒤 앱이
     const ending = pane.terms.items[0];
     try session.backendFor(ending).writeInput(ending.rt.handle, "x\r"); // controlled smoke 셸은 한 줄을 읽고 끝난다
     var waited: usize = 0;
-    while (waited < 30) : (waited += 1) {
+    while (waited < 50) : (waited += 1) { // 약 1.5 초 — 셸이 끝나고도 남는다(끝나지 않았다면 아래 단언이 약해질 뿐 거짓 빨강은 없다)
         _ = try session.tick();
-        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(10), .awake) catch {};
+        std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(30), .awake) catch {};
     }
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     try std.testing.expect(ending.rt.finish_ended == null);
     try std.testing.expectEqual(@as(u32, 1), session.pending_app_quit_shutdown.target_cursor);
-    // Swift 가 저장 안 한 파일로 종료를 취소했다 — 창은 다시 돌아 끝난 셸을 거둔다(막아 두면 영영 멈췄다).
+    // Swift 가 저장 안 한 파일로 종료를 취소했다 — 창의 drain 이 다시 돈다(막아 두면 영영 멈췄다). 이 시험의 셸은 in-process 라
+    // 끝이 다시 보여 거둬진다(실제 취소에서 end-all 이 봉인한 원격 Term 은 끝을 건너뛰어 저절로 거둬지지 않는다 — 문서의 남은 것).
     session.cancelAcceptedAppQuit();
     waited = 0;
     while (pane.terms.items.len == 2 and waited < 300) : (waited += 1) {

@@ -178,3 +178,14 @@ WT5 는 둘로 나눈다(2026-10-09) — 무엇이 실행되는지 보이는 일
 - Zed: [Worktree Trust](https://zed.dev/docs/worktree-trust).
 - rust-analyzer: [Security](https://rust-analyzer.github.io/book/security.html)(모든 코드를 신뢰한다고 가정).
 - 실 서버 일곱의 그룹·EOF 동작 실측: [tooling §8.2a 「수명·재시작」](../editor-surface-tooling.md).
+
+## 2026-10-09 LSPB20 초기화 중 거부 검증
+
+첫 pump에서 서버가 이미 initialize에 답해 ready가 될 수 있는데, 기존 fixture는 반드시 starting을
+기대해 스케줄링에 따라 실패했다. read 직전의 진단용 양보로 ready/proc=true와 해당 assertion
+실패를 재현했고, 같은 조건에서 수정 후 통과했다. 초기화 중 거부 구간만 기존 fake 서버의
+`MARU_FAKE_LSP_INIT=silent`를 EnvGuard로 적용하고, 거부를 확인한 뒤 복원한다. starting과
+프로세스 존재·두 창의 거부 정산·이후 정상 ready 판정은 유지한다. 제품 read 지연/재시도나
+시한 확대를 넣지 않았으며 진단용 hook과 임시 build step은 제거했다. LSPB20/21/22의
+focused Debug·ReleaseFast가 통과했다. 로컬 증거는 `/tmp/maru-lspb20-phase-repro.log`,
+`/tmp/maru-lspb20-yield-fixed.log`, `/tmp/maru-lspb20-trust-group-{debug,release}.log`다.

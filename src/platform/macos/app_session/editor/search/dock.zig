@@ -536,7 +536,11 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
                 };
                 st.apply_outcome = if (result == .saved) .saved else .save_failed;
                 if (result == .saved) {
-                    self.showNoticeKey(.project_replace_saved);
+                    const term = pane.activePane(self).activeTerm();
+                    if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) {
+                        var message: [1024]u8 = undefined;
+                        self.showNotice(std.fmt.bufPrint(&message, "{s}\n{s}", .{ i18n.t(.project_replace_saved), i18n.t(.editor_conflict_markers_remain) }) catch i18n.t(.editor_conflict_markers_remain));
+                    } else self.showNoticeKey(.project_replace_saved);
                 } else {
                     const reason: ?i18n.Key = switch (result.save_failed) {
                         error.ExternalConflict => .editor_save_external_conflict,

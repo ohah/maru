@@ -50,6 +50,7 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
     if (stage >= 26 and stage <= 28) {
         if (term.surfaceId() != editor_project_search_original_surface) return 0;
         const renamed = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "renamed") != null;
+        if (stage == 26 and std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_MARKERS") orelse "0"), "1") and std.mem.indexOf(u8, self.chrome_host.notice.message, maru.i18n.t(.editor_conflict_markers_remain)) == null) return -1;
         if (stage == 26) return if (renamed and !editor_ops.isDirty(term) and term.rt.editorDocument().history.undo_len > 0) 1 else -1;
         if (stage == 27) return if (!renamed and editor_ops.isDirty(term)) 1 else -1;
         return if (!renamed and !editor_ops.isDirty(term)) 1 else -1;

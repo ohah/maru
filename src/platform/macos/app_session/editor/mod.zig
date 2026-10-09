@@ -55534,13 +55534,17 @@ const ProjectSearchSink = struct {
 // 도크 입력과 worker 수명은 실제 AppSession을 사용해 검증한다.
 // 바꾸기 미리보기 판정은 실제 owner·worker를 거치며 쓰기 API를 호출하지 않는다.
 fn replacePreviewSearch(fx: *PaneFixture) !void {
+    try replacePreviewSearchWith(fx, "foo", "bar", false);
+}
+fn replacePreviewSearchWith(fx: *PaneFixture, needle: []const u8, replacement: []const u8, regex: bool) !void {
     try projectSearchRootForTest(fx);
     fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
     const d = @import("search/dock.zig");
     _ = try fx.session.resize(960, 600, 1000);
     d.open(fx.session);
-    try fx.session.editor_search.fields[0].insertText(testing.allocator, "foo");
+    try fx.session.editor_search.fields[0].insertText(testing.allocator, needle);
     try fx.session.editor_search.fields[1].insertText(testing.allocator, "search.txt,disk.txt");
+    fx.session.editor_search.options[2] = regex;
     d.changed(fx.session);
     d.run(fx.session);
     var helper_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -55555,7 +55559,7 @@ fn replacePreviewSearch(fx: *PaneFixture) !void {
     }
     try testing.expectEqual(maru.session.editor.search.presentation.Phase.complete, fx.session.editor_search.result.phase);
     fx.session.editor_search.replacing = true;
-    try fx.session.editor_search.fields[3].insertText(testing.allocator, "bar");
+    try fx.session.editor_search.fields[3].insertText(testing.allocator, replacement);
 }
 fn replacePreviewRow(session: *AppSession, disk: bool, file: bool) !usize {
     for (session.editor_search.result.model.visible.items, 0..) |visible, i| {
@@ -58278,4 +58282,173 @@ test "RPA7 revision 밖 원문 변경과 공유 뷰 조합 검색어 변경은 �
         defer testing.allocator.free(disk);
         try testing.expectEqualStrings("foo", disk);
     }
+}
+
+test "RPA8 적용 저장 완료 알림은 남아 있는 충돌 마커 경고를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n");
+    try applyPreviewReady(&fx);
+    const d = @import("search/dock.zig");
+    d.apply(fx.session, .{ .option = 9 }, fx.session.editor_search.result.generation);
+    try testing.expect(!isDirty(term));
+    try testing.expectEqualStrings("bar\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.editor_conflict_markers_remain)) != null);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.project_replace_saved)) != null);
+}
+
+test "RPA9 root 교체와 대상 닫기 같은 치환 디스크 결과는 적용을 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..5) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "search.txt", if (mode == 4) "aa" else "foo");
+        if (mode == 3) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo disk" });
+        if (mode == 4) try replacePreviewSearchWith(&fx, "((?<=a)a|)a?", "$1$1", true) else try replacePreviewSearch(&fx);
+        if (mode == 2) {
+            fx.session.editor_search.fields[3].selectAll();
+            try fx.session.editor_search.fields[3].insertText(testing.allocator, "foo");
+        }
+        const p = @import("search/preview.zig");
+        try p.start(fx.session, try replacePreviewRow(fx.session, mode == 3, true));
+        try waitReplacePreview(fx.session);
+        if (mode == 0) try fx.session.file_tree.replaceExplicitRoots(&.{});
+        if (mode == 1) {
+            const pane = pane_ops.activePane(fx.session);
+            for (pane.terms.items, 0..) |candidate, index| if (candidate == term) {
+                term_ops.closeTermAt(fx.session, fx.session.app_window.active_tab, pane, index);
+                break;
+            };
+        }
+        try testing.expect(!p.canApply(fx.session));
+        try testing.expectError(error.StaleRequest, p.apply(fx.session));
+        const disk = try fx.dir.dir.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
+        defer testing.allocator.free(disk);
+        try testing.expectEqualStrings(if (mode == 4) "aa" else "foo", disk);
+    }
+}
+
+test "RPA10 원본 삭제와 디렉터리 교체는 저장 실패 뒤에도 적용 내용과 Undo를 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+        try applyPreviewReady(&fx);
+        try fx.dir.dir.deleteFile(testing.io, "search.txt");
+        if (mode == 1) try fx.dir.dir.createDir(testing.io, "search.txt", .default_dir);
+        const outcome = try @import("search/preview.zig").apply(fx.session);
+        try testing.expect(outcome == .save_failed);
+        try testing.expectEqualStrings("bar", term.rt.editorDocument().opened.?.file.content);
+        try testing.expect(isDirty(term));
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+        if (mode == 0) try testing.expectError(error.FileNotFound, fx.dir.dir.access(testing.io, "search.txt", .{})) else {
+            var dir = try fx.dir.dir.openDir(testing.io, "search.txt", .{});
+            dir.close(testing.io);
+        }
+    }
+}
+
+test "RPA11 BOM CRLF와 한글 emoji는 적용 저장 Undo 재저장에서 원문 형식을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const raw = "\xef\xbb\xbf한🙂 foo\r\nfoo\r\n";
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", raw);
+    try applyPreviewReady(&fx);
+    try testing.expect((try @import("search/preview.zig").apply(fx.session)) == .saved);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("\xef\xbb\xbf한🙂 bar\r\nbar\r\n", disk);
+    try testing.expect(!isDirty(term));
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings(raw[3..], term.rt.editorDocument().opened.?.file.content);
+    try saveDocument(fx.session, term);
+    const restored = try fx.dir.dir.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
+    defer testing.allocator.free(restored);
+    try testing.expectEqualStrings(raw, restored);
+}
+
+test "RPA12 공유 문서 전체 할당 실패는 두 뷰의 선택과 본문 기존 Undo를 함께 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var points: usize = 0;
+    var index: usize = 0;
+    while (index == 0 or index <= points) : (index += 1) {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo foo");
+        term.rt.editor_selection = editor_selection.Selection.at(7);
+        try testing.expect(insertText(fx.session, term, "!"));
+        const peer = try openSharedViewInActivePane(fx.session, term);
+        term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
+        peer.rt.editor_selection = editor_selection.Selection.fromPoints(4, 7);
+        term.rt.editor_extra_selections = try testing.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(4)});
+        const before = term.rt.editor_selection;
+        const peer_before = peer.rt.editor_selection;
+        const history = &term.rt.editorDocument().history;
+        history.undo = try testing.allocator.realloc(history.undo, history.undo_len);
+        const undo_before = history.undo_len;
+        try replacePreviewSearchWith(&fx, "foo", "longer", false);
+        try @import("search/preview.zig").start(fx.session, try replacePreviewRow(fx.session, false, true));
+        try waitReplacePreview(fx.session);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (index == 0) std.math.maxInt(usize) else index - 1 });
+        fx.session.allocator = failing.allocator();
+        const result = @import("search/preview.zig").apply(fx.session);
+        fx.session.allocator = testing.allocator;
+        if (index == 0) points = failing.alloc_index;
+        if (result) |_| {
+            try testing.expectEqualStrings("longer longer!", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualStrings("longer longer!", peer.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(@as(usize, 7), peer.rt.editor_selection.?.start());
+            try testing.expectEqual(@as(usize, 13), peer.rt.editor_selection.?.end());
+            try testing.expectEqual(@as(usize, 7), term.rt.editor_extra_selections[0].start());
+            try testing.expectEqual(undo_before + 1, history.undo_len);
+            try testing.expect(undoEdit(fx.session, term));
+            try testing.expectEqualStrings("foo foo!", peer.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualDeep(peer_before, peer.rt.editor_selection);
+            try testing.expectEqual(@as(usize, 4), term.rt.editor_extra_selections[0].start());
+        } else |err| {
+            try testing.expect(err == error.OutOfMemory or err == error.ApplyFailed);
+            try testing.expectEqualStrings("foo foo!", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualStrings("foo foo!", peer.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualDeep(before, term.rt.editor_selection);
+            try testing.expectEqualDeep(peer_before, peer.rt.editor_selection);
+            try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+            try testing.expectEqual(undo_before, history.undo_len);
+        }
+    }
+    std.debug.print("replace_shared_oom allocation_points={d}\n", .{points});
+    try testing.expect(points > 4);
+}
+
+test "RPA13 준비 실패는 Redo를 보존하고 적용 재클릭과 후속 타이핑은 Undo 경계를 지킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(undoEdit(fx.session, term));
+    try applyPreviewReady(&fx);
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    const denied = @import("search/preview.zig").apply(fx.session);
+    fx.session.allocator = testing.allocator;
+    try testing.expectError(error.OutOfMemory, denied);
+    try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.redo_len);
+    try testing.expect((try @import("search/preview.zig").apply(fx.session)) == .saved);
+    try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.redo_len);
+    try testing.expectError(error.StaleRequest, @import("search/preview.zig").apply(fx.session));
+    try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.undo_len);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("bar", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("bar", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("bar!", term.rt.editorDocument().opened.?.file.content);
 }

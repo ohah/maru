@@ -57,6 +57,24 @@ def verify(cli, root):
     listener.bind(str(control / 'fixture.sock'))
     listener.listen()
     listener.settimeout(10)
+    # Help cannot connect to reachable control endpoints or modify persistent state.
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    rid = '0000000000000000000000000000aabb'
+    for flag in ['--help', '-h']:
+        for args in [[flag], ['terminfo', flag], ['control', flag], ['host', 'status', flag],
+                     ['host', 'status', '--json', flag], ['runtime', 'list', flag],
+                     ['runtime', 'get', flag], ['runtime', 'get', rid, '--json', flag],
+                     ['runtime', 'end', flag], ['runtime', 'end', rid, '--yes', flag]]:
+            assert 'usage:' in run(args, 0).stdout
+    for args in [['--help', '--bad'], ['-h', 'extra'], ['terminfo', '--clear', '--help'], ['terminfo', '--help', '--refresh'],
+                 ['control', '--stdio', '--help'], ['control', '--help', '--stdio'],
+                 ['host', 'unknown', '--help'], ['host', 'status', '--bad', '--help'],
+                 ['runtime', 'unknown', '--help'], ['runtime', 'get', 'bad', '--help'],
+                 ['runtime', 'end', 'bad', '--help'],
+                 ['runtime', 'end', rid, '--yes', '--yes', '--help']]:
+        run(args, 2 if args[0] in ['host', 'runtime'] else 1)
+    after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    assert before == after, 'help or rejected arguments changed filesystem state'
     target_verbs = [
         ['navigate', 'https://example.invalid/'], ['get-url'], ['exec', '1+1'],
         ['get-cookies'], ['set-cookie', '--name', 'n', '--value', 'v'],

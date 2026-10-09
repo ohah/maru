@@ -21,6 +21,19 @@ CLI가 PATH에 없다면 `.app/Contents/MacOS/maru install-cli`로 기존 설치
 
 계약과 한계는 [구현 계획](plans/editor-open-cli.md)을 따른다.
 
+### CLI 도움말 요청
+
+root `maru --help`/`maru -h`는 단독 요청으로 지원한다. `terminfo`와 `control`도
+단독 `--help`/`-h`를 지원한다. `host status`, `runtime list/get/end` 뒤에도 같은
+도움말 플래그를 쓸 수 있다. get/end 도움말은 ID가 없어도 표시하고, 유효한 ID와
+--json/--yes를 함께 적었더라도 작업을 실행하지 않는다. help는 stdout 안내 후 exit 0이다.
+잘못된 명령·ID·옵션·중복 옵션은 계속 실패하며 host/runtime의 usage 오류는 기존 exit 2다.
+`control --stdio --help`와 `terminfo --clear --help` 같은 동작/help 조합은 거부한다.
+
+`zig build test-cli-failure-contract test-cli-failure-process test-cli-relay`는 도움말의
+인자 판정·실제 process 부작용·relay 회귀 검증을 실행한다. 새 help 요청은 cache 생성,
+stdin relay, host 시작 및 control socket 연결을 하지 않는다.
+
 ## 에디터 앱 URL
 
 - `mise exec -- zig build test-editor-app-url`: 순수 URL grammar·bounded startup queue·OOM·encoder corpus.

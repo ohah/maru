@@ -190,3 +190,20 @@ Debug 및 ReleaseFast 순수 suite는 108 passed/1 skipped다. 실제 process �
 정상 호출과 기존 오류 종료 대조군도 유지했다. assignSurface의 중복 방어를 제거한
 변형은 새 판정자에서 실패했다. script/text/파일명 값의 --surface 문자열은 옵션으로
 다시 해석하지 않는다.
+
+## CLI 도움말 통일 계약
+
+2026-10-10 사용자 승인: root -h를 --help 별칭으로 지원한다. terminfo와 control은
+단독 --help/-h를 exit 0 안내로 처리하며 캐시/소켓/relay I/O를 시작하지 않는다.
+host status 및 runtime list/get/end의 leaf help도 exit 0이다. get/end help는 ID 없이도
+볼 수 있다. 알려진 verb의 유효한 ID/옵션과 함께 요청한 help는 작업을 실행하지 않는다.
+알 수 없는 verb/옵션, 잘못된 ID 및 중복 옵션은 help로 숨기지 않고 오류로 거부한다.
+SSH의 외부 argv 전달 및 개발용 진단 명령의 계약은 유지한다. --window/--volume의
+중복 정책은 별도 작업이다.
+
+도움말 수정의 실제 process 회귀 검증은 5회 각각 203개 검사가 통과했다. 파일 내용과
+symlink를 포함한 상태가 보존됐으며 접근 가능한 fake control endpoint에 연결하지 않았다.
+Debug/ReleaseFast 순수 suite는 126 passed/1 skipped다. relay suite는 기존 9개와 새
+help 테스트 1개 및 실제 모듈 그래프의 anonymous block 23개를 확인해 총 33개 기록을
+갱신했다(32 passed/1 skipped). 도움말 판정을 무력화한 runtime 변형은 leaf help 테스트에서
+UnknownOption으로 실패했다. 다른 selector의 중복 정책은 이번 구현에서 바꾸지 않았다.

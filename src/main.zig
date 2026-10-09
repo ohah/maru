@@ -354,7 +354,7 @@ fn dispatch(
     }
 
     if (std.mem.eql(u8, command, "control")) {
-        try runControl(io, allocator, &args, stderr);
+        try runControl(io, allocator, &args, stdout, stderr);
         return;
     }
 
@@ -389,7 +389,11 @@ fn dispatch(
         return;
     }
 
-    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) {
+    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+        if (args.next() != null) {
+            try stderr.writeAll("usage: maru [--help|-h]\n");
+            return error.UnknownCommand;
+        }
         try printUsage(stdout);
         return;
     }
@@ -14243,6 +14247,7 @@ fn runControl(
     io: std.Io,
     allocator: std.mem.Allocator,
     args: *std.process.Args.Iterator,
+    stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
     var rest: std.ArrayList([]const u8) = .empty;
@@ -14250,6 +14255,10 @@ fn runControl(
     while (args.next()) |a| try rest.append(allocator, a);
 
     switch (maru.cli.control_relay.parseArgs(rest.items)) {
+        .help => {
+            try stdout.writeAll("usage: maru control --stdio\n");
+            try stdout.flush();
+        },
         .usage => |msg| {
             try stderr.print("{s}\n", .{msg});
             try stderr.flush();
@@ -15475,6 +15484,13 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
         return error.UnknownCommand;
     };
 
+    // Help is resolved before cache paths or external shell commands are touched.
+    if (action == .help) {
+        try stdout.writeAll("usage: maru terminfo [--status|--refresh|--clear|--path]\n");
+        try stdout.flush();
+        return;
+    }
+
     const home_raw = hostHomeDir() orelse {
         try stderr.writeAll("maru terminfo: cannot determine the cache location: no home directory ($HOME" ++
             (if (@import("builtin").os.tag == .windows) "·%USERPROFILE%" else "") ++ ")\n");
@@ -15505,6 +15521,7 @@ fn runTerminfo(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writ
     defer allocator.free(dir);
 
     switch (action) {
+        .help => unreachable,
         // 스크립트에서 캐시 경로만 필요할 때(예: 지우기 자동화). 경로만 한 줄 출력한다.
         .path => try stdout.print("{s}\n", .{dir}),
         // 캐시가 컴파일돼 xterm-maru가 해석되는지 보고한다(아무것도 바꾸지 않는 안전 기본).

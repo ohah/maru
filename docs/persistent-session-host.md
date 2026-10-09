@@ -3469,7 +3469,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
 
    `CloseRequestKind`는 `close_and_detach|close_without_routing|finish_after_termination`의 closed enum이다.
    `close_and_detach`는 명시적 tab/window close가 쓰며 routing tombstone과 `terminate_host` disposition을 요구한다.
-   `close_without_routing`은 construction rollback 또는 routing이 아직 게시되지 않은 typed teardown만 쓰며 일반 AppSession close caller는 0이다.
+   `close_without_routing`은 construction rollback 또는 routing이 아직 게시되지 않은 typed teardown만 쓴다(AppSession 창 teardown은
+   runtime 초기화 전 — `AppSession.close`의 `!runtime_initialized` — 에만 이것을 보낸다).
    `finish_after_termination`은 검증된 종료 관측 뒤에만 쓰고 terminate RPC를 다시 보내지 않는다. 세 kind 모두 같은
    `CloseProgress`를 반환하지만 precondition과 effect를 서로 대체할 수 없고 kind/disposition 조합은 CloseAuthority seal에 들어간다.
    그래서 AppSession은 `finish_after_termination`을 보낸 원격 Term(`Term.rt.finish_ended`)에는 그 뒤 창 teardown(`AppSession.close`)·

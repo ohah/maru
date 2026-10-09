@@ -2218,11 +2218,13 @@ const TermRuntime = struct {
     terminated: bool = false,
     // backend에 finishAfterTermination을 보낸 종료(보낸 적 없으면 null). 원격 runtime은 처음 받은 close 요청의 종류를
     // 봉인해 다른 종류가 오면 프로세스를 끝낸다(`requestRuntimeClose` proof_loss) — 셸이 끝난 Term에 앱 종료 정리가
-    // closeAndDetach를 다시 보내 exit 86으로 죽었다. 그래서 이 Term에는 finish만 다시 보낸다(`term_ops.finishIfRequested`).
+    // closeAndDetach를 다시 보내 exit 86으로 죽었다. 그래서 원격 Term에는 finish만 다시 보낸다(`term_ops.finishIfRequested` —
+    // in-process는 kind를 보지 않아 지금처럼 closeAndDetach를 받는다).
     // finish가 event_pending이면 원격 pump는 끝을 다시 알리지 않으므로 tick이 이 값으로 같은 finish를 이어 보낸다.
     finish_ended: ?app.RuntimePumpTermination = null,
     // 그 끝을 처음 본 시각(`std.Io.Clock.awake` ns, 0=아직). uptime(비정상 시작 사망 grace)은 finish 가 끝난 때가 아니라 이
-    // 시각으로 잰다 — finish 가 몇 tick 기다리면 시작 직후 죽은 셸이 grace 를 넘겨 창이 닫혔다(적대 리뷰 3 회차).
+    // 시각으로 잰다 — 그러지 않으면 finish 가 몇 tick 기다리는 동안 시작 직후 죽은 셸이 grace 를 넘겨 창이 닫힐 수 있었다
+    // (적대 리뷰 3 회차).
     ended_seen_ns: i128 = 0,
     // backend close가 complete를 게시했지만 layout/remove suffix는 아직 실행 전일 수 있다. 이 래치가 있어야
     // topology를 보존한 재시도와 destroy 단계가 같은 close request를 두 번 발행하지 않는다.
@@ -20806,12 +20808,13 @@ pub const AppSession = struct {
                     if (ended_now) |ended| {
                         if (terminationClosesWorkspace(ended)) {
                             if (!term.rt.terminated) {
-                                if (term.rt.finish_ended == null) term.rt.ended_seen_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+                                if (term.rt.ended_seen_ns == 0) term.rt.ended_seen_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
                                 term.rt.finish_ended = ended;
                                 if (self.backendFor(term).finishAfterTermination(term.rt.handle) == .event_pending) continue;
                                 term.rt.close_complete = true;
                                 term.rt.terminated = true;
-                                // 이 Term의 uptime(spawn→exit, ms) — 비정상 시작 사망 grace 판정(holdOnStartupExit)이 쓴다.
+                                // 이 Term의 uptime(spawn→처음 끝을 본 시각 `ended_seen_ns`, ms) — 비정상 시작 사망 grace 판정
+                                // (holdOnStartupExit)이 쓴다.
                                 // spawned_at_ns=0(미스탬프)이면 판정 생략(직전 값 유지 — 보수적).
                                 if (term.rt.spawned_at_ns != 0)
                                     self.last_exit_uptime_ms = @intCast(@divFloor(term.rt.ended_seen_ns - term.rt.spawned_at_ns, std.time.ns_per_ms));
@@ -24272,7 +24275,8 @@ pub const AppSession = struct {
                     if (term.rt.live_initialized and self.runtime_initialized) {
                         // P3-e3-6: 앱 quit(detach) + host-backed면 terminate(closeAndDetach)를 건너뛴다 — runtime을 host에
                         // 남겨야 재실행 시 재접속한다(detach는 아래 pass 2 detachTerm이 client-side만 회수). 단 P4 "종료 및 세션
-                        // 끝내기"(app_quit_end_all)면 skip 안 하고 종료한다. 그 외(in-process·명시 창 close)도 기존대로 closeAndDetach.
+                        // 끝내기"(app_quit_end_all)면 skip 안 하고 종료한다. 그 외(in-process·명시 창 close)도 기존대로 closeAndDetach —
+                        // 단 셸이 끝나 finish를 보낸 원격 Term은 같은 finish(`finish_ended` 주석).
                         if (self.shouldDetachRemoteOnAppQuit(term)) continue;
                         const progress = term_ops.finishIfRequested(self, term) orelse
                             self.backendFor(term).closeAndDetach(term.rt.handle);
@@ -71873,6 +71877,8 @@ test "셸이 끝나 finish 를 보낸 원격 Term 에 앱 정리는 finish 만 �
     const pane = pane_ops.activePane(session);
     const finished = pane.terms.items[0]; // 활성이 아닌 Term — 정리 중에 그리지 않는다
     markRemoteForCloseKindTest(finished, session);
+    var deinited = false;
+    defer if (!deinited) session.deinit(); // 단언이 실패해도 reader 를 남기지 않는다
     // tick 이 셸의 끝을 보고 finish 를 보내 끝냈다. 둘째 Term 은 in-process 로 끝났다 — kind 를 보지 않고, 끝난 뒤의
     // closeAndDetach 가 routing 연결도 끊으므로 지금처럼 closeAndDetach 를 받는다.
     for (pane.terms.items) |term| {
@@ -71889,7 +71895,8 @@ test "셸이 끝나 finish 를 보낸 원격 Term 에 앱 정리는 finish 만 �
     try std.testing.expectEqualSlices(Request, &.{ .finish_after_termination, .close_and_detach }, app.term_runtime_backend.testing.requests());
     app.term_runtime_backend.testing.clear();
     app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
-    session.deinit(); // 그 뒤 pass 1 도 같다(원격 표시는 pass 2 의 remove 가 시험 seam 으로 간다 — app_remote_backend 없음)
+    deinited = true;
+    session.deinit(); // 그 뒤 pass 1 도 같다(app_remote_backend 가 없어 pass 2 의 remove 는 in-process 로 간다)
     try std.testing.expectEqualSlices(Request, &.{ .finish_after_termination, .close_and_detach }, app.term_runtime_backend.testing.requests());
 }
 
@@ -71925,7 +71932,7 @@ test "끝난 원격 Term 을 finish 가 끝나기 전에 부수면(destroyTerm) 
     finishing.rt.finish_ended = .{ .exited = .{ .unknown = 0 } };
     app.term_runtime_backend.testing.clear();
     app.term_runtime_backend.testing.armCloseSequence(&.{.complete});
-    term_ops.destroyTerm(session, finishing); // 원격 표시가 있어도 app_remote_backend 가 없어 remove 는 시험 seam 으로 간다
+    term_ops.destroyTerm(session, finishing); // 원격 표시가 있어도 app_remote_backend 가 없어 remove 는 in-process 로 간다
     const Request = app.term_runtime_backend.testing.CloseRequest;
     try std.testing.expectEqualSlices(Request, &.{.finish_after_termination}, app.term_runtime_backend.testing.requests());
 }
@@ -71974,14 +71981,19 @@ test "셸이 실제로 끝나면 tick 이 보낸 finish 를 기록하고, event_
     try std.testing.expect(!ending.rt.terminated); // event_pending 이었다
     try std.testing.expectEqualSlices(Request, &.{.finish_after_termination}, app.term_runtime_backend.testing.requests());
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    // 이어 보낸 finish 가 끝나면 Term 이 거둬져 해제된다 — 그 전에 값을 잡아 둔다.
     const seen = ending.rt.ended_seen_ns;
+    const spawned = ending.rt.spawned_at_ns;
+    try std.testing.expect(spawned != 0);
+    std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(30), .awake) catch {}; // 재시도가 늦게 끝난다
     app.term_runtime_backend.testing.clear();
     app.term_runtime_backend.testing.armCloseSequence(&.{.complete});
     _ = try session.tick();
     try std.testing.expectEqualSlices(Request, &.{.finish_after_termination}, app.term_runtime_backend.testing.requests());
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // 이어 보낸 finish 가 끝나 거뒀다
-    // uptime 은 처음 끝을 본 시각으로 잰다 — 재시도가 늦어도 그대로다.
-    try std.testing.expectEqual(seen, ending.rt.ended_seen_ns);
+    // uptime 은 finish 가 끝난 때가 아니라 처음 끝을 본 시각으로 잰다.
+    const expected_uptime: i64 = @intCast(@divFloor(seen - spawned, std.time.ns_per_ms));
+    try std.testing.expectEqual(expected_uptime, session.last_exit_uptime_ms);
 }
 
 test "finish 가 끝나지 않은 원격 셸이 있으면 창 닫기는 graph 를 준비하지 않고 끝날 때까지 기다린다" {

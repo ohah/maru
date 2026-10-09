@@ -574,3 +574,9 @@ OpenSSH 는 `exec` 을 사용자 셸에 물려 돌리므로, `maru` 가 없어�
 손상된 JSON, response가 아닌 메시지 또는 렌더러가 판정한 result 오류를 표시한 뒤 exit 1로
 종료한다. 정상 응답은 exit 0이며 빈 목록도 성공이다. 진단 출력 자체의 쓰기 실패와
 서버 응답의 실패 판정은 분리한다. shell 호출자는 표시 문자열 대신 종료 코드를 사용할 수 있다.
+
+### control 도움말과 stdio 경계
+
+`maru control --help`/`-h`는 사람용 usage를 stdout으로 표시하고 exit 0으로 끝난다.
+stdin을 읽거나 소켓에 연결하지 않는다. 기존 `maru control --stdio`는 계속 wire만
+중계한다. --stdio와 help를 함께 지정하거나 추가 토큰을 주면 중계 전에 오류로 거부한다.

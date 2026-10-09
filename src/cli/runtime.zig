@@ -74,6 +74,7 @@ pub const host_help =
     \\usage: maru host status [--json]
     \\
     \\Read the current persistent session host without starting one.
+    \\Use --help or -h on host or host status for help.
     \\
 ;
 
@@ -84,6 +85,7 @@ pub const runtime_help =
     \\  maru runtime end <32-lower-hex-runtime-id> [--yes]
     \\
     \\Inspect or explicitly end persistent runtimes without starting a host.
+    \\Use --help or -h on runtime or a listed subcommand for help.
     \\
 ;
 
@@ -94,6 +96,7 @@ pub fn parseHost(args: []const []const u8) ParseError!Command {
         return .help;
     }
     if (!std.mem.eql(u8, args[0], "status")) return error.UnknownSubcommand;
+    if (try outputHelp(args[1..])) return .help;
     return .{ .request = .{ .host_status = try parseOutput(args[1..]) } };
 }
 
@@ -103,12 +106,16 @@ pub fn parseRuntime(args: []const []const u8) ParseError!Command {
         if (args.len != 1) return error.UnexpectedArgument;
         return .help;
     }
-    if (std.mem.eql(u8, args[0], "list"))
+    if (std.mem.eql(u8, args[0], "list")) {
+        if (try outputHelp(args[1..])) return .help;
         return .{ .request = .{ .runtime_list = try parseOutput(args[1..]) } };
+    }
     if (std.mem.eql(u8, args[0], "end")) return parseRuntimeEnd(args[1..]);
     if (!std.mem.eql(u8, args[0], "get")) return error.UnknownSubcommand;
     if (args.len == 1) return error.MissingRuntimeId;
+    if (args.len == 2 and isHelp(args[1])) return .help;
     const runtime_id = parseRuntimeId(args[1]) orelse return error.InvalidRuntimeId;
+    if (try outputHelp(args[2..])) return .help;
     return .{ .request = .{ .runtime_get = .{
         .runtime_id = runtime_id,
         .output = try parseOutput(args[2..]),
@@ -119,7 +126,13 @@ fn parseRuntimeEnd(args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.MissingRuntimeId;
     var runtime_id: ?u128 = null;
     var assume_yes = false;
+    var help = false;
     for (args) |arg| {
+        if (isHelp(arg)) {
+            if (help) return error.UnexpectedArgument;
+            help = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--yes")) {
             if (assume_yes) return error.UnexpectedArgument;
             assume_yes = true;
@@ -129,10 +142,27 @@ fn parseRuntimeEnd(args: []const []const u8) ParseError!Command {
         if (runtime_id != null) return error.UnexpectedArgument;
         runtime_id = parseRuntimeId(arg) orelse return error.InvalidRuntimeId;
     }
+    if (help) return .help;
     return .{ .request = .{ .runtime_end = .{
         .runtime_id = runtime_id orelse return error.MissingRuntimeId,
         .assume_yes = assume_yes,
     } } };
+}
+
+// Validate all tokens even when help is requested, so help cannot hide typos.
+fn outputHelp(args: []const []const u8) ParseError!bool {
+    var help = false;
+    var json = false;
+    for (args) |arg| {
+        if (isHelp(arg)) {
+            if (help) return error.UnexpectedArgument;
+            help = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            if (json) return error.UnexpectedArgument;
+            json = true;
+        } else return error.UnknownOption;
+    }
+    return help;
 }
 
 fn parseOutput(args: []const []const u8) ParseError!Output {
@@ -1103,4 +1133,24 @@ test "S11-6 --json 도 선언을 싣는다 — 텍스트만 보여 주면 스크
         try render(.{ .runtime_get = meta }, .json, &out.writer);
         try T.expect(std.mem.endsWith(u8, out.written(), ",\"declared_total\":11}\n"));
     }
+}
+
+// Help must avoid host I/O while preserving argument validation for executable requests.
+test "runtime and host leaf help validates tokens without requiring a runtime" {
+    const testing = std.testing;
+    const id = "0000000000000000000000000000aabb";
+    for ([_][]const u8{ "--help", "-h" }) |flag| {
+        try testing.expect((try parseHost(&.{ "status", flag })) == .help);
+        try testing.expect((try parseHost(&.{ "status", "--json", flag })) == .help);
+        for ([_][]const u8{ "list", "get", "end" }) |verb|
+            try testing.expect((try parseRuntime(&.{ verb, flag })) == .help);
+        try testing.expect((try parseRuntime(&.{ "get", id, "--json", flag })) == .help);
+        try testing.expect((try parseRuntime(&.{ "end", id, "--yes", flag })) == .help);
+    }
+    try testing.expectError(error.UnknownSubcommand, parseRuntime(&.{ "unknown", "--help" }));
+    try testing.expectError(error.InvalidRuntimeId, parseRuntime(&.{ "get", "bad", "--help" }));
+    try testing.expectError(error.InvalidRuntimeId, parseRuntime(&.{ "end", "bad", "--help" }));
+    try testing.expectError(error.UnknownOption, parseHost(&.{ "status", "--bogus", "--help" }));
+    try testing.expectError(error.UnexpectedArgument, parseRuntime(&.{ "list", "--json", "--json", "--help" }));
+    try testing.expectError(error.UnexpectedArgument, parseRuntime(&.{ "end", "--yes", "--yes", "--help" }));
 }

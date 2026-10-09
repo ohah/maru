@@ -78,14 +78,16 @@ pub fn endMessage(end: End) []const u8 {
 /// 모르는 인자를 조용히 무시하면 오타가 "왜인지 아무 일도 안 일어난다" 로 나타난다.
 pub const Mode = union(enum) {
     stdio,
+    help,
     usage: []const u8,
 };
 
 pub fn parseArgs(args: []const []const u8) Mode {
     if (args.len == 0) return .{ .usage = "usage: maru control --stdio" };
     if (args.len > 1) return .{ .usage = "maru control: too many arguments" };
+    if (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h")) return .help;
     if (std.mem.eql(u8, args[0], "--stdio")) return .stdio;
-    return .{ .usage = "maru control: unknown argument (only --stdio)" };
+    return .{ .usage = "maru control: unknown argument (expected --stdio, --help or -h)" };
 }
 
 // ---- 여기부터 OS 를 부른다(L4) ------------------------------------------------
@@ -388,4 +390,11 @@ test "폰이 쓰기 쪽만 닫아도 마지막 답을 흘린다" {
     var got: [64]u8 = undefined;
     const n = std.c.read(out[0], &got, got.len);
     try testing.expectEqualStrings(reply, got[0..@intCast(n)]);
+}
+
+test "control help never selects the stdio relay" {
+    try testing.expect(parseArgs(&.{"--help"}) == .help);
+    try testing.expect(parseArgs(&.{"-h"}) == .help);
+    try testing.expect(parseArgs(&.{ "--stdio", "--help" }) == .usage);
+    try testing.expect(parseArgs(&.{ "--help", "--stdio" }) == .usage);
 }

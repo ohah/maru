@@ -9,16 +9,18 @@
 const std = @import("std");
 
 /// `maru terminfo [<action>]`의 동작. 인자 없으면 status(가장 안전한 기본 — 아무것도 안 바꾼다).
-pub const Action = enum { status, refresh, clear, path };
+pub const Action = enum { status, refresh, clear, path, help };
 
 pub const ParseError = error{UnknownArg};
 
 /// "terminfo" 뒤 인자들을 Action으로 판정한다. 인자 0개면 status. 하나의 플래그(`--status`/`--refresh`/
 /// `--clear`/`--path`)만 받는다. 알 수 없거나 2개 이상이면 error.UnknownArg(main이 usage를 낸다).
+/// Standalone --help/-h is a help action, never a cache action.
 pub fn parse(args: []const []const u8) ParseError!Action {
     if (args.len == 0) return .status;
     if (args.len > 1) return error.UnknownArg;
     const a = args[0];
+    if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) return .help;
     if (std.mem.eql(u8, a, "--status")) return .status;
     if (std.mem.eql(u8, a, "--refresh")) return .refresh;
     if (std.mem.eql(u8, a, "--clear")) return .clear;
@@ -41,4 +43,11 @@ test "parse: 알 수 없는 인자·중복은 거부" {
     try std.testing.expectError(error.UnknownArg, parse(&.{"--bogus"}));
     try std.testing.expectError(error.UnknownArg, parse(&.{"refresh"})); // 대시 없는 형식은 미지원
     try std.testing.expectError(error.UnknownArg, parse(&.{ "--refresh", "--clear" }));
+}
+
+test "terminfo help is standalone and cannot combine with a cache action" {
+    try std.testing.expectEqual(Action.help, try parse(&.{"--help"}));
+    try std.testing.expectEqual(Action.help, try parse(&.{"-h"}));
+    try std.testing.expectError(error.UnknownArg, parse(&.{ "--clear", "--help" }));
+    try std.testing.expectError(error.UnknownArg, parse(&.{ "--help", "--refresh" }));
 }

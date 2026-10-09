@@ -1,0 +1,364 @@
+{
+  "scope": "pure policy and controlled Swift host effects plus native backend; not OS delivery",
+  "source_sha256": {
+    "src/session/editor_app_url.zig": "dd37fb7e7461fc261ccece9a69486159ae2e045a0bd851c963d0887ed6ee2653",
+    "src/session/editor_app_url_test.zig": "ff664cc5a612421e801e41d87a91e8cab2ac0cc66bbfd76dbbbbeecf1ab2f7ed",
+    "src/platform/macos/MaruAppHost.swift": "ffe19daefc1bb2f5cdaf37640916020556366e1f5d6887a9e876fd4e2b143b37",
+    "src/platform/macos/editor_app_url.zig": "5692b835f2c5f0300d15edcf87c7718e846312315326a99f50c1d71aa2f9c8e1",
+    "src/platform/macos/app_session/editor/mod.zig": "c6f2f8804f28906899922d22c9670f1d446632319d46da48545033204c93fd31",
+    "src/platform/macos/app_session/pane.zig": "c3d9a2babd9c0e4fa6eea7600c23bcb17b9f297900bdd81dc51db51dc10883cf"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "pure": {
+        "scope": "pure parser and queue; not OS delivery",
+        "source_sha256": "dd37fb7e7461fc261ccece9a69486159ae2e045a0bd851c963d0887ed6ee2653",
+        "test_sha256": "ff664cc5a612421e801e41d87a91e8cab2ac0cc66bbfd76dbbbbeecf1ab2f7ed",
+        "results": [
+          {
+            "name": "round-1-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-1-duplicate-path",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-2-control",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-2-invalid-utf8",
+            "mode": "ReleaseFast",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-3-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-3-zero-coordinate",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-4-control",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-4-early-drain",
+            "mode": "ReleaseFast",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-5-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-5-unbounded-slots",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "equivalent-length",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "equivalent-ring",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          }
+        ]
+      },
+      "host": [
+        {
+          "name": "control",
+          "exit_code": 0,
+          "expected_pass": true
+        },
+        {
+          "name": "scope",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "admission",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "burst",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "quit",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "equivalent",
+          "exit_code": 0,
+          "expected_pass": true
+        }
+      ],
+      "native_mode": "Debug",
+      "native_exit_code": 0,
+      "source_unchanged": true
+    },
+    {
+      "round": 2,
+      "pure": {
+        "scope": "pure parser and queue; not OS delivery",
+        "source_sha256": "dd37fb7e7461fc261ccece9a69486159ae2e045a0bd851c963d0887ed6ee2653",
+        "test_sha256": "ff664cc5a612421e801e41d87a91e8cab2ac0cc66bbfd76dbbbbeecf1ab2f7ed",
+        "results": [
+          {
+            "name": "round-1-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-1-duplicate-path",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-2-control",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-2-invalid-utf8",
+            "mode": "ReleaseFast",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-3-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-3-zero-coordinate",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-4-control",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-4-early-drain",
+            "mode": "ReleaseFast",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-5-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-5-unbounded-slots",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "equivalent-length",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "equivalent-ring",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          }
+        ]
+      },
+      "host": [
+        {
+          "name": "control",
+          "exit_code": 0,
+          "expected_pass": true
+        },
+        {
+          "name": "scope",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "admission",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "burst",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "quit",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "equivalent",
+          "exit_code": 0,
+          "expected_pass": true
+        }
+      ],
+      "native_mode": "ReleaseFast",
+      "native_exit_code": 0,
+      "source_unchanged": true
+    },
+    {
+      "round": 3,
+      "pure": {
+        "scope": "pure parser and queue; not OS delivery",
+        "source_sha256": "dd37fb7e7461fc261ccece9a69486159ae2e045a0bd851c963d0887ed6ee2653",
+        "test_sha256": "ff664cc5a612421e801e41d87a91e8cab2ac0cc66bbfd76dbbbbeecf1ab2f7ed",
+        "results": [
+          {
+            "name": "round-1-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-1-duplicate-path",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-2-control",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-2-invalid-utf8",
+            "mode": "ReleaseFast",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-3-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-3-zero-coordinate",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-4-control",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-4-early-drain",
+            "mode": "ReleaseFast",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "round-5-control",
+            "mode": "Debug",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "round-5-unbounded-slots",
+            "mode": "Debug",
+            "exit_code": 1,
+            "expected_pass": false
+          },
+          {
+            "name": "equivalent-length",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          },
+          {
+            "name": "equivalent-ring",
+            "mode": "ReleaseFast",
+            "exit_code": 0,
+            "expected_pass": true
+          }
+        ]
+      },
+      "host": [
+        {
+          "name": "control",
+          "exit_code": 0,
+          "expected_pass": true
+        },
+        {
+          "name": "scope",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "admission",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "burst",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "quit",
+          "exit_code": 1,
+          "expected_pass": false
+        },
+        {
+          "name": "equivalent",
+          "exit_code": 0,
+          "expected_pass": true
+        }
+      ],
+      "native_mode": "Debug",
+      "native_exit_code": 0,
+      "source_unchanged": true
+    }
+  ]
+}

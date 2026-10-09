@@ -1,0 +1,79 @@
+{
+  "scope": "pure parser and queue; not OS delivery",
+  "source_sha256": "dd37fb7e7461fc261ccece9a69486159ae2e045a0bd851c963d0887ed6ee2653",
+  "test_sha256": "ff664cc5a612421e801e41d87a91e8cab2ac0cc66bbfd76dbbbbeecf1ab2f7ed",
+  "results": [
+    {
+      "name": "round-1-control",
+      "mode": "Debug",
+      "exit_code": 0,
+      "expected_pass": true
+    },
+    {
+      "name": "round-1-duplicate-path",
+      "mode": "Debug",
+      "exit_code": 1,
+      "expected_pass": false
+    },
+    {
+      "name": "round-2-control",
+      "mode": "ReleaseFast",
+      "exit_code": 0,
+      "expected_pass": true
+    },
+    {
+      "name": "round-2-invalid-utf8",
+      "mode": "ReleaseFast",
+      "exit_code": 1,
+      "expected_pass": false
+    },
+    {
+      "name": "round-3-control",
+      "mode": "Debug",
+      "exit_code": 0,
+      "expected_pass": true
+    },
+    {
+      "name": "round-3-zero-coordinate",
+      "mode": "Debug",
+      "exit_code": 1,
+      "expected_pass": false
+    },
+    {
+      "name": "round-4-control",
+      "mode": "ReleaseFast",
+      "exit_code": 0,
+      "expected_pass": true
+    },
+    {
+      "name": "round-4-early-drain",
+      "mode": "ReleaseFast",
+      "exit_code": 1,
+      "expected_pass": false
+    },
+    {
+      "name": "round-5-control",
+      "mode": "Debug",
+      "exit_code": 0,
+      "expected_pass": true
+    },
+    {
+      "name": "round-5-unbounded-slots",
+      "mode": "Debug",
+      "exit_code": 1,
+      "expected_pass": false
+    },
+    {
+      "name": "equivalent-length",
+      "mode": "ReleaseFast",
+      "exit_code": 0,
+      "expected_pass": true
+    },
+    {
+      "name": "equivalent-ring",
+      "mode": "ReleaseFast",
+      "exit_code": 0,
+      "expected_pass": true
+    }
+  ]
+}

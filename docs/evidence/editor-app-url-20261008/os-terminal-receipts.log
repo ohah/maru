@@ -1,0 +1,10 @@
+warning(app): maru build: mtime=1791433322 pid=83012
+warning: reconnect tick inactive: not_owner_thread
+info: editor URL id=1 opened surface=2 byte=11
+[EDITOR_URL] id=1 surface=2 byte=11 path_sha256=716fe5516cbda60d807f605981b29abd177c364fc0434f8a07eec16fe7f108ef
+info: editor URL id=2 opened surface=2 byte=5
+[EDITOR_URL] id=2 surface=2 byte=5 path_sha256=716fe5516cbda60d807f605981b29abd177c364fc0434f8a07eec16fe7f108ef
+info: editor URL id=3 opened surface=2 byte=5
+[EDITOR_URL] id=3 surface=2 byte=5 path_sha256=716fe5516cbda60d807f605981b29abd177c364fc0434f8a07eec16fe7f108ef
+maru: editor URL rejected status=1
+=== maru app exit pid=83012 via=exit ===

@@ -1,0 +1,15 @@
+{
+  "scope": "exact-bundle OS URL delivery and backend caret; default handler and pixels are separate",
+  "passed": true,
+  "app_sha256": "36f68d24a7566c1217558c9ee6b024349f5b981304b011686966fff4e14a2bfd",
+  "receipt_ids": [
+    1,
+    2,
+    3
+  ],
+  "byte_offsets": [
+    11,
+    5,
+    5
+  ]
+}

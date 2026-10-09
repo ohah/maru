@@ -6,6 +6,16 @@
 #include "metal_cell_policy.h"
 #include "session_host_notification_route.h"
 
+/* Main-thread only. offer: 0 accepted, 1 invalid/too long, 2 full, 3 stopped,
+   4 allocation failure. drain: 0 none, 1 opened, 2 consumed failure.
+   ready is called only after workspace restoration and normal window binding. */
+uint32_t maru_macos_editor_url_offer(const uint8_t *bytes, size_t len);
+void maru_macos_editor_url_ready(void);
+void maru_macos_editor_url_stop(void);
+uint32_t maru_macos_editor_url_pending(void);
+struct MaruAppHostSession;
+uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t admitted);
+
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */

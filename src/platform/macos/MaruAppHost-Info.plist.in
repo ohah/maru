@@ -2,6 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key><string>dev.maru.editor</string>
+            <key>CFBundleURLSchemes</key><array><string>maru</string></array>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+        </dict>
+    </array>
     <!-- bare 실행파일(.app 번들 없음)에 __TEXT,__info_plist 섹션으로 임베드한다. macOS는
          번들이 없는 앱의 이 섹션을 Info.plist로 읽는다. NSHighResolutionCapable이 없으면
          창이 1x backing store로 렌더되어 Retina에서 업스케일로 흐려진다. -->

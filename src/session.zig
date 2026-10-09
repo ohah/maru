@@ -38,6 +38,8 @@ pub const ssh = struct {
     // 등록 목록으로 세던 앞선 판정자가 그래서 무력했다(그 파일 머리 주석에 실측을 적어 뒀다).
 };
 pub const input_math = @import("session/input_math.zig");
+/// External editor URL grammar and startup queue; no OS/file access in this policy.
+pub const editor_app_url = @import("session/editor_app_url.zig");
 pub const layout_math = @import("session/layout_math.zig");
 pub const web_panel_layout = @import("session/web_panel_layout.zig"); // Phase 4a: 웹 패널 rect(본문 rect)·px↔pt y-flip·surface 생애주기 diff 순수 계산(docs/plans/web-panel.md §10 4a·§11·§14)
 pub const resource_usage = @import("session/resource_usage.zig"); // 상태바 리소스 항목: pid 표본 합산·CPU 차분·고정 폭 포맷(순수 — syscall 없음, docs/status-bar.md §6)

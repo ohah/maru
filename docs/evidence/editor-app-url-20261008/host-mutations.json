@@ -1,0 +1,32 @@
+[
+  {
+    "name": "control",
+    "exit_code": 0,
+    "expected_pass": true
+  },
+  {
+    "name": "scope",
+    "exit_code": 1,
+    "expected_pass": false
+  },
+  {
+    "name": "admission",
+    "exit_code": 1,
+    "expected_pass": false
+  },
+  {
+    "name": "burst",
+    "exit_code": 1,
+    "expected_pass": false
+  },
+  {
+    "name": "quit",
+    "exit_code": 1,
+    "expected_pass": false
+  },
+  {
+    "name": "equivalent",
+    "exit_code": 0,
+    "expected_pass": true
+  }
+]

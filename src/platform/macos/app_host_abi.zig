@@ -1,4 +1,24 @@
 const std = @import("std");
+const editor_app_url = @import("editor_app_url.zig");
+
+// Additive, main-thread-only URL operations; existing record layouts are unchanged.
+pub export fn maru_macos_editor_url_offer(bytes: ?[*]const u8, len: usize) u32 {
+    if (len > maru.session.editor_app_url.max_url_bytes) return 1;
+    const raw = bytes orelse return 1;
+    return editor_app_url.offer(raw[0..len]);
+}
+pub export fn maru_macos_editor_url_ready() void {
+    editor_app_url.ready();
+}
+pub export fn maru_macos_editor_url_stop() void {
+    editor_app_url.stop();
+}
+pub export fn maru_macos_editor_url_pending() u32 {
+    return editor_app_url.pending();
+}
+pub export fn maru_macos_editor_url_drain(session: ?*session_mod.AppSession, admitted: u8) u32 {
+    return editor_app_url.drain(session, admitted == 1);
+}
 const diag_gate = @import("diag.zig"); // MARU_DEBUG 게이트(진단 로그 단일 출처)
 const builtin = @import("builtin");
 const maru = @import("maru");

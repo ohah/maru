@@ -14298,6 +14298,9 @@ pub const AppSession = struct {
             // 이름 없는 문서의 저장 이름 상자(U2 — §3.11)도 같은 상자·같은 길이다. **빠져 있어** 다른 오버레이(알림 등)가 없으면 이 프레임이
             // 안 지어져 ⌘S 뒤 상자가 안 그려졌고, 친 글자는 보이지 않는 상자로 갔다(2026-10-09 실제 앱 캡처 — 알림이 떠 있을 때만 보였다).
             (self.rename != null and self.rename.? == .untitled_save) or
+            // 마커 이미지 프리뷰의 **실패 안내 글자**(`collectMarkerPreviewDraws`) — 배경·테두리는 프레임 조립이 따로 그리지만 글자는 이 프레임에만
+            // 실린다. 빠져 있어 다른 오버레이가 없으면 「풀 수 없습니다」가 안 그려졌다(2026-10-09, 관문 대조 판정자 OVF1 이 찾음).
+            (self.marker_preview_open != null and self.marker_preview_open.?.failed) or
             self.editor_completion.active; // 완성 팝업(§8.2g)도 같다
     }
 
@@ -96400,4 +96403,109 @@ test "브라우저 권한 확인은 비동기 보호(chrome-strategy §5.4) — 
     _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
     const approved = session.takeGrantDecision().?;
     try std.testing.expect(approved.approved and approved.async_id == 10);
+}
+
+test "OVF1 오버레이 프레임이 그리는 출처마다 관문(overlayFrameNeeded)이 선다 — 새 출처를 더하고 관문을 빠뜨리면 여기서 멈춘다 (소스 판정)" {
+    // 2026-10-09: 이름 없는 문서 저장 상자(#4250)와 마커 프리뷰 실패 안내가 **그려지는 길은 있는데 관문에 없어** 다른 오버레이가 없으면 안 그려졌다.
+    // 관문은 손으로 쓴 목록이라 출처가 늘 때 함께 늘어야 한다. 이 판정자는 `buildChromeOverlayPrep` 의 그리기 호출을 전부 세고, 호출마다
+    // 관문(`overlayFrameNeeded` + 그것이 부르는 `anyOverlayOpen`)에 그 상태를 묻는 말이 있는지 본다. 표에 없는 새 호출이면 실패한다 —
+    // 관문을 세우고 이 표에 한 줄을 적는다.
+    const src = @embedFile("app_session.zig");
+    const body = struct {
+        fn f(text: []const u8, head: []const u8) ![]const u8 {
+            const at = std.mem.indexOf(u8, text, head) orelse return error.FunctionMissing;
+            const end = std.mem.indexOfPos(u8, text, at, "\n    }\n") orelse return error.FunctionUnterminated;
+            return text[at..end];
+        }
+    }.f;
+    const prep = try body(src, "    pub fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {");
+    const gate_a = try body(src, "    pub fn overlayFrameNeeded(self: *const AppSession) bool {");
+    const gate_b = try body(src, "    pub fn anyOverlayOpen(self: *const AppSession) bool {");
+    const Source = struct { call: []const u8, count: usize, gates: []const []const u8 };
+    const sources = [_]Source{
+        .{ .call = "collectDraws(", .count = 1, .gates = &.{ "notice.open", "confirm.open", "find.open", "find_secondary.open" } }, // 알림·확인창·찾기(+비교 뷰 둘째)
+        .{ .call = "collectPaletteDraws(", .count = 1, .gates = &.{"palette.open"} },
+        .{ .call = "collectSymbolPickerDraws(", .count = 1, .gates = &.{"symbol_picker.open"} },
+        .{ .call = "collectRecoveryPickerDraws(", .count = 1, .gates = &.{"recovery_picker.open"} },
+        .{ .call = "collectTrustPickerDraws(", .count = 1, .gates = &.{"trust_picker.open"} },
+        .{ .call = "collectReferencePickerDraws(", .count = 1, .gates = &.{"reference_picker.open"} },
+        .{ .call = "collectContextMenuDraws(", .count = 1, .gates = &.{"context_menu.open"} },
+        .{ .call = "collectMarkerPreviewDraws(", .count = 1, .gates = &.{"marker_preview_open"} },
+        .{ .call = "collectRenameBoxDraws(", .count = 2, .gates = &.{ "== .symbol", "== .untitled_save" } }, // 심볼 · 이름 없는 문서
+        .{ .call = "collectNotificationsDraws(", .count = 1, .gates = &.{"notifications.open"} },
+        .{ .call = "collectSettingsDraws(", .count = 1, .gates = &.{"settings.open"} },
+        .{ .call = "collectSendHelperDraws(", .count = 1, .gates = &.{"send_helper.open"} },
+        .{ .call = "collectSuggestBoxDraws(", .count = 1, .gates = &.{"editor_completion.active"} },
+        .{ .call = "collectHoverBoxDraws(", .count = 2, .gates = &.{"hover_box.open"} }, // 시그니처 · 호버(같은 상자 — 시그니처도 hover_box 를 연다)
+        .{ .call = "buildKeyHintBadges(", .count = 1, .gates = &.{"key_hints.visible"} },
+    };
+    var listed: usize = 0;
+    for (sources) |so| {
+        const n = std.mem.count(u8, prep, so.call);
+        if (n != so.count) {
+            std.debug.print("buildChromeOverlayPrep 의 `{s}` 가 {d}번(표는 {d}) — 출처가 바뀌었으면 관문과 이 표를 함께 고친다\n", .{ so.call, n, so.count });
+            return error.OverlaySourceCountDrift;
+        }
+        listed += n;
+        for (so.gates) |g| {
+            if (std.mem.indexOf(u8, gate_a, g) == null and std.mem.indexOf(u8, gate_b, g) == null) {
+                std.debug.print("`{s}` 가 그리는데 관문에 `{s}` 가 없다 — 다른 오버레이가 없으면 안 그려진다\n", .{ so.call, g });
+                return error.OverlaySourceUngated;
+            }
+        }
+    }
+    // 표에 없는 그리기 호출이 없다 — `collect…Draws(` 를 전부 센다(정의가 아니라 이 함수 안의 호출만).
+    var total: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, prep, i, "Draws(")) |at| : (i = at + 1) {
+        const line_start = (std.mem.lastIndexOfScalar(u8, prep[0..at], '\n') orelse 0);
+        const line = prep[line_start..at];
+        if (std.mem.indexOf(u8, line, "collect") != null and std.mem.indexOf(u8, line, "//") == null) total += 1;
+    }
+    total += std.mem.count(u8, prep, "buildKeyHintBadges(");
+    if (total != listed) {
+        std.debug.print("buildChromeOverlayPrep 의 그리기 호출이 {d}개인데 표는 {d}개 — 새 출처의 관문을 세우고 표에 적는다\n", .{ total, listed });
+        return error.OverlaySourceUnlisted;
+    }
+}
+
+test "OVF2 마커 이미지 프리뷰가 「풀 수 없다」로 끝나면 — 다른 오버레이 없이도 관문이 서고 그 프레임에 안내 글자가 실린다; 정상 프리뷰는 관문을 세우지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    const term = pane_ops.activePane(session).activeTerm();
+    session.marker_preview_open = .{
+        .surface_id = term.surface.id,
+        .n = 1,
+        .row = 6,
+        .start_col = 4,
+        .end_col = 14,
+        .width = 200,
+        .height = 120,
+    };
+    defer marker_view_ops.closeMarkerPreview(session);
+    try std.testing.expect(!session.anyOverlayOpen());
+    try std.testing.expect(!session.overlayFrameNeeded()); // 정상(아직 안 풀림·풀림)은 글자가 없어 프레임이 필요 없다
+    session.marker_preview_open.?.failed = true;
+    try std.testing.expect(session.overlayFrameNeeded()); // ★ 다른 오버레이 없이도 관문이 선다
+    var prep = (try session.buildChromeOverlayPrep()) orelse return error.MarkerFailureNotDrawn;
+    defer prep.dl.deinit(allocator);
+    const want = maru.i18n.t(.app_marker_preview_undecodable);
+    var it = (std.unicode.Utf8View.init(want) catch return error.BadText).iterator();
+    const first = it.nextCodepoint().?;
+    var found = false;
+    for (prep.dl.cells) |c| if (c.codepoint == first) {
+        found = true;
+    };
+    try std.testing.expect(found); // 안내 글자가 실렸다
 }

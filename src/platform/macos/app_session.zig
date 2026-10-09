@@ -2220,7 +2220,8 @@ const TermRuntime = struct {
     // 봉인해 다른 종류가 오면 프로세스를 끝낸다(`requestRuntimeClose` proof_loss) — 셸이 끝난 Term에 앱 종료 정리가
     // closeAndDetach를 다시 보내 exit 86으로 죽었다. 그래서 원격 Term에는 finish만 다시 보낸다(`term_ops.finishIfRequested` —
     // in-process는 kind를 보지 않아 지금처럼 closeAndDetach를 받는다).
-    // finish가 event_pending이면 원격 pump는 끝을 다시 알리지 않으므로 tick이 이 값으로 같은 finish를 이어 보낸다.
+    // finish가 event_pending이면 원격 pump는 (그 runtime 세대 안에서) 끝을 다시 알리지 않으므로 tick이 이 값으로 같은 finish를
+    // 이어 보낸다.
     finish_ended: ?app.RuntimePumpTermination = null,
     // 그 끝을 처음 본 시각(`std.Io.Clock.awake` ns, 0=아직). uptime(비정상 시작 사망 grace)은 finish 가 끝난 때가 아니라 이
     // 시각으로 잰다 — 그러지 않으면 finish 가 몇 tick 기다리는 동안 시작 직후 죽은 셸이 grace 를 넘겨 창이 닫힐 수 있었다
@@ -71853,7 +71854,8 @@ test "C3-3b5 AppSession은 termination finish와 remove가 끝난 뒤에만 casc
 }
 
 /// 원격 화면 소스 자리만 채운다 — 아래 시험은 이 Term 을 그리지 않는다(그리면 패닉으로 드러난다). `app_remote_backend` 가
-/// 없으므로 `backendFor` 는 원격으로 가지 않고 시험 seam 을 거친다 — 어떤 종류의 close 를 보냈는지만 본다.
+/// 없으면 `backendFor` 는 in-process backend 를 돌려주고, 시험은 그 바깥의 seam(`term_runtime_backend.testing`)으로 어떤
+/// 종류의 close 를 보냈는지만 본다(응답은 `armCloseSequence` 가 준다).
 fn markRemoteForCloseKindTest(term: *Term, owner: *anyopaque) void {
     const Source = @typeInfo(@TypeOf(term.surface.remote)).optional.child;
     const NoScreen = struct {
@@ -71878,7 +71880,12 @@ test "셸이 끝나 finish 를 보낸 원격 Term 에 앱 정리는 finish 만 �
     const finished = pane.terms.items[0]; // 활성이 아닌 Term — 정리 중에 그리지 않는다
     markRemoteForCloseKindTest(finished, session);
     var deinited = false;
-    defer if (!deinited) session.deinit(); // 단언이 실패해도 reader 를 남기지 않는다
+    // 단언이 실패해도 reader 를 남기지 않는다. 원격 표시를 먼저 거둔다 — 남기면 pass 1 이 빈 seam 으로 진짜 in-process finish 를
+    // 불러 살아 있는 셸의 reader 를 영영 기다린다(실패 대신 멈춤).
+    defer if (!deinited) {
+        finished.surface.remote = null;
+        session.deinit();
+    };
     // tick 이 셸의 끝을 보고 finish 를 보내 끝냈다. 둘째 Term 은 in-process 로 끝났다 — kind 를 보지 않고, 끝난 뒤의
     // closeAndDetach 가 routing 연결도 끊으므로 지금처럼 closeAndDetach 를 받는다.
     for (pane.terms.items) |term| {
@@ -72024,7 +72031,8 @@ test "finish 가 끝나지 않은 원격 셸이 있으면 창 닫기는 graph �
         if (app_remote_backend) |*backend| backend.deinit();
         app_remote_backend = null;
     }
-    // graph 를 준비했다면 finish 로 봉인된 runtime 의 ticket 예약이 proof_loss 로 프로세스를 끝냈다.
+    // 제품에서 graph 를 준비했다면 finish 로 봉인된 runtime 의 ticket 예약이 proof_loss 로 프로세스를 끝냈다(이 시험에는 등록된
+    // 원격 runtime 이 없어 가드를 빼면 close_runtime_absent 로 시험 프로세스가 끝난다 — 변이 판정은 크래시도 센다).
     try std.testing.expect(session.requestWindowClose());
     try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expect(session.window_close_pending);

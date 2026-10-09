@@ -2066,6 +2066,9 @@ ended_pid=$!
 ended_rc=0
 wait "$ended_pid" || ended_rc=$?
 grep -ao "fatal integrity: reason=[a-z_]*([0-9]*)" "$root/app-endedshell-plain.log" | head -1
+# integrity 실패면 summary 가 쓰이지 않는다 — 그 사유를 먼저 알린다.
+! grep -aq "fatal integrity" "$root/app-endedshell-plain.log" \
+    || fail "a window whose only shell already ended hit a session host integrity failure when the app quit (exit $ended_rc)"
 # 셸이 정말 끝났어야 이 길을 본 것이다(끝나지 않았으면 정리할 끝난 셸이 없다).
 grep -aq '^exit_events=[1-9]' "$root/endedshell-plain.summary" 2>/dev/null \
     || fail "the plain window's shell did not end before the app quit — this stage did not reach the ended-shell cleanup"

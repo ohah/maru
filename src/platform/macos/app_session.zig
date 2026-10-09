@@ -14373,7 +14373,7 @@ pub const AppSession = struct {
 
     /// 편집기 헬퍼(자동완성·시그니처·호버)를 **닫아야 하는가** — 입력을 받는 오버레이(`anyOverlayOpen`)나 인라인 rename 이 떠 있다.
     /// 세 헬퍼의 `refresh` 가 이 판정으로 스스로 닫으려 했지만(자동완성은 이 모양 그대로, 시그니처·호버는 `anyOverlayOpen` 만),
-    /// `refresh` 는 **다른 오버레이가 없을 때만** 불려(`buildChromeOverlayPrep` 의 `draws.items.len == 0`) 그 갈래에 닿지 않았다 — 그래서
+    /// `refresh` 는 **다른 오버레이가 없을 때만**(지금은 포커스 없는 찾기 막대만 있을 때도 — `editor_helpers_may_draw`) 불려 그 갈래에 닿지 않았다 — 그래서
     /// 오버레이 아래 숨은 낡은 목록·호버가 오버레이를 닫은 뒤 다시 떴다(2026-10-09). tick 이 오버레이를 짓기 전에 닫고
     /// (`closeEditorHelpersBehindOverlay` — 토스트·확정 보류는 빼고, 그 함수 doc), 호버 tick 은 이것이 참이면 새 호버를 묻지 않는다. 보내기 헬퍼는 일부러 남긴다 — 고른 것이
     /// 그대로라 오버레이가 닫히면 다시 떠야 한다(send-selection-to-agent §6.2).
@@ -24015,7 +24015,14 @@ pub const AppSession = struct {
         const props = self.buildChromeProps();
         var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
         find_ops.syncDiffFind(self);
-        try self.chrome_host.collectDraws(props, &tokens, arena, &draws); // Notice·Find
+        try self.chrome_host.collectDraws(props, &tokens, arena, &draws); // Notice·Confirm·Find
+        // 위 수집(토스트·확인창·찾기 막대 1·2)이 낸 것이 **포커스 없는 찾기 막대뿐**인가 — 그때는 편집기 헬퍼(자동완성·시그니처·호버)도 함께
+        // 그린다(아래 `editor_helpers_may_draw`). 입력·메시지를 가진 오버레이(`anyOverlayOpen` — `collectDraws` 몫으로는 토스트·확인창·포커스 있는
+        // 찾기)가 있으면 아니다:
+        // 그때 헬퍼의 `refresh` 를 부르면 `editorHelpersSuppressed` 로 목록을 **닫는다** — 토스트는 닫는 이유가 아니고(§8.2g ⑴), 확정 보류
+        // (`pending_accept`)는 tick 이 일부러 남겨 둔 것이라(⑵) 여기서 닫으면 Enter 로 고른 항목이 사라졌다(적대적 검증 2026-10-10).
+        const find_bars_only_draws = draws.items.len;
+        const find_bars_only = !self.anyOverlayOpen();
         if (self.chrome_host.palette.open) {
             self.followPaletteSelection(); // 선택이 바뀌었으면 창을 당긴다(값 비교 — 위 필드 주석)
             const rows = try self.buildPaletteRows(arena); // 카탈로그 행 주입(platform 소유)
@@ -24095,23 +24102,30 @@ pub const AppSession = struct {
         if (draws.items.len == 0 and editor_ops.refreshSendHelper(self)) {
             try self.chrome_host.collectSendHelperDraws(editor_ops.sendHelperItems(self), props, &tokens, arena, &draws);
         }
-        // 호버 박스(tooling §8.2b — 비모달). 헬퍼와 같은 규율: 다른 오버레이가 낼 것이 있으면 안 내고, 프레임마다 `refresh` 가
+        // 호버 박스(tooling §8.2b — 비모달). 다른 오버레이가 낼 것이 있으면 안 낸다(포커스 없는 찾기 막대뿐이면 함께 낸다 — 아래
+        // `editor_helpers_may_draw`), 프레임마다 `refresh` 가
         // 설 자리를 다시 묻는다(없으면 스스로 내려간다).
         // 자동완성 팝업(§8.2g) — 편집기 헬퍼 상자는 프레임에 하나다(정책 — 아래 if-else). 이것이 뜨면 시그니처·호버는 이 프레임에 안 그린다(상태는 남는다).
-        // **그렸는지를 남긴다**(2026-10-09) — 아래 셋은 다른 오버레이가 있으면 안 그려지는데 상태는 남고, 포인터 처리기
+        // **그렸는지를 남긴다**(2026-10-09) — 아래 셋은 (포커스 없는 찾기 막대 말고) 다른 오버레이가 있으면 안 그려지는데 상태는 남고, 포인터 처리기
         // (`completion_client.mouseDown`·`hover_client.mouseDown`·각 `wheel`)는 `mouse()`·`scrollWheel` **맨 앞**에서 돈다. 그래서
         // 이름 상자·팔레트 아래 **보이지 않는** 완성 목록이 클릭을 받아 문서에 완성을 넣었다(재현: F2 상자 안·팔레트 안 클릭 →
         // `doc_changed=true`). 처리기는 이 값을 보고 안 그려진 상자 몫의 포인터를 받지도 삼키지도 않는다(`editorHelperTakesPointer`).
         self.editor_suggest_hidden = true;
         self.editor_hover_box_hidden = true;
-        if (draws.items.len == 0 and editor_ops.completion_client.refresh(self)) {
+        // **편집기 헬퍼는 다른 오버레이가 없을 때, 또는 그려진 것이 찾기 막대뿐일 때 그린다**(2026-10-10). 찾기 입력에 포커스가 없으면
+        // (프로젝트 검색 도크가 포커스를 가져갔다가 Esc·결과 열기로 편집기에 돌려준 경우 — tooling §8.2g) 키는 편집기가 받으므로 완성 목록·시그니처·
+        // 호버도 그 막대와 함께 떠야 한다. 예전에는 「없을 때」만이라
+        // 목록이 **상태만 서고 안 그려졌고**, ↑↓ 는 그 보이지 않는 목록이 먹었다(caret 51 → 51 실측). 함께 그려도 둘 다 컴포넌트가 정한 픽셀에
+        // 선다 — 칸 위상이 다르면 lowering 이 격자를 따로 내린다(docs/chrome-strategy.md §5.3). 헬퍼는 찾기 막대 **뒤에** 모여 위에 그려진다.
+        const editor_helpers_may_draw = draws.items.len == 0 or (find_bars_only and draws.items.len == find_bars_only_draws);
+        if (editor_helpers_may_draw and editor_ops.completion_client.refresh(self)) {
             self.editor_suggest_hidden = false;
             try self.chrome_host.collectSuggestBoxDraws(editor_ops.completion_client.rows(self), editor_ops.completion_client.docsLines(self), props, &tokens, arena, &draws);
-        } else if (draws.items.len == 0 and editor_ops.signature_client.refresh(self)) {
+        } else if (editor_helpers_may_draw and editor_ops.signature_client.refresh(self)) {
             // 시그니처 힌트(§8.2d) — 같은 상자, 주인이 시그니처일 때. 호버의 refresh 는 그동안 false 다.
             self.editor_hover_box_hidden = false;
             try self.chrome_host.collectHoverBoxDraws(editor_ops.signature_client.lines(self), props, &tokens, arena, &draws);
-        } else if (draws.items.len == 0 and editor_ops.hover_client.refresh(self)) {
+        } else if (editor_helpers_may_draw and editor_ops.hover_client.refresh(self)) {
             self.editor_hover_box_hidden = false;
             try self.chrome_host.collectHoverBoxDraws(editor_ops.hover_client.lines(self), props, &tokens, arena, &draws);
         }
@@ -63230,7 +63244,7 @@ test "알림 패널을 열면 모달이 아닌 다른 오버레이(찾기 바·�
 
     _ = notification_ops.pushNotificationHistory(session, "Maru", "b", 0);
     session.chrome_host.find.show();
-    session.chrome_host.find.input_focused = false; // 편집기를 눌러 포커스만 잃은 상태 — 모달이 아니다
+    session.chrome_host.find.input_focused = false; // 포커스만 빠진 상태(프로젝트 검색 도크가 가져간 뒤 등) — 모달이 아니다
     try std.testing.expect(!session.chrome_host.anyModalOpen()); // 그래서 종 클릭이 패널까지 간다(전제)
     notification_ops.openNotificationPanel(session);
     try std.testing.expect(session.chrome_host.notifications.open);
@@ -96614,7 +96628,7 @@ test "OVF1 오버레이 프레임이 그리는 출처마다 관문(overlayFrameN
     const Source = struct { call: []const u8, count: usize, gates: []const []const u8 };
     const sources = [_]Source{
         // 알림·확인창·찾기(+비교 뷰 둘째). **찾기는 `overlayFrameNeeded` 자신의 넓은 조건**(`chrome_host.find.open`)을 요구한다 — `anyOverlayOpen` 의
-        // `h.find.open and h.find.input_focused` 는 포커스가 있을 때만이라, 그것만 남으면 포커스 없는 찾기 막대(편집기를 눌렀거나 ⌘G 중)가 다른
+        // `h.find.open and h.find.input_focused` 는 포커스가 있을 때만이라, 그것만 남으면 포커스 없는 찾기 막대(프로젝트 검색 도크가 포커스를 가져간 뒤 등)가 다른
         // 오버레이 없이 안 그려진다. 예전 표는 `find.open` 이 그쪽에도 있어 그 줄을 지워도 통과했다(뮤테이션 생존, OVF3 가 동작으로도 잰다).
         .{ .call = "collectDraws(", .count = 1, .gates = &.{ "notice.open", "confirm.open", "chrome_host.find.open", "find_secondary.open" } },
         .{ .call = "collectPaletteDraws(", .count = 1, .gates = &.{"palette.open"} },
@@ -96714,7 +96728,7 @@ test "OVF2 마커 이미지 프리뷰가 「풀 수 없다」로 끝나면 — �
 }
 
 test "OVF3 찾기 막대가 열려 있고 입력에 포커스가 없을 때도 — 다른 오버레이 없이 관문이 서고 그 프레임에 찾기 막대가 실린다" {
-    // 편집기를 눌렀거나 ⌘G 로 넘기는 중이면 찾기 막대는 남고 입력 포커스만 빠진다. 그때 `anyOverlayOpen` 은 거짓이라(포커스 있는 찾기만 센다)
+    // 프로젝트 검색 도크가 포커스를 가져가면(⇧⌘F — `search/dock.zig` `open`) 찾기 막대는 남고 입력 포커스만 빠진다. 그때 `anyOverlayOpen` 은 거짓이라(포커스 있는 찾기만 센다)
     // 관문은 `overlayFrameNeeded` 자신의 `chrome_host.find.open` 이 세운다 — 그 줄을 지워도 잡는 판정자가 없었다(2026-10-09 뮤테이션 생존).
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
     const allocator = std.testing.allocator;
@@ -96732,7 +96746,7 @@ test "OVF3 찾기 막대가 열려 있고 입력에 포커스가 없을 때도 �
     try std.testing.expect(!session.overlayFrameNeeded());
     session.dispatchAppAction(.toggle_find);
     try std.testing.expect(session.chrome_host.find.open);
-    session.chrome_host.find.input_focused = false; // 편집기를 눌러 포커스가 빠진 상태
+    session.chrome_host.find.input_focused = false; // 포커스만 빠진 상태(프로젝트 검색 도크가 가져간 뒤 등)
     try std.testing.expect(!session.anyOverlayOpen()); // 전제: 그 집합으로는 세지 않는다
     try std.testing.expect(session.overlayFrameNeeded()); // ★ 관문은 선다
     var prep = (try session.buildChromeOverlayPrep()) orelse return error.FindBarNotDrawn;

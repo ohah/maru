@@ -422,7 +422,7 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
 
 /// 접두사로 다시 좁힌다. `force` 면 접두사가 같아도 다시(목록이 갈아 끼워졌다). 결과가 0 이면 false(호출자가 닫는다).
 /// **확정 보류가 시간을 넘겼으면 additional 없이 지금 확정한다**(§8.2g-b — 응답을 `resolve_wait_ms` 까지만 기다린다). 확정했으면 true.
-/// `refresh` 와 tick 이 함께 부른다 — `refresh` 는 다른 오버레이가 없을 때만 불려, 오버레이 아래에서 보류된 확정은 이 시간 초과에 닿지 않았다
+/// `refresh` 와 tick 이 함께 부른다 — `refresh` 는 다른 오버레이가 없을 때만(포커스 없는 찾기 막대만 있을 때도) 불려, 오버레이 아래에서 보류된 확정은 이 시간 초과에 닿지 않았다
 /// (`AppSession.closeEditorHelpersBehindOverlay`).
 pub fn acceptPendingOnTimeout(self: *AppSession) bool {
     const st = &self.editor_completion;

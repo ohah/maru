@@ -146,6 +146,19 @@ pub fn contains(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool 
         y >= @as(f64, @floatFromInt(lay.y)) and y < @as(f64, @floatFromInt(lay.y + @as(i32, @intCast(lay.ch * @as(u32, if (state.replaceActive()) 2 else 1)))));
 }
 
+/// **보이는 패널**(사방 `modal_padding_px` 만큼 키운 것 — rich lowering 이 그렇게 그린다) 안인가. 클릭 판정(`contains`)은 입력 줄만
+/// 보지만, 패널이 **가린 자리**를 묻는 쪽(그 아래 편집기 낱말의 호버)은 보이는 테두리까지 본다.
+pub fn visibleContains(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool {
+    if (!state.open) return false;
+    const lay = layout(state, p) orelse return false;
+    const pad: f64 = @floatFromInt(p.shape.modal_padding_px);
+    const x0: f64 = @floatFromInt(lay.x);
+    const y0: f64 = @floatFromInt(lay.y);
+    const w: f64 = @floatFromInt(lay.panel_cols * lay.cw);
+    const h: f64 = @floatFromInt(lay.ch * @as(u32, if (state.replaceActive()) 2 else 1));
+    return x >= x0 - pad and x < x0 + w + pad and y >= y0 - pad and y < y0 + h + pad;
+}
+
 fn regexButtonRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     if (!state.open or state.target == .page) return null;
     const lay = layout(state, p) orelse return null;
@@ -1113,4 +1126,24 @@ test "find paired scope: 중간 폭에서도 입력·정규식 버튼·카운터
         const caret = caretRect(&s, p).?;
         try std.testing.expect(caret.x >= panel.x and caret.x < panel.x + @as(i32, @intCast(panel.w)));
     }
+}
+
+test "visibleContains — 보이는 패널은 입력 줄보다 사방 패딩만큼 크다(가린 자리 판정), contains 는 입력 줄만" {
+    var s = State{};
+    s.show();
+    var p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 } };
+    p.shape.modal_padding_px = 12;
+    const lay = layout(&s, p).?;
+    const x0: f64 = @floatFromInt(lay.x);
+    const y0: f64 = @floatFromInt(lay.y);
+    try std.testing.expect(visibleContains(&s, p, x0 - 6, y0 + 4)); // 왼쪽 패딩 위
+    try std.testing.expect(!contains(&s, p, x0 - 6, y0 + 4));
+    try std.testing.expect(!visibleContains(&s, p, x0 - 13, y0 + 4)); // 패딩 밖
+    const w: f64 = @floatFromInt(lay.panel_cols * lay.cw);
+    try std.testing.expect(visibleContains(&s, p, x0 + w + 6, y0 + 4)); // 오른쪽 패딩
+    try std.testing.expect(visibleContains(&s, p, x0 + 4, y0 - 6)); // 위 패딩
+    try std.testing.expect(visibleContains(&s, p, x0 + 4, y0 + 16 + 6)); // 아래 패딩(막대 바로 아래 줄을 가린다)
+    try std.testing.expect(!visibleContains(&s, p, x0 + 4, y0 + 16 + 13));
+    s.hide();
+    try std.testing.expect(!visibleContains(&s, p, x0 + 4, y0 + 4)); // 닫히면 없다
 }

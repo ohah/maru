@@ -132,9 +132,17 @@ pub fn tick(self: *AppSession) void {
     // 입력을 받는 오버레이·인라인 rename 이 떠 있으면 새 호버를 묻지 않는다 — 이름 상자가 열린 채 포인터가 낱말에 머물면 요청이 나가
     // 상자를 닫은 뒤 낡은 호버가 떴다(2026-10-09, `AppSession.editorHelpersSuppressed`).
     if (self.editorHelpersSuppressed()) return;
+    // **찾기 막대가 가린 자리**에 멈춘 포인터는 그 아래 낱말의 호버를 묻지 않는다 — 포인터는 막대 위에 있다. 헬퍼가 포커스 없는 찾기 막대와
+    // 함께 그려지면서 드러났다: 막대 위에 300 ms 머물면 가려진 낱말의 호버가 막대 아래 줄을 덮었다(적대적 검증 2026-10-10).
+    if (findBarCovers(self, st.pointer_x, st.pointer_y)) return;
     const term = pane_ops.activePane(self).activeTerm();
     const off = pointerOffsetWithSession(self, term, st.pointer_x, st.pointer_y) orelse return;
     begin(self, term, off, true);
+}
+
+/// 비교 뷰의 둘째 찾기 막대는 보지 않는다 — 비교 뷰는 호버를 열지 않는다(`pointerOffsetWithSession` 이 diff 를 거절한다).
+fn findBarCovers(self: *AppSession, x: f64, y: f64) bool {
+    return chrome.components.find.visibleContains(&self.chrome_host.find, self.buildChromeProps(), x, y);
 }
 
 /// `show_hover` 명령 — caret 자리로 연다(§8.2b 「키보드」). `editor.hover` 를 꺼도 온다.

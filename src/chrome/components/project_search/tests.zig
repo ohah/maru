@@ -23,6 +23,7 @@ test "project search dock replacement field and readonly diff share action geome
     var p = props(160, 300, 1000);
     p.replacing = true;
     p.previewing = true;
+    p.can_apply = true;
     p.focused = 3;
     p.replacement = "한글";
     p.rows = &.{.{ .label = "- foo", .index = 0, .enabled = false, .kind = .removed }};
@@ -41,8 +42,15 @@ test "project search dock replacement field and readonly diff share action geome
     try std.testing.expectEqualDeep(ids.Intent{ .option = 7 }, table.resolve(back_hit.action_id, 7).?);
     const row = f.tree.entries[f.tree.find(build.rowId(0)).?].rect;
     try std.testing.expect(interaction.hitAction(f.tree, row.x + 10, @max(row.y, @as(f32, @floatFromInt(f.metrics.header))) + 5) == null);
+    const apply_rect = f.tree.entries[f.tree.find(build.optionId(9)).?].rect;
+    const apply_hit = interaction.hitAction(f.tree, apply_rect.x + apply_rect.width / 2, apply_rect.y + apply_rect.height / 2).?;
+    try std.testing.expectEqualDeep(ids.Intent{ .option = 9 }, table.resolve(apply_hit.action_id, 7).?);
+    try std.testing.expect(table.resolve(apply_hit.action_id, 8) == null);
     p.viewport.width = 800;
+    p.can_apply = false;
     const wide = try make(a, p);
+    const disabled = wide.tree.entries[wide.tree.find(build.optionId(9)).?].rect;
+    try std.testing.expect(interaction.hitAction(wide.tree, disabled.x + disabled.width / 2, disabled.y + disabled.height / 2) == null);
     const wide_option = wide.tree.entries[wide.tree.find(build.optionId(0)).?].rect;
     const wide_run = wide.tree.entries[wide.tree.find(build.optionId(4)).?].rect;
     try std.testing.expectEqual(@as(u32, 1), wide.metrics.toolbar_rows);
@@ -124,8 +132,8 @@ test "project search dock text clips belong to individual fields buttons and row
         const f = try make(a, p);
         const tk = tokens.Tokens.rich(std.mem.zeroes(tokens.ThemeColors));
         const rendered = try view.view(p, f, .{}, &tk, .{ .ops = try a.alloc(draw.Op, 200), .runs = try a.alloc(draw.Run, 30) });
-        const names = [_][]const u8{ "query", "include", "exclude", "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", "→", p.scopes, p.status, "a.zig", "foo" };
-        const names_ids = [_]u64{ 10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 7, 8, build.rowId(99), build.rowId(100) };
+        const names = [_][]const u8{ "query", "include", "exclude", "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", "→", "✓", p.scopes, p.status, "a.zig", "foo" };
+        const names_ids = [_]u64{ 10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 7, 8, build.rowId(99), build.rowId(100) };
         for (rendered.ops) |op| if (op == .text) {
             var found = false;
             for (names, names_ids) |name, id| if (std.mem.eql(u8, name, op.text.runs[0].text)) {

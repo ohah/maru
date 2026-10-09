@@ -5,13 +5,24 @@ const lines = @import("../line_index.zig");
 const diff = @import("../diff.zig");
 const query = @import("query.zig");
 const event = @import("event.zig");
+const delta = @import("../delta.zig");
+/// 대체 문자열은 after 안의 범위로 식별한다. output 성장 중의 포인터를 보관하지 않는다.
+pub const Edit = struct { start: usize, end: usize, after_start: usize, after_end: usize };
 pub const Row = struct { kind: diff.RowKind, line: u32, text: []const u8, context_start: usize = 0 };
 pub const Plan = struct {
     before: []u8,
     after: []u8,
     rows: std.ArrayList(Row) = .empty,
     replacements: usize,
+    edits: std.ArrayList(Edit) = .empty,
+    /// 반환 배열만 호출자가 소유하고 text는 Plan.after를 빌린다. 실제 적용이 끝날 때까지 Plan을 보존한다.
+    pub fn changes(self: *const Plan, a: std.mem.Allocator) ![]delta.Change {
+        const result = try a.alloc(delta.Change, self.edits.items.len);
+        for (result, self.edits.items) |*change, edit| change.* = .{ .start = edit.start, .end = edit.end, .text = self.after[edit.after_start..edit.after_end] };
+        return result;
+    }
     pub fn deinit(self: *Plan, a: std.mem.Allocator) void {
+        self.edits.deinit(a);
         self.rows.deinit(a);
         a.free(self.before);
         a.free(self.after);
@@ -40,6 +51,8 @@ pub fn prepare(a: std.mem.Allocator, original: []const u8, needle: []const u8, r
     defer if (pattern) |*p| p.deinit();
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(a);
+    var edits: std.ArrayList(Edit) = .empty;
+    defer edits.deinit(a);
     var copied: usize = 0;
     var previous: ?find.regex.Span = null;
     var scan: usize = 0;
@@ -71,13 +84,18 @@ pub fn prepare(a: std.mem.Allocator, original: []const u8, needle: []const u8, r
             if (found.start != lo or found.end != hi) return error.StaleMatch;
         }
         try append(a, &output, before[copied..lo], limit);
+        const after_start = output.items.len;
         try append(a, &output, expanded orelse replacement, limit);
+        if (!std.mem.eql(u8, before[lo..hi], expanded orelse replacement))
+            try edits.append(a, .{ .start = lo, .end = hi, .after_start = after_start, .after_end = output.items.len });
         copied = hi;
     }
     try append(a, &output, before[copied..], limit);
     const after = try output.toOwnedSlice(a);
     errdefer a.free(after);
-    var plan: Plan = .{ .before = before, .after = after, .replacements = ranges.len };
+    var plan: Plan = .{ .before = before, .after = after, .replacements = ranges.len, .edits = edits };
+    edits = .empty;
+    errdefer plan.edits.deinit(a);
     errdefer plan.rows.deinit(a);
     var right = try lines.build(a, after);
     defer right.deinit();
@@ -95,6 +113,7 @@ pub fn prepare(a: std.mem.Allocator, original: []const u8, needle: []const u8, r
     }
     var view = try diff.compute(a, left_text, right_text, .{});
     defer if (view == .compare) view.compare.deinit(a);
+    if (view == .unchanged) return plan;
     if (view != .compare) return error.DiffTooLarge;
     // unified 표시도 기존 줄 대응을 소비한다. 전문은 Plan이 보관하므로 row는 안전하게 빌린다.
     for (view.compare.left, view.compare.right) |left, added| {
@@ -134,6 +153,9 @@ fn allocationCase(a: std.mem.Allocator) !void {
     var plan = try prepare(a, "foo\nfoo", "(foo)", "$1x", .{ .regex = true }, &.{ .{ .start = .{ .line = 0, .byte = 0 }, .end = .{ .line = 0, .byte = 3 } }, .{ .start = .{ .line = 1, .byte = 0 }, .end = .{ .line = 1, .byte = 3 } } }, 100, &stop);
     defer plan.deinit(a);
     try std.testing.expectEqualStrings("foox\nfoox", plan.after);
+    const changes = try plan.changes(a);
+    defer a.free(changes);
+    try std.testing.expectEqual(@as(usize, 2), changes.len);
 }
 test "project replace preview releases every failed preparation allocation" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationCase, .{});
@@ -167,4 +189,61 @@ test "project replace preview replays skipped regex context empty spans and Unic
     try std.testing.expectError(error.StaleMatch, prepare(a, "A", "(?:)", "_", .{ .regex = true }, &.{ empty, empty }, 100, &stop));
     const split: event.Range = .{ .start = .{ .line = 0, .byte = 1 }, .end = .{ .line = 0, .byte = 3 } };
     try std.testing.expectError(error.StaleMatch, prepare(a, "가", "가", "x", .{}, &.{split}, 100, &stop));
+}
+
+/// 미리보기 문자열 조립과 별개인 실제 문서 편집 엔진으로 정방향·역방향을 대조한다.
+fn verifyChanges(a: std.mem.Allocator, plan: *const Plan) !void {
+    const changes = try plan.changes(a);
+    defer a.free(changes);
+    try std.testing.expect((delta.Delta{ .changes = changes }).isWellFormed());
+    var doc = try @import("../edit_doc.zig").EditableFile.initContent(a, plan.before, false);
+    defer doc.deinit();
+    const selection = @import("../selection.zig");
+    var items = [_]selection.Selection{selection.Selection.at(0)};
+    var sels = selection.Selections.init(&items, 0);
+    var inverse = try doc.apply(.{ .changes = changes }, &sels);
+    defer inverse.deinit();
+    try std.testing.expectEqualStrings(plan.after, doc.content);
+    var redo = try doc.apply(inverse.delta(), &sels);
+    defer redo.deinit();
+    try std.testing.expectEqualStrings(plan.before, doc.content);
+}
+test "project replace preview compact edits apply and undo raw multiline capture deletion and empty matches" {
+    const a = std.testing.allocator;
+    const stop = std.atomic.Value(bool).init(false);
+    const cases = [_]struct { original: []const u8, needle: []const u8, replacement: []const u8, regex: bool, ranges: []const event.Range }{
+        .{ .original = "α\r\nfoo\nβfoo", .needle = "(foo)", .replacement = "$1$1", .regex = true, .ranges = &.{ .{ .start = .{ .line = 1, .byte = 0 }, .end = .{ .line = 1, .byte = 3 } }, .{ .start = .{ .line = 2, .byte = 2 }, .end = .{ .line = 2, .byte = 5 } } } },
+        .{ .original = "foo bar foo", .needle = "foo", .replacement = "", .regex = false, .ranges = &.{ .{ .start = .{ .line = 0, .byte = 0 }, .end = .{ .line = 0, .byte = 3 } }, .{ .start = .{ .line = 0, .byte = 8 }, .end = .{ .line = 0, .byte = 11 } } } },
+        .{ .original = "A", .needle = "(?:)", .replacement = "_", .regex = true, .ranges = &.{ .{ .start = .{ .line = 0, .byte = 0 }, .end = .{ .line = 0, .byte = 0 } }, .{ .start = .{ .line = 0, .byte = 1 }, .end = .{ .line = 0, .byte = 1 } } } },
+        .{ .original = "foofoo", .needle = "\\Gfoo", .replacement = "X", .regex = true, .ranges = &.{.{ .start = .{ .line = 0, .byte = 3 }, .end = .{ .line = 0, .byte = 6 } }} },
+    };
+    for (cases) |case| {
+        var plan = try prepare(a, case.original, case.needle, case.replacement, .{ .regex = case.regex }, case.ranges, 1024, &stop);
+        defer plan.deinit(a);
+        try verifyChanges(a, &plan);
+        try std.testing.expectEqual(case.ranges.len, plan.edits.items.len);
+    }
+}
+test "project replace preview single match retains only its range and replacement in the edit list" {
+    const a = std.testing.allocator;
+    const stop = std.atomic.Value(bool).init(false);
+    const original = "prefix unchanged foo suffix unchanged";
+    var plan = try prepare(a, original, "foo", "X", .{}, &.{.{ .start = .{ .line = 0, .byte = 17 }, .end = .{ .line = 0, .byte = 20 } }}, 1024, &stop);
+    defer plan.deinit(a);
+    const changes = try plan.changes(a);
+    defer a.free(changes);
+    try std.testing.expectEqual(@as(usize, 1), changes.len);
+    try std.testing.expectEqual(@as(usize, 3), changes[0].removedLen());
+    try std.testing.expectEqualStrings("X", changes[0].text);
+    try std.testing.expect(changes[0].text.ptr == plan.after.ptr + plan.edits.items[0].after_start);
+    try verifyChanges(a, &plan);
+}
+
+test "project replace preview identical replacements do not create mutation entries" {
+    const a = std.testing.allocator;
+    const stop = std.atomic.Value(bool).init(false);
+    var plan = try prepare(a, "foo", "foo", "foo", .{}, &.{.{ .start = .{ .line = 0, .byte = 0 }, .end = .{ .line = 0, .byte = 3 } }}, 1024, &stop);
+    defer plan.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), plan.edits.items.len);
+    try std.testing.expectEqualStrings(plan.before, plan.after);
 }

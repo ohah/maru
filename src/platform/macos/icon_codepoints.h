@@ -60,6 +60,7 @@
 #define MARU_ICON_SEARCH_REGEX 0xF0030u
 #define MARU_ICON_SEARCH_FILTER 0xF0031u
 #define MARU_ICON_SEARCH_STOP 0xF0032u
+#define MARU_ICON_CHECK 0xF0033u
 
 static inline bool maru_is_registered_icon_cp(uint32_t cp) {
     switch (cp) {
@@ -112,6 +113,7 @@ static inline bool maru_is_registered_icon_cp(uint32_t cp) {
         case 0xF0030u:
         case 0xF0031u:
         case 0xF0032u:
+        case 0xF0033u:
             return true;
         default:
             return false;

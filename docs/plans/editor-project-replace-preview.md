@@ -82,7 +82,7 @@ python3 tools/editor-project-search-app/run.py --replace-preview --disk-files 2 
 
 ## 남은 경계
 
-S4의 실제 쓰기, 여러 파일 선택 집합·실패/부분 성공·재시도·되돌리기 정책은 아직 연결하지 않았다.
+S4a 열린 문서의 실제 적용·저장은 [적용 계획](editor-project-replace-apply.md)을 따른다. 디스크 전용·여러 파일 선택 집합·실패/부분 성공·재시도·되돌리기 정책은 후속이다.
 외부 수정 후 충돌 표시에는 기존 감시 세대를 사용한다. watcher의 모든 누락·overflow·지연 I/O 종료 상한을 증명하지 않는다.
 향후 적용 시 미리보기 상태만 믿지 않고 원문을 다시 검증해야 한다. 새 workspace 포맷이나 영속 Undo를 도입하지 않는다.
 

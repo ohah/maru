@@ -13,7 +13,7 @@
 | 문서 전체 정규식 | 구현·집중 자동/Metal 검증 | `FND35~39`, `EDREG1~4`, 독립 원문 범위·오류 대조와 현재/비현재 여러 줄 강조의 픽셀 대조 | 실제 OS/HID/IME 콜백과 프로젝트 worker는 이 검사의 범위 밖 |
 | VS Code 기본 검색 판정 | 구현·집중 검증 | `FND40~41`, `EDREG5`, 실제 VS Code Searcher와 공통 문법 1,380조합 범위 대조, 단어 강조/비강조 제품 Metal 픽셀 | 기본 구분자·단일 줄 오라클 범위. 사용자 지정 구분자·전체 JS 정규식 호환·실제 OS 입력의 증거는 아님 |
 | 프로젝트 검색 rg 기반 | 구현·로컬 검증 | query/event/stream unit와 OOM·전문 절단, 실제 offline helper/어댑터 fixture, 앱 내 universal helper·114 notice·서명, 변조/누락 음성 대조 | 제품 worker·열린 모델 우선·취소·도크·실제 IME는 후속. CLI 통과를 앱 검색 완료로 표시하지 않는다 |
-| 프로젝트 전체 검색·바꾸기 미리보기 | 검색 worker·도크와 읽기 전용 바꾸기 미리보기 구현 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·전체 파일시스템·OS watcher/종료 경계·바꾸기. 검색 UI·실제 HID·제품 취소·앱 RSS·시각 캡처의 표본은 [도크 검증](plans/editor-project-search-dock.md)을 따른다. 바꾸기 미리보기는 [S3 판정](plans/editor-project-replace-preview.md)의 범위를 따르며 S4 적용은 미구현이다. CLI 통과는 제품 완료의 증거가 아니다 |
+| 프로젝트 전체 검색·바꾸기 미리보기 | 검색 worker·도크와 읽기 전용 바꾸기 미리보기 구현 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·전체 파일시스템·OS watcher/종료 경계·바꾸기. 검색 UI·실제 HID·제품 취소·앱 RSS·시각 캡처의 표본은 [도크 검증](plans/editor-project-search-dock.md)을 따른다. 바꾸기 미리보기는 [S3 판정](plans/editor-project-replace-preview.md)의 범위를 따르며 S4a 열린 문서 단일 파일 적용·저장은 [적용 판정](plans/editor-project-replace-apply.md)을 따른다. 디스크 전용·여러 파일 적용은 미구현이다. CLI 통과는 제품 완료의 증거가 아니다 |
 
 ### 영속 세션 P5 세부 상태
 
@@ -4155,3 +4155,5 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 무전달로 검사한다.
 
 프로젝트 검색 결과 탭의 사본 수명·낡은 이동 거절·저장/복원 제외·준비 OOM은 `test-editor-project-replace-preview`의 RPV4~8을 따른다([범위](plans/editor-project-search-pane.md)). 제품 Metal 결과 탭 캡처는 PR 본문에 연결하며 물리 후보창·VoiceOver 완료로 해석하지 않는다.
+
+프로젝트 바꾸기의 열린 문서 적용·CAS 자동 저장·단일 Undo·공유 뷰·준비 할당 실패는 `test-editor-project-replace-apply`를 따른다([범위](plans/editor-project-replace-apply.md)). 저장 실패는 본문 적용 실패와 구분하고, 외부 파일 충돌 시 편집과 Undo를 유지한다.

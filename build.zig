@@ -5263,7 +5263,7 @@ pub fn build(b: *std.Build) void {
     replace_preview_module.linkLibrary(pcre2_lib.?);
     const replace_preview_tests = addProjectTest(b, .{ .root_module = replace_preview_module, .filters = &.{".test.project replace preview"} });
     const run_replace_preview = b.addRunArtifact(replace_preview_tests);
-    run_replace_preview.addArg("--maru-expect-tests=5");
+    run_replace_preview.addArg("--maru-expect-tests=8");
     const replace_preview_step = b.step("test-editor-project-replace-preview", "Run immutable replacement preview judges");
     replace_preview_step.dependOn(&run_replace_preview.step);
     test_step.dependOn(&run_replace_preview.step);
@@ -5392,6 +5392,17 @@ pub fn build(b: *std.Build) void {
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_replace_host.step);
 
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_search_owner_tests.step);
+    const apply_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPA"} });
+    const run_apply_host = b.addRunArtifact(apply_host_tests);
+    run_apply_host.setCwd(b.path("."));
+    run_apply_host.addArg("--maru-expect-tests=11");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_apply_host.step.dependOn(&ripgrep_prepare.step);
+        macos_only_test_step.dependOn(&run_apply_host.step);
+    }
+    const apply_step = b.step("test-editor-project-replace-apply", "Validate single document replace apply save Undo and failed preparation");
+    apply_step.dependOn(&run_apply_host.step);
+    apply_step.dependOn(&run_replace_preview.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);

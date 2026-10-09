@@ -104,7 +104,7 @@ extension MaruAppHostController {
         }
         guard ready == 1 else { finish(false); return }
         let matrix = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_MATRIX"] == "1"
-        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict", "search-pane", "search-pane-navigated", "pane-preview-results", "pane-preview-ready", "preview-pane"]
+        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict", "search-pane", "search-pane-navigated", "pane-preview-results", "pane-preview-ready", "preview-pane", "replace-applied-saved", "replace-undo", "replace-undo-saved"]
         guard editorProjectSearchCapture(labels[Int(stage)]) else { finish(false); return }
         let unicode = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_UNICODE"] == "1"
         switch stage {
@@ -165,7 +165,19 @@ extension MaruAppHostController {
         case 22, 23: editorProjectSearchAction(stage)
         case 24:
             guard editorProjectSearchClick(0) else { finish(false); return }
-        case 25: finish(true); return
+        case 25:
+            if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_REPLACE_APPLY"] != "1" { finish(true); return }
+            guard editorProjectSearchClick(0) else { finish(false); return }
+        case 26, 27:
+            let saving = stage == 27
+            // 완료 알림의 닫기 키는 기존 계약대로 소비된다. 실제 Esc를 보낸 뒤 Undo/Save를 확인한다.
+            if stage == 26 {
+                guard let dismiss = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53) else { finish(false); return }
+                view.keyDown(with: dismiss)
+            }
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: saving ? "s" : "z", charactersIgnoringModifiers: saving ? "s" : "z", isARepeat: false, keyCode: saving ? 1 : 6) else { finish(false); return }
+            view.keyDown(with: event)
+        case 28: finish(true); return
         case 11: finish(true); return
         default: editorProjectSearchAction(stage)
         }

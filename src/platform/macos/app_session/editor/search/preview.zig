@@ -1,4 +1,4 @@
-//! 바꾸기 미리보기는 불변 전문과 worker만 소유한다. 문서 열기·쓰기·Undo를 호출하지 않는다.
+//! 바꾸기 미리보기는 불변 전문과 worker를 소유하고, 재검증한 열린 문서에만 명시적으로 적용·저장한다.
 const std = @import("std");
 const maru = @import("maru");
 const host = @import("../../../app_session.zig");
@@ -101,9 +101,12 @@ const Expected = struct {
         a.free(self.found);
     }
 };
+pub const ModelTarget = struct { document: search.request.DocumentIdentity, revision: u64, surface: u64 };
 pub const State = struct {
+    target: ?ModelTarget = null,
     phase: enum { idle, verifying, building, ready, conflict, failed } = .idle,
     stamp: u64 = 0,
+    settings_stamp: u64 = 0,
     title: []u8 = &.{},
     input: ?Input = null,
     verifier: ?backend.Backend = null,
@@ -156,7 +159,7 @@ pub fn start(self: *host.AppSession, visible_index: usize) !void {
         },
     };
     const group = st.result.model.groups.items[group_index];
-    var next: State = .{ .stamp = st.stamp.?, .identity = st.result.identity };
+    var next: State = .{ .stamp = st.stamp.?, .settings_stamp = settingsStamp(self), .identity = st.result.identity };
     errdefer next.deinit(self.allocator);
     next.title = try self.allocator.dupe(u8, group.path);
     var ranges: std.ArrayList(search.event.Range) = .empty;
@@ -194,6 +197,7 @@ pub fn start(self: *host.AppSession, visible_index: usize) !void {
                 if (term.kind != .editor or !std.meta.eql(document(term), original.document)) continue;
                 const opened = term.rt.editorDocument().opened orelse return error.NoDocument;
                 if (opened.file.revision != original.revision or owner.compositionStamp(term) != 0) return error.StaleRequest;
+                next.target = .{ .document = original.document, .revision = original.revision, .surface = term.surfaceId() };
                 break :blk .{ .model = opened.file.snapshot() };
             };
             return error.StaleRequest;
@@ -322,4 +326,70 @@ pub fn quietForTest(self: *host.AppSession) void {
         if (std.Io.Clock.awake.now(self.io).nanoseconds >= deadline) return;
         std.Thread.yield() catch {};
     }
+}
+
+/// 경로가 아닌 정본 신원으로 찾는다. 같은 경로의 독립 문서는 적용 대상이 아니다.
+fn targetTerm(self: *host.AppSession) ?*host.Term {
+    const target = self.editor_search.preview.target orelse return null;
+    var result: ?*host.Term = null;
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (term.kind != .editor or !std.meta.eql(document(term), target.document)) continue;
+        if (term.rt.editor_diff != null or term.rt.editor_merge != null or term.rt.editor_search_report != null) return null;
+        const state = term.rt.editorDocument();
+        const opened = state.opened orelse return null;
+        if (state.path == null or state.untitled != null or state.remote != null or opened.file.read_only or
+            opened.file.revision != target.revision or owner.compositionStamp(term) != 0) return null;
+        if (result == null or term.surfaceId() == target.surface) result = term;
+    };
+    return result;
+}
+fn settingsStamp(self: *host.AppSession) u64 {
+    var hash = std.hash.Wyhash.init(0);
+    for (self.editor_search.fields) |field| {
+        hash.update(std.mem.asBytes(&field.text.items.len));
+        hash.update(field.text.items);
+    }
+    hash.update(std.mem.asBytes(&self.editor_search.options));
+    hash.update(std.mem.asBytes(&self.editor_search.replacing));
+    return hash.final();
+}
+pub fn canApply(self: *host.AppSession) bool {
+    const state = &self.editor_search.preview;
+    if (self.ime_active or self.ime_editor_commit_pending or state.phase != .ready or state.plan == null or state.plan.?.edits.items.len == 0) return false;
+    for (self.editor_search.fields) |field| if (field.preedit.items.len > 0) return false;
+    return state.settings_stamp == settingsStamp(self) and state.stamp == owner.fingerprint(self) and targetTerm(self) != null;
+}
+pub const ApplyResult = union(enum) { saved, save_failed: editor.SaveError };
+/// 편집과 저장은 별도 결과다. 저장 실패가 이미 적용된 본문과 Undo를 되감지 않는다.
+pub fn apply(self: *host.AppSession) !ApplyResult {
+    if (!canApply(self)) return error.StaleRequest;
+    var term = targetTerm(self) orelse return error.StaleRequest;
+    const state = &self.editor_search.preview;
+    const current = term.rt.editorDocument().opened.?.file.content;
+    if (!std.mem.eql(u8, current, state.plan.?.before)) return error.StaleRequest;
+    // 편집 통지로 도크가 무효화되어도 delta가 빌린 after는 이 호출이 소유한다.
+    var plan = state.plan.?;
+    state.plan = null;
+    const generation = self.editor_search.result.generation;
+    const stamp = state.stamp;
+    var applied = false;
+    defer {
+        if (!applied and self.editor_search.result.generation == generation and self.editor_search.preview.plan == null)
+            self.editor_search.preview.plan = plan
+        else
+            plan.deinit(self.allocator);
+    }
+    const changes = try plan.changes(self.allocator);
+    defer self.allocator.free(changes);
+    if (self.editor_search.result.generation != generation or self.editor_search.preview.stamp != stamp or self.editor_search.preview.settings_stamp != settingsStamp(self) or owner.fingerprint(self) != stamp) return error.StaleRequest;
+    term = targetTerm(self) orelse return error.StaleRequest;
+    if (!editor.applyEditAsOneWithUndo(self, term, changes)) return error.ApplyFailed;
+    applied = true;
+    const result: ApplyResult = if (editor.saveDocument(self, term)) |_| .saved else |err| .{ .save_failed = err };
+    self.editor_search.focused = null;
+    _ = self.activateExistingFileTerm(term);
+    if (term.rt.editor_selection == null) term.rt.editor_selection = maru.session.editor.selection.Selection.at(changes[0].start);
+    dock.changed(self);
+    self.editor_search.preview.deinit(self.allocator);
+    return result;
 }

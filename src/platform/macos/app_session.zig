@@ -2216,6 +2216,11 @@ const TermRuntime = struct {
     // 이 Term의 PTY가 종료(exit/read_error) 관측 후 finishAfterTermination까지 끝났는가. tick drain이 Term별로
     // 한 번만 finish하도록, 세션 종료(모든 Term terminated) 판정에 쓴다.
     terminated: bool = false,
+    // backend에 finishAfterTermination을 보낸 종료(보낸 적 없으면 null). 원격 runtime은 처음 받은 close 요청의 종류를
+    // 봉인해 다른 종류가 오면 프로세스를 끝낸다(`requestRuntimeClose` proof_loss) — 셸이 끝난 Term에 앱 종료 정리가
+    // closeAndDetach를 다시 보내 exit 86으로 죽었다. 그래서 이 Term에는 finish만 다시 보낸다(`term_ops.finishIfRequested`).
+    // finish가 event_pending이면 원격 pump는 끝을 다시 알리지 않으므로 tick이 이 값으로 같은 finish를 이어 보낸다.
+    finish_ended: ?app.RuntimePumpTermination = null,
     // backend close가 complete를 게시했지만 layout/remove suffix는 아직 실행 전일 수 있다. 이 래치가 있어야
     // topology를 보존한 재시도와 destroy 단계가 같은 close request를 두 번 발행하지 않는다.
     close_complete: bool = false,
@@ -20791,9 +20796,14 @@ pub const AppSession = struct {
                     // pty_reader가 reapIfExited로 자식이 살아있음을 확인하고 방출)는 finishAfterTermination(→session.close
                     // →shutdownChild로 산 셸을 죽인다)·terminated·reap을 타지 않는다. 셸에서 claude 실행 중 Ctrl+C가
                     // 유발한 일시적 write 오류가 read_error로 잡혀 좌측 워크스페이스 탭을 통째로 닫던 버그의 수정.
-                    if (ds.ended) |ended| {
+                    // finish가 event_pending이었던 Term은 다음 tick에 ds.ended가 다시 오지 않는다(원격 pump는 끝을 한 번만
+                    // 알린다) — 보낸 종료로 같은 finish를 이어 보낸다. 안 그러면 terminated가 서지 않아 창이 영영 닫히지 않았다.
+                    const ended_now: ?app.RuntimePumpTermination = ds.ended orelse
+                        if (term.rt.finish_ended != null and !term.rt.terminated) term.rt.finish_ended else null;
+                    if (ended_now) |ended| {
                         if (terminationClosesWorkspace(ended)) {
                             if (!term.rt.terminated) {
+                                term.rt.finish_ended = ended;
                                 if (self.backendFor(term).finishAfterTermination(term.rt.handle) == .event_pending) continue;
                                 term.rt.close_complete = true;
                                 term.rt.terminated = true;
@@ -22364,11 +22374,14 @@ pub const AppSession = struct {
                     // deinit보다 먼저 도므로, 여기서도 막지 않으면 runtime을 죽여 "GUI 종료 후 생존" 계약이 깨진다(회수는
                     // deinit pass2 detachTerm이 client-side만). P4 "종료 및 세션 끝내기"(app_quit_end_all)면 막지 않고 종료한다.
                     if (self.shouldDetachRemoteOnAppQuit(term)) continue;
-                    if (term.rt.live_initialized and self.runtime_initialized) {
-                        runtime_close_pending = self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending or runtime_close_pending;
-                    } else if (term.rt.live_initialized) {
-                        runtime_close_pending = self.backendFor(term).close(term.rt.handle) == .event_pending or runtime_close_pending;
-                    }
+                    if (!term.rt.live_initialized) continue;
+                    // 셸이 끝나 finish를 보낸 원격 Term에는 finish만 다시 보낸다 — 마지막 셸이 끝나 앱이 닫힐 때 여기서
+                    // closeAndDetach를 보내 proof_loss(exit 86)로 죽었다(`finish_ended` 주석).
+                    const progress = term_ops.finishIfRequested(self, term) orelse if (self.runtime_initialized)
+                        self.backendFor(term).closeAndDetach(term.rt.handle)
+                    else
+                        self.backendFor(term).close(term.rt.handle);
+                    runtime_close_pending = progress == .event_pending or runtime_close_pending;
                 }
             }
         }
@@ -24257,7 +24270,9 @@ pub const AppSession = struct {
                         // 남겨야 재실행 시 재접속한다(detach는 아래 pass 2 detachTerm이 client-side만 회수). 단 P4 "종료 및 세션
                         // 끝내기"(app_quit_end_all)면 skip 안 하고 종료한다. 그 외(in-process·명시 창 close)도 기존대로 closeAndDetach.
                         if (self.shouldDetachRemoteOnAppQuit(term)) continue;
-                        if (self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending)
+                        const progress = term_ops.finishIfRequested(self, term) orelse
+                            self.backendFor(term).closeAndDetach(term.rt.handle);
+                        if (progress == .event_pending)
                             @panic("process teardown reached an active terminal close operation");
                     }
                 }
@@ -71827,6 +71842,157 @@ test "C3-3b5 AppSession은 termination finish와 remove가 끝난 뒤에만 casc
     term.rt.close_complete = true;
     term_ops.closeTermAt(session, session.app_window.active_tab, pane, pane.active_term);
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+}
+
+/// 원격 화면 소스 자리만 채운다 — 아래 시험은 이 Term 을 그리지 않는다(그리면 패닉으로 드러난다). `app_remote_backend` 가
+/// 없으므로 `backendFor` 는 원격으로 가지 않고 시험 seam 을 거친다 — 어떤 종류의 close 를 보냈는지만 본다.
+fn markRemoteForCloseKindTest(term: *Term, owner: *anyopaque) void {
+    const Source = @typeInfo(@TypeOf(term.surface.remote)).optional.child;
+    const NoScreen = struct {
+        fn snapshot(_: *anyopaque) terminal.RenderSnapshot {
+            @panic("close-kind test must not draw the remote term");
+        }
+        fn lock(_: *anyopaque, _: std.Io) void {
+            @panic("close-kind test must not lock the remote term");
+        }
+        const vtable: Source.VTable = .{ .render_snapshot = snapshot, .lock = lock, .unlock = lock };
+    };
+    term.surface.remote = .{ .ctx = owner, .vtable = &NoScreen.vtable };
+}
+
+test "셸이 끝나 finish 를 보낸 원격 Term 에 앱 정리는 finish 만 다시 보낸다 — closeAndDetach 는 proof_loss(exit 86)였다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer app.term_runtime_backend.testing.clear();
+    const pane = pane_ops.activePane(session);
+    const finished = pane.terms.items[0]; // 활성이 아닌 Term — 정리 중에 그리지 않는다
+    markRemoteForCloseKindTest(finished, session);
+    // tick 이 셸의 끝을 보고 finish 를 보내 끝냈다. 둘째 Term 은 in-process 로 끝났다 — kind 를 보지 않고, 끝난 뒤의
+    // closeAndDetach 가 routing 연결도 끊으므로 지금처럼 closeAndDetach 를 받는다.
+    for (pane.terms.items) |term| {
+        term.rt.finish_ended = .{ .exited = .{ .unknown = 0 } };
+        term.rt.close_complete = true;
+        term.rt.terminated = true;
+    }
+    const Request = app.term_runtime_backend.testing.CloseRequest;
+    // 요청은 seam 이 답한다 — 이 시험의 Term 은 실제로는 살아 있는 in-process 셸이라, 진짜 finish 는 끝나지 않은 reader 를
+    // 기다린다(종류만 본다. 셸은 pass 2 의 remove 가 끝낸다).
+    app.term_runtime_backend.testing.clear();
+    app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
+    _ = session.close(); // 마지막 창이 닫힐 때(teardownWindowSurface)
+    try std.testing.expectEqualSlices(Request, &.{ .finish_after_termination, .close_and_detach }, app.term_runtime_backend.testing.requests());
+    app.term_runtime_backend.testing.clear();
+    app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
+    session.deinit(); // 그 뒤 pass 1 도 같다(원격 표시는 pass 2 의 remove 가 시험 seam 으로 간다 — app_remote_backend 없음)
+    try std.testing.expectEqualSlices(Request, &.{ .finish_after_termination, .close_and_detach }, app.term_runtime_backend.testing.requests());
+}
+
+test "끝난 원격 Term 을 finish 가 끝나기 전에 부수면(destroyTerm) finish 를 보낸다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    const pane = pane_ops.activePane(session);
+    const finishing = pane.terms.orderedRemove(0);
+    pane.active_term = 0;
+    markRemoteForCloseKindTest(finishing, session);
+    finishing.rt.finish_ended = .{ .exited = .{ .unknown = 0 } };
+    app.term_runtime_backend.testing.clear();
+    app.term_runtime_backend.testing.armCloseSequence(&.{.complete});
+    term_ops.destroyTerm(session, finishing); // 원격 표시가 있어도 app_remote_backend 가 없어 remove 는 시험 seam 으로 간다
+    const Request = app.term_runtime_backend.testing.CloseRequest;
+    try std.testing.expectEqualSlices(Request, &.{.finish_after_termination}, app.term_runtime_backend.testing.requests());
+}
+
+test "finish 가 끝나지 않은 원격 Term 을 사용자가 닫아도 finish 를 이어 보낸다 — 다른 종류를 보내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    const pane = pane_ops.activePane(session);
+    const finishing = pane.terms.items[0];
+    markRemoteForCloseKindTest(finishing, session);
+    defer finishing.surface.remote = null;
+    finishing.rt.finish_ended = .{ .exited = .{ .unknown = 0 } }; // 보냈지만 event_pending 이었다(close_complete 없음)
+    app.term_runtime_backend.testing.clear();
+    app.term_runtime_backend.testing.armCloseSequence(&.{.event_pending});
+    term_ops.closeTermAt(session, session.app_window.active_tab, pane, 0);
+    const Request = app.term_runtime_backend.testing.CloseRequest;
+    try std.testing.expectEqualSlices(Request, &.{.finish_after_termination}, app.term_runtime_backend.testing.requests());
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len); // 아직 끝나지 않아 layout 을 건드리지 않는다
+}
+
+test "finish 가 끝나지 않은 원격 셸이 있으면 창 닫기는 graph 를 준비하지 않고 끝날 때까지 기다린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    defer app.term_runtime_backend.testing.clear();
+    try session_host.host_adapter.HostAdapter.initializeProcessRuntime();
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    markAllTermsAtPrompt(session);
+    const pane = pane_ops.activePane(session);
+    const finishing = pane.terms.items[0];
+    markRemoteForCloseKindTest(finishing, session);
+    var remote_cleared = false;
+    defer if (!remote_cleared) {
+        finishing.surface.remote = null;
+    };
+    finishing.rt.finish_ended = .{ .exited = .{ .unknown = 0 } }; // 보냈지만 아직 끝나지 않았다
+    app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(
+        allocator,
+        std.testing.io,
+        undefined,
+        session.runtime,
+    );
+    defer {
+        if (app_remote_backend) |*backend| backend.deinit();
+        app_remote_backend = null;
+    }
+    // graph 를 준비했다면 finish 로 봉인된 runtime 의 ticket 예약이 proof_loss 로 프로세스를 끝냈다.
+    try std.testing.expect(session.requestWindowClose());
+    // 원격 표시를 단 Term 은 실행 중 명령을 읽을 관측이 없어 확인을 띄울 수 있다 — 수락하면 같은 graph 길로 간다.
+    if (session.pending_confirm == .close) session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expect(session.window_close_pending);
+    try std.testing.expect(std.meta.eql(session.pending_window_close_graph, session_host.pending_term_close_graph.PendingTermCloseGraph{}));
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    workspace_ops.advancePendingWindowClose(session); // 아직 끝나지 않았다 — 그대로 기다린다
+    try std.testing.expect(session.window_close_pending);
+    // tick 이 finish 를 끝냈다 — 이 시험의 Term 은 원격 runtime 이 없으므로 원격 표시를 거두고 진행한다.
+    finishing.rt.close_complete = true;
+    finishing.rt.terminated = true;
+    finishing.surface.remote = null;
+    remote_cleared = true; // 아래에서 창의 Term 이 모두 해제된다
+    workspace_ops.advancePendingWindowClose(session);
+    try std.testing.expect(!session.window_close_pending);
+    try std.testing.expect(session.ended_seen);
+    try std.testing.expectEqual(@as(usize, 0), session.tabs.items.len);
+}
+
+test "finish 가 event_pending 이던 Term 은 끝이 다시 오지 않아도 다음 tick 이 같은 finish 를 이어 보내 거둔다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    const pane = pane_ops.activePane(session);
+    const finishing = pane.terms.items[0];
+    // 원격 pump 는 끝을 한 번만 알린다 — 그 tick 의 finish 가 event_pending 이었다.
+    finishing.rt.finish_ended = .{ .exited = .{ .unknown = 0 } };
+    app.term_runtime_backend.testing.clear();
+    app.term_runtime_backend.testing.armCloseSequence(&.{.complete});
+    _ = try session.tick();
+    const Request = app.term_runtime_backend.testing.CloseRequest;
+    try std.testing.expect(app.term_runtime_backend.testing.requests().len >= 1);
+    try std.testing.expectEqual(Request.finish_after_termination, app.term_runtime_backend.testing.requests()[0]);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // terminated 가 서서 거뒀다
 }
 
 test "C3-3b5 AppSession은 stale remove와 backend absence를 구분해 dangling layout을 만들지 않는다" {

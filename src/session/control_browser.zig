@@ -1619,7 +1619,7 @@ pub fn browserOpFromRequest(
     request_bytes: []const u8,
     snapshot: cs.CollectorSnapshot,
     caller_caps: []const capmod.Capability,
-    /// 요청 pane의 selector surface_id(§8.4 tty-검증). pane confirm-grant 조회 키. null=self-origin 없음=grant 조회 불가.
+    /// 요청 pane의 surface_id — 1g(§8.4)가 붙은 프로세스의 출처에서 찾은 pane(셀렉터가 아니다). pane confirm-grant 조회 키. null=pane 을 못 찾음=grant 조회 불가.
     pane_selector: ?u64,
     /// pane-bound confirm-grant 저장소(§9.2 Model B). 세션 cap이 인가 못 할 때 가법 조회(1e-confirm-1b).
     grants: *const cpg.PaneGrantStore,
@@ -1648,7 +1648,7 @@ pub fn browserOpFromRequest(
         }
     }
     // ── 4b. 1e-confirm(§9.2 Model B): 세션 cap이 인가 못 하면 **pane confirm-grant** 조회(가법 — 22차 [1] 정합).
-    //       grant는 tty-검증 pane 신원(pane_selector)에 묶인 (pane, target, scope). scope는 methodRequiredScope로
+    //       grant는 서버가 찾은 pane 신원(pane_selector — 1g)에 묶인 (pane, target, scope). scope는 methodRequiredScope로
     //       판정(browser.getCookies=browser_storage·나머지 browser.*=browser). **behavior-preserving**: grant 없으면
     //       (빈 store 포함) 기존과 동일 균일 unauthorized. needs_grant/held-request 흐름(미grant면 확인 대기)은 1e-confirm-1c. ──
     const req_scope = capmod.methodRequiredScope(req.method); // cap authz·grant 조회·needs_grant 공용(browser.*=browser|browser_storage)

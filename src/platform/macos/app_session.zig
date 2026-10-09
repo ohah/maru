@@ -20647,8 +20647,9 @@ pub const AppSession = struct {
         self.advancePendingAppQuitShutdown();
         // end-all target이 source-zero와 ready_remove까지 도달해 종료 승인을 게시한 frame은 더 이상
         // remote maintenance나 Term drain을 실행하지 않는다. 같은 frame의 후속 접근은 deinit이 소유할
-        // terminal Runtime을 다시 만져 close authority를 이중 소비할 수 있다.
-        if (self.quit_decision == .accepted) {
+        // terminal Runtime을 다시 만져 close authority를 이중 소비할 수 있다. 승인 뒤 앱이 끝나기 전에 도는 frame도 같다
+        // (`endAllApproved` — 승인 frame 은 `quit_decision` 을 한 번 싣고 비운다).
+        if (self.quit_decision == .accepted or self.endAllApproved()) {
             self.writeSummaryFromState();
             self.last_summary.last_event_kind = @intFromEnum(EventKind.frame_tick);
             self.last_summary.quit_decision = @intFromEnum(self.quit_decision);
@@ -20808,6 +20809,9 @@ pub const AppSession = struct {
                         if (term.rt.finish_ended != null and !term.rt.terminated) term.rt.finish_ended else null;
                     if (ended_now) |ended| {
                         if (terminationClosesWorkspace(ended)) {
+                            // 이미 다른 close 요청이 봉인한 runtime 이면 그 요청이 이 끝을 거둔다 — finish 를 보내면 종류 불일치다
+                            // (「종료 및 세션 끝내기」가 host 에서 셸을 끝내는 사이 그 끝을 보고 exit 86 이었다).
+                            if (!term.rt.terminated and term.rt.finish_ended == null and term_ops.closeOwnedByOtherRequest(term)) continue;
                             if (!term.rt.terminated) {
                                 if (term.rt.ended_seen_ns == 0) term.rt.ended_seen_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
                                 term.rt.finish_ended = ended;
@@ -22345,6 +22349,12 @@ pub const AppSession = struct {
 
     /// AppKit의 terminateLater 보류 동안 한 frame에 target 하나만 진행한다. 마지막 target의 admin outcome과
     /// source-zero가 함께 닫힌 뒤에만 Swift로 accepted를 one-shot 게시한다.
+    /// 「종료 및 세션 끝내기」가 모든 target 을 끝내 종료 승인을 게시했는가(그 뒤로는 앱이 끝날 때까지 아무것도 진행하지 않는다).
+    fn endAllApproved(self: *const AppSession) bool {
+        return is_macos and self.pending_app_quit_shutdown.lifecycle_raw ==
+            @intFromEnum(session_host.pending_app_quit_shutdown.Lifecycle.complete);
+    }
+
     fn advancePendingAppQuitShutdown(self: *AppSession) void {
         if (!is_macos or std.meta.eql(self.pending_app_quit_shutdown, PendingAppQuitShutdown{})) return;
         const backend = if (app_remote_backend) |*value| value else session_host.pending_term_close_graph.fatalProofLoss();
@@ -22354,6 +22364,9 @@ pub const AppSession = struct {
             @intFromPtr(self),
             backend_addr,
         )) session_host.pending_term_close_graph.fatalProofLoss();
+        // 끝까지 진행해 종료 승인을 이미 게시했다 — 더 진행할 target 이 없다. Swift 가 앱을 끝내기 전에 tick 이 한 번 더
+        // 돌 수 있어서(실측), 여기서 막지 않으면 target 수와 같은 ordinal 로 진행해 exit 86 이었다(셸 셋 end-all 의 3/10).
+        if (self.endAllApproved()) return;
         const now_raw = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (now_raw <= 0 or now_raw > std.math.maxInt(u64))
             session_host.pending_term_close_graph.fatalProofLoss();
@@ -72001,6 +72014,46 @@ test "셸이 실제로 끝나면 tick 이 보낸 finish 를 기록하고, event_
     // uptime 은 finish 가 끝난 때가 아니라 처음 끝을 본 시각으로 잰다.
     const expected_uptime: i64 = @intCast(@divFloor(seen - spawned, std.time.ns_per_ms));
     try std.testing.expectEqual(expected_uptime, session.last_exit_uptime_ms);
+}
+
+test "「종료 및 세션 끝내기」가 종료 승인을 게시한 뒤 앱이 끝나기 전에 도는 tick 은 더 진행하지 않는다 — 전에는 exit 86" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    try session_host.host_adapter.HostAdapter.initializeProcessRuntime();
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(
+        allocator,
+        std.testing.io,
+        undefined,
+        session.runtime,
+    );
+    defer {
+        if (app_remote_backend) |*backend| backend.deinit();
+        app_remote_backend = null;
+    }
+    defer session.pending_app_quit_shutdown = .{};
+    // target 하나를 끝까지 진행해 종료 승인을 게시한 상태(승인 frame 은 지나갔다).
+    try session_host.pending_app_quit_shutdown.prepare(
+        &session.pending_app_quit_shutdown,
+        @intFromPtr(session),
+        @intFromPtr(&app_remote_backend.?),
+        1_000,
+        2_000,
+        1,
+    );
+    try std.testing.expect(try session_host.pending_app_quit_shutdown.advance(
+        &session.pending_app_quit_shutdown,
+        @intFromPtr(session),
+        @intFromPtr(&app_remote_backend.?),
+    ));
+    // Swift 가 앱을 끝내기 전에 tick 이 또 돈다 — 전에는 target 수와 같은 ordinal 로 backend 를 진행해 프로세스가 끝났다.
+    const before = pane_ops.activePane(session).terms.items.len;
+    _ = try session.tick();
+    _ = try session.tick();
+    try std.testing.expectEqual(before, pane_ops.activePane(session).terms.items.len);
+    try std.testing.expectEqual(@as(u32, 1), session.pending_app_quit_shutdown.target_cursor);
 }
 
 test "finish 가 끝나지 않은 원격 셸이 있으면 창 닫기는 graph 를 준비하지 않고 끝날 때까지 기다린다" {

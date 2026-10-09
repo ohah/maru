@@ -2078,6 +2078,53 @@ else
     fail "a window whose only shell already ended did not close cleanly when the app quit (exit $ended_rc)"
 fi
 
+# ── 종료 및 세션 끝내기: 셸이 끝났거나 여럿이어도 session host 가 죽지 않고 셸을 다 끝낸다 ─────────────────────
+# 종료 확인의 「종료 및 세션 끝내기」(키 D)는 host 의 셸을 모두 끝내고 앱을 끝낸다. 세 결함이 있었다: (1) 끝나 정리만 남은 셸이 하나라도
+# 있으면 시작 전 검사가 거부해 exit 86, (2) host 가 셸을 끝내는 사이 tick 이 그 끝을 보고 다른 종류의 close(finish)를 보내 86,
+# (3) 끝까지 진행해 종료를 승인한 뒤 앱이 끝나기 전에 도는 tick 이 한 칸 더 진행해 86. 두 길로 본다: (가) 웹 패널 없이 셸이 시작
+# 직후 끝나 남은 창 — 안내를 닫고(Esc) 탭을 닫아 종료 확인을 띄운다, (나) 셸 셋 — 경쟁을 잡으려고 세 번. 시험 시간(30 초)보다
+# 일찍 0 으로 끝나야 하고, integrity 실패가 없어야 하며, 이 스모크의 session host 아래 시험 셸이 남지 않아야 한다(「종료」는 셸을
+# 남긴다 — 「세션 끝내기」를 실제로 탔다는 증거. 앞 단계가 남긴 셸이 있어 실행 전후 수를 비교한다).
+end_all_shells() { # 이 스모크의 session host 아래 시험 셸 수(앞 단계가 남긴 것도 있다 — 실행 전후를 비교한다)
+    n=0
+    for spid in $(pgrep -f "Maru app shell" 2>/dev/null); do
+        sppid=$(ps -o ppid= -p "$spid" 2>/dev/null | tr -d ' ')
+        case "$(ps -o command= -p "$sppid" 2>/dev/null)" in *"$root"*) n=$((n + 1)) ;; esac
+    done
+    echo "$n"
+}
+end_all_run() { # $1=이름 $2=대본 $3=웹 패널(1/0)
+    ea_before=$(end_all_shells)
+    rm -rf "$root/home" && mkdir -p "$root/home"
+    printf '%b' "$2" > "$root/endall-$1.txt"
+    ea_start=$(date +%s)
+    if [ "$3" = 1 ]; then
+        env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+            MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_MACOS_APP_SMOKE_MS=30000 MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel \
+            MARU_WEB_OSR_TEST_INPUT="$root/endall-$1.txt" MARU_CONFIG="$root/endedshell.conf" "$app" > "$root/app-endall-$1.log" 2>&1 &
+    else
+        env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+            MARU_MACOS_APP_SMOKE_MS=30000 MARU_WEB_OSR_TEST_INPUT="$root/endall-$1.txt" MARU_CONFIG="$root/endedshell.conf" \
+            "$app" > "$root/app-endall-$1.log" 2>&1 &
+    fi
+    ea_pid=$!
+    ea_rc=0
+    wait "$ea_pid" || ea_rc=$?
+    ea_elapsed=$(( $(date +%s) - ea_start ))
+    sleep 1
+    ea_left=$(( $(end_all_shells) - ea_before ))
+    grep -ao "fatal integrity: reason=[a-z_]*([0-9]*)" "$root/app-endall-$1.log" | head -1
+    if [ "$ea_rc" = 0 ] && [ "$ea_elapsed" -lt 25 ] && [ "$ea_left" -le 0 ] && ! grep -aq "fatal integrity" "$root/app-endall-$1.log"; then
+        echo "PASS quit and end sessions ($1) ended every shell and quit cleanly ($ea_elapsed s · exit 0)"
+    else
+        fail "quit and end sessions ($1) did not end cleanly ($ea_elapsed s · exit $ea_rc · test shells left $ea_left)"
+    fi
+}
+end_all_run ended-shell 'sleep 4000\nkey 53 U+1B U+1B 0\nsleep 600\naction close_tab\nsleep 1000\nkey 2 U+64 U+64 0\nsleep 26000\n' 0
+for ea_i in 1 2 3; do
+    end_all_run "three-shells-$ea_i" 'sleep 6000\naction new_term\nsleep 800\naction new_term\nsleep 800\naction close_tab\nsleep 1000\nkey 2 U+64 U+64 0\nsleep 24000\n' 1
+done
+
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그
 # sheet 를 취소로 닫는다(사용자 결정 2026-10-06). alert 를 띄운 채 시험 시간이 끝나도 앱이 제때 끝나야 한다 — 끝나지 않으면 감시가

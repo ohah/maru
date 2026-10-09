@@ -350,6 +350,14 @@ pub fn finishIfRequested(self: *AppSession, term: *Term) ?app.term_runtime_backe
     return self.backendFor(term).finishAfterTermination(term.rt.handle);
 }
 
+/// 이 원격 Term 의 runtime 이 이미 finish 가 아닌 다른 close 요청(「종료 및 세션 끝내기」·끝나지 않은 닫기)의 것인가 —
+/// 그렇다면 셸의 끝을 본 tick 은 finish 를 보내지 않고 그 요청에 맡긴다(`RemoteTermBackend.closeSealedByOtherRequest`).
+pub fn closeOwnedByOtherRequest(term: *const Term) bool {
+    if (!is_macos or term.surface.remote == null) return false;
+    if (app_session_mod.app_remote_backend) |*rb| return rb.closeSealedByOtherRequest(term.rt.handle);
+    return false;
+}
+
 /// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
 /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
 /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.

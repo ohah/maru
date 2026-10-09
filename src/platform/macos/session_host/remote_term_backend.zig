@@ -3853,6 +3853,10 @@ pub const RemoteTermBackend = struct {
 
     /// end-all 확인은 모든 target을 먼저 검증한 뒤 close ticket, routing tombstone, shutdown authority를
     /// allocation/callback 없는 한 suffix에서 함께 게시한다. 반환한 개수가 AppSession cursor의 닫힌 범위다.
+    /// 셸이 끝나 `finish_after_termination`으로 ready_remove에 이른 runtime은 target이 아니다 — 끝낼 것이 없고, 그
+    /// Term의 창 teardown이 같은 finish(`term_ops.finishIfRequested`)와 `remove`로 거둔다. 전에는 이런 runtime 하나
+    /// (시작 직후 종료로 유지한 창 · 다운로드로 숨겨 쥔 세션 · 저장 안 한 파일 패널로 남은 창)만 있어도 pristine이
+    /// 아니라 거부돼 exit 86이었다(2026-10-09 실측). 그 밖의 non-pristine은 지금처럼 거부한다.
     pub fn prepareAppQuitEndAll(self: *RemoteTermBackend, now_ns: i128) !u32 {
         if (self.app_quit_target_count != 0 or self.app_quit_first_ticket != 0)
             return self.app_quit_target_count;
@@ -3865,13 +3869,17 @@ pub const RemoteTermBackend = struct {
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
             const runtime = row.value_ptr.runtime;
-            if (!std.meta.eql(runtime.shutdown_attempt_authority, shutdown_attempt.ShutdownAttemptAuthority{}) or
-                runtime.close_authority.lifecycle_raw != @intFromEnum(close_authority.Lifecycle.pristine))
+            if (!std.meta.eql(runtime.shutdown_attempt_authority, shutdown_attempt.ShutdownAttemptAuthority{}))
+                return error.InvalidAppQuitShutdown;
+            if (finishedAwaitingRemove(&runtime.close_authority)) continue;
+            if (runtime.close_authority.lifecycle_raw != @intFromEnum(close_authority.Lifecycle.pristine))
                 return error.InvalidAppQuitShutdown;
             handles[count] = row.key_ptr.*;
             target_digests[count] = appQuitTargetDigest(row.key_ptr.*, row.value_ptr.*);
             count += 1;
         }
+        // 끝난 runtime만 있었다 — 예약할 ticket이 없다(빈 예약은 reserveWindowCloseTickets가 거부한다).
+        if (count == 0) return 0;
         std.mem.sort(RuntimeHandle, handles[0..count], {}, std.sort.asc(RuntimeHandle));
         // 정렬 뒤 digest도 같은 target 순서로 다시 계산한다. HashMap 순서는 shutdown ordinal의 권위가 아니다.
         for (handles[0..count], 0..) |handle, index| {
@@ -3896,6 +3904,24 @@ pub const RemoteTermBackend = struct {
         self.app_quit_first_ticket = first_ticket;
         self.app_quit_target_count = @intCast(count);
         return self.app_quit_target_count;
+    }
+
+    /// 셸이 끝나 finish 로 ready_remove 에 이르러 `remove`만 남은 close 권한인가.
+    fn finishedAwaitingRemove(authority: *const close_authority.CloseAuthority) bool {
+        return close_authority.valid(authority) and
+            authority.request_kind_raw == @intFromEnum(close_authority.CloseRequestKind.finish_after_termination) and
+            authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.ready_remove);
+    }
+
+    /// 이 runtime 의 close 권한이 finish 가 아닌 다른 요청(「종료 및 세션 끝내기」의 target, 끝나지 않은 탭·창 닫기)으로
+    /// 이미 봉인됐는가. 그렇다면 셸의 끝을 본 tick 이 finish 를 보내면 종류 불일치로 `proof_loss`다 — 그 끝은 봉인한
+    /// 요청이 거둔다. 살아 있는 셸 셋에 「종료 및 세션 끝내기」를 걸면 host 가 셸을 끝내는 사이 tick 이 그 끝을 보고
+    /// finish 를 보내 exit 86 이었다(2026-10-09 실측 4/4). runtime 이 없으면 false(그 판정은 finish 가 한다).
+    pub fn closeSealedByOtherRequest(self: *const RemoteTermBackend, handle: RuntimeHandle) bool {
+        const entry = self.runtimes.get(handle) orelse return false;
+        const authority = &entry.runtime.close_authority;
+        if (authority.lifecycle_raw == @intFromEnum(close_authority.Lifecycle.pristine)) return false;
+        return authority.request_kind_raw != @intFromEnum(close_authority.CloseRequestKind.finish_after_termination);
     }
 
     fn appQuitTargetDigest(handle: RuntimeHandle, row: RuntimeEntry) process_seal.CleanupSeal {
@@ -8455,6 +8481,92 @@ test "C3-3b5 remote backend는 active pin 제거를 보류하고 다음 tick에 
     try testing.expectEqual(@as(usize, 1), stats.removed_count);
     try testing.expect(!backend_value.runtimes.contains(7));
     try testing.expectEqual(@as(usize, 0), backend_value.maintenanceCloseTick().removed_count);
+}
+
+/// close 권한만 채운 시험용 runtime — `kind` 로 봉인하고 `ready` 면 ready_remove 까지, 아니면 settling 에 둔다.
+fn sealedRuntimeForEndAllTest(handle: RuntimeHandle, kind: close_authority.CloseRequestKind, ready: bool) !*RemoteRuntime {
+    const runtime_ptr = try testing.allocator.create(RemoteRuntime);
+    errdefer testing.allocator.destroy(runtime_ptr);
+    runtime_ptr.close_authority = .{};
+    runtime_ptr.shutdown_attempt_authority = .{};
+    try close_authority.prepareCurrent(&runtime_ptr.close_authority, .{
+        .runtime_addr = @intFromPtr(runtime_ptr),
+        .handle = handle,
+        .runtime_generation = 1,
+        .host_id = 9,
+        .close_request_generation = handle,
+        .close_schedule_ticket = handle,
+        .request_kind = kind,
+        .disposition = .terminate_host,
+    });
+    try close_authority.advance(&runtime_ptr.close_authority, .open, .routing_tombstoned);
+    try close_authority.advance(&runtime_ptr.close_authority, .routing_tombstoned, .settling);
+    if (ready) try testing.expect(try close_authority.publishReadyRemove(&runtime_ptr.close_authority, true));
+    return runtime_ptr;
+}
+
+test "셸이 끝나 finish 로 ready_remove 에 이른 runtime 은 「종료 및 세션 끝내기」의 대상이 아니다 — 전에는 거부돼 exit 86" {
+    try HostAdapter.initializeProcessRuntime();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    const runtime_ptr = try sealedRuntimeForEndAllTest(7, .finish_after_termination, true);
+    defer testing.allocator.destroy(runtime_ptr);
+    try backend_value.runtimes.put(testing.allocator, 7, .{ .runtime = runtime_ptr, .host_id = 9, .runtime_generation = 1 });
+    const before = runtime_ptr.close_authority;
+    // 끝난 runtime 만 있다 — 끝낼 target 이 없다(빈 ticket 예약을 하지 않는다).
+    try testing.expectEqual(@as(u32, 0), try backend_value.prepareAppQuitEndAll(1_000_000));
+    try testing.expect(std.meta.eql(before, runtime_ptr.close_authority));
+    try testing.expect(std.meta.eql(runtime_ptr.shutdown_attempt_authority, shutdown_attempt.ShutdownAttemptAuthority{}));
+    // 창 teardown 의 같은 finish 는 complete 로 그치고 remove 가 거둔다.
+    try testing.expectEqual(term_backend.CloseProgress.complete, backend_value.backend().finishAfterTermination(7));
+    B5TestState.skip_destroy = true;
+    defer B5TestState.skip_destroy = false;
+    try testing.expectEqual(term_backend.RemoveProgress.removed, RemoteTermBackend.remove(&backend_value, 7));
+    try testing.expect(!backend_value.runtimes.contains(7));
+}
+
+test "「종료 및 세션 끝내기」는 finish 가 끝나지 않았거나 다른 요청이 봉인한 runtime 은 지금처럼 거부한다" {
+    try HostAdapter.initializeProcessRuntime();
+    const Case = struct { kind: close_authority.CloseRequestKind, ready: bool };
+    for ([_]Case{
+        .{ .kind = .finish_after_termination, .ready = false }, // finish 가 아직 settling
+        .{ .kind = .close_and_detach, .ready = true }, // 다른 요청이 봉인
+    }) |case| {
+        var backend_value = b5TestBackend(testing.allocator);
+        defer backend_value.runtimes.deinit(testing.allocator);
+        const runtime_ptr = try sealedRuntimeForEndAllTest(7, case.kind, case.ready);
+        defer testing.allocator.destroy(runtime_ptr);
+        try backend_value.runtimes.put(testing.allocator, 7, .{ .runtime = runtime_ptr, .host_id = 9, .runtime_generation = 1 });
+        try testing.expectError(error.InvalidAppQuitShutdown, backend_value.prepareAppQuitEndAll(1_000_000));
+    }
+    // 끝난 runtime 이라도 shutdown 권한이 이미 서 있으면(다른 end-all 이 맡았다) 거부한다.
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    const runtime_ptr = try sealedRuntimeForEndAllTest(7, .finish_after_termination, true);
+    defer testing.allocator.destroy(runtime_ptr);
+    runtime_ptr.shutdown_attempt_authority.close_request_generation = 1;
+    try backend_value.runtimes.put(testing.allocator, 7, .{ .runtime = runtime_ptr, .host_id = 9, .runtime_generation = 1 });
+    try testing.expectError(error.InvalidAppQuitShutdown, backend_value.prepareAppQuitEndAll(1_000_000));
+}
+
+test "다른 요청이 봉인한 runtime 에는 셸의 끝을 본 tick 이 finish 를 보내지 않는다 — closeSealedByOtherRequest" {
+    try HostAdapter.initializeProcessRuntime();
+    var backend_value = b5TestBackend(testing.allocator);
+    defer backend_value.runtimes.deinit(testing.allocator);
+    const pristine = try testing.allocator.create(RemoteRuntime);
+    defer testing.allocator.destroy(pristine);
+    pristine.close_authority = .{};
+    const finishing = try sealedRuntimeForEndAllTest(8, .finish_after_termination, false);
+    defer testing.allocator.destroy(finishing);
+    const ending_all = try sealedRuntimeForEndAllTest(9, .close_and_detach, false);
+    defer testing.allocator.destroy(ending_all);
+    try backend_value.runtimes.put(testing.allocator, 7, .{ .runtime = pristine, .host_id = 9, .runtime_generation = 1 });
+    try backend_value.runtimes.put(testing.allocator, 8, .{ .runtime = finishing, .host_id = 9, .runtime_generation = 1 });
+    try backend_value.runtimes.put(testing.allocator, 9, .{ .runtime = ending_all, .host_id = 9, .runtime_generation = 1 });
+    try testing.expect(!backend_value.closeSealedByOtherRequest(7)); // 아직 아무 요청도 없다 — finish 를 보낸다
+    try testing.expect(!backend_value.closeSealedByOtherRequest(8)); // finish 가 진행 중 — 같은 finish 를 이어 보낸다
+    try testing.expect(backend_value.closeSealedByOtherRequest(9)); // end-all·닫기가 봉인 — 그 요청이 거둔다
+    try testing.expect(!backend_value.closeSealedByOtherRequest(10)); // 없음 — finish 가 판정한다
 }
 
 test "C3-3b4 async close parity는 prepared event를 다음 tick settlement 뒤 제거한다" {

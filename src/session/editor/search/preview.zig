@@ -113,7 +113,10 @@ pub fn prepare(a: std.mem.Allocator, original: []const u8, needle: []const u8, r
     }
     var view = try diff.compute(a, left_text, right_text, .{});
     defer if (view == .compare) view.compare.deinit(a);
-    if (view == .unchanged) return plan;
+    if (view == .unchanged) {
+        plan.edits.clearRetainingCapacity();
+        return plan;
+    }
     if (view != .compare) return error.DiffTooLarge;
     // unified 표시도 기존 줄 대응을 소비한다. 전문은 Plan이 보관하므로 row는 안전하게 빌린다.
     for (view.compare.left, view.compare.right) |left, added| {
@@ -246,4 +249,56 @@ test "project replace preview identical replacements do not create mutation entr
     defer plan.deinit(a);
     try std.testing.expectEqual(@as(usize, 0), plan.edits.items.len);
     try std.testing.expectEqualStrings(plan.before, plan.after);
+}
+
+test "project replace preview randomized subsets match an independent string oracle and inverse" {
+    const a = std.testing.allocator;
+    const stop = std.atomic.Value(bool).init(false);
+    var random = std.Random.DefaultPrng.init(0x4266a11);
+    const replacements = [_][]const u8{ "X", "", "한\r\n글", "foo", "$literal" };
+    for (0..256) |_| {
+        var original: std.ArrayList(u8) = .empty;
+        defer original.deinit(a);
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(a);
+        var starts: std.ArrayList(usize) = .empty;
+        defer starts.deinit(a);
+        const replacement = replacements[random.random().uintLessThan(usize, replacements.len)];
+        for (0..1 + random.random().uintLessThan(usize, 32)) |_| {
+            const prefix: []const u8 = if (random.random().boolean()) "🙂\r\n" else "한 ";
+            try original.appendSlice(a, prefix);
+            try expected.appendSlice(a, prefix);
+            if (random.random().boolean()) {
+                try starts.append(a, original.items.len);
+                try expected.appendSlice(a, replacement);
+            } else try expected.appendSlice(a, "foo");
+            try original.appendSlice(a, "foo");
+        }
+        var index = try lines.build(a, original.items);
+        defer index.deinit();
+        const ranges = try a.alloc(event.Range, starts.items.len);
+        defer a.free(ranges);
+        for (ranges, starts.items) |*range, start| {
+            const line = index.lineAt(start);
+            const byte: u32 = @intCast(start - index.line(line).?.start);
+            range.* = .{ .start = .{ .line = @intCast(line), .byte = byte }, .end = .{ .line = @intCast(line), .byte = byte + 3 } };
+        }
+        var plan = try prepare(a, original.items, "foo", replacement, .{ .match_case = true }, ranges, 8192, &stop);
+        defer plan.deinit(a);
+        try std.testing.expectEqualStrings(expected.items, plan.after);
+        try verifyChanges(a, &plan);
+    }
+}
+
+test "project replace preview cancelling capture replacements do not create a net edit" {
+    const a = std.testing.allocator;
+    const stop = std.atomic.Value(bool).init(false);
+    var plan = try prepare(a, "aa", "((?<=a)a|)a?", "$1$1", .{ .regex = true }, &.{
+        .{ .start = .{ .line = 0, .byte = 0 }, .end = .{ .line = 0, .byte = 1 } },
+        .{ .start = .{ .line = 0, .byte = 1 }, .end = .{ .line = 0, .byte = 2 } },
+    }, 1024, &stop);
+    defer plan.deinit(a);
+    try std.testing.expectEqualStrings("aa", plan.after);
+    try std.testing.expectEqual(@as(usize, 0), plan.edits.items.len);
+    try verifyChanges(a, &plan);
 }

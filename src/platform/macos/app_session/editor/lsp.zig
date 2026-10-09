@@ -353,6 +353,22 @@ fn loadTrust(io: std.Io, config_path: ?[]const u8) void {
     trust_store.ensureLoaded(io, if (config_path) |p| trust_store.legacyPathFor(p, &buf) else null);
 }
 
+/// git 읽기가 묻는 「이 저장소를 신뢰했나」(계획 workspace-trust WT6b-1a) — 언어 서버와 같은 표·같은 키(`trust_store.keyFor` —
+/// 실제 경로·볼륨)다. 표가 아직 안 읽혔으면 읽는다(SCM 이 언어 서버보다 먼저 물을 수 있다). 묻지 않는 root(홈·저장소 밖 —
+/// WT2b)는 결정이 생길 수 없어 늘 신뢰 전이다. 허용만 신뢰다(거부·결정 없음은 신뢰 전).
+pub fn repoTrusted(self: *AppSession, root: []const u8) bool {
+    ensureTrustLoaded(self);
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return false;
+    if (refusalFor(root, key.path) != null) return false;
+    return trust_store.get(key) == .allow;
+}
+
+/// 신뢰 표의 세대 — git 읽기의 다시 읽기 기준(`git.pumpTrustReread`).
+pub fn trustGeneration() u64 {
+    return trust_store.generation();
+}
+
 /// 앱 전역 묻는 자리에서 이 창을 가리키는 값.
 fn trustOwner(self: *AppSession) usize {
     return @intFromPtr(self);

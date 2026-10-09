@@ -118,6 +118,10 @@ pub const ReadFailure = enum {
     remote_git_missing,
     /// ssh 가 자기 실패로 끝났다(exit 255). git 까지 **닿지도 못했다** — 저장소 이야기가 아니다.
     remote_transport,
+    /// 신뢰 전 partial clone 이라 아직 안 받은 내용(blob·tree)을 못 읽었다(계획 workspace-trust WT6b-1a — 신뢰 전에는
+    /// 지연 가져오기를 막는다; 신뢰하면 git 이 그대로 받아 온다). **`ok` 와 함께 오면** 실패가 아니라 줄여 읽었다는 뜻이다 —
+    /// 목록은 증감 없이, 커밋 펼침은 `--raw` 로 섰다.
+    partial_clone,
 };
 
 pub const Result = struct {
@@ -242,6 +246,9 @@ const State = struct {
 
 const Job = struct {
     state: *State,
+    /// 신뢰 전 저장소의 읽기인가(계획 workspace-trust WT6b-1a) — 워커가 시작할 때 `read_untrusted` 로 세운다. 기본은 **신뢰 전**
+    /// (닫힌 쪽 — 판정을 빠뜨린 제출이 지연 가져오기를 열지 않게).
+    untrusted: bool = true,
     /// worker가 소유하고 끝나면 해제한다(호출자 문자열 수명에 매이지 않게 복사해 넘긴다).
     git_exe: []u8,
     repo: []u8,
@@ -484,6 +491,31 @@ pub const DiffResult = struct {
 
 pub const Backend = struct {
     state: ?*State = null,
+    /// 저장소가 신뢰됐나(계획 workspace-trust WT6b-1a) — 세션이 꽂는다(이 층은 편집기의 신뢰 표를 모른다). 꽂지 않았으면
+    /// **신뢰 전**으로 본다(닫힌 쪽). 메인 스레드에서만 부른다(`submit*` 이 메인 스레드다).
+    trust: ?TrustCheck = null,
+
+    pub const TrustCheck = struct {
+        ctx: *anyopaque,
+        trusted: *const fn (ctx: *anyopaque, repo: []const u8) bool,
+    };
+
+    /// 이 읽기를 신뢰 전 규칙으로 돌릴까 — 원격은 늘(원격 신뢰 키가 없다 — 2026-10-09 사용자 결정), 로컬은 신뢰 표가 허용이
+    /// 아니면. 턴 스냅샷처럼 신뢰 전에 아예 안 하는 일은 호출자가 이것으로 거른다.
+    pub fn untrustedFor(self: *const Backend, repo: []const u8, is_remote: bool) bool {
+        if (is_remote) return true;
+        // 판정 함수가 없으면 제품에서는 신뢰 전(닫힌 쪽 — 제품은 늘 `initWithTrust` 로 만든다; 판정자가 센다), 판정자에서는
+        // 신뢰(그 판정자들이 재는 것은 신뢰와 무관한 읽기다 — 신뢰 전 갈래는 판정 함수를 꽂아 잰다).
+        const t = self.trust orelse return !builtin.is_test;
+        return !t.trusted(t.ctx, repo);
+    }
+
+    /// 제품이 쓰는 생성 — 세션의 신뢰 판정을 꽂는다(계획 workspace-trust WT6b-1a).
+    pub fn initWithTrust(io: std.Io, trust: TrustCheck) !Backend {
+        var b = try init(io);
+        b.trust = trust;
+        return b;
+    }
 
     /// **allocator를 받지 않는다.** 이 backend의 worker는 detach되어 소유자(창 세션)보다 오래 살 수 있고,
     /// 살아 있는 동안 계속 할당·해제한다. 그래서 필요한 것은 "State를 refcount로 붙드는 것"이 아니라
@@ -573,6 +605,7 @@ pub const Backend = struct {
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch &.{};
             if (job.remote_dest.len == 0 or job.remote_ctl.len == 0) job.freeRemote(state.allocator);
         }
+        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             job.freeRemote(state.allocator);
             state.allocator.free(job.git_exe);
@@ -786,6 +819,7 @@ pub const Backend = struct {
             job.remote_root = state.allocator.dupe(u8, remote_root) catch &.{};
             if (job.remote_dest.len == 0 or job.remote_ctl.len == 0) job.freeRemote(state.allocator);
         }
+        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
         thread.detach();
         return true;
@@ -874,6 +908,7 @@ pub const Backend = struct {
             return self.releaseIgnoreJob(job);
         }
         job.ignore_paths = owned;
+        job.untrusted = self.untrustedFor(repo, false); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, ignoreWorker, .{job}) catch return self.releaseIgnoreJob(job);
         thread.detach();
         return true;
@@ -984,6 +1019,7 @@ pub const Backend = struct {
         job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id, .file_list_kind = kind };
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseBranchesJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseBranchesJob(job);
+        job.untrusted = self.untrustedFor(repo, false); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, branchesWorker, .{job}) catch return self.releaseBranchesJob(job);
         thread.detach();
         return true;
@@ -1035,6 +1071,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseRepoStatusJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseRepoStatusJob(job);
         }
+        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, repoStatusWorker, .{job}) catch return self.releaseRepoStatusJob(job);
         thread.detach();
         return true;
@@ -1074,6 +1111,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseLogJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseLogJob(job);
         }
+        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, logWorker, .{job}) catch return self.releaseLogJob(job);
         thread.detach();
         return true;
@@ -1172,6 +1210,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseCommitFilesJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseCommitFilesJob(job);
         }
+        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, commitFilesWorker, .{job}) catch return self.releaseCommitFilesJob(job);
         thread.detach();
         return true;
@@ -1272,6 +1311,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseSnapshotJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseSnapshotJob(job);
         }
+        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, snapshotWorker, .{job}) catch return self.releaseSnapshotJob(job);
         thread.detach();
         return true;
@@ -1344,6 +1384,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseTreeCheckJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseTreeCheckJob(job);
         }
+        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, treeCheckWorker, .{job}) catch return self.releaseTreeCheckJob(job);
         thread.detach();
         return true;
@@ -1419,6 +1460,8 @@ pub const Backend = struct {
 ///   unstaged : `:<path>`     ↔ 작업트리 파일 (스테이지된 것 ↔ 지금 파일)
 ///   untracked: 없음          ↔ 작업트리 파일 (비교 대상이 없다 — 왼쪽은 빈 문서)
 const SnapshotJob = struct {
+    /// `Job.untrusted` 와 같다(스냅샷은 신뢰한 저장소에서만 찍지만 — 호출자가 거른다 — 판정을 같은 자리로 싣는다).
+    untrusted: bool = true,
     state: *State,
     git_exe: []u8,
     repo: []u8,
@@ -1435,6 +1478,8 @@ const SnapshotJob = struct {
 };
 
 const TreeCheckJob = struct {
+    /// `Job.untrusted` 와 같다.
+    untrusted: bool = true,
     state: *State,
     git_exe: []u8,
     repo: []u8,
@@ -1460,6 +1505,7 @@ const TreeCheckJob = struct {
 };
 
 fn treeCheckWorker(job: *TreeCheckJob) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: TreeCheckResult = .{ .session_len = job.session_len };
     @memcpy(result.session[0..job.session_len], job.session[0..job.session_len]);
@@ -1479,6 +1525,7 @@ fn treeCheckWorker(job: *TreeCheckJob) void {
 }
 
 fn snapshotWorker(job: *SnapshotJob) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: SnapshotResult = .{ .surface_id = job.surface_id };
     // 오래된 형제 index(크래시로 남은 다른 창의 것)를 프로세스당 한 번 거둔다 — 메인이 아니라 여기인 이유는
@@ -1515,12 +1562,14 @@ fn snapshotWorker(job: *SnapshotJob) void {
 }
 
 fn repoStatusWorker(job: *Job) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: RepoStatusResult = .{ .request_id = job.request_id };
     result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
     // **원격 인지 러너를 쓴다**(RS5). 예전에는 `run` 이라 로컬 git 이 그 경로에 돌았고, 원격 저장소의
     // 워크트리 행에서 **저쪽 기계의 경로를 이쪽 git 이 읽었다**(적대적 검증 2026-09-02).
-    if (runOn(state.allocator, job.remoteTarget(), .status, job.git_exe, job.repo, null)) |out| {
+    var partial = false;
+    if (readStatus(state.allocator, job, &partial)) |out| { // 신뢰 전 partial clone 이면 rename 판정 없이(WT6b-1a)
         result.text = out.bytes;
         result.ok = true;
     } else |_| {}
@@ -1544,6 +1593,7 @@ fn repoStatusWorker(job: *Job) void {
 }
 
 fn logWorker(job: *Job) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: LogResult = .{ .request_id = job.request_id, .limit = job.limit };
     result.repo = state.allocator.dupe(u8, job.repo) catch &.{};
@@ -1587,6 +1637,7 @@ fn isRevKey(key: []const u8) bool {
 }
 
 fn commitFilesWorker(job: *Job) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: CommitFilesResult = .{ .request_id = job.request_id };
     // 커밋 OID는 `snapshot_tree` 자리를 빌린다 — 그 필드는 "이 작업이 읽을 rev"라는 같은 뜻이다.
@@ -1598,6 +1649,17 @@ fn commitFilesWorker(job: *Job) void {
         result.ok = true;
     } else |err| {
         result.failure = readFailureFor(err); // RS7d — 같은 규칙, 같은 함수
+        // **신뢰 전 partial clone 이면 증감 없이 다시 읽는다**(계획 workspace-trust WT6b-1a) — 증감·내용 유사도(`--find-renames`)
+        // 는 부모 쪽 blob 을 읽어야 하는데 신뢰 전엔 가져오지 않는다. tree 끼리의 `--raw` 는 blob 을 안 읽는다.
+        if (read_untrusted and isPartialClone(state.allocator, job.remoteTarget(), job.git_exe, job.repo)) {
+            result.failure = .partial_clone;
+            const raw_kind: git_command.Kind = if (job.file_list_kind == .turn_name_status) .turn_name_status_raw else .commit_files_raw;
+            if (runOn(state.allocator, job.remoteTarget(), raw_kind, job.git_exe, job.repo, job.snapshot_tree)) |out| {
+                result.text = out.bytes;
+                result.truncated = out.truncated;
+                result.ok = true; // `failure = .partial_clone` 은 남긴다 — 줄여 읽었다는 사실
+            } else |_| {}
+        }
     }
     state.allocator.free(job.git_exe);
     state.allocator.free(job.repo);
@@ -1618,6 +1680,7 @@ fn commitFilesWorker(job: *Job) void {
 }
 
 fn ignoreWorker(job: *Job) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: IgnoreResult = .{ .request_id = job.request_id };
     // **물은 저장소를 답에 싣는다**(`IgnoreResult.repo` 주석). 못 실으면 빈 슬라이스이고, 소비자는
@@ -1669,6 +1732,7 @@ fn ignoreWorker(job: *Job) void {
 }
 
 fn branchesWorker(job: *Job) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: BranchesResult = .{ .request_id = job.request_id };
     // 어떤 목록인지는 **호출자가 정한다**(전환용 로컬 브랜치 / 기준 후보 — §3.5). 여기서 고르면
@@ -1769,6 +1833,7 @@ fn runMarkersBatch(allocator: std.mem.Allocator, job: *const Job, paths: []const
 }
 
 fn diffWorker(job: *Job) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     const target = job.diff.?;
     var result: DiffResult = .{ .request_id = job.request_id };
@@ -1777,6 +1842,14 @@ fn diffWorker(job: *Job) void {
     // 진짜 실패는 **양쪽 다 못 읽은 경우**뿐이다 — 보여 줄 것이 없다.
     var had_side = false;
     var truncated = false;
+    // 신뢰 전 partial clone 에서 «있는데 못 읽은» 면이 있다 — 그러면 한쪽만 실린 diff(추가·삭제로 보인다)를 내지 않는다
+    // (`sideUnfetched` — 계획 workspace-trust WT6b-1a).
+    var unfetched = false;
+    var probed: ?bool = null;
+    const old_path = if (target.orig_rel_path.len > 0) target.orig_rel_path else target.rel_path; // commitSide·HEAD 쪽이 읽는 경로
+    const left_trim = std.mem.trim(u8, target.left_rev, " \t\r\n");
+    var parent_buf: [80]u8 = undefined;
+    const left_parent: ?[]const u8 = if (git_command.isHexRev(left_trim)) std.fmt.bufPrint(&parent_buf, "{s}^", .{left_trim}) catch null else null;
 
     // untracked는 비교 대상 자체가 없다 — 왼쪽을 읽지 않는다(읽으면 같은 경로가 추적 중일 때 엉뚱한 내용이 실린다).
     if (target.base == .turn_range) {
@@ -1786,13 +1859,17 @@ fn diffWorker(job: *Job) void {
             result.original = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
-        } else |_| {}
+        } else |_| if (treeUnfetched(state.allocator, job, &probed, left_trim, old_path)) {
+            unfetched = true;
+        }
         if (commitSide(state.allocator, job, target.right_rev)) |out| {
             result.modified = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
-        } else |_| {}
-        result.ok = had_side;
+        } else |_| if (treeUnfetched(state.allocator, job, &probed, std.mem.trim(u8, target.right_rev, " \t\r\n"), old_path)) {
+            unfetched = true;
+        }
+        result.ok = had_side and !unfetched;
         result.truncated = truncated;
         finishDiff(state, job, target, result);
         return;
@@ -1808,13 +1885,17 @@ fn diffWorker(job: *Job) void {
             result.original = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
-        } else |_| {}
+        } else |_| if (treeUnfetched(state.allocator, job, &probed, left_parent, old_path)) {
+            unfetched = true;
+        }
         if (commitSide(state.allocator, job, target.left_rev)) |out| {
             result.modified = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
-        } else |_| {}
-        result.ok = had_side;
+        } else |_| if (treeUnfetched(state.allocator, job, &probed, left_trim, old_path)) {
+            unfetched = true;
+        }
+        result.ok = had_side and !unfetched;
         result.truncated = truncated;
         finishDiff(state, job, target, result);
         return;
@@ -1872,7 +1953,9 @@ fn diffWorker(job: *Job) void {
             result.original = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
-        } else |_| {}
+        } else |_| if (sideUnfetched(state.allocator, job, &probed, if (side == .head) "HEAD" else null, if (side == .head) old_path else target.rel_path)) {
+            unfetched = true;
+        }
     } else had_side = true; // 왼쪽이 없는 것이 이 기준의 정상이다
 
     if (target.base == .staged) {
@@ -1880,17 +1963,27 @@ fn diffWorker(job: *Job) void {
             result.modified = out.bytes;
             if (out.truncated) truncated = true;
             had_side = true;
-        } else |_| {}
+        } else |_| if (sideUnfetched(state.allocator, job, &probed, null, target.rel_path)) {
+            unfetched = true;
+        }
     } else if (worktreeSideOn(state.allocator, job, target.rel_path)) |out| {
         result.modified = out.bytes;
         if (out.truncated) truncated = true;
         had_side = true;
     } else |_| {}
 
-    result.ok = had_side;
+    result.ok = had_side and !unfetched;
     result.truncated = truncated;
 
     finishDiff(state, job, target, result);
+}
+
+/// 커밋·tree 쪽의 `sideUnfetched`. hex(뒤에 `^` 하나까지)가 아닌 rev 는 묻지 않는다 — 그 면은 `commitSide` 도 안 읽으므로
+/// (`BadRev`) 그 실패는 예전 그대로다.
+fn treeUnfetched(allocator: std.mem.Allocator, job: *Job, probed: *?bool, rev: ?[]const u8, path: []const u8) bool {
+    const r = rev orelse return false;
+    if (!git_command.isHexRev(if (std.mem.endsWith(u8, r, "^")) r[0 .. r.len - 1] else r)) return false;
+    return sideUnfetched(allocator, job, probed, r, path);
 }
 
 /// worker의 마지막 절차(소유 해제 + 결과 적재)를 한 곳에 둔다 — 기준마다 갈라진 경로가 같은 정리를 공유한다.
@@ -2091,6 +2184,7 @@ fn worktreeSide(allocator: std.mem.Allocator, repo: []const u8, rel_path: []cons
 }
 
 fn worker(job: *Job) void {
+    read_untrusted = job.untrusted; // 계획 workspace-trust WT6b-1a — 이 스레드의 읽기 정책(러너가 읽는다)
     const state = job.state;
     var result: Result = .{ .request_id = job.request_id };
     var ok = true;
@@ -2131,19 +2225,29 @@ fn worker(job: *Job) void {
         } else |_| {}
     }
     var failure: ReadFailure = .generic;
+    var partial = false; // 이 저장소가 신뢰 전 partial clone 이라고 이미 갈랐다 — 다시 묻지 않는다(셋이 다 실패할 수 있다)
     inline for (required_reads) |pair| {
         if (ok) {
-            if (runOn(state.allocator, job.remoteTarget(), pair[0], job.git_exe, job.repo, null)) |o| {
+            if (if (pair[0] == .status) readStatus(state.allocator, job, &partial) else runOn(state.allocator, job.remoteTarget(), pair[0], job.git_exe, job.repo, null)) |o| {
                 @field(result, pair[1]) = o.bytes;
                 if (o.truncated) truncated = true;
             } else |err| {
-                ok = false;
-                // **왜 실패했는지 싣는다.** 「읽지 못함」 하나로 뭉개면 사용자는 원격에 git 을 깔아야
-                // 하는지, 연결을 다시 붙여야 하는지 알 수 없다.
-                failure = readFailureFor(err);
+                // **신뢰 전 partial clone 의 증감 실패는 목록을 죽이지 않는다**(계획 workspace-trust WT6b-1a). 지연 가져오기를
+                // 막았으니 아직 안 받은 blob 의 줄 수를 못 센다 — `reset --soft` 한 번이면 이 필수 읽기가 실패해 목록 전체가
+                // 「git 읽기에 실패했습니다」가 됐다(WT6a 적대적 검증 실측). 상태(`status`)는 blob 을 안 읽으므로 그대로 필수다.
+                if (read_untrusted and pair[0] != .status and (partial or isPartialClone(state.allocator, job.remoteTarget(), job.git_exe, job.repo))) {
+                    partial = true;
+                } else {
+                    ok = false;
+                    // **왜 실패했는지 싣는다.** 「읽지 못함」 하나로 뭉개면 사용자는 원격에 git 을 깔아야
+                    // 하는지, 연결을 다시 붙여야 하는지 알 수 없다. 신뢰 전 partial clone 으로 이미 갈랐는데 대체 읽기마저
+                    // 실패했으면(treeless — tree 도 안 받았다) 사유는 그것이다(적대적 검증 2회차).
+                    failure = if (partial) .partial_clone else readFailureFor(err);
+                }
             }
         }
     }
+    if (ok and partial) failure = .partial_clone; // `ok` 와 함께 — 줄여 읽었다(rename 판정·증감 없이)
     // **충돌 행의 마커 판정**(S4). 같은 왕복에 얹는다 — 따로 물으면 목록과 판정이 다른 순간의 것이 된다.
     if (ok) scanConflictMarkers(state.allocator, job, &result);
     result.ok = ok;
@@ -2203,6 +2307,97 @@ fn mapRemoteExitError(err: anyerror) anyerror {
         error.ExitTransportFailed => error.RemoteTransportFailed, // 거기까지 못 갔다
         else => err,
     };
+}
+
+/// 이 스레드의 읽기 정책(계획 workspace-trust WT6b-1a) — 읽기 워커가 시작할 때 작업의 판정으로 세우고(`Job.untrusted`),
+/// 러너(`runArgvWithEnv`)가 신뢰 전이면 `git_command.untrusted_env_overrides` 를 싣는다. 인자로 넘기지 않는 이유는 러너를
+/// 부르는 자리가 수십 곳이라서다 — 대신 **읽기 워커 아홉이 모두 세운다**(판정자가 센다). 워커가 아닌 스레드(메인·쓰기 워커·
+/// 판정자)는 기본값(신뢰)이다 — 쓰기의 신뢰 전 처리는 신뢰 시트다(WT6b-2). 원격 읽기는 이 값과 무관하게 늘 싣는다
+/// (`git_command.buildRemote`).
+threadlocal var read_untrusted: bool = false;
+
+/// 신뢰 전 읽기가 실패한 뒤 — 그 저장소가 partial clone 인가(promisor 원격이 있나 — `git_command.Kind.partial_clone_probe`).
+/// 그 실패가 지연 가져오기 차단 때문인지 가른다(계획 workspace-trust WT6b-1a). 실패의 뒤에만 묻는다 — 정상 읽기에 프로세스를
+/// 더하지 않는다.
+fn isPartialClone(allocator: std.mem.Allocator, remote: ?git_command.Remote, git_exe: []const u8, repo: []const u8) bool {
+    if (runOn(allocator, remote, .partial_clone_probe, git_exe, repo, null)) |out| {
+        defer allocator.free(out.bytes);
+        if (promisorTrue(out.bytes)) return true;
+    } else |_| {}
+    const ext = runOn(allocator, remote, .partial_clone_ext_probe, git_exe, repo, null) catch return false;
+    defer allocator.free(ext.bytes);
+    return std.mem.trim(u8, ext.bytes, " \t\r\n").len > 0;
+}
+
+/// `config --type=bool --get-regexp` 출력에 promisor 원격이 있나. `--type=bool` 이 값을 `true`/`false` 로 고르게 낸다 — 거짓
+/// 표기(`no`·`0`)를 우리가 다시 가르지 않는다. 같은 키가 여러 번이면 git 처럼 **마지막 값**이 이긴다(적대적 검증 1회차 —
+/// `true` 한 줄만 보고 참이라 했다). 키는 마지막 공백 앞이다(하위 절 이름엔 공백이 들 수 있다).
+fn promisorTrue(text: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trimEnd(u8, raw, "\r");
+        const sp = std.mem.lastIndexOfScalar(u8, line, ' ') orelse continue;
+        if (!std.mem.eql(u8, line[sp + 1 ..], "true")) continue;
+        var later = lines;
+        const overridden = while (later.next()) |raw2| {
+            const l2 = std.mem.trimEnd(u8, raw2, "\r");
+            const sp2 = std.mem.lastIndexOfScalar(u8, l2, ' ') orelse continue;
+            if (std.mem.eql(u8, l2[0..sp2], line[0..sp])) break true;
+        } else false;
+        if (!overridden) return true;
+    }
+    return false;
+}
+
+test "WT6b-1a promisor 판정은 키마다 마지막 값 — 뒤의 false 가 앞의 true 를 이긴다 (계획 workspace-trust)" {
+    try std.testing.expect(promisorTrue("remote.origin.promisor true\n"));
+    try std.testing.expect(!promisorTrue("remote.origin.promisor true\nremote.origin.promisor false\n"));
+    try std.testing.expect(promisorTrue("remote.origin.promisor false\nremote.origin.promisor true\n"));
+    try std.testing.expect(promisorTrue("remote.a.promisor false\nremote.my b.promisor true\n"));
+    try std.testing.expect(!promisorTrue("remote.a.promisor false\n"));
+    try std.testing.expect(!promisorTrue(""));
+}
+
+/// 목록·머리 줄의 `status`. **신뢰 전 partial clone 에서 실패하면 rename 판정 없이 다시 읽는다**(`status_no_renames` —
+/// 계획 workspace-trust WT6b-1a, 적대적 검증 1회차 실측: 내용이 바뀐 staged rename 은 판정에 안 받은 HEAD 쪽 blob 을 읽어
+/// `status` 가 통째로 실패했다 — 목록이 사유 없는 「git 읽기에 실패했습니다」가 됐다). 다시 읽었으면 `partial` 을 세운다.
+fn readStatus(allocator: std.mem.Allocator, job: *Job, partial: *bool) !Output {
+    return runOn(allocator, job.remoteTarget(), .status, job.git_exe, job.repo, null) catch |err| {
+        if (!read_untrusted or !(partial.* or isPartialClone(allocator, job.remoteTarget(), job.git_exe, job.repo))) return err;
+        partial.* = true;
+        return runOn(allocator, job.remoteTarget(), .status_no_renames, job.git_exe, job.repo, null);
+    };
+}
+
+/// diff 한 면을 git 으로 못 읽었다 — **신뢰 전 partial clone 이면** 그 면이 「정말 없는 면」(추가·삭제된 파일, 루트 커밋의
+/// 부모)인지 「이름은 있는데 안 받은 객체」인지 가른다(계획 workspace-trust WT6b-1a). 예전엔 실패를 늘 「없는 면」으로 읽어
+/// 수정된 파일이 **통째로 추가된 것처럼** 보였다(적대적 검증 1회차 실측). 참이면 안 받았거나(이름은 있다) tree 까지 없어
+/// 가를 수 없다 — 그 diff 는 틀린 답 대신 실패한다. `tree_ish` 가 null 이면 index 다. 판정은 이름만 본다(blob 을 안 읽는다).
+fn sideUnfetched(allocator: std.mem.Allocator, job: *Job, probed: *?bool, tree_ish: ?[]const u8, path: []const u8) bool {
+    if (!read_untrusted) return false;
+    const partial = probed.* orelse blk: {
+        const v = isPartialClone(allocator, job.remoteTarget(), job.git_exe, job.repo);
+        probed.* = v;
+        break :blk v;
+    };
+    if (!partial) return false;
+    const t = tree_ish orelse {
+        const out = runOn(allocator, job.remoteTarget(), .ls_files_path, job.git_exe, job.repo, path) catch return true;
+        defer allocator.free(out.bytes);
+        return std.mem.trim(u8, out.bytes, " \t\r\n").len > 0;
+    };
+    var arg_buf: [std.fs.max_path_bytes + 80]u8 = undefined;
+    const arg = std.fmt.bufPrint(&arg_buf, "{s} {s}", .{ t, path }) catch return true;
+    if (runOn(allocator, job.remoteTarget(), .ls_tree_path, job.git_exe, job.repo, arg)) |out| {
+        defer allocator.free(out.bytes);
+        return std.mem.trim(u8, out.bytes, " \t\r\n").len > 0; // 빈 출력 = 그 tree 에 그 이름이 없다
+    } else |_| {
+        // tree 를 못 읽었다 — 그 rev 자체가 없으면(루트 커밋의 `<c>^`, unborn `HEAD`) 정말 없는 면이고(커밋은 partial clone
+        // 에서도 늘 받아 둔다), 있으면 tree 까지 안 받았다(적대적 검증 2회차: unborn HEAD 의 staged diff 가 통째로 실패했다).
+        const out = runOn(allocator, job.remoteTarget(), .verify_rev, job.git_exe, job.repo, t) catch return false;
+        allocator.free(out.bytes);
+        return true;
+    }
 }
 
 fn runOn(
@@ -2318,6 +2513,7 @@ fn runArgvWithEnv(
         for (git_command.env_overrides) |o| {
             if (std.mem.eql(u8, pair[0..eq], o.name)) continue :outer; // override가 이긴다
         }
+        if (read_untrusted and git_command.untrustedDropsInherited(pair[0..eq])) continue :outer; // 신뢰 전 목록이 이긴다
         // 사용자 환경의 `GIT_INDEX_FILE`은 **항상 버린다**. 남겨 두면 우리 명령이 그 index에 쓰게 되어, 스냅샷이
         // 아닌 명령까지 남의 index를 건드린다(스냅샷은 아래에서 우리 값을 명시적으로 건다).
         if (std.mem.eql(u8, pair[0..eq], "GIT_INDEX_FILE")) continue :outer;
@@ -2330,6 +2526,11 @@ fn runArgvWithEnv(
         env_store.append(allocator, joined) catch return error.GitFailed;
         env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;
     }
+    if (read_untrusted) for (git_command.untrusted_env_overrides) |o| {
+        const joined = std.fmt.allocPrintSentinel(allocator, "{s}={s}", .{ o.name, o.value }, 0) catch return error.GitFailed;
+        env_store.append(allocator, joined) catch return error.GitFailed;
+        env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;
+    };
     if (index_file) |path| {
         const joined = std.fmt.allocPrintSentinel(allocator, "GIT_INDEX_FILE={s}", .{path}, 0) catch return error.GitFailed;
         env_store.append(allocator, joined) catch return error.GitFailed;
@@ -2401,6 +2602,10 @@ fn runArgvWithEnvWindows(
     for (git_command.env_overrides) |o| {
         overrides.append(allocator, .{ .name = o.name, .value = o.value }) catch return error.GitFailed;
     }
+    // 신뢰 전 읽기의 덮어쓰기(WT6b-1a) — 덮어쓰기는 같은 이름의 상속분을 대신한다(`win32_process.buildEnvBlock`).
+    if (read_untrusted) for (git_command.untrusted_env_overrides) |o| {
+        overrides.append(allocator, .{ .name = o.name, .value = o.value }) catch return error.GitFailed;
+    };
     if (index_file) |path| {
         overrides.append(allocator, .{ .name = "GIT_INDEX_FILE", .value = path }) catch return error.GitFailed;
     }
@@ -4911,7 +5116,8 @@ test "WT6a 읽기는 서명 검증 프로그램을 실행하지 않는다 — �
     var fb: [std.fs.max_path_bytes]u8 = undefined;
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&fb, "{s}/f.txt", .{repo}), .data = "x\n" });
     if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "add", "f.txt" })) return error.SkipZigTest;
-    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x" })) return error.SkipZigTest;
+    // 준비 커밋은 사용자 전역의 서명·훅을 끈다 — 기계마다 이 줄의 성패가 달라 판정이 건너뛰어지지 않게.
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "x" })) return error.SkipZigTest;
     // 서명 머리(내용은 가짜 — 검증 프로그램이 불리기만 하면 된다)를 단 커밋으로 HEAD 를 바꾼다.
     const plain = wt6Raw(allocator, git_exe, &.{ "-C", repo, "cat-file", "commit", "HEAD" }) orelse return error.SkipZigTest;
     defer allocator.free(plain);
@@ -4929,8 +5135,11 @@ test "WT6a 읽기는 서명 검증 프로그램을 실행하지 않는다 — �
     if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "commit.gpgSign", "false" })) return error.SkipZigTest;
     if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "gpg.program", script })) return error.SkipZigTest;
     // 대조군 — 굳히기 없는 `log` 는 검증 프로그램을 부른다.
-    _ = wt6Run(allocator, git_exe, &.{ "-C", repo, "log", "-n", "1", "--format=%H" });
+    const control = wt6Raw(allocator, git_exe, &.{ "-C", repo, "log", "-n", "1", "--format=%H" });
+    defer if (control) |c| allocator.free(c);
     if (!wt6Exists(marker)) return error.SkipZigTest;
+    // 아래 「출력에 `gpg:` 없음」이 헛돌지 않게 — 굳히기 없는 읽기의 출력엔 검증 프로그램의 말이 섞인다.
+    if (control == null or std.mem.indexOf(u8, control.?, "gpg:") == null) return error.SkipZigTest;
     wt6Remove(marker);
     const out = try run(allocator, .log, git_exe, repo);
     defer allocator.free(out.bytes);
@@ -4938,6 +5147,255 @@ test "WT6a 읽기는 서명 검증 프로그램을 실행하지 않는다 — �
     // 출력은 우리 형식 그대로 — 검증 프로그램의 말(`gpg: …`)이 섞여 첫 커밋 필드를 더럽히지 않는다(예전 파싱 결함).
     try std.testing.expect(std.mem.indexOf(u8, out.bytes, "gpg:") == null);
     try std.testing.expect(std.mem.indexOf(u8, out.bytes, oid) != null);
+}
+
+// ── 계획 workspace-trust WT6b-1a — 신뢰 전 읽기는 지연 가져오기를 막고, partial clone 실패를 줄여 보인다 ─────────────────
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+const Wt6bTrust = struct {
+    trusted: bool,
+    fn check(ctx: *anyopaque, repo: []const u8) bool {
+        _ = repo;
+        const self: *Wt6bTrust = @ptrCast(@alignCast(ctx));
+        return self.trusted;
+    }
+};
+
+/// `origin` 을 blob:none 으로 받고, 저장소에 무해한 uploadpack 표식과 `protocol.file.allow=always` 를 심은 뒤 `reset --soft HEAD~1`
+/// — 이제 HEAD 는 첫 커밋, index 는 둘째 커밋이라 `diff --numstat --cached` 와 rename 판정은 안 받은 첫 커밋 blob 을 읽어야 한다.
+fn wt6bPartialClone(allocator: std.mem.Allocator, git_exe: []const u8, origin_url: []const u8, dir: []const u8, upload: []const u8) bool {
+    if (!wt6Run(allocator, git_exe, &.{ "clone", "-q", "--filter=blob:none", origin_url, dir })) return false;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", dir, "config", "core.excludesFile", "" })) return false;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", dir, "config", "remote.origin.uploadpack", upload })) return false;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", dir, "config", "protocol.file.allow", "always" })) return false; // 저장소가 「허용」을 적어도
+    return wt6Run(allocator, git_exe, &.{ "-C", dir, "reset", "-q", "--soft", "HEAD~1" });
+}
+
+fn wt6bWaitCommitFiles(backend: *Backend) ?CommitFilesResult {
+    var spins: usize = 0;
+    while (spins < 1000) : (spins += 1) {
+        if (backend.takeCommitFilesResult()) |r| return r;
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    }
+    return null;
+}
+
+test "WT6b-1a 신뢰 전 partial clone — 읽기는 지연 가져오기를 안 하고(두 층 각자·사용자 환경이 풀어도 표식 0) 목록·커밋 펼침은 rename·증감 없이 줄여 서며, diff 는 안 받은 면을 「없는 면」으로 읽지 않는다; 신뢰하면 git 그대로 (계획 workspace-trust)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0 .. tmp.dir.realPath(io, &root_buf) catch return error.SkipZigTest];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var b: [8][std.fs.max_path_bytes + 64]u8 = undefined;
+    const origin = try std.fmt.bufPrint(&b[0], "{s}/origin", .{root});
+    const marker = try std.fmt.bufPrint(&b[1], "{s}/lazy-fetch-ran", .{root});
+    const url = try std.fmt.bufPrint(&b[2], "file://{s}", .{origin});
+    const upload = try std.fmt.bufPrint(&b[3], "touch '{s}'; git-upload-pack", .{marker});
+    const control = try std.fmt.bufPrint(&b[4], "{s}/control", .{root});
+    const untrusted_dir = try std.fmt.bufPrint(&b[5], "{s}/untrusted", .{root});
+    const trusted_dir = try std.fmt.bufPrint(&b[6], "{s}/trusted", .{root});
+    try tmp.dir.createDirPath(io, "origin");
+    if (!initRepoForTest(allocator, git_exe, origin)) return error.SkipZigTest;
+    // 첫 커밋: a.txt·r.txt·k.txt. 둘째: a.txt 수정, r.txt → r2.txt(내용도 한 줄 고친 rename — 판정에 옛 blob 이 필요하다), n.txt 추가.
+    const r_v1 = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n";
+    const r_v2 = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nTEN\n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "origin/a.txt", .data = "v1\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "origin/r.txt", .data = r_v1 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "origin/k.txt", .data = "kept\n" }); // 두 커밋 내내 그대로 — blob 을 받아 둔다
+    if (!wt6Run(allocator, git_exe, &.{ "-C", origin, "add", "-A" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "one" })) return error.SkipZigTest;
+    try tmp.dir.writeFile(io, .{ .sub_path = "origin/a.txt", .data = "v2\nmore\n" });
+    if (!wt6Run(allocator, git_exe, &.{ "-C", origin, "mv", "r.txt", "r2.txt" })) return error.SkipZigTest;
+    try tmp.dir.writeFile(io, .{ .sub_path = "origin/r2.txt", .data = r_v2 });
+    try tmp.dir.writeFile(io, .{ .sub_path = "origin/n.txt", .data = "new\n" });
+    if (!wt6Run(allocator, git_exe, &.{ "-C", origin, "add", "-A" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "two" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", origin, "config", "uploadpack.allowFilter", "true" })) return error.SkipZigTest;
+    // 대조군 — 따로 받은 저장소에서 굳히기 없는 git 이 빠진 blob 을 가져오려 uploadpack 을 돌린다(한 번 가져온 blob 은 그 저장소에
+    // 남으므로 대조군·신뢰 전·신뢰는 저장소를 나눈다 — WT6a 첫 판정자가 그래서 헛돌았다).
+    if (!wt6bPartialClone(allocator, git_exe, url, control, upload)) return error.SkipZigTest;
+    wt6Remove(marker);
+    _ = wt6Run(allocator, git_exe, &.{ "-C", control, "diff", "--numstat", "--cached" });
+    if (!wt6Exists(marker)) return error.SkipZigTest; // 이 기계의 git 이 그 길을 안 탄다 — 판정이 헛돈다
+    wt6Remove(marker);
+
+    // ⓪ **두 층은 각자 혼자서도 막는다** — 신뢰 전 목록의 항목 하나씩만 실은 깨끗한 환경(사용자 전역 설정 없이)에서, 층마다 따로
+    // 받은 저장소로(한 층이 뚫리면 blob 이 들어와 다음 층의 판정이 헛돈다). `GIT_NO_LAZY_FETCH` 는 git 2.45 부터라 그보다
+    // 낮은 git 에서는 그 층을 재지 않는다(그때는 다른 층 혼자 막는다 — 적대적 검증 2회차).
+    const lazy_env_known = blk: {
+        const ver = wt6Raw(allocator, git_exe, &.{"--version"}) orelse break :blk false;
+        defer allocator.free(ver);
+        var it = std.mem.tokenizeAny(u8, ver, " .\n");
+        _ = it.next(); // git
+        _ = it.next(); // version
+        const major = std.fmt.parseInt(u32, it.next() orelse "0", 10) catch 0;
+        const minor = std.fmt.parseInt(u32, it.next() orelse "0", 10) catch 0;
+        break :blk major > 2 or (major == 2 and minor >= 45);
+    };
+    for (git_command.untrusted_env_overrides, 0..) |o, i| {
+        if (std.mem.eql(u8, o.name, "GIT_NO_LAZY_FETCH") and !lazy_env_known) continue;
+        var layer_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+        const layer_dir = try std.fmt.bufPrint(&layer_buf, "{s}/layer{d}", .{ root, i });
+        if (!wt6bPartialClone(allocator, git_exe, url, layer_dir, upload)) return error.SkipZigTest;
+        wt6Remove(marker);
+        var cmd_buf: [4 * std.fs.max_path_bytes]u8 = undefined;
+        const cmd = try std.fmt.bufPrint(&cmd_buf, "env -i PATH=/usr/bin:/bin HOME='{s}' GIT_CONFIG_NOSYSTEM=1 '{s}={s}' '{s}' -C '{s}' diff --numstat --cached >/dev/null 2>&1", .{ root, o.name, o.value, git_exe, layer_dir });
+        _ = runQuiet(&.{ "/bin/sh", "-c", cmd });
+        if (wt6Exists(marker)) {
+            std.debug.print("layer alone did not block: {s}\n", .{o.name});
+            return error.UntrustedLayerLeaks;
+        }
+    }
+
+    if (!wt6bPartialClone(allocator, git_exe, url, untrusted_dir, upload)) return error.SkipZigTest;
+    wt6Remove(marker);
+
+    // **사용자 환경이 두 층을 다 풀어 둔 채로** 잰다 — 상속한 `GIT_NO_LAZY_FETCH=0`·`GIT_ALLOW_PROTOCOL=file` 이 envp 에서 우리
+    // 값보다 앞서면 git 의 getenv 는 그 앞 것을 읽는다(그리고 `file` 은 문을 연다 — 실측). 러너가 상속분을 버려야
+    // (`untrustedDropsInherited`) 막힌다. 되돌릴 때 `unsetenv` 를 안 쓴다(std 가 붙잡은 envp 가 낡는다 — `kitty_media_io`
+    // 판정자와 같은 이유) — 「없음」이었으면 무해한 값(`0`·모든 프로토콜 이름이 아닌 값)으로 둔다.
+    const saved_lazy = if (std.c.getenv("GIT_NO_LAZY_FETCH")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    defer if (saved_lazy) |v| allocator.free(v);
+    const saved_allow = if (std.c.getenv("GIT_ALLOW_PROTOCOL")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    defer if (saved_allow) |v| allocator.free(v);
+    _ = setenv("GIT_NO_LAZY_FETCH", "0", 1);
+    _ = setenv("GIT_ALLOW_PROTOCOL", "file", 1);
+    defer _ = setenv("GIT_NO_LAZY_FETCH", if (saved_lazy) |v| v.ptr else "0", 1);
+    defer _ = setenv("GIT_ALLOW_PROTOCOL", if (saved_allow) |v| v.ptr else "file:git:ssh:http:https", 1);
+
+    // ⑴ 신뢰 전 목록 — 살고(ok) 사유는 partial clone. rename 판정 없이 다시 읽어(`status_no_renames`) r.txt·r2.txt 가 삭제·추가
+    // 두 행이고(rename 행 `2 ` 없음), 증감은 빈다. 표식 없음.
+    var no: Wt6bTrust = .{ .trusted = false };
+    var backend = try Backend.initWithTrust(io, .{ .ctx = &no, .trusted = Wt6bTrust.check });
+    defer backend.deinit();
+    try std.testing.expect(backend.submit(git_exe, untrusted_dir, "", 1, null));
+    var list = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer list.deinit(worker_allocator);
+    try std.testing.expect(list.ok);
+    try std.testing.expectEqual(ReadFailure.partial_clone, list.failure); // 줄여 읽었다
+    try std.testing.expectEqual(@as(usize, 0), list.numstat_staged.len);
+    for ([_][]const u8{ " a.txt\n", " r.txt\n", " r2.txt\n", " n.txt\n" }) |want| try std.testing.expect(std.mem.indexOf(u8, list.status, want) != null);
+    try std.testing.expect(std.mem.indexOf(u8, list.status, "\n2 ") == null);
+    try std.testing.expect(!wt6Exists(marker));
+    // 머리 줄의 상태도 같은 길이다.
+    try std.testing.expect(backend.submitRepoStatus(git_exe, untrusted_dir, 4, null));
+    var rs: ?RepoStatusResult = null;
+    var spins: usize = 0;
+    while (spins < 1000 and rs == null) : (spins += 1) {
+        rs = backend.takeRepoStatusResult();
+        if (rs == null) {
+            var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&ts, null);
+        }
+    }
+    var repo_status = rs orelse return error.RepoStatusNeverCompleted;
+    defer repo_status.deinit(worker_allocator);
+    try std.testing.expect(repo_status.ok);
+
+    // ⑵ 신뢰 전 커밋 펼침 — 증감·rename 없이(`--raw --no-renames`) 다시 읽는다. 화면의 파서가 그대로 받는다 — 상태 문자·경로는
+    // 서고 증감 자리만 빈다(0/0 이 아니다).
+    const orig_raw = wt6Raw(allocator, git_exe, &.{ "-C", untrusted_dir, "rev-parse", "ORIG_HEAD" }) orelse return error.SkipZigTest;
+    defer allocator.free(orig_raw);
+    const second = std.mem.trim(u8, orig_raw, " \n");
+    try std.testing.expect(backend.submitCommitFiles(git_exe, untrusted_dir, second, 2, null));
+    var f = wt6bWaitCommitFiles(&backend) orelse return error.CommitFilesNeverCompleted;
+    defer f.deinit(worker_allocator);
+    try std.testing.expect(f.ok);
+    try std.testing.expectEqual(ReadFailure.partial_clone, f.failure);
+    var files_it = maru.session.git_status.iterateCommitFiles(f.text);
+    for ([_]struct { u8, []const u8 }{ .{ 'M', "a.txt" }, .{ 'A', "n.txt" }, .{ 'D', "r.txt" }, .{ 'A', "r2.txt" } }) |want| {
+        const entry = files_it.next() orelse return error.CommitFileMissing;
+        try std.testing.expectEqual(want[0], entry.letter);
+        try std.testing.expectEqualStrings(want[1], entry.path);
+        try std.testing.expect(!entry.has_delta);
+    }
+    try std.testing.expect(files_it.next() == null);
+
+    // ⑶ 신뢰 전 diff — 안 받은 면(수정된 a.txt 의 옛 blob)은 「없는 면」이 아니라 실패다(통째로 추가된 것처럼 보이면 틀린 답이다).
+    // 정말 없는 면(그 커밋이 더한 n.txt 의 부모 쪽)은 예전 그대로 한쪽만 선다.
+    try std.testing.expect(backend.submitDiff(git_exe, untrusted_dir, "a.txt", "", second, "", .commit, 5, null, ""));
+    var d1 = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer d1.deinit(worker_allocator);
+    try std.testing.expect(!d1.ok);
+    try std.testing.expect(backend.submitDiff(git_exe, untrusted_dir, "a.txt", "", "", "", .staged, 6, null, ""));
+    var d2 = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer d2.deinit(worker_allocator);
+    try std.testing.expect(!d2.ok);
+    try std.testing.expect(backend.submitDiff(git_exe, untrusted_dir, "n.txt", "", second, "", .commit, 7, null, ""));
+    var d3 = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer d3.deinit(worker_allocator);
+    try std.testing.expect(d3.ok);
+    try std.testing.expectEqual(@as(usize, 0), d3.original.len);
+    try std.testing.expectEqualStrings("new\n", d3.modified);
+    // 루트 커밋의 부모 쪽은 정말 없는 면이다(`<c>^` 가 없다 — tree 를 못 읽은 것과 가른다).
+    const first_raw = wt6Raw(allocator, git_exe, &.{ "-C", untrusted_dir, "rev-parse", "HEAD" }) orelse return error.SkipZigTest;
+    defer allocator.free(first_raw);
+    try std.testing.expect(backend.submitDiff(git_exe, untrusted_dir, "k.txt", "", std.mem.trim(u8, first_raw, " \n"), "", .commit, 8, null, ""));
+    var d4 = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer d4.deinit(worker_allocator);
+    try std.testing.expect(d4.ok);
+    try std.testing.expectEqualStrings("kept\n", d4.modified);
+    // unborn HEAD(`checkout --orphan` — index 는 남는다)의 staged diff 도 왼쪽은 정말 없는 면이다(적대적 검증 2회차 — `ls-tree HEAD`
+    // 가 실패한다고 「안 받음」으로 읽어 통째로 실패했다).
+    if (!wt6Run(allocator, git_exe, &.{ "-C", untrusted_dir, "checkout", "-q", "--orphan", "fresh" })) return error.SkipZigTest;
+    try std.testing.expect(backend.submitDiff(git_exe, untrusted_dir, "n.txt", "", "", "", .staged, 9, null, ""));
+    var d5 = waitForDiff(&backend) orelse return error.DiffNeverCompleted;
+    defer d5.deinit(worker_allocator);
+    try std.testing.expect(d5.ok);
+    try std.testing.expectEqual(@as(usize, 0), d5.original.len);
+    try std.testing.expectEqualStrings("new\n", d5.modified);
+    try std.testing.expect(!wt6Exists(marker));
+
+    // ⑸ treeless(`tree:0`) — rename 없이 다시 읽어도 tree 가 없어 목록이 서지 않는다. 그때도 사유는 partial clone 이다(일반
+    // 「읽기 실패」가 아니다 — 적대적 검증 2회차).
+    var tl_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    const treeless = try std.fmt.bufPrint(&tl_buf, "{s}/treeless", .{root});
+    if (!wt6Run(allocator, git_exe, &.{ "clone", "-q", "--filter=tree:0", url, treeless })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", treeless, "config", "core.excludesFile", "" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", treeless, "config", "remote.origin.uploadpack", upload })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", treeless, "reset", "-q", "--soft", "HEAD~1" })) return error.SkipZigTest;
+    wt6Remove(marker);
+    try std.testing.expect(backend.submit(git_exe, treeless, "", 10, null));
+    var tl_list = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer tl_list.deinit(worker_allocator);
+    // 이 git 이 treeless 에서도 목록을 세우면 이 갈래가 안 생긴다(그때는 줄여 읽은 목록이다 — 실측 2.50.1 은 못 세운다).
+    try std.testing.expectEqual(ReadFailure.partial_clone, tl_list.failure);
+    try std.testing.expect(!wt6Exists(marker));
+
+    // ⑷ 신뢰 — git 그대로: 빠진 blob 을 받아 와(저장소의 uploadpack 이 돈다 — 사용자가 신뢰한 저장소다) rename·증감이 선다.
+    if (!wt6bPartialClone(allocator, git_exe, url, trusted_dir, upload)) return error.SkipZigTest;
+    wt6Remove(marker);
+    var yes: Wt6bTrust = .{ .trusted = true };
+    var trusted_backend = try Backend.initWithTrust(io, .{ .ctx = &yes, .trusted = Wt6bTrust.check });
+    defer trusted_backend.deinit();
+    try std.testing.expect(trusted_backend.submit(git_exe, trusted_dir, "", 3, null));
+    var tlist = waitForList(&trusted_backend) orelse return error.ListNeverCompleted;
+    defer tlist.deinit(worker_allocator);
+    try std.testing.expect(tlist.ok);
+    try std.testing.expectEqual(ReadFailure.generic, tlist.failure);
+    try std.testing.expect(std.mem.indexOf(u8, tlist.numstat_staged, "a.txt") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tlist.status, "\n2 R") != null);
+    try std.testing.expect(wt6Exists(marker));
+}
+
+test "WT6b-1a 신뢰 전 정책은 읽기 워커 아홉이 모두 세우고, 제품은 판정 함수 없이 백엔드를 만들지 않으며, 신뢰 전 저장소는 스냅샷 제출 전에 돌아간다 (계획 workspace-trust)" {
+    const src = @embedFile("git_backend.zig");
+    // 허용된 자리를 센다 — 워커 진입마다 한 번(아홉), 다른 데서 세우지 않는다.
+    try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, src, "    read_untrusted = job" ++ ".untrusted; // 계획"));
+    try std.testing.expectEqual(@as(usize, 9), std.mem.count(u8, src, "job.untrusted = self" ++ ".untrustedFor(repo, "));
+    for ([_][]const u8{ @embedFile("app_session.zig"), @embedFile("app_session/agent.zig"), @embedFile("app_session/editor/merge.zig"), @embedFile("app_session/git.zig"), @embedFile("app_session/scm_dock.zig"), @embedFile("app_session/settings.zig") }) |product| {
+        try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, product, "self.git_backend = git_backend_mod.Backend.init(self.io)"));
+    }
+    const agent = @embedFile("app_session/agent.zig");
+    const skip = std.mem.indexOf(u8, agent, "if (self.git_backend.?.untrustedFor(repo, remote != null)) return;") orelse return error.MissingSnapshotTrustSkip;
+    const submit = std.mem.indexOf(u8, agent, "self.git_backend.?.submitSnapshot(") orelse return error.MissingSnapshotSubmit;
+    try std.testing.expect(skip < submit);
 }
 
 fn remoteScmHarness() ?struct { dest: []const u8, ctl: []const u8, repo: []const u8 } {

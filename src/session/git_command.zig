@@ -138,11 +138,36 @@ pub const Kind = enum {
     /// 같은 출력 그룹이라 함께 걸면 **뒤에 온 쪽만** 나온다(실측 git 2.50.1). `--raw`는 다른 그룹이라
     /// 둘이 나란히 오므로 프로세스는 그대로 하나다.
     commit_files,
+    /// `commit_files` 를 **증감 없이**(`--raw` 만 — `--numstat`·`--find-renames` 없이). 신뢰 전 partial clone 에서 부모 쪽
+    /// blob 이 없어 증감을 못 셀 때 다시 읽는 모양이다(계획 workspace-trust WT6b-1a — 증감·내용 유사도는 blob 을 읽어야
+    /// 하고, 신뢰 전에는 지연 가져오기를 막았다). tree 끼리의 비교라 blob 을 안 읽는다.
+    commit_files_raw,
     /// 턴 하나가 바꾼 파일들(P5): `git diff --raw --numstat <treeA> <treeB>`.
     ///
     /// **양쪽 다 tree다** — 그래서 작업트리가 어떻게 바뀌든 그 턴의 목록은 고정된다(§3.5.4가 타임라인을
     /// 두 스냅샷 사이로 잡은 이유). 두 rev는 `arg`에 `<A> <B>`로 붙여 넘긴다.
     turn_name_status,
+    /// `turn_name_status` 를 증감 없이(`commit_files_raw` 와 같은 이유).
+    turn_name_status_raw,
+    /// `status` 를 rename 판정 없이(`--no-renames`) — 신뢰 전 partial clone 에서 `status` 가 실패했을 때만 다시 읽는다
+    /// (계획 workspace-trust WT6b-1a). 내용이 바뀐 staged rename 은 판정에 HEAD 쪽 blob 을 읽어야 해서, 그 blob 을 안 받은
+    /// 신뢰 전 저장소에선 `status` 가 통째로 실패한다(적대적 검증 1회차 실측). rename 은 삭제·추가 두 행으로 보인다.
+    status_no_renames,
+    /// `--literal-pathspecs ls-tree --full-tree <tree-ish> -- <경로>` — 그 경로가 그 tree 에 **이름으로** 있나(blob 은 안 읽는다). arg 는
+    /// `<tree-ish> <경로>`(tree-ish 엔 공백이 없다 — 첫 공백에서 쪼갠다). 신뢰 전 partial clone 에서 diff 한 면을 못 읽었을 때
+    /// 「정말 없는 면」(추가·삭제)과 「안 받은 객체」를 가른다(exit 0 + 빈 출력 = 없다, 항목 = 있다, 실패 = tree 도 없다).
+    ls_tree_path,
+    /// `--literal-pathspecs ls-files --stage -- <경로>` — 위와 같은 질문을 index 에(경로를 글자 그대로).
+    ls_files_path,
+    /// `rev-parse --verify --quiet <rev>` — 그 rev 가 있나(루트 커밋의 `<c>^` 는 없다).
+    verify_rev,
+    /// 이 저장소가 partial clone 인가 — 둘 중 하나: `git config --type=bool --get-regexp ^remote\..*\.promisor$` 에 `true`
+    /// 인 줄이 있다(git 2.50 의 `clone --filter` 가 남기는 표시 — `extensions.partialclone` 은 안 남긴다; 실측), 또는
+    /// `partial_clone_ext_probe` 가 값을 낸다(옛 git 이 남긴 표시). git 자신의 판정(`promisor_remote` 설정 읽기)과 같은 두
+    /// 키다. 신뢰 전 읽기가 실패한 뒤에만 묻는다(그 실패가 지연 가져오기 차단 때문인지 가른다). 아무것도 실행하지 않는 조회다.
+    partial_clone_probe,
+    /// `git config --get extensions.partialclone`(있으면 값, 없으면 exit 1) — 위의 둘째 갈래.
+    partial_clone_ext_probe,
     /// diff 본문 한쪽(원본)을 통째로: `git show <spec>`. spec은 `blobSpec`이 만든 `HEAD:<경로>` 또는 `:<경로>`다.
     /// **worktree 쪽은 이 경로로 읽지 않는다** — 디스크 파일을 그대로 읽으면 되고, git을 한 번 덜 띄운다.
     show_blob,
@@ -422,7 +447,7 @@ pub fn baseRange(base: []const u8, buf: *[max_base_range_len]u8) ?[]const u8 {
 
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
-pub const max_argv = 36; // 기본 3 + `--no-optional-locks` + config 덮어쓰기 20(서명 검증 금지 2 — WT6a) + kind별 최대 10 + 여유
+pub const max_argv = 36; // 기본 3 + `--no-optional-locks` 1 + config 덮어쓰기 18(`-c` 9쌍 — 서명 검증 금지 1쌍은 WT6a) + kind별 최대 10 = 32, 여유 4
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
 ///
@@ -502,7 +527,9 @@ pub const config_overrides = [_][]const u8{
 };
 
 /// 하위 프로세스에 **덮어써서** 넘길 환경변수. 상속만 하면 사용자 환경의 GIT_* 가 계약을 깬다.
-pub const env_overrides = [_]struct { name: []const u8, value: []const u8 }{
+pub const EnvOverride = struct { name: []const u8, value: []const u8 };
+
+pub const env_overrides = [_]EnvOverride{
     .{ .name = "GIT_OPTIONAL_LOCKS", .value = "0" }, // index.lock을 잡지 않는다(읽기가 쓰기를 방해하지 않게)
     .{ .name = "GIT_TERMINAL_PROMPT", .value = "0" }, // 어떤 경우에도 입력을 기다리지 않는다
     .{ .name = "GIT_CONFIG_NOSYSTEM", .value = "1" }, // /etc/gitconfig 의 외부 프로그램 설정 배제
@@ -510,6 +537,30 @@ pub const env_overrides = [_]struct { name: []const u8, value: []const u8 }{
     .{ .name = "GIT_ASKPASS", .value = "" },
     .{ .name = "GIT_LFS_SKIP_SMUDGE", .value = "1" }, // smudge 필터 프로세스 금지
 };
+
+/// **신뢰 전 저장소의 읽기에 더 싣는 env**(계획 workspace-trust WT6b-1a). 지연 가져오기를 막는다 — partial clone 의 빠진
+/// blob 을 읽는 순간 git 이 원격에서 가져오며 저장소 config 의 `remote.<n>.uploadpack`·`core.sshCommand`·`core.gitProxy`·
+/// `git-remote-<x>` 를 실행한다(실측 git 2.50.1 — 도크의 `diff --numstat --cached` 만으로). 두 층이고 **각자 혼자서도 막는다**
+/// (실측 — 판정자가 층마다 잰다):
+/// - `GIT_NO_LAZY_FETCH=1`(git 2.45+) — 가져오기 자체를 안 한다.
+/// - `GIT_ALLOW_PROTOCOL=`(빈 목록) — 어떤 전송도 허용하지 않는다. 낮은 git(원격 호스트)에도 듣고, `protocol.*` config 를
+///   **통째로** 이긴다(저장소의 `protocol.file.allow=always`·사용자 정의 helper `evil::` 까지 — 적대적 검증 1회차: 프로토콜별
+///   `-c protocol.<p>.allow=never` 는 목록에 없는 `ftp`·`<x>::` 를 못 막았다).
+/// argv 가 아니라 env 인 이유는 argv 상한(`max_argv`)이다. 상속한 같은 이름은 러너가 버린다(`untrustedDropsInherited` —
+/// envp 에 같은 이름이 둘이면 git 의 getenv 는 앞 것을 읽고, 상속한 `GIT_ALLOW_PROTOCOL=file` 은 문을 연다 — 실측).
+///
+/// **신뢰한 저장소에는 싣지 않는다** — 늘 막으면 정상 partial clone 사용자의 커밋 펼침·목록이 실패한다(WT6a 적대적 검증 —
+/// 그래서 신뢰에 따라 가른다). 원격(SSH) 저장소는 늘 싣는다(원격은 늘 신뢰 전 — 2026-10-09 사용자 결정).
+pub const untrusted_env_overrides = [_]EnvOverride{
+    .{ .name = "GIT_NO_LAZY_FETCH", .value = "1" },
+    .{ .name = "GIT_ALLOW_PROTOCOL", .value = "" },
+};
+
+/// 신뢰 전 읽기가 상속 env 에서 버릴 이름인가 — 우리 목록의 이름.
+pub fn untrustedDropsInherited(name: []const u8) bool {
+    for (untrusted_env_overrides) |o| if (std.mem.eql(u8, name, o.name)) return true;
+    return false;
+}
 
 /// `git_exe`와 `repo`를 받아 argv를 `buf`에 채우고 그 슬라이스를 돌려준다. 할당하지 않는다.
 /// `git_exe`는 호출자가 **절대 경로로 해석해 둔** 실행 파일이다 — PATH 탐색을 이 모듈이 하지 않는 이유는
@@ -660,7 +711,8 @@ pub fn buildRemoteWithIndex(
     // **POSIX sh 를 한 겹 씌운다**(근거는 `remote_path_script` 주석) — 로그인 셸은 인용된 토큰만 본다.
     n = remote_shell.appendShPrologue(cmd_buf, n, remote_path_script) orelse return null;
     n = quoteAppend(cmd_buf, n, "env") orelse return null;
-    for (env_overrides) |override| {
+    // **원격은 늘 신뢰 전이다**(계획 workspace-trust WT6b-1a) — 신뢰 전 env(지연 가져오기 금지)도 늘 싣는다.
+    for ([_][]const EnvOverride{ &env_overrides, &untrusted_env_overrides }) |list| for (list) |override| {
         if (!remoteTokenIsSafe(override.name) or !remoteTokenIsSafe(override.value)) return null;
         // `K=V` 를 **한 토큰으로** 인용한다 — 셸이 인용을 벗기면 env(1) 가 그대로 한 인자로 받는다.
         if (n >= cmd_buf.len) return null;
@@ -686,7 +738,7 @@ pub fn buildRemoteWithIndex(
         if (n >= cmd_buf.len) return null;
         cmd_buf[n] = '\'';
         n += 1;
-    }
+    };
     if (index_file) |path| {
         if (!remoteTokenIsSafe(path) or std.mem.indexOfScalar(u8, path, '\'') != null or path.len == 0) return null;
         if (n + 1 + "'GIT_INDEX_FILE='".len + path.len + 1 > cmd_buf.len) return null;
@@ -987,6 +1039,67 @@ pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8
             n += 1;
             buf[n] = arg orelse "HEAD";
             n += 1;
+        },
+        .commit_files_raw => {
+            // `--no-renames` — rename 판정(기본 켬 `diff.renames`)도 내용을 읽는다(적대적 검증 1회차 실측: 수정된 rename
+            // 커밋에서 이 대체 읽기마저 실패했다). rename 은 삭제·추가 두 줄이 된다.
+            for ([_][]const u8{ "show", "--format=", "--raw", "--no-renames", "--first-parent", "-m", "--no-ext-diff", "--no-textconv" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
+            buf[n] = arg orelse "HEAD";
+            n += 1;
+        },
+        .turn_name_status_raw => {
+            for ([_][]const u8{ "diff", "--raw", "--no-renames", "--no-ext-diff", "--no-textconv" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
+            const pair = arg orelse "";
+            const sep = std.mem.indexOfScalar(u8, pair, ' ') orelse pair.len;
+            buf[n] = pair[0..sep];
+            n += 1;
+            buf[n] = if (sep < pair.len) pair[sep + 1 ..] else "";
+            n += 1;
+        },
+        .status_no_renames => {
+            for ([_][]const u8{ "status", "--porcelain=v2", "--branch", "--untracked-files=all", "--no-renames" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
+        },
+        .ls_tree_path => {
+            const pair = arg orelse "";
+            const sep = std.mem.indexOfScalar(u8, pair, ' ') orelse pair.len;
+            // `--literal-pathspecs` — `:(top)x` 처럼 pathspec 마법으로 읽히는 이름이 있다(적대적 검증 2회차 실측).
+            for ([_][]const u8{ "--literal-pathspecs", "ls-tree", "--full-tree", pair[0..sep], "--", if (sep < pair.len) pair[sep + 1 ..] else "" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
+        },
+        .ls_files_path => {
+            for ([_][]const u8{ "--literal-pathspecs", "ls-files", "--stage", "--", arg orelse "" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
+        },
+        .verify_rev => {
+            for ([_][]const u8{ "rev-parse", "--verify", "--quiet", arg orelse "HEAD" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
+        },
+        .partial_clone_probe => {
+            for ([_][]const u8{ "config", "--type=bool", "--get-regexp", "^remote\\..*\\.promisor$" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
+        },
+        .partial_clone_ext_probe => {
+            for ([_][]const u8{ "config", "--get", "extensions.partialclone" }) |t| {
+                buf[n] = t;
+                n += 1;
+            }
         },
         .turn_name_status => {
             buf[n] = "diff";
@@ -1844,4 +1957,44 @@ test "tree_exists: tree 들을 각각의 인자로 싣고 상한을 넘기지 �
     const nine = "a1 a2 a3 a4 a5 a6 a7 a8 a9";
     const argv9 = build(.tree_exists, "/usr/bin/git", "/repo", nine, &buf);
     try std.testing.expectEqualStrings("a8", argv9[argv9.len - 1]);
+}
+
+test "WT6b-1a 원격 읽기는 늘 신뢰 전 env(지연 가져오기 금지)를 싣는다 — 원격은 늘 신뢰 전 (계획 workspace-trust)" {
+    var buf: [max_argv][]const u8 = undefined;
+    const local = build(.status, "/usr/bin/git", "/repo", null, &buf);
+    var remote_buf: [max_argv][]const u8 = undefined;
+    var cmd_buf: [max_remote_command_bytes]u8 = undefined;
+    const argv = buildRemote(local, .{ .dest = "host", .control_path = "/tmp/ctl" }, &remote_buf, &cmd_buf) orelse return error.RemoteBuildFailed;
+    const cmd = argv[argv.len - 1];
+    for (untrusted_env_overrides) |o| {
+        var want: [128]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, cmd, try std.fmt.bufPrint(&want, "'{s}={s}'", .{ o.name, o.value })) != null);
+    }
+    // 두 층 — 지연 가져오기 금지와 전송 금지(빈 허용 목록). 판정자(`git_backend` WT6b-1a)가 층마다 혼자서 재 본다.
+    try testing.expectEqual(@as(usize, 2), untrusted_env_overrides.len);
+    try testing.expectEqualStrings("GIT_NO_LAZY_FETCH", untrusted_env_overrides[0].name);
+    try testing.expectEqualStrings("GIT_ALLOW_PROTOCOL", untrusted_env_overrides[1].name);
+    try testing.expectEqualStrings("", untrusted_env_overrides[1].value);
+    // 상속 env 를 버리는 이름 — 우리 목록의 이름만.
+    try testing.expect(untrustedDropsInherited("GIT_NO_LAZY_FETCH"));
+    try testing.expect(untrustedDropsInherited("GIT_ALLOW_PROTOCOL"));
+    try testing.expect(!untrustedDropsInherited("PATH"));
+    // 증감 없는 대체 읽기는 blob 을 읽는 옵션(`--numstat`·`--find-renames`)을 안 달고 rename 판정을 끈다(그것도 내용을 읽는다).
+    for ([_]Kind{ .commit_files_raw, .turn_name_status_raw, .status_no_renames }) |kind| {
+        var b2: [max_argv][]const u8 = undefined;
+        const raw = build(kind, "/usr/bin/git", "/repo", "aaa bbb", &b2);
+        var no_renames = false;
+        for (raw) |t| {
+            try testing.expect(!std.mem.eql(u8, t, "--numstat") and !std.mem.eql(u8, t, "--find-renames") and !std.mem.eql(u8, t, "--renames"));
+            if (std.mem.eql(u8, t, "--no-renames")) no_renames = true;
+        }
+        try testing.expect(no_renames);
+    }
+    // 경로 조회 — tree-ish 와 경로를 첫 공백에서 가르고(경로의 공백은 경로다) `--` 뒤에 둔다.
+    var b4: [max_argv][]const u8 = undefined;
+    const lt = build(.ls_tree_path, "/usr/bin/git", "/repo", "abc123^ dir/a b.txt", &b4);
+    try testing.expectEqualStrings("abc123^", lt[lt.len - 3]);
+    try testing.expectEqualStrings("--", lt[lt.len - 2]);
+    try testing.expectEqualStrings("dir/a b.txt", lt[lt.len - 1]);
+    try testing.expectEqualStrings("--literal-pathspecs", lt[lt.len - 6]);
 }

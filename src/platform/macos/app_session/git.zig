@@ -26,6 +26,7 @@ const git_command = app_session_mod.git_command;
 const git_status = maru.session.git_status; // check-ignore 출력 파서(순수 계층)
 const layout_math = app_session_mod.layout_math;
 const scm_dock_ops = @import("scm_dock.zig");
+const trust_store = @import("editor/trust_store.zig"); // 신뢰 세대만 본다(계획 workspace-trust WT6b-1a)
 const turn_ring_persist = @import("turn_ring_persist.zig"); // AT7: 봉인 뒤 쓰기·첫 턴 전 되살리기·tree 확인
 const dock_ops = @import("dock.zig");
 const ssh_upload = @import("../ssh_upload.zig"); // 원격 감시자 spawn(RW3)
@@ -62,6 +63,31 @@ pub fn pumpBaseReread(self: *AppSession) void {
     if (self.git_inflight != 0 or self.scm_write_inflight != 0) return; // 아직 도는 중 — 끝나면 이 자리로 온다
     self.scm_base_reread_pending = false;
     refreshGitStatus(self);
+}
+
+/// 신뢰 표의 세대가 바뀌었으면(이 창·다른 창의 허용·거부·잊기, 컨트롤 플레인 철회) 도크의 git 읽기를 다시 건다(계획
+/// workspace-trust WT6b-1a) — 목록·펼친 커밋 파일은 신뢰 전 규칙(지연 가져오기 금지 — 증감·rename 없이 줄여 읽음)으로 읽은
+/// 결과라, 신뢰한 뒤에도 남으면 줄인 화면이 남는다(그 반대도 — 철회 뒤에 신뢰 때의 결과가 남는다). 히스토리(`log`)는 내용을
+/// 안 읽어 신뢰와 무관하다 — 다시 읽지 않는다.
+///
+/// **기준 세대는 첫 신뢰 판정이 잡는다**(`AppSession.gitRepoTrustedThunk` — 첫 git 제출이 표를 읽은 그 세대). 그 전엔 다시 읽을
+/// 것이 없다. 처음 본 값을 받아들이면 표 적재로 오른 세대가 「바뀜」으로 읽혀 방금 한 읽기를 한 번 더 하거나, 적재와 첫
+/// 관측 사이의 결정을 놓친다(적대적 검증 1회차).
+pub fn pumpTrustReread(self: *AppSession) void {
+    const seen = self.git_trust_generation orelse return;
+    const gen = trust_store.generation();
+    if (gen == seen) return;
+    self.git_trust_generation = gen;
+    // 도는 펼침 요청도 끊는다 — 그 답은 신뢰 전 규칙의 것인데, 도착하면 「이 커밋을 읽어 둠」을 다시 세워 다시 읽기가 안
+    // 일어난다(적대적 검증 1회차). 늦게 온 답은 요청 번호가 안 맞아 버려진다(`drainCommitFiles`).
+    scm_dock_ops.invalidateScmCommitFiles(self);
+    self.scm_base_reread_pending = true; // 도는 목록 읽기가 끝난 뒤 한 번 — `pumpBaseReread` 가 건다
+}
+
+/// 신뢰 전 partial clone 의 안내(계획 workspace-trust WT6b-1a) — 원격은 신뢰할 수 없으므로(원격 신뢰 키가 없다) 「신뢰하면 받아
+/// 온다」를 말하지 않는다(적대적 검증 2회차). 도크의 저장소가 원격인가는 `git_repo_dest` 가 답한다.
+pub fn partialCloneNotice(self: *const AppSession) [:0]const u8 {
+    return maru.i18n.t(if (self.git_repo_dest != null) .scm_partial_clone_remote else .scm_partial_clone_untrusted);
 }
 
 /// 활성 Term 이 붙어 있는 **기계**(원격이면 그 목적지, 로컬이면 null).
@@ -241,7 +267,7 @@ fn submitGitRead(self: *AppSession, repo: []const u8, remote: ?git_command.Remot
     // 원격 목록의 갱신은 포커스 전환과 사용자의 새로고침이 맡는다(RS2 의 알려진 한계).
     if (remote == null) ensureGitWatch(self, repo);
     if (self.git_backend == null) {
-        self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+        self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
     }
     // 실행 파일을 먼저 확정한다. 못 찾으면 **실행을 시도하지 않고** 미설치로 표시한다(docs/editor-surface-tooling.md §6).
     // 후보 열거에만 PATH를 쓰고 exec는 확정된 절대경로로 한다(셸·execvp 경유 없음 = PATH hijack 차단 유지).
@@ -1276,7 +1302,7 @@ pub fn isIgnoreRuleFile(changed_path: []const u8) bool {
 /// 그러면 `ignoredKnown` 이 거짓으로 남아 「모르면 흐리게 하지 않는다」가 그대로 지켜진다.
 pub fn ensureIgnoreBackend(self: *AppSession) void {
     if (self.git_backend != null) return;
-    self.git_backend = git_backend_mod.Backend.init(self.io) catch return;
+    self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return;
 }
 
 /// 그 디렉터리를 **다시 물어야 한다**고 적어 둔다(커서를 0 으로). 스캔이 끝났을 때 불린다.
@@ -1576,6 +1602,7 @@ pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
         .repo => if (self.git_failed) switch (self.git_failure) {
             .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
             .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
+            .partial_clone => partialCloneNotice(self),
             .generic => maru.i18n.t(.git_read_failed),
         } else maru.i18n.t(.scm_loading),
     };

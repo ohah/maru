@@ -104,7 +104,7 @@ extension MaruAppHostController {
         }
         guard ready == 1 else { finish(false); return }
         let matrix = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_MATRIX"] == "1"
-        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release"]
+        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk"]
         guard editorProjectSearchCapture(labels[Int(stage)]) else { finish(false); return }
         let unicode = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_UNICODE"] == "1"
         switch stage {
@@ -134,6 +134,11 @@ extension MaruAppHostController {
             }
         case 5: editorProjectSearchAction(4)
         case 6:
+            if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_REPLACE_PREVIEW"] == "1" {
+                editorProjectSearchAction(12)
+                EditorProjectSearchRun.stage = 12
+                return
+            }
             if !matrix { finish(true); return }
             editorProjectSearchAction(6)
         case 8:
@@ -146,6 +151,13 @@ extension MaruAppHostController {
             editorProjectSearchAction(9)
         case 10:
             guard editorProjectSearchHold(false) else { finish(false); return }
+        case 12:
+            guard editorProjectSearchClick(0) else { finish(false); return }
+            view.insertText("renamed", replacementRange: NSRange(location: NSNotFound, length: 0))
+        case 13:
+            guard editorProjectSearchClick(0) else { finish(false); return }
+        case 14, 15, 16: editorProjectSearchAction(stage)
+        case 17: finish(true); return
         case 11: finish(true); return
         default: editorProjectSearchAction(stage)
         }

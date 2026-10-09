@@ -73,8 +73,8 @@ test "project search dock hidden fields and unavailable search commands have no 
             else => {},
         }
     }
-    try std.testing.expect(interaction.hitAction(f.tree, 180, 40) == null);
-    try std.testing.expect(interaction.hitAction(f.tree, 220, 40) == null);
+    try std.testing.expect(interaction.hitAction(f.tree, 135, 40) == null);
+    try std.testing.expect(interaction.hitAction(f.tree, 165, 40) == null);
 }
 
 test "project search dock text clips belong to individual fields buttons and rows" {
@@ -88,8 +88,8 @@ test "project search dock text clips belong to individual fields buttons and row
         const f = try make(a, p);
         const tk = tokens.Tokens.rich(std.mem.zeroes(tokens.ThemeColors));
         const rendered = try view.view(p, f, .{}, &tk, .{ .ops = try a.alloc(draw.Op, 200), .runs = try a.alloc(draw.Run, 30) });
-        const names = [_][]const u8{ "query", "include", "exclude", "Aa", "Ab", ".*", "…", "▶", "■", p.scopes, p.status, "a.zig", "foo" };
-        const names_ids = [_]u64{ 10, 11, 12, 20, 21, 22, 23, 24, 25, 7, 8, build.rowId(99), build.rowId(100) };
+        const names = [_][]const u8{ "query", "include", "exclude", "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", p.scopes, p.status, "a.zig", "foo" };
+        const names_ids = [_]u64{ 10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 7, 8, build.rowId(99), build.rowId(100) };
         for (rendered.ops) |op| if (op == .text) {
             var found = false;
             for (names, names_ids) |name, id| if (std.mem.eql(u8, name, op.text.runs[0].text)) {

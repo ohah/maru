@@ -504,7 +504,7 @@ pub fn build(b: *std.Build) void {
     b.step("editor-project-search-probe", "Build the opt-in project search comparison probe")
         .dependOn(&b.addInstallArtifact(project_search_probe, .{}).step);
     const project_search_module = b.createModule(.{
-        .root_source_file = b.path("src/session/editor/search/mod.zig"),
+        .root_source_file = b.path("src/project_search_module.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -5245,6 +5245,15 @@ pub fn build(b: *std.Build) void {
     const run_search_dock = b.addRunArtifact(search_dock_tests);
     run_search_dock.addArg("--maru-expect-tests=25");
     b.step("test-editor-project-search-dock", "Run project search grouping and dock geometry judges").dependOn(&run_search_dock.step);
+    const replace_preview_module = b.createModule(.{ .root_source_file = b.path("src/project_replace_preview_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    replace_preview_module.addIncludePath(pcre2_dep.?.path("src"));
+    replace_preview_module.linkLibrary(pcre2_lib.?);
+    const replace_preview_tests = addProjectTest(b, .{ .root_module = replace_preview_module, .filters = &.{".test.project replace preview"} });
+    const run_replace_preview = b.addRunArtifact(replace_preview_tests);
+    run_replace_preview.addArg("--maru-expect-tests=5");
+    const replace_preview_step = b.step("test-editor-project-replace-preview", "Run immutable replacement preview judges");
+    replace_preview_step.dependOn(&run_replace_preview.step);
+    test_step.dependOn(&run_replace_preview.step);
     // 심볼 목록의 수명과 확정 대상을 실제 편집기에서 검사한다. 전체 test-editor에도 포함된다.
     const symbol_picker_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
@@ -5361,6 +5370,14 @@ pub fn build(b: *std.Build) void {
     run_search_owner_tests.step.dependOn(&install_fake_lsp.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_search_owner_tests.step.dependOn(&ripgrep_prepare.step);
     b.step("test-editor-project-search-owner", "Run AppSession search snapshot and invalidation judges").dependOn(&run_search_owner_tests.step);
+    const replace_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPV"} });
+    const run_replace_host = b.addRunArtifact(replace_host_tests);
+    run_replace_host.setCwd(b.path("."));
+    run_replace_host.addArg("--maru-expect-tests=7");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_replace_host.step.dependOn(&ripgrep_prepare.step);
+    replace_preview_step.dependOn(&run_replace_host.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_replace_host.step);
+
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_search_owner_tests.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));

@@ -8,6 +8,20 @@ pub fn outstandingWorkers() usize {
 }
 const Sha = std.crypto.hash.sha2.Sha256;
 pub fn disk(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity) ![32]u8 {
+    return readInternal(a, io, root_path, path, control, max_bytes, expected, null);
+}
+/// 미리보기 전문도 navigation과 같은 root·regular file·변경 검사를 통과한 경우만 반환한다.
+pub fn read(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity) !struct { bytes: []u8, hash: [32]u8 } {
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(a);
+    const hash = try readInternal(a, io, root_path, path, control, max_bytes, expected, &output);
+    const raw = try output.toOwnedSlice(a);
+    defer a.free(raw);
+    const text = if (std.mem.startsWith(u8, raw, maru.session.editor.document.utf8_bom)) raw[3..] else raw;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.NotUtf8;
+    return .{ .bytes = try a.dupe(u8, text), .hash = hash };
+}
+fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity, output: ?*std.ArrayList(u8)) ![32]u8 {
     var root = try process.openRoot(a, io, root_path);
     defer root.deinit(a, io);
     const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
@@ -37,6 +51,7 @@ pub fn disk(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []con
         if (n == 0) break;
         const count: usize = @intCast(n);
         if (count > max_bytes -| size) return error.TooLarge;
+        if (output) |bytes| try bytes.appendSlice(a, buffer[0..count]);
         var consumed: usize = 0;
         if (!prefix_hashed) {
             const take = @min(prefix.len - prefix_len, count);

@@ -23,9 +23,28 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
     if (content.w == 0 or content.h == 0 or width == 0) return null;
     const state = &self.editor_search;
     const m = search_dock.metrics(self);
-    const window = state.result.model.window(m.row, search_dock.resultRect(self).h, state.scroll.offset_y_px);
-    const rows = try arena.alloc(component.types.Row, window.items.len);
-    for (rows, window.items, 0..) |*row, visible, index| switch (visible) {
+    const preview = &state.preview;
+    const previewing = preview.active();
+    const preview_count = if (preview.plan) |plan| plan.rows.items.len else 0;
+    const preview_max: u32 = @intCast(@min(@as(u64, preview_count) * m.row, std.math.maxInt(u32)));
+    const viewport = search_dock.resultRect(self).h;
+    const offset = @min(state.scroll.offset_y_px, preview_max -| viewport);
+    const first = @min(@as(usize, offset / m.row), preview_count);
+    const window_end = @min(first + @as(usize, (viewport +| offset % m.row +| m.row -| 1) / m.row), preview_count);
+    const window = if (!previewing) state.result.model.window(m.row, viewport, state.scroll.offset_y_px) else maru.session.editor.search.results.Window{ .items = &.{}, .first = first, .shift = offset % m.row, .offset = offset, .content_height = preview_max, .max_offset = preview_max -| viewport };
+    const rows = try arena.alloc(component.types.Row, if (previewing) window_end - first else window.items.len);
+    if (previewing) {
+        if (preview.plan) |plan| for (rows, plan.rows.items[first..window_end], 0..) |*row, line, index| {
+            var excerpt_end = @min(line.text.len, line.context_start +| search_dock.budget.preview_bytes);
+            while (excerpt_end < line.text.len and excerpt_end > line.context_start and line.text[excerpt_end] & 0xc0 == 0x80) excerpt_end -= 1;
+            const text = try arena.dupe(u8, line.text[line.context_start..excerpt_end]);
+            for (text) |*byte| if (byte.* < 0x20) {
+                byte.* = ' ';
+            };
+            row.* = .{ .label = try std.fmt.allocPrint(arena, "{s} {d}: {s}{s}{s}", .{ if (line.kind == .added) "+" else if (line.kind == .removed) "-" else " ", line.line, if (line.context_start > 0) "…" else "", text, if (excerpt_end < line.text.len) "…" else "" }), .index = first + index, .enabled = false, .kind = if (line.kind == .added) .added else if (line.kind == .removed) .removed else .normal };
+        };
+    }
+    if (!previewing) for (rows, window.items, 0..) |*row, visible, index| switch (visible) {
         .file => |group_index| {
             const group = state.result.model.groups.items[group_index];
             const path = try arena.dupe(u8, group.path);
@@ -38,17 +57,17 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .hit => |hit| {
             const match = state.result.model.rows.items[hit.row].match;
             const span = match.ranges[hit.range];
-            const preview = try arena.dupe(u8, match.text);
-            for (preview) |*byte| if (byte.* == '\n' or byte.* == '\r' or byte.* == '\t') {
+            const snippet = try arena.dupe(u8, match.text);
+            for (snippet) |*byte| if (byte.* == '\n' or byte.* == '\r' or byte.* == '\t') {
                 byte.* = ' ';
             };
-            row.* = .{ .label = try std.fmt.allocPrint(arena, "  {d}: {s}", .{ span.start.line + 1, preview }), .index = window.first + index };
+            row.* = .{ .label = try std.fmt.allocPrint(arena, "  {d}: {s}", .{ span.start.line + 1, snippet }), .index = window.first + index };
         },
     };
-    var fields: [3][]const u8 = undefined;
+    var fields: [4][]const u8 = undefined;
     const cols = (width -| m.inset * 2) / @max(self.cell_width_px, 1);
-    var carets: [3]?f32 = .{ null, null, null };
-    var selections: @TypeOf(@as(component.types.Props, undefined).selections) = .{ null, null, null };
+    var carets: [4]?f32 = .{ null, null, null, null };
+    var selections: [4]?component.types.Selection = .{ null, null, null, null };
     for (&fields, &state.fields, 0..) |*text, *field, index| {
         const display = try search_dock.makeDisplay(arena, field, "", cols);
         text.* = display.text;
@@ -65,7 +84,12 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         if (index != 0) try scopes.appendSlice(arena, " | ");
         try scopes.appendSlice(arena, try std.fmt.allocPrint(arena, "[{d}] {s}", .{ index + 1, self.file_tree.rootAt(index).? }));
     }
-    const status = if (search_dock.remote(self)) i18n.t(.project_search_remote) else if (!search_dock.localRoots(self)) i18n.t(.project_search_no_root) else if (state.nav != null) i18n.t(.project_search_running) else switch (state.result.phase) {
+    const status = if (previewing) switch (preview.phase) {
+        .ready => i18n.t(.project_replace_preview),
+        .conflict => i18n.t(.project_replace_conflict),
+        .failed => i18n.t(.project_replace_failed),
+        else => i18n.t(.project_search_running),
+    } else if (search_dock.remote(self)) i18n.t(.project_search_remote) else if (!search_dock.localRoots(self)) i18n.t(.project_search_no_root) else if (state.nav != null) i18n.t(.project_search_running) else switch (state.result.phase) {
         .idle => i18n.t(.project_search_idle),
         .composing, .waiting => i18n.t(.project_search_waiting),
         .running => i18n.t(.project_search_running),
@@ -74,20 +98,28 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .partial => i18n.t(.project_search_partial),
         .failed => i18n.t(.project_search_failed),
     };
-    const count = state.result.model.matches;
+    const count = if (previewing) (if (preview.plan) |plan| plan.replacements else 0) else state.result.model.matches;
     const props: component.types.Props = .{
         .viewport = .{ .width = @floatFromInt(width), .height = @floatFromInt(content.h) },
         .scale = search_dock.scaleMilli(self),
         .generation = state.result.generation,
-        .fields = fields,
-        .carets = carets,
-        .selections = selections,
+        .fields = fields[0..3].*,
+        .replacement = fields[3],
+        .replacement_label = i18n.t(.project_replace_text),
+        .replacement_caret = carets[3],
+        .replacement_selection = selections[3],
+        .replacing = state.replacing,
+        .previewing = previewing,
+        .replace_label = i18n.t(.project_replace_toggle),
+        .back_label = i18n.t(.project_replace_back),
+        .carets = carets[0..3].*,
+        .selections = selections[0..3].*,
         .field_labels = .{ i18n.t(.project_search_query), i18n.t(.project_search_include), i18n.t(.project_search_exclude) },
         .focused = state.focused,
         .options = state.options,
         .option_labels = .{ i18n.t(.project_search_case), i18n.t(.project_search_word), i18n.t(.project_search_regex), i18n.t(.project_search_filters), i18n.t(.project_search_run), i18n.t(.project_search_cancel) },
-        .status = if (state.result.phase == .complete and state.nav == null) try std.fmt.allocPrint(arena, "{d} {s} · {d} {s}", .{ count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }) else try std.fmt.allocPrint(arena, "{s} · {d} {s} · {d} {s}", .{ status, count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }),
-        .scopes = scopes.items,
+        .status = if (!previewing and state.result.phase == .complete and state.nav == null) try std.fmt.allocPrint(arena, "{d} {s} · {d} {s}", .{ count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }) else try std.fmt.allocPrint(arena, "{s} · {d} {s} · {d} {s}", .{ status, count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }),
+        .scopes = if (previewing) preview.title else scopes.items,
         .expanded = state.expanded,
         .running = state.result.phase == .running or state.result.phase == .waiting or state.nav != null,
         .can_search = search_dock.canSearch(self),

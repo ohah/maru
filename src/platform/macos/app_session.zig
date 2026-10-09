@@ -24223,6 +24223,7 @@ pub const AppSession = struct {
     /// **새 backend 를 세션에 달면 여기에 한 줄 더한다.** 빠뜨리면 빠른 기계에서는 아무 일도 안 일어나고
     /// 느린 CI 에서만, 그것도 **엉뚱한 판정자 이름으로** 터진다.
     fn quietDetachedWorkersForTest(self: *AppSession) void {
+        @import("app_session/editor/search/preview.zig").quietForTest(self);
         // verify worker도 문서 snapshot 참조를 놓은 뒤에만 테스트 allocator를 결산한다.
         if (self.editor_search.nav) |*nav| {
             nav.cancel();

@@ -1,7 +1,7 @@
 //! 실제 번들 helper→argv→JSON/분할 parser를 실행하는 개발용 제품 프로토콜 판정 경로다.
 //! run의 출력 수집 한도는 이 도구의 한도이며 앱 worker/취소/결과 예산을 대신하지 않는다.
 const std = @import("std");
-const search = @import("project_search");
+const search = @import("project_search").search;
 pub fn main(init: std.process.Init) !void {
     const a = init.gpa;
     const argv = try init.minimal.args.toSlice(a);

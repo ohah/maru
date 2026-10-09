@@ -359,7 +359,7 @@ CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길�
 
 앱 도크 뷰·키/IME·worker 수신·파일 이동을 연결했다. 앱 RSS 실측과 byte 예산, 디스크 클릭 재검증,
 실제 AppKit·Metal·두벌식 HID 검증의 범위는 [도크 구현·검증](editor-project-search-dock.md)이 소유한다.
-S3/S4 바꾸기 기능이나 전체 파일시스템 호환성까지 완료한 것으로 해석하지 않는다.
+이 검색 도크 증거를 S3/S4 바꾸기나 전체 파일시스템 호환성의 증거로 해석하지 않는다. S3의 별도 증거는 [미리보기 계획](editor-project-replace-preview.md)을 따른다.
 
 ## 구현 순서와 완료 조건
 
@@ -369,7 +369,7 @@ S3/S4 바꾸기 기능이나 전체 파일시스템 호환성까지 완료한 �
 | S1a | rg 번들·argv·JSON 기반 | #4196 메인 머지 완료. 공식 양 아키텍처·해시·라이선스·서명과 실제 helper/parser fixture 검증 |
 | S1b | 디스크 rg + 열린 모델·경로 선정·worker | 디스크 helper 취소와 열린 모델 검색·출처/좌표 검증, 불변 사본 소유권·기본 옵션 비용, root별 glob·VCS root 거부·FIFO 교체, helper 수명·부분 실패·제외 후보/ignore 변경·감시 overflow 검증 |
 | S2 | 검색 도크·열린 문서·클릭 이동 | 우측/하단·좁은 폭·배율·스크롤·공유/독립 문서·0건 덮어쓰기·IME Enter·root 변경·낡은 클릭·실제 여러 파일 이동을 제품 앱에서 검증. Metal PNG를 PR 본문에 첨부 |
-| S3 | 바꾸기 미리보기 | 선택한 파일/일치별 전후 diff. 표시 revision과 원본 bytes를 고정하고 미리보기 뒤 변경은 충돌로 표시 |
+| S3 | [바꾸기 미리보기](editor-project-replace-preview.md) | 파일/일치 선택의 읽기 전용 diff, 불변 전문·revision과 원문 해시 검증, 입력/원문 변경 시 충돌. 검증 입구와 남은 경계는 개별 계획을 따른다 |
 | S4 | 선택 적용 | 열린 문서는 Undo와 IME, 디스크는 외부 변경·저장 실패·권한·원자 저장을 검증. 여러 파일 실패/부분 성공·재시도·되돌리기 정책을 별도 승인한 뒤 연결 |
 
 S1b 백엔드의 구현·실행 증거와 실제 앱 연결의 남은 gate는 [worker와 불변 문서](editor-project-search-worker.md)에 둔다. [AppSession owner 연결](editor-project-search-owner.md)은 현재 창의 지정된 root에 대한 준비·무효화·감시 확인·worker 수명 API를 연결한다. [여러 root 요청](editor-project-search-roots.md)은 후보 합집합·전체 사본/결과 예산을 연결한다. 제품 화면/앱 실측의 남은 gate를 유지하며, 프로브의 통과를 S1b 전체 완료로 표시하지 않는다.
@@ -377,8 +377,9 @@ S1b 백엔드의 구현·실행 증거와 실제 앱 연결의 남은 gate는 [w
 S1/S2는 바꾸기를 실행하지 않는다. S4도 여러 파일 전체의 원자적 성공이나 crash 이후 Undo 보존을 약속하지 않는다.
 최종 저장은 기존 파일 저장/복구 계약을 재사용하되, 이미 구현된 `WorkspaceEdit`의 존재만으로 이 gate를 닫지 않는다.
 
-현재 **제품 검색·도크·사용자 취소·미저장 덮어쓰기·실제 IME·앱 전체 RSS·바꾸기는 미검증**이다.
-위 CLI 프로브 통과를 그 기능의 완료로 표시하지 않는다.
+제품 검색·도크·취소·미저장 덮어쓰기·두벌식 HID·앱 RSS의 표본은 S2 문서를 따른다.
+S3 읽기 전용 미리보기는 [별도 구현·검증](editor-project-replace-preview.md)을 따른다. S4 실제 적용은 미구현이다.
+CLI 프로브 통과를 전체 파일시스템·OS 입력기·감시 경계의 완료로 표시하지 않는다.
 
 
 ## 후속 검색 규칙 개선 — Unicode 평문 검색

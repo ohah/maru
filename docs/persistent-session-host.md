@@ -3484,11 +3484,14 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    finish를 보내지 않고 그 요청에 맡긴다 — 셸 셋에 「종료 및 세션 끝내기」를 걸면 host가 셸을 끝내는 사이 tick이 finish를 보내 exit
    86이었다(2026-10-09 실측 4/4). 「종료 및 세션 끝내기」(`prepareAppQuitEndAll`)의 target은 pristine runtime이고, 셸이 끝나 finish로
    ready_remove에 이른 runtime은 target이 아니다(그 Term의 창 teardown이 같은 finish와 `remove`로 거둔다 — 전에는 그런 runtime 하나만
-   있어도 거부돼 86). 그 밖의 non-pristine(finish가 아직 settling, 다른 요청이 봉인)은 지금처럼 거부한다. 모든 target을 끝내 종료
-   승인을 게시한 뒤(`PendingAppQuitShutdown.complete`)에는 앱이 끝날 때까지 tick이 더 진행하지도 Term을 drain하지도 않는다 — 승인 뒤
-   앱이 끝나기 전에 도는 tick이 target 수와 같은 ordinal로 진행해 86이었다(셸 셋에서 3/10). **남은 것(기존 결함)**: finish가 아직
-   settling인 runtime이 있을 때의 「종료 및 세션 끝내기」. closeAndDetach가 `event_pending`인 Term에 끝이 오면 tick은 이제 finish를
-   보내지 않지만, 그 닫기를 누가 마저 하는지는 그대로다. finish가 끝나기 전에 창 teardown이 오면 deinit pass 1의, 사용자가 그 탭·pane·Term을
+   있어도 거부돼 86). 끝난 runtime만 있으면 종료 deadline도 세우지 않고 0이다. 그 밖의 non-pristine(finish가 아직 settling, 다른
+   요청이 봉인)은 지금처럼 거부한다. 모든 target을 끝내 종료 승인을 게시한 뒤(`PendingAppQuitShutdown.complete`)에는 더 진행하지
+   않는다 — 승인 뒤 앱이 끝나기 전에 도는 tick이 target 수와 같은 ordinal로 진행해 86이었다(셸 셋에서 3/10). 그 종료가 진행 중인
+   동안(`app_quit_end_all`)은 그 창의 tick이 Term을 drain하지도 않고, Swift가 저장 안 한 파일로 종료를 취소하면(`cancelAcceptedAppQuit`)
+   다시 돈다. **남은 것(기존 결함)**: finish가 아직 settling인 runtime이 있을 때의 「종료 및 세션 끝내기」. 승인 뒤 취소된 창에서는
+   다시 「종료 및 세션 끝내기」를 고를 수 없고(진행 기록이 남는다) backend의 end-all 상태도 남는다. closeAndDetach가
+   `event_pending`인 Term(에이전트 행 ✕ 등 재시도 주체가 없는 닫기)에 끝이 오면 tick은 이제 finish를 보내지 않지만 그 Term은
+   거둬지지 않아 창이 저절로 닫히지 않고, 그 창을 닫으면 close graph의 예약이 거부해 86이다(같은 ✕를 다시 누르면 회복된다). finish가 끝나기 전에 창 teardown이 오면 deinit pass 1의, 사용자가 그 탭·pane·Term을
    닫으면(`closeTab`·`closeActivePane`·`closeActiveTerm` → `destroyTerm`) destroy의 panic이다(전에는 둘 다 86).
 
    heap-pin된 `RemoteRuntime.CloseAuthority`의 불변 identity seal tuple은

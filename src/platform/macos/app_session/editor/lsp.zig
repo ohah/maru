@@ -1340,6 +1340,16 @@ pub fn shellEnvironmentOverride() ?bool {
     return tool_env.enabledOverride();
 }
 
+/// 앱 전역 환경 제외 목록(설정 `lsp.environment-exclude` — 계획 WT5b-1). 세팅 화면·설정 다시 읽기가 부른다(스위치와 같은 자리).
+pub fn setEnvironmentExclude(text: []const u8) void {
+    tool_env.setExcluded(text);
+}
+
+/// 앱 전역 제외 목록의 지금 값 — 아직 아무도 정하지 않았으면 `null`(세팅 화면의 미러 되맞춤).
+pub fn environmentExcludeOverride() ?[]const u8 {
+    return tool_env.excludedOverride();
+}
+
 /// 팔레트 「Language Server: Reload Shell Environment」 — 사용자 셸 환경을 다시 읽는다(셸 설정을 고친 뒤). 떠 있는 서버는 다시 띄울 때
 /// 새 환경을 쓴다.
 pub fn reloadShellEnvironment(self: *AppSession) void {
@@ -1691,6 +1701,8 @@ fn gateTrust(self: *AppSession, c: *Client) void {
     }
     // 사용자 셸 환경을 담는 중이면 「없음」을 판정하지 않는다(계획 WT3b) — 담으면 다음 gate 가 그 환경으로 찾는다. 처음이면 여기서 시작한다
     // (서버가 필요한 문서가 처음 생긴 순간 — 셸을 안 띄우는 경우는 그 자리에서 정해져 같은 gate 가 바로 이어 간다).
+    // 제외 목록은 띄우기 전에 정한다 — 아직 아무도 정하지 않았으면 이 창의 설정으로(다시 읽기 명령이 먼저 담았어도; 계획 WT5b-1).
+    tool_env.initExcluded(self.loaded_config.config.lsp.environment_exclude);
     if (!tool_env.settled()) {
         tool_env.tick(self.loaded_config.config.lsp.shell_environment);
         if (!tool_env.settled()) {

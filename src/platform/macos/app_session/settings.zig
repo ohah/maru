@@ -807,9 +807,9 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
                 self.metal_dirty = true;
             } else if (std.mem.eql(u8, tkey, "window.background-image")) {
                 self.file_pick_pending = true;
-            } else {
+            } else if (self.chrome_host.settings.editFits(cf.texts[ti].value)) {
                 self.chrome_host.settings.enterEdit(cf.texts[ti].value);
-            }
+            } else self.metal_dirty = true; // 편집 칸보다 길다 — 컴포넌트가 알렸다(들이면 잘린 채 저장된다)
         }
         return;
     }
@@ -1043,6 +1043,15 @@ pub fn resetSelectedTextRow(self: *AppSession, t: config_mod.schema.TextField, d
     if (std.mem.eql(u8, t.key, "shell.args")) {
         self.loaded_config.config.shell.args = &.{}; // 기본값 = 빈 argv(셸 spawn 시점 반영)
         markConfigKeyRemoved(self, "shell.args");
+        self.metal_dirty = true;
+        return;
+    }
+    if (std.mem.eql(u8, t.key, "lsp.environment-exclude")) {
+        // 기본값(빈 목록)으로 — setText 는 빈 값을 거부하므로 필드를 직접. 앱 전역을 재적용 **전에**(미러 되맞춤이 옛 전역으로 되돌리지 않게).
+        self.loaded_config.config.lsp.environment_exclude = "";
+        editor_ops.lsp_client.setEnvironmentExclude("");
+        reapplyLoadedConfig(self);
+        markConfigKeyRemoved(self, "lsp.environment-exclude");
         self.metal_dirty = true;
         return;
     }
@@ -2319,6 +2328,7 @@ pub fn reloadConfig(self: *AppSession) void {
     replaceAppKeepAlivePolicyFromReload(self.loaded_config);
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 파일이 정본
     editor_ops.lsp_client.setShellEnvironmentEnabled(self.loaded_config.config.lsp.shell_environment); // 파일이 정본(앱 전역)
+    editor_ops.lsp_client.setEnvironmentExclude(self.loaded_config.config.lsp.environment_exclude); // 파일이 정본(앱 전역 — 사본을 담는다)
     // 옛 arena를 버렸으니 follow-system 복귀 스냅샷(옛 arena slice)도 비운다(dangling 방지). 아래 applyFollowSystemTheme가
     // 새 파일 테마로 다시 스냅샷·적용한다(F2-9). null 대입은 옛 slice를 deref하지 않아 free 후라도 안전.
     self.theme_pre_follow = null;
@@ -2441,6 +2451,7 @@ pub fn resetAllSettings(self: *AppSession) void {
     self.loaded_config.global_bindings = &.{};
     app_session_mod.setAppQuitAfterLastWindowClosed(self.loaded_config.config.window_quit_after_last_window_closed); // 기본값(앱 전역)
     editor_ops.lsp_client.setShellEnvironmentEnabled(self.loaded_config.config.lsp.shell_environment); // 기본값(앱 전역)
+    editor_ops.lsp_client.setEnvironmentExclude(self.loaded_config.config.lsp.environment_exclude); // 기본값(앱 전역)
     self.theme_pre_follow = null; // 기본값으로 갈았으니 follow-system 복귀 스냅샷(옛 arena slice)도 무효 — 비운다(F2-9 dangling 방지)
     self.follow_applied_dark = null; // 외관 게이트도 리셋(기본값은 follow off라 어차피 무적용)
     self.allow_scrollback_shrink = true; // 전체 리셋 — 사용자가 고른 시점(스크롤백도 기본값으로)
@@ -3302,6 +3313,10 @@ pub fn currentSectionFields(self: *AppSession, arena: std.mem.Allocator) !Settin
     self.loaded_config.config.session.keep_alive_after_quit = app_session_mod.appKeepAlivePolicyValue();
     if (app_session_mod.appQuitAfterLastWindowClosedOverride()) |v| self.loaded_config.config.window_quit_after_last_window_closed = v;
     if (editor_ops.lsp_client.shellEnvironmentOverride()) |v| self.loaded_config.config.lsp.shell_environment = v;
+    // 제외 목록은 문자열이다 — 앱 전역(gpa) 슬라이스를 그대로 대입하면 다른 창이 바꿀 때 풀린 메모리를 빌린다. 다를 때만 창 arena 로.
+    if (editor_ops.lsp_client.environmentExcludeOverride()) |v| if (!std.mem.eql(u8, v, self.loaded_config.config.lsp.environment_exclude)) {
+        if (self.loaded_config.arena.allocator().dupe(u8, v)) |owned| self.loaded_config.config.lsp.environment_exclude = owned else |_| {}
+    };
     const sections = try buildSectionList(self, arena);
     const sel_sec: ?config_mod.Section = if (sections.len > 0)
         sections[@min(self.chrome_host.settings.section, sections.len - 1)].section
@@ -3473,6 +3488,17 @@ pub fn restoreDropdownSnapshot(self: *AppSession) void {
     }
 }
 
+/// 환경 제외 목록 커밋 — 빈 값은 목록을 비운다(파일에서 그 줄을 지운다; setText 는 빈 값을 거부한다). **앱 전역을 재적용 전에** 세운다
+/// (`currentSectionFields` 의 미러 되맞춤이 옛 전역으로 되돌리지 않게 — 스위치 토글과 같은 순서).
+fn setEnvironmentExclude(self: *AppSession, text: []const u8) void {
+    const trimmed = std.mem.trim(u8, text, " \t");
+    const owned = self.loaded_config.arena.allocator().dupe(u8, trimmed) catch return;
+    self.loaded_config.config.lsp.environment_exclude = owned;
+    editor_ops.lsp_client.setEnvironmentExclude(owned);
+    reapplyLoadedConfig(self);
+    if (owned.len == 0) markConfigKeyRemoved(self, "lsp.environment-exclude") else markConfigKeyDirty(self, "lsp.environment-exclude");
+}
+
 /// 인라인 편집 커밋(text 행 Enter) — settings.editText()를 config arena에 dupe해 schema.setText로 적용하고 라이브
 /// 재resolve + write-back 예약. 편집 종료. 라이브/직렬화가 계속 슬라이스를 읽으므로 loaded_config.arena가 소유한다.
 pub fn commitSelectedText(self: *AppSession) void {
@@ -3521,6 +3547,8 @@ pub fn commitSelectedText(self: *AppSession) void {
             self.setShellArgs(editor); // 공백-토큰 분리
         } else if (std.mem.eql(u8, tkey, "workspace.root")) {
             workspace_ops.setWorkspaceRoot(self, editor); // 시작 디렉터리 — loader와 형식 검증 공유
+        } else if (std.mem.eql(u8, tkey, "lsp.environment-exclude")) {
+            setEnvironmentExclude(self, editor); // 빈 값(목록 비우기)도 받는다 — 앱 전역(계획 WT5b-1)
         } else if (std.mem.eql(u8, tkey, "env.")) {
             addEnvVar(self, editor); // 추가 행 — "KEY=VALUE" 파싱
             refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)

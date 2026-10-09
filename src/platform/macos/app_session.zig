@@ -11327,6 +11327,7 @@ pub const AppSession = struct {
             .lsp_revoke_trust => editor_ops.lsp_client.manageCurrent(self, .revoke),
             .lsp_reload_shell_environment => editor_ops.lsp_client.reloadShellEnvironment(self),
             .lsp_show_server_info => editor_ops.lsp_client.showServerInfo(self),
+            .lsp_show_environment_names => editor_ops.trust_ui.openEnvNames(self),
             .lsp_forget_trust => editor_ops.lsp_client.manageCurrent(self, .forget),
             .show_editor_outline => if (!self.tabsBlocked()) dock_ops.openDockTo(self, .outline),
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),
@@ -12591,7 +12592,7 @@ pub const AppSession = struct {
         if (self.dropdownDirectInputSelected()) {
             settings_ops.restoreDropdownSnapshot(self); // 프리뷰로 바뀐 폰트를 원본으로(인메모리), 그 값으로 편집 시작
             self.chrome_host.settings.dropdown.hide();
-            self.chrome_host.settings.enterEdit(self.loaded_config.config.font.family);
+            if (self.chrome_host.settings.editFits(self.loaded_config.config.font.family)) self.chrome_host.settings.enterEdit(self.loaded_config.config.font.family);
             self.dropdown_snapshot_kind = .none;
             self.metal_dirty = true;
             return;

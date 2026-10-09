@@ -136,16 +136,37 @@ fn isProbeExtraKey(entry: []const u8) bool {
 /// 표식·`MARU_ZDOTDIR_PREV`·`MARU_BIN`·`MARU_SSH_INTEGRATION`·`MARU_CONFIG` 등)은 `keep` 이 접두로 뺀다.
 pub const shell_state_keys = [_][]const u8{ "PWD", "OLDPWD", "SHLVL", "_", "ZDOTDIR", "DISABLE_AUTO_UPDATE", "FORCE_HYPERLINK" };
 
-/// 서버에 넘길 항목인가 — 터미널 세션 변수·셸 상태 변수·사용자 제외 목록(`excluded` — 키 이름)을 뺀다. 비밀 이름 패턴으로 빼지
-/// 않는다(계획 WT3 「위생」 — 사용자가 일부러 넣은 값이다). `NODE_OPTIONS`·`PYTHONPATH` 같은 런타임 옵션도 그대로다.
-pub fn keep(entry: []const u8, excluded: []const []const u8) bool {
+/// 서버에 넘길 항목인가(시스템 위생) — 터미널 세션 변수·셸 상태 변수·maru 내부 변수를 뺀다. 비밀 이름 패턴으로 빼지 않는다(계획
+/// WT3 「위생」 — 사용자가 일부러 넣은 값이다). `NODE_OPTIONS`·`PYTHONPATH` 같은 런타임 옵션도 그대로다. 사용자 제외 목록은 여기가
+/// 아니라 서버에 줄 envp 를 만들 때다(`excludedBy` — 계획 WT5b-1).
+pub fn keep(entry: []const u8) bool {
     const k = inherited_env.key(entry) orelse return false;
     if (k.len == 0) return false;
     if (inherited_env.isTerminalSession(entry, false)) return false;
     if (std.mem.startsWith(u8, k, "MARU_")) return false;
     for (shell_state_keys) |name| if (std.mem.eql(u8, k, name)) return false;
-    for (excluded) |name| if (std.mem.eql(u8, k, name)) return false;
     return true;
+}
+
+/// 사용자 제외 목록(설정 `lsp.environment-exclude` — 계획 WT5b-1)이 이 이름을 빼는가. 목록은 쉼표로 가른 이름들이고(앞뒤 공백·빈 항목은
+/// 무시), **이름 끝의 `*` 만** 접두로 본다(`AWS_*` — 비밀 변수는 묶음으로 온다; 그 밖의 글롭은 없다 — 2026-10-09 사용자 결정). `*`
+/// 하나는 모든 이름이다(사용자가 고른 것이다 — 서버는 빈 환경으로 뜬다). 시스템 위생(`keep`)과 달리 걸러 낸 원본은 그대로 두고
+/// 서버에 줄 envp 를 만들 때 적용한다 — 목록 상자가 「제외됨」을 보이고, 목록을 바꿔도 셸을 다시 띄우지 않는다.
+pub fn excludedBy(name: []const u8, list: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, ',');
+    while (it.next()) |raw| {
+        const p = std.mem.trim(u8, raw, " \t");
+        if (p.len == 0) continue;
+        if (p[p.len - 1] == '*') {
+            if (std.mem.startsWith(u8, name, p[0 .. p.len - 1])) return true;
+        } else if (std.mem.eql(u8, name, p)) return true;
+    }
+    return false;
+}
+
+/// 항목(`KEY=VALUE`)의 이름 — 목록 상자·제외 판정이 쓴다. `sanitize` 를 지난 항목은 늘 이름이 있다.
+pub fn entryName(entry: []const u8) []const u8 {
+    return inherited_env.key(entry) orelse entry;
 }
 
 /// PATH 정리 — 절대 경로 항목만(빈 항목 `::` 와 상대 경로는 현재 폴더 — 서버의 cwd 는 저장소다 — 를 뜻하므로 버린다), 중복은 처음
@@ -189,7 +210,7 @@ pub const Resolved = struct {
 /// 다른 프로그램을 띄웠거나 도중에 죽었다), 그 사이는 `env -0` 출력(항목마다 NUL 로 끝난다)이다. **셸에 준 표식 변수가 그 안에
 /// 있어야 한다** — 명령이 `;` 로 이어져 `env -0` 이 실패해도 표식 둘은 찍히므로, 그것 없이는 빈 출력을 「빈 환경」으로 받는다.
 /// 항목은 `sanitize` 가 거른다(대체 경로 — 셸을 못 읽었다·스위치 끔 — 도 같은 함수다).
-pub fn resolve(allocator: std.mem.Allocator, data: []const u8, nonce: []const u8, excluded: []const []const u8) error{ Malformed, OutOfMemory }!Resolved {
+pub fn resolve(allocator: std.mem.Allocator, data: []const u8, nonce: []const u8) error{ Malformed, OutOfMemory }!Resolved {
     if (!isNonce(nonce)) return error.Malformed;
     var begin_buf: [begin_prefix.len + nonce_len]u8 = undefined;
     var end_buf: [end_prefix.len + nonce_len]u8 = undefined;
@@ -208,7 +229,7 @@ pub fn resolve(allocator: std.mem.Allocator, data: []const u8, nonce: []const u8
         try entries.append(allocator, entry);
     }
     if (!saw_probe) return error.Malformed;
-    return sanitize(allocator, entries.items, excluded);
+    return sanitize(allocator, entries.items);
 }
 
 /// 서버에 넘길 환경을 만든다 — 항목은 `keep` 으로 거르고, 같은 키가 두 번이면 처음 것만(서버가 어느 쪽을 볼지 갈리지 않게), PATH 는
@@ -216,7 +237,7 @@ pub fn resolve(allocator: std.mem.Allocator, data: []const u8, nonce: []const u8
 /// PATH 도 「처음 것」이다 — 뒤의 PATH 가 그 자리를 차지하지 않는다. **해석 결과와 대체 경로(앱 환경 — 셸을 못 읽었다·지원 안 하는
 /// 셸·스위치 끔)가 함께 쓴다** — 대체 경로에서도 터미널 세션 변수와 상대 PATH 항목이 서버로 가지 않게. bash 만 펼치는 PATH 의
 /// `~/bin` 같은 항목은 상대 경로로 보고 버린다(한계 — 계획 WT3a).
-pub fn sanitize(allocator: std.mem.Allocator, env: []const []const u8, excluded: []const []const u8) error{OutOfMemory}!Resolved {
+pub fn sanitize(allocator: std.mem.Allocator, env: []const []const u8) error{OutOfMemory}!Resolved {
     var list: std.ArrayList([:0]u8) = .empty;
     errdefer {
         for (list.items) |e| allocator.free(e);
@@ -225,7 +246,7 @@ pub fn sanitize(allocator: std.mem.Allocator, env: []const []const u8, excluded:
     var path_index: ?usize = null;
     var seen_path = false;
     for (env) |entry| {
-        if (!keep(entry, excluded)) continue;
+        if (!keep(entry)) continue;
         const k = inherited_env.key(entry).?;
         if (std.mem.eql(u8, k, "PATH")) {
             if (seen_path) continue;
@@ -339,16 +360,23 @@ test "shell_env: 셸에 줄 환경(터미널에서 띄운 앱 — SHLVL 있음) 
     for (want, out.items) |w, got| try testing.expectEqualStrings(w, got);
 }
 
-test "shell_env: 위생 — 터미널 세션 변수·셸 상태 변수·사용자 제외는 빼고, 런타임 옵션·비밀처럼 보이는 이름·빈 값은 그대로다" {
-    const no_ex = [_][]const u8{};
+test "shell_env: 위생 — 터미널 세션 변수·셸 상태 변수는 빼고, 런타임 옵션·비밀처럼 보이는 이름·빈 값은 그대로다" {
     for ([_][]const u8{ "TERM=xterm", "COLORTERM=truecolor", "TERM_PROGRAM=maru", "TMUX_PANE=%1", "MARU_PANE_ID=1", "PWD=/x", "OLDPWD=/y", "SHLVL=2", "_=/usr/bin/env", "ZDOTDIR=/z", "MARU_ZDOTDIR_PREV=/z", "MARU_BIN=/m", "MARU_SSH_INTEGRATION=1", "MARU_RESOLVING_ENVIRONMENT=1", "DISABLE_AUTO_UPDATE=true", "MARU_CONFIG=/c", "MARU_DEBUG=1", "FORCE_HYPERLINK=1", "=C:=C:\\w", "NOEQ" }) |e|
-        try testing.expect(!keep(e, &no_ex));
+        try testing.expect(!keep(e));
     for ([_][]const u8{ "PATH=/bin", "NODE_OPTIONS=--max-old-space-size=4096", "PYTHONPATH=/p", "GITHUB_TOKEN=x", "AWS_SECRET_ACCESS_KEY=y", "RUSTUP_HOME=/r", "EMPTY=", "TERMINAL_EMULATOR=x", "LC_MARU_PANE=x", "TMPDIR=/t", "SSH_AUTH_SOCK=/s", "__CF_USER_TEXT_ENCODING=0x1F5:0x3:0x33" }) |e|
-        try testing.expect(keep(e, &no_ex));
-    const ex = [_][]const u8{ "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY" };
-    try testing.expect(!keep("GITHUB_TOKEN=x", &ex));
-    try testing.expect(!keep("AWS_SECRET_ACCESS_KEY=y", &ex));
-    try testing.expect(keep("GITHUB_TOKENS=x", &ex)); // 이름이 정확히 같아야 한다
+        try testing.expect(keep(e));
+}
+
+test "LSPX1 환경 제외 목록 — 쉼표로 가른 정확한 이름과 끝 `*` 접두, 공백·빈 항목은 무시, 그 밖의 글롭은 글자 그대로 (계획 workspace-trust WT5b-1)" {
+    const list = " GITHUB_TOKEN , AWS_*,,\tNPM_TOKEN\t, A*B";
+    for ([_][]const u8{ "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_", "NPM_TOKEN" }) |n| try testing.expect(excludedBy(n, list));
+    // 이름이 정확히 같아야 한다(접두는 끝 `*` 일 때만) · 가운데 `*` 는 글롭이 아니다.
+    for ([_][]const u8{ "GITHUB_TOKENS", "XGITHUB_TOKEN", "AWS", "aws_x", "AXB", "A*BC", "PATH", "" }) |n| try testing.expect(!excludedBy(n, list));
+    try testing.expect(excludedBy("A*B", list));
+    try testing.expect(!excludedBy("PATH", ""));
+    try testing.expect(!excludedBy("PATH", " , ,"));
+    try testing.expect(excludedBy("PATH", "*")); // `*` 하나는 모든 이름이다
+    try testing.expectEqualStrings("GITHUB_TOKEN", entryName("GITHUB_TOKEN=a=b"));
 }
 
 test "shell_env: PATH 정리 — 절대 경로만, 빈 항목·상대 경로(현재 폴더)는 버리고 중복은 처음 것만" {
@@ -360,20 +388,20 @@ test "shell_env: PATH 정리 — 절대 경로만, 빈 항목·상대 경로(현
 }
 
 test "shell_env: 결과 읽기 — 표식 둘 사이의 env -0 을 거르고 PATH 를 정리하며 같은 키는 처음 것만; 표식이 없거나 잘렸으면 Malformed" {
-    const ex = [_][]const u8{"SECRET"};
     const data = "MARU_ENV_BEGIN_" ++ nonce_a ++
         "PATH=/opt/homebrew/bin::.:/usr/bin\x00TERM=xterm\x00HOME=/Users/u\x00MULTI=a\nb\x00SECRET=s\x00HOME=/dup\x00SHLVL=2\x00" ++
         "MARU_RESOLVING_ENVIRONMENT=1\x00DISABLE_AUTO_UPDATE=true\x00" ++
         "MARU_ENV_END_" ++ nonce_a;
-    var r = try resolve(testing.allocator, data, nonce_a, &ex);
+    var r = try resolve(testing.allocator, data, nonce_a);
     defer r.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 3), r.entries.len);
+    try testing.expectEqual(@as(usize, 4), r.entries.len); // 사용자 제외는 여기가 아니다 — `SECRET` 도 남는다(envp 를 만들 때 거른다)
     try testing.expectEqualStrings("PATH=/opt/homebrew/bin:/usr/bin", r.entries[0]);
     try testing.expectEqualStrings("HOME=/Users/u", r.entries[1]);
     try testing.expectEqualStrings("MULTI=a\nb", r.entries[2]); // 값 속 개행 — env -0 이라 갈리지 않는다
+    try testing.expectEqualStrings("SECRET=s", r.entries[3]);
     try testing.expectEqualStrings("/opt/homebrew/bin:/usr/bin", r.path.?);
     // 셸에 준 것뿐인 환경도 성공이다(PATH 없음). PATH 가 정리해서 비면 넘기지 않는다 — 빈 PATH 는 현재 폴더(저장소)를 찾는다.
-    var empty = try resolve(testing.allocator, "MARU_ENV_BEGIN_" ++ nonce_a ++ "MARU_RESOLVING_ENVIRONMENT=1\x00PATH=.:bin::\x00" ++ "MARU_ENV_END_" ++ nonce_a, nonce_a, &.{});
+    var empty = try resolve(testing.allocator, "MARU_ENV_BEGIN_" ++ nonce_a ++ "MARU_RESOLVING_ENVIRONMENT=1\x00PATH=.:bin::\x00" ++ "MARU_ENV_END_" ++ nonce_a, nonce_a);
     defer empty.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), empty.entries.len);
     try testing.expect(empty.path == null);
@@ -389,20 +417,20 @@ test "shell_env: 결과 읽기 — 표식 둘 사이의 env -0 을 거르고 PAT
         // 끝 표식 없이 긴 출력 — 마지막 항목(끝 표식 길이와 같다)을 잘라 내도 NUL 로 끝나 그럴듯해 보인다.
         "MARU_ENV_BEGIN_" ++ nonce_a ++ "MARU_RESOLVING_ENVIRONMENT=1\x00A=1\x00" ++ "X=" ++ "y" ** 26 ++ "\x00",
     };
-    for (bad) |b| try testing.expectError(error.Malformed, resolve(testing.allocator, b, nonce_a, &.{}));
-    try testing.expectError(error.Malformed, resolve(testing.allocator, data, "nothex", &.{}));
+    for (bad) |b| try testing.expectError(error.Malformed, resolve(testing.allocator, b, nonce_a));
+    try testing.expectError(error.Malformed, resolve(testing.allocator, data, "nothex"));
 }
 
 test "shell_env: 대체 경로(셸을 못 읽었다·스위치 끔)도 같은 위생 — 앱 환경의 터미널 변수·내부 변수·상대 PATH 항목이 서버로 가지 않고, 첫 PATH 가 정리해서 비면 뒤의 PATH 가 그 자리를 차지하지 않는다" {
     const app = [_][]const u8{ "TERM=xterm-maru", "TMUX=/tmp/x,1,0", "MARU_PANE_ID=4", "PATH=.:node_modules/.bin:/usr/bin::/usr/bin", "HOME=/h", "HOME=/dup" };
-    var r = try sanitize(testing.allocator, &app, &.{});
+    var r = try sanitize(testing.allocator, &app);
     defer r.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), r.entries.len);
     try testing.expectEqualStrings("PATH=/usr/bin", r.entries[0]);
     try testing.expectEqualStrings("HOME=/h", r.entries[1]);
     try testing.expectEqualStrings("/usr/bin", r.path.?);
     const two = [_][]const u8{ "PATH=.:", "PATH=/x/bin", "LANG=C" };
-    var r2 = try sanitize(testing.allocator, &two, &.{});
+    var r2 = try sanitize(testing.allocator, &two);
     defer r2.deinit(testing.allocator);
     try testing.expect(r2.path == null);
     try testing.expectEqual(@as(usize, 1), r2.entries.len);
@@ -413,7 +441,7 @@ test "shell_env: 결과 읽기는 메모리가 모자라도 새지 않는다" {
     const data = "MARU_ENV_BEGIN_" ++ nonce_a ++ "PATH=/a::/b\x00HOME=/h\x00LANG=x\x00MARU_RESOLVING_ENVIRONMENT=1\x00" ++ "MARU_ENV_END_" ++ nonce_a;
     try testing.checkAllAllocationFailures(testing.allocator, struct {
         fn f(a: std.mem.Allocator) !void {
-            var r = try resolve(a, data, nonce_a, &.{});
+            var r = try resolve(a, data, nonce_a);
             r.deinit(a);
         }
     }.f, .{});

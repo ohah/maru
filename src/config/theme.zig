@@ -1677,10 +1677,14 @@ pub const LspConfig = struct {
     /// 서버를 찾고 띄울 환경으로 **사용자 셸 환경**을 읽을지(로그인 셸 설정 — `.zprofile`·`.zshrc` — 을 한 번 실행한다; 계획
     /// workspace-trust WT3). **기본 true**. 끄면 셸을 띄우지 않고 앱 환경 + 통상 설치 위치로 찾는다.
     shell_environment: bool = true,
+    /// 서버에 넘기지 않을 환경 변수 이름 — 쉼표로 가르고, 이름 끝의 `*` 는 접두다(`AWS_*, GITHUB_TOKEN`; 계획 workspace-trust WT5b-1).
+    /// **기본 빈 값**(아무것도 빼지 않는다 — 시스템 위생만). 앱 전역 하나다(셸 환경 해석기가 하나) — 이 값은 창마다의 미러다.
+    environment_exclude: []const u8 = "",
 
-    pub const schema = .{ // 키: lsp.enabled · lsp.shell-environment
+    pub const schema = .{ // 키: lsp.enabled · lsp.shell-environment · lsp.environment-exclude
         .enabled = Meta{ .doc = .cfg_lsp_enabled, .widget = .toggle, .section = .editor },
         .shell_environment = Meta{ .doc = .cfg_lsp_shell_environment, .widget = .toggle, .section = .editor },
+        .environment_exclude = Meta{ .doc = .cfg_lsp_environment_exclude, .widget = .text, .section = .editor },
     };
 };
 

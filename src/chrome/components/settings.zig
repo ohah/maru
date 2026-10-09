@@ -68,8 +68,9 @@ pub const FieldRow = struct {
 /// 순수 상태 — 열림 + 포커스된 행 + color 피커 드래그 상태. 행 데이터(rows)는 State에 두지 않고 매 프레임 platform이
 /// 주입한다(config 단일 출처 — palette 선례). 값도 config가 소유하므로 handle은 의도(toggle/dropdown/text_commit 등)만
 /// 내고 실제 변경+write-back은 platform이 한다(숫자는 입력 박스 편집→text_commit, enum/폰트는 드롭다운 팝업).
-/// 인라인 편집 버퍼 용량(바이트) — 폰트 패밀리·#RRGGBB는 짧아 고정 버퍼면 충분(별도 allocator 불요).
-const edit_cap: usize = 128;
+/// 인라인 편집 버퍼 용량(바이트) — 폰트 패밀리·#RRGGBB는 짧아 고정 버퍼면 충분(별도 allocator 불요). 이보다 긴 값은 편집에 들이지
+/// 않는다(platform 이 알린다 — 담으면 잘린 채 저장된다).
+pub const edit_cap: usize = 128;
 /// 검색 쿼리 버퍼 용량(바이트) — 짧은 키워드면 충분(고정 버퍼).
 const search_cap: usize = 64;
 /// 검색 IME 조합(preedit) 버퍼 용량(바이트) — 조합 중 한글 몇 자면 충분(고정 버퍼).
@@ -335,10 +336,22 @@ pub const State = struct {
     /// 인라인 편집 시작(platform이 text 행 활성 시 호출 — 현재값으로 시드). 버퍼 초과는 잘라 담되, UTF-8 코드포인트
     /// 중간에서 자르지 않게 경계로 back-up한다(리뷰 #823 — 잘린 멀티바이트는 무효 UTF-8 → view/backspace 오작동).
     pub fn enterEdit(self: *State, value: []const u8) void {
+        self.clearMessage(); // 새 편집 — 지난 안내(「편집 칸보다 깁니다」 등)는 이 행의 말이 아니다
         const n = width.truncateToBoundary(value, edit_cap); // 버퍼 초과는 UTF-8 경계로 자름(단일 출처 — #823)
         @memcpy(self.edit_buf[0..n], value[0..n]);
         self.edit_len = n;
         self.editing = true;
+    }
+    /// 값을 편집에 들일 수 있나 — 편집 칸보다 길면 들이지 않고 알린다(들이면 잘린 채 저장된다 — Enter 만 눌러도; 계획 workspace-trust
+    /// WT5b-1 적대적 검증 — 환경 제외 목록이면 뒤쪽 이름이 빠져 그 변수가 서버로 간다). platform 이 편집을 열기 전에 부른다.
+    pub fn editFits(self: *State, value: []const u8) bool {
+        if (value.len <= edit_cap) return true;
+        self.setTooLongMessage();
+        return false;
+    }
+    fn setTooLongMessage(self: *State) void {
+        var buf: [256]u8 = undefined;
+        self.setMessage(i18n.format(&buf, i18n.t(.set_text_too_long), &.{.{ .d = edit_cap }}));
     }
     pub fn cancelEdit(self: *State) void {
         self.editing = false;
@@ -350,7 +363,7 @@ pub const State = struct {
     pub fn appendEditCp(self: *State, cp: u21) void {
         var tmp: [4]u8 = undefined;
         const n = std.unicode.utf8Encode(cp, &tmp) catch return;
-        if (self.edit_len + n > edit_cap) return;
+        if (self.edit_len + n > edit_cap) return self.setTooLongMessage(); // 넘친 입력은 버리고 알린다(조용히 끊지 않는다)
         @memcpy(self.edit_buf[self.edit_len..][0..n], tmp[0..n]);
         self.edit_len += n;
     }
@@ -819,15 +832,16 @@ pub fn view(
     if (state.message().len > 0) {
         const banner = try std.fmt.allocPrint(arena, "⚠ {s}", .{state.message()});
         const shown = try overlay_input.truncateToCols(arena, banner, box.inner_cols);
-        try modal_box.text(box, box.inner_x, hint_row, shown, .accent_bar, arena, out);
-        return; // 배너가 힌트 줄을 대체(같은 행)
+        try modal_box.text(box, box.inner_x, hint_row, shown, .accent_bar, arena, out); // 배너가 힌트 줄을 대체(같은 행)
+    } else {
+        // 내비 힌트 — 제목 바로 아래 중앙에 한 줄(muted). 방향키 영역 모델: ← 네비 · → 설정으로 포커스, ↑↓로 그 영역 이동.
+        const nav_hint = i18n.t(.set_nav_hint);
+        const hint_w = overlay_input.displayCols(nav_hint);
+        const hx = box.inner_x + @as(i32, @intCast((box.inner_cols -| hint_w) / 2 * box.cw)); // 중앙 정렬
+        try modal_box.text(box, hx, hint_row, nav_hint, .muted_fg, arena, out);
     }
-
-    // 내비 힌트 — 제목 바로 아래 중앙에 한 줄(muted). 방향키 영역 모델: ← 네비 · → 설정으로 포커스, ↑↓로 그 영역 이동.
-    const nav_hint = i18n.t(.set_nav_hint);
-    const hint_w = overlay_input.displayCols(nav_hint);
-    const hx = box.inner_x + @as(i32, @intCast((box.inner_cols -| hint_w) / 2 * box.cw)); // 중앙 정렬
-    try modal_box.text(box, hx, hint_row, nav_hint, .muted_fg, arena, out);
+    // (배너가 떠 있어도 아래 드롭다운 팝업은 그린다 — 예전에는 배너 갈래가 여기서 돌아가 팝업이 안 보인 채 ↑↓ 가 값을 바꿨다;
+    // 계획 workspace-trust WT5b-1 적대적 검증.)
 
     // enum/font 드롭다운 팝업(열려 있으면) — 폼 위 최상위 오버레이. 앵커=선택 행의 축소 control rect(그 아래에 목록이
     // 뜬다). 항목 라벨은 platform이 dropdown_items로 주입(빈 슬라이스면 무동작). 선택 행이 보이는 창 안일 때만.
@@ -1802,6 +1816,45 @@ test "settings text edit: enterEdit 시드 + char/backspace 편집 + Enter=text_
     s.enterEdit(&long);
     try std.testing.expectEqual(@as(usize, 127), s.editText().len); // 쪼개진 '한'은 통째로 드롭
     try std.testing.expect(std.unicode.utf8ValidateSlice(s.editText())); // 유효 UTF-8
+    // 편집 칸보다 긴 값은 들이지 않고 알리며(`editFits`), 치다가 넘친 글자는 버리고 알린다 — 잘린 채 저장되지 않게(계획 workspace-trust
+    // WT5b-1). 상한은 문구에 채운다.
+    s.clearMessage();
+    try std.testing.expect(s.editFits(long[0..128]));
+    try std.testing.expectEqual(@as(usize, 0), s.message().len);
+    try std.testing.expect(!s.editFits(&long));
+    try std.testing.expect(std.mem.indexOf(u8, s.message(), "128") != null);
+    s.clearMessage();
+    s.enterEdit(long[0..127]);
+    s.appendEditCp('b'); // 128 바이트 — 들어간다
+    try std.testing.expectEqual(@as(usize, 0), s.message().len);
+    s.appendEditCp('c'); // 넘친다 — 버리고 알린다
+    try std.testing.expectEqual(@as(usize, 128), s.editText().len);
+    try std.testing.expect(std.mem.indexOf(u8, s.message(), "128") != null);
+}
+
+test "settings 안내 배너가 떠 있어도 드롭다운 팝업은 그리고, 새 편집은 지난 안내를 지운다 (계획 workspace-trust WT5b-1)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tk = testTokens();
+    const rows = [_]FieldRow{
+        .{ .label = "Family", .kind = .{ .text = "JetBrains Mono" } },
+        .{ .label = "Blink", .kind = .{ .toggle = true } },
+    };
+    var s = State{};
+    s.show();
+    s.setFieldCount(rows.len);
+    s.selected = 0;
+    s.setMessage("banner");
+    var closed_ops: std.ArrayList(draw.Op) = .empty;
+    try view(&s, &test_sections, &rows, no_items, test_props, &tk, arena, &closed_ops);
+    s.dropdown.show(2, 0);
+    var open_ops: std.ArrayList(draw.Op) = .empty;
+    try view(&s, &test_sections, &rows, &.{ "Alpha", "Beta" }, test_props, &tk, arena, &open_ops);
+    try std.testing.expect(open_ops.items.len > closed_ops.items.len); // 배너가 있어도 팝업이 그려졌다
+    s.dropdown.hide();
+    s.enterEdit("x");
+    try std.testing.expectEqual(@as(usize, 0), s.message().len);
 }
 
 test "settings 좁은 창 → 렌더 안 함(겹침 회피), 편집 중 다른 곳 클릭 → 편집 종료 (리뷰 #823)" {

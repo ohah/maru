@@ -16271,7 +16271,7 @@ test "LSPB31 「꺼짐」을 누르면 root 의 키도 다시 푼다 — 심링�
 
 fn trustRowIndex(session: *AppSession, path_suffix: []const u8) ?usize {
     const st = &session.editor_trust_list;
-    for (st.shown.items, 0..) |i, row| if (std.mem.endsWith(u8, st.items.items[i].path, path_suffix)) return row;
+    for (st.shown.items, 0..) |i, row| if (std.mem.endsWith(u8, st.items.items[i].text, path_suffix)) return row;
     return null;
 }
 
@@ -16577,8 +16577,8 @@ test "LSPB35 신뢰 목록 — 넘치면 휠·막대로 굴리고 굴린 뒤 클
     // ⑶ 굴린 뒤 첫 보이는 행을 누르면 그 행(맨 위가 아니라)의 저장소를 고른다.
     const first_visible = list.shown.items[rolled / ch];
     var want_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const want = want_buf[0..list.items.items[first_visible].path.len];
-    @memcpy(want, list.items.items[first_visible].path);
+    const want = want_buf[0..list.items.items[first_visible].text.len];
+    @memcpy(want, list.items.items[first_visible].text);
     fx.session.mouse(1, row_x, @as(f64, @floatFromInt(layout.y + @as(i32, @intCast(ch)))) + 1, 0, 0);
     try testing.expect(fx.session.pending_confirm == .lsp_trust_manage);
     try testing.expectEqualStrings(want, fx.session.editor_lsp.manage_key.?.path);
@@ -16621,7 +16621,7 @@ test "LSPB35 신뢰 목록 — 넘치면 휠·막대로 굴리고 굴린 뒤 클
     fx.session.dispatchAppAction(.lsp_trusted_repositories);
     fx.session.chrome_host.trust_picker.selected = 0;
     const picked = list.items.items[list.shown.items[0]];
-    const picked_key: maru.session.editor.lsp.trust.Key = .{ .volume = picked.volume, .path = try arena.allocator().dupe(u8, picked.path) };
+    const picked_key: maru.session.editor.lsp.trust.Key = .{ .volume = picked.volume, .path = try arena.allocator().dupe(u8, picked.text) };
     fx.session.dispatchChromeAction(.trust_picker_accept);
     try testing.expect(fx.session.pending_confirm == .lsp_trust_manage);
     fx.session.chrome_host.confirm.dismiss();
@@ -16890,6 +16890,239 @@ test "LSPE15 실행 파일의 출처는 사용자 셸 환경의 자리 변수로
             return tool_env.settled();
         }
     }.f));
+}
+
+test "LSPE16 환경 제외 목록 — gate 가 창의 설정으로 목록을 정해 서버는 걸린 이름 없이 뜨고(셸 환경), 「Show Environment Variable Names」는 이름만·「제외됨」을 보이며 고르면 닫힐 뿐이고, 목록을 바꾸면 셸을 다시 띄우지 않고 envp 만 (계획 workspace-trust WT5b-1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", null); // PATH 로 찾게
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    const term = try openProjDoc(&fx, root);
+    var wrapper_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/zls", .{root})).ptr, 0o755);
+    }
+    fx.session.loaded_config.config.lsp.environment_exclude = " SECRET_*, AWS_KEY ";
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nexport SECRET_TOKEN=s SECRET_OTHER=o AWS_KEY=k AWS_KEYS=kk\nexport PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {}; // 실패 경로에서도 셸을 놓아 준다
+    // ⑴ 담고 허용해 띄운다 — 목록은 gate 가 이 창의 설정으로 정했다(목록 상자를 먼저 열지 않았다). 서버 환경에 걸린 이름이 없다(끝 `*`
+    // 는 접두, 정확한 이름은 정확히).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.pending_confirm == .lsp_trust;
+        }
+    }.f));
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return v.phase == .ready;
+        }
+    }.f));
+    const server_env = try fx.dir.dir.readFileAlloc(testing.io, "home/server.env", allocator, .limited(1 << 16));
+    defer allocator.free(server_env);
+    try testing.expect(std.mem.indexOf(u8, server_env, "SECRET_TOKEN=") == null);
+    try testing.expect(std.mem.indexOf(u8, server_env, "SECRET_OTHER=") == null);
+    try testing.expect(std.mem.indexOf(u8, server_env, "\nAWS_KEY=") == null and !std.mem.startsWith(u8, server_env, "AWS_KEY="));
+    try testing.expect(std.mem.indexOf(u8, server_env, "AWS_KEYS=kk") != null); // 정확한 이름은 정확히
+    // ⑶ 이름 목록 — 값은 없고, 걸린 이름은 「제외됨」.
+    fx.session.dispatchAppAction(.lsp_show_environment_names);
+    const list = &fx.session.editor_trust_list;
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_env_list_prompt), fx.session.chrome_host.trust_picker.prompt);
+    var saw = [_]bool{ false, false, false };
+    for (list.items.items) |it| {
+        try testing.expect(std.mem.indexOfScalar(u8, it.text, '=') == null); // 이름만
+        if (std.mem.eql(u8, it.text, "SECRET_TOKEN")) {
+            try testing.expect(it.excluded);
+            saw[0] = true;
+        }
+        if (std.mem.eql(u8, it.text, "AWS_KEYS")) {
+            try testing.expect(!it.excluded);
+            saw[1] = true;
+        }
+        if (std.mem.eql(u8, it.text, "PATH")) {
+            try testing.expect(!it.excluded);
+            saw[2] = true;
+        }
+    }
+    try testing.expect(saw[0] and saw[1] and saw[2]);
+    // 행 — 거르면 `AWS_KEY` 는 「제외됨」, `AWS_KEYS` 는 빈 칸.
+    try fx.session.chrome_host.trust_picker.input.query.appendSlice(allocator, "aws_key");
+    trust_ui.recompute(fx.session);
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    fx.session.backing_width_px = 960; // 행은 패널 기하로 그린다(목록 판정자 LSPB35 와 같은 창)
+    fx.session.backing_height_px = 600;
+    const shown_rows = try trust_ui.rows(fx.session, scratch.allocator());
+    try testing.expectEqual(@as(usize, 2), shown_rows.len);
+    for (shown_rows) |r| {
+        if (std.mem.eql(u8, r.title, "AWS_KEY")) try testing.expectEqualStrings(maru.i18n.t(.lsp_env_list_excluded), r.binding) else {
+            try testing.expectEqualStrings("AWS_KEYS", r.title);
+            try testing.expectEqualStrings("", r.binding);
+        }
+    }
+    trust_ui.accept(fx.session); // 읽기 전용 — 고르면 닫힐 뿐이다(신뢰 관리 상자로 가지 않는다)
+    try testing.expect(!fx.session.chrome_host.trust_picker.open);
+    try testing.expect(fx.session.pending_confirm == .none);
+    try testing.expect(!fx.session.chrome_host.notice.open);
+    // ⑷ 목록을 비우면 셸을 다시 띄우지 않고 envp 만 다시 만든다(다음 띄우기부터 넘어간다).
+    const spawned = tool_env.spawnCountForTest();
+    lsp_client.setEnvironmentExclude("");
+    try testing.expectEqual(spawned, tool_env.spawnCountForTest());
+    const envp = tool_env.envp().?;
+    var has_secret = false;
+    var i: usize = 0;
+    while (envp[i]) |e| : (i += 1) {
+        if (std.mem.startsWith(u8, std.mem.span(e), "SECRET_TOKEN=")) has_secret = true;
+    }
+    try testing.expect(has_secret);
+}
+
+test "LSPE18 「Show Environment Variable Names」는 아직 아무도 안 읽었으면 읽기를 시작하고 그동안 「읽는 중」, 다 읽은 뒤 다시 열면 이름을 보이며, 언어 서버가 꺼져 있으면 그렇다고 알린다 (계획 workspace-trust WT5b-1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "home");
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    // 꺼져 있으면 목록 대신 알림 — 셸도 띄우지 않는다.
+    fx.session.loaded_config.config.lsp.enabled = false;
+    fx.session.dispatchAppAction(.lsp_show_environment_names);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_info_disabled), fx.session.chrome_host.notice.message);
+    try testing.expect(!fx.session.chrome_host.trust_picker.open);
+    fx.session.chrome_host.notice.dismiss();
+    fx.session.loaded_config.config.lsp.enabled = true;
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nexport FROM_SHELL=1\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {};
+    // 서버가 필요한 문서를 열지 않았다 — 명령이 읽기를 시작하고, 그동안은 「읽는 중」.
+    fx.session.dispatchAppAction(.lsp_show_environment_names);
+    try testing.expect(fx.session.chrome_host.trust_picker.open);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_trust_list.items.items.len);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_env_list_pending), fx.session.chrome_host.trust_picker.prompt);
+    try testing.expect(!tool_env.settled());
+    try testing.expect(waitSpawnCount(1)); // 셸을 띄웠다(횟수는 워커가 올린다)
+    trust_ui.closed(fx.session);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    const Ctx = struct { fx: *PaneFixture };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(_: Ctx) bool {
+            tool_env.tick(true);
+            return tool_env.settled();
+        }
+    }.f));
+    fx.session.dispatchAppAction(.lsp_show_environment_names);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_env_list_prompt), fx.session.chrome_host.trust_picker.prompt);
+    var saw = false;
+    for (fx.session.editor_trust_list.items.items) |it| {
+        if (std.mem.eql(u8, it.text, "FROM_SHELL")) saw = true;
+    }
+    try testing.expect(saw);
+    try testing.expectEqual(@as(u32, 1), tool_env.spawnCountForTest()); // 다시 열어도 다시 안 띄운다
+    trust_ui.closed(fx.session);
+}
+
+test "LSPE17 제외 목록은 앱 전역 — 세팅 화면 커밋이 전역을 세우고(빈 값은 비우기), 다른 창의 미러가 사본으로 따라오며, 바꾸는 자리는 넷 (계획 workspace-trust WT5b-1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var a = try PaneFixture.init(allocator);
+    defer a.deinit(allocator);
+    var b = try PaneFixture.init(allocator);
+    defer b.deinit(allocator);
+    try testing.expect(lsp_client.environmentExcludeOverride() == null); // 아직 아무도 정하지 않았다
+    // 처음 정하기는 처음 연 창의 설정 — 다른 창의 다른 미러가 덮지 않는다(스위치와 같은 규율).
+    a.session.loaded_config.config.lsp.environment_exclude = "FIRST_*";
+    b.session.loaded_config.config.lsp.environment_exclude = "SECOND_*";
+    trust_ui.openEnvNames(a.session);
+    trust_ui.closed(a.session);
+    trust_ui.openEnvNames(b.session);
+    trust_ui.closed(b.session);
+    try testing.expectEqualStrings("FIRST_*", lsp_client.environmentExcludeOverride().?);
+    var scratch = std.heap.ArenaAllocator.init(allocator);
+    defer scratch.deinit();
+    const sections = try settings_ops.buildSectionList(b.session, scratch.allocator());
+    for (sections, 0..) |entry, si| if (entry.section == .editor) {
+        b.session.chrome_host.settings.section = si;
+    };
+    settings_ops.refreshSettingsFieldCount(b.session);
+    const Row = struct {
+        fn find(session: *AppSession, arena: std.mem.Allocator) !usize {
+            const cf = try settings_ops.currentSectionFields(session, arena);
+            for (cf.texts, 0..) |f, i| if (std.mem.eql(u8, f.key, "lsp.environment-exclude")) return cf.bools.len + cf.nums.len + cf.enums.len + i;
+            return error.MissingSettingsRow;
+        }
+    };
+    // 창 B 의 세팅 화면에서 커밋 — 앱 전역이 선다(앞뒤 공백은 다듬는다).
+    b.session.chrome_host.settings.selected = try Row.find(b.session, scratch.allocator());
+    b.session.chrome_host.settings.enterEdit(" AWS_*, NPM_TOKEN ");
+    settings_ops.commitSelectedText(b.session);
+    try testing.expectEqualStrings("AWS_*, NPM_TOKEN", lsp_client.environmentExcludeOverride().?);
+    try testing.expectEqualStrings("AWS_*, NPM_TOKEN", b.session.loaded_config.config.lsp.environment_exclude);
+    try testing.expect(settings_ops.takeConfigDirty(b.session));
+    // 창 A 의 미러가 따라온다 — 앱 전역 슬라이스를 빌리지 않고 창 arena 의 사본으로(다른 창이 바꾸면 전역은 풀린다).
+    _ = try settings_ops.currentSectionFields(a.session, scratch.allocator());
+    try testing.expectEqualStrings("AWS_*, NPM_TOKEN", a.session.loaded_config.config.lsp.environment_exclude);
+    try testing.expect(a.session.loaded_config.config.lsp.environment_exclude.ptr != lsp_client.environmentExcludeOverride().?.ptr);
+    // 빈 값 커밋은 목록을 비운다(setText 는 빈 값을 거부한다 — 그래도 비울 수 있어야 한다).
+    b.session.chrome_host.settings.selected = try Row.find(b.session, scratch.allocator());
+    b.session.chrome_host.settings.enterEdit("");
+    settings_ops.commitSelectedText(b.session);
+    try testing.expectEqualStrings("", lsp_client.environmentExcludeOverride().?);
+    try testing.expectEqualStrings("", b.session.loaded_config.config.lsp.environment_exclude);
+    _ = try settings_ops.currentSectionFields(a.session, scratch.allocator());
+    try testing.expectEqualStrings("", a.session.loaded_config.config.lsp.environment_exclude);
+    settings_ops.clearConfigDirty(b.session);
+    // 바꾸는 자리 — 세팅 커밋·행 되돌리기·Reload Config·전체 리셋(스위치와 같은 규율). 처음 정하기는 gate·목록 상자뿐.
+    const settings_src = @embedFile("../settings.zig");
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, settings_src, "editor_ops.lsp_client.setEnvironmentExclude("));
+    for ([_][]const u8{
+        "editor_ops.lsp_client.setEnvironmentExclude(owned);", // 세팅 커밋
+        "editor_ops.lsp_client.setEnvironmentExclude(\"\");", // 행 되돌리기
+        "editor_ops.lsp_client.setEnvironmentExclude(self.loaded_config.config.lsp.environment_exclude); // 파일이 정본", // Reload Config
+        "editor_ops.lsp_client.setEnvironmentExclude(self.loaded_config.config.lsp.environment_exclude); // 기본값", // 전체 리셋
+    }) |site| try testing.expectEqual(@as(usize, 1), std.mem.count(u8, settings_src, site));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("lsp.zig"), "tool_env." ++ "setExcluded("));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("lsp.zig"), "tool_env." ++ "initExcluded("));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("trust_ui.zig"), "tool_env." ++ "initExcluded("));
+    // 우회 — 디스패치·ABI 가 전역을 직접 바꾸지 않는다.
+    for ([_][]const u8{ @embedFile("../../app_session.zig"), @embedFile("../../app_host_abi.zig") }) |src| {
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, src, "setEnvironmentExclude("));
+        try testing.expectEqual(@as(usize, 0), std.mem.count(u8, src, "tool_env." ++ "setExcluded("));
+    }
+    // 편집 칸보다 긴 값은 편집에 들이지 않는다 — 들이면 잘린 채 저장되어 뒤쪽 이름이 서버로 간다(적대적 검증).
+    const long = "A_" ++ ("X" ** 140);
+    b.session.loaded_config.config.lsp.environment_exclude = long;
+    lsp_client.setEnvironmentExclude(long);
+    b.session.chrome_host.settings.selected = try Row.find(b.session, scratch.allocator());
+    settings_ops.toggleSelectedSetting(b.session);
+    try testing.expect(!b.session.chrome_host.settings.editing);
+    try testing.expect(std.mem.indexOf(u8, b.session.chrome_host.settings.message(), "128") != null); // 상한을 문구에 채운다
+    try testing.expectEqualStrings(long, lsp_client.environmentExcludeOverride().?);
+    settings_ops.clearConfigDirty(b.session);
 }
 
 test "LSPE1 사용자 셸 환경을 읽는 동안은 「없음」이 아니라 「셸 환경 읽는 중」이고, 다 읽으면 그 PATH 에서 서버를 찾아 묻고 그 환경으로 띄운다 (계획 workspace-trust WT3b)" {

@@ -341,6 +341,15 @@ pub fn hasClosablePty(term: *const Term) bool {
         !term.rt.close_complete;
 }
 
+/// 셸이 끝나 finish를 보낸 원격 Term이면 같은 finish를 다시 보내고 그 결과를, 아니면 null을 돌려준다(호출자가 원래
+/// close를 보낸다). 원격 runtime은 처음 받은 close 요청의 종류를 봉인해 종류가 다르면 프로세스를 끝낸다 — finish 뒤에
+/// closeAndDetach가 오면 proof_loss(exit 86)였다. 이미 끝난 finish는 ready_remove에서 complete로 그친다.
+/// in-process는 종류를 보지 않고, 끝난 뒤의 closeAndDetach가 routing 연결도 끊으므로 지금 그대로 둔다.
+pub fn finishIfRequested(self: *AppSession, term: *Term) ?app.term_runtime_backend.CloseProgress {
+    if (!is_macos or term.rt.finish_ended == null or term.surface.remote == null) return null;
+    return self.backendFor(term).finishAfterTermination(term.rt.handle);
+}
+
 /// 임의 탭(tab_index)의 pane에서 term_index Term을 닫고 cascade한다(exit 자동 정리·일반화). Term을 teardown·
 /// 제거하고: pane에 Term이 남으면 active_term clamp, 비면 split이면 collapse, 단일 pane이면 워크스페이스(탭)를
 /// close한다. 활성/배경 탭 모두 대상이라 closeActiveTerm(활성 전용)과 달리 위치를 인자로 받는다.
@@ -348,7 +357,8 @@ pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index:
     const tab = self.tabs.items[tab_index];
     const target = pane.terms.items[term_index];
     if (hasClosablePty(target)) {
-        if (self.backendFor(target).closeAndDetach(target.rt.handle) == .event_pending) return;
+        const progress = finishIfRequested(self, target) orelse self.backendFor(target).closeAndDetach(target.rt.handle);
+        if (progress == .event_pending) return;
         target.rt.close_complete = true;
     }
     cancelPointerGestureForTermRemoval(self, tab_index, pane, term_index);
@@ -886,7 +896,8 @@ fn destroyTermWithAbandonBackend(
             // restore staging rollback: 기존 runtime의 subscription/client state만 회수한다. terminate는 절대 보내지 않는다.
             if (app_session_mod.app_remote_backend) |*rb| rb.detachTerm(term.rt.handle);
         } else {
-            if (!term.rt.close_complete and self.runtime_initialized and self.backendFor(term).closeAndDetach(term.rt.handle) == .event_pending)
+            if (!term.rt.close_complete and self.runtime_initialized and
+                (finishIfRequested(self, term) orelse self.backendFor(term).closeAndDetach(term.rt.handle)) == .event_pending)
                 @panic("term destruction bypassed a pending close operation");
             if (self.backendFor(term).remove(term.rt.handle) != .removed)
                 @panic("term destruction lost its terminal runtime");

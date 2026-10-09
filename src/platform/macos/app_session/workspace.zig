@@ -122,6 +122,13 @@ fn collectWindowCloseTargets(
     return out[0..count];
 }
 
+fn finishPendingInWindow(self: *AppSession) bool {
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (term.rt.finish_ended != null and !term.rt.close_complete and term.surface.remote != null) return true;
+    };
+    return false;
+}
+
 fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProgress {
     if (builtin.os.tag != .macos or app_session_mod.app_remote_backend == null) {
         for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
@@ -134,6 +141,10 @@ fn advanceWindowClose(self: *AppSession) maru.app.term_runtime_backend.CloseProg
 
     var target_storage: [max_window_close_targets]close_graph.TargetProjection = undefined;
     const graph_pristine = std.meta.eql(self.pending_window_close_graph, close_graph.PendingTermCloseGraph{});
+    // 셸이 끝나 보낸 finish 가 아직 끝나지 않은 원격 Term 이 있으면 graph 를 준비하지 않고 다음 tick 에 다시 온다 — 그 runtime 의
+    // close 권한은 이미 finish 로 봉인돼, graph 의 ticket 예약(손대지 않은 runtime 만 받는다)이 proof_loss(exit 86)로 끝난다.
+    // tick 이 finish 를 이어 보내 끝나면(close_complete) 그 Term 은 대상에서 빠진다.
+    if (graph_pristine and finishPendingInWindow(self)) return .event_pending;
     const targets = collectWindowCloseTargets(self, &target_storage, graph_pristine) orelse
         close_graph.fatalProofLoss();
     if (targets.len == 0) return .complete;

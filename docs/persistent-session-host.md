@@ -3472,6 +3472,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    `close_without_routing`은 construction rollback 또는 routing이 아직 게시되지 않은 typed teardown만 쓰며 일반 AppSession close caller는 0이다.
    `finish_after_termination`은 검증된 종료 관측 뒤에만 쓰고 terminate RPC를 다시 보내지 않는다. 세 kind 모두 같은
    `CloseProgress`를 반환하지만 precondition과 effect를 서로 대체할 수 없고 kind/disposition 조합은 CloseAuthority seal에 들어간다.
+   그래서 AppSession은 `finish_after_termination`을 보낸 원격 Term(`Term.rt.finish_ended`)에는 그 뒤 창 teardown(`AppSession.close`)·
+   deinit pass 1·`closeTermAt`·`destroyTerm`에서 같은 kind만 다시 보낸다(`term_ops.finishIfRequested` — 이미 ready_remove면 complete로
+   그친다). 다른 kind는 seal 불일치로 `proof_loss`다 — 마지막 셸이 끝나 앱이 닫힐 때 `AppSession.close`가 closeAndDetach를 보내 exit
+   86으로 끝났다(2026-10-09 실측, 웹 패널 유무와 무관). 창 close graph는 ticket 예약이 pristine runtime만 받으므로, finish가 아직
+   끝나지 않은 원격 Term이 있으면 graph를 준비하지 않고 `event_pending`으로 다음 tick을 기다린다(끝나면 `close_complete`로 대상에서
+   빠진다). finish가 `event_pending`이면 원격 pump는 끝을 다시 알리지 않으므로 tick이 같은 finish를 이어 보낸다. in-process는 kind를
+   보지 않고 끝난 뒤의 closeAndDetach가 routing 연결도 끊으므로 그대로 둔다. **남은 것(기존 결함)**: 「종료 및 세션 끝내기」
+   (`prepareAppQuitEndAll`)는 backend의 모든 runtime이 pristine이기를 요구해, 끝난 셸이 거둬지지 않고 남은 창(시작 직후 종료로 유지한
+   창, 다운로드로 숨겨 쥔 세션, 저장하지 않은 파일 패널로 남은 창)이 있으면 `proof_loss`다. closeAndDetach가 `event_pending`인 Term에
+   끝이 오면 tick의 finish가 kind 불일치다. finish가 끝나기 전에 창 teardown이 오면 deinit pass 1의 panic이다.
 
    heap-pin된 `RemoteRuntime.CloseAuthority`의 불변 identity seal tuple은
    `{self_addr,pid,process_nonce,thread_id,runtime_addr,handle,runtime_generation,host_id,close_request_generation,

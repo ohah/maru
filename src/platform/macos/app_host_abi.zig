@@ -18,6 +18,8 @@ const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const workspace_checkpoint_file = @import("workspace_checkpoint_file.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
+const control_self_origin = maru.session.control_self_origin; // 1g: 붙은 프로세스의 출처 판정(조상 사슬의 첫 제어 터미널)
+const control_self_origin_macos = @import("control_self_origin_macos.zig"); // 1g: 그 판정의 macOS 공급자
 const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터 + 1e dispatchAuthenticated
 const control_plane = maru.session.control_plane; // 1a: hello capability method namespace 파싱
 const control_browser = maru.session.control_browser; // 5e: browser.* op·응답 직렬화(dispatchAuthenticated가 산출한 op을 marshal)
@@ -6635,6 +6637,29 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
 /// 지금은 default-deny). **§8.4 self 경로 한계 유지**: nonce 없는 same-uid peer는 임의 surface를 self로 주장할 수 있고
 /// tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만(§8.3 self 필터). `now`=**모노토닉 awake 초**(TTL 판정용, 순수
 /// 코어에 주입 — 미래 fd 발급도 같은 시계로 expires_at 계산해야 정합; wall-clock 아님, 아래 impl 참조 — 리뷰 [2]).
+/// **1g(control-plane-security §8.4)**: 붙은 프로세스의 출처(연결 스레드가 찾은 조상 사슬의 첫 제어 터미널 프로세스와
+/// 그 세션)를 pane 으로 바꾼다. 그 프로세스가 **지금도** 그 터미널의 foreground 일 때만(지속 세션은 요청마다 다시 본다).
+/// - `browser_pane` = 찾은 pane — browser 확인 grant(§9.2 Model B)의 pane. 셀렉터가 필요 없어 세션 유지 pane(셀렉터 없음)
+///   에서도 에이전트가 확인 모달을 받는다(사용자 결정 2026-10-09).
+/// - `selector`(주장) 는 찾은 pane 과 같을 때만 남긴다. 다르거나 못 찾았으면 null — metadata 는 셀렉터 없는 연결처럼
+///   전체 목록이 되고(넓어지는 권한이 없다, §4a), browser 는 찾은 pane 으로만 묻는다. 남의 pane 번호를 대도 그 pane 의
+///   기억된 grant 를 못 탄다. 확인 모달 승인 뒤의 재처리(`drainGrantPrompts`)도 이 두 값을 그대로 쓴다.
+fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_mod.PendingRequest) void {
+    const found: ?u64 = blk: {
+        const origin = pending.peer_origin orelse break :blk null;
+        if (!control_self_origin.stillForeground(control_self_origin_macos.provider(), origin)) break :blk null;
+        for (refs) |ref| {
+            const app = ref.app_session orelse continue;
+            if (app.surfaceForSessionLeader(origin.sid)) |id| break :blk id;
+        }
+        break :blk null;
+    };
+    pending.browser_pane = found;
+    if (pending.selector) |claimed| {
+        if (found == null or found.? != claimed) pending.selector = null;
+    }
+}
+
 fn handleControlRequest(
     server: *control_server_mod.ControlServer,
     refs: []const ControlSessionRef,
@@ -6650,8 +6675,9 @@ fn handleControlRequest(
     // expires_at을 계산하면 정합한다(코드베이스가 이미 std.Io.Clock.awake를 uptime에 씀). store가 빈 지금은 TTL 미사용.
     const now_ns: i128 = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    resolveSelfOrigin(refs, pending);
     // 5f-4a-2: 세션 누적 cap 집합(serveConnection이 auth.self+auth.grant로 채운 슬라이스, 연결 스레드 스택 소유·대기 동안 유효).
-    const disp = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
+    const disp = control_dispatch.dispatchAuthenticatedAnchored(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.browser_pane, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
         server.resolveRequest(pending, null);
         return;
     };
@@ -6724,7 +6750,7 @@ fn resolveGrantPrompt(
         return;
     };
     // 재-dispatch: grant가 인가 → .browser/.subscribe/.immediate. grant async_id를 그대로 완료 상관자로 재사용.
-    const disp2 = control_dispatch.dispatchAuthenticated(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
+    const disp2 = control_dispatch.dispatchAuthenticatedAnchored(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.browser_pane, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
         _ = server.completeInFlight(e.async_id, null);
         return;
     };

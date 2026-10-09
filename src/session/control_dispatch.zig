@@ -162,6 +162,8 @@ pub const AuthDispatch = union(enum) {
     needs_grant: cb.GrantRequest,
 };
 
+/// 셀렉터 하나가 metadata 앵커와 browser 확인 grant 의 pane 을 함께 맡는 형태(헤드리스 시험·가짜 drain). 라이브
+/// 서버는 둘을 가르는 `dispatchAuthenticatedAnchored` 를 쓴다(1g).
 pub fn dispatchAuthenticated(
     gpa: std.mem.Allocator,
     request_bytes: []const u8,
@@ -170,6 +172,23 @@ pub fn dispatchAuthenticated(
     cap_nonces: []const cap.Nonce, // 5f-4a: 세션 누적 cap 집합(§9.5.6 ③). 빈=cap 없음. 하나라도 인가하면 통과.
     store: *const cap.CapabilityStore,
     grants: *const cpg.PaneGrantStore, // 1e-confirm-1b: pane-bound confirm-grant(§9.2 Model B). browser.* authz 가법 조회.
+    now: u64,
+) std.mem.Allocator.Error!AuthDispatch {
+    return dispatchAuthenticatedAnchored(gpa, request_bytes, snapshot, selector, selector, cap_nonces, store, grants, now);
+}
+
+/// **1g(§8.4)**: `selector` 는 metadata 앵커(셀렉터를 댔고 서버가 그 pane 으로 확인했을 때만 — 아니면 null 이라 목록은
+/// 전체, 사용자 결정 2026-10-09 「목록은 지금처럼」), `browser_pane` 은 browser 확인 grant(§9.2 Model B)의 pane — 서버가
+/// 붙은 프로세스의 조상 사슬에서 **스스로 찾은** pane 이다(셀렉터 불필요 — 세션 유지 pane 에도 셀렉터가 없다).
+pub fn dispatchAuthenticatedAnchored(
+    gpa: std.mem.Allocator,
+    request_bytes: []const u8,
+    snapshot: cs.CollectorSnapshot,
+    selector: ?u64,
+    browser_pane: ?u64,
+    cap_nonces: []const cap.Nonce,
+    store: *const cap.CapabilityStore,
+    grants: *const cpg.PaneGrantStore,
     now: u64,
 ) std.mem.Allocator.Error!AuthDispatch {
     // **먼저 파싱**한다 — browser.* 라우팅은 nonce 유무와 무관하게 method로 판정해야 한다(리뷰 [2]: cap_nonce 없는
@@ -205,7 +224,7 @@ pub fn dispatchAuthenticated(
                 }
             }
         }
-        return switch (try cb.browserOpFromRequest(gpa, req, request_bytes, snapshot, caps_buf[0..ncaps], selector, grants, now)) {
+        return switch (try cb.browserOpFromRequest(gpa, req, request_bytes, snapshot, caps_buf[0..ncaps], browser_pane, grants, now)) {
             .err => |e| .{ .immediate = e },
             .op => |raw_op| blk: {
                 var op = raw_op;

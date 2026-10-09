@@ -328,6 +328,10 @@ run = [
 description = "Run and assert the bounded browser.executeScript WKWebView/socket smoke"
 run = "zig build -Doptimize=ReleaseSafe macos-browser-bounded-smoke"
 
+[tasks.macos-control-self-origin-smoke]
+description = "Run the control-plane 1g self-origin smoke (live app — pane shell, setsid child, background job, outside caller)"
+run = "zig build macos-app-build && sh tools/test-macos-control-self-origin-smoke.sh"
+
 [tasks.macos-dmg]
 description = "Sign+notarize+staple a distributable .dmg (needs keychain cert + notarytool profile)"
 run = "zig build macos-dmg -Doptimize=ReleaseFast"

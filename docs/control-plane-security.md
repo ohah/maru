@@ -61,15 +61,43 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
 4. server는 peer pid의 controlling tty identity와 foreground process group을 읽어, 후보 surface가 spawn할 때 기록한 PTY slave identity 및 현재 foreground process group과 비교한다. 둘 중 하나라도 불일치하면 `unauthorized`다.
 5. 통과하면 해당 연결/request에만 `metadata:self`를 부여한다. 응답은 항상 자기 surface 하나로 필터링한다.
 
-**A2b 구현 상태(정직 — same-uid+selector까지, tty 검증 없음)**: 라이브 서버 A2b는 위 **1·3·5만** 구현한다. peer-cred(3, same-uid gate)는 `acceptOne`이, 셀렉터(1)는 wire의 `auth.self` 프레임(`control_plane.serializeAuthSelf`/`parseAuthFrame` — 후자는 selector와 optional `cap_nonce`[1e]를 함께 뽑는다)이, `metadata:self` 부여+self 필터(5)는 dispatch(1d)가 한다(**셀렉터를 댄 연결에 한한다** — 안 댄 연결은 아래 `metadata:all` 문단을 따른다). **4단계(peer pid의 tty/foreground pgrp ↔ surface PTY 일치 검증)는 미구현 — 1g 후속이다.** 그리고 **셀렉터의 실제 전달 매개는 `$MARU_SESSION`이 아니라 `$MARU_PANE_ID`**(=surface.id, `pty/macos.zig`가 각 팬 셸에 주입하는 실제 env; `$MARU_SESSION` 복합 selector는 미도입)다. CLI(`main.runSessionRequest`)가 `MARU_PANE_ID`를 읽어 `auth.self{surface_id}`로 보낸다.
+**A2b 구현 상태(정직 — same-uid+selector까지, tty 검증 없음)**: 라이브 서버 A2b는 위 **1·3·5만** 구현한다. peer-cred(3, same-uid gate)는 `acceptOne`이, 셀렉터(1)는 wire의 `auth.self` 프레임(`control_plane.serializeAuthSelf`/`parseAuthFrame` — 후자는 selector와 optional `cap_nonce`[1e]를 함께 뽑는다)이, `metadata:self` 부여+self 필터(5)는 dispatch(1d)가 한다(**셀렉터를 댄 연결에 한한다** — 안 댄 연결은 아래 `metadata:all` 문단을 따른다). **4단계(peer pid의 tty/foreground pgrp ↔ surface PTY 일치 검증)는 1g 에서 「서버가 스스로 찾기」로 바꿔 구현했다(아래 「1g 구현」 — 셀렉터를 검증하지 않고 출처에서 pane 을 찾는다).** 그리고 **셀렉터의 실제 전달 매개는 `$MARU_SESSION`이 아니라 `$MARU_PANE_ID`**(=surface.id, `pty/macos.zig`가 각 팬 셸에 주입하는 실제 env; `$MARU_SESSION` 복합 selector는 미도입)다. CLI(`main.runSessionRequest`)가 `MARU_PANE_ID`를 읽어 `auth.self{surface_id}`로 보낸다.
 
-**⚠️ 이 auth의 경계 한계(A2b, §8.3/§8.4 대비)**: same-uid peer는 tty 검증이 없으므로 **임의 `surface_id`를 self로 주장**할 수 있다 — 즉 같은 uid의 임의 프로세스가 아무 surface_id나 셀렉터로 보내 그 **한 surface의 metadata(cwd·git_branch·focused·at_prompt)를 열람**할 수 있다. surface_id가 monotonic이라 낮은 값부터 셀렉터를 훑으면 여러 surface metadata를 순차 수집할 수 있다(실측으로 확인 — 한 번의 훑기로 첫 surface 의 메타데이터가 그대로 나왔다). read-output/write/lifecycle은 A2b에서 애초에 안 열린다(§8.3). **1g가 4단계 tty/pgrp 검증을 붙이기 전까지 `metadata:self`는 "같은 uid면 selector로 임의 surface metadata 열람 가능"이라는 한계를 갖는다.**
+**⚠️ 이 auth의 경계 한계(A2b, §8.3/§8.4 대비 — 1g 전 기록. 1g 뒤로는 셀렉터가 찾은 pane 과 다르면 버려져, 아래 열람은 셀렉터 없는 연결의 전체 목록과 같은 등급이 된다)**: same-uid peer는 tty 검증이 없으므로 **임의 `surface_id`를 self로 주장**할 수 있다 — 즉 같은 uid의 임의 프로세스가 아무 surface_id나 셀렉터로 보내 그 **한 surface의 metadata(cwd·git_branch·focused·at_prompt)를 열람**할 수 있다. surface_id가 monotonic이라 낮은 값부터 셀렉터를 훑으면 여러 surface metadata를 순차 수집할 수 있다(실측으로 확인 — 한 번의 훑기로 첫 surface 의 메타데이터가 그대로 나왔다). read-output/write/lifecycle은 A2b에서 애초에 안 열린다(§8.3). **1g가 4단계 tty/pgrp 검증을 붙이기 전까지 `metadata:self`는 "같은 uid면 selector로 임의 surface metadata 열람 가능"이라는 한계를 갖는다.**
 
 **셀렉터를 안 댄 연결은 `metadata:all`이다(2026-08-29).** 앞 문단이 예전에는 "scope 가 `metadata:self` 고정이라 `sessions.list` 전역 열거는 안 된다" 를 완화 요소로 들었는데, **그 완화는 실효가 없었다** — 같은 문단이 인정하듯 셀렉터를 훑으면 같은 것이 나온다. 그리고 그 좁힘은 실제로는 **정상 사용을 막고 있었다**: 폰이 SSH `exec` 채널로 여는 중계에는 `MARU_PANE_ID`가 없어 셀렉터를 못 대는데, 그때 `.self`(anchor=0)로 두면 목록이 언제나 비어 폰 화면에 "세션이 없다" 만 떴다([컨트롤 플레인 §4a](control-plane.md)가 그 계약을 이미 "앵커가 필요 없는 것은 된다" 로 적어 두었으나 코드가 어긋나 있었다).
 
 - **셀렉터 있음** → 종전대로 `metadata:self`(그 surface 하나). 바뀐 것 없다.
 - **셀렉터 없음** → `metadata:all`. 근거는 이 소켓의 등급이다: same-uid peer-cred + 0700 이라 붙은 쪽은 **그 사용자 자신**이고, SSH 로 붙은 폰도 같다 — 그 사용자로 아무 명령이나 돌릴 수 있으므로 목록이 권한을 넓히지 않는다(§4a "왜 이 모양인가").
 - **넓어진 것은 metadata 뿐이다.** `session.capture`(read-output)·write·`browser.*` 는 그대로다 — 각각 cap 이나 target 앵커를 따로 요구하고, 이 규칙은 그 경로에 닿지 않는다.
+
+**1g 구현(사용자 결정 2026-10-09) — 위 4단계를 「서버가 스스로 찾기」로 바꿨다.** 셀렉터(`$MARU_PANE_ID`)를 검증하는 대신
+서버가 붙은 프로세스의 출처에서 pane 을 직접 찾는다(`maru.session.control_self_origin` + macOS 공급자
+`control_self_origin_macos.zig`). 바꾼 이유가 둘이다. (1) **에이전트**: Claude Code 는 Bash 도구의 명령을 새 세션(setsid)으로
+띄워 명령 자체에는 제어 터미널이 없다(실측 — `claude` 는 pane 의 tty·foreground, 그 자식 `zsh -c` 는 tty 없음). 「peer 자신의
+tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)에는 셀렉터가 없다** — 재실행 뒤 낡은 번호가 다른 pane 을 가리키지
+않게 일부러 비운다(`persistentSpawnRequest`). 그래서 그 pane 의 에이전트는 browser 확인 모달(§9.2 Model B)을 아예 받지 못했다.
+
+- **연결 스레드**(auth 프레임을 읽은 직후 — `LOCAL_PEERPID` 는 소켓에 마지막으로 쓴 프로세스라 그 프레임을 쓴 프로세스다):
+  peer 에서 부모 쪽으로 거슬러 올라가 **제어 터미널을 가진 첫 프로세스**를 찾는다(`proc_pidinfo(PROC_PIDTBSDINFO)`). 그
+  프로세스는 그 터미널의 foreground(`pgid == tpgid`)여야 하고, 거치는 프로세스는 모두 서버와 같은 uid 여야 한다. 연결을 받은 뒤에
+  시작한 peer 는 pid 를 물려받은 다른 프로세스라 거절한다(시작 시각). 깊이 상한 16. 찾은 프로세스의 **세션 번호**(`getsid`)를
+  남긴다.
+- **메인**(요청마다): 그 프로세스가 지금도 같은 프로세스(시작 시각)·foreground·같은 세션인지 다시 보고, 세션 번호와 같은
+  뿌리 pid(`TermRuntimeBackend.sessionLeaderPid` — in-process 는 PTY 의 `child_pid`, 세션 호스트는 host 가 관측에 실어 보낸
+  `child_pid`)를 가진 살아 있는 터미널 pane 을 찾는다. pane 의 셸은 뿌리(`/usr/bin/login`)가 연 세션 안에 있어 세션 번호 = 뿌리
+  pid 다(실측 — in-process·세션 호스트 pane 모두). 뿌리 `login` 은 root 소유라 앱이 `proc_pidinfo` 로 읽을 수 없어(EPERM) 이
+  관계(권한 검사 없는 `getsid`)로 잇는다.
+- **결과**: 찾은 pane 이 **browser 확인 grant 의 pane** 이 된다(셀렉터 불필요). 셀렉터는 찾은 pane 과 같을 때만 metadata 앵커로
+  남고, 다르거나 못 찾았으면 버린다 — metadata 는 셀렉터 없는 연결처럼 전체(아래 문단, 사용자 결정 「목록은 지금처럼」), browser 는
+  찾은 pane 으로만 묻는다. 그래서 남의 pane 번호를 대도 그 pane 의 기억된 grant 를 못 탄다(1g 전에는 in-process pane 의 grant 를
+  모달 없이 탔다).
+- **통과·거절**(실측 — `mise run macos-control-self-origin-smoke`, 세션 유지·in-process 두 모드): pane 셸에서 직접 → 통과, pane 안
+  setsid 자식(에이전트 도구 모양) → 통과, pane 안 백그라운드 작업(job control) → 거절, pane 밖에서 pane 번호를 댐 → 거절.
+  launchd 아래 데몬·고아는 제어 터미널 조상이 없어 거절, 다른 터미널은 세션이 달라 거절.
+- **한계**: 최선의 노력이지 하드 경계가 아니다 — 같은 uid 는 그 pane 안에서 명령을 띄울 수 있다. pane 안에서 띄운 tmux·screen·
+  `ssh localhost` 안의 명령은 첫 터미널이 바깥 PTY 라 거절된다. 비대화형 대본의 `&`(job control 꺼짐)는 foreground 대본과 같은
+  process group 이라 foreground 로 본다. 구 host(관측에 `child_pid` 없음)의 pane 은 찾지 못한다.
 
 셀렉터를 대는 쪽이 **더 좁다**는 것이 낯설게 읽히지만 그 방향이 맞다 — 셀렉터는 권한이 아니라 "나는 이 surface 다" 라는 **주장**이고, 주장한 만큼만 보는 것이 self-origin 의 뜻이다. 1g 가 4단계 tty 검증을 붙이면 그 주장이 비로소 검증되고, 그때 이 비대칭은 "검증된 좁힘 vs 미검증 넓힘" 이라는 뜻을 갖는다.
 

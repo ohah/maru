@@ -1365,6 +1365,7 @@ pub const RemoteTermBackend = struct {
         .finish_after_termination = finishAfterTermination,
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
+        .session_leader_pid = sessionLeaderPid,
         .resource_samples = resourceSamples,
         .foreground_process_names = foregroundProcessNames,
         .process_cwd = processCwd,
@@ -5195,6 +5196,14 @@ pub const RemoteTermBackend = struct {
     /// 예전 판은 무조건 0을 돌려줬고, 그래서 keep-alive를 켠 사용자에게는 모든 탭이 `—`였다.
     /// **호스트 데몬 자신은 여기서 안 센다** — 자식 트리와 겹치지 않게 별도 "모든 창 공유" 행이 갖는다
     /// (`hostProcessSamples`).
+    /// host 가 관측에 실어 보낸 뿌리(`login`) pid — 셸의 세션 번호(구 host 거나 아직 안 왔으면 null).
+    fn sessionLeaderPid(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
+        const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
+        const rr = (self.runtimes.get(handle) orelse return null).runtime;
+        const root = RemoteRuntime.backend_api.processIdentity(rr).child_pid;
+        return if (root > 1) root else null;
+    }
+
     fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []maru.session.resource_usage.Sample) usize {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (out.len == 0) return 0;

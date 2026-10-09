@@ -11153,6 +11153,18 @@ pub const AppSession = struct {
     pub const PinRegion = struct { lo: usize, hi: usize };
 
     /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
+    /// 세션 번호(셸의 `getsid` = pane 뿌리 `login` pid)가 이 창의 어느 터미널 pane 인지 — 컨트롤 플레인 1g(§8.4)가 붙은
+    /// 프로세스의 출처를 pane 으로 바꾼다. 살아 있는 터미널만 본다(웹·편집기·종료 묘비·끝난 셸은 PTY 세션이 없다).
+    pub fn surfaceForSessionLeader(self: *AppSession, sid: i32) ?u64 {
+        if (sid <= 1) return null;
+        for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (term.kind != .terminal or !term.rt.live_initialized or term.rt.terminated or term.rt.ended_placeholder) continue;
+            const leader = self.backendFor(term).sessionLeaderPid(term.rt.handle) orelse continue;
+            if (leader == sid) return term.surface.id;
+        };
+        return null;
+    }
+
     pub fn allTabsTerminated(self: *AppSession) bool {
         if (self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {
@@ -71887,6 +71899,41 @@ fn markRemoteForCloseKindTest(term: *Term, owner: *anyopaque) void {
         const vtable: Source.VTable = .{ .render_snapshot = snapshot, .lock = lock, .unlock = lock };
     };
     term.surface.remote = .{ .ctx = owner, .vtable = &NoScreen.vtable };
+}
+
+test "1g: pane 이 띄운 셸을 붙은 프로세스로 삼으면 조상 사슬 판정이 그 pane 을 찾는다 — 셸의 세션 번호 = 뿌리 pid" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const self_origin = maru.session.control_self_origin;
+    const macos = @import("control_self_origin_macos.zig");
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    for (pane.terms.items) |term| {
+        const leader = session.backendFor(term).sessionLeaderPid(term.rt.handle) orelse return error.TestUnexpectedResult;
+        // 이 시험의 셸(controlled smoke)은 PTY 세션을 연 뿌리 자신이고, 그 PTY 의 foreground 다(한 줄을 기다린다).
+        try std.testing.expectEqual(leader, macos.sessionOf(leader).?);
+        const origin = switch (self_origin.findOrigin(macos.provider(), leader, std.c.getuid(), macos.nowUs())) {
+            .origin => |o| o,
+            .reject => |r| {
+                std.debug.print("rejected: {s}\n", .{@tagName(r)});
+                return error.TestUnexpectedResult;
+            },
+        };
+        try std.testing.expectEqual(leader, origin.sid);
+        try std.testing.expect(self_origin.stillForeground(macos.provider(), origin));
+        try std.testing.expectEqual(term.surface.id, session.surfaceForSessionLeader(origin.sid).?);
+    }
+    // 어느 pane 의 세션도 아니면 못 찾는다(이 시험 프로세스 자신 등).
+    try std.testing.expect(session.surfaceForSessionLeader(macos.sessionOf(std.c.getpid()) orelse 0) == null);
+    try std.testing.expect(session.surfaceForSessionLeader(1) == null);
+    // 끝난 셸의 pane 은 찾지 않는다(PTY 세션이 끝났다).
+    const ended = pane.terms.items[0];
+    const ended_leader = session.backendFor(ended).sessionLeaderPid(ended.rt.handle).?;
+    ended.rt.terminated = true;
+    defer ended.rt.terminated = false;
+    try std.testing.expect(session.surfaceForSessionLeader(ended_leader) == null);
 }
 
 test "셸이 끝나 finish 를 보낸 원격 Term 에 앱 정리는 finish 만 다시 보낸다 — closeAndDetach 는 proof_loss(exit 86)였다" {

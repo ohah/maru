@@ -47,6 +47,21 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
         std.debug.print("SEARCH_MATRIX stage={d} matches={d} groups={d}\n", .{stage, state.result.model.matches, state.result.model.groups.items.len});
         return 1;
     }
+    if (stage >= 12 and stage <= 17) {
+        const preview = &state.preview;
+        if (stage == 12 or stage == 13) return if (state.result.phase == .complete and state.replacing and state.focused == 3) 1 else 0;
+        if (stage == 15) return if (preview.phase == .conflict and preview.plan != null) 1 else -1;
+        if (preview.phase == .building or preview.phase == .verifying) return 0;
+        if (preview.phase != .ready or preview.plan == null) {
+            std.debug.print("REPLACE_FAILURE stage={d} phase={s} failure={any}\n", .{stage, @tagName(preview.phase), preview.failure});
+            return -1;
+        }
+        const expected_count = if (stage == 14) std.fmt.parseInt(usize, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_SEARCH_MODEL_MATCHES") orelse return -1), 10) catch return -1 else 1;
+        if (preview.plan.?.replacements != expected_count or std.mem.indexOf(u8, preview.plan.?.after, "renamed") == null) return -1;
+        if (std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "renamed") != null) return -1;
+        std.debug.print("REPLACE_READY stage={d} replacements={d} source_bytes={d} modified_bytes={d}\n", .{stage, preview.plan.?.replacements, preview.plan.?.before.len, preview.plan.?.after.len});
+        return 1;
+    }
     if (stage == 101) {
         var h = std.hash.Wyhash.init(0);
         h.update(state.fields[0].text.items);
@@ -97,6 +112,39 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
 export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
     const self = editor_project_search_session orelse return;
     switch (stage) {
+        12 => {
+            const d = @import("editor/search/dock.zig");
+            d.open(self);
+            self.editor_search.replacing = true;
+            self.editor_search.focused = 3;
+            d.run(self);
+        },
+        14 => {
+            self.editor_search.focused = 3;
+            _ = @import("editor/search/dock.zig").commitText(self, "x");
+        },
+        15 => {
+            const d = @import("editor/search/dock.zig");
+            @import("editor/search/preview.zig").back(self);
+            self.editor_search.fields[3].selectAll();
+            _ = d.commitText(self, "renamed");
+            for (self.editor_search.result.model.visible.items, 0..) |visible, index| if (visible == .hit) {
+                const row = self.editor_search.result.model.rows.items[visible.hit.row];
+                if (row.source == .model) {
+                    @import("editor/search/preview.zig").start(self, index) catch return;
+                    break;
+                }
+            };
+        },
+        16 => {
+            @import("editor/search/preview.zig").back(self);
+            for (self.editor_search.result.model.visible.items, 0..) |visible, index| if (visible == .file) {
+                if (self.editor_search.result.model.groups.items[visible.file].source == .disk) {
+                    @import("editor/search/preview.zig").start(self, index) catch return;
+                    break;
+                }
+            };
+        },
         0 => self.dispatchAppAction(.show_project_search),
         3 => {
             self.dispatchAppAction(.toggle_file_panel_dock_side);
@@ -134,6 +182,17 @@ export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
 }
 export fn maru_editor_project_search_coordinate(axis: u32) callconv(.c) f64 {
     const self = editor_project_search_session orelse return -1;
+    if (editor_project_search_probe_stage == 12) {
+        for (self.editor_search.entries.items) |entry| if (entry.id == maru.chrome.components.project_search.build.fieldId(3)) return if (axis == 0) entry.rect.x + 20 else entry.rect.y + entry.rect.height / 2;
+        return -1;
+    }
+    if (editor_project_search_probe_stage == 13) {
+        for (self.editor_search.result.model.visible.items, 0..) |visible, index| if (visible == .file and self.editor_search.result.model.groups.items[visible.file].source == .model) {
+            for (self.editor_search.entries.items) |entry| if (entry.id == maru.chrome.components.project_search.build.rowId(index)) return if (axis == 0) entry.rect.x + entry.rect.width / 2 else entry.rect.y + entry.rect.height / 2;
+        };
+        return -1;
+    }
+
     const d = @import("editor/search/dock.zig");
     if (!d.publish(self)) return -1;
     for (self.editor_search.actions.items) |entry| {

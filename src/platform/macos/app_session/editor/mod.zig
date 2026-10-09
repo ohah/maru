@@ -55386,6 +55386,161 @@ const ProjectSearchSink = struct {
     }
 };
 // 도크 입력과 worker 수명은 실제 AppSession을 사용해 검증한다.
+// 바꾸기 미리보기 판정은 실제 owner·worker를 거치며 쓰기 API를 호출하지 않는다.
+fn replacePreviewSearch(fx: *PaneFixture) !void {
+    try projectSearchRootForTest(fx);
+    fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
+    const d = @import("search/dock.zig");
+    _ = try fx.session.resize(960, 600, 1000);
+    d.open(fx.session);
+    try fx.session.editor_search.fields[0].insertText(testing.allocator, "foo");
+    try fx.session.editor_search.fields[1].insertText(testing.allocator, "search.txt,disk.txt");
+    d.changed(fx.session);
+    d.run(fx.session);
+    var helper_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const helper = helper_buf[0..try std.Io.Dir.cwd().realPathFile(testing.io, "zig-out/ripgrep/rg", &helper_buf)];
+    fx.session.editor_project_search_query.?.helper_for_test = try testing.allocator.dupe(u8, helper);
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+    while (fx.session.editor_search.result.phase == .running) {
+        @import("search/owner.zig").poll(fx.session);
+        d.pump(fx.session);
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+    try testing.expectEqual(maru.session.editor.search.presentation.Phase.complete, fx.session.editor_search.result.phase);
+    fx.session.editor_search.replacing = true;
+    try fx.session.editor_search.fields[3].insertText(testing.allocator, "bar");
+}
+fn replacePreviewRow(session: *AppSession, disk: bool, file: bool) !usize {
+    for (session.editor_search.result.model.visible.items, 0..) |visible, i| {
+        const row = switch (visible) {
+            .file => |group| session.editor_search.result.model.groups.items[group].rows.items[0],
+            .hit => |hit| hit.row,
+        };
+        if ((visible == .file) == file and (session.editor_search.result.model.rows.items[row].source == .disk) == disk) return i;
+    }
+    return error.NoPreviewRow;
+}
+fn waitReplacePreview(session: *AppSession) !void {
+    const p = @import("search/preview.zig");
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+    while (session.editor_search.preview.phase == .building or session.editor_search.preview.phase == .verifying) {
+        p.poll(session);
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+    while (p.outstandingWorkers() != 0 or @import("search/backend.zig").outstandingWorkers() != 0) {
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+}
+test "RPV1 파일과 단일 일치의 미리보기는 원문 선택 Undo를 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo\r\nfo");
+    term.rt.editor_selection = maru.session.editor.selection.Selection.fromPoints(7, 7);
+    var change = [_]maru.session.editor.delta.Change{.{ .start = 7, .end = 7, .text = "o" }};
+    try testing.expect(applyEditAsOne(fx.session, term, &change));
+    try testing.expect(term.rt.editorDocument().history.undo_len > 0);
+    const history = term.rt.editorDocument().history;
+    try replacePreviewSearch(&fx);
+    const p = @import("search/preview.zig");
+    const revision = term.rt.editorDocument().opened.?.file.revision;
+    const selected = term.rt.editor_selection;
+    const caret = cursorPosition(term);
+    try p.start(fx.session, try replacePreviewRow(fx.session, false, true));
+    try waitReplacePreview(fx.session);
+    try testing.expectEqualStrings("bar\r\nbar", fx.session.editor_search.preview.plan.?.after);
+    try testing.expectEqualStrings("foo\r\nfoo", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(revision, term.rt.editorDocument().opened.?.file.revision);
+    const after_history = term.rt.editorDocument().history;
+    try testing.expectEqual(history.undo_len, after_history.undo_len);
+    try testing.expectEqual(history.redo_len, after_history.redo_len);
+    try testing.expectEqual(history.edit_group, after_history.edit_group);
+    try testing.expectEqual(history.last_edit_kind, after_history.last_edit_kind);
+    try testing.expect(history.undo.ptr == after_history.undo.ptr and history.redo.ptr == after_history.redo.ptr);
+    try testing.expectEqualDeep(selected, term.rt.editor_selection);
+    try testing.expectEqualDeep(caret, cursorPosition(term));
+    p.back(fx.session);
+    try p.start(fx.session, try replacePreviewRow(fx.session, false, false));
+    try waitReplacePreview(fx.session);
+    try testing.expectEqualStrings("bar\r\nfoo", fx.session.editor_search.preview.plan.?.after);
+    // 기존 Undo가 실제로 이전 입력을 되돌리며, 미리보기는 그 새 revision에 맞춰 충돌한다.
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo\r\nfo", term.rt.editorDocument().opened.?.file.content);
+    p.poll(fx.session);
+    try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.preview.phase), .conflict), fx.session.editor_search.preview.phase);
+    try testing.expectEqualStrings("bar\r\nfoo", fx.session.editor_search.preview.plan.?.after);
+}
+test "RPV2 디스크 재검색과 전문 hash는 알림 전 수정과 BOM을 검증한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo model");
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "\xef\xbb\xbffoo disk\r\nfoo" });
+        try replacePreviewSearch(&fx);
+        const p = @import("search/preview.zig");
+        if (mode == 1) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "bar disk\r\nfoo" });
+        try p.start(fx.session, try replacePreviewRow(fx.session, true, true));
+        if (mode == 2) {
+            while (!fx.session.editor_search.preview.verifier.?.done()) try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+            try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "\xef\xbb\xbffoo disk\r\nfoo\nchanged tail" });
+        }
+        try waitReplacePreview(fx.session);
+        if (mode != 0) {
+            try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.preview.phase), .conflict), fx.session.editor_search.preview.phase);
+            try testing.expect(fx.session.editor_search.preview.plan == null);
+        } else {
+            try testing.expectEqualStrings("bar disk\r\nbar", fx.session.editor_search.preview.plan.?.after);
+            // 미리보기 뒤 watcher의 무효화도 화면 전문을 유지하고 충돌을 표시한다.
+            fx.session.editor_project_search_disk_generation +%= 1;
+            @import("search/dock.zig").refreshForFocus(fx.session);
+            try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.preview.phase), .conflict), fx.session.editor_search.preview.phase);
+            try testing.expectEqualStrings("bar disk\r\nbar", fx.session.editor_search.preview.plan.?.after);
+        }
+        try testing.expectEqualStrings("foo model", @import("../pane.zig").activePane(fx.session).activeTerm().rt.editorDocument().opened.?.file.content);
+    }
+}
+test "RPV3 준비 할당 실패와 입력기 조합은 기존 미리보기와 바꿀 글자를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try replacePreviewSearch(&fx);
+    const p = @import("search/preview.zig");
+    const index = try replacePreviewRow(fx.session, false, true);
+    try p.start(fx.session, index);
+    try waitReplacePreview(fx.session);
+    for (0..4) |fail_index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        fx.session.allocator = failing.allocator();
+        const result = p.start(fx.session, index);
+        fx.session.allocator = testing.allocator;
+        try testing.expectError(error.OutOfMemory, result);
+        try testing.expectEqualStrings("bar", fx.session.editor_search.preview.plan.?.after);
+    }
+    fx.session.editor_search.focused = 3;
+    const d = @import("search/dock.zig");
+    d.setPreedit(fx.session, "한");
+    try testing.expect(!d.canSearch(fx.session));
+    try testing.expectEqualStrings("한", fx.session.editor_search.fields[3].preedit.items);
+    try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .enter } }));
+    try testing.expectEqualStrings("한", fx.session.editor_search.fields[3].preedit.items);
+    try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.preview.phase), .conflict), fx.session.editor_search.preview.phase);
+    try testing.expect(d.commitPreedit(fx.session));
+    try testing.expectEqualStrings("bar한", fx.session.editor_search.fields[3].text.items);
+    try testing.expectEqual(maru.session.editor.search.presentation.Phase.complete, fx.session.editor_search.result.phase);
+    p.back(fx.session);
+    try p.start(fx.session, index);
+    fx.session.editor_search.preview.invalidate(testing.allocator);
+    try waitReplacePreview(fx.session);
+    p.poll(fx.session);
+    try testing.expect(fx.session.editor_search.preview.plan == null);
+    try testing.expectEqualStrings("foo", @import("../pane.zig").activePane(fx.session).activeTerm().rt.editorDocument().opened.?.file.content);
+}
+
 test "EDPSD1 빈 입력과 조합 중 Enter는 worker를 시작하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try PaneFixture.init(testing.allocator);

@@ -12,6 +12,7 @@ const dock = @import("../../dock.zig");
 const pane = @import("../../pane.zig");
 const render = @import("dock/render.zig");
 const navigation = @import("navigation.zig");
+pub const preview = @import("preview.zig");
 pub const collect = render.collect;
 pub const publish = render.publish;
 
@@ -20,7 +21,9 @@ pub const limits: search.request.Limits = .{ .matches = 20_000, .result_bytes = 
 pub const budget: backend.Budget = .{ .timing = .{ .execution_ms = 10_000, .reap_ms = 1000 }, .snapshot_bytes = 64 * 1024 * 1024, .preview_bytes = 256, .selection_bytes = 8 * 1024 * 1024 };
 pub const State = struct {
     result: search.presentation.State = .{},
-    fields: [3]chrome.components.text_field.TextField = .{ .{}, .{}, .{} },
+    fields: [4]chrome.components.text_field.TextField = .{ .{}, .{}, .{}, .{} },
+    replacing: bool = false,
+    preview: preview.State = .{},
     focused: ?usize = null,
     options: [3]bool = .{ false, false, false },
     expanded: bool = false,
@@ -59,6 +62,7 @@ pub const State = struct {
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
         self.invalidate();
         self.dropPending(a);
+        self.preview.deinit(a);
         self.result.deinit(a);
         for (&self.fields) |*field| field.deinit(a);
         self.entries.deinit(a);
@@ -87,7 +91,7 @@ pub fn scaleMilli(self: *const AppSession) u32 {
     return @import("../../agent_dock.zig").agentSessionDockScaleMilli(self);
 }
 pub fn metrics(self: *const AppSession) component.types.Metrics {
-    return component.types.Metrics.resolve(scaleMilli(self), self.editor_search.expanded);
+    return component.types.Metrics.resolveReplace(scaleMilli(self), self.editor_search.expanded, self.editor_search.replacing);
 }
 pub fn resultRect(self: *const AppSession) maru.session.SplitRect {
     var rect = dock.dockGeometry(self).tree_content;
@@ -97,7 +101,13 @@ pub fn resultRect(self: *const AppSession) maru.session.SplitRect {
     return rect;
 }
 pub fn scrollExtent(self: *const AppSession) AppSession.FileTreeScrollExtent {
-    const window = self.editor_search.result.model.window(metrics(self).row, resultRect(self).h, self.editor_search.scroll.offset_y_px);
+    const st = &self.editor_search;
+    if (st.preview.active()) {
+        const count = if (st.preview.plan) |plan| plan.rows.items.len else 0;
+        const height: u32 = @intCast(@min(@as(u64, count) *| metrics(self).row, std.math.maxInt(u32)));
+        return .{ .content_h_px = height, .viewport_h_px = resultRect(self).h, .max_offset_px = height -| resultRect(self).h };
+    }
+    const window = st.result.model.window(metrics(self).row, resultRect(self).h, st.scroll.offset_y_px);
     return .{ .content_h_px = window.content_height, .viewport_h_px = resultRect(self).h, .max_offset_px = window.max_offset };
 }
 pub fn setScroll(self: *AppSession, offset: i64) void {
@@ -127,6 +137,7 @@ pub fn canSearch(self: *const AppSession) bool {
         !self.ime_active and !self.ime_editor_commit_pending;
 }
 fn stopRequest(self: *AppSession) void {
+    self.editor_search.preview.invalidate(self.allocator);
     owner.cancel(self);
     self.editor_search.dropPending(self.allocator);
     if (self.editor_project_search_query) |*query| query.deinit(self.allocator);
@@ -142,12 +153,24 @@ pub fn changed(self: *AppSession) void {
     self.editor_search.scroll.reset();
     self.metal_dirty = true;
 }
+fn edited(self: *AppSession) void {
+    if (self.editor_search.focused == 3) {
+        self.editor_search.preview.invalidate(self.allocator);
+        self.editor_search.invalidate();
+        self.editor_search.result.generation +%= 1;
+        self.metal_dirty = true;
+    } else changed(self);
+}
 pub fn setPreedit(self: *AppSession, bytes: []const u8) void {
     const field = focused(self) orelse return;
     if (bytes.len == 0 and field.preedit.items.len == 0) return;
     // 기존 조합을 비우기 전에 예약한다. 새 조합의 할당 실패도 이전 조합을 보존한다.
     field.preedit.ensureTotalCapacity(self.allocator, bytes.len) catch return;
     field.setPreedit(self.allocator, bytes) catch return;
+    if (self.editor_search.focused == 3) {
+        edited(self);
+        return;
+    }
     stopRequest(self);
     self.editor_search.invalidate();
     self.editor_search.result.preedit(self.allocator);
@@ -161,7 +184,7 @@ pub fn commitText(self: *AppSession, bytes: []const u8) bool {
     field.text.ensureTotalCapacity(self.allocator, required) catch return false;
     field.insertText(self.allocator, bytes) catch return false;
     field.preedit.clearRetainingCapacity();
-    changed(self);
+    edited(self);
     return true;
 }
 pub fn commitPreedit(self: *AppSession) bool {
@@ -301,6 +324,7 @@ pub fn pump(self: *AppSession) void {
         };
     }
     navigation.poll(self);
+    preview.poll(self);
     st.scroll.clamp(scrollExtent(self).max_offset_px);
 }
 pub fn handleRawKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
@@ -308,7 +332,7 @@ pub fn handleRawKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
     switch (event.key) {
         .delete => {
             field.deleteForward();
-            changed(self);
+            edited(self);
         },
         .home => {
             field.moveHome(event.modifiers.shift);
@@ -337,6 +361,7 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
             cancel(self);
         },
         .enter => {
+            if (self.editor_search.focused == 3) return true;
             if (field.preedit.items.len == 0 and (!self.ime_active or !self.ime_had_marked)) {
                 changed(self);
                 if (self.editor_search.result.phase == .waiting) self.editor_search.result.due_ms = now(self);
@@ -345,7 +370,11 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
         },
         .tab => {
             if (!self.tryCommitComposition()) return true;
-            if (self.editor_search.expanded) self.editor_search.focused = (self.editor_search.focused.? + (if (k.mods.shift) @as(usize, 2) else 1)) % 3;
+            const order = if (self.editor_search.expanded) (if (self.editor_search.replacing) &[_]usize{ 0, 3, 1, 2 } else &[_]usize{ 0, 1, 2 }) else if (self.editor_search.replacing) &[_]usize{ 0, 3 } else &[_]usize{0};
+            for (order, 0..) |index, i| if (index == self.editor_search.focused.?) {
+                self.editor_search.focused = order[(i + (if (k.mods.shift) order.len - 1 else 1)) % order.len];
+                break;
+            };
             self.metal_dirty = true;
         },
         .left => {
@@ -358,7 +387,7 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
         },
         .backspace => {
             if (k.mods.command) field.deleteToLineStart() else if (k.mods.option) field.deleteWordBackward(" -_./:") else field.deleteBackward();
-            changed(self);
+            edited(self);
         },
         .char => {
             if (k.mods.command and (k.codepoint == 'a' or k.codepoint == 'A')) {
@@ -384,7 +413,7 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
             if (k.codepoint >= 0x20 and k.codepoint != 0x7f) {
                 field.text.ensureUnusedCapacity(self.allocator, 4) catch return true;
                 field.insertCp(self.allocator, k.codepoint) catch return true;
-                changed(self);
+                edited(self);
             }
         },
         .up => {
@@ -414,7 +443,7 @@ pub fn cut(self: *AppSession) void {
     if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
     self.chrome_clipboard_write = copy;
     _ = field.deleteSelection();
-    changed(self);
+    edited(self);
 }
 pub fn cancelPointer(self: *AppSession) void {
     if (self.editor_search.interaction.hovered != null or self.editor_search.interaction.capture != null) self.metal_dirty = true;
@@ -487,7 +516,7 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
     if (!visible(self) or generation != st.result.generation) return;
     switch (intent) {
         .field => |index| {
-            if (index >= 3 or index > 0 and !st.expanded or !self.tryCommitComposition()) return;
+            if (index >= 4 or index == 3 and !st.replacing or index > 0 and index < 3 and !st.expanded or !self.tryCommitComposition()) return;
             self.chrome_host.find.input_focused = false;
             @import("../../web.zig").cancelAddrEdit(self, false);
             self.sidebar_search_active = false;
@@ -501,9 +530,17 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             if (index < 3) {
                 st.options[index] = !st.options[index];
                 changed(self);
+            } else if (index == 7) {
+                preview.back(self);
+            } else if (index == 6) {
+                preview.back(self);
+                st.replacing = !st.replacing;
+                if (!st.replacing and st.focused == 3) st.focused = 0;
+                st.invalidate();
+                st.result.generation +%= 1;
             } else if (index == 3) {
                 st.expanded = !st.expanded;
-                if (!st.expanded and st.focused != null and st.focused.? > 0) st.focused = 0;
+                if (!st.expanded and st.focused != null and st.focused.? > 0 and st.focused.? < 3) st.focused = 0;
                 st.invalidate();
                 st.result.generation +%= 1;
             }
@@ -511,7 +548,22 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
         .run => run(self),
         .cancel => cancel(self),
         .row => |index| {
+            if (st.preview.active()) return;
             if (index >= st.result.model.visible.items.len) return;
+            if (st.replacing) {
+                preview.start(self, index) catch |err| {
+                    if (err == error.StaleRequest) changed(self) else {
+                        // 실패한 다음 준비가 이미 읽는 미리보기까지 덮어쓰지 않는다.
+                        if (!st.preview.active()) {
+                            st.preview.phase = .failed;
+                            st.preview.failure = err;
+                        }
+                        self.showNoticeKey(if (err == error.OutOfMemory) .dbg_editor_oom else .dbg_editor_unreadable);
+                    }
+                };
+                self.metal_dirty = true;
+                return;
+            }
             switch (st.result.model.visible.items[index]) {
                 .file => |group| {
                     st.result.model.groups.items[group].collapsed = !st.result.model.groups.items[group].collapsed;
@@ -576,7 +628,7 @@ pub fn measure(self: *AppSession, text: []const u8, offsets: [3]usize, width: u3
 
 extern "c" fn maru_macos_coretext_chrome_index(text: [*]const u8, len: usize, family: [*]const u8, family_len: usize, fallback: [*]const u8, fallback_len: usize, font_px: f64, weight: u32, width: f64, x: f64, byte_index: *usize) c_int;
 pub fn byteForPoint(self: *AppSession, index: usize, x: f64) !usize {
-    if (index >= 3) return error.InvalidField;
+    if (index >= 4) return error.InvalidField;
     const st = &self.editor_search;
     const tree: chrome.ui.tree.UiRectTree = .{ .entries = st.entries.items, .generation = st.published_generation };
     const rect = tree.entries[tree.find(component.build.fieldId(index)) orelse return error.NoField].rect;

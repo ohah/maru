@@ -1228,3 +1228,5 @@ ReleaseFast는 `-Doptimize=ReleaseFast`를 추가한다. 후보 합집합·전�
 LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget …`이며,
 기존 `maru lsp …`는 동일한 parser와 request 실행 경로를 쓰는 호환 별칭이다.
 `maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.
+
+프로젝트 바꾸기 미리보기 판정: `mise exec -- zig build test-editor-project-replace-preview` ([범위](plans/editor-project-replace-preview.md)).

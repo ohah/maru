@@ -14359,6 +14359,32 @@ pub const AppSession = struct {
         };
     }
 
+    /// 편집기 헬퍼(자동완성·시그니처·호버)를 **닫아야 하는가** — 입력을 받는 오버레이(`anyOverlayOpen`)나 인라인 rename 이 떠 있다.
+    /// 세 헬퍼의 `refresh` 가 이 판정으로 스스로 닫으려 했지만(자동완성은 이 모양 그대로, 시그니처·호버는 `anyOverlayOpen` 만),
+    /// `refresh` 는 **다른 오버레이가 없을 때만** 불려(`buildChromeOverlayPrep` 의 `draws.items.len == 0`) 그 갈래에 닿지 않았다 — 그래서
+    /// 오버레이 아래 숨은 낡은 목록·호버가 오버레이를 닫은 뒤 다시 떴다(2026-10-09). tick 이 오버레이를 짓기 전에 닫고
+    /// (`closeEditorHelpersBehindOverlay` — 토스트·확정 보류는 빼고, 그 함수 doc), 호버 tick 은 이것이 참이면 새 호버를 묻지 않는다. 보내기 헬퍼는 일부러 남긴다 — 고른 것이
+    /// 그대로라 오버레이가 닫히면 다시 떠야 한다(send-selection-to-agent §6.2).
+    pub fn editorHelpersSuppressed(self: *const AppSession) bool {
+        return self.anyOverlayOpen() or self.rename != null;
+    }
+
+    /// 입력을 받는 오버레이 아래의 헬퍼를 닫는다(tick 이 오버레이를 짓기 전에 부른다). 두 갈래는 일부러 남긴다(2026-10-09 적대적 검증):
+    ///   ⑴ **지나가는 토스트(notice)는 닫는 이유가 아니다** — `anyModalOverlayOpen` 을 쓴다(토스트 제외). 타이핑 중 비동기 토스트 하나에
+    ///      완성 목록이 닫히면 안 된다(VS Code 도 알림에 목록을 안 닫는다). 그리지 않는 판정(`editorHelpersSuppressed`)은 토스트를 포함한다.
+    ///   ⑵ **확정 보류(`pending_accept`) 중인 자동완성은 닫지 않는다** — 사용자가 Enter 로 고른 것이라, 닫으면 그 확정이 사라졌다. 오버레이가
+    ///      없을 때와 똑같이 끝낸다: 응답이 오면 additional 과 함께 넣고(`onResolveResponse`), 시간을 넘기면 여기서 additional 없이 넣는다.
+    fn closeEditorHelpersBehindOverlay(self: *AppSession) void {
+        if (!(self.anyModalOverlayOpen() or self.rename != null)) return;
+        if (self.editor_completion.active) {
+            if (self.editor_completion.pending_accept) {
+                _ = editor_ops.completion_client.acceptPendingOnTimeout(self);
+            } else editor_ops.completion_client.hide(self);
+        }
+        editor_ops.signature_client.hide(self); // 시그니처가 먼저다 — 호버의 hide 는 시그니처가 든 상자를 안 닫는다
+        editor_ops.hover_client.hide(self);
+    }
+
     pub fn interactiveOverlayOpen(self: *const AppSession) bool {
         return self.anyModalOverlayOpen() or self.rename != null;
     }
@@ -20959,6 +20985,7 @@ pub const AppSession = struct {
         editor_ops.lsp_client.pump(self); // §8.2a: 서버 읽기·문서 동기화 — 스레드 없이 tick 에서
         self.flushDeferredResponseNotice(); // §8.2a: 사용자가 그사이 연 오버레이 뒤로 미룬 응답 알림
         editor_ops.rename_client.closeIfDocHidden(self); // §8.2f: 상자가 붙은 문서가 화면에서 사라졌으면 취소(오버레이를 짓기 전)
+        self.closeEditorHelpersBehindOverlay(); // §8.2g: 입력을 받는 오버레이 아래 숨은 자동완성·시그니처·호버를 닫는다(오버레이를 짓기 전)
         editor_ops.hover_client.tick(self); // §8.2b: 포인터 정지 → 호버 요청/열기
         editor_ops.references_client.tick(self); // §8.2l: 「지금은 못 답한다」 뒤 되묻기
         editor_backup_ops.tick(self); // §3.10: 편집이 멎고 debounce 가 지났으면 미저장 내용을 백업한다

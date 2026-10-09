@@ -228,7 +228,7 @@ pub fn refresh(self: *AppSession) bool {
         hide(self);
         return false;
     };
-    if (self.anyOverlayOpen() or term.rt.editor_diff != null) {
+    if (self.editorHelpersSuppressed() or term.rt.editor_diff != null) {
         hide(self);
         return false;
     }

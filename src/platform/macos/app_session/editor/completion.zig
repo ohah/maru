@@ -421,6 +421,19 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
 }
 
 /// 접두사로 다시 좁힌다. `force` 면 접두사가 같아도 다시(목록이 갈아 끼워졌다). 결과가 0 이면 false(호출자가 닫는다).
+/// **확정 보류가 시간을 넘겼으면 additional 없이 지금 확정한다**(§8.2g-b — 응답을 `resolve_wait_ms` 까지만 기다린다). 확정했으면 true.
+/// `refresh` 와 tick 이 함께 부른다 — `refresh` 는 다른 오버레이가 없을 때만 불려, 오버레이 아래에서 보류된 확정은 이 시간 초과에 닿지 않았다
+/// (`AppSession.closeEditorHelpersBehindOverlay`).
+pub fn acceptPendingOnTimeout(self: *AppSession) bool {
+    const st = &self.editor_completion;
+    if (!st.pending_accept or self.awakeMs() -| st.pending_since_ms < resolve_wait_ms) return false;
+    st.pending_accept = false;
+    st.resolve_waiting = false;
+    st.accepted_on_timeout += 1;
+    accept(self); // `resolved` 표시는 안 한다 — accept 는 그 플래그를 안 보고 hide 가 항목을 비운다(적대적 2회차 B18: 죽은 표시였다)
+    return true;
+}
+
 fn refilter(self: *AppSession, term: *Term, force: bool) bool {
     const st = &self.editor_completion;
     const doc = term.rt.editorDocument().opened orelse return false;
@@ -463,7 +476,7 @@ fn rebuildRows(self: *AppSession) bool {
 pub fn refresh(self: *AppSession) bool {
     const st = &self.editor_completion;
     if (!st.active) return false;
-    if (self.anyOverlayOpen() or self.rename != null) {
+    if (self.editorHelpersSuppressed()) { // 같은 판정의 단일 출처(`AppSession.editorHelpersSuppressed`) — tick 이 먼저 닫는다
         hide(self);
         return false;
     }
@@ -496,13 +509,7 @@ pub fn refresh(self: *AppSession) bool {
         return false;
     }
     // 확정이 resolve 를 기다리는 중 — 300 ms 안에 안 오면 additional 없이 적용한다(§8.2g-b).
-    if (st.pending_accept and self.awakeMs() -| st.pending_since_ms >= resolve_wait_ms) {
-        st.pending_accept = false;
-        st.resolve_waiting = false;
-        st.accepted_on_timeout += 1;
-        accept(self); // `resolved` 표시는 안 한다 — accept 는 그 플래그를 안 보고 hide 가 항목을 비운다(적대적 2회차 B18: 죽은 표시였다)
-        return false;
-    }
+    if (acceptPendingOnTimeout(self)) return false;
     const changed = !std.mem.eql(u8, doc.file.content[st.word_start..caret], st.last_prefix.items);
     if (changed and st.incomplete and !st.waiting) { // words_only 는 `incomplete = false` 로 서므로 따로 거르지 않는다(적대적 2회차 B25)
         st.refetched += 1;

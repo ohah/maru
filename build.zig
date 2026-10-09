@@ -5711,6 +5711,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_control_socket_tests = b.addRunArtifact(control_socket_tests);
+        b.step("test-macos-control-socket", "Run native control socket and CLI response round-trip tests").dependOn(&run_control_socket_tests.step);
         test_step.dependOn(&run_control_socket_tests.step);
         macos_only_test_step.dependOn(&run_control_socket_tests.step);
         // control_server.zig(Track C A2b)는 앱 전역 라이브 컨트롤 소켓 + accept 스레드 + 메인 marshal 큐다.

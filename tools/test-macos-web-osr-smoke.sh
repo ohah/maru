@@ -2078,6 +2078,37 @@ else
     fail "a window whose only shell already ended did not close cleanly when the app quit (exit $ended_rc)"
 fi
 
+# ── W9-0: 컨트롤 플레인이 Chromium 탭을 엔진과 함께 알리고, 지원하지 않는 명령은 확인 모달 전에 답한다 ──────────────
+# `maru browser list` 가 이 탭을 engine=chromium(지원 명령 없음)으로 보이고, `maru browser navigate` 는 확인 모달을 띄우지 않고
+# 곧바로 -32008 unsupported_by_engine 으로 답해야 한다(예전엔 모달을 승인한 뒤 실행 단계에서 실패). 엔진 검사는 허용 판정보다
+# 앞이라 pane 밖(이 대본)에서 불러도 같다 — 모달이 떴다면 결정하는 사람이 없어 응답이 시간 초과로 끝난다.
+cli_bin="$PWD/zig-out/bin/maru"
+if [ -x "$cli_bin" ]; then
+    rm -rf "$root/home" && mkdir -p "$root/home"
+    printf 'sleep 14000\n' > "$root/w90.txt"
+    env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
+        MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/solid" \
+        MARU_MACOS_APP_SMOKE_MS=16000 MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel MARU_WEB_OSR_TEST_INPUT="$root/w90.txt" \
+        "$app" > "$root/app-w90.log" 2>&1 &
+    w90_pid=$!
+    sleep 7
+    HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" "$cli_bin" browser list > "$root/w90-list" 2>&1 || true
+    w90_sid=$(awk '/^surface .*engine=chromium/{print $2; exit}' "$root/w90-list")
+    w90_start=$(date +%s)
+    HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" "$cli_bin" browser navigate --surface "${w90_sid:-0}" "http://127.0.0.1:$port/solid" > "$root/w90-nav" 2>&1 || true
+    w90_elapsed=$(( $(date +%s) - w90_start ))
+    wait "$w90_pid" 2>/dev/null || true
+    cat "$root/w90-list"
+    grep -q 'engine=chromium (browser commands not supported yet)' "$root/w90-list" \
+        || fail "the Chromium tab was not listed with its engine ($(tr '\n' ' ' < "$root/w90-list"))"
+    echo "PASS the Chromium tab is listed with engine=chromium and no supported commands yet"
+    grep -q '(-32008)' "$root/w90-nav" && [ "$w90_elapsed" -lt 5 ] \
+        || fail "navigate on the Chromium tab did not answer unsupported_by_engine before any dialog ($w90_elapsed s · $(tr '\n' ' ' < "$root/w90-nav"))"
+    echo "PASS navigate on the Chromium tab answered -32008 without a confirmation dialog ($w90_elapsed s)"
+else
+    echo "WARN W9-0 stage skipped: build the maru cli first"
+fi
+
 # ── 종료 및 세션 끝내기: 셸이 끝났거나 여럿이어도 session host 가 죽지 않고 셸을 다 끝낸다 ─────────────────────
 # 종료 확인의 「종료 및 세션 끝내기」(키 D)는 host 의 셸을 모두 끝내고 앱을 끝낸다. 세 결함이 있었다: (1) 끝나 정리만 남은 셸이 하나라도
 # 있으면 시작 전 검사가 거부해 exit 86, (2) host 가 셸을 끝내는 사이 tick 이 그 끝을 보고 다른 종류의 close(finish)를 보내 86,

@@ -136,6 +136,42 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     return null;
 }
 
+/// wire 메서드 이름(`browser.` 뒤) — `parseBrowserMethod` 의 역. `browser.list` 의 지원 목록이 쓴다.
+pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
+    return switch (m) {
+        .navigate => "navigate",
+        .get_url => "getUrl",
+        .execute_script => "executeScript",
+        .subscribe => "subscribe",
+        .get_cookies => "getCookies",
+        .screenshot => "screenshot",
+        .set_cookie => "setCookie",
+        .delete_cookie => "deleteCookie",
+        .get_local_storage => "getLocalStorage",
+        .set_local_storage => "setLocalStorage",
+        .remove_local_storage => "removeLocalStorage",
+        .clear_storage => "clearStorage",
+        .click => "click",
+        .type_text => "type",
+        .scroll => "scroll",
+        .wait => "wait",
+        .snapshot => "snapshot",
+        .console => "console",
+    };
+}
+
+/// 그 엔진이 이 메서드를 지원하는가(W9-0 — 단일 출처). WebKit 은 지금의 전부, Chromium 은 W9 단계마다 늘어난다(지금은
+/// 없음 — docs/plans/web-osr-backend.md W9). 지원하지 않으면 인가 판정 **전에** `unsupported_by_engine` 으로 답한다.
+pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
+    return switch (engine) {
+        .webkit => true,
+        // W9 단계마다 여기에 메서드를 더한다(예: W9b 의 click·type).
+        .chromium => switch (m) {
+            else => false,
+        },
+    };
+}
+
 inline fn eq(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
 }
@@ -1327,6 +1363,22 @@ pub fn serializeBrowserListResult(gpa: std.mem.Allocator, id: cp.Id, snapshot: c
     return aw.toOwnedSlice();
 }
 
+/// 대상 web surface 의 엔진이 이 메서드를 지원하지 않으면 그 엔진을, 지원하면 null.
+fn unsupportedByEngine(dto: cs.SurfaceDto, m: BrowserMethod) ?cs.WebEngine {
+    const engine = switch (dto.detail) {
+        .web => |w| w.engine,
+        else => return null,
+    };
+    return if (engineSupports(engine, m)) null else engine;
+}
+
+fn unsupportedByEngineResponse(gpa: std.mem.Allocator, id: cp.Id, engine: cs.WebEngine) std.mem.Allocator.Error![]u8 {
+    var data: std.json.ObjectMap = .empty;
+    defer data.deinit(gpa);
+    try data.put(gpa, "engine", .{ .string = engine.wireName() });
+    return cp.serializeError(gpa, id, .unsupported_by_engine, cp.ErrorCode.unsupported_by_engine.defaultMessage(), .{ .object = data });
+}
+
 fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.CollectorSnapshot) !void {
     try beginResult(s, id);
     try s.objectField("surfaces");
@@ -1346,6 +1398,16 @@ fn writeBrowserListResult(s: *std.json.Stringify, id: cp.Id, snapshot: cs.Collec
                     .markdown => "markdown",
                     .browser => "browser",
                 });
+                // W9-0: 엔진과 그 엔진이 지원하는 메서드(에이전트가 「이 탭은 못 한다」를 미리 안다 — Aside 의 탭 목록처럼).
+                try s.objectField("engine");
+                try s.write(w.engine.wireName());
+                try s.objectField("methods");
+                try s.beginArray();
+                inline for (std.meta.fields(BrowserMethod)) |f| {
+                    const m: BrowserMethod = @enumFromInt(f.value);
+                    if (engineSupports(w.engine, m)) try s.write(browserMethodWireName(m));
+                }
+                try s.endArray();
                 try s.endObject();
             },
             else => {}, // terminal surface 제외 — browser.list는 제어 가능한 web만
@@ -1683,6 +1745,7 @@ pub fn browserOpFromRequest(
         // 먼저 → 없음/비-web=unauthorized, 미grant valid=needs_grant(확인 대기), 인가됨만 필터 파싱.
         const sub_dto = snapshot.find(target_id);
         if (sub_dto == null or sub_dto.?.kind() != .web) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        if (unsupportedByEngine(sub_dto.?, bmethod)) |engine| return .{ .err = try unsupportedByEngineResponse(gpa, req.id, engine) };
         if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope); // 미grant valid subscribe → 확인 대기(필터 미파싱)
         const filter = parseSubscribeFilter(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
         return .{ .subscribe = .{ .surface_id = target_id, .filter = filter } };
@@ -1695,6 +1758,9 @@ pub fn browserOpFromRequest(
     //       invalid_params로 답해 파라미터 스키마를 탐침당했다(리뷰 — subscribe는 막았으나 일반 경로가 규율을 놓침). ──
     const dto = snapshot.find(target_id);
     if (dto == null or dto.?.kind() != .web) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+    // W9-0: 엔진이 지원하지 않는 메서드는 확인 모달 **전에** 답한다(예전엔 승인 뒤 실행 단계에서 실패해, 사용자가 허용을 눌러도
+    // 에이전트는 실패를 받았다).
+    if (unsupportedByEngine(dto.?, bmethod)) |engine| return .{ .err = try unsupportedByEngineResponse(gpa, req.id, engine) };
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
     // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
@@ -2832,6 +2898,73 @@ test "serializeBrowserListResult(§9.6): web surface만 나열(터미널 제외)
     try testing.expectEqual(@as(i64, 11), o.get("id").?.integer);
     try testing.expectEqualStrings("https://example/", o.get("url").?.string);
     try testing.expectEqualStrings("browser", o.get("panel_kind").?.string);
+}
+
+// ── W9-0: 엔진별 지원 — 목록에 싣고, 지원하지 않으면 확인 모달 전에 답한다 ──
+
+const fx_engine_surfaces = [_]cs.SurfaceDto{
+    .{ .surface_id = 11, .title = "webkit", .window = 1, .detail = .{ .web = .{ .url = "https://example/", .panel_kind = .browser, .loading = false, .trust = .untrusted } } },
+    .{ .surface_id = 12, .title = "chromium", .window = 1, .detail = .{ .web = .{ .url = "https://example/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium } } },
+};
+const fx_engine_ids = [_]u64{ 11, 12 };
+const fx_engine_windows = [_]wm.WindowMembershipSnapshot{.{ .window_id = 1, .window_kind = .normal, .surface_ids = &fx_engine_ids }};
+const fx_engine: cs.CollectorSnapshot = .{ .surfaces = &fx_engine_surfaces, .windows = &fx_engine_windows };
+
+test "browserMethodWireName 은 parseBrowserMethod 의 역이다(모든 메서드)" {
+    inline for (std.meta.fields(BrowserMethod)) |f| {
+        const m: BrowserMethod = @enumFromInt(f.value);
+        try testing.expectEqual(m, parseBrowserMethod(browserMethodWireName(m)).?);
+    }
+}
+
+test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메서드를 싣는다" {
+    const w = try serializeBrowserListResult(testing.allocator, .{ .number = 1 }, fx_engine);
+    defer testing.allocator.free(w);
+    var pm = try cp.parseMessage(testing.allocator, w);
+    defer pm.deinit();
+    const arr = pm.message.response.result.?.object.get("surfaces").?.array;
+    try testing.expectEqual(@as(usize, 2), arr.items.len);
+    const webkit = arr.items[0].object;
+    try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
+    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len), webkit.get("methods").?.array.items.len);
+    try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
+    const chromium = arr.items[1].object;
+    try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
+    try testing.expectEqual(@as(usize, 0), chromium.get("methods").?.array.items.len); // W9 단계마다 늘어난다
+}
+
+test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant) 전에 unsupported_by_engine 으로 답한다" {
+    var grants: cpg.PaneGrantStore = .{};
+    const nav12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":12,\"url\":\"https://x/\"}}";
+    const sub12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":12}}";
+    for ([_][]const u8{ nav12, sub12 }) |bytes| {
+        // pane 이 있어 WebKit 이었다면 확인 모달을 띄웠을 요청 — Chromium 탭이라 모달 없이 답한다.
+        switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 6, &grants, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+                try testing.expect(std.mem.indexOf(u8, e, "\"engine\":\"chromium\"") != null);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    // WebKit 탭은 그대로 확인 대기.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"https://x/\"}}", fx_engine, &.{}, 6, &grants, 0)) {
+        .needs_grant => |g| try testing.expectEqual(@as(u64, 11), g.target),
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 없는 id·터미널은 지금처럼 균일 unauthorized(엔진 응답이 존재 oracle 이 되지 않게 — 엔진은 web 탭에만 답한다).
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":99,\"url\":\"https://x/\"}}", fx_engine, &.{}, 6, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(e));
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 // ── cookie write(§9.4 D4) params·arg·dispatch·응답 단위 ──

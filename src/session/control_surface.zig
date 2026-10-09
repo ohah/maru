@@ -78,6 +78,20 @@ pub const AtPrompt = enum {
 /// 신뢰 등급(§8.1). `panel_kind=browser`(임의 URL)는 untrusted다.
 pub const TrustLevel = enum { trusted, untrusted };
 
+/// web surface 를 그리는 브라우저 엔진(W9-0). browser 탭은 Chromium sidecar 가 켜져 있으면 chromium, 아니면 webkit 이다.
+/// 신뢰 패널(markdown)·파일 HTML 은 늘 webkit(docs/plans/web-osr-backend.md 분업). 엔진마다 지원하는 `browser.*` 가 다르다.
+pub const WebEngine = enum {
+    webkit,
+    chromium,
+
+    pub fn wireName(self: WebEngine) []const u8 {
+        return switch (self) {
+            .webkit => "webkit",
+            .chromium => "chromium",
+        };
+    }
+};
+
 /// web 패널 종류(§3 `panel_kind`). web-panel.md의 "닫힌 열거"(마크다운 편집·인앱 브라우저) — 새 종류는 사용자
 /// 승인이 필요하다(§1 line 22). 지금 열린 값만 둔다.
 pub const PanelKind = enum { markdown, browser };
@@ -161,6 +175,9 @@ pub const WebMeta = struct {
     loading: bool = false,
     /// 신뢰 등급(§8.1).
     trust: TrustLevel,
+    /// 그리는 엔진(W9-0). collector 가 탭 단위 결정(`isOsrTerm`)으로 채운다 — Chromium 브라우저가 아직 만들어지지 않은(한 번도
+    /// 보이지 않은) 탭도 chromium 이다.
+    engine: WebEngine = .webkit,
 };
 
 /// kind에 따라 분기하는 전용 메타(tagged). terminal이면 web 필드를, web이면 terminal 필드를 **타입 수준에서**

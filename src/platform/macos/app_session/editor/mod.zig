@@ -57158,3 +57158,202 @@ test "U2J 이름 없는 문서 저장 상자는 다른 오버레이가 없어도
     try testing.expect(s.rename == null);
     try testing.expect(!s.overlayFrameNeeded());
 }
+
+test "HELP5 자동완성 목록이 열린 채 F2 — tick 이 숨은 목록을 닫아, 이름 상자를 닫은 뒤 낡은 목록이 다시 뜨지 않는다 (제품 경계, §8.2g)" {
+    // #4247 은 숨은 목록이 포인터를 못 받게만 했다(상태는 남김). 세 헬퍼의 `refresh` 는 오버레이가 있으면 스스로 닫으려 했지만 오버레이가 있을 때는
+    // 불리지 않아 닿지 않았다 — 그래서 상자를 닫으면 F2 전의 목록이 다시 떴다. 이제 tick 이 오버레이를 짓기 전에 닫는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    _ = try h.openCompletion();
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null);
+    try testing.expect(s.editor_completion.active); // F2 는 목록을 닫지 않는다(↑↓·Enter·Tab·Esc 만 가져간다)
+    _ = try s.tick();
+    try testing.expect(!s.editor_completion.active); // ★ tick 이 닫았다
+    try pressKey(&h.fx, .escape, .{});
+    try testing.expect(s.rename == null);
+    try h.frame();
+    try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open); // 낡은 목록이 다시 안 뜬다
+}
+
+test "HELP6 자동완성 목록이 열린 채 메뉴바로 팔레트를 열면 — tick 이 숨은 목록을 닫는다; 팔레트를 닫아도 다시 안 뜬다 (제품 경계, §8.2g)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    _ = try h.openCompletion();
+    try testing.expect(s.runAction("toggle_command_palette"));
+    _ = try s.tick();
+    try testing.expect(!s.editor_completion.active);
+    s.dismissMessageOverlays();
+    try h.frame();
+    try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open);
+}
+
+test "HELP7 호버 상자가 열린 채 메뉴바로 팔레트를 열면 — tick 이 숨은 호버를 닫는다 (제품 경계, §8.2b)" {
+    // 메뉴바 경로는 편집기 키 경로(`hover_client.noteKey`)를 안 지나 호버가 남았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, "int x;\nint y;\n");
+    const s = h.fx.session;
+    try h.frame();
+    const p1 = pointerAtOffset(h.term, 1) orelse return error.NoPointer;
+    _ = s.hoverCursor(p1.x, p1.y, 0);
+    try testing.expect(pumpHoverUntil(&h.fx, 3000, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    try testing.expect(s.runAction("toggle_command_palette"));
+    try testing.expect(s.chrome_host.hover_box.open); // 메뉴바 경로는 호버를 안 닫는다
+    _ = try s.tick();
+    try testing.expect(!s.chrome_host.hover_box.open); // ★
+}
+
+test "HELP8 시그니처 힌트가 열린 채 메뉴바로 팔레트를 열면 — tick 이 숨은 시그니처를 닫는다 (제품 경계, §8.2d)" {
+    // 시그니처는 `Esc` 로만 닫혀(타이핑하며 보는 것이라) 메뉴바로 연 오버레이 아래에 남았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, "int x;\n\n");
+    const s = h.fx.session;
+    h.term.rt.editor_selection = .{ .anchor_start = 7, .anchor_end = 7, .focus = 7 };
+    try testing.expect(insertText(s, h.term, "add("));
+    try testing.expect(pumpLspUntil(&h.fx, 3000, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try testing.expect(s.chrome_host.hover_box.open);
+    try testing.expect(s.runAction("toggle_command_palette"));
+    _ = try s.tick();
+    try testing.expect(!s.editor_signature.active); // ★
+    try testing.expect(!s.chrome_host.hover_box.open);
+}
+
+test "HELP9 심볼 이름 상자가 열린 동안 포인터가 낱말에 머물러도 — 호버를 묻지 않는다 (제품 경계, §8.2b·§8.2f)" {
+    // 호버 tick 은 `anyOverlayOpen` 만 봐서(인라인 rename 은 그 집합에 없다) 상자가 열린 채 포인터가 머물면 요청이 나갔고, 상자를 닫으면
+    // 낡은 호버가 떴다. 이제 `editorHelpersSuppressed` 를 본다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    try h.frame();
+    h.term.rt.editor_selection = .{ .anchor_start = 23, .anchor_end = 23, .focus = 23 }; // `add` 안
+    try pressKey(&h.fx, .{ .function = 2 }, .{});
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    const hovers_before = s.editor_lsp.sent_hovers;
+    const p = pointerAtOffset(h.term, 5) orelse return error.NoPointer; // `printf` 위(상자 밖)
+    _ = s.hoverCursor(p.x, p.y, 0);
+    const opened = pumpHoverUntil(&h.fx, 900, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.editor_lsp.sent_hovers > 0 or c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f); // 지연(300 ms)의 세 배를 기다린다
+    try testing.expect(!opened);
+    try testing.expectEqual(hovers_before, s.editor_lsp.sent_hovers);
+    try pressKey(&h.fx, .escape, .{});
+}
+
+const pending_doc = "int printf(int x);\nint main() {\n  \n}\n"; // CMP4 와 같은 문서 — 셋째 줄 "  " 뒤(34)에서 친다
+
+/// HELP10·11 — `laz` 를 쳐 강조가 `lazy_import`(resolve 전)에 오게 하고 Enter → 확정 보류(`pending_accept`)까지.
+fn pendingAcceptFixture(h: *HelperFx) !void {
+    const s = h.fx.session;
+    h.term.rt.editor_selection = .{ .anchor_start = 34, .anchor_end = 34, .focus = 34 };
+    try testing.expect(insertText(s, h.term, "laz"));
+    try testing.expect(pumpLspUntil(&h.fx, 3000, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return !c.fx.session.editor_completion.waiting;
+        }
+    }.f));
+    try h.frame();
+    var guard: usize = 0;
+    while (!std.mem.eql(u8, completion_client.rows(s)[s.chrome_host.suggest_box.selected].label, "lazy_import")) : (guard += 1) {
+        if (guard > 20) return error.NoLazyItem;
+        try pressKey(&h.fx, .arrow_down, .{});
+    }
+    try pressKey(&h.fx, .enter, .{}); // resolve 응답 전 — 기다린다(CMP4 ⑶)
+    try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active);
+}
+
+test "HELP10 확정 보류 중에 메뉴바로 팔레트를 열어도 — 사용자가 Enter 로 고른 항목이 응답 뒤 additional 과 함께 들어간다 (제품 경계, §8.2g-b)" {
+    // 2026-10-09 적대적 검증: 숨은 헬퍼를 tick 에서 닫는 첫 구현이 `hide` 로 `pending_accept` 까지 지워 **고른 항목이 사라졌다**. 보류 중이면
+    // 닫지 않고, 오버레이가 없을 때와 똑같이 끝낸다 — 응답이 오면 additional(import)까지 한 번에.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, pending_doc);
+    const s = h.fx.session;
+    try pendingAcceptFixture(&h);
+    try testing.expect(s.runAction("toggle_command_palette"));
+    // 응답은 첫 tick 안(tick 이 LSP 를 먼저 펌프한다)에 올 수도, 그 뒤에 올 수도 있다 — 어느 쪽이든 끝 상태를 잰다. 「보류가 tick 뒤에도 산다」는
+    // 응답이 오지 않는 HELP11 이 결정적으로 잰다.
+    const t0 = s.awakeMs();
+    while (s.editor_completion.active and s.awakeMs() - t0 < 3000) {
+        lsp_client.pump(s);
+        _ = try s.tick();
+        _ = usleep(2_000);
+    }
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_after_resolve);
+    try testing.expectEqualStrings("#include \"lazy.h\"\nint printf(int x);\nint main() {\n  lazy_import\n}\n", h.content());
+    try testing.expect(s.chrome_host.palette.open); // 팔레트는 그대로
+}
+
+test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 않으면 — 오버레이 아래에서도 300 ms 뒤 additional 없이 들어간다 (제품 경계, §8.2g-b)" {
+    // 시간 초과 확정은 `refresh` 안에만 있었는데 `refresh` 는 다른 오버레이가 없을 때만 불린다 — 그래서 tick 도 같은 함수를 부른다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n"); // 표식 — 가짜 서버가 resolve 에 답하지 않는다
+    const s = h.fx.session;
+    try pendingAcceptFixture(&h);
+    try testing.expect(s.runAction("toggle_command_palette"));
+    const start = s.awakeMs();
+    _ = try s.tick();
+    // ★ 보류는 tick 뒤에도 산다 — 서버가 답하지 않으므로(`RESOLVESTALL`) 이 순서는 결정적이다. 예전 구현은 여기서 `hide` 로 지웠다.
+    try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active);
+    while (s.editor_completion.active and s.awakeMs() - start < 3000) {
+        lsp_client.pump(s);
+        _ = try s.tick();
+        _ = usleep(5_000);
+    }
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
+    try testing.expect(s.awakeMs() - start >= 250); // 기다렸다(보류를 곧바로 버리거나 넣지 않았다)
+    try testing.expect(std.mem.indexOf(u8, h.content(), "  lazy_import\n") != null);
+    try testing.expect(std.mem.indexOf(u8, h.content(), "lazy.h") == null);
+    try testing.expect(s.chrome_host.palette.open);
+}
+
+test "HELP12 지나가는 토스트는 자동완성을 닫는 이유가 아니다 — 토스트가 닫히면 같은 목록이 다시 보인다 (제품 경계, §8.2g)" {
+    // 2026-10-09 적대적 검증: 닫는 판정이 `anyOverlayOpen`(토스트 포함)이면 타이핑 중 비동기 토스트 하나에 목록이 닫혔다(VS Code 도 알림에 목록을
+    // 안 닫는다). 닫는 판정은 `anyModalOverlayOpen`(토스트 제외)이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    _ = try h.openCompletion();
+    s.showNoticeKey(.nav_no_definition); // 비동기로 뜬 토스트(응답 알림 등)
+    _ = try s.tick();
+    try testing.expect(s.editor_completion.active); // ★ 닫히지 않았다
+    s.chrome_host.notice.dismiss();
+    try h.frame();
+    try testing.expect(s.chrome_host.suggest_box.open); // 다시 보인다
+}

@@ -129,7 +129,9 @@ pub fn tick(self: *AppSession) void {
     if (now -| st.pointer_moved_ms < delayMs(self)) return;
     st.stop_judged = true;
     if (self.pointer_gesture_owner != .none) return; // 드래그 중에는 안 연다
-    if (self.anyOverlayOpen()) return;
+    // 입력을 받는 오버레이·인라인 rename 이 떠 있으면 새 호버를 묻지 않는다 — 이름 상자가 열린 채 포인터가 낱말에 머물면 요청이 나가
+    // 상자를 닫은 뒤 낡은 호버가 떴다(2026-10-09, `AppSession.editorHelpersSuppressed`).
+    if (self.editorHelpersSuppressed()) return;
     const term = pane_ops.activePane(self).activeTerm();
     const off = pointerOffsetWithSession(self, term, st.pointer_x, st.pointer_y) orelse return;
     begin(self, term, off, true);
@@ -410,7 +412,7 @@ pub fn refresh(self: *AppSession) bool {
         hide(self);
         return false;
     };
-    if (term.rt.editorDocument().notifications.lsp_version != st.shown_version or self.anyOverlayOpen()) {
+    if (term.rt.editorDocument().notifications.lsp_version != st.shown_version or self.editorHelpersSuppressed()) {
         hide(self);
         return false;
     }

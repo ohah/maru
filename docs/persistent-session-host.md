@@ -3481,7 +3481,8 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    보지 않고 끝난 뒤의 closeAndDetach가 routing 연결도 끊으므로 그대로 둔다. **남은 것(기존 결함)**: 「종료 및 세션 끝내기」
    (`prepareAppQuitEndAll`)는 backend의 모든 runtime이 pristine이기를 요구해, 끝난 셸이 거둬지지 않고 남은 창(시작 직후 종료로 유지한
    창, 다운로드로 숨겨 쥔 세션, 저장하지 않은 파일 패널로 남은 창)이 있으면 `proof_loss`다. closeAndDetach가 `event_pending`인 Term에
-   끝이 오면 tick의 finish가 kind 불일치다. finish가 끝나기 전에 창 teardown이 오면 deinit pass 1의 panic이다.
+   끝이 오면 tick의 finish가 kind 불일치다. finish가 끝나기 전에 창 teardown이 오면 deinit pass 1의, 사용자가 그 탭·pane·Term을
+   닫으면(`closeTab`·`closeActivePane`·`closeActiveTerm` → `destroyTerm`) destroy의 panic이다(전에는 둘 다 86).
 
    heap-pin된 `RemoteRuntime.CloseAuthority`의 불변 identity seal tuple은
    `{self_addr,pid,process_nonce,thread_id,runtime_addr,handle,runtime_generation,host_id,close_request_generation,

@@ -11963,6 +11963,66 @@ test "kitty 애니메이션: placeholder 셀이 없는 화면에서는 U=1 애�
     try std.testing.expect(core.advanceAnimations(40));
 }
 
+// **placeholder 좌표 결합문자는 297개 전부 0폭이어야 한다.** kitty 가 배포하는 `rowcolumn-diacritics.txt`
+// 는 Unicode 의 «Mn;230» 결합 부호로만 짜였고(그 파일 머리말), 셸·tmux 의 `wcwidth` 도 그것들을 0폭으로
+// 센다. 코어가 하나라도 폭 1로 세면 그 결합문자가 **자기 셀**을 차지해 뒤 칸이 밀린다. 실측(2026-10-09):
+// 폭 표가 앞 30개(U+0305…U+036F)만 0폭으로 알아서, tmux 안 terminal-browser 화면이 왼쪽 위 30×30 만
+// 그림이 되고 그 오른쪽은 세로 줄무늬, 30행 아래는 결합문자 글리프 격자가 됐다.
+//
+// 모든 diacritic 을 **행 자리와 열 자리 둘 다**에 한 번씩 쓴다 — 한쪽만 재면 다른 쪽 자리의 실패를 못 본다.
+// 둘째 행은 tmux 가 바깥 터미널로 실제로 보내는 모양(base → BS → base+행 → BS → base+행+열)을 그대로
+// 흉내 낸다(tmux 3.6a/3.6b 바이트 캡처로 확인한 형태).
+test "kitty placeholder: 좌표 결합문자 297개가 전부 0폭이라 셀이 밀리지 않고 제 좌표로 풀린다 (tmux 실측)" {
+    const kitty_placeholder = @import("kitty_placeholder.zig");
+    const diacritics = kitty_placeholder.row_column_diacritics;
+    const n: u16 = diacritics.len;
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = n, .rows = 2 });
+    defer core.deinit();
+
+    const ph = "\u{10EEEE}";
+    var buf: [32]u8 = undefined;
+    try core.write("\x1b[1;1H\x1b[38;2;0;0;7m");
+    for (diacritics) |d| {
+        var len: usize = ph.len;
+        @memcpy(buf[0..ph.len], ph);
+        len += try std.unicode.utf8Encode(d, buf[len..]);
+        len += try std.unicode.utf8Encode(d, buf[len..]);
+        try core.write(buf[0..len]);
+    }
+    // 한 칸으로 되돌아가는 법도 tmux 를 따른다: 보통은 BS, **마지막 칸에서는 CUP** 다(캡처의
+    // `\x1b[1;30H`). 마지막 칸은 deferred wrap 이 걸린 자리라 tmux 가 BS 를 안 쓴다.
+    try core.write("\x1b[2;1H");
+    var back_buf: [16]u8 = undefined;
+    for (diacritics, 0..) |d, col| {
+        const back = if (col + 1 == n)
+            try std.fmt.bufPrint(&back_buf, "\x1b[2;{d}H", .{n})
+        else
+            "\x08";
+        try core.write(ph);
+        try core.write(back);
+        var len: usize = ph.len;
+        @memcpy(buf[0..ph.len], ph);
+        len += try std.unicode.utf8Encode(diacritics[0], buf[len..]);
+        try core.write(buf[0..len]);
+        try core.write(back);
+        len += try std.unicode.utf8Encode(d, buf[len..]);
+        try core.write(buf[0..len]);
+    }
+
+    for (0..2) |row| {
+        for (0..n) |col| {
+            const cell = core.screen.cells[core.index(@intCast(row), @intCast(col))];
+            const ref = kitty_placeholder.placeholderAt(cell, core.grapheme_store.items) orelse {
+                std.debug.print("row {d} col {d}: placeholder 로 안 풀린다 (codepoint U+{X})\n", .{ row, col, cell.codepoint });
+                return error.PlaceholderNotDecoded;
+            };
+            try std.testing.expectEqual(@as(u32, 7), ref.image_id);
+            try std.testing.expectEqual(@as(u32, if (row == 0) @intCast(col) else 0), ref.tile_row);
+            try std.testing.expectEqual(@as(u32, @intCast(col)), ref.tile_col);
+        }
+    }
+}
+
 // **U=1 격자도 화면에 귀속된다.** #3631 이 정규 배치를 화면에 묶을 때 가상 배치는 「위치를
 // placeholder 셀이 정하니 구조상 이미 귀속된다」고 보고 손대지 않았다 — **틀렸다**. 위치는
 // 그렇지만 **격자(c x r)** 는 전역 등록부에 있고 교체 키에 화면이 없었다. 실측(적대적 검증):

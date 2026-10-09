@@ -157,9 +157,9 @@ pub fn commitText(self: *AppSession, bytes: []const u8) bool {
     changed(self);
     return true;
 }
-pub fn commitPreedit(self: *AppSession) void {
-    const field = focused(self) orelse return;
-    if (field.preedit.items.len != 0) _ = commitText(self, field.preedit.items);
+pub fn commitPreedit(self: *AppSession) bool {
+    const field = focused(self) orelse return true;
+    return field.preedit.items.len == 0 or commitText(self, field.preedit.items);
 }
 pub fn open(self: *AppSession) void {
     if (!self.tryCommitComposition()) return;
@@ -174,12 +174,12 @@ pub fn open(self: *AppSession) void {
     changed(self);
 }
 pub fn blur(self: *AppSession) void {
-    commitPreedit(self);
+    if (!commitPreedit(self)) return;
     self.editor_search.focused = null;
     self.metal_dirty = true;
 }
 pub fn leave(self: *AppSession) void {
-    commitPreedit(self);
+    if (!commitPreedit(self)) return;
     self.editor_search.focused = null;
     stopRequest(self);
     self.editor_search.invalidate();
@@ -236,7 +236,7 @@ pub fn refreshForFocus(self: *AppSession) void {
         self.editor_project_search_live = null;
     };
     if (!dock.dockVisible(self) or self.dock.view != .project_search) {
-        if (self.editor_search.focused != null or self.editor_search.result.phase == .running or self.editor_search.result.phase == .waiting or self.editor_search.result.phase == .composing) leave(self);
+        if (self.editor_search.nav != null or self.editor_search.focused != null or self.editor_search.result.phase == .running or self.editor_search.result.phase == .waiting or self.editor_search.result.phase == .composing) leave(self);
         cancelPointer(self);
         return;
     }
@@ -323,7 +323,7 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
     };
     switch (k.key) {
         .escape => {
-            self.commitComposition();
+            if (!self.tryCommitComposition()) return true;
             self.editor_search.focused = null;
             cancel(self);
         },
@@ -335,7 +335,7 @@ pub fn handleKey(self: *AppSession, event: chrome.input.InputEvent) bool {
             }
         },
         .tab => {
-            self.commitComposition();
+            if (!self.tryCommitComposition()) return true;
             if (self.editor_search.expanded) self.editor_search.focused = (self.editor_search.focused.? + (if (k.mods.shift) @as(usize, 2) else 1)) % 3;
             self.metal_dirty = true;
         },

@@ -55406,7 +55406,7 @@ test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수�
     d.open(fx.session);
     d.setPreedit(fx.session, "한");
     const generation = fx.session.editor_search.result.generation;
-    d.commitPreedit(fx.session);
+    try testing.expect(d.commitPreedit(fx.session));
     try testing.expectEqualStrings("한", fx.session.editor_search.fields[0].text.items);
     try testing.expect(fx.session.editor_search.result.generation > generation);
     try testing.expectEqual(maru.session.editor.search.presentation.Phase.waiting, fx.session.editor_search.result.phase);
@@ -55436,6 +55436,20 @@ test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수�
     try testing.expect(!accepted);
     try testing.expectEqualStrings("간", fx.session.editor_search.fields[0].text.items);
     try testing.expectEqualStrings("나", fx.session.editor_search.fields[0].preedit.items);
+    try testing.expect(fx.session.editor_search.fields[0].selection != null);
+    // OS의 marked session 폐기 허가와 Tab/Esc 포커스 전환도 같은 실패를 받아야 한다.
+    d.setPreedit(fx.session, &huge);
+    fx.session.editor_search.expanded = true;
+    fx.session.surface_initialized = true;
+    var commit_failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    fx.session.allocator = commit_failing.allocator();
+    defer fx.session.allocator = testing.allocator;
+    try testing.expect(!fx.session.tryCommitComposition());
+    try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .tab } }));
+    try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .escape } }));
+    try testing.expectEqual(@as(?usize, 0), fx.session.editor_search.focused);
+    try testing.expectEqualStrings("간", fx.session.editor_search.fields[0].text.items);
+    try testing.expectEqualSlices(u8, &huge, fx.session.editor_search.fields[0].preedit.items);
     try testing.expect(fx.session.editor_search.fields[0].selection != null);
 }
 test "EDPSD3 glob 쉼표는 brace와 class 안에서 나누지 않는다" {
@@ -55472,7 +55486,11 @@ test "EDPSD5 불변 문서 해시는 worker가 종료된 뒤 일치한다" {
     defer file.deinit();
     const verify = @import("search/verify.zig");
     const loaded = try verify.Loaded.start(testing.allocator, &file);
-    defer loaded.deinit();
+    defer {
+        // done은 결과 공개 시점이다. allocator 검사 전 worker의 마지막 참조 해제도 기다린다.
+        while (loaded.refs.load(.acquire) != 1) std.Thread.yield() catch {};
+        loaded.deinit();
+    }
     while (!loaded.done.load(.acquire)) try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
     var expected: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(file.content, &expected, .{});
@@ -55481,7 +55499,7 @@ test "EDPSD5 불변 문서 해시는 worker가 종료된 뒤 일치한다" {
 }
 test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    for ([_]u2{ 0, 1, 2 }) |mode| {
+    for ([_]u2{ 0, 1, 2, 3 }) |mode| {
         const modified = mode == 1;
         var fx = try PaneFixture.init(testing.allocator);
         defer fx.deinit(testing.allocator);
@@ -55518,6 +55536,13 @@ test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막
         if (modified) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "src/[/disk.txt", .data = "bar disk\n" });
         const nav = @import("search/navigation.zig");
         try nav.start(fx.session, disk_row.?, 0);
+        if (mode == 3) {
+            // 입력 포커스를 잃은 완료 결과에서도 숨긴 도크의 클릭 worker는 파일을 열면 안 된다.
+            fx.session.editor_search.focused = null;
+            fx.session.dock.view = .explorer;
+            d.refreshForFocus(fx.session);
+            try testing.expect(fx.session.editor_search.nav.?.cancelled);
+        }
         if (mode == 2) {
             while (!fx.session.editor_search.nav.?.job.done()) {
                 if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
@@ -55532,7 +55557,7 @@ test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막
             try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
         }
         const active = @import("../pane.zig").activePane(fx.session).activeTerm();
-        if (modified) {
+        if (modified or mode == 3) {
             try testing.expectEqual(term.surface.id, active.surface.id);
             try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
         } else if (mode == 2) {

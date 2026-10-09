@@ -95,6 +95,29 @@ ReleaseFast에서 앱 호스트와 같은 `smp_allocator`를 사용한 두 실�
 디스크가 검색 전에 바뀐 경우뿐 아니라 재검색 후 같은 preview를 유지한 채 뒤쪽 내용이 바뀐 경우도 이동을 막는다.
 변경 없는 BOM/CRLF 파일의 실제 열기·선택은 성공한다. 이 판정은 물리 입력기나 VoiceOver 편집을 증명하지 않는다.
 
+## 추가 검증에서 수정한 경계
+
+- `navigation.poll`은 첫 결과 수신 뒤 완료 신호가 게시되는 경우를 고려해, 완료 확인 뒤 마지막 배치를 다시 읽는다.
+  그렇지 않으면 변경 없는 파일도 일치 결과가 없는 것으로 처리할 수 있다. 재검증의 내용·해시 조건은 유지한다.
+- `dock.commitPreedit`은 확정 성공 여부를 반환하고 `AppSession.tryCommitComposition`이 이를 전달한다.
+  할당 실패 시 OS marked session 폐기를 허가하거나 Tab·Esc로 입력 포커스를 옮기지 않는다.
+  실패 주입 판정은 본문·선택·조합·입력 포커스 보존을 확인한다.
+- 검색이 완료되고 입력 포커스가 없어도 도크를 숨기면 진행 중인 클릭 재검증을 취소한다.
+  `EDPSD6`은 다른 도크로 전환한 뒤 파일 열기·이동 이력이 생기지 않는 경우도 확인한다.
+- 해시 worker 판정은 결과 공개인 `done`뿐 아니라 worker 참조 해제까지 기다리고 allocator를 검사한다.
+  제품 경로의 detached worker 소유권과 결과 공개 순서는 바꾸지 않는다.
+
+입력·클릭 기하 경계, worker 수명·완료 경쟁, 디스크·루트·glob 경계를 각각 검토했다.
+실제 helper adapter 21개, worker 141개, 다중 루트 20개 판정은 통과했다.
+격리 소스에서 확정 실패 전달을 제거하면 `EDPSD2`가 반환값 assertion으로 실패한다.
+첫 수신에는 행이 없고 완료 때 마지막 행이 도착한 스케줄을 강제하면 수정본은 통과하며,
+완료 후 재수신을 제거한 음성 대조는 `EDPSD6`의 정상 파일 이동 assertion으로 실패한다.
+도크 숨김 취소를 제거한 격리 소스도 `EDPSD6`의 취소 상태 assertion으로 실패했다.
+새 빌드의 60개 모델 일치·2개 디스크 일치에서 실제 입력·선택·파일 열기·하단 스크롤·취소를 확인했다.
+하네스는 하단 첫 표시 행을 디스크 결과라고 가정하지 않고 결과 source를 확인해 클릭한다.
+이 표본은 `/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-editor-project-search-app-_0395vmn/manifest.json`에 남겼다.
+물리 IME와 VoiceOver 경계는 아래 제품 한계와 동일하며 이 검토로 완료 처리하지 않는다.
+
 ## 제품 실측 (2026-10-09)
 
 `python3 tools/editor-project-search-app/run.py --count 12000 --disk-files 2048`의 격리된 실제 앱 표본이다.

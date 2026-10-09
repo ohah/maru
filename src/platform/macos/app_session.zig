@@ -96420,11 +96420,32 @@ test "OVF1 오버레이 프레임이 그리는 출처마다 관문(overlayFrameN
         }
     }.f;
     const prep = try body(src, "    pub fn buildChromeOverlayPrep(self: *AppSession) !?OverlayPrep {");
-    const gate_a = try body(src, "    pub fn overlayFrameNeeded(self: *const AppSession) bool {");
-    const gate_b = try body(src, "    pub fn anyOverlayOpen(self: *const AppSession) bool {");
+    // 관문은 **주석을 걷고** 본다 — 조건 코드를 지우고 주석에만 그 말을 남겨도 통과하던 구멍(2026-10-09 사후 적대적 검증).
+    const stripComments = struct {
+        fn f(a: std.mem.Allocator, text: []const u8) ![]u8 {
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(a);
+            var it = std.mem.splitScalar(u8, text, '\n');
+            while (it.next()) |line| {
+                const code = if (std.mem.indexOf(u8, line, "//")) |c| line[0..c] else line;
+                try out.appendSlice(a, code);
+                try out.append(a, '\n');
+            }
+            return out.toOwnedSlice(a);
+        }
+    }.f;
+    const gate_a = try stripComments(std.testing.allocator, try body(src, "    pub fn overlayFrameNeeded(self: *const AppSession) bool {"));
+    defer std.testing.allocator.free(gate_a);
+    const gate_b = try stripComments(std.testing.allocator, try body(src, "    pub fn anyOverlayOpen(self: *const AppSession) bool {"));
+    defer std.testing.allocator.free(gate_b);
+    // 관문이 `anyOverlayOpen` 을 실제로 부른다 — 그래야 그 본문의 말이 관문의 말이다.
+    if (std.mem.indexOf(u8, gate_a, "self.anyOverlayOpen()") == null) return error.GateDoesNotCallAnyOverlayOpen;
     const Source = struct { call: []const u8, count: usize, gates: []const []const u8 };
     const sources = [_]Source{
-        .{ .call = "collectDraws(", .count = 1, .gates = &.{ "notice.open", "confirm.open", "find.open", "find_secondary.open" } }, // 알림·확인창·찾기(+비교 뷰 둘째)
+        // 알림·확인창·찾기(+비교 뷰 둘째). **찾기는 `overlayFrameNeeded` 자신의 넓은 조건**(`chrome_host.find.open`)을 요구한다 — `anyOverlayOpen` 의
+        // `h.find.open and h.find.input_focused` 는 포커스가 있을 때만이라, 그것만 남으면 포커스 없는 찾기 막대(편집기를 눌렀거나 ⌘G 중)가 다른
+        // 오버레이 없이 안 그려진다. 예전 표는 `find.open` 이 그쪽에도 있어 그 줄을 지워도 통과했다(뮤테이션 생존, OVF3 가 동작으로도 잰다).
+        .{ .call = "collectDraws(", .count = 1, .gates = &.{ "notice.open", "confirm.open", "chrome_host.find.open", "find_secondary.open" } },
         .{ .call = "collectPaletteDraws(", .count = 1, .gates = &.{"palette.open"} },
         .{ .call = "collectSymbolPickerDraws(", .count = 1, .gates = &.{"symbol_picker.open"} },
         .{ .call = "collectRecoveryPickerDraws(", .count = 1, .gates = &.{"recovery_picker.open"} },
@@ -96468,6 +96489,16 @@ test "OVF1 오버레이 프레임이 그리는 출처마다 관문(overlayFrameN
         std.debug.print("buildChromeOverlayPrep 의 그리기 호출이 {d}개인데 표는 {d}개 — 새 출처의 관문을 세우고 표에 적는다\n", .{ total, listed });
         return error.OverlaySourceUnlisted;
     }
+    // **이름이 다른 출처도 센다**(2026-10-09 사후 적대적 검증) — 위는 `collect…Draws(` 이름만 본다. 그리기 목록을 받는 호출은 전부 `&draws` 를
+    // 넘기므로 그 수가 표와 같아야 하고(다른 이름의 `appendFoo(self, &draws)` 가 생기면 여기서 갈린다), 목록에 직접 넣는 `draws.append(` 는 없어야 한다.
+    const prep_code = try stripComments(std.testing.allocator, prep);
+    defer std.testing.allocator.free(prep_code);
+    const handed = std.mem.count(u8, prep_code, "&draws");
+    if (handed != listed) {
+        std.debug.print("buildChromeOverlayPrep 이 그리기 목록(&draws)을 {d}번 넘기는데 표는 {d}개 — 이름이 다른 그리기 출처가 있다\n", .{ handed, listed });
+        return error.OverlaySourceUnlistedByName;
+    }
+    if (std.mem.indexOf(u8, prep_code, "draws.append(") != null) return error.OverlayDrawAppendedDirectly;
 }
 
 test "OVF2 마커 이미지 프리뷰가 「풀 수 없다」로 끝나면 — 다른 오버레이 없이도 관문이 서고 그 프레임에 안내 글자가 실린다; 정상 프리뷰는 관문을 세우지 않는다" {
@@ -96509,4 +96540,31 @@ test "OVF2 마커 이미지 프리뷰가 「풀 수 없다」로 끝나면 — �
         found = true;
     };
     try std.testing.expect(found); // 안내 글자가 실렸다
+}
+
+test "OVF3 찾기 막대가 열려 있고 입력에 포커스가 없을 때도 — 다른 오버레이 없이 관문이 서고 그 프레임에 찾기 막대가 실린다" {
+    // 편집기를 눌렀거나 ⌘G 로 넘기는 중이면 찾기 막대는 남고 입력 포커스만 빠진다. 그때 `anyOverlayOpen` 은 거짓이라(포커스 있는 찾기만 센다)
+    // 관문은 `overlayFrameNeeded` 자신의 `chrome_host.find.open` 이 세운다 — 그 줄을 지워도 잡는 판정자가 없었다(2026-10-09 뮤테이션 생존).
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    try std.testing.expect(!session.overlayFrameNeeded());
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    session.chrome_host.find.input_focused = false; // 편집기를 눌러 포커스가 빠진 상태
+    try std.testing.expect(!session.anyOverlayOpen()); // 전제: 그 집합으로는 세지 않는다
+    try std.testing.expect(session.overlayFrameNeeded()); // ★ 관문은 선다
+    var prep = (try session.buildChromeOverlayPrep()) orelse return error.FindBarNotDrawn;
+    defer prep.dl.deinit(allocator);
+    try std.testing.expect(prep.dl.cells.len > 0); // 찾기 막대의 글자가 실렸다
 }

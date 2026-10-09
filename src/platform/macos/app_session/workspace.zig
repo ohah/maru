@@ -122,7 +122,8 @@ fn collectWindowCloseTargets(
     return out[0..count];
 }
 
-fn finishPendingInWindow(self: *AppSession) bool {
+/// 셸이 끝나 보낸 finish 가 아직 끝나지 않은 원격 Term 이 이 창에 있는가 — 있으면 창 close graph 를 준비하지 않는다.
+pub fn finishPendingInWindow(self: *AppSession) bool {
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
         if (term.rt.finish_ended != null and !term.rt.close_complete and term.surface.remote != null) return true;
     };

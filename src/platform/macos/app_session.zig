@@ -71889,6 +71889,24 @@ test "셸이 끝나 finish 를 보낸 원격 Term 에 앱 정리는 finish 만 �
     try std.testing.expectEqualSlices(Request, &.{ .finish_after_termination, .close_and_detach }, app.term_runtime_backend.testing.requests());
 }
 
+test "살아 있는 원격 Term 은 창 teardown 에서 지금처럼 closeAndDetach 를 받는다 — finish 는 셸을 끝내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    defer app.term_runtime_backend.testing.clear();
+    const pane = pane_ops.activePane(session);
+    const alive = pane.terms.items[0];
+    markRemoteForCloseKindTest(alive, session);
+    defer alive.surface.remote = null;
+    app.term_runtime_backend.testing.clear();
+    app.term_runtime_backend.testing.armCloseSequence(&.{ .complete, .complete });
+    _ = session.close();
+    const Request = app.term_runtime_backend.testing.CloseRequest;
+    try std.testing.expectEqualSlices(Request, &.{ .close_and_detach, .close_and_detach }, app.term_runtime_backend.testing.requests());
+}
+
 test "끝난 원격 Term 을 finish 가 끝나기 전에 부수면(destroyTerm) finish 를 보낸다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -71945,6 +71963,7 @@ test "finish 가 끝나지 않은 원격 셸이 있으면 창 닫기는 graph �
         finishing.surface.remote = null;
     };
     finishing.rt.finish_ended = .{ .exited = .{ .unknown = 0 } }; // 보냈지만 아직 끝나지 않았다
+    finishing.surface.process_state = .exited; // 원격 끝이 세운다 — 실행 중 명령이 아니라 확인 없이 닫는 길을 탄다
     app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(
         allocator,
         std.testing.io,
@@ -71957,13 +71976,26 @@ test "finish 가 끝나지 않은 원격 셸이 있으면 창 닫기는 graph �
     }
     // graph 를 준비했다면 finish 로 봉인된 runtime 의 ticket 예약이 proof_loss 로 프로세스를 끝냈다.
     try std.testing.expect(session.requestWindowClose());
-    // 원격 표시를 단 Term 은 실행 중 명령을 읽을 관측이 없어 확인을 띄울 수 있다 — 수락하면 같은 graph 길로 간다.
-    if (session.pending_confirm == .close) session.dispatchChromeAction(.confirm_accept);
+    try std.testing.expect(session.pending_confirm == .none);
     try std.testing.expect(session.window_close_pending);
     try std.testing.expect(std.meta.eql(session.pending_window_close_graph, session_host.pending_term_close_graph.PendingTermCloseGraph{}));
     try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
     workspace_ops.advancePendingWindowClose(session); // 아직 끝나지 않았다 — 그대로 기다린다
     try std.testing.expect(session.window_close_pending);
+    // 가드의 조건 하나하나: finish 가 끝났거나(close_complete — 「시작 직후 종료」로 남은 창이 영영 안 닫히면 안 된다),
+    // finish 를 보내지 않았거나, 원격이 아니면 기다리지 않는다.
+    try std.testing.expect(workspace_ops.finishPendingInWindow(session));
+    finishing.rt.close_complete = true;
+    try std.testing.expect(!workspace_ops.finishPendingInWindow(session));
+    finishing.rt.close_complete = false;
+    const sent = finishing.rt.finish_ended;
+    finishing.rt.finish_ended = null;
+    try std.testing.expect(!workspace_ops.finishPendingInWindow(session));
+    finishing.rt.finish_ended = sent;
+    const remote = finishing.surface.remote;
+    finishing.surface.remote = null;
+    try std.testing.expect(!workspace_ops.finishPendingInWindow(session));
+    finishing.surface.remote = remote;
     // tick 이 finish 를 끝냈다 — 이 시험의 Term 은 원격 runtime 이 없으므로 원격 표시를 거두고 진행한다.
     finishing.rt.close_complete = true;
     finishing.rt.terminated = true;
@@ -71990,8 +72022,7 @@ test "finish 가 event_pending 이던 Term 은 끝이 다시 오지 않아도 �
     app.term_runtime_backend.testing.armCloseSequence(&.{.complete});
     _ = try session.tick();
     const Request = app.term_runtime_backend.testing.CloseRequest;
-    try std.testing.expect(app.term_runtime_backend.testing.requests().len >= 1);
-    try std.testing.expectEqual(Request.finish_after_termination, app.term_runtime_backend.testing.requests()[0]);
+    try std.testing.expectEqualSlices(Request, &.{.finish_after_termination}, app.term_runtime_backend.testing.requests());
     try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len); // terminated 가 서서 거뒀다
 }
 

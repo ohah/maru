@@ -15529,21 +15529,28 @@ test "LSPB20 신뢰는 앱 전역이다 — 두 창이 같은 저장소를 열�
     lsp_client.pump(a.session);
     try testing.expect(b.session.pending_confirm == .lsp_trust);
     try testing.expect(a.session.pending_confirm == .none);
-    b.session.chrome_host.confirm.dismiss();
-    b.session.dispatchChromeAction(.confirm_accept);
-    // ⑸ **뜨는 중**(initialize 를 기다린다)에 온 거부도 서버를 내린다 — 「떠 있는 서버」는 ready 만이 아니다.
-    lsp_client.pump(b.session);
-    lsp_client.pump(a.session);
-    try testing.expect(allClients(a.session, struct {
-        fn f(c: lsp_client.Client) bool {
-            return c.phase == .starting and c.proc != null;
-        }
-    }.f));
-    _ = trust_store.decide(testing.io, key, .deny);
-    lsp_client.pump(a.session);
-    lsp_client.pump(b.session);
-    try testing.expect(allClients(a.session, isLoweredDenied));
-    try testing.expect(allClients(b.session, isLoweredDenied));
+    {
+        // The fake server may finish initialize in the same pump that spawns it.
+        // Hold replies explicitly so this assertion tests revocation during
+        // initialization, independently of parent/child scheduling speed.
+        var silent = try EnvGuard.set("MARU_FAKE_LSP_INIT", "silent");
+        defer silent.restore();
+        b.session.chrome_host.confirm.dismiss();
+        b.session.dispatchChromeAction(.confirm_accept);
+        // ⑸ **뜨는 중**(initialize 를 기다린다)에 온 거부도 서버를 내린다 — 「떠 있는 서버」는 ready 만이 아니다.
+        lsp_client.pump(b.session);
+        lsp_client.pump(a.session);
+        try testing.expect(allClients(a.session, struct {
+            fn f(c: lsp_client.Client) bool {
+                return c.phase == .starting and c.proc != null;
+            }
+        }.f));
+        _ = trust_store.decide(testing.io, key, .deny);
+        lsp_client.pump(a.session);
+        lsp_client.pump(b.session);
+        try testing.expect(allClients(a.session, isLoweredDenied));
+        try testing.expect(allClients(b.session, isLoweredDenied));
+    }
     // ⑹ 다른 데서 온 허용 — 두 창의 거부된 클라이언트가 묻지 않고 다시 뜬다.
     _ = trust_store.decide(testing.io, key, .allow);
     try testing.expect(pumpTwoUntil(&a, &b, 5000, ctx, struct {

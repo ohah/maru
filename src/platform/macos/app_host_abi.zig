@@ -6658,7 +6658,7 @@ fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_m
             const app = ref.app_session orelse continue;
             if (app.surfaceForSessionLeader(origin.sid)) |id| break :blk id;
         }
-        if (noteworthy) control_log.info("control: no pane for this caller (session {d} is not a maru pane)", .{origin.sid});
+        if (noteworthy) control_log.info("control: no pane for this caller (session {d} matches no maru pane whose root pid is known — not a maru pane, or a session host pane before its first observation)", .{origin.sid});
         break :blk null;
     };
     const a = control_self_origin.anchors(found, pending.selector);

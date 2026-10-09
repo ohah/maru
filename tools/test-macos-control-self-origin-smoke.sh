@@ -81,7 +81,8 @@ run_mode() { # $1=이름 $2=session.keep-alive-after-quit
     out="$root/out-$mode"
     mkdir -p "$out" "$root/home-$mode"
     printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = %s\n' "$root/pane.sh" "$2" > "$root/$mode.conf"
-    env HOME="$root/home-$mode" CFFIXED_USER_HOME="$root/home-$mode" MARU_SESSION_HOST_ROOT="$root/session-host-$mode" \
+    # 앱의 control 디렉터리도 시험 홈으로(`XDG_CACHE_HOME` 이 먼저다 — 개발자 셸에 있으면 사용자의 control 디렉터리에 소켓을 연다).
+    env HOME="$root/home-$mode" CFFIXED_USER_HOME="$root/home-$mode" XDG_CACHE_HOME="$root/home-$mode/.cache" MARU_SESSION_HOST_ROOT="$root/session-host-$mode" \
         MARU_CONFIG="$root/$mode.conf" MARU_WEB_PANEL=1 MARU_TEST_GRANT_DECISION=approve MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home-$mode" \
         "$app" > "$root/app-$mode.log" 2>&1 &
     app_pid=$!

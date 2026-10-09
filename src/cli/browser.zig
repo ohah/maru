@@ -785,6 +785,14 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
 pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console };
 
+const unauthorized_code: i64 = -32002;
+const unauthorized_hint =
+    \\hint: browser requests are allowed from a command running in a maru pane's foreground job (an agent there,
+    \\      or your shell). Not from another terminal, inside tmux/screen, or a background job while another
+    \\      program holds the terminal. A refused confirmation dialog looks the same; the maru app log has the reason.
+    \\
+;
+
 /// 응답 바이트 한 줄을 기계·사람 읽기 편한 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`
 /// (sessions.renderResponse 규율 — 미grant 거부는 `error: Unauthorized (-32002)`). result는 kind별 한 줄.
 pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: ResponseKind, w: *std.Io.Writer) !void {
@@ -802,6 +810,9 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
     };
     if (resp.err) |e| {
         try w.print("error: {s} ({d})\n", .{ e.message, e.code });
+        // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
+        // unauthorized 만 주므로(존재 oracle 금지) 이유를 묻지 않고 늘 같은 안내를 붙인다 — 서버 정보가 새지 않는다.
+        if (e.code == unauthorized_code) try w.writeAll(unauthorized_hint);
         return;
     }
     const result = switch (resp.result orelse {
@@ -1439,7 +1450,7 @@ test "renderResponse: navigate ok·getUrl url·exec result·getCookies 배열·e
     {
         var w = std.Io.Writer.fixed(&buf);
         try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .navigate, &w);
-        try testing.expectEqualStrings("error: Unauthorized (-32002)\n", w.buffered());
+        try testing.expectEqualStrings("error: Unauthorized (-32002)\n" ++ unauthorized_hint, w.buffered());
     }
 }
 

@@ -143,10 +143,16 @@ pub fn stillForeground(provider: Provider, origin: Origin) bool {
 const Fake = struct {
     procs: []const ProcInfo,
     sessions: []const [2]i32, // {pid, sid}
+    /// 공급자가 다른 pid 의 정보를 돌려주는 경우를 흉내 낸다(커널 버퍼가 엉뚱한 프로세스로 찬 경우 등).
+    lie_about: ?i32 = null,
 
     fn lookup(ctx: *anyopaque, pid: i32) ?ProcInfo {
         const self: *Fake = @ptrCast(@alignCast(ctx));
-        for (self.procs) |p| if (p.pid == pid) return p;
+        for (self.procs) |p| if (p.pid == pid) {
+            var out = p;
+            if (self.lie_about != null and self.lie_about.? == pid) out.pid = pid + 1000;
+            return out;
+        };
         return null;
     }
 
@@ -282,12 +288,10 @@ test "처음 만난 터미널의 세션을 벗어나면 멈춘다 — 안쪽 터
 test "세션 번호가 1 이하이거나 정보의 pid 가 다르면 거절된다" {
     var low_sid: Fake = .{ .procs = &.{ login, shell(101) }, .sessions = &.{.{ 101, 1 }} };
     try expectReject(findOrigin(low_sid.provider(), 101, uid, accepted), .session_unknown);
-    var wrong_pid: Fake = .{
-        .procs = &.{.{ .pid = 999, .ppid = 100, .pgid = 101, .uid = uid, .has_ctty = true, .tpgid = 101, .start_us = 20 }},
-        .sessions = &.{.{ 101, 100 }},
-    };
-    // 공급자가 다른 pid 의 정보를 돌려줬다(시험 공급자는 pid 로 찾으므로 없는 pid 로 흉내 낸다 — 아래 stillForeground).
-    try expectReject(findOrigin(wrong_pid.provider(), 101, uid, accepted), .peer_unknown);
+    // 공급자가 다른 pid 의 정보를 돌려줬다 — 사슬 안이든 요청 때 재확인이든 믿지 않는다.
+    var wrong_pid: Fake = .{ .procs = &.{ login, shell(101) }, .sessions = &.{.{ 101, 100 }}, .lie_about = 101 };
+    try expectReject(findOrigin(wrong_pid.provider(), 101, uid, accepted), .lookup_failed);
+    try std.testing.expect(!stillForeground(wrong_pid.provider(), .{ .ctty_pid = 101, .ctty_start_us = 20, .sid = 100 }));
 }
 
 test "앵커: 셀렉터는 찾은 pane 과 같을 때만 남고, browser grant 의 pane 은 늘 찾은 pane 이다" {

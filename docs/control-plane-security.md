@@ -103,6 +103,12 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
 - **누가 grant 를 쓰나**: grant 는 pane 단위(Model B)라, 그 pane 의 foreground 작업의 **자손 전부**가 쓴다 — 에이전트 본체만이
   아니라 그것이 띄운 도구·MCP 서버·플러그인, pane 셸이 쉬는 동안 그 셸이 띄워 둔 setsid 데몬도. 연결 하나의 출처는 연결에
   고정되고, 같은 fd 를 물려받은 프로세스는 그 조상이 foreground 인 동안 같은 출처로 요청한다.
+- **앞으로 write·read-output·lifecycle 을 연결할 때(경고)**: 1g 는 확인되지 않은 셀렉터를 null 로 바꾸고, 지금의 ambient 폴백은
+  「앵커 없음 = metadata 전체」다. 그 폴백을 metadata 밖 scope 로 넓히면 1g 가 버린 셀렉터가 오히려 권한 확장이 된다 — 새 scope
+  는 앵커가 없으면 거절해야 한다. auth.grant 로 받은 metadata cap 도 앵커가 셀렉터라 1g 뒤로는 셀렉터가 버려지면 무효가 된다(지금은
+  라이브 발급이 없다).
+- **CLI 안내**: `maru browser` 가 unauthorized 를 받으면 「maru pane 의 foreground 에서, 다른 터미널·tmux·다른 작업이 터미널을 쥔
+  동안의 백그라운드가 아니라」 안내를 늘 붙인다(서버는 이유를 주지 않는다 — 클라이언트가 이미 아는 사실만).
 - **진단**: browser 요청이나 셀렉터를 댄 요청에서 pane 을 못 찾은 이유(출처 거절 사유·foreground 를 잃음·maru pane 의 세션이
   아님)와 모달 승인 뒤 재확인 실패는 앱 로그(`control` info)에 남는다. 클라이언트에게는 §8.3 균일 unauthorized 다.
 - **한계**: 최선의 노력이지 하드 경계가 아니다 — 같은 uid 는 그 pane 안에서 명령을 띄울 수 있다(rc 파일, 접근성 키 입력 등).

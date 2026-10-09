@@ -25,10 +25,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--unicode-field", action="store_true")
+    parser.add_argument("--physical-ime", action="store_true")
+    parser.add_argument("--matrix", action="store_true")
+    parser.add_argument("--narrow-hidden", action="store_true")
+    parser.add_argument("--window-size", default="960x600")
+    parser.add_argument("--render-scale", type=int, choices=(1000, 2000), default=1000)
     parser.add_argument("--count", type=int, default=60)
     parser.add_argument("--disk-files", type=int, default=0)
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if (args.physical_ime and (args.matrix or args.unicode_field or args.disk_files)) or (args.matrix and (args.unicode_field or args.disk_files)):
+        parser.error("Physical IME and matrix use separate fixtures")
+    if re.fullmatch(r"[1-9][0-9]{2,3}x[1-9][0-9]{2,3}", args.window_size) is None:
+        parser.error("Expected a bounded WIDTHxHEIGHT")
     repo = Path(__file__).resolve().parents[2]
     root = (args.output or Path(tempfile.mkdtemp(prefix="maru-editor-project-search-app-"))).resolve()
     if root == repo or repo in root.parents or (root.exists() and any(root.iterdir())):
@@ -74,6 +83,8 @@ def main():
         host.write_text(replace_once(host.read_text(), "        maybeRunEditorIMESmoke()\n",
             "        maybeRunEditorIMESmoke()\n        maybeRunEditorProjectSearch()\n") + "\n" +
             (repo / "tools/editor-project-search-app/driver.swift.inc").read_text())
+        host.write_text(replace_once(host.read_text(), "    let physical = window?.backingScaleFactor ?? 1.0",
+            '    let physical = window?.backingScaleFactor ?? 1.0\n    if let raw = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_SCALE"], let value = UInt32(raw), value == 1000 || value == 2000 { return CGFloat(value) / 1000.0 }'))
         renderer = source / names[5]
         renderer.write_text(replace_once(renderer.read_text(), "    static const char *const gates[] = {",
             '    static const char *const gates[] = {\n        "MARU_EDITOR_PROJECT_SEARCH_CAPTURE",'))
@@ -97,22 +108,39 @@ def main():
     document.write_text("pub const Widget = struct {\n    pub fn first() void {}\n    pub fn second() void {}\n};\n\n" + "".join(f"pub fn sample{i:02}() void {{\n    const value = {i};\n    _ = value;\n}}\n\n" for i in range(args.count)))
     for index in range(args.disk_files):
         (project / f"disk{index:04}.txt").write_text("sample disk\n" + "padding text\n" * 5000)
+    if args.physical_ime:
+        document.write_text("// 한글\n" + document.read_text())
     if args.unicode_field:
         document.write_text("// 한글🙂x\n" + document.read_text())
     original = document.read_bytes()
+    other = root / "other-project"
+    other.mkdir()
+    (other / "fresh.txt").write_text("sample fresh\n")
     env = {key: value for key, value in os.environ.items() if not key.startswith("MARU_")}
     env.update(HOME=str(root / "home"), CFFIXED_USER_HOME=str(root / "home"),
         XDG_CONFIG_HOME=str(root / "home/.config"), XDG_CACHE_HOME=str(root / "cache"), XDG_STATE_HOME=str(root / "state"),
         MARU_CONFIG=str(root / "config"), MARU_SESSION_HOST_ROOT=str(root / "host"), MARU_EDITOR_BACKUP_ROOT=str(root / "backups"),
         MARU_EDITOR_RECOVERY_CHECKPOINT_TEST="maru-test-only-v1", MARU_MACOS_APP_SMOKE_MS="45000",
-        MARU_NATIVE_EDITOR=str(document), MARU_FT_WINDOW_SIZE="960x600", MARU_EDITOR_PROJECT_SEARCH_CAPTURE="1",
-        MARU_EDITOR_PROJECT_SEARCH_OUTPUT=str(artifacts), MARU_EDITOR_PROJECT_SEARCH_DISK_FILES=str(args.disk_files), MARU_EDITOR_PROJECT_SEARCH_UNICODE="1" if args.unicode_field else "0", MARU_EDITOR_PROJECT_SEARCH_EXPECTED=str(1 if args.unicode_field else args.count + args.disk_files), MARU_APP_SUMMARY_PATH=str(root / "summary.txt"))
+        MARU_NATIVE_EDITOR=str(document), MARU_FT_WINDOW_SIZE=args.window_size, MARU_EDITOR_PROJECT_SEARCH_SCALE=str(args.render_scale), MARU_EDITOR_PROJECT_SEARCH_MATRIX="1" if args.matrix else "0", MARU_EDITOR_PROJECT_SEARCH_TINY="1" if args.narrow_hidden else "0", MARU_EDITOR_PROJECT_SEARCH_OTHER_ROOT=str(other), MARU_EDITOR_PROJECT_SEARCH_CAPTURE="1",
+        MARU_EDITOR_PROJECT_SEARCH_OUTPUT=str(artifacts), MARU_EDITOR_PROJECT_SEARCH_DISK_FILES=str(args.disk_files), MARU_EDITOR_PROJECT_SEARCH_UNICODE="1" if args.unicode_field else "0", MARU_EDITOR_PROJECT_SEARCH_PHYSICAL="1" if args.physical_ime else "0", MARU_EDITOR_PROJECT_SEARCH_EXPECTED=str(1 if args.unicode_field or args.physical_ime else args.count + args.disk_files), MARU_APP_SUMMARY_PATH=str(root / "summary.txt"))
+    if args.physical_ime:
+        main = root / "main.swift"
+        main.write_text((repo / "src/platform/macos/SessionHostInputSourcePolicy.swift").read_text() + "\n" +
+                        (repo / "tools/editor-project-search-app/hid.swift.inc").read_text())
+        subprocess.run(["swiftc", str(main), "-o", str(root / "hid")], check=True, timeout=60)
     with (root / "app.log").open("wb") as log:
         child = subprocess.Popen([str(app)], env=env, stdout=log, stderr=log, start_new_session=True)
+        hid = None
+        hid_log = None
         try:
+            if args.physical_ime:
+                hid_log = (root / "hid.log").open("wb")
+                hid = subprocess.Popen([str(root / "hid"), str(child.pid), str(artifacts)], stdout=hid_log, stderr=hid_log)
             samples = []
             deadline = time.monotonic() + 60
             while child.poll() is None:
+                if hid is not None and hid.poll() not in (None, 0):
+                    raise RuntimeError("Physical IME driver failed; inspect hid.log")
                 if time.monotonic() > deadline:
                     raise subprocess.TimeoutExpired(str(app), 60)
                 measurement = subprocess.run(["ps", "-o", "rss=", "-p", str(child.pid)], capture_output=True, text=True)
@@ -121,10 +149,17 @@ def main():
                 time.sleep(0.05)
             code = child.returncode
             (root / "rss.json").write_text(json.dumps(samples, indent=2) + "\n")
-        except subprocess.TimeoutExpired:
-            child.kill()
-            child.wait()
-            raise
+            if hid is not None and hid.wait(timeout=30) != 0:
+                raise RuntimeError("Physical IME driver failed; inspect hid.log")
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+            # HID의 실패·앱 종료도 자기 복원 defer까지 기다린다. 전역 입력기 기록은 강제 삭제하지 않는다.
+            if hid is not None:
+                hid.wait(timeout=30)
+            if hid_log is not None:
+                hid_log.close()
     transcript = (root / "app.log").read_text()
     if (code != 0 or "EDITOR_PROJECT_SEARCH_FINISH passed=true" not in transcript or
 document.read_bytes() != original):
@@ -132,6 +167,12 @@ document.read_bytes() != original):
     expected = ("before", "query", "results", "query-selection", "navigated", "bottom-scrolled", "cancelled")
     if args.disk_files:
         expected += ("disk-navigated",)
+    if args.physical_ime:
+        expected += ("ime-marked",)
+    if args.narrow_hidden:
+        expected += ("geometry-hidden",)
+    if args.matrix:
+        expected += ("shared", "independent", "zero-override", "root-changed", "stale-release")
     for label in expected:
         ppm = artifacts / (label + ".ppm")
         if not ppm.exists() or ppm.stat().st_size < 1000:
@@ -144,8 +185,8 @@ document.read_bytes() != original):
     metrics = dict(zip(("first_result_ns", "completion_ns", "main_search_tick_max_ns", "cancel_call_ns", "cancel_retire_ns"), map(int, match.groups())))
     metrics["peak_rss_bytes"] = max(sample["rss_bytes"] for sample in samples)
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
-        limits="No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
-        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, matches=1 if args.unicode_field else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+        limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
+        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

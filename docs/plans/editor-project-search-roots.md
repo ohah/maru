@@ -1,6 +1,6 @@
 # 프로젝트 검색 — 여러 root 요청 연결
 
-`AppSession.requestWorkspaceProjectSearch`는 현재 창 탐색기의 확정된 로컬 root 모두를 요청 하나로 검색한다. 기존 `requestProjectSearch(root_index, …)`는 지정 root API로 유지한다. 검색 도크·클릭 이동·실제 OS IME와 앱 측정은 후속 S2 gate다.
+`AppSession.requestWorkspaceProjectSearch`는 현재 창 탐색기의 확정된 로컬 root 모두를 요청 하나로 검색한다. 기존 `requestProjectSearch(root_index, …)`는 지정 root API로 유지한다. 검색 도크·클릭 이동·실제 두벌식 HID와 앱 측정은 [도크 검증](editor-project-search-dock.md)에 연결했다.
 
 ## 요청과 문서
 
@@ -35,4 +35,4 @@ helper 실패·예산·취소는 기존 kill/reap 경계를 공유한다. root �
 
 `python3 tools/editor-project-search/roots-measure.py --worker zig-out/bin/maru-project-search-worker --rg zig-out/ripgrep/rg --output zig-out/editor-project-search-roots-measure`는 opt-in 측정이다. ReleaseFast, 2,048개 파일·64 MiB, 단일 상위 root와 두 분리된 root의 같은 corpus를 3번씩 검색했다. 벽시계 중앙값은 단일 45.97 ms / workspace 89.13 ms, 첫 일치 행은 8.42 / 28.92 ms였다. `/usr/bin/time -l`의 최대 RSS 관측 중앙값은 약 8.28 / 6.00 MiB다. 샘플 변동·warm cache·별도 프로브 실행을 포함하므로 앱 RSS 개선이나 제품 기본 예산의 근거로 과장하지 않는다. 후보 선정의 추가 비용이 있으며 root 수·파일 수·긴 경로에 따라 달라진다. 실행 당시 raw 결과는 `zig-out/editor-project-search-roots-measure-final/run-e1nzvf12/report.json`이다.
 
-남은 gate는 검색 도크와 결과 클릭, 앱에서의 첫 결과/취소·준비 tick/RSS 실측, 실제 OS IME·FSEvents·종료, 다른 파일시스템과 절대 root 별칭/범위 입장의 전체 호환성이다. 전체 S1b/S2 완료로 표시하지 않는다.
+검색 도크·결과 클릭·앱 실측·두벌식 HID·root 교체 화면은 [도크 검증](editor-project-search-dock.md)에 별도 표본이 있다. 남은 범위는 전체 FSEvents·지연 I/O 종료·다른 파일시스템과 절대 root 별칭/범위 입장의 전체 호환성이다. 전체 S1b/S2 완료로 표시하지 않는다.

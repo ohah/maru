@@ -6,6 +6,9 @@
 @MainActor private enum EditorProjectSearchRun {
     static var stage: UInt32 = 0
     static var next = 0.0
+    static var markedCaptured = false
+    static var heldPoint: NSPoint? = nil
+    static var tinyResized = false
 }
 extension MaruAppHostController {
     private func editorProjectSearchClick(_ index: UInt32, disclosure: Bool = false, releaseOutside: Bool = false) -> Bool {
@@ -26,6 +29,20 @@ extension MaruAppHostController {
             else if type == .leftMouseDragged { view.mouseDragged(with: event) }
             else { view.mouseUp(with: event) }
         }
+        return true
+    }
+    private func editorProjectSearchHold(_ down: Bool) -> Bool {
+        guard let surface = primary, let window = surface.window, let view = surface.view else { return false }
+        if down {
+            let scale = archiveSmokeRenderScale(window)
+            let x = editorProjectSearchCoordinate(0) / scale
+            let y = editorProjectSearchCoordinate(1) / scale
+            guard x >= 0 && y >= 0 else { return false }
+            EditorProjectSearchRun.heldPoint = view.convert(NSPoint(x: x, y: view.bounds.height - y), to: nil)
+        }
+        guard let point = EditorProjectSearchRun.heldPoint,
+              let event = NSEvent.mouseEvent(with: down ? .leftMouseDown : .leftMouseUp, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 2, clickCount: 1, pressure: down ? 1 : 0) else { return false }
+        if down { view.mouseDown(with: event) } else { view.mouseUp(with: event); EditorProjectSearchRun.heldPoint = nil }
         return true
     }
     private func editorProjectSearchSelectQuery(unicode: Bool) -> Bool {
@@ -59,6 +76,23 @@ extension MaruAppHostController {
         let now = ProcessInfo.processInfo.systemUptime
         guard now >= EditorProjectSearchRun.next else { return }
         let stage = EditorProjectSearchRun.stage
+        let tiny = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_TINY"] == "1"
+        if stage == 1 && tiny && !EditorProjectSearchRun.tinyResized {
+            guard editorProjectSearchProbe(103) == 1, editorProjectSearchCapture("geometry-hidden") else {
+                exitCode = 1; NSApp.terminate(nil); return
+            }
+            window.setContentSize(NSSize(width: 640, height: 480))
+            EditorProjectSearchRun.tinyResized = true
+            EditorProjectSearchRun.next = now + 0.3
+            return
+        }
+        if stage == 1 && tiny { editorProjectSearchAction(0) }
+
+        let physical = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_PHYSICAL"] == "1"
+        if physical && stage == 2 && !EditorProjectSearchRun.markedCaptured && editorProjectSearchProbe(101) == 1 {
+            guard editorProjectSearchCapture("ime-marked") else { return }
+            EditorProjectSearchRun.markedCaptured = true
+        }
         let ready = editorProjectSearchProbe(stage)
         if ready == 0 { return }
         func finish(_ success: Bool) {
@@ -69,13 +103,27 @@ extension MaruAppHostController {
             DispatchQueue.main.async { NSApp.terminate(nil) }
         }
         guard ready == 1 else { finish(false); return }
-        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled"]
+        let matrix = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_MATRIX"] == "1"
+        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release"]
         guard editorProjectSearchCapture(labels[Int(stage)]) else { finish(false); return }
         let unicode = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_UNICODE"] == "1"
         switch stage {
-        case 1: view.insertText(unicode ? "한글🙂x" : "sample", replacementRange: NSRange(location: NSNotFound, length: 0))
+        case 1:
+            if physical {
+                window.makeKeyAndOrderFront(nil)
+                window.makeFirstResponder(view)
+                NSApp.activate(ignoringOtherApps: true)
+                let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"]!
+                try? Data("ready".utf8).write(to: URL(fileURLWithPath: root).appendingPathComponent("physical-ready"))
+            } else {
+                view.insertText(unicode ? "한글🙂x" : "sample", replacementRange: NSRange(location: NSNotFound, length: 0))
+            }
         case 2:
-            guard editorProjectSearchSelectQuery(unicode: unicode), editorProjectSearchCapture("query-selection") else { finish(false); return }
+            if physical {
+                guard EditorProjectSearchRun.markedCaptured && editorProjectSearchProbe(102) == 1 else { finish(false); return }
+                FileHandle.standardError.write(Data("PHYSICAL_IME accepted=true\n".utf8))
+            } else if !editorProjectSearchSelectQuery(unicode: unicode) { finish(false); return }
+            guard editorProjectSearchCapture("query-selection") else { finish(false); return }
             guard editorProjectSearchClick(0) else { finish(false); return }
         case 4:
             if Int(ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_DISK_FILES"] ?? "0") ?? 0 > 0 {
@@ -85,7 +133,20 @@ extension MaruAppHostController {
                 EditorProjectSearchRun.stage = 5
             }
         case 5: editorProjectSearchAction(4)
-        case 6: finish(true); return
+        case 6:
+            if !matrix { finish(true); return }
+            editorProjectSearchAction(6)
+        case 8:
+            editorProjectSearchAction(8)
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0) else { finish(false); return }
+            view.keyDown(with: event)
+            view.insertText("no results", replacementRange: NSRange(location: NSNotFound, length: 0))
+        case 9:
+            guard editorProjectSearchHold(true) else { finish(false); return }
+            editorProjectSearchAction(9)
+        case 10:
+            guard editorProjectSearchHold(false) else { finish(false); return }
+        case 11: finish(true); return
         default: editorProjectSearchAction(stage)
         }
         EditorProjectSearchRun.stage += 1

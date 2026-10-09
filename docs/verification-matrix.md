@@ -13,7 +13,7 @@
 | 문서 전체 정규식 | 구현·집중 자동/Metal 검증 | `FND35~39`, `EDREG1~4`, 독립 원문 범위·오류 대조와 현재/비현재 여러 줄 강조의 픽셀 대조 | 실제 OS/HID/IME 콜백과 프로젝트 worker는 이 검사의 범위 밖 |
 | VS Code 기본 검색 판정 | 구현·집중 검증 | `FND40~41`, `EDREG5`, 실제 VS Code Searcher와 공통 문법 1,380조합 범위 대조, 단어 강조/비강조 제품 Metal 픽셀 | 기본 구분자·단일 줄 오라클 범위. 사용자 지정 구분자·전체 JS 정규식 호환·실제 OS 입력의 증거는 아님 |
 | 프로젝트 검색 rg 기반 | 구현·로컬 검증 | query/event/stream unit와 OOM·전문 절단, 실제 offline helper/어댑터 fixture, 앱 내 universal helper·114 notice·서명, 변조/누락 음성 대조 | 제품 worker·열린 모델 우선·취소·도크·실제 IME는 후속. CLI 통과를 앱 검색 완료로 표시하지 않는다 |
-| 프로젝트 전체 검색·바꾸기 미리보기 | rg 번들·프로토콜 기반 구현, worker/도크 미연결 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·검색 도크·제품 취소·IME·앱 RSS·시각 캡처·바꾸기. CLI 통과는 제품 완료의 증거가 아니다 |
+| 프로젝트 전체 검색·바꾸기 미리보기 | 검색 worker·도크 구현, 바꾸기 미리보기 미구현 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·전체 파일시스템·OS watcher/종료 경계·바꾸기. 검색 UI·실제 HID·제품 취소·앱 RSS·시각 캡처의 표본은 [도크 검증](plans/editor-project-search-dock.md)을 따른다. CLI 통과는 제품 완료의 증거가 아니다 |
 
 ### 영속 세션 P5 세부 상태
 
@@ -4142,4 +4142,4 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 
 ## 프로젝트 검색 worker 백엔드
 
-`test-macos-project-search-worker`는 실제 API의 합성 native 모델·공유/독립 신원·0건 점유·glob/범위·취소·helper 수거·부분 결과를 검증한다. `test-editor-project-search`는 10개 L2 판정자를 실행한다. `test-macos-project-search-roots`는 여러 root의 후보 합집합·귀속·전체 예산·수명을 실행 검증한다([범위](plans/editor-project-search-roots.md)). `test-editor-project-search-owner`는 실제 AppSession 사본·논리 IME callback·감시 확인 후 실행·편집 후 재검색을 검사한다. 실제 OS IME·FSEvents/overflow·최종 앱 종료·앱 RSS·검색 UI는 아직 제품 실행 증거 범위 밖이며 [worker 계획](plans/editor-project-search-worker.md)의 완료 조건을 유지한다.
+`test-macos-project-search-worker`는 실제 API의 합성 native 모델·공유/독립 신원·0건 점유·glob/범위·취소·helper 수거·부분 결과를 검증한다. `test-editor-project-search`는 argv·JSON·요청 신원의 L2 판정자를 실행한다. `test-macos-project-search-roots`는 여러 root의 후보 합집합·귀속·전체 예산·수명을 실행 검증한다([범위](plans/editor-project-search-roots.md)). `test-editor-project-search-owner`는 실제 AppSession 사본·논리 IME callback·감시 확인 후 실행·편집 후 재검색을 검사한다. 검색 UI·실제 두벌식 HID·앱 RSS와 root 교체 화면은 [도크 검증](plans/editor-project-search-dock.md)에 제품 표본이 있다. 전체 FSEvents/overflow·지연 I/O 종료·OS 후보창 픽셀·VoiceOver 조작은 그 표본의 범위 밖이며 [worker 계획](plans/editor-project-search-worker.md)의 남은 경계를 유지한다.

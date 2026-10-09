@@ -155,6 +155,7 @@ pub fn poll(self: *AppSession) void {
         var completed = state.nav.?;
         state.nav = null;
         defer completed.deinit(self.allocator);
+        if (loaded.failure) |err| openFailure(self, err);
         if (loaded.failure != null or loaded.hash == null or completed.expected_hash == null or !std.mem.eql(u8, &loaded.hash.?, &completed.expected_hash.?)) {
             dock.changed(self);
             return;

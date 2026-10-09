@@ -174,6 +174,9 @@ pub fn collect(self: *AppSession, collected: *std.ArrayList(AppSession.Collected
         self.editor_search.invalidate();
         return;
     };
+    var painted = false;
+    // 입력 표를 먼저 만들었더라도 paint 준비가 실패하면 보이지 않는 동작을 남기지 않는다.
+    defer if (!painted) self.editor_search.invalidate();
     const props = prepared.props;
     const frame = prepared.frame;
     const content = prepared.content;
@@ -193,7 +196,9 @@ pub fn collect(self: *AppSession, collected: *std.ArrayList(AppSession.Collected
     if (!host.MeasuredTextCache.hit(self.editor_search.cache, fingerprint)) shape(self, draws.ops, &tokens, fingerprint, props.scale, origin);
     if (self.editor_search.cache) |*cache| {
         if (cache.fingerprint != fingerprint) return;
+        const before = collected.items.len;
         self.collectMeasuredTextFromCache(collected, host.chrome_system_text.emptyDrawList(self.allocator, cache.records.len) catch return, cache, builder, .{ .x = content.x, .y = content.y, .w = @intFromFloat(props.viewport.width), .h = content.h }, .{ .pane = .{ .origin_x = content.x, .origin_y = content.y, .colors = colors, .scroll_delta_y_px = @floatFromInt(origin - cache.scroll_origin_y_px) } });
+        painted = collected.items.len > before;
     }
 }
 

@@ -4,11 +4,14 @@ var editor_project_search_root_ready = false;
 var editor_project_search_root_submitted = false;
 var editor_project_search_original_surface: u64 = 0;
 var editor_project_search_probe_stage: u32 = 0;
+var editor_project_search_ime_observed: u64 = 0;
+var editor_project_search_matrix_surface: u64 = 0;
+var editor_project_search_matrix_history: usize = 0;
 pub fn editorProjectSearchObserve(self: *AppSession) void {
     if (std.c.getenv("MARU_EDITOR_PROJECT_SEARCH_CAPTURE") != null and self.dock_initialized) editor_project_search_session = self;
 }
 export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
-    if (stage != 100) editor_project_search_probe_stage = stage;
+    if (stage < 100) editor_project_search_probe_stage = stage;
     const self = editor_project_search_session orelse return 0;
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_syntax.pending or !self.file_tree_initialized) return 0;
@@ -26,6 +29,37 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
     }
     const state = &self.editor_search;
     if (stage == 0) editor_project_search_original_surface = term.surfaceId();
+    if (stage >= 7 and stage <= 11) {
+        if (state.result.phase != .complete or state.nav != null) return 0;
+        const base = std.fmt.parseInt(usize, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_SEARCH_EXPECTED") orelse return -1), 10) catch return -1;
+        const wanted = if (stage == 8) base * 2 else if (stage >= 10) @as(usize, 1) else base;
+        if (state.result.model.matches != wanted) return -1;
+        if (stage == 7 and (term.rt.editor_document_lease == null or self.editor_documents.viewCount(term.rt.editor_document_lease.?).? != 2)) return -1;
+        if (stage == 8 and state.result.model.groups.items.len != 2) return -1;
+        if (stage == 9) {
+            if (state.result.model.groups.items.len != 1 or state.result.model.groups.items[0].source != .model) return -1;
+            if (!std.mem.eql(u8, term.rt.editorDocument().opened.?.file.content, "no results")) return -1;
+        }
+        if (stage >= 10) {
+            if (state.result.model.groups.items.len != 1 or state.result.model.groups.items[0].source != .disk or !std.mem.eql(u8, state.result.model.groups.items[0].path, "fresh.txt")) return -1;
+            if (term.surfaceId() != editor_project_search_matrix_surface or self.editor_nav_back.items.len != editor_project_search_matrix_history) return -1;
+        }
+        std.debug.print("SEARCH_MATRIX stage={d} matches={d} groups={d}\n", .{stage, state.result.model.matches, state.result.model.groups.items.len});
+        return 1;
+    }
+    if (stage == 101) {
+        var h = std.hash.Wyhash.init(0);
+        h.update(state.fields[0].text.items);
+        h.update(state.fields[0].preedit.items);
+        const stamp = h.final();
+        if (stamp != editor_project_search_ime_observed) {
+            editor_project_search_ime_observed = stamp;
+            std.debug.print("PHYSICAL_STATE text={s} preedit={s} phase={s} focus={any}\n", .{state.fields[0].text.items, state.fields[0].preedit.items, @tagName(state.result.phase), state.focused});
+        }
+    }
+    if (stage == 101) return if (std.mem.eql(u8, state.fields[0].preedit.items, "글") and state.result.phase == .composing and self.editor_project_search_query == null) 1 else 0;
+    if (stage == 103) return if (!@import("editor/search/dock.zig").ownsInput(self) and state.focused == null and self.editor_project_search_query == null and state.entries.items.len == 0) 1 else -1;
+    if (stage == 102) return if (std.mem.eql(u8, state.fields[0].text.items, "한글") and state.fields[0].preedit.items.len == 0) 1 else -1;
     if (stage == 100) {
         const unicode = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_SEARCH_UNICODE") orelse return -1), "1");
         const selected = state.fields[0].selection orelse return -1;
@@ -76,6 +110,24 @@ export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
             search_cancel_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
             d.cancel(self);
             search_cancel_return_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        },
+        6 => {
+            self.dispatchAppAction(.split_editor_right);
+            self.dispatchAppAction(.show_project_search);
+            @import("editor/search/dock.zig").run(self);
+        },
+        7 => {
+            const active = pane_ops.activePane(self).activeTerm();
+            _ = editor_ops.openPathInActivePane(self, active.rt.editorDocument().path.?) catch return;
+            self.dispatchAppAction(.show_project_search);
+            @import("editor/search/dock.zig").run(self);
+        },
+        8 => self.focusWorkspaceInput(),
+        9 => {
+            editor_project_search_matrix_surface = pane_ops.activePane(self).activeTerm().surfaceId();
+            editor_project_search_matrix_history = self.editor_nav_back.items.len;
+            self.file_tree_root_picker_inflight = .replace;
+            self.provideFileTreeRootPick(std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_SEARCH_OTHER_ROOT") orelse return));
         },
         else => {},
     }

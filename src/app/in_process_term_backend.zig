@@ -239,7 +239,9 @@ pub const InProcessTermBackend = struct {
     fn sessionLeaderPid(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         const t = self.terminalSlot(handle) orelse return null;
-        return std.math.cast(i32, t.live_pty.session.child_pid); // macOS pid_t·Windows u32 모두
+        // 중립 `pty.ChildPid`(POSIX pid_t · Windows u32 · 미지원 플랫폼 0) — 세션 필드를 직접 읽으면 Linux 의 미지원 PTY
+        // 타입에서 컴파일이 깨진다(적대 리뷰 3 회차). 0 은 `sessionLeaderPid` 가 거른다.
+        return std.math.cast(i32, t.live_pty.childPid());
     }
 
     fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []resource_usage.Sample) usize {

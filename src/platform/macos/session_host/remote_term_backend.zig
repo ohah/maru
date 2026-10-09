@@ -5188,14 +5188,6 @@ pub const RemoteTermBackend = struct {
         return RemoteRuntime.backend_api.foregroundProcessGroup(rr);
     }
 
-    /// host-backed 터미널의 자원 표본. PTY가 host 프로세스 안에 살아 **앱의 트리 walk가 자기 자식에서
-    /// 출발해서는 못 닿지만**, 뿌리 pid만 알면 닿는다 — libproc은 같은 uid면 자손이 아닌 프로세스도
-    /// 열거·조회하게 해 준다(실측: 비-자손 pid에서 `proc_listchildpids` 자식 5개, `proc_pid_rusage` rc=0.
-    /// 다른 uid면 rc=-1). 그 뿌리를 host가 관측에 실어 보낸다(docs/status-bar.md §4.1).
-    ///
-    /// 예전 판은 무조건 0을 돌려줬고, 그래서 keep-alive를 켠 사용자에게는 모든 탭이 `—`였다.
-    /// **호스트 데몬 자신은 여기서 안 센다** — 자식 트리와 겹치지 않게 별도 "모든 창 공유" 행이 갖는다
-    /// (`hostProcessSamples`).
     /// host 가 관측에 실어 보낸 뿌리(`login`) pid — 셸의 세션 번호(구 host 거나 아직 안 왔으면 null).
     fn sessionLeaderPid(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
@@ -5204,6 +5196,14 @@ pub const RemoteTermBackend = struct {
         return if (root > 1) root else null;
     }
 
+    /// host-backed 터미널의 자원 표본. PTY가 host 프로세스 안에 살아 **앱의 트리 walk가 자기 자식에서
+    /// 출발해서는 못 닿지만**, 뿌리 pid만 알면 닿는다 — libproc은 같은 uid면 자손이 아닌 프로세스도
+    /// 열거·조회하게 해 준다(실측: 비-자손 pid에서 `proc_listchildpids` 자식 5개, `proc_pid_rusage` rc=0.
+    /// 다른 uid면 rc=-1). 그 뿌리를 host가 관측에 실어 보낸다(docs/status-bar.md §4.1).
+    ///
+    /// 예전 판은 무조건 0을 돌려줬고, 그래서 keep-alive를 켠 사용자에게는 모든 탭이 `—`였다.
+    /// **호스트 데몬 자신은 여기서 안 센다** — 자식 트리와 겹치지 않게 별도 "모든 창 공유" 행이 갖는다
+    /// (`hostProcessSamples`).
     fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []maru.session.resource_usage.Sample) usize {
         const self: *RemoteTermBackend = @ptrCast(@alignCast(ctx));
         if (out.len == 0) return 0;

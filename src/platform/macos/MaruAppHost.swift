@@ -2288,6 +2288,9 @@ private func runBrowserBoundedResultSmokeClient(socketPath: String, sid: UInt64,
 // 자동 증명한다. auth.self는 **cap_nonce 없이** selector(=surface_id)만 보내 self-origin으로 인증하고, browser.navigate를
 // 날린다 → 서버: 세션 cap 0 → needs_grant → handleNeedsGrant(env MARU_TEST_GRANT_DECISION 스텁) → approve면 grant 기록 +
 // 재-dispatch → op → drainBrowserOps 실행 → complete. 반환="true"(응답 ok)·"unexpected:…"·"error:…". 요청마다 새 연결(5e 스모크와 동형).
+// **1g(control-plane-security §8.4) 뒤로는 늘 unauthorized 다** — 서버는 셀렉터를 믿지 않고 붙은 프로세스의 출처에서 pane 을
+// 찾는데, 붙는 쪽이 앱 자신이라 어느 pane 의 자손도 아니다. 확인 grant 경로의 실측은 pane 안에서 실제 CLI 를 부르는
+// `tools/test-macos-control-self-origin-smoke.sh` 가 대신한다.
 private func runBrowserGrantSmokeClient(socketPath: String, sid: UInt64, navigateURL: String) -> String {
     // cap_nonce 없는 auth.self(selector만) — 무-cap 세션. wire는 Zig parseAuthFrame(cap_nonce optional)을 미러링.
     let auth = "{\"jsonrpc\":\"2.0\",\"method\":\"auth.self\",\"params\":{\"surface_id\":\(sid)}}"
@@ -7880,6 +7883,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     /// 성공하는지 1회 kick한다. cap 발급 없이 auth.self(selector만)+navigate → 서버가 needs_grant → env 결정(approve면
     /// grant 기록+재구동→op→ok / deny면 unauthorized). 배경 큐(메인 tick이 계속 돌며 drainBrowserOps로 op 완료). env
     /// 미설정=무동작(프로덕션 무영향). MARU_TEST_BROWSER_CAP과 독립 — grant 스모크는 그 env 없이 이것만 켜고 돌린다.
+    /// 1g 뒤로는 이 클라이언트가 pane 밖(앱 자신)이라 늘 거절된다(`runBrowserGrantSmokeClient` 주석).
     private func maybeRunGrantSmoke() {
         guard !didKickGrantSmoke, controlServerStarted else { return }
         // 무-cap navigate를 보내 grant 흐름을 유발한다. MARU_TEST_GRANT_DECISION(스텁 auto 결정 — 스모크 게이트) 또는

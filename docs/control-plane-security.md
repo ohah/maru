@@ -61,7 +61,7 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
 4. server는 peer pid의 controlling tty identity와 foreground process group을 읽어, 후보 surface가 spawn할 때 기록한 PTY slave identity 및 현재 foreground process group과 비교한다. 둘 중 하나라도 불일치하면 `unauthorized`다.
 5. 통과하면 해당 연결/request에만 `metadata:self`를 부여한다. 응답은 항상 자기 surface 하나로 필터링한다.
 
-**A2b 구현 상태(정직 — same-uid+selector까지, tty 검증 없음)**: 라이브 서버 A2b는 위 **1·3·5만** 구현한다. peer-cred(3, same-uid gate)는 `acceptOne`이, 셀렉터(1)는 wire의 `auth.self` 프레임(`control_plane.serializeAuthSelf`/`parseAuthFrame` — 후자는 selector와 optional `cap_nonce`[1e]를 함께 뽑는다)이, `metadata:self` 부여+self 필터(5)는 dispatch(1d)가 한다(**셀렉터를 댄 연결에 한한다** — 안 댄 연결은 아래 `metadata:all` 문단을 따른다). **4단계(peer pid의 tty/foreground pgrp ↔ surface PTY 일치 검증)는 1g 에서 「서버가 스스로 찾기」로 바꿔 구현했다(아래 「1g 구현」 — 셀렉터를 검증하지 않고 출처에서 pane 을 찾는다).** 그리고 **셀렉터의 실제 전달 매개는 `$MARU_SESSION`이 아니라 `$MARU_PANE_ID`**(=surface.id, `pty/macos.zig`가 각 팬 셸에 주입하는 실제 env; `$MARU_SESSION` 복합 selector는 미도입)다. CLI(`main.runSessionRequest`)가 `MARU_PANE_ID`를 읽어 `auth.self{surface_id}`로 보낸다.
+**A2b 구현 상태(정직 — same-uid+selector까지, tty 검증 없음. 4단계는 뒤에 1g 로 구현 — 아래)**: 라이브 서버 A2b는 위 **1·3·5만** 구현한다. peer-cred(3, same-uid gate)는 `acceptOne`이, 셀렉터(1)는 wire의 `auth.self` 프레임(`control_plane.serializeAuthSelf`/`parseAuthFrame` — 후자는 selector와 optional `cap_nonce`[1e]를 함께 뽑는다)이, `metadata:self` 부여+self 필터(5)는 dispatch(1d)가 한다(**셀렉터를 댄 연결에 한한다** — 안 댄 연결은 아래 `metadata:all` 문단을 따른다). **4단계(peer pid의 tty/foreground pgrp ↔ surface PTY 일치 검증)는 1g 에서 「서버가 스스로 찾기」로 바꿔 구현했다(아래 「1g 구현」 — 셀렉터를 검증하지 않고 출처에서 pane 을 찾는다).** 그리고 **셀렉터의 실제 전달 매개는 `$MARU_SESSION`이 아니라 `$MARU_PANE_ID`**(=surface.id, `pty/macos.zig`가 각 팬 셸에 주입하는 실제 env; `$MARU_SESSION` 복합 selector는 미도입)다. CLI(`main.runSessionRequest`)가 `MARU_PANE_ID`를 읽어 `auth.self{surface_id}`로 보낸다.
 
 **⚠️ 이 auth의 경계 한계(A2b, §8.3/§8.4 대비 — 1g 전 기록. 1g 뒤로는 셀렉터가 찾은 pane 과 다르면 버려져, 아래 열람은 셀렉터 없는 연결의 전체 목록과 같은 등급이 된다)**: same-uid peer는 tty 검증이 없으므로 **임의 `surface_id`를 self로 주장**할 수 있다 — 즉 같은 uid의 임의 프로세스가 아무 surface_id나 셀렉터로 보내 그 **한 surface의 metadata(cwd·git_branch·focused·at_prompt)를 열람**할 수 있다. surface_id가 monotonic이라 낮은 값부터 셀렉터를 훑으면 여러 surface metadata를 순차 수집할 수 있다(실측으로 확인 — 한 번의 훑기로 첫 surface 의 메타데이터가 그대로 나왔다). read-output/write/lifecycle은 A2b에서 애초에 안 열린다(§8.3). **1g가 4단계 tty/pgrp 검증을 붙이기 전까지 `metadata:self`는 "같은 uid면 selector로 임의 surface metadata 열람 가능"이라는 한계를 갖는다.**
 
@@ -115,22 +115,22 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
   control 꺼짐)는 foreground 대본과 같은 process group 이다. 구 host(관측에 `child_pid` 없음)나 재접속 뒤 관측이 오기 전의 pane 은
   찾지 못한다. `browser.subscribe` 이벤트 스트림은 등록 뒤 출처를 다시 보지 않는다.
 
-셀렉터를 대는 쪽이 **더 좁다**는 것이 낯설게 읽히지만 그 방향이 맞다 — 셀렉터는 권한이 아니라 "나는 이 surface 다" 라는 **주장**이고, 주장한 만큼만 보는 것이 self-origin 의 뜻이다. 1g 가 4단계 tty 검증을 붙이면 그 주장이 비로소 검증되고, 그때 이 비대칭은 "검증된 좁힘 vs 미검증 넓힘" 이라는 뜻을 갖는다.
+셀렉터를 대는 쪽이 **더 좁다**는 것이 낯설게 읽히지만 그 방향이 맞다 — 셀렉터는 권한이 아니라 "나는 이 surface 다" 라는 **주장**이고, 주장한 만큼만 보는 것이 self-origin 의 뜻이다. 1g 뒤로는 그 주장이 서버가 찾은 pane 과 같을 때만 남으므로, 이 비대칭은 "확인된 좁힘 vs 셀렉터 없는 전체" 라는 뜻을 갖는다.
 
 멀티윈도우와 quick terminal 처리:
 
-- 일반 창 A/B와 quick terminal은 모두 앱 전역 `surface_id` 공간을 공유하므로 ID 충돌을 만들지 않는다. 창 A의 CLI가 창 B의 selector를 복사해 보내면 PTY identity/foreground pgrp가 B와 맞지 않아 거부되어야 한다.
+- 일반 창 A/B와 quick terminal은 모두 앱 전역 `surface_id` 공간을 공유하므로 ID 충돌을 만들지 않는다. 창 A의 CLI가 창 B의 selector를 복사해 보내면 그 셀렉터는 서버가 찾은 pane(A)과 달라 버려진다(1g) — metadata 는 셀렉터 없는 연결처럼 전체, browser 는 A 로만 묻는다.
 - quick terminal은 `window_kind=quick`인 window에 속한 surface다. quick 안의 CLI는 quick 자기 surface의 `metadata:self`만 얻는다. 일반 창의 CLI는 quick을 기본으로 보지 못하고, quick CLI도 primary 창을 기본으로 보지 못한다.
 - quick이 숨겨져 있어도 PTY/session이 살아 있으면 selector는 live일 수 있다. 단, lifecycle/write는 기본 거부이고 quick 제어는 별도 explicit grant가 필요하다.
 
-**경계 강도 정직(적대적 리뷰 반영)**: 이 경로가 실제로 증명하는 것은 "peer가 surface의 controlling tty를 공유한다"뿐이지 "peer가 그 surface의 셸 자신이다"가 아니다. `childExec`는 셸에 `setsid`+`TIOCSCTTY(slave)`를 한 번 걸므로 **그 셸의 모든 자손**(background job, `disown`/`nohup`, subshell, 사용자가 실행한 도구의 하위 프로세스)이 같은 ctty를 물려받는다. 따라서:
+**경계 강도 정직(적대적 리뷰 반영 — 1g 전 설계 기록. 1g 는 tty 장치 비교 대신 세션 번호로 잇고, pid 는 auth 프레임 직후에 읽으며, foreground 판정은 「foreground 작업의 자손」이다 — 위 「1g 구현」이 우선한다)**: 이 경로가 실제로 증명하는 것은 "peer가 surface의 controlling tty를 공유한다"뿐이지 "peer가 그 surface의 셸 자신이다"가 아니다. `childExec`는 셸에 `setsid`+`TIOCSCTTY(slave)`를 한 번 걸므로 **그 셸의 모든 자손**(background job, `disown`/`nohup`, subshell, 사용자가 실행한 도구의 하위 프로세스)이 같은 ctty를 물려받는다. 따라서:
 - **4단계의 foreground pgrp 비교는 보안 경계가 아니라 UX 휴리스틱이다.** CLI 자신이 실행 순간 foreground이므로 정상 경로엔 제약이 0이고, background 형제는 `SIGTTOU`를 무시하고 `tcsetpgrp(getpgrp())`로 잠깐 자기를 foreground로 올려 통과할 수 있다(POSIX 허용). 실제 boundary는 **ctty identity binding(step 4의 tty 비교)뿐**이고, `metadata:self`는 사실상 **surface 세션 단위 grant**다. cross-surface 위장(다른 창/quick selector 복사)만 막힌다.
 - **same-ctty 프로세스는 이미 tty를 소유하므로 `write` capability(§8.3) 밖에 있다.** macOS는 `TIOCSTI`를 게이팅하지 않아 same-ctty 코드는 컨트롤 플레인을 우회해 PTY에 직접 입력을 주입할 수 있다. write-cap이 방어하는 것은 cross-session same-uid 코드지 same-session 코드가 아니다.
 - **`LOCAL_PEERPID`→pid 검사는 TOCTOU이며 best-effort다.** macOS엔 소켓 연결과 peer ctty를 원자적으로 묶는 primitive가 없다(`xucred`는 uid만). pid는 connect-time이고 ctty/pgrp는 별도 `proc_pidinfo`로 사후 조회하므로 pid 재사용 창이 존재한다. 하드 경계로 취급하지 않고 metadata-only에만 쓴다.
 - **"PTY slave identity"를 구체화한다.** 현재 코드는 `openpty(name=null)`로 slave 이름을 안 잡는다. 기록 대상(`ptsname`/`st_rdev`)을 정하되 device number는 pty 해제 후 재사용되므로 **live surface 집합 안에서만** 비교하고 시간에 걸쳐 안정하다고 가정하지 않는다.
 - **self-origin grant는 per-connection 캐시가 아니라 per-request 재평가**로 둔다(foreground였다가 background로 내려 연결을 유지해도 grant가 잔존하지 않게). self-origin에는 TTL/liveness 재확인을 붙인다.
 
-**실측 필수 gate**: 이 모델은 구현 PR에서 제품 경로로 측정하기 전까지 완료 처리하지 않는다. 최소 실측 행렬은 primary 창 2개 + quick terminal 1개를 띄우고, 각 shell 안에서 `sessions.list`가 자기 surface 하나만 반환하는지, 다른 창/quick의 selector로 변조하면 거부되는지, maru 밖 일반 shell에서 복사한 selector가 거부되는지 확인한다. zsh/bash login shell, background child, tmux/screen pane, sudo/su는 별도 행으로 기록한다. tmux/screen처럼 nested PTY가 original Maru PTY와 다르면 기본 허용하지 말고 실제 결과를 `tests/artifacts/control-plane/self-origin.summary.txt`에 남긴다.
+**실측 필수 gate**(1g 전 계획 — 1g 는 `mise run macos-control-self-origin-smoke` 가 대신한다: 세션 유지·in-process 두 모드에서 셸 직접·에이전트 모양 둘·백그라운드 둘·pane 밖 번호. 「`sessions.list` 가 자기 surface 하나」는 사용자 결정 「목록은 지금처럼」으로 기준이 아니다. 창 2 + quick·zsh/bash 별 행은 측정하지 않았다): 이 모델은 구현 PR에서 제품 경로로 측정하기 전까지 완료 처리하지 않는다. 최소 실측 행렬은 primary 창 2개 + quick terminal 1개를 띄우고, 각 shell 안에서 `sessions.list`가 자기 surface 하나만 반환하는지, 다른 창/quick의 selector로 변조하면 거부되는지, maru 밖 일반 shell에서 복사한 selector가 거부되는지 확인한다. zsh/bash login shell, background child, tmux/screen pane, sudo/su는 별도 행으로 기록한다. tmux/screen처럼 nested PTY가 original Maru PTY와 다르면 기본 허용하지 말고 실제 결과를 `tests/artifacts/control-plane/self-origin.summary.txt`에 남긴다.
 
 ### 8.5 환경변수 노출·redaction·capability fd
 - `$MARU_SESSION`은 키名에 `SESSION` 토큰을 포함하므로 [project-rules.md] §redaction의 deny-by-default 대상이다. trace/artifact에서 값을 마스킹한다. env는 보안 경계가 아니라 편의 채널이다(소켓 경로는 결정론적이라 env 없이도 발견됨). capability fd 번호를 담는 `MARU_CONTROL_CAP_FD`는 비밀이 아니지만, 그 fd에서 읽은 nonce는 절대 로그·trace·artifact에 쓰지 않는다.

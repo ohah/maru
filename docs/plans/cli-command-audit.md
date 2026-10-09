@@ -166,3 +166,12 @@ stdout trace 익명화, RPC 오류·malformed JSON·notification만 보낸 뒤 E
 수정 전 native CLI를 동일한 process 판정자에 넣은 음성 대조군은 install help의 파일 보존
 단언에서 실패했다. 순수 suite는 전체 test에 포함되며 `test-cli-failure-process`는 POSIX
 실제 process 검증의 opt-in build step이다.
+
+## CI 컴파일 회귀 보완
+
+PR CI의 file explorer 및 macOS-only 잡은 같은 누락으로 실패했다. renderer를 !bool로
+바꾸면서 macOS control_socket의 RoundTripHarness 호출이 반환값을 처리하지 않았다.
+성공·의도된 RPC 오류의 표시 문자열을 모두 검사하는 harness이므로 outcome을 명시적으로
+버리고 기존 문자열 검사를 유지한다. 제품 runner의 실패 종료 전파는 유지한다.
+`zig build test-macos-control-socket`으로 실제 socket 왕복 suite를 직접 실행할 수 있게 했다.
+수정 전 이 명령에서 CI와 같은 bool ignored 컴파일 오류를 재현했다.

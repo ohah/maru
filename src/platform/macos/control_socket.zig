@@ -1032,7 +1032,9 @@ const RoundTripHarness = struct {
                 defer a.free(resp);
                 var aw: std.Io.Writer.Allocating = .init(a);
                 defer aw.deinit();
-                try sess.renderResponse(a, resp, self.kind, &aw.writer);
+                // This harness checks rendered text for both success and deliberate RPC errors.
+                // Process runners consume the outcome; the round-trip harness preserves either text.
+                _ = try sess.renderResponse(a, resp, self.kind, &aw.writer);
                 try self.rendered.appendSlice(a, aw.written());
             }
         };

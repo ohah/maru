@@ -1242,3 +1242,6 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 
 `maru trace --help`와 `maru trace anonymize --help`는 exit 0 안내이며 `-h`도 지원한다.
 `anonymize <input.trace> [output.trace]` 뒤 초과 인자는 read/write 이전에 exit 1로 거부한다.
+
+`zig build test-macos-control-socket`은 macOS의 실제 소켓 왕복과 CLI 응답 렌더 테스트를
+직접 실행한다. 전체 test 및 macOS-only suite에도 기존대로 포함된다.

@@ -2,8 +2,9 @@
 
 ## 상태와 기준
 
-2026-10-09 점검 완료, 발견 사항의 제품 코드는 수정 전이다. PR #4258은 필수 CI 대기 중이며
-자동 rebase merge가 설정돼 있다. 대기 동안 독립 worktree에서 점검했다.
+2026-10-09 최초 점검과 재현 완료. 아래 발견 사항은 수정 전 동작이며, 승인된 수정 결과는 마지막 절에 기록한다. PR #4258은 머지됐다
+(`7d1fcf1d396d5e9652447857c19641d0c67c7be3`). 독립 worktree에서 점검했으며,
+해당 merge commit과 최초 점검 source의 `src/cli` 및 `src/main.zig` 내용이 동일함을 확인했다.
 
 기준 source는 `fbedbe1527dafc0086fcd4a22ac5457f3f9c0538`(PR #4258 head), 해당 checkout에서
 새로 빌드한 CLI SHA256은 `631b729dfbbd98d8b9871066786912c33814b1d1d4ea5e1b88f2cbf06fea9479`다.
@@ -126,3 +127,42 @@ source상 값 옵션을 덮어쓰는 경로가 있으나 여기서는 live provi
 - numeric-results.json: 숫자 상한 process 검사.
 
 문서에는 생성 fixture 설명과 재현 명령만 적고 원본 artifact·PNG는 커밋하지 않는다.
+
+## 적대적 재검증 결과
+
+독립 HOME/cache와 fake socket을 매회 새로 생성해 전체 입력 점검과 RPC·selector 대조를
+5회 반복했다. 매회 99개 실제 CLI process를 실행했다. 잘못된 install-cli 인자의 symlink
+교체, trace 초과 인자의 sentinel 덮어쓰기, sessions/browser의 RPC 오류·malformed JSON
+성공 종료, root help 누락과 중복 selector의 last-wins가 모두 동일하게 재현됐다.
+정상 무인자 설치·정상 trace 출력·정상 RPC 응답 및 LSP 오류의 nonzero 종료 대조군도 확인했다.
+검사 범위 안에서 추가 결함은 발견하지 못했다. 발견 사항의 제품 수정은 아직 하지 않았다.
+
+반복 harness와 요약은 기존 증거 디렉터리의 `repeat-five.py`, `five-repeat-results.json`,
+개별 증거는 `/tmp/maru-cli-hostile-{1..5}-20261009/`에 있다. CLI artifact는 위 SHA256과 같다.
+
+## 승인된 수정 계약
+
+사용자 요청에 따라 설치·trace의 인자 검증을 I/O 앞에 두고, sessions/browser의 표시된
+응답 오류는 exit 1로 전파한다. 정상 응답과 정상 설치·익명화는 유지한다. install-cli는
+무인자만 설치하며 단독 --help/-h는 exit 0으로 안내한다. trace는 namespace/verb help를
+지원하고 anonymize의 input 및 optional output 밖 토큰을 거부한다. root help에 공개
+제품 명령을 추가하고 browser 설명을 실제 namespace에 맞춘다. 중복 selector의 last-wins는
+이번 수정에 포함하지 않으며 별도 호환성 검토 대상이다.
+
+## 수정 결과
+
+설치 인자 검증과 trace parser 상한·help를 I/O 전에 연결했다. sessions/browser renderer는
+표시한 응답 오류를 false outcome으로 반환하고 runner가 기존 graceful exit 1 경로로
+전달한다. 빈 목록·빈 snapshot/console는 true outcome이다. root help에 incidents/control/
+agent-events/agent-hooks와 browser usage를 추가하고 browser 설명을 갱신했다.
+
+`tools/test-cli-failure-contract.py --repeat 5`의 실제 process 회귀 검증에서 매회 35개
+검사가 통과했다. 일반 파일·설치된 symlink와 기존 trace 출력의 보존, 정상 설치·파일/
+stdout trace 익명화, RPC 오류·malformed JSON·notification만 보낸 뒤 EOF의 nonzero,
+정상 RPC·빈 wrapped result의 성공을 함께 확인했다. 순수 CLI suite도 Debug/ReleaseFast에서
+107 passed, 1 skipped로 통과했다. 중복 selector 정책 및 모든 namespace의 help flag
+일괄 변경은 이 수정 범위 밖이다.
+
+수정 전 native CLI를 동일한 process 판정자에 넣은 음성 대조군은 install help의 파일 보존
+단언에서 실패했다. 순수 suite는 전체 test에 포함되며 `test-cli-failure-process`는 POSIX
+실제 process 검증의 opt-in build step이다.

@@ -1232,3 +1232,13 @@ LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forg
 프로젝트 바꾸기 미리보기 판정: `mise exec -- zig build test-editor-project-replace-preview` ([범위](plans/editor-project-replace-preview.md)).
 
 검색 결과 탭·할당 실패·읽기 전용 diff 탭 판정도 `mise exec -- zig build test-editor-project-replace-preview`에 포함된다([계약](plans/editor-project-search-pane.md)).
+### CLI 실패 계약 회귀 검증
+
+`zig build test-cli-failure-contract`는 trace 인자 상한과 sessions/browser 응답 outcome을
+검증하며 전체 `zig build test`에도 포함된다. 실제 process 검증은 `zig build test-cli-failure-process` 또는 `zig build` 후
+`python3 tools/test-cli-failure-contract.py --repeat 5`로 실행한다. private HOME/cache,
+fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보존, 오류 exit 1, 정상
+설치·trace 출력·빈 결과의 성공을 대조한다. macOS/POSIX의 opt-in 검증이다.
+
+`maru trace --help`와 `maru trace anonymize --help`는 exit 0 안내이며 `-h`도 지원한다.
+`anonymize <input.trace> [output.trace]` 뒤 초과 인자는 read/write 이전에 exit 1로 거부한다.

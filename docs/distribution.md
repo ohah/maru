@@ -300,3 +300,10 @@ release A/B의 실제 준비 상태와 남은 외부 gate는 [검증 매트릭�
 
 - 빌드 산출물 `dist/`는 git에 커밋하지 않는다(`.gitignore`).
 - 앱 전용 암호·인증서 등 비밀값은 리포에 두지 않는다 — 로컬은 키체인, CI는 GitHub Secret.
+
+### install-cli 인자 검증
+
+`maru install-cli`는 무인자 호출만 설치한다. 단독 `--help` 또는 `-h`는 안내를 표시하고
+exit 0으로 종료하며 설치 위치를 만들거나 기존 파일을 교체하지 않는다. 그 외 인자 및
+help 뒤 추가 인자는 exit 1로 거부하며 설치 I/O를 시작하지 않는다. 이 검증은 POSIX
+symlink와 Windows shim 설치 분기보다 먼저 실행한다.

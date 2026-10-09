@@ -154,32 +154,33 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
 pub const ResponseKind = enum { list, get };
 
 /// 응답 바이트 한 줄을 사람이 읽을 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`.
+/// Returns false after a server/protocol diagnostic; write failures remain errors.
 pub fn renderResponse(
     gpa: std.mem.Allocator,
     response_bytes: []const u8,
     kind: ResponseKind,
     w: *std.Io.Writer,
-) !void {
+) !bool {
     var pm = cp.parseMessage(gpa, response_bytes) catch {
         try w.writeAll("error: malformed response from server\n");
-        return;
+        return false;
     };
     defer pm.deinit();
     const resp = switch (pm.message) {
         .response => |r| r,
         else => {
             try w.writeAll("error: unexpected message (not a response)\n");
-            return;
+            return false;
         },
     };
     // 에러 응답(unauthorized·process_exited·method_not_found 등)은 kind와 무관하게 균일한 형태로.
     if (resp.err) |e| {
         try w.print("error: {s} ({d})\n", .{ e.message, e.code });
-        return;
+        return false;
     }
     const result = resp.result orelse {
         try w.writeAll("error: empty result\n");
-        return;
+        return false;
     };
     switch (kind) {
         .list => {
@@ -187,27 +188,30 @@ pub fn renderResponse(
                 .array => |a| a,
                 else => {
                     try w.writeAll("error: expected a list result\n");
-                    return;
+                    return false;
                 },
             };
             if (arr.items.len == 0) {
                 try w.writeAll("(no sessions)\n");
-                return;
+                return true;
             }
-            for (arr.items) |item| try renderSurfaceLine(item, w);
+            for (arr.items) |item| {
+                if (!try renderSurfaceLine(item, w)) return false;
+            }
         },
-        .get => try renderSurfaceLine(result, w),
+        .get => if (!try renderSurfaceLine(result, w)) return false,
     }
+    return true;
 }
 
 /// Surface 객체 하나를 사람이 읽을 한 줄로 쓴다(1c wire 스키마 §3 소비). 공통 메타 → kind별 필드.
 /// 형태: `[<sid>] <kind> "<title>" win<w>/tab<t>/pane<p>[ *focused*]<extras>`.
-fn renderSurfaceLine(v: std.json.Value, w: *std.Io.Writer) !void {
+fn renderSurfaceLine(v: std.json.Value, w: *std.Io.Writer) !bool {
     const o = switch (v) {
         .object => |o| o,
         else => {
             try w.writeAll("error: malformed surface\n");
-            return;
+            return false;
         },
     };
     const surface_id = blk: {
@@ -243,6 +247,7 @@ fn renderSurfaceLine(v: std.json.Value, w: *std.Io.Writer) !void {
         try w.print(" trust={s}", .{strOr(o.get("trust"), "?")});
     }
     try w.writeAll("\n");
+    return true;
 }
 
 // ── JSON Value 읽기 헬퍼(누락/타입불일치는 기본값·null로 접어 render가 panic하지 않게) ──
@@ -467,7 +472,7 @@ test "buildRequestBytes: session.get → method + params.id, 한 줄" {
 fn render(bytes: []const u8, kind: ResponseKind, out: *std.ArrayList(u8)) !void {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try renderResponse(testing.allocator, bytes, kind, &aw.writer);
+    _ = try renderResponse(testing.allocator, bytes, kind, &aw.writer);
     try out.appendSlice(testing.allocator, aw.written());
 }
 
@@ -635,4 +640,13 @@ test "pickSocket: .sock 항목이 정확히 하나면 single, 0개면 none, 2개
 
 test {
     testing.refAllDecls(@This());
+}
+
+test "response outcome distinguishes server failure from successful rendering" {
+    const wires = [_][]const u8{ "invalid-json", "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"fixture\"}}", "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":[]}" };
+    for (wires, 0..) |wire, index| {
+        var w: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer w.deinit();
+        try testing.expectEqual(index == 2, try renderResponse(testing.allocator, wire, .list, &w.writer));
+    }
 }

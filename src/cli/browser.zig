@@ -787,31 +787,32 @@ pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, 
 
 /// 응답 바이트 한 줄을 기계·사람 읽기 편한 형태로 `w`에 쓴다. 에러 응답이면 균일하게 `error: <msg> (<code>)`
 /// (sessions.renderResponse 규율 — 미grant 거부는 `error: Unauthorized (-32002)`). result는 kind별 한 줄.
-pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: ResponseKind, w: *std.Io.Writer) !void {
+/// Returns false after a server/protocol diagnostic; write failures remain errors.
+pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: ResponseKind, w: *std.Io.Writer) !bool {
     var pm = cp.parseMessage(gpa, response_bytes) catch {
         try w.writeAll("error: malformed response from server\n");
-        return;
+        return false;
     };
     defer pm.deinit();
     const resp = switch (pm.message) {
         .response => |r| r,
         else => {
             try w.writeAll("error: unexpected message (not a response)\n");
-            return;
+            return false;
         },
     };
     if (resp.err) |e| {
         try w.print("error: {s} ({d})\n", .{ e.message, e.code });
-        return;
+        return false;
     }
     const result = switch (resp.result orelse {
         try w.writeAll("error: empty result\n");
-        return;
+        return false;
     }) {
         .object => |o| o,
         else => {
             try w.writeAll("error: malformed result\n");
-            return;
+            return false;
         },
     };
     switch (kind) {
@@ -821,12 +822,12 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 .array => |a| a,
                 else => {
                     try w.writeAll("error: malformed surfaces\n");
-                    return;
+                    return false;
                 },
             };
             if (surfaces.items.len == 0) {
                 try w.writeAll("(no web surfaces)\n");
-                return;
+                return true;
             }
             for (surfaces.items) |item| {
                 const o = switch (item) {
@@ -842,10 +843,16 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             }
         },
         .navigate => {
-            if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: navigate not ok\n");
+            if (boolField(result.get("ok"))) try w.writeAll("ok\n") else {
+                try w.writeAll("error: navigate not ok\n");
+                return false;
+            }
         },
         .ok => { // set-cookie/delete-cookie/set·remove-local-storage/clear-storage 성공 = {ok:true}
-            if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: not ok\n");
+            if (boolField(result.get("ok"))) try w.writeAll("ok\n") else {
+                try w.writeAll("error: not ok\n");
+                return false;
+            }
         },
         .value => try w.print("{s}\n", .{strField(result.get("value"))}), // get-local-storage → {value}
         .get_url => try w.print("{s}\n", .{strField(result.get("url"))}),
@@ -856,7 +863,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 .array => |a| a,
                 else => {
                     try w.writeAll("error: malformed cookies\n");
-                    return;
+                    return false;
                 },
             };
             var s: std.json.Stringify = .{ .writer = w, .options = .{} };
@@ -869,19 +876,19 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 .object => |o| o,
                 else => {
                     try w.writeAll("error: malformed snapshot\n");
-                    return;
+                    return false;
                 },
             };
             const tree = switch (snap.get("tree") orelse std.json.Value{ .null = {} }) {
                 .array => |a| a,
                 else => {
                     try w.writeAll("error: malformed snapshot tree\n");
-                    return;
+                    return false;
                 },
             };
             if (tree.items.len == 0) {
                 try w.writeAll("(empty snapshot)\n");
-                return;
+                return true;
             }
             for (tree.items) |node| try renderSnapshotNode(node, 0, w);
         },
@@ -891,12 +898,12 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 .array => |a| a,
                 else => {
                     try w.writeAll("error: malformed console\n");
-                    return;
+                    return false;
                 },
             };
             if (entries.items.len == 0) {
                 try w.writeAll("(empty console)\n");
-                return;
+                return true;
             }
             for (entries.items) |entry| {
                 const o = switch (entry) {
@@ -907,6 +914,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             }
         },
     }
+    return true;
 }
 
 /// snapshot 트리 노드 한 줄 + 자식 재귀(들여쓰기 2칸). `<role> "<name>" [ref=<ref>]`(name/ref 없으면 생략).
@@ -1414,31 +1422,31 @@ test "renderResponse: navigate ok·getUrl url·exec result·getCookies 배열·e
     // navigate {ok:true} → "ok".
     {
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .navigate, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .navigate, &w);
         try testing.expectEqualStrings("ok\n", w.buffered());
     }
     // getUrl {url} → url 한 줄.
     {
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://x/y\"}}", .get_url, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://x/y\"}}", .get_url, &w);
         try testing.expectEqualStrings("https://x/y\n", w.buffered());
     }
     // exec {result} → 값 한 줄.
     {
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"result\":\"My Page\"}}", .exec, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"result\":\"My Page\"}}", .exec, &w);
         try testing.expectEqualStrings("My Page\n", w.buffered());
     }
     // getCookies {cookies:[...]} → JSON 배열 한 줄.
     {
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"cookies\":[{\"name\":\"sid\",\"value\":\"v\"}]}}", .get_cookies, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"cookies\":[{\"name\":\"sid\",\"value\":\"v\"}]}}", .get_cookies, &w);
         try testing.expect(std.mem.indexOf(u8, w.buffered(), "\"name\":\"sid\"") != null);
     }
     // error 응답(미grant 거부) → 균일 "error: msg (code)".
     {
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .navigate, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .navigate, &w);
         try testing.expectEqualStrings("error: Unauthorized (-32002)\n", w.buffered());
     }
 }
@@ -1696,7 +1704,7 @@ test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 
     {
         var buf: [512]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://naver.com/\",\"title\":\"Browser\",\"panel_kind\":\"browser\"},{\"id\":7,\"url\":\"\",\"title\":\"docs\",\"panel_kind\":\"markdown\"}]}}", .list, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://naver.com/\",\"title\":\"Browser\",\"panel_kind\":\"browser\"},{\"id\":7,\"url\":\"\",\"title\":\"docs\",\"panel_kind\":\"markdown\"}]}}", .list, &w);
         const out = w.buffered();
         try testing.expect(std.mem.indexOf(u8, out, "surface 3  browser  https://naver.com/  \"Browser\"") != null);
         try testing.expect(std.mem.indexOf(u8, out, "surface 7  markdown  ") != null);
@@ -1705,7 +1713,7 @@ test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 
     {
         var buf: [128]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[]}}", .list, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[]}}", .list, &w);
         try testing.expectEqualStrings("(no web surfaces)\n", w.buffered());
     }
 }
@@ -1774,7 +1782,7 @@ test "buildRequestBytes: setCookie/deleteCookie params(선택 필드 생략)" {
 test "renderResponse(ok): setCookie {ok:true} → ok" {
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .ok, &w);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}", .ok, &w);
     try testing.expectEqualStrings("ok\n", w.buffered());
 }
 
@@ -1833,7 +1841,7 @@ test "buildRequestBytes: localStorage/clear 메서드·params" {
 test "renderResponse(value): getLocalStorage {value} → 값 출력" {
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"hello\"}}", .value, &w);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"hello\"}}", .value, &w);
     try testing.expectEqualStrings("hello\n", w.buffered());
 }
 
@@ -2042,7 +2050,7 @@ test "parse/build/render: snapshot(§9.5.4) — 기본·옵션·에러·트리 �
     {
         var buf: [256]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[{\"role\":\"navigation\",\"name\":\"\",\"children\":[{\"role\":\"link\",\"name\":\"Home\",\"ref\":\"e1\"}]}]}}}", .snapshot, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[{\"role\":\"navigation\",\"name\":\"\",\"children\":[{\"role\":\"link\",\"name\":\"Home\",\"ref\":\"e1\"}]}]}}}", .snapshot, &w);
         try testing.expectEqualStrings("navigation\n  link \"Home\" [ref=e1]\n", w.buffered());
     }
 }
@@ -2088,17 +2096,26 @@ test "parse/build/render: console(§9.5.9) — 기본·clear·에러·항목 렌
     {
         var buf: [256]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"log\",\"text\":\"hi\"},{\"level\":\"error\",\"text\":\"boom\"}]}}", .console, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"log\",\"text\":\"hi\"},{\"level\":\"error\",\"text\":\"boom\"}]}}", .console, &w);
         try testing.expectEqualStrings("[log] hi\n[error] boom\n", w.buffered());
     }
     {
         var buf: [64]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[]}}", .console, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[]}}", .console, &w);
         try testing.expectEqualStrings("(empty console)\n", w.buffered());
     }
 }
 
 test {
     testing.refAllDecls(@This());
+}
+
+test "response outcome distinguishes server failure from successful rendering" {
+    const wires = [_][]const u8{ "invalid-json", "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"fixture\"}}", "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://example.invalid/\"}}" };
+    for (wires, 0..) |wire, index| {
+        var w: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer w.deinit();
+        try testing.expectEqual(index == 2, try renderResponse(testing.allocator, wire, .get_url, &w.writer));
+    }
 }

@@ -299,6 +299,16 @@ fn dispatch(
     }
 
     if (std.mem.eql(u8, command, "install-cli")) {
+        // Validate the entire invocation before install can replace a file.
+        if (args.next()) |option| {
+            if ((std.mem.eql(u8, option, "--help") or std.mem.eql(u8, option, "-h")) and args.next() == null) {
+                try stdout.writeAll("usage: maru install-cli\n");
+                try stdout.flush();
+                return;
+            }
+            try stderr.writeAll("usage: maru install-cli\n");
+            return error.UnknownCommand;
+        }
         try runInstallCli(io, allocator, stdout, stderr);
         return;
     }
@@ -15585,6 +15595,10 @@ fn runTrace(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *st
     };
 
     switch (cmd) {
+        .help => {
+            try stdout.writeAll("usage: maru trace anonymize <input.trace> [output.trace]\n");
+            try stdout.flush();
+        },
         .anonymize => |an| {
             const input = std.Io.Dir.cwd().readFileAlloc(io, an.input, allocator, .limited(64 * 1024 * 1024)) catch |e| {
                 try stderr.print("maru trace anonymize: '{s}' read failed ({s})\n", .{ an.input, @errorName(e) });
@@ -15914,7 +15928,7 @@ fn runSessionRequest(
     defer allocator.free(request_bytes);
     const resp = try maru.cli.control_client.fetchResponse(io, allocator, request_bytes, stderr);
     defer allocator.free(resp);
-    try maru.cli.sessions.renderResponse(allocator, resp, kind, stdout);
+    if (!try maru.cli.sessions.renderResponse(allocator, resp, kind, stdout)) return error.UnknownCommand;
     try stdout.flush();
 }
 
@@ -15981,6 +15995,11 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru editor open <file> [-l N | --line N] [-c N | --column N]
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
+        \\  maru incidents list [options]
+        \\  maru control --stdio
+        \\  maru agent-events --stdio --dir=<absolute path> [options]
+        \\  maru agent-hooks install|uninstall [options]
+        \\  maru browser <command> [options]
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
         \\  maru editor lsp trust list | revoke <path> [--volume <hex>] | forget <path> [--volume <hex>]
@@ -16017,7 +16036,11 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  host       inspect the existing persistent session host without starting one (`host --help`)
         \\  runtime    inspect or explicitly end persistent runtimes without starting a host (`runtime --help`)
         \\  attach     attach this terminal to an existing persistent runtime (`attach --help`)
-        \\  browser    control a web surface (navigate/get-url/exec/get-cookies; asks for confirmation) (`browser --help`)
+        \\  incidents  inspect local incident records (`incidents --help`)
+        \\  control    relay control-plane messages over stdio
+        \\  agent-events stream remote agent events over stdio
+        \\  agent-hooks install or uninstall remote provider hooks (`agent-hooks --help`)
+        \\  browser    control web surfaces, storage, input and captures (asks for confirmation; `browser --help`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\
     );

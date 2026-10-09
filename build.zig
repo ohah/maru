@@ -4321,6 +4321,19 @@ pub fn build(b: *std.Build) void {
     const run_editor_open_tests = b.addRunArtifact(editor_open_tests);
     b.step("test-editor-open-cli", "Run one-file CLI arguments, URL encoding and allocation failure tests").dependOn(&run_editor_open_tests.step);
     test_step.dependOn(&run_editor_open_tests.step);
+    const cli_failure_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/cli_failure_contract_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_cli_failure_tests = b.addRunArtifact(cli_failure_tests);
+    b.step("test-cli-failure-contract", "Run CLI argument and response outcome regression tests").dependOn(&run_cli_failure_tests.step);
+    test_step.dependOn(&run_cli_failure_tests.step);
+    // Actual CLI process tests are opt-in: they require a local POSIX host and Python.
+    const cli_failure_process = b.addSystemCommand(&.{ "python3", "tools/test-cli-failure-contract.py", "--cli" });
+    cli_failure_process.addArtifactArg(exe);
+    cli_failure_process.setCwd(b.path("."));
+    b.step("test-cli-failure-process", "Run isolated POSIX CLI process failure checks").dependOn(&cli_failure_process.step);
     const editor_url_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/session/editor_app_url_test.zig"),
         .target = target,

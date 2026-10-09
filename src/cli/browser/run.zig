@@ -112,7 +112,7 @@ fn runRequest(
     defer allocator.free(request_bytes);
     const resp = try control_client.fetchResponse(io, allocator, request_bytes, stderr);
     defer allocator.free(resp);
-    try browser.renderResponse(allocator, resp, kind, stdout);
+    if (!try browser.renderResponse(allocator, resp, kind, stdout)) return error.UnknownCommand;
     try stdout.flush();
 }
 
@@ -158,7 +158,7 @@ fn runExecuteScript(
                     // 서버가 정상 JSON-RPC error(script_error·result_too_large·timeout·unauthorized 등) 반환 — 일반 "잘못된
                     // stream" 대신 실제 code/message를 stderr에 내고 exit 1(부분 result는 안 쓴다). renderResponse는 error
                     // 응답에서 kind를 안 쓴다(.exec는 표식일 뿐). 성공 결과만 stdout으로 나간다(계약 유지).
-                    browser.renderResponse(allocator, line, .exec, stderr) catch {};
+                    _ = browser.renderResponse(allocator, line, .exec, stderr) catch false;
                     stderr.flush() catch {};
                     return error.UnknownCommand;
                 },
@@ -252,9 +252,9 @@ fn runWrappedResult(
         synth.appendSlice(allocator, "\":") catch return error.OutOfMemory;
         synth.appendSlice(allocator, reassembled.items) catch return error.OutOfMemory;
         synth.appendSlice(allocator, "}}") catch return error.OutOfMemory;
-        try browser.renderResponse(allocator, synth.items, kind, stdout);
+        if (!try browser.renderResponse(allocator, synth.items, kind, stdout)) return error.UnknownCommand;
     } else if (terminal_line) |line| {
-        try browser.renderResponse(allocator, line, kind, stdout);
+        if (!try browser.renderResponse(allocator, line, kind, stdout)) return error.UnknownCommand;
     } else {
         return wrappedStreamError(stderr, wrap_field);
     }
@@ -296,7 +296,7 @@ fn runScreenshot(
                 .error_response => {
                     // 서버가 정상 JSON-RPC error(unauthorized·surface 없음 등) 반환 — 일반 "잘못된 stream" 대신 실제
                     // code/message를 stderr에 내고 exit 1. renderResponse는 error 응답에서 kind를 안 쓴다(.ok는 표식일 뿐).
-                    browser.renderResponse(allocator, line, .ok, stderr) catch {};
+                    _ = browser.renderResponse(allocator, line, .ok, stderr) catch false;
                     stderr.flush() catch {};
                     return error.UnknownCommand;
                 },

@@ -22,10 +22,10 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 | 메서드 | params | result | → WKWebView(5d) |
 |---|---|---|---|
-| `browser.list` | `{}` | `{surfaces:[{id, url, title, panel_kind}]}` | collector snapshot 필터(web만) — **ungated 발견**(§9.6, cap/grant/모달 불요; 제어는 게이트) |
+| `browser.list` | `{}` | `{surfaces:[{id, url, title, panel_kind, engine, methods}]}` | collector snapshot 필터(web만) — **ungated 발견**(§9.6, cap/grant/모달 불요; 제어는 게이트). **W9-0**: `engine`(`webkit`\|`chromium` — 탭 단위 결정, Chromium 브라우저가 아직 만들어지지 않은 탭도 chromium)과 그 엔진이 지원하는 wire 메서드 이름 `methods`(Chromium 은 W9 단계마다 늘어난다 — 지금은 빈 배열). 엔진이 지원하지 않는 메서드는 **확인 모달 전에** `-32008 unsupported_by_engine`(data `{engine}`)으로 답한다(예전엔 승인 뒤 실행 단계에서 실패). 대상 id·엔진은 이 목록이 이미 알려 주므로 새 oracle 이 아니고, 없는 id·터미널은 지금처럼 균일 unauthorized 다 |
 | `browser.navigate` | `{id, url}` | `{ok}` | `load(URLRequest)` |
 | `browser.getUrl` | `{id}` | `{url}` | `.url` |
-| `browser.back`/`forward`/`refresh` | `{id}` | `{ok}` | `goBack`/`goForward`/`reload` |
+| `browser.back`/`forward`/`refresh` | `{id}` | `{ok}` | `goBack`/`goForward`/`reload` — **미구현**(이 표에만 있었다 — 파서가 모르는 메서드라 `method_not_found`. W9b 에서 두 엔진에 넣는다, docs/plans/web-osr-backend.md W9) |
 | `browser.executeScript` | `{id, script, args?, max_result_bytes?}` | inline `{result, transfer:"inline"}` 또는 `browser.executeScriptChunk` notification×N → 최종 `{transfer:"chunked", result_id, seq_total, bytes}` | 5f-5c live: `script`=JavaScript 표현식, `args`=strict-JSON 배열(`args` 이름으로 접근), Promise 자동 await, strict CSP에서 string-eval 없음. raw strict-JSON ≤512 KiB inline, 그 초과~16 MiB progressive pump. hello 완료 capability는 Track 5 성능 gate 뒤에 연다. 16 MiB 초과와 대체 attachment는 후속 재검토(§4.4·§9.4 D6·§9.5.8) |
 | `browser.screenshot` | `{id, format?, rect?, scale?}` | `browser.screenshotChunk` notification×N → 최종 응답 `{capture_id, seq_total, bytes, width, height, format}` | `takeSnapshot`→PNG, **소켓 chunk-streaming**(§9.5.3·§9.5.7 — `{png_base64}` 단일 응답 폐기: >1MB 프레임 상한). rect=`WKSnapshotConfiguration.rect`·scale=`.snapshotWidth` |
 | `browser.snapshot` | `{id, interactive_only?, max_depth?, selector?}` | ARIA 트리 `{role,name,ref?,value?,state?,children}` | eval read-only DOM walk + W3C accname, 임시 `data-maru-ref`, inline — scope=`browser`(snapshot-1 구현 §9.5.4) |

@@ -3855,13 +3855,16 @@ pub const RemoteTermBackend = struct {
     /// allocation/callback 없는 한 suffix에서 함께 게시한다. 반환한 개수가 AppSession cursor의 닫힌 범위다.
     /// 셸이 끝나 `finish_after_termination`으로 ready_remove에 이른 runtime은 target이 아니다 — 끝낼 것이 없고, 그
     /// Term의 창 teardown이 같은 finish(`term_ops.finishIfRequested`)와 `remove`로 거둔다. 전에는 이런 runtime 하나
-    /// (시작 직후 종료로 유지한 창 · 다운로드로 숨겨 쥔 세션 · 저장 안 한 파일 패널로 남은 창)만 있어도 pristine이
-    /// 아니라 거부돼 exit 86이었다(2026-10-09 실측). 그 밖의 non-pristine은 지금처럼 거부한다.
+    /// (시작 직후 종료로 유지한 창 · 다운로드로 숨겨 쥔 세션)만 있어도 pristine이 아니라 거부돼 exit 86이었다(2026-10-09
+    /// 실측). 그 밖의 non-pristine은 지금처럼 거부한다. 끝난 runtime만 있으면 backend 상태(종료 deadline 등)를 건드리지
+    /// 않고 0을 돌려준다 — 세워 두면 종료가 취소된 뒤 재접속이 막히고 다음 end-all이 낡은 deadline을 쓴다.
     pub fn prepareAppQuitEndAll(self: *RemoteTermBackend, now_ns: i128) !u32 {
         if (self.app_quit_target_count != 0 or self.app_quit_first_ticket != 0)
             return self.app_quit_target_count;
-        if (!self.beginAppQuitShutdown(now_ns)) return error.InvalidAppQuitShutdown;
-        if (self.runtimes.count() == 0) return 0;
+        if (self.runtimes.count() == 0) {
+            if (!self.beginAppQuitShutdown(now_ns)) return error.InvalidAppQuitShutdown;
+            return 0;
+        }
 
         var handles: [max_remote_backend_runtimes]RuntimeHandle = undefined;
         var target_digests: [max_remote_backend_runtimes]process_seal.CleanupSeal = undefined;
@@ -3880,6 +3883,7 @@ pub const RemoteTermBackend = struct {
         }
         // 끝난 runtime만 있었다 — 예약할 ticket이 없다(빈 예약은 reserveWindowCloseTickets가 거부한다).
         if (count == 0) return 0;
+        if (!self.beginAppQuitShutdown(now_ns)) return error.InvalidAppQuitShutdown;
         std.mem.sort(RuntimeHandle, handles[0..count], {}, std.sort.asc(RuntimeHandle));
         // 정렬 뒤 digest도 같은 target 순서로 다시 계산한다. HashMap 순서는 shutdown ordinal의 권위가 아니다.
         for (handles[0..count], 0..) |handle, index| {
@@ -8513,8 +8517,11 @@ test "셸이 끝나 finish 로 ready_remove 에 이른 runtime 은 「종료 및
     defer testing.allocator.destroy(runtime_ptr);
     try backend_value.runtimes.put(testing.allocator, 7, .{ .runtime = runtime_ptr, .host_id = 9, .runtime_generation = 1 });
     const before = runtime_ptr.close_authority;
-    // 끝난 runtime 만 있다 — 끝낼 target 이 없다(빈 ticket 예약을 하지 않는다).
+    // 끝난 runtime 만 있다 — 끝낼 target 이 없다(빈 ticket 예약을 하지 않는다). 종료 deadline 도 세우지 않는다 — 종료가
+    // 취소되면 남은 deadline 이 재접속을 막고 다음 end-all 에 낡은 값으로 쓰인다.
     try testing.expectEqual(@as(u32, 0), try backend_value.prepareAppQuitEndAll(1_000_000));
+    try testing.expectEqual(@as(u64, 0), backend_value.app_quit_shutdown_deadline_ns);
+    try testing.expectEqual(@as(u64, 0), backend_value.app_quit_first_ticket);
     try testing.expect(std.meta.eql(before, runtime_ptr.close_authority));
     try testing.expect(std.meta.eql(runtime_ptr.shutdown_attempt_authority, shutdown_attempt.ShutdownAttemptAuthority{}));
     // 창 teardown 의 같은 finish 는 complete 로 그치고 remove 가 거둔다.

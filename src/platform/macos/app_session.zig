@@ -296,6 +296,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 210: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
 // 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
 // 212: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
+// 216: W10e — downloads_keep_alive(앱을 남겨 둘 다운로드 수)·web_osr_detached_pump(창이 없을 때 sidecar 펌프) — 마지막 셸이
+// 끝나도 받는 중이면 창만 숨기고 다 받을 때까지 남는다.
 // 215: W10b — 다운로드 「매번 묻기」: 행 상태 10(asking), MaruDownloadAsk·app_session_take_download_ask(이 창의 활성 Chromium
 // 탭에서 물을 행)·downloads_claim_ask(목록 창이 맡기)·downloads_answer_ask(고른 경로·취소·치움), 목록 글 19(저장할 곳 고르기).
 // 214: W10a — downloads_*(Chromium 탭 다운로드 목록 — 앱 전역: 세대·행·누름·끝난 것 지우기·보이기 요청·받는 중 수),

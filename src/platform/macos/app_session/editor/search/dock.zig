@@ -530,6 +530,11 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             if (index < 3) {
                 st.options[index] = !st.options[index];
                 changed(self);
+            } else if (index == 8) {
+                _ = @import("report.zig").open(self) catch |err| {
+                    self.showNoticeKey(if (err == error.OutOfMemory) .dbg_editor_oom else .dbg_editor_unreadable);
+                    return;
+                };
             } else if (index == 7) {
                 preview.back(self);
             } else if (index == 6) {

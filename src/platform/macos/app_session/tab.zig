@@ -1323,6 +1323,7 @@ pub fn captureWorkspaceTabWithEditors(self: *AppSession, arena: std.mem.Allocato
         var active_browser: ?usize = null;
         var persisted_index: usize = 0;
         for (pane.terms.items, 0..) |term, term_i| {
+            if (term.rt.editor_search_report != null) continue;
             if (editor_ops.workspace_restore.eligible(term)) {
                 try editor_views.append(arena, try editors.view(term, persisted_index));
                 persisted_index += 1;

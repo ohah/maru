@@ -1884,7 +1884,9 @@ pub fn termLabel(term: *const Term) []const u8 {
         // **이름 없는 문서는 `untitled-N`**(§3.11) — 「편집기」로 두면 여러 개를 열었을 때 탭이 전부
         // 같은 이름이라 어느 것이 무엇인지 알 수 없다(파일 Term 이 같은 이유로 파일 이름을 쓴다).
         // 사용자 rename 이 있으면 그게 우선인 것은 다른 경로와 같다(`pickLabel` 단일 해석).
-        const auto_name: []const u8 = if (term.rt.editorDocument().path) |p|
+        const auto_name: []const u8 = if (term.rt.editor_search_report) |report|
+            report.title
+        else if (term.rt.editorDocument().path) |p|
             std.fs.path.basename(p)
             // **저쪽 파일도 파일 이름이다**(U3 — §3.11). 여기 없으면 탭이 「편집기」로 떨어져, 바로 위
             // 주석이 경고한 상태(여러 개를 열면 이름이 전부 같다)가 저쪽 문서에서 되살아난다.
@@ -2514,6 +2516,8 @@ const TermRuntime = struct {
     /// 않는다 — `editor_hit_*`(렌더가 굳히는 스냅숏)와 방향이 반대다.
     /// 배열 자리 대신 뷰 자체에 최근 활성화 순서를 둔다. 이동·닫기 압축 뒤에도 의미가 같다.
     editor_focus_order: u64 = 0,
+    /// 검색 결과는 원문과 별개인 임시 읽기 전용 탭이다.
+    editor_search_report: ?*@import("app_session/editor/search/report.zig").Report = null,
     editor_selection: ?maru.session.editor.selection.Selection = null,
     /// **IME 조합 중 글자**(N3 — native-editor.md §11). 문서에 넣지 않고 **화면에만** 끼워 그린다 —
     /// 조합은 아직 확정이 아니므로 버퍼에 들어가면 undo·저장·검색이 전부 그것을 진짜 내용으로 본다.
@@ -14053,6 +14057,14 @@ pub const AppSession = struct {
                 // 키를 **소비하지는 않는다** — 헬퍼는 모달이 아니므로 `Esc` 의 원래 뜻(있다면)을
                 // 뺏지 않는다. 나머지 닫힘은 `refreshSendHelper` 가 프레임마다 스스로 판정한다.
                 if (key_event.key == .escape) editor_ops.hideSendHelper(self);
+                if (active.rt.editor_search_report != null and key_event.key == .enter and
+                    !key_event.modifiers.command and !key_event.modifiers.control and !key_event.modifiers.option)
+                {
+                    @import("app_session/editor/search/report.zig").activate(self, active) catch |err| {
+                        self.showNoticeKey(if (err == error.OutOfMemory) .dbg_editor_oom else .project_replace_conflict);
+                    };
+                    return input_ops.keyConsumedByApp(self);
+                }
                 // **자동완성 팝업이 열려 있으면 `↑↓`/`Enter`/`Tab`/`Esc` 만 가져간다**(tooling §8.2g · ui §8 규칙 3) — 나머지는 편집기로.
                 if (editor_ops.completion_client.handleKey(self, key_event.key, key_event.modifiers)) return input_ops.keyConsumedByApp(self);
                 // **키가 오면 호버 박스는 닫힌다**(tooling §8.2b 「닫힘」) — 소비하지 않는다. 수정자만의 키 이벤트는 이 경로에

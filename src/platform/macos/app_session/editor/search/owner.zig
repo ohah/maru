@@ -72,6 +72,7 @@ pub const Prepared = struct {
         var index: usize = 0;
         var consumed: usize = 0;
         for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+            if (term.rt.editor_search_report != null) continue;
             defer index += 1;
             if (index < self.cursor) continue;
             if (consumed == max_views) return false;
@@ -183,7 +184,9 @@ pub fn fingerprint(session: *app.AppSession) u64 {
     const remote = app.termCwdIsRemote(@import("../../pane.zig").activePane(session).activeTerm());
     hash.update(std.mem.asBytes(&remote));
     for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
-        // 배치 cursor는 모든 surface를 센다. 터미널 삽입·닫기도 순회를 무효화해야 빠진 문서가 없다.
+        // 결과 사본은 검색 대상도 배치 cursor도 아니다. 열기·닫기가 원문 변경 충돌을 만들지 않는다.
+        if (term.rt.editor_search_report != null) continue;
+        // 나머지 surface 삽입·닫기는 순회를 무효화해야 빠진 문서가 없다.
         hash.update(std.mem.asBytes(&term.surface.id));
         const kind: u8 = @intCast(@intFromEnum(term.kind));
         hash.update(std.mem.asBytes(&kind));

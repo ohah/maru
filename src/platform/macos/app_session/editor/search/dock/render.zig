@@ -65,10 +65,11 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         },
     };
     var fields: [4][]const u8 = undefined;
-    const cols = (width -| m.inset * 2) / @max(self.cell_width_px, 1);
+
     var carets: [4]?f32 = .{ null, null, null, null };
     var selections: [4]?component.types.Selection = .{ null, null, null, null };
     for (&fields, &state.fields, 0..) |*text, *field, index| {
+        const cols = (width -| (if (index == 0 and m.query_inline) m.row * 3 else 0) -| m.inset * 2) / @max(self.cell_width_px, 1);
         const display = try search_dock.makeDisplay(arena, field, "", cols);
         text.* = display.text;
         if (state.focused == index and (self.blink_visible or display.selected != null)) {
@@ -112,6 +113,8 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .previewing = previewing,
         .replace_label = i18n.t(.project_replace_toggle),
         .back_label = i18n.t(.project_replace_back),
+        .pane_label = i18n.t(.project_search_open_pane),
+        .can_open_pane = (!previewing or state.preview.phase == .ready) and state.result.phase == .complete and state.stamp != null,
         .carets = carets[0..3].*,
         .selections = selections[0..3].*,
         .field_labels = .{ i18n.t(.project_search_query), i18n.t(.project_search_include), i18n.t(.project_search_exclude) },

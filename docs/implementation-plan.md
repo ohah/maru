@@ -1667,3 +1667,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 
 - [VS Code 방향의 편집기 검색 판정](plans/editor-search-policy.md): 기본 단어 구분자·빈 대안 우선순위·EOF 중복과 치환의 승인 계약.
 - [문서 전체 정규식 검색·치환](plans/editor-document-regex.md): 사용자 승인한 원문·ANYCRLF 정책으로 공통 엔진·여러 줄 표시·캡처 치환을 연결한다.
+
+- [프로젝트 검색 결과 탭·옵션 UI](plans/editor-project-search-pane.md): 읽기 전용 결과 사본·Enter 이동·diff 전문 탭.

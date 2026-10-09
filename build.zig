@@ -5373,7 +5373,7 @@ pub fn build(b: *std.Build) void {
     const replace_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPV"} });
     const run_replace_host = b.addRunArtifact(replace_host_tests);
     run_replace_host.setCwd(b.path("."));
-    run_replace_host.addArg("--maru-expect-tests=7");
+    run_replace_host.addArg("--maru-expect-tests=11");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_replace_host.step.dependOn(&ripgrep_prepare.step);
     replace_preview_step.dependOn(&run_replace_host.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_replace_host.step);

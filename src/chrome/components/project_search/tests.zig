@@ -20,7 +20,7 @@ test "project search dock replacement field and readonly diff share action geome
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var p = props(240, 300, 1000);
+    var p = props(160, 300, 1000);
     p.replacing = true;
     p.previewing = true;
     p.focused = 3;
@@ -46,9 +46,9 @@ test "project search dock replacement field and readonly diff share action geome
     const wide_option = wide.tree.entries[wide.tree.find(build.optionId(0)).?].rect;
     const wide_run = wide.tree.entries[wide.tree.find(build.optionId(4)).?].rect;
     try std.testing.expectEqual(@as(u32, 1), wide.metrics.toolbar_rows);
-    try std.testing.expectEqual(wide_option.y, wide_run.y);
+    try std.testing.expect(wide_run.y > wide_option.y);
     try std.testing.expectEqual(@as(f32, @floatFromInt(wide.metrics.row)), wide_run.width);
-    try std.testing.expect(wide_run.x - wide_option.x > 500);
+    try std.testing.expect(wide_run.x < wide_option.x);
 }
 test "project search dock fixed header and row identity share published geometry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -124,8 +124,8 @@ test "project search dock text clips belong to individual fields buttons and row
         const f = try make(a, p);
         const tk = tokens.Tokens.rich(std.mem.zeroes(tokens.ThemeColors));
         const rendered = try view.view(p, f, .{}, &tk, .{ .ops = try a.alloc(draw.Op, 200), .runs = try a.alloc(draw.Run, 30) });
-        const names = [_][]const u8{ "query", "include", "exclude", "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", p.scopes, p.status, "a.zig", "foo" };
-        const names_ids = [_]u64{ 10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 7, 8, build.rowId(99), build.rowId(100) };
+        const names = [_][]const u8{ "query", "include", "exclude", "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", "→", p.scopes, p.status, "a.zig", "foo" };
+        const names_ids = [_]u64{ 10, 11, 12, 20, 21, 22, 23, 24, 25, 26, 27, 28, 7, 8, build.rowId(99), build.rowId(100) };
         for (rendered.ops) |op| if (op == .text) {
             var found = false;
             for (names, names_ids) |name, id| if (std.mem.eql(u8, name, op.text.runs[0].text)) {
@@ -162,7 +162,7 @@ test "project search dock frame and paint reject insufficient buffers without pu
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var p = props(240, 300, 1000);
+    var p = props(160, 300, 1000);
     p.expanded = true;
     const n = build.size(p.rows.len);
     const complete: build.Buffers = .{ .nodes = try a.alloc(tree.UiNode, n), .entries = try a.alloc(tree.RectEntry, n), .items = try a.alloc(layout.Item, n), .flex = try a.alloc(layout.FlexScratch, n), .rects = try a.alloc(layout.UiRect, n), .actions = try a.alloc(ids.Entry, n) };

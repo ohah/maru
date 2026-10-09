@@ -311,7 +311,12 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
 // 217: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
 // 218: W6m② — osr_datalist_key(열린 제안 목록이 ↑↓·Enter·Esc 를 먹는다).
-// 218: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
+// 216: W10e — downloads_keep_alive(앱을 남겨 둘 다운로드 수)·web_osr_detached_pump(창이 없을 때 sidecar 펌프) — 마지막 셸이
+// 끝나도 받는 중이면 창만 숨기고 다 받을 때까지 남는다.
+// 215: W10b — 다운로드 「매번 묻기」: 행 상태 10(asking), MaruDownloadAsk·app_session_take_download_ask(이 창의 활성 Chromium
+// 탭에서 물을 행)·downloads_claim_ask(목록 창이 맡기)·downloads_answer_ask(고른 경로·취소·치움), 목록 글 19(저장할 곳 고르기).
+// 214: W10a — downloads_*(Chromium 탭 다운로드 목록 — 앱 전역: 세대·행·누름·끝난 것 지우기·보이기 요청·받는 중 수),
+// take_show_downloads_request(`show_downloads` 액션).
 // 213: W6m② — osr_datalist_state·item·shown·hover·pick(제안 목록을 칸 아래 네이티브 창으로 — Zig 가 목록·강조를 쥐고 Swift 가
 // 띄운 세대를 알린다), osr_datalist_key(띄운 목록이 ↑↓·Enter·Esc 를 먹는다).
 // 219: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).

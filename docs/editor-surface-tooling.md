@@ -783,6 +783,9 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 는 손으로 쓴 목록이라 출처가 늘 때 함께 늘어야 한다. 판정자 `OVF1`(소스)이 `buildChromeOverlayPrep` 의 그리기 호출을 **전부** 세고, 호출마다 관문
 (`overlayFrameNeeded` · `anyOverlayOpen`)에 그 상태를 묻는 말이 있는지 본다 — 표에 없는 새 호출이면 실패하므로, 새 오버레이를 더하는 사람은
 관문을 세우고 표에 한 줄을 적게 된다. `OVF2` 는 마커 실패 안내를 제품 관문으로 잰다(정상 프리뷰는 관문을 세우지 않는다).
+사후 적대적 검증이 OVF1 의 구멍 둘을 찾아 막았다: ⑴ 관문 어디든 그 말이 있으면 통과해 `anyOverlayOpen` 의 **좁은** `find.open`(포커스 있을 때만)이
+`overlayFrameNeeded` 의 넓은 `chrome_host.find.open` 을 대신했다 — 그 줄을 지워도(포커스 없는 찾기 막대가 사라진다) 아무것도 안 잡았다. 이제 찾기는 넓은
+조건을 요구하고 `OVF3` 이 동작으로도 잰다. ⑵ 주석 속 말도 셌다 — 이제 관문은 주석을 걷고 보며, `overlayFrameNeeded` 가 `anyOverlayOpen()` 을 부르는지도 묻는다.
 
 ### 8.2g LSP 2단 ⑥ — 자동완성 ①-a: LSP 완성 팝업 (2026-09-19, 계획 공격 뒤의 결정)
 

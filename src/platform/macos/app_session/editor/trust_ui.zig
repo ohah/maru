@@ -1,26 +1,35 @@
-//! 저장소 신뢰 결정 목록(계획 WT4 — 팔레트 「Language Server: Repository Trust…」). 앱 전역 신뢰 표(`trust_store`)의 결정을 보이고,
-//! 고르면 신뢰 관리 확인 상자(`lsp.manageListed` — 철회·잊기)로 간다. 신뢰를 **주는** 길은 여기 없다(신뢰 시트의 답뿐 — LSPB23).
-//! 복구 목록(`recovery.zig`)과 같은 피커 컴포넌트·같은 행 모양이다.
+//! 언어 서버 목록 상자 — 두 가지를 같은 피커 컴포넌트·같은 행 모양으로 보인다(복구 목록 `recovery.zig` 와 같은 모양):
+//! - 저장소 신뢰 결정 목록(계획 WT4 — 팔레트 「Language Server: Repository Trust…」). 앱 전역 신뢰 표(`trust_store`)의 결정을 보이고,
+//!   고르면 신뢰 관리 확인 상자(`lsp.manageListed` — 철회·잊기)로 간다. 신뢰를 **주는** 길은 여기 없다(신뢰 시트의 답뿐 — LSPB23).
+//! - 서버에 넘기는 환경 변수 **이름** 목록(계획 WT5b-1 — 팔레트 「Language Server: Show Environment Variable Names」). 값은 보이지
+//!   않는다. 사용자 제외 목록(`lsp.environment-exclude`)에 걸린 이름은 「제외됨」. 읽기 전용이라 고르면 닫힌다.
 const std = @import("std");
 const maru = @import("maru");
 const app_session_mod = @import("../../app_session.zig");
 const AppSession = app_session_mod.AppSession;
 const trust_store = @import("trust_store.zig");
 const lsp_client = @import("lsp.zig");
+const tool_env = @import("../../tool_env.zig");
 const chrome = maru.chrome;
 const trust = maru.session.editor.lsp.trust;
 
+pub const Mode = enum { trust, env_names };
+
 pub const State = struct {
-    /// 연 순간의 표 사본 — 표는 다른 창의 답으로 바뀌므로 행이 그 밑에서 움직이지 않게 찍어 둔다.
+    mode: Mode = .trust,
+    /// 연 순간의 사본 — 신뢰 표는 다른 창의 답으로, 환경은 다시 읽기로 바뀌므로 행이 그 밑에서 움직이지 않게 찍어 둔다.
     items: std.ArrayList(Item) = .empty,
     shown: std.ArrayList(usize) = .empty,
     scroll: chrome.ui.scroll_area.State = .{},
     followed: ?usize = null,
+    /// 환경 목록을 열 때 셸 환경을 아직 안 담았다(「읽은 뒤에 보입니다」).
+    env_pending: bool = false,
 
-    pub const Item = struct { volume: u64, path: []u8, decision: trust.Decision };
+    /// `text` 는 저장소의 실제 경로(신뢰) 또는 변수 이름(환경)이다.
+    pub const Item = struct { text: []u8, volume: u64 = 0, decision: trust.Decision = .deny, excluded: bool = false };
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        for (self.items.items) |it| allocator.free(it.path);
+        for (self.items.items) |it| allocator.free(it.text);
         self.items.deinit(allocator);
         self.shown.deinit(allocator);
         self.* = .{};
@@ -35,11 +44,37 @@ pub fn open(self: *AppSession) void {
     var it = trust_store.decided();
     while (it.next()) |e| {
         const path = self.allocator.dupe(u8, e.key.path) catch break;
-        state.items.append(self.allocator, .{ .volume = e.key.volume, .path = path, .decision = e.decision }) catch {
+        state.items.append(self.allocator, .{ .text = path, .volume = e.key.volume, .decision = e.decision }) catch {
             self.allocator.free(path);
             break;
         };
     }
+    self.chrome_host.trust_picker.show();
+    recompute(self);
+    self.metal_dirty = true;
+}
+
+/// 팔레트 「Language Server: Show Environment Variable Names」(계획 WT5b-1) — 담아 둔 환경의 이름들(시스템 위생을 지난 것)과 제외 여부.
+pub fn openEnvNames(self: *AppSession) void {
+    if (!self.loaded_config.config.lsp.enabled) return self.showNoticeKey(.lsp_info_disabled);
+    self.dismissMessageOverlays();
+    tool_env.initExcluded(self.loaded_config.config.lsp.environment_exclude); // 아직 아무도 정하지 않았으면 이 창의 설정으로
+    // 아직 아무도 안 읽었으면 읽기를 시작한다 — 서버가 필요한 문서를 열지 않았어도(사용자의 명시 행동 — 다시 읽기 명령과 같다). 셸을
+    // 읽는 동안은 「읽는 중 — 다 읽은 뒤 다시 여세요」(스위치를 껐으면 앱 환경으로 바로 선다).
+    tool_env.tick(self.loaded_config.config.lsp.shell_environment);
+    const state = &self.editor_trust_list;
+    state.deinit(self.allocator);
+    state.mode = .env_names;
+    if (tool_env.names()) |names| {
+        var it = names;
+        while (it.next()) |n| {
+            const name = self.allocator.dupe(u8, n.name) catch break;
+            state.items.append(self.allocator, .{ .text = name, .excluded = n.excluded }) catch {
+                self.allocator.free(name);
+                break;
+            };
+        }
+    } else state.env_pending = true;
     self.chrome_host.trust_picker.show();
     recompute(self);
     self.metal_dirty = true;
@@ -73,27 +108,37 @@ fn refresh(self: *AppSession) void {
     const q = composed orelse picker.input.query.items;
     const home = std.mem.span(std.c.getenv("HOME") orelse "");
     for (state.items.items, 0..) |it, i| {
+        if (q.len == 0 or std.ascii.indexOfIgnoreCase(it.text, q) != null) {
+            state.shown.appendAssumeCapacity(i);
+            continue;
+        }
+        if (state.mode != .trust) continue;
         // 보이는 그대로(`~/…` — `rows`)로도 거른다 — 사용자는 화면의 경로를 친다.
         var shown_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-        const shown = app_session_mod.homeTilde(it.path, home, &shown_buf);
-        if (q.len == 0 or std.ascii.indexOfIgnoreCase(it.path, q) != null or std.ascii.indexOfIgnoreCase(shown, q) != null) state.shown.appendAssumeCapacity(i);
+        const shown = app_session_mod.homeTilde(it.text, home, &shown_buf);
+        if (std.ascii.indexOfIgnoreCase(shown, q) != null) state.shown.appendAssumeCapacity(i);
     }
     picker.setResultCount(state.shown.items.len);
-    picker.prompt = maru.i18n.t(if (state.items.items.len == 0) .lsp_trust_list_empty else .lsp_trust_list_prompt);
+    const empty = state.items.items.len == 0;
+    picker.prompt = maru.i18n.t(switch (state.mode) {
+        .trust => if (empty) .lsp_trust_list_empty else .lsp_trust_list_prompt,
+        .env_names => if (state.env_pending) .lsp_env_list_pending else if (empty) .lsp_env_list_empty else .lsp_env_list_prompt,
+    });
     self.metal_dirty = true;
 }
 
-/// 고른 저장소의 관리 상자를 띄운다(목록은 닫는다 — 상자는 하나뿐이다).
+/// 고른 저장소의 관리 상자를 띄운다(목록은 닫는다 — 상자는 하나뿐이다). 환경 목록은 읽기 전용이라 닫기만 한다.
 pub fn accept(self: *AppSession) void {
     const state = &self.editor_trust_list;
+    if (state.mode == .env_names) return closed(self);
     const selected = self.chrome_host.trust_picker.selected;
     if (selected >= state.shown.items.len) return;
     const it = state.items.items[state.shown.items[selected]];
     // 상자를 띄우면 목록이 닫히며 사본이 풀린다 — 키를 먼저 떠 둔다.
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (it.path.len > path_buf.len) return;
-    @memcpy(path_buf[0..it.path.len], it.path);
-    const key: trust.Key = .{ .volume = it.volume, .path = path_buf[0..it.path.len] };
+    if (it.text.len > path_buf.len) return;
+    @memcpy(path_buf[0..it.text.len], it.text);
+    const key: trust.Key = .{ .volume = it.volume, .path = path_buf[0..it.text.len] };
     closed(self);
     lsp_client.manageListed(self, key); // 사본의 결정이 아니라 지금 표의 결정으로
 }
@@ -118,7 +163,7 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
     accept(self);
 }
 
-/// 행 — 저장소 경로(`~` 로 줄이고 넘치면 앞을 줄인다)와 결정(허용/거부).
+/// 행 — 저장소 경로(`~` 로 줄이고 넘치면 앞을 줄인다)와 결정(허용/거부), 또는 변수 이름과 「제외됨」.
 pub fn rows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
     const state = &self.editor_trust_list;
     const total = state.shown.items.len;
@@ -128,9 +173,14 @@ pub fn rows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.pa
     const layout = chrome.components.overlay_input.panelLayout(self.buildChromeProps()) orelse return &.{};
     for (result, 0..) |*row, i| {
         const it = state.items.items[state.shown.items[start + i]];
-        const detail = maru.i18n.t(if (it.decision == .allow) .lsp_trust_list_allowed else .lsp_trust_list_denied);
-        const shown_buf = try arena.alloc(u8, it.path.len + 1);
-        const shown = app_session_mod.homeTilde(it.path, std.mem.span(std.c.getenv("HOME") orelse ""), shown_buf);
+        const detail: []const u8 = switch (state.mode) {
+            .trust => maru.i18n.t(if (it.decision == .allow) .lsp_trust_list_allowed else .lsp_trust_list_denied),
+            .env_names => if (it.excluded) maru.i18n.t(.lsp_env_list_excluded) else "",
+        };
+        const shown: []const u8 = switch (state.mode) {
+            .trust => app_session_mod.homeTilde(it.text, std.mem.span(std.c.getenv("HOME") orelse ""), try arena.alloc(u8, it.text.len + 1)),
+            .env_names => it.text,
+        };
         const available = layout.panel_cols -| (chrome.components.overlay_input.displayCols(detail) + 5);
         const title = chrome.components.overlay_input.tailWindow(shown, available -| 1);
         row.* = .{

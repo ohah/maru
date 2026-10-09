@@ -37,8 +37,9 @@ pub const Reason = enum { none, disabled, old_macos, unsupported_shell, no_login
 const max_output_bytes: usize = 1 << 20;
 
 const Env = struct {
+    /// 시스템 위생(`shell_env.sanitize`)만 거친 항목 — 사용자 제외 목록은 아직 안 거른 원본이다(목록 상자가 「제외됨」을 보인다).
     resolved: shell_env.Resolved,
-    /// `execve` 에 줄 환경(`resolved.entries` 를 빌린다).
+    /// `execve` 에 줄 환경 — `resolved.entries` 중 사용자 제외 목록에 안 걸린 것(빌린다). 목록을 바꾸면 이것만 다시 만든다(`setExcluded`).
     envp: [:null]?[*:0]const u8,
 
     fn deinit(self: *Env) void {
@@ -59,6 +60,10 @@ var current_from_shell: bool = false;
 /// 읽기 시작·다 됨의 횟수 — 창마다 마지막으로 본 값과 견줘 상태바를 다시 그린다(결과는 한 창의 pump 가 받고 다시 읽기는 한 창이
 /// 부르지만 「셸 환경 읽는 중」·「못 읽음」은 모든 창에 있다; 워커 스레드의 완료는 다른 무엇도 다시 그리게 하지 않는다).
 var change_count: u64 = 0;
+/// 사용자 제외 목록(설정 `lsp.environment-exclude` 원문 — 소유, 앞뒤 공백을 다듬은 것; 계획 WT5b-1). 앱 전역 하나다 — 해석기가 하나이고
+/// 창마다의 설정은 미러다(스위치 `enabled_` 와 같은 규율: 처음 시작할 때 첫 창의 설정으로, 그 뒤로는 사용자의 명시 행동으로만).
+var excluded_text: []u8 = &.{};
+var excluded_set: bool = false;
 /// 지금 세대를 사용자의 다시 읽기(`reload`)가 시작했나 — 그것마저 못 읽었으면 상태바는 다시 읽기를 더 권하지 않는다(`failedAfterReload`).
 var from_reload: bool = false;
 
@@ -118,6 +123,9 @@ pub fn resetForTest() void {
     reason_ = .none;
     enabled_ = true;
     enabled_set = false;
+    gpa.free(excluded_text);
+    excluded_text = &.{};
+    excluded_set = false;
     from_reload = false;
     test_shell = null;
     test_timeout_ms = null;
@@ -138,7 +146,7 @@ fn finishedCountForTest() u32 {
 
 // ── 메인 스레드 ──
 
-/// 서버가 필요한 문서의 gate 가 부른다 — 처음이면 시작하고, 워커 결과가 왔으면 받는다(pump 는 `poll` 만 — 받기만 한다). `initial` 은 **처음 한 번만**
+/// 서버가 필요한 문서의 gate 와 이름 목록 명령(`trust_ui.openEnvNames`)이 부른다 — 처음이면 시작하고, 워커 결과가 왔으면 받는다(pump 는 `poll` 만 — 받기만 한다). `initial` 은 **처음 한 번만**
 /// 읽는다(그 창의 `lsp.shell-environment`). 스위치는 앱 전역이라 창마다의 설정 미러로 매 tick 견주면, 자동 reload 를 끈 창 하나가
 /// 다른 값을 들고 있을 때 tick 마다 셸을 새로 띄운다(적대적 검증) — 바꾸는 것은 사용자의 명시 행동뿐이다(`setEnabled` —
 /// `window.quit-after-last-window-closed` 와 같은 규율).
@@ -176,6 +184,60 @@ pub fn reload(initial: bool) void {
     from_reload = true;
     start();
 }
+
+/// 사용자 제외 목록을 정한다(설정 `lsp.environment-exclude` — 쉼표로 가른 이름, 끝 `*` 는 접두; 계획 WT5b-1). 담아 둔 환경의 envp 만
+/// 다시 만든다 — 셸을 다시 띄우지 않는다(걸러 낸 원본을 지킨다). **이미 떠 있는 서버는 다음에 띄울 때부터** 새 목록으로 뜬다. 못 담으면
+/// (메모리) 목록도 envp 도 앞의 것을 지킨다.
+pub fn setExcluded(text: []const u8) void {
+    const trimmed = std.mem.trim(u8, text, " \t");
+    if (excluded_set and std.mem.eql(u8, excluded_text, trimmed)) return;
+    const owned = gpa.dupe(u8, trimmed) catch return;
+    // 새 envp 를 먼저 만든다 — 못 만들면 목록도 그대로 둔다(목록 상자·세팅 미러가 「제외됨」이라 말하는데 서버는 그 변수를 받는 일이
+    // 없게; 적대적 검증).
+    const ptrs: ?[:null]?[*:0]const u8 = if (current) |e| (filteredEnvp(e.resolved.entries, owned) catch {
+        gpa.free(owned);
+        return;
+    }) else null;
+    gpa.free(excluded_text);
+    excluded_text = owned;
+    excluded_set = true;
+    if (ptrs) |p| {
+        gpa.free(current.?.envp);
+        current.?.envp = p;
+    }
+}
+
+/// 아직 아무도 정하지 않았으면 이 창의 설정으로 정한다(처음 시작할 때 — 스위치 `tick(initial)` 와 같은 규율).
+pub fn initExcluded(text: []const u8) void {
+    if (!excluded_set) setExcluded(text);
+}
+
+/// 사용자가 정한 제외 목록 — 아직 아무도 정하지 않았으면 `null`. 세팅 화면이 창의 설정 미러를 이 값으로 되맞춘다(`enabledOverride` 와 같다).
+pub fn excludedOverride() ?[]const u8 {
+    return if (excluded_set) excluded_text else null;
+}
+
+/// 서버에 줄 환경의 변수 하나 — 이름(값은 보이지 않는다)과 제외 목록에 걸렸는지.
+pub const Name = struct { name: []const u8, excluded: bool };
+
+/// 담아 둔 환경의 이름들(시스템 위생을 지난 것 — 순서는 담은 순서). 다 되기 전이면 `null`. 이름은 다음 해석·`setExcluded` 전까지 산다.
+pub fn names() ?NameIter {
+    if (!settled()) return null;
+    const e = current orelse return null;
+    return .{ .entries = e.resolved.entries };
+}
+
+pub const NameIter = struct {
+    entries: []const [:0]u8,
+    i: usize = 0,
+
+    pub fn next(self: *NameIter) ?Name {
+        if (self.i >= self.entries.len) return null;
+        const name = shell_env.entryName(self.entries[self.i]);
+        self.i += 1;
+        return .{ .name = name, .excluded = shell_env.excludedBy(name, excluded_text) };
+    }
+};
 
 /// 셸을 못 읽어 **앱 환경으로** 대신했나 — 상태바 「없음」이 셸 환경 탓일 수 있다고 말하는 조건. 앞서 담은 셸 환경을 지킨 실패면
 /// 거짓이다(그 환경에서 못 찾은 것은 셸 탓이 아니다 — 10회차; 원인은 앱 로그에 있다).
@@ -255,7 +317,7 @@ fn start() void {
     reason_ = .none;
 }
 
-/// 워커 결과가 왔으면 받는다 — 시작하지는 않는다(LSP pump 가 매 tick 부른다 — 시작은 서버가 필요한 문서의 gate 만 한다).
+/// 워커 결과가 왔으면 받는다 — 시작하지는 않는다(LSP pump 가 매 tick 부른다 — 시작은 서버가 필요한 문서의 gate 와 이름 목록 명령만 한다).
 pub fn poll() void {
     const r = takeSlot() orelse return;
     defer gpa.destroy(r);
@@ -301,7 +363,7 @@ fn settleFallback(to: Status, why: Reason) void {
     defer app.deinit(gpa);
     var i: usize = 0;
     while (std.c.environ[i]) |entry| : (i += 1) app.append(gpa, std.mem.span(entry)) catch break;
-    if (shell_env.sanitize(gpa, app.items, &.{})) |resolved| {
+    if (shell_env.sanitize(gpa, app.items)) |resolved| {
         if (buildEnv(resolved)) |env| {
             replaceCurrent(env);
             current_from_shell = false; // 갈아 끼운 뒤에만 — OOM 으로 못 바꿨으면 남은 것은 여전히 셸 환경이다
@@ -317,11 +379,24 @@ fn replaceCurrent(env: Env) void {
     current = env;
 }
 
-/// `Resolved` 를 넘겨받아 envp 를 만든다. 실패하면 `resolved` 는 호출자가 푼다.
+/// `Resolved` 를 넘겨받아 envp 를 만든다(사용자 제외 목록을 거른다). 실패하면 `resolved` 는 호출자가 푼다.
 fn buildEnv(resolved: shell_env.Resolved) error{OutOfMemory}!Env {
-    const ptrs = try gpa.allocSentinel(?[*:0]const u8, resolved.entries.len, null);
-    for (resolved.entries, 0..) |e, i| ptrs[i] = e.ptr;
-    return .{ .resolved = resolved, .envp = ptrs };
+    return .{ .resolved = resolved, .envp = try filteredEnvp(resolved.entries, excluded_text) };
+}
+
+fn filteredEnvp(entries: []const [:0]u8, list: []const u8) error{OutOfMemory}![:null]?[*:0]const u8 {
+    var n: usize = 0;
+    for (entries) |e| {
+        if (!shell_env.excludedBy(shell_env.entryName(e), list)) n += 1;
+    }
+    const ptrs = try gpa.allocSentinel(?[*:0]const u8, n, null);
+    var i: usize = 0;
+    for (entries) |e| {
+        if (shell_env.excludedBy(shell_env.entryName(e), list)) continue;
+        ptrs[i] = e.ptr;
+        i += 1;
+    }
+    return ptrs;
 }
 
 /// macOS 12.3 이상인가(`/usr/bin/env -0` — Apple `shell_cmds` 240 부터). 판을 못 읽으면 있는 것으로 본다(띄워 보고 실패하면 알린다).
@@ -345,19 +420,24 @@ fn atLeast(version: []const u8, major: u32, minor: u32) bool {
 
 const Login = struct { shell: []const u8, home: []const u8 };
 
-/// 로그인 셸과 홈(`getpwuid`). 판정자는 주입한 셸과 `$HOME`.
+fn usableHome(h: []const u8) bool {
+    if (h.len == 0 or h[0] != '/') return false;
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const hz = std.fmt.bufPrintZ(&z, "{s}", .{h}) catch return false;
+    var st: std.c.Stat = undefined;
+    if (std.c.fstatat(std.posix.AT.FDCWD, hz.ptr, &st, 0) != 0) return false;
+    return (st.mode & std.c.S.IFMT) == std.c.S.IFDIR;
+}
+
+/// 로그인 셸(`getpwuid` — 판정자는 주입한 셸)과 홈. 홈은 **앱 환경의 `HOME`** 이다(셸 cwd — 셸에 넘기는 `HOME` 과 같은 값, 쓸 수 없어 `getpwuid` 로 대신할 때만 다르다; 계획 WT5b-1
+/// 결정: `getpwuid` 로 고정하지 않는다 — 격리 HOME 실행이 기대고 다른 편집기도 프로세스 환경을 그대로 준다). 앱 환경에 없거나 비었으면
+/// `getpwuid` 의 홈.
 fn loginShell(shell_buf: []u8, home_buf: []u8) ?Login {
-    if (builtin.is_test) {
-        const s = test_shell orelse return null;
-        const h = std.mem.span(std.c.getenv("HOME") orelse return null);
-        if (s.len > shell_buf.len or h.len > home_buf.len) return null;
-        @memcpy(shell_buf[0..s.len], s);
-        @memcpy(home_buf[0..h.len], h);
-        return .{ .shell = shell_buf[0..s.len], .home = home_buf[0..h.len] };
-    }
-    const pw = std.c.getpwuid(std.c.getuid()) orelse return null;
-    const s = std.mem.span(pw.shell orelse return null);
-    const h = std.mem.span(pw.dir orelse return null);
+    const pw = std.c.getpwuid(std.c.getuid()); // 판정자도 읽는다 — 홈이 `HOME` 을 따르는지(이 값이 아닌지)를 가른다
+    const s: []const u8 = if (builtin.is_test) (test_shell orelse return null) else std.mem.span((pw orelse return null).shell orelse return null);
+    const env_home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
+    // 쓸 수 없는 `HOME`(상대 경로·없는 폴더 — 지운 격리 홈)이면 셸이 cwd 로 못 들어가 빈 출력(「못 읽음」)이 된다 — 그때는 `getpwuid`.
+    const h: []const u8 = if (usableHome(env_home)) env_home else if (pw) |p| std.mem.span(p.dir orelse return null) else return null;
     if (s.len == 0 or h.len == 0 or s.len > shell_buf.len or h.len > home_buf.len) return null;
     @memcpy(shell_buf[0..s.len], s);
     @memcpy(home_buf[0..h.len], h);
@@ -556,7 +636,7 @@ fn run(job: *Job) Outcome {
 
     const data = readSmall(out_path) orelse return .{ .failed = .malformed };
     defer gpa.free(data);
-    const resolved = shell_env.resolve(gpa, data, &nonce, &.{}) catch return .{ .failed = .malformed };
+    const resolved = shell_env.resolve(gpa, data, &nonce) catch return .{ .failed = .malformed };
     return .{ .ok = resolved };
 }
 
@@ -677,6 +757,34 @@ fn envValueOf(name: []const u8) ?[]const u8 {
         if (entry.len > name.len and entry[name.len] == '=' and std.mem.eql(u8, entry[0..name.len], name)) return entry[name.len + 1 ..];
     }
     return null;
+}
+
+test "tool_env: 셸 cwd 는 앱 환경의 HOME — 쓸 수 없는 HOME(없는 폴더·상대 경로·파일)이면 getpwuid 의 홈으로 대신해 「못 읽음」이 되지 않는다 (계획 WT5b-1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(testing.io, &root_buf)];
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeShell(tmp.dir, "zsh",
+        \\export FAKE_CWD="$(pwd -P)"
+        \\exec /bin/sh -c "$cmd"
+    , &shell_buf, root);
+    const pw = std.c.getpwuid(std.c.getuid()) orelse return error.SkipZigTest;
+    var want_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const want = std.c.realpath(pw.dir orelse return error.SkipZigTest, &want_buf) orelse return error.SkipZigTest;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "not-a-dir", .data = "" });
+    var file_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const file_home = try std.fmt.bufPrint(&file_buf, "{s}/not-a-dir", .{root}); // 폴더가 아닌 파일
+    for ([_][]const u8{ "/nonexistent-maru-home-wt5b1", "relative/home", file_home }) |bad| {
+        var home = try HomeGuard.set(bad);
+        defer home.restore();
+        setShellForTest(shell, null);
+        defer resetForTest();
+        try testing.expect(settleForTest(true, 5000));
+        try testing.expectEqual(Status.ready, status());
+        try testing.expectEqualStrings(std.mem.sliceTo(want, 0), envValueOf("FAKE_CWD").?);
+    }
 }
 
 test "tool_env: 가짜 로그인 셸 — -l -i -c 로 홈에서, 제어 터미널 없이(setsid) 띄우고, 셸 설정이 세운 PATH·변수를 담는다; 표식·터미널 변수는 서버로 안 간다 (계획 WT3b)" {

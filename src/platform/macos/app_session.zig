@@ -14294,6 +14294,9 @@ pub const AppSession = struct {
         return self.anyOverlayOpen() or self.chrome_host.find.open or self.chrome_host.find_secondary.open or self.chrome_host.key_hints.visible or
             self.chrome_host.send_helper.open or self.chrome_host.hover_box.open or
             (self.rename != null and self.rename.? == .symbol) or // 심볼 상자(§8.2f)는 프레임이 앵커를 세워야 열린다 — 상태로 묻는다
+            // 이름 없는 문서의 저장 이름 상자(U2 — §3.11)도 같은 상자·같은 길이다. **빠져 있어** 다른 오버레이(알림 등)가 없으면 이 프레임이
+            // 안 지어져 ⌘S 뒤 상자가 안 그려졌고, 친 글자는 보이지 않는 상자로 갔다(2026-10-09 실제 앱 캡처 — 알림이 떠 있을 때만 보였다).
+            (self.rename != null and self.rename.? == .untitled_save) or
             self.editor_completion.active; // 완성 팝업(§8.2g)도 같다
     }
 

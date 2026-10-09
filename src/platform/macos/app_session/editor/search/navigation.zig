@@ -124,6 +124,18 @@ fn openFailure(self: *AppSession, err: anyerror) void {
         else => .dbg_editor_unreadable,
     });
 }
+fn drain(a: std.mem.Allocator, ticket: *Ticket) void {
+    if (ticket.job.take(ticket.identity)) |value| {
+        var batch = value;
+        defer batch.deinit(a);
+        for (batch.rows.items) |row| {
+            if (!std.meta.eql(row.match.text_start, ticket.expected.text_start) or !std.mem.eql(u8, row.match.text, ticket.expected.text) or row.match.text_truncated != ticket.expected.text_truncated) continue;
+            for (row.match.ranges) |span| if (std.meta.eql(span, ticket.span)) {
+                ticket.found = true;
+            };
+        }
+    }
+}
 pub fn poll(self: *AppSession) void {
     const state = &self.editor_search;
     const active = if (state.nav) |*value| value else return;
@@ -165,17 +177,10 @@ pub fn poll(self: *AppSession) void {
         dock.changed(self);
         return;
     }
-    if (active.job.take(active.identity)) |value| {
-        var batch = value;
-        defer batch.deinit(self.allocator);
-        for (batch.rows.items) |row| {
-            if (!std.meta.eql(row.match.text_start, active.expected.text_start) or !std.mem.eql(u8, row.match.text, active.expected.text) or row.match.text_truncated != active.expected.text_truncated) continue;
-            for (row.match.ranges) |span| if (std.meta.eql(span, active.span)) {
-                active.found = true;
-            };
-        }
-    }
+    drain(self.allocator, active);
     const done = active.job.completion() orelse return;
+    // 첫 take와 완료 확인 사이에 도착한 마지막 행도 완료 판정 뒤 반드시 읽는다.
+    drain(self.allocator, active);
     var finished = state.nav.?;
     state.nav = null;
     const ticket = &finished;

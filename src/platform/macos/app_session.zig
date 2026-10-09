@@ -16277,7 +16277,7 @@ pub const AppSession = struct {
             .addr_edit => if (self.addr_field.commitPreedit(self.allocator)) {
                 self.metal_dirty = true; // 조합 글자를 편집 텍스트로 확정(포커스 상실 등 엣지 — find/palette와 동형)
             },
-            .project_search => project_search_ops.commitPreedit(self),
+            .project_search => return project_search_ops.commitPreedit(self),
             .scm_commit => scm_dock_ops.commitCommitPreedit(self),
             .terminal => {
                 return self.commitTerminalComposition();

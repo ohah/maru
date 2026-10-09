@@ -3,10 +3,12 @@ var editor_project_search_session: ?*AppSession = null;
 var editor_project_search_root_ready = false;
 var editor_project_search_root_submitted = false;
 var editor_project_search_original_surface: u64 = 0;
+var editor_project_search_probe_stage: u32 = 0;
 pub fn editorProjectSearchObserve(self: *AppSession) void {
     if (std.c.getenv("MARU_EDITOR_PROJECT_SEARCH_CAPTURE") != null and self.dock_initialized) editor_project_search_session = self;
 }
 export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
+    if (stage != 100) editor_project_search_probe_stage = stage;
     const self = editor_project_search_session orelse return 0;
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_syntax.pending or !self.file_tree_initialized) return 0;
@@ -86,6 +88,11 @@ export fn maru_editor_project_search_coordinate(axis: u32) callconv(.c) f64 {
         switch (entry.intent) {
             .row => |index| {
                 if (index >= self.editor_search.result.model.visible.items.len or self.editor_search.result.model.visible.items[index] != .hit) continue;
+                const hit = self.editor_search.result.model.visible.items[index].hit;
+                const source = self.editor_search.result.model.rows.items[hit.row].source;
+                // 디스크 fixture가 적어도 하단의 첫 표시 행을 디스크라고 가정하지 않는다.
+                if (editor_project_search_probe_stage == 4 and source != .disk) continue;
+                if (editor_project_search_probe_stage == 2 and source != .model) continue;
                 for (self.editor_search.entries.items) |rect| if (rect.id == maru.chrome.components.project_search.build.rowId(index)) return if (axis == 0) rect.rect.x + rect.rect.width / 2 else rect.rect.y + rect.rect.height / 2;
             },
             else => {},

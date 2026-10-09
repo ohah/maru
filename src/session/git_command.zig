@@ -422,7 +422,7 @@ pub fn baseRange(base: []const u8, buf: *[max_base_range_len]u8) ?[]const u8 {
 
 /// 어떤 kind든 이만큼이면 담긴다(테스트가 상한을 고정한다). config 쌍을 늘리면 여기도 함께 늘려야 한다 —
 /// 넘치면 조용히 잘리는 게 아니라 buf 범위를 벗어난다(quotePath 추가 때 실제로 넘쳤다).
-pub const max_argv = 34; // 기본 3 + `--no-optional-locks` + config 덮어쓰기 18 + kind별 최대 10 + 여유
+pub const max_argv = 36; // 기본 3 + `--no-optional-locks` + config 덮어쓰기 20(서명 검증 금지 2 — WT6a) + kind별 최대 10 + 여유
 
 /// repository config가 외부 프로세스를 실행하지 못하게 덮어쓰는 `-c` 쌍. **빈 값 = 비활성**이 git의 규약이다.
 ///
@@ -486,6 +486,11 @@ pub const config_overrides = [_][]const u8{
     "-c", "diff.external=", //            external diff 프로그램 금지
     "-c", "credential.helper=", //        자격증명 helper 프로세스 금지
     "-c", "protocol.ext.allow=never", //  ext:: 원격 = 임의 명령 실행 벡터
+    // ⚠️ **서명 검증 프로그램을 실행한다**(실측 2026-10-09 — 계획 workspace-trust WT6a). 저장소(또는 전역) config 의
+    // `log.showSignature=true` 와 `gpg.program`(·`gpg.ssh.program`·`gpg.x509.program`)이면 서명된 커밋을 지나는
+    // `log`·`show` 가 그 프로그램을 부른다 — 그리고 그 출력(`gpg: …`)이 `--format` 출력 앞에 섞여 첫 커밋의 필드를
+    // 더럽혔다(파싱 결함이기도 했다). 우리는 서명을 보이지 않으므로(`%G` 를 안 쓴다) 끄면 답이 고쳐진다.
+    "-c", "log.showSignature=false",
     // 경로를 **있는 그대로** 받는다. 기본값(true)이면 비ASCII 경로를 `"\355\225\234..."`처럼 C-quote해서 내주는데,
     // 그 문자열을 다시 git에 넘기거나 open(2)에 쓰면 "그런 파일 없음"이 된다 — 한글·일본어 파일명이 전부 안 열렸다.
     "-c", "core.quotePath=false",

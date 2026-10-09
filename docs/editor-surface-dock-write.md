@@ -17,7 +17,7 @@
 |---|---|---|---|
 | index 잠금 | `GIT_OPTIONAL_LOCKS=0` | **해제** | 쓰기는 index를 잠가야 한다. 잠그지 않으면 동시 실행이 index를 깬다 |
 | hook | `core.hooksPath=/dev/null` | **commit만 허용**(§3) | 읽기가 남의 hook을 실행하면 안 되지만, 커밋 hook은 사용자가 기대하는 동작이다 |
-| 외부 프로세스 | external diff·textconv·pager 전부 빈 값 | **동일하게 차단** | 저장소 config가 우리를 통해 프로그램을 실행하는 경로는 쓰기에서도 안 연다 |
+| 외부 프로세스 | external diff·textconv·pager 전부 빈 값 | **동일하게 차단** | 저장소 config가 우리를 통해 프로그램을 실행하는 경로는 쓰기에서도 안 연다. 단 `core.fsmonitor`·커밋의 훅·서명은 저장소 설정을 정답의 일부로 쓰므로 끄지 않는다 — 신뢰 전 쓰기는 [workspace-trust](plans/workspace-trust.md) WT6b 가 신뢰 시트로 막는다(끄면 사용자 index 의 fsmonitor 확장이 지워진다 — 실측) |
 | 네트워크 | 없음(credential helper 제거) | fetch만 허용(§4) | |
 | 대화형 프롬프트 | `GIT_TERMINAL_PROMPT=0` | **동일** | 프롬프트는 우리 화면에 그릴 수 없다 — 뜨면 그 명령은 영영 안 끝난다 |
 | stderr | 화면·로그에 싣지 않는다 | **가공해서 보여 준다**(§5) | 커밋이 왜 거부됐는지 못 보여 주면 쓸 수 없는 기능이다 |

@@ -682,13 +682,15 @@ git diff --numstat --find-renames --no-ext-diff --no-textconv --cached  ← 행�
 
 감시자가 git 을 돌린다는 것은 **남의 저장소 config 가 시킨 프로그램을 우리가 실행할 수 있다**는 뜻이다.
 클라이언트는 이미 `git_command.config_overrides` 로 그것을 막고 있는데, **그 목록에 구멍이 있다**
-(실측 2026-09-04, git 2.50.1):
+(실측 2026-09-04, git 2.50.1 — 감시자는 이제 env 덮어쓰기도 앞머리 `env K=V … git` 로 싣는다, [workspace-trust](workspace-trust.md) WT6a):
 
 | 설정 | 언제 실행되나 | 상태 |
 |---|---|---|
 | `core.hooksPath` · `diff.external` · `core.pager` · `credential.helper` · `protocol.ext.allow` | 각자 | ✅ 이미 막혀 있었다 |
 | `diff.<name>.textconv` | `diff` | ✅ 이미 막혀 있었다 — `build` 의 두 `diff` 가 모두 `--no-textconv` 를 건다 |
 | `core.fsmonitor` | **`status` 마다** | ✅ **이번에 막았다**(`-c core.fsmonitor=`) |
+| partial clone 의 지연 가져오기(`remote.<n>.uploadpack`·`core.sshCommand`·`core.gitProxy`·`git-remote-*`) | 빠진 blob 을 읽는 `diff --numstat` 등 | ❌ 아직 열려 있다 — 늘 막으면 정상 partial clone 사용자의 읽기가 실패해(실측) 신뢰에 따라 막는다([workspace-trust](workspace-trust.md) WT6b) |
+| `log.showSignature` + `gpg.program` | `log`·`show` | ✅ 막았다(WT6a — `-c log.showSignature=false`) |
 | **`filter.<name>.clean` · `.smudge`** | **`status` · `diff` · `diff --numstat`** | ❌ **아직 열려 있다** |
 
 ⚠️ **`filter` 는 `diff` 만의 문제가 아니다**(실측). 크기가 **같은** 변경이면 `git status` 가 내용을

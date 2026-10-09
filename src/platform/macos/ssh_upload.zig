@@ -700,6 +700,42 @@ pub fn spawnAgentEvents(
 /// - 그래서 stdin 을 **파이프**로 준다. 부모가 죽거나 닫으면 자식은 **EOF** 를 받고 스스로 끝낸다.
 ///
 /// 즉 `/dev/null` 은 「쓰는 자식」의 고아 방지책이고, **파이프는 「조용한 자식」의 고아 방지책**이다.
+const WatchEnvTokens = [git_command.env_overrides.len][128]u8;
+const WatchArgs = [git_command.config_overrides.len + git_command.env_overrides.len + 3][]const u8;
+
+/// 감시자에게 줄 인자 — 루트, 그리고 감시자가 그대로 execvp 할 **git 앞머리**. 앞머리는 `env K=V … git <굳히기>` 다:
+/// 굳히기 `-c` 목록뿐 아니라 **env 덮어쓰기도 싣는다**(계획 workspace-trust WT6a — `GIT_CONFIG_NOSYSTEM`·`GIT_TERMINAL_PROMPT`
+/// 같은 env 조항이 감시자에서만 빠져 있었다; 로컬·원격 읽기는 `buildRemote` 가 `env K=V` 로 싣는다 — 같은 단일 출처
+/// `git_command.env_overrides`).
+fn watchArgs(root: []const u8, env_tokens: *WatchEnvTokens, args: *WatchArgs) []const []const u8 {
+    args[0] = root;
+    args[1] = "env";
+    for (git_command.env_overrides, 0..) |e, i| args[i + 2] = std.fmt.bufPrint(&env_tokens[i], "{s}={s}", .{ e.name, e.value }) catch unreachable; // 이름·값은 컴파일 때 정해진 짧은 글자다
+    args[git_command.env_overrides.len + 2] = "git";
+    for (git_command.config_overrides, 0..) |token, i| args[git_command.env_overrides.len + 3 + i] = token;
+    return args;
+}
+
+test "원격 감시자의 git 앞머리는 env 덮어쓰기와 굳히기를 둘 다 싣는다 — env 조항이 감시자에서만 빠지지 않는다 (계획 workspace-trust WT6a)" {
+    var env_tokens: WatchEnvTokens = undefined;
+    var args: WatchArgs = undefined;
+    const a = watchArgs("/srv/repo", &env_tokens, &args);
+    try std.testing.expectEqualStrings("/srv/repo", a[0]);
+    try std.testing.expectEqualStrings("env", a[1]);
+    for (git_command.env_overrides, 0..) |e, i| {
+        try std.testing.expect(std.mem.startsWith(u8, a[i + 2], e.name));
+        try std.testing.expectEqual(@as(u8, '='), a[i + 2][e.name.len]);
+        try std.testing.expectEqualStrings(e.value, a[i + 2][e.name.len + 1 ..]);
+    }
+    var saw_nosystem = false;
+    for (a) |t| if (std.mem.eql(u8, t, "GIT_CONFIG_NOSYSTEM=1")) {
+        saw_nosystem = true;
+    };
+    try std.testing.expect(saw_nosystem);
+    try std.testing.expectEqualStrings("git", a[git_command.env_overrides.len + 2]);
+    try std.testing.expectEqualSlices([]const u8, &git_command.config_overrides, a[git_command.env_overrides.len + 3 ..]);
+}
+
 pub fn spawnRemoteWatch(
     allocator: std.mem.Allocator,
     ctl: []const u8,
@@ -709,11 +745,9 @@ pub fn spawnRemoteWatch(
 ) !WatchStream {
     // 루트 뒤에 **git 앞머리**를 실어 보낸다(RW7b). 감시자가 폴링할 때 그대로 쓴다 — 굳히기 목록을
     // 두 벌로 두면 감시자만 문이 열린 채 돈다(단일 출처는 `git_command.config_overrides`).
-    var args: [git_command.config_overrides.len + 2][]const u8 = undefined;
-    args[0] = root;
-    args[1] = "git";
-    for (git_command.config_overrides, 0..) |token, i| args[i + 2] = token;
-    const cmd = try remote_shell.wrapAlloc(allocator, watch_script, &args);
+    var env_tokens: WatchEnvTokens = undefined;
+    var args: WatchArgs = undefined;
+    const cmd = try remote_shell.wrapAlloc(allocator, watch_script, watchArgs(root, &env_tokens, &args));
     defer allocator.free(cmd);
 
     const c_env0 = try allocator.dupeZ(u8, "env");

@@ -4846,6 +4846,100 @@ pub fn initRepoForTest(allocator: std.mem.Allocator, git_exe: []const u8, repo: 
     return true;
 }
 
+// ── 계획 workspace-trust WT6a — 신뢰와 무관하게 닫는 실행 구멍을 실제 git 으로 잰다 ─────────────────────────
+// (지연 가져오기·쓰기의 fsmonitor 는 처음 여기 있었으나 정상 사용자의 답을 바꿔 — partial clone 이 실패하고, 사용자 index 의
+// fsmonitor 확장이 지워진다 — 신뢰에 따른 WT6b 로 옮겼다; 적대적 검증·사용자 결정 2026-10-09.)
+// 판정은 argv 모양이 아니라 **표식 파일이 생기느냐**다(적대적 검증 — 모양 판정으론 이번 구멍들을 못 잡았다). 저장소에
+// 무해한 `touch` 명령을 심고, 먼저 굳히기 없는 git(대조군)이 그 표식을 만드는지 본다 — 이 기계의 git 이 그 길을 안
+// 타면(버전·설정) 판정이 헛돌므로 건너뛴다. 그다음 제품의 읽기·쓰기로 돌려 표식이 없어야 한다.
+
+/// 대조군·준비용 git — 제품 러너(`runArgvWithEnv`)를 지나되 **굳히기 `-c` 없이**(제품 읽기는 `build` 가 붙인다).
+fn wt6Raw(allocator: std.mem.Allocator, git_exe: []const u8, args: []const []const u8) ?[]u8 {
+    var argv: [32][]const u8 = undefined;
+    argv[0] = git_exe;
+    @memcpy(argv[1..][0..args.len], args);
+    const out = runArgvWithEnv(allocator, argv[0 .. 1 + args.len], null, false, null, false) catch return null;
+    return out.bytes;
+}
+
+fn wt6Run(allocator: std.mem.Allocator, git_exe: []const u8, args: []const []const u8) bool {
+    const bytes = wt6Raw(allocator, git_exe, args) orelse return false;
+    allocator.free(bytes);
+    return true;
+}
+
+fn wt6Exists(path: []const u8) bool {
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const p = std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return false;
+    return std.c.access(p.ptr, std.c.F_OK) == 0;
+}
+
+fn wt6Remove(path: []const u8) void {
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const p = std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return;
+    _ = std.c.unlink(p.ptr);
+}
+
+/// 표식만 남기는 실행 파일(`touch <marker>` 뒤 실패로 끝난다 — git 이 그 출력을 믿지 않게).
+fn wt6Script(io: std.Io, path: []const u8, marker: []const u8) !void {
+    var body: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = try std.fmt.bufPrint(&body, "#!/bin/sh\ntouch '{s}'\necho 'gpg: FAKE' >&2\necho 'gpg: FAKE'\nexit 1\n", .{marker}) });
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}", .{path})).ptr, 0o755);
+}
+
+test "WT6a 읽기는 서명 검증 프로그램을 실행하지 않는다 — 저장소의 log.showSignature + gpg.program (계획 workspace-trust)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0 .. tmp.dir.realPath(io, &root_buf) catch return error.SkipZigTest];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    var b3: [std.fs.max_path_bytes]u8 = undefined;
+    var b4: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&b1, "{s}/repo", .{root});
+    const marker = try std.fmt.bufPrint(&b2, "{s}/gpg-ran", .{root});
+    const script = try std.fmt.bufPrint(&b3, "{s}/fake-gpg", .{root});
+    const commit_file = try std.fmt.bufPrint(&b4, "{s}/signed-commit", .{root});
+    try tmp.dir.createDirPath(io, "repo");
+    if (!initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
+    var fb: [std.fs.max_path_bytes]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&fb, "{s}/f.txt", .{repo}), .data = "x\n" });
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "add", "f.txt" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x" })) return error.SkipZigTest;
+    // 서명 머리(내용은 가짜 — 검증 프로그램이 불리기만 하면 된다)를 단 커밋으로 HEAD 를 바꾼다.
+    const plain = wt6Raw(allocator, git_exe, &.{ "-C", repo, "cat-file", "commit", "HEAD" }) orelse return error.SkipZigTest;
+    defer allocator.free(plain);
+    const committer = std.mem.indexOf(u8, plain, "\ncommitter ") orelse return error.SkipZigTest;
+    const line_end = std.mem.indexOfScalarPos(u8, plain, committer + 1, '\n') orelse return error.SkipZigTest;
+    const signed = try std.fmt.allocPrint(allocator, "{s}\ngpgsig -----BEGIN PGP SIGNATURE-----\n \n -----END PGP SIGNATURE-----{s}", .{ plain[0..line_end], plain[line_end..] });
+    defer allocator.free(signed);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = commit_file, .data = signed });
+    const oid_raw = wt6Raw(allocator, git_exe, &.{ "-C", repo, "hash-object", "-t", "commit", "-w", commit_file }) orelse return error.SkipZigTest;
+    defer allocator.free(oid_raw);
+    const oid = std.mem.trim(u8, oid_raw, " \n");
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "update-ref", "HEAD", oid })) return error.SkipZigTest;
+    try wt6Script(io, script, marker);
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "log.showSignature", "true" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "commit.gpgSign", "false" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "gpg.program", script })) return error.SkipZigTest;
+    // 대조군 — 굳히기 없는 `log` 는 검증 프로그램을 부른다.
+    _ = wt6Run(allocator, git_exe, &.{ "-C", repo, "log", "-n", "1", "--format=%H" });
+    if (!wt6Exists(marker)) return error.SkipZigTest;
+    wt6Remove(marker);
+    const out = try run(allocator, .log, git_exe, repo);
+    defer allocator.free(out.bytes);
+    try std.testing.expect(!wt6Exists(marker));
+    // 출력은 우리 형식 그대로 — 검증 프로그램의 말(`gpg: …`)이 섞여 첫 커밋 필드를 더럽히지 않는다(예전 파싱 결함).
+    try std.testing.expect(std.mem.indexOf(u8, out.bytes, "gpg:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out.bytes, oid) != null);
+}
+
 fn remoteScmHarness() ?struct { dest: []const u8, ctl: []const u8, repo: []const u8 } {
     const dest_z = std.c.getenv("MARU_REMOTE_SCM_DEST") orelse return null;
     const ctl_z = std.c.getenv("MARU_REMOTE_SCM_CTL") orelse return null;

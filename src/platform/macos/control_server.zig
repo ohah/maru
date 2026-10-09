@@ -45,7 +45,6 @@ const cap = maru.session.control_capability;
 const co = maru.session.control_outbound; // 5f-0b-2b: per-connection outbound 프레임 큐(순수 5f-0b-1)
 const control_browser = maru.session.control_browser;
 const self_origin = maru.session.control_self_origin;
-const log = std.log.scoped(.control);
 const self_origin_macos = @import("control_self_origin_macos.zig");
 const cev = maru.session.control_events; // 5f-0b-3: browser 이벤트 채널 코어(EventBroker 구독 레지스트리·매칭·직렬화, §9.5.2)
 
@@ -72,6 +71,8 @@ pub const PendingRequest = struct {
     /// **1g(§8.4)**: 연결 스레드가 auth 프레임 직후 찾은 출처 — 붙은 프로세스의 조상 사슬에서 제어 터미널을 가진 첫
     /// 프로세스와 그 세션. 못 찾았으면 null(셀렉터 없는 연결과 같다). 메인이 요청마다 아직 foreground 인지 다시 본다.
     peer_origin: ?self_origin.Origin = null,
+    /// **1g**: 출처를 못 찾은 이유(진단 — 메인이 셀렉터를 버릴 때 로그에 싣는다).
+    peer_reject: ?self_origin.Reject = null,
     /// **1g**: 메인이 `peer_origin` 의 세션으로 찾은 pane(surface id) — browser 확인 grant(§9.2 Model B)의 pane.
     /// 확인 모달을 승인한 뒤의 재처리도 이 값을 쓴다. 메인 소유(처리 시작에 채운다).
     browser_pane: ?u64 = null,
@@ -1046,15 +1047,12 @@ pub const ControlServer = struct {
         }
     }
 
-    /// 1g: 붙은 프로세스의 출처(조상 사슬의 첫 제어 터미널 프로세스와 그 세션). 못 찾으면 null.
-    fn peerOrigin(fd: c.fd_t, accepted_us: u64) ?self_origin.Origin {
-        const pid = self_origin_macos.peerPid(fd) orelse return null;
+    /// 1g: 붙은 프로세스의 출처(조상 사슬에서 자기 터미널의 foreground 그룹에 속한 첫 조상과 그 세션), 또는 못 찾은 이유.
+    fn peerOrigin(fd: c.fd_t, accepted_us: u64) struct { origin: ?self_origin.Origin = null, reject: ?self_origin.Reject = null } {
+        const pid = self_origin_macos.peerPid(fd) orelse return .{ .reject = .peer_unknown };
         return switch (self_origin.findOrigin(self_origin_macos.provider(), pid, c.getuid(), accepted_us)) {
-            .origin => |o| o,
-            .reject => |reason| {
-                log.debug("control: self-origin rejected pid={d} reason={s}", .{ pid, @tagName(reason) });
-                return null;
-            },
+            .origin => |o| .{ .origin = o },
+            .reject => |reason| .{ .reject = reason },
         };
     }
 
@@ -1077,7 +1075,7 @@ pub const ControlServer = struct {
         const auth = cp.parseAuthFrame(self.cross_gpa, auth_line);
         // 1g: auth 프레임을 읽은 **직후**에 peer 를 본다 — `LOCAL_PEERPID` 는 마지막으로 쓴 프로세스라 지금이 그 프레임을
         // 쓴 프로세스다. 셀렉터 유무와 무관하게 찾는다(세션 유지 pane 에는 셀렉터가 없다). 코어·트리는 안 만진다(syscall 뿐).
-        const peer_origin = peerOrigin(conn.fd, accepted_us);
+        const peer = peerOrigin(conn.fd, accepted_us);
 
         // 5f-4a-2 **세션 cap 집합**(§9.5.6 ③): auth.self의 cap_nonce가 있으면 첫 원소. 이후 요청 루프서 `auth.grant` 프레임을
         // 만나면 여기에 누적한다(bounded max_session_caps — 초과는 조용히 무시). serveConnection 스택 소유라 세션 내내 유효 →
@@ -1110,7 +1108,7 @@ pub const ControlServer = struct {
             const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
             defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 iteration 끝(대기 후)에 해제
 
-            var pending: PendingRequest = .{ .connection_id = connection_id, .connection_fd = conn.fd, .request_bytes = req_copy, .selector = auth.selector, .peer_origin = peer_origin, .cap_nonces = session_caps[0..n_caps], .outbound = outbound, .io = self.io };
+            var pending: PendingRequest = .{ .connection_id = connection_id, .connection_fd = conn.fd, .request_bytes = req_copy, .selector = auth.selector, .peer_origin = peer.origin, .peer_reject = peer.reject, .cap_nonces = session_caps[0..n_caps], .outbound = outbound, .io = self.io };
             self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon(req_copy는 defer가 해제)
 
             switch (pending.waitResolved()) {

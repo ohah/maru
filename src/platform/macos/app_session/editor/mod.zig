@@ -2664,6 +2664,18 @@ pub fn openSharedViewInActivePane(self: *AppSession, source: *Term) (OpenFileErr
 /// **같은 `Prepared` 를 돌려주는 이유**: 부착 뒤의 일(줄 배열·접힘·탭 폭·구문)이 경로 있는 문서와
 /// **한 글자도 다르지 않다**. 다른 구조를 주면 `finishAttach` 가 두 벌이 되고, 둘 중 하나만 고쳐지는
 /// 날이 온다(이 파일이 `materialize`·`computeMarks` 에서 이미 겪은 모양이다).
+/// 검색 결과는 저장 신원·백업 owner를 만들지 않는다. 본문과 줄을 게시 전에 준비한다.
+pub fn prepareSearchReport(self: *AppSession, content: []const u8) !Prepared {
+    var opened: Opened = .{ .file = try editor.edit_doc.EditableFile.initContent(self.allocator, content, true), .saved_hash = contentHash(content) };
+    errdefer opened.deinit(self.allocator);
+    const lines = try self.allocator.alloc([]const u8, opened.file.lineCount());
+    errdefer self.allocator.free(lines);
+    for (lines, 0..) |*line, i| line.* = opened.file.lineText(i) orelse "";
+    var state: editor.document_state.State = .{ .opened = opened };
+    const lease = try self.editor_documents.create(&state, self.allocator);
+    return .{ .lease = lease, .lines = lines };
+}
+
 pub fn prepareUntitled(self: *AppSession) OpenFileError!Prepared {
     return prepareUntitledContent(self, "", false);
 }
@@ -11145,6 +11157,8 @@ pub fn toggleWrap(self: *AppSession) bool {
 
 /// 편집기 Term이 소유한 것을 놓는다. `destroyTerm`이 kind로 분기해 부른다.
 pub fn releaseEditorTerm(self: *AppSession, term: *Term) void {
+    if (term.rt.editor_search_report) |report| report.destroy(self.allocator);
+    term.rt.editor_search_report = null;
     if (term.rt.editor_symbol_preview) |*preview| preview.deinit(self.allocator);
     term.rt.editor_symbol_preview = null;
     editor_diff_ops.release(self, term); // N1.5 diff 행·줄 배열(entry 버퍼를 빌린다)
@@ -57511,4 +57525,142 @@ test "HELP12 지나가는 토스트는 자동완성을 닫는 이유가 아니�
     s.chrome_host.notice.dismiss();
     try h.frame();
     try testing.expect(s.chrome_host.suggest_box.open); // 다시 보인다
+}
+
+test "RPV4 검색 결과 탭은 독립 사본이며 편집 저장 복원을 하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const source = try undoFixture(&fx, testing.allocator, "search.txt", "foo foo\nfoo");
+    try replacePreviewSearch(&fx);
+    const report_ops = @import("search/report.zig");
+    const result = try report_ops.open(fx.session);
+    try testing.expect(result.rt.editor_search_report != null);
+    try testing.expect(result.rt.editor_recovery == null);
+    try testing.expect(result.rt.editorDocument().untitled == null);
+    try testing.expect(result.rt.editorDocument().path == null);
+    try testing.expect(result.rt.editorDocument().opened.?.file.read_only);
+    try testing.expect(!insertText(fx.session, result, "changed"));
+    try testing.expectError(error.ReadOnly, saveDocument(fx.session, result));
+    try testing.expect(!isDirty(result));
+    const report = result.rt.editor_search_report.?;
+    try testing.expectEqual(@as(usize, 3), report.hits.items.len);
+    try testing.expectEqual(fx.session.editor_search.result.model.rows.items.len, report.rows.items.len);
+    const first_hit = report.hits.items[0];
+    const first_text = report.rows.items[first_hit.row].match.text;
+    const separator = first_hit.line + 2 + std.mem.count(u8, first_text, "\n") - @intFromBool(std.mem.endsWith(u8, first_text, "\n"));
+    result.rt.editor_selection = maru.session.editor.selection.Selection.at(result.rt.editorDocument().opened.?.file.lines.line(separator).?.start);
+    try report_ops.activate(fx.session, result);
+    try testing.expect(@import("../pane.zig").activePane(fx.session).activeTerm() == result);
+    // 재검색으로 도크의 배열·질의를 정산한 뒤에도 pane의 결과·질의·이동은 살아 있다.
+    @import("search/dock.zig").changed(fx.session);
+    try testing.expectEqualStrings("foo", report.query.text);
+    const at = result.rt.editorDocument().opened.?.file.lines.line(report.hits.items[0].line).?.start;
+    result.rt.editor_selection = maru.session.editor.selection.Selection.at(at);
+    try report_ops.activate(fx.session, result);
+    try testing.expect(@import("../pane.zig").activePane(fx.session).activeTerm() == source);
+    try testing.expectEqualStrings("foo foo\nfoo", source.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), source.rt.editorDocument().history.undo_len);
+    source.rt.editorDocument().opened.?.file.revision += 1;
+    try testing.expectError(error.StaleRequest, report_ops.activate(fx.session, result));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const captured = try @import("../workspace.zig").captureWorkspaceWindow(fx.session, arena.allocator(), true, null);
+    const encoded = try maru.session.workspace.serializeWindow(testing.allocator, captured);
+    defer testing.allocator.free(encoded);
+    try testing.expect(std.mem.indexOf(u8, encoded, report.title) == null);
+}
+
+test "RPV5 검색 결과 탭 준비의 모든 할당 실패는 기존 결과와 탭을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var allocations: usize = 0;
+    var rejected: usize = 0;
+    var index: usize = 0;
+    while (index == 0 or index <= allocations) : (index += 1) {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo foo\nfoo");
+        try replacePreviewSearch(&fx);
+        const before = @import("../pane.zig").activePane(fx.session).terms.items.len;
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (index == 0) std.math.maxInt(usize) else index - 1 });
+        fx.session.allocator = failing.allocator();
+        const opened = @import("search/report.zig").open(fx.session);
+        fx.session.allocator = testing.allocator;
+        if (index == 0) allocations = failing.alloc_index;
+        if (opened) |term| {
+            try testing.expect(term.rt.editorDocument().opened.?.file.read_only);
+            try testing.expectEqual(before + 1, @import("../pane.zig").activePane(fx.session).terms.items.len);
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            rejected += 1;
+            try testing.expectEqual(before, @import("../pane.zig").activePane(fx.session).terms.items.len);
+            try testing.expectEqual(@as(usize, 3), fx.session.editor_search.result.model.matches);
+            try testing.expectEqualStrings("foo", fx.session.editor_project_search_query.?.text);
+        }
+    }
+    try testing.expect(allocations > 10 and rejected > 10);
+}
+
+test "RPV6 미리보기 탭은 전문 diff를 보존하고 원문 또는 충돌 결과를 편집하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const source = try undoFixture(&fx, testing.allocator, "search.txt", "foo\nfoo");
+    try replacePreviewSearch(&fx);
+    const preview_ops = @import("search/preview.zig");
+    try preview_ops.start(fx.session, try replacePreviewRow(fx.session, false, true));
+    try waitReplacePreview(fx.session);
+    const result = try @import("search/report.zig").open(fx.session);
+    try testing.expectEqual(@as(usize, 0), result.rt.editor_search_report.?.hits.items.len);
+    try testing.expect(std.mem.indexOf(u8, result.rt.editorDocument().opened.?.file.content, "+ 1: bar") != null);
+    try testing.expect(!insertText(fx.session, result, "write"));
+    try testing.expectEqualStrings("foo\nfoo", source.rt.editorDocument().opened.?.file.content);
+    @import("search/dock.zig").refreshForFocus(fx.session);
+    try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.preview.phase), .ready), fx.session.editor_search.preview.phase);
+    @import("search/dock.zig").changed(fx.session);
+    try testing.expectError(error.StaleRequest, @import("search/report.zig").open(fx.session));
+}
+
+test "RPV7 검색 결과 탭의 디스크 이동은 수정과 탭 닫기 뒤 늦은 완료를 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo model");
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo disk" });
+        try replacePreviewSearch(&fx);
+        const report_ops = @import("search/report.zig");
+        const result = try report_ops.open(fx.session);
+        const report = result.rt.editor_search_report.?;
+        for (report.hits.items) |hit| if (report.rows.items[hit.row].source == .disk) {
+            const at = result.rt.editorDocument().opened.?.file.lines.line(hit.line).?.start;
+            result.rt.editor_selection = maru.session.editor.selection.Selection.at(at);
+            break;
+        };
+        if (mode == 1) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "bar disk" });
+        try report_ops.activate(fx.session, result);
+        try testing.expect(fx.session.editor_search.nav != null);
+        const p = @import("../pane.zig").activePane(fx.session);
+        if (mode == 2) {
+            try testing.expect(p.terms.orderedRemove(p.terms.items.len - 1) == result);
+            fx.session.focusTerm(p.terms.items.len - 1);
+            term_ops.destroyTerm(fx.session, result);
+        }
+        const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+        while (fx.session.editor_search.nav != null) {
+            @import("search/navigation.zig").poll(fx.session);
+            if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+            try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+        }
+        const active = @import("../pane.zig").activePane(fx.session).activeTerm();
+        if (mode == 0) {
+            try testing.expectEqualStrings("disk.txt", std.fs.path.basename(active.rt.editorDocument().path.?));
+            try testing.expectEqual(@as(usize, 3), active.rt.editor_selection.?.focus);
+        } else if (mode == 1) {
+            try testing.expect(active == result);
+        } else {
+            try testing.expect(active.rt.editor_search_report == null);
+            try testing.expectEqualStrings("search.txt", std.fs.path.basename(active.rt.editorDocument().path.?));
+        }
+    }
 }

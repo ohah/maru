@@ -54,7 +54,8 @@ def main():
              "src/platform/macos/app_session/accessibility.zig", "src/chrome/components/project_search/types.zig", "src/platform/macos/coretext_smoke.m",
              "src/platform/macos/app_session/input.zig", "src/platform/macos/app_session/editor/search/navigation.zig",
              "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
-             "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig")
+             "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
+             "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h")
     print(root, flush=True)
     if args.app:
         app = args.app.resolve()
@@ -91,6 +92,9 @@ def main():
         renderer = source / names[5]
         renderer.write_text(replace_once(renderer.read_text(), "    static const char *const gates[] = {",
             '    static const char *const gates[] = {\n        "MARU_EDITOR_PROJECT_SEARCH_CAPTURE",'))
+        report_source = source / "src/platform/macos/app_session/editor/search/report.zig"
+        report_source.write_text(replace_once(report_source.read_text(), "pub fn open(self: *host.AppSession) !*host.Term {",
+            'pub fn open(self: *host.AppSession) !*host.Term {\n    const capture_start = std.Io.Clock.awake.now(self.io).nanoseconds;\n    defer std.debug.print("SEARCH_PANE_BUILD elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(self.io).nanoseconds - capture_start});'))
         command = ["mise", "exec", "--", "zig", "build", "macos-app-bundle", "-j2"]
         print(root, flush=True)
         with (root / "build.log").open("wb") as log:
@@ -175,7 +179,7 @@ document.read_bytes() != original):
     if args.narrow_hidden:
         expected += ("geometry-hidden",)
     if args.replace_preview:
-        expected += ("replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict")
+        expected += ("replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict", "search-pane", "search-pane-navigated", "pane-preview-results", "pane-preview-ready", "preview-pane")
     if args.matrix:
         expected += ("shared", "independent", "zero-override", "root-changed", "stale-release")
     for label in expected:
@@ -189,6 +193,7 @@ document.read_bytes() != original):
         raise RuntimeError("Missing product timing/RSS evidence")
     metrics = dict(zip(("first_result_ns", "completion_ns", "main_search_tick_max_ns", "cancel_call_ns", "cancel_retire_ns"), map(int, match.groups())))
     metrics["peak_rss_bytes"] = max(sample["rss_bytes"] for sample in samples)
+    metrics["pane_build_ns"] = [int(value) for value in re.findall(r"SEARCH_PANE_BUILD elapsed_ns=(\d+)", transcript)]
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
         product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, replace_preview=args.replace_preview, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})

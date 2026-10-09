@@ -106,6 +106,16 @@ pub const Icon = enum(u21) {
     cloud_download = 0xF002C,
     /// standard: assets/icons/phone.svg (0xF002D)
     phone = 0xF002D,
+    /// standard: assets/icons/search-case.svg (0xF002E)
+    search_case = 0xF002E,
+    /// standard: assets/icons/search-word.svg (0xF002F)
+    search_word = 0xF002F,
+    /// standard: assets/icons/search-regex.svg (0xF0030)
+    search_regex = 0xF0030,
+    /// standard: assets/icons/search-filter.svg (0xF0031)
+    search_filter = 0xF0031,
+    /// standard: assets/icons/search-stop.svg (0xF0032)
+    search_stop = 0xF0032,
 };
 
 /// 이 아이콘에 그 fit의 **자산이 실재하는가**. `codepointFit`은 없는 조합을 기본으로 폴백하므로,
@@ -153,6 +163,11 @@ pub fn hasFit(icon: Icon, fit: Fit) bool {
         .collapse_all => fit == .standard,
         .cloud_download => fit == .standard,
         .phone => fit == .standard,
+        .search_case => fit == .standard,
+        .search_word => fit == .standard,
+        .search_regex => fit == .standard,
+        .search_filter => fit == .standard,
+        .search_stop => fit == .standard,
     };
 }
 
@@ -220,6 +235,11 @@ pub fn utf8(icon: Icon) []const u8 {
         .collapse_all => "\u{F002B}",
         .cloud_download => "\u{F002C}",
         .phone => "\u{F002D}",
+        .search_case => "\u{F002E}",
+        .search_word => "\u{F002F}",
+        .search_regex => "\u{F0030}",
+        .search_filter => "\u{F0031}",
+        .search_stop => "\u{F0032}",
     };
 }
 
@@ -287,6 +307,11 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
         0xF002B => .{ .icon = .collapse_all, .fit = .standard },
         0xF002C => .{ .icon = .cloud_download, .fit = .standard },
         0xF002D => .{ .icon = .phone, .fit = .standard },
+        0xF002E => .{ .icon = .search_case, .fit = .standard },
+        0xF002F => .{ .icon = .search_word, .fit = .standard },
+        0xF0030 => .{ .icon = .search_regex, .fit = .standard },
+        0xF0031 => .{ .icon = .search_filter, .fit = .standard },
+        0xF0032 => .{ .icon = .search_stop, .fit = .standard },
         else => null,
     };
 }

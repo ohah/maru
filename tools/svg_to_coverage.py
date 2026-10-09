@@ -134,6 +134,12 @@ ICONS = [
     ("cloud_download", FIT_STANDARD, 0xF002C, "assets/icons/cloud-download.svg"),
     # 폰이 세션을 좁혀 둔 상태를 상태줄이 말할 때 쓴다(S11-6). 직접 그린 자산이다.
     ("phone", FIT_STANDARD, 0xF002D, "assets/icons/phone.svg"),
+    # 검색 옵션: 공식 제품 화면의 관례를 참고해 독립 제작한 자산이다.
+    ("search_case", FIT_STANDARD, 0xF002E, "assets/icons/search-case.svg"),
+    ("search_word", FIT_STANDARD, 0xF002F, "assets/icons/search-word.svg"),
+    ("search_regex", FIT_STANDARD, 0xF0030, "assets/icons/search-regex.svg"),
+    ("search_filter", FIT_STANDARD, 0xF0031, "assets/icons/search-filter.svg"),
+    ("search_stop", FIT_STANDARD, 0xF0032, "assets/icons/search-stop.svg"),
 ]
 
 

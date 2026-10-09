@@ -55,6 +55,11 @@
 #define MARU_ICON_COLLAPSE_ALL 0xF002Bu
 #define MARU_ICON_CLOUD_DOWNLOAD 0xF002Cu
 #define MARU_ICON_PHONE 0xF002Du
+#define MARU_ICON_SEARCH_CASE 0xF002Eu
+#define MARU_ICON_SEARCH_WORD 0xF002Fu
+#define MARU_ICON_SEARCH_REGEX 0xF0030u
+#define MARU_ICON_SEARCH_FILTER 0xF0031u
+#define MARU_ICON_SEARCH_STOP 0xF0032u
 
 static inline bool maru_is_registered_icon_cp(uint32_t cp) {
     switch (cp) {
@@ -102,6 +107,11 @@ static inline bool maru_is_registered_icon_cp(uint32_t cp) {
         case 0xF002Bu:
         case 0xF002Cu:
         case 0xF002Du:
+        case 0xF002Eu:
+        case 0xF002Fu:
+        case 0xF0030u:
+        case 0xF0031u:
+        case 0xF0032u:
             return true;
         default:
             return false;

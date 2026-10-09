@@ -104,7 +104,7 @@ extension MaruAppHostController {
         }
         guard ready == 1 else { finish(false); return }
         let matrix = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_MATRIX"] == "1"
-        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict"]
+        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict", "search-pane", "search-pane-navigated", "pane-preview-results", "pane-preview-ready", "preview-pane"]
         guard editorProjectSearchCapture(labels[Int(stage)]) else { finish(false); return }
         let unicode = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_UNICODE"] == "1"
         switch stage {
@@ -158,7 +158,14 @@ extension MaruAppHostController {
         case 13:
             guard editorProjectSearchClick(0) else { finish(false); return }
         case 14, 15, 16, 17, 18, 19: editorProjectSearchAction(stage)
-        case 20: finish(true); return
+        case 20:
+            editorProjectSearchAction(20)
+            guard editorProjectSearchClick(0) else { finish(false); return }
+        case 21: editorProjectSearchAction(21)
+        case 22, 23: editorProjectSearchAction(stage)
+        case 24:
+            guard editorProjectSearchClick(0) else { finish(false); return }
+        case 25: finish(true); return
         case 11: finish(true); return
         default: editorProjectSearchAction(stage)
         }

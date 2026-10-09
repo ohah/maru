@@ -16,8 +16,9 @@ pub const Ticket = struct {
     span: search.event.Range,
     path: []u8,
     identity: search.request.Identity,
-    generation: u64,
+    generation: ?u64,
     stamp: u64,
+    origin_surface: u64 = 0,
     cancelled: bool = false,
     found: bool = false,
     loaded: ?*verify.Loaded = null,
@@ -69,6 +70,14 @@ pub fn start(self: *AppSession, row_index: usize, range_index: usize) !void {
     if (row_index >= state.result.model.rows.items.len) return error.StaleRequest;
     const row = state.result.model.rows.items[row_index];
     if (range_index >= row.match.ranges.len) return error.StaleRequest;
+    const query = self.editor_project_search_query orelse return error.StaleRequest;
+    try startRow(self, row, range_index, query, state.result.identity orelse return error.StaleRequest, state.result.generation);
+}
+
+/// 불변 결과 탭은 도크의 질의 세대와 독립적이다. 원문 신원·실시간 worker 검증은 그대로 적용한다.
+pub fn startRow(self: *AppSession, row: search.request.Row, range_index: usize, query: owner.Query, request_identity: search.request.Identity, generation: ?u64) !void {
+    const state = &self.editor_search;
+    if (range_index >= row.match.ranges.len) return error.StaleRequest;
     const span = row.match.ranges[range_index];
     switch (row.source) {
         .model => |source| {
@@ -91,7 +100,6 @@ pub fn start(self: *AppSession, row_index: usize, range_index: usize) !void {
     if (state.nav != null) return error.NavigationPending;
     const root = self.file_tree.rootAt(row.root_index) orelse return error.StaleRequest;
     const cap = self.file_tree.rootCapabilityForPath(root) orelse return error.StaleRequest;
-    const query = self.editor_project_search_query orelse return error.StaleRequest;
     var expected: search.event.Match = .{ .path = try self.allocator.dupe(u8, row.match.path), .text = undefined, .ranges = undefined, .text_start = row.match.text_start, .text_truncated = row.match.text_truncated };
     errdefer self.allocator.free(expected.path);
     expected.text = try self.allocator.dupe(u8, row.match.text);
@@ -102,7 +110,6 @@ pub fn start(self: *AppSession, row_index: usize, range_index: usize) !void {
     errdefer self.allocator.free(path);
     var job: backend.Backend = .{ .a = self.allocator, .io = self.io };
     errdefer job.deinit();
-    const request_identity = state.result.identity orelse return error.StaleRequest;
     var output: search.request.State = .{ .identity = request_identity, .limits = dock.limits };
     defer output.deinit(self.allocator);
     var models: std.ArrayList(backend.model.Captured) = .empty;
@@ -114,7 +121,7 @@ pub fn start(self: *AppSession, row_index: usize, range_index: usize) !void {
     } else {
         try job.startBundledTarget(.{ .path = root, .identity = cap.identity }, row.match.path, query.text, query.options, &output, &models, budget);
     }
-    state.nav = .{ .job = job, .expected = expected, .span = span, .path = path, .identity = request_identity, .generation = state.result.generation, .stamp = owner.fingerprint(self) };
+    state.nav = .{ .job = job, .expected = expected, .span = span, .path = path, .identity = request_identity, .generation = generation, .stamp = owner.fingerprint(self) };
 }
 fn openFailure(self: *AppSession, err: anyerror) void {
     self.showNoticeKey(switch (err) {
@@ -136,6 +143,13 @@ fn drain(a: std.mem.Allocator, ticket: *Ticket) void {
         }
     }
 }
+fn originAlive(self: *AppSession, surface: u64) bool {
+    if (surface == 0) return true;
+    for (self.tabs.items) |tab| for (tab.panes.items) |p| for (p.terms.items) |term| {
+        if (term.surfaceId() == surface and term.rt.editor_search_report != null) return true;
+    };
+    return false;
+}
 pub fn poll(self: *AppSession) void {
     const state = &self.editor_search;
     const active = if (state.nav) |*value| value else return;
@@ -146,7 +160,7 @@ pub fn poll(self: *AppSession) void {
         }
         return;
     }
-    if (active.stamp != owner.fingerprint(self) or active.generation != state.result.generation) {
+    if (!originAlive(self, active.origin_surface) or active.stamp != owner.fingerprint(self) or (active.generation != null and active.generation.? != state.result.generation)) {
         active.cancel();
         return;
     }
@@ -221,7 +235,7 @@ pub fn poll(self: *AppSession) void {
     ticket.document = identity(opened.term);
     ticket.revision = doc.file.revision;
     ticket.stamp = owner.fingerprint(self);
-    ticket.generation = state.result.generation;
+    if (ticket.generation != null) ticket.generation = state.result.generation;
     state.nav = finished;
     moved = true;
     // 소유권이 state로 이동했으므로 위 defer는 실행하지 않는다.

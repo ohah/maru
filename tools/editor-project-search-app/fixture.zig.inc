@@ -47,6 +47,21 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
         std.debug.print("SEARCH_MATRIX stage={d} matches={d} groups={d}\n", .{stage, state.result.model.matches, state.result.model.groups.items.len});
         return 1;
     }
+    if (stage == 23) return if (state.result.phase == .complete) 1 else 0;
+    if (stage == 24) return if (state.preview.phase == .ready) 1 else if (state.preview.phase == .conflict or state.preview.phase == .failed) -1 else 0;
+    if (stage == 25) {
+        const report = term.rt.editor_search_report orelse return 0;
+        return if (report.hits.items.len == 0 and term.rt.editorDocument().opened.?.file.read_only) 1 else -1;
+    }
+    if (stage == 21) {
+        const report = term.rt.editor_search_report orelse return 0;
+        if (report.hits.items.len == 0 or !term.rt.editorDocument().opened.?.file.read_only or term.rt.editor_recovery != null) return -1;
+        return 1;
+    }
+    if (stage == 22) {
+        if (term.surfaceId() != editor_project_search_original_surface or term.rt.editor_selection == null) return 0;
+        return if (term.rt.editor_selection.?.focus > term.rt.editor_selection.?.anchor_start) 1 else -1;
+    }
     if (stage >= 12 and stage <= 20) {
         const preview = &state.preview;
         if (stage >= 18 and self.dock.side != .right) return -1;
@@ -114,6 +129,37 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
 export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
     const self = editor_project_search_session orelse return;
     switch (stage) {
+        22 => {
+            const d = @import("editor/search/dock.zig");
+            d.open(self);
+            self.editor_search.fields[3].selectAll();
+            self.editor_search.focused = 3;
+            _ = d.commitText(self, "renamed");
+            self.editor_search.replacing = true;
+            d.run(self);
+        },
+        23 => {
+            for (self.editor_search.result.model.visible.items, 0..) |visible, index| if (visible == .file and self.editor_search.result.model.groups.items[visible.file].source == .model) {
+                @import("editor/search/preview.zig").start(self, index) catch return;
+                break;
+            };
+        },
+        20 => {
+            @import("editor/search/preview.zig").back(self);
+            self.editor_search.replacing = false;
+            self.editor_search.focused = null;
+            self.editor_search.invalidate();
+        },
+        21 => {
+            const active = pane_ops.activePane(self).activeTerm();
+            const report = active.rt.editor_search_report orelse return;
+            for (report.hits.items) |hit| if (report.rows.items[hit.row].source == .model) {
+                const at = active.rt.editorDocument().opened.?.file.lines.line(hit.line).?.start;
+                active.rt.editor_selection = maru.session.editor.selection.Selection.at(at);
+                _ = self.handleKeyEvent(.{ .key = .enter }) catch return;
+                break;
+            };
+        },
         17 => self.dispatchAppAction(.toggle_file_panel_dock_side),
         18 => {
             @import("editor/search/preview.zig").back(self);
@@ -192,6 +238,10 @@ export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
 export fn maru_editor_project_search_coordinate(axis: u32) callconv(.c) f64 {
     const self = editor_project_search_session orelse return -1;
     if (!@import("editor/search/dock.zig").publish(self)) return -1;
+    if (editor_project_search_probe_stage == 20 or editor_project_search_probe_stage == 24) {
+        for (self.editor_search.entries.items) |entry| if (entry.id == maru.chrome.components.project_search.build.optionId(8)) return if (axis == 0) entry.rect.x + entry.rect.width / 2 else entry.rect.y + entry.rect.height / 2;
+        return -1;
+    }
     if (editor_project_search_probe_stage == 12) {
         if (!self.editor_search.replacing) {
             for (self.editor_search.entries.items) |entry| if (entry.id == maru.chrome.components.project_search.build.optionId(6)) return if (axis == 0) entry.rect.x + entry.rect.width / 2 else entry.rect.y + entry.rect.height / 2;

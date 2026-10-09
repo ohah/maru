@@ -1230,3 +1230,5 @@ LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forg
 `maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.
 
 프로젝트 바꾸기 미리보기 판정: `mise exec -- zig build test-editor-project-replace-preview` ([범위](plans/editor-project-replace-preview.md)).
+
+검색 결과 탭·할당 실패·읽기 전용 diff 탭 판정도 `mise exec -- zig build test-editor-project-replace-preview`에 포함된다([계약](plans/editor-project-search-pane.md)).

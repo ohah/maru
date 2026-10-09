@@ -1965,10 +1965,11 @@ echo "PASS part files left by a killed app and sidecar are gone after the next l
 # 있다 — 다운로드 없이도 웹 탭을 닫고 마지막 셸을 끝내면 base 에서도 그렇게 끝난다(W10e 착수 중 실측) — 실패가 아니라 알림으로 둔다.
 printf 'ui.language = ko\n' > "$root/keepalive.conf"
 cat > "$root/dlkeep.txt" <<'SCRIPT'
-sleep 7000
+sleep 8000
 mouse 1 0 0 338 302 0
 mouse 3 0 0 338 302 0
-sleep 1500
+sleep 2500
+downloads
 key 13 U+77 U+77 32
 sleep 700
 key 36 U+D
@@ -1982,7 +1983,7 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$ro
     MARU_MACOS_APP_SMOKE_MS=60000 MARU_APP_SUMMARY_PATH="$root/dlkeep.summary" MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel \
     MARU_WEB_OSR_TEST_INPUT="$root/dlkeep.txt" MARU_CONFIG="$root/keepalive.conf" "$app" > "$root/app-dlw-app.log" 2>&1 &
 keep_pid=$!
-sleep 12 # 웹 탭을 닫은 뒤(대본 약 9.2 초) — 받기는 누른 뒤 약 9 초 걸린다
+sleep 14 # 받기가 시작돼(목록 보고) 웹 탭을 닫은 뒤(대본 약 11.2 초) — 받기는 누른 뒤 약 9 초 걸린다
 # 시험 셸의 부모는 이 스모크의 session host(`$root/session-host` — 앱에서 떨어져 나간다)다 — 그 부모의 셸만 끝낸다.
 shell_killed=0
 for spid in $(pgrep -f "Maru app shell" 2>/dev/null); do
@@ -1990,13 +1991,22 @@ for spid in $(pgrep -f "Maru app shell" 2>/dev/null); do
     case "$(ps -o command= -p "$sppid" 2>/dev/null)" in *"$root"*) kill -TERM "$spid" 2>/dev/null && shell_killed=1 ;; esac
 done
 [ "$shell_killed" = 1 ] || echo "WARN the test shell to end was not found under this smoke's session host"
+sleep 3
+# 숨겨 쥐는 동안 앱이 헛돌지 않는가(리뷰 2 회차 추정 — 숨긴 세션의 session host 연결이 깨우기를 거듭하면 CPU 를 다 쓴다).
+keep_cpu=$(ps -o %cpu= -p "$keep_pid" 2>/dev/null | tr -d ' ')
+echo "app CPU while holding: ${keep_cpu:-?}%"
 keep_rc=0
 wait "$keep_pid" || keep_rc=$?
 keep_elapsed=$(( $(date +%s) - keep_start ))
 dl_check dlw-app
 grep -ao 'app: \(last window closed — downloads keep the app alive[^(]*\|background downloads finished — terminating\|last window closed — terminating\)' "$root/app-dlw-app.log" > "$root/dlkeep.events" || true
 cat "$root/dlkeep.events"
-[ "$keep_rc" = 86 ] && echo "WARN the app ended with 86 (session host proof_loss) — pre-existing: ending the last shell after closing a web tab does this on the base branch too, without downloads"
+if [ "$keep_rc" = 86 ]; then
+    # base 와 같은 사유(같은 정산 실패가 원래 마지막 창 종료 길에서)여야 기존 결함이다 — 다른 사유면 W10e 가 만든 것이다.
+    grep -aq "fatal integrity: reason=proof_loss(7)" "$root/app-dlw-app.log" \
+        || fail "the app ended with 86 for a different reason than the known base issue"
+    echo "WARN the app ended with 86 (session host proof_loss(7) at quit) — pre-existing: ending the last shell after closing a web tab does this on the base branch too, without downloads"
+fi
 python3 - "$root" "$keep_elapsed" "$keep_rc" <<'PY' || fail "the app did not stay in the background until the download finished"
 import sys, os
 root, elapsed, rc = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])

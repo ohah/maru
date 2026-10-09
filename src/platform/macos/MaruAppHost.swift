@@ -5483,7 +5483,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 끝나 받던 것이 말없이 취소됐다.
         // (숨긴 창은 셸이 끝난 세션이라 거기서 묻지 않는다.)
         var keepAliveTarget: TerminalSurface?
-        if protected == nil, keepAliveSurface != nil, windows.isEmpty, maru_macos_downloads_keep_alive() > 0 {
+        if protected == nil, !keepAliveSurfaces.isEmpty, windows.isEmpty, maru_macos_downloads_keep_alive() > 0 {
             keepAliveTarget = createTerminalWindow(applyingWorkspace: nil)
         }
         guard let target = protected ?? keepAliveTarget ?? activeSurface ?? quick else { holdOsrDialogsForExit(); return .terminateNow }
@@ -5560,9 +5560,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = notification
         terminationStartNs = DispatchTime.now().uptimeNanoseconds
         // W10e: 숨겨 둔 끝난 세션의 창을 되돌려 원래 종료 정리를 탄다(맨 앞 — 마지막 창이 끝났을 때와 같은 요약 기준).
-        if let held = keepAliveSurface {
-            windows.insert(held, at: 0)
-            keepAliveSurface = nil
+        if !keepAliveSurfaces.isEmpty {
+            windows.insert(contentsOf: keepAliveSurfaces, at: 0)
+            keepAliveSurfaces.removeAll()
             endKeepAliveActivity()
         }
         editorIMESmokeDriver?.restoreInputSource(view: primary?.view)
@@ -5674,7 +5674,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         _ = sender
         // 숨겨 둔 창은 셸이 끝난 세션이다(`windows` 밖) — 일반 창이 없으면 새 창을 연다.
-        if keepAliveSurface != nil, windows.isEmpty {
+        if !keepAliveSurfaces.isEmpty, windows.isEmpty {
             _ = createTerminalWindow(applyingWorkspace: nil)
             return false
         }
@@ -7054,14 +7054,15 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 소스를 읽고 추론해야 했다. 마지막 창이 닫히는 것 자체는 정상이지만 **왜 마지막이 됐는지**는 남겨야 한다.
             // W10c·W10e: 셸이 정상으로 끝났는데(fault 는 아니다 — 리뷰 1 회차) 받는 중인 Chromium 다운로드가 있으면 창만 닫고(숨기고)
             // 앱은 다 받을 때까지 남는다(사용자 결정 2026-10-09 — 셸 `exit` 는 확인 없이 끝나는 길이라 받던 것이 말없이 취소됐다). 그 세션은
-            // 정리하지 않고 `windows` 에서 빼 쥐어 둔다(`keepAliveSurface`). 다 받으면 `tickAppSession` 이 원래 종료 길로 끝낸다.
-            if sessionEnded, keepAliveSurface == nil, maru_macos_downloads_keep_alive() > 0 {
+            // 정리하지 않고 `windows` 에서 빼 쥐어 둔다(`keepAliveSurfaces`). 다 받으면 `tickAppSession` 이 원래 종료 길로 끝낸다. 이미
+            // 쥐고 있어도(그 사이 연 새 창의 셸도 끝났다) 같이 쥔다 — 곧바로 끝내면 받던 것이 확인 없이 취소됐다(리뷰 2 회차).
+            if sessionEnded, maru_macos_downloads_keep_alive() > 0 {
                 fputs("app: last window closed — downloads keep the app alive in the background (\(maru_macos_downloads_keep_alive()) moving)\n", stderr)
-                keepAliveSurface = surface
+                keepAliveSurfaces.append(surface)
                 keepAliveZeroSince = nil
                 windows.removeAll { $0 === surface }
                 surface.window?.orderOut(nil)
-                keepAliveActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: "Chromium downloads after the last window closed")
+                beginKeepAliveActivity()
                 return
             }
             fputs("app: last window closed — terminating (windows=\(windows.count) token=\(surface.token) sessionNil=\(surface.appSession == nil))\n", stderr)
@@ -7261,19 +7262,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // W10e: 마지막 셸이 끝났지만 받는 중이라 남았다 — 숨긴 창의 세션은 돌리지 않으니 sidecar 를 여기서 돌리고 목록 창도 고친다.
         // 다 받으면(3 초 이어서 0) 일반 창도 보이는 quick 도 없을 때 원래 종료 길로 끝낸다(사용자가 새 창이나 quick 을 쓰는 중이면 그대로 둔다 —
         // 숨긴 세션은 앱이 끝날 때 정리한다).
-        if let held = keepAliveSurface {
+        if !keepAliveSurfaces.isEmpty {
             maru_macos_web_osr_detached_pump()
             drainDownloads()
+            // 창이 없으면 아래 `guard` 가 돌아가 컨트롤 서버 요청이 시간 초과까지 기다렸다(리뷰 2 회차) — 여기서 비운다.
+            if windows.isEmpty, quick == nil { drainControlServer() }
             if maru_macos_downloads_keep_alive() > 0 {
                 keepAliveZeroSince = nil
+                beginKeepAliveActivity() // 0 이 됐다가 다시 오르면(Chromium 이 스스로 다시 받는다) 다시 건다
             } else {
                 endKeepAliveActivity()
                 let now = ProcessInfo.processInfo.systemUptime
                 if keepAliveZeroSince == nil { keepAliveZeroSince = now }
-                if windows.isEmpty, quick?.window?.isVisible != true, now - (keepAliveZeroSince ?? now) >= 3 {
+                // 저장하지 않은 파일 패널(보호)이 있으면 끝내지 않는다 — 원래 마지막 창 종료가 지키는 규칙(리뷰 2 회차).
+                if windows.isEmpty, quick?.window?.isVisible != true, protectedFilePanelSurface() == nil,
+                   now - (keepAliveZeroSince ?? now) >= 3 {
                     fputs("app: background downloads finished — terminating\n", stderr)
-                    windows.insert(held, at: 0)
-                    keepAliveSurface = nil
+                    windows.insert(contentsOf: keepAliveSurfaces, at: 0)
+                    keepAliveSurfaces.removeAll()
                     bypassQuitConfirm = true
                     tickTimer?.invalidate()
                     tickTimer = nil
@@ -7348,7 +7354,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             } else {
                 if quickStatus != Self.statusSessionEnded { exitCode = 1 }
                 if tearDownQuickTerminalIfUnprotected(persistentTickFault: true) {
-                    if windows.isEmpty && !blockGlobalTerminationForProtectedFilePanels() {
+                    // W10e: 받는 중이라 숨겨 쥔 창이 있으면 여기서 끝내지 않는다 — 위의 쥔 창 처리가 다 받은 뒤 끝낸다(리뷰 2 회차).
+                    if windows.isEmpty && keepAliveSurfaces.isEmpty && !blockGlobalTerminationForProtectedFilePanels() {
                         bypassQuitConfirm = true
                         tickTimer?.invalidate()
                         tickTimer = nil
@@ -10068,14 +10075,20 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 그때 그 경로에 무언가 있었는지(있었으면 저장 창이 「바꿀까요?」를 물어 사용자가 바꾸기를 골랐다), 취소, 치움(종료·창 닫힘 —
     // 보류로 되돌린다).
     private var downloadAskPanels: [UInt64: NSSavePanel] = [:]
-    /// W10e: 마지막 셸이 끝났지만 받는 중인 다운로드 때문에 숨겨 둔 그 창(끝난 세션). `windows` 에서 빼 둔다 — 창 수·`primary`·
+    /// W10e: 마지막 셸이 끝났지만 받는 중인 다운로드 때문에 숨겨 둔 창들(끝난 세션). `windows` 에서 빼 둔다 — 창 수·`primary`·
     /// 정리 대상에 들지 않게(도는 중에 끝난 세션을 정리하면 session host 정산이 `proof_loss` 로 앱을 끝냈다 — 실측, 리뷰 1 회차: 새 창이
     /// 생겨 「마지막이 아닌 창」으로 정리되는 길도 같았다). 앱이 끝날 때 `applicationWillTerminate` 가 맨 앞에 되돌려 원래대로 정리한다.
-    private var keepAliveSurface: TerminalSurface?
+    private var keepAliveSurfaces: [TerminalSurface] = []
     /// 남아 있는 동안 App Nap 을 막는다(백그라운드 앱의 Timer 가 늦어지면 sidecar 펌프가 밀려 Chromium 이 쓰기를 기다리며 멈춘다).
     private var keepAliveActivity: NSObjectProtocol?
     /// 남겨 둘 수가 0 이 된 때 — 잠깐의 중단(Chromium 이 스스로 다시 받는다)에 곧바로 끝내지 않게 3 초 기다린다.
     private var keepAliveZeroSince: TimeInterval?
+
+    private func beginKeepAliveActivity() {
+        if keepAliveActivity == nil {
+            keepAliveActivity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: "Chromium downloads after the last window closed")
+        }
+    }
 
     private func endKeepAliveActivity() {
         if let activity = keepAliveActivity { ProcessInfo.processInfo.endActivity(activity) }

@@ -60,6 +60,7 @@ pub const InProcessTermBackend = struct {
         .finish_after_termination = finishAfterTermination,
         .remove = remove,
         .foreground_process_group = foregroundProcessGroup,
+        .session_leader_pid = sessionLeaderPid,
         .resource_samples = resourceSamples,
         .foreground_process_names = foregroundProcessNames,
         .process_cwd = processCwd,
@@ -233,6 +234,12 @@ pub const InProcessTermBackend = struct {
         const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
         const t = self.terminalSlot(handle) orelse return null;
         return t.live_pty.session.foregroundProcessGroup();
+    }
+
+    fn sessionLeaderPid(ctx: *anyopaque, handle: RuntimeHandle) ?i32 {
+        const self: *InProcessTermBackend = @ptrCast(@alignCast(ctx));
+        const t = self.terminalSlot(handle) orelse return null;
+        return std.math.cast(i32, t.live_pty.session.child_pid); // macOS pid_t·Windows u32 모두
     }
 
     fn resourceSamples(ctx: *anyopaque, handle: RuntimeHandle, out: []resource_usage.Sample) usize {

@@ -44,6 +44,9 @@ const cp = maru.session.control_plane;
 const cap = maru.session.control_capability;
 const co = maru.session.control_outbound; // 5f-0b-2b: per-connection outbound 프레임 큐(순수 5f-0b-1)
 const control_browser = maru.session.control_browser;
+const self_origin = maru.session.control_self_origin;
+const log = std.log.scoped(.control);
+const self_origin_macos = @import("control_self_origin_macos.zig");
 const cev = maru.session.control_events; // 5f-0b-3: browser 이벤트 채널 코어(EventBroker 구독 레지스트리·매칭·직렬화, §9.5.2)
 
 // auth 프레임 cap_nonce의 wire 길이(1a)와 capability nonce 길이(1e)가 어긋나면 fd payload↔auth 프레임이 안 맞는다.
@@ -63,8 +66,15 @@ pub const PendingRequest = struct {
     connection_fd: c.fd_t = -1,
     /// 요청 프레임 바이트(개행 제외). 연결 스레드 소유(cross_gpa), 메인은 read-only.
     request_bytes: []const u8,
-    /// caller가 주장한 self surface_id(auth.self 셀렉터, §8.4). 없으면 null(maru 밖 shell 등).
+    /// caller가 주장한 self surface_id(auth.self 셀렉터, §8.4). 없으면 null(maru 밖 shell 등). **1g**: 메인이 처리 전에
+    /// 서버가 찾은 pane 과 맞을 때만 남기고 아니면 null 로 바꾼다(`browser_pane` 참고) — 주장은 그 자체로 권한이 아니다.
     selector: ?u64,
+    /// **1g(§8.4)**: 연결 스레드가 auth 프레임 직후 찾은 출처 — 붙은 프로세스의 조상 사슬에서 제어 터미널을 가진 첫
+    /// 프로세스와 그 세션. 못 찾았으면 null(셀렉터 없는 연결과 같다). 메인이 요청마다 아직 foreground 인지 다시 본다.
+    peer_origin: ?self_origin.Origin = null,
+    /// **1g**: 메인이 `peer_origin` 의 세션으로 찾은 pane(surface id) — browser 확인 grant(§9.2 Model B)의 pane.
+    /// 확인 모달을 승인한 뒤의 재처리도 이 값을 쓴다. 메인 소유(처리 시작에 채운다).
+    browser_pane: ?u64 = null,
     /// 세션 누적 capability nonce **집합**(auth.self `cap_nonce` + 이후 `auth.grant` 프레임들, §9.5.6 ③ 5f-4a). 메인
     /// drain(dispatchAuthenticated)이 각 nonce를 CapabilityStore로 resolve해 **하나라도** 인가하면 통과시킨다(빈=cap 없음=
     /// metadata:self만). 연결 스레드의 **세션 cap 배열을 빌린 슬라이스**(serveConnection 스택 소유, 대기 동안 유효). 실 fd
@@ -1036,6 +1046,18 @@ pub const ControlServer = struct {
         }
     }
 
+    /// 1g: 붙은 프로세스의 출처(조상 사슬의 첫 제어 터미널 프로세스와 그 세션). 못 찾으면 null.
+    fn peerOrigin(fd: c.fd_t, accepted_us: u64) ?self_origin.Origin {
+        const pid = self_origin_macos.peerPid(fd) orelse return null;
+        return switch (self_origin.findOrigin(self_origin_macos.provider(), pid, c.getuid(), accepted_us)) {
+            .origin => |o| o,
+            .reject => |reason| {
+                log.debug("control: self-origin rejected pid={d} reason={s}", .{ pid, @tagName(reason) });
+                return null;
+            },
+        };
+    }
+
     /// 한 연결의 **reader**를 serve(5f-0b-2b-2 2-스레드): read 타임아웃 → auth 프레임 1회 → **요청 루프**(각 요청=frame
     /// 읽기 → marshal → 메인 응답 대기 → **outbound에 push**, 순차). 5f-0b-2b-1 **지속 세션**(§9.5.1 D1): auth 1회 후
     /// 같은 연결로 다중 요청. 요청은 순차(현 요청 응답을 push한 뒤 다음 read) — 응답 소켓 write는 writer 스레드가 한다
@@ -1044,6 +1066,8 @@ pub const ControlServer = struct {
     fn serveConnection(self: *ControlServer, conn: *cs.Connection, connection_id: u64, outbound: *OutboundChannel) void {
         cs.setReadTimeoutMs(conn.fd, self.read_timeout_ms);
         cs.setWriteTimeoutMs(conn.fd, self.read_timeout_ms); // #2: 응답을 안 읽는 client에 writer write가 무한 블록하지 않게(read와 대칭).
+        // 1g: 연결을 받은 시각 — 이보다 늦게 시작한 peer 는 pid 를 물려받은 다른 프로세스다.
+        const accepted_us = self_origin_macos.nowUs();
         var framer: cp.Framer = .{};
         defer framer.deinit(self.cross_gpa);
 
@@ -1051,6 +1075,9 @@ pub const ControlServer = struct {
         // AuthFrame은 값 타입(selector·cap_nonce 복사본)이라 framer 슬라이스 무효화와 무관하게 세션 내내 유효하다(auth 1회).
         const auth_line = self.readFrame(conn, &framer, outbound) orelse return;
         const auth = cp.parseAuthFrame(self.cross_gpa, auth_line);
+        // 1g: auth 프레임을 읽은 **직후**에 peer 를 본다 — `LOCAL_PEERPID` 는 마지막으로 쓴 프로세스라 지금이 그 프레임을
+        // 쓴 프로세스다. 셀렉터 유무와 무관하게 찾는다(세션 유지 pane 에는 셀렉터가 없다). 코어·트리는 안 만진다(syscall 뿐).
+        const peer_origin = peerOrigin(conn.fd, accepted_us);
 
         // 5f-4a-2 **세션 cap 집합**(§9.5.6 ③): auth.self의 cap_nonce가 있으면 첫 원소. 이후 요청 루프서 `auth.grant` 프레임을
         // 만나면 여기에 누적한다(bounded max_session_caps — 초과는 조용히 무시). serveConnection 스택 소유라 세션 내내 유효 →
@@ -1083,7 +1110,7 @@ pub const ControlServer = struct {
             const req_copy = self.cross_gpa.dupe(u8, req_line) catch return;
             defer self.cross_gpa.free(req_copy); // done/cancelled/에러 모두 이 iteration 끝(대기 후)에 해제
 
-            var pending: PendingRequest = .{ .connection_id = connection_id, .connection_fd = conn.fd, .request_bytes = req_copy, .selector = auth.selector, .cap_nonces = session_caps[0..n_caps], .outbound = outbound, .io = self.io };
+            var pending: PendingRequest = .{ .connection_id = connection_id, .connection_fd = conn.fd, .request_bytes = req_copy, .selector = auth.selector, .peer_origin = peer_origin, .cap_nonces = session_caps[0..n_caps], .outbound = outbound, .io = self.io };
             self.queue.push(&pending) catch return; // QueueClosed(종료) → abandon(req_copy는 defer가 해제)
 
             switch (pending.waitResolved()) {

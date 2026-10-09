@@ -370,6 +370,11 @@ pub const VTable = struct {
     /// 포그라운드 process group id(agent observer용). runtime이 없거나 PTY가 없으면 null. 관통 관측이지 제어가 아니다.
     foreground_process_group: *const fn (ctx: *anyopaque, handle: RuntimeHandle) ?i32,
 
+    /// 이 runtime 의 뿌리 프로세스(PTY 세션을 연 `login`) pid — 셸의 세션 번호와 같다. 컨트롤 플레인이 붙은 프로세스의
+    /// 세션으로 어느 pane 인지 찾는 데 쓴다(control-plane-security §8.4 「1g」). 모르면 null. null 이면 그 backend 의
+    /// pane 은 찾을 수 없다(셀렉터 없는 연결과 같다).
+    session_leader_pid: ?*const fn (ctx: *anyopaque, handle: RuntimeHandle) ?i32 = null,
+
     /// 이 runtime의 프로세스 트리(셸 + 자손)의 자원 표본을 `out`에 채우고 개수를 돌려준다.
     /// 상태바 리소스 항목이 쓴다(docs/status-bar.md §6). 고정 버퍼라 alloc 없음.
     ///
@@ -474,6 +479,12 @@ pub const TermRuntimeBackend = struct {
 
     pub fn foregroundProcessGroup(self: TermRuntimeBackend, handle: RuntimeHandle) ?i32 {
         return self.vtable.foreground_process_group(self.ctx, handle);
+    }
+
+    pub fn sessionLeaderPid(self: TermRuntimeBackend, handle: RuntimeHandle) ?i32 {
+        const f = self.vtable.session_leader_pid orelse return null;
+        const pid = f(self.ctx, handle) orelse return null;
+        return if (pid > 1) pid else null;
     }
 
     pub fn foregroundProcessNames(self: TermRuntimeBackend, handle: RuntimeHandle, out: []pty.types.ForegroundProcessName) usize {

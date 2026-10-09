@@ -1,6 +1,6 @@
 #!/bin/sh
-# 컨트롤 플레인 1g(control-plane-security §8.4) 실측 — 서버가 붙은 프로세스의 출처(조상 사슬에서 제어 터미널을 가진 첫
-# 프로세스 → 그 세션 → pane)를 스스로 찾는지, 그 pane 으로만 browser 확인 grant 를 묻는지 본다. 스모크 모드는 셸을 고정
+# 컨트롤 플레인 1g(control-plane-security §8.4) 실측 — 서버가 붙은 프로세스의 출처(조상 사슬에서 자기 터미널의 foreground
+# 그룹에 속한 첫 조상 → 그 세션 → pane)를 스스로 찾는지, 그 pane 으로만 browser 확인 grant 를 묻는지 본다. 스모크 모드는 셸을 고정
 # 시험 셸로 바꾸므로 **일반 모드**로 띄우고(셸 = 이 대본이 쓴 pane 대본), 확인 모달은 `MARU_TEST_GRANT_DECISION=approve`
 # 로 자동 승인한다. 두 모드를 본다: 세션 유지(기본 — pane 에 `MARU_PANE_ID` 가 없다)와 세션 유지 끔(in-process — 있다).
 #
@@ -105,6 +105,8 @@ run_mode() { # $1=이름 $2=session.keep-alive-after-quit
     pkill -KILL -f "$root/session-host-$mode" 2>/dev/null || true
     # 허용 = 종료 코드 0 이고 오류 응답이 없다(CLI 는 unauthorized 응답에도 0 으로 끝난다 — 출력으로 가른다).
     pass() { grep -q '^rc=0$' "$out/$1" && ! grep -q 'error:' "$out/$1"; }
+    # 거절 = 서버의 unauthorized 응답(연결 실패·시간 초과 같은 다른 실패를 거절로 세지 않는다).
+    refused() { grep -q 'Unauthorized' "$out/$1"; }
     pass fg || fail "$mode: the pane's own shell was refused ($(tr '\n' ' ' < "$out/fg"))"
     echo "PASS $mode: the pane's own shell got the grant and navigated"
     pass setsid || fail "$mode: a setsid child (agent tool shape) was refused ($(tr '\n' ' ' < "$out/setsid"))"
@@ -113,9 +115,9 @@ run_mode() { # $1=이름 $2=session.keep-alive-after-quit
     echo "PASS $mode: a child in a new process group was traced to its foreground parent"
     pass bg-idle || fail "$mode: a background job while the shell was idle was refused ($(tr '\n' ' ' < "$out/bg-idle"))"
     echo "PASS $mode: a background job while the shell was idle was allowed"
-    pass bg && fail "$mode: a background job while another job was in the foreground was allowed ($(tr '\n' ' ' < "$out/bg"))"
+    refused bg || fail "$mode: a background job while another job was in the foreground was not refused by the server ($(tr '\n' ' ' < "$out/bg"))"
     echo "PASS $mode: a background job while another job was in the foreground was refused"
-    pass outside && fail "$mode: a process outside the pane that named pane $pane_id was allowed ($(tr '\n' ' ' < "$out/outside"))"
+    refused outside || fail "$mode: a process outside the pane that named pane $pane_id was not refused by the server ($(tr '\n' ' ' < "$out/outside"))"
     echo "PASS $mode: naming pane $pane_id from outside was refused"
 }
 

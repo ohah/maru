@@ -7,7 +7,7 @@
 //! 시각(연결을 받은 뒤에 시작했으면 거절)으로 가른다.
 //!
 //! **pane 의 뿌리(`/usr/bin/login`)는 root 소유라 `proc_pidinfo` 로 못 읽는다**(EPERM — 같은 사용자만). 그래서 판정은
-//! 사용자 소유인 첫 제어 터미널 프로세스에서 멈추고, pane 과는 `getsid`(권한 검사 없음)로 잇는다.
+//! 사용자 소유인 foreground 조상에서 멈추고(그 위 login 에 닿으면 거절), pane 과는 `getsid`(권한 검사 없음)로 잇는다.
 const std = @import("std");
 const c = std.c;
 const maru = @import("maru");

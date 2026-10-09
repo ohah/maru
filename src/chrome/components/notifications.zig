@@ -445,8 +445,8 @@ pub fn scrollView(state: *const State, items: []const Item, p: props.ChromeProps
 /// 강조 배경·구분선(view)과 클릭·호버(`hitTest`)가 모두 이것을 부른다 — 스크롤은 픽셀인데 글자는 행에 내림으로 붙으므로,
 /// 셋이 각자 픽셀로 풀면 «보이는 줄»과 어긋난다(강조가 헤더를 칠하고, 선이 제목줄을 가로지르고, 클릭이 한 줄 위 카드를
 /// 잡았다 — 2026-10-06). 스크롤이 없으면 offset 0·뷰포트 = 카드 높이 합이라 모든 줄이 제자리에 놓인다.
-/// 전제: 오버레이 격자 원점 = 패널 `rect.y` — 패널이 프레임의 유일한 오버레이일 때 참이다(`notificationPanelDrawn`·
-/// 패널을 열 때 `dismissMessageOverlays`). 다른 상자가 같은 raster 에 섞여 원점이 위로 가면 이 행이 글자 행과 갈린다.
+/// 전제: 오버레이 격자 원점 = 패널 `rect.y`. 이 패널은 `.clip` 을 내므로 lowering 이 늘 자기 묶음(자기 격자)으로 두어 늘 참이다
+/// (2026-10-10 — docs/chrome-strategy.md §5.3). 그 전에는 다른 상자가 같은 raster 에 섞여 원점이 위로 가면 이 행이 글자 행과 갈렸다.
 fn placedRow(l: Layout, line_idx: usize) ?u32 {
     const offset: i64 = @intCast(l.first * l.card_h + l.origin_shift_px);
     const ch: i64 = l.ch;

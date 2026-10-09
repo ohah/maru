@@ -124,11 +124,7 @@ fn appendOverlayProductLowering(
     layer: u32,
 ) !void {
     var raster = try metal_lowering.lower(allocator, &.{draws}, tk, cw, ch, false);
-    defer {
-        raster.cells.deinit(allocator);
-        raster.gpu_quads.deinit(allocator);
-        raster.gpu_shadows.deinit(allocator);
-    }
+    defer raster.deinit(allocator);
     const dy: f32 = @floatFromInt(origin_y_px);
     for (raster.gpu_quads.items) |q| {
         var moved = q;

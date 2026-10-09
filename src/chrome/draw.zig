@@ -91,11 +91,11 @@ pub const Op = union(enum) {
     text: Text,
     quad: Quad,
     swatch: Swatch,
-    /// 이 오버레이의 셀을 px 사각(backing, 좌상단)으로 클리핑한다 — lowering이 OverlayRaster.clip_rect로 모으면
-    /// replace가 그 셀들에 `clip_index`를 달고 renderer가 해당 draw run에 setScissorRect로 적용한다(ABI v169).
-    /// 한 오버레이에 최대 1개(여러 개면 마지막이 이김). 그리지 않고 bounding-box 에도 안 들어간다 — 다만 모달 셀
-    /// 격자 lowering(`metal_lowering.lower`)은 이 op 이 있으면 bbox 행 수를 **올림**해 바닥에 걸친 행을 격자에 넣는다
-    /// (넘친 몫은 이 clip 이 자른다).
+    /// 이 오버레이의 셀을 px 사각(backing, 좌상단)으로 클리핑한다 — lowering 은 `.clip` 을 내는 draw 를 **늘 자기 묶음**으로 두고 그
+    /// 묶음의 `clip_rect` 로 모으므로(`metal_lowering.lower` — docs/chrome-strategy.md §5.3) clip 은 그 draw 의 셀에만 걸린다. replace가
+    /// 그 셀들에 `clip_index`를 달고 renderer가 해당 draw run에 setScissorRect로 적용한다(ABI v169). 한 draw 에 최대 1개(여러 개면 마지막이
+    /// 이김). 그리지 않고 bounding-box 에도 안 들어간다 — 다만 모달 셀 격자 lowering 은 이 op 이 있으면 bbox 행 수를 **올림**해 바닥에 걸친
+    /// 행을 격자에 넣는다(넘친 몫은 이 clip 이 자른다).
     clip: Rect,
 
     /// 사각 영역 채우기(밴드·탭 배경·hover·drop-zone). alpha<0xFF면 반투명 합성.

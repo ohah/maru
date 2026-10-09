@@ -90,7 +90,7 @@ flowchart TD
 - macOS Metal Lab smoke는 drawable readback PPM, PR 첨부용 PNG, machine-readable
   summary를 `zig-out/maru-macos-chrome-lab/<scenario>.{ppm,png,json}`에 남긴다.
   **오버레이(`.modal` 층)는 제품 lowering 결과 그대로 그린다**(2026-10-07부터). 제품은 오버레이를
-  `metal_lowering.lower`로 셀 격자 + GPU quad로 내리고, `.m`이 over quad(layer 1·3, 배열 순서) →
+  `metal_lowering.lower`로 셀 격자(칸 위상이 다른 오버레이는 격자 따로 — `chrome-strategy.md` §5.3) + GPU quad로 내리고, `.m`이 over quad(layer 1·3, 배열 순서) →
   모달 셀(셀마다 배경 → 글자) 순서로 합성한다. 스모크의 `appendOverlayProductLowering`은 그 quad를 같은
   순서로 싣고 셀 배경(`.default`가 아닌 것)을 같은 사각형·같은 색 quad로 옮긴다 — Lab의 quad는 전부
   텍스트 아래 버킷이고 글자는 rich 경로가 맨 위에 그리므로 **배열 순서가 곧 제품의 painter 순서**다.

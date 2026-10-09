@@ -6020,7 +6020,7 @@ pub const AppSession = struct {
     command_key_equivalents: std.ArrayList([:0]u8) = .empty,
     // 커맨드 팝업(Cmd+Shift+P)의 필터된 카탈로그 인덱스(표시 순서). UI 상태(open/query/preedit/selected)는 chrome
     // 컴포넌트(chrome_host.palette)가 든다 — C1b에서 chrome으로 이주했다(find와 같은 경로: placeText·IME·caret 공유).
-    // command_palette.filter가 쿼리로 채우고(recomputePalette), buildChromeOverlayFrame이 이 인덱스로 Row를 만들어
+    // command_palette.filter가 쿼리로 채우고(recomputePalette), buildChromeOverlayPrep이 이 인덱스로 Row를 만들어
     // 컴포넌트 view에 주입한다(카탈로그는 platform 소유라 neutral chrome에 못 넘긴다 — 필터된 행만 넘긴다).
     palette_filtered: std.ArrayList(usize) = .empty,
     // 스크롤백 Find(⌘F)의 매치 리스트(절대 좌표). UI 상태(검색어/현재/카운트)는 chrome_host.find가 들고, 매치
@@ -6582,7 +6582,7 @@ pub const AppSession = struct {
     // 호버 카드를 판정할 때, 이 rect로 coarse bounding-box 게이트를 먼저 본다 — 포인터가 패널 밖이면(대부분의 이동:
     // 터미널 위·idle jitter) 무거운 buildNotificationItems(히스토리 walk + per-item 라이브 surface 스캔 + 시간 포맷)를
     // 건너뛰고 바로 호버 해제한다. content rect는 hitTest의 bounds와 같은 출처라 "밖이면 hitTest=null"과 동치다.
-    // buildChromeOverlayFrame이 매 프레임 갱신하고, openNotificationPanel이 null로 리셋한다(재오픈 시 stale 게이트 방지).
+    // buildChromeOverlayPrep이 매 프레임 갱신하고, openNotificationPanel이 null로 리셋한다(재오픈 시 stale 게이트 방지).
     notif_panel_rect: ?chrome.draw.Rect = null,
     // 세팅 검색줄 caret의 셀 rect(검색 중일 때만, 아니면 null) — imeCursorRect가 IME 후보창을 검색줄 옆에 띄우는 데
     // 쓴다. buildChromeOverlayPrep이 세팅 오버레이를 그릴 때(sections/rows/props가 이미 있는 자리) settings.searchCaretRect로
@@ -10554,9 +10554,9 @@ pub const AppSession = struct {
         self.branch_menu_open = false;
         settings_ops.clearFileContentMenu(self);
         // **팝업 rename 도 내린다**(그 함수 doc) — 심볼·이름 없는 문서 저장 상자는 같은 오버레이
-        // 그리드에 그려져 겹친다. 인라인 rename 은 겹치지 않으므로 그대로 둔다.
+        // 층에 겹쳐 그려지고 두 모달이 키를 다툰다. 인라인 rename 은 겹치지 않으므로 그대로 둔다.
         settings_ops.closePopupRename(self);
-        // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayFrame이 둘을 한 오버레이
+        // 세팅 모달도 닫는다 — confirm/notice가 settings와 동시에 열리면 buildChromeOverlayPrep이 둘을 한 오버레이
         // 그리드(union bbox)에 painter-order로 raster해 텍스트가 겹쳐 보였다(z-order 겹침). settings를 단일-오버레이
         // 불변식에 포함해 한 번에 하나만 뜨게 한다. toggleSettings는 이 경로를 거치지 않아 열기엔 영향 없음.
         self.chrome_host.settings.hide();
@@ -21483,8 +21483,8 @@ pub const AppSession = struct {
                 // 넘치지 않게 하려는 것이 이 이관의 목적이다(docs/file-explorer.md §3.5).
                 sidebar_ops.collectSidebarSearchText(self, &collected, pane_ops.paneFrameBuilder(self));
             }
-            // 최상위 모달 오버레이 frame(열렸을 때만, macOS). Notice·Find·Palette는 배타적이라 하나만 그린다(replace의
-            // overlay_frame). 셋 다 chrome 컴포넌트 경로(buildChromeOverlayFrame → collectDraws/collectPaletteDraws →
+            // 최상위 모달 오버레이 frame들(열렸을 때만, macOS). 열린 오버레이를 모두 모아 칸 위상 묶음마다 한 장씩 그린다(replace의
+            // overlay_frames — 대부분 한 장). 모두 chrome 컴포넌트 경로(buildChromeOverlayPrep → collectDraws/collectPaletteDraws →
             // 일반 rasterizer placeText)로 lower한다 — palette도 C1b에서 이주해 같은 EAW-폭 경로를 탄다. 실패는 무시
             // (오버레이 없이 정상). PaneFrame.frame을 deinit해야 하므로 defer로 정리한다.
             self.dropQuadsByLayer(1); // C4b 모달: 이전 프레임 모달 quad(layer1)를 비운다 — 닫혀도 잔존 안 함(아래서 재채움).
@@ -21511,15 +21511,24 @@ pub const AppSession = struct {
             sidebar_ops.appendSidebarScrollbar(self); // 사이드바 우측 thumb(워크스페이스 카드가 뷰포트 넘칠 때만) — 단일 트랙 fade
             self.gpu_shadows.clearRetainingCapacity(); // C4b 모달: 그림자도 per-frame — 매 프레임 비우고 lowering이 재채움.
             self.gpu_glyphs.clearRetainingCapacity(); // B1: final pixel text도 completed frame 단위로만 보관한다.
-            var overlay_frame: ?metal_frame.PaneFrame = null;
-            defer if (overlay_frame) |*pf| pf.frame.deinit(self.allocator);
+            // 오버레이는 칸 위상이 다른 묶음마다 한 장이다(`metal_lowering.lower`) — 대부분 한 장.
+            var overlay_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+            defer {
+                for (overlay_frames.items) |*pf| pf.frame.deinit(self.allocator);
+                overlay_frames.deinit(self.allocator);
+            }
             if (builtin.os.tag == .macos) {
                 // 단축키 힌트 HUD(key_hints.visible)는 패시브라 anyOverlayOpen이 아니다(커서 blink·keyEquivalent 양보 불변) —
-                // 빌드 게이트에만 더해 오버레이 frame을 그린다. 모달이 같이 열리면 collectKeyHintsDraws가 내부에서 억제해 단일 오버레이 유지.
+                // 빌드 게이트에만 더해 오버레이 frame을 그린다. 모달이 같이 열리면 collectKeyHintsDraws가 내부에서 억제한다(모달에 타이핑 중이면 힌트는 무의미).
                 if (self.overlayFrameNeeded()) {
-                    // 통합 수집: prep만 만들고 collect(.overlay) — placeAndDistribute가 overlay_frame(PaneFrame)을 조립한다.
+                    // 통합 수집: prep만 만들고 collect(.overlay) — placeAndDistribute가 overlay_frames(PaneFrame)를 조립한다.
+                    // 묶음마다 한 조각 — painter 순서대로 모은다(`collectShaped` 가 dl 소유권을 가져간다).
                     if (self.buildChromeOverlayPrep()) |maybe| {
-                        if (maybe) |prep| self.collectShaped(&collected, prep.dl, prep.builder, .{ .overlay = prep.placement });
+                        if (maybe) |prep| {
+                            self.collectShaped(&collected, prep.dl, prep.builder, .{ .overlay = prep.placement });
+                            for (prep.extra) |part| self.collectShaped(&collected, part.dl, prep.builder, .{ .overlay = part.placement });
+                            self.allocator.free(prep.extra);
+                        }
                     } else |_| {}
                     // SV5b: 팔레트 결과 목록 우측 막대. **오버레이 lowering 뒤에** 낸다 — 팔레트 배경도
                     // 같은 over 버킷이고 그 안에서는 배열 순서가 painter 순서라, 앞에 내면 배경이 막대를
@@ -22247,7 +22256,7 @@ pub const AppSession = struct {
                 // 배치+분배한다 — cross-pane 정합(한 atlas 세대). 활성은 active_result로 받아 아래에서 pane_frames 맨 뒤(커서
                 // suffix·floating 맨 위 직전)에 넣는다.
                 if (ft_on) ft_shape = std.Io.Clock.awake.now(self.io).nanoseconds; // shape(CoreText 수집) 끝 = place 시작
-                self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &sticky_pf, &active_result);
+                self.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frames, &floating_pf, &sticky_pf, &active_result);
                 if (ft_on) ft_place = std.Io.Clock.awake.now(self.io).nanoseconds; // place(atlas 배치+분배) 끝 = assemble 시작
             }
             // 활성 terminal frame 성공 여부를 확정한다. macOS에서 surface가 있는데 active_result==null이면 활성
@@ -22446,7 +22455,7 @@ pub const AppSession = struct {
                 agent_activity_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (ft_on) ft_rep = std.Io.Clock.awake.now(self.io).nanoseconds; // 조립 끝 = replace(투영) 시작
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frame, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frames.items, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.glyph_placement.commit(); // 이번 배치의 업로드가 metal_buffer 로 넘어갔다
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
@@ -22539,8 +22548,11 @@ pub const AppSession = struct {
                     defer if (sidebar_frame) |*sf| sf.deinit(self.allocator);
                     var throwaway_header: ?renderer.RenderFrame = null;
                     defer if (throwaway_header) |*hf| hf.deinit(self.allocator);
-                    var throwaway_overlay: ?metal_frame.PaneFrame = null;
-                    defer if (throwaway_overlay) |*pf| pf.frame.deinit(self.allocator);
+                    var throwaway_overlay: std.ArrayList(metal_frame.PaneFrame) = .empty;
+                    defer {
+                        for (throwaway_overlay.items) |*pf| pf.frame.deinit(self.allocator);
+                        throwaway_overlay.deinit(self.allocator);
+                    }
                     var throwaway_floating: ?metal_frame.PaneFrame = null;
                     defer if (throwaway_floating) |*pf| pf.frame.deinit(self.allocator);
                     var throwaway_sticky: ?metal_frame.PaneFrame = null;
@@ -22644,8 +22656,11 @@ pub const AppSession = struct {
         defer if (sidebar_frame) |*frame| frame.deinit(self.allocator);
         var header: ?renderer.RenderFrame = null;
         defer if (header) |*frame| frame.deinit(self.allocator);
-        var overlay: ?metal_frame.PaneFrame = null;
-        defer if (overlay) |*frame| frame.frame.deinit(self.allocator);
+        var overlay: std.ArrayList(metal_frame.PaneFrame) = .empty;
+        defer {
+            for (overlay.items) |*frame| frame.frame.deinit(self.allocator);
+            overlay.deinit(self.allocator);
+        }
         var floating: ?metal_frame.PaneFrame = null;
         defer if (floating) |*frame| frame.frame.deinit(self.allocator);
         var sticky: ?metal_frame.PaneFrame = null;
@@ -22682,7 +22697,7 @@ pub const AppSession = struct {
             colors,
             &.{},
             &.{},
-            null,
+            &.{},
             null,
             &.{},
             &.{},
@@ -23336,11 +23351,25 @@ pub const AppSession = struct {
     };
 
     /// chrome 오버레이의 shape 전 준비 — DrawList + 배치(origin/colors/cursor/clip) + builder(오버레이는 호출자
-    /// appearance/cell_w/h를 쓴다). 단발(buildChromeOverlayFrame)·통합(collect)이 공유한다.
+    /// appearance/cell_w/h를 쓴다). 단발(buildChromeOverlayPrep)·통합(collect)이 공유한다.
     const OverlayPrep = struct {
         dl: renderer.DrawList,
         placement: PanePlacement,
         builder: coretext_frame_builder.CoreTextFrameBuilder,
+        /// 칸 위상이 다른 뒤 오버레이 묶음(painter 순서) — `metal_lowering.lower` 주석. 대부분의 프레임은 비어 있다.
+        /// 각 조각은 자기 원점의 격자라, 컴포넌트가 낸 픽셀 자리에 글자가 선다. 같은 `builder` 로 셰이핑한다.
+        extra: []OverlayPrepPart = &.{},
+
+        pub fn deinit(self: *OverlayPrep, allocator: std.mem.Allocator) void {
+            self.dl.deinit(allocator);
+            for (self.extra) |*part| part.dl.deinit(allocator);
+            allocator.free(self.extra);
+        }
+    };
+
+    const OverlayPrepPart = struct {
+        dl: renderer.DrawList,
+        placement: PanePlacement,
     };
 
     /// DrawList(소유권 이전)를 shapeOnly로 만들어 collected에 추가한다. shapeOnly 실패면 dl은 shapeOnly가 정리하고
@@ -23493,7 +23522,7 @@ pub const AppSession = struct {
         built_frames: *std.ArrayList(renderer.RenderFrame),
         sidebar_frame: *?renderer.RenderFrame,
         sidebar_header_frame: *?renderer.RenderFrame,
-        overlay_frame: *?metal_frame.PaneFrame,
+        overlay_frames: *std.ArrayList(metal_frame.PaneFrame),
         floating_pf: *?metal_frame.PaneFrame,
         sticky_pf: *?metal_frame.PaneFrame,
         active_out: *?ActiveResult,
@@ -23582,7 +23611,13 @@ pub const AppSession = struct {
             switch (c.dest) {
                 .sidebar => sidebar_frame.* = rf,
                 .sidebar_header => sidebar_header_frame.* = rf,
-                .overlay => |p| overlay_frame.* = .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect },
+                // 오버레이 조각(칸 위상 묶음)마다 한 장 — 실패하면 그 조각만 빠진다. pane 의 셰이핑·배치 실패(`collectShaped`·`finishPane`)와
+                // 같은 규율이다(OOM 한 프레임 — 그 조각의 업로드는 버려지고 다음 dirty 프레임이 다시 그린다).
+                .overlay => |p| overlay_frames.append(self.allocator, .{ .frame = rf, .origin_x = p.origin_x, .origin_y = p.origin_y, .colors = p.colors, .clip_rect = p.clip_rect }) catch {
+                    var lost = rf;
+                    lost.deinit(self.allocator);
+                    self.glyph_placement.taint(); // 이 조각의 업로드는 버려진다
+                },
                 .pane, .dock_toggle, .status_bar, .sidebar_search => |p| {
                     if (built_frames.append(self.allocator, rf)) |_| {
                         pane_frames.append(self.allocator, .{
@@ -23753,7 +23788,7 @@ pub const AppSession = struct {
             .overlays = overlays,
         };
         overlays_owned = false; // 소유권이 draw_list로 — 이후 실패는 buildFromDrawList가 draw_list.deinit로 정리
-        // appearance·cell_w/h를 호출자가 준다 — 오버레이는 터미널과 같은 셀·폰트(1×)를 쓴다(buildChromeOverlayFrame가
+        // appearance·cell_w/h를 호출자가 준다 — 오버레이는 터미널과 같은 셀·폰트(1×)를 쓴다(buildChromeOverlayPrep가
         // self.cell_width_px·self.appearance를 넘김). 글리프 픽셀(font.size×scale)과 atlas slot(cell)이 같은 메트릭에서
         // 나와 정확히 맞는다 — 1.3× 확대 시절의 스케일 불일치(글자 약간 잘림)가 없다.
         const frame_builder = coretext_frame_builder.CoreTextFrameBuilder{
@@ -23775,7 +23810,7 @@ pub const AppSession = struct {
             .block = self.appearance.cursor.color orelse self.appearance.theme.cursor,
             .text = self.appearance.cursor.text orelse self.appearance.theme.sidebar_background,
         } else null;
-        // DrawList 소유권을 prep로 넘긴다 — 단발(buildChromeOverlayFrame)·통합(collect)이 buildFromDrawList/shapeOnly로 소비.
+        // DrawList 소유권을 prep로 넘긴다 — 단발(buildChromeOverlayPrep)·통합(collect)이 buildFromDrawList/shapeOnly로 소비.
         return .{
             .dl = draw_list,
             .placement = .{
@@ -23789,7 +23824,7 @@ pub const AppSession = struct {
     }
 
     // 커맨드 팝업·스크롤백 Find 오버레이는 chrome 컴포넌트로 이주했다(palette=C1b, find=C1a). 각 컴포넌트 view가
-    // ChromeDraw를 내고 buildChromeOverlayFrame이 일반 rasterizer(placeText, EAW-폭)로 lower한다 — buildPaletteFrame/
+    // ChromeDraw를 내고 buildChromeOverlayPrep이 일반 rasterizer(placeText, EAW-폭)로 lower한다 — buildPaletteFrame/
     // buildFindFrame은 제거. 팝업은 IME 조합 표시·한글 2칸 폭을 find와 같은 경로로 공짜로 얻는다. 오버레이는 터미널과
     // 같은 셀 크기(1×)로 그린다 — 1.3× 확대는 사용자 요청으로 제거(스케일 불일치로 글자가 약간 잘리던 문제도 함께 사라짐).
 
@@ -23842,7 +23877,8 @@ pub const AppSession = struct {
     }
 
     /// 일반 오버레이 lowering: chrome 컴포넌트가 낸 ChromeDraw ops(fill/border/text)를 셀 그리드로 rasterize한다
-    /// (painter order). bounding box = 모든 fill/border rect 합집합(패널 외곽), origin = 그 좌상단(backing px 절대).
+    /// (painter order). 격자는 **연속한, 칸 위상이 같은 draw 묶음마다** 하나다 — bounding box = 그 묶음의 fill/border/quad rect
+    /// 합집합(패널 외곽 — 사각형이 없는 draw 는 글자 칸), origin = 그 좌상단(backing px 절대). 대부분의 프레임은 묶음 하나(docs/chrome-strategy.md §5.3).
     /// 각 셀 bg = 그 셀을 덮는 마지막 fill의 role 색(+켜진 변이면 border 색), codepoint·fg = text op이 origin부터
     /// 놓은 글리프. notice(박스 1개)·find(1행 다중 텍스트)·palette(N행 리스트)가 같은 lowering을 공유한다 —
     /// buildNoticeFrame의 "첫 fill+text" 특수형을 일반화(C1). rule op은 컴포넌트가 아직 안 내므로 무시한다.
@@ -23946,17 +23982,19 @@ pub const AppSession = struct {
 
     /// 이 프레임에 알림 패널을 **그리는가**. 열려 있어도 notice·confirm 이 떠 있으면 안 그린다 — 상태는 그대로 두므로
     /// 메시지가 닫히면 패널이 다시 보인다(공존은 의도다: 판정자 「notice 토스트와 알림 패널 공존 …」, 입력은 메시지를
-    /// 먼저 닫는다). 오버레이 raster 는 bounding box 하나라 둘을 함께 내면 겹쳐 그려진다 — 먼저 모인 메시지 글자가 패널
-    /// 위로 비치고, 넘친 패널의 프레임 clip(셀 scissor)이 그리드 **전체**에 걸려 메시지 상자 안 글자가 잘리며, 먼저 온 메시지가
-    /// 모달 배경 자리를 가져가 패널이 패딩·그림자 없는 위젯 quad 로 내려갔다(2026-10-06 사용자 지적, ML3b 전체 창 캡처).
+    /// 먼저 닫는다). 둘을 함께 내면 겹쳐 그려졌다 — 먼저 모인 메시지 글자가 패널 위로 비치고, 넘친 패널의 프레임 clip(셀
+    /// scissor)이 그리드 **전체**에 걸려 메시지 상자 안 글자가 잘리며, 먼저 온 메시지가 모달 배경 자리를 가져가 패널이 패딩·그림자
+    /// 없는 위젯 quad 로 내려갔다(2026-10-06 사용자 지적, ML3b 전체 창 캡처). 셋 다 그 뒤 풀렸다 — 첫째는 뒤 패널이 앞 글자를 가리는
+    /// #4228, 셋째는 오버레이마다 첫 둥근 quad 가 패널(2026-10-07), 둘째는 `.clip` 을 내는 draw 가 늘 자기 묶음이라 clip 이 그 draw 의
+    /// 셀에만 걸린다(2026-10-10 — docs/chrome-strategy.md §5.3). 규율은 **정책**으로 남긴다 — 메시지가 입력을 먼저 받고, 닫히면 패널이 다시 보인다.
     /// 편집기 선택 헬퍼(아래 `draws.items.len == 0` 게이트)와 같은 규율이다. 막대·말풍선 caret 도 이 값을 따른다.
     fn notificationPanelDrawn(self: *const AppSession) bool {
         return self.chrome_host.notifications.open and !self.chrome_host.notice.open and !self.chrome_host.confirm.open;
     }
 
     /// chrome 오버레이 frame(최상위). chrome_host에서 열린 컴포넌트(Notice·Find·Palette)의 ChromeDraw를 수집해(실제
-    /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이는 라우팅상 배타적
-    /// 이라 최대 1개만 ops를 낸다(rasterizer가 단일 오버레이 가정). palette는 카탈로그 행을 주입해야 해 collectDraws가
+    /// view 계약을 탄다) 일반 rasterizer로 lower한다(fill·border·text, EAW-폭 placeText). 오버레이 여럿이 한 프레임에 함께
+    /// 모일 수 있다(찾기 막대 + 우클릭 메뉴 등) — 칸 위상이 다른 것은 격자 따로라 `extra` 조각으로 나온다. palette는 카탈로그 행을 주입해야 해 collectDraws가
     /// 아니라 collectPaletteDraws로 따로 모은다. 닫혀 있거나 메트릭/박스 미상이면 에러(호출자가 무시). macOS 전용.
     /// **`pub` 인 이유는 판정자다** — 편집기 선택 헬퍼(NSH)가 이 프레임에 실리는지는 다른 파일의
     /// 픽스처(`app_session/editor/mod.zig`)에서만 잴 수 있고, 못 재면 "상자를 영영 안 그린다" 는 변이가
@@ -24049,16 +24087,17 @@ pub const AppSession = struct {
             // (배경과 같은 over 버킷, SV5b 주석) 여기서 값만 기억하고 아래에서 낸다.
             self.settings_scroll_view = chrome.components.settings.scrollView(&self.chrome_host.settings, labels, fields, props, &tokens);
         }
-        // 편집기 선택 헬퍼(NSH — 비모달). **다른 오버레이가 낼 것이 있으면 안 낸다** — 이 프레임의
-        // raster 는 bounding box 하나라(단일 오버레이 가정) 둘을 함께 내면 두 상자 **사이의 빈 칸까지**
-        // 오버레이 배경으로 칠해진다. 그리지 못하는 프레임에는 상자가 "없는" 것이 맞지만 상태까지
+        // 편집기 선택 헬퍼(NSH — 비모달). **다른 오버레이가 낼 것이 있으면 안 낸다** — 메시지·메뉴·입력 상자가 먼저다(정책).
+        // 처음 근거는 「raster 가 bounding box 하나라 두 상자 사이 빈 칸까지 칠해진다」였지만 rich 경로에서는 패널 quad 가 빈 칸을
+        // 투명하게 하고, 칸 위상이 다르면 격자도 따로라(`metal_lowering.lower`, 2026-10-10) 그 근거는 더는 서지 않는다.
+        // 그리지 못하는 프레임에는 상자가 "없는" 것이 맞지만 상태까지
         // 지우지는 않는다 — 모달이 닫히면 고른 것이 그대로 있으므로 다시 떠야 한다.
         if (draws.items.len == 0 and editor_ops.refreshSendHelper(self)) {
             try self.chrome_host.collectSendHelperDraws(editor_ops.sendHelperItems(self), props, &tokens, arena, &draws);
         }
         // 호버 박스(tooling §8.2b — 비모달). 헬퍼와 같은 규율: 다른 오버레이가 낼 것이 있으면 안 내고, 프레임마다 `refresh` 가
         // 설 자리를 다시 묻는다(없으면 스스로 내려간다).
-        // 자동완성 팝업(§8.2g) — 프레임에 상자는 하나라 이것이 뜨면 시그니처·호버는 이 프레임에 안 그린다(상태는 남는다).
+        // 자동완성 팝업(§8.2g) — 편집기 헬퍼 상자는 프레임에 하나다(정책 — 아래 if-else). 이것이 뜨면 시그니처·호버는 이 프레임에 안 그린다(상태는 남는다).
         // **그렸는지를 남긴다**(2026-10-09) — 아래 셋은 다른 오버레이가 있으면 안 그려지는데 상태는 남고, 포인터 처리기
         // (`completion_client.mouseDown`·`hover_client.mouseDown`·각 `wheel`)는 `mouse()`·`scrollWheel` **맨 앞**에서 돈다. 그래서
         // 이름 상자·팔레트 아래 **보이지 않는** 완성 목록이 클릭을 받아 문서에 완성을 넣었다(재현: F2 상자 안·팔레트 안 클릭 →
@@ -24095,9 +24134,25 @@ pub const AppSession = struct {
         // 덮어 'bubble을 연다'. 벨 바로 아래(빈 버퍼 행)에서 위로 뾰족. 패널이 세로 clamp로 밀렸거나 벨이 가로 밖이면 생략.
         if (notificationPanelDrawn(self)) notification_ops.appendNotificationCaret(self, notif_items, props, &tokens);
         // finishOverlayPrep이 cells 소유권을 toOwnedSlice로 가져가기 **전에** 실패하면(예: overlays alloc OOM)
-        // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op).
+        // raster.cells가 미해제로 남는다 — 그 경로만 정리한다(성공/이전 후엔 cells가 비어 no-op). 뒤 묶음도 같다.
         errdefer raster.cells.deinit(self.allocator);
-        return try self.finishOverlayPrep(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor, raster.clip_rect);
+        errdefer raster.deinitExtraParts(self.allocator);
+        // 칸 위상이 다른 뒤 묶음 — 묶음마다 자기 원점의 DrawList 로 만든다(같은 셀 크기·같은 외관).
+        const extra = try self.allocator.alloc(OverlayPrepPart, raster.extra_parts.items.len);
+        var extra_made: usize = 0;
+        errdefer {
+            for (extra[0..extra_made]) |*part| part.dl.deinit(self.allocator);
+            self.allocator.free(extra);
+        }
+        for (raster.extra_parts.items) |*part| {
+            const pp = try self.finishOverlayPrep(&part.cells, part.cols, part.rows, part.origin_x, part.origin_y, appearance, cw, ch, part.cursor, part.clip_rect);
+            extra[extra_made] = .{ .dl = pp.dl, .placement = pp.placement };
+            extra_made += 1;
+        }
+        var prep = try self.finishOverlayPrep(&raster.cells, raster.cols, raster.rows, raster.origin_x, raster.origin_y, appearance, cw, ch, raster.cursor, raster.clip_rect);
+        prep.extra = extra;
+        raster.deinitExtraParts(self.allocator); // 셀은 위에서 각 DrawList 로 옮겨 갔다 — 목록만 놓는다
+        return prep;
     }
 
     /// gradient_kind=3(위 삼각형) GpuQuad 한 개(말풍선 caret 헬퍼). 좌상단 (x,y)·크기 (w,h) backing px,
@@ -47588,8 +47643,13 @@ fn testBuildSidebarTitleFrame(session: *AppSession) !renderer.RenderFrame {
     return pane_ops.paneFrameBuilder(session).buildFromDrawList(session.allocator, dl, &session.renderer_state);
 }
 
+/// 오버레이가 한 장(칸 위상 하나)인 장면 전용 — 위상이 갈린 장면이면 실패한다(뒤 조각을 조용히 버리지 않는다).
 fn testBuildChromeOverlayFrame(session: *AppSession) !metal_frame.PaneFrame {
-    const prep = (try session.buildChromeOverlayPrep()) orelse return error.NotOpen;
+    var prep = (try session.buildChromeOverlayPrep()) orelse return error.NotOpen;
+    if (prep.extra.len != 0) {
+        prep.deinit(session.allocator);
+        return error.OverlayHasSeveralParts;
+    }
     const f = try prep.builder.buildFromDrawList(session.allocator, prep.dl, &session.renderer_state);
     return .{ .frame = f, .origin_x = prep.placement.origin_x, .origin_y = prep.placement.origin_y, .colors = prep.placement.colors, .clip_rect = prep.placement.clip_rect };
 }
@@ -47635,8 +47695,11 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
     defer if (sidebar_frame) |*f| f.deinit(allocator);
     var sidebar_header_frame: ?renderer.RenderFrame = null;
     defer if (sidebar_header_frame) |*f| f.deinit(allocator);
-    var overlay_frame: ?metal_frame.PaneFrame = null;
-    defer if (overlay_frame) |*pf| pf.frame.deinit(allocator);
+    var overlay_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+    defer {
+        for (overlay_frames.items) |*pf| pf.frame.deinit(allocator);
+        overlay_frames.deinit(allocator);
+    }
     var floating_pf: ?metal_frame.PaneFrame = null; // built_frames 소유(view) — 따로 deinit 안 함
     var sticky_pf: ?metal_frame.PaneFrame = null; // built_frames 소유(view)
     var active_result: ?AppSession.ActiveResult = null; // built_frames 소유(view)
@@ -47661,7 +47724,7 @@ test "placeAndDistribute: 멀티 페인 collect를 dest별로 분배 + collected
     }
     try std.testing.expectEqual(@as(usize, 5), collected.items.len); // 5종 전부 shapeOnly 성공
 
-    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &sticky_pf, &active_result);
+    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frames, &floating_pf, &sticky_pf, &active_result);
 
     // dest 분배 정확성(리뷰 #4: wrong dest routing 방지).
     try std.testing.expect(sidebar_frame != null); // .sidebar → sidebar_frame(소유)
@@ -49505,7 +49568,7 @@ test "command catalog: 엔트리·바인딩 표시 + runAction 디스패치" {
 }
 
 test "command palette(chrome): 토글 열림 → 타이핑 필터 → IME 조합 표시 → Enter 디스패치+닫힘 → 프레임 빌드" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayPrep=CoreText, 실 PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -49730,7 +49793,7 @@ test "TFREG scrollback Find switches literal and PCRE2 through the shared chord"
 }
 
 test "scrollback find(chrome): 토글 열림 → 증분 검색 → 매치 네비게이션 → 하이라이트·오버레이 프레임" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayPrep=CoreText, 실 PTY
     const allocator = std.testing.allocator;
     test_config_text = keep_alive_off_config;
     defer test_config_text = "";
@@ -52197,7 +52260,7 @@ test "imeBegin: 터미널 포커스만 바닥으로 스냅 — find 조합은 �
 }
 
 test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayPrep=CoreText, 실 PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -52253,7 +52316,7 @@ test "find overlay: 한글(wide)은 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회�
 }
 
 test "command palette(chrome): 한글(wide) query는 atlas slot이 2칸 — ㄱㄴㄷ 잘림 회귀 실측(실 CoreText)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayFrame=CoreText, 실 PTY
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // buildChromeOverlayPrep=CoreText, 실 PTY
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
     defer allocator.destroy(session);
@@ -58036,8 +58099,8 @@ test "notification scroll view survives the frame that produced it" {
 
     // 프레임을 한 번 돌린 뒤에도 발행 재료가 **살아 있어야** 한다. prep은 DrawList를 소유하므로 푼다.
     if (session.buildChromeOverlayPrep() catch null) |prep| {
-        var dl = prep.dl;
-        dl.deinit(allocator);
+        var owned = prep;
+        owned.deinit(allocator);
     }
     const sv = session.notif_scroll_view orelse return error.ScrollViewClearedByItsOwnFrame;
     try std.testing.expect(sv.viewport.h > 0);
@@ -58046,8 +58109,8 @@ test "notification scroll view survives the frame that produced it" {
     // 패널을 닫으면 다음 프레임에 사라진다 — 남기면 stale 막대가 뜬다.
     session.chrome_host.notifications.hide();
     if (session.buildChromeOverlayPrep() catch null) |prep| {
-        var dl = prep.dl;
-        dl.deinit(allocator);
+        var owned = prep;
+        owned.deinit(allocator);
     }
     try std.testing.expect(session.notif_scroll_view == null);
 }
@@ -63070,9 +63133,9 @@ test "notice 토스트와 알림 패널 공존: 입력이 notice를 먼저 닫�
     try std.testing.expect(session.chrome_host.notifications.open);
 }
 
-// 위 공존을 **그리는** 쪽. 오버레이 raster 는 상자 하나라 notice/confirm 과 패널을 함께 내면 겹쳐 그려진다 — notice 글자가
-// 패널 위로 비치고, 패널의 프레임 clip 이 그리드 전체에 걸려 notice 상자 안 글자가 잘리고, 패널은 모달 배경 자리를 잃는다
-// (2026-10-06 사용자 지적). 메시지가 떠 있는 동안은 패널을 **안 그리고** 상태는 둔다 — 메시지가 닫히면 다시 보인다.
+// 위 공존을 **그리는** 쪽. 예전에는 notice/confirm 과 패널을 함께 내면 겹쳐 그려졌다 — notice 글자가 패널 위로 비치고, 패널의
+// 프레임 clip 이 그리드 전체에 걸려 notice 상자 안 글자가 잘리고, 패널은 모달 배경 자리를 잃었다(2026-10-06 사용자 지적 — 셋 다 그 뒤
+// 풀렸고 규율은 정책으로 남았다: `notificationPanelDrawn` 주석). 메시지가 떠 있는 동안은 패널을 **안 그리고** 상태는 둔다 — 메시지가 닫히면 다시 보인다.
 test "notice·confirm 이 떠 있는 프레임엔 알림 패널을 안 그리고(clip·막대·caret 포함), 닫히면 다시 그린다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -63093,13 +63156,21 @@ test "notice·confirm 이 떠 있는 프레임엔 알림 패널을 안 그리고
     const frame = struct {
         fn run(s: *AppSession, a: std.mem.Allocator) !Seen {
             s.overlay_quads.clearRetainingCapacity();
-            const prep = (try s.buildChromeOverlayPrep()) orelse return error.NoOverlay;
-            var dl = prep.dl;
-            defer dl.deinit(a);
+            var prep = (try s.buildChromeOverlayPrep()) orelse return error.NoOverlay;
+            defer prep.deinit(a);
+            const dl = prep.dl;
             var seen: Seen = .{ .clip = prep.placement.clip_rect != null, .panel_text = false, .message_text = false, .caret = false, .bar = s.notif_scroll_view != null };
             for (dl.cells) |c| {
                 if (c.codepoint == 'Q') seen.panel_text = true;
                 if (c.codepoint == 'X') seen.message_text = true;
+            }
+            // 칸 위상이 다르면 패널은 뒤 조각으로 간다 — 첫 조각만 보면 「없다」 단언이 공짜가 된다(적대적 검증 2026-10-10).
+            for (prep.extra) |part| {
+                if (part.placement.clip_rect != null) seen.clip = true;
+                for (part.dl.cells) |c| {
+                    if (c.codepoint == 'Q') seen.panel_text = true;
+                    if (c.codepoint == 'X') seen.message_text = true;
+                }
             }
             for (s.overlay_quads.items) |q| if (q.gradient_kind == 3) {
                 seen.caret = true; // 말풍선 caret(위 삼각형) — 패널 몫
@@ -63146,8 +63217,9 @@ test "notice·confirm 이 떠 있는 프레임엔 알림 패널을 안 그리고
     try std.testing.expect(session.chrome_host.notifications.hovered == null);
 }
 
-// 포커스 없는 찾기 바·참조 피커는 모달이 아니라 종 클릭을 막지 않는다 — 그대로 두면 패널과 한 오버레이 그리드에 겹쳐
-// 그려지고, 패널이 넘쳐 프레임 clip 을 내면 그것이 그리드 전체에 걸려 **그 글자가 통째로 잘린다**. 다른 오버레이를 여는
+// 포커스 없는 찾기 바·참조 피커는 모달이 아니라 종 클릭을 막지 않는다 — 그대로 두면 패널과 겹쳐 그려진다(예전에는 패널이 넘쳐
+// 프레임 clip 을 내면 그것이 그리드 전체에 걸려 그 글자가 통째로 잘렸다 — 지금은 clip 이 패널 draw 의 셀에만 걸린다, docs/chrome-strategy.md
+// §5.3). 다른 오버레이를 여는
 // 경로와 같은 함수(`dismissMessageOverlays`)로 먼저 내린다.
 test "알림 패널을 열면 모달이 아닌 다른 오버레이(찾기 바·참조 피커)를 내린다 (단일-오버레이 불변식)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -65430,7 +65502,7 @@ test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 �
     session.showConfirm(.app_close_running, .active_term);
     try std.testing.expect(session.chrome_host.confirm.open);
 
-    // buildChromeOverlayFrame과 같은 경로로 ChromeDraw 수집 → 셀 rasterize(여기까진 CoreText 무관 순수 단계).
+    // buildChromeOverlayPrep과 같은 경로로 ChromeDraw 수집 → 셀 rasterize(여기까진 CoreText 무관 순수 단계).
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -65441,11 +65513,7 @@ test "guardrail: 한글 확인 모달 메시지·안내가 오버레이 셀에 �
     try std.testing.expect(draws.items.len > 0);
 
     var raster = try AppSession.rasterizeOverlayCells(allocator, draws.items, &tk, session.cell_width_px, session.cell_height_px, false);
-    defer {
-        raster.cells.deinit(allocator);
-        raster.gpu_quads.deinit(allocator);
-        raster.gpu_shadows.deinit(allocator);
-    }
+    defer raster.deinit(allocator);
 
     // 메시지 + 버튼 라벨(닫기/취소) 모두 — 각 글자의 비-공백 코드포인트가 셀에 존재해야 한다(우측 클리핑 0).
     // 코드포인트 수로 박스를 쟀다면(버그) 한글 표시폭의 절반만 담겨 뒷부분 코드포인트가 셀에 없어 이 단언이 실패한다.
@@ -69430,11 +69498,7 @@ test "WP-F1 R9: found/none 표시기가 셀까지 도달한다(긴 검색어와 
     try session.chrome_host.collectDraws(props, &tk, arena, &draws);
 
     var raster = try AppSession.rasterizeOverlayCells(allocator, draws.items, &tk, session.cell_width_px, session.cell_height_px, false);
-    defer {
-        raster.cells.deinit(allocator);
-        raster.gpu_quads.deinit(allocator);
-        raster.gpu_shadows.deinit(allocator);
-    }
+    defer raster.deinit(allocator);
 
     // vacuity 가드부터: 오버레이 자체가 그려졌는지(프롬프트 'F') 먼저 본다.
     var has_prompt = false;
@@ -69818,7 +69882,7 @@ test "WP-F1: 웹 탭 카운터는 0/0이 아니라 found/none이다" {
     try std.testing.expect(!(try findOverlayHasText(allocator, session, "none")));
 }
 
-/// 오버레이를 **실제 렌더 경로**(buildChromeOverlayFrame과 같은 collectDraws)로 그려 `needle` 텍스트가 나오는지
+/// 오버레이를 **실제 렌더 경로**(buildChromeOverlayPrep과 같은 collectDraws)로 그려 `needle` 텍스트가 나오는지
 /// 본다 — 상태만 단언하면 view가 그 상태를 무시해도 통과하므로(그리는 것이 계약이다) 그림을 본다.
 fn findOverlayHasText(allocator: std.mem.Allocator, session: *AppSession, needle: []const u8) !bool {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -72167,14 +72231,15 @@ test "placement_failed: 배치 진입에서 지워진다 — 부분 투영의 �
     defer built_frames.deinit(allocator);
     var sidebar_frame: ?renderer.RenderFrame = null;
     var sidebar_header_frame: ?renderer.RenderFrame = null;
-    var overlay_frame: ?metal_frame.PaneFrame = null;
+    var overlay_frames: std.ArrayList(metal_frame.PaneFrame) = .empty;
+    defer overlay_frames.deinit(allocator);
     var floating_pf: ?metal_frame.PaneFrame = null;
     var sticky_pf: ?metal_frame.PaneFrame = null;
     var active_result: ?AppSession.ActiveResult = null;
 
     // 직전(부분 투영) 배치가 실패했다고 가정 — 그 신호가 다음 배치까지 살아남으면 안 된다.
     session.placement_failed = true;
-    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frame, &floating_pf, &sticky_pf, &active_result);
+    session.placeAndDistribute(&collected, &pane_frames, &built_frames, &sidebar_frame, &sidebar_header_frame, &overlay_frames, &floating_pf, &sticky_pf, &active_result);
     try std.testing.expect(!session.placement_failed);
 }
 
@@ -96637,7 +96702,7 @@ test "OVF2 마커 이미지 프리뷰가 「풀 수 없다」로 끝나면 — �
     session.marker_preview_open.?.failed = true;
     try std.testing.expect(session.overlayFrameNeeded()); // ★ 다른 오버레이 없이도 관문이 선다
     var prep = (try session.buildChromeOverlayPrep()) orelse return error.MarkerFailureNotDrawn;
-    defer prep.dl.deinit(allocator);
+    defer prep.deinit(allocator);
     const want = maru.i18n.t(.app_marker_preview_undecodable);
     var it = (std.unicode.Utf8View.init(want) catch return error.BadText).iterator();
     const first = it.nextCodepoint().?;
@@ -96671,7 +96736,7 @@ test "OVF3 찾기 막대가 열려 있고 입력에 포커스가 없을 때도 �
     try std.testing.expect(!session.anyOverlayOpen()); // 전제: 그 집합으로는 세지 않는다
     try std.testing.expect(session.overlayFrameNeeded()); // ★ 관문은 선다
     var prep = (try session.buildChromeOverlayPrep()) orelse return error.FindBarNotDrawn;
-    defer prep.dl.deinit(allocator);
+    defer prep.deinit(allocator);
     try std.testing.expect(prep.dl.cells.len > 0); // 찾기 막대의 글자가 실렸다
 }
 
@@ -96826,7 +96891,7 @@ test "OVF4 관문을 지나는 오버레이를 하나씩 연다 — 다른 오�
                 std.debug.print("OVF4 {s}: 관문은 섰는데 프레임에 아무것도 안 실렸다\n", .{c.name});
                 return error.NothingDrawn;
             };
-            prep.dl.deinit(allocator);
+            prep.deinit(allocator);
         }
         c.close(session);
         if (session.overlayFrameNeeded()) {

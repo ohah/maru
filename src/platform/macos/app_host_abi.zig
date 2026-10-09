@@ -6632,12 +6632,6 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
     return .{ .surfaces = surfaces.items, .windows = windows.items };
 }
 
-/// 한 요청을 실 collector + auth(1e capability) + dispatch(1d)로 처리해 응답 바이트(server.cross_gpa 소유)를 만든다.
-/// **1e**: `dispatchAuthenticated`가 auth 프레임의 `{selector, cap_nonce}`(pending)와 라이브 `control_cap_store`로
-/// `(caller, scope)`를 발급한다 — cap_nonce 없으면 기존 metadata:self(§8.4 A2b, 회귀 없음), 있으면 resolve(빈 store라
-/// 지금은 default-deny). **§8.4 1g**: 셀렉터는 서버가 붙은 프로세스의 출처에서 찾은 pane 과 같을 때만 남고(`resolveSelfOrigin`),
-/// browser 확인 grant 의 pane 은 그 찾은 pane 이다. `now`=**모노토닉 awake 초**(TTL 판정용, 순수
-/// 코어에 주입 — 미래 fd 발급도 같은 시계로 expires_at 계산해야 정합; wall-clock 아님, 아래 impl 참조 — 리뷰 [2]).
 /// **1g(control-plane-security §8.4)**: 붙은 프로세스의 출처(연결 스레드가 찾은 조상 사슬에서 자기 터미널의 foreground
 /// 그룹에 속한 첫 조상과 그 세션)를 pane 으로 바꾼다. 그 프로세스가 **지금도** 그 터미널의 foreground 일 때만(지속 세션은 요청마다 다시 본다).
 /// - `browser_pane` = 찾은 pane — browser 확인 grant(§9.2 Model B)의 pane. 셀렉터가 필요 없어 세션 유지 pane(셀렉터 없음)
@@ -6648,7 +6642,9 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
 fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_mod.PendingRequest) void {
     // 사유는 그것이 결과를 바꾸는 요청에만 남긴다 — browser.* 이거나 셀렉터를 댄 요청. 다른 터미널에서 주기적으로 부르는
     // `maru sessions list` 같은 것까지 찍으면 로그가 쌓인다(적대 리뷰 2 회차).
-    const noteworthy = pending.selector != null or std.mem.indexOf(u8, pending.request_bytes, "\"browser.") != null;
+    const is_browser = std.mem.indexOf(u8, pending.request_bytes, "\"browser.") != null and
+        std.mem.indexOf(u8, pending.request_bytes, "\"browser.list\"") == null; // list 는 pane 없이 허용된다
+    const noteworthy = pending.selector != null or is_browser;
     const found: ?u64 = blk: {
         const origin = pending.peer_origin orelse {
             if (noteworthy) control_log.info("control: no pane for this caller ({s})", .{if (pending.peer_reject) |r| @tagName(r) else "unknown"});
@@ -6682,6 +6678,12 @@ fn recheckSelfOrigin(pending: *control_server_mod.PendingRequest) void {
     pending.selector = null;
 }
 
+/// 한 요청을 실 collector + auth(1e capability) + dispatch(1d)로 처리해 응답 바이트(server.cross_gpa 소유)를 만든다.
+/// **1e**: `dispatchAuthenticated`가 auth 프레임의 `{selector, cap_nonce}`(pending)와 라이브 `control_cap_store`로
+/// `(caller, scope)`를 발급한다 — cap_nonce 없으면 기존 metadata:self(§8.4 A2b, 회귀 없음), 있으면 resolve(빈 store라
+/// 지금은 default-deny). **§8.4 1g**: 셀렉터는 서버가 붙은 프로세스의 출처에서 찾은 pane 과 같을 때만 남고(`resolveSelfOrigin`),
+/// browser 확인 grant 의 pane 은 그 찾은 pane 이다. `now`=**모노토닉 awake 초**(TTL 판정용, 순수
+/// 코어에 주입 — 미래 fd 발급도 같은 시계로 expires_at 계산해야 정합; wall-clock 아님, 아래 impl 참조 — 리뷰 [2]).
 fn handleControlRequest(
     server: *control_server_mod.ControlServer,
     refs: []const ControlSessionRef,

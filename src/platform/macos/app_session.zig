@@ -11152,7 +11152,6 @@ pub const AppSession = struct {
     /// 앵커 = 전역 앵커 → byte-identical. idx가 범위 밖이면 빈 구간 [idx, idx).
     pub const PinRegion = struct { lo: usize, hi: usize };
 
-    /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
     /// 세션 번호(셸의 `getsid` = pane 뿌리 `login` pid)가 이 창의 어느 터미널 pane 인지 — 컨트롤 플레인 1g(§8.4)가 붙은
     /// 프로세스의 출처를 pane 으로 바꾼다. 살아 있는 터미널만 본다(웹·편집기·종료 묘비·끝난 셸은 PTY 세션이 없다).
     pub fn surfaceForSessionLeader(self: *AppSession, sid: i32) ?u64 {
@@ -11165,6 +11164,7 @@ pub const AppSession = struct {
         return null;
     }
 
+    /// live 탭이 모두 종료됐는가(세션/창 종료 판정). 탭이 없으면 false(아직 안 만든 상태).
     pub fn allTabsTerminated(self: *AppSession) bool {
         if (self.tabs.items.len == 0) return false;
         for (self.tabs.items) |tab| {

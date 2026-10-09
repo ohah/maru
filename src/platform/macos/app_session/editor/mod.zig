@@ -24239,6 +24239,33 @@ test "external editor URL FIFO open returns unreadable instead of blocking" {
     try testing.expectError(error.Unreadable, openPath(std.testing.io, testing.allocator, path));
 }
 
+test "external editor URL unfolds the target and reveals its real caret" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "url-fold.txt", .data = "a:\n  target\n  tail\nz\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    const path = try std.fs.path.join(allocator, &.{ root, "url-fold.txt" });
+    defer allocator.free(path);
+    try navigateUserFile(fx.session, .{ .path = path, .raw_len = 0 });
+    const term = pane_ops.activePane(fx.session).activeTerm();
+    var before = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    before.dl.deinit(allocator);
+    try testing.expect(foldAll(fx.session));
+    try testing.expect(foldedHeads(term).len != 0);
+    try testing.expect(visibleRowOfDocLine(term, 1) == null);
+    try navigateUserFile(fx.session, .{ .path = path, .line = 2, .column = 3, .raw_len = 0 });
+    // Literal byte 5 is the first 't', independently of the product offset helper.
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), foldedHeads(term).len);
+    try testing.expect(visibleRowOfDocLine(term, 1) != null);
+    var after = appendPaneFrame(fx.session, fx.leaf_rect, term) orelse return error.MissingFrame;
+    after.dl.deinit(allocator);
+    try testing.expect(editorImeCaretRect(fx.session, term) != null);
+}
+
 test "랩 토글은 뷰 override를 세우고 config를 안 건드린다" {
     // **뷰별 상태다**(VSCode `⌥Z`와 같은 축) — 전역으로 두면 파일 하나를 랩해 보려다 열린 편집기가
     // 전부 바뀐다. config는 **기본값**으로 남아 새로 여는 뷰가 그것을 따라야 하므로, 토글이 config를

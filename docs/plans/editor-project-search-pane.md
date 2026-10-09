@@ -37,7 +37,7 @@
 
 ## 검증
 
-`test-editor-project-replace-preview`의 RPV4~7은 결과 사본 수명·원문 이동·revision 거절,
+`test-editor-project-replace-preview`의 RPV4~8은 결과 사본 수명·원문 이동·revision 거절,
 읽기 전용 편집/저장·복원 제외·준비 할당 실패·diff 탭 원문 보존·디스크 수정과 탭 닫기 뒤 늦은 완료를 검증한다.
 `test-editor-project-search-dock`은 입력 폭·버튼·행의 동일 geometry와 paint clip을 검증한다.
 제품 AppKit/Metal harness는 우측·하단 도크와 실제 결과 탭 열기 버튼, Enter 이동을 촬영한다.
@@ -45,9 +45,11 @@
 
 ## 실행 증거 (2026-10-09)
 
-- `test-editor-project-replace-preview`: 중립 5개·제품 11개 통과. 도크 26개·owner 29개·호스트 ABI·문서 링크/줄 참조 통과.
+- `test-editor-project-replace-preview`: 중립 5개·제품 12개 통과. 도크 26개·owner 29개·호스트 ABI·문서 링크/줄 참조 통과.
 - 순차 전체 검사 `mise run -j1 -c check` 종료 코드 0, 1028.45초. 수정 중 진행한 전체 검사와 별도로 최종 변경의 위 집중 판정을 다시 통과했다.
 - 읽기 전용 file 설정을 별도 소스 사본에서 제거하면 RPV4의 실제 `insertText` 거절 판정이 실패했다. 사본은 복원했고 제품 코드에 변이를 적용하지 않았다.
 - 실제 AppKit/Metal 960×600·1×: `maru-editor-project-search-app-3_2l3hck/manifest.json`. 640×480·주입 2×: `maru-editor-project-search-app-txuvhwav/manifest.json` (동일 1× 빌드 재사용). 정확한 접두는 `/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/`다.
 - 앞선 2× 실패에서 검색 옵션이 입력 폭을 빼앗는 문제를 수정했다. 이어 좁은 분기의 u1 덧셈 overflow가 단위/제품 실행에서 발견되어 usize 변환으로 수정했다. 최종 좁은 폭 재실행은 통과했다.
 - 탭 열기 버튼의 실제 클릭·결과 Enter 이동·readonly 상태·diff 탭을 촬영했다. source/binary/harness/PNG hash를 manifest로 결속한다. 탭 생성 시간은 격리 하네스의 `open` 호출 구간이며 frame 전체/대량 결과 최대 지연은 아니다.
+
+추가 좌표 상한 검증에서 0-based u32 최댓값의 1-based 표시에 overflow를 재현했다. 표시 계산을 u64로 넓혔으며 RPV8은 IME 확정 대기·상한 표시·실제 범위 밖 이동 거절·원문 보존을 검사한다.

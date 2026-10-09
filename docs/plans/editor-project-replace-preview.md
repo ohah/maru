@@ -65,7 +65,7 @@ python3 tools/editor-project-search-app/run.py --replace-preview --disk-files 2 
 
 ## 실행 증거 (2026-10-09)
 
-- `test-editor-project-replace-preview`: 중립 5개(입구 포함)·제품 11개(입구 포함) 통과.
+- `test-editor-project-replace-preview`: 중립 5개(입구 포함)·제품 12개(입구 포함) 통과.
   비어 있지 않은 실제 Undo 기록을 만들고 미리보기 후 기존 Undo가 이전 입력을 되돌리는 것도 검증한다.
 - 기존 검색 도크 26개·owner 29개와 호스트 ABI 빌드 통과. 문서 링크·줄 참조 통과.
 - 제품 표본: `maru-editor-project-search-app-c9wmrfqn/manifest.json`의 960×600·1×와
@@ -77,7 +77,7 @@ python3 tools/editor-project-search-app/run.py --replace-preview --disk-files 2 
 - 초기 전체 실행에서 기존 diff OOM sweep(2단계)과 코어 handoff 부하 판정이 실패했다.
   diff는 변경 전 main과 이번 코드의 분리 실행에서 각각 102단계(실패 99·성공 3)로 통과했고 handoff도 분리 실행에서 통과했다.
   이어 `mise run -j1 -c check`는 종료 코드 0, 1142.51초로 통과했다. 실패 원인을 순차 재실행의 성공만으로 단정하지 않는다.
-- 버튼 배치를 수정한 뒤 검색 도크 26개·owner 29개·미리보기 중립 5개/제품 11개·호스트 ABI를 다시 통과했다.
+- 버튼 배치를 수정한 뒤 검색 도크 26개·owner 29개·미리보기 중립 5개/제품 12개·호스트 ABI를 다시 통과했다.
   범위가 작은 UI 수정의 이 집중 결과와 전체 매트릭스의 결과를 구분해 기록한다.
 
 ## 남은 경계

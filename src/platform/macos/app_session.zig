@@ -6161,6 +6161,9 @@ pub const AppSession = struct {
     /// 컨텍스트 메뉴가 code action 목록이다(tooling §8.2h) — accept 가 이 갈래로 먼저 들어온다. `closeContextMenu` 가 내린다.
     code_action_menu: bool = false,
     editor_workspace_edit: editor_ops.workspace_edit_client.State = .{},
+    /// 지난 오버레이 프레임에 자동완성 목록·호버(시그니처) 상자를 **안 그렸나**(`editorHelperTakesPointer`). 기본 false — 예전 동작.
+    editor_suggest_hidden: bool = false,
+    editor_hover_box_hidden: bool = false,
     /// 늦게 온 LSP 응답의 알림 중 사용자가 그사이 연 오버레이 때문에 미룬 것(`showResponseNotice`) — 하나만 든다(새것이 이긴다).
     deferred_response_notice_buf: [deferred_response_notice_cap]u8 = undefined,
     deferred_response_notice_len: usize = 0,
@@ -14327,6 +14330,17 @@ pub const AppSession = struct {
     /// 열린다 — 기다리는 사이 사용자가 알림 패널·설정 등을 열면, 응답이 그 위에 메뉴를 함께 띄웠다(재현: 메뉴와 알림 패널이
     /// 동시에 열림). 오버레이는 모인 순서대로 그려져 메뉴가 알림 패널 **아래**에 깔리기도 했다. 응답 쪽이 이것을 묻고 결과를
     /// 버린다 — 사용자가 그 뒤에 한 일을 늦은 응답이 덮지 않는다.
+    /// 편집기 헬퍼 상자(자동완성 목록 · 호버/시그니처 상자)가 **지난 오버레이 프레임에 그려졌으면** 그 몫의 포인터(누름·휠)를
+    /// 받는다. 다른 오버레이(이름 상자·팔레트·설정·피커·알림 패널·보내기 헬퍼 …)가 있어 안 그려졌으면 받지도 삼키지도 않는다 —
+    /// 사용자는 그 자리에 다른 것을 보고 있다(2026-10-09 재현: 숨은 완성 목록이 이름 상자·팔레트 클릭을 받아 문서에 완성을
+    /// 넣었다). 값은 `buildChromeOverlayPrep` 이 프레임마다 세운다. 오버레이 프레임을 아직 안 그렸으면(기본값) 예전처럼 받는다.
+    pub fn editorHelperTakesPointer(self: *const AppSession, which: enum { suggest, hover_box }) bool {
+        return switch (which) {
+            .suggest => !self.editor_suggest_hidden,
+            .hover_box => !self.editor_hover_box_hidden,
+        };
+    }
+
     pub fn interactiveOverlayOpen(self: *const AppSession) bool {
         return self.anyModalOverlayOpen() or self.rename != null;
     }
@@ -14807,8 +14821,9 @@ pub const AppSession = struct {
         find_ops.syncDiffFind(self);
         // 호버 박스(tooling §8.2b): 상자 밖 눌림은 닫고 **흘려보낸다**, 상자 안은 삼킨다. 모달 게이트보다 앞이어도 무해하다 —
         // 모달이 열리는 순간 `refresh` 가 상자를 내리므로 둘이 함께 있는 프레임이 없다.
-        if (kind == 1 and editor_ops.completion_client.mouseDown(self, x_px, y_px)) return; // §8.2g — 상자 안 클릭은 그 행을 고르고, 밖은 닫는다
-        if (kind == 1 and editor_ops.hover_client.mouseDown(self, x_px, y_px)) return;
+        // 안 그려진 상자 몫은 받지 않는다(`editorHelperTakesPointer` — 다른 오버레이 아래 숨은 완성 목록이 클릭을 받아 문서를 바꿨다).
+        if (kind == 1 and self.editorHelperTakesPointer(.suggest) and editor_ops.completion_client.mouseDown(self, x_px, y_px)) return; // §8.2g — 상자 안 클릭은 그 행을 고르고, 밖은 닫는다
+        if (kind == 1 and self.editorHelperTakesPointer(.hover_box) and editor_ops.hover_client.mouseDown(self, x_px, y_px)) return;
         // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
         // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)
         // 터미널 선택 드래그가 시작된다. 드래그 중(kind != 1)은 통과시킨다 — 터미널에서 시작한 선택이 상태바
@@ -23951,12 +23966,21 @@ pub const AppSession = struct {
         // 호버 박스(tooling §8.2b — 비모달). 헬퍼와 같은 규율: 다른 오버레이가 낼 것이 있으면 안 내고, 프레임마다 `refresh` 가
         // 설 자리를 다시 묻는다(없으면 스스로 내려간다).
         // 자동완성 팝업(§8.2g) — 프레임에 상자는 하나라 이것이 뜨면 시그니처·호버는 이 프레임에 안 그린다(상태는 남는다).
+        // **그렸는지를 남긴다**(2026-10-09) — 아래 셋은 다른 오버레이가 있으면 안 그려지는데 상태는 남고, 포인터 처리기
+        // (`completion_client.mouseDown`·`hover_client.mouseDown`·각 `wheel`)는 `mouse()`·`scrollWheel` **맨 앞**에서 돈다. 그래서
+        // 이름 상자·팔레트 아래 **보이지 않는** 완성 목록이 클릭을 받아 문서에 완성을 넣었다(재현: F2 상자 안·팔레트 안 클릭 →
+        // `doc_changed=true`). 처리기는 이 값을 보고 안 그려진 상자 몫의 포인터를 받지도 삼키지도 않는다(`editorHelperTakesPointer`).
+        self.editor_suggest_hidden = true;
+        self.editor_hover_box_hidden = true;
         if (draws.items.len == 0 and editor_ops.completion_client.refresh(self)) {
+            self.editor_suggest_hidden = false;
             try self.chrome_host.collectSuggestBoxDraws(editor_ops.completion_client.rows(self), editor_ops.completion_client.docsLines(self), props, &tokens, arena, &draws);
         } else if (draws.items.len == 0 and editor_ops.signature_client.refresh(self)) {
             // 시그니처 힌트(§8.2d) — 같은 상자, 주인이 시그니처일 때. 호버의 refresh 는 그동안 false 다.
+            self.editor_hover_box_hidden = false;
             try self.chrome_host.collectHoverBoxDraws(editor_ops.signature_client.lines(self), props, &tokens, arena, &draws);
         } else if (draws.items.len == 0 and editor_ops.hover_client.refresh(self)) {
+            self.editor_hover_box_hidden = false;
             try self.chrome_host.collectHoverBoxDraws(editor_ops.hover_client.lines(self), props, &tokens, arena, &draws);
         }
         // 단축키 힌트(재설계): 모달이 안 열렸고 key_hints.visible면 **각 chrome 요소 우상단에 단축키 배지**를 빌드한다

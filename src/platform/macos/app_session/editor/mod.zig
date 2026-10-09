@@ -55997,3 +55997,200 @@ test "RNM11 상자가 열린 동안 서버가 rename 을 못 하게 되면 — �
     try testing.expectEqualStrings(maru.i18n.t(.rn_no_server), s.chrome_host.notice.message);
     try testing.expectEqualStrings(RenameFx.r_text, h.content());
 }
+
+/// HELP 판정자의 틀 — 가짜 서버로 `c.c` 를 열고 셋째 줄에서 `p` 를 쳐 **자동완성 목록이 그려진** 상태까지(CMP1 과 같은 문서).
+const HelperFx = struct {
+    fx: PaneFixture,
+    term: *Term = undefined,
+    leaf: maru.session.SplitRect = undefined,
+    path: []const u8 = "",
+    fake_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined,
+    root_buf: [std.fs.max_path_bytes]u8 = undefined,
+
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+
+    fn init(self: *HelperFx, allocator: std.mem.Allocator, text: []const u8) !void {
+        var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+        const fz = try std.fmt.bufPrintZ(&self.fake_z, "{s}", .{fake});
+        _ = setenv("MARU_LSP_SERVER_OVERRIDE", fz.ptr, 1);
+        const root = self.root_buf[0..try self.fx.dir.dir.realPath(testing.io, &self.root_buf)];
+        const cz = try std.fmt.bufPrintZ(&self.cfg_z, "{s}/config", .{root});
+        _ = setenv("MARU_CONFIG", cz.ptr, 1);
+        if (self.fx.session.config_path_buffer) |b| allocator.free(b);
+        self.fx.session.config_path_buffer = null;
+        self.fx.session.editor_lsp.auto_trust_answer = .allow;
+        try self.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "c.c", .data = text });
+        self.path = try std.fs.path.join(allocator, &.{ root, "c.c" });
+        self.fx.session.git_repo = @constCast(root);
+        self.term = (try pane_ops.openFileTermInActivePane(self.fx.session, self.path, .text)).term;
+        self.fx.session.surface_initialized = true;
+        self.fx.session.backing_width_px = 1200;
+        self.fx.session.backing_height_px = 800;
+        self.leaf = activeLeafRectForTest(self.fx.session) orelse return error.SkipZigTest;
+        try testing.expect(pumpLspUntil(&self.fx, 3000, Ctx{ .fx = &self.fx, .term = self.term }, struct {
+            fn f(c: Ctx) bool {
+                return c.term.rt.editor_diagnostics.lsp.items.len >= 1;
+            }
+        }.f));
+    }
+
+    fn deinit(self: *HelperFx, allocator: std.mem.Allocator) void {
+        if (self.path.len > 0) allocator.free(self.path);
+        _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+        _ = unsetenv("MARU_CONFIG");
+        self.fx.session.git_repo = null;
+        self.fx.deinit(allocator);
+    }
+
+    /// 편집기 pane + 오버레이 — 제품 프레임이 하는 둘(오버레이가 헬퍼를 그렸는지 여기서 정해진다).
+    fn frame(self: *HelperFx) !void {
+        var d = appendPaneFrame(self.fx.session, self.leaf, self.term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(testing.allocator);
+        if (try self.fx.session.buildChromeOverlayPrep()) |*prep| {
+            var pp = prep.*;
+            pp.dl.deinit(testing.allocator);
+        }
+    }
+
+    fn content(self: *HelperFx) []const u8 {
+        return self.term.rt.editorDocument().opened.?.file.content;
+    }
+
+    /// 셋째 줄(offset 50)에서 `p` → 목록이 뜨고 그려진다. 그려진 목록 rect 를 돌려준다.
+    fn openCompletion(self: *HelperFx) !chrome.draw.Rect {
+        const s = self.fx.session;
+        self.term.rt.editor_selection = .{ .anchor_start = 50, .anchor_end = 50, .focus = 50 };
+        try testing.expect(insertText(s, self.term, "p"));
+        try testing.expect(pumpLspUntil(&self.fx, 3000, Ctx{ .fx = &self.fx, .term = self.term }, struct {
+            fn f(c: Ctx) bool {
+                return !c.fx.session.editor_completion.waiting;
+            }
+        }.f));
+        try self.frame();
+        try testing.expect(s.editor_completion.active and s.chrome_host.suggest_box.open);
+        try testing.expect(s.editorHelperTakesPointer(.suggest)); // 그려졌다
+        return chrome.components.suggest_box.boxRect(&s.chrome_host.suggest_box, completion_client.rows(s), s.buildChromeProps()) orelse error.SuggestNotPlaced;
+    }
+};
+
+const helper_doc = "int printf(int x);\nint add(int a);\nint main() {\n  \n}\n";
+
+test "HELP1 자동완성 목록이 열린 채 F2 — 이름 상자 아래 숨은 목록이 상자 안 클릭을 받지 않는다: 문서 그대로, 상자 caret 이 옮겨진다 (제품 경계, §8.2f·§8.2g)" {
+    // 2026-10-09 재현: 목록과 이름 상자는 같은 낱말 아래에 열려 자리가 겹친다(272,188). 목록은 다른 오버레이가 있으면 안 그려지는데
+    // `completion_client.mouseDown` 이 `mouse()` 맨 앞에서 돌아, caret 을 옮기려 상자를 누르자 **문서에 완성이 들어갔다**(`doc_changed=true`).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    _ = try h.openCompletion();
+    try pressKey(&h.fx, .{ .function = 2 }, .{}); // F2 는 완성 목록을 닫지 않는다(↑↓·Enter·Tab·Esc 만 가져간다)
+    try testing.expect(s.rename != null and s.rename.? == .symbol);
+    try h.frame();
+    try testing.expect(s.editor_completion.active); // 상태는 남았고
+    try testing.expect(!s.editorHelperTakesPointer(.suggest)); // 이번 프레임엔 안 그려졌다
+    try testing.expect(rename_client.refreshAnchor(s, s.rename.?.symbol));
+    const box = chrome.components.rename_box.boxRect(&s.chrome_host.rename_box, s.rename_input.text.items, s.buildChromeProps()).?;
+    const doc_before = try allocator.dupe(u8, h.content());
+    defer allocator.free(doc_before);
+    const accepted_before = s.editor_completion.accepted;
+    // 상자 첫 글자 칸 왼쪽(caret 0 자리) — 목록 첫 행과 겹친다.
+    const x: f64 = @as(f64, @floatFromInt(box.x)) + @as(f64, @floatFromInt(s.buildChromeProps().metrics.cell_width_px)) * 1.2;
+    const y: f64 = @as(f64, @floatFromInt(box.y)) + @as(f64, @floatFromInt(box.h)) / 2;
+    s.mouse(1, x, y, 0, 0);
+    s.mouse(3, x, y, 0, 0);
+    try testing.expectEqualStrings(doc_before, h.content());
+    try testing.expectEqual(accepted_before, s.editor_completion.accepted);
+    try testing.expect(s.rename != null);
+    try testing.expectEqual(@as(usize, 0), s.rename_input.caret); // 상자가 받았다 — 첫 글자 앞
+    try pressKey(&h.fx, .escape, .{});
+}
+
+test "HELP2 자동완성 목록이 열린 채 메뉴바로 팔레트를 열면 — 팔레트 아래 숨은 목록이 팔레트 안 클릭을 받지 않는다: 문서 그대로 (제품 경계, §8.2g)" {
+    // 2026-10-09 재현: 팔레트 안(412,192)을 누르자 그 아래 숨은 목록이 받아 **문서에 완성이 들어갔고**(`doc_changed=true`) 클릭은 팔레트에 안 닿았다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    const sug = try h.openCompletion();
+    try testing.expect(s.runAction("toggle_command_palette"));
+    try h.frame();
+    try testing.expect(s.chrome_host.palette.open and s.editor_completion.active);
+    try testing.expect(!s.editorHelperTakesPointer(.suggest));
+    const doc_before = try allocator.dupe(u8, h.content());
+    defer allocator.free(doc_before);
+    const accepted_before = s.editor_completion.accepted;
+    const x: f64 = @as(f64, @floatFromInt(sug.x)) + @as(f64, @floatFromInt(sug.w)) / 2;
+    const y: f64 = @as(f64, @floatFromInt(sug.y)) + 4;
+    s.mouse(1, x, y, 0, 0);
+    s.mouse(3, x, y, 0, 0);
+    try testing.expectEqualStrings(doc_before, h.content());
+    try testing.expectEqual(accepted_before, s.editor_completion.accepted);
+    // 팔레트를 닫으면 목록은 다시 그려지고 다시 클릭을 받는다(상태를 지우지는 않았다).
+    s.dismissMessageOverlays();
+    try h.frame();
+    try testing.expect(s.editorHelperTakesPointer(.suggest));
+}
+
+test "HELP3 호버 상자가 열린 채 메뉴바로 팔레트를 열면 — 숨은 호버 상자가 휠·클릭을 삼키지 않는다 (제품 경계, §8.2b)" {
+    // 메뉴바 경로는 편집기 키 경로(`hover_client.noteKey`)를 안 지나 호버가 남는다. 팔레트 아래에서 안 그려진 호버 상자 자리의 휠은 그 상자를
+    // 굴리고 삼켰고(팔레트 목록이 안 굴러갔다), 누름은 「상자 안」이라 삼켰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, "int x;\nint y;\n");
+    const s = h.fx.session;
+    try h.frame();
+    const p1 = pointerAtOffset(h.term, 1) orelse return error.NoPointer;
+    _ = s.hoverCursor(p1.x, p1.y, 0);
+    try testing.expect(pumpHoverUntil(&h.fx, 3000, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    try h.frame();
+    try testing.expect(s.editorHelperTakesPointer(.hover_box));
+    const rect = maru.chrome.components.hover_box.boxRect(&s.chrome_host.hover_box, hover_client.lines(s), s.buildChromeProps()).?;
+    const ix: f64 = @floatFromInt(rect.x + 2);
+    const iy: f64 = @floatFromInt(rect.y + 2);
+    // 전제: 그려진 동안에는 상자 안 휠이 상자를 굴린다(HOVB1 ⑵).
+    s.scrollWheel(-3, 0, false, ix, iy);
+    try testing.expectEqual(@as(u32, 1), s.chrome_host.hover_box.scroll_rows);
+    try testing.expect(s.runAction("toggle_command_palette"));
+    try h.frame();
+    try testing.expect(s.chrome_host.palette.open and s.chrome_host.hover_box.open); // 호버는 남았다(메뉴바 경로)
+    try testing.expect(!s.editorHelperTakesPointer(.hover_box));
+    // ⑴ 휠 — 숨은 상자를 굴리지 않는다.
+    s.scrollWheel(-3, 0, false, ix, iy);
+    try testing.expectEqual(@as(u32, 1), s.chrome_host.hover_box.scroll_rows);
+    // 누름 쪽은 팔레트로는 관측되지 않는다 — 팔레트는 클릭을 쓰지 않고 삼키기만 한다(`ChromeHost.handlePointer` → `.none`). 그래서 「호버가
+    // 삼켰다」와 「팔레트가 삼켰다」가 같아 보인다. 누름 게이트는 HELP4 가 자리를 센다.
+}
+
+test "HELP4 숨은 헬퍼 상자의 포인터 게이트는 네 자리 모두에 선다 — mouse() 의 누름 둘·scrollWheel 의 휠 둘 (소스 판정, §8.2b·§8.2g)" {
+    // HELP1·HELP2 는 완성 목록 누름을, HELP3 은 호버 휠을 태운다. 호버 **누름**은 클릭을 쓰는 오버레이 아래에서만 갈리는데(팔레트는 삼키기만 한다)
+    // 그 기하를 세우기 무거워, 처리기를 부르는 줄이 같은 줄에서 게이트(`editorHelperTakesPointer`)를 먼저 묻는지 센다.
+    const Site = struct { src: []const u8, file: []const u8, call: []const u8, gate: []const u8 };
+    const sites = [_]Site{
+        .{ .src = @embedFile("../../app_session.zig"), .file = "app_session.zig", .call = "editor_ops.completion_client.mouseDown(self, x_px, y_px)", .gate = "editorHelperTakesPointer(.suggest)" },
+        .{ .src = @embedFile("../../app_session.zig"), .file = "app_session.zig", .call = "editor_ops.hover_client.mouseDown(self, x_px, y_px)", .gate = "editorHelperTakesPointer(.hover_box)" },
+        .{ .src = @embedFile("../scroll.zig"), .file = "scroll.zig", .call = "editor_ops.hover_client.wheel(self, x_px, y_px, delta_y)", .gate = "editorHelperTakesPointer(.hover_box)" },
+        .{ .src = @embedFile("../scroll.zig"), .file = "scroll.zig", .call = "editor_ops.completion_client.wheel(self, x_px, y_px, delta_y)", .gate = "editorHelperTakesPointer(.suggest)" },
+    };
+    for (sites) |site| {
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, site.src, site.call)); // 제품 자리는 하나뿐이다
+        const at = std.mem.indexOf(u8, site.src, site.call).?;
+        const line_start = if (std.mem.lastIndexOfScalar(u8, site.src[0..at], '\n')) |i| i + 1 else 0;
+        const line = site.src[line_start..at];
+        if (std.mem.indexOf(u8, line, site.gate) == null) {
+            std.debug.print("{s}: `{s}` 앞에 `{s}` 가 없다 — 안 그려진 상자가 포인터를 받는다\n", .{ site.file, site.call, site.gate });
+            return error.HelperPointerUngated;
+        }
+    }
+}

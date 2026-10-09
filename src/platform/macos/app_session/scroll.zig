@@ -231,9 +231,11 @@ pub fn scroll(self: *AppSession, delta_up: i32) void {
 pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool, x_px: f64, y_px: f64) void {
     if (!self.surface_initialized) return;
     // 호버 박스(tooling §8.2b): 상자 안 휠은 상자를 굴리고 삼킨다, 밖이면 닫고 흘려보낸다.
-    if (editor_ops.hover_client.wheel(self, x_px, y_px, delta_y)) return;
+    // 안 그려진 상자 몫은 받지 않는다(`AppSession.editorHelperTakesPointer` — 클릭과 같은 이유: 다른 오버레이 아래 숨은 상자가 휠을 삼키면
+    // 사용자가 보고 있는 팔레트·설정 목록이 안 굴러간다).
+    if (self.editorHelperTakesPointer(.hover_box) and editor_ops.hover_client.wheel(self, x_px, y_px, delta_y)) return;
     // 자동완성 문서 패널(§8.2g-d): 패널 안 휠은 패널을 굴리고 삼킨다.
-    if (editor_ops.completion_client.wheel(self, x_px, y_px, delta_y)) return;
+    if (self.editorHelperTakesPointer(.suggest) and editor_ops.completion_client.wheel(self, x_px, y_px, delta_y)) return;
     // 닫기 확인 모달은 결정 게이트라 마우스 클릭(mouse())뿐 아니라 휠도 막는다 — 안 막으면 모달 뒤 터미널/스크롤백이
     // 사용자 결정 중에 움직이거나(스크롤) 트래킹 앱에 휠이 리포트된다(모달 의도 위배).
     if (self.chrome_host.confirm.open) return;

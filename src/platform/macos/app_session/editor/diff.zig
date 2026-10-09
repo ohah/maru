@@ -4580,3 +4580,22 @@ test "DCOL16: Term 전환 직후 실제 IME 트랜잭션 시작이 새 Surface�
     fx.session.imeMarked("한");
     try testing.expectEqual(@as(usize, 0), fx.session.chrome_host.find.input.preedit.items.len);
 }
+
+test "DCOL17: 비교 뷰에서 열을 바꿔 둘째 찾기 막대만 남아도 — 다른 오버레이 없이 관문이 서고 그 프레임에 막대가 실린다" {
+    // 2026-10-09 관문 좁히기 뮤테이션: `overlayFrameNeeded` 의 `find_secondary.open` 을 꺼도 아무 판정자도 안 잡았다. 열을 바꾸면 첫째 막대는
+    // 닫히고(`find.open` 거짓) 둘째만 남는다 — 그때 관문을 세우는 것은 그 줄 하나다. 꺼지면 다른 오버레이가 없을 때 둘째 막대가 안 그려진다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("left left\nRIGHT\n", "right right right\nleft\n");
+    try findPairFixture(&fx, &entry);
+    const h = &fx.session.chrome_host;
+    try findQuery(&fx, "right");
+    try testing.expect(editor_ops.diffSwitchSide(fx.session, fx.term));
+    try testing.expect(!h.find.open and h.find_secondary.open); // 전제: 둘째만 남았다(DCOL8 과 같은 자리)
+    try testing.expect(!fx.session.anyOverlayOpen());
+    try testing.expect(fx.session.overlayFrameNeeded()); // ★ 관문이 선다
+    var prep = (try fx.session.buildChromeOverlayPrep()) orelse return error.SecondaryFindBarNotDrawn;
+    defer prep.dl.deinit(testing.allocator);
+    try testing.expect(prep.dl.cells.len > 0); // 둘째 막대의 글자(검색어 `right`)가 실렸다
+}

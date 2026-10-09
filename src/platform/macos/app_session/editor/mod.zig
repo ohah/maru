@@ -55386,6 +55386,7 @@ test "EDPSD1 빈 입력과 조합 중 Enter는 worker를 시작하지 않는다"
     _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
     try projectSearchRootForTest(&fx);
     const d = @import("search/dock.zig");
+    _ = try fx.session.resize(960, 600, 1000);
     d.open(fx.session);
     try testing.expect(!d.canSearch(fx.session));
     try fx.session.editor_search.fields[0].insertText(testing.allocator, "foo");
@@ -55395,6 +55396,14 @@ test "EDPSD1 빈 입력과 조합 중 Enter는 worker를 시작하지 않는다"
     try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .enter } }));
     try testing.expect(fx.session.editor_project_search_query == null);
     try testing.expectEqualStrings("한", fx.session.editor_search.fields[0].preedit.items);
+    // 공통 레이아웃이 우측 도크를 0px로 줄인 경우에도 입력 소유권을 남기면 안 된다.
+    _ = try fx.session.resize(480, 480, 1000);
+    try testing.expectEqual(@as(u32, 0), @import("../dock.zig").dockGeometry(fx.session).tree_content.w);
+    try testing.expect(!d.ownsInput(fx.session));
+    d.refreshForFocus(fx.session);
+    try testing.expect(fx.session.editor_search.focused == null);
+    try testing.expect(!d.canSearch(fx.session));
+    try testing.expectEqualStrings("foo한", fx.session.editor_search.fields[0].text.items);
 }
 test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -55403,6 +55412,7 @@ test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수�
     _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
     try projectSearchRootForTest(&fx);
     const d = @import("search/dock.zig");
+    _ = try fx.session.resize(960, 600, 1000);
     d.open(fx.session);
     d.setPreedit(fx.session, "한");
     const generation = fx.session.editor_search.result.generation;
@@ -55447,6 +55457,11 @@ test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수�
     try testing.expect(!fx.session.tryCommitComposition());
     try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .tab } }));
     try testing.expect(d.handleKey(fx.session, .{ .key = .{ .key = .escape } }));
+    const before_owner = fx.session.focus_owner;
+    @import("../dock.zig").enterDockView(fx.session, .outline);
+    try testing.expectEqual(maru.session.dock_panel.View.project_search, fx.session.dock.view);
+    @import("../workspace.zig").focusWorkspaceInput(fx.session);
+    try testing.expectEqual(before_owner, fx.session.focus_owner);
     try testing.expectEqual(@as(?usize, 0), fx.session.editor_search.focused);
     try testing.expectEqualStrings("간", fx.session.editor_search.fields[0].text.items);
     try testing.expectEqualSlices(u8, &huge, fx.session.editor_search.fields[0].preedit.items);
@@ -55499,7 +55514,7 @@ test "EDPSD5 불변 문서 해시는 worker가 종료된 뒤 일치한다" {
 }
 test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    for ([_]u2{ 0, 1, 2, 3 }) |mode| {
+    for ([_]u3{ 0, 1, 2, 3, 4 }) |mode| {
         const modified = mode == 1;
         var fx = try PaneFixture.init(testing.allocator);
         defer fx.deinit(testing.allocator);
@@ -55510,6 +55525,7 @@ test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막
         fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
         const d = @import("search/dock.zig");
         const owner = @import("search/owner.zig");
+        _ = try fx.session.resize(960, 600, 1000);
         d.open(fx.session);
         try fx.session.editor_search.fields[0].insertText(testing.allocator, "foo");
         try fx.session.editor_search.fields[1].insertText(testing.allocator, "search.txt, src/[[]/disk.txt");
@@ -55551,6 +55567,17 @@ test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막
             // 재검색 뒤의 변경은 preview만으로 검출되지 않는다. 실제 열린 내용의 hash로 거부한다.
             try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "src/[/disk.txt", .data = "\xef\xbb\xbffoo disk\r\ntrailing mutation\r\n" });
         }
+        if (mode == 4) {
+            while (fx.session.editor_search.nav.?.loaded == null) {
+                nav.poll(fx.session);
+                if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+                try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+            }
+            const loaded = fx.session.editor_search.nav.?.loaded.?;
+            while (!loaded.done.load(.acquire)) try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+            // worker 결과가 OOM인 경우와 stale hash는 사용자 안내가 달라야 한다.
+            loaded.failure = error.OutOfMemory;
+        }
         while (fx.session.editor_search.nav != null) {
             nav.poll(fx.session);
             if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
@@ -55560,7 +55587,11 @@ test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막
         if (modified or mode == 3) {
             try testing.expectEqual(term.surface.id, active.surface.id);
             try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
-        } else if (mode == 2) {
+        } else if (mode == 2 or mode == 4) {
+            if (mode == 4) {
+                try testing.expect(fx.session.chrome_host.notice.open);
+                try testing.expectEqualStrings(maru.i18n.t(.dbg_editor_oom), fx.session.chrome_host.notice.message);
+            }
             try testing.expect(active.surface.id != term.surface.id);
             try testing.expectEqual(@as(usize, 0), fx.session.editor_nav_back.items.len);
             try testing.expect(active.rt.editor_selection == null or active.rt.editor_selection.?.isEmpty());
@@ -55571,6 +55602,42 @@ test "EDPSD6 알림 전 디스크 수정은 클릭 재검증에서 이동을 막
             try testing.expectEqual(@as(usize, 3), active.rt.editor_selection.?.end());
         }
     }
+}
+test "EDPSD7 paint 준비 실패는 게시된 입력 표와 접근성 동작을 거둔다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var checked_after_store = false;
+    for (0..70) |fail_index| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        try projectSearchRootForTest(&fx);
+        _ = try fx.session.resize(960, 600, 1000);
+        const d = @import("search/dock.zig");
+        _ = try fx.session.resize(960, 600, 1000);
+        d.open(fx.session);
+        fx.session.editor_search.focused = null;
+        try testing.expect(d.publish(fx.session));
+        try testing.expect(fx.session.editor_search.actions.items.len != 0);
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        fx.session.allocator = failing.allocator();
+        const builder: app_session_mod.coretext_frame_builder.CoreTextFrameBuilder = .{
+            .appearance = fx.session.appearance,
+            .shape_draw_list = app_session_mod.coretext_bridge.maru_macos_coretext_shape_draw_list,
+            .rasterize_glyph = app_session_mod.coretext_bridge.maru_macos_coretext_smoke_rasterize_glyph,
+        };
+        var collected: std.ArrayList(AppSession.CollectedPane) = .empty;
+        @import("search/dock/render.zig").collect(fx.session, &collected, builder, .{ .default_fg = .{ .r = 255, .g = 255, .b = 255 } });
+        fx.session.allocator = testing.allocator;
+        defer {
+            for (collected.items) |*item| item.pane.deinit(testing.allocator);
+            collected.deinit(testing.allocator);
+        }
+        if (failing.has_induced_failure and collected.items.len == 0) {
+            try testing.expectEqual(@as(usize, 0), fx.session.editor_search.actions.items.len);
+            try testing.expectEqual(@as(usize, 0), fx.session.editor_search.accessibility.elements.items.len);
+            if (fail_index > 12) checked_after_store = true;
+        }
+    }
+    try testing.expect(checked_after_store);
 }
 test "EDPS1 실제 owner 조합 사본은 여러 커서에 적용하고 정본을 바꾸지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

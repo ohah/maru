@@ -1,6 +1,6 @@
 # 프로젝트 검색 worker와 불변 문서
 
-상태: S1b의 백엔드 구현·합성 실행 검증. 제품 `AppSession`의 문서 열거·IME·감시와 검색 도크는 아직 연결하지 않았다.
+상태: S1b 백엔드·AppSession owner·검색 도크를 연결했다. 이 문서는 백엔드 증거를 소유하며 실제 UI·IME·앱 실측은 [도크 검증](editor-project-search-dock.md)을 따른다.
 전체 완료 조건은 [프로젝트 검색 계획](editor-project-search.md)의 S1b/S2가 소유한다.
 
 ## 구현 경계
@@ -92,4 +92,4 @@ CI는 `zig-out/editor-project-search-worker/latest.json`·실행별 `verificatio
   symlink 자동 감시를 보장하지 않으며 별도 watcherInclude를 제공한다. Maru도 기존 root 감시만으로 링크 대상까지
   최신성을 보장한다고 설명하지 않는다. 검색은 기존 `follow_symlinks=true` 계약을 유지한다.
 - 실제 창 닫기/앱 종료·교체 요청·지연 I/O에서 worker 수명과 살아 있는 helper를 확인한다.
-- 제품 RSS/예산·Metal·IME·검색 도크·외부 수정 클릭은 아직 미검증이다. 이 gate 전에는 S1b/S2 전체를 완료 표시하지 않는다.
+- 제품 RSS/예산·Metal·검색 도크·두벌식 HID·외부 수정 클릭은 [도크 검증](editor-project-search-dock.md)에 별도 실행 증거를 기록했다. 다른 파일시스템·링크 대상 감시·OS overflow·지연 I/O의 모든 종료 경계까지 완료로 표시하지 않는다.

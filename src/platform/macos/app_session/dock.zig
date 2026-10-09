@@ -491,7 +491,7 @@ pub fn setDockView(self: *AppSession, view: dock_panel.View) void {
     if (self.dock.view == .source_control and view != .source_control) scm_dock_ops.blurCommit(self);
     // 갤러리를 떠나면 도는 스캔을 취소한다 — 안 보는 화면 때문에 3.6 초를 끝까지 돌 이유가 없다.
     if (self.dock.view == .agent_activity and view != .agent_activity) agent_activity_ops.onLeaveView(self);
-    if (self.dock.view == .project_search and view != .project_search) project_search_ops.leave(self);
+    if (self.dock.view == .project_search and view != .project_search and !project_search_ops.leave(self)) return;
     self.dock.view = view;
     self.editor_outline.interaction = .{};
     // The SessionDock's component-local keyboard/pointer focus is meaningful only while its
@@ -609,6 +609,7 @@ pub fn dockListScroll(self: *AppSession) ?DockListScroll {
 /// 특히 잘 드러난다 — 목록도 스피너도 없이 비어 있고 새로 고침을 눌러야 나타났다).
 pub fn enterDockView(self: *AppSession, view: dock_panel.View) void {
     setDockView(self, view);
+    if (self.dock.view != view) return;
     onDockViewPresented(self, view);
 }
 

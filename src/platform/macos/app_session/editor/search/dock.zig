@@ -69,8 +69,13 @@ pub const State = struct {
         self.* = .{};
     }
 };
+fn visible(self: *const AppSession) bool {
+    if (!dock.dockVisible(self) or self.dock.view != .project_search) return false;
+    const content = dock.dockGeometry(self).tree_content;
+    return content.w != 0 and content.h != 0 and dock.dockListTextWidthPx(self) != 0;
+}
 pub fn ownsInput(self: *const AppSession) bool {
-    return dock.dockVisible(self) and self.dock.view == .project_search and self.editor_search.focused != null;
+    return visible(self) and self.editor_search.focused != null;
 }
 pub fn focused(self: *AppSession) ?*chrome.components.text_field.TextField {
     return if (self.editor_search.focused) |index| &self.editor_search.fields[index] else null;
@@ -118,7 +123,7 @@ pub fn localRoots(self: *const AppSession) bool {
 }
 pub fn canSearch(self: *const AppSession) bool {
     for (self.editor_search.fields) |field| if (field.preedit.items.len != 0) return false;
-    return localRoots(self) and self.editor_search.fields[0].text.items.len != 0 and
+    return visible(self) and localRoots(self) and self.editor_search.fields[0].text.items.len != 0 and
         !self.ime_active and !self.ime_editor_commit_pending;
 }
 fn stopRequest(self: *AppSession) void {
@@ -173,17 +178,19 @@ pub fn open(self: *AppSession) void {
     self.editor_search.fields[0].selectAll();
     changed(self);
 }
-pub fn blur(self: *AppSession) void {
-    if (!commitPreedit(self)) return;
+pub fn blur(self: *AppSession) bool {
+    if (!commitPreedit(self)) return false;
     self.editor_search.focused = null;
     self.metal_dirty = true;
+    return true;
 }
-pub fn leave(self: *AppSession) void {
-    if (!commitPreedit(self)) return;
+pub fn leave(self: *AppSession) bool {
+    if (!commitPreedit(self)) return false;
     self.editor_search.focused = null;
     stopRequest(self);
     self.editor_search.invalidate();
     self.editor_search.result.cancel(self.allocator);
+    return true;
 }
 pub fn cancel(self: *AppSession) void {
     stopRequest(self);
@@ -235,8 +242,8 @@ pub fn refreshForFocus(self: *AppSession) void {
         live.job.deinit();
         self.editor_project_search_live = null;
     };
-    if (!dock.dockVisible(self) or self.dock.view != .project_search) {
-        if (self.editor_search.nav != null or self.editor_search.focused != null or self.editor_search.result.phase == .running or self.editor_search.result.phase == .waiting or self.editor_search.result.phase == .composing) leave(self);
+    if (!visible(self)) {
+        if (self.editor_search.nav != null or self.editor_search.focused != null or self.editor_search.result.phase == .running or self.editor_search.result.phase == .waiting or self.editor_search.result.phase == .composing) _ = leave(self);
         cancelPointer(self);
         return;
     }
@@ -475,7 +482,7 @@ pub fn pointer(self: *AppSession, phase: chrome.ui.interaction.UiPointerPhase, x
 pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) void {
     refreshForFocus(self);
     const st = &self.editor_search;
-    if (!dock.dockVisible(self) or self.dock.view != .project_search or generation != st.result.generation) return;
+    if (!visible(self) or generation != st.result.generation) return;
     switch (intent) {
         .field => |index| {
             if (index >= 3 or index > 0 and !st.expanded or !self.tryCommitComposition()) return;

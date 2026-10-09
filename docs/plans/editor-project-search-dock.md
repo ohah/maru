@@ -91,7 +91,7 @@ ReleaseFast에서 앱 호스트와 같은 `smp_allocator`를 사용한 두 실�
 - glob 목록의 쉼표 분리와 부모 경로 처리는 같은 `query.GlobScope`를 사용한다. 리터럴 `[`·`]` 클래스도
   유지하며 실제 매칭은 ripgrep에 맡긴다. 구문 근거는 [globset 공개 구문](https://docs.rs/globset/latest/globset/#syntax)이다.
 
-검색 owner/AppSession 집중 판정 28개, 도크 모델·컴포넌트 판정 25개, Chrome UI 판정 1,110개를 실행했다.
+검색 owner/AppSession 집중 판정 29개, 도크 모델·컴포넌트 판정 25개, Chrome UI 판정 1,110개를 실행했다.
 디스크가 검색 전에 바뀐 경우뿐 아니라 재검색 후 같은 preview를 유지한 채 뒤쪽 내용이 바뀐 경우도 이동을 막는다.
 변경 없는 BOM/CRLF 파일의 실제 열기·선택은 성공한다. 이 판정은 물리 입력기나 VoiceOver 편집을 증명하지 않는다.
 
@@ -118,6 +118,34 @@ ReleaseFast에서 앱 호스트와 같은 `smp_allocator`를 사용한 두 실�
 이 표본은 `/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-editor-project-search-app-_0395vmn/manifest.json`에 남겼다.
 물리 IME와 VoiceOver 경계는 아래 제품 한계와 동일하며 이 검토로 완료 처리하지 않는다.
 
+## 추가로 재현해 수정한 실패 경로
+
+- `leave`·`blur`의 확정 거부를 도크 뷰·본문 포커스 전환 호출자에게 전달한다. 거부된 전환의 진입 훅도 실행하지 않는다.
+- 표시 폭이 사라진 도크는 입력이나 검색 작업을 소유하지 않는다. 공통 레이아웃의 최소 본문 폭 정책은 유지한다.
+- 실제 화면 수집의 paint·shape 실패는 이미 게시한 동작 표와 접근성 표를 회수한다.
+  `EDPSD7`이 제품 수집 경로의 할당 실패 지점들을 주입해 이를 검사한다.
+- 공통 `chrome/system_text.prepareRequest`는 문자열 복사 이후 run 표 확장 실패 시 아직 이전되지 않은 사본을 회수한다.
+  paint 실패 주입에서 실제 allocator 누수로 재현했고 수정 뒤 누수 검사까지 통과했다.
+- 열린 사본 해시 worker 오류는 내용이 바뀐 경우와 구분하여 기존 편집기 오류 안내를 표시한다.
+
+실제 HID 표본은 `y5svflvn/manifest.json`, AppKit 행렬 표본은 `ctgjhipf/manifest.json`,
+640×480 창·주입한 2× backing scale 표본은 `kyjpnv79/manifest.json`이다. 모두
+`/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-editor-project-search-app-` 아래의 격리 실행이며
+각 manifest가 실제 소스·바이너리·하네스·PNG를 해시로 결속한다. 이후 main 통합 검사는 별도로 기록한다.
+
+HID는 조합 `ㅎ → 하 → 한 → 한그 → 한글` 동안 `.composing`과 검색 요청 없음,
+Enter 뒤 확정된 `한글`과 실제 1개 결과를 확인했다. 전역 입력기는 기존 복원 기록 계약으로 복원했다.
+AppKit 행렬은 공유 뷰의 결과 60개·독립 문서 추가 후 120개·독립 문서의 0건 편집 후 60개,
+root 교체 후 새 파일 1개·교체 전에 누른 행의 늦은 놓음 무시를 실제 제품 경로에서 확인했다.
+이 검사는 전체 FSEvents overflow·다른 파일시스템·OS 후보창 픽셀·VoiceOver 편집을 증명하지 않는다.
+
+```sh
+python3 tools/editor-project-search-app/run.py --physical-ime
+python3 tools/editor-project-search-app/run.py --matrix
+python3 tools/editor-project-search-app/run.py --matrix --window-size 640x480 --render-scale 2000
+python3 tools/editor-project-search-app/run.py --matrix --narrow-hidden --window-size 480x480
+```
+
 ## 제품 실측 (2026-10-09)
 
 `python3 tools/editor-project-search-app/run.py --count 12000 --disk-files 2048`의 격리된 실제 앱 표본이다.
@@ -136,7 +164,7 @@ ReleaseFast에서 앱 호스트와 같은 `smp_allocator`를 사용한 두 실�
 RSS는 편집기·구문 트리·폰트·렌더러를 포함하며 검색 모델의 보관 allocation과 다르다.
 상태표시줄은 앱·자식 프로세스의 footprint를 합산하므로 이 앱 프로세스의 RSS와 같은 수치가 아니다.
 전체 frame 시간과 일반 파일 열기 API의 큰 파일 지연을 뜻하지 않는다.
-최신 main 리베이스 후에도 같은 부하를 재실행했다. 첫 표본의 실측 artifact는 `/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-editor-project-search-app-tfjs2j6u/manifest.json`이다.
+당시 main 리베이스 후에도 같은 부하를 재실행했다. 첫 표본의 실측 artifact는 `/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-editor-project-search-app-tfjs2j6u/manifest.json`이다.
 실제 디스크 결과 클릭·다른 파일 이동까지 포함한 추가 표본은 `/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-editor-project-search-app-7onqfb30/manifest.json`이다.
 리베이스 후 표본은 `/private/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-editor-project-search-app-r630akyk/manifest.json`이다.
 재실행 시 생성되는 manifest는 소스·바이너리·하네스·PNG 해시와 RSS/시간을 결속한다.
@@ -156,5 +184,5 @@ python3 tools/editor-project-search-app/run.py --count 12000 --disk-files 2048
 
 실제 AppKit 입력·마우스와 제품 Metal 읽기로 검색, 한글/이모지의 grapheme 선택, 파일 이동, 하단 도크,
 스크롤·취소를 확인한다. 해시 비교를 제거한 대조군은 같은 preview를 유지한 외부 변경 판정에서 실패했고 복원 후 28개 판정이 다시 통과했다. 이 방법은 직접 AppKit 콜백을 사용하는 부분이 있으므로 물리 두벌식 조합·Enter·후보창
-확인과 구분한다. 현재 실제 OS 입력기 검증은 화면 잠금으로 보류되어 있다. 공유/독립 문서·root 교체·낡은 요청의
+확인과 구분한다. 실제 두벌식 HID 조합·Enter는 추가 제품 실행으로 확인했다. OS 후보창 픽셀과 VoiceOver 조작은 이 증거가 확인하지 않는다. 공유/독립 문서·root 교체·낡은 요청의
 집중 판정과 실제 화면 검증도 같은 것으로 합산하지 않는다. 모든 S2 제품 gate가 끝나기 전에는 완료로 표시하지 않는다.

@@ -357,8 +357,9 @@ CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길�
 - 중립 판정은 `mise run test-editor-project-search-dock`으로 실행한다. 기본 `zig build test`에도 연결한다.
   이 검사는 실제 AppSession 키·IME 라우팅이나 OS 입력기를 증명하지 않는다.
 
-**아직 앱 도크 뷰·키/IME·worker 수신·파일 이동에는 연결하지 않았다.** 앱 RSS 실측에 따른 byte 예산,
-디스크 클릭 재검증, 실제 앱 화면과 IME 검증도 남아 있다. 이 기반 구현을 S2 완료로 표시하지 않는다.
+앱 도크 뷰·키/IME·worker 수신·파일 이동을 연결했다. 앱 RSS 실측과 byte 예산, 디스크 클릭 재검증,
+실제 AppKit·Metal·두벌식 HID 검증의 범위는 [도크 구현·검증](editor-project-search-dock.md)이 소유한다.
+S3/S4 바꾸기 기능이나 전체 파일시스템 호환성까지 완료한 것으로 해석하지 않는다.
 
 ## 구현 순서와 완료 조건
 

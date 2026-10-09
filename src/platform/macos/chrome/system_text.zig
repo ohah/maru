@@ -460,8 +460,11 @@ pub fn prepareRequest(
             var first_run = true;
             for (text.runs) |run| {
                 if (!shapesRun(text, run, max_width)) continue;
+                const copied = try allocator.dupe(u8, run.text);
+                // run 표 확장 전에는 아직 요청이 사본을 소유하지 않는다. append 실패도 사본을 거둔다.
+                errdefer allocator.free(copied);
                 try runs.append(allocator, .{
-                    .text = try allocator.dupe(u8, run.text),
+                    .text = copied,
                     .role = text.text_role,
                     .origin = text.origin,
                     .max_width_px = max_width,

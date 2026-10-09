@@ -18,6 +18,7 @@ const file_tree_mutation_backend = @import("file_tree_mutation_backend.zig");
 const workspace_checkpoint_file = @import("workspace_checkpoint_file.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
+const control_log = std.log.scoped(.control);
 const control_self_origin = maru.session.control_self_origin; // 1g: 붙은 프로세스의 출처 판정(조상 사슬의 첫 제어 터미널)
 const control_self_origin_macos = @import("control_self_origin_macos.zig"); // 1g: 그 판정의 macOS 공급자
 const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터 + 1e dispatchAuthenticated
@@ -6634,8 +6635,8 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
 /// 한 요청을 실 collector + auth(1e capability) + dispatch(1d)로 처리해 응답 바이트(server.cross_gpa 소유)를 만든다.
 /// **1e**: `dispatchAuthenticated`가 auth 프레임의 `{selector, cap_nonce}`(pending)와 라이브 `control_cap_store`로
 /// `(caller, scope)`를 발급한다 — cap_nonce 없으면 기존 metadata:self(§8.4 A2b, 회귀 없음), 있으면 resolve(빈 store라
-/// 지금은 default-deny). **§8.4 self 경로 한계 유지**: nonce 없는 same-uid peer는 임의 surface를 self로 주장할 수 있고
-/// tty/pgrp 검증(1g)은 없다 → 그 한 surface의 metadata만(§8.3 self 필터). `now`=**모노토닉 awake 초**(TTL 판정용, 순수
+/// 지금은 default-deny). **§8.4 1g**: 셀렉터는 서버가 붙은 프로세스의 출처에서 찾은 pane 과 같을 때만 남고(`resolveSelfOrigin`),
+/// browser 확인 grant 의 pane 은 그 찾은 pane 이다. `now`=**모노토닉 awake 초**(TTL 판정용, 순수
 /// 코어에 주입 — 미래 fd 발급도 같은 시계로 expires_at 계산해야 정합; wall-clock 아님, 아래 impl 참조 — 리뷰 [2]).
 /// **1g(control-plane-security §8.4)**: 붙은 프로세스의 출처(연결 스레드가 찾은 조상 사슬의 첫 제어 터미널 프로세스와
 /// 그 세션)를 pane 으로 바꾼다. 그 프로세스가 **지금도** 그 터미널의 foreground 일 때만(지속 세션은 요청마다 다시 본다).
@@ -6647,17 +6648,33 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
 fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_mod.PendingRequest) void {
     const found: ?u64 = blk: {
         const origin = pending.peer_origin orelse break :blk null;
-        if (!control_self_origin.stillForeground(control_self_origin_macos.provider(), origin)) break :blk null;
+        if (!control_self_origin.stillForeground(control_self_origin_macos.provider(), origin)) {
+            control_log.info("control: caller's foreground ancestor pid={d} is no longer foreground — no pane", .{origin.ctty_pid});
+            break :blk null;
+        }
         for (refs) |ref| {
             const app = ref.app_session orelse continue;
             if (app.surfaceForSessionLeader(origin.sid)) |id| break :blk id;
         }
+        control_log.info("control: caller's session {d} is not a maru pane — no pane", .{origin.sid});
         break :blk null;
     };
-    pending.browser_pane = found;
-    if (pending.selector) |claimed| {
-        if (found == null or found.? != claimed) pending.selector = null;
-    }
+    if (found == null) if (pending.peer_reject) |reason| if (pending.selector != null)
+        control_log.info("control: pane claim not verified ({s}) — browser requests need a caller inside a maru pane", .{@tagName(reason)});
+    const a = control_self_origin.anchors(found, pending.selector);
+    pending.selector = a.selector;
+    pending.browser_pane = a.browser_pane;
+}
+
+/// 확인 모달을 기다리는 동안(최대 `grant_prompt_timeout`) 출처가 바뀌었을 수 있다 — 승인 뒤 재처리 전에 그 프로세스가 아직
+/// 같은 프로세스이고 foreground 인지 다시 본다. 아니면 pane 을 비워 그 요청은 unauthorized 가 된다(grant 는 승인대로 남는다).
+fn recheckSelfOrigin(pending: *control_server_mod.PendingRequest) void {
+    if (pending.browser_pane == null) return;
+    const origin = pending.peer_origin orelse {
+        pending.browser_pane = null;
+        return;
+    };
+    if (!control_self_origin.stillForeground(control_self_origin_macos.provider(), origin)) pending.browser_pane = null;
 }
 
 fn handleControlRequest(
@@ -6750,6 +6767,7 @@ fn resolveGrantPrompt(
         return;
     };
     // 재-dispatch: grant가 인가 → .browser/.subscribe/.immediate. grant async_id를 그대로 완료 상관자로 재사용.
+    recheckSelfOrigin(pending);
     const disp2 = control_dispatch.dispatchAuthenticatedAnchored(server.cross_gpa, pending.request_bytes, snapshot, pending.selector, pending.browser_pane, pending.cap_nonces, &control_cap_store, &control_pane_grant_store, now) catch {
         _ = server.completeInFlight(e.async_id, null);
         return;

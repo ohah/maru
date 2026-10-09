@@ -78,11 +78,13 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
 tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)에는 셀렉터가 없다** — 재실행 뒤 낡은 번호가 다른 pane 을 가리키지
 않게 일부러 비운다(`persistentSpawnRequest`). 그래서 그 pane 의 에이전트는 browser 확인 모달(§9.2 Model B)을 아예 받지 못했다.
 
-- **연결 스레드**(auth 프레임을 읽은 직후 — `LOCAL_PEERPID` 는 소켓에 마지막으로 쓴 프로세스라 그 프레임을 쓴 프로세스다):
-  peer 에서 부모 쪽으로 거슬러 올라가 **제어 터미널을 가진 첫 프로세스**를 찾는다(`proc_pidinfo(PROC_PIDTBSDINFO)`). 그
-  프로세스는 그 터미널의 foreground(`pgid == tpgid`)여야 하고, 거치는 프로세스는 모두 서버와 같은 uid 여야 한다. 연결을 받은 뒤에
-  시작한 peer 는 pid 를 물려받은 다른 프로세스라 거절한다(시작 시각). 깊이 상한 16. 찾은 프로세스의 **세션 번호**(`getsid`)를
-  남긴다.
+- **연결 스레드**(auth 프레임을 읽은 직후 — `LOCAL_PEERPID` 는 그 소켓을 마지막으로 다룬 프로세스라, 프레임을 읽은 직후가
+  그 프레임을 쓴 프로세스에 가장 가깝다): peer 에서 부모 쪽으로 거슬러 올라가 **자기 제어 터미널의 foreground 그룹에 속한 첫
+  조상**(`pgid == tpgid`)을 찾는다(`proc_pidinfo(PROC_PIDTBSDINFO)`) — 요청이 「지금 그 pane 의 foreground 작업(셸이 프롬프트에
+  있으면 셸)」에서 나왔는가(사용자 결정 2026-10-09). Claude Code(명령을 setsid — 터미널 없음)와 Codex(새 process group — 터미널은
+  있지만 foreground 아님)가 둘 다 이것으로 통과한다(둘 다 실측). 거치는 프로세스는 모두 서버와 같은 uid 여야 한다. 연결을 받은
+  뒤에 시작한 peer, 자식보다 늦게 시작한 조상은 pid 를 물려받은 다른 프로세스라 거절한다(시작 시각). 깊이 상한 16. 찾은 프로세스의
+  **세션 번호**(`getsid`)를 남긴다.
 - **메인**(요청마다): 그 프로세스가 지금도 같은 프로세스(시작 시각)·foreground·같은 세션인지 다시 보고, 세션 번호와 같은
   뿌리 pid(`TermRuntimeBackend.sessionLeaderPid` — in-process 는 PTY 의 `child_pid`, 세션 호스트는 host 가 관측에 실어 보낸
   `child_pid`)를 가진 살아 있는 터미널 pane 을 찾는다. pane 의 셸은 뿌리(`/usr/bin/login`)가 연 세션 안에 있어 세션 번호 = 뿌리
@@ -92,12 +94,20 @@ tty」 검사는 이 길을 전부 막는다. (2) **세션 유지 pane(기본)�
   남고, 다르거나 못 찾았으면 버린다 — metadata 는 셀렉터 없는 연결처럼 전체(아래 문단, 사용자 결정 「목록은 지금처럼」), browser 는
   찾은 pane 으로만 묻는다. 그래서 남의 pane 번호를 대도 그 pane 의 기억된 grant 를 못 탄다(1g 전에는 in-process pane 의 grant 를
   모달 없이 탔다).
-- **통과·거절**(실측 — `mise run macos-control-self-origin-smoke`, 세션 유지·in-process 두 모드): pane 셸에서 직접 → 통과, pane 안
-  setsid 자식(에이전트 도구 모양) → 통과, pane 안 백그라운드 작업(job control) → 거절, pane 밖에서 pane 번호를 댐 → 거절.
-  launchd 아래 데몬·고아는 제어 터미널 조상이 없어 거절, 다른 터미널은 세션이 달라 거절.
-- **한계**: 최선의 노력이지 하드 경계가 아니다 — 같은 uid 는 그 pane 안에서 명령을 띄울 수 있다. pane 안에서 띄운 tmux·screen·
-  `ssh localhost` 안의 명령은 첫 터미널이 바깥 PTY 라 거절된다. 비대화형 대본의 `&`(job control 꺼짐)는 foreground 대본과 같은
-  process group 이라 foreground 로 본다. 구 host(관측에 `child_pid` 없음)의 pane 은 찾지 못한다.
+- **통과·거절**(실측 — `mise run macos-control-self-origin-smoke`, 세션 유지·in-process 두 모드): pane 셸에서 직접, pane 안
+  setsid 자식(Claude Code 모양), 새 process group 자식(Codex 모양), 셸이 쉬는 동안의 `&` → 통과. 다른 작업이 foreground 인
+  동안의 `&`, pane 밖에서 pane 번호를 댐 → 거절. launchd 아래 데몬·고아는 제어 터미널 조상이 없어 거절, 다른 터미널은 세션이 달라
+  거절. 확인 모달을 승인한 뒤의 재처리 전에 그 조상이 아직 foreground 인지 다시 본다.
+- **누가 grant 를 쓰나**: grant 는 pane 단위(Model B)라, 그 pane 의 foreground 작업의 **자손 전부**가 쓴다 — 에이전트 본체만이
+  아니라 그것이 띄운 도구·MCP 서버·플러그인, pane 셸이 쉬는 동안 그 셸이 띄워 둔 setsid 데몬도. 연결 하나의 출처는 연결에
+  고정되고, 같은 fd 를 물려받은 프로세스는 그 조상이 foreground 인 동안 같은 출처로 요청한다.
+- **진단**: 출처를 못 찾거나 셀렉터를 버린 이유는 앱 로그(`control` info)에 남는다. 클라이언트에게는 §8.3 균일 unauthorized 다.
+- **한계**: 최선의 노력이지 하드 경계가 아니다 — 같은 uid 는 그 pane 안에서 명령을 띄울 수 있다(rc 파일, 접근성 키 입력 등).
+  pane 과 출처를 세션 번호 = 뿌리 pid 라는 숫자로만 잇는다 — pane 의 셸이 끝난 뒤 앱이 그것을 보기 전의 짧은 틈에 같은 pid 를 받은
+  세션은 가리지 못한다(터미널 장치 대조는 세션 호스트 쪽 PTY 장치 번호가 필요해 후속). pane 안에서 띄운 터미널 안의 터미널(tmux·
+  screen·`ssh localhost`·`script`·편집기 내장 터미널) 안의 명령은 그 안쪽 터미널의 세션이라 거절된다. 비대화형 대본의 `&`(job
+  control 꺼짐)는 foreground 대본과 같은 process group 이다. 구 host(관측에 `child_pid` 없음)나 재접속 뒤 관측이 오기 전의 pane 은
+  찾지 못한다. `browser.subscribe` 이벤트 스트림은 등록 뒤 출처를 다시 보지 않는다.
 
 셀렉터를 대는 쪽이 **더 좁다**는 것이 낯설게 읽히지만 그 방향이 맞다 — 셀렉터는 권한이 아니라 "나는 이 surface 다" 라는 **주장**이고, 주장한 만큼만 보는 것이 self-origin 의 뜻이다. 1g 가 4단계 tty 검증을 붙이면 그 주장이 비로소 검증되고, 그때 이 비대칭은 "검증된 좁힘 vs 미검증 넓힘" 이라는 뜻을 갖는다.
 

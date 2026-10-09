@@ -1,8 +1,9 @@
 //! 1g self-origin 판정(`maru.session.control_self_origin`)의 macOS 공급자 — 소켓 peer pid(`LOCAL_PEERPID`),
 //! 프로세스 정보(`proc_pidinfo(PROC_PIDTBSDINFO)`), 세션 번호(`getsid`).
 //!
-//! **peer pid 는 auth 프레임을 읽은 뒤에 읽는다.** `LOCAL_PEERPID` 는 소켓에 마지막으로 쓴 프로세스(xnu `last_pid`)라,
-//! 셀렉터를 쓴 그 프로세스를 가리키는 것은 그 프레임을 읽은 직후다. 그 사이 끝나고 pid 가 재사용되는 경우는 시작
+//! **peer pid 는 auth 프레임을 읽은 뒤에 읽는다.** `LOCAL_PEERPID` 는 그 소켓을 마지막으로 다룬 프로세스(xnu `last_pid`)라,
+//! 그 프레임을 쓴 프로세스에 가장 가까운 것은 그 프레임을 읽은 직후다(같은 fd 를 나눠 가진 다른 프로세스가 끼어들 수 있지만
+//! 그것은 이미 그 fd 를 쥔 협조자다). 그 사이 끝나고 pid 가 재사용되는 경우는 시작
 //! 시각(연결을 받은 뒤에 시작했으면 거절)으로 가른다.
 //!
 //! **pane 의 뿌리(`/usr/bin/login`)는 root 소유라 `proc_pidinfo` 로 못 읽는다**(EPERM — 같은 사용자만). 그래서 판정은

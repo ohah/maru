@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Exercise real CLI failure contracts using private HOME/files and a fake endpoint."""
+import argparse
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import tempfile
+import threading
+
+
+def verify(cli, root):
+    home = root / 'home'
+    home.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('MARU_', 'XDG_', 'DYLD_'))}
+    env.update(HOME=str(home), CFFIXED_USER_HOME=str(home), XDG_CACHE_HOME=str(root / 'cache'))
+    records = []
+
+    def run(args, expected):
+        p = subprocess.run([str(cli), *args], cwd=root, env=env, capture_output=True, text=True, timeout=15)
+        records.append(dict(args=args, exit=p.returncode, stdout=p.stdout, stderr=p.stderr))
+        assert p.returncode == expected, records[-1]
+        assert 'panic' not in p.stderr and 'stack trace' not in p.stderr, records[-1]
+        return p
+
+    link = home / '.local/bin/maru'
+    link.parent.mkdir(parents=True)
+    link.write_text('KEEP INSTALL\n')
+    for args, code in [(['--help'], 0), (['-h'], 0), (['install-cli'], 1), (['--help', 'extra'], 1), (['unknown'], 1)]:
+        run(['install-cli', *args], code)
+        assert not link.is_symlink() and link.read_text() == 'KEEP INSTALL\n'
+    run(['install-cli'], 0)
+    assert link.is_symlink() and link.resolve() == cli
+    # Invalid requests also preserve an already installed symlink.
+    run(['install-cli', 'extra'], 1)
+    assert link.is_symlink() and link.resolve() == cli
+    source = root / 'in.trace'
+    source.write_text('maru.trace.v1\n')
+    output = root / 'out.trace'
+    output.write_text('KEEP OUTPUT\n')
+    for args in [['anonymize', 'in.trace', 'out.trace', 'extra'], ['anonymize', 'missing', 'out.trace', 'extra']]:
+        run(['trace', *args], 1)
+        assert output.read_text() == 'KEEP OUTPUT\n'
+    for args in [['--help'], ['-h'], ['anonymize', '--help'], ['anonymize', '-h']]:
+        assert 'usage:' in run(['trace', *args], 0).stdout
+    run(['trace', 'anonymize', 'in.trace', 'out.trace'], 0)
+    assert output.read_text().startswith('maru.trace.v1')
+    assert run(['trace', 'anonymize', 'in.trace'], 0).stdout.startswith('maru.trace.v1')
+    help_text = run(['--help'], 0).stdout
+    for command in ['incidents', 'control', 'agent-events', 'agent-hooks', 'browser']:
+        assert '  ' + command + ' ' in help_text, command
+    run(['editor', 'editor'], 1)
+    control = root / 'cache/maru/control'
+    control.mkdir(parents=True)
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(control / 'fixture.sock'))
+    listener.listen()
+    listener.settimeout(10)
+    plans = []
+    for args, result in [(['sessions', 'list'], []), (['browser', 'get-url', '--surface', '1'], {'url': 'https://example.invalid/'}), (['browser', 'navigate', '--surface', '1', 'https://example.invalid/'], {'ok': True}), (['editor', 'lsp', 'trust', 'list'], {'decisions': []})]:
+        for kind in ['success', 'error', 'malformed', 'wrong-envelope']:
+            plans.append((args, kind, result))
+    # Empty wrapped results are successful, not protocol failures.
+    plans += [(['browser', 'snapshot', '--surface', '1'], 'success', {'snapshot': {'tree': []}}), (['browser', 'console', '--surface', '1'], 'success', {'console': []})]
+    errors = []
+
+    def serve():
+        try:
+            for _, kind, result in plans:
+                conn, _ = listener.accept()
+                with conn:
+                    conn.settimeout(10)
+                    f = conn.makefile('rb')
+                    json.loads(f.readline())
+                    req = json.loads(f.readline())
+                    if kind == 'malformed':
+                        wire = 'invalid-json'
+                    elif kind == 'wrong-envelope':
+                        wire = json.dumps({'jsonrpc': '2.0', 'method': 'fixture.notification'})
+                    elif kind == 'error':
+                        wire = json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'error': {'code': -32601, 'message': 'fixture error'}})
+                    else:
+                        wire = json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': result})
+                    conn.sendall((wire + '\n').encode())
+                    f.close()
+        except Exception as exc:
+            errors.append(repr(exc))
+        finally:
+            listener.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    for args, kind, _ in plans:
+        run(args, 0 if kind == 'success' else 1)
+    thread.join(timeout=10)
+    assert not thread.is_alive() and not errors, errors
+    (root / 'results.json').write_text(json.dumps(records, indent=2) + '\n')
+    return len(records)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cli', type=Path, default=Path('zig-out/bin/maru'))
+    parser.add_argument('--repeat', type=int, default=1)
+    opts = parser.parse_args()
+    cli = opts.cli.resolve(strict=True)
+    for index in range(opts.repeat):
+        root = Path(tempfile.mkdtemp(prefix='maru-cli-failure-', dir='/tmp'))
+        count = verify(cli, root)
+        print(f'iteration {index + 1}: {count} process checks passed; evidence: {root}', flush=True)
+
+
+if __name__ == '__main__':
+    main()

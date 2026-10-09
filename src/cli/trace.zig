@@ -4,9 +4,10 @@
 
 const std = @import("std");
 
-pub const ParseError = error{ UnknownSubcommand, MissingInput };
+pub const ParseError = error{ UnknownSubcommand, MissingInput, UnexpectedArgument };
 
 pub const Command = union(enum) {
+    help,
     /// `maru trace anonymize <input> [output]` — trace의 PII(경로·IP·user@host·유저명)를 익명화한다.
     /// output이 없으면 stdout으로 낸다.
     anonymize: struct { input: []const u8, output: ?[]const u8 },
@@ -14,9 +15,13 @@ pub const Command = union(enum) {
 
 /// args = "trace" 뒤 토큰들(첫 토큰이 서브커맨드).
 pub fn parse(args: []const []const u8) ParseError!Command {
+    if (args.len == 1 and (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h"))) return .help;
+    if (args.len == 2 and std.mem.eql(u8, args[0], "anonymize") and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) return .help;
     if (args.len == 0) return error.UnknownSubcommand;
     if (std.mem.eql(u8, args[0], "anonymize")) {
         if (args.len < 2) return error.MissingInput;
+        // Extra tokens must never reach the file-writing runner.
+        if (args.len > 3) return error.UnexpectedArgument;
         return .{ .anonymize = .{ .input = args[1], .output = if (args.len >= 3) args[2] else null } };
     }
     return error.UnknownSubcommand;
@@ -36,4 +41,10 @@ test "trace CLI parse: anonymize input [output]" {
     try std.testing.expectError(error.MissingInput, parse(&[_][]const u8{"anonymize"}));
     try std.testing.expectError(error.UnknownSubcommand, parse(&[_][]const u8{"bogus"}));
     try std.testing.expectError(error.UnknownSubcommand, parse(&[_][]const u8{}));
+}
+
+test "trace rejects extra arguments before file IO and supports help" {
+    try std.testing.expectError(error.UnexpectedArgument, parse(&.{ "anonymize", "in", "out", "extra" }));
+    try std.testing.expect((try parse(&.{"--help"})) == .help);
+    try std.testing.expect((try parse(&.{ "anonymize", "-h" })) == .help);
 }

@@ -567,3 +567,10 @@ OpenSSH 는 `exec` 을 사용자 셸에 물려 돌리므로, `maru` 가 없어�
 - ~~`web-panel.md` 작성~~ **완료** — WKWebView 합성·z-order·per-pane rect ABI는 [웹 패널 인프라](web-panel.md)가 단일 출처. ABI·모달 레이어 분리 구현은 Phase 4.
 - ~~zntc 프론트엔드 dev/build/bundle 편입·lockfile/캐시/라이선스 재확인~~ **FP2+FP4 완료** — `web/README.md`의 명령·버전·보안 경계를 단일 실행 지침으로 둔다. `.app` asset 연결과 production dependency graph의 `THIRD_PARTY_NOTICES.txt` 동봉도 FP4에서 닫았다.
 - `MARU_SESSION` redaction, capability nonce redaction, `metadata:self` self-origin 실측 artifact — Phase 1.
+
+### CLI 응답 오류 종료
+
+`sessions list`와 `session get`, `browser`의 응답 렌더 경로는 서버의 JSON-RPC error,
+손상된 JSON, response가 아닌 메시지 또는 렌더러가 판정한 result 오류를 표시한 뒤 exit 1로
+종료한다. 정상 응답은 exit 0이며 빈 목록도 성공이다. 진단 출력 자체의 쓰기 실패와
+서버 응답의 실패 판정은 분리한다. shell 호출자는 표시 문자열 대신 종료 코드를 사용할 수 있다.

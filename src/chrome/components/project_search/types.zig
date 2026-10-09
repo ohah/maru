@@ -34,11 +34,19 @@ pub const Metrics = struct {
     row: u32,
     inset: u32,
     header: u32,
+    toolbar_rows: u32,
+    gap: u32,
     pub fn resolve(scale: u32, expanded: bool) Metrics {
         return resolveReplace(scale, expanded, false);
     }
     pub fn resolveReplace(scale: u32, expanded: bool, replacing: bool) Metrics {
+        return resolveForWidth(scale, expanded, replacing, 100000);
+    }
+    pub fn resolveForWidth(scale: u32, expanded: bool, replacing: bool, width: u32) Metrics {
         const row = spacing.pointsPx(28, scale);
-        return .{ .row = row, .inset = spacing.pointsPx(6, scale), .header = row * (if (expanded) @as(u32, 6) else 4) + row * @as(u32, @intFromBool(replacing)) };
+        const inset = spacing.pointsPx(6, scale);
+        const gap = spacing.px(.xxs, scale);
+        const toolbar_rows: u32 = if (width < row * 8 + gap * 6 + inset * 2) 2 else 1;
+        return .{ .row = row, .inset = inset, .gap = gap, .toolbar_rows = toolbar_rows, .header = row * ((if (expanded) @as(u32, 6) else 4) + @as(u32, @intFromBool(replacing)) + toolbar_rows - 1) };
     }
 };

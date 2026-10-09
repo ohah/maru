@@ -16,6 +16,40 @@ fn make(a: std.mem.Allocator, p: types.Props) !build.Frame {
 fn props(width: f32, height: f32, scale: u32) types.Props {
     return .{ .viewport = .{ .width = width, .height = height }, .scale = scale, .generation = 7, .fields = .{ "한글", "", "" }, .field_labels = .{ "검색", "포함", "제외" }, .focused = 0, .options = .{ false, false, false }, .option_labels = .{ "대소문자", "단어", "정규식", "필터", "검색", "취소" }, .status = "검색 중", .scopes = "프로젝트", .expanded = false, .running = true, .can_search = true, .rows = &.{ .{ .label = "a.zig", .index = 99, .file = true }, .{ .label = "foo", .index = 100 } }, .shift = 11 };
 }
+test "project search dock replacement field and readonly diff share action geometry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var p = props(240, 300, 1000);
+    p.replacing = true;
+    p.previewing = true;
+    p.focused = 3;
+    p.replacement = "한글";
+    p.rows = &.{.{ .label = "- foo", .index = 0, .enabled = false, .kind = .removed }};
+    const f = try make(a, p);
+    var table = ids.Table.init(@constCast(f.actions));
+    table.count = f.actions.len;
+    try std.testing.expectEqual(@as(u32, 2), f.metrics.toolbar_rows);
+    const narrow_option = f.tree.entries[f.tree.find(build.optionId(0)).?].rect;
+    const narrow_run = f.tree.entries[f.tree.find(build.optionId(4)).?].rect;
+    try std.testing.expect(narrow_run.y > narrow_option.y);
+    const field = f.tree.entries[f.tree.find(build.fieldId(3)).?].rect;
+    const field_hit = interaction.hitAction(f.tree, field.x + 10, field.y + field.height / 2).?;
+    try std.testing.expectEqualDeep(ids.Intent{ .field = 3 }, table.resolve(field_hit.action_id, 7).?);
+    const back = f.tree.entries[f.tree.find(build.optionId(7)).?].rect;
+    const back_hit = interaction.hitAction(f.tree, back.x + back.width / 2, back.y + back.height / 2).?;
+    try std.testing.expectEqualDeep(ids.Intent{ .option = 7 }, table.resolve(back_hit.action_id, 7).?);
+    const row = f.tree.entries[f.tree.find(build.rowId(0)).?].rect;
+    try std.testing.expect(interaction.hitAction(f.tree, row.x + 10, @max(row.y, @as(f32, @floatFromInt(f.metrics.header))) + 5) == null);
+    p.viewport.width = 800;
+    const wide = try make(a, p);
+    const wide_option = wide.tree.entries[wide.tree.find(build.optionId(0)).?].rect;
+    const wide_run = wide.tree.entries[wide.tree.find(build.optionId(4)).?].rect;
+    try std.testing.expectEqual(@as(u32, 1), wide.metrics.toolbar_rows);
+    try std.testing.expectEqual(wide_option.y, wide_run.y);
+    try std.testing.expectEqual(@as(f32, @floatFromInt(wide.metrics.row)), wide_run.width);
+    try std.testing.expect(wide_run.x - wide_option.x > 500);
+}
 test "project search dock fixed header and row identity share published geometry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -25,7 +59,7 @@ test "project search dock fixed header and row identity share published geometry
     table.count = f.actions.len;
     const field = interaction.hitAction(f.tree, 20, 10).?;
     try std.testing.expectEqualDeep(ids.Intent{ .field = 0 }, table.resolve(field.action_id, 7).?);
-    const hit = interaction.hitAction(f.tree, 20, 130).?;
+    const hit = interaction.hitAction(f.tree, 20, @as(f32, @floatFromInt(f.metrics.header)) + 18).?;
     try std.testing.expectEqualDeep(ids.Intent{ .row = 100 }, table.resolve(hit.action_id, 7).?);
     try std.testing.expect(interaction.hitAction(f.tree, 20, 201) == null);
 }
@@ -51,8 +85,8 @@ test "project search dock stale generation cannot release an old pressed row" {
     defer arena.deinit();
     const f = try make(arena.allocator(), props(240, 200, 1000));
     var state: interaction.InteractionState = .{};
-    _ = try interaction.dispatch(&state, f.tree, .{ .phase = .down, .x_px = 20, .y_px = 130, .generation = 7, .timestamp_ns = 0 });
-    const result = try interaction.dispatch(&state, f.tree, .{ .phase = .up, .x_px = 20, .y_px = 130, .generation = 8, .timestamp_ns = 0 });
+    _ = try interaction.dispatch(&state, f.tree, .{ .phase = .down, .x_px = 20, .y_px = @as(f64, @floatFromInt(f.metrics.header)) + 18, .generation = 7, .timestamp_ns = 0 });
+    const result = try interaction.dispatch(&state, f.tree, .{ .phase = .up, .x_px = 20, .y_px = @as(f64, @floatFromInt(f.metrics.header)) + 18, .generation = 8, .timestamp_ns = 0 });
     try std.testing.expect(result.action == null);
 }
 
@@ -73,8 +107,10 @@ test "project search dock hidden fields and unavailable search commands have no 
             else => {},
         }
     }
-    try std.testing.expect(interaction.hitAction(f.tree, 135, 40) == null);
-    try std.testing.expect(interaction.hitAction(f.tree, 165, 40) == null);
+    for ([_]usize{ 4, 5 }) |index| {
+        const rect = f.tree.entries[f.tree.find(build.optionId(index)).?].rect;
+        try std.testing.expect(interaction.hitAction(f.tree, rect.x + rect.width / 2, rect.y + rect.height / 2) == null);
+    }
 }
 
 test "project search dock text clips belong to individual fields buttons and rows" {

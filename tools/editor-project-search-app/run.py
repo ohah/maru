@@ -175,7 +175,7 @@ document.read_bytes() != original):
     if args.narrow_hidden:
         expected += ("geometry-hidden",)
     if args.replace_preview:
-        expected += ("replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk")
+        expected += ("replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict")
     if args.matrix:
         expected += ("shared", "independent", "zero-override", "root-changed", "stale-release")
     for label in expected:

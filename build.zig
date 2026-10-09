@@ -5243,7 +5243,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }), .filters = &.{".test.project search dock"} });
     const run_search_dock = b.addRunArtifact(search_dock_tests);
-    run_search_dock.addArg("--maru-expect-tests=25");
+    run_search_dock.addArg("--maru-expect-tests=26");
     b.step("test-editor-project-search-dock", "Run project search grouping and dock geometry judges").dependOn(&run_search_dock.step);
     const replace_preview_module = b.createModule(.{ .root_source_file = b.path("src/project_replace_preview_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
     replace_preview_module.addIncludePath(pcre2_dep.?.path("src"));

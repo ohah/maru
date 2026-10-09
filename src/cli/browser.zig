@@ -844,12 +844,19 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     .object => |oo| oo,
                     else => continue,
                 };
-                try w.print("surface {d}  {s}  {s}  \"{s}\"\n", .{
+                try w.print("surface {d}  {s}  {s}  \"{s}\"", .{
                     intField(o.get("id")) orelse 0,
                     strField(o.get("panel_kind")),
                     strField(o.get("url")),
                     strField(o.get("title")),
                 });
+                // W9-0: 엔진(뒤에 붙인다 — 앞 칸을 읽던 대본이 그대로 돈다). 지원하는 명령이 없으면 그렇다고 적는다. 구 서버는 생략.
+                if (o.get("engine")) |engine| {
+                    try w.print("  engine={s}", .{strField(engine)});
+                    if (o.get("methods")) |methods| if (methods == .array and methods.array.items.len == 0)
+                        try w.writeAll(" (browser commands not supported yet)");
+                }
+                try w.writeAll("\n");
             }
         },
         .navigate => {
@@ -1711,6 +1718,15 @@ test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 
         const out = w.buffered();
         try testing.expect(std.mem.indexOf(u8, out, "surface 3  browser  https://naver.com/  \"Browser\"") != null);
         try testing.expect(std.mem.indexOf(u8, out, "surface 7  markdown  ") != null);
+    }
+    // W9-0: 엔진과 「지원하는 명령 없음」을 줄 끝에 — 앞 칸은 그대로다.
+    {
+        var buf: [512]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://a/\",\"title\":\"A\",\"panel_kind\":\"browser\",\"engine\":\"webkit\",\"methods\":[\"navigate\"]},{\"id\":4,\"url\":\"https://b/\",\"title\":\"B\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"methods\":[]}]}}", .list, &w);
+        const out = w.buffered();
+        try testing.expect(std.mem.indexOf(u8, out, "surface 3  browser  https://a/  \"A\"  engine=webkit\n") != null);
+        try testing.expect(std.mem.indexOf(u8, out, "surface 4  browser  https://b/  \"B\"  engine=chromium (browser commands not supported yet)\n") != null);
     }
     // 빈 목록.
     {

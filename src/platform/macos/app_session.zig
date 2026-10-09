@@ -18849,6 +18849,8 @@ pub const AppSession = struct {
                                     // "격리 config를 쓰는가"다. FP16에서 `.html`/`.pdf` 파일 Term도 여기서는 untrusted가 맞으므로
                                     // 파일 entry 제외 조건을 **적용하지 않는다**.
                                     .trust = if (term.web_panel_kind == .browser) .untrusted else .trusted, // §8.1
+                                    // W9-0: 탭 단위 엔진 결정(브라우저가 만들어졌는지와 무관 — `isOsrSurface` 는 만들어진 뒤에만 참이다).
+                                    .engine = if (web_ops.isOsrTerm(term)) .chromium else .webkit,
                                 },
                             },
                         });

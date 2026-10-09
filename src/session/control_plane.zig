@@ -86,6 +86,10 @@ pub const ErrorCode = enum(i64) {
     result_too_large = -32005,
     script_error = -32006,
     resource_busy = -32007,
+    /// 대상 web surface 의 브라우저 엔진이 이 메서드를 (아직) 지원하지 않는다(W9-0 — Chromium 탭은 W9 단계마다 늘어난다).
+    /// 인가 판정 **전에** 답한다 — 확인 모달을 띄웠다가 승인 뒤에 실패하지 않게. 대상 id·엔진은 ungated `browser.list` 가 이미
+    /// 알려 주므로 새 oracle 이 아니다. data 에 `{engine}` 을 싣는다. 코드값은 impl-defined server-error 범위에서 maru 가 택했다.
+    unsupported_by_engine = -32008,
 
     /// 이 코드의 표준 짧은 message(JSON-RPC §5.1의 관례). 에러 응답 build 편의.
     pub fn defaultMessage(self: ErrorCode) []const u8 {
@@ -102,6 +106,7 @@ pub const ErrorCode = enum(i64) {
             .result_too_large => "Result too large",
             .script_error => "Script error",
             .resource_busy => "Resource busy",
+            .unsupported_by_engine => "Not supported by this browser engine",
         };
     }
 };

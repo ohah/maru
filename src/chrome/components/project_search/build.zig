@@ -16,7 +16,7 @@ pub fn rowId(index: usize) u64 {
 pub const Buffers = struct { nodes: []tree.UiNode, entries: []tree.RectEntry, items: []layout.Item, flex: []layout.FlexScratch, rects: []layout.UiRect, actions: []ids.Entry };
 pub const Frame = struct { tree: tree.UiRectTree, actions: []const ids.Entry, metrics: types.Metrics };
 pub fn size(rows: usize) usize {
-    return rows +| 40;
+    return rows +| 41;
 }
 pub fn build(p: types.Props, b: Buffers) !Frame {
     if (!std.math.isFinite(p.viewport.width) or p.viewport.width < 0 or p.viewport.width >= 4294967296.0) return error.InvalidGeometry;
@@ -38,15 +38,15 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
         .paint = .{ .background = .surface_bg, .shadow = .none, .border_widths_px = .{ 1, 1, 1, 1 }, .border = .muted_fg, .corner_radii_px = .{ 2, 2, 2, 2 } },
         .semantics = .{ .role = .text, .label = if (index == 3) p.replacement_label else p.field_labels[index], .value = if (index == 3) p.replacement else p.fields[index], .focusable = true, .selected = p.focused == index },
     }, &.{});
-    const opts = b.nodes[n..][0..9];
-    n += 9;
+    const opts = b.nodes[n..][0..10];
+    n += 10;
     for (opts, 0..) |*node, index| node.* = tree.button(.{
         .id = optionId(index),
         .variant = if (selected(p, index)) .secondary else .ghost,
         .style = .{ .width = .{ .px = @floatFromInt(m.row) }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } },
         .action = try table.append(p.generation, if (index < 4) .{ .option = index } else if (index == 4) .run else if (index == 5) .cancel else .{ .option = index }, commandEnabled(p, index)),
         .paint = .{ .shadow = .none },
-        .semantics = .{ .role = .button, .label = if (index == 8) p.pane_label else if (index == 6) p.replace_label else if (index == 7) p.back_label else p.option_labels[index], .selected = selected(p, index), .enabled = commandEnabled(p, index) },
+        .semantics = .{ .role = .button, .label = if (index == 9) p.apply_label else if (index == 8) p.pane_label else if (index == 6) p.replace_label else if (index == 7) p.back_label else p.option_labels[index], .selected = selected(p, index), .enabled = commandEnabled(p, index) },
     });
     // Aa·단어·정규식은 검색어와 같은 행의 오른쪽에 둔다. 입력 폭도 실제 슬롯 폭이다.
     const query_nodes = b.nodes[n..][0..4];
@@ -57,7 +57,7 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
     if (!m.query_inline) header[1] = tree.container(.{ .id = 43, .direction = .row, .justify = .end, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, opts[0..3]);
     const groups = b.nodes[n..][0..2];
     n += 2;
-    for (groups, 0..) |*node, index| node.* = tree.container(.{ .id = 40 + index, .style = .{ .width = .{ .px = @floatFromInt(m.row * 3 + m.gap * 2) }, .height = .{ .px = @floatFromInt(m.row) }, .gap = @floatFromInt(m.gap), .flex = .{ .shrink = 0 } }, .direction = .row }, opts[3 + index * 3 ..][0..3]);
+    for (groups, 0..) |*node, index| node.* = tree.container(.{ .id = 40 + index, .style = .{ .width = .{ .px = @floatFromInt(m.row * (if (index == 0) @as(u32, 3) else 4) + m.gap * (if (index == 0) @as(u32, 2) else 3)) }, .height = .{ .px = @floatFromInt(m.row) }, .gap = @floatFromInt(m.gap), .flex = .{ .shrink = 0 } }, .direction = .row }, opts[3 + index * 3 ..][0..if (index == 0) @as(usize, 3) else 4]);
     const toolbar_style: layout.UiStyle = .{ .height = .{ .px = @floatFromInt(m.row) }, .padding = .{ .left = @floatFromInt(m.inset), .right = @floatFromInt(m.inset) }, .flex = .{ .shrink = 0 } };
     const toolbar_start: usize = 1 + @as(usize, @intFromBool(!m.query_inline));
     var tail: usize = toolbar_start + 1;
@@ -105,5 +105,5 @@ fn selected(p: types.Props, index: usize) bool {
 }
 
 fn commandEnabled(p: types.Props, index: usize) bool {
-    return if (index == 8) p.can_open_pane else if (index == 4) p.can_search else if (index == 5) p.running else if (index == 7) p.previewing else true;
+    return if (index == 9) p.can_apply else if (index == 8) p.can_open_pane else if (index == 4) p.can_search else if (index == 5) p.running else if (index == 7) p.previewing else true;
 }

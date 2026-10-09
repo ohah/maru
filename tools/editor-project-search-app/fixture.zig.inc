@@ -47,6 +47,13 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
         std.debug.print("SEARCH_MATRIX stage={d} matches={d} groups={d}\n", .{stage, state.result.model.matches, state.result.model.groups.items.len});
         return 1;
     }
+    if (stage >= 26 and stage <= 28) {
+        if (term.surfaceId() != editor_project_search_original_surface) return 0;
+        const renamed = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "renamed") != null;
+        if (stage == 26) return if (renamed and !editor_ops.isDirty(term) and term.rt.editorDocument().history.undo_len > 0) 1 else -1;
+        if (stage == 27) return if (!renamed and editor_ops.isDirty(term)) 1 else -1;
+        return if (!renamed and !editor_ops.isDirty(term)) 1 else -1;
+    }
     if (stage == 23) return if (state.result.phase == .complete) 1 else 0;
     if (stage == 24) return if (state.preview.phase == .ready) 1 else if (state.preview.phase == .conflict or state.preview.phase == .failed) -1 else 0;
     if (stage == 25) {
@@ -238,6 +245,10 @@ export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
 export fn maru_editor_project_search_coordinate(axis: u32) callconv(.c) f64 {
     const self = editor_project_search_session orelse return -1;
     if (!@import("editor/search/dock.zig").publish(self)) return -1;
+    if (editor_project_search_probe_stage == 25) {
+        for (self.editor_search.entries.items) |entry| if (entry.id == maru.chrome.components.project_search.build.optionId(9)) return if (axis == 0) entry.rect.x + entry.rect.width / 2 else entry.rect.y + entry.rect.height / 2;
+        return -1;
+    }
     if (editor_project_search_probe_stage == 20 or editor_project_search_probe_stage == 24) {
         for (self.editor_search.entries.items) |entry| if (entry.id == maru.chrome.components.project_search.build.optionId(8)) return if (axis == 0) entry.rect.x + entry.rect.width / 2 else entry.rect.y + entry.rect.height / 2;
         return -1;

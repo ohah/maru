@@ -140,6 +140,7 @@ ICONS = [
     ("search_regex", FIT_STANDARD, 0xF0030, "assets/icons/search-regex.svg"),
     ("search_filter", FIT_STANDARD, 0xF0031, "assets/icons/search-filter.svg"),
     ("search_stop", FIT_STANDARD, 0xF0032, "assets/icons/search-stop.svg"),
+    ("check", FIT_STANDARD, 0xF0033, "assets/icons/check.svg"),
 ]
 
 

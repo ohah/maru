@@ -1,6 +1,7 @@
 //! 창의 검색 입력·worker 수신·도크 수명을 연결한다. 본문 검색은 worker가 한다.
 const std = @import("std");
 const maru = @import("maru");
+const i18n = maru.i18n;
 const host = @import("../../../app_session.zig");
 const AppSession = host.AppSession;
 const chrome = maru.chrome;
@@ -23,6 +24,7 @@ pub const State = struct {
     result: search.presentation.State = .{},
     fields: [4]chrome.components.text_field.TextField = .{ .{}, .{}, .{}, .{} },
     replacing: bool = false,
+    apply_outcome: enum { none, saved, save_failed } = .none,
     preview: preview.State = .{},
     focused: ?usize = null,
     options: [3]bool = .{ false, false, false },
@@ -146,6 +148,7 @@ fn stopRequest(self: *AppSession) void {
     if (self.editor_search.nav) |*nav| nav.cancel();
 }
 pub fn changed(self: *AppSession) void {
+    self.editor_search.apply_outcome = .none;
     stopRequest(self);
     self.editor_search.invalidate();
     self.editor_search.result.changed(self.allocator, now(self), self.editor_search.fields[0].text.items.len != 0);
@@ -526,6 +529,29 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             st.fields[index].moveEnd(false);
         },
         .option => |index| {
+            if (index == 9) {
+                const result = preview.apply(self) catch |err| {
+                    self.showNoticeKey(if (err == error.OutOfMemory or err == error.ApplyFailed) .dbg_editor_oom else .project_replace_apply_failed);
+                    return;
+                };
+                st.apply_outcome = if (result == .saved) .saved else .save_failed;
+                if (result == .saved) {
+                    self.showNoticeKey(.project_replace_saved);
+                } else {
+                    const reason: ?i18n.Key = switch (result.save_failed) {
+                        error.ExternalConflict => .editor_save_external_conflict,
+                        error.NotFound => .editor_save_gone,
+                        error.TooLarge => .app_save_too_large,
+                        else => null,
+                    };
+                    if (reason) |key| {
+                        var message: [1024]u8 = undefined;
+                        self.showNotice(std.fmt.bufPrint(&message, "{s}\n{s}", .{ i18n.t(.project_replace_save_failed), i18n.t(key) }) catch i18n.t(.project_replace_save_failed));
+                    } else self.showNoticeKey(.project_replace_save_failed);
+                }
+                self.metal_dirty = true;
+                return;
+            }
             if (!self.tryCommitComposition()) return;
             if (index < 3) {
                 st.options[index] = !st.options[index];

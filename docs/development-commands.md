@@ -1249,3 +1249,4 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 `maru browser`의 대상 옵션은 한 호출에서 한 번만 지정한다. 같은 ID 반복과
 `--surface N`/`--surface=N` 혼용 반복도 요청 전송 전에 exit 1이다.
 `test-cli-failure-contract`와 실제 process 검증은 대상이 필요한 17개 verb를 대조한다.
+프로젝트 바꾸기 열린 문서 단일 파일 적용·자동 저장·Undo·공유 뷰·할당 실패 판정: `mise exec -- zig build test-editor-project-replace-apply` ([범위](plans/editor-project-replace-apply.md)). macOS 전용 CI에도 연결한다. 실제 버튼·완료 알림·Esc 후 Cmd+Z·Cmd+S는 `python3 tools/editor-project-search-app/run.py --replace-apply --disk-files 2`로 제품 AppKit/Metal 경로에서 검사한다.

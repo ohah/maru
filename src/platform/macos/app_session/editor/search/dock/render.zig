@@ -85,7 +85,7 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         if (index != 0) try scopes.appendSlice(arena, " | ");
         try scopes.appendSlice(arena, try std.fmt.allocPrint(arena, "[{d}] {s}", .{ index + 1, self.file_tree.rootAt(index).? }));
     }
-    const status = if (previewing) switch (preview.phase) {
+    const status = if (state.apply_outcome == .saved) i18n.t(.project_replace_saved) else if (state.apply_outcome == .save_failed) i18n.t(.project_replace_save_failed) else if (previewing) switch (preview.phase) {
         .ready => i18n.t(.project_replace_preview),
         .conflict => i18n.t(.project_replace_conflict),
         .failed => i18n.t(.project_replace_failed),
@@ -114,6 +114,8 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .replace_label = i18n.t(.project_replace_toggle),
         .back_label = i18n.t(.project_replace_back),
         .pane_label = i18n.t(.project_search_open_pane),
+        .apply_label = i18n.t(.project_replace_apply),
+        .can_apply = search_dock.preview.canApply(self),
         .can_open_pane = (!previewing or state.preview.phase == .ready) and state.result.phase == .complete and state.stamp != null,
         .carets = carets[0..3].*,
         .selections = selections[0..3].*,

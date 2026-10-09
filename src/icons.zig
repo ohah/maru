@@ -116,6 +116,8 @@ pub const Icon = enum(u21) {
     search_filter = 0xF0031,
     /// standard: assets/icons/search-stop.svg (0xF0032)
     search_stop = 0xF0032,
+    /// standard: assets/icons/check.svg (0xF0033)
+    check = 0xF0033,
 };
 
 /// 이 아이콘에 그 fit의 **자산이 실재하는가**. `codepointFit`은 없는 조합을 기본으로 폴백하므로,
@@ -168,6 +170,7 @@ pub fn hasFit(icon: Icon, fit: Fit) bool {
         .search_regex => fit == .standard,
         .search_filter => fit == .standard,
         .search_stop => fit == .standard,
+        .check => fit == .standard,
     };
 }
 
@@ -240,6 +243,7 @@ pub fn utf8(icon: Icon) []const u8 {
         .search_regex => "\u{F0030}",
         .search_filter => "\u{F0031}",
         .search_stop => "\u{F0032}",
+        .check => "\u{F0033}",
     };
 }
 
@@ -312,6 +316,7 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
         0xF0030 => .{ .icon = .search_regex, .fit = .standard },
         0xF0031 => .{ .icon = .search_filter, .fit = .standard },
         0xF0032 => .{ .icon = .search_stop, .fit = .standard },
+        0xF0033 => .{ .icon = .check, .fit = .standard },
         else => null,
     };
 }

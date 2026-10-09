@@ -5342,10 +5342,34 @@ fn selectNextMatchAtOrAfter(self: *AppSession, term: *Term, at: usize) void {
 /// 같음을 뮤턴트로 확인했다(적대적 검증 2026-08-27). 이 파일의 여덟 자리가 같은 관용구를 쓰므로
 /// 그 형태는 유지하되, **무엇이 실제로 막는지**를 여기 한 번 적어 둔다.
 pub fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
-    var sels = selectionsForEdit(self, term) orelse return false;
+    return applyEditAsOneImpl(self, term, changes, false);
+}
+/// 프로젝트 적용은 Undo 슬롯도 본문 변경 전에 확보한다.
+pub fn applyEditAsOneWithUndo(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
+    return applyEditAsOneImpl(self, term, changes, true);
+}
+fn applyEditAsOneImpl(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change, require_undo: bool) bool {
+    const fallback = require_undo and selections(term).count() == 0;
+    var sels = if (fallback) blk: {
+        const items = self.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(0)}) catch return false;
+        break :blk editor_selection.Selections.init(items, 0);
+    } else selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(sels.items);
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
     const before_primary = sels.primary;
+    if (require_undo) {
+        const history = &term.rt.editorDocument().history;
+        if (history.undo_len == history.undo.len) {
+            const capacity = if (history.undo.len == 0) 16 else std.math.mul(usize, history.undo.len, 2) catch {
+                self.allocator.free(before);
+                return false;
+            };
+            history.undo = self.allocator.realloc(history.undo, capacity) catch {
+                self.allocator.free(before);
+                return false;
+            };
+        }
+    }
 
     const scroll_anchor = captureScrollAnchor(term);
     const rows_before = drawnDocLines(term);
@@ -5360,6 +5384,7 @@ pub fn applyEditAsOne(self: *AppSession, term: *Term, changes: []maru.session.ed
     const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .insert);
     writeBackSelections(self, term, sels);
+    if (fallback) term.rt.editor_selection = null;
     // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = changes });
@@ -58080,4 +58105,177 @@ test "FINDH3 포커스 없는 찾기 막대가 열린 채 시그니처 힌트가
     try h.frame();
     try testing.expect(s.chrome_host.find.open and s.chrome_host.hover_box.open);
     try testing.expect(s.editorHelperTakesPointer(.hover_box)); // 그려졌다(시그니처는 호버 상자를 쓴다)
+}
+
+fn applyPreviewReady(fx: *PaneFixture) !void {
+    try replacePreviewSearch(fx);
+    try @import("search/preview.zig").start(fx.session, try replacePreviewRow(fx.session, false, true));
+    try waitReplacePreview(fx.session);
+}
+test "RPA1 단일 파일 — 적용 저장과 한 Undo는 기존 미저장 편집을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo\r\nfoo");
+    term.rt.editor_selection = editor_selection.Selection.at(8);
+    var prior = [_]editor.delta.Change{.{ .start = 8, .end = 8, .text = "!" }};
+    try testing.expect(applyEditAsOne(fx.session, term, &prior));
+    try applyPreviewReady(&fx);
+    const p = @import("search/preview.zig");
+    try testing.expect(p.canApply(fx.session));
+    try testing.expect((try p.apply(fx.session)) == .saved);
+    try testing.expectEqualStrings("bar\r\nbar!", term.rt.editorDocument().opened.?.file.content);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("bar\r\nbar!", disk);
+    try testing.expect(!isDirty(term));
+    try testing.expectEqual(.idle, fx.session.editor_search.preview.phase);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo\r\nfoo!", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqualStrings("bar\r\nbar!", term.rt.editorDocument().opened.?.file.content);
+}
+test "RPA2 외부 저장 충돌은 적용 문서와 Undo를 유지하고 외부 파일을 덮지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    try applyPreviewReady(&fx);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "search.txt", .data = "external" });
+    const result = try @import("search/preview.zig").apply(fx.session);
+    try testing.expect(result == .save_failed);
+    try testing.expectEqual(error.ExternalConflict, result.save_failed);
+    try testing.expectEqualStrings("bar", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(term));
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("external", disk);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+}
+test "RPA3 원문 수정 읽기 전용 IME와 준비 OOM은 적용 전에 멈추고 기존 상태를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..8) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+        try applyPreviewReady(&fx);
+        const p = @import("search/preview.zig");
+        if (mode == 0) term.rt.editorDocument().opened.?.file.read_only = true;
+        if (mode == 1) fx.session.ime_active = true;
+        if (mode == 2) fx.session.ime_editor_commit_pending = true;
+        if (mode == 3) term.rt.editorDocument().opened.?.file.revision += 1;
+        const selected = term.rt.editor_selection;
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = mode -| 4 });
+        if (mode >= 4) fx.session.allocator = failing.allocator();
+        const result = p.apply(fx.session);
+        fx.session.allocator = testing.allocator;
+        if (result) |_| return error.UnexpectedApply else |err| {
+            try testing.expect(err == error.StaleRequest or err == error.OutOfMemory or err == error.ApplyFailed);
+        }
+        fx.session.ime_active = false;
+        fx.session.ime_editor_commit_pending = false;
+        try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualDeep(selected, term.rt.editor_selection);
+        try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+        try testing.expect(fx.session.editor_search.preview.plan != null);
+    }
+}
+
+test "RPA4 선택한 정본의 공유 뷰만 적용하고 같은 경로의 독립 문서는 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const original = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    const other = try openPathInActivePane(fx.session, original.rt.editorDocument().path.?);
+    other.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, other, " independent"));
+    const peer = try openSharedViewInActivePane(fx.session, original);
+    try testing.expect(original.rt.editorDocument() != other.rt.editorDocument());
+    try testing.expect(original.rt.editorDocument() == peer.rt.editorDocument());
+    original.rt.editor_selection = null;
+    peer.rt.editor_selection = editor_selection.Selection.at(1);
+    try applyPreviewReady(&fx);
+    try testing.expect((try @import("search/preview.zig").apply(fx.session)) == .saved);
+    try testing.expectEqualStrings("bar", original.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("bar", peer.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("foo independent", other.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), other.rt.editorDocument().history.undo_len);
+    try testing.expect(undoEdit(fx.session, original));
+    try testing.expectEqualStrings("foo", peer.rt.editorDocument().opened.?.file.content);
+}
+
+test "RPA5 전체 준비 할당 실패는 기존 이력을 보존하고 저장 실패는 새 Undo를 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var points: usize = 0;
+    var rejected: usize = 0;
+    var index: usize = 0;
+    while (index == 0 or index <= points) : (index += 1) {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, term, "!"));
+        const history = &term.rt.editorDocument().history;
+        history.undo = try testing.allocator.realloc(history.undo, history.undo_len);
+        const before_len = history.undo_len;
+        try applyPreviewReady(&fx);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (index == 0) std.math.maxInt(usize) else index - 1 });
+        fx.session.allocator = failing.allocator();
+        const result = @import("search/preview.zig").apply(fx.session);
+        fx.session.allocator = testing.allocator;
+        if (index == 0) points = failing.alloc_index;
+        if (result) |_| {
+            try testing.expectEqualStrings("bar!", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(before_len + 1, history.undo_len);
+            try testing.expect(undoEdit(fx.session, term));
+            try testing.expectEqualStrings("foo!", term.rt.editorDocument().opened.?.file.content);
+        } else |err| {
+            try testing.expect(err == error.OutOfMemory or err == error.ApplyFailed);
+            rejected += 1;
+            try testing.expectEqualStrings("foo!", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(before_len, history.undo_len);
+            try testing.expect(fx.session.editor_search.preview.plan != null);
+            try testing.expect(undoEdit(fx.session, term));
+            try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+        }
+    }
+    std.debug.print("replace_apply_oom allocation_points={d} rejected_before_edit={d}\n", .{ points, rejected });
+    try testing.expect(points >= 4 and rejected >= 4);
+}
+
+test "RPA6 단일 일치만 적용 저장하고 한 Undo로 되돌린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo foo");
+    try replacePreviewSearch(&fx);
+    const p = @import("search/preview.zig");
+    try p.start(fx.session, try replacePreviewRow(fx.session, false, false));
+    try waitReplacePreview(fx.session);
+    try testing.expect((try p.apply(fx.session)) == .saved);
+    try testing.expectEqualStrings("bar foo", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo foo", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "RPA7 revision 밖 원문 변경과 공유 뷰 조합 검색어 변경은 쓰기를 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+        const peer = try openSharedViewInActivePane(fx.session, term);
+        try applyPreviewReady(&fx);
+        const content = term.rt.editorDocument().opened.?.file.content;
+        if (mode == 0) content[0] = 'x';
+        if (mode == 1) peer.rt.editor_preedit = try testing.allocator.dupe(u8, "한");
+        if (mode == 2) try fx.session.editor_search.fields[0].insertText(testing.allocator, "x");
+        try testing.expectError(error.StaleRequest, @import("search/preview.zig").apply(fx.session));
+        try testing.expectEqualStrings(if (mode == 0) "xoo" else "foo", content);
+        try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+        const disk = try fx.dir.dir.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
+        defer testing.allocator.free(disk);
+        try testing.expectEqualStrings("foo", disk);
+    }
 }

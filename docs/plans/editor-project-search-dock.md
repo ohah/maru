@@ -1,6 +1,6 @@
 # 프로젝트 검색 도크 구현과 검증
 
-파일별 결과 모델·입력 수명·Chrome 표시 컴포넌트와 AppSession 연결을 구현했다. S2의 실제 화면·두벌식 HID·공유/독립 문서·root 교체·클릭·앱 메모리 표본을 실행 검증했다. 전체 파일시스템·OS watcher/지연 I/O 종료·VoiceOver·OS 후보창 픽셀은 별도 범위다. S3 읽기 전용 바꾸기 미리보기는 [개별 계획](editor-project-replace-preview.md)을 따르며 S4 적용은 후속이다.
+파일별 결과 모델·입력 수명·Chrome 표시 컴포넌트와 AppSession 연결을 구현했다. S2의 실제 화면·두벌식 HID·공유/독립 문서·root 교체·클릭·앱 메모리 표본을 실행 검증했다. 전체 파일시스템·OS watcher/지연 I/O 종료·VoiceOver·OS 후보창 픽셀은 별도 범위다. S3 읽기 전용 바꾸기 미리보기는 [개별 계획](editor-project-replace-preview.md)을 따르며 S4a 열린 문서 단일 파일 적용은 [적용 계획](editor-project-replace-apply.md)을 따르며 디스크 전용·여러 파일 적용은 후속이다.
 제품 계약과 단계별 완료 조건은 [프로젝트 검색 계획](editor-project-search.md)을 따른다.
 
 ## 수정한 결함

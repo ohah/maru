@@ -17,6 +17,8 @@ pub const Props = struct {
     replace_label: []const u8 = "",
     back_label: []const u8 = "",
     pane_label: []const u8 = "",
+    apply_label: []const u8 = "",
+    can_apply: bool = false,
     can_open_pane: bool = false,
     carets: [3]?f32 = .{ null, null, null },
     selections: [3]?Selection = .{ null, null, null },
@@ -50,7 +52,7 @@ pub const Metrics = struct {
         const inset = spacing.pointsPx(6, scale);
         const gap = spacing.px(.xxs, scale);
         const query_inline = width >= row * 6;
-        const toolbar_rows: u32 = if (width < row * 6 + gap * 4 + inset * 2) 2 else 1;
+        const toolbar_rows: u32 = if (width < row * 7 + gap * 5 + inset * 2) 2 else 1;
         return .{ .row = row, .inset = inset, .gap = gap, .toolbar_rows = toolbar_rows, .query_inline = query_inline, .header = row * ((if (expanded) @as(u32, 6) else 4) + @as(u32, @intFromBool(replacing)) + toolbar_rows - 1 + @as(u32, @intFromBool(!query_inline))) };
     }
 };

@@ -10,7 +10,7 @@ const icons = @import("../../../icons.zig");
 const spacing = @import("../../ui/spacing.zig");
 pub const Buffers = struct { ops: []draw.Op, runs: []draw.Run };
 pub fn bufferSizes(row_count: usize, entry_count: usize) struct { ops: usize, runs: usize } {
-    const runs = row_count +| 15;
+    const runs = row_count +| 16;
     return .{ .ops = entry_count +| runs +| 6, .runs = runs };
 }
 pub fn view(p: types.Props, f: build.Frame, state: interaction.InteractionState, tokens: *const tk.Tokens, b: Buffers) !draw.ChromeDraw {
@@ -33,7 +33,7 @@ pub fn view(p: types.Props, f: build.Frame, state: interaction.InteractionState,
         try text(p, f, build.fieldId(index), if (p.fields[index].len == 0) p.field_labels[index] else p.fields[index], if (p.fields[index].len == 0) .muted_fg else .surface_fg, &count, &runs, b);
     }
     if (p.replacing) try text(p, f, build.fieldId(3), if (p.replacement.len == 0) p.replacement_label else p.replacement, .surface_fg, &count, &runs, b);
-    const labels = [_][]const u8{ "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", "→" };
+    const labels = [_][]const u8{ "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", "→", "✓" };
     for (labels, 0..) |label, index| try text(p, f, build.optionId(index), label, .surface_fg, &count, &runs, b);
     try text(p, f, 7, p.scopes, .muted_fg, &count, &runs, b);
     try text(p, f, 8, p.status, .muted_fg, &count, &runs, b);
@@ -53,7 +53,7 @@ fn text(p: types.Props, f: build.Frame, id: u64, value: []const u8, role: tk.Col
     if (count.* >= b.ops.len or runs.* >= b.runs.len) return error.InsufficientBuffer;
     b.runs[runs.*] = .{ .text = value };
     const inset: i32 = @intCast(f.metrics.inset);
-    const horizontal_inset = if (id >= 20 and id < 29) @divTrunc(inset, 2) else inset;
+    const horizontal_inset = if (id >= 20 and id < 30) @divTrunc(inset, 2) else inset;
     const rect = entry.rect;
     const clip: draw.Rect = .{ .x = @intFromFloat(rect.x), .y = @intFromFloat(rect.y), .w = @intFromFloat(@max(0, rect.width)), .h = @intFromFloat(@max(0, rect.height)) };
     // 조상 clip뿐 아니라 이 텍스트를 소유하는 면에도 묶는다. 긴 미리보기가 옆 행을 덮지 않는다.
@@ -73,9 +73,10 @@ fn text(p: types.Props, f: build.Frame, id: u64, value: []const u8, role: tk.Col
         26 => if (p.replacing) .chevron_down else .chevron_right,
         27 => .arrow_left,
         28 => .arrow_right,
+        29 => .check,
         else => null,
     };
-    b.ops[count.*] = .{ .text = .{ .origin = .{ .x = clip.x + horizontal_inset, .y = clip.y + inset }, .runs = b.runs[runs.* .. runs.* + 1], .placement = if (icon) |source| .{ .icon_in_rect = .{ .content_rect = clip, .icon_codepoint = icons.codepoint(source), .icon_extent_px = @intCast(spacing.pointsPx(14, p.scale)) } } else if (id >= 20 and id < 29) .{ .center_in_rect = clip } else .origin, .anchor = if (id >= 10 and id <= 13) .tail else .head, .role = if (entry.semantics != null and !entry.semantics.?.enabled) .muted_fg else role, .text_role = .control, .max_width_px = clip.w -| @as(u32, @intCast(horizontal_inset * 2)), .clip = effective, .scroll_clipped = true, .above_scroll = true } };
+    b.ops[count.*] = .{ .text = .{ .origin = .{ .x = clip.x + horizontal_inset, .y = clip.y + inset }, .runs = b.runs[runs.* .. runs.* + 1], .placement = if (icon) |source| .{ .icon_in_rect = .{ .content_rect = clip, .icon_codepoint = icons.codepoint(source), .icon_extent_px = @intCast(spacing.pointsPx(14, p.scale)) } } else if (id >= 20 and id < 30) .{ .center_in_rect = clip } else .origin, .anchor = if (id >= 10 and id <= 13) .tail else .head, .role = if (entry.semantics != null and !entry.semantics.?.enabled) .muted_fg else role, .text_role = .control, .max_width_px = clip.w -| @as(u32, @intCast(horizontal_inset * 2)), .clip = effective, .scroll_clipped = true, .above_scroll = true } };
     count.* += 1;
     runs.* += 1;
 }

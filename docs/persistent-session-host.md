@@ -3479,10 +3479,16 @@ absolute deadline 안에서 direct controller grant만 기다린다. runtime별 
    86으로 끝났다(2026-10-09 실측, 웹 패널 유무와 무관). 창 close graph는 ticket 예약이 pristine runtime만 받으므로, finish가 아직
    끝나지 않은 원격 Term이 있으면 graph를 준비하지 않고 `event_pending`으로 다음 tick을 기다린다(끝나면 `close_complete`로 대상에서
    빠진다). finish가 `event_pending`이면 원격 pump는 끝을 다시 알리지 않으므로 tick이 같은 finish를 이어 보낸다. in-process는 kind를
-   보지 않고 끝난 뒤의 closeAndDetach가 routing 연결도 끊으므로 그대로 둔다. **남은 것(기존 결함)**: 「종료 및 세션 끝내기」
-   (`prepareAppQuitEndAll`)는 backend의 모든 runtime이 pristine이기를 요구해, 끝난 셸이 거둬지지 않고 남은 창(시작 직후 종료로 유지한
-   창, 다운로드로 숨겨 쥔 세션, 저장하지 않은 파일 패널로 남은 창)이 있으면 `proof_loss`다. closeAndDetach가 `event_pending`인 Term에
-   끝이 오면 tick의 finish가 kind 불일치다. finish가 끝나기 전에 창 teardown이 오면 deinit pass 1의, 사용자가 그 탭·pane·Term을
+   보지 않고 끝난 뒤의 closeAndDetach가 routing 연결도 끊으므로 그대로 둔다. 거꾸로 셸의 끝을 본 tick은 그 runtime이 이미
+   finish가 아닌 요청으로 봉인됐으면(「종료 및 세션 끝내기」의 target, 끝나지 않은 닫기 — `RemoteTermBackend.closeSealedByOtherRequest`)
+   finish를 보내지 않고 그 요청에 맡긴다 — 셸 셋에 「종료 및 세션 끝내기」를 걸면 host가 셸을 끝내는 사이 tick이 finish를 보내 exit
+   86이었다(2026-10-09 실측 4/4). 「종료 및 세션 끝내기」(`prepareAppQuitEndAll`)의 target은 pristine runtime이고, 셸이 끝나 finish로
+   ready_remove에 이른 runtime은 target이 아니다(그 Term의 창 teardown이 같은 finish와 `remove`로 거둔다 — 전에는 그런 runtime 하나만
+   있어도 거부돼 86). 그 밖의 non-pristine(finish가 아직 settling, 다른 요청이 봉인)은 지금처럼 거부한다. 모든 target을 끝내 종료
+   승인을 게시한 뒤(`PendingAppQuitShutdown.complete`)에는 앱이 끝날 때까지 tick이 더 진행하지도 Term을 drain하지도 않는다 — 승인 뒤
+   앱이 끝나기 전에 도는 tick이 target 수와 같은 ordinal로 진행해 86이었다(셸 셋에서 3/10). **남은 것(기존 결함)**: finish가 아직
+   settling인 runtime이 있을 때의 「종료 및 세션 끝내기」. closeAndDetach가 `event_pending`인 Term에 끝이 오면 tick은 이제 finish를
+   보내지 않지만, 그 닫기를 누가 마저 하는지는 그대로다. finish가 끝나기 전에 창 teardown이 오면 deinit pass 1의, 사용자가 그 탭·pane·Term을
    닫으면(`closeTab`·`closeActivePane`·`closeActiveTerm` → `destroyTerm`) destroy의 panic이다(전에는 둘 다 86).
 
    heap-pin된 `RemoteRuntime.CloseAuthority`의 불변 identity seal tuple은

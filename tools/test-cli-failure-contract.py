@@ -57,6 +57,34 @@ def verify(cli, root):
     listener.bind(str(control / 'fixture.sock'))
     listener.listen()
     listener.settimeout(10)
+    target_verbs = [
+        ['navigate', 'https://example.invalid/'], ['get-url'], ['exec', '1+1'],
+        ['get-cookies'], ['set-cookie', '--name', 'n', '--value', 'v'],
+        ['delete-cookie', '--name', 'n'], ['get-local-storage', '--key', 'k'],
+        ['set-local-storage', '--key', 'k', '--value', 'v'],
+        ['remove-local-storage', '--key', 'k'], ['clear-storage'],
+        ['click', '--ref', 'e1'], ['type', '--ref', 'e1', '--text', 't'],
+        ['scroll', '--ref', 'e1'], ['wait', '--load'], ['snapshot'], ['console'],
+        ['screenshot', '--out', 'preserved.png'],
+    ]
+    sentinel = root / 'preserved.png'
+    sentinel.write_bytes(b'KEEP SCREENSHOT OUTPUT')
+    for verb in target_verbs:
+        for first in [['--surface', '1'], ['--surface=1']]:
+            for second in [['--surface', '1'], ['--surface', '2'], ['--surface=1'], ['--surface=2']]:
+                p = run(['browser', verb[0], *first, *verb[1:], *second], 1)
+                assert '--surface may only be specified once' in p.stderr
+                assert sentinel.read_bytes() == b'KEEP SCREENSHOT OUTPUT'
+    # A reachable endpoint exists: rejection must happen before even auth is sent.
+    listener.settimeout(0.05)
+    try:
+        connection, _ = listener.accept()
+    except socket.timeout:
+        pass
+    else:
+        connection.close()
+        raise AssertionError('duplicate target invocation connected to the endpoint')
+    listener.settimeout(10)
     plans = []
     for args, result in [(['sessions', 'list'], []), (['browser', 'get-url', '--surface', '1'], {'url': 'https://example.invalid/'}), (['browser', 'navigate', '--surface', '1', 'https://example.invalid/'], {'ok': True}), (['editor', 'lsp', 'trust', 'list'], {'decisions': []})]:
         for kind in ['success', 'error', 'malformed', 'wrong-envelope']:

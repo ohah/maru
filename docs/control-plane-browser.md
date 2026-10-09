@@ -72,3 +72,12 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 **확인 모달의 URL 은 「어느 사이트인가」를 지킨다**(2026-10-06). 권한은 출처가 아니라 **그 탭**(pane·target·scope)에 묶여 탭이 살아 있는 동안 유효하므로, 이후 그 탭에서 여는 사이트까지 열린다 — 그래서 사용자가 읽는 사이트 이름이 틀리면 안 된다. 동의문은 URL 을 60칸 안에 싣되(`app_host_abi.grantPromptUrl`) **스킴과 호스트는 줄이지 않고**, `user:pass@` 는 버리고(진짜 호스트는 `@` 뒤), 호스트 자체가 너무 길면 **왼쪽을** 「…」로 줄여 등록 도메인(오른쪽 끝)을 남기며, 경로·질의만 남은 칸에서 가운데를 줄인다. 예전에는 URL 전체의 가운데를 줄여 `https://accounts.google.com.session-verify-portal-x91.attacker.io/…` 가 `https://accounts.google.com.session-ver…` 로 보였다(적대적 검증).
 
 **슬라이스**: **CLI-0(doc, = 이 절)**. **CLI-1(L2 순수)**=`cli/browser.zig`(파싱·요청 바이트·렌더링) 헤드리스 TDD. **CLI-2(main 배선)**=main.zig `browser` 서브커맨드→소켓 왕복(runSessionCli 재사용/미러). 손 테스트(에이전트가 CLI로 브라우저 제어→모달→실행). **MCP 어댑터**는 CLI 검증 후 별도(§10 note — wire가 JSON-RPC 2.0이라 얇게 얹힘).
+
+### CLI 대상 서페이스 단일 지정
+
+사용자 결정: 한 browser 호출의 대상은 하나다. `--surface N`과 `--surface=N`은 같은
+옵션이며 합쳐서 최대 한 번만 지정한다. 같은 값 반복도 중복이다. 중복 지정은 마지막 값을
+취하지 않고 exit 1로 거부하며 socket 연결·auth·request 전송 및 출력 파일 쓰기를 시작하지
+않는다. 대상이 필요한 모든 browser verb에 적용한다. `browser list`는 대상 옵션을 받지
+않는 기존 계약을 유지한다. 여러 대상에 실행하려면 각각 별도 호출한다. `--text`와
+`--out`의 값이 `--surface=2`처럼 보여도 대상 옵션으로 다시 해석하지 않는다.

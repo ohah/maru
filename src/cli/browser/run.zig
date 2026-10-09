@@ -58,6 +58,7 @@ pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
     const reason = switch (err) {
         error.MissingSubcommand => "a subcommand is required",
         error.UnknownSubcommand => "unknown subcommand",
+        error.DuplicateSurface => "--surface may only be specified once",
         error.MissingSurface => "--surface <id> is required",
         error.InvalidSurface => "the surface id must be a non-negative integer",
         error.MissingSurfaceValue => "--surface needs a value",

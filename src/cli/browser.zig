@@ -18,6 +18,7 @@ const cp = @import("../session/control_plane.zig");
 pub const browser_help =
     \\usage: maru browser <command> [--surface <id>] [args]
     \\
+    \\Specify --surface only once per invocation (repeated IDs are also rejected).
     \\Control a web surface (browser panel). First discover the target web surface_id with
     \\`maru browser list`, then pass it to the other commands as --surface <id>. Without a
     \\capability the request opens a confirmation dialog; allowing it runs the command (§9.2 Model B).
@@ -150,6 +151,7 @@ pub const ParseError = error{
     UnknownSubcommand, // 알 수 없는 서브커맨드(`browser foo`)
     MissingSurface, // `--surface` 미제공(모든 서브커맨드 필수)
     InvalidSurface, // surface 값이 비숫자/음수/범위밖
+    DuplicateSurface, // one invocation may select its target only once
     MissingSurfaceValue, // `--surface`에 값 없음
     MissingUrl, // `navigate`에 url 없음
     MissingScript, // `exec`에 script 없음
@@ -296,10 +298,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
             const a = args[i];
             if (eq(a, "--surface")) {
                 if (i + 1 >= args.len) return error.MissingSurfaceValue;
-                surface = parseU64(args[i + 1]) catch return error.InvalidSurface;
+                try assignSurface(&surface, args[i + 1]);
                 i += 2;
             } else if (std.mem.startsWith(u8, a, "--surface=")) {
-                surface = parseU64(a["--surface=".len..]) catch return error.InvalidSurface;
+                try assignSurface(&surface, a["--surface=".len..]);
                 i += 1;
             } else if (eq(a, "--out")) {
                 if (i + 1 >= args.len) return error.MissingOutValue;
@@ -342,10 +344,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
             const a = args[i];
             if (eq(a, "--surface")) {
                 if (i + 1 >= args.len) return error.MissingSurfaceValue;
-                surface = parseU64(args[i + 1]) catch return error.InvalidSurface;
+                try assignSurface(&surface, args[i + 1]);
                 i += 2;
             } else if (std.mem.startsWith(u8, a, "--surface=")) {
-                surface = parseU64(a["--surface=".len..]) catch return error.InvalidSurface;
+                try assignSurface(&surface, a["--surface=".len..]);
                 i += 1;
             } else if (eq(a, "--interactive")) {
                 interactive = true;
@@ -382,10 +384,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
             const a = args[i];
             if (eq(a, "--surface")) {
                 if (i + 1 >= args.len) return error.MissingSurfaceValue;
-                surface = parseU64(args[i + 1]) catch return error.InvalidSurface;
+                try assignSurface(&surface, args[i + 1]);
                 i += 2;
             } else if (std.mem.startsWith(u8, a, "--surface=")) {
-                surface = parseU64(a["--surface=".len..]) catch return error.InvalidSurface;
+                try assignSurface(&surface, a["--surface=".len..]);
                 i += 1;
             } else if (eq(a, "--clear")) {
                 clear = true;
@@ -413,10 +415,10 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
         const arg = rest[i];
         if (eq(arg, "--surface")) {
             if (i + 1 >= rest.len) return error.MissingSurfaceValue;
-            surface = parseU64(rest[i + 1]) catch return error.InvalidSurface;
+            try assignSurface(&surface, rest[i + 1]);
             i += 2;
         } else if (std.mem.startsWith(u8, arg, "--surface=")) {
-            surface = parseU64(arg["--surface=".len..]) catch return error.InvalidSurface;
+            try assignSurface(&surface, arg["--surface=".len..]);
             i += 1;
         } else if (eq(arg, "--args")) {
             if (i + 1 >= rest.len) return error.MissingArgsValue;
@@ -471,10 +473,10 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
         const a = rest[i];
         if (eq(a, "--surface")) {
             if (i + 1 >= rest.len) return error.MissingSurfaceValue;
-            surface = parseU64(rest[i + 1]) catch return error.InvalidSurface;
+            try assignSurface(&surface, rest[i + 1]);
             i += 2;
         } else if (std.mem.startsWith(u8, a, "--surface=")) {
-            surface = parseU64(a["--surface=".len..]) catch return error.InvalidSurface;
+            try assignSurface(&surface, a["--surface=".len..]);
             i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
@@ -515,7 +517,7 @@ fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
                 error.MissingOptionValue => return error.MissingSurfaceValue,
                 else => return err,
             };
-            r.surface = parseU64(value) catch return error.InvalidSurface;
+            try assignSurface(&r.surface, value);
         } else if (matchOpt(a, "--selector")) {
             if (r.condition != null) return error.ConflictingWaitCondition;
             const value = try optValue(rest, &i, "--selector");
@@ -554,7 +556,7 @@ fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
             r.secure = true;
             i += 1;
         } else if (matchOpt(a, "--surface")) {
-            r.surface = parseU64(try optValue(rest, &i, "--surface")) catch return error.InvalidSurface;
+            try assignSurface(&r.surface, try optValue(rest, &i, "--surface"));
         } else if (matchOpt(a, "--name")) {
             r.name = try optValue(rest, &i, "--name");
         } else if (matchOpt(a, "--key")) {
@@ -602,6 +604,12 @@ fn hasHelpFlag(args: []const []const u8) bool {
 }
 
 /// 10진 파싱 후 wire i64 범위 제한(surface_id는 JSON integer=i64). sessions.parseU64와 동일 규율.
+// Share target ownership across all verb parsers: no branch may silently overwrite it.
+fn assignSurface(target: *?u64, value: []const u8) ParseError!void {
+    if (target.* != null) return error.DuplicateSurface;
+    target.* = parseU64(value) catch return error.InvalidSurface;
+}
+
 fn parseU64(s: []const u8) !u64 {
     const v = try std.fmt.parseInt(u64, s, 10);
     if (v > std.math.maxInt(i64)) return error.Overflow;
@@ -1909,6 +1917,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
     try testing.expectEqualStrings(
         \\usage: maru browser <command> [--surface <id>] [args]
         \\
+        \\Specify --surface only once per invocation (repeated IDs are also rejected).
         \\Control a web surface (browser panel). First discover the target web surface_id with
         \\`maru browser list`, then pass it to the other commands as --surface <id>. Without a
         \\capability the request opens a confirmation dialog; allowing it runs the command (§9.2 Model B).
@@ -2118,4 +2127,48 @@ test "response outcome distinguishes server failure from successful rendering" {
         defer w.deinit();
         try testing.expectEqual(index == 2, try renderResponse(testing.allocator, wire, .get_url, &w.writer));
     }
+}
+
+// Every target-bearing verb must reject repeated selection, independent of spelling/value.
+test "browser target is selected once across every verb and option spelling" {
+    const verbs = [_][]const []const u8{
+        &.{ "navigate", "https://example.invalid/" },
+        &.{"get-url"},
+        &.{ "exec", "1 + 1" },
+        &.{"get-cookies"},
+        &.{ "set-cookie", "--name", "n", "--value", "v" },
+        &.{ "delete-cookie", "--name", "n" },
+        &.{ "get-local-storage", "--key", "k" },
+        &.{ "set-local-storage", "--key", "k", "--value", "v" },
+        &.{ "remove-local-storage", "--key", "k" },
+        &.{"clear-storage"},
+        &.{ "click", "--ref", "e1" },
+        &.{ "type", "--ref", "e1", "--text", "t" },
+        &.{ "scroll", "--ref", "e1" },
+        &.{ "wait", "--load" },
+        &.{"snapshot"},
+        &.{"console"},
+        &.{"screenshot"},
+    };
+    const firsts = [_][]const []const u8{ &.{ "--surface", "1" }, &.{"--surface=1"} };
+    const seconds = [_][]const []const u8{ &.{ "--surface", "1" }, &.{ "--surface", "2" }, &.{"--surface=1"}, &.{"--surface=2"} };
+    for (verbs) |verb| {
+        for (firsts) |first| {
+            var args: std.ArrayList([]const u8) = .empty;
+            defer args.deinit(testing.allocator);
+            try args.append(testing.allocator, verb[0]);
+            try args.appendSlice(testing.allocator, first);
+            try args.appendSlice(testing.allocator, verb[1..]);
+            _ = try parse(args.items); // valid single-target positive control
+            const original_len = args.items.len;
+            for (seconds) |second| {
+                args.items.len = original_len;
+                try args.appendSlice(testing.allocator, second);
+                try testing.expectError(error.DuplicateSurface, parse(args.items));
+            }
+        }
+    }
+    // Values that happen to look like target options are opaque values, not selections.
+    _ = try parse(&.{ "type", "--surface", "1", "--ref", "e1", "--text", "--surface=2" });
+    _ = try parse(&.{ "screenshot", "--surface", "1", "--out", "--surface=2" });
 }

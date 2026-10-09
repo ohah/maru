@@ -175,3 +175,18 @@ PR CI의 file explorer 및 macOS-only 잡은 같은 누락으로 실패했다. r
 버리고 기존 문자열 검사를 유지한다. 제품 runner의 실패 종료 전파는 유지한다.
 `zig build test-macos-control-socket`으로 실제 socket 왕복 suite를 직접 실행할 수 있게 했다.
 수정 전 이 명령에서 CI와 같은 bool ignored 컴파일 오류를 재현했다.
+
+## browser 단일 대상 정책 적용
+
+2026-10-10 사용자 결정에 따라 browser의 대상 surface는 한 호출에서 한 번만 지정한다.
+같은 ID 반복과 `--surface N`/`--surface=N` 혼용도 DuplicateSurface로 거부한다.
+대상이 필요한 17개 verb의 일곱 parser 경로가 공통 assignSurface로 값을 설정하며
+socket runner 전에 종료한다. browser list의 무대상 계약은 유지한다. sessions --window
+및 LSP --volume는 이 surface 수정 범위에 포함하지 않았다.
+
+Debug 및 ReleaseFast 순수 suite는 108 passed/1 skipped다. 실제 process 회귀 검증
+5회에서 매회 171개 검사가 통과했다. 접근 가능한 private socket을 두고 136개 중복
+호출의 exit 1, 명확한 진단, 연결 0건 및 screenshot 출력 sentinel 보존을 확인했다.
+정상 호출과 기존 오류 종료 대조군도 유지했다. assignSurface의 중복 방어를 제거한
+변형은 새 판정자에서 실패했다. script/text/파일명 값의 --surface 문자열은 옵션으로
+다시 해석하지 않는다.

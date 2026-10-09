@@ -91,7 +91,7 @@ pub fn scaleMilli(self: *const AppSession) u32 {
     return @import("../../agent_dock.zig").agentSessionDockScaleMilli(self);
 }
 pub fn metrics(self: *const AppSession) component.types.Metrics {
-    return component.types.Metrics.resolveReplace(scaleMilli(self), self.editor_search.expanded, self.editor_search.replacing);
+    return component.types.Metrics.resolveForWidth(scaleMilli(self), self.editor_search.expanded, self.editor_search.replacing, dock.dockListTextWidthPx(self));
 }
 pub fn resultRect(self: *const AppSession) maru.session.SplitRect {
     var rect = dock.dockGeometry(self).tree_content;

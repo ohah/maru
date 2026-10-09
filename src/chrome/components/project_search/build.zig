@@ -16,17 +16,18 @@ pub fn rowId(index: usize) u64 {
 pub const Buffers = struct { nodes: []tree.UiNode, entries: []tree.RectEntry, items: []layout.Item, flex: []layout.FlexScratch, rects: []layout.UiRect, actions: []ids.Entry };
 pub const Frame = struct { tree: tree.UiRectTree, actions: []const ids.Entry, metrics: types.Metrics };
 pub fn size(rows: usize) usize {
-    return rows +| 30;
+    return rows +| 34;
 }
 pub fn build(p: types.Props, b: Buffers) !Frame {
-    const m = types.Metrics.resolveReplace(p.scale, p.expanded, p.replacing);
+    if (!std.math.isFinite(p.viewport.width) or p.viewport.width < 0 or p.viewport.width >= 4294967296.0) return error.InvalidGeometry;
+    const m = types.Metrics.resolveForWidth(p.scale, p.expanded, p.replacing, @intFromFloat(@max(0, p.viewport.width)));
     if (p.shift >= m.row) return error.InvalidGeometry;
     const count = std.math.cast(u32, p.rows.len) orelse return error.InvalidGeometry;
     const content_height = std.math.mul(u32, m.row, count) catch return error.InvalidGeometry;
     if (b.nodes.len < size(p.rows.len)) return error.InsufficientBuffer;
     var table = ids.Table.init(b.actions);
     var n: usize = 0;
-    const header = b.nodes[n..][0 .. (if (p.expanded) @as(usize, 6) else 4) + @intFromBool(p.replacing)];
+    const header = b.nodes[n..][0 .. (if (p.expanded) @as(usize, 6) else 4) + @intFromBool(p.replacing) + m.toolbar_rows - 1];
     n += header.len;
     const fields = b.nodes[n..][0..4];
     n += 4;
@@ -39,20 +40,31 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
     }, &.{});
     const opts = b.nodes[n..][0..8];
     n += 8;
-    for (opts, 0..) |*node, index| node.* = tree.card(.{
+    for (opts, 0..) |*node, index| node.* = tree.button(.{
         .id = optionId(index),
-        .style = .{ .width = .{ .percent = 1.0 / 8.0 }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } },
+        .variant = if (selected(p, index)) .secondary else .ghost,
+        .style = .{ .width = .{ .px = @floatFromInt(m.row) }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } },
         .action = try table.append(p.generation, if (index < 4) .{ .option = index } else if (index == 4) .run else if (index == 5) .cancel else .{ .option = index }, commandEnabled(p, index)),
-        .paint = .{ .background = if (selected(p, index)) .tab_active_bg else .surface_bg, .shadow = .none },
+        .paint = .{ .shadow = .none },
         .semantics = .{ .role = .button, .label = if (index == 6) p.replace_label else if (index == 7) p.back_label else p.option_labels[index], .selected = selected(p, index), .enabled = commandEnabled(p, index) },
-    }, &.{});
+    });
     header[0] = tree.container(.{ .id = 3, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[0..1]);
-    header[1] = tree.container(.{ .id = 4, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } }, .direction = .row }, opts);
+    const groups = b.nodes[n..][0..2];
+    n += 2;
+    for (groups, 0..) |*node, index| node.* = tree.container(.{ .id = 40 + index, .style = .{ .width = .{ .px = @floatFromInt(m.row * 4 + m.gap * 3) }, .height = .{ .px = @floatFromInt(m.row) }, .gap = @floatFromInt(m.gap), .flex = .{ .shrink = 0 } }, .direction = .row }, opts[index * 4 ..][0..4]);
+    const toolbar_style: layout.UiStyle = .{ .height = .{ .px = @floatFromInt(m.row) }, .padding = .{ .left = @floatFromInt(m.inset), .right = @floatFromInt(m.inset) }, .flex = .{ .shrink = 0 } };
     var tail: usize = 2;
+    if (m.toolbar_rows == 1) {
+        header[1] = tree.container(.{ .id = 4, .style = toolbar_style, .direction = .row, .justify = .space_between }, groups);
+    } else {
+        header[1] = tree.container(.{ .id = 4, .style = toolbar_style, .direction = .row }, groups[0..1]);
+        header[2] = tree.container(.{ .id = 42, .style = toolbar_style, .direction = .row, .justify = .end }, groups[1..2]);
+        tail = 3;
+    }
     if (p.expanded) {
-        header[2] = tree.container(.{ .id = 5, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[1..2]);
-        header[3] = tree.container(.{ .id = 6, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[2..3]);
-        tail = 4;
+        header[tail] = tree.container(.{ .id = 5, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[1..2]);
+        header[tail + 1] = tree.container(.{ .id = 6, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[2..3]);
+        tail += 2;
     }
     if (p.replacing) {
         header[tail] = tree.container(.{ .id = 14, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[3..4]);
@@ -77,7 +89,7 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
     b.nodes[n] = tree.scrollArea(.{ .id = 30, .style = .{ .height = .{ .px = @max(0, p.viewport.height - @as(f32, @floatFromInt(m.header))) }, .flex = .{ .shrink = 0 } }, .scroll = .{ .first_item_origin_y_px = -@as(i32, @intCast(p.shift)), .content_h_px = content_height } }, scroll_child);
     const children = b.nodes[n - 1 .. n + 1];
     const root = tree.container(.{ .id = 1, .direction = .column, .overflow = .clip }, children);
-    const built = try tree.build(root, .{ .root_size = p.viewport, .max_entries = b.entries.len, .max_depth = 5 }, .{ .entries = b.entries, .items = b.items, .flex_scratch = b.flex, .child_rects = b.rects });
+    const built = try tree.build(root, .{ .root_size = p.viewport, .max_entries = b.entries.len, .max_depth = 6 }, .{ .entries = b.entries, .items = b.items, .flex_scratch = b.flex, .child_rects = b.rects });
     return .{ .tree = .{ .entries = built.entries, .generation = p.generation }, .actions = table.slice(), .metrics = m };
 }
 

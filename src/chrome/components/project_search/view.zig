@@ -6,6 +6,8 @@ const paint = @import("../../ui/paint.zig");
 const types = @import("types.zig");
 const build = @import("build.zig");
 const layout = @import("../../ui/layout.zig");
+const icons = @import("../../../icons.zig");
+const spacing = @import("../../ui/spacing.zig");
 pub const Buffers = struct { ops: []draw.Op, runs: []draw.Run };
 pub fn bufferSizes(row_count: usize, entry_count: usize) struct { ops: usize, runs: usize } {
     const runs = row_count +| 14;
@@ -47,7 +49,6 @@ pub fn view(p: types.Props, f: build.Frame, state: interaction.InteractionState,
     return .{ .layer = .pane_overlay, .ops = b.ops[0..count] };
 }
 fn text(p: types.Props, f: build.Frame, id: u64, value: []const u8, role: tk.ColorRole, count: *usize, runs: *usize, b: Buffers) !void {
-    _ = p;
     const entry = f.tree.entries[f.tree.find(id) orelse return];
     if (count.* >= b.ops.len or runs.* >= b.runs.len) return error.InsufficientBuffer;
     b.runs[runs.*] = .{ .text = value };
@@ -61,7 +62,14 @@ fn text(p: types.Props, f: build.Frame, id: u64, value: []const u8, role: tk.Col
     const left = @ceil(clipped.x);
     const top = @ceil(clipped.y);
     const effective: draw.Rect = .{ .x = @intFromFloat(left), .y = @intFromFloat(top), .w = @intFromFloat(@max(0, @floor(clipped.x + clipped.width) - left)), .h = @intFromFloat(@max(0, @floor(clipped.y + clipped.height) - top)) };
-    b.ops[count.*] = .{ .text = .{ .origin = .{ .x = clip.x + horizontal_inset, .y = clip.y + inset }, .runs = b.runs[runs.* .. runs.* + 1], .anchor = if (id >= 10 and id <= 13) .tail else .head, .role = if (entry.semantics != null and !entry.semantics.?.enabled) .muted_fg else role, .text_role = .control, .max_width_px = clip.w -| @as(u32, @intCast(horizontal_inset * 2)), .clip = effective, .scroll_clipped = true, .above_scroll = true } };
+    // 탐색·펼침은 다른 Chrome 표면과 같은 SVG 슬롯을 쓴다. 텍스트 기호의 폰트별 모양에 기대지 않는다.
+    const icon: ?icons.Icon = switch (id) {
+        24 => .search,
+        26 => if (p.replacing) .chevron_down else .chevron_right,
+        27 => .arrow_left,
+        else => null,
+    };
+    b.ops[count.*] = .{ .text = .{ .origin = .{ .x = clip.x + horizontal_inset, .y = clip.y + inset }, .runs = b.runs[runs.* .. runs.* + 1], .placement = if (icon) |source| .{ .icon_in_rect = .{ .content_rect = clip, .icon_codepoint = icons.codepoint(source), .icon_extent_px = @intCast(spacing.pointsPx(14, p.scale)) } } else if (id >= 20 and id < 28) .{ .center_in_rect = clip } else .origin, .anchor = if (id >= 10 and id <= 13) .tail else .head, .role = if (entry.semantics != null and !entry.semantics.?.enabled) .muted_fg else role, .text_role = .control, .max_width_px = clip.w -| @as(u32, @intCast(horizontal_inset * 2)), .clip = effective, .scroll_clipped = true, .above_scroll = true } };
     count.* += 1;
     runs.* += 1;
 }

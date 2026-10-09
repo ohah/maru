@@ -87,7 +87,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 |---|---|---|
 | 셀 프리미티브(입력) | `renderer/draw_list.zig` `DrawCell{row,col,codepoint,combining,width,style}` | 터미널 코어→렌더러 **입력 계약**. sentinel/kind/origin/packed-color 없음 |
 | 백엔드 출력 셀 | `metal_frame.zig` `NativeMetalCell`(extern) | 백엔드가 실제로 그리는 셀. `reserved`(0/2~5=부분사각형 kind), UV sentinel(-1=배경만, +2.0=컬러 글리프 — **u0·u1 둘 다**에 실어야 한다. 셰이더가 `uv.x >= 2.0`으로 판정하므로 한쪽만 실으면 정점 보간에서 컬러 분기가 왼쪽 일부에서만 성립해 글리프가 세로 조각으로 잘린다), `origin_x/y`, `foreground`(0x00RRGGBB)/`background`(0xAARRGGBB) |
-| 합성 seam | `MetalFrameBuffer.replace(pane_frames, sidebar_*, pane_chrome_cells, pane_overlay_cells, overlay_frame)` | N-pane + 사이드바 + chrome + 모달을 Z-순서 단일 스트림으로. **chrome가 백엔드를 거쳐 들어오는 자리** |
+| 합성 seam | `MetalFrameBuffer.replace(pane_frames, sidebar_*, pane_chrome_cells, pane_overlay_cells, overlay_frames)` | N-pane + 사이드바 + chrome + 모달을 Z-순서 단일 스트림으로. **chrome가 백엔드를 거쳐 들어오는 자리** |
 | 오버레이 컴포넌트(순수) | `command_palette.zig`·`find_overlay.zig` | `PaletteState`/`FindState` 순수(std+타입만, 헤드리스 테스트). 물리적으로 platform/macos |
 | chrome 렌더·hit-test | `app_session.zig`(chrome fn 다수) | `NativeMetalCell`을 **손으로 직접 구성**(`sentinelBgCell`/`appendVerticalLine`/`BarMetrics`/`sidebarBandCell`). DrawList 안 거침 |
 | theme | `config/theme.zig`→`appearance.ResolvedTheme`(9 색 role, `color.Rgb`) | 파생(lighten +24/+48·hover 중점·muted 55/45·drop alpha 0x55)이 코드 리터럴로 흩어짐. **비-색 토큰(spacing/border/radius) 없음** |
@@ -184,12 +184,46 @@ mock lowerer 없이 이 같은 제품 Metal 입력 변환을 호출해야 한다
 (`sentinelBgCell`·`appendVerticalLine` 등)는 아직 `app_session.zig`에 남아 있으며, 전용 backend
 분리는 별도 범위다.
 
+**오버레이 글자는 컴포넌트가 낸 픽셀 자리에 선다 — 격자는 칸 위상마다 하나**(2026-10-10). **이 계약의 단일 출처는 이 문단이다** — 코드
+주석·다른 문서는 여기를 가리킨다. §9 결정 3(「좌표 = 픽셀」)을 lowering 이 지켜야 그리기와 클릭 판정(`hitTest`·`itemAt`·`contains`)·
+IME 위치(`caretRect`)가 한 레이아웃을 쓴다(§5.4). 오버레이 글자는 셀 격자로 내려가고, 격자는 원점에서 셀 크기의 정수배 자리에만
+글자를 놓는다.
+
+- **무엇이 깨졌나.** 예전 `lower` 는 프레임의 모든 draw 를 격자 한 장(원점 = 전체 좌상단)에 올렸다. 좌상단이 셀 배수만큼 떨어져 있지
+  않은(칸 위상이 다른) 오버레이가 함께 뜨면, **축마다** 원점을 정하지 않은 쪽 글자가 칸으로 내려앉았다. main 에서 도달하는 조합은
+  찾기 막대(pane 모서리 기준) + 우클릭 메뉴(누른 픽셀 기준)다 — 패널 quad 는 픽셀 그대로라 글자만 패널 안에서 밀렸고, 클릭 판정은
+  컴포넌트 자리를 써 그림과 갈렸다(실측 수치와 조건은 `OVF5` 주석). 찾기 막대와 완성 목록(편집기 글자 기준)을 함께 그리게 한 실험
+  빌드에서는 목록이 배경째 밀렸다(`ML6` 주석). **lowering 의 이 전제(「한 프레임의 오버레이는 격자 한 장」)는 주석에만 있었고 강제되지
+  않아**, 함께 뜨는 경우가 하나씩 붙으며 조용히 깨졌다. 입력 모달끼리 서로 닫는 배타성(`dismissMessageOverlays`)은 그와 별개인
+  정책이고 유효하다 — 그 정책 밖의 오버레이(우클릭 메뉴·편집기 헬퍼·이름 상자·diff 둘째 찾기 막대)가 함께 뜬다.
+- **규칙.** `lower` 는 **연속한, 칸 위상(좌상단 mod 셀 크기 — 가로·세로 각각)이 같은 draw** 를 한 묶음으로 격자 하나에 올리고 묶음마다
+  자기 원점을 둔다(`OverlayRaster.extra_parts` → `OverlayPrep.extra` → 오버레이 `PaneFrame` 여러 장 → `MetalFrameBuffer.replace` 가
+  장마다 셀에 원점(드래그 고스트와 같은 `setCellsPaneOrigin`)과 자기 `clip_index` 를 붙인다; `.m` 무변경). 「연속한」이어야 묶음 순서가
+  painter 순서다. **`.clip` 을 내는 draw 는 늘 자기 묶음이다** — clip 은 묶음 격자 전체에 걸리므로 이웃과 묶이면 이웃 글자를 잘랐다.
+  사각형을 내지 않는 draw(글자만)는 글자가 차지하는 칸(`placeText` 와 같은 폭 규칙)으로 위상·범위를 잰다. 셀도 caret 도 없는 뒤 묶음은
+  내지 않는다. 위상이 하나뿐이고 clip 을 내는 draw·글자만 있는 draw 가 없는 프레임은 예전과 같은 격자 한 장이다.
+- **단위는 draw 다.** 한 draw 안의 내용은 그 draw 의 격자를 함께 쓴다 — 알림 패널은 카드 줄을 일부러 그 격자의 행에 앉힌다(`placedRow`).
+  단축키 배지(배지마다 fill 과 글자가 같은 원점)·세팅 드롭다운 팝업은 draw 안에서 위상이 섞일 수 있어 그 몫은 예전처럼 칸에 맞춰진다.
+  그래서 **위상이 다를 수 있는 패널은 draw 를 나눈다**(§5.4) — 완성 목록 옆 문서 패널이 자기 draw 인 이유다(`collectSuggestBoxDraws`;
+  한 draw 일 때는 패널 글자가 칸으로 밀려 `suggest_docs.contains` 와 갈렸다). 겹치면 뒤 draw 가 위라 클릭도 그쪽이 먼저 받는다
+  (`completion_client.mouseDown` 은 문서 패널을 먼저 본다).
+- **겹칠 때.** 뒤 패널이 앞 글자를 지우는 가림(#4228)은 모든 앞 묶음의 격자에 걸쳐 셀마다 자기 격자 원점으로 픽셀 중심을 잰다. 판정이
+  셀 중심이라, 앞 묶음 가장자리 행이 뒤 패널 첫·끝 내용 행에 몇 px(최대 「셀 높이 / 2 − 패딩」) 걸쳐 남을 수 있다(예전에는 같은 칸에
+  스냅돼 덮어썼다 — 한계로 둔다). caret 은 프레임에 하나이고, 그것이 든 장이 마지막이 아니어도 렌더러가 버퍼 맨 끝(blink suffix)으로 옮긴다.
+- **판정자**(`metal_lowering.zig` 의 `ML*` — `plans/metal-ui-layout.md` 의 단계 이름 ML6 등과는 다르다): `ML6`(찾기 막대 + 완성 목록 실측
+  좌표 — 둘 다 컴포넌트 픽셀) · `ML6b`(같은 위상은 한 장) · `ML7`(p·q·p 는 세 장) · `ML8`(위상이 다른 뒤 패널의 가림) · `ML8b`(caret 가림은
+  caret 자기 격자 원점으로) · `ML9`(caret 이 뒤 묶음에 — 그 묶음의 cursor 에만) · `ML10`(한 축만 다른 위상) · `ML11`(clip·행 올림은 자기
+  묶음만) · `ML11b`(clip draw 는 같은 위상 이웃과도 따로) · `ML12`·`ML12b`(글자만 있는 draw — 넓은 글자·깨진 바이트 폭) · `ML13`(빈 뒤 묶음은
+  안 낸다) · `OVF5`(제품 경계 — 찾기 막대를 연 채 우클릭: prep 과 tick 뒤 렌더러 셀까지, 기대 픽셀은 `menuRect`·`caretRect` 에서) ·
+  `SGD3`(문서 패널은 자기 draw) · 문서 패널 글자 픽셀(`editor/mod.zig` 문서 패널 제품 판정자) · `metal_frame` 「오버레이 여러 장」(장마다
+  원점·clip, 장 순서, caret suffix, 래스터 병합).
+
 ```zig
 pub const ChromeFrame = struct {                 // replace()가 먹을 번들(layer별)
     sidebar_cells: []NativeMetalCell,
     pane_chrome_cells: []NativeMetalCell,
     pane_overlay_cells: []NativeMetalCell,
-    text_frames: []PositionedFrame,              // sidebar 제목·모달(overlay_frame) glyph
+    text_frames: []PositionedFrame,              // sidebar 제목·모달(overlay_frames) glyph
 };
 // Metal cell lowerer: fill→sentinel-UV bg 셀, border/rule→reserved-kind 2px 띠 셀, text→기존 glyph RenderFrame 경로
 pub fn lower(allocator, draws: []const ChromeDraw, tokens: Tokens, metrics: CellMetrics) !ChromeFrame;
@@ -197,6 +231,10 @@ pub fn lower(allocator, draws: []const ChromeDraw, tokens: Tokens, metrics: Cell
 Metal cell lowerer의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow`를 **이주**한 것. 즉 새 코드가 아니라 현재 수작업 셀 생성을 backend로 격상한다. 사용자 설정의 `tui` 선택지는 제공하지 않으며, 남은 `tui` 이름은 이 legacy cell 경로의 내부 호환성 표기일 뿐이다.
 
 ### 5.4 Component 계약 — `chrome/components/*.zig`
+
+**패널마다 draw 하나**(2026-10-10). 칸 위상이 다를 수 있는 패널(둥근 패널 quad 를 내는 상자)을 한 `ChromeDraw` 에 섞지 않는다 — 한 draw
+안의 글자는 그 draw 격자의 칸에 앉으므로, 섞으면 한쪽 글자가 칸으로 밀려 클릭 판정과 갈린다(§5.3 「오버레이 글자는 컴포넌트가 낸 픽셀
+자리에 선다」). 이 규칙을 강제하는 판정자는 아직 컴포넌트별이다(`SGD3`).
 Zig엔 trait가 없으니 **계약은 컨벤션**(각 컴포넌트 모듈이 같은 4개를 노출)이고 `ChromeHost`가 명시 호출한다(vtable 없음 — 컴파일타임 고정 집합, 기존 `self.palette`/`self.find` 패턴 그대로). 선례 = `FindState`/`PaletteState`.
 
 ```zig

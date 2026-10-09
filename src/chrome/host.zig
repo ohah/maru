@@ -148,8 +148,10 @@ pub const ChromeHost = struct {
     }
 
     /// 각 컴포넌트 view를 호출해 (layer, ops) = ChromeDraw를 arena에 빌드한다. 빈(닫힌) 컴포넌트는 건너뛴다.
-    /// 오버레이 컴포넌트(notice/find)는 라우팅상 배타적이라 현재 최대 1개만 ops를 낸다(platform lowering이 단일
-    /// 오버레이 frame을 가정). out·ops 슬라이스는 호출자가 준 frame arena가 소유한다(lower 뒤 arena 리셋).
+    /// notice·confirm·find(diff 의 둘째 찾기 막대 포함)가 한 번에 여럿 ops 를 낼 수 있고, 뒤에 모이는 오버레이(우클릭 메뉴 등)와도
+    /// 한 프레임에 함께 그려진다 — platform lowering 은 칸 위상이 다른 오버레이를 격자 따로 내린다(`metal_lowering.lower`,
+    /// 2026-10-10 — 그 전에는 「단일 오버레이 frame」을 가정해 함께 그리면 한쪽 글자가 칸으로 내려앉았다). 그래도 어느 둘을 **함께
+    /// 그릴지**는 호출자의 정책이다(알림 패널·편집기 헬퍼의 게이트). out·ops 슬라이스는 호출자가 준 frame arena가 소유한다(lower 뒤 arena 리셋).
     pub fn collectDraws(
         self: *ChromeHost,
         p: props.ChromeProps,
@@ -181,7 +183,7 @@ pub const ChromeHost = struct {
 
     /// palette는 필터된 행(Row: title·binding·selected)을 host가 주입해야 그릴 수 있다 — generic collectDraws는 rows가
     /// 없어 못 부른다. platform(catalog 소유)이 rows를 빌드해 이걸 부른다. palette 닫힘이면 무동작(빈 out). 다른 오버레이와
-    /// 배타적이라 platform이 palette.open일 때만 부른다(단일 오버레이 frame 가정 유지).
+    /// 배타적이라 platform이 palette.open일 때만 부른다(팔레트는 입력을 받는 모달이라 다른 모달을 닫고 연다).
     pub fn collectPaletteDraws(
         self: *ChromeHost,
         rows: []const palette.Row,
@@ -322,8 +324,15 @@ pub const ChromeHost = struct {
         var ops: std.ArrayList(draw.Op) = .empty;
         try suggest_box.view(&self.suggest_box, rows, p, tk, arena, &ops);
         if (ops.items.len > 0) {
-            if (suggest_box.boxRect(&self.suggest_box, rows, p)) |beside| try suggest_docs.view(&self.suggest_docs, docs, beside, p, arena, &ops);
             try out.append(arena, .{ .layer = suggest_box.layer, .ops = ops.items });
+            // 문서 패널은 **자기 draw** 다(2026-10-10) — 목록 옆에 「간격 + 보이는 패딩」만큼 떨어져 서므로 목록과 칸 위상이 대개 다르다.
+            // 한 draw 에 함께 두면 lowering 이 둘을 격자 한 장에 올려 패널 글자가 칸으로 내려앉았다(둥근 패널 quad 는 픽셀 그대로라
+            // 글자만 패널 안에서 밀리고, `suggest_docs.contains` 의 클릭 판정과 갈렸다). 목록 뒤에 모아 painter 순서는 같다.
+            if (suggest_box.boxRect(&self.suggest_box, rows, p)) |beside| {
+                var docs_ops: std.ArrayList(draw.Op) = .empty;
+                try suggest_docs.view(&self.suggest_docs, docs, beside, p, arena, &docs_ops);
+                if (docs_ops.items.len > 0) try out.append(arena, .{ .layer = suggest_docs.layer, .ops = docs_ops.items });
+            }
         }
     }
 
@@ -730,7 +739,7 @@ test "host: 단축키 힌트 — visible면 collectKeyHintsDraws 1개(modal laye
     try std.testing.expectEqual(@as(usize, 0), out.items.len);
 }
 
-test "host: 자동완성 목록 + 문서 패널 — 한 레이어에 목록 행이 먼저, 패널 quad 는 그 뒤에 목록 상자 오른쪽·위 맞춤 (§8.2g-d)" {
+test "host: 자동완성 목록 + 문서 패널 — 목록 draw 가 먼저, 패널은 그 뒤 자기 draw(첫 op 이 quad)로 목록 상자 오른쪽·위 맞춤 (§8.2g-d)" {
     const Rgb = @import("../color.zig").Rgb;
     const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
     const p = props.ChromeProps{ .metrics = .{ .cell_width_px = 10, .cell_height_px = 20, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
@@ -753,10 +762,39 @@ test "host: 자동완성 목록 + 문서 패널 — 한 레이어에 목록 행�
     host.suggest_docs.toggle();
     out.clearRetainingCapacity();
     try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &out);
-    const ops2 = out.items[0].ops;
-    try std.testing.expectEqual(@as(usize, 2 * 2 + 1 + 2), ops2.len); // + 패널 quad + 텍스트 둘(빈 줄 제외)
-    try std.testing.expect(ops2[0] == .fill and ops2[4] == .quad); // 목록이 먼저, 패널이 뒤(적대적 7회차 E2)
+    // 패널은 **자기 draw** 다 — 목록과 칸 위상이 대개 달라 한 draw 면 패널 글자가 칸으로 내려앉는다(`SGD3`, 2026-10-10).
+    try std.testing.expectEqual(@as(usize, 2), out.items.len);
+    try std.testing.expectEqual(@as(usize, 2 * 2), out.items[0].ops.len); // 목록 행 둘(fill + text) — 목록이 먼저(적대적 7회차 E2)
+    const ops2 = out.items[1].ops;
+    try std.testing.expectEqual(@as(usize, 1 + 2), ops2.len); // 패널 quad + 텍스트 둘(빈 줄 제외)
+    try std.testing.expect(out.items[0].ops[0] == .fill and ops2[0] == .quad);
     const list = suggest_box.boxRect(&host.suggest_box, &rows, p).?;
-    try std.testing.expectEqual(list.y, ops2[4].quad.rect.y); // 위 맞춤(적대적 7회차 E10)
-    try std.testing.expectEqual(list.x + @as(i32, @intCast(list.w)) + 10, ops2[4].quad.rect.x); // 오른쪽 한 칸
+    try std.testing.expectEqual(list.y, ops2[0].quad.rect.y); // 위 맞춤(적대적 7회차 E10)
+    try std.testing.expectEqual(list.x + @as(i32, @intCast(list.w)) + 10, ops2[0].quad.rect.x); // 오른쪽 한 칸
+}
+
+// 완성 목록 옆 문서 패널은 **자기 draw** 다 — 목록과 칸 위상이 대개 달라(간격 + 보이는 패딩만큼 떨어진다) 한 draw 에 두면 lowering 이 둘을
+// 격자 한 장에 올려 패널 글자가 칸으로 내려앉았다(2026-10-10 적대적 검증 — `metal_lowering.lower` 「단위는 draw 다」).
+test "SGD3 완성 목록과 문서 패널은 draw 둘이다 — 목록 먼저, 패널(첫 op 이 둥근 quad) 뒤" {
+    const Rgb = @import("../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
+    p.shape.corner_radius_px = 8;
+    p.shape.modal_padding_px = 12;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var host = ChromeHost{};
+    const rows = [_]suggest_box.Row{ .{ .label = "print_count", .kind = 'w' }, .{ .label = "print_total", .kind = 'w' } };
+    host.suggest_box.show(288, 202, 16);
+    const docs = [_]suggest_docs.Line{.{ .text = "int print_count(int count)" }};
+    var draws: std.ArrayList(draw.ChromeDraw) = .empty;
+    try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &draws);
+    try std.testing.expectEqual(@as(usize, 1), draws.items.len); // 문서가 접혀 있으면 목록 하나
+    host.suggest_docs.toggle();
+    draws.clearRetainingCapacity();
+    try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &draws);
+    try std.testing.expectEqual(@as(usize, 2), draws.items.len);
+    for (draws.items[0].ops) |op| try std.testing.expect(op != .quad); // 목록에는 패널 quad 가 없다
+    try std.testing.expect(draws.items[1].ops[0] == .quad); // 패널은 자기 draw 의 첫 둥근 quad — lowering 이 패널로 친다
 }

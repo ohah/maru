@@ -18598,7 +18598,7 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
         try testing.expect(fx.session.overlayFrameNeeded());
         {
             var prep = (try fx.session.buildChromeOverlayPrep()) orelse return error.HoverNotDrawn;
-            defer prep.dl.deinit(allocator);
+            defer prep.deinit(allocator);
             try testing.expect(prep.dl.cells.len > 0);
             try testing.expect(drawnHasCodepoint(prep.dl, '(')); // 출처 줄의 `clangd(E1)` 이 실렸다
         }
@@ -19018,7 +19018,7 @@ test "REF1 참조 피커 — ⇧F12 가 caret 자리의 참조를 묻고 응답�
         var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
         var prep = (try s.buildChromeOverlayPrep()) orelse return error.PickerNotDrawn;
-        defer prep.dl.deinit(allocator);
+        defer prep.deinit(allocator);
         try testing.expect(prep.dl.cells.len > 0);
         try testing.expect(drawnHasCodepoint(prep.dl, ';'));
         try testing.expect(drawnHasCodepoint(prep.dl, ':'));
@@ -21219,7 +21219,7 @@ test "SIG1 시그니처 힌트 — `(` 를 치면 열리고 첫 파라미터가 
         try testing.expectEqual(@as(i32, @intFromFloat(a.x - @as(f64, @floatFromInt(term.rt.editor_hit_geom.cell_w_px)) / 2)), fx.session.chrome_host.hover_box.anchor_x);
         try testing.expect(fx.session.overlayFrameNeeded());
         var prep = (try fx.session.buildChromeOverlayPrep()) orelse return error.SignatureNotDrawn;
-        defer prep.dl.deinit(allocator);
+        defer prep.deinit(allocator);
         try testing.expect(drawnHasCodepoint(prep.dl, '/')); // 「1/2」
     }
     // ⑵ `1,` — `,` 는 트리거: 둘째 파라미터가 accent(15..20 → 19..24). 키 입력은 닫지 않는다.
@@ -21652,7 +21652,7 @@ test "RNM1 심볼 이름 바꾸기 — F2 로 낱말이 씨앗인 상자, 이름
         d.dl.deinit(allocator);
         try testing.expect(s.overlayFrameNeeded()); // 제품은 이 게이트를 지나야 오버레이 프레임을 만든다(캡처 실측 — 없으면 상자가 안 뜬다)
         var prep = (try s.buildChromeOverlayPrep()) orelse return error.RenameBoxNotDrawn;
-        defer prep.dl.deinit(allocator);
+        defer prep.deinit(allocator);
         try testing.expect(s.chrome_host.rename_box.open);
         try testing.expect(settings_ops.renameCaretRect(s) != null); // IME 후보창 자리도 상자 안
         // 앵커는 낱말 **첫 글자**(offset 4) 셀이다 — caret(5) 이나 낱말 끝이 아니다.
@@ -21975,7 +21975,7 @@ test "CMP1 자동완성 — 식별자 글자로 열리고 접두사로 좁혀지
             d.dl.deinit(testing.allocator);
             if (try sess.buildChromeOverlayPrep()) |*prep| {
                 var pp = prep.*;
-                pp.dl.deinit(testing.allocator);
+                pp.deinit(testing.allocator);
             }
         }
     }.f;
@@ -22334,7 +22334,7 @@ test "CMP3 자동완성 ①-b — 서버 없는 파일(markdown)에서도 타이
         var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
         var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
-        defer prep.dl.deinit(allocator);
+        defer prep.deinit(allocator);
         try testing.expect(s.chrome_host.suggest_box.open);
     }
     // fuzzy — `wds` 는 words(w·d·s 부분열)만.
@@ -22344,7 +22344,7 @@ test "CMP3 자동완성 ①-b — 서버 없는 파일(markdown)에서도 타이
         d.dl.deinit(allocator);
         if (try s.buildChromeOverlayPrep()) |*prep| {
             var pp = prep.*;
-            pp.dl.deinit(allocator);
+            pp.deinit(allocator);
         }
     }
     try testing.expect(s.editor_completion.active);
@@ -22420,7 +22420,7 @@ test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(add
             d.dl.deinit(testing.allocator);
             if (try sess.buildChromeOverlayPrep()) |*prep| {
                 var pp = prep.*;
-                pp.dl.deinit(testing.allocator);
+                pp.deinit(testing.allocator);
             }
         }
     }.f;
@@ -22615,7 +22615,7 @@ test "CMP5 자동완성 ①-c — labelDetails: 행에 꼬리(label_detail)가 �
         d.dl.deinit(allocator);
         if (try s.buildChromeOverlayPrep()) |*prep| {
             var pp = prep.*;
-            pp.dl.deinit(allocator);
+            pp.deinit(allocator);
         }
     }
     try testing.expect(s.editor_completion.active);
@@ -23300,7 +23300,7 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
             d.dl.deinit(testing.allocator);
             if (try sess.buildChromeOverlayPrep()) |*prep| {
                 var pp = prep.*;
-                pp.dl.deinit(testing.allocator);
+                pp.deinit(testing.allocator);
             }
         }
     }.f;
@@ -23384,6 +23384,16 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     const panel = maru.chrome.components.suggest_docs.boxRect(&s.chrome_host.suggest_docs, dl, beside, p).?;
     try testing.expect(panel.x >= beside.x + @as(i32, @intCast(beside.w)));
     try testing.expectEqual(beside.y, panel.y);
+    // 패널 글자는 패널이 정한 픽셀에 선다 — 패널은 목록 옆 「간격 + 보이는 패딩」에 서서 목록과 칸 위상이 대개 다르다(패널은 자기 draw —
+    // `ChromeHost.collectSuggestBoxDraws`, 2026-10-10). 한 draw 일 때는 패널 글자가 목록 격자의 칸으로 내려앉았다. 「Lazy import.」 는 셋째 줄.
+    {
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
+        defer prep.deinit(testing.allocator);
+        const pcw = p.metrics.cell_width_px;
+        const pch = p.metrics.cell_height_px;
+        const want = [2]i64{ panel.x + @as(i64, pcw) * maru.chrome.components.hover_box.pad_cols, panel.y + 2 * @as(i64, pch) };
+        try testing.expectEqual(want, prepGlyphPixel(&prep, 'L', pcw, pch) orelse return error.DocsGlyphNotDrawn);
+    }
     const inside_x: f64 = @floatFromInt(panel.x + 4);
     const inside_y: f64 = @floatFromInt(panel.y + 4);
     // **제품 진입점**으로 굴린다(`scrollWheel` — 적대적 3회차 B18: 클라이언트를 직접 부르면 배선을 빼도 초록).
@@ -23397,6 +23407,34 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     s.mouse(1, inside_x, inside_y, 0, 0);
     try testing.expect(s.editor_completion.active and s.chrome_host.suggest_box.open);
     try testing.expectEqual(@as(u32, 1), s.chrome_host.suggest_docs.scroll_rows);
+    // 자리가 모자라 패널이 목록 **위로** 놓이면(배치의 마지막 대안 — `popup_box.placeBeside`) 보이는 쪽은 패널이다(목록 뒤 자기 draw).
+    // 그 겹친 자리를 누르면 패널이 받는다 — 숨은 목록 행을 확정하지 않는다(적대적 검증 2026-10-10: 예전 순서는 목록을 먼저 봤다).
+    {
+        const save_w = s.backing_width_px;
+        const save_h = s.backing_height_px;
+        defer {
+            s.backing_width_px = save_w;
+            s.backing_height_px = save_h;
+        }
+        const pcw = p.metrics.cell_width_px;
+        const pch = p.metrics.cell_height_px;
+        const ws0 = maru.chrome.props.workspaceRect(p.metrics);
+        // 작업 영역을 「목록 폭 + 3칸 × 목록 높이 + 3행」 으로 줄인다 — 패널은 동·서·남·북 어디에도 안 들어간다.
+        s.backing_width_px = save_w - (ws0.w - (beside.w + 3 * pcw));
+        s.backing_height_px = save_h - (ws0.h - (beside.h + 3 * pch));
+        try frame(s, leaf, term);
+        const q = s.buildChromeProps();
+        const list = maru.chrome.components.suggest_box.boxRect(&s.chrome_host.suggest_box, completion_client.rows(s), q) orelse return error.SuggestNotPlaced;
+        const docs_box = maru.chrome.components.suggest_docs.boxRect(&s.chrome_host.suggest_docs, completion_client.docsLines(s), list, q) orelse return error.DocsNotPlaced;
+        const ix0 = @max(list.x, docs_box.x);
+        const iy0 = @max(list.y, docs_box.y);
+        const ix1 = @min(list.x + @as(i32, @intCast(list.w)), docs_box.x + @as(i32, @intCast(docs_box.w)));
+        const iy1 = @min(list.y + @as(i32, @intCast(list.h)), docs_box.y + @as(i32, @intCast(docs_box.h)));
+        if (ix0 >= ix1 or iy0 >= iy1) return error.NoOverlapScenario; // 장면이 안 섰다 — 줄이는 양을 다시 잡는다
+        s.mouse(1, @floatFromInt(@divTrunc(ix0 + ix1, 2)), @floatFromInt(@divTrunc(iy0 + iy1, 2)), 0, 0);
+        try testing.expect(s.editor_completion.active and s.chrome_host.suggest_box.open); // 확정되지 않았다
+    }
+    try frame(s, leaf, term);
     // 강조가 바뀌면 패널 스크롤은 0 으로(적대적 3회차 B20) — ↑ 로 `laz` 에 갔다가 ↓ 로 돌아온다.
     try pressKey(&fx, .arrow_up, .{});
     try frame(s, leaf, term);
@@ -43819,7 +43857,7 @@ test "NSH 상자는 실제로 프레임에 실린다 — 안 그리면 아무 �
     // 만든다 — 헬퍼가 여기 없으면 아래 `prep` 은 초록인데 화면에는 영영 안 뜬다(실제로 그랬다).
     try testing.expect(h.fx.session.overlayFrameNeeded());
     var prep = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.HelperNotDrawn;
-    defer prep.dl.deinit(allocator);
+    defer prep.deinit(allocator);
     try testing.expect(prep.dl.cells.len > 0); // 상자만 있고 글자가 없으면 라벨이 안 실린 것이다
 }
 
@@ -43868,7 +43906,7 @@ test "NSH 가려지거나 사라진 문서의 상자는 남지 않는다 (적대
 }
 
 test "NSH 토스트가 떠 있으면 상자는 클릭을 안 먹는다 (적대적 2회차 — 오버레이 공존)" {
-    // 한 프레임의 오버레이 raster 는 bounding box 하나라 토스트와 상자를 함께 낼 수 없다 —
+    // 토스트와 상자를 함께 내지 않는다(정책 — 메시지가 먼저다) —
     // 그래서 토스트가 뜬 동안 상자는 **안 그려진다**. 안 그려지는데 클릭은 먹으면 «보이지 않는
     // 버튼»이 되고, 그것이 이 부류에서 가장 나쁜 상태다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -43885,19 +43923,20 @@ test "NSH 토스트가 떠 있으면 상자는 클릭을 안 먹는다 (적대�
     try testing.expect(h.fx.session.chrome_host.notice.open);
 
     // **그리고 그려지지도 않는다.** 토스트가 뜬 프레임의 오버레이는 헬퍼가 열려 있든 아니든
-    // **같은 기하**여야 한다 — 둘을 함께 내면 bounding box 가 합쳐져 두 상자 **사이의 빈 칸까지**
-    // 오버레이 배경으로 칠해진다(단일 오버레이 가정).
+    // **같은 기하**여야 한다 — 상자가 어느 조각으로도 실리지 않아야 한다.
     {
         var with_helper = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.NoticeNotDrawn;
-        defer with_helper.dl.deinit(allocator);
+        defer with_helper.deinit(allocator);
         const saved_open = h.fx.session.chrome_host.send_helper.open;
         h.fx.session.chrome_host.send_helper.open = false;
         var notice_only = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.NoticeNotDrawn;
-        defer notice_only.dl.deinit(allocator);
+        defer notice_only.deinit(allocator);
         h.fx.session.chrome_host.send_helper.open = saved_open;
         try testing.expectEqual(notice_only.placement.origin_x, with_helper.placement.origin_x);
         try testing.expectEqual(notice_only.placement.origin_y, with_helper.placement.origin_y);
         try testing.expectEqual(notice_only.dl.cells.len, with_helper.dl.cells.len);
+        // 상자는 **다른 묶음으로도** 안 실린다 — 칸 위상이 다르면 뒤 조각(`extra`)으로 갈 수 있으므로 첫 조각만 비교하면 빈 판정자다.
+        try testing.expectEqual(notice_only.extra.len, with_helper.extra.len);
     }
     h.fx.session.last_agent_target = null;
     h.fx.session.mouse(1, on.x, on.y, 0, 0);
@@ -44537,23 +44576,24 @@ test "NSH 상자가 떠 있어도 우클릭은 메뉴 것이다, 그리고 상�
     // 상자는 **상태로 남아 있다**(그리기만 억제된다).
     try testing.expect(h.fx.session.chrome_host.send_helper.open);
 
-    // 메뉴가 떠 있는 프레임에서는 상자를 **안 낸다** — bounding box 가 하나라 둘을 함께 못 낸다.
+    // 메뉴가 떠 있는 프레임에서는 상자를 **안 낸다**(정책 — 메뉴가 먼저다).
     {
         var with_menu = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.MenuNotDrawn;
-        defer with_menu.dl.deinit(allocator);
+        defer with_menu.deinit(allocator);
         const saved = h.fx.session.chrome_host.send_helper.open;
         h.fx.session.chrome_host.send_helper.open = false;
         var menu_only = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.MenuNotDrawn;
-        defer menu_only.dl.deinit(allocator);
+        defer menu_only.deinit(allocator);
         h.fx.session.chrome_host.send_helper.open = saved;
         try testing.expectEqual(menu_only.dl.cells.len, with_menu.dl.cells.len);
+        try testing.expectEqual(menu_only.extra.len, with_menu.extra.len); // 다른 묶음으로도 안 실린다
     }
 
     // 메뉴를 닫으면 다시 그려진다.
     settings_ops.closeContextMenu(h.fx.session);
     try testing.expect(refreshSendHelper(h.fx.session));
     var after = (try h.fx.session.buildChromeOverlayPrep()) orelse return error.HelperNotDrawn;
-    defer after.dl.deinit(allocator);
+    defer after.deinit(allocator);
     try testing.expect(after.dl.cells.len > 0);
 }
 
@@ -57136,7 +57176,7 @@ const HelperFx = struct {
         d.dl.deinit(testing.allocator);
         if (try self.fx.session.buildChromeOverlayPrep()) |*prep| {
             var pp = prep.*;
-            pp.dl.deinit(testing.allocator);
+            pp.deinit(testing.allocator);
         }
     }
 
@@ -57319,7 +57359,7 @@ test "U2J 이름 없는 문서 저장 상자는 다른 오버레이가 없어도
         d.dl.deinit(allocator);
     }
     var prep = (try s.buildChromeOverlayPrep()) orelse return error.UntitledBoxNotDrawn;
-    defer prep.dl.deinit(allocator);
+    defer prep.deinit(allocator);
     try testing.expect(s.chrome_host.rename_box.open);
     try testing.expect(drawnHasCodepoint(prep.dl, 'n') and drawnHasCodepoint(prep.dl, 'd')); // 친 이름이 실렸다
     // Esc 로 닫으면 관문도 내려간다.
@@ -57689,4 +57729,85 @@ test "RPV8 결과 좌표 상한과 IME 확정 대기는 탭 게시나 원문 선
         try testing.expectEqualStrings("foo", source.rt.editorDocument().opened.?.file.content);
         try testing.expect(!canShareView(fx.session, report));
     }
+}
+
+/// 그 글자가 화면에 서는 픽셀(셀 좌상단) — 오버레이 prep 의 모든 조각(첫 묶음 + 위상이 다른 뒤 묶음)을 본다.
+fn prepGlyphPixel(prep: anytype, cp: u21, cw: u32, ch: u32) ?[2]i64 {
+    for (prep.dl.cells) |c| if (c.codepoint == cp) return .{ @as(i64, prep.placement.origin_x) + @as(i64, c.col) * cw, @as(i64, prep.placement.origin_y) + @as(i64, c.row) * ch };
+    for (prep.extra) |part| for (part.dl.cells) |c| if (c.codepoint == cp) return .{ @as(i64, part.placement.origin_x) + @as(i64, c.col) * cw, @as(i64, part.placement.origin_y) + @as(i64, c.row) * ch };
+    return null;
+}
+
+test "OVF5 찾기 막대를 연 채 편집기를 우클릭하면 — 두 오버레이의 글자가 각자 컴포넌트가 정한 픽셀에 선다(칸 위상이 달라도) (제품 경계)" {
+    // 2026-10-10 실제 앱 실측(main, 1배율 960×600 창 — 셀 8×18, `MARU_OPEN_FIND=total` + 편집기 (305,150) 우클릭): 메뉴 첫 글자 윗변이
+    // 151 → 145 로 6px 위(패널 윗 테두리에 붙음), 찾기 'F' 왼변이 461 → 458 로 3px 왼쪽 — 프레임의 모든 오버레이를 셀 격자 한 장
+    // (원점 = 전체 좌상단)에 올려, 축마다 원점을 정하지 않은 쪽 글자가 칸으로 내려앉았다(docs/chrome-strategy.md §5.3). 클릭 판정(`itemAt`)과 IME
+    // 위치(`caretRect`)는 컴포넌트 자리를 써 그림과 갈렸다. 기대 픽셀은 컴포넌트의 공개 배치(`menuRect` · `caretRect`)에서 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const s = fx.session;
+    s.surface_initialized = true;
+    s.backing_width_px = 1200;
+    s.backing_height_px = 800;
+    s.dispatchAppAction(.toggle_find);
+    try testing.expect(s.chrome_host.find.open and s.chrome_host.find.input.query.items.len == 0);
+    const cw = s.cell_width_px;
+    const ch = s.cell_height_px;
+    const props = s.buildChromeProps();
+    // 찾기 글자 원점 = caret − 「Find: 」(6칸) — 검색어가 비었으므로 caret 은 프롬프트 바로 뒤다. caret 은 포커스가 있을 때만 잰다.
+    const caret = chrome.components.find.caretRect(&s.chrome_host.find, props) orelse return error.FindNotPlaced;
+    const find_x: i64 = caret.x - 6 * @as(i64, cw);
+    const find_y: i64 = caret.y;
+    s.chrome_host.find.input_focused = false; // 편집기를 눌러 포커스가 빠진 상태(우클릭은 편집기가 받는다)
+    // 메뉴를 찾기 막대와 **칸 위상이 다른** 자리에 연다(한 칸 안에서 고른다). 넓은 메뉴는 창 오른쪽에 붙어 가로 위상이 고정될 수 있어
+    // 가로·세로 중 하나만 달라도 된다 — 다른 축의 글자가 내려앉는 것이 예전 결함이었다.
+    var opened = false;
+    var dy: u32 = 0;
+    search: while (dy < ch) : (dy += 1) {
+        var dx: u32 = 0;
+        while (dx < cw) : (dx += 1) {
+            settings_ops.closeContextMenu(s);
+            if (!settings_ops.showEditorContextMenu(s, fx.term, @floatFromInt(300 + dx), @floatFromInt(300 + dy))) return error.MenuNotOpened;
+            const rect = chrome.components.context_menu.menuRect(&s.chrome_host.context_menu, settings_ops.contextMenuItems(s), props) orelse return error.MenuNotPlaced;
+            if (@mod(rect.x - find_x, @as(i64, cw)) != 0 or @mod(rect.y - find_y, @as(i64, ch)) != 0) {
+                opened = true;
+                break :search;
+            }
+        }
+    }
+    try testing.expect(opened);
+    const items = settings_ops.contextMenuItems(s);
+    const rect = chrome.components.context_menu.menuRect(&s.chrome_host.context_menu, items, props).?;
+    var it = (std.unicode.Utf8View.init(items[0]) catch return error.BadLabel).iterator();
+    const menu_first = it.nextCodepoint().?;
+
+    var prep = (try s.buildChromeOverlayPrep()) orelse return error.NothingDrawn;
+    defer prep.deinit(allocator);
+    try testing.expect(prep.extra.len >= 1); // 위상이 달라 두 장
+    try testing.expectEqual([2]i64{ find_x, find_y }, prepGlyphPixel(&prep, 'F', cw, ch).?);
+    try testing.expectEqual([2]i64{ rect.x + @as(i64, cw), rect.y }, prepGlyphPixel(&prep, menu_first, cw, ch).?); // 좌패딩 1칸
+
+    // **제품 틱까지** — 뒤 조각도 셰이핑돼 렌더러 버퍼(오버레이 영역)에 자기 원점으로 실린다. 틱이 `prep.extra` 를 빠뜨리면 메뉴
+    // 글자가 화면에서 사라지고, `replace` 가 장마다 원점을 안 붙이면 다시 한쪽이 밀린다.
+    _ = try s.tick();
+    const v = s.metal_buffer.view();
+    try testing.expectEqual(@as(u32, 1), v.overlay_cells_present);
+    const modal = s.metal_buffer.cells[v.modal_cells_start..];
+    try testing.expectEqual([2]i64{ find_x, find_y }, metalCellPixel(modal, 'F', cw, ch) orelse return error.FindGlyphNotInFrame);
+    try testing.expectEqual([2]i64{ rect.x + @as(i64, cw), rect.y }, metalCellPixel(modal, menu_first, cw, ch) orelse return error.MenuGlyphNotInFrame);
+    // painter 순서 — 찾기 막대(먼저 모인다)의 셀이 메뉴 셀보다 앞이다(메뉴가 위에 그려진다).
+    try testing.expect(metalCellIndex(modal, 'F').? < metalCellIndex(modal, menu_first).?);
+}
+
+fn metalCellIndex(cells: []const renderer.metal_frame.NativeMetalCell, cp: u21) ?usize {
+    for (cells, 0..) |c, i| if (c.codepoint == cp) return i;
+    return null;
+}
+
+/// 렌더러 셀(`NativeMetalCell`)이 화면에 서는 픽셀 — 셀마다 자기 원점을 든다(`setCellsPaneOrigin`).
+fn metalCellPixel(cells: []const renderer.metal_frame.NativeMetalCell, cp: u21, cw: u32, ch: u32) ?[2]i64 {
+    for (cells) |c| if (c.codepoint == cp) return .{ @as(i64, c.origin_x) + @as(i64, c.col) * cw, @as(i64, c.origin_y) + @as(i64, c.row) * ch };
+    return null;
 }

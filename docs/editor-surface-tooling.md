@@ -799,8 +799,9 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 전체 행, `below_clamp`(뒤집지 않음 — 규칙 2 위반), 항목 하나의 라벨만 안다. 기하는 `popup_box` 가 단일 출처가 됐으므로(§8.3 의 선례 —
 「신규로 남은 것은 줄 배치와 자체 스크롤뿐」) 완성 목록도 같은 꼴로 선다: `chrome/components/suggest_box.zig` = `popup_box` + 창 행(상한
 10) + 선택 강조 + `label`/`detail` 두 열. ③ 적용은 §3.6 세 번째 소비자 — `textEdit`(접두사 교체) + `additionalTextEdits`(자동 import)가
-**한 delta**(#3794 의 길). 응답 뒤에도 타이핑이 이어지므로 offset 이 밀린다 → 아래 「적용」이 그 규칙을 든다. ④ 오버레이 raster 는 프레임에
-상자 **하나**다(`buildChromeOverlayPrep`) — 완성 팝업이 뜨는 프레임에는 호버·시그니처 상자가 안 그려지고(상태는 남는다 — 닫히면 `refresh`
+**한 delta**(#3794 의 길). 응답 뒤에도 타이핑이 이어지므로 offset 이 밀린다 → 아래 「적용」이 그 규칙을 든다. ④ 편집기 헬퍼 상자는 프레임에
+**하나**다(`buildChromeOverlayPrep` 의 if-else — 처음 근거였던 「오버레이 raster 가 상자 하나」는 2026-10-10 에 풀렸다, `chrome-strategy.md` §5.3;
+규칙은 남는다) — 완성 팝업이 뜨는 프레임에는 호버·시그니처 상자가 안 그려지고(상태는 남는다 — 닫히면 `refresh`
 가 다시 세운다), 호버 tick 은 팝업이 열린 동안 열지 않는다. ⑤ 스니펫은 받지 않는다 — `snippetSupport = false` 로 선언하면 서버가 평문
 `insertText` 를 보낸다(clangd 실측: `add` 만).
 
@@ -990,7 +991,8 @@ labelDetails 가 없다.
 - **C7** 패널의 오른쪽 경계는 밖 · **C8** 폭 상한 80 은 `hover_box.size` 의 것(`SGD1`).
 - **D1** 로딩 줄은 하나뿐 · **D2** 상자가 아직 안 섰으면 `⌃Space` 는 토글이 아니라 다시 묻기(「보이지 않는 목록」 규칙의 연장) · **D4** 휠 델타 0 은 무동작 ·
   **D8** 줄 색은 `surface_fg` · **D9** detail 없는 문서 항목(가짜 `arrow_fix` 에 문서를 실었다)은 빈 줄 없이 문서부터(`CMP6`).
-- **E2·E10** host 가 목록 행 뒤에 패널 quad 를, 목록 상자 **위 맞춤·오른쪽 한 칸**에(host 판정자 새로) · **E3** value 없는 MarkupContent 는 문서 없음(`CPL9`).
+- **E2·E10** host 가 목록 행 뒤에 패널 quad 를, 목록 상자 **위 맞춤·오른쪽 한 칸**에(host 판정자 새로 — 2026-10-10 부터 패널은 목록과
+  다른 draw 다: 칸 위상이 대개 달라 한 draw 면 패널 글자가 칸으로 밀렸다, `chrome-strategy.md` §5.3·`SGD3`) · **E3** value 없는 MarkupContent 는 문서 없음(`CPL9`).
 - 등가·죽은 것: **D7** 토글 뒤 `docs_item = null`(접히면 `refreshDocs` 가 비우고 펼칠 땐 이미 비어 있다) → 뺐다 · `docs_loading` 필드는 읽는 곳이 없어 뺐다 ·
   **E5**(같은 문서 재복사 — 누수 아님) · **E7**(닫히면 줄이 비어 앞 가드 둘은 방어) · **E9**(토글의 `metal_dirty` — 키 경로가 세운다) · **E1** 은 주석만 바꾼 무효 변이.
 

@@ -677,6 +677,10 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
     const p = self.buildChromeProps();
     const box = &self.chrome_host.suggest_box;
     if (suggest_box.boxRect(box, st.rows.items, p)) |rect| {
+        // **문서 패널이 먼저다** — 목록 뒤에 자기 draw 로 그려지므로(`ChromeHost.collectSuggestBoxDraws`) 둘이 겹치면(자리가 모자라
+        // 패널이 목록 위로 놓이는 마지막 대안 — `popup_box.placeBeside`) 패널이 위에 보인다. 보이는 쪽이 클릭을 받아야 한다 —
+        // 예전 순서면 패널 글자를 누르자 그 아래 숨은 목록 행이 확정됐다(적대적 검증 2026-10-10). 패널 안 클릭은 삼킨다(닫지 않는다 — 읽는 동작).
+        if (suggest_docs.contains(&self.chrome_host.suggest_docs, st.docs_lines.items, rect, p, x_px, y_px)) return true;
         if (std.math.isFinite(x_px) and std.math.isFinite(y_px)) {
             const x0: f64 = @floatFromInt(rect.x);
             const y0: f64 = @floatFromInt(rect.y);
@@ -689,8 +693,6 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
                 return true;
             }
         }
-        // 문서 패널 안 클릭은 삼킨다(닫지 않는다 — 읽는 동작).
-        if (suggest_docs.contains(&self.chrome_host.suggest_docs, st.docs_lines.items, rect, p, x_px, y_px)) return true;
     }
     hide(self);
     return false;

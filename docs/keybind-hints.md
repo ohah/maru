@@ -33,7 +33,7 @@
 | 결정 | 베이스(기존 원칙/사실) | 왜 |
 |---|---|---|
 | **패시브 HUD(입력 비소비)** — `ChromeHost.handleInput` 모달 라우팅에 **넣지 않는다** | notice/palette/find는 키를 가로채는 모달(`host.zig` 우선순위 라우팅) | 이 힌트는 정반대다: 사용자가 Cmd를 **누른 채 그 단축키 키를 실제로 눌러야** 한다. 입력을 소비하면 단축키가 안 먹는다. 그래서 렌더(`collectDraws`)만 타고 입력 라우팅엔 안 들어간다 |
-| **모달/IME 조합 중이면 힌트 억제** | platform lowering이 "단일 오버레이 frame"을 가정(`host.zig` collectDraws 주석) | 동시에 두 오버레이 frame이 뜨면 그 가정이 깨진다. 모달이 열렸으면 거기 타이핑 중이라 Cmd-홀드 힌트는 무의미 → 억제로 단일 오버레이 불변 유지 |
+| **모달/IME 조합 중이면 힌트 억제** | 모달이 열렸으면 거기 타이핑 중이다 | Cmd-홀드 힌트는 무의미하다 → 억제한다. (처음 근거였던 「platform lowering 이 단일 오버레이 frame 을 가정」은 2026-10-10 에 풀렸다 — 칸 위상이 다른 오버레이를 격자 따로 내린다, `chrome-strategy.md` §5.3. 억제는 위 이유로 남긴다) |
 | **내용 = chord가 바인딩된 app 액션만** | `command_catalog.chordForAction`이 안 묶인 액션은 null 반환 | "이 단축키가 X를 한다"가 HUD의 본질. chord 없는 액션(`install_cli`·`move_pane_to_new_workspace` 등 — 팔레트 발견 전용)은 보여 줄 키가 없으므로 제외. unbind도 자연히 빠지고 리바인드는 새 chord로 표시 |
 | **트리거 = 모디파이어 홀드(지연 후)** | 사용자 요청("Cmd 오래 누르고 있으면") | 즉시 표시는 매 `Cmd+key`마다 깜빡여 거슬린다. 지연 + "다른 키 눌리면 취소"로 정상 단축키 사용과 충돌 안 함 |
 | **카테고리 그룹핑(맥락별 아님)** | maru app 바인딩은 대부분 전역(어느 pane이든 동작 — `key-input-and-shortcuts.md`) | "포커스 맥락별 좁히기"는 maru에선 표면이 거의 없다. 정직하게 카테고리로 묶는다(맥락 인식은 §8 후속) |
@@ -73,7 +73,7 @@ flowchart TD
   BD --> CK["host.collectKeyHintsDraws (모달이면 억제)"]
   CK --> SV["shortcut_hints.view: 요소 rect 우상단마다 fill(keycap_bg)+chord glyph"]
   SV --> RA["rasterizeOverlayCells(transparent_default=true): 배지 셀만, 나머지 투명"]
-  RA --> MF["overlay_frame → metal_frame.replace (chrome/터미널 위에 합성)"]
+  RA --> MF["overlay_frames → metal_frame.replace (chrome/터미널 위에 합성)"]
 ```
 
 ## 3. 아키텍처 — 레이어와 데이터 흐름 (KH-1~5 옛 박스 모델 — 역사 기록)
@@ -127,7 +127,7 @@ pub const ChromeHost = struct {
     key_hints: shortcut_hints.State = .{},
 
     /// platform이 rows를 빌드해 부른다(palette와 동형). 안 보이거나 다른 모달이 열렸으면 무동작 —
-    /// "단일 오버레이 frame" 불변(collectDraws 주석)을 지키려 모달 억제.
+    /// 모달이 열렸으면 거기 타이핑 중이라 억제(§3.2).
     pub fn collectKeyHintsDraws(self, rows, p, tk, arena, out) !void {
         if (anyModalOpen(self)) return;   // confirm/notice/…/settings 중 하나라도 열림 → 억제
         try shortcut_hints.view(&self.key_hints, rows, p, tk, arena, out);
@@ -322,7 +322,7 @@ pub const KeyHintConfig = struct {
 ## 8. 리스크·미해결
 
 - **(중) 홀드 오발/누락**: `flagsChanged`는 modifierFlags만 줘 좌/우 Cmd 구분이 애매할 수 있다. keyCode(`event.keyCode`)로 보강하거나 modifierFlags 비교만으로 충분한지 KH-4 실측으로 확정한다("추측 말고 캡처").
-- **(중) 단일 오버레이 frame 가정**: collectDraws가 동시 1개 오버레이를 가정 → 모달 억제로 지킨다(§3.2). 향후 다중 오버레이가 필요해지면 lowering을 먼저 일반화한다.
+- **(해소) 단일 오버레이 frame 가정**: 예전 lowering 은 프레임의 오버레이를 격자 한 장에 올려 둘이 함께 뜨면 한쪽 글자가 칸으로 내려앉았다. 2026-10-10 에 lowering 을 일반화했다 — 칸 위상이 다른 오버레이는 격자 따로(`chrome-strategy.md` §5.3). 모달 억제는 §3.2 의 UX 이유로 남긴다.
 - **(낮) 맥락 인식 한계**: maru app 바인딩이 전역이라 v1은 카테고리 그룹만. "현재 패널 전용" 배지는 표면이 생기면(터미널 매크로 등) KH-5에서.
 - **(낮) 내용 길이 vs pane 높이**: 활성 pane 우상단에서 아래로 자라므로, 바인딩이 많고 pane이 짧으면 박스가 pane(또는 창) 아래로 넘칠 수 있다. v1은 `paneTopRightBox`가 pane 높이로 행 수를 clamp하고 초과분은 컴포넌트가 안 그린다(상단은 안 넘침 — 위에서 아래로만 자람). 카테고리 2열 배치·폰트 축소·스크롤은 KH-5.
 - **트리거 모디파이어 표시 정책**: `keyhint.modifier`를 Control/Option로 바꾸면 그 모디파이어 홀드로 뜨되, 내용은 여전히 "바인딩된 app 액션 전체"다(모디파이어별 필터 아님 — v1 단순화). 필터링이 필요하면 KH-5.

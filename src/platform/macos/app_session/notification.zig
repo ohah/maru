@@ -699,7 +699,7 @@ pub fn openNotificationPanel(self: *AppSession) void {
 /// 커버리지를 줘 외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다(사용자 피드백). 벨 글리프 중심(렌더러 가로 nudge 반영: col cols-12·width 2 슬롯이 0.5칸
 /// 왼쪽으로 밀려 중심 (cols-11.5)*cw)에 apex를 두고, 밑변을 패널 상단에 overlap만큼 겹쳐 상단 테두리를 caret
 /// 폭만큼 덮어 'bubble을 연다'. 패널이 세로 clamp로 anchor보다 위로 밀렸거나 벨이 패널 가로 밖이면 생략(벨과
-/// 어긋난 caret 방지). buildChromeOverlayFrame이 패널 배경 quad를 self.gpu_quads에 append한 '뒤'에 부른다(테두리 위로).
+/// 어긋난 caret 방지). buildChromeOverlayPrep이 패널 배경 quad를 self.gpu_quads에 append한 '뒤'에 부른다(테두리 위로).
 pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.components.notifications.Item, props: chrome.ChromeProps, tk: *const chrome.Tokens) void {
     const cw = self.cell_width_px;
     const ch = self.cell_height_px;

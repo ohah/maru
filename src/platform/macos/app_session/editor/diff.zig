@@ -4596,6 +4596,6 @@ test "DCOL17: 비교 뷰에서 열을 바꿔 둘째 찾기 막대만 남아도 �
     try testing.expect(!fx.session.anyOverlayOpen());
     try testing.expect(fx.session.overlayFrameNeeded()); // ★ 관문이 선다
     var prep = (try fx.session.buildChromeOverlayPrep()) orelse return error.SecondaryFindBarNotDrawn;
-    defer prep.dl.deinit(testing.allocator);
+    defer prep.deinit(testing.allocator);
     try testing.expect(prep.dl.cells.len > 0); // 둘째 막대의 글자(검색어 `right`)가 실렸다
 }

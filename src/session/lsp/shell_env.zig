@@ -173,32 +173,6 @@ fn containsEntry(joined: []const u8, part: []const u8) bool {
     return false;
 }
 
-/// 저장소(`root`) 자신이거나 그 아래인 PATH 항목을 뺀다 — 신뢰 전에 **실행하는** 일(계획 WT5 의 버전 조회)용(저장소가 넣어 둔
-/// 실행 파일이 서버 이름으로 잡혀 신뢰 전에 돌지 않게; 서버 **찾기**는 거르지 않는다 — 계획 WT3b). `out` 은 `path.len` 이상. 경로
-/// 성분 경계에서 가른다(`/r` 은 `/rx` 의 조상이 아니다). **글자로만 가른다** — `//`·`.`·`..`·심링크(`/tmp`↔`/private/tmp`) 표기는
-/// 같은 자리로 보지 못하므로, 호출자가 항목과 root 를 실제 경로로 푼 뒤 부른다. `cleanPath` 를 거친 값을 받는다(상대 경로 항목은 이미 없다).
-pub fn pathWithout(path: []const u8, root: []const u8, out: []u8) []const u8 {
-    std.debug.assert(out.len >= path.len);
-    std.debug.assert(root.len > 0); // 빈 root 는 모든 절대 경로를 지운다 — 호출자 오용
-    const r = if (root.len > 1) std.mem.trimEnd(u8, root, "/") else root;
-    var n: usize = 0;
-    var it = std.mem.splitScalar(u8, path, ':');
-    while (it.next()) |part| {
-        if (part.len == 0) continue;
-        const p = if (part.len > 1) std.mem.trimEnd(u8, part, "/") else part;
-        const under = std.mem.eql(u8, p, r) or (std.mem.eql(u8, r, "/") and p.len > 0 and p[0] == '/') or
-            (p.len > r.len and std.mem.startsWith(u8, p, r) and p[r.len] == '/');
-        if (under) continue;
-        if (n > 0) {
-            out[n] = ':';
-            n += 1;
-        }
-        @memcpy(out[n..][0..part.len], part);
-        n += part.len;
-    }
-    return out[0..n];
-}
-
 /// 해석한 환경 — 서버에 넘길 항목(소유, `KEY=VALUE\0`)과 그중 PATH(정리한 값, 없으면 `null`).
 pub const Resolved = struct {
     entries: [][:0]u8,
@@ -377,15 +351,12 @@ test "shell_env: 위생 — 터미널 세션 변수·셸 상태 변수·사용�
     try testing.expect(keep("GITHUB_TOKENS=x", &ex)); // 이름이 정확히 같아야 한다
 }
 
-test "shell_env: PATH 정리 — 절대 경로만, 빈 항목·상대 경로(현재 폴더)는 버리고 중복은 처음 것만; 저장소 아래 항목 걸러 내기는 성분 경계에서" {
+test "shell_env: PATH 정리 — 절대 경로만, 빈 항목·상대 경로(현재 폴더)는 버리고 중복은 처음 것만" {
     var buf: [256]u8 = undefined;
     try testing.expectEqualStrings("/a/bin:/usr/bin:/bin", cleanPath("/a/bin::.:/usr/bin:node_modules/.bin:/bin:/usr/bin:", &buf));
     try testing.expectEqualStrings("", cleanPath("", &buf));
     try testing.expectEqualStrings("", cleanPath(":::.", &buf));
     try testing.expectEqualStrings("/x", cleanPath("/x", &buf));
-    try testing.expectEqualStrings("/usr/bin:/r2/bin:/rx", pathWithout("/r/node_modules/.bin:/usr/bin:/r:/r/:/r2/bin:/rx", "/r", &buf));
-    try testing.expectEqualStrings("/usr/bin", pathWithout("/r/bin:/usr/bin", "/r/", &buf));
-    try testing.expectEqualStrings("", pathWithout("/usr/bin:/bin", "/", &buf)); // `/` 는 모든 절대 경로의 조상
 }
 
 test "shell_env: 결과 읽기 — 표식 둘 사이의 env -0 을 거르고 PATH 를 정리하며 같은 키는 처음 것만; 표식이 없거나 잘렸으면 Malformed" {

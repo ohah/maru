@@ -14821,13 +14821,22 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     {
         // 순서가 곧 우선순위다(높이가 모자라면 끝부터 준다) — 대가가 맨 앞, 경로 줄이 맨 끝.
         const notes = fx.session.chrome_host.confirm.notes;
-        try testing.expectEqual(@as(usize, 5), notes.len);
+        try testing.expectEqual(@as(usize, 6), notes.len);
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_privileges), notes[0].text);
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_build), notes[1].text);
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_scope), notes[2].text);
-        try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_shim), notes[3].text);
-        try testing.expect(notes[4].fit == .path);
-        try testing.expect(std.mem.endsWith(u8, notes[4].text, std.fs.path.basename(fx.session.editor_lsp.asking_root.?))); // 묻는 root
+        // 실행 파일(계획 WT5a) — 출처 경고(가짜 서버는 저장소의 zig-out 안이다)가 경고 줄로, 찾아 낸 경로(override 의 절대 경로, 홈 아래면
+        // `~`)가 경로 줄로(가운데를 줄인다 — 경고보다 먼저 준다).
+        try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_exe_repo), notes[3].text);
+        {
+            var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+            var want_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+            const shown = app_session_mod.homeTildeInto(fake, &shown_buf);
+            try testing.expectEqualStrings(maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = shown }}), notes[4].text);
+            try testing.expect(notes[4].fit == .path);
+        }
+        try testing.expect(notes[5].fit == .path);
+        try testing.expect(std.mem.endsWith(u8, notes[5].text, std.fs.path.basename(fx.session.editor_lsp.asking_root.?))); // 묻는 root
     }
     fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     fx.session.dispatchChromeAction(.confirm_cancel);
@@ -15975,11 +15984,19 @@ test "LSPB28 묻지 않는 root — 홈(dotfiles `.git`) 아래 파일과 git �
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", "/nonexistent-dir-for-lsp-test/clangd", 1);
     const t_zig = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/home/notes/s.zig", .{root}));
     const t_home = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/home/notes/n.c", .{root}));
+    // 정보 명령(계획 WT5a) — gate 가 root 를 보기 **전**(첫 pump 전)에도 홈을 「저장소」라 하지 않는다: 상태·버전 두 줄.
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, fx.session.chrome_host.notice.message, "\n"));
+    fx.session.chrome_host.notice.dismiss();
     lsp_client.pump(fx.session);
     lsp_client.pump(fx.session);
     _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
     try testing.expect(fx.session.pending_confirm == .none);
     try testing.expect(std.mem.endsWith(u8, t_home.rt.editor_lsp_root.?, "/home"));
+    // 정보 명령(계획 WT5a) — 묻지 않는 root 에서는 상태(이유)와 버전 두 줄뿐: 홈을 「저장소」라 하지 않고, 읽지 않을 셸 환경을 기다리지 않는다.
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, fx.session.chrome_host.notice.message, "\n"));
+    fx.session.chrome_host.notice.dismiss();
     const hv = lsp_client.statusFor(fx.session, t_home).?;
     try testing.expectEqual(lsp_client.Phase.home_root, hv.phase);
     try testing.expectEqual(lsp_client.Phase.home_root, lsp_client.statusFor(fx.session, t_zig).?.phase);
@@ -16059,6 +16076,10 @@ test "LSPB28 묻지 않는 root — 홈(dotfiles `.git`) 아래 파일과 git �
     lsp_client.pump(fx.session);
     try testing.expectEqual(lsp_client.Phase.outside_repo, lsp_client.statusFor(fx.session, t_q).?.phase);
     try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&g_buf, "{s}/.git", .{outside2}));
+    // 정보 명령(계획 WT5a) — `git init` 했어도 누르기 전에는 상태가 「저장소 밖」이다: 저장소 줄을 붙여 스스로 모순되지 않는다(두 줄).
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, fx.session.chrome_host.notice.message, "\n"));
+    fx.session.chrome_host.notice.dismiss();
     lsp_client.activateStatus(fx.session);
     lsp_client.pump(fx.session);
     try testing.expect(fx.session.pending_confirm == .lsp_trust);
@@ -16756,6 +16777,97 @@ const EnvGuard = struct {
     }
 };
 
+test "LSPE15 실행 파일의 출처는 사용자 셸 환경의 자리 변수로 가른다 — 앱 환경엔 없는 VOLTA_HOME 아래의 서버면 신뢰 시트가 volta shim 이라 말한다 (계획 workspace-trust WT5a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", null); // PATH 로 찾게
+    defer override.restore();
+    var volta_app = try EnvGuard.set("VOLTA_HOME", null); // 앱 환경엔 없다 — 사용자 셸 설정만 세운다
+    defer volta_app.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    const term = try openProjDoc(&fx, root);
+    // 셸 설정이 세운 volta 자리(`$HOME/vh` — 기본 `~/.volta` 가 아니다)의 bin 에 서버가 있다.
+    try fx.dir.dir.createDirPath(testing.io, "home/vh/bin");
+    var wrapper_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/vh/bin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\nexec {s} \"$@\"\n", .{fake}) });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/vh/bin/zls", .{root})).ptr, 0o755);
+    }
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 처음엔 `go` 를, 두 번째(다시 읽기)엔 `go2` 를 기다린다 — 시간이 아니라 순서로.
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nif [ -f \"$HOME/ran\" ]; then while [ ! -f \"$HOME/go2\" ]; do /bin/sleep 0.02; done; fi\n: > \"$HOME/ran\"\nexport VOLTA_HOME=\"$HOME/vh\"\nexport PATH=\"$HOME/vh/bin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    // 실패 경로에서도 관문을 연다 — 셸이 시한(10초)까지 기다리지 않게(`fx.deinit` 이 폴더를 먼저 지우므로 그 뒤엔 못 연다).
+    errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {};
+    errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go2", .data = "" }) catch {};
+    const Ctx = struct { fx: *PaneFixture };
+    // 담기 전 — 정보 명령은 실행 파일을 판정하지 않는다(앱 PATH 로 찾으면 「찾지 못함」이 된다).
+    lsp_client.pump(fx.session);
+    try testing.expect(!tool_env.settled());
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expect(std.mem.endsWith(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.lsp_info_exe_pending)));
+    fx.session.chrome_host.notice.dismiss();
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            return c.fx.session.pending_confirm == .lsp_trust;
+        }
+    }.f));
+    try testing.expectEqual(tool_env.Status.ready, tool_env.status());
+    var want_origin_buf: [256]u8 = undefined;
+    const want_origin = maru.i18n.format(&want_origin_buf, maru.i18n.t(.lsp_trust_note_exe_shim), &.{.{ .s = "volta" }});
+    var want_path_buf: [256]u8 = undefined;
+    const want_path = maru.i18n.format(&want_path_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = "~/vh/bin/zls" }});
+    var saw_origin = false;
+    var saw_path = false;
+    for (fx.session.chrome_host.confirm.notes) |n| {
+        if (std.mem.eql(u8, n.text, want_origin)) saw_origin = true;
+        if (std.mem.eql(u8, n.text, want_path)) saw_path = true;
+    }
+    try testing.expect(saw_path);
+    try testing.expect(saw_origin);
+    // 허용해 띄운 뒤 셸 환경을 다시 읽는 동안에도 띄운 서버의 출처는 띄울 때 굳힌 것(그동안 자리 변수는 비어 있다).
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    const Ct = struct { fx: *PaneFixture, term: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ct{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ct) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return v.phase == .ready;
+        }
+    }.f));
+    // 떠 있는 동안 저장소의 `.git` 이 사라져도 정보 명령은 지금 돌고 있는 실행 파일을 숨기지 않는다.
+    try fx.dir.dir.deleteTree(testing.io, "proj/.git");
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, want_path) != null);
+    fx.session.chrome_host.notice.dismiss();
+    try fx.dir.dir.createDirPath(testing.io, "proj/.git");
+    fx.session.dispatchAppAction(.lsp_reload_shell_environment);
+    fx.session.chrome_host.notice.dismiss();
+    try testing.expect(!tool_env.settled());
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, want_origin) != null);
+    fx.session.chrome_host.notice.dismiss();
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go2", .data = "" }); // 셸을 놓아 준다(정리 — 워커를 남기지 않는다)
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(_: Ctx) bool {
+            return tool_env.settled();
+        }
+    }.f));
+}
+
 test "LSPE1 사용자 셸 환경을 읽는 동안은 「없음」이 아니라 「셸 환경 읽는 중」이고, 다 읽으면 그 PATH 에서 서버를 찾아 묻고 그 환경으로 띄운다 (계획 workspace-trust WT3b)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -16802,6 +16914,15 @@ test "LSPE1 사용자 셸 환경을 읽는 동안은 「없음」이 아니라 �
         }
     }.f));
     try testing.expectEqual(tool_env.Status.ready, tool_env.status());
+    // 실행 파일이 저장소 밖의 일반 자리(`~/fakebin`)라 출처 경고가 없다 — 안내는 다섯 줄, 끝의 둘이 경로 줄(실행 파일·저장소).
+    {
+        const notes = fx.session.chrome_host.confirm.notes;
+        try testing.expectEqual(@as(usize, 5), notes.len);
+        var want_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+        try testing.expectEqualStrings(maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = "~/fakebin/zls" }}), notes[3].text);
+        try testing.expect(notes[3].fit == .path and notes[4].fit == .path);
+        try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_scope), notes[2].text);
+    }
     fx.session.chrome_host.confirm.dismiss();
     fx.session.dispatchChromeAction(.confirm_accept);
     try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
@@ -17797,6 +17918,173 @@ test "LSPB39 관리 상자를 띄운 뒤 다른 창·컨트롤 플레인이 결�
     try testing.expect(trust_store.get(key) == null);
 }
 
+test "LSPB40 「Language Server: Show Server Info」 — 상태·서버가 알려 준 이름과 버전·띄운 실행 파일(출처)·저장소와 신뢰 결정; 버전을 안 알려 주는 서버·아직 안 띄운 서버 (계획 workspace-trust WT5a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", fake);
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shown_fake = app_session_mod.homeTildeInto(fake, &shown_buf);
+    // ⑴ 아직 안 띄웠다(첫 pump 전 — 클라이언트도 없고 셸 환경도 아직이다) — 「떠 있지 않음」, 실행 파일은 셸 환경을 읽은 뒤에, 결정 없음.
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    {
+        const msg = fx.session.chrome_host.notice.message;
+        try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.t(.lsp_info_not_running)) != null);
+        try testing.expect(std.mem.endsWith(u8, msg, maru.i18n.t(.lsp_info_exe_pending)));
+        try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.t(.lsp_info_undecided)) != null);
+    }
+    fx.session.chrome_host.notice.dismiss();
+    // ⑵ 묻고 허용해 띄웠다 — 서버가 알려 준 이름·버전(가짜 서버 9.8.7), 띄운 경로, 허용.
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
+    fx.session.dispatchChromeAction(.confirm_accept);
+    const Ctx = struct { fx: *PaneFixture };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(c: Ctx) bool {
+            const s = lsp_client.statusFor(c.fx.session, c.fx.term) orelse return false;
+            return s.phase == .ready;
+        }
+    }.f));
+    const c = &fx.session.editor_lsp.clients.items[0];
+    try testing.expectEqualStrings(fake, c.launched_path.?);
+    try testing.expectEqualStrings("maru-fake-lsp", c.server_name.?);
+    try testing.expectEqualStrings("9.8.7", c.server_version.?);
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    {
+        const msg = fx.session.chrome_host.notice.message;
+        var want_buf: [256]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.format(&want_buf, maru.i18n.t(.lsp_info_version), &.{.{ .s = "maru-fake-lsp 9.8.7" }})) != null);
+        try testing.expect(std.mem.indexOf(u8, msg, shown_fake) != null);
+        try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.t(.lsp_trust_list_allowed)) != null);
+        try testing.expectEqual(@as(usize, 4), std.mem.count(u8, msg, "\n")); // 상태·버전·저장소·출처(저장소 안 — zig-out)·실행 파일 — 다섯 줄
+        try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.t(.lsp_trust_note_exe_repo)) != null);
+        // 경로 줄이 맨 끝 — 알림은 6 행까지라 긴 경로가 접혀 잘려도 저장소·신뢰 결정은 남는다.
+        try testing.expect(std.mem.endsWith(u8, msg, shown_fake));
+        try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.t(.lsp_trust_list_allowed)).? < std.mem.indexOf(u8, msg, shown_fake).?);
+    }
+    fx.session.chrome_host.notice.dismiss();
+    const Phase = lsp_client.Phase;
+    const waitPhase = struct {
+        fn f(fxp: *PaneFixture, want: Phase) bool {
+            const W = struct { fx: *PaneFixture, want: Phase };
+            return pumpLspUntil(fxp, 5000, W{ .fx = fxp, .want = want }, struct {
+                fn g(x: W) bool {
+                    const cl = &x.fx.session.editor_lsp.clients.items[0];
+                    return cl.phase == x.want and (x.want != .starting or cl.proc != null);
+                }
+            }.g);
+        }
+    }.f;
+    var no_info = try EnvGuard.set("MARU_FAKE_LSP_NOSERVERINFO", "1");
+    var no_info_set = true;
+    defer if (no_info_set) no_info.restore();
+    {
+        var silent = try EnvGuard.set("MARU_FAKE_LSP_INIT", "silent"); // 다음 서버는 `initialize` 에 답하지 않는다
+        defer silent.restore();
+        // ⑶ 내렸다(재시작 대기) — 지난 버전·경로는 지금의 것이 아니다: 「떠 있지 않음」.
+        _ = std.c.kill((c.proc orelse return error.NoProc).pid, std.c.SIG.KILL);
+        try testing.expect(waitPhase(&fx, .restarting));
+        c.retry_at_ms = std.math.maxInt(u64); // 시간이 아니라 순서로 — 재시작을 붙잡아 둔다
+        fx.session.dispatchAppAction(.lsp_show_server_info);
+        try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.lsp_info_not_running)) != null);
+        try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, "9.8.7") == null);
+        try testing.expect(std.mem.endsWith(u8, fx.session.chrome_host.notice.message, shown_fake)); // 지금 찾아 낸 경로
+        fx.session.chrome_host.notice.dismiss();
+        // ⑶b 다시 띄웠고 `initialize` 응답을 기다린다 — 「서버 응답을 기다리는 중」(「알려 주지 않음」이 아니다).
+        c.retry_at_ms = 0;
+        try testing.expect(waitPhase(&fx, .starting));
+        fx.session.dispatchAppAction(.lsp_show_server_info);
+        try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.lsp_info_version_pending)) != null);
+        fx.session.chrome_host.notice.dismiss();
+        _ = std.c.kill((c.proc orelse return error.NoProc).pid, std.c.SIG.KILL);
+        try testing.expect(waitPhase(&fx, .restarting));
+    }
+    // ⑶c 버전을 안 알려 주는 서버 — 다시 띄우면 지난 버전은 지워지고 「서버가 알려 주지 않음」.
+    c.retry_at_ms = 0;
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+        fn f(x: Ctx) bool {
+            const cl = &x.fx.session.editor_lsp.clients.items[0];
+            return cl.phase == .ready and cl.server_name == null; // 다시 띄웠다(지난 이름은 지워졌다)
+        }
+    }.f));
+    try testing.expect(c.server_name == null and c.server_version == null);
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.lsp_info_version_unknown)) != null);
+    fx.session.chrome_host.notice.dismiss();
+    // ⑶d 알림 상한을 넘는 실행 파일 경로(한글) — 글자 경계에서 자르고 「…」로 잘렸음을 보인다(조용히 끊지 않는다). 경로의 개행(폴더
+    // 이름에 들 수 있다)은 공백이라 줄을 늘리지 못한다.
+    {
+        var long = ("/x\ny" ++ ("가" ** 300)).*;
+        const saved = c.launched_path;
+        c.launched_path = &long;
+        defer c.launched_path = saved;
+        fx.session.dispatchAppAction(.lsp_show_server_info);
+        const msg = fx.session.chrome_host.notice.message;
+        try testing.expect(std.unicode.utf8ValidateSlice(msg));
+        try testing.expect(std.mem.endsWith(u8, msg, "\u{2026}"));
+        try testing.expect(msg.len <= app_session_mod.notice_message_cap);
+        try testing.expectEqual(@as(usize, 4), std.mem.count(u8, msg, "\n"));
+        fx.session.chrome_host.notice.dismiss();
+    }
+    // ⑷ 서버가 보낸 이름·버전은 담을 때 거른다(제품 경로 — 순수 규칙은 `LSJ serverText`): 개행은 공백이라 줄을 위조하지 못하고, 128 바이트 상한.
+    no_info.restore();
+    no_info_set = false;
+    {
+        var name_env = try EnvGuard.set("MARU_FAKE_LSP_SERVERINFO_NAME", "evil\nRepository: ~/x (Allowed)");
+        defer name_env.restore();
+        var ver_env = try EnvGuard.set("MARU_FAKE_LSP_SERVERINFO_VERSION", "v" ** 200);
+        defer ver_env.restore();
+        _ = std.c.kill((c.proc orelse return error.NoProc).pid, std.c.SIG.KILL);
+        try testing.expect(waitPhase(&fx, .restarting));
+        c.retry_at_ms = 0;
+        try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+            fn f(x: Ctx) bool {
+                const cl = &x.fx.session.editor_lsp.clients.items[0];
+                return cl.phase == .ready and cl.server_name != null;
+            }
+        }.f));
+        try testing.expectEqualStrings("evil Repository: ~/x (Allowed)", c.server_name.?);
+        try testing.expectEqual(@as(usize, 128), c.server_version.?.len);
+        fx.session.dispatchAppAction(.lsp_show_server_info);
+        try testing.expectEqual(@as(usize, 4), std.mem.count(u8, fx.session.chrome_host.notice.message, "\n")); // 줄이 늘지 않았다
+        fx.session.chrome_host.notice.dismiss();
+    }
+    // ⑷b 이름만 알려 주는 서버(버전은 선택 필드) — 이름은 남긴다.
+    {
+        var ver_env = try EnvGuard.set("MARU_FAKE_LSP_SERVERINFO_VERSION", "");
+        defer ver_env.restore();
+        _ = std.c.kill((c.proc orelse return error.NoProc).pid, std.c.SIG.KILL);
+        try testing.expect(waitPhase(&fx, .restarting));
+        c.retry_at_ms = 0;
+        try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx }, struct {
+            fn f(x: Ctx) bool {
+                const cl = &x.fx.session.editor_lsp.clients.items[0];
+                return cl.phase == .ready and cl.server_name != null;
+            }
+        }.f));
+        try testing.expect(c.server_version == null);
+        fx.session.dispatchAppAction(.lsp_show_server_info);
+        var want_buf: [256]u8 = undefined;
+        try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.format(&want_buf, maru.i18n.t(.lsp_info_version_unknown_named), &.{.{ .s = "maru-fake-lsp" }})) != null);
+        fx.session.chrome_host.notice.dismiss();
+    }
+    // ⑸ 언어 서버를 안 쓰는 자리 — 알림으로 말한다.
+    fx.session.loaded_config.config.lsp.enabled = false;
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_info_disabled), fx.session.chrome_host.notice.message);
+    fx.session.loaded_config.config.lsp.enabled = true;
+}
+
 test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에서 경고 안내가 「…」 없이 끝까지 서고 버튼이 화면 안에 그려진다 (§8.1·계획 WT1)" {
     const ch = maru.chrome;
     const confirm = ch.components.confirm;
@@ -17809,10 +18097,15 @@ test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에�
     inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |l| {
         maru.i18n.setLang(l);
         // 제품 `gateTrust`·`setTrustSheetNotes` 와 같은 키·같은 자리(안내 목록 자체는 LSPB2 가 제품 경로에서 고정한다).
-        const warnings = [_][]const u8{ maru.i18n.t(.lsp_trust_note_privileges), maru.i18n.t(.lsp_trust_note_build), maru.i18n.t(.lsp_trust_note_scope), maru.i18n.t(.lsp_trust_note_shim) };
+        // 넷째 줄은 실행 파일의 출처 경고(계획 WT5a — 가장 긴 도구 이름), 그 뒤 경로 줄 둘(실행 파일·저장소 — 가운데를 줄인다).
+        var origin_buf: [256]u8 = undefined;
+        const origin_line = maru.i18n.format(&origin_buf, maru.i18n.t(.lsp_trust_note_exe_shim), &.{.{ .s = "nodenv" }});
+        var exe_buf: [256]u8 = undefined;
+        const exe_line = maru.i18n.format(&exe_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = "~/.local/share/mise/shims/typescript-language-server" }});
+        const warnings = [_][]const u8{ maru.i18n.t(.lsp_trust_note_privileges), maru.i18n.t(.lsp_trust_note_build), maru.i18n.t(.lsp_trust_note_scope), origin_line };
         var root_buf: [256]u8 = undefined;
         const root_line = maru.i18n.format(&root_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = "~/Documents/workspace/maru/.claude/worktrees/lsp-trust-sheet" }});
-        const notes = [_]confirm.Note{ .{ .text = warnings[0] }, .{ .text = warnings[1] }, .{ .text = warnings[2] }, .{ .text = warnings[3] }, .{ .text = root_line, .fit = .path } };
+        const notes = [_]confirm.Note{ .{ .text = warnings[0] }, .{ .text = warnings[1] }, .{ .text = warnings[2] }, .{ .text = warnings[3] }, .{ .text = exe_line, .fit = .path }, .{ .text = root_line, .fit = .path } };
         var msg_buf: [512]u8 = undefined;
         // 서버 이름은 고정 표에서 가장 긴 것 — 질문이 가장 길어지는 경우.
         const message = maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "typescript-language-server" }});
@@ -17876,6 +18169,7 @@ test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에�
             var joined: std.ArrayList(u8) = .empty;
             var saw_buttons = false;
             const root_prefix = root_line[0..std.mem.indexOfScalar(u8, root_line, ' ').?];
+            const exe_prefix = exe_line[0..std.mem.indexOfScalar(u8, exe_line, '~').?]; // 경로 앞까지(「실행 파일: 」) — 한 낱말이면 경고의 줄바꿈 행(「실행되며,」)까지 건너뛴다
             for (out.items) |op| if (op == .text) {
                 const txt = op.text.runs[0].text;
                 const is_button = std.mem.eql(u8, txt, maru.i18n.t(.lsp_trust_allow)) or std.mem.eql(u8, txt, maru.i18n.t(.lsp_trust_deny));
@@ -17883,7 +18177,7 @@ test "LSPB19 신뢰 시트는 두 언어 × 기본 창(480)·좁은 창(320)에�
                     saw_buttons = true;
                     try testing.expect(op.text.origin.y + 16 <= 480); // 버튼 행이 화면 안
                 }
-                if (op.text.role != .surface_fg or is_button or std.mem.startsWith(u8, txt, root_prefix)) continue;
+                if (op.text.role != .surface_fg or is_button or std.mem.startsWith(u8, txt, root_prefix) or std.mem.startsWith(u8, txt, exe_prefix)) continue;
                 try testing.expect(std.mem.indexOf(u8, txt, "…") == null); // 경고 안내는 잘리지 않는다
                 try joined.appendSlice(arena, txt);
                 try joined.append(arena, ' ');

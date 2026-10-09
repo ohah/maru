@@ -135,6 +135,15 @@ pub const Client = struct {
     trust_pending: bool = false,
     /// 이 root 의 신뢰 키(실제 경로·볼륨 — `trust_store.keyFor`). 처음 신뢰를 볼 때 구해 굳힌다.
     trust_key: ?OwnedKey = null,
+    /// 실제로 띄운 실행 파일 경로(소유) — `spawnClient` 가 띄울 때 굳힌다(gate 가 찾은 경로와 다를 수 있다 — 그 사이 셸 환경을 다시
+    /// 읽었거나 다른 후보로 바꿨다). 정보 명령·로그가 쓴다(계획 workspace-trust WT5a 「해결된 executable 표시」). 아직 안 띄웠으면 `null`.
+    launched_path: ?[]u8 = null,
+    /// 띄운 실행 파일의 출처 — 띄울 때(그 서버가 받은 셸 환경으로) 굳힌다. 정보 명령이 나중에 다시 재면 셸 환경을 다시 읽는 동안
+    /// 자리 변수가 비어 「그 밖」으로 보인다(적대적 검증).
+    launched_origin: lsp.exe_origin.Origin = .plain,
+    /// 서버가 `initialize` 에서 알려 준 이름·버전(소유 — 선택 필드라 없을 수 있다; 다시 띄우면 지운다).
+    server_name: ?[]u8 = null,
+    server_version: ?[]u8 = null,
     /// 묻는 root 임을 이미 봤다(`refusalFor` — root 는 클라이언트마다 고정이라 한 번이면 된다; 기다리는 클라이언트가 tick 마다
     /// 파일 시스템을 다시 보지 않게). 거부된 클라이언트는 거짓으로 남아, 상태바를 누르면 다음 gate 가 다시 본다.
     scope_checked: bool = false,
@@ -203,6 +212,9 @@ pub const Client = struct {
         self.docs.deinit(allocator);
         self.inbuf.deinit(allocator);
         if (self.trust_key) |k| k.deinit(allocator);
+        if (self.launched_path) |p| allocator.free(p);
+        if (self.server_name) |n| allocator.free(n);
+        if (self.server_version) |v| allocator.free(v);
         allocator.free(self.root);
     }
 
@@ -247,10 +259,13 @@ pub const State = struct {
     manage_alternate: ?ManageAction = null,
     manage_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
     manage_notes: [5]maru.chrome.components.confirm.Note = undefined,
-    /// 신뢰 시트의 안내 줄(`setTrustSheetNotes`) — 모달이 빌려 그리므로 모달이 떠 있는 동안 여기 산다. 경로 줄만 버퍼를 쓰고
-    /// 나머지는 번역 표의 정적 문장이다.
+    /// 신뢰 시트의 안내 줄(`setTrustSheetNotes`) — 모달이 빌려 그리므로 모달이 떠 있는 동안 여기 산다. 경로 두 줄과 shim 출처
+    /// 경고(도구 이름)는 버퍼를 쓰고 나머지는 번역 표의 정적 문장이다.
     trust_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
-    trust_notes: [5]maru.chrome.components.confirm.Note = undefined,
+    /// 실행 파일 줄(경로 — 계획 WT5a)과 그 출처 경고(shim·저장소 안일 때만).
+    trust_exe_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
+    trust_origin_note_buf: [256]u8 = undefined,
+    trust_notes: [6]maru.chrome.components.confirm.Note = undefined,
     /// 판정자가 켜는 스위치 — 프롬프트 없이 이 답으로 간주한다. **테스트 빌드에서만 읽는다**(`gateTrust`) — 제품에서는 이 값이
     /// 무엇이든 신뢰는 사용자의 클릭으로만 선다(계획 WT2, LSPB23). `null` 이면 정상(모달).
     auto_trust_answer: ?lsp.trust.Decision = null,
@@ -433,6 +448,58 @@ fn selfOrAncestor(dir: []const u8, path: []const u8) bool {
     return path.len > dir.len and std.mem.startsWith(u8, path, dir) and path[dir.len] == '/';
 }
 
+test "LSPB41 실행 파일의 출처(제품 경로) — 같은 폴더의 rustup 과 같은 파일(하드 링크·심링크)이면 rustup shim(~/.cargo/bin·Homebrew rustup 의 bin), 같은 폴더의 다른 파일·rustup 없는 폴더는 그 밖; 저장소 안이 이긴다; 심링크 root·저장소 밖 링크 (계획 workspace-trust WT5a)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    try tmp.dir.createDirPath(std.testing.io, "cargo/bin");
+    try tmp.dir.createDirPath(std.testing.io, "brew/bin");
+    try tmp.dir.createDirPath(std.testing.io, "other");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cargo/bin/rustup", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "cargo/bin/taplo", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "brew/bin/rustup", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "other/rust-analyzer", .data = "#!/bin/sh\n" });
+    var a_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var b_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    // `~/.cargo/bin` 은 하드 링크, Homebrew rustup 은 심링크로 대리를 둔다.
+    try std.testing.expectEqual(@as(c_int, 0), std.c.link((try std.fmt.bufPrintZ(&a_z, "{s}/cargo/bin/rustup", .{root})).ptr, (try std.fmt.bufPrintZ(&b_z, "{s}/cargo/bin/rust-analyzer", .{root})).ptr));
+    try tmp.dir.symLink(std.testing.io, "rustup", "brew/bin/rust-analyzer", .{});
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual(exe_origin.Origin{ .shim = .rustup }, exeOrigin(try std.fmt.bufPrint(&p_buf, "{s}/cargo/bin/rust-analyzer", .{root}), "", "/nonexistent-root"));
+    try std.testing.expectEqual(exe_origin.Origin{ .shim = .rustup }, exeOrigin(try std.fmt.bufPrint(&p_buf, "{s}/brew/bin/rust-analyzer", .{root}), "", "/nonexistent-root"));
+    try std.testing.expectEqual(exe_origin.Origin.plain, exeOrigin(try std.fmt.bufPrint(&p_buf, "{s}/cargo/bin/taplo", .{root}), "", "/nonexistent-root"));
+    try std.testing.expectEqual(exe_origin.Origin.plain, exeOrigin(try std.fmt.bufPrint(&p_buf, "{s}/other/rust-analyzer", .{root}), "", "/nonexistent-root"));
+    // 저장소 안이 이긴다.
+    try std.testing.expectEqual(exe_origin.Origin.repo, exeOrigin(try std.fmt.bufPrint(&p_buf, "{s}/cargo/bin/rust-analyzer", .{root}), "", root));
+    // 시트·정보 명령의 문장 — 경로 줄과 출처 경고(도구 이름).
+    var line_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    var origin_buf: [256]u8 = undefined;
+    const lines = exeLines(&line_buf, &origin_buf, try std.fmt.bufPrint(&p_buf, "{s}/cargo/bin/rust-analyzer", .{root}), .{ .shim = .rustup });
+    try std.testing.expect(std.mem.indexOf(u8, lines.path_line, "rust-analyzer") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lines.origin_line.?, "rustup") != null);
+    try std.testing.expect(exeLines(&line_buf, &origin_buf, try std.fmt.bufPrint(&p_buf, "{s}/cargo/bin/taplo", .{root}), .plain).origin_line == null);
+    // 저장소 안 — PATH 표기(심링크를 거친 `alias/…` — `/tmp` → `/private/tmp` 처럼)와 root 의 실제 경로가 갈려도, 저장소 밖 심링크가
+    // 저장소의 빌드 산출물을 가리켜도(적대적 검증).
+    try tmp.dir.createDirPath(std.testing.io, "repo/zig-out/bin");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "repo/zig-out/bin/zls", .data = "#!/bin/sh\n" });
+    try tmp.dir.symLink(std.testing.io, "../repo/zig-out/bin/zls", "outside/zls", .{});
+    try tmp.dir.symLink(std.testing.io, "repo", "alias", .{});
+    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&repo_buf, "{s}/repo", .{root});
+    var alias_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shown_root = try std.fmt.bufPrint(&alias_buf, "{s}/alias", .{root});
+    var q_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual(exe_origin.Origin.repo, exeOrigin(try std.fmt.bufPrint(&q_buf, "{s}/zig-out/bin/zls", .{shown_root}), shown_root, repo));
+    // 저장소 안의 링크가 저장소 밖을 가리키면 실제 경로로는 못 가른다 — 보이는 표기의 root 가 가른다(저장소가 그 링크를 정한다).
+    try tmp.dir.symLink(std.testing.io, "/bin/sh", "repo/escape", .{});
+    try std.testing.expectEqual(exe_origin.Origin.repo, exeOrigin(try std.fmt.bufPrint(&q_buf, "{s}/escape", .{shown_root}), shown_root, repo));
+    try std.testing.expectEqual(exe_origin.Origin.repo, exeOrigin(try std.fmt.bufPrint(&q_buf, "{s}/outside/zls", .{root}), "", repo));
+    try std.testing.expectEqual(exe_origin.Origin.plain, exeOrigin(try std.fmt.bufPrint(&q_buf, "{s}/outside/zls", .{root}), "", "/nonexistent-root"));
+}
+
 test "LSPB28a 묻지 않는 root 의 조상 판정 — 자신·조상은 참, 접두만 같은 형제·자식은 거짓, `/` 는 모든 절대 경로의 조상 (계획 WT2b)" {
     try std.testing.expect(selfOrAncestor("/Users/x", "/Users/x"));
     try std.testing.expect(selfOrAncestor("/Users", "/Users/x"));
@@ -578,22 +645,204 @@ pub fn dismissTrustPrompt(self: *AppSession) void {
 
 /// 신뢰 시트의 안내 줄(tooling §8.1 「sandbox 하지 못하는 한계를 확인 UX 에 명시」 — 계획 WT1). 무엇을 신뢰하는지(이 저장소의
 /// 언어 서버 **전체** + root 경로 — 결정은 root 단위로 기억된다)와 무엇이 일어날 수 있는지(사용자 권한·격리 없음·저장소 밖·빌드
-/// 스크립트·툴체인 다운로드·shim)를 밝힌다. 예전 문구(「‹서버› 를 실행할까요? … 설정을 읽고 빌드를 실행할 수 있습니다」)는 서버
-/// 하나를 묻는 것처럼, 영향이 저장소 안에 머무는 것처럼 읽혔다. 경로 줄은 모달이 가운데를 줄인다(뿌리·잎을 남긴다).
-fn setTrustSheetNotes(self: *AppSession, root: []const u8) void {
+/// 스크립트·툴체인 다운로드)와 **무엇이 실행되는지**(찾아 낸 실행 파일 경로와 그 출처 — 저장소 안의 파일·버전 관리자의 shim, 계획
+/// WT5a)를 밝힌다. 예전 문구(「‹서버› 를 실행할까요? … 설정을 읽고 빌드를 실행할 수 있습니다」)는 서버 하나를 묻는 것처럼, 영향이
+/// 저장소 안에 머무는 것처럼 읽혔다. 실행 파일 줄은 묻는 클라이언트 하나의 것이다(허락은 저장소의 모든 서버에 선다 — 셋째 줄이
+/// 그것을 말한다). 경로 줄은 모달이 가운데를 줄인다(뿌리·잎을 남긴다).
+fn setTrustSheetNotes(self: *AppSession, root: []const u8, exe_path: []const u8, real_root: []const u8) void {
     const st = &self.editor_lsp;
     var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_line = maru.i18n.format(&st.trust_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(root, &shown_buf) }});
+    const exe = exeLines(&st.trust_exe_note_buf, &st.trust_origin_note_buf, exe_path, exeOrigin(exe_path, root, real_root));
     // **순서가 곧 우선순위다** — 높이가 모자라면 모달이 안내를 끝부터 줄인다. 대가(사용자 권한·격리 없음·저장소 밖)를 맨 앞에,
     // 경로 줄을 맨 끝에 둔다(경로가 먼저 사라지고 경고는 남는다).
-    st.trust_notes = .{
-        .{ .text = maru.i18n.t(.lsp_trust_note_privileges) },
-        .{ .text = maru.i18n.t(.lsp_trust_note_build) },
-        .{ .text = maru.i18n.t(.lsp_trust_note_scope) },
-        .{ .text = maru.i18n.t(.lsp_trust_note_shim) },
-        .{ .text = root_line, .fit = .path },
+    // 출처 경고(shim·저장소 안)는 경고 줄이라 경로 줄보다 앞이다 — 좁으면 경로가 먼저 준다. 경로 두 줄은 한 행에 가운데를 줄인다.
+    var n: usize = 0;
+    for ([_]?[]const u8{ maru.i18n.t(.lsp_trust_note_privileges), maru.i18n.t(.lsp_trust_note_build), maru.i18n.t(.lsp_trust_note_scope), exe.origin_line }) |line| {
+        st.trust_notes[n] = .{ .text = line orelse continue };
+        n += 1;
+    }
+    st.trust_notes[n] = .{ .text = exe.path_line, .fit = .path };
+    st.trust_notes[n + 1] = .{ .text = root_line, .fit = .path };
+    self.chrome_host.confirm.notes = st.trust_notes[0 .. n + 2];
+}
+
+// ── 실행 파일과 버전(계획 workspace-trust WT5a) ───────────────────────────────
+
+const exe_origin = lsp.exe_origin;
+
+/// 사용자 셸 환경(`tool_env.envp()`)의 변수 — 실행 파일의 출처를 그 환경의 자리 변수(`MISE_DATA_DIR` 등)로 가른다(앱 환경과 갈리면
+/// 서버가 실제로 받은 자리와 어긋난다).
+fn toolEnvValue(_: void, name: []const u8) ?[]const u8 {
+    const envp = tool_env.envp() orelse return null;
+    var i: usize = 0;
+    while (envp[i]) |e| : (i += 1) {
+        const s = std.mem.span(e);
+        if (s.len > name.len and s[name.len] == '=' and std.mem.eql(u8, s[0..name.len], name)) return s[name.len + 1 ..];
+    }
+    return null;
+}
+
+/// 실행 파일의 출처 — 저장소 안·버전 관리자의 shim·그 밖. rustup 대리는 **같은 폴더의 `rustup` 과 같은 파일**(장치·inode — 하드 링크든
+/// 심링크든)인지로 잰다 — 그 폴더(`~/.cargo/bin`·Homebrew rustup 의 bin)엔 `cargo install` 한 일반 바이너리도 있다. 사용자 셸 환경을
+/// 담은 뒤에만 부른다(자리 변수).
+fn exeOrigin(path: []const u8, root: []const u8, real_root: []const u8) exe_origin.Origin {
+    const home = toolEnvValue({}, "HOME") orelse (if (std.c.getenv("HOME")) |h| std.mem.span(h) else "");
+    const proxy = sameFileAsSibling(path, "rustup");
+    // 저장소 안인지는 실행 파일의 실제 경로로도 본다(보이는 경로는 PATH 표기 그대로라 root 의 실제 경로와 표기가 갈린다 — 적대적 검증).
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_path: ?[]const u8 = if (std.fmt.bufPrintZ(&z, "{s}", .{path})) |pz| (if (std.c.realpath(pz.ptr, &real_buf)) |r| std.mem.sliceTo(r, 0) else null) else |_| null;
+    return exe_origin.classify(path, real_path, &.{ root, real_root }, home, {}, toolEnvValue, proxy);
+}
+
+/// `path` 가 같은 폴더의 `name` 과 같은 파일인가(장치·inode — 링크를 따라간다).
+fn sameFileAsSibling(path: []const u8, name: []const u8) bool {
+    const parent = std.fs.path.dirname(path) orelse return false;
+    var a_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var b_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const a = std.fmt.bufPrintZ(&a_z, "{s}", .{path}) catch return false;
+    const b = std.fmt.bufPrintZ(&b_z, "{s}/{s}", .{ std.mem.trimEnd(u8, parent, "/"), name }) catch return false;
+    var sa: std.c.Stat = undefined;
+    var sb: std.c.Stat = undefined;
+    if (std.c.fstatat(std.posix.AT.FDCWD, a.ptr, &sa, 0) != 0) return false;
+    if (std.c.fstatat(std.posix.AT.FDCWD, b.ptr, &sb, 0) != 0) return false;
+    return sa.dev == sb.dev and sa.ino == sb.ino;
+}
+
+/// 실행 파일의 두 줄 — 경로(`~` 로 줄임)와 출처 경고(shim·저장소 안일 때만). 신뢰 시트의 안내 줄과 정보 명령이 같은 문장을 쓴다.
+const ExeLines = struct { path_line: []const u8, origin_line: ?[]const u8 };
+
+fn exeLines(path_buf: []u8, origin_buf: []u8, path: []const u8, origin: exe_origin.Origin) ExeLines {
+    var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_line = maru.i18n.format(path_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = app_session_mod.homeTildeInto(path, &shown_buf) }});
+    const origin_line: ?[]const u8 = switch (origin) {
+        .plain => null,
+        .repo => maru.i18n.t(.lsp_trust_note_exe_repo),
+        .shim => |tool| maru.i18n.format(origin_buf, maru.i18n.t(.lsp_trust_note_exe_shim), &.{.{ .s = tool.name() }}),
     };
-    self.chrome_host.confirm.notes = &st.trust_notes;
+    return .{ .path_line = path_line, .origin_line = origin_line };
+}
+
+test "LSPB42 앱 로그의 경로 사본 — 제어 문자는 공백(서버 문자열·알림과 같은 규칙 `rpc.displayByte`) (계획 workspace-trust WT5a)" {
+    var log_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("/a b c", cleanCopy(&log_buf, "/a\nb\x1bc"));
+}
+
+/// 띄웠다 — 경로를 굳히고 지난 서버의 이름·버전을 지운다. 앱 로그에 한 줄(tooling §8.1 「실제 executable 을 trace 에 노출」).
+fn recordLaunch(self: *AppSession, c: *Client, path: []const u8) void {
+    if (c.launched_path) |p| self.allocator.free(p);
+    c.launched_path = self.allocator.dupe(u8, path) catch null;
+    c.launched_origin = exeOrigin(path, c.root, if (c.trust_key) |k| k.path else c.root);
+    if (c.server_name) |n| self.allocator.free(n);
+    if (c.server_version) |v| self.allocator.free(v);
+    c.server_name = null;
+    c.server_version = null;
+    if (!builtin.is_test) {
+        var pb: [std.fs.max_path_bytes]u8 = undefined;
+        var rb: [std.fs.max_path_bytes]u8 = undefined;
+        std.log.scoped(.lsp).info("started {s}: {s} (root {s})", .{ c.server.exe, cleanCopy(&pb, path), cleanCopy(&rb, c.root) });
+    }
+}
+
+/// `initialize` 응답의 `serverInfo` 를 담는다(없으면 그대로 — 선택 필드다).
+fn recordServerInfo(self: *AppSession, c: *Client, result: ?std.json.Value) void {
+    const info = lsp.rpc.serverInfoFromResult(result) orelse return;
+    if (c.server_name) |n| self.allocator.free(n);
+    if (c.server_version) |v| self.allocator.free(v);
+    c.server_name = lsp.rpc.dupeServerText(self.allocator, info.name);
+    c.server_version = if (info.version) |v| lsp.rpc.dupeServerText(self.allocator, v) else null;
+    if (!builtin.is_test) std.log.scoped(.lsp).info("{s} reports {s} {s}", .{ c.server.exe, c.server_name orelse "?", c.server_version orelse "(no version)" });
+}
+
+/// 팔레트 「Language Server: Show Server Info」 — 지금 편집기 문서의 서버: 상태·버전·실행 파일(출처)·저장소와 신뢰 결정을 알림으로
+/// 보인다(다른 편집기의 `:LspInfo`·Output 패널 자리 — 계획 WT5a). 아직 안 띄웠으면 지금 환경에서 찾아 낸 경로를 보인다(찾기는
+/// 실행이 아니다).
+pub fn showServerInfo(self: *AppSession) void {
+    if (!self.loaded_config.config.lsp.enabled) return self.showNoticeKey(.lsp_info_disabled);
+    if (self.tabs.items.len == 0) return self.showNoticeKey(.lsp_info_unavailable);
+    const term = pane_ops.activePane(self).activeTerm();
+    if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return self.showNoticeKey(.lsp_info_unavailable);
+    const server = serverFor(self, term.rt.editor_grammar) orelse return self.showNoticeKey(.lsp_info_unavailable);
+    const view = statusFor(self, term) orelse return self.showNoticeKey(.lsp_info_unavailable);
+    const root = rootFor(self, term);
+    const c: ?*Client = if (root) |r| clientFor(self, r, server) else null;
+    // 줄마다의 상한을 다 담는 크기 — 알림 상한(512)을 넘는 몫은 `showNotice` 가 글자 경계에서 자르고 「…」를 붙인다. 알림 상한으로
+    // 잡으면 고정 writer 가 조용히 끊는다(글자 가운데에서도).
+    var out: [status_text_cap + 3 * std.fs.max_path_bytes + 1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    // ① 상태(상태바와 같은 문장)
+    var status_buf: [status_text_cap]u8 = undefined;
+    w.writeAll(statusText(view, &status_buf)) catch {};
+    // **떠 있는** 서버만 띄운 경로·버전을 말한다 — 내린 뒤(재시작 대기·실패·거부·없음)의 지난 값은 지금의 것이 아니다; 그때는 「떠 있지 않음」(적대적 검증).
+    const running: ?*Client = if (c) |cl| (if (cl.proc != null and cl.launched_path != null) cl else null) else null;
+    // ② 버전 — 서버가 알려 준 것(없을 수 있다)·`initialize` 응답 기다림·아직 안 띄움
+    var line_buf: [std.fs.max_path_bytes + 192]u8 = undefined;
+    const version_line = if (running) |cl| blk: {
+        if (cl.server_version) |v| {
+            var nv: [lsp.rpc.server_text_cap * 2 + 2]u8 = undefined;
+            const named = std.fmt.bufPrint(&nv, "{s} {s}", .{ cl.server_name orelse cl.server.exe, v }) catch v;
+            break :blk maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_version), &.{.{ .s = named }});
+        }
+        if (cl.server_name) |n| break :blk maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_version_unknown_named), &.{.{ .s = n }}); // 이름만(버전은 선택 필드)
+        break :blk maru.i18n.t(if (cl.phase == .starting) .lsp_info_version_pending else .lsp_info_version_unknown);
+    } else maru.i18n.t(.lsp_info_not_running);
+    printLine(&w, version_line);
+    // 묻는 root 일 때만 저장소·실행 파일 줄을 둔다 — 묻지 않는 root(저장소 밖·홈, root 를 못 구함)는 상태 줄이 그 이유를 말하고, 그 폴더를
+    // 「저장소」라 하면 「저장소 안」 판정이 거짓이며(홈이면 홈 아래 모든 실행 파일) 셸 환경도 읽지 않아 「읽은 뒤에 찾습니다」는 오지 않을
+    // 약속이다(적대적 검증). 둘 다 본다 — phase 만 보면 gate 가 root 를 보기 전(첫 pump 전·클릭 직후)에 새고, 지금의 root 만 보면 gate 가
+    // 굳힌 상태 줄(「저장소 밖」 — 그 뒤 `git init` 해도 누르기 전엔 그대로)과 어긋난다. 떠 있는 서버는 root 를 다시 보지 않는다 — 그 뒤
+    // `.git` 이 사라져도 지금 돌고 있는 실행 파일을 숨기지 않는다.
+    if (view.phase == .outside_repo or view.phase == .home_root or (running == null and !askedRoot(root))) return self.showNotice(w.buffered());
+    // ③ 저장소와 신뢰 결정 — 실행 파일 줄보다 앞이다: 알림은 6 행까지라 넘치면 끝부터 잘린다(앞의 상태·버전·저장소가 남는다 —
+    // 아주 좁은 창에서는 경로 줄이 통째로 밀려날 수 있다, 적대적 검증).
+    if (root) |r| {
+        var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const decision: ?lsp.trust.Decision = if (c) |cl| (if (cl.trust_key) |k| trustOf(self, k.key()) else null) else null;
+        const word = if (decision) |d| maru.i18n.t(if (d == .allow) .lsp_trust_list_allowed else .lsp_trust_list_denied) else maru.i18n.t(.lsp_info_undecided);
+        var repo_buf: [std.fs.max_path_bytes + 128]u8 = undefined;
+        printLine(&w, maru.i18n.format(&repo_buf, maru.i18n.t(.lsp_info_repo), &.{ .{ .s = app_session_mod.homeTildeInto(r, &shown_buf) }, .{ .s = word } }));
+    }
+    // ④ 실행 파일 — 출처 경고, 그리고 경로를 맨 끝에. 떠 있으면 띄운 경로와 띄울 때 굳힌 출처, 아니면 지금 찾아 낸 경로 — 셸 환경을
+    // 담기 전·다시 읽는 중에는 찾지도 재지도 않는다(그 PATH·자리 변수가 아직 없어 「찾지 못함」·「그 밖」이 된다 — 상태바가 「없음」을
+    // 판정하지 않는 것과 같다, 적대적 검증).
+    const real_root: []const u8 = if (c) |cl| (if (cl.trust_key) |k| k.path else cl.root) else (root orelse "");
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    var origin_buf: [256]u8 = undefined;
+    const exe: ?ExeLines = if (running) |cl|
+        exeLines(&line_buf, &origin_buf, cl.launched_path.?, cl.launched_origin)
+    else if (!tool_env.settled())
+        null
+    else if (lsp_process.locate(if (c) |cl| cl.server.exe else server.exe, tool_env.path(), &pbuf)) |p|
+        exeLines(&line_buf, &origin_buf, p, exeOrigin(p, root orelse "", real_root))
+    else
+        null;
+    if (exe) |e| {
+        if (e.origin_line) |o| printLine(&w, o);
+        printLine(&w, e.path_line);
+    } else printLine(&w, maru.i18n.t(if (running == null and !tool_env.settled()) .lsp_info_exe_pending else .lsp_info_exe_missing));
+    self.showNotice(w.buffered());
+}
+
+/// 정보 명령의 root 가 묻는 root 인가 — gate 와 같은 판정(`refusalFor`)을 지금 한다(gate 가 아직 안 봤어도 — 첫 pump 전 등).
+fn askedRoot(root: ?[]const u8) bool {
+    const r = root orelse return false;
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(r, &kb) orelse return false;
+    return refusalFor(r, key.path) == null;
+}
+
+/// 알림에 한 줄 — 앞에 줄바꿈, 제어 문자는 공백(`rpc.displayByte` — 폴더 이름에도 개행이 들 수 있다).
+fn printLine(w: *std.Io.Writer, line: []const u8) void {
+    w.writeByte('\n') catch return;
+    for (line) |b| w.writeByte(lsp.rpc.displayByte(b)) catch return;
+}
+
+/// 앱 로그에 쓸 경로 사본 — 제어 문자는 공백(`rpc.displayByte` — 폴더 이름의 개행이 로그 줄을 위조하지 못하게).
+fn cleanCopy(buf: []u8, s: []const u8) []const u8 {
+    const n = @min(buf.len, s.len);
+    for (s[0..n], buf[0..n]) |b, *o| o.* = lsp.rpc.displayByte(b);
+    return buf[0..n];
 }
 
 /// 신뢰 모달의 답(`confirm_accept` / 사용자의 취소) — `app_session` 의 pending_confirm 갈래가 부른다.
@@ -936,6 +1185,7 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
         return;
     };
     c.proc = proc;
+    recordLaunch(self, c, exe);
     c.inbuf.clearRetainingCapacity();
     c.encoding = .utf16;
     c.shutdown_at_ms = 0;
@@ -1191,6 +1441,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                     return;
                 }
                 c.encoding = lsp.rpc.positionEncodingFromResult(r.result);
+                recordServerInfo(self, c, r.result); // 계획 WT5a — 이름·버전(선택 필드)
                 c.signature_triggers = lsp.rpc.signatureTriggersFromResult(r.result); // §8.2d — 트리거 글자는 서버가 준다
                 c.formatting_supported = lsp.rpc.formattingSupported(r.result); // §8.2e
                 c.rename_supported = lsp.rpc.renameSupported(r.result); // §8.2f
@@ -1449,14 +1700,18 @@ fn gateTrust(self: *AppSession, c: *Client) void {
     }
     // 실행 파일이 없으면 신뢰를 묻지 않는다 — 「설치」가 먼저다. 없는 채면 다른 후보가 생겼는지 다시 고른다(TS 계열 — §8.2a 「서버 찾기」).
     // 사용자 셸 환경의 PATH 로 찾는다. 찾기는 실행이 아니므로 저장소 아래 PATH 항목도 거르지 않는다 — 거르면 저장소 안에 설치한 서버가
-    // 늘 「없음」이라 신뢰를 묻지도 못한다(LSPB9 가 드러냈다). 신뢰 전에 실행하는 일(WT5 의 버전 조회)이 `shell_env.pathWithout` 을 쓴다.
+    // 늘 「없음」이라 신뢰를 묻지도 못한다(LSPB9 가 드러냈다). 찾은 경로는 신뢰 시트의 실행 파일 줄이 보인다(계획 WT5a).
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    if (lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) == null) {
-        if (!repickIfMissing(self, c) or lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) == null) {
+    const located = lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) orelse blk: {
+        if (!repickIfMissing(self, c)) {
             c.phase = .missing;
             return;
         }
-    }
+        break :blk lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) orelse {
+            c.phase = .missing;
+            return;
+        };
+    };
     if (c.phase == .missing or c.phase == .preparing) c.phase = .restarting; // 설치된 것을 이제 봤다
     const stored = if (c.reask) null else trustOf(self, key);
     const decision = stored orelse {
@@ -1505,7 +1760,7 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         // 안 된다(`guardAsync` — 거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더 묻는다). 잘못 들어간 Enter 는 거부로 기억되고
         // 상태바에서 다시 물을 수 있다(보수적인 쪽 — tooling §8.2a).
         self.chrome_host.confirm.guardAsync(maru.i18n.t(.lsp_trust_recheck));
-        setTrustSheetNotes(self, c.root); // `show` 가 안내를 비우므로 그 뒤에 채운다
+        setTrustSheetNotes(self, c.root, located, key.path); // `show` 가 안내를 비우므로 그 뒤에 채운다
         return;
     };
     c.trust_pending = false;

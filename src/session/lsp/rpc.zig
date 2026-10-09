@@ -989,9 +989,102 @@ pub fn positionEncodingFromResult(result: ?std.json.Value) PositionEncoding {
     };
 }
 
+/// `initialize` 결과의 `serverInfo {name, version?}`(LSP 3.15 — 선택 필드). 없거나 모양이 틀리면 `null`, 문자열이 아닌 version 은
+/// 없는 것으로 본다. 슬라이스는 `result` 를 빌린다(호출자가 복사한다 — 계획 workspace-trust WT5a).
+pub const ServerInfo = struct { name: []const u8, version: ?[]const u8 = null };
+
+pub fn serverInfoFromResult(result: ?std.json.Value) ?ServerInfo {
+    const r = switch (result orelse return null) {
+        .object => |o| o,
+        else => return null,
+    };
+    const info = switch (r.get("serverInfo") orelse return null) {
+        .object => |o| o,
+        else => return null,
+    };
+    const name = switch (info.get("name") orelse return null) {
+        .string => |s| s,
+        else => return null,
+    };
+    const version: ?[]const u8 = switch (info.get("version") orelse std.json.Value.null) {
+        .string => |s| s,
+        else => null,
+    };
+    return .{ .name = name, .version = version };
+}
+
+/// 서버가 보낸 표시용 문자열(이름·버전)의 상한(바이트) — 서버가 보낸 것이라 길이를 믿지 않는다(넘으면 자른다 — UTF-8 경계).
+pub const server_text_cap: usize = 128;
+
+/// 알림·로그에 쓰는 바이트 — 제어 문자(C0·DEL)는 공백. 알림은 `\n` 으로 줄을 나누므로 개행이 「저장소: … (허용)」 같은 줄을 위조하거나
+/// 빈 줄로 진짜 줄을 밀어낼 수 있고, 로그 줄도 위조된다(계획 workspace-trust WT5a 적대적 검증). 비 ASCII 는 그대로 둔다(이름·버전·경로에
+/// 쓰인다 — C1 제어는 남는다). 서버 문자열·폴더 경로·로그 사본이 모두 이 규칙 하나를 쓴다.
+pub fn displayByte(b: u8) u8 {
+    return if (b < 0x20 or b == 0x7F) ' ' else b;
+}
+
+/// 서버가 보낸 이름·버전을 담는다(소유) — `server_text_cap` 에서 자르고(UTF-8 경계) 제어 문자는 공백. 고친 뒤 공백뿐이면(빈 이름 포함)
+/// `null` — 없는 것과 같다(「버전:  1.2」처럼 빈 이름을 보이지 않는다). 할당 실패도 `null`.
+pub fn dupeServerText(allocator: std.mem.Allocator, s: []const u8) ?[]u8 {
+    var n = @min(s.len, server_text_cap);
+    while (n > 0 and n < s.len and (s[n] & 0xC0) == 0x80) n -= 1; // UTF-8 이어지는 바이트 앞에서 자르지 않는다
+    const out = allocator.dupe(u8, s[0..n]) catch return null;
+    for (out) |*b| b.* = displayByte(b.*);
+    if (std.mem.trim(u8, out, " ").len == 0) {
+        allocator.free(out);
+        return null;
+    }
+    return out;
+}
+
 // ── 판정 ────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "LSJ serverText — 128 바이트에서 글자 경계로 자르고, 개행·ESC·DEL 은 공백, 비었거나 공백뿐이면 없음 (계획 workspace-trust WT5a)" {
+    const a = testing.allocator;
+    const short = dupeServerText(a, "zls 0.13.0").?;
+    defer a.free(short);
+    try testing.expectEqualStrings("zls 0.13.0", short);
+    const forged = dupeServerText(a, "1.0\nExecutable: /x\r\x1b[2J\x7f").?;
+    defer a.free(forged);
+    try testing.expectEqualStrings("1.0 Executable: /x  [2J ", forged);
+    // 3 바이트 글자 43 개(129 바이트) — 128 에서 자르면 마지막 글자가 갈린다 → 42 개(126 바이트).
+    const long = dupeServerText(a, "가" ** 43).?;
+    defer a.free(long);
+    try testing.expectEqual(@as(usize, 126), long.len);
+    try testing.expect(std.unicode.utf8ValidateSlice(long));
+    const ascii = dupeServerText(a, "v" ** 200).?;
+    defer a.free(ascii);
+    try testing.expectEqual(server_text_cap, ascii.len);
+    try testing.expect(dupeServerText(a, "") == null);
+    try testing.expect(dupeServerText(a, "  ") == null);
+    try testing.expect(dupeServerText(a, "\n\x1b") == null);
+    try testing.expectEqual(@as(u8, ' '), displayByte('\n'));
+    try testing.expectEqual(@as(u8, 0xEA), displayByte(0xEA));
+}
+
+test "LSJ serverInfo — 이름·버전, 버전 없음, 모양이 틀리면 null (계획 workspace-trust WT5a)" {
+    const a = testing.allocator;
+    {
+        var p = try parse(a, "{\"capabilities\":{},\"serverInfo\":{\"name\":\"zls\",\"version\":\"0.13.0\"}}");
+        defer p.deinit();
+        const i = serverInfoFromResult(p.value).?;
+        try testing.expectEqualStrings("zls", i.name);
+        try testing.expectEqualStrings("0.13.0", i.version.?);
+    }
+    {
+        var p = try parse(a, "{\"serverInfo\":{\"name\":\"x\",\"version\":3}}");
+        defer p.deinit();
+        try testing.expect(serverInfoFromResult(p.value).?.version == null);
+    }
+    for ([_][]const u8{ "{\"capabilities\":{}}", "{\"serverInfo\":\"zls\"}", "{\"serverInfo\":{\"version\":\"1\"}}", "[]" }) |t| {
+        var p = try parse(a, t);
+        defer p.deinit();
+        try testing.expect(serverInfoFromResult(p.value) == null);
+    }
+    try testing.expect(serverInfoFromResult(null) == null);
+}
 
 fn parse(a: std.mem.Allocator, text: []const u8) !std.json.Parsed(std.json.Value) {
     return std.json.parseFromSlice(std.json.Value, a, text, .{});

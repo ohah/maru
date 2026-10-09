@@ -1811,6 +1811,14 @@ pub fn settleClosedPark(gpa: std.mem.Allocator, surface_id: u64) void {
     s.close_park = false;
 }
 
+/// 창이 하나도 없는 동안(W10e — 마지막 셸이 끝나도 다운로드가 끝날 때까지 앱이 남는다) Swift 의 tick 이 부른다. 창의 tick 이
+/// 넘겨 주던 할당기는 기억해 둔 것을 쓴다(창이 한 번도 없었으면 할 일이 없다).
+pub fn detachedPump() void {
+    const gpa = gpa_ref orelse return;
+    if (!enabled()) return;
+    pump(gpa, monotonicNow());
+}
+
 /// 창 tick 마다 부른다 — 파이프를 비우고 알림을 적용하고, 죽었으면 다시 띄운다. 여러 창이 불러도 값싸다.
 pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     gpa_ref = gpa;

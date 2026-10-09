@@ -320,7 +320,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 220: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
 // 215: W10b — 다운로드 「매번 묻기」: 행 상태 10(asking), MaruDownloadAsk·app_session_take_download_ask(이 창의 활성 Chromium
 // 탭에서 물을 행)·downloads_claim_ask(목록 창이 맡기)·downloads_answer_ask(고른 경로·취소·치움), 목록 글 19(저장할 곳 고르기).
-pub const abi_version: u32 = 220;
+pub const abi_version: u32 = 221;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,

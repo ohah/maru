@@ -44,7 +44,7 @@ pub const Provider = struct {
     session_of: *const fn (ctx: *anyopaque, pid: i32) ?i32,
 };
 
-/// 찾은 출처 — 제어 터미널을 가진 첫 조상과 그 세션.
+/// 찾은 출처 — 자기 제어 터미널의 foreground 그룹에 속한 첫 조상(`ctty_pid` — 이름은 「터미널을 가진 프로세스」)과 그 세션.
 pub const Origin = struct {
     ctty_pid: i32,
     ctty_start_us: u64,
@@ -67,6 +67,9 @@ pub const Reject = enum {
     background,
     /// 거슬러 오르는 중 부모가 자식보다 늦게 시작했다 — 그 pid 를 다른 프로세스가 물려받았다.
     ancestor_replaced,
+    /// 처음 만난 제어 터미널의 세션을 벗어났다 — pane 안에서 연 안쪽 터미널(`script`·편집기 내장 터미널 등)의 프로세스가
+    /// 바깥 pane 의 foreground 조상으로 통과하지 않게 세션 경계에서 멈춘다(적대 리뷰 2 회차).
+    terminal_changed,
     session_unknown,
 };
 
@@ -82,10 +85,12 @@ pub fn findOrigin(provider: Provider, peer_pid: i32, server_uid: u32, accept_us:
     if (peer_pid <= 1) return .{ .reject = .peer_unknown };
     var pid = peer_pid;
     var child_start: u64 = std.math.maxInt(u64);
-    // 터미널을 가진 조상을 지났는가 — 그 뒤로 끊기면(foreground 조상 없이 root `login` 등에 닿음) 「백그라운드」다.
-    var saw_ctty = false;
+    // 처음 만난 제어 터미널 프로세스의 세션 — 그 세션 안에서만 foreground 조상을 찾는다. 그 뒤로 끊기면(foreground 조상
+    // 없이 root `login` 등에 닿음) 「백그라운드」다.
+    var first_sid: ?i32 = null;
     var depth: usize = 0;
     while (depth < max_depth) : (depth += 1) {
+        const saw_ctty = first_sid != null;
         const info = provider.lookup(provider.ctx, pid) orelse return .{ .reject = if (depth == 0)
             .peer_unknown
         else if (saw_ctty)
@@ -97,12 +102,13 @@ pub fn findOrigin(provider: Provider, peer_pid: i32, server_uid: u32, accept_us:
         if (info.start_us > child_start) return .{ .reject = .ancestor_replaced };
         if (info.uid != server_uid) return .{ .reject = if (saw_ctty) .background else .uid_mismatch };
         if (info.has_ctty) {
-            saw_ctty = true;
-            if (info.pgid > 0 and info.pgid == info.tpgid) {
-                const sid = provider.session_of(provider.ctx, pid) orelse return .{ .reject = .session_unknown };
-                if (sid <= 1) return .{ .reject = .session_unknown };
+            const sid = provider.session_of(provider.ctx, pid) orelse return .{ .reject = .session_unknown };
+            if (sid <= 1) return .{ .reject = .session_unknown };
+            if (first_sid) |first| {
+                if (sid != first) return .{ .reject = .terminal_changed };
+            } else first_sid = sid;
+            if (info.pgid > 0 and info.pgid == info.tpgid)
                 return .{ .origin = .{ .ctty_pid = pid, .ctty_start_us = info.start_us, .sid = sid } };
-            }
         }
         if (info.ppid <= 1 or info.ppid == pid) return .{ .reject = if (saw_ctty) .background else .no_ctty_ancestor };
         child_start = info.start_us;
@@ -217,7 +223,7 @@ test "Codex 처럼 새 process group 으로 띄운 명령(터미널은 있지만
             .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 30 },
             .{ .pid = 104, .ppid = 103, .pgid = 104, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 40 },
         },
-        .sessions = &.{.{ 103, 100 }},
+        .sessions = &.{ .{ 103, 100 }, .{ 104, 100 } },
     };
     try expectOrigin(findOrigin(fake.provider(), 104, uid, accepted), 103, 100);
 }
@@ -225,15 +231,15 @@ test "Codex 처럼 새 process group 으로 띄운 명령(터미널은 있지만
 test "셸이 프롬프트에 있을 때의 `&` 는 통과하고, 다른 작업이 foreground 인 동안의 백그라운드는 거절된다" {
     const bg: ProcInfo = .{ .pid = 102, .ppid = 101, .pgid = 102, .uid = uid, .has_ctty = true, .tpgid = 101, .start_us = 30 };
     // 셸이 foreground(tpgid 101) — 그 셸에서 나왔다.
-    var idle: Fake = .{ .procs = &.{ login, shell(101), bg }, .sessions = &.{.{ 101, 100 }} };
+    var idle: Fake = .{ .procs = &.{ login, shell(101), bg }, .sessions = &.{ .{ 101, 100 }, .{ 102, 100 } } };
     try expectOrigin(findOrigin(idle.provider(), 102, uid, accepted), 101, 100);
     // vim(pgid 150)이 foreground — 백그라운드 작업도 그 셸도 foreground 가 아니고, 위는 읽을 수 없는 root login.
     var busy_bg = bg;
     busy_bg.tpgid = 150;
-    var busy: Fake = .{ .procs = &.{ shell(150), busy_bg }, .sessions = &.{.{ 101, 100 }} };
+    var busy: Fake = .{ .procs = &.{ shell(150), busy_bg }, .sessions = &.{ .{ 101, 100 }, .{ 102, 100 } } };
     try expectReject(findOrigin(busy.provider(), 102, uid, accepted), .background);
     // root login 까지 읽히더라도(시험 공급자) uid 가 달라 백그라운드로 끝난다.
-    var busy_login: Fake = .{ .procs = &.{ login, shell(150), busy_bg }, .sessions = &.{.{ 101, 100 }} };
+    var busy_login: Fake = .{ .procs = &.{ login, shell(150), busy_bg }, .sessions = &.{ .{ 101, 100 }, .{ 102, 100 } } };
     try expectReject(findOrigin(busy_login.provider(), 102, uid, accepted), .background);
 }
 
@@ -246,6 +252,42 @@ test "거슬러 오르는 중 부모가 자식보다 늦게 시작했으면 pid 
         .sessions = &.{.{ 101, 100 }},
     };
     try expectReject(findOrigin(fake.provider(), 102, uid, accepted), .ancestor_replaced);
+}
+
+test "처음 만난 터미널의 세션을 벗어나면 멈춘다 — 안쪽 터미널의 백그라운드가 바깥 pane 의 foreground 조상으로 통과하지 않는다" {
+    // pane(세션 100): 셸 → script(foreground, pgid 103) → 안쪽 pty(세션 200): 안쪽 셸(pgid 201) — vim(pgid 250)이
+    // foreground — 백그라운드 작업(pgid 202).
+    var fake: Fake = .{
+        .procs = &.{
+            login,
+            shell(103),
+            .{ .pid = 103, .ppid = 101, .pgid = 103, .uid = uid, .has_ctty = true, .tpgid = 103, .start_us = 30 },
+            .{ .pid = 201, .ppid = 103, .pgid = 201, .uid = uid, .has_ctty = true, .tpgid = 250, .start_us = 40 },
+            .{ .pid = 202, .ppid = 201, .pgid = 202, .uid = uid, .has_ctty = true, .tpgid = 250, .start_us = 50 },
+        },
+        .sessions = &.{ .{ 103, 100 }, .{ 201, 201 }, .{ 202, 201 } },
+    };
+    try expectReject(findOrigin(fake.provider(), 202, uid, accepted), .terminal_changed);
+    // 안쪽 셸이 foreground 면 안쪽 세션으로 찾는다(어느 pane 의 뿌리도 아니라 L4 가 못 찾는다).
+    var inner_fg: Fake = .{
+        .procs = &.{
+            .{ .pid = 201, .ppid = 103, .pgid = 201, .uid = uid, .has_ctty = true, .tpgid = 201, .start_us = 40 },
+            .{ .pid = 202, .ppid = 201, .pgid = 202, .uid = uid, .has_ctty = true, .tpgid = 201, .start_us = 50 },
+        },
+        .sessions = &.{ .{ 201, 201 }, .{ 202, 201 } },
+    };
+    try expectOrigin(findOrigin(inner_fg.provider(), 202, uid, accepted), 201, 201);
+}
+
+test "세션 번호가 1 이하이거나 정보의 pid 가 다르면 거절된다" {
+    var low_sid: Fake = .{ .procs = &.{ login, shell(101) }, .sessions = &.{.{ 101, 1 }} };
+    try expectReject(findOrigin(low_sid.provider(), 101, uid, accepted), .session_unknown);
+    var wrong_pid: Fake = .{
+        .procs = &.{.{ .pid = 999, .ppid = 100, .pgid = 101, .uid = uid, .has_ctty = true, .tpgid = 101, .start_us = 20 }},
+        .sessions = &.{.{ 101, 100 }},
+    };
+    // 공급자가 다른 pid 의 정보를 돌려줬다(시험 공급자는 pid 로 찾으므로 없는 pid 로 흉내 낸다 — 아래 stillForeground).
+    try expectReject(findOrigin(wrong_pid.provider(), 101, uid, accepted), .peer_unknown);
 }
 
 test "앵커: 셀렉터는 찾은 pane 과 같을 때만 남고, browser grant 의 pane 은 늘 찾은 pane 이다" {
@@ -327,4 +369,7 @@ test "요청마다: 같은 프로세스가 여전히 foreground 일 때만 출�
     try std.testing.expect(!stillForeground(reused.provider(), origin));
     var gone: Fake = .{ .procs = &.{}, .sessions = &.{} };
     try std.testing.expect(!stillForeground(gone.provider(), origin));
+    // 같은 프로세스·foreground 인데 세션만 바뀌었다(다른 세션으로 옮겨 갔다).
+    var moved_session: Fake = .{ .procs = &.{ login, shell(101) }, .sessions = &.{.{ 101, 300 }} };
+    try std.testing.expect(!stillForeground(moved_session.provider(), origin));
 }

@@ -19,7 +19,7 @@ const workspace_checkpoint_file = @import("workspace_checkpoint_file.zig");
 const control_server_mod = @import("control_server.zig"); // Track C A2b: 라이브 컨트롤 서버(소켓+accept 스레드+marshal)
 const control_socket = @import("control_socket.zig"); // 1b: formatInstanceKey(인스턴스 키)
 const control_log = std.log.scoped(.control);
-const control_self_origin = maru.session.control_self_origin; // 1g: 붙은 프로세스의 출처 판정(조상 사슬의 첫 제어 터미널)
+const control_self_origin = maru.session.control_self_origin; // 1g: 붙은 프로세스의 출처 판정(조상 사슬의 foreground 조상)
 const control_self_origin_macos = @import("control_self_origin_macos.zig"); // 1g: 그 판정의 macOS 공급자
 const control_dispatch = maru.session.control_dispatch; // 1d: read-only 바이트→바이트 디스패치 라우터 + 1e dispatchAuthenticated
 const control_plane = maru.session.control_plane; // 1a: hello capability method namespace 파싱
@@ -6638,29 +6638,33 @@ fn collectSessionsInto(refs: []const ControlSessionRef, arena: std.mem.Allocator
 /// 지금은 default-deny). **§8.4 1g**: 셀렉터는 서버가 붙은 프로세스의 출처에서 찾은 pane 과 같을 때만 남고(`resolveSelfOrigin`),
 /// browser 확인 grant 의 pane 은 그 찾은 pane 이다. `now`=**모노토닉 awake 초**(TTL 판정용, 순수
 /// 코어에 주입 — 미래 fd 발급도 같은 시계로 expires_at 계산해야 정합; wall-clock 아님, 아래 impl 참조 — 리뷰 [2]).
-/// **1g(control-plane-security §8.4)**: 붙은 프로세스의 출처(연결 스레드가 찾은 조상 사슬의 첫 제어 터미널 프로세스와
-/// 그 세션)를 pane 으로 바꾼다. 그 프로세스가 **지금도** 그 터미널의 foreground 일 때만(지속 세션은 요청마다 다시 본다).
+/// **1g(control-plane-security §8.4)**: 붙은 프로세스의 출처(연결 스레드가 찾은 조상 사슬에서 자기 터미널의 foreground
+/// 그룹에 속한 첫 조상과 그 세션)를 pane 으로 바꾼다. 그 프로세스가 **지금도** 그 터미널의 foreground 일 때만(지속 세션은 요청마다 다시 본다).
 /// - `browser_pane` = 찾은 pane — browser 확인 grant(§9.2 Model B)의 pane. 셀렉터가 필요 없어 세션 유지 pane(셀렉터 없음)
 ///   에서도 에이전트가 확인 모달을 받는다(사용자 결정 2026-10-09).
 /// - `selector`(주장) 는 찾은 pane 과 같을 때만 남긴다. 다르거나 못 찾았으면 null — metadata 는 셀렉터 없는 연결처럼
 ///   전체 목록이 되고(넓어지는 권한이 없다, §4a), browser 는 찾은 pane 으로만 묻는다. 남의 pane 번호를 대도 그 pane 의
 ///   기억된 grant 를 못 탄다. 확인 모달 승인 뒤의 재처리(`drainGrantPrompts`)도 이 두 값을 그대로 쓴다.
 fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_mod.PendingRequest) void {
+    // 사유는 그것이 결과를 바꾸는 요청에만 남긴다 — browser.* 이거나 셀렉터를 댄 요청. 다른 터미널에서 주기적으로 부르는
+    // `maru sessions list` 같은 것까지 찍으면 로그가 쌓인다(적대 리뷰 2 회차).
+    const noteworthy = pending.selector != null or std.mem.indexOf(u8, pending.request_bytes, "\"browser.") != null;
     const found: ?u64 = blk: {
-        const origin = pending.peer_origin orelse break :blk null;
+        const origin = pending.peer_origin orelse {
+            if (noteworthy) control_log.info("control: no pane for this caller ({s})", .{if (pending.peer_reject) |r| @tagName(r) else "unknown"});
+            break :blk null;
+        };
         if (!control_self_origin.stillForeground(control_self_origin_macos.provider(), origin)) {
-            control_log.info("control: caller's foreground ancestor pid={d} is no longer foreground — no pane", .{origin.ctty_pid});
+            if (noteworthy) control_log.info("control: no pane for this caller (its foreground ancestor pid={d} is no longer foreground)", .{origin.ctty_pid});
             break :blk null;
         }
         for (refs) |ref| {
             const app = ref.app_session orelse continue;
             if (app.surfaceForSessionLeader(origin.sid)) |id| break :blk id;
         }
-        control_log.info("control: caller's session {d} is not a maru pane — no pane", .{origin.sid});
+        if (noteworthy) control_log.info("control: no pane for this caller (session {d} is not a maru pane)", .{origin.sid});
         break :blk null;
     };
-    if (found == null) if (pending.peer_reject) |reason| if (pending.selector != null)
-        control_log.info("control: pane claim not verified ({s}) — browser requests need a caller inside a maru pane", .{@tagName(reason)});
     const a = control_self_origin.anchors(found, pending.selector);
     pending.selector = a.selector;
     pending.browser_pane = a.browser_pane;
@@ -6670,11 +6674,12 @@ fn resolveSelfOrigin(refs: []const ControlSessionRef, pending: *control_server_m
 /// 같은 프로세스이고 foreground 인지 다시 본다. 아니면 pane 을 비워 그 요청은 unauthorized 가 된다(grant 는 승인대로 남는다).
 fn recheckSelfOrigin(pending: *control_server_mod.PendingRequest) void {
     if (pending.browser_pane == null) return;
-    const origin = pending.peer_origin orelse {
-        pending.browser_pane = null;
-        return;
-    };
-    if (!control_self_origin.stillForeground(control_self_origin_macos.provider(), origin)) pending.browser_pane = null;
+    const still = if (pending.peer_origin) |origin| control_self_origin.stillForeground(control_self_origin_macos.provider(), origin) else false;
+    if (still) return;
+    control_log.info("control: the approved browser request's caller is no longer in the pane's foreground — refused", .{});
+    // `anchors` 의 불변식(셀렉터가 남으면 그것이 browser pane 과 같다)을 지킨다.
+    pending.browser_pane = null;
+    pending.selector = null;
 }
 
 fn handleControlRequest(

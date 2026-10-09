@@ -63,7 +63,7 @@ pub const control_dispatch = @import("session/control_dispatch.zig"); // Track C
 pub const control_capability = @import("session/control_capability.zig"); // Track C 1e: capability fd 인가 코어(hash(nonce)→cap store, constant-time lookup, scope↔method, fd payload, §8.3·§8.5)
 pub const CapabilityStore = control_capability.CapabilityStore;
 pub const Capability = control_capability.Capability;
-pub const control_self_origin = @import("session/control_self_origin.zig"); // 1g: 붙은 프로세스가 어느 pane 에서 왔는지(조상 사슬의 첫 제어 터미널 → 세션, §8.4)
+pub const control_self_origin = @import("session/control_self_origin.zig"); // 1g: 붙은 프로세스가 어느 pane 에서 왔는지(조상 사슬의 foreground 조상 → 세션, §8.4)
 pub const control_capture = @import("session/control_capture.zig"); // Track C 1f: session.capture 프로토콜 코어(chunk 스트림 상태머신·base64·generation 고정/invalidated·재시도 상한 fallback·authz ack, §4.3·§6·§8.3·§8.5)
 pub const control_browser = @import("session/control_browser.zig"); // Track C 5a: browser.* wire 스키마 + 디스패치 + browser capability authz(제어코어 skeleton, §9.1)
 pub const control_bridge = @import("session/control_bridge.zig"); // Track C 5b: 신뢰 웹 브리지(window.maru.*) 디스패치 코어(auth 없음=신뢰는 Swift origin/frame 검증, §8.1.1)

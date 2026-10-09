@@ -68,10 +68,10 @@ pub const PendingRequest = struct {
     /// caller가 주장한 self surface_id(auth.self 셀렉터, §8.4). 없으면 null(maru 밖 shell 등). **1g**: 메인이 처리 전에
     /// 서버가 찾은 pane 과 맞을 때만 남기고 아니면 null 로 바꾼다(`browser_pane` 참고) — 주장은 그 자체로 권한이 아니다.
     selector: ?u64,
-    /// **1g(§8.4)**: 연결 스레드가 auth 프레임 직후 찾은 출처 — 붙은 프로세스의 조상 사슬에서 제어 터미널을 가진 첫
-    /// 프로세스와 그 세션. 못 찾았으면 null(셀렉터 없는 연결과 같다). 메인이 요청마다 아직 foreground 인지 다시 본다.
+    /// **1g(§8.4)**: 연결 스레드가 auth 프레임 직후 찾은 출처 — 붙은 프로세스의 조상 사슬에서 자기 터미널의 foreground
+    /// 그룹에 속한 첫 조상(처음 만난 터미널의 세션 안)과 그 세션. 못 찾았으면 null(셀렉터 없는 연결과 같다). 메인이 요청마다 아직 foreground 인지 다시 본다.
     peer_origin: ?self_origin.Origin = null,
-    /// **1g**: 출처를 못 찾은 이유(진단 — 메인이 셀렉터를 버릴 때 로그에 싣는다).
+    /// **1g**: 출처를 못 찾은 이유(진단 — 메인이 browser 요청·셀렉터를 댄 요청에서 로그에 싣는다).
     peer_reject: ?self_origin.Reject = null,
     /// **1g**: 메인이 `peer_origin` 의 세션으로 찾은 pane(surface id) — browser 확인 grant(§9.2 Model B)의 pane.
     /// 확인 모달을 승인한 뒤의 재처리도 이 값을 쓴다. 메인 소유(처리 시작에 채운다).

@@ -4,10 +4,12 @@
 # 시험 셸로 바꾸므로 **일반 모드**로 띄우고(셸 = 이 대본이 쓴 pane 대본), 확인 모달은 `MARU_TEST_GRANT_DECISION=approve`
 # 로 자동 승인한다. 두 모드를 본다: 세션 유지(기본 — pane 에 `MARU_PANE_ID` 가 없다)와 세션 유지 끔(in-process — 있다).
 #
-#   pane 셸에서 직접          → 허용(확인 grant 를 그 pane 으로 묻고 실행)
-#   pane 안 setsid 자식       → 허용(Claude Code 의 Bash 도구처럼 제어 터미널 없음 — 조상 사슬로 pane 을 찾는다)
-#   pane 안 백그라운드 작업    → 거절(foreground 가 아니다 — 같은 pane 에 grant 가 기억돼 있어도)
-#   pane 밖에서 pane 번호를 댐 → 거절(1g 전에는 in-process pane 의 기억된 grant 를 모달 없이 탔다)
+#   pane 셸에서 직접                      → 허용(확인 grant 를 그 pane 으로 묻고 실행)
+#   pane 안 setsid 자식                   → 허용(Claude Code 의 Bash 도구 — 제어 터미널 없음, 조상 사슬로 pane 을 찾는다)
+#   pane 안 새 process group 자식          → 허용(Codex — 터미널은 있지만 foreground 아님, foreground 인 부모로 찾는다)
+#   셸이 쉬는 동안의 `&`                   → 허용(foreground 인 셸에서 나왔다)
+#   다른 작업이 foreground 일 때의 `&`      → 거절(그 pane 의 foreground 작업에서 나오지 않았다 — grant 가 기억돼 있어도)
+#   pane 밖에서 pane 번호를 댐             → 거절(1g 전에는 in-process pane 의 기억된 grant 를 모달 없이 탔다)
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·session host·셸만 끈다.
 set -eu
@@ -57,10 +59,16 @@ echo "\$sid" > "\$out/web-id"
 echo "\${MARU_PANE_ID:-}" > "\$out/pane-env"
 "\$cli" browser navigate --surface "\$sid" "$url" > "\$out/fg" 2>&1; echo "rc=\$?" >> "\$out/fg"
 python3 -c 'import os, sys; os.setsid(); os.execv(sys.argv[1], sys.argv[1:])' "\$cli" browser navigate --surface "\$sid" "$url" > "\$out/setsid" 2>&1; echo "rc=\$?" >> "\$out/setsid"
+python3 -c 'import os, sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])' "\$cli" browser navigate --surface "\$sid" "$url" > "\$out/pgroup" 2>&1; echo "rc=\$?" >> "\$out/pgroup"
 # 대화형 셸의 \`&\` 처럼 자기 process group 을 받게 job control 을 켠다(비대화형 sh 의 \`&\` 는 foreground 대본과 같은
 # 그룹에 남아 foreground 로 보인다 — 실측).
 set -m
-( "\$cli" browser navigate --surface "\$sid" "$url" > "\$out/bg" 2>&1; echo "rc=\$?" >> "\$out/bg" ) &
+# 셸이 쉬는 동안(wait — 셸이 foreground)의 \`&\`.
+( "\$cli" browser navigate --surface "\$sid" "$url" > "\$out/bg-idle" 2>&1; echo "rc=\$?" >> "\$out/bg-idle" ) &
+wait
+# 다른 작업(sleep — 자기 group 으로 foreground)이 도는 동안의 \`&\`.
+( sleep 1; "\$cli" browser navigate --surface "\$sid" "$url" > "\$out/bg" 2>&1; echo "rc=\$?" >> "\$out/bg" ) &
+sleep 4
 wait
 set +m
 touch "\$out/done"
@@ -101,8 +109,12 @@ run_mode() { # $1=이름 $2=session.keep-alive-after-quit
     echo "PASS $mode: the pane's own shell got the grant and navigated"
     pass setsid || fail "$mode: a setsid child (agent tool shape) was refused ($(tr '\n' ' ' < "$out/setsid"))"
     echo "PASS $mode: a setsid child without a terminal was traced to its pane"
-    pass bg && fail "$mode: a background job in the pane was allowed ($(tr '\n' ' ' < "$out/bg"))"
-    echo "PASS $mode: a background job in the pane was refused"
+    pass pgroup || fail "$mode: a child in a new process group (Codex shape) was refused ($(tr '\n' ' ' < "$out/pgroup"))"
+    echo "PASS $mode: a child in a new process group was traced to its foreground parent"
+    pass bg-idle || fail "$mode: a background job while the shell was idle was refused ($(tr '\n' ' ' < "$out/bg-idle"))"
+    echo "PASS $mode: a background job while the shell was idle was allowed"
+    pass bg && fail "$mode: a background job while another job was in the foreground was allowed ($(tr '\n' ' ' < "$out/bg"))"
+    echo "PASS $mode: a background job while another job was in the foreground was refused"
     pass outside && fail "$mode: a process outside the pane that named pane $pane_id was allowed ($(tr '\n' ' ' < "$out/outside"))"
     echo "PASS $mode: naming pane $pane_id from outside was refused"
 }

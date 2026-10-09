@@ -4150,3 +4150,6 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 | --- | --- | --- | --- |
 | `maru://open` | 구현 | PR #4249 머지 후 설치본의 기본 handler cold/warm, byte 11/5/5, 동일 surface, Metal readback 검증. [계획](plans/editor-app-url.md)의 설치본 이력 참조 | 검증은 기록된 앱 SHA에 귀속되며 후속 빌드 전체를 대신하지 않는다. |
 | `maru editor open` | 구현 | 순수 인자와 인코딩, 상한과 OOM, 실제 CLI argv와 exec 실패, 변이와 동등 대조군, 격리 OS event에서 byte 11/5/5와 동일 문서 재사용 | OS 하네스는 test-only adapter로 대상 앱과 HOME을 고정한다. 기본 handler 선택은 기존 설치본 앱 URL gate에 귀속되며 이번 CLI와 기본 handler의 무변경 전달 검증으로 합치지 않는다. 종료 확인 UX는 범위 밖이며 macOS 실행만 지원한다. |
+
+`maru editor lsp trust …`와 호환 별칭 `maru lsp …`는 동일한 parser·request·socket 경로를 사용한다.
+namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 무전달로 검사한다.

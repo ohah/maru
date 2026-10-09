@@ -1,10 +1,10 @@
-//! `maru lsp trust` 서브커맨드의 **순수 CLI 로직** — 인자 파싱·`--help`·client wire(요청 바이트 조립·응답 포맷). 계획
+//! `maru editor lsp trust` 서브커맨드의 **순수 CLI 로직** — 인자 파싱·`--help`·client wire(요청 바이트 조립·응답 포맷). 계획
 //! docs/plans/workspace-trust.md WT4b, 메서드 docs/control-plane.md §6(`lsp.trust.*`), wire 절반은 `session/control_lsp_trust.zig`.
 //!
 //! **무엇을 하나**: 언어 서버 신뢰 결정을 **조회·철회·잊기**만 한다 — 부여 명령은 없다(에이전트가 신뢰를 주지 못하게, 계획 WT2).
-//!   - `maru lsp trust list` → `lsp.trust.list`.
-//!   - `maru lsp trust revoke <path> [--volume <hex>]` → `lsp.trust.revoke {path, volume?}` — 지금 허용인 저장소를 거부로.
-//!   - `maru lsp trust forget <path> [--volume <hex>]` → `lsp.trust.forget {path, volume?}` — 결정을 지운다(다시 열면 묻는다).
+//!   - `maru editor lsp trust list` → `lsp.trust.list`.
+//!   - `maru editor lsp trust revoke <path> [--volume <hex>]` → `lsp.trust.revoke {path, volume?}` — 지금 허용인 저장소를 거부로.
+//!   - `maru editor lsp trust forget <path> [--volume <hex>]` → `lsp.trust.forget {path, volume?}` — 결정을 지운다(다시 열면 묻는다).
 //! 소켓 접착은 `cli/control_client.zig`(셀렉터 없이 — 앱 전역 표라 자기 패인으로 좁힐 이유가 없다, 2026-10-09 사용자 결정), 상대 경로를
 //! 절대 경로로 펴는 데 쓸 현재 디렉터리는 `main.zig` 가 준다.
 
@@ -26,13 +26,13 @@ pub const Command = union(enum) {
 };
 
 pub const ParseError = error{
-    /// `maru lsp` 뒤에 `trust` 가 없다.
+    /// `maru editor lsp` 뒤에 `trust` 가 없다.
     MissingTopic,
-    /// `maru lsp foo`.
+    /// `maru editor lsp foo`.
     UnknownTopic,
-    /// `maru lsp trust` 뒤에 서브커맨드가 없다.
+    /// `maru editor lsp trust` 뒤에 서브커맨드가 없다.
     MissingSubcommand,
-    /// `maru lsp trust grant` 등.
+    /// `maru editor lsp trust grant` 등.
     UnknownSubcommand,
     /// `revoke`·`forget` 에 경로가 없다.
     MissingPath,
@@ -44,7 +44,7 @@ pub const ParseError = error{
     UnexpectedArgument,
 };
 
-/// `maru lsp` 뒤 인자. `--help`/`-h` 가 어디 있든 help.
+/// `maru editor lsp` 뒤 인자. `--help`/`-h` 가 어디 있든 help.
 pub fn parse(args: []const []const u8) ParseError!Command {
     for (args) |a| if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) return .help;
     if (args.len == 0) return error.MissingTopic;
@@ -219,12 +219,12 @@ fn str(v: ?std.json.Value) []const u8 {
     };
 }
 
-/// `maru lsp --help`. 동작하는 명령만 싣는다(§11 CLI help gate — 부여 명령은 없다).
+/// `maru editor lsp --help`. 동작하는 명령만 싣는다(§11 CLI help gate — 부여 명령은 없다).
 pub const help =
     \\usage:
-    \\  maru lsp trust list
-    \\  maru lsp trust revoke <path> [--volume <hex>]
-    \\  maru lsp trust forget <path> [--volume <hex>]
+    \\  maru editor lsp trust list
+    \\  maru editor lsp trust revoke <path> [--volume <hex>]
+    \\  maru editor lsp trust forget <path> [--volume <hex>]
     \\
     \\show or withdraw language server trust decisions of the running Maru.
     \\
@@ -364,9 +364,9 @@ test "lsp trust CLI: 서버 직렬화기의 응답을 그대로 렌더한다 —
 }
 
 test "lsp trust CLI: help 는 동작하는 명령만 — 세 줄, 부여 명령 없음" {
-    try testing.expect(std.mem.indexOf(u8, help, "maru lsp trust list\n") != null);
-    try testing.expect(std.mem.indexOf(u8, help, "maru lsp trust revoke <path> [--volume <hex>]\n") != null);
-    try testing.expect(std.mem.indexOf(u8, help, "maru lsp trust forget <path> [--volume <hex>]\n") != null);
+    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust list\n") != null);
+    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust revoke <path> [--volume <hex>]\n") != null);
+    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust forget <path> [--volume <hex>]\n") != null);
     for ([_][]const u8{ "trust grant", "trust allow", "trust add", "trust set" }) |w| try testing.expect(std.mem.indexOf(u8, help, w) == null);
-    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, help, "  maru lsp trust "));
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, help, "  maru editor lsp trust "));
 }

@@ -57,6 +57,10 @@ pub const testing = if (@import("builtin").is_test) struct {
     threadlocal var close_index: usize = 0;
     threadlocal var remove_sequence: []const RemoveProgress = &.{};
     threadlocal var remove_index: usize = 0;
+    /// backend에 간 close 요청의 종류 — 원격 runtime은 종류를 봉인하므로 AppSession 시험이 어떤 종류를 보냈는지 본다.
+    pub const CloseRequest = enum { close_and_detach, close, finish_after_termination };
+    threadlocal var request_log: [16]CloseRequest = undefined;
+    threadlocal var request_len: usize = 0;
 
     pub fn armCloseSequence(sequence: []const CloseProgress) void {
         close_sequence = sequence;
@@ -73,6 +77,18 @@ pub const testing = if (@import("builtin").is_test) struct {
         close_index = 0;
         remove_sequence = &.{};
         remove_index = 0;
+        request_len = 0;
+    }
+
+    pub fn requests() []const CloseRequest {
+        return request_log[0..request_len];
+    }
+
+    fn record(request: CloseRequest) void {
+        if (request_len < request_log.len) {
+            request_log[request_len] = request;
+            request_len += 1;
+        }
     }
 
     fn takeClose() ?CloseProgress {
@@ -435,15 +451,18 @@ pub const TermRuntimeBackend = struct {
     }
 
     pub fn closeAndDetach(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        if (@import("builtin").is_test) testing.record(.close_and_detach);
         if (@import("builtin").is_test) if (testing.takeClose()) |progress| return progress;
         return self.vtable.close_and_detach(self.ctx, handle);
     }
 
     pub fn close(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        if (@import("builtin").is_test) testing.record(.close);
         return self.vtable.close(self.ctx, handle);
     }
 
     pub fn finishAfterTermination(self: TermRuntimeBackend, handle: RuntimeHandle) CloseProgress {
+        if (@import("builtin").is_test) testing.record(.finish_after_termination);
         if (@import("builtin").is_test) if (testing.takeClose()) |progress| return progress;
         return self.vtable.finish_after_termination(self.ctx, handle);
     }

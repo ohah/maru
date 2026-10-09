@@ -1961,8 +1961,8 @@ echo "PASS part files left by a killed app and sidecar are gone after the next l
 # 받는 중인 웹 탭을 닫고(주차) 마지막 셸이 끝나면(이 스모크의 session host 가 띄운 시험 셸만 끝낸다 — 앱이 앞에 없는 스모크에서는
 # 터미널 키 입력이 셸에 닿지 않을 때가 있었다)
 # 창은 닫히지만(숨긴다) 앱은 다 받을 때까지 남고, 다 받으면 원래 종료 길로 스스로 끝난다(사용자 결정 2026-10-09). 전에는 확인 없이
-# 곧바로 끝나 받던 것이 취소됐다. 시험 시간(60 초)보다 일찍 끝나야 한다. 종료 코드 86(session host `proof_loss`)은 이 PR 전부터
-# 있다 — 다운로드 없이도 웹 탭을 닫고 마지막 셸을 끝내면 base 에서도 그렇게 끝난다(W10e 착수 중 실측) — 실패가 아니라 알림으로 둔다.
+# 곧바로 끝나 받던 것이 취소됐다. 시험 시간(60 초)보다 일찍 끝나야 한다. 종료 코드 86(session host `proof_loss`)은 W10e 때 알림으로
+# 두었으나 그 결함을 고쳤으므로(셸이 끝난 Term 에 앱 정리가 다른 종류의 close 를 보냈다) 이제 0 이어야 한다.
 printf 'ui.language = ko\n' > "$root/keepalive.conf"
 cat > "$root/dlkeep.txt" <<'SCRIPT'
 sleep 8000
@@ -2001,11 +2001,9 @@ keep_elapsed=$(( $(date +%s) - keep_start ))
 dl_check dlw-app
 grep -ao 'app: \(last window closed — downloads keep the app alive[^(]*\|background downloads finished — terminating\|last window closed — terminating\)' "$root/app-dlw-app.log" > "$root/dlkeep.events" || true
 cat "$root/dlkeep.events"
-if [ "$keep_rc" = 86 ]; then
-    # base 와 같은 사유(같은 정산 실패가 원래 마지막 창 종료 길에서)여야 기존 결함이다 — 다른 사유면 W10e 가 만든 것이다.
-    grep -aq "fatal integrity: reason=proof_loss(7)" "$root/app-dlw-app.log" \
-        || fail "the app ended with 86 for a different reason than the known base issue"
-    echo "WARN the app ended with 86 (session host proof_loss(7) at quit) — pre-existing: ending the last shell after closing a web tab does this on the base branch too, without downloads"
+if grep -aq "fatal integrity" "$root/app-dlw-app.log"; then
+    grep -ao "fatal integrity: reason=[a-z_]*([0-9]*)" "$root/app-dlw-app.log" | head -1
+    fail "the app hit a session host integrity failure while quitting after the downloads"
 fi
 python3 - "$root" "$keep_elapsed" "$keep_rc" <<'PY' || fail "the app did not stay in the background until the download finished"
 import sys, os
@@ -2023,9 +2021,59 @@ keep = [i for i, e in enumerate(ev) if 'downloads keep the app alive' in e]
 done = [i for i, e in enumerate(ev) if 'background downloads finished' in e]
 check(bool(keep), f'when the last shell ended the window closed (hidden) but the app stayed ({ev})')
 check(size == 30 * 104858 and q == '0281', f'the download finished in the background ({size} bytes · {q!r})')
-check(bool(done) and keep and done[0] > keep[0] and elapsed < 55 and rc in (0, 86), f'then the app quit on its own, before the 60 s smoke time ({elapsed} s · exit {rc})')
+check(bool(done) and keep and done[0] > keep[0] and elapsed < 55 and rc == 0, f'then the app quit on its own, before the 60 s smoke time ({elapsed} s · exit {rc})')
 sys.exit(0 if ok else 1)
 PY
+
+# ── 끝난 셸의 정리: 마지막 셸이 끝난 뒤 앱이 끝날 때 session host 가 죽지 않는다 ──────────────────────────────
+# 셸이 끝나면 tick 이 원격 runtime 에 finish 를 보낸다. 앱이 끝날 때 정리(`AppSession.close`)가 그 runtime 에 closeAndDetach 를
+# 또 보내 session host 의 close 정산이 `proof_loss(7)` 로 앱을 끝냈다(exit 86). 두 길로 본다: (가) 웹 탭을 닫아 셸만 남긴 뒤 그
+# 셸을 끝낸다 — 세션 종료로 앱이 스스로 끝난다. (나) 웹 패널 없이 셸 하나 — 이 스모크의 시험 셸은 곧바로 끝나 창이 「시작 직후
+# 종료」 안내로 남고, 시험 시간이 다 돼 앱이 끝난다. 둘 다 0 으로 끝나야 하고 integrity 실패가 없어야 한다.
+printf 'ui.language = ko\n' > "$root/endedshell.conf"
+printf 'sleep 7000\nkey 13 U+77 U+77 32\nsleep 700\nkey 36 U+D\nsleep 20000\n' > "$root/endedshell-web.txt"
+printf 'sleep 20000\n' > "$root/endedshell-plain.txt"
+rm -rf "$root/home" && mkdir -p "$root/home"
+ended_start=$(date +%s)
+env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+    MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/solid" \
+    MARU_MACOS_APP_SMOKE_MS=30000 MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel \
+    MARU_WEB_OSR_TEST_INPUT="$root/endedshell-web.txt" MARU_CONFIG="$root/endedshell.conf" "$app" > "$root/app-endedshell-web.log" 2>&1 &
+ended_pid=$!
+sleep 12 # 웹 탭을 닫은 뒤(대본 약 7.7 초)
+ended_killed=0
+for spid in $(pgrep -f "Maru app shell" 2>/dev/null); do
+    sppid=$(ps -o ppid= -p "$spid" 2>/dev/null | tr -d ' ')
+    case "$(ps -o command= -p "$sppid" 2>/dev/null)" in *"$root"*) kill -TERM "$spid" 2>/dev/null && ended_killed=1 ;; esac
+done
+ended_rc=0
+wait "$ended_pid" || ended_rc=$?
+ended_elapsed=$(( $(date +%s) - ended_start ))
+[ "$ended_killed" = 1 ] || fail "the test shell to end was not found under this smoke's session host"
+grep -ao "fatal integrity: reason=[a-z_]*([0-9]*)" "$root/app-endedshell-web.log" | head -1
+if [ "$ended_rc" = 0 ] && [ "$ended_elapsed" -lt 25 ] && grep -aq "app: last window closed — terminating" "$root/app-endedshell-web.log" \
+    && ! grep -aq "fatal integrity" "$root/app-endedshell-web.log"; then
+    echo "PASS closing the web tab and ending the last shell quits the app cleanly ($ended_elapsed s · exit 0)"
+else
+    fail "closing the web tab and ending the last shell did not quit cleanly ($ended_elapsed s · exit $ended_rc)"
+fi
+rm -rf "$root/home" && mkdir -p "$root/home"
+env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+    MARU_MACOS_APP_SMOKE_MS=8000 MARU_APP_SUMMARY_PATH="$root/endedshell-plain.summary" \
+    MARU_WEB_OSR_TEST_INPUT="$root/endedshell-plain.txt" MARU_CONFIG="$root/endedshell.conf" \
+    "$app" > "$root/app-endedshell-plain.log" 2>&1 &
+ended_pid=$!
+ended_rc=0
+wait "$ended_pid" || ended_rc=$?
+grep -ao "fatal integrity: reason=[a-z_]*([0-9]*)" "$root/app-endedshell-plain.log" | head -1
+# 셸이 정말 끝났어야 이 길을 본 것이다(끝나지 않았으면 정리할 끝난 셸이 없다).
+grep -aq '^exit_events=[1-9]' "$root/endedshell-plain.summary" 2>/dev/null \
+    || fail "the plain window's shell did not end before the app quit — this stage did not reach the ended-shell cleanup"
+if [ "$ended_rc" = 0 ] && ! grep -aq "fatal integrity" "$root/app-endedshell-plain.log"; then
+    echo "PASS a window whose only shell already ended closes cleanly when the app quits (exit 0)"
+else
+    fail "a window whose only shell already ended did not close cleanly when the app quit (exit $ended_rc)"
+fi
 
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그

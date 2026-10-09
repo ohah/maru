@@ -183,7 +183,7 @@ codepoint / grapheme
 
 - ASCII printable은 1 cell.
 - East Asian wide 문자는 2 cell.
-- combining mark는 이전 cell cluster에 붙인다.
+- combining mark는 이전 cell cluster에 붙인다. 0폭으로 세는 범위는 Unicode 일반 범주 **Mn·Me 전체**다(`width.isCombiningMark`, Unicode 18.0 표) — 셸·tmux의 `wcwidth`가 같은 규칙이라, 하나라도 1 cell로 세면 그 결합 문자가 자기 칸을 차지해 뒤 칸이 밀린다(실측: tmux 안 kitty unicode placeholder의 좌표 결합문자 297개 중 214개가 옛 표 밖이라 화면이 30×30만 그려졌다). 폭을 갖는 Mc(Spacing_Mark)는 1 cell이다.
 - grapheme cluster는 UAX#29 기준으로 분절하고, ZWJ 시퀀스·국기·skin-tone modifier, **그리고 NFD(분해형) 한글 conjoining 자모(초성 L+중성 V+종성 T)** 는 하나의 cluster로 묶어 폭을 width policy로 정한다(한글은 base 초성이 wide라 음절 cluster=2칸). 완전한 처리는 fixture로 확장한다 — 다중 코드포인트 cluster의 저장·셰이핑 정공법은 [Grapheme Cluster 저장·렌더링 전략](grapheme-clustering.md)이 단일 출처다.
 - ambiguous width(UAX#11 'A')는 config 키 `text.ambiguous-width`로 정한다(값 `narrow`(기본)/`wide`). 기본 `narrow`는 1 cell(정렬 안전·Ghostty/xterm.js 호환), `wide`는 로케일/CJK 맥락에서 폰트가 전각으로 그리는 심볼(`width.isWideRenderSymbol` — Enclosed Alphanumerics U+2460~U+24FF)을 2 cell로 올린다(advance 2). box/block·PUA(Nerd Font)는 제외한다. live-reload로 즉시 반영된다.
 - unsupported/ambiguous width는 보수적으로 1 cell로 시작하고 fixture로 확장한다.

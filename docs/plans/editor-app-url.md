@@ -194,3 +194,14 @@ IME admission은 선택한 normal surface의 `withSurface` 경계에서만 수�
 터미널에서 OS 수신 하네스의 실제 cold/warm·파일 재사용·잘못된 위치 거부가 통과했다.
 앱 SHA와 receipt의 경로 hash·surface·독립 byte 기대값을 대조했다. 기본 handler·화면 gate는 미완료다.
 최신 bundle 빌드·Swift 효과 검사·기존 shared split 회귀·전체 `check-boundaries`는 통과했다.
+
+## 2026-10-09 설치본 검증
+
+PR #4249는 main `3f7fd7a4cc02b4957e28247c69192d46a34be9f7`로 머지됐다.
+해당 main의 서명 검증된 `/Applications/Maru.app`에서 일반 `open maru://…`의
+기본 handler 전달을 격리 HOME으로 확인했다. cold/warm의 독립 byte 기대값은
+11/5/5이며 동일 surface 재사용과 Metal readback을 함께 기록했다. 설치본 SHA256은
+`814b29af86889ba45661d80415e58192abeb5f06d838d65dd6c79337a7f4f6eb`이다.
+로컬 증거는 `~/.cache/maru-installed-20261009/default-verification/result.json`에 있다.
+사용자 승인 아래 중복 개발 앱의 LaunchServices 등록만 해제하고 설치본을 기본 handler로
+연결했으며 복사본 파일은 보존했다. 이후 설치본의 일반 실행도 확인했다.

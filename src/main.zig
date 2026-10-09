@@ -293,6 +293,11 @@ fn dispatch(
         return;
     }
 
+    if (std.mem.eql(u8, command, "editor")) {
+        try runEditorCli(allocator, &args, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "install-cli")) {
         try runInstallCli(io, allocator, stdout, stderr);
         return;
@@ -15132,6 +15137,57 @@ fn runAgentEvents(
     }
 }
 
+/// CLI only requests OS URL delivery; the app owns file validation and navigation.
+fn runEditorCli(allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    const cli = maru.cli.editor;
+    var collected: [9][]const u8 = undefined;
+    var count: usize = 0;
+    defer for (collected[0..count]) |arg| allocator.free(arg);
+    while (args.next()) |arg| {
+        if (count == collected.len) {
+            try stderr.writeAll(cli.help);
+            return error.UnknownCommand;
+        }
+        collected[count] = try allocator.dupe(u8, arg);
+        count += 1;
+    }
+    const parsed = cli.parse(collected[0..count]) catch {
+        const usage = if (count > 0 and std.mem.eql(u8, collected[0], "open")) cli.open.help else cli.help;
+        try stderr.writeAll(usage);
+        return error.UnknownCommand;
+    };
+    if (parsed == .help or parsed == .open_help) {
+        try stdout.writeAll(if (parsed == .open_help) cli.open.help else cli.help);
+        try stdout.flush();
+        return;
+    }
+    if (builtin.os.tag != .macos) {
+        try stderr.writeAll("maru editor open: app URL delivery is supported on macOS only\n");
+        return error.UnknownCommand;
+    }
+    var cwd_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    // Dir.cwd() is AT_FDCWD, not an open fd for macOS F_GETPATH. getcwd
+    // queries the process directory without passing that sentinel to fcntl.
+    _ = std.c.getcwd(&cwd_buffer, cwd_buffer.len) orelse {
+        try stderr.writeAll("maru editor open: cannot determine current directory\n");
+        return error.UnknownCommand;
+    };
+    const url = cli.open.buildURL(allocator, parsed.open, std.mem.sliceTo(&cwd_buffer, 0)) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        try stderr.writeAll("maru editor open: invalid path or location, or URL limit exceeded\n");
+        return error.UnknownCommand;
+    };
+    defer allocator.free(url);
+    const terminated = try allocator.dupeZ(u8, url);
+    defer allocator.free(terminated);
+    // No shell or PATH lookup: metacharacters remain filename bytes, and open's
+    // exit status reaches the caller without claiming an application-level ACK.
+    const argv = [_:null]?[*:0]const u8{ "/usr/bin/open", terminated.ptr };
+    _ = std.c.execve("/usr/bin/open", &argv, @ptrCast(std.c.environ));
+    try stderr.writeAll("maru editor open: cannot execute OS URL delivery\n");
+    return error.UnknownCommand;
+}
+
 fn runSsh(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.Io.Writer) !void {
     // Windows 미지원(백로그 W9) — 이유는 `HostGatedFeature.ssh`. 여기서 접지 않으면 W2의 목표(Windows에서
     // maru가 빌드된다)가 성립하지 않는다. comptime 참이라 아래 POSIX 본문은 의미 분석되지 않는다(실측 확인).
@@ -15912,6 +15968,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru win32-terminal-smoke
         \\  maru win32-clipboard-smoke [<expected> | --paste-encode]
         \\  maru ssh [--terminfo-only] <ssh args...>
+        \\  maru editor open <file> [-l N | --line N] [-c N | --column N]
         \\  maru install-cli
         \\  maru terminfo [--status|--refresh|--clear|--path]
         \\  maru sessions list [--window <id>]
@@ -15941,6 +15998,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\                        with <expected>: read what another app put there and compare.
         \\                        with --paste-encode: run the current clipboard through the paste rules.
         \\  ssh        install maru terminfo on the remote, then exec ssh (opt-in; your normal ssh is untouched)
+        \\  editor       open an editor file at a line/UTF-16 column (macOS; `editor --help`)
         \\  install-cli  symlink the maru binary into ~/.local/bin so `maru` works on your PATH
         \\  terminfo   manage the local xterm-maru terminfo cache (--status default, --refresh, --clear, --path)
         \\  sessions   list running Maru sessions (surfaces) as read-only metadata (`sessions --help`)

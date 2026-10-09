@@ -60,6 +60,7 @@ macOS 로컬 shell 1개 surface
 - [비교 뷰 좌우 독립 찾기 상자](plans/editor-diff-find.md)
 - [에디터 전체 잔여 작업 점검](plans/editor-remaining-work.md) — 기능·제품 연결·미결 계약·검증 한계의 현재 코드 대조
 - [에디터 Surface 단계 계획](plans/editor-surface.md)
+- [`maru editor open` CLI](plans/editor-open-cli.md) — 파일·줄·열을 기본 앱 스킴에 전달
 - [에디터 앱 URL — 파일·줄·열 열기](plans/editor-app-url.md) — doc-first 설계·정책 미결·단계와 검증; [적대적 계획 검토](plans/editor-app-url-review.md)
 - [이름 없는 문서(untitled) 구현 계획](plans/editor-untitled.md) — **끝났다(2026-09-23)**. 파일 없이 여는 편집기(U1~U3)·미저장 편집의 백업과 복원(U4a~U4d)·저장 실패 이유와 충돌 선택(C0·C1a·C1b). 계약은 문서 모델 §3.10·§3.11 과 editor-surface §4, 포맷은 workspace-restore 가 소유한다
 - [소스 컨트롤 도크 2판 단계 계획](plans/scm-dock.md)

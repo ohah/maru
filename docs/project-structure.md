@@ -131,6 +131,7 @@ src/
   main.zig              개발용 CLI entrypoint
   app.zig               탭/창/surface facade
   chrome.zig            플랫폼 중립 디자인 시스템(ChromeDraw) facade
+  editor_open_cli_test.zig  CLI와 공통 URL parser를 같은 src module root에서 검사하는 test entrypoint
   cli.zig               개발용 CLI 서브커맨드 구현 facade(main.zig가 디스패치, 로직은 cli/에)
   color.zig             backend-neutral 색 primitive(Rgb). terminal/renderer/config가 공유
   config.zig            action/config facade
@@ -600,3 +601,7 @@ tools/
 `src/platform/macos/app_session/editor/search/coordinator.zig`에 둔다.
 L2 `session/editor/search/request.zig`는 요청 전체 예산과 행의 root 귀속을 소유한다.
 [여러 root 연결](plans/editor-project-search-roots.md)의 worker·제품 검증 경계를 따른다.
+
+`src/cli/editor.zig`는 editor 명령 namespace와 도움말 선택을 소유한다.
+`src/cli/editor/open.zig`는 `maru editor open`의 인자 해석과 앱 URL 생성만 소유한다. 현재 디렉터리 조회와
+`/usr/bin/open`의 직접 exec는 `main.zig`가 맡는다. 기존 CLI 순수 경계를 유지한다.

@@ -56194,3 +56194,50 @@ test "HELP4 숨은 헬퍼 상자의 포인터 게이트는 네 자리 모두에 
         }
     }
 }
+
+test "U2J 이름 없는 문서 저장 상자는 다른 오버레이가 없어도 그려진다 — 제품 관문(overlayFrameNeeded)이 참이고, 그 관문으로 지은 프레임에 상자가 실린다" {
+    // 2026-10-09 실제 앱 캡처: ⌘S 뒤 상자가 **안 보였다**(같은 순간 알림이 떠 있으면 보였다). `overlayFrameNeeded` 가 rename 중 심볼만 세서,
+    // 알림 같은 다른 오버레이가 없으면 제품 tick 이 오버레이 프레임을 안 지었다. 친 글자는 보이지 않는 상자로 갔다. 예전 U2 판정자들은
+    // `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 **직접** 불러 그 관문을 한 번도 안 지났다 — 이 판정자는 관문부터 묻는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try UntitledFixture.init(allocator, false, true);
+    defer fx.deinit(allocator);
+    const s = fx.session;
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(std.testing.io, &root_buf)];
+    pinUntitledBase(s, root);
+    s.surface_initialized = true;
+    s.backing_width_px = 1200;
+    s.backing_height_px = 800;
+    const leaf: maru.session.SplitRect = .{ .x = 0, .y = 0, .w = 800, .h = 400 };
+    const t = try openUntitledInActivePane(s);
+    try testing.expect(insertText(s, t, "one\n"));
+    {
+        var d = appendPaneFrame(s, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    try testing.expect(!s.overlayFrameNeeded()); // 전제: 열린 것이 없다
+    try testing.expectError(error.AskName, saveDocument(s, t));
+    try testing.expect(s.rename != null and s.rename.? == .untitled_save);
+    try testing.expect(!s.anyOverlayOpen() and !s.chrome_host.notice.open); // 다른 오버레이 없이 —
+    try testing.expect(s.overlayFrameNeeded()); // ★ 제품 관문이 참이다
+    // 이름을 친다(상자는 빈 이름으로 열린다 — 글자가 있어야 프레임에 글리프가 실린다).
+    for ("named") |c| settings_ops.handleRenameKey(s, .{ .key = .{ .key = .char, .codepoint = c } });
+    try testing.expect(s.overlayFrameNeeded());
+    // 제품 tick 이 하는 순서: pane 을 그리고, 관문이 참이면 오버레이를 짓는다. 그 프레임에 상자와 친 이름이 실린다.
+    {
+        var d = appendPaneFrame(s, leaf, t) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    var prep = (try s.buildChromeOverlayPrep()) orelse return error.UntitledBoxNotDrawn;
+    defer prep.dl.deinit(allocator);
+    try testing.expect(s.chrome_host.rename_box.open);
+    try testing.expect(drawnHasCodepoint(prep.dl, 'n') and drawnHasCodepoint(prep.dl, 'd')); // 친 이름이 실렸다
+    // Esc 로 닫으면 관문도 내려간다.
+    settings_ops.handleRenameKey(s, .{ .key = .{ .key = .escape } });
+    try testing.expect(s.rename == null);
+    try testing.expect(!s.overlayFrameNeeded());
+}

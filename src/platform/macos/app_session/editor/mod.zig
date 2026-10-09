@@ -57590,7 +57590,8 @@ test "HELP10 확정 보류 중에 메뉴바로 팔레트를 열어도 — 사용
 }
 
 test "HELP11 확정 보류 중에 팔레트를 열었는데 서버가 답하지 않으면 — 오버레이 아래에서도 300 ms 뒤 additional 없이 들어간다 (제품 경계, §8.2g-b)" {
-    // 시간 초과 확정은 `refresh` 안에만 있었는데 `refresh` 는 다른 오버레이가 없을 때만 불린다 — 그래서 tick 도 같은 함수를 부른다.
+    // 시간 초과 확정은 `refresh` 안에만 있었는데 `refresh` 는 다른 오버레이가 없을 때만(포커스 없는 찾기 막대만 있을 때도) 불린다 — 그래서 tick 도
+    // 같은 함수를 부른다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
@@ -57629,6 +57630,10 @@ test "HELP12 지나가는 토스트는 자동완성을 닫는 이유가 아니�
     s.showNoticeKey(.nav_no_definition); // 비동기로 뜬 토스트(응답 알림 등)
     _ = try s.tick();
     try testing.expect(s.editor_completion.active); // ★ 닫히지 않았다
+    // 토스트가 떠 있는 **프레임**도 목록을 닫지 않는다 — 헬퍼 게이트가 토스트 프레임에 `refresh` 를 부르면 `editorHelpersSuppressed`(토스트 포함)가
+    // 목록을 닫았다(적대적 검증 2026-10-10 — 게이트는 `anyOverlayOpen` 을 본다).
+    try h.frame();
+    try testing.expect(s.editor_completion.active);
     s.chrome_host.notice.dismiss();
     try h.frame();
     try testing.expect(s.chrome_host.suggest_box.open); // 다시 보인다
@@ -57827,7 +57832,7 @@ test "OVF5 찾기 막대를 연 채 편집기를 우클릭하면 — 두 오버�
     const caret = chrome.components.find.caretRect(&s.chrome_host.find, props) orelse return error.FindNotPlaced;
     const find_x: i64 = caret.x - 6 * @as(i64, cw);
     const find_y: i64 = caret.y;
-    s.chrome_host.find.input_focused = false; // 편집기를 눌러 포커스가 빠진 상태(우클릭은 편집기가 받는다)
+    s.chrome_host.find.input_focused = false; // 포커스만 빠진 상태(프로젝트 검색 도크가 가져간 뒤 등 — 우클릭은 편집기가 받는다)
     // 메뉴를 찾기 막대와 **칸 위상이 다른** 자리에 연다(한 칸 안에서 고른다). 넓은 메뉴는 창 오른쪽에 붙어 가로 위상이 고정될 수 있어
     // 가로·세로 중 하나만 달라도 된다 — 다른 축의 글자가 내려앉는 것이 예전 결함이었다.
     var opened = false;
@@ -57877,4 +57882,202 @@ fn metalCellIndex(cells: []const renderer.metal_frame.NativeMetalCell, cp: u21) 
 fn metalCellPixel(cells: []const renderer.metal_frame.NativeMetalCell, cp: u21, cw: u32, ch: u32) ?[2]i64 {
     for (cells) |c| if (c.codepoint == cp) return .{ @as(i64, c.origin_x) + @as(i64, c.col) * cw, @as(i64, c.origin_y) + @as(i64, c.row) * ch };
     return null;
+}
+
+/// FINDH — **실제 경로**로 「찾기 막대는 열려 있고 키는 편집기가 받는」 상태를 만든다: 찾기를 연 채 프로젝트 검색 도크를 열면(⇧⌘F) 찾기
+/// 막대는 남고 입력 포커스만 빠진다(`search/dock.zig` `open`). 도크 검색 입력에서 Esc 를 누르면 그 입력이 풀리고 키가 편집기로 간다
+/// (`search/dock.zig` `handleKey` — 포커스 없는 찾기는 모달이 아니라 Esc 가 도크로 간다). 편집기 **클릭**으로는 도크 입력이 안 풀리고
+/// (`mouse()` 의 `focusWorkspaceInput` 갈래는 `focus_owner` 가 workspace 가 아닐 때만), 찾기 입력에 포커스가 있는 채로는 편집기 클릭이
+/// 삼켜진다(`ChromeHost.handlePointer` — 비교 뷰 제외). 돌려주는 값: 찾기 글자 원점(「Find: 」의 'F' 가 서야 할 픽셀). 도크가 pane 폭을
+/// 바꾸므로 도크를 연 **뒤에** 잰다(caret 은 포커스가 있을 때만 재므로 잴 때만 잠깐 세운다). leaf 도 다시 잰다.
+fn openUnfocusedFindBar(h: *HelperFx) ![2]i64 {
+    const s = h.fx.session;
+    s.dispatchAppAction(.toggle_find);
+    try testing.expect(s.chrome_host.find.open and s.chrome_host.find.input_focused and s.chrome_host.find.input.query.items.len == 0);
+    app_session_mod.project_search_ops.open(s);
+    try testing.expect(s.chrome_host.find.open and !s.chrome_host.find.input_focused and !s.anyOverlayOpen());
+    try testing.expect(s.editor_search.focused != null); // 키는 도크 검색 입력이 받는다
+    try pressKey(&h.fx, .escape, .{});
+    try testing.expect(s.editor_search.focused == null and s.chrome_host.find.open and !s.chrome_host.find.input_focused);
+    // 도크가 pane 폭을 바꿨다 — 제품은 레이아웃이 바뀌면 활성 pane 사각을 다시 잰다(`recomputeActivePaneRect`). 찾기 막대는 그 사각(탭 바 아래)
+    // 우상단에 선다 — 안 재면 작업 영역 전체로 폴백해 막대가 pane 탭 바 위에 놓였다.
+    pane_ops.recomputeActivePaneRect(s);
+    h.leaf = activeLeafRectForTest(s) orelse return error.SkipZigTest;
+    try h.frame();
+    s.chrome_host.find.input_focused = true; // 재기만 한다 — 바로 되돌린다
+    const caret = chrome.components.find.caretRect(&s.chrome_host.find, s.buildChromeProps());
+    s.chrome_host.find.input_focused = false;
+    const c = caret orelse return error.FindNotPlaced;
+    return .{ c.x - 6 * @as(i64, s.cell_width_px), c.y };
+}
+
+test "FINDH1 찾기 막대가 열리고 포커스가 없을 때 편집기에서 치면 — 완성 목록이 찾기 막대와 함께, 둘 다 컴포넌트가 정한 픽셀에 그려지고 ↓ 는 목록을 움직인다 (제품 경계, §8.2g)" {
+    // 2026-10-09 실측: 헬퍼는 「다른 오버레이가 없을 때만」 그려져(그때의 규칙), 찾기 막대가 열린 채 치면 목록이 **상태만 서고 안 그려졌고** ↑ 는 그 보이지 않는
+    // 목록이 먹었다(caret 51 → 51). 이제 그려진 것이 찾기 막대뿐이면 헬퍼도 그린다. 함께 그린 프레임에서 둘이 칸 위상이 달라도 각자 자리에
+    // 선다(docs/chrome-strategy.md §5.3 — 그 전의 어긋남 실측은 `ML6` 주석).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    const find_at = try openUnfocusedFindBar(&h);
+    const box = try h.openCompletion(); // 안에서 「그려졌다」(suggest_box.open · 포인터를 받는다)까지 단언한다
+    _ = try s.tick();
+    try testing.expect(s.editor_completion.active and s.chrome_host.find.open); // 둘 다 산다(찾기는 닫는 이유가 아니다)
+    {
+        try h.frame();
+        try testing.expect(s.chrome_host.suggest_box.open);
+        // 그 프레임에 목록의 첫 행과 찾기 막대가 함께 실리고, 둘 다 컴포넌트 픽셀에 선다(목록 label 은 「 kind 」 3칸 뒤 — `suggest_box.view`).
+        var d = appendPaneFrame(s, h.leaf, h.term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.NothingDrawn;
+        defer prep.deinit(allocator);
+        const cw = s.cell_width_px;
+        const ch = s.cell_height_px;
+        const label = completion_client.rows(s)[0].label;
+        try testing.expect(std.mem.indexOfScalar(u8, "Find: ", label[0]) == null); // 찾기 글자와 겹치지 않는 글자로 잰다
+        // 전제: 둘의 칸 위상이 다르다 — 같으면 한 격자라 이 판정자는 lowering 의 묶음 나누기를 재지 못한다.
+        try testing.expect(@mod(box.y - find_at[1], @as(i64, ch)) != 0 or @mod(box.x + 3 * @as(i64, cw) - find_at[0], @as(i64, cw)) != 0);
+        try testing.expectEqual(find_at, prepGlyphPixel(&prep, 'F', cw, ch) orelse return error.FindGlyphNotDrawn);
+        try testing.expectEqual([2]i64{ box.x + 3 * @as(i64, cw), box.y }, prepGlyphPixel(&prep, label[0], cw, ch) orelse return error.ListGlyphNotDrawn);
+    }
+    // ↑↓ 는 목록을 움직이고 편집기 caret 은 그대로다.
+    const caret = h.term.rt.editor_selection.?.focus;
+    const sel0 = s.chrome_host.suggest_box.selected;
+    try pressKey(&h.fx, .arrow_down, .{});
+    try testing.expect(s.chrome_host.suggest_box.selected != sel0);
+    try testing.expectEqual(caret, h.term.rt.editor_selection.?.focus);
+}
+
+test "FINDH2 찾기 막대가 열리고 포커스가 없을 때 포인터가 낱말에 머물면 — 호버 상자가 찾기 막대와 함께 그려진다 (제품 경계, §8.2b)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, "int x;\nint y;\n");
+    const s = h.fx.session;
+    _ = try openUnfocusedFindBar(&h);
+    try h.frame();
+    const p1 = pointerAtOffset(h.term, 1) orelse return error.NoPointer;
+    _ = s.hoverCursor(p1.x, p1.y, 0);
+    try testing.expect(pumpHoverUntil(&h.fx, 3000, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f));
+    try h.frame();
+    try testing.expect(s.chrome_host.hover_box.open and s.chrome_host.find.open);
+    try testing.expect(s.editorHelperTakesPointer(.hover_box)); // 그려졌다(#4247 기록)
+}
+
+test "FINDH4 완성 목록이 찾기 막대와 함께 열린 채 찾기 입력으로 포커스가 돌아가면 — tick 이 목록을 닫는다 (제품 경계, §8.2g)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, helper_doc);
+    const s = h.fx.session;
+    _ = try openUnfocusedFindBar(&h);
+    _ = try h.openCompletion();
+    s.chrome_host.find.input_focused = true; // 찾기 막대를 눌렀다 — 키는 찾기 입력이 받는다
+    _ = try s.tick();
+    try h.frame();
+    try testing.expect(!s.editor_completion.active and !s.chrome_host.suggest_box.open);
+}
+
+test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 프레임이 보류를 지우지 않고 300 ms 뒤 additional 없이 들어간다 (제품 경계, §8.2g-b)" {
+    // 적대적 검증 2026-10-10: 「찾기 막대뿐이면 헬퍼도 그린다」 게이트가 포커스 있는 찾기·확인창에서도 열려 `refresh` 가 불리면, 그 안의
+    // `editorHelpersSuppressed` 가 목록을 닫으며 tick 이 일부러 남겨 둔 확정 보류(⑵)까지 지웠다 — Enter 로 고른 항목이 사라졌다. HELP11 은
+    // 팔레트(뒤에 모여 게이트를 닫는다)로만 쟀고 프레임도 짓지 않아 못 봤다. 여기서는 tick 뒤마다 프레임(prep)을 짓는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, pending_doc ++ "// RESOLVESTALL\n"); // 가짜 서버가 resolve 에 답하지 않는다 — 순서가 결정적이다
+    const s = h.fx.session;
+    try pendingAcceptFixture(&h);
+    try testing.expect(s.runAction("toggle_find"));
+    try testing.expect(s.chrome_host.find.open and s.chrome_host.find.input_focused);
+    const start = s.awakeMs();
+    _ = try s.tick();
+    try h.frame();
+    try testing.expect(s.editor_completion.pending_accept and s.editor_completion.active); // ★ 프레임이 보류를 지우지 않았다
+    while (s.editor_completion.active and s.awakeMs() - start < 3000) {
+        lsp_client.pump(s);
+        _ = try s.tick();
+        try h.frame();
+        _ = usleep(5_000);
+    }
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
+    try testing.expect(std.mem.indexOf(u8, h.content(), "  lazy_import\n") != null);
+}
+
+test "FINDH6 포커스 없는 찾기 막대가 가린 자리(아래 패딩)에 포인터가 머물면 — 그 아래 낱말의 호버를 묻지 않는다, 막대를 닫으면 같은 자리에서 묻는다 (제품 경계, §8.2b)" {
+    // 적대적 검증 2026-10-10: 헬퍼가 찾기 막대와 함께 그려지면서, 막대 위에 300 ms 머문 포인터가 막대에 가린 편집기 낱말의 호버를 열어 막대
+    // 아래 줄을 덮었다(포인터 → 본문 판정이 막대를 빼지 않았다). 호버 tick 이 보이는 패널(`find.visibleContains` — 패딩 포함) 안이면 묻지 않는다.
+    // 점은 **아래 패딩 띠**다 — 입력 줄(`contains`)이 아니면서 막대가 가리는 자리, 그리고 막대를 닫으면 같은 점이 본문 낱말 위다(대조).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    const long = "int " ++ ("abcdefghij" ** 30) ++ ";\n"; // 긴 줄 — 찾기 막대(pane 오른쪽 위) 아래에도 낱말이 있다
+    try h.init(allocator, long ++ long ++ long ++ long ++ long ++ long ++ "int y;\n");
+    const s = h.fx.session;
+    const find_at = try openUnfocusedFindBar(&h);
+    // 바꾸기 줄을 열어 막대를 두 줄로 — 이 픽스처는 편집기 본문 위에 머리 띠가 있어 한 줄 막대(패딩 포함)는 그 띠만 가리고 글자 줄에 닿지 않는다.
+    // 두 줄이면 아래 패딩 띠가 본문 첫 글자 줄 위에 온다(실제 앱처럼 막대가 본문을 가리는 장면).
+    s.chrome_host.find.replace_open = true;
+    _ = try s.tick(); // 찾기 대상(편집기)을 세운다 — 바꾸기 줄은 대상이 편집기일 때만 산다(`replaceActive`)
+    try h.frame();
+    const props = s.buildChromeProps();
+    const pad: i64 = props.shape.modal_padding_px;
+    try testing.expect(pad > 0 and s.chrome_host.find.replaceActive());
+    const under_x: f64 = @floatFromInt(find_at[0] + 4 * @as(i64, s.cell_width_px));
+    const under_y: f64 = @floatFromInt(find_at[1] + 2 * @as(i64, s.cell_height_px) + @divTrunc(pad, 2));
+    try testing.expect(hover_client.pointerOffset(h.term, under_x, under_y) != null); // 그 점은 본문 낱말 위다(막대가 가린다)
+    try testing.expect(chrome.components.find.visibleContains(&s.chrome_host.find, props, under_x, under_y));
+    try testing.expect(!chrome.components.find.contains(&s.chrome_host.find, props, under_x, under_y)); // 입력 줄이 아니라 패딩
+    const hovers_before = s.editor_lsp.sent_hovers;
+    _ = s.hoverCursor(under_x, under_y, 0);
+    const opened = pumpHoverUntil(&h.fx, 900, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.editor_lsp.sent_hovers > 0 or c.fx.session.chrome_host.hover_box.open;
+        }
+    }.f); // 지연(300 ms)의 세 배를 기다린다
+    try testing.expect(!opened);
+    try testing.expectEqual(hovers_before, s.editor_lsp.sent_hovers);
+    // 대조: 막대를 닫으면 **같은 점**에서 묻는다 — 위 「안 묻는다」가 막대 때문이지 그 점이 본문 밖이라서가 아니다.
+    s.chrome_host.find.hide();
+    try h.frame();
+    _ = s.hoverCursor(under_x + 1, under_y, 0);
+    _ = s.hoverCursor(under_x, under_y, 0);
+    try testing.expect(pumpHoverUntil(&h.fx, 3000, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.editor_lsp.sent_hovers > 0;
+        }
+    }.f));
+}
+
+test "FINDH3 포커스 없는 찾기 막대가 열린 채 시그니처 힌트가 뜨면 — 상자가 찾기 막대와 함께 그려진다 (제품 경계, §8.2d)" {
+    // 시그니처 갈래도 같은 게이트다(`editor_helpers_may_draw`). 그 갈래만 옛 「다른 오버레이 없을 때」로 남으면 시그니처가 상태만 서고 안 그려졌다
+    // (호버 갈래로 내려가도 `hover_client.refresh` 는 시그니처가 서 있으면 false — 적대적 검증 2026-10-10).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    try h.init(allocator, "int x;\n\n");
+    const s = h.fx.session;
+    _ = try openUnfocusedFindBar(&h);
+    h.term.rt.editor_selection = .{ .anchor_start = 7, .anchor_end = 7, .focus = 7 };
+    try testing.expect(insertText(s, h.term, "add("));
+    try testing.expect(pumpLspUntil(&h.fx, 3000, HelperFx.Ctx{ .fx = &h.fx, .term = h.term }, struct {
+        fn f(c: HelperFx.Ctx) bool {
+            return c.fx.session.editor_signature.active;
+        }
+    }.f));
+    try h.frame();
+    try testing.expect(s.chrome_host.find.open and s.chrome_host.hover_box.open);
+    try testing.expect(s.editorHelperTakesPointer(.hover_box)); // 그려졌다(시그니처는 호버 상자를 쓴다)
 }

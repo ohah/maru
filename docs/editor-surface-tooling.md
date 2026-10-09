@@ -786,6 +786,10 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 사후 적대적 검증이 OVF1 의 구멍 둘을 찾아 막았다: ⑴ 관문 어디든 그 말이 있으면 통과해 `anyOverlayOpen` 의 **좁은** `find.open`(포커스 있을 때만)이
 `overlayFrameNeeded` 의 넓은 `chrome_host.find.open` 을 대신했다 — 그 줄을 지워도(포커스 없는 찾기 막대가 사라진다) 아무것도 안 잡았다. 이제 찾기는 넓은
 조건을 요구하고 `OVF3` 이 동작으로도 잰다. ⑵ 주석 속 말도 셌다 — 이제 관문은 주석을 걷고 보며, `overlayFrameNeeded` 가 `anyOverlayOpen()` 을 부르는지도 묻는다.
+**OVF1 은 말이 있는지만 보므로 조건을 좁히는 변경(`X and false`)은 동작 판정자만 잡는다.** 관문 조건 열 개를 하나씩 좁혀 보니
+`find_secondary.open`·`key_hints.visible` 은 아무것도 안 잡았고 `anyOverlayOpen()` 은 하나(SV6b)만 잡았다. 그래서 `OVF4` 가 관문을 지나는 오버레이
+(팔레트·설정·확인창·알림·우클릭 메뉴·알림 패널·피커 넷·단축키 배지)를 하나씩 열어 **다른 오버레이 없이 관문이 서고 · 그 프레임에 무언가 실리며 · 닫으면
+내려가는지** 재고, 비교 뷰 둘째 찾기 막대는 실제 비교 뷰가 있어야 그려지므로 `DCOL17`(editor/diff.zig)이 열을 바꿔 둘째만 남긴 자리에서 잰다.
 
 ### 8.2g LSP 2단 ⑥ — 자동완성 ①-a: LSP 완성 팝업 (2026-09-19, 계획 공격 뒤의 결정)
 

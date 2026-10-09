@@ -96634,3 +96634,164 @@ test "OVF3 찾기 막대가 열려 있고 입력에 포커스가 없을 때도 �
     defer prep.dl.deinit(allocator);
     try std.testing.expect(prep.dl.cells.len > 0); // 찾기 막대의 글자가 실렸다
 }
+
+test "OVF4 관문을 지나는 오버레이를 하나씩 연다 — 다른 오버레이 없이 overlayFrameNeeded 가 서고, 그 관문으로 지은 프레임에 무언가 실리며, 닫으면 내려간다" {
+    // 2026-10-09 관문 좁히기 뮤테이션: `find_secondary.open`·`key_hints.visible` 을 꺼도 아무 판정자도 안 잡았고, `anyOverlayOpen()` 을 꺼도
+    // 잡은 것은 하나(SV6b)뿐이었다 — 팔레트·설정·확인창·피커·알림 패널·우클릭 메뉴가 **관문을 지나 그려지는지**를 묻는 판정자가 거의 없었다.
+    // OVF1 은 관문에 그 말이 **있는지**만 본다(좁혀져도 통과) — 이 판정자가 **동작**으로 잰다. 여는 길이 데이터를 요구하는 것(피커·비교 뷰
+    // 둘째 찾기 막대)은 상태를 직접 세운다 — 여기서 재는 것은 그리기 내용이 아니라 관문이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 80,
+        .rows = 24,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    _ = try session.resize(1400, 900, 1000);
+    const Case = struct {
+        name: []const u8,
+        open: *const fn (*AppSession) void,
+        close: *const fn (*AppSession) void,
+    };
+    const cases = [_]Case{
+        .{ .name = "palette", .open = struct {
+            fn f(s: *AppSession) void {
+                s.dispatchAppAction(.toggle_command_palette);
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.dismissMessageOverlays();
+            }
+        }.f },
+        .{ .name = "settings", .open = struct {
+            fn f(s: *AppSession) void {
+                s.dispatchAppAction(.toggle_settings);
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.settings.hide();
+            }
+        }.f },
+        .{
+            .name = "confirm",
+            .open = struct {
+                fn f(s: *AppSession) void {
+                    s.dispatchAppAction(.reset_settings);
+                }
+            }.f,
+            .close = struct {
+                fn f(s: *AppSession) void {
+                    // 제품 길과 같다 — host 가 확인창을 내리고(`confirm.dismiss`) 결정을 보낸다(`mouse` 의 버튼 분기·`handleInput` 의 Esc).
+                    s.chrome_host.confirm.dismiss();
+                    s.dispatchChromeAction(.confirm_cancel);
+                }
+            }.f,
+        },
+        .{ .name = "notice", .open = struct {
+            fn f(s: *AppSession) void {
+                s.showNoticeKey(.nav_no_definition);
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.notice.dismiss();
+            }
+        }.f },
+        .{ .name = "context_menu", .open = struct {
+            fn f(s: *AppSession) void {
+                settings_ops.showTerminalContextMenu(s, 400, 300);
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                settings_ops.closeContextMenu(s);
+            }
+        }.f },
+        .{ .name = "notifications", .open = struct {
+            fn f(s: *AppSession) void {
+                notification_ops.openNotificationPanel(s);
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.notifications.hide();
+            }
+        }.f },
+        .{ .name = "symbol_picker", .open = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.symbol_picker.show();
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.symbol_picker.hide();
+            }
+        }.f },
+        .{ .name = "reference_picker", .open = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.reference_picker.show();
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.reference_picker.hide();
+            }
+        }.f },
+        .{ .name = "recovery_picker", .open = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.recovery_picker.show();
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.recovery_picker.hide();
+            }
+        }.f },
+        .{ .name = "trust_picker", .open = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.trust_picker.show();
+            }
+        }.f, .close = struct {
+            fn f(s: *AppSession) void {
+                s.chrome_host.trust_picker.hide();
+            }
+        }.f },
+        // 비교 뷰 둘째 찾기 막대(`find_secondary`)는 여기서 안 연다 — 실제 비교 뷰와 열 전환이 있어야 그려진다(상태만 세우면 안 그려진다).
+        // 그 관문은 `editor/diff.zig` 의 DCOL17 이 실제 비교 뷰에서 잰다.
+        .{
+            .name = "key_hints",
+            .open = struct {
+                fn f(s: *AppSession) void {
+                    s.chrome_host.key_hints.visible = true; // ⌘ 를 누르고 있으면 tick 이 세우는 값
+                }
+            }.f,
+            .close = struct {
+                fn f(s: *AppSession) void {
+                    s.chrome_host.key_hints.visible = false;
+                }
+            }.f,
+        },
+    };
+    for (cases) |c| {
+        if (session.overlayFrameNeeded()) {
+            std.debug.print("OVF4 {s}: 열기 전에 이미 관문이 서 있다(앞 사례가 덜 닫혔다)\n", .{c.name});
+            return error.GateAlreadyUp;
+        }
+        c.open(session);
+        if (!session.overlayFrameNeeded()) {
+            std.debug.print("OVF4 {s}: 열었는데 관문이 안 선다 — 다른 오버레이 없이는 안 그려진다\n", .{c.name});
+            return error.GateNotRaised;
+        }
+        {
+            var prep = (try session.buildChromeOverlayPrep()) orelse {
+                std.debug.print("OVF4 {s}: 관문은 섰는데 프레임에 아무것도 안 실렸다\n", .{c.name});
+                return error.NothingDrawn;
+            };
+            prep.dl.deinit(allocator);
+        }
+        c.close(session);
+        if (session.overlayFrameNeeded()) {
+            std.debug.print("OVF4 {s}: 닫았는데 관문이 남는다\n", .{c.name});
+            return error.GateStuck;
+        }
+    }
+}

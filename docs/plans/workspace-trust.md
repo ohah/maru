@@ -1,6 +1,6 @@
 # 워크스페이스 신뢰와 도구 환경 구현 계획
 
-상태: WT1·WT2a·WT2b·WT3a·WT3b·WT4a·WT4b·WT5a·WT5b-1 완료(WT3b 는 Finder 실측 대기), WT5b-2·3 미착수(WT2·WT3·WT4 는 둘로, WT5 는 WT5a 와 WT5b-1~3 으로 나눴다 — 아래). WT3 의 「결정 대기」 때문에 WT4 를 먼저 했다(2026-10-08 사용자 결정). 2026-10-07 사용자 승인(「순서대로 진행해주시죠」). 계약은 [tooling §8.1](../editor-surface-tooling.md)·§8.2a 가 소유하고, 이 문서는 지금 코드와 그 계약 사이의 차이와 그것을 메우는 단계를 소유한다.
+상태: WT1·WT2a·WT2b·WT3a·WT3b·WT4a·WT4b·WT5a·WT5b-1·WT6a 완료(WT3b 는 Finder 실측 대기), WT5b-2·3 미착수, WT6a 완료·WT6b 미착수(WT2·WT3·WT4·WT6 은 둘로, WT5 는 WT5a 와 WT5b-1~3 으로 나눴다 — 아래). WT3 의 「결정 대기」 때문에 WT4 를 먼저 했다(2026-10-08 사용자 결정). 2026-10-07 사용자 승인(「순서대로 진행해주시죠」). 계약은 [tooling §8.1](../editor-surface-tooling.md)·§8.2a 가 소유하고, 이 문서는 지금 코드와 그 계약 사이의 차이와 그것을 메우는 단계를 소유한다.
 
 ## 왜 — 지금 코드와 계약의 차이
 
@@ -166,9 +166,35 @@ WT5 는 둘로 나눈다(2026-10-09) — 무엇이 실행되는지 보이는 일
 
 - 계약 §8.1 「config discovery 결과…를 노출」 — WT5a 는 같은 문장의 「실제 executable/version」 절반만 했다. 서버가 읽은 설정 파일(어떤 `zls.json`·`pyrightconfig.json`)을 보이는 일은 어느 단계에도 없었다 — 여기서 정한다(적대적 검증). 서버마다 알려 주는 방식이 달라 무엇을 「찾았다」고 할지부터 정한다.
 
+## WT6 — git 이 신뢰 전에 저장소가 정한 명령을 실행하지 않게 (2026-10-09 사용자 결정)
+
+**왜**: 도크의 git 조회(SCM `status`·`diff --numstat`·`log`·`show`·`check-ignore`, 에이전트 턴 스냅샷의 임시 index `add -A`)는 위험 설정 일부를 막지만, 파일 필터(`filter.*`)는 정확성 때문에 허용한다(`session/git_command.zig` `config_overrides` — 끄면 LFS 저장소에서 가짜 수정·포인터 대신 원본이 index 로, [remote-watch](remote-watch.md) §11.5). `.git` 이 든 압축 파일을 풀어 그 폴더에서 터미널을 열면(파일을 열지 않아도 — SCM 은 터미널 cwd 의 저장소다) 신뢰 전에 돈다. VS Code·JetBrains 는 신뢰 전에 git 을 끈다. 적대적 검증(scratchpad 임시 저장소, git 2.50.1 실측)이 필터 말고도 신뢰와 무관하게 열린 길을 찾았다: partial clone 의 **지연 가져오기**(`remote.<n>.uploadpack`·`core.sshCommand`·`core.gitProxy`·`git-remote-*` — 도크의 `diff --numstat --cached` 만으로 돈다; `protocol.allow=never` 는 저장소의 `protocol.file.allow=always` 가 이긴다), **서명 검증**(`log.showSignature` + `gpg.program` — 히스토리 탭의 `log`·`show`), **submodule 의 필터**(`.git/modules/<n>/config` — 최상위 드라이버 목록에 안 잡히는데 최상위 `status`·`diff`·`add -A` 가 돌린다), **이름에 `=` 가 든 드라이버**(`-c` 로 끌 수 없다 — `GIT_CONFIG_COUNT` env 로는 끈다), 쓰기의 `core.fsmonitor`·fetch 의 `uploadpack`·`credential.helper`·commit 의 훅·서명 프로그램.
+
+**결정(2026-10-09 사용자, 다 권장안)**:
+- **신뢰 전(결정 없음·거부) 저장소에서는 저장소가 정의한 필터 드라이버만 끈다** — 전역(`~/.gitconfig`)의 LFS 는 그대로 돈다(LFS 저장소는 신뢰 전에도 정확). 저장소(local·worktree — include 로 끌어온 것 포함) 범위의 드라이버를 모든 범위를 한 번에 읽어(`git config -z --show-scope --get-regexp`) 찾고, 덮어쓰기는 `-c` 가 아니라 `GIT_CONFIG_COUNT` env 로 한다. 저장소가 전역 드라이버 이름(`filter.lfs.*`)을 덮어썼으면 전역 값을 다시 넣는다. submodule 은 신뢰 전에 보지 않는다(`--ignore-submodules=dirty`, 스냅샷은 gitlink 를 뺀다). 저장소에 드라이버를 둔 git-crypt·nbstripout 저장소는 신뢰 전 목록이 틀릴 수 있다 — 도크가 그렇다고 말한다.
+- **도크가 신뢰를 묻는다** — 신뢰 전 저장소면 SCM 도크 머리에 한 줄, 누르면 언어 서버와 같은 신뢰 시트(신뢰 표는 하나). 저절로 모달은 띄우지 않는다.
+- **신뢰 전 쓰기(stage·commit·fetch)는 누르면 신뢰 시트부터** — 쓰기는 저장소 설정(훅·서명·필터)을 정답의 일부로 쓰므로 끄고 돌릴 수 없다(git-crypt 평문이 커밋에 들어간다); 허용하면 그 쓰기를 이어 한다.
+- **원격(SSH) 저장소는 늘 신뢰 전 규칙** — 원격 신뢰 키(범위 밖)가 생길 때까지. 대가: 원격의 저장소 필터 저장소는 도크 목록이 틀린다.
+- **둘로 나눈다** — 신뢰와 무관하게 닫을 구멍부터(WT6a), 그다음 신뢰에 따른 갈래(WT6b). 지연 가져오기·쓰기의 fsmonitor 는 처음 WT6a 였으나 정상 사용자의 답을 바꿔 WT6b 로 옮겼다(2026-10-09 사용자 결정 — 아래).
+
+#### WT6a — 신뢰와 무관하게 닫는 구멍 (완료)
+
+- 모든 읽기에 `log.showSignature=false` — 저장소(또는 전역)의 `log.showSignature=true` + `gpg.program` 이면 `log`·`show` 가 그 프로그램을 불렀고, 그 출력(`gpg: …`)이 `--format` 출력 앞에 섞여 첫 커밋 필드를 더럽혔다(파싱 결함이기도 했다). 우리는 서명을 보이지 않으므로(`%G` 없음) 끄면 답이 **고쳐진다**.
+- 원격 감시자(`tools/remote-watch`)가 로컬·원격 읽기와 같은 env 덮어쓰기(`GIT_CONFIG_NOSYSTEM`·`GIT_TERMINAL_PROMPT` 등)를 싣는다 — 앞머리를 `env K=V … git <굳히기>` 로(`ssh_upload.watchArgs`; 감시자는 앞머리를 열어 보지 않고 그대로 execvp 한다).
+- **처음 범위에서 뺀 것 — WT6b 로(적대적 검증·사용자 결정 2026-10-09)**: 처음엔 지연 가져오기 차단(`GIT_NO_LAZY_FETCH`·프로토콜별 `never`)과 쓰기의 `core.fsmonitor=` 도 「꺼도 답이 같다」로 여기 넣었는데, 실측으로 **정상 사용자의 답을 바꿨다** — partial clone(`blob:none`·treeless) 저장소에서 커밋 펼침이 늘 실패하고, `reset --soft` 뒤엔 필수 읽기(`numstat_staged`)가 실패해 도크 목록이 통째로 「git 읽기에 실패했습니다」가 됐고(사유도 없이), 쓰기의 `core.fsmonitor=` 는 사용자 index 의 fsmonitor 확장을 지워 대형 저장소의 다음 git 명령을 느리게 했다. 그래서 둘 다 신뢰에 따라 가른다(WT6b).
+- **종료:** 실제 git 판정자(`git_backend` — 무해한 `touch` 표식): 서명 검증(대조군 — 굳히기 없는 `log` 가 표식을 만드는지 먼저 보고, 안 만들면 건너뛴다 — 그다음 제품의 `log` 에서 표식이 없고 출력에 `gpg:` 가 섞이지 않는다), 감시자 앞머리 판정자(`ssh_upload` — `env`·모든 env 덮어쓰기·`git`·굳히기). `test-remote-watch-module` 의 컴파일 수 11 → 12(그 그래프가 `ssh_upload` 를 끌고 온다).
+
+#### WT6b — 신뢰에 따른 갈래
+
+- 위 결정의 나머지: 저장소 범위 필터 드라이버 끄기(신뢰 전·원격), submodule 무시, 도크 머리 줄과 신뢰 시트, 신뢰 전 쓰기의 시트.
+- **지연 가져오기(신뢰 전·원격만 막는다)**: 신뢰 전 읽기에 `GIT_NO_LAZY_FETCH=1`(git 2.45+)과 프로토콜별 `protocol.<p>.allow=never`(낮은 git — 저장소의 `protocol.file.allow=always` 는 더 구체적인 키라 `protocol.allow` 하나로는 못 이긴다; 두 층은 각자 혼자서도 막는다 — 실측). 그러면 partial clone 의 신뢰 전 읽기는 실패할 수 있다 — 도크가 「partial clone — 신뢰하면 받아 옵니다」처럼 사유를 말하고, 커밋 펼침은 증감 없는 `--raw` 로 줄여 보이며, 필수 읽기 실패가 목록을 죽이지 않게 한다. 신뢰한 저장소는 git 그대로 가져온다 — 그 읽기가 멈추지 않게 시한(fetch 의 stall 가드·`ConnectTimeout`)을 싣는다. 판정자 주의: 대조군과 제품은 **따로 받은 저장소**를 쓴다(한 번 가져온 blob 은 남아 같은 저장소의 다음 읽기는 가져올 일이 없다 — 첫 판정자가 그래서 보호를 다 빼도 초록이었다).
+- **쓰기의 `core.fsmonitor`**: 신뢰 전 쓰기는 어차피 신뢰 시트를 먼저 거치므로(결정) 따로 끌 자리가 없다 — 신뢰한 저장소의 쓰기는 사용자 fsmonitor 를 그대로 쓴다(끄면 사용자 index 의 fsmonitor 확장이 지워진다 — 실측). 신뢰 키는 SCM 저장소 root 도 `trust_store.keyFor` 로 정규화한다(편집기 쪽 「가장 가까운 `.git`」과 같은 키). 홈 root(WT2b — 묻지 않는 root)의 도크 줄은 묻지 않고 「홈 저장소는 신뢰를 묻지 않는다」.
+- **종료:** 실제 git 판정자(저장소·include·submodule·`=` 이름·전역 LFS 덮어쓰기 각각 표식 0, 신뢰 뒤엔 저장소 필터가 돈다), 도크 줄·시트·쓰기 시트 제품 경로.
+- **남는 것(알려 둔다)**: 사용자 셸 프롬프트(oh-my-zsh·starship 등)는 `cd` 만으로 `git status` 를 돌린다 — 우리가 통제하지 않는 경로다.
+
 ## 범위 밖 (별도 결정 거리)
 
-- **git 이 신뢰 전에 저장소가 정한 명령을 실행할 수 있다.** 도크의 git 조회는 위험 설정 일부를 막지만 파일 필터(`filter.*`)는 정확성 때문에 허용한다(`session/git_command.zig` `config_overrides`) — `.git` 이 든 압축 파일을 열면 신뢰 전에 돈다. VS Code·JetBrains 는 신뢰 전에 git 을 끈다.
+- (git 이 신뢰 전에 저장소가 정한 명령을 실행하는 문제는 WT6 으로 옮겼다 — 아래.)
 - 원격(SSH) 저장소의 신뢰 키(호스트 키 지문·원격 사용자·원격 실제 경로)와 원격 쪽 환경 해석, devcontainer, 조상 디렉터리 설정 파일 지문(신뢰 뒤 새로 생기면 다시 묻기), 서버별 제한 모드, 감사 로그, 조직 정책.
 
 ## 근거

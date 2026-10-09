@@ -8249,7 +8249,7 @@ pub fn build(b: *std.Build) void {
     // ⚠️ `MARU_TEST_KEEP_ONLY_PREFIX` 로 좁히는 길은 **막혀 있다.** 그 env 는 `envPrefix` 가
     // `builtin.os.tag != .macos` 에서 `null` 을 돌려주므로 **리눅스에서 통째로 무시**된다 —
     // `check-boundaries` 는 리눅스 러너라, 필터를 건 줄 알았는데 11 개가 전부 돌아 다시 빨갰다.
-    run_remote_watch_module.addArg("--maru-expect-tests=11");
+    run_remote_watch_module.addArg("--maru-expect-tests=12"); // +1: 감시자 앞머리 판정자(`ssh_upload` — 계획 workspace-trust WT6a)
     run_remote_watch_module.setCwd(b.path("."));
     remote_watch_module_step.dependOn(&run_remote_watch_module.step);
     boundary_step.dependOn(&run_remote_watch_module.step);

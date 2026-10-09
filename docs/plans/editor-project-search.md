@@ -257,7 +257,7 @@ CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길�
 [전체 범위와 음성 대조](../../tools/editor-project-search/results/literal-verification-macos-arm64.json)는 수정 전후의
 동등성과, 겹침·낱말·검색어 검사·ASCII/비ASCII 접기를 잘못 바꾼 실행 가능한 변이의 검출을 기록한다.
 
-## 검색 도크 구현 계약 (S1b/S2 완료 조건, 제품 gate 검증 중)
+## 검색 도크 구현 계약 (S1b/S2 완료 조건)
 
 ### 대상과 입력
 
@@ -343,7 +343,7 @@ CLI의 `--baseline-native`는 수정 전 바이너리와 파일·줄·byte·길�
 - 진단은 요청 세대·원인·처리량·지연·제외 수만 남긴다. 사용자 검색어·본문·절대경로는 일반 로그에 남기지 않는다.
   제품 테스트의 합성 fixture와 같은 상태 이벤트를 snapshot/trace가 소비하게 한다.
 
-### S2 표시 모델과 컴포넌트 작업 중 (2026-10-08)
+### S2 표시 모델과 제품 연결 (2026-10-09)
 
 추가로 재현해 수정한 결함·판정 범위·남은 제품 경계는 [도크 기반 검증](editor-project-search-dock.md)에 정리한다.
 

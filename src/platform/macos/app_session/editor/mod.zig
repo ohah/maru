@@ -55442,6 +55442,7 @@ test "EDPSD2 확정과 취소는 표시 신원을 갱신하고 질의를 회수�
     fx.session.allocator = failing.allocator();
     const huge = [_]u8{'x'} ** 4096;
     const accepted = d.commitText(fx.session, &huge);
+    d.setPreedit(fx.session, &huge);
     fx.session.allocator = testing.allocator;
     try testing.expect(!accepted);
     try testing.expectEqualStrings("간", fx.session.editor_search.fields[0].text.items);

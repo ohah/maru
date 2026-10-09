@@ -9,7 +9,7 @@
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 215u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 216u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1061,6 +1061,11 @@ void maru_macos_downloads_clear_finished(void);
 /* 사용자 동작으로 시작한 새 다운로드의 요청 번호(바뀌면 새 요청)와 그 탭. */
 uint64_t maru_macos_downloads_show_request(uint64_t *out_surface);
 uint32_t maru_macos_downloads_active(void);
+/* v216(W10e): 앱을 남겨 둘 다운로드 수(받는 중·준비 중·옮기는 중 — 보류·묻는 중·중단은 세지 않는다). 마지막 셸이 끝나도 이 수가 0 이
+   아니면 창만 닫고 앱은 다 받을 때까지 남는다(사용자 결정 2026-10-09). */
+uint32_t maru_macos_downloads_keep_alive(void);
+/* v216(W10e): 창이 하나도 없는 동안 Chromium sidecar 의 파이프를 비우고 다운로드를 진행한다(창의 tick 이 하던 일). */
+void maru_macos_web_osr_detached_pump(void);
 /* v215(W10b): 저장할 곳을 물을 다운로드(상태 10 asking) — 이름·처음 열 폴더·저장 창 안내(Zig 문장, UTF-8 길이로). */
 typedef struct MaruDownloadAsk {
     uint64_t key;

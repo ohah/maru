@@ -5479,7 +5479,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 요구하기 전에 전 세션 보호를 찾고, clean quick도 일반 종료 confirm 대상으로 삼는다.
         guard tickTimer != nil else { holdOsrDialogsForExit(); return .terminateNow }
         let protected = protectedFilePanelSurface()
-        guard let target = protected ?? activeSurface ?? quick else { holdOsrDialogsForExit(); return .terminateNow }
+        // W10e: 창 없이 다운로드만 받는 중이다 — 새 창에서 종료를 묻는다(진행 중인 다운로드 N개가 취소됩니다). 그대로 두면 확인 없이
+        // 끝나 받던 것이 말없이 취소됐다.
+        // (숨긴 창은 셸이 끝난 세션이라 거기서 묻지 않는다.)
+        var keepAliveTarget: TerminalSurface?
+        if protected == nil, downloadsKeepAlive, windows.allSatisfy({ $0.window?.isVisible != true }), maru_macos_downloads_keep_alive() > 0 {
+            keepAliveTarget = createTerminalWindow(applyingWorkspace: nil)
+        }
+        guard let target = protected ?? keepAliveTarget ?? activeSurface ?? quick else { holdOsrDialogsForExit(); return .terminateNow }
         guard let session = target.appSession else { holdOsrDialogsForExit(); return .terminateNow }
         // W6k: 종료 확인이 뜰 때만 페이지 대화상자를 치운다 — 저장 안 한 파일 패널이 있으면 Zig 가 곧바로 거절하고 확인은 뜨지
         // 않는다(그때 치우면 종료하지 않는데 대화상자만 사라진다 — 적대 검증).
@@ -5655,6 +5662,17 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         } else {
             writeSummary(visibleUI: false, abiReady: validateCachedCapabilities(), smokeDurationMs: smokeDurationMs())
         }
+    }
+
+    /// W10e: 창을 숨긴 채 다운로드만 받는 중에 Dock 을 누르면 새 창을 연다(그 밖의 경우는 AppKit 기본 그대로).
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        _ = sender
+        // 숨긴 창은 셸이 끝난 세션이다 — 새 창을 연다(숨긴 창은 이제 마지막이 아니어서 보통 창처럼 정리된다).
+        if downloadsKeepAlive, !flag {
+            _ = createTerminalWindow(applyingWorkspace: nil)
+            return false
+        }
+        return true
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -7028,6 +7046,24 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 사용자 눈에는 앱이 그냥 사라진 것으로 보인다. 2026-08-27 에 복구 세션을 누르자 앱이 조용히
             // 종료됐는데 crash report·unified log·app.log 어디에도 단서가 없어, 이 경로에 도달했다는 사실조차
             // 소스를 읽고 추론해야 했다. 마지막 창이 닫히는 것 자체는 정상이지만 **왜 마지막이 됐는지**는 남겨야 한다.
+            // W10c·W10e: 받는 중인 Chromium 다운로드가 있으면 창만 닫고(숨기고) 앱은 다 받을 때까지 남는다(사용자 결정 2026-10-09 —
+            // 셸 `exit` 는 확인 없이 끝나는 길이라 받던 것이 말없이 취소됐다). 그 사이 Dock 을 누르면 새 창이 열린다.
+            // 세션은 정리하지 않고 창만 숨긴다 — 끝난 마지막 세션을 앱이 도는 중에 정리하면 session host 의 런타임 닫기 정산이
+            // `proof_loss` 로 앱을 끝냈다(실측 — 이 정리는 원래 앱 종료로만 가는 길이다). 숨긴 창의 tick 이 셸 종료를 매번 다시 알리므로
+            // 여기로 거듭 온다 — 그동안 sidecar 를 돌리고(끝난 세션의 tick 이 웹을 펌프하는지에 기대지 않는다), 다 받으면 아래 원래 종료로.
+            if maru_macos_downloads_keep_alive() > 0 {
+                maru_macos_web_osr_detached_pump()
+                if !downloadsKeepAlive {
+                    fputs("app: last window closed — downloads keep the app alive in the background (\(maru_macos_downloads_keep_alive()) moving)\n", stderr)
+                    downloadsKeepAlive = true
+                    surface.window?.orderOut(nil)
+                }
+                return
+            }
+            if downloadsKeepAlive {
+                fputs("app: background downloads finished — terminating\n", stderr)
+                downloadsKeepAlive = false
+            }
             fputs("app: last window closed — terminating (windows=\(windows.count) token=\(surface.token) sessionNil=\(surface.appSession == nil))\n", stderr)
             bypassQuitConfirm = true // 창 닫기/세션 종료에 따른 종료 — applicationShouldTerminate가 재확인하지 않게
             tickTimer?.invalidate()
@@ -10003,6 +10039,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 그때 그 경로에 무언가 있었는지(있었으면 저장 창이 「바꿀까요?」를 물어 사용자가 바꾸기를 골랐다), 취소, 치움(종료·창 닫힘 —
     // 보류로 되돌린다).
     private var downloadAskPanels: [UInt64: NSSavePanel] = [:]
+    /// W10e: 마지막 셸이 끝났지만 받는 중인 다운로드 때문에 그 창을 숨긴 채 남아 있다 — 다 받으면 원래 종료 길로 끝낸다.
+    private var downloadsKeepAlive = false
     /// 띄운 때 — 띄운 직후 sheet 가 아직 붙기 전을 「붙은 창이 사라졌다」로 보지 않게(8 회차 — 1 초 유예).
     private var downloadAskShownAt: [UInt64: Date] = [:]
     /// 시험(대본 `dlanswer <경로|->`): 다음 저장 창의 답 — 창을 띄우지 않고 곧바로 답한다. `-` 는 취소.

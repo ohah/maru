@@ -1,5 +1,26 @@
 # 개발 명령
 
+## 에디터 CLI
+
+`maru editor open 'src/file 한글.zig' -l 42 -c 7`은 macOS 기본 Maru 앱에 파일을
+전달한다. `--line`/`-l`, `--column`/`-c`를 지원한다. `maru editor --help`는 명령 목록을 표시한다.
+열은 1-based UTF-16이며 `--column`에는 `--line`이 필요하다. 옵션 같은 파일명은
+`maru editor open -- -file.zig`로 전달한다. 상대 경로는 CLI의 실제 cwd 기준이며 workspace 밖도
+허용한다. 전달 성공은 앱의 파일 열기 성공 ACK가 아니다.
+
+CLI가 PATH에 없다면 `.app/Contents/MacOS/maru install-cli`로 기존 설치 명령을 사용한다.
+소스 빌드에서는 `zig-out/bin/maru editor open …`으로 실행한다.
+
+- `mise exec -- zig build test-editor-open-cli` (Debug/`-Doptimize=ReleaseFast`).
+- `python3 tools/test-editor-open-cli.py --cli zig-out/bin/maru --output <새 빈 디렉터리>`:
+  실제 CLI의 exec argv와 실패 처리. macOS test-only DYLD interposer를 사용하므로 OS 전달은 별도다.
+- `python3 tools/test-editor-open-cli-os.py --cli zig-out/bin/maru --app /Applications/Maru.app --output <새 빈 ~/.cache 하위 디렉터리>`:
+  실제 CLI argv를 격리 앱에 전달해 OS event와 문서 이동을 검사한다. 기본 handler 선택은 별도다.
+- `python3 tools/test-editor-open-cli-adversarial.py --output <새 빈 디렉터리>`:
+  경로 인코딩·좌표·중복 옵션·cwd·receiver validation 변이와 정상/동등 대조군.
+
+계약과 한계는 [구현 계획](plans/editor-open-cli.md)을 따른다.
+
 ## 에디터 앱 URL
 
 - `mise exec -- zig build test-editor-app-url`: 순수 URL grammar·bounded startup queue·OOM·encoder corpus.

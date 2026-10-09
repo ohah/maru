@@ -4143,3 +4143,10 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 ## 프로젝트 검색 worker 백엔드
 
 `test-macos-project-search-worker`는 실제 API의 합성 native 모델·공유/독립 신원·0건 점유·glob/범위·취소·helper 수거·부분 결과를 검증한다. `test-editor-project-search`는 argv·JSON·요청 신원의 L2 판정자를 실행한다. `test-macos-project-search-roots`는 여러 root의 후보 합집합·귀속·전체 예산·수명을 실행 검증한다([범위](plans/editor-project-search-roots.md)). `test-editor-project-search-owner`는 실제 AppSession 사본·논리 IME callback·감시 확인 후 실행·편집 후 재검색을 검사한다. 검색 UI·실제 두벌식 HID·앱 RSS와 root 교체 화면은 [도크 검증](plans/editor-project-search-dock.md)에 제품 표본이 있다. 전체 FSEvents/overflow·지연 I/O 종료·OS 후보창 픽셀·VoiceOver 조작은 그 표본의 범위 밖이며 [worker 계획](plans/editor-project-search-worker.md)의 남은 경계를 유지한다.
+
+## 에디터 CLI와 앱 URL
+
+| 기능 | 상태 | 검증 | 한계 |
+| --- | --- | --- | --- |
+| `maru://open` | 구현 | PR #4249 머지 후 설치본의 기본 handler cold/warm, byte 11/5/5, 동일 surface, Metal readback 검증. [계획](plans/editor-app-url.md)의 설치본 이력 참조 | 검증은 기록된 앱 SHA에 귀속되며 후속 빌드 전체를 대신하지 않는다. |
+| `maru editor open` | 구현 | 순수 인자와 인코딩, 상한과 OOM, 실제 CLI argv와 exec 실패, 변이와 동등 대조군, 격리 OS event에서 byte 11/5/5와 동일 문서 재사용 | OS 하네스는 test-only adapter로 대상 앱과 HOME을 고정한다. 기본 handler 선택은 기존 설치본 앱 URL gate에 귀속되며 이번 CLI와 기본 handler의 무변경 전달 검증으로 합치지 않는다. 종료 확인 UX는 범위 밖이며 macOS 실행만 지원한다. |

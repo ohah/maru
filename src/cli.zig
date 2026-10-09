@@ -5,6 +5,7 @@
 //! `ssh`(원격 terminfo 전파), `install`(maru CLI를 PATH에 설치), `terminfo`(로컬 terminfo 캐시 관리),
 //! `sessions`(컨트롤 플레인 read-only 메타데이터 조회 — `sessions list`/`session get`, Track C 1d).
 //! 구조는 docs/project-structure.md의 `src/cli/` 항목을 단일 출처로 둔다.
+pub const editor = @import("cli/editor.zig");
 pub const ssh = @import("cli/ssh.zig");
 pub const install = @import("cli/install.zig");
 pub const terminfo = @import("cli/terminfo.zig");

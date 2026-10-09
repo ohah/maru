@@ -4313,6 +4313,14 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run all Zig tests");
     // Exercise grammar/ownership effects, not source-string presence. OS delivery
     // remains a separate opt-in product test.
+    const editor_open_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/editor_open_cli_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_editor_open_tests = b.addRunArtifact(editor_open_tests);
+    b.step("test-editor-open-cli", "Run one-file CLI arguments, URL encoding and allocation failure tests").dependOn(&run_editor_open_tests.step);
+    test_step.dependOn(&run_editor_open_tests.step);
     const editor_url_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/session/editor_app_url_test.zig"),
         .target = target,

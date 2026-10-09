@@ -57664,3 +57664,29 @@ test "RPV7 검색 결과 탭의 디스크 이동은 수정과 탭 닫기 뒤 늦
         }
     }
 }
+
+test "RPV8 결과 좌표 상한과 IME 확정 대기는 탭 게시나 원문 선택을 손상하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const source = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+        try replacePreviewSearch(&fx);
+        const ops = @import("search/report.zig");
+        fx.session.ime_editor_commit_pending = true;
+        try testing.expectError(error.InputTransactionPending, ops.open(fx.session));
+        fx.session.ime_editor_commit_pending = false;
+        const row = &fx.session.editor_search.result.model.rows.items[0];
+        if (mode == 0) row.match.ranges[0].start.line = std.math.maxInt(u32) else row.match.ranges[0].start.byte = std.math.maxInt(u32);
+        const report = try ops.open(fx.session);
+        try testing.expect(std.mem.indexOf(u8, report.rt.editorDocument().opened.?.file.content, "4294967296") != null);
+        const hit = report.rt.editor_search_report.?.hits.items[0];
+        report.rt.editor_selection = maru.session.editor.selection.Selection.at(report.rt.editorDocument().opened.?.file.lines.line(hit.line).?.start);
+        fx.session.ime_active = true;
+        try testing.expectError(error.InputTransactionPending, ops.activate(fx.session, report));
+        fx.session.ime_active = false;
+        try testing.expectError(error.StaleRequest, ops.activate(fx.session, report));
+        try testing.expectEqualStrings("foo", source.rt.editorDocument().opened.?.file.content);
+        try testing.expect(!canShareView(fx.session, report));
+    }
+}

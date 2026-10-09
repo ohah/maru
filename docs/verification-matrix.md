@@ -4154,4 +4154,4 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 `maru editor lsp trust …`와 호환 별칭 `maru lsp …`는 동일한 parser·request·socket 경로를 사용한다.
 namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 무전달로 검사한다.
 
-프로젝트 검색 결과 탭의 사본 수명·낡은 이동 거절·저장/복원 제외·준비 OOM은 `test-editor-project-replace-preview`의 RPV4~7을 따른다([범위](plans/editor-project-search-pane.md)). 제품 Metal 결과 탭 캡처는 PR 본문에 연결하며 물리 후보창·VoiceOver 완료로 해석하지 않는다.
+프로젝트 검색 결과 탭의 사본 수명·낡은 이동 거절·저장/복원 제외·준비 OOM은 `test-editor-project-replace-preview`의 RPV4~8을 따른다([범위](plans/editor-project-search-pane.md)). 제품 Metal 결과 탭 캡처는 PR 본문에 연결하며 물리 후보창·VoiceOver 완료로 해석하지 않는다.

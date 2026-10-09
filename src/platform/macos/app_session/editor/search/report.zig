@@ -104,7 +104,7 @@ pub fn open(self: *host.AppSession) !*host.Term {
             try rows.append(a, owned);
         }
         for (row.match.ranges, 0..) |range, range_index| {
-            const heading = try std.fmt.allocPrint(a, "[{d}] {s}:{d}:{d}\n", .{ row.root_index + 1, row.match.path, range.start.line + 1, range.start.byte + 1 });
+            const heading = try std.fmt.allocPrint(a, "[{d}] {s}:{d}:{d}\n", .{ row.root_index + 1, row.match.path, @as(u64, range.start.line) + 1, @as(u64, range.start.byte) + 1 });
             defer a.free(heading);
             // 파일 이름의 줄바꿈도 화면 구조를 바꾸지 않게 정리한다. 원래 경로는 hit가 보관한다.
             for (heading[0 .. heading.len - 1]) |*byte| if (byte.* < 0x20) {

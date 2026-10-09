@@ -119,10 +119,14 @@ pub const Opened = editor.document_state.Opened;
 ///
 /// **쓸 수 없는 파일도 연다** — 읽기 전용으로 표시할 뿐이다(§3.5: "보는 것은 되어야 한다").
 pub fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) OpenFileError!Opened {
-    const file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return error.Unreadable;
+    // External file URLs may name a FIFO: opening it in blocking mode can hang
+    // before stat. Validate the same nonblocking descriptor that is actually read.
+    const file = file_panel_ops.openFilePanelRead(std.Io.Dir.cwd(), path, true) catch return error.Unreadable;
     defer file.close(io);
 
-    const size = (file.stat(io) catch return error.Unreadable).size;
+    const stat = file.stat(io) catch return error.Unreadable;
+    if (stat.kind != .file) return error.Unreadable;
+    const size = stat.size;
     if (size > read_limit_bytes) return error.TooLarge;
 
     // **빈 파일도 연다.** `alloc(0)`은 빈 슬라이스를 주고, `document.open`이 그것을 한 줄짜리
@@ -401,18 +405,38 @@ pub const NavError = error{
 /// 스크롤은 `revealFoldedLine`·`revealPrimaryCaretRows` 가 갖고 있고 **그 둘은 이미 적대적 검증을
 /// 거쳤다**(각자의 머리말이 그 이력을 든다). 새 경로가 그것을 우회하면 그 결함들이 되돌아온다.
 pub fn navigateTo(self: *AppSession, target: NavTarget) NavError!void {
+    return navigate(self, target, false);
+}
+
+/// Explicit user file opening is permitted outside the workspace. Internal LSP
+/// and diagnostic navigation still enters navigateTo and retains its root check.
+pub fn navigateUserFile(self: *AppSession, request: maru.session.editor_app_url.Request) NavError!void {
+    return navigate(self, .{ .path = request.path, .pos = if (request.line) |line| .{
+        .line = line - 1,
+        .character = request.column - 1,
+        .enc = .utf16,
+    } else null }, true);
+}
+
+fn navigate(self: *AppSession, target: NavTarget, explicit_file: bool) NavError!void {
     // ⑴ **떠나기 전 자리를 먼저 잡는다.** 아래에서 pane 활성이 바뀌면 「직전 위치」를 못 구한다.
     const from = currentNavMark(self);
 
     // ⑵ 열기. 경로가 없으면 지금 Term 안의 이동이다.
     const term = if (target.path) |path| blk: {
-        if (!withinNavRoot(self, path)) return error.OutsideRoot;
-        const opened = pane_ops.openFileTermInActivePane(self, path, .text) catch return error.Unopenable;
+        if (!explicit_file and !withinNavRoot(self, path)) return error.OutsideRoot;
+        const opened = (if (explicit_file) pane_ops.openNativeFileTermInActivePane(self, path) else pane_ops.openFileTermInActivePane(self, path, .text)) catch return error.Unopenable;
         break :blk opened.term;
     } else pane_ops.activePane(self).activeTerm();
 
     if (term.kind != .editor) return error.NoDocument;
     const doc = term.rt.editorDocument().opened orelse return error.NoDocument;
+    // A file-only URL preserves an existing caret; a fresh document needs a
+    // visible insertion point. Explicit locations always use the shared reveal.
+    if (explicit_file and target.pos == null) {
+        if (term.rt.editor_selection == null) placeCaretAndReveal(self, term, 0);
+        return;
+    }
     // ⑵ʹ 풀기 — `(line, character)` 는 **이 문서**의 줄 표로 byte 가 된다(§8.2c).
     const raw_offset: usize = if (target.pos) |p|
         maru.session.editor.lsp.position.offsetOf(doc.file.content, doc.file.lines, p.line, p.character, p.enc)
@@ -24437,6 +24461,76 @@ fn trustFileDecision(text: []const u8, root: []const u8) ?maru.session.editor.ls
         if (e.key.eql(key)) found = e.decision;
     }
     return found;
+}
+
+test "external editor URL opens outside root with UTF16 caret and preserves dirty identity" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const io = std.testing.io;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(io, .{ .sub_path = "external.txt", .data = "A😀B\r\n한\n" });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try fx.dir.dir.realPath(io, &root_buffer)];
+    const path = try std.fs.path.join(allocator, &.{ root, "external.txt" });
+    defer allocator.free(path);
+    const previous_root = fx.session.git_repo;
+    fx.session.git_repo = @constCast("/unrelated-workspace");
+    defer fx.session.git_repo = previous_root;
+    try testing.expectError(error.OutsideRoot, navigateTo(fx.session, .{ .path = path }));
+    const request: maru.session.editor_app_url.Request = .{ .path = path, .line = 1, .column = 3, .raw_len = 0 };
+    try navigateUserFile(fx.session, request);
+    const term = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(term.kind == .editor);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus);
+    try testing.expect(insertText(fx.session, term, "X"));
+    const body = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
+    defer allocator.free(body);
+    const count = pane_ops.activePane(fx.session).terms.items.len;
+    const caret = term.rt.editor_selection.?.focus;
+    try navigateUserFile(fx.session, .{ .path = path, .raw_len = 0 });
+    try testing.expect(term == pane_ops.activePane(fx.session).activeTerm());
+    try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+    try testing.expectEqual(caret, term.rt.editor_selection.?.focus);
+    try testing.expectEqualStrings(body, term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(term.rt.editorDocument().opened.?.isDirty());
+    try testing.expectError(error.OutsideRoot, navigateTo(fx.session, .{ .path = path }));
+}
+
+test "external editor URL refuses binary directory and missing file without publishing tabs" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    try fx.dir.dir.writeFile(std.testing.io, .{ .sub_path = "binary", .data = "\xff\xfe" });
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try fx.dir.dir.realPath(std.testing.io, &root_buffer)];
+    const previous = pane_ops.activePane(fx.session).activeTerm();
+    const count = pane_ops.activePane(fx.session).terms.items.len;
+    for ([_][]const u8{ "binary", "missing", "." }) |name| {
+        const path = try std.fs.path.join(allocator, &.{ root, name });
+        defer allocator.free(path);
+        try testing.expectError(error.Unopenable, navigateUserFile(fx.session, .{ .path = path, .raw_len = 0 }));
+        try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+        try testing.expect(previous == pane_ops.activePane(fx.session).activeTerm());
+    }
+}
+
+test "external editor URL FIFO open returns unreadable instead of blocking" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // No writer exists: blocking open would never reach the kind check. The
+    // external runner deadline is the negative oracle for that mutation.
+    const posix_fixture = struct {
+        extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+    };
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try dir.dir.realPath(std.testing.io, &root_buffer)];
+    const path = try std.fmt.allocPrintSentinel(testing.allocator, "{s}/pipe", .{root}, 0);
+    defer testing.allocator.free(path);
+    if (posix_fixture.mkfifo(path, 0o600) != 0) return error.SkipZigTest;
+    try testing.expectError(error.Unreadable, openPath(std.testing.io, testing.allocator, path));
 }
 
 test "랩 토글은 뷰 override를 세우고 config를 안 건드린다" {

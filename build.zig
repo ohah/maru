@@ -4311,11 +4311,26 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    // Exercise grammar/ownership effects, not source-string presence. OS delivery
+    // remains a separate opt-in product test.
+    const editor_url_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/session/editor_app_url_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_editor_url_tests = b.addRunArtifact(editor_url_tests);
+    b.step("test-editor-app-url", "Run external editor URL grammar and startup queue tests").dependOn(&run_editor_url_tests.step);
+    test_step.dependOn(&run_editor_url_tests.step);
     // Execute the actual Swift capture body as well as the Zig ownership tests.
     // AppKit fixture stubs need the macOS host SDK; cross-target checks stay compile-only.
     const capture_host_step = b.step("test-macos-workspace-capture", "Run exact-byte and failure tests of the Swift workspace capture");
     const read_host_step = b.step("test-macos-workspace-read", "Run missing versus unreadable workspace read judges");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        const editor_url_host_effects = b.addSystemCommand(&.{ "python3", "tools/test-editor-app-url-host.py" });
+        editor_url_host_effects.setCwd(b.path("."));
+        b.step("test-editor-app-url-host", "Execute scoped URL admission and drain Swift effects").dependOn(&editor_url_host_effects.step);
+        test_step.dependOn(&editor_url_host_effects.step);
+        macos_only_test_step.dependOn(&editor_url_host_effects.step);
         const capture_host_test = b.addSystemCommand(&.{ "python3", "tools/test-workspace-host-capture.py" });
         capture_host_test.setCwd(b.path("."));
         capture_host_step.dependOn(&capture_host_test.step);
@@ -5286,6 +5301,13 @@ pub fn build(b: *std.Build) void {
     run_shared_split_tests.setCwd(b.path("."));
     run_shared_split_tests.step.dependOn(&install_fake_lsp.step);
     b.step("test-editor-shared-split", "Run shared editor pane split and lifecycle judges").dependOn(&run_shared_split_tests.step);
+    const editor_url_navigation_tests = addProjectTest(b, .{
+        .root_module = editor_tests.root_module,
+        .filters = &.{"external editor URL"},
+    });
+    const run_editor_url_navigation_tests = b.addRunArtifact(editor_url_navigation_tests);
+    run_editor_url_navigation_tests.setCwd(b.path("."));
+    b.step("test-editor-app-url-navigation", "Run external file URL native navigation and refusal judges").dependOn(&run_editor_url_navigation_tests.step);
     const shared_anchor_tests = addProjectTest(b, .{
         .root_module = editor_tests.root_module,
         .filters = &.{"shared editor peer"},

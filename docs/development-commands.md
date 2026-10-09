@@ -1,5 +1,17 @@
 # 개발 명령
 
+## 에디터 앱 URL
+
+- `mise exec -- zig build test-editor-app-url`: 순수 URL grammar·bounded startup queue·OOM·encoder corpus.
+- `mise exec -- zig build test-editor-app-url-navigation`: 외부 파일의 native 이동·dirty 재사용·특수 파일 거부.
+- 위 두 gate에 `-Doptimize=ReleaseFast`를 붙여 최적화에서도 검사한다.
+- `python3 tools/test-editor-app-url-adversarial.py --output <새 빈 디렉터리>`: 소스 사본의 변이 5개와 정상/동등 대조군.
+- `python3 tools/test-editor-app-url-os.py --app zig-out/Maru.app --output <새 빈 tmp 디렉터리>`: 실제 GUI session에서 exact bundle의 cold/warm 수신·byte caret·문서 identity·잘못된 URL 거부.
+
+URL 예: `maru://open?path=%2Ftmp%2Fmain.zig&line=42&column=7`. 줄·열은 1-based이며
+열은 UTF-16 unit이다. 외부 파일도 허용하지만 root 등록이나 trust 승인은 하지 않는다.
+계약·구현 상태·실제 OS gate의 한계는 [계획](plans/editor-app-url.md)을 따른다.
+
 Maru 작업에서 사용하는 기본 명령이다.
 
 ## WebKit 편집기 자원 검사

@@ -147,9 +147,22 @@ pub fn openFileTermInActivePane(
     path: []const u8,
     kind: dock_panel.EntryKind,
 ) !FileOpenResult {
+    return openFileTerm(self, path, kind, false);
+}
+
+/// External editor requests must fail before publishing a tab when native read
+/// fails. They must not silently fall back to a browser panel for a FIFO/binary.
+pub fn openNativeFileTermInActivePane(self: *AppSession, path: []const u8) !FileOpenResult {
+    return openFileTerm(self, path, .text, true);
+}
+
+fn openFileTerm(self: *AppSession, path: []const u8, kind: dock_panel.EntryKind, require_native: bool) !FileOpenResult {
     // diff는 위 유일성 키가 다르므로 경로만으로 기존 Term을 재사용하지 않는다(그 확인은 openDiffTerm이 한다).
     if (kind != .diff) {
-        if (file_panel_ops.fileTermForPath(self, path)) |existing| return self.activateExistingFileTerm(existing);
+        if (file_panel_ops.fileTermForPath(self, path)) |existing| {
+            if (require_native and existing.kind != .editor) return error.NotNativeEditor;
+            return self.activateExistingFileTerm(existing);
+        }
     }
 
     // 창당 상한. 옛 `DockPanel.open`이 모델 불변식으로 걸던 것을 열기 시점 검사로 옮겼다(§10 열린 질문 2번).
@@ -178,8 +191,8 @@ pub fn openFileTermInActivePane(
     // 무엇을 내주는지는 `editor.nativeTextFromEnv`가 소유한다). 읽기를 **Term 분기 앞에서** 하는 이유는 못 읽는 파일이 있기
     // 때문이다(§3.5 — UTF-8 아님·상한 초과·권한). 그런 파일까지 네이티브로 보내면 훅을 켠 것이
     // **특정 파일을 아예 못 여는 이유**가 된다. 못 읽으면 조용히 지금까지의 CM6 경로로 간다.
-    var prepared: ?editor_ops.Prepared = if (kind == .text and self.native_text)
-        editor_ops.preparePath(self, path) catch null
+    var prepared: ?editor_ops.Prepared = if (kind == .text and (self.native_text or require_native))
+        editor_ops.preparePath(self, path) catch |err| if (require_native) return err else null
     else
         null;
     errdefer if (prepared) |*p| p.deinit(self.allocator);

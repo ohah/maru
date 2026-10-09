@@ -4326,6 +4326,50 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     private static let maxPendingStableNotificationRoutes = 8
     private var pendingStableNotificationRoutes: [StableNotificationRoute] = []
     private var stableNotificationRoutingReady = false
+    private var drainingEditorURLs = false
+
+    // AppKit receives the URLs before or after launch. Grammar/queue policy has
+    // one Zig owner; no URLComponents parser or filesystem reads live in Swift.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        _ = application
+        // Bound work as well as retained memory for one OS delivery batch.
+        if urls.count > 32 { fputs("maru: editor URL batch exceeds capacity\n", stderr) }
+        for url in urls.prefix(32) {
+            let raw = url.absoluteString
+            guard raw.utf8.count <= 16 * 1024 else {
+                fputs("maru: editor URL rejected: too long\n", stderr)
+                continue
+            }
+            let status = raw.utf8CString.withUnsafeBufferPointer {
+                maru_macos_editor_url_offer(UnsafeRawPointer($0.baseAddress!).assumingMemoryBound(to: UInt8.self), $0.count - 1)
+            }
+            if status != 0 { fputs("maru: editor URL rejected status=\(status)\n", stderr) }
+        }
+        drainEditorURLs()
+    }
+
+    private func drainEditorURLs() {
+        guard !drainingEditorURLs, !quitConfirmPending, !workspaceFinalQuitApproved,
+              maru_macos_editor_url_pending() != 0 else { return }
+        drainingEditorURLs = true
+        defer { drainingEditorURLs = false }
+        // A finite tick budget keeps bursts from starving rendering. Resolve live
+        // windows each time; never retain a target across restore or window close.
+        for _ in 0..<4 {
+            guard maru_macos_editor_url_pending() != 0 else { break }
+            let surface = windows.first { $0.window?.isKeyWindow == true } ?? primary
+            var admitted = false
+            withSurface(surface) {
+                admitted = surface?.view?.commitMarkedTextIfComposing() ?? false
+            }
+            let result = maru_macos_editor_url_drain(surface?.appSession, admitted ? 1 : 0)
+            if result != 0 {
+                surface?.window?.makeKeyAndOrderFront(nil)
+                if let view = surface?.view { surface?.window?.makeFirstResponder(view) }
+                NSApp.activate(ignoringOtherApps: true)
+            }
+        }
+    }
     private let notificationReleaseScenario: NotificationReleaseAppScenarioConfiguration?
     private var notificationReleaseReceiptOwner: NotificationReleaseScenarioReceiptOwner?
     private var notificationReleaseReceiptSink: NotificationReleaseReceiptSink?
@@ -5262,6 +5306,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // received before this point is safe to consume exactly once through the same product path.
         stableNotificationRoutingReady = true
         drainPendingStableNotificationRoutes()
+        maru_macos_editor_url_ready()
+        drainEditorURLs()
 
         // 표준 메뉴바를 세운다(커맨드 카탈로그에서 액션 항목·단축키를 읽어). smoke에서도 빌드해 구성 경로를
         // CI가 구동한다(메뉴는 OS-global 부수효과가 없어 hotkey 등록과 달리 게이트 불요).
@@ -5516,6 +5562,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     func applicationWillTerminate(_ notification: Notification) {
         _ = notification
+        maru_macos_editor_url_stop()
         terminationStartNs = DispatchTime.now().uptimeNanoseconds
         editorIMESmokeDriver?.restoreInputSource(view: primary?.view)
         _ = restoreSessionHostInputSmokeInputSource()
@@ -7248,6 +7295,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             noteMainTickTiming(startNs: tickStartedNs, reconnectEndNs: tickReconnectEndNs, windowsEndNs: tickWindowsEndNs)
         }
         workspaceCheckpointDrivenThisTick = false
+        drainEditorURLs()
         refreshSessionHostWakeSources()
         let reconnectStartedNs = isSessionHostAutoReconnectSmokeMode ? DispatchTime.now().uptimeNanoseconds : 0
         let reconnectOutcome = maru_macos_reconnect_product_tick()

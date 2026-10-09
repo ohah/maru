@@ -1,0 +1,85 @@
+{
+  "status": "exact_bundle_os_delivery_verified_default_handler_and_visual_pending",
+  "source_sha256": {
+    "src/session/editor_app_url.zig": "dd37fb7e7461fc261ccece9a69486159ae2e045a0bd851c963d0887ed6ee2653",
+    "src/session/editor_app_url_test.zig": "ff664cc5a612421e801e41d87a91e8cab2ac0cc66bbfd76dbbbbeecf1ab2f7ed",
+    "src/platform/macos/editor_app_url.zig": "5692b835f2c5f0300d15edcf87c7718e846312315326a99f50c1d71aa2f9c8e1",
+    "src/platform/macos/app_session/editor/mod.zig": "c6f2f8804f28906899922d22c9670f1d446632319d46da48545033204c93fd31",
+    "src/platform/macos/app_session/pane.zig": "c3d9a2babd9c0e4fa6eea7600c23bcb17b9f297900bdd81dc51db51dc10883cf",
+    "src/platform/macos/MaruAppHost.swift": "ffe19daefc1bb2f5cdaf37640916020556366e1f5d6887a9e876fd4e2b143b37",
+    "src/platform/macos/MaruAppHost-Info.plist.in": "ea3e7fb4ce7cbc72238401c029d702d7e0de1ad3e564d630cbb9a823e3a5fe11",
+    "src/platform/macos/app_host_abi.zig": "be1c8b169cbc1e650c0e39bf99aaaff0ffd207caf499831aa60895edce1820be",
+    "src/platform/macos/app_host_abi.h": "1eda323cfc125ece81fe0772b6bd9e75a46b06368a6a8d84faea79d377d5a148"
+  },
+  "parser_queue": {
+    "Debug": "passed",
+    "ReleaseFast": "passed",
+    "tests": 6,
+    "encoder_cases": 1000,
+    "allocation_failures": "passed"
+  },
+  "native_navigation": {
+    "Debug": "passed",
+    "ReleaseFast": "passed",
+    "product_judges": 3
+  },
+  "swift_typecheck": "passed",
+  "swift_host_effects": "passed",
+  "bundle_build": "passed",
+  "shared_split_regression": "passed",
+  "adversarial": {
+    "hostile_mutations_rejected": 5,
+    "equivalent_controls_passed": 2,
+    "normal_control_rounds_passed": 5
+  },
+  "os_delivery": {
+    "passed": true,
+    "execution": "user macOS GUI terminal; inspected artifacts",
+    "app_sha256": "36f68d24a7566c1217558c9ee6b024349f5b981304b011686966fff4e14a2bfd",
+    "receipt_ids": [
+      1,
+      2,
+      3
+    ],
+    "byte_offsets": [
+      11,
+      5,
+      5
+    ],
+    "same_surface": true,
+    "path_hash_bound": true,
+    "invalid_line_rejected": true,
+    "default_handler_verified": false,
+    "visual_verified": false
+  },
+  "check_boundaries": "passed",
+  "host_mutations": {
+    "rejected": 4,
+    "normal_control": "passed",
+    "equivalent_control": "passed"
+  },
+  "app_sha256": "36f68d24a7566c1217558c9ee6b024349f5b981304b011686966fff4e14a2bfd",
+  "additional_adversarial": {
+    "rounds_passed": 3,
+    "policy_mutations_rejected": 15,
+    "host_mutations_rejected": 12,
+    "equivalent_controls_passed": 9,
+    "native_navigation_rounds_passed": 3,
+    "source_unchanged": true,
+    "os_delivery_verified": false
+  },
+  "previous_tool_launch_failure": {
+    "passed": false,
+    "LaunchServices_status": -10827,
+    "direct_process_exit": -6,
+    "executable_and_signature_verified": true,
+    "cause": "Direct process aborted in HIServices application registration during NSApplication initialization, before URL handling. Tool session is Background; sandbox denies system log access. GUI-session launch remains unverified.",
+    "crash_stack": [
+      "___RegisterApplication_block_invoke",
+      "_RegisterApplication",
+      "GetCurrentProcess",
+      "_NSInitializeAppContext",
+      "-[NSApplication init]"
+    ]
+  }
+}

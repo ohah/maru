@@ -17,15 +17,18 @@
 const std = @import("std");
 const max_source_bytes = 16 * 1024 * 1024;
 
-test "IME 조합 확정은 키보드·포인터·메뉴·드롭 네 모달리티가 공유한다" {
+test "IME 조합 확정은 키보드·포인터·메뉴·드롭·외부 URL 경계가 공유한다" {
     const allocator = std.testing.allocator;
     const swift = try readSource(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(swift);
 
-    // 선언 1 + 호출 6(keyEquivalent의 두 직접 dispatch 포함). 이 숫자가 이 게이트의 전부다 — 늘거나 줄면 목록이 바뀐 것이고, 그때 아래 네
+    // 선언 1 + 호출 7(keyEquivalent의 두 직접 dispatch 및 외부 URL 포함). 늘거나 줄면 목록이 바뀐 것이고, 그때 아래
     // 문맥 단언도 함께 갱신해야 한다.
     try std.testing.expectEqual(@as(usize, 1), count(swift, "func commitMarkedTextIfComposing()"));
-    try std.testing.expectEqual(@as(usize, 6), count(swift, "commitMarkedTextIfComposing()") - 1);
+    try std.testing.expectEqual(@as(usize, 7), count(swift, "commitMarkedTextIfComposing()") - 1);
+    // URL's actual host body is also executed against scoped admission stubs by
+    // tools/test-editor-app-url-host.py; this inventory is not its effect oracle.
+    try std.testing.expect(callsWithin(swift, "private func drainEditorURLs()", "maru_macos_editor_url_drain("));
 
     // 네 모달리티 각각이 **자기 함수 안에서** 부르는지 본다. 총 개수만 세면 한 경로에서 두 번 부르고
     // 다른 경로가 빠진 상태도 통과한다.

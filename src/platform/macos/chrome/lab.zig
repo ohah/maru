@@ -1863,19 +1863,23 @@ fn buildConfirmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: 
         state.show(maru.i18n.t(.term_paste_confirm), .{ .confirm = maru.i18n.t(.btn_paste), .cancel = maru.i18n.t(.common_cancel) });
         state.body = &.{ "cd ~/work/maru", "git fetch origin", "git rebase origin/main", "zig build test", "echo done", "ls -la", "exit" };
     } else if (scenario.id == .confirm_lsp_trust or scenario.id == .confirm_lsp_trust_narrow) {
-        // 제품 `editor/lsp.zig` `gateTrust`·`setTrustSheetNotes` 와 같은 키·같은 자리다(질문 + 안내 다섯 줄, 경로 줄은 가운데를 줄인다).
+        // 제품 `editor/lsp.zig` `gateTrust`·`setTrustSheetNotes` 와 같은 키·같은 자리다(질문 + 안내 여섯 줄 — 넷째는 실행 파일의 출처 경고, 다섯째는
+        // 실행 파일 경로(WT5a), 경로 두 줄은 가운데를 줄인다).
         var msg_buf: [512]u8 = undefined;
         const message = try arena.dupe(u8, maru.i18n.format(&msg_buf, maru.i18n.t(.lsp_trust_prompt), &.{.{ .s = "rust-analyzer" }}));
         state.show(message, .{ .confirm = maru.i18n.t(.lsp_trust_allow), .cancel = maru.i18n.t(.lsp_trust_deny) });
         state.guardAsync(maru.i18n.t(.lsp_trust_recheck)); // 제품과 같은 보호 — 거부 포커스·표식 없음
         var root_buf: [256]u8 = undefined;
         const root_line = try arena.dupe(u8, maru.i18n.format(&root_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = "~/Documents/workspace/maru/.claude/worktrees/lsp-trust-sheet" }}));
-        const notes = try arena.alloc(chrome.components.confirm.Note, 5);
+        const notes = try arena.alloc(chrome.components.confirm.Note, 6);
         notes[0] = .{ .text = maru.i18n.t(.lsp_trust_note_privileges) };
         notes[1] = .{ .text = maru.i18n.t(.lsp_trust_note_build) };
         notes[2] = .{ .text = maru.i18n.t(.lsp_trust_note_scope) };
-        notes[3] = .{ .text = maru.i18n.t(.lsp_trust_note_shim) };
-        notes[4] = .{ .text = root_line, .fit = .path };
+        var origin_buf: [256]u8 = undefined;
+        notes[3] = .{ .text = try arena.dupe(u8, maru.i18n.format(&origin_buf, maru.i18n.t(.lsp_trust_note_exe_shim), &.{.{ .s = "rustup" }})) };
+        var exe_buf: [256]u8 = undefined;
+        notes[4] = .{ .text = try arena.dupe(u8, maru.i18n.format(&exe_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = "~/.cargo/bin/rust-analyzer" }})), .fit = .path };
+        notes[5] = .{ .text = root_line, .fit = .path };
         state.notes = notes;
     } else {
         // 제품 브라우저 권한 동의문(`app_host_abi.zig` `grantPromptText`)과 같은 키·같은 버튼이다. URL 은 제품이 줄이는 폭 안의 길이다.

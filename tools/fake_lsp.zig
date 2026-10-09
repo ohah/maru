@@ -1,7 +1,10 @@
 //! 가짜 언어 서버(docs/editor-surface-tooling.md §8.2a 관측점) — 판정자가 `MARU_LSP_SERVER_OVERRIDE` 로 끼운다.
 //!
 //! stdin 에서 Content-Length 프레임을 읽고:
-//! - `initialize` → 응답(제안된 인코딩에 utf-8 이 있으면 `positionEncoding: "utf-8"`, `MARU_FAKE_LSP_UTF16=1` 이면 utf-16; textDocumentSync Full).
+//! - `initialize` → 응답(제안된 인코딩에 utf-8 이 있으면 `positionEncoding: "utf-8"`, `MARU_FAKE_LSP_UTF16=1` 이면 utf-16; textDocumentSync Full;
+//!   `serverInfo {maru-fake-lsp, 9.8.7}` — `MARU_FAKE_LSP_NOSERVERINFO=1` 이면 null).
+//!   `MARU_FAKE_LSP_SERVERINFO_NAME`·`_VERSION` 은 그 이름·버전을 바꾼다(서버가 보낸 문자열을 클라이언트가 거르는지 잰다 — `_VERSION=` 빈 값이면
+//!   버전 없이 이름만).
 //! - `initialized` → 서버 → 클라이언트 요청 `workspace/configuration` 하나(클라이언트가 **거부**해야 한다). 그 응답(id `srv-1`,
 //!   result 든 error 든)이 오면 `answered` — 안 온 채 didChange 를 받으면 WARN 진단의 message 가 `fake: warn noack` 이 된다
 //!   (답이 없으면 실서버는 그 요청에 **영원히 매달린다** — 카운터가 아니라 서버 쪽에서 봐야 변이 B7 이 죽는다).
@@ -1386,10 +1389,18 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         // `MARU_FAKE_LSP_UTF16=1` 이면 제안과 무관하게 utf-16 을 고른다 — 클라이언트의 byte ↔ character 변환을 제품 경계에서 재는 데 쓴다.
         const force_utf16 = std.c.getenv("MARU_FAKE_LSP_UTF16") != null;
         negotiated_utf16 = !(utf8 and !force_utf16); // 협상 결과를 기억한다 — 자리를 읽고 내는 처리기가 같은 단위를 쓴다
+        // `serverInfo`(LSP 3.15 선택 필드) — 클라이언트가 이름·버전을 보이는지 잰다(계획 workspace-trust WT5a). `MARU_FAKE_LSP_NOSERVERINFO=1`
+        // 이면 싣지 않는다(없는 서버).
+        const ServerInfo = struct { name: []const u8, version: ?[]const u8 };
+        const server_info: ?ServerInfo = if (std.c.getenv("MARU_FAKE_LSP_NOSERVERINFO") != null) null else .{
+            .name = if (std.c.getenv("MARU_FAKE_LSP_SERVERINFO_NAME")) |v| std.mem.span(v) else "maru-fake-lsp",
+            .version = if (std.c.getenv("MARU_FAKE_LSP_SERVERINFO_VERSION")) |v| (if (v[0] == 0) null else std.mem.span(v)) else "9.8.7",
+        };
         sendJson(allocator, .{
             .jsonrpc = "2.0",
             .id = id.?,
             .result = .{
+                .serverInfo = server_info,
                 .capabilities = .{
                     .positionEncoding = if (utf8 and !force_utf16) "utf-8" else "utf-16",
                     // 저장 통지(§8.2k) — 객체 꼴로 `save{includeText: true}`(본문을 실어 오게 — 가짜가 didChange 본문과 대조한다).

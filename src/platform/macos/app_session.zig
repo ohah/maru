@@ -11326,6 +11326,7 @@ pub const AppSession = struct {
             .lsp_trusted_repositories => editor_ops.trust_ui.open(self),
             .lsp_revoke_trust => editor_ops.lsp_client.manageCurrent(self, .revoke),
             .lsp_reload_shell_environment => editor_ops.lsp_client.reloadShellEnvironment(self),
+            .lsp_show_server_info => editor_ops.lsp_client.showServerInfo(self),
             .lsp_forget_trust => editor_ops.lsp_client.manageCurrent(self, .forget),
             .show_editor_outline => if (!self.tabsBlocked()) dock_ops.openDockTo(self, .outline),
             .open_file_panel => file_panel_ops.requestFilePanelPick(self),

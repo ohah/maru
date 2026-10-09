@@ -302,7 +302,7 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // take_show_downloads_request(`show_downloads` 액션).
 // 213: W6m② — osr_datalist_state·item·shown·hover·pick(제안 목록을 칸 아래 네이티브 창으로 — Zig 가 목록·강조를 쥐고 Swift 가
 // 띄운 세대를 알린다), osr_datalist_key(띄운 목록이 ↑↓·Enter·Esc 를 먹는다).
-pub const abi_version: u32 = 215;
+pub const abi_version: u32 = 216;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,

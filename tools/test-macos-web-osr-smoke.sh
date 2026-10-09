@@ -1957,6 +1957,66 @@ case "$part_after_restart" in *maru-part*) fail "the next launch did not remove 
 [ "$journal_after" = 0 ] || fail "the part journal was not emptied after cleaning ($journal_after bytes — 정리 뒤 기록은 없거나 비어 있어야 한다)"
 echo "PASS part files left by a killed app and sidecar are gone after the next launch — maru removes its journaled placeholder, Chromium its data sibling — and the journal is emptied"
 
+# ── W10e: 마지막 셸이 끝나도 받는 중이면 백그라운드 ─────────────────────────────────────────────────────────────
+# 받는 중인 웹 탭을 닫고(주차) 마지막 셸이 끝나면(이 스모크의 session host 가 띄운 시험 셸만 끝낸다 — 앱이 앞에 없는 스모크에서는
+# 터미널 키 입력이 셸에 닿지 않을 때가 있었다)
+# 창은 닫히지만(숨긴다) 앱은 다 받을 때까지 남고, 다 받으면 원래 종료 길로 스스로 끝난다(사용자 결정 2026-10-09). 전에는 확인 없이
+# 곧바로 끝나 받던 것이 취소됐다. 시험 시간(60 초)보다 일찍 끝나야 한다. 종료 코드 86(session host `proof_loss`)은 이 PR 전부터
+# 있다 — 다운로드 없이도 웹 탭을 닫고 마지막 셸을 끝내면 base 에서도 그렇게 끝난다(W10e 착수 중 실측) — 실패가 아니라 알림으로 둔다.
+printf 'ui.language = ko\n' > "$root/keepalive.conf"
+cat > "$root/dlkeep.txt" <<'SCRIPT'
+sleep 7000
+mouse 1 0 0 338 302 0
+mouse 3 0 0 338 302 0
+sleep 1500
+key 13 U+77 U+77 32
+sleep 700
+key 36 U+D
+sleep 50000
+SCRIPT
+: > "$root/requests.log"
+rm -rf "$root/home" && mkdir -p "$root/home"
+keep_start=$(date +%s)
+env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+    MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/dlw-app" \
+    MARU_MACOS_APP_SMOKE_MS=60000 MARU_APP_SUMMARY_PATH="$root/dlkeep.summary" MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel \
+    MARU_WEB_OSR_TEST_INPUT="$root/dlkeep.txt" MARU_CONFIG="$root/keepalive.conf" "$app" > "$root/app-dlw-app.log" 2>&1 &
+keep_pid=$!
+sleep 12 # 웹 탭을 닫은 뒤(대본 약 9.2 초) — 받기는 누른 뒤 약 9 초 걸린다
+# 시험 셸의 부모는 이 스모크의 session host(`$root/session-host` — 앱에서 떨어져 나간다)다 — 그 부모의 셸만 끝낸다.
+shell_killed=0
+for spid in $(pgrep -f "Maru app shell" 2>/dev/null); do
+    sppid=$(ps -o ppid= -p "$spid" 2>/dev/null | tr -d ' ')
+    case "$(ps -o command= -p "$sppid" 2>/dev/null)" in *"$root"*) kill -TERM "$spid" 2>/dev/null && shell_killed=1 ;; esac
+done
+[ "$shell_killed" = 1 ] || echo "WARN the test shell to end was not found under this smoke's session host"
+keep_rc=0
+wait "$keep_pid" || keep_rc=$?
+keep_elapsed=$(( $(date +%s) - keep_start ))
+dl_check dlw-app
+grep -ao 'app: \(last window closed — downloads keep the app alive[^(]*\|background downloads finished — terminating\|last window closed — terminating\)' "$root/app-dlw-app.log" > "$root/dlkeep.events" || true
+cat "$root/dlkeep.events"
+[ "$keep_rc" = 86 ] && echo "WARN the app ended with 86 (session host proof_loss) — pre-existing: ending the last shell after closing a web tab does this on the base branch too, without downloads"
+python3 - "$root" "$keep_elapsed" "$keep_rc" <<'PY' || fail "the app did not stay in the background until the download finished"
+import sys, os
+root, elapsed, rc = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+ok = True
+def check(c, m):
+    global ok
+    ok = ok and c
+    print(('PASS ' if c else 'FAIL ') + m)
+ev = [l.strip() for l in open(os.path.join(root, 'dlkeep.events')) if l.strip()]
+path = os.path.join(root, 'home', 'Downloads', 'big.zip')
+size = os.path.getsize(path) if os.path.exists(path) else -1
+q = os.popen(f"xattr -p com.apple.quarantine '{path}' 2>/dev/null").read()[:4]
+keep = [i for i, e in enumerate(ev) if 'downloads keep the app alive' in e]
+done = [i for i, e in enumerate(ev) if 'background downloads finished' in e]
+check(bool(keep), f'when the last shell ended the window closed (hidden) but the app stayed ({ev})')
+check(size == 30 * 104858 and q == '0281', f'the download finished in the background ({size} bytes · {q!r})')
+check(bool(done) and keep and done[0] > keep[0] and elapsed < 55 and rc in (0, 86), f'then the app quit on its own, before the 60 s smoke time ({elapsed} s · exit {rc})')
+sys.exit(0 if ok else 1)
+PY
+
 # ── W6k: 대화상자가 떠 있을 때의 종료 ─────────────────────────────────────────────────────────────────────────
 # 페이지 대화상자 sheet 가 떠 있으면 AppKit 이 종료를 진행하지 않았다(시험 모드의 끝도 — 앱이 끝나지 않았다). 종료를 고르면 maru 가 그
 # sheet 를 취소로 닫는다(사용자 결정 2026-10-06). alert 를 띄운 채 시험 시간이 끝나도 앱이 제때 끝나야 한다 — 끝나지 않으면 감시가

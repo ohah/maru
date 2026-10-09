@@ -1344,6 +1344,16 @@ pub fn unfinishedFor(browser: u64) usize {
     return activeCount(browser);
 }
 
+/// 앱을 남겨 둘 다운로드 수(W10e — 마지막 셸이 끝나도 창만 닫고 다 받을 때까지 남는다). 받는 중·준비 중·옮기는 중만 —
+/// 보류·묻는 중(사용자가 정해야 한다)·중단(Chromium 이 다시 받지 않으면 끝없이 남는다)은 세지 않는다.
+pub fn keepAliveCount() usize {
+    var n: usize = 0;
+    for (entries.items) |e| {
+        if (e.finalizing or e.state == .active or e.state == .preparing) n += 1;
+    }
+    return n;
+}
+
 /// 종료하면 멈출 다운로드 수(W10c — 종료 확인에 적는다). 보류는 뺀다 — 사용자가 받기로 한 적이 없다(목록에 「보류」로 보인다).
 pub fn quitWarningCount() usize {
     var n: usize = 0;
@@ -1894,6 +1904,22 @@ test "turning ask off puts unclaimed asking rows on hold and leaves a panel bein
     try std.testing.expectEqual(State.asking, entryOfKey(1).?.state);
     try std.testing.expectEqual(@as(i64, 0), entryOfKey(1).?.ask_since_ms);
     try std.testing.expect(!entryOfKey(1).?.ask_nudged);
+}
+
+test "the app stays in the background only for downloads that are moving, not for held, asking, or interrupted ones (W10e)" {
+    resetForTest();
+    defer resetForTest();
+    try entries.append(allocator(), rowForTest(1, 1, .held));
+    try entries.append(allocator(), rowForTest(2, 2, .asking));
+    try entries.append(allocator(), rowForTest(3, 3, .interrupted));
+    try entries.append(allocator(), rowForTest(4, 4, .done));
+    try std.testing.expectEqual(@as(usize, 0), keepAliveCount());
+    try entries.append(allocator(), rowForTest(5, 5, .active));
+    try entries.append(allocator(), rowForTest(6, 6, .preparing));
+    var moving = rowForTest(7, 7, .active);
+    moving.finalizing = true;
+    try entries.append(allocator(), moving);
+    try std.testing.expectEqual(@as(usize, 3), keepAliveCount());
 }
 
 test "quit warns about downloads the user started but not about held ones, and counts a tab's unfinished rows (W10c)" {

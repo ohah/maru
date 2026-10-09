@@ -174,7 +174,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 215), abi_version);
+    try std.testing.expectEqual(@as(u32, 216), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -5261,6 +5261,16 @@ pub export fn maru_macos_downloads_text(kind: u32) [*:0]const u8 {
 /// 받는 중(끝나지 않은) 다운로드 수.
 pub export fn maru_macos_downloads_active() u32 {
     return @intCast(session_mod.web_downloads.activeTotal());
+}
+
+/// v216(W10e): 앱을 남겨 둘 다운로드 수 — 받는 중·준비 중·옮기는 중(보류·묻는 중·중단은 세지 않는다 — 끝없이 남지 않게).
+pub export fn maru_macos_downloads_keep_alive() u32 {
+    return @intCast(session_mod.web_downloads.keepAliveCount());
+}
+
+/// v216(W10e): 창이 하나도 없는 동안 sidecar 파이프를 비우고 다운로드를 진행한다(창의 tick 이 하던 일 — `web_osr.pump`).
+pub export fn maru_macos_web_osr_detached_pump() void {
+    session_mod.web_osr.detachedPump();
 }
 
 /// v215(W10b): 저장할 곳을 물을 다운로드 — 이름(다듬은 제안 이름)·처음 열 폴더·저장 창 안내(Zig 문장).

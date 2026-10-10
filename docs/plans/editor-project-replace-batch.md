@@ -1,6 +1,6 @@
 # 프로젝트 바꾸기 — 여러 파일 적용 S4c
 
-상태: 중립 선택 명세와 전체 Plan 준비 구현. 열린 모델 actor·파일별 CAS 자동 저장 API를 구현했다. worker·배치 UI·닫힌 파일 로드는 미착수다.
+상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. 검색 UI의 snapshot 수집·worker 시작·결과 적용 연결과 닫힌 파일 로드는 미착수다.
 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo는 [연결 이력 계획](editor-history-transaction.md)이 소유한다.
 [S4a/S4b](editor-project-replace-apply.md)는 단일 파일 적용까지 구현됐다.
 
@@ -103,7 +103,27 @@ watcher에 아직 나타나지 않은 root 교체는 실제 디렉터리의 devi
 Term을 활성화하거나 선택 없는 뷰에 편집 전에 커서를 게시하지 않는다. 공유 뷰 게시와
 커서 매핑은 기존 Publication을 재사용한다. 작업 결과와 Undo는 메모리 수명이며 영속하지 않는다.
 
-## 후속 worker·제품 연결 — 미착수
+## 불변 snapshot worker API — 구현
+
+`platform/macos/app_session/editor/search/batch/worker.zig::Job.start`는 동결 명세,
+각 대상의 source 신원과 불변 buffer snapshot, 준비 시작 Ticket을 받는다.
+신원·개수·조합·총 입력/파일별 크기를 검사하고 성공할 때만 명세와 snapshot 배열을 소유한다.
+실패한 시작의 자원은 caller가 해제한다. worker는 Term/AppSession 포인터를 받지 않으며
+원래 Buffer가 종료돼도 snapshot에서 원문을 읽어 기존 `Prepared.prepare`로 전체 Plan을 만든다.
+이 API만으로 현재 문서의 신원이 검증됐다고 판단하지 않는다. actor의 최종 재검증은 그대로다.
+
+caller 참조와 detached thread 참조는 별개다. caller 종료는 취소하고 자기 참조만 해제한다.
+worker 완료는 snapshot을 해제한 뒤 release/acquire로 게시한다. `Job.take`는 완료한
+명세·Plan·원래 Ticket을 한 번만 옮기며, 완료 뒤 취소해도 준비 결과를 반환하지 않는다.
+`Ready`는 UI와 별개로 actor 호출과 저장 정산이 끝날 때까지 caller가 보존해야 한다.
+마지막 파일의 준비 실패는 앞 Plan까지 폐기하며 모든 결과 슬롯은 pending 그대로다.
+
+worker와 snapshot의 allocator는 스레드 안전해야 하고 마지막 참조 해제까지 살아 있어야 한다.
+worker 카운터는 마지막 자원 해제가 끝난 뒤 감소하며 기존 미리보기의 종료 대기 집계에 포함한다.
+기존 bounded shutdown 정책을 무한 대기로 바꾸지 않는다. UI의 job 보관·취소 연결은 후속이다.
+이 단계는 제품 버튼이나 검색 UI에서 worker를 호출하지 않는다.
+
+## 후속 제품 연결 — 미착수
 
 - 완료 검색의 선택을 root capability로 해석하고 신원 있는 모델 snapshot을 worker에 전달한다.
   worker는 Term 포인터를 빌리지 않는다. 취소/종료와 detached worker 완료 수명을 따로 정산한다.
@@ -138,6 +158,13 @@ Term을 활성화하거나 선택 없는 뷰에 편집 전에 커서를 게시�
 - `python3 tools/test-editor-replace-batch-apply-adversarial.py`: 격리 source에 원문 검증 제거·입력
   변경 무시·실제 root 검사 생략·첫 저장 실패 후 중단·no-op 저장·선택 없는 Undo 거절 결함을 넣어 실제 host 판정으로 검출한다.
   정상·등가·복원 대조와 source hash를 보존하며 결함마다 별도 캐시를 쓴다.
+- `mise exec -- zig build test-editor-project-replace-batch-worker` (Debug/ReleaseFast):
+  원본 Buffer 종료 뒤 두 snapshot의 전체 Plan·시작 Ticket 보존, 결과 단회 이동,
+  완료 뒤 취소·caller 조기 종료, 시작 거절 시 caller 소유권, 모든 caller/worker 준비 할당 실패,
+  마지막 원문 충돌 시 앞 Plan 폐기를 검사한다. OS의 thread spawn 실패는 직접 주입하지 않는다.
+- `python3 tools/test-editor-replace-batch-worker-adversarial.py`: 완료 뒤 취소 무시·시작 Ticket
+  신원 무시·모델 신원 무시·입력 예산 무시·Ticket stamp 유실 결함과 정상/등가/복원 대조를 검사한다.
+  격리 source·결함별 cache·source hash·로그를 보존한다. UI/실제 OS 입력 검증은 아니다.
 - 제품 UI 연결 뒤에도 실제 버튼 진입·늦은 worker·선택 수명, 저장 실패 표시를 확인해야 한다.
   저장/연결 Undo, 마지막 대상 충돌 시 전부 불변, 저장 실패 후 dirty/Undo,
   focus/공유 선택·취소/IME/root·닫기/늦은 worker, OOM과 결과 게시 실패를 실제 경로에서 검증해야 한다.

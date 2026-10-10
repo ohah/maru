@@ -4177,6 +4177,13 @@ actor 편집·자동 저장·선택/진행 UI·디스크 적용은 이 gate에 �
 반영/저장/연결 Undo, model 원문 충돌 시 전부 보존, 입력/root/IME, 첫/마지막 저장 실패의
 dirty/Undo와 다음 저장, no-op/단일 유효 편집, 공유 뷰/focus, 모든 actor 예약 실패,
 선택 밖 동일 경로 점유·닫기·disk source 거절, 선택 없는 일반 Undo의 초기 커서 OOM, cached capability만으로 놓치던 실제 root 교체를 검사한다.
-UI에서 호출되지 않는 API이므로 배치 제품 버튼·worker·물리 IME 완료는 아니다.
+UI에서 호출되지 않는 API이므로 배치 제품 버튼·worker 연결·물리 IME 완료는 아니다.
 watcher/model에 아직 반영되지 않은 디스크 변경은 파일별 CAS 저장 실패로 결산하며
 디스크 별칭/점유·비활성 로드와 UI 결과 표시가 [배치 계획](plans/editor-project-replace-batch.md)의 후속이다.
+
+`test-editor-project-replace-batch-worker`의 `RPBW1`~`RPBW6`와 초기 import 판정자 하나는
+불변 snapshot 두 개의 준비·Buffer 종료·시작 Ticket 보존·결과 단회 이동, 완료 뒤 취소,
+caller 조기 종료와 detached worker 완료 해제, 신원/예산/disk 거절의 caller 소유권,
+모든 준비 할당 실패와 마지막 원문 충돌 시 전체 Plan 폐기를 검사한다.
+결함 주입 도구는 취소·Ticket·모델 신원·예산 보호가 빠지면 판정이 실제 실패하는지 검사한다.
+실제 UI 호출/취소·actor 적용 연결, 물리 IME·OS thread spawn 실패 주입은 별도 문턱이다.

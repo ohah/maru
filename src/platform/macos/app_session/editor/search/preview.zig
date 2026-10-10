@@ -34,7 +34,7 @@ const Input = struct {
 };
 var workers = std.atomic.Value(usize).init(0);
 pub fn outstandingWorkers() usize {
-    return workers.load(.acquire) + disk_apply.outstandingWorkers();
+    return workers.load(.acquire) + disk_apply.outstandingWorkers() + @import("batch/worker.zig").outstandingWorkers();
 }
 const Job = struct {
     a: std.mem.Allocator,

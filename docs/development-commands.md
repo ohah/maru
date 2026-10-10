@@ -1336,5 +1336,15 @@ mise exec -- zig build test-editor-project-replace-batch-apply -Doptimize=Releas
 python3 tools/test-editor-replace-batch-apply-adversarial.py
 ```
 
-이 게이트는 실제 AppSession API를 검증한다. 제품 배치 버튼·worker·닫힌 파일 로드는
+이 게이트는 실제 AppSession API를 검증한다. 제품 배치 버튼·worker 연결·닫힌 파일 로드는
 [배치 계획](plans/editor-project-replace-batch.md)의 후속 단계이며 GUI 완료를 의미하지 않는다.
+
+불변 snapshot 배치 worker의 소유권·완료 뒤 취소·caller 조기 종료·전체 준비 실패 판정:
+
+```sh
+mise exec -- zig build test-editor-project-replace-batch-worker
+mise exec -- zig build test-editor-project-replace-batch-worker -Doptimize=ReleaseFast
+python3 tools/test-editor-replace-batch-worker-adversarial.py
+```
+
+worker API만 검사하며 실제 검색 UI의 시작/적용·물리 IME·OS thread spawn 실패 주입은 포함하지 않는다.

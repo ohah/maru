@@ -85,6 +85,9 @@ pub const diagnostics = @import("diagnostics.zig");
 pub const lsp_client = @import("lsp.zig");
 const trust_store = @import("trust_store.zig");
 const git_ops = @import("../git.zig"); // 신뢰 세대 펌프(계획 workspace-trust WT6b-1a)
+const scm_dock_ops = @import("../scm_dock.zig"); // 도크 신뢰 줄(계획 workspace-trust WT6b-2a)
+const scm_dock_dock_ops = @import("../dock.zig"); // 도크 신뢰 줄 판정자 — 도크 기하·열림(계획 workspace-trust WT6b-2a)
+const git_backend_for_test = @import("../../git_backend.zig");
 const tool_env = @import("../../tool_env.zig");
 /// 호버 박스(tooling §8.2b) — 진단 메시지 + 언어 서버 hover.
 pub const hover_client = @import("hover.zig");
@@ -15050,6 +15053,351 @@ test "WT6b-1a git 읽기의 신뢰 판정은 언어 서버와 같은 표다(허�
     fx.session.git_repo_dest = @constCast("user@host");
     defer fx.session.git_repo_dest = saved_dest;
     try testing.expectEqualStrings(maru.i18n.t(.scm_partial_clone_remote), git_ops.partialCloneNotice(fx.session));
+}
+
+test "WT6b-2a 도크 신뢰 줄 — 신뢰 전 로컬 저장소는 맨 위에 누를 수 있는 줄이 서고, 누르거나 팔레트로 같은 신뢰 시트가 뜨며(취소는 기억하지 않는다), 허용하면 줄이 사라진다; 원격·묻지 않는 root 는 진술만 한다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    scm_dock_ops.test_trust_line = true;
+    defer scm_dock_ops.test_trust_line = false;
+    try fx.dir.dir.createDirPath(testing.io, ".git");
+    // 표에 다른 저장소의 결정을 미리 둔다 — 첫 판정이 표를 읽으며 세대를 올리게 한다(캐시가 읽은 **뒤의** 세대로 적히는지 재려면 읽기가
+    // 세대를 바꿔야 한다).
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    try fx.dir.dir.createDirPath(testing.io, "other");
+    var other_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    var okb: [std.fs.max_path_bytes]u8 = undefined;
+    const other_key = trust_store.keyFor(try std.fmt.bufPrint(&other_buf, "{s}/other", .{root}), &okb) orelse return error.TrustKeyMissing;
+    var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "state/" ++ trust_store.file_name, .data = maru.session.editor.lsp.trust.line(.allow, other_key, &line_buf).? });
+    const gen_before_load = trust_store.generation();
+    fx.session.git_result = .{ .status = try git_backend_for_test.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    git_ops.rememberGitRepo(fx.session, root);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const Probe = struct {
+        fn first(session: *AppSession, arena: std.mem.Allocator) !?maru.chrome.components.scm_dock.types.TrustNoticeItem {
+            const projection = scm_dock_ops.projectTabForTest(session, arena) orelse return error.NoProjection;
+            if (projection.items.len == 0) return null;
+            return switch (projection.items[0]) {
+                .trust_notice => |line| line,
+                else => null,
+            };
+        }
+        /// 그려진 첫 줄(신뢰 줄)을 **실제로 누른다** — 발행한 tree 의 rect 를 포인터로 눌러 나온 인텐트를 제품과 같은 함수로 디스패치한다.
+        fn clickFirst(session: *AppSession, arena: std.mem.Allocator) !void {
+            const sd = maru.chrome.components.scm_dock;
+            const projection = scm_dock_ops.project(session, arena) orelse return error.NoProjection;
+            const props = scm_dock_ops.testProps(session, projection);
+            const sizes = sd.build.bufferSizes(props.items);
+            const frame = try sd.build.build(props, .{
+                .nodes = try arena.alloc(maru.chrome.ui.tree.UiNode, sizes.nodes),
+                .entries = try arena.alloc(maru.chrome.ui.tree.RectEntry, sizes.entries),
+                .layout_items = try arena.alloc(maru.chrome.ui.layout.Item, sizes.layout_items),
+                .flex_scratch = try arena.alloc(maru.chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+                .child_rects = try arena.alloc(maru.chrome.ui.layout.UiRect, sizes.child_rects),
+                .actions = try arena.alloc(sd.ids.Entry, sizes.actions),
+            });
+            scm_dock_ops.publishScmDockFrame(session, frame, props.items);
+            const content = scm_dock_dock_ops.dockGeometry(session).tree_content;
+            var rect: ?maru.chrome.ui.layout.UiRect = null;
+            for (session.scm_dock_entries.items) |e| if (e.id == sd.build.NodeIds.item(0)) {
+                rect = e.rect;
+            };
+            const r = rect orelse return error.MissingTrustRow;
+            const x = @as(f64, @floatFromInt(content.x)) + r.x + r.width / 2;
+            const y = @as(f64, @floatFromInt(content.y)) + r.y + r.height / 2;
+            _ = scm_dock_ops.scmDockPointer(session, .down, x, y);
+            const intent = scm_dock_ops.scmDockPointer(session, .up, x, y) orelse return error.NoIntent;
+            scm_dock_ops.applyScmDockIntentAt(session, intent, x, y);
+        }
+    };
+    const notice = &fx.session.chrome_host.notice;
+
+    // ⑴ 신뢰 전 — 맨 위에 누를 수 있는 줄.
+    const line = (try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing;
+    try testing.expect(line.actionable);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_line), line.text);
+    // 판정은 프레임마다 풀지 않는다 — 표를 읽은 **뒤의** 세대·지금의 목록 세대로 적고, 키가 같으면 그 답을 쓴다. 새 목록이면 다시
+    // 푼다(경로 문자열만 보면 심링크가 다른 곳을 가리키게 된 뒤에도 줄이 옛 판정을 말했다 — 적대적 검증 2회차). diff 같은 다른 git
+    // 요청은 다시 풀게 하지 않는다(요청 번호를 키로 두면 프레임마다 풀었다 — 3회차).
+    const cached = fx.session.scm_trust_cache orelse return error.TrustCacheMissing;
+    try testing.expect(trust_store.generation() != gen_before_load); // 판정이 표를 읽었다
+    try testing.expectEqual(trust_store.generation(), cached.generation);
+    try testing.expectEqual(fx.session.scm_dock_snapshot_generation, cached.list_generation);
+    fx.session.scm_trust_cache.?.state = .refused; // 같은 키면 이 (심은) 답이 그대로 나온다
+    try testing.expect(!((try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing).actionable);
+    fx.session.git_request_seq += 1; // 다른 git 요청(diff 등) — 다시 풀지 않는다
+    try testing.expect(!((try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing).actionable);
+    git_ops.bumpScmDockGeneration(fx.session); // 새 목록 — 다시 푼다
+    try testing.expect(((try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing).actionable);
+
+    // ⑵ 누르면 — **그려진 줄을 실제로 누른다**(행 → 인텐트 → 디스패치가 이어지는지; 인텐트를 직접 부르면 그 사이가 빈다 — 적대적 검증
+    // 2회차) — 언어 서버와 같은 신뢰 시트. 취소(Esc)는 「거부」로 기억하지 않는다(그 저장소의 언어 서버가 묻지도 않고 「거부됨」이 되지
+    // 않게).
+    _ = try fx.session.resize(fx.session.sidebar_width_px + 800, 600, fx.session.scale_milli); // 도크 기하가 서야 누를 자리가 있다
+    fx.session.dock_initialized = true;
+    fx.session.dock.presented = true;
+    fx.session.dock.collapsed = false;
+    fx.session.dock.view = .source_control;
+    try Probe.clickFirst(fx.session, arena_state.allocator());
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(fx.session.editor_lsp.asking_scm);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return error.TrustKeyMissing;
+    try testing.expect(trust_store.get(key) == null);
+    try testing.expect(!fx.session.editor_lsp.asking_scm);
+
+    // ⑵′ 원격 — 신뢰를 정할 수 없어(WT7 전) 진술만 하고, 눌러도 시트가 안 뜬다(같은 경로의 로컬은 아직 신뢰 전 — 원격 갈래가 막아야
+    // 시트가 안 뜬다).
+    git_ops.rememberGitRepoDest(fx.session, "user@host");
+    const remote = (try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing;
+    try testing.expect(!remote.actionable);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_line_remote), remote.text);
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_remote_notice), notice.message);
+    git_ops.rememberGitRepoDest(fx.session, null);
+
+    // ⑶ 팔레트 명령도 같은 시트 — 허용(Enter)하면 표에 서고 줄이 사라진다(세대가 바뀌어 다시 판정한다).
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    // 시트의 질문·안내 줄은 저장소 단위다 — 경로가 **맨 앞**(질문이 「이 저장소를…?」뿐이라 경로가 곧 대상이다).
+    const confirm = &fx.session.chrome_host.confirm;
+    try testing.expectEqual(@as(usize, 3), confirm.notes.len);
+    try testing.expectEqual(maru.chrome.components.confirm.Note.Fit.path, confirm.notes[0].fit);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_note_privileges), confirm.notes[1].text);
+    // 키보드 허용은 한 번 더 묻는다(팔레트 Enter 의 반복이 그대로 「신뢰」가 되지 않게) — ← ⏎ 뒤 ⌘⏎.
+    try testing.expect(confirm.focused == .cancel and !confirm.letter_keys);
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expect(confirm.rechecking and trust_store.get(key) == null);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_recheck), confirm.recheck.?);
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    try testing.expect(trust_store.get(key) == .allow);
+    try testing.expect((try Probe.first(fx.session, arena_state.allocator())) == null);
+    // 이미 신뢰했으면 시트 없이 그렇다고 말한다.
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_already), notice.message);
+
+    // ⑸ 묻지 않는 root — 진술만. 제품에서 `git_repo` 는 늘 위로 올라가 찾은 저장소 루트라, 실제로 나는 경우는 **홈 폴더가 저장소**인
+    // 것이다(dotfiles — WT2b). 홈을 그 저장소로 둔다.
+    try fx.dir.dir.createDirPath(testing.io, "home/.git");
+    var home_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const home = try std.fmt.bufPrint(&home_buf, "{s}/home", .{root});
+    var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    var home_z: [std.fs.max_path_bytes + 17]u8 = undefined;
+    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
+    git_ops.rememberGitRepo(fx.session, home);
+    const refused = (try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing;
+    try testing.expect(!refused.actionable);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_line_refused), refused.text);
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_refused_notice), notice.message);
+}
+
+test "WT6b-2a 팔레트 「이 저장소 신뢰…」는 도크가 숨어 있으면 열고 터미널의 저장소를 따라간 뒤 묻는다 — 마지막으로 본 낡은 저장소를 묻지 않고, 저장소 아닌 폴더면 묻지 않는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.createDirPath(testing.io, "stale/.git");
+    var repo_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&repo_buf, "{s}/repo", .{root});
+    var stale_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const stale = try std.fmt.bufPrint(&stale_buf, "{s}/stale", .{root});
+    // 읽기는 띄우지 않는다(대상 판정만 잰다) — 백엔드를 닫힌 채로 둔다.
+    fx.session.git_backend = try git_backend_for_test.Backend.init(fx.session.io);
+    fx.session.git_backend.?.state.?.shutting_down = true;
+    // 활성 Term 을 그 pane 의 터미널로 — 그 cwd 가 따라가기의 답이다.
+    const pane = pane_ops.activePane(fx.session);
+    pane.active_term = for (pane.terms.items, 0..) |t, i| {
+        if (t.kind == .terminal) break i;
+    } else return error.SkipZigTest;
+    const term = pane.activeTerm();
+    const Cwd = struct {
+        fn set(t: *Term, path: []const u8) !void {
+            t.rt.observation.cwd.clearRetainingCapacity();
+            try t.rt.observation.cwd.appendSlice(testing.allocator, path);
+            t.rt.observation.availability = .current;
+        }
+    };
+    try Cwd.set(term, repo);
+    _ = try fx.session.resize(fx.session.sidebar_width_px + 800, 600, fx.session.scale_milli);
+    fx.session.dock_initialized = true;
+    fx.session.dock.presented = false; // 도크는 숨어 있고
+    git_ops.rememberGitRepo(fx.session, stale); // 마지막으로 본 저장소는 터미널이 떠난 곳이다
+
+    // ⑴ 도크를 열고 터미널의 저장소를 따라간 뒤 **그 저장소**를 묻는다(시트 뒤에 그 목록이 선다).
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(scm_dock_dock_ops.dockVisible(fx.session) and fx.session.dock.view == .source_control);
+    try testing.expectEqualStrings(repo, fx.session.git_repo orelse return error.NoRepo);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expectEqualStrings(repo, fx.session.editor_lsp.asking_root orelse return error.NotAsking);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+
+    // ⑴′ 뷰는 이미 소스 컨트롤이고 도크만 숨었으면 열기가 뷰를 안 바꿔 다시 읽지 않는다 — 따라가기가 대상을 고친다.
+    git_ops.rememberGitRepo(fx.session, stale);
+    fx.session.dock.presented = false;
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expectEqualStrings(repo, fx.session.git_repo orelse return error.NoRepo);
+    try testing.expectEqualStrings(repo, fx.session.editor_lsp.asking_root orelse return error.NotAsking);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+
+    // ⑴″ 쓰기가 도는 동안엔 따라가기의 기억이 미뤄진다(읽기 제출이 기억보다 먼저 돌아간다) — `git_repo` 가 옛 저장소로 남아도
+    // **지금 판정한** 저장소를 묻는다(적대적 검증 3회차).
+    git_ops.rememberGitRepo(fx.session, stale);
+    fx.session.scm_write_inflight = 1;
+    fx.session.dock.presented = false;
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expectEqualStrings(stale, fx.session.git_repo orelse return error.NoRepo); // 기억은 미뤄졌다
+    try testing.expectEqualStrings(repo, fx.session.editor_lsp.asking_root orelse return error.NotAsking);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    fx.session.scm_write_inflight = 0;
+
+    // ⑵ 같은 저장소의 시트가 다른 창에 떠 있으면(저장소마다 하나 — `trust_store.claim`) 묻지 않고 그렇다고 말한다. 이 창의 시트가 떠
+    // 있는 동안은 모달이 입력을 막아 다시 고를 수 없으므로, 「떠 있음」이 실제로 나는 자리는 이쪽이다.
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(repo, &kb) orelse return error.TrustKeyMissing;
+    const other_window: usize = 0x5ca1ab1e;
+    try testing.expect(trust_store.claim(key, other_window));
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_busy), fx.session.chrome_host.notice.message);
+    trust_store.release(key, other_window);
+
+    // ⑶ 터미널이 저장소 아닌 폴더에 서 있으면 — 도크가 「저장소가 아닙니다」를 말하는 상태 — 남아 있는 `git_repo` 를 묻지 않는다(테스트
+    // 폴더는 작업 트리 안이라 위로 올라가면 저장소가 잡힌다 — 저장소 밖 폴더로 `/tmp` 를 쓴다; 다른 판정자와 같은 관례).
+    try Cwd.set(term, "/tmp");
+    fx.session.dock.presented = false;
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_no_repo), fx.session.chrome_host.notice.message);
+
+    // ⑷ 활성 pane 이 원격이면 — 목록을 아직 못 읽었어도(`git_repo_dest` 가 없다) — 원격이라고 알리고 묻지 않는다.
+    try Cwd.set(term, repo);
+    try term.rt.observation.ssh_remote_dest.appendSlice(testing.allocator, "user@host");
+    term.rt.observation.ssh_remote_dest_present = true;
+    fx.session.dock.presented = false;
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_remote_notice), fx.session.chrome_host.notice.message);
+    // 같은 상태에서 도크 줄을 누르면 — 로컬 목록이 남아 있어 줄은 누를 수 있게 그려진다 — **그 줄이 말하는 저장소**를 묻는다(다시
+    // 판정하면 「원격」으로 갈려 엉뚱한 거절이 났다 — 적대적 검증 4회차).
+    git_ops.rememberGitRepo(fx.session, repo); // 줄이 말하는 저장소(로컬 목록)
+    scm_dock_ops.applyScmDockIntent(fx.session, .trust_repo);
+    try testing.expectEqualStrings(repo, fx.session.editor_lsp.asking_root orelse return error.NotAsking);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    term.rt.observation.ssh_remote_dest_present = false;
+    term.rt.observation.ssh_remote_dest.clearRetainingCapacity();
+
+    // ⑸ 도크가 없는 minimal 세션(quick terminal)에서는 아무것도 안 한다 — 탭을 허용해도(`minimal_tabs`) 도크는 없다.
+    fx.session.dock.presented = false;
+    fx.session.chrome_minimal = true;
+    fx.session.minimal_tabs = true;
+    defer fx.session.minimal_tabs = false;
+    defer fx.session.chrome_minimal = false;
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expect(!fx.session.dock.presented);
+}
+
+test "WT6b-2a 「필터를 끌 수 없음」 안내는 팔레트 제목을 그대로 앞머리에 든다 — 좁은 도크에서 뒤가 잘려도 신뢰할 길이 먼저 보인다 (계획 workspace-trust)" {
+    // 누를 줄이 없는 상태(읽기가 거절돼 목록이 없다)에서 신뢰할 길은 팔레트뿐이다. 안내가 그 이름을 들고, 그 이름이 팔레트에 보이는 제목과
+    // 같아야 찾을 수 있다(제목이 바뀌면 안내가 조용히 낡는다). 도크 안내는 한 줄이라 뒤가 잘린다 — 이름이 앞에 있어야 보인다(3회차).
+    var title: ?[]const u8 = null;
+    for (app_session_mod.command_catalog.entries) |e| if (e.action == .scm_trust_repository) {
+        title = e.title;
+    };
+    const want = title orelse return error.MissingCommand;
+    const saved = maru.i18n.lang();
+    defer maru.i18n.setLang(saved);
+    inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |l| {
+        maru.i18n.setLang(l);
+        const text = maru.i18n.t(.scm_repo_filters_untrusted);
+        const at = std.mem.indexOf(u8, text, want) orelse return error.TitleMissingFromNotice;
+        try testing.expect(at < 32);
+    }
+}
+
+test "WT6b-2a SCM 시트에 합류한 언어 서버 클라이언트는 그 시트를 취소해도 갇히지 않는다(결정 없음 — 누르면 묻는다); Enter 만으로는 신뢰하지 않고, 다른 시트가 떠 있으면 묻지 않는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    try fx.dir.dir.createDirPath(testing.io, ".git");
+
+    // SCM 이 먼저 묻는다 — 그 사이 언어 서버가 같은 저장소를 물으려다 그 시트에 합류한다(`.asking`).
+    try testing.expectEqual(lsp_client.AskOutcome.asked, lsp_client.askTrustForRepo(fx.session, root));
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.asking, lsp_client.statusFor(fx.session, fx.term).?.phase);
+    // 다른 시트가 떠 있으면 또 묻지 않는다(한 번에 하나).
+    try testing.expectEqual(lsp_client.AskOutcome.busy, lsp_client.askTrustForRepo(fx.session, root));
+    // Enter 만으로는 신뢰하지 않는다(포커스는 취소) — 그 취소는 기억하지 않고, 합류한 클라이언트는 「결정 없음」으로 풀린다.
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return error.TrustKeyMissing;
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expect(trust_store.get(key) == null);
+    try testing.expectEqual(lsp_client.Phase.unasked, lsp_client.statusFor(fx.session, fx.term).?.phase);
+    // 곧바로 다시 묻지 않는다(방금 취소한 시트가 언어 서버 문구로 다시 뜨지 않는다) — 누르면 묻는다.
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    // 언어 서버를 꺼도(`stopAll`) SCM 이 연 시트는 남는다 — 그 질문은 git 읽기의 것이다. 창이 포커스를 잃으면 설정과 무관하게 내려간다
+    // (기억은 안 한다 — 적대적 검증 2회차: 꺼진 설정에서만 시트가 남았다).
+    try testing.expectEqual(lsp_client.AskOutcome.asked, lsp_client.askTrustForRepo(fx.session, root));
+    fx.session.loaded_config.config.lsp.enabled = false;
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_lsp.clients.items.len);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust and fx.session.editor_lsp.asking_scm);
+    fx.session.window_focused = false;
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust and fx.session.editor_lsp.asking_key == null);
+    try testing.expect(trust_store.get(key) == null);
 }
 
 test "LSPB10 상태바 문구는 phase 마다·언어마다 서버 이름을 싣고 원문 자리표시자를 남기지 않는다 (§8.2a)" {

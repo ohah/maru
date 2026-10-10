@@ -7320,6 +7320,9 @@ pub const AppSession = struct {
     /// 마지막으로 본 신뢰 표의 세대(계획 workspace-trust WT6b-1a) — 바뀌면 도크의 git 읽기를 다시 건다(신뢰 전 결과가 신뢰한 뒤에도
     /// 남지 않게, 그 반대도). null 은 아직 git 이 신뢰를 묻지 않았다(다시 읽을 것이 없다) — 첫 판정이 세운다.
     git_trust_generation: ?u64 = null,
+    /// 도크 신뢰 줄의 판정 캐시(계획 workspace-trust WT6b-2a — `scm_dock.scmTrustLine`) — 저장소·신뢰 표 세대·목록 세대가 같으면
+    /// 다시 풀지 않는다.
+    scm_trust_cache: ?struct { repo_hash: u64, generation: u64, list_generation: u64, state: editor_ops.lsp_client.RepoTrustState } = null,
     /// 마지막으로 만든 프레임에서 **목록이 창을 넘쳤나**(그래서 오른쪽에 스크롤바 자리를 비웠나).
     ///
     /// 커밋 상자의 랩 계산이 이 값을 쓴다: 상자는 목록 줄이라 그 자리만큼 좁아지는데, host가 그 조건을
@@ -11335,6 +11338,10 @@ pub const AppSession = struct {
             // 신뢰 관리(계획 WT4) — 목록 피커, 그리고 지금 문서 저장소의 철회·잊기(둘 다 확인 상자를 거친다). 탭을 만들지
             // 않으므로 `tabsBlocked` 게이트를 지나지 않는다(chrome 최소 세션에서도 팔레트에 보이는 대로 먹는다).
             .lsp_trusted_repositories => editor_ops.trust_ui.open(self),
+            // 도크가 없는 minimal 세션(quick terminal)에서는 막는다 — 보이지 않는 도크를 열고 읽기를 걸었다(적대적 검증 3회차). 탭 허용
+            // (`minimal_tabs`)과 무관하게 도크는 늘 없다(`dockVisible` 이 `!chrome_minimal` 을 요구한다) — 그래서 `tabsBlocked` 가 아니라
+            // 이 조건이다(5회차: 탭을 허용한 quick terminal 에서 샜다).
+            .scm_trust_repository => if (!self.chrome_minimal) scm_dock_ops.requestScmTrust(self),
             .lsp_revoke_trust => editor_ops.lsp_client.manageCurrent(self, .revoke),
             .lsp_reload_shell_environment => editor_ops.lsp_client.reloadShellEnvironment(self),
             .lsp_show_server_info => editor_ops.lsp_client.showServerInfo(self),
@@ -77975,6 +77982,8 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
                 .toggle_section, .expand_section, .toggle_repo => {},
                 .select_commit, .select_turn, .load_more_commits, .select_tab => {},
                 .scroll_thumb, .scroll_track => {},
+                // 원격에선 **누를 수 없다** — 원격은 신뢰를 정할 수 없어(WT7 전) 신뢰 줄이 진술만 한다(계획 workspace-trust WT6b-2a).
+                .trust_repo => {},
             }
         }
     }.call;

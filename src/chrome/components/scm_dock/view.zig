@@ -171,6 +171,10 @@ pub fn drawBufferSizes(props: types.Props, entry_count: usize) struct { ops: usi
             text_ops += 1;
             bytes += text.len;
         },
+        .trust_notice => |trust| {
+            text_ops += 1;
+            bytes += trust.text.len;
+        },
     };
     // 호버 동작 글리프(`+`/`−`)는 한 번에 한 행이다.
     bytes += 4;
@@ -290,6 +294,9 @@ pub fn view(
             .notice => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .muted_fg, .supporting, false),
             // **막힌 이유는 다르다.** 누른 동작이 안 됐다는 말이라 중립 진술과 같은 톤이면 안 읽힌다.
             .blocker => |text| try writer.line(row, @floatFromInt(m.iconColumnX()), text, .danger_text, .supporting, false),
+            // 누를 수 있으면 테마의 시그니처 색(`accent_bar` — 원격 갱신 칩과 같은 이유로 `focus_accent` 가 아니다: rich 토큰셋에선 그쪽이
+            // 흐려 진술 줄보다 어둡게 나왔다 — 첫 캡처에서 실측), 진술이면 중립(눌러도 아무 일 없는 줄이 컨트롤처럼 보이지 않게).
+            .trust_notice => |trust| try writer.line(row, @floatFromInt(m.iconColumnX()), trust.text, if (trust.actionable) .accent_bar else .muted_fg, .supporting, false),
         }
         // 머리 줄의 동작 아이콘 둘(②c). 같은 규율이다 — 히트 사각형은 늘 있고 글리프만 호버를 따른다.
         // 겹침은 여기서 덮어서가 아니라 **`repoRow`가 그 자리의 글자를 안 그려서** 안 난다(그 함수 설명).
@@ -568,7 +575,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .section => |section| section.action,
         .file => |file| file.action,
         // 히스토리 줄에는 행 동작이 없다(고르기뿐이다 — P4).
-        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice, .blocker => .none,
+        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice, .blocker, .trust_notice => .none,
     };
 }
 
@@ -2297,6 +2304,19 @@ test "안내 행은 강조색을 쓰지 않는다(상태 진술이지 컨트롤�
     const draws = try renderFixture(&storage, .{}, &items);
     const text = findText(draws, "잘렸습니다") orelse return error.MissingNotice;
     try testing.expectEqual(tokens.ColorRole.muted_fg, text.role);
+}
+
+test "신뢰 전 줄은 누를 수 있으면 시그니처 색, 진술이면 안내 색이다 — 글자 예산도 그 줄을 센다 (계획 workspace-trust WT6b-2a)" {
+    // 예산(`drawBufferSizes`)이 이 줄을 안 세면 긴 문구가 남는 여유를 넘어 도크가 통째로 빈다 — 두 줄 다 그 여유보다 길게 둔다.
+    const pad = "untrusted - filters, submodules and partial clone are not read here; this list may differ from the files";
+    const items = [_]types.Item{
+        .{ .trust_notice = .{ .text = "ACTIONABLE " ++ pad, .actionable = true } },
+        .{ .trust_notice = .{ .text = "STATEMENT " ++ pad, .actionable = false } },
+    };
+    var storage: TestStorage = .{};
+    const draws = try renderFixture(&storage, .{}, &items);
+    try testing.expectEqual(tokens.ColorRole.accent_bar, (findText(draws, "ACTIONABLE") orelse return error.MissingActionable).role);
+    try testing.expectEqual(tokens.ColorRole.muted_fg, (findText(draws, "STATEMENT") orelse return error.MissingStatement).role);
 }
 
 test "히스토리 커밋 줄은 두 줄이다(제목이 마지막까지 남는다) (P4)" {

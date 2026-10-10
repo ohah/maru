@@ -871,7 +871,7 @@ pub fn main(init: std.process.Init) !void {
         // **고친 뒤에도 그대로** 캡처했다(2026-08-31). `scm_blocker` 도 같은 이유로 빠져 있었다.
         // 갈래를 다 적어 두면 새 시나리오는 컴파일 오류로 드러난다.
         const rect = (switch (scenario_id) {
-            .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
+            .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_small_font, .scm_blocker, .scm_trust, .dock_over_status_bar => chrome.components.scm_dock.build.scrollTextViewport(frame.tree),
             .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => chrome.components.file_tree.build.scrollTextViewport(frame.tree),
             .empty, .loading, .retained_list, .font_specimen, .partial_scroll, .partial_group_scroll, .scrollbar, .sticky_at_rest, .sticky_pinned, .sticky_pushed, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .sort_toggle_hover, .sort_toggle_pressed, .sidebar_status_strip, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .context_menu_checked, .context_menu_send, .context_menu_send_helper, .context_menu_unchecked, .context_menu_bottom_right, .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .suggest_list, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_find, .editor_diagnostics, .editor_diff_selection, .editor_diff, .editor_diff_scrolled, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => chrome.components.session_dock.build.scrollTextViewport(frame.tree),
         }) orelse break :blk null;
@@ -1146,6 +1146,7 @@ fn scenarioFromEnvValue(raw: []const u8) ?lab.ScenarioId {
     if (std.mem.eql(u8, raw, "dock-over-status-bar")) return .dock_over_status_bar;
     if (std.mem.eql(u8, raw, "scm-commit-edit")) return .scm_commit_edit;
     if (std.mem.eql(u8, raw, "scm-blocker")) return .scm_blocker;
+    if (std.mem.eql(u8, raw, "scm-trust")) return .scm_trust;
     if (std.mem.eql(u8, raw, "file-tree-rows")) return .file_tree_rows;
     if (std.mem.eql(u8, raw, "file-tree-row-hover")) return .file_tree_row_hover;
     if (std.mem.eql(u8, raw, "file-tree-scrolled")) return .file_tree_scrolled;
@@ -1183,6 +1184,7 @@ fn artifactName(id: lab.ScenarioId) []const u8 {
         .dock_over_status_bar => "dock-over-status-bar",
         .scm_commit_edit => "scm-commit-edit",
         .scm_blocker => "scm-blocker",
+        .scm_trust => "scm-trust",
         .file_tree_rows => "file-tree-rows",
         .file_tree_row_hover => "file-tree-row-hover",
         .file_tree_scrolled => "file-tree-scrolled",

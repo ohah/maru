@@ -21,6 +21,7 @@ const metal_frame = app_session_mod.metal_frame;
 const terminal = maru.terminal; // Page/Home/End 키 이벤트 타입
 const dock_ops = @import("dock.zig");
 const git_ops = @import("git.zig");
+const lsp_client = @import("editor/lsp.zig"); // 도크 저장소의 신뢰 상태·묻기(계획 workspace-trust WT6b-2a)
 const turn_ring_persist = @import("turn_ring_persist.zig"); // AT7: 링이 바뀌면 디스크도
 const agent_ops = @import("agent.zig");
 const scroll_ops = @import("scroll.zig"); // 목록 스크롤 상한(스크롤바 기하의 max_offset)
@@ -296,7 +297,8 @@ fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // 쓰기가 실패했으면 그 사유를 **목록 맨 위 한 줄**로 낸다(§5 — 실패는 사실대로). 별도 배너를 만들지
     // 않는 이유는 이 자리가 이미 "목록이 사실과 다르다"를 말하는 자리(`notice`)이고, 사용자가 방금 누른
     // 동작의 결과를 그 목록 바로 위에서 읽는 것이 자연스럽기 때문이다.
-    const notice_rows: usize = if (self.scm_write_error != null) 1 else 0;
+    const trust_line = scmTrustLine(self);
+    const notice_rows: usize = (if (self.scm_write_error != null) @as(usize, 1) else 0) + (if (trust_line != null) @as(usize, 1) else 0);
 
     // **저장소 머리 줄이 목록의 첫 층이다**(§3.5.1c). 지금 읽어 둔 저장소의 줄들은 자기 머리 줄 아래에
     // 오고, 아직 안 읽은 저장소는 머리 줄만 선다("읽는 중…" — 배지의 빈자리와 구별한다).
@@ -339,6 +341,12 @@ fn projectTab(self: *AppSession, arena: std.mem.Allocator) ?Projection {
     // 그것도 없다(②b).
     const items = arena.alloc(component.types.Item, total_rows + notice_rows + repos.entries.len * 4) catch return null;
     var n: usize = 0;
+    // **신뢰 전이면 맨 위에 그 사실을 한 줄로**(계획 workspace-trust WT6b-2a) — 도크가 저장소 필터·submodule·partial clone 을 보지
+    // 않으므로 목록이 사실과 다를 수 있다(가짜 수정·빠진 submodule 행·빈 증감). 신뢰할 수 있으면 눌러서 신뢰 시트를 연다.
+    if (trust_line) |line| {
+        items[n] = .{ .trust_notice = line };
+        n += 1;
+    }
     // **저장소에 매인 사유는 여기 안 선다** — 그 저장소의 커밋 버튼 아래로 간다(아래 `.blocker`).
     // 여기 남는 것은 어느 저장소에도 안 매인 것(원격 갱신 결과 등)이다.
     if (self.scm_write_error) |err| {
@@ -1938,6 +1946,85 @@ pub fn blurCommitIfOutside(self: *AppSession, x_px: f64, y_px: f64) void {
     if (!pointInCommitBox(self, x_px, y_px)) blurCommit(self);
 }
 
+/// 판정자가 켜는 스위치 — **테스트 빌드에서만 읽는다**. 끄면(기본) 신뢰 줄을 안 세운다: 도크 판정자 대부분은 신뢰와 무관한 행 배치·클릭을
+/// 재는데 그 저장소는 신뢰 전이라 줄 하나가 모든 행을 밀고, 판정이 사용자 기계의 신뢰 파일을 읽게 된다. 신뢰 줄을 재는 판정자만 켠다
+/// (`agent_ops.test_allow_turn_snapshot` 과 같은 규율).
+pub var test_trust_line: bool = false;
+
+/// 도크 머리의 신뢰 전 줄(계획 workspace-trust WT6b-2a) — 도크 저장소가 신뢰 전이면 그 사실을, 신뢰했으면 null. 판정(`repoTrustState` —
+/// 실제 경로를 여는 시스템 호출)은 프레임마다 하지 않는다: 저장소·신뢰 표의 세대·**목록 세대**(`scm_dock_snapshot_generation` — 새
+/// git 결과·목록 폐기 때 오른다)가 그대로면 지난 답을 쓴다. 목록 세대가 키에 드는 이유: 목록 읽기는 제출마다 신뢰를 다시 푸는데
+/// (`Backend.untrustedFor`), 경로 문자열만 보면 심링크가 다른 곳을 가리키게 된 뒤에도(`current → releases/…`) 줄이 옛 판정을 말했다
+/// (적대적 검증 2회차). 새 목록마다 다시 풀면 줄과 목록이 같은 판정을 본다. 요청 번호(`git_request_seq`)는 쓰지 않는다 — diff·merge 도
+/// 함께 올리고 제출이 막혀도 올라, 그것을 키로 두면 프레임마다 다시 풀었다(3회차).
+fn scmTrustLine(self: *AppSession) ?component.types.TrustNoticeItem {
+    if (builtin.is_test and !test_trust_line) return null;
+    const repo = self.git_repo orelse return null;
+    if (self.git_repo_dest != null) return .{ .text = maru.i18n.t(.scm_trust_line_remote), .actionable = false }; // 원격은 늘 신뢰 전(WT7 전)
+    const repo_hash = std.hash.Wyhash.hash(0, repo);
+    const generation = lsp_client.trustGeneration();
+    const list_generation = self.scm_dock_snapshot_generation;
+    const state = if (self.scm_trust_cache) |c| (if (c.repo_hash == repo_hash and c.generation == generation and c.list_generation == list_generation) c.state else null) else null;
+    const resolved = state orelse blk: {
+        const s = lsp_client.repoTrustState(self, repo);
+        // 판정이 표를 처음 읽으면 세대가 오른다 — 읽은 **뒤의** 세대로 적는다(다음 프레임에 또 풀지 않게).
+        self.scm_trust_cache = .{ .repo_hash = repo_hash, .generation = lsp_client.trustGeneration(), .list_generation = list_generation, .state = s };
+        break :blk s;
+    };
+    return switch (resolved) {
+        .trusted => null,
+        .untrusted => .{ .text = maru.i18n.t(.scm_trust_line), .actionable = true },
+        .refused => .{ .text = maru.i18n.t(.scm_trust_line_refused), .actionable = false },
+    };
+}
+
+/// 도크 줄을 눌렀다 — **그 줄이 말하는 저장소**(`git_repo`)를 묻는다(계획 workspace-trust WT6b-2a). 줄이 서 있다는 것이 그 목록이 그
+/// 저장소의 것이라는 뜻이라, 팔레트처럼 다시 판정하지 않는다: 활성 pane 이 원격이 됐는데 로컬 목록이 남아 있는 동안(소켓이 죽은
+/// `maru ssh`·맨 `ssh`) 다시 판정하면 「원격」·「저장소 없음」으로 갈려, 누를 수 있게 그려진 줄이 엉뚱한 거절을 냈다(적대적 검증 4회차).
+fn requestScmTrustForLine(self: *AppSession) void {
+    if (self.git_repo_dest != null) return self.showNoticeKey(.scm_trust_remote_notice);
+    askScmTrust(self, self.git_repo orelse return self.showNoticeKey(.scm_trust_no_repo));
+}
+
+/// 도크 저장소를 신뢰할지 묻는다(계획 workspace-trust WT6b-2a — 팔레트 「소스 컨트롤: 이 저장소 신뢰…」). 시트를 못 띄우면 그
+/// 이유를 알린다(조용히 아무 일도 안 하면 눌렀는데 고장으로 읽힌다).
+///
+/// **대상은 화면에 보이는 저장소다.** 도크가 소스 컨트롤을 안 보이고 있으면 `git_repo` 는 마지막으로 본 저장소다(따라가기는 뷰가
+/// 보일 때만 돈다 — `followActiveTerminalRepo` ⑴). 팔레트에서 그대로 물으면 터미널이 다른 저장소로 옮긴 뒤에도 옛 저장소를 신뢰하게
+/// 됐다(적대적 검증 2회차). 그래서 먼저 도크를 열고 따라간다 — 시트 뒤에 그 저장소의 목록이 선다. 터미널이 저장소 아닌 폴더에 서
+/// 있으면(`.none` — 도크가 「저장소가 아닙니다」를 말하는 상태) `git_repo` 는 diff·스냅샷을 위해 남아 있을 뿐이라 묻지 않는다.
+///
+/// **묻는 대상은 `git_repo` 가 아니라 지금 판정한 저장소(`gitRepoTarget`)다.** 따라가기의 기억은 미뤄질 수 있다 — 쓰기가 도는 동안
+/// 읽기 제출은 기억보다 먼저 돌아가(`submitGitRead`) `git_repo` 가 터미널이 떠난 저장소로 남는다(적대적 검증 3회차: 커밋 훅이 도는
+/// 동안 팔레트가 옛 저장소를 물었다). 판정과 같은 값으로 물으면 그 창이 없다 — 시트의 첫 줄이 그 경로다.
+pub fn requestScmTrust(self: *AppSession) void {
+    if (self.dock.view != .source_control or !dock_ops.dockVisible(self)) {
+        dock_ops.openDockTo(self, .source_control);
+        git_ops.followActiveTerminalRepo(self);
+    }
+    var dest_buf: [git_ops.max_remote_dest_bytes]u8 = undefined;
+    if (git_ops.activeTermRemoteDest(self, &dest_buf) != null) return self.showNoticeKey(.scm_trust_remote_notice);
+    var probe: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = switch (git_ops.gitRepoTarget(self, &probe)) {
+        .repo => |found| found,
+        .none => return self.showNoticeKey(.scm_trust_no_repo),
+        // 모른다 — 원격 목록을 보는 중이거나(로컬 순위로 내려가지 않는다 — `gitRepoTarget`) 물을 저장소가 없다.
+        .unknown => return self.showNoticeKey(if (self.git_repo_dest != null) .scm_trust_remote_notice else .scm_trust_no_repo),
+    };
+    askScmTrust(self, repo);
+}
+
+/// 그 저장소의 신뢰 시트를 띄운다 — 못 띄우면 그 이유를 알린다.
+fn askScmTrust(self: *AppSession, repo: []const u8) void {
+    switch (lsp_client.askTrustForRepo(self, repo)) {
+        .asked => {},
+        .already_trusted => self.showNoticeKey(.scm_trust_already),
+        .refused => self.showNoticeKey(.scm_trust_refused_notice),
+        .busy => self.showNoticeKey(.scm_trust_busy),
+    }
+    self.metal_dirty = true;
+}
+
 /// **RS2 의 진입점 가드는 RS4 가 지웠다.** 그때는 「원격 목록을 보는 동안 로컬을 만지는 동작」을 여기서
 /// 통째로 끊었는데, RS4a~c 가 그 동작들을 **원격으로 보내면서** 막을 것이 하나도 안 남았다 — 모든
 /// 인텐트가 통과였다. **아무것도 안 막는 게이트는 다음 사람에게 「여기서 지킨다」고 거짓말한다.**
@@ -2000,6 +2087,7 @@ pub fn applyScmDockIntent(self: *AppSession, intent: component.ids.Intent) void 
             const repo = repoPathAt(self, index) orelse return;
             submitStageAllFor(self, repo);
         },
+        .trust_repo => requestScmTrustForLine(self),
         // 탭 전환(P4). **읽기는 여기서 걸지 않는다** — 그 탭이 무엇을 필요로 하는지는 `pumpScmLog`가
         // 매 tick 보고 정한다(뷰 진입·저장소 변경·상한 증가가 전부 같은 판정을 지난다).
         .select_tab => |tab| selectScmTab(self, tab),

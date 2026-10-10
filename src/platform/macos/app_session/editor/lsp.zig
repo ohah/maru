@@ -266,6 +266,9 @@ pub const State = struct {
     trust_exe_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
     trust_origin_note_buf: [256]u8 = undefined,
     trust_notes: [6]maru.chrome.components.confirm.Note = undefined,
+    /// 지금 시트를 **SCM 이 열었다**(계획 workspace-trust WT6b-2a — 도크 줄·팔레트 「이 저장소 신뢰…」). 사용자가 스스로 연 시트라
+    /// 취소(Esc)는 「거부」로 기억하지 않고 닫기만 한다 — 거부로 기억하면 그 저장소의 언어 서버가 묻지도 않고 「거부됨」이 된다.
+    asking_scm: bool = false,
     /// 판정자가 켜는 스위치 — 프롬프트 없이 이 답으로 간주한다. **테스트 빌드에서만 읽는다**(`gateTrust`) — 제품에서는 이 값이
     /// 무엇이든 신뢰는 사용자의 클릭으로만 선다(계획 WT2, LSPB23). `null` 이면 정상(모달).
     auto_trust_answer: ?lsp.trust.Decision = null,
@@ -362,6 +365,75 @@ pub fn repoTrusted(self: *AppSession, root: []const u8) bool {
     const key = trust_store.keyFor(root, &kb) orelse return false;
     if (refusalFor(root, key.path) != null) return false;
     return trust_store.get(key) == .allow;
+}
+
+/// 도크의 저장소 신뢰 상태(계획 workspace-trust WT6b-2a) — 도크 머리 줄이 무엇을 말할지 가른다. `refused` 는 묻지 않는 root(홈·저장소
+/// 밖 — WT2b)라 신뢰를 정할 수 없다. 판정은 `repoTrusted` 와 같은 표·같은 키·같은 거절이다.
+pub const RepoTrustState = enum { trusted, untrusted, refused };
+
+pub fn repoTrustState(self: *AppSession, root: []const u8) RepoTrustState {
+    ensureTrustLoaded(self);
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return .refused;
+    if (refusalFor(root, key.path) != null) return .refused;
+    return if (trust_store.get(key) == .allow) .trusted else .untrusted;
+}
+
+pub const AskOutcome = enum {
+    /// 시트를 띄웠다.
+    asked,
+    /// 이미 신뢰했다 — 물을 것이 없다.
+    already_trusted,
+    /// 묻지 않는 root — 신뢰를 정할 수 없다.
+    refused,
+    /// 이 창에 신뢰 시트가 떠 있거나(창마다 하나), 같은 저장소의 시트가 다른 창에 떠 있다(저장소마다 하나 — `trust_store.claim`).
+    /// 묻기를 세울 메모리를 못 얻었을 때도 여기로 접는다(다시 누르면 된다 — 기록된 것은 없다).
+    busy,
+};
+
+/// **SCM 이 신뢰를 묻는다**(계획 workspace-trust WT6b-2a — 도크 줄·팔레트). 언어 서버의 시트와 **같은 상자·같은 표·같은 키**다(신뢰 표는
+/// 하나 — 2026-10-09 결정). 문구와 안내 줄만 저장소 단위로 묻는다(서버 이름·실행 파일 줄 없이). 사용자가 스스로 연 시트지만 **키보드
+/// 방어(`guardAsync`)를 건다** — 팔레트에서 명령을 고른 Enter 가 반복되면 그대로 「신뢰」가 됐다(적대적 검증 1회차; 키 반복은 이벤트에서
+/// 구별되지 않는다). 권한을 주는 시트는 늘 한 번 더 묻는다. 취소는 기억하지 않는다(`asking_scm`). 답은 `answerTrust` 가 기록한다 — 언어
+/// 서버 클라이언트도 그 답을 따른다.
+pub fn askTrustForRepo(self: *AppSession, root: []const u8) AskOutcome {
+    ensureTrustLoaded(self);
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return .refused;
+    if (refusalFor(root, key.path) != null) return .refused;
+    if (trust_store.get(key) == .allow) return .already_trusted;
+    if (self.editor_lsp.asking_key != null) return .busy;
+    const owned_root = self.allocator.dupe(u8, root) catch return .busy;
+    const owned_key = OwnedKey.dupe(self.allocator, key) catch {
+        self.allocator.free(owned_root);
+        return .busy;
+    };
+    if (!trust_store.claim(key, trustOwner(self))) {
+        self.allocator.free(owned_root);
+        owned_key.deinit(self.allocator);
+        return .busy;
+    }
+    self.showConfirmText(.lsp_trust, maru.i18n.t(.scm_trust_prompt), .{ .confirm = .scm_trust_allow, .cancel = .common_cancel });
+    self.chrome_host.confirm.guardAsync(maru.i18n.t(.scm_trust_recheck));
+    // `show` 가 앞 시트를 닫으며(`cancelPendingConfirm` → `dismissTrustPrompt`) 묻던 자리를 비우므로 **그 뒤에** 세운다.
+    self.editor_lsp.asking_root = owned_root;
+    self.editor_lsp.asking_key = owned_key;
+    self.editor_lsp.asking_scm = true;
+    setScmTrustSheetNotes(self, root);
+    return .asked;
+}
+
+/// SCM 신뢰 시트의 안내 줄 — **어느 저장소인지가 맨 앞**이다: 질문이 「이 저장소를 신뢰할까요?」뿐이라 경로가 곧 대상이다(언어 서버
+/// 시트는 질문이 서버 이름을 들어 경로를 맨 끝에 둔다; 신뢰 관리 상자 `setManageNotes` 와 같은 이유 — 적대적 검증 1회차: 낮은 창에선 끝
+/// 줄부터 사라져 무엇을 신뢰하는지가 빠졌다). 그다음 무엇이 실행될 수 있는지·무엇에 서는지.
+fn setScmTrustSheetNotes(self: *AppSession, root: []const u8) void {
+    const st = &self.editor_lsp;
+    var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_line = maru.i18n.format(&st.trust_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(root, &shown_buf) }});
+    st.trust_notes[0] = .{ .text = root_line, .fit = .path };
+    st.trust_notes[1] = .{ .text = maru.i18n.t(.scm_trust_note_privileges) };
+    st.trust_notes[2] = .{ .text = maru.i18n.t(.scm_trust_note_scope) };
+    self.chrome_host.confirm.notes = st.trust_notes[0..3];
 }
 
 /// 신뢰 표의 세대 — git 읽기의 다시 읽기 기준(`git.pumpTrustReread`).
@@ -545,6 +617,7 @@ fn recordTrust(io: std.Io, config_path: ?[]const u8, key: lsp.trust.Key, decisio
 /// 묻던 자리를 비운다 — 앱 전역 자리도 놓는다(그 키를 기다리던 다른 창이 다음 gate 에 묻는다).
 fn clearAsking(self: *AppSession) void {
     const st = &self.editor_lsp;
+    st.asking_scm = false;
     if (st.asking_key) |k| {
         trust_store.release(k.key(), trustOwner(self));
         k.deinit(self.allocator);
@@ -865,6 +938,20 @@ fn cleanCopy(buf: []u8, s: []const u8) []const u8 {
 pub fn answerTrust(self: *AppSession, allow: bool) void {
     const st = &self.editor_lsp;
     const ak = st.asking_key orelse return;
+    // SCM 이 연 시트의 취소는 기억하지 않는다(`asking_scm` 주석) — 묻기만 내린다. 그 사이 이 시트에 합류한(같은 저장소라 `.asking` 에서
+    // 기다린) 언어 서버 클라이언트는 「결정 없음 — 누르면 묻는다」(`.unasked`)로 둔다: 그대로 두면 다시 물을 자리가 없어 세션 내내 「허락
+    // 대기」에 갇히고(적대적 검증 1회차), 곧바로 다시 물으면 방금 취소한 시트가 언어 서버 문구로 다시 뜬다. 취소 때 아직 묻기 전이던
+    // 클라이언트(`.preparing` — 셸 환경을 읽는 중)는 여기 없다: 환경이 다 담기면 제 문구(그 서버를 띄울지)로 묻는다(적대적 검증 2회차 —
+    // 한계로 계획에 적었다).
+    if (!allow and st.asking_scm) {
+        for (st.clients.items) |*c| {
+            if (!sameKey(c, ak.key()) or c.phase != .asking) continue;
+            c.phase = .unasked;
+            c.trust_pending = false;
+        }
+        clearAsking(self);
+        return;
+    }
     defer clearAsking(self);
     const decision: lsp.trust.Decision = if (allow) .allow else .deny;
     // 파일에 못 남은 답은 말하지 않는다 — 다음 실행이 다시 묻는다(계획 WT4a 「한계」: 「다시 묻기」의 거부만 옛 허용으로 돌아간다).
@@ -1322,6 +1409,9 @@ pub fn pump(self: *AppSession) void {
     if (!self.loaded_config.config.lsp.enabled) {
         // 꺼졌다 — 떠 있는 서버를 내린다. 그대로 두면 아무도 stdout 을 안 읽는 서버가 앱 종료까지 남는다.
         if (self.editor_lsp.clients.items.len > 0) stopAll(self);
+        // 꺼져 있어도 SCM 이 연 시트는 있다 — 포커스 규칙(아래)은 설정과 무관하게 같다(적대적 검증 2회차: 이 갈래가 일찍 돌아가 꺼진
+        // 설정에서만 시트가 남았다).
+        if (self.editor_lsp.asking_key != null and !self.window_focused) dropTrustPrompt(self);
         return;
     }
     const now_ms = self.awakeMs();
@@ -2496,5 +2586,7 @@ fn stopAll(self: *AppSession) void {
         c.deinit(self.allocator);
     }
     st.clients.clearRetainingCapacity();
-    dropTrustPrompt(self); // 묻던 모달도 내린다 — 답할 서버가 없다. 기억하지 않는다(다시 켜면 다시 묻는다)
+    // 묻던 모달도 내린다 — 답할 서버가 없다. 기억하지 않는다(다시 켜면 다시 묻는다). **SCM 이 연 시트는 남긴다** — 그 답은 언어 서버가
+    // 아니라 git 읽기의 것이다(언어 서버를 끈다고 그 질문이 없어지지 않는다 — 적대적 검증 2회차).
+    if (!st.asking_scm) dropTrustPrompt(self);
 }

@@ -95,7 +95,7 @@ fn rightMarkerExtent(item: types.Item, props: types.Props, m: types.DockMetrics)
         // 머리 줄의 동작 버튼은 **가장 바깥**에 앉으므로 비켜설 것이 없다(자리를 비우는 쪽은 브랜치 칩과
         // 개수 배지이고, 그건 `view.repoRow`가 같은 상수로 한다 — ②c).
         // 커밋 줄은 오른쪽 끝에 **짧은 해시**가 앉지만 동작 버튼이 없어 비켜설 것이 없다.
-        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice, .blocker => base,
+        .repo, .commit, .turn, .commit_file, .load_more, .commit_box, .commit_button, .more, .notice, .blocker, .trust_notice => base,
     };
 }
 
@@ -235,6 +235,7 @@ fn rowCursor(item: types.Item) tree.CursorHint {
         .repo, .section, .file, .more, .commit, .turn, .commit_file, .load_more => .press,
         // 안내는 상태 진술이지 컨트롤이 아니다(action도 없다).
         .notice, .blocker => .auto,
+        .trust_notice => |trust| if (trust.actionable) .press else .auto,
         // 버튼의 커서는 **면 노드**가 든다(아래 여백은 버튼이 아니다).
         .commit_button => .auto,
     };
@@ -245,7 +246,7 @@ fn actionOf(item: types.Item) types.RowAction {
         .section => |section| section.action,
         .file => |file| file.action,
         // 머리 줄의 동작은 `RowAction`(스테이지/언스테이지) 어휘가 아니다 — 자기 버튼 둘을 따로 낸다(②c).
-        .repo, .commit_box, .commit_button, .more, .notice, .blocker, .commit, .turn, .commit_file, .load_more => .none,
+        .repo, .commit_box, .commit_button, .more, .notice, .blocker, .trust_notice, .commit, .turn, .commit_file, .load_more => .none,
     };
 }
 
@@ -274,7 +275,7 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             const intent: ids.Intent = switch (item) {
                 .section => |section| .{ .section_action = .{ .repo_index = section.repo_index, .section = section.section } },
                 .file => |file| .{ .row_action = .{ .repo_index = file.repo_index, .model_index = file.model_index } },
-                .repo, .commit_box, .commit_button, .more, .notice, .blocker, .commit, .turn, .commit_file, .load_more => unreachable, // actionOf가 이미 `.none`으로 걸렀다
+                .repo, .commit_box, .commit_button, .more, .notice, .blocker, .trust_notice, .commit, .turn, .commit_file, .load_more => unreachable, // actionOf가 이미 `.none`으로 걸렀다
             };
             const action = table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer;
             slot[0] = tree.button(.{
@@ -421,6 +422,8 @@ pub fn build(props: types.Props, buffers: Buffers) BuildError!Frame {
             .turn => |turn| .{ .select_turn = turn.index },
             // 안내는 진술이지 컨트롤이 아니다 — action을 붙이지 않는다.
             .notice, .blocker => null,
+            // 신뢰할 수 있는 저장소일 때만 누른다 — 원격·묻지 않는 root 는 진술이다.
+            .trust_notice => |trust| if (trust.actionable) ids.Intent.trust_repo else null,
         };
         const row_action_id: ?tree.UiAction = if (row_intent) |intent|
             table.append(props.snapshot_generation, intent, true) catch return error.InsufficientActionBuffer
@@ -660,7 +663,7 @@ fn isSelected(item: types.Item) bool {
         .commit => |commit| commit.selected,
         .turn => |turn| turn.selected,
         .commit_file => |file| file.selected,
-        .repo, .load_more, .commit_box, .commit_button, .section, .more, .notice, .blocker => false,
+        .repo, .load_more, .commit_box, .commit_button, .section, .more, .notice, .blocker, .trust_notice => false,
     };
 }
 
@@ -941,6 +944,29 @@ test "브랜치를 못 잡으면 원격 갱신 칩도 함께 사라진다 (P6)" 
     try testing.expect(frame.tree.find(NodeIds.fetch) == null);
 }
 
+test "신뢰 전 줄은 누를 수 있을 때만 `trust_repo` 를 싣고 누르는 커서다 — 진술(원격·묻지 않는 root)은 action 이 없다 (계획 workspace-trust WT6b-2a)" {
+    var storage: Storage = .{};
+    const items = [_]types.Item{
+        .{ .trust_notice = .{ .text = "untrusted", .actionable = true } },
+        .{ .trust_notice = .{ .text = "remote", .actionable = false } },
+    };
+    const frame = try buildTest(.{
+        .viewport_px = .{ .x = 0, .y = 0, .width = 320, .height = 400 },
+        .items = &items,
+    }, &storage);
+    var trust_actions: usize = 0;
+    for (frame.actions) |entry| switch (entry.intent) {
+        .trust_repo => {
+            trust_actions += 1;
+            try testing.expect(entry.enabled);
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), trust_actions);
+    try testing.expectEqual(tree.CursorHint.press, rowCursor(items[0]));
+    try testing.expectEqual(tree.CursorHint.auto, rowCursor(items[1]));
+}
+
 test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 돌려준다)" {
     var storage: Storage = .{};
     const items = testItems();
@@ -972,7 +998,7 @@ test "action 표가 행마다 의도를 복원한다(히트테스트는 ID만 �
             saw_expand = true;
             try testing.expectEqual(types.Section.changes, section);
         },
-        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file, .select_turn, .open_turn_file, .fetch_remote, .open_remote_menu => {},
+        .section_action, .scroll_thumb, .scroll_track, .commit_focus, .commit, .toggle_repo, .refresh_repo, .stage_all_repo, .select_tab, .select_commit, .load_more_commits, .open_commit_file, .select_turn, .open_turn_file, .fetch_remote, .open_remote_menu, .trust_repo => {},
     };
     try testing.expect(saw_toggle and saw_open and saw_row_action and saw_expand);
 }

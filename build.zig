@@ -5405,7 +5405,7 @@ pub fn build(b: *std.Build) void {
     apply_step.dependOn(&run_replace_preview.step);
     const history_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.HSTH"} });
     const run_history_host = b.addRunArtifact(history_host_tests);
-    run_history_host.addArg("--maru-expect-tests=5");
+    run_history_host.addArg("--maru-expect-tests=6");
     const history_step = b.step("test-editor-history-step", "Run prepared multi-document history and host identity judges");
     history_step.dependOn(&run_history_host.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
@@ -5435,7 +5435,7 @@ pub fn build(b: *std.Build) void {
     });
     const history_step_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{".test.HST"} });
     const run_history_step = b.addRunArtifact(history_step_tests);
-    run_history_step.addArg("--maru-expect-tests=28");
+    run_history_step.addArg("--maru-expect-tests=33");
     history_step.dependOn(&run_history_step.step);
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));

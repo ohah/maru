@@ -690,6 +690,7 @@ fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs 
             r.level = v;
         } else if (matchOpt(a, "--nth")) {
             r.nth = std.fmt.parseInt(u32, try optValue(rest, &i, "--nth"), 10) catch return error.InvalidLocatorNumber;
+            if (r.nth.? > 1_000_000) return error.InvalidLocatorNumber; // 서버(L2)와 같은 범위
         } else if (extras.text and matchOpt(a, "--text")) {
             r.text = try optValue(rest, &i, "--text");
         } else if (extras.key and matchOpt(a, "--key")) {
@@ -985,11 +986,19 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
     };
     if (resp.err) |e| {
-        try w.print("error: {s} ({d})", .{ e.message, e.code });
+        // 메시지에는 페이지 글이 섞일 수 있다(로케이터의 후보 이름 등) — 표시 안전하게(W9b②-1).
+        var safe_msg: [4096]u8 = undefined;
+        const msg_n = displaySafe(e.message[0..@min(e.message.len, safe_msg.len)], &safe_msg);
+        try w.print("error: {s}{s} ({d})", .{ safe_msg[0..msg_n], if (e.message.len > safe_msg.len) "…" else "", e.code });
         // W9-0: 어느 엔진이 지원하지 않는지(`-32008` data) — 브라우저 탭이 아니면 그것이 이유다.
         if (e.code == unsupported_by_engine_code) if (e.data) |d| if (d == .object) {
             if (d.object.get("controllable")) |c| if (c == .bool and !c.bool) try w.writeAll(" [not a browser tab]");
             if (d.object.get("engine")) |engine| if (engine == .string) try w.print(" [engine={s}]", .{engine.string});
+            // 메서드는 되지만 그 인자를 그 엔진이 못 한다(W9b② — WebKit 의 locator).
+            if (d.object.get("param")) |param| if (param == .string) {
+                var safe_p: [64]u8 = undefined;
+                try w.print(" [param={s}]", .{safe_p[0..displaySafe(param.string[0..@min(param.string.len, 64)], &safe_p)]});
+            };
         };
         try w.writeAll("\n");
         // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
@@ -2167,6 +2176,13 @@ test "parse·buildRequestBytes: role 로케이터(W9b②) — 옵션 규칙·act
     try testing.expectEqualStrings("Email", params.get("locator").?.object.get("name").?.string);
     try testing.expectEqualStrings("hi", params.get("text").?.string);
     try testing.expect(params.get("selector") == null);
+}
+
+test "renderResponse: -32008 의 param 과 오류 메시지는 표시 안전하게 찍는다" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported\\u001b[2J\",\"data\":{\"engine\":\"webkit\",\"param\":\"locator\"}}}", .ok, &w);
+    try testing.expectEqualStrings("error: Not supported[2J (-32008) [engine=webkit] [param=locator]\n", w.buffered());
 }
 
 test "renderResponse: matched 의 페이지 글은 제어·양방향 제어 글자를 빼고 찍는다" {

@@ -324,8 +324,9 @@ pub const ChromeHost = struct {
         var ops: std.ArrayList(draw.Op) = .empty;
         try suggest_box.view(&self.suggest_box, rows, p, tk, arena, &ops);
         if (ops.items.len > 0) {
-            try out.append(arena, .{ .layer = suggest_box.layer, .ops = ops.items });
-            // 문서 패널은 **자기 draw** 다(2026-10-10) — 목록 옆에 「간격 + 보이는 패딩」만큼 떨어져 서므로 목록과 칸 위상이 대개 다르다.
+            try out.append(arena, .{ .layer = suggest_box.layer, .ops = ops.items, .independent_panel = suggest_box.independent_panel });
+            // 문서 패널은 **자기 draw** 다(2026-10-10) — 목록 옆에 「간격 + 두 패널의 보이는 패딩」만큼 떨어져 서므로 목록과 칸 위상이 다를 수 있다
+            // (패딩 합 24px 이 셀 폭의 배수가 아니면 — Retina 셀 ≈16px 이 그렇다; 1배율 8px 이면 같은 위상이라 한 격자에 묶인다).
             // 한 draw 에 함께 두면 lowering 이 둘을 격자 한 장에 올려 패널 글자가 칸으로 내려앉았다(둥근 패널 quad 는 픽셀 그대로라
             // 글자만 패널 안에서 밀리고, `suggest_docs.contains` 의 클릭 판정과 갈렸다). 목록 뒤에 모아 painter 순서는 같다.
             if (suggest_box.boxRect(&self.suggest_box, rows, p)) |beside| {
@@ -758,22 +759,22 @@ test "host: 자동완성 목록 + 문서 패널 — 목록 draw 가 먼저, 패�
     try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len);
     const ops = out.items[0].ops;
-    try std.testing.expectEqual(@as(usize, 2 * 2), ops.len); // 행 둘(fill + text) — 접힌 패널은 없다
+    try std.testing.expectEqual(@as(usize, 1 + 1 + 3), ops.len); // 목록 패널 + 선택 알약 + 글(행0 label·오른쪽, 행1 label) — 접힌 문서 패널은 없다
     host.suggest_docs.toggle();
     out.clearRetainingCapacity();
     try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &out);
-    // 패널은 **자기 draw** 다 — 목록과 칸 위상이 대개 달라 한 draw 면 패널 글자가 칸으로 내려앉는다(`SGD3`, 2026-10-10).
+    // 패널은 **자기 draw** 다 — 목록과 칸 위상이 다를 수 있어(두 패널의 패딩 합이 셀 폭의 배수가 아니면) 한 draw 면 패널 글자가 칸으로 내려앉는다(`SGD3`, 2026-10-10).
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
-    try std.testing.expectEqual(@as(usize, 2 * 2), out.items[0].ops.len); // 목록 행 둘(fill + text) — 목록이 먼저(적대적 7회차 E2)
+    try std.testing.expectEqual(@as(usize, 1 + 1 + 3), out.items[0].ops.len); // 목록이 먼저(적대적 7회차 E2)
     const ops2 = out.items[1].ops;
     try std.testing.expectEqual(@as(usize, 1 + 2), ops2.len); // 패널 quad + 텍스트 둘(빈 줄 제외)
-    try std.testing.expect(out.items[0].ops[0] == .fill and ops2[0] == .quad);
+    try std.testing.expect(out.items[0].ops[0] == .quad and ops2[0] == .quad); // 둘 다 자기 패널
     const list = suggest_box.boxRect(&host.suggest_box, &rows, p).?;
     try std.testing.expectEqual(list.y, ops2[0].quad.rect.y); // 위 맞춤(적대적 7회차 E10)
     try std.testing.expectEqual(list.x + @as(i32, @intCast(list.w)) + 10, ops2[0].quad.rect.x); // 오른쪽 한 칸
 }
 
-// 완성 목록 옆 문서 패널은 **자기 draw** 다 — 목록과 칸 위상이 대개 달라(간격 + 보이는 패딩만큼 떨어진다) 한 draw 에 두면 lowering 이 둘을
+// 완성 목록 옆 문서 패널은 **자기 draw** 다 — 목록과 칸 위상이 다를 수 있어(간격 + 두 패널의 보이는 패딩만큼 떨어진다 — 패딩 합이 셀 폭의 배수가 아니면) 한 draw 에 두면 lowering 이 둘을
 // 격자 한 장에 올려 패널 글자가 칸으로 내려앉았다(2026-10-10 적대적 검증 — `metal_lowering.lower` 「단위는 draw 다」).
 test "SGD3 완성 목록과 문서 패널은 draw 둘이다 — 목록 먼저, 패널(첫 op 이 둥근 quad) 뒤" {
     const Rgb = @import("../color.zig").Rgb;
@@ -781,6 +782,7 @@ test "SGD3 완성 목록과 문서 패널은 draw 둘이다 — 목록 먼저, �
     var p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
     p.shape.corner_radius_px = 8;
     p.shape.modal_padding_px = 12;
+    p.shape.border_width_px = 1;
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -795,6 +797,14 @@ test "SGD3 완성 목록과 문서 패널은 draw 둘이다 — 목록 먼저, �
     draws.clearRetainingCapacity();
     try host.collectSuggestBoxDraws(&rows, &docs, p, &tk, arena, &draws);
     try std.testing.expectEqual(@as(usize, 2), draws.items.len);
-    for (draws.items[0].ops) |op| try std.testing.expect(op != .quad); // 목록에는 패널 quad 가 없다
-    try std.testing.expect(draws.items[1].ops[0] == .quad); // 패널은 자기 draw 의 첫 둥근 quad — lowering 이 패널로 친다
+    // 둘 다 자기 draw 의 첫 둥근 quad 가 패널이다 — lowering 이 draw 마다 패널(패딩·그림자)로 친다(§8.2g-e: 목록도 패널을 가진다).
+    const list_panel = draws.items[0].ops[0].quad;
+    const docs_panel = draws.items[1].ops[0].quad;
+    // 목록은 직각 패널(`independent_panel` 로 GPU 패널), 문서 패널은 호버 상자와 같은 둥근 패널.
+    try std.testing.expect(draws.items[0].independent_panel and !draws.items[1].independent_panel);
+    try std.testing.expect(list_panel.corner_radii[0] == 0 and docs_panel.corner_radii[0] == 8);
+    // 보이는 두 패널이 한 칸(8) 떨어진다 — 목록은 테두리 폭만큼(`panelPadding`), 문서 패널은 12 만큼 커져 그려진다.
+    const lp: i32 = suggest_box.panelPadding(p);
+    try std.testing.expectEqual(lp, @as(i32, list_panel.panel_padding_px.?));
+    try std.testing.expectEqual(list_panel.rect.x + @as(i32, @intCast(list_panel.rect.w)) + lp + 8, docs_panel.rect.x - 12);
 }

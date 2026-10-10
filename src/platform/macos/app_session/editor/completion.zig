@@ -86,6 +86,8 @@ pub const State = struct {
     /// 마지막으로 필터한 접두사(바뀌었을 때만 다시 센다).
     last_prefix: std.ArrayList(u8) = .empty,
     rows: std.ArrayList(suggest_box.Row) = .empty,
+    /// 행의 일치 자리(`suggest_box.Row.match`)가 빌리는 버퍼 — 행마다 접두사 길이만큼 이어 붙인다.
+    match_buf: std.ArrayList(u32) = .empty,
     /// 문서 패널의 줄(§8.2g-d) — 글은 우리 소유(`docs_texts`). `docs_item` 항목의 것; 강조·응답마다 다시 만든다.
     docs_lines: std.ArrayList(suggest_docs.Line) = .empty,
     docs_item: ?usize = null,
@@ -120,6 +122,7 @@ pub const State = struct {
         self.items.clearRetainingCapacity();
         self.order.clearRetainingCapacity();
         self.rows.clearRetainingCapacity();
+        self.match_buf.clearRetainingCapacity();
         self.last_prefix.clearRetainingCapacity();
         self.clearDocs(allocator);
     }
@@ -136,6 +139,7 @@ pub const State = struct {
         self.items.deinit(allocator);
         self.order.deinit(allocator);
         self.rows.deinit(allocator);
+        self.match_buf.deinit(allocator);
         self.docs_lines.deinit(allocator);
         self.last_prefix.deinit(allocator);
     }
@@ -406,7 +410,14 @@ pub fn onResolveResponse(self: *AppSession, seq: u32, result: ?std.json.Value, e
             if (self.allocator.dupe(u8, d)) |nd| {
                 self.allocator.free(item.detail);
                 item.detail = nd;
-                _ = rebuildRows(self); // rows 가 detail 조각을 빌린다 — 선택은 그대로 두고 행만 다시
+                // rows 가 detail 조각을 빌린다 — 선택은 그대로 두고 행만 다시. **못 세우면 닫는다** — 행이 빈 채 `order` 만 남으면 상자는
+                // 안 그려지는데 Enter 가 보이지 않는 항목을 확정했다(적대적 1회차: `match_buf` 가 실패 자리를 하나 더 냈다). 다만 **확정 보류
+                // 중이면 닫지 않는다** — 사용자가 보이는 목록에서 고른 Enter 이고, 아래 보류 확정은 rows 를 안 읽는다(`accept` 는 order·items 만;
+                // 닫으면 그 Enter 가 아무 일도 안 하고 사라졌다 — 적대적 5회차).
+                if (!rebuildRows(self) and !st.pending_accept) {
+                    hide(self);
+                    return;
+                }
             } else |_| {}
         };
         st.resolved_count += 1;
@@ -463,10 +474,18 @@ fn refilter(self: *AppSession, term: *Term, force: bool) bool {
 fn rebuildRows(self: *AppSession) bool {
     const st = &self.editor_completion;
     st.rows.clearRetainingCapacity();
-    for (st.order.items) |idx| {
+    st.match_buf.clearRetainingCapacity();
+    // 일치 자리(§8.2g-e)는 **보이는 label** 에 잰다 — filterText 가 label 과 달라도 강조는 화면의 글자를 가리켜야 한다. 안 맞으면 강조 없음.
+    // 행이 버퍼를 빌리므로 버퍼를 먼저 다 채우고(늘면 옮겨진다) 행을 세운다.
+    const prefix = st.last_prefix.items;
+    const n = st.order.items.len;
+    st.match_buf.resize(self.allocator, n * prefix.len) catch return false;
+    for (st.order.items, 0..) |idx, i| {
         const it = st.items.items[idx];
+        const slot = st.match_buf.items[i * prefix.len ..][0..prefix.len];
+        const hit = completion.matchPositions(it.label, prefix, slot);
         // 오른쪽 열은 description 이 있으면 그것, 없으면 detail(§8.2g-c) — resolve 가 detail 을 채우면 description 없는 항목의 오른쪽이 바뀐다.
-        st.rows.append(self.allocator, .{ .label = it.label, .label_detail = it.label_detail, .detail = if (it.description.len > 0) it.description else it.detail, .kind = completion.kindGlyph(it.kind) }) catch return false;
+        st.rows.append(self.allocator, .{ .label = it.label, .label_detail = it.label_detail, .detail = if (it.description.len > 0) it.description else it.detail, .kind = completion.kindGlyph(it.kind), .match = hit orelse &.{} }) catch return false;
     }
     return true;
 }
@@ -693,6 +712,8 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
                 return true;
             }
         }
+        // 행 밖이지만 **보이는 패널**(패딩) 안 — 목록의 것이라 삼키되 고르지도 닫지도 않는다(§8.2g-e). 흘리면 패널 아래 편집기 caret 이 옮겨졌다.
+        if (suggest_box.contains(box, st.rows.items, p, x_px, y_px)) return true;
     }
     hide(self);
     return false;

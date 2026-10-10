@@ -199,6 +199,11 @@ pub const Op = union(enum) {
         /// 테두리만의 알파. `null` 이면 `alpha` 를 같이 쓴다(지금까지의 모양). 채움은 흐리게·테두리는 또렷하게 그릴 때 연다 —
         /// 짝 괄호 상자(10% 채움 + 불투명 테두리)·현재 줄 상자(채움 0 + 테두리, visual-mapping §5.1b)가 그렇다.
         border_alpha: ?u8 = null,
+        /// **패널마다 패딩**(2026-10-10). 이 quad 가 draw 의 패널(첫 둥근 quad)일 때 rich lowering 이 사방으로 키우는 폭 — `null` 이면 토큰의
+        /// `modal_padding_px`(메뉴·확인창·호버의 12px). 촘촘한 목록(자동완성 — VS Code 처럼 행이 테두리에 붙는다)은 테두리 폭만 준다.
+        /// 배치(`popup_box.Placement.visible_outset_px`)와 포인터 판정도 **같은 값**을 써야 보이는 패널과 판정이 한 레이아웃이다
+        /// (docs/chrome-strategy.md §5.4). widget quad 에는 뜻이 없다.
+        panel_padding_px: ?u16 = null,
         /// 이 quad를 잘라야 할 뷰포트(published tree의 `effective_clip`을 **그대로** 전달한 값).
         /// 컴포넌트는 교차를 계산하지 않는다 — 자르는 일은 backend 몫이고, 그래야 잘린 변의 radius/border
         /// 보정 같은 세부를 컴포넌트마다 반복하지 않는다. `null`이면 클리핑 없음.
@@ -216,6 +221,6 @@ pub const Op = union(enum) {
 pub const ChromeDraw = struct {
     layer: Layer,
     ops: []const Op,
-    /// 각 열의 찾기처럼 독립된 최상위 패널은 자신의 배경·그림자를 가진다.
+    /// 각 열의 찾기·직각 완성 목록처럼 독립된 최상위 패널은 자신의 배경·그림자를 가진다 — 모서리 0 인 첫 quad 도 GPU 패널로 친다.
     independent_panel: bool = false,
 };

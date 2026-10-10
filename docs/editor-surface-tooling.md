@@ -819,7 +819,7 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 | **타이핑 중** | 문서가 바뀌면 프레임마다 접두사를 다시 잰다(`[word_start, caret)`). caret 이 `word_start` 앞이거나 다른 줄이면 **닫는다**; 접두사가 바뀌었는데 `isIncomplete` 면 다시 묻는다(응답이 목록을 갈아 끼운다); 필터 결과가 0 이면 닫는다(다음 글자로 다시 뜬다) | ui §8.2 |
 | **키** | 열린 동안 `↑`/`↓` 선택(창 이동), `Enter`/`Tab` 확정, `Esc` 닫기 — 셋만 소비한다. 나머지는 편집기로(타이핑하면서 좁혀진다). 화살표 `←→`·마우스 caret 이동·입력을 받는 다른 오버레이(토스트·포커스 없는 찾기 막대 제외 — §8.2g)·rename·문서 재로드는 닫는다. **보이지 않는 목록은 확정하지 않는다** — 응답은 왔지만 프레임이 아직 상자를 세우지 않았으면 `Enter`/`Tab` 은 편집기로 흘린다(구현이 되먹인 것: 캡처 실측에서 그 사이의 키가 보이지도 않은 첫 항목을 넣었다; VS Code 도 위젯이 보일 때만 받는다) | ui §8 규칙 3 |
 | **적용** | primary caret 하나: 주 편집 = `[word_start, caret)` → `newText`(§3.6 — `applyEditAsOne` 하나) + `additionalTextEdits`. **응답 뒤 문서가 바뀌었으면** `additionalTextEdits` 는 전부 `word_start` 앞에서 끝날 때만 함께 적용한다(타이핑은 `word_start` 뒤에서만 일어나므로 그 앞의 offset 은 그대로다) — 아니면 그 항목의 additional 은 버린다(카운터). 적용 뒤 caret 은 `newText` 끝. 멀티 커서는 primary 만(다음) | §3.6 「자동 import 가 딸린 완성 하나도 undo 하나」 |
-| **하지 않는 것** | 스니펫(`$1` 탭스톱) · fuzzy 필터 · `completionItem/resolve`(문서 지연 로드) · 문서 패널 · kind 아이콘 · commitCharacters · 버퍼 단어 fallback·스니펫·경로 완성(①-b) · ghost text(§4) · `itemDefaults` · 멀티 커서 · `PageUp/Down` | 다음 조각 |
+| **하지 않는 것** | 스니펫(`$1` 탭스톱) · fuzzy 필터 · `completionItem/resolve`(문서 지연 로드) · 문서 패널 · kind 아이콘(§8.2g-e 에서 함) · commitCharacters · 버퍼 단어 fallback·스니펫·경로 완성(①-b) · ghost text(§4) · `itemDefaults` · 멀티 커서 · `PageUp/Down` | 다음 조각 |
 
 **적대적 검증(2026-09-19, 1~5회차 · 변이 46)**: 1회차 순수·chrome 18 → 0(무효 3 → 유효로 재실행) · 2회차 상태 기계 18 → 5(무효 4 → 재실행) ·
 3회차 배선 10 → 1 · 4회차 재실행 13 → 4 · 5회차 재실행 2 → 0. 판정자를 더해 사살한 것 여섯, 등가 1, 죽은 가드 1 제거:
@@ -878,8 +878,8 @@ rename) tick 이 오버레이를 짓기 전에 세 헬퍼를 닫는다(VS Code �
 확인창·포커스 있는 찾기)가 없을 때다. 그 조건이 빠지면 헬퍼 `refresh` 가 불려 `editorHelpersSuppressed` 로 목록을 **닫는다** — 토스트는 닫는 이유가 아니고(위 ⑴), 확정
 보류는 tick 이 일부러 남겨 둔 것이라(⑵) 닫으면 Enter 로 고른 항목이 사라졌다(적대적 검증 2026-10-10 — 첫 구현이 이 조건을 「죽은 조건」으로 보고
 뺐다가 되살렸다; `FINDH5`). 헬퍼는 찾기 막대 뒤에 모여 위에 그려지고, 둘 다 컴포넌트가 정한 픽셀에 선다(계약 `chrome-strategy.md` §5.3, 실측은
-`ML6` 주석). 겹치면 호버·시그니처 상자는 뒤 패널이 앞 글자를 가리는 규칙(#4228)이, 패널 quad 가 없는 완성 목록은 행마다 불투명한 배경이 painter
-순서로 덮는다. 포인터가 찾기 막대가 **가린 자리**에 머물면 그 아래 낱말의 호버를 묻지 않는다(`find.visibleContains` — 패딩까지, 함께 그리게 되면서 드러난
+`ML6` 주석). 겹치면 뒤 패널이 앞 글자를 가리는 규칙(#4228)이 덮는다 — 호버·시그니처 상자도, 완성 목록도(§8.2g-e 부터 자기 패널 quad 를 낸다; 그전에는
+행마다 불투명한 배경이 painter 순서로 덮었다). 포인터가 찾기 막대가 **가린 자리**에 머물면 그 아래 낱말의 호버를 묻지 않는다(`find.visibleContains` — 패딩까지, 함께 그리게 되면서 드러난
 결함, `FINDH6`). VS Code 도 찾기 위젯이 열린 채 편집기에서 치면 완성 목록을 띄운다. 비교 뷰에서는 헬퍼 셋이 열리지 않아(완성·시그니처·호버가 diff
 를 거절한다) 둘째 찾기 막대와 함께 그려지는 일은 없다. 보내기 헬퍼는 바꾸지 않았다(다른 오버레이가 있으면 안 그린다 — 기존 정책). 판정자
 `FINDH1`(완성 — 함께 그려짐·찾기 글자와 목록 글자가 각자 컴포넌트 픽셀·↓ 는 목록) · `FINDH2`(호버 — 함께 그려짐) · `FINDH3`(시그니처 — 함께
@@ -907,7 +907,7 @@ resolve** 해 확정 때는 대개 끝나 있다 → 같은 방식. ⑤ 단어 �
 | **트리거** | 서버 없이도 식별자 글자면 연다(설정 `editor.quick-suggestions`). 서버 트리거 글자·`⌃Space` 는 그대로. 서버가 없으면 요청 없이 **그 자리에서** 목록이 선다(`isIncomplete` 는 없다) | |
 | **fuzzy** | 접두사 문자들이 `filterText` 에 **순서대로 부분열**로 있으면 후보. 점수 = 정확한 접두사(대소문자까지) > 접두사(무시) > 낱말 경계(`_`·camelCase) 일치 > 연속 일치 > 나머지; 같은 점수는 `sortText`, 그다음 label. 빈 접두사는 전부 | VS Code 의 순서와 같은 축 |
 | **resolve** | `completionProvider.resolveProvider` 면 **강조된 항목**(선택이 바뀔 때·목록이 열릴 때)을 `completionItem/resolve`(id `9e8+seq`, 항목 JSON 그대로)로 미리 푼다. 응답의 `additionalTextEdits`·`insertText`/`textEdit`·`detail` 을 항목에 합친다. 확정 때 아직 안 풀렸으면 응답을 기다렸다 **한 번에** 적용한다(undo 하나) — 300 ms 안에 안 오면 additional 없이 적용하고 센다. 낡은 seq·다른 항목의 응답은 버린다 | 위 ④ · §3.6 |
-| **kind** | LSP `CompletionItemKind` → 한 글자 열(`f` 함수/메서드/생성자, `v` 변수/필드/상수, `t` 타입(클래스·구조체·인터페이스·enum), `k` 키워드, `m` 모듈, `s` 스니펫, `p` 속성, `w` 버퍼 단어, ` ` 그 밖) — label 앞 열 | VS Code 의 아이콘 자리를 글자로(등폭 상자) |
+| **kind** | LSP `CompletionItemKind` → 한 글자(`f` 함수/메서드/생성자, `v` 변수/필드/상수, `t` 타입(클래스·구조체·인터페이스·enum), `k` 키워드, `m` 모듈, `s` 스니펫, `p` 속성, `w` 버퍼 단어, ` ` 그 밖) — label 앞 열. **§8.2g-e 부터 화면에는 글자 대신 그 글자가 고르는 아이콘**(글자는 플랫폼↔컴포넌트 사이 값으로 남는다) | VS Code 의 아이콘 자리 |
 | **하지 않는 것** | 스니펫·경로 완성 · ghost text · 문서 패널(resolve 의 `documentation` 은 받아 두기만) · §5.3 트리 토큰 경계 · commitCharacters | 다음 |
 
 **관측점**: `CPL4`(순수: 버퍼 단어 수집 — 순서·중복·숫자 시작·상한·치는 낱말 제외) · `CPL5`(순수: 병합 — 같은 label 은 LSP 승·sortText·kind) · `CPL6`(순수: fuzzy — 부분열·
@@ -959,13 +959,13 @@ labelDetails 가 없다.
 | --- | --- | --- |
 | **capability** | `initialize` 에 `completionItem.labelDetailsSupport: true`. 선언했으면 **반드시 그린다** — 서버가 label 에서 뺀 것을 우리가 안 그리면 정보가 사라진다 | LSP 3.17 |
 | **파싱** | `labelDetails.detail` → `label_detail`, `labelDetails.description` → `description`(둘 다 없을 수 있다). `filter`·`sort`·`insert` 규칙은 그대로 | ② |
-| **행** | ` k ` + label + **label_detail(옅게, 간격 없이)** + 간격 2 + **오른쪽(옅게, 우측 정렬)** = `description` 있으면 그것, 없으면 `detail`. resolve 가 `detail` 을 채우면 오른쪽이 바뀐다(description 이 없을 때) | ③ · clangd 의 `int` 는 detail 이다 |
-| **폭** | 좌패딩 1 + kind 1 + 간격 1 + (label + label_detail) + (오른쪽 있으면 간격 2 + 오른쪽) + 우패딩 1, 상한 60 | §8.2g 와 같은 상한 |
+| **행** | kind 열 + label + **label_detail(옅게, 간격 없이)** + 간격 2 + **오른쪽(옅게, 우측 정렬)** = `description` 있으면 그것, 없으면 `detail`. resolve 가 `detail` 을 채우면 오른쪽이 바뀐다(description 이 없을 때). kind 열은 처음 ` k `(3칸) → §8.2g-e 부터 패딩 1 · 아이콘 2 · 간격 1 | ③ · clangd 의 `int` 는 detail 이다 |
+| **폭** | 좌패딩 1 + kind 열 + 간격 1 + (label + label_detail) + (오른쪽 있으면 간격 2 + 오른쪽) + 우패딩 1, 상한 60 — kind 열은 처음 1칸, §8.2g-e 부터 아이콘 2칸 | §8.2g 와 같은 상한 |
 | **접기(넘칠 때)** | ① 오른쪽을 먼저 접되 **16칸 아래로는 안 접는다**(오른쪽이 16칸보다 짧으면 그 길이까지) → ② 그래도 넘치면 label_detail 을 `…` 로 → ③ 그래도 넘치면 label 을 `…` 로. 오른쪽이 없으면 label_detail → label 순. 상자가 문턱보다도 좁으면(화면 clamp) label 4칸을 남기고 오른쪽은 있는 만큼 | ③ 의 「오른쪽 먼저, 그래도 넘치면 왼쪽도」 — 등폭 상자에서 비례 대신 문턱 |
-| **색** | label 은 `surface_fg`, label_detail·오른쪽은 `muted_fg`(run 별 role — lowering 은 run 의 색이 이긴다) | VS Code 의 옅은 두 자리 |
+| **색** | label 은 `surface_fg`, label_detail·오른쪽은 `muted_fg`(run 별 role — lowering 은 run 의 색이 이긴다). §8.2g-e 가 일치 글자(accent)·kind 색을 더한다 | VS Code 의 옅은 두 자리 |
 | **하지 않는 것** | 넓히기(드래그·저장) · 옆 문서 패널(②, resolve 의 `documentation` 은 받아 둔 채) · clangd 의 label 접두 정리 — `labelDetailsSupport` 를 내면 clangd 는 include 상태 칸(`•` = include 필요, 공백 = 이미 있음)을 label 머리에 붙여 `f  printf(...)` 로 한 칸 뜬다(캡처 실측; 서버의 것, filterText 는 `printf`) | 다음 |
 
-**관측점**: `CPL8`(순수: labelDetails 파싱 — 둘·하나·없음, filter 는 그대로) · `LSJ14`(순수: initialize 의 `labelDetailsSupport`) · `SGB3`(순수 chrome: 행 run 셋과
+**관측점**: `CPL8`(순수: labelDetails 파싱 — 둘·하나·없음, filter 는 그대로) · `LSJ14`(순수: initialize 의 `labelDetailsSupport`) · `SGB3`(순수 chrome: label run 과 꼬리 run(§8.2g-e 부터 kind 는 따로 아이콘 op, label 은 일치 여부로 run 이 나뉜다)·
 색 역할 · 폭 계산 · 접기 순서 셋 — 오른쪽 16 문턱 → label_detail → label) · `CMP5`(제품 경계: 가짜 서버가 labelDetails 를 실은 항목 — 행에 꼬리와 오른쪽이 서고 description 이 detail 을 이기며, labelDetails 없는
 항목은 꼬리가 없고, 폭은 label+꼬리) · `CMP3`(버퍼 단어 행에는 꼬리도 오른쪽도 없다) · `CMP4` ⑵(resolve 뒤 detail 이 오른쪽에 선다 — description 없는 항목).
 
@@ -1021,6 +1021,45 @@ labelDetails 가 없다.
   다른 draw 다: 칸 위상이 대개 달라 한 draw 면 패널 글자가 칸으로 밀렸다, `chrome-strategy.md` §5.3·`SGD3`) · **E3** value 없는 MarkupContent 는 문서 없음(`CPL9`).
 - 등가·죽은 것: **D7** 토글 뒤 `docs_item = null`(접히면 `refreshDocs` 가 비우고 펼칠 땐 이미 비어 있다) → 뺐다 · `docs_loading` 필드는 읽는 곳이 없어 뺐다 ·
   **E5**(같은 문서 재복사 — 누수 아님) · **E7**(닫히면 줄이 비어 앞 가드 둘은 방어) · **E9**(토글의 `metal_dirty` — 키 경로가 세운다) · **E1** 은 주석만 바꾼 무효 변이.
+
+#### 8.2g-e 자동완성 ①-e — 디자인 시스템 목록 (2026-10-10)
+
+**드러난 것.** ① 목록만 디자인 시스템 밖이었다 — 우클릭 메뉴·팔레트·호버·문서 패널은 둥근 **패널 quad**(rich lowering 이 사방 패딩 12px·그림자를
+단다) 위에 서는데, 목록은 행마다 불투명한 fill(선택 `tab_active_bg`, 나머지 `tab_hover_bg`)을 깐 직사각형이라 편집기 위에 「회색 띠 묶음」으로
+보였다(사용자: 「자동완성 UI 좀 이쁘게」·「디자인 시스템 컴포넌트」). ② kind 가 한 글자(`f`·`v`·`t`…)라 무엇인지 읽히지 않았다(§8.2g 「하지 않는
+것: kind 아이콘」). ③ fuzzy 가 무엇을 맞췄는지 보이지 않았다 — `prtf` 가 `printf` 를 왜 찾았는지 화면이 말하지 않는다. VS Code(MIT, 동작만 —
+`suggestWidgetRenderer.ts`)는 kind 아이콘 + 일치 글자 강조를 쓴다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **패널** | 첫 op 는 **직각** 패널 quad(`surface_bg` + `focus_accent` 테두리 · 그림자 — `independent_panel` 이라 모서리 0 이어도 GPU 패널). **패딩은 테두리 폭**이라 행이 테두리 바로 안에 붙는다(`suggest_box.panelPadding` → `Quad.panel_padding_px`; 메뉴·확인창의 `modal_padding_px` 12 는 목록에 너무 컸다 — 사용자 지적, VS Code 비교). **모서리를 두지 않는다** — 1배율에서 1px 테두리 + 둥근 모서리는 안티에일리어싱으로 번져 경계선이 흐렸고 촘촘한 목록에 쓸모가 없었다(사용자 지적; 문서 패널은 호버 상자와 같은 둥근 패널 그대로). 행 배경 fill 은 없다 | ① · VS Code `suggest.css`(MIT, 치수만): 위젯은 테두리 1px 뿐 안쪽 여백이 없다 |
+| **선택** | 선택 행은 **폭 가득한 셀 배경**(`tab_active_bg` `.fill`) — 직각이라 셀 격자에 그대로 앉고 글자 셀이 그 배경을 지닌다. tui 도 같다 | VS Code: 포커스 행은 목록 폭 가득 |
+| **kind 열** | 맨 앞 **아이콘 2칸**(그림은 SVG 안에서 1.25/16 내려 그렸다 — 셀 높이 가운데에 두면 소문자 label 의 x-height 가운데보다 1배율 1.5px 높아 떠 보였다, 사용자 지적)(등록 SVG — `wide_icons` 는 아이콘 op 에만, 사용자 글에는 끈다) · 간격 1(VS Code 는 행 안쪽 2px · 아이콘 16px · 4px — 칸 격자에서 label 이 테두리에서 1배율 25px, VS Code 22px; 아이콘은 SVG 안쪽 여백만큼 테두리에서 떨어진다). kind 글자(`completion.kindGlyph` — 단일 출처 그대로)가 아이콘과 색을 고른다: `f` 함수(`syntax_function`) · `v` 변수(`syntax_property`) · `t` 타입(`syntax_type_name`) · `k` 키워드(`syntax_keyword`) · `m` 모듈(`syntax_tag`) · `s` 스니펫(`syntax_string`) · `p` 속성(`syntax_property`) · `w` 버퍼 단어(`muted_fg` — 확신이 낮은 후보) · 그 밖은 빈 칸. 모양이 kind 를 가르므로 색은 가족만 맞춘다. 아이콘 8종은 Maru 자작(`assets/icons/kind-*.svg`, third-party-licenses) | ② |
+| **일치 글자** | 치는 접두사가 맞춘 label 글자를 `accent_bar` 로. 자리는 `completion.matchPositions` — 점수와 **같은 탐욕 걸음**(`fuzzyMatch` 하나)이라 「무엇을 맞췄나」의 규칙이 필터와 하나다. 다만 순위는 `filterText` 로, 강조는 **보이는 label** 로 잰다 — 둘이 같은 대부분의 항목에서는 강조가 순위의 근거 그대로이고, 다르면(서버가 label 을 꾸민 경우) 화면의 글자에 맞춘 강조이며 안 맞으면 강조가 없다. 걸음은 **글자 단위**다(여러 바이트 글자는 바이트 전부가 같아야 — 예전 바이트 걸음은 `나` 를 `난하` 에 흩어 맞췄다; 필터 오탐도 함께 고쳤다). 접혀 사라진 자리와 `…` 는 강조하지 않는다 | ③ |
+| **폭** | label + 4(아이콘 2 · 간격 1 · 우패딩 1 — VS Code 행 `padding-right: 10px` 자리) + (간격 2 + 오른쪽), 상한 60 그대로 | §8.2g-c |
+| **자리** | 패널이 생겼으므로 `visible_outset_px = panelPadding`(앵커 줄 간격·workspace 경계 여백을 보이는 테두리에서 — `chrome-strategy` §5.4 분류). 보이는 윗단이 앵커 줄 아랫단에 닿는다. 문서 패널은 목록 패딩까지 간격에 더해 **보이는 두 패널이 한 칸** 떨어진다(맞춤 축은 rect 끼리; 문서 패널 자신은 호버 상자와 같은 12px 패딩) | 호버 상자와 같은 규율 |
+| **포인터** | 보이는 패널(테두리 포함)이 목록의 것 — 테두리를 누르면 삼키고 고르지도 닫지도 않는다(예전에는 흘려 패널 아래 caret 이 옮겨졌다). 겹클릭의 둘째·셋째 down(kind 4·5)도 목록이 먼저 본다(안 그러면 패널 아래 낱말이 선택됐다). **버튼은 가리지 않는다** — 행 위 우클릭이 그 행을 고르던 기존 동작과 같게, 패딩 우클릭도 삼킨다(편집기 우클릭 메뉴는 목록 밖에서). 문서 패널도 같다(`suggest_docs.contains`) | 그림과 판정이 한 레이아웃 |
+| **하지 않는 것** | 행 hover 강조 · 굵게(셀 lowering 이 `Run.bold` 를 안 그린다) · 넓히기 · 멀티 커서 완성(다음 조각). tui 토큰(모서리·패딩 0)에서는 행을 공백으로 채우지 않아 앞 오버레이(찾기 막대) 글자가 빈 칸으로 비칠 수 있다 — 제품은 늘 rich 토큰이라 잠복(`chrome_theme`) | 다음 |
+
+**관측점**: `SGB2`(직각 패널 quad 가 첫 op · 선택 행만 폭 가득한 셀 배경 · 다른 quad 없음 · 아이콘 op 의 `wide_icons`·색 · label op 은 끔 · 오른쪽 자리) · `SGB3`(접기 —
+고정 칸 4 뒤의 쓸 칸) · `SGB4`(kind → 아이콘·색 표 · 일치 run — 접두사·흩어진 부분열·접혀 사라진 자리·여러 바이트 · 직각 패널 · 패널 패딩 = 테두리 폭 · 보이는 패널 포인터·
+경계) · `CPL10`(일치 자리 — 점수와 같은 걸음) · `SGD2`·`SGD3`(보이는 두 패널 사이 한 칸 · 목록 draw 는 `independent_panel`) · `ML6`(목록 패널은 **자기 패딩**(1)으로 layer 1 로 커지고 — 찾기 막대는 토큰 12 그대로 — 직각이지만 `independent_panel` 이라 GPU 패널, 선택은 셀 배경) ·
+`CMP5`(폭) · `FINDH1`(목록 글자는 `label_col` 뒤) · `CMP7`(제품 경계 — 행마다 다른 일치 자리 · 아이콘 셀 2칸·자리 · 테두리 클릭·겹클릭은 삼키고 고르지도 닫지도 않음 · 패널 바로 밖은 닫음) · Lab 골든 `suggest-list-design-system`(kind 여덟·일치 글자·폭 가득한 선택 행·한글 label — 상자를 셀 배수에 둔 픽스처, `metal-ui-layout-lab.md` 「아이콘은 원점 0 인 셀 격자」).
+
+**적대적 검증(2026-10-10, 1~10회차 · 변이 40 + VS Code 치수 재조정 뒤 8)**: 독립 리뷰어 여섯(문서·판정자 공허함·렌더·상호작용·견고성·새 눈) + 뮤테이션 러너.
+47 개를 판정자가 잡고 하나가 남았다. **첫 판은 메뉴와 같은 12px 패딩·안쪽 알약이었는데 사용자가 VS Code 와 비교해 패딩이 다르다고 지적했다** — VS Code 의
+`suggest.css`(위젯 안쪽 여백 없음 · 테두리 1px · 행 폭 가득 선택)에 맞춰 패널마다 패딩(`Quad.panel_padding_px`, `ML14`)을 디자인 시스템에 더했다. 결함으로 고친 것:
+- **A1** 한글 접두사 오탐 — 걸음이 바이트끼리 맞춰 `나` 가 `난하` 의 바이트 셋에 흩어 맞았다(필터 오탐이 강조로 드러났다) → 걸음을 글자 단위로(`CPL10`).
+- **A2** 연속 가산이 바이트 기준이라 한글에서 늘 거짓 → 앞 일치 글자 끝으로 잰다(`CPL10` `x가나zz` › `x가y나`).
+- **A3** 잘린 접두사(`\xEB`)가 접두사로 안 잡혔다 → 접두사는 걸음 없이 정한다(`CPL10`).
+- **A4** 깨진 UTF-8 에서 run 이 뒤 글자를 쪼개 한 칸 넓게 그려졌다 → 그리는 쪽과 같은 디코더(`SGB4`).
+- **A5** label 의 진짜 `…` 가 접힌 표시 `…` 와 바이트로 섞여 강조됐다 → 접힘 여부를 명시(`SGB4`).
+- **A6** resolve 뒤 행을 못 세우면 닫았는데, 확정 보류 중이면 그 Enter 가 사라졌다 → 보류면 확정으로 흘린다(판정자 없음 — 할당 실패 주입이 없다).
+- **A7** 패딩 겹클릭의 둘째 down(kind 4·5)이 편집기로 흘러 낱말이 선택되고 목록이 닫혔다 → 목록이 먼저 본다(`CMP7`).
+- 판정자 보강: 행마다 다른 일치 자리·아이콘 셀 2칸(`CMP7` — 제품 셀 경로), 스크롤된 창의 알약·테두리 폭(`SGB2`), 네 변 포인터·경계 여백 정확값·위로 뒤집힘(`SGB4`),
+  i18n 원장(Lab 픽스처 낱말).
+- 남은 것: **`matchPositions(it.filter, …)`** — 버퍼 단어와 가짜 서버 항목은 filterText 가 label 과 같아 갈리지 않는다(위 「일치 글자」의 설계 결정; 그런
+  항목을 가짜 서버에 넣으면 기존 CMP 판정자의 행 수가 바뀐다). 점수 포화(`*|`)는 수만 글자 접두사에서만 갈려 판정자를 두지 않았다.
 
 ### 8.2h LSP 2단 ⑦ — code action (2026-09-19, 계획 공격 뒤의 결정)
 

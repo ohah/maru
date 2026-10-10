@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- 자동완성 kind 표시를 위해 독립 제작한 벡터 자산. 외부 에디터 자산을 복사하지 않는다. -->
+  <!-- 글자 옆에 서는 아이콘이라 그림을 1.25 내렸다 — 셀 높이 가운데에 두면 소문자 label 의 x-height 가운데보다 높아 떠 보였다(1배율 실측 1.5px). -->
+  <g transform="translate(0 1.25)">
+    <circle cx="5.2" cy="10.8" r="2.4" fill="none" stroke="black" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M6.9 9.1 13 3 M10.6 5.4l1.6 1.6 M12.1 3.9l1.2 1.2" fill="none" stroke="black" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

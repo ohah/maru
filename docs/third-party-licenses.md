@@ -83,6 +83,8 @@ license-inventory를 함께 갱신한다. 버전·라이선스·한쪽 아키텍
 
 `assets/icons/`의 SVG 중 아래 15종은 **GitHub Octicons**(primer/octicons, MIT) 유래다. 빌드 준비 단계에서 `tools/svg_to_coverage.py`가 coverage 마스터로 변환해 커밋된 `src/renderer/icon_coverage_data.zig`(+ `src/platform/macos/icon_codepoints.h`)에 들어가고, 앱이 이 데이터를 렌더하므로 **파생 형태(coverage 데이터)로 배포물에 포함**된다. SVG 파일 자체는 번들에 복사되지 않는다.
 
+아래 모든 아이콘(Octicons 유래와 Maru 자작 모두)에 공통: `tools/svg_to_coverage.py`의 manifest는 각 exact path/codepoint/SHA-256을 커밋된 Zig 데이터에 기록한다. 기본 Zig test는 외부 도구 없이 실제 SVG SHA-256과 C/Zig registry를 검증하고, `mise run icons:check`는 `rsvg-convert`/Pillow가 있는 개발 환경에서 SVG→coverage 재생성 drift까지 확인하는 opt-in gate다.
+
 | 아이콘 | 파일 | 라이선스 | 저작권 | 출처 |
 | --- | --- | --- | --- | --- |
 | bell · folder · gear · git-branch · mark-github · plus · search · sidebar-collapse | `assets/icons/<이름>.svg` | MIT | © GitHub, Inc. | <https://github.com/primer/octicons> |
@@ -116,7 +118,12 @@ license-inventory를 함께 갱신한다. 버전·라이선스·한쪽 아키텍
 안에서 `esc`·`tab` 라벨보다 훨씬 작아 보였다(화면으로 확인). 합성 아이콘은 슬롯을 가장자리까지
 채우므로 크기를 우리가 정한다. 같은 이유가 §9.6(헤더 아이콘)에도 적혀 있다.
 
-`tools/svg_to_coverage.py`의 manifest는 각 exact path/codepoint/SHA-256을 커밋된 Zig 데이터에 기록한다. 기본 Zig test는 외부 도구 없이 실제 SVG SHA-256과 C/Zig registry를 검증하고, `mise run icons:check`는 `rsvg-convert`/Pillow가 있는 개발 환경에서 SVG→coverage 재생성 drift까지 확인하는 opt-in gate다.
+### Maru 자작 자동완성 kind 아이콘
+
+`kind-function.svg`·`kind-variable.svg`·`kind-type.svg`·`kind-keyword.svg`·`kind-module.svg`·`kind-snippet.svg`·`kind-property.svg`·`kind-word.svg`
+여덟은 **자동완성 목록의 kind 열**용으로 이 작업에서 처음 만든 **Maru 원본 자산**이며 외부 에디터의 아이콘을 복사·변형하지 않았다. 은유(함수=정육면체, 속성=열쇠, 모듈=중괄호, 스니펫=점선 상자)는 편집기 관례를 참고했고, 기하(path)는 전부 독립 제작이다.
+`0 0 16 16` viewBox, 획 굵기 1.25 로 한 세트를 맞췄고, 색은 자산이 아니라 그리는 쪽(kind 별 syntax 역할)이 입힌다.
+라이선스는 Maru 본체와 같은 MIT([LICENSE](../LICENSE)), 저작권자는 Maru contributors다.
 
 ## 파일 패널 웹 런타임
 

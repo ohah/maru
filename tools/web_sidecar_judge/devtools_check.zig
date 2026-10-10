@@ -12,7 +12,8 @@
 //!   dt-too-large       16 MiB 를 넘는 결과는 조각 없이 too_large
 //!   dt-big-result-time 8 MiB 결과를 sidecar 가 다 써 보내는 시간(판정자는 바로 읽는다 — maru 의 tick 예산 지연은 재지 않는다)
 //!   dt-busy            탭마다 상한(2)을 넘으면 busy
-//!   dt-busy-other-tab  그 탭이 상한이어도 다른 탭은 부를 수 있다(멈춘 페이지 하나가 다른 탭을 막지 못한다)
+//!   dt-busy-other-tab  그 탭이 상한이어도 다른 탭은 부를 수 있다(멈춘 페이지 하나가 다른 탭을 막지 못한다 — `dt-busy` 와 함께여야
+//!                      뜻이 있다: 탭마다 상한이 없던 옛 설계도 이것만은 통과한다)
 //!   dt-closed          인자를 다 받지 못한 호출과 CDP 로 보내 답을 기다리는 호출이 브라우저를 닫으면 `browser_closed` **앞에** detached
 //!   dt-renderer-gone   답을 기다리는 호출(끝나지 않는 Promise)이 렌더러가 죽으면 detached 로 끝난다
 //!   dt-expired         시한을 줄인 host(`MARU_WEB_TEST_DEVTOOLS_STALE_MS`)에서 답이 오지 않는 호출이 새 호출 없이도 expired 로 끝난다
@@ -345,5 +346,6 @@ fn expired(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, p
     const c = try r.call("Runtime.evaluate", "{\"expression\":\"new Promise(function(){})\",\"awaitPromise\":true}");
     const d = r.wait(c, 8_000);
     const ms = os.nowMs() - started;
-    report(d != null and d.?.status == .expired and ms >= 1_400, "dt-expired", std.fmt.bufPrint(&detail, "상태 {s} · {d} ms(시한 1500 ms · 정리 주기 375 ms)", .{ statusName(d), ms }) catch "");
+    // 시한 1500 + 정리 주기 375 안에 와야 한다(정리가 시한 그 자체·수 초 주기로 퇴행하면 넘는다) — 부하 여유 750 ms.
+    report(d != null and d.?.status == .expired and ms >= 1_400 and ms <= 2_625, "dt-expired", std.fmt.bufPrint(&detail, "상태 {s} · {d} ms(1400~2625 — 시한 1500 · 정리 주기 375)", .{ statusName(d), ms }) catch "");
 }

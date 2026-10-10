@@ -818,8 +818,8 @@ U2 판정자들이 `refreshCaretAnchor`·`buildChromeOverlayPrep` 을 직접 불
 | **목록** | `CompletionList{isIncomplete, items}` 또는 `CompletionItem[]`. 항목: `label`·`filterText`(없으면 label)·`sortText`(없으면 label)·`insertText`/`textEdit.newText`(없으면 label)·`detail`·`preselect`·`additionalTextEdits`. **로컬 필터** = 접두사(대소문자 무시)로 `filterText` 시작; **정렬** = 대소문자까지 맞는 접두사가 먼저(구현이 되먹인 것 — clangd 실측: `pri` 에 index 의 `•PRId16` 매크로가 sortText 로 `printf` 를 앞서 창을 채웠다; VS Code 는 자기 fuzzy 점수를 sortText 앞에 둔다), 그 안에서 `sortText`, 같으면 label; `preselect` 가 있으면 그것을 처음 선택. 창 10행, 선택은 창을 따른다 | ui §8.2 「필터링은 로컬」 |
 | **타이핑 중** | 문서가 바뀌면 프레임마다 접두사를 다시 잰다(`[word_start, caret)`). caret 이 `word_start` 앞이거나 다른 줄이면 **닫는다**; 접두사가 바뀌었는데 `isIncomplete` 면 다시 묻는다(응답이 목록을 갈아 끼운다); 필터 결과가 0 이면 닫는다(다음 글자로 다시 뜬다) | ui §8.2 |
 | **키** | 열린 동안 `↑`/`↓` 선택(창 이동), `Enter`/`Tab` 확정, `Esc` 닫기 — 셋만 소비한다. 나머지는 편집기로(타이핑하면서 좁혀진다). 화살표 `←→`·마우스 caret 이동·입력을 받는 다른 오버레이(토스트·포커스 없는 찾기 막대 제외 — §8.2g)·rename·문서 재로드는 닫는다. **보이지 않는 목록은 확정하지 않는다** — 응답은 왔지만 프레임이 아직 상자를 세우지 않았으면 `Enter`/`Tab` 은 편집기로 흘린다(구현이 되먹인 것: 캡처 실측에서 그 사이의 키가 보이지도 않은 첫 항목을 넣었다; VS Code 도 위젯이 보일 때만 받는다) | ui §8 규칙 3 |
-| **적용** | primary caret 하나: 주 편집 = `[word_start, caret)` → `newText`(§3.6 — `applyEditAsOne` 하나) + `additionalTextEdits`. **응답 뒤 문서가 바뀌었으면** `additionalTextEdits` 는 전부 `word_start` 앞에서 끝날 때만 함께 적용한다(타이핑은 `word_start` 뒤에서만 일어나므로 그 앞의 offset 은 그대로다) — 아니면 그 항목의 additional 은 버린다(카운터). 적용 뒤 caret 은 `newText` 끝. 멀티 커서는 primary 만(다음) | §3.6 「자동 import 가 딸린 완성 하나도 undo 하나」 |
-| **하지 않는 것** | 스니펫(`$1` 탭스톱) · fuzzy 필터 · `completionItem/resolve`(문서 지연 로드) · 문서 패널 · kind 아이콘(§8.2g-e 에서 함) · commitCharacters · 버퍼 단어 fallback·스니펫·경로 완성(①-b) · ghost text(§4) · `itemDefaults` · 멀티 커서 · `PageUp/Down` | 다음 조각 |
+| **적용** | 주 편집 = `[word_start, caret)` → `newText`(멀티 커서면 커서마다 — §8.2g-f)(§3.6 — `applyEditAsOne` 하나) + `additionalTextEdits`. **응답 뒤 문서가 바뀌었으면** `additionalTextEdits` 는 전부 `word_start` 앞에서 끝날 때만 함께 적용한다(커서 하나면 타이핑은 `word_start` 뒤에서만 일어나므로 그 앞의 offset 은 그대로다 — 멀티 커서는 앞쪽 커서도 치므로 편집 경로가 그 offset 을 함께 민다, §8.2g-f) — 아니면 그 항목의 additional 은 버린다(카운터). 적용 뒤 caret 은 `newText` 끝(커서마다). 멀티 커서는 처음엔 primary 만이었다(다른 커서를 접었다) → §8.2g-f 에서 커서마다 | §3.6 「자동 import 가 딸린 완성 하나도 undo 하나」 |
+| **하지 않는 것** | 스니펫(`$1` 탭스톱) · fuzzy 필터 · `completionItem/resolve`(문서 지연 로드) · 문서 패널 · kind 아이콘(§8.2g-e 에서 함) · commitCharacters · 버퍼 단어 fallback·스니펫·경로 완성(①-b) · ghost text(§4) · `itemDefaults` · 멀티 커서(§8.2g-f 에서 함) · `PageUp/Down` | 다음 조각 |
 
 **적대적 검증(2026-09-19, 1~5회차 · 변이 46)**: 1회차 순수·chrome 18 → 0(무효 3 → 유효로 재실행) · 2회차 상태 기계 18 → 5(무효 4 → 재실행) ·
 3회차 배선 10 → 1 · 4회차 재실행 13 → 4 · 5회차 재실행 2 → 0. 판정자를 더해 사살한 것 여섯, 등가 1, 죽은 가드 1 제거:
@@ -1039,7 +1039,7 @@ labelDetails 가 없다.
 | **폭** | label + 4(아이콘 2 · 간격 1 · 우패딩 1 — VS Code 행 `padding-right: 10px` 자리) + (간격 2 + 오른쪽), 상한 60 그대로 | §8.2g-c |
 | **자리** | 패널이 생겼으므로 `visible_outset_px = panelPadding`(앵커 줄 간격·workspace 경계 여백을 보이는 테두리에서 — `chrome-strategy` §5.4 분류). 보이는 윗단이 앵커 줄 아랫단에 닿는다. 문서 패널은 목록 패딩까지 간격에 더해 **보이는 두 패널이 한 칸** 떨어진다(맞춤 축은 rect 끼리; 문서 패널 자신은 호버 상자와 같은 12px 패딩) | 호버 상자와 같은 규율 |
 | **포인터** | 보이는 패널(테두리 포함)이 목록의 것 — 테두리를 누르면 삼키고 고르지도 닫지도 않는다(예전에는 흘려 패널 아래 caret 이 옮겨졌다). 겹클릭의 둘째·셋째 down(kind 4·5)도 목록이 먼저 본다(안 그러면 패널 아래 낱말이 선택됐다). **버튼은 가리지 않는다** — 행 위 우클릭이 그 행을 고르던 기존 동작과 같게, 패딩 우클릭도 삼킨다(편집기 우클릭 메뉴는 목록 밖에서). 문서 패널도 같다(`suggest_docs.contains`) | 그림과 판정이 한 레이아웃 |
-| **하지 않는 것** | 행 hover 강조 · 굵게(셀 lowering 이 `Run.bold` 를 안 그린다) · 넓히기 · 멀티 커서 완성(다음 조각). tui 토큰(모서리·패딩 0)에서는 행을 공백으로 채우지 않아 앞 오버레이(찾기 막대) 글자가 빈 칸으로 비칠 수 있다 — 제품은 늘 rich 토큰이라 잠복(`chrome_theme`) | 다음 |
+| **하지 않는 것** | 행 hover 강조 · 굵게(셀 lowering 이 `Run.bold` 를 안 그린다) · 넓히기 · 멀티 커서 완성(§8.2g-f 에서 함). tui 토큰(모서리·패딩 0)에서는 행을 공백으로 채우지 않아 앞 오버레이(찾기 막대) 글자가 빈 칸으로 비칠 수 있다 — 제품은 늘 rich 토큰이라 잠복(`chrome_theme`) | 다음 |
 
 **관측점**: `SGB2`(직각 패널 quad 가 첫 op · 선택 행만 폭 가득한 셀 배경 · 다른 quad 없음 · 아이콘 op 의 `wide_icons`·색 · label op 은 끔 · 오른쪽 자리) · `SGB3`(접기 —
 고정 칸 4 뒤의 쓸 칸) · `SGB4`(kind → 아이콘·색 표 · 일치 run — 접두사·흩어진 부분열·접혀 사라진 자리·여러 바이트 · 직각 패널 · 패널 패딩 = 테두리 폭 · 보이는 패널 포인터·
@@ -1060,6 +1060,39 @@ labelDetails 가 없다.
   i18n 원장(Lab 픽스처 낱말).
 - 남은 것: **`matchPositions(it.filter, …)`** — 버퍼 단어와 가짜 서버 항목은 filterText 가 label 과 같아 갈리지 않는다(위 「일치 글자」의 설계 결정; 그런
   항목을 가짜 서버에 넣으면 기존 CMP 판정자의 행 수가 바뀐다). 점수 포화(`*|`)는 수만 글자 접두사에서만 갈려 판정자를 두지 않았다.
+
+#### 8.2g-f 자동완성 ①-f — 멀티 커서 (2026-10-10)
+
+**드러난 것.** ① §8.2g 의 첫 조각은 확정 때 **다른 커서를 접고** primary 에만 넣었다(`clearExtraSelections`) — 커서 셋에서 `wor` 를 치고 Enter 를 누르면
+커서 둘이 사라지고 한 곳만 `world` 가 됐다. ② VS Code(MIT, 동작만 — `snippetSession.ts` `createEditsAndSnippetsFromSelections`)는 **커서마다** 넣는다:
+primary 가 덮는 앞 글(`overwriteBefore`)과 **같은 글**이 그 커서 앞에 있으면 그만큼 늘려 덮고, 다르면 그 selection 에 넣기만 한다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **자리** | primary = `[start, caret)`(치던 접두사, 또는 서버 textEdit 의 머리). 다른 selection 마다 그 앞 `len` 바이트가 primary 의 덮는 글과 같으면 `[sel.start − len, sel.end)`, 아니면 `[sel.start, sel.end)`(순수 `completion.multiSites`) | ② |
+| **겹침** | primary 가 덮는 범위 안의 caret 은 뺀다(그 자리는 primary 편집에 흡수). 다른 자리끼리 겹치면 늘리지 않은 자리로 물러서고, 그래도 겹치면 뺀다(합쳐진 커서라 같은 자리 둘은 없다; primary 와 같은 자리의 길이 0 은 겹침). additional 과 겹치는 커서는 **그 커서만** 놓는다(`completion.conflicts` — `mergeMany` 와 같은 판정). additional 이 **primary** 자리와 겹치면 확정 전체를 하지 않는다(커서 하나일 때와 같다) | 같은 곳에 두 번 넣지 않는다 |
+| **한 편집** | additional(자동 import)은 **한 번**, 자리 전부와 함께 `completion.mergeMany` → `applyEditAsOne` 하나 = **undo 하나**(되돌리면 커서도 셋) | §3.6 |
+| **caret** | 자리마다 넣은 끝 — 정렬된 목록에서 **그 자리 자신의 항목**까지 길이 차를 쌓아 잰다(`completion.siteEnds`; 같은 시작의 import 가 앞에 적용되므로 「자리 시작보다 앞」으로 세면 빠뜨렸다). 정렬 키는 (start, end) — 맞닿은 넣기(`[k,k)`)가 `[k,m)` 앞에 선다. 놓을 수 없던 커서는 사라지고, 남은 커서는 `mergeCarets` 로 합친다 | §3.2 |
+| **offset 밀기** | 목록이 쥔 편집 전 offset(낱말 시작·나가 있는 요청의 낱말 시작·서버 textEdit 머리·additional)을 **모든 편집이 지나는** `shared_edit.applyPrepared`(와 여러 문서 작업의 `history.finish`)가 같은 delta 로 민다(`completion_client.noteDocumentEdit`, `delta.mapOffset`) — 앞쪽 커서에서 친 글자만큼 primary 낱말이 밀리기 때문이다. 나가 있는 요청은 **요청한 뷰**(`waiting_surface`)로 재고, 그 낱말 시작 앞을 고쳤으면 응답의 서버 자리(줄·글자)가 낡았으니 **그 응답을 버리고 다시 묻는다**(`asked_shifted` → `onResponse`; 치는 글자가 `dirty` 로 다시 묻는 것과 같은 길. 머리만 지우면 머리가 낱말 앞인 후위 완성이 엉뚱하게 들어갔다. 다른 줄 편집도 켜는 보수적 판정 — 값은 다시 묻는 것뿐). 낱말 시작 앞을 지우며 걸치면(트리거 글자 삭제) 닫는다. 확정 자신의 편집은 건너뛰고(`accepting`), 확정은 나가 있는 요청을 지운다(그 응답이 확정 뒤 목록을 다시 열었다) | 적대적 1·3·5회차 |
+| **요청·응답** | 낡은 응답을 버리고 다시 물을 때는 **그 요청의 트리거**로 묻는다(`asked_trigger` — 대기 중에 친 글자가 있으면 그것). 사용자가 닫으면(Esc·수정자 chord·바깥 클릭 — `cancel`) 나가 있는 요청의 응답도 버린다. Enter 는 나가 있는 재요청을 버리고, 확정이 resolve 를 기다리는 동안에는 다시 묻지 않으며, 기다린 확정은 **Enter 때 고른 항목**을 넣는다(`pending_item` — 그 사이 다시 좁혀 선택이 preselect 로 돌아가도) | 적대적 8회차 — 셋 다 커서 하나에서도 있던 구멍이다 |
+| **하지 않는 것** | `overwriteAfter`(caret 뒤를 덮는 textEdit 끝 — 우리 항목은 머리만 싣는다) · 커서마다 다른 들여쓰기 맞춤(스니펫이 없다) · 프레임이 상태를 다시 맞추며 닫는 경우(낱말 밖 caret)의 대기 지우기(다음 응답이 같은 판정으로 닫힌다) | 다음 |
+
+**관측점**: `CPL11`(순수: 자리 — 같은 글이면 늘림·다르면 넣기만·primary 범위 안 caret 빠짐·겹치면 물러섬·같은 자리 둘·빈 접두사 · `mergeMany` 의 순서·복사·겹침) ·
+`CPL12`(순수: 자리 끝 — 같은 시작의 import·맞닿은 넣기·빈 insert · `conflicts` 가 `mergeMany` 와 같다) ·
+`CMP8`(제품 경계 — 커서 셋에서 `r` 을 치고 Enter: 같은 접두사 줄은 덮고 다른 글 뒤는 넣기만, caret 셋이 각자 끝, undo 하나로 세 자리와 커서 셋이 돌아온다) ·
+`CMP9`(제품 경계 — primary 가 뒤쪽 커서: 앞 커서에서 쳐도 낱말 시작이 밀려 목록이 살고, 확정이 두 자리 모두 제 낱말을 덮는다) ·
+`CMP10`(제품 경계, 가짜 서버 — 기다리는 동안 친 글자가 서버 자리를 낡았다고 표시하고 다시 물은 응답이 연다 · 열린 동안 친 글자가 textEdit 머리·import 를 밀어 `fake_import` 가 두 줄에 맞게, import 는 한 번 · 다시 묻는 요청이 나가 있는 채 확정해도 그 응답이 목록을 다시 열지 않음 · 트리거 글자를 지우면 닫힘) ·
+`CMP11`(제품 경계, 가짜 서버 — 응답 전에 같은 줄 앞을 치지 않고 고치면 낡은 응답을 버리고 다시 물어, 확정이 제 낱말만 덮고 import 는 한 번) ·
+`CMP12`(제품 경계, 가짜 서버 — 버린 응답은 `.` 트리거로 다시 물어 목록이 산다 · 나가 있는 재요청 중 Esc 면 그 응답이 와도 안 열린다 · 확정 대기 중 친 글자는 다시 묻지 않고 고른 `printf` 가 들어간다).
+
+**적대적 검증(2026-10-10, 1~10회차 — 독립 리뷰어 여섯 + 뮤테이션 러너)**: 결함으로 고친 것 — 앞쪽 커서에서 치면 낱말 시작이 낡아 목록이 키마다
+닫히고 확정이 앞 글을 덮음(편집 경로가 offset 을 민다) · 같은 시작의 import 를 caret 끝에서 빠뜨림(`siteEnds`) · start 만 보는 정렬이 맞닿은 넣기를
+Overlap 으로 만들어 다른 커서가 전부 사라짐 · import 와 겹치면 커서를 전부 놓음 · 첫 응답을 기다리는 동안 엉뚱한 뷰로 재 안 밀림 · 트리거 글자를
+지워도 목록이 남음 · 낡은 서버 자리(머리만 지우면 후위 완성이 깨짐 → 응답을 버리고 다시 묻는다) · 확정 뒤 나가 있던 응답이 목록을 다시 엶 ·
+커서 수의 제곱 비용 · 버린 응답을 낡은 트리거로 다시 물어 `.` 목록이 닫힘 · Esc 뒤 재요청 응답이 목록을 다시 엶 · 확정 대기 중 재요청이 기다리던 Enter 를
+지움 · 기다리는 동안 다시 좁혀 다른 항목이 확정됨. 등가로 남긴 뮤턴트 — `mergeCarets`(빈 insert 가 아니면 자리 끝이 겹칠 수 없다) · `accepting`(확정은 이미 복사한 변경·끝만 쓰고 곧 닫힌다 —
+확정 편집이 낱말 시작 앞을 걸쳐 도중에 닫혀도 결과가 같다). 판정자 사각 — additional 밀기·Overlap 복구 갈래(가짜 서버의 import 는 offset 0 이라
+못 밟는다 — 낱말 뒤 import 를 내는 서버로 재는 것은 다음) · 확정 자신의 대기 지우기(행 클릭 확정 경로 — 키보드는 Enter 가 먼저 지운다).
 
 ### 8.2h LSP 2단 ⑦ — code action (2026-09-19, 계획 공격 뒤의 결정)
 

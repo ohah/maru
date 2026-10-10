@@ -241,6 +241,14 @@ pub fn preparePublication(self: *AppSession, term: *Term, d: maru.session.editor
     return .{ .session = self, .term = term, .change = d, .views = prepared, .line_count = line_count, .restore_source = restore_source };
 }
 pub fn applyPrepared(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections, result_selection_count: usize) !maru.session.editor.delta.Inverse {
+    const inverse = try applyPreparedImpl(self, term, d, sels, result_selection_count);
+    // 자동완성이 들고 있는 문서 offset(낱말 시작·서버 textEdit 머리·additional)을 **같은 편집으로** 민다(§8.2g-f) — 편집은 모두 여기를 지난다.
+    // 안 밀면 primary 앞 커서에서 친 글자만큼 낱말 시작이 낡아 목록이 키마다 닫히고 확정이 엉뚱한 범위를 덮었다(적대적 1회차).
+    editor_ops.completion_client.noteDocumentEdit(self, term, d);
+    return inverse;
+}
+
+fn applyPreparedImpl(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections, result_selection_count: usize) !maru.session.editor.delta.Inverse {
     const state = term.rt.editorDocument();
     const lease = term.rt.editor_document_lease orelse return state.opened.?.file.apply(d, sels);
     const count = lease.owner.viewCount(lease) orelse return error.DocumentNotRegistered;

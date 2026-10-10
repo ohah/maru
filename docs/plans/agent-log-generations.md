@@ -5,7 +5,7 @@
 설계 확정. 사용자는 명시적인 세대 ID와 offset의 공통 계약에 이어 native 기록기
 방식으로 후속 구현을 진행하도록 승인했다(2026-10-11). 아래는 단계별 구현 계획이며
 각 단계의 라이브 배선과 OS 검증이 완료되기 전에는 제품 지원 완료를 뜻하지 않는다.
-현재 다음 작업은 1단계 순수 codec과 reconciliation이다. peer ACK는 별도 범위다.
+1단계 순수 codec과 reconciliation은 구현됐고 native 기록기부터 라이브 배선은 후속이다. peer ACK는 별도 범위다.
 
 ## 현재 경로와 필요한 변경
 
@@ -107,3 +107,44 @@ v2 기능이 확인되기 전에는 v2 resume를 구버전 CLI에 보내지 않�
 
 기록기/수신기 배선 및 OS 실행 검증이 닫히기 전에는 세대 기반 이어읽기 완료라고
 표시하지 않는다. legacy 지원·ACK·crash durability와 검증 상태를 분리한다.
+
+## 1단계 codec의 확정 바이트 계약
+
+v2 헤더는 `MARU_AGENT_LOG_V2\t<소문자 hex 32자리>\n`이다. codec은 이 헤더만
+엄격하게 해석한다. 일반 v1 로그는 NotGenerationLog로 구분하며 예약 magic의 부분
+헤더·지원하지 않는 버전·잘못된 ID를 v1로 취급하지 않는다. 헤더 뒤의 데이터는 그대로 둔다.
+빈 파일의 초기 생성은 기록기가 맡으며 빈 입력은 incomplete header다.
+
+resume entry는 `이름:offset` 또는 `이름:offset:세대hex`이며 이름은 기존
+agent_hook_command의 토큰 클래스와 remote_log_name_max를 따른다. offset은
+ASCII 숫자로 된 u64, 선행 0 허용이며 추가 구분자·부호·공백을 거부한다. 이름별 중복은
+목록을 소유하는 기존 맵에서 검사하며 entry codec이 혼자 목록을 소유하지 않는다.
+
+v2 reconciliation은 같은 generation이고 offset이 현재 payload 크기 이내인
+경우만 위치를 유지한다. 다른/없는 generation 또는 범위 밖 위치는 현재 generation의
+payload 0으로 돌아간다. 실제 seek는 고정 헤더 길이+offset의 overflow를 검사한다.
+회전 eligibility는 snapshot의 끝까지 소비했고 현재 generation과 EOF가 snapshot과
+일치할 때만 참이다. 이 판정은 공유 lock과 출력 flush를 대신하지 않는다.
+
+1단계는 순수 계약과 기본 test 배선까지이며 native 기록기·wire 협상·앱 cursor의
+라이브 연결은 후속 단계다. 이 단계에서 기존 CLI 입력과 제품 로그를 변경하지 않는다.
+
+## 1단계 구현 결과
+
+`session.agent_log_generation`이 Generation/Header/ResumeEntry codec, payload seek
+overflow 검사, generation-aware reconciliation 및 snapshot 회전 eligibility를
+소유한다. `test-agent-log-generations`는 기본 test 그래프에 포함된다. 단위 검사에는
+독립 golden header와 std hex formatter oracle, 모든 byte 값/ID byte 위치,
+최대 이름·u64·작은 buffer·헤더 절단 위치·legacy 구분이 포함된다.
+
+macOS Debug·ReleaseFast와 실제 Ubuntu 24.04 ARM64 테스트 실행이 통과했다.
+Windows x86_64 test 모듈 cross compile은 통과했으나 Windows native 실행은
+미검증이다. generation 비교·offset 범위·회전 크기·회전 generation·부분 헤더
+가드를 무력화한 변형은 컴파일 후 해당 행위 테스트에서 실패했고 등가 조건은 통과했다.
+변형은 격리된 소스 사본에서 실행하고 제거했다.
+
+새 포맷은 아직 기록기·CLI·수신 앱에 연결되지 않았으므로 제품의 같은 크기 파일
+교체 감지 완료를 의미하지 않는다. 2단계는 native 기록기의 세대 생성·잠금·publish와
+기존 훅 대비 latency 검증이다.
+
+전체 `check-targets`·`check-boundaries`, native build 및 문서 링크/행 인용 검사도 통과했다.

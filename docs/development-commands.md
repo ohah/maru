@@ -34,6 +34,14 @@ root `maru --help`/`maru -h`는 단독 요청으로 지원한다. `terminfo`와 
 인자 판정·실제 process 부작용·relay 회귀 검증을 실행한다. 새 help 요청은 cache 생성,
 stdin relay, host 시작 및 control socket 연결을 하지 않는다.
 
+### CLI 대상 옵션 단일 지정
+
+실행 요청의 `sessions list --window` 및 `editor lsp trust revoke/forget --volume`는
+각 한 번만 지정한다. 같은 값, 0, 앞자리 0, hex 대소문자 등 표기가 달라도 반복 지정은
+exit 1이며 소켓 연결·auth·request를 시작하지 않는다. `--option value`와 `--option=value`는
+같은 옵션이다. 기존 `maru lsp` 별칭도 같은 계약이다. 옵션 생략과 정상 단일 지정은 유지하며
+여러 대상은 별도 호출로 실행한다. 도움말은 기존 계약을 유지한다.
+
 ## 에디터 앱 URL
 
 - `mise exec -- zig build test-editor-app-url`: 순수 URL grammar·bounded startup queue·OOM·encoder corpus.

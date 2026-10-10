@@ -207,3 +207,19 @@ Debug/ReleaseFast 순수 suite는 126 passed/1 skipped다. relay suite는 기존
 help 테스트 1개 및 실제 모듈 그래프의 anonymous block 23개를 확인해 총 33개 기록을
 갱신했다(32 passed/1 skipped). 도움말 판정을 무력화한 runtime 변형은 leaf help 테스트에서
 UnknownOption으로 실패했다. 다른 selector의 중복 정책은 이번 구현에서 바꾸지 않았다.
+
+## window·volume 단일 대상 계약
+
+사용자 승인된 후속 작업: 실행 요청에서 sessions list의 --window 및 LSP revoke/forget의
+--volume도 각 한 번만 지정한다. 같은 값, 0, 정규화하면 같은 숫자 및 공백/= 표기 혼용
+모두 중복으로 거부하며 socket 연결/auth/request 전에 exit 1이다. canonical editor lsp와
+기존 lsp 별칭에 같은 parser·계약을 적용한다. 정상 단일 대상, 생략 가능한 대상 옵션,
+기존 도움말 및 wire/auth 의미는 유지한다. 여러 대상은 별도 호출로 실행한다.
+
+window·volume 수정 전의 private socket 재현은 /tmp/maru-selector-baseline-*/result.json에
+기록했다. 창 0→2 및 canonical/legacy LSP 볼륨 0→A가 실제 wire에서 마지막 값으로
+바뀌었다. 수정 후 Debug/ReleaseFast 순수 suite는 137 passed/1 skipped다. 실제 process
+회귀 5회는 매회 342개 검사가 통과했다. 새 중복 120개(window 24, 양쪽 LSP alias의
+revoke/forget 96개)는 정상 접속 가능한 endpoint에 연결하지 않았고, 정상 단일/생략 요청의
+wire 및 inherited pane 환경에서도 LSP auth selector 없는 계약을 대조했다. 각 중복 방어를
+제거한 변형은 해당 순수 판정자에서 실패했다. artifact는 저장소에 넣지 않았다.

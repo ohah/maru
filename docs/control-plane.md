@@ -580,3 +580,10 @@ OpenSSH 는 `exec` 을 사용자 셸에 물려 돌리므로, `maru` 가 없어�
 `maru control --help`/`-h`는 사람용 usage를 stdout으로 표시하고 exit 0으로 끝난다.
 stdin을 읽거나 소켓에 연결하지 않는다. 기존 `maru control --stdio`는 계속 wire만
 중계한다. --stdio와 help를 함께 지정하거나 추가 토큰을 주면 중계 전에 오류로 거부한다.
+
+### CLI 대상 필터 중복 거부
+
+sessions list의 --window 및 LSP revoke/forget의 --volume은 실행 요청당 한 번만 지정한다.
+공백/= 형태를 섞거나 같은 값(정규화하면 같은 값 포함)을 반복해도 exit 1로 거부하며
+auth/request 전송 전 종료한다. canonical editor lsp와 기존 lsp 별칭은 같은 parser를 쓴다.
+단일 필터와 생략 가능한 필터의 기존 wire/auth 계약은 유지한다. 여러 대상은 별도 호출이다.

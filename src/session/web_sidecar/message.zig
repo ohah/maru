@@ -157,6 +157,17 @@ pub const Tag = enum(u8) {
     download_decide = 129,
     /// 사용자가 다운로드를 취소하거나 다시 받으라 했다(W10a).
     download_control = 130,
+    /// 그 브라우저의 프로세스 안 DevTools 에 메서드 하나를 부른다(W9-0b — CDP, 원격 디버깅 포트는 열지 않는다). 인자(JSON 객체)는
+    /// `params_size` 만큼 `devtools_call_data` 조각으로 뒤따른다(0 이면 인자 없이 곧바로 부른다). 답은 `devtools_result` 하나 —
+    /// 호출 번호는 maru 가 매긴다(0 이 아니다).
+    devtools_call = 131,
+    /// `devtools_call` 인자의 한 조각(W9-0b) — 다 모이면 sidecar 가 부른다.
+    devtools_call_data = 132,
+
+    /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
+    devtools_result_data = 64,
+    /// `devtools_call` 의 끝(W9-0b) — 상태와 보낸 결과 크기. 결과가 있는 상태(`ok`·`cdp_error`)만 크기가 0 이 아닐 수 있다.
+    devtools_result = 65,
 
     pub fn direction(self: Tag) Direction {
         const v = @intFromEnum(self);
@@ -1000,6 +1011,74 @@ pub const DownloadDecide = struct {
     path: []const u8,
 };
 
+/// DevTools 호출(W9-0b) 상한 — 메서드 이름(`Domain.method`), 인자, 결과, 조각.
+pub const max_devtools_method_bytes: usize = 128;
+/// sidecar 의 명령 상자(1 MiB)를 넘지 않게: 동시 호출 `max_devtools_calls` 개가 다 차도 그 60 % 안이다(codec comptime).
+pub const max_devtools_params_bytes: u32 = 64 * 1024;
+/// 인자 JSON 의 중첩 깊이 상한 — Chromium 의 CDP 파서는 깊이 한도가 있어 넘으면 번호 없이 오류를 내고(그 호출은 답을 받지
+/// 못한다), Zig `std.json.validate` 는 깊이를 보지 않는다(W9-0b 적대 리뷰).
+pub const max_devtools_params_depth: usize = 64;
+/// 페이지가 결과 크기를 정할 수 있다(스크린샷·DOM) — 넘으면 sidecar 가 결과 없이 `too_large` 로 답한다.
+pub const max_devtools_result_bytes: u32 = 16 * 1024 * 1024;
+pub const devtools_chunk_bytes: usize = 16 * 1024;
+/// 동시 호출 상한 — 전체와 탭마다(maru·sidecar 같은 값, 넘으면 maru `Busy`·sidecar `busy`). 탭마다 상한이 있어 렌더러를 멈춘
+/// 페이지 하나가 다른 탭의 호출을 막지 못한다(W9-0b 적대 리뷰 — 전체 4 개만 두었을 때는 막았다).
+pub const max_devtools_calls: usize = 8;
+pub const max_devtools_calls_per_browser: usize = 2;
+/// sidecar 가 답을 기다리는 시한 — 렌더러가 멈추면 CDP 는 답도 detach 도 주지 않는다. sidecar 는 주기적으로 넘은 호출을 `expired` 로
+/// 답하고 버린다. maru 는 30 초(control-plane 시한)에 호출을 끝내지만 sidecar 의 답이 올 때까지 그 자리를 쥔다(늦은 큰 결과를 읽는
+/// 예산도) — 그래서 이 값은 maru 시한보다 조금 길다.
+pub const devtools_stale_ms: i64 = 35_000;
+
+pub const DevtoolsCall = struct {
+    browser: BrowserId,
+    /// 0 이 아니다 — maru 가 매긴다.
+    call: u32,
+    /// `Domain.method` — 영숫자와 `.` 만(JSON 으로 감쌀 때 이스케이프가 필요 없다).
+    method: []const u8,
+    /// 뒤따를 인자 크기(0 = 인자 없음).
+    params_size: u32,
+};
+
+/// 인자·결과 조각 — 비지 않고 `devtools_chunk_bytes` 안(바이트 그대로 — JSON 검사는 다 모은 쪽이 한다).
+pub const DevtoolsData = struct {
+    browser: BrowserId,
+    call: u32,
+    bytes: []const u8,
+};
+
+pub const DevtoolsStatus = enum(u8) {
+    /// CDP 가 성공으로 답했다 — 결과는 `result` 객체.
+    ok = 0,
+    /// CDP 가 오류로 답했다 — 결과는 `error` 객체(`code`·`message`).
+    cdp_error = 1,
+    unknown_browser = 2,
+    /// 메서드 이름·인자(JSON 객체가 아님)·조각 순서가 틀렸다.
+    invalid_request = 3,
+    /// 결과가 `max_devtools_result_bytes` 를 넘었다.
+    too_large = 4,
+    /// DevTools 가 떨어졌다(렌더러 죽음·브라우저 닫힘) — 답은 오지 않는다.
+    detached = 5,
+    /// CEF 가 보내지 못했다.
+    send_failed = 6,
+    /// 동시 호출 상한.
+    busy = 7,
+    /// sidecar 가 시한(`devtools_stale_ms`) 넘게 답을 못 받아 버렸다.
+    expired = 8,
+
+    pub fn carriesResult(self: DevtoolsStatus) bool {
+        return self == .ok or self == .cdp_error;
+    }
+};
+
+pub const DevtoolsResult = struct {
+    browser: BrowserId,
+    call: u32,
+    status: DevtoolsStatus,
+    /// 앞서 보낸 결과 조각의 합(결과가 없는 상태면 0).
+    size: u32,
+};
+
 pub const DownloadAction = enum(u8) {
     cancel = 0,
     resume_download = 1,
@@ -1088,6 +1167,11 @@ pub const Message = union(Tag) {
     datalist_pick: DatalistPick,
     download_decide: DownloadDecide,
     download_control: DownloadControl,
+    devtools_call: DevtoolsCall,
+    devtools_call_data: DevtoolsData,
+
+    devtools_result_data: DevtoolsData,
+    devtools_result: DevtoolsResult,
 };
 
 test "tags split by direction — 0..31 and 128..191 go to the sidecar" {

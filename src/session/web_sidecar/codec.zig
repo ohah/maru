@@ -332,6 +332,22 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeByte(@intFromEnum(value.placement));
             try writeUrl(&cursor, value.url);
         },
+        .devtools_call => |value| {
+            try fields.checkDevtoolsCall(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.call);
+            try cursor.writeByte(@intCast(value.method.len));
+            try cursor.writeBytes(value.method);
+            try cursor.writeU32(value.params_size);
+        },
+        .devtools_call_data, .devtools_result_data => |value| try fields.writeDevtoolsData(&cursor, value),
+        .devtools_result => |value| {
+            try fields.checkDevtoolsResult(value);
+            try writeBrowser(&cursor, value.browser);
+            try cursor.writeU32(value.call);
+            try cursor.writeByte(@intFromEnum(value.status));
+            try cursor.writeU32(value.size);
+        },
         .drag_file_request => |value| {
             if (value.drag == 0) return error.InvalidDrag;
             try writeBrowser(&cursor, value.browser);
@@ -707,6 +723,27 @@ pub fn decodeExact(frame: []const u8) Error!Message {
             try fields.checkDragOut(value);
             break :blk .{ .drag_out = value };
         },
+        .devtools_call => blk: {
+            const browser = try readBrowser(&cursor);
+            const call = try cursor.readU32();
+            const method_len = try cursor.readByte();
+            if (method_len == 0 or method_len > message_mod.max_devtools_method_bytes) return error.InvalidDevtools;
+            const value: message_mod.DevtoolsCall = .{ .browser = browser, .call = call, .method = try cursor.readBytes(method_len), .params_size = try cursor.readU32() };
+            try fields.checkDevtoolsCall(value);
+            break :blk .{ .devtools_call = value };
+        },
+        .devtools_call_data => .{ .devtools_call_data = try fields.readDevtoolsData(&cursor) },
+        .devtools_result_data => .{ .devtools_result_data = try fields.readDevtoolsData(&cursor) },
+        .devtools_result => blk: {
+            const value: message_mod.DevtoolsResult = .{
+                .browser = try readBrowser(&cursor),
+                .call = try cursor.readU32(),
+                .status = std.enums.fromInt(message_mod.DevtoolsStatus, try cursor.readByte()) orelse return error.InvalidDevtools,
+                .size = try cursor.readU32(),
+            };
+            try fields.checkDevtoolsResult(value);
+            break :blk .{ .devtools_result = value };
+        },
         .drag_file_request => blk: {
             const browser = try readBrowser(&cursor);
             const drag = try cursor.readU32();
@@ -795,6 +832,14 @@ fn readDownloadText(cursor: *wire.ReadCursor, max: usize) Error![]const u8 {
 
 // 가장 큰 frame(create_browser + URL 상한)이 frame 상한 안에 든다 — 상수를 바꿔 이 둘이 어긋나면 컴파일이 멈춘다.
 comptime {
+    // W9-0b: DevTools 조각·호출 frame.
+    std.debug.assert(prefix_len + common_len + 8 + 4 + 4 + message_mod.devtools_chunk_bytes <= max_frame_bytes);
+    std.debug.assert(prefix_len + common_len + 8 + 4 + 1 + message_mod.max_devtools_method_bytes + 4 <= max_frame_bytes);
+    std.debug.assert(message_mod.max_devtools_method_bytes <= std.math.maxInt(u8));
+    // 동시 호출의 인자가 다 차도(frame 머리까지) sidecar 명령 상자(1 MiB)의 60 % 안이다 — 나머지는 입력·이동 같은 다른 명령의 자리.
+    const per_call = message_mod.max_devtools_params_bytes + (message_mod.max_devtools_params_bytes / message_mod.devtools_chunk_bytes + 2) * 64;
+    std.debug.assert(message_mod.max_devtools_calls * per_call <= 640 * 1024);
+    std.debug.assert(message_mod.max_devtools_calls_per_browser <= message_mod.max_devtools_calls);
     const largest = prefix_len + common_len + 8 + 12 + 1 + 4 + max_url_bytes;
     std.debug.assert(largest <= max_frame_bytes);
     std.debug.assert(prefix_len + common_len + 8 + 1 + 4 + max_text_bytes <= max_frame_bytes);
@@ -820,7 +865,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  16, 0, // v16, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  17, 0, // v17, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -904,9 +949,9 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 64; // 정의되지 않은 tag(sidecar → maru 는 W10d 의 `page_close_kept` 63 까지)
+    bad[10] = 66; // 정의되지 않은 tag(sidecar → maru 는 W9-0b 의 `devtools_result` 65 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 131; // 둘째 구간(maru → sidecar)도 `download_control` 130 뒤는 비었다
+    bad[10] = 133; // 둘째 구간(maru → sidecar)도 W9-0b 의 `devtools_call_data` 132 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;
@@ -1433,6 +1478,53 @@ test "input closed fields fail closed both ways" {
     try std.testing.expectError(error.InvalidCoordinate, encode(.{ .ime_range = .{ .browser = 1, .bounds = .{ .x = 0, .y = 0, .width = @as(u32, @intCast(extent)) + 1, .height = 1 } } }, &buf));
 }
 
+test "W9-0b JSON 중첩 깊이 — 문자열 안 괄호는 세지 않는다" {
+    try std.testing.expect(fields.jsonDepthWithin("{\"a\":[1,{\"b\":2}]}", 3));
+    try std.testing.expect(!fields.jsonDepthWithin("{\"a\":[1,{\"b\":2}]}", 2));
+    try std.testing.expect(fields.jsonDepthWithin("{\"a\":\"[[[[\\\"{{{\"}", 1));
+    const deep = "[" ** 65 ++ "]" ** 65;
+    try std.testing.expect(!fields.jsonDepthWithin("{\"a\":" ++ deep ++ "}", message_mod.max_devtools_params_depth));
+    try std.testing.expect(fields.jsonDepthWithin("{\"a\":" ++ "[" ** 63 ++ "]" ** 63 ++ "}", message_mod.max_devtools_params_depth));
+}
+
+test "W9-0b DevTools 호출: 왕복과 닫힌 필드" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    const call = (try roundTrip(.{ .devtools_call = .{ .browser = 7, .call = 3, .method = "Runtime.evaluate", .params_size = 21 } })).devtools_call;
+    try std.testing.expectEqualStrings("Runtime.evaluate", call.method);
+    try std.testing.expectEqual(@as(u32, 21), call.params_size);
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.devtools_call.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.devtools_call_data.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.devtools_result_data.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.devtools_result.direction());
+    // 조각은 바이트 그대로(제어 문자·NUL 도 — JSON 검사는 다 모은 쪽이 한다), 조각 상한까지.
+    const full: [message_mod.devtools_chunk_bytes]u8 = @splat(0x01);
+    try std.testing.expectEqual(full.len, (try roundTrip(.{ .devtools_result_data = .{ .browser = 7, .call = 3, .bytes = &full } })).devtools_result_data.bytes.len);
+    try std.testing.expectEqualStrings("{\"a\":\"\x00\"}", (try roundTrip(.{ .devtools_call_data = .{ .browser = 7, .call = 3, .bytes = "{\"a\":\"\x00\"}" } })).devtools_call_data.bytes);
+    const done: message_mod.DevtoolsResult = .{ .browser = 7, .call = 3, .status = .cdp_error, .size = 99 };
+    try std.testing.expectEqual(done, (try roundTrip(.{ .devtools_result = done })).devtools_result);
+    // 닫힌 필드.
+    const over: [message_mod.devtools_chunk_bytes + 1]u8 = @splat(0x01);
+    try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_result_data = .{ .browser = 7, .call = 3, .bytes = &over } }, &buf));
+    try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_call_data = .{ .browser = 7, .call = 3, .bytes = "" } }, &buf));
+    try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_call_data = .{ .browser = 7, .call = 0, .bytes = "{}" } }, &buf));
+    for ([_][]const u8{ "", ".a", "a.", "Runtime.evaluate\"", "a b", "a,\"x\":1" }) |bad| {
+        try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_call = .{ .browser = 7, .call = 3, .method = bad, .params_size = 0 } }, &buf));
+    }
+    const long_method: [message_mod.max_devtools_method_bytes + 1]u8 = @splat('a');
+    try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_call = .{ .browser = 7, .call = 3, .method = &long_method, .params_size = 0 } }, &buf));
+    try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_call = .{ .browser = 7, .call = 3, .method = "A.b", .params_size = message_mod.max_devtools_params_bytes + 1 } }, &buf));
+    try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_result = .{ .browser = 7, .call = 3, .status = .detached, .size = 1 } }, &buf));
+    try std.testing.expectError(error.InvalidDevtools, encode(.{ .devtools_result = .{ .browser = 7, .call = 3, .status = .ok, .size = message_mod.max_devtools_result_bytes + 1 } }, &buf));
+    // 디코더도 같은 규칙 — 조각 길이를 본문보다 먼저 본다.
+    const len = try encode(.{ .devtools_result_data = .{ .browser = 7, .call = 3, .bytes = "ab" } }, &buf);
+    var bad = buf;
+    std.mem.writeInt(u32, bad[len - 6 ..][0..4], message_mod.devtools_chunk_bytes + 1, .big);
+    try std.testing.expectError(error.InvalidDevtools, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[len - 6] = 0xFF; // 길이의 첫 바이트 — 본문을 읽기 전에 거절한다
+    try std.testing.expectError(error.InvalidDevtools, decodeExact(bad[0..len]));
+}
+
 test "every single-byte corruption of input frames decodes to valid fields or errors" {
     // 입력·대화상자 tag 모두(방향 둘) — 새 tag 를 더하면 여기에도 넣는다.
     const samples = [_]Message{
@@ -1512,6 +1604,13 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .download_decide = .{ .browser = 3, .download = 5, .path = "/Users/a/Downloads/f.zip.maru-part" } },
         .{ .download_decide = .{ .browser = 3, .download = 5, .path = "" } },
         .{ .download_control = .{ .browser = 3, .download = 5, .action = .resume_download } },
+        // W9-0b DevTools 호출.
+        .{ .devtools_call = .{ .browser = 3, .call = 5, .method = "Runtime.evaluate", .params_size = 40 } },
+        .{ .devtools_call = .{ .browser = 3, .call = 5, .method = "Page.enable", .params_size = 0 } },
+        .{ .devtools_call_data = .{ .browser = 3, .call = 5, .bytes = "{\"expression\":\"1+1\"}" } },
+        .{ .devtools_result_data = .{ .browser = 3, .call = 5, .bytes = "{\"result\":{}}" } },
+        .{ .devtools_result = .{ .browser = 3, .call = 5, .status = .ok, .size = 13 } },
+        .{ .devtools_result = .{ .browser = 3, .call = 5, .status = .detached, .size = 0 } },
     };
     var encoded: [256]u8 = undefined;
     var corrupted: [256]u8 = undefined;

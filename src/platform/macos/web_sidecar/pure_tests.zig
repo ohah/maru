@@ -12,4 +12,5 @@ test {
     _ = @import("dialog_table.zig");
     _ = @import("unsandboxed_policy.zig");
     _ = @import("datalist_page.zig");
+    _ = @import("devtools_table.zig");
 }

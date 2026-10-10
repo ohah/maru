@@ -93,12 +93,12 @@ pub const Dispatcher = struct {
         switch (message) {
             .shutdown => return .quit,
             .hello => return self.violation("second hello"),
-            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .datalist_pick, .download_decide, .download_control => {
+            .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => {
                 self.handler.browser_command(self.handler.context, message, self.writer);
                 return .keep_running;
             },
             // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-            .hello_ack, .browser_created, .browser_closed, .page_close_kept, .title_changed, .load_finished, .renderer_gone, .failure, .url_changed, .nav_state, .cursor_changed, .ime_range, .js_dialog, .file_dialog, .dialog_closed, .permission_request, .web_notification, .popup_changed, .tooltip_changed, .context_menu, .context_menu_closed, .drag_operation, .drag_out_data, .drag_out, .drag_file_ready, .open_tab, .popup_created, .datalist_show, .datalist_hide, .download_begin, .download_update, .page_started => unreachable,
+            .hello_ack, .browser_created, .browser_closed, .page_close_kept, .title_changed, .load_finished, .renderer_gone, .failure, .url_changed, .nav_state, .cursor_changed, .ime_range, .js_dialog, .file_dialog, .dialog_closed, .permission_request, .web_notification, .popup_changed, .tooltip_changed, .context_menu, .context_menu_closed, .drag_operation, .drag_out_data, .drag_out, .drag_file_ready, .open_tab, .popup_created, .datalist_show, .datalist_hide, .download_begin, .download_update, .page_started, .devtools_result_data, .devtools_result => unreachable,
         }
     }
 

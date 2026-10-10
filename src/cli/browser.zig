@@ -201,7 +201,8 @@ pub const ParseError = error{
     UnexpectedArgument, // 남는 위치 인자
 };
 
-/// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자와 양방향 제어 글자를 뺀다(서버가 보낸 페이지 글을 터미널에 찍을 때). 쓴 바이트 수.
+/// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자, 양방향 제어 글자, 줄·문단 구분, interlinear, tag 글자를 뺀다(서버가 보낸 페이지
+/// 글을 터미널에 찍을 때). 쓴 바이트 수. `web_cdp_locate.displaySafe` 와 같다(둘을 함께 고친다).
 fn displaySafe(s: []const u8, out: []u8) usize {
     var n: usize = 0;
     var i: usize = 0;
@@ -216,7 +217,8 @@ fn displaySafe(s: []const u8, out: []u8) usize {
             continue;
         };
         const unsafe = code < 0x20 or (code >= 0x7f and code <= 0x9f) or code == 0x061C or code == 0x200E or code == 0x200F or
-            (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069);
+            (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069) or code == 0x2028 or code == 0x2029 or
+            (code >= 0xFFF9 and code <= 0xFFFB) or (code >= 0xE0000 and code <= 0xE007F);
         if (!unsafe and n + len <= out.len) {
             @memcpy(out[n .. n + len], s[i .. i + len]);
             n += len;
@@ -1058,6 +1060,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.print("matched {s} ", .{safe_ref[0..displaySafe(ref[0..@min(ref.len, 64)], &safe_ref)]});
                 var js: std.json.Stringify = .{ .writer = w, .options = .{} };
                 js.write(safe_name[0..displaySafe(name[0..@min(name.len, 512)], &safe_name)]) catch return error.WriteFailed;
+                if (name.len > 512) try w.writeAll("…");
                 try w.writeAll("\n");
             };
         },

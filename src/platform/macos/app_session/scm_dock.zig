@@ -1070,6 +1070,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                     .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
                     .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
                     .partial_clone => git_ops.partialCloneNotice(self),
+                    .repo_filters => git_ops.repoFiltersNotice(self),
                     .generic => maru.i18n.t(.scm_log_read_failed),
                 }
             else
@@ -1116,6 +1117,7 @@ fn projectHistory(self: *AppSession, arena: std.mem.Allocator) ?Projection {
                             .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
                             .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
                             .partial_clone => git_ops.partialCloneNotice(self),
+                            .repo_filters => git_ops.repoFiltersNotice(self),
                             .generic => maru.i18n.t(.scm_commit_files_failed),
                         }
                     else
@@ -2474,7 +2476,7 @@ pub fn shouldRetryScmLog(
     if (!failed) return false;
     return switch (failure) {
         // partial clone 은 신뢰가 바뀌어야 풀린다 — 신뢰가 바뀌면 도크가 통째로 다시 읽는다(계획 workspace-trust WT6b-1a).
-        .generic, .partial_clone => false,
+        .generic, .partial_clone, .repo_filters => false,
         .remote_git_missing, .remote_transport => now - read_ns >= scm_log_retry_ns,
     };
 }

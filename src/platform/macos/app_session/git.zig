@@ -90,6 +90,12 @@ pub fn partialCloneNotice(self: *const AppSession) [:0]const u8 {
     return maru.i18n.t(if (self.git_repo_dest != null) .scm_partial_clone_remote else .scm_partial_clone_untrusted);
 }
 
+/// 신뢰 전 저장소의 필터가 너무 많아 읽지 않은 안내(계획 workspace-trust WT6b-1b) — 원격은 신뢰할 수 없으므로 「신뢰하면 읽는다」를
+/// 말하지 않는다(`partialCloneNotice` 와 같은 규율).
+pub fn repoFiltersNotice(self: *const AppSession) [:0]const u8 {
+    return maru.i18n.t(if (self.git_repo_dest != null) .scm_repo_filters_remote else .scm_repo_filters_untrusted);
+}
+
 /// 활성 Term 이 붙어 있는 **기계**(원격이면 그 목적지, 로컬이면 null).
 ///
 /// `remoteScmTarget` 과 갈린 이유: 그쪽은 **control socket 이 있어야** 답한다(우리가 명령을 보내야
@@ -1603,6 +1609,7 @@ pub fn scmEmptyNotice(self: *AppSession, probe: []u8) []const u8 {
             .remote_git_missing => maru.i18n.t(.scm_remote_git_missing),
             .remote_transport => maru.i18n.t(.scm_remote_transport_failed),
             .partial_clone => partialCloneNotice(self),
+            .repo_filters => repoFiltersNotice(self),
             .generic => maru.i18n.t(.git_read_failed),
         } else maru.i18n.t(.scm_loading),
     };

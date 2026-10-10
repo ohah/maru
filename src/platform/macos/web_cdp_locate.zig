@@ -230,18 +230,40 @@ fn levelOf(o: std.json.ObjectMap) ?i64 {
     return null;
 }
 
-/// 페이지가 정한 글을 메시지에 — JSON 인용, 60 바이트(UTF-8 경계)까지, 제어 문자는 뺀다.
+/// 페이지가 정한 글을 메시지에 — JSON 인용, 60 바이트(UTF-8 경계)까지, 제어 문자(C0·DEL·C1)와 양방향 제어 글자는 뺀다(CLI 가
+/// 메시지를 그대로 찍는다 — 표시 속이기, 1 회차).
 fn writeQuoted(w: *std.Io.Writer, s: []const u8) !void {
     var end: usize = @min(s.len, 60);
     while (end < s.len and end > 0 and (s[end] & 0xC0) == 0x80) end -= 1;
     var clean: [60]u8 = undefined;
-    var n: usize = 0;
-    for (s[0..end]) |c| if (c >= 0x20 and c != 0x7f) {
-        clean[n] = c;
-        n += 1;
-    };
+    const n = displaySafe(s[0..end], &clean);
     try std.json.Stringify.value(clean[0..n], .{}, w);
     if (end < s.len) try w.writeAll("…");
+}
+
+/// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자와 양방향 제어 글자(U+061C·200E·200F·202A–202E·2066–2069)를 뺀다. 쓴 바이트 수.
+pub fn displaySafe(s: []const u8, out: []u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + len > s.len) break;
+        const cp = std.unicode.utf8Decode(s[i .. i + len]) catch {
+            i += len;
+            continue;
+        };
+        const unsafe = cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or cp == 0x061C or cp == 0x200E or cp == 0x200F or
+            (cp >= 0x202A and cp <= 0x202E) or (cp >= 0x2066 and cp <= 0x2069);
+        if (!unsafe and n + len <= out.len) {
+            @memcpy(out[n .. n + len], s[i .. i + len]);
+            n += len;
+        }
+        i += len;
+    }
+    return n;
 }
 
 const testing = std.testing;
@@ -309,6 +331,12 @@ test "queryAXTree 거르기: 무시된 노드는 빼고, 이름 부분·정확 �
     defer g.free(amb2.ambiguous);
     try testing.expect(std.mem.startsWith(u8, amb2.ambiguous, "ambiguous: 3 elements match role=button — n11"));
     try testing.expectError(error.Malformed, pickFromAx(g, "[]", .{ .role = "button" }, "button"));
+}
+
+test "표시 안전: C1·양방향 제어 글자는 메시지에서 빠진다" {
+    var out: [64]u8 = undefined;
+    const n = displaySafe("a\x1b[31mb\u{9b}c\u{202e}d\u{2066}e\u{85}f", &out);
+    try testing.expectEqualStrings("a[31mbcdef", out[0..n]);
 }
 
 test "여럿 메시지: 긴 이름은 60 바이트(UTF-8 경계)에서 자르고, 다섯 넘으면 …, exact 로도 맞는 후보에 표시" {

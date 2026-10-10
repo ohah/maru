@@ -21,7 +21,8 @@
 #                   칸(snapshot 의 ref)에도 넣는다(초점 검사가 거짓 「focus moved」 를 내지 않는다)
 #   scroll-real     scroll 이 페이지를 실제로 굴린다(scrollY — 신호)
 #   hover           hover 가 그 요소에 진짜 포인터 이동(isTrusted mouseover)을 준다 · 없는 요소는 not ok(W9b①b-2)
-#   press           요소에 Shift+a → 「A」(isTrusted keydown) · Meta+a(편집 명령 selectAll) 뒤 대상 없이 x → 값이 「x」로 바뀐다 ·
+#   press           요소에 Shift+a → 「A」(isTrusted keydown — 입력 이벤트만으로는 insertText 와 가를 수 없다) · Meta+a(편집 명령 selectAll)
+#                   뒤 대상 없이 x → 값이 「x」로 바뀐다 · Shift+/ → 「?」(US 배열의 위 글자) ·
 #                   대상 없이 Tab → 초점이 다음 칸으로 · 틀린 키 이름은 invalid params. 붙여넣기(Meta+v)는 사용자 클립보드를 쓰므로 스모크에
 #                   넣지 않는다
 #   back·forward    링크로 다음 문서에 간 뒤 뒤로 → 첫 문서, 앞으로 → 다음 문서, 더 앞으로 → not ok
@@ -177,10 +178,12 @@ run hover hover --selector '#hv'
 hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
 run hover-missing hover --selector '#none'
 run press-a press --selector '#pk' --key 'Shift+a'
-hit_seen 'pkv-A-true' && echo yes > "\$out/pk-a" || echo no > "\$out/pk-a"
+hit_seen 'pkd-A-true' && hit_seen 'pkv-A-true' && echo yes > "\$out/pk-a" || echo no > "\$out/pk-a"
 run press-all press --selector '#pk' --key 'Meta+a'
 run press-x press --key 'x'
 hit_seen 'pkv-x-true' && echo yes > "\$out/pk-x" || echo no > "\$out/pk-x"
+run press-q press --key 'Shift+/'
+hit_seen 'pkd-?-true' && hit_seen 'pkv-x%3F-true' && echo yes > "\$out/pk-q" || echo no > "\$out/pk-q"
 run press-tab press --key 'Tab'
 hit_seen pk2focus && echo yes > "\$out/pk-tab" || echo no > "\$out/pk-tab"
 run press-bad press --key 'Hyper+a'
@@ -289,9 +292,10 @@ grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was no
 echo "PASS hover: the element got a real (isTrusted) mouseover, a missing element is not ok"
 ok press-a && [ "$(cat "$out/pk-a")" = yes ] || fail "press Shift+a on the field did not type A with a real key ($(tr '\n' ' ' < "$out/press-a") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-all && ok press-x && [ "$(cat "$out/pk-x")" = yes ] || fail "Meta+a then x (where the focus is) did not replace the value ($(tr '\n' ' ' < "$out/press-all") · $(tr '\n' ' ' < "$out/press-x") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
+ok press-q && [ "$(cat "$out/pk-q")" = yes ] || fail "Shift+/ did not press ? as a real key ($(tr '\n' ' ' < "$out/press-q") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-tab && [ "$(cat "$out/pk-tab")" = yes ] || fail "Tab (where the focus is) did not move the focus to the next field ($(tr '\n' ' ' < "$out/press-tab"))"
 grep -q '(-32602)' "$out/press-bad" || fail "an unknown key name was not invalid params ($(tr '\n' ' ' < "$out/press-bad"))"
-echo "PASS press: Shift+a typed A, Meta+a selected all and x replaced it, Tab moved the focus, an unknown key name is invalid params"
+echo "PASS press: Shift+a typed A (a real keydown), Meta+a selected all and x replaced it, Shift+/ typed ?, Tab moved the focus, an unknown key name is invalid params"
 ok scroll2 && [ "$(cat "$out/sy-hit")" = yes ] || fail "scroll did not move the page ($(tr '\n' ' ' < "$out/scroll2"))"
 echo "PASS scroll-real: scroll moved the page down to the element"
 ok click-next && [ "$(cat "$out/next-title")" = yes ] || fail "clicking the link did not open the next page ($(tr '\n' ' ' < "$out/next-title"))"

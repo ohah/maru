@@ -7,7 +7,10 @@
 //!   (착수 전 실측 — `commands:["selectAll"]` 을 실으니 됐다). 명령 이름은 macOS 의 표준 키 바인딩(`NSStandardKeyBindingResponding`
 //!   셀렉터 — 공개 API)에서 콜론을 뺀 것이다. 붙여넣기(`Meta+v` → `paste`)는 **사용자 클립보드를 페이지에 넣는다**(사용자 결정
 //!   2026-10-10 — 막지 않는다).
-//! - 글자는 `Meta`·`Control` 이 없을 때만 글(`text`)을 싣는다(단축키는 글을 넣지 않는다). `Shift` + 영문 소문자는 대문자다.
+//! - 글자는 `Meta`·`Control` 이 없을 때만 글(`text`)을 싣는다(단축키는 글을 넣지 않는다). `Shift` 는 US 배열로 바꾼다 — 영문 소문자는
+//!   대문자, 숫자·기호는 위 글자(`Shift+1` → `!`, `Shift+/` → `?`). 기호는 그 자리의 `code`·keyCode 를 싣는다(`?` → `Slash`·191).
+//! - 이름은 대소문자를 가리지 않는다(`enter`·`ctrl+a`), `Esc`·`Return` 도 받는다. `Control`·`Alt` + 글자는 macOS 의 뜻(Emacs 줄 이동·
+//!   `Option+a` = `å`)을 만들지 않고 그대로 보낸다(그 글자·modifiers 만 — 적대 리뷰 1 회차).
 
 const std = @import("std");
 
@@ -39,6 +42,8 @@ const named_keys = [_]Named{
     .{ .name = "Enter", .key = "Enter", .code = "Enter", .vk = 13, .text = "\r" },
     .{ .name = "Tab", .key = "Tab", .code = "Tab", .vk = 9 },
     .{ .name = "Escape", .key = "Escape", .code = "Escape", .vk = 27 },
+    .{ .name = "Esc", .key = "Escape", .code = "Escape", .vk = 27 },
+    .{ .name = "Return", .key = "Enter", .code = "Enter", .vk = 13, .text = "\r" },
     .{ .name = "Backspace", .key = "Backspace", .code = "Backspace", .vk = 8 },
     .{ .name = "Delete", .key = "Delete", .code = "Delete", .vk = 46 },
     .{ .name = "Insert", .key = "Insert", .code = "Insert", .vk = 45 },
@@ -86,12 +91,12 @@ pub fn parse(spec: []const u8, out: *Press) ParseError!void {
     }
     if (rest.len > 1 and rest[rest.len - 1] == '+') return error.InvalidKey; // `Shift+` — 키가 없다
     out.* = .{ .key = "", .code = "", .vk = 0, .modifiers = mods, .text = null, .command = null };
-    for (named_keys) |n| if (std.mem.eql(u8, n.name, rest)) {
+    for (named_keys) |n| if (rest.len > 1 and std.ascii.eqlIgnoreCase(n.name, rest)) {
         out.key = n.key;
         out.code = n.code;
         out.vk = n.vk;
         out.text = if (mods & (Modifier.meta | Modifier.control) == 0) n.text else null;
-        out.command = editingCommand(rest, mods);
+        out.command = editingCommand(n.key, mods);
         return;
     };
     // 글자 하나.
@@ -103,18 +108,22 @@ pub fn parse(spec: []const u8, out: *Press) ParseError!void {
     @memcpy(out.buf[0..ch.len], ch);
     if (cp < 0x80) {
         const c: u8 = @intCast(cp);
+        const shift = mods & Modifier.shift != 0;
         if (std.ascii.isAlphabetic(c)) {
             const upper = std.ascii.toUpper(c);
-            if (mods & Modifier.shift != 0) out.buf[0] = upper;
+            if (shift) out.buf[0] = upper;
             out.code = letter_codes[upper - 'A'];
             out.vk = upper;
-        } else if (std.ascii.isDigit(c)) {
-            out.code = digit_codes[c - '0'];
-            out.vk = c;
         } else if (c == ' ') {
             out.code = "Space";
             out.vk = 32;
-        }
+        } else for (us_keys) |k| if (c == k.plain or c == k.shifted) {
+            // 그 자리의 키 — `Shift` 면 위 글자를 넣는다(`?` 처럼 위 글자를 바로 줘도 같은 자리).
+            if (shift) out.buf[0] = k.shifted;
+            out.code = k.code;
+            out.vk = k.vk;
+            break;
+        };
     }
     ch = out.buf[0..rest.len];
     out.key = ch;
@@ -122,14 +131,35 @@ pub fn parse(spec: []const u8, out: *Press) ParseError!void {
     out.command = editingCommand(rest, mods);
 }
 
+/// US 배열의 숫자·기호 자리(아래 글자·위 글자·DOM code·Windows keyCode).
+const UsKey = struct { plain: u8, shifted: u8, code: []const u8, vk: u16 };
+const us_keys = [_]UsKey{
+    .{ .plain = '1', .shifted = '!', .code = "Digit1", .vk = '1' },
+    .{ .plain = '2', .shifted = '@', .code = "Digit2", .vk = '2' },
+    .{ .plain = '3', .shifted = '#', .code = "Digit3", .vk = '3' },
+    .{ .plain = '4', .shifted = '$', .code = "Digit4", .vk = '4' },
+    .{ .plain = '5', .shifted = '%', .code = "Digit5", .vk = '5' },
+    .{ .plain = '6', .shifted = '^', .code = "Digit6", .vk = '6' },
+    .{ .plain = '7', .shifted = '&', .code = "Digit7", .vk = '7' },
+    .{ .plain = '8', .shifted = '*', .code = "Digit8", .vk = '8' },
+    .{ .plain = '9', .shifted = '(', .code = "Digit9", .vk = '9' },
+    .{ .plain = '0', .shifted = ')', .code = "Digit0", .vk = '0' },
+    .{ .plain = '`', .shifted = '~', .code = "Backquote", .vk = 192 },
+    .{ .plain = '-', .shifted = '_', .code = "Minus", .vk = 189 },
+    .{ .plain = '=', .shifted = '+', .code = "Equal", .vk = 187 },
+    .{ .plain = '[', .shifted = '{', .code = "BracketLeft", .vk = 219 },
+    .{ .plain = ']', .shifted = '}', .code = "BracketRight", .vk = 221 },
+    .{ .plain = '\\', .shifted = '|', .code = "Backslash", .vk = 220 },
+    .{ .plain = ';', .shifted = ':', .code = "Semicolon", .vk = 186 },
+    .{ .plain = '\'', .shifted = '"', .code = "Quote", .vk = 222 },
+    .{ .plain = ',', .shifted = '<', .code = "Comma", .vk = 188 },
+    .{ .plain = '.', .shifted = '>', .code = "Period", .vk = 190 },
+    .{ .plain = '/', .shifted = '?', .code = "Slash", .vk = 191 },
+};
+
 const letter_codes = blk: {
     var out: [26][]const u8 = undefined;
     for (0..26) |i| out[i] = "Key" ++ [_]u8{'A' + i};
-    break :blk out;
-};
-const digit_codes = blk: {
-    var out: [10][]const u8 = undefined;
-    for (0..10) |i| out[i] = "Digit" ++ [_]u8{'0' + i};
     break :blk out;
 };
 
@@ -144,7 +174,7 @@ fn modifierBit(name: []const u8) ?u8 {
         .{ "Cmd", Modifier.meta },
         .{ "Command", Modifier.meta },
     };
-    for (table) |e| if (std.mem.eql(u8, e[0], name)) return e[1];
+    for (table) |e| if (std.ascii.eqlIgnoreCase(e[0], name)) return e[1];
     return null;
 }
 
@@ -240,14 +270,22 @@ test "키 이름: 이름 있는 키·글자·수식키·편집 명령" {
     try expectEvent("Control+a", true, "{\"type\":\"rawKeyDown\",\"key\":\"a\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65,\"modifiers\":2}");
     try expectEvent("가", true, "{\"type\":\"keyDown\",\"key\":\"가\",\"code\":\"\",\"windowsVirtualKeyCode\":0,\"modifiers\":0,\"text\":\"가\",\"unmodifiedText\":\"가\"}");
     try expectEvent("Space", true, "{\"type\":\"keyDown\",\"key\":\" \",\"code\":\"Space\",\"windowsVirtualKeyCode\":32,\"modifiers\":0,\"text\":\" \",\"unmodifiedText\":\" \"}");
-    try expectEvent("+", true, "{\"type\":\"keyDown\",\"key\":\"+\",\"code\":\"\",\"windowsVirtualKeyCode\":0,\"modifiers\":0,\"text\":\"+\",\"unmodifiedText\":\"+\"}");
-    try expectEvent("Shift++", true, "{\"type\":\"keyDown\",\"key\":\"+\",\"code\":\"\",\"windowsVirtualKeyCode\":0,\"modifiers\":8,\"text\":\"+\",\"unmodifiedText\":\"+\"}");
+    try expectEvent("+", true, "{\"type\":\"keyDown\",\"key\":\"+\",\"code\":\"Equal\",\"windowsVirtualKeyCode\":187,\"modifiers\":0,\"text\":\"+\",\"unmodifiedText\":\"+\"}");
+    try expectEvent("Shift++", true, "{\"type\":\"keyDown\",\"key\":\"+\",\"code\":\"Equal\",\"windowsVirtualKeyCode\":187,\"modifiers\":8,\"text\":\"+\",\"unmodifiedText\":\"+\"}");
+    // Shift 는 US 배열의 위 글자로, 기호는 그 자리의 code·keyCode.
+    try expectEvent("Shift+1", true, "{\"type\":\"keyDown\",\"key\":\"!\",\"code\":\"Digit1\",\"windowsVirtualKeyCode\":49,\"modifiers\":8,\"text\":\"!\",\"unmodifiedText\":\"!\"}");
+    try expectEvent("Shift+/", true, "{\"type\":\"keyDown\",\"key\":\"?\",\"code\":\"Slash\",\"windowsVirtualKeyCode\":191,\"modifiers\":8,\"text\":\"?\",\"unmodifiedText\":\"?\"}");
+    try expectEvent("?", true, "{\"type\":\"keyDown\",\"key\":\"?\",\"code\":\"Slash\",\"windowsVirtualKeyCode\":191,\"modifiers\":0,\"text\":\"?\",\"unmodifiedText\":\"?\"}");
+    // 이름은 대소문자를 가리지 않고 Esc·Return 도 받는다.
+    try expectEvent("ctrl+ENTER", false, "{\"type\":\"keyUp\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"modifiers\":2}");
+    try expectEvent("Esc", false, "{\"type\":\"keyUp\",\"key\":\"Escape\",\"code\":\"Escape\",\"windowsVirtualKeyCode\":27,\"modifiers\":0}");
+    try expectEvent("cmd+arrowleft", true, "{\"type\":\"rawKeyDown\",\"key\":\"ArrowLeft\",\"code\":\"ArrowLeft\",\"windowsVirtualKeyCode\":37,\"modifiers\":4,\"commands\":[\"moveToBeginningOfLine\"]}");
     try expectEvent("7", true, "{\"type\":\"keyDown\",\"key\":\"7\",\"code\":\"Digit7\",\"windowsVirtualKeyCode\":55,\"modifiers\":0,\"text\":\"7\",\"unmodifiedText\":\"7\"}");
 }
 
 test "키 이름: 틀린 이름은 거절한다" {
     var p: Press = undefined;
-    for ([_][]const u8{ "", "Hyper+a", "ab", "Enterr", "+a", "Shift+", "Shift+Ctrl", "\x01", "\x7f", "a+b", "Shift+++" }) |bad| {
+    for ([_][]const u8{ "", "Hyper+a", "ab", "Enterr", "+a", "Shift+", "Shift+Ctrl", "\x01", "\x7f", "a+b", "Shift+++", "Return+" }) |bad| {
         try testing.expectError(error.InvalidKey, parse(bad, &p));
     }
     try testing.expectError(error.InvalidKey, parse("a" ** 65, &p));

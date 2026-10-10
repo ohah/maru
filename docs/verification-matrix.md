@@ -4170,4 +4170,13 @@ namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 �
 모든 예약 할당 실패를 검사한다. 모델 결함 주입 도구에서 보호를 없앴을 때 실제 판정이 실패하는지도 확인한다.
 actor 편집·자동 저장·선택/진행 UI·디스크 적용은 이 gate에 포함하지 않는다.
 `RPBP1`~`RPBP5`는 전체 Plan·마지막 대상 실패·원문 신원·총량·취소·변경 없음과 모든 준비 할당 실패를 검사한다.
-전체 준비 후 함께 반영하는 정책은 사용자 승인됐으며, [배치 계획](plans/editor-project-replace-batch.md)의 actor·저장·UI 연결이 남았다.
+전체 준비 후 함께 반영하는 정책은 사용자 승인됐으며, [배치 계획](plans/editor-project-replace-batch.md)의 worker·UI 연결이 남았으며 열린 모델 actor·저장 API는 아래 별도 gate로 검사한다.
+
+프로젝트 바꾸기의 **열린 모델 actor·자동 저장 API는 부분 구현**이다.
+`test-editor-project-replace-batch-apply`의 `RPBA1`~`RPBA13`는 실제 AppSession의 두 문서
+반영/저장/연결 Undo, model 원문 충돌 시 전부 보존, 입력/root/IME, 첫/마지막 저장 실패의
+dirty/Undo와 다음 저장, no-op/단일 유효 편집, 공유 뷰/focus, 모든 actor 예약 실패,
+선택 밖 동일 경로 점유·닫기·disk source 거절, 선택 없는 일반 Undo의 초기 커서 OOM, cached capability만으로 놓치던 실제 root 교체를 검사한다.
+UI에서 호출되지 않는 API이므로 배치 제품 버튼·worker·물리 IME 완료는 아니다.
+watcher/model에 아직 반영되지 않은 디스크 변경은 파일별 CAS 저장 실패로 결산하며
+디스크 별칭/점유·비활성 로드와 UI 결과 표시가 [배치 계획](plans/editor-project-replace-batch.md)의 후속이다.

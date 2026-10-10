@@ -84,6 +84,12 @@ fn finish(self: *AppSession, staged: []Staged) void {
 /// 여러 열린 문서의 편집을 한 작업으로 만든다. 파일 로드·자동 저장은 이 API의 책임이 아니다.
 pub fn apply(self: *AppSession, inputs: []const Input) !u64 {
     if (inputs.len < 2) return error.NotMultipleDocuments;
+    return (try applyDocuments(self, inputs)).?;
+}
+
+/// 배치의 변경 없는 대상을 빼면 한 문서만 남을 수 있다. 같은 준비 경로를 쓰되 연결 기록은 만들지 않는다.
+pub fn applyDocuments(self: *AppSession, inputs: []const Input) !?u64 {
+    if (inputs.len == 0) return error.NoTargets;
     self.editor_documents.pruneHistoryLinks();
     var staged: std.ArrayList(Staged) = .empty;
     defer {
@@ -104,11 +110,11 @@ pub fn apply(self: *AppSession, inputs: []const Input) !u64 {
         item.span = ops.syntax_color.spanFromInverse(model.entry.inverse.changes);
         item.view = try publication.preparePublication(self, item.term, item.changes.delta(), model.sels.items.len, item.restore);
     }
-    var record = try self.editor_documents.links.prepare(self.editor_documents.allocator, members);
-    errdefer record.deinit(self.editor_documents.allocator);
+    var record: ?links.Record = if (inputs.len > 1) try self.editor_documents.links.prepare(self.editor_documents.allocator, members) else null;
+    errdefer if (record) |*pending| pending.deinit(self.editor_documents.allocator);
     try prepared.commit();
-    const id = record.id;
-    self.editor_documents.links.publish(record);
+    const id = if (record) |pending| pending.id else null;
+    if (record) |pending| self.editor_documents.links.publish(pending);
     finish(self, staged.items);
     return id;
 }

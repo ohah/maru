@@ -5449,7 +5449,7 @@ pub fn build(b: *std.Build) void {
     const apply_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPA"} });
     const run_apply_host = b.addRunArtifact(apply_host_tests);
     run_apply_host.setCwd(b.path("."));
-    run_apply_host.addArg("--maru-expect-tests=32");
+    run_apply_host.addArg("--maru-expect-tests=33");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
         run_apply_host.step.dependOn(&ripgrep_prepare.step);
         macos_only_test_step.dependOn(&run_apply_host.step);
@@ -5459,6 +5459,12 @@ pub fn build(b: *std.Build) void {
     run_replace_batch.addArg("--maru-expect-tests=33");
     const replace_batch_step = b.step("test-editor-project-replace-batch", "Run frozen replacement batch specifications and prepared outcomes");
     replace_batch_step.dependOn(&run_replace_batch.step);
+    const batch_apply_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBA"} });
+    const run_batch_apply = b.addRunArtifact(batch_apply_tests);
+    run_batch_apply.addArg("--maru-expect-tests=17");
+    run_batch_apply.setCwd(b.path("."));
+    b.step("test-editor-project-replace-batch-apply", "Run all-model batch commit, CAS save and linked Undo judges").dependOn(&run_batch_apply.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_apply.step);
     const apply_step = b.step("test-editor-project-replace-apply", "Validate single document replace apply save Undo and failed preparation");
     apply_step.dependOn(&run_apply_host.step);
     apply_step.dependOn(&run_replace_preview.step);

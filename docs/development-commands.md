@@ -1327,3 +1327,14 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 `mise exec -- zig build test-editor-project-replace-batch` (Debug/ReleaseFast).
 `python3 tools/test-editor-replace-batch-adversarial.py`는 격리 명세의 컴파일 가능한 결함과 정상·동등·복원 대조를 실행한다.
 이 게이트는 actor 편집·저장·UI 완료 판정이 아니다([현재 범위와 후속 정책](plans/editor-project-replace-batch.md)).
+
+프로젝트 바꾸기의 열린 모델 전체 반영·파일별 CAS 저장·연결 Undo·준비 실패 판정:
+
+```sh
+mise exec -- zig build test-editor-project-replace-batch-apply
+mise exec -- zig build test-editor-project-replace-batch-apply -Doptimize=ReleaseFast
+python3 tools/test-editor-replace-batch-apply-adversarial.py
+```
+
+이 게이트는 실제 AppSession API를 검증한다. 제품 배치 버튼·worker·닫힌 파일 로드는
+[배치 계획](plans/editor-project-replace-batch.md)의 후속 단계이며 GUI 완료를 의미하지 않는다.

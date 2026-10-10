@@ -343,3 +343,16 @@ fn fail(session: *app.AppSession, err: anyerror) void {
     session.editor_project_search_failure_stamp = fingerprint(session);
     session.editor_project_search_failure_request = session.editor_project_search_request;
 }
+
+pub fn validateRoots(session: *app.AppSession) !void {
+    // watcher가 아직 보고하지 않은 실제 디렉터리 교체도 거절한다. 동일 본문은 root 신원의 증거가 아니다.
+    for (0..session.file_tree.rootCount()) |index| {
+        const path = session.file_tree.rootAt(index).?;
+        const cap = session.file_tree.rootCapabilityForPath(path) orelse return error.RootChanged;
+        var actual = try @import("process.zig").openRoot(session.allocator, session.io, path);
+        defer actual.deinit(session.allocator, session.io);
+        const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(actual.device))) = @bitCast(actual.device);
+        if (@as(u64, device) != cap.identity.device or actual.stat.inode != cap.identity.inode or cap.identity.kind != 2) return error.RootChanged;
+        try @import("process.zig").validateRoot(session.io, &actual);
+    }
+}

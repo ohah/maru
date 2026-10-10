@@ -625,3 +625,8 @@ registry 소유 `history/links.zig`는 작업/항목 신원을 연결한다. 이
 `src/session/editor/search/batch.zig`가 소유하고, 모든 원문의 Plan과 편집 배열 준비는
 `src/session/editor/search/batch_plan.zig`가 소유한다. 문서/worker/저장은 host의 책임이며,
 연결 범위와 미착수 단계는 [배치 계획](plans/editor-project-replace-batch.md)을 따른다.
+
+프로젝트 바꾸기의 열린 모델 동시 반영·파일별 CAS 저장은
+`src/platform/macos/app_session/editor/search/batch.zig`가 소유한다. 중립 명세/Plan을
+독립 소유한 caller의 ticket을 재검증하고 `editor/history.zig::applyDocuments`에 연결한다.
+worker·배치 UI·닫힌 파일 로드의 미연결 범위는 [배치 계획](plans/editor-project-replace-batch.md)을 따른다.

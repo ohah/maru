@@ -3,8 +3,9 @@
 //!
 //! **무엇을 하나**: 언어 서버 신뢰 결정을 **조회·철회·잊기**만 한다 — 부여 명령은 없다(에이전트가 신뢰를 주지 못하게, 계획 WT2).
 //!   - `maru editor lsp trust list` → `lsp.trust.list`.
-//!   - `maru editor lsp trust revoke <path> [--volume <hex>]` → `lsp.trust.revoke {path, volume?}` — 지금 허용인 저장소를 거부로.
-//!   - `maru editor lsp trust forget <path> [--volume <hex>]` → `lsp.trust.forget {path, volume?}` — 결정을 지운다(다시 열면 묻는다).
+//!   - `maru editor lsp trust revoke <path> [--volume <hex> | --host <dest>]` → `lsp.trust.revoke {path, volume?, host?}` — 지금 허용인 저장소를 거부로.
+//!   - `maru editor lsp trust forget <path> [--volume <hex> | --host <dest>]` → `lsp.trust.forget {path, volume?, host?}` — 결정을 지운다(다시 열면 묻는다).
+//!   - `--host` 는 원격(SSH) 저장소의 키를 고른다(계획 WT7a) — 그때 경로는 저쪽 기계의 절대 경로다(여기 현재 디렉터리로 펴지 않는다).
 //! 소켓 접착은 `cli/control_client.zig`(셀렉터 없이 — 앱 전역 표라 자기 패인으로 좁힐 이유가 없다, 2026-10-09 사용자 결정), 상대 경로를
 //! 절대 경로로 펴는 데 쓸 현재 디렉터리는 `main.zig` 가 준다.
 
@@ -16,8 +17,8 @@ pub const Request = union(enum) {
     revoke: Target,
     forget: Target,
 
-    /// `path` 는 절대 경로(`absolutize` 가 편다), `volume` 은 목록이 보여 준 16진 그대로.
-    pub const Target = struct { path: []const u8, volume: ?u64 = null };
+    /// `path` 는 절대 경로(`absolutize` 가 편다), `volume` 은 목록이 보여 준 16진 그대로, `host` 는 원격 목적지(목록이 보여 준 그대로).
+    pub const Target = struct { path: []const u8, volume: ?u64 = null, host: ?[]const u8 = null };
 };
 
 pub const Command = union(enum) {
@@ -42,6 +43,14 @@ pub const ParseError = error{
     DuplicateVolume,
     /// `--volume` 값이 16진이 아니다.
     InvalidVolumeValue,
+    /// `--host` 값이 없다.
+    MissingHostValue,
+    /// `--host` 를 두 번 줬다.
+    DuplicateHost,
+    /// `--host` 와 `--volume` 을 함께 줬다(다른 종류의 키다).
+    HostWithVolume,
+    /// `--host` 인데 경로가 절대가 아니다(저쪽 기계의 경로라 여기서 펼 수 없다).
+    RelativeRemotePath,
     UnknownOption,
     UnexpectedArgument,
 };
@@ -62,10 +71,18 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (!is_revoke and !std.mem.eql(u8, sub, "forget")) return error.UnknownSubcommand;
     var path: ?[]const u8 = null;
     var volume: ?u64 = null;
+    var host: ?[]const u8 = null;
     var i: usize = 1;
     while (i < rest.len) {
         const a = rest[i];
-        if (std.mem.eql(u8, a, "--volume")) {
+        if (std.mem.eql(u8, a, "--host")) {
+            if (i + 1 >= rest.len) return error.MissingHostValue;
+            try assignHost(&host, rest[i + 1]);
+            i += 2;
+        } else if (std.mem.startsWith(u8, a, "--host=")) {
+            try assignHost(&host, a["--host=".len..]);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--volume")) {
             if (i + 1 >= rest.len) return error.MissingVolumeValue;
             try assignVolume(&volume, rest[i + 1]);
             i += 2;
@@ -82,7 +99,9 @@ pub fn parse(args: []const []const u8) ParseError!Command {
             i += 1;
         }
     }
-    const target: Request.Target = .{ .path = path orelse return error.MissingPath, .volume = volume };
+    const target: Request.Target = .{ .path = path orelse return error.MissingPath, .volume = volume, .host = host };
+    if (host != null and volume != null) return error.HostWithVolume;
+    if (host != null and !std.fs.path.isAbsolute(target.path)) return error.RelativeRemotePath;
     return .{ .request = if (is_revoke) .{ .revoke = target } else .{ .forget = target } };
 }
 
@@ -90,6 +109,12 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 /// 심링크는 서버가 실제 경로로 푼다. caller free.
 pub fn absolutize(gpa: std.mem.Allocator, cwd: []const u8, path: []const u8) std.mem.Allocator.Error![]u8 {
     return std.fs.path.resolve(gpa, &.{ cwd, path });
+}
+
+fn assignHost(target: *?[]const u8, value: []const u8) ParseError!void {
+    if (target.* != null) return error.DuplicateHost;
+    if (value.len == 0) return error.MissingHostValue;
+    target.* = value;
 }
 
 // Do not let a later mount selector replace the repository target chosen earlier.
@@ -109,6 +134,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
     try obj.put(gpa, "path", .{ .string = target.path });
     var vbuf: [16]u8 = undefined;
     if (target.volume) |v| try obj.put(gpa, "volume", .{ .string = std.fmt.bufPrint(&vbuf, "{x}", .{v}) catch unreachable });
+    if (target.host) |h| try obj.put(gpa, "host", .{ .string = h });
     return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
 }
 
@@ -169,7 +195,10 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     .object => |o| o,
                     else => continue,
                 };
-                try w.print("{s: <6} {s}  (volume {s})\n", .{ str(o.get("decision")), str(o.get("path")), str(o.get("volume")) });
+                if (o.get("host")) |h|
+                    try w.print("{s: <6} {s}:{s}\n", .{ str(o.get("decision")), str(h), str(o.get("path")) })
+                else
+                    try w.print("{s: <6} {s}  (volume {s})\n", .{ str(o.get("decision")), str(o.get("path")), str(o.get("volume")) });
             }
             return true;
         },
@@ -231,8 +260,8 @@ fn str(v: ?std.json.Value) []const u8 {
 pub const help =
     \\usage:
     \\  maru editor lsp trust list
-    \\  maru editor lsp trust revoke <path> [--volume <hex>]
-    \\  maru editor lsp trust forget <path> [--volume <hex>]
+    \\  maru editor lsp trust revoke <path> [--volume <hex> | --host <dest>]
+    \\  maru editor lsp trust forget <path> [--volume <hex> | --host <dest>]
     \\
     \\show or withdraw language server trust decisions of the running Maru.
     \\
@@ -242,6 +271,7 @@ pub const help =
     \\
     \\options:
     \\  --volume <hex>   pick the repository when the same path has decisions on more than one volume (specify once)
+    \\  --host <dest>    a remote (SSH) repository: <dest> as `list` shows it, <path> is the absolute path on that machine
     \\
     \\exit status 0 also when nothing changed ("unchanged: ..."); 1 on an error.
     \\`..` is folded as text before the path is sent (it is not resolved through symlinks).
@@ -373,8 +403,8 @@ test "lsp trust CLI: 서버 직렬화기의 응답을 그대로 렌더한다 —
 
 test "lsp trust CLI: help 는 동작하는 명령만 — 세 줄, 부여 명령 없음" {
     try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust list\n") != null);
-    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust revoke <path> [--volume <hex>]\n") != null);
-    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust forget <path> [--volume <hex>]\n") != null);
+    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust revoke <path> [--volume <hex> | --host <dest>]\n") != null);
+    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust forget <path> [--volume <hex> | --host <dest>]\n") != null);
     for ([_][]const u8{ "trust grant", "trust allow", "trust add", "trust set" }) |w| try testing.expect(std.mem.indexOf(u8, help, w) == null);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, help, "  maru editor lsp trust "));
 }
@@ -402,4 +432,28 @@ test "lsp selector rejects repeated volume including zero and hexadecimal case" 
             }
         }
     }
+}
+
+test "maru editor lsp trust --host (계획 workspace-trust WT7a) — 원격 키를 고르고 요청에 싣는다; `--volume` 과 함께·두 번·빈 값·상대 경로는 거절; 목록은 원격 항목을 `목적지:경로` 로 찍는다" {
+    const cmd = try parse(&.{ "trust", "forget", "/srv/app", "--host", "me@openclaw" });
+    const t = cmd.request.forget;
+    try std.testing.expectEqualStrings("me@openclaw", t.host.?);
+    try std.testing.expectEqualStrings("/srv/app", t.path);
+    try std.testing.expectEqualStrings("openclaw", (try parse(&.{ "trust", "revoke", "/r", "--host=openclaw" })).request.revoke.host.?);
+    try std.testing.expectError(error.HostWithVolume, parse(&.{ "trust", "revoke", "/r", "--host", "h", "--volume", "ff" }));
+    try std.testing.expectError(error.DuplicateHost, parse(&.{ "trust", "revoke", "/r", "--host", "h", "--host", "g" }));
+    try std.testing.expectError(error.MissingHostValue, parse(&.{ "trust", "revoke", "/r", "--host" }));
+    try std.testing.expectError(error.MissingHostValue, parse(&.{ "trust", "revoke", "/r", "--host=" }));
+    try std.testing.expectError(error.RelativeRemotePath, parse(&.{ "trust", "revoke", "repo", "--host", "h" }));
+    const bytes = try buildRequestBytes(std.testing.allocator, cmd.request, .{ .number = 3 });
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"host\":\"me@openclaw\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "\"volume\"") == null);
+    // 목록 — 원격 항목은 목적지:경로.
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"decisions\":[{\"host\":\"openclaw\",\"path\":\"/srv/app\",\"decision\":\"allow\"},{\"volume\":\"1f\",\"path\":\"/l\",\"decision\":\"deny\"}]}}";
+    try std.testing.expect(try renderResponse(std.testing.allocator, resp, .list, "", &out.writer));
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "allow  openclaw:/srv/app\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "deny   /l  (volume 1f)\n") != null);
 }

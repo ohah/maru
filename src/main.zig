@@ -15872,6 +15872,10 @@ fn runLspTrustArgs(io: std.Io, allocator: std.mem.Allocator, collected: []const 
             error.DuplicateVolume => "--volume may only be specified once",
             error.MissingVolumeValue => "--volume needs a value",
             error.InvalidVolumeValue => "the --volume value must be hexadecimal",
+            error.MissingHostValue => "--host needs a value",
+            error.DuplicateHost => "--host may only be specified once",
+            error.HostWithVolume => "--host and --volume pick different kinds of repository — use one",
+            error.RelativeRemotePath => "with --host, pass the absolute path on that machine",
             error.UnknownOption => "unknown option",
             error.UnexpectedArgument => "too many arguments",
         };

@@ -25,11 +25,14 @@ pub const State = struct {
     /// 환경 목록을 열 때 셸 환경을 아직 안 담았다(「읽은 뒤에 보입니다」).
     env_pending: bool = false,
 
-    /// `text` 는 저장소의 실제 경로(신뢰) 또는 변수 이름(환경)이다.
-    pub const Item = struct { text: []u8, volume: u64 = 0, decision: trust.Decision = .deny, excluded: bool = false };
+    /// `text` 는 저장소의 실제 경로(신뢰) 또는 변수 이름(환경)이다. `dest` 는 원격 키의 목적지(로컬·환경이면 빈 조각 — 계획 WT7a).
+    pub const Item = struct { text: []u8, volume: u64 = 0, dest: []u8 = &.{}, decision: trust.Decision = .deny, excluded: bool = false };
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
-        for (self.items.items) |it| allocator.free(it.text);
+        for (self.items.items) |it| {
+            allocator.free(it.text);
+            allocator.free(it.dest);
+        }
         self.items.deinit(allocator);
         self.shown.deinit(allocator);
         self.* = .{};
@@ -44,8 +47,13 @@ pub fn open(self: *AppSession) void {
     var it = trust_store.decided();
     while (it.next()) |e| {
         const path = self.allocator.dupe(u8, e.key.path) catch break;
-        state.items.append(self.allocator, .{ .text = path, .volume = e.key.volume, .decision = e.decision }) catch {
+        const dest = self.allocator.dupe(u8, e.key.dest) catch {
             self.allocator.free(path);
+            break;
+        };
+        state.items.append(self.allocator, .{ .text = path, .volume = e.key.volume, .dest = dest, .decision = e.decision }) catch {
+            self.allocator.free(path);
+            self.allocator.free(dest);
             break;
         };
     }
@@ -113,9 +121,12 @@ fn refresh(self: *AppSession) void {
             continue;
         }
         if (state.mode != .trust) continue;
-        // 보이는 그대로(`~/…` — `rows`)로도 거른다 — 사용자는 화면의 경로를 친다.
-        var shown_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-        const shown = app_session_mod.homeTilde(it.text, home, &shown_buf);
+        // 보이는 그대로(`~/…`·원격은 `목적지:경로` — `rows`)로도 거른다 — 사용자는 화면의 이름을 친다.
+        var shown_buf: [std.fs.max_path_bytes + trust.max_dest_bytes + 1]u8 = undefined;
+        const shown = if (it.dest.len > 0)
+            lsp_client.trustKeyLabel(.{ .volume = it.volume, .path = it.text, .dest = it.dest }, &shown_buf)
+        else
+            app_session_mod.homeTilde(it.text, home, &shown_buf);
         if (std.ascii.indexOfIgnoreCase(shown, q) != null) state.shown.appendAssumeCapacity(i);
     }
     picker.setResultCount(state.shown.items.len);
@@ -136,9 +147,11 @@ pub fn accept(self: *AppSession) void {
     const it = state.items.items[state.shown.items[selected]];
     // 상자를 띄우면 목록이 닫히며 사본이 풀린다 — 키를 먼저 떠 둔다.
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (it.text.len > path_buf.len) return;
+    var dest_buf: [trust.max_dest_bytes]u8 = undefined;
+    if (it.text.len > path_buf.len or it.dest.len > dest_buf.len) return;
     @memcpy(path_buf[0..it.text.len], it.text);
-    const key: trust.Key = .{ .volume = it.volume, .path = path_buf[0..it.text.len] };
+    @memcpy(dest_buf[0..it.dest.len], it.dest);
+    const key: trust.Key = .{ .volume = it.volume, .path = path_buf[0..it.text.len], .dest = dest_buf[0..it.dest.len] };
     closed(self);
     lsp_client.manageListed(self, key); // 사본의 결정이 아니라 지금 표의 결정으로
 }
@@ -178,7 +191,10 @@ pub fn rows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.pa
             .env_names => if (it.excluded) maru.i18n.t(.lsp_env_list_excluded) else "",
         };
         const shown: []const u8 = switch (state.mode) {
-            .trust => app_session_mod.homeTilde(it.text, std.mem.span(std.c.getenv("HOME") orelse ""), try arena.alloc(u8, it.text.len + 1)),
+            .trust => if (it.dest.len > 0)
+                lsp_client.trustKeyLabel(.{ .volume = it.volume, .path = it.text, .dest = it.dest }, try arena.alloc(u8, it.dest.len + it.text.len + 1))
+            else
+                app_session_mod.homeTilde(it.text, std.mem.span(std.c.getenv("HOME") orelse ""), try arena.alloc(u8, it.text.len + 1)),
             .env_names => it.text,
         };
         const available = layout.panel_cols -| (chrome.components.overlay_input.displayCols(detail) + 5);

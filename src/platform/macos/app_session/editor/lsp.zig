@@ -224,23 +224,35 @@ pub const Client = struct {
     }
 };
 
-/// 신뢰 키의 소유본(`lsp.trust.Key` 는 경로를 빌린다).
+/// 신뢰 키의 소유본(`lsp.trust.Key` 는 경로·목적지를 빌린다).
 pub const OwnedKey = struct {
     volume: u64,
     path: []u8,
+    /// 원격 키의 목적지(로컬이면 빈 조각 — 계획 workspace-trust WT7a).
+    dest: []u8,
 
     pub fn key(self: OwnedKey) lsp.trust.Key {
-        return .{ .volume = self.volume, .path = self.path };
+        return .{ .volume = self.volume, .path = self.path, .dest = self.dest };
     }
 
     fn dupe(allocator: std.mem.Allocator, k: lsp.trust.Key) !OwnedKey {
-        return .{ .volume = k.volume, .path = try allocator.dupe(u8, k.path) };
+        const path = try allocator.dupe(u8, k.path);
+        errdefer allocator.free(path);
+        return .{ .volume = k.volume, .path = path, .dest = try allocator.dupe(u8, k.dest) };
     }
 
     fn deinit(self: OwnedKey, allocator: std.mem.Allocator) void {
         allocator.free(self.path);
+        allocator.free(self.dest);
     }
 };
+
+/// 신뢰 키를 사람에게 보이는 이름으로(관리 상자·관리 목록 — 계획 WT7a): 로컬은 홈을 `~` 로 줄인 경로, 원격은 `목적지:경로`(그 경로는 저쪽
+/// 기계의 것이라 이 기계의 홈으로 줄이지 않는다). `buf` 가 모자라면 경로만.
+pub fn trustKeyLabel(key: lsp.trust.Key, buf: []u8) []const u8 {
+    if (key.isRemote()) return std.fmt.bufPrint(buf, "{s}:{s}", .{ key.dest, key.path }) catch key.path;
+    return app_session_mod.homeTildeInto(key.path, buf);
+}
 
 pub const State = struct {
     clients: std.ArrayList(Client) = .empty,
@@ -257,7 +269,7 @@ pub const State = struct {
     manage_key: ?OwnedKey = null,
     manage_primary: ManageAction = .forget,
     manage_alternate: ?ManageAction = null,
-    manage_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
+    manage_root_note_buf: [std.fs.max_path_bytes + lsp.trust.max_dest_bytes + 64]u8 = undefined,
     manage_notes: [5]maru.chrome.components.confirm.Note = undefined,
     /// 신뢰 시트의 안내 줄(`setTrustSheetNotes`) — 모달이 빌려 그리므로 모달이 떠 있는 동안 여기 산다. 경로 두 줄과 shim 출처
     /// 경고(도구 이름)는 버퍼를 쓰고 나머지는 번역 표의 정적 문장이다.
@@ -1021,8 +1033,8 @@ fn manageLabel(a: ManageAction) maru.i18n.Key {
 fn setManageNotes(self: *AppSession, key: lsp.trust.Key, primary: ManageAction, alternate: ?ManageAction) void {
     const st = &self.editor_lsp;
     var n: usize = 0;
-    var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_line = maru.i18n.format(&st.manage_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(key.path, &shown_buf) }});
+    var shown_buf: [std.fs.max_path_bytes + lsp.trust.max_dest_bytes + 1]u8 = undefined;
+    const root_line = maru.i18n.format(&st.manage_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = trustKeyLabel(key, &shown_buf) }});
     st.manage_notes[n] = .{ .text = root_line, .fit = .path };
     n += 1;
     const offers_revoke = primary == .revoke or alternate == .revoke;
@@ -1134,25 +1146,27 @@ const ControlTrust = struct {
     /// 맞은 키의 경로 사본 — 응답(`repository`)을 다 쓸 때까지 산다(`apply` 의 지역 버퍼면 응답을 쓸 때 이미 풀렸다 — 판정자 LSPB38 이
     /// 잡았다). 표를 고치는 동안 표가 빌려 준 경로를 쥐지 않으려고 복사한다.
     path_buf: [std.fs.max_path_bytes]u8 = undefined,
+    /// 맞은 원격 키의 목적지 사본(계획 WT7a) — 경로와 같은 이유.
+    dest_buf: [lsp.trust.max_dest_bytes]u8 = undefined,
 
     /// 결정이 있는 항목 전부(표가 빌려 준 경로 — 응답을 쓰는 동안만 산다).
     pub fn entries(_: *ControlTrust, gpa: std.mem.Allocator) ![]control_trust.Entry {
         var list: std.ArrayList(control_trust.Entry) = .empty;
         errdefer list.deinit(gpa);
         var it = trust_store.decided();
-        while (it.next()) |e| try list.append(gpa, .{ .volume = e.key.volume, .path = e.key.path, .decision = wireDecision(e.decision) });
+        while (it.next()) |e| try list.append(gpa, .{ .volume = e.key.volume, .path = e.key.path, .decision = wireDecision(e.decision), .host = e.key.dest });
         return list.toOwnedSlice(gpa);
     }
 
     pub fn apply(self: *ControlTrust, op: control_trust.Op, target: control_trust.Target) control_trust.Outcome {
-        const key = switch (findTrustKey(target, &self.path_buf)) {
-            .none => return .{ .none = .{ .containing = containingDecision(target.path) } },
+        const key = switch (findTrustKey(target, &self.path_buf, &self.dest_buf)) {
+            .none => return .{ .none = .{ .containing = containingDecision(target, &self.dest_buf) } },
             .ambiguous => return .ambiguous,
             .one => |k| k,
         };
         const previous = trust_store.get(key).?; // `findTrustKey` 는 결정이 있는 키만 낸다
         const prev_wire = wireDecision(previous);
-        const matched: control_trust.Key = .{ .volume = key.volume, .path = key.path };
+        const matched: control_trust.Key = .{ .volume = key.volume, .path = key.path, .host = key.dest };
         const saved = switch (op) {
             .list => unreachable, // `respond` 가 목록은 `entries` 로 답한다
             // 철회는 지금 허용인 결정만 거부로 — 이미 거부면 그대로(다시 적지 않는다; 결정이 없던 저장소는 위에서 「없음」이다 — 관리 상자
@@ -1167,17 +1181,24 @@ const ControlTrust = struct {
 /// 그 경로를 품은(자신이 아닌 조상인) 저장소의 결정 — 가장 가까운 것. 결정은 저장소 root 단위라 하위 폴더를 준 사용자에게 알려 준다(바꾸지는
 /// 않는다). 경로는 실제 경로로 풀어 본다 — 풀리면 같은 볼륨의 것만(같은 접두의 다른 디스크를 알려 주지 않게), 못 풀면 글자 그대로. 표가
 /// 빌려 준 경로를 돌려준다 — 응답을 쓰는 동안만 산다(그 사이 표를 고치지 않는다).
-fn containingDecision(path: []const u8) ?control_trust.Entry {
+///
+/// 원격 대상(`host`)이면 같은 목적지의 원격 항목만 보고 경로는 글자 그대로 본다(저쪽 기계의 경로라 여기서 풀지 않는다 — 계획 WT7a). 로컬
+/// 대상은 원격 항목을 건너뛴다(같은 경로라도 다른 기계다).
+fn containingDecision(target: control_trust.Target, dest_buf: *[lsp.trust.max_dest_bytes]u8) ?control_trust.Entry {
+    const dest: ?[]const u8 = if (target.host) |h| (lsp.trust.normalizeDest(h, dest_buf) orelse return null) else null;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const resolved = trust_store.keyFor(path, &buf);
-    const real = if (resolved) |k| k.path else path;
+    const resolved = if (dest == null) trust_store.keyFor(target.path, &buf) else null;
+    const real = if (resolved) |k| k.path else target.path;
     var best: ?control_trust.Entry = null;
     var it = trust_store.decided();
     while (it.next()) |e| {
+        if (dest) |d| {
+            if (!std.mem.eql(u8, e.key.dest, d)) continue;
+        } else if (e.key.isRemote()) continue;
         if (resolved) |k| if (e.key.volume != k.volume) continue;
         if (std.mem.eql(u8, e.key.path, real) or !selfOrAncestor(e.key.path, real)) continue;
         if (best) |b| if (b.path.len >= e.key.path.len) continue;
-        best = .{ .volume = e.key.volume, .path = e.key.path, .decision = wireDecision(e.decision) };
+        best = .{ .volume = e.key.volume, .path = e.key.path, .decision = wireDecision(e.decision), .host = e.key.dest };
     }
     return best;
 }
@@ -1192,11 +1213,23 @@ fn wireDecision(d: lsp.trust.Decision) control_trust.Decision {
 /// 요청이 가리키는 표의 키. 먼저 표에 **그 글자 그대로** 있는 결정(목록이 준 경로 — 지워진 저장소도 잊을 수 있게), 없으면 실제 경로로
 /// 풀어 본다(심링크·`/tmp`↔`/private/tmp`·대소문자만 다른 이름 — 사용자가 친 경로). 같은 경로가 여러 볼륨에 있으면 `volume` 이 고른다.
 /// 키의 경로는 `buf` 에 복사한다 — 표를 고치는 동안 빌린 경로를 쥐지 않는다.
-fn findTrustKey(target: control_trust.Target, buf: *[std.fs.max_path_bytes]u8) union(enum) { none, ambiguous, one: lsp.trust.Key } {
+///
+/// 원격 대상(`host`)은 목적지를 키의 모양으로 맞춘 뒤(`normalizeDest`) 같은 목적지·같은 경로 글자의 원격 항목만 찾는다 — 실제 경로로 풀지
+/// 않는다(저쪽 기계의 경로다). 로컬 대상은 원격 항목을 건너뛴다(경로만 같은 원격 항목과 섞여 「여러 볼륨」이 되지 않게 — 계획 WT7a).
+fn findTrustKey(target: control_trust.Target, buf: *[std.fs.max_path_bytes]u8, dest_buf: *[lsp.trust.max_dest_bytes]u8) union(enum) { none, ambiguous, one: lsp.trust.Key } {
+    if (target.host) |h| {
+        const dest = lsp.trust.normalizeDest(h, dest_buf) orelse return .none;
+        if (target.path.len > buf.len) return .none;
+        const want: lsp.trust.Key = .{ .volume = 0, .path = target.path, .dest = dest };
+        if (trust_store.get(want) == null) return .none;
+        @memcpy(buf[0..target.path.len], target.path);
+        return .{ .one = .{ .volume = 0, .path = buf[0..target.path.len], .dest = dest } };
+    }
     var found: ?lsp.trust.Key = null;
     var n: usize = 0;
     var it = trust_store.decided();
     while (it.next()) |e| {
+        if (e.key.isRemote()) continue;
         if (!std.mem.eql(u8, e.key.path, target.path)) continue;
         if (target.volume) |v| if (e.key.volume != v) continue;
         found = e.key;

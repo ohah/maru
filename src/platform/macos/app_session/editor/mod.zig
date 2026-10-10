@@ -55537,13 +55537,16 @@ fn replacePreviewSearch(fx: *PaneFixture) !void {
     try replacePreviewSearchWith(fx, "foo", "bar", false);
 }
 fn replacePreviewSearchWith(fx: *PaneFixture, needle: []const u8, replacement: []const u8, regex: bool) !void {
+    return replacePreviewSearchWithFiles(fx, needle, replacement, regex, "search.txt,disk.txt");
+}
+fn replacePreviewSearchWithFiles(fx: *PaneFixture, needle: []const u8, replacement: []const u8, regex: bool, included: []const u8) !void {
     try projectSearchRootForTest(fx);
     fx.session.editor_project_search_watch_generation = fx.session.file_tree.rootGeneration();
     const d = @import("search/dock.zig");
     _ = try fx.session.resize(960, 600, 1000);
     d.open(fx.session);
     try fx.session.editor_search.fields[0].insertText(testing.allocator, needle);
-    try fx.session.editor_search.fields[1].insertText(testing.allocator, "search.txt,disk.txt");
+    try fx.session.editor_search.fields[1].insertText(testing.allocator, included);
     fx.session.editor_search.options[2] = regex;
     d.changed(fx.session);
     d.run(fx.session);
@@ -58769,5 +58772,150 @@ test "RPA23 디스크 정규식의 여러 줄 캡처 삭제와 빈 매치는 미
         try diskApplyRead(&fx, c.after);
         try testing.expect(undoEdit(fx.session, term));
         try testing.expectEqualStrings(c.before, term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+// 입력과 UI 수명은 worker를 완료시킨 뒤에 바꾼다. 빠른 디스크에서도 같은 순서를 강제한다.
+test "RPA24 적용 완료 전 취소 옵션 변경 조합과 확정 대기는 쓰지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..6) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try diskApplyReady(&fx, "foo original", true);
+        const p = @import("search/preview.zig");
+        const d = @import("search/dock.zig");
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        try waitDiskCheck(fx.session);
+        if (mode == 0) d.cancel(fx.session);
+        if (mode == 1) d.apply(fx.session, .{ .option = 2 }, fx.session.editor_search.result.generation);
+        if (mode == 2) {
+            fx.session.editor_search.focused = 3;
+            d.setPreedit(fx.session, "한");
+        }
+        if (mode == 3) fx.session.ime_editor_commit_pending = true;
+        if (mode == 4) try testing.expect(d.leave(fx.session));
+        if (mode == 5) try fx.session.editor_search.fields[1].setPreedit(testing.allocator, "한");
+        try waitDiskApply(fx.session);
+        fx.session.ime_editor_commit_pending = false;
+        try diskApplyRead(&fx, "foo original");
+        try testing.expect(fx.session.editor_search.apply_outcome == .none);
+        if (mode == 2) try testing.expectEqualStrings("한", fx.session.editor_search.fields[3].preedit.items);
+    }
+}
+
+// 파일 이름을 질의의 glob으로 재해석하지 않는다. 실제 파일 목록에서 정확한 경로의 행을 고른다.
+fn diskPreviewRowNamed(session: *AppSession, name: []const u8) !usize {
+    for (session.editor_search.result.model.visible.items, 0..) |visible, index| {
+        if (visible != .file) continue;
+        const group = session.editor_search.result.model.groups.items[visible.file];
+        if (group.source == .disk and std.mem.eql(u8, group.path, name)) return index;
+    }
+    return error.NoPreviewRow;
+}
+test "RPA25 공백 한글 개행 옵션 같은 이름과 하위 경로는 정확한 파일만 쓴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const names = [_][]const u8{ "한글😀 name.txt", "-dash.txt", "line\nbreak.txt", "hash#percent%.txt", "folder space/leaf.txt" };
+    for (names) |name| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo control");
+        try fx.dir.dir.createDir(testing.io, "folder space", .default_dir);
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = name, .data = "foo original" });
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "untouched.txt", .data = "foo independent" });
+        try replacePreviewSearchWithFiles(&fx, "foo", "bar", false, "*");
+        const p = @import("search/preview.zig");
+        try p.start(fx.session, try diskPreviewRowNamed(fx.session, name));
+        try waitReplacePreview(fx.session);
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        try waitDiskApply(fx.session);
+        const applied = try fx.dir.dir.readFileAlloc(testing.io, name, testing.allocator, .limited(1024));
+        defer testing.allocator.free(applied);
+        try testing.expectEqualStrings("bar original", applied);
+        const other = try fx.dir.dir.readFileAlloc(testing.io, "untouched.txt", testing.allocator, .limited(1024));
+        defer testing.allocator.free(other);
+        try testing.expectEqualStrings("foo independent", other);
+        const term = pane_ops.activePane(fx.session).activeTerm();
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("foo original", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+test "RPA26 재검증 대상이 FIFO 비UTF8 상한 초과 파일로 바뀌어도 쓰기와 무한 대기를 막는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try diskApplyReady(&fx, "foo original", true);
+        const before = pane_ops.activePane(fx.session).terms.items.len;
+        if (mode == 0) {
+            const path = try testing.allocator.dupeZ(u8, fx.session.editor_search.preview.disk_target.?.absolute);
+            defer testing.allocator.free(path);
+            try fx.dir.dir.deleteFile(testing.io, "disk.txt");
+            const posix_fixture = struct {
+                extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+            };
+            try testing.expectEqual(@as(c_int, 0), posix_fixture.mkfifo(path, 0o600));
+        }
+        if (mode == 1) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo\xff" });
+        if (mode == 2) {
+            const file = try fx.dir.dir.createFile(testing.io, "disk.txt", .{});
+            defer file.close(testing.io);
+            try file.setLength(testing.io, read_limit_bytes + 1);
+        }
+        try testing.expect((try @import("search/preview.zig").apply(fx.session)) == .pending);
+        try waitDiskApply(fx.session);
+        try testing.expectEqual(.conflict, fx.session.editor_search.preview.phase);
+        try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len);
+        if (mode == 1) try diskApplyRead(&fx, "foo\xff");
+        if (mode == 2) try testing.expectEqual(read_limit_bytes + 1, (try fx.dir.dir.statFile(testing.io, "disk.txt", .{})).size);
+    }
+}
+test "RPA27 취소한 적용 직후 새 미리보기를 반복해도 옛 완료는 새 요청을 쓰지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const control = try diskApplyReady(&fx, "foo original", true);
+    const p = @import("search/preview.zig");
+    for (0..16) |_| {
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        p.back(fx.session);
+        // 옛 Check가 아직 자기 사본을 해제하는 동안 새 State를 만든다.
+        try p.start(fx.session, try replacePreviewRow(fx.session, true, true));
+        try waitReplacePreview(fx.session);
+        try testing.expect(p.canApply(fx.session));
+        try diskApplyRead(&fx, "foo original");
+    }
+    fx.session.editor_search.fields[3].selectAll();
+    try fx.session.editor_search.fields[3].insertText(testing.allocator, "final");
+    p.back(fx.session);
+    try p.start(fx.session, try replacePreviewRow(fx.session, true, true));
+    try waitReplacePreview(fx.session);
+    try testing.expect((try p.apply(fx.session)) == .pending);
+    try waitDiskApply(fx.session);
+    try diskApplyRead(&fx, "final original");
+    try testing.expectEqualStrings("foo control", control.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), p.outstandingWorkers());
+}
+test "RPA28 완료된 적용이 IME 대기로 거절되면 그려 둔 진행 UI도 무효화한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try diskApplyReady(&fx, "foo original", true);
+        const p = @import("search/preview.zig");
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        try waitDiskCheck(fx.session);
+        if (mode == 0) fx.session.ime_editor_commit_pending = true;
+        if (mode == 1) fx.session.ime_active = true;
+        if (mode == 2) try fx.session.editor_search.fields[1].setPreedit(testing.allocator, "한");
+        try testing.expect(@import("search/dock.zig").publish(fx.session));
+        // 앞 프레임을 그려 dirty가 내려갔고, 그다음 tick에서 worker 완료를 받는 순서다.
+        fx.session.metal_dirty = false;
+        p.poll(fx.session);
+        fx.session.ime_active = false;
+        fx.session.ime_editor_commit_pending = false;
+        try testing.expectEqual(.conflict, fx.session.editor_search.preview.phase);
+        try diskApplyRead(&fx, "foo original");
+        try testing.expect(fx.session.metal_dirty);
+        try testing.expectEqual(@as(u64, 0), fx.session.editor_search.published_generation);
     }
 }

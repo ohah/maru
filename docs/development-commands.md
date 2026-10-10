@@ -1257,4 +1257,9 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 도메인/OOM 판정은 기존 `zig build test-editor-project-replace-apply`에 포함한다.
 
 `python3 tools/test-editor-project-replace-disk-adversarial.py --output <새 빈 디렉터리>`는
-격리 소스에서 디스크 적용의 원문·입력·root 보호 변이와 정상/등가 대조를 실행한다.
+격리 소스에서 디스크 적용의 원문·입력·root·화면 갱신 보호 변이와 정상/등가/복원 대조를 실행한다.
+
+`python3 tools/editor-project-search-app/run.py --replace-ime-refuse --disk-files 2`는
+완료한 검증 worker의 수확을 진행 프레임 뒤로 늦추고 IME 확정 대기를 주입한다.
+진행→충돌 화면의 실제 Metal 캡처와 원래 문서·모든 디스크 파일의 bytes 보존을 판정한다.
+물리 OS IME 입력·후보창 검증은 아니다.

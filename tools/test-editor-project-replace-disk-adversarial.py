@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,8 +29,9 @@ def main():
     b = build.read_text()
     old = '.filters = &.{".test.RPA"}'
     assert b.count(old) == 1
-    b = b.replace(old, '.filters = &.{".test.RPA14", ".test.RPA15", ".test.RPA16", ".test.RPA17", ".test.RPA20", ".test.RPA21"}')
-    b = b.replace('run_apply_host.addArg("--maru-expect-tests=27");', 'run_apply_host.addArg("--maru-expect-tests=10");')
+    b = b.replace(old, '.filters = &.{".test.RPA14", ".test.RPA15", ".test.RPA16", ".test.RPA17", ".test.RPA20", ".test.RPA21", ".test.RPA28"}')
+    b, count = re.subn(r'run_apply_host.addArg\("--maru-expect-tests=\d+"\);', 'run_apply_host.addArg("--maru-expect-tests=11");', b)
+    assert count == 1
     build.write_text(b)
     path = source / "src/platform/macos/app_session/editor/search/preview.zig"
     original = path.read_text()
@@ -40,6 +42,8 @@ def main():
          'false or self.ime_active', False),
         ("replaced-root-after-check", 'if (@as(u64, @intCast(root.device)) != target.identity.device or root.stat.inode != target.identity.inode)',
          'if ((@as(u64, @intCast(root.device)) != target.identity.device or root.stat.inode != target.identity.inode) and false)', False),
+        ("paint-invalidation", 'self.editor_search.result.generation +%= 1;\n    self.metal_dirty = true;\n}\nfn pollApply',
+         'self.editor_search.result.generation +%= 1;\n    self.metal_dirty = false;\n}\nfn pollApply', False),
         ("equivalent-content-comparison", '!std.mem.eql(u8, doc.opened.?.file.content, transaction.plan.?.before)',
          '!std.mem.eql(u8, transaction.plan.?.before, doc.opened.?.file.content)', True),
     ]
@@ -67,7 +71,7 @@ def main():
     finally:
         path.write_text(original)
     (output / "results.json").write_text(json.dumps(dict(
-        scope="real rg/AppSession disk apply; focused RPA14/15/16/17/20/21 and neutral Plan; not GUI or OS IME",
+        scope="real rg/AppSession disk apply; focused RPA14/15/16/17/20/21/28 and neutral Plan; not GUI or OS IME",
         results=results), ensure_ascii=False, indent=2) + "\n")
     print(output / "results.json")
 

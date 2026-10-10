@@ -5,6 +5,7 @@ var editor_project_search_root_submitted = false;
 var editor_project_search_original_surface: u64 = 0;
 var editor_project_search_probe_stage: u32 = 0;
 var editor_project_search_applied_surface: u64 = 0;
+var editor_project_search_refused_surface: u64 = 0;
 var editor_project_search_ime_observed: u64 = 0;
 var editor_project_search_matrix_surface: u64 = 0;
 var editor_project_search_matrix_history: usize = 0;
@@ -46,6 +47,21 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
             if (term.surfaceId() != editor_project_search_matrix_surface or self.editor_nav_back.items.len != editor_project_search_matrix_history) return -1;
         }
         std.debug.print("SEARCH_MATRIX stage={d} matches={d} groups={d}\n", .{stage, state.result.model.matches, state.result.model.groups.items.len});
+        return 1;
+    }
+    const refusing = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE") orelse "0"), "1");
+    if (refusing and stage >= 26 and stage <= 28) {
+        if (stage == 26) {
+            if (state.preview.phase != .applying or state.preview.apply_check == null) return -1;
+            const job = state.preview.apply_check.?;
+            if (!job.done.load(.acquire)) return 0;
+            if (job.failure != null) return -1;
+            editor_project_search_refused_surface = term.surfaceId();
+            return 1;
+        }
+        if (state.preview.phase != .conflict or state.apply_outcome != .none or term.surfaceId() != editor_project_search_refused_surface) return -1;
+        // 새 표시 세대로 실제 프레임을 만든 뒤에만 conflict 화면을 촬영한다.
+        if (state.published_generation != state.result.generation) return 0;
         return 1;
     }
     if (stage >= 26 and stage <= 28) {
@@ -146,6 +162,14 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
 export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
     const self = editor_project_search_session orelse return;
     switch (stage) {
+        26 => {
+            if (!std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE") orelse "0"), "1")) return;
+            // worker는 실제 읽기를 마쳤다. 앞 프레임 뒤 확정 대기가 들어온 actor 순서를 주입한다.
+            self.ime_editor_commit_pending = true;
+            self.metal_dirty = false;
+            @import("editor/search/preview.zig").poll(self);
+            self.ime_editor_commit_pending = false;
+        },
         22 => {
             const d = @import("editor/search/dock.zig");
             d.open(self);
@@ -310,7 +334,9 @@ pub fn editorProjectSearchTick(self: *AppSession) void {
     const before = std.Io.Clock.awake.now(self.io).nanoseconds;
     if (self.editor_search.fields[0].text.items.len != 0 and search_started_ns == null) search_started_ns = before;
     @import("editor/search/owner.zig").poll(self);
-    @import("editor/search/dock.zig").pump(self);
+    // 캡처 사본에서만 완료 수확을 한 프레임 미룬다. worker의 읽기·hash·취소는 제품 그대로다.
+    const hold_apply = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE") orelse "0"), "1") and self.editor_search.preview.phase == .applying;
+    if (!hold_apply) @import("editor/search/dock.zig").pump(self);
     const after = std.Io.Clock.awake.now(self.io).nanoseconds;
     if (search_started_ns != null) search_tick_max_ns = @max(search_tick_max_ns, after - before);
     if (self.editor_search.result.model.matches != 0 and search_first_ns == null) search_first_ns = after;

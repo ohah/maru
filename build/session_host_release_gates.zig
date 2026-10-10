@@ -5570,6 +5570,18 @@ pub fn register(b: *std.Build, ctx: Context) void {
         // **원격 파일 트리 하네스 게이트**(RF2b — docs/plans/remote-file-tree.md §10.3). 같은 하네스
         // sshd 위에서 제품 전송(`runRemoteCapped`)이 실물 헬퍼의 목록 wire 를 왕복하는지 잰다.
         {
+            // 감시자는 세션 모듈 둘을 문다(활동 축 `remote_activity_wire`·폴링의 필터 규칙 `git_filter_override` — `build.zig` 의 두 자리와
+            // 같다). 이 자리는 RAV2 부터 주입이 빠져 빌드가 안 됐다(적대적 검증 WT6b-1b-ii 3회차 — 아무도 이 스텝을 부르지 않아 몰랐다).
+            const rft_activity_mod = b.createModule(.{
+                .root_source_file = b.path("src/session/remote_activity_wire.zig"),
+                .target = b.graph.host,
+                .optimize = optimize,
+            });
+            const rft_filter_mod = b.createModule(.{
+                .root_source_file = b.path("src/session/git_filter_override.zig"),
+                .target = b.graph.host,
+                .optimize = optimize,
+            });
             const rft_native_watch = b.addExecutable(.{
                 .name = "maru-remote-watch-native",
                 .root_module = b.createModule(.{
@@ -5577,6 +5589,10 @@ pub fn register(b: *std.Build, ctx: Context) void {
                     .target = b.graph.host,
                     .optimize = optimize,
                     .link_libc = true,
+                    .imports = &.{
+                        .{ .name = "remote_activity_wire", .module = rft_activity_mod },
+                        .{ .name = "git_filter_override", .module = rft_filter_mod },
+                    },
                 }),
             });
             const rft_install_native = b.addInstallArtifact(rft_native_watch, .{

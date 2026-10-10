@@ -110,6 +110,7 @@ pub const git_status = @import("session/git_status.zig"); // git porcelain v2·n
 pub const remote_shell = @import("session/remote_shell.zig"); // 원격 로그인 셸 규율(PATH 처방·`sh` 껍데기) — 세 사용처의 단일 출처
 pub const remote_watch_install = @import("session/remote_watch_install.zig"); // 원격 감시자 설치 계약(RW2 — uname 판별·멱등 확인·심기)
 pub const git_command = @import("session/git_command.zig"); // 읽기 전용 git argv·env 조립(외부 프로세스 실행 경로 차단)
+pub const git_filter_override = @import("session/git_filter_override.zig"); // 신뢰 전 저장소 필터 덮어쓰기(앱 읽기·원격 감시자가 함께 문다)
 pub const git_write_command = @import("session/git_write_command.zig"); // 쓰기 git argv·안전 술어(읽기와 환경·플래그가 갈린다 — 쓰기 문서 §1)
 pub const git_locate = @import("session/git_locate.zig");
 pub const turn_snapshot = @import("session/turn_snapshot.zig"); // 에이전트 턴 경계 스냅샷 정책(§6.1, 순수)

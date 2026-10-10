@@ -80,10 +80,19 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, code, "maru-remote-watch: no-repo - ") != null);
     // **판이 올라야 원격 바이너리가 갈린다.** 옛 판이 깔린 원격은 계속 `unsupported` 를 내므로,
     // 판을 안 올리면 이 수정이 그 호스트에 영영 닿지 않는다(설치 쪽이 이름에 판을 박는다).
-    try std.testing.expect(std.mem.indexOf(u8, code, "maru-remote-watch 16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, code, "maru-remote-watch 17") != null);
     // ⚠️ **다이제스트는 도크가 읽는 것과 «같은 범위» 여야 한다**(§11.3). `status` 하나만 보면 다른
     // 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다 — 셋을 합쳐도 0.04 s 다(실측).
-    const reads = try bodyOf(src, "const digest_reads = [_][]const []const u8{", "\n};", 2048);
+    const reads = try bodyOf(src, "const digest_reads = [_]DigestRead{", "\n};", 2048);
+    // ⚠️ **작업트리를 읽는 셋은 저장소 필터를 끈 채로 돈다**(계획 workspace-trust WT6b-1b-ii — 원격은 늘 신뢰 전). 표시를 빼면
+    // 그 읽기가 저장소가 정한 프로그램을 원격에서 돌린다. 허용된 자리를 센다(`status` 하나·`numstat` 둘).
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, reads, ".runs_filters = true"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, reads, ".runs_filters = false"));
+    // 덮어쓰기 env 는 앞머리의 env 토큰 **뒤**·git 바로 앞에 끼운다 — env(1) 는 뒤에 온 같은 이름이 이긴다(앞에 끼우면 앱 토큰이 언젠가
+    // `GIT_CONFIG_*` 를 실을 때 우리 것이 조용히 진다 — 적대적 검증 1회차).
+    const argv_body = try bodyOf(src, "fn gitArgv(", "\n}\n", 4096);
+    try std.testing.expect(std.mem.indexOf(u8, argv_body, "while (at < git_prefix.len and std.mem.indexOfScalar(u8, git_prefix[at], '=') != null) at += 1;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, argv_body, "argv.appendSlice(arena, git_prefix[0..at])") != null);
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"status\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"for-each-ref\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, reads, "\"worktree\"") != null);
@@ -105,7 +114,7 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     try std.testing.expect(std.mem.indexOf(u8, reads_code, "for-each-ref") != null);
     try std.testing.expect(std.mem.indexOf(u8, reads_code, "--branch") != null);
     // 첫 읽기만 필수다 — `origin` 이 없는 저장소에서 `rev-list` 가 실패한다고 감시가 멀면 안 된다.
-    const dg_body = try bodyOf(src, "fn digest(", "\n}\n", 2048);
+    const dg_body = try bodyOf(src, "fn digest(", "\n}\n", 4096); // 필터 조회·건너뜀이 들어 자랐다(WT6b-1b-ii)
     try std.testing.expect(std.mem.indexOf(u8, dg_body, "if (index == 0) return .{ .state = .failed }") != null);
     // ⚠️ 다이제스트는 **이 프로세스 안에서만** 산다 — 밖으로 나가는 것은 `change` 한 줄뿐이다(§10).
     try std.testing.expect(std.mem.indexOf(u8, poll_body, "announce()") != null);
@@ -113,7 +122,7 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     // ⚠️ **git 을 기다리는 동안에도 stdin 을 본다**(적대적 검증 2026-09-04 17 회차 — 실측). 폴링 갈래는
     // 자식을 띄우므로 §5 의 고아 방지를 «새로» 지켜야 한다. 앞 판은 파이프를 블로킹으로 읽어서, git 이
     // 멈추면 채널이 끊겨도 안 끝났다(고치기 전 바이너리로 재현 확인 · 고친 뒤 60 ms).
-    const run_body = try bodyOf(src, "fn hashCommand(", "\n}\n", 4096);
+    const run_body = try bodyOf(src, "fn runCommand(", "\n}\n", 4096);
     try std.testing.expect(std.mem.indexOf(u8, run_body, ".fd = 0,") != null);
     try std.testing.expect(std.mem.indexOf(u8, run_body, "channel_closed") != null);
     // 병든 원격이 폴링을 영원히 붙잡지 못한다.

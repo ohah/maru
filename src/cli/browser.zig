@@ -2012,6 +2012,9 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
         \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
         \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG (--rect region, --scale factor; omit for full page at device scale)
+        \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
+        \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
+        \\  reload  --surface <id>                     reload the page (Chromium tabs)
         \\
     ,
         browser_help,

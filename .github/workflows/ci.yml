@@ -159,6 +159,9 @@ jobs:
           if [ "$CHANGES_RESULT" != "success" ] || [ "$CODE" = "true" ]; then
             # `check-boundaries` 는 아래 별도 잡이 자기 러너에서 돈다(.mise.toml 의 그 태스크 주석).
             mise run check-without-boundaries
+            # Pure tests cannot observe main's exit status or pre-request side effects.
+            # Use the freshly built artifact once; the existing upload step keeps evidence.
+            zig build test-cli-failure-process
           elif [ "$DOCS" = "true" ]; then
             echo "문서 전용 변경 — Zig 게이트 대신 문서 드리프트와 문서 간 링크만 검사한다"
             mise run check-config-docs

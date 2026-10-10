@@ -223,3 +223,28 @@ window·volume 수정 전의 private socket 재현은 /tmp/maru-selector-baselin
 revoke/forget 96개)는 정상 접속 가능한 endpoint에 연결하지 않았고, 정상 단일/생략 요청의
 wire 및 inherited pane 환경에서도 LSP auth selector 없는 계약을 대조했다. 각 중복 방어를
 제거한 변형은 해당 순수 판정자에서 실패했다. artifact는 저장소에 넣지 않았다.
+
+## 실제 CLI process CI 게이트
+
+사용자 승인된 후속 작업: 기존 Ubuntu check 잡의 코드 변경 경로에서
+`zig build test-cli-failure-process`를 한 번 실행한다. 기본 순수 test와 별도로 실제 native
+CLI artifact를 실행하며 설치된 zig-out 또는 사용자 PATH의 CLI를 재사용하지 않는다.
+private /tmp HOME·cache·socket으로 도움말/잘못된 인자의 부작용 부재와 정상·오류 RPC의
+종료 상태를 대조한다. GUI/TCC나 실 session host는 필요하지 않다. 새 matrix는 추가하지 않는다.
+성공·실패 호출 기록은 tests/artifacts/cli-failure 아래 JSON으로 보존해 기존 check artifact가
+업로드한다. 검증 실패 전까지의 기록도 남긴다. /tmp의 짧은 socket 경로는 유지한다.
+
+CI 배선 검증에서 실제 native CLI의 342개 process 검사가 통과했다. 기록을 매 호출마다
+남기면서 help 파일 보존 판정에 검증 도구 자신의 results.json 변경이 섞이는 문제가 발견돼,
+그 정확한 기록 파일만 비교에서 제외했다. 사용자 상태 파일·symlink 검사는 유지한다.
+실패 실행 파일 음성 대조군은 nonzero로 종료했고 첫 실패 호출 JSON이 보존됐다.
+
+추가 실패 경로 검증에서 첫 subprocess가 timeout/spawn 예외를 내면 JSON이 없음을 재현했다.
+이제 timeout의 partial stdout/stderr 및 spawn 진단을 exit=null과 failure 종류로 기록한 뒤
+원래 예외를 전파한다. 성공 exit 0으로 바꾸지 않는다. 문서 충돌은 upstream 내용을 보존하고
+CLI 검증 절을 상단 CLI 관련 절에 배치해 해결했다.
+
+최종 변경의 적대적 검증은 5회 독립 루트에서 실제 CLI 342개 호출과 exit mismatch,
+help 파일 변경, 첫 timeout, 첫 spawn 실패, panic 출력 및 0/음수 반복 거부를 대조했다.
+모든 정상 대조군이 통과했고 변형은 의도한 실패로 검출됐다. timeout/spawn의 실패 JSON과
+partial output 보존도 확인했다. 검증 artifact는 저장소에 커밋하지 않는다.

@@ -4338,8 +4338,10 @@ pub fn build(b: *std.Build) void {
     const run_cli_failure_tests = b.addRunArtifact(cli_failure_tests);
     b.step("test-cli-failure-contract", "Run CLI argument and response outcome regression tests").dependOn(&run_cli_failure_tests.step);
     test_step.dependOn(&run_cli_failure_tests.step);
-    // Actual CLI process tests are opt-in: they require a local POSIX host and Python.
-    const cli_failure_process = b.addSystemCommand(&.{ "python3", "tools/test-cli-failure-contract.py", "--cli" });
+    // CI's native Ubuntu check runs this separately from pure tests. Keep it opt-in
+    // for cross-target/local test builds, and always execute even with a warm cache.
+    const cli_failure_process = b.addSystemCommand(&.{ "python3", "tools/test-cli-failure-contract.py", "--output-dir", "tests/artifacts/cli-failure", "--cli" });
+    cli_failure_process.has_side_effects = true;
     cli_failure_process.addArtifactArg(exe);
     cli_failure_process.setCwd(b.path("."));
     b.step("test-cli-failure-process", "Run isolated POSIX CLI process failure checks").dependOn(&cli_failure_process.step);

@@ -248,3 +248,34 @@ CLI 검증 절을 상단 CLI 관련 절에 배치해 해결했다.
 help 파일 변경, 첫 timeout, 첫 spawn 실패, panic 출력 및 0/음수 반복 거부를 대조했다.
 모든 정상 대조군이 통과했고 변형은 의도한 실패로 검출됐다. timeout/spawn의 실패 JSON과
 partial output 보존도 확인했다. 검증 artifact는 저장소에 커밋하지 않는다.
+
+## agent-hooks 단일 옵션 계약
+
+사용자 승인된 후속 작업: agent-hooks install/uninstall의 --provider=, --dir=, --scope=는
+각 한 번만 지정한다. 같은 값 반복과 다른 값 반복 모두 usage 오류(exit 2)로 거부한다.
+provider 설정·trust 파일 읽기/쓰기·락·로그 디렉터리 생성 전에 종료한다. 기존 = 문법,
+필수 옵션·provider/scope 값·절대 경로 규칙 및 정상 설치/삭제는 유지한다. 기존 help 선행
+판정은 유지하며 중복 옵션과 help를 함께 주더라도 설정 변경 없는 도움말(exit 0)이다.
+agent-events/incidents와 원격 셸 커맨드 생성·provider 훅 바이트는 이 범위 밖이다.
+
+검증 계획: private HOME뿐 아니라 CLAUDE_CONFIG_DIR/CODEX_HOME도 격리한다.
+중복 provider·dir·scope의 같은/다른 값, 옵션 순열과 옵션처럼 보이는 경로를 검사한다.
+정상 install/uninstall과 재설치의 대조군을 두고 설정 및 trust 파일·디렉터리 상태 보존을
+실제 CLI 프로세스로 확인한다. 기존 process CI gate에 포함하고 방어 제거 변이도 검출한다.
+
+수정 전 native CLI의 private HOME/CLAUDE_CONFIG_DIR/CODEX_HOME 재현에서 중복 provider는
+마지막 codex의 hooks.json·config.toml을 썼고, 중복 dir는 마지막 로그 경로를 만들었다.
+같은 scope 반복도 설치가 실행됐다. 증거는 /tmp/maru-hooks-baseline-ielm5mu7/results.json이다.
+수정은 순수 parseArgs의 각 필드 할당 전에 존재 여부를 검사하며 기존 usage 오류 경로를 쓴다.
+
+Debug/ReleaseFast 순수 suite가 통과했고 실제 process gate는 없는 설정과 설치된 설정 모두에서
+중복 요청의 exit 2 및 설정/trust bytes·디렉터리 권한 보존을 확인한다. 양 provider의 정상 설치,
+무변경 재설치, 삭제와 사용자 설정 sentinel 보존을 같은 자리에서 대조한다. provider 환경 변수도
+명시적으로 private 경로로 고정했다. 수정 전 CLI는 새 process 판정자에서 중복 설치의 exit 0으로
+실패했다. provider·dir·scope 방어 각각을 무력화한 세 변형은 컴파일 후 새 테스트에서 실패했고,
+동등 provider 검사 변형은 통과했다(/tmp/maru-hooks-mutations-vkbtzh9r/results.json).
+
+실제 CLI 회귀 검증 5회에서 매회 608개 호출이 통과했다. 새 검사는 hook/trust 생성·삭제를
+명시적인 정상 대조군으로 확인하고, 초기/설치된 상태의 중복 요청과 help가 이를 바꾸지 않는지
+검사한다. 기존 CI process 게이트에 포함되며 별도 provider 또는 SSH 실행은 하지 않는다.
+구현은 완료됐고 최종 PR CI 결과는 해당 checks로 추적한다.

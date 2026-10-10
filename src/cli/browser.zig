@@ -201,6 +201,31 @@ pub const ParseError = error{
     UnexpectedArgument, // 남는 위치 인자
 };
 
+/// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자와 양방향 제어 글자를 뺀다(서버가 보낸 페이지 글을 터미널에 찍을 때). 쓴 바이트 수.
+fn displaySafe(s: []const u8, out: []u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) {
+        const len = std.unicode.utf8ByteSequenceLength(s[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (i + len > s.len) break;
+        const code = std.unicode.utf8Decode(s[i .. i + len]) catch {
+            i += len;
+            continue;
+        };
+        const unsafe = code < 0x20 or (code >= 0x7f and code <= 0x9f) or code == 0x061C or code == 0x200E or code == 0x200F or
+            (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069);
+        if (!unsafe and n + len <= out.len) {
+            @memcpy(out[n .. n + len], s[i .. i + len]);
+            n += len;
+        }
+        i += len;
+    }
+    return n;
+}
+
 // ══ 파서 ═══════════════════════════════════════════════════════════════════════════════════════════════════
 
 /// `maru browser` 뒤 인자를 파싱한다. `--help`/`-h` 있으면 `.help`.
@@ -1025,9 +1050,14 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: not ok\n");
             // 로케이터로 찾았으면 무엇을 눌렀는지(W9b②) — 첫 줄은 그대로 「ok」.
             if (result.get("matched")) |m| if (m == .object) {
-                try w.print("matched {s} ", .{strField(m.object.get("ref"))});
+                // 이름은 페이지가 정한 글 — 제어·양방향 제어 글자를 빼고 JSON 으로 인용한다(터미널 표시 속이기, W9b②-1 1 회차).
+                var safe_ref: [64]u8 = undefined;
+                var safe_name: [512]u8 = undefined;
+                const ref = strField(m.object.get("ref"));
+                const name = strField(m.object.get("name"));
+                try w.print("matched {s} ", .{safe_ref[0..displaySafe(ref[0..@min(ref.len, 64)], &safe_ref)]});
                 var js: std.json.Stringify = .{ .writer = w, .options = .{} };
-                js.write(strField(m.object.get("name"))) catch return error.WriteFailed;
+                js.write(safe_name[0..displaySafe(name[0..@min(name.len, 512)], &safe_name)]) catch return error.WriteFailed;
                 try w.writeAll("\n");
             };
         },
@@ -2134,6 +2164,13 @@ test "parse·buildRequestBytes: role 로케이터(W9b②) — 옵션 규칙·act
     try testing.expectEqualStrings("Email", params.get("locator").?.object.get("name").?.string);
     try testing.expectEqualStrings("hi", params.get("text").?.string);
     try testing.expect(params.get("selector") == null);
+}
+
+test "renderResponse: matched 의 페이지 글은 제어·양방향 제어 글자를 빼고 찍는다" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Sa\\u001b[2Jve\\u009b\\u202edoc\"}}}", .ok, &w);
+    try testing.expectEqualStrings("ok\nmatched n11 \"Sa[2Jvedoc\"\n", w.buffered());
 }
 
 test "renderResponse: 로케이터로 찾은 ok 는 matched 줄을 덧붙인다(첫 줄은 그대로 ok)" {

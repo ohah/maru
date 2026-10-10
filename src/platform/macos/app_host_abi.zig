@@ -9718,6 +9718,35 @@ test "W9b①b-2: 확실히 못 보낸 키 누름(busy)은 떼지 않고, 보냈�
     }
 }
 
+test "W9b①b-2: 떼기를 보내는 순간 탭이 준비되지 않았으면(NotReady) op 이 정한다 — 잠깐 뒤 다시 보내려 잔다" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    // 엔진은 있다고 치되 그 탭은 없다 — devtoolsCall 이 곧바로 NotReady.
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(std.testing.allocator);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":94,\"method\":\"browser.press\",\"params\":{\"id\":11,\"key\":\"Enter\"}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    defer if (pending.response) |r| allocator.free(r);
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 11, .method = .press, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    defer _ = active_browser_executions.finish(id);
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .press, "{\"key\":\"Enter\"}", id), .started = true };
+    const down = try run.op.start(allocator);
+    allocator.free(down.call.params);
+    const up = try run.op.feed(allocator, .{ .ok = "{}" }); // 누름은 갔다 — 다음은 떼기
+    try cdp_runs.append(allocator, run);
+    cdpAdvance(run, up);
+    try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len); // 끝내지 않고 다시 보내려 잔다
+    try std.testing.expect(pending.response == null);
+    // 정리 — 잠든 것을 꺼내 끝낸다.
+    _ = cdp_sleepers.orderedRemove(0);
+    finishCdp(run, .failed, "test");
+}
+
 test "W9b①: Chromium op 은 그 요청이 살아 있고 허가돼 있을 때만 다음 DevTools 호출(진짜 입력)을 보낸다" {
     const globals = LifecycleTestGlobalsGuard.install();
     defer globals.restore();

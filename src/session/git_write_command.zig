@@ -383,53 +383,15 @@ pub fn build(
         }
     }
 
-    switch (kind) {
-        .stage => {
-            buf[n] = "add";
-            n += 1;
-        },
-        .stage_all => {
-            buf[n] = "add";
-            n += 1;
-            buf[n] = "-A";
-            n += 1;
-        },
-        .unstage, .unstage_all => {
-            buf[n] = "restore";
-            n += 1;
-            buf[n] = "--staged";
-            n += 1;
-        },
-        .unstage_unborn => {
-            buf[n] = "rm";
-            n += 1;
-            buf[n] = "--cached";
-            n += 1;
-        },
-        .unstage_all_unborn => {
-            buf[n] = "rm";
-            n += 1;
-            buf[n] = "--cached";
-            n += 1;
-            buf[n] = "-r";
-            n += 1;
-        },
-        .commit => {
-            buf[n] = "commit";
-            n += 1;
-            buf[n] = "-F";
-            n += 1;
-            buf[n] = message_file.?;
-            n += 1;
-        },
-        // **`--prune`이 붙는다**(§4). 안 붙이면 원격에서 지워진 브랜치의 remote-tracking ref가 영영 남고,
-        // 그 ref는 화면의 ahead/behind와 히스토리 칩에 계속 뜬다 — 사라진 브랜치를 "있다"고 말하게 된다.
-        .fetch => {
-            buf[n] = "fetch";
-            n += 1;
-            buf[n] = "--prune";
-            n += 1;
-        },
+    for (subcommand(kind)) |token| {
+        buf[n] = token;
+        n += 1;
+    }
+    if (kind == .commit) {
+        buf[n] = "-F";
+        n += 1;
+        buf[n] = message_file.?;
+        n += 1;
     }
 
     // **`--`는 커밋·fetch를 뺀 모든 쓰기에 붙는다.** 없으면 `-`로 시작하는 파일 이름이 옵션으로 해석된다(§2).
@@ -445,15 +407,103 @@ pub fn build(
             buf[n] = path;
             n += 1;
         },
-        // 모두-언스테이지는 `.`이 대상이다. 모두-스테이지는 `-A`가 이미 전체를 뜻하므로 대상을 주지 않는다.
-        .unstage_all, .unstage_all_unborn => {
-            buf[n] = ".";
+        .unstage_all, .unstage_all_unborn, .stage_all, .commit, .fetch => for (allTarget(kind)) |token| {
+            buf[n] = token;
             n += 1;
         },
-        .stage_all, .commit, .fetch => {},
     }
 
     return buf[0..n];
+}
+
+/// 하위 명령과 그 플래그 — 우리가 실행하는 argv(`build`)와 사용자 터미널에 넣는 명령(`buildTerminal`)이 **같은 표**를 쓴다(두 벌이면
+/// 한쪽만 고쳐져 「도크가 하는 일」과 「터미널에 넣는 일」이 갈린다). 커밋의 메시지 자리는 둘이 다르다(`-F <파일>` / `-m <글>`).
+fn subcommand(kind: Kind) []const []const u8 {
+    return switch (kind) {
+        .stage => &.{"add"},
+        .stage_all => &.{ "add", "-A" },
+        .unstage, .unstage_all => &.{ "restore", "--staged" },
+        .unstage_unborn => &.{ "rm", "--cached" },
+        .unstage_all_unborn => &.{ "rm", "--cached", "-r" },
+        .commit => &.{"commit"},
+        // **`--prune`이 붙는다**(§4). 안 붙이면 원격에서 지워진 브랜치의 remote-tracking ref가 영영 남고,
+        // 그 ref는 화면의 ahead/behind와 히스토리 칩에 계속 뜬다 — 사라진 브랜치를 "있다"고 말하게 된다.
+        .fetch => &.{ "fetch", "--prune" },
+    };
+}
+
+/// 경로를 받지 않는 변종의 대상 — 모두-언스테이지는 `.`이다. 모두-스테이지는 `-A`가 이미 전체를 뜻하므로 대상을 주지 않는다.
+fn allTarget(kind: Kind) []const []const u8 {
+    return switch (kind) {
+        .unstage_all, .unstage_all_unborn => &.{"."},
+        .stage, .unstage, .unstage_unborn, .stage_all, .commit, .fetch => &.{},
+    };
+}
+
+/// 터미널에 넣는 명령의 상한 — 경로 목록 한 번(`max_batch_bytes`)에 앞머리를 더한 크기. 넘으면 자르지 않고 거절한다.
+pub const max_terminal_command_bytes: usize = max_batch_bytes + std.fs.max_path_bytes + 256;
+
+pub const TerminalError = PathError || error{
+    /// 경로·저장소·메시지에 제어 문자가 들었다 — 터미널에 붙이면 그 바이트가 셸이 아니라 단말에 먹힌다(ESC 시퀀스·Enter).
+    /// 메시지의 줄바꿈·탭만 예외다(작은따옴표 안이라 실행되지 않는다).
+    ControlCharacter,
+    NoPaths,
+    PathsNotAllowed,
+    MessageMismatch,
+    /// 명령이 버퍼를 넘었다(경로가 너무 많다).
+    TooLong,
+};
+
+/// 사용자 터미널에 넣을 쓰기 명령(계획 workspace-trust WT6b-2b-ii — 원격·묻지 않는 root 의 쓰기는 우리가 실행하지 않는다). 하위
+/// 명령은 `build` 와 같은 표(`subcommand`)이고, `-c` 덮어쓰기는 싣지 않는다 — 사용자가 자기 셸에서 보고 실행하는 명령이라 사용자
+/// 설정·훅이 그대로 돈다(그것을 사용자가 본다는 것이 결정의 뜻이다). 저장소는 `-C` 로 준다 — 목록의 경로는 저장소 루트 기준이라 그
+/// 터미널이 하위 폴더에 서 있어도 맞는 파일을 가리킨다. 모든 토큰을 작은따옴표로 인용한다(POSIX — `'` 는 `'\''`; fish 도 같게
+/// 읽는다). 커밋 메시지는 `-m '…'` 로 싣는다 — 여러 줄이어도 따옴표가 끝까지 열려 있어 사용자가 Enter 를 누르기 전엔 실행되지 않는다.
+/// 끝에 개행을 붙이지 않는다(실행은 사용자가 한다).
+pub fn buildTerminal(kind: Kind, repo: []const u8, paths: []const []const u8, message: ?[]const u8, out: []u8) TerminalError![]const u8 {
+    if (kind.takesPaths()) {
+        if (paths.len == 0) return error.NoPaths;
+    } else if (paths.len != 0) return error.PathsNotAllowed;
+    if ((kind == .commit) != (message != null)) return error.MessageMismatch;
+    for (paths) |path| {
+        try validatePath(path);
+        if (hasControl(path, false)) return error.ControlCharacter;
+    }
+    if (hasControl(repo, false)) return error.ControlCharacter;
+    if (message) |m| if (hasControl(m, true)) return error.ControlCharacter;
+
+    var n: usize = 0;
+    n = appendRaw(out, n, "git -C ") orelse return error.TooLong;
+    n = remote_shell.quoteAppend(out, n, repo) orelse return error.TooLong;
+    for (subcommand(kind)) |token| {
+        n = appendRaw(out, n, " ") orelse return error.TooLong;
+        n = appendRaw(out, n, token) orelse return error.TooLong;
+    }
+    if (message) |m| {
+        n = appendRaw(out, n, " -m ") orelse return error.TooLong;
+        n = remote_shell.quoteAppend(out, n, m) orelse return error.TooLong;
+    }
+    if (kind.takesPathSeparator()) n = appendRaw(out, n, " --") orelse return error.TooLong;
+    const targets: []const []const u8 = if (kind.takesPaths()) paths else allTarget(kind);
+    for (targets) |token| {
+        n = appendRaw(out, n, " ") orelse return error.TooLong;
+        n = remote_shell.quoteAppend(out, n, token) orelse return error.TooLong;
+    }
+    return out[0..n];
+}
+
+fn hasControl(text: []const u8, allow_line_breaks: bool) bool {
+    for (text) |c| {
+        if (allow_line_breaks and (c == '\n' or c == '\t')) continue;
+        if (c < 0x20 or c == 0x7f) return true;
+    }
+    return false;
+}
+
+fn appendRaw(out: []u8, at: usize, text: []const u8) ?usize {
+    if (at + text.len > out.len) return null;
+    @memcpy(out[at..][0..text.len], text);
+    return at + text.len;
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -985,4 +1035,43 @@ test "원격 배치: 한 경로가 상한보다 커도 그 하나는 넣는다 (
     const paths = [_][]const u8{ huge, "a.txt" };
     try std.testing.expectEqual(@as(usize, 1), remoteBatchEnd(&paths, 0));
     try std.testing.expectEqual(@as(usize, 2), remoteBatchEnd(&paths, 1));
+}
+
+test "터미널에 넣는 쓰기 명령은 실행 argv 와 같은 하위 명령이고 모든 토큰을 작은따옴표로 인용한다 — 메시지는 줄바꿈을 따옴표 안에 두고, 제어 문자는 거절한다 (계획 workspace-trust WT6b-2b-ii)" {
+    var buf: [512]u8 = undefined;
+    // 경로는 `--` 뒤 — `-` 로 시작하는 이름도 옵션이 아니다. 작은따옴표는 `'\''`.
+    try testing.expectEqualStrings(
+        "git -C '/srv/my repo' add -- '-n.txt' 'it'\\''s.txt'",
+        try buildTerminal(.stage, "/srv/my repo", &.{ "-n.txt", "it's.txt" }, null, &buf),
+    );
+    try testing.expectEqualStrings("git -C '/r' restore --staged -- 'a.txt'", try buildTerminal(.unstage, "/r", &.{"a.txt"}, null, &buf));
+    try testing.expectEqualStrings("git -C '/r' rm --cached -- 'a.txt'", try buildTerminal(.unstage_unborn, "/r", &.{"a.txt"}, null, &buf));
+    try testing.expectEqualStrings("git -C '/r' add -A --", try buildTerminal(.stage_all, "/r", &.{}, null, &buf));
+    try testing.expectEqualStrings("git -C '/r' restore --staged -- '.'", try buildTerminal(.unstage_all, "/r", &.{}, null, &buf));
+    try testing.expectEqualStrings("git -C '/r' rm --cached -r -- '.'", try buildTerminal(.unstage_all_unborn, "/r", &.{}, null, &buf));
+    try testing.expectEqualStrings("git -C '/r' fetch --prune", try buildTerminal(.fetch, "/r", &.{}, null, &buf));
+    // 여러 줄 메시지 — 줄바꿈이 따옴표 안이라 마지막 줄의 Enter 전엔 실행되지 않는다. 끝에 개행이 없다.
+    try testing.expectEqualStrings(
+        "git -C '/r' commit -m 'title\n\nbody'\\''s line'",
+        try buildTerminal(.commit, "/r", &.{}, "title\n\nbody's line", &buf),
+    );
+    // 실행 argv 와 같은 하위 명령 — 표가 하나다.
+    var argv_buf: [fixed_argv_max + 4][]const u8 = undefined;
+    const argv = try build(.unstage_all_unborn, "/usr/bin/git", "/r", &.{}, null, &argv_buf);
+    try testing.expect(indexOf(argv, "rm") != null and indexOf(argv, "-r") != null);
+    // 제어 문자 — 경로·저장소는 하나도, 메시지는 줄바꿈·탭 말고는.
+    try testing.expectError(error.ControlCharacter, buildTerminal(.stage, "/r", &.{"a\x1b[0m.txt"}, null, &buf));
+    try testing.expectError(error.ControlCharacter, buildTerminal(.stage, "/r", &.{"a\n.txt"}, null, &buf));
+    try testing.expectError(error.ControlCharacter, buildTerminal(.fetch, "/r\r", &.{}, null, &buf));
+    try testing.expectError(error.ControlCharacter, buildTerminal(.commit, "/r", &.{}, "ok\x07", &buf));
+    _ = try buildTerminal(.commit, "/r", &.{}, "tab\there", &buf);
+    // 경로 규칙은 실행 argv 와 같다(절대경로·`..`).
+    try testing.expectError(error.ParentSegment, buildTerminal(.stage, "/r", &.{"../x"}, null, &buf));
+    // 모양 규칙도 같다.
+    try testing.expectError(error.NoPaths, buildTerminal(.stage, "/r", &.{}, null, &buf));
+    try testing.expectError(error.PathsNotAllowed, buildTerminal(.stage_all, "/r", &.{"a"}, null, &buf));
+    try testing.expectError(error.MessageMismatch, buildTerminal(.commit, "/r", &.{}, null, &buf));
+    // 버퍼를 넘으면 자르지 않고 거절한다(반쪽 명령을 넣지 않는다).
+    var tiny: [16]u8 = undefined;
+    try testing.expectError(error.TooLong, buildTerminal(.stage, "/r", &.{"a.txt"}, null, &tiny));
 }

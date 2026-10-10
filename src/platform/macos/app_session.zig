@@ -78099,14 +78099,16 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         scm_dock_ops.forgetRepoStatus(session);
     }
 
-    // **거절은 이제 «소켓이 없다» 하나뿐이다**(RS4a·RS4b 가 나머지를 열었다). 이 세션에는 control
-    // socket 이 없으므로 원격 쓰기는 **보내지 않고 이유를 말한다** — 조용한 무동작이 아니다.
-    scm_dock_ops.clearScmWriteError(session);
-    // 이 세션에는 control socket 이 없다 → `.unavailable` → **보내지 않고 이유를 말한다.**
+    // **원격 쓰기는 우리가 실행하지 않고 그 원격 셸에 넣는다**(워크스페이스 신뢰 WT6b-2b-ii — 원격은 늘 신뢰 전; 2026-10-10 결정).
+    // control socket 이 없어도 그렇다 — 넣는 곳은 그 pane 의 셸이다(예전엔 「읽기 전용」으로 거절했다). 로컬 쓰기는 걸리지 않고(로컬
+    // git 에 원격 경로를 넘기지 않는다), 넣었다고 말한다.
     // (인텐트로 못 몬다 — 이 스모크 세션에는 저장소 행이 없어 인텐트가 그 문까지 못 간다.)
-    try std.testing.expect(!scm_dock_ops.submitWriteForTest(session, "/srv/app", .stage));
-    try std.testing.expect(session.scm_write_error != null);
-    try std.testing.expectEqualStrings(maru.i18n.t(.scm_remote_read_only), session.scm_write_error.?);
+    scm_dock_ops.clearScmWriteError(session);
+    const seq_before_remote_write = session.scm_write_seq;
+    _ = scm_dock_ops.submitWriteForTest(session, "/srv/app", .stage);
+    try std.testing.expectEqual(seq_before_remote_write, session.scm_write_seq);
+    try std.testing.expect(session.scm_write_inflight == 0);
+    try std.testing.expectEqualStrings(maru.i18n.t(.scm_write_injected), session.scm_write_error orelse return error.NoInjectNotice);
 
     // ⑶ **자동 경로도 로컬에 손대지 않는다.** 인텐트를 안 거치고 tick 이 굴리는 것들이다.
     //

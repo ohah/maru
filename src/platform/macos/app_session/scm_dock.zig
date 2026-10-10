@@ -2191,7 +2191,15 @@ fn submitFetch(self: *AppSession) void {
     if (git_ops.scmTargetIsRemote(self)) return injectRemoteFetch(self);
     // 신뢰 전 로컬 저장소는 시트부터(계획 workspace-trust WT6b-2b-i) — fetch 는 저장소 config 의 `uploadpack`·`core.sshCommand`·
     // `credential.helper` 를 돌린다.
-    if (!trustGate(self, repo, .fetch)) return;
+    switch (trustGate(self, repo, .fetch)) {
+        .run => {},
+        // 묻지 않는 root 는 원격처럼 터미널에 넣는다(WT6b-2b-ii).
+        .terminal => {
+            _ = injectWrite(self, repo, .fetch, &.{}, null);
+            return;
+        },
+        .stop => return,
+    }
 
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
@@ -3497,8 +3505,9 @@ fn submitStageAllFor(self: *AppSession, repo: []const u8) void {
 /// 「모두 스테이지」의 실제 걸기(S4b) — 저장소 머리 줄과 「변경 사항」 머리 줄이 같은 길을 쓴다.
 fn submitStageAllPlanned(self: *AppSession, repo: []const u8) void {
     // 신뢰 전 로컬 저장소는 계획을 세우기 **전에** 시트부터(계획 workspace-trust WT6b-2b-i — `TrustHeldWrite.Op.stage_all`).
+    // 묻지 않는 root·원격은 계획대로 세운 경로를 `submitWrite` 가 터미널에 넣는다(WT6b-2b-ii).
     var gate_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (git_ops.writeTargetFor(self, repo, &gate_ctl_buf) == .local and !trustGate(self, repo, .stage_all)) return;
+    if (git_ops.writeTargetFor(self, repo, &gate_ctl_buf) == .local and trustGate(self, repo, .stage_all) == .stop) return;
     // status 전문과 마커 판정: 활성 저장소는 읽기 결과에서, 비활성은 status 만(판정 없음 → 충돌 전부 미해결).
     const is_current = if (self.git_repo) |cur| std.mem.eql(u8, cur, repo) else false;
     const status: []const u8, const markers: ?[]const u8, const truncated: bool = if (is_current) blk: {
@@ -3571,27 +3580,27 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
     // 막는 것은 이제 **대상을 못 정한 경우** 하나뿐 — 원격 pane 인데 control socket 이 없으면
     // `remoteScmTarget` 이 `.unknown` 을 내고, 그때 로컬로 떨어뜨리면 **원격 경로를 로컬 git 에 넘긴다**
     // (RS3 6회차에서 diff 가 그렇게 샜다). 그 자리는 쓰기라 더 나쁘다 — 남의 파일을 **바꾼다.**
+    //
+    // 워크스페이스 신뢰(WT6b-2b-ii)에서 원격의 뜻이 또 바뀌었다: **원격 쓰기는 우리가 실행하지 않고 사용자 터미널에 넣는다**
+    // (2026-10-10 결정). 원격은 늘 신뢰 전이다(`Backend.untrustedFor` 의 첫 줄 — 원격 신뢰는 WT7) — 「시트부터, 허용하면 잇는다」가
+    // 성립하지 않으니 실행(훅·서명)을 사용자가 보고 한다. control socket 유무와 무관하다(넣는 곳은 그 pane 의 셸이고, 기계 대조는
+    // `injectIntoActiveTerminal` 이 한다) — 소켓이 없어 「읽기 전용」이던 원격도 이제 넣을 수 있다. 원격 쓰기 실행 경로(RS4a·b —
+    // `Backend.submitWrite` 의 `remote`)는 WT7 이 원격을 신뢰하면 다시 이 자리에서 쓴다.
     var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const remote: ?git_write_command.Remote = switch (git_ops.writeTargetFor(self, repo, &ctl_buf)) {
-        .local => null,
-        .remote => |r| .{ .dest = r.dest, .control_path = r.control_path },
-        // 소켓이 없다 — **보내지 않는다.** 로컬로 떨어뜨리면 원격 경로를 로컬 git 이 받는다.
-        .unavailable => {
-            setScmWriteNotice(self, maru.i18n.t(.scm_remote_read_only));
-            return false;
-        },
-    };
+    switch (git_ops.writeTargetFor(self, repo, &ctl_buf)) {
+        .remote, .unavailable => return injectWrite(self, remoteRepoRootFor(self, repo), kind, paths, null),
+        .local => {},
+    }
     if (self.scm_write_inflight != 0) return false;
     // **신뢰 전 로컬 저장소는 시트부터**(계획 workspace-trust WT6b-2b-i) — 쓰기는 저장소의 fsmonitor·필터(`add` 의 clean)를 돌린다.
-    // 원격은 신뢰할 수 없어 WT6b-2b-ii 가 따로 다룬다.
-    if (remote == null and !trustGate(self, repo, .{ .write = .{ .kind = kind, .paths = paths, .after = after } })) return false;
+    // 묻지 않는 root(홈·저장소 밖)는 신뢰를 정할 수 없어 원격처럼 터미널에 넣는다(WT6b-2b-ii).
+    switch (trustGate(self, repo, .{ .write = .{ .kind = kind, .paths = paths, .after = after } })) {
+        .run => {},
+        .terminal => return injectWrite(self, repo, kind, paths, null),
+        .stop => return false,
+    }
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    // **원격이면 로컬 git 경로를 안 찾는다** — 원격의 설치 위치는 우리가 모르고, `buildRemote` 가
-    // `argv[0]` 을 버리고 `remote_git_exe` 로 바꾼다. 로컬에 git 이 없다고 원격 쓰기가 막히면 안 된다.
-    const git_exe = if (remote != null)
-        git_write_command.remote_git_exe
-    else
-        git_backend_mod.locate(&exe_buf) orelse return false;
+    const git_exe = git_backend_mod.locate(&exe_buf) orelse return false;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return false;
     }
@@ -3599,9 +3608,9 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
     // **판정자용 기록**(S4b): 무엇을 걸었는지 — 종류와 경로 수. 백엔드 큐를 들여다보지 않고 이 경계를 잰다.
     self.scm_last_write_kind = kind;
     self.scm_last_write_path_count = paths.len;
-    if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq, remote)) return false;
+    if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq, null)) return false;
     self.scm_write_inflight = self.scm_write_seq;
-    rememberWriteRepo(self, repo, if (remote) |r| r.dest else null);
+    rememberWriteRepo(self, repo, null);
     clearScmWriteError(self);
     if (after.optimistic_from) |from| setScmPending(self, paths[0], from); // 행 하나의 쓰기만 세운다(`submitRowWrite`)
     if (after.notice) |key| setScmWriteNotice(self, maru.i18n.t(key));
@@ -3666,35 +3675,83 @@ pub const TrustHeldWrite = struct {
 /// 밖 — 신뢰를 정할 수 없어 WT6b-2b-ii 가 터미널로 옮긴다; 그때까지는 지금처럼 실행한다). `false` 면 멈춘다 — 신뢰 시트를 띄우고 이
 /// 쓰기를 미뤄 뒀거나(`pumpTrustWrite` 가 답을 보고 잇거나 버린다), 띄울 수 없어 그 사유를 알렸다. 미룬 쓰기는 하나뿐이다 — 시트가 하나라
 /// 둘째는 물을 자리가 없다.
-fn trustGate(self: *AppSession, repo: []const u8, op: TrustHeldWrite.Op) bool {
-    if (builtin.is_test and !test_write_gate) return true;
-    if (lsp_client.repoTrustState(self, repo) != .untrusted) return true;
+/// 쓰기 관문의 답(계획 workspace-trust WT6b-2b) — 지금 실행한다 · 사용자 터미널에 넣는다(묻지 않는 root — 신뢰를 정할 수 없다) ·
+/// 멈춘다(시트를 띄우고 미뤘다, 또는 띄울 수 없어 사유를 알렸다).
+const Gate = enum { run, terminal, stop };
+
+fn trustGate(self: *AppSession, repo: []const u8, op: TrustHeldWrite.Op) Gate {
+    if (builtin.is_test and !test_write_gate) return .run;
+    switch (lsp_client.repoTrustState(self, repo)) {
+        .trusted => return .run,
+        .refused => return .terminal,
+        .untrusted => {},
+    }
     // 이 창에 신뢰 시트가 떠 있으면 조용히 멈춘다 — 모달이 입력을 막으므로 이것은 사용자의 누름이 아니다(디버그 픽스처가 tick 마다
     // 다시 건다). 알림을 띄우면 그 알림이 시트를 닫아, 시트와 알림이 tick 마다 오가고 쓰기는 영영 안 됐다(적대적 검증 2회차).
-    if (self.editor_lsp.asking_key != null) return false;
+    if (self.editor_lsp.asking_key != null) return .stop;
     if (self.scm_trust_write != null) {
         self.showNoticeKey(.scm_trust_busy);
-        return false;
+        return .stop;
     }
     // 묻기 전에 든다 — 물은 뒤에 못 들면 「신뢰」를 눌러도 아무 일도 안 일어난다. 못 들면(메모리) 묻지 않는다.
-    var held = TrustHeldWrite.dupe(self.allocator, repo, op) catch return false;
+    var held = TrustHeldWrite.dupe(self.allocator, repo, op) catch return .stop;
     switch (lsp_client.askTrustForRepo(self, repo, true)) {
         .asked => {
             self.scm_trust_write = held;
             self.metal_dirty = true;
-            return false;
+            return .stop;
         },
-        // 바로 위 판정이 신뢰 전이라 했으므로 여기 오지 않는다(같은 표·같은 거절) — 오면 판정과 같은 규칙대로 지금 실행한다.
-        .already_trusted, .refused => {
+        // 바로 위 판정이 신뢰 전이라 했으므로 여기 오지 않는다(같은 표·같은 거절) — 오면 판정과 같은 규칙을 따른다.
+        .already_trusted => {
             held.deinit(self.allocator);
-            return true;
+            return .run;
+        },
+        .refused => {
+            held.deinit(self.allocator);
+            return .terminal;
         },
         .busy => {
             held.deinit(self.allocator);
             self.showNoticeKey(.scm_trust_busy);
-            return false;
+            return .stop;
         },
     }
+}
+
+/// 쓰기를 **사용자 터미널에 넣는다**(계획 workspace-trust WT6b-2b-ii — 원격·묻지 않는 root). 명령은 실행 argv 와 같은 하위 명령 표로
+/// 만들고(`git_write_command.buildTerminal`) 활성 pane 에 개행 없이 붙인다 — 실행(훅·서명)은 사용자가 보고 한다. 넣으면 그렇다고
+/// 말한다: 결과를 우리가 모른다(실행됐는지·성공했는지) — 그래서 낙관 반영·커밋 상자 비우기는 하지 않는다. `false` 면 넣지 못했고
+/// 그 사유를 이미 알렸다.
+fn injectWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind, paths: []const []const u8, message: ?[]const u8) bool {
+    var buf: [git_write_command.max_terminal_command_bytes]u8 = undefined;
+    const command = git_write_command.buildTerminal(kind, repo, paths, message, &buf) catch {
+        // 제어 문자(터미널에 붙이면 셸이 아니라 단말이 먹는다)·너무 긴 명령·경로 규칙 위반 — 반쪽 명령을 넣지 않는다.
+        setScmWriteNotice(self, maru.i18n.t(.scm_write_inject_refused));
+        return false;
+    };
+    if (!injectIntoActiveTerminal(self, command)) return false; // 사유는 그쪽이 알렸다
+    if (builtin.is_test) {
+        @memcpy(test_last_injected[0..command.len], command);
+        test_last_injected_len = command.len;
+    }
+    setScmWriteNotice(self, maru.i18n.t(.scm_write_injected));
+    return true;
+}
+
+/// 판정자가 읽는 자리 — **테스트 빌드에서만 적는다**. 마지막으로 터미널에 넣은 쓰기 명령: 넣은 바이트는 PTY 로 곧장 가 판정자가 못
+/// 읽는다(`test_trust_line` 과 같은 규율 — 제품에서는 읽지도 쓰지도 않는다).
+pub var test_last_injected: [git_write_command.max_terminal_command_bytes]u8 = undefined;
+pub var test_last_injected_len: usize = 0;
+pub fn testLastInjected() []const u8 {
+    return test_last_injected[0..test_last_injected_len];
+}
+
+/// 원격 쓰기 명령의 `-C` 자리 — **원격 저장소 루트**다. 목록의 경로는 루트 기준(`status --porcelain`)인데 원격 목록의 저장소 자리는 그
+/// pane 의 cwd(하위 폴더일 수 있다)라, cwd 로 `-C` 를 주면 같은 이름의 다른 파일을 가리킨다. 루트를 모르면 받은 것을 쓴다.
+fn remoteRepoRootFor(self: *AppSession, repo: []const u8) []const u8 {
+    const root = self.git_repo_remote_root orelse return repo;
+    const current = self.git_repo orelse return repo;
+    return if (std.mem.eql(u8, current, repo)) root else repo;
 }
 
 /// 판정자가 켜는 스위치 — **테스트 빌드에서만 읽는다**. 끄면(기본) 쓰기 관문을 건너뛴다: 판정자 빌드의 신뢰 표는 비어(사용자 기계의
@@ -4391,10 +4448,24 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
 
     // 신뢰 전 로컬 저장소는 시트부터(계획 workspace-trust WT6b-2b-i) — 커밋은 저장소의 훅·서명·fsmonitor 를 돌린다. 원격은 신뢰할 수
     // 없어 WT6b-2b-ii 가 따로 다룬다.
+    // 원격·묻지 않는 root 는 커밋을 터미널에 넣는다(WT6b-2b-ii — `git commit -m '…'`; 훅·서명을 사용자가 보고 실행한다).
+    const text = self.scm_commit_field.text.items;
     var gate_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (git_ops.writeTargetFor(self, repo_path, &gate_ctl_buf) == .local and
-        !trustGate(self, repo_path, .{ .commit = self.scm_commit_field.text.items })) return;
-    runCommit(self, repo_path, self.scm_commit_field.text.items);
+    switch (git_ops.writeTargetFor(self, repo_path, &gate_ctl_buf)) {
+        .remote, .unavailable => {
+            _ = injectWrite(self, remoteRepoRootFor(self, repo_path), .commit, &.{}, text);
+            return;
+        },
+        .local => switch (trustGate(self, repo_path, .{ .commit = text })) {
+            .run => {},
+            .terminal => {
+                _ = injectWrite(self, repo_path, .commit, &.{}, text);
+                return;
+            },
+            .stop => return,
+        },
+    }
+    runCommit(self, repo_path, text);
 }
 
 /// 메시지로 커밋을 건다 — 검사는 끝났다(`submitCommitFor`, 미룬 커밋은 누른 순간에 검사했다).

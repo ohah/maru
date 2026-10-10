@@ -562,3 +562,20 @@ getOwnPropertyDescriptor(Node.prototype,'parentNode').get` 등) 걷기를 4096 �
 시한도 30 초라 에이전트는 timeout 을 받는다). 하: 새 시한 분기 둘(떼기·놓기)에 시험이 없었다 → 시험, 줄 상자 8 개로 잘림 → 64, 검사·누름의
 CDP 오류에 묶음을 놓지 않았다 → 놓고 실패, 같은 탭의 앞 op 이 버린 자리와 겹쳐 떼기가 `busy` 로 막히는 좁은 경우도 「남긴 것」에, 낡은
 시험 주석. 남긴 것(W9b①b 에서): 텍스트 노드 ref·닫힌 shadow root 안 slot 의 거짓 「covered」.
+
+### W9b①b — snapshot·type·scroll·wait(2026-10-10)
+
+①b 를 둘로 나눴다 — **①b-1**(이미 있는 명령 snapshot·type·scroll·wait 를 Chromium 에 — 새 CLI 이름 없음), ①b-2(새 명령 hover·press —
+클립보드 붙여넣기 키처럼 사용자 자료를 페이지로 보내는 키를 막는 문제를 따로).
+
+**착수 전 실측**(sidecar wire 탐사): 접근성 트리 31 노드 8 ms — 무시된 노드·`InlineTextBox`·역할 없는 `generic` 을 펼치면 WebKit snapshot 과
+같은 모양이 된다. `DOM.focus` + 격리 world 의 `select()`(contenteditable 은 Range) + `Input.insertText` 로 기존 값을 바꿔 쓰고, 페이지는
+`isTrusted` 입력 이벤트로 한글을 받는다. Enter 로 form 제출·Tab 으로 초점 이동(`isTrusted` keydown). 보이는 탭의 `mouseMoved` 2 ms 로 `:hover`.
+격리 world 의 document 에서 Promise 로 늦게 생기는 요소를 320 ms 에 찾았다.
+
+**설계** — snapshot 은 `web_cdp_snapshot`(순수 — 접근성 트리를 `{role,name,ref?,children?}` 로 접는다: 역할 없는 노드는 펼치고, 부모 이름과 다른
+글은 `text` 노드로, 상호작용 역할에만 ref `n<backendNodeId>`, 이름 160 바이트). type 은 화면 안으로 → 초점 → 격리 world 에서 고르기 → insertText
+(빈 글은 Delete 키), wait 는 격리 world 의 document 에서 한 번의 Promise 호출(100 ms 간격, 시한은 요청의 timeout_ms — DevTools 30 초 안).
+격리 world 의 JS 는 모두 프로토타입 함수·getter 로 부른다(W9b①a 3 회차의 DOM clobbering). 클릭의 덮임 검사는 ref 가 글 노드를 가리키면 그 부모
+요소로 본다(3 회차 「남긴 것」). wait 는 기다림 목록에 오른 뒤 DevTools 로 보내 탭 닫힘·철회가 끝낸다, snapshot 은 Swift 와 같은 큰 결과
+전송(`complete_browser_result` — inline ≤512 KiB, 넘으면 조각).

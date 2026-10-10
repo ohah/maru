@@ -42,6 +42,15 @@ exit 1이며 소켓 연결·auth·request를 시작하지 않는다. `--option v
 같은 옵션이다. 기존 `maru lsp` 별칭도 같은 계약이다. 옵션 생략과 정상 단일 지정은 유지하며
 여러 대상은 별도 호출로 실행한다. 도움말은 기존 계약을 유지한다.
 
+## CLI 실제 프로세스 CI 검증
+
+Ubuntu CI의 `check` 잡은 코드 변경 시 `zig build test-cli-failure-process`를 실행한다.
+빌드가 전달한 native CLI artifact를 private HOME·cache·socket으로 검증하므로 GUI 권한은
+필요하지 않다. 순수 parser 테스트와 별도로 종료 코드·요청 전 부작용·정상 wire를 검사한다.
+`tests/artifacts/cli-failure/*.json`은 실패 호출까지 기록하며 기존 `maru-check-artifacts`에
+업로드된다. 로컬에서도 같은 build 명령을 사용한다. `python3 tools/test-cli-failure-contract.py
+--cli <native CLI> --repeat 5 --output-dir <artifact 폴더>`로 반복할 수 있다.
+
 ## 에디터 앱 URL
 
 - `mise exec -- zig build test-editor-app-url`: 순수 URL grammar·bounded startup queue·OOM·encoder corpus.

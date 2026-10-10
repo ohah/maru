@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -17,9 +18,27 @@ def verify(cli, root):
     env.update(HOME=str(home), CFFIXED_USER_HOME=str(home), XDG_CACHE_HOME=str(root / 'cache'), MARU_PANE_ID='987654321')
     records = []
 
+    def record(args, code, stdout, stderr, failure=None):
+        # TimeoutExpired can expose bytes even with text=True. Keep partial output.
+        def text(value):
+            return value.decode(errors='replace') if isinstance(value, bytes) else value or ''
+        entry = dict(args=args, exit=code, stdout=text(stdout), stderr=text(stderr))
+        if failure:
+            entry['failure'] = failure
+        records.append(entry)
+        (root / 'results.json').write_text(json.dumps(records, indent=2) + '\n')
+
     def run(args, expected):
-        p = subprocess.run([str(cli), *args], cwd=root, env=env, capture_output=True, text=True, timeout=15)
-        records.append(dict(args=args, exit=p.returncode, stdout=p.stdout, stderr=p.stderr))
+        try:
+            p = subprocess.run([str(cli), *args], cwd=root, env=env, capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired as exc:
+            record(args, None, exc.stdout, exc.stderr, 'timeout')
+            raise
+        except OSError as exc:
+            record(args, None, '', str(exc), 'spawn')
+            raise
+        # Persist before assertions so CI also retains the failing invocation.
+        record(args, p.returncode, p.stdout, p.stderr)
         assert p.returncode == expected, records[-1]
         assert 'panic' not in p.stderr and 'stack trace' not in p.stderr, records[-1]
         return p
@@ -58,7 +77,7 @@ def verify(cli, root):
     listener.listen()
     listener.settimeout(10)
     # Help cannot connect to reachable control endpoints or modify persistent state.
-    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file() and p != root / 'results.json'}
     rid = '0000000000000000000000000000aabb'
     for flag in ['--help', '-h']:
         for args in [[flag], ['terminfo', flag], ['control', flag], ['host', 'status', flag],
@@ -73,7 +92,7 @@ def verify(cli, root):
                  ['runtime', 'end', 'bad', '--help'],
                  ['runtime', 'end', rid, '--yes', '--yes', '--help']]:
         run(args, 2 if args[0] in ['host', 'runtime'] else 1)
-    after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file()}
+    after = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob('*') if p.is_file() and p != root / 'results.json'}
     assert before == after, 'help or rejected arguments changed filesystem state'
     target_verbs = [
         ['navigate', 'https://example.invalid/'], ['get-url'], ['exec', '1+1'],
@@ -183,11 +202,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--cli', type=Path, default=Path('zig-out/bin/maru'))
     parser.add_argument('--repeat', type=int, default=1)
+    parser.add_argument('--output-dir', type=Path)
     opts = parser.parse_args()
+    if opts.repeat < 1:
+        parser.error('--repeat must be at least 1')
+    if opts.output_dir:
+        opts.output_dir.mkdir(parents=True, exist_ok=True)
     cli = opts.cli.resolve(strict=True)
     for index in range(opts.repeat):
         root = Path(tempfile.mkdtemp(prefix='maru-cli-failure-', dir='/tmp'))
-        count = verify(cli, root)
+        try:
+            count = verify(cli, root)
+        finally:
+            # Keep AF_UNIX endpoints in short /tmp paths, independent of CI checkout length.
+            if opts.output_dir and (root / 'results.json').exists():
+                shutil.copy2(root / 'results.json', opts.output_dir / f'{root.name}.json')
         print(f'iteration {index + 1}: {count} process checks passed; evidence: {root}', flush=True)
 
 

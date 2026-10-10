@@ -68,7 +68,7 @@ pub const Cell = struct {
     // base(codepoint) 뒤에 붙는 grapheme cluster 본체(악센트·VS16·NFD 한글 V/T·키캡·ZWJ 시퀀스).
     // grapheme_id(0=없음)가 TerminalCore.grapheme_store의 코드포인트 배열을 가리킨다 — link/link_store와
     // 동형(셀엔 id만, 본체는 store에). extra가 1개든 N개든 전부 여기로(pure-B, 단일 출처) — 긴 cluster도
-    // 무손실. (단일 extra가 반복돼 누적되면 회수/dedup은 측정 후 후속, 설계 §5 HG3b.)
+    // 무손실(한 셀 64개까지 — `TerminalCore.max_grapheme_extra_codepoints`, 넘친 0폭 코드포인트만 버린다). (단일 extra가 반복돼 누적되면 회수/dedup은 측정 후 후속, 설계 §5 HG3b.)
     grapheme_id: u32 = 0,
     // OSC 8 하이퍼링크 id(0=없음). URI 자체는 TerminalCore.link_store에 한 번만 저장하고
     // 셀은 id만 든다 — 링크가 걸린 긴 출력에서도 셀 메모리가 URI 길이에 비례하지 않는다.

@@ -5,7 +5,8 @@
 //!
 //! 요청은 `6e8+seq` — 한 번에 하나, 대기 중 트리거는 `dirty` 로 응답 뒤 한 번 더(시그니처와 같은 규율). 응답의 항목은 **복사**해
 //! 든다(트리는 사라진다) — `additionalTextEdits` 는 응답 시점 본문으로 byte 에 옮겨 두고, 확정 때 그 뒤 문서가 바뀌었으면 전부 `word_start`
-//! 앞에서 끝날 때만 함께 적용한다(타이핑은 `word_start` 뒤에서만 일어나므로 그 앞의 offset 은 그대로다).
+//! 앞에서 끝날 때만 함께 적용한다(커서 하나면 타이핑은 `word_start` 뒤에서만 일어난다). 멀티 커서는 앞쪽 커서도 치므로 목록이 쥔 offset 을
+//! 모든 편집이 지나는 `shared_edit.applyPrepared` 가 같은 delta 로 민다(`noteDocumentEdit`, §8.2g-f). 확정은 커서마다 넣는다(VS Code `snippetSession` 규칙).
 
 const std = @import("std");
 const maru = @import("maru");
@@ -20,6 +21,7 @@ const pane_ops = @import("../pane.zig");
 const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
 const completion = lsp.completion;
+const editor_selection = maru.session.editor.selection;
 const suggest_box = chrome.components.suggest_box;
 const suggest_docs = chrome.components.suggest_docs;
 const hover_text = maru.session.editor.hover_text;
@@ -71,6 +73,8 @@ pub const State = struct {
     /// 대기 중에 온 트리거 — 응답 뒤 한 번 더 묻는다.
     dirty: bool = false,
     dirty_trigger: ?u8 = null,
+    /// 나가 있는 요청의 트리거 글자 — 낡은 응답을 버리고 다시 물을 때 같은 트리거로 묻는다(`dirty_trigger` 는 대기 중에 친 마지막 글자다).
+    asked_trigger: ?u8 = null,
     /// 요청 때의 낱말 시작(접두사의 왼쪽 끝)과 트리거 글자로 열렸는가(그때는 빈 접두사가 정상이다).
     asked_word_start: usize = 0,
     asked_by_trigger: bool = false,
@@ -101,6 +105,8 @@ pub const State = struct {
     resolve_seq: u32 = 0,
     resolve_item: usize = 0,
     pending_accept: bool = false,
+    /// 확정이 기다리는 항목(`items` 첨자) — `pending_accept` 와 함께 선다.
+    pending_item: ?usize = null,
     pending_since_ms: u64 = 0,
     /// 서버 없이 버퍼 단어만으로 열렸다(재요청·resolve 없음).
     words_only: bool = false,
@@ -113,6 +119,13 @@ pub const State = struct {
     words_opened: u64 = 0,
     closed_empty: u64 = 0,
     accepted: u64 = 0,
+    /// 확정이 글을 넣은 자리 수(멀티 커서면 커서 수 — §8.2g-f). 판정자 관측.
+    accepted_sites: u64 = 0,
+    /// 확정이 제 편집을 적용하는 중 — `noteDocumentEdit` 가 건너뛴다.
+    accepting: bool = false,
+    /// 나가 있는 요청의 낱말 시작 **앞**에서 편집이 있었다 — 응답의 서버 자리(textEdit 머리·additional — 줄·글자)가 낡았다. 그 응답은 버리고
+    /// 다시 묻는다(`onResponse`). 다른 줄의 편집도 켠다 — 줄바꿈 수가 바뀌었는지까지 가리지 않는 보수적인 판정이다(다시 묻는 값만 치른다).
+    asked_shifted: bool = false,
     accepted_with_additional: u64 = 0,
     dropped_additional: u64 = 0,
     refetched: u64 = 0,
@@ -121,6 +134,7 @@ pub const State = struct {
         for (self.items.items) |*it| it.deinit(allocator);
         self.items.clearRetainingCapacity();
         self.order.clearRetainingCapacity();
+        self.pending_item = null; // 첨자가 가리키던 항목이 사라졌다
         self.rows.clearRetainingCapacity();
         self.match_buf.clearRetainingCapacity();
         self.last_prefix.clearRetainingCapacity();
@@ -228,6 +242,8 @@ fn ask(self: *AppSession, term: *Term, trigger_char: ?u8) bool {
     st.waiting = true;
     st.waiting_seq = seq;
     st.waiting_surface = term.surface.id;
+    st.asked_shifted = false;
+    st.asked_trigger = trigger_char;
     st.asked_word_start = wordStart(doc.file.content, caret);
     st.asked_by_trigger = trigger_char != null;
     st.dirty = false;
@@ -250,6 +266,16 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
         st.dirty = false;
         if (visibleEditorTerm(self, st.waiting_surface)) |t| _ = ask(self, t, st.dirty_trigger);
     };
+    // 요청 뒤 낱말 시작 **앞**이 고쳐졌다(앞쪽 커서의 편집 — §8.2g-f) — 응답의 서버 자리(textEdit 머리·additional — 줄·글자)가 낡았다. 이 응답은
+    // 버리고 다시 묻는다(치는 글자가 `dirty` 로 다시 묻는 것과 같은 길). 머리만 지우면 머리가 낱말 앞인 항목(후위 완성 `foo.if`)이 엉뚱하게
+    // 들어갔다(적대적 5회차).
+    if (st.asked_shifted) {
+        // 같은 요청을 다시 — 대기 중에 친 글자가 있으면 그것(`dirty_trigger`), 없으면 이 요청의 트리거. 지난 대기의 낡은 `dirty_trigger` 로 묻으면
+        // `.` 로 연 목록이 빈 접두사로 곧바로 닫혔다(적대적 8회차).
+        if (!st.dirty) st.dirty_trigger = st.asked_trigger;
+        st.dirty = true;
+        return;
+    }
     const term = visibleEditorTerm(self, st.waiting_surface) orelse {
         hide(self);
         return;
@@ -530,7 +556,8 @@ pub fn refresh(self: *AppSession) bool {
     // 확정이 resolve 를 기다리는 중 — 300 ms 안에 안 오면 additional 없이 적용한다(§8.2g-b).
     if (acceptPendingOnTimeout(self)) return false;
     const changed = !std.mem.eql(u8, doc.file.content[st.word_start..caret], st.last_prefix.items);
-    if (changed and st.incomplete and !st.waiting) { // words_only 는 `incomplete = false` 로 서므로 따로 거르지 않는다(적대적 2회차 B25)
+    // 확정이 resolve 를 기다리는 동안은 다시 묻지 않는다 — 그 응답이 목록을 갈아 끼우며 기다리던 확정을 지웠다(적대적 8회차).
+    if (changed and st.incomplete and !st.waiting and !st.pending_accept) { // words_only 는 `incomplete = false` 로 서므로 따로 거르지 않는다(적대적 2회차 B25)
         st.refetched += 1;
         _ = ask(self, term, null); // 응답이 목록을 갈아 끼운다 — 그동안은 지금 목록을 접두사로 좁혀 보인다
     }
@@ -635,7 +662,7 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
         const ev: maru.terminal.KeyEvent = .{ .key = key, .modifiers = mods };
         const res = self.loaded_config.keyBindingResolver().resolveEditor(ev, false);
         if (res == .app_action and res.app_action == .trigger_suggest) return false;
-        hide(self);
+        cancel(self);
         return false;
     }
     switch (key) {
@@ -659,6 +686,10 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
                 return false;
             }
             if (st.pending_accept) return true; // 이미 기다리는 중
+            // 고른 것이 보이는 목록의 항목이다 — 나가 있는 재요청(isIncomplete)의 응답은 버린다. 그 응답이 먼저 오면 목록을 갈아 끼우며 기다리던 확정을
+            // 지웠다(Enter 가 사라졌다 — 적대적 5회차). 확정 자신도 대기를 지우지만(`accept`) 확정이 resolve 를 기다리는 동안이 그 틈이다.
+            st.waiting = false;
+            st.dirty = false;
             // 강조된 항목이 아직 안 풀렸으면 응답을 기다렸다 한 번에 적용한다(§8.2g-b — undo 하나).
             const pick = @min(self.chrome_host.suggest_box.selected, st.order.items.len - 1);
             const idx = st.order.items[pick];
@@ -670,6 +701,7 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
                 // 여기서 기다리는 중이면 그것은 이 항목의 것이다(위가 보장 — 적대적 2회차 B21 의 `resolve_item == idx` 는 등가라 뺐다).
                 if (st.resolve_waiting) {
                     st.pending_accept = true;
+                    st.pending_item = idx; // 고른 **항목**을 쥔다 — 기다리는 동안 치면 다시 좁히며 선택이 preselect 로 돌아갔다(적대적 8회차)
                     st.pending_since_ms = self.awakeMs();
                     return true;
                 }
@@ -678,7 +710,7 @@ pub fn handleKey(self: *AppSession, key: maru.terminal.input.Key, mods: maru.ter
             return true;
         },
         .escape => {
-            hide(self);
+            cancel(self);
             return true;
         },
         .arrow_left, .arrow_right, .home, .end, .page_up, .page_down => {
@@ -715,7 +747,7 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
         // 행 밖이지만 **보이는 패널**(패딩) 안 — 목록의 것이라 삼키되 고르지도 닫지도 않는다(§8.2g-e). 흘리면 패널 아래 편집기 caret 이 옮겨졌다.
         if (suggest_box.contains(box, st.rows.items, p, x_px, y_px)) return true;
     }
-    hide(self);
+    cancel(self); // 바깥 클릭 — 사용자가 닫았다
     return false;
 }
 
@@ -723,12 +755,18 @@ pub fn mouseDown(self: *AppSession, x_px: f64, y_px: f64) bool {
 pub fn accept(self: *AppSession) void {
     const st = &self.editor_completion;
     defer hide(self);
+    // 나가 있는 요청(isIncomplete 로 다시 물은 것)은 버린다 — 그 응답이 확정 뒤에 목록을 다시 열었다(`hide` 는 대기를 안 지운다 — 적대적 5회차).
+    st.waiting = false;
+    st.dirty = false;
     const term = visibleEditorTerm(self, st.surface_id) orelse return;
     const doc = term.rt.editorDocument().opened orelse return;
     const sel = term.rt.editor_selection orelse return;
     if (st.order.items.len == 0) return;
     const pick = @min(self.chrome_host.suggest_box.selected, st.order.items.len - 1);
-    const item = st.items.items[st.order.items[pick]];
+    // 확정 대기(resolve) 뒤라면 Enter 때 고른 항목 — 그 사이 다시 좁혀 선택이 옮겨졌어도 사용자가 고른 것을 넣는다.
+    const item_idx = if (st.pending_item) |pi| (if (pi < st.items.items.len) pi else st.order.items[pick]) else st.order.items[pick];
+    st.pending_item = null;
+    const item = st.items.items[item_idx];
     const caret = @min(sel.focus, doc.file.content.len);
     var start = st.word_start;
     if (item.edit_start) |es| if (es <= caret) {
@@ -743,25 +781,109 @@ pub fn accept(self: *AppSession) void {
         };
     }
     if (!allow and item.additional.items.len > 0) st.dropped_additional += 1;
-    var changes = completion.merge(self.allocator, if (allow) item.additional.items else &.{}, start, caret, item.insert) catch return;
+    // **멀티 커서**(§8.2g-f) — 다른 커서마다 같은 글을 넣는다. 앞 글이 primary 가 덮는 글(`[start, caret)`)과 같으면 그만큼 덮고, 다르면 넣기만
+    // 한다(VS Code `snippetSession` 의 규칙). additional(자동 import)은 **한 번**, 전부 `applyEditAsOne` 하나 = undo 하나. 예전에는 다른 커서를
+    // 접어 버렸다(첫 조각은 primary 만이었다).
+    const content = doc.file.content;
+    const extras = term.rt.editor_extra_selections;
+    var others: std.ArrayList(completion.Span) = .empty;
+    defer others.deinit(self.allocator);
+    for (extras) |e| others.append(self.allocator, .{ .start = e.start(), .end = e.end() }) catch return;
+    const primary_site: completion.Span = .{ .start = @min(start, caret), .end = caret };
+    const decided = completion.multiSites(self.allocator, content, primary_site, others.items) catch return;
+    defer self.allocator.free(decided);
+    var sites: std.ArrayList(completion.Span) = .empty;
+    defer sites.deinit(self.allocator);
+    sites.append(self.allocator, primary_site) catch return;
+    for (decided) |d| if (d) |site| sites.append(self.allocator, site) catch return;
+    const additional = if (allow) item.additional.items else &.{};
+    var changes = completion.mergeMany(self.allocator, additional, sites.items, item.insert) catch |err| switch (err) {
+        // additional 이 다른 커서의 자리와 겹치면 **그 커서만** 놓는다 — primary 의 확정(과 import)이 먼저다(적대적 1회차: 예전엔 전부 놓았다).
+        error.Overlap => blk: {
+            var k: usize = 1;
+            while (k < sites.items.len) {
+                var hit = false;
+                for (additional) |c| if (completion.conflicts(sites.items[k], .{ .start = c.start, .end = c.end })) {
+                    hit = true;
+                };
+                if (hit) _ = sites.orderedRemove(k) else k += 1;
+            }
+            break :blk completion.mergeMany(self.allocator, additional, sites.items, item.insert) catch return;
+        },
+        else => return,
+    };
     defer changes.deinit(self.allocator);
-    // 다른 커서는 접는다 — 첫 조각은 primary 만(§8.2g).
+    // caret 은 자리마다 insert 끝 — 정렬된 목록에서 **그 자리 자신의 항목**까지 길이 차를 쌓아 잰다(같은 시작의 import 가 앞에 있어도 맞다).
+    const ends = completion.siteEnds(self.allocator, changes, additional.len, sites.items) catch return;
+    defer self.allocator.free(ends);
+    st.accepting = true;
+    const applied = editor_ops.applyEditAsOne(self, term, changes.items);
+    st.accepting = false;
+    if (!applied) return;
+    const new_len = term.rt.editorDocument().opened.?.file.content.len;
+    for (ends) |*e| e.* = @min(e.*, new_len);
+    term.rt.editor_selection = .{ .anchor_start = ends[0], .anchor_end = ends[0], .focus = ends[0] };
+    // 다른 커서 — 넣은 자리의 끝으로. 놓을 수 없던 커서(primary 가 덮은 범위 안 · import 와 겹침)는 사라진다(그 자리는 primary 편집에 흡수됐다).
     editor_ops.clearExtraSelections(self, term);
-    if (!editor_ops.applyEditAsOne(self, term, changes.items)) return;
-    // caret 을 insert 끝에 — delta 의 selection 매핑은 삭제 구간 안의 caret 을 시작으로 접는다.
-    var shift: i64 = 0;
-    for (changes.items) |c| {
-        if (c.start < start) shift += @as(i64, @intCast(c.text.len)) - @as(i64, @intCast(c.end - c.start));
+    if (ends.len > 1) {
+        const next = self.allocator.alloc(editor_selection.Selection, ends.len - 1) catch return;
+        for (ends[1..], next) |e, *slot| slot.* = editor_selection.Selection.at(e);
+        term.rt.editor_extra_selections = next;
+        editor_ops.mergeCarets(self, term);
     }
-    const end: usize = @intCast(@as(i64, @intCast(start)) + shift + @as(i64, @intCast(item.insert.len)));
-    const clamped = @min(end, term.rt.editorDocument().opened.?.file.content.len);
-    term.rt.editor_selection = .{ .anchor_start = clamped, .anchor_end = clamped, .focus = clamped };
+    st.accepted_sites += sites.items.len;
     st.accepted += 1;
     if (allow and item.additional.items.len > 0) st.accepted_with_additional += 1;
     self.metal_dirty = true;
 }
 
 pub const resolve_wait_ms: u64 = 300;
+
+/// 문서 편집 하나가 지났다(`shared_edit.applyPrepared` — 편집은 모두 여기를 지난다) — 목록이 들고 있는 **편집 전 offset** 을 편집 후 축으로 민다
+/// (§8.2g-f, `delta.mapOffset`). primary 의 caret 에서 치는 글자는 낱말 시작 뒤라 그대로이고, **앞쪽 커서**에서 친 글자만큼 밀린다. 같은 문서의 다른 뷰
+/// 편집도 같은 offset 축이라 민다.
+pub fn noteDocumentEdit(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta) void {
+    const st = &self.editor_completion;
+    if (st.accepting) return; // 확정 자신의 편집 — 그 뒤 곧 닫는다(밀거나 닫으면 확정이 쓰는 항목이 흔들린다)
+    const map = maru.session.editor.delta.mapOffset;
+    const doc = term.rt.editorDocument();
+    // 나가 있는 요청 — **요청한 뷰**(`waiting_surface`)의 문서일 때만 잰다(목록 주인 `surface_id` 는 응답이 설 때 정해진다 — 적대적 3회차). 그
+    // 낱말 시작 앞을 고쳤으면 응답이 낡았다 — 표시해 두면 `onResponse` 가 버리고 다시 묻는다. 그래서 요청의 낱말 시작은 밀 일이 없다(앞 편집은
+    // 표시로 가고, 뒤 편집은 `mapOffset` 이 안 민다).
+    if (st.waiting) if (visibleEditorTerm(self, st.waiting_surface)) |w| if (w.rt.editorDocument() == doc) {
+        for (d.changes) |c| if (c.start < st.asked_word_start) {
+            st.asked_shifted = true;
+        };
+    };
+    if (!st.active) return;
+    const owner = visibleEditorTerm(self, st.surface_id) orelse return;
+    if (owner.rt.editorDocument() != doc) return;
+    // 낱말 시작 **앞을 지우며 걸치는** 편집이면 닫는다 — 트리거 글자(`.`)를 지운 것이다(`mapOffset` 은 구간 끝을 밀기만 해 낱말 시작이 caret 에
+    // 붙어 살아남았다 — 적대적 3회차). 예전에는 `caret < word_start` 로 닫혔다.
+    for (d.changes) |c| if (c.start < st.word_start and c.end >= st.word_start) {
+        hide(self);
+        return;
+    };
+    st.word_start = map(d, st.word_start);
+    for (st.items.items) |*it| {
+        if (it.edit_start == null and it.additional.items.len == 0) continue; // 버퍼 단어 — 민 offset 이 없다(항목 수 × 커서 수를 줄인다)
+        if (it.edit_start) |*es| es.* = map(d, es.*);
+        for (it.additional.items) |*c| {
+            c.start = map(d, c.start);
+            c.end = map(d, c.end);
+        }
+    }
+}
+
+/// 사용자가 목록을 **닫았다**(Esc·수정자 chord·바깥 클릭) — 나가 있는 요청의 응답도 버린다. `hide` 만 하면 isIncomplete 재요청의 응답이 같은 접두사로
+/// 목록을 다시 열었다(적대적 8회차). `hide` 는 대기를 안 지운다 — 프레임이 상태를 다시 맞추며 닫는 경우(낱말 밖 caret 등)에는 다음 응답이 어차피
+/// 같은 판정으로 닫힌다.
+fn cancel(self: *AppSession) void {
+    const st = &self.editor_completion;
+    st.waiting = false;
+    st.dirty = false;
+    hide(self);
+}
 
 pub fn hide(self: *AppSession) void {
     const st = &self.editor_completion;

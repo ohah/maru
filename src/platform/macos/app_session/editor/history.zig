@@ -65,6 +65,8 @@ fn capture(self: *AppSession, term: *Term, changes: []const delta.Change, restor
 fn finish(self: *AppSession, staged: []Staged) void {
     // 통지는 모든 뷰의 빌린 줄이 새 정본을 가리킨 다음에만 보낸다.
     for (staged) |*item| item.view.?.publish();
+    // 여러 문서 작업도 편집이다 — 자동완성이 쥔 offset 을 같은 delta 로 민다(§8.2g-f, `shared_edit.applyPrepared` 와 같은 훅).
+    for (staged) |*item| ops.completion_client.noteDocumentEdit(self, item.term, item.changes.delta());
     for (staged) |*item| if (item.restore) {
         item.term.rt.editor_column_anchor = null;
         ops.writeBackSelections(self, item.term, item.selections);

@@ -356,7 +356,102 @@ pub fn changesFor(allocator: std.mem.Allocator, item: Item, content: []const u8,
 
 /// `additional`(이미 byte 로 옮긴 것) + 주 편집 `[start, caret)` → `insert` 를 하나의 정렬된 목록으로. 겹치면 `Overlap`. 텍스트는 복사.
 pub fn merge(allocator: std.mem.Allocator, additional: []const delta_mod.Change, start: usize, caret: usize, insert: []const u8) ChangesError!text_edits.Changes {
-    const n = additional.len + 1;
+    return mergeMany(allocator, additional, &.{.{ .start = @min(start, caret), .end = caret }}, insert);
+}
+
+/// `mergeMany` 의 결과에서 **자리마다 넣은 글의 끝**(편집 후 offset, `sites` 순서). 정렬된 목록을 차례로 걸으며 앞 항목들의 길이 차를 쌓고,
+/// 자리 자신의 항목(입력 순서의 텍스트 — `texts[additional_len + k]`)에 닿으면 그 끝을 잰다. 같은 시작의 항목은 목록 순서대로 적용되므로
+/// (`delta.apply`) 「자리 시작보다 앞」으로 세면 같은 시작의 import 를 빠뜨렸다(적대적 1회차).
+/// 항목은 텍스트 포인터 **와** 범위로 알아본다 — 빈 insert 면 포인터가 같을 수 있어서다(자리끼리는 범위가 겹치지 않는다).
+/// 자리를 `mergeMany` 와 같은 키로 정렬해 두 포인터로 걷는다 — 커서가 수천이어도 n log n(자리마다 목록 전체를 훑으면 제곱이었다 — 적대적 5회차).
+pub fn siteEnds(allocator: std.mem.Allocator, changes: text_edits.Changes, additional_len: usize, sites: []const Span) error{OutOfMemory}![]usize {
+    const out = try allocator.alloc(usize, sites.len);
+    errdefer allocator.free(out);
+    @memset(out, 0);
+    const order = try allocator.alloc(usize, sites.len);
+    defer allocator.free(order);
+    for (order, 0..) |*o, i| o.* = i;
+    std.mem.sort(usize, order, sites, struct {
+        fn less(ss: []const Span, a: usize, b: usize) bool {
+            const sa = @min(ss[a].start, ss[a].end);
+            const sb = @min(ss[b].start, ss[b].end);
+            return sa < sb or (sa == sb and ss[a].end < ss[b].end);
+        }
+    }.less);
+    var j: usize = 0;
+    var shift: i64 = 0;
+    for (changes.items) |c| {
+        if (j < order.len) {
+            const k = order[j];
+            const site = sites[k];
+            if (c.text.ptr == changes.texts[additional_len + k].ptr and c.start == @min(site.start, site.end) and c.end == site.end) {
+                out[k] = @intCast(@as(i64, @intCast(c.start)) + shift + @as(i64, @intCast(c.text.len)));
+                j += 1;
+            }
+        }
+        shift += @as(i64, @intCast(c.text.len)) - @as(i64, @intCast(c.end - c.start));
+    }
+    return out;
+}
+
+/// 주 편집 한 자리 — `[start, end)` 를 `insert` 로.
+pub const Span = struct { start: usize, end: usize };
+
+/// **멀티 커서 완성의 자리**(§8.2g-f) — VS Code 의 규칙(`snippetSession.ts` `createEditsAndSnippetsFromSelections`, MIT — 동작만): primary 가
+/// 덮어쓰는 앞 글 `content[primary.start..primary.end]`(치던 접두사, 또는 서버 textEdit 의 머리)와 **같은 글**이 다른 selection 앞에 있으면 그만큼
+/// 늘려 덮어쓰고, 다르면 그 selection 자리(선택이면 그 범위)에 **넣기만** 한다. 결과는 `others` 와 같은 순서이고, 둘 중 하나와 겹쳐 놓을 수 없는
+/// 자리는 `null`(primary 가 덮어쓰는 범위 안의 caret — 그 caret 은 primary 편집에 흡수된다). 겹침은 먼저 늘리지 않은 자리로 물러서 본다.
+pub fn multiSites(allocator: std.mem.Allocator, content: []const u8, primary: Span, others: []const Span) error{OutOfMemory}![]?Span {
+    const out = try allocator.alloc(?Span, others.len);
+    errdefer allocator.free(out);
+    const before = content[@min(primary.start, content.len)..@min(primary.end, content.len)];
+    const l = before.len;
+    for (others, out) |o, *slot| {
+        const plain: Span = .{ .start = @min(o.start, content.len), .end = @min(o.end, content.len) };
+        const grown: ?Span = if (l > 0 and plain.start >= l and std.mem.eql(u8, content[plain.start - l .. plain.start], before)) .{ .start = plain.start - l, .end = plain.end } else null;
+        slot.* = if (grown) |g| (if (!overlaps(g, primary)) g else if (!overlaps(plain, primary)) plain else null) else (if (!overlaps(plain, primary)) plain else null);
+    }
+    // 다른 자리끼리 — 문서 순서로 훑어 앞 자리와 겹치면 늘리지 않은 자리로, 그래도 겹치면 뺀다.
+    const order = try allocator.alloc(usize, others.len);
+    defer allocator.free(order);
+    for (order, 0..) |*o, i| o.* = i;
+    std.mem.sort(usize, order, others, struct {
+        fn less(os: []const Span, a: usize, b: usize) bool {
+            return os[a].start < os[b].start;
+        }
+    }.less);
+    var prev_end: ?usize = null;
+    for (order) |i| {
+        const site = out[i] orelse continue;
+        if (prev_end) |pe| if (site.start < pe) {
+            // 늘린 자리가 primary 와 안 겹쳤으면 그 부분 구간인 늘리지 않은 자리도 안 겹친다 — 앞 자리와만 다시 잰다.
+            const plain: Span = .{ .start = @min(others[i].start, content.len), .end = @min(others[i].end, content.len) };
+            out[i] = if (plain.start >= pe) plain else null;
+        };
+        if (out[i]) |kept| prev_end = kept.end;
+    }
+    return out;
+}
+
+/// `mergeMany` 와 **같은 판정**으로 두 변경이 함께 갈 수 있나 — (start, end) 순으로 놓았을 때 뒤의 시작이 앞의 끝보다 앞이면 겹침. 같은 자리의
+/// 길이 0 둘은 함께 간다(입력 순서대로 넣는다). 확정이 Overlap 을 만나면 additional 과 이것이 참인 커서만 놓는다(§8.2g-f).
+pub fn conflicts(a: Span, b: Span) bool {
+    const a_first = a.start < b.start or (a.start == b.start and a.end <= b.end);
+    const first = if (a_first) a else b;
+    const second = if (a_first) b else a;
+    return second.start < first.end;
+}
+
+/// 두 자리가 겹치나 — 맞닿는 것(`[0,3)`·`[3,6)`)은 겹침이 아니다(`mergeMany` 의 판정과 같다). 길이 0 인 둘이 같은 자리면 겹친다(같은 곳에 두 번
+/// 넣는다 — `mergeMany` 는 그것을 못 가르므로 여기서 막는다; 합쳐진 커서라면 애초에 같은 자리에 둘이 없다).
+fn overlaps(a: Span, b: Span) bool {
+    if (a.start == a.end and b.start == b.end) return a.start == b.start;
+    return a.start < b.end and b.start < a.end;
+}
+
+/// `additional` + 주 편집 여럿(`sites` 마다 `insert`) → 하나의 정렬된 목록(§8.2g-f — undo 하나). 겹치면 `Overlap`. 텍스트는 복사.
+pub fn mergeMany(allocator: std.mem.Allocator, additional: []const delta_mod.Change, sites: []const Span, insert: []const u8) ChangesError!text_edits.Changes {
+    const n = additional.len + sites.len;
     var texts = try allocator.alloc([]u8, n);
     var owned: usize = 0;
     errdefer {
@@ -370,12 +465,16 @@ pub fn merge(allocator: std.mem.Allocator, additional: []const delta_mod.Change,
         owned += 1;
         items[i] = .{ .start = c.start, .end = c.end, .text = texts[i] };
     }
-    texts[owned] = try allocator.dupe(u8, insert);
-    owned += 1;
-    items[n - 1] = .{ .start = @min(start, caret), .end = caret, .text = texts[n - 1] };
+    for (sites, additional.len..) |site, i| {
+        texts[owned] = try allocator.dupe(u8, insert);
+        owned += 1;
+        items[i] = .{ .start = @min(site.start, site.end), .end = site.end, .text = texts[i] };
+    }
+    // (start, end) 순 — 같은 시작이면 길이 0(넣기)이 앞이다. 그래야 맞닿은 `[k,k)`·`[k,m)` 이 겹침으로 안 잡힌다(`multiSites` 의 `overlaps` 와 같은
+    // 판정 — 적대적 1회차: start 만 보면 낱말 머리의 커서와 primary 가 Overlap 이 되어 다른 커서가 전부 사라졌다). 안정 정렬이라 나머지는 입력 순서다.
     std.mem.sort(delta_mod.Change, items, {}, struct {
         fn f(_: void, a: delta_mod.Change, b: delta_mod.Change) bool {
-            return a.start < b.start;
+            return a.start < b.start or (a.start == b.start and a.end < b.end);
         }
     }.f);
     var prev_end: usize = 0;
@@ -579,6 +678,103 @@ test "CPL6 fuzzy — 부분열이면 후보, 정확한 접두사 > 무시 접두
     const all = try filterSort(a, l, "");
     defer a.free(all);
     try testing.expectEqual(@as(usize, 6), all.len);
+}
+
+test "CPL11 멀티 커서 자리 — primary 가 덮는 앞 글과 같으면 늘려 덮고 다르면 넣기만, primary 범위 안 caret 은 빠지고, 겹치면 물러선다; 여러 자리를 한 목록으로 (§8.2g-f)" {
+    const a = testing.allocator;
+    //                p0 r1 i2 _3 a4 _5 p6 r7 i8 _9 b10 _11 x12 p13 r14 i15 _16 c17 _18 q19 q20
+    const content = "pri a pri b xpri c qq";
+    const primary: Span = .{ .start = 6, .end = 9 }; // 둘째 `pri` 뒤 caret, 접두사 `pri`
+    const others = [_]Span{
+        .{ .start = 3, .end = 3 }, // 첫 `pri` 뒤 — 같은 글 → [0, 3)
+        .{ .start = 16, .end = 16 }, // `xpri` 뒤 — 앞 세 바이트가 `pri` → [13, 16)(VS Code 도 글이 같으면 늘린다)
+        .{ .start = 21, .end = 21 }, // `qq` 뒤 — 다른 글 → 넣기만
+        .{ .start = 8, .end = 8 }, // primary 가 덮는 범위 안 — 뺀다
+        .{ .start = 19, .end = 21 }, // 선택 범위(`qq`) — 앞이 다르면 그 범위를 덮는다
+    };
+    const sites = try multiSites(a, content, primary, &others);
+    defer a.free(sites);
+    try testing.expectEqual(@as(?Span, .{ .start = 0, .end = 3 }), sites[0]);
+    try testing.expectEqual(@as(?Span, .{ .start = 13, .end = 16 }), sites[1]);
+    try testing.expectEqual(@as(?Span, .{ .start = 21, .end = 21 }), sites[2]);
+    try testing.expectEqual(@as(?Span, null), sites[3]);
+    try testing.expectEqual(@as(?Span, .{ .start = 19, .end = 21 }), sites[4]); // `[19,21)` 와 `[21,21)` 은 맞닿을 뿐이다
+    // primary 시작에 맞닿은 caret(`[6,6)` — 앞 글이 `pri` 가 아니라 늘리지 않는다)은 겹침이 아니다 — 남는다(적대적 6회차: `<` 를 `<=` 로 바꿔도 초록이었다).
+    const touch = try multiSites(a, content, primary, &.{.{ .start = 6, .end = 6 }});
+    defer a.free(touch);
+    try testing.expectEqual(@as(?Span, .{ .start = 6, .end = 6 }), touch[0]);
+    // 다른 자리끼리 겹치면 늘리지 않은 자리로 물러선다 — caret 2(늘릴 수 없다)와 caret 3(늘리면 [0,3) 이 2 를 덮는다).
+    const tight = try multiSites(a, content, primary, &.{ .{ .start = 2, .end = 2 }, .{ .start = 3, .end = 3 } });
+    defer a.free(tight);
+    try testing.expectEqual(@as(?Span, .{ .start = 2, .end = 2 }), tight[0]);
+    try testing.expectEqual(@as(?Span, .{ .start = 3, .end = 3 }), tight[1]);
+    // 같은 자리 둘(길이 0)은 겹친다 — 같은 곳에 두 번 넣지 않는다.
+    const same = try multiSites(a, content, .{ .start = 9, .end = 9 }, &.{.{ .start = 9, .end = 9 }});
+    defer a.free(same);
+    try testing.expectEqual(@as(?Span, null), same[0]);
+    // 빈 접두사(primary 가 덮는 글 없음)면 모두 넣기만.
+    const empty = try multiSites(a, content, .{ .start = 9, .end = 9 }, &.{.{ .start = 3, .end = 3 }});
+    defer a.free(empty);
+    try testing.expectEqual(@as(?Span, .{ .start = 3, .end = 3 }), empty[0]);
+    // 한 목록으로 — additional 하나 + 자리 셋, 문서 순서, 텍스트는 각자 복사.
+    const additional = [_]delta_mod.Change{.{ .start = 11, .end = 11, .text = "X" }};
+    var c = try mergeMany(a, &additional, &.{ .{ .start = 6, .end = 9 }, .{ .start = 0, .end = 3 }, .{ .start = 13, .end = 16 } }, "printf");
+    defer c.deinit(a);
+    try testing.expectEqual(@as(usize, 4), c.items.len);
+    try testing.expectEqual(@as(usize, 0), c.items[0].start);
+    try testing.expectEqual(@as(usize, 6), c.items[1].start);
+    try testing.expectEqualStrings("X", c.items[2].text);
+    try testing.expectEqual(@as(usize, 13), c.items[3].start);
+    try testing.expectEqualStrings("printf", c.items[3].text);
+    try testing.expect(c.items[1].text.ptr != c.items[3].text.ptr); // 각자 복사 — 해제가 한 번씩
+    try testing.expect(c.delta().isWellFormed());
+    try testing.expectError(error.Overlap, mergeMany(a, &.{}, &.{ .{ .start = 0, .end = 3 }, .{ .start = 2, .end = 4 } }, "p"));
+}
+
+test "CPL12 멀티 커서 caret 끝·정렬·겹침 판정 — 같은 시작의 import 도 세고, 맞닿은 넣기는 앞에 서며, conflicts 는 mergeMany 와 같다 (§8.2g-f)" {
+    const a = testing.allocator;
+    // 같은 시작의 import(`[16,16)`)가 자리(`[16,19)`) 앞에 적용된다 — 「자리 시작보다 앞」으로 세면 빠뜨려 caret 이 import 글 안에 섰다.
+    const imp = "import X\n";
+    const additional = [_]delta_mod.Change{.{ .start = 16, .end = 16, .text = imp }};
+    const sites = [_]Span{ .{ .start = 30, .end = 33 }, .{ .start = 16, .end = 19 } };
+    var c = try mergeMany(a, &additional, &sites, "world");
+    defer c.deinit(a);
+    try testing.expectEqualStrings(imp, c.items[0].text); // import 가 같은 시작의 자리보다 앞
+    const ends = try siteEnds(a, c, additional.len, &sites);
+    defer a.free(ends);
+    // primary: 30 + (import 9) + (16..19 → world: +2) + 5. secondary: 16 + 9 + 5.
+    try testing.expectEqual(@as(usize, 30 + imp.len + 2 + 5), ends[0]);
+    try testing.expectEqual(@as(usize, 16 + imp.len + 5), ends[1]);
+    // 맞닿은 `[3,3)`(넣기)와 `[3,6)` 은 겹침이 아니다 — 넣기가 앞에 선다(start 만 보던 정렬은 Overlap 이라 다른 커서가 전부 사라졌다).
+    const touch = [_]Span{ .{ .start = 3, .end = 6 }, .{ .start = 3, .end = 3 } };
+    var t = try mergeMany(a, &.{}, &touch, "ab");
+    defer t.deinit(a);
+    try testing.expectEqual(@as(usize, 3), t.items[0].end); // 길이 0 이 먼저
+    const te = try siteEnds(a, t, 0, &touch);
+    defer a.free(te);
+    try testing.expectEqual(@as(usize, 3 + 2 + 2), te[0]); // `[3,6)` 은 앞 넣기(+2) 뒤
+    try testing.expectEqual(@as(usize, 3 + 2), te[1]);
+    // 빈 insert — 포인터가 같아도 범위로 가른다.
+    var e = try mergeMany(a, &.{}, &.{ .{ .start = 0, .end = 2 }, .{ .start = 5, .end = 7 } }, "");
+    defer e.deinit(a);
+    const ee = try siteEnds(a, e, 0, &.{ .{ .start = 0, .end = 2 }, .{ .start = 5, .end = 7 } });
+    defer a.free(ee);
+    try testing.expectEqual([2]usize{ 0, 3 }, ee[0..2].*);
+    // conflicts — mergeMany 와 같은 판정.
+    try testing.expect(!conflicts(.{ .start = 3, .end = 3 }, .{ .start = 3, .end = 6 }));
+    try testing.expect(!conflicts(.{ .start = 3, .end = 6 }, .{ .start = 3, .end = 3 }));
+    try testing.expect(!conflicts(.{ .start = 0, .end = 3 }, .{ .start = 3, .end = 6 }));
+    try testing.expect(conflicts(.{ .start = 0, .end = 4 }, .{ .start = 3, .end = 6 }));
+    try testing.expect(conflicts(.{ .start = 3, .end = 6 }, .{ .start = 4, .end = 4 })); // 범위 안의 넣기
+    try testing.expect(!conflicts(.{ .start = 3, .end = 3 }, .{ .start = 3, .end = 3 })); // 같은 자리의 넣기 둘은 함께 간다(입력 순서)
+    for ([_][2]Span{ .{ .{ .start = 0, .end = 4 }, .{ .start = 3, .end = 6 } }, .{ .{ .start = 3, .end = 3 }, .{ .start = 3, .end = 6 } }, .{ .{ .start = 5, .end = 5 }, .{ .start = 3, .end = 6 } } }) |pair| {
+        const merged = mergeMany(a, &.{.{ .start = pair[0].start, .end = pair[0].end, .text = "x" }}, &.{pair[1]}, "y");
+        if (merged) |m| {
+            var mm = m;
+            mm.deinit(a);
+            try testing.expect(!conflicts(pair[0], pair[1]));
+        } else |_| try testing.expect(conflicts(pair[0], pair[1]));
+    }
 }
 
 test "CPL10 일치 자리 — 점수와 같은 탐욕 걸음: 접두사는 0..n, 부분열은 첫 등장, 대소문자 무시, 안 맞으면 null, 빈 접두사는 빈 조각 (§8.2g-e)" {

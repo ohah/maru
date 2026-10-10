@@ -49,6 +49,11 @@ exit 1이며 소켓 연결·auth·request를 시작하지 않는다. `--option v
 
 ## CLI 실제 프로세스 CI 검증
 
+`maru agent-events --stdio --dir=<절대 경로> [--heartbeat-ms=N] [--resume=spec]`의 값 옵션도
+각 한 번만 지정한다. 0 heartbeat·빈 resume와 동일 값 반복도 exit 1이며 hello 출력과 로그
+정리 전에 종료한다. `=` 문법과 기본값은 유지한다. 기존 help의 순서 판정도 유지해 help가
+중복보다 먼저면 안내(exit 0), 중복 뒤라면 오류다. boolean `--stdio`의 반복 허용은 유지한다.
+
 Ubuntu CI의 `check` 잡은 코드 변경 시 `zig build test-cli-failure-process`를 실행한다.
 빌드가 전달한 native CLI artifact를 private HOME·cache·socket으로 검증하므로 GUI 권한은
 필요하지 않다. 순수 parser 테스트와 별도로 종료 코드·요청 전 부작용·정상 wire를 검사한다.

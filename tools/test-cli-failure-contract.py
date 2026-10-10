@@ -5,11 +5,13 @@ import itertools
 import json
 import os
 from pathlib import Path
+import selectors
 import socket
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 
 
 def verify(cli, root):
@@ -19,13 +21,15 @@ def verify(cli, root):
     env.update(HOME=str(home), CFFIXED_USER_HOME=str(home), XDG_CACHE_HOME=str(root / 'cache'), MARU_PANE_ID='987654321')
     records = []
 
-    def record(args, code, stdout, stderr, failure=None):
+    def record(args, code, stdout, stderr, failure=None, fixture_terminated=False):
         # TimeoutExpired can expose bytes even with text=True. Keep partial output.
         def text(value):
             return value.decode(errors='replace') if isinstance(value, bytes) else value or ''
         entry = dict(args=args, exit=code, stdout=text(stdout), stderr=text(stderr))
         if failure:
             entry['failure'] = failure
+        if fixture_terminated:
+            entry['fixture_terminated'] = True
         records.append(entry)
         (root / 'results.json').write_text(json.dumps(records, indent=2) + '\n')
 
@@ -136,6 +140,94 @@ def verify(cli, root):
     assert json.loads(claude_settings.read_text())['keep'] == 'sentinel'
     assert '# keep sentinel' in codex_config.read_text()
     assert 'MARU_HOOK_V3' not in codex_config.read_text()
+    streams = root / 'stream-fixture'
+    streams.mkdir()
+    stream_dirs = [streams / 'first', streams / 'last']
+    for directory in stream_dirs:
+        directory.mkdir()
+        stale = directory / 'a.ndjson'
+        stale.write_text('claude\t{"tag":"stale"}\n')
+        os.utime(stale, (0, 0))
+    before = {str(p): (p.lstat().st_mode, p.read_bytes() if p.is_file() else None)
+              for p in streams.rglob('*')}
+    options = ['--stdio', f'--dir={stream_dirs[0]}', '--heartbeat-ms=0', '--resume=']
+    extras = [f'--dir={stream_dirs[0]}', f'--dir={stream_dirs[1]}', '--heartbeat-ms=0',
+              '--heartbeat-ms=00', '--heartbeat-ms=200', '--resume=', '--resume=a:0']
+    for order in itertools.permutations(options):
+        for extra in extras:
+            p = run(['agent-events', *order, extra], 1)
+            assert not p.stdout and 'may only be specified once' in p.stderr
+    for first, last in [('--dir=', f'--dir={stream_dirs[0]}'), ('--dir=relative', f'--dir={stream_dirs[0]}'),
+                        ('--resume=invalid', '--resume='), ('--heartbeat-ms=0', '--heartbeat-ms=4294967295')]:
+        run(['agent-events', '--stdio', f'--dir={stream_dirs[0]}', first, last], 1)
+    for flag in ['--help', '-h']:
+        run(['agent-events', flag, *options, extras[1]], 0)
+        p = run(['agent-events', *options, extras[1], flag], 1)
+        assert not p.stdout
+    after = {str(p): (p.lstat().st_mode, p.read_bytes() if p.is_file() else None)
+             for p in streams.rglob('*')}
+    assert before == after, 'rejected stream options started log cleanup'
+
+    # A real bounded stream proves we did not merely disable startup to pass negatives.
+    active = streams / 'active' / '--heartbeat-ms=0'
+    active.mkdir(parents=True)
+    first_line = b'claude\t{"tag":"first"}\n'
+    second_line = b'claude\t{"tag":"second"}\n'
+    (active / 'a.ndjson').write_bytes(first_line + second_line)
+
+    def check_stream(extra, expected_tags, heartbeat):
+        args = ['agent-events', '--stdio', f'--dir={active}', *extra]
+        proc = subprocess.Popen([str(cli), *args], cwd=root, env=env, stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        selector = selectors.DefaultSelector()
+        output = bytearray()
+        pending = bytearray()
+        frames = []
+        settled = None
+        try:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                now = time.monotonic()
+                if settled is not None and now >= settled:
+                    break
+                wait_until = min(deadline, settled) if settled is not None else deadline
+                for key, _ in selector.select(max(0, wait_until - now)):
+                    chunk = os.read(key.fd, 65536)
+                    assert chunk, 'stream closed before fixture stopped it'
+                    output.extend(chunk)
+                    pending.extend(chunk)
+                    while b'\n' in pending:
+                        line, _, remainder = pending.partition(b'\n')
+                        pending[:] = remainder
+                        frames.append(json.loads(line))
+                tags = [json.loads(f['line'].split('\t', 1)[1])['tag'] for f in frames if 'line' in f]
+                cursor = any(f.get('cur') == 'a' and f.get('at') == len(first_line + second_line) for f in frames)
+                hb = any(f.get('hb') == 0 for f in frames)
+                if frames and tags == expected_tags and (cursor or not expected_tags) and (hb or not heartbeat) and settled is None:
+                    settled = time.monotonic() + 0.35
+            assert frames and frames[0] == {'hello': 'maru-agent-events', 'v': 1}, frames
+            assert tags == expected_tags and (cursor or not expected_tags), frames
+            assert hb if heartbeat else not any('hb' in f for f in frames), frames
+            assert settled is not None, frames
+        finally:
+            selector.close()
+            controlled = proc.poll() is None
+            if controlled:
+                proc.terminate()
+            try:
+                tail, stderr = proc.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                tail, stderr = proc.communicate(timeout=3)
+            output.extend(tail)
+            record(args, proc.returncode, bytes(output), stderr, fixture_terminated=controlled)
+        assert controlled, 'normal stream exited on its own'
+
+    check_stream([], ['first', 'second'], False)
+    check_stream(['--stdio', '--heartbeat-ms=0', '--resume='], ['first', 'second'], False)
+    check_stream(['--heartbeat-ms=200', f'--resume=a:{len(first_line)}'], ['second'], True)
+    check_stream(['--heartbeat-ms=200', f'--resume=a:{len(first_line + second_line)}'], [], True)
     control = root / 'cache/maru/control'
     control.mkdir(parents=True)
     listener = socket.socket(socket.AF_UNIX)

@@ -14811,12 +14811,12 @@ fn runAgentEvents(
 
     const opts = switch (ae.parseArgs(rest.items)) {
         .help => {
-            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N]\n");
+            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec]\nValue options may only be specified once.\n");
             try stdout.flush();
             return;
         },
         .usage_error => {
-            try stderr.writeAll("maru agent-events: --stdio and an absolute --dir= are required\n");
+            try stderr.writeAll("maru agent-events: --stdio and an absolute --dir= are required; --dir, --heartbeat-ms and --resume may only be specified once\n");
             try stderr.flush();
             return error.UnknownCommand;
         },

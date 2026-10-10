@@ -14,7 +14,7 @@ def verify(cli, root):
     home = root / 'home'
     home.mkdir()
     env = {k: v for k, v in os.environ.items() if not k.startswith(('MARU_', 'XDG_', 'DYLD_'))}
-    env.update(HOME=str(home), CFFIXED_USER_HOME=str(home), XDG_CACHE_HOME=str(root / 'cache'))
+    env.update(HOME=str(home), CFFIXED_USER_HOME=str(home), XDG_CACHE_HOME=str(root / 'cache'), MARU_PANE_ID='987654321')
     records = []
 
     def run(args, expected):
@@ -93,6 +93,16 @@ def verify(cli, root):
                 p = run(['browser', verb[0], *first, *verb[1:], *second], 1)
                 assert '--surface may only be specified once' in p.stderr
                 assert sentinel.read_bytes() == b'KEEP SCREENSHOT OUTPUT'
+    for first in [['--window', '1'], ['--window=1'], ['--window', '0'], ['--window=0']]:
+        for second in [['--window', '1'], ['--window=1'], ['--window', '2'], ['--window=2'], ['--window=0'], ['--window=01']]:
+            p = run(['sessions', 'list', *first, *second], 1)
+            assert '--window may only be specified once' in p.stderr
+    for namespace in [['editor', 'lsp'], ['lsp']]:
+        for verb in ['revoke', 'forget']:
+            for first in [['--volume', 'a'], ['--volume=A'], ['--volume', '0'], ['--volume=0']]:
+                for second in [['--volume', 'a'], ['--volume=A'], ['--volume', 'b'], ['--volume=b'], ['--volume=0'], ['--volume=0a']]:
+                    p = run([*namespace, 'trust', verb, '/fixture/repository', *first, *second], 1)
+                    assert '--volume may only be specified once' in p.stderr
     # A reachable endpoint exists: rejection must happen before even auth is sent.
     listener.settimeout(0.05)
     try:
@@ -107,6 +117,23 @@ def verify(cli, root):
     for args, result in [(['sessions', 'list'], []), (['browser', 'get-url', '--surface', '1'], {'url': 'https://example.invalid/'}), (['browser', 'navigate', '--surface', '1', 'https://example.invalid/'], {'ok': True}), (['editor', 'lsp', 'trust', 'list'], {'decisions': []})]:
         for kind in ['success', 'error', 'malformed', 'wrong-envelope']:
             plans.append((args, kind, result))
+    selector_positive = []
+    for option, value in [(['--window', '2'], 2), (['--window=0'], 0), (['--window=01'], 1)]:
+        args = ['sessions', 'list', *option]
+        plans.append((args, 'success', []))
+        selector_positive.append((args, 'sessions.list', {'window': value}))
+    for namespace in [['editor', 'lsp'], ['lsp']]:
+        for verb in ['revoke', 'forget']:
+            for option, value in [(['--volume', 'A'], 'a'), (['--volume=0'], '0'), (['--volume=0a'], 'a')]:
+                args = [*namespace, 'trust', verb, '/fixture/repository', *option]
+                plans.append((args, 'success', {'changed': True, 'saved': True, 'previous': 'allow'}))
+                selector_positive.append((args, 'lsp.trust.' + verb, {'path': '/fixture/repository', 'volume': value}))
+    for namespace in [['editor', 'lsp'], ['lsp']]:
+        for verb in ['revoke', 'forget']:
+            args = [*namespace, 'trust', verb, '/fixture/repository']
+            plans.append((args, 'success', {'changed': True, 'saved': True, 'previous': 'allow'}))
+            selector_positive.append((args, 'lsp.trust.' + verb, {'path': '/fixture/repository'}))
+    wire_seen = []
     # Empty wrapped results are successful, not protocol failures.
     plans += [(['browser', 'snapshot', '--surface', '1'], 'success', {'snapshot': {'tree': []}}), (['browser', 'console', '--surface', '1'], 'success', {'console': []})]
     errors = []
@@ -118,8 +145,9 @@ def verify(cli, root):
                 with conn:
                     conn.settimeout(10)
                     f = conn.makefile('rb')
-                    json.loads(f.readline())
+                    auth = json.loads(f.readline())
                     req = json.loads(f.readline())
+                    wire_seen.append((auth, req))
                     if kind == 'malformed':
                         wire = 'invalid-json'
                     elif kind == 'wrong-envelope':
@@ -139,6 +167,12 @@ def verify(cli, root):
     thread.start()
     for args, kind, _ in plans:
         run(args, 0 if kind == 'success' else 1)
+        for positive_args, method, params in selector_positive:
+            if args == positive_args:
+                auth, req = wire_seen[-1]
+                assert req['method'] == method and req['params'] == params, req
+                if method.startswith('lsp.'):
+                    assert auth['params'] == {}, auth
     thread.join(timeout=10)
     assert not thread.is_alive() and not errors, errors
     (root / 'results.json').write_text(json.dumps(records, indent=2) + '\n')

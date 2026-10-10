@@ -38,6 +38,8 @@ pub const ParseError = error{
     MissingPath,
     /// `--volume` 값이 없다.
     MissingVolumeValue,
+    /// Reject repeated target selection, including a valid zero.
+    DuplicateVolume,
     /// `--volume` 값이 16진이 아니다.
     InvalidVolumeValue,
     UnknownOption,
@@ -65,10 +67,10 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const a = rest[i];
         if (std.mem.eql(u8, a, "--volume")) {
             if (i + 1 >= rest.len) return error.MissingVolumeValue;
-            volume = std.fmt.parseInt(u64, rest[i + 1], 16) catch return error.InvalidVolumeValue;
+            try assignVolume(&volume, rest[i + 1]);
             i += 2;
         } else if (std.mem.startsWith(u8, a, "--volume=")) {
-            volume = std.fmt.parseInt(u64, a["--volume=".len..], 16) catch return error.InvalidVolumeValue;
+            try assignVolume(&volume, a["--volume=".len..]);
             i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
@@ -88,6 +90,12 @@ pub fn parse(args: []const []const u8) ParseError!Command {
 /// 심링크는 서버가 실제 경로로 푼다. caller free.
 pub fn absolutize(gpa: std.mem.Allocator, cwd: []const u8, path: []const u8) std.mem.Allocator.Error![]u8 {
     return std.fs.path.resolve(gpa, &.{ cwd, path });
+}
+
+// Do not let a later mount selector replace the repository target chosen earlier.
+fn assignVolume(target: *?u64, value: []const u8) ParseError!void {
+    if (target.* != null) return error.DuplicateVolume;
+    target.* = std.fmt.parseInt(u64, value, 16) catch return error.InvalidVolumeValue;
 }
 
 pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.mem.Allocator.Error![]u8 {
@@ -233,7 +241,7 @@ pub const help =
     \\  forget   remove the decision (Maru asks again when you next open a file there)
     \\
     \\options:
-    \\  --volume <hex>   pick the repository when the same path has decisions on more than one volume
+    \\  --volume <hex>   pick the repository when the same path has decisions on more than one volume (specify once)
     \\
     \\exit status 0 also when nothing changed ("unchanged: ..."); 1 on an error.
     \\`..` is folded as text before the path is sent (it is not resolved through symlinks).
@@ -369,4 +377,29 @@ test "lsp trust CLI: help 는 동작하는 명령만 — 세 줄, 부여 명령 
     try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust forget <path> [--volume <hex>]\n") != null);
     for ([_][]const u8{ "trust grant", "trust allow", "trust add", "trust set" }) |w| try testing.expect(std.mem.indexOf(u8, help, w) == null);
     try testing.expectEqual(@as(usize, 3), std.mem.count(u8, help, "  maru editor lsp trust "));
+}
+
+test "lsp selector rejects repeated volume including zero and hexadecimal case" {
+    const firsts = [_][]const []const u8{ &.{ "--volume", "a" }, &.{"--volume=A"}, &.{ "--volume", "0" }, &.{"--volume=0"} };
+    const seconds = [_][]const []const u8{ &.{ "--volume", "a" }, &.{"--volume=A"}, &.{ "--volume", "b" }, &.{"--volume=b"}, &.{"--volume=0"}, &.{"--volume=0a"} };
+    for ([_][]const u8{ "revoke", "forget" }) |verb| {
+        for (firsts) |first| {
+            var args: std.ArrayList([]const u8) = .empty;
+            defer args.deinit(testing.allocator);
+            try args.appendSlice(testing.allocator, &.{ "trust", verb, "/fixture/--volume=b" });
+            try args.appendSlice(testing.allocator, first);
+            const parsed = try parse(args.items);
+            try testing.expectEqualStrings("/fixture/--volume=b", switch (parsed.request) {
+                .revoke => |t| t.path,
+                .forget => |t| t.path,
+                .list => unreachable,
+            });
+            const length = args.items.len;
+            for (seconds) |second| {
+                args.items.len = length;
+                try args.appendSlice(testing.allocator, second);
+                try testing.expectError(error.DuplicateVolume, parse(args.items));
+            }
+        }
+    }
 }

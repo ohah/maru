@@ -55,6 +55,8 @@ pub const ParseError = error{
     InvalidSurfaceId,
     /// `--window`에 값이 없음.
     MissingWindowValue,
+    /// Reject repeated target selection, including a valid zero.
+    DuplicateWindow,
     /// `--window` 값이 비숫자/음수.
     InvalidWindowValue,
     /// 알 수 없는 옵션(`list --bogus`).
@@ -81,10 +83,10 @@ fn parseListArgs(rest: []const []const u8) ParseError!Request.List {
         const a = rest[i];
         if (std.mem.eql(u8, a, "--window")) {
             if (i + 1 >= rest.len) return error.MissingWindowValue;
-            window = parseU64(rest[i + 1]) catch return error.InvalidWindowValue;
+            try assignWindow(&window, rest[i + 1]);
             i += 2;
         } else if (std.mem.startsWith(u8, a, "--window=")) {
-            window = parseU64(a["--window=".len..]) catch return error.InvalidWindowValue;
+            try assignWindow(&window, a["--window=".len..]);
             i += 1;
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption; // 알 수 없는 옵션(정의 안 된 플래그).
@@ -115,6 +117,12 @@ fn hasHelpFlag(args: []const []const u8) bool {
         if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) return true;
     }
     return false;
+}
+
+// A nullable field distinguishes omission from a valid zero target.
+fn assignWindow(target: *?u64, value: []const u8) ParseError!void {
+    if (target.* != null) return error.DuplicateWindow;
+    target.* = parseU64(value) catch return error.InvalidWindowValue;
 }
 
 /// 10진 파싱 후 **wire i64 범위로 제한**한다. surface_id/window는 JSON integer(=i64, 1a `Id`)로 실리므로,
@@ -333,7 +341,7 @@ pub const sessions_help =
     \\list running Maru sessions (surfaces) with read-only metadata.
     \\
     \\options:
-    \\  --window <id>   only list surfaces in window <id>
+    \\  --window <id>   only list surfaces in window <id> (specify once)
     \\
 ;
 
@@ -420,7 +428,7 @@ test "parseSession: --help/-h는 .help(id 자리의 --help도 help)" {
 test "help 스냅샷: sessions/session help는 구현된 명령만 정확히 공개한다" {
     // 정확한 텍스트 고정(바이트 스냅샷).
     try testing.expectEqualStrings(
-        "usage:\n  maru sessions list [--window <id>]\n\nlist running Maru sessions (surfaces) with read-only metadata.\n\noptions:\n  --window <id>   only list surfaces in window <id>\n",
+        "usage:\n  maru sessions list [--window <id>]\n\nlist running Maru sessions (surfaces) with read-only metadata.\n\noptions:\n  --window <id>   only list surfaces in window <id> (specify once)\n",
         sessions_help,
     );
     try testing.expectEqualStrings(
@@ -648,5 +656,23 @@ test "response outcome distinguishes server failure from successful rendering" {
         var w: std.Io.Writer.Allocating = .init(testing.allocator);
         defer w.deinit();
         try testing.expectEqual(index == 2, try renderResponse(testing.allocator, wire, .list, &w.writer));
+    }
+}
+
+test "sessions selector rejects repeated window including zero and normalized numbers" {
+    const firsts = [_][]const []const u8{ &.{ "--window", "1" }, &.{"--window=1"}, &.{ "--window", "0" }, &.{"--window=0"} };
+    const seconds = [_][]const []const u8{ &.{ "--window", "1" }, &.{"--window=1"}, &.{ "--window", "2" }, &.{"--window=2"}, &.{"--window=0"}, &.{"--window=01"} };
+    for (firsts) |first| {
+        var args: std.ArrayList([]const u8) = .empty;
+        defer args.deinit(testing.allocator);
+        try args.append(testing.allocator, "list");
+        try args.appendSlice(testing.allocator, first);
+        _ = try parseSessions(args.items);
+        const length = args.items.len;
+        for (seconds) |second| {
+            args.items.len = length;
+            try args.appendSlice(testing.allocator, second);
+            try testing.expectError(error.DuplicateWindow, parseSessions(args.items));
+        }
     }
 }

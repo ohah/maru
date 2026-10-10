@@ -432,22 +432,29 @@ fn diskUnoccupied(self: *host.AppSession, path: []const u8) bool {
     }
     return @import("../../file_panel.zig").fileTermForPath(self, path) == null;
 }
+/// 완료를 거절해도 화면 상태가 바뀐다. 앞 프레임이 dirty를 내렸더라도 진행 표시와 지난 입력 트리를 다시 만든다.
+fn invalidateApply(self: *host.AppSession) void {
+    self.editor_search.preview.invalidate(self.allocator);
+    self.editor_search.invalidate();
+    self.editor_search.result.generation +%= 1;
+    self.metal_dirty = true;
+}
 fn pollApply(self: *host.AppSession) void {
     const state = &self.editor_search.preview;
     const check = state.apply_check orelse return;
     if (!check.done.load(.acquire)) return;
     if (check.failure) |err| {
         state.failure = err;
-        state.invalidate(self.allocator);
+        invalidateApply(self);
         dock.applyFailure(self, err);
         return;
     }
     if (state.settings_stamp != settingsStamp(self) or self.ime_active or self.ime_editor_commit_pending) {
-        state.invalidate(self.allocator);
+        invalidateApply(self);
         return;
     }
     for (self.editor_search.fields) |field| if (field.preedit.items.len > 0) {
-        state.invalidate(self.allocator);
+        invalidateApply(self);
         return;
     };
     // 열기·편집 통지가 live preview를 정산해도 이 호출의 원문/대체 텍스트는 살아 있어야 한다.

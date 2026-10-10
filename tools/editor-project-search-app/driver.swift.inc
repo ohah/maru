@@ -105,7 +105,9 @@ extension MaruAppHostController {
         guard ready == 1 else { finish(false); return }
         let matrix = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_MATRIX"] == "1"
         let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict", "search-pane", "search-pane-navigated", "pane-preview-results", "pane-preview-ready", "preview-pane", "replace-applied-saved", "replace-undo", "replace-undo-saved"]
-        guard editorProjectSearchCapture(labels[Int(stage)]) else { finish(false); return }
+        let refusing = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE"] == "1"
+        let label = refusing && stage == 26 ? "replace-verifying" : refusing && stage == 27 ? "replace-ime-conflict" : labels[Int(stage)]
+        guard editorProjectSearchCapture(label) else { finish(false); return }
         let unicode = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_UNICODE"] == "1"
         switch stage {
         case 1:
@@ -169,6 +171,11 @@ extension MaruAppHostController {
             if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_REPLACE_APPLY"] != "1" { finish(true); return }
             guard editorProjectSearchClick(0) else { finish(false); return }
         case 26, 27:
+            if refusing {
+                if stage == 26 { editorProjectSearchAction(26) }
+                else { finish(true); return }
+                break
+            }
             let saving = stage == 27
             // 완료 알림의 닫기 키는 기존 계약대로 소비된다. 실제 Esc를 보낸 뒤 Undo/Save를 확인한다.
             if stage == 26 {

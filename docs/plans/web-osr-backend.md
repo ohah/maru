@@ -801,3 +801,13 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
 - 구현 중 스모크가 3 회차 finder 의 회귀를 잡았다 — 숨은 자식으로도 내려가 숨은 일치를 세게 바꾼 뒤 「숨은 일치가 조상을 가린다」 였다
   (`<button>Erase now<span hidden>Erase now</span>` 가 0 건 + hint) → 그려지지 않은 숨은 일치(display:none·visibility:hidden — 글이 조상의 innerText 에
   없다)는 조상을 가리지 않고, aria-hidden·화면 밖 함정(글이 조상에 남는다)만 가린다. 스모크 22 경우.
+
+**W9b②-2 적대 리뷰**(구현 뒤 다섯 회차):
+- **1 회차**(실측):
+  - 높음: shadow host 의 글을 textContent 로 세 숨은 light 자식(닫힌 메뉴 항목)으로 host 를 골라 트리거를 눌렀다 → host·SVG 는 그려지는 글(flat tree — shadow
+    내용·slot 배정, svg title·desc·style 제외)로.
+  - 중: click·hover 를 조작 가능한 조상으로 바꾸면 그 가운데의 다른 버튼을 눌렀다(카드) → 맞은 요소가 아주 작을 때(sr-only)만 바꾼다.
+  - 중: aria-hidden 아이콘 글자·화면 밖 「read more about …」 이 조상을 가려 0 건(흔한 패턴) → 숨은 일치는 세기만 하고, 조상은 그것을 뺀 그려지는 글로 판정.
+  - 중: 올라가는 길에서 시간 예산을 보지 않아 1 초 넘게 멈췄다 → 올라갈 때도.
+  - 하: XHTML(소문자 tagName), 찾기 답이 깨진 JSON 이면 놓지 않고 끝냈다 → 대문자로 비교, 해석을 놓기 앞에서.
+

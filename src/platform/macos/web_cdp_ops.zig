@@ -413,7 +413,15 @@ pub const Op = struct {
         if (self.stage == .loc_release) return self.afterFind(gpa);
         // 찾기 호출 자체가 실패·시한 — 쥔 객체가 있을 수 있어 놓은 뒤 그 이유로 끝낸다.
         if (self.stage == .loc_find) switch (reply) {
-            .ok, .cdp_error => {},
+            // 답은 곧장 해석해 놓기로 — 공통 JSON 파싱이 깨진 답에 놓지 않고 끝내던 것(1 회차).
+            .ok => |b| {
+                const found = web_cdp_locate.parseFound(gpa, b, if (self.loc_kind == .text) "text" else "label", self.loc_name.?, self.loc_exact) catch |e| switch (e) {
+                    error.OutOfMemory => return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "out of memory") } }),
+                    else => web_cdp_locate.Found{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "malformed locator result") } },
+                };
+                return self.findRelease(gpa, found);
+            },
+            .cdp_error => {},
             .timed_out => |why| return self.findRelease(gpa, .{ .done = .{ .status = .timeout, .msg = try gpa.dupe(u8, why) } }),
             .failed, .not_sent => |why| return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, if (std.mem.eql(u8, why, result_too_large)) "too_large: the locator result was too large — use a selector or ref" else why) } }),
         };
@@ -787,14 +795,7 @@ pub const Op = struct {
                     },
                 }
             },
-            .loc_find => {
-                const found = web_cdp_locate.parseFound(gpa, bytes, if (self.loc_kind == .text) "text" else "label", self.loc_name.?, self.loc_exact) catch |e| switch (e) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => web_cdp_locate.Found{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "malformed locator result") } },
-                };
-                return self.findRelease(gpa, found);
-            },
-            .loc_release => unreachable, // feed 앞에서
+            .loc_find, .loc_release => unreachable, // feed 앞에서
             .ax_tree => {
                 const json = web_cdp_snapshot.build(gpa, bytes, self.snap) catch |e| return switch (e) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -2286,6 +2287,14 @@ test "text·label 로케이터: 격리 world 의 JS 로 찾고(deep 직렬화) �
     try testing.expect(try std.json.validate(testing.allocator, p));
     try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-400\"}", trail.params.items[3]);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[4], "\"backendNodeId\":41") != null);
+    // label·exact·nth 없음·동작 이름도 그대로 인자로(1 회차 변이 — exact 를 버려도 살아남았다).
+    trail.reset();
+    var op2 = try Op.init(testing.allocator, .hover, "{\"locator\":{\"label\":\"Email\",\"exact\":true}}", 401);
+    defer op2.deinit(testing.allocator);
+    const r2 = try drive(&op2, &findPage, &trail);
+    defer testing.allocator.free(r2.result);
+    try testing.expectEqualStrings("Runtime.callFunctionOn", trail.methods.items[2]);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "\"arguments\":[{\"value\":\"label\"},{\"value\":\"Email\"},{\"value\":true},{\"value\":null},{\"value\":\"hover\"}]") != null);
 }
 
 test "text·label 로케이터: 숨은 일치만이면 ok:false + hint, 여럿이면 후보 ref, 찾기의 시한·오류·결과 상한에도 놓은 뒤 끝낸다, 놓기는 철회돼도" {
@@ -2299,6 +2308,7 @@ test "text·label 로케이터: 숨은 일치만이면 ok:false + hint, 여럿�
         .{ .reply = .{ .failed = result_too_large }, .status = .failed, .want = "too_large: the locator result was too large" },
         .{ .reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}" }, .status = .failed, .want = "locator script failed: Cannot find context" },
         .{ .reply = .{ .ok = "{\"result\":{}}" }, .status = .failed, .want = "malformed locator result" },
+        .{ .reply = .{ .ok = "{not json" }, .status = .failed, .want = "malformed locator result" }, // 깨진 답에도 놓는다
     };
     for (cases) |c| {
         trail.reset();

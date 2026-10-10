@@ -6,7 +6,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
   var G = function (p, k) { return Object.getOwnPropertyDescriptor(p, k).get; };
   var EP = Element.prototype, NP = Node.prototype, HP = HTMLElement.prototype, DP = Document.prototype, FP = DocumentFragment.prototype;
   var perf = performance, pnow = Performance.prototype.now, t0 = pnow.call(perf);
-  var srG = G(EP, 'shadowRoot'), tagG = G(EP, 'tagName'), kidsE = G(EP, 'children'), kidsF = G(FP, 'children'), ga = EP.getAttribute,
+  var srG = G(EP, 'shadowRoot'), tagG0 = G(EP, 'tagName'), kidsE = G(EP, 'children'), kidsF = G(FP, 'children'), ga = EP.getAttribute,
     tcG = G(NP, 'textContent'), itG = G(HP, 'innerText'), pnG = G(NP, 'parentNode'), ntG = G(NP, 'nodeType'), hostG = G(ShadowRoot.prototype, 'host'),
     slotG = G(EP, 'assignedSlot'), cv = EP.checkVisibility, gbr = EP.getBoundingClientRect, valG = G(HTMLInputElement.prototype, 'value'),
     typG = G(HTMLInputElement.prototype, 'type'), docElG = G(DP, 'documentElement'), cwG = G(EP, 'clientWidth'), swG = G(EP, 'scrollWidth'),
@@ -15,6 +15,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
     ceG = G(HP, 'isContentEditable'), S = String.prototype, sIdx = S.indexOf, sRep = S.replace, sLow = S.toLowerCase;
   var INV = /[\u00AD\u200B-\u200D\u2060\uFEFF]/g, WS = /[ \t\n\r\v\f\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+/g, UP = /[A-Z]+/g;
   var lowF = function (m) { return sLow.call(m); };
+  var sUp = S.toUpperCase, tagG = { call: function (e) { return sUp.call(tagG0.call(e)); } }; // XHTML gives lower-case tagName
   var lowA = function (s) { return sRep.call(s, UP, lowF); }; // ASCII only - same as std.ascii.eqlIgnoreCase
   var norm = function (s) { // = web_cdp_locate.normalize
     s = sRep.call(sRep.call(s, INV, ''), WS, ' ');
@@ -67,6 +68,9 @@ function(KIND, Q, EXACT, NTH, ACTION) {
       for (var n = e; n; n = up(n)) if (tagG.call(n) === 'LABEL') { var c = ctlG.call(n); viaLabel = !!c; return c || n; }
       if (ACTION === 'type') return e;
     }
+    // click/hover: only a tiny hit (sr-only 1x1, clipped) moves to its actionable ancestor - pressing an ancestor's center hits whatever is
+    // there (a card's delete button, review round 1); a normal hit is pressed itself and the event bubbles. press: always (focus).
+    if (ACTION !== 'press') { var hr = gbr.call(e); if (hr.width > 2 && hr.height > 2) return e; }
     for (var m = e, i = 0; m && i < 4096; m = up(m), i++) if (actionable(m)) return boxed(m) ? m : e;
     return e;
   };
@@ -74,10 +78,38 @@ function(KIND, Q, EXACT, NTH, ACTION) {
   // ---- pre-scan: count elements (document + open shadow roots, tree order with each shadow tree at its host), stop over CAP
   var count = 0, roots = [], force = new Set(), order = KIND === 'label' ? [] : null;
   var isBtnInput = function (e) { if (tagG.call(e) !== 'INPUT') return false; var ty = typG.call(e); return ty === 'submit' || ty === 'reset' || ty === 'button'; };
-  var textOf = function (e) {
+  // rendered text without aria-hidden, unrendered, off-page or tiny parts (and svg title/desc/style) - for shadow hosts, non-HTML elements and
+  // ancestors of such parts (review round 1: a host's textContent carried its hidden menu items; an aria-hidden icon hid its button).
+  // Walks the flat tree: a host's shadow content, a slot's assigned nodes; unslotted light children of a host are not rendered.
+  var cnG2 = G(NP, 'childNodes'), anodes = HTMLSlotElement.prototype.assignedNodes, tslot = G(Text.prototype, 'assignedSlot'), FLAT = { flatten: true };
+  var NOTEXT = { SCRIPT: 1, STYLE: 1, TEMPLATE: 1, NOSCRIPT: 1, TITLE: 1, DESC: 1, HEAD: 1 };
+  var INLINE = { inline: 1, contents: 1, 'inline-block': 1, 'inline-flex': 1, 'inline-grid': 1 };
+  var renderedText = function (root) {
+    var out = [], stk = [], push = function (n) { var s0 = ntG.call(n) === 1 ? srG.call(n) : null; stk.push([s0 ? cnG2.call(s0) : cnG2.call(n), 0, !!s0]); };
+    push(root);
+    while (stk.length) {
+      tick();
+      var top = stk[stk.length - 1];
+      if (top[1] >= top[0].length) { stk.pop(); continue; }
+      var ch = top[0][top[1]++], nt = ntG.call(ch);
+      if (nt === 3) { var p0 = pnG.call(ch); if (p0 && ntG.call(p0) === 1 && srG.call(p0) && !tslot.call(ch)) continue; out.push(dataG.call(ch)); continue; }
+      if (nt !== 1) continue;
+      var tg = tagG.call(ch);
+      if (NOTEXT[tg] === 1) continue;
+      if (tg === 'SLOT') { var an = anodes.call(ch, FLAT); stk.push([an.length ? an : cnG2.call(ch), 0, false]); continue; }
+      var ah = ga.call(ch, 'aria-hidden');
+      if ((ah !== null && lowA(ah) === 'true') || !visible(ch)) continue;
+      var blk = INLINE[getComputedStyle(ch).display] !== 1;
+      if (blk) out.push(' ');
+      push(ch);
+      if (blk) stk.push([[], 0, false]), out.push(' ');
+    }
+    return out.join('');
+  };
+  var textOf = function (e, masked) {
     if (tagG.call(e) === 'INPUT') return isBtnInput(e) ? valG.call(e) : '';
-    if (e instanceof HTMLElement && !srG.call(e)) return itG.call(e);
-    return tcG.call(e) || '';
+    if (e instanceof HTMLElement && !srG.call(e) && !masked) return itG.call(e);
+    return renderedText(e);
   };
   var mark = function (e) { for (var n = e; n && !force.has(n); n = up(n)) force.add(n); };
   var scan = function (root) {
@@ -122,23 +154,20 @@ function(KIND, Q, EXACT, NTH, ACTION) {
         return true;
       };
       var lists = function (e) { var s = srG.call(e); return s ? [kidsF.call(s), kidsE.call(e)] : [kidsE.call(e)]; };
-      var judge = function (e) {
+      // 0 = no match, 1 = accepted (ancestors are not judged - innermost only), 2 = a hidden match (aria-hidden, unrendered, off-page or
+      // tiny): counted, and its ancestors are judged on their rendered text without it (review round 1 - hidden copies, aria-hidden icon
+      // text and off-page "read more about ..." spans no longer hide a visible match, and no longer make an ancestor match either)
+      var judge = function (e, masked) {
         var tg = tagG.call(e);
-        if (tg === 'HTML' || tg === 'BODY') return false;
-        var n = match(textOf(e));
-        if (n === null) return false;
-        if (ariaHidden(e)) { hidden++; return true; } // aria-hidden text stays in the ancestors' innerText - keep hiding them (carousel copies)
-        if (!visible(e)) {
-          hidden++;
-          // not rendered (display:none, visibility:hidden): its text is not in the ancestors' innerText - let a visible ancestor match on its own
-          // text (<button>Erase now<span hidden>Erase now</span></button>, W9b2-2 smoke). Rendered but off-page / zero-size: keep hiding them.
-          return cv.call(e, { visibilityProperty: true });
-        }
+        if (tg === 'HTML' || tg === 'BODY') return 0;
+        var n = match(textOf(e, masked));
+        if (n === null) return 0;
+        if (ariaHidden(e) || !visible(e)) { hidden++; return 2; }
         accept(e, n);
-        return true; // innermost only
+        return 1;
       };
-      // iterative post-order (deep DOMs must not overflow the stack): [element, child lists, list index, child index, got]
-      var st = [[docEl, lists(docEl), 0, 0, false]];
+      // iterative post-order (deep DOMs must not overflow the stack): [element, child lists, list index, child index, got, masked below]
+      var st = [[docEl, lists(docEl), 0, 0, false, false]];
       while (st.length) {
         var f = st[st.length - 1], L = f[1], down = false;
         while (f[2] < L.length) {
@@ -149,12 +178,13 @@ function(KIND, Q, EXACT, NTH, ACTION) {
           var ct = tagG.call(c);
           if (SKIP[ct] === 1) { if (ct === 'SELECT' && match(itG.call(c)) !== null) f[4] = true; continue; } // option text shows in the parent's innerText - the select owns it
           if (!pass(c)) continue;
-          st.push([c, lists(c), 0, 0, false]); down = true; break;
+          st.push([c, lists(c), 0, 0, false, false]); down = true; break;
         }
         if (down) continue;
         st.pop();
-        var got = f[4] || judge(f[0]);
-        if (got && st.length) st[st.length - 1][4] = true;
+        tick(); // the way up re-reads innerText per ancestor - the budget covers it too (review round 1: 1 s on a deep page)
+        var res = f[4] ? 1 : judge(f[0], f[5]);
+        if (st.length) { var pf = st[st.length - 1]; if (res === 1) pf[4] = true; else if (res === 2 || f[5]) pf[5] = true; }
       }
     } else {
       var SEL = 'input,textarea,select,button,meter,output,progress,[role],[contenteditable]';

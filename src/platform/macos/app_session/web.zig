@@ -401,7 +401,7 @@ pub fn isOsrTerm(term: *const Term) bool {
     return isBrowserTerm(term) and web_osr.enabled();
 }
 
-/// OSR 이 들고 있는 surface 인가(control-plane 이 「이 엔진은 아직 지원하지 않는다」로 답한다 — W9 전까지).
+/// OSR 이 들고 있는 surface 인가(처음 배치되어 레코드가 생긴 뒤에만 참 — 탭의 엔진은 `isOsrTerm` 으로 가른다, W9-0).
 pub fn isOsrSurface(surface_id: u64) bool {
     return web_osr.enabled() and web_osr.owns(surface_id);
 }

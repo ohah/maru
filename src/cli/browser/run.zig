@@ -84,7 +84,7 @@ pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
         error.MissingText => "type needs --text",
         error.LocatorOptionWithoutRole => "--name, --level, --exact and --nth go with --role",
         error.ExactWithoutName => "--exact needs --name",
-        error.InvalidLocatorNumber => "--level must be 1..100 and --nth a non-negative integer",
+        error.InvalidLocatorNumber => "--level must be 1..100 and --nth 0..1000000",
         error.MissingPressKey => "press needs --key (for example Enter, Shift+Tab or Meta+a)",
         error.MissingValue => "--value is required",
         error.MissingOptionValue => "the option needs a value",

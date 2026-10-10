@@ -7048,14 +7048,22 @@ fn pushBrowserOp(
 // ── W9b①: Chromium 탭의 op 실행 — DevTools 호출 차례 ──────────────────────────────────────────────────────────────
 // 한 op = `web_cdp_ops.Op` 하나(호출 여러 번). 호출마다 `web_osr.devtoolsCall` 로 보내고, 답(`pump` 끝에서 온다)을 차례에
 // 먹여 다음 호출이나 끝을 얻는다. 끝은 Swift 경로와 같은 `maru_macos_control_complete_browser_op`(재인가·예산·직렬화).
-// 진짜 입력이므로 **호출마다 그 요청이 아직 살아 있고 허가돼 있는지 본다** — 취소·시한·grant 철회·탭 닫힘 뒤에는 더 보내지
-// 않는다(누르기 직전에 철회됐는데 누르면 안 된다).
+// - 진짜 입력이므로 **호출마다 그 요청이 아직 살아 있고 허가돼 있는지 본다** — 취소·시한·grant 철회·탭 닫힘 뒤에는 더 보내지
+//   않는다. 다만 누름을 보냈으면 떼기·놓기는 끝까지 보낸다(`Op.committed` — 버튼을 눌린 채 두지 않는다).
+// - **같은 탭의 op 은 하나씩**(도착 순) — 두 op 의 누름·떼기·문서 노드 번호(`DOM.getDocument` 가 다시 매긴다)가 섞이지 않게
+//   (W9b①a 적대 리뷰 1 회차). 기다리는 op 은 차례가 오면 그때 허가를 다시 본다.
 
 const CdpRun = struct {
     async_id: u64,
     surface_id: u64,
     op: web_cdp_ops.Op,
+    started: bool = false,
 };
+
+/// 실행 중이거나 기다리는 Chromium op(도착 순).
+var cdp_runs: std.ArrayList(*CdpRun) = .empty;
+/// 보내려 한 DevTools 호출 수(관측점 — 철회 뒤 보내지 않았는지를 시험이 센다).
+var cdp_calls_attempted: usize = 0;
 
 fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
     return switch (method) {
@@ -7070,12 +7078,21 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
 fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMethod, arg: []const u8) void {
     const kind = cdpKind(method) orelse return completeCdp(async_id, .failed, "not supported by the Chromium engine");
     const run = allocator.create(CdpRun) catch return completeCdp(async_id, .failed, "out of memory");
-    const op = web_cdp_ops.Op.init(allocator, kind, arg) catch {
+    const op = web_cdp_ops.Op.init(allocator, kind, arg, async_id) catch {
         allocator.destroy(run);
         return completeCdp(async_id, .invalid_params, "invalid arguments");
     };
     run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op };
-    _ = active_browser_executions.markRunning(async_id);
+    const busy = for (cdp_runs.items) |other| {
+        if (other.surface_id == surface_id) break true;
+    } else false;
+    cdp_runs.append(allocator, run) catch return finishCdp(run, .failed, "out of memory");
+    if (!busy) beginCdp(run); // 같은 탭에 앞선 op 이 있으면 그것이 끝날 때 시작한다
+}
+
+fn beginCdp(run: *CdpRun) void {
+    run.started = true;
+    _ = active_browser_executions.markRunning(run.async_id);
     const step = run.op.start(allocator) catch return finishCdp(run, .failed, "out of memory");
     cdpAdvance(run, step);
 }
@@ -7098,14 +7115,17 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
         },
         .call => |next| {
             defer allocator.free(next.params);
-            if (!cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
+            if (!run.op.committed() and !cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
+            cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
-            _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return finishCdp(run, .failed, switch (e) {
-                error.NotReady => "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)",
-                error.Busy => "too many DevTools calls on this tab",
-                error.InvalidMethod, error.InvalidParams => "internal DevTools request error",
-                error.OutOfMemory => "out of memory",
-            });
+            _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return switch (e) {
+                error.NotReady => finishCdp(run, .failed, "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)"),
+                error.Busy => finishCdp(run, .failed, "too many DevTools calls on this tab"),
+                // 인자는 이 모듈이 만든 JSON 이다 — 넘치는 것은 사용자의 selector 뿐이다(64 KiB).
+                error.InvalidParams => finishCdp(run, .invalid_params, "the selector is too long"),
+                error.InvalidMethod => finishCdp(run, .failed, "internal DevTools request error"),
+                error.OutOfMemory => finishCdp(run, .failed, "out of memory"),
+            };
         },
     }
 }
@@ -7115,7 +7135,7 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
     const reply: web_cdp_ops.Reply = switch (outcome) {
         .ok => .{ .ok = result },
         .cdp_error => .{ .cdp_error = result },
-        .timeout, .expired => .{ .failed = "DevTools did not answer in time" },
+        .timeout, .expired => .{ .timed_out = "DevTools did not answer in time" },
         .detached, .closed => .{ .failed = "the tab closed or its page crashed" },
         .sidecar_gone => .{ .failed = "the Chromium engine stopped" },
         .too_large => .{ .failed = "the DevTools result was too large" },
@@ -7128,9 +7148,35 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
 
 fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void {
     const async_id = run.async_id;
+    const surface_id = run.surface_id;
+    removeCdpRun(run);
     run.op.deinit(allocator);
     allocator.destroy(run);
     completeCdp(async_id, status, result);
+    startNextCdp(surface_id);
+}
+
+fn removeCdpRun(run: *CdpRun) void {
+    for (cdp_runs.items, 0..) |r, i| if (r == run) {
+        _ = cdp_runs.orderedRemove(i);
+        return;
+    };
+}
+
+/// 그 탭에 실행 중인 op 이 없으면 기다리던 첫 op 을 시작한다 — 그사이 철회·취소된 것은 시작하지 않고 끝내며 다음을 본다.
+fn startNextCdp(surface_id: u64) void {
+    while (true) {
+        for (cdp_runs.items) |r| if (r.surface_id == surface_id and r.started) return;
+        const next = for (cdp_runs.items) |r| {
+            if (r.surface_id == surface_id) break r;
+        } else return;
+        if (cdpStillAllowed(next.async_id)) return beginCdp(next);
+        const async_id = next.async_id;
+        removeCdpRun(next);
+        next.op.deinit(allocator);
+        allocator.destroy(next);
+        completeCdp(async_id, .failed, "the request was cancelled");
+    }
 }
 
 fn completeCdp(async_id: u64, status: web_cdp_ops.Status, result: []const u8) void {
@@ -9413,6 +9459,62 @@ fn uninstallTransferTestServer() void {
     control_server_active = false;
     control_server_storage.in_flight.deinit(std.testing.allocator);
     control_pane_grant_store.clearAll();
+}
+
+test "W9b①: 철회 뒤에는 다음 호출을 보내지 않지만 누른 뒤의 떼기는 보낸다, 같은 탭의 op 은 하나씩·취소된 차례는 건너뛴다" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    // sidecar 가 돈 적 없다 — 보내려 하면 곧 「engine is not running」 으로 끝난다. 보내려 했는지는 시도 수로 본다.
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":91,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#b\"}}";
+    const click_arg = "{\"selector\":\"#b\"}";
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    var pendings: [5]control_server_mod.PendingRequest = undefined;
+    var ids: [5]u64 = undefined;
+    for (&pendings, &ids, 0..) |*p, *id, i| {
+        p.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+        id.* = try control_server_storage.deferRequest(p, std.math.maxInt(i128));
+        // 둘째(1)만 grant 없는 pane 의 요청 — 차례가 와도 허가되지 않는다.
+        const pane: u64 = if (i == 1) 6 else 5;
+        try active_browser_executions.admit(allocator, .{ .async_id = id.*, .surface_id = 11, .method = .click, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = pane, .target = 11, .scope = .browser } } });
+    }
+    defer for (&pendings) |*p| if (p.response) |r| allocator.free(r);
+    defer for (ids) |id| {
+        _ = active_browser_executions.finish(id);
+    };
+
+    // ① 앞선 op(시작됨 — 가짜)이 있으면 같은 탭의 새 op 은 기다린다.
+    const first = try allocator.create(CdpRun);
+    first.* = .{ .async_id = ids[0], .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .click, click_arg, ids[0]), .started = true };
+    try cdp_runs.append(allocator, first);
+    const before = cdp_calls_attempted;
+    startCdpOp(ids[1], 11, .click, click_arg);
+    startCdpOp(ids[2], 11, .click, click_arg);
+    try std.testing.expectEqual(@as(usize, 3), cdp_runs.items.len);
+    try std.testing.expect(!cdp_runs.items[1].started and !cdp_runs.items[2].started);
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try std.testing.expect(pendings[1].response == null and pendings[2].response == null);
+    // ② 앞선 것이 끝나면 차례 — 둘째는 허가되지 않아 시작하지 않고 끝나며, 셋째가 시작한다(보내려 한다).
+    finishCdp(first, .success, "true");
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    try std.testing.expect(pendings[1].response != null and pendings[2].response != null);
+    try std.testing.expectEqual(before + 1, cdp_calls_attempted);
+
+    // ③ 철회 뒤 — 누르기 전이면 보내지 않고, 누른 뒤면 떼기를 보낸다.
+    control_pane_grant_store.clearAll();
+    for ([_]bool{ false, true }, [_]usize{ 3, 4 }) |pressed, k| {
+        const run = try allocator.create(CdpRun);
+        run.* = .{ .async_id = ids[k], .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .click, click_arg, ids[k]), .started = true };
+        if (pressed) run.op.stage = .mouse_up;
+        try cdp_runs.append(allocator, run);
+        const attempted = cdp_calls_attempted;
+        cdpAdvance(run, .{ .call = .{ .method = "Input.dispatchMouseEvent", .params = try allocator.dupe(u8, "{}") } });
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+        try std.testing.expectEqual(attempted + @intFromBool(pressed), cdp_calls_attempted);
+    }
 }
 
 test "W9b①: Chromium op 은 그 요청이 살아 있고 허가돼 있을 때만 다음 DevTools 호출(진짜 입력)을 보낸다" {

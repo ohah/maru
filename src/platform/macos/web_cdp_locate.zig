@@ -21,9 +21,25 @@ pub const max_role_page_elements = 30000;
 /// - 대상이 없는 같은 문서 fragment 링크(`href="#N"` 에 그 id 가 없음): 1 만 개면 role=link 2.5 초·role=button 1.2 초(정상 링크 1 만은 0.38 초).
 /// - 네이티브 radio(같은 그룹·name 없음): 5 천 1.8 초·1 만 6.9 초.
 /// - `role=radiogroup` 안의 `role=radio`: 1 천 0.36 초·2 천 2.5 초·1 만은 37 초에도 답이 없었다(앱의 DevTools 시한 30 초를 넘는다).
+/// - 라벨이 붙은 폼 컨트롤(`<label for>`·감싼 label): 1 만 쌍 3.75 초·1.4 만 7.9 초(4 회차).
+/// - 한 글 노드 안의 줄 수(로그 파일 탭 — Chromium 이 `<pre>` 로 감싼다): 2 만 줄 1.6 초, 5 만 줄은 10 초 넘게(4 회차).
+/// 상한들은 더해진다(각자 상한이면 0.3–0.9 초, 셋이 함께면 1.7 초 — 4 회차) — 상한 대비 비율의 합이 1 을 넘으면 거절한다.
+/// closed shadow root 안의 구성은 셀 수 없다(문서).
 pub const max_dangling_fragment_links = 3000;
 pub const max_native_radios = 3000;
 pub const max_aria_radios = 800;
+pub const max_labeled_controls = 3000;
+pub const max_text_node_lines = 10000;
+
+/// 세는 것들 — 세기 JS 의 결과 순서와 같다(첫째는 요소 수).
+pub const Costly = struct { what: []const u8, limit: i64 };
+pub const costly = [_]Costly{
+    .{ .what = "same-page #links without a target", .limit = max_dangling_fragment_links },
+    .{ .what = "radio inputs", .limit = max_native_radios },
+    .{ .what = "role=radio elements", .limit = max_aria_radios },
+    .{ .what = "labeled form controls", .limit = max_labeled_controls },
+    .{ .what = "lines in one text node", .limit = max_text_node_lines },
+};
 
 /// ARIA 1.2 구체 역할(접근성 트리가 같은 문자열로 쓰는 것 — 실측) — 정렬 안 됨, 선형 탐색(작다).
 const aria_roles = [_][]const u8{

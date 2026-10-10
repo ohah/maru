@@ -2221,9 +2221,11 @@ fn injectRemoteFetch(self: *AppSession) void {
     // ⚠️ **넣지 못했으면 넣었다고 말하지 않는다.** 거절 사유를 덮어쓰면 화면이 거짓말한다 —
     // 사용자는 터미널에서 명령을 찾다가 없는 것을 보고, 왜 없는지는 영영 모른다(적대적 검증 2회차에서
     // 이 자리를 실제로 그렇게 써 두었다).
-    if (!injectIntoActiveTerminal(self, "git fetch --prune")) return;
-    // **결과를 우리가 모른다**(§6.3 의 대가). 조용히 두면 사용자는 목록이 곧 갱신될 것으로 읽는다.
-    setScmWriteNotice(self, maru.i18n.t(.scm_remote_fetch_injected));
+    switch (injectIntoActiveTerminal(self, "git fetch --prune")) {
+        // **결과를 우리가 모른다**(§6.3 의 대가). 조용히 두면 사용자는 목록이 곧 갱신될 것으로 읽는다.
+        .typed => setScmWriteNotice(self, maru.i18n.t(.scm_remote_fetch_injected)),
+        .copied, .refused => {}, // 그쪽이 알렸다
+    }
 }
 
 /// 명령 한 줄을 **활성 pane 의 활성 Term** 에 넣는다. 실행은 사용자가 한다.
@@ -2233,10 +2235,19 @@ fn injectRemoteFetch(self: *AppSession) void {
 /// pane 을 옮기면 목록 상태가 낡는다. 지금은 진입점이 도크 버튼과 메뉴뿐이라 닫혀 있지만 **그 방어는
 /// 간접적이다**(누가 키바인딩을 더하면 도크가 접힌 채로도 실행된다). 그래서 묻는 자리를 여기 둔다.
 /// 넣었으면 `true`. **거절이면 이유를 적고 `false`** — 호출자가 「넣었다」고 덮어쓰지 않게 한다.
-fn injectIntoActiveTerminal(self: *AppSession, command: []const u8) bool {
+const InjectOutcome = enum {
+    /// 프롬프트에 넣었다(개행 없이 — 실행은 사용자가 한다).
+    typed,
+    /// 그 셸이 무엇을 하는지 몰라 넣지 않고 클립보드에 복사했다 — 그렇다고 알렸다.
+    copied,
+    /// 넣지 않았다 — 사유를 알렸다.
+    refused,
+};
+
+fn injectIntoActiveTerminal(self: *AppSession, command: []const u8) InjectOutcome {
     if (!term_ops.activeTermIsTerminal(self)) {
         setScmWriteNotice(self, maru.i18n.t(.scm_no_terminal));
-        return false;
+        return .refused;
     }
     // ⚠️ **그 명령이 향하는 기계와 지금 타이핑할 pane 의 기계가 같아야 한다**(RS4c 적대적 검증 2회차).
     //
@@ -2255,19 +2266,24 @@ fn injectIntoActiveTerminal(self: *AppSession, command: []const u8) bool {
         list_host == null;
     if (!same_machine) {
         setScmWriteNotice(self, maru.i18n.t(.scm_inject_host_mismatch));
-        return false;
+        return .refused;
     }
-    // ⚠️ **돌고 있는 것을 알면 넣지 않는다**(RS4c 3회차 후속). vim·less·도는 빌드에 붙여넣으면 그
-    // 프로그램이 받는다 — `git fetch --prune` 이 편집 중인 파일에 글자로 박힌다.
-    //
-    // **모르면 넣는다.** OSC 133 을 내는 원격 셸은 소수라, 모름을 막음으로 접으면 흔한 경우를 통째로
-    // 막고 사용자는 왜 안 되는지도 모른다 — 닫기 확인(`termHasRunningJob`)과 **기본값이 반대**인 이유다.
-    if (term_ops.activeTermKnownBusy(self, self.io)) {
-        setScmWriteNotice(self, maru.i18n.t(.scm_terminal_busy));
-        return false;
+    // ⚠️ **프롬프트에 있다고 알 때만 넣는다**(사용자 결정 2026-10-11). 돌고 있다고 알면(vim·less·도는 빌드) 넣지 않는다 — 그
+    // 프로그램이 받는다(RS4c 3회차). **모르면 넣지 않고 클립보드로 준다** — 예전 규칙은 「모르면 넣는다」였는데(OSC 133 을 내는 원격
+    // 셸이 소수라 막으면 흔한 경우를 통째로 막는다), 그 「모름」에 에이전트 TUI 가 든다: `maru ssh` 로 붙은 pane 에서 claude 가 돌면
+    // `git … add …` 가 그 입력창에 글자로 박혔다. 클립보드는 흔한 경우를 막지 않으면서(붙여 넣으면 된다) 그 일을 구조적으로 없앤다.
+    switch (term_ops.typeCommandIfAtPrompt(self, command)) {
+        .typed => return .typed,
+        .busy => {
+            setScmWriteNotice(self, maru.i18n.t(.scm_terminal_busy));
+            return .refused;
+        },
+        .copied => {
+            setScmWriteNotice(self, maru.i18n.t(.scm_command_copied));
+            return .copied;
+        },
+        .failed => return .refused,
     }
-    term_ops.submitPaste(self, command, false, term_ops.activeSurface(self).id);
-    return true;
 }
 
 /// `∨` 보조 메뉴를 연다(P6b — 쓰기·원격 §4). 여는 자리는 그 `∨`의 **발행된 rect**다: 메뉴는 누른 자리에서
@@ -2504,7 +2520,7 @@ pub fn applyRemoteMenuSelection(self: *AppSession, index: usize) void {
     switch (self.scm_remote_menu_items[index]) {
         .push, .pull => {
             const cmd: []const u8 = if (self.scm_remote_menu_items[index] == .push) "git push" else "git pull";
-            _ = injectIntoActiveTerminal(self, cmd); // 원격 fetch 와 **같은 자리**를 지난다(RS4c)
+            _ = injectIntoActiveTerminal(self, cmd); // 원격 fetch 와 **같은 자리**를 지난다(RS4c) — 클립보드로 갔으면 그쪽이 알렸다
         },
         // 목록 읽기는 비동기다 — 결과가 오면 `drainGitStatus`가 `openBaseMenu`를 부른다(브랜치 메뉴와 같은 길).
         .pick_base => settings_ops.requestBranchMenu(self, .pick_base),
@@ -3729,7 +3745,11 @@ fn injectWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
         setScmWriteNotice(self, maru.i18n.t(.scm_write_inject_refused));
         return false;
     };
-    if (!injectIntoActiveTerminal(self, command)) return false; // 사유는 그쪽이 알렸다
+    switch (injectIntoActiveTerminal(self, command)) {
+        .typed => {},
+        .copied => return true, // 클립보드로 줬다 — 그쪽이 알렸다
+        .refused => return false, // 사유는 그쪽이 알렸다
+    }
     if (builtin.is_test) {
         @memcpy(test_last_injected[0..command.len], command);
         test_last_injected_len = command.len;

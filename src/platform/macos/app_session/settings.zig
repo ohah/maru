@@ -1812,7 +1812,13 @@ pub fn applyBranchMenuSelection(self: *AppSession, index: usize) void {
         self.showNoticeKey(.set_branch_name_invalid);
         return;
     };
-    self.pasteText(cmd, false);
+    // 도크의 git 주입과 **같은 함수**를 지난다 — 셸이 프롬프트에 있다고 알 때만 넣고, 모르면 클립보드로(사용자 결정 2026-10-11 —
+    // `maru ssh` pane 에서 에이전트가 돌면 `git switch` 가 그 입력창에 박혔다). 상태바에서 골랐으니 말도 상태바 알림으로 한다.
+    switch (term_ops.typeCommandIfAtPrompt(self, cmd)) {
+        .typed, .failed => {},
+        .copied => self.showNoticeKey(.scm_command_copied),
+        .busy => self.showNoticeKey(.scm_terminal_busy),
+    }
 }
 
 pub fn closeContextMenu(self: *AppSession) void {

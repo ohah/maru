@@ -4,6 +4,7 @@ var editor_project_search_root_ready = false;
 var editor_project_search_root_submitted = false;
 var editor_project_search_original_surface: u64 = 0;
 var editor_project_search_probe_stage: u32 = 0;
+var editor_project_search_applied_surface: u64 = 0;
 var editor_project_search_ime_observed: u64 = 0;
 var editor_project_search_matrix_surface: u64 = 0;
 var editor_project_search_matrix_history: usize = 0;
@@ -48,9 +49,17 @@ export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
         return 1;
     }
     if (stage >= 26 and stage <= 28) {
-        if (term.surfaceId() != editor_project_search_original_surface) return 0;
+        const disk_apply = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_DISK_APPLY") orelse "0"), "1");
+        if (disk_apply) {
+            if (state.preview.phase == .applying) return 0;
+            if (stage == 26) {
+                if (std.mem.indexOf(u8, self.chrome_host.notice.message, maru.i18n.t(.project_replace_saved)) == null) return -1;
+                if (term.surfaceId() == editor_project_search_original_surface) return -1;
+                editor_project_search_applied_surface = term.surfaceId();
+            } else if (term.surfaceId() != editor_project_search_applied_surface) return -1;
+        } else if (term.surfaceId() != editor_project_search_original_surface) return 0;
         const renamed = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "renamed") != null;
-        if (stage == 26 and std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_MARKERS") orelse "0"), "1") and std.mem.indexOf(u8, self.chrome_host.notice.message, maru.i18n.t(.editor_conflict_markers_remain)) == null) return -1;
+        if (stage == 26 and !disk_apply and std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_MARKERS") orelse "0"), "1") and std.mem.indexOf(u8, self.chrome_host.notice.message, maru.i18n.t(.editor_conflict_markers_remain)) == null) return -1;
         if (stage == 26) return if (renamed and !editor_ops.isDirty(term) and term.rt.editorDocument().history.undo_len > 0) 1 else -1;
         if (stage == 27) return if (!renamed and editor_ops.isDirty(term)) 1 else -1;
         return if (!renamed and !editor_ops.isDirty(term)) 1 else -1;
@@ -147,7 +156,8 @@ export fn maru_editor_project_search_action(stage: u32) callconv(.c) void {
             d.run(self);
         },
         23 => {
-            for (self.editor_search.result.model.visible.items, 0..) |visible, index| if (visible == .file and self.editor_search.result.model.groups.items[visible.file].source == .model) {
+            const disk_apply = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_REPLACE_DISK_APPLY") orelse "0"), "1");
+            for (self.editor_search.result.model.visible.items, 0..) |visible, index| if (visible == .file and (self.editor_search.result.model.groups.items[visible.file].source == .disk) == disk_apply) {
                 @import("editor/search/preview.zig").start(self, index) catch return;
                 break;
             };

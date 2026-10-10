@@ -5395,7 +5395,7 @@ pub fn build(b: *std.Build) void {
     const apply_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPA"} });
     const run_apply_host = b.addRunArtifact(apply_host_tests);
     run_apply_host.setCwd(b.path("."));
-    run_apply_host.addArg("--maru-expect-tests=17");
+    run_apply_host.addArg("--maru-expect-tests=27");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
         run_apply_host.step.dependOn(&ripgrep_prepare.step);
         macos_only_test_step.dependOn(&run_apply_host.step);

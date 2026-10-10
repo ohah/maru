@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--replace-preview", action="store_true")
     parser.add_argument("--replace-apply", action="store_true")
+    parser.add_argument("--replace-disk-apply", action="store_true")
     parser.add_argument("--conflict-markers", action="store_true")
     parser.add_argument("--narrow-hidden", action="store_true")
     parser.add_argument("--window-size", default="960x600")
@@ -37,6 +38,10 @@ def main():
     parser.add_argument("--disk-files", type=int, default=0)
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if args.replace_disk_apply:
+        args.replace_apply = True
+        if args.disk_files < 2:
+            parser.error("Disk apply requires at least two disk files")
     if args.conflict_markers and not args.replace_apply:
         parser.error("Conflict marker warning requires replace apply")
     if args.replace_apply:
@@ -59,7 +64,7 @@ def main():
              "src/chrome/components/project_search/build.zig", "src/chrome/components/project_search/view.zig",
              "src/platform/macos/app_session/accessibility.zig", "src/chrome/components/project_search/types.zig", "src/platform/macos/coretext_smoke.m",
              "src/platform/macos/app_session/input.zig", "src/platform/macos/app_session/editor/search/navigation.zig",
-             "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
+             "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/disk_apply.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
              "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
              "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h")
     print(root, flush=True)
@@ -128,6 +133,7 @@ def main():
     if args.conflict_markers:
         document.write_text(document.read_text() + "\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n")
     original = document.read_bytes()
+    disk_originals = {p: p.read_bytes() for p in project.glob("disk*.txt")}
     other = root / "other-project"
     other.mkdir()
     (other / "fresh.txt").write_text("sample fresh\n")
@@ -136,7 +142,7 @@ def main():
         XDG_CONFIG_HOME=str(root / "home/.config"), XDG_CACHE_HOME=str(root / "cache"), XDG_STATE_HOME=str(root / "state"),
         MARU_CONFIG=str(root / "config"), MARU_SESSION_HOST_ROOT=str(root / "host"), MARU_EDITOR_BACKUP_ROOT=str(root / "backups"),
         MARU_EDITOR_RECOVERY_CHECKPOINT_TEST="maru-test-only-v1", MARU_MACOS_APP_SMOKE_MS="45000",
-        MARU_NATIVE_EDITOR=str(document), MARU_FT_WINDOW_SIZE=args.window_size, MARU_EDITOR_PROJECT_SEARCH_SCALE=str(args.render_scale), MARU_EDITOR_PROJECT_SEARCH_MATRIX="1" if args.matrix else "0", MARU_EDITOR_PROJECT_REPLACE_PREVIEW="1" if args.replace_preview else "0", MARU_EDITOR_PROJECT_REPLACE_APPLY="1" if args.replace_apply else "0", MARU_EDITOR_PROJECT_REPLACE_MARKERS="1" if args.conflict_markers else "0", MARU_EDITOR_PROJECT_SEARCH_TINY="1" if args.narrow_hidden else "0", MARU_EDITOR_PROJECT_SEARCH_OTHER_ROOT=str(other), MARU_EDITOR_PROJECT_SEARCH_CAPTURE="1",
+        MARU_NATIVE_EDITOR=str(document), MARU_FT_WINDOW_SIZE=args.window_size, MARU_EDITOR_PROJECT_SEARCH_SCALE=str(args.render_scale), MARU_EDITOR_PROJECT_SEARCH_MATRIX="1" if args.matrix else "0", MARU_EDITOR_PROJECT_REPLACE_PREVIEW="1" if args.replace_preview else "0", MARU_EDITOR_PROJECT_REPLACE_APPLY="1" if args.replace_apply else "0", MARU_EDITOR_PROJECT_REPLACE_DISK_APPLY="1" if args.replace_disk_apply else "0", MARU_EDITOR_PROJECT_REPLACE_MARKERS="1" if args.conflict_markers else "0", MARU_EDITOR_PROJECT_SEARCH_TINY="1" if args.narrow_hidden else "0", MARU_EDITOR_PROJECT_SEARCH_OTHER_ROOT=str(other), MARU_EDITOR_PROJECT_SEARCH_CAPTURE="1",
         MARU_EDITOR_PROJECT_SEARCH_OUTPUT=str(artifacts), MARU_EDITOR_PROJECT_SEARCH_DISK_FILES=str(args.disk_files), MARU_EDITOR_PROJECT_SEARCH_UNICODE="1" if args.unicode_field else "0", MARU_EDITOR_PROJECT_SEARCH_PHYSICAL="1" if args.physical_ime else "0", MARU_EDITOR_PROJECT_SEARCH_MODEL_MATCHES=str(args.count), MARU_EDITOR_PROJECT_SEARCH_EXPECTED=str(1 if args.unicode_field or args.physical_ime else args.count + args.disk_files), MARU_APP_SUMMARY_PATH=str(root / "summary.txt"))
     if args.physical_ime:
         main = root / "main.swift"
@@ -177,7 +183,7 @@ def main():
                 hid_log.close()
     transcript = (root / "app.log").read_text()
     if (code != 0 or "EDITOR_PROJECT_SEARCH_FINISH passed=true" not in transcript or
-document.read_bytes() != original):
+document.read_bytes() != original or any(p.read_bytes() != data for p, data in disk_originals.items())):
         raise RuntimeError("Product verification failed; inspect app.log")
     expected = ("before", "query", "results", "query-selection", "navigated", "bottom-scrolled", "cancelled")
     if args.disk_files:
@@ -206,7 +212,7 @@ document.read_bytes() != original):
     metrics["pane_build_ns"] = [int(value) for value in re.findall(r"SEARCH_PANE_BUILD elapsed_ns=(\d+)", transcript)]
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
-        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, replace_preview=args.replace_preview, replace_apply=args.replace_apply, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

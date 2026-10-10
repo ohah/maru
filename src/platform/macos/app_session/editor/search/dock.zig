@@ -531,28 +531,10 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
         .option => |index| {
             if (index == 9) {
                 const result = preview.apply(self) catch |err| {
-                    self.showNoticeKey(if (err == error.OutOfMemory or err == error.ApplyFailed) .dbg_editor_oom else .project_replace_apply_failed);
+                    applyFailure(self, err);
                     return;
                 };
-                st.apply_outcome = if (result == .saved) .saved else .save_failed;
-                if (result == .saved) {
-                    const term = pane.activePane(self).activeTerm();
-                    if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) {
-                        var message: [1024]u8 = undefined;
-                        self.showNotice(std.fmt.bufPrint(&message, "{s}\n{s}", .{ i18n.t(.project_replace_saved), i18n.t(.editor_conflict_markers_remain) }) catch i18n.t(.editor_conflict_markers_remain));
-                    } else self.showNoticeKey(.project_replace_saved);
-                } else {
-                    const reason: ?i18n.Key = switch (result.save_failed) {
-                        error.ExternalConflict => .editor_save_external_conflict,
-                        error.NotFound => .editor_save_gone,
-                        error.TooLarge => .app_save_too_large,
-                        else => null,
-                    };
-                    if (reason) |key| {
-                        var message: [1024]u8 = undefined;
-                        self.showNotice(std.fmt.bufPrint(&message, "{s}\n{s}", .{ i18n.t(.project_replace_save_failed), i18n.t(key) }) catch i18n.t(.project_replace_save_failed));
-                    } else self.showNoticeKey(.project_replace_save_failed);
-                }
+                applyFinished(self, result);
                 self.metal_dirty = true;
                 return;
             }
@@ -685,4 +667,35 @@ pub fn byteForPoint(self: *AppSession, index: usize, x: f64) !usize {
     if (maru_macos_coretext_chrome_index(display.text.ptr, display.text.len, family.ptr, family.len, fallback.ptr, fallback.len, @as(f64, @floatFromInt(token.point_size)) * @as(f64, @floatFromInt(scaleMilli(self))) / 1000.0, @intFromEnum(token.weight), @floatFromInt(width), x - rect.x - inset, &at) != 0) return error.MeasureFailed;
     if (glyph.len != 0 and at > display.caret) at -|= glyph.len;
     return maru.grapheme.snapToBoundary(field.text.items, @min(at, field.text.items.len));
+}
+
+/// 비동기 디스크 적용과 열린 문서 적용은 같은 완료/실패 안내를 사용한다.
+pub fn applyFailure(self: *AppSession, err: anyerror) void {
+    self.showNoticeKey(if (err == error.OutOfMemory or err == error.ApplyFailed) .dbg_editor_oom else .project_replace_apply_failed);
+    self.metal_dirty = true;
+}
+pub fn applyFinished(self: *AppSession, result: preview.ApplyResult) void {
+    if (result == .pending) return;
+    const st = &self.editor_search;
+    st.apply_outcome = if (result == .saved) .saved else .save_failed;
+    if (result == .saved) {
+        const term = pane.activePane(self).activeTerm();
+        if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) {
+            var message: [1024]u8 = undefined;
+            self.showNotice(std.fmt.bufPrint(&message, "{s}\n{s}", .{ i18n.t(.project_replace_saved), i18n.t(.editor_conflict_markers_remain) }) catch i18n.t(.editor_conflict_markers_remain));
+        } else self.showNoticeKey(.project_replace_saved);
+    } else {
+        const reason: ?i18n.Key = switch (result.save_failed) {
+            error.ExternalConflict => .editor_save_external_conflict,
+            error.NotFound => .editor_save_gone,
+            error.TooLarge => .app_save_too_large,
+            else => null,
+        };
+        if (reason) |key| {
+            var message: [1024]u8 = undefined;
+            self.showNotice(std.fmt.bufPrint(&message, "{s}\n{s}", .{ i18n.t(.project_replace_save_failed), i18n.t(key) }) catch i18n.t(.project_replace_save_failed));
+        } else self.showNoticeKey(.project_replace_save_failed);
+    }
+
+    self.metal_dirty = true;
 }

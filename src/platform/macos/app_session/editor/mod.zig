@@ -58298,7 +58298,7 @@ test "RPA8 적용 저장 완료 알림은 남아 있는 충돌 마커 경고를 
     try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.project_replace_saved)) != null);
 }
 
-test "RPA9 root 교체와 대상 닫기 같은 치환 디스크 결과는 적용을 거절한다" {
+test "RPA9 root 교체와 대상 닫기 같은 치환 변경된 디스크 결과는 적용을 거절한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     for (0..5) |mode| {
         var fx = try PaneFixture.init(testing.allocator);
@@ -58314,6 +58314,7 @@ test "RPA9 root 교체와 대상 닫기 같은 치환 디스크 결과는 적용
         try p.start(fx.session, try replacePreviewRow(fx.session, mode == 3, true));
         try waitReplacePreview(fx.session);
         if (mode == 0) try fx.session.file_tree.replaceExplicitRoots(&.{});
+        if (mode == 3) @import("search/dock.zig").changed(fx.session);
         if (mode == 1) {
             const pane = pane_ops.activePane(fx.session);
             for (pane.terms.items, 0..) |candidate, index| if (candidate == term) {
@@ -58451,4 +58452,322 @@ test "RPA13 준비 실패는 Redo를 보존하고 적용 재클릭과 후속 타
     try testing.expectEqualStrings("bar", term.rt.editorDocument().opened.?.file.content);
     try testing.expect(redoEdit(fx.session, term));
     try testing.expectEqualStrings("bar!", term.rt.editorDocument().opened.?.file.content);
+}
+
+/// 디스크 적용 판정은 결과 생성과 worker 재검증을 실제 rg로 진행한다. 열린 control 문서도 함께 보존한다.
+fn diskApplyReady(fx: *PaneFixture, bytes: []const u8, whole_file: bool) !*Term {
+    const control = try undoFixture(fx, testing.allocator, "search.txt", "foo control");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = bytes });
+    try replacePreviewSearch(fx);
+    try @import("search/preview.zig").start(fx.session, try replacePreviewRow(fx.session, true, whole_file));
+    try waitReplacePreview(fx.session);
+    try testing.expect(@import("search/preview.zig").canApply(fx.session));
+    return control;
+}
+fn waitDiskApply(session: *AppSession) !void {
+    const p = @import("search/preview.zig");
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+    while (session.editor_search.preview.phase == .applying) {
+        p.poll(session);
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+    while (p.outstandingWorkers() != 0) {
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+}
+fn diskApplyRead(fx: *PaneFixture, expected: []const u8) !void {
+    const bytes = try fx.dir.dir.readFileAlloc(testing.io, "disk.txt", testing.allocator, .limited(1024));
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings(expected, bytes);
+}
+test "RPA14 디스크 파일과 단일 일치는 새 문서의 한 Undo와 자동 저장으로 연결한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |whole_file| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const control = try diskApplyReady(&fx, "foo foo\r\n한글😀", whole_file);
+        const before = pane_ops.activePane(fx.session).terms.items.len;
+        const p = @import("search/preview.zig");
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        try testing.expect(!p.canApply(fx.session));
+        try testing.expectError(error.StaleRequest, p.apply(fx.session));
+        try waitDiskApply(fx.session);
+        const term = pane_ops.activePane(fx.session).activeTerm();
+        const expected = if (whole_file) "bar bar\r\n한글😀" else "bar foo\r\n한글😀";
+        try testing.expectEqual(before + 1, pane_ops.activePane(fx.session).terms.items.len);
+        try testing.expectEqualStrings(expected, term.rt.editorDocument().opened.?.file.content);
+        try diskApplyRead(&fx, expected);
+        try testing.expect(!isDirty(term));
+        try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.undo_len);
+        try testing.expectEqualStrings("foo control", control.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), control.rt.editorDocument().history.undo_len);
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings("foo foo\r\n한글😀", term.rt.editorDocument().opened.?.file.content);
+        try saveDocument(fx.session, term);
+        try diskApplyRead(&fx, "foo foo\r\n한글😀");
+    }
+}
+test "RPA15 미리보기 뒤 외부 수정 삭제 특수 파일 교체는 디스크와 탭을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try diskApplyReady(&fx, "foo original", true);
+        const before = pane_ops.activePane(fx.session).terms.items.len;
+        if (mode == 0) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo EXTERNAL" });
+        if (mode > 0) try fx.dir.dir.deleteFile(testing.io, "disk.txt");
+        if (mode == 2) try fx.dir.dir.createDir(testing.io, "disk.txt", .default_dir);
+        try testing.expect((try @import("search/preview.zig").apply(fx.session)) == .pending);
+        try waitDiskApply(fx.session);
+        try testing.expectEqual(.conflict, fx.session.editor_search.preview.phase);
+        try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len);
+        if (mode == 0) try diskApplyRead(&fx, "foo EXTERNAL");
+        try testing.expect(fx.session.chrome_host.notice.open);
+    }
+}
+test "RPA16 늦은 완료는 취소 검색 입력 조합 새로 열린 문서를 수정하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..5) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try diskApplyReady(&fx, "foo original", true);
+        const p = @import("search/preview.zig");
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        var opened: ?*Term = null;
+        if (mode == 0) p.back(fx.session);
+        if (mode == 1) try fx.session.editor_search.fields[3].insertText(testing.allocator, "changed");
+        if (mode == 2) fx.session.ime_active = true;
+        if (mode == 3) {
+            const path = fx.session.editor_search.preview.disk_target.?.absolute;
+            opened = (try pane_ops.openNativeFileTermInActivePane(fx.session, path)).term;
+            opened.?.rt.editor_selection = editor_selection.Selection.at(12);
+            try testing.expect(insertText(fx.session, opened.?, "!"));
+        }
+        if (mode == 4) try fx.session.file_tree.replaceExplicitRoots(&.{});
+        try waitDiskApply(fx.session);
+        fx.session.ime_active = false;
+        try diskApplyRead(&fx, "foo original");
+        if (opened) |term| {
+            try testing.expectEqualStrings("foo original!", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.undo_len);
+        }
+    }
+}
+test "RPA17 worker가 검증한 뒤 열기 전에 바뀐 원문은 적용하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try diskApplyReady(&fx, "foo original", true);
+    const p = @import("search/preview.zig");
+    try testing.expect((try p.apply(fx.session)) == .pending);
+    const job = fx.session.editor_search.preview.apply_check.?;
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+    while (!job.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo LATE" });
+    try waitDiskApply(fx.session);
+    try diskApplyRead(&fx, "foo LATE");
+    const term = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expectEqualStrings("foo LATE", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(.conflict, fx.session.editor_search.preview.phase);
+}
+test "RPA18 디스크 적용은 BOM과 CRLF를 저장 Undo 재저장까지 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try diskApplyReady(&fx, "\xef\xbb\xbffoo\r\n한글😀", true);
+    try testing.expect((try @import("search/preview.zig").apply(fx.session)) == .pending);
+    try waitDiskApply(fx.session);
+    try diskApplyRead(&fx, "\xef\xbb\xbfbar\r\n한글😀");
+    const term = pane_ops.activePane(fx.session).activeTerm();
+    try testing.expect(undoEdit(fx.session, term));
+    try saveDocument(fx.session, term);
+    try diskApplyRead(&fx, "\xef\xbb\xbffoo\r\n한글😀");
+}
+
+fn waitDiskCheck(session: *AppSession) !void {
+    const job = session.editor_search.preview.apply_check.?;
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+    while (!job.done.load(.acquire)) {
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+}
+test "RPA19 디스크 적용 준비와 저장 OOM은 원문 또는 적용 Undo를 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var points: usize = 0;
+    var denied: usize = 0;
+    var saved_failures: usize = 0;
+    var index: usize = 0;
+    while (index == 0 or index <= points) : (index += 1) {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const control = try diskApplyReady(&fx, "foo original", true);
+        try testing.expect((try @import("search/preview.zig").apply(fx.session)) == .pending);
+        try waitDiskCheck(fx.session);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (index == 0) std.math.maxInt(usize) else index - 1 });
+        fx.session.allocator = failing.allocator();
+        @import("search/preview.zig").poll(fx.session);
+        fx.session.allocator = testing.allocator;
+        if (index == 0) points = failing.alloc_index;
+        // 새 문서가 이 allocator를 소유한다. OOM을 풀어야 그 문서의 Undo도 자원을 준비할 수 있다.
+        failing.fail_index = std.math.maxInt(usize);
+        const term = pane_ops.activePane(fx.session).activeTerm();
+        if (fx.session.editor_search.apply_outcome == .saved) {
+            try diskApplyRead(&fx, "bar original");
+            try testing.expect(undoEdit(fx.session, term));
+        } else if (fx.session.editor_search.apply_outcome == .save_failed) {
+            saved_failures += 1;
+            try testing.expectEqualStrings("bar original", term.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.undo_len);
+            try testing.expect(isDirty(term));
+            try diskApplyRead(&fx, "foo original");
+            try testing.expect(undoEdit(fx.session, term));
+        } else {
+            denied += 1;
+            try diskApplyRead(&fx, "foo original");
+            if (term != control) {
+                try testing.expectEqualStrings("foo original", term.rt.editorDocument().opened.?.file.content);
+                try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+            }
+        }
+        try testing.expectEqualStrings("foo control", control.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), control.rt.editorDocument().history.undo_len);
+    }
+    std.debug.print("disk_apply_oom points={d} denied={d} save_failed={d}\n", .{ points, denied, saved_failures });
+    try testing.expect(points > 4 and denied > 4 and saved_failures > 0);
+}
+test "RPA20 worker 완료 뒤 다른 창의 정본과 읽기 전용 문서는 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try diskApplyReady(&fx, "foo original", true);
+        const p = @import("search/preview.zig");
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        try waitDiskCheck(fx.session);
+        const path = fx.session.editor_search.preview.disk_target.?.absolute;
+        if (mode == 0) {
+            // 현재 pane에 없는 정본도 앱 전역 registry가 보호한다.
+            var prepared = try preparePath(fx.session, path);
+            defer prepared.deinit(testing.allocator);
+            const doc = fx.session.editor_documents.get(prepared.lease).?;
+            const changes = [_]editor.delta.Change{.{ .start = 0, .end = 3, .text = "external view" }};
+            var selected = [_]editor_selection.Selection{editor_selection.Selection.at(0)};
+            var peer_ranges = editor_selection.Selections.init(&selected, 0);
+            var inverse = try doc.opened.?.file.apply(.{ .changes = &changes }, &peer_ranges);
+            defer inverse.deinit();
+            try waitDiskApply(fx.session);
+            try testing.expectEqualStrings("external view original", doc.opened.?.file.content);
+            try testing.expectEqual(@as(usize, 0), doc.history.undo_len);
+        } else {
+            const path_z = try testing.allocator.dupeZ(u8, path);
+            defer testing.allocator.free(path_z);
+            try testing.expectEqual(@as(c_int, 0), std.c.chmod(path_z, 0o444));
+            defer _ = std.c.chmod(path_z, 0o644);
+            try waitDiskApply(fx.session);
+            try testing.expectEqual(.conflict, fx.session.editor_search.preview.phase);
+            try testing.expectEqual(@as(usize, 0), pane_ops.activePane(fx.session).activeTerm().rt.editorDocument().history.undo_len);
+        }
+        try diskApplyRead(&fx, "foo original");
+    }
+}
+
+test "RPA21 worker 완료 뒤 같은 bytes를 가진 다른 root로 바뀌어도 적용하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try diskApplyReady(&fx, "foo original", true);
+    const p = @import("search/preview.zig");
+    try testing.expect((try p.apply(fx.session)) == .pending);
+    try waitDiskCheck(fx.session);
+    const root = try testing.allocator.dupe(u8, fx.session.editor_search.preview.disk_target.?.root);
+    defer testing.allocator.free(root);
+    const moved = try std.fmt.allocPrint(testing.allocator, "{s}-disk-apply-old", .{root});
+    defer testing.allocator.free(moved);
+    try std.Io.Dir.renameAbsolute(root, moved, testing.io);
+    defer std.Io.Dir.renameAbsolute(moved, root, testing.io) catch unreachable;
+    try std.Io.Dir.createDirAbsolute(testing.io, root, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(testing.io, root) catch unreachable;
+    var replacement = try std.Io.Dir.openDirAbsolute(testing.io, root, .{});
+    defer replacement.close(testing.io);
+    try replacement.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo original" });
+    const before = pane_ops.activePane(fx.session).terms.items.len;
+    try waitDiskApply(fx.session);
+    try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len);
+    try testing.expectEqual(.conflict, fx.session.editor_search.preview.phase);
+    const untouched = try replacement.readFileAlloc(testing.io, "disk.txt", testing.allocator, .limited(1024));
+    defer testing.allocator.free(untouched);
+    try testing.expectEqualStrings("foo original", untouched);
+    try diskApplyRead(&fx, "foo original");
+}
+test "RPA22 디스크 재검증 시작과 worker의 할당 실패는 디스크를 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var points: usize = 0;
+    var denied: usize = 0;
+    var index: usize = 0;
+    while (index == 0 or index <= points) : (index += 1) {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try diskApplyReady(&fx, "foo original", true);
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = if (index == 0) std.math.maxInt(usize) else index - 1 });
+        fx.session.allocator = failing.allocator();
+        const result = @import("search/preview.zig").apply(fx.session);
+        if (result) |value| {
+            try testing.expect(value == .pending);
+            try waitDiskCheck(fx.session);
+        } else |err| {
+            try testing.expect(err == error.OutOfMemory or err == error.StaleRequest);
+        }
+        fx.session.allocator = testing.allocator;
+        if (index == 0) points = failing.alloc_index;
+        failing.fail_index = std.math.maxInt(usize);
+        if (result) |_| {
+            try waitDiskApply(fx.session);
+            if (fx.session.editor_search.apply_outcome == .saved) {
+                try diskApplyRead(&fx, "bar original");
+            } else {
+                denied += 1;
+                try diskApplyRead(&fx, "foo original");
+            }
+        } else |_| {
+            denied += 1;
+            try diskApplyRead(&fx, "foo original");
+        }
+    }
+    std.debug.print("disk_check_oom points={d} denied={d}\n", .{ points, denied });
+    try testing.expect(points > 4 and denied > 4);
+}
+
+test "RPA23 디스크 정규식의 여러 줄 캡처 삭제와 빈 매치는 미리보기와 같은 bytes를 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Case = struct { before: []const u8, needle: []const u8, replacement: []const u8, after: []const u8 };
+    const cases = [_]Case{
+        .{ .before = "foo\r\n한글😀", .needle = "(foo)\\r?\\n(한글😀)", .replacement = "$2:$1\r\n", .after = "한글😀:foo\r\n" },
+        .{ .before = "foo", .needle = "foo", .replacement = "", .after = "" },
+        .{ .before = "foo", .needle = "^|foo", .replacement = "X", .after = "Xfoo" },
+    };
+    for (cases) |c| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        _ = try undoFixture(&fx, testing.allocator, "search.txt", "foo control");
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = c.before });
+        try replacePreviewSearchWith(&fx, c.needle, c.replacement, true);
+        const p = @import("search/preview.zig");
+        try p.start(fx.session, try replacePreviewRow(fx.session, true, true));
+        try waitReplacePreview(fx.session);
+        try testing.expectEqualStrings(c.after, fx.session.editor_search.preview.plan.?.after);
+        try testing.expect((try p.apply(fx.session)) == .pending);
+        try waitDiskApply(fx.session);
+        const term = pane_ops.activePane(fx.session).activeTerm();
+        try testing.expectEqualStrings(c.after, term.rt.editorDocument().opened.?.file.content);
+        try diskApplyRead(&fx, c.after);
+        try testing.expect(undoEdit(fx.session, term));
+        try testing.expectEqualStrings(c.before, term.rt.editorDocument().opened.?.file.content);
+    }
 }

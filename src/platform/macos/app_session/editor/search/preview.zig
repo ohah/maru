@@ -1,4 +1,4 @@
-//! 바꾸기 미리보기는 불변 전문과 worker를 소유하고, 재검증한 열린 문서에만 명시적으로 적용·저장한다.
+//! 바꾸기 미리보기는 불변 전문과 worker를 소유하고, 재검증한 정본 문서에 명시적으로 적용·저장한다.
 const std = @import("std");
 const maru = @import("maru");
 const host = @import("../../../app_session.zig");
@@ -8,6 +8,7 @@ const owner = @import("owner.zig");
 const dock = @import("dock.zig");
 const verify = @import("verify.zig");
 const editor = @import("../mod.zig");
+const disk_apply = @import("disk_apply.zig");
 const Source = union(enum) {
     model: maru.session.editor.buffer.Snapshot,
     disk: struct { root: []u8, path: []u8, identity: maru.session.file_tree.Identity, hash: ?[32]u8 = null },
@@ -33,7 +34,7 @@ const Input = struct {
 };
 var workers = std.atomic.Value(usize).init(0);
 pub fn outstandingWorkers() usize {
-    return workers.load(.acquire);
+    return workers.load(.acquire) + disk_apply.outstandingWorkers();
 }
 const Job = struct {
     a: std.mem.Allocator,
@@ -104,7 +105,9 @@ const Expected = struct {
 pub const ModelTarget = struct { document: search.request.DocumentIdentity, revision: u64, surface: u64 };
 pub const State = struct {
     target: ?ModelTarget = null,
-    phase: enum { idle, verifying, building, ready, conflict, failed } = .idle,
+    disk_target: ?disk_apply.Target = null,
+    apply_check: ?*disk_apply.Check = null,
+    phase: enum { idle, verifying, building, ready, applying, conflict, failed } = .idle,
     stamp: u64 = 0,
     settings_stamp: u64 = 0,
     title: []u8 = &.{},
@@ -116,6 +119,8 @@ pub const State = struct {
     plan: ?search.preview.Plan = null,
     failure: ?anyerror = null,
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
+        if (self.disk_target) |*target| target.deinit(a);
+        if (self.apply_check) |job| job.deinit();
         if (self.input) |*input| input.deinit(a);
         if (self.verifier) |*job| job.deinit();
         if (self.job) |job| job.deinit();
@@ -127,6 +132,8 @@ pub const State = struct {
     }
     pub fn invalidate(self: *State, a: std.mem.Allocator) void {
         if (self.phase == .idle) return;
+        if (self.apply_check) |job| job.deinit();
+        self.apply_check = null;
         if (self.verifier) |*job| job.deinit();
         self.verifier = null;
         if (self.job) |job| job.deinit();
@@ -205,6 +212,7 @@ pub fn start(self: *host.AppSession, visible_index: usize) !void {
         .disk => blk: {
             const root = self.file_tree.rootAt(group.root_index) orelse return error.StaleRequest;
             const cap = self.file_tree.rootCapabilityForPath(root) orelse return error.StaleRequest;
+            next.disk_target = try disk_apply.Target.init(self.allocator, root, try search.request.relativePath(group.path), cap.identity);
             const name = try self.allocator.dupe(u8, try search.request.relativePath(group.path));
             errdefer self.allocator.free(name);
             break :blk .{ .disk = .{ .root = try self.allocator.dupe(u8, root), .path = name, .identity = cap.identity } };
@@ -259,6 +267,10 @@ pub fn poll(self: *host.AppSession) void {
         self.metal_dirty = true;
         return;
     }
+    if (state.phase == .applying) {
+        pollApply(self);
+        return;
+    }
     if (state.phase == .verifying) {
         drain(self.allocator, state);
         const done = state.verifier.?.completion() orelse return;
@@ -275,6 +287,7 @@ pub fn poll(self: *host.AppSession) void {
             return;
         }
         state.input.?.source.disk.hash = hash;
+        state.disk_target.?.hash = hash;
         state.job = Job.start(self.allocator, state.input.?) catch |err| {
             state.phase = .failed;
             state.failure = err;
@@ -317,6 +330,10 @@ pub fn quietForTest(self: *host.AppSession) void {
         job.cancel();
         if (job.active) |active| wait.quietState(active, self.io);
     }
+    if (self.editor_search.preview.apply_check) |job| {
+        job.control.cancelled.store(true, .release);
+        wait.quietState(job, self.io);
+    }
     if (self.editor_search.preview.job) |job| {
         job.control.cancelled.store(true, .release);
         wait.quietState(job, self.io);
@@ -357,12 +374,21 @@ pub fn canApply(self: *host.AppSession) bool {
     const state = &self.editor_search.preview;
     if (self.ime_active or self.ime_editor_commit_pending or state.phase != .ready or state.plan == null or state.plan.?.edits.items.len == 0) return false;
     for (self.editor_search.fields) |field| if (field.preedit.items.len > 0) return false;
-    return state.settings_stamp == settingsStamp(self) and state.stamp == owner.fingerprint(self) and targetTerm(self) != null;
+    return state.settings_stamp == settingsStamp(self) and state.stamp == owner.fingerprint(self) and (if (state.disk_target) |target| diskUnoccupied(self, target.absolute) else targetTerm(self) != null);
 }
-pub const ApplyResult = union(enum) { saved, save_failed: editor.SaveError };
+pub const ApplyResult = union(enum) { pending, saved, save_failed: editor.SaveError };
 /// 편집과 저장은 별도 결과다. 저장 실패가 이미 적용된 본문과 Undo를 되감지 않는다.
 pub fn apply(self: *host.AppSession) !ApplyResult {
     if (!canApply(self)) return error.StaleRequest;
+    if (self.editor_search.preview.disk_target) |target| {
+        const job = try disk_apply.Check.start(self.allocator, target, editor.read_limit_bytes);
+        self.editor_search.preview.apply_check = job;
+        self.editor_search.preview.phase = .applying;
+        self.editor_search.invalidate();
+        self.editor_search.result.generation +%= 1;
+        self.metal_dirty = true;
+        return .pending;
+    }
     var term = targetTerm(self) orelse return error.StaleRequest;
     const state = &self.editor_search.preview;
     const current = term.rt.editorDocument().opened.?.file.content;
@@ -388,6 +414,81 @@ pub fn apply(self: *host.AppSession) !ApplyResult {
     const result: ApplyResult = if (editor.saveDocument(self, term)) |_| .saved else |err| .{ .save_failed = err };
     self.editor_search.focused = null;
     _ = self.activateExistingFileTerm(term);
+    if (term.rt.editor_selection == null) term.rt.editor_selection = maru.session.editor.selection.Selection.at(changes[0].start);
+    dock.changed(self);
+    self.editor_search.preview.deinit(self.allocator);
+    return result;
+}
+
+/// 앱 전역 정본과 현재 창의 웹 패널도 점유로 본다. 디스크 결과가 새로 열린 문서를 대신 수정하면 안 된다.
+fn diskUnoccupied(self: *host.AppSession, path: []const u8) bool {
+    for (self.editor_documents.slots.items) |slot| {
+        const doc = slot.document orelse continue;
+        if (doc.state.remote != null) continue;
+        const existing = doc.state.path orelse continue;
+        const normalized = std.fs.path.resolve(self.allocator, &.{existing}) catch return false;
+        defer self.allocator.free(normalized);
+        if (std.mem.eql(u8, normalized, path)) return false;
+    }
+    return @import("../../file_panel.zig").fileTermForPath(self, path) == null;
+}
+fn pollApply(self: *host.AppSession) void {
+    const state = &self.editor_search.preview;
+    const check = state.apply_check orelse return;
+    if (!check.done.load(.acquire)) return;
+    if (check.failure) |err| {
+        state.failure = err;
+        state.invalidate(self.allocator);
+        dock.applyFailure(self, err);
+        return;
+    }
+    if (state.settings_stamp != settingsStamp(self) or self.ime_active or self.ime_editor_commit_pending) {
+        state.invalidate(self.allocator);
+        return;
+    }
+    for (self.editor_search.fields) |field| if (field.preedit.items.len > 0) {
+        state.invalidate(self.allocator);
+        return;
+    };
+    // 열기·편집 통지가 live preview를 정산해도 이 호출의 원문/대체 텍스트는 살아 있어야 한다.
+    var transaction = state.*;
+    state.* = .{};
+    defer transaction.deinit(self.allocator);
+    const result = finishDiskApply(self, &transaction) catch |err| {
+        transaction.phase = .conflict;
+        transaction.failure = err;
+        if (transaction.apply_check) |job| job.deinit();
+        transaction.apply_check = null;
+        self.editor_search.preview.deinit(self.allocator);
+        self.editor_search.preview = transaction;
+        transaction = .{};
+        self.editor_search.invalidate();
+        self.editor_search.result.generation +%= 1;
+        dock.applyFailure(self, err);
+        return;
+    };
+    dock.applyFinished(self, result);
+}
+fn finishDiskApply(self: *host.AppSession, transaction: *State) !ApplyResult {
+    const target = transaction.disk_target.?;
+    if (!diskUnoccupied(self, target.absolute)) return error.StaleRequest;
+    // worker 완료 뒤에도 root를 다시 확인한다. 전문을 main에서 다시 해시하지는 않는다.
+    var root = try @import("process.zig").openRoot(self.allocator, self.io, target.root);
+    defer root.deinit(self.allocator, self.io);
+    if (@as(u64, @intCast(root.device)) != target.identity.device or root.stat.inode != target.identity.inode) return error.RootChanged;
+    try @import("process.zig").validateRoot(self.io, &root);
+    const changes = try transaction.plan.?.changes(self.allocator);
+    defer self.allocator.free(changes);
+    const opened = try @import("../../pane.zig").openNativeFileTermInActivePane(self, target.absolute);
+    if (!opened.created) return error.StaleRequest;
+    const term = opened.term;
+    const doc = term.rt.editorDocument();
+    // 열기 도중 디스크가 달라졌거나 기존 복구 백업이 붙었다면 원문을 덮지 않는다.
+    if (doc.opened.?.file.read_only or doc.opened.?.isDirty() or !std.mem.eql(u8, doc.opened.?.file.content, transaction.plan.?.before)) return error.FileChanged;
+    try @import("process.zig").validateRoot(self.io, &root);
+    if (!editor.applyEditAsOneWithUndo(self, term, changes)) return error.ApplyFailed;
+    const result: ApplyResult = if (editor.saveDocument(self, term)) |_| .saved else |err| .{ .save_failed = err };
+    self.editor_search.focused = null;
     if (term.rt.editor_selection == null) term.rt.editor_selection = maru.session.editor.selection.Selection.at(changes[0].start);
     dock.changed(self);
     self.editor_search.preview.deinit(self.allocator);

@@ -7653,6 +7653,10 @@ CLI exit code와 사용자 문구는 이 typed error를 한 곳에서 매핑하�
 
 ## 12. screen snapshot과 관측 가능성
 
+`image_shm` 을 협상한 GUI 연결에서 이미지 픽셀은 이 절의 `image_blob` 이 아니라 연결마다 하나 있는 이미지 채널의 공유 메모리
+세그먼트로 오가고, 주 스트림에는 `image_ref` 참조만 실린다 — 그 계약은 [Session host 이미지 채널](session-host-image-channel.md)이
+소유한다. 협상하지 않은 연결(`maru attach --stream`·ANSI attach·N-1 앱)은 이 절의 `image_blob` 그대로다.
+
 ### 12.0 이미지 대역폭 계측 — 호스트 로그 `maru-metrics` (2026-09-14)
 
 **왜 붙였나.** *"세션 많이 열어놓으면 세션호스트모드에서 터미널 브라우저가 뜨더라도 느리다"* 는

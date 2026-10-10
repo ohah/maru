@@ -158,7 +158,7 @@ pub const Op = struct {
                 const k = o.get("key") orelse return error.InvalidArg;
                 if (k != .string) return error.InvalidArg;
                 var probe: web_cdp_keys.Press = undefined;
-                web_cdp_keys.parse(k.string, &probe) catch return error.InvalidArg;
+                web_cdp_keys.parse(k.string, &probe) catch return error.InvalidKey;
                 op.press_key = try gpa.dupe(u8, k.string);
                 // 대상이 없으면 지금 초점에 누른다(페이지의 초점 — 다른 출처 iframe 일 수도 있다).
                 if (o.get("ref") == null and o.get("selector") == null) return op;
@@ -246,8 +246,9 @@ pub const Op = struct {
                 self.stage = .delete_up;
                 return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyUp\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
             },
-            // 움직임의 답이 늦었다(숨긴 탭은 다음 프레임까지 — 실측 5 초) — 놓고 timeout.
-            .hover_move, .focus_check => {
+            // 움직임의 답이 늦었다(숨긴 탭은 다음 프레임까지 — 실측 5 초) — 놓고 timeout. 덮임 검사·노드 잡기의 시한도 쥔 묶음을
+            // 놓는다(적대 리뷰 1 회차 — 곧장 끝내 묶음이 남았다).
+            .hover_move, .focus_check, .hit_test, .resolve => {
                 self.late = reply.timed_out;
                 return self.releaseStep(gpa);
             },
@@ -390,6 +391,10 @@ pub const Op = struct {
             },
             .hover_move => return self.releaseStep(gpa),
             .focus_check => {
+                if (at(v, &.{"exceptionDetails"}) != null) {
+                    self.miss = "could not check the focus";
+                    return self.releaseStep(gpa);
+                }
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
                 if (!std.mem.eql(u8, verdict, "ok")) {
                     self.miss = "focus moved away from the element (the page moved it) — no key was pressed";
@@ -1367,6 +1372,62 @@ test "hover: click 과 같은 길(화면 안으로·자리·덮임 검사) 뒤 �
     }
 }
 
+test "hover: 움직임을 보내기 전에는 committed 가 아니다(철회됐으면 움직이지 않는다), 덮임 검사의 시한에도 묶음을 놓는다" {
+    var op = try Op.init(testing.allocator, .hover, "{\"ref\":\"n9\"}", 53);
+    defer op.deinit(testing.allocator);
+    var step = try op.start(testing.allocator);
+    var saw_move = false;
+    while (step == .call) {
+        const c = step.call;
+        defer testing.allocator.free(c.params);
+        if (std.mem.indexOf(u8, c.params, "mouseMoved") != null) {
+            saw_move = true;
+            try testing.expect(!op.committed());
+        }
+        step = try op.feed(testing.allocator, happyPage(c.method, c.params));
+    }
+    testing.allocator.free(step.done.result);
+    try testing.expect(saw_move);
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var slow = try Op.init(testing.allocator, .hover, "{\"ref\":\"n9\"}", 54);
+    defer slow.deinit(testing.allocator);
+    const r = try drive(&slow, &stuckHitPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.timeout, r.status);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    try testing.expectEqual(@as(usize, 0), trail.count("Input.dispatchMouseEvent"));
+}
+
+fn stuckHitPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .timed_out = "DevTools did not answer in time" };
+    return happyPage(method, params);
+}
+
+fn throwingFocusPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"object\"},\"exceptionDetails\":{\"text\":\"x\"}}" };
+    return happyPage(method, params);
+}
+
+test "press: 초점 검사가 예외면 「focus moved」 가 아니라 검사 실패로, 대상 없는 누름의 오류는 떼지 않고 실패" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .press, "{\"key\":\"x\",\"selector\":\"#e\"}", 65);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &throwingFocusPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.failed, r.status);
+    try testing.expect(std.mem.indexOf(u8, r.result, "could not check the focus") != null);
+    try testing.expectEqual(@as(usize, 0), trail.count("Input.dispatchKeyEvent"));
+    trail.reset();
+    var bare = try Op.init(testing.allocator, .press, "{\"key\":\"x\"}", 66);
+    defer bare.deinit(testing.allocator);
+    const b = try drive(&bare, &keyErrorPage, &trail);
+    defer testing.allocator.free(b.result);
+    try testing.expectEqual(Status.failed, b.status);
+    try testing.expectEqual(@as(usize, 1), trail.count("Input.dispatchKeyEvent"));
+}
+
 test "press: 대상이 없으면 지금 초점에 누르고 떼기만, 누른 뒤에는 철회돼도 뗀다" {
     var op = try Op.init(testing.allocator, .press, "{\"key\":\"Enter\"}", 61);
     defer op.deinit(testing.allocator);
@@ -1382,7 +1443,7 @@ test "press: 대상이 없으면 지금 초점에 누르고 떼기만, 누른 �
     step = try op.feed(testing.allocator, .{ .ok = "{}" });
     try testing.expectEqual(Status.success, step.done.status);
     testing.allocator.free(step.done.result);
-    try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .press, "{\"key\":\"Hyper+a\"}", 1));
+    try testing.expectError(error.InvalidKey, Op.init(testing.allocator, .press, "{\"key\":\"Hyper+a\"}", 1));
     try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .press, "{}", 1));
 }
 

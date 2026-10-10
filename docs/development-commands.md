@@ -42,6 +42,11 @@ exit 1이며 소켓 연결·auth·request를 시작하지 않는다. `--option v
 같은 옵션이다. 기존 `maru lsp` 별칭도 같은 계약이다. 옵션 생략과 정상 단일 지정은 유지하며
 여러 대상은 별도 호출로 실행한다. 도움말은 기존 계약을 유지한다.
 
+`maru agent-hooks install|uninstall --provider=claude|codex --scope=remote --dir=<절대 경로>`도
+각 옵션을 한 번만 지정한다. 같은 값 반복도 기존 usage 오류(exit 2)이며 provider 설정·trust
+파일과 로그 디렉터리를 변경하지 않는다. 이 명령은 기존 `--option=value` 문법을 유지한다.
+중복 옵션에 `--help`/`-h`를 함께 주면 기존 도움말 선행 판정에 따라 exit 0이며 작업은 실행하지 않는다.
+
 ## CLI 실제 프로세스 CI 검증
 
 Ubuntu CI의 `check` 잡은 코드 변경 시 `zig build test-cli-failure-process`를 실행한다.

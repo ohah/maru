@@ -2160,6 +2160,10 @@ trusted_hash = "sha256:…"
 - **선다(이어서)**: 원격 훅 **설치**도 이제 우리가 한다 — 로컬이 원격 파일을 고치는 것이 아니라 그
   기계의 `maru agent-hooks` 를 돌려 **그 기계의 락으로** read-modify-write 한다(로컬에는 그 기계의
   claude·codex 와 경합을 막을 락이 없고, `settings.json` 은 사용자의 다른 설정을 함께 담는다).
+  CLI의 install/uninstall은 `--provider=`, `--scope=`, `--dir=`를 각각 한 번만 받는다.
+  같은 값 반복도 usage 오류(exit 2)로 거부하며 설정·trust 파일 I/O와 로그 디렉터리 생성 전에
+  종료한다. 필수 옵션과 기존 `=` 문법은 유지한다. `--help`/`-h`가 있으면 기존 도움말 우선
+  판정을 유지해 exit 0으로 안내만 표시한다.
   **tmux 안의 오배달**도 역조회로 되찾는다 — 훅이 `<nonce>.tmux` 옆 파일에 `$TMUX`·`$TMUX_PANE` 을
   남기고, 스트리머가 `pane → session → client` 를 물어 그 클라이언트 env 의 오염되지 않은 값을 읽는다.
 - **선다(이어서)**: **codex 도 자동으로 깐다**(§11.5 정정). 훅과 함께 **신뢰 항목까지** 그 기계의

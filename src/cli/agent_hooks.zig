@@ -54,8 +54,11 @@ pub fn parseArgs(args: []const []const u8) Mode {
     var dir: ?[]const u8 = null;
     var scope_seen = false;
 
+    // A repeated selector must not silently redirect config writes or log creation.
+    // Check presence before assignment, including repeated identical values.
     for (args[1..]) |arg| {
         if (std.mem.startsWith(u8, arg, "--provider=")) {
+            if (provider != null) return .usage_error;
             const v = arg["--provider=".len..];
             if (std.mem.eql(u8, v, "claude")) {
                 provider = .claude;
@@ -63,8 +66,10 @@ pub fn parseArgs(args: []const []const u8) Mode {
                 provider = .codex;
             } else return .usage_error;
         } else if (std.mem.startsWith(u8, arg, "--dir=")) {
+            if (dir != null) return .usage_error;
             dir = arg["--dir=".len..];
         } else if (std.mem.startsWith(u8, arg, "--scope=")) {
+            if (scope_seen) return .usage_error;
             if (!std.mem.eql(u8, arg["--scope=".len..], "remote")) return .usage_error;
             scope_seen = true;
         } else return .usage_error;
@@ -196,10 +201,36 @@ pub const usage =
     \\Installs (or removes) maru's agent hooks in this machine's provider config.
     \\Run this on the machine where the agent runs; maru on the other side reads the
     \\events over its existing ssh connection.
+    \\Each option may only be specified once.
     \\
 ;
 
 const testing = std.testing;
+
+test "parseArgs: duplicate selectors never become a config operation" {
+    const orders = [_][3]usize{ .{ 0, 1, 2 }, .{ 0, 2, 1 }, .{ 1, 0, 2 }, .{ 1, 2, 0 }, .{ 2, 0, 1 }, .{ 2, 1, 0 } };
+    for ([_][]const u8{ "install", "uninstall" }) |action| {
+        for ([_][]const u8{ "--provider=claude", "--provider=codex" }) |provider| {
+            const options = [_][]const u8{ provider, "--dir=/x", "--scope=remote" };
+            for (orders) |order| {
+                for ([_][]const u8{ "--provider=claude", "--provider=codex", "--dir=/x", "--dir=/y", "--scope=remote" }) |duplicate| {
+                    const args = [_][]const u8{ action, options[order[0]], options[order[1]], options[order[2]], duplicate };
+                    try testing.expect(parseArgs(args[0..4]) == .run);
+                    try testing.expect(parseArgs(&args) == .usage_error);
+                }
+            }
+        }
+    }
+    // Empty/relative dir values also count as supplied: a later value cannot repair them.
+    for ([_][]const u8{ "--dir=", "--dir=relative" }) |first| {
+        try testing.expect(parseArgs(&.{ "install", "--provider=claude", "--scope=remote", first, "--dir=/x" }) == .usage_error);
+    }
+    const literal = parseArgs(&.{ "install", "--provider=claude", "--scope=remote", "--dir=/x/--provider=codex" });
+    try testing.expect(literal == .run);
+    try testing.expectEqualStrings("/x/--provider=codex", literal.run.dir);
+    // Existing help precedence remains side-effect free even with duplicate arguments.
+    try testing.expect(parseArgs(&.{ "install", "--provider=claude", "--provider=codex", "--help" }) == .help);
+}
 
 test "parseArgs: 계약대로 온 인자만 돈다" {
     const m = parseArgs(&.{ "install", "--provider=claude", "--scope=remote", "--dir=/home/u/.cache/x" });

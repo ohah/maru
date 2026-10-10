@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real CLI failure contracts using private HOME/files and a fake endpoint."""
 import argparse
+import itertools
 import json
 import os
 from pathlib import Path
@@ -70,6 +71,71 @@ def verify(cli, root):
     for command in ['incidents', 'control', 'agent-events', 'agent-hooks', 'browser']:
         assert '  ' + command + ' ' in help_text, command
     run(['editor', 'editor'], 1)
+    # Provider overrides can escape a private HOME; pin both explicitly before hook calls.
+    hooks = root / 'hook-fixture'
+    hooks.mkdir()
+    env.update(CLAUDE_CONFIG_DIR=str(hooks / 'claude'), CODEX_HOME=str(hooks / 'codex'))
+    hook_dir = hooks / 'events' / '--provider=codex'
+
+    def hook_state():
+        state = {}
+        # Include directory permissions and symlinks, not just config/trust file bytes.
+        for base in [home, hooks]:
+            for p in [base, *base.rglob('*')]:
+                stat = p.lstat()
+                payload = os.readlink(p) if p.is_symlink() else p.read_bytes() if p.is_file() else None
+                state[str(p)] = (stat.st_mode, payload)
+        return state
+
+    def reject_hook_duplicates():
+        before = hook_state()
+        for action in ['install', 'uninstall']:
+            for provider in ['claude', 'codex']:
+                options = [f'--provider={provider}', '--scope=remote', f'--dir={hook_dir}']
+                extras = ['--provider=claude', '--provider=codex', f'--dir={hook_dir}', f'--dir={hooks / "other"}', '--scope=remote']
+                for order in itertools.permutations(options):
+                    for extra in extras:
+                        p = run(['agent-hooks', action, *order, extra], 2)
+                        assert not p.stdout and 'Each option may only be specified once.' in p.stderr
+            for first in ['--dir=', '--dir=relative']:
+                run(['agent-hooks', action, '--provider=claude', '--scope=remote', first, f'--dir={hook_dir}'], 2)
+        assert hook_state() == before, 'rejected hook selectors changed config, trust or log paths'
+
+    # Check both absence and already-installed hooks: uninstall must not remove existing state.
+    reject_hook_duplicates()
+    (hooks / 'claude').mkdir()
+    (hooks / 'codex').mkdir()
+    claude_settings = hooks / 'claude/settings.json'
+    claude_settings.write_text('{"keep":"sentinel"}\n')
+    codex_config = hooks / 'codex/config.toml'
+    codex_config.write_text('# keep sentinel\n')
+    for provider in ['claude', 'codex']:
+        args = ['agent-hooks', 'install', f'--provider={provider}', '--scope=remote', f'--dir={hook_dir}']
+        outcome = json.loads(run(args, 0).stdout)
+        assert outcome['provider'] == provider and outcome['action'] == 'install' and outcome['changed']
+        assert hook_dir.is_dir()
+        target = claude_settings if provider == 'claude' else hooks / 'codex/hooks.json'
+        assert 'MARU_HOOK_V3' in target.read_text() and str(hook_dir) in target.read_text()
+    assert json.loads(claude_settings.read_text())['keep'] == 'sentinel'
+    assert '# keep sentinel' in codex_config.read_text()
+    assert 'MARU_HOOK_V3' in codex_config.read_text() and 'trusted_hash' in codex_config.read_text()
+    reject_hook_duplicates()
+    before = hook_state()
+    for flag in ['--help', '-h']:
+        for action in ['install', 'uninstall']:
+            for extra in ['--provider=codex', f'--dir={hooks / "other"}', '--scope=remote']:
+                run(['agent-hooks', action, '--provider=claude', '--scope=remote', f'--dir={hook_dir}', extra, flag], 0)
+    assert hook_state() == before, 'hook help changed installed provider state'
+    for provider in ['claude', 'codex']:
+        options = [f'--provider={provider}', '--scope=remote', f'--dir={hook_dir}']
+        assert not json.loads(run(['agent-hooks', 'install', *options], 0).stdout)['changed']
+        outcome = json.loads(run(['agent-hooks', 'uninstall', *options], 0).stdout)
+        assert outcome['action'] == 'uninstall' and outcome['changed']
+        target = claude_settings if provider == 'claude' else hooks / 'codex/hooks.json'
+        assert 'MARU_HOOK_V3' not in target.read_text()
+    assert json.loads(claude_settings.read_text())['keep'] == 'sentinel'
+    assert '# keep sentinel' in codex_config.read_text()
+    assert 'MARU_HOOK_V3' not in codex_config.read_text()
     control = root / 'cache/maru/control'
     control.mkdir(parents=True)
     listener = socket.socket(socket.AF_UNIX)

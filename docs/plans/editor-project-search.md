@@ -378,7 +378,7 @@ S1/S2는 바꾸기를 실행하지 않는다. S4도 여러 파일 전체의 원�
 최종 저장은 기존 파일 저장/복구 계약을 재사용하되, 이미 구현된 `WorkspaceEdit`의 존재만으로 이 gate를 닫지 않는다.
 
 제품 검색·도크·취소·미저장 덮어쓰기·두벌식 HID·앱 RSS의 표본은 S2 문서를 따른다.
-S3 읽기 전용 미리보기는 [별도 구현·검증](editor-project-replace-preview.md)을 따른다. S4a 열린 문서 단일 파일 적용·자동 저장은 [적용 계획](editor-project-replace-apply.md)을 따른다. 디스크 전용·여러 파일 적용은 후속이다.
+S3 읽기 전용 미리보기는 [별도 구현·검증](editor-project-replace-preview.md)을 따른다. S4a 열린 문서와 S4b 디스크 단일 파일 적용·자동 저장은 [적용 계획](editor-project-replace-apply.md)을 따른다. 여러 파일 적용은 후속이다.
 CLI 프로브 통과를 전체 파일시스템·OS 입력기·감시 경계의 완료로 표시하지 않는다.
 
 

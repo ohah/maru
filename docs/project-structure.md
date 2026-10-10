@@ -609,3 +609,7 @@ L2 `session/editor/search/request.zig`는 요청 전체 예산과 행의 root �
 LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget …`이며,
 기존 `maru lsp …`는 동일한 parser와 request 실행 경로를 쓰는 호환 별칭이다.
 `maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.
+
+프로젝트 바꾸기 디스크 적용의 재검증 worker와 경로 소유는
+`src/platform/macos/app_session/editor/search/disk_apply.zig`에 둔다.
+`preview.zig`가 요청·취소·문서 로드·Undo/저장 결과를 연결하며, L2 Plan과 기존 저장 계약은 재사용한다.

@@ -1272,3 +1272,10 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 `test-cli-failure-contract`와 실제 process 검증은 대상이 필요한 17개 verb를 대조한다.
 
 프로젝트 바꾸기 열린 문서 단일 파일 적용·자동 저장·Undo·공유 뷰·할당 실패 판정: `mise exec -- zig build test-editor-project-replace-apply` ([범위](plans/editor-project-replace-apply.md)). macOS 전용 CI에도 연결한다. 실제 버튼·완료 알림·Esc 후 Cmd+Z·Cmd+S는 `python3 tools/editor-project-search-app/run.py --replace-apply --disk-files 2`로 제품 AppKit/Metal 경로에서 검사한다.
+
+디스크 단일 파일 바꾸기(S4b)의 실제 AppKit 버튼→자동 저장→Undo→재저장은
+`python3 tools/editor-project-search-app/run.py --replace-disk-apply --disk-files 2`로 검사한다.
+도메인/OOM 판정은 기존 `zig build test-editor-project-replace-apply`에 포함한다.
+
+`python3 tools/test-editor-project-replace-disk-adversarial.py --output <새 빈 디렉터리>`는
+격리 소스에서 디스크 적용의 원문·입력·root 보호 변이와 정상/등가 대조를 실행한다.

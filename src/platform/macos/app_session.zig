@@ -24322,6 +24322,7 @@ pub const AppSession = struct {
     /// 느린 CI 에서만, 그것도 **엉뚱한 판정자 이름으로** 터진다.
     fn quietDetachedWorkersForTest(self: *AppSession) void {
         @import("app_session/editor/search/preview.zig").quietForTest(self);
+        @import("app_session/editor/search/disk_apply.zig").quietForTest(self.io);
         // verify worker도 문서 snapshot 참조를 놓은 뒤에만 테스트 allocator를 결산한다.
         if (self.editor_search.nav) |*nav| {
             nav.cancel();

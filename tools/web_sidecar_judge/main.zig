@@ -35,6 +35,7 @@ const media_check = @import("media_check.zig");
 const close_check = @import("close_check.zig");
 const datalist_check = @import("datalist_check.zig");
 const download_check = @import("download_check.zig");
+const devtools_check = @import("devtools_check.zig");
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -107,6 +108,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         downloadChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--devtools")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        devtoolsChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--closeask")) {
@@ -211,6 +220,7 @@ pub fn main(init: std.process.Init.Minimal) u8 {
     closeAskChecks(host_path, profile_root);
     datalistChecks(host_path, profile_root);
     downloadChecks(host_path, profile_root);
+    devtoolsChecks(host_path, profile_root);
     parentDeath(host_path, profile_b) catch |err| report(false, "parent-death", "{s}", .{@errorName(err)});
 
     // 크래시 보고는 ReportCrash 가 몇 초 늦게 쓴다.
@@ -429,6 +439,16 @@ fn downloadChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var profile_buf: [1024]u8 = undefined;
     const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/s", .{profile_root}) catch return report(false, "download", "프로필 경로가 길다", .{});
     download_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "download", "{s}", .{@errorName(err)});
+}
+
+/// DevTools 호출 판정(W9-0b) — 프로필은 `<뿌리>/t`, 시한을 줄인 host 는 `<뿌리>/u`.
+fn devtoolsChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "devtools", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/t", .{profile_root}) catch return report(false, "devtools", "프로필 경로가 길다", .{});
+    var expired_buf: [1024]u8 = undefined;
+    const expired_profile = std.fmt.bufPrintZ(&expired_buf, "--profile-dir={s}/u", .{profile_root}) catch return report(false, "devtools", "프로필 경로가 길다", .{});
+    devtools_check.run(&reportText, host_path, profile, expired_profile, server.port) catch |err| report(false, "devtools", "{s}", .{@errorName(err)});
 }
 
 /// 팝업 이어 받기 판정(W6f①) — 프로필은 `<뿌리>/o`.

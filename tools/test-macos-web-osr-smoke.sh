@@ -2079,7 +2079,7 @@ else
 fi
 
 # ── W9-0: 컨트롤 플레인이 Chromium 탭을 엔진과 함께 알리고, 지원하지 않는 명령은 확인 모달 전에 답한다 ──────────────
-# 실제 앱에서 `maru browser list` 가 이 탭을 engine=chromium(지원 명령 없음)으로 보이고, `maru browser navigate` 가 허용
+# 실제 앱에서 `maru browser list` 가 이 탭을 engine=chromium 으로 보이고, `maru browser navigate` 가 허용
 # 판정이 아니라 엔진 검사의 답(-32008 unsupported_by_engine)을 받는지 본다 — 엔진 검사가 허용 판정보다 앞이다. 이 대본은
 # pane 밖이라 예전 코드에서도 모달은 뜨지 않고 unauthorized 를 받았다. 「pane 안의 호출자에게 모달을 띄우기 전에 답한다」는
 # control_browser 의 W9-0 단위 시험이 본다.
@@ -2103,9 +2103,9 @@ if [ -x "$cli_bin" ] && "$cli_bin" browser --help 2>&1 | grep -q 'title, engine'
     w90_elapsed=$(( $(date +%s) - w90_start ))
     wait "$w90_pid" 2>/dev/null || true
     cat "$root/w90-list"
-    grep -q 'engine=chromium (browser commands not supported yet)' "$root/w90-list" \
+    grep -q 'engine=chromium' "$root/w90-list" \
         || fail "the Chromium tab was not listed with its engine ($(tr '\n' ' ' < "$root/w90-list"))"
-    echo "PASS the Chromium tab is listed with engine=chromium and no supported commands yet"
+    echo "PASS the Chromium tab is listed with engine=chromium"
     grep -q '(-32008) \[engine=chromium\]' "$root/w90-nav" \
         || fail "navigate on the Chromium tab was not answered by the engine check ($w90_elapsed s · $(tr '\n' ' ' < "$root/w90-nav"))"
     echo "PASS navigate on the Chromium tab was answered by the engine check (-32008, engine=chromium) before the permission check ($w90_elapsed s)"

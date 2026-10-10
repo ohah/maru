@@ -71138,9 +71138,19 @@ test "SB1: 브랜치 선택은 git switch를 터미널에 넣기만 한다" {
     settings_ops.applyBranchMenuSelection(session, 99);
     try std.testing.expect(!session.chrome_host.notice.open);
 
-    // 정상 선택은 오류 없이 지나간다(무엇이 나가는지는 아래 순수 계약이 잠근다).
+    // 정상 선택 — 셸이 프롬프트에 있다고 알면 오류 없이 넣는다(무엇이 나가는지는 아래 순수 계약이 잠근다).
+    const branch_term = pane_ops.activePane(session).activeTerm();
+    branch_term.surface.core.semantic_state = .prompt;
     settings_ops.applyBranchMenuSelection(session, 1);
     try std.testing.expect(!session.chrome_host.notice.open);
+    // 셸이 무엇을 하는지 모르면(원격 셸·에이전트 TUI) 넣지 않고 클립보드로 준다 — 그렇다고 말한다(도크 주입과 같은 함수, 2026-10-11).
+    branch_term.surface.core.semantic_state = .unknown;
+    if (session.chrome_clipboard_write.len > 0) allocator.free(session.chrome_clipboard_write);
+    session.chrome_clipboard_write = &.{};
+    settings_ops.applyBranchMenuSelection(session, 1);
+    try std.testing.expectEqualStrings("git switch feat/status-bar", session.chrome_clipboard_write);
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.chrome_host.notice.dismiss();
 
     var cmd_buf: [128]u8 = undefined;
     const cmd = git_command.branchSwitchCommand(session.branch_menu_names[1], &cmd_buf).?;
@@ -78104,6 +78114,7 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
     // git 에 원격 경로를 넘기지 않는다), 넣었다고 말한다.
     // (인텐트로 못 몬다 — 이 스모크 세션에는 저장소 행이 없어 인텐트가 그 문까지 못 간다.)
     scm_dock_ops.clearScmWriteError(session);
+    term.surface.core.semantic_state = .prompt; // 그 셸이 프롬프트에 있다고 안다(OSC 133) — 넣는 갈래를 잰다(모름은 클립보드 — RS4c 판정자)
     const seq_before_remote_write = session.scm_write_seq;
     _ = scm_dock_ops.submitWriteForTest(session, "/srv/app", .stage);
     try std.testing.expectEqual(seq_before_remote_write, session.scm_write_seq);
@@ -79135,27 +79146,28 @@ test "히스토리: 첫 커밋 전 저장소는 «없다»고 말한다 — «�
     try std.testing.expect(saw_failed);
 }
 
-test "원격 pane 의 «돌고 있나» 는 낡은 관측을 믿지 않는다 (RS4c 적대적 검증 2회차)" {
-    const busy = term_ops.observationKnownBusy;
+test "원격 pane 의 셸 상태는 낡은 관측을 믿지 않는다 — 프롬프트·돎·모름 셋을 가른다 (RS4c 적대적 검증 2회차 · 주입 안전 2026-10-11)" {
+    const state = term_ops.observationShellState;
     const Sem = maru.terminal.SemanticPrompt;
+    const S = term_ops.ShellState;
 
     // ⑴ **`.current` 일 때만 판단한다.**
-    try std.testing.expect(busy(.current, false, Sem.command)); //  돌고 있다 — 넣지 않는다
-    try std.testing.expect(!busy(.current, false, Sem.prompt));
-    try std.testing.expect(!busy(.current, false, Sem.input));
-    // **모르면 넣는다** — OSC 133 을 내는 원격 셸은 소수라, 모름을 막음으로 접으면 흔한 경우를 통째로
-    // 막고 사용자는 왜 안 되는지도 모른다(닫기 확인과 기본값이 **반대**인 이유다).
-    try std.testing.expect(!busy(.current, false, Sem.unknown));
+    try std.testing.expectEqual(S.busy, state(.current, false, Sem.command)); // 돌고 있다 — 넣지 않는다
+    try std.testing.expectEqual(S.at_prompt, state(.current, false, Sem.prompt));
+    try std.testing.expectEqual(S.at_prompt, state(.current, false, Sem.input));
+    // **모른다**(OSC 133 없음) — 넣지 않고 클립보드로 준다(그 「모름」에 에이전트 TUI 가 든다).
+    try std.testing.expectEqual(S.unknown, state(.current, false, Sem.unknown));
 
-    // ⑵ ⚠️ **낡은 관측은 「모른다」다.** 거기 남은 `.command` 로 막으면 화면이 **거짓말한다** —
-    //    사용자는 프롬프트를 보고 있는데 「명령이 돌고 있습니다」가 뜬다.
-    try std.testing.expect(!busy(.stale, false, Sem.command));
-    try std.testing.expect(!busy(.stale, true, Sem.command));
-    try std.testing.expect(!busy(.unavailable, true, Sem.command));
+    // ⑵ ⚠️ **낡은 관측은 「모른다」다.** 거기 남은 `.command` 로 막으면 화면이 **거짓말하고**, 남은 `.prompt` 로 넣으면 그 사이
+    //    시작된 프로그램에 박힌다.
+    try std.testing.expectEqual(S.unknown, state(.stale, false, Sem.command));
+    try std.testing.expectEqual(S.unknown, state(.stale, false, Sem.prompt));
+    try std.testing.expectEqual(S.unknown, state(.stale, true, Sem.command));
+    try std.testing.expectEqual(S.unknown, state(.unavailable, true, Sem.command));
 
     // ⑶ **alt 화면은 semantic 과 무관하게 돈다** — 거기 넣으면 편집 중인 파일에 글자로 박힌다.
-    try std.testing.expect(busy(.current, true, Sem.prompt));
-    try std.testing.expect(busy(.current, true, Sem.unknown));
+    try std.testing.expectEqual(S.busy, state(.current, true, Sem.prompt));
+    try std.testing.expectEqual(S.busy, state(.current, true, Sem.unknown));
 }
 
 // **도크 뷰는 저마다 «활성 pane 을 어떻게 따라가는가» 를 답해야 한다.**
@@ -79409,6 +79421,8 @@ test "원격 fetch: 우리가 실행하지 않고 활성 pane 에 넣는다 (RS4
     // 이게 없으면 pane 은 로컬이라 주입이 늘 거절되고, 그러면 ⑵·⑶ 이 아무것도 안 본다.
     const term = pane_ops.activePane(session).activeTerm();
     try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    // 그 셸이 프롬프트에 있다고 안다(OSC 133) — 넣는 갈래다. 모르면 클립보드로 간다(⑸ ⓐ).
+    term.surface.core.semantic_state = .prompt;
     // **원격이 있다는 것을 이미 안다**(그 전에는 「모른다」라서 아무 말도 하지 않는 것이 맞다 —
     // 그 규율은 로컬과 원격이 같다).
     session.git_result = .{
@@ -79447,36 +79461,36 @@ test "원격 fetch: 우리가 실행하지 않고 활성 pane 에 넣는다 (RS4
         maru.i18n.t(.scm_remote_fetch_injected),
     ));
 
-    // ⑸ **돌고 있는 것을 알면 안 넣는다 — 그러나 모르면 넣는다.**
+    // ⑸ **프롬프트에 있다고 알 때만 넣는다 — 돌고 있다고 알면 안 넣고, 모르면 클립보드로 준다**(사용자 결정 2026-10-11).
     //
-    //    이 기본값이 닫기 확인(`termHasRunningJob`)과 **반대**인 것이 요점이다: OSC 133 을 내는 원격
-    //    셸은 소수라, 모름을 막음으로 접으면 흔한 경우를 통째로 막고 사용자는 왜 안 되는지도 모른다.
+    //    예전 규칙은 「모르면 넣는다」였다(OSC 133 을 내는 원격 셸은 소수라 막으면 흔한 경우를 통째로 막는다). 그 「모름」에 에이전트
+    //    TUI 가 들어, `maru ssh` pane 에서 claude 가 돌면 git 명령이 그 입력창에 박혔다. 클립보드는 흔한 경우도 막지 않는다.
     git_ops.rememberGitRepoDest(session, "user@build-box"); // 다시 같은 기계로
     {
         const t = pane_ops.activePane(session).activeTerm();
-        // ⓐ **모른다**(OSC 133 없음) → 넣는다.
+        // ⓐ **모른다**(OSC 133 없음) → 넣지 않고 클립보드로 — 그렇다고 말한다.
         t.surface.core.semantic_state = .unknown;
         t.surface.core.alt_active = false;
-        try std.testing.expect(!term_ops.activeTermKnownBusy(session, session.io));
+        try std.testing.expectEqual(term_ops.ShellState.unknown, term_ops.activeTermShellState(session, session.io));
         scm_dock_ops.clearScmWriteError(session);
+        if (session.chrome_clipboard_write.len > 0) allocator.free(session.chrome_clipboard_write);
+        session.chrome_clipboard_write = &.{};
         scm_dock_ops.submitFetchForTest(session);
-        try std.testing.expectEqualStrings(
-            maru.i18n.t(.scm_remote_fetch_injected),
-            session.scm_write_error.?,
-        );
+        try std.testing.expectEqualStrings(maru.i18n.t(.scm_command_copied), session.scm_write_error.?);
+        try std.testing.expectEqualStrings("git fetch --prune", session.chrome_clipboard_write);
         // ⓑ **돈다**(OSC 133 C) → 안 넣는다.
         t.surface.core.semantic_state = .command;
-        try std.testing.expect(term_ops.activeTermKnownBusy(session, session.io));
+        try std.testing.expectEqual(term_ops.ShellState.busy, term_ops.activeTermShellState(session, session.io));
         scm_dock_ops.clearScmWriteError(session);
         scm_dock_ops.submitFetchForTest(session);
         try std.testing.expectEqualStrings(maru.i18n.t(.scm_terminal_busy), session.scm_write_error.?);
         // ⓒ **alt 화면**(vim·less)은 semantic 과 무관하게 돈다 — 거기 넣으면 편집 중인 파일에 박힌다.
         t.surface.core.semantic_state = .prompt;
         t.surface.core.alt_active = true;
-        try std.testing.expect(term_ops.activeTermKnownBusy(session, session.io));
-        // ⓓ **프롬프트로 돌아오면** 다시 넣는다.
+        try std.testing.expectEqual(term_ops.ShellState.busy, term_ops.activeTermShellState(session, session.io));
+        // ⓓ **프롬프트로 돌아오면** 넣는다.
         t.surface.core.alt_active = false;
-        try std.testing.expect(!term_ops.activeTermKnownBusy(session, session.io));
+        try std.testing.expectEqual(term_ops.ShellState.at_prompt, term_ops.activeTermShellState(session, session.io));
         scm_dock_ops.clearScmWriteError(session);
         scm_dock_ops.submitFetchForTest(session);
         try std.testing.expectEqualStrings(
@@ -79496,7 +79510,7 @@ test "원격 fetch: 우리가 실행하지 않고 활성 pane 에 넣는다 (RS4
     defer allocator.free(src);
     try std.testing.expectEqual(
         @as(usize, 1),
-        std.mem.count(u8, src, "term_ops.submitPaste(self, command"),
+        std.mem.count(u8, src, "term_ops.typeCommandIfAtPrompt(self, command"),
     );
     try std.testing.expect(std.mem.count(u8, src, "injectIntoActiveTerminal(self,") >= 2);
 }

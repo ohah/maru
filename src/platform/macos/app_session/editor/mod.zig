@@ -15683,8 +15683,10 @@ test "WT6b-2b-ii 원격·묻지 않는 root 의 쓰기는 실행하지 않고 �
     const wa = git_backend_for_test.worker_allocator;
     const staged_status = "# branch.head main\n1 A. N... 000000 100644 100644 0000000000000000000000000000000000000000 78981922613b2afb6025042ff6bd878ac1994e85 a.txt\n";
 
-    // ⑴ 원격 — 그 pane 이 `maru ssh` 로 붙은 원격이고 목록도 그 원격이다. 목록의 자리는 하위 폴더(cwd)지만 경로는 루트 기준이다.
+    // ⑴ 원격 — 그 pane 이 `maru ssh` 로 붙은 원격이고 목록도 그 원격이다. 목록의 자리는 하위 폴더(cwd)지만 경로는 루트 기준이다. 그
+    // 셸은 프롬프트에 있다고 안다(OSC 133 — 모르면 클립보드로 간다; 그 갈래는 RS4c 판정자가 잰다).
     try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    term.surface.core.semantic_state = .prompt;
     fx.session.git_result = .{ .status = try wa.dupe(u8, staged_status), .ok = true };
     git_ops.rememberGitRepo(fx.session, "/srv/app/sub");
     git_ops.rememberGitRepoDest(fx.session, "user@build-box");
@@ -15730,6 +15732,7 @@ test "WT6b-2b-ii 홈 폴더가 저장소면(묻지 않는 root — 신뢰를 정
     pane.active_term = for (pane.terms.items, 0..) |t, i| {
         if (t.kind == .terminal) break i;
     } else return error.SkipZigTest;
+    pane.activeTerm().surface.core.semantic_state = .prompt; // 그 셸이 프롬프트에 있다고 안다(모름은 클립보드 — RS4c 판정자)
     const wa = git_backend_for_test.worker_allocator;
     fx.session.git_result = .{
         .status = try wa.dupe(u8, "# branch.head main\n1 A. N... 000000 100644 100644 0000000000000000000000000000000000000000 78981922613b2afb6025042ff6bd878ac1994e85 a.txt\n? b.txt\n"),

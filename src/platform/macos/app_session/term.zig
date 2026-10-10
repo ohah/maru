@@ -1012,51 +1012,73 @@ pub fn cancelPointerGestureForTermRemoval(self: *AppSession, tab_index: usize, p
     }
 }
 
-/// 활성 Term 이 **지금 명령을 돌리고 있다고 우리가 아는가**(RS4c 후속). `termHasRunningJob` 과 **기본값이
-/// 반대**라 따로 있다:
-///
-/// - 닫기 확인은 「모르면 물어본다」가 맞다 — 잘못 닫으면 돌던 작업이 죽는다.
-/// - **명령 주입은 「모르면 넣는다」가 맞다.** OSC 133 을 내는 원격 셸은 **소수**라, 모름을 막음으로
-///   접으면 흔한 경우를 통째로 막는다(그때 사용자는 왜 안 되는지도 모른다).
-///
-/// 그래서 `unknown` 을 **접지 않는다** — 컨트롤 플레인의 `atPromptWire` 3상과 같은 규율이다.
-pub fn activeTermKnownBusy(self: *AppSession, io: std.Io) bool {
-    if (!self.surface_initialized or self.tabs.items.len == 0) return false;
+/// 활성 Term 의 셸이 지금 어디에 있는가 — 주입(도크의 git 명령)의 판정이다. **아는 것만 안다**: 프롬프트에 있다고 알면 넣고, 돌고
+/// 있다고 알면(vim·less·도는 빌드·에이전트 TUI) 안 넣고, **모르면 넣지 않고 클립보드로 준다**(사용자 결정 2026-10-11 — 원격 셸은
+/// 보통 OSC 133 을 안 내 「모름」인데, 예전 규칙 「모르면 넣는다」는 그 pane 에서 도는 에이전트의 입력창에 git 명령을 글자로 박았다).
+/// 판정은 셸 통합(OSC 133)과 alt 화면이다 — 닫기 확인(`termHasRunningJob`)과 같은 신호다.
+pub const ShellState = enum { at_prompt, busy, unknown };
+
+pub fn activeTermShellState(self: *AppSession, io: std.Io) ShellState {
+    if (!self.surface_initialized or self.tabs.items.len == 0) return .unknown;
     const term = pane_ops.activePane(self).activeTerm();
-    if (term.kind != .terminal) return false;
-    if (!term.rt.live_initialized) return false;
-    if (term.surface.process_state == .exited) return false;
+    if (term.kind != .terminal) return .unknown;
+    if (!term.rt.live_initialized) return .unknown;
+    if (term.surface.process_state == .exited) return .unknown;
     if (term.surface.remote == null) {
         term.surface.lockCore(io);
         defer term.surface.unlockCore(io);
-        // alt 화면(vim·less)은 semantic 과 무관하게 **돌고 있다**(§3 alt 오버라이드와 같은 판정).
-        if (term.surface.core.alt_active) return true;
-        return term.surface.core.semantic_state == .command;
+        return shellStateOf(term.surface.core.alt_active, term.surface.core.semantic_state);
     }
-    // ⚠️ **`.current` 일 때만 믿는다**(적대적 검증 2회차). `.stale` 은 낡은 값이라, 거기 남은
-    // `.command` 로 막으면 **화면이 거짓말한다** — 사용자는 프롬프트를 보고 있는데 「명령이 돌고
-    // 있습니다」가 뜬다. 「모르면 넣는다」의 「모른다」에는 **낡음도 든다.**
-    return observationKnownBusy(
+    // ⚠️ **`.current` 일 때만 믿는다**(적대적 검증 2회차). `.stale` 은 낡은 값이라 「모름」이다 — 낡은 `.command` 로 막으면 프롬프트를 보는
+    // 사용자에게 「명령이 돌고 있습니다」가 뜨고, 낡은 `.prompt` 로 넣으면 그 사이 시작된 프로그램에 박힌다.
+    return observationShellState(
         term.rt.observation.availability,
         term.rt.observation.alt_active,
         term.rt.observation.semantic_state,
     );
 }
 
-/// host-backed 관측 → 「지금 돌고 있다고 **아는가**」. 순수라 헤드리스로 전수로 짚는다 — 스모크 세션의
-/// Term 은 in-process 라 위 함수만으로는 이 갈래를 **한 번도 안 지난다**(적대적 검증에서 그렇게 드러났다).
-///
-/// ⚠️ **`.current` 일 때만 믿는다.** `.stale` 은 낡은 값이라, 거기 남은 `.command` 로 막으면 화면이
-/// **거짓말한다** — 사용자는 프롬프트를 보고 있는데 「명령이 돌고 있습니다」가 뜬다. 「모르면 넣는다」의
-/// 「모른다」에는 **낡음도 든다.**
-pub fn observationKnownBusy(
+/// 우리가 만든 명령 한 줄을 사용자 터미널(활성 pane 의 활성 Term)에 준다 — 도크의 git 주입(`scm_dock.injectIntoActiveTerminal`)과
+/// 상태바 브랜치 전환(`settings.applyBranchMenuSelection`)이 **같은 이 함수**를 지난다(두 벌이면 한쪽만 고쳐진다 — 브랜치 전환은 예전에
+/// 이 규칙 밖에서 `pasteText` 로 바로 넣었고, 포커스가 커밋 상자면 거기에 박혔다). 셸이 프롬프트에 있다고 알 때만 개행 없이 넣는다
+/// (실행은 사용자가 한다). 돌고 있다고 알면 넣지 않는다. 모르면 클립보드에 복사한다(⌘X 와 같은 길 — 다음 tick 에 Swift 가
+/// NSPasteboard 에 쓴다). 알림은 호출자가 낸다 — 그 말이 서는 자리(도크 목록 줄·상태바 알림)가 호출자마다 다르다.
+pub const CommandDelivery = enum { typed, copied, busy, failed };
+
+pub fn typeCommandIfAtPrompt(self: *AppSession, command: []const u8) CommandDelivery {
+    switch (activeTermShellState(self, self.io)) {
+        .at_prompt => {
+            submitPaste(self, command, false, activeSurface(self).id);
+            return .typed;
+        },
+        .busy => return .busy,
+        .unknown => {
+            const copy = self.allocator.dupe(u8, command) catch return .failed;
+            if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
+            self.chrome_clipboard_write = copy;
+            return .copied;
+        },
+    }
+}
+
+/// host-backed 관측 → 셸 상태. 순수라 헤드리스로 전수로 짚는다 — 스모크 세션의 Term 은 in-process 라 위 함수만으로는 이 갈래를 **한 번도
+/// 안 지난다**(적대적 검증에서 그렇게 드러났다).
+pub fn observationShellState(
     availability: maru.app.term_runtime_backend.ObservationAvailability,
     alt_active: bool,
     semantic: maru.terminal.SemanticPrompt,
-) bool {
-    if (availability != .current) return false;
-    if (alt_active) return true; // alt 화면(vim·less)은 semantic 과 무관하게 돈다
-    return semantic == .command;
+) ShellState {
+    if (availability != .current) return .unknown;
+    return shellStateOf(alt_active, semantic);
+}
+
+fn shellStateOf(alt_active: bool, semantic: maru.terminal.SemanticPrompt) ShellState {
+    if (alt_active) return .busy; // alt 화면(vim·less)은 semantic 과 무관하게 돈다
+    return switch (semantic) {
+        .prompt, .input => .at_prompt, // A~C — 줄 편집기가 입력을 받는다
+        .command => .busy,
+        .unknown => .unknown,
+    };
 }
 
 /// 이 Term에 셸이 아닌 포그라운드 명령이 실행 중인가 — 닫기 확인의 단위 판정. live_pty 미초기화(attach 전)나

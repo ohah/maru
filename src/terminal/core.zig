@@ -2579,9 +2579,10 @@ test "cluster 상한: 한 칸에 결합 부호가 상한을 넘으면 넘친 몫
     defer core.deinit();
 
     // A + U+0301 을 상한의 네 배 — 상한 없이는 append마다 한 칸 긴 prefix가 intern돼 store가 4×cap개가 된다.
+    // 넘치는 몫은 블록이 다른 Mn·Me(키릴·히브리·태국·둘러싸기)로 섞는다 — 특정 코드포인트만 거르는 상한이면 샌다.
     try core.write("A");
     for (0..cap * 4) |_| try core.write("\u{0301}");
-    try core.write("x");
+    try core.write("\u{0483}\u{05B0}\u{0E31}\u{20DD}x");
 
     const s = core.snapshot();
     try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // 버린 부호도 0폭 — x가 바로 옆 칸
@@ -2598,6 +2599,18 @@ test "cluster 상한: 한 칸에 결합 부호가 상한을 넘으면 넘친 몫
     const exact = core.graphemeCluster(s2.cells[8].grapheme_id) orelse return error.NoCluster;
     try std.testing.expectEqual(cap, exact.len);
     for (exact) |cp| try std.testing.expectEqual(@as(u21, 0x0300), cp);
+
+    // 상한 도입 전 host 가 handoff 로 넘긴 상한 초과 cluster(디코드는 4096까지 받는다)에 부호가 더 와도
+    // id·store 가 그대로다 — `==` 가 아니라 `>=` 로 막아야 하는 이유.
+    try core.write("C");
+    var long: [cap + 36]u21 = undefined;
+    @memset(&long, 0x0302);
+    const long_id = try core.internGrapheme(&long);
+    core.screen.cells[9].grapheme_id = long_id;
+    const store_before = core.grapheme_store.items.len;
+    try core.write("\u{0303}");
+    try std.testing.expectEqual(long_id, core.screen.cells[9].grapheme_id);
+    try std.testing.expectEqual(store_before, core.grapheme_store.items.len);
 
     // 상한은 실제 텍스트에 닿지 않는다: 가장 긴 RGI 이모지 👩🏻‍❤️‍💋‍👨🏼(extra 9개)가 한 셀에 그대로 남는다.
     var emoji = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });

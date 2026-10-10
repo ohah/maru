@@ -836,7 +836,8 @@ comptime {
     std.debug.assert(prefix_len + common_len + 8 + 4 + 4 + message_mod.devtools_chunk_bytes <= max_frame_bytes);
     std.debug.assert(prefix_len + common_len + 8 + 4 + 1 + message_mod.max_devtools_method_bytes + 4 <= max_frame_bytes);
     std.debug.assert(message_mod.max_devtools_method_bytes <= std.math.maxInt(u8));
-    // 동시 호출의 인자가 다 차도(frame 머리까지) sidecar 명령 상자(1 MiB)의 60 % 안이다 — 나머지는 입력·이동 같은 다른 명령의 자리.
+    // 동시 호출의 인자가 다 차도(frame 머리까지) 640 KiB — sidecar 명령 상자(1 MiB)의 62.5 % — 안이다. 나머지는 입력·이동 같은 다른
+    // 명령의 자리.
     const per_call = message_mod.max_devtools_params_bytes + (message_mod.max_devtools_params_bytes / message_mod.devtools_chunk_bytes + 2) * 64;
     std.debug.assert(message_mod.max_devtools_calls * per_call <= 640 * 1024);
     std.debug.assert(message_mod.max_devtools_calls_per_browser <= message_mod.max_devtools_calls);

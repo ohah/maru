@@ -1013,7 +1013,7 @@ pub const DownloadDecide = struct {
 
 /// DevTools 호출(W9-0b) 상한 — 메서드 이름(`Domain.method`), 인자, 결과, 조각.
 pub const max_devtools_method_bytes: usize = 128;
-/// sidecar 의 명령 상자(1 MiB)를 넘지 않게: 동시 호출 `max_devtools_calls` 개가 다 차도 그 60 % 안이다(codec comptime).
+/// sidecar 의 명령 상자(1 MiB)를 넘지 않게: 동시 호출 `max_devtools_calls` 개가 다 차도 640 KiB(62.5 %) 안이다(codec comptime).
 pub const max_devtools_params_bytes: u32 = 64 * 1024;
 /// 인자 JSON 의 중첩 깊이 상한 — Chromium 의 CDP 파서는 깊이 한도가 있어 넘으면 번호 없이 오류를 내고(그 호출은 답을 받지
 /// 못한다), Zig `std.json.validate` 는 깊이를 보지 않는다(W9-0b 적대 리뷰).
@@ -1025,8 +1025,8 @@ pub const devtools_chunk_bytes: usize = 16 * 1024;
 /// 페이지 하나가 다른 탭의 호출을 막지 못한다(W9-0b 적대 리뷰 — 전체 4 개만 두었을 때는 막았다).
 pub const max_devtools_calls: usize = 8;
 pub const max_devtools_calls_per_browser: usize = 2;
-/// sidecar 가 답을 기다리는 시한 — 렌더러가 멈추면 CDP 는 답도 detach 도 주지 않는다. sidecar 는 주기적으로 넘은 호출을 `expired` 로
-/// 답하고 버린다. maru 는 30 초(control-plane 시한)에 호출을 끝내지만 sidecar 의 답이 올 때까지 그 자리를 쥔다(늦은 큰 결과를 읽는
+/// sidecar 가 답을 기다리는 시한 — 렌더러가 멈추면 CDP 는 답도 detach 도 주지 않는다. sidecar 는 주기적으로(시한의 1/4) 넘은 호출을
+/// `expired` 로 답하고 버린다 — 그래서 실제로는 35~44 초. maru 는 30 초(control-plane 시한)에 호출을 끝내지만 sidecar 의 답이 올 때까지 그 자리를 쥔다(늦은 큰 결과를 읽는
 /// 예산도) — 그래서 이 값은 maru 시한보다 조금 길다.
 pub const devtools_stale_ms: i64 = 35_000;
 

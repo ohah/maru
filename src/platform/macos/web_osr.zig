@@ -1832,6 +1832,7 @@ pub fn detachedPump() void {
 /// 창 tick 마다 부른다 — 파이프를 비우고 알림을 적용하고, 죽었으면 다시 띄운다. 여러 창이 불러도 값싸다.
 pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     gpa_ref = gpa;
+    defer deliverDevtools(gpa); // W9-0b: 이 tick 에 끝난 DevTools 호출을 알린다(어느 갈래로 끝나도)
     reapRetiring(gpa, now_ms);
     const generation = process_generation;
     const p = if (process) |*p| p else {
@@ -3145,6 +3146,10 @@ fn reapRetiring(gpa: std.mem.Allocator, now_ms: i64) void {
 }
 
 fn stop(gpa: std.mem.Allocator) void {
+    // W9-0b: 앱이 끝난다 — 기다리는 호출을 끝내고 곧바로 알린다(다음 tick 이 없다).
+    failDevtools(gpa, 0, .sidecar_gone, false);
+    deliverDevtools(gpa);
+    devtools_done.clearAndFree(gpa);
     parked.clearRetainingCapacity(); // W10c: 주차한 브라우저도 함께 끝난다(종료 확인이 받는 중인 다운로드 수를 알렸다)
     var p = process orelse {
         releaseRunCopy(&run_copy); // 띄우지 못한 사본이 남았더라도
@@ -3265,7 +3270,9 @@ pub const DevtoolsOutcome = enum {
     protocol,
 };
 
-/// 끝나면 메인 스레드에서 한 번 부른다. `result` 는 부르는 동안만 유효하다.
+/// 끝나면 메인 스레드에서 한 번 부른다 — 끝난 그 자리(탭 닫기·sidecar 정리·알림 적용 한가운데)가 아니라 그 tick 의 `pump` 끝에서
+/// (`deliverDevtools` — 콜백이 탭을 닫거나 새로 불러도 진행 중인 상태 전이를 깨지 않게, W9-0b 적대 리뷰 2 회차). `result` 는 부르는
+/// 동안만 유효하다. 앱이 끝날 때는 `sidecar_gone` 으로 곧바로 부른다.
 pub const DevtoolsSink = struct {
     ctx: *anyopaque,
     done: *const fn (ctx: *anyopaque, call: u32, outcome: DevtoolsOutcome, result: []const u8) void,
@@ -3290,14 +3297,30 @@ pub const devtools_timeout_ms: i64 = 30_000;
 const devtools_abandon_ms: i64 = 2 * ws.message.devtools_stale_ms;
 var devtools_pending: [ws.message.max_devtools_calls]?DevtoolsPending = @splat(null);
 var next_devtools_call: u32 = 0;
-/// sidecar 를 정리하는 중(`forgetSidecar`) — 콜백이 그사이 새 호출을 해도 죽은 sidecar 로 보내지 않는다(W9-0b 적대 리뷰).
-var devtools_closing = false;
 
-pub const DevtoolsCallError = error{ NotReady, Busy, InvalidMethod, InvalidParams };
+const DevtoolsDone = struct {
+    sink: DevtoolsSink,
+    call: u32,
+    outcome: DevtoolsOutcome,
+    /// `ok`·`cdp_error` 의 결과(소유 — 부른 뒤 놓는다).
+    result: std.ArrayList(u8),
+};
+/// 끝났지만 아직 알리지 않은 호출. 자리는 호출을 받을 때 잡는다(`devtoolsCall`) — 끝낼 때 메모리가 모자라 알림을 잃지 않게.
+var devtools_done: std.ArrayList(DevtoolsDone) = .empty;
+
+pub const DevtoolsCallError = error{ NotReady, Busy, InvalidMethod, InvalidParams, OutOfMemory };
 
 fn devtoolsPending() bool {
     for (devtools_pending) |p| if (p != null) return true;
     return false;
+}
+
+fn devtoolsUsedSlots() usize {
+    var n: usize = 0;
+    for (devtools_pending) |p| if (p != null) {
+        n += 1;
+    };
+    return n;
 }
 
 fn devtoolsFind(surface: u64, call: u32) ?usize {
@@ -3320,7 +3343,7 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     if (params.len > ws.message.max_devtools_params_bytes) return error.InvalidParams;
     if (params.len != 0 and (!isJsonObject(gpa, params) or !ws.fields.jsonDepthWithin(params, ws.message.max_devtools_params_depth))) return error.InvalidParams;
     const s = surfaces.getPtr(surface_id) orelse return error.NotReady;
-    if (!s.created or state == .off or state == .failed or devtools_closing) return error.NotReady;
+    if (!s.created or state == .off or state == .failed) return error.NotReady;
     var of_surface: usize = 0;
     for (devtools_pending) |p| if (p) |v| if (v.surface == surface_id) {
         of_surface += 1;
@@ -3329,6 +3352,8 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     const slot = for (&devtools_pending) |*p| {
         if (p.* == null) break p;
     } else return error.Busy;
+    // 끝날 때의 알림 자리 — 알리지 않은 것 + 기다리는 것 + 이 호출.
+    devtools_done.ensureTotalCapacity(gpa, devtools_done.items.len + devtoolsUsedSlots() + 1) catch return error.OutOfMemory;
     var call = next_devtools_call;
     while (true) {
         call +%= 1;
@@ -3346,8 +3371,8 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     return call;
 }
 
-/// 그 자리의 호출을 끝낸다 — 콜백을 부르기 전에 자리를 비우거나(`keep` 거짓) 버린 자리로 바꾼다(`keep` — sidecar 의 답을 기다린다).
-/// 이미 버린 자리면 콜백 없이 비우기만 한다(`keep` 이면 그대로).
+/// 그 자리의 호출을 끝내 알림 줄에 넣는다 — 자리를 비우거나(`keep` 거짓) 버린 자리로 바꾼다(`keep` — sidecar 의 답을 기다린다).
+/// 이미 버린 자리면 알리지 않고 비우기만 한다(`keep` 이면 그대로). 콜백은 여기서 부르지 않는다(`deliverDevtools`).
 fn devtoolsFinish(gpa: std.mem.Allocator, index: usize, outcome: DevtoolsOutcome, keep: bool, now_ms: i64) void {
     const p = if (devtools_pending[index]) |*v| v else return;
     const sink = p.sink orelse {
@@ -3359,13 +3384,23 @@ fn devtoolsFinish(gpa: std.mem.Allocator, index: usize, outcome: DevtoolsOutcome
     };
     const call = p.call;
     var result = p.result;
-    defer result.deinit(gpa);
     if (keep) {
         p.* = .{ .surface = p.surface, .call = p.call, .sink = null, .deadline_ms = now_ms + devtools_abandon_ms };
     } else {
-        devtools_pending[index] = null; // 콜백이 새 호출을 해도 자리가 있게 먼저 비운다
+        devtools_pending[index] = null;
     }
-    sink.done(sink.ctx, call, outcome, if (outcome == .ok or outcome == .cdp_error) result.items else "");
+    if (outcome != .ok and outcome != .cdp_error) result.clearAndFree(gpa);
+    // 자리는 `devtoolsCall` 이 잡아 두었다(알리지 않은 것 + 기다리는 것).
+    devtools_done.appendAssumeCapacity(.{ .sink = sink, .call = call, .outcome = outcome, .result = result });
+}
+
+/// 끝난 호출을 알린다(`pump` 끝 — 콜백이 탭을 닫거나 새로 불러도 된다. 그 사이 끝난 것도 이어서 알린다).
+fn deliverDevtools(gpa: std.mem.Allocator) void {
+    while (devtools_done.items.len > 0) {
+        var d = devtools_done.orderedRemove(0);
+        defer d.result.deinit(gpa);
+        d.sink.done(d.sink.ctx, d.call, d.outcome, d.result.items);
+    }
 }
 
 fn devtoolsData(gpa: std.mem.Allocator, v: ws.message.DevtoolsData) void {
@@ -3404,8 +3439,8 @@ fn devtoolsResult(gpa: std.mem.Allocator, v: ws.message.DevtoolsResult) void {
     devtoolsFinish(gpa, i, outcome, false, 0); // 버린 자리면 콜백 없이 푼다
 }
 
-/// 그 탭(0 이면 모든 탭)의 호출을 끝낸다. 자리마다 **지금** 값을 다시 읽는다 — 콜백이 탭을 닫아 다른 자리를 비울 수 있다(처음엔
-/// 배열 복사본을 돌아 비운 자리를 다시 풀었다 — W9-0b 적대 리뷰).
+/// 그 탭(0 이면 모든 탭)의 호출을 끝낸다. 자리마다 **지금** 값을 다시 읽는다(처음엔 콜백을 여기서 불러, 콜백이 탭을 닫으면 배열
+/// 복사본을 돌던 루프가 비운 자리를 다시 풀었다 — W9-0b 적대 리뷰 1 회차. 지금은 콜백을 미루지만 읽기 규칙은 그대로 둔다).
 fn failDevtools(gpa: std.mem.Allocator, surface: u64, outcome: DevtoolsOutcome, keep: bool) void {
     const now_ms = monotonicNow();
     for (0..devtools_pending.len) |i| {
@@ -3442,10 +3477,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         // 물은 닫기(W6j) — 답할 곳이 없다. 사용자는 닫기를 골랐다(떠나기 확인도 함께 사라졌다) — 창이 닫는다.
         if (s.close_ask == .asking or s.close_ask == .asked) s.close_ask = .closed;
     }
-    // W9-0b: 답은 오지 않는다 — 버린 자리도 푼다. 그사이 콜백의 새 호출은 받지 않는다.
-    devtools_closing = true;
-    failDevtools(gpa, 0, .sidecar_gone, false);
-    devtools_closing = false;
+    failDevtools(gpa, 0, .sidecar_gone, false); // W9-0b: 답은 오지 않는다 — 버린 자리도 푼다(알림은 pump 끝에)
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
     parked.clearRetainingCapacity(); // W10c: 주차한 브라우저도 sidecar 와 함께 사라졌다(다시 만들지 않는다 — 탭이 없다)
     web_downloads.sidecarLost(); // 받던 다운로드는 끝났다(W10a) — 임시 파일을 지우고 새 sidecar 의 번호와 섞이지 않게
@@ -4754,8 +4786,19 @@ const DevtoolsRecorder = struct {
     }
 };
 
+/// 알림을 적용하고 이 tick 의 DevTools 알림을 낸다(`pump` 끝과 같다).
+fn applyD(gpa: std.mem.Allocator, message: Message) void {
+    apply(gpa, message, 0);
+    deliverDevtools(gpa);
+}
+
 fn devtoolsTestSurface(id: u64, created: bool) !void {
     try surfaces.put(std.testing.allocator, id, .{ .record = .{ .surface_id = id, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = created });
+}
+
+fn expireDevtoolsD(gpa: std.mem.Allocator, now_ms: i64) void {
+    expireDevtools(gpa, now_ms);
+    deliverDevtools(gpa);
 }
 
 fn devtoolsUsed() usize {
@@ -4774,6 +4817,8 @@ test "W9-0b DevTools 호출: 인자는 조각으로 나가고, 결과는 모아 
             v.result.deinit(gpa);
             p.* = null;
         };
+        for (devtools_done.items) |*d| d.result.deinit(gpa);
+        devtools_done.clearAndFree(gpa);
         for (surfaces.values()) |*s| freeSurface(gpa, s);
         surfaces.deinit(gpa);
         surfaces = .empty;
@@ -4810,45 +4855,45 @@ test "W9-0b DevTools 호출: 인자는 조각으로 나가고, 결과는 모아 
     try std.testing.expect(devtoolsPending());
 
     // 결과 조각을 모아 알린 크기와 맞고 JSON 객체면 ok — 한 번만 답한다.
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c1, .bytes = "{\"result\":" } }, 0);
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 99, .call = c1, .bytes = "zz" } }, 0); // 다른 탭 — 섞이지 않는다
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c1, .bytes = "{\"value\":2}}" } }, 0);
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = c1, .status = .ok, .size = 22 } }, 0);
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c1, .bytes = "{\"result\":" } });
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 99, .call = c1, .bytes = "zz" } }); // 다른 탭 — 섞이지 않는다
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c1, .bytes = "{\"value\":2}}" } });
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c1, .status = .ok, .size = 22 } });
     try std.testing.expectEqual(@as(usize, 1), rec.count);
     try std.testing.expectEqual(c1, rec.call);
     try std.testing.expectEqual(DevtoolsOutcome.ok, rec.outcome.?);
     try std.testing.expectEqualStrings("{\"result\":{\"value\":2}}", rec.text());
     try std.testing.expect(!devtoolsPending());
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = c1, .status = .ok, .size = 0 } }, 0); // 늦은 답 — 버린다
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c1, .status = .ok, .size = 0 } }); // 늦은 답 — 버린다
     try std.testing.expectEqual(@as(usize, 1), rec.count);
 
     // 알린 크기와 받은 양이 다르면·JSON 객체가 아니면 protocol, CDP 오류는 그 객체를 싣는다, 결과 없는 상태는 그대로.
     const c2 = try devtoolsCall(gpa, 7, "A.b", "", rec.sink());
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c2, .bytes = "{}" } }, 0);
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = c2, .status = .ok, .size = 3 } }, 0);
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c2, .bytes = "{}" } });
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c2, .status = .ok, .size = 3 } });
     try std.testing.expectEqual(DevtoolsOutcome.protocol, rec.outcome.?);
     try std.testing.expectEqualStrings("", rec.text());
     const c3 = try devtoolsCall(gpa, 7, "A.b", "", rec.sink());
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c3, .bytes = "[1]" } }, 0);
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = c3, .status = .ok, .size = 3 } }, 0);
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c3, .bytes = "[1]" } });
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c3, .status = .ok, .size = 3 } });
     try std.testing.expectEqual(DevtoolsOutcome.protocol, rec.outcome.?);
     const c4 = try devtoolsCall(gpa, 7, "A.b", "", rec.sink());
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c4, .bytes = "{\"code\":-32601}" } }, 0);
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = c4, .status = .cdp_error, .size = 15 } }, 0);
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c4, .bytes = "{\"code\":-32601}" } });
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c4, .status = .cdp_error, .size = 15 } });
     try std.testing.expectEqual(DevtoolsOutcome.cdp_error, rec.outcome.?);
     try std.testing.expectEqualStrings("{\"code\":-32601}", rec.text());
     const c5 = try devtoolsCall(gpa, 7, "A.b", "", rec.sink());
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = c5, .status = .detached, .size = 0 } }, 0);
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c5, .status = .detached, .size = 0 } });
     try std.testing.expectEqual(DevtoolsOutcome.detached, rec.outcome.?);
 
     // 결과 상한을 넘으면 모으기를 멈추고 too_large.
     const c6 = try devtoolsCall(gpa, 7, "A.b", "", rec.sink());
     const piece: [ws.message.devtools_chunk_bytes]u8 = @splat(' ');
-    for (0..ws.message.max_devtools_result_bytes / piece.len) |_| apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c6, .bytes = &piece } }, 0);
+    for (0..ws.message.max_devtools_result_bytes / piece.len) |_| applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c6, .bytes = &piece } });
     try std.testing.expect(!devtools_pending[devtoolsFind(7, c6).?].?.overflow); // 상한까지는 모은다
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c6, .bytes = " " } }, 0);
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c6, .bytes = " " } });
     try std.testing.expectEqual(@as(usize, 0), devtools_pending[devtoolsFind(7, c6).?].?.result.capacity);
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = c6, .status = .ok, .size = ws.message.max_devtools_result_bytes } }, 0);
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c6, .status = .ok, .size = ws.message.max_devtools_result_bytes } });
     try std.testing.expectEqual(DevtoolsOutcome.too_large, rec.outcome.?);
     try std.testing.expect(!devtoolsPending());
 }
@@ -4861,6 +4906,8 @@ test "W9-0b DevTools 호출: 탭마다·전체 상한, 시한이 지나도 sidec
             v.result.deinit(gpa);
             p.* = null;
         };
+        for (devtools_done.items) |*d| d.result.deinit(gpa);
+        devtools_done.clearAndFree(gpa);
         for (surfaces.values()) |*s| freeSurface(gpa, s);
         surfaces.deinit(gpa);
         surfaces = .empty;
@@ -4883,63 +4930,72 @@ test "W9-0b DevTools 호출: 탭마다·전체 상한, 시한이 지나도 sidec
     try std.testing.expectError(error.Busy, devtoolsCall(gpa, 12, "A.b", "", rec.sink()));
     // 다른 탭(9·10·11)의 것은 sidecar 가 답해 비운다.
     for (0..devtools_pending.len) |i| if (devtools_pending[i]) |v| if (v.surface != 7) {
-        apply(gpa, .{ .devtools_result = .{ .browser = v.surface, .call = v.call, .status = .detached, .size = 0 } }, 0);
+        applyD(gpa, .{ .devtools_result = .{ .browser = v.surface, .call = v.call, .status = .detached, .size = 0 } });
     };
     try std.testing.expectEqual(@as(usize, 2), devtoolsUsed());
 
     // 시한 — 콜백(timeout)은 한 번씩 오지만 자리는 sidecar 의 답까지 남는다(그 탭은 여전히 Busy, 읽기 예산도 그대로).
     const base = rec.count;
     const later = monotonicNow() + devtools_timeout_ms;
-    expireDevtools(gpa, later - 2 * devtools_timeout_ms);
+    expireDevtoolsD(gpa, later - 2 * devtools_timeout_ms);
     try std.testing.expectEqual(base, rec.count);
-    expireDevtools(gpa, later);
+    expireDevtoolsD(gpa, later);
     try std.testing.expectEqual(base + 2, rec.count);
     try std.testing.expectEqual(DevtoolsOutcome.timeout, rec.outcome.?);
-    expireDevtools(gpa, later); // 두 번 답하지 않는다
+    expireDevtoolsD(gpa, later); // 두 번 답하지 않는다
     try std.testing.expectEqual(base + 2, rec.count);
     try std.testing.expectEqual(@as(usize, 2), devtoolsUsed());
     try std.testing.expect(devtoolsPending());
     try std.testing.expectError(error.Busy, devtoolsCall(gpa, 7, "A.b", "", rec.sink()));
     // 늦은 결과는 모으지 않고, 그 답이 자리를 푼다(콜백 없이).
-    apply(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = a1, .bytes = "{}" } }, 0);
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = a1, .bytes = "{}" } });
     try std.testing.expectEqual(@as(usize, 0), devtools_pending[devtoolsFind(7, a1).?].?.result.items.len);
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = a1, .status = .ok, .size = 2 } }, 0);
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = a1, .status = .ok, .size = 2 } });
     try std.testing.expectEqual(base + 2, rec.count);
     try std.testing.expectEqual(@as(usize, 1), devtoolsUsed());
     // sidecar 가 끝내 답하지 않으면 버린 자리도 결국 푼다.
-    expireDevtools(gpa, later + 2 * ws.message.devtools_stale_ms + 1);
+    expireDevtoolsD(gpa, later + 2 * ws.message.devtools_stale_ms + 1);
     try std.testing.expectEqual(base + 2, rec.count);
     try std.testing.expect(devtoolsFind(7, a2) == null and !devtoolsPending());
 
-    // 시한에 콜백이 그 탭을 닫는다 — 같은 탭의 다른 호출도 한 번(closed)만 답하고, 죽지 않는다.
+    // 시한에 콜백이 그 탭을 닫는다 — 같은 탭의 다른 호출도 한 번(closed)만 답하고(같은 알림 차례에 이어서), 죽지 않는다.
     const b1 = try devtoolsCall(gpa, 7, "A.b", "", rec.sink());
     _ = try devtoolsCall(gpa, 7, "A.b", "", rec.sink());
     const before = rec.count;
     rec.action = .destroy7;
-    expireDevtools(gpa, monotonicNow() + devtools_timeout_ms);
+    expireDevtoolsD(gpa, monotonicNow() + devtools_timeout_ms);
     try std.testing.expectEqual(before + 2, rec.count);
     try std.testing.expect(!surfaces.contains(7));
     // 닫은 탭의 자리는 sidecar 의 답(`detached`)까지 남고, 그 답이 콜백 없이 푼다.
     try std.testing.expectEqual(@as(usize, 2), devtoolsUsed());
-    apply(gpa, .{ .devtools_result = .{ .browser = 7, .call = b1, .status = .detached, .size = 0 } }, 0);
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = b1, .status = .detached, .size = 0 } });
     try std.testing.expectEqual(before + 2, rec.count);
     try std.testing.expectEqual(@as(usize, 1), devtoolsUsed());
 
     // 콜백 안의 새 호출 — 자리를 먼저 비운다.
     const c1 = try devtoolsCall(gpa, 9, "A.b", "", rec.sink());
     rec.action = .chain;
-    apply(gpa, .{ .devtools_result = .{ .browser = 9, .call = c1, .status = .busy, .size = 0 } }, 0);
+    applyD(gpa, .{ .devtools_result = .{ .browser = 9, .call = c1, .status = .busy, .size = 0 } });
     try std.testing.expect(rec.chained != null and rec.chained.? != c1);
 
-    // 페이지가 닫은 탭(sidecar 는 먼저 답했다 — 남은 것은 푼다)·sidecar 죽음(버린 자리까지 풀고, 그사이 새 호출은 받지 않는다).
-    apply(gpa, .{ .browser_closed = 9 }, 0);
+    // 페이지가 닫은 탭(sidecar 는 먼저 답했다 — 남은 것은 푼다)·sidecar 죽음(버린 자리까지 푼다).
+    applyD(gpa, .{ .browser_closed = 9 });
     try std.testing.expectEqual(DevtoolsOutcome.closed, rec.outcome.?);
     try std.testing.expect(devtoolsFind(9, rec.chained.?) == null);
     _ = try devtoolsCall(gpa, 10, "A.b", "", rec.sink());
     rec.action = .chain;
-    surfaces.getPtr(9).?.created = true;
     forgetSidecar(gpa);
-    try std.testing.expectEqual(DevtoolsOutcome.sidecar_gone, rec.outcome.?);
-    try std.testing.expectEqual(DevtoolsCallError.NotReady, rec.chain_error.?);
+    try std.testing.expect(rec.outcome.? != .sidecar_gone); // 콜백은 정리 한가운데가 아니라 tick 끝에
     try std.testing.expect(!devtoolsPending()); // 닫은 탭 7 의 버린 자리도
+    deliverDevtools(gpa);
+    try std.testing.expectEqual(DevtoolsOutcome.sidecar_gone, rec.outcome.?);
+    try std.testing.expectEqual(DevtoolsCallError.NotReady, rec.chain_error.?); // 닫힌 탭 9 — 브라우저가 없다
+
+    // 앱 종료 — 기다리는 호출을 곧바로 알린다(다음 tick 이 없다).
+    const before_stop = rec.count;
+    _ = try devtoolsCall(gpa, 10, "A.b", "", rec.sink());
+    stop(gpa);
+    try std.testing.expectEqual(before_stop + 1, rec.count);
+    try std.testing.expectEqual(DevtoolsOutcome.sidecar_gone, rec.outcome.?);
+    try std.testing.expect(!devtoolsPending());
 }

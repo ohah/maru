@@ -6952,12 +6952,14 @@ fn pushBrowserOp(
     async_id: u64,
     op: control_browser.BrowserOp,
 ) void {
-    // W3b: Chromium(OSR) 탭의 browser.* 는 W9(CDP) 전까지 지원하지 않는다 — WKWebView 가 없어 Swift 에 보내면 이유 없이
-    // 실패한다. 무엇이 안 되는지 알 수 있게 여기서 답한다(docs/plans/web-osr-backend.md 「control-plane 호환은 별도 단계」).
+    // W3b: Chromium(OSR) 탭의 op 은 Swift 에 보내지 않는다 — WKWebView 가 없어 이유 없이 실패한다. 지금은 L2 가 엔진
+    // 판정(`control_browser.surfaceSupports`, W9-0)으로 확인 모달 전에 먼저 거절해 여기 닿지 않는다. 닿으면 L2 와 같은
+    // `-32008` 로 답한다. **W9b 가 Chromium 메서드를 켤 때** 여기가 sidecar 로 보내는 분기가 된다 — 그때는 이 레코드
+    // 판정이 아니라 탭 단위 엔진(`isOsrTerm`)으로 가른다(한 번도 배치되지 않은 탭은 레코드가 없다).
     if (session_mod.web_ops.isOsrSurface(op.surface_id)) {
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
-        const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .failed, "browser.* is not supported by the Chromium engine yet") catch null;
+        const resp = control_browser.serializeUnsupportedByEngine(server.cross_gpa, pending.request_bytes, .chromium) catch null;
         _ = server.completeInFlight(async_id, resp);
         return;
     }

@@ -508,6 +508,14 @@ pub fn decideFrom(config_wants_chromium: bool, env_dir: ?[]const u8, installed_d
     return .{ .chromium = false, .not_installed = true };
 }
 
+/// 시험 전용 — 엔진 결정을 바꾸고 이전 값을 돌려준다(되돌릴 때 같은 함수로).
+pub fn setDecidedForTest(value: ?bool) ?bool {
+    if (!builtin.is_test) @compileError("setDecidedForTest is test-only");
+    const old = decided;
+    decided = value;
+    return old;
+}
+
 /// 첫 창이 설정을 읽은 뒤 부른다(두 번째부터는 무동작).
 pub fn decide(config_wants_chromium: bool) void {
     if (decided != null) return;

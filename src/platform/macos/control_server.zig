@@ -1826,7 +1826,7 @@ const test_caps = [_][]const u8{ "sessions.list", "session.get" };
 
 // 5f-0b-3b: browser.subscribe 왕복용 web surface 스냅샷(browserOpFromRequest는 대상이 web이어야 authz 통과). surface 30=web.
 const web_surfaces = [_]csurf.SurfaceDto{
-    .{ .surface_id = 30, .title = "browser", .window = 3, .detail = .{ .web = .{ .url = "https://ex/", .panel_kind = .browser, .loading = false, .trust = .untrusted } } },
+    .{ .surface_id = 30, .title = "browser", .window = 3, .detail = .{ .web = .{ .url = "https://ex/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .controllable = true } } },
 };
 const web_ids = [_]u64{30};
 const web_windows = [_]wm.WindowMembershipSnapshot{.{ .window_id = 3, .window_kind = .normal, .surface_ids = &web_ids }};

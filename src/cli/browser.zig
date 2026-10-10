@@ -23,7 +23,7 @@ pub const browser_help =
     \\capability the request opens a confirmation dialog; allowing it runs the command (§9.2 Model B).
     \\
     \\commands:
-    \\  list                                   list open web panels (id, url, title — for discovery)
+    \\  list                                   list open web panels (id, url, title, engine — for discovery)
     \\  navigate    --surface <id> <url>       navigate to URL
     \\  get-url     --surface <id>             print the current document URL
     \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
@@ -786,6 +786,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console };
 
 const unauthorized_code: i64 = -32002;
+const unsupported_by_engine_code: i64 = -32008;
 const unauthorized_hint =
     \\hint: browser requests are allowed from a command running in a maru pane's foreground job (an agent there,
     \\      or your shell). Not from another terminal, inside tmux/screen, or a background job while another
@@ -809,7 +810,13 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
     };
     if (resp.err) |e| {
-        try w.print("error: {s} ({d})\n", .{ e.message, e.code });
+        try w.print("error: {s} ({d})", .{ e.message, e.code });
+        // W9-0: 어느 엔진이 지원하지 않는지(`-32008` data) — 브라우저 탭이 아니면 그것이 이유다.
+        if (e.code == unsupported_by_engine_code) if (e.data) |d| if (d == .object) {
+            if (d.object.get("controllable")) |c| if (c == .bool and !c.bool) try w.writeAll(" [not a browser tab]");
+            if (d.object.get("engine")) |engine| if (engine == .string) try w.print(" [engine={s}]", .{engine.string});
+        };
+        try w.writeAll("\n");
         // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
         // unauthorized 만 주므로(존재 oracle 금지) 이유를 묻지 않고 늘 같은 안내를 붙인다 — 서버 정보가 새지 않는다.
         if (e.code == unauthorized_code) try w.writeAll(unauthorized_hint);
@@ -850,10 +857,14 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     strField(o.get("url")),
                     strField(o.get("title")),
                 });
-                // W9-0: 엔진(뒤에 붙인다 — 앞 칸을 읽던 대본이 그대로 돈다). 지원하는 명령이 없으면 그렇다고 적는다. 구 서버는 생략.
+                // W9-0: 엔진(뒤에 붙인다 — 앞 칸을 읽던 대본이 그대로 돈다). 실행할 수 있는 명령이 없으면 그 이유를 적는다
+                // (브라우저 탭이 아닌 markdown·파일 뷰 / 엔진이 아직 지원하지 않음). 구 서버는 생략.
                 if (o.get("engine")) |engine| {
                     try w.print("  engine={s}", .{strField(engine)});
-                    if (o.get("methods")) |methods| if (methods == .array and methods.array.items.len == 0)
+                    const controllable = if (o.get("controllable")) |c| c != .bool or c.bool else true;
+                    if (!controllable) {
+                        try w.writeAll(" (not a browser tab — browser commands do not apply)");
+                    } else if (o.get("methods")) |methods| if (methods == .array and methods.array.items.len == 0)
                         try w.writeAll(" (browser commands not supported yet)");
                 }
                 try w.writeAll("\n");
@@ -1728,6 +1739,23 @@ test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 
         try testing.expect(std.mem.indexOf(u8, out, "surface 3  browser  https://a/  \"A\"  engine=webkit\n") != null);
         try testing.expect(std.mem.indexOf(u8, out, "surface 4  browser  https://b/  \"B\"  engine=chromium (browser commands not supported yet)\n") != null);
     }
+    // 브라우저 탭이 아닌 web 패널(파일 HTML 뷰 — panel_kind 는 browser).
+    {
+        var buf: [512]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":5,\"url\":\"\",\"title\":\"p.html\",\"panel_kind\":\"browser\",\"engine\":\"webkit\",\"controllable\":false,\"methods\":[]}]}}", .list, &w);
+        try testing.expectEqualStrings("surface 5  browser    \"p.html\"  engine=webkit (not a browser tab — browser commands do not apply)\n", w.buffered());
+    }
+    // `-32008` 은 data 의 엔진(과 브라우저 탭 아님)을 붙인다.
+    {
+        var buf: [256]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported by this browser engine\",\"data\":{\"engine\":\"chromium\"}}}", .navigate, &w);
+        try testing.expectEqualStrings("error: Not supported by this browser engine (-32008) [engine=chromium]\n", w.buffered());
+        w = std.Io.Writer.fixed(&buf);
+        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported by this browser engine\",\"data\":{\"engine\":\"webkit\",\"controllable\":false}}}", .navigate, &w);
+        try testing.expectEqualStrings("error: Not supported by this browser engine (-32008) [not a browser tab] [engine=webkit]\n", w.buffered());
+    }
     // 빈 목록.
     {
         var buf: [128]u8 = undefined;
@@ -1933,7 +1961,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\capability the request opens a confirmation dialog; allowing it runs the command (§9.2 Model B).
         \\
         \\commands:
-        \\  list                                   list open web panels (id, url, title — for discovery)
+        \\  list                                   list open web panels (id, url, title, engine — for discovery)
         \\  navigate    --surface <id> <url>       navigate to URL
         \\  get-url     --surface <id>             print the current document URL
         \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression

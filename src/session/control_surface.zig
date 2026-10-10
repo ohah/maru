@@ -178,6 +178,11 @@ pub const WebMeta = struct {
     /// 그리는 엔진(W9-0). collector 가 탭 단위 결정(`isOsrTerm`)으로 채운다 — Chromium 브라우저가 아직 만들어지지 않은(한 번도
     /// 보이지 않은) 탭도 chromium 이다.
     engine: WebEngine = .webkit,
+    /// browser.* 를 실행할 수 있는 **브라우저 탭**인가(W9-0). markdown 패널과 파일 뷰(`.html`·`.pdf`·이미지·미디어·텍스트
+    /// 등 — 파일을 연 탭)는 아니다 — 앱이 그 패널에서는 어떤 browser 동작도 실행하지 않고 이벤트도 보내지 않는다. 파일
+    /// HTML 은 `panel_kind` 가 browser 라 그 칸만으로는 가를 수 없어 따로 싣는다. collector 가 `isBrowserTerm` 으로 채운다.
+    /// **기본값이 없다** — 만드는 곳이 빠뜨리면 「제어 가능」으로 열리지 않고 컴파일이 멈춘다.
+    controllable: bool,
 };
 
 /// kind에 따라 분기하는 전용 메타(tagged). terminal이면 web 필드를, web이면 terminal 필드를 **타입 수준에서**
@@ -541,7 +546,7 @@ fn webSurface(sid: u64, title: []const u8, meta: WebMeta) SurfaceDto {
 
 const fx_surfaces = [_]SurfaceDto{
     .{ .surface_id = 10, .generation = 0, .title = "shell-a", .window = 1, .tab = 0, .pane = 0, .focused = true, .detail = .{ .terminal = .{ .cwd = "/home/a", .git_branch = "main", .agent = .{ .kind = .claude, .state = .running }, .at_prompt = .not_at_prompt } } },
-    .{ .surface_id = 11, .generation = 0, .title = "docs", .window = 1, .tab = 1, .pane = 0, .focused = false, .detail = .{ .web = .{ .url = "https://x/y", .panel_kind = .markdown, .loading = false, .trust = .trusted } } },
+    .{ .surface_id = 11, .generation = 0, .title = "docs", .window = 1, .tab = 1, .pane = 0, .focused = false, .detail = .{ .web = .{ .url = "https://x/y", .panel_kind = .markdown, .loading = false, .trust = .trusted, .controllable = false } } },
     .{ .surface_id = 20, .generation = 2, .title = "shell-b", .window = 2, .tab = 0, .pane = 0, .focused = false, .detail = .{ .terminal = .{ .cwd = "/srv/b", .at_prompt = .at_prompt } } },
     .{ .surface_id = 30, .generation = 0, .title = "quick", .window = 3, .tab = 0, .pane = 0, .focused = false, .detail = .{ .terminal = .{ .at_prompt = .unknown } } },
 };
@@ -643,7 +648,7 @@ test "surface DTO: 원격 cwd 는 `cwd_host` 로 어느 기계인지 말한다 �
 
 // ── 2) DTO 직렬화 round-trip(web) ──
 test "surface DTO round-trip: web 전용 필드(url·panel_kind·loading·trust), terminal 필드 부재" {
-    const dto = webSurface(11, "docs", .{ .url = "https://x/y", .panel_kind = .browser, .loading = true, .trust = .untrusted });
+    const dto = webSurface(11, "docs", .{ .url = "https://x/y", .panel_kind = .browser, .loading = true, .trust = .untrusted, .controllable = true });
     const wire = try serializeSurface(testing.allocator, dto);
     defer testing.allocator.free(wire);
 
@@ -948,7 +953,7 @@ test "surfaceVisible: self/window/all이 window_membership.scopeAllowsSurface와
 // ── 17) kind() tag 헬퍼 ──
 test "SurfaceDto.kind()는 detail tag를 돌려준다" {
     try testing.expectEqual(SurfaceKind.terminal, termSurface(1, "s", .{}).kind());
-    try testing.expectEqual(SurfaceKind.web, webSurface(2, "w", .{ .panel_kind = .markdown, .trust = .trusted }).kind());
+    try testing.expectEqual(SurfaceKind.web, webSurface(2, "w", .{ .panel_kind = .markdown, .trust = .trusted, .controllable = false }).kind());
 }
 
 fn idEqlNum(id: cp.Id, n: i64) bool {

@@ -43,7 +43,7 @@ fn document(term: *Term) ?search.request.DocumentIdentity {
     const lease = term.rt.editor_document_lease orelse return null;
     return .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation };
 }
-fn resolve(session: *AppSession, target: search.batch.Target, before: []const u8) !*Term {
+fn resolve(session: *AppSession, target: search.batch.Target, before: ?[]const u8) !*Term {
     if (target.source != .model) return error.DiskTargetsNotSupported;
     const source = target.source.model;
     if (source.document.owner != @intFromPtr(session.editor_documents) or source.composition != 0) return error.StaleDocument;
@@ -72,7 +72,8 @@ fn resolve(session: *AppSession, target: search.batch.Target, before: []const u8
         if (state.remote != null or state.untitled != null) return error.UnsupportedDocument;
         if (opened.file.read_only) return error.ReadOnly;
         if (owner.compositionStamp(term) != 0) return error.InputTransactionPending;
-        if (opened.file.revision != source.revision or !std.mem.eql(u8, opened.file.content, before)) return error.StaleDocument;
+        if (opened.file.revision != source.revision) return error.StaleDocument;
+        if (before) |text| if (!std.mem.eql(u8, opened.file.content, text)) return error.StaleDocument;
         const path = state.path orelse return error.StaleDocument;
         const normalized = try std.fs.path.resolve(session.allocator, &.{path});
         defer session.allocator.free(normalized);
@@ -80,6 +81,12 @@ fn resolve(session: *AppSession, target: search.batch.Target, before: []const u8
         if (result == null or term == active) result = term;
     };
     return result orelse error.DocumentClosed;
+}
+
+/// 수집도 적용과 같은 정본·경로·점유 검사를 쓴다. worker는 이 snapshot만 읽는다.
+pub fn captureSnapshot(session: *AppSession, target: search.batch.Target) !maru.session.editor.buffer.Snapshot {
+    const term = try resolve(session, target, null);
+    return term.rt.editorDocument().opened.?.file.snapshot();
 }
 
 /// spec과 prepared는 호출자가 독립 소유해야 한다. 편집 통지가 검색 UI를 폐기해도 이 자원은 살아 있어야 한다.

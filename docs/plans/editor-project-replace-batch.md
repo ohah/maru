@@ -1,6 +1,6 @@
 # 프로젝트 바꾸기 — 여러 파일 적용 S4c
 
-상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. 검색 UI의 snapshot 수집·worker 시작·결과 적용 연결과 닫힌 파일 로드는 미착수다.
+상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일 배치는 미착수다.
 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo는 [연결 이력 계획](editor-history-transaction.md)이 소유한다.
 [S4a/S4b](editor-project-replace-apply.md)는 단일 파일 적용까지 구현됐다.
 
@@ -120,19 +120,19 @@ worker 완료는 snapshot을 해제한 뒤 release/acquire로 게시한다. `Job
 
 worker와 snapshot의 allocator는 스레드 안전해야 하고 마지막 참조 해제까지 살아 있어야 한다.
 worker 카운터는 마지막 자원 해제가 끝난 뒤 감소하며 기존 미리보기의 종료 대기 집계에 포함한다.
-기존 bounded shutdown 정책을 무한 대기로 바꾸지 않는다. UI의 job 보관·취소 연결은 후속이다.
-이 단계는 제품 버튼이나 검색 UI에서 worker를 호출하지 않는다.
+기존 bounded shutdown 정책을 무한 대기로 바꾸지 않는다. 열린 문서 UI가 job을 보관하고
+취소/닫기/해제 때 자기 참조를 놓는다. 테스트 종료 대기도 취소 후 마지막 worker 해제를 확인한다.
 
-## 후속 제품 연결 — 미착수
+## 제품 연결과 후속 범위
 
 - 완료 검색의 선택을 root capability로 해석하고 신원 있는 모델 snapshot을 worker에 전달한다.
-  worker는 Term 포인터를 빌리지 않는다. 취소/종료와 detached worker 완료 수명을 따로 정산한다.
+  worker는 Term 포인터를 빌리지 않는다. 열린 문서 UI에 연결했으며 취소/종료와 detached worker 완료 수명을 따로 정산한다.
 - worker가 준비한 명세/Plan과 준비 시작 ticket을 독립 소유해 현재 actor API에 연결한다.
   commit 직전 입력·옵션·root와 모든 문서 revision/원문/조합을 재검증한다.
   준비 성공만으로 실제 문서 충돌이 해결됐다고 판단하지 않는다.
 - 연결 조정자는 유효 편집이 둘 이상일 때 사용한다. 유효 편집 하나와 전부 변경 없음도 별도로 검증한다.
   이 경우의 열린 모델 API는 구현됐다. 기존 단일 파일 UI apply 반복 호출은 focus 이동·검색 상태 폐기 때문에 사용하지 않는다.
-- 자기 commit이 검색 fingerprint를 바꾸거나 알림이 검색 상태를 해제해도 적용 중 명세/Plan을 잃지 않는다.
+- 열린 문서 UI는 자기 commit이 검색 fingerprint를 바꾸거나 알림이 검색 상태를 해제해도 적용 중 명세/Plan을 잃지 않는다.
   원래 fingerprint를 무시해서 외부 변경 검사까지 끄지 않는다.
 - 같은 경로의 독립 문서는 선택 밖 열린 문서까지 점유 검사한다. 디스크 파일은 검증→로드→저장
   사이의 물리 신원 재검증과 symlink/hardlink 별칭 검출을 해결해야 한다.

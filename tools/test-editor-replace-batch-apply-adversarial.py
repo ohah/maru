@@ -27,7 +27,7 @@ undo_end = original[host].index("        // 반대편 이력은", undo_start)
 undo_block = original[host][undo_start:undo_end]
 cases = [
     ("control", original, True),
-    ("accept-stale-body", mutate(actor, "or !std.mem.eql(u8, opened.file.content, before)", "or (!std.mem.eql(u8, opened.file.content, before) and false)"), False),
+    ("accept-stale-body", mutate(actor, "!std.mem.eql(u8, opened.file.content, text)", "(!std.mem.eql(u8, opened.file.content, text) and false)"), False),
     ("ignore-real-root", mutate(actor, "try owner.validateRoots(session);", "if (session.file_tree.rootCount() == 0) try owner.validateRoots(session);"), False),
     ("ignore-edited-input", mutate(actor, "preview.settingsStamp(session) != self.settings)", "(preview.settingsStamp(session) != self.settings and false))"), False),
     ("stop-after-first-save-failure", mutate(actor, "result.save_failed += 1;", "result.save_failed += 1;\n            break;"), False),

@@ -14,6 +14,7 @@ const pane = @import("../../pane.zig");
 const render = @import("dock/render.zig");
 const navigation = @import("navigation.zig");
 pub const preview = @import("preview.zig");
+pub const batch_ui = @import("batch/ui.zig");
 pub const collect = render.collect;
 pub const publish = render.publish;
 
@@ -26,6 +27,7 @@ pub const State = struct {
     replacing: bool = false,
     apply_outcome: enum { none, saved, save_failed } = .none,
     preview: preview.State = .{},
+    batch: batch_ui.State = .{},
     focused: ?usize = null,
     options: [3]bool = .{ false, false, false },
     expanded: bool = false,
@@ -65,6 +67,7 @@ pub const State = struct {
         self.invalidate();
         self.dropPending(a);
         self.preview.deinit(a);
+        self.batch.deinit(a);
         self.result.deinit(a);
         for (&self.fields) |*field| field.deinit(a);
         self.entries.deinit(a);
@@ -104,6 +107,10 @@ pub fn resultRect(self: *const AppSession) maru.session.SplitRect {
 }
 pub fn scrollExtent(self: *const AppSession) AppSession.FileTreeScrollExtent {
     const st = &self.editor_search;
+    if (st.batch.active()) {
+        const height: u32 = @intCast(@min(@as(u64, st.batch.rowCount()) *| metrics(self).row, std.math.maxInt(u32)));
+        return .{ .content_h_px = height, .viewport_h_px = resultRect(self).h, .max_offset_px = height -| resultRect(self).h };
+    }
     if (st.preview.active()) {
         const count = if (st.preview.plan) |plan| plan.rows.items.len else 0;
         const height: u32 = @intCast(@min(@as(u64, count) *| metrics(self).row, std.math.maxInt(u32)));
@@ -140,6 +147,7 @@ pub fn canSearch(self: *const AppSession) bool {
 }
 fn stopRequest(self: *AppSession) void {
     self.editor_search.preview.invalidate(self.allocator);
+    self.editor_search.batch.invalidate(self.allocator);
     owner.cancel(self);
     self.editor_search.dropPending(self.allocator);
     if (self.editor_project_search_query) |*query| query.deinit(self.allocator);
@@ -159,6 +167,7 @@ pub fn changed(self: *AppSession) void {
 fn edited(self: *AppSession) void {
     if (self.editor_search.focused == 3) {
         self.editor_search.preview.invalidate(self.allocator);
+        self.editor_search.batch.invalidate(self.allocator);
         self.editor_search.invalidate();
         self.editor_search.result.generation +%= 1;
         self.metal_dirty = true;
@@ -328,6 +337,7 @@ pub fn pump(self: *AppSession) void {
     }
     navigation.poll(self);
     preview.poll(self);
+    batch_ui.poll(self);
     st.scroll.clamp(scrollExtent(self).max_offset_px);
 }
 pub fn handleRawKey(self: *AppSession, event: maru.terminal.KeyEvent) bool {
@@ -529,6 +539,14 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             st.fields[index].moveEnd(false);
         },
         .option => |index| {
+            if (index == 10 or index == 9 and st.batch.active()) {
+                if (st.batch.active()) batch_ui.apply(self) catch |err| {
+                    applyFailure(self, err);
+                } else batch_ui.start(self) catch |err| {
+                    applyFailure(self, err);
+                };
+                return;
+            }
             if (index == 9) {
                 const result = preview.apply(self) catch |err| {
                     applyFailure(self, err);
@@ -548,8 +566,10 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
                     return;
                 };
             } else if (index == 7) {
+                batch_ui.back(self);
                 preview.back(self);
             } else if (index == 6) {
+                batch_ui.back(self);
                 preview.back(self);
                 st.replacing = !st.replacing;
                 if (!st.replacing and st.focused == 3) st.focused = 0;
@@ -562,10 +582,19 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
                 st.result.generation +%= 1;
             }
         },
-        .run => run(self),
+        .run => {
+            if (!canSearch(self)) return;
+            batch_ui.back(self);
+            preview.back(self);
+            run(self);
+        },
         .cancel => cancel(self),
         .row => |index| {
-            if (st.preview.active()) return;
+            if (st.batch.active()) {
+                batch_ui.openResult(self, index);
+                return;
+            }
+            if (st.preview.active() or st.batch.active()) return;
             if (index >= st.result.model.visible.items.len) return;
             if (st.replacing) {
                 preview.start(self, index) catch |err| {

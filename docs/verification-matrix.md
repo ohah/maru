@@ -13,7 +13,7 @@
 | 문서 전체 정규식 | 구현·집중 자동/Metal 검증 | `FND35~39`, `EDREG1~4`, 독립 원문 범위·오류 대조와 현재/비현재 여러 줄 강조의 픽셀 대조 | 실제 OS/HID/IME 콜백과 프로젝트 worker는 이 검사의 범위 밖 |
 | VS Code 기본 검색 판정 | 구현·집중 검증 | `FND40~41`, `EDREG5`, 실제 VS Code Searcher와 공통 문법 1,380조합 범위 대조, 단어 강조/비강조 제품 Metal 픽셀 | 기본 구분자·단일 줄 오라클 범위. 사용자 지정 구분자·전체 JS 정규식 호환·실제 OS 입력의 증거는 아님 |
 | 프로젝트 검색 rg 기반 | 구현·로컬 검증 | query/event/stream unit와 OOM·전문 절단, 실제 offline helper/어댑터 fixture, 앱 내 universal helper·114 notice·서명, 변조/누락 음성 대조 | 제품 worker·열린 모델 우선·취소·도크·실제 IME는 후속. CLI 통과를 앱 검색 완료로 표시하지 않는다 |
-| 프로젝트 전체 검색·바꾸기 미리보기 | 검색 worker·도크와 읽기 전용 바꾸기 미리보기 구현 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·전체 파일시스템·OS watcher/종료 경계·바꾸기. 검색 UI·실제 HID·제품 취소·앱 RSS·시각 캡처의 표본은 [도크 검증](plans/editor-project-search-dock.md)을 따른다. 바꾸기 미리보기는 [S3 판정](plans/editor-project-replace-preview.md)의 범위를 따르며 S4a 열린 문서·S4b 디스크 단일 파일 적용·저장은 [적용 판정](plans/editor-project-replace-apply.md)을 따른다. 여러 파일 적용은 미구현이다. 디스크 적용은 worker 재검증과 main actor 문서 로드·원문 대조를 거치며 외부 변경·늦은 완료·OOM·저장 실패의 보호 경계를 별도로 검사한다. CLI 통과는 제품 완료의 증거가 아니다 |
+| 프로젝트 전체 검색·바꾸기 미리보기 | 검색 worker·도크와 읽기 전용 바꾸기 미리보기 구현 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·전체 파일시스템·OS watcher/종료 경계·바꾸기. 검색 UI·실제 HID·제품 취소·앱 RSS·시각 캡처의 표본은 [도크 검증](plans/editor-project-search-dock.md)을 따른다. 바꾸기 미리보기는 [S3 판정](plans/editor-project-replace-preview.md)의 범위를 따르며 S4a 열린 문서·S4b 디스크 단일 파일 적용·저장은 [적용 판정](plans/editor-project-replace-apply.md)을 따른다. 여러 열린 문서 적용은 [배치 UI](plans/editor-project-replace-batch-ui.md)로 연결했으며 닫힌 파일 배치는 미구현이다. 디스크 적용은 worker 재검증과 main actor 문서 로드·원문 대조를 거치며 외부 변경·늦은 완료·OOM·저장 실패의 보호 경계를 별도로 검사한다. CLI 통과는 제품 완료의 증거가 아니다 |
 
 ### 영속 세션 P5 세부 상태
 
@@ -4162,7 +4162,7 @@ namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 �
 `LHT1`~`LHT6`와 `LHG1`~`LHG11`이 취소/현재/전체, 후속 편집·Redo 폐기·마지막 뷰 닫힘,
 확인 뒤 상태 변화, 공유 뷰, IME 거절, 모든 준비 할당 실패, 상한과 신원 고갈을 검사한다.
 제품 AppKit 입력·Confirm 버튼·Metal 캡처는 `tools/editor-linked-history-app/run.py`로 실행한다.
-검색 배치 UI·닫힌 파일 로드·기존 WorkspaceEdit 통합·자동 저장·다른 창 전체 게이트와 물리 IME는
+닫힌 파일 배치 로드·기존 WorkspaceEdit 통합·다른 창 전체 게이트와 물리 IME는
 이 완료 범위에 포함하지 않는다([계획](plans/editor-history-transaction.md)).
 
 프로젝트 바꾸기 배치는 **선택 명세·전체 Plan 준비 부분 구현**이다. `test-editor-project-replace-batch`의
@@ -4170,20 +4170,30 @@ namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 �
 모든 예약 할당 실패를 검사한다. 모델 결함 주입 도구에서 보호를 없앴을 때 실제 판정이 실패하는지도 확인한다.
 actor 편집·자동 저장·선택/진행 UI·디스크 적용은 이 gate에 포함하지 않는다.
 `RPBP1`~`RPBP5`는 전체 Plan·마지막 대상 실패·원문 신원·총량·취소·변경 없음과 모든 준비 할당 실패를 검사한다.
-전체 준비 후 함께 반영하는 정책은 사용자 승인됐으며, [배치 계획](plans/editor-project-replace-batch.md)의 worker·UI 연결이 남았으며 열린 모델 actor·저장 API는 아래 별도 gate로 검사한다.
+전체 준비 후 함께 반영하는 정책은 사용자 승인됐으며, [배치 계획](plans/editor-project-replace-batch.md)의 열린 문서 UI와 연결했으며 열린 모델 actor·저장 API는 아래 별도 gate로 검사한다.
 
 프로젝트 바꾸기의 **열린 모델 actor·자동 저장 API는 부분 구현**이다.
 `test-editor-project-replace-batch-apply`의 `RPBA1`~`RPBA13`는 실제 AppSession의 두 문서
 반영/저장/연결 Undo, model 원문 충돌 시 전부 보존, 입력/root/IME, 첫/마지막 저장 실패의
 dirty/Undo와 다음 저장, no-op/단일 유효 편집, 공유 뷰/focus, 모든 actor 예약 실패,
 선택 밖 동일 경로 점유·닫기·disk source 거절, 선택 없는 일반 Undo의 초기 커서 OOM, cached capability만으로 놓치던 실제 root 교체를 검사한다.
-UI에서 호출되지 않는 API이므로 배치 제품 버튼·worker 연결·물리 IME 완료는 아니다.
+열린 문서 제품 UI가 호출하며 실제 완료 검색/worker/버튼 경로는 아래 UI gate가 별도로 확인한다.
+물리 IME 완료 판정은 아니다.
 watcher/model에 아직 반영되지 않은 디스크 변경은 파일별 CAS 저장 실패로 결산하며
-디스크 별칭/점유·비활성 로드와 UI 결과 표시가 [배치 계획](plans/editor-project-replace-batch.md)의 후속이다.
+디스크 별칭/점유·비활성 로드가 [배치 계획](plans/editor-project-replace-batch.md)의 후속이다.
 
 `test-editor-project-replace-batch-worker`의 `RPBW1`~`RPBW6`와 초기 import 판정자 하나는
 불변 snapshot 두 개의 준비·Buffer 종료·시작 Ticket 보존·결과 단회 이동, 완료 뒤 취소,
 caller 조기 종료와 detached worker 완료 해제, 신원/예산/disk 거절의 caller 소유권,
 모든 준비 할당 실패와 마지막 원문 충돌 시 전체 Plan 폐기를 검사한다.
 결함 주입 도구는 취소·Ticket·모델 신원·예산 보호가 빠지면 판정이 실제 실패하는지 검사한다.
-실제 UI 호출/취소·actor 적용 연결, 물리 IME·OS thread spawn 실패 주입은 별도 문턱이다.
+실제 UI 호출/취소·actor 적용 연결은 아래 gate로 확인한다. 물리 IME·OS thread spawn 실패 주입은 별도 문턱이다.
+
+
+`test-editor-project-replace-batch-ui`의 `RPBU1`~`RPBU6`와 import 판정자 4개는 실제 완료 검색에서
+열린 문서 전체를 동결/준비/적용/자동 저장한다. 닫힌 파일 수 표시·접힌 결과 포함,
+자기 알림 뒤 과거 결과 보존/연결 Undo, 입력·IME·취소·닫기, 첫 저장 실패 뒤 다음 저장,
+no-op/단일 유효 편집/disk 전용 거절, 닫힌 결과 문서 재열기 금지, 모든 수집/worker 준비 OOM·
+화면 게시 OOM을 검사한다. `test-editor-project-search-dock`는 배치 동작을 포함해 27개를 고른다.
+실제 AppKit 클릭과 오른쪽/하단 제품 Metal 화면은 [배치 UI 계획](plans/editor-project-replace-batch-ui.md)의
+하네스가 검사한다. Undo/Save fixture API 호출을 물리 키 입력이나 VoiceOver 증거로 표현하지 않는다.

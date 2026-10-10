@@ -16,7 +16,7 @@ pub fn rowId(index: usize) u64 {
 pub const Buffers = struct { nodes: []tree.UiNode, entries: []tree.RectEntry, items: []layout.Item, flex: []layout.FlexScratch, rects: []layout.UiRect, actions: []ids.Entry };
 pub const Frame = struct { tree: tree.UiRectTree, actions: []const ids.Entry, metrics: types.Metrics };
 pub fn size(rows: usize) usize {
-    return rows +| 41;
+    return rows +| 43;
 }
 pub fn build(p: types.Props, b: Buffers) !Frame {
     if (!std.math.isFinite(p.viewport.width) or p.viewport.width < 0 or p.viewport.width >= 4294967296.0) return error.InvalidGeometry;
@@ -27,7 +27,7 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
     if (b.nodes.len < size(p.rows.len)) return error.InsufficientBuffer;
     var table = ids.Table.init(b.actions);
     var n: usize = 0;
-    const header = b.nodes[n..][0 .. (if (p.expanded) @as(usize, 6) else 4) + @intFromBool(p.replacing) + m.toolbar_rows - 1 + @as(usize, @intFromBool(!m.query_inline))];
+    const header = b.nodes[n..][0 .. (if (p.expanded) @as(usize, 6) else 4) + 2 * @as(usize, @intFromBool(p.replacing)) + m.toolbar_rows - 1 + @as(usize, @intFromBool(!m.query_inline))];
     n += header.len;
     const fields = b.nodes[n..][0..4];
     n += 4;
@@ -75,6 +75,14 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
     }
     if (p.replacing) {
         header[tail] = tree.container(.{ .id = 14, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, fields[3..4]);
+        tail += 1;
+        header[tail] = tree.button(.{
+            .id = 44,
+            .variant = .secondary,
+            .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } },
+            .action = try table.append(p.generation, .{ .option = 10 }, p.can_batch),
+            .semantics = .{ .role = .button, .label = if (p.batch_semantic_label.len > 0) p.batch_semantic_label else p.batch_label, .enabled = p.can_batch },
+        });
         tail += 1;
     }
     header[tail] = tree.card(.{ .id = 7, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } }, .paint = .{ .opacity = 0, .shadow = .none }, .semantics = .{ .role = .text, .label = p.scopes } }, &.{});

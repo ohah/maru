@@ -81,14 +81,6 @@ gh pr edit <번호> --add-assignee ohah --add-label <영역>,<성격>
 
 일회성 분류(`duplicate`·`invalid`·`question`·`wontfix`·`good first issue`·`help wanted`)는 이슈용이며 PR 필수 라벨로 치지 않는다.
 
-## PR별 적대적 검증
-
-2026-10-10 사용자 결정: 모든 PR마다 적대적 검증을 최소 5회 수행한다. 같은 검사 재실행만으로
-횟수를 채우지 않고 변경에 맞는 서로 다른 반례·실패 경계·대안 관점을 검토한다.
-본문에는 회차 제목이나 횟수보다 발견한 결함·수정·확인한 결과·남은 한계를 적는다.
-설계/문서 검토와 제품 실행 검증을 구분하며, 실행하지 않은 검증은 완료로 표시하지 않는다.
-코드 변경은 재현 가능한 판정과 필요한 보호 조건 대조를 사용하고, 수정 후 영향을 받는 검사와 CI를 다시 확인한다.
-
 ## CI 게이트 — 무엇이 머지를 막나 (2026-08-31 사용자 결정)
 
 **required check 는 여섯이다**: `check` · `require label and assignee=ohah` · `core performance budget` ·

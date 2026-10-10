@@ -382,6 +382,15 @@ pub const Locator = union(enum) {
     /// W9b② — 역할·이름(`{"locator":{"role","name"?,"level"?,"exact"?,"nth"?}}`). Chromium 만(WebKit 은 모달 전 `-32008`). 역할 이름의
     /// 해석(허용 목록·별칭)은 엔진이 한다 — L2 는 모양·상한만 본다.
     role: RoleLocator,
+    /// W9b②-2 — 보이는 글(`{"locator":{"text","exact"?,"nth"?}}`)·라벨(`{"label",…}`)로. Chromium 만.
+    text: TextLocator,
+    label: TextLocator,
+};
+
+pub const TextLocator = struct {
+    value: []const u8,
+    exact: bool = false,
+    nth: ?i64 = null,
 };
 
 pub const RoleLocator = struct {
@@ -561,10 +570,37 @@ fn parseLocator(obj: std.json.ObjectMap) ParamError!Locator {
     if (given != 1) return error.InvalidParams;
     if (selector) |s| return .{ .selector = s };
     if (ref) |r| return .{ .ref = r };
-    return .{ .role = try parseRoleLocator(locator.?) };
+    const lv = locator.?;
+    if (lv == .object and lv.object.get("role") == null) {
+        if (lv.object.get("text") != null) return .{ .text = try parseTextLocator(lv, "text") };
+        if (lv.object.get("label") != null) return .{ .label = try parseTextLocator(lv, "label") };
+    }
+    return .{ .role = try parseRoleLocator(lv) };
 }
 
-/// `locator` 객체 — 지금은 role 만(label·text 는 W9b②-2). 모르는 키·틀린 타입·빈 글·상한 초과·이름 없는 exact 는 invalid_params.
+/// `{text|label, exact?, nth?}` — 키 집합을 엄격히(role 의 name·level 은 받지 않는다). 빈 글·상한 초과·틀린 타입은 invalid_params.
+fn parseTextLocator(v: std.json.Value, field: []const u8) ParamError!TextLocator {
+    const o = v.object;
+    var it = o.iterator();
+    while (it.next()) |e| {
+        const k = e.key_ptr.*;
+        if (!(eq(k, field) or eq(k, "exact") or eq(k, "nth"))) return error.InvalidParams;
+    }
+    const value = try strFromObj(o, field);
+    if (value.len == 0 or value.len > max_locator_text_bytes) return error.InvalidParams;
+    var r: TextLocator = .{ .value = value };
+    if (o.get("exact")) |x| {
+        if (x != .bool) return error.InvalidParams;
+        r.exact = x.bool;
+    }
+    if (o.get("nth")) |n| {
+        if (n != .integer or n.integer < 0 or n.integer > 1_000_000) return error.InvalidParams;
+        r.nth = n.integer;
+    }
+    return r;
+}
+
+/// `locator` 객체의 role 갈래. 모르는 키·틀린 타입·빈 글·상한 초과·이름 없는 exact 는 invalid_params.
 fn parseRoleLocator(v: std.json.Value) ParamError!RoleLocator {
     if (v != .object) return error.InvalidParams;
     const o = v.object;
@@ -757,6 +793,21 @@ fn writeLocatorFields(s: *std.json.Stringify, locator: Locator) !void {
                 try s.write(true);
             }
             if (r.nth) |n| {
+                try s.objectField("nth");
+                try s.write(n);
+            }
+            try s.endObject();
+        },
+        .text, .label => |t| {
+            try s.objectField("locator");
+            try s.beginObject();
+            try s.objectField(if (locator == .text) "text" else "label");
+            try s.write(t.value);
+            if (t.exact) {
+                try s.objectField("exact");
+                try s.write(true);
+            }
+            if (t.nth) |n| {
                 try s.objectField("nth");
                 try s.write(n);
             }
@@ -1739,6 +1790,16 @@ fn serializeActMatchedResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const
     if (parsed.value != .object) return error.InvalidActPayload;
     const ok = parsed.value.object.get("ok") orelse return error.InvalidActPayload;
     if (ok != .bool) return error.InvalidActPayload;
+    // 못 찾았지만 숨은 일치가 있었다(W9b②-2) — `{ok:false, hint}`.
+    if (!ok.bool) {
+        const hint = parsed.value.object.get("hint") orelse return error.InvalidActPayload;
+        if (hint != .string) return error.InvalidActPayload;
+        var haw: std.Io.Writer.Allocating = .init(gpa);
+        defer haw.deinit();
+        var hs: std.json.Stringify = .{ .writer = &haw.writer, .options = .{} };
+        writeActHint(&hs, id, hint.string) catch return error.OutOfMemory;
+        return haw.toOwnedSlice();
+    }
     const matched = parsed.value.object.get("matched") orelse return error.InvalidActPayload;
     if (matched != .object) return error.InvalidActPayload;
     const ref = matched.object.get("ref") orelse return error.InvalidActPayload;
@@ -1749,6 +1810,15 @@ fn serializeActMatchedResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     writeActMatched(&s, id, ok.bool, ref.string, name.string) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
+}
+
+fn writeActHint(s: *std.json.Stringify, id: cp.Id, hint: []const u8) !void {
+    try beginResult(s, id);
+    try s.objectField("ok");
+    try s.write(false);
+    try s.objectField("hint");
+    try s.write(hint);
+    try endResult(s);
 }
 
 fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: []const u8, name: []const u8) !void {
@@ -3286,6 +3356,9 @@ test "W9b②: role 로케이터는 Chromium 탭에서 op arg 로 — 모양·상
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":12,\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true,\"nth\":0}}}", .arg = "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true,\"nth\":0}}" },
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.type\",\"params\":{\"id\":12,\"locator\":{\"role\":\"textbox\"},\"text\":\"hi\"}}", .arg = "{\"locator\":{\"role\":\"textbox\"},\"text\":\"hi\"}" },
         .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"Enter\",\"locator\":{\"role\":\"heading\",\"level\":2}}}", .arg = "{\"key\":\"Enter\",\"locator\":{\"role\":\"heading\",\"level\":2}}" },
+        // W9b②-2 — text·label(exact 는 이름 없이도).
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":12,\"locator\":{\"text\":\"Sign in\",\"exact\":true,\"nth\":1}}}", .arg = "{\"locator\":{\"text\":\"Sign in\",\"exact\":true,\"nth\":1}}" },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.type\",\"params\":{\"id\":12,\"locator\":{\"label\":\"Email\"},\"text\":\"a@b\"}}", .arg = "{\"locator\":{\"label\":\"Email\"},\"text\":\"a@b\"}" },
     };
     for (ok_cases) |c| switch (try dispatchBrowser(testing.allocator, c.req, fx_engine, capsSlice(&buf, browserCap(12)), null, &no_grants, 0)) {
         .op => |op| {
@@ -3301,7 +3374,10 @@ test "W9b②: role 로케이터는 Chromium 탭에서 op arg 로 — 모양·상
     const bad = [_][]const u8{
         "{\"id\":12,\"locator\":{\"role\":\"button\"},\"selector\":\"#b\"}", // 둘
         "{\"id\":12,\"locator\":\"button\"}",
-        "{\"id\":12,\"locator\":{\"label\":\"Email\"}}", // W9b②-2
+        "{\"id\":12,\"locator\":{\"label\":\"\"}}", // 빈 라벨
+        "{\"id\":12,\"locator\":{\"text\":\"a\",\"name\":\"b\"}}", // text 에 role 의 키
+        "{\"id\":12,\"locator\":{\"text\":\"a\",\"label\":\"b\"}}", // 둘
+        "{\"id\":12,\"locator\":{\"label\":1}}",
         "{\"id\":12,\"locator\":{\"role\":\"\"}}",
         "{\"id\":12,\"locator\":{\"role\":\"button\",\"exact\":true}}", // 이름 없는 exact
         "{\"id\":12,\"locator\":{\"role\":\"button\",\"nth\":-1}}",
@@ -3345,6 +3421,11 @@ test "W9b②: 로케이터로 찾은 act 의 결과는 {ok, matched{ref,name}} �
     defer testing.allocator.free(good);
     try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save \\\"x\\\"\"}}}", good);
     try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{\"ok\":true}"));
+    // 숨은 일치만 있었다 — {ok:false, hint}(W9b②-2).
+    const hinted = try serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{\"ok\":false,\"hint\":\"1 matching element(s) are hidden\"}");
+    defer testing.allocator.free(hinted);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":false,\"hint\":\"1 matching element(s) are hidden\"}}", hinted);
+    try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{\"ok\":false}"));
     try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{nope"));
     _ = req;
 }

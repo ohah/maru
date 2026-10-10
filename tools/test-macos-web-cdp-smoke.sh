@@ -24,6 +24,9 @@
 #   role            role 로케이터(W9b②): 이름이 여럿 맞으면 실패하고 후보 ref 를 준다 — 그 ref 로 다시 누르면 진짜 클릭 · --exact·--nth 로 고른다 ·
 #                   성공 답에 matched(ref·이름) · 제목은 --level 로 · 모르는 역할은 invalid params(가까운 역할을 권한다) · 요소가 3 만을 넘는 페이지는
 #                   질의 전에 거절(too_large — 질의가 페이지를 멈춘다)
+#   text·label      text·label 로케이터(W9b②-2 — 격리 world 의 JS): 숨은 자손이 낀 버튼 글·쪼개진 글 exact·sr-only 글(누를 수 있는 버튼으로 바꿔
+#                   누른다)·라벨(aria-hidden 별표는 뺀 exact)로 진짜 입력, 숨긴 체크박스는 label 로 ok:false + hint → 보이는 글로 누르면 토글,
+#                   같은 글이 여럿이면 후보 ref 로 다시
 #   press           요소에 Shift+a → 「A」(isTrusted keydown — 입력 이벤트만으로는 insertText 와 가를 수 없다) · Meta+a(편집 명령 selectAll)
 #                   뒤 대상 없이 x → 값이 「x」로 바뀐다 · Shift+/ → 「?」(US 배열의 위 글자) ·
 #                   대상 없이 Tab → 초점이 다음 칸으로 · 틀린 키 이름은 invalid params. 붙여넣기(Meta+v)는 사용자 클립보드를 쓰므로 스모크에
@@ -77,6 +80,14 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=rs2 style="position:absolute;left:620px;top:140px" onclick="hit('rs2-'+event.isTrusted)">Role Save draft</button>
 <h2 id=rh style="position:absolute;left:620px;top:170px;margin:0">Role Heading</h2>
 <div id=osh style="position:absolute;left:620px;top:220px"></div>
+<div style="position:absolute;left:20px;top:740px">
+<button id=td onclick="hit('td-'+event.isTrusted)">Erase now<span style="display:none">Erase now</span></button>
+<a id=sp href="#" onclick="hit('sp-'+event.isTrusted);return false">Join <b>the</b> club</a>
+<button id=icon onclick="hit('icon-'+event.isTrusted)"><span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Close dialog</span>X</button>
+<label for=em2>Work email <span aria-hidden=true>*</span></label><input id=em2 oninput="hit('em2-'+event.isTrusted+'-'+encodeURIComponent(this.value))">
+<label id=dm><input type=checkbox style="display:none" onchange="hit('dm-'+this.checked)">Dark mode</label>
+<button onclick="hit('ar1-'+event.isTrusted)">Archive item</button><button onclick="hit('ar2')">Archive item</button>
+</div>
 <script>(function(){var r=document.getElementById('osh').attachShadow({mode:'open'});var inner=document.createElement('div');r.appendChild(inner);inner.attachShadow({mode:'open'}).innerHTML='<button id=osb>Shadow Role Btn</button>';inner.shadowRoot.getElementById('osb').addEventListener('click',function(e){hit('osb-'+e.isTrusted)})})()</script>
 <input id=pk style="position:absolute;left:420px;top:340px" onkeydown="hit('pkd-'+event.key+'-'+event.isTrusted)" oninput="hit('pkv-'+encodeURIComponent(this.value)+'-'+event.isTrusted)">
 <input id=pk2 style="position:absolute;left:420px;top:380px" onfocus="hit('pk2focus')">
@@ -211,6 +222,21 @@ run role-level scroll --role heading --level 2 --name 'role heading'
 run role-unknown click --role buton
 run role-shadow click --role button --name 'Shadow Role Btn' --exact
 hit_seen osb-true && echo yes > "\$out/osb-hit" || echo no > "\$out/osb-hit"
+run tx-hidden click --by-text 'Erase now' --exact
+hit_seen td-true && echo yes > "\$out/td-hit" || echo no > "\$out/td-hit"
+run tx-split click --by-text 'Join the club' --exact
+hit_seen sp-true && echo yes > "\$out/sp-hit" || echo no > "\$out/sp-hit"
+run tx-sr click --by-text 'Close dialog'
+hit_seen icon-true && echo yes > "\$out/icon-hit" || echo no > "\$out/icon-hit"
+run lb-type type --by-label 'Work email' --exact --text 'w@x'
+hit_seen 'em2-true-w%40x' && echo yes > "\$out/em2-hit" || echo no > "\$out/em2-hit"
+run lb-hidden click --by-label 'Dark mode'
+run tx-dm click --by-text 'Dark mode'
+hit_seen dm-true && echo yes > "\$out/dm-hit" || echo no > "\$out/dm-hit"
+run tx-amb click --by-text 'Archive item'
+tx_ref=\$(grep -o 'n[0-9][0-9]* "Archive item"' "\$out/tx-amb" | head -1 | cut -d' ' -f1)
+run tx-ref click --ref "\$tx_ref"
+hit_seen ar1-true && echo yes > "\$out/ar1-hit" || echo no > "\$out/ar1-hit"
 run hover hover --selector '#hv'
 hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
 run hover-missing hover --selector '#none'
@@ -330,6 +356,14 @@ ok type-em && [ "$(cat "$out/em-hit")" = yes ] || fail "an email field that trim
 [ -n "$(cat "$out/shref")" ] || fail "snapshot did not list the field inside the closed shadow root ($(tr '\n' ' ' < "$out/snapshot" | cut -c1-400))"
 ok type-sh && [ "$(cat "$out/sh-hit")" = yes ] || fail "typing into a field inside a closed shadow root did not go in for real ($(tr '\n' ' ' < "$out/type-sh"))"
 echo "PASS type-shaped: a reshaping field and an email field's trim are ok, a maxlength cut and an append are refused, a field inside a closed shadow root takes the text"
+ok tx-hidden && [ "$(cat "$out/td-hit")" = yes ] || fail "a button whose text has a hidden duplicate was not found by text and clicked ($(tr '\n' ' ' < "$out/tx-hidden"))"
+ok tx-split && [ "$(cat "$out/sp-hit")" = yes ] || fail "text split across elements was not found exactly ($(tr '\n' ' ' < "$out/tx-split"))"
+ok tx-sr && [ "$(cat "$out/icon-hit")" = yes ] || fail "screen-reader-only text did not lead to clicking its button ($(tr '\n' ' ' < "$out/tx-sr"))"
+ok lb-type && [ "$(cat "$out/em2-hit")" = yes ] || fail "typing by label (an aria-hidden star excluded, exact) did not go in ($(tr '\n' ' ' < "$out/lb-type"))"
+grep -q 'not ok' "$out/lb-hidden" && grep -q '^hint: 1 matching' "$out/lb-hidden" || fail "a hidden checkbox by label did not answer not ok with a hint ($(tr '\n' ' ' < "$out/lb-hidden"))"
+ok tx-dm && [ "$(cat "$out/dm-hit")" = yes ] || fail "clicking the visible label text did not toggle the hidden checkbox ($(tr '\n' ' ' < "$out/tx-dm"))"
+grep -q 'ambiguous: 2 elements match text~"Archive item"' "$out/tx-amb" && ok tx-ref && [ "$(cat "$out/ar1-hit")" = yes ] || fail "an ambiguous text did not give candidate refs that click for real ($(tr '\n' ' ' < "$out/tx-amb") · $(tr '\n' ' ' < "$out/tx-ref"))"
+echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"
 grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was not not ok ($(tr '\n' ' ' < "$out/hover-missing"))"
 echo "PASS hover: the element got a real (isTrusted) mouseover, a missing element is not ok"

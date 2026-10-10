@@ -23,6 +23,8 @@ const std = @import("std");
 const web_cdp_snapshot = @import("web_cdp_snapshot.zig");
 const web_cdp_keys = @import("web_cdp_keys.zig");
 const web_cdp_locate = @import("web_cdp_locate.zig");
+/// text·label 로케이터의 격리 world 함수(W9b②-2 — 계획 공격 3 회차에 실측한 것).
+const finder_js = @embedFile("web_cdp_finder.js");
 
 /// 앱이 DevTools 결과 상한을 넘은 답에 싣는 글 — 로케이터 질의가 이것이면 「너무 많다」 로 바꿔 답한다.
 pub const result_too_large = "the DevTools result was too large";
@@ -64,7 +66,7 @@ pub const wait_max_interval_ms: u32 = 500;
 pub const up_retry_ms: u32 = 50;
 pub const max_up_retries: u8 = 3;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate };
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release };
 
 pub const Op = struct {
     kind: Kind,
@@ -118,6 +120,10 @@ pub const Op = struct {
     loc_nth: ?u32 = null,
     /// 로케이터로 찾은 요소의 이름(소유) — 성공 답에 `matched` 로 싣는다(부분 일치가 하나면 그것을 누른다 — 무엇을 눌렀는지 보이게).
     matched_name: ?[]u8 = null,
+    /// 로케이터 종류 — role 은 접근성 질의, text·label 은 격리 world 의 JS(W9b②-2).
+    loc_kind: enum { role, text, label } = .role,
+    /// text·label 찾기의 결과 — 놓기(`loc_release`) 뒤에 쓴다.
+    loc_found: ?web_cdp_locate.Found = null,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
@@ -129,6 +135,7 @@ pub const Op = struct {
         if (self.loc_input_role) |s| gpa.free(s);
         if (self.loc_name) |s| gpa.free(s);
         if (self.matched_name) |s| gpa.free(s);
+        if (self.loc_found) |*f| f.deinit(gpa);
         self.* = undefined;
     }
 
@@ -215,7 +222,25 @@ pub const Op = struct {
     fn parseLocator(op: *Op, gpa: std.mem.Allocator, l: std.json.Value) !void {
         if (l != .object) return error.InvalidArg;
         const lo = l.object;
-        const role = lo.get("role") orelse return error.InvalidArg; // label·text 는 W9b②-2
+        if (lo.get("role") == null) if (lo.get("text") orelse lo.get("label")) |t| {
+            // text·label(W9b②-2) — 정규화한 질의를 격리 world 의 JS 에 넘긴다.
+            if (t != .string or t.string.len == 0 or t.string.len > web_cdp_locate.max_text_bytes) return error.InvalidArg;
+            op.loc_kind = if (lo.get("text") != null) .text else .label;
+            op.loc_name = try web_cdp_locate.normalize(gpa, t.string);
+            if (op.loc_name.?.len == 0) return error.InvalidArg;
+            if (lo.get("exact")) |v| {
+                if (v != .bool) return error.InvalidArg;
+                op.loc_exact = v.bool;
+            }
+            if (lo.get("nth")) |v| {
+                if (v != .integer or v.integer < 0 or v.integer > 1_000_000) return error.InvalidArg;
+                op.loc_nth = @intCast(v.integer);
+            }
+            op.locating = true;
+            if (op.kind == .press) op.press_target = true;
+            return;
+        };
+        const role = lo.get("role") orelse return error.InvalidArg;
         if (role != .string) return error.InvalidArg;
         op.loc_role = web_cdp_locate.chromiumRole(role.string) orelse return error.UnknownRole;
         op.loc_input_role = try gpa.dupe(u8, role.string);
@@ -245,7 +270,8 @@ pub const Op = struct {
         return switch (self.stage) {
             // 누름·Delete 키 누름을 보냈다 — 뗌·놓기를 끝까지. 넣은 뒤의 다시 읽기도(읽기만 한다 — 놓기까지 가게).
             // 키를 눌렀다 — 떼기까지(눌린 채 두지 않는다).
-            .mouse_up, .release, .delete_up, .verify, .key_up => true,
+            // 찾기 결과를 쥔 원격 객체는 철회돼도 놓는다(W9b②-2).
+            .mouse_up, .release, .delete_up, .verify, .key_up, .loc_release => true,
             else => false,
         };
     }
@@ -294,7 +320,103 @@ pub const Op = struct {
         return self.scrollStep(gpa);
     }
 
+    /// text·label 을 격리 world 의 JS 로 찾는다 — deep 직렬화로 backendNodeId 를 바로 받고, 쥔 원격 객체(답에 늘 objectId 가 온다 — 실측)는
+    /// 묶음 `maru-w9b-<id>` 에 넣어 곧 놓는다.
+    fn findStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .loc_find;
+        const action: []const u8 = switch (self.kind) {
+            .click => "click",
+            .hover => "hover",
+            .type_text => "type",
+            .press => "press",
+            else => "scroll",
+        };
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        writeFindParams(&s, self, action) catch return error.OutOfMemory;
+        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice() } };
+    }
+
+    fn writeFindParams(s: *std.json.Stringify, self: *const Op, action: []const u8) !void {
+        try s.beginObject();
+        try s.objectField("functionDeclaration");
+        try s.write(finder_js);
+        try s.objectField("executionContextId");
+        try s.write(self.context_id);
+        try s.objectField("arguments");
+        try s.beginArray();
+        for ([_]?[]const u8{ if (self.loc_kind == .text) "text" else "label", self.loc_name.? }) |a| {
+            try s.beginObject();
+            try s.objectField("value");
+            try s.write(a.?);
+            try s.endObject();
+        }
+        try s.beginObject();
+        try s.objectField("value");
+        try s.write(self.loc_exact);
+        try s.endObject();
+        try s.beginObject();
+        try s.objectField("value");
+        if (self.loc_nth) |n| try s.write(n) else try s.write(null);
+        try s.endObject();
+        try s.beginObject();
+        try s.objectField("value");
+        try s.write(action);
+        try s.endObject();
+        try s.endArray();
+        try s.objectField("serializationOptions");
+        try s.beginObject();
+        try s.objectField("serialization");
+        try s.write("deep");
+        try s.objectField("maxDepth");
+        try s.write(2);
+        try s.endObject();
+        try s.objectField("objectGroup");
+        var buf: [32]u8 = undefined;
+        try s.write(std.fmt.bufPrint(&buf, "maru-w9b-{d}", .{self.id}) catch unreachable);
+        try s.endObject();
+    }
+
+    /// 찾기 결과를 둔 채 그 묶음을 놓는다(결과는 놓은 뒤에 쓴다).
+    fn findRelease(self: *Op, gpa: std.mem.Allocator, found: web_cdp_locate.Found) !Step {
+        if (self.loc_found) |*f| f.deinit(gpa);
+        self.loc_found = found;
+        self.stage = .loc_release;
+        return call(gpa, "Runtime.releaseObjectGroup", "{{\"objectGroup\":\"maru-w9b-{d}\"}}", .{self.id});
+    }
+
+    /// 놓은 뒤 — 찾기 결과대로(놓기의 성공·실패와 무관하다).
+    fn afterFind(self: *Op, gpa: std.mem.Allocator) !Step {
+        var found = self.loc_found.?;
+        self.loc_found = null;
+        switch (found) {
+            .done => |d| return .{ .done = .{ .status = if (d.status == .timeout) .timeout else .failed, .result = d.msg } },
+            .none => |hidden| {
+                if (hidden == 0) return done(gpa, .success, "false");
+                // 숨은 일치만 있었다 — 계약(없으면 ok:false)은 지키고 안내를 싣는다(흔한 예: 숨긴 커스텀 체크박스와 보이는 label).
+                const msg = try std.fmt.allocPrint(gpa, "{{\"ok\":false,\"hint\":\"{d} matching element(s) are hidden (not rendered, aria-hidden or off-page) — for a hidden checkbox or radio, use its visible label with a text locator\"}}", .{hidden});
+                return .{ .done = .{ .status = .success, .result = msg } };
+            },
+            .one => |o| {
+                found = undefined;
+                self.backend = o.backend;
+                self.matched_name = try clipName(gpa, o.name, max_matched_name_bytes);
+                self.locating = false;
+                return self.scrollStep(gpa);
+            },
+        }
+    }
+
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
+        // 찾기 결과를 둔 채 놓는 중 — 놓기의 답(무엇이든) 뒤에 그 결과대로.
+        if (self.stage == .loc_release) return self.afterFind(gpa);
+        // 찾기 호출 자체가 실패·시한 — 쥔 객체가 있을 수 있어 놓은 뒤 그 이유로 끝낸다.
+        if (self.stage == .loc_find) switch (reply) {
+            .ok, .cdp_error => {},
+            .timed_out => |why| return self.findRelease(gpa, .{ .done = .{ .status = .timeout, .msg = try gpa.dupe(u8, why) } }),
+            .failed, .not_sent => |why| return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, if (std.mem.eql(u8, why, result_too_large)) "too_large: the locator result was too large — use a selector or ref" else why) } }),
+        };
         // 누른 뒤의 시한 — 페이지가 막혀 답이 늦을 뿐 입력은 갔을 수 있다: 떼기·놓기를 마저 보내고 끝에 timeout 으로 답한다.
         if (reply == .timed_out) switch (self.stage) {
             .mouse_down => {
@@ -465,6 +587,7 @@ pub const Op = struct {
             },
             .world => {
                 self.context_id = intAt(v, &.{"executionContextId"}) orelse return done(gpa, .failed, "no isolated world");
+                if (self.locating and self.loc_kind != .role) return self.findStep(gpa);
                 if (self.locating) {
                     // 요소 수를 먼저 본다 — 접근성 질의는 DOM 크기의 제곱으로 느려지고 그동안 페이지가 멈춘다(프로토타입 함수 — DOM clobbering).
                     self.stage = .size_check;
@@ -664,6 +787,14 @@ pub const Op = struct {
                     },
                 }
             },
+            .loc_find => {
+                const found = web_cdp_locate.parseFound(gpa, bytes, if (self.loc_kind == .text) "text" else "label", self.loc_name.?, self.loc_exact) catch |e| switch (e) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => web_cdp_locate.Found{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "malformed locator result") } },
+                };
+                return self.findRelease(gpa, found);
+            },
+            .loc_release => unreachable, // feed 앞에서
             .ax_tree => {
                 const json = web_cdp_snapshot.build(gpa, bytes, self.snap) catch |e| return switch (e) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -827,6 +958,8 @@ pub const Op = struct {
                 break :blk self.releaseStep(gpa);
             },
             .release => self.finish(gpa),
+            // 찾기 스크립트를 DevTools 가 거절했다 — 놓은 뒤 그 이유로.
+            .loc_find => self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try std.fmt.allocPrint(gpa, "locator script failed: {s}", .{message}) } }),
             else => done(gpa, .failed, message),
         };
     }
@@ -2017,7 +2150,8 @@ test "role 로케이터: 모르는 역할은 UnknownRole(가까운 역할을 권
     for ([_][]const u8{
         "{\"locator\":{\"role\":\"generic\"}}",
         "{\"locator\":\"button\"}",
-        "{\"locator\":{\"label\":\"Email\"}}",
+        "{\"locator\":{\"label\":\"\"}}",
+        "{\"locator\":{\"text\":\" \\u00ad \"}}", // 정규화하면 빈 글
         "{\"locator\":{\"role\":\"button\",\"name\":\"\"}}",
         "{\"locator\":{\"role\":\"button\",\"level\":0}}",
         "{\"locator\":{\"role\":\"button\",\"nth\":-1}}",
@@ -2122,4 +2256,72 @@ test "role 로케이터: 트리를 비싸게 만드는 구성(대상 없는 # �
         try testing.expect(std.mem.endsWith(u8, r.result, "…\"}}"));
         try testing.expect(std.unicode.utf8ValidateSlice(r.result));
     }
+}
+
+var find_reply: Reply = .{ .ok = "" };
+
+fn findPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "function(KIND, Q, EXACT, NTH, ACTION)") != null) return find_reply;
+    return happyPage(method, params);
+}
+
+const found_one = "{\"result\":{\"type\":\"object\",\"objectId\":\"o9\",\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":1}],[\"el\",{\"type\":\"node\",\"value\":{\"backendNodeId\":41}}],[\"name\",{\"type\":\"string\",\"value\":\"Sign in\"}]]}}}";
+
+test "text·label 로케이터: 격리 world 의 JS 로 찾고(deep 직렬화) 그 묶음을 놓은 뒤 ref 처럼 누른다 — matched 는 찾은 글" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    find_reply = .{ .ok = found_one };
+    var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"text\":\"  Sign\\u00a0in \",\"nth\":0}}", 400);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &findPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n41\",\"name\":\"Sign in\"}}", r.result);
+    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want.len, trail.methods.items.len);
+    for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+    // 질의는 정규화해 인자로(문자열로 끼워 넣지 않는다), deep 직렬화·묶음.
+    const p = trail.params.items[2];
+    for ([_][]const u8{ "\"arguments\":[{\"value\":\"text\"},{\"value\":\"Sign in\"},{\"value\":false},{\"value\":0},{\"value\":\"click\"}]", "\"serialization\":\"deep\"", "\"objectGroup\":\"maru-w9b-400\"", "\"executionContextId\":7" }) |needle|
+        try testing.expect(std.mem.indexOf(u8, p, needle) != null);
+    try testing.expect(try std.json.validate(testing.allocator, p));
+    try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-400\"}", trail.params.items[3]);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[4], "\"backendNodeId\":41") != null);
+}
+
+test "text·label 로케이터: 숨은 일치만이면 ok:false + hint, 여럿이면 후보 ref, 찾기의 시한·오류·결과 상한에도 놓은 뒤 끝낸다, 놓기는 철회돼도" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    const cases = [_]struct { reply: Reply, status: Status, want: []const u8 }{
+        .{ .reply = .{ .ok = "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":0}],[\"hidden\",{\"type\":\"number\",\"value\":1}]]}}}" }, .status = .success, .want = "{\"ok\":false,\"hint\":\"1 matching element(s) are hidden" },
+        .{ .reply = .{ .ok = "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":0}],[\"hidden\",{\"type\":\"number\",\"value\":0}]]}}}" }, .status = .success, .want = "false" },
+        .{ .reply = .{ .ok = "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":2}],[\"cands\",{\"type\":\"array\",\"value\":[{\"type\":\"node\",\"value\":{\"backendNodeId\":7}},{\"type\":\"node\",\"value\":{\"backendNodeId\":9}}]}],[\"names\",{\"type\":\"array\",\"value\":[{\"type\":\"string\",\"value\":\"Email\"},{\"type\":\"string\",\"value\":\"Email 2\"}]}],[\"more\",{\"type\":\"boolean\",\"value\":false}]]}}}" }, .status = .failed, .want = "ambiguous: 2 elements match label~\"Email\" — n7 \"Email\", n9 \"Email 2\"" },
+        .{ .reply = .{ .timed_out = "DevTools did not answer in time" }, .status = .timeout, .want = "DevTools did not answer in time" },
+        .{ .reply = .{ .failed = result_too_large }, .status = .failed, .want = "too_large: the locator result was too large" },
+        .{ .reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}" }, .status = .failed, .want = "locator script failed: Cannot find context" },
+        .{ .reply = .{ .ok = "{\"result\":{}}" }, .status = .failed, .want = "malformed locator result" },
+    };
+    for (cases) |c| {
+        trail.reset();
+        find_reply = c.reply;
+        var op = try Op.init(testing.allocator, .type_text, "{\"locator\":{\"label\":\"Email\"},\"text\":\"x\"}", 401);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &findPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(c.status, r.status);
+        try testing.expect(std.mem.startsWith(u8, r.result, c.want));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+        try testing.expectEqual(@as(usize, 0), trail.count("Input.insertText"));
+    }
+    // 놓기 단계는 committed — 철회돼도 놓는다.
+    find_reply = .{ .ok = found_one };
+    var op = try Op.init(testing.allocator, .hover, "{\"locator\":{\"text\":\"Sign in\"}}", 402);
+    defer op.deinit(testing.allocator);
+    var step = try op.start(testing.allocator);
+    while (step == .call and !std.mem.eql(u8, step.call.method, "Runtime.releaseObjectGroup")) {
+        const c = step.call;
+        defer testing.allocator.free(c.params);
+        step = try op.feed(testing.allocator, findPage(c.method, c.params));
+    }
+    try testing.expect(op.committed());
+    testing.allocator.free(step.call.params);
 }

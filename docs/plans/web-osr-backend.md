@@ -767,3 +767,37 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - 중: 주석으로 쪼갠 글 노드는 요소가 아니라 안 셌다(10 만 7.4 초 — 부모마다 제곱) → 블록마다 글 노드 수의 제곱 합.
   - 하–중: 보이지 않는 글(`<style>`·`<script>`·`hidden`)의 줄로 질의가 0 ms 인 페이지를 거절했다 → 사각형으로 세면 0, script·style 은 건너뛴다.
   - 하: 문서에 새 too_large 형식이 없었다 → 적음. 세기 JS 자체는 최악에서도 90 ms(10 MB `<pre>` 천 개) — 페이지를 멈추지 않는다(확인).
+
+### W9b②-2 — text·label 로케이터(2026-10-11)
+
+**계획 공격 세 번**(실측 — 탐침 scratchpad/plan2_r1·r2·r3, 3 회차가 실측을 통과한 `web_cdp_finder.js` 를 만들었다):
+- **1 회차:**
+  - textContent 가지치기가 open shadow·버튼형 input 을 놓쳤다 → 먼저 훑어 그 조상은 가지치기 없이.
+  - 화면 좌표 honeypot 이 스크롤 뒤 위쪽 요소를 뺐다 → 문서 좌표.
+  - `labels` getter 가 2 만 쌍 24.8 초 → label → control 맵(78 ms).
+  - sr-only span 이 덮임 검사에 걸렸다 → 조작 가능한 조상으로 바꾼다.
+  - 그 밖에 객체 놓기·select 의 옵션 글·숨긴 체크박스 안내·ASCII 접기.
+- **2 회차:**
+  - 시간 예산이 끊겨도 그때까지의 일부로 「하나」 를 골랐다 → 예외로 빠져 결과를 내지 않는다.
+  - 예산은 상한이 아니다(강제 레이아웃 한 번 724 ms) → 상한은 요소 수.
+  - contenteditable 로 바꾸면 편집기 가운데를 누르고 여럿이 하나로 합쳐졌다 → 바꾸지 않는다.
+  - 결과는 deep 직렬화로 받는다(왕복 하나에 backendNodeId).
+  - RTL honeypot, type·press 의 바꾸기 범위.
+- **3 회차:**
+  - deep 직렬화여도 objectId 가 늘 온다 → 놓기 단계.
+  - 숨은 일치 안내가 L2 에서 internal_error 가 됐을 것 → `{ok:false, hint}` 를 받는다.
+  - press 는 span 에 초점을 못 준다 → label 이면 control, 아니면 조작 가능한 조상.
+  - 옵션 글이 부모로 샌다 → select 가 흡수한다.
+  - 숨은 자손이 낀 글 → 부분열로 가지치기.
+  - 첫 레이아웃이 예산을 먹는다 → 사전 훑기 뒤 레이아웃을 한 번 강제하고 그때부터 잰다.
+
+**구현:**
+- `web_cdp_finder.js`(격리 world 함수 — `@embedFile`).
+- `web_cdp_locate.parseFound`(deep 직렬화 답 해석·여럿 메시지 — 순수 시험).
+- `web_cdp_ops` 의 `loc_find` → `loc_release` 단계: 놓기는 committed — 철회돼도 놓는다. 찾기의 시한·오류·결과 상한에도 놓은 뒤 끝낸다.
+- L2 `locator` 의 `text`·`label`: 종류별 키 집합, 결과 `{ok:false, hint}`.
+- CLI `--by-text`·`--by-label`: `--exact`·`--nth` 는 셋 모두와, `--name`·`--level` 은 `--role` 과만. hint 한 줄.
+
+- 구현 중 스모크가 3 회차 finder 의 회귀를 잡았다 — 숨은 자식으로도 내려가 숨은 일치를 세게 바꾼 뒤 「숨은 일치가 조상을 가린다」 였다
+  (`<button>Erase now<span hidden>Erase now</span>` 가 0 건 + hint) → 그려지지 않은 숨은 일치(display:none·visibility:hidden — 글이 조상의 innerText 에
+  없다)는 조상을 가리지 않고, aria-hidden·화면 밖 함정(글이 조상에 남는다)만 가린다. 스모크 22 경우.

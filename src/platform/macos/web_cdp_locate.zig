@@ -410,3 +410,188 @@ test "여럿 메시지: 긴 이름은 60 바이트(UTF-8 경계)에서 자르고
     try testing.expect(std.mem.indexOf(u8, p.ambiguous, "n106") == null); // 다섯까지만
     try testing.expect(std.unicode.utf8ValidateSlice(p.ambiguous));
 }
+
+// ── W9b②-2 — text·label 로케이터(격리 world 의 JS `web_cdp_finder.js` — 접근성 질의를 쓰지 않는다) ──
+
+/// 걷기 전에 세는 요소 수의 상한(이 상한·시간 예산은 `web_cdp_finder.js` 의 CAP·BUDGET_MS 와 같다 — 시험이 묶는다). JS 가 도는 동안 페이지가
+/// 멈춘다(계획 공격 실측: 10 만 요소 흔한 글 23–75 ms·최악 181 ms, 시간 예산은 강제 레이아웃 한 번이 끼면 넘는다 — 상한은 요소 수로).
+pub const max_text_page_elements = 100000;
+pub const text_budget_ms = 300;
+
+/// 찾기의 결과.
+pub const Found = union(enum) {
+    /// 실패 — 그 status 와 메시지(소유).
+    done: struct { status: enum { failed, timeout }, msg: []u8 },
+    /// 없다 — 숨은 일치 수(0 이 아니면 안내를 싣는다).
+    none: u64,
+    /// 하나 — backendNodeId 와 이름(소유).
+    one: struct { backend: i64, name: []u8 },
+
+    pub fn deinit(self: *Found, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .done => |d| gpa.free(d.msg),
+            .one => |o| gpa.free(o.name),
+            .none => {},
+        }
+    }
+};
+
+/// `Runtime.callFunctionOn`(deep 직렬화) 답 → 결과. `what` 은 "text"·"label"(메시지용), `query` 는 정규화한 질의.
+/// deep 직렬화의 모양(계획 공격 3 회차 실측): `result.deepSerializedValue = {type:"object", value:[[키, {type, value}], …]}`,
+/// 노드 = `{type:"node", value:{backendNodeId, …}}`, 배열 = `{type:"array", value:[…]}`. 모양이 틀리면 error.Malformed.
+pub fn parseFound(gpa: std.mem.Allocator, json: []const u8, what: []const u8, query: []const u8, exact: bool) !Found {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, json, .{}) catch return error.Malformed;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.Malformed;
+    if (parsed.value.object.get("exceptionDetails")) |ex| {
+        const text = blk: {
+            if (ex == .object) if (ex.object.get("exception")) |e| if (e == .object) if (e.object.get("description")) |d| if (d == .string) break :blk d.string;
+            if (ex == .object) if (ex.object.get("text")) |t| if (t == .string) break :blk t.string;
+            break :blk "exception";
+        };
+        var clean: [200]u8 = undefined;
+        const n = displaySafe(text[0..@min(text.len, 200)], &clean);
+        return .{ .done = .{ .status = .failed, .msg = try std.fmt.allocPrint(gpa, "locator script failed: {s}", .{clean[0..n]}) } };
+    }
+    const result = parsed.value.object.get("result") orelse return error.Malformed;
+    if (result != .object) return error.Malformed;
+    const deep = result.object.get("deepSerializedValue") orelse return error.Malformed;
+    const fields = try deepObject(deep);
+    if (field(fields, "err")) |e| {
+        const kind = try deepString(e);
+        if (std.mem.eql(u8, kind, "too_large")) {
+            const count = if (field(fields, "elements")) |c| try deepInt(c) else 0;
+            return .{ .done = .{ .status = .failed, .msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} elements ({s} locator limit {d}; walking it freezes the page) — use a selector or ref", .{ count, what, max_text_page_elements }) } };
+        }
+        return .{ .done = .{ .status = .failed, .msg = try std.fmt.allocPrint(gpa, "too_large: the {s} locator took over {d} ms on this page (it freezes the page) — use a selector or ref", .{ what, text_budget_ms }) } };
+    }
+    const n = try deepInt(field(fields, "n") orelse return error.Malformed);
+    if (n == 0) {
+        const hidden = if (field(fields, "hidden")) |h| try deepInt(h) else 0;
+        return .{ .none = @intCast(@max(hidden, 0)) };
+    }
+    if (n == 1) if (field(fields, "el")) |el| {
+        const backend = try deepNodeBackend(el);
+        const name = if (field(fields, "name")) |nm| try deepString(nm) else "";
+        return .{ .one = .{ .backend = backend, .name = try gpa.dupe(u8, name) } };
+    };
+    // 여럿 — 후보(다섯까지)와 이름.
+    const cands = try deepArray(field(fields, "cands") orelse return error.Malformed);
+    const names = try deepArray(field(fields, "names") orelse return error.Malformed);
+    const more = if (field(fields, "more")) |m| try deepBool(m) else false;
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    const w = &aw.writer;
+    if (more) {
+        w.print("ambiguous: more than 5 elements match {s}{s}", .{ what, if (exact) "=" else "~" }) catch return error.OutOfMemory;
+    } else w.print("ambiguous: {d} elements match {s}{s}", .{ cands.len, what, if (exact) "=" else "~" }) catch return error.OutOfMemory;
+    writeQuoted(w, query) catch return error.OutOfMemory;
+    w.writeAll(" — ") catch return error.OutOfMemory;
+    for (cands[0..@min(cands.len, 5)], 0..) |c, i| {
+        if (i > 0) w.writeAll(", ") catch return error.OutOfMemory;
+        w.print("n{d} ", .{try deepNodeBackend(c)}) catch return error.OutOfMemory;
+        writeQuoted(w, if (i < names.len) try deepString(names[i]) else "") catch return error.OutOfMemory;
+    }
+    if (more) w.writeAll(", …") catch return error.OutOfMemory;
+    w.writeAll("; retry with ref (preferred), exact:true, or nth") catch return error.OutOfMemory;
+    return .{ .done = .{ .status = .failed, .msg = try aw.toOwnedSlice() } };
+}
+
+fn deepObject(v: std.json.Value) ![]std.json.Value {
+    if (v != .object) return error.Malformed;
+    const t = v.object.get("type") orelse return error.Malformed;
+    if (t != .string or !std.mem.eql(u8, t.string, "object")) return error.Malformed;
+    const val = v.object.get("value") orelse return error.Malformed;
+    if (val != .array) return error.Malformed;
+    return val.array.items;
+}
+
+fn field(pairs: []std.json.Value, name: []const u8) ?std.json.Value {
+    for (pairs) |p| {
+        if (p != .array or p.array.items.len != 2) continue;
+        const k = p.array.items[0];
+        if (k == .string and std.mem.eql(u8, k.string, name)) return p.array.items[1];
+    }
+    return null;
+}
+
+fn deepValue(v: std.json.Value, comptime ty: []const u8) !std.json.Value {
+    if (v != .object) return error.Malformed;
+    const t = v.object.get("type") orelse return error.Malformed;
+    if (t != .string or !std.mem.eql(u8, t.string, ty)) return error.Malformed;
+    return v.object.get("value") orelse error.Malformed;
+}
+
+fn deepInt(v: std.json.Value) !i64 {
+    const x = try deepValue(v, "number");
+    return switch (x) {
+        .integer => |i| i,
+        .float => |f| if (f >= 0 and f < 1e15) @intFromFloat(f) else error.Malformed,
+        else => error.Malformed,
+    };
+}
+
+fn deepString(v: std.json.Value) ![]const u8 {
+    const x = try deepValue(v, "string");
+    return if (x == .string) x.string else error.Malformed;
+}
+
+fn deepBool(v: std.json.Value) !bool {
+    const x = try deepValue(v, "boolean");
+    return if (x == .bool) x.bool else error.Malformed;
+}
+
+fn deepArray(v: std.json.Value) ![]std.json.Value {
+    const x = try deepValue(v, "array");
+    return if (x == .array) x.array.items else error.Malformed;
+}
+
+fn deepNodeBackend(v: std.json.Value) !i64 {
+    const x = try deepValue(v, "node");
+    if (x != .object) return error.Malformed;
+    const b = x.object.get("backendNodeId") orelse return error.Malformed;
+    return if (b == .integer and b.integer > 0) b.integer else error.Malformed;
+}
+
+test "text·label 찾기의 답: 하나·없음(숨은 수)·여럿(후보 ref·이름·more)·예산·상한·스크립트 예외, 모양이 틀리면 Malformed" {
+    const g = testing.allocator;
+    {
+        var f = try parseFound(g, "{\"result\":{\"type\":\"object\",\"objectId\":\"o1\",\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":1}],[\"el\",{\"type\":\"node\",\"value\":{\"backendNodeId\":25,\"nodeType\":1,\"localName\":\"button\"}}],[\"name\",{\"type\":\"string\",\"value\":\"Sign in\"}]]}}}", "text", "sign in", false);
+        defer f.deinit(g);
+        try testing.expectEqual(@as(i64, 25), f.one.backend);
+        try testing.expectEqualStrings("Sign in", f.one.name);
+    }
+    {
+        var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":0}],[\"hidden\",{\"type\":\"number\",\"value\":2}]]}}}", "label", "Dark mode", false);
+        defer f.deinit(g);
+        try testing.expectEqual(@as(u64, 2), f.none);
+    }
+    {
+        var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":2}],[\"cands\",{\"type\":\"array\",\"value\":[{\"type\":\"node\",\"value\":{\"backendNodeId\":7}},{\"type\":\"node\",\"value\":{\"backendNodeId\":9}}]}],[\"names\",{\"type\":\"array\",\"value\":[{\"type\":\"string\",\"value\":\"Save\"},{\"type\":\"string\",\"value\":\"Save \\u202edraft\"}]}],[\"more\",{\"type\":\"boolean\",\"value\":true}]]}}}", "text", "save", false);
+        defer f.deinit(g);
+        try testing.expectEqualStrings("ambiguous: more than 5 elements match text~\"save\" — n7 \"Save\", n9 \"Save draft\", …; retry with ref (preferred), exact:true, or nth", f.done.msg);
+    }
+    {
+        var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"err\",{\"type\":\"string\",\"value\":\"too_large\"}],[\"elements\",{\"type\":\"number\",\"value\":120000}]]}}}", "text", "x", false);
+        defer f.deinit(g);
+        try testing.expect(std.mem.startsWith(u8, f.done.msg, "too_large: page has 120000 elements (text locator limit 100000"));
+    }
+    {
+        var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"err\",{\"type\":\"string\",\"value\":\"budget\"}],[\"ms\",{\"type\":\"number\",\"value\":301}]]}}}", "label", "x", false);
+        defer f.deinit(g);
+        try testing.expect(std.mem.startsWith(u8, f.done.msg, "too_large: the label locator took over 300 ms"));
+    }
+    {
+        var f = try parseFound(g, "{\"result\":{\"type\":\"object\"},\"exceptionDetails\":{\"text\":\"Uncaught\",\"exception\":{\"description\":\"TypeError: x\\u001b[2J\"}}}", "text", "x", false);
+        defer f.deinit(g);
+        try testing.expectEqualStrings("locator script failed: TypeError: x[2J", f.done.msg);
+    }
+    for ([_][]const u8{ "[]", "{\"result\":{}}", "{\"result\":{\"deepSerializedValue\":{\"type\":\"array\",\"value\":[]}}}", "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":1}],[\"el\",{\"type\":\"node\",\"value\":{}}]]}}}" }) |bad|
+        try testing.expectError(error.Malformed, parseFound(g, bad, "text", "x", false));
+}
+
+test "finder JS 의 상한·예산은 이 모듈의 값과 같다" {
+    const js = @embedFile("web_cdp_finder.js");
+    var buf: [64]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, js, try std.fmt.bufPrint(&buf, "var CAP = {d}, BUDGET_MS = {d},", .{ max_text_page_elements, text_budget_ms })) != null);
+}

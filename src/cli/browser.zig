@@ -38,7 +38,7 @@ pub const browser_help =
     \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
     \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
     \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
-    \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>] [--exact] [--nth <n>] instead of --selector/--ref; Chromium tabs)
+    \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>], instead of --selector/--ref; Chromium tabs)
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
     \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
@@ -137,7 +137,12 @@ pub const Locator = union(enum) {
     ref: []const u8,
     /// W9b② — `--role <role> [--name <n>] [--level <n>] [--exact] [--nth <n>]`(Chromium 탭).
     role: RoleLocator,
+    /// W9b②-2 — `--by-text <t>`·`--by-label <t>` [`--exact`] [`--nth <n>`](Chromium 탭).
+    text: TextLocator,
+    label: TextLocator,
 };
+
+pub const TextLocator = struct { value: []const u8, exact: bool = false, nth: ?u32 = null };
 
 pub const RoleLocator = struct { role: []const u8, name: ?[]const u8 = null, level: ?u32 = null, exact: bool = false, nth: ?u32 = null };
 
@@ -321,7 +326,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const aa = try parseActArgs(rest, .{ .key = true });
         const s = aa.surface orelse return error.MissingSurface;
         const key = aa.key orelse return error.MissingPressKey;
-        const loc: ?Locator = if (aa.selector == null and aa.ref == null and aa.role == null and !aa.hasRoleOptions()) null else try actLocator(aa);
+        const loc: ?Locator = if (aa.selector == null and aa.ref == null and aa.role == null and aa.by_text == null and aa.by_label == null and !aa.hasRoleOptions() and !aa.hasMatchOptions()) null else try actLocator(aa);
         return .{ .request = .{ .press = .{ .surface_id = s, .key = key, .locator = loc } } };
     }
     if (eq(sub, "click")) {
@@ -661,9 +666,16 @@ const ActArgs = struct {
     nth: ?u32 = null,
     text: ?[]const u8 = null,
     key: ?[]const u8 = null,
+    by_text: ?[]const u8 = null,
+    by_label: ?[]const u8 = null,
 
+    /// `--role` 하고만 쓰는 옵션.
     fn hasRoleOptions(self: ActArgs) bool {
-        return self.name != null or self.level != null or self.exact or self.nth != null;
+        return self.name != null or self.level != null;
+    }
+    /// 로케이터(role·text·label) 셋 모두와 쓰는 옵션.
+    fn hasMatchOptions(self: ActArgs) bool {
+        return self.exact or self.nth != null;
     }
 };
 const ActExtras = struct { text: bool = false, key: bool = false };
@@ -682,6 +694,10 @@ fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs 
             r.selector = try optValue(rest, &i, "--selector");
         } else if (matchOpt(a, "--ref")) {
             r.ref = try optValue(rest, &i, "--ref");
+        } else if (matchOpt(a, "--by-text")) {
+            r.by_text = try optValue(rest, &i, "--by-text");
+        } else if (matchOpt(a, "--by-label")) {
+            r.by_label = try optValue(rest, &i, "--by-label");
         } else if (matchOpt(a, "--role")) {
             r.role = try optValue(rest, &i, "--role");
         } else if (matchOpt(a, "--name")) {
@@ -708,10 +724,14 @@ fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs 
 
 /// act 의 대상 — `--selector`·`--ref`·`--role` 가운데 정확히 하나. 로케이터 옵션은 `--role` 과만, `--exact` 는 `--name` 과만.
 fn actLocator(aa: ActArgs) ParseError!Locator {
-    const given = @as(u8, @intFromBool(aa.selector != null)) + @intFromBool(aa.ref != null) + @intFromBool(aa.role != null);
+    const given = @as(u8, @intFromBool(aa.selector != null)) + @intFromBool(aa.ref != null) + @intFromBool(aa.role != null) +
+        @intFromBool(aa.by_text != null) + @intFromBool(aa.by_label != null);
     if (given > 1) return error.ConflictingLocator;
     if (aa.role == null and aa.hasRoleOptions()) return error.LocatorOptionWithoutRole;
-    if (aa.exact and aa.name == null) return error.ExactWithoutName;
+    if (aa.role == null and aa.by_text == null and aa.by_label == null and aa.hasMatchOptions()) return error.LocatorOptionWithoutRole;
+    if (aa.role != null and aa.exact and aa.name == null) return error.ExactWithoutName;
+    if (aa.by_text) |t| return .{ .text = .{ .value = t, .exact = aa.exact, .nth = aa.nth } };
+    if (aa.by_label) |t| return .{ .label = .{ .value = t, .exact = aa.exact, .nth = aa.nth } };
     if (aa.selector) |s| return .{ .selector = s };
     if (aa.ref) |r| return .{ .ref = r };
     if (aa.role) |role| return .{ .role = .{ .role = role, .name = aa.name, .level = aa.level, .exact = aa.exact, .nth = aa.nth } };
@@ -897,6 +917,12 @@ fn putLocator(gpa: std.mem.Allocator, obj: *std.json.ObjectMap, loc_obj: *std.js
             if (r.nth) |v| try loc_obj.put(gpa, "nth", .{ .integer = v });
             try obj.put(gpa, "locator", .{ .object = loc_obj.* });
         },
+        .text, .label => |t| {
+            try loc_obj.put(gpa, if (l == .text) "text" else "label", .{ .string = t.value });
+            if (t.exact) try loc_obj.put(gpa, "exact", .{ .bool = true });
+            if (t.nth) |v| try loc_obj.put(gpa, "nth", .{ .integer = v });
+            try obj.put(gpa, "locator", .{ .object = loc_obj.* });
+        },
     }
 }
 
@@ -906,7 +932,7 @@ fn actRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id:
     return switch (locator) {
         .selector => |s| twoFieldRequest(gpa, id, method, surface_id, "selector", s, "text", text),
         .ref => |r| twoFieldRequest(gpa, id, method, surface_id, "ref", r, "text", text),
-        .role => {
+        .role, .text, .label => {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
             var loc_obj: std.json.ObjectMap = .empty;
@@ -1072,6 +1098,11 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         .ok => { // set-cookie/delete-cookie/set·remove-local-storage/clear-storage 성공 = {ok:true}
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else {
                 try w.writeAll("error: not ok\n");
+                // 로케이터가 숨은 일치만 찾았다(W9b②-2) — 그 안내 한 줄(페이지 글은 섞이지 않지만 표시 안전하게).
+                if (result.get("hint")) |h| if (h == .string) {
+                    var safe_h: [512]u8 = undefined;
+                    try w.print("hint: {s}\n", .{safe_h[0..displaySafe(h.string[0..@min(h.string.len, 512)], &safe_h)]});
+                };
                 return false;
             }
             // 로케이터로 찾았으면 무엇을 눌렀는지(W9b②) — 첫 줄은 그대로 「ok」.
@@ -2194,6 +2225,31 @@ test "parse·buildRequestBytes: role 로케이터(W9b②) — 옵션 규칙·act
     try testing.expect(params.get("selector") == null);
 }
 
+test "parse·buildRequestBytes: --by-text·--by-label(W9b②-2) — exact·nth 는 셋 모두와, name·level 은 role 과만" {
+    const t = (try parse(&.{ "click", "--surface", "3", "--by-text", "Sign in", "--exact", "--nth", "2" })).request.click.locator.text;
+    try testing.expectEqualStrings("Sign in", t.value);
+    try testing.expect(t.exact);
+    try testing.expectEqual(@as(u32, 2), t.nth.?);
+    try testing.expectEqualStrings("Email", (try parse(&.{ "type", "--surface=3", "--by-label=Email", "--text=x" })).request.type_text.locator.label.value);
+    try testing.expectError(error.ConflictingLocator, parse(&.{ "click", "--surface", "3", "--by-text", "a", "--by-label", "b" }));
+    try testing.expectError(error.LocatorOptionWithoutRole, parse(&.{ "click", "--surface", "3", "--by-text", "a", "--name", "b" }));
+    try testing.expectError(error.LocatorOptionWithoutRole, parse(&.{ "click", "--surface", "3", "--selector", "#a", "--exact" }));
+    const b = try buildRequestBytes(testing.allocator, .{ .click = .{ .surface_id = 11, .locator = .{ .label = .{ .value = "Dark mode", .exact = true } } } }, .{ .number = 1 });
+    defer testing.allocator.free(b);
+    var pm = try cp.parseMessage(testing.allocator, b);
+    defer pm.deinit();
+    const loc = pm.message.request.params.?.object.get("locator").?.object;
+    try testing.expectEqualStrings("Dark mode", loc.get("label").?.string);
+    try testing.expect(loc.get("exact").?.bool);
+}
+
+test "renderResponse: 숨은 일치만이면 not ok 에 hint 한 줄" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":false,\"hint\":\"1 matching element(s) are hidden\"}}", .ok, &w);
+    try testing.expectEqualStrings("error: not ok\nhint: 1 matching element(s) are hidden\n", w.buffered());
+}
+
 test "renderResponse: -32008 의 param 과 오류 메시지는 표시 안전하게 찍는다" {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -2272,7 +2328,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
         \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
         \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
-        \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>] [--exact] [--nth <n>] instead of --selector/--ref; Chromium tabs)
+        \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>], instead of --selector/--ref; Chromium tabs)
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
         \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading

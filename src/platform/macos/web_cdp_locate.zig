@@ -493,7 +493,8 @@ pub fn parseFound(gpa: std.mem.Allocator, json: []const u8, what: []const u8, qu
         writeQuoted(w, if (i < names.len) try deepString(names[i]) else "") catch return error.OutOfMemory;
     }
     if (more) w.writeAll(", …") catch return error.OutOfMemory;
-    w.writeAll("; retry with ref (preferred), exact:true, or nth") catch return error.OutOfMemory;
+    // 이미 exact 면 exact 를 권하지 않는다(5 회차).
+    w.writeAll(if (exact) "; retry with ref (preferred) or nth" else "; retry with ref (preferred), exact:true, or nth") catch return error.OutOfMemory;
     return .{ .done = .{ .status = .failed, .msg = try aw.toOwnedSlice() } };
 }
 
@@ -570,6 +571,11 @@ test "text·label 찾기의 답: 하나·없음(숨은 수)·여럿(후보 ref·
         var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":2}],[\"cands\",{\"type\":\"array\",\"value\":[{\"type\":\"node\",\"value\":{\"backendNodeId\":7}},{\"type\":\"node\",\"value\":{\"backendNodeId\":9}}]}],[\"names\",{\"type\":\"array\",\"value\":[{\"type\":\"string\",\"value\":\"Save\"},{\"type\":\"string\",\"value\":\"Save \\u202edraft\"}]}],[\"more\",{\"type\":\"boolean\",\"value\":true}]]}}}", "text", "save", false);
         defer f.deinit(g);
         try testing.expectEqualStrings("ambiguous: more than 5 elements match text~\"save\" — n7 \"Save\", n9 \"Save draft\", …; retry with ref (preferred), exact:true, or nth", f.done.msg);
+    }
+    {
+        var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":2}],[\"cands\",{\"type\":\"array\",\"value\":[{\"type\":\"node\",\"value\":{\"backendNodeId\":7}},{\"type\":\"node\",\"value\":{\"backendNodeId\":9}}]}],[\"names\",{\"type\":\"array\",\"value\":[{\"type\":\"string\",\"value\":\"Save\"},{\"type\":\"string\",\"value\":\"Save\"}]}],[\"more\",{\"type\":\"boolean\",\"value\":false}]]}}}", "text", "Save", true);
+        defer f.deinit(g);
+        try testing.expectEqualStrings("ambiguous: 2 elements match text=\"Save\" — n7 \"Save\", n9 \"Save\"; retry with ref (preferred) or nth", f.done.msg);
     }
     {
         var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"err\",{\"type\":\"string\",\"value\":\"too_large\"}],[\"elements\",{\"type\":\"number\",\"value\":120000}]]}}}", "text", "x", false);

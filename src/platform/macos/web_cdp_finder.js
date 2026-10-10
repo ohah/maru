@@ -242,6 +242,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
       }
     } else {
       var SEL = 'input,textarea,select,button,meter,output,progress,[role],[contenteditable]';
+      var CTL = 'a[href],button,input,select,textarea,summary,[role],[contenteditable]';
       var FORM = { textbox: 1, searchbox: 1, combobox: 1, checkbox: 1, radio: 1, switch: 1, slider: 1, spinbutton: 1, listbox: 1 };
       var LM = new Map(), isT = new Set(), rts = [document].concat(roots);
       for (var ri = 0; ri < rts.length; ri++) {
@@ -262,7 +263,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
         var out = [], stk = [cnG.call(root)], idx = [0];
         while (stk.length) {
           var ks = stk[stk.length - 1], j = idx[idx.length - 1];
-          if (j >= ks.length) { stk.pop(); idx.pop(); continue; }
+          if (j >= ks.length) { if (ks.length === 0) out.push(' '); stk.pop(); idx.pop(); continue; }
           idx[idx.length - 1] = j + 1;
           tick();
           var ch = ks[j], nt = ntG.call(ch);
@@ -270,7 +271,11 @@ function(KIND, Q, EXACT, NTH, ACTION) {
           if (nt !== 1 || ch === ctl) continue;
           var tg = tagG.call(ch);
           if (tg === 'SCRIPT' || tg === 'STYLE' || tg === 'TEMPLATE') continue;
+          if (tg === 'BR') { out.push(' '); continue; }
           if (!whole) { var ah = ga.call(ch, 'aria-hidden'); if ((ah !== null && lowA(ah) === 'true') || !cv.call(ch, { visibilityProperty: true })) continue; }
+          // blocks separate words (round 5: "Team plan<br>Best for ..." read "planBest") - a space is folded by normalize
+          var dsp = getComputedStyle(ch).display;
+          if (INLINE[dsp] !== 1 && dsp !== 'contents') out.push(' '), stk.push([]), idx.push(0);
           stk.push(cnG.call(ch)); idx.push(0);
         }
         return out.join('');
@@ -292,8 +297,16 @@ function(KIND, Q, EXACT, NTH, ACTION) {
         for (var c2 = 0; c2 < cands.length && hit === null; c2++) hit = match(cands[c2]);
         if (hit === null) continue;
         if (ariaHidden(t) || !visible(t)) { hidden++; continue; }
-        // click/hover on a tiny control (sr-only 1x1 checkbox of a toggle) goes to its visible label - the label activates it (round 4)
-        if ((ACTION === 'click' || ACTION === 'hover') && ls) { var tr = gbr.call(t); if (!(tr.width > 2 && tr.height > 2)) for (var k2 = 0; k2 < ls.length; k2++) if (visible(ls[k2])) { t = ls[k2]; break; } }
+        // click/hover on a tiny control (sr-only 1x1 checkbox of a toggle) goes to its visible label - the label activates it (round 4);
+        // only a label that is not tiny itself and holds no other control (round 5: its center was a Terms link - the link was pressed)
+        if ((ACTION === 'click' || ACTION === 'hover') && ls) {
+          var tr = gbr.call(t);
+          if (!(tr.width > 2 && tr.height > 2)) for (var k2 = 0; k2 < ls.length; k2++) {
+            var lb2 = ls[k2], lr = gbr.call(lb2), oc = qsaE.call(lb2, CTL), only = true;
+            for (var k3 = 0; k3 < oc.length; k3++) if (oc[k3] !== t) { only = false; break; }
+            if (only && lr.width > 2 && lr.height > 2 && visible(lb2)) { t = lb2; break; }
+          }
+        }
         var seenBefore = seen.has(t); if (!seenBefore) { seen.add(t); if (NTH !== null && NTH !== undefined) { if (hits.length === NTH) { picked = [t, hit]; throw 'enough'; } hits.push(null); } else { hits.push([t, hit]); if (hits.length > MAX_CANDS) { stopped = true; throw 'enough'; } } }
       }
     }
@@ -301,7 +314,8 @@ function(KIND, Q, EXACT, NTH, ACTION) {
     if (x === 'budget') return { err: 'budget', ms: Math.round(pnow.call(perf) - t0) };
     if (x !== 'enough') throw x;
   }
-  if (NTH !== null && NTH !== undefined) return picked ? { n: 1, el: picked[0], name: clip(picked[1]) } : { n: 0, hidden: hidden };
+  // nth past the visible matches: no hint - there were visible ones (round 5: it suggested a hidden checkbox)
+  if (NTH !== null && NTH !== undefined) return picked ? { n: 1, el: picked[0], name: clip(picked[1]) } : { n: 0, hidden: hits.length ? 0 : hidden };
   if (hits.length === 0) return { n: 0, hidden: hidden };
   if (hits.length === 1) return { n: 1, el: hits[0][0], name: clip(hits[0][1]) };
   var nodes = [], names = [];

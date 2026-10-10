@@ -1369,13 +1369,21 @@ pub fn takeInstallNotice() bool {
     return v;
 }
 
-/// OSR 백엔드가 켜져 있는가. 결정 전(첫 창 설정 전)에는 개발용 환경변수만 본다.
 /// 이 모듈이 쓰는 할당자(첫 `pump` 이후) — 다른 모듈이 `devtoolsCall` 을 부를 때 같은 할당자를 넘기게(W9b①: 알림 줄과
 /// 보낼 frame 을 이 할당자로 잡고 놓는다). 아직 없으면 sidecar 도 없다.
 pub fn gpaRef() ?std.mem.Allocator {
     return gpa_ref;
 }
 
+/// 시험 전용 — 할당자(곧 「sidecar 가 돈 적이 있는가」)를 바꾸고 이전 값을 돌려준다.
+pub fn setGpaRefForTest(value: ?std.mem.Allocator) ?std.mem.Allocator {
+    if (!builtin.is_test) @compileError("setGpaRefForTest is test-only");
+    const old = gpa_ref;
+    gpa_ref = value;
+    return old;
+}
+
+/// OSR 백엔드가 켜져 있는가. 결정 전(첫 창 설정 전)에는 개발용 환경변수만 본다.
 pub fn enabled() bool {
     return decided orelse (envDir() != null);
 }

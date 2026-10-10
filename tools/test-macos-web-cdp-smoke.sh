@@ -5,7 +5,8 @@
 #
 #   click-trusted   `maru browser click --selector '#b'` → ok, 페이지는 사람 클릭(`isTrusted`)으로 받는다(페이지가 서버로 보내는 신호
 #                   요청 `/hit?b-true` — Chromium 탭의 `browser list` 제목은 아직 페이지 제목이 아니다(W9a), 이동은 주소 칸으로 본다)
-#   click-ref       같은 문서의 ref(`n<backendNodeId>` — DevTools 로 얻는다) 클릭도 된다
+#   click-ref       모르는 ref(`n999999`)는 not ok(ref 로 실제 누르기는 snapshot 이 ref 를 주는 W9b①b 에서)
+#   click-far       화면 밖(1500 px 아래) 요소는 화면 안으로 스크롤해 누른다
 #   click-covered   다른 요소가 덮은 버튼은 누르지 않고 「covered」 오류 — 덮은 요소도 눌리지 않는다
 #   click-missing   없는 요소는 not ok(WebKit 과 같다)
 #   back·forward    링크로 다음 문서에 간 뒤 뒤로 → 첫 문서, 앞으로 → 다음 문서, 더 앞으로 → not ok
@@ -41,6 +42,7 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=b onclick="hit('b-'+event.isTrusted)">Save</button>
 <a id=next href="b.html">next</a>
 <button id=cover onclick="hit('cover')">Covered</button><div id=over onclick="hit('over')"></div>
+<button id=far style="position:absolute;top:1500px;left:20px" onclick="hit('far-'+event.isTrusted)">Far</button><div style="height:2000px"></div>
 HTML
 printf '<!doctype html><title>page-b</title>b' > "$root/www/b.html"
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
@@ -101,6 +103,8 @@ hit_seen b-true && echo yes > "\$out/click-title" || grep 'GET /hit' "$root/http
 run click-covered click --selector '#cover'
 sleep 1
 run click-missing click --selector '#none'
+run click-far click --selector '#far'
+hit_seen far-true && echo yes > "\$out/far-hit" || echo no > "\$out/far-hit"
 run click-next click --selector '#next'
 url_is b.html && echo yes > "\$out/next-title" || cp "\$out/list" "\$out/next-title"
 run back back
@@ -144,6 +148,8 @@ grep -q 'covered' "$out/click-covered" || fail "a covered button was not refused
 echo "PASS click-covered: a covered element is refused and nothing is clicked"
 grep -q 'not ok' "$out/click-missing" || fail "a missing element was not answered not ok ($(tr '\n' ' ' < "$out/click-missing"))"
 echo "PASS click-missing: a missing element is not ok"
+ok click-far && [ "$(cat "$out/far-hit")" = yes ] || fail "an element below the fold was not scrolled into view and clicked ($(tr '\n' ' ' < "$out/click-far"))"
+echo "PASS click-far: an element below the fold is scrolled into view and clicked for real"
 ok click-next && [ "$(cat "$out/next-title")" = yes ] || fail "clicking the link did not open the next page ($(tr '\n' ' ' < "$out/next-title"))"
 ok back && [ "$(cat "$out/back-title")" = yes ] || fail "back did not return to the first page ($(tr '\n' ' ' < "$out/back") · $(tr '\n' ' ' < "$out/back-title"))"
 ok forward && [ "$(cat "$out/forward-title")" = yes ] || fail "forward did not reopen the next page ($(tr '\n' ' ' < "$out/forward"))"

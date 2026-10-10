@@ -379,7 +379,22 @@ pub const SetLocalStorageParams = struct { id: u64, key: []const u8, value: []co
 pub const Locator = union(enum) {
     selector: []const u8,
     ref: []const u8,
+    /// W9b② — 역할·이름(`{"locator":{"role","name"?,"level"?,"exact"?,"nth"?}}`). Chromium 만(WebKit 은 모달 전 `-32008`). 역할 이름의
+    /// 해석(허용 목록·별칭)은 엔진이 한다 — L2 는 모양·상한만 본다.
+    role: RoleLocator,
 };
+
+pub const RoleLocator = struct {
+    role: []const u8,
+    name: ?[]const u8 = null,
+    level: ?i64 = null,
+    exact: bool = false,
+    nth: ?i64 = null,
+};
+
+/// 로케이터 글(역할 이름·name)의 상한 — 엔진(`web_cdp_locate.max_text_bytes`)과 같다.
+pub const max_locator_text_bytes = 1024;
+pub const max_locator_role_bytes = 64;
 
 /// `browser.click`/`scroll` params `{id, selector | ref}`. locator=selector 또는 ref 정확히 하나.
 pub const ActParams = struct { id: u64, locator: Locator };
@@ -541,10 +556,44 @@ pub fn parseSetLocalStorageParams(params: ?std.json.Value) ParamError!SetLocalSt
 fn parseLocator(obj: std.json.ObjectMap) ParamError!Locator {
     const selector = try optStrFromObj(obj, "selector");
     const ref = try optStrFromObj(obj, "ref");
-    if (selector != null and ref != null) return error.InvalidParams;
+    const locator = obj.get("locator");
+    const given = @as(u8, @intFromBool(selector != null)) + @intFromBool(ref != null) + @intFromBool(locator != null);
+    if (given != 1) return error.InvalidParams;
     if (selector) |s| return .{ .selector = s };
     if (ref) |r| return .{ .ref = r };
-    return error.InvalidParams;
+    return .{ .role = try parseRoleLocator(locator.?) };
+}
+
+/// `locator` 객체 — 지금은 role 만(label·text 는 W9b②-2). 모르는 키·틀린 타입·빈 글·상한 초과·이름 없는 exact 는 invalid_params.
+fn parseRoleLocator(v: std.json.Value) ParamError!RoleLocator {
+    if (v != .object) return error.InvalidParams;
+    const o = v.object;
+    var it = o.iterator();
+    while (it.next()) |e| {
+        const k = e.key_ptr.*;
+        if (!(eq(k, "role") or eq(k, "name") or eq(k, "level") or eq(k, "exact") or eq(k, "nth"))) return error.InvalidParams;
+    }
+    const role = try strFromObj(o, "role");
+    if (role.len == 0 or role.len > max_locator_role_bytes) return error.InvalidParams;
+    var r: RoleLocator = .{ .role = role };
+    if (o.get("name")) |n| {
+        if (n != .string or n.string.len == 0 or n.string.len > max_locator_text_bytes) return error.InvalidParams;
+        r.name = n.string;
+    }
+    if (o.get("level")) |l| {
+        if (l != .integer or l.integer < 1 or l.integer > 100) return error.InvalidParams;
+        r.level = l.integer;
+    }
+    if (o.get("exact")) |x| {
+        if (x != .bool) return error.InvalidParams;
+        if (x.bool and r.name == null) return error.InvalidParams; // 이름 없이 exact 는 뜻이 없다
+        r.exact = x.bool;
+    }
+    if (o.get("nth")) |n| {
+        if (n != .integer or n.integer < 0 or n.integer > 1_000_000) return error.InvalidParams;
+        r.nth = n.integer;
+    }
+    return r;
 }
 
 pub fn parseActParams(params: ?std.json.Value) ParamError!ActParams {
@@ -561,7 +610,7 @@ pub fn parsePressParams(params: ?std.json.Value) ParamError!PressParams {
     const obj = try paramsObject(params);
     const key = try strFromObj(obj, "key");
     if (key.len == 0 or key.len > max_press_key_bytes) return error.InvalidParams;
-    const has_locator = (try optStrFromObj(obj, "selector")) != null or (try optStrFromObj(obj, "ref")) != null;
+    const has_locator = (try optStrFromObj(obj, "selector")) != null or (try optStrFromObj(obj, "ref")) != null or obj.get("locator") != null;
     return .{ .id = try idFromObj(obj), .key = key, .locator = if (has_locator) try parseLocator(obj) else null };
 }
 
@@ -676,21 +725,11 @@ fn writePressArg(s: *std.json.Stringify, p: PressParams) !void {
     try s.beginObject();
     try s.objectField("key");
     try s.write(p.key);
-    if (p.locator) |l| switch (l) {
-        .selector => |sel| {
-            try s.objectField("selector");
-            try s.write(sel);
-        },
-        .ref => |ref| {
-            try s.objectField("ref");
-            try s.write(ref);
-        },
-    };
+    if (p.locator) |l| try writeLocatorFields(s, l);
     try s.endObject();
 }
 
-fn writeActArg(s: *std.json.Stringify, locator: Locator, text: ?[]const u8) !void {
-    try s.beginObject();
+fn writeLocatorFields(s: *std.json.Stringify, locator: Locator) !void {
     switch (locator) {
         .selector => |sel| {
             try s.objectField("selector");
@@ -700,7 +739,35 @@ fn writeActArg(s: *std.json.Stringify, locator: Locator, text: ?[]const u8) !voi
             try s.objectField("ref");
             try s.write(ref);
         },
+        .role => |r| {
+            try s.objectField("locator");
+            try s.beginObject();
+            try s.objectField("role");
+            try s.write(r.role);
+            if (r.name) |n| {
+                try s.objectField("name");
+                try s.write(n);
+            }
+            if (r.level) |l| {
+                try s.objectField("level");
+                try s.write(l);
+            }
+            if (r.exact) {
+                try s.objectField("exact");
+                try s.write(true);
+            }
+            if (r.nth) |n| {
+                try s.objectField("nth");
+                try s.write(n);
+            }
+            try s.endObject();
+        },
     }
+}
+
+fn writeActArg(s: *std.json.Stringify, locator: Locator, text: ?[]const u8) !void {
+    try s.beginObject();
+    try writeLocatorFields(s, locator);
     if (text) |t| {
         try s.objectField("text");
         try s.write(t);
@@ -1446,12 +1513,34 @@ fn unsupportedOnSurface(dto: cs.SurfaceDto, m: BrowserMethod) ?cs.WebMeta {
     return if (surfaceSupports(w, m)) null else w;
 }
 
+/// 대상 메서드에 `locator` 키가 있고 그 탭의 엔진이 로케이터를 못 하면(WebKit) 그 탭의 메타.
+fn locatorUnsupported(dto: cs.SurfaceDto, m: BrowserMethod, params: ?std.json.Value) ?cs.WebMeta {
+    switch (m) {
+        .click, .type_text, .scroll, .hover, .press => {},
+        else => return null,
+    }
+    const w = switch (dto.detail) {
+        .web => |w| w,
+        else => return null,
+    };
+    if (w.engine == .chromium) return null;
+    const p = params orelse return null;
+    if (p != .object or p.object.get("locator") == null) return null;
+    return w;
+}
+
 /// `-32008` — data `{engine}`, 브라우저 탭이 아니면(markdown·파일 뷰) `controllable:false` 도.
 fn unsupportedByEngineResponse(gpa: std.mem.Allocator, id: cp.Id, engine: cs.WebEngine, controllable: bool) std.mem.Allocator.Error![]u8 {
+    return unsupportedByEngineParamResponse(gpa, id, engine, controllable, null);
+}
+
+/// 메서드는 되지만 그 인자를 그 엔진이 못 할 때(W9b② — WebKit 의 `locator`) data 에 `param` 도.
+fn unsupportedByEngineParamResponse(gpa: std.mem.Allocator, id: cp.Id, engine: cs.WebEngine, controllable: bool, param: ?[]const u8) std.mem.Allocator.Error![]u8 {
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "engine", .{ .string = engine.wireName() });
     if (!controllable) try data.put(gpa, "controllable", .{ .bool = false });
+    if (param) |p| try data.put(gpa, "param", .{ .string = p });
     return cp.serializeError(gpa, id, .unsupported_by_engine, cp.ErrorCode.unsupported_by_engine.defaultMessage(), .{ .object = data });
 }
 
@@ -1599,7 +1688,14 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         .get_local_storage => serializeValueResult(gpa, req.id, result),
         .set_local_storage, .remove_local_storage, .clear_storage => serializeNavigateResult(gpa, req.id),
         // act(5f-2): click/type/scroll → {ok:<bool>} — Swift eval이 "true"(요소 발견+동작)/"false"(셀렉터 미매치)를 result로.
-        .click, .type_text, .scroll, .hover, .press => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
+        // 로케이터로 찾았으면 엔진이 `{"ok":true,"matched":{"ref","name"}}` 를 준다(W9b② — 무엇을 눌렀는지).
+        .click, .type_text, .scroll, .hover, .press => if (result.len > 0 and result[0] == '{')
+            serializeActMatchedResult(gpa, req.id, result) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return cp.serializeError(gpa, req.id, .internal_error, "invalid act payload", null),
+            }
+        else
+            serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         // W9b①: back/forward → 갈 곳이 있었는가, reload → true.
         .back, .forward, .reload => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         .wait => serializeNavigateResult(gpa, req.id),
@@ -1631,6 +1727,42 @@ fn serializeWaitTimeoutError(gpa: std.mem.Allocator, req: cp.Request) std.mem.Al
     try data.put(gpa, "condition", .{ .string = p.condition.wire() });
     try data.put(gpa, "timeout_ms", .{ .integer = p.timeout_ms });
     return cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), .{ .object = data });
+}
+
+/// 로케이터 act 결과 `{"ok":true,"matched":{"ref","name"}}` — 엔진이 준 JSON 을 검사해 그 두 필드만 싣는다.
+fn serializeActMatchedResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) (std.mem.Allocator.Error || error{InvalidActPayload})![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidActPayload,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidActPayload;
+    const ok = parsed.value.object.get("ok") orelse return error.InvalidActPayload;
+    if (ok != .bool) return error.InvalidActPayload;
+    const matched = parsed.value.object.get("matched") orelse return error.InvalidActPayload;
+    if (matched != .object) return error.InvalidActPayload;
+    const ref = matched.object.get("ref") orelse return error.InvalidActPayload;
+    const name = matched.object.get("name") orelse return error.InvalidActPayload;
+    if (ref != .string or name != .string) return error.InvalidActPayload;
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writeActMatched(&s, id, ok.bool, ref.string, name.string) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: []const u8, name: []const u8) !void {
+    try beginResult(s, id);
+    try s.objectField("ok");
+    try s.write(ok);
+    try s.objectField("matched");
+    try s.beginObject();
+    try s.objectField("ref");
+    try s.write(ref);
+    try s.objectField("name");
+    try s.write(name);
+    try s.endObject();
+    try endResult(s);
 }
 
 /// act 결과 `{"ok":<bool>}`(click/type/scroll — ok=요소 발견+동작). Swift eval의 boolean 반환을 실는다. caller free.
@@ -1855,6 +1987,8 @@ pub fn browserOpFromRequest(
     // W9-0: 엔진이 지원하지 않는 메서드는 확인 모달 **전에** 답한다(예전엔 승인 뒤 실행 단계에서 실패해, 사용자가 허용을 눌러도
     // 에이전트는 실패를 받았다).
     if (unsupportedOnSurface(dto.?, bmethod)) |w| return .{ .err = try unsupportedByEngineResponse(gpa, req.id, w.engine, w.controllable) };
+    // W9b②: 로케이터(`locator`)는 Chromium 만 — 키가 있는지만 본다(인가 전에는 params 값을 풀지 않는다 — §8.3 oracle 불변식).
+    if (locatorUnsupported(dto.?, bmethod, req.params)) |w| return .{ .err = try unsupportedByEngineParamResponse(gpa, req.id, w.engine, w.controllable, "locator") };
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
     // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
@@ -3144,6 +3278,75 @@ test "W9b①b-2: Chromium 탭의 hover·press 는 op 으로 — press 는 key �
         },
         else => return error.TestUnexpectedResult,
     };
+}
+
+test "W9b②: role 로케이터는 Chromium 탭에서 op arg 로 — 모양·상한·배타는 invalid_params, WebKit 은 인가 전 -32008(param locator)" {
+    var buf: [1]capmod.Capability = undefined;
+    const ok_cases = [_]struct { req: []const u8, arg: []const u8 }{
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":12,\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true,\"nth\":0}}}", .arg = "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true,\"nth\":0}}" },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.type\",\"params\":{\"id\":12,\"locator\":{\"role\":\"textbox\"},\"text\":\"hi\"}}", .arg = "{\"locator\":{\"role\":\"textbox\"},\"text\":\"hi\"}" },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"Enter\",\"locator\":{\"role\":\"heading\",\"level\":2}}}", .arg = "{\"key\":\"Enter\",\"locator\":{\"role\":\"heading\",\"level\":2}}" },
+    };
+    for (ok_cases) |c| switch (try dispatchBrowser(testing.allocator, c.req, fx_engine, capsSlice(&buf, browserCap(12)), null, &no_grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqualStrings(c.arg, op.arg);
+        },
+        .err => |e| {
+            defer testing.allocator.free(e);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    const bad = [_][]const u8{
+        "{\"id\":12,\"locator\":{\"role\":\"button\"},\"selector\":\"#b\"}", // 둘
+        "{\"id\":12,\"locator\":\"button\"}",
+        "{\"id\":12,\"locator\":{\"label\":\"Email\"}}", // W9b②-2
+        "{\"id\":12,\"locator\":{\"role\":\"\"}}",
+        "{\"id\":12,\"locator\":{\"role\":\"button\",\"exact\":true}}", // 이름 없는 exact
+        "{\"id\":12,\"locator\":{\"role\":\"button\",\"nth\":-1}}",
+        "{\"id\":12,\"locator\":{\"role\":\"button\",\"level\":101}}",
+        "{\"id\":12,\"locator\":{\"role\":\"button\",\"bogus\":1}}",
+    };
+    for (bad) |params| {
+        var req_buf: [256]u8 = undefined;
+        const req = try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{s}}}", .{params});
+        switch (try dispatchBrowser(testing.allocator, req, fx_engine, capsSlice(&buf, browserCap(12)), null, &no_grants, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            },
+            .op => |op| {
+                testing.allocator.free(op.arg);
+                return error.TestUnexpectedResult;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    // WebKit 탭 — 인가(모달) 전에 -32008, 값은 보지 않는다(값이 틀려도 -32008 — 미인가 caller 에게 스키마를 알려 주지 않는다).
+    var grants: cpg.PaneGrantStore = .{};
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":11,\"locator\":{\"role\":\"button\"}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.scroll\",\"params\":{\"id\":11,\"locator\":42}}",
+    }) |req| switch (try dispatchBrowser(testing.allocator, req, fx_engine, &.{}, 6, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            try testing.expect(std.mem.indexOf(u8, e, "\"param\":\"locator\"") != null);
+            try testing.expect(std.mem.indexOf(u8, e, "\"engine\":\"webkit\"") != null);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+}
+
+test "W9b②: 로케이터로 찾은 act 의 결과는 {ok, matched{ref,name}} — 모양이 틀린 엔진 답은 internal_error" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.click\",\"params\":{\"id\":12,\"locator\":{\"role\":\"button\"}}}";
+    const good = try serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save \\\"x\\\"\"}}");
+    defer testing.allocator.free(good);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save \\\"x\\\"\"}}}", good);
+    try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{\"ok\":true}"));
+    try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{nope"));
+    _ = req;
 }
 
 test "W9-0: 실행 단계의 -32008 은 L2 와 같은 모양이다(원 요청의 id · engine)" {

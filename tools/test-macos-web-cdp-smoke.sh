@@ -21,6 +21,9 @@
 #                   칸(snapshot 의 ref)에도 넣는다(초점 검사가 거짓 「focus moved」 를 내지 않는다)
 #   scroll-real     scroll 이 페이지를 실제로 굴린다(scrollY — 신호)
 #   hover           hover 가 그 요소에 진짜 포인터 이동(isTrusted mouseover)을 준다 · 없는 요소는 not ok(W9b①b-2)
+#   role            role 로케이터(W9b②): 이름이 여럿 맞으면 실패하고 후보 ref 를 준다 — 그 ref 로 다시 누르면 진짜 클릭 · --exact·--nth 로 고른다 ·
+#                   성공 답에 matched(ref·이름) · 제목은 --level 로 · 모르는 역할은 invalid params(가까운 역할을 권한다) · 요소가 3 만을 넘는 페이지는
+#                   질의 전에 거절(too_large — 질의가 페이지를 멈춘다)
 #   press           요소에 Shift+a → 「A」(isTrusted keydown — 입력 이벤트만으로는 insertText 와 가를 수 없다) · Meta+a(편집 명령 selectAll)
 #                   뒤 대상 없이 x → 값이 「x」로 바뀐다 · Shift+/ → 「?」(US 배열의 위 글자) ·
 #                   대상 없이 Tab → 초점이 다음 칸으로 · 틀린 키 이름은 invalid params. 붙여넣기(Meta+v)는 사용자 클립보드를 쓰므로 스모크에
@@ -70,6 +73,9 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=mk style="position:absolute;left:20px;top:420px" onclick="setTimeout(function(){document.body.insertAdjacentHTML('beforeend','<p id=late2>late2</p>')},2000)">Make</button>
 <input id=ro readonly value="ro" style="position:absolute;left:20px;top:460px">
 <button id=hv style="position:absolute;left:420px;top:300px" onmouseover="hit('hv-'+event.isTrusted)">Hov</button>
+<button id=rs1 style="position:absolute;left:620px;top:100px" onclick="hit('rs1-'+event.isTrusted)">Role Save</button>
+<button id=rs2 style="position:absolute;left:620px;top:140px" onclick="hit('rs2-'+event.isTrusted)">Role Save draft</button>
+<h2 id=rh style="position:absolute;left:620px;top:170px;margin:0">Role Heading</h2>
 <input id=pk style="position:absolute;left:420px;top:340px" onkeydown="hit('pkd-'+event.key+'-'+event.isTrusted)" oninput="hit('pkv-'+encodeURIComponent(this.value)+'-'+event.isTrusted)">
 <input id=pk2 style="position:absolute;left:420px;top:380px" onfocus="hit('pk2focus')">
 <input id=ro2 readonly value="old" style="position:absolute;left:220px;top:460px">
@@ -88,7 +94,8 @@ cat > "$root/www/a.html" <<'HTML'
 HTML
 printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
 printf '<!doctype html><title>page-c</title>c<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=cready>ready</p>")},1000)</script>' > "$root/www/c.html"
-printf '<!doctype html><title>page-slow</title>slow' > "$root/www/slow.html"
+# 느린 문서는 요소가 3 만을 넘는다 — role 로케이터가 질의 전에 거절하는지(W9b②).
+python3 -c "import sys; sys.stdout.write('<!doctype html><title>page-slow</title>slow<button>Big</button>' + '<i></i>' * 31000)" > "$root/www/slow.html"
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
 cat > "$root/server.py" <<'PY'
 import http.server, sys, functools, time
@@ -174,6 +181,16 @@ run type-ro type --selector '#ro' --text 'x'
 run type-ro2 type --selector '#ro2' --text 'x'
 run type-fs type --selector '#fs' --text 'steal'
 run type-up type --selector '#up' --text 'abcd'
+run role-amb click --role button --name 'Role Save'
+amb_ref=\$(sed -n 's/.*\(n[0-9][0-9]*\) "Role Save" (exact).*/\1/p' "\$out/role-amb" | head -1)
+echo "\$amb_ref" > "\$out/amb-ref"
+run role-ref click --ref "\$amb_ref"
+hit_seen rs1-true && echo yes > "\$out/rs1-hit" || echo no > "\$out/rs1-hit"
+run role-nth click --role button --name 'Role Save' --nth 1
+hit_seen rs2-true && echo yes > "\$out/rs2-hit" || echo no > "\$out/rs2-hit"
+run role-exact scroll --role button --name 'Role Save' --exact
+run role-level scroll --role heading --level 2 --name 'role heading'
+run role-unknown click --role buton
 run hover hover --selector '#hv'
 hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
 run hover-missing hover --selector '#none'
@@ -222,6 +239,7 @@ run wait-load wait --load --timeout 8000
 t1=\$(ms)
 echo \$((tc - t0)) > "\$out/load-click-ms"
 url_is slow.html && echo yes > "\$out/slow-title" || cp "\$out/list" "\$out/slow-title"
+run role-big click --role button --name Big
 t2=\$(ms)
 run reload-slow reload
 t3=\$(ms)
@@ -290,6 +308,14 @@ echo "PASS type-shaped: a reshaping field and an email field's trim are ok, a ma
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"
 grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was not not ok ($(tr '\n' ' ' < "$out/hover-missing"))"
 echo "PASS hover: the element got a real (isTrusted) mouseover, a missing element is not ok"
+grep -q 'ambiguous: 2 elements match role=button name~"Role Save"' "$out/role-amb" && [ -n "$(cat "$out/amb-ref")" ] || fail "an ambiguous role locator did not fail with candidate refs ($(tr '\n' ' ' < "$out/role-amb"))"
+ok role-ref && [ "$(cat "$out/rs1-hit")" = yes ] || fail "clicking the candidate ref $(cat "$out/amb-ref") did not click Role Save for real ($(tr '\n' ' ' < "$out/role-ref"))"
+ok role-nth && grep -q 'matched n[0-9]* "Role Save draft"' "$out/role-nth" && [ "$(cat "$out/rs2-hit")" = yes ] || fail "--nth 1 did not click the second match for real ($(tr '\n' ' ' < "$out/role-nth"))"
+ok role-exact && grep -q 'matched n[0-9]* "Role Save"$' "$out/role-exact" || fail "--exact did not pick only Role Save ($(tr '\n' ' ' < "$out/role-exact"))"
+ok role-level && grep -q 'matched n[0-9]* "Role Heading"' "$out/role-level" || fail "--level 2 did not find the h2 ($(tr '\n' ' ' < "$out/role-level"))"
+grep -q '(-32602)' "$out/role-unknown" && grep -q 'did you mean "button"' "$out/role-unknown" || fail "an unknown role was not invalid params with a suggestion ($(tr '\n' ' ' < "$out/role-unknown"))"
+grep -q 'too_large: page has [0-9]* elements' "$out/role-big" || fail "a page with over 30000 elements was not refused before the query ($(tr '\n' ' ' < "$out/role-big"))"
+echo "PASS role: an ambiguous name failed with candidate refs and the ref clicked for real, --nth/--exact/--level picked the right element (matched), an unknown role suggested button, a 31000-element page was refused"
 ok press-a && [ "$(cat "$out/pk-a")" = yes ] || fail "press Shift+a on the field did not type A with a real key ($(tr '\n' ' ' < "$out/press-a") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-all && ok press-x && [ "$(cat "$out/pk-x")" = yes ] || fail "Meta+a then x (where the focus is) did not replace the value ($(tr '\n' ' ' < "$out/press-all") · $(tr '\n' ' ' < "$out/press-x") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-q && [ "$(cat "$out/pk-q")" = yes ] || fail "Shift+/ did not press ? as a real key ($(tr '\n' ' ' < "$out/press-q") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"

@@ -176,6 +176,15 @@ def verify(cli, root):
         run(['agent-events', flag, *options, extras[1]], 0)
         p = run(['agent-events', *options, extras[1], flag], 1)
         assert not p.stdout
+    # Internal duplicates must not emit hello or let startup cleanup delete stale logs.
+    for spec in ['a:23,a:0', 'a:0,a:23', 'a:23,a:23', 'a:01,b:2,a:1',
+                 'a:0,b:1,c:2,a:18446744073709551615']:
+        for directory in [stream_dirs[0], streams / 'missing']:
+            p = run(['agent-events', '--stdio', f'--dir={directory}', f'--resume={spec}'], 1)
+            assert not p.stdout and 'one cursor per file name' in p.stderr
+        for flag in ['--help', '-h']:
+            p = run(['agent-events', '--stdio', f'--dir={stream_dirs[0]}', f'--resume={spec}', flag], 0)
+            assert 'Each resume file name may only appear once' in p.stdout
     after = {str(p): (p.lstat().st_mode, p.read_bytes() if p.is_file() else None)
              for p in streams.rglob('*')}
     assert before == after, 'rejected stream options started log cleanup'
@@ -240,6 +249,18 @@ def verify(cli, root):
     check_stream(['--stdio', '--heartbeat-ms=0', '--resume='], ['first', 'second'], False)
     check_stream(['--heartbeat-ms=200', f'--resume=a:{len(first_line)}'], ['second'], True)
     check_stream(['--heartbeat-ms=200', f'--resume=a:{len(first_line + second_line)}'], [], True)
+    # A second independent file and a prefix name must keep their own byte cursors.
+    (active / 'aa.ndjson').write_bytes(first_line + second_line)
+    check_stream(['--resume=a:23,aa:47', '--heartbeat-ms=200'], ['second'], True)
+    check_stream(['--resume=aa:47,a:23', '--heartbeat-ms=200'], ['second'], True)
+    (active / 'aa.ndjson').unlink()
+    large = active / 'large.ndjson'
+    large.write_bytes(b'x' * (2 * 1024 * 1024))
+    active_before = {p.name: p.read_bytes() for p in active.iterdir()}
+    p = run(['agent-events', '--stdio', f'--dir={active}', '--resume=large:0,a:0,large:1'], 1)
+    assert not p.stdout and 'one cursor per file name' in p.stderr
+    assert active_before == {p.name: p.read_bytes() for p in active.iterdir()}, 'duplicate resume cleaned logs'
+    large.unlink()
     incident_dir = root / 'cache/maru/incidents'
     maximum_limit = str((1 << (8 * struct.calcsize('P'))) - 1)
 

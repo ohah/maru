@@ -55,9 +55,12 @@ exit 1이며 소켓 연결·auth·request를 시작하지 않는다. `--option v
 boolean `--json` 반복은 유지하며 `--limit=N`은 지원하지 않는다.
 
 `maru agent-events --stdio --dir=<절대 경로> [--heartbeat-ms=N] [--resume=spec]`의 값 옵션도
-각 한 번만 지정한다. 0 heartbeat·빈 resume와 동일 값 반복도 exit 1이며 hello 출력과 로그
-정리 전에 종료한다. `=` 문법과 기본값은 유지한다. 기존 help의 순서 판정도 유지해 help가
-중복보다 먼저면 안내(exit 0), 중복 뒤라면 오류다. boolean `--stdio`의 반복 허용은 유지한다.
+각 한 번만 지정한다. 하나의 resume 목록에서도 파일 이름은 한 번만 지정한다. 같은 이름은
+offset과 순서에 관계없이 exit 1이며 서로 다른 파일의 커서는 허용한다. 커서 초기화 실패와
+중복은 hello 출력과 로그 정리 전에 종료한다. 값 옵션의 반복은 0 heartbeat·빈 resume와
+동일 값도 exit 1이다. `=` 문법과 기본값은 유지한다. 값 옵션 중복보다 먼저 help를 만나면
+안내(exit 0), 중복 뒤라면 오류다. 목록 내부 검증은 help가 선택되지 않았을 때만 수행하므로
+내부 중복 뒤에 help가 있어도 안내다. boolean `--stdio`의 반복 허용은 유지한다.
 
 Ubuntu CI의 `check` 잡은 코드 변경 시 `zig build test-cli-failure-process`를 실행한다.
 빌드가 전달한 native CLI artifact를 private HOME·cache·socket으로 검증하므로 GUI 권한은

@@ -1314,3 +1314,8 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 `python3 tools/test-editor-linked-history-adversarial.py`는 실제 모델에 컴파일 가능한 결함과 동등/복원 대조를 실행한다.
 `python3 tools/editor-linked-history-app/run.py`는 격리 앱의 AppKit 입력·Confirm 버튼·Metal PNG를 검증한다.
 범위와 자동 저장/다른 창의 한계는 [연결 이력 계획](plans/editor-history-transaction.md)을 따른다.
+
+프로젝트 바꾸기 배치 선택 명세·입력 수명·중복·전체 Plan·준비 실패 정산 판정:
+`mise exec -- zig build test-editor-project-replace-batch` (Debug/ReleaseFast).
+`python3 tools/test-editor-replace-batch-adversarial.py`는 격리 명세의 컴파일 가능한 결함과 정상·동등·복원 대조를 실행한다.
+이 게이트는 actor 편집·저장·UI 완료 판정이 아니다([현재 범위와 후속 정책](plans/editor-project-replace-batch.md)).

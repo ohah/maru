@@ -4,6 +4,8 @@ pub const event = @import("event.zig");
 pub const request = @import("request.zig");
 pub const presentation = @import("presentation.zig");
 pub const results = @import("results.zig");
+pub const batch_plan = @import("batch_plan.zig");
+pub const batch = @import("batch.zig");
 pub const preview = @import("preview.zig");
 pub const stream = @import("stream.zig");
 comptime {

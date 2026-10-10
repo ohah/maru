@@ -9,6 +9,7 @@
 //!   2026-10-10 — 막지 않는다).
 //! - 글자는 `Meta`·`Control` 이 없을 때만 글(`text`)을 싣는다(단축키는 글을 넣지 않는다). `Shift` 는 US 배열로 바꾼다 — 영문 소문자는
 //!   대문자, 숫자·기호는 위 글자(`Shift+1` → `!`, `Shift+/` → `?`). 기호는 그 자리의 `code`·keyCode 를 싣는다(`?` → `Slash`·191).
+//! - 대문자·위 글자를 바로 주면(`A`·`?`) shiftKey 를 켠다. `Meta`·`Control` 과 함께면 영문은 소문자 key 다(`Meta+A` = Cmd+a).
 //! - 이름은 대소문자를 가리지 않는다(`enter`·`ctrl+a`), `Esc`·`Return` 도 받는다. `Control`·`Alt` + 글자는 macOS 의 뜻(Emacs 줄 이동·
 //!   `Option+a` = `å`)을 만들지 않고 그대로 보낸다(그 글자·modifiers 만 — 적대 리뷰 1 회차).
 
@@ -103,15 +104,22 @@ pub fn parse(spec: []const u8, out: *Press) ParseError!void {
     const len = std.unicode.utf8ByteSequenceLength(rest[0]) catch return error.InvalidKey;
     if (len != rest.len) return error.InvalidKey;
     const cp = std.unicode.utf8Decode(rest) catch return error.InvalidKey;
-    if (cp < 0x20 or cp == 0x7f) return error.InvalidKey;
+    if (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f)) return error.InvalidKey; // C0·DEL·C1 제어 문자
     var ch = rest;
     @memcpy(out.buf[0..ch.len], ch);
     if (cp < 0x80) {
         const c: u8 = @intCast(cp);
         const shift = mods & Modifier.shift != 0;
+        const shortcut = mods & (Modifier.meta | Modifier.control) != 0;
         if (std.ascii.isAlphabetic(c)) {
             const upper = std.ascii.toUpper(c);
-            if (shift) out.buf[0] = upper;
+            if (shift) {
+                out.buf[0] = upper;
+            } else if (shortcut) {
+                out.buf[0] = std.ascii.toLower(c); // `Meta+A` 는 실제 Cmd+A 처럼 key `a`(적대 리뷰 2 회차)
+            } else if (c == upper) {
+                out.modifiers |= Modifier.shift; // 대문자를 바로 줬다 — 실제 키보드처럼 shiftKey 를 켠다
+            }
             out.code = letter_codes[upper - 'A'];
             out.vk = upper;
         } else if (c == ' ') {
@@ -119,7 +127,11 @@ pub fn parse(spec: []const u8, out: *Press) ParseError!void {
             out.vk = 32;
         } else for (us_keys) |k| if (c == k.plain or c == k.shifted) {
             // 그 자리의 키 — `Shift` 면 위 글자를 넣는다(`?` 처럼 위 글자를 바로 줘도 같은 자리).
-            if (shift) out.buf[0] = k.shifted;
+            if (shift) {
+                out.buf[0] = k.shifted;
+            } else if (c == k.shifted and !shortcut) {
+                out.modifiers |= Modifier.shift; // 위 글자(`?`)를 바로 줬다 — shiftKey 를 켠다
+            }
             out.code = k.code;
             out.vk = k.vk;
             break;
@@ -270,12 +282,15 @@ test "키 이름: 이름 있는 키·글자·수식키·편집 명령" {
     try expectEvent("Control+a", true, "{\"type\":\"rawKeyDown\",\"key\":\"a\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65,\"modifiers\":2}");
     try expectEvent("가", true, "{\"type\":\"keyDown\",\"key\":\"가\",\"code\":\"\",\"windowsVirtualKeyCode\":0,\"modifiers\":0,\"text\":\"가\",\"unmodifiedText\":\"가\"}");
     try expectEvent("Space", true, "{\"type\":\"keyDown\",\"key\":\" \",\"code\":\"Space\",\"windowsVirtualKeyCode\":32,\"modifiers\":0,\"text\":\" \",\"unmodifiedText\":\" \"}");
-    try expectEvent("+", true, "{\"type\":\"keyDown\",\"key\":\"+\",\"code\":\"Equal\",\"windowsVirtualKeyCode\":187,\"modifiers\":0,\"text\":\"+\",\"unmodifiedText\":\"+\"}");
+    try expectEvent("+", true, "{\"type\":\"keyDown\",\"key\":\"+\",\"code\":\"Equal\",\"windowsVirtualKeyCode\":187,\"modifiers\":8,\"text\":\"+\",\"unmodifiedText\":\"+\"}");
     try expectEvent("Shift++", true, "{\"type\":\"keyDown\",\"key\":\"+\",\"code\":\"Equal\",\"windowsVirtualKeyCode\":187,\"modifiers\":8,\"text\":\"+\",\"unmodifiedText\":\"+\"}");
     // Shift 는 US 배열의 위 글자로, 기호는 그 자리의 code·keyCode.
     try expectEvent("Shift+1", true, "{\"type\":\"keyDown\",\"key\":\"!\",\"code\":\"Digit1\",\"windowsVirtualKeyCode\":49,\"modifiers\":8,\"text\":\"!\",\"unmodifiedText\":\"!\"}");
     try expectEvent("Shift+/", true, "{\"type\":\"keyDown\",\"key\":\"?\",\"code\":\"Slash\",\"windowsVirtualKeyCode\":191,\"modifiers\":8,\"text\":\"?\",\"unmodifiedText\":\"?\"}");
-    try expectEvent("?", true, "{\"type\":\"keyDown\",\"key\":\"?\",\"code\":\"Slash\",\"windowsVirtualKeyCode\":191,\"modifiers\":0,\"text\":\"?\",\"unmodifiedText\":\"?\"}");
+    try expectEvent("?", true, "{\"type\":\"keyDown\",\"key\":\"?\",\"code\":\"Slash\",\"windowsVirtualKeyCode\":191,\"modifiers\":8,\"text\":\"?\",\"unmodifiedText\":\"?\"}");
+    // 대문자를 바로 주면 shiftKey 를 켜고, Meta·Control 과 함께면 실제 단축키처럼 소문자 key 다.
+    try expectEvent("A", true, "{\"type\":\"keyDown\",\"key\":\"A\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65,\"modifiers\":8,\"text\":\"A\",\"unmodifiedText\":\"A\"}");
+    try expectEvent("Meta+A", true, "{\"type\":\"rawKeyDown\",\"key\":\"a\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65,\"modifiers\":4,\"commands\":[\"selectAll\"]}");
     // 이름은 대소문자를 가리지 않고 Esc·Return 도 받는다.
     try expectEvent("ctrl+ENTER", false, "{\"type\":\"keyUp\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"modifiers\":2}");
     try expectEvent("Esc", false, "{\"type\":\"keyUp\",\"key\":\"Escape\",\"code\":\"Escape\",\"windowsVirtualKeyCode\":27,\"modifiers\":0}");
@@ -285,7 +300,7 @@ test "키 이름: 이름 있는 키·글자·수식키·편집 명령" {
 
 test "키 이름: 틀린 이름은 거절한다" {
     var p: Press = undefined;
-    for ([_][]const u8{ "", "Hyper+a", "ab", "Enterr", "+a", "Shift+", "Shift+Ctrl", "\x01", "\x7f", "a+b", "Shift+++", "Return+" }) |bad| {
+    for ([_][]const u8{ "", "Hyper+a", "ab", "Enterr", "+a", "Shift+", "Shift+Ctrl", "\x01", "\x7f", "\u{85}", "a+b", "Shift+++", "Return+" }) |bad| {
         try testing.expectError(error.InvalidKey, parse(bad, &p));
     }
     try testing.expectError(error.InvalidKey, parse("a" ** 65, &p));

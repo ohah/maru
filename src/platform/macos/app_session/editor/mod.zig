@@ -15660,6 +15660,108 @@ test "WT6b-2b-i 신뢰 전 로컬 저장소의 쓰기는 신뢰 시트부터 —
     try testing.expect(fx.session.scm_trust_write != null);
 }
 
+test "WT6b-2b-ii 원격·묻지 않는 root 의 쓰기는 실행하지 않고 그 터미널에 넣는다 — 원격은 저장소 루트를 `-C` 로, 커밋은 `-m '…'` 로; 로컬 쓰기는 걸리지 않고 넣었다고 말한다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    scm_dock_ops.test_write_gate = true;
+    defer scm_dock_ops.test_write_gate = false;
+    // 활성 Term 을 그 pane 의 터미널로 — 넣는 곳이다.
+    const pane = pane_ops.activePane(fx.session);
+    pane.active_term = for (pane.terms.items, 0..) |t, i| {
+        if (t.kind == .terminal) break i;
+    } else return error.SkipZigTest;
+    const term = pane.activeTerm();
+    const wa = git_backend_for_test.worker_allocator;
+    const staged_status = "# branch.head main\n1 A. N... 000000 100644 100644 0000000000000000000000000000000000000000 78981922613b2afb6025042ff6bd878ac1994e85 a.txt\n";
+
+    // ⑴ 원격 — 그 pane 이 `maru ssh` 로 붙은 원격이고 목록도 그 원격이다. 목록의 자리는 하위 폴더(cwd)지만 경로는 루트 기준이다.
+    try term.surface.core.write("\x1b]5379;ssh;user@build-box\x07");
+    fx.session.git_result = .{ .status = try wa.dupe(u8, staged_status), .ok = true };
+    git_ops.rememberGitRepo(fx.session, "/srv/app/sub");
+    git_ops.rememberGitRepoDest(fx.session, "user@build-box");
+    git_ops.rememberRemoteRepoRoot(fx.session, "/srv/app");
+    const seq0 = fx.session.scm_write_seq;
+    _ = scm_dock_ops.submitWriteForTest(fx.session, "/srv/app/sub", .stage);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq); // 우리가 실행하지 않았다(원격 git 으로도 로컬 git 으로도)
+    try testing.expectEqualStrings(maru.i18n.t(.scm_write_injected), fx.session.scm_write_error orelse return error.NoNotice);
+    try testing.expectEqualStrings("git -C '/srv/app' add -- 'a.txt'", scm_dock_ops.testLastInjected()); // 루트 기준 — cwd(`sub`)가 아니다
+    // 커밋 — `-C` 는 루트, 메시지는 따옴표 안의 줄바꿈(끝에 개행이 없다 — 실행은 사용자가 한다).
+    try fx.session.scm_commit_field.text.appendSlice(fx.session.allocator, "title\n\nit's body");
+    scm_dock_ops.submitCommitFor(fx.session, "/srv/app/sub"); // 커밋 버튼과 같은 진입점
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expect(!fx.session.scm_commit_inflight);
+    try testing.expectEqualStrings("git -C '/srv/app' commit -m 'title\n\nit'\\''s body'", scm_dock_ops.testLastInjected());
+    // 상자는 그대로다 — 실행됐는지 우리가 모른다.
+    try testing.expectEqualStrings("title\n\nit's body", fx.session.scm_commit_field.text.items);
+    fx.session.scm_commit_field.text.clearRetainingCapacity();
+}
+
+test "WT6b-2b-ii 홈 폴더가 저장소면(묻지 않는 root — 신뢰를 정할 수 없다) 쓰기·fetch 를 실행하지 않고 그 터미널에 넣는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    scm_dock_ops.test_write_gate = true;
+    defer scm_dock_ops.test_write_gate = false;
+    try fx.dir.dir.createDirPath(testing.io, "home/.git");
+    var home_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const home = try std.fmt.bufPrint(&home_buf, "{s}/home", .{root});
+    var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    var home_z: [std.fs.max_path_bytes + 17]u8 = undefined;
+    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
+    const pane = pane_ops.activePane(fx.session);
+    pane.active_term = for (pane.terms.items, 0..) |t, i| {
+        if (t.kind == .terminal) break i;
+    } else return error.SkipZigTest;
+    const wa = git_backend_for_test.worker_allocator;
+    fx.session.git_result = .{
+        .status = try wa.dupe(u8, "# branch.head main\n1 A. N... 000000 100644 100644 0000000000000000000000000000000000000000 78981922613b2afb6025042ff6bd878ac1994e85 a.txt\n? b.txt\n"),
+        .remotes = try wa.dupe(u8, "origin\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(fx.session, home);
+    try testing.expect(lsp_client.repoTrustState(fx.session, home) == .refused); // 전제 — 홈 폴더 저장소는 묻지 않는 root
+    const seq0 = fx.session.scm_write_seq;
+    _ = scm_dock_ops.submitWriteForTest(fx.session, home, .stage);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust); // 물을 수 없으니 시트도 없다
+    try testing.expectEqualStrings(maru.i18n.t(.scm_write_injected), fx.session.scm_write_error orelse return error.NoNotice);
+    var want_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "git -C '{s}' add -- 'a.txt'", .{home}), scm_dock_ops.testLastInjected());
+    scm_dock_ops.clearScmWriteError(fx.session);
+    const fetch0 = fx.session.scm_fetch_seq;
+    scm_dock_ops.applyScmDockIntent(fx.session, .fetch_remote);
+    try testing.expectEqual(fetch0, fx.session.scm_fetch_seq);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_write_injected), fx.session.scm_write_error orelse return error.NoNotice);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "git -C '{s}' fetch --prune", .{home}), scm_dock_ops.testLastInjected());
+    // 「모두 스테이지」 — 계획을 세운 뒤(관문은 멈추지 않는다) 그 명령을 넣는다.
+    scm_dock_ops.submitStageAllForTest(fx.session, home);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "git -C '{s}' add -A --", .{home}), scm_dock_ops.testLastInjected());
+    // 커밋.
+    try fx.session.scm_commit_field.text.appendSlice(fx.session.allocator, "dotfiles");
+    scm_dock_ops.submitCommitFor(fx.session, home);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expect(!fx.session.scm_commit_inflight);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "git -C '{s}' commit -m 'dotfiles'", .{home}), scm_dock_ops.testLastInjected());
+}
+
 test "WT6b-2b-i 쓰기 시트를 취소한 바로 그 tick 에 같은 창의 언어 서버 시트가 떠도 미룬 쓰기는 그 시트를 기다리지 않고 버려진다 — 그 시트의 허용이 취소한 쓰기를 실행하지 않는다 (계획 workspace-trust)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

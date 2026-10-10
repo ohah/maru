@@ -37,6 +37,7 @@ pub const browser_help =
     \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
     \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
     \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
+    \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>] [--exact] [--nth <n>] instead of --selector/--ref; Chromium tabs)
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
     \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
@@ -133,7 +134,11 @@ pub const WaitCondition = enum {
 pub const Locator = union(enum) {
     selector: []const u8,
     ref: []const u8,
+    /// W9b② — `--role <role> [--name <n>] [--level <n>] [--exact] [--nth <n>]`(Chromium 탭).
+    role: RoleLocator,
 };
+
+pub const RoleLocator = struct { role: []const u8, name: ?[]const u8 = null, level: ?u32 = null, exact: bool = false, nth: ?u32 = null };
 
 pub const wait_default_timeout_ms: u32 = 25_000;
 pub const wait_max_timeout_ms: u32 = 25_000;
@@ -184,6 +189,9 @@ pub const ParseError = error{
     MissingTimeoutValue, // `wait --timeout`에 값 없음
     InvalidTimeout, // timeout이 1..25_000 정수가 아님
     MissingText, // `type`에 `--text` 없음
+    LocatorOptionWithoutRole, // `--name`·`--level`·`--exact`·`--nth` 를 `--role` 없이
+    ExactWithoutName, // `--exact` 를 `--name` 없이
+    InvalidLocatorNumber, // `--level`(1..100)·`--nth`(0 이상)가 수가 아님
     MissingPressKey, // `press`에 `--key` 없음
     MissingValue, // `set-cookie`/`set-local-storage`에 `--value` 없음
     MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`/`--selector`에 값 없음
@@ -276,33 +284,33 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         return .{ .request = if (eq(sub, "back")) .{ .back = .{ .surface_id = s } } else if (eq(sub, "forward")) .{ .forward = .{ .surface_id = s } } else .{ .reload = .{ .surface_id = s } } };
     }
     if (eq(sub, "hover")) {
-        const ca = try parseCookieArgs(rest);
-        const s = ca.surface orelse return error.MissingSurface;
-        return .{ .request = .{ .hover = .{ .surface_id = s, .locator = try locatorFromArgs(ca) } } };
+        const aa = try parseActArgs(rest, .{});
+        const s = aa.surface orelse return error.MissingSurface;
+        return .{ .request = .{ .hover = .{ .surface_id = s, .locator = try actLocator(aa) } } };
     }
     if (eq(sub, "press")) {
-        const ca = try parseCookieArgs(rest);
-        const s = ca.surface orelse return error.MissingSurface;
-        const key = ca.key orelse return error.MissingPressKey;
-        const loc: ?Locator = if (ca.selector == null and ca.ref == null) null else try locatorFromArgs(ca);
+        const aa = try parseActArgs(rest, .{ .key = true });
+        const s = aa.surface orelse return error.MissingSurface;
+        const key = aa.key orelse return error.MissingPressKey;
+        const loc: ?Locator = if (aa.selector == null and aa.ref == null and aa.role == null and !aa.hasRoleOptions()) null else try actLocator(aa);
         return .{ .request = .{ .press = .{ .surface_id = s, .key = key, .locator = loc } } };
     }
     if (eq(sub, "click")) {
-        const ca = try parseCookieArgs(rest);
-        const s = ca.surface orelse return error.MissingSurface;
-        return .{ .request = .{ .click = .{ .surface_id = s, .locator = try locatorFromArgs(ca) } } };
+        const aa = try parseActArgs(rest, .{});
+        const s = aa.surface orelse return error.MissingSurface;
+        return .{ .request = .{ .click = .{ .surface_id = s, .locator = try actLocator(aa) } } };
     }
     if (eq(sub, "type")) {
-        const ca = try parseCookieArgs(rest);
-        const s = ca.surface orelse return error.MissingSurface;
-        const loc = try locatorFromArgs(ca);
-        const text = ca.text orelse return error.MissingText;
+        const aa = try parseActArgs(rest, .{ .text = true });
+        const s = aa.surface orelse return error.MissingSurface;
+        const loc = try actLocator(aa);
+        const text = aa.text orelse return error.MissingText;
         return .{ .request = .{ .type_text = .{ .surface_id = s, .locator = loc, .text = text } } };
     }
     if (eq(sub, "scroll")) {
-        const ca = try parseCookieArgs(rest);
-        const s = ca.surface orelse return error.MissingSurface;
-        return .{ .request = .{ .scroll = .{ .surface_id = s, .locator = try locatorFromArgs(ca) } } };
+        const aa = try parseActArgs(rest, .{});
+        const s = aa.surface orelse return error.MissingSurface;
+        return .{ .request = .{ .scroll = .{ .surface_id = s, .locator = try actLocator(aa) } } };
     }
     if (eq(sub, "wait")) {
         const wa = try parseWaitArgs(rest);
@@ -611,6 +619,75 @@ fn parseCookieArgs(rest: []const []const u8) ParseError!CookieArgs {
     return r;
 }
 
+/// act 명령(click·type·scroll·hover·press)의 옵션 — 다른 명령의 옵션(`--value` 등)은 받지 않는다(예전엔 쿠키 파서를 함께 써서
+/// `click --name x` 를 조용히 무시했다 — W9b② 에서 `--name` 이 역할 이름이 됐다).
+const ActArgs = struct {
+    surface: ?u64 = null,
+    selector: ?[]const u8 = null,
+    ref: ?[]const u8 = null,
+    role: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    level: ?u32 = null,
+    exact: bool = false,
+    nth: ?u32 = null,
+    text: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+
+    fn hasRoleOptions(self: ActArgs) bool {
+        return self.name != null or self.level != null or self.exact or self.nth != null;
+    }
+};
+const ActExtras = struct { text: bool = false, key: bool = false };
+
+fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs {
+    var r: ActArgs = .{};
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (eq(a, "--exact")) {
+            r.exact = true;
+            i += 1;
+        } else if (matchOpt(a, "--surface")) {
+            r.surface = parseU64(try optValue(rest, &i, "--surface")) catch return error.InvalidSurface;
+        } else if (matchOpt(a, "--selector")) {
+            r.selector = try optValue(rest, &i, "--selector");
+        } else if (matchOpt(a, "--ref")) {
+            r.ref = try optValue(rest, &i, "--ref");
+        } else if (matchOpt(a, "--role")) {
+            r.role = try optValue(rest, &i, "--role");
+        } else if (matchOpt(a, "--name")) {
+            r.name = try optValue(rest, &i, "--name");
+        } else if (matchOpt(a, "--level")) {
+            const v = std.fmt.parseInt(u32, try optValue(rest, &i, "--level"), 10) catch return error.InvalidLocatorNumber;
+            if (v < 1 or v > 100) return error.InvalidLocatorNumber;
+            r.level = v;
+        } else if (matchOpt(a, "--nth")) {
+            r.nth = std.fmt.parseInt(u32, try optValue(rest, &i, "--nth"), 10) catch return error.InvalidLocatorNumber;
+        } else if (extras.text and matchOpt(a, "--text")) {
+            r.text = try optValue(rest, &i, "--text");
+        } else if (extras.key and matchOpt(a, "--key")) {
+            r.key = try optValue(rest, &i, "--key");
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else {
+            return error.UnexpectedArgument;
+        }
+    }
+    return r;
+}
+
+/// act 의 대상 — `--selector`·`--ref`·`--role` 가운데 정확히 하나. 로케이터 옵션은 `--role` 과만, `--exact` 는 `--name` 과만.
+fn actLocator(aa: ActArgs) ParseError!Locator {
+    const given = @as(u8, @intFromBool(aa.selector != null)) + @intFromBool(aa.ref != null) + @intFromBool(aa.role != null);
+    if (given > 1) return error.ConflictingLocator;
+    if (aa.role == null and aa.hasRoleOptions()) return error.LocatorOptionWithoutRole;
+    if (aa.exact and aa.name == null) return error.ExactWithoutName;
+    if (aa.selector) |s| return .{ .selector = s };
+    if (aa.ref) |r| return .{ .ref = r };
+    if (aa.role) |role| return .{ .role = .{ .role = role, .name = aa.name, .level = aa.level, .exact = aa.exact, .nth = aa.nth } };
+    return error.MissingLocator;
+}
+
 fn matchOpt(a: []const u8, opt: []const u8) bool {
     return eq(a, opt) or (std.mem.startsWith(u8, a, opt) and a.len > opt.len and a[opt.len] == '=');
 }
@@ -735,10 +812,9 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             defer obj.deinit(gpa);
             try obj.put(gpa, "id", .{ .integer = @intCast(c.surface_id) });
             try obj.put(gpa, "key", .{ .string = c.key });
-            if (c.locator) |l| switch (l) {
-                .selector => |sel| try obj.put(gpa, "selector", .{ .string = sel }),
-                .ref => |r| try obj.put(gpa, "ref", .{ .string = r }),
-            };
+            var loc_obj: std.json.ObjectMap = .empty;
+            defer loc_obj.deinit(gpa);
+            if (c.locator) |l| try putLocator(gpa, &obj, &loc_obj, l);
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.press", .params = .{ .object = obj } } });
         },
         .click => |c| return actRequest(gpa, id, "browser.click", c.surface_id, c.locator, null),
@@ -772,12 +848,38 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
     }
 }
 
+/// locator 를 요청 객체에 — selector·ref 는 최상위, role 은 `locator` 객체(`loc_obj` 는 부른 쪽이 함수 끝까지 쥔다 — 중첩 객체 수명).
+fn putLocator(gpa: std.mem.Allocator, obj: *std.json.ObjectMap, loc_obj: *std.json.ObjectMap, l: Locator) std.mem.Allocator.Error!void {
+    switch (l) {
+        .selector => |sel| try obj.put(gpa, "selector", .{ .string = sel }),
+        .ref => |r| try obj.put(gpa, "ref", .{ .string = r }),
+        .role => |r| {
+            try loc_obj.put(gpa, "role", .{ .string = r.role });
+            if (r.name) |n| try loc_obj.put(gpa, "name", .{ .string = n });
+            if (r.level) |v| try loc_obj.put(gpa, "level", .{ .integer = v });
+            if (r.exact) try loc_obj.put(gpa, "exact", .{ .bool = true });
+            if (r.nth) |v| try loc_obj.put(gpa, "nth", .{ .integer = v });
+            try obj.put(gpa, "locator", .{ .object = loc_obj.* });
+        },
+    }
+}
+
 /// act 요청 바이트: `{id, selector|ref, text?}`(§9.5.4). locator=selector 또는 ref 하나, text null이면 locator만(click/scroll).
 /// ref는 wire 불투명 토큰(서버가 [data-maru-ref]로 해소). caller free.
 fn actRequest(gpa: std.mem.Allocator, id: cp.Id, method: []const u8, surface_id: u64, locator: Locator, text: ?[]const u8) std.mem.Allocator.Error![]u8 {
     return switch (locator) {
         .selector => |s| twoFieldRequest(gpa, id, method, surface_id, "selector", s, "text", text),
         .ref => |r| twoFieldRequest(gpa, id, method, surface_id, "ref", r, "text", text),
+        .role => {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            var loc_obj: std.json.ObjectMap = .empty;
+            defer loc_obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(surface_id) });
+            try putLocator(gpa, &obj, &loc_obj, locator);
+            if (text) |t| try obj.put(gpa, "text", .{ .string = t });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
+        },
     };
 }
 
@@ -921,6 +1023,13 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         },
         .ok => { // set-cookie/delete-cookie/set·remove-local-storage/clear-storage 성공 = {ok:true}
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else try w.writeAll("error: not ok\n");
+            // 로케이터로 찾았으면 무엇을 눌렀는지(W9b②) — 첫 줄은 그대로 「ok」.
+            if (result.get("matched")) |m| if (m == .object) {
+                try w.print("matched {s} ", .{strField(m.object.get("ref"))});
+                var js: std.json.Stringify = .{ .writer = w, .options = .{} };
+                js.write(strField(m.object.get("name"))) catch return error.WriteFailed;
+                try w.writeAll("\n");
+            };
         },
         .value => try w.print("{s}\n", .{strField(result.get("value"))}), // get-local-storage → {value}
         .get_url => try w.print("{s}\n", .{strField(result.get("url"))}),
@@ -2001,6 +2110,39 @@ test "parse·buildRequestBytes: hover·press(W9b①b-2) — press 는 --key 필�
     try testing.expectEqualStrings("#i", params.get("selector").?.string);
 }
 
+test "parse·buildRequestBytes: role 로케이터(W9b②) — 옵션 규칙·act 명령은 다른 명령의 옵션을 받지 않는다" {
+    const r = (try parse(&.{ "click", "--surface", "3", "--role", "button", "--name", "Save", "--exact", "--nth", "1" })).request.click.locator.role;
+    try testing.expectEqualStrings("button", r.role);
+    try testing.expectEqualStrings("Save", r.name.?);
+    try testing.expect(r.exact);
+    try testing.expectEqual(@as(u32, 1), r.nth.?);
+    try testing.expectEqual(@as(u32, 2), (try parse(&.{ "press", "--surface=3", "--key=Enter", "--role=heading", "--level=2" })).request.press.locator.?.role.level.?);
+    try testing.expectError(error.ConflictingLocator, parse(&.{ "click", "--surface", "3", "--role", "button", "--selector", "#b" }));
+    try testing.expectError(error.LocatorOptionWithoutRole, parse(&.{ "click", "--surface", "3", "--name", "Save" }));
+    try testing.expectError(error.LocatorOptionWithoutRole, parse(&.{ "press", "--surface", "3", "--key", "a", "--nth", "0" }));
+    try testing.expectError(error.ExactWithoutName, parse(&.{ "click", "--surface", "3", "--role", "button", "--exact" }));
+    try testing.expectError(error.InvalidLocatorNumber, parse(&.{ "click", "--surface", "3", "--role", "heading", "--level", "0" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "click", "--surface", "3", "--selector", "#b", "--value", "x" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "click", "--surface", "3", "--selector", "#b", "--text", "x" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "scroll", "--surface", "3", "--selector", "#b", "--key", "x" }));
+    const b = try buildRequestBytes(testing.allocator, .{ .type_text = .{ .surface_id = 11, .locator = .{ .role = .{ .role = "textbox", .name = "Email" } }, .text = "hi" } }, .{ .number = 1 });
+    defer testing.allocator.free(b);
+    var pm = try cp.parseMessage(testing.allocator, b);
+    defer pm.deinit();
+    const params = pm.message.request.params.?.object;
+    try testing.expectEqualStrings("textbox", params.get("locator").?.object.get("role").?.string);
+    try testing.expectEqualStrings("Email", params.get("locator").?.object.get("name").?.string);
+    try testing.expectEqualStrings("hi", params.get("text").?.string);
+    try testing.expect(params.get("selector") == null);
+}
+
+test "renderResponse: 로케이터로 찾은 ok 는 matched 줄을 덧붙인다(첫 줄은 그대로 ok)" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}}", .ok, &w);
+    try testing.expectEqualStrings("ok\nmatched n11 \"Save\"\n", w.buffered());
+}
+
 test "buildRequestBytes: act 메서드·params(selector|ref)" {
     {
         const b = try buildRequestBytes(testing.allocator, .{ .click = .{ .surface_id = 11, .locator = .{ .selector = "#btn" } } }, .{ .number = 1 });
@@ -2057,6 +2199,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
         \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
         \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
+        \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>] [--exact] [--nth <n>] instead of --selector/--ref; Chromium tabs)
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
         \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading

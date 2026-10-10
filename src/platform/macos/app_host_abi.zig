@@ -7138,6 +7138,12 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
     const run = allocator.create(CdpRun) catch return completeCdp(async_id, .failed, "out of memory");
     const op = web_cdp_ops.Op.init(allocator, kind, arg, async_id) catch |e| {
         allocator.destroy(run);
+        if (e == error.UnknownRole) {
+            // 모르는 역할 — 가까운 역할과 흔한 역할을 함께(W9b② — 틀린 역할이 조용히 0 개가 되지 않게).
+            const msg = web_cdp_ops.Op.unknownRoleMessage(allocator, arg) catch return completeCdp(async_id, .invalid_params, "unknown role");
+            defer allocator.free(msg);
+            return completeCdp(async_id, .invalid_params, msg);
+        }
         return completeCdp(async_id, .invalid_params, if (e == error.InvalidKey) "unknown key name (use names like Enter, Shift+Tab, Meta+a or a single character)" else "invalid arguments");
     };
     run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op };
@@ -7205,7 +7211,7 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
         .timeout, .expired => .{ .timed_out = "DevTools did not answer in time" },
         .detached, .closed => .{ .failed = "the tab closed or its page crashed" },
         .sidecar_gone => .{ .failed = "the Chromium engine stopped" },
-        .too_large => .{ .failed = "the DevTools result was too large" },
+        .too_large => .{ .failed = web_cdp_ops.result_too_large },
         // 확실히 보내지 않은 것과 보냈을 수도 있는 것(결과가 깨짐)을 가른다 — 누름이면 떼기를 보낼지가 달라진다.
         .busy => .{ .not_sent = "too many DevTools calls on this tab" },
         .unknown_browser, .invalid_request, .send_failed => .{ .not_sent = "DevTools request failed" },

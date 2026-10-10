@@ -692,3 +692,31 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - 하: click 칸의 「busy 로 막히는 좁은 경우」 가 낡았다 → 고침.
   - 변이(고친 뒤): 리뷰 사본에서 살았던 것들을 포함해 14 중 14 걸림(단계별 묶음 놓기 6·마우스·Delete 떼기 재전송·재시도 범위·이유 덮어쓰기·
     Delete 떼기·떼기 답이 깨짐·놓기 접기, 앱의 동기 NotReady).
+
+### W9b② — 로케이터(2026-10-11)
+
+**계획 공격 세 번**(사용자 지시 — 작업마다 계획 세 번·구현 뒤 다섯 회차; 탐침은 실제 CEF):
+- **1 회차:**
+  - wire 의 `text` 가 type 의 글과 겹친다 → 중첩 `locator` 객체.
+  - label 을 역할마다 접근성 질의로 찾으면 큰 페이지에서 호출마다 약 340 ms(역할 아홉이면 약 3 초 렌더러 멈춤)이고 contenteditable 은 role `generic` 이라 빠진다 → label·text 는 격리 world JS.
+  - 역할 이름이 ARIA 와 다르고 틀리면 조용히 0 개 → 허용 목록·별칭·모르는 역할 거절.
+  - text 의 「가장 안쪽」·「보이는」 규칙이 비었다.
+- **2 회차:**
+  - text 의 위에서 아래 가지치기가 숨은 자손에게 매치를 뺏겼다(`<button>Delete<span hidden>Delete`) → 아래에서 위로.
+  - 역할 약 100 개 실측 — ARIA 이름 그대로(다른 것은 `img`→`image`·`directory`→`list` 뿐).
+  - label 글과 접근성 이름의 차이(select 를 감싼 label 은 값까지 들어간다).
+  - WebKit wait 은 `visible` 조건을 모른다.
+- **3 회차:**
+  - text 탐색이 못 찾으면 BODY·HTML 을 결과로 내 엉뚱한 곳을 누를 수 있었다 → html·body 는 받지 않는다.
+  - **접근성 질의는 DOM 크기의 제곱으로 느려지고 그동안 페이지가 멈춘다**(4 만 요소 3.7 초 — 페이지 타이머 3.6 초 멈춤, 8 만 14 초) → 요소 수 상한 3 만, 넘으면 질의하지 않는다.
+  - 라벨의 aria-hidden 별표, honeypot(화면 밖 입력칸), aria-hidden 글은 빼기.
+  - 부분 일치가 하나면 그것을 누르므로 성공 답에 `matched`.
+  - 오류는 고정 토큰(`ambiguous:`·`too_large:`)과 후보 ref.
+
+**나누기:** ①-1 wire·L2·CLI·role 경로, ②-2 text·label JS, ③-3 wait `visible`.
+
+**W9b②-1 구현:**
+- `web_cdp_locate`(순수): 역할 표·정규화·queryAXTree 결과 거르기·여럿 메시지.
+- `web_cdp_ops` 의 찾기 단계: 격리 world 에서 요소 수 → 문서 → `Accessibility.queryAXTree`(exact 면 이름도) → 하나면 ref 처럼.
+- L2 `locator`(배타·상한·인가 전 WebKit `-32008` + `param`), 결과 `matched`.
+- CLI `--role --name --level --exact --nth`(act 명령은 다른 명령의 옵션을 거절 — 예전엔 쿠키 파서를 함께 써 `click --name x` 를 조용히 무시했다).

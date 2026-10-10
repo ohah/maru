@@ -4320,6 +4320,15 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    // Shared codec gates must run on every host; native writer locks are a later stage.
+    const agent_log_generation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/agent_log_generation_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_agent_log_generation_tests = b.addRunArtifact(agent_log_generation_tests);
+    b.step("test-agent-log-generations", "Run portable log generation codec and cursor reconciliation tests").dependOn(&run_agent_log_generation_tests.step);
+    test_step.dependOn(&run_agent_log_generation_tests.step);
     // Exercise grammar/ownership effects, not source-string presence. OS delivery
     // remains a separate opt-in product test.
     const editor_open_tests = addProjectTest(b, .{ .root_module = b.createModule(.{

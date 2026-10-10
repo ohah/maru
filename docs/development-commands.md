@@ -62,6 +62,10 @@ offset과 순서에 관계없이 exit 1이며 서로 다른 파일의 커서는 
 안내(exit 0), 중복 뒤라면 오류다. 목록 내부 검증은 help가 선택되지 않았을 때만 수행하므로
 내부 중복 뒤에 help가 있어도 안내다. boolean `--stdio`의 반복 허용은 유지한다.
 
+세대 codec 집중 검증은 `zig build test-agent-log-generations`다. 기본 `test`에도
+포함되며 header/resume 문법·세대별 offset 조정·snapshot 회전 조건을 OS 중립적으로
+검사한다. 파일 잠금·native 기록기와 제품 스트림 배선의 실행 검증은 후속 단계다.
+
 Ubuntu CI의 `check` 잡은 코드 변경 시 `zig build test-cli-failure-process`를 실행한다.
 이 게이트는 실제 stdout pipe와 private 로그로 agent-events의 축소 회전·짧은 파일 교체·
 cursor 재접속·정상 절단 및 출력 실패 시 로그 바이트/0600 보존도 검사한다. 시작 시

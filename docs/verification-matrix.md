@@ -4144,6 +4144,13 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 
 `test-macos-project-search-worker`는 실제 API의 합성 native 모델·공유/독립 신원·0건 점유·glob/범위·취소·helper 수거·부분 결과를 검증한다. `test-editor-project-search`는 argv·JSON·요청 신원의 L2 판정자를 실행한다. `test-macos-project-search-roots`는 여러 root의 후보 합집합·귀속·전체 예산·수명을 실행 검증한다([범위](plans/editor-project-search-roots.md)). `test-editor-project-search-owner`는 실제 AppSession 사본·논리 IME callback·감시 확인 후 실행·편집 후 재검색을 검사한다. 검색 UI·실제 두벌식 HID·앱 RSS와 root 교체 화면은 [도크 검증](plans/editor-project-search-dock.md)에 제품 표본이 있다. 전체 FSEvents/overflow·지연 I/O 종료·OS 후보창 픽셀·VoiceOver 조작은 그 표본의 범위 밖이며 [worker 계획](plans/editor-project-search-worker.md)의 남은 경계를 유지한다.
 
+## 에이전트 로그 세대
+
+| 범위 | 상태 | 검증 | 한계 |
+| --- | --- | --- | --- |
+| 명시적 generation과 payload offset | 부분 구현 | `test-agent-log-generations`가 header/resume codec·세대 reconciliation·overflow·snapshot 회전 조건을 기본 test에서 검증한다. macOS Debug/ReleaseFast와 Ubuntu ARM64 실제 실행, Windows x86_64 cross compile, 방어 무력화와 등가 변형을 확인했다. | native 기록기·공유 잠금·wire 협상·앱 cursor 배선과 Windows native 파일 I/O는 후속이다. 현재 제품 CLI/log 포맷은 유지된다. 계획은 [로그 세대와 이어읽기](plans/agent-log-generations.md)를 따른다. |
+
+
 ## 에디터 CLI와 앱 URL
 
 | 기능 | 상태 | 검증 | 한계 |

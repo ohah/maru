@@ -93,6 +93,7 @@ pub const agent_image_staging = @import("session/agent_image_staging.zig"); // M
 pub const agent_image_markers = @import("session/agent_image_markers.zig"); // MP1: 화면에서 `[Image #N]` 후보를 셀 열과 함께 긁는다(커서 블록 스코프)
 pub const agent_statusline = @import("session/agent_statusline.zig"); // claude 상태줄 훅(§7.2.2 — 옵션 보강)
 pub const agent_hook_command = @import("session/agent_hook_command.zig"); // provider 훅 인라인 커맨드(docs/agent-hooks.md §4.1, 순수)
+pub const agent_log_generation = @import("session/agent_log_generation.zig"); // OS-neutral log generation and resume contract
 pub const agent_hook_event = @import("session/agent_hook_event.zig"); // 훅 이벤트 로그 파서·tail 커서(§4, 순수)
 pub const agent_hook_install = @import("session/agent_hook_install.zig"); // 훅 설치 계획 판정(§5, 순수)
 pub const agent_hook_trust = @import("session/agent_hook_trust.zig"); // codex 훅 신뢰 값 계산(§2.1, 순수)

@@ -201,6 +201,7 @@ pub const Op = struct {
         // 떼기를 다시 보낸다(못 보냈던 것 — 철회돼도 committed 라 보낸다).
         if (self.stage == .key_up) return self.keyStep(gpa, false);
         if (self.stage == .mouse_up) return self.mouse(gpa, "mouseReleased");
+        if (self.stage == .delete_up) return deleteUp(gpa);
         if (self.now_ms >= self.wait_deadline_ms) return done(gpa, .timeout, "");
         return if (self.frame_id == null) self.frameTreeStep(gpa) else self.worldStep(gpa);
     }
@@ -288,6 +289,12 @@ pub const Op = struct {
                 self.miss = reply.failed;
                 return self.keyStep(gpa, false);
             },
+            // Delete 누름도 같다 — 떼기를 마저(5 회차 — 시한에는 떼면서 실패에는 떼지 않았다).
+            .delete_down => {
+                self.miss = reply.failed;
+                self.stage = .delete_up;
+                return deleteUp(gpa);
+            },
             else => {},
         };
         // 누름을 확실히 보내지 않았다 — 떼지 않고, 쥔 묶음만 놓는다.
@@ -303,12 +310,13 @@ pub const Op = struct {
             else => {},
         };
         // 떼기를 확실히 보내지 못했다 — 잠깐 뒤 다시(세 번까지). 그래도 못 보내면 놓고 실패.
-        if (reply == .not_sent and (self.stage == .key_up or self.stage == .mouse_up)) {
+        if (reply == .not_sent and (self.stage == .key_up or self.stage == .mouse_up or self.stage == .delete_up)) {
             if (self.up_retries < max_up_retries) {
                 self.up_retries += 1;
                 return .{ .sleep = up_retry_ms };
             }
-            self.miss = reply.not_sent;
+            // 앞선 실패 이유(엔진이 멈춤 등)가 있으면 그것으로 답한다(5 회차 — 「not ready」 가 다시 덮었다).
+            if (self.miss == null) self.miss = reply.not_sent;
             return if (self.stage == .key_up) self.afterKeys(gpa) else self.releaseStep(gpa);
         }
         if (reply == .failed or reply == .not_sent) {
@@ -317,10 +325,13 @@ pub const Op = struct {
                 // 놓기의 실패 — 동작은 이미 끝났다: 그 결과로 답한다(4 회차 — 실패로 답하면 다시 시도해 Enter 가 두 번 갔다).
                 .release => return self.finish(gpa),
                 // 원격 객체 묶음을 쥔 단계의 실패 — 놓고 실패(4 회차 — 곧장 끝내 묶음이 남았다).
-                .hit_test, .focus_check, .hover_move, .select, .insert, .delete_down, .delete_up, .verify => {
-                    self.miss = why;
+                .resolve, .hit_test, .focus_check, .hover_move, .select, .insert, .delete_up, .verify => {
+                    if (self.miss == null) self.miss = why;
                     return self.releaseStep(gpa);
                 },
+                // 떼기의 실패(보냈을 수도) — 누름은 갔다: 실패로 덮지 않고 놓은 뒤 동작의 결과로(5 회차 — 결과가 깨진 답에도 실패였다).
+                .key_up => return self.afterKeys(gpa),
+                .mouse_up => return self.releaseStep(gpa),
                 else => {},
             }
         }
@@ -542,6 +553,10 @@ pub const Op = struct {
             },
             .sleeping => unreachable, // 잠든 동안은 답이 오지 않는다(wake 로 깨운다)
         }
+    }
+
+    fn deleteUp(gpa: std.mem.Allocator) !Step {
+        return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyUp\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
     }
 
     /// press 의 누름(`down`)·뗌.
@@ -1685,4 +1700,95 @@ test "press: 못 보낸 떼기는 50 ms 뒤 세 번까지 다시, 놓기 실패�
     try testing.expectEqual(Status.failed, h.status);
     try testing.expectEqual(@as(usize, 0), trail.count("Input.dispatchMouseEvent"));
     try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+}
+
+/// `fail_method`(+`fail_needle` 이 params 에 있을 때)에 `fail_reply` 로 답하는 페이지 — 단계별 표 시험용.
+var fail_method: []const u8 = "";
+var fail_needle: []const u8 = "";
+var fail_reply: Reply = .{ .failed = "DevTools request failed" };
+var fail_left: usize = 0;
+
+fn tablePage(method: []const u8, params: []const u8) Reply {
+    if (fail_left > 0 and std.mem.eql(u8, method, fail_method) and std.mem.indexOf(u8, params, fail_needle) != null) {
+        fail_left -= 1;
+        return fail_reply;
+    }
+    // press 의 초점 검사(글 하나로 답한다) — type 의 고르기(객체로 답한다)와 가른다.
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "return 'focus moved'") != null) return happyPage(method, params);
+    return editorPage(method, params);
+}
+
+test "묶음을 쥔 단계마다(노드 잡기·검사·움직임·고르기·넣기·Delete·다시 읽기) 실패해도 묶음을 놓는다, 마우스·Delete 떼기도 다시 보낸다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    const failed: Reply = .{ .failed = "DevTools request failed" };
+    const unsent: Reply = .{ .not_sent = "too many DevTools calls on this tab" };
+    const cases = [_]struct { kind: Kind, arg: []const u8, method: []const u8, needle: []const u8, reply: Reply, times: usize, status: Status }{
+        .{ .kind = .click, .arg = "{\"selector\":\"#b\"}", .method = "DOM.resolveNode", .needle = "", .reply = failed, .times = 1, .status = .failed },
+        .{ .kind = .press, .arg = "{\"key\":\"x\",\"selector\":\"#e\"}", .method = "Runtime.callFunctionOn", .needle = "", .reply = failed, .times = 1, .status = .failed },
+        .{ .kind = .hover, .arg = "{\"selector\":\"#h\"}", .method = "Input.dispatchMouseEvent", .needle = "mouseMoved", .reply = failed, .times = 1, .status = .failed },
+        .{ .kind = .type_text, .arg = "{\"selector\":\"#e\",\"text\":\"x\"}", .method = "Runtime.callFunctionOn", .needle = "isContentEditable", .reply = failed, .times = 1, .status = .failed },
+        .{ .kind = .type_text, .arg = "{\"selector\":\"#e\",\"text\":\"x\"}", .method = "Input.insertText", .needle = "", .reply = unsent, .times = 1, .status = .failed },
+        .{ .kind = .type_text, .arg = "{\"selector\":\"#e\",\"text\":\"x\"}", .method = "Runtime.callFunctionOn", .needle = "function(want,bh,bn)", .reply = failed, .times = 1, .status = .failed },
+        // Delete 누름이 실패(보냈을 수도) — 떼기를 마저.
+        .{ .kind = .type_text, .arg = "{\"selector\":\"#e\",\"text\":\"\"}", .method = "Input.dispatchKeyEvent", .needle = "keyDown", .reply = failed, .times = 1, .status = .failed },
+        // 떼기를 둘 못 보냈다 — 다시 보내 성공(마우스·Delete).
+        .{ .kind = .click, .arg = "{\"selector\":\"#b\"}", .method = "Input.dispatchMouseEvent", .needle = "mouseReleased", .reply = unsent, .times = 2, .status = .success },
+        .{ .kind = .type_text, .arg = "{\"selector\":\"#e\",\"text\":\"\"}", .method = "Input.dispatchKeyEvent", .needle = "keyUp", .reply = unsent, .times = 2, .status = .success },
+        // 떼기의 답이 깨졌다(보냈을 수도) — 누름은 갔다: 성공으로.
+        .{ .kind = .press, .arg = "{\"key\":\"x\",\"selector\":\"#e\"}", .method = "Input.dispatchKeyEvent", .needle = "keyUp", .reply = failed, .times = 1, .status = .success },
+    };
+    for (cases, 0..) |c, i| {
+        trail.reset();
+        fail_method = c.method;
+        fail_needle = c.needle;
+        fail_reply = c.reply;
+        fail_left = c.times;
+        var op = try Op.init(testing.allocator, c.kind, c.arg, 100 + i);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &tablePage, &trail);
+        defer testing.allocator.free(r.result);
+        errdefer std.debug.print("case {d}: {s} {s}\n", .{ i, @tagName(r.status), r.result });
+        try testing.expectEqual(c.status, r.status);
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+        if (i == 6) {
+            // Delete 누름이 실패해도 떼기는 갔다.
+            var ups: usize = 0;
+            for (trail.params.items) |p| if (std.mem.indexOf(u8, p, "\"keyUp\"") != null) {
+                ups += 1;
+            };
+            try testing.expectEqual(@as(usize, 1), ups);
+        }
+    }
+    fail_left = 0;
+}
+
+test "떼기를 끝까지 못 보내도 앞선 실패 이유로 답한다(엔진이 멈춤 — 「not ready」 가 덮지 않는다)" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    fail_method = "Input.dispatchKeyEvent";
+    fail_needle = "";
+    fail_reply = .{ .failed = "the Chromium engine stopped" };
+    fail_left = 1;
+    var op = try Op.init(testing.allocator, .press, "{\"key\":\"x\"}", 120);
+    defer op.deinit(testing.allocator);
+    // 누름이 실패 → 떼기는 못 보냄(not_sent) 셋 — 마지막 답은 앞선 이유.
+    var step = try op.start(testing.allocator);
+    testing.allocator.free(step.call.params);
+    step = try op.feed(testing.allocator, fail_reply);
+    var n: usize = 0;
+    while (step != .done) : (n += 1) {
+        switch (step) {
+            .call => |c| {
+                testing.allocator.free(c.params);
+                step = try op.feed(testing.allocator, .{ .not_sent = "the Chromium tab is not ready" });
+            },
+            .sleep => step = try op.wake(testing.allocator),
+            .done => unreachable,
+        }
+    }
+    defer testing.allocator.free(step.done.result);
+    try testing.expectEqual(Status.failed, step.done.status);
+    try testing.expectEqualStrings("the Chromium engine stopped", step.done.result);
+    fail_left = 0;
 }

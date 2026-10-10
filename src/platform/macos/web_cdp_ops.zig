@@ -56,6 +56,10 @@ const max_boxes = 64;
 pub const wait_first_interval_ms: u32 = 50;
 pub const wait_max_interval_ms: u32 = 500;
 
+/// 누른 뒤의 떼기를 확실히 보내지 못했을 때(DevTools 자리가 참 등) 다시 보내는 간격·횟수(4 회차 — 그냥 끝내 키가 눌린 채 남았다).
+pub const up_retry_ms: u32 = 50;
+pub const max_up_retries: u8 = 3;
+
 const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up };
 
 pub const Op = struct {
@@ -98,6 +102,8 @@ pub const Op = struct {
     /// press — 키 이름(소유 — 이벤트를 만들 때마다 `web_cdp_keys` 로 다시 푼다)과 대상(없으면 지금 초점에 누른다).
     press_key: ?[]u8 = null,
     press_target: bool = false,
+    /// 떼기를 다시 보낸 횟수.
+    up_retries: u8 = 0,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
@@ -192,6 +198,9 @@ pub const Op = struct {
 
     /// `sleep` 뒤에 다시 부른다(부른 쪽이 `now_ms` 를 넣은 뒤) — 시한이 지났으면 timeout, 아니면 다음 확인.
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
+        // 떼기를 다시 보낸다(못 보냈던 것 — 철회돼도 committed 라 보낸다).
+        if (self.stage == .key_up) return self.keyStep(gpa, false);
+        if (self.stage == .mouse_up) return self.mouse(gpa, "mouseReleased");
         if (self.now_ms >= self.wait_deadline_ms) return done(gpa, .timeout, "");
         return if (self.frame_id == null) self.frameTreeStep(gpa) else self.worldStep(gpa);
     }
@@ -293,6 +302,28 @@ pub const Op = struct {
             },
             else => {},
         };
+        // 떼기를 확실히 보내지 못했다 — 잠깐 뒤 다시(세 번까지). 그래도 못 보내면 놓고 실패.
+        if (reply == .not_sent and (self.stage == .key_up or self.stage == .mouse_up)) {
+            if (self.up_retries < max_up_retries) {
+                self.up_retries += 1;
+                return .{ .sleep = up_retry_ms };
+            }
+            self.miss = reply.not_sent;
+            return if (self.stage == .key_up) self.afterKeys(gpa) else self.releaseStep(gpa);
+        }
+        if (reply == .failed or reply == .not_sent) {
+            const why = if (reply == .failed) reply.failed else reply.not_sent;
+            switch (self.stage) {
+                // 놓기의 실패 — 동작은 이미 끝났다: 그 결과로 답한다(4 회차 — 실패로 답하면 다시 시도해 Enter 가 두 번 갔다).
+                .release => return self.finish(gpa),
+                // 원격 객체 묶음을 쥔 단계의 실패 — 놓고 실패(4 회차 — 곧장 끝내 묶음이 남았다).
+                .hit_test, .focus_check, .hover_move, .select, .insert, .delete_down, .delete_up, .verify => {
+                    self.miss = why;
+                    return self.releaseStep(gpa);
+                },
+                else => {},
+            }
+        }
         const bytes = switch (reply) {
             .failed, .not_sent => |why| return done(gpa, .failed, why),
             .timed_out => |why| return done(gpa, .timeout, why),
@@ -1590,4 +1621,68 @@ test "click: 누름의 답이 실패면 떼기·놓기를 마저 보내고, 확�
         try testing.expectEqual(c.mouse, trail.count("Input.dispatchMouseEvent"));
         try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
     }
+}
+
+var up_unsent_left: usize = 0;
+
+fn flakyKeyUpPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchKeyEvent") and std.mem.indexOf(u8, params, "keyUp") != null and up_unsent_left > 0) {
+        up_unsent_left -= 1;
+        return .{ .not_sent = "too many DevTools calls on this tab" };
+    }
+    return happyPage(method, params);
+}
+
+fn failedReleasePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .not_sent = "the Chromium tab is not ready" };
+    return happyPage(method, params);
+}
+
+fn failedHitPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .failed = "DevTools request failed" };
+    return happyPage(method, params);
+}
+
+test "press: 못 보낸 떼기는 50 ms 뒤 세 번까지 다시, 놓기 실패는 동작의 결과로, 묶음을 쥔 단계의 실패는 놓고 실패" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    // 둘 못 보내고 셋째에 갔다 — 성공, 누름 1·뗌 3.
+    up_unsent_left = 2;
+    var op = try Op.init(testing.allocator, .press, "{\"key\":\"Enter\",\"selector\":\"#e\"}", 90);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &flakyKeyUpPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqual(@as(usize, 4), trail.count("Input.dispatchKeyEvent"));
+    try testing.expectEqual(@as(usize, 2), trail.sleeps);
+    // 끝까지 못 보냈다 — 세 번 다시 보낸 뒤 놓고 실패.
+    trail.reset();
+    up_unsent_left = 100;
+    var stuck = try Op.init(testing.allocator, .press, "{\"key\":\"Enter\",\"selector\":\"#e\"}", 91);
+    defer stuck.deinit(testing.allocator);
+    const s = try drive(&stuck, &flakyKeyUpPage, &trail);
+    defer testing.allocator.free(s.result);
+    try testing.expectEqual(Status.failed, s.status);
+    try testing.expectEqual(@as(usize, 1 + 1 + max_up_retries), trail.count("Input.dispatchKeyEvent"));
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    up_unsent_left = 0;
+    // 키는 갔고 놓기만 실패 — 성공으로 답한다(실패로 답하면 다시 시도해 두 번 누른다).
+    for ([_]Kind{ .press, .click }) |kind| {
+        trail.reset();
+        var rel = try Op.init(testing.allocator, kind, if (kind == .press) "{\"key\":\"Enter\",\"selector\":\"#e\"}" else "{\"selector\":\"#b\"}", 92);
+        defer rel.deinit(testing.allocator);
+        const x = try drive(&rel, &failedReleasePage, &trail);
+        defer testing.allocator.free(x.result);
+        try testing.expectEqual(Status.success, x.status);
+        try testing.expectEqualStrings("true", x.result);
+    }
+    // 덮임 검사의 실패(보냈을 수도) — 묶음을 놓고 실패, 누르지 않는다.
+    trail.reset();
+    var hit = try Op.init(testing.allocator, .hover, "{\"selector\":\"#h\"}", 93);
+    defer hit.deinit(testing.allocator);
+    const h = try drive(&hit, &failedHitPage, &trail);
+    defer testing.allocator.free(h.result);
+    try testing.expectEqual(Status.failed, h.status);
+    try testing.expectEqual(@as(usize, 0), trail.count("Input.dispatchMouseEvent"));
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
 }

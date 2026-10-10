@@ -7063,6 +7063,36 @@ const CdpRun = struct {
 
 /// 실행 중이거나 기다리는 Chromium op(도착 순).
 var cdp_runs: std.ArrayList(*CdpRun) = .empty;
+/// 잠든 op(wait 의 확인 간격) — 매 tick(`maru_macos_control_take_browser_op`) 시각이 된 것을 깨운다. 그 탭의 줄은 계속 쥔다.
+var cdp_sleepers: std.ArrayList(struct { run: *CdpRun, wake_ms: i64 }) = .empty;
+
+fn cdpNowMs() i64 {
+    const ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    return @intCast(@divFloor(ns, std.time.ns_per_ms));
+}
+
+/// 시각이 된 잠든 op 을 깨운다 — 깨운 op 이 다시 잠들 수 있어 먼저 꺼낸 뒤 깨운다.
+fn wakeCdpSleepers() void {
+    if (cdp_sleepers.items.len == 0) return;
+    const now = cdpNowMs();
+    var due: [16]*CdpRun = undefined;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < cdp_sleepers.items.len and n < due.len) {
+        if (cdp_sleepers.items[i].wake_ms <= now) {
+            due[n] = cdp_sleepers.orderedRemove(i).run;
+            n += 1;
+        } else i += 1;
+    }
+    for (due[0..n]) |run| {
+        run.op.now_ms = now;
+        const step = run.op.wake(allocator) catch {
+            finishCdp(run, .failed, "out of memory");
+            continue;
+        };
+        cdpAdvance(run, step);
+    }
+}
 /// 보내려 한 DevTools 호출 수(시험에서만 센다 — 철회 뒤 보내지 않았는지).
 var cdp_calls_attempted: usize = 0;
 
@@ -7097,6 +7127,7 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
 
 fn beginCdp(run: *CdpRun) void {
     run.started = true;
+    run.op.now_ms = cdpNowMs();
     _ = active_browser_executions.markRunning(run.async_id);
     const step = run.op.start(allocator) catch return finishCdp(run, .failed, "out of memory");
     cdpAdvance(run, step);
@@ -7119,6 +7150,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             defer allocator.free(d.result);
             finishCdp(run, d.status, d.result);
         },
+        .sleep => |ms| cdp_sleepers.append(allocator, .{ .run = run, .wake_ms = cdpNowMs() + ms }) catch finishCdp(run, .failed, "out of memory"),
         .call => |next| {
             defer allocator.free(next.params);
             if (!run.op.committed() and !cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
@@ -7138,6 +7170,8 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
 
 fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome, result: []const u8) void {
     const run: *CdpRun = @ptrCast(@alignCast(ctx));
+    run.op.now_ms = cdpNowMs();
+    run.op.page_loading = session_mod.web_osr.isLoading(run.surface_id);
     const reply: web_cdp_ops.Reply = switch (outcome) {
         .ok => .{ .ok = result },
         .cdp_error => .{ .cdp_error = result },
@@ -7353,6 +7387,8 @@ pub export fn maru_macos_control_take_browser_op(
     out_arg_ptr: ?*?[*]const u8,
     out_arg_len: ?*usize,
 ) u32 {
+    // W9b①b: 잠든 Chromium op(wait 의 확인 간격)을 깨운다 — 서버가 멈췄어도(깨운 op 이 재허가에서 끝난다).
+    wakeCdpSleepers();
     if (!control_server_active) return 0;
     const server = &control_server_storage;
     // §5-async reap: 매 tick hung op timeout(evaluateJavaScript/navigation/wait가 안 끝나는 op가 accept를 영구 붙잡는 것 방어).

@@ -6,9 +6,12 @@
 //!   누르기 직전에 그 자리에서 맞는 것이 그 요소(또는 그 안)인지 본다 — 다른 요소가 덮었으면 누르지 않고 실패로 답한다. 이 검사는
 //!   **격리된 world**(`Page.createIsolatedWorld`)에서 돈다: 페이지 world 에서 돌리면 페이지가 `elementFromPoint`·`contains` 를 바꿔
 //!   검사를 속이고 검사 순간을 알아챘다(W9b①a 적대 리뷰 1 회차 실측 — 격리 world 는 둘 다 막는다). 검사와 누르기 사이에는 왕복이
-//!   하나뿐이고(그 사이 페이지가 요소를 옮기는 경합은 남는다 — 문서), 누르기 전 움직임(`mouseMoved`)은 보내지 않는다: 숨긴 탭에서는
-//!   답이 오지 않았고(실측) 페이지에 「곧 누른다」는 신호가 됐다. 누름이 있으면 떼기는 끝까지 보낸다(`committed` — 철회돼도 버튼을
-//!   눌린 채 두지 않는다).
+//!   하나뿐이다. **이 검사는 오클릭 방지이지 적대 페이지에 대한 경계가 아니다** — 페이지가 검사 순간을 몰라도 덮개를 계속 켰다 껐다
+//!   하면 검사는 「맞음」·누름은 덮개에 떨어지는 경우가 생긴다(W9b①a 적대 리뷰 2 회차). 누르기 전 움직임(`mouseMoved`)은 보내지
+//!   않는다: 숨긴 탭에서는 답이 오지 않았고(실측) 페이지에 「곧 누른다」는 신호가 됐다. 누름을 보냈으면 떼기·놓기는 끝까지 보낸다
+//!   (`committed` — 철회돼도, 누름의 답이 시한을 넘겨도 버튼을 눌린 채 두지 않는다).
+//! - 다른 frame 의 요소(같은 출처 iframe 노드를 ref 로)는 누르지 않는다 — 자리는 주 화면 좌표인데 검사는 그 frame 문서에서 돌아
+//!   어긋난다. 그림자 DOM 의 slot 에 꽂힌 내용·host 는 그 요소 안으로 본다.
 //! - 자리는 요소 상자와 화면(layout viewport)이 겹친 곳의 가운데다(화면보다 큰 요소의 가운데가 화면 밖이면 거기서는 아무것도 맞지
 //!   않는다). 원격 객체는 요청마다 다른 묶음(`maru-w9b-<번호>`)이라 같은 탭의 다른 요청이 놓지 못한다.
 //! - ref 는 `n<backendNodeId>`(같은 문서 안에서 바뀌지 않는다 — WebKit 의 `e1` 은 다음 snapshot 까지만이다). 모르는 ref·없는 요소는
@@ -37,6 +40,8 @@ pub const Reply = union(enum) {
     timed_out: []const u8,
 };
 
+const max_boxes = 8;
+
 const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload };
 
 pub const Op = struct {
@@ -46,14 +51,17 @@ pub const Op = struct {
     id: u64 = 0,
     selector: ?[]u8 = null,
     backend: i64 = 0,
-    /// 요소 상자(viewport CSS px) — 화면과 겹친 곳을 고른다.
-    box: [4]f64 = .{ 0, 0, 0, 0 },
+    /// 요소 상자들(viewport CSS px, 앞에서 `max_boxes` 개 — 여러 줄에 걸친 링크는 줄마다 하나) — 화면과 겹친 첫 상자를 고른다.
+    boxes: [max_boxes][4]f64 = undefined,
+    box_count: usize = 0,
     frame_id: ?[]u8 = null,
     context_id: i64 = 0,
     x: f64 = 0,
     y: f64 = 0,
     /// 덮였는지 본 결과의 실패 이유(놓기 뒤에 답한다). null = 맞았다.
     miss: ?[]const u8 = null,
+    /// 누름·떼기의 답이 시한을 넘겼다 — 그래도 떼기·놓기를 보내고 끝에 timeout 으로 답한다.
+    late: ?[]const u8 = null,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
@@ -104,6 +112,20 @@ pub const Op = struct {
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
+        // 누른 뒤의 시한 — 페이지가 막혀 답이 늦을 뿐 입력은 갔을 수 있다: 떼기·놓기를 마저 보내고 끝에 timeout 으로 답한다.
+        if (reply == .timed_out) switch (self.stage) {
+            .mouse_down => {
+                self.late = reply.timed_out;
+                self.stage = .mouse_up;
+                return self.mouse(gpa, "mouseReleased");
+            },
+            .mouse_up => {
+                self.late = reply.timed_out;
+                return self.releaseStep(gpa);
+            },
+            .release => return self.finish(gpa),
+            else => {},
+        };
         const bytes = switch (reply) {
             .failed => |why| return done(gpa, .failed, why),
             .timed_out => |why| return done(gpa, .timeout, why),
@@ -134,13 +156,8 @@ pub const Op = struct {
                 return call(gpa, "DOM.getContentQuads", "{{\"backendNodeId\":{d}}}", .{self.backend});
             },
             .quads => {
-                const quad = firstQuad(v) orelse return done(gpa, .failed, "the element has no visible box");
-                self.box = .{
-                    @min(@min(quad[0], quad[2]), @min(quad[4], quad[6])),
-                    @min(@min(quad[1], quad[3]), @min(quad[5], quad[7])),
-                    @max(@max(quad[0], quad[2]), @max(quad[4], quad[6])),
-                    @max(@max(quad[1], quad[3]), @max(quad[5], quad[7])),
-                };
+                self.box_count = collectBoxes(v, &self.boxes);
+                if (self.box_count == 0) return done(gpa, .failed, "the element has no visible box");
                 self.stage = .metrics;
                 return call(gpa, "Page.getLayoutMetrics", "", .{});
             },
@@ -148,13 +165,15 @@ pub const Op = struct {
                 // 상자와 화면이 겹친 곳의 가운데 — 화면보다 큰 요소의 가운데가 화면 밖이어도 보이는 곳을 누른다.
                 const w = numberAt(v, &.{ "cssLayoutViewport", "clientWidth" }) orelse return done(gpa, .failed, "no viewport");
                 const h = numberAt(v, &.{ "cssLayoutViewport", "clientHeight" }) orelse return done(gpa, .failed, "no viewport");
-                const left = @max(self.box[0], 0);
-                const top = @max(self.box[1], 0);
-                const right = @min(self.box[2], w);
-                const bottom = @min(self.box[3], h);
-                if (right <= left or bottom <= top) return done(gpa, .failed, "the element is outside the viewport");
-                self.x = (left + right) / 2;
-                self.y = (top + bottom) / 2;
+                const picked = for (self.boxes[0..self.box_count]) |box| {
+                    const left = @max(box[0], 0);
+                    const top = @max(box[1], 0);
+                    const right = @min(box[2], w);
+                    const bottom = @min(box[3], h);
+                    if (right > left and bottom > top) break [4]f64{ left, top, right, bottom };
+                } else return done(gpa, .failed, "the element is outside the viewport");
+                self.x = (picked[0] + picked[2]) / 2;
+                self.y = (picked[1] + picked[3]) / 2;
                 self.stage = .frame_tree;
                 return call(gpa, "Page.getFrameTree", "", .{});
             },
@@ -172,15 +191,21 @@ pub const Op = struct {
             .resolve => {
                 const oid = stringAt(v, &.{ "object", "objectId" }) orelse return done(gpa, .success, "false");
                 self.stage = .hit_test;
-                // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 그림자 DOM 안이면 그 뿌리에서 본다.
-                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y){{var r=this.getRootNode&&this.getRootNode();var d=r&&r.elementFromPoint?r:document;var h=d.elementFromPoint(x,y);return !!h&&(h===this||this.contains(h))}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y });
+                // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
+                // 그 frame 에서 보면 어긋난다). 그림자 DOM 안이면 그 뿌리에서 맞히고, slot 에 꽂힌 내용·host 를 따라 올라가며 본다.
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y){{if((this.ownerDocument||this)!==document)return 'frame';var r=this.getRootNode&&this.getRootNode();var d=r&&r.elementFromPoint?r:document;for(var n=d.elementFromPoint(x,y);n;n=n.assignedSlot||n.parentNode||n.host)if(n===this)return 'ok';return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y });
             },
             .hit_test => {
                 if (at(v, &.{"exceptionDetails"}) != null) {
                     self.miss = "could not check what is at the element's position";
                     return self.releaseStep(gpa);
                 }
-                if (!(boolAt(v, &.{ "result", "value" }) orelse false)) {
+                const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                if (std.mem.eql(u8, verdict, "frame")) {
+                    self.miss = "elements inside frames cannot be clicked yet";
+                    return self.releaseStep(gpa);
+                }
+                if (!std.mem.eql(u8, verdict, "ok")) {
                     self.miss = "the element is covered by another element at its center";
                     return self.releaseStep(gpa);
                 }
@@ -193,10 +218,7 @@ pub const Op = struct {
                 return self.mouse(gpa, "mouseReleased");
             },
             .mouse_up => return self.releaseStep(gpa),
-            .release => {
-                if (self.miss) |why| return done(gpa, .failed, why);
-                return done(gpa, .success, "true");
-            },
+            .release => return self.finish(gpa),
             .history => {
                 const current = intAt(v, &.{"currentIndex"}) orelse return done(gpa, .failed, "no navigation history");
                 const entries = arrayAt(v, &.{"entries"}) orelse return done(gpa, .failed, "no navigation history");
@@ -208,6 +230,13 @@ pub const Op = struct {
             },
             .navigate_entry, .reload => return done(gpa, .success, "true"),
         }
+    }
+
+    /// 놓은 뒤의 답 — 덮였으면 실패, 누름·떼기가 시한을 넘겼으면 timeout, 아니면 눌렀다.
+    fn finish(self: *Op, gpa: std.mem.Allocator) !Step {
+        if (self.miss) |why| return done(gpa, .failed, why);
+        if (self.late) |why| return done(gpa, .timeout, why);
+        return done(gpa, .success, "true");
     }
 
     fn scrollStep(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -239,7 +268,7 @@ pub const Op = struct {
             .query => if (gone) done(gpa, .success, "false") else done(gpa, .invalid_params, message),
             .describe, .scroll, .quads, .resolve => if (gone) done(gpa, .success, "false") else done(gpa, .failed, message),
             .mouse_up => self.releaseStep(gpa), // 떼기 실패 — 그래도 묶음은 놓는다
-            .release => if (self.miss) |why| done(gpa, .failed, why) else done(gpa, .success, "true"),
+            .release => self.finish(gpa),
             else => done(gpa, .failed, message),
         };
     }
@@ -304,16 +333,33 @@ fn arrayAt(v: std.json.Value, path: []const []const u8) ?[]std.json.Value {
     return if (x == .array) x.array.items else null;
 }
 
-fn firstQuad(v: std.json.Value) ?[8]f64 {
-    const quads = arrayAt(v, &.{"quads"}) orelse return null;
-    if (quads.len == 0 or quads[0] != .array or quads[0].array.items.len != 8) return null;
-    var out: [8]f64 = undefined;
-    for (quads[0].array.items, 0..) |n, i| out[i] = switch (n) {
-        .integer => |x| @floatFromInt(x),
-        .float => |x| x,
-        else => return null,
-    };
-    return out;
+/// `quads` 의 상자들(넓이 0 은 뺀다) — 앞에서 `out.len` 개까지. 모양이 틀린 quad 는 건너뛴다.
+fn collectBoxes(v: std.json.Value, out: *[max_boxes][4]f64) usize {
+    const quads = arrayAt(v, &.{"quads"}) orelse return 0;
+    var n: usize = 0;
+    for (quads) |q| {
+        if (n == out.len) break;
+        if (q != .array or q.array.items.len != 8) continue;
+        var c: [8]f64 = undefined;
+        const ok = for (q.array.items, 0..) |x, i| {
+            c[i] = switch (x) {
+                .integer => |iv| @floatFromInt(iv),
+                .float => |fv| fv,
+                else => break false,
+            };
+        } else true;
+        if (!ok) continue;
+        const box = [4]f64{
+            @min(@min(c[0], c[2]), @min(c[4], c[6])),
+            @min(@min(c[1], c[3]), @min(c[5], c[7])),
+            @max(@max(c[0], c[2]), @max(c[4], c[6])),
+            @max(@max(c[1], c[3]), @max(c[5], c[7])),
+        };
+        if (box[2] <= box[0] or box[3] <= box[1]) continue;
+        out[n] = box;
+        n += 1;
+    }
+    return n;
 }
 
 // ── 시험: 가짜 DevTools 로 차례를 돈다 ──
@@ -325,6 +371,8 @@ const Trail = struct {
     params: std.ArrayList([]u8) = .empty,
     /// 누름을 보낸 뒤 `committed` 였는가(떼기·놓기마다).
     committed_after_press: bool = true,
+    /// 누름 Step 을 받을 때 `committed` 가 거짓이었는가(누르기 직전에는 재허가를 거친다).
+    uncommitted_at_press: bool = true,
 
     fn deinit(self: *Trail) void {
         for (self.params.items) |p| testing.allocator.free(p);
@@ -356,7 +404,10 @@ fn drive(op: *Op, answer: *const fn (method: []const u8, params: []const u8) Rep
             try trail.methods.append(testing.allocator, c.method);
             try trail.params.append(testing.allocator, c.params);
             if (pressed and !op.committed()) trail.committed_after_press = false;
-            if (std.mem.indexOf(u8, c.params, "mousePressed") != null) pressed = true;
+            if (std.mem.indexOf(u8, c.params, "mousePressed") != null) {
+                if (op.committed()) trail.uncommitted_at_press = false;
+                pressed = true;
+            }
             step = try op.feed(testing.allocator, answer(c.method, c.params));
         },
     };
@@ -371,12 +422,29 @@ fn happyPage(method: []const u8, params: []const u8) Reply {
     if (std.mem.eql(u8, method, "Page.getFrameTree")) return .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F1\"}}}" };
     if (std.mem.eql(u8, method, "Page.createIsolatedWorld")) return .{ .ok = "{\"executionContextId\":7}" };
     if (std.mem.eql(u8, method, "DOM.resolveNode")) return .{ .ok = "{\"object\":{\"objectId\":\"o-1\"}}" };
-    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":true}}" };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" };
     return .{ .ok = "{}" };
 }
 
 fn coveredPage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":false}}" };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"covered\"}}" };
+    return happyPage(method, params);
+}
+
+fn framePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"frame\"}}" };
+    return happyPage(method, params);
+}
+
+fn twoLinePage(method: []const u8, params: []const u8) Reply {
+    // 두 줄에 걸친 링크 — 첫 줄은 화면 위로 나갔고 둘째 줄이 보인다. 넓이 0 상자도 섞였다.
+    if (std.mem.eql(u8, method, "DOM.getContentQuads")) return .{ .ok = "{\"quads\":[[0,-40,100,-40,100,-20,0,-20],[5,5,5,5,5,5,5,5],[0,0,60,0,60,20,0,20]]}" };
+    return happyPage(method, params);
+}
+
+fn stuckPressPage(method: []const u8, params: []const u8) Reply {
+    // 누름 핸들러가 alert 를 띄웠다 — 누름의 답이 시한을 넘긴다.
+    if (std.mem.eql(u8, method, "Input.dispatchMouseEvent") and std.mem.indexOf(u8, params, "mousePressed") != null) return .{ .timed_out = "DevTools did not answer in time" };
     return happyPage(method, params);
 }
 
@@ -452,6 +520,7 @@ test "click(selector): 찾기 → 화면 안으로 → 자리 → 화면과 겹�
     try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "mousePressed") != null);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[11], "mouseReleased") != null);
     try testing.expect(trail.committed_after_press);
+    try testing.expect(trail.uncommitted_at_press);
     try testing.expectEqual(@as(f64, 23), op.x);
     try testing.expectEqual(@as(f64, 10), op.y);
 }
@@ -474,6 +543,41 @@ test "click: 화면보다 큰 요소는 화면과 겹친 곳의 가운데, 화�
     try testing.expectEqual(Status.failed, o.status);
     try testing.expect(std.mem.indexOf(u8, o.result, "outside the viewport") != null);
     try testing.expectEqual(@as(usize, 0), trail.count("Input.dispatchMouseEvent"));
+}
+
+test "click: 누름의 답이 시한을 넘겨도 떼기·놓기를 보내고 timeout, 다른 frame 의 요소는 누르지 않는다, 두 줄 링크는 보이는 줄을" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    {
+        var op = try Op.init(testing.allocator, .click, "{\"selector\":\"#b\"}", 11);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &stuckPressPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.timeout, r.status);
+        try testing.expectEqual(@as(usize, 2), trail.count("Input.dispatchMouseEvent")); // 누름 + 떼기
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+        try testing.expect(trail.committed_after_press);
+    }
+    trail.reset();
+    {
+        var op = try Op.init(testing.allocator, .click, "{\"ref\":\"n9\"}", 12);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &framePage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.failed, r.status);
+        try testing.expect(std.mem.indexOf(u8, r.result, "frames") != null);
+        try testing.expectEqual(@as(usize, 0), trail.count("Input.dispatchMouseEvent"));
+    }
+    trail.reset();
+    {
+        var op = try Op.init(testing.allocator, .click, "{\"selector\":\"a\"}", 13);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &twoLinePage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqualStrings("true", r.result);
+        try testing.expectEqual(@as(f64, 30), op.x); // 둘째 줄의 가운데
+        try testing.expectEqual(@as(f64, 10), op.y);
+    }
 }
 
 test "click(ref): n<backendNodeId> 는 찾기를 건너뛴다, 모르는 ref·없는 요소는 {ok:false}" {

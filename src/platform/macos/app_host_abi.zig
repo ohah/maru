@@ -7062,7 +7062,7 @@ const CdpRun = struct {
 
 /// 실행 중이거나 기다리는 Chromium op(도착 순).
 var cdp_runs: std.ArrayList(*CdpRun) = .empty;
-/// 보내려 한 DevTools 호출 수(관측점 — 철회 뒤 보내지 않았는지를 시험이 센다).
+/// 보내려 한 DevTools 호출 수(시험에서만 센다 — 철회 뒤 보내지 않았는지).
 var cdp_calls_attempted: usize = 0;
 
 fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
@@ -7116,13 +7116,13 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
         .call => |next| {
             defer allocator.free(next.params);
             if (!run.op.committed() and !cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
-            cdp_calls_attempted +%= 1;
+            if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return switch (e) {
                 error.NotReady => finishCdp(run, .failed, "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)"),
                 error.Busy => finishCdp(run, .failed, "too many DevTools calls on this tab"),
                 // 인자는 이 모듈이 만든 JSON 이다 — 넘치는 것은 사용자의 selector 뿐이다(64 KiB).
-                error.InvalidParams => finishCdp(run, .invalid_params, "the selector is too long"),
+                error.InvalidParams => finishCdp(run, .invalid_params, "invalid DevTools parameters (the selector may be too long)"),
                 error.InvalidMethod => finishCdp(run, .failed, "internal DevTools request error"),
                 error.OutOfMemory => finishCdp(run, .failed, "out of memory"),
             };
@@ -9505,10 +9505,11 @@ test "W9b①: 철회 뒤에는 다음 호출을 보내지 않지만 누른 뒤�
 
     // ③ 철회 뒤 — 누르기 전이면 보내지 않고, 누른 뒤면 떼기를 보낸다.
     control_pane_grant_store.clearAll();
+    // 「누름」 Step 을 보낼 때(단계 mouse_down)는 아직 누르지 않았다 — 재허가를 거친다. 「떼기」(mouse_up)는 누른 뒤다.
     for ([_]bool{ false, true }, [_]usize{ 3, 4 }) |pressed, k| {
         const run = try allocator.create(CdpRun);
         run.* = .{ .async_id = ids[k], .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .click, click_arg, ids[k]), .started = true };
-        if (pressed) run.op.stage = .mouse_up;
+        run.op.stage = if (pressed) .mouse_up else .mouse_down;
         try cdp_runs.append(allocator, run);
         const attempted = cdp_calls_attempted;
         cdpAdvance(run, .{ .call = .{ .method = "Input.dispatchMouseEvent", .params = try allocator.dupe(u8, "{}") } });

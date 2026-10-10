@@ -15,7 +15,7 @@
 //!
 //! ⚠️ 그래서 호출자는 **채널의 stdin 을 열어 둬야 한다.** 닫힌 채로 띄우면 뜨자마자 죽는다.
 //!
-//! ## 「`std` 만 임포트한다」를 **활동 축에서만** 깬다
+//! ## 「`std` 만 임포트한다」를 **활동 축과 폴링의 필터 규칙에서만** 깬다
 //!
 //! 목록·변경 wire 는 인코더의 **사본**을 손으로 든다(아래 `rfls_header` 계열) — 크기와 자기완결
 //! 때문이고, 드리프트는 실물 왕복 게이트가 막는다. **활동 축(RAV2)은 그럴 수 없다.**
@@ -25,10 +25,16 @@
 //!
 //! 그래서 활동 축은 `remote_activity_wire` 모듈 하나를 문다(그것이 스캐너·라벨을 함께 끌어온다).
 //! 비용은 쟀다: **+19,072 B(+8.6%)** — 계획 [원격 에이전트 활동 뷰](../../docs/plans/remote-agent-activity.md) §2.3.
+//!
+//! **폴링 갈래도 하나를 문다 — `git_filter_override`**(계획 [workspace-trust](../../docs/plans/workspace-trust.md) WT6b-1b-ii).
+//! 원격은 늘 신뢰 전이라 다이제스트의 `status`·`diff --numstat` 이 저장소가 정한 필터를 돌리면 안 되는데, 끌 드라이버를 고르는
+//! 규칙(범위·전역 되살림·표지·상한)을 사본으로 들면 앱과 감시자가 **다른 것을 끈다** — 보안 규칙이 낡는 쪽은 조용히 열린다.
+//! 그 모듈은 `std` 만 임포트하는 순수 계산이다.
 //! 방향은 한 쪽이다 — 헬퍼가 세션 모듈을 물고, 그 반대는 없다.
 
 const std = @import("std");
 const activity_wire = @import("remote_activity_wire");
+const filter_override = @import("git_filter_override");
 const builtin = @import("builtin");
 
 extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
@@ -57,7 +63,10 @@ extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_
 /// 판 14: wire 도 명령도 그대로인데 **보내는 값의 뜻이 달라진다**(계획 §29) — 본문이 `text` 없는
 /// 배열이면 예전 판은 결과 레코드를 통째로 버려 `found=false` 를 보냈다. 낡은 헬퍼를 그대로 두면
 /// **같은 파일을 로컬로 열 때와 원격으로 열 때가 갈린다**(계약 §2.3). 그래서 판을 올려 갈아 끼운다.
-pub const version_line = "maru-remote-watch 16\n";
+///
+/// 판 17: 폴링 다이제스트가 **신뢰 전 규칙**을 진다(계획 workspace-trust WT6b-1b-ii) — 저장소가 정한 필터를 끄고 submodule 안을
+/// 안 본다. 옛 판이 깔린 원격은 그 필터를 5 초마다 돌리므로 판을 올려 갈아 끼운다.
+pub const version_line = "maru-remote-watch 17\n";
 
 /// **판 2 부터는 내지 않는다**(RW7d — 한도에서 폴링으로 내려간다). 상수를 남겨 두는 이유는 원격에
 /// 아직 **판 1 바이너리가 도는 경우**가 있어서다 — 그쪽은 여전히 이 코드로 나가고, 앱은 그것을
@@ -101,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
     // **목록 모드**(RF2 — [계획](../../docs/plans/remote-file-tree.md) §2.2·§10). 디렉터리 하나를
     // 나열해 `maru-rfls 1` wire 로 stdout 에 내고 끝난다 — 감시와 달리 **한 번 답하고 죽는** 모드라
     // stdin 고아 방지 규율이 필요 없다. wire 의 단일 출처는 `src/session/remote_file_listing.zig` 이고,
-    // 여기는 그 인코더를 **모듈로 못 물어**(이 바이너리는 std 만 임포트한다 — 크기·자기완결) 손으로
+    // 여기는 그 인코더를 **모듈로 못 물어**(이 바이너리는 활동 축·필터 규칙 밖에선 std 만 임포트한다 — 크기·자기완결) 손으로
     // 낸다. 드리프트는 빌드가 이 바이너리를 실제로 돌려 그 파서로 되읽는 게이트가 막는다
     // (`test-remote-file-listing` — RW 의 version_line 문자열 대조보다 강한, 바이트 수준 왕복이다).
     if (std.mem.eql(u8, root, "list")) {
@@ -271,12 +280,12 @@ fn exitUnsupportedWhy(why: []const u8) noreturn {
 // ── 목록 모드(RF2) ──────────────────────────────────────────────────────────────────────────────
 
 /// wire 상수 — `src/session/remote_file_listing.zig` 와 **바이트까지 같아야 한다.** 이 바이너리는
-/// std 만 임포트하므로(크기·자기완결) 여기 사본이 있고, 드리프트는 실행형 왕복 게이트가 막는다.
+/// 목록 축은 std 만 임포트하므로(크기·자기완결) 여기 사본이 있고, 드리프트는 실행형 왕복 게이트가 막는다.
 const rfls_header = "maru-rfls 1\n";
 const rfmv_header = "maru-rfmv 1\n";
 
 /// 변경 결말 — `src/session/remote_file_mutation.zig` 의 `Outcome` 과 **같은 수**여야 한다.
-/// 이 바이너리는 세션 모듈을 못 물어(std 만 임포트) 사본을 든다 — 드리프트는 왕복 게이트가 잡는다.
+/// 목록 축은 세션 모듈을 안 물어(std 만 임포트) 사본을 든다 — 드리프트는 왕복 게이트가 잡는다.
 const MvOutcome = enum(u8) {
     ok = 0,
     stale = 1,
@@ -929,15 +938,22 @@ const poll_tick_ms: c_int = 250;
 /// `status` 바이트는 그대로인데 `diff --numstat` 은 `1 1` → `3 3` 으로 바뀐다 — 그 숫자가 도크 행마다
 /// 보이는 `+N −M` 이다. 그래서 다이제스트는 **화면의 숫자를 만드는 읽기까지** 봐야 한다.
 ///
-/// 첫 줄(`status`)은 **필수**다. 나머지는 실패해도 「실패했다」를 해시에 넣고 계속한다 — `origin` 이
+/// 이 다섯 앞에 저장소 필터 조회가 먼저 돈다(`probeFilters` — 원격은 늘 신뢰 전; 작업트리를 읽는 셋에는 덮어쓰기 env 와
+/// `--ignore-submodules=dirty` 가 붙고, 끌 수 없으면 셋을 건너뛴다 — 계획 workspace-trust WT6b-1b-ii). 조회가 「모름」으로 끝나도
+/// 다이제스트 실패다.
+///
+/// 첫 줄(`status`)은 **필수**다(건너뛴 경우는 실패가 아니다 — 그 저장소는 git 이 열었다: 조회가 답했다). 나머지는 실패해도 「실패했다」를 해시에 넣고 계속한다 — `origin` 이
 /// 없는 저장소에서 `rev-list` 가 실패한다고 감시 전체가 멀면 안 된다.
-const digest_reads = [_][]const []const u8{
-    &.{ "status", "--porcelain=v2", "--branch", "--untracked-files=all" },
-    &.{ "for-each-ref", "--format=%(refname) %(objectname)" },
-    &.{ "worktree", "list", "--porcelain" },
+/// `runs_filters` — 작업트리를 읽어 **저장소 필터를 돌릴 수 있는** 읽기(앱의 `git_command.kindRunsFilters` 와 같은 갈래). 원격은 늘
+/// 신뢰 전이라 이 읽기들엔 저장소 드라이버를 끄는 env 와 submodule 플래그를 싣고, 끌 수 없으면 돌리지 않는다(WT6b-1b-ii).
+const DigestRead = struct { tail: []const []const u8, runs_filters: bool };
+const digest_reads = [_]DigestRead{
+    .{ .tail = &.{ "status", "--porcelain=v2", "--branch", "--untracked-files=all" }, .runs_filters = true },
+    .{ .tail = &.{ "for-each-ref", "--format=%(refname) %(objectname)" }, .runs_filters = false },
+    .{ .tail = &.{ "worktree", "list", "--porcelain" }, .runs_filters = false },
     // 행별 `+N −M` — 작업트리와 스테이지 양쪽(§3 이 잰 구멍이 여기다)
-    &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv" },
-    &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv", "--cached" },
+    .{ .tail = &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv" }, .runs_filters = true },
+    .{ .tail = &.{ "diff", "--numstat", "--find-renames", "--no-ext-diff", "--no-textconv", "--cached" }, .runs_filters = true },
 
     // ⚠️ **머리 줄 `↑↓` 는 여기 «없다» — 위 둘이 이미 덮는다**(적대적 검증 2026-09-05 — 실측).
     //
@@ -988,7 +1004,23 @@ const command_deadline_ms: i64 = 30_000;
 var last_exit: i32 = -1;
 var last_signal: i32 = -1;
 
+/// 필터 조회의 출력을 모으는 자리 — 상한을 넘으면 `truncated`(그 조회는 「끌 수 없음」이다).
+const Capture = struct {
+    list: std.ArrayList(u8) = .empty,
+    truncated: bool = false,
+    // 앱의 조회는 읽기 상한(16 MiB)까지 받는다. 감시자는 원격 메모리를 아껴 1 MiB — 그 사이(전역에 긴 필터 값이 아주 많다)면 감시자만
+    // 「끌 수 없음」이 되어 그 저장소의 작업트리 변화를 자동으로 못 잡는다(닫힌 쪽 — 앱은 읽는다; 적대적 검증 2회차).
+    const max_bytes: usize = 1024 * 1024;
+};
+
 fn hashCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.hash.Wyhash) RunResult {
+    return runCommand(gpa, argv, hasher, null);
+}
+
+fn runCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.hash.Wyhash, capture: ?*Capture) RunResult {
+    // 앞 명령의 종료 정보가 남아 이 명령의 실패(시한·spawn — 갱신하지 않는다)를 다른 이야기로 읽히게 하지 않는다.
+    last_exit = -1;
+    last_signal = -1;
     var zargs: std.ArrayList(?[*:0]const u8) = .empty;
     defer {
         for (zargs.items) |a| if (a) |ptr| gpa.free(std.mem.span(ptr));
@@ -1054,6 +1086,13 @@ fn hashCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.ha
             break;
         }
         hasher.update(buf[0..@intCast(n)]);
+        if (capture) |c| {
+            if (c.list.items.len + @as(usize, @intCast(n)) > Capture.max_bytes) {
+                c.truncated = true;
+            } else c.list.appendSlice(gpa, buf[0..@intCast(n)]) catch {
+                c.truncated = true;
+            };
+        }
     }
     _ = std.c.close(fds[0]);
     if (outcome != .ok) _ = std.c.kill(pid, std.c.SIG.KILL); // 멈춘 자식을 남기지 않는다
@@ -1076,14 +1115,31 @@ fn hashCommand(gpa: std.mem.Allocator, argv: []const []const u8, hasher: *std.ha
 /// 지금 상태의 다이제스트. 하나라도 못 읽으면 null — 그때는 **바뀌었다고 말하지 않는다**(git 이
 /// 잠깐 실패한 것을 변경으로 읽으면 읽기 폭주가 된다).
 fn digest(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8) Digest {
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // **원격은 늘 신뢰 전이다**(WT6b-1b-ii) — 주기마다 저장소 필터를 조회한다(앱과 같은 이유로 캐시하지 않는다: include·전역
+    // 변경을 무효화 기준으로 못 잡는다). 끌 수 없으면 필터를 돌리는 읽기는 건너뛴다(그 자리엔 「건너뜀」을 해시한다 — ref 변화는
+    // 여전히 잡힌다).
+    var filters: filter_override.FilterConfig = .{};
+    const verdict = probeFilters(arena, root, git_prefix, &filters);
+    if (verdict == .channel_closed) return .{ .state = .channel_closed };
+    // **모르면 실패다** — 조회가 1·129 가 아닌 이유(신호·시한·spawn·git 없음·깨진 설정 128)로 끝났다. 「끌 수 없음」으로 접으면 첫 읽기(`status`)를 건너뛰어 다이제스트가
+    // `.ok` 가 되고, git 이 없는 원격도 「감시 중」으로 조용히 반쪽만 돈다(적대적 검증 2회차 실측 — 예전엔 첫 주기에 사유와 함께
+    // 끝났다). 첫 주기면 `watchPoll` 이 그 종료 코드로 사유를 싣고, 그 뒤면 「잠깐 실패」로 넘어간다.
+    if (verdict == .unknown) return .{ .state = .failed };
     var hasher = std.hash.Wyhash.init(0);
-    for (digest_reads, 0..) |tail, index| {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(gpa);
-        argv.appendSlice(gpa, git_prefix) catch return .{ .state = .failed };
-        argv.appendSlice(gpa, &.{ "-C", root }) catch return .{ .state = .failed };
-        argv.appendSlice(gpa, tail) catch return .{ .state = .failed };
-        switch (hashCommand(gpa, argv.items, &hasher)) {
+    for (digest_reads, 0..) |read, index| {
+        if (read.runs_filters and verdict == .refused) {
+            hasher.update("refused\x00");
+            continue;
+        }
+        const argv = gitArgv(arena, git_prefix, if (read.runs_filters) filters.slice() else null, root, read.tail, read.runs_filters) orelse {
+            // 앞머리에 env 를 끼울 자리가 없다 — 끌 수 없으니 그 읽기를 안 돌린다.
+            hasher.update("refused\x00");
+            continue;
+        };
+        switch (hashCommand(gpa, argv, &hasher)) {
             .ok => {},
             // **첫 읽기만 필수다.** git 이 없거나 저장소가 아니면 거기서 드러난다. 나머지는 실패를
             // 해시에 적고 계속한다 — `origin` 이 없는 저장소에서 `rev-list` 가 실패한다고 감시가
@@ -1100,6 +1156,86 @@ fn digest(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const 
 }
 
 const Digest = struct { state: RunResult, value: u64 = 0 };
+
+/// git 한 번의 argv — 앞머리(`env K=V … git <굳히기>`)의 `env` 바로 뒤에 덮어쓰기 env 를 끼우고, `-C <root>` 와 하위 명령을 잇는다.
+/// `submodule_flag` 면 하위 명령 바로 뒤에 `--ignore-submodules=dirty`. 덮어쓰기가 있는데 앞머리가 `env` 로 시작하지 않으면 null —
+/// 끼울 자리가 없다(호출자는 끌 수 없는 것으로 친다).
+fn gitArgv(arena: std.mem.Allocator, git_prefix: []const []const u8, config_or_null: ?[]const filter_override.ConfigPair, root: []const u8, tail: []const []const u8, submodule_flag: bool) ?[]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    // 필터 읽기·조회는 덮어쓰기가 비어도 `GIT_CONFIG_COUNT` 를 싣는다 — git 이 읽는 수가 **우리가 읽은 수**가 되게(물려받은 값을 git
+    // 은 `strtoul` 로, 우리는 `parseInt` 로 읽어 `" 1"` 같은 값에서 둘이 갈렸다 — 그러면 조회와 읽기가 다른 사용자 설정을 본다;
+    // 적대적 검증 2회차 실측 우회).
+    if (config_or_null) |config| {
+        if (git_prefix.len == 0 or !std.mem.eql(u8, git_prefix[0], "env")) return null;
+        // **앞머리의 env 토큰 뒤·git 바로 앞**에 끼운다 — env(1) 는 뒤에 온 같은 이름이 이긴다(앱 토큰이 언젠가 `GIT_CONFIG_*` 를
+        // 실어도 우리 것이 진다 — 적대적 검증 1회차). 번호는 **물려받은 `GIT_CONFIG_COUNT` 뒤에** 잇는다: 로그인 셸이 물려준
+        // 사용자 설정(`safe.directory` 등)을 조회와 읽기가 똑같이 보게(그 둘이 갈리면 조회가 못 본 저장소를 읽기가 연다 — 1회차
+        // 실측 우회). 같은 키면 뒤의 우리 것이 이긴다.
+        var at: usize = 1;
+        while (at < git_prefix.len and std.mem.indexOfScalar(u8, git_prefix[at], '=') != null) at += 1;
+        const inherited: usize = if (std.c.getenv("GIT_CONFIG_COUNT")) |v| std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0 else 0;
+        argv.appendSlice(arena, git_prefix[0..at]) catch return null;
+        argv.append(arena, std.fmt.allocPrint(arena, "GIT_CONFIG_COUNT={d}", .{inherited + config.len}) catch return null) catch return null;
+        for (config, inherited..) |pair, i| {
+            argv.append(arena, std.fmt.allocPrint(arena, "GIT_CONFIG_KEY_{d}={s}", .{ i, pair.key }) catch return null) catch return null;
+            argv.append(arena, std.fmt.allocPrint(arena, "GIT_CONFIG_VALUE_{d}={s}", .{ i, pair.value }) catch return null) catch return null;
+        }
+        argv.appendSlice(arena, git_prefix[at..]) catch return null;
+    } else argv.appendSlice(arena, git_prefix) catch return null;
+    argv.appendSlice(arena, &.{ "-C", root }) catch return null;
+    if (tail.len == 0) return argv.items;
+    argv.append(arena, tail[0]) catch return null;
+    if (submodule_flag) argv.append(arena, filter_override.ignore_dirty_submodules) catch return null;
+    argv.appendSlice(arena, tail[1..]) catch return null;
+    return argv.items;
+}
+
+const FilterVerdict = enum {
+    ok,
+    /// 드라이버를 알지만 끌 수 없다 — 필터 읽기를 건너뛴다.
+    refused,
+    /// 드라이버가 있는지 모른다(조회가 1·129 가 아닌 이유 — 신호·시한·spawn·git 없음·깨진 설정 128 — 로 끝났다) — 다이제스트 실패다.
+    unknown,
+    channel_closed,
+};
+
+/// 저장소 필터를 조회해 `out` 에 덮어쓰기를 채운다 — 앱의 `git_backend.untrustedFilters` 와 같은 순수 함수(`filter_override`).
+/// 표지를 실어 이 git 이 덮어쓰기를 읽는지 함께 본다. 옛 git(`--show-scope` 를 몰라 129)이면 대체 조회로 저장소에 드라이버가
+/// 있는지만 보고, 있으면 끌 수 없다(`.refused`). 대체 조회의 실패는 1·128(저장소 밖 — 뒤의 `status` 가 드러내 「저장소가
+/// 아니다」 종료 경로를 가리지 않는다)·129(`--worktree` 를 모르는 더 옛 git)만 「없음」이다. 그 밖의 실패는 드라이버가 있는지
+/// 모른다(`.unknown` — 다이제스트 실패).
+fn probeFilters(arena: std.mem.Allocator, root: []const u8, git_prefix: []const []const u8, out: *filter_override.FilterConfig) FilterVerdict {
+    var scratch = std.hash.Wyhash.init(0);
+    const canary = [_]filter_override.ConfigPair{filter_override.filter_probe_canary};
+    var capture: Capture = .{};
+    const main_argv = gitArgv(arena, git_prefix, &canary, root, &filter_override.probe_args, false) orelse
+        gitArgv(arena, git_prefix, &.{}, root, &filter_override.probe_args, false) orelse return .refused; // 표지를 못 실으면 표지 없음으로 판정된다
+    switch (runCommand(arena, main_argv, &scratch, &capture)) {
+        .channel_closed => return .channel_closed,
+        .ok => return if (!capture.truncated and filter_override.untrustedFilterConfig(capture.list.items, out)) .ok else .refused,
+        .failed => {
+            if (last_signal < 0 and last_exit == 1) return if (filter_override.untrustedFilterConfig("", out)) .ok else .refused;
+            // 대체 조회는 **옛 git**(`--show-scope` 를 모른다 — 129)일 때만 — 신호·시한·spawn 이나 깨진 설정(128)까지 대체 조회로
+            // 받으면, 드라이버가 있는 저장소에서 판정이 ok ↔ refused 로 뒤집혀 변화 없이 `change` 가 나갔다(적대적 검증 3회차 실측).
+            // 그 실패는 「모름」 — 다이제스트 실패다(첫 주기면 그 종료 코드로 사유를 싣는다).
+            if (!(last_signal < 0 and last_exit == 129)) return .unknown;
+        },
+    }
+    out.* = .{};
+    for ([_][]const []const u8{ &filter_override.probe_local_args, &filter_override.probe_worktree_args }) |tail| {
+        var fallback: Capture = .{};
+        const argv = gitArgv(arena, git_prefix, &.{}, root, tail, false) orelse return .refused; // 대체 조회도 같은 COUNT — 읽기와 같은 상속 설정
+        switch (runCommand(arena, argv, &scratch, &fallback)) {
+            .channel_closed => return .channel_closed,
+            .ok => if (fallback.truncated or filter_override.repoDefinesFilters(fallback.list.items)) return .refused,
+            // 일치 없음(1)·저장소 밖(128 — 뒤의 `status` 가 드러낸다)·`--worktree` 를 모르는 옛 git(129)만 「없음」이다. 그 밖의
+            // 실패(신호·시한·spawn)는 드라이버가 있는지 모른다 — 끌 수 없으니 건너뛴다(앱 `untrustedFilters` 와 같다; 1회차 실측
+            // — 모든 실패를 「없음」으로 쳐 필터가 돌았다).
+            .failed => if (!(last_signal < 0 and (last_exit == 1 or last_exit == 128 or last_exit == 129))) return .unknown,
+        }
+    }
+    return .ok;
+}
 
 /// macOS·BSD·한도 초과에서 쓰는 갈래(RW7). **git 을 돌려 다이제스트를 비교한다** — 파일을 훑지
 /// 않는다(전체 stat 걷기는 0.37~0.83 s 로 10 배 넘게 비싸고 `.gitignore` 도 안 따른다).

@@ -499,7 +499,7 @@ X <count>\n                     꼬리 — 없으면 **잘린 것**이다(§6.1)
 `tools/remote-watch/main.zig` 에 **판 9** `activity <path>` 를 더했다. 트랜스크립트 하나를 훑어
 `maru-rav 1` wire 를 stdout 으로 내고 죽는다 — `list` 와 같이 **한 번 답하고 끝나는** 모드다.
 
-**「`std` 만 임포트한다」를 활동 축에서만 깼다**(§2.3 의 결정). 목록·변경 wire 는 인코더의 **사본**을
+**「`std` 만 임포트한다」를 활동 축에서만 깼다**(§2.3 의 결정 — 그 뒤 폴링의 필터 규칙 `git_filter_override` 도 같은 이유로 문다; [workspace-trust](workspace-trust.md) WT6b-1b-ii). 목록·변경 wire 는 인코더의 **사본**을
 손으로 들지만 스캐너는 그럴 수 없다(2,800 줄 · 판정자 163 개 · 계약의 벗기기 규칙 전부). 문은 하나만
 연다 — `remote_activity_wire` 모듈이 스캐너·라벨을 함께 끌어오고, 헬퍼는 그 모듈만 문다.
 

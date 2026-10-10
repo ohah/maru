@@ -635,6 +635,8 @@ git diff --numstat --find-renames --no-ext-diff --no-textconv --cached  ← 행�
 단독** 기준의 측정이었고, `for-each-ref` 가 들어온 뒤로는 **같은 사실을 두 번 묻는 것**이었다.
 (도크가 숫자를 «그릴» 때는 여전히 클라이언트가 `rev-list` 를 돌린다 — 그쪽은 값이 필요하다.)
 
+이 다섯 앞에 **저장소 필터 조회**가 먼저 돈다(원격은 늘 신뢰 전 — [workspace-trust](workspace-trust.md) WT6b-1b-ii): 작업트리를 읽는 셋(`status`·`numstat` 둘)에는 저장소 드라이버를 끄는 env 와 `--ignore-submodules=dirty` 가 붙고, 끌 수 없으면 셋을 건너뛴다(그 자리엔 「건너뜀」을 해시한다). 조회가 「모름」(1·129 가 아닌 실패 — 신호·시한·git 없음·깨진 설정 128)으로 끝나면 다이제스트 실패다(첫 주기의 128 은 「저장소가 아니다」 종료).
+
 **첫 줄만 필수다.** 나머지는 실패해도 「실패했다」를 해시에 적고 계속한다 — `origin` 이 없는 저장소
 에서 `rev-list` 가 실패한다고 감시가 통째로 멀면 안 된다(그 저장소가 오히려 흔하다). 실측으로
 확인했다: origin 없는 저장소에서도 변경을 잡고 유휴 오탐은 0 이다.
@@ -691,7 +693,7 @@ git diff --numstat --find-renames --no-ext-diff --no-textconv --cached  ← 행�
 | `core.fsmonitor` | **`status` 마다** | ✅ **이번에 막았다**(`-c core.fsmonitor=`) |
 | partial clone 의 지연 가져오기(`remote.<n>.uploadpack`·`core.sshCommand`·`core.gitProxy`·`git-remote-*`) | 빠진 blob 을 읽는 `diff --numstat` 등 | ✅ 신뢰 전에 막는다([workspace-trust](workspace-trust.md) WT6b-1a — `GIT_NO_LAZY_FETCH=1`·`GIT_ALLOW_PROTOCOL=`(빈 목록) — 각자 혼자서도 막는다). 감시자 앞머리엔 `-c status.renames=false` 도 싣는다 — 안 받은 blob 으로 다이제스트의 `status` 가 실패하지 않게. 원격은 늘 신뢰 전이라 원격 읽기·감시자 앞머리에 늘 싣는다. 늘 막지 않는 이유: 신뢰한 partial clone 사용자의 읽기가 실패한다(실측) |
 | `log.showSignature` + `gpg.program` | `log`·`show` | ✅ 막았다(WT6a — `-c log.showSignature=false`) |
-| **`filter.<name>.clean` · `.smudge`** | **`status` · `diff` · `diff --numstat`** | 늘 싣는 목록에선 열어 둔다(아래 — 끄면 답이 틀린다). **신뢰 전에는 저장소가 정의한 드라이버만 끈다** — 앱의 원격 읽기는 원격이 늘 신뢰 전이라 늘 끈다([workspace-trust](workspace-trust.md) WT6b-1b-i); 감시자는 WT6b-1b-ii |
+| **`filter.<name>.clean` · `.smudge`** | **`status` · `diff` · `diff --numstat`** | 늘 싣는 목록에선 열어 둔다(아래 — 끄면 답이 틀린다). **신뢰 전에는 저장소가 정의한 드라이버만 끈다** — 앱의 원격 읽기와 감시자의 폴링 다이제스트는 원격이 늘 신뢰 전이라 늘 끈다([workspace-trust](workspace-trust.md) WT6b-1b-i·ii — 같은 순수 모듈 `git_filter_override`) |
 
 ⚠️ **`filter` 는 `diff` 만의 문제가 아니다**(실측). 크기가 **같은** 변경이면 `git status` 가 내용을
 비교해야 해서 `clean` 필터를 **매번** 돌린다 — 크기가 다르면 안 돈다. 도크는 열려 있는 내내 `status`

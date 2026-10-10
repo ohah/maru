@@ -905,6 +905,12 @@ pub fn build(b: *std.Build) void {
             .target = watch_target,
             .optimize = .ReleaseSmall,
         });
+        // 폴링 갈래의 신뢰 전 필터 덮어쓰기(WT6b-1b-ii) — 앱 읽기와 같은 순수 모듈(`std` 만 문다).
+        const watch_filter_mod = b.createModule(.{
+            .root_source_file = b.path("src/session/git_filter_override.zig"),
+            .target = watch_target,
+            .optimize = .ReleaseSmall,
+        });
         const watch_exe = b.addExecutable(.{
             .name = "maru-remote-watch",
             .root_module = b.createModule(.{
@@ -912,7 +918,10 @@ pub fn build(b: *std.Build) void {
                 .target = watch_target,
                 .optimize = .ReleaseSmall, // 원격에 실어 나르는 것이라 크기가 곧 비용이다
                 .link_libc = true, // kqueue·inotify 를 libc 경유로 부른다
-                .imports = &.{.{ .name = "remote_activity_wire", .module = watch_activity_mod }},
+                .imports = &.{
+                    .{ .name = "remote_activity_wire", .module = watch_activity_mod },
+                    .{ .name = "git_filter_override", .module = watch_filter_mod },
+                },
             }),
         });
         // **이름을 손으로 적는 자리다**(RW2b) — `Variant.assetName` 과 어긋나면 앱이 빌드가 만들지
@@ -4796,6 +4805,11 @@ pub fn build(b: *std.Build) void {
             .target = b.graph.host,
             .optimize = optimize,
         });
+        const native_filter_mod = b.createModule(.{
+            .root_source_file = b.path("src/session/git_filter_override.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        });
         const native_remote_watch = b.addExecutable(.{
             .name = "maru-remote-watch-native",
             .root_module = b.createModule(.{
@@ -4803,7 +4817,10 @@ pub fn build(b: *std.Build) void {
                 .target = b.graph.host,
                 .optimize = optimize,
                 .link_libc = true,
-                .imports = &.{.{ .name = "remote_activity_wire", .module = native_activity_mod }},
+                .imports = &.{
+                    .{ .name = "remote_activity_wire", .module = native_activity_mod },
+                    .{ .name = "git_filter_override", .module = native_filter_mod },
+                },
             }),
         });
         const install_native_watch = b.addInstallArtifact(native_remote_watch, .{
@@ -4833,6 +4850,36 @@ pub fn build(b: *std.Build) void {
             "test-remote-file-listing",
             "Run the built remote-watch helper's list mode and re-read it with the session codec",
         ).dependOn(&run_listing_roundtrip.step);
+
+        // **감시자 폴링 다이제스트의 신뢰 전 필터 게이트**(계획 workspace-trust WT6b-1b-ii). 실물 감시자를 앱이 주는 앞머리로 띄워
+        // 저장소 드라이버·submodule 안이 안 돌고 사용자의 드라이버는 도는지, 끌 수 없는 저장소는 필터 읽기를 건너뛰는지 잰다.
+        // 폴링 갈래는 macOS 호스트에서만 돈다(리눅스 호스트 판은 inotify) — 그래서 실행 수는 macOS 에서만 센다.
+        const watch_filter_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("tests/remote_watch_untrusted_filters.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+        });
+        const run_watch_filters = b.addRunArtifact(watch_filter_tests);
+        run_watch_filters.addArg("--maru-expect-tests=1");
+        if (builtin.os.tag == .macos) run_watch_filters.addArg("--maru-expect-passed=1"); // env 가 빠져 조용히 skip 되는 것을 막는다
+        run_watch_filters.setCwd(b.path("."));
+        run_watch_filters.has_side_effects = true;
+        run_watch_filters.step.dependOn(&install_native_watch.step);
+        run_watch_filters.setEnvironmentVariable(
+            "MARU_REMOTE_WATCH_BIN",
+            b.getInstallPath(.{ .custom = "test-helpers" }, "maru-remote-watch-native"),
+        );
+        test_step.dependOn(&run_watch_filters.step);
+        // macOS CI 잡은 `test` 가 아니라 `test-macos-only` 를 돈다 — 거기 안 붙이면 이 판정자는 CI 어디서도 실제로 안 돈다(리눅스
+        // 잡에선 폴링 갈래가 없어 건너뛴다 — 적대적 검증 2회차).
+        if (builtin.os.tag == .macos) macos_only_test_step.dependOn(&run_watch_filters.step);
+        b.step(
+            "test-remote-watch-filters",
+            "Run the built remote-watch helper's polling digest against repository filters (workspace-trust WT6b-1b-ii)",
+        ).dependOn(&run_watch_filters.step);
 
         // **헬퍼 `activity` ↔ 활동 코덱 왕복 게이트**(RAV2 — docs/plans/remote-agent-activity.md §5).
         // 위 목록 게이트와 막는 것이 다르다: 활동 축은 헬퍼가 인코더를 **물므로** 드리프트가 원리적으로

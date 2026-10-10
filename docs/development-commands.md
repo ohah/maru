@@ -1298,3 +1298,9 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 `mise exec -- zig build test-editor-history-step` (Debug/ReleaseFast).
 `python3 tools/test-editor-history-step-adversarial.py`는 격리된 컴파일 가능한 보호 변이와 정상/복원 대조를 실행한다.
 제품 UI/공유 게시 연결 범위는 [사전 준비 계획](plans/editor-history-transaction.md)을 따른다.
+
+연결된 열린 문서 편집·Undo/Redo·공유 게시·할당 실패 판정:
+`mise exec -- zig build test-editor-linked-history` (Debug/ReleaseFast).
+`python3 tools/test-editor-linked-history-adversarial.py`는 실제 모델에 컴파일 가능한 결함과 동등/복원 대조를 실행한다.
+`python3 tools/editor-linked-history-app/run.py`는 격리 앱의 AppKit 입력·Confirm 버튼·Metal PNG를 검증한다.
+범위와 자동 저장/다른 창의 한계는 [연결 이력 계획](plans/editor-history-transaction.md)을 따른다.

@@ -2,6 +2,7 @@
 //! 닫기 승인·provider 취소·백업 삭제는 coordinator의 책임이다. 참조 해제는 그 정산 뒤에만 호출한다.
 const std = @import("std");
 const document_state = @import("document_state.zig");
+const history_links = @import("history/links.zig");
 
 pub const Handle = struct { slot: usize, generation: u64 };
 pub const Kind = enum { view, read, request };
@@ -25,6 +26,7 @@ pub const Registry = struct {
     allocator: std.mem.Allocator,
     slots: std.ArrayList(Slot) = .empty,
     last_reference: u64 = 0,
+    links: history_links.State = .{},
 
     /// 아직 원본을 보호 중인 복구가 있으면 같은 레코드를 다른 창에서 중복 복구하지 않는다.
     pub fn hasRecoveryBackupSource(self: *const Registry, name: []const u8) bool {
@@ -135,6 +137,11 @@ pub const Registry = struct {
                 break;
             }
         }
+        var views: usize = 0;
+        for (doc.refs.items) |r| if (r.kind == .view) {
+            views += 1;
+        };
+        if (lease.kind == .view and views == 0) self.links.closeDocument(lease.document);
         if (doc.refs.items.len != 0) return false;
         doc.state.clear(doc.resource_allocator);
         doc.refs.deinit(self.allocator);
@@ -143,6 +150,7 @@ pub const Registry = struct {
         slot.document = null;
         // 세대를 되감지 않는다. 상한 슬롯은 재사용하지 않고 새 슬롯을 만든다.
         if (slot.generation != std.math.maxInt(u64)) slot.generation += 1;
+        self.pruneHistoryLinks();
         return true;
     }
 
@@ -150,8 +158,33 @@ pub const Registry = struct {
     /// 성공하면 registry 수명이 끝난다. 호출 뒤 이 owner나 이전 handle을 재사용하지 않는다.
     pub fn deinit(self: *Registry) Error!void {
         for (self.slots.items) |slot| if (slot.document != null) return error.Busy;
+        self.links.deinit(self.allocator);
         self.slots.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    pub fn pruneHistoryLinks(self: *Registry) void {
+        self.links.prune(self.allocator, self, containsHistoryMember);
+    }
+    pub fn isHistoryTop(self: *const Registry, m: history_links.Member, direction: @import("history/step.zig").Direction) bool {
+        if (m.document.slot >= self.slots.items.len) return false;
+        const slot = self.slots.items[m.document.slot];
+        if (slot.generation != m.document.generation) return false;
+        const doc = slot.document orelse return false;
+        const h = &doc.state.history;
+        if (h.epoch != m.epoch) return false;
+        const entries = if (direction == .undo) h.undo[0..h.undo_len] else h.redo[0..h.redo_len];
+        return entries.len != 0 and entries[entries.len - 1].id == m.entry;
+    }
+    fn containsHistoryMember(self: *const Registry, m: history_links.Member) bool {
+        if (m.document.slot >= self.slots.items.len) return false;
+        const slot = self.slots.items[m.document.slot];
+        if (slot.generation != m.document.generation) return false;
+        const doc = slot.document orelse return false;
+        if (doc.state.history.epoch != m.epoch) return false;
+        for (doc.state.history.undo[0..doc.state.history.undo_len]) |entry| if (entry.id == m.entry) return true;
+        for (doc.state.history.redo[0..doc.state.history.redo_len]) |entry| if (entry.id == m.entry) return true;
+        return false;
     }
 
     fn nextId(self: *const Registry) Error!u64 {

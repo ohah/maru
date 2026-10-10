@@ -140,6 +140,11 @@ fn prepareItem(t: Target, d: Direction) !Item {
     var inverse = try next.apply(top.inverse.delta(), &sels);
     errdefer inverse.deinit();
     const next_items = try a.dupe(selection.Selection, top.sels_before);
+    // Undo는 편집 전 좌표를 복원하되 세로 이동 목표와 진행 중 제스처를 부활시키지 않는다.
+    for (next_items) |*item| {
+        item.goal = .none;
+        item.anchor_goal = .none;
+    }
     errdefer a.free(next_items);
     const mirror_items = try a.dupe(selection.Selection, before);
     errdefer a.free(mirror_items);

@@ -11,7 +11,7 @@ const shared_policy = maru.session.editor.shared_edit;
 const syntax_color = editor_ops.syntax_color;
 
 // 정본 변경 전 연결 뷰의 줄 저장소를 모두 준비한다. 단일 뷰는 기존 빠른 경로를 유지한다.
-// 현재 일반 UI는 두 view를 연결하지 않는다. cross-window/provider/IME 배선은 후속 단계다.
+// 같은 창의 분할 뷰도 포함한다. 다른 창에 걸친 게시 여부는 registry의 전체 view 수로 검증한다.
 const SharedPreparedView = struct {
     term: *Term,
     lines: [][]const u8,
@@ -122,18 +122,67 @@ pub fn applyAtRevision(self: *AppSession, term: *Term, d: maru.session.editor.de
     return applyPrepared(self, term, d, sels, sels.items.len);
 }
 
-pub fn applyPrepared(
-    self: *AppSession,
+pub const Publication = struct {
+    session: *AppSession,
     term: *Term,
-    d: maru.session.editor.delta.Delta,
-    sels: *editor_selection.Selections,
-    result_selection_count: usize,
-) !maru.session.editor.delta.Inverse {
+    change: maru.session.editor.delta.Delta,
+    views: []SharedPreparedView,
+    line_count: usize,
+    restore_source: bool,
+    published: bool = false,
+    pub fn deinit(self: *Publication) void {
+        if (!self.published) for (self.views) |view| {
+            self.session.allocator.free(view.lines);
+            self.session.allocator.free(view.extras);
+            if (view.folds) |folds| folds.deinit(self.session.allocator);
+        };
+        self.session.allocator.free(self.views);
+    }
+    // 모든 정본 변경 뒤, 통지 전에 모든 뷰의 빌린 배열부터 교체한다.
+    pub fn publish(self: *Publication) void {
+        // 여기부터 줄 배열과 offset의 게시에는 할당이 없다. 옛 본문을 빌린 배열은 모두 갈아 끼운다.
+        for (self.views) |v| {
+            for (0..self.line_count) |i| v.lines[i] = self.term.rt.editorDocument().opened.?.file.lineText(i) orelse "";
+            if (v.term.rt.editor_lines.len > 0) self.session.allocator.free(v.term.rt.editor_lines);
+            v.term.rt.editor_lines = v.lines;
+            v.term.rt.editor_shared_lines_ready = true;
+            if (v.term == self.term and self.restore_source) {
+                if (self.term.rt.editor_shared_selection_buf) |buf| self.session.allocator.free(buf);
+                self.term.rt.editor_shared_selection_buf = v.extras;
+                continue;
+            }
+            v.term.rt.editor_selection = v.primary;
+            if (v.term.rt.editor_extra_selections.len > 0) self.session.allocator.free(v.term.rt.editor_extra_selections);
+            v.term.rt.editor_extra_selections = v.extras;
+            v.term.rt.editor_column_anchor = null;
+            if (v.term.rt.editor_auto_closed_at) |at| {
+                v.term.rt.editor_auto_closed_at = shared_policy.mapAutoClose(self.change, at);
+            }
+        }
+        self.published = true;
+    }
+    pub fn finish(self: *Publication, span: ?syntax_color.EditSpan) void {
+        editor_ops.notifyDocumentEdit(self.session, self.term);
+        for (self.views) |v| {
+            if (v.term == self.term and self.restore_source) continue;
+            if (v.folds) |folds| {
+                editor_ops.publishMappedFolds(self.session, v.term, folds.ranges, folds.folded, folds.previous, folds.marks, folds.len);
+                editor_ops.refreshMappedViewAfterEdit(self.session, v.term, span) catch {};
+            } else editor_ops.refreshViewAfterEdit(self.session, v.term, span) catch {};
+            // 다른 뷰는 같은 위치 삽입도 원래 보던 텍스트를 anchor로 유지한다.
+            const mapped_scroll: ?editor_ops.ScrollAnchor = if (v.scroll) |a| .{
+                .off = shared_policy.mapSelection(self.change, editor_selection.Selection.at(a.off)).focus,
+            } else null;
+            editor_ops.restoreScrollAnchor(self.session, v.term, mapped_scroll, .{ .changes = &.{} });
+            v.term.rt.editor_first_piece = v.first_piece;
+        }
+    }
+};
+pub fn preparePublication(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, result_selection_count: usize, restore_source: bool) !Publication {
     const state = term.rt.editorDocument();
     const file = &(state.opened orelse return error.DocumentNotOpen).file;
-    const lease = term.rt.editor_document_lease orelse return state.opened.?.file.apply(d, sels);
+    const lease = term.rt.editor_document_lease orelse return error.DocumentNotRegistered;
     const count = lease.owner.viewCount(lease) orelse return error.DocumentNotRegistered;
-    if (count <= 1) return state.opened.?.file.apply(d, sels);
     if (file.read_only) return error.ReadOnly;
     if (!d.isWellFormed()) return error.MalformedDelta;
     if (d.changes.len > 0 and d.changes[d.changes.len - 1].end > file.content.len) return error.OutOfRange;
@@ -143,16 +192,15 @@ pub fn applyPrepared(
         line_count += std.mem.count(u8, c.text, "\n");
     }
     const prepared = try self.allocator.alloc(SharedPreparedView, count);
-    defer self.allocator.free(prepared);
+    errdefer self.allocator.free(prepared);
     var n: usize = 0;
-    var published = false;
-    defer if (!published) {
+    errdefer {
         for (prepared[0..n]) |v| {
             self.allocator.free(v.lines);
             self.allocator.free(v.extras);
             if (v.folds) |folds| folds.deinit(self.allocator);
         }
-    };
+    }
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |view| {
         if (view.kind != .editor or view.rt.editorDocument() != state) continue;
         if (n == count) return error.SharedViewCountMismatch;
@@ -161,7 +209,7 @@ pub fn applyPrepared(
         errdefer self.allocator.free(lines);
         var primary = view.rt.editor_selection;
         var extras: []editor_selection.Selection = undefined;
-        if (view == term) {
+        if (view == term and restore_source) {
             extras = try self.allocator.alloc(editor_selection.Selection, result_selection_count -| 1);
         } else if (primary) |sel| {
             // 매핑으로 서로 겹친 선택도 정본 변경 전에 합친다. primary 소유는 유지한다.
@@ -181,7 +229,7 @@ pub fn applyPrepared(
         } else {
             extras = try self.allocator.alloc(editor_selection.Selection, 0);
         }
-        const folds: ?MappedFolds = if (view == term or view.rt.editor_folded_len == 0) null else prepareFolds(self, view, d, line_count) catch |err| {
+        const folds: ?MappedFolds = if ((view == term and restore_source) or view.rt.editor_folded_len == 0) null else prepareFolds(self, view, d, line_count) catch |err| {
             self.allocator.free(extras);
             return err;
         };
@@ -190,6 +238,15 @@ pub fn applyPrepared(
     };
     // 다른 창의 view는 아직 이 coordinator에 연결하지 않았다. 부분 게시로 넘기지 않는다.
     if (n != count) return error.SharedViewCountMismatch;
+    return .{ .session = self, .term = term, .change = d, .views = prepared, .line_count = line_count, .restore_source = restore_source };
+}
+pub fn applyPrepared(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections, result_selection_count: usize) !maru.session.editor.delta.Inverse {
+    const state = term.rt.editorDocument();
+    const lease = term.rt.editor_document_lease orelse return state.opened.?.file.apply(d, sels);
+    const count = lease.owner.viewCount(lease) orelse return error.DocumentNotRegistered;
+    if (count <= 1) return state.opened.?.file.apply(d, sels);
+    var publication = try preparePublication(self, term, d, result_selection_count, true);
+    defer publication.deinit();
     const before = try self.allocator.dupe(editor_selection.Selection, sels.items);
     defer self.allocator.free(before);
     const before_state = sels.*;
@@ -198,41 +255,7 @@ pub fn applyPrepared(
         sels.* = before_state;
         return err;
     };
-    // 여기부터 줄 배열과 offset의 게시에는 할당이 없다. 옛 본문을 빌린 배열은 모두 갈아 끼운다.
-    for (prepared) |v| {
-        for (0..line_count) |i| v.lines[i] = state.opened.?.file.lineText(i) orelse "";
-        if (v.term.rt.editor_lines.len > 0) self.allocator.free(v.term.rt.editor_lines);
-        v.term.rt.editor_lines = v.lines;
-        v.term.rt.editor_shared_lines_ready = true;
-        if (v.term == term) {
-            if (term.rt.editor_shared_selection_buf) |buf| self.allocator.free(buf);
-            term.rt.editor_shared_selection_buf = v.extras;
-            continue;
-        }
-        v.term.rt.editor_selection = v.primary;
-        if (v.term.rt.editor_extra_selections.len > 0) self.allocator.free(v.term.rt.editor_extra_selections);
-        v.term.rt.editor_extra_selections = v.extras;
-        v.term.rt.editor_column_anchor = null;
-        if (v.term.rt.editor_auto_closed_at) |at| {
-            v.term.rt.editor_auto_closed_at = shared_policy.mapAutoClose(d, at);
-        }
-    }
-    published = true;
-
-    editor_ops.notifyDocumentEdit(self, term);
-    const span = syntax_color.spanFromInverse(inverse.changes);
-    for (prepared) |v| {
-        if (v.term == term) continue;
-        if (v.folds) |folds| {
-            editor_ops.publishMappedFolds(self, v.term, folds.ranges, folds.folded, folds.previous, folds.marks, folds.len);
-            editor_ops.refreshMappedViewAfterEdit(self, v.term, span) catch {};
-        } else editor_ops.refreshViewAfterEdit(self, v.term, span) catch {};
-        // 다른 뷰는 같은 위치 삽입도 원래 보던 텍스트를 anchor로 유지한다.
-        const mapped_scroll: ?editor_ops.ScrollAnchor = if (v.scroll) |a| .{
-            .off = shared_policy.mapSelection(d, editor_selection.Selection.at(a.off)).focus,
-        } else null;
-        editor_ops.restoreScrollAnchor(self, v.term, mapped_scroll, .{ .changes = &.{} });
-        v.term.rt.editor_first_piece = v.first_piece;
-    }
+    publication.publish();
+    publication.finish(syntax_color.spanFromInverse(inverse.changes));
     return inverse;
 }

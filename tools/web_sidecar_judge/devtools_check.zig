@@ -15,6 +15,8 @@
 //!   dt-busy-other-tab  그 탭이 상한이어도 다른 탭은 부를 수 있다(멈춘 페이지 하나가 다른 탭을 막지 못한다 — `dt-busy` 와 함께여야
 //!                      뜻이 있다: 탭마다 상한이 없던 옛 설계도 이것만은 통과한다)
 //!   dt-closed          인자를 다 받지 못한 호출과 CDP 로 보내 답을 기다리는 호출이 브라우저를 닫으면 `browser_closed` **앞에** detached
+//!   dt-closed-unsent   관찰자를 한 번도 등록하지 않은 탭(인자를 받는 중인 호출뿐)을 닫아도 `browser_closed` 앞에 detached — CEF 의
+//!                      DevTools 떨어짐 콜백이 오지 않는 경우(등록이 없다)라 sidecar 가 닫힘에서 스스로 답해야 한다
 //!   dt-renderer-gone   답을 기다리는 호출(끝나지 않는 Promise)이 렌더러가 죽으면 detached 로 끝난다
 //!   dt-expired         시한을 줄인 host(`MARU_WEB_TEST_DEVTOOLS_STALE_MS`)에서 답이 오지 않는 호출이 새 호출 없이도 expired 로 끝난다
 
@@ -301,6 +303,33 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, e
         _ = r.until("closed", wait_ms);
         const want = protocol.message.max_devtools_calls_per_browser;
         report(r.closed and r.detached_before_close == want, "dt-closed", std.fmt.bufPrint(&detail, "닫힘 {} · 그 앞의 detached {d}(기대 {d} — 인자 받는 중 1 · CDP 로 보낸 것 1)", .{ r.closed, r.detached_before_close, want }) catch "");
+    }
+    // dt-closed-unsent — 관찰자 등록 없는 탭.
+    {
+        const lone: u64 = browser_id + 2;
+        try host.send(.{ .create_browser = .{ .browser = lone, .size = .{ .width = 320, .height = 200, .scale = 2 }, .hidden = false, .url = browsers_check.url(&u, port, "/static") } });
+        r.pump(1_500);
+        const c = try r.begin(lone, "Runtime.evaluate", 10);
+        r.pump(200);
+        try host.send(.{ .destroy_browser = lone });
+        var answered = false;
+        var answered_before_close = false;
+        var closed = false;
+        const deadline = os.nowMs() + wait_ms;
+        while (os.nowMs() < deadline and !closed) {
+            const m = (host.next(50) catch null) orelse continue;
+            switch (m) {
+                .devtools_result => |v| if (v.browser == lone and v.call == c and v.status == .detached) {
+                    answered = true;
+                    answered_before_close = !closed;
+                },
+                .browser_closed => |id| if (id == lone) {
+                    closed = true;
+                },
+                else => r.other(m),
+            }
+        }
+        report(closed and answered and answered_before_close, "dt-closed-unsent", std.fmt.bufPrint(&detail, "닫힘 {} · detached {} · 닫힘 앞 {}", .{ closed, answered, answered_before_close }) catch "");
     }
     // dt-renderer-gone — 새 브라우저에서 끝나지 않는 Promise 를 기다리는 호출.
     {

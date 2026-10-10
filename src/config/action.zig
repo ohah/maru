@@ -27,6 +27,9 @@ pub const Action = union(enum) {
     show_project_search,
     /// 언어 서버 신뢰 관리(계획 WT4) — 신뢰한 저장소 목록, 지금 문서 저장소의 철회·잊기. **부여는 없다**(신뢰 시트의 답뿐).
     lsp_trusted_repositories,
+    /// 도크의 저장소를 신뢰할지 묻는다(계획 workspace-trust WT6b-2a) — 도크 머리의 신뢰 전 줄과 같은 시트. 목록 읽기가 거절돼 줄이 안
+    /// 보일 때(필터를 끌 수 없는 저장소)도 이 명령으로 신뢰할 수 있다.
+    scm_trust_repository,
     lsp_revoke_trust,
     lsp_forget_trust,
     /// 언어 서버 도구 환경(사용자 셸 환경 — 계획 workspace-trust WT3b)을 다시 읽는다 — 셸 설정을 고친 뒤.
@@ -329,6 +332,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "show_editor_outline")) return .show_editor_outline;
     if (std.mem.eql(u8, value, "show_project_search")) return .show_project_search;
     if (std.mem.eql(u8, value, "lsp_trusted_repositories")) return .lsp_trusted_repositories;
+    if (std.mem.eql(u8, value, "scm_trust_repository")) return .scm_trust_repository;
     if (std.mem.eql(u8, value, "lsp_revoke_trust")) return .lsp_revoke_trust;
     if (std.mem.eql(u8, value, "lsp_forget_trust")) return .lsp_forget_trust;
     if (std.mem.eql(u8, value, "lsp_reload_shell_environment")) return .lsp_reload_shell_environment;

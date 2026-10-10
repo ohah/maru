@@ -271,6 +271,15 @@ pub const Item = union(enum) {
     /// **왜 `notice` 에 bool 을 달지 않았나**: 그러면 모든 생성 자리가 그 값을 정해야 하고, 안 정하면
     /// 조용히 중립이 된다. 종류를 나누면 부르는 쪽이 고를 수밖에 없다.
     blocker: []const u8,
+    /// **신뢰 전 저장소의 진술**(계획 workspace-trust WT6b-2a) — 도크가 저장소 필터·submodule·partial clone 을 보지 않는다는 사실.
+    /// 신뢰할 수 있는 저장소면 눌러서 신뢰 시트를 연다(`actionable`). 원격·묻지 않는 root(홈·저장소 밖)는 신뢰를 정할 수 없어 진술만
+    /// 한다 — 누를 수 있는 것처럼 보이면 눌렀는데 아무 일이 없다.
+    trust_notice: TrustNoticeItem,
+};
+
+pub const TrustNoticeItem = struct {
+    text: []const u8,
+    actionable: bool,
 };
 
 /// 목록 위의 요약 줄. 아직 커밋·필터가 없으므로 **숫자만** 싣는다.
@@ -576,7 +585,7 @@ pub const DockMetrics = struct {
             .section => self.section_h,
             .file => self.row_h,
             // "모두 보기"와 안내는 파일 행과 같은 높이를 쓴다(줄이 하나이므로).
-            .more, .notice, .blocker => self.row_h,
+            .more, .notice, .blocker, .trust_notice => self.row_h,
         };
     }
 

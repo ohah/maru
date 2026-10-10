@@ -144,6 +144,9 @@ pub const ScenarioId = enum {
     /// **중립 안내를 같은 캡처에 둔다.** 색을 가른다는 것은 둘을 나란히 놓아야 보인다 — 하나만 찍으면
     /// "붉다" 는 알아도 "구별된다" 는 모른다.
     scm_blocker,
+    /// **신뢰 전 저장소의 도크 머리 줄**(계획 workspace-trust WT6b-2a) — 맨 위에 누를 수 있는 신뢰 전 줄(강조색)이 서고, 그 아래
+    /// 저장소 그룹이 이어진다. 누를 수 없는 진술(원격)과 색이 갈리는지 같은 캡처에서 본다.
+    scm_trust,
     /// **히스토리 탭**(P4·P4b) — 커밋 줄과 **펼친 커밋의 파일 줄**이 한 캡처에 든다. 이 탭에는 Lab
     /// 시나리오가 하나도 없었고(`scm_rows` 는 전부 변경 사항 탭이다), 그래서 커밋 줄의 두 단 배치·ref
     /// 칩·펼친 파일 행의 증감은 **사용자 캡처로만** 보였다. 실제로 그 목록은 파일마다 증감이 빈 채로
@@ -458,7 +461,7 @@ pub fn buildFrame(
     };
     return switch (scenario.id) {
         .detail_loading, .detail_ready, .detail_stale, .detail_unavailable => buildDetailFrame(scenario, tokens, buffers),
-        .scm_rows, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
+        .scm_rows, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_trust, .scm_small_font, .dock_over_status_bar => buildScmFrame(scenario, tokens, buffers),
         .scm_history => buildScmHistoryFrame(scenario, tokens, buffers),
         .scm_turn_badges => buildScmTurnBadgesFrame(scenario, tokens, buffers),
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
@@ -1690,7 +1693,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .suggest_list, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .suggest_list, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_trust, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -2154,6 +2157,15 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         // 두 번째 저장소 — **그 아래에는 안 선다**(사유는 한 저장소 것이다).
         .{ .repo = .{ .index = 1, .name = "wt-review", .branch = "review-wt", .primary = false, .collapsed = true, .count = 2 } },
     };
+    // 신뢰 전 줄은 **목록 맨 위**다(제품 `projectTab` 과 같은 자리). 진술(원격) 줄을 바로 아래 두어 누를 수 있는 줄과 색이 갈리는지
+    // 같은 캡처에서 견준다.
+    const trust_items = [_]scm_dock.types.Item{
+        .{ .trust_notice = .{ .text = maru.i18n.t(.scm_trust_line), .actionable = true } },
+        .{ .trust_notice = .{ .text = maru.i18n.t(.scm_trust_line_remote), .actionable = false } },
+        .{ .repo = .{ .index = 0, .name = "maru3", .branch = "feat/lab-fixture", .primary = true, .count = 1 } },
+        .{ .commit_box = .{ .repo_index = 0 } },
+        .{ .commit_button = .{ .repo_index = 0, .enabled = true } },
+    };
     const default_items = [_]scm_dock.types.Item{
         // 저장소·워크트리 머리 줄(P3d-②). 같은 이름의 두 줄을 사용자가 구별해야 하므로 **종류가
         // 글리프로** 보여야 하고, 접힌 줄도 개수를 갖는다 — 그 셋이 한 캡처에 든다.
@@ -2183,7 +2195,7 @@ fn buildScmFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: Fram
         .{ .repo = .{ .index = 1, .name = "wt-review", .branch = "review-wt", .primary = false, .collapsed = true, .count = 2 } },
     };
     const items: []const scm_dock.types.Item =
-        if (scenario.id == .scm_blocker) &blocker_items else &default_items;
+        if (scenario.id == .scm_blocker) &blocker_items else if (scenario.id == .scm_trust) &trust_items else &default_items;
     const props = scm_dock.types.Props{
         // scm_dock은 `UiRect`(원점 포함)를 받는다 — Lab 시나리오는 크기만 들고 원점은 0,0이다.
         .viewport_px = .{ .x = 0, .y = 0, .width = scenario.viewport_px.width, .height = scenario.viewport_px.height },

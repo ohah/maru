@@ -717,7 +717,7 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
 
 **W9b②-1 구현:**
 - `web_cdp_locate`(순수): 역할 표·정규화·queryAXTree 결과 거르기·여럿 메시지.
-- `web_cdp_ops` 의 찾기 단계: 격리 world 에서 요소 수 → 문서 → `Accessibility.queryAXTree`(exact 면 이름도) → 하나면 ref 처럼.
+- `web_cdp_ops` 의 찾기 단계: 격리 world 에서 요소 수 → 문서 → `Accessibility.queryAXTree`(역할만 — 이름은 받은 뒤 거른다) → 하나면 ref 처럼.
 - L2 `locator`(배타·상한·인가 전 WebKit `-32008` + `param`), 결과 `matched`.
 - CLI `--role --name --level --exact --nth`(act 명령은 다른 명령의 옵션을 거절 — 예전엔 쿠키 파서를 함께 써 `click --name x` 를 조용히 무시했다).
 
@@ -732,3 +732,13 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - 하: 공백뿐인 이름이 이름 조건을 없앴다 → 거절. CLI 가 페이지 글의 C1·양방향 제어 글자를 그대로 찍었다 → 메시지·`matched` 에서 뺀다.
     엔진도 `locator` 와 `selector`·`ref` 를 함께 받지 않는다. 문서(exact·shadow·투명 요소).
   - 변이(고치기 전): 12 중 12 걸림(판정 대본이 누수 변이를 처음엔 「살아남음」 으로 셌다 — 누수도 실패로 세게 고쳤다).
+- **2 회차**(실측):
+  - 중: too_large 안내가 「exact:true 를 붙여라」 였는데 1 회차 뒤 exact 는 질의를 줄이지 않는다 → 「selector 나 ref 를」.
+  - 중: **link 는 맞는 노드 수의 제곱으로 느려진다** — 요소 3 만 상한 아래인 링크 2.5 만 페이지가 15 초 멈췄다(1 회차의 「4 만 요소 3.7 초」 는
+    역할이 맞지 않는 요소로 잰 값이었다; 링크 5 천 0.68 초·1 만 2.5 초, button 1 만 0.4 초) → 같은 JS 로 link 후보(`a[href],area[href],[role=link]`)를
+    세 5 천을 넘으면 거절.
+  - 중: 접근성 이름은 잘리지 않는다(실측 2 MB) — `matched` 가 CLI 프레임 상한(1 MiB)을 넘으면 클릭은 됐는데 「응답 없음」 이라 다시 누를 수 있었다 →
+    256 바이트에서 자른다.
+  - 중: 1 회차 고침을 지키는 시험이 없었다(리뷰 사본 변이 11 중 5 걸림 — 받은 이름 정규화·shadow 세기) → nbsp·soft hyphen exact·대소문자·메시지의
+    양방향 글자 시험, 스모크에 중첩 open shadow 안 버튼을 role 로 누르기.
+  - 하: closed shadow root 안은 여전히 셀 수 없다(문서). 표시 안전에 줄·문단 구분·interlinear·tag 글자도, CLI 의 512 바이트 자르기에 「…」.

@@ -76,6 +76,8 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=rs1 style="position:absolute;left:620px;top:100px" onclick="hit('rs1-'+event.isTrusted)">Role Save</button>
 <button id=rs2 style="position:absolute;left:620px;top:140px" onclick="hit('rs2-'+event.isTrusted)">Role Save draft</button>
 <h2 id=rh style="position:absolute;left:620px;top:170px;margin:0">Role Heading</h2>
+<div id=osh style="position:absolute;left:620px;top:220px"></div>
+<script>(function(){var r=document.getElementById('osh').attachShadow({mode:'open'});var inner=document.createElement('div');r.appendChild(inner);inner.attachShadow({mode:'open'}).innerHTML='<button id=osb>Shadow Role Btn</button>';inner.shadowRoot.getElementById('osb').addEventListener('click',function(e){hit('osb-'+e.isTrusted)})})()</script>
 <input id=pk style="position:absolute;left:420px;top:340px" onkeydown="hit('pkd-'+event.key+'-'+event.isTrusted)" oninput="hit('pkv-'+encodeURIComponent(this.value)+'-'+event.isTrusted)">
 <input id=pk2 style="position:absolute;left:420px;top:380px" onfocus="hit('pk2focus')">
 <input id=ro2 readonly value="old" style="position:absolute;left:220px;top:460px">
@@ -191,6 +193,8 @@ hit_seen rs2-true && echo yes > "\$out/rs2-hit" || echo no > "\$out/rs2-hit"
 run role-exact scroll --role button --name 'Role Save' --exact
 run role-level scroll --role heading --level 2 --name 'role heading'
 run role-unknown click --role buton
+run role-shadow click --role button --name 'Shadow Role Btn' --exact
+hit_seen osb-true && echo yes > "\$out/osb-hit" || echo no > "\$out/osb-hit"
 run hover hover --selector '#hv'
 hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
 run hover-missing hover --selector '#none'
@@ -314,8 +318,9 @@ ok role-nth && grep -q 'matched n[0-9]* "Role Save draft"' "$out/role-nth" && [ 
 ok role-exact && grep -q 'matched n[0-9]* "Role Save"$' "$out/role-exact" || fail "--exact did not pick only Role Save ($(tr '\n' ' ' < "$out/role-exact"))"
 ok role-level && grep -q 'matched n[0-9]* "Role Heading"' "$out/role-level" || fail "--level 2 did not find the h2 ($(tr '\n' ' ' < "$out/role-level"))"
 grep -q '(-32602)' "$out/role-unknown" && grep -q 'did you mean "button"' "$out/role-unknown" || fail "an unknown role was not invalid params with a suggestion ($(tr '\n' ' ' < "$out/role-unknown"))"
+ok role-shadow && [ "$(cat "$out/osb-hit")" = yes ] || fail "a button inside nested open shadow roots was not found and clicked by role ($(tr '\n' ' ' < "$out/role-shadow"))"
 grep -q 'too_large: page has [0-9]* elements' "$out/role-big" || fail "a page with over 30000 elements was not refused before the query ($(tr '\n' ' ' < "$out/role-big"))"
-echo "PASS role: an ambiguous name failed with candidate refs and the ref clicked for real, --nth/--exact/--level picked the right element (matched), an unknown role suggested button, a 31000-element page was refused"
+echo "PASS role: an ambiguous name failed with candidate refs and the ref clicked for real, --nth/--exact/--level picked the right element (matched), an unknown role suggested button, a button in nested open shadow roots was clicked, a 31000-element page was refused"
 ok press-a && [ "$(cat "$out/pk-a")" = yes ] || fail "press Shift+a on the field did not type A with a real key ($(tr '\n' ' ' < "$out/press-a") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-all && ok press-x && [ "$(cat "$out/pk-x")" = yes ] || fail "Meta+a then x (where the focus is) did not replace the value ($(tr '\n' ' ' < "$out/press-all") · $(tr '\n' ' ' < "$out/press-x") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-q && [ "$(cat "$out/pk-q")" = yes ] || fail "Shift+/ did not press ? as a real key ($(tr '\n' ' ' < "$out/press-q") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"

@@ -129,8 +129,8 @@ pub fn parse(spec: []const u8, out: *Press) ParseError!void {
             // 그 자리의 키 — `Shift` 면 위 글자를 넣는다(`?` 처럼 위 글자를 바로 줘도 같은 자리).
             if (shift) {
                 out.buf[0] = k.shifted;
-            } else if (c == k.shifted and !shortcut) {
-                out.modifiers |= Modifier.shift; // 위 글자(`?`)를 바로 줬다 — shiftKey 를 켠다
+            } else if (c == k.shifted) {
+                out.modifiers |= Modifier.shift; // 위 글자(`?`·`Meta+!`)를 바로 줬다 — Shift 없이는 낼 수 없으니 shiftKey 를 켠다(3 회차)
             }
             out.code = k.code;
             out.vk = k.vk;
@@ -290,6 +290,7 @@ test "키 이름: 이름 있는 키·글자·수식키·편집 명령" {
     try expectEvent("?", true, "{\"type\":\"keyDown\",\"key\":\"?\",\"code\":\"Slash\",\"windowsVirtualKeyCode\":191,\"modifiers\":8,\"text\":\"?\",\"unmodifiedText\":\"?\"}");
     // 대문자를 바로 주면 shiftKey 를 켜고, Meta·Control 과 함께면 실제 단축키처럼 소문자 key 다.
     try expectEvent("A", true, "{\"type\":\"keyDown\",\"key\":\"A\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65,\"modifiers\":8,\"text\":\"A\",\"unmodifiedText\":\"A\"}");
+    try expectEvent("Meta+!", true, "{\"type\":\"rawKeyDown\",\"key\":\"!\",\"code\":\"Digit1\",\"windowsVirtualKeyCode\":49,\"modifiers\":12}");
     try expectEvent("Meta+A", true, "{\"type\":\"rawKeyDown\",\"key\":\"a\",\"code\":\"KeyA\",\"windowsVirtualKeyCode\":65,\"modifiers\":4,\"commands\":[\"selectAll\"]}");
     // 이름은 대소문자를 가리지 않고 Esc·Return 도 받는다.
     try expectEvent("ctrl+ENTER", false, "{\"type\":\"keyUp\",\"key\":\"Enter\",\"code\":\"Enter\",\"windowsVirtualKeyCode\":13,\"modifiers\":2}");

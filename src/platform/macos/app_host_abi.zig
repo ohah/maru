@@ -7179,7 +7179,10 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             if (!run.op.committed() and !cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
             if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
-            _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return switch (e) {
+            _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return if (run.op.committed() and run.op.miss != null)
+                // 누름 뒤의 떼기·놓기를 보내지 못했다 — 앞선 실패 이유(엔진이 멈춤 등)로 답한다(3 회차 — 「not ready」 가 덮었다).
+                finishCdp(run, .failed, run.op.miss.?)
+            else switch (e) {
                 error.NotReady => finishCdp(run, .failed, "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)"),
                 error.Busy => finishCdp(run, .failed, "too many DevTools calls on this tab"),
                 // 인자는 이 모듈이 만든 JSON 이다 — 넘치는 것은 사용자의 selector 뿐이다(64 KiB).
@@ -7202,8 +7205,10 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
         .detached, .closed => .{ .failed = "the tab closed or its page crashed" },
         .sidecar_gone => .{ .failed = "the Chromium engine stopped" },
         .too_large => .{ .failed = "the DevTools result was too large" },
-        .busy => .{ .failed = "too many DevTools calls on this tab" },
-        .unknown_browser, .invalid_request, .send_failed, .protocol => .{ .failed = "DevTools request failed" },
+        // 확실히 보내지 않은 것과 보냈을 수도 있는 것(결과가 깨짐)을 가른다 — 누름이면 떼기를 보낼지가 달라진다.
+        .busy => .{ .not_sent = "too many DevTools calls on this tab" },
+        .unknown_browser, .invalid_request, .send_failed => .{ .not_sent = "DevTools request failed" },
+        .protocol => .{ .failed = "DevTools request failed" },
     };
     const step = run.op.feed(allocator, reply) catch return finishCdp(run, .failed, "out of memory");
     cdpAdvance(run, step);

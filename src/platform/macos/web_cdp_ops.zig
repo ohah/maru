@@ -43,6 +43,9 @@ pub const Reply = union(enum) {
     failed: []const u8,
     /// 시한 안에 답이 없었다 — status timeout.
     timed_out: []const u8,
+    /// 확실히 보내지 않았다(탭의 DevTools 자리가 다 찼다·보내기 실패 등) — 누름이면 떼기를 보내지 않는다(3 회차: 떼기만 가면
+    /// 페이지는 keydown 없는 진짜 keyup 을 받았다).
+    not_sent: []const u8,
 };
 
 /// 여러 줄 링크의 줄 상자 상한 — 화면보다 긴 링크는 앞줄이 화면 밖일 수 있어 넉넉히(3 회차 — 8 이면 9 줄째부터 보여도 실패했다).
@@ -278,8 +281,20 @@ pub const Op = struct {
             },
             else => {},
         };
+        // 누름을 확실히 보내지 않았다 — 떼지 않고, 쥔 묶음만 놓는다.
+        if (reply == .not_sent) switch (self.stage) {
+            .mouse_down => {
+                self.miss = reply.not_sent;
+                return self.releaseStep(gpa);
+            },
+            .key_down => {
+                self.miss = reply.not_sent;
+                return self.afterKeys(gpa);
+            },
+            else => {},
+        };
         const bytes = switch (reply) {
-            .failed => |why| return done(gpa, .failed, why),
+            .failed, .not_sent => |why| return done(gpa, .failed, why),
             .timed_out => |why| return done(gpa, .timeout, why),
             .cdp_error => |e| return self.cdpError(gpa, e),
             .ok => |b| b,
@@ -1441,6 +1456,21 @@ fn framedPage(method: []const u8, params: []const u8) Reply {
     return happyPage(method, params);
 }
 
+fn failedPressPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchMouseEvent") and std.mem.indexOf(u8, params, "mousePressed") != null) return .{ .failed = "DevTools request failed" };
+    return happyPage(method, params);
+}
+
+fn unsentKeyDownPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchKeyEvent") and std.mem.indexOf(u8, params, "keyUp") == null) return .{ .not_sent = "too many DevTools calls on this tab" };
+    return happyPage(method, params);
+}
+
+fn unsentPressPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchMouseEvent")) return .{ .not_sent = "too many DevTools calls on this tab" };
+    return happyPage(method, params);
+}
+
 fn failedKeyDownPage(method: []const u8, params: []const u8) Reply {
     if (std.mem.eql(u8, method, "Input.dispatchKeyEvent") and std.mem.indexOf(u8, params, "keyUp") == null) return .{ .failed = "DevTools request failed" };
     return happyPage(method, params);
@@ -1454,6 +1484,8 @@ test "click·press: 노드 잡기·초점 검사의 시한에도 묶음을 놓�
         .{ .kind = .press, .arg = "{\"key\":\"x\",\"selector\":\"#e\"}", .answer = &stuckHitPage, .status = .timeout, .want = "", .keys = 0 },
         .{ .kind = .press, .arg = "{\"key\":\"x\",\"ref\":\"n9\"}", .answer = &framedPage, .status = .failed, .want = "frames", .keys = 0 },
         .{ .kind = .press, .arg = "{\"key\":\"x\",\"selector\":\"#e\"}", .answer = &failedKeyDownPage, .status = .failed, .want = "request failed", .keys = 2 },
+        // 확실히 못 보낸 누름은 떼지 않는다(keydown 없는 keyup 을 만들지 않는다).
+        .{ .kind = .press, .arg = "{\"key\":\"x\",\"selector\":\"#e\"}", .answer = &unsentKeyDownPage, .status = .failed, .want = "too many", .keys = 1 },
     }) |c| {
         trail.reset();
         var op = try Op.init(testing.allocator, c.kind, c.arg, 70);
@@ -1540,4 +1572,22 @@ test "press(selector): 화면 안으로 → 초점 → 격리 world 에서 초�
     defer testing.allocator.free(u.result);
     try testing.expectEqualStrings("false", u.result);
     try testing.expectEqual(@as(usize, 0), trail.methods.items.len);
+}
+
+test "click: 누름의 답이 실패면 떼기·놓기를 마저 보내고, 확실히 못 보냈으면 떼지 않고 놓기만" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    for ([_]struct { answer: *const fn ([]const u8, []const u8) Reply, mouse: usize }{
+        .{ .answer = &failedPressPage, .mouse = 2 },
+        .{ .answer = &unsentPressPage, .mouse = 1 },
+    }) |c| {
+        trail.reset();
+        var op = try Op.init(testing.allocator, .click, "{\"selector\":\"#b\"}", 80);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, c.answer, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.failed, r.status);
+        try testing.expectEqual(c.mouse, trail.count("Input.dispatchMouseEvent"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
 }

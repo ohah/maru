@@ -2071,7 +2071,7 @@ fn costlyPage(method: []const u8, params: []const u8) Reply {
 }
 
 fn longNamePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"" ++ "가" ** 200 ++ "\"},\"backendDOMNodeId\":31}]}" };
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"" ++ "é" ** 200 ++ "\"},\"backendDOMNodeId\":31}]}" };
     return rolePage(method, params);
 }
 

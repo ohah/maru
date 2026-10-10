@@ -4,6 +4,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
 const web_cdp_ops = @import("web_cdp_ops.zig");
+const web_cdp_keys = @import("web_cdp_keys.zig");
 const editor_ime_ops = @import("app_session/editor_ime.zig");
 const session_host = @import("session_host.zig");
 const ime_candidate_evidence = @import("session_host/ime_candidate_evidence.zig");
@@ -7111,6 +7112,11 @@ fn wakeCdpSleepers() void {
 /// 보내려 한 DevTools 호출 수(시험에서만 센다 — 철회 뒤 보내지 않았는지).
 var cdp_calls_attempted: usize = 0;
 
+comptime {
+    // L2 의 press 키 이름 상한과 엔진의 상한은 같은 값이어야 한다(L2 가 지난 이름을 엔진이 길이로 거절하지 않게).
+    std.debug.assert(control_browser.max_press_key_bytes == web_cdp_keys.max_spec_bytes);
+}
+
 fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
     return switch (method) {
         .click => .click,
@@ -7130,9 +7136,9 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
 fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMethod, arg: []const u8) void {
     const kind = cdpKind(method) orelse return completeCdp(async_id, .failed, "not supported by the Chromium engine");
     const run = allocator.create(CdpRun) catch return completeCdp(async_id, .failed, "out of memory");
-    const op = web_cdp_ops.Op.init(allocator, kind, arg, async_id) catch {
+    const op = web_cdp_ops.Op.init(allocator, kind, arg, async_id) catch |e| {
         allocator.destroy(run);
-        return completeCdp(async_id, .invalid_params, "invalid arguments");
+        return completeCdp(async_id, .invalid_params, if (e == error.InvalidKey) "unknown key name (use names like Enter, Shift+Tab, Meta+a or a single character)" else "invalid arguments");
     };
     run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op };
     const busy = for (cdp_runs.items) |other| {

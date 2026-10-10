@@ -483,7 +483,7 @@ wire 에 DevTools 요청/응답을 낸다 — 아직 control-plane 에는 잇지
 
 판정(`maru-web-judge --devtools`, 실제 CEF): `dt-eval`·`dt-no-params`·`dt-params-chunked`(40 000 바이트)·`dt-result-chunked`(100 000
 글자, 조각 7)·`dt-cdp-error`·`dt-invalid-params`·`dt-overflow`·`dt-unknown`·`dt-too-large`(17 MiB)·`dt-big-result-time`(8 MiB 69 ms)·
-`dt-busy`(탭마다 2)·`dt-busy-other-tab`·`dt-closed`(`browser_closed` 앞 detached 2 — 인자 받는 중 · CDP 로 보낸 것)·`dt-renderer-gone`·
+`dt-busy`(탭마다 2)·`dt-busy-other-tab`·`dt-closed`(`browser_closed` 앞 detached 2 — 인자 받는 중 · CDP 로 보낸 것)·`dt-closed-unsent`(관찰자를 등록한 적 없는 탭 — CEF 의 떨어짐 콜백이 없어 sidecar 가 닫힘에서 스스로 답해야 한다, 변이가 이것으로만 잡혔다)·`dt-renderer-gone`·
 `dt-clean`·`dt-expired`(시한을 1.5 초로 줄인 host 에서 새 호출 없이 `expired` — 1 400~2 625 ms 안이어야, 실측 1 536 ms). `dt-renderer-gone` 의 detached 가 렌더러
 죽음 경로로 왔는지 DevTools 떨어짐 경로로 왔는지는 판정이 가르지 않는다(둘 다 같은 답).
 

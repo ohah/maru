@@ -4972,6 +4972,17 @@ test "W9-0b DevTools 호출: 탭마다·전체 상한, 시한이 지나도 sidec
     try std.testing.expectEqual(before + 2, rec.count);
     try std.testing.expectEqual(@as(usize, 1), devtoolsUsed());
 
+    // maru 가 탭을 닫는다(시한 전) — 호출은 closed 로 끝나고, 자리는 sidecar 의 답까지 남는다.
+    const e1 = try devtoolsCall(gpa, 11, "A.b", "", rec.sink());
+    destroy(gpa, 11);
+    try std.testing.expect(rec.outcome.? != .closed or rec.call != e1); // 알림은 tick 끝에
+    deliverDevtools(gpa);
+    try std.testing.expectEqual(e1, rec.call);
+    try std.testing.expectEqual(DevtoolsOutcome.closed, rec.outcome.?);
+    try std.testing.expect(devtoolsFind(11, e1) != null);
+    applyD(gpa, .{ .devtools_result = .{ .browser = 11, .call = e1, .status = .detached, .size = 0 } });
+    try std.testing.expect(devtoolsFind(11, e1) == null);
+
     // 콜백 안의 새 호출 — 자리를 먼저 비운다.
     const c1 = try devtoolsCall(gpa, 9, "A.b", "", rec.sink());
     rec.action = .chain;
@@ -4987,7 +4998,7 @@ test "W9-0b DevTools 호출: 탭마다·전체 상한, 시한이 지나도 sidec
     forgetSidecar(gpa);
     try std.testing.expect(rec.outcome.? != .sidecar_gone); // 콜백은 정리 한가운데가 아니라 tick 끝에
     try std.testing.expect(!devtoolsPending()); // 닫은 탭 7 의 버린 자리도
-    deliverDevtools(gpa);
+    pump(gpa, monotonicNow()); // tick 끝 알림(어느 갈래로 끝나도 — 여기서는 sidecar 가 없는 갈래)
     try std.testing.expectEqual(DevtoolsOutcome.sidecar_gone, rec.outcome.?);
     try std.testing.expectEqual(DevtoolsCallError.NotReady, rec.chain_error.?); // 닫힌 탭 9 — 브라우저가 없다
 

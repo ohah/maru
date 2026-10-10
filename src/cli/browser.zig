@@ -189,8 +189,8 @@ pub const ParseError = error{
     MissingName, // `set-cookie`/`delete-cookie`에 `--name` 없음
     MissingKey, // `*-local-storage`에 `--key` 없음
     MissingSelector, // `wait --selector`에 값 없음(selector 조건)
-    MissingLocator, // `click`/`type`/`scroll`에 `--selector`/`--ref` 둘 다 없음
-    ConflictingLocator, // `click`/`type`/`scroll`에 `--selector`와 `--ref` 동시 지정
+    MissingLocator, // act 에 대상(`--selector`·`--ref`·`--role`·`--by-text`·`--by-label`)이 없음
+    ConflictingLocator, // act 에 대상이 둘 이상
     MissingWaitCondition, // `wait`에 `--selector` 또는 `--load` 없음
     ConflictingWaitCondition, // `wait` 조건을 둘 이상 지정
     MissingTimeoutValue, // `wait --timeout`에 값 없음
@@ -722,7 +722,8 @@ fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs 
     return r;
 }
 
-/// act 의 대상 — `--selector`·`--ref`·`--role` 가운데 정확히 하나. 로케이터 옵션은 `--role` 과만, `--exact` 는 `--name` 과만.
+/// act 의 대상 — `--selector`·`--ref`·`--role`·`--by-text`·`--by-label` 가운데 정확히 하나. `--name`·`--level` 은 `--role` 과만,
+/// `--exact`·`--nth` 는 로케이터(role 은 `--exact` 에 `--name` 이 있어야)와만.
 fn actLocator(aa: ActArgs) ParseError!Locator {
     const given = @as(u8, @intFromBool(aa.selector != null)) + @intFromBool(aa.ref != null) + @intFromBool(aa.role != null) +
         @intFromBool(aa.by_text != null) + @intFromBool(aa.by_label != null);

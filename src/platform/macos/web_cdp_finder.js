@@ -78,39 +78,56 @@ function(KIND, Q, EXACT, NTH, ACTION) {
   // ---- pre-scan: count elements (document + open shadow roots, tree order with each shadow tree at its host), stop over CAP
   var count = 0, roots = [], force = new Set(), order = KIND === 'label' ? [] : null;
   var isBtnInput = function (e) { if (tagG.call(e) !== 'INPUT') return false; var ty = typG.call(e); return ty === 'submit' || ty === 'reset' || ty === 'button'; };
-  // rendered text without aria-hidden, unrendered, off-page or tiny parts (and svg title/desc/style) - for shadow hosts, non-HTML elements and
-  // ancestors of such parts (review round 1: a host's textContent carried its hidden menu items; an aria-hidden icon hid its button).
-  // Walks the flat tree: a host's shadow content, a slot's assigned nodes; unslotted light children of a host are not rendered.
-  var cnG2 = G(NP, 'childNodes'), anodes = HTMLSlotElement.prototype.assignedNodes, tslot = G(Text.prototype, 'assignedSlot'), FLAT = { flatten: true };
-  var NOTEXT = { SCRIPT: 1, STYLE: 1, TEMPLATE: 1, NOSCRIPT: 1, TITLE: 1, DESC: 1, HEAD: 1 };
-  var INLINE = { inline: 1, contents: 1, 'inline-block': 1, 'inline-flex': 1, 'inline-grid': 1 };
-  var renderedText = function (root) {
-    var out = [], stk = [], push = function (n) { var s0 = ntG.call(n) === 1 ? srG.call(n) : null; stk.push([s0 ? cnG2.call(s0) : cnG2.call(n), 0, !!s0]); };
-    push(root);
-    while (stk.length) {
+  // composed text (review rounds 1-2): an element's rendered text without its hidden matches, aria-hidden parts, unrendered parts and
+  // form-control text - for shadow hosts and non-HTML elements (textContent carried a host's unslotted light children), for elements with a
+  // rendered hidden match below ("masked") and for elements with aria-hidden text below (icon ligatures). Children are read natively
+  // (innerText) unless they are composed themselves; every composed text is kept (ctext), so an ancestor chain costs one pass, not one per
+  // level (round 2: re-walking it took 300 ms at 20k elements). Flat tree: a host's shadow content, a slot's assigned nodes.
+  var cnG2 = G(NP, 'childNodes'), anodes = HTMLSlotElement.prototype.assignedNodes, FLAT = { flatten: true }, qsE = EP.querySelector, VIS = { visibilityProperty: true };
+  var NOTEXT = { SCRIPT: 1, STYLE: 1, TEMPLATE: 1, NOSCRIPT: 1, TITLE: 1, DESC: 1, HEAD: 1, TEXTAREA: 1, SELECT: 1, DATALIST: 1 };
+  var INLINE = { inline: 1, 'inline-block': 1, 'inline-flex': 1, 'inline-grid': 1, 'inline-table': 1, ruby: 1 };
+  var AH = '[aria-hidden="true" i]';
+  var isAH = function (e) { var v = ga.call(e, 'aria-hidden'); return v !== null && lowA(v) === 'true'; };
+  var ctext = new Map(), hid = new Set();
+  var compose = function (node) {
+    var t = ctext.get(node);
+    if (t !== undefined) return t;
+    var s0 = srG.call(node), kids;
+    if (s0) kids = cnG2.call(s0);
+    else if (tagG.call(node) === 'SLOT') { kids = anodes.call(node, FLAT); if (!kids.length) kids = cnG2.call(node); }
+    else kids = cnG2.call(node);
+    var tt = getComputedStyle(node).textTransform, out = '';
+    for (var i = 0; i < kids.length; i++) {
       tick();
-      var top = stk[stk.length - 1];
-      if (top[1] >= top[0].length) { stk.pop(); continue; }
-      var ch = top[0][top[1]++], nt = ntG.call(ch);
-      if (nt === 3) { var p0 = pnG.call(ch); if (p0 && ntG.call(p0) === 1 && srG.call(p0) && !tslot.call(ch)) continue; out.push(dataG.call(ch)); continue; }
-      if (nt !== 1) continue;
-      var tg = tagG.call(ch);
-      if (NOTEXT[tg] === 1) continue;
-      if (tg === 'SLOT') { var an = anodes.call(ch, FLAT); stk.push([an.length ? an : cnG2.call(ch), 0, false]); continue; }
-      var ah = ga.call(ch, 'aria-hidden');
-      if ((ah !== null && lowA(ah) === 'true') || !visible(ch)) continue;
-      var blk = INLINE[getComputedStyle(ch).display] !== 1;
-      if (blk) out.push(' ');
-      push(ch);
-      if (blk) stk.push([[], 0, false]), out.push(' ');
+      var ch = kids[i], nt = ntG.call(ch);
+      if (nt === 3) { var d = dataG.call(ch); out += tt === 'uppercase' ? sUp.call(d) : tt === 'lowercase' ? sLow.call(d) : d; }
+      else if (nt === 1) out += part(ch);
     }
-    return out.join('');
+    ctext.set(node, out);
+    return out;
   };
-  var textOf = function (e, masked) {
+  // a child's share of its parent's composed text - innerText's rules: <br> and blocks separate, display:contents and slots have no box
+  // (their children are the parent's - round 2: they were taken for hidden), unrendered parts are left out
+  var part = function (ch) {
+    if (hid.has(ch)) return '';
+    var tg = tagG.call(ch);
+    if (NOTEXT[tg] === 1 || isAH(ch)) return '';
+    if (tg === 'BR') return ' ';
+    var d = getComputedStyle(ch).display;
+    if (d === 'none') return '';
+    if (d === 'contents' || tg === 'SLOT') return compose(ch);
+    if (!cv.call(ch, VIS)) return '';
+    var t = ctext.has(ch) || srG.call(ch) || !(ch instanceof HTMLElement) || qsE.call(ch, AH) ? compose(ch) : itG.call(ch);
+    return INLINE[d] === 1 ? t : ' ' + t + ' ';
+  };
+  // the text a candidate is judged on (and named by)
+  var textOf = function (e) {
     if (tagG.call(e) === 'INPUT') return isBtnInput(e) ? valG.call(e) : '';
-    if (e instanceof HTMLElement && !srG.call(e) && !masked) return itG.call(e);
-    return renderedText(e);
+    if (ctext.has(e) || srG.call(e) || !(e instanceof HTMLElement) || qsE.call(e, AH)) return compose(e);
+    return itG.call(e);
   };
+  // a subsequence check - composed text is innerText with parts taken out, so it can only match where the query is a subsequence
+  var subseq = function (k) { for (var i = 0, p = -1; i < QK.length; i++) { p = sIdx.call(k, QK.charAt(i), p + 1); if (p < 0) return false; } return true; };
   var mark = function (e) { for (var n = e; n && !force.has(n); n = up(n)) force.add(n); };
   var scan = function (root) {
     var all = (root === document ? qsaD : qsaF).call(root, '*');
@@ -150,24 +167,41 @@ function(KIND, Q, EXACT, NTH, ACTION) {
         var k = key(tcG.call(c) || '');
         if (sIdx.call(k, QK) >= 0) return true;
         // innerText may drop hidden descendants inside the run (Del<span hidden>XX</span>ete) - a subsequence is still necessary
-        for (var i = 0, p = -1; i < QK.length; i++) { p = sIdx.call(k, QK.charAt(i), p + 1); if (p < 0) return false; }
-        return true;
+        return subseq(k);
       };
       var lists = function (e) { var s = srG.call(e); return s ? [kidsF.call(s), kidsE.call(e)] : [kidsE.call(e)]; };
-      // 0 = no match, 1 = accepted (ancestors are not judged - innermost only), 2 = a hidden match (aria-hidden, unrendered, off-page or
-      // tiny): counted, and its ancestors are judged on their rendered text without it (review round 1 - hidden copies, aria-hidden icon
-      // text and off-page "read more about ..." spans no longer hide a visible match, and no longer make an ancestor match either)
-      var judge = function (e, masked) {
+      // 0 = no match, 1 = accepted (ancestors are not judged - innermost only), 2 = a rendered hidden match (aria-hidden, off-page,
+      // zero-size: its text is in its ancestors' innerText - they are judged on composed text without it, round 1), 3 = an unrendered
+      // match (display:none, visibility:hidden - not in their innerText, nothing to take out). Only the innermost hidden match is counted
+      // (round 2: an aria-hidden chain counted 4). display:contents has no box of its own - its parent has its text (round 2).
+      var judge = function (e, masked, below) {
         var tg = tagG.call(e);
         if (tg === 'HTML' || tg === 'BODY') return 0;
-        var n = match(textOf(e, masked));
+        var t;
+        if (masked) {
+          // compose only where it can still match (non-exact: the composed text is part of innerText)
+          var pt = tg === 'INPUT' ? '' : ctext.has(e) || srG.call(e) || !(e instanceof HTMLElement) ? compose(e) : itG.call(e);
+          if (EXACT ? !subseq(key(pt)) : match(pt) === null) return 0;
+          t = compose(e);
+        } else if (tg !== 'INPUT' && !ctext.has(e) && !srG.call(e) && e instanceof HTMLElement && qsE.call(e, AH)) {
+          var it = itG.call(e);
+          if (EXACT ? !subseq(key(it)) : match(it) === null) return 0;
+          t = compose(e);
+        } else t = textOf(e);
+        var n = match(t);
         if (n === null) return 0;
-        if (ariaHidden(e) || !visible(e)) { hidden++; return 2; }
-        accept(e, n);
-        return 1;
+        var r = 2;
+        if (!ariaHidden(e)) {
+          if (visible(e)) { accept(e, n); return 1; }
+          if (getComputedStyle(e).display === 'contents') return 0;
+          if (!cv.call(e, VIS)) r = 3;
+        }
+        if (!below) hidden++;
+        return r;
       };
-      // iterative post-order (deep DOMs must not overflow the stack): [element, child lists, list index, child index, got, masked below]
-      var st = [[docEl, lists(docEl), 0, 0, false, false]];
+      // iterative post-order (deep DOMs must not overflow the stack):
+      // [element, child lists, list index, child index, got, masked (a rendered hidden match or composed text below), hidden counted below]
+      var st = [[docEl, lists(docEl), 0, 0, false, false, false]];
       while (st.length) {
         var f = st[st.length - 1], L = f[1], down = false;
         while (f[2] < L.length) {
@@ -178,13 +212,17 @@ function(KIND, Q, EXACT, NTH, ACTION) {
           var ct = tagG.call(c);
           if (SKIP[ct] === 1) { if (ct === 'SELECT' && match(itG.call(c)) !== null) f[4] = true; continue; } // option text shows in the parent's innerText - the select owns it
           if (!pass(c)) continue;
-          st.push([c, lists(c), 0, 0, false, false]); down = true; break;
+          st.push([c, lists(c), 0, 0, false, false, false]); down = true; break;
         }
         if (down) continue;
         st.pop();
-        tick(); // the way up re-reads innerText per ancestor - the budget covers it too (review round 1: 1 s on a deep page)
-        var res = f[4] ? 1 : judge(f[0], f[5]);
-        if (st.length) { var pf = st[st.length - 1]; if (res === 1) pf[4] = true; else if (res === 2 || f[5]) pf[5] = true; }
+        tick(); // the way up reads innerText per ancestor - the budget covers it too (review round 1: 1 s on a deep page)
+        var e0 = f[0], res = f[4] ? 1 : judge(e0, f[5], f[6]);
+        if (st.length && res !== 1) {
+          var pf = st[st.length - 1];
+          if (res === 2) { hid.add(e0); pf[5] = true; } else if (res !== 3 && (f[5] || ctext.has(e0))) pf[5] = true;
+          if (res >= 2 || f[6]) pf[6] = true;
+        } else if (st.length) st[st.length - 1][4] = true;
       }
     } else {
       var SEL = 'input,textarea,select,button,meter,output,progress,[role],[contenteditable]';

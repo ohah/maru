@@ -2016,7 +2016,7 @@ pub fn requestScmTrust(self: *AppSession) void {
 
 /// 그 저장소의 신뢰 시트를 띄운다 — 못 띄우면 그 이유를 알린다.
 fn askScmTrust(self: *AppSession, repo: []const u8) void {
-    switch (lsp_client.askTrustForRepo(self, repo)) {
+    switch (lsp_client.askTrustForRepo(self, repo, false)) {
         .asked => {},
         .already_trusted => self.showNoticeKey(.scm_trust_already),
         .refused => self.showNoticeKey(.scm_trust_refused_notice),
@@ -2189,6 +2189,9 @@ fn submitFetch(self: *AppSession) void {
     // 대가를 적어 둔다: **결과를 우리가 모른다.** 로컬 fetch 는 완료를 받아 목록을 다시 읽지만, 주입은
     // 사용자가 실행하므로 갱신 시점을 알 수 없다 — 그래서 그 사실을 화면에 말한다.
     if (git_ops.scmTargetIsRemote(self)) return injectRemoteFetch(self);
+    // 신뢰 전 로컬 저장소는 시트부터(계획 workspace-trust WT6b-2b-i) — fetch 는 저장소 config 의 `uploadpack`·`core.sshCommand`·
+    // `credential.helper` 를 돌린다.
+    if (!trustGate(self, repo, .fetch)) return;
 
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
@@ -3407,11 +3410,10 @@ fn submitRowWrite(self: *AppSession, ref: component.ids.RowRef) void {
     // (`git_write_command.kindForRow`) — Windows 표면도 같은 것을 쓴다.
     const kind = git_write_command.kindForRow(row.action, model.head.unborn) orelse return;
     const paths = [_][]const u8{row.path};
-    if (!submitWrite(self, repo, kind, &paths)) return;
-
     // **낙관적 반영**(§7): 화면은 즉시 바뀐다. 안 그러면 100 ms 남짓 아무 일도 안 일어나 두 번 누르게
-    // 되고, 두 번째 클릭은 in-flight라 흘려져 "안 눌렸다"로 읽힌다. 낙관은 **이 행 하나**에만 건다.
-    setScmPending(self, row.path, row.section);
+    // 되고, 두 번째 클릭은 in-flight라 흘려져 "안 눌렸다"로 읽힌다. 낙관은 **이 행 하나**에만 건다 — 걸린 뒤에
+    // 세운다(`WriteAfter` — 신뢰 시트를 거쳐 이어 할 때도 같은 자리에서 선다).
+    _ = submitWrite(self, repo, kind, &paths, .{ .optimistic_from = row.section });
 }
 
 /// 강조할 행을 세운다. **저장소와 함께** 든다(②d) — 인덱스만 들면 다른 저장소의 같은 번호 행이
@@ -3439,7 +3441,7 @@ pub fn submitFetchForTest(self: *AppSession) void {
     submitFetch(self);
 }
 pub fn submitWriteForTest(self: *AppSession, repo: []const u8, kind: git_write_command.Kind) bool {
-    return submitWrite(self, repo, kind, &.{"a.txt"});
+    return submitWrite(self, repo, kind, &.{"a.txt"}, .{});
 }
 
 pub fn rememberWriteRepoForTest(self: *AppSession, repo: []const u8, dest: ?[]const u8) void {
@@ -3494,6 +3496,9 @@ fn submitStageAllFor(self: *AppSession, repo: []const u8) void {
 
 /// 「모두 스테이지」의 실제 걸기(S4b) — 저장소 머리 줄과 「변경 사항」 머리 줄이 같은 길을 쓴다.
 fn submitStageAllPlanned(self: *AppSession, repo: []const u8) void {
+    // 신뢰 전 로컬 저장소는 계획을 세우기 **전에** 시트부터(계획 workspace-trust WT6b-2b-i — `TrustHeldWrite.Op.stage_all`).
+    var gate_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (git_ops.writeTargetFor(self, repo, &gate_ctl_buf) == .local and !trustGate(self, repo, .stage_all)) return;
     // status 전문과 마커 판정: 활성 저장소는 읽기 결과에서, 비활성은 status 만(판정 없음 → 충돌 전부 미해결).
     const is_current = if (self.git_repo) |cur| std.mem.eql(u8, cur, repo) else false;
     const status: []const u8, const markers: ?[]const u8, const truncated: bool = if (is_current) blk: {
@@ -3505,11 +3510,9 @@ fn submitStageAllPlanned(self: *AppSession, repo: []const u8) void {
     self.scm_last_stage_all_plan = std.meta.activeTag(plan);
     switch (plan) {
         .nothing => setScmWriteNotice(self, maru.i18n.t(.scm_nothing_to_stage)),
-        .all => _ = submitWrite(self, repo, .stage_all, &.{}),
-        .paths => |p| {
-            // **비켜 간 파일은 말한다** — 실패가 아니라 «다 하지 않았다» 이고, 그것도 사실이다.
-            if (submitWrite(self, repo, .stage, paths_buf[0..p.n])) setScmWriteNotice(self, maru.i18n.t(.scm_stage_all_skipped_conflicts));
-        },
+        .all => _ = submitWrite(self, repo, .stage_all, &.{}, .{}),
+        // **비켜 간 파일은 말한다** — 실패가 아니라 «다 하지 않았다» 이고, 그것도 사실이다.
+        .paths => |p| _ = submitWrite(self, repo, .stage, paths_buf[0..p.n], .{ .notice = .scm_stage_all_skipped_conflicts }),
         .blocked_truncated, .blocked_too_many => setScmWriteNotice(self, maru.i18n.t(.scm_stage_all_blocked_truncated)),
     }
 }
@@ -3547,12 +3550,19 @@ fn submitSectionWrite(self: *AppSession, ref: component.ids.SectionRef) void {
     const kind = git_write_command.kindForSection(target, model.head.unborn);
     // `_all` 변종은 경로를 받지 않는다. **그래서 화면에 안 보이는 파일까지 든다** — 그것이 "모두"의 뜻이고,
     // 10행 상한에 걸려 접힌 파일도 사용자가 기대하는 대상이다.
-    _ = submitWrite(self, repo, kind, &.{});
+    _ = submitWrite(self, repo, kind, &.{}, .{});
 }
+
+/// 쓰기가 걸린 **뒤에** 할 일 — 행 하나의 낙관 반영(그 경로는 `paths[0]`)과 알림. 걸린 자리에서 하므로 신뢰 시트를 거쳐 이어 할 때도
+/// 같은 일이 선다(계획 workspace-trust WT6b-2b-i — 호출자가 `true` 를 보고 하면, 이어 하기엔 호출자가 없다).
+pub const WriteAfter = struct {
+    optimistic_from: ?scm_view.Section = null,
+    notice: ?maru.i18n.Key = null,
+};
 
 /// 쓰기 하나를 건다. **in-flight 하나**(§6) — 도는 동안 눌린 것은 흘린다(큐를 쌓으면 오래된 클릭이
 /// 뒤늦게 저장소를 바꾼다).
-fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind, paths: []const []const u8) bool {
+fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind, paths: []const []const u8, after: WriteAfter) bool {
     // **두 번째 겹**(RS2 적대적 검증 3회차). 인텐트 게이트가 첫 겹이지만 쓰기를 거는 길이 그것만이
     // 아니다 — 커밋은 키 입력 경로에서도 들어온다(`settleCommitInput`). 저장소를 만지는 자리마다
     // 묻는 대신, **그 자리로 들어가는 마지막 문**에서 한 번 더 본다.
@@ -3572,6 +3582,9 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
         },
     };
     if (self.scm_write_inflight != 0) return false;
+    // **신뢰 전 로컬 저장소는 시트부터**(계획 workspace-trust WT6b-2b-i) — 쓰기는 저장소의 fsmonitor·필터(`add` 의 clean)를 돌린다.
+    // 원격은 신뢰할 수 없어 WT6b-2b-ii 가 따로 다룬다.
+    if (remote == null and !trustGate(self, repo, .{ .write = .{ .kind = kind, .paths = paths, .after = after } })) return false;
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     // **원격이면 로컬 git 경로를 안 찾는다** — 원격의 설치 위치는 우리가 모르고, `buildRemote` 가
     // `argv[0]` 을 버리고 `remote_git_exe` 로 바꾼다. 로컬에 git 이 없다고 원격 쓰기가 막히면 안 된다.
@@ -3590,8 +3603,156 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
     self.scm_write_inflight = self.scm_write_seq;
     rememberWriteRepo(self, repo, if (remote) |r| r.dest else null);
     clearScmWriteError(self);
+    if (after.optimistic_from) |from| setScmPending(self, paths[0], from); // 행 하나의 쓰기만 세운다(`submitRowWrite`)
+    if (after.notice) |key| setScmWriteNotice(self, maru.i18n.t(key));
     self.metal_dirty = true;
     return true;
+}
+
+/// 신뢰 시트가 답할 때까지 미뤄 둔 쓰기(계획 workspace-trust WT6b-2b-i). **인텐트가 아니라 푼 값으로 든다** — 인텐트는 목록 인덱스뿐인데,
+/// 시트를 거치는 동안 신뢰 재읽기로 목록과 세대가 바뀐다(같은 인덱스가 다른 파일이다). 문자열은 세션 allocator 소유다.
+pub const TrustHeldWrite = struct {
+    repo: []u8,
+    op: Op,
+
+    pub const Op = union(enum) {
+        write: struct { kind: git_write_command.Kind, paths: []const []const u8, after: WriteAfter },
+        /// 커밋 메시지 스냅샷 — 누른 순간의 글자(시트를 거치는 동안 상자가 바뀌어도 누른 것을 커밋한다).
+        commit: []const u8,
+        fetch,
+        /// 「모두 스테이지」 — **계획을 굳히지 않는다**: 누른 순간의 신뢰 전 목록으로 세운 경로를 들면, 사람이 답하는 사이 생긴 마커 남은
+        /// 충돌을 스테이지하거나(S4b) 사라진 경로로 통째 실패한다. 이어 할 때 신뢰 뒤 다시 읽은 목록으로 계획을 새로 세운다(2회차).
+        stage_all,
+    };
+
+    fn dupe(allocator: std.mem.Allocator, repo: []const u8, op: Op) !TrustHeldWrite {
+        const owned_repo = try allocator.dupe(u8, repo);
+        errdefer allocator.free(owned_repo);
+        const owned_op: Op = switch (op) {
+            .write => |w| blk: {
+                const paths = try allocator.alloc([]const u8, w.paths.len);
+                var n: usize = 0;
+                errdefer {
+                    for (paths[0..n]) |p| allocator.free(p);
+                    allocator.free(paths);
+                }
+                for (w.paths) |p| {
+                    paths[n] = try allocator.dupe(u8, p);
+                    n += 1;
+                }
+                break :blk .{ .write = .{ .kind = w.kind, .paths = paths, .after = w.after } };
+            },
+            .commit => |m| .{ .commit = try allocator.dupe(u8, m) },
+            .fetch => .fetch,
+            .stage_all => .stage_all,
+        };
+        return .{ .repo = owned_repo, .op = owned_op };
+    }
+
+    fn deinit(self: *TrustHeldWrite, allocator: std.mem.Allocator) void {
+        switch (self.op) {
+            .write => |w| {
+                for (w.paths) |p| allocator.free(p);
+                allocator.free(w.paths);
+            },
+            .commit => |m| allocator.free(m),
+            .fetch, .stage_all => {},
+        }
+        allocator.free(self.repo);
+    }
+};
+
+/// 쓰기의 신뢰 관문(계획 workspace-trust WT6b-2b-i) — 로컬 대상만 부른다. `true` 면 지금 실행한다: 신뢰했거나, 묻지 않는 root(홈·저장소
+/// 밖 — 신뢰를 정할 수 없어 WT6b-2b-ii 가 터미널로 옮긴다; 그때까지는 지금처럼 실행한다). `false` 면 멈춘다 — 신뢰 시트를 띄우고 이
+/// 쓰기를 미뤄 뒀거나(`pumpTrustWrite` 가 답을 보고 잇거나 버린다), 띄울 수 없어 그 사유를 알렸다. 미룬 쓰기는 하나뿐이다 — 시트가 하나라
+/// 둘째는 물을 자리가 없다.
+fn trustGate(self: *AppSession, repo: []const u8, op: TrustHeldWrite.Op) bool {
+    if (builtin.is_test and !test_write_gate) return true;
+    if (lsp_client.repoTrustState(self, repo) != .untrusted) return true;
+    // 이 창에 신뢰 시트가 떠 있으면 조용히 멈춘다 — 모달이 입력을 막으므로 이것은 사용자의 누름이 아니다(디버그 픽스처가 tick 마다
+    // 다시 건다). 알림을 띄우면 그 알림이 시트를 닫아, 시트와 알림이 tick 마다 오가고 쓰기는 영영 안 됐다(적대적 검증 2회차).
+    if (self.editor_lsp.asking_key != null) return false;
+    if (self.scm_trust_write != null) {
+        self.showNoticeKey(.scm_trust_busy);
+        return false;
+    }
+    // 묻기 전에 든다 — 물은 뒤에 못 들면 「신뢰」를 눌러도 아무 일도 안 일어난다. 못 들면(메모리) 묻지 않는다.
+    var held = TrustHeldWrite.dupe(self.allocator, repo, op) catch return false;
+    switch (lsp_client.askTrustForRepo(self, repo, true)) {
+        .asked => {
+            self.scm_trust_write = held;
+            self.metal_dirty = true;
+            return false;
+        },
+        // 바로 위 판정이 신뢰 전이라 했으므로 여기 오지 않는다(같은 표·같은 거절) — 오면 판정과 같은 규칙대로 지금 실행한다.
+        .already_trusted, .refused => {
+            held.deinit(self.allocator);
+            return true;
+        },
+        .busy => {
+            held.deinit(self.allocator);
+            self.showNoticeKey(.scm_trust_busy);
+            return false;
+        },
+    }
+}
+
+/// 판정자가 켜는 스위치 — **테스트 빌드에서만 읽는다**. 끄면(기본) 쓰기 관문을 건너뛴다: 판정자 빌드의 신뢰 표는 비어(사용자 기계의
+/// 신뢰 파일을 안 읽는다) 모든 저장소가 신뢰 전이라, 실제 git 저장소에 쓰는 판정자(머지·스테이지·커밋)가 전부 시트에 막힌다. 관문을
+/// 재는 판정자만 켠다(`test_trust_line` 과 같은 규율 — 읽기 쪽 `Backend.untrustedFor` 도 판정자 빌드의 기본은 신뢰다).
+pub var test_write_gate: bool = false;
+
+/// 미룬 쓰기를 잇거나 버린다(계획 workspace-trust WT6b-2b-i — tick). 시트가 닫혔고(다른 시트가 이어 떠 있으면 그것도 닫힐 때까지) 그 슬롯의
+/// 쓰기가 끝났을 때 한 번 본다: 그 저장소가 신뢰됐고 대상이 여전히 로컬이면 누른 쓰기를 다시 건다 — index 쓰기·fetch 는 **같은 제출
+/// 함수로**(관문은 이제 통과한다), 커밋은 누른 순간의 메시지로 `runCommit` 을(검사는 누를 때 끝났다). 아니면 버린다 —
+/// 취소·창이 포커스를 잃어 내려감·다른 창의 거부가 다 여기로 온다(답을 콜백으로 받지 않는 이유: 시트가 내려가는 길이 여럿이라 한 판정이
+/// 다 덮는 쪽이 빠뜨리지 않는다).
+pub fn pumpTrustWrite(self: *AppSession) void {
+    const held = self.scm_trust_write orelse return;
+    // **이 쓰기가 띄운 시트**가 끝났는가 — 「시트가 하나도 없나」가 아니다: 답한 바로 그 tick 에 다른 시트(같은 창의 언어 서버)가 이어
+    // 뜨면, 그것까지 기다리는 동안 그 시트의 허용이 방금 **취소한** 쓰기를 실행했다(적대적 검증 2회차). 쓰기의 시트는 `asking_scm` 이다
+    // (미룬 쓰기가 있는 동안엔 다른 SCM 시트가 못 선다 — 관문이 막는다).
+    if (self.editor_lsp.asking_scm) return;
+    // 답은 **시트가 끝난 그 순간에** 본다 — 슬롯을 기다린 뒤에 보면, 취소한 쓰기가 슬롯을 기다리는 동안 다른 길(도크 줄)로 그 저장소를
+    // 신뢰했을 때 취소한 쓰기가 실행됐다(적대적 검증 3회차). 신뢰 전이면 지금 버린다. 기다리는 동안에도 매 tick 여기를 지나므로 그 사이
+    // 신뢰가 철회·잊히면 다음 tick 에 버린다.
+    if (lsp_client.repoTrustState(self, held.repo) != .trusted) {
+        dropTrustWrite(self);
+        return self.showNoticeKey(.scm_trust_write_dropped); // 조용히 버리면 「누른 것이 안 먹었다」로 읽힌다(2회차)
+    }
+    switch (held.op) {
+        .fetch => if (self.scm_fetch_inflight != 0) return,
+        .write, .commit => if (self.scm_write_inflight != 0) return,
+        // 「모두 스테이지」는 신뢰 뒤 다시 읽은 목록으로 계획을 세운다 — 그 읽기가 끝날 때까지 기다린다.
+        .stage_all => if (self.scm_write_inflight != 0 or self.scm_base_reread_pending or self.git_inflight != 0) return,
+    }
+    var h = held;
+    self.scm_trust_write = null;
+    defer h.deinit(self.allocator);
+    // 미룬 것은 **이 기계의** 쓰기다 — 시트 뒤에 대상이 원격이 됐으면(같은 경로의 원격 pane 이 그 목록이 됐다) 보내지 않는다: 허락한
+    // 것은 로컬 저장소의 신뢰다(적대적 검증 1회차 — 이어 걸 때 다시 판정한 대상이 원격 git·원격 터미널로 갔다).
+    var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const still_local = switch (h.op) {
+        .fetch => !git_ops.scmTargetIsRemote(self),
+        .write, .commit, .stage_all => git_ops.writeTargetFor(self, h.repo, &ctl_buf) == .local,
+    };
+    if (!still_local) return self.showNoticeKey(.scm_trust_write_dropped);
+    switch (h.op) {
+        .write => |w| _ = submitWrite(self, h.repo, w.kind, w.paths, w.after),
+        .commit => |m| runCommit(self, h.repo, m),
+        .stage_all => submitStageAllPlanned(self, h.repo),
+        // fetch 는 지금 목록의 저장소에서만 건다(`submitFetch` 가 그 결과로 원격 유무를 본다) — 그 사이 저장소가 바뀌었으면 버린다.
+        .fetch => if (self.git_repo != null and std.mem.eql(u8, self.git_repo.?, h.repo))
+            submitFetch(self)
+        else
+            self.showNoticeKey(.scm_trust_write_dropped),
+    }
+}
+
+/// 미룬 쓰기를 버린다(세션 종료).
+pub fn dropTrustWrite(self: *AppSession) void {
+    if (self.scm_trust_write) |*held| held.deinit(self.allocator);
+    self.scm_trust_write = null;
 }
 
 pub fn clearScmWriteError(self: *AppSession) void {
@@ -4228,10 +4389,20 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
         return;
     }
 
+    // 신뢰 전 로컬 저장소는 시트부터(계획 workspace-trust WT6b-2b-i) — 커밋은 저장소의 훅·서명·fsmonitor 를 돌린다. 원격은 신뢰할 수
+    // 없어 WT6b-2b-ii 가 따로 다룬다.
+    var gate_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (git_ops.writeTargetFor(self, repo_path, &gate_ctl_buf) == .local and
+        !trustGate(self, repo_path, .{ .commit = self.scm_commit_field.text.items })) return;
+    runCommit(self, repo_path, self.scm_commit_field.text.items);
+}
+
+/// 메시지로 커밋을 건다 — 검사는 끝났다(`submitCommitFor`, 미룬 커밋은 누른 순간에 검사했다).
+fn runCommit(self: *AppSession, repo_path: []const u8, message_text: []const u8) void {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = commitMessagePath(self, &path_buf) orelse return;
     // 메시지는 **원문 그대로** 쓴다(끝에 개행 하나만 보장 — git이 마지막 줄을 삼키지 않게).
-    writeCommitMessageFile(self, path, self.scm_commit_field.text.items) catch {
+    writeCommitMessageFile(self, path, message_text) catch {
         setScmWriteBlocker(self, repo_path, maru.i18n.t(.scm_commit_msg_write_failed));
         return;
     };
@@ -4267,6 +4438,9 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
     self.scm_write_inflight = self.scm_write_seq;
     rememberWriteRepo(self, repo, if (commit_remote) |r| r.dest else null);
     self.scm_commit_inflight = true;
+    // 보낸 글을 든다 — 끝난 뒤 상자가 **그 글일 때만** 비운다(`finishCommit`).
+    if (self.scm_commit_sent) |old| self.allocator.free(old);
+    self.scm_commit_sent = self.allocator.dupe(u8, message_text) catch null;
     self.scm_commit_started_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
     clearScmWriteError(self);
     self.metal_dirty = true;
@@ -4306,13 +4480,39 @@ fn finishCommit(self: *AppSession, ok: bool) void {
     if (commitMessagePath(self, &path_buf)) |path| deleteCommitMessageFile(path);
     self.scm_commit_inflight = false;
     self.scm_commit_started_ns = 0;
-    if (!ok) return;
-    // 성공했으면 상자를 비운다 — 그 글은 이제 커밋에 들어갔고, 남겨 두면 다음 커밋에 다시 들어간다.
-    self.scm_commit_field.clear();
-    self.scm_commit_first_row = 0;
-    // 그 저장소의 초안도 함께 지운다(빈 글을 담으면 `stashCommitDraft`가 항목을 없앤다).
-    var repo_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (git_ops.gitRepoRoot(self, &repo_buf)) |repo| stashCommitDraft(self, repo);
+    if (!ok) {
+        if (self.scm_commit_sent) |m| self.allocator.free(m);
+        self.scm_commit_sent = null;
+        return;
+    }
+    // 성공했으면 **그 커밋이 간 저장소의** 글을 비운다 — 그 글은 이제 커밋에 들어갔고, 남겨 두면 다음 커밋에 다시 들어간다. 상자는 지금
+    // 도크 저장소의 것이라, 커밋하는 사이 저장소가 바뀌었으면(상자가 다른 저장소의 초안을 꺼냈다) 상자가 아니라 그 저장소의 초안을 지운다
+    // — 예전엔 늘 상자와 지금 저장소의 초안을 지워, 다른 저장소의 초안을 잃고 커밋된 글을 초안으로 남겼다(계획 workspace-trust WT6b-2b-i
+    // 적대적 검증 1회차: 신뢰 시트를 거친 커밋은 그 사이가 사람이 답하는 시간만큼 넓다).
+    // 상자는 **보낸 글 그대로일 때만** 비운다 — 저장소와 무관하다: 비활성 저장소의 커밋 버튼을 누르면 상자에 그 저장소의 글이 남아 있고
+    // (누르는 클릭이 포커스만 뗀다), 남기면 다음 저장소 전환이 그 글을 엉뚱한 저장소의 초안으로 담는다(2회차). 상자가 그 사이 다른
+    // 저장소의 초안을 꺼냈으면 글이 달라 그대로 둔다(1회차).
+    const sent = self.scm_commit_sent;
+    self.scm_commit_sent = null;
+    defer if (sent) |m| self.allocator.free(m);
+    if (sent) |m| {
+        if (std.mem.eql(u8, self.scm_commit_field.text.items, m)) {
+            self.scm_commit_field.clear();
+            self.scm_commit_first_row = 0;
+        }
+    }
+    if (self.scm_write_repo) |committed| dropCommitDraft(self, committed);
+}
+
+/// 그 저장소의 초안을 없앤다(상자는 건드리지 않는다).
+fn dropCommitDraft(self: *AppSession, repo: []const u8) void {
+    for (self.scm_commit_drafts.items, 0..) |draft, index| {
+        if (!std.mem.eql(u8, draft.repo, repo)) continue;
+        self.allocator.free(draft.repo);
+        self.allocator.free(draft.text);
+        _ = self.scm_commit_drafts.orderedRemove(index);
+        return;
+    }
 }
 
 /// 테스트가 그 자리에 문구를 심는 유일한 통로. 제품 경로와 **같은 함수**를 태워, 지우는 규칙(저장소가

@@ -15353,6 +15353,348 @@ test "WT6b-2a 「필터를 끌 수 없음」 안내는 팔레트 제목을 그�
     }
 }
 
+test "WT6b-2b-i 신뢰 전 로컬 저장소의 쓰기는 신뢰 시트부터 — 취소·포커스로 내려가면 버리고, 허용하면 누른 쓰기를 같은 제출로 이어 하며(행 stage 의 낙관 반영·커밋은 누른 순간의 메시지), 다른 창의 같은 저장소 시트면 묻지 않고, 신뢰한 저장소는 바로 쓴다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 환경(홈·git 신원)은 세션보다 **먼저** 세우고 **나중에** 되돌린다 — 세션 해제가 도는 git 작업을 거두기 전에 env 를 바꾸면 그 작업의
+    // 프로세스 생성과 env 가 겹친다(2회차). `git init` 도 홈을 바꾼 뒤라 사용자의 템플릿 훅이 안 들어온다.
+    // 커밋 메시지 파일은 `$HOME/.cache/maru` 에 선다 — 사용자 홈을 건드리지 않게 홈을 **저장소와 따로 선** 임시 폴더로 둔다(저장소가
+    // 홈이거나 홈의 조상이면 「홈 폴더 저장소」 — 묻지 않는 root — 라 관문을 안 지난다).
+    // 짧은 경로여야 한다 — 원격 control socket 경로가 홈 아래에 서고 그 길이는 104 바이트가 상한이다(⑷‴). pid 를 붙여 겹치는 실행을 가른다.
+    var home_buf: [64]u8 = undefined;
+    const home = try std.fmt.bufPrint(&home_buf, "/private/tmp/mwh-{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(testing.io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, home) catch {};
+    var cache_buf: [96]u8 = undefined;
+    // 메시지 경로는 `.cache` 가 있다고 본다(한 단계만 만든다).
+    try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&cache_buf, "{s}/.cache", .{home}));
+    var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
+    // 커밋이 실제로 서야 끝난 뒤의 정리(`finishCommit`)를 잰다 — 빈 홈엔 사용자 이름이 없어 env 로 준다.
+    inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| _ = setenv(name, "maru-test", 1);
+    defer inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| {
+        _ = unsetenv(name);
+    };
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = git_backend_for_test.locate(&exe_buf) orelse return error.SkipZigTest;
+    if (!git_backend_for_test.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", root })) return error.SkipZigTest;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    scm_dock_ops.test_write_gate = true;
+    defer scm_dock_ops.test_write_gate = false;
+    try fx.dir.dir.createDirPath(testing.io, "other-repo/.git");
+    var other_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const other = try std.fmt.bufPrint(&other_buf, "{s}/other-repo", .{root});
+    // 스테이지된 a.txt(커밋할 것)와 추적 안 된 b.txt(스테이지할 것).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "a.txt", .data = "a\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.txt", .data = "b\n" });
+    if (!git_backend_for_test.testRunQuiet(&.{ exe, "-C", root, "add", "a.txt" })) return error.SkipZigTest;
+    const wa = git_backend_for_test.worker_allocator;
+    fx.session.git_result = .{
+        .status = try wa.dupe(u8, "# branch.head main\n1 A. N... 000000 100644 100644 0000000000000000000000000000000000000000 78981922613b2afb6025042ff6bd878ac1994e85 a.txt\n? b.txt\n"),
+        .remotes = try wa.dupe(u8, "origin\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(fx.session, root);
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(root, &kb) orelse return error.TrustKeyMissing;
+    const Probe = struct {
+        /// b.txt 행의 모델 인덱스 — 인텐트가 싣는 값.
+        fn bRow(session: *AppSession) !u32 {
+            var rows_buf: [64]maru.session.scm_view.Row = undefined;
+            var scratch: [std.fs.max_path_bytes]u8 = undefined;
+            const model = git_ops.buildScmModel(session, &rows_buf, &scratch) orelse return error.MissingModel;
+            for (model.rows, 0..) |row, i| switch (row) {
+                .file => |f| if (std.mem.eql(u8, f.path, "b.txt")) return @intCast(i),
+                else => {},
+            };
+            return error.MissingRow;
+        }
+        fn waitWrite(session: *AppSession) !void {
+            var spins: usize = 0;
+            while (spins < 600 and session.scm_write_inflight != 0) : (spins += 1) {
+                scm_dock_ops.drainScmWrite(session);
+                var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&ts, null);
+            }
+            try testing.expectEqual(@as(u64, 0), session.scm_write_inflight);
+        }
+        fn waitFetch(session: *AppSession) !void {
+            var spins: usize = 0;
+            while (spins < 600 and session.scm_fetch_inflight != 0) : (spins += 1) {
+                scm_dock_ops.drainScmFetch(session);
+                var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&ts, null);
+            }
+            try testing.expectEqual(@as(u64, 0), session.scm_fetch_inflight);
+        }
+        fn allow(session: *AppSession) !void {
+            _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+            _ = try session.handleKeyEvent(.{ .key = .enter });
+            _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+        }
+    };
+    const stage_b: maru.chrome.components.scm_dock.ids.Intent = .{ .row_action = .{ .repo_index = 0, .model_index = try Probe.bRow(fx.session) } };
+    const seq0 = fx.session.scm_write_seq;
+
+    // ⑴ 신뢰 전 — 누르면 시트가 뜨고 쓰기는 안 걸린다. 취소하면 미룬 쓰기를 버린다(기억도 안 한다).
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust and fx.session.scm_trust_write != null);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    // 쓰기로 열린 시트는 그렇다고 말한다 — 경로 다음 줄(좁으면 끝 줄부터 준다).
+    try testing.expectEqual(@as(usize, 4), fx.session.chrome_host.confirm.notes.len);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_note_pending_write), fx.session.chrome_host.confirm.notes[1].text);
+    // 시트가 떠 있는 동안 또 걸려도(사용자는 못 누른다 — 디버그 픽스처가 tick 마다 다시 건다) 조용히 멈춘다: 알림이 시트를 닫지 않는다.
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    // 시트가 떠 있는 동안의 tick 은 기다린다(아직 답이 없다).
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write != null);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    // 취소와 다음 tick 사이에 또 누르면 — 미룬 쓰기가 아직 있다 — 다시 묻지 않는다(묻으면 미룬 쓰기를 덮어 잃는다).
+    const held_before = fx.session.scm_trust_write.?.repo.ptr;
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_busy), fx.session.chrome_host.notice.message);
+    try testing.expectEqual(held_before, fx.session.scm_trust_write.?.repo.ptr);
+    // 다른 쓰기가 슬롯을 쓰고 있어도 취소한 쓰기는 **지금** 버린다 — 슬롯을 기다리게 두면 그 사이 다른 길로 신뢰했을 때 실행된다.
+    fx.session.scm_write_inflight = 99;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    fx.session.scm_write_inflight = 0;
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_write_dropped), fx.session.chrome_host.notice.message); // 버리면 말한다
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expect(trust_store.get(key) == null);
+
+    // ⑴′ 저장소 머리 줄의 「모두 스테이지」도 같은 문(`submitWrite`)이라 시트부터다.
+    scm_dock_ops.applyScmDockIntent(fx.session, .{ .stage_all_repo = 0 });
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(fx.session.scm_trust_write.?.op == .stage_all); // 계획을 굳히지 않는다
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+
+    // ⑵ 창이 포커스를 잃어 시트가 내려가도 버린다(답이 아니다).
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.scm_trust_write != null);
+    fx.session.window_focused = false;
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    fx.session.window_focused = true;
+
+    // ⑶ 같은 저장소의 시트가 다른 창에 떠 있으면 묻지 않고 그렇다고 말한다 — 미루지도 않는다.
+    const other_window: usize = 0x5ca1ab1e;
+    try testing.expect(trust_store.claim(key, other_window));
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust and fx.session.scm_trust_write == null);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_busy), fx.session.chrome_host.notice.message);
+    trust_store.release(key, other_window);
+
+    // ⑷ fetch 도 시트부터 — 취소하면 걸지 않는다.
+    const fetch_seq0 = fx.session.scm_fetch_seq;
+    scm_dock_ops.applyScmDockIntent(fx.session, .fetch_remote);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(fx.session.scm_trust_write.?.op == .fetch);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expectEqual(fetch_seq0, fx.session.scm_fetch_seq);
+    // 허용하면 fetch 를 이어 건다(원격이 없어 실패해도 걸리기는 한다) — fetch 슬롯이 차 있으면 빌 때까지 기다린다. 그 뒤 신뢰를 잊어 다시
+    // 신뢰 전으로 둔다.
+    scm_dock_ops.applyScmDockIntent(fx.session, .fetch_remote);
+    try Probe.allow(fx.session);
+    fx.session.scm_fetch_inflight = 99;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write != null);
+    fx.session.scm_fetch_inflight = 0;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expectEqual(fetch_seq0 + 1, fx.session.scm_fetch_seq);
+    try Probe.waitFetch(fx.session);
+    try testing.expect(trust_store.forget(testing.io, key));
+    // ⑷″ 시트를 거치는 사이 도크 저장소가 바뀌었으면 fetch 는 버린다(원격 유무를 그 목록에서 본다).
+    scm_dock_ops.applyScmDockIntent(fx.session, .fetch_remote);
+    git_ops.rememberGitRepo(fx.session, other);
+    try Probe.allow(fx.session);
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(fetch_seq0 + 1, fx.session.scm_fetch_seq);
+    git_ops.rememberGitRepo(fx.session, root);
+    try testing.expect(trust_store.forget(testing.io, key));
+    // ⑷‴ 시트 뒤에 그 목록이 원격이 됐으면 — 허락한 것은 이 기계의 저장소다 — 보내지 않고 버린다. 그 원격의 control socket 자리를
+    // 세워 둔다: 없으면 「소켓 없음」 거절이 대신 막아 이 판정이 무엇을 재는지 흐려진다(소켓 판정은 그 자리의 파일만 본다).
+    const ctl = try maru.cli.ssh.controlSocketPath(allocator, home, "user@host");
+    defer allocator.free(ctl);
+    try std.Io.Dir.cwd().createDirPath(testing.io, std.fs.path.dirname(ctl).?);
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = ctl, .data = "" });
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    git_ops.rememberGitRepoDest(fx.session, "user@host");
+    var ctl_probe: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(git_ops.writeTargetFor(fx.session, root, &ctl_probe) == .remote); // 이어 걸면 원격으로 갈 상태다
+    try Probe.allow(fx.session);
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    git_ops.rememberGitRepoDest(fx.session, null);
+    try testing.expect(trust_store.forget(testing.io, key));
+    // ⑷⁗ 허용한 뒤 슬롯을 기다리는 사이 신뢰가 잊혔으면(관리 상자·컨트롤 플레인) 잇지 않는다.
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try Probe.allow(fx.session);
+    fx.session.scm_write_inflight = 99;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write != null);
+    try testing.expect(trust_store.forget(testing.io, key));
+    fx.session.showNoticeKey(.scm_trust_busy); // 앞 장면의 같은 알림과 가르려고 다른 문구로 덮어 둔다
+    fx.session.scm_write_inflight = 0;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_write_dropped), fx.session.chrome_host.notice.message);
+
+    // ⑸ 허용하면 누른 쓰기를 **같은 제출로** 이어 한다 — b.txt 가 올라가고 그 행의 낙관 반영이 선다.
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try Probe.allow(fx.session);
+    try testing.expect(trust_store.get(key) == .allow);
+    // 다른 쓰기가 그 슬롯을 쓰고 있으면 끝날 때까지 기다린다(걸면 흘려져 누른 쓰기를 잃는다).
+    fx.session.scm_write_inflight = 99;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write != null);
+    fx.session.scm_write_inflight = 0;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0 + 1, fx.session.scm_write_seq);
+    try testing.expectEqual(maru.session.git_write_command.Kind.stage, fx.session.scm_last_write_kind.?);
+    try testing.expectEqualStrings("b.txt", (fx.session.scm_pending orelse return error.NoOptimistic).path);
+    try Probe.waitWrite(fx.session);
+    var status_out: [std.fs.max_path_bytes]u8 = undefined;
+    const st = git_backend_for_test.testGitStatusLines(exe, root, &status_out) orelse return error.StatusFailed;
+    try testing.expect(std.mem.indexOf(u8, st, "b.txt") != null and std.mem.indexOf(u8, st, "? b.txt") == null); // 올라갔다
+
+    // ⑸′ 「모두 스테이지」는 신뢰 뒤 다시 읽은 목록으로 계획을 새로 세운다 — 그 읽기가 끝날 때까지 기다렸다가.
+    try testing.expect(trust_store.forget(testing.io, key));
+    scm_dock_ops.applyScmDockIntent(fx.session, .{ .stage_all_repo = 0 });
+    try Probe.allow(fx.session);
+    fx.session.scm_base_reread_pending = true; // 신뢰가 바뀌어 다시 읽기가 걸렸다(`pumpTrustReread`)
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write != null);
+    fx.session.scm_base_reread_pending = false;
+    fx.session.scm_last_stage_all_plan = null;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_last_stage_all_plan != null); // 이어 할 때 계획을 세웠다
+    try testing.expectEqual(seq0 + 2, fx.session.scm_write_seq);
+    try Probe.waitWrite(fx.session);
+
+    // ⑹ 커밋 — 신뢰를 잊은 뒤(다시 신뢰 전) 누르면 **누른 순간의 메시지**를 미뤄 두고, 허용하면 그 메시지로 커밋한다(그 사이 상자가
+    // 바뀌어도).
+    try testing.expect(trust_store.forget(testing.io, key));
+    try fx.session.scm_commit_field.text.appendSlice(fx.session.allocator, "first message");
+    scm_dock_ops.applyScmDockIntent(fx.session, .{ .commit = 0 });
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expectEqualStrings("first message", fx.session.scm_trust_write.?.op.commit);
+    // 시트가 떠 있는 동안 도크가 다른 저장소로 옮겨 가면 상자는 그 저장소의 초안을 꺼낸다(이 저장소의 글은 초안으로 담긴다).
+    git_ops.rememberGitRepo(fx.session, other);
+    try fx.session.scm_commit_field.text.appendSlice(fx.session.allocator, "other draft");
+    try Probe.allow(fx.session);
+    fx.session.scm_write_inflight = 99; // 쓰기 슬롯이 차 있으면 기다린다
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write != null);
+    fx.session.scm_write_inflight = 0;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_commit_inflight);
+    var msg_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const msg_path = scm_dock_ops.testCommitMessagePath(fx.session, &msg_path_buf) orelse return error.NoMessagePath;
+    const msg = try std.Io.Dir.cwd().readFileAlloc(testing.io, msg_path, allocator, .limited(256));
+    defer allocator.free(msg);
+    try testing.expectEqualStrings("first message\n", msg);
+    try Probe.waitWrite(fx.session);
+    // 커밋이 섰다(스테이지된 것이 남지 않는다). 끝난 뒤엔 **그 커밋이 간 저장소의** 글만 지운다 — 지금 상자(다른 저장소의 초안)는 그대로다.
+    const committed_st = git_backend_for_test.testGitStatusLines(exe, root, &status_out) orelse return error.StatusFailed;
+    try testing.expect(std.mem.indexOf(u8, committed_st, "1 A.") == null);
+    try testing.expectEqualStrings("other draft", fx.session.scm_commit_field.text.items);
+    for (fx.session.scm_commit_drafts.items) |draft| try testing.expect(!std.mem.eql(u8, draft.repo, root));
+    git_ops.rememberGitRepo(fx.session, root);
+
+    // ⑹′ 신뢰한 저장소의 평범한 커밋 — 상자가 보낸 글 그대로면 끝난 뒤 비운다.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "c.txt", .data = "c\n" });
+    if (!git_backend_for_test.testRunQuiet(&.{ exe, "-C", root, "add", "c.txt" })) return error.SkipZigTest;
+    fx.session.scm_commit_field.text.clearRetainingCapacity();
+    try fx.session.scm_commit_field.text.appendSlice(fx.session.allocator, "second");
+    scm_dock_ops.applyScmDockIntent(fx.session, .{ .commit = 0 });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust and fx.session.scm_commit_inflight);
+    try Probe.waitWrite(fx.session);
+    try testing.expectEqual(@as(usize, 0), fx.session.scm_commit_field.text.items.len);
+
+    // ⑺ 신뢰한 저장소는 시트 없이 바로 쓴다(fetch — 원격이 없어 실패해도 걸리기는 한다).
+    scm_dock_ops.applyScmDockIntent(fx.session, .fetch_remote);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust and fx.session.scm_trust_write == null);
+    try testing.expectEqual(fetch_seq0 + 2, fx.session.scm_fetch_seq);
+    try Probe.waitFetch(fx.session);
+
+    // ⑻ 미룬 쓰기를 든 채 창이 닫혀도 새지 않는다(세션 해제가 미룬 경로·메시지를 놓는다 — 판정자 allocator 가 잰다).
+    try testing.expect(trust_store.forget(testing.io, key));
+    try fx.session.scm_commit_field.text.appendSlice(fx.session.allocator, "held at close");
+    scm_dock_ops.applyScmDockIntent(fx.session, .{ .commit = 0 });
+    try testing.expect(fx.session.scm_trust_write != null);
+}
+
+test "WT6b-2b-i 쓰기 시트를 취소한 바로 그 tick 에 같은 창의 언어 서버 시트가 떠도 미룬 쓰기는 그 시트를 기다리지 않고 버려진다 — 그 시트의 허용이 취소한 쓰기를 실행하지 않는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    try fx.dir.dir.createDirPath(testing.io, ".git");
+    scm_dock_ops.test_write_gate = true;
+    defer scm_dock_ops.test_write_gate = false;
+    const wa = git_backend_for_test.worker_allocator;
+    fx.session.git_result = .{ .status = try wa.dupe(u8, "# branch.head main\n"), .remotes = try wa.dupe(u8, "origin\n"), .ok = true };
+    git_ops.rememberGitRepo(fx.session, root);
+
+    // fetch 를 누른다 — 쓰기의 시트가 뜨고 미룬다(언어 서버는 아직 pump 전이라 합류하지 않았다). 취소한다.
+    scm_dock_ops.applyScmDockIntent(fx.session, .fetch_remote);
+    try testing.expect(fx.session.scm_trust_write != null and fx.session.editor_lsp.asking_scm);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    // 같은 tick 에 언어 서버가 그 저장소를 제 시트로 묻는다(tick 에서 언어 서버 pump 가 미룬 쓰기보다 먼저 돈다).
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust and !fx.session.editor_lsp.asking_scm);
+    // 미룬 쓰기는 **그** 시트를 기다리지 않는다 — 제 시트가 끝났으니 지금 판정해 버린다.
+    const fetch_seq0 = fx.session.scm_fetch_seq;
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    // 그 언어 서버 시트를 허용해도 취소한 fetch 는 돌지 않는다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expectEqual(fetch_seq0, fx.session.scm_fetch_seq);
+}
+
 test "WT6b-2a SCM 시트에 합류한 언어 서버 클라이언트는 그 시트를 취소해도 갇히지 않는다(결정 없음 — 누르면 묻는다); Enter 만으로는 신뢰하지 않고, 다른 시트가 떠 있으면 묻지 않는다 (계획 workspace-trust)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -15372,11 +15714,11 @@ test "WT6b-2a SCM 시트에 합류한 언어 서버 클라이언트는 그 시�
     try fx.dir.dir.createDirPath(testing.io, ".git");
 
     // SCM 이 먼저 묻는다 — 그 사이 언어 서버가 같은 저장소를 물으려다 그 시트에 합류한다(`.asking`).
-    try testing.expectEqual(lsp_client.AskOutcome.asked, lsp_client.askTrustForRepo(fx.session, root));
+    try testing.expectEqual(lsp_client.AskOutcome.asked, lsp_client.askTrustForRepo(fx.session, root, false));
     lsp_client.pump(fx.session);
     try testing.expectEqual(lsp_client.Phase.asking, lsp_client.statusFor(fx.session, fx.term).?.phase);
     // 다른 시트가 떠 있으면 또 묻지 않는다(한 번에 하나).
-    try testing.expectEqual(lsp_client.AskOutcome.busy, lsp_client.askTrustForRepo(fx.session, root));
+    try testing.expectEqual(lsp_client.AskOutcome.busy, lsp_client.askTrustForRepo(fx.session, root, false));
     // Enter 만으로는 신뢰하지 않는다(포커스는 취소) — 그 취소는 기억하지 않고, 합류한 클라이언트는 「결정 없음」으로 풀린다.
     var kb: [std.fs.max_path_bytes]u8 = undefined;
     const key = trust_store.keyFor(root, &kb) orelse return error.TrustKeyMissing;
@@ -15389,7 +15731,7 @@ test "WT6b-2a SCM 시트에 합류한 언어 서버 클라이언트는 그 시�
     try testing.expect(fx.session.pending_confirm != .lsp_trust);
     // 언어 서버를 꺼도(`stopAll`) SCM 이 연 시트는 남는다 — 그 질문은 git 읽기의 것이다. 창이 포커스를 잃으면 설정과 무관하게 내려간다
     // (기억은 안 한다 — 적대적 검증 2회차: 꺼진 설정에서만 시트가 남았다).
-    try testing.expectEqual(lsp_client.AskOutcome.asked, lsp_client.askTrustForRepo(fx.session, root));
+    try testing.expectEqual(lsp_client.AskOutcome.asked, lsp_client.askTrustForRepo(fx.session, root, false));
     fx.session.loaded_config.config.lsp.enabled = false;
     lsp_client.pump(fx.session);
     try testing.expectEqual(@as(usize, 0), fx.session.editor_lsp.clients.items.len);

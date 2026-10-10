@@ -396,7 +396,9 @@ pub const AskOutcome = enum {
 /// 방어(`guardAsync`)를 건다** — 팔레트에서 명령을 고른 Enter 가 반복되면 그대로 「신뢰」가 됐다(적대적 검증 1회차; 키 반복은 이벤트에서
 /// 구별되지 않는다). 권한을 주는 시트는 늘 한 번 더 묻는다. 취소는 기억하지 않는다(`asking_scm`). 답은 `answerTrust` 가 기록한다 — 언어
 /// 서버 클라이언트도 그 답을 따른다.
-pub fn askTrustForRepo(self: *AppSession, root: []const u8) AskOutcome {
+/// `pending_write` 면 시트가 쓰기 때문에 열렸다 — 안내에 「신뢰하면 누른 쓰기를 이어 한다」를 더한다(계획 WT6b-2b-i — 같은 질문이라 쓰기로
+/// 열린 것이 안 보였다; 적대적 검증 2회차).
+pub fn askTrustForRepo(self: *AppSession, root: []const u8, pending_write: bool) AskOutcome {
     ensureTrustLoaded(self);
     var kb: [std.fs.max_path_bytes]u8 = undefined;
     const key = trust_store.keyFor(root, &kb) orelse return .refused;
@@ -419,21 +421,28 @@ pub fn askTrustForRepo(self: *AppSession, root: []const u8) AskOutcome {
     self.editor_lsp.asking_root = owned_root;
     self.editor_lsp.asking_key = owned_key;
     self.editor_lsp.asking_scm = true;
-    setScmTrustSheetNotes(self, root);
+    setScmTrustSheetNotes(self, root, pending_write);
     return .asked;
 }
 
 /// SCM 신뢰 시트의 안내 줄 — **어느 저장소인지가 맨 앞**이다: 질문이 「이 저장소를 신뢰할까요?」뿐이라 경로가 곧 대상이다(언어 서버
 /// 시트는 질문이 서버 이름을 들어 경로를 맨 끝에 둔다; 신뢰 관리 상자 `setManageNotes` 와 같은 이유 — 적대적 검증 1회차: 낮은 창에선 끝
 /// 줄부터 사라져 무엇을 신뢰하는지가 빠졌다). 그다음 무엇이 실행될 수 있는지·무엇에 서는지.
-fn setScmTrustSheetNotes(self: *AppSession, root: []const u8) void {
+fn setScmTrustSheetNotes(self: *AppSession, root: []const u8, pending_write: bool) void {
     const st = &self.editor_lsp;
     var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_line = maru.i18n.format(&st.trust_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(root, &shown_buf) }});
-    st.trust_notes[0] = .{ .text = root_line, .fit = .path };
-    st.trust_notes[1] = .{ .text = maru.i18n.t(.scm_trust_note_privileges) };
-    st.trust_notes[2] = .{ .text = maru.i18n.t(.scm_trust_note_scope) };
-    self.chrome_host.confirm.notes = st.trust_notes[0..3];
+    var n: usize = 0;
+    st.trust_notes[n] = .{ .text = root_line, .fit = .path };
+    n += 1;
+    // 쓰기로 열렸으면 그 사실이 경로 다음이다 — 좁으면 끝 줄부터 주므로 대가 줄보다 앞에 둔다(답이 무엇을 일으키는지가 먼저다).
+    if (pending_write) {
+        st.trust_notes[n] = .{ .text = maru.i18n.t(.scm_trust_note_pending_write) };
+        n += 1;
+    }
+    st.trust_notes[n] = .{ .text = maru.i18n.t(.scm_trust_note_privileges) };
+    st.trust_notes[n + 1] = .{ .text = maru.i18n.t(.scm_trust_note_scope) };
+    self.chrome_host.confirm.notes = st.trust_notes[0 .. n + 2];
 }
 
 /// 신뢰 표의 세대 — git 읽기의 다시 읽기 기준(`git.pumpTrustReread`).

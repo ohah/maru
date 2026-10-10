@@ -7336,6 +7336,8 @@ pub const AppSession = struct {
     /// **한 행뿐이다.** §7이 낙관을 "그 행 하나"로 못박았고, 일괄 동작(`모두 …`)은 낙관하지 않는다 —
     /// 어느 행들이 움직일지는 index를 읽어야 알 수 있다.
     scm_pending: ?ScmPending = null,
+    /// 신뢰 시트가 답할 때까지 미뤄 둔 쓰기(계획 workspace-trust WT6b-2b-i — `scm_dock.trustGate`·`pumpTrustWrite`). 하나뿐이다.
+    scm_trust_write: ?scm_dock_ops.TrustHeldWrite = null,
 
     /// 목록에 뜬 **비활성 저장소들의 머리 줄 요약**(P3d-③). 활성 저장소는 목록 읽기가 채우므로 여기
     /// 없다 — 두 곳이 같은 값을 들면 어느 쪽이 최신인지 판정이 생긴다.
@@ -7389,6 +7391,8 @@ pub const AppSession = struct {
     /// 지금 도는 쓰기가 **커밋**인가. `scm_write_inflight`만으로는 스테이지와 커밋을 못 가른다 —
     /// 화면 문구("커밋 중"·"오래 걸리는 중")와 메시지 파일 정리가 이 구분을 쓴다.
     scm_commit_inflight: bool = false,
+    /// 그 커밋에 보낸 글(세션 allocator 소유) — 끝난 뒤 상자가 그 글일 때만 비운다(`scm_dock.finishCommit` — 계획 workspace-trust WT6b-2b-i).
+    scm_commit_sent: ?[]u8 = null,
     /// 그 커밋을 건 시각(awake 단조 시계). "오래 걸리는 중"은 이 값으로만 판정한다 — **프로세스는
     /// 죽이지 않는다**(쓰기 문서 §3: 죽이면 index·`.git`이 어중간해진다).
     scm_commit_started_ns: i128 = 0,
@@ -20719,6 +20723,8 @@ pub const AppSession = struct {
         // 원격 갱신도 같은 자리에서 거둔다(P6). **쓰기와 다른 슬롯**이라 둘이 서로를 기다리지 않는다 —
         // 느린 fetch가 도는 동안에도 스테이지·커밋 결과는 제때 들어온다.
         scm_dock_ops.drainScmFetch(self);
+        // 신뢰 시트가 닫혔으면 미룬 쓰기를 잇거나 버린다(계획 workspace-trust WT6b-2b-i) — 두 슬롯을 거둔 **뒤**라 같은 tick 에 이어 걸린다.
+        scm_dock_ops.pumpTrustWrite(self);
         // N1.5 b: 네이티브 diff Term의 네 상태를 옮긴다. **결과가 안 와도 매 tick 봐야 한다** — 재시도 창
         // (6초)이 지났는지는 결과가 아니라 시간이 말한다. 판정이 선 Term은 곧바로 반환하므로 비용이 없다.
         for (self.tabs.items) |tab| {
@@ -24581,6 +24587,8 @@ pub const AppSession = struct {
                 self.agent_session_archive_projection.deinit(self.allocator);
                 scm_dock_ops.clearScmWriteError(self); // 실패 사유 문자열은 세션 allocator 소유다
                 scm_dock_ops.clearScmPending(self); // 낙관 경로도 세션 allocator 소유다
+                scm_dock_ops.dropTrustWrite(self); // 미룬 쓰기의 경로·메시지도
+                if (self.scm_commit_sent) |m| self.allocator.free(m); // 보낸 커밋 글도
                 self.scm_dock_entries.deinit(self.allocator);
                 self.scm_dock_actions.deinit(self.allocator);
                 self.file_tree_entries.deinit(self.allocator);

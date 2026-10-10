@@ -216,3 +216,33 @@ test "project search dock malformed scroll and overflowing geometry fail before 
     try std.testing.expectError(error.InvalidGeometry, make(arena.allocator(), p));
     try std.testing.expectEqual(std.math.maxInt(usize), build.size(std.math.maxInt(usize)));
 }
+
+test "project search dock batch action is explicit bounded and rejects stale or disabled clicks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]f32{ 160, 240, 800 }) |width| for ([_]u32{ 1000, 2000 }) |scale| {
+        var p = props(width, 800, scale);
+        p.replacing = true;
+        p.batch_label = "열린 문서 보기";
+        p.batch_semantic_label = "열린 문서 일치 전체 미리보기";
+        p.can_batch = true;
+        const f = try make(arena.allocator(), p);
+        const entry = f.tree.entries[f.tree.find(44).?];
+        try std.testing.expectEqualStrings(p.batch_semantic_label, entry.semantics.?.label);
+        try std.testing.expect(entry.rect.x >= 0 and entry.rect.x + entry.rect.width <= width);
+        const replacement = f.tree.entries[f.tree.find(build.fieldId(3)).?];
+        try std.testing.expect(entry.rect.y >= replacement.rect.y + replacement.rect.height);
+        const hit = interaction.hitAction(f.tree, entry.rect.x + entry.rect.width / 2, entry.rect.y + entry.rect.height / 2).?;
+        var table = ids.Table.init(@constCast(f.actions));
+        table.count = f.actions.len;
+        try std.testing.expectEqualDeep(ids.Intent{ .option = 10 }, table.resolve(hit.action_id, 7).?);
+        try std.testing.expect(table.resolve(hit.action_id, 8) == null);
+        p.can_batch = false;
+        const disabled = try make(arena.allocator(), p);
+        const r = disabled.tree.entries[disabled.tree.find(44).?].rect;
+        try std.testing.expect(interaction.hitAction(disabled.tree, r.x + r.width / 2, r.y + r.height / 2) == null);
+        p.replacing = false;
+        const hidden = try make(arena.allocator(), p);
+        try std.testing.expect(hidden.tree.find(44) == null);
+    };
+}

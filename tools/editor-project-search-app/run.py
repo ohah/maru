@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--unicode-field", action="store_true")
     parser.add_argument("--physical-ime", action="store_true")
     parser.add_argument("--matrix", action="store_true")
+    parser.add_argument("--replace-batch", action="store_true")
+    parser.add_argument("--batch-open-files", type=int, default=2)
     parser.add_argument("--replace-preview", action="store_true")
     parser.add_argument("--replace-apply", action="store_true")
     parser.add_argument("--replace-disk-apply", action="store_true")
@@ -39,6 +41,12 @@ def main():
     parser.add_argument("--disk-files", type=int, default=0)
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
+    if not 2 <= args.batch_open_files <= 64:
+        parser.error("Batch open-file measurement is bounded to 2..64")
+    if args.replace_batch:
+        args.replace_apply = True
+        if args.disk_files != 2:
+            parser.error("Batch fixture needs exactly two closed disk files")
     if args.replace_ime_refuse:
         args.replace_disk_apply = True
     if args.replace_disk_apply:
@@ -69,7 +77,7 @@ def main():
              "src/platform/macos/app_session/input.zig", "src/platform/macos/app_session/editor/search/navigation.zig",
              "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/disk_apply.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
              "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
-             "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h")
+             "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h", "src/platform/macos/app_session/editor/search/batch.zig", "src/platform/macos/app_session/editor/search/batch/ui.zig", "src/platform/macos/app_session/editor/search/batch/worker.zig")
     print(root, flush=True)
     if args.app:
         app = args.app.resolve()
@@ -81,7 +89,7 @@ def main():
     else:
         source = root / "source"
         subprocess.run(["rsync", "-a", "--exclude=.git", "--exclude=.zig-cache", "--exclude=zig-out",
-                        "--exclude=node_modules", "--exclude=references", "--exclude=.env*",
+                        "--exclude=node_modules", "--exclude=references", "--exclude=.env*", "--exclude=.codex-worktrees",
                         str(repo) + "/", str(source) + "/"], check=True, timeout=120)
         for name in ("node_modules", "web/node_modules"):
             if (repo / name).exists():
@@ -96,7 +104,7 @@ def main():
             '            @import("app_session/editor/search/owner.zig").poll(self);\n            project_search_ops.pump(self);',
             '            debug_fixtures.editorProjectSearchTick(self);'))
         observer = source / names[4]
-        observer.write_text(observer.read_text() + "\n" + (repo / "tools/editor-project-search-app/fixture.zig.inc").read_text())
+        observer.write_text(observer.read_text() + "\n" + (repo / "tools/editor-project-search-app/fixture.zig.inc").read_text() + "\n" + (repo / "tools/editor-project-search-app/batch.zig.inc").read_text())
         host = source / names[3]
         host.write_text(replace_once(host.read_text(), "        maybeRunEditorIMESmoke()\n",
             "        maybeRunEditorIMESmoke()\n        maybeRunEditorProjectSearch()\n") + "\n" +
@@ -109,6 +117,13 @@ def main():
         report_source = source / "src/platform/macos/app_session/editor/search/report.zig"
         report_source.write_text(replace_once(report_source.read_text(), "pub fn open(self: *host.AppSession) !*host.Term {",
             'pub fn open(self: *host.AppSession) !*host.Term {\n    const capture_start = std.Io.Clock.awake.now(self.io).nanoseconds;\n    defer std.debug.print("SEARCH_PANE_BUILD elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(self.io).nanoseconds - capture_start});'))
+        batch_source = source / "src/platform/macos/app_session/editor/search/batch/ui.zig"
+        batch_source.write_text(replace_once(batch_source.read_text(), "pub fn start(self: *host.AppSession) !void {",
+            'var batch_prepare_start_ns: ?i128 = null;\npub fn start(self: *host.AppSession) !void {\n    const measured_start = std.Io.Clock.awake.now(self.io).nanoseconds;\n    batch_prepare_start_ns = measured_start;\n    defer std.debug.print("BATCH_CAPTURE elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(self.io).nanoseconds - measured_start});'))
+        batch_source.write_text(replace_once(batch_source.read_text(), "    st.batch.phase = .ready;",
+            '    st.batch.phase = .ready;\n    std.debug.print("BATCH_PREPARE elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(self.io).nanoseconds - (batch_prepare_start_ns orelse 0)});'))
+        batch_source.write_text(replace_once(batch_source.read_text(), "pub fn apply(self: *host.AppSession) !void {",
+            'pub fn apply(self: *host.AppSession) !void {\n    const measured_start = std.Io.Clock.awake.now(self.io).nanoseconds;\n    defer std.debug.print("BATCH_APPLY elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(self.io).nanoseconds - measured_start});'))
         command = ["mise", "exec", "--", "zig", "build", "macos-app-bundle", "-j2"]
         print(root, flush=True)
         with (root / "build.log").open("wb") as log:
@@ -135,6 +150,8 @@ def main():
         document.write_text("// 한글🙂x\n" + document.read_text())
     if args.conflict_markers:
         document.write_text(document.read_text() + "\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n")
+    peers = [project / ("peer.zig" if i == 1 else f"peer{i}.zig") for i in range(1, args.batch_open_files)] if args.replace_batch else []
+    peer_original = b"pub fn sample_peer() void {}\n"
     original = document.read_bytes()
     disk_originals = {p: p.read_bytes() for p in project.glob("disk*.txt")}
     other = root / "other-project"
@@ -147,6 +164,8 @@ def main():
         MARU_EDITOR_RECOVERY_CHECKPOINT_TEST="maru-test-only-v1", MARU_MACOS_APP_SMOKE_MS="45000",
         MARU_NATIVE_EDITOR=str(document), MARU_FT_WINDOW_SIZE=args.window_size, MARU_EDITOR_PROJECT_SEARCH_SCALE=str(args.render_scale), MARU_EDITOR_PROJECT_SEARCH_MATRIX="1" if args.matrix else "0", MARU_EDITOR_PROJECT_REPLACE_PREVIEW="1" if args.replace_preview else "0", MARU_EDITOR_PROJECT_REPLACE_APPLY="1" if args.replace_apply else "0", MARU_EDITOR_PROJECT_REPLACE_DISK_APPLY="1" if args.replace_disk_apply else "0", MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE="1" if args.replace_ime_refuse else "0", MARU_EDITOR_PROJECT_REPLACE_MARKERS="1" if args.conflict_markers else "0", MARU_EDITOR_PROJECT_SEARCH_TINY="1" if args.narrow_hidden else "0", MARU_EDITOR_PROJECT_SEARCH_OTHER_ROOT=str(other), MARU_EDITOR_PROJECT_SEARCH_CAPTURE="1",
         MARU_EDITOR_PROJECT_SEARCH_OUTPUT=str(artifacts), MARU_EDITOR_PROJECT_SEARCH_DISK_FILES=str(args.disk_files), MARU_EDITOR_PROJECT_SEARCH_UNICODE="1" if args.unicode_field else "0", MARU_EDITOR_PROJECT_SEARCH_PHYSICAL="1" if args.physical_ime else "0", MARU_EDITOR_PROJECT_SEARCH_MODEL_MATCHES=str(args.count), MARU_EDITOR_PROJECT_SEARCH_EXPECTED=str(1 if args.unicode_field or args.physical_ime else args.count + args.disk_files), MARU_APP_SUMMARY_PATH=str(root / "summary.txt"))
+    env["MARU_EDITOR_PROJECT_BATCH_OPEN_FILES"] = str(args.batch_open_files)
+    env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
     if args.physical_ime:
         main = root / "main.swift"
         main.write_text((repo / "src/platform/macos/SessionHostInputSourcePolicy.swift").read_text() + "\n" +
@@ -186,7 +205,7 @@ def main():
                 hid_log.close()
     transcript = (root / "app.log").read_text()
     if (code != 0 or "EDITOR_PROJECT_SEARCH_FINISH passed=true" not in transcript or
-document.read_bytes() != original or any(p.read_bytes() != data for p, data in disk_originals.items())):
+        any(peer.read_bytes() != peer_original for peer in peers) or document.read_bytes() != original or any(p.read_bytes() != data for p, data in disk_originals.items())):
         raise RuntimeError("Product verification failed; inspect app.log")
     expected = ("before", "query", "results", "query-selection", "navigated", "bottom-scrolled", "cancelled")
     if args.disk_files:
@@ -201,6 +220,8 @@ document.read_bytes() != original or any(p.read_bytes() != data for p, data in d
         expected += ("replace-verifying", "replace-ime-conflict")
     elif args.replace_apply:
         expected += ("replace-applied-saved", "replace-undo", "replace-undo-saved")
+    if args.replace_batch:
+        expected += ("batch-results", "right-batch-preview", "bottom-batch-preview", "bottom-batch-saved", "right-batch-saved", "batch-undo", "batch-undo-saved")
     if args.matrix:
         expected += ("shared", "independent", "zero-override", "root-changed", "stale-release")
     for label in expected:
@@ -215,9 +236,14 @@ document.read_bytes() != original or any(p.read_bytes() != data for p, data in d
     metrics = dict(zip(("first_result_ns", "completion_ns", "main_search_tick_max_ns", "cancel_call_ns", "cancel_retire_ns"), map(int, match.groups())))
     metrics["peak_rss_bytes"] = max(sample["rss_bytes"] for sample in samples)
     metrics["pane_build_ns"] = [int(value) for value in re.findall(r"SEARCH_PANE_BUILD elapsed_ns=(\d+)", transcript)]
+    for label in ("CAPTURE", "PREPARE", "APPLY"):
+        metrics["batch_" + label.lower() + "_ns"] = [int(value) for value in re.findall(r"BATCH_" + label + r" elapsed_ns=(\d+)", transcript)]
+    metrics["batch_plans"] = [dict(zip(("files", "matches", "omitted", "input_bytes", "output_bytes", "plan_rows"), map(int, values))) for values in re.findall(r"BATCH_READY files=(\d+) matches=(\d+) omitted=(\d+) input_bytes=(\d+) output_bytes=(\d+) plan_rows=(\d+)", transcript)]
+    if args.replace_batch and (not metrics["batch_apply_ns"] or not metrics["batch_plans"]):
+        raise RuntimeError("Missing actual batch timing evidence")
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
-        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

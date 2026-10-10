@@ -1339,7 +1339,7 @@ mise exec -- zig build test-editor-project-replace-batch-apply -Doptimize=Releas
 python3 tools/test-editor-replace-batch-apply-adversarial.py
 ```
 
-이 게이트는 실제 AppSession API를 검증한다. 제품 배치 버튼·worker 연결·닫힌 파일 로드는
+이 게이트는 실제 AppSession API를 검증한다. 닫힌 파일 배치는
 [배치 계획](plans/editor-project-replace-batch.md)의 후속 단계이며 GUI 완료를 의미하지 않는다.
 
 불변 snapshot 배치 worker의 소유권·완료 뒤 취소·caller 조기 종료·전체 준비 실패 판정:
@@ -1350,4 +1350,20 @@ mise exec -- zig build test-editor-project-replace-batch-worker -Doptimize=Relea
 python3 tools/test-editor-replace-batch-worker-adversarial.py
 ```
 
-worker API만 검사하며 실제 검색 UI의 시작/적용·물리 IME·OS thread spawn 실패 주입은 포함하지 않는다.
+worker API만 검사하며 실제 검색 UI의 시작/적용은 아래 제품 연결 gate로 확인한다.
+물리 IME·OS thread spawn 실패 주입은 포함하지 않는다.
+
+
+열린 문서 배치 UI 연결과 실제 제품 캡처:
+
+```sh
+mise exec -- zig build test-editor-project-replace-batch-ui test-editor-project-search-dock
+mise exec -- zig build test-editor-project-replace-batch-ui -Doptimize=ReleaseFast
+python3 tools/test-editor-replace-batch-ui-adversarial.py
+python3 tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --count 20
+```
+
+`--batch-open-files 32`는 열린 문서 수 실측, `--window-size 640x480 --render-scale 2000`은
+좁은 2× 화면이다. build한 하네스 앱은 `--app <binary>`로 재사용할 수 있다.
+수집/준비/동기 적용 시간·Plan bytes/행과 앱 RSS를 manifest에 기록한다.
+범위와 물리 OS 검증 경계는 [UI 계획](plans/editor-project-replace-batch-ui.md)을 따른다.

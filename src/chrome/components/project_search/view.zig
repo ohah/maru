@@ -10,7 +10,7 @@ const icons = @import("../../../icons.zig");
 const spacing = @import("../../ui/spacing.zig");
 pub const Buffers = struct { ops: []draw.Op, runs: []draw.Run };
 pub fn bufferSizes(row_count: usize, entry_count: usize) struct { ops: usize, runs: usize } {
-    const runs = row_count +| 16;
+    const runs = row_count +| 17;
     return .{ .ops = entry_count +| runs +| 6, .runs = runs };
 }
 pub fn view(p: types.Props, f: build.Frame, state: interaction.InteractionState, tokens: *const tk.Tokens, b: Buffers) !draw.ChromeDraw {
@@ -33,6 +33,7 @@ pub fn view(p: types.Props, f: build.Frame, state: interaction.InteractionState,
         try text(p, f, build.fieldId(index), if (p.fields[index].len == 0) p.field_labels[index] else p.fields[index], if (p.fields[index].len == 0) .muted_fg else .surface_fg, &count, &runs, b);
     }
     if (p.replacing) try text(p, f, build.fieldId(3), if (p.replacement.len == 0) p.replacement_label else p.replacement, .surface_fg, &count, &runs, b);
+    if (p.replacing) try text(p, f, 44, p.batch_label, .surface_fg, &count, &runs, b);
     const labels = [_][]const u8{ "Aa", "Ab", ".*", "…", "▶", "■", "↔", "←", "→", "✓" };
     for (labels, 0..) |label, index| try text(p, f, build.optionId(index), label, .surface_fg, &count, &runs, b);
     try text(p, f, 7, p.scopes, .muted_fg, &count, &runs, b);

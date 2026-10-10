@@ -631,4 +631,6 @@ registry 소유 `history/links.zig`는 작업/항목 신원을 연결한다. 이
 독립 소유한 caller의 ticket을 재검증하고 `editor/history.zig::applyDocuments`에 연결한다.
 `src/platform/macos/app_session/editor/search/batch/worker.zig`는 불변 snapshot·동결 명세·시작
 Ticket을 소유해 전체 Plan을 만드는 detached worker API다. caller/thread 참조를 별도로 해제한다.
-검색 UI의 worker 호출·배치 결과 표시·닫힌 파일 로드의 미연결 범위는 [배치 계획](plans/editor-project-replace-batch.md)을 따른다.
+`src/platform/macos/app_session/editor/search/batch/ui.zig`는 완료한 열린 문서 결과를 수집하고
+worker·전체 actor 적용·파일별 저장 결과를 연결한다. 컴포넌트는 불변 표시 값만 받는다.
+닫힌 파일 로드의 미연결 범위는 [배치 계획](plans/editor-project-replace-batch.md)을 따른다.

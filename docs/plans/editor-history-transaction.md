@@ -71,7 +71,8 @@ UI 게시·공유 뷰 선택/접힘/스크롤 매핑·syntax/LSP 통지·IME·�
 ## 열린 문서 작업 조정자
 
 상태: 같은 창의 이미 열린 로컬 문서에 대한 연결 편집과 제품 Undo/Redo 진입을 구현했다.
-검색 배치 UI·닫힌 파일 로드·기존 WorkspaceEdit 경로 통합·다른 창 전체 게시 연결은 미착수다.
+열린 문서 검색 배치 UI·자동 저장은 [UI 계획](editor-project-replace-batch-ui.md)에 연결했다.
+닫힌 파일 로드·기존 WorkspaceEdit 경로 통합·다른 창 전체 게시 연결은 미착수다.
 열린 모델의 배치 actor·자동 저장 API는 [배치 계획](editor-project-replace-batch.md)이 소유한다.
 
 `app_session/editor/history.zig::apply`는 서로 다른 정본을 받는 내부 API다.

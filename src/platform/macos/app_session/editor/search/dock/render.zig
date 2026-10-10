@@ -15,17 +15,76 @@ const Prepared = struct {
     content: maru.session.SplitRect,
 };
 
+fn compactWidth(self: *const AppSession, width: u32) bool {
+    // device px로 받은 폭을 같은 도크 zoom/backing scale의 180 논리 px와 비교한다.
+    return @as(u64, width) * 1000 < @as(u64, search_dock.scaleMilli(self)) * 180;
+}
+
+fn batchFormat(a: std.mem.Allocator, key: i18n.Key, args: []const i18n.Arg) ![]const u8 {
+    // 개수 안내는 고정 크기 보간 버퍼로 충분하다. 사용자가 선택한 언어의 어순을 유지한다.
+    const storage = try a.alloc(u8, 512);
+    return i18n.format(storage, i18n.t(key), args);
+}
+
+fn batchRow(self: *AppSession, a: std.mem.Allocator, index: usize) !component.types.Row {
+    const state = &self.editor_search;
+    const batch = &state.batch;
+    const compact = compactWidth(self, dock.dockListTextWidthPx(self));
+    var row: component.types.Row = .{ .label = "", .index = index, .enabled = false };
+    if (batch.phase != .completed and index == 0) {
+        row.label = if (batch.ready != null and batch.ready.?.prepared.effective == 0) i18n.t(.project_batch_unchanged) else i18n.t(if (compact) .project_batch_dirty_compact else .project_batch_dirty);
+        return row;
+    }
+    var offset = index - @as(usize, @intFromBool(batch.phase != .completed));
+    if (batch.ready) |ready| for (ready.specification.targets.items, ready.prepared.items.items) |target, item| {
+        if (offset == 0) {
+            row.file = true;
+            row.enabled = !self.ime_active and !self.ime_editor_commit_pending and search_dock.batch_ui.resultTerm(self, index) != null;
+            const outcome = switch (target.outcome) {
+                .saved => i18n.t(.project_batch_saved),
+                .save_failed => i18n.t(.project_batch_save_failed),
+                .unchanged => i18n.t(.project_batch_unchanged),
+                else => i18n.t(if (item.changes.len == 0) .project_batch_unchanged else .project_batch_file_preview),
+            };
+            const path = try a.dupe(u8, batch.displayPath(target.absolute));
+            for (path) |*byte| if (byte.* == '\n' or byte.* == '\r' or byte.* == '\t') {
+                byte.* = ' ';
+            };
+            row.label = try std.fmt.allocPrint(a, "{s} · {s}", .{ if (compact and batch.phase == .completed) outcome else path, if (compact and batch.phase == .completed) path else outcome });
+            return row;
+        }
+        offset -= 1;
+        if (batch.phase == .completed) continue;
+        if (offset < item.plan.rows.items.len) {
+            const line = item.plan.rows.items[offset];
+            var end = @min(line.text.len, line.context_start +| search_dock.budget.preview_bytes);
+            while (end < line.text.len and end > line.context_start and line.text[end] & 0xc0 == 0x80) end -= 1;
+            const text = try a.dupe(u8, line.text[line.context_start..end]);
+            for (text) |*byte| if (byte.* < 0x20) {
+                byte.* = ' ';
+            };
+            row.label = try std.fmt.allocPrint(a, "{s} {d}: {s}{s}{s}", .{ if (line.kind == .added) "+" else if (line.kind == .removed) "-" else " ", line.line, if (line.context_start > 0) "…" else "", text, if (end < line.text.len) "…" else "" });
+            row.kind = if (line.kind == .added) .added else if (line.kind == .removed) .removed else .normal;
+            return row;
+        }
+        offset -= item.plan.rows.items.len;
+    };
+    return error.StaleRequest;
+}
+
 fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
     search_dock.refreshForFocus(self);
     if (!dock.dockVisible(self) or self.dock.view != .project_search or self.cell_width_px == 0 or self.cell_height_px == 0) return null;
     const content = dock.dockGeometry(self).tree_content;
     const width = dock.dockListTextWidthPx(self);
+    const compact = compactWidth(self, width);
     if (content.w == 0 or content.h == 0 or width == 0) return null;
     const state = &self.editor_search;
     const m = search_dock.metrics(self);
     const preview = &state.preview;
-    const previewing = preview.active();
-    const preview_count = if (preview.plan) |plan| plan.rows.items.len else 0;
+    const batching = state.batch.active();
+    const previewing = preview.active() or batching;
+    const preview_count = if (batching) state.batch.rowCount() else if (preview.plan) |plan| plan.rows.items.len else 0;
     const preview_max: u32 = @intCast(@min(@as(u64, preview_count) * m.row, std.math.maxInt(u32)));
     const viewport = search_dock.resultRect(self).h;
     const offset = @min(state.scroll.offset_y_px, preview_max -| viewport);
@@ -33,7 +92,9 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
     const window_end = @min(first + @as(usize, (viewport +| offset % m.row +| m.row -| 1) / m.row), preview_count);
     const window = if (!previewing) state.result.model.window(m.row, viewport, state.scroll.offset_y_px) else maru.session.editor.search.results.Window{ .items = &.{}, .first = first, .shift = offset % m.row, .offset = offset, .content_height = preview_max, .max_offset = preview_max -| viewport };
     const rows = try arena.alloc(component.types.Row, if (previewing) window_end - first else window.items.len);
-    if (previewing) {
+    if (batching) {
+        for (rows, first..) |*row, index| row.* = try batchRow(self, arena, index);
+    } else if (previewing) {
         if (preview.plan) |plan| for (rows, plan.rows.items[first..window_end], 0..) |*row, line, index| {
             var excerpt_end = @min(line.text.len, line.context_start +| search_dock.budget.preview_bytes);
             while (excerpt_end < line.text.len and excerpt_end > line.context_start and line.text[excerpt_end] & 0xc0 == 0x80) excerpt_end -= 1;
@@ -85,7 +146,13 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         if (index != 0) try scopes.appendSlice(arena, " | ");
         try scopes.appendSlice(arena, try std.fmt.allocPrint(arena, "[{d}] {s}", .{ index + 1, self.file_tree.rootAt(index).? }));
     }
-    const status = if (state.apply_outcome == .saved) i18n.t(.project_replace_saved) else if (state.apply_outcome == .save_failed) i18n.t(.project_replace_save_failed) else if (previewing) switch (preview.phase) {
+    const status = if (batching) switch (state.batch.phase) {
+        .ready => i18n.t(.project_batch_file_preview),
+        .conflict => i18n.t(.project_replace_conflict),
+        .failed => i18n.t(.project_replace_failed),
+        .completed => try batchFormat(arena, if (compact) .project_batch_result_compact else .project_batch_result, &.{ .{ .d = @intCast(state.batch.result.saved) }, .{ .d = @intCast(state.batch.result.save_failed) }, .{ .d = @intCast(state.batch.result.unchanged) } }),
+        else => i18n.t(.project_search_running),
+    } else if (state.apply_outcome == .saved) i18n.t(.project_replace_saved) else if (state.apply_outcome == .save_failed) i18n.t(.project_replace_save_failed) else if (previewing) switch (preview.phase) {
         .ready => i18n.t(.project_replace_preview),
         .conflict => i18n.t(.project_replace_conflict),
         .failed => i18n.t(.project_replace_failed),
@@ -99,7 +166,7 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .partial => i18n.t(.project_search_partial),
         .failed => i18n.t(.project_search_failed),
     };
-    const count = if (previewing) (if (preview.plan) |plan| plan.replacements else 0) else state.result.model.matches;
+    const count = if (batching) state.batch.matches else if (previewing) (if (preview.plan) |plan| plan.replacements else 0) else state.result.model.matches;
     const props: component.types.Props = .{
         .viewport = .{ .width = @floatFromInt(width), .height = @floatFromInt(content.h) },
         .scale = search_dock.scaleMilli(self),
@@ -114,19 +181,22 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .replace_label = i18n.t(.project_replace_toggle),
         .back_label = i18n.t(.project_replace_back),
         .pane_label = i18n.t(.project_search_open_pane),
-        .apply_label = i18n.t(.project_replace_apply),
-        .can_apply = search_dock.preview.canApply(self),
-        .can_open_pane = (!previewing or state.preview.phase == .ready) and state.result.phase == .complete and state.stamp != null,
+        .apply_label = if (batching) try batchFormat(arena, .project_batch_apply, &.{.{ .d = @intCast(state.batch.files) }}) else i18n.t(.project_replace_apply),
+        .batch_semantic_label = if (state.batch.phase == .completed) i18n.t(.project_batch_done) else if (batching) try batchFormat(arena, .project_batch_apply, &.{.{ .d = @intCast(state.batch.files) }}) else i18n.t(.project_batch_preview),
+        .batch_label = if (state.batch.phase == .completed) i18n.t(.project_batch_done) else if (batching) try batchFormat(arena, if (compact) .project_batch_apply_compact else .project_batch_apply, &.{.{ .d = @intCast(state.batch.files) }}) else i18n.t(if (compact) .project_batch_preview_compact else .project_batch_preview),
+        .can_batch = if (batching) search_dock.batch_ui.canApply(self) else search_dock.batch_ui.canStart(self),
+        .can_apply = if (batching) search_dock.batch_ui.canApply(self) else search_dock.preview.canApply(self),
+        .can_open_pane = !batching and (!previewing or state.preview.phase == .ready) and state.result.phase == .complete and state.stamp != null,
         .carets = carets[0..3].*,
         .selections = selections[0..3].*,
         .field_labels = .{ i18n.t(.project_search_query), i18n.t(.project_search_include), i18n.t(.project_search_exclude) },
         .focused = state.focused,
         .options = state.options,
         .option_labels = .{ i18n.t(.project_search_case), i18n.t(.project_search_word), i18n.t(.project_search_regex), i18n.t(.project_search_filters), i18n.t(.project_search_run), i18n.t(.project_search_cancel) },
-        .status = if (!previewing and state.result.phase == .complete and state.nav == null) try std.fmt.allocPrint(arena, "{d} {s} · {d} {s}", .{ count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }) else try std.fmt.allocPrint(arena, "{s} · {d} {s} · {d} {s}", .{ status, count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }),
-        .scopes = if (previewing) preview.title else scopes.items,
+        .status = if (state.batch.phase == .completed) status else if (batching) try std.fmt.allocPrint(arena, "{s} · {d} {s}", .{ status, count, i18n.t(.project_search_matches) }) else if (!previewing and state.result.phase == .complete and state.nav == null) try std.fmt.allocPrint(arena, "{d} {s} · {d} {s}", .{ count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }) else try std.fmt.allocPrint(arena, "{s} · {d} {s} · {d} {s}", .{ status, count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }),
+        .scopes = if (batching) try batchFormat(arena, if (compact) .project_batch_scope_compact else .project_batch_scope, &.{ .{ .d = @intCast(state.batch.files) }, .{ .d = @intCast(state.batch.omitted) } }) else if (previewing) preview.title else scopes.items,
         .expanded = state.expanded,
-        .running = state.result.phase == .running or state.result.phase == .waiting or state.nav != null,
+        .running = state.batch.phase == .building or state.result.phase == .running or state.result.phase == .waiting or state.nav != null,
         .can_search = search_dock.canSearch(self),
         .rows = rows,
         .shift = window.shift,

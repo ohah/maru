@@ -5,6 +5,8 @@ const delta = @import("delta.zig");
 const selection = @import("selection.zig");
 
 pub const Entry = struct {
+    /// 스택 이동으로 바뀌지 않는 문서 내 항목 신원. 0은 아직 발급하지 않은 항목이다.
+    id: u64 = 0,
     inverse: delta.Inverse,
     /// **편집 전** 커서들(문서 순서). §3.3: *"undo/redo는 텍스트뿐 아니라 그 시점의 selection
     /// 배열 전체와 primary 인덱스를 되돌린다."*
@@ -27,6 +29,9 @@ pub const EditKind = enum { none, insert, delete };
 /// 선형 이력 저장소. 같은 group 번호의 entry를 함께 되돌리며 delta 자체를 합치지 않는다.
 /// clock과 입력 사건을 관측하는 platform이 그룹 번호를 갱신한다.
 pub const State = struct {
+    next_id: u64 = 1,
+    epoch: u64 = 1,
+
     undo: []Entry = &.{},
     undo_len: usize = 0,
     redo: []Entry = &.{},
@@ -34,6 +39,13 @@ pub const State = struct {
     edit_group: u32 = 0,
     last_edit_kind: EditKind = .none,
     last_edit_ms: u64 = 0,
+
+    pub fn issueId(self: *State) error{HistoryIdExhausted}!u64 {
+        if (self.next_id == std.math.maxInt(u64)) return error.HistoryIdExhausted;
+        const id = self.next_id;
+        self.next_id += 1;
+        return id;
+    }
 
     /// 할당한 entry와 capacity를 함께 해제한다. 호출자는 빌린 entry를 먼저 정산한다.
     /// 기존 reset 의미를 유지하여 그룹 번호와 마지막 시각은 보존한다.
@@ -47,6 +59,8 @@ pub const State = struct {
         self.undo_len = 0;
         self.redo_len = 0;
         self.last_edit_kind = .none;
+        // 포화 뒤에는 새 준비를 거절한다. wrapping으로 지난 연결을 되살리지 않는다.
+        self.epoch +|= 1;
     }
 };
 

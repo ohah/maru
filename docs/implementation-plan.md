@@ -1671,4 +1671,5 @@ restore 설정 alias, 과거 hook/mapping cleanup과 전용 환경변수 차단�
 
 - [프로젝트 검색 결과 탭·옵션 UI](plans/editor-project-search-pane.md): 읽기 전용 결과 사본·Enter 이동·diff 전문 탭.
 
+- [여러 문서 Undo/Redo 사전 준비](plans/editor-history-transaction.md): 안정적인 항목 ID/epoch와 전체 준비·재검증 코어; UI/조정자 연결은 후속.
 - [프로젝트 바꾸기 단일 파일 적용](plans/editor-project-replace-apply.md): S4a 열린 문서와 S4b 디스크 재검증·자동 저장·문서 신원·Undo 사전 준비와 실패 보존.

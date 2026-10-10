@@ -9,6 +9,7 @@
 #   click-far       화면 밖(1500 px 아래) 요소는 화면 안으로 스크롤해 누른다(누를 때 페이지가 스크롤돼 있었다 — 신호에 싣는다)
 #   click-covered   다른 요소가 덮은 버튼은 누르지 않고 「covered」 오류 — 덮은 요소도 눌리지 않는다
 #   click-missing   없는 요소는 not ok(WebKit 과 같다)
+#   click-clobber   DOM clobbering(덮개를 담은 form 의 `parentNode` 를 덮인 버튼 자신으로 가리킨 페이지)으로도 덮임 검사를 통과하지 못한다
 #   back·forward    링크로 다음 문서에 간 뒤 뒤로 → 첫 문서, 앞으로 → 다음 문서, 더 앞으로 → not ok
 #   reload          새로고침 → ok, 문서가 다시 불린다(서버가 받은 요청 수)
 #
@@ -42,6 +43,8 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=b onclick="hit('b-'+event.isTrusted)">Save</button>
 <a id=next href="b.html">next</a>
 <button id=cover onclick="hit('cover')">Covered</button><div id=over onclick="hit('over')"></div>
+<button id=t2 name=parentNode form=f2 style="position:absolute;left:300px;top:220px;width:100px;height:40px" onclick="hit('t2')">T2</button>
+<form id=f2><div style="position:absolute;left:290px;top:210px;width:140px;height:70px;z-index:5;background:rgba(0,0,0,.2)" onclick="hit('over2')"></div></form>
 <button id=far style="position:absolute;top:1500px;left:20px" onclick="hit('far-'+event.isTrusted+'-scrolled-'+(scrollY>0))">Far</button><div style="height:2000px"></div>
 HTML
 printf '<!doctype html><title>page-b</title>b' > "$root/www/b.html"
@@ -103,6 +106,7 @@ hit_seen b-true && echo yes > "\$out/click-title" || grep 'GET /hit' "$root/http
 run click-covered click --selector '#cover'
 sleep 1
 run click-missing click --selector '#none'
+run click-clobber click --selector '#t2'
 run click-far click --selector '#far'
 hit_seen far-true-scrolled-true && echo yes > "\$out/far-hit" || echo no > "\$out/far-hit"
 run click-next click --selector '#next'
@@ -148,6 +152,9 @@ grep -q 'covered' "$out/click-covered" || fail "a covered button was not refused
 echo "PASS click-covered: a covered element is refused and nothing is clicked"
 grep -q 'not ok' "$out/click-missing" || fail "a missing element was not answered not ok ($(tr '\n' ' ' < "$out/click-missing"))"
 echo "PASS click-missing: a missing element is not ok"
+grep -q 'covered' "$out/click-clobber" || fail "a covered button behind a DOM-clobbering form was not refused ($(tr '\n' ' ' < "$out/click-clobber"))"
+! grep -q 'GET /hit?t2\|GET /hit?over2' "$root/http.log" || fail "the clobbering page's button or cover was clicked ($(grep 'GET /hit' "$root/http.log" | tr '\n' ' '))"
+echo "PASS click-clobber: DOM clobbering does not get a covered button past the check"
 ok click-far && [ "$(cat "$out/far-hit")" = yes ] || fail "an element below the fold was not scrolled into view and clicked ($(tr '\n' ' ' < "$out/click-far"))"
 echo "PASS click-far: an element below the fold is scrolled into view and clicked for real"
 ok click-next && [ "$(cat "$out/next-title")" = yes ] || fail "clicking the link did not open the next page ($(tr '\n' ' ' < "$out/next-title"))"

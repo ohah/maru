@@ -2319,9 +2319,9 @@ test "dispatchBrowser(5f-1) D5: browser_storage cap은 screenshot 불인가 → 
 }
 
 // 22차 리뷰 [1]: `parseBrowserMethod(rest) orelse method_not_found`(step 5) 경로 — screenshot 구현 후 dispatch 레벨
-//   테스트가 사라졌다(옛 "screenshot 미구현→method_not_found"를 op 테스트로 교체). browser.back/forward/refresh는 §9.4
-//   표엔 있으나 parseBrowserMethod 미구현(null)이라 에이전트가 부르면 method_not_found여야 한다(authorized 무관 — 메서드명은
-//   공개 API라 oracle 아님). 유효 cap이어도 이 접힘을 확인해 복원.
+//   테스트가 사라졌다(옛 "screenshot 미구현→method_not_found"를 op 테스트로 교체). 모르는 메서드(예 `browser.pdf`)는 에이전트가
+//   부르면 method_not_found여야 한다(authorized 무관 — 메서드명은 공개 API라 oracle 아님). 유효 cap이어도 이 접힘을 확인해 복원.
+//   (back/forward/reload 는 W9b① 에서 구현됐다 — 아래 시험이 WebKit 탭의 -32008 을 본다.)
 test "dispatchBrowser: 유효 cap + 미구현 browser 메서드(pdf) → method_not_found(-32601)" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.pdf\",\"params\":{\"id\":11}}";
     const wire = try dispatchErr(req, browserCap(11));

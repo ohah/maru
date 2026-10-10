@@ -6,6 +6,11 @@
 //!   — 버튼 「Go」 안의 글자 「Go」 처럼 되풀이는 빼고, 문단의 글은 에이전트가 읽게 한다(WebKit snapshot 에는 글이 없다).
 //! - 상호작용 역할(WebKit 의 표와 같다)에만 ref 를 단다 — `n<backendNodeId>`(같은 문서 안에서 바뀌지 않는다, `web_cdp_ops`).
 //! - 이름은 160 바이트까지(글자 경계에서 자른다 — WebKit 과 같은 상한).
+//! - 트리는 sidecar 가 보낸 것(렌더러가 만든 것)이라 믿지 않는다 — 한 번 쓴 노드는 다시 쓰지 않고(순환·여러 부모), 재귀는
+//!   `max_walk_depth` 에서, 남는 노드의 중첩은 `max_emit_depth` 에서 끊는다(W9b①b 적대 리뷰 — 깊게 겹친 `role=group` 이
+//!   개발 빌드의 JSON 중첩 검사를 넘겨 앱이 죽었다).
+//! - 입력칸(`textbox`·`searchbox`·`combobox`·`spinbutton`) 안의 글(= 지금 값)은 쓰지 않는다 — 사용자가 친 값을 snapshot 에 흘리지
+//!   않는다(WebKit snapshot 에도 값은 없다).
 
 const std = @import("std");
 
@@ -19,6 +24,12 @@ pub const Options = struct {
 const interactive_roles = [_][]const u8{ "button", "link", "textbox", "checkbox", "radio", "combobox", "listbox", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "searchbox", "slider", "switch", "tab", "spinbutton" };
 const flatten_roles = [_][]const u8{ "generic", "none", "presentation", "LabelText", "LineBreak", "Ignored" };
 const max_name_bytes = 160;
+/// 재귀 한도(펼친 노드 포함) — 메인 스레드 스택을 지킨다.
+const max_walk_depth = 512;
+/// 남는 노드의 중첩 한도 — 받는 쪽(serializeSnapshotResult 의 `std.json` 파서·에이전트)의 중첩 한도와 메인 스레드 스택을 지킨다
+/// (노드 하나가 JSON 객체·`children` 배열 둘을 쓴다 — 200 단계).
+const max_emit_depth = 100;
+const value_roles = [_][]const u8{ "textbox", "searchbox", "combobox", "spinbutton" };
 
 fn isOneOf(role: []const u8, set: []const []const u8) bool {
     for (set) |r| if (std.mem.eql(u8, role, r)) return true;
@@ -37,6 +48,19 @@ const Tree = struct {
     nodes: std.StringHashMapUnmanaged(Node) = .empty,
     root: ?[]const u8 = null,
     by_backend: std.AutoHashMapUnmanaged(i64, []const u8) = .empty,
+    /// 이미 쓴(또는 펼친) 노드 — 순환·여러 부모를 한 번만.
+    seen: std.StringHashMapUnmanaged(void) = .empty,
+    arena: std.mem.Allocator,
+};
+
+const Walk = struct {
+    parent_name: []const u8,
+    /// 재귀 깊이(펼친 노드 포함).
+    walk: u32,
+    /// 남는 노드의 중첩 깊이.
+    depth: u32,
+    /// 입력칸 안이다 — 글(값)을 쓰지 않는다.
+    in_value: bool,
 };
 
 fn str(v: std.json.Value, a: []const u8, b: []const u8) []const u8 {
@@ -59,7 +83,7 @@ pub fn build(gpa: std.mem.Allocator, ax_json: []const u8, opts: Options) ![]u8 {
         if (n != .array) return error.InvalidTree;
         break :blk n.array.items;
     };
-    var tree: Tree = .{};
+    var tree: Tree = .{ .arena = a };
     for (list) |item| {
         if (item != .object) continue;
         const id = item.object.get("nodeId") orelse continue;
@@ -79,22 +103,17 @@ pub fn build(gpa: std.mem.Allocator, ax_json: []const u8, opts: Options) ![]u8 {
         if (item.object.get("parentId") == null and tree.root == null) tree.root = id.string;
     }
 
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    var s: std.json.Stringify = .{ .writer = &out.writer, .options = .{} };
-    try s.beginObject();
-    try s.objectField("tree");
-    try s.beginArray();
+    var items: std.ArrayList(u8) = .empty;
+    defer items.deinit(gpa);
     if (opts.root_backend) |rb| {
-        if (tree.by_backend.get(rb)) |id| try emit(&s, &tree, id, "", 0, opts);
+        if (tree.by_backend.get(rb)) |id| try emit(&items, gpa, &tree, id, .{ .parent_name = "", .walk = 0, .depth = 0, .in_value = false }, opts);
     } else if (tree.root) |id| {
         // 문서 노드 자신은 넣지 않고 그 자식들부터(WebKit 이 body 부터인 것과 같다).
         const root = tree.nodes.get(id).?;
-        for (root.children) |k| try emit(&s, &tree, k, root.name, 0, opts);
+        try tree.seen.put(a, id, {});
+        for (root.children) |k| try emit(&items, gpa, &tree, k, .{ .parent_name = root.name, .walk = 1, .depth = 0, .in_value = false }, opts);
     }
-    try s.endArray();
-    try s.endObject();
-    return out.toOwnedSlice();
+    return std.fmt.allocPrint(gpa, "{{\"tree\":[{s}]}}", .{items.items});
 }
 
 fn clampName(name: []const u8) []const u8 {
@@ -104,59 +123,46 @@ fn clampName(name: []const u8) []const u8 {
     return name[0..end];
 }
 
-/// 노드 하나를 쓴다 — 역할이 없거나 무시된 노드면 자식을 그 자리에 쓴다.
-fn emit(s: *std.json.Stringify, tree: *Tree, id: []const u8, parent_name: []const u8, depth: u32, opts: Options) !void {
-    const n = tree.nodes.get(id) orelse return;
-    if (std.mem.eql(u8, n.role, "InlineTextBox")) return;
+fn keepNode(n: Node, w: Walk, opts: Options) bool {
     const is_text = std.mem.eql(u8, n.role, "StaticText");
-    const interactive = isOneOf(n.role, &interactive_roles);
-    const keep = !n.ignored and n.role.len != 0 and !isOneOf(n.role, &flatten_roles) and
-        (if (is_text) !opts.interactive_only and n.name.len != 0 and !std.mem.eql(u8, n.name, parent_name) else (!opts.interactive_only or interactive));
-    if (!keep) {
-        if (is_text) return;
-        if (opts.max_depth) |m| if (depth > m) return;
-        for (n.children) |k| try emit(s, tree, k, if (n.name.len != 0) n.name else parent_name, depth, opts);
-        return;
-    }
-    try s.beginObject();
-    try s.objectField("role");
-    try s.write(if (is_text) "text" else n.role);
-    try s.objectField("name");
-    try s.write(clampName(n.name));
-    if (interactive) if (n.backend) |b| {
-        var buf: [24]u8 = undefined;
-        try s.objectField("ref");
-        try s.write(try std.fmt.bufPrint(&buf, "n{d}", .{b}));
-    };
-    const deeper = if (opts.max_depth) |m| depth < m else true;
-    if (deeper and !is_text) {
-        // 자식이 하나라도 쓰일 때만 `children` 을 연다 — 먼저 세어 본다.
-        var any = false;
-        for (n.children) |k| if (wouldEmit(tree, k, n.name, opts)) {
-            any = true;
-            break;
-        };
-        if (any) {
-            try s.objectField("children");
-            try s.beginArray();
-            for (n.children) |k| try emit(s, tree, k, n.name, depth + 1, opts);
-            try s.endArray();
-        }
-    }
-    try s.endObject();
+    if (n.ignored or n.role.len == 0 or isOneOf(n.role, &flatten_roles)) return false;
+    if (is_text) return !opts.interactive_only and !w.in_value and n.name.len != 0 and !std.mem.eql(u8, n.name, w.parent_name);
+    return !opts.interactive_only or isOneOf(n.role, &interactive_roles);
 }
 
-/// 이 노드(또는 펼쳐질 자손)가 무엇이라도 쓰이는가.
-fn wouldEmit(tree: *Tree, id: []const u8, parent_name: []const u8, opts: Options) bool {
-    const n = tree.nodes.get(id) orelse return false;
-    if (std.mem.eql(u8, n.role, "InlineTextBox")) return false;
+/// 노드 하나를 `out`(목록 안 — 앞에 쓴 것이 있으면 쉼표)에 쓴다. 역할이 없거나 무시된 노드면 자식을 그 자리에 쓴다. 한 번 쓴
+/// 노드·한도를 넘은 깊이는 건너뛴다. 자식은 먼저 임시 버퍼에 써 보고 비어 있지 않을 때만 `children` 으로 붙인다 — 미리 세는
+/// 탐색이 없어 공유된 노드가 많은 트리에서도 선형이다(복사는 깊이 `max_emit_depth` 로 묶인다).
+fn emit(out: *std.ArrayList(u8), gpa: std.mem.Allocator, tree: *Tree, id: []const u8, w: Walk, opts: Options) !void {
+    if (w.walk >= max_walk_depth) return;
+    const n = tree.nodes.get(id) orelse return;
+    if (std.mem.eql(u8, n.role, "InlineTextBox")) return;
+    if (tree.seen.contains(id)) return;
+    try tree.seen.put(tree.arena, id, {});
     const is_text = std.mem.eql(u8, n.role, "StaticText");
-    if (is_text) return !opts.interactive_only and !n.ignored and n.name.len != 0 and !std.mem.eql(u8, n.name, parent_name);
-    const interactive = isOneOf(n.role, &interactive_roles);
-    const keep = !n.ignored and n.role.len != 0 and !isOneOf(n.role, &flatten_roles) and (!opts.interactive_only or interactive);
-    if (keep) return true;
-    for (n.children) |k| if (wouldEmit(tree, k, if (n.name.len != 0) n.name else parent_name, opts)) return true;
-    return false;
+    const in_value = w.in_value or isOneOf(n.role, &value_roles);
+    if (!keepNode(n, w, opts)) {
+        if (is_text) return;
+        if (opts.max_depth) |m| if (w.depth > m) return;
+        for (n.children) |k| try emit(out, gpa, tree, k, .{ .parent_name = if (n.name.len != 0) n.name else w.parent_name, .walk = w.walk + 1, .depth = w.depth, .in_value = in_value }, opts);
+        return;
+    }
+    if (out.items.len != 0) try out.append(gpa, ',');
+    try out.print(gpa, "{{\"role\":{f},\"name\":{f}", .{ std.json.fmt(if (is_text) "text" else n.role, .{}), std.json.fmt(clampName(n.name), .{}) });
+    if (isOneOf(n.role, &interactive_roles)) if (n.backend) |b| try out.print(gpa, ",\"ref\":\"n{d}\"", .{b});
+    const deeper = (if (opts.max_depth) |m| w.depth < m else true) and w.depth + 1 < max_emit_depth;
+    if (deeper and !is_text) {
+        var kids: std.ArrayList(u8) = .empty;
+        defer kids.deinit(gpa);
+        const child: Walk = .{ .parent_name = n.name, .walk = w.walk + 1, .depth = w.depth + 1, .in_value = in_value };
+        for (n.children) |k| try emit(&kids, gpa, tree, k, child, opts);
+        if (kids.items.len != 0) {
+            try out.appendSlice(gpa, ",\"children\":[");
+            try out.appendSlice(gpa, kids.items);
+            try out.append(gpa, ']');
+        }
+    }
+    try out.append(gpa, '}');
 }
 
 const testing = std.testing;
@@ -186,7 +192,7 @@ test "접근성 트리 → WebKit 모양: 역할 없는 노드는 펼치고, 되
     const out = try build(testing.allocator, sample, .{});
     defer testing.allocator.free(out);
     try testing.expectEqualStrings(
-        \\{"tree":[{"role":"form","name":"","children":[{"role":"text","name":"Email "},{"role":"textbox","name":"Email","ref":"n3","children":[{"role":"text","name":"old text"}]},{"role":"button","name":"Go","ref":"n13"}]},{"role":"paragraph","name":"","children":[{"role":"text","name":"Some text"}]},{"role":"link","name":"More","ref":"n40"}]}
+        \\{"tree":[{"role":"form","name":"","children":[{"role":"text","name":"Email "},{"role":"textbox","name":"Email","ref":"n3"},{"role":"button","name":"Go","ref":"n13"}]},{"role":"paragraph","name":"","children":[{"role":"text","name":"Some text"}]},{"role":"link","name":"More","ref":"n40"}]}
     , out);
 }
 
@@ -230,4 +236,45 @@ test "이름은 160 바이트까지 글자 경계에서, 모양이 틀린 트리
     const name = parsed.value.object.get("tree").?.array.items[0].object.get("name").?.string;
     try testing.expect(name.len <= 160 and name.len % 3 == 0 and std.unicode.utf8ValidateSlice(name));
     try testing.expectError(error.InvalidTree, build(testing.allocator, "[]", .{}));
+}
+
+test "믿지 않는 트리: 순환·여러 부모는 한 번만, 아주 깊은 중첩은 한도에서 끊는다(앱이 죽지 않는다)" {
+    // 1 → 2 → 3 → 2(순환), 그리고 1 → 3(두 번째 부모).
+    const cyc =
+        \\{"nodes":[{"nodeId":"1","role":{"value":"RootWebArea"},"name":{"value":""},"childIds":["2","3"]},
+        \\{"nodeId":"2","role":{"value":"group"},"name":{"value":"a"},"parentId":"1","childIds":["3"]},
+        \\{"nodeId":"3","role":{"value":"button"},"name":{"value":"b"},"backendDOMNodeId":7,"parentId":"2","childIds":["2"]}]}
+    ;
+    const out = try build(testing.allocator, cyc, .{});
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("{\"tree\":[{\"role\":\"group\",\"name\":\"a\",\"children\":[{\"role\":\"button\",\"name\":\"b\",\"ref\":\"n7\"}]}]}", out);
+    // 2000 겹 group — 남는 노드의 중첩은 100 에서 끊는다.
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(testing.allocator);
+    try json.appendSlice(testing.allocator, "{\"nodes\":[{\"nodeId\":\"0\",\"role\":{\"value\":\"RootWebArea\"},\"name\":{\"value\":\"\"},\"childIds\":[\"1\"]}");
+    for (1..2001) |i| try json.print(testing.allocator, ",{{\"nodeId\":\"{d}\",\"role\":{{\"value\":\"group\"}},\"name\":{{\"value\":\"g\"}},\"parentId\":\"{d}\",\"childIds\":[\"{d}\"]}}", .{ i, i - 1, i + 1 });
+    try json.appendSlice(testing.allocator, "]}");
+    const deep = try build(testing.allocator, json.items, .{});
+    defer testing.allocator.free(deep);
+    try testing.expectEqual(@as(usize, max_emit_depth), std.mem.count(u8, deep, "\"role\":\"group\""));
+}
+
+test "입력칸 안의 글(지금 값)은 snapshot 에 쓰지 않는다" {
+    const out = try build(testing.allocator, sample, .{});
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "old text") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "Some text") != null); // 문단 글은 그대로
+}
+
+test "여러 부모를 가진 노드가 겹겹이 이어진 트리(60 단 다이아몬드)도 한 번씩만 — 지수로 불어나지 않는다" {
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(testing.allocator);
+    try json.appendSlice(testing.allocator, "{\"nodes\":[{\"nodeId\":\"r\",\"role\":{\"value\":\"RootWebArea\"},\"name\":{\"value\":\"\"},\"childIds\":[\"a0\",\"b0\"]}");
+    for (0..60) |i| for ([_]u8{ 'a', 'b' }) |c| {
+        try json.print(testing.allocator, ",{{\"nodeId\":\"{c}{d}\",\"role\":{{\"value\":\"generic\"}},\"name\":{{\"value\":\"\"}},\"childIds\":[\"a{d}\",\"b{d}\"]}}", .{ c, i, i + 1, i + 1 });
+    };
+    try json.appendSlice(testing.allocator, ",{\"nodeId\":\"a60\",\"role\":{\"value\":\"button\"},\"name\":{\"value\":\"end\"},\"backendDOMNodeId\":3,\"childIds\":[]}]}");
+    const out = try build(testing.allocator, json.items, .{});
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("{\"tree\":[{\"role\":\"button\",\"name\":\"end\",\"ref\":\"n3\"}]}", out);
 }

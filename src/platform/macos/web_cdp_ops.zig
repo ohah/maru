@@ -30,6 +30,8 @@ pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, s
 pub const Step = union(enum) {
     call: struct { method: []const u8, params: []u8 },
     done: struct { status: Status, result: []u8 },
+    /// 이만큼(ms) 뒤에 `wake` 로 다시 부른다(wait 의 확인 간격 — 페이지 타이머를 쓰지 않는다: 숨긴 탭은 그것을 늦춘다).
+    sleep: u32,
 };
 
 /// 한 호출의 결과(`web_osr.DevtoolsOutcome` 을 이 모듈이 아는 셋으로 접는다).
@@ -45,7 +47,12 @@ pub const Reply = union(enum) {
 /// 여러 줄 링크의 줄 상자 상한 — 화면보다 긴 링크는 앞줄이 화면 밖일 수 있어 넉넉히(3 회차 — 8 이면 9 줄째부터 보여도 실패했다).
 const max_boxes = 64;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, ax_tree, doc_eval, wait_poll };
+/// wait 의 확인 간격(백오프) — 50 ms 에서 두 배씩 500 ms 까지. 확인 한 번 = DevTools 호출 둘(world·평가). 이벤트로 깨우는 길은
+/// DevTools 이벤트를 받는 W9c 에서(그때 이 되풀이 확인을 없앤다).
+pub const wait_first_interval_ms: u32 = 50;
+pub const wait_max_interval_ms: u32 = 500;
+
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping };
 
 pub const Op = struct {
     kind: Kind,
@@ -70,6 +77,15 @@ pub const Op = struct {
     /// wait — selector 가 보일 때까지(null 이면 문서가 다 불릴 때까지), 시한.
     wait_selector: ?[]u8 = null,
     wait_timeout_ms: u32 = 0,
+    wait_deadline_ms: i64 = 0,
+    /// 다음 확인까지의 간격 — 처음엔 짧게(곧 생기는 요소를 빨리), 두 배씩 늘려 `wait_max_interval_ms` 에서 멈춘다(오래 기다리는
+    /// 동안의 DevTools 호출을 줄인다).
+    wait_interval_ms: u32 = wait_first_interval_ms,
+    /// 부른 쪽이 넣는 지금 시각(start·wake 전에)과 그 탭이 불러오는 중인가(wait --load — sidecar 의 nav_state).
+    now_ms: i64 = 0,
+    page_loading: bool = false,
+    /// type — 고른 요소(넣은 뒤 다시 읽는다, 소유).
+    object_id: ?[]u8 = null,
     /// snapshot 선택.
     snap: web_cdp_snapshot.Options = .{},
 
@@ -78,6 +94,7 @@ pub const Op = struct {
         if (self.frame_id) |s| gpa.free(s);
         if (self.text) |s| gpa.free(s);
         if (self.wait_selector) |s| gpa.free(s);
+        if (self.object_id) |s| gpa.free(s);
         self.* = undefined;
     }
 
@@ -141,7 +158,17 @@ pub const Op = struct {
 
     /// 이미 페이지에 누름을 보냈다 — 남은 호출(떼기·놓기)은 그 요청이 철회돼도 보낸다(버튼을 눌린 채 두지 않는다).
     pub fn committed(self: *const Op) bool {
-        return self.stage == .mouse_up or self.stage == .release;
+        return switch (self.stage) {
+            // 누름·Delete 키 누름을 보냈다 — 뗌·놓기를 끝까지. 넣은 뒤의 다시 읽기도(읽기만 한다 — 놓기까지 가게).
+            .mouse_up, .release, .delete_up, .verify => true,
+            else => false,
+        };
+    }
+
+    /// `sleep` 뒤에 다시 부른다(부른 쪽이 `now_ms` 를 넣은 뒤) — 시한이 지났으면 timeout, 아니면 다음 확인.
+    pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
+        if (self.now_ms >= self.wait_deadline_ms) return done(gpa, .timeout, "");
+        return self.worldStep(gpa);
     }
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -160,7 +187,10 @@ pub const Op = struct {
                 self.stage = .reload;
                 break :blk call(gpa, "Page.reload", "", .{});
             },
-            .wait => self.frameTreeStep(gpa),
+            .wait => blk: {
+                self.wait_deadline_ms = self.now_ms + self.wait_timeout_ms;
+                break :blk self.frameTreeStep(gpa);
+            },
             .snapshot => if (self.selector != null) call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{}) else self.axStep(gpa),
         };
     }
@@ -178,6 +208,18 @@ pub const Op = struct {
                 return self.releaseStep(gpa);
             },
             .release => return self.finish(gpa),
+            // 고르기·넣기·다시 읽기의 시한 — 묶음을 놓고 timeout(Delete 를 눌렀으면 뗀 뒤).
+            .select, .insert, .verify, .delete_up => {
+                self.late = reply.timed_out;
+                return self.releaseStep(gpa);
+            },
+            .delete_down => {
+                self.late = reply.timed_out;
+                self.stage = .delete_up;
+                return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyUp\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
+            },
+            // wait 의 확인이 시한 — 다음 확인으로(시한은 wake 가 본다).
+            .check, .world => if (self.kind == .wait) return self.sleepOrTimeout(gpa),
             else => {},
         };
         const bytes = switch (reply) {
@@ -245,14 +287,16 @@ pub const Op = struct {
             .frame_tree => {
                 const fid = stringAt(v, &.{ "frameTree", "frame", "id" }) orelse return done(gpa, .failed, "no main frame");
                 self.frame_id = try gpa.dupe(u8, fid);
-                self.stage = .world;
-                return call(gpa, "Page.createIsolatedWorld", "{{\"frameId\":{f},\"worldName\":\"maru-w9b\"}}", .{std.json.fmt(fid, .{})});
+                return self.worldStep(gpa);
             },
             .world => {
                 self.context_id = intAt(v, &.{"executionContextId"}) orelse return done(gpa, .failed, "no isolated world");
                 if (self.kind == .wait) {
-                    self.stage = .doc_eval;
-                    return call(gpa, "Runtime.evaluate", "{{\"expression\":\"document\",\"contextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.context_id, self.id });
+                    // 한 번 확인한다(격리 world — 이동했으면 새 문서의 world 다, 객체를 쥐지 않는다).
+                    self.stage = .check;
+                    const expr = try std.fmt.allocPrint(gpa, "(function(sel,load){{try{{var D=Document.prototype;if(load)return Object.getOwnPropertyDescriptor(D,'readyState').get.call(document)==='complete';var e=D.querySelector.call(document,sel);if(!e)return false;var r=Element.prototype.getBoundingClientRect.call(e),cs=getComputedStyle(e);return r.width>0&&r.height>0&&cs.visibility!=='hidden'&&cs.display!=='none'}}catch(x){{return 'error'}}}})({f},{})", .{ std.json.fmt(self.wait_selector orelse "", .{}), self.wait_selector == null });
+                    defer gpa.free(expr);
+                    return call(gpa, "Runtime.evaluate", "{{\"expression\":{f},\"contextId\":{d},\"returnByValue\":true}}", .{ std.json.fmt(expr, .{}), self.context_id });
                 }
                 self.stage = .resolve;
                 return call(gpa, "DOM.resolveNode", "{{\"backendNodeId\":{d},\"executionContextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.backend, self.context_id, self.id });
@@ -260,10 +304,11 @@ pub const Op = struct {
             .resolve => {
                 const oid = stringAt(v, &.{ "object", "objectId" }) orelse return done(gpa, .success, "false");
                 if (self.kind == .type_text) {
+                    self.object_id = try gpa.dupe(u8, oid);
                     // 격리 world 에서 그 요소의 글을 고른다(입력칸·글 상자·contenteditable) — 그 위에 넣으면 바꿔 쓴다(WebKit 의 type 과 같다).
                     // 프로토타입 함수·getter 로 부른다(DOM clobbering).
                     self.stage = .select;
-                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return 'not editable';HTMLInputElement.prototype.select.call(t);return 'ok'}}if(t instanceof HTMLTextAreaElement){{HTMLTextAreaElement.prototype.select.call(t);return 'ok'}}if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{var d=P(Node.prototype,'ownerDocument').call(t);var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);return 'ok'}}return 'not editable'}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var d=P(Node.prototype,'ownerDocument').call(t),ok=false;if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return 'not editable';HTMLInputElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLTextAreaElement){{HTMLTextAreaElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);ok=true}}if(!ok)return 'not editable';var ae=P(Document.prototype,'activeElement').call(d),sr=P(Element.prototype,'shadowRoot'),sa=P(ShadowRoot.prototype,'activeElement');for(var i=0;ae&&i<64;i++){{var root=sr.call(ae),inner=root?sa.call(root):null;if(!inner)break;ae=inner}}if(ae===t)return 'ok';if(ae&&t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)&&Node.prototype.contains.call(t,ae))return 'ok';return 'focus moved'}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
                 }
                 self.stage = .hit_test;
                 // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
@@ -309,6 +354,11 @@ pub const Op = struct {
             .navigate_entry, .reload => return done(gpa, .success, "true"),
             .select => {
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                if (std.mem.eql(u8, verdict, "focus moved")) {
+                    // 페이지가 초점을 다른 곳으로 옮겼다(모달의 초점 가두기 등) — 넣으면 엉뚱한 칸(다른 출처 iframe 일 수도)에 간다.
+                    self.miss = "focus moved away from the element (the page moved it) — nothing was typed";
+                    return self.releaseStep(gpa);
+                }
                 if (!std.mem.eql(u8, verdict, "ok")) {
                     self.miss = "the element is not editable";
                     return self.releaseStep(gpa);
@@ -325,7 +375,16 @@ pub const Op = struct {
                 self.stage = .delete_up;
                 return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyUp\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
             },
-            .insert, .delete_up => return self.releaseStep(gpa),
+            .insert, .delete_up => {
+                // 넣은 뒤 다시 읽는다 — readonly·disabled·maxlength·형식(number 에 글자)은 insertText 가 조용히 안 넣거나 자른다.
+                self.stage = .verify;
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(want){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var v=(t instanceof HTMLInputElement)?P(HTMLInputElement.prototype,'value').call(t):(t instanceof HTMLTextAreaElement)?P(HTMLTextAreaElement.prototype,'value').call(t):P(Node.prototype,'textContent').call(t);if(t instanceof HTMLInputElement||t instanceof HTMLTextAreaElement)return v===want?'ok':'rejected';return (want===''?v.trim()==='':String.prototype.indexOf.call(v,want)>=0)?'ok':'rejected'}}\",\"arguments\":[{{\"value\":{f}}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object_id.?, .{}), std.json.fmt(self.text.?, .{}) });
+            },
+            .verify => {
+                const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                if (!std.mem.eql(u8, verdict, "ok")) self.miss = "the field did not take the text (read-only, disabled, a length limit or its type)";
+                return self.releaseStep(gpa);
+            },
             .ax_tree => {
                 const json = web_cdp_snapshot.build(gpa, bytes, self.snap) catch |e| return switch (e) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -333,23 +392,36 @@ pub const Op = struct {
                 };
                 return .{ .done = .{ .status = .success, .result = json } };
             },
-            .doc_eval => {
-                const oid = stringAt(v, &.{ "result", "objectId" }) orelse return done(gpa, .failed, "no document");
-                self.stage = .wait_poll;
-                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(sel,ms,load){{var D=Document.prototype,qs=D.querySelector,rs=Object.getOwnPropertyDescriptor(D,'readyState').get,bc=Element.prototype.getBoundingClientRect,gcs=getComputedStyle,t0=Date.now();return new Promise(function(res){{(function poll(){{try{{if(load){{if(rs.call(document)==='complete')return res(true)}}else{{var e=qs.call(document,sel);if(e){{var r=bc.call(e),cs=gcs(e);if(r.width>0&&r.height>0&&cs.visibility!=='hidden'&&cs.display!=='none')return res(true)}}}}}}catch(x){{return res('error')}}if(Date.now()-t0>=ms)return res(false);setTimeout(poll,100)}})()}})}}\",\"arguments\":[{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{}}}],\"awaitPromise\":true,\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), std.json.fmt(self.wait_selector orelse "", .{}), self.wait_timeout_ms, self.wait_selector == null });
+            .check => {
+                const value = at(v, &.{ "result", "value" }) orelse return self.sleepOrTimeout(gpa);
+                if (value == .string) return done(gpa, .invalid_params, "Invalid selector");
+                // load 는 그 문서가 다 불렸고 Chromium 이 불러오는 중이 아닐 때(이동이 시작된 옛 문서의 complete 를 믿지 않는다).
+                const met = value == .bool and value.bool and !(self.wait_selector == null and self.page_loading);
+                if (met) return done(gpa, .success, "true");
+                return self.sleepOrTimeout(gpa);
             },
-            .wait_poll => {
-                const value = at(v, &.{ "result", "value" }) orelse return done(gpa, .failed, "wait failed");
-                if (value == .bool and value.bool) return self.waitEnd(gpa, .success, "true");
-                if (value == .string) return self.waitEnd(gpa, .invalid_params, "Invalid selector");
-                return self.waitEnd(gpa, .timeout, "");
-            },
+            .sleeping => unreachable, // 잠든 동안은 답이 오지 않는다(wake 로 깨운다)
         }
     }
 
     /// 없는 요소 — click·type·scroll 은 `{ok:false}`(WebKit 과 같다), snapshot 은 빈 트리.
     fn missing(self: *Op, gpa: std.mem.Allocator) !Step {
         return if (self.kind == .snapshot) done(gpa, .success, "{\"tree\":[]}") else done(gpa, .success, "false");
+    }
+
+    fn worldStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .world;
+        return call(gpa, "Page.createIsolatedWorld", "{{\"frameId\":{f},\"worldName\":\"maru-w9b\"}}", .{std.json.fmt(self.frame_id.?, .{})});
+    }
+
+    /// wait — 아직이면 다음 간격 뒤 다시(시한을 넘겨 자지 않는다, 시한이 지났으면 timeout). 간격은 두 배씩 늘린다.
+    fn sleepOrTimeout(self: *Op, gpa: std.mem.Allocator) !Step {
+        if (self.now_ms >= self.wait_deadline_ms) return done(gpa, .timeout, "");
+        const left: u32 = @intCast(@min(self.wait_deadline_ms - self.now_ms, std.math.maxInt(u32)));
+        const ms = @min(self.wait_interval_ms, left);
+        self.wait_interval_ms = @min(self.wait_interval_ms *| 2, wait_max_interval_ms);
+        self.stage = .sleeping;
+        return .{ .sleep = @max(ms, 1) };
     }
 
     fn frameTreeStep(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -360,12 +432,6 @@ pub const Op = struct {
     fn axStep(self: *Op, gpa: std.mem.Allocator) !Step {
         self.stage = .ax_tree;
         return call(gpa, "Accessibility.getFullAXTree", "", .{});
-    }
-
-    /// wait 의 끝 — 쥔 document 객체를 놓지 않고 답한다(놓기는 그 묶음이 다음 요청과 섞이지 않게 이름이 요청마다 달라 해롭지 않다 —
-    /// 왕복 하나를 아낀다). 결과는 status 로만.
-    fn waitEnd(_: *Op, gpa: std.mem.Allocator, status: Status, result: []const u8) !Step {
-        return done(gpa, status, result);
     }
 
     /// 놓은 뒤의 답 — 덮였으면 실패, 누름·떼기가 시한을 넘겼으면 timeout, 아니면 눌렀다.
@@ -404,8 +470,10 @@ pub const Op = struct {
             .query => if (gone) self.missing(gpa) else done(gpa, .invalid_params, message),
             .describe, .scroll, .quads, .resolve => if (gone) self.missing(gpa) else done(gpa, .failed, message),
             .focus => done(gpa, .failed, "the element cannot be focused"),
+            // wait 의 world·확인 오류 — 이동 중이라 문서·world 가 사라졌다: 다음 확인으로(새 문서의 world).
+            .world, .check => if (self.kind == .wait) self.sleepOrTimeout(gpa) else done(gpa, .failed, message),
             // 고르기·넣기 실패 — 쥔 묶음은 놓고 실패.
-            .select, .insert, .delete_down, .delete_up => blk: {
+            .select, .insert, .delete_down, .delete_up, .verify => blk: {
                 self.miss = "the text could not be entered";
                 break :blk self.releaseStep(gpa);
             },
@@ -524,6 +592,7 @@ const Trail = struct {
     committed_after_press: bool = true,
     /// 누름 Step 을 받을 때 `committed` 가 거짓이었는가(누르기 직전에는 재허가를 거친다).
     uncommitted_at_press: bool = true,
+    sleeps: usize = 0,
 
     fn deinit(self: *Trail) void {
         for (self.params.items) |p| testing.allocator.free(p);
@@ -551,6 +620,12 @@ fn drive(op: *Op, answer: *const fn (method: []const u8, params: []const u8) Rep
     var pressed = false;
     while (true) switch (step) {
         .done => |d| return .{ .status = d.status, .result = d.result },
+        .sleep => |ms| {
+            // 가짜 시계 — 잠든 만큼 흘려 깨운다.
+            trail.sleeps += 1;
+            op.now_ms += ms;
+            step = try op.wake(testing.allocator);
+        },
         .call => |c| {
             try trail.methods.append(testing.allocator, c.method);
             try trail.params.append(testing.allocator, c.params);
@@ -868,11 +943,10 @@ const tiny_ax =
 
 fn editorPage(method: []const u8, params: []const u8) Reply {
     if (std.mem.eql(u8, method, "Accessibility.getFullAXTree")) return .{ .ok = tiny_ax };
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"d-1\"}}" };
-    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "readyState") != null) {
-        // wait — selector 가 `#late` 면 보인다, `#never` 면 시한, `[` 면 selector 오류, load 는 보인다.
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) {
+        // wait 의 한 번 확인 — `#late` 면 보인다, `#never` 면 아직, `[` 면 selector 오류, load 는 complete.
         if (std.mem.indexOf(u8, params, "#never") != null) return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":false}}" };
-        if (std.mem.indexOf(u8, params, "{\"value\":\"[\"}") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"error\"}}" };
+        if (std.mem.indexOf(u8, params, "\\\"[\\\"") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"error\"}}" };
         return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":true}}" };
     }
     return happyPage(method, params);
@@ -891,12 +965,45 @@ test "type: 찾기 → 화면 안으로 → 초점 → 격리 world 에서 글 �
     const r = try drive(&op, &editorPage, &trail);
     defer testing.allocator.free(r.result);
     try testing.expectEqualStrings("true", r.result);
-    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.focus", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.insertText", "Runtime.releaseObjectGroup" };
+    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.focus", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.insertText", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "HTMLInputElement.prototype.select.call") != null);
     try testing.expectEqualStrings("{\"text\":\"새 \\\"값\\\"\"}", trail.params.items[9]);
     try testing.expect(try std.json.validate(testing.allocator, trail.params.items[8]));
+    // 고른 뒤 초점이 그 요소인지 보고, 넣은 뒤 값을 다시 읽는다(넣은 글을 인자로).
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "focus moved") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "\"arguments\":[{\"value\":\"새 \\\"값\\\"\"}]") != null);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[10]));
+}
+
+fn focusStealPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "isContentEditable") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"focus moved\"}}" };
+    return editorPage(method, params);
+}
+
+fn rejectingPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "function(want)") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"rejected\"}}" };
+    return editorPage(method, params);
+}
+
+test "type: 페이지가 초점을 옮겼으면 넣지 않고, 넣은 값이 거부됐으면(readonly·maxlength·형식) 실패 — 묶음은 놓는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    for ([_]struct { answer: *const fn ([]const u8, []const u8) Reply, want: []const u8, inserts: usize }{
+        .{ .answer = &focusStealPage, .want = "focus moved", .inserts = 0 },
+        .{ .answer = &rejectingPage, .want = "did not take", .inserts = 1 },
+    }) |c| {
+        trail.reset();
+        var op = try Op.init(testing.allocator, .type_text, "{\"selector\":\"#e\",\"text\":\"x\"}", 31);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, c.answer, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.failed, r.status);
+        try testing.expect(std.mem.indexOf(u8, r.result, c.want) != null);
+        try testing.expectEqual(c.inserts, trail.count("Input.insertText"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
 }
 
 test "type: 빈 글은 고른 것을 Delete 키로 지우고, 편집할 수 없는 요소는 넣지 않고 실패" {
@@ -941,30 +1048,69 @@ test "scroll: 화면 안으로 스크롤하고 끝, 없는 요소는 {ok:false}"
     try testing.expectEqualStrings("false", n.result);
 }
 
-test "wait: 격리 world 의 document 에서 기다린다 — 보이면 성공, 시한이면 timeout, selector 오류는 invalid_params, load 는 readyState" {
+test "wait: 격리 world 에서 한 번씩 본다(간격 50→100→200…→500 ms) — 보이면 성공, 시한이면 timeout, selector 오류는 invalid_params" {
     var trail: Trail = .{};
     defer trail.deinit();
-    const cases = [_]struct { arg: []const u8, status: Status }{
-        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"#late\",\"timeout_ms\":5000}", .status = .success },
-        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"#never\",\"timeout_ms\":100}", .status = .timeout },
-        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"[\",\"timeout_ms\":100}", .status = .invalid_params },
-        .{ .arg = "{\"condition\":\"load\",\"timeout_ms\":100}", .status = .success },
+    const cases = [_]struct { arg: []const u8, status: Status, sleeps: usize }{
+        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"#late\",\"timeout_ms\":5000}", .status = .success, .sleeps = 0 },
+        // 350 ms: 50 + 100 + 200(남은 만큼) — 시한에서 끝.
+        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"#never\",\"timeout_ms\":350}", .status = .timeout, .sleeps = 3 },
+        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"[\",\"timeout_ms\":100}", .status = .invalid_params, .sleeps = 0 },
+        .{ .arg = "{\"condition\":\"load\",\"timeout_ms\":100}", .status = .success, .sleeps = 0 },
     };
     for (cases) |c| {
         trail.reset();
         var op = try Op.init(testing.allocator, .wait, c.arg, 26);
         defer op.deinit(testing.allocator);
+        op.now_ms = 1000;
         const r = try drive(&op, &editorPage, &trail);
         defer testing.allocator.free(r.result);
         try testing.expectEqual(c.status, r.status);
-        const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "Runtime.callFunctionOn" };
-        for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
-        try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "\"contextId\":7") != null); // 격리 world 의 document
-        try testing.expect(std.mem.indexOf(u8, trail.params.items[3], "\"awaitPromise\":true") != null);
-        try testing.expect(try std.json.validate(testing.allocator, trail.params.items[3]));
+        try testing.expectEqual(c.sleeps, trail.sleeps);
+        const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate" };
+        for (want, trail.methods.items[0..3]) |w, got| try testing.expectEqualStrings(w, got);
+        try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "\"contextId\":7") != null); // 격리 world
+        try testing.expect(try std.json.validate(testing.allocator, trail.params.items[2]));
+        // 확인마다 world 를 다시 받는다(이동했으면 새 문서의 world) — 잠든 수만큼 더.
+        // (시한으로 끝나는 마지막 깨어남은 world 를 받지 않는다.)
+        try testing.expectEqual(if (c.status == .timeout) c.sleeps else 1 + c.sleeps, trail.count("Page.createIsolatedWorld"));
     }
     try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"timeout_ms\":5}", 1));
     try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .wait, "{\"condition\":\"idle\",\"timeout_ms\":5}", 1));
+}
+
+var navigating_checks: usize = 0;
+fn navigatingPage(method: []const u8, params: []const u8) Reply {
+    // 처음 두 번은 이동 중이라 문서·world 가 사라진다 — 그다음 새 문서에서 보인다.
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) {
+        navigating_checks += 1;
+        if (navigating_checks <= 2) return .{ .cdp_error = "{\"code\":-32000,\"message\":\"Execution context was destroyed.\"}" };
+    }
+    return editorPage(method, params);
+}
+
+fn loadingPage(method: []const u8, params: []const u8) Reply {
+    return editorPage(method, params);
+}
+
+test "wait: 이동 중 world 가 사라져도 다음 확인으로 넘긴다, load 는 그 탭이 불러오는 중이면 기다린다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    navigating_checks = 0;
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"selector\":\"#result\",\"timeout_ms\":5000}", 32);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &navigatingPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqual(@as(usize, 2), trail.sleeps);
+    trail.reset();
+    var load = try Op.init(testing.allocator, .wait, "{\"condition\":\"load\",\"timeout_ms\":250}", 33);
+    defer load.deinit(testing.allocator);
+    load.page_loading = true; // 이동이 시작됐다 — 옛 문서의 complete 를 믿지 않는다
+    const l = try drive(&load, &loadingPage, &trail);
+    defer testing.allocator.free(l.result);
+    try testing.expectEqual(Status.timeout, l.status);
+    try testing.expect(trail.sleeps >= 2);
 }
 
 test "snapshot: 접근성 트리를 WebKit 모양으로, selector 는 그 노드부터, 없는 selector 는 빈 트리" {
@@ -995,4 +1141,26 @@ test "snapshot: 접근성 트리를 WebKit 모양으로, selector 는 그 노드
         defer testing.allocator.free(r.result);
         try testing.expectEqualStrings("{\"tree\":[]}", r.result);
     }
+}
+
+test "wait 의 간격은 두 배씩 늘어 500 ms 에서 멈추고, 시한을 넘겨 자지 않는다" {
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"load\",\"timeout_ms\":3000}", 40);
+    defer op.deinit(testing.allocator);
+    op.now_ms = 0;
+    op.wait_deadline_ms = 3000;
+    var got: [8]u32 = undefined;
+    for (&got) |*g| {
+        const step = try op.sleepOrTimeout(testing.allocator);
+        g.* = step.sleep;
+        op.now_ms += g.*;
+        if (op.now_ms >= op.wait_deadline_ms) break;
+    }
+    try testing.expectEqualSlices(u32, &.{ 50, 100, 200, 400, 500, 500, 500, 500 }, &got);
+    // 남은 시간이 간격보다 짧으면 남은 만큼만.
+    op.now_ms = 2990;
+    try testing.expectEqual(@as(u32, 10), (try op.sleepOrTimeout(testing.allocator)).sleep);
+    op.now_ms = 3000;
+    const end = try op.sleepOrTimeout(testing.allocator);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.timeout, end.done.status);
 }

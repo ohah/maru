@@ -192,6 +192,7 @@ pub const Op = struct {
             },
             else => {},
         }
+        if (o.get("locator") != null and (o.get("selector") != null or o.get("ref") != null)) return error.InvalidArg; // L2 가 막지만 엔진도
         if (o.get("locator")) |l| switch (kind) {
             .click, .type_text, .scroll, .hover, .press => {
                 try op.parseLocator(gpa, l);
@@ -221,6 +222,7 @@ pub const Op = struct {
         if (lo.get("name")) |n| {
             if (n != .string or n.string.len == 0 or n.string.len > web_cdp_locate.max_text_bytes) return error.InvalidArg;
             op.loc_name = try web_cdp_locate.normalize(gpa, n.string);
+            if (op.loc_name.?.len == 0) return error.InvalidArg; // 공백·보이지 않는 글자뿐 — 이름 조건이 사라진다(1 회차)
         }
         if (lo.get("level")) |v| {
             if (v != .integer or v.integer < 1 or v.integer > 100) return error.InvalidArg;
@@ -466,7 +468,10 @@ pub const Op = struct {
                 if (self.locating) {
                     // 요소 수를 먼저 본다 — 접근성 질의는 DOM 크기의 제곱으로 느려지고 그동안 페이지가 멈춘다(프로토타입 함수 — DOM clobbering).
                     self.stage = .size_check;
-                    return call(gpa, "Runtime.evaluate", "{{\"expression\":\"Document.prototype.getElementsByTagName.call(document,'*').length\",\"contextId\":{d},\"returnByValue\":true}}", .{self.context_id});
+                    // open shadow root 안도 센다(1 회차 — 셀 때 빠져 6 만 요소 페이지가 상한을 지나 2.8 초 멈췄다). 상한을 넘으면 곧 멈춘다.
+                    const expr = try std.fmt.allocPrint(gpa, "(function(){{var L={d},sr=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot').get,qa=Document.prototype.querySelectorAll,fa=DocumentFragment.prototype.querySelectorAll,n=0,todo=[qa.call(document,'*')];while(todo.length){{var l=todo.pop();n+=l.length;if(n>L)return n;for(var i=0;i<l.length;i++){{var s=sr.call(l[i]);if(s)todo.push(fa.call(s,'*'))}}}}return n}})()", .{web_cdp_locate.max_role_page_elements});
+                    defer gpa.free(expr);
+                    return call(gpa, "Runtime.evaluate", "{{\"expression\":{f},\"contextId\":{d},\"returnByValue\":true}}", .{ std.json.fmt(expr, .{}), self.context_id });
                 }
                 if (self.kind == .wait) {
                     // 한 번 확인한다(격리 world — 이동했으면 새 문서의 world 다, 객체를 쥐지 않는다).
@@ -612,9 +617,8 @@ pub const Op = struct {
             .loc_document => {
                 const root = intAt(v, &.{ "root", "backendNodeId" }) orelse return done(gpa, .failed, "no document");
                 self.stage = .locate;
-                // exact 면 이름도 실어 결과를 줄인다(서버의 이름 비교는 정확 일치 — 시간은 같다).
-                if (self.loc_exact and self.loc_name != null)
-                    return call(gpa, "Accessibility.queryAXTree", "{{\"backendNodeId\":{d},\"role\":{f},\"accessibleName\":{f}}}", .{ root, std.json.fmt(self.loc_role, .{}), std.json.fmt(self.loc_name.?, .{}) });
+                // 이름은 싣지 않는다 — 서버는 계산된 이름 원문과 비교해(nbsp·soft hyphen 그대로) 정규화한 exact 이름을 못 찾았다
+                // (W9b②-1 적대 리뷰 1 회차 실측). 이름은 받은 뒤 정규화해 거른다.
                 return call(gpa, "Accessibility.queryAXTree", "{{\"backendNodeId\":{d},\"role\":{f}}}", .{ root, std.json.fmt(self.loc_role, .{}) });
             },
             .locate => {
@@ -1940,7 +1944,8 @@ test "role 로케이터: 크기 검사 → 문서 → 접근성 질의 → 하�
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     // 크기 검사는 격리 world·프로토타입 함수로, 질의는 Chromium 역할로(부분 일치라 이름은 싣지 않는다).
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "Document.prototype.getElementsByTagName.call(document,'*').length") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "Element.prototype,'shadowRoot').get") != null); // open shadow 도 센다
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "var L=30000") != null);
     try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\"}", trail.params.items[4]);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"backendNodeId\":11") != null);
 }
@@ -1953,7 +1958,7 @@ test "role 로케이터: exact 면 이름도 질의에, 여럿이면 후보 ref 
         defer op.deinit(testing.allocator);
         const r = try drive(&op, &rolePage, &trail);
         defer testing.allocator.free(r.result);
-        try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\",\"accessibleName\":\"Save\"}", trail.params.items[4]);
+        try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\"}", trail.params.items[4]); // exact 여도 이름은 싣지 않는다
         try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
     }
     const cases = [_]struct { arg: []const u8, answer: *const fn ([]const u8, []const u8) Reply, status: Status, want: []const u8, presses: usize }{
@@ -1991,6 +1996,8 @@ test "role 로케이터: 모르는 역할은 UnknownRole(가까운 역할을 권
         "{\"locator\":{\"role\":\"button\",\"level\":0}}",
         "{\"locator\":{\"role\":\"button\",\"nth\":-1}}",
         "{\"locator\":{\"role\":\"button\",\"exact\":\"yes\"}}",
+        "{\"locator\":{\"role\":\"button\",\"name\":\" \\u200b \"}}", // 공백·보이지 않는 글자뿐
+        "{\"locator\":{\"role\":\"button\"},\"selector\":\"#b\"}",
     }) |bad| {
         if (Op.init(testing.allocator, .click, bad, 1)) |op_val| {
             var op = op_val;

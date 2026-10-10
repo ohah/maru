@@ -720,3 +720,15 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
 - `web_cdp_ops` 의 찾기 단계: 격리 world 에서 요소 수 → 문서 → `Accessibility.queryAXTree`(exact 면 이름도) → 하나면 ref 처럼.
 - L2 `locator`(배타·상한·인가 전 WebKit `-32008` + `param`), 결과 `matched`.
 - CLI `--role --name --level --exact --nth`(act 명령은 다른 명령의 옵션을 거절 — 예전엔 쿠키 파서를 함께 써 `click --name x` 를 조용히 무시했다).
+
+**W9b②-1 적대 리뷰**(구현 뒤 다섯 회차):
+- **1 회차**(실측):
+  - 높음: `exact:true` 가 nbsp·soft hyphen 이 섞인 이름을 못 찾았다 — 서버(`accessibleName`)는 계산된 이름 원문과 비교하는데 정규화한 이름을
+    보냈다. 그래서 「ambiguous … (exact) …; retry with exact:true」 의 권고가 곧 실패했다 → 이름은 싣지 않고 받은 뒤 정규화해 거른다.
+  - 중: 요소 수가 shadow root 안을 세지 않아 6 만 요소 페이지가 상한을 지나 2.8 초 멈췄다 → open shadow root 까지 센다(상한을 넘으면 곧 멈춘다 —
+    실측 4 만 요소 5 ms).
+  - 중(틀림): 짝 없는 서로게이트 이름 하나가 질의를 망친다 — 리뷰는 sidecar wire 로 직접 실측했고, 앱 경로는 W9b①b-1 의 정화
+    (`web_osr.devtoolsResult`)를 거친다.
+  - 하: 공백뿐인 이름이 이름 조건을 없앴다 → 거절. CLI 가 페이지 글의 C1·양방향 제어 글자를 그대로 찍었다 → 메시지·`matched` 에서 뺀다.
+    엔진도 `locator` 와 `selector`·`ref` 를 함께 받지 않는다. 문서(exact·shadow·투명 요소).
+  - 변이(고치기 전): 12 중 12 걸림(판정 대본이 누수 변이를 처음엔 「살아남음」 으로 셌다 — 누수도 실패로 세게 고쳤다).

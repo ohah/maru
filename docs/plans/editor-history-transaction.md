@@ -8,14 +8,17 @@
 
 - `history.Entry.id`는 문서 이력 안에서 단조 증가하며 undo↔redo 이동 때 보존된다.
   기존 macOS `pushUndo`가 발급하고 `stepHistory`의 mirror가 유지한다.
+  strict 편집은 ID 고갈을 편집 전에 거절하여 본문·선택·기존 이력을 보존한다.
   `State.clear`는 ID 발급기를 되감지 않고 epoch를 올린다. 포화는 wrapping하지 않는다.
 - `history/step.zig`의 `Target`은 실제 EditableFile·history·선택과 예상 항목 ID/epoch를 받는다.
   호출자는 문서 lease와 main actor 단독 소유를 준비부터 결산까지 유지해야 한다.
-  포인터가 문서 ID나 lease를 대체하지 않는다. 이 API 자체는 파일 로드/registry retain을 하지 않는다.
+  포인터가 문서 ID나 lease를 대체하지 않는다.
+  정본 사용이 끝난 준비 자원의 해제는 저장한 allocator로 수행하며 정본 포인터를 다시 읽지 않는다.
+  allocator context 자체는 준비 자원 해제가 끝날 때까지 살아 있어야 한다. 이 API 자체는 파일 로드/registry retain을 하지 않는다.
 - `Prepared.prepare`는 각 문서의 사본에서 실제 역편집과 반대 이력·선택을 준비한다.
   두 번째 문서에서 할당/검증이 실패해도 첫 문서의 정본·선택·Undo/Redo를 바꾸지 않는다.
 - `commit`은 모든 대상의 read_only·revision·epoch·최상위 항목 ID·양쪽 깊이/반대 항목 ID·선택을
-  재검증한다. 하나라도 낡으면 어떤 대상도 교체하지 않는다. 성공 뒤 교체에는 할당이 없다.
+  재검증한다. allocator 신원과 파일 format도 준비 시점과 같아야 한다. 하나라도 낡으면 어떤 대상도 교체하지 않는다. 성공 뒤 교체에는 할당이 없다.
   성공 뒤 재호출을 거절하고, 미사용 준비 자원과 완료 자원의 소유권을 구분해 해제한다.
 - 같은 file/history/선택 owner를 중복 target으로 받지 않는다. 첫 구현은 파일별 독립 항목 하나씩만
   처리하며 같은 group에 여러 항목이 있으면 `GroupedHistory`로 거절한다. 타이핑 묶음의 일부를 되돌리지 않는다.
@@ -52,3 +55,16 @@ UI 게시·공유 뷰 선택/접힘/스크롤 매핑·syntax/LSP 통지·IME·�
   각각 주입한다. 컴파일 뒤 실제 판정 실패와 정상/복원 대조 통과를 요구한다. 제품 체크아웃에 변이를 남기지 않는다.
 
 실행 수치와 결과는 PR 본문에 기록한다. 자동 캡처할 제품 UI 변화가 없는 코어 단계다.
+
+## 추가 검증에서 수정한 내용과 확인한 결과
+
+- 실제 AppSession에서 `next_id`를 최댓값으로 만든 뒤 strict 편집을 호출하면 편집 뒤 기존 이력을
+  비우고 성공으로 반환하는 것을 `HSTH2`로 재현했다. strict 편집 전에 고갈을 거절하도록 수정했다.
+- 준비 자원 cleanup이 정본 allocator를 다시 읽던 의존을 제거했다. allocator를 독립 보관하며,
+  Undo 결산 후와 준비 취소 후 정본을 해제한 뒤에도 준비 자원은 안전하게 해제한다(`HST6`).
+- 준비 후 BOM format 변경이나 다른 준비의 먼저 완료된 Undo는 옛 준비를 거절한다(`HST7`).
+  format 대조를 무력화한 컴파일 가능한 대조군도 이 판정에서 실패한다.
+- 같은 history/selection owner, 낡은 ID/epoch, 유효하지 않은 primary는 A 준비 뒤 B에서 거절해도
+  A를 바꾸지 않는다(`HST8`). 묶인 source 항목과 개별 Redo 폐기도 전체 적용을 거절한다(`HST9`).
+- 40회 Undo/Redo 왕복에 준비 취소를 끼워 원문·CRLF/Unicode·선택·항목 ID를 대조했다(`HST10`).
+  다섯 관점은 도구의 `focused_reviews`와 별도 로그로 재현할 수 있다. 제품 UI 연결 검증은 아니다.

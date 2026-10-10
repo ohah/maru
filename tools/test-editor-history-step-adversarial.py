@@ -22,6 +22,7 @@ cases = [
     ("skip-final-validation", original_step.replace("for (self.items.items) |item| {", "for (self.items.items[0..0]) |item| {", 1), original_history, False),
     ("publish-before-B-ready", original_step.replace("prepared.items.appendAssumeCapacity(try prepareItem(t, direction));", "prepared.items.appendAssumeCapacity(try prepareItem(t, direction));\n            if (i == 0 and targets.len > 1) try prepared.commit();", 1), original_history, False),
     ("recycle-history-id", original_step, original_history.replace("self.epoch +|= 1;", "self.epoch +|= 1;\n        self.next_id = 1;", 1), False),
+    ("skip-file-format-validation", original_step.replace("!std.meta.eql(t.file.format, item.next.format) or ", "", 1), original_history, False),
     ("restored-control", original_step, original_history, True),
 ]
 results = []
@@ -33,10 +34,17 @@ for name, text, hist, passing in cases:
     result = subprocess.run(["mise", "exec", "--", "zig", "test", "judge.zig", "--test-filter", "HST", "--cache-dir", str(root / name / "cache")], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     (root / f"{name}.log").write_text(result.stdout)
     if passing:
-        assert result.returncode == 0 and "All 6 tests passed" in result.stdout, (name, result.stdout[-4000:])
+        assert result.returncode == 0 and "All 11 tests passed" in result.stdout, (name, result.stdout[-4000:])
     else:
         assert result.returncode != 0 and "FAIL (" in result.stdout, (name, result.stdout[-4000:])
     results.append(dict(name=name, exit_code=result.returncode, expected_pass=passing, step_sha256=hashlib.sha256(text.encode()).hexdigest(), history_sha256=hashlib.sha256(hist.encode()).hexdigest()))
     print(f"{name}: verified", flush=True)
-(root / "results.json").write_text(json.dumps(dict(scope="real EditableFile/history; no AppSession/UI or FS writes", results=results), indent=2) + "\n")
+focused = []
+for number, scope in ((6, "cleanup-lifetime"), (7, "format-and-competing-commit"), (8, "identity-and-owner-aliases"), (9, "group-and-redo-invalidation"), (10, "repeated-undo-redo")):
+    result = subprocess.run(["mise", "exec", "--", "zig", "test", "judge.zig", "--test-filter", f"test.HST{number}", "--cache-dir", str(root / f"focused-{number}" / "cache")], cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    (root / f"{scope}.log").write_text(result.stdout)
+    assert result.returncode == 0 and "All 2 tests passed" in result.stdout, (scope, result.stdout[-4000:])
+    focused.append(dict(scope=scope, exit_code=result.returncode))
+    print(f"{scope}: verified", flush=True)
+(root / "results.json").write_text(json.dumps(dict(scope="real EditableFile/history; no AppSession/UI or FS writes", results=results, focused_reviews=focused), indent=2) + "\n")
 print(root / "results.json", flush=True)

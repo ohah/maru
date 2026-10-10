@@ -15,6 +15,7 @@ pub const Target = struct {
 };
 const Item = struct {
     target: Target,
+    resource_allocator: std.mem.Allocator,
     revision: u64,
     from_len: usize,
     to_len: usize,
@@ -29,7 +30,7 @@ const Item = struct {
     consumed: bool = false,
 
     fn deinit(self: *Item) void {
-        const a = self.target.file.allocator;
+        const a = self.resource_allocator;
         a.free(self.before);
         if (!self.consumed) {
             self.next.deinit();
@@ -92,7 +93,8 @@ pub const Prepared = struct {
             _ = try validate(item.target, self.direction);
             const t = item.target;
             const dst = destination(t.state, self.direction);
-            if (t.file.revision != item.revision or source(t.state, self.direction).len != item.from_len or dst.len != item.to_len or
+            if (t.file.allocator.ptr != item.resource_allocator.ptr or t.file.allocator.vtable != item.resource_allocator.vtable or
+                !std.meta.eql(t.file.format, item.next.format) or t.file.revision != item.revision or source(t.state, self.direction).len != item.from_len or dst.len != item.to_len or
                 (if (dst.len == 0) 0 else dst[dst.len - 1].id) != item.to_id or
                 t.selections.primary != item.primary or !std.meta.eql(t.selections.column, item.column) or t.selections.items.len != item.before.len) return error.StaleHistory;
             for (t.selections.items, item.before) |current, old| if (!std.meta.eql(current, old)) return error.StaleSelection;
@@ -146,6 +148,7 @@ fn prepareItem(t: Target, d: Direction) !Item {
     @memcpy(stack[0..dst.len], dst);
     return .{
         .target = t,
+        .resource_allocator = a,
         .revision = t.file.revision,
         .from_len = source(t.state, d).len,
         .to_len = dst.len,
@@ -301,4 +304,117 @@ test "HST5 reset does not recycle ids and saturation rejects old connections" {
     state.epoch = std.math.maxInt(u64);
     state.clear(testing.allocator);
     try testing.expectEqual(std.math.maxInt(u64), state.epoch);
+}
+
+test "HST6 prepared cleanup does not read documents released after commit or cancel" {
+    for ([_]bool{ false, true }) |commit| {
+        var a = try Fixture.init(testing.allocator, "a");
+        var b = try Fixture.init(testing.allocator, "b");
+        var prepared = try Prepared.prepare(testing.allocator, &.{ a.target(.undo), b.target(.undo) }, .undo);
+        if (commit) try prepared.commit();
+        a.deinit();
+        b.deinit();
+        // 정본 수명은 끝났다. cleanup은 준비한 allocator와 독립 자원만 읽어야 한다.
+        a = undefined;
+        b = undefined;
+        prepared.deinit();
+    }
+}
+test "HST7 file format mutation and an intervening completed undo invalidate old preparation" {
+    for (0..3) |mode| {
+        var a = try Fixture.init(testing.allocator, "a\r\n");
+        defer a.deinit();
+        var b = try Fixture.init(testing.allocator, "b\r\n");
+        defer b.deinit();
+        var old = try Prepared.prepare(testing.allocator, &.{ a.target(.undo), b.target(.undo) }, .undo);
+        defer old.deinit();
+        var allocator_changed = testing.FailingAllocator.init(testing.allocator, .{});
+        if (mode == 0) {
+            b.file.format.has_bom = true;
+        } else if (mode == 2) {
+            b.file.allocator = allocator_changed.allocator();
+        } else {
+            var newer = try Prepared.prepare(testing.allocator, &.{ a.target(.undo), b.target(.undo) }, .undo);
+            defer newer.deinit();
+            try newer.commit();
+        }
+        try testing.expectError(error.StaleHistory, old.commit());
+        if (mode == 2) b.file.allocator = testing.allocator;
+        try testing.expectEqualStrings(if (mode != 1) "\xed\x95\x9c\xf0\x9f\x98\x80\r\n" else "a\r\n", a.file.content);
+        if (mode == 0) try testing.expect(b.file.format.has_bom);
+    }
+}
+test "HST8 duplicate owners bad identity and invalid selection reject after preparing A" {
+    for (0..5) |mode| {
+        var a = try Fixture.init(testing.allocator, "a");
+        defer a.deinit();
+        var b = try Fixture.init(testing.allocator, "b");
+        defer b.deinit();
+        var target = b.target(.undo);
+        if (mode == 0) target.state = &a.state;
+        if (mode == 1) target.selections = &a.sels;
+        if (mode == 2) target.expected_id += 1;
+        if (mode == 3) target.expected_epoch += 1;
+        if (mode == 4) b.sels.primary = b.sels.items.len;
+        if (Prepared.prepare(testing.allocator, &.{ a.target(.undo), target }, .undo)) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.UnexpectedPreparation;
+        } else |_| {}
+        try testing.expectEqualStrings("\xed\x95\x9c\xf0\x9f\x98\x80", a.file.content);
+        try testing.expectEqual(@as(usize, 1), a.state.undo_len);
+        try testing.expectEqual(@as(usize, 0), a.state.redo_len);
+    }
+}
+test "HST9 grouped source and discarded redo preserve every untouched document" {
+    var a = try Fixture.init(testing.allocator, "a");
+    defer a.deinit();
+    var b = try Fixture.init(testing.allocator, "b");
+    defer b.deinit();
+    var undo = try Prepared.prepare(testing.allocator, &.{ a.target(.undo), b.target(.undo) }, .undo);
+    defer undo.deinit();
+    try undo.commit();
+    var redo = try Prepared.prepare(testing.allocator, &.{ a.target(.redo), b.target(.redo) }, .redo);
+    defer redo.deinit();
+    b.state.redo[0].deinit(testing.allocator);
+    b.state.redo_len = 0;
+    try testing.expectError(error.StaleHistory, redo.commit());
+    try testing.expectEqualStrings("a", a.file.content);
+    try testing.expectEqual(@as(usize, 1), a.state.redo_len);
+    var mirror_sels = selection.Selections.init(try testing.allocator.dupe(selection.Selection, b.sels.items), 0);
+    defer testing.allocator.free(mirror_sels.items);
+    const original_sels = try testing.allocator.dupe(selection.Selection, b.sels.items);
+    const inverse = try b.file.apply(.{ .changes = &.{.{ .start = 0, .end = 1, .text = "c" }} }, &mirror_sels);
+    b.state.undo = try testing.allocator.realloc(b.state.undo, 2);
+    b.state.undo[0] = .{ .id = try b.state.issueId(), .inverse = inverse, .sels_before = original_sels, .primary_before = 0, .group = 9 };
+    b.state.undo_len = 1;
+    const inverse2 = try b.file.apply(.{ .changes = &.{.{ .start = 0, .end = 1, .text = "d" }} }, &mirror_sels);
+    b.state.undo[1] = .{ .id = try b.state.issueId(), .inverse = inverse2, .sels_before = try testing.allocator.dupe(selection.Selection, b.sels.items), .primary_before = 0, .group = 9 };
+    b.state.undo_len = 2;
+    var restore_a = try Prepared.prepare(testing.allocator, &.{a.target(.redo)}, .redo);
+    defer restore_a.deinit();
+    try restore_a.commit();
+    try testing.expectError(error.GroupedHistory, Prepared.prepare(testing.allocator, &.{ a.target(.undo), b.target(.undo) }, .undo));
+}
+test "HST10 forty alternating transactions preserve text selections and IDs with cancelled previews" {
+    var a = try Fixture.init(testing.allocator, "a\r\n");
+    defer a.deinit();
+    var b = try Fixture.init(testing.allocator, "b\n");
+    defer b.deinit();
+    const a_id = a.state.undo[0].id;
+    const b_id = b.state.undo[0].id;
+    for (0..40) |cycle| {
+        const d: Direction = if (cycle % 2 == 0) .undo else .redo;
+        var cancelled = try Prepared.prepare(testing.allocator, &.{ a.target(d), b.target(d) }, d);
+        cancelled.deinit();
+        var prepared = try Prepared.prepare(testing.allocator, &.{ a.target(d), b.target(d) }, d);
+        defer prepared.deinit();
+        try prepared.commit();
+        try testing.expectEqualStrings(if (d == .undo) "a\r\n" else "\xed\x95\x9c\xf0\x9f\x98\x80\r\n", a.file.content);
+        try testing.expectEqualStrings(if (d == .undo) "b\n" else "\xed\x95\x9c\xf0\x9f\x98\x80\n", b.file.content);
+        const opposite: Direction = if (d == .undo) .redo else .undo;
+        try testing.expectEqual(a_id, source(&a.state, opposite)[0].id);
+        try testing.expectEqual(b_id, source(&b.state, opposite)[0].id);
+        try testing.expectEqual(if (d == .undo) @as(usize, 1) else @as(usize, 7), a.sels.items[0].focus);
+    }
 }

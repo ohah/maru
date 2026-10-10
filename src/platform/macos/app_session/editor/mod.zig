@@ -5349,6 +5349,8 @@ pub fn applyEditAsOneWithUndo(self: *AppSession, term: *Term, changes: []maru.se
     return applyEditAsOneImpl(self, term, changes, true);
 }
 fn applyEditAsOneImpl(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change, require_undo: bool) bool {
+    // 신원 발급도 strict Undo의 사전 준비다. 편집 뒤 고갈을 발견하면 기존 이력을 잃는다.
+    if (require_undo and term.rt.editorDocument().history.next_id == std.math.maxInt(u64)) return false;
     const fallback = require_undo and selections(term).count() == 0;
     var sels = if (fallback) blk: {
         const items = self.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(0)}) catch return false;
@@ -59055,4 +59057,25 @@ test "HSTH1 실제 편집 Undo Redo와 초기화는 항목 신원을 보존하�
     change[0].text = "new";
     try testing.expect(applyEditAsOneWithUndo(fx.session, term, &change));
     try testing.expect(h.undo[h.undo_len - 1].id > id);
+}
+
+test "HSTH2 strict 편집의 신원 고갈은 본문 선택과 기존 Undo를 보존한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "history-exhausted.txt", "foo");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    var change = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 3, .text = "bar" }};
+    try testing.expect(applyEditAsOneWithUndo(fx.session, term, &change));
+    const h = &term.rt.editorDocument().history;
+    const id = h.undo[h.undo_len - 1].id;
+    const epoch = h.epoch;
+    const before_selection = term.rt.editor_selection.?;
+    h.next_id = std.math.maxInt(u64);
+    change[0].text = "bad";
+    try testing.expect(!applyEditAsOneWithUndo(fx.session, term, &change));
+    try testing.expectEqualStrings("bar", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), h.undo_len);
+    try testing.expectEqual(id, h.undo[0].id);
+    try testing.expectEqual(epoch, h.epoch);
+    try testing.expect(std.meta.eql(before_selection, term.rt.editor_selection.?));
 }

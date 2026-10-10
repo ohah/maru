@@ -319,7 +319,9 @@ const testing = std.testing;
 // fake collector snapshot: 창 A(normal,win1)={10 terminal, 11 web}, 창 B(normal,win2)={20 terminal}, quick(win3)={30}.
 const fx_surfaces = [_]cs.SurfaceDto{
     .{ .surface_id = 10, .generation = 0, .title = "shell-a", .window = 1, .tab = 0, .pane = 0, .focused = true, .detail = .{ .terminal = .{ .cwd = "/home/a", .git_branch = "main", .agent = .{ .kind = .claude, .state = .running }, .at_prompt = .not_at_prompt } } },
-    .{ .surface_id = 11, .generation = 0, .title = "docs", .window = 1, .tab = 1, .pane = 0, .focused = false, .detail = .{ .web = .{ .url = "https://x/y", .panel_kind = .markdown, .loading = false, .trust = .trusted } } },
+    // web 11 은 browser 제어 시험의 대상이다 — 앱에서 제어할 수 있는 브라우저 탭으로 둔다(W9-0 전에는 markdown 이었는데,
+    // 앱은 markdown 패널에서 browser.* 를 실행하지 않는다).
+    .{ .surface_id = 11, .generation = 0, .title = "docs", .window = 1, .tab = 1, .pane = 0, .focused = false, .detail = .{ .web = .{ .url = "https://x/y", .panel_kind = .browser, .loading = false, .trust = .untrusted, .controllable = true } } },
     .{ .surface_id = 20, .generation = 2, .title = "shell-b", .window = 2, .tab = 0, .pane = 0, .focused = false, .detail = .{ .terminal = .{ .cwd = "/srv/b", .at_prompt = .at_prompt } } },
     .{ .surface_id = 30, .generation = 0, .title = "quick", .window = 3, .tab = 0, .pane = 0, .focused = false, .detail = .{ .terminal = .{ .at_prompt = .unknown } } },
 };
@@ -670,7 +672,7 @@ test "dispatchAuthenticated(§8.3): 셀렉터가 없어도 read-output 은 안 �
 test "dispatchAuthenticated(§9.6): browser.list → cap·selector 없이 web surface만(ungated 발견, 터미널 제외)" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    // 발견은 ungated — nonce null·selector null이어도 통과(제어와 달리 cap/grant/모달 불요). fx의 web은 surface 11(markdown)뿐.
+    // 발견은 ungated — nonce null·selector null이어도 통과(제어와 달리 cap/grant/모달 불요). fx의 web은 surface 11(browser)뿐.
     const wire = try authDispatch("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.list\"}", null, null, &store);
     defer testing.allocator.free(wire);
     var pm = try cp.parseMessage(testing.allocator, wire);
@@ -681,7 +683,7 @@ test "dispatchAuthenticated(§9.6): browser.list → cap·selector 없이 web su
     try testing.expectEqual(@as(i64, 11), o.get("id").?.integer);
     try testing.expectEqualStrings("https://x/y", o.get("url").?.string);
     try testing.expectEqualStrings("docs", o.get("title").?.string);
-    try testing.expectEqualStrings("markdown", o.get("panel_kind").?.string);
+    try testing.expectEqualStrings("browser", o.get("panel_kind").?.string);
 }
 
 test "dispatchAuthenticated: metadata:all cap(surface 10) → sessions.list 전체(10,11,20,30)" {
@@ -743,7 +745,7 @@ test "dispatchAuthenticated(22차 [1]): cap surface≠anchor는 그 cap scope로
 test "dispatchAuthenticated 5e/1c: browser cap → .browser op; 미인가 cap+pane → needs_grant; browser cap+sessions.list → self-origin" {
     var store: cap.CapabilityStore = .{};
     defer store.deinit(testing.allocator);
-    // cap은 **web surface 11**(fx: web/markdown)에 묶임 — browser cap의 anchor는 target이다.
+    // cap은 **web surface 11**(fx: web/browser)에 묶임 — browser cap의 anchor는 target이다.
     try store.issueForFd(testing.allocator, n_browser, .{ .surface_id = 11, .generation = 0, .scope = .browser });
     try store.issueForFd(testing.allocator, n_all, .{ .surface_id = 11, .generation = 0, .scope = .{ .metadata = .all } });
 

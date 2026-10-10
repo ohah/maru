@@ -2079,15 +2079,19 @@ else
 fi
 
 # ── W9-0: 컨트롤 플레인이 Chromium 탭을 엔진과 함께 알리고, 지원하지 않는 명령은 확인 모달 전에 답한다 ──────────────
-# `maru browser list` 가 이 탭을 engine=chromium(지원 명령 없음)으로 보이고, `maru browser navigate` 는 확인 모달을 띄우지 않고
-# 곧바로 -32008 unsupported_by_engine 으로 답해야 한다(예전엔 모달을 승인한 뒤 실행 단계에서 실패). 엔진 검사는 허용 판정보다
-# 앞이라 pane 밖(이 대본)에서 불러도 같다 — 모달이 떴다면 결정하는 사람이 없어 응답이 시간 초과로 끝난다.
+# 실제 앱에서 `maru browser list` 가 이 탭을 engine=chromium(지원 명령 없음)으로 보이고, `maru browser navigate` 가 허용
+# 판정이 아니라 엔진 검사의 답(-32008 unsupported_by_engine)을 받는지 본다 — 엔진 검사가 허용 판정보다 앞이다. 이 대본은
+# pane 밖이라 예전 코드에서도 모달은 뜨지 않고 unauthorized 를 받았다. 「pane 안의 호출자에게 모달을 띄우기 전에 답한다」는
+# control_browser 의 W9-0 단위 시험이 본다.
 cli_bin="$PWD/zig-out/bin/maru"
-if [ -x "$cli_bin" ]; then
+# 엔진 칸을 모르는 옛 CLI 면 이 단계를 판정할 수 없다(목록 줄에 engine= 이 없다) — 건너뛴다고 알린다.
+if [ -x "$cli_bin" ] && "$cli_bin" browser --help 2>&1 | grep -q 'title, engine'; then
     rm -rf "$root/home" && mkdir -p "$root/home"
     printf 'sleep 14000\n' > "$root/w90.txt"
+    # 기본 설정(개발자 셸의 MARU_CONFIG 를 물려받지 않게 빈 설정 파일을 준다).
+    printf '# W9-0 smoke: defaults\n' > "$root/w90.conf"
     env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
-        MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/solid" \
+        MARU_CONFIG="$root/w90.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/solid" \
         MARU_MACOS_APP_SMOKE_MS=16000 MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel MARU_WEB_OSR_TEST_INPUT="$root/w90.txt" \
         "$app" > "$root/app-w90.log" 2>&1 &
     w90_pid=$!
@@ -2102,11 +2106,11 @@ if [ -x "$cli_bin" ]; then
     grep -q 'engine=chromium (browser commands not supported yet)' "$root/w90-list" \
         || fail "the Chromium tab was not listed with its engine ($(tr '\n' ' ' < "$root/w90-list"))"
     echo "PASS the Chromium tab is listed with engine=chromium and no supported commands yet"
-    grep -q '(-32008)' "$root/w90-nav" && [ "$w90_elapsed" -lt 5 ] \
-        || fail "navigate on the Chromium tab did not answer unsupported_by_engine before any dialog ($w90_elapsed s · $(tr '\n' ' ' < "$root/w90-nav"))"
-    echo "PASS navigate on the Chromium tab answered -32008 without a confirmation dialog ($w90_elapsed s)"
+    grep -q '(-32008) \[engine=chromium\]' "$root/w90-nav" \
+        || fail "navigate on the Chromium tab was not answered by the engine check ($w90_elapsed s · $(tr '\n' ' ' < "$root/w90-nav"))"
+    echo "PASS navigate on the Chromium tab was answered by the engine check (-32008, engine=chromium) before the permission check ($w90_elapsed s)"
 else
-    echo "WARN W9-0 stage skipped: build the maru cli first"
+    echo "WARN W9-0 stage skipped: build the current maru cli first (zig build)"
 fi
 
 # ── 종료 및 세션 끝내기: 셸이 끝났거나 여럿이어도 session host 가 죽지 않고 셸을 다 끝낸다 ─────────────────────

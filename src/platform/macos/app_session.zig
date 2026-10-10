@@ -18849,8 +18849,11 @@ pub const AppSession = struct {
                                     // "격리 config를 쓰는가"다. FP16에서 `.html`/`.pdf` 파일 Term도 여기서는 untrusted가 맞으므로
                                     // 파일 entry 제외 조건을 **적용하지 않는다**.
                                     .trust = if (term.web_panel_kind == .browser) .untrusted else .trusted, // §8.1
-                                    // W9-0: 탭 단위 엔진 결정(브라우저가 만들어졌는지와 무관 — `isOsrSurface` 는 만들어진 뒤에만 참이다).
+                                    // W9-0: 탭 단위 엔진 결정(한 번도 배치되지 않은 탭도 — `isOsrSurface` 는 처음 배치되어 OSR
+                                    // 레코드가 생긴 뒤에만 참이다).
                                     .engine = if (web_ops.isOsrTerm(term)) .chromium else .webkit,
+                                    // markdown·파일 뷰는 browser.* 를 실행하지 않는다(Swift `drainBrowserOps` 가 거절).
+                                    .controllable = web_ops.isBrowserTerm(term),
                                 },
                             },
                         });
@@ -71901,6 +71904,47 @@ fn markRemoteForCloseKindTest(term: *Term, owner: *anyopaque) void {
         const vtable: Source.VTable = .{ .render_snapshot = snapshot, .lock = lock, .unlock = lock };
     };
     term.surface.remote = .{ .ctx = owner, .vtable = &NoScreen.vtable };
+}
+
+test "W9-0: 한 번도 보이지 않아 Chromium 브라우저가 아직 없는 browser 탭도 컨트롤 플레인에는 chromium 으로 보인다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const saved = web_osr.setDecidedForTest(true);
+    defer _ = web_osr.setDecidedForTest(saved);
+    const session = try initSmokeSessionTwoTerms(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    try pane_ops.newWebTermInActivePane(session, .browser);
+    const web_term = pane_ops.activePane(session).activeTerm();
+    const id = web_term.surfaceId();
+    // 화면에 배치하지 않았다 — OSR 레코드가 없다(예전 판정 `isOsrSurface` 는 거짓이었다).
+    try std.testing.expect(!web_ops.isOsrSurface(id));
+    // 같은 pane 의 markdown 패널과 `.html` 파일 뷰 — 브라우저 탭이 아니라 browser.* 를 실행할 수 없다(엔진은 webkit).
+    // 파일 HTML 은 `web_panel_kind` 가 browser 라 패널 종류만 보는 판정은 이것을 놓친다.
+    try pane_ops.newWebTermInActivePane(session, .markdown);
+    const md_id = pane_ops.activePane(session).activeTerm().surfaceId();
+    const html_open = try pane_ops.openFileTermInActivePane(session, "/tmp/w90-file-view.html", .html);
+    try std.testing.expectEqual(maru.session.control_surface.PanelKind.browser, switch (html_open.term.web_panel_kind) {
+        .markdown => maru.session.control_surface.PanelKind.markdown,
+        .browser => .browser,
+    });
+    const html_id = html_open.term.surfaceId();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var surfaces: std.ArrayList(maru.session.SurfaceDto) = .empty;
+    var windows: std.ArrayList(maru.session.WindowMembershipSnapshot) = .empty;
+    try session.collectSessionInto(arena.allocator(), 1, .normal, &surfaces, &windows);
+    var found: usize = 0;
+    for (surfaces.items) |dto| if (dto.surface_id == id or dto.surface_id == md_id or dto.surface_id == html_id) switch (dto.detail) {
+        .web => |w| {
+            const is_browser = dto.surface_id == id;
+            try std.testing.expectEqual(if (is_browser) maru.session.control_surface.WebEngine.chromium else .webkit, w.engine);
+            try std.testing.expectEqual(is_browser, w.controllable);
+            found += 1;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 3), found);
 }
 
 test "1g: pane 이 띄운 셸을 붙은 프로세스로 삼으면 조상 사슬 판정이 그 pane 을 찾는다 — 셸의 세션 번호 = 뿌리 pid" {

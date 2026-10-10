@@ -4330,11 +4330,16 @@ pub fn build(b: *std.Build) void {
     const run_editor_open_tests = b.addRunArtifact(editor_open_tests);
     b.step("test-editor-open-cli", "Run one-file CLI arguments, URL encoding and allocation failure tests").dependOn(&run_editor_open_tests.step);
     test_step.dependOn(&run_editor_open_tests.step);
-    const cli_failure_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
-        .root_source_file = b.path("src/cli_failure_contract_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    }) });
+    const cli_failure_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/cli_failure_contract_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            // Incident codec tests include a POSIX fork/getpid ownership check.
+            // Darwin links its system library implicitly; Linux needs this explicitly.
+            .link_libc = target.result.os.tag == .linux or target.result.os.tag == .macos,
+        }),
+    });
     const run_cli_failure_tests = b.addRunArtifact(cli_failure_tests);
     b.step("test-cli-failure-contract", "Run CLI argument and response outcome regression tests").dependOn(&run_cli_failure_tests.step);
     test_step.dependOn(&run_cli_failure_tests.step);

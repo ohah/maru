@@ -315,3 +315,51 @@ hello 출력도 함께 기록됐다(/tmp/maru-events-old-negative-lgnmu8xr).
 최종 실제 CLI 검증 5회에서 매회 788개 프로세스 검사가 통과했다. 기본 CLI CI 게이트가
 같은 중복 거부와 정상 스트림 대조군을 실행한다. 구현은 완료됐고 최종 CI 결과는 PR에서
 추적한다. 도움말의 기존 순서와 boolean stdio 반복은 유지한다.
+
+## incidents limit 단일 지정 계약
+
+사용자 승인된 후속 작업: incidents list의 --limit은 한 번만 지정한다. 같은 값과 다른 값,
+앞자리 0 및 기본값과 같은 값 반복도 usage 오류(exit 2)로 거부한다. parser 단계에서
+디렉터리 열거·incident 파일 읽기·digest 검사 전에 종료한다. 기존 --limit N 문법과
+양수 usize 상한, 생략 시 default_limit, boolean --json 반복은 유지한다. --limit=N은 기존처럼
+지원하지 않는다. help의 기존 순서 판정을 유지해 중복보다 help가 먼저면 exit 0 안내,
+중복이 먼저면 오류다. 새로운 문법/종료 코드 정책은 추가하지 않는다.
+
+검증 계획: private HOME/cache의 유효한 incident 봉투 여러 개를 사용해 실제 CLI가 최신순으로
+단일 limit만큼 조회하는지 대조한다. 기본 조회·빈 목록·손상된 artifact 처리도 유지한다.
+중복은 stdout 없이 즉시 실패하고 파일 조회 진단에 도달하지 않는지 확인한다. artifact bytes와
+mode는 보존하고 기존 실제 process CI gate에 포함한다. 방어 제거 변이와 정상/동등 대조군도
+확인한다. 부모 PR #4288은 최종 CI 통과 후 머지됐고, 이 수정은 최신 main으로 리베이스했다.
+
+구현은 limit_seen으로 첫 지정 여부를 기억한다. default_limit과 같은 값을 첫 인자로 준
+경우도 명시적 지정이며, 중복은 DuplicateLimit으로 값 소비 전에 거부한다. main의 기존
+usage 경로(exit 2)와 인자 순서에 따른 help 동작을 유지한다.
+
+검증 도구의 현재 encoding_version=1 golden 봉투 3개는 Maru EmergencyRing.publish로
+생성했다. Python에서 Blake3 writer를 재구현하거나 새 의존성을 추가하지 않는다. 각 봉투의
+sequence/timestamp는 1, 2, 3이며 파일 mtime은 반대로 설정해 봉인된 시간의 최신순 정렬을
+독립 기대값으로 검사한다. 정상 단일 limit·기본값·최대 usize, 빈/없는 디렉터리, wrong-size와
+digest 손상 제외를 실제 CLI에서 대조한다. 중복 요청은 stdout 없이 exit 2로 실패하고 없는
+디렉터리 진단에도 도달하지 않는다. artifact bytes/mode는 보존된다.
+
+Debug/ReleaseFast 순수 판정자는 344 passed/1 skipped로 통과했다. 중복 방어를 무력화한
+변형은 컴파일 후 새 테스트에서 실패하고 동등 조건 변형은 통과했다
+(/tmp/maru-incidents-mutations-50fkwv_b/results.json). 수정 전 native CLI도 새 process
+판정자에서 중복 요청의 exit 0과 파일 조회 진단으로 실패했다
+(/tmp/maru-incidents-old-negative-rixonaa3). 생성·재현 결과 파일은 저장소에 커밋하지 않는다.
+
+실제 CLI 검증은 독립 HOME/cache에서 5회 반복해 매회 936개 검사가 통과했다.
+새 limit 검사들은 기존 CI process 게이트에 포함된다. 정상 조회와 오류의 기대값은 고정
+sequence 순서로 대조하며 incident codec/digest 자체를 이번 수정에서 변경하지 않는다.
+
+## incidents CI libc 링크 보완
+
+PR #4289의 Ubuntu check는 새 incidents import가 수집한 connection_incident의 POSIX
+fork/getpid 소유권 테스트를 컴파일하며 실패했다. cli_failure_tests에 libc 링크 선언이
+없었고 macOS에서는 시스템 라이브러리의 암묵적 링크 때문에 로컬 검증으로 드러나지 않았다.
+Linux target 컴파일에서 같은 오류를 재현했다. Linux/macOS의 해당 테스트 모듈에 libc를
+명시적으로 링크한다. core 테스트를 빼거나 skip하지 않으며 제품 parser/writer는 바꾸지 않는다.
+Linux target의 링크 누락 오류를 수정 전 컴파일에서 재현하고, libc 명시 후 같은 모듈을
+컴파일했다. Ubuntu 24.04 ARM64 컨테이너에 해당 테스트 실행 파일과 소스를 읽기 전용으로
+전달해 실제 Linux POSIX fork 검증을 포함한 344개 테스트가 통과했다(1개 건너뜀).
+이 로컬 검증은 실행 중 네트워크를 끄고 private tmp만 쓰며, CI 의존성이나 사용자 설정은 바꾸지 않는다.

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real CLI failure contracts using private HOME/files and a fake endpoint."""
 import argparse
+import base64
 import itertools
 import json
 import os
@@ -9,9 +10,20 @@ import selectors
 import socket
 import shutil
 import subprocess
+import struct
 import tempfile
 import threading
 import time
+
+
+# Current version-1 golden envelopes, produced by EmergencyRing.publish from
+# ConnectionIncident records with sequence/timestamp 1, 2, 3. Do not duplicate
+# the Blake3 writer in Python; decoder output and limit order have independent oracles.
+INCIDENT_ENVELOPES = (
+    'AQABAdAAAAABAAAAAAAAAAEAAQUBAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAMAAAAAAAAABAAAAAAAAAABAAABAQEBAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA9DjxenItzrDOU+U/t/c7/8LZCwJFvgZdJegYO4hf4yQ==',
+    'AQABAdAAAAACAAAAAAAAAAEAAQUBAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAMAAAAAAAAABAAAAAAAAAABAAABAQEBAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACVXE31mCLtHtWjkjcC9xZyrNiF06zVocDBkzIWcMaxww==',
+    'AQABAdAAAAADAAAAAAAAAAEAAQUBAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAADAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAMAAAAAAAAABAAAAAAAAAABAAABAQEBAQEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAwAAAAAAAAAAAAAAAAAAAAMAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD6fRWDMpfnIOIJOejEF8RMdXqIVrI8iPiwVl84s00Fyg==',
+)
 
 
 def verify(cli, root):
@@ -228,6 +240,57 @@ def verify(cli, root):
     check_stream(['--stdio', '--heartbeat-ms=0', '--resume='], ['first', 'second'], False)
     check_stream(['--heartbeat-ms=200', f'--resume=a:{len(first_line)}'], ['second'], True)
     check_stream(['--heartbeat-ms=200', f'--resume=a:{len(first_line + second_line)}'], [], True)
+    incident_dir = root / 'cache/maru/incidents'
+    maximum_limit = str((1 << (8 * struct.calcsize('P'))) - 1)
+
+    def reject_incident_limits():
+        for first in ['1', '20', '01', maximum_limit]:
+            for second in ['1', '2', '20', '01', maximum_limit, '0', '', 'bad']:
+                for args in [['--limit', first, '--limit', second],
+                             ['--json', '--limit', first, '--json', '--limit', second]]:
+                    p = run(['incidents', 'list', *args], 2)
+                    assert not p.stdout and 'specify once' in p.stderr
+                    assert 'no incident directory' not in p.stderr
+        p = run(['incidents', 'list', '--limit', '1', '--limit'], 2)
+        assert not p.stdout
+
+    # Missing directory diagnostics would expose a caller that started I/O before rejection.
+    reject_incident_limits()
+    missing = run(['incidents', 'list', '--json'], 0)
+    assert not missing.stdout and 'no incident directory' in missing.stderr
+    incident_dir.mkdir(parents=True)
+    assert 'no incident records' in run(['incidents', 'list'], 0).stdout
+    assert not run(['incidents', 'list', '--json'], 0).stdout
+    for index, blob in enumerate(INCIDENT_ENVELOPES, 1):
+        path = incident_dir / f'item-{index}.incident'
+        path.write_bytes(base64.b64decode(blob))
+        # Deliberately reverse filesystem time: the sealed record time owns ordering.
+        os.utime(path, (1000 - index, 1000 - index))
+    (incident_dir / 'bad-size.incident').write_bytes(b'BROKEN')
+    corrupt = bytearray(base64.b64decode(INCIDENT_ENVELOPES[0]))
+    corrupt[-1] ^= 1
+    (incident_dir / 'bad-digest.incident').write_bytes(corrupt)
+    before = {p.name: (p.stat().st_mode, p.read_bytes()) for p in incident_dir.iterdir()}
+    reject_incident_limits()
+    for flag in ['--help', '-h']:
+        run(['incidents', 'list', '--limit', '1', flag, '--limit', '2'], 0)
+        p = run(['incidents', 'list', '--limit', '1', '--limit', '2', flag], 2)
+        assert not p.stdout
+    for flags, sequences in [([], [3, 2, 1]), (['--limit', '1'], [3]),
+                             (['--limit', '2'], [3, 2]), (['--limit', '01'], [3]),
+                             (['--limit', '20'], [3, 2, 1]), (['--limit', maximum_limit], [3, 2, 1]),
+                             (['--json'], [3, 2, 1])]:
+        p = run(['incidents', 'list', '--json', *flags], 0)
+        rows = [json.loads(line) for line in p.stdout.splitlines()]
+        assert [row['sequence'] for row in rows] == sequences, rows
+    text = run(['incidents', 'list', '--limit', '2'], 0).stdout
+    assert '2 record(s) shown of 3' in text and '2 file(s) rejected' in text, text
+    for flags in [['--limit', '0'], ['--limit', str(int(maximum_limit) + 1)], ['--limit=1']]:
+        p = run(['incidents', 'list', *flags], 2)
+        assert not p.stdout
+    after = {p.name: (p.stat().st_mode, p.read_bytes()) for p in incident_dir.iterdir()}
+    assert before == after, 'incident queries changed artifact bytes or modes'
+
     control = root / 'cache/maru/control'
     control.mkdir(parents=True)
     listener = socket.socket(socket.AF_UNIX)

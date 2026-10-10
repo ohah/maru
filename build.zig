@@ -5452,6 +5452,12 @@ pub fn build(b: *std.Build) void {
     const apply_step = b.step("test-editor-project-replace-apply", "Validate single document replace apply save Undo and failed preparation");
     apply_step.dependOn(&run_apply_host.step);
     apply_step.dependOn(&run_replace_preview.step);
+    const linked_history_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LHG"} });
+    const run_linked_history = b.addRunArtifact(linked_history_tests);
+    run_linked_history.addArg("--maru-expect-tests=15");
+    const linked_history_step = b.step("test-editor-linked-history", "Run linked document edits and actual Undo Redo input judges");
+    linked_history_step.dependOn(&run_linked_history.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_linked_history.step);
     const history_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.HSTH"} });
     const run_history_host = b.addRunArtifact(history_host_tests);
     run_history_host.addArg("--maru-expect-tests=6");
@@ -5486,6 +5492,10 @@ pub fn build(b: *std.Build) void {
     const run_history_step = b.addRunArtifact(history_step_tests);
     run_history_step.addArg("--maru-expect-tests=33");
     history_step.dependOn(&run_history_step.step);
+    const linked_core_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{".test.LHT"} });
+    const run_linked_core = b.addRunArtifact(linked_core_tests);
+    run_linked_core.addArg("--maru-expect-tests=29");
+    linked_history_step.dependOn(&run_linked_core.step);
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));
     editor_test_step.dependOn(&run_editor_core_tests.step);

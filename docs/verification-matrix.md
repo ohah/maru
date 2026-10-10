@@ -4157,3 +4157,10 @@ namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 �
 프로젝트 검색 결과 탭의 사본 수명·낡은 이동 거절·저장/복원 제외·준비 OOM은 `test-editor-project-replace-preview`의 RPV4~8을 따른다([범위](plans/editor-project-search-pane.md)). 제품 Metal 결과 탭 캡처는 PR 본문에 연결하며 물리 후보창·VoiceOver 완료로 해석하지 않는다.
 
 프로젝트 바꾸기의 열린 문서 적용·CAS 자동 저장·단일 Undo·공유 뷰·준비 할당 실패는 `test-editor-project-replace-apply`를 따른다([범위](plans/editor-project-replace-apply.md)). 저장 실패는 본문 적용 실패와 구분하고, 외부 파일 충돌 시 편집과 Undo를 유지한다.
+
+여러 열린 문서 연결 편집·Undo/Redo는 **같은 창 구현**이다. `test-editor-linked-history`의
+`LHT1`~`LHT6`와 `LHG1`~`LHG11`이 취소/현재/전체, 후속 편집·Redo 폐기·마지막 뷰 닫힘,
+확인 뒤 상태 변화, 공유 뷰, IME 거절, 모든 준비 할당 실패, 상한과 신원 고갈을 검사한다.
+제품 AppKit 입력·Confirm 버튼·Metal 캡처는 `tools/editor-linked-history-app/run.py`로 실행한다.
+검색 배치 UI·닫힌 파일 로드·기존 WorkspaceEdit 통합·자동 저장·다른 창 전체 게이트와 물리 IME는
+이 완료 범위에 포함하지 않는다([계획](plans/editor-history-transaction.md)).

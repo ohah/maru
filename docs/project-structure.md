@@ -615,5 +615,8 @@ LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forg
 `preview.zig`가 요청·취소·문서 로드·Undo/저장 결과를 연결하며, L2 Plan과 기존 저장 계약은 재사용한다.
 
 에디터 이력 자원은 `src/session/editor/history.zig`, 여러 문서 사전 준비·결산은
-`src/session/editor/history/step.zig`가 소유한다. 후자는 OS·문서 로드·뷰 게시를 하지 않는다.
+`src/session/editor/history/step.zig`가 소유한다. `history/forward.zig`는 forward 편집을 준비하고,
+registry 소유 `history/links.zig`는 작업/항목 신원을 연결한다. 이 중립 모듈은 OS·문서 로드·뷰 게시를 하지 않는다.
+`src/platform/macos/app_session/editor/history.zig`가 같은 창의 열린 문서와 Confirm·Undo/Redo를 연결하고
+`editor/shared_edit.zig`가 모든 뷰의 사전 준비·게시·통지를 정산한다.
 계약과 미연결 범위는 [Undo/Redo 사전 준비 계획](plans/editor-history-transaction.md)을 따른다.

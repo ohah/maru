@@ -2943,6 +2943,7 @@ pub const PendingFilePanelClose = struct {
 };
 
 const PendingConfirm = union(enum) {
+    linked_history: editor_ops.linked_history.Pending,
     none,
     close: PendingClose,
     reset,
@@ -10584,7 +10585,7 @@ pub const AppSession = struct {
             .untitled_overwrite, .untitled_where, .untitled_remote_overwrite => self.pending_untitled_save = .{},
             // **저장 충돌의 취소는 아무 일도 안 한다**(§4) — 디스크도 버퍼도 그대로다. 들고 있는
             // 것이 surface id 하나라 비울 것도 없다.
-            .none, .close, .reset, .file_conflict_reload, .save_conflict => {},
+            .none, .close, .reset, .file_conflict_reload, .save_conflict, .linked_history => {},
         }
         self.pending_confirm = .none;
     }
@@ -13258,6 +13259,7 @@ pub const AppSession = struct {
                     // **`primary` = 비교**(C1b — §4). 셋 중 **아무것도 버리지 않는 유일한 선택**이라
                     // 여기 둔다: 상자는 열 때 `primary` 에 포커스를 두므로 Enter 가 이것을 실행한다.
                     .save_conflict => |surface_id| editor_conflict_ops.confirmCompare(self, surface_id),
+                    .linked_history => |pending| editor_ops.linked_history.choose(self, pending, false),
                     .none => {},
                 }
             },
@@ -13282,6 +13284,8 @@ pub const AppSession = struct {
                 } else if (owner == .lsp_trust_manage) {
                     // **`alternate` = 잊기**(허용된 저장소의 관리 상자 — `primary` 는 철회).
                     editor_ops.lsp_client.answerManage(self, .alternate);
+                } else if (owner == .linked_history) {
+                    editor_ops.linked_history.choose(self, owner.linked_history, true);
                 } else if (owner == .save_conflict) {
                     // **`alternate` = 덮어쓰기**(C1b 가 `primary` 를 비교로 올렸다 — §4). CAS 를
                     // 건너뛰는 그 길이고, 부르는 자리는 이것 하나다.

@@ -110,6 +110,7 @@ pub const brackets_client = @import("brackets.zig");
 pub const guides_client = @import("guides.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
+pub const linked_history = @import("history.zig");
 pub const workspace_edit_client = @import("workspace_edit.zig");
 
 /// 중립 문서 상태의 facade alias. 파일을 여는 작업은 이 platform 모듈이 맡는다.
@@ -8308,7 +8309,7 @@ const undo_group_gap_ms: u64 = 500;
 ///
 /// 무제한으로 두면 긴 세션에서 메모리가 누적된다 — §3.3이 delta를 고른 이유가 그것인데, 스택
 /// 자체에 상한이 없으면 같은 문제가 한 층 위에서 돌아온다.
-const undo_stack_limit: usize = 2048;
+const undo_stack_limit: usize = maru.session.editor.history.stack_limit;
 
 /// **묶음을 끊는다** — 커서가 편집 아닌 이유로 움직였을 때 호출한다(클릭·다음 일치 추가).
 ///
@@ -8454,6 +8455,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
     if (term.kind != .editor) return false;
     if (term.rt.editor_diff != null) return false;
     if (term.rt.editorDocument().opened == null) return false;
+    if (linked_history.attempt(self, term, if (is_undo) .undo else .redo)) |handled| return handled;
 
     const from_len = if (is_undo) &term.rt.editorDocument().history.undo_len else &term.rt.editorDocument().history.redo_len;
     if (from_len.* == 0) return false;
@@ -9139,10 +9141,13 @@ fn mapIMEProjectionOffset(offset: usize, replacement: maru.session.editor.text_i
 /// 제품의 커서들을 `Selections`(L2가 요구하는 모양)로 옮긴다. **문서 순서로 정렬해서** 준다 —
 /// `Selections.init`이 그것을 불변식으로 강제한다(편집을 뒤에서부터 적용하는 전제, §3.2).
 fn selectionsForEdit(self: *AppSession, term: *Term) ?maru.session.editor.selection.Selections {
+    return snapshotSelections(self.allocator, term) catch null;
+}
+pub fn snapshotSelections(allocator: std.mem.Allocator, term: *Term) !maru.session.editor.selection.Selections {
     var iter = selections(term);
     const n = iter.count();
-    if (n == 0) return null;
-    const items = self.allocator.alloc(editor_selection.Selection, n) catch return null;
+    if (n == 0) return error.NoSelection;
+    const items = try allocator.alloc(editor_selection.Selection, n);
     var i: usize = 0;
     while (iter.next()) |sel| {
         items[i] = sel;
@@ -9171,7 +9176,7 @@ fn takeSharedSelectionBuffer(self: *AppSession, term: *Term, count: usize) ?[]ed
     return null;
 }
 
-fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor.selection.Selections) void {
+pub fn writeBackSelections(self: *AppSession, term: *Term, sels: maru.session.editor.selection.Selections) void {
     term.rt.editor_selection = sels.primarySelection();
     const extras_len = sels.items.len - 1;
     if (extras_len == 0) {
@@ -59078,4 +59083,341 @@ test "HSTH2 strict 편집의 신원 고갈은 본문 선택과 기존 Undo를 �
     try testing.expectEqual(id, h.undo[0].id);
     try testing.expectEqual(epoch, h.epoch);
     try testing.expect(std.meta.eql(before_selection, term.rt.editor_selection.?));
+}
+
+test "LHG1 두 열린 문서를 한 작업으로 편집하고 Cmd Z 선택으로 함께 Undo Redo한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "linked-a.txt", "aaa\n");
+    const b = try undoFixture(&fx, testing.allocator, "linked-b.txt", "bbb\n");
+    a.rt.editor_selection = editor_selection.Selection.at(1);
+    b.rt.editor_selection = editor_selection.Selection.at(2);
+    _ = fx.session.activateExistingFileTerm(a);
+    const operation = try linked_history.apply(fx.session, &.{
+        .{ .term = a, .changes = &.{.{ .start = 0, .end = 3, .text = "a\nlong" }} },
+        .{ .term = b, .changes = &.{.{ .start = 0, .end = 3, .text = "b\nlong" }} },
+    });
+    try testing.expect(operation != 0);
+    try testing.expectEqualStrings("a\nlong\n", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("b\nlong\n", b.rt.editorDocument().opened.?.file.content);
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true } });
+    try testing.expect(fx.session.chrome_host.confirm.open);
+    try testing.expectEqualStrings("a\nlong\n", a.rt.editorDocument().opened.?.file.content);
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqualStrings("aaa\n", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("bbb\n", b.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), a.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 0), b.rt.editor_selection.?.focus); // 다른 문서는 현재 커서를 매핑한다.
+    _ = try fx.session.handleKeyEvent(.{ .key = .{ .char = 'z' }, .modifiers = .{ .command = true, .shift = true } });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    try testing.expectEqualStrings("a\nlong\n", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("b\nlong\n", b.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), a.rt.editorDocument().history.undo_len);
+}
+
+fn linkedFixtureEdit(fx: *PaneFixture, a: *Term, b: *Term) !u64 {
+    _ = fx.session.activateExistingFileTerm(a);
+    a.rt.editor_selection = editor_selection.Selection.at(1);
+    b.rt.editor_selection = editor_selection.Selection.at(2);
+    return linked_history.apply(fx.session, &.{
+        .{ .term = a, .changes = &.{.{ .start = 0, .end = 3, .text = "AAA" }} },
+        .{ .term = b, .changes = &.{.{ .start = 0, .end = 3, .text = "BBB" }} },
+    });
+}
+fn linkedFixtureClose(fx: *PaneFixture, term: *Term) void {
+    for (fx.session.tabs.items, 0..) |tab, ti| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |member, i| {
+        if (member == term) {
+            term_ops.closeTermAt(fx.session, ti, pane, i);
+            return;
+        }
+    };
+    unreachable;
+}
+fn linkedFixtureChoose(fx: *PaneFixture, current: bool) !void {
+    const pending = fx.session.pending_confirm.linked_history;
+    // 선택 버튼의 dispatch 뒤 컴포넌트가 닫히는 순서를 재현한다.
+    fx.session.chrome_host.confirm.open = false;
+    fx.session.pending_confirm = .none;
+    linked_history.choose(fx.session, pending, current);
+}
+test "LHG2 취소와 현재 문서 선택은 다른 문서와 이력을 보존한다" {
+    for ([_]bool{ false, true }) |current| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "choice-a.txt", "aaa");
+        const b = try undoFixture(&fx, testing.allocator, "choice-b.txt", "bbb");
+        const id = try linkedFixtureEdit(&fx, a, b);
+        try testing.expect(undoEdit(fx.session, a));
+        if (!current) {
+            _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+            try testing.expectEqualStrings("AAA", a.rt.editorDocument().opened.?.file.content);
+            try testing.expect(fx.session.editor_documents.links.get(id) != null);
+        } else {
+            try linkedFixtureChoose(&fx, true);
+            try testing.expectEqualStrings("aaa", a.rt.editorDocument().opened.?.file.content);
+            try testing.expect(fx.session.editor_documents.links.get(id) == null);
+            try testing.expect(redoEdit(fx.session, a));
+            try testing.expectEqualStrings("AAA", a.rt.editorDocument().opened.?.file.content);
+        }
+        try testing.expectEqualStrings("BBB", b.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 1), b.rt.editorDocument().history.undo_len);
+        try testing.expectEqual(@as(usize, 0), b.rt.editorDocument().history.redo_len);
+    }
+}
+test "LHG3 다른 문서의 후속 편집과 Redo 폐기는 현재 문서만 분리한다" {
+    for ([_]bool{ false, true }) |redo_discard| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "follow-a.txt", "aaa");
+        const b = try undoFixture(&fx, testing.allocator, "follow-b.txt", "bbb");
+        const id = try linkedFixtureEdit(&fx, a, b);
+        if (redo_discard) {
+            try testing.expect(undoEdit(fx.session, a));
+            try linkedFixtureChoose(&fx, false);
+        }
+        b.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, b, "!"));
+        try testing.expect(if (redo_discard) redoEdit(fx.session, a) else undoEdit(fx.session, a));
+        try testing.expectEqualStrings(if (redo_discard) "AAA" else "aaa", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings(if (redo_discard) "bbb!" else "BBB!", b.rt.editorDocument().opened.?.file.content);
+        try testing.expect(fx.session.editor_documents.links.get(id) == null);
+        try testing.expect(!fx.session.chrome_host.confirm.open);
+    }
+}
+test "LHG4 확인창 이후 포커스나 다른 문서 이력이 바뀌면 전체 적용을 거절한다" {
+    for ([_]bool{ false, true }) |focus| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "stale-a.txt", "aaa");
+        const b = try undoFixture(&fx, testing.allocator, "stale-b.txt", "bbb");
+        _ = try linkedFixtureEdit(&fx, a, b);
+        try testing.expect(undoEdit(fx.session, a));
+        if (focus) _ = fx.session.activateExistingFileTerm(b) else {
+            b.rt.editor_selection = editor_selection.Selection.at(3);
+            try testing.expect(insertText(fx.session, b, "!"));
+        }
+        try linkedFixtureChoose(&fx, false);
+        try testing.expectEqualStrings("AAA", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings(if (focus) "BBB" else "BBB!", b.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.redo_len);
+    }
+}
+test "LHG5 공유 뷰의 현재 커서를 매핑하고 마지막 뷰 닫힘만 연결을 무효화한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "shared-linked-a.txt", "aaa");
+    const b = try undoFixture(&fx, testing.allocator, "shared-linked-b.txt", "bbb");
+    const peer = try openSharedViewInActivePane(fx.session, a);
+    peer.rt.editor_selection = editor_selection.Selection.at(3);
+    const id = try linkedFixtureEdit(&fx, a, b);
+    try testing.expectEqualStrings("AAA", peer.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 3), peer.rt.editor_selection.?.focus);
+    linkedFixtureClose(&fx, peer);
+    try testing.expect(!fx.session.editor_documents.links.get(id).?.invalid);
+    linkedFixtureClose(&fx, b);
+    _ = fx.session.activateExistingFileTerm(a);
+    try testing.expect(fx.session.editor_documents.links.get(id).?.invalid);
+    try testing.expect(undoEdit(fx.session, a));
+    try testing.expectEqualStrings("aaa", a.rt.editorDocument().opened.?.file.content);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try testing.expect(fx.session.editor_documents.links.get(id) == null);
+}
+test "LHG6 source IME와 공유 peer의 조합은 두 문서 전체를 보존한다" {
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "ime-linked-a.txt", "aaa");
+        const b = try undoFixture(&fx, testing.allocator, "ime-linked-b.txt", "bbb");
+        const peer = try openSharedViewInActivePane(fx.session, a);
+        _ = fx.session.activateExistingFileTerm(a);
+        if (mode == 0) fx.session.ime_active = true;
+        if (mode == 1) fx.session.ime_editor_commit_pending = true;
+        if (mode == 2) peer.rt.editor_preedit = try testing.allocator.dupe(u8, "composing");
+        if (linked_history.apply(fx.session, &.{
+            .{ .term = a, .changes = &.{.{ .start = 0, .end = 3, .text = "AAA" }} },
+            .{ .term = b, .changes = &.{.{ .start = 0, .end = 3, .text = "BBB" }} },
+        })) |_| return error.UnexpectedCommit else |_| {}
+        fx.session.ime_active = false;
+        fx.session.ime_editor_commit_pending = false;
+        try testing.expectEqualStrings("aaa", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("bbb", b.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_documents.links.records.items.len);
+        if (mode == 2) try testing.expectEqualStrings("composing", peer.rt.editor_preedit);
+    }
+}
+
+test "LHG7 actor 모델 registry 게시 준비의 할당 실패는 두 문서와 공유 뷰를 원자적으로 보존한다" {
+    for ([_]bool{ false, true }) |undo| {
+        var failures: usize = 0;
+        var success = false;
+        for (0..160) |index| {
+            var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index, .resize_fail_index = 0 });
+            var fx = try PaneFixture.init(testing.allocator);
+            defer fx.deinit(testing.allocator);
+            const a = try undoFixture(&fx, testing.allocator, "oom-linked-a.txt", "aaa\n    child\nafter\n");
+            const b = try undoFixture(&fx, testing.allocator, "oom-linked-b.txt", "bbb");
+            const peer = try openSharedViewInActivePane(fx.session, a);
+            try testing.expect(toggleFoldHead(fx.session, peer, 0));
+            peer.rt.editor_selection = editor_selection.Selection.at(4);
+            _ = fx.session.activateExistingFileTerm(a);
+            a.rt.editor_selection = editor_selection.Selection.at(1);
+            if (undo) _ = try linkedFixtureEdit(&fx, a, b);
+            const before_a = try testing.allocator.dupe(u8, a.rt.editorDocument().opened.?.file.content);
+            defer testing.allocator.free(before_a);
+            const before_b = try testing.allocator.dupe(u8, b.rt.editorDocument().opened.?.file.content);
+            defer testing.allocator.free(before_b);
+            const before_lines = peer.rt.editor_lines.ptr;
+            const before_sel = peer.rt.editor_selection;
+            const before_folds = try testing.allocator.dupe(u32, foldedHeads(peer));
+            defer testing.allocator.free(before_folds);
+            const rev = a.rt.editorDocument().opened.?.file.revision;
+            const depth = a.rt.editorDocument().history.undo_len;
+            const operation_next = fx.session.editor_documents.links.next_id;
+            if (undo) try testing.expect(undoEdit(fx.session, a));
+            const registry_allocator = fx.session.editor_documents.allocator;
+            var registry_failing = testing.FailingAllocator.init(registry_allocator, .{ .fail_index = index, .resize_fail_index = 0 });
+            fx.session.allocator = failing.allocator();
+            fx.session.editor_documents.allocator = registry_failing.allocator();
+            for ([_]*Term{ a, b }) |term| {
+                term.rt.editorDocument().opened.?.file.allocator = failing.allocator();
+                term.rt.editorDocument().opened.?.file.buf.allocator = failing.allocator();
+            }
+            const committed = if (undo) blk: {
+                try linkedFixtureChoose(&fx, false);
+                break :blk a.rt.editorDocument().history.redo_len == 1;
+            } else blk: {
+                if (linked_history.apply(fx.session, &.{
+                    .{ .term = a, .changes = &.{.{ .start = 0, .end = 3, .text = "AAA\nnew" }} },
+                    .{ .term = b, .changes = &.{.{ .start = 0, .end = 3, .text = "BBB" }} },
+                })) |_| break :blk true else |err| {
+                    try testing.expectEqual(error.OutOfMemory, err);
+                    break :blk false;
+                }
+            };
+            fx.session.allocator = testing.allocator;
+            fx.session.editor_documents.allocator = registry_allocator;
+            for ([_]*Term{ a, b }) |term| {
+                term.rt.editorDocument().opened.?.file.allocator = testing.allocator;
+                term.rt.editorDocument().opened.?.file.buf.allocator = testing.allocator;
+            }
+            if (!committed) {
+                failures += 1;
+                try testing.expectEqualStrings(before_a, a.rt.editorDocument().opened.?.file.content);
+                try testing.expectEqualStrings(before_b, b.rt.editorDocument().opened.?.file.content);
+                try testing.expectEqual(rev, a.rt.editorDocument().opened.?.file.revision);
+                try testing.expectEqual(depth, a.rt.editorDocument().history.undo_len);
+                try testing.expectEqual(before_lines, peer.rt.editor_lines.ptr);
+                try testing.expect(std.meta.eql(before_sel, peer.rt.editor_selection));
+                try testing.expectEqualSlices(u32, before_folds, foldedHeads(peer));
+                try testing.expectEqual(operation_next, fx.session.editor_documents.links.next_id);
+            } else {
+                try testing.expectEqualStrings(if (undo) "aaa\n    child\nafter\n" else "AAA\nnew\n    child\nafter\n", a.rt.editorDocument().opened.?.file.content);
+                try testing.expectEqualStrings(if (undo) "bbb" else "BBB", b.rt.editorDocument().opened.?.file.content);
+                try testing.expectEqualStrings(if (undo) "aaa" else "AAA", peer.rt.editor_lines[0]);
+                try testing.expectEqual(a.rt.editorDocument().opened.?.file.lineCount(), peer.rt.editor_lines.len);
+                if (!failing.has_induced_failure and !registry_failing.has_induced_failure) {
+                    success = true;
+                    break;
+                }
+            }
+        }
+        try testing.expect(success and failures > 10);
+        std.debug.print("LHG actor preparation failures undo={}: {d}\n", .{ undo, failures });
+    }
+}
+
+test "LHG8 외부 창의 뷰가 빠지면 부분 게시하지 않고 중복 문서도 거절한다" {
+    for ([_]bool{ false, true }) |external| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "cross-linked-a.txt", "aaa");
+        const b = try undoFixture(&fx, testing.allocator, "cross-linked-b.txt", "bbb");
+        const lease = a.rt.editor_document_lease.?;
+        const extra = if (external) try fx.session.editor_documents.retain(lease, .view) else null;
+        defer if (extra) |ref| {
+            _ = fx.session.editor_documents.release(ref) catch unreachable;
+        };
+        try testing.expectError(if (external) error.SharedViewCountMismatch else error.DuplicateTarget, linked_history.apply(fx.session, &.{
+            .{ .term = a, .changes = &.{.{ .start = 0, .end = 3, .text = "AAA" }} },
+            .{ .term = if (external) b else a, .changes = &.{.{ .start = 0, .end = 3, .text = "BBB" }} },
+        }));
+        try testing.expectEqualStrings("aaa", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("bbb", b.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_documents.links.records.items.len);
+    }
+}
+
+test "LHG9 여러 연결 작업의 이력 순서와 다른 공유 뷰 호출에서 신원을 보존한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "repeat-linked-a.txt", "aaa");
+    const b = try undoFixture(&fx, testing.allocator, "repeat-linked-b.txt", "bbb");
+    _ = try linkedFixtureEdit(&fx, a, b);
+    a.rt.editor_selection.?.goal = .{ .col = 17 };
+    a.rt.editor_selection.?.anchor_goal = .{ .col = 7 };
+    const second = try linked_history.apply(fx.session, &.{
+        .{ .term = a, .changes = &.{.{ .start = 0, .end = 3, .text = "CCC" }} },
+        .{ .term = b, .changes = &.{.{ .start = 0, .end = 3, .text = "DDD" }} },
+    });
+    const peer = try openSharedViewInActivePane(fx.session, a);
+    linkedFixtureClose(&fx, a);
+    _ = fx.session.activateExistingFileTerm(peer);
+    try testing.expect(!fx.session.editor_documents.links.get(second).?.invalid);
+    for (0..10) |_| {
+        for (0..2) |index| {
+            try testing.expect(undoEdit(fx.session, peer));
+            try linkedFixtureChoose(&fx, false);
+            try testing.expectEqualStrings(if (index == 0) "AAA" else "aaa", peer.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualStrings(if (index == 0) "BBB" else "bbb", b.rt.editorDocument().opened.?.file.content);
+            try testing.expect(peer.rt.editor_selection.?.goal.eql(.none));
+            try testing.expect(peer.rt.editor_selection.?.anchor_goal.eql(.none));
+        }
+        for (0..2) |index| {
+            try testing.expect(redoEdit(fx.session, peer));
+            try linkedFixtureChoose(&fx, false);
+            try testing.expectEqualStrings(if (index == 0) "AAA" else "CCC", peer.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualStrings(if (index == 0) "BBB" else "DDD", b.rt.editorDocument().opened.?.file.content);
+        }
+    }
+}
+test "LHG10 연결 신원 고갈과 B 읽기 전용은 A 본문과 기존 이력을 보존한다" {
+    for ([_]bool{ false, true }) |exhausted| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "refused-linked-a.txt", "aaa");
+        const b = try undoFixture(&fx, testing.allocator, "refused-linked-b.txt", "bbb");
+        const id = try linkedFixtureEdit(&fx, a, b);
+        if (exhausted) fx.session.editor_documents.links.next_id = std.math.maxInt(u64) else b.rt.editorDocument().opened.?.file.read_only = true;
+        try testing.expectError(if (exhausted) error.OperationIdExhausted else error.ReadOnly, linked_history.apply(fx.session, &.{
+            .{ .term = a, .changes = &.{.{ .start = 0, .end = 3, .text = "CCC" }} },
+            .{ .term = b, .changes = &.{.{ .start = 0, .end = 3, .text = "DDD" }} },
+        }));
+        try testing.expectEqualStrings("AAA", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("BBB", b.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 1), a.rt.editorDocument().history.undo_len);
+        try testing.expect(fx.session.editor_documents.links.get(id) != null);
+        // 전역 registry를 다음 fixture에도 쓰므로 시험용 포화만 원복한다.
+        if (exhausted) fx.session.editor_documents.links.next_id = id + 1;
+    }
+}
+
+test "LHG11 AppKit 빈 확인 키 트랜잭션은 허용하되 조합과 확정 대기는 거절한다" {
+    for (0..5) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "modal-linked-a.txt", "aaa");
+        const b = try undoFixture(&fx, testing.allocator, "modal-linked-b.txt", "bbb");
+        _ = try linkedFixtureEdit(&fx, a, b);
+        try testing.expect(undoEdit(fx.session, a));
+        fx.session.imeBegin();
+        if (mode == 1) fx.session.ime_had_marked = true;
+        if (mode == 2) fx.session.ime_marked_changed = true;
+        if (mode == 3) fx.session.ime_editor_commit_pending = true;
+        if (mode == 4) try fx.session.ime_inserted.appendSlice(testing.allocator, "pending");
+        fx.session.imeEnd(.{ .key = .enter });
+        try testing.expectEqualStrings(if (mode == 0) "aaa" else "AAA", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings(if (mode == 0) "bbb" else "BBB", b.rt.editorDocument().opened.?.file.content);
+        fx.session.ime_editor_commit_pending = false;
+    }
 }

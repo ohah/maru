@@ -4,6 +4,8 @@ const std = @import("std");
 const delta = @import("delta.zig");
 const selection = @import("selection.zig");
 
+pub const stack_limit: usize = 2048;
+
 pub const Entry = struct {
     /// 스택 이동으로 바뀌지 않는 문서 내 항목 신원. 0은 아직 발급하지 않은 항목이다.
     id: u64 = 0,

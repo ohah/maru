@@ -49,6 +49,11 @@ exit 1이며 소켓 연결·auth·request를 시작하지 않는다. `--option v
 
 ## CLI 실제 프로세스 CI 검증
 
+`maru incidents list [--json] [--limit N]`의 `--limit`도 한 번만 지정한다. 같은 값·기본값·
+앞자리 0 반복은 파일 조회 전에 usage 오류(exit 2)다. 기존 공백 문법과 양수 usize 범위,
+기본값은 유지한다. help가 중복보다 먼저면 안내(exit 0), 중복 뒤면 오류다.
+boolean `--json` 반복은 유지하며 `--limit=N`은 지원하지 않는다.
+
 `maru agent-events --stdio --dir=<절대 경로> [--heartbeat-ms=N] [--resume=spec]`의 값 옵션도
 각 한 번만 지정한다. 0 heartbeat·빈 resume와 동일 값 반복도 exit 1이며 hello 출력과 로그
 정리 전에 종료한다. `=` 문법과 기본값은 유지한다. 기존 help의 순서 판정도 유지해 help가

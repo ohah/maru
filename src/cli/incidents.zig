@@ -21,7 +21,7 @@ pub const help =
     \\
     \\options:
     \\  --json        emit one JSON object per record
-    \\  --limit <n>   show at most <n> most recent records (default 20)
+    \\  --limit <n>   show at most <n> most recent records (default 20; specify once)
     \\
 ;
 
@@ -38,6 +38,7 @@ pub const ParseError = error{
     UnknownOption,
     MissingValue,
     InvalidLimit,
+    DuplicateLimit,
 };
 
 /// `args`는 `incidents` **뒤**의 토큰만 받는다(main이 서브커맨드 이름을 이미 소비한 뒤).
@@ -47,6 +48,7 @@ pub fn parse(args: []const []const u8) ParseError!Parsed {
     if (!std.mem.eql(u8, args[0], "list")) return error.UnknownSubcommand;
 
     var result: List = .{};
+    var limit_seen = false;
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         const arg = args[index];
@@ -54,6 +56,10 @@ pub fn parse(args: []const []const u8) ParseError!Parsed {
         if (std.mem.eql(u8, arg, "--json")) {
             result.json = true;
         } else if (std.mem.eql(u8, arg, "--limit")) {
+            // A value equal to the default is still an explicit option. Reject
+            // repetition before the caller can enumerate incident artifacts.
+            if (limit_seen) return error.DuplicateLimit;
+            limit_seen = true;
             index += 1;
             if (index >= args.len) return error.MissingValue;
             result.limit = std.fmt.parseInt(usize, args[index], 10) catch return error.InvalidLimit;
@@ -143,6 +149,24 @@ pub fn writeAggregateJson(writer: *std.Io.Writer, value: incident.IncidentAggreg
         value.first_timestamp_ns,
         value.last_timestamp_ns,
     });
+}
+
+test "incidents limit is specified once including default and normalized values" {
+    var max_buf: [32]u8 = undefined;
+    const maximum = try std.fmt.bufPrint(&max_buf, "{d}", .{std.math.maxInt(usize)});
+    for ([_][]const u8{ "1", "20", "01", maximum }) |first| {
+        const single = try parse(&.{ "list", "--limit", first });
+        try std.testing.expect(single == .list);
+        for ([_][]const u8{ "1", "2", "20", "01", maximum, "0", "", "bad" }) |second| {
+            try std.testing.expectError(error.DuplicateLimit, parse(&.{ "list", "--limit", first, "--limit", second }));
+            try std.testing.expectError(error.DuplicateLimit, parse(&.{ "list", "--json", "--limit", first, "--json", "--limit", second }));
+        }
+    }
+    try std.testing.expectError(error.DuplicateLimit, parse(&.{ "list", "--limit", "1", "--limit" }));
+    try std.testing.expectEqual(Parsed.help, try parse(&.{ "list", "--limit", "1", "--help", "--limit", "2" }));
+    try std.testing.expectError(error.DuplicateLimit, parse(&.{ "list", "--limit", "1", "--limit", "2", "--help" }));
+    try std.testing.expectError(error.UnknownOption, parse(&.{ "list", "--limit=1" }));
+    try std.testing.expect((try parse(&.{ "list", "--json", "--json" })).list.json);
 }
 
 test "CR0b cli incidents 파싱은 닫힌 문법만 받는다" {

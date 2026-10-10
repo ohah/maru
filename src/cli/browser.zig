@@ -34,13 +34,16 @@ pub const browser_help =
     \\  set-local-storage    --surface <id> --key k --value v   set a localStorage value
     \\  remove-local-storage --surface <id> --key k             remove a localStorage entry
     \\  clear-storage        --surface <id>                     clear all cookies and storage for the target origin
-    \\  click   --surface <id> (--selector <css> | --ref <e#>)          click an element (by selector or snapshot ref)
+    \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
     \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   type text into an element (input)
     \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          scroll an element into view
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
     \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
     \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG (--rect region, --scale factor; omit for full page at device scale)
+    \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
+    \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
+    \\  reload  --surface <id>                     reload the page (Chromium tabs)
     \\
 ;
 
@@ -75,6 +78,10 @@ pub const Request = union(enum) {
     remove_local_storage: struct { surface_id: u64, key: []const u8 },
     /// `browser clear-storage`(§9.4 D4). surface만. 대상 origin 쿠키+스토리지 삭제. 응답 {ok}.
     clear_storage: struct { surface_id: u64 },
+    /// `browser back`·`forward`·`reload`(W9b① — Chromium 탭). surface만. 응답 {ok}(back·forward 는 갈 곳이 없으면 false).
+    back: struct { surface_id: u64 },
+    forward: struct { surface_id: u64 },
+    reload: struct { surface_id: u64 },
     /// `browser click`(act 5f-2·snapshot-2). locator=--selector 또는 --ref 하나. 응답 {ok}(요소 발견+클릭).
     click: struct { surface_id: u64, locator: Locator },
     /// `browser type`(act 5f-2·snapshot-2). locator + text 필수. 응답 {ok}.
@@ -96,7 +103,7 @@ pub const Request = union(enum) {
             .get_url => .get_url,
             .exec => .exec,
             .get_cookies => .get_cookies,
-            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll, .wait => .ok,
+            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll, .wait, .back, .forward, .reload => .ok,
             .get_local_storage => .value,
             .snapshot => .snapshot,
             .console => .console,
@@ -255,6 +262,12 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const s = p.surface orelse return error.MissingSurface;
         if (p.arg != null) return error.UnexpectedArgument;
         return .{ .request = .{ .clear_storage = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "back") or eq(sub, "forward") or eq(sub, "reload")) {
+        const p = try parseSurfaceArg(rest);
+        const s = p.surface orelse return error.MissingSurface;
+        if (p.arg != null) return error.UnexpectedArgument;
+        return .{ .request = if (eq(sub, "back")) .{ .back = .{ .surface_id = s } } else if (eq(sub, "forward")) .{ .forward = .{ .surface_id = s } } else .{ .reload = .{ .surface_id = s } } };
     }
     if (eq(sub, "click")) {
         const ca = try parseCookieArgs(rest);
@@ -695,6 +708,9 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
         .set_local_storage => |g| return keyRequest(gpa, id, "browser.setLocalStorage", g.surface_id, g.key, g.value),
         .remove_local_storage => |g| return keyRequest(gpa, id, "browser.removeLocalStorage", g.surface_id, g.key, null),
         .clear_storage => |g| return idOnlyRequest(gpa, id, "browser.clearStorage", g.surface_id),
+        .back => |g| return idOnlyRequest(gpa, id, "browser.back", g.surface_id),
+        .forward => |g| return idOnlyRequest(gpa, id, "browser.forward", g.surface_id),
+        .reload => |g| return idOnlyRequest(gpa, id, "browser.reload", g.surface_id),
         .click => |c| return actRequest(gpa, id, "browser.click", c.surface_id, c.locator, null),
         .type_text => |c| return actRequest(gpa, id, "browser.type", c.surface_id, c.locator, c.text),
         .scroll => |c| return actRequest(gpa, id, "browser.scroll", c.surface_id, c.locator, null),
@@ -1885,6 +1901,23 @@ test "buildRequestBytes: localStorage/clear 메서드·params" {
     }
 }
 
+test "parse·build: back·forward·reload(W9b①) — surface 만" {
+    try testing.expectEqual(@as(u64, 7), (try parse(&.{ "back", "--surface", "7" })).request.back.surface_id);
+    try testing.expectEqual(@as(u64, 8), (try parse(&.{ "forward", "--surface", "8" })).request.forward.surface_id);
+    try testing.expectEqual(@as(u64, 9), (try parse(&.{ "reload", "--surface", "9" })).request.reload.surface_id);
+    try testing.expectError(error.MissingSurface, parse(&.{"back"}));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "reload", "--surface", "1", "x" }));
+    inline for (.{ .{ "back", "browser.back" }, .{ "forward", "browser.forward" }, .{ "reload", "browser.reload" } }) |c| {
+        const req = (try parse(&.{ c[0], "--surface", "11" })).request;
+        const b = try buildRequestBytes(testing.allocator, req, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings(c[1], pm.message.request.method);
+        try testing.expectEqual(@as(i64, 11), pm.message.request.params.?.object.get("id").?.integer);
+    }
+}
+
 test "renderResponse(value): getLocalStorage {value} → 값 출력" {
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
@@ -1972,7 +2005,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  set-local-storage    --surface <id> --key k --value v   set a localStorage value
         \\  remove-local-storage --surface <id> --key k             remove a localStorage entry
         \\  clear-storage        --surface <id>                     clear all cookies and storage for the target origin
-        \\  click   --surface <id> (--selector <css> | --ref <e#>)          click an element (by selector or snapshot ref)
+        \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
         \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   type text into an element (input)
         \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          scroll an element into view
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)

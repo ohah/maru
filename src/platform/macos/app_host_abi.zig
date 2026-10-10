@@ -3,6 +3,7 @@ const diag_gate = @import("diag.zig"); // MARU_DEBUG 게이트(진단 로그 단
 const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
+const web_cdp_ops = @import("web_cdp_ops.zig");
 const editor_ime_ops = @import("app_session/editor_ime.zig");
 const session_host = @import("session_host.zig");
 const ime_candidate_evidence = @import("session_host/ime_candidate_evidence.zig");
@@ -6166,6 +6167,9 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .scroll,
         .snapshot,
         .console,
+        .back,
+        .forward,
+        .reload,
         => true,
         .subscribe, .wait => false,
     };
@@ -6201,6 +6205,9 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .wait => "browser.wait",
         .snapshot => "browser.snapshot",
         .console => "browser.console",
+        .back => "browser.back",
+        .forward => "browser.forward",
+        .reload => "browser.reload",
     };
 }
 
@@ -6590,6 +6597,12 @@ const control_hello_caps = [_][]const u8{
     "browser.type",
     "browser.scroll",
     "browser.wait",
+    // 빠져 있던 둘(W9b① 에서 「모든 메서드를 광고」 시험으로 찾았다)과 W9b① 의 방문 기록.
+    "browser.snapshot",
+    "browser.console",
+    "browser.back",
+    "browser.forward",
+    "browser.reload",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -6952,11 +6965,12 @@ fn pushBrowserOp(
     async_id: u64,
     op: control_browser.BrowserOp,
 ) void {
-    // W3b: Chromium(OSR) 탭의 op 은 Swift 에 보내지 않는다 — WKWebView 가 없어 이유 없이 실패한다. 지금은 L2 가 엔진
-    // 판정(`control_browser.surfaceSupports`, W9-0)으로 확인 모달 전에 먼저 거절해 여기 닿지 않는다. 닿으면 L2 와 같은
-    // `-32008` 로 답한다. **W9b 가 Chromium 메서드를 켤 때** 여기가 sidecar 로 보내는 분기가 된다 — 그때는 이 레코드
-    // 판정이 아니라 탭 단위 엔진(`isOsrTerm`)으로 가른다(한 번도 배치되지 않은 탭은 레코드가 없다).
-    if (session_mod.web_ops.isOsrSurface(op.surface_id)) {
+    // W9b①: Chromium(OSR) 탭의 op 은 Swift 가 아니라 DevTools 차례(`web_cdp_ops`)로 실행한다. 엔진은 프로세스 단위 결정
+    // (`web_osr.enabled` — L2 의 탭 단위 판정 `isOsrTerm` 과 같은 값: 켜졌으면 제어 가능한 브라우저 탭은 모두 Chromium 이다,
+    // markdown·파일 뷰는 L2 가 막았다). 한 번도 배치되지 않은 탭도 여기로 온다(레코드로 가르면 WebKit 으로 갔다).
+    // Chromium 이 지원하지 않는 메서드는 L2 가 확인 모달 전에 거절했다 — 닿으면 같은 `-32008`.
+    const chromium = session_mod.web_osr.enabled();
+    if (chromium and !control_browser.engineSupports(.chromium, op.method)) {
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
         const resp = control_browser.serializeUnsupportedByEngine(server.cross_gpa, pending.request_bytes, .chromium) catch null;
@@ -7003,6 +7017,11 @@ fn pushBrowserOp(
         // executeScript arg는 L2가 이미 `{script,args,max_result_bytes}` owned JSON으로 직렬화했다. 여기서 다시
         // 감싸면 args를 잃거나 사용자 script를 이중 escape하므로 ABI queue가 그대로 인수한다.
     }
+    if (chromium) {
+        startCdpOp(async_id, op.surface_id, op.method, backend_arg);
+        server.cross_gpa.free(backend_arg);
+        return;
+    }
     if (op.method == .wait) {
         active_browser_waits.append(allocator, .{
             .async_id = async_id,
@@ -7024,6 +7043,110 @@ fn pushBrowserOp(
         server.cross_gpa.free(backend_arg);
         _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
     };
+}
+
+// ── W9b①: Chromium 탭의 op 실행 — DevTools 호출 차례 ──────────────────────────────────────────────────────────────
+// 한 op = `web_cdp_ops.Op` 하나(호출 여러 번). 호출마다 `web_osr.devtoolsCall` 로 보내고, 답(`pump` 끝에서 온다)을 차례에
+// 먹여 다음 호출이나 끝을 얻는다. 끝은 Swift 경로와 같은 `maru_macos_control_complete_browser_op`(재인가·예산·직렬화).
+// 진짜 입력이므로 **호출마다 그 요청이 아직 살아 있고 허가돼 있는지 본다** — 취소·시한·grant 철회·탭 닫힘 뒤에는 더 보내지
+// 않는다(누르기 직전에 철회됐는데 누르면 안 된다).
+
+const CdpRun = struct {
+    async_id: u64,
+    surface_id: u64,
+    op: web_cdp_ops.Op,
+};
+
+fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
+    return switch (method) {
+        .click => .click,
+        .back => .back,
+        .forward => .forward,
+        .reload => .reload,
+        else => null,
+    };
+}
+
+fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMethod, arg: []const u8) void {
+    const kind = cdpKind(method) orelse return completeCdp(async_id, .failed, "not supported by the Chromium engine");
+    const run = allocator.create(CdpRun) catch return completeCdp(async_id, .failed, "out of memory");
+    const op = web_cdp_ops.Op.init(allocator, kind, arg) catch {
+        allocator.destroy(run);
+        return completeCdp(async_id, .invalid_params, "invalid arguments");
+    };
+    run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op };
+    _ = active_browser_executions.markRunning(async_id);
+    const step = run.op.start(allocator) catch return finishCdp(run, .failed, "out of memory");
+    cdpAdvance(run, step);
+}
+
+/// 그 요청이 아직 살아 있고 허가돼 있는가(취소·시한·철회·탭 닫힘·서버 멈춤이면 거짓).
+fn cdpStillAllowed(async_id: u64) bool {
+    if (!control_server_active) return false;
+    const execution = active_browser_executions.get(async_id) orelse return false;
+    if (execution.phase == .abandoned) return false;
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
+    return browserExecutionAuthorized(execution, now);
+}
+
+fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
+    switch (step) {
+        .done => |d| {
+            defer allocator.free(d.result);
+            finishCdp(run, d.status, d.result);
+        },
+        .call => |next| {
+            defer allocator.free(next.params);
+            if (!cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
+            const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
+            _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return finishCdp(run, .failed, switch (e) {
+                error.NotReady => "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)",
+                error.Busy => "too many DevTools calls on this tab",
+                error.InvalidMethod, error.InvalidParams => "internal DevTools request error",
+                error.OutOfMemory => "out of memory",
+            });
+        },
+    }
+}
+
+fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome, result: []const u8) void {
+    const run: *CdpRun = @ptrCast(@alignCast(ctx));
+    const reply: web_cdp_ops.Reply = switch (outcome) {
+        .ok => .{ .ok = result },
+        .cdp_error => .{ .cdp_error = result },
+        .timeout, .expired => .{ .failed = "DevTools did not answer in time" },
+        .detached, .closed => .{ .failed = "the tab closed or its page crashed" },
+        .sidecar_gone => .{ .failed = "the Chromium engine stopped" },
+        .too_large => .{ .failed = "the DevTools result was too large" },
+        .busy => .{ .failed = "too many DevTools calls on this tab" },
+        .unknown_browser, .invalid_request, .send_failed, .protocol => .{ .failed = "DevTools request failed" },
+    };
+    const step = run.op.feed(allocator, reply) catch return finishCdp(run, .failed, "out of memory");
+    cdpAdvance(run, step);
+}
+
+fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void {
+    const async_id = run.async_id;
+    run.op.deinit(allocator);
+    allocator.destroy(run);
+    completeCdp(async_id, status, result);
+}
+
+fn completeCdp(async_id: u64, status: web_cdp_ops.Status, result: []const u8) void {
+    maru_macos_control_complete_browser_op(async_id, @intFromEnum(status), result.ptr, result.len);
+}
+
+comptime {
+    // web_cdp_ops 의 status 숫자는 control_browser 계약과 같다.
+    std.debug.assert(@intFromEnum(web_cdp_ops.Status.success) == @intFromEnum(control_browser.BrowserCompletionStatus.success));
+    std.debug.assert(@intFromEnum(web_cdp_ops.Status.failed) == @intFromEnum(control_browser.BrowserCompletionStatus.failed));
+    std.debug.assert(@intFromEnum(web_cdp_ops.Status.timeout) == @intFromEnum(control_browser.BrowserCompletionStatus.timeout));
+    std.debug.assert(@intFromEnum(web_cdp_ops.Status.invalid_params) == @intFromEnum(control_browser.BrowserCompletionStatus.invalid_params));
+}
+
+test {
+    _ = web_cdp_ops;
 }
 
 pub export fn maru_macos_control_server_start() c_int {
@@ -8063,6 +8186,10 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u8, 15), @as(u8, @intFromEnum(control_browser.BrowserMethod.wait)));
     try std.testing.expectEqual(@as(u8, 16), @as(u8, @intFromEnum(control_browser.BrowserMethod.snapshot))); // §9.5.4
     try std.testing.expectEqual(@as(u8, 17), @as(u8, @intFromEnum(control_browser.BrowserMethod.console))); // §9.5.9
+    // W9b①: Chromium 전용(Swift 로 가지 않는다 — DevTools). 그래도 번호는 고정한다.
+    try std.testing.expectEqual(@as(u8, 18), @as(u8, @intFromEnum(control_browser.BrowserMethod.back)));
+    try std.testing.expectEqual(@as(u8, 19), @as(u8, @intFromEnum(control_browser.BrowserMethod.forward)));
+    try std.testing.expectEqual(@as(u8, 20), @as(u8, @intFromEnum(control_browser.BrowserMethod.reload)));
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
@@ -8267,6 +8394,15 @@ test "live hello capabilities advertise browser.wait and only parsed browser met
         if (std.mem.eql(u8, method, "browser.wait")) wait_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), wait_count);
+    // 모든 browser 메서드를 광고한다(메서드를 더하고 여기를 빠뜨리면 걸린다 — snapshot·console 이 빠져 있었다).
+    inline for (std.meta.fields(control_browser.BrowserMethod)) |f| {
+        const m: control_browser.BrowserMethod = @enumFromInt(f.value);
+        var found = false;
+        for (control_hello_caps) |method| {
+            if (std.mem.startsWith(u8, method, "browser.") and std.mem.eql(u8, method["browser.".len..], control_browser.browserMethodWireName(m))) found = true;
+        }
+        try std.testing.expect(found);
+    }
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {
@@ -9277,6 +9413,41 @@ fn uninstallTransferTestServer() void {
     control_server_active = false;
     control_server_storage.in_flight.deinit(std.testing.allocator);
     control_pane_grant_store.clearAll();
+}
+
+test "W9b①: Chromium op 은 그 요청이 살아 있고 허가돼 있을 때만 다음 DevTools 호출(진짜 입력)을 보낸다" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":90,\"method\":\"browser.click\",\"params\":{\"id\":11,\"selector\":\"#b\"}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try active_browser_executions.admit(allocator, .{
+        .async_id = id,
+        .surface_id = 11,
+        .method = .click,
+        .reserved_bytes = 0,
+        .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } },
+    });
+    try std.testing.expect(cdpStillAllowed(id));
+    try std.testing.expect(!cdpStillAllowed(id + 1000)); // 모르는 요청
+    // grant 철회 — 누르기 직전이어도 보내지 않는다.
+    control_pane_grant_store.clearAll();
+    try std.testing.expect(!cdpStillAllowed(id));
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try std.testing.expect(cdpStillAllowed(id));
+    // 서버가 멈췄다.
+    control_server_active = false;
+    try std.testing.expect(!cdpStillAllowed(id));
+    control_server_active = true;
+    // 탭이 닫혔다 — 요청은 버려졌다.
+    try std.testing.expect(active_browser_executions.markRunning(id));
+    cancelBrowserExecutionsForClosedSurface(&control_server_storage, 11);
+    try expectPendingErrorCode(&pending, .process_exited);
+    try std.testing.expect(!cdpStillAllowed(id));
+    _ = active_browser_executions.finish(id);
 }
 
 test "generic async browser op: target close wins once and late callback only releases lifecycle slot" {

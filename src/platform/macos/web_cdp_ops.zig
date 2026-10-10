@@ -380,7 +380,7 @@ pub const Op = struct {
         if (reply == .failed or reply == .not_sent) {
             const why = if (reply == .failed) reply.failed else reply.not_sent;
             if (self.stage == .locate and std.mem.eql(u8, why, result_too_large))
-                return done(gpa, .failed, "too_large: the accessibility query result was too large — add a name with exact:true, or use a selector or ref");
+                return done(gpa, .failed, "too_large: the accessibility query result was too large — use a selector or ref"); // exact 는 질의를 줄이지 않는다(2 회차)
             switch (self.stage) {
                 // 놓기의 실패 — 동작은 이미 끝났다: 그 결과로 답한다(4 회차 — 실패로 답하면 다시 시도해 Enter 가 두 번 갔다).
                 .release => return self.finish(gpa),
@@ -469,7 +469,9 @@ pub const Op = struct {
                     // 요소 수를 먼저 본다 — 접근성 질의는 DOM 크기의 제곱으로 느려지고 그동안 페이지가 멈춘다(프로토타입 함수 — DOM clobbering).
                     self.stage = .size_check;
                     // open shadow root 안도 센다(1 회차 — 셀 때 빠져 6 만 요소 페이지가 상한을 지나 2.8 초 멈췄다). 상한을 넘으면 곧 멈춘다.
-                    const expr = try std.fmt.allocPrint(gpa, "(function(){{var L={d},sr=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot').get,qa=Document.prototype.querySelectorAll,fa=DocumentFragment.prototype.querySelectorAll,n=0,todo=[qa.call(document,'*')];while(todo.length){{var l=todo.pop();n+=l.length;if(n>L)return n;for(var i=0;i<l.length;i++){{var s=sr.call(l[i]);if(s)todo.push(fa.call(s,'*'))}}}}return n}})()", .{web_cdp_locate.max_role_page_elements});
+                    // 비싼 역할(link)은 후보도 함께 센다(2 회차 — 맞는 노드 수의 제곱으로 느려졌다). 결과는 [요소 수, 후보 수].
+                    const cand = web_cdp_locate.candidateSelector(self.loc_role);
+                    const expr = try std.fmt.allocPrint(gpa, "(function(C){{var L={d},sr=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot').get,qa=Document.prototype.querySelectorAll,fa=DocumentFragment.prototype.querySelectorAll,n=0,c=0,todo=[document];while(todo.length){{var r=todo.pop(),q=r===document?qa:fa,l=q.call(r,'*');n+=l.length;if(C)c+=q.call(r,C).length;if(n>L)return [n,c];for(var i=0;i<l.length;i++){{var s=sr.call(l[i]);if(s)todo.push(s)}}}}return [n,c]}})({f})", .{ web_cdp_locate.max_role_page_elements, std.json.fmt(cand, .{}) });
                     defer gpa.free(expr);
                     return call(gpa, "Runtime.evaluate", "{{\"expression\":{f},\"contextId\":{d},\"returnByValue\":true}}", .{ std.json.fmt(expr, .{}), self.context_id });
                 }
@@ -606,7 +608,13 @@ pub const Op = struct {
                 return self.releaseStep(gpa);
             },
             .size_check => {
-                const count = intAt(v, &.{ "result", "value" }) orelse return done(gpa, .failed, "could not count the page's elements");
+                const counts = arrayAt(v, &.{ "result", "value" }) orelse return done(gpa, .failed, "could not count the page's elements");
+                if (counts.len != 2 or counts[0] != .integer or counts[1] != .integer) return done(gpa, .failed, "could not count the page's elements");
+                const count = counts[0].integer;
+                if (web_cdp_locate.candidateSelector(self.loc_role) != null and counts[1].integer > web_cdp_locate.max_link_candidates) {
+                    const msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} {s} candidates (role={s} locator limit {d}; the query freezes the page) — use a selector or ref", .{ counts[1].integer, self.loc_role, self.loc_role, web_cdp_locate.max_link_candidates });
+                    return .{ .done = .{ .status = .failed, .result = msg } };
+                }
                 if (count > web_cdp_locate.max_role_page_elements) {
                     const msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} elements (role locator limit {d}; the query freezes the page) — use a selector or ref", .{ count, web_cdp_locate.max_role_page_elements });
                     return .{ .done = .{ .status = .failed, .result = msg } };
@@ -632,7 +640,8 @@ pub const Op = struct {
                     .one => |one| {
                         // 찾았다 — 그 노드를 ref 처럼(화면 안으로 → …).
                         self.backend = one.backend;
-                        self.matched_name = one.name;
+                        // 이름은 잘리지 않고 온다(실측 2 MB) — 답이 CLI 프레임 상한(1 MiB)을 넘으면 클릭은 됐는데 「응답 없음」 이 된다(2 회차).
+                        self.matched_name = try clipName(gpa, one.name, max_matched_name_bytes);
                         self.locating = false;
                         return self.scrollStep(gpa);
                     },
@@ -1915,14 +1924,14 @@ test "떼기를 끝까지 못 보내도 앞선 실패 이유로 답한다(엔진
 }
 
 fn rolePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"number\",\"value\":120}}" };
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[120,0]}}" };
     if (std.mem.eql(u8, method, "DOM.getDocument")) return .{ .ok = "{\"root\":{\"nodeId\":1,\"backendNodeId\":2}}" };
     if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"Save\"},\"backendDOMNodeId\":11},{\"ignored\":false,\"name\":{\"value\":\"Save changes\"},\"backendDOMNodeId\":12},{\"ignored\":true,\"name\":{\"value\":\"\"},\"backendDOMNodeId\":13}]}" };
     return happyPage(method, params);
 }
 
 fn hugeRolePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"number\",\"value\":40000}}" };
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[40000,0]}}" };
     return rolePage(method, params);
 }
 
@@ -1950,7 +1959,7 @@ test "role 로케이터: 크기 검사 → 문서 → 접근성 질의 → 하�
     try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"backendNodeId\":11") != null);
 }
 
-test "role 로케이터: exact 면 이름도 질의에, 여럿이면 후보 ref 로 실패, 없으면 {ok:false}, 큰 페이지·큰 결과는 too_large" {
+test "role 로케이터: exact 여도 이름은 질의에 싣지 않는다, 여럿이면 후보 ref 로 실패, 없으면 {ok:false}, 큰 페이지·큰 결과는 too_large" {
     var trail: Trail = .{};
     defer trail.deinit();
     {
@@ -2014,4 +2023,65 @@ test "role 로케이터: 모르는 역할은 UnknownRole(가까운 역할을 권
     try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
     try testing.expectEqual(@as(usize, 1), trail.count("DOM.focus"));
     try testing.expectEqual(@as(usize, 2), trail.count("Input.dispatchKeyEvent"));
+}
+
+/// 성공 답에 싣는 이름의 상한(바이트).
+const max_matched_name_bytes = 256;
+
+/// `name` 을 UTF-8 경계에서 `max` 바이트까지 자르고 넘쳤으면 「…」 — `name` 은 넘겨받아 놓는다(소유한 새 글).
+fn clipName(gpa: std.mem.Allocator, name: []u8, max: usize) ![]u8 {
+    if (name.len <= max) return name;
+    defer gpa.free(name);
+    var end = max;
+    while (end > 0 and (name[end] & 0xC0) == 0x80) end -= 1;
+    const out = try gpa.alloc(u8, end + "…".len);
+    @memcpy(out[0..end], name[0..end]);
+    @memcpy(out[end..], "…");
+    return out;
+}
+
+fn manyLinksPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[20000,6000]}}" };
+    return rolePage(method, params);
+}
+
+fn longNamePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"" ++ "가" ** 200 ++ "\"},\"backendDOMNodeId\":31}]}" };
+    return rolePage(method, params);
+}
+
+test "role 로케이터: link 는 후보가 5 천을 넘으면 질의 전에 거절(다른 역할은 후보를 세지 않는다), 긴 이름은 256 바이트에서 잘라 matched 에" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    {
+        var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"link\",\"name\":\"x\"}}", 300);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &manyLinksPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.failed, r.status);
+        try testing.expect(std.mem.startsWith(u8, r.result, "too_large: page has 6000 link candidates"));
+        try testing.expectEqual(@as(usize, 0), trail.count("Accessibility.queryAXTree"));
+        // 후보 selector 는 그 역할만 — link 면 실린다.
+        try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "a[href],area[href],[role=link]") != null);
+    }
+    trail.reset();
+    {
+        var op = try Op.init(testing.allocator, .scroll, "{\"locator\":{\"role\":\"button\"}}", 301);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &manyLinksPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(@as(usize, 1), trail.count("Accessibility.queryAXTree")); // button 은 후보를 보지 않는다
+        try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "})(null)") != null);
+    }
+    trail.reset();
+    {
+        var op = try Op.init(testing.allocator, .scroll, "{\"locator\":{\"role\":\"button\"}}", 302);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &longNamePage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.success, r.status);
+        try testing.expect(r.result.len < 400);
+        try testing.expect(std.mem.endsWith(u8, r.result, "…\"}}"));
+        try testing.expect(std.unicode.utf8ValidateSlice(r.result));
+    }
 }

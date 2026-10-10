@@ -16,6 +16,16 @@ pub const max_text_bytes = 1024;
 /// 3.7 초 — 페이지 타이머가 3.6 초 멈췄다, 8 만 요소 14 초).
 pub const max_role_page_elements = 30000;
 
+/// 맞는 노드가 많을 때 유난히 느린 역할의 후보 상한 — link 는 맞는 노드 수의 제곱으로 느려졌다(실측: 링크 5 천 0.68 초·1 만 2.5 초·
+/// 2.5 만 15 초 — 요소 3 만 상한 아래에서도 페이지가 14 초 멈췄다, W9b②-1 적대 리뷰 2 회차. button 1 만은 0.4 초).
+pub const max_link_candidates = 5000;
+
+/// 역할의 후보를 미리 셀 CSS selector — 상한이 있는 역할만(지금은 link).
+pub fn candidateSelector(chromium_role: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, chromium_role, "link")) return "a[href],area[href],[role=link]";
+    return null;
+}
+
 /// ARIA 1.2 구체 역할(접근성 트리가 같은 문자열로 쓰는 것 — 실측) — 정렬 안 됨, 선형 탐색(작다).
 const aria_roles = [_][]const u8{
     "alert",         "alertdialog", "application", "article",      "banner",    "blockquote",    "button",      "caption",
@@ -241,7 +251,9 @@ fn writeQuoted(w: *std.Io.Writer, s: []const u8) !void {
     if (end < s.len) try w.writeAll("…");
 }
 
-/// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자와 양방향 제어 글자(U+061C·200E·200F·202A–202E·2066–2069)를 뺀다. 쓴 바이트 수.
+/// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자, 양방향 제어 글자(U+061C·200E·200F·202A–202E·2066–2069), 줄·문단 구분
+/// (U+2028·2029), interlinear(U+FFF9–FFFB), tag 글자(U+E0000–E007F)를 뺀다. 쓴 바이트 수. CLI(`src/cli/browser.zig`)에 같은 함수가 있다
+/// (플랫폼 모듈과 CLI 는 서로 가져오지 않는다 — 둘을 함께 고친다).
 pub fn displaySafe(s: []const u8, out: []u8) usize {
     var n: usize = 0;
     var i: usize = 0;
@@ -256,7 +268,8 @@ pub fn displaySafe(s: []const u8, out: []u8) usize {
             continue;
         };
         const unsafe = cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or cp == 0x061C or cp == 0x200E or cp == 0x200F or
-            (cp >= 0x202A and cp <= 0x202E) or (cp >= 0x2066 and cp <= 0x2069);
+            (cp >= 0x202A and cp <= 0x202E) or (cp >= 0x2066 and cp <= 0x2069) or cp == 0x2028 or cp == 0x2029 or
+            (cp >= 0xFFF9 and cp <= 0xFFFB) or (cp >= 0xE0000 and cp <= 0xE007F); // 줄·문단 구분·interlinear·tag 글자도(2 회차)
         if (!unsafe and n + len <= out.len) {
             @memcpy(out[n .. n + len], s[i .. i + len]);
             n += len;
@@ -333,10 +346,27 @@ test "queryAXTree 거르기: 무시된 노드는 빼고, 이름 부분·정확 �
     try testing.expectError(error.Malformed, pickFromAx(g, "[]", .{ .role = "button" }, "button"));
 }
 
-test "표시 안전: C1·양방향 제어 글자는 메시지에서 빠진다" {
+test "표시 안전: C1·양방향 제어·줄 구분·tag 글자는 메시지에서 빠진다" {
     var out: [64]u8 = undefined;
-    const n = displaySafe("a\x1b[31mb\u{9b}c\u{202e}d\u{2066}e\u{85}f", &out);
-    try testing.expectEqualStrings("a[31mbcdef", out[0..n]);
+    const n = displaySafe("a\x1b[31mb\u{9b}c\u{202e}d\u{2066}e\u{85}f\u{2028}g\u{E0041}h\u{FFF9}i", &out);
+    try testing.expectEqualStrings("a[31mbcdefghi", out[0..n]);
+}
+
+test "정규화한 이름끼리 비교한다 — nbsp·soft hyphen 이 섞인 이름도 exact 로 찾고, exact 는 대소문자를 가린다, 메시지에 양방향 제어 글자가 남지 않는다" {
+    const g = testing.allocator;
+    const ax =
+        \\{"nodes":[
+        \\{"ignored":false,"name":{"value":"Save\u00a0 all\u00ad"},"backendDOMNodeId":21},
+        \\{"ignored":false,"name":{"value":"save ALL"},"backendDOMNodeId":22},
+        \\{"ignored":false,"name":{"value":"\u202eevil"},"backendDOMNodeId":23}
+        \\]}
+    ;
+    try expectOne(try pickFromAx(g, ax, .{ .role = "button", .name = "Save all", .exact = true }, "button"), 21, "Save all");
+    try expectOne(try pickFromAx(g, ax, .{ .role = "button", .name = "save ALL", .exact = true }, "button"), 22, "save ALL");
+    const amb = try pickFromAx(g, ax, .{ .role = "button" }, "button");
+    defer g.free(amb.ambiguous);
+    try testing.expect(std.mem.indexOf(u8, amb.ambiguous, "n23 \"evil\"") != null);
+    try testing.expect(std.mem.indexOf(u8, amb.ambiguous, "\u{202e}") == null);
 }
 
 test "여럿 메시지: 긴 이름은 60 바이트(UTF-8 경계)에서 자르고, 다섯 넘으면 …, exact 로도 맞는 후보에 표시" {

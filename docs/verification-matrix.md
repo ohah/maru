@@ -4164,3 +4164,10 @@ namespace 반복, unknown subcommand, mixed alias 중복을 실제 process의 �
 제품 AppKit 입력·Confirm 버튼·Metal 캡처는 `tools/editor-linked-history-app/run.py`로 실행한다.
 검색 배치 UI·닫힌 파일 로드·기존 WorkspaceEdit 통합·자동 저장·다른 창 전체 게이트와 물리 IME는
 이 완료 범위에 포함하지 않는다([계획](plans/editor-history-transaction.md)).
+
+프로젝트 바꾸기 배치는 **선택 명세·전체 Plan 준비 부분 구현**이다. `test-editor-project-replace-batch`의
+`RPB1`~`RPB5`가 질의·옵션 glob·범위 수명, 중복/root, 문서 충돌, 불완전 결과·조합·범위와
+모든 예약 할당 실패를 검사한다. 모델 결함 주입 도구에서 보호를 없앴을 때 실제 판정이 실패하는지도 확인한다.
+actor 편집·자동 저장·선택/진행 UI·디스크 적용은 이 gate에 포함하지 않는다.
+`RPBP1`~`RPBP5`는 전체 Plan·마지막 대상 실패·원문 신원·총량·취소·변경 없음과 모든 준비 할당 실패를 검사한다.
+전체 준비 후 함께 반영하는 정책은 사용자 승인됐으며, [배치 계획](plans/editor-project-replace-batch.md)의 actor·저장·UI 연결이 남았다.

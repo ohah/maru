@@ -620,3 +620,8 @@ registry 소유 `history/links.zig`는 작업/항목 신원을 연결한다. 이
 `src/platform/macos/app_session/editor/history.zig`가 같은 창의 열린 문서와 Confirm·Undo/Redo를 연결하고
 `editor/shared_edit.zig`가 모든 뷰의 사전 준비·게시·통지를 정산한다.
 계약과 미연결 범위는 [Undo/Redo 사전 준비 계획](plans/editor-history-transaction.md)을 따른다.
+
+프로젝트 바꾸기 배치의 독립 선택 명세와 예약 결과 슬롯은
+`src/session/editor/search/batch.zig`가 소유하고, 모든 원문의 Plan과 편집 배열 준비는
+`src/session/editor/search/batch_plan.zig`가 소유한다. 문서/worker/저장은 host의 책임이며,
+연결 범위와 미착수 단계는 [배치 계획](plans/editor-project-replace-batch.md)을 따른다.

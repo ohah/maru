@@ -5449,6 +5449,11 @@ pub fn build(b: *std.Build) void {
         run_apply_host.step.dependOn(&ripgrep_prepare.step);
         macos_only_test_step.dependOn(&run_apply_host.step);
     }
+    const replace_batch_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{".test.RPB"} });
+    const run_replace_batch = b.addRunArtifact(replace_batch_tests);
+    run_replace_batch.addArg("--maru-expect-tests=33");
+    const replace_batch_step = b.step("test-editor-project-replace-batch", "Run frozen replacement batch specifications and prepared outcomes");
+    replace_batch_step.dependOn(&run_replace_batch.step);
     const apply_step = b.step("test-editor-project-replace-apply", "Validate single document replace apply save Undo and failed preparation");
     apply_step.dependOn(&run_apply_host.step);
     apply_step.dependOn(&run_replace_preview.step);

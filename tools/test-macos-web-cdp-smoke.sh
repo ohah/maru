@@ -10,14 +10,23 @@
 #   click-covered   다른 요소가 덮은 버튼은 누르지 않고 「covered」 오류 — 덮은 요소도 눌리지 않는다
 #   click-missing   없는 요소는 not ok(WebKit 과 같다)
 #   click-clobber   DOM clobbering(덮개를 담은 form 의 `parentNode` 를 덮인 버튼 자신으로 가리킨 페이지)으로도 덮임 검사를 통과하지 못한다
-#   snapshot-ref    snapshot(접근성 트리)이 준 ref(`n<backendNodeId>`)로 그 버튼을 진짜로 누른다(W9b①b)
+#   snapshot-ref    snapshot(접근성 트리)이 준 ref(`n<backendNodeId>`)로 그 버튼을 진짜로 누른다(W9b①b) — 페이지에 짝 없는 서로게이트
+#                   글(잘못 자른 이모지)이 있어도 snapshot 이 실패하지 않는다
 #   type            입력칸에 한글을 넣으면 기존 값을 바꿔 쓰고 페이지는 진짜 입력 이벤트로 받는다
 #   wait-scroll     늦게 생기는 요소를 기다리고(보일 때 ok), 화면 밖 요소로 스크롤한다
 #   wait-real       부른 뒤 2 초 지나 생기는 요소를 실제로 기다린다 · 링크 이동을 넘어 다음 문서의 요소를 기다린다
-#   type-guards     빈 글은 지운다(Delete 키) · readonly 칸은 「did not take」 · 초점을 가로채는 칸은 「focus moved」 로 아무것도 넣지 않는다
+#   type-guards     빈 글은 지운다(Delete 키) · readonly 칸은 「did not take」(원래 값의 해시가 2^31 아래·위인 둘 — 해시를 같은 부호로 견주는지) · 초점을 가로채는 칸은 「focus moved」 로 아무것도 넣지 않는다
+#   type-shaped     값을 다듬는 칸(넣은 글을 대문자 세 글자로 줄여 원래 값과 길이가 같아지는 칸 — 해시까지 견주는지 본다·끝 공백을 지우는 email 칸 — 지운 값을 신호로 본다)은 들어간 것으로 ok · maxlength 로
+#                   잘린 칸과 원래 값 뒤에 덧붙은 칸(입력 때 원래 값을 앞에 다시 붙인다)은 「did not take」 · **닫힌** shadow root 안의
+#                   칸(snapshot 의 ref)에도 넣는다(초점 검사가 거짓 「focus moved」 를 내지 않는다)
 #   scroll-real     scroll 이 페이지를 실제로 굴린다(scrollY — 신호)
 #   back·forward    링크로 다음 문서에 간 뒤 뒤로 → 첫 문서, 앞으로 → 다음 문서, 더 앞으로 → not ok
 #   reload          새로고침 → ok, 문서가 다시 불린다(서버가 받은 요청 수)
+#   wait-nav        기다리는 **도중** 페이지가 다른 문서로 옮겨 가도(0.8 초 뒤 이동, 그 문서가 1 초 뒤 요소를 만든다) 그 요소를 찾는다
+#   wait-load       응답이 2 초 늦는 문서로 가는 링크를 누른 뒤 `wait --load` 가 그 문서에서 ok. 그 문서를 새로고침한 직후의 `wait --load` 는
+#                   새 응답이 다 불린 뒤에야 ok(wait 만 ≥ 1 초). 이동이 진행 중이면 Chromium 의 DevTools 가 그 페이지로 가는 호출을 새 문서가
+#                   올 때까지 붙잡는다(실측 — 이동을 일으킨 클릭도 2.3 초, `nav_state.loading` 을 지운 변이도 이 시험을 지난다) — 옛 문서의
+#                   complete 를 읽을 틈이 없다. 그래서 이 경우는 loading 판정이 아니라 Chromium 이 지킨다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -55,17 +64,31 @@ cat > "$root/www/a.html" <<'HTML'
 <input id=in value="old" style="position:absolute;left:20px;top:360px" oninput="hit('in-'+event.isTrusted+'-'+encodeURIComponent(this.value))">
 <button id=mk style="position:absolute;left:20px;top:420px" onclick="setTimeout(function(){document.body.insertAdjacentHTML('beforeend','<p id=late2>late2</p>')},2000)">Make</button>
 <input id=ro readonly value="ro" style="position:absolute;left:20px;top:460px">
+<input id=ro2 readonly value="old" style="position:absolute;left:220px;top:460px">
 <input id=fs style="position:absolute;left:20px;top:500px" onfocus="document.getElementById('in').focus()">
-<button id=far2 style="position:absolute;top:2600px;left:20px">Far2</button>
+<input id=up value="xyz" style="position:absolute;left:20px;top:540px" oninput="this.value=this.value.toUpperCase().slice(0,3);hit('up-'+this.value)">
+<input id=ml maxlength=2 style="position:absolute;left:20px;top:580px">
+<input id=ap value="pre" style="position:absolute;left:220px;top:540px" oninput="if(this.value.indexOf('pre')!==0)this.value='pre'+this.value">
+<input id=em type=email style="position:absolute;left:220px;top:580px" oninput="hit('em-'+encodeURIComponent(this.value))">
+<div id=sh style="position:absolute;left:20px;top:620px"></div>
+<p id=ls style="position:absolute;left:200px;top:700px"></p><script>document.getElementById('ls').textContent='Lone \ud83d end'</script>
+<script>(function(){var r=document.getElementById('sh').attachShadow({mode:'closed'});r.innerHTML='<input aria-label=ShadowField oninput="new Image().src=\'/hit?sh-\'+event.isTrusted+\'-\'+this.value">'})()</script>
+<button id=far2 style="position:absolute;top:4000px;left:20px">Far2</button><div style="position:absolute;top:4100px;height:4000px;width:1px"></div>
 <script>addEventListener('scroll',function(){if(scrollY>2000&&!window.__sy){window.__sy=1;hit('sy-true')}})</script>
 <div id=late-box></div><script>setTimeout(function(){document.getElementById('late-box').innerHTML='<button id=late style=\'position:absolute;left:200px;top:300px\'>Late</button>'},1500)</script>
 <button id=far style="position:absolute;top:1500px;left:20px" onclick="hit('far-'+event.isTrusted+'-scrolled-'+(scrollY>0))">Far</button><div style="height:2000px"></div>
 HTML
-printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script>' > "$root/www/b.html"
+printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
+printf '<!doctype html><title>page-c</title>c<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=cready>ready</p>")},1000)</script>' > "$root/www/c.html"
+printf '<!doctype html><title>page-slow</title>slow' > "$root/www/slow.html"
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
 cat > "$root/server.py" <<'PY'
-import http.server, sys, functools
+import http.server, sys, functools, time
 class H(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/slow.html"):
+            time.sleep(2)  # wait-load: 응답이 늦는 문서
+        super().do_GET()
     def log_message(self, fmt, *args):
         sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
     def end_headers(self):
@@ -126,6 +149,8 @@ hit_seen far-true-scrolled-true && echo yes > "\$out/far-hit" || echo no > "\$ou
 "\$cli" browser snapshot --surface "\$sid" --interactive > "\$out/snapshot" 2>&1; echo "rc=\$?" >> "\$out/snapshot"
 ref=\$(sed -n 's/.*button "RefTarget" \[ref=\(n[0-9]*\)\].*/\1/p' "\$out/snapshot" | head -1)
 echo "\$ref" > "\$out/ref"
+shref=\$(sed -n 's/.*textbox "ShadowField" \[ref=\(n[0-9]*\)\].*/\1/p' "\$out/snapshot" | head -1)
+echo "\$shref" > "\$out/shref"
 run click-ref-real click --ref "\$ref"
 hit_seen rb-true && echo yes > "\$out/ref-hit" || echo no > "\$out/ref-hit"
 run type type --selector '#in' --text '새 값'
@@ -138,7 +163,16 @@ run wait-late2 wait --selector '#late2' --timeout 6000
 run type-empty type --selector '#in' --text ''
 hit_seen 'in-true-\$' && echo yes > "\$out/empty-hit" || echo no > "\$out/empty-hit"
 run type-ro type --selector '#ro' --text 'x'
+run type-ro2 type --selector '#ro2' --text 'x'
 run type-fs type --selector '#fs' --text 'steal'
+run type-up type --selector '#up' --text 'abcd'
+hit_seen up-ABC && echo yes > "\$out/up-hit" || echo no > "\$out/up-hit"
+run type-ml type --selector '#ml' --text 'abcd'
+run type-ap type --selector '#ap' --text 'X'
+run type-em type --selector '#em' --text 'a@b.c '
+hit_seen 'em-a%40b.c$' && echo yes > "\$out/em-hit" || echo no > "\$out/em-hit"
+run type-sh type --ref "\$shref" --text 'deep'
+hit_seen sh-true-deep && echo yes > "\$out/sh-hit" || echo no > "\$out/sh-hit"
 sleep 0.5
 run scroll2 scroll --selector '#far2'
 hit_seen sy-true && echo yes > "\$out/sy-hit" || echo no > "\$out/sy-hit"
@@ -154,6 +188,26 @@ grep -c 'GET /b.html' "$root/http.log" > "\$out/reload-before" || true
 run reload reload
 sleep 1
 grep -c 'GET /b.html' "$root/http.log" > "\$out/reload-after" || true
+run click-go click --selector '#go'
+run wait-cready wait --selector '#cready' --timeout 8000
+url_is c.html && echo yes > "\$out/c-title" || cp "\$out/list" "\$out/c-title"
+run back2 back
+url_is b.html || true
+ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+t0=\$(ms)
+run click-slow click --selector '#slow'
+tc=\$(ms)
+run wait-load wait --load --timeout 8000
+t1=\$(ms)
+echo \$((tc - t0)) > "\$out/load-click-ms"
+url_is slow.html && echo yes > "\$out/slow-title" || cp "\$out/list" "\$out/slow-title"
+t2=\$(ms)
+run reload-slow reload
+t3=\$(ms)
+run wait-load2 wait --load --timeout 8000
+t4=\$(ms)
+echo \$((t4 - t3)) > "\$out/load-ms"
+echo \$((t3 - t2)) > "\$out/reload-ms"
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -202,9 +256,16 @@ ok wait-late2 || fail "waiting for an element made 2 s after the call did not su
 ok wait-bready || fail "waiting across a link navigation for the next page's element did not succeed ($(tr '\n' ' ' < "$out/wait-bready"))"
 echo "PASS wait-real: waits for an element made 2 s later, and across a navigation for the next page's element"
 ok type-empty && [ "$(cat "$out/empty-hit")" = yes ] || fail "typing empty text did not clear the field with a real input ($(tr '\n' ' ' < "$out/type-empty") · $(grep 'GET /hit?in' "$root/http.log" | tr '\n' ' '))"
-grep -q 'did not take' "$out/type-ro" || fail "typing into a read-only field was not refused ($(tr '\n' ' ' < "$out/type-ro"))"
+grep -q 'did not take' "$out/type-ro" && grep -q 'did not take' "$out/type-ro2" || fail "typing into a read-only field was not refused ($(tr '\n' ' ' < "$out/type-ro") · $(tr '\n' ' ' < "$out/type-ro2"))"
 grep -q 'focus moved' "$out/type-fs" && ! grep -q 'GET /hit?in-true-steal' "$root/http.log" || fail "a field that moves focus away was not refused, or the text went elsewhere ($(tr '\n' ' ' < "$out/type-fs"))"
 echo "PASS type-guards: empty text clears for real, a read-only field and a focus-stealing field are refused and nothing lands elsewhere"
+ok type-up && [ "$(cat "$out/up-hit")" = yes ] || fail "a field that reshapes its value (upper case) was not taken as typed ($(tr '\n' ' ' < "$out/type-up"))"
+grep -q 'did not take' "$out/type-ml" || fail "a maxlength field that cut the text was not refused ($(tr '\n' ' ' < "$out/type-ml"))"
+grep -q 'did not take' "$out/type-ap" || fail "a field that moved the caret to the end (the text was appended, not replaced) was not refused ($(tr '\n' ' ' < "$out/type-ap"))"
+ok type-em && [ "$(cat "$out/em-hit")" = yes ] || fail "an email field that trims the trailing space was not taken as typed ($(tr '\n' ' ' < "$out/type-em") · $(grep 'GET /hit?em' "$root/http.log" | tr '\n' ' '))"
+[ -n "$(cat "$out/shref")" ] || fail "snapshot did not list the field inside the closed shadow root ($(tr '\n' ' ' < "$out/snapshot" | cut -c1-400))"
+ok type-sh && [ "$(cat "$out/sh-hit")" = yes ] || fail "typing into a field inside a closed shadow root did not go in for real ($(tr '\n' ' ' < "$out/type-sh"))"
+echo "PASS type-shaped: a reshaping field and an email field's trim are ok, a maxlength cut and an append are refused, a field inside a closed shadow root takes the text"
 ok scroll2 && [ "$(cat "$out/sy-hit")" = yes ] || fail "scroll did not move the page ($(tr '\n' ' ' < "$out/scroll2"))"
 echo "PASS scroll-real: scroll moved the page down to the element"
 ok click-next && [ "$(cat "$out/next-title")" = yes ] || fail "clicking the link did not open the next page ($(tr '\n' ' ' < "$out/next-title"))"
@@ -217,4 +278,12 @@ after=$(cat "$out/reload-after")
 ok reload || fail "reload did not answer ok ($(tr '\n' ' ' < "$out/reload"))"
 [ "$after" -gt "$before" ] || fail "reload did not load the page again (b.html requests $before → $after)"
 echo "PASS reload: the page was loaded again (b.html requests $before → $after)"
+ok click-go && ok wait-cready && [ "$(cat "$out/c-title")" = yes ] \
+    || fail "waiting while the page moved to another document did not find that document's element ($(tr '\n' ' ' < "$out/wait-cready") · $(tr '\n' ' ' < "$out/c-title"))"
+echo "PASS wait-nav: the wait kept going while the page moved to another document and found its element"
+load_ms=$(cat "$out/load-ms")
+ok click-slow && ok wait-load && [ "$(cat "$out/slow-title")" = yes ] || fail "wait --load after clicking a slow link did not succeed on that page ($(tr '\n' ' ' < "$out/wait-load") · $(tr '\n' ' ' < "$out/slow-title"))"
+ok reload-slow && ok wait-load2 || fail "reloading the slow page and waiting for it to load did not succeed ($(tr '\n' ' ' < "$out/reload-slow") · $(tr '\n' ' ' < "$out/wait-load2"))"
+[ "$load_ms" -ge 1000 ] || fail "wait --load answered before the reloaded slow page (2 s late) loaded (the wait took ${load_ms} ms, the reload $(cat "$out/reload-ms") ms)"
+echo "PASS wait-load: wait --load on the slow page is ok, and right after a reload it answers only once the new response loaded (the wait took ${load_ms} ms, the reload $(cat "$out/reload-ms") ms, the link click $(cat "$out/load-click-ms") ms)"
 echo "web cdp smoke passed"

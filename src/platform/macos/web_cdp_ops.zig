@@ -10,6 +10,7 @@
 //!   하면 검사는 「맞음」·누름은 덮개에 떨어지는 경우가 생긴다(W9b①a 적대 리뷰 2 회차). 누르기 전 움직임(`mouseMoved`)은 보내지
 //!   않는다: 숨긴 탭에서는 답이 오지 않았고(실측) 페이지에 「곧 누른다」는 신호가 됐다. 누름을 보냈으면 떼기·놓기는 끝까지 보낸다
 //!   (`committed` — 철회돼도, 누름의 답이 시한을 넘겨도 버튼을 눌린 채 두지 않는다).
+//! - 검사는 DOM 속성을 프로토타입 getter 로 읽는다 — 이름 속성(DOM clobbering)은 격리 world 에서도 보인다(3 회차 실측).
 //! - 다른 frame 의 요소(같은 출처 iframe 노드를 ref 로)는 누르지 않는다 — 자리는 주 화면 좌표인데 검사는 그 frame 문서에서 돌아
 //!   어긋난다. 그림자 DOM 의 slot 에 꽂힌 내용·host 는 그 요소 안으로 본다.
 //! - 자리는 요소 상자와 화면(layout viewport)이 겹친 곳의 가운데다(화면보다 큰 요소의 가운데가 화면 밖이면 거기서는 아무것도 맞지
@@ -40,7 +41,8 @@ pub const Reply = union(enum) {
     timed_out: []const u8,
 };
 
-const max_boxes = 8;
+/// 여러 줄 링크의 줄 상자 상한 — 화면보다 긴 링크는 앞줄이 화면 밖일 수 있어 넉넉히(3 회차 — 8 이면 9 줄째부터 보여도 실패했다).
+const max_boxes = 64;
 
 const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload };
 
@@ -193,7 +195,10 @@ pub const Op = struct {
                 self.stage = .hit_test;
                 // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
                 // 그 frame 에서 보면 어긋난다). 그림자 DOM 안이면 그 뿌리에서 맞히고, slot 에 꽂힌 내용·host 를 따라 올라가며 본다.
-                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y){{if((this.ownerDocument||this)!==document)return 'frame';var r=this.getRootNode&&this.getRootNode();var d=r&&r.elementFromPoint?r:document;for(var n=d.elementFromPoint(x,y);n;n=n.assignedSlot||n.parentNode||n.host)if(n===this)return 'ok';return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y });
+                // **DOM 속성은 프로토타입의 getter 로 읽는다** — 격리 world 여도 `<form>` 안의 `<input name=parentNode>` 같은 이름
+                // 속성(DOM clobbering)이 `n.parentNode` 를 가린다: 실측으로 걷기가 끝없이 돌거나(렌더러 멈춤) 덮인 요소를 「맞음」으로
+                // 통과시켰다(W9b①a 적대 리뷰 3 회차). 걷기는 4096 단계로 끊는다.
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y){{var G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}};var od=G(Node.prototype,'ownerDocument'),pn=G(Node.prototype,'parentNode'),es=G(Element.prototype,'assignedSlot'),ts=G(Text.prototype,'assignedSlot'),hs=G(ShadowRoot.prototype,'host');var grn=Node.prototype.getRootNode,def=Document.prototype.elementFromPoint,sef=ShadowRoot.prototype.elementFromPoint;if((od.call(this)||this)!==document)return 'frame';var r=grn.call(this);var h=(r instanceof ShadowRoot)?sef.call(r,x,y):def.call(document,x,y);for(var n=h,i=0;n&&i<4096;i++){{if(n===this)return 'ok';var s=(n instanceof Element)?es.call(n):(n instanceof Text)?ts.call(n):null;n=s||pn.call(n)||((n instanceof ShadowRoot)?hs.call(n):null)}}return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y });
             },
             .hit_test => {
                 if (at(v, &.{"exceptionDetails"}) != null) {
@@ -268,6 +273,15 @@ pub const Op = struct {
             .query => if (gone) done(gpa, .success, "false") else done(gpa, .invalid_params, message),
             .describe, .scroll, .quads, .resolve => if (gone) done(gpa, .success, "false") else done(gpa, .failed, message),
             .mouse_up => self.releaseStep(gpa), // 떼기 실패 — 그래도 묶음은 놓는다
+            // 검사·누름이 CDP 오류 — 누르지 못했다. 쥔 묶음은 놓고 실패로 답한다(3 회차 — 그냥 끝내 묶음이 남았다).
+            .hit_test => blk: {
+                self.miss = "could not check what is at the element's position";
+                break :blk self.releaseStep(gpa);
+            },
+            .mouse_down => blk: {
+                self.miss = "the click could not be dispatched";
+                break :blk self.releaseStep(gpa);
+            },
             .release => self.finish(gpa),
             else => done(gpa, .failed, message),
         };
@@ -442,6 +456,26 @@ fn twoLinePage(method: []const u8, params: []const u8) Reply {
     return happyPage(method, params);
 }
 
+fn stuckReleasePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchMouseEvent") and std.mem.indexOf(u8, params, "mouseReleased") != null) return .{ .timed_out = "DevTools did not answer in time" };
+    return happyPage(method, params);
+}
+
+fn stuckGroupReleasePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .timed_out = "DevTools did not answer in time" };
+    return happyPage(method, params);
+}
+
+fn hitErrorPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .cdp_error = "{\"code\":-32000,\"message\":\"Cannot find context\"}" };
+    return happyPage(method, params);
+}
+
+fn pressErrorPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchMouseEvent")) return .{ .cdp_error = "{\"code\":-32602,\"message\":\"bad\"}" };
+    return happyPage(method, params);
+}
+
 fn stuckPressPage(method: []const u8, params: []const u8) Reply {
     // 누름 핸들러가 alert 를 띄웠다 — 누름의 답이 시한을 넘긴다.
     if (std.mem.eql(u8, method, "Input.dispatchMouseEvent") and std.mem.indexOf(u8, params, "mousePressed") != null) return .{ .timed_out = "DevTools did not answer in time" };
@@ -557,6 +591,23 @@ test "click: 누름의 답이 시한을 넘겨도 떼기·놓기를 보내고 ti
         try testing.expectEqual(@as(usize, 2), trail.count("Input.dispatchMouseEvent")); // 누름 + 떼기
         try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
         try testing.expect(trail.committed_after_press);
+    }
+    // 떼기가 시한 → 놓기를 마저 보내고 timeout, 놓기만 시한 → 눌렀으니 성공, 누름이 CDP 오류 → 묶음을 놓고 실패.
+    const more = [_]struct { answer: *const fn ([]const u8, []const u8) Reply, status: Status, presses: usize }{
+        .{ .answer = &stuckReleasePage, .status = .timeout, .presses = 2 },
+        .{ .answer = &stuckGroupReleasePage, .status = .success, .presses = 2 },
+        .{ .answer = &pressErrorPage, .status = .failed, .presses = 1 },
+        .{ .answer = &hitErrorPage, .status = .failed, .presses = 0 },
+    };
+    for (more) |c| {
+        trail.reset();
+        var op = try Op.init(testing.allocator, .click, "{\"selector\":\"#b\"}", 14);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, c.answer, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(c.status, r.status);
+        try testing.expectEqual(c.presses, trail.count("Input.dispatchMouseEvent"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
     }
     trail.reset();
     {

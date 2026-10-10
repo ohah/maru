@@ -1370,6 +1370,12 @@ pub fn takeInstallNotice() bool {
 }
 
 /// OSR 백엔드가 켜져 있는가. 결정 전(첫 창 설정 전)에는 개발용 환경변수만 본다.
+/// 이 모듈이 쓰는 할당자(첫 `pump` 이후) — 다른 모듈이 `devtoolsCall` 을 부를 때 같은 할당자를 넘기게(W9b①: 알림 줄과
+/// 보낼 frame 을 이 할당자로 잡고 놓는다). 아직 없으면 sidecar 도 없다.
+pub fn gpaRef() ?std.mem.Allocator {
+    return gpa_ref;
+}
+
 pub fn enabled() bool {
     return decided orelse (envDir() != null);
 }

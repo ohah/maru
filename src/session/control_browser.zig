@@ -109,6 +109,12 @@ pub const BrowserMethod = enum {
     /// 서버 버퍼(네비 넘어 보존)에서 회수. `clear`=반환 후 버퍼 비움. base `browser` scope(콘솔 텍스트=executeScript 결과
     /// 등급). op.arg=`{clear?}` JSON. **op_kind=17 고정**(app_host_abi 컴파일 assert — enum 재배치 금지, 끝에 추가).
     console,
+    /// `browser.back {id}`·`browser.forward {id}` → `{ok:<bool>}`(갈 곳이 없으면 false), `browser.reload {id}` → `{ok:true}`(W9b① —
+    /// Chromium 전용: DevTools 방문 기록·`Page.reload`. WebKit 은 걷어낼 예정이라 새로 두지 않는다 — `-32008`). op.arg 빈 것.
+    /// **op_kind=18·19·20 고정**.
+    back,
+    forward,
+    reload,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -133,6 +139,9 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "wait")) return .wait;
     if (eq(rest, "snapshot")) return .snapshot;
     if (eq(rest, "console")) return .console;
+    if (eq(rest, "back")) return .back;
+    if (eq(rest, "forward")) return .forward;
+    if (eq(rest, "reload")) return .reload;
     return null;
 }
 
@@ -157,17 +166,25 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .wait => "wait",
         .snapshot => "snapshot",
         .console => "console",
+        .back => "back",
+        .forward => "forward",
+        .reload => "reload",
     };
 }
 
-/// 그 엔진이 이 메서드를 지원하는가(W9-0 — 단일 출처). WebKit 은 지금의 전부, Chromium 은 W9 단계마다 늘어난다(지금은
-/// 없음 — docs/plans/web-osr-backend.md W9). 지원하지 않으면 인가 판정 **전에** `unsupported_by_engine` 으로 답한다.
+/// 그 엔진이 이 메서드를 지원하는가(W9-0 — 단일 출처). WebKit 은 W9 전의 것만(걷어낼 예정 — 새 메서드를 두지 않는다, 사용자 결정
+/// 2026-10-10), Chromium 은 W9 단계마다 늘어난다(docs/plans/web-osr-backend.md W9). 지원하지 않으면 인가 판정 **전에**
+/// `unsupported_by_engine` 으로 답한다.
 /// 탭 하나가 지원하는지는 `surfaceSupports`(브라우저 탭이 아니면 엔진과 무관하게 아무것도 없다).
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
-        .webkit => true,
-        // W9 단계마다 여기에 메서드를 더한다(예: W9b 의 click·type).
+        .webkit => switch (m) {
+            .back, .forward, .reload => false,
+            else => true,
+        },
+        // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록.
         .chromium => switch (m) {
+            .click, .back, .forward, .reload => true,
             else => false,
         },
     };
@@ -1532,6 +1549,8 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         .set_local_storage, .remove_local_storage, .clear_storage => serializeNavigateResult(gpa, req.id),
         // act(5f-2): click/type/scroll → {ok:<bool>} — Swift eval이 "true"(요소 발견+동작)/"false"(셀렉터 미매치)를 result로.
         .click, .type_text, .scroll => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
+        // W9b①: back/forward → 갈 곳이 있었는가, reload → true.
+        .back, .forward, .reload => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         .wait => serializeNavigateResult(gpa, req.id),
         // snapshot(§9.5.4) → {snapshot:<tree JSON>}. Swift가 준 JSON을 구조화 embed(malformed=internal_error 방어).
         .snapshot => serializeSnapshotResult(gpa, req.id, result) catch |e| switch (e) {
@@ -1831,6 +1850,7 @@ pub fn browserOpFromRequest(
         .snapshot => try serializeSnapshotArg(gpa, parseSnapshotParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // console(§9.5.9): clear 플래그를 arg에 실어 Swift가 pull(서버 버퍼 반환 + clear면 비움). base browser scope.
         .console => try serializeConsoleArg(gpa, parseConsoleParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        .back, .forward, .reload => try gpa.dupe(u8, ""), // {id}만
         .subscribe => unreachable, // 위에서 이미 분기
     };
     // arg는 이제 gpa-owned. surface·authz는 step 6에서 이미 접혔으므로(op 반환만 남음) 여기서 free할 실패 경로가 없다
@@ -2955,11 +2975,15 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const webkit = arr.items[0].object;
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
-    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len), webkit.get("methods").?.array.items.len);
+    // WebKit 은 W9 전의 것만(back·forward·reload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
+    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 3), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
-    try testing.expectEqual(@as(usize, 0), chromium.get("methods").?.array.items.len); // W9 단계마다 늘어난다
+    // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록.
+    const chromium_methods = chromium.get("methods").?.array.items;
+    try testing.expectEqual(@as(usize, 4), chromium_methods.len);
+    for ([_][]const u8{ "click", "back", "forward", "reload" }, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
     for (arr.items[2..4]) |item| {
         try testing.expectEqualStrings("webkit", item.object.get("engine").?.string);

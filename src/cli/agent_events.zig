@@ -66,8 +66,10 @@ pub const Options = struct {
 pub fn parseArgs(args: []const []const u8) Mode {
     var dir: ?[]const u8 = null;
     var hb: u32 = 5_000;
+    var heartbeat_seen = false;
     // 이어읽기 커서(RA5-a). 비면 처음부터 — **앱을 새로 켠 경우가 그것**이라 기본값이 맞다.
     var resume_spec: []const u8 = "";
+    var resume_seen = false;
     var saw_stdio = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -77,10 +79,17 @@ pub fn parseArgs(args: []const []const u8) Mode {
         } else if (std.mem.eql(u8, a, "--help") or std.mem.eql(u8, a, "-h")) {
             return .help;
         } else if (std.mem.startsWith(u8, a, "--dir=")) {
+            if (dir != null) return .usage_error;
             dir = a["--dir=".len..];
         } else if (std.mem.startsWith(u8, a, "--heartbeat-ms=")) {
+            // Zero and empty resume are valid values, so presence needs its own bit.
+            // Reject before hello/cleanup can make ambiguous selectors observable.
+            if (heartbeat_seen) return .usage_error;
+            heartbeat_seen = true;
             hb = std.fmt.parseInt(u32, a["--heartbeat-ms=".len..], 10) catch return .usage_error;
         } else if (std.mem.startsWith(u8, a, "--resume=")) {
+            if (resume_seen) return .usage_error;
+            resume_seen = true;
             resume_spec = a["--resume=".len..];
         } else return .usage_error;
     }
@@ -464,6 +473,35 @@ test "RA7 formatPanes: 목록 한 줄이 소비자가 가르는 접두를 그대
     defer out.deinit(testing.allocator);
     try formatPanes(&out, testing.allocator, "%0 %7");
     try testing.expectEqualStrings("{\"panes\":\"%0 %7\"}\n", out.items);
+}
+
+test "parseArgs: duplicate stream value options are rejected before startup" {
+    const options = [_][]const u8{ "--stdio", "--dir=/tmp/ev", "--heartbeat-ms=0", "--resume=" };
+    // Move every pair around the remaining options; both adjacent and separated duplicates matter.
+    for (0..4) |a| for (0..4) |b| {
+        if (a == b) continue;
+        for (0..4) |c| {
+            if (c == a or c == b) continue;
+            const d = 6 - a - b - c;
+            for ([_][]const u8{ "--dir=/tmp/ev", "--dir=/tmp/other", "--heartbeat-ms=0", "--heartbeat-ms=00", "--heartbeat-ms=200", "--resume=", "--resume=a:0" }) |duplicate| {
+                const args = [_][]const u8{ options[a], options[b], options[c], options[d], duplicate };
+                try testing.expect(parseArgs(args[0..4]) == .stdio);
+                try testing.expect(parseArgs(&args) == .usage_error);
+            }
+        }
+    };
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=", "--dir=/tmp/ev" }) == .usage_error);
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=invalid", "--resume=" }) == .usage_error);
+    try testing.expect(parseArgs(&.{ "--help", "--dir=/a", "--dir=/b" }) == .help);
+    try testing.expect(parseArgs(&.{ "--dir=/a", "--dir=/b", "--help" }) == .usage_error);
+    const literal = parseArgs(&.{ "--stdio", "--stdio", "--dir=/tmp/--resume=a:0" });
+    try testing.expect(literal == .stdio);
+    try testing.expectEqualStrings("/tmp/--resume=a:0", literal.stdio.dir);
+    try testing.expectEqual(@as(u32, 5_000), literal.stdio.heartbeat_ms);
+    try testing.expectEqualStrings("", literal.stdio.resume_spec);
+    const zero = parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--heartbeat-ms=0", "--resume=" });
+    try testing.expectEqual(@as(u32, 0), zero.stdio.heartbeat_ms);
+    try testing.expectEqualStrings("", zero.stdio.resume_spec);
 }
 
 test "parseArgs: --stdio 와 절대 경로가 있어야 돈다" {

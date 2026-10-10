@@ -279,3 +279,39 @@ Debug/ReleaseFast 순수 suite가 통과했고 실제 process gate는 없는 설
 명시적인 정상 대조군으로 확인하고, 초기/설치된 상태의 중복 요청과 help가 이를 바꾸지 않는지
 검사한다. 기존 CI process 게이트에 포함되며 별도 provider 또는 SSH 실행은 하지 않는다.
 구현은 완료됐고 최종 PR CI 결과는 해당 checks로 추적한다.
+
+## agent-events 단일 값 옵션 계약
+
+사용자 승인된 후속 작업: agent-events의 --dir=, --heartbeat-ms=, --resume=는 각각 한 번만
+지정한다. 같은 값, 0 heartbeat, 빈 resume 및 정규화하면 같은 숫자도 반복은 usage 오류(exit 1)다.
+hello 출력·로그 디렉터리 열기·정리·이어읽기·하트비트 루프 전에 종료한다. 필수 --stdio와
+절대 경로, 기존 = 문법 및 생략 시 기본값은 유지한다. --stdio 반복의 기존 idempotent 동작은
+값 옵션 변경 범위 밖이다. help의 기존 좌→우 판정을 유지한다: help 전에 오류를 만나면 실패,
+help를 먼저 만나면 exit 0 안내다. resume 사양 내부의 항목 정책은 별도 범위다.
+
+검증 계획: private HOME/cache/logs 및 직접 소유한 자식 CLI만 사용한다. 중복 요청은 빠르게
+exit 1이며 stdout/hello 없음과 파일·디렉터리 mode/bytes 보존을 확인한다. 정상 스트림은
+hello·로그 event·이어읽기 cursor·heartbeat를 실제 pipe로 검사하고 항상 종료·회수한다.
+GUI/provider/SSH/tmux는 사용하지 않는다. 기본 CLI process CI gate에 포함하며 세 방어 제거
+변이와 정상/동등 대조군을 확인한다.
+
+수정 전 실제 CLI에서 중복 dir의 마지막 로그가 출력됐고, heartbeat 0→200은 heartbeat를
+다시 활성화했으며 resume a:23→a:0은 앞 이벤트를 재생했다. 자식은 재현 도구가 소유하고
+종료·회수했다. 증거는 /tmp/maru-events-baseline-0q8fo6pg/results.json이다.
+
+parseArgs가 dir 존재와 heartbeat/resume의 별도 seen bit를 할당 전에 검사한다. 0과 빈 문자열도
+지정된 값으로 센다. main은 기존 usage 오류(exit 1)를 hello와 로그 정리 전에 전파하며,
+도움말에는 기존 지원 옵션인 resume와 값 옵션 단일 지정 안내를 추가했다.
+Debug/ReleaseFast 순수 검증은 304 passed/1 skipped로 통과했다. 실제 process 판정자는 24개
+옵션 순열과 7개 중복값의 거부, 오래된 로그 보존, help 순서, 정상 hello/event/cursor/heartbeat,
+이어읽기 중간/끝 위치를 확인한다. 스트림은 테스트 도구가 직접 종료·회수하며 JSON에 이를
+표시한다. tmux 옆 파일·SSH·provider 프로세스는 사용하지 않는다.
+
+dir/heartbeat/resume 방어 각각을 무력화한 변형은 컴파일 후 새 순수 판정자에서 실패했고,
+동등 dir 검사 변형은 통과했다(/tmp/maru-events-mutations-x4sw5nsm/results.json).
+수정 전 CLI는 새 process 판정자에서 중복 옵션인데 스트림이 시작돼 timeout으로 실패했다.
+hello 출력도 함께 기록됐다(/tmp/maru-events-old-negative-lgnmu8xr).
+
+최종 실제 CLI 검증 5회에서 매회 788개 프로세스 검사가 통과했다. 기본 CLI CI 게이트가
+같은 중복 거부와 정상 스트림 대조군을 실행한다. 구현은 완료됐고 최종 CI 결과는 PR에서
+추적한다. 도움말의 기존 순서와 boolean stdio 반복은 유지한다.

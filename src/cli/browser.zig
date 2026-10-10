@@ -44,6 +44,8 @@ pub const browser_help =
     \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
     \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
+    \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
+    \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
     \\
 ;
 
@@ -82,6 +84,9 @@ pub const Request = union(enum) {
     back: struct { surface_id: u64 },
     forward: struct { surface_id: u64 },
     reload: struct { surface_id: u64 },
+    /// `browser hover`·`press`(W9b①b-2 — Chromium 탭). hover 는 locator 필수, press 는 key 필수·locator 는 없어도 된다(지금 초점).
+    hover: struct { surface_id: u64, locator: Locator },
+    press: struct { surface_id: u64, key: []const u8, locator: ?Locator },
     /// `browser click`(act 5f-2·snapshot-2). locator=--selector 또는 --ref 하나. 응답 {ok}(요소 발견+클릭).
     click: struct { surface_id: u64, locator: Locator },
     /// `browser type`(act 5f-2·snapshot-2). locator + text 필수. 응답 {ok}.
@@ -103,7 +108,7 @@ pub const Request = union(enum) {
             .get_url => .get_url,
             .exec => .exec,
             .get_cookies => .get_cookies,
-            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll, .wait, .back, .forward, .reload => .ok,
+            .set_cookie, .delete_cookie, .set_local_storage, .remove_local_storage, .clear_storage, .click, .type_text, .scroll, .wait, .back, .forward, .reload, .hover, .press => .ok,
             .get_local_storage => .value,
             .snapshot => .snapshot,
             .console => .console,
@@ -179,6 +184,7 @@ pub const ParseError = error{
     MissingTimeoutValue, // `wait --timeout`에 값 없음
     InvalidTimeout, // timeout이 1..25_000 정수가 아님
     MissingText, // `type`에 `--text` 없음
+    MissingPressKey, // `press`에 `--key` 없음
     MissingValue, // `set-cookie`/`set-local-storage`에 `--value` 없음
     MissingOptionValue, // `--name`/`--value`/`--domain`/`--path`/`--selector`에 값 없음
     MissingMaxDepthValue, // `snapshot --max-depth`에 값 없음
@@ -268,6 +274,18 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         const s = p.surface orelse return error.MissingSurface;
         if (p.arg != null) return error.UnexpectedArgument;
         return .{ .request = if (eq(sub, "back")) .{ .back = .{ .surface_id = s } } else if (eq(sub, "forward")) .{ .forward = .{ .surface_id = s } } else .{ .reload = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "hover")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        return .{ .request = .{ .hover = .{ .surface_id = s, .locator = try locatorFromArgs(ca) } } };
+    }
+    if (eq(sub, "press")) {
+        const ca = try parseCookieArgs(rest);
+        const s = ca.surface orelse return error.MissingSurface;
+        const key = ca.key orelse return error.MissingPressKey;
+        const loc: ?Locator = if (ca.selector == null and ca.ref == null) null else try locatorFromArgs(ca);
+        return .{ .request = .{ .press = .{ .surface_id = s, .key = key, .locator = loc } } };
     }
     if (eq(sub, "click")) {
         const ca = try parseCookieArgs(rest);
@@ -711,6 +729,18 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
         .back => |g| return idOnlyRequest(gpa, id, "browser.back", g.surface_id),
         .forward => |g| return idOnlyRequest(gpa, id, "browser.forward", g.surface_id),
         .reload => |g| return idOnlyRequest(gpa, id, "browser.reload", g.surface_id),
+        .hover => |c| return actRequest(gpa, id, "browser.hover", c.surface_id, c.locator, null),
+        .press => |c| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(c.surface_id) });
+            try obj.put(gpa, "key", .{ .string = c.key });
+            if (c.locator) |l| switch (l) {
+                .selector => |sel| try obj.put(gpa, "selector", .{ .string = sel }),
+                .ref => |r| try obj.put(gpa, "ref", .{ .string = r }),
+            };
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.press", .params = .{ .object = obj } } });
+        },
         .click => |c| return actRequest(gpa, id, "browser.click", c.surface_id, c.locator, null),
         .type_text => |c| return actRequest(gpa, id, "browser.type", c.surface_id, c.locator, c.text),
         .scroll => |c| return actRequest(gpa, id, "browser.scroll", c.surface_id, c.locator, null),
@@ -1952,6 +1982,25 @@ test "parse: click/type/scroll locator selector·ref·에러" {
     try testing.expectError(error.MissingSurface, parse(&.{ "click", "--selector", "#b" }));
 }
 
+test "parse·buildRequestBytes: hover·press(W9b①b-2) — press 는 --key 필수, 대상은 없어도 된다" {
+    try testing.expectEqualStrings("#h", (try parse(&.{ "hover", "--surface", "3", "--selector", "#h" })).request.hover.locator.selector);
+    try testing.expectError(error.MissingLocator, parse(&.{ "hover", "--surface", "3" }));
+    const bare = (try parse(&.{ "press", "--surface", "3", "--key", "Enter" })).request.press;
+    try testing.expectEqualStrings("Enter", bare.key);
+    try testing.expect(bare.locator == null);
+    try testing.expectEqualStrings("n7", (try parse(&.{ "press", "--surface=3", "--key=Meta+a", "--ref=n7" })).request.press.locator.?.ref);
+    try testing.expectError(error.MissingPressKey, parse(&.{ "press", "--surface", "3", "--selector", "#i" }));
+    try testing.expectError(error.ConflictingLocator, parse(&.{ "press", "--surface", "3", "--key", "a", "--selector", "#i", "--ref", "n1" }));
+    const b = try buildRequestBytes(testing.allocator, .{ .press = .{ .surface_id = 11, .key = "Shift+Tab", .locator = .{ .selector = "#i" } } }, .{ .number = 1 });
+    defer testing.allocator.free(b);
+    var pm = try cp.parseMessage(testing.allocator, b);
+    defer pm.deinit();
+    try testing.expectEqualStrings("browser.press", pm.message.request.method);
+    const params = pm.message.request.params.?.object;
+    try testing.expectEqualStrings("Shift+Tab", params.get("key").?.string);
+    try testing.expectEqualStrings("#i", params.get("selector").?.string);
+}
+
 test "buildRequestBytes: act 메서드·params(selector|ref)" {
     {
         const b = try buildRequestBytes(testing.allocator, .{ .click = .{ .surface_id = 11, .locator = .{ .selector = "#btn" } } }, .{ .number = 1 });
@@ -2015,6 +2064,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
         \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
         \\  reload  --surface <id>                     reload the page (Chromium tabs)
+        \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
+        \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
         \\
     ,
         browser_help,

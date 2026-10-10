@@ -71,6 +71,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
     if (input.handle(message)) return;
     if (dialogs.handle(message)) return;
     if (drag.handle(message)) return;
+    if (@import("devtools.zig").handle(message)) return; // W9-0b
     switch (message) {
         .create_browser => |value| create(value, writer),
         .destroy_browser => |browser| destroy(browser, writer),
@@ -259,6 +260,7 @@ pub fn onClosed(cef_id: c_int) void {
         dropPopup(&closing);
         context_menus.drop(&closing);
         @import("media_menu.zig").forget(cef_id); // W6h②: 미디어 항목의 진행·DevTools 관찰자 등록
+        @import("devtools.zig").forget(cef_id, entry.id); // W9-0b: 기다리던 호출은 `detached` 로(`browser_closed` 앞)
         drag.reset(&closing, true);
         @import("downloads.zig").browserClosed(entry.id); // W10a: 닫힌 브라우저의 다운로드는 CEF 가 알림 없이 멈춘다
         state.writer.send(.{ .browser_closed = entry.id }) catch {};

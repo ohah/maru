@@ -21,9 +21,9 @@ pub const Context = struct {
     maru_version: []const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 2 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 2 + devtools_table 7 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 39;
+const pure_test_count = 46;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{

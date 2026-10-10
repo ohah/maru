@@ -585,6 +585,72 @@ pub fn checkDragOut(value: message.DragOut) Error!void {
     if (value.file_size > message.max_drag_file_bytes) return error.InvalidDrag;
 }
 
+/// DevTools 메서드 이름(W9-0b) — `Domain.method` 모양: 비지 않고 상한 안, 영숫자와 `.` 만, `.` 로 시작·끝나지 않는다.
+pub fn checkDevtoolsMethod(method: []const u8) Error!void {
+    if (method.len == 0 or method.len > message.max_devtools_method_bytes) return error.InvalidDevtools;
+    if (method[0] == '.' or method[method.len - 1] == '.') return error.InvalidDevtools;
+    for (method) |b| if (!std.ascii.isAlphanumeric(b) and b != '.') return error.InvalidDevtools;
+}
+
+/// JSON 의 객체·배열 중첩이 `max` 안인가(문자열 안의 괄호는 세지 않는다). 모양 검사는 하지 않는다 — `std.json.validate` 와 함께 쓴다.
+pub fn jsonDepthWithin(bytes: []const u8, max: usize) bool {
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (bytes) |b| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (b == '\\') {
+                escaped = true;
+            } else if (b == '"') in_string = false;
+            continue;
+        }
+        switch (b) {
+            '"' => in_string = true,
+            '{', '[' => {
+                depth += 1;
+                if (depth > max) return false;
+            },
+            '}', ']' => depth -|= 1,
+            else => {},
+        }
+    }
+    return true;
+}
+
+pub fn checkDevtoolsCall(value: message.DevtoolsCall) Error!void {
+    if (value.call == 0 or value.params_size > message.max_devtools_params_bytes) return error.InvalidDevtools;
+    try checkDevtoolsMethod(value.method);
+}
+
+pub fn checkDevtoolsData(value: message.DevtoolsData) Error!void {
+    if (value.call == 0 or value.bytes.len == 0 or value.bytes.len > message.devtools_chunk_bytes) return error.InvalidDevtools;
+}
+
+pub fn checkDevtoolsResult(value: message.DevtoolsResult) Error!void {
+    if (value.call == 0 or value.size > message.max_devtools_result_bytes) return error.InvalidDevtools;
+    if (!value.status.carriesResult() and value.size != 0) return error.InvalidDevtools;
+}
+
+pub fn writeDevtoolsData(cursor: *Cursor, value: message.DevtoolsData) Error!void {
+    try checkDevtoolsData(value);
+    try writeBrowser(cursor, value.browser);
+    try cursor.writeU32(value.call);
+    try cursor.writeU32(@intCast(value.bytes.len));
+    try cursor.writeBytes(value.bytes);
+}
+
+pub fn readDevtoolsData(cursor: *ReadCursor) Error!message.DevtoolsData {
+    const browser = try readBrowser(cursor);
+    const call = try cursor.readU32();
+    const len = try cursor.readU32();
+    if (len == 0 or len > message.devtools_chunk_bytes) return error.InvalidDevtools;
+    const value: message.DevtoolsData = .{ .browser = browser, .call = call, .bytes = try cursor.readBytes(len) };
+    try checkDevtoolsData(value);
+    return value;
+}
+
 /// 파일 내용 끝(W6d③): 번호는 0 이 아니고, 크기는 상한 안이며 실패면 0.
 pub fn checkDragFileReady(value: message.DragFileReady) Error!void {
     if (value.drag == 0 or value.size > message.max_drag_file_bytes or (!value.ok and value.size != 0)) return error.InvalidDrag;

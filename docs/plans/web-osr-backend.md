@@ -654,3 +654,17 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
 - `web_cdp_keys`(순수 — 키 이름 → `Input.dispatchKeyEvent` 누름·뗌, 편집 명령 표는 macOS 표준 키 바인딩 셀렉터 이름).
 - `web_cdp_ops` 의 hover(click 의 길 → `mouseMoved` → 놓기)·press(대상 있으면 초점 → 격리 world 의 초점 검사 → 누름·뗌 → 놓기, 없으면 누름·뗌만 — 누름 뒤에는 철회돼도 뗌까지).
 - L2 `browser.hover`·`browser.press`(Chromium 만 — WebKit `-32008`, op_kind 21·22), CLI `maru browser hover`·`press --key`.
+
+**W9b①b-2 적대 리뷰**(구현 뒤 다섯 회차 — 사용자 지시 2026-10-10):
+- **1 회차**(높음 0):
+  - 중: `Shift+숫자·기호` 가 아래 글자를 넣었다(`Shift+/` → `/`) → US 배열의 위 글자와 그 자리의 code·keyCode.
+  - 중: 스모크가 입력 이벤트만 봐 insertText 와 가를 수 없었다 → 진짜 keydown 신호와 `Shift+/` 를 본다.
+  - 하: 이름 대소문자·`Esc`·`Return`, 「unknown key name」, 초점 검사 JS 예외를 「focus moved」 로 답함, 덮임 검사·노드 잡기 시한의 묶음 누수(click 부터), 문서(Control·Alt+글자, 새 탭 링크).
+  - 변이: 고치기 전 10 중 10 걸림 — 스모크 3·전체 시험 1 포함.
+- **2 회차**(높음·중 0):
+  - 하: 노드 잡기 시한의 시험이 없었다.
+  - 하: 같은 출처 iframe 안 요소의 press·type 이 「focus moved」 로 답했다 → `frame`.
+  - 하: 대문자·위 글자를 바로 주면 shiftKey 가 없었고, `Meta+A` 가 key `A` 였다(실제 Cmd+A 는 `a`) → shiftKey 를 켜고 단축키는 소문자.
+  - 하: C1 제어 문자를 받았다.
+  - 하: 누름의 답이 실패(결과가 깨짐 등)면 떼지 않았다 → 이미 갔을 수 있어 떼기·놓기를 마저 보낸다(마우스도).
+  - 하: 「Alt+글자 는 그 글자를 넣는다」 를 문서에.

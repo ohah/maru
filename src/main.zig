@@ -14811,7 +14811,7 @@ fn runAgentEvents(
 
     const opts = switch (ae.parseArgs(rest.items)) {
         .help => {
-            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec]\nValue options may only be specified once.\n");
+            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec]\nValue options may only be specified once. Each resume file name may only appear once.\n");
             try stdout.flush();
             return;
         },
@@ -14821,6 +14821,22 @@ fn runAgentEvents(
             return error.UnknownCommand;
         },
         .stdio => |o| o,
+    };
+
+    var cursors: std.StringHashMapUnmanaged(ae.Cursor) = .empty;
+    defer {
+        var it = cursors.keyIterator();
+        while (it.next()) |k| allocator.free(k.*);
+        cursors.deinit(allocator);
+    }
+    // Validate and retain every initial cursor before any wire output or log cleanup.
+    ae.seedResumeCursors(allocator, opts.resume_spec, &cursors) catch |err| switch (err) {
+        error.DuplicateResume, error.InvalidResume => {
+            try stderr.writeAll("maru agent-events: --resume requires one cursor per file name\n");
+            try stderr.flush();
+            return error.UnknownCommand;
+        },
+        else => return err,
     };
 
     // hello 를 **가장 먼저** 보낸다 — 소비자가 제한 서버(`ForceCommand`)를 이것으로 가른다.
@@ -14856,33 +14872,6 @@ fn runAgentEvents(
         }
         routes.deinit(allocator);
     }
-    var cursors: std.StringHashMapUnmanaged(ae.Cursor) = .empty;
-    // **이어읽기**(RA5-a). 로컬이 기억해 둔 위치를 받아 그 자리부터 읽는다 — 채널만 죽었다 살아난
-    // 경우에 이미 흘린 이벤트를 다시 흘리지 않는다(그러면 완료 알림이 재생된다). 비면 처음부터이고,
-    // 그것이 **앱을 새로 켠** 경우다(배지를 세우려면 최근 이벤트를 다시 읽어야 한다).
-    //
-    // `seen_size` 는 `offset` 과 같게 둔다 — 「그때 그만큼 봤다」가 우리가 아는 전부이고, 파일이 그
-    // 사이 줄었으면 `advance` 가 다음 회차에 0 으로 되돌린다.
-    if (opts.resume_spec.len > 0) {
-        var it = std.mem.splitScalar(u8, opts.resume_spec, ',');
-        while (it.next()) |field| {
-            const entry = ae.parseResumeEntry(field) orelse continue; // 인자 해석이 이미 걸렀다
-            const gop = cursors.getOrPut(allocator, entry.name) catch continue;
-            if (!gop.found_existing) {
-                gop.key_ptr.* = allocator.dupe(u8, entry.name) catch {
-                    _ = cursors.remove(entry.name);
-                    continue;
-                };
-            }
-            gop.value_ptr.* = .{ .offset = entry.offset, .seen_size = entry.offset };
-        }
-    }
-    defer {
-        var it = cursors.keyIterator();
-        while (it.next()) |k| allocator.free(k.*);
-        cursors.deinit(allocator);
-    }
-
     var frame: std.ArrayListUnmanaged(u8) = .empty;
     defer frame.deinit(allocator);
 

@@ -295,6 +295,26 @@ pub const Cursor = struct {
     seen_size: u64 = 0,
 };
 
+/// Seed the existing cursor map before hello or disk cleanup. Each name has one authority;
+/// overwriting it would replay or skip events. Allocation failure must not become offset zero.
+/// Keys are owned by the map; the caller frees them even when initialization fails halfway.
+/// seen_size starts at offset: that is all the sender knows. advance resets a rotated file.
+pub fn seedResumeCursors(allocator: std.mem.Allocator, spec: []const u8, cursors: *std.StringHashMapUnmanaged(Cursor)) !void {
+    if (spec.len == 0) return;
+    var it = std.mem.splitScalar(u8, spec, ',');
+    while (it.next()) |field| {
+        const entry = parseResumeEntry(field) orelse return error.InvalidResume;
+        const gop = try cursors.getOrPut(allocator, entry.name);
+        if (gop.found_existing) return error.DuplicateResume;
+        gop.key_ptr.* = allocator.dupe(u8, entry.name) catch |err| {
+            // Remove the borrowed key before the caller's owned-key cleanup runs.
+            _ = cursors.remove(entry.name);
+            return err;
+        };
+        gop.value_ptr.* = .{ .offset = entry.offset, .seen_size = entry.offset };
+    }
+}
+
 /// **다 읽은 파일을 언제 비우나**([계획](../../docs/plans/remote-agent-state.md) RA3 의 «회전·정리를
 /// 누가 하나»).
 ///
@@ -697,4 +717,38 @@ test "parseArgs: --resume 을 받고, 망가진 값은 시작 전에 거른다" 
     try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=t5" }) == .usage_error);
     try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=t5:10," }) == .usage_error);
     try testing.expect(parseArgs(&.{ "--stdio", "--dir=/tmp/ev", "--resume=../x:1" }) == .usage_error);
+}
+
+test "resume cursors reject duplicate names without overwriting the first offset" {
+    for ([_][]const u8{ "a:23,a:0", "a:0,a:23", "a:23,a:23", "a:01,b:2,a:1", "a:0,b:1,c:2,a:18446744073709551615" }) |spec| {
+        var cursors: std.StringHashMapUnmanaged(Cursor) = .empty;
+        defer {
+            var keys = cursors.keyIterator();
+            while (keys.next()) |key| testing.allocator.free(key.*);
+            cursors.deinit(testing.allocator);
+        }
+        try testing.expectError(error.DuplicateResume, seedResumeCursors(testing.allocator, spec, &cursors));
+        const first = parseResumeEntry(spec[0..std.mem.indexOfScalar(u8, spec, ',').?]).?;
+        try testing.expectEqual(first.offset, cursors.get("a").?.offset);
+    }
+}
+
+test "resume cursor initialization cleans up after every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var cursors: std.StringHashMapUnmanaged(Cursor) = .empty;
+            defer {
+                var keys = cursors.keyIterator();
+                while (keys.next()) |key| allocator.free(key.*);
+                cursors.deinit(allocator);
+            }
+            try seedResumeCursors(allocator, "", &cursors);
+            try std.testing.expectEqual(@as(u32, 0), cursors.count());
+            try seedResumeCursors(allocator, "a:01,aa:2,a_t0:3,b:18446744073709551615", &cursors);
+            try std.testing.expectEqual(@as(u32, 4), cursors.count());
+            try std.testing.expectEqual(@as(u64, 1), cursors.get("a").?.offset);
+            try std.testing.expectEqual(@as(u64, 2), cursors.get("aa").?.seen_size);
+            try std.testing.expectEqual(std.math.maxInt(u64), cursors.get("b").?.offset);
+        }
+    }.run, .{});
 }

@@ -469,9 +469,9 @@ pub const Op = struct {
                     // 요소 수를 먼저 본다 — 접근성 질의는 DOM 크기의 제곱으로 느려지고 그동안 페이지가 멈춘다(프로토타입 함수 — DOM clobbering).
                     self.stage = .size_check;
                     // open shadow root 안도 센다(1 회차 — 셀 때 빠져 6 만 요소 페이지가 상한을 지나 2.8 초 멈췄다). 상한을 넘으면 곧 멈춘다.
-                    // 비싼 역할(link)은 후보도 함께 센다(2 회차 — 맞는 노드 수의 제곱으로 느려졌다). 결과는 [요소 수, 후보 수].
-                    const cand = web_cdp_locate.candidateSelector(self.loc_role);
-                    const expr = try std.fmt.allocPrint(gpa, "(function(C){{var L={d},sr=Object.getOwnPropertyDescriptor(Element.prototype,'shadowRoot').get,qa=Document.prototype.querySelectorAll,fa=DocumentFragment.prototype.querySelectorAll,n=0,c=0,todo=[document];while(todo.length){{var r=todo.pop(),q=r===document?qa:fa,l=q.call(r,'*');n+=l.length;if(C)c+=q.call(r,C).length;if(n>L)return [n,c];for(var i=0;i<l.length;i++){{var s=sr.call(l[i]);if(s)todo.push(s)}}}}return [n,c]}})({f})", .{ web_cdp_locate.max_role_page_elements, std.json.fmt(cand, .{}) });
+                    // 접근성 트리를 비싸게 만드는 구성도 함께 센다(3 회차 — 어떤 역할을 찾든 질의마다 트리를 새로 만든다): 대상이 없는 같은
+                    // 문서 fragment 링크, 네이티브 radio, role=radio. 결과는 [요소, fragment 링크, radio, role=radio].
+                    const expr = try std.fmt.allocPrint(gpa, "(function(){{var L={d},G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}},sr=G(Element.prototype,'shadowRoot'),qa=Document.prototype.querySelectorAll,fa=DocumentFragment.prototype.querySelectorAll,ga=Element.prototype.getAttribute,byId=Document.prototype.getElementById,byName=Document.prototype.getElementsByName,S=String.prototype,n=0,frag=0,radio=0,aria=0,todo=[document];while(todo.length){{var r=todo.pop(),q=r===document?qa:fa,l=q.call(r,'*');n+=l.length;if(n>L)return [n,frag,radio,aria];var links=q.call(r,'a[href],area[href]');for(var k=0;k<links.length;k++){{var h=ga.call(links[k],'href')||'';if(S.charAt.call(h,0)!=='#'||h.length<2)continue;var id=S.slice.call(h,1);try{{id=decodeURIComponent(id)}}catch(e){{}}if(!byId.call(document,id)&&!byName.call(document,id).length)frag++}}radio+=q.call(r,'input[type=radio]').length;aria+=q.call(r,'[role=radio]').length;for(var i=0;i<l.length;i++){{var s=sr.call(l[i]);if(s)todo.push(s)}}}}return [n,frag,radio,aria]}})()", .{web_cdp_locate.max_role_page_elements});
                     defer gpa.free(expr);
                     return call(gpa, "Runtime.evaluate", "{{\"expression\":{f},\"contextId\":{d},\"returnByValue\":true}}", .{ std.json.fmt(expr, .{}), self.context_id });
                 }
@@ -609,12 +609,18 @@ pub const Op = struct {
             },
             .size_check => {
                 const counts = arrayAt(v, &.{ "result", "value" }) orelse return done(gpa, .failed, "could not count the page's elements");
-                if (counts.len != 2 or counts[0] != .integer or counts[1] != .integer) return done(gpa, .failed, "could not count the page's elements");
+                if (counts.len != 4) return done(gpa, .failed, "could not count the page's elements");
+                for (counts) |c| if (c != .integer) return done(gpa, .failed, "could not count the page's elements");
                 const count = counts[0].integer;
-                if (web_cdp_locate.candidateSelector(self.loc_role) != null and counts[1].integer > web_cdp_locate.max_link_candidates) {
-                    const msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} {s} candidates (role={s} locator limit {d}; the query freezes the page) — use a selector or ref", .{ counts[1].integer, self.loc_role, self.loc_role, web_cdp_locate.max_link_candidates });
+                const costly = [_]struct { n: i64, limit: i64, what: []const u8 }{
+                    .{ .n = counts[1].integer, .limit = web_cdp_locate.max_dangling_fragment_links, .what = "same-page #links without a target" },
+                    .{ .n = counts[2].integer, .limit = web_cdp_locate.max_native_radios, .what = "radio inputs" },
+                    .{ .n = counts[3].integer, .limit = web_cdp_locate.max_aria_radios, .what = "role=radio elements" },
+                };
+                for (costly) |c| if (c.n > c.limit) {
+                    const msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} {s} (limit {d}; they make the accessibility query freeze the page) — use a selector or ref", .{ c.n, c.what, c.limit });
                     return .{ .done = .{ .status = .failed, .result = msg } };
-                }
+                };
                 if (count > web_cdp_locate.max_role_page_elements) {
                     const msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} elements (role locator limit {d}; the query freezes the page) — use a selector or ref", .{ count, web_cdp_locate.max_role_page_elements });
                     return .{ .done = .{ .status = .failed, .result = msg } };
@@ -1924,14 +1930,14 @@ test "떼기를 끝까지 못 보내도 앞선 실패 이유로 답한다(엔진
 }
 
 fn rolePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[120,0]}}" };
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[120,0,0,0]}}" };
     if (std.mem.eql(u8, method, "DOM.getDocument")) return .{ .ok = "{\"root\":{\"nodeId\":1,\"backendNodeId\":2}}" };
     if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"Save\"},\"backendDOMNodeId\":11},{\"ignored\":false,\"name\":{\"value\":\"Save changes\"},\"backendDOMNodeId\":12},{\"ignored\":true,\"name\":{\"value\":\"\"},\"backendDOMNodeId\":13}]}" };
     return happyPage(method, params);
 }
 
 fn hugeRolePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[40000,0]}}" };
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[40000,0,0,0]}}" };
     return rolePage(method, params);
 }
 
@@ -1953,7 +1959,7 @@ test "role 로케이터: 크기 검사 → 문서 → 접근성 질의 → 하�
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     // 크기 검사는 격리 world·프로토타입 함수로, 질의는 Chromium 역할로(부분 일치라 이름은 싣지 않는다).
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "Element.prototype,'shadowRoot').get") != null); // open shadow 도 센다
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "sr=G(Element.prototype,'shadowRoot')") != null); // open shadow 도 센다
     try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "var L=30000") != null);
     try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\"}", trail.params.items[4]);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"backendNodeId\":11") != null);
@@ -2040,8 +2046,16 @@ fn clipName(gpa: std.mem.Allocator, name: []u8, max: usize) ![]u8 {
     return out;
 }
 
-fn manyLinksPage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[20000,6000]}}" };
+var costly_counts: []const u8 = "[200,0,0,0]";
+
+fn costlyPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) {
+        const Buf = struct {
+            var b: [128]u8 = undefined;
+        };
+        const json = std.fmt.bufPrint(&Buf.b, "{{\"result\":{{\"type\":\"object\",\"value\":{s}}}}}", .{costly_counts}) catch unreachable;
+        return .{ .ok = json };
+    }
     return rolePage(method, params);
 }
 
@@ -2050,29 +2064,31 @@ fn longNamePage(method: []const u8, params: []const u8) Reply {
     return rolePage(method, params);
 }
 
-test "role 로케이터: link 는 후보가 5 천을 넘으면 질의 전에 거절(다른 역할은 후보를 세지 않는다), 긴 이름은 256 바이트에서 잘라 matched 에" {
+test "role 로케이터: 트리를 비싸게 만드는 구성(대상 없는 # 링크·radio·role=radio)이 상한을 넘으면 어떤 역할이든 질의 전에 거절, 긴 이름은 256 바이트에서" {
     var trail: Trail = .{};
     defer trail.deinit();
-    {
-        var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"link\",\"name\":\"x\"}}", 300);
+    for ([_]struct { counts: []const u8, want: ?[]const u8 }{
+        .{ .counts = "[200,3001,0,0]", .want = "too_large: page has 3001 same-page #links without a target (limit 3000" },
+        .{ .counts = "[200,0,3001,0]", .want = "too_large: page has 3001 radio inputs (limit 3000" },
+        .{ .counts = "[200,0,0,801]", .want = "too_large: page has 801 role=radio elements (limit 800" },
+        .{ .counts = "[200,3000,3000,800]", .want = null },
+    }) |c| {
+        trail.reset();
+        costly_counts = c.counts;
+        var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 300);
         defer op.deinit(testing.allocator);
-        const r = try drive(&op, &manyLinksPage, &trail);
+        const r = try drive(&op, &costlyPage, &trail);
         defer testing.allocator.free(r.result);
-        try testing.expectEqual(Status.failed, r.status);
-        try testing.expect(std.mem.startsWith(u8, r.result, "too_large: page has 6000 link candidates"));
-        try testing.expectEqual(@as(usize, 0), trail.count("Accessibility.queryAXTree"));
-        // 후보 selector 는 그 역할만 — link 면 실린다.
-        try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "a[href],area[href],[role=link]") != null);
+        if (c.want) |w| {
+            try testing.expectEqual(Status.failed, r.status);
+            try testing.expect(std.mem.startsWith(u8, r.result, w));
+            try testing.expectEqual(@as(usize, 0), trail.count("Accessibility.queryAXTree"));
+        } else try testing.expectEqual(@as(usize, 1), trail.count("Accessibility.queryAXTree"));
     }
-    trail.reset();
-    {
-        var op = try Op.init(testing.allocator, .scroll, "{\"locator\":{\"role\":\"button\"}}", 301);
-        defer op.deinit(testing.allocator);
-        const r = try drive(&op, &manyLinksPage, &trail);
-        defer testing.allocator.free(r.result);
-        try testing.expectEqual(@as(usize, 1), trail.count("Accessibility.queryAXTree")); // button 은 후보를 보지 않는다
-        try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "})(null)") != null);
-    }
+    // 세기 JS 는 그 구성들을 센다(같은 문서 # 링크의 대상·radio·role=radio).
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "a[href],area[href]") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "input[type=radio]") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "[role=radio]") != null);
     trail.reset();
     {
         var op = try Op.init(testing.allocator, .scroll, "{\"locator\":{\"role\":\"button\"}}", 302);

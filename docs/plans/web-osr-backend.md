@@ -742,3 +742,10 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - 중: 1 회차 고침을 지키는 시험이 없었다(리뷰 사본 변이 11 중 5 걸림 — 받은 이름 정규화·shadow 세기) → nbsp·soft hyphen exact·대소문자·메시지의
     양방향 글자 시험, 스모크에 중첩 open shadow 안 버튼을 role 로 누르기.
   - 하: closed shadow root 안은 여전히 셀 수 없다(문서). 표시 안전에 줄·문단 구분·interlinear·tag 글자도, CLI 의 512 바이트 자르기에 「…」.
+- **3 회차**(실측 — 역할 아홉 가지를 1 만 노드로):
+  - 중(높음에 가까움): **비용은 찾는 역할이 아니라 페이지 구성이 정한다** — 질의마다 트리를 새로 만들고(두 번 불러도 같다 — 캐시 없음), 대상이 없는
+    같은 문서 `#` 링크(1 만: role=link 2.5 초·role=button 1.2 초)·네이티브 radio(1 만 6.9 초)·`role=radiogroup` 안 `role=radio`(2 천 2.5 초, 1 만은 37 초에도
+    답이 없다 — 앱 시한 30 초를 넘는다)가 키운다. 정상 링크 1 만은 0.38 초, heading·listitem·cell·option·image·checkbox·menuitem·paragraph·tab·treeitem
+    1 만은 모두 0.4 초 아래 → 2 회차의 「link 후보 5 천」(정상 큰 목록을 거절했다)을 빼고, 어떤 역할이든 그 세 구성을 세 상한(3 천·3 천·800)을 넘으면 거절.
+    snapshot(`getFullAXTree`)도 같은 비용을 낸다(범위 밖 — 남김).
+  - 하: CLI 가 `-32008` 의 `param:"locator"` 를 보이지 않았다 → `[param=locator]`. CLI `--nth` 범위를 서버(0..1000000)와 맞춤.

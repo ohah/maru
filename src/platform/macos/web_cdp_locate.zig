@@ -16,15 +16,14 @@ pub const max_text_bytes = 1024;
 /// 3.7 초 — 페이지 타이머가 3.6 초 멈췄다, 8 만 요소 14 초).
 pub const max_role_page_elements = 30000;
 
-/// 맞는 노드가 많을 때 유난히 느린 역할의 후보 상한 — link 는 맞는 노드 수의 제곱으로 느려졌다(실측: 링크 5 천 0.68 초·1 만 2.5 초·
-/// 2.5 만 15 초 — 요소 3 만 상한 아래에서도 페이지가 14 초 멈췄다, W9b②-1 적대 리뷰 2 회차. button 1 만은 0.4 초).
-pub const max_link_candidates = 5000;
-
-/// 역할의 후보를 미리 셀 CSS selector — 상한이 있는 역할만(지금은 link).
-pub fn candidateSelector(chromium_role: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, chromium_role, "link")) return "a[href],area[href],[role=link]";
-    return null;
-}
+/// 접근성 트리를 만드는 비용을 크게 키우는 페이지 구성의 상한 — **어떤 역할을 찾든** 질의마다 트리를 새로 만들고(캐시 없음) 그 비용은 이
+/// 구성에 따라 제곱(또는 그 이상)으로 커졌다(실측, W9b②-1 적대 리뷰 3 회차 — 2 회차의 「link 가 느리다」 는 원인을 잘못 짚었다):
+/// - 대상이 없는 같은 문서 fragment 링크(`href="#N"` 에 그 id 가 없음): 1 만 개면 role=link 2.5 초·role=button 1.2 초(정상 링크 1 만은 0.38 초).
+/// - 네이티브 radio(같은 그룹·name 없음): 5 천 1.8 초·1 만 6.9 초.
+/// - `role=radiogroup` 안의 `role=radio`: 1 천 0.36 초·2 천 2.5 초·1 만은 37 초에도 답이 없었다(앱의 DevTools 시한 30 초를 넘는다).
+pub const max_dangling_fragment_links = 3000;
+pub const max_native_radios = 3000;
+pub const max_aria_radios = 800;
 
 /// ARIA 1.2 구체 역할(접근성 트리가 같은 문자열로 쓰는 것 — 실측) — 정렬 안 됨, 선형 탐색(작다).
 const aria_roles = [_][]const u8{

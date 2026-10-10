@@ -2322,11 +2322,21 @@ test "dispatchBrowser(5f-1) D5: browser_storage cap은 screenshot 불인가 → 
 //   테스트가 사라졌다(옛 "screenshot 미구현→method_not_found"를 op 테스트로 교체). browser.back/forward/refresh는 §9.4
 //   표엔 있으나 parseBrowserMethod 미구현(null)이라 에이전트가 부르면 method_not_found여야 한다(authorized 무관 — 메서드명은
 //   공개 API라 oracle 아님). 유효 cap이어도 이 접힘을 확인해 복원.
-test "dispatchBrowser: 유효 cap + 미구현 browser 메서드(back) → method_not_found(-32601)" {
-    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.back\",\"params\":{\"id\":11}}";
+test "dispatchBrowser: 유효 cap + 미구현 browser 메서드(pdf) → method_not_found(-32601)" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.pdf\",\"params\":{\"id\":11}}";
     const wire = try dispatchErr(req, browserCap(11));
     defer testing.allocator.free(wire);
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
+}
+
+test "dispatchBrowser: WebKit 탭의 back·forward·reload 는 cap 이 있어도 -32008(W9b① — Chromium 전용, WebKit 은 걷어낼 예정)" {
+    for ([_][]const u8{ "back", "forward", "reload" }) |m| {
+        var buf: [128]u8 = undefined;
+        const req = try std.fmt.bufPrint(&buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.{s}\",\"params\":{{\"id\":11}}}}", .{m});
+        const wire = try dispatchErr(req, browserCap(11));
+        defer testing.allocator.free(wire);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(wire));
+    }
 }
 
 // ── 7) 유효 cap + navigate params에 url 없음 → invalid_params ──
@@ -2412,8 +2422,13 @@ test "parseBrowserMethod: 구현된 browser method 인식, 미지는 null" {
     try testing.expectEqual(BrowserMethod.type_text, parseBrowserMethod("type").?);
     try testing.expectEqual(BrowserMethod.scroll, parseBrowserMethod("scroll").?);
     try testing.expectEqual(BrowserMethod.wait, parseBrowserMethod("wait").?);
+    // W9b①: 방문 기록(Chromium 전용 — 엔진 판정은 dispatch 가 한다).
+    try testing.expectEqual(BrowserMethod.back, parseBrowserMethod("back").?);
+    try testing.expectEqual(BrowserMethod.forward, parseBrowserMethod("forward").?);
+    try testing.expectEqual(BrowserMethod.reload, parseBrowserMethod("reload").?);
     // 미구현/미지 → null.
-    try testing.expect(parseBrowserMethod("back") == null);
+    try testing.expect(parseBrowserMethod("goBack") == null);
+    try testing.expect(parseBrowserMethod("refresh") == null); // 옛 문서 표의 이름 — reload 다
     try testing.expect(parseBrowserMethod("get_url") == null); // snake_case는 wire 이름 아님(camelCase 엄수)
     try testing.expect(parseBrowserMethod("") == null);
     // parseMethod("browser.navigate").rest가 곧 parseBrowserMethod 입력임을 확인(1a와 결합).

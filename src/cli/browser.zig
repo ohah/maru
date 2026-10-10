@@ -35,8 +35,8 @@ pub const browser_help =
     \\  remove-local-storage --surface <id> --key k             remove a localStorage entry
     \\  clear-storage        --surface <id>                     clear all cookies and storage for the target origin
     \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
-    \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   type text into an element (input)
-    \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          scroll an element into view
+    \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
+    \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
     \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
@@ -2006,8 +2006,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  remove-local-storage --surface <id> --key k             remove a localStorage entry
         \\  clear-storage        --surface <id>                     clear all cookies and storage for the target origin
         \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
-        \\  type    --surface <id> (--selector <css> | --ref <e#>) --text <t>   type text into an element (input)
-        \\  scroll  --surface <id> (--selector <css> | --ref <e#>)          scroll an element into view
+        \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
+        \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
         \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading

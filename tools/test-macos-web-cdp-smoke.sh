@@ -10,6 +10,9 @@
 #   click-covered   다른 요소가 덮은 버튼은 누르지 않고 「covered」 오류 — 덮은 요소도 눌리지 않는다
 #   click-missing   없는 요소는 not ok(WebKit 과 같다)
 #   click-clobber   DOM clobbering(덮개를 담은 form 의 `parentNode` 를 덮인 버튼 자신으로 가리킨 페이지)으로도 덮임 검사를 통과하지 못한다
+#   snapshot-ref    snapshot(접근성 트리)이 준 ref(`n<backendNodeId>`)로 그 버튼을 진짜로 누른다(W9b①b)
+#   type            입력칸에 한글을 넣으면 기존 값을 바꿔 쓰고 페이지는 진짜 입력 이벤트로 받는다
+#   wait-scroll     늦게 생기는 요소를 기다리고(보일 때 ok), 화면 밖 요소로 스크롤한다
 #   back·forward    링크로 다음 문서에 간 뒤 뒤로 → 첫 문서, 앞으로 → 다음 문서, 더 앞으로 → not ok
 #   reload          새로고침 → ok, 문서가 다시 불린다(서버가 받은 요청 수)
 #
@@ -45,6 +48,9 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=cover onclick="hit('cover')">Covered</button><div id=over onclick="hit('over')"></div>
 <button id=t2 name=parentNode form=f2 style="position:absolute;left:300px;top:220px;width:100px;height:40px" onclick="hit('t2')">T2</button>
 <form id=f2><div style="position:absolute;left:290px;top:210px;width:140px;height:70px;z-index:5;background:rgba(0,0,0,.2)" onclick="hit('over2')"></div></form>
+<button id=rb style="position:absolute;left:20px;top:300px" onclick="hit('rb-'+event.isTrusted)">RefTarget</button>
+<input id=in value="old" style="position:absolute;left:20px;top:360px" oninput="hit('in-'+event.isTrusted+'-'+encodeURIComponent(this.value))">
+<div id=late-box></div><script>setTimeout(function(){document.getElementById('late-box').innerHTML='<button id=late style=\'position:absolute;left:200px;top:300px\'>Late</button>'},1500)</script>
 <button id=far style="position:absolute;top:1500px;left:20px" onclick="hit('far-'+event.isTrusted+'-scrolled-'+(scrollY>0))">Far</button><div style="height:2000px"></div>
 HTML
 printf '<!doctype html><title>page-b</title>b' > "$root/www/b.html"
@@ -109,6 +115,16 @@ run click-missing click --selector '#none'
 run click-clobber click --selector '#t2'
 run click-far click --selector '#far'
 hit_seen far-true-scrolled-true && echo yes > "\$out/far-hit" || echo no > "\$out/far-hit"
+"\$cli" browser snapshot --surface "\$sid" --interactive > "\$out/snapshot" 2>&1; echo "rc=\$?" >> "\$out/snapshot"
+ref=\$(sed -n 's/.*button "RefTarget" \[ref=\(n[0-9]*\)\].*/\1/p' "\$out/snapshot" | head -1)
+echo "\$ref" > "\$out/ref"
+run click-ref-real click --ref "\$ref"
+hit_seen rb-true && echo yes > "\$out/ref-hit" || echo no > "\$out/ref-hit"
+run type type --selector '#in' --text '새 값'
+hit_seen 'in-true-%EC%83%88%20%EA%B0%92' && echo yes > "\$out/type-hit" || echo no > "\$out/type-hit"
+run wait wait --selector '#late' --timeout 5000
+run wait-never wait --selector '#never-there' --timeout 300
+run scroll scroll --selector '#far'
 run click-next click --selector '#next'
 url_is b.html && echo yes > "\$out/next-title" || cp "\$out/list" "\$out/next-title"
 run back back
@@ -157,6 +173,13 @@ grep -q 'covered' "$out/click-clobber" || fail "a covered button behind a DOM-cl
 echo "PASS click-clobber: DOM clobbering does not get a covered button past the check"
 ok click-far && [ "$(cat "$out/far-hit")" = yes ] || fail "an element below the fold was not scrolled into view and clicked ($(tr '\n' ' ' < "$out/click-far"))"
 echo "PASS click-far: an element below the fold is scrolled into view and clicked for real"
+grep -q '^rc=0$' "$out/snapshot" && [ -n "$(cat "$out/ref")" ] || fail "snapshot did not list the RefTarget button with a node ref ($(tr '\n' ' ' < "$out/snapshot" | cut -c1-400))"
+ok click-ref-real && [ "$(cat "$out/ref-hit")" = yes ] || fail "clicking the snapshot ref $(cat "$out/ref") did not click the button for real ($(tr '\n' ' ' < "$out/click-ref-real"))"
+echo "PASS snapshot-ref: the accessibility snapshot gave ref $(cat "$out/ref") and clicking it pressed the button for real"
+ok type && [ "$(cat "$out/type-hit")" = yes ] || fail "type did not replace the field's value with a real input event ($(tr '\n' ' ' < "$out/type") · $(grep 'GET /hit?in' "$root/http.log" | tr '\n' ' '))"
+echo "PASS type: the field's value was replaced with Korean text through a real (isTrusted) input event"
+ok wait && grep -q '(-32004)' "$out/wait-never" && ok scroll || fail "wait or scroll did not behave ($(tr '\n' ' ' < "$out/wait") · $(tr '\n' ' ' < "$out/wait-never") · $(tr '\n' ' ' < "$out/scroll"))"
+echo "PASS wait-scroll: waiting for a late element succeeds, a missing one times out (-32004), scroll is ok"
 ok click-next && [ "$(cat "$out/next-title")" = yes ] || fail "clicking the link did not open the next page ($(tr '\n' ' ' < "$out/next-title"))"
 ok back && [ "$(cat "$out/back-title")" = yes ] || fail "back did not return to the first page ($(tr '\n' ' ' < "$out/back") · $(tr '\n' ' ' < "$out/back-title"))"
 ok forward && [ "$(cat "$out/forward-title")" = yes ] || fail "forward did not reopen the next page ($(tr '\n' ' ' < "$out/forward"))"

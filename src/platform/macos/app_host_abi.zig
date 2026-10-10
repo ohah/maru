@@ -7017,11 +7017,6 @@ fn pushBrowserOp(
         // executeScript arg는 L2가 이미 `{script,args,max_result_bytes}` owned JSON으로 직렬화했다. 여기서 다시
         // 감싸면 args를 잃거나 사용자 script를 이중 escape하므로 ABI queue가 그대로 인수한다.
     }
-    if (chromium) {
-        startCdpOp(async_id, op.surface_id, op.method, backend_arg);
-        server.cross_gpa.free(backend_arg);
-        return;
-    }
     if (op.method == .wait) {
         active_browser_waits.append(allocator, .{
             .async_id = async_id,
@@ -7032,6 +7027,12 @@ fn pushBrowserOp(
             _ = server.completeInFlight(async_id, null);
             return;
         };
+    }
+    // wait 도 기다림 목록에 오른 뒤 보낸다 — 탭 닫힘·grant 철회가 그 목록으로 끝낸다(W9b①b).
+    if (chromium) {
+        startCdpOp(async_id, op.surface_id, op.method, backend_arg);
+        server.cross_gpa.free(backend_arg);
+        return;
     }
     const required_host: control_pane_grant.GrantHost = if (op.pane_grant) |g|
         (if (g.scope == .browser_storage) g.host else .{})
@@ -7071,6 +7072,10 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
         .back => .back,
         .forward => .forward,
         .reload => .reload,
+        .type_text => .type_text,
+        .scroll => .scroll,
+        .wait => .wait,
+        .snapshot => .snapshot,
         else => null,
     };
 }
@@ -7097,10 +7102,11 @@ fn beginCdp(run: *CdpRun) void {
     cdpAdvance(run, step);
 }
 
-/// 그 요청이 아직 살아 있고 허가돼 있는가(취소·시한·철회·탭 닫힘·서버 멈춤이면 거짓).
+/// 그 요청이 아직 살아 있고 허가돼 있는가(취소·시한·철회·탭 닫힘·서버 멈춤이면 거짓). wait 는 실행 목록이 아니라 기다림 목록에
+/// 있다 — 닫힘·철회가 그 목록에서 빼고 답한다.
 fn cdpStillAllowed(async_id: u64) bool {
     if (!control_server_active) return false;
-    const execution = active_browser_executions.get(async_id) orelse return false;
+    const execution = active_browser_executions.get(async_id) orelse return activeBrowserWait(async_id);
     if (execution.phase == .abandoned) return false;
     const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
@@ -7149,11 +7155,44 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
 fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void {
     const async_id = run.async_id;
     const surface_id = run.surface_id;
+    const big_result = run.op.kind == .snapshot and status == .success;
     removeCdpRun(run);
     run.op.deinit(allocator);
     allocator.destroy(run);
-    completeCdp(async_id, status, result);
+    // snapshot 은 Swift 와 같은 큰 결과 전송(≤512 KiB inline, 넘으면 조각)으로 — 트리가 frame 상한을 넘을 수 있다.
+    if (big_result) completeCdpResult(async_id, result) else completeCdp(async_id, status, result);
     startNextCdp(surface_id);
+}
+
+/// 큰 결과의 바이트를 쥔다 — `maru_macos_control_complete_browser_result` 가 읽고(copy) 다 쓰면 놓는다(release).
+const CdpResultHolder = struct { bytes: []u8 };
+var cdp_next_transfer: u64 = 0;
+
+fn cdpResultCopy(context: ?*anyopaque, _: u64, offset: u64, dst: ?[*]u8, cap: usize) callconv(.c) i64 {
+    const holder: *CdpResultHolder = @ptrCast(@alignCast(context orelse return -1));
+    const start: usize = std.math.cast(usize, offset) orelse return -1;
+    if (start > holder.bytes.len or dst == null) return -1;
+    const n = @min(cap, holder.bytes.len - start);
+    @memcpy(dst.?[0..n], holder.bytes[start..][0..n]);
+    return @intCast(n);
+}
+
+fn cdpResultRelease(context: ?*anyopaque, _: u64) callconv(.c) u32 {
+    const holder: *CdpResultHolder = @ptrCast(@alignCast(context orelse return 1));
+    allocator.free(holder.bytes);
+    allocator.destroy(holder);
+    return 1;
+}
+
+fn completeCdpResult(async_id: u64, result: []const u8) void {
+    const holder = allocator.create(CdpResultHolder) catch return completeCdp(async_id, .failed, "out of memory");
+    holder.* = .{ .bytes = allocator.dupe(u8, result) catch {
+        allocator.destroy(holder);
+        return completeCdp(async_id, .failed, "out of memory");
+    } };
+    cdp_next_transfer +%= 1;
+    if (cdp_next_transfer == 0) cdp_next_transfer = 1;
+    _ = maru_macos_control_complete_browser_result(async_id, cdp_next_transfer, holder.bytes.len, holder, &cdpResultCopy, &cdpResultRelease);
 }
 
 fn removeCdpRun(run: *CdpRun) void {

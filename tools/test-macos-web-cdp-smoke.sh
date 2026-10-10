@@ -13,6 +13,9 @@
 #   snapshot-ref    snapshot(접근성 트리)이 준 ref(`n<backendNodeId>`)로 그 버튼을 진짜로 누른다(W9b①b)
 #   type            입력칸에 한글을 넣으면 기존 값을 바꿔 쓰고 페이지는 진짜 입력 이벤트로 받는다
 #   wait-scroll     늦게 생기는 요소를 기다리고(보일 때 ok), 화면 밖 요소로 스크롤한다
+#   wait-real       부른 뒤 2 초 지나 생기는 요소를 실제로 기다린다 · 링크 이동을 넘어 다음 문서의 요소를 기다린다
+#   type-guards     빈 글은 지운다(Delete 키) · readonly 칸은 「did not take」 · 초점을 가로채는 칸은 「focus moved」 로 아무것도 넣지 않는다
+#   scroll-real     scroll 이 페이지를 실제로 굴린다(scrollY — 신호)
 #   back·forward    링크로 다음 문서에 간 뒤 뒤로 → 첫 문서, 앞으로 → 다음 문서, 더 앞으로 → not ok
 #   reload          새로고침 → ok, 문서가 다시 불린다(서버가 받은 요청 수)
 #
@@ -50,10 +53,15 @@ cat > "$root/www/a.html" <<'HTML'
 <form id=f2><div style="position:absolute;left:290px;top:210px;width:140px;height:70px;z-index:5;background:rgba(0,0,0,.2)" onclick="hit('over2')"></div></form>
 <button id=rb style="position:absolute;left:20px;top:300px" onclick="hit('rb-'+event.isTrusted)">RefTarget</button>
 <input id=in value="old" style="position:absolute;left:20px;top:360px" oninput="hit('in-'+event.isTrusted+'-'+encodeURIComponent(this.value))">
+<button id=mk style="position:absolute;left:20px;top:420px" onclick="setTimeout(function(){document.body.insertAdjacentHTML('beforeend','<p id=late2>late2</p>')},2000)">Make</button>
+<input id=ro readonly value="ro" style="position:absolute;left:20px;top:460px">
+<input id=fs style="position:absolute;left:20px;top:500px" onfocus="document.getElementById('in').focus()">
+<button id=far2 style="position:absolute;top:2600px;left:20px">Far2</button>
+<script>addEventListener('scroll',function(){if(scrollY>2000&&!window.__sy){window.__sy=1;hit('sy-true')}})</script>
 <div id=late-box></div><script>setTimeout(function(){document.getElementById('late-box').innerHTML='<button id=late style=\'position:absolute;left:200px;top:300px\'>Late</button>'},1500)</script>
 <button id=far style="position:absolute;top:1500px;left:20px" onclick="hit('far-'+event.isTrusted+'-scrolled-'+(scrollY>0))">Far</button><div style="height:2000px"></div>
 HTML
-printf '<!doctype html><title>page-b</title>b' > "$root/www/b.html"
+printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script>' > "$root/www/b.html"
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
 cat > "$root/server.py" <<'PY'
 import http.server, sys, functools
@@ -125,7 +133,17 @@ hit_seen 'in-true-%EC%83%88%20%EA%B0%92' && echo yes > "\$out/type-hit" || echo 
 run wait wait --selector '#late' --timeout 5000
 run wait-never wait --selector '#never-there' --timeout 300
 run scroll scroll --selector '#far'
+run click-mk click --selector '#mk'
+run wait-late2 wait --selector '#late2' --timeout 6000
+run type-empty type --selector '#in' --text ''
+hit_seen 'in-true-\$' && echo yes > "\$out/empty-hit" || echo no > "\$out/empty-hit"
+run type-ro type --selector '#ro' --text 'x'
+run type-fs type --selector '#fs' --text 'steal'
+sleep 0.5
+run scroll2 scroll --selector '#far2'
+hit_seen sy-true && echo yes > "\$out/sy-hit" || echo no > "\$out/sy-hit"
 run click-next click --selector '#next'
+run wait-bready wait --selector '#bready' --timeout 6000
 url_is b.html && echo yes > "\$out/next-title" || cp "\$out/list" "\$out/next-title"
 run back back
 url_is a.html && echo yes > "\$out/back-title" || cp "\$out/list" "\$out/back-title"
@@ -180,6 +198,15 @@ ok type && [ "$(cat "$out/type-hit")" = yes ] || fail "type did not replace the 
 echo "PASS type: the field's value was replaced with Korean text through a real (isTrusted) input event"
 ok wait && grep -q '(-32004)' "$out/wait-never" && ok scroll || fail "wait or scroll did not behave ($(tr '\n' ' ' < "$out/wait") · $(tr '\n' ' ' < "$out/wait-never") · $(tr '\n' ' ' < "$out/scroll"))"
 echo "PASS wait-scroll: waiting for a late element succeeds, a missing one times out (-32004), scroll is ok"
+ok wait-late2 || fail "waiting for an element made 2 s after the call did not succeed ($(tr '\n' ' ' < "$out/wait-late2"))"
+ok wait-bready || fail "waiting across a link navigation for the next page's element did not succeed ($(tr '\n' ' ' < "$out/wait-bready"))"
+echo "PASS wait-real: waits for an element made 2 s later, and across a navigation for the next page's element"
+ok type-empty && [ "$(cat "$out/empty-hit")" = yes ] || fail "typing empty text did not clear the field with a real input ($(tr '\n' ' ' < "$out/type-empty") · $(grep 'GET /hit?in' "$root/http.log" | tr '\n' ' '))"
+grep -q 'did not take' "$out/type-ro" || fail "typing into a read-only field was not refused ($(tr '\n' ' ' < "$out/type-ro"))"
+grep -q 'focus moved' "$out/type-fs" && ! grep -q 'GET /hit?in-true-steal' "$root/http.log" || fail "a field that moves focus away was not refused, or the text went elsewhere ($(tr '\n' ' ' < "$out/type-fs"))"
+echo "PASS type-guards: empty text clears for real, a read-only field and a focus-stealing field are refused and nothing lands elsewhere"
+ok scroll2 && [ "$(cat "$out/sy-hit")" = yes ] || fail "scroll did not move the page ($(tr '\n' ' ' < "$out/scroll2"))"
+echo "PASS scroll-real: scroll moved the page down to the element"
 ok click-next && [ "$(cat "$out/next-title")" = yes ] || fail "clicking the link did not open the next page ($(tr '\n' ' ' < "$out/next-title"))"
 ok back && [ "$(cat "$out/back-title")" = yes ] || fail "back did not return to the first page ($(tr '\n' ' ' < "$out/back") · $(tr '\n' ' ' < "$out/back-title"))"
 ok forward && [ "$(cat "$out/forward-title")" = yes ] || fail "forward did not reopen the next page ($(tr '\n' ' ' < "$out/forward"))"

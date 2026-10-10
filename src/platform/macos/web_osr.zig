@@ -76,6 +76,8 @@ const Surface = struct {
     url: ?[]u8 = null,
     can_go_back: bool = false,
     can_go_forward: bool = false,
+    /// Chromium 이 이 탭을 불러오는 중인가(`nav_state.loading` — 이동이 막 시작된 것도 참이다, W9b①b 의 wait --load).
+    loading: bool = false,
     nav_dirty: bool = false,
     gpu_notice_pending: bool = false,
     /// 엔진이 멈췄다는 안내(`latched`)를 이 탭의 창이 아직 안 보였다 — 멈출 때 열려 있던 탭과 멈춘 뒤 새로 연 탭에 한 번씩
@@ -1481,6 +1483,12 @@ pub fn testForget(gpa: std.mem.Allocator) void {
 
 pub fn owns(surface_id: u64) bool {
     return surfaces.contains(surface_id);
+}
+
+/// 그 탭을 불러오는 중인가(모르는 탭은 거짓) — control-plane 의 `wait --load`(W9b①b).
+pub fn isLoading(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.loading;
 }
 
 /// 창 배치 하나를 맞춘다(창 tick 의 web 전이 계산에서, OSR 대상 탭마다).
@@ -3748,6 +3756,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .nav_state => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.can_go_back = v.can_go_back;
             s.can_go_forward = v.can_go_forward;
+            s.loading = v.loading;
             s.nav_dirty = true;
         },
         .failure => |f| switch (f.code) {

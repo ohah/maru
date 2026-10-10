@@ -8241,6 +8241,19 @@ snapshot 이 먼저다」 1번 항목이 소유한다.
 준비물을 되돌리므로 commit 된 frontier 는 실패 전 그대로다. 진짜 할당 실패·ops 오류(`OutOfMemory`)는 base 를 어디까지
 믿을지 몰라 여전히 연결을 닫는다(`tick_collect_oom`).
 
+**무효화 원인 한 줄(2026-10-10).** 「스트림 무효화 → 1 초 백오프 → resync 스냅샷」은 그 순간 화면을 멈칫하게
+한다. 그런데 `resync sweep blocked: invalidated=1` 만으로는 다섯 자리(`invalidate_turn_rejected`·`_projection_budget`·
+`_frontier_mismatch`·`_pressure_victim`·`_prepared_attach`) 중 무엇인지, `turn_rejected` 라면 연성 상한
+(`screen_soft_bytes`) 초과인지 길이 0 청크인지를 가를 수 없었다(terminal-browser 사용 중 초당 1 회꼴 무효화로
+프레임이 빠지던 조사). 이제 `invalidateSubscriptionOutput` 이 purge **전에** 한 줄을 남긴다:
+
+```
+session host stream invalidated: n=<누적> site=<자리> stream=<id> reject_site=<enqueue 자리|-> reject_err=<오류|-> reject_bytes=<거부된 배치> screen_resident=<그 스트림에 쌓인 바이트> soft_cap=<연성 상한> slot_pending=<연결 큐>
+```
+
+`reject_*` 는 `turn_rejected` 갈래에서만 채운다(그 거부를 만든 `enqueueOwnedScreenBatch` 의 오류). 이 경로는
+초당 한 번꼴로 탈 수 있으므로 **처음 8 번과 그 뒤 256 번마다**만 찍는다 — `n` 이 누적이라 빈도도 읽힌다.
+
 **판정자.** 값(방향·상한·기록 교체)은 `collect_failure.zig` 의 순수 테스트, 배선(어느 자리가 무엇을
 넘기는가·로그가 렌더를 그대로 내는가)은 `collect_failure_site_boundary` 의 「frontier 가 어긋나 접히면
 기대값과 실제값을 함께 남긴다」다 — 둘 다 `check-boundaries` 에서 돈다. 여기에 **진단 배선의 E2E**

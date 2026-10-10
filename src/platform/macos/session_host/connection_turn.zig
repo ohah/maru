@@ -220,6 +220,49 @@ fn noteStreamFrontierResync(stream: subscription_identity.LocalStreamId) void {
     host_log.line("session host stream resync after frontier mismatch: stream={d} -> snapshot.invalidated", .{stream});
 }
 
+/// 이 프로세스에서 구독 출력을 무효화한 횟수. 처음 몇 번과 그 뒤 일정 간격만 찍는 데 쓴다.
+var subscription_invalidations: u64 = 0;
+
+/// 다음 무효화가 방금 거부된 subscription turn 때문인가. 그 갈래(`tick` 의 `.rejected`)만 세우고 다음
+/// `noteSubscriptionInvalidated` 가 소비한다 — 그때만 `adoption_reject_*` 가 그 무효화의 원인이다. 자리 이름을
+/// 문자열로 비교하지 않는 이유: 자리 이름은 소스에 정확히 한 번만 있어야 로그 한 줄이 한 자리로 갈린다
+/// (`close_site_name_boundary`).
+var turn_reject_detail_pending: bool = false;
+
+/// 구독 출력 무효화 한 줄 — **어느 자리가, 왜, 그 순간 얼마가 쌓여 있었는지.** 무효화는 그 스트림을
+/// 1 초 백오프 뒤 전체 스냅샷 resync 로 보내므로 화면이 멈칫한다. 예전엔 `resync sweep blocked:
+/// invalidated=1` 만 남아 다섯 자리 중 무엇인지, 연성 상한(`screen_soft_bytes`) 초과인지 길이 0 청크인지
+/// 가를 수 없었다(2026-10-10 terminal-browser 프레임 드랍 조사). `reject_*` 는 `turn_rejected` 갈래에서만
+/// 그 거부를 만든 enqueue 오류다(다른 갈래는 `-`). 브라우저가 이미지를 흘리면 초당 한 번꼴로 일어나므로
+/// 처음 8 번과 그 뒤 256 번마다만 찍는다 — `n` 이 누적 횟수다.
+fn noteSubscriptionInvalidated(
+    site: []const u8,
+    stream: subscription_identity.LocalStreamId,
+    screen_resident: ?usize,
+    slot_pending: usize,
+) void {
+    if (builtin.is_test) return;
+    const turn_rejected = turn_reject_detail_pending;
+    turn_reject_detail_pending = false; // 찍든 안 찍든 이 무효화에서 소비한다 — 다음 무효화로 새지 않게.
+    subscription_invalidations +%= 1;
+    const n = subscription_invalidations;
+    if (n > 8 and n % 256 != 0) return;
+    host_log.line(
+        "session host stream invalidated: n={d} site={s} stream={d} reject_site={s} reject_err={s} reject_bytes={d} screen_resident={d} soft_cap={d} slot_pending={d}",
+        .{
+            n,
+            site,
+            stream,
+            if (turn_rejected) adoption_reject_site else "-",
+            if (turn_rejected) adoption_reject_error else "-",
+            if (turn_rejected) adoption_reject_bytes else 0,
+            screen_resident orelse 0,
+            slot_mod.screen_soft_bytes,
+            slot_pending,
+        },
+    );
+}
+
 /// 정체로 닫기 **직전** 한 줄. 바로 뒤의 `closed client connection ... site=tick_partial_*_stalled` 줄은
 /// 「정체로 닫았다」까지만 말한다. 2026-10-07 18:59 GUI 끊김에서 그 줄만으로는
 /// ① 두 기한(진행 없음 10 초 / 전체 30 초) 중 어느 것인지, ② 얼마나 쌓였는지, ③ 언제인지를 몰라
@@ -938,8 +981,11 @@ pub const Client = struct {
                 },
                 .rejected => {
                     output.rollback(&self.connection);
-                    if (!self.isClosing())
+                    if (!self.isClosing()) {
+                        // 거부 사유(`adoption_reject_*`)를 이 무효화의 원인으로 한 줄에 싣는다.
+                        turn_reject_detail_pending = true;
                         self.invalidateSubscriptionOutput("invalidate_turn_rejected", stream, tracker);
+                    }
                 },
             }
             if (self.isClosing()) return;
@@ -1150,6 +1196,8 @@ pub const Client = struct {
     ) void {
         const slot = self.reactor.get(self.admission) catch |err|
             return self.beginCloseAtErr("invalidate_slot_lookup", @errorName(err), .socket_error);
+        // purge 가 쌓인 바이트를 비우기 «전» 에 잰다 — 그래야 상한 대비 얼마였는지가 남는다.
+        noteSubscriptionInvalidated(site, stream, slot.screenResidentBytes(tracker) catch null, slot.pending_bytes);
         const outcome = slot.beginPressureInvalidation(tracker) catch |err|
             return self.beginCloseAtErr(site, @errorName(err), .socket_error);
         if (outcome == .drain_current_batch) return;

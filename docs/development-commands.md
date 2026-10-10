@@ -1293,3 +1293,8 @@ fake Unix socket과 sentinel 파일을 사용해 잘못된 인자의 파일 보�
 완료한 검증 worker의 수확을 진행 프레임 뒤로 늦추고 IME 확정 대기를 주입한다.
 진행→충돌 화면의 실제 Metal 캡처와 원래 문서·모든 디스크 파일의 bytes 보존을 판정한다.
 물리 OS IME 입력·후보창 검증은 아니다.
+
+여러 문서 Undo/Redo의 사전 준비·할당 실패·실제 항목 ID 판정:
+`mise exec -- zig build test-editor-history-step` (Debug/ReleaseFast).
+`python3 tools/test-editor-history-step-adversarial.py`는 격리된 컴파일 가능한 보호 변이와 정상/복원 대조를 실행한다.
+제품 UI/공유 게시 연결 범위는 [사전 준비 계획](plans/editor-history-transaction.md)을 따른다.

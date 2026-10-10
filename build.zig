@@ -5452,6 +5452,11 @@ pub fn build(b: *std.Build) void {
     const apply_step = b.step("test-editor-project-replace-apply", "Validate single document replace apply save Undo and failed preparation");
     apply_step.dependOn(&run_apply_host.step);
     apply_step.dependOn(&run_replace_preview.step);
+    const history_host_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.HSTH"} });
+    const run_history_host = b.addRunArtifact(history_host_tests);
+    run_history_host.addArg("--maru-expect-tests=5");
+    const history_step = b.step("test-editor-history-step", "Run prepared multi-document history and host identity judges");
+    history_step.dependOn(&run_history_host.step);
     const run_editor_tests = b.addRunArtifact(editor_tests);
     run_editor_tests.setCwd(b.path("."));
     run_editor_tests.step.dependOn(&install_fake_lsp.step);
@@ -5477,6 +5482,10 @@ pub fn build(b: *std.Build) void {
         // 돈다** — `editor_judges.zig` 에 import 하면 「모듈 경로 밖」이라 컴파일이 막힌다.
         .filters = &.{ "LANG", "MOT", "CLIP", "PAIR", "DLT", "BUF", "OCC", "FND", "HL", "DGC", "DGT", "LSF", "LSJ", "LSP", "LST", "LSI", "HVT", "TXE", "WSE", "CPL", "SEM", "FRG", "INL", "DSY", "OCH", "SSEL", "STK", "CAX", "CT", "CASE", "ETX", "BR", "AC", "COL", "OPT", "OW", "EMK", "TIG", "FKB", "SBL", "DCARET", "DCOL", "DSB", "DHS", "CRUMB", "LOOP", "session.editor.", "session.syntax_theme.", "platform.cell_text.", "session.repo_path." },
     });
+    const history_step_tests = addProjectTest(b, .{ .root_module = maru_mod, .filters = &.{".test.HST"} });
+    const run_history_step = b.addRunArtifact(history_step_tests);
+    run_history_step.addArg("--maru-expect-tests=28");
+    history_step.dependOn(&run_history_step.step);
     const run_editor_core_tests = b.addRunArtifact(editor_core_tests);
     run_editor_core_tests.setCwd(b.path("."));
     editor_test_step.dependOn(&run_editor_core_tests.step);

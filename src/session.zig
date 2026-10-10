@@ -167,6 +167,7 @@ pub const editor = struct {
     pub const line_index = @import("session/editor/line_index.zig");
     pub const selection = @import("session/editor/selection.zig");
     pub const history = @import("session/editor/history.zig");
+    pub const history_step = @import("session/editor/history/step.zig");
     pub const document_state = @import("session/editor/document_state.zig");
     pub const recovery_id = @import("session/editor/recovery_id.zig");
     pub const document_registry = @import("session/editor/document_registry.zig");

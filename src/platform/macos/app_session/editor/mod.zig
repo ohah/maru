@@ -8354,7 +8354,14 @@ fn pushUndo(
     // **새 편집은 redo를 버린다**(§3.3).
     dropRedo(self, term);
 
+    const id = term.rt.editorDocument().history.issueId() catch {
+        owned_inverse.deinit();
+        self.allocator.free(sels_before);
+        term.rt.editorDocument().history.clear(self.allocator);
+        return;
+    };
     const entry: UndoEntry = .{
+        .id = id,
         .inverse = owned_inverse,
         .sels_before = sels_before,
         .primary_before = primary_before,
@@ -8515,6 +8522,7 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
         restored = .{ .items = entry.sels_before, .primary = entry.primary_before };
 
         const mirror: UndoEntry = .{
+            .id = entry.id,
             .inverse = back,
             .sels_before = mirror_items,
             .primary_before = mirror_primary,
@@ -59025,4 +59033,26 @@ test "RPA28 완료된 적용이 IME 대기로 거절되면 그려 둔 진행 UI�
         try testing.expect(fx.session.metal_dirty);
         try testing.expectEqual(@as(u64, 0), fx.session.editor_search.published_generation);
     }
+}
+
+test "HSTH1 실제 편집 Undo Redo와 초기화는 항목 신원을 보존하고 재사용하지 않는다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "history.txt", "foo");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    var change = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = 3, .text = "bar" }};
+    try testing.expect(applyEditAsOneWithUndo(fx.session, term, &change));
+    const h = &term.rt.editorDocument().history;
+    const id = h.undo[h.undo_len - 1].id;
+    try testing.expect(id != 0);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqual(id, h.redo[h.redo_len - 1].id);
+    try testing.expect(redoEdit(fx.session, term));
+    try testing.expectEqual(id, h.undo[h.undo_len - 1].id);
+    const epoch = h.epoch;
+    h.clear(testing.allocator);
+    try testing.expect(h.epoch > epoch);
+    change[0].text = "new";
+    try testing.expect(applyEditAsOneWithUndo(fx.session, term, &change));
+    try testing.expect(h.undo[h.undo_len - 1].id > id);
 }

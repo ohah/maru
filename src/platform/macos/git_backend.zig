@@ -137,6 +137,9 @@ pub const Result = struct {
     /// **목록과 같은 왕복에 실어 온다.** 따로 물으면 원격 왕복이 하나 더 늘고, 그 사이에 사용자가
     /// 다른 pane 으로 옮기면 루트와 목록이 다른 저장소의 것이 된다.
     repo_root: []u8 = &.{},
+    /// **원격 홈의 실제 경로**(`cd && pwd -P` — 계획 workspace-trust WT7b). 루트를 읽었을 때만 함께 묻는다 — 홈 자체·그 위의 저장소는
+    /// 신뢰를 묻지 않는다(WT2b 와 같은 거절). 로컬 읽기·루트를 못 읽은 원격 읽기에서는 비어 있다.
+    remote_home: []u8 = &.{},
     /// `git status --porcelain=v2 --branch` 출력.
     status: []u8 = &.{},
     /// `git diff --numstat HEAD` 출력 — **목록 행의 증감**(행의 기본 비교와 같은 범위). unborn 저장소에서는
@@ -179,6 +182,7 @@ pub const Result = struct {
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         allocator.free(self.repo_root);
+        allocator.free(self.remote_home);
         allocator.free(self.status);
         allocator.free(self.conflict_markers);
         allocator.free(self.numstat_head);
@@ -283,6 +287,10 @@ const Job = struct {
     /// 원격 **저장소 루트**(RS3). diff 의 오른쪽(작업트리)은 git 으로 못 읽어 파일을 직접 읽는데, 그때
     /// 상대경로를 절대경로로 만드는 데 쓴다. 목록 읽기에서 받아 둔 값을 호출자가 그대로 넘긴다.
     remote_root: []u8 = &.{},
+    /// 원격 목록 읽기를 **신뢰로** 제출했을 때 그 판정이 본 저장소 루트(계획 workspace-trust WT7b). 워커는 이번 왕복이 읽은 루트가
+    /// 이것과 같을 때만 신뢰 규칙으로 읽는다 — 판정은 지난 목록의 루트로 섰는데, 그 사이 cwd 의 저장소가 바뀌었을 수 있다(심링크가 다른
+    /// 곳을 가리킴·cwd 아래에 새 저장소). 비면 신뢰 판정이 없었다.
+    trusted_root: []u8 = &.{},
 
     /// 이 job 이 원격이면 그 대상. 둘 중 하나라도 비면 **로컬로 본다** — 반쪽짜리 원격 대상으로
     /// 명령을 만드느니 로컬로 도는 편이 낫다는 뜻이 아니라, `buildRemote` 가 그 값을 거부하기 때문에
@@ -297,9 +305,11 @@ const Job = struct {
         if (self.remote_dest.len > 0) allocator.free(self.remote_dest);
         if (self.remote_ctl.len > 0) allocator.free(self.remote_ctl);
         if (self.remote_root.len > 0) allocator.free(self.remote_root);
+        if (self.trusted_root.len > 0) allocator.free(self.trusted_root);
         self.remote_dest = &.{};
         self.remote_ctl = &.{};
         self.remote_root = &.{};
+        self.trusted_root = &.{};
     }
 
     const DiffTarget = struct {
@@ -503,16 +513,27 @@ pub const Backend = struct {
     pub const TrustCheck = struct {
         ctx: *anyopaque,
         trusted: *const fn (ctx: *anyopaque, repo: []const u8) bool,
+        /// 원격 저장소(그 목적지의 cwd `repo`)를 신뢰했으면 그 신뢰 키의 경로(원격 실제 루트 — 계획 workspace-trust WT7b), 아니면 null.
+        /// 반환한 조각은 이 호출 동안만 빌린다. 꽂지 않았으면 원격은 신뢰 전이다(닫힌 쪽).
+        remote_trusted_root: ?*const fn (ctx: *anyopaque, repo: []const u8, dest: []const u8) ?[]const u8 = null,
     };
 
-    /// 이 읽기를 신뢰 전 규칙으로 돌릴까 — 원격은 늘(원격 신뢰 키가 없다 — 2026-10-09 사용자 결정), 로컬은 신뢰 표가 허용이
-    /// 아니면. 턴 스냅샷처럼 신뢰 전에 아예 안 하는 일은 호출자가 이것으로 거른다.
-    pub fn untrustedFor(self: *const Backend, repo: []const u8, is_remote: bool) bool {
-        if (is_remote) return true;
+    /// 이 읽기를 신뢰 전 규칙으로 돌릴까 — 신뢰 표가 허용이 아니면. 원격(`remote_dest`)은 (목적지, 원격 실제 루트) 키로 본다(계획
+    /// workspace-trust WT7b). 턴 스냅샷처럼 신뢰 전에 아예 안 하는 일은 호출자가 이것으로 거른다.
+    pub fn untrustedFor(self: *const Backend, repo: []const u8, remote_dest: ?[]const u8) bool {
+        if (remote_dest) |dest| return self.remoteTrustedRoot(repo, dest) == null;
         // 판정 함수가 없으면 제품에서는 신뢰 전(닫힌 쪽 — 제품은 늘 `initWithTrust` 로 만든다; 판정자가 센다), 판정자에서는
         // 신뢰(그 판정자들이 재는 것은 신뢰와 무관한 읽기다 — 신뢰 전 갈래는 판정 함수를 꽂아 잰다).
         const t = self.trust orelse return !builtin.is_test;
         return !t.trusted(t.ctx, repo);
+    }
+
+    /// 원격 저장소를 신뢰했으면 그 키의 루트(빌린 조각), 아니면 null — 판정자 빌드에서도 꽂지 않았으면 신뢰 전이다(원격 판정자들은 신뢰
+    /// 전 env 를 잰다).
+    pub fn remoteTrustedRoot(self: *const Backend, repo: []const u8, dest: []const u8) ?[]const u8 {
+        const t = self.trust orelse return null;
+        const f = t.remote_trusted_root orelse return null;
+        return f(t.ctx, repo, dest);
     }
 
     /// 제품이 쓰는 생성 — 세션의 신뢰 판정을 꽂는다(계획 workspace-trust WT6b-1a).
@@ -610,7 +631,13 @@ pub const Backend = struct {
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch &.{};
             if (job.remote_dest.len == 0 or job.remote_ctl.len == 0) job.freeRemote(state.allocator);
         }
-        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
+        // 원격을 신뢰로 제출하면 그 판정의 루트를 싣는다 — 워커가 이번 왕복의 루트와 대 본다(`Job.trusted_root`). 못 실으면 신뢰 전.
+        if (!job.untrusted and job.remoteTarget() != null) {
+            const root = self.remoteTrustedRoot(repo, job.remote_dest) orelse "";
+            job.trusted_root = if (root.len > 0) state.allocator.dupe(u8, root) catch &.{} else &.{};
+            if (job.trusted_root.len == 0) job.untrusted = true;
+        }
         const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
             job.freeRemote(state.allocator);
             state.allocator.free(job.git_exe);
@@ -824,7 +851,7 @@ pub const Backend = struct {
             job.remote_root = state.allocator.dupe(u8, remote_root) catch &.{};
             if (job.remote_dest.len == 0 or job.remote_ctl.len == 0) job.freeRemote(state.allocator);
         }
-        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, diffWorker, .{job}) catch return self.releaseDiffJob(job);
         thread.detach();
         return true;
@@ -913,7 +940,7 @@ pub const Backend = struct {
             return self.releaseIgnoreJob(job);
         }
         job.ignore_paths = owned;
-        job.untrusted = self.untrustedFor(repo, false); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, ignoreWorker, .{job}) catch return self.releaseIgnoreJob(job);
         thread.detach();
         return true;
@@ -1024,7 +1051,7 @@ pub const Backend = struct {
         job.* = .{ .state = state, .git_exe = &.{}, .repo = &.{}, .request_id = request_id, .file_list_kind = kind };
         job.git_exe = state.allocator.dupe(u8, git_exe) catch return self.releaseBranchesJob(job);
         job.repo = state.allocator.dupe(u8, repo) catch return self.releaseBranchesJob(job);
-        job.untrusted = self.untrustedFor(repo, false); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, branchesWorker, .{job}) catch return self.releaseBranchesJob(job);
         thread.detach();
         return true;
@@ -1076,7 +1103,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseRepoStatusJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseRepoStatusJob(job);
         }
-        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, repoStatusWorker, .{job}) catch return self.releaseRepoStatusJob(job);
         thread.detach();
         return true;
@@ -1116,7 +1143,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseLogJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseLogJob(job);
         }
-        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, logWorker, .{job}) catch return self.releaseLogJob(job);
         thread.detach();
         return true;
@@ -1215,7 +1242,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseCommitFilesJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseCommitFilesJob(job);
         }
-        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, commitFilesWorker, .{job}) catch return self.releaseCommitFilesJob(job);
         thread.detach();
         return true;
@@ -1316,7 +1343,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseSnapshotJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseSnapshotJob(job);
         }
-        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, snapshotWorker, .{job}) catch return self.releaseSnapshotJob(job);
         thread.detach();
         return true;
@@ -1389,7 +1416,7 @@ pub const Backend = struct {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseTreeCheckJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseTreeCheckJob(job);
         }
-        job.untrusted = self.untrustedFor(repo, remote != null); // 계획 workspace-trust WT6b-1a — 신뢰 판정(메인 스레드)
+        job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, treeCheckWorker, .{job}) catch return self.releaseTreeCheckJob(job);
         thread.detach();
         return true;
@@ -1825,7 +1852,7 @@ fn runMarkersBatch(allocator: std.mem.Allocator, job: *const Job, paths: []const
     const o = if (job.remoteTarget()) |target| blk: {
         var remote_buf: [git_command.max_argv][]const u8 = undefined;
         var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
-        const argv = git_command.buildRemote(local, target, &remote_buf, &cmd_buf) orelse return false;
+        const argv = git_command.buildRemoteWithConfig(local, target, null, null, read_untrusted, &remote_buf, &cmd_buf) orelse return false;
         break :blk runArgvWithEnv(allocator, argv, null, true, null, true) catch return false;
     } else runArgvWithEnv(allocator, local, null, false, null, true) catch return false;
     defer allocator.free(o.bytes);
@@ -2205,6 +2232,23 @@ fn worker(job: *Job) void {
         (git_command.baseRange(job.base, &range_buf) orelse git_command.default_base_range)
     else
         git_command.default_base_range;
+    // **원격이면 루트를 함께 묻는다**(RS3). 로컬은 walk-up 으로 이미 알아 물을 필요가 없고, 원격은
+    // 이 왕복에 얹지 않으면 diff 를 열 때 왕복이 하나 더 늘어난다 — 그 사이 pane 이 바뀌면 루트와
+    // 목록이 **다른 저장소**의 것이 된다.
+    //
+    // **다른 읽기보다 먼저 묻는다**(계획 workspace-trust WT7b) — 신뢰는 지난 목록의 루트로 판정했는데, 이번 왕복의 루트가 그것과
+    // 다르면(그 사이 cwd 의 저장소가 바뀌었다) 나머지를 신뢰 전 규칙으로 읽는다. 루트를 묻는 읽기 자체는 신뢰 전 규칙이다(판정 전이다).
+    // 홈(`remote_home`)도 함께 묻는다 — 세션이 홈 저장소를 묻지 않는 데 쓴다.
+    if (job.remoteTarget()) |target| {
+        read_untrusted = true;
+        if (runOn(state.allocator, target, .repo_root, job.git_exe, job.repo, null)) |out| {
+            defer state.allocator.free(out.bytes);
+            const trimmed = std.mem.trim(u8, out.bytes, " \t\r\n");
+            if (trimmed.len > 0) result.repo_root = state.allocator.dupe(u8, trimmed) catch &.{};
+        } else |_| {}
+        if (result.repo_root.len > 0) result.remote_home = readRemoteHome(state.allocator, target);
+        read_untrusted = job.untrusted or !std.mem.eql(u8, job.trusted_root, result.repo_root);
+    }
     inline for (optional_reads) |pair| {
         const arg: ?[]const u8 = switch (pair[0]) {
             .ahead_behind => base_range,
@@ -2217,16 +2261,6 @@ fn worker(job: *Job) void {
             // 상한에 걸렸을 때 앞쪽 파일만 숫자를 갖고 나머지는 조용히 빈 채로 남는다 — 사용자는 그것을
             // "안 바뀐 파일"로 읽는다. 실패(그 값이 없는 것)와 잘림(값이 반만 있는 것)은 다른 상태다.
             if (out.truncated) truncated = true;
-        } else |_| {}
-    }
-    // **원격이면 루트를 함께 묻는다**(RS3). 로컬은 walk-up 으로 이미 알아 물을 필요가 없고, 원격은
-    // 이 왕복에 얹지 않으면 diff 를 열 때 왕복이 하나 더 늘어난다 — 그 사이 pane 이 바뀌면 루트와
-    // 목록이 **다른 저장소**의 것이 된다.
-    if (job.remoteTarget() != null) {
-        if (runOn(state.allocator, job.remoteTarget(), .repo_root, job.git_exe, job.repo, null)) |out| {
-            defer state.allocator.free(out.bytes);
-            const trimmed = std.mem.trim(u8, out.bytes, " \t\r\n");
-            if (trimmed.len > 0) result.repo_root = state.allocator.dupe(u8, trimmed) catch &.{};
         } else |_| {}
     }
     var failure: ReadFailure = .generic;
@@ -2389,7 +2423,7 @@ fn runFilterProbe(allocator: std.mem.Allocator, remote: ?git_command.Remote, kin
     if (remote) |target| {
         var remote_buf: [git_command.max_argv][]const u8 = undefined;
         var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
-        const argv = git_command.buildRemoteWithConfig(local, target, null, config, &remote_buf, &cmd_buf) orelse return error.GitFailed; // 대체 조회도 `COUNT=0` — 읽기와 같은 상속 env
+        const argv = git_command.buildRemoteWithConfig(local, target, null, config, true, &remote_buf, &cmd_buf) orelse return error.GitFailed; // 대체 조회도 `COUNT=0` — 읽기와 같은 상속 env; 조회는 신뢰 전 읽기만 한다
         return runArgvWithEnv(allocator, argv, null, true, null, true) catch |err| return mapRemoteExitError(err);
     }
     read_filter_env = config;
@@ -2481,6 +2515,19 @@ fn sideUnfetched(allocator: std.mem.Allocator, job: *Job, probed: *?bool, tree_i
     }
 }
 
+/// 원격 홈의 실제 경로(계획 workspace-trust WT7b — `git_command.buildRemoteHome`). 못 읽으면 빈 조각 — 세션은 홈을 모르면 그 저장소를
+/// 묻지 않는다(닫힌 쪽). 경로가 아닌 답(빈 줄·상대 경로·여러 줄)도 버린다.
+fn readRemoteHome(allocator: std.mem.Allocator, remote: git_command.Remote) []u8 {
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
+    const argv = git_command.buildRemoteHome(remote, &argv_buf, &cmd_buf) orelse return &.{};
+    const out = runArgvWithEnv(allocator, argv, null, true, null, false) catch return &.{};
+    defer allocator.free(out.bytes);
+    const line = std.mem.trimEnd(u8, out.bytes, "\n");
+    if (line.len == 0 or line[0] != '/' or std.mem.indexOfScalar(u8, line, '\n') != null or out.truncated) return &.{};
+    return allocator.dupe(u8, line) catch &.{};
+}
+
 fn runOn(
     allocator: std.mem.Allocator,
     remote: ?git_command.Remote,
@@ -2513,7 +2560,7 @@ fn runOn(
     // 를 조회와 읽기가 **똑같이** 버려야, 조회가 못 본 저장소를 읽기가 보는 일이 없다(적대적 검증 WT6b-1b-ii 1회차 실측 —
     // 상속한 `safe.directory` 로 읽기만 저장소를 열고 덮어쓰기 없이 필터를 돌렸다). 원격 셸의 env 는 우리가 못 읽어 뒤에 잇지 못한다.
     const remote_config: ?[]const git_command.ConfigPair = if (read_untrusted and git_command.kindRunsFilters(kind)) filters else null;
-    const argv = git_command.buildRemoteWithConfig(local, target, null, remote_config, &remote_buf, &cmd_buf) orelse
+    const argv = git_command.buildRemoteWithConfig(local, target, null, remote_config, read_untrusted, &remote_buf, &cmd_buf) orelse
         return if (filters.len > 0) error.RepoFiltersRefused else error.GitFailed; // 명령 상한 — 끄지 못한 채로는 안 돌린다
     // **원격에서만 종료 코드를 이야기로 바꾼다.** 로컬 git 이 127·255 를 내는 일은 없고, 낸다면 그것은
     // git 이 한 말이라 우리가 다시 해석하면 안 된다.
@@ -5527,6 +5574,131 @@ test "WT6b-1a 신뢰 전 partial clone — 읽기는 지연 가져오기를 안 
     try std.testing.expect(wt6Exists(marker));
 }
 
+// ── 계획 workspace-trust WT7b — 신뢰한 원격 저장소의 읽기 ─────────────────────────────────────────────────
+
+const Wt7bTrust = struct {
+    /// 세션이 「신뢰했다」고 답할 루트(null = 신뢰 전).
+    root: ?[]const u8,
+    fn local(ctx: *anyopaque, repo: []const u8) bool {
+        _ = ctx;
+        _ = repo;
+        return false;
+    }
+    fn remote(ctx: *anyopaque, repo: []const u8, dest: []const u8) ?[]const u8 {
+        _ = repo;
+        _ = dest;
+        const self: *Wt7bTrust = @ptrCast(@alignCast(ctx));
+        return self.root;
+    }
+};
+
+/// 가짜 ssh 로 건 원격 목록 읽기의 명령 줄들 — `status` 줄들에 신뢰 전 env 가 실렸는지 센다.
+const Wt7bSeen = struct { status_lines: usize = 0, status_untrusted: usize = 0, root_untrusted: bool = false };
+
+fn wt7bSeen(io: std.Io, log_path: []const u8, buf: []u8) !Wt7bSeen {
+    const bytes = try std.Io.Dir.cwd().readFile(io, log_path, buf);
+    var seen: Wt7bSeen = .{};
+    var it = std.mem.splitScalar(u8, bytes, '\n');
+    while (it.next()) |line| {
+        const untrusted = std.mem.indexOf(u8, line, "GIT_NO_LAZY_FETCH") != null;
+        if (std.mem.indexOf(u8, line, "'--show-toplevel'") != null) seen.root_untrusted = untrusted;
+        if (std.mem.indexOf(u8, line, "'status'") == null) continue;
+        seen.status_lines += 1;
+        if (untrusted) seen.status_untrusted += 1;
+    }
+    return seen;
+}
+
+test "WT7b 원격 목록 읽기 — 루트를 먼저 묻고(신뢰 전 규칙) 그 루트가 신뢰 판정의 루트와 같을 때만 나머지를 신뢰 규칙으로 읽으며, 원격 홈의 실제 경로를 함께 실어 온다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0 .. tmp.dir.realPath(io, &root_buf) catch return error.SkipZigTest];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    var b3: [std.fs.max_path_bytes]u8 = undefined;
+    var b4: [std.fs.max_path_bytes]u8 = undefined;
+    var b5: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&b1, "{s}/repo", .{root});
+    const cwd = try std.fmt.bufPrint(&b2, "{s}/repo/sub", .{root});
+    const log_path = try std.fmt.bufPrint(&b3, "{s}/ssh.log", .{root});
+    const home_real = try std.fmt.bufPrint(&b4, "{s}/home-real", .{root});
+    const bin = try std.fmt.bufPrint(&b5, "{s}/bin", .{root});
+    try tmp.dir.createDirPath(io, "repo/sub");
+    try tmp.dir.createDirPath(io, "home-real");
+    try tmp.dir.createDirPath(io, "bin");
+    if (!initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
+    // 홈은 심링크로 둔다 — 원격 홈은 심링크를 푼 경로로 와야 한다(저장소 루트와 같은 기준).
+    var link_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var real_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const home_link = try std.fmt.bufPrintZ(&link_z, "{s}/home-link", .{root});
+    if (std.c.symlink((try std.fmt.bufPrintZ(&real_z, "{s}", .{home_real})).ptr, home_link.ptr) != 0) return error.SkipZigTest;
+    // 가짜 ssh — 인자는 `-o BatchMode=yes -S <ctl> <dest> <cmd>`. 원격 명령 줄을 적고 그대로 이 기계의 sh 로 돌린다(홈은 심링크).
+    var script_buf: [4 * std.fs.max_path_bytes]u8 = undefined;
+    const script = try std.fmt.bufPrint(&script_buf, "#!/bin/sh\nprintf '%s\\n' \"$6\" >> '{s}'\nHOME='{s}'; export HOME\nexec /bin/sh -c \"$6\"\n", .{ log_path, home_link });
+    var ssh_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ssh_path = try std.fmt.bufPrint(&ssh_buf, "{s}/ssh", .{bin});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ssh_path, .data = script });
+    var ssh_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    if (std.c.chmod((try std.fmt.bufPrintZ(&ssh_z, "{s}", .{ssh_path})).ptr, 0o755) != 0) return error.SkipZigTest;
+    // PATH 앞에 가짜 ssh — 원래 값은 복사해 둔다(`getenv` 포인터는 `setenv` 뒤 매달린다).
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    defer if (saved_path) |p| allocator.free(p);
+    var path_z: [8 * std.fs.max_path_bytes]u8 = undefined;
+    _ = setenv("PATH", (try std.fmt.bufPrintZ(&path_z, "{s}:{s}", .{ bin, if (saved_path) |p| p else "/usr/bin:/bin" })).ptr, 1);
+    defer if (saved_path) |p| {
+        _ = setenv("PATH", p.ptr, 1);
+    };
+    const remote: git_command.Remote = .{ .dest = "box", .control_path = "/tmp/maru-wt7b-ctl" };
+    var log_buf: [256 * 1024]u8 = undefined;
+
+    // ⑴ 신뢰 — 판정의 루트가 이번 왕복의 루트와 같다: 루트 읽기만 신뢰 전 규칙, 목록의 `status` 는 신뢰 규칙(지연 가져오기 금지 env 없음).
+    var trust: Wt7bTrust = .{ .root = repo };
+    var backend = try Backend.initWithTrust(io, .{ .ctx = &trust, .trusted = Wt7bTrust.local, .remote_trusted_root = Wt7bTrust.remote });
+    defer backend.deinit();
+    try std.testing.expect(!backend.untrustedFor(cwd, "box"));
+    try std.testing.expect(backend.submit(git_command.remote_git_exe, cwd, "", 1, remote));
+    var list = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer list.deinit(worker_allocator);
+    try std.testing.expect(list.ok);
+    try std.testing.expectEqualStrings(repo, list.repo_root);
+    try std.testing.expectEqualStrings(home_real, list.remote_home);
+    const trusted_seen = try wt7bSeen(io, log_path, &log_buf);
+    try std.testing.expect(trusted_seen.root_untrusted);
+    try std.testing.expect(trusted_seen.status_lines > 0);
+    try std.testing.expectEqual(@as(usize, 0), trusted_seen.status_untrusted);
+
+    // ⑵ 판정의 루트가 이번 왕복의 루트와 다르다(그 사이 cwd 의 저장소가 바뀌었다) — 나머지도 신뢰 전 규칙.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = "" });
+    trust.root = "/srv/elsewhere";
+    try std.testing.expect(backend.submit(git_command.remote_git_exe, cwd, "", 2, remote));
+    var moved = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer moved.deinit(worker_allocator);
+    try std.testing.expect(moved.ok);
+    const moved_seen = try wt7bSeen(io, log_path, &log_buf);
+    try std.testing.expect(moved_seen.status_lines > 0);
+    try std.testing.expectEqual(moved_seen.status_lines, moved_seen.status_untrusted);
+
+    // ⑶ 신뢰 전(판정이 null) — 전부 신뢰 전 규칙. 판정 함수를 안 꽂은 백엔드도 원격은 신뢰 전이다(닫힌 쪽).
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = "" });
+    trust.root = null;
+    try std.testing.expect(backend.untrustedFor(cwd, "box"));
+    try std.testing.expect(backend.submit(git_command.remote_git_exe, cwd, "", 3, remote));
+    var untrusted = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer untrusted.deinit(worker_allocator);
+    const untrusted_seen = try wt7bSeen(io, log_path, &log_buf);
+    try std.testing.expect(untrusted_seen.status_lines > 0);
+    try std.testing.expectEqual(untrusted_seen.status_lines, untrusted_seen.status_untrusted);
+    var bare = try Backend.init(io);
+    defer bare.deinit();
+    try std.testing.expect(bare.untrustedFor(cwd, "box"));
+}
+
 test "WT6b-1a 신뢰 전 정책은 읽기 워커 아홉이 모두 세우고, 제품은 판정 함수 없이 백엔드를 만들지 않으며, 신뢰 전 저장소는 스냅샷 제출 전에 돌아간다 (계획 workspace-trust)" {
     const src = @embedFile("git_backend.zig");
     // 허용된 자리를 센다 — 워커 진입마다 한 번(아홉), 다른 데서 세우지 않는다.
@@ -5536,7 +5708,7 @@ test "WT6b-1a 신뢰 전 정책은 읽기 워커 아홉이 모두 세우고, 제
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, product, "self.git_backend = git_backend_mod.Backend.init(self.io)"));
     }
     const agent = @embedFile("app_session/agent.zig");
-    const skip = std.mem.indexOf(u8, agent, "if (self.git_backend.?.untrustedFor(repo, remote != null)) return;") orelse return error.MissingSnapshotTrustSkip;
+    const skip = std.mem.indexOf(u8, agent, "if (remote != null or self.git_backend.?.untrustedFor(repo, null)) return;") orelse return error.MissingSnapshotTrustSkip;
     const submit = std.mem.indexOf(u8, agent, "self.git_backend.?.submitSnapshot(") orelse return error.MissingSnapshotSubmit;
     try std.testing.expect(skip < submit);
 }
@@ -5782,7 +5954,7 @@ test "WT6b-1b SSH 읽기도 같은 필터 덮어쓰기를 명령에 싣는다 �
     // 원격 실물은 하네스(`tools/remote-scm/ssh_harness.sh`)에서만 돈다. 여기선 `runOn` 이 조회한 덮어쓰기를 **원격 빌더에도** 넘기는지
     // 그 한 줄을 센다(빌더 자체는 `git_command` 판정자가 잰다) — 로컬만 싣고 원격을 빠뜨리면 원격 저장소의 필터가 돈다.
     const src = @embedFile("git_backend.zig");
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "git_command.buildRemoteWithConfig(local, target, null, remote_config" ++ ", &remote_buf, &cmd_buf)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "git_command.buildRemoteWithConfig(local, target, null, remote_config" ++ ", read_untrusted, &remote_buf, &cmd_buf)"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "const remote_config: ?[]const git_command.ConfigPair = if (read_untrusted and git_command.kindRunsFilters(kind)) filters" ++ " else null;"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "git_command.buildOpts(kind, git_exe, repo, arg, &argv_buf, .{ .ignore_dirty_submodules = read" ++ "_untrusted })"));
 }

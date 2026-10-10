@@ -22,23 +22,31 @@ pub const max_role_page_elements = 30000;
 /// - 네이티브 radio(같은 그룹·name 없음): 5 천 1.8 초·1 만 6.9 초.
 /// - `role=radiogroup` 안의 `role=radio`: 1 천 0.36 초·2 천 2.5 초·1 만은 37 초에도 답이 없었다(앱의 DevTools 시한 30 초를 넘는다).
 /// - 라벨이 붙은 폼 컨트롤(`<label for>`·감싼 label): 1 만 쌍 3.75 초·1.4 만 7.9 초(4 회차).
-/// - 한 글 노드 안의 줄 수(로그 파일 탭 — Chromium 이 `<pre>` 로 감싼다): 2 만 줄 1.6 초, 5 만 줄은 10 초 넘게(4 회차).
+/// - 블록 하나 안의 줄 상자 수 — 비용은 블록마다 줄 상자 수의 제곱이고 블록끼리 더해진다(5 회차 실측: `<pre>` 9 999 줄 하나 0.39 초,
+///   스무 개 8 초, 줄바꿈 없이 감긴 8 MB JSON 한 줄 6.1 초 — `\n` 만 세면 0 이었다). 긴 글 노드(2 천 자 이상)의 줄 조각을 Range 의 사각형으로
+///   센다(보이지 않는 글은 0 — script·style 의 줄을 세 거짓으로 거절하던 것도 사라진다). textarea 는 값의 `\n`.
+/// - 블록 하나 안의 글 노드 수(주석으로 쪼갠 글 — 요소 수에 안 잡힌다): 10 만 7.4 초, 부모마다 제곱(5 회차).
 /// 상한들은 더해진다(각자 상한이면 0.3–0.9 초, 셋이 함께면 1.7 초 — 4 회차) — 상한 대비 비율의 합이 1 을 넘으면 거절한다.
 /// closed shadow root 안의 구성은 셀 수 없다(문서).
 pub const max_dangling_fragment_links = 3000;
 pub const max_native_radios = 3000;
 pub const max_aria_radios = 800;
 pub const max_labeled_controls = 3000;
-pub const max_text_node_lines = 10000;
+/// 블록 하나의 줄 조각(Range 사각형 — 실측으로 줄 하나에 둘쯤, 그래서 약 1 만 줄: 9 999 줄 `<pre>` 하나가 질의 0.39 초 — 제곱으로 더한다).
+pub const max_block_lines = 20000;
+/// 블록 하나의 글 노드(이만큼이면 질의 약 0.4 초 — 제곱으로 더한다).
+pub const max_block_text_nodes = 20000;
 
 /// 세는 것들 — 세기 JS 의 결과 순서와 같다(첫째는 요소 수).
-pub const Costly = struct { what: []const u8, limit: i64 };
+/// `squared` 면 세기 JS 가 블록마다 제곱한 합을 준다(상한도 제곱) — 메시지에는 「블록 하나로 치면」 제곱근을.
+pub const Costly = struct { what: []const u8, limit: i64, squared: bool = false };
 pub const costly = [_]Costly{
     .{ .what = "same-page #links without a target", .limit = max_dangling_fragment_links },
     .{ .what = "radio inputs", .limit = max_native_radios },
     .{ .what = "role=radio elements", .limit = max_aria_radios },
     .{ .what = "labeled form controls", .limit = max_labeled_controls },
-    .{ .what = "lines in one text node", .limit = max_text_node_lines },
+    .{ .what = "line fragments per block", .limit = max_block_lines * max_block_lines, .squared = true },
+    .{ .what = "text nodes per block", .limit = max_block_text_nodes * max_block_text_nodes, .squared = true },
 };
 
 /// ARIA 1.2 구체 역할(접근성 트리가 같은 문자열로 쓰는 것 — 실측) — 정렬 안 됨, 선형 탐색(작다).

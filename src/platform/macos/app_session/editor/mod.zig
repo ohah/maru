@@ -18784,7 +18784,7 @@ test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "@import(\"app_session/editor/lsp.zig\")"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "pub fn controlTrust("));
     // 응답이 쓰는 맞은 키의 경로는 impl 의 버퍼에 산다(apply 의 지역 버퍼면 응답 때 이미 풀렸다 — 실측으로 잡혔다).
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "findTrustKey(target, &self.path_buf)"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "findTrustKey(target, &self.path_buf, &self.dest_buf)"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "findTrustKey(target, ")); // 호출은 그 하나뿐
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "trust_store.forget(")); // 잊기는 결정을 지울 뿐이다
     // 신뢰 목록(WT4a)은 표를 **읽기만** 한다 — 표에 닿는 자리는 읽기 전용 반복자 하나, 고른 뒤는 관리 상자(철회·잊기)로 넘긴다.
@@ -18852,6 +18852,67 @@ fn controlTrustCall(session: ?*AppSession, method: []const u8, params_json: ?[]c
     defer out.deinit();
     try std.json.Stringify.value(r.result.?, .{}, &out.writer);
     return std.json.parseFromSlice(std.json.Value, testing.allocator, out.written(), .{});
+}
+
+test "WT7a 원격 신뢰 키 — 신뢰 파일의 원격 줄이 관리 목록·관리 상자에 `목적지:경로` 로 서고, 컨트롤 플레인은 `host` 로만 그 키를 고르며(같은 경로의 로컬 요청은 닿지 않는다) 목적지는 맞춰 찾는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    // 원격 저장소의 허용 한 줄(아직 아무도 원격 키를 만들지 않으니 파일로 심는다 — 묻기는 WT7b).
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "state/" ++ trust_store.file_name, .data = "allow\tssh\topenclaw\t/srv/app\n" });
+    const remote: maru.session.editor.lsp.trust.Key = .{ .volume = 0, .path = "/srv/app", .dest = "openclaw" };
+
+    // ⑴ 관리 목록 — 원격 항목은 `목적지:경로`(이 기계의 홈으로 줄이지 않는다). 행은 패널 기하가 서야 나온다.
+    _ = try fx.session.resize(fx.session.sidebar_width_px + 800, 600, fx.session.scale_milli);
+    trust_ui.open(fx.session);
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const rows = try trust_ui.rows(fx.session, arena_state.allocator());
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expect(std.mem.indexOf(u8, rows[0].title, "openclaw:/srv/app") != null);
+    trust_ui.closed(fx.session);
+
+    // ⑵ 컨트롤 플레인 목록 — 원격 항목은 `volume` 자리에 `host`.
+    {
+        const r = try controlTrustCall(fx.session, "lsp.trust.list", null);
+        defer r.deinit();
+        const items = r.value.object.get("decisions").?.array.items;
+        try testing.expectEqual(@as(usize, 1), items.len);
+        try testing.expectEqualStrings("openclaw", items[0].object.get("host").?.string);
+        try testing.expect(items[0].object.get("volume") == null);
+    }
+    // ⑶ `host` 없는 같은 경로 요청은 로컬 키만 본다 — 원격 항목에 닿지 않는다(결정 없음).
+    {
+        const r = try controlTrustCall(fx.session, "lsp.trust.revoke", "{\"path\":\"/srv/app\"}");
+        defer r.deinit();
+        try testing.expect(r.value.object.get("previous").? == .null);
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .allow), trust_store.get(remote));
+    }
+    // 그 아래 경로도 — 「품은 저장소」 힌트로 원격 항목을 내놓지 않는다(같은 경로라도 다른 기계다).
+    {
+        const r = try controlTrustCall(fx.session, "lsp.trust.revoke", "{\"path\":\"/srv/app/sub\"}");
+        defer r.deinit();
+        try testing.expect(r.value.object.get("containing") == null);
+    }
+    // ⑷ `host` 로 고르면 — 대문자로 줘도 키의 모양으로 맞춰 찾는다 — 그 원격 키를 철회하고, 결과의 저장소도 `host` 를 싣는다.
+    {
+        const r = try controlTrustCall(fx.session, "lsp.trust.revoke", "{\"path\":\"/srv/app\",\"host\":\"OpenClaw\"}");
+        defer r.deinit();
+        try testing.expectEqualStrings("allow", r.value.object.get("previous").?.string);
+        try testing.expectEqualStrings("openclaw", r.value.object.get("repository").?.object.get("host").?.string);
+        try testing.expectEqual(@as(?maru.session.editor.lsp.trust.Decision, .deny), trust_store.get(remote));
+    }
+    // ⑸ 관리 상자 — 경로 줄이 `목적지:경로`.
+    lsp_client.manageListed(fx.session, remote);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust_manage);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.confirm.notes[0].text, "openclaw:/srv/app") != null);
 }
 
 test "LSPB38 컨트롤 플레인의 신뢰 조회·철회·잊기(계획 WT4b) — 목록에 서고, 철회는 떠 있는 서버를 내리고 파일에 남으며, 잊으면 「결정 없음」(곧바로 묻지 않음); 심링크 경로도 같은 저장소, 창 없이도 표를 읽는다" {

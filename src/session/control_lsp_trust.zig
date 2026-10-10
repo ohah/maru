@@ -12,6 +12,8 @@
 //!
 //! **키**: 저장소는 (볼륨, 실제 경로)다. 볼륨은 u64(볼륨 UUID 를 접은 값)라 JSON 정수(i64)에 못 실어 16진 문자열로 싣는다(신뢰 파일과
 //! 같은 표기). 요청은 경로만 줘도 된다 — 같은 경로가 여러 볼륨에 있으면 `volume` 으로 고르라고 `invalid_params` 로 돌려준다.
+//! 원격(SSH) 저장소는 (목적지, 원격 실제 경로)다(계획 WT7a) — 목록·결과에서 `volume` 자리에 `host`(목적지)가 서고, 요청은 `host` 로 원격
+//! 키를 고른다(`volume` 과 함께 주면 `invalid_params` — 둘은 다른 종류의 키다). `host` 가 없는 요청은 로컬 키만 본다.
 
 const std = @import("std");
 const cp = @import("control_plane.zig");
@@ -43,15 +45,20 @@ pub fn opFor(rest: []const u8) ?Op {
 
 pub const Decision = enum { allow, deny };
 
-/// 철회·잊기의 대상. `path` 는 요청 arena 를 빌린다.
+/// 철회·잊기의 대상. `path`·`host` 는 요청 arena 를 빌린다. `host` 가 있으면 원격 키(그 목적지의 원격 경로)다.
 pub const Target = struct {
     path: []const u8,
     volume: ?u64 = null,
+    host: ?[]const u8 = null,
 };
+
+/// 목적지 문자열의 상한(신뢰 키와 같다 — `trust.max_dest_bytes`).
+pub const max_host_bytes: usize = 256;
 
 pub const ParamError = error{InvalidParams};
 
-/// `{path, volume?}` — `path` 는 비어 있지 않은 절대 경로, `volume` 은 16진 문자열(신뢰 파일·목록과 같은 표기).
+/// `{path, volume?, host?}` — `path` 는 비어 있지 않은 절대 경로, `volume` 은 16진 문자열(신뢰 파일·목록과 같은 표기), `host` 는 원격 목적지
+/// (빈 값·제어 문자·상한 초과는 거절; `volume` 과 함께 오면 거절).
 pub fn parseTarget(params: ?std.json.Value) ParamError!Target {
     const obj = switch (params orelse return error.InvalidParams) {
         .object => |o| o,
@@ -69,11 +76,22 @@ pub fn parseTarget(params: ?std.json.Value) ParamError!Target {
         .null => null,
         else => return error.InvalidParams,
     } else null;
+    const host: ?[]const u8 = if (obj.get("host")) |v| switch (v) {
+        .string => |h| blk: {
+            if (h.len == 0 or h.len > max_host_bytes) return error.InvalidParams;
+            for (h) |c| if (c < 0x20 or c == 0x7f) return error.InvalidParams;
+            break :blk h;
+        },
+        .null => null,
+        else => return error.InvalidParams,
+    } else null;
+    if (host != null and volume != null) return error.InvalidParams;
     var it = obj.iterator();
     while (it.next()) |e| {
-        if (!std.mem.eql(u8, e.key_ptr.*, "path") and !std.mem.eql(u8, e.key_ptr.*, "volume")) return error.InvalidParams;
+        const k = e.key_ptr.*;
+        if (!std.mem.eql(u8, k, "path") and !std.mem.eql(u8, k, "volume") and !std.mem.eql(u8, k, "host")) return error.InvalidParams;
     }
-    return .{ .path = path, .volume = volume };
+    return .{ .path = path, .volume = volume, .host = host };
 }
 
 /// `lsp.trust.list` 의 params — 없거나 빈 객체만(철회·잊기처럼 모르는 키는 거절한다).
@@ -86,14 +104,15 @@ pub fn checkListParams(params: ?std.json.Value) ParamError!void {
     }
 }
 
-/// 표의 키(볼륨·실제 경로).
-pub const Key = struct { volume: u64, path: []const u8 };
+/// 표의 키(볼륨·실제 경로, 원격이면 목적지·원격 경로 — `host` 가 비면 로컬).
+pub const Key = struct { volume: u64, path: []const u8, host: []const u8 = "" };
 
 /// 목록 한 줄.
 pub const Entry = struct {
     volume: u64,
     path: []const u8,
     decision: Decision,
+    host: []const u8 = "",
 };
 
 /// 철회·잊기의 결과.
@@ -162,6 +181,7 @@ fn errorResponse(gpa: std.mem.Allocator, id: cp.Id, code: cp.ErrorCode) std.mem.
 }
 
 /// `{"decisions":[{"volume":"<16진>","path":"…","decision":"allow"|"deny"}]}`. 볼륨은 신뢰 파일과 같은 표기(패딩 없는 소문자 16진 — `trust.line`).
+/// 원격 항목은 `volume` 자리에 `"host":"<목적지>"`(칸 수는 같다).
 pub fn serializeList(gpa: std.mem.Allocator, id: cp.Id, entries: []const Entry) std.mem.Allocator.Error![]u8 {
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
@@ -198,11 +218,9 @@ fn writeOutcome(s: *std.json.Stringify, id: cp.Id, previous: ?Decision, changed:
     try s.objectField("saved");
     try s.write(saved);
     if (repository) |k| {
-        var vbuf: [16]u8 = undefined;
         try s.objectField("repository");
         try s.beginObject();
-        try s.objectField("volume");
-        try s.write(std.fmt.bufPrint(&vbuf, "{x}", .{k.volume}) catch unreachable);
+        try writeWhere(s, k.volume, k.host);
         try s.objectField("path");
         try s.write(k.path);
         try s.endObject();
@@ -214,11 +232,21 @@ fn writeOutcome(s: *std.json.Stringify, id: cp.Id, previous: ?Decision, changed:
     try cp.endResult(s);
 }
 
-fn writeEntry(s: *std.json.Stringify, e: Entry) !void {
+/// 키의 「어디」 칸 — 로컬은 `volume`(16진), 원격은 `host`(목적지).
+fn writeWhere(s: *std.json.Stringify, volume: u64, host: []const u8) !void {
+    if (host.len > 0) {
+        try s.objectField("host");
+        try s.write(host);
+        return;
+    }
     var vbuf: [16]u8 = undefined;
-    try s.beginObject();
     try s.objectField("volume");
-    try s.write(std.fmt.bufPrint(&vbuf, "{x}", .{e.volume}) catch unreachable);
+    try s.write(std.fmt.bufPrint(&vbuf, "{x}", .{volume}) catch unreachable);
+}
+
+fn writeEntry(s: *std.json.Stringify, e: Entry) !void {
+    try s.beginObject();
+    try writeWhere(s, e.volume, e.host);
     try s.objectField("path");
     try s.write(e.path);
     try s.objectField("decision");
@@ -395,4 +423,49 @@ test "control_lsp_trust: 철회·잊기 응답은 previous·changed·saved 셋 �
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), pm.message.response.err.?.code);
         try testing.expect(impl.seen_op == null);
     }
+}
+
+test "control_lsp_trust: 원격 키 (계획 workspace-trust WT7a) — `host` 로 원격 키를 고르고(`volume` 과 함께면 거절), 목록·결과에서 원격 항목은 `volume` 자리에 `host` 가 선다(칸 수는 같다)" {
+    const Case = struct { json: []const u8, host: ?[]const u8 };
+    const ok = [_]Case{
+        .{ .json = "{\"path\":\"/srv/app\",\"host\":\"me@openclaw\"}", .host = "me@openclaw" },
+        .{ .json = "{\"path\":\"/srv/app\",\"host\":null}", .host = null },
+    };
+    for (ok) |c| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, c.json, .{});
+        defer parsed.deinit();
+        const t = try parseTarget(parsed.value);
+        if (c.host) |h| try testing.expectEqualStrings(h, t.host.?) else try testing.expect(t.host == null);
+    }
+    for ([_][]const u8{
+        "{\"path\":\"/a\",\"host\":\"h\",\"volume\":\"ff\"}", // 둘은 다른 종류의 키다
+        "{\"path\":\"/a\",\"host\":\"\"}",
+        "{\"path\":\"/a\",\"host\":\"h\\u001b\"}",
+        "{\"path\":\"/a\",\"host\":7}",
+    }) |j| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, j, .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseTarget(parsed.value));
+    }
+    // 목록 — 원격 항목은 `host`·`path`·`decision`.
+    const list = try serializeList(testing.allocator, .{ .number = 1 }, &.{
+        .{ .volume = 0x1f, .path = "/l", .decision = .allow },
+        .{ .volume = 0, .path = "/srv/app", .decision = .deny, .host = "openclaw" },
+    });
+    defer testing.allocator.free(list);
+    var parsed_list = try std.json.parseFromSlice(std.json.Value, testing.allocator, list, .{});
+    defer parsed_list.deinit();
+    const items = parsed_list.value.object.get("result").?.object.get("decisions").?.array.items;
+    try testing.expectEqual(@as(usize, 3), items[1].object.count());
+    try testing.expectEqualStrings("openclaw", items[1].object.get("host").?.string);
+    try testing.expect(items[1].object.get("volume") == null);
+    try testing.expectEqualStrings("1f", items[0].object.get("volume").?.string);
+    // 결과의 `repository` 도 같다.
+    const out = try serializeOutcome(testing.allocator, .{ .number = 2 }, .allow, true, true, .{ .volume = 0, .path = "/srv/app", .host = "openclaw" }, null);
+    defer testing.allocator.free(out);
+    var parsed_out = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed_out.deinit();
+    const repo = parsed_out.value.object.get("result").?.object.get("repository").?.object;
+    try testing.expectEqual(@as(usize, 2), repo.count());
+    try testing.expectEqualStrings("openclaw", repo.get("host").?.string);
 }

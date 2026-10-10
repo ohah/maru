@@ -2,7 +2,8 @@
 //! 순수 계산: 표·세대 번호·묻는 자리·줄 형식·옛 형식 이관. 파일 읽기·쓰기와 키 정규화(실제 경로·볼륨)는 호출자.
 //!
 //! 파일은 줄마다 `allow\t‹볼륨 16진›\t‹실제 경로›` / `deny\t…` / `forget\t…`(결정을 지운다 — 계획 WT4a) 이고 마지막 줄이 이긴다 —
-//! 결정을 바꾸거나 잊으면 뒤에 붙이기만 한다.
+//! 결정을 바꾸거나 잊으면 뒤에 붙이기만 한다. 원격(SSH) 저장소는 네 칸 `allow\tssh\t‹목적지›\t‹원격 실제 경로›`(계획 WT7a) — 칸 수가
+//! 달라 옛 빌드는 그 줄을 무시한다(로컬 키로 잘못 읽지 않는다).
 //! **개행으로 끝나지 않은 줄은 읽지 않는다** — 덧붙이다 끊긴 줄(디스크가 찼다)은 경로가 잘려 있어 부모 폴더의 결정으로 읽힐 수 있다.
 //! 옛 형식(`allow\t‹root›` — 창마다 따로 읽던 설정 옆 `lsp-trust`)은 이관할 때만 읽는다(`Store.mergeLegacy`).
 
@@ -10,33 +11,69 @@ const std = @import("std");
 
 pub const Decision = enum { allow, deny };
 
-/// 신뢰 키 — 저장소의 **(볼륨, 실제 경로)**. 작업 root(서버의 rootUri·표시)와 따로 둔다: `/tmp/x` 와 `/private/tmp/x`, 심링크,
+/// 신뢰 키 — 로컬 저장소는 **(볼륨, 실제 경로)**. 작업 root(서버의 rootUri·표시)와 따로 둔다: `/tmp/x` 와 `/private/tmp/x`, 심링크,
 /// 대소문자만 다른 경로가 한 키가 되고(그래야 거부가 먹는다), 같은 경로라도 볼륨이 다르면(같은 자리에 다른 디스크) 다른 키다.
+///
+/// 원격(SSH) 저장소는 **(목적지, 원격 실제 경로)**(계획 workspace-trust WT7 — 2026-10-11 사용자 결정: VS Code 와 같게, 연결 이름 + 경로).
+/// `dest` 가 비면 로컬, 있으면 원격이고 그때 `volume` 은 0 이다. 목적지는 `maru ssh` 에 준 그 문자열을 `normalizeDest` 로 맞춘 것이다 —
+/// 같은 기계라도 다른 이름(`dev`·`me@1.2.3.4`)으로 붙으면 다른 키다(VS Code 도 같다). 그 이름으로 붙는 기계가 진짜인지는 연결 때 ssh 의
+/// `known_hosts` 검사가 지킨다.
 pub const Key = struct {
     volume: u64,
     path: []const u8,
+    dest: []const u8 = "",
 
     pub fn eql(a: Key, b: Key) bool {
-        return a.volume == b.volume and std.mem.eql(u8, a.path, b.path);
+        return a.volume == b.volume and std.mem.eql(u8, a.path, b.path) and std.mem.eql(u8, a.dest, b.dest);
+    }
+
+    pub fn isRemote(self: Key) bool {
+        return self.dest.len > 0;
     }
 };
+
+/// 원격 목적지의 상한 — 앱이 원격 목적지를 들고 다니는 자리(`max_remote_dest_bytes`)와 같다.
+pub const max_dest_bytes: usize = 256;
+
+/// 원격 목적지를 키로 맞춘다(계획 WT7a): **호스트 부분만 소문자로** 둔다(ssh 도 호스트 이름의 대소문자를 가리지 않는다), `user@` 는 그대로
+/// (계정 이름은 대소문자를 가린다). 빈 값·제어 문자·탭·상한 초과는 `null` — 그런 목적지는 기억할 수 없다(줄 형식이 깨지거나 표시가 깨진다).
+pub fn normalizeDest(dest: []const u8, out: []u8) ?[]const u8 {
+    if (dest.len == 0 or dest.len > max_dest_bytes or dest.len > out.len) return null;
+    for (dest) |c| if (c < 0x20 or c == 0x7f) return null;
+    const host_at = if (std.mem.lastIndexOfScalar(u8, dest, '@')) |at| at + 1 else 0;
+    if (host_at >= dest.len) return null; // `user@` 만 — 호스트가 없다
+    @memcpy(out[0..host_at], dest[0..host_at]);
+    for (dest[host_at..], host_at..) |c, i| out[i] = std.ascii.toLower(c);
+    return out[0..dest.len];
+}
 
 /// 한 줄. `decision == null` 은 `forget` 줄이다 — 그 키의 결정을 지운다(계획 WT4 「잊기」).
 pub const Entry = struct { key: Key, decision: ?Decision };
 
-/// 한 줄을 읽는다(빌린 경로). 모르는 동사·칸 수가 다른 줄·16진이 아닌 볼륨·상대 경로는 `null` — 무시한다.
+/// 한 줄을 읽는다(빌린 경로). 모르는 동사·칸 수가 다른 줄·16진이 아닌 볼륨·상대 경로는 `null` — 무시한다. 네 칸이고 둘째 칸이 `ssh`
+/// 면 원격 줄이다(목적지가 이미 맞춘 모양이 아니면 — 빈 값·제어 문자·대문자 호스트 — 무시한다: 파일을 손으로 고쳐 같은 기계가 두 키로
+/// 갈리지 않게).
 pub fn parseLine(raw: []const u8) ?Entry {
     const entry = std.mem.trimEnd(u8, raw, "\r");
     var it = std.mem.splitScalar(u8, entry, '\t');
     const verb = it.next() orelse return null;
-    const vol = it.next() orelse return null;
-    const path = it.next() orelse return null;
+    const second = it.next() orelse return null;
+    const third = it.next() orelse return null;
+    const fourth = it.next();
     if (it.next() != null) return null;
     const decision: ?Decision = if (std.mem.eql(u8, verb, "allow")) .allow else if (std.mem.eql(u8, verb, "deny")) .deny else if (std.mem.eql(u8, verb, "forget")) null else return null;
-    if (vol.len == 0) return null;
-    const volume = std.fmt.parseInt(u64, vol, 16) catch return null;
-    if (path.len == 0 or path[0] != '/') return null;
-    return .{ .key = .{ .volume = volume, .path = path }, .decision = decision };
+    if (fourth) |path| {
+        if (!std.mem.eql(u8, second, "ssh")) return null;
+        var dest_buf: [max_dest_bytes]u8 = undefined;
+        const normalized = normalizeDest(third, &dest_buf) orelse return null;
+        if (!std.mem.eql(u8, normalized, third)) return null;
+        if (path.len == 0 or path[0] != '/') return null;
+        return .{ .key = .{ .volume = 0, .path = path, .dest = third }, .decision = decision };
+    }
+    if (second.len == 0) return null;
+    const volume = std.fmt.parseInt(u64, second, 16) catch return null;
+    if (third.len == 0 or third[0] != '/') return null;
+    return .{ .key = .{ .volume = volume, .path = third }, .decision = decision };
 }
 
 /// 붙일 한 줄(개행 포함). `decision == null` 이면 `forget` 줄. `out` 이 모자라면 `null`. 경로에 탭·개행이 있으면 `null` — 그런 경로는
@@ -44,8 +81,17 @@ pub fn parseLine(raw: []const u8) ?Entry {
 pub fn line(decision: ?Decision, key: Key, out: []u8) ?[]const u8 {
     if (std.mem.indexOfAny(u8, key.path, "\t\n\r") != null) return null;
     const verb = if (decision) |d| @tagName(d) else "forget";
+    if (key.isRemote()) {
+        var dest_buf: [max_dest_bytes]u8 = undefined;
+        const normalized = normalizeDest(key.dest, &dest_buf) orelse return null;
+        if (!std.mem.eql(u8, normalized, key.dest)) return null; // 맞추지 않은 목적지는 키가 아니다
+        return std.fmt.bufPrint(out, "{s}\tssh\t{s}\t{s}\n", .{ verb, key.dest, key.path }) catch null;
+    }
     return std.fmt.bufPrint(out, "{s}\t{x}\t{s}\n", .{ verb, key.volume, key.path }) catch null;
 }
+
+/// 한 줄의 최대 길이 — 버퍼를 잡는 자리(파일 덧붙이기·다시 쓰기)가 이 값을 쓴다.
+pub const max_line_bytes: usize = std.fs.max_path_bytes + max_dest_bytes + 32;
 
 /// 개행으로 끝난 줄만 돈다 — 마지막 개행 뒤의 조각(끊긴 줄)은 버린다.
 fn completeLines(contents: []const u8) std.mem.SplitIterator(u8, .scalar) {
@@ -77,7 +123,17 @@ pub const Store = struct {
     /// `changed_at` — 그 항목의 결정이 마지막으로 바뀐 세대(다시 묻는 중인 창이 「그 뒤에 다른 데서 답이 왔나」를 본다).
     /// `decision == null` 은 **실행 중에 잊은** 표시다(`forget`) — 결정은 없고, 각 창이 「언제 잊었나」를 보고 제 서버를 내린다. 파일에서
     /// 읽은 `forget` 줄은 이 표시를 남기지 않고 항목을 지운다(시작할 때 잊은 것은 그냥 결정이 없는 것이다).
-    const Owned = struct { volume: u64, path: []const u8, decision: ?Decision, changed_at: u64 };
+    const Owned = struct {
+        volume: u64,
+        path: []const u8,
+        dest: []const u8,
+        decision: ?Decision,
+        changed_at: u64,
+
+        fn key(self: Owned) Key {
+            return .{ .volume = self.volume, .path = self.path, .dest = self.dest };
+        }
+    };
 
     /// 결정이 있는 항목을 **읽기 전용으로** 돈다(경로는 빌린 `[]const u8`) — 표 밖에서 항목을 고치는 길을 열지 않는다(계획 WT2a
     /// 「신뢰 부여는 사용자의 답으로만」). 이번 실행에 잊은 것은 건너뛴다.
@@ -94,45 +150,67 @@ pub const Store = struct {
                 const e = self.items[self.i];
                 self.i += 1;
                 const d = e.decision orelse continue;
-                return .{ .key = .{ .volume = e.volume, .path = e.path }, .decision = d };
+                return .{ .key = e.key(), .decision = d };
             }
             return null;
         }
     };
-    const Claim = struct { volume: u64, path: []u8, owner: usize };
+    const Claim = struct {
+        volume: u64,
+        path: []u8,
+        dest: []u8,
+        owner: usize,
+
+        fn key(self: Claim) Key {
+            return .{ .volume = self.volume, .path = self.path, .dest = self.dest };
+        }
+    };
 
     pub fn deinit(self: *Store, allocator: std.mem.Allocator) void {
-        for (self.entries.items) |e| allocator.free(e.path);
+        for (self.entries.items) |e| freeOwned(allocator, e.path, e.dest);
         self.entries.deinit(allocator);
-        for (self.claims.items) |c| allocator.free(c.path);
+        for (self.claims.items) |c| freeOwned(allocator, c.path, c.dest);
         self.claims.deinit(allocator);
         self.* = .{};
     }
 
+    /// 키의 두 문자열을 복사한다(목적지가 비면 빈 조각 — 로컬 키).
+    fn dupeKey(allocator: std.mem.Allocator, key: Key) !struct { path: []u8, dest: []u8 } {
+        const path = try allocator.dupe(u8, key.path);
+        errdefer allocator.free(path);
+        const dest = try allocator.dupe(u8, key.dest);
+        return .{ .path = path, .dest = dest };
+    }
+
+    fn freeOwned(allocator: std.mem.Allocator, path: []const u8, dest: []const u8) void {
+        allocator.free(path);
+        allocator.free(dest);
+    }
+
     pub fn get(self: *const Store, key: Key) ?Decision {
-        for (self.entries.items) |e| if (e.volume == key.volume and std.mem.eql(u8, e.path, key.path)) return e.decision;
+        for (self.entries.items) |e| if (e.key().eql(key)) return e.decision;
         return null;
     }
 
     /// 그 키의 결정이 마지막으로 바뀐 세대(없으면 `null`).
     pub fn changedAt(self: *const Store, key: Key) ?u64 {
-        for (self.entries.items) |e| if (e.volume == key.volume and std.mem.eql(u8, e.path, key.path)) return e.changed_at;
+        for (self.entries.items) |e| if (e.key().eql(key)) return e.changed_at;
         return null;
     }
 
     /// 결정을 둔다. 바뀌었으면 세대를 올리고 `true`.
     pub fn put(self: *Store, allocator: std.mem.Allocator, key: Key, decision: Decision) !bool {
         for (self.entries.items) |*e| {
-            if (e.volume != key.volume or !std.mem.eql(u8, e.path, key.path)) continue;
+            if (!e.key().eql(key)) continue;
             if (e.decision == decision) return false;
             self.generation +%= 1;
             e.decision = decision;
             e.changed_at = self.generation;
             return true;
         }
-        const owned = try allocator.dupe(u8, key.path);
-        errdefer allocator.free(owned);
-        try self.entries.append(allocator, .{ .volume = key.volume, .path = owned, .decision = decision, .changed_at = self.generation +% 1 });
+        const owned = try dupeKey(allocator, key);
+        errdefer freeOwned(allocator, owned.path, owned.dest);
+        try self.entries.append(allocator, .{ .volume = key.volume, .path = owned.path, .dest = owned.dest, .decision = decision, .changed_at = self.generation +% 1 });
         self.generation +%= 1;
         return true;
     }
@@ -140,7 +218,7 @@ pub const Store = struct {
     /// 결정을 잊는다(계획 WT4) — 표시(`decision = null`)를 남겨 세대를 올린다. 결정이 없었으면 `false`.
     pub fn forget(self: *Store, key: Key) bool {
         for (self.entries.items) |*e| {
-            if (e.volume != key.volume or !std.mem.eql(u8, e.path, key.path)) continue;
+            if (!e.key().eql(key)) continue;
             if (e.decision == null) return false;
             self.generation +%= 1;
             e.decision = null;
@@ -153,8 +231,8 @@ pub const Store = struct {
     /// 항목을 통째로 지운다(파일의 `forget` 줄 — 표시를 남기지 않는다).
     fn drop(self: *Store, allocator: std.mem.Allocator, key: Key) void {
         for (self.entries.items, 0..) |e, i| {
-            if (e.volume != key.volume or !std.mem.eql(u8, e.path, key.path)) continue;
-            allocator.free(e.path);
+            if (!e.key().eql(key)) continue;
+            freeOwned(allocator, e.path, e.dest);
             _ = self.entries.orderedRemove(i);
             return;
         }
@@ -164,7 +242,7 @@ pub const Store = struct {
     /// 「다시 묻기」 중이던 클라이언트가 이 답을 제 물음의 답으로 본다(같은 질문을 또 하지 않게). 항목이 없으면 아무것도 안 한다.
     pub fn touch(self: *Store, key: Key) void {
         for (self.entries.items) |*e| {
-            if (e.volume != key.volume or !std.mem.eql(u8, e.path, key.path)) continue;
+            if (!e.key().eql(key)) continue;
             self.generation +%= 1;
             e.changed_at = self.generation;
             return;
@@ -223,8 +301,8 @@ pub const Store = struct {
         errdefer out.deinit(allocator);
         for (self.entries.items) |e| {
             if (e.decision == null) continue; // 잊은 것은 적지 않는다
-            var buf: [std.fs.max_path_bytes + 32]u8 = undefined;
-            const l = line(e.decision, .{ .volume = e.volume, .path = e.path }, &buf) orelse continue;
+            var buf: [max_line_bytes]u8 = undefined;
+            const l = line(e.decision, e.key(), &buf) orelse continue;
             try out.appendSlice(allocator, l);
         }
         return out.toOwnedSlice(allocator);
@@ -232,16 +310,16 @@ pub const Store = struct {
 
     /// 그 키를 묻는 창(없으면 `null`).
     pub fn claimant(self: *const Store, key: Key) ?usize {
-        for (self.claims.items) |c| if (c.volume == key.volume and std.mem.eql(u8, c.path, key.path)) return c.owner;
+        for (self.claims.items) |c| if (c.key().eql(key)) return c.owner;
         return null;
     }
 
     /// 그 키를 `owner` 가 묻겠다고 잡는다. 다른 창이 이미 잡았으면 `false`(그 창의 답을 기다린다), 비었거나 제 것이면 `true`.
     pub fn claim(self: *Store, allocator: std.mem.Allocator, key: Key, owner: usize) !bool {
         if (self.claimant(key)) |o| return o == owner;
-        const owned = try allocator.dupe(u8, key.path);
-        errdefer allocator.free(owned);
-        try self.claims.append(allocator, .{ .volume = key.volume, .path = owned, .owner = owner });
+        const owned = try dupeKey(allocator, key);
+        errdefer freeOwned(allocator, owned.path, owned.dest);
+        try self.claims.append(allocator, .{ .volume = key.volume, .path = owned.path, .dest = owned.dest, .owner = owner });
         return true;
     }
 
@@ -250,12 +328,12 @@ pub const Store = struct {
         var i: usize = 0;
         while (i < self.claims.items.len) {
             const c = self.claims.items[i];
-            const hit = c.owner == owner and if (key) |k| (c.volume == k.volume and std.mem.eql(u8, c.path, k.path)) else true;
+            const hit = c.owner == owner and if (key) |k| c.key().eql(k) else true;
             if (!hit) {
                 i += 1;
                 continue;
             }
-            allocator.free(c.path);
+            freeOwned(allocator, c.path, c.dest);
             _ = self.claims.swapRemove(i);
         }
     }
@@ -439,4 +517,73 @@ test "LST13 잊기 — 실행 중에는 표시를 남겨 세대를 올리고(창
     try testing.expectEqual(@as(usize, 1), t.entries.items.len);
     try t.load(a, "deny\t1\t/r\n"); // 잊은 뒤의 결정은 다시 선다
     try testing.expectEqual(@as(?Decision, .deny), t.get(k));
+}
+
+test "LST-R1 원격 키 (계획 workspace-trust WT7a) — 네 칸 줄로 왕복하고 같은 경로의 로컬 키와 갈리며, 목적지는 호스트만 소문자로 맞춘다; 맞추지 않은 목적지·빈 값·제어 문자는 키가 아니다" {
+    var buf: [max_line_bytes]u8 = undefined;
+    // 왕복.
+    const remote: Key = .{ .volume = 0, .path = "/home/me/repo", .dest = "me@openclaw" };
+    const l = line(.allow, remote, &buf).?;
+    try testing.expectEqualStrings("allow\tssh\tme@openclaw\t/home/me/repo\n", l);
+    const back = parseLine(l[0 .. l.len - 1]).?;
+    try testing.expect(back.key.eql(remote) and back.key.isRemote() and back.decision.? == .allow);
+    try testing.expect(parseLine("forget\tssh\tme@openclaw\t/home/me/repo").?.decision == null);
+    // 같은 경로라도 로컬 키와 다르다 — 원격 결정이 이 기계의 같은 경로에 서지 않는다.
+    const local: Key = .{ .volume = 0, .path = "/home/me/repo" };
+    try testing.expect(!local.eql(remote) and !local.isRemote());
+    // 목적지 정규화 — 호스트만 소문자, 계정은 그대로.
+    var d: [max_dest_bytes]u8 = undefined;
+    try testing.expectEqualStrings("Me@openclaw", normalizeDest("Me@OpenClaw", &d).?);
+    try testing.expectEqualStrings("openclaw", normalizeDest("openClaw", &d).?);
+    try testing.expectEqualStrings("a@b@host", normalizeDest("a@b@HOST", &d).?);
+    try testing.expect(normalizeDest("", &d) == null);
+    try testing.expect(normalizeDest("me@", &d) == null);
+    try testing.expect(normalizeDest("host\x1b", &d) == null);
+    try testing.expect(normalizeDest("ho\tst", &d) == null);
+    var long: [max_dest_bytes + 1]u8 = undefined;
+    @memset(&long, 'a');
+    try testing.expect(normalizeDest(&long, &d) == null);
+    // 맞추지 않은 목적지는 적지도 읽지도 않는다(같은 기계가 두 키로 갈리지 않게).
+    try testing.expect(line(.allow, .{ .volume = 0, .path = "/r", .dest = "OpenClaw" }, &buf) == null);
+    try testing.expect(parseLine("allow\tssh\tOpenClaw\t/r") == null);
+    // 원격 줄의 모양 규칙 — 둘째 칸은 `ssh`, 경로는 절대, 빈 목적지 없음.
+    try testing.expect(parseLine("allow\tsh\thost\t/r") == null);
+    try testing.expect(parseLine("allow\tssh\thost\tr") == null);
+    try testing.expect(parseLine("allow\tssh\t\t/r") == null);
+    try testing.expect(parseLine("allow\tssh\thost\t/r\textra") == null);
+    // 로컬 줄은 그대로다.
+    try testing.expect(parseLine("allow\t1000012\t/x/y z").?.key.eql(.{ .volume = 0x1000012, .path = "/x/y z" }));
+}
+
+test "LST-R2 원격 키는 표에서 로컬 키와 같은 규칙으로 산다 — 결정·잊기·묻는 자리·다시 쓰기, 같은 경로의 로컬 결정과 섞이지 않는다 (계획 WT7a)" {
+    var s: Store = .{};
+    defer s.deinit(testing.allocator);
+    const remote: Key = .{ .volume = 0, .path = "/srv/app", .dest = "openclaw" };
+    const local: Key = .{ .volume = 7, .path = "/srv/app" };
+    try testing.expect(try s.put(testing.allocator, remote, .allow));
+    try testing.expect(try s.put(testing.allocator, local, .deny));
+    try testing.expectEqual(@as(?Decision, .allow), s.get(remote));
+    try testing.expectEqual(@as(?Decision, .deny), s.get(local));
+    // 다시 쓰기 — 두 줄 모두 제 형식으로.
+    const text = try s.serialize(testing.allocator);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "allow\tssh\topenclaw\t/srv/app\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "deny\t7\t/srv/app\n") != null);
+    var re: Store = .{};
+    defer re.deinit(testing.allocator);
+    try re.load(testing.allocator, text);
+    try testing.expectEqual(@as(?Decision, .allow), re.get(remote));
+    try testing.expectEqual(@as(?Decision, .deny), re.get(local));
+    // 묻는 자리 — 원격 키는 그 키로만 잡힌다.
+    try testing.expect(try s.claim(testing.allocator, remote, 1));
+    try testing.expect(!(try s.claim(testing.allocator, remote, 2)));
+    try testing.expect(try s.claim(testing.allocator, local, 2));
+    s.release(testing.allocator, remote, 1);
+    try testing.expect(s.claimant(remote) == null and s.claimant(local).? == 2);
+    // 잊기 — 원격만.
+    try testing.expect(s.forget(remote));
+    try testing.expect(s.get(remote) == null and s.get(local).? == .deny);
+    // 파일의 forget 줄도 원격 키로 지운다.
+    try re.load(testing.allocator, "forget\tssh\topenclaw\t/srv/app\n");
+    try testing.expect(re.get(remote) == null and re.get(local).? == .deny);
 }

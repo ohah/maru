@@ -185,7 +185,7 @@ pub fn decide(io: std.Io, key: trust.Key, decision: trust.Decision) bool {
         store.touch(key); // 같은 답 — 파일은 그대로, 다시 묻던 다른 창이 이것을 답으로 본다
         return true;
     }
-    var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    var line_buf: [trust.max_line_bytes]u8 = undefined;
     return persist(io, trust.line(decision, key, &line_buf) orelse return false);
 }
 
@@ -194,7 +194,7 @@ pub fn decide(io: std.Io, key: trust.Key, decision: trust.Decision) bool {
 /// (`decide` 와 같다 — 다음 실행은 옛 결정을 읽는다). 잊을 결정이 없었으면 할 일이 없어 `true`.
 pub fn forget(io: std.Io, key: trust.Key) bool {
     if (!store.forget(key)) return true;
-    var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    var line_buf: [trust.max_line_bytes]u8 = undefined;
     return persist(io, trust.line(null, key, &line_buf) orelse return false);
 }
 
@@ -444,7 +444,7 @@ test "LST10 새 파일이 있으면 이관하지 않는다 — 옛 파일이 남
     var k_buf: [std.fs.max_path_bytes]u8 = undefined;
     var p_buf: [std.fs.max_path_bytes]u8 = undefined;
     const repo = keyFor(try joinBuf(&p_buf, root, "Repo"), &k_buf).?;
-    var line_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    var line_buf: [trust.max_line_bytes]u8 = undefined;
     const new_text = trust.line(.allow, repo, &line_buf).?;
     try tmp.dir.writeFile(io, .{ .sub_path = "state/" ++ file_name, .data = new_text });
     var old_buf: [2 * std.fs.max_path_bytes]u8 = undefined;

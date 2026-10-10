@@ -7179,12 +7179,13 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             if (!run.op.committed() and !cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
             if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
-            _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return if (run.op.committed() and run.op.miss != null)
-                // 누름 뒤의 떼기·놓기를 보내지 못했다 — 앞선 실패 이유(엔진이 멈춤 등)로 답한다(3 회차 — 「not ready」 가 덮었다).
-                finishCdp(run, .failed, run.op.miss.?)
-            else switch (e) {
-                error.NotReady => finishCdp(run, .failed, "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)"),
-                error.Busy => finishCdp(run, .failed, "too many DevTools calls on this tab"),
+            _ = session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone }) catch |e| return switch (e) {
+                // 보내지 못했다 — op 이 정한다(누른 뒤의 떼기면 잠깐 뒤 다시, 놓기면 동작의 결과로, 앞선 실패가 있으면 그 이유로 — 3·4 회차).
+                error.NotReady, error.Busy => {
+                    const why = if (e == error.NotReady) "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)" else "too many DevTools calls on this tab";
+                    const after = run.op.feed(allocator, .{ .not_sent = why }) catch return finishCdp(run, .failed, "out of memory");
+                    return cdpAdvance(run, after);
+                },
                 // 인자는 이 모듈이 만든 JSON 이다 — 넘치는 것은 사용자의 selector 뿐이다(64 KiB).
                 error.InvalidParams => finishCdp(run, .invalid_params, "invalid DevTools parameters (the selector or text may be too long)"),
                 error.InvalidMethod => finishCdp(run, .failed, "internal DevTools request error"),
@@ -9686,6 +9687,35 @@ test "W9b①b: 잠든 wait 는 drain tick(창이 없어도 오는 길)에서 시
     maru_macos_control_server_drain(null, 0);
     try std.testing.expectEqual(before + 1, cdp_calls_attempted);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+}
+
+test "W9b①b-2: 확실히 못 보낸 키 누름(busy)은 떼지 않고, 보냈을 수도 있는 실패(protocol)면 뗀다" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":93,\"method\":\"browser.press\",\"params\":{\"id\":11,\"key\":\"Enter\"}}";
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    var pendings: [2]control_server_mod.PendingRequest = undefined;
+    defer for (&pendings) |*p| if (p.response) |r| allocator.free(r);
+    for ([_]session_mod.web_osr.DevtoolsOutcome{ .busy, .protocol }, [_]usize{ 0, 1 }, &pendings) |outcome, ups, *p| {
+        p.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+        const id = try control_server_storage.deferRequest(p, std.math.maxInt(i128));
+        try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 11, .method = .press, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+        defer _ = active_browser_executions.finish(id);
+        const run = try allocator.create(CdpRun);
+        run.* = .{ .async_id = id, .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .press, "{\"key\":\"Enter\"}", id), .started = true };
+        const first = try run.op.start(allocator); // 누름 Step(보낸 셈 친다)
+        allocator.free(first.call.params);
+        try cdp_runs.append(allocator, run);
+        const before = cdp_calls_attempted;
+        cdpDone(run, 0, outcome, "");
+        try std.testing.expectEqual(before + ups, cdp_calls_attempted); // protocol 이면 떼기를 보내려 했다
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+        try std.testing.expect(p.response != null);
+    }
 }
 
 test "W9b①: Chromium op 은 그 요청이 살아 있고 허가돼 있을 때만 다음 DevTools 호출(진짜 입력)을 보낸다" {

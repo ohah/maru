@@ -30,6 +30,12 @@ pub const max_link_bytes: usize = 64 * 1024 * 1024;
 pub const max_grapheme_bytes: usize = 64 * 1024 * 1024;
 pub const max_link_len: usize = 1024 * 1024;
 pub const max_grapheme_codepoints: usize = 4096;
+// 코어가 한 셀에 담을 수 있는 cluster는 디코드가 받아야 한다 — 쓸 때 받아 놓고 읽을 때 거부하면
+// validateHandoff 가 업그레이드를 막는다.
+comptime {
+    if (TerminalCore.max_grapheme_extra_codepoints > max_grapheme_codepoints)
+        @compileError("core cluster cap exceeds handoff max_grapheme_codepoints");
+}
 
 const magic = [8]u8{ 'M', 'R', 'U', 'H', 'O', 'F', '0', '1' };
 const envelope_header_len = 64;

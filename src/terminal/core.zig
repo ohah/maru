@@ -638,6 +638,14 @@ pub const TerminalCore = struct {
     /// 막는 방어선(이미지 320MB·APC 4096·placement 1024 한계와 같은 결). 디코드된 이미지는 320MB로 따로
     /// 제한되므로, base64 오버헤드(~4/3)를 감안해 480MB로 둔다. 초과하면 그 chunked 전송을 폐기한다.
     pub const max_kitty_chunk_bytes: usize = 480 * 1000 * 1000; // parser.dispatchApc도 참조(cross-file) — pub
+    /// 한 셀의 cluster 본체(base 뒤 extra 코드포인트)에 담는 상한 — 넘치는 0폭 코드포인트는 버린다. 터미널
+    /// 입력은 믿을 수 없는 바이트라, 한 칸에 결합 부호를 끝없이 붙이면 append마다 한 칸 긴 prefix를 새로
+    /// intern해(store는 append-only) 메모리가 N²로 늘고, 4096을 넘긴 cluster는 handoff 디코드가 거부해
+    /// 업그레이드가 막힌다(`handoff_codec.max_grapheme_codepoints`, comptime으로 이 값 이상을 강제).
+    /// 값은 실제 텍스트가 닿지 않는 높이다: UAX #15 Stream-Safe는 이어지는 non-starter를 30개로 보고,
+    /// 가장 긴 RGI 이모지(👩🏻‍❤️‍💋‍👨🏼)의 extra는 9개, kitty placeholder는 3개다. Ghostty도 같은 64를 쓴다
+    /// (`grapheme_max_len` — 동작 비교 기준, 코드는 독립).
+    pub const max_grapheme_extra_codepoints: usize = 64;
     // OSC 52 클립보드 쓰기 상한(max_clipboard_bytes)은 osc.zig로 이동(clipboard 핸들러 전용).
 
     pub fn init(allocator: std.mem.Allocator, size: types.Size) !TerminalCore {
@@ -1907,8 +1915,10 @@ pub const TerminalCore = struct {
     /// 기존 cluster(id; 0이면 빈 것으로 취급) 뒤에 cp 하나를 덧붙인 새 cluster를 intern해 id를 돌려준다.
     /// internGrapheme를 거치므로 dedup된다(같은 결과 cluster면 기존 id 재사용). NFD 한글 자모가 음절에
     /// 차례로 붙을 때(writeCodepoint의 cluster 확장) 호출된다. screen.zig가 cross-file 호출 — pub.
+    /// cluster가 이미 `max_grapheme_extra_codepoints`면 cp를 버리고 id를 그대로 돌려준다.
     pub fn appendGraphemeCodepoint(self: *TerminalCore, id: u32, cp: u21) !u32 {
         const old: []const u21 = self.graphemeCluster(id) orelse &.{};
+        if (old.len >= max_grapheme_extra_codepoints) return id;
         // old ++ cp를 임시 버퍼에 만들어 intern(dedup). 이미 있는 cluster면 internGrapheme이 임시를
         // 안 쓰고 기존 id를 돌려준다(새 cluster일 때만 store가 복사 보관).
         const tmp = try self.allocator.alloc(u21, old.len + 1);
@@ -2561,6 +2571,42 @@ test "multi-combining: 둘째 mark부터 grapheme_store에 누적돼 무손실 (
     const text = try core.dumpUtf8(std.testing.allocator);
     defer std.testing.allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "e\u{0301}\u{0323}x") != null);
+}
+
+test "cluster 상한: 한 칸에 결합 부호가 상한을 넘으면 넘친 몫은 버려 store가 더 안 자라고, 실제 이모지는 무손실이다" {
+    const cap = TerminalCore.max_grapheme_extra_codepoints;
+    var core = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+
+    // A + U+0301 을 상한의 네 배 — 상한 없이는 append마다 한 칸 긴 prefix가 intern돼 store가 4×cap개가 된다.
+    try core.write("A");
+    for (0..cap * 4) |_| try core.write("\u{0301}");
+    try core.write("x");
+
+    const s = core.snapshot();
+    try std.testing.expectEqual(@as(u16, 2), s.cursor.col); // 버린 부호도 0폭 — x가 바로 옆 칸
+    try std.testing.expectEqual(@as(u21, 'x'), s.cells[1].codepoint);
+    const cluster = core.graphemeCluster(s.cells[0].grapheme_id) orelse return error.NoCluster;
+    try std.testing.expectEqual(cap, cluster.len);
+    for (cluster) |cp| try std.testing.expectEqual(@as(u21, 0x0301), cp);
+    try std.testing.expectEqual(cap, core.grapheme_store.items.len); // prefix 1..cap — 그 뒤로 안 자란다
+
+    // 경계: 정확히 상한만큼은 다 남는다(버리는 건 넘친 몫뿐).
+    try core.write("\r\nB");
+    for (0..cap) |_| try core.write("\u{0300}");
+    const s2 = core.snapshot();
+    const exact = core.graphemeCluster(s2.cells[8].grapheme_id) orelse return error.NoCluster;
+    try std.testing.expectEqual(cap, exact.len);
+    for (exact) |cp| try std.testing.expectEqual(@as(u21, 0x0300), cp);
+
+    // 상한은 실제 텍스트에 닿지 않는다: 가장 긴 RGI 이모지 👩🏻‍❤️‍💋‍👨🏼(extra 9개)가 한 셀에 그대로 남는다.
+    var emoji = try TerminalCore.init(std.testing.allocator, .{ .cols = 8, .rows = 1 });
+    defer emoji.deinit();
+    emoji.emoji_wide = true; // app_session이 config(text.emoji-width=wide 기본)에서 켜는 값
+    try emoji.write("\u{1F469}\u{1F3FB}\u{200D}\u{2764}\u{FE0F}\u{200D}\u{1F48B}\u{200D}\u{1F468}\u{1F3FC}");
+    const s3 = emoji.snapshot();
+    try std.testing.expectEqual(@as(u21, 0x1F469), s3.cells[0].codepoint);
+    try expectCluster(&emoji, s3.cells[0].grapheme_id, &.{ 0x1F3FB, 0x200D, 0x2764, 0xFE0F, 0x200D, 0x1F48B, 0x200D, 0x1F468, 0x1F3FC });
 }
 
 test "bare ZWJ(U+200D)는 NFD cluster에 흡수되지 않고 제 셀을 유지한다 (리뷰 #2 회귀)" {

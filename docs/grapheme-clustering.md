@@ -155,6 +155,7 @@ conjoining 자모를 cluster로 묶는 규칙은 UAX#29 Grapheme Cluster Boundar
 - **수명 관리**: `grapheme_store`를 `link_store`와 동형의 **dedup append-only**로 둔다(`grapheme_ids` 해시맵 — 같은 cluster 1 entry). store가 distinct cluster 수로 bounded돼 반복 cluster의 per-cell 증가가 없고, reset(RIS)·deinit에서 일괄 free한다 — 이게 **standing 답**이다. 화면에서 사라진 cluster까지 회수(구조적 회수)하려면 grapheme 저장을 Screen/page 수명에 귀속시켜야 하나, 그 vehicle인 §11 B가 불가로 판정돼 **보류**다(§5·§11.8 §595, measure-first).
 - **기존 combining 경로 통합**: `width.zig`의 `isKeycapCombining`(U+20E3 키캡)을 경유하는 **단일-combining 보정 hack 세 곳**(`metal_frame.isColorGlyph` 컬러 판정·셰이퍼 VS16 재주입·`appendRowUtf8` 복사)은 다중 저장으로 **근본 해소**되어 제거 대상이다 — 키캡 `base+VS16+U+20E3`을 그대로 저장하니 재주입이 불필요하다. VS16(❤️)·skin-tone(👍🏽)·국기(RI 쌍)도 같은 cluster 저장 경로로 흡수한다. 단 이는 동작 변경이 아니라 **모델 이전**이라, 기존 이모지/키캡 테스트가 green을 유지해야 한다.
 - 저장 상한·문자열 복사(`appendRowUtf8`)·trace/snapshot 직렬화가 다중 코드포인트를 **잃지 않도록**(무손실) 함께 본다.
+- **한 셀 상한(`TerminalCore.max_grapheme_extra_codepoints` = 64)**: cluster 본체가 64개면 그 뒤 0폭 코드포인트는 버린다. §3.2 의 «잘림 금지»는 실제 텍스트가 닿는 길이(가장 긴 RGI 이모지 extra 9개, UAX #15 Stream-Safe 의 non-starter 30개)를 자르지 말라는 것이고, 이 상한은 그 위다. 상한이 없으면 터미널 입력(믿을 수 없는 바이트)이 한 칸에 결합 부호를 끝없이 붙여 append마다 한 칸 긴 prefix가 store에 남아 메모리가 N²로 늘고, 4096을 넘는 cluster는 handoff 디코드(`handoff_codec.max_grapheme_codepoints`)가 거부해 `validateHandoff` 가 업그레이드를 막는다 — 그래서 `handoff_codec.zig` 가 comptime 으로 «코어 상한 ≤ 디코드 상한»을 강제한다. Ghostty 도 같은 64 다(`grapheme_max_len`, 동작 비교 기준).
 
 ### 4.3 폭 — cluster 단위로 base가 결정한다
 

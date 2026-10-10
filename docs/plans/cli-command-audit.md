@@ -385,3 +385,37 @@ Ubuntu 24.04 ARM64에서 동일 단위 검사 통과. `seedResumeCursors` 중복
 컴파일 가능한 변형은 TestExpectedError로 실패하고, 등가 비교 변형은 통과했다.
 문서 링크와 행 인용 검사 통과. 기존 help·빈 목록·파일별 이어읽기를 유지하며
 중복 커서는 stdout 없이 종료하고 stale·대형 로그의 바이트를 보존했다.
+
+## agent-events 회전·출력 실패 검증 — 구현 완료
+
+실제 CLI의 private 로그와 소유한 stdout pipe로 축소 회전, 새 파일 생성, 재접속 및
+대형 로그 절단 전 출력 실패를 재현한다. 스트림 생성 이후 대형 로그를 넣어 기존 시작 시
+정리 정책과 분리한다. 파일별 cursor와 event 순서를 독립적인 기대값으로 대조한다.
+정상 소비·절단·reset cursor는 양성 대조군이며 바이트와 권한 보존도 확인한다.
+
+읽었다는 사실만으로 로그를 비우지 않는다. stdout 버퍼의 이벤트와 cursor가 flush에
+성공한 뒤에만 소비 완료에 따른 절단을 허용한다. stdout 실패는 nonzero 종료하며,
+절단 뒤 reset cursor의 출력 실패도 무시하지 않는다. 기존 wire version·시작 시 backlog
+정리·크기 기반 회전 감지 정책은 유지한다. peer ACK 및 같은 크기 이상으로 재생성된
+파일 세대의 식별은 현재 offset 프로토콜만으로 보장할 수 없으며 별도 설계 범위다.
+
+수정 전 실제 CLI에서 1 MiB prefix 뒤의 짧은 미소비 tail을 읽도록 resume를 지정하고,
+시작 시 정리가 끝난 뒤 stdout pipe를 닫고 로그를 넣었다. exit 1/WriteFailed였지만
+1,048,598바이트 파일이 0바이트가 됐다. 기록은
+`/var/folders/51/mr5cjhg13v324f1vgg9m237c0000gn/T/maru-stream-baseline-7e3b7tjn/result.json`이다.
+초기 heartbeat 200ms 실험은 다음 heartbeat 출력에서 먼저 실패해 이 경로에 도달하지
+않았다. 회귀 하네스는 첫 heartbeat로 시작 시 정리 완료를 확인하고, heartbeat 주기
+안에 로그를 넣어 작은 tail을 소비하게 한다.
+
+`runAgentEvents`는 소비 완료 절단 직전에 stdout.flush를 try하며 실패면 로그를
+보존한다. 절단 뒤 reset cursor 생성·출력·flush도 try로 전파한다.
+`tools/agent_events_stream_recovery.py`를 기존 실제 CLI process 게이트에서 호출한다.
+같은 크기 이상 파일 교체, 읽기와 append/절단 사이의 경쟁, transport 수락 후 peer
+처리 실패는 offset만으로 원자성·정확히 한 번 전달을 보장하지 못하며 별도 설계 범위다.
+
+검증 결과: Debug와 ReleaseFast에서 실제 CLI 965개 검사 통과, Debug 반복 실행 모두
+통과, 단위 검사 346 pass/1 skip 및 전체 check-boundaries와 문서 검사 통과.
+절단 전 flush를 `if (false)`로 무력화한 변형은 컴파일 뒤 실제 CLI 검사에서
+`output failure erased log`로 실패했고 `if (true)` 등가 변형은 통과했다.
+원본 소스를 복구하고 native CLI를 다시 빌드했다. 변형 증거는
+`/tmp/maru-stream-mutations.json`이며 생성 파일은 커밋하지 않는다.

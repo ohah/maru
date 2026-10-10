@@ -15113,8 +15113,11 @@ fn runAgentEvents(
             }
 
             // **다 읽었고 상한을 넘겼으면 비운다**(RA3 — 원격에서는 이 프로세스가 그 기계의 소비자다).
-            // 실패는 조용히 지나간다: 못 비워도 이벤트는 계속 흐르고, 다음 회차에 다시 시도한다.
+            // 디스크 절단 실패는 조용히 지나간다: 못 비워도 이벤트는 흐르고 다음 회차에 다시 시도한다.
             if (ae.shouldTruncate(next, size)) {
+                // writeAll may only queue bytes in stdout's buffer. Keep the disk copy
+                // until events and their cursor have actually reached the transport.
+                try stdout.flush();
                 // `O_TRUNC` 로 열어 아무것도 안 쓴다 — 파일이 이미 있으므로 **권한은 그대로 남는다**
                 // (훅이 `umask 077` 로 만든 0600 이다. 지우고 다시 만들면 그 값을 잃는다).
                 if (dir.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } })) |_| {
@@ -15125,8 +15128,9 @@ fn runAgentEvents(
                     // **비웠다는 것도 알린다.** 로컬이 옛 offset 을 든 채 재접속하면 새 파일의 앞을
                     // 건너뛴다 — `advance` 의 회전 감지가 결국 되돌리지만, 그 한 회차를 안 만든다.
                     frame.clearRetainingCapacity();
-                    ae.formatCursor(&frame, allocator, nonce, 0) catch continue; // 위와 같은 이유로 파일 이름
-                    stdout.writeAll(frame.items) catch continue;
+                    try ae.formatCursor(&frame, allocator, nonce, 0);
+                    try stdout.writeAll(frame.items);
+                    try stdout.flush();
                 } else |_| {}
             }
         }

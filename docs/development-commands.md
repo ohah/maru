@@ -63,6 +63,9 @@ offset과 순서에 관계없이 exit 1이며 서로 다른 파일의 커서는 
 내부 중복 뒤에 help가 있어도 안내다. boolean `--stdio`의 반복 허용은 유지한다.
 
 Ubuntu CI의 `check` 잡은 코드 변경 시 `zig build test-cli-failure-process`를 실행한다.
+이 게이트는 실제 stdout pipe와 private 로그로 agent-events의 축소 회전·짧은 파일 교체·
+cursor 재접속·정상 절단 및 출력 실패 시 로그 바이트/0600 보존도 검사한다. 시작 시
+backlog 정리와 구분하려고 첫 heartbeat 뒤에 로그를 넣으며 provider·SSH·tmux는 실행하지 않는다.
 빌드가 전달한 native CLI artifact를 private HOME·cache·socket으로 검증하므로 GUI 권한은
 필요하지 않다. 순수 parser 테스트와 별도로 종료 코드·요청 전 부작용·정상 wire를 검사한다.
 `tests/artifacts/cli-failure/*.json`은 실패 호출까지 기록하며 기존 `maru-check-artifacts`에

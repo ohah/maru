@@ -113,6 +113,7 @@ pub const brackets_client = @import("brackets.zig");
 pub const guides_client = @import("guides.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
+pub const project_replace_batch = @import("search/batch.zig");
 pub const linked_history = @import("history.zig");
 pub const workspace_edit_client = @import("workspace_edit.zig");
 
@@ -8495,7 +8496,13 @@ fn stepHistory(self: *AppSession, term: *Term, is_undo: bool) bool {
     while (from_len.* > 0 and from.*[from_len.* - 1].group == group) {
         // 준비 실패는 원래 항목을 스택에 남긴다. 성공한 delta만 반대 스택으로 옮긴다.
         var entry = from.*[from_len.* - 1];
-        var sels = selectionsForEdit(self, term) orelse break;
+        // 배치는 본문을 누른 적 없는 비활성 문서도 편집한다. 그 문서의 한 항목 Undo도
+        // 연결 편집 준비와 같은 가상 0번 커서를 사용한다. 실패 시 뷰에 커서를 먼저 게시하지 않는다.
+        var sels = snapshotSelections(self.allocator, term) catch |err| blk: {
+            if (err != error.NoSelection) break;
+            const initial = self.allocator.dupe(editor_selection.Selection, &.{editor_selection.Selection.at(0)}) catch break;
+            break :blk editor_selection.Selections.init(initial, 0);
+        };
         // 반대편 이력은 이번 역연산 직전의 커서를 되살린다. 원래 entry 의 before 를 다시
         // 복사하면 redo 가 편집 전 커서를 복원해, IME 로 합친 secondary 까지 되살린다.
         // 묶음 중간에는 화면 상태를 아직 게시하지 않았으므로 직전 항목이 복원한 값을 쓴다.
@@ -59768,4 +59775,349 @@ test "LHG11 AppKit 빈 확인 키 트랜잭션은 허용하되 조합과 확정 
         try testing.expectEqualStrings(if (mode == 0) "bbb" else "BBB", b.rt.editorDocument().opened.?.file.content);
         fx.session.ime_editor_commit_pending = false;
     }
+}
+
+const BatchApplyFixture = struct {
+    spec: editor.search.batch.Specification,
+    prepared: editor.search.batch_plan.Prepared,
+    ticket: project_replace_batch.Ticket,
+    fn deinit(self: *@This()) void {
+        self.prepared.deinit(testing.allocator);
+        self.spec.deinit(testing.allocator);
+    }
+};
+fn batchApplyReady(fx: *PaneFixture, terms: []const *Term, needle: []const u8, replacement: []const u8, regex: bool) !BatchApplyFixture {
+    try projectSearchRootForTest(fx);
+    const st = &fx.session.editor_search;
+    try st.fields[0].insertText(testing.allocator, needle);
+    try st.fields[3].insertText(testing.allocator, replacement);
+    st.options[2] = regex;
+    st.replacing = true;
+    const identity: editor.search.request.Identity = .{ .request = 1, .root = fx.session.file_tree.rootGeneration(), .models = @import("search/owner.zig").fingerprint(fx.session) };
+    st.result.phase = .complete;
+    st.result.identity = identity;
+    st.stamp = identity.models;
+    const chosen_targets = try testing.allocator.alloc(editor.search.batch.Selection, terms.len);
+    defer testing.allocator.free(chosen_targets);
+    const bodies = try testing.allocator.alloc(editor.search.batch_plan.Body, terms.len);
+    defer testing.allocator.free(bodies);
+    const range: editor.search.event.Range = .{ .start = .{ .line = 0, .byte = 0 }, .end = .{ .line = 0, .byte = 3 } };
+    for (terms, chosen_targets, bodies) |term, *selected, *body| {
+        const lease = term.rt.editor_document_lease.?;
+        const doc = term.rt.editorDocument();
+        const source: editor.search.request.Source = .{ .model = .{ .document = .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation }, .revision = doc.opened.?.file.revision, .composition = 0 } };
+        selected.* = .{ .absolute = doc.path.?, .root_index = 0, .source = source, .ranges = &.{range} };
+        body.* = .{ .absolute = doc.path.?, .source = source, .text = doc.opened.?.file.content };
+    }
+    var spec = try editor.search.batch.Specification.capture(testing.allocator, identity, .complete, needle, replacement, .{ .regex = regex }, chosen_targets);
+    errdefer spec.deinit(testing.allocator);
+    const ticket = try project_replace_batch.Ticket.capture(fx.session, &spec);
+    const cancelled = std.atomic.Value(bool).init(false);
+    const prepared = try editor.search.batch_plan.Prepared.prepare(testing.allocator, &spec, bodies, 1024 * 1024, 1024 * 1024, &cancelled);
+    return .{ .spec = spec, .prepared = prepared, .ticket = ticket };
+}
+fn batchApplyDisk(fx: *PaneFixture, name: []const u8, expected: []const u8) !void {
+    const bytes = try fx.dir.dir.readFileAlloc(testing.io, name, testing.allocator, .limited(1024));
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings(expected, bytes);
+}
+fn batchApplyPreserved(terms: []const *Term, batch: *const BatchApplyFixture) !void {
+    for (terms, batch.prepared.items.items, batch.spec.targets.items) |term, item, target| {
+        try testing.expectEqualStrings(item.plan.before, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+        try testing.expectEqual(editor.search.batch.Outcome.pending, target.outcome);
+    }
+}
+
+test "RPBA1 실제 두 문서 반영 저장 연결 Undo와 포커스 보존" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo A");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo B");
+    _ = fx.session.activateExistingFileTerm(a);
+    a.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, a, "!"));
+    const prior_entry = a.rt.editorDocument().history.undo[0].id;
+    a.rt.editor_selection = editor_selection.Selection.at(1);
+    b.rt.editor_selection = editor_selection.Selection.at(5);
+    var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "long", false);
+    defer batch.deinit();
+    const result = try project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket);
+    try testing.expect(result.operation != null);
+    try testing.expectEqual(@as(usize, 2), result.saved);
+    try batchApplyDisk(&fx, "batch-a.txt", "long A!");
+    try batchApplyDisk(&fx, "batch-b.txt", "long B");
+    try testing.expect(@import("../pane.zig").activePane(fx.session).activeTerm() == a);
+    try testing.expectEqual(@as(usize, 6), b.rt.editor_selection.?.focus);
+    try testing.expectEqualStrings("long B", b.rt.editor_lines[0]);
+    try testing.expect(undoEdit(fx.session, a));
+    try linkedFixtureChoose(&fx, false);
+    try testing.expectEqualStrings("foo A!", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("foo B", b.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(a) and isDirty(b));
+    try testing.expectEqual(@as(usize, 1), a.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(prior_entry, a.rt.editorDocument().history.undo[0].id);
+}
+test "RPBA2 마지막 문서의 원문만 바뀌어도 첫 문서와 이력을 보존" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+    var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+    defer batch.deinit();
+    @memcpy(b.rt.editorDocument().opened.?.file.content, "bad"); // revision이 그대로인 경우도 전문으로 검사한다.
+    try testing.expectError(error.StaleDocument, project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket));
+    try testing.expectEqualStrings("foo", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("bad", b.rt.editorDocument().opened.?.file.content);
+    for (batch.spec.targets.items) |target| try testing.expectEqual(editor.search.batch.Outcome.pending, target.outcome);
+    try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
+    try batchApplyDisk(&fx, "batch-a.txt", "foo");
+}
+test "RPBA3 입력 root 검색 신원 조합 변경은 전체 적용을 거절" {
+    for (0..6) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+        const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+        var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+        defer batch.deinit();
+        if (mode == 0) try fx.session.editor_search.fields[3].insertText(testing.allocator, "!");
+        if (mode == 1) fx.session.editor_search.result.identity.?.request += 1;
+        if (mode == 2) fx.session.ime_active = true;
+        if (mode == 3) fx.session.ime_editor_commit_pending = true;
+        if (mode == 4) try fx.session.editor_search.fields[0].setPreedit(testing.allocator, "한");
+        if (mode == 5) try fx.session.file_tree.replaceExplicitRoots(&.{"/"});
+        if (project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket)) |_| return error.UnexpectedCommit else |_| {}
+        fx.session.ime_active = false;
+        fx.session.ime_editor_commit_pending = false;
+        try batchApplyPreserved(&.{ a, b }, &batch);
+    }
+}
+test "RPBA4 마지막 파일 저장 충돌은 두 문서의 편집 Undo와 첫 저장을 유지" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+    var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+    defer batch.deinit();
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-b.txt", .data = "external" });
+    const result = try project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket);
+    try testing.expectEqual(@as(usize, 1), result.saved);
+    try testing.expectEqual(@as(usize, 1), result.save_failed);
+    try testing.expectEqual(error.ExternalConflict, batch.spec.targets.items[1].save_failure.?);
+    try testing.expectEqual(editor.search.batch.Outcome.save_failed, batch.spec.targets.items[1].outcome);
+    try batchApplyDisk(&fx, "batch-a.txt", "bar");
+    try batchApplyDisk(&fx, "batch-b.txt", "external");
+    try testing.expectEqualStrings("bar", b.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(b) and !isDirty(a));
+    try testing.expectEqual(@as(usize, 1), b.rt.editorDocument().history.undo_len);
+    try testing.expectError(error.AlreadyApplied, project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket));
+}
+test "RPBA5 저장 첫 실패 뒤에도 다음 파일 저장하고 원래 편집 순서 유지" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+    var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+    defer batch.deinit();
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "external" });
+    const result = try project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket);
+    try testing.expectEqual(@as(usize, 1), result.saved);
+    try testing.expectEqual(@as(usize, 1), result.save_failed);
+    try batchApplyDisk(&fx, "batch-a.txt", "external");
+    try batchApplyDisk(&fx, "batch-b.txt", "bar");
+}
+test "RPBA6 변경 없는 대상은 저장과 Undo를 추가하지 않고 단일 유효 편집은 일반 Undo" {
+    for ([_]bool{ false, true }) |one| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+        const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", if (one) "bar" else "foo");
+        var batch = try batchApplyReady(&fx, &.{ a, b }, "foo|bar", "foo", true);
+        defer batch.deinit();
+        // 변경 없는 문서의 외부 상태는 저장을 생략했는지를 보는 독립 sentinel이다.
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "external" });
+        const result = try project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket);
+        try testing.expectEqual(@as(usize, if (one) 1 else 0), result.changed);
+        try testing.expectEqual(@as(usize, if (one) 1 else 2), result.unchanged);
+        try testing.expect(result.operation == null);
+        try testing.expectEqual(@as(usize, if (one) 1 else 0), result.saved);
+        try testing.expectEqual(@as(usize, 0), result.save_failed);
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_documents.links.records.items.len);
+        try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
+        try batchApplyDisk(&fx, "batch-a.txt", "external");
+        if (one) {
+            try testing.expect(undoEdit(fx.session, b));
+            try testing.expectEqualStrings("bar", b.rt.editorDocument().opened.?.file.content);
+            try testing.expect(!fx.session.chrome_host.confirm.open);
+        }
+    }
+}
+test "RPBA7 마지막 읽기 전용 대상과 공유 뷰 조합은 전부 보존" {
+    for ([_]bool{ false, true }) |composing| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+        const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+        const peer = try openSharedViewInActivePane(fx.session, b);
+        var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+        defer batch.deinit();
+        if (composing) peer.rt.editor_preedit = try testing.allocator.dupe(u8, "한") else b.rt.editorDocument().opened.?.file.read_only = true;
+        if (project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket)) |_| return error.UnexpectedCommit else |_| {}
+        try batchApplyPreserved(&.{ a, b }, &batch);
+    }
+}
+test "RPBA8 전체 예약 OOM은 부분 본문 적용 없이 정리하고 성공 뒤 저장 OOM은 따로 결산" {
+    var failures: usize = 0;
+    var success = false;
+    for (0..160) |index| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+        const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+        var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+        defer batch.deinit();
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index, .resize_fail_index = 0 });
+        const before = fx.session.allocator;
+        fx.session.allocator = failing.allocator();
+        const applied = project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket);
+        fx.session.allocator = before;
+        if (applied) |result| {
+            try testing.expectEqual(@as(usize, 2), result.changed);
+            try testing.expectEqual(@as(usize, 2), result.saved + result.save_failed);
+            try testing.expectEqualStrings("bar", a.rt.editorDocument().opened.?.file.content);
+            try testing.expectEqualStrings("bar", b.rt.editorDocument().opened.?.file.content);
+            if (!failing.has_induced_failure) {
+                success = true;
+                break;
+            }
+        } else |_| {
+            failures += 1;
+            try batchApplyPreserved(&.{ a, b }, &batch);
+            try batchApplyDisk(&fx, "batch-a.txt", "foo");
+            try batchApplyDisk(&fx, "batch-b.txt", "foo");
+        }
+    }
+    try testing.expect(failures > 0 and success);
+}
+test "RPBA9 독립 문서의 동일 경로 점유를 선택 밖 registry에서도 거절" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+    var extra: editor.document_state.State = .{ .path = try testing.allocator.dupe(u8, b.rt.editorDocument().path.?), .opened = try openPath(testing.io, testing.allocator, b.rt.editorDocument().path.?) };
+    const lease = try fx.session.editor_documents.create(&extra, testing.allocator);
+    defer _ = fx.session.editor_documents.release(lease) catch unreachable;
+    var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+    defer batch.deinit();
+    try testing.expectError(error.PathOccupied, project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket));
+    try batchApplyPreserved(&.{ a, b }, &batch);
+}
+test "RPBA10 닫힌 대상과 disk source를 열린 문서로 대신 적용하지 않음" {
+    for ([_]bool{ false, true }) |disk| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+        const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+        var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+        defer batch.deinit();
+        if (disk) batch.spec.targets.items[1].source = .disk else linkedFixtureClose(&fx, b);
+        if (project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket)) |_| return error.UnexpectedCommit else |_| {}
+        try testing.expectEqualStrings("foo", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
+        try batchApplyDisk(&fx, "batch-a.txt", "foo");
+    }
+}
+test "RPBA11 배치 공유 뷰는 같은 정본과 매핑된 커서를 게시하고 준비 개수 불일치는 거절" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+    const peer = try openSharedViewInActivePane(fx.session, a);
+    peer.rt.editor_selection = editor_selection.Selection.at(3);
+    _ = fx.session.activateExistingFileTerm(b);
+    var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "long", false);
+    defer batch.deinit();
+    batch.prepared.effective += 1;
+    try testing.expectError(error.StalePlan, project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket));
+    try batchApplyPreserved(&.{ a, b }, &batch);
+    batch.prepared.effective -= 1;
+    _ = try project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket);
+    try testing.expectEqualStrings("long", peer.rt.editor_lines[0]);
+    try testing.expectEqual(@as(usize, 4), peer.rt.editor_selection.?.focus);
+    try testing.expect(@import("../pane.zig").activePane(fx.session).activeTerm() == b);
+}
+
+test "RPBA12 커서 없는 단일 문서 Undo의 초기 커서 예약 실패도 본문과 이력을 보존" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "batch-single.txt", "foo");
+    var batch = try batchApplyReady(&fx, &.{term}, "foo", "bar", false);
+    defer batch.deinit();
+    _ = try project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket);
+    try testing.expect(term.rt.editor_selection == null);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0, .resize_fail_index = 0 });
+    const original = fx.session.allocator;
+    fx.session.allocator = failing.allocator();
+    const undone = undoEdit(fx.session, term);
+    fx.session.allocator = original;
+    try testing.expect(!undone and failing.has_induced_failure);
+    try testing.expect(term.rt.editor_selection == null);
+    try testing.expectEqualStrings("bar", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), term.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.redo_len);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "RPBA13 같은 본문의 다른 실제 root로 교체되면 두 모델과 디스크를 보존" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo");
+    var batch = try batchApplyReady(&fx, &.{ a, b }, "foo", "bar", false);
+    defer batch.deinit();
+    const root = fx.session.file_tree.rootAt(0).?;
+    const moved = try std.fmt.allocPrint(testing.allocator, "{s}-batch-old", .{root});
+    defer testing.allocator.free(moved);
+    try std.Io.Dir.renameAbsolute(root, moved, testing.io);
+    defer std.Io.Dir.renameAbsolute(moved, root, testing.io) catch unreachable;
+    try std.Io.Dir.createDirAbsolute(testing.io, root, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(testing.io, root) catch unreachable;
+    var replacement = try std.Io.Dir.openDirAbsolute(testing.io, root, .{});
+    defer replacement.close(testing.io);
+    try replacement.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "foo" });
+    try replacement.writeFile(testing.io, .{ .sub_path = "batch-b.txt", .data = "foo" });
+    try testing.expectError(error.RootChanged, project_replace_batch.apply(fx.session, &batch.spec, &batch.prepared, batch.ticket));
+    try batchApplyPreserved(&.{ a, b }, &batch);
+    for ([_][]const u8{ "batch-a.txt", "batch-b.txt" }) |name| {
+        const bytes = try replacement.readFileAlloc(testing.io, name, testing.allocator, .limited(1024));
+        defer testing.allocator.free(bytes);
+        try testing.expectEqualStrings("foo", bytes);
+    }
+}
+
+test "RPA29 열린 모델 단일 적용도 같은 본문의 실제 root 교체를 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "search.txt", "foo");
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    try applyPreviewReady(&fx);
+    const root = fx.session.file_tree.rootAt(0).?;
+    const moved = try std.fmt.allocPrint(testing.allocator, "{s}-model-old", .{root});
+    defer testing.allocator.free(moved);
+    try std.Io.Dir.renameAbsolute(root, moved, testing.io);
+    defer std.Io.Dir.renameAbsolute(moved, root, testing.io) catch unreachable;
+    try std.Io.Dir.createDirAbsolute(testing.io, root, .default_dir);
+    defer std.Io.Dir.cwd().deleteTree(testing.io, root) catch unreachable;
+    var replacement = try std.Io.Dir.openDirAbsolute(testing.io, root, .{});
+    defer replacement.close(testing.io);
+    try replacement.writeFile(testing.io, .{ .sub_path = "search.txt", .data = "foo" });
+    try testing.expectError(error.RootChanged, @import("search/preview.zig").apply(fx.session));
+    try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), term.rt.editorDocument().history.undo_len);
+    const bytes = try replacement.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("foo", bytes);
 }

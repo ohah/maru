@@ -128,3 +128,8 @@ S4b는 디스크 미리보기에서도 적용 버튼을 제공한다. S4c 여러
 - 제품 `--replace-ime-refuse --disk-files 2`는 진행 프레임 이후 완료 수확 직전에 IME 확정 대기를 주입한다.
   실제 Metal의 진행→충돌 화면과 새 입력 세대 publish, 원래 문서·모든 디스크 fixture의 bytes 보존을 확인했다.
   물리 OS IME 입력 검증은 아니다. `maru-editor-project-search-app-we1wkla2/manifest.json`에 소스/바이너리/캡처 hash를 기록했다.
+
+열린 모델 적용의 root 검증은 `search/owner.zig::validateRoots`를 배치와 공유한다.
+watcher 세대와 cached capability가 그대로여도 실제 root 디렉터리가 같은 본문의 다른
+device/inode로 교체됐으면 편집 전에 거절한다. `RPA29`는 실제 디렉터리 교체 뒤 모델 본문·
+Undo와 교체 디렉터리의 원문이 모두 보존되는 것을 검사한다.

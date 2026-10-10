@@ -360,7 +360,7 @@ fn targetTerm(self: *host.AppSession) ?*host.Term {
     };
     return result;
 }
-fn settingsStamp(self: *host.AppSession) u64 {
+pub fn settingsStamp(self: *host.AppSession) u64 {
     var hash = std.hash.Wyhash.init(0);
     for (self.editor_search.fields) |field| {
         hash.update(std.mem.asBytes(&field.text.items.len));
@@ -389,6 +389,7 @@ pub fn apply(self: *host.AppSession) !ApplyResult {
         self.metal_dirty = true;
         return .pending;
     }
+    try owner.validateRoots(self);
     var term = targetTerm(self) orelse return error.StaleRequest;
     const state = &self.editor_search.preview;
     const current = term.rt.editorDocument().opened.?.file.content;

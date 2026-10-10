@@ -115,6 +115,13 @@ pub const BrowserMethod = enum {
     back,
     forward,
     reload,
+    /// `browser.hover {id, selector|ref}` → `{ok}`(W9b①b-2 — Chromium 전용: 진짜 포인터 이동 `Input.dispatchMouseEvent mouseMoved`,
+    /// 페이지는 isTrusted mouseover·`:hover`). op.arg=`{selector|ref}`. **op_kind=21 고정**.
+    hover,
+    /// `browser.press {id, key, selector?|ref?}` → `{ok}`(W9b①b-2 — Chromium 전용: 진짜 키 누름·뗌 `Input.dispatchKeyEvent`).
+    /// key=`수식키+…+키`(예 `Enter`·`Shift+Tab`·`Meta+a`). 대상이 있으면 그 요소에 초점을 주고 누르고, 없으면 지금 초점에.
+    /// op.arg=`{key, selector?|ref?}`. **op_kind=22 고정**.
+    press,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -142,6 +149,8 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "back")) return .back;
     if (eq(rest, "forward")) return .forward;
     if (eq(rest, "reload")) return .reload;
+    if (eq(rest, "hover")) return .hover;
+    if (eq(rest, "press")) return .press;
     return null;
 }
 
@@ -169,6 +178,8 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .back => "back",
         .forward => "forward",
         .reload => "reload",
+        .hover => "hover",
+        .press => "press",
     };
 }
 
@@ -179,12 +190,13 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload => false,
+            .back, .forward, .reload, .hover, .press => false,
             else => true,
         },
-        // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait.
+        // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
+        // hover·press.
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait => true,
+            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press => true,
             else => false,
         },
     };
@@ -375,6 +387,11 @@ pub const ActParams = struct { id: u64, locator: Locator };
 /// `browser.type` params `{id, selector | ref, text}`. locator + text 필수.
 pub const TypeParams = struct { id: u64, locator: Locator, text: []const u8 };
 
+/// `browser.press` params `{id, key, selector? | ref?}`. key 필수(비지 않고 `max_press_key_bytes` 이하 — 키 이름의 해석은 실행하는
+/// 엔진이 한다), 대상은 없어도 된다(지금 초점에 누른다).
+pub const PressParams = struct { id: u64, key: []const u8, locator: ?Locator };
+pub const max_press_key_bytes = 64;
+
 /// `browser.wait` 조건. 첫 슬라이스는 명시적 selector visible·현재 load 완료만 지원한다. URL/text/fn/network-idle과
 /// click/type auto-wait는 후속(§9.4 D3·§9.5).
 pub const WaitCondition = enum {
@@ -540,6 +557,14 @@ pub fn parseTypeParams(params: ?std.json.Value) ParamError!TypeParams {
     return .{ .id = try idFromObj(obj), .locator = try parseLocator(obj), .text = try strFromObj(obj, "text") };
 }
 
+pub fn parsePressParams(params: ?std.json.Value) ParamError!PressParams {
+    const obj = try paramsObject(params);
+    const key = try strFromObj(obj, "key");
+    if (key.len == 0 or key.len > max_press_key_bytes) return error.InvalidParams;
+    const has_locator = (try optStrFromObj(obj, "selector")) != null or (try optStrFromObj(obj, "ref")) != null;
+    return .{ .id = try idFromObj(obj), .key = key, .locator = if (has_locator) try parseLocator(obj) else null };
+}
+
 /// `browser.wait` params. condition은 tagged string이라 후속 URL/text 조건을 기존 필드 의미 변경 없이 확장할 수 있다.
 /// selector 조건은 non-empty selector가 필수, load 조건은 selector를 금지한다. timeout은 1..25_000ms bounded.
 pub fn parseWaitParams(params: ?std.json.Value) ParamError!WaitParams {
@@ -636,6 +661,32 @@ pub fn serializeActArg(gpa: std.mem.Allocator, locator: Locator, text: ?[]const 
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     writeActArg(&s, locator, text) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
+}
+
+/// press op.arg — `{key, selector?|ref?}`.
+pub fn serializePressArg(gpa: std.mem.Allocator, p: PressParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    writePressArg(&s, p) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writePressArg(s: *std.json.Stringify, p: PressParams) !void {
+    try s.beginObject();
+    try s.objectField("key");
+    try s.write(p.key);
+    if (p.locator) |l| switch (l) {
+        .selector => |sel| {
+            try s.objectField("selector");
+            try s.write(sel);
+        },
+        .ref => |ref| {
+            try s.objectField("ref");
+            try s.write(ref);
+        },
+    };
+    try s.endObject();
 }
 
 fn writeActArg(s: *std.json.Stringify, locator: Locator, text: ?[]const u8) !void {
@@ -1548,7 +1599,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         .get_local_storage => serializeValueResult(gpa, req.id, result),
         .set_local_storage, .remove_local_storage, .clear_storage => serializeNavigateResult(gpa, req.id),
         // act(5f-2): click/type/scroll → {ok:<bool>} — Swift eval이 "true"(요소 발견+동작)/"false"(셀렉터 미매치)를 result로.
-        .click, .type_text, .scroll => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
+        .click, .type_text, .scroll, .hover, .press => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         // W9b①: back/forward → 갈 곳이 있었는가, reload → true.
         .back, .forward, .reload => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         .wait => serializeNavigateResult(gpa, req.id),
@@ -1840,7 +1891,8 @@ pub fn browserOpFromRequest(
         },
         .clear_storage => try gpa.dupe(u8, ""), // {id}만 — Swift가 대상 origin 데이터를 WKWebsiteDataStore로 삭제(인자 없음)
         // act(5f-2·snapshot-2): click/scroll arg=`{selector|ref}`, type arg=`{selector|ref,text}`(Swift가 eval로 실행). base browser scope.
-        .click, .scroll => try serializeActArg(gpa, (parseActParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).locator, null),
+        .click, .scroll, .hover => try serializeActArg(gpa, (parseActParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }).locator, null),
+        .press => try serializePressArg(gpa, parsePressParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .type_text => blk: {
             const p = parseTypeParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
             break :blk try serializeActArg(gpa, p.locator, p.text);
@@ -2329,8 +2381,8 @@ test "dispatchBrowser: 유효 cap + 미구현 browser 메서드(pdf) → method_
     try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.method_not_found)), try errCode(wire));
 }
 
-test "dispatchBrowser: WebKit 탭의 back·forward·reload 는 cap 이 있어도 -32008(W9b① — Chromium 전용, WebKit 은 걷어낼 예정)" {
-    for ([_][]const u8{ "back", "forward", "reload" }) |m| {
+test "dispatchBrowser: WebKit 탭의 back·forward·reload·hover·press 는 cap 이 있어도 -32008(W9b① — Chromium 전용, WebKit 은 걷어낼 예정)" {
+    for ([_][]const u8{ "back", "forward", "reload", "hover", "press" }) |m| {
         var buf: [128]u8 = undefined;
         const req = try std.fmt.bufPrint(&buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.{s}\",\"params\":{{\"id\":11}}}}", .{m});
         const wire = try dispatchErr(req, browserCap(11));
@@ -2426,6 +2478,8 @@ test "parseBrowserMethod: 구현된 browser method 인식, 미지는 null" {
     try testing.expectEqual(BrowserMethod.back, parseBrowserMethod("back").?);
     try testing.expectEqual(BrowserMethod.forward, parseBrowserMethod("forward").?);
     try testing.expectEqual(BrowserMethod.reload, parseBrowserMethod("reload").?);
+    try testing.expectEqual(BrowserMethod.hover, parseBrowserMethod("hover").?); // W9b①b-2
+    try testing.expectEqual(BrowserMethod.press, parseBrowserMethod("press").?);
     // 미구현/미지 → null.
     try testing.expect(parseBrowserMethod("goBack") == null);
     try testing.expect(parseBrowserMethod("refresh") == null); // 옛 문서 표의 이름 — reload 다
@@ -2990,14 +3044,14 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const webkit = arr.items[0].object;
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
-    // WebKit 은 W9 전의 것만(back·forward·reload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 3), webkit.get("methods").?.array.items.len);
+    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press 는 Chromium 전용 — WebKit 은 걷어낼 예정).
+    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 5), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
-    // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait(enum 순서).
+    // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
-    const want_chromium = [_][]const u8{ "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload" };
+    const want_chromium = [_][]const u8{ "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -3063,6 +3117,33 @@ test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant
             else => return error.TestUnexpectedResult,
         }
     }
+}
+
+test "W9b①b-2: Chromium 탭의 hover·press 는 op 으로 — press 는 key 필수(64 바이트까지)·대상은 없어도 된다" {
+    var buf: [1]capmod.Capability = undefined;
+    const caps = capsSlice(&buf, browserCap(12));
+    const cases = [_]struct { req: []const u8, arg: ?[]const u8 }{
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.hover\",\"params\":{\"id\":12,\"selector\":\"#h\"}}", .arg = "{\"selector\":\"#h\"}" },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"Enter\"}}", .arg = "{\"key\":\"Enter\"}" },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"Meta+a\",\"ref\":\"n5\"}}", .arg = "{\"key\":\"Meta+a\",\"ref\":\"n5\"}" },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12}}", .arg = null },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"\"}}", .arg = null },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"" ++ "a" ** 65 ++ "\"}}", .arg = null },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.press\",\"params\":{\"id\":12,\"key\":\"a\",\"selector\":\"#a\",\"ref\":\"n1\"}}", .arg = null },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.hover\",\"params\":{\"id\":12}}", .arg = null },
+    };
+    for (cases) |c| switch (try dispatchBrowser(testing.allocator, c.req, fx_engine, caps, null, &no_grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqualStrings(c.arg.?, op.arg);
+        },
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expect(c.arg == null);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        else => return error.TestUnexpectedResult,
+    };
 }
 
 test "W9-0: 실행 단계의 -32008 은 L2 와 같은 모양이다(원 요청의 id · engine)" {

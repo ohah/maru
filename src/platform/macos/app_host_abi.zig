@@ -6170,6 +6170,8 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .back,
         .forward,
         .reload,
+        .hover,
+        .press,
         => true,
         .subscribe, .wait => false,
     };
@@ -6208,6 +6210,8 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .back => "browser.back",
         .forward => "browser.forward",
         .reload => "browser.reload",
+        .hover => "browser.hover",
+        .press => "browser.press",
     };
 }
 
@@ -6603,6 +6607,8 @@ const control_hello_caps = [_][]const u8{
     "browser.back",
     "browser.forward",
     "browser.reload",
+    "browser.hover",
+    "browser.press",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -7115,6 +7121,8 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
         .scroll => .scroll,
         .wait => .wait,
         .snapshot => .snapshot,
+        .hover => .hover,
+        .press => .press,
         else => null,
     };
 }
@@ -8326,6 +8334,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u8, 18), @as(u8, @intFromEnum(control_browser.BrowserMethod.back)));
     try std.testing.expectEqual(@as(u8, 19), @as(u8, @intFromEnum(control_browser.BrowserMethod.forward)));
     try std.testing.expectEqual(@as(u8, 20), @as(u8, @intFromEnum(control_browser.BrowserMethod.reload)));
+    try std.testing.expectEqual(@as(u8, 21), @as(u8, @intFromEnum(control_browser.BrowserMethod.hover)));
+    try std.testing.expectEqual(@as(u8, 22), @as(u8, @intFromEnum(control_browser.BrowserMethod.press)));
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
@@ -9443,6 +9453,8 @@ test "browser op lifecycle classification and exact authorization method stay ex
         .{ .method = .click, .scope = .browser, .reserved = 0 },
         .{ .method = .type_text, .scope = .browser, .reserved = 0 },
         .{ .method = .scroll, .scope = .browser, .reserved = 0 },
+        .{ .method = .hover, .scope = .browser, .reserved = 0 },
+        .{ .method = .press, .scope = .browser, .reserved = 0 },
     };
     for (cases) |case| {
         try std.testing.expect(browserMethodHasTrackedLifecycle(case.method));

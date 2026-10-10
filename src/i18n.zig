@@ -1017,6 +1017,10 @@ const Table = struct {
     scm_partial_clone_untrusted: [:0]const u8,
     /// 원격(SSH) 저장소의 같은 상태 — 원격은 신뢰할 수 없어(원격 신뢰 키가 없다) 「신뢰하면 받아 온다」가 거짓이다.
     scm_partial_clone_remote: [:0]const u8,
+    /// 신뢰 전 저장소가 정한 필터를 끌 수 없어 읽지 않았다(WT6b-1b — 너무 많음·덮어쓰기를 못 읽는 옛 git·저장소의 `lfs.extension`) —
+    /// 로컬은 신뢰하면 읽는다, 원격은 신뢰할 수 없다.
+    scm_repo_filters_untrusted: [:0]const u8,
+    scm_repo_filters_remote: [:0]const u8,
     scm_need_commit_message: [:0]const u8,
     scm_nothing_staged: [:0]const u8,
     scm_commit_msg_write_failed: [:0]const u8,
@@ -1640,6 +1644,8 @@ const en: Table = .{
     .scm_remote_transport_failed = "Lost the connection to the remote — the command did not reach git",
     .scm_partial_clone_untrusted = "Partial clone — this content is not downloaded yet; trust the repository to fetch it",
     .scm_partial_clone_remote = "Partial clone — this content is not downloaded yet; remote repositories are read without fetching",
+    .scm_repo_filters_untrusted = "This repository's own file filters can't be turned off, so it isn't read before you trust it — trust the repository to read it",
+    .scm_repo_filters_remote = "This remote repository's own file filters can't be turned off, so it isn't read",
     .scm_need_commit_message = "Enter a commit message",
     .scm_nothing_staged = "There are no staged changes",
     .scm_commit_msg_write_failed = "Could not write the commit message to a temporary file",
@@ -2645,6 +2651,8 @@ const ko: Table = .{
     .scm_remote_transport_failed = "원격 연결이 끊겨 git 까지 닿지 못했습니다",
     .scm_partial_clone_untrusted = "partial clone — 아직 받지 않은 내용입니다(저장소를 신뢰하면 받아 옵니다)",
     .scm_partial_clone_remote = "partial clone — 아직 받지 않은 내용입니다(원격 저장소는 받아 오지 않고 읽습니다)",
+    .scm_repo_filters_untrusted = "저장소가 정한 파일 필터를 끌 수 없어 신뢰 전에는 읽지 않습니다(저장소를 신뢰하면 읽습니다)",
+    .scm_repo_filters_remote = "원격 저장소가 정한 파일 필터를 끌 수 없어 읽지 않습니다",
     .scm_remote_fetch_injected = "터미널에 `git fetch --prune` 을 넣었습니다 — 거기서 실행한 뒤 새로고침하세요",
     .scm_inject_host_mismatch = "활성 터미널이 이 저장소와 다른 기계에 있습니다",
     .scm_remote_git_missing = "원격에 git 이 없습니다 — 그쪽에 설치하세요",

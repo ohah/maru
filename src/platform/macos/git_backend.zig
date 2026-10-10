@@ -107,6 +107,7 @@ pub fn readFailureFor(err: anyerror) ReadFailure {
     return switch (err) {
         error.RemoteGitMissing => .remote_git_missing,
         error.RemoteTransportFailed => .remote_transport,
+        error.RepoFiltersRefused => .repo_filters,
         else => .generic,
     };
 }
@@ -122,6 +123,10 @@ pub const ReadFailure = enum {
     /// 지연 가져오기를 막는다; 신뢰하면 git 이 그대로 받아 온다). **`ok` 와 함께 오면** 실패가 아니라 줄여 읽었다는 뜻이다 —
     /// 목록은 증감 없이, 커밋 펼침은 `--raw` 로 섰다.
     partial_clone,
+    /// 신뢰 전 저장소가 정의한 필터를 다 끌 수 없어 **읽지 않았다**(계획 workspace-trust WT6b-1b — 2026-10-10 사용자 결정: 끄지 못한
+    /// 필터가 도는 일이 없게) — 드라이버가 `git_command.max_filter_drivers` 를 넘거나, 덮어쓰기를 못 읽는 옛 git 인데 저장소에 드라이버가
+    /// 있거나, 저장소에 `lfs.extension.*` 가 있다. 신뢰하면 읽는다.
+    repo_filters,
 };
 
 pub const Result = struct {
@@ -2235,7 +2240,7 @@ fn worker(job: *Job) void {
                 // **신뢰 전 partial clone 의 증감 실패는 목록을 죽이지 않는다**(계획 workspace-trust WT6b-1a). 지연 가져오기를
                 // 막았으니 아직 안 받은 blob 의 줄 수를 못 센다 — `reset --soft` 한 번이면 이 필수 읽기가 실패해 목록 전체가
                 // 「git 읽기에 실패했습니다」가 됐다(WT6a 적대적 검증 실측). 상태(`status`)는 blob 을 안 읽으므로 그대로 필수다.
-                if (read_untrusted and pair[0] != .status and (partial or isPartialClone(state.allocator, job.remoteTarget(), job.git_exe, job.repo))) {
+                if (read_untrusted and pair[0] != .status and err != error.RepoFiltersRefused and (partial or isPartialClone(state.allocator, job.remoteTarget(), job.git_exe, job.repo))) {
                     partial = true;
                 } else {
                     ok = false;
@@ -2316,6 +2321,82 @@ fn mapRemoteExitError(err: anyerror) anyerror {
 /// (`git_command.buildRemote`).
 threadlocal var read_untrusted: bool = false;
 
+/// 이 스레드(= 한 읽기 작업 — 워커는 작업마다 새 스레드다)가 조회한 신뢰 전 필터 덮어쓰기(계획 workspace-trust WT6b-1b). 작업당
+/// 한 번 조회한다(목록 한 벌의 `status`·`numstat` 셋이 같은 답을 쓴다). 캐시하지 않는 이유: include·워크트리 공용 config·전역
+/// 변경을 무효화 기준으로 못 잡는다 — 작업이 끝나면 스레드와 함께 사라진다.
+threadlocal var read_filters: struct {
+    probed: bool = false,
+    refused: bool = false,
+    repo_buf: [std.fs.max_path_bytes]u8 = undefined,
+    repo_len: usize = 0,
+    config: git_command.FilterConfig = .{},
+} = .{};
+
+/// 이 스레드에서 러너(`runArgvWithEnv`)가 마지막으로 본 git 의 종료 코드(-1 = 못 띄웠거나 신호로 죽었다). 필터 대체 조회가 「드라이버
+/// 없음」으로 칠 실패(128 — `--local` 이 저장소 밖, 129 — `--worktree` 를 모르는 옛 git)와 그 밖의 실패(신호·spawn — 끌 수 있는지
+/// 모른다)를 가르는 데만 쓴다(적대적 검증 WT6b-1b-ii 1회차: 모든 실패를 「없음」으로 쳐 필터가 돌았다).
+threadlocal var read_last_exit: c_int = -1;
+
+/// 러너(`runArgvWithEnv`)가 이번 명령에 실을 필터 덮어쓰기 — `runOn` 이 그 명령 동안만 세운다(로컬).
+threadlocal var read_filter_env: []const git_command.ConfigPair = &.{};
+
+/// 신뢰 전 저장소의 필터 덮어쓰기 — 이 작업에서 처음이면 조회한다(`filter_probe` — 아무것도 실행하지 않는 config 조회; 표지
+/// `filter_probe_canary` 를 실어 이 git 이 덮어쓰기를 읽는지 함께 본다). 끌 수 없으면(`git_command.untrustedFilterConfig` 가 false
+/// — 상한·표지 없는 git 의 저장소 드라이버·저장소 `lfs.extension`) `error.RepoFiltersRefused`(그 읽기를 하지 않는다). `--show-scope`
+/// 를 모르는 옛 git(2.26 미만 — 원격 호스트)이면 `--local`/`--worktree` 대체 조회로 저장소에 드라이버가 있는지만 본다 — 있으면 그
+/// git 으론 끌 수 없어 거절하고, 없으면 덮어쓰기 없이 읽는다(적대적 검증 1회차: 예전엔 그 조회 실패가 원격 목록 전체를 죽였다).
+fn untrustedFilters(allocator: std.mem.Allocator, remote: ?git_command.Remote, git_exe: []const u8, repo: []const u8) ![]const git_command.ConfigPair {
+    const c = &read_filters;
+    if (c.probed and std.mem.eql(u8, c.repo_buf[0..c.repo_len], repo)) {
+        if (c.refused) return error.RepoFiltersRefused;
+        return c.config.slice();
+    }
+    const canary = [_]git_command.ConfigPair{git_command.filter_probe_canary};
+    const refused = if (runFilterProbe(allocator, remote, .filter_probe, git_exe, repo, &canary)) |out| blk: {
+        defer allocator.free(out.bytes);
+        break :blk out.truncated or !git_command.untrustedFilterConfig(out.bytes, &c.config);
+    } else |err| switch (err) {
+        error.RemoteGitMissing, error.RemoteTransportFailed => return err, // 연결 이야기다 — 옛 git 이 아니다
+        else => blk: {
+            c.config = .{};
+            for ([_]git_command.Kind{ .filter_probe_local, .filter_probe_worktree }) |kind| {
+                const out = runFilterProbe(allocator, remote, kind, git_exe, repo, &.{}) catch |e| switch (e) {
+                    error.RemoteGitMissing, error.RemoteTransportFailed => return e,
+                    // 128 — 저장소 밖(뒤의 읽기가 그 사실을 드러낸다), 129 — `--worktree` 를 모르는 옛 git(워크트리 설정이 없다).
+                    // 그 밖의 실패(신호·시한·spawn)는 드라이버가 있는지 모른다 — 끌 수 없으니 읽지 않는다(닫힌 쪽).
+                    else => if (read_last_exit == 128 or read_last_exit == 129) continue else break :blk true,
+                };
+                defer allocator.free(out.bytes);
+                if (out.truncated or git_command.repoDefinesFilters(out.bytes)) break :blk true;
+            }
+            break :blk false;
+        },
+    };
+    c.probed = repo.len <= c.repo_buf.len; // 담을 수 없으면 다음 명령이 다시 묻는다
+    if (c.probed) {
+        @memcpy(c.repo_buf[0..repo.len], repo);
+        c.repo_len = repo.len;
+    }
+    c.refused = refused;
+    if (refused) return error.RepoFiltersRefused;
+    return c.config.slice();
+}
+
+/// 필터 조회 하나 — 일치가 없으면(exit 1) 빈 답. `config` 는 그 조회에 함께 싣는 덮어쓰기(표지).
+fn runFilterProbe(allocator: std.mem.Allocator, remote: ?git_command.Remote, kind: git_command.Kind, git_exe: []const u8, repo: []const u8, config: []const git_command.ConfigPair) !Output {
+    var argv_buf: [git_command.max_argv][]const u8 = undefined;
+    const local = git_command.build(kind, git_exe, repo, null, &argv_buf);
+    if (remote) |target| {
+        var remote_buf: [git_command.max_argv][]const u8 = undefined;
+        var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
+        const argv = git_command.buildRemoteWithConfig(local, target, null, config, &remote_buf, &cmd_buf) orelse return error.GitFailed; // 대체 조회도 `COUNT=0` — 읽기와 같은 상속 env
+        return runArgvWithEnv(allocator, argv, null, true, null, true) catch |err| return mapRemoteExitError(err);
+    }
+    read_filter_env = config;
+    defer read_filter_env = &.{};
+    return runArgvWithEnv(allocator, local, null, false, null, true);
+}
+
 /// 신뢰 전 읽기가 실패한 뒤 — 그 저장소가 partial clone 인가(promisor 원격이 있나 — `git_command.Kind.partial_clone_probe`).
 /// 그 실패가 지연 가져오기 차단 때문인지 가른다(계획 workspace-trust WT6b-1a). 실패의 뒤에만 묻는다 — 정상 읽기에 프로세스를
 /// 더하지 않는다.
@@ -2363,7 +2444,7 @@ test "WT6b-1a promisor 판정은 키마다 마지막 값 — 뒤의 false 가 �
 /// `status` 가 통째로 실패했다 — 목록이 사유 없는 「git 읽기에 실패했습니다」가 됐다). 다시 읽었으면 `partial` 을 세운다.
 fn readStatus(allocator: std.mem.Allocator, job: *Job, partial: *bool) !Output {
     return runOn(allocator, job.remoteTarget(), .status, job.git_exe, job.repo, null) catch |err| {
-        if (!read_untrusted or !(partial.* or isPartialClone(allocator, job.remoteTarget(), job.git_exe, job.repo))) return err;
+        if (err == error.RepoFiltersRefused or !read_untrusted or !(partial.* or isPartialClone(allocator, job.remoteTarget(), job.git_exe, job.repo))) return err;
         partial.* = true;
         return runOn(allocator, job.remoteTarget(), .status_no_renames, job.git_exe, job.repo, null);
     };
@@ -2414,12 +2495,26 @@ fn runOn(
     // 없다」로 보인다. 지금은 부르는 자리가 없지만(원격 탐색기는 흐림을 안 묻는다) 여기 kind 는
     // 런타임 값이라 **더해지는 순간 그 모양이 성립한다.**
     if (kind == .check_ignore) return error.CheckIgnoreNeedsStdin;
+    // **신뢰 전에 작업트리를 읽는 명령은 저장소 필터를 끄고 submodule 안을 안 본다**(계획 workspace-trust WT6b-1b).
+    const filters: []const git_command.ConfigPair = if (read_untrusted and git_command.kindRunsFilters(kind))
+        try untrustedFilters(allocator, remote, git_exe, repo)
+    else
+        &.{};
     var argv_buf: [git_command.max_argv][]const u8 = undefined;
-    const local = git_command.build(kind, git_exe, repo, arg, &argv_buf);
-    const target = remote orelse return runArgvWithEnv(allocator, local, null, false, null, false);
+    const local = git_command.buildOpts(kind, git_exe, repo, arg, &argv_buf, .{ .ignore_dirty_submodules = read_untrusted });
+    const target = remote orelse {
+        read_filter_env = filters;
+        defer read_filter_env = &.{};
+        return runArgvWithEnv(allocator, local, null, false, null, false);
+    };
     var remote_buf: [git_command.max_argv][]const u8 = undefined;
     var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
-    const argv = git_command.buildRemote(local, target, &remote_buf, &cmd_buf) orelse return error.GitFailed;
+    // 원격 필터 읽기는 덮어쓰기가 비어도 `GIT_CONFIG_COUNT` 를 싣는다(조회도 늘 싣는다) — 원격 로그인 셸이 물려준 `GIT_CONFIG_*`
+    // 를 조회와 읽기가 **똑같이** 버려야, 조회가 못 본 저장소를 읽기가 보는 일이 없다(적대적 검증 WT6b-1b-ii 1회차 실측 —
+    // 상속한 `safe.directory` 로 읽기만 저장소를 열고 덮어쓰기 없이 필터를 돌렸다). 원격 셸의 env 는 우리가 못 읽어 뒤에 잇지 못한다.
+    const remote_config: ?[]const git_command.ConfigPair = if (read_untrusted and git_command.kindRunsFilters(kind)) filters else null;
+    const argv = git_command.buildRemoteWithConfig(local, target, null, remote_config, &remote_buf, &cmd_buf) orelse
+        return if (filters.len > 0) error.RepoFiltersRefused else error.GitFailed; // 명령 상한 — 끄지 못한 채로는 안 돌린다
     // **원격에서만 종료 코드를 이야기로 바꾼다.** 로컬 git 이 127·255 를 내는 일은 없고, 낸다면 그것은
     // git 이 한 말이라 우리가 다시 해석하면 안 된다.
     return runArgvWithEnv(allocator, argv, null, true, null, false) catch |err| return mapRemoteExitError(err);
@@ -2506,6 +2601,10 @@ fn runArgvWithEnv(
     }
     var env_ptrs: std.ArrayList(?[*:0]const u8) = .empty;
     defer env_ptrs.deinit(allocator);
+    const inherited_config_count: usize = if (read_filter_env.len == 0) 0 else if (std.c.getenv("GIT_CONFIG_COUNT")) |v|
+        std.fmt.parseInt(usize, std.mem.span(v), 10) catch 0 // 깨진 값이면 상속분을 다 버린다(git 도 그 값으론 못 돈다)
+    else
+        0;
     var i: usize = 0;
     outer: while (std.c.environ[i]) |entry| : (i += 1) {
         const pair = std.mem.span(entry);
@@ -2514,6 +2613,14 @@ fn runArgvWithEnv(
             if (std.mem.eql(u8, pair[0..eq], o.name)) continue :outer; // override가 이긴다
         }
         if (read_untrusted and git_command.untrustedDropsInherited(pair[0..eq])) continue :outer; // 신뢰 전 목록이 이긴다
+        // 필터 덮어쓰기를 실으면 상속한 덮어쓰기 **뒤에** 잇는다(WT6b-1b) — 상속 `GIT_CONFIG_COUNT` 는 우리 값으로 갈고, 상속
+        // `KEY_n`·`VALUE_n` 은 그 수 안의 것만 남긴다(envp 에 같은 이름이 둘이면 git 의 getenv 는 앞 것을 읽어 우리 번호를 가린다).
+        // 상속분을 버리지 않는 이유: 사용자 자신의 설정(devcontainer 의 `safe.directory` 등)이 저장소에 드라이버가 있을 때만
+        // 사라지면 그 읽기가 실패한다(적대적 검증 1회차). 같은 키면 뒤의 것(우리)이 이긴다.
+        if (read_filter_env.len > 0) if (git_command.configEnvName(pair[0..eq])) |which| switch (which) {
+            .count => continue :outer,
+            .entry => |idx| if (idx >= inherited_config_count) continue :outer,
+        };
         // 사용자 환경의 `GIT_INDEX_FILE`은 **항상 버린다**. 남겨 두면 우리 명령이 그 index에 쓰게 되어, 스냅샷이
         // 아닌 명령까지 남의 index를 건드린다(스냅샷은 아래에서 우리 값을 명시적으로 건다).
         if (std.mem.eql(u8, pair[0..eq], "GIT_INDEX_FILE")) continue :outer;
@@ -2531,6 +2638,20 @@ fn runArgvWithEnv(
         env_store.append(allocator, joined) catch return error.GitFailed;
         env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;
     };
+    if (read_filter_env.len > 0) {
+        const count = std.fmt.allocPrintSentinel(allocator, "GIT_CONFIG_COUNT={d}", .{inherited_config_count + read_filter_env.len}, 0) catch return error.GitFailed;
+        env_store.append(allocator, count) catch return error.GitFailed;
+        env_ptrs.append(allocator, count.ptr) catch return error.GitFailed;
+        for (read_filter_env, inherited_config_count..) |pair, idx| {
+            for ([_][:0]u8{
+                std.fmt.allocPrintSentinel(allocator, "GIT_CONFIG_KEY_{d}={s}", .{ idx, pair.key }, 0) catch return error.GitFailed,
+                std.fmt.allocPrintSentinel(allocator, "GIT_CONFIG_VALUE_{d}={s}", .{ idx, pair.value }, 0) catch return error.GitFailed,
+            }) |joined| {
+                env_store.append(allocator, joined) catch return error.GitFailed;
+                env_ptrs.append(allocator, joined.ptr) catch return error.GitFailed;
+            }
+        }
+    }
     if (index_file) |path| {
         const joined = std.fmt.allocPrintSentinel(allocator, "GIT_INDEX_FILE={s}", .{path}, 0) catch return error.GitFailed;
         env_store.append(allocator, joined) catch return error.GitFailed;
@@ -2541,7 +2662,9 @@ fn runArgvWithEnv(
     // 읽기는 **stdout만** 받는다. stderr에는 경로·사용자·저장소 정보가 섞이므로 파이프로 받지 않고 /dev/null로
     // 버린다(docs/editor-surface-tooling.md §6 — raw로 흘리지 않는다). 실패 여부는 종료 코드로 충분하다.
     // 쓰기는 정반대라(§5 — 가공해서 보여 준다) `spawnCapture`가 그 축을 인자로 받는다.
+    read_last_exit = -1;
     const spawned = try spawnCapture(allocator, &argv, env_ptrs.items.ptr, .stdout_only, stdin_bytes);
+    read_last_exit = spawned.exit_code;
     defer allocator.free(spawned.stderr_bytes); // 읽기 경로에서는 항상 빈 슬라이스다
     errdefer allocator.free(spawned.stdout_bytes);
     // 상한에 걸렸는지는 길이로 판정한다 — 잘렸으면 목록 끝에 그 사실을 표시한다(조용히 일부만 보여 주지 않는다).
@@ -2606,6 +2729,26 @@ fn runArgvWithEnvWindows(
     if (read_untrusted) for (git_command.untrusted_env_overrides) |o| {
         overrides.append(allocator, .{ .name = o.name, .value = o.value }) catch return error.GitFailed;
     };
+    // 필터 덮어쓰기(WT6b-1b) — 이름을 만든 바이트를 이 함수가 끝날 때까지 든다. 상속한 `KEY_n` 은 같은 이름이면 대신하고, 우리
+    // `COUNT` 를 넘는 번호는 git 이 안 읽는다.
+    var filter_names: std.ArrayList([]u8) = .empty;
+    defer {
+        for (filter_names.items) |name| allocator.free(name);
+        filter_names.deinit(allocator);
+    }
+    if (read_filter_env.len > 0) {
+        const count = std.fmt.allocPrint(allocator, "{d}", .{read_filter_env.len}) catch return error.GitFailed;
+        filter_names.append(allocator, count) catch return error.GitFailed;
+        overrides.append(allocator, .{ .name = "GIT_CONFIG_COUNT", .value = count }) catch return error.GitFailed;
+        for (read_filter_env, 0..) |pair, idx| {
+            const key_name = std.fmt.allocPrint(allocator, "GIT_CONFIG_KEY_{d}", .{idx}) catch return error.GitFailed;
+            filter_names.append(allocator, key_name) catch return error.GitFailed;
+            const value_name = std.fmt.allocPrint(allocator, "GIT_CONFIG_VALUE_{d}", .{idx}) catch return error.GitFailed;
+            filter_names.append(allocator, value_name) catch return error.GitFailed;
+            overrides.append(allocator, .{ .name = key_name, .value = pair.key }) catch return error.GitFailed;
+            overrides.append(allocator, .{ .name = value_name, .value = pair.value }) catch return error.GitFailed;
+        }
+    }
     if (index_file) |path| {
         overrides.append(allocator, .{ .name = "GIT_INDEX_FILE", .value = path }) catch return error.GitFailed;
     }
@@ -5396,6 +5539,252 @@ test "WT6b-1a 신뢰 전 정책은 읽기 워커 아홉이 모두 세우고, 제
     const skip = std.mem.indexOf(u8, agent, "if (self.git_backend.?.untrustedFor(repo, remote != null)) return;") orelse return error.MissingSnapshotTrustSkip;
     const submit = std.mem.indexOf(u8, agent, "self.git_backend.?.submitSnapshot(") orelse return error.MissingSnapshotSubmit;
     try std.testing.expect(skip < submit);
+}
+
+// ── 계획 workspace-trust WT6b-1b — 신뢰 전 읽기는 저장소가 정의한 필터와 submodule 안을 안 돌린다 ─────────────────
+
+/// 같은 내용을 다시 써 mtime 만 바꾼다 — 다음 `status` 가 그 파일을 다시 해시하며 clean 필터를 돌린다(실측).
+fn wt6bTouchSame(io: std.Io, dir: std.Io.Dir, rel: []const u8, content: []const u8) !void {
+    var ts: std.c.timespec = .{ .sec = 0, .nsec = 20 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&ts, null); // mtime 해상도 — 같은 순간이면 git 이 「racy」로도 안 볼 수 있다
+    try dir.writeFile(io, .{ .sub_path = rel, .data = content });
+}
+
+test "WT6b-1b 신뢰 전 읽기는 저장소가 정의한 필터(local·include·worktree·`=` 이름·빈 이름·전역 이름 덮어쓰기)와 submodule 안의 필터를 안 돌리고(사용자 자신의 env 덮어쓰기는 살린다), 신뢰하면 돈다; 상한·저장소 lfs.extension·옛 git 은 읽지 않고 사유를 싣는다 (계획 workspace-trust)" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0 .. tmp.dir.realPath(io, &root_buf) catch return error.SkipZigTest];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var pb: [16][std.fs.max_path_bytes + 96]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&pb[0], "{s}/repo", .{root});
+    const sub_src = try std.fmt.bufPrint(&pb[1], "{s}/subsrc", .{root});
+    const include_file = try std.fmt.bufPrint(&pb[2], "{s}/inc.cfg", .{root});
+    const markers = [_][]const u8{ "m_evil", "m_eq", "m_lfs", "m_inc", "m_wt", "m_sub", "m_empty" };
+    var marker_paths: [markers.len][]const u8 = undefined;
+    for (markers, 0..) |m, i| marker_paths[i] = try std.fmt.bufPrint(&pb[3 + i], "{s}/{s}", .{ root, m });
+    const inherited_marker = try std.fmt.bufPrint(&pb[10], "{s}/m_inherited", .{root});
+    const user_marker = try std.fmt.bufPrint(&pb[11], "{s}/m_user", .{root});
+    const old_git = try std.fmt.bufPrint(&pb[12], "{s}/old-git", .{root});
+    const commit = [_][]const u8{ "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "x" };
+
+    // submodule 원본 — `*.txt` 에 필터를 건다(드라이버는 최상위의 `.git/modules/sub/config` 에 심는다). 이름을 최상위 드라이버와
+    // 다르게 둔다 — 같은 이름이면 최상위에서 끈 env 가 submodule 의 git 에도 물려져 그것까지 끄므로, submodule 플래그를 재지 못한다.
+    try tmp.dir.createDirPath(io, "subsrc");
+    if (!initRepoForTest(allocator, git_exe, sub_src)) return error.SkipZigTest;
+    try tmp.dir.writeFile(io, .{ .sub_path = "subsrc/.gitattributes", .data = "*.txt filter=subf\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "subsrc/s.txt", .data = "s\n" });
+    if (!wt6Run(allocator, git_exe, &.{ "-C", sub_src, "add", "-A" })) return error.SkipZigTest;
+    {
+        var argv: [16][]const u8 = undefined;
+        argv[0] = "-C";
+        argv[1] = sub_src;
+        @memcpy(argv[2..][0..commit.len], &commit);
+        if (!wt6Run(allocator, git_exe, argv[0 .. 2 + commit.len])) return error.SkipZigTest;
+    }
+
+    // 최상위 — 필터 드라이버 다섯 갈래(저장소 local·`=` 이름·전역 이름 `lfs` 덮어쓰기·include·worktree).
+    try tmp.dir.createDirPath(io, "repo");
+    if (!initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
+    const files = [_]struct { []const u8, []const u8 }{
+        .{ "repo/.gitattributes", "*.txt filter=evil\n*.dat filter=a=b\n*.lfs filter=lfs\n*.inc filter=incf\n*.wt filter=wtf\n*.e filter=\n*.u filter=userf\n" },
+        .{ "repo/a.txt", "a\n" },
+        .{ "repo/b.dat", "b\n" },
+        .{ "repo/c.lfs", "c\n" },
+        .{ "repo/d.inc", "d\n" },
+        .{ "repo/e.wt", "e\n" },
+        .{ "repo/f.e", "f\n" },
+        .{ "repo/g.u", "g\n" },
+    };
+    for (files) |f| try tmp.dir.writeFile(io, .{ .sub_path = f[0], .data = f[1] });
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "add", "-A" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "-c", "protocol.file.allow=always", "submodule", "-q", "add", sub_src, "sub" })) return error.SkipZigTest;
+    {
+        var argv: [16][]const u8 = undefined;
+        argv[0] = "-C";
+        argv[1] = repo;
+        @memcpy(argv[2..][0..commit.len], &commit);
+        if (!wt6Run(allocator, git_exe, argv[0 .. 2 + commit.len])) return error.SkipZigTest;
+    }
+    var cmd_buf: [7][std.fs.max_path_bytes + 64]u8 = undefined;
+    const evil_cmd = try std.fmt.bufPrint(&cmd_buf[0], "touch '{s}'; cat", .{marker_paths[0]});
+    const eq_cmd = try std.fmt.bufPrint(&cmd_buf[1], "touch '{s}'; cat", .{marker_paths[1]});
+    const lfs_cmd = try std.fmt.bufPrint(&cmd_buf[2], "touch '{s}'; cat", .{marker_paths[2]});
+    const inc_cmd = try std.fmt.bufPrint(&cmd_buf[3], "touch '{s}'; cat", .{marker_paths[3]});
+    const wt_cmd = try std.fmt.bufPrint(&cmd_buf[4], "touch '{s}'; cat", .{marker_paths[4]});
+    const sub_cmd = try std.fmt.bufPrint(&cmd_buf[5], "touch '{s}'; cat", .{marker_paths[5]});
+    const empty_cmd = try std.fmt.bufPrint(&cmd_buf[6], "touch '{s}'; cat", .{marker_paths[6]});
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "filter.evil.clean", evil_cmd })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "filter.a=b.clean", eq_cmd })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "filter.lfs.clean", lfs_cmd })) return error.SkipZigTest; // 전역 이름을 저장소가 덮어쓴다
+    var inc_body: [std.fs.max_path_bytes + 96]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = include_file, .data = try std.fmt.bufPrint(&inc_body, "[filter \"incf\"]\n\tclean = {s}\n", .{inc_cmd}) });
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "include.path", include_file })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "extensions.worktreeConfig", "true" })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "--worktree", "filter.wtf.clean", wt_cmd })) return error.SkipZigTest;
+    var modules_cfg: [std.fs.max_path_bytes + 32]u8 = undefined;
+    if (!wt6Run(allocator, git_exe, &.{ "config", "--file", try std.fmt.bufPrint(&modules_cfg, "{s}/.git/modules/sub/config", .{repo}), "filter.subf.clean", sub_cmd })) return error.SkipZigTest;
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "submodule.sub.ignore", "none" })) return error.SkipZigTest; // 저장소가 「submodule 안을 봐라」를 적어도
+    // 이름이 빈 드라이버 `[filter ""]` — `.gitattributes` 의 `filter=` 가 쓴다(적대적 검증 1회차 실측 우회). 명령줄로는 못 적어 파일에 잇는다.
+    {
+        var sh_buf: [2 * std.fs.max_path_bytes + 96]u8 = undefined;
+        const sh = try std.fmt.bufPrint(&sh_buf, "printf '[filter \"\"]\\n\\tclean = %s\\n' \"$0\" >> '{s}/.git/config'", .{repo});
+        if (!runQuiet(&.{ "/bin/sh", "-c", sh, empty_cmd })) return error.SkipZigTest;
+    }
+
+    // **전역 설정을 이 판정자의 파일로 고정한다**(적대적 검증 2회차). 기계의 전역에 LFS(`filter.lfs.process`)가 있으면 git 은
+    // `process` 가 있을 때 `clean` 을 아예 안 골라, 대조군에서 저장소의 `lfs.clean` 이 안 돌고 판정 전체가 건너뛰어졌다(GitHub 러너가
+    // 그렇다). 그 파일에 전역 `lfs.clean` 을 심어 「전역 값을 다시 넣는다」도 실제 git 으로 잰다. 되돌릴 때 `unsetenv` 를 안 쓴다 —
+    // 원래 없었으면 git 의 기본 자리(`$HOME/.gitconfig`)로 둔다.
+    const global_marker = try std.fmt.bufPrint(&pb[13], "{s}/m_global", .{root});
+    const global_file = try std.fmt.bufPrint(&pb[14], "{s}/global.cfg", .{root});
+    var global_body: [2 * std.fs.max_path_bytes]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = global_file, .data = try std.fmt.bufPrint(&global_body, "[filter \"lfs\"]\n\tclean = touch '{s}'; cat\n", .{global_marker}) });
+    const saved_global = if (std.c.getenv("GIT_CONFIG_GLOBAL")) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    defer if (saved_global) |v| allocator.free(v);
+    var home_cfg: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const default_global: [:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&home_cfg, "{s}/.gitconfig", .{std.mem.span(h)}) else "/dev/null";
+    var global_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("GIT_CONFIG_GLOBAL", (try std.fmt.bufPrintZ(&global_z, "{s}", .{global_file})).ptr, 1);
+    defer _ = setenv("GIT_CONFIG_GLOBAL", if (saved_global) |v| v.ptr else default_global.ptr, 1);
+
+    var repo_dir = try tmp.dir.openDir(io, "repo", .{});
+    defer repo_dir.close(io);
+    const Force = struct {
+        fn all(io_: std.Io, dir: std.Io.Dir) !void {
+            for ([_]struct { []const u8, []const u8 }{ .{ "a.txt", "a\n" }, .{ "b.dat", "b\n" }, .{ "c.lfs", "c\n" }, .{ "d.inc", "d\n" }, .{ "e.wt", "e\n" }, .{ "f.e", "f\n" }, .{ "g.u", "g\n" }, .{ "sub/s.txt", "s\n" } }) |f| try wt6bTouchSame(io_, dir, f[0], f[1]);
+        }
+    };
+
+    // 대조군 — 굳히기 없는 git(신뢰 아님 규칙 없음)이 여섯 드라이버를 다 돌린다. 하나라도 안 돌면 이 기계의 git 이 그 길을 안
+    // 탄다 — 판정이 헛돈다.
+    try Force.all(io, repo_dir);
+    for (marker_paths) |m| wt6Remove(m);
+    wt6Remove(global_marker);
+    _ = wt6Run(allocator, git_exe, &.{ "-C", repo, "status", "--porcelain" });
+    for (marker_paths) |m| if (!wt6Exists(m)) return error.SkipZigTest;
+    if (wt6Exists(global_marker)) return error.SkipZigTest; // 저장소 값이 전역을 이겨야 한다 — 아니면 되살림을 못 잰다
+
+    // ⑴ 신뢰 전 — 저장소 드라이버는 하나도 안 돈다. 사용자 자신의 env 덮어쓰기(`GIT_CONFIG_*`)는 살린다: 그 안의 드라이버(`userf`)는
+    // 돌고, 저장소 드라이버와 같은 키(`filter.evil.clean`)는 우리 것이 뒤에 이어져 이긴다(적대적 검증 1회차 — 상속분을 통째로 버리면
+    // 사용자 설정이 저장소에 드라이버가 있을 때만 사라졌다). 내용만 더러운 submodule(추적 안 된 파일)은 목록에 안 나온다.
+    try Force.all(io, repo_dir);
+    try repo_dir.writeFile(io, .{ .sub_path = "sub/untracked.md", .data = "u\n" });
+    for (marker_paths) |m| wt6Remove(m);
+    wt6Remove(global_marker);
+    var inherited_cmd: [std.fs.max_path_bytes + 32]u8 = undefined;
+    var user_cmd: [std.fs.max_path_bytes + 32]u8 = undefined;
+    // 사용자 환경을 잠깐 바꾼다 — 되돌릴 때 `unsetenv` 를 안 쓴다(WT6b-1a 판정자와 같은 이유). 원래 값이 있으면 그 값, 없으면 무해한
+    // 값(`COUNT=0` 이면 남은 KEY 는 안 읽힌다).
+    const env_names = [_][:0]const u8{ "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0", "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1" };
+    var saved_env: [env_names.len]?[:0]u8 = undefined;
+    for (env_names, 0..) |name, k| saved_env[k] = if (std.c.getenv(name)) |v| try allocator.dupeZ(u8, std.mem.span(v)) else null;
+    defer for (env_names, 0..) |name, k| {
+        _ = setenv(name, if (saved_env[k]) |v| v.ptr else if (k == 0) "0" else "", 1);
+        if (saved_env[k]) |v| allocator.free(v);
+    };
+    _ = setenv("GIT_CONFIG_COUNT", "2", 1);
+    _ = setenv("GIT_CONFIG_KEY_0", "filter.evil.clean", 1);
+    _ = setenv("GIT_CONFIG_VALUE_0", (try std.fmt.bufPrintZ(&inherited_cmd, "touch '{s}'; cat", .{inherited_marker})).ptr, 1);
+    _ = setenv("GIT_CONFIG_KEY_1", "filter.userf.clean", 1);
+    _ = setenv("GIT_CONFIG_VALUE_1", (try std.fmt.bufPrintZ(&user_cmd, "touch '{s}'; cat", .{user_marker})).ptr, 1);
+    var no: Wt6bTrust = .{ .trusted = false };
+    var backend = try Backend.initWithTrust(io, .{ .ctx = &no, .trusted = Wt6bTrust.check });
+    defer backend.deinit();
+    try std.testing.expect(backend.submit(git_exe, repo, "", 1, null));
+    var list = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer list.deinit(worker_allocator);
+    try std.testing.expect(list.ok);
+    for (marker_paths, markers) |m, name| {
+        if (wt6Exists(m)) {
+            std.debug.print("untrusted read ran repo filter: {s}\n", .{name});
+            return error.RepoFilterRan;
+        }
+    }
+    try std.testing.expect(wt6Exists(global_marker)); // 저장소가 덮어쓴 전역 이름 — 전역 값이 돌아와 돈다
+    try std.testing.expect(!wt6Exists(inherited_marker)); // 같은 키 — 우리 것이 이긴다
+    try std.testing.expect(wt6Exists(user_marker)); // 사용자 자신의 드라이버 — 산다
+    try std.testing.expect(std.mem.indexOf(u8, list.status, " sub\n") == null); // 그 안을 안 본다
+    _ = setenv("GIT_CONFIG_COUNT", "0", 1);
+
+    // ⑵ 신뢰 — 저장소 필터가 그대로 돈다(정답의 일부다).
+    try Force.all(io, repo_dir);
+    for (marker_paths) |m| wt6Remove(m);
+    var yes: Wt6bTrust = .{ .trusted = true };
+    var trusted_backend = try Backend.initWithTrust(io, .{ .ctx = &yes, .trusted = Wt6bTrust.check });
+    defer trusted_backend.deinit();
+    try std.testing.expect(trusted_backend.submit(git_exe, repo, "", 2, null));
+    var tlist = waitForList(&trusted_backend) orelse return error.ListNeverCompleted;
+    defer tlist.deinit(worker_allocator);
+    try std.testing.expect(tlist.ok);
+    try std.testing.expect(wt6Exists(marker_paths[0]));
+    try std.testing.expect(std.mem.indexOf(u8, tlist.status, " sub\n") != null); // 대조 — 신뢰하면 더러운 submodule 이 보인다(위 단언이 헛돌지 않는다)
+
+    // ⑵′ 옛 git(`--show-scope` 를 모른다 — 2.26 미만 원격 호스트를 흉내 낸 감싸개) — 저장소에 드라이버가 있으면 끌 수 없어 읽지 않고,
+    // 없으면(submodule 원본 — 속성만 있고 드라이버는 없다) 덮어쓰기 없이 읽는다.
+    var old_body: [std.fs.max_path_bytes + 96]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = old_git, .data = try std.fmt.bufPrint(&old_body, "#!/bin/sh\ncase \"$*\" in *--show-scope*) echo 'error: unknown option' >&2; exit 129;; esac\nexec '{s}' \"$@\"\n", .{git_exe}) });
+    var old_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = std.c.chmod((try std.fmt.bufPrintZ(&old_z, "{s}", .{old_git})).ptr, 0o755);
+    try Force.all(io, repo_dir);
+    for (marker_paths) |m| wt6Remove(m);
+    try std.testing.expect(backend.submit(old_git, repo, "", 5, null));
+    var old_list = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer old_list.deinit(worker_allocator);
+    try std.testing.expect(!old_list.ok);
+    try std.testing.expectEqual(ReadFailure.repo_filters, old_list.failure);
+    for (marker_paths) |m| try std.testing.expect(!wt6Exists(m));
+    try std.testing.expect(backend.submit(old_git, sub_src, "", 6, null));
+    var old_clean = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer old_clean.deinit(worker_allocator);
+    try std.testing.expect(old_clean.ok);
+    // 대체 조회가 128·129 가 아닌 이유로 실패하면(신호 — 시한·spawn 실패와 같은 갈래) 드라이버가 있는지 모른다 — 읽지 않는다.
+    const crash_git = try std.fmt.bufPrint(&pb[15], "{s}/crash-git", .{root});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = crash_git, .data = try std.fmt.bufPrint(&old_body, "#!/bin/sh\ncase \"$*\" in *--show-scope*) exit 129;; *--worktree*) kill -9 $$;; esac\nexec '{s}' \"$@\"\n", .{git_exe}) });
+    _ = std.c.chmod((try std.fmt.bufPrintZ(&old_z, "{s}", .{crash_git})).ptr, 0o755);
+    try std.testing.expect(backend.submit(crash_git, sub_src, "", 8, null));
+    var crashed = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer crashed.deinit(worker_allocator);
+    try std.testing.expect(!crashed.ok);
+    try std.testing.expectEqual(ReadFailure.repo_filters, crashed.failure);
+
+    // ⑵″ 저장소의 `lfs.extension.*` — 전역 LFS 의 clean 이 그 명령을 돌리므로 읽지 않는다.
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "lfs.extension.x.clean", "true" })) return error.SkipZigTest;
+    try std.testing.expect(backend.submit(git_exe, repo, "", 7, null));
+    var ext_list = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer ext_list.deinit(worker_allocator);
+    try std.testing.expect(!ext_list.ok);
+    try std.testing.expectEqual(ReadFailure.repo_filters, ext_list.failure);
+    if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", "--unset", "lfs.extension.x.clean" })) return error.SkipZigTest;
+
+    // ⑶ 상한 — 저장소 드라이버가 `max_filter_drivers` 를 넘으면 신뢰 전엔 읽지 않고(필터가 하나도 안 돈다) 사유를 싣는다.
+    var i: usize = 0;
+    while (i < git_command.max_filter_drivers) : (i += 1) {
+        var key_buf: [64]u8 = undefined;
+        if (!wt6Run(allocator, git_exe, &.{ "-C", repo, "config", try std.fmt.bufPrint(&key_buf, "filter.extra{d}.clean", .{i}), "cat" })) return error.SkipZigTest;
+    }
+    try Force.all(io, repo_dir);
+    for (marker_paths) |m| wt6Remove(m);
+    try std.testing.expect(backend.submit(git_exe, repo, "", 3, null));
+    var over = waitForList(&backend) orelse return error.ListNeverCompleted;
+    defer over.deinit(worker_allocator);
+    try std.testing.expect(!over.ok);
+    try std.testing.expectEqual(ReadFailure.repo_filters, over.failure);
+    for (marker_paths) |m| try std.testing.expect(!wt6Exists(m));
+}
+
+test "WT6b-1b SSH 읽기도 같은 필터 덮어쓰기를 명령에 싣는다 — 실 sshd 없이 재는 자리 (계획 workspace-trust)" {
+    // 이름에 「원격」을 안 쓴다 — `test-remote-scm` 이 그 낱말로 걸러 판정자 수를 고정해 둔다(적대적 검증 2회차).
+    // 원격 실물은 하네스(`tools/remote-scm/ssh_harness.sh`)에서만 돈다. 여기선 `runOn` 이 조회한 덮어쓰기를 **원격 빌더에도** 넘기는지
+    // 그 한 줄을 센다(빌더 자체는 `git_command` 판정자가 잰다) — 로컬만 싣고 원격을 빠뜨리면 원격 저장소의 필터가 돈다.
+    const src = @embedFile("git_backend.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "git_command.buildRemoteWithConfig(local, target, null, remote_config" ++ ", &remote_buf, &cmd_buf)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "const remote_config: ?[]const git_command.ConfigPair = if (read_untrusted and git_command.kindRunsFilters(kind)) filters" ++ " else null;"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "git_command.buildOpts(kind, git_exe, repo, arg, &argv_buf, .{ .ignore_dirty_submodules = read" ++ "_untrusted })"));
 }
 
 fn remoteScmHarness() ?struct { dest: []const u8, ctl: []const u8, repo: []const u8 } {

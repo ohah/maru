@@ -1,6 +1,6 @@
 # 워크스페이스 신뢰와 도구 환경 구현 계획
 
-상태: WT1·WT2a·WT2b·WT3a·WT3b·WT4a·WT4b·WT5a·WT5b-1·WT6a·WT6b-1a 완료(WT3b 는 Finder 실측 대기), WT5b-2·3·WT6b-1b·2·WT7 미착수(WT2·WT3·WT4 는 둘로, WT5 는 WT5a 와 WT5b-1~3, WT6 은 WT6a 와 WT6b-1a·1b·2 로 나눴다 — 아래). WT3 의 「결정 대기」 때문에 WT4 를 먼저 했다(2026-10-08 사용자 결정). 2026-10-07 사용자 승인(「순서대로 진행해주시죠」). 계약은 [tooling §8.1](../editor-surface-tooling.md)·§8.2a 가 소유하고, 이 문서는 지금 코드와 그 계약 사이의 차이와 그것을 메우는 단계를 소유한다.
+상태: WT1·WT2a·WT2b·WT3a·WT3b·WT4a·WT4b·WT5a·WT5b-1·WT6a·WT6b-1a 완료(WT3b 는 Finder 실측 대기), WT6b-1b-i 완료, WT5b-2·3·WT6b-1b-ii·2·WT7 미착수(WT2·WT3·WT4 는 둘로, WT5 는 WT5a 와 WT5b-1~3, WT6 은 WT6a 와 WT6b-1a·1b-i·1b-ii·2 로 나눴다 — 아래). WT3 의 「결정 대기」 때문에 WT4 를 먼저 했다(2026-10-08 사용자 결정). 2026-10-07 사용자 승인(「순서대로 진행해주시죠」). 계약은 [tooling §8.1](../editor-surface-tooling.md)·§8.2a 가 소유하고, 이 문서는 지금 코드와 그 계약 사이의 차이와 그것을 메우는 단계를 소유한다.
 
 ## 왜 — 지금 코드와 계약의 차이
 
@@ -201,12 +201,27 @@ WT5 는 둘로 나눈다(2026-10-09) — 무엇이 실행되는지 보이는 일
 - **2회차 적대적 검증(WT6a) 정비**: 감시자 경계 판정자가 주석이 아니라 코드를 센다(`spawnRemoteWatch` 가 `watchArgs(` 를 부르고 `watchArgs` 가 덮어쓰기 목록을 쓴다), 서명 판정자의 준비 커밋이 사용자 전역 서명·훅을 안 타고 대조군 출력에 `gpg:` 가 있음을 단언한다.
 - **종료:** 실제 git 판정자(`git_backend` — `blob:none` 클론(첫 커밋 a·r·k, 둘째 커밋 a 수정·r→r2 내용 바뀐 rename·n 추가)에 무해한 uploadpack 표식과 `protocol.file.allow=always`, `reset --soft`: 대조군이 표식을 만들어야 잰다; 층마다 혼자 실은 깨끗한 환경에서 표식 0; 신뢰 전 — 사용자 환경이 `GIT_NO_LAZY_FETCH=0`·`GIT_ALLOW_PROTOCOL=file` 이어도 표식 0, 목록·머리 줄이 살아 있고 `failure=.partial_clone`·rename 행 없음, 커밋 펼침이 `--raw --no-renames` 로 서서 화면 파서가 증감 없이 읽음, diff 는 안 받은 면에서 실패하고 정말 없는 면(추가된 파일의 부모·루트 커밋의 부모·unborn HEAD)은 한쪽만 선다; treeless 클론의 목록 실패 사유가 partial clone; 층 단독 판정은 층마다 따로 받은 저장소로(git 2.45 미만에선 `GIT_NO_LAZY_FETCH` 층을 재지 않는다); 신뢰한 저장소 — 가져와서 rename·증감이 선다; 대조군·신뢰 전·신뢰는 따로 받은 저장소), promisor 마지막 값 판정자, 소스 판정자(워커 아홉이 정책을 세움·제품 생성 자리에 판정 없는 `init` 0·스냅샷 건너뜀이 제출 앞), 신뢰 판정·세대 펌프(`editor/mod` — 첫 판정 전엔 안 읽음·첫 판정이 기준·저장소 밖·결정 없음·거부·허용·거절된 root·한 번만 다시 읽음·도는 펼침 요청 끊음), 원격 env·대체 kind(`git_command`)·감시자 앞머리와 `status.renames=false`(`ssh_upload`)·경계(`tests/remote_watch_channel_boundary`)·원격 안내 문구(`editor/mod`). 변이 35개 전부 잡힘.
 
-##### WT6b-1b — 저장소 필터·submodule
+##### WT6b-1b — 저장소 필터·submodule (둘로 나눈다 — 2026-10-10 사용자 결정)
 
-- 신뢰 전·원격 읽기에서 저장소(local·worktree — include 포함) 범위의 필터 드라이버를 끈다 — 작업당 한 번 `git config -z --show-scope --get-regexp` 로 찾고(캐시하지 않는다 — include·워크트리 공용 config·전역 변경을 무효화 기준으로 못 잡는다), `GIT_CONFIG_COUNT` env 로 `clean`·`smudge`·`process` 를 비우고 `required=false`(이름에 `=` 가 든 드라이버도). 전역 LFS 를 저장소가 덮어썼으면 전역 값을 다시 넣는다. 원격 명령의 env 인용은 `remote_shell.quoteAppend` 로(드라이버 이름에 `'` 가 들 수 있다), 드라이버 수 상한과 그 사유.
-- submodule: `status`·`diff` 에 `--ignore-submodules=dirty`(내용만 더러운 submodule 행은 사라진다 — 도크가 그렇다고 말한다).
-- 원격 감시자가 저장소별 드라이버 목록을 받는다(원격 목록 읽기의 조회 결과로 띄우고 바뀌면 다시 띄운다, 또는 감시자가 직접 조회).
-- **종료:** 실제 git 판정자(저장소·include·submodule·`=` 이름·전역 LFS 덮어쓰기 각각 표식 0, 신뢰 뒤엔 저장소 필터가 돈다).
+원격 감시자의 submodule 처리는 앞머리 config 로는 안 된다 — `diff.ignoreSubmodules` 는 저장소의 `submodule.<n>.ignore=none` 에 지고 플래그만 이긴다(실측) — 그래서 감시자 바이너리를 고쳐야 해 따로 둔다.
+
+###### WT6b-1b-i — 앱 읽기 (완료)
+
+- 신뢰 전·원격의 작업트리 읽기(`git_command.kindRunsFilters` — `status`·`status_no_renames`·`numstat` 셋)에서 저장소(local·worktree — include·includeIf 로 끌어온 것도 `local` 로 나온다, 실측) 범위가 정의한 필터 드라이버를 끈다. 작업당 한 번 `git config -z --show-scope --get-regexp`(`filter_probe`)로 찾는다 — 워커는 작업마다 새 스레드라 스레드 지역 자리에 두고(`read_filters`) 작업과 함께 사라진다(캐시하지 않는다 — include·워크트리 공용 config·전역 변경을 무효화 기준으로 못 잡는다).
+- 덮어쓰기(`untrustedFilterConfig`)는 `GIT_CONFIG_COUNT` env 로 싣고 **저장소가 정한 변수만** 다룬다 — 같은 이름·같은 변수가 전역에도 있으면 **전역 값을 다시 넣고**(저장소가 `filter.lfs.*` 를 덮어써도 사용자의 LFS 가 돈다), 없으면 비운다; 하나라도 비운 드라이버는 `required=false`(빈 `clean`·`process` 와 `required=true` 는 목록 전체를 실패시킨다 — 적대적 검증 1회차 실측). 이름에 `=`·`.` 이 들거나 **빈 이름**(`[filter ""]` — `.gitattributes` 의 `filter=`; 1회차 실측 우회)도 끈다. 사용자 자신의 범위(`global`·`command`)는 끄지 않는다. 로컬(POSIX) 읽기는 상속한 `GIT_CONFIG_*` 를 버리지 않고 **그 뒤 번호에** 잇는다(같은 키면 뒤의 우리 것이 이긴다 — 버리면 사용자 설정이 저장소에 드라이버가 있을 때만 사라졌다). Windows·원격은 같은 번호를 우리 것으로 갈아 그 읽기 동안 사용자의 env 덮어쓰기가 빠진다(원격 셸의 env 는 우리가 못 읽는다).
+- **끌 수 없으면 읽지 않는다**(`repo_filters` — 「저장소가 정한 파일 필터를 끌 수 없어 신뢰 전에는 읽지 않습니다(저장소를 신뢰하면 읽습니다)」, 원격은 「…읽지 않습니다」 — 2026-10-10 사용자 결정: 끄지 못한 필터가 도는 일이 없게):
+  - 드라이버 16개 초과(`max_filter_drivers` — 원격은 그 env 를 8 KiB 명령 문자열에 싣는다; 실제 저장소는 하나둘)·저장 자리·원격 명령 상한 초과.
+  - 덮어쓰기를 못 읽는 git — 조회에 표지(`filter_probe_canary`)를 env 로 실어 `command` 범위에 보이는지로 스스로 판정한다(`GIT_CONFIG_COUNT` 는 2.31+; 2.26~2.30 은 조회는 되지만 덮어쓰기를 무시한다 — 1회차). `--show-scope` 도 모르는 2.26 미만은 `--local`/`--worktree --includes` 대체 조회(`filter_probe_local`·`_worktree`)로 저장소에 드라이버가 있는지만 본다. 어느 쪽이든 저장소 드라이버가 없으면 그대로 읽는다(예전엔 조회 실패가 원격 목록 전체를 사유 없이 죽였다 — 1회차). 대체 조회의 실패는 종료 코드 128(저장소 밖 — 뒤의 읽기가 드러낸다)·129(`--worktree` 를 모르는 옛 git)만 「없음」이고, 그 밖(신호·시한·spawn)은 끌 수 있는지 모르니 읽지 않는다(`read_last_exit` — WT6b-1b-ii 적대적 검증 1회차: 모든 실패를 「없음」으로 쳐 필터가 돌았다).
+  - 저장소 범위의 `lfs.extension.*` — 전역 LFS 의 clean 이 그 명령을 실행한다(git-lfs 문서; 1회차).
+- 원격 명령은 같은 덮어쓰기를 `env` 토큰으로 싣는다(`git_command.buildRemoteWithConfig` — `K=V` 를 통째로 `remote_shell.quoteAppend`; 드라이버 이름·전역 값에 `'`·공백이 들 수 있다). 원격 필터 읽기는 덮어쓰기가 비어도 `GIT_CONFIG_COUNT=0` 을 싣는다 — 조회(표지)와 읽기가 원격 로그인 셸이 물려준 `GIT_CONFIG_*` 를 **똑같이** 버려야, 상속 `safe.directory` 로 읽기만 저장소를 여는 일이 없다(WT6b-1b-ii 적대적 검증 1회차 실측 우회; 원격 셸의 env 는 우리가 못 읽어 뒤에 잇지 못한다).
+- submodule: 같은 읽기에 `--ignore-submodules=dirty`(`git_command.buildOpts` — 하위 명령 바로 뒤). submodule 의 필터(`.git/modules/<n>/config` — 최상위 조회에 안 잡힌다)·`status.submoduleSummary`·`submodule.recurse` 가 안 돈다(실측 — 자식 프로세스 0). config(`diff.ignoreSubmodules`)가 아니라 플래그인 이유는 위. 내용만 더러운 submodule 행은 신뢰 전 목록에서 사라진다 — 도크가 그렇다고 말하는 줄은 WT6b-2.
+- **대가**: 저장소에 드라이버를 둔 저장소(git-crypt·nbstripout·저장소 config 의 LFS)는 신뢰 전 목록이 틀릴 수 있다(가짜 수정) — 도크 줄(WT6b-2)이 말한다. 저장소가 `process` 만 정하고 사용자의 전역엔 `clean` 만 있는 드라이버는 빈 `process` 가 전역 `clean` 까지 막는다(git 은 `process` 가 있으면 `clean` 을 안 고른다 — 실측; 가짜 수정, 실패는 아니다). 시스템 범위(`/etc/gitconfig`)는 모든 읽기가 원래 안 읽는다(`GIT_CONFIG_NOSYSTEM`). `--ignore-submodules=dirty` 는 저장소·사용자의 `submodule.<n>.ignore=all` 보다 세서, 신뢰한 읽기에선 숨던 submodule 커밋 변경 행이 신뢰 전엔 보인다. 저장소가 `core.attributesFile`·`.git/info/attributes` 로 사용자의 **전역** 드라이버(LFS 등)를 붙이는 것은 막지 않는다 — 사용자의 프로그램이고 신뢰 전에도 LFS 저장소가 정확해야 한다(결정 2026-10-09); 그 프로그램이 저장소 config 를 읽어 실행하는 길은 알려진 `lfs.extension` 만 막는다.
+- **종료:** 실제 git 판정자(`git_backend` — local·`=` 이름·빈 이름·전역 이름 `lfs` 덮어쓰기·include·worktree·submodule(`submodule.<n>.ignore=none` 을 적어도) 일곱 드라이버에 무해한 `touch` 표식, 같은 내용을 다시 써 `status` 가 다시 해시하게: 대조군이 일곱을 다 돌려야 잰다; 전역 설정은 판정자의 파일로 고정(기계의 전역 LFS `process` 가 대조군을 건너뛰게 했다 — 2회차)하고 거기 `lfs.clean` 을 심는다; 신뢰 전 — 저장소 표식 0, 저장소가 덮어쓴 `lfs` 는 전역 값이 돌아와 돈다, 사용자 env 의 같은 키는 지고 사용자 자신의 드라이버는 돈다, 더러운 submodule 행 없음; 신뢰 — 저장소 필터가 돌고 더러운 submodule 이 보인다; 옛 git 감싸개(`--show-scope` 거절) — 드라이버 있는 저장소는 `repo_filters`, 없는 저장소는 읽힘; 저장소 `lfs.extension` — `repo_filters`; 드라이버 상한 + 1 — `repo_filters`, 표식 0), `git_command` 판정자(덮어쓰기 — 범위·저장소가 정한 변수만·전역 되살림·`required`·빈 이름·마지막 값·표지·`lfs.extension`·상한·저장 자리·옛 git 대체 조회; 플래그 자리; 원격 env 토큰 인용·제어문자·상한; `GIT_CONFIG_*` 이름 가르기), 원격 배선 소스 판정자(원격 필터 읽기는 늘 `COUNT` 를 싣는다), 대체 조회가 신호로 죽는 감싸개 — `repo_filters`. 변이 20개 전부 잡힘.
+
+###### WT6b-1b-ii — 원격 감시자
+
+- 원격 감시자의 폴링 갈래(다이제스트의 `status`·`diff --numstat`)도 저장소 드라이버를 끄고 `--ignore-submodules=dirty` 를 단다 — 감시자가 같은 조회(`filter_probe`)와 같은 순수 함수(`git_command.untrustedFilterConfig`)를 쓴다(두 벌로 두지 않는다). 감시자 판을 올린다.
+- **종료:** 감시자 판정자(드라이버·submodule 표식 0 — 실 sshd 하네스), 판 맞춤.
 
 ##### WT6b-2 — 도크 UI·쓰기 시트
 

@@ -755,6 +755,7 @@ workspace 포맷 개정과 같이 다룬다.)
   | `generic` | git 이 한 말이다(unborn 의 exit 128 이 대표) — **영구적**이다 | 다시 안 묻는다 |
   | `remote_git_missing`·`remote_transport` | **연결의 사실**이라 저절로 바뀔 수 있다 | 쉬었다 다시 묻는다 |
   | `partial_clone` | 신뢰 전 partial clone 에서 안 받은 내용을 못 읽었다([workspace-trust](plans/workspace-trust.md) WT6b-1a) — 신뢰가 바뀔 때까지 같다 | 다시 안 묻는다(신뢰가 바뀌면 `pumpTrustReread` 가 다시 읽는다) |
+  | `repo_filters` | 신뢰 전 저장소가 정의한 필터를 끌 수 없어 읽지 않았다(WT6b-1b — 상한 초과·옛 git·저장소 `lfs.extension`) — 신뢰가 바뀔 때까지 같다 | 다시 안 묻는다(위와 같다) |
 
   연결 탓 실패까지 막으면, ControlMaster 가 다시 서서 **멀쩡해진 뒤에도** 화면이 「연결이 끊겼다」에
   갇혀 사용자가 새로고침을 눌러야 한다. 간격은 머리 줄 요약(`shouldReadRepoStatus`)이 쓰는 것과 같은
@@ -1026,6 +1027,7 @@ syntax 하이라이트와 같은 배관) — 테마를 바꾸면 diff도 따라�
 | --- | --- | --- |
 | git CLI 없음 | `git이 설치되어 있지 않습니다` | 실행 파일 후보를 다 봐도 없음(§6) — **실행을 시도하지 않는다** |
 | 읽기 실패 | `git 읽기에 실패했습니다` | 명령이 0이 아닌 코드로 끝남. 직전 성공 목록은 버린다(다른 시점과 섞지 않는다) |
+| 신뢰 전 저장소 필터를 끌 수 없음 | `저장소가 정한 파일 필터를 끌 수 없어 신뢰 전에는 읽지 않습니다(저장소를 신뢰하면 읽습니다)`(원격이면 `원격 저장소가 정한 파일 필터를 끌 수 없어 읽지 않습니다`) | 신뢰 전 저장소 범위 드라이버가 `max_filter_drivers`(16)를 넘거나, env 덮어쓰기를 못 읽는 옛 git(2.31 미만)인데 저장소에 드라이버가 있거나, 저장소에 `lfs.extension.*` 가 있다 — 끄지 못한 필터가 돌지 않게 읽지 않는다([workspace-trust](plans/workspace-trust.md) WT6b-1b). 상한 안이면 드라이버를 끄고 읽는다(그 저장소의 목록은 가짜 수정이 보일 수 있고, 내용만 더러운 submodule 행은 안 보인다) |
 | 신뢰 전 partial clone | (목록은 서고 증감 자리만 빈다 — 내용이 바뀐 rename 은 삭제·추가 두 행) · 커밋 펼침을 `--raw` 로도 못 읽으면 `partial clone — 아직 받지 않은 내용입니다(저장소를 신뢰하면 받아 옵니다)`(원격이면 `…(원격 저장소는 받아 오지 않고 읽습니다)`) · diff 의 한 면이 안 받은 객체면 그 diff 는 실패한다(한쪽만 실어 「추가됨」으로 보이지 않는다) | 지연 가져오기를 막은 신뢰 전 읽기가 실패하고 저장소가 partial clone 이다([workspace-trust](plans/workspace-trust.md) WT6b-1a) |
 | 읽는 중 | `읽는 중…` | 요청이 실제로 떠 있는 동안만 |
 

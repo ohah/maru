@@ -691,7 +691,7 @@ git diff --numstat --find-renames --no-ext-diff --no-textconv --cached  ← 행�
 | `core.fsmonitor` | **`status` 마다** | ✅ **이번에 막았다**(`-c core.fsmonitor=`) |
 | partial clone 의 지연 가져오기(`remote.<n>.uploadpack`·`core.sshCommand`·`core.gitProxy`·`git-remote-*`) | 빠진 blob 을 읽는 `diff --numstat` 등 | ✅ 신뢰 전에 막는다([workspace-trust](workspace-trust.md) WT6b-1a — `GIT_NO_LAZY_FETCH=1`·`GIT_ALLOW_PROTOCOL=`(빈 목록) — 각자 혼자서도 막는다). 감시자 앞머리엔 `-c status.renames=false` 도 싣는다 — 안 받은 blob 으로 다이제스트의 `status` 가 실패하지 않게. 원격은 늘 신뢰 전이라 원격 읽기·감시자 앞머리에 늘 싣는다. 늘 막지 않는 이유: 신뢰한 partial clone 사용자의 읽기가 실패한다(실측) |
 | `log.showSignature` + `gpg.program` | `log`·`show` | ✅ 막았다(WT6a — `-c log.showSignature=false`) |
-| **`filter.<name>.clean` · `.smudge`** | **`status` · `diff` · `diff --numstat`** | ❌ **아직 열려 있다** |
+| **`filter.<name>.clean` · `.smudge`** | **`status` · `diff` · `diff --numstat`** | 늘 싣는 목록에선 열어 둔다(아래 — 끄면 답이 틀린다). **신뢰 전에는 저장소가 정의한 드라이버만 끈다** — 앱의 원격 읽기는 원격이 늘 신뢰 전이라 늘 끈다([workspace-trust](workspace-trust.md) WT6b-1b-i); 감시자는 WT6b-1b-ii |
 
 ⚠️ **`filter` 는 `diff` 만의 문제가 아니다**(실측). 크기가 **같은** 변경이면 `git status` 가 내용을
 비교해야 해서 `clean` 필터를 **매번** 돌린다 — 크기가 다르면 안 돈다. 도크는 열려 있는 내내 `status`

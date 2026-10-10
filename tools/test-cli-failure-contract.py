@@ -14,6 +14,7 @@ import struct
 import tempfile
 import threading
 import time
+from agent_events_stream_recovery import verify_recovery
 
 
 # Current version-1 golden envelopes, produced by EmergencyRing.publish from
@@ -261,6 +262,7 @@ def verify(cli, root):
     assert not p.stdout and 'one cursor per file name' in p.stderr
     assert active_before == {p.name: p.read_bytes() for p in active.iterdir()}, 'duplicate resume cleaned logs'
     large.unlink()
+    verify_recovery(cli, root, env, record)
     incident_dir = root / 'cache/maru/incidents'
     maximum_limit = str((1 << (8 * struct.calcsize('P'))) - 1)
 

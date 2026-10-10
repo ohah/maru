@@ -48,8 +48,8 @@ fn initSweep() void {
 /// 기다리는 호출이 있으면 시한의 1/4 뒤에 한 번 본다(이미 걸었으면 그대로).
 fn ensureSweep() void {
     if (sweep_posted or table.isEmpty()) return;
-    sweep_posted = true;
-    _ = browsers.state.api.post_delayed_task(c.TID_UI, &sweep_task, @max(@divTrunc(table.stale_ms, 4), 100));
+    // 걸지 못하면(CEF 가 끝나는 중) 걸었다고 두지 않는다 — 다음 호출이 다시 건다.
+    sweep_posted = browsers.state.api.post_delayed_task(c.TID_UI, &sweep_task, @max(@divTrunc(table.stale_ms, 4), 100)) != 0;
 }
 
 fn sweep(_: [*c]c.cef_task_t) callconv(.c) void {

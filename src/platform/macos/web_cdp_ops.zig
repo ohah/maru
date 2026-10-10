@@ -20,10 +20,11 @@
 //! - 결과의 status 숫자는 `control_browser.BrowserCompletionStatus` 계약이다(성공 = 0 + "true"/"false", 실패 = 1 + 메시지).
 
 const std = @import("std");
+const web_cdp_snapshot = @import("web_cdp_snapshot.zig");
 
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
-pub const Kind = enum { click, back, forward, reload };
+pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot };
 
 /// 다음에 할 일 — CDP 호출 하나(`params` 는 소유 — 부른 쪽이 놓는다) 또는 끝(`result` 소유).
 pub const Step = union(enum) {
@@ -44,7 +45,7 @@ pub const Reply = union(enum) {
 /// 여러 줄 링크의 줄 상자 상한 — 화면보다 긴 링크는 앞줄이 화면 밖일 수 있어 넉넉히(3 회차 — 8 이면 9 줄째부터 보여도 실패했다).
 const max_boxes = 64;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload };
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, ax_tree, doc_eval, wait_poll };
 
 pub const Op = struct {
     kind: Kind,
@@ -64,25 +65,74 @@ pub const Op = struct {
     miss: ?[]const u8 = null,
     /// 누름·떼기의 답이 시한을 넘겼다 — 그래도 떼기·놓기를 보내고 끝에 timeout 으로 답한다.
     late: ?[]const u8 = null,
+    /// type 의 글(소유).
+    text: ?[]u8 = null,
+    /// wait — selector 가 보일 때까지(null 이면 문서가 다 불릴 때까지), 시한.
+    wait_selector: ?[]u8 = null,
+    wait_timeout_ms: u32 = 0,
+    /// snapshot 선택.
+    snap: web_cdp_snapshot.Options = .{},
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
         if (self.frame_id) |s| gpa.free(s);
+        if (self.text) |s| gpa.free(s);
+        if (self.wait_selector) |s| gpa.free(s);
         self.* = undefined;
     }
 
-    /// `arg` 는 L2 가 만든 op.arg(click 은 `{"selector":…}` 또는 `{"ref":…}`, 나머지는 빈 것). `id` 는 원격 객체 묶음 이름에 쓴다.
+    /// `arg` 는 L2 가 만든 op.arg — click·scroll `{"selector"|"ref"}`, type `{…, "text"}`, wait `{"condition","selector"?,
+    /// "timeout_ms"}`, snapshot `{"interactive_only","max_depth"?,"selector"?}`, back·forward·reload 는 빈 것. `id` 는 원격 객체
+    /// 묶음 이름에 쓴다.
     pub fn init(gpa: std.mem.Allocator, kind: Kind, arg: []const u8, id: u64) !Op {
         var op: Op = .{ .kind = kind, .id = id };
-        if (kind != .click) return op;
+        errdefer op.deinit(gpa);
+        switch (kind) {
+            .back, .forward, .reload => return op,
+            else => {},
+        }
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, arg, .{}) catch return error.InvalidArg;
         defer parsed.deinit();
         if (parsed.value != .object) return error.InvalidArg;
-        if (parsed.value.object.get("ref")) |r| {
+        const o = parsed.value.object;
+        switch (kind) {
+            .wait => {
+                const cond = o.get("condition") orelse return error.InvalidArg;
+                if (cond != .string) return error.InvalidArg;
+                if (std.mem.eql(u8, cond.string, "selector")) {
+                    const sel = o.get("selector") orelse return error.InvalidArg;
+                    if (sel != .string) return error.InvalidArg;
+                    op.wait_selector = try gpa.dupe(u8, sel.string);
+                } else if (!std.mem.eql(u8, cond.string, "load")) return error.InvalidArg;
+                const t = o.get("timeout_ms") orelse return error.InvalidArg;
+                if (t != .integer or t.integer <= 0) return error.InvalidArg;
+                op.wait_timeout_ms = @intCast(@min(t.integer, std.math.maxInt(u32)));
+                return op;
+            },
+            .snapshot => {
+                if (o.get("interactive_only")) |v| if (v == .bool) {
+                    op.snap.interactive_only = v.bool;
+                };
+                if (o.get("max_depth")) |v| if (v == .integer and v.integer >= 0) {
+                    op.snap.max_depth = @intCast(@min(v.integer, std.math.maxInt(u32)));
+                };
+                if (o.get("selector")) |v| if (v == .string) {
+                    op.selector = try gpa.dupe(u8, v.string);
+                };
+                return op;
+            },
+            .type_text => {
+                const t = o.get("text") orelse return error.InvalidArg;
+                if (t != .string) return error.InvalidArg;
+                op.text = try gpa.dupe(u8, t.string);
+            },
+            else => {},
+        }
+        if (o.get("ref")) |r| {
             if (r != .string) return error.InvalidArg;
             op.backend = parseRef(r.string) orelse 0; // 모르는 ref — start 가 곧바로 {ok:false}
             op.stage = .scroll;
-        } else if (parsed.value.object.get("selector")) |sel| {
+        } else if (o.get("selector")) |sel| {
             if (sel != .string) return error.InvalidArg;
             op.selector = try gpa.dupe(u8, sel.string);
         } else return error.InvalidArg;
@@ -96,7 +146,7 @@ pub const Op = struct {
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
         return switch (self.kind) {
-            .click => if (self.selector != null)
+            .click, .type_text, .scroll => if (self.selector != null)
                 call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{})
             else if (self.backend == 0)
                 done(gpa, .success, "false")
@@ -110,6 +160,8 @@ pub const Op = struct {
                 self.stage = .reload;
                 break :blk call(gpa, "Page.reload", "", .{});
             },
+            .wait => self.frameTreeStep(gpa),
+            .snapshot => if (self.selector != null) call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{}) else self.axStep(gpa),
         };
     }
 
@@ -145,18 +197,30 @@ pub const Op = struct {
             },
             .query => {
                 const node = intAt(v, &.{"nodeId"}) orelse 0;
-                if (node == 0) return done(gpa, .success, "false"); // 없는 요소 — WebKit 과 같다
+                if (node == 0) return self.missing(gpa); // 없는 요소 — WebKit 과 같다
                 self.stage = .describe;
                 return call(gpa, "DOM.describeNode", "{{\"nodeId\":{d}}}", .{node});
             },
             .describe => {
-                self.backend = intAt(v, &.{ "node", "backendNodeId" }) orelse return done(gpa, .success, "false");
+                self.backend = intAt(v, &.{ "node", "backendNodeId" }) orelse return self.missing(gpa);
+                if (self.kind == .snapshot) {
+                    self.snap.root_backend = self.backend;
+                    return self.axStep(gpa);
+                }
                 return self.scrollStep(gpa);
             },
-            .scroll => {
-                self.stage = .quads;
-                return call(gpa, "DOM.getContentQuads", "{{\"backendNodeId\":{d}}}", .{self.backend});
+            .scroll => switch (self.kind) {
+                .scroll => return done(gpa, .success, "true"),
+                .type_text => {
+                    self.stage = .focus;
+                    return call(gpa, "DOM.focus", "{{\"backendNodeId\":{d}}}", .{self.backend});
+                },
+                else => {
+                    self.stage = .quads;
+                    return call(gpa, "DOM.getContentQuads", "{{\"backendNodeId\":{d}}}", .{self.backend});
+                },
             },
+            .focus => return self.frameTreeStep(gpa),
             .quads => {
                 self.box_count = collectBoxes(v, &self.boxes);
                 if (self.box_count == 0) return done(gpa, .failed, "the element has no visible box");
@@ -176,8 +240,7 @@ pub const Op = struct {
                 } else return done(gpa, .failed, "the element is outside the viewport");
                 self.x = (picked[0] + picked[2]) / 2;
                 self.y = (picked[1] + picked[3]) / 2;
-                self.stage = .frame_tree;
-                return call(gpa, "Page.getFrameTree", "", .{});
+                return self.frameTreeStep(gpa);
             },
             .frame_tree => {
                 const fid = stringAt(v, &.{ "frameTree", "frame", "id" }) orelse return done(gpa, .failed, "no main frame");
@@ -187,18 +250,28 @@ pub const Op = struct {
             },
             .world => {
                 self.context_id = intAt(v, &.{"executionContextId"}) orelse return done(gpa, .failed, "no isolated world");
+                if (self.kind == .wait) {
+                    self.stage = .doc_eval;
+                    return call(gpa, "Runtime.evaluate", "{{\"expression\":\"document\",\"contextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.context_id, self.id });
+                }
                 self.stage = .resolve;
                 return call(gpa, "DOM.resolveNode", "{{\"backendNodeId\":{d},\"executionContextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.backend, self.context_id, self.id });
             },
             .resolve => {
                 const oid = stringAt(v, &.{ "object", "objectId" }) orelse return done(gpa, .success, "false");
+                if (self.kind == .type_text) {
+                    // 격리 world 에서 그 요소의 글을 고른다(입력칸·글 상자·contenteditable) — 그 위에 넣으면 바꿔 쓴다(WebKit 의 type 과 같다).
+                    // 프로토타입 함수·getter 로 부른다(DOM clobbering).
+                    self.stage = .select;
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return 'not editable';HTMLInputElement.prototype.select.call(t);return 'ok'}}if(t instanceof HTMLTextAreaElement){{HTMLTextAreaElement.prototype.select.call(t);return 'ok'}}if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{var d=P(Node.prototype,'ownerDocument').call(t);var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);return 'ok'}}return 'not editable'}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
+                }
                 self.stage = .hit_test;
                 // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
                 // 그 frame 에서 보면 어긋난다). 그림자 DOM 안이면 그 뿌리에서 맞히고, slot 에 꽂힌 내용·host 를 따라 올라가며 본다.
                 // **DOM 속성은 프로토타입의 getter 로 읽는다** — 격리 world 여도 `<form>` 안의 `<input name=parentNode>` 같은 이름
                 // 속성(DOM clobbering)이 `n.parentNode` 를 가린다: 실측으로 걷기가 끝없이 돌거나(렌더러 멈춤) 덮인 요소를 「맞음」으로
                 // 통과시켰다(W9b①a 적대 리뷰 3 회차). 걷기는 4096 단계로 끊는다.
-                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y){{var G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}};var od=G(Node.prototype,'ownerDocument'),pn=G(Node.prototype,'parentNode'),es=G(Element.prototype,'assignedSlot'),ts=G(Text.prototype,'assignedSlot'),hs=G(ShadowRoot.prototype,'host');var grn=Node.prototype.getRootNode,def=Document.prototype.elementFromPoint,sef=ShadowRoot.prototype.elementFromPoint;if((od.call(this)||this)!==document)return 'frame';var r=grn.call(this);var h=(r instanceof ShadowRoot)?sef.call(r,x,y):def.call(document,x,y);for(var n=h,i=0;n&&i<4096;i++){{if(n===this)return 'ok';var s=(n instanceof Element)?es.call(n):(n instanceof Text)?ts.call(n):null;n=s||pn.call(n)||((n instanceof ShadowRoot)?hs.call(n):null)}}return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y });
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y){{var G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}};var od=G(Node.prototype,'ownerDocument'),pn=G(Node.prototype,'parentNode'),es=G(Element.prototype,'assignedSlot'),ts=G(Text.prototype,'assignedSlot'),hs=G(ShadowRoot.prototype,'host');var grn=Node.prototype.getRootNode,def=Document.prototype.elementFromPoint,sef=ShadowRoot.prototype.elementFromPoint;var me=this;if(me instanceof Text)me=G(Node.prototype,'parentElement').call(me)||me;if((od.call(me)||me)!==document)return 'frame';var r=grn.call(me);var h=(r instanceof ShadowRoot)?sef.call(r,x,y):def.call(document,x,y);for(var n=h,i=0;n&&i<4096;i++){{if(n===me)return 'ok';var s=(n instanceof Element)?es.call(n):(n instanceof Text)?ts.call(n):null;n=s||pn.call(n)||((n instanceof ShadowRoot)?hs.call(n):null)}}return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y });
             },
             .hit_test => {
                 if (at(v, &.{"exceptionDetails"}) != null) {
@@ -234,7 +307,65 @@ pub const Op = struct {
                 return call(gpa, "Page.navigateToHistoryEntry", "{{\"entryId\":{d}}}", .{entry_id});
             },
             .navigate_entry, .reload => return done(gpa, .success, "true"),
+            .select => {
+                const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                if (!std.mem.eql(u8, verdict, "ok")) {
+                    self.miss = "the element is not editable";
+                    return self.releaseStep(gpa);
+                }
+                // 빈 글이면 고른 것을 지운다(Delete 키 — 진짜 입력). 아니면 고른 것 위에 넣는다(`Input.insertText` — 한 번의 입력 이벤트).
+                if (self.text.?.len == 0) {
+                    self.stage = .delete_down;
+                    return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyDown\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
+                }
+                self.stage = .insert;
+                return call(gpa, "Input.insertText", "{{\"text\":{f}}}", .{std.json.fmt(self.text.?, .{})});
+            },
+            .delete_down => {
+                self.stage = .delete_up;
+                return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyUp\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
+            },
+            .insert, .delete_up => return self.releaseStep(gpa),
+            .ax_tree => {
+                const json = web_cdp_snapshot.build(gpa, bytes, self.snap) catch |e| return switch (e) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => done(gpa, .failed, "malformed accessibility tree"),
+                };
+                return .{ .done = .{ .status = .success, .result = json } };
+            },
+            .doc_eval => {
+                const oid = stringAt(v, &.{ "result", "objectId" }) orelse return done(gpa, .failed, "no document");
+                self.stage = .wait_poll;
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(sel,ms,load){{var D=Document.prototype,qs=D.querySelector,rs=Object.getOwnPropertyDescriptor(D,'readyState').get,bc=Element.prototype.getBoundingClientRect,gcs=getComputedStyle,t0=Date.now();return new Promise(function(res){{(function poll(){{try{{if(load){{if(rs.call(document)==='complete')return res(true)}}else{{var e=qs.call(document,sel);if(e){{var r=bc.call(e),cs=gcs(e);if(r.width>0&&r.height>0&&cs.visibility!=='hidden'&&cs.display!=='none')return res(true)}}}}}}catch(x){{return res('error')}}if(Date.now()-t0>=ms)return res(false);setTimeout(poll,100)}})()}})}}\",\"arguments\":[{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{}}}],\"awaitPromise\":true,\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), std.json.fmt(self.wait_selector orelse "", .{}), self.wait_timeout_ms, self.wait_selector == null });
+            },
+            .wait_poll => {
+                const value = at(v, &.{ "result", "value" }) orelse return done(gpa, .failed, "wait failed");
+                if (value == .bool and value.bool) return self.waitEnd(gpa, .success, "true");
+                if (value == .string) return self.waitEnd(gpa, .invalid_params, "Invalid selector");
+                return self.waitEnd(gpa, .timeout, "");
+            },
         }
+    }
+
+    /// 없는 요소 — click·type·scroll 은 `{ok:false}`(WebKit 과 같다), snapshot 은 빈 트리.
+    fn missing(self: *Op, gpa: std.mem.Allocator) !Step {
+        return if (self.kind == .snapshot) done(gpa, .success, "{\"tree\":[]}") else done(gpa, .success, "false");
+    }
+
+    fn frameTreeStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .frame_tree;
+        return call(gpa, "Page.getFrameTree", "", .{});
+    }
+
+    fn axStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .ax_tree;
+        return call(gpa, "Accessibility.getFullAXTree", "", .{});
+    }
+
+    /// wait 의 끝 — 쥔 document 객체를 놓지 않고 답한다(놓기는 그 묶음이 다음 요청과 섞이지 않게 이름이 요청마다 달라 해롭지 않다 —
+    /// 왕복 하나를 아낀다). 결과는 status 로만.
+    fn waitEnd(_: *Op, gpa: std.mem.Allocator, status: Status, result: []const u8) !Step {
+        return done(gpa, status, result);
     }
 
     /// 놓은 뒤의 답 — 덮였으면 실패, 누름·떼기가 시한을 넘겼으면 timeout, 아니면 눌렀다.
@@ -270,8 +401,14 @@ pub const Op = struct {
         const message: []const u8 = owned orelse "DevTools error";
         const gone = containsAny(message, &.{ "No node", "Could not find node", "not found", "No target" });
         return switch (self.stage) {
-            .query => if (gone) done(gpa, .success, "false") else done(gpa, .invalid_params, message),
-            .describe, .scroll, .quads, .resolve => if (gone) done(gpa, .success, "false") else done(gpa, .failed, message),
+            .query => if (gone) self.missing(gpa) else done(gpa, .invalid_params, message),
+            .describe, .scroll, .quads, .resolve => if (gone) self.missing(gpa) else done(gpa, .failed, message),
+            .focus => done(gpa, .failed, "the element cannot be focused"),
+            // 고르기·넣기 실패 — 쥔 묶음은 놓고 실패.
+            .select, .insert, .delete_down, .delete_up => blk: {
+                self.miss = "the text could not be entered";
+                break :blk self.releaseStep(gpa);
+            },
             .mouse_up => self.releaseStep(gpa), // 떼기 실패 — 그래도 묶음은 놓는다
             // 검사·누름이 CDP 오류 — 누르지 못했다. 쥔 묶음은 놓고 실패로 답한다(3 회차 — 그냥 끝내 묶음이 남았다).
             .hit_test => blk: {
@@ -720,4 +857,142 @@ test "back·forward 는 방문 기록의 앞뒤 항목으로, 갈 곳이 없으�
     defer testing.allocator.free(r.result);
     try testing.expectEqualStrings("true", r.result);
     try testing.expectEqualStrings("Page.reload", trail.methods.items[0]);
+}
+
+// ── W9b①b: type·scroll·wait·snapshot ──
+
+const tiny_ax =
+    \\{"nodes":[{"nodeId":"1","role":{"value":"RootWebArea"},"name":{"value":"t"},"backendDOMNodeId":5,"childIds":["2"]},
+    \\{"nodeId":"2","role":{"value":"button"},"name":{"value":"Go"},"backendDOMNodeId":9,"parentId":"1","childIds":[]}]}
+;
+
+fn editorPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Accessibility.getFullAXTree")) return .{ .ok = tiny_ax };
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"d-1\"}}" };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "readyState") != null) {
+        // wait — selector 가 `#late` 면 보인다, `#never` 면 시한, `[` 면 selector 오류, load 는 보인다.
+        if (std.mem.indexOf(u8, params, "#never") != null) return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":false}}" };
+        if (std.mem.indexOf(u8, params, "{\"value\":\"[\"}") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"error\"}}" };
+        return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":true}}" };
+    }
+    return happyPage(method, params);
+}
+
+fn notEditablePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "isContentEditable") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"not editable\"}}" };
+    return editorPage(method, params);
+}
+
+test "type: 찾기 → 화면 안으로 → 초점 → 격리 world 에서 글 고르기(프로토타입 함수) → 그 위에 insertText → 놓기" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .type_text, "{\"selector\":\"#e\",\"text\":\"새 \\\"값\\\"\"}", 21);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &editorPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqualStrings("true", r.result);
+    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.focus", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.insertText", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want.len, trail.methods.items.len);
+    for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "HTMLInputElement.prototype.select.call") != null);
+    try testing.expectEqualStrings("{\"text\":\"새 \\\"값\\\"\"}", trail.params.items[9]);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[8]));
+}
+
+test "type: 빈 글은 고른 것을 Delete 키로 지우고, 편집할 수 없는 요소는 넣지 않고 실패" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    {
+        var op = try Op.init(testing.allocator, .type_text, "{\"ref\":\"n9\",\"text\":\"\"}", 22);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &editorPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqualStrings("true", r.result);
+        try testing.expectEqual(@as(usize, 0), trail.count("Input.insertText"));
+        try testing.expectEqual(@as(usize, 2), trail.count("Input.dispatchKeyEvent"));
+    }
+    trail.reset();
+    {
+        var op = try Op.init(testing.allocator, .type_text, "{\"selector\":\"#cb\",\"text\":\"x\"}", 23);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &notEditablePage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.failed, r.status);
+        try testing.expect(std.mem.indexOf(u8, r.result, "not editable") != null);
+        try testing.expectEqual(@as(usize, 0), trail.count("Input.insertText"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+}
+
+test "scroll: 화면 안으로 스크롤하고 끝, 없는 요소는 {ok:false}" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .scroll, "{\"selector\":\"#far\"}", 24);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &editorPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqualStrings("true", r.result);
+    try testing.expectEqualStrings("DOM.scrollIntoViewIfNeeded", trail.methods.items[trail.methods.items.len - 1]);
+    trail.reset();
+    var none = try Op.init(testing.allocator, .scroll, "{\"selector\":\"#none\"}", 25);
+    defer none.deinit(testing.allocator);
+    const n = try drive(&none, &editorPage, &trail);
+    defer testing.allocator.free(n.result);
+    try testing.expectEqualStrings("false", n.result);
+}
+
+test "wait: 격리 world 의 document 에서 기다린다 — 보이면 성공, 시한이면 timeout, selector 오류는 invalid_params, load 는 readyState" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    const cases = [_]struct { arg: []const u8, status: Status }{
+        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"#late\",\"timeout_ms\":5000}", .status = .success },
+        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"#never\",\"timeout_ms\":100}", .status = .timeout },
+        .{ .arg = "{\"condition\":\"selector\",\"selector\":\"[\",\"timeout_ms\":100}", .status = .invalid_params },
+        .{ .arg = "{\"condition\":\"load\",\"timeout_ms\":100}", .status = .success },
+    };
+    for (cases) |c| {
+        trail.reset();
+        var op = try Op.init(testing.allocator, .wait, c.arg, 26);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &editorPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(c.status, r.status);
+        const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "Runtime.callFunctionOn" };
+        for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+        try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "\"contextId\":7") != null); // 격리 world 의 document
+        try testing.expect(std.mem.indexOf(u8, trail.params.items[3], "\"awaitPromise\":true") != null);
+        try testing.expect(try std.json.validate(testing.allocator, trail.params.items[3]));
+    }
+    try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"timeout_ms\":5}", 1));
+    try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .wait, "{\"condition\":\"idle\",\"timeout_ms\":5}", 1));
+}
+
+test "snapshot: 접근성 트리를 WebKit 모양으로, selector 는 그 노드부터, 없는 selector 는 빈 트리" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    {
+        var op = try Op.init(testing.allocator, .snapshot, "{\"interactive_only\":false}", 27);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &editorPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqualStrings("{\"tree\":[{\"role\":\"button\",\"name\":\"Go\",\"ref\":\"n9\"}]}", r.result);
+        try testing.expectEqual(@as(usize, 1), trail.methods.items.len);
+    }
+    trail.reset();
+    {
+        var op = try Op.init(testing.allocator, .snapshot, "{\"interactive_only\":true,\"selector\":\"#b\"}", 28);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &editorPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqualStrings("{\"tree\":[{\"role\":\"button\",\"name\":\"Go\",\"ref\":\"n9\"}]}", r.result);
+        try testing.expectEqualStrings("Accessibility.getFullAXTree", trail.methods.items[trail.methods.items.len - 1]);
+    }
+    trail.reset();
+    {
+        var op = try Op.init(testing.allocator, .snapshot, "{\"interactive_only\":false,\"selector\":\"#none\"}", 29);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &editorPage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqualStrings("{\"tree\":[]}", r.result);
+    }
 }

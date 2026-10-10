@@ -182,9 +182,9 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
             .back, .forward, .reload => false,
             else => true,
         },
-        // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록.
+        // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait.
         .chromium => switch (m) {
-            .click, .back, .forward, .reload => true,
+            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait => true,
             else => false,
         },
     };
@@ -2995,10 +2995,11 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
-    // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록.
+    // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
-    try testing.expectEqual(@as(usize, 4), chromium_methods.len);
-    for ([_][]const u8{ "click", "back", "forward", "reload" }, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
+    const want_chromium = [_][]const u8{ "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload" };
+    try testing.expectEqual(want_chromium.len, chromium_methods.len);
+    for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
     for (arr.items[2..4]) |item| {
         try testing.expectEqualStrings("webkit", item.object.get("engine").?.string);

@@ -821,4 +821,24 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - 하(기존): 자식이 모두 float 인 높이 0 상자 → 한계로 적었다.
   - 하(추론): 메모리가 없어 실패 메시지조차 못 만들면 놓지 못하고 끝난다 — 그때는 앱 전체가 위험하고 객체 묶음은 문서를 떠나면 사라진다, 받아들인다.
   - 버틴 것: 시간 예산(올라가는 길·짠 글 안), press 의 조상 바꾸기, label 안 숨긴 체크박스, nth 와 숨은 일치, flex·td·li 공백, XHTML.
+- **3 회차**(실측 — 운영과 같은 좌표로 덮임 검사 JS 를 그대로 돌리고 진짜로 눌러 핸들러를 셌다):
+  - 높음: 2 회차의 조상 허용이 조작 가능한 조상이 없으면 html 까지 올라가 조상의 로딩 덮개(`::after`)·모달 배경(`body::after`)·`inert` 를 `ok` 로 통과시켰다 —
+    누른 뒤 핸들러 0 회(거짓 성공) → 가장 가까운 조작 가능한 조상 A(폼 역할·contenteditable 포함 — label 대상)가 있을 때만, 맞은 것에서 올라가 다른 조작 가능한 요소를
+    거치지 않고 A 에 닿으면 통과. 없으면 예전대로 엄격.
+  - 중: A 안의 형제 덮개(Angular Material 버튼의 터치 영역, shadow 안 `<button><slot>` + 덮개)를 `covered` 로 막았다 — 사람이 누르면 동작 → 위의 규칙(맞은 것에서 A 로,
+    open shadow 안까지 따라 내려가 맞힌다)으로 통과, 진짜 눌러 핸들러 1 회.
+  - 하: 짠 글의 compose → part → compose 재귀가 깊이 5 천에서 스택을 넘었다 → 명시적 스택(깊이 1 만 296 ms).
+  - 하: 제목마다 aria-hidden 아이콘인 큰 문서에서 exact 가 상한에 걸렸다 → exact 는 빼낼 수 있는 글(숨은 일치·aria-hidden)의 길이로 하한을 두고 짜지 않는다(9.6 만 요소 260 → 214 ms).
+    페이지에 없는 짧은 질의가 거의 모든 글을 읽는 것(처음부터)은 한계로 적었다.
+  - 하: 질의와 맞지 않는 화면 밖·크기 0 인 자손의 글은 남는다 — 계약 문구를 동작에 맞췄다(뺄 것을 정하려면 판정마다 레이아웃을 읽어야 한다).
+  - 버틴 것: hit_up 수명(Op 는 요청마다 새로), role 해석의 일치, 카드 안 다른 버튼·stretched-link, wbr·nbsp·pre·caption·li·안쪽 uppercase·slot fallback·ruby, nth 와 숨은 일치.
+- **4 회차**(실측 — 무작위 DOM 수백 개로 3 회차 전 finder 와 결과를 맞대 보고, 덮임 판정은 진짜로 눌러 핸들러를 셌다):
+  - 중(3 회차 퇴행): exact 하한이 select 를 품은 요소의 참 일치를 버렸다(innerText 에 옵션 글, 짠 글에는 없다 — 「Country * <select>」) → select 를 aria-hidden 처럼
+    (짠 글로 판정·하한에 그 길이). aria-hidden 이 없는 「Region <select>」 의 exact 0 건(처음부터)도 함께.
+  - 중(처음부터): label 의 control 이 sr-only 1 px(Tailwind peer 토글)이거나 control 이 label 안을 덮으면 `covered` — 진짜 누르면 켜진다 → 덮임 검사가 label 과
+    그 control 을 같은 것으로, label 로케이터의 click·hover 는 아주 작은 control 대신 보이는 label 을.
+  - 하: A 안의 iframe 덮개가 `ok`(클릭은 iframe 으로) → iframe·frame·embed·object 에서 멈춘다. 닫힌 shadow 속 버튼은 한계로.
+  - 하: hover 가 A 안 덮개면 그 글 요소의 mouseenter 가 오지 않는다 → 문서에.
+  - 하: 그려지지 않은 요소의 innerText 는 textContent 라 하한이 숨은 일치를 버려 hint 를 잃었다 → 하한은 그려진 요소에만.
+  - 버틴 것: 반복 compose 와 예전 재귀의 결과 차이 0 건(무작위 120 × 8), 하한이 그려진 참 일치를 버린 것 0 건(무작위 200), summary·floating label·파일 input.
 

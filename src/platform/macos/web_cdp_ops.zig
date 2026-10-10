@@ -265,6 +265,19 @@ pub const Op = struct {
             .check, .world => if (self.kind == .wait) return self.sleepOrTimeout(gpa),
             else => {},
         };
+        // 누름의 답이 실패(보내지 못함·결과가 깨짐) — 이미 갔을 수 있으니 떼기·놓기를 마저 보내고 실패로 답한다(2 회차).
+        if (reply == .failed) switch (self.stage) {
+            .mouse_down => {
+                self.miss = reply.failed;
+                self.stage = .mouse_up;
+                return self.mouse(gpa, "mouseReleased");
+            },
+            .key_down => {
+                self.miss = reply.failed;
+                return self.keyStep(gpa, false);
+            },
+            else => {},
+        };
         const bytes = switch (reply) {
             .failed => |why| return done(gpa, .failed, why),
             .timed_out => |why| return done(gpa, .timeout, why),
@@ -349,14 +362,14 @@ pub const Op = struct {
                 if (self.kind == .press) {
                     // 초점이 아직 그 요소인가(type 과 같은 걷기 — 요소의 root 에서 host 를 따라 문서까지). 아니면 누르지 않는다.
                     self.stage = .focus_check;
-                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var gr=Node.prototype.getRootNode,dae=P(Document.prototype,'activeElement'),sae=P(ShadowRoot.prototype,'activeElement'),host=P(ShadowRoot.prototype,'host'),ce=P(HTMLElement.prototype,'isContentEditable');var cur=t,root=gr.call(cur);for(var i=0;i<64;i++){{var ae=(root instanceof ShadowRoot)?sae.call(root):(root instanceof Document)?dae.call(root):null;if(ae!==cur&&!(cur===t&&ae&&(t instanceof HTMLElement)&&ce.call(t)&&Node.prototype.contains.call(t,ae)))return 'focus moved';if(!(root instanceof ShadowRoot))return 'ok';cur=host.call(root);root=gr.call(cur)}}return 'focus moved'}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};if((P(Node.prototype,'ownerDocument').call(t)||t)!==document)return 'frame';var gr=Node.prototype.getRootNode,dae=P(Document.prototype,'activeElement'),sae=P(ShadowRoot.prototype,'activeElement'),host=P(ShadowRoot.prototype,'host'),ce=P(HTMLElement.prototype,'isContentEditable');var cur=t,root=gr.call(cur);for(var i=0;i<64;i++){{var ae=(root instanceof ShadowRoot)?sae.call(root):(root instanceof Document)?dae.call(root):null;if(ae!==cur&&!(cur===t&&ae&&(t instanceof HTMLElement)&&ce.call(t)&&Node.prototype.contains.call(t,ae)))return 'focus moved';if(!(root instanceof ShadowRoot))return 'ok';cur=host.call(root);root=gr.call(cur)}}return 'focus moved'}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
                 }
                 if (self.kind == .type_text) {
                     self.object_id = try gpa.dupe(u8, oid);
                     // 격리 world 에서 그 요소의 글을 고른다(입력칸·글 상자·contenteditable) — 그 위에 넣으면 바꿔 쓴다(WebKit 의 type 과 같다).
                     // 프로토타입 함수·getter 로 부른다(DOM clobbering).
                     self.stage = .select;
-                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var od=P(Node.prototype,'ownerDocument'),ok=false,before='',H=function(s){{var h=2166136261;for(var i=0;i<s.length;i++){{h=Math.imul(h^String.prototype.charCodeAt.call(s,i),16777619)}}return h|0}};var val=function(e){{return (e instanceof HTMLInputElement)?P(HTMLInputElement.prototype,'value').call(e):(e instanceof HTMLTextAreaElement)?P(HTMLTextAreaElement.prototype,'value').call(e):P(Node.prototype,'textContent').call(e)}};if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return {{r:'not editable'}};before=val(t);HTMLInputElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLTextAreaElement){{before=val(t);HTMLTextAreaElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{before=val(t);var d=od.call(t);var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);ok=true}}if(!ok)return {{r:'not editable'}};var gr=Node.prototype.getRootNode,dae=P(Document.prototype,'activeElement'),sae=P(ShadowRoot.prototype,'activeElement'),host=P(ShadowRoot.prototype,'host'),ce=P(HTMLElement.prototype,'isContentEditable');var cur=t,root=gr.call(cur);for(var i=0;i<64;i++){{var ae=(root instanceof ShadowRoot)?sae.call(root):(root instanceof Document)?dae.call(root):null;if(ae!==cur&&!(cur===t&&ae&&ce.call(t)&&Node.prototype.contains.call(t,ae)))return {{r:'focus moved'}};if(!(root instanceof ShadowRoot))return {{r:'ok',h:H(before),n:before.length}};cur=host.call(root);root=gr.call(cur)}}return {{r:'focus moved'}}}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var od=P(Node.prototype,'ownerDocument');if((od.call(t)||t)!==document)return {{r:'frame'}};var ok=false,before='',H=function(s){{var h=2166136261;for(var i=0;i<s.length;i++){{h=Math.imul(h^String.prototype.charCodeAt.call(s,i),16777619)}}return h|0}};var val=function(e){{return (e instanceof HTMLInputElement)?P(HTMLInputElement.prototype,'value').call(e):(e instanceof HTMLTextAreaElement)?P(HTMLTextAreaElement.prototype,'value').call(e):P(Node.prototype,'textContent').call(e)}};if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return {{r:'not editable'}};before=val(t);HTMLInputElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLTextAreaElement){{before=val(t);HTMLTextAreaElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{before=val(t);var d=od.call(t);var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);ok=true}}if(!ok)return {{r:'not editable'}};var gr=Node.prototype.getRootNode,dae=P(Document.prototype,'activeElement'),sae=P(ShadowRoot.prototype,'activeElement'),host=P(ShadowRoot.prototype,'host'),ce=P(HTMLElement.prototype,'isContentEditable');var cur=t,root=gr.call(cur);for(var i=0;i<64;i++){{var ae=(root instanceof ShadowRoot)?sae.call(root):(root instanceof Document)?dae.call(root):null;if(ae!==cur&&!(cur===t&&ae&&ce.call(t)&&Node.prototype.contains.call(t,ae)))return {{r:'focus moved'}};if(!(root instanceof ShadowRoot))return {{r:'ok',h:H(before),n:before.length}};cur=host.call(root);root=gr.call(cur)}}return {{r:'focus moved'}}}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
                 }
                 self.stage = .hit_test;
                 // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
@@ -396,6 +409,11 @@ pub const Op = struct {
                     return self.releaseStep(gpa);
                 }
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                if (std.mem.eql(u8, verdict, "frame")) {
+                    // 같은 출처 iframe 안의 요소(ref) — 격리 world 는 주 frame 의 것이라 그 frame 의 초점을 볼 수 없다.
+                    self.miss = "elements inside frames are not supported yet";
+                    return self.releaseStep(gpa);
+                }
                 if (!std.mem.eql(u8, verdict, "ok")) {
                     self.miss = "focus moved away from the element (the page moved it) — no key was pressed";
                     return self.releaseStep(gpa);
@@ -424,6 +442,10 @@ pub const Op = struct {
                 const verdict = stringAt(v, &.{ "result", "value", "r" }) orelse "";
                 self.before_hash = intAt(v, &.{ "result", "value", "h" }) orelse -1;
                 self.before_len = intAt(v, &.{ "result", "value", "n" }) orelse 0;
+                if (std.mem.eql(u8, verdict, "frame")) {
+                    self.miss = "elements inside frames are not supported yet";
+                    return self.releaseStep(gpa);
+                }
                 if (std.mem.eql(u8, verdict, "focus moved")) {
                     // 페이지가 초점을 다른 곳으로 옮겼다(모달의 초점 가두기 등) — 넣으면 엉뚱한 칸(다른 출처 iframe 일 수도)에 간다.
                     self.miss = "focus moved away from the element (the page moved it) — nothing was typed";
@@ -1407,6 +1429,42 @@ fn stuckHitPage(method: []const u8, params: []const u8) Reply {
 fn throwingFocusPage(method: []const u8, params: []const u8) Reply {
     if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"object\"},\"exceptionDetails\":{\"text\":\"x\"}}" };
     return happyPage(method, params);
+}
+
+fn stuckResolvePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "DOM.resolveNode")) return .{ .timed_out = "DevTools did not answer in time" };
+    return happyPage(method, params);
+}
+
+fn framedPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"frame\"}}" };
+    return happyPage(method, params);
+}
+
+fn failedKeyDownPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchKeyEvent") and std.mem.indexOf(u8, params, "keyUp") == null) return .{ .failed = "DevTools request failed" };
+    return happyPage(method, params);
+}
+
+test "click·press: 노드 잡기·초점 검사의 시한에도 묶음을 놓고 timeout, iframe 안 요소는 frame 으로, 누름 실패 뒤에도 뗀다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    for ([_]struct { kind: Kind, arg: []const u8, answer: *const fn ([]const u8, []const u8) Reply, status: Status, want: []const u8, keys: usize }{
+        .{ .kind = .click, .arg = "{\"selector\":\"#b\"}", .answer = &stuckResolvePage, .status = .timeout, .want = "", .keys = 0 },
+        .{ .kind = .press, .arg = "{\"key\":\"x\",\"selector\":\"#e\"}", .answer = &stuckHitPage, .status = .timeout, .want = "", .keys = 0 },
+        .{ .kind = .press, .arg = "{\"key\":\"x\",\"ref\":\"n9\"}", .answer = &framedPage, .status = .failed, .want = "frames", .keys = 0 },
+        .{ .kind = .press, .arg = "{\"key\":\"x\",\"selector\":\"#e\"}", .answer = &failedKeyDownPage, .status = .failed, .want = "request failed", .keys = 2 },
+    }) |c| {
+        trail.reset();
+        var op = try Op.init(testing.allocator, c.kind, c.arg, 70);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, c.answer, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(c.status, r.status);
+        try testing.expect(std.mem.indexOf(u8, r.result, c.want) != null);
+        try testing.expectEqual(c.keys, trail.count("Input.dispatchKeyEvent"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
 }
 
 test "press: 초점 검사가 예외면 「focus moved」 가 아니라 검사 실패로, 대상 없는 누름의 오류는 떼지 않고 실패" {

@@ -294,7 +294,7 @@ ok press-a && [ "$(cat "$out/pk-a")" = yes ] || fail "press Shift+a on the field
 ok press-all && ok press-x && [ "$(cat "$out/pk-x")" = yes ] || fail "Meta+a then x (where the focus is) did not replace the value ($(tr '\n' ' ' < "$out/press-all") · $(tr '\n' ' ' < "$out/press-x") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-q && [ "$(cat "$out/pk-q")" = yes ] || fail "Shift+/ did not press ? as a real key ($(tr '\n' ' ' < "$out/press-q") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-tab && [ "$(cat "$out/pk-tab")" = yes ] || fail "Tab (where the focus is) did not move the focus to the next field ($(tr '\n' ' ' < "$out/press-tab"))"
-grep -q '(-32602)' "$out/press-bad" || fail "an unknown key name was not invalid params ($(tr '\n' ' ' < "$out/press-bad"))"
+grep -q '(-32602)' "$out/press-bad" && grep -q 'unknown key name' "$out/press-bad" || fail "an unknown key name was not invalid params ($(tr '\n' ' ' < "$out/press-bad"))"
 echo "PASS press: Shift+a typed A (a real keydown), Meta+a selected all and x replaced it, Shift+/ typed ?, Tab moved the focus, an unknown key name is invalid params"
 ok scroll2 && [ "$(cat "$out/sy-hit")" = yes ] || fail "scroll did not move the page ($(tr '\n' ' ' < "$out/scroll2"))"
 echo "PASS scroll-real: scroll moved the page down to the element"

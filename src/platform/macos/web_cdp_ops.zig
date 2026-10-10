@@ -124,6 +124,9 @@ pub const Op = struct {
     loc_kind: enum { role, text, label } = .role,
     /// text·label 찾기의 결과 — 놓기(`loc_release`) 뒤에 쓴다.
     loc_found: ?web_cdp_locate.Found = null,
+    /// text·label 로 찾은 요소 — 덮임 검사가 그 요소에서 가장 가까운 조작 가능한 조상까지의 조상에 맞아도 통과시킨다(2 회차 —
+    /// `pointer-events:none` 글·조상의 의사 요소 덮개: 사람이 그 글을 누르면 그 조상이 받는다).
+    hit_up: bool = false,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
@@ -403,6 +406,7 @@ pub const Op = struct {
                 self.backend = o.backend;
                 self.matched_name = try clipName(gpa, o.name, max_matched_name_bytes);
                 self.locating = false;
+                self.hit_up = true;
                 return self.scrollStep(gpa);
             },
         }
@@ -638,7 +642,7 @@ pub const Op = struct {
                 // **DOM 속성은 프로토타입의 getter 로 읽는다** — 격리 world 여도 `<form>` 안의 `<input name=parentNode>` 같은 이름
                 // 속성(DOM clobbering)이 `n.parentNode` 를 가린다: 실측으로 걷기가 끝없이 돌거나(렌더러 멈춤) 덮인 요소를 「맞음」으로
                 // 통과시켰다(W9b①a 적대 리뷰 3 회차). 걷기는 4096 단계로 끊는다.
-                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y){{var G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}};var od=G(Node.prototype,'ownerDocument'),pn=G(Node.prototype,'parentNode'),es=G(Element.prototype,'assignedSlot'),ts=G(Text.prototype,'assignedSlot'),hs=G(ShadowRoot.prototype,'host');var grn=Node.prototype.getRootNode,def=Document.prototype.elementFromPoint,sef=ShadowRoot.prototype.elementFromPoint;var me=this;if(me instanceof Text)me=G(Node.prototype,'parentElement').call(me)||me;if((od.call(me)||me)!==document)return 'frame';var r=grn.call(me);var h=(r instanceof ShadowRoot)?sef.call(r,x,y):def.call(document,x,y);for(var n=h,i=0;n&&i<4096;i++){{if(n===me)return 'ok';var s=(n instanceof Element)?es.call(n):(n instanceof Text)?ts.call(n):null;n=s||pn.call(n)||((n instanceof ShadowRoot)?hs.call(n):null)}}return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y });
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y,up){{var G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}};var od=G(Node.prototype,'ownerDocument'),pn=G(Node.prototype,'parentNode'),es=G(Element.prototype,'assignedSlot'),ts=G(Text.prototype,'assignedSlot'),hs=G(ShadowRoot.prototype,'host');var grn=Node.prototype.getRootNode,def=Document.prototype.elementFromPoint,sef=ShadowRoot.prototype.elementFromPoint;var me=this;if(me instanceof Text)me=G(Node.prototype,'parentElement').call(me)||me;if((od.call(me)||me)!==document)return 'frame';var r=grn.call(me);var h=(r instanceof ShadowRoot)?sef.call(r,x,y):def.call(document,x,y);for(var n=h,i=0;n&&i<4096;i++){{if(n===me)return 'ok';var s=(n instanceof Element)?es.call(n):(n instanceof Text)?ts.call(n):null;n=s||pn.call(n)||((n instanceof ShadowRoot)?hs.call(n):null)}}if(up){{var tg=G(Element.prototype,'tagName'),ga=Element.prototype.getAttribute,SP=String.prototype,R=',button,link,tab,menuitem,menuitemcheckbox,menuitemradio,option,checkbox,radio,switch,treeitem,';for(var m=me,j=0;m&&j<4096;j++){{if(m===h)return 'ok';var t=SP.toUpperCase.call(tg.call(m));if(t==='BUTTON'||t==='LABEL'||t==='SUMMARY'||t==='INPUT'||t==='SELECT'||t==='TEXTAREA'||(t==='A'&&ga.call(m,'href')!==null))break;var ro=ga.call(m,'role');if(ro!==null&&SP.indexOf.call(R,','+SP.split.call(SP.toLowerCase.call(SP.trim.call(ro)),/\\\\s/)[0]+',')>=0)break;var q=es.call(m)||pn.call(m);if(q instanceof ShadowRoot)q=hs.call(q);m=(q instanceof Element)?q:null}}}}return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}},{{\"value\":{s}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y, if (self.hit_up) "true" else "false" });
             },
             .hit_test => {
                 if (at(v, &.{"exceptionDetails"}) != null) {
@@ -1259,6 +1263,9 @@ test "click(selector): 찾기 → 화면 안으로 → 자리 → 화면과 겹�
     try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "\"executionContextId\":7") != null);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "\"objectGroup\":\"maru-w9b-42\"") != null);
     try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-42\"}", trail.params.items[12]);
+    // selector·ref 는 그 요소(또는 그 안)에 맞아야 한다 — 조상 허용은 text·label 로케이터만(W9b②-2 2 회차).
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "{\"value\":false}],") != null);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[9]));
     // 누르기 앞에 움직임이 없다(숨긴 탭에서 답이 없었다) — 검사 바로 다음이 누름이다.
     try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "mousePressed") != null);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[11], "mouseReleased") != null);
@@ -2287,6 +2294,11 @@ test "text·label 로케이터: 격리 world 의 JS 로 찾고(deep 직렬화) �
     try testing.expect(try std.json.validate(testing.allocator, p));
     try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-400\"}", trail.params.items[3]);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[4], "\"backendNodeId\":41") != null);
+    // 덮임 검사는 가장 가까운 조작 가능한 조상까지의 조상을 받는다(2 회차 — pointer-events:none 글·의사 요소 덮개).
+    try testing.expectEqualStrings("Runtime.callFunctionOn", trail.methods.items[10]);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "{\"value\":true}],") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "if(up){") != null);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[10]));
     // label·exact·nth 없음·동작 이름도 그대로 인자로(1 회차 변이 — exact 를 버려도 살아남았다).
     trail.reset();
     var op2 = try Op.init(testing.allocator, .hover, "{\"locator\":{\"label\":\"Email\",\"exact\":true}}", 401);

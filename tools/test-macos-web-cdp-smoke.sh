@@ -27,7 +27,8 @@
 #   text·label      text·label 로케이터(W9b②-2 — 격리 world 의 JS): 숨은 자손이 낀 버튼 글·쪼개진 글 exact·sr-only 글(누를 수 있는 버튼으로 바꿔
 #                   누른다)·라벨(aria-hidden 별표는 뺀 exact)로 진짜 입력, 숨긴 체크박스는 label 로 ok:false + hint → 보이는 글로 누르면 토글,
 #                   같은 글이 여럿이면 후보 ref 로 다시. 적대 리뷰 1 회차: 카드 제목 글은 카드 가운데의 다른 버튼이 아니라 그 글을 누른다,
-#                   화면 밖 「… about …」 글이 링크를 가리지 않는다, shadow host 의 그려지지 않는 light 자식 글로 host 를 고르지 않는다(hint)
+#                   화면 밖 「… about …」 글이 링크를 가리지 않는다, shadow host 의 그려지지 않는 light 자식 글로 host 를 고르지 않는다(hint).
+#                   2 회차: pointer-events:none 글은 그 버튼이 받는다, aria-hidden 아이콘 글자를 뺀 exact, display:contents 글
 #   press           요소에 Shift+a → 「A」(isTrusted keydown — 입력 이벤트만으로는 insertText 와 가를 수 없다) · Meta+a(편집 명령 selectAll)
 #                   뒤 대상 없이 x → 값이 「x」로 바뀐다 · Shift+/ → 「?」(US 배열의 위 글자) ·
 #                   대상 없이 Tab → 초점이 다음 칸으로 · 틀린 키 이름은 invalid params. 붙여넣기(Meta+v)는 사용자 클립보드를 쓰므로 스모크에
@@ -91,6 +92,9 @@ cat > "$root/www/a.html" <<'HTML'
 <div role=button tabindex=0 onclick="hit('card-'+event.isTrusted)" style="position:relative;width:300px;height:60px;border:1px solid"><span>Card title</span><button style="position:absolute;left:110px;top:15px;width:80px;height:30px" onclick="event.stopPropagation();hit('cdel')">Del</button></div>
 <a href="#" onclick="hit('rm-'+event.isTrusted);return false">Read more<span style="position:absolute;left:-10000px">Read more about pricing</span></a>
 <div id=xm></div>
+<button onclick="hit('pen-'+event.isTrusted)"><span style="pointer-events:none">Pointer pass</span></button>
+<button onclick="hit('mi-'+event.isTrusted)"><span aria-hidden=true>delete</span> Remove row</button>
+<button onclick="hit('dcb-'+event.isTrusted)"><div style="display:contents">Contents label</div></button>
 </div>
 <script>(function(){var h=document.getElementById('xm');h.innerHTML='<div>Settings panel</div>';h.attachShadow({mode:'open'}).innerHTML='<button onclick="hit(\'xm-\'+event.isTrusted)">Menu</button>'})()</script>
 <script>(function(){var r=document.getElementById('osh').attachShadow({mode:'open'});var inner=document.createElement('div');r.appendChild(inner);inner.attachShadow({mode:'open'}).innerHTML='<button id=osb>Shadow Role Btn</button>';inner.shadowRoot.getElementById('osb').addEventListener('click',function(e){hit('osb-'+e.isTrusted)})})()</script>
@@ -249,6 +253,12 @@ hit_seen rm-true && echo yes > "\$out/rm-hit" || echo no > "\$out/rm-hit"
 run tx-host click --by-text 'Settings panel'
 sleep 0.5
 grep -q 'GET /hit?xm-' "$root/http.log" && echo yes > "\$out/xm-hit" || echo no > "\$out/xm-hit"
+run tx-pe click --by-text 'Pointer pass' --exact
+hit_seen pen-true && echo yes > "\$out/pen-hit" || echo no > "\$out/pen-hit"
+run tx-icon click --by-text 'Remove row' --exact
+hit_seen mi-true && echo yes > "\$out/mi-hit" || echo no > "\$out/mi-hit"
+run tx-dc click --by-text 'Contents label' --exact
+hit_seen dcb-true && echo yes > "\$out/dcb-hit" || echo no > "\$out/dcb-hit"
 run hover hover --selector '#hv'
 hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
 run hover-missing hover --selector '#none'
@@ -378,7 +388,10 @@ grep -q 'ambiguous: 2 elements match text~"Archive item"' "$out/tx-amb" && ok tx
 ok tx-card && [ "$(cat "$out/card-hit")" = yes ] || fail "clicking a card's title text pressed something else at the card's center ($(tr '\n' ' ' < "$out/tx-card") · $(grep -c 'GET /hit?cdel' "$root/http.log") cdel)"
 ok tx-more && [ "$(cat "$out/rm-hit")" = yes ] || fail "an off-page \"Read more about ...\" span hid its visible link ($(tr '\n' ' ' < "$out/tx-more"))"
 grep -q 'not ok' "$out/tx-host" && grep -q '^hint: 1 matching' "$out/tx-host" && [ "$(cat "$out/xm-hit")" = no ] || fail "an unrendered light child of a shadow host made the host match and its button get pressed ($(tr '\n' ' ' < "$out/tx-host") · xm $(cat "$out/xm-hit"))"
-echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint"
+ok tx-pe && [ "$(cat "$out/pen-hit")" = yes ] || fail "pointer-events:none text inside a button was refused as covered or not clicked ($(tr '\n' ' ' < "$out/tx-pe"))"
+ok tx-icon && [ "$(cat "$out/mi-hit")" = yes ] || fail "an aria-hidden icon ligature broke an exact text match ($(tr '\n' ' ' < "$out/tx-icon"))"
+ok tx-dc && [ "$(cat "$out/dcb-hit")" = yes ] || fail "display:contents text was taken for hidden ($(tr '\n' ' ' < "$out/tx-dc"))"
+echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"
 grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was not not ok ($(tr '\n' ' ' < "$out/hover-missing"))"
 echo "PASS hover: the element got a real (isTrusted) mouseover, a missing element is not ok"

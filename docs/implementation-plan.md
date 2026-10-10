@@ -43,6 +43,7 @@ macOS 로컬 shell 1개 surface
 - [백로그 — New Window와 chrome 고급화 (설계 근거 보존)](plans/new-window-and-chrome.md)
 - [에이전트 세션 기록 도크 구현 계획](plans/agent-session-dock.md)
 - [원격 에이전트 상태(배지·대화 줄) 구현 계획](plans/remote-agent-state.md)
+- [에이전트 로그 세대와 이어읽기](plans/agent-log-generations.md) — 공통 세대 ID·기록/회전 원자성·버전 이행 설계
 - [ScrollArea 이관 구현 계획](plans/scroll-area.md)
 - [`app_session.zig` 분해 실행 계획·완료 이력](plans/app-session-decomposition.md)
 - [세션 컨트롤 플레인 Phase·검증·코드 위치](plans/control-plane.md)

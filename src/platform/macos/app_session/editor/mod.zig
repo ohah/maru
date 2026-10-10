@@ -22456,6 +22456,112 @@ test "CMP3 자동완성 ①-b — 서버 없는 파일(markdown)에서도 타이
     completion_client.hide(s);
 }
 
+// 제품 행이 일치 자리를 **행마다 따로** 싣는가(§8.2g-e) — 순수 판정자(`SGB4`·`CPL10`)는 자리를 손으로 주거나 matcher 만 불러, `rebuildRows` 가
+// 자리를 빼거나 행들이 한 칸을 같이 쓰게 해도 초록이었다(적대적 1회차 M2·M3). 패딩 클릭은 제품 진입점(`mouse`)으로 잰다 — 패딩을 삼키는 줄을
+// 지워도 순수 `contains` 판정자는 초록이었다(M1).
+test "CMP7 자동완성 ①-e — 제품 행이 일치 자리를 행마다 싣고, 보이는 패널의 패딩을 누르면(겹클릭까지) 삼키되 고르지도 닫지도 않으며, 패널 바로 밖은 닫는다 (제품 경계, §8.2g-e)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    const text = "wonderful world\n\n";
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "notes.md", .data = text });
+    const path = try std.fs.path.join(allocator, &.{ root, "notes.md" });
+    defer allocator.free(path);
+    const term = (try pane_ops.openFileTermInActivePane(fx.session, path, .text)).term;
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+    const s = fx.session;
+    const end: usize = text.len - 1; // 마지막 빈 줄
+    term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+    try testing.expect(insertText(s, term, "w"));
+    try testing.expect(insertText(s, term, "r")); // `wr` — 둘 다 부분열, 자리가 행마다 다르다
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
+        defer prep.deinit(allocator);
+    }
+    // 둘째 글자의 좁히기는 프레임이 한다(`refresh` — 접두사가 바뀌었으면 다시 좁힌다).
+    try testing.expect(s.editor_completion.active);
+    var seen: usize = 0;
+    for (completion_client.rows(s)) |r| {
+        if (std.mem.eql(u8, r.label, "wonderful")) {
+            try testing.expectEqualSlices(u32, &.{ 0, 5 }, r.match);
+            seen += 1;
+        } else if (std.mem.eql(u8, r.label, "world")) {
+            try testing.expectEqualSlices(u32, &.{ 0, 2 }, r.match);
+            seen += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), seen);
+    {
+        var d = appendPaneFrame(s, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
+        defer prep.deinit(allocator);
+    }
+    try testing.expect(s.editorHelperTakesPointer(.suggest)); // 그려졌다 — 포인터를 받는다
+    const p = s.buildChromeProps();
+    const pad = maru.chrome.components.suggest_box.panelPadding(p); // 테두리 폭(VS Code 처럼 행이 테두리에 붙는다)
+    try testing.expect(pad >= 1); // 전제: 보이는 테두리가 있다 — 0 이면 패딩 자리가 없어 아래 클릭이 아무것도 재지 못한다
+    const box = maru.chrome.components.suggest_box.boxRect(&s.chrome_host.suggest_box, completion_client.rows(s), p) orelse return error.SuggestNotPlaced;
+    // 제품 셀 경로의 kind 아이콘 — 행마다 **2칸** 셀 하나가 좌패딩 뒤에 선다(`metal_lowering.placeText` 의 `wide_icons` 분기). 순수 판정자는 op 만,
+    // Lab 골든은 Lab 의 아이콘 패스만 보아 이 분기를 1칸으로 바꿔도 초록이었다(적대적 3회차).
+    {
+        var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
+        defer prep.deinit(allocator);
+        const icon_cp: u21 = @intFromEnum(maru.icons.Icon.kind_word);
+        var icon_cells: usize = 0;
+        for (prep.dl.cells) |c| if (c.codepoint == icon_cp) {
+            try testing.expectEqual(@as(u2, 2), c.width);
+            icon_cells += 1;
+        };
+        for (prep.extra) |part| for (part.dl.cells) |c| if (c.codepoint == icon_cp) {
+            try testing.expectEqual(@as(u2, 2), c.width);
+            icon_cells += 1;
+        };
+        try testing.expectEqual(completion_client.rows(s).len, icon_cells); // 버퍼 단어 행마다 하나
+        const cw = s.cell_width_px;
+        const ch = s.cell_height_px;
+        const sb = maru.chrome.components.suggest_box;
+        try testing.expectEqual([2]i64{ box.x + @as(i64, sb.icon_col) * cw, box.y }, prepGlyphPixel(&prep, icon_cp, cw, ch) orelse return error.IconNotDrawn);
+    }
+    const before = try allocator.dupe(u8, term.rt.editorDocument().opened.?.file.content);
+    defer allocator.free(before);
+    const caret_before = term.rt.editor_selection.?.focus;
+    const sel_before = s.chrome_host.suggest_box.selected;
+    const edge: i32 = @intCast(pad); // 보이는 패널의 맨 바깥 픽셀 = 행 rect 에서 패딩만큼
+    // 왼쪽 테두리와 아래 테두리 — down 은 삼키고, 뒤따르는 up 도 편집기를 건드리지 않는다.
+    const spots = [_][2]f64{
+        .{ @floatFromInt(box.x - edge), @floatFromInt(box.y + 2) },
+        .{ @floatFromInt(box.x + 2), @floatFromInt(box.y + @as(i32, @intCast(box.h)) + edge - 1) },
+    };
+    for (spots) |pt| {
+        s.mouse(1, pt[0], pt[1], 0, 0);
+        s.mouse(3, pt[0], pt[1], 0, 0);
+        // 겹클릭의 둘째·셋째 down(kind 4·5)도 — 예전에는 편집기로 흘러 패널 아래 낱말이 선택되고 목록이 닫혔다(적대적 5회차).
+        s.mouse(4, pt[0], pt[1], 0, 0);
+        s.mouse(3, pt[0], pt[1], 0, 0);
+        s.mouse(5, pt[0], pt[1], 0, 0);
+        s.mouse(3, pt[0], pt[1], 0, 0);
+        try testing.expect(s.editor_completion.active and s.chrome_host.suggest_box.open);
+        try testing.expect(term.rt.editor_selection.?.anchor_start == caret_before and term.rt.editor_selection.?.anchor_end == caret_before); // 낱말 선택이 안 섰다
+        try testing.expectEqualStrings(before, term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(caret_before, term.rt.editor_selection.?.focus);
+        try testing.expectEqual(sel_before, s.chrome_host.suggest_box.selected);
+        try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted);
+    }
+    // 대조 — 보이는 패널 바로 밖은 목록의 것이 아니다: 닫고 흘린다(같은 경계의 반대편).
+    s.mouse(1, @floatFromInt(box.x - @as(i32, @intCast(pad)) - 2), @floatFromInt(box.y + 2), 0, 0);
+    try testing.expect(!s.editor_completion.active);
+    try testing.expectEqual(@as(u64, 0), s.editor_completion.accepted);
+}
+
 test "CMP4 자동완성 ①-b — resolve: 강조된 항목을 미리 풀고(additional 이 온다) 확정은 undo 하나; 확정 때 미해결이면 응답 뒤 한 번에; RESOLVESTALL 이면 300 ms 뒤 additional 없이; 병합 목록에서 같은 label 은 LSP 것 (제품 경계, §8.2g-b)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -22730,7 +22836,7 @@ test "CMP5 자동완성 ①-c — labelDetails: 행에 꼬리(label_detail)가 �
         }
     }
     try testing.expect(seen_import and seen_tail and seen_plain);
-    // 상자의 폭은 (label + 꼬리) 를 센다: `fake_import(use fake)` 21 + 4 + 2 + `mod fake` 8 = 35.
+    // 상자의 폭은 (label + 꼬리) 를 센다: `fake_import(use fake)` 21 + 4(아이콘 2·간격·우패딩) + 2 + `mod fake` 8 = 35.
     try testing.expectEqual(@as(u32, 35), maru.chrome.components.suggest_box.size(completion_client.rows(s)).?.cols);
     completion_client.hide(s);
 }
@@ -23476,7 +23582,7 @@ test "CMP6 자동완성 ①-d — 문서 패널: ⌃Space 가 목록이 열려 �
     const panel = maru.chrome.components.suggest_docs.boxRect(&s.chrome_host.suggest_docs, dl, beside, p).?;
     try testing.expect(panel.x >= beside.x + @as(i32, @intCast(beside.w)));
     try testing.expectEqual(beside.y, panel.y);
-    // 패널 글자는 패널이 정한 픽셀에 선다 — 패널은 목록 옆 「간격 + 보이는 패딩」에 서서 목록과 칸 위상이 대개 다르다(패널은 자기 draw —
+    // 패널 글자는 패널이 정한 픽셀에 선다 — 패널은 목록 옆 「간격 + 두 패널의 보이는 패딩」에 서서 목록과 칸 위상이 다를 수 있다(패널은 자기 draw —
     // `ChromeHost.collectSuggestBoxDraws`, 2026-10-10). 한 draw 일 때는 패널 글자가 목록 격자의 칸으로 내려앉았다. 「Lazy import.」 는 셋째 줄.
     {
         var prep = (try s.buildChromeOverlayPrep()) orelse return error.SuggestNotDrawn;
@@ -57957,7 +58063,7 @@ test "FINDH1 찾기 막대가 열리고 포커스가 없을 때 편집기에서 
     {
         try h.frame();
         try testing.expect(s.chrome_host.suggest_box.open);
-        // 그 프레임에 목록의 첫 행과 찾기 막대가 함께 실리고, 둘 다 컴포넌트 픽셀에 선다(목록 label 은 「 kind 」 3칸 뒤 — `suggest_box.view`).
+        // 그 프레임에 목록의 첫 행과 찾기 막대가 함께 실리고, 둘 다 컴포넌트 픽셀에 선다(목록 label 은 패딩·아이콘·간격 뒤 `label_col` — `suggest_box.view`).
         var d = appendPaneFrame(s, h.leaf, h.term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
         var prep = (try s.buildChromeOverlayPrep()) orelse return error.NothingDrawn;
@@ -57967,9 +58073,10 @@ test "FINDH1 찾기 막대가 열리고 포커스가 없을 때 편집기에서 
         const label = completion_client.rows(s)[0].label;
         try testing.expect(std.mem.indexOfScalar(u8, "Find: ", label[0]) == null); // 찾기 글자와 겹치지 않는 글자로 잰다
         // 전제: 둘의 칸 위상이 다르다 — 같으면 한 격자라 이 판정자는 lowering 의 묶음 나누기를 재지 못한다.
-        try testing.expect(@mod(box.y - find_at[1], @as(i64, ch)) != 0 or @mod(box.x + 3 * @as(i64, cw) - find_at[0], @as(i64, cw)) != 0);
+        const label_dx = @as(i64, chrome.components.suggest_box.label_col) * @as(i64, cw);
+        try testing.expect(@mod(box.y - find_at[1], @as(i64, ch)) != 0 or @mod(box.x + label_dx - find_at[0], @as(i64, cw)) != 0);
         try testing.expectEqual(find_at, prepGlyphPixel(&prep, 'F', cw, ch) orelse return error.FindGlyphNotDrawn);
-        try testing.expectEqual([2]i64{ box.x + 3 * @as(i64, cw), box.y }, prepGlyphPixel(&prep, label[0], cw, ch) orelse return error.ListGlyphNotDrawn);
+        try testing.expectEqual([2]i64{ box.x + label_dx, box.y }, prepGlyphPixel(&prep, label[0], cw, ch) orelse return error.ListGlyphNotDrawn);
     }
     // ↑↓ 는 목록을 움직이고 편집기 caret 은 그대로다.
     const caret = h.term.rt.editor_selection.?.focus;

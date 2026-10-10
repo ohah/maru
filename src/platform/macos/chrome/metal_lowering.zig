@@ -252,7 +252,7 @@ pub fn lower(
     // 열린 채 편집기를 우클릭하면 먼저 모인 찾기 막대가 그 자리를 가져가, 우클릭 메뉴의 패널이 패딩·그림자 없는 widget 으로
     // 내려가 첫 줄이 윗 테두리에 겹쳤다(실제 앱 1배율 캡처로 재현). 배치(`popup_box.visible_outset_px`)는 패딩이 있다고
     // 가정하므로 둘이 갈렸다. host 의 수집 함수는 **패널 하나당** draw 하나를 내므로(`ChromeHost.collect*Draws` — 완성 목록 옆 문서 패널도
-    // 자기 draw, `SGD3`) draw 가 곧 패널 단위다(docs/chrome-strategy.md §5.4 「패널마다 draw 하나」). `independent_panel` 은 이제 「모서리 0 인 첫 quad 도 GPU 패널로 친다」만 가른다(각 열의 찾기).
+    // 자기 draw, `SGD3`) draw 가 곧 패널 단위다(docs/chrome-strategy.md §5.4 「패널마다 draw 하나」). `independent_panel` 은 이제 「모서리 0 인 첫 quad 도 GPU 패널로 친다」만 가른다(각 열의 찾기 · 직각 완성 목록).
     var cursor: ?terminal.Cursor = null;
     var cursor_part: usize = 0;
     var cursor_owner: u16 = no_owner;
@@ -309,7 +309,7 @@ pub fn lower(
                     // 뚫고 보였다(실제 앱 1배율 캡처로 재현). 셀이 패널 순서를 따르게, 보이는 패널(패딩 포함) 안에 중심이 든
                     // 앞 draw 의 셀을 비운다 — 패널은 그 draw 의 첫 op 이라 이 draw 의 셀은 아직 없다. **앞 묶음의 격자도 본다**
                     // (2026-10-10) — 위상이 다른 앞 오버레이는 다른 격자에 있고, 판정은 셀마다 자기 격자 원점으로 픽셀 중심을 잰다.
-                    const p = tk.space.modal_padding_px;
+                    const p = panelPadding(q, tk);
                     const box = q.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
                     for (grids[0 .. part_of[draw_index] + 1]) |*hg| hideCellsUnder(hg, who, cw, ch, box, surface_bg, surface_fg);
                     if (cursor) |c| {
@@ -387,9 +387,14 @@ fn appendWidgetQuad(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.m
     appendQuad(quads, allocator, q.rect, q.corner_radii, q.border_widths, q.fill_role, q.border_role, tk, 3, q.clip);
 }
 
+/// 패널이 사방으로 커지는 폭 — 컴포넌트가 정했으면 그것(`Quad.panel_padding_px`), 아니면 토큰. 그림·가림(`hideCellsUnder`)이 같은 값을 쓴다.
+fn panelPadding(q: chrome.draw.Op.Quad, tk: *const chrome.Tokens) u16 {
+    return q.panel_padding_px orelse tk.space.modal_padding_px;
+}
+
 fn appendModalQuad(quads: *std.ArrayList(metal_frame.GpuQuad), shadows: *std.ArrayList(metal_frame.GpuShadow), allocator: std.mem.Allocator, q: chrome.draw.Op.Quad, tk: *const chrome.Tokens) void {
     // content rect와 box shadow가 같은 outset box를 공유해야 padding·border·shadow의 가장자리가 어긋나지 않는다.
-    const p = tk.space.modal_padding_px;
+    const p = panelPadding(q, tk);
     const box = q.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
     // **여기만 clip을 전달하지 않는다.** 위에서 rect를 padding만큼 **키웠으므로** component가 실은 clip
     // (키우기 전 rect 기준)과 좌표계가 어긋난다. 그대로 적용하면 방금 더한 padding과 그 그림자가 잘린다.
@@ -975,26 +980,33 @@ test "ML6 칸 위상이 다른 오버레이 둘 — 둘 다 컴포넌트가 낸 
         .{ .quad = .{ .rect = .{ .x = 460, .y = 90, .w = 480, .h = 18 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } },
         .{ .text = .{ .origin = .{ .x = 460, .y = 90 }, .runs = &find_runs, .role = .surface_fg } },
     };
-    // 완성 목록은 패널 quad 없이 행 배경(fill)과 글자만 낸다(`suggest_box.view`).
-    const row1 = [_]chrome.draw.Run{.{ .text = " w print_count" }};
-    const row2 = [_]chrome.draw.Run{.{ .text = " w qrint_total" }};
+    // 완성 목록은 자기 직각 패널 quad(패딩 = 테두리 폭 1 — `Quad.panel_padding_px`, `independent_panel`) · 폭 가득한 선택 셀 배경 · 행 글자를 낸다
+    // (`suggest_box.view` — §8.2g-e).
+    // label 은 아이콘 2·간격 1 의 3칸 뒤(`label_col`).
+    const row1 = [_]chrome.draw.Run{.{ .text = "print_count" }};
+    const row2 = [_]chrome.draw.Run{.{ .text = "qrint_total" }};
     const list_ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 288, .y = 228, .w = 120, .h = 36 }, .fill_role = .surface_bg, .panel_padding_px = 1 } },
         .{ .fill = .{ .rect = .{ .x = 288, .y = 228, .w = 120, .h = 18 }, .role = .tab_active_bg } },
-        .{ .text = .{ .origin = .{ .x = 288, .y = 228 }, .runs = &row1, .role = .surface_fg } },
-        .{ .fill = .{ .rect = .{ .x = 288, .y = 246, .w = 120, .h = 18 }, .role = .tab_hover_bg } },
-        .{ .text = .{ .origin = .{ .x = 288, .y = 246 }, .runs = &row2, .role = .surface_fg } },
+        .{ .text = .{ .origin = .{ .x = 288 + 24, .y = 228 }, .runs = &row1, .role = .surface_fg } },
+        .{ .text = .{ .origin = .{ .x = 288 + 24, .y = 246 }, .runs = &row2, .role = .surface_fg } },
     };
     var raster = try lower(std.testing.allocator, &.{
         .{ .layer = .modal, .ops = &find_ops },
-        .{ .layer = .modal, .ops = &list_ops },
+        .{ .layer = .modal, .ops = &list_ops, .independent_panel = true },
     }, &tk, 8, 18, false);
     defer raster.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), raster.extra_parts.items.len); // 위상이 달라 두 장
     try std.testing.expectEqual([2]i64{ 460, 90 }, glyphPixel(&raster, 'F', 8, 18).?); // 예전: 456
-    try std.testing.expectEqual([2]i64{ 288 + 8, 228 }, glyphPixel(&raster, 'w', 8, 18).?); // 예전: y 216
+    try std.testing.expectEqual([2]i64{ 288 + 24, 228 }, glyphPixel(&raster, 'p', 8, 18).?); // 예전: y 216
     try std.testing.expectEqual([2]i64{ 288 + 24, 246 }, glyphPixel(&raster, 'q', 8, 18).?); // 둘째 행도
-    // GPU 패널은 묶음과 무관하게 픽셀 그대로 하나다.
-    try std.testing.expectEqual(@as(usize, 1), raster.gpu_quads.items.len);
+    // GPU quad 는 묶음과 무관하게 픽셀 그대로다 — 패널 둘(찾기·목록 — 목록은 직각이지만 `independent_panel` 이라 패널). 선택은 셀 배경이다.
+    try std.testing.expectEqual(@as(usize, 2), raster.gpu_quads.items.len);
+    try std.testing.expectEqual(@as(u32, 1), raster.gpu_quads.items[1].layer); // 목록 패널 — 사방 **자기** 패딩(1)만큼 커진다
+    try std.testing.expectEqual(@as(f32, 288 - 1), raster.gpu_quads.items[1].x); // 토큰 12 가 아니다(패널마다 패딩 — `Quad.panel_padding_px`)
+    try std.testing.expectEqual(@as(f32, 120 + 2), raster.gpu_quads.items[1].w);
+    try std.testing.expectEqual(@as(f32, 460 - 12), raster.gpu_quads.items[0].x); // 찾기 막대는 토큰 그대로
+    try std.testing.expectEqual(@as(f32, 288 - 1), raster.gpu_shadows.items[1].x); // 그림자도 같은 상자
 }
 
 // 위상이 같으면 예전과 같은 격자 한 장이다 — 원점도 셀도 그대로(`ML5` 의 프레임이 그 경우다).
@@ -1051,6 +1063,41 @@ test "ML7 위상 p·q·p 로 이어진 오버레이 셋은 세 장이다 — 묶
 }
 
 // 뒤 오버레이의 패널은 위상이 다른(= 다른 격자의) 앞 오버레이의 글자·caret 도 가린다 — 판정은 셀마다 자기 격자 원점으로 픽셀 중심을 잰다.
+// 패널마다 패딩(`Quad.panel_padding_px`, 2026-10-10 — chrome-strategy §5.4): 가림도 그 패널이 **실제로 그려지는** 상자로 잰다. 토큰(12)으로 재면
+// 촘촘한 목록(패딩 1)이 보이지도 않는 바깥 11px 의 앞 글자까지 지웠다.
+test "ML14 패널마다 패딩 — 그림·그림자·앞 글자 가림이 모두 그 패널의 패딩(토큰이 아니라)으로 잰다" {
+    var tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
+    tk.space.modal_padding_px = 12;
+    const r: u16 = 8;
+    const find_runs = [_]chrome.draw.Run{.{ .text = "FFFFFFFFFFFFFFFFFFFF" }};
+    const find_ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 0, .y = 0, .w = 320, .h = 16 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r } } },
+        .{ .text = .{ .origin = .{ .x = 0, .y = 0 }, .runs = &find_runs, .role = .surface_fg } },
+    };
+    // 목록: x[19..99) y[5..37), 패딩 1 → 보이는 x[18..100) y[4..38).
+    const list_runs = [_]chrome.draw.Run{.{ .text = "M" }};
+    const list_ops = [_]chrome.draw.Op{
+        .{ .quad = .{ .rect = .{ .x = 19, .y = 5, .w = 80, .h = 32 }, .fill_role = .surface_bg, .corner_radii = .{ r, r, r, r }, .panel_padding_px = 1 } },
+        .{ .text = .{ .origin = .{ .x = 19, .y = 5 }, .runs = &list_runs, .role = .surface_fg } },
+    };
+    var raster = try lower(std.testing.allocator, &.{
+        .{ .layer = .modal, .ops = &find_ops },
+        .{ .layer = .modal, .ops = &list_ops },
+    }, &tk, 8, 16, false);
+    defer raster.deinit(std.testing.allocator);
+    // 찾기 글자 열 c 의 중심 x = 8c+4 — c=2(20)…c=11(92) 만 덮이고, c=1(12)·c=12(100) 은 남는다(토큰 12 면 c=1…13 이 덮였다).
+    var seen = [_]bool{false} ** 20;
+    for (raster.cells.items) |c| if (c.codepoint == 'F' and c.row == 0 and c.col < 20) {
+        seen[c.col] = true;
+    };
+    for (seen, 0..) |v, col| try std.testing.expectEqual(col < 2 or col >= 12, v);
+    // 그림과 그림자 — 찾기 막대는 토큰 12, 목록은 1.
+    try std.testing.expectEqual(@as(f32, -12), raster.gpu_quads.items[0].x);
+    try std.testing.expectEqual(@as(f32, 18), raster.gpu_quads.items[1].x);
+    try std.testing.expectEqual(@as(f32, 82), raster.gpu_quads.items[1].w);
+    try std.testing.expectEqual(@as(f32, 18), raster.gpu_shadows.items[1].x);
+}
+
 test "ML8 위상이 다른 뒤 패널도 앞 오버레이의 글자·caret 을 가리고, 닿지 않는 글자는 남긴다" {
     var tk = chrome.Tokens{ .palette = std.EnumArray(chrome.tokens.ColorRole, Rgb).initFill(.{ .r = 9, .g = 9, .b = 9 }) };
     tk.space.modal_padding_px = 12;

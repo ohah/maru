@@ -58,8 +58,8 @@ pub const Placement = struct {
     /// 넘쳐 **오른쪽 테두리가 창 끝에 먹혔다** — 우하단 우클릭 메뉴·긴 「보내기」 메뉴에서 실측(2026-10-07, Lab 이 제품
     /// 모양으로 그리기 시작하면서 드러났고, 실제 앱 1배율 캡처로도 확인). 셀이 그보다 크면(Retina 기본 글꼴 ≈16px, 셀
     /// 높이 16~18px) 넘치지는 않아도 여백이 한 셀보다 좁았다. 그 quad 를 내는 호출자만 `p.shape.modal_padding_px` 를 준다 —
-    /// `context_menu`·`hover_box`·`suggest_docs`·`rename_box`(입력 상자 `input_box` 가 그 quad 를 낸다 — 처음에 「패널
-    /// 없음」으로 잘못 분류했다, 적대적 검증 2026-10-07). 패널 quad 가 없는 상자(드롭다운·자동완성 목록)와 pane
+    /// `context_menu`·`hover_box`·`suggest_box`(2026-10-10 부터 패널을 낸다 — 패딩은 테두리 폭 `suggest_box.panelPadding`, `Quad.panel_padding_px`)·`suggest_docs`·`rename_box`(입력 상자 `input_box` 가 그 quad 를
+    /// 낸다 — 처음에 「패널 없음」으로 잘못 분류했다, 적대적 검증 2026-10-07). 패널 quad 가 없는 상자(드롭다운)와 pane
     /// 오버레이(이미지 프리뷰)는 0 이다. **판단은 그 컴포넌트 파일만 보지 말고 그것이 부르는 그리기 함수까지 본다.**
     visible_outset_px: u32 = 0,
 };

@@ -14882,7 +14882,9 @@ pub const AppSession = struct {
         // 호버 박스(tooling §8.2b): 상자 밖 눌림은 닫고 **흘려보낸다**, 상자 안은 삼킨다. 모달 게이트보다 앞이어도 무해하다 —
         // 모달이 열리는 순간 `refresh` 가 상자를 내리므로 둘이 함께 있는 프레임이 없다.
         // 안 그려진 상자 몫은 받지 않는다(`editorHelperTakesPointer` — 다른 오버레이 아래 숨은 완성 목록이 클릭을 받아 문서를 바꿨다).
-        if (kind == 1 and self.editorHelperTakesPointer(.suggest) and editor_ops.completion_client.mouseDown(self, x_px, y_px)) return; // §8.2g — 상자 안 클릭은 그 행을 고르고, 밖은 닫는다
+        // §8.2g — 상자 안 클릭은 그 행을 고르고, 밖은 닫는다. 겹클릭의 둘째·셋째 down(kind 4·5)도 목록이 먼저 본다 — 패딩에서 삼킨 첫 down 뒤
+        // 둘째 down 이 편집기로 흘러 패널 아래 낱말이 선택되고 목록이 닫혔다(§8.2g-e, 적대적 5회차).
+        if ((kind == 1 or kind == 4 or kind == 5) and self.editorHelperTakesPointer(.suggest) and editor_ops.completion_client.mouseDown(self, x_px, y_px)) return;
         if (kind == 1 and self.editorHelperTakesPointer(.hover_box) and editor_ops.hover_client.mouseDown(self, x_px, y_px)) return;
         // 상태바 위 클릭은 **삼킨다**(S3가 항목을 올리기 전까지 눌러도 아무 일도 없는 게 맞다). 안 막으면 아래
         // 사이드바·탭 바 hit-test가 상태바 좌표를 자기 것으로 받거나(상태바는 창 전폭이라 사이드바 아래를 지난다)

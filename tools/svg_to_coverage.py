@@ -141,6 +141,16 @@ ICONS = [
     ("search_filter", FIT_STANDARD, 0xF0031, "assets/icons/search-filter.svg"),
     ("search_stop", FIT_STANDARD, 0xF0032, "assets/icons/search-stop.svg"),
     ("check", FIT_STANDARD, 0xF0033, "assets/icons/check.svg"),
+    # 자동완성 목록의 kind 열(editor-surface-tooling §8.2g-e). 글자 한 칸(f·v·t…)은 무엇인지 읽히지 않아
+    # 그림으로 바꿨다. 색은 그리는 쪽이 kind 별 syntax 역할로 입힌다. Maru 자작(획 굵기 1.25).
+    ("kind_function", FIT_STANDARD, 0xF0034, "assets/icons/kind-function.svg"),
+    ("kind_variable", FIT_STANDARD, 0xF0035, "assets/icons/kind-variable.svg"),
+    ("kind_type", FIT_STANDARD, 0xF0036, "assets/icons/kind-type.svg"),
+    ("kind_keyword", FIT_STANDARD, 0xF0037, "assets/icons/kind-keyword.svg"),
+    ("kind_module", FIT_STANDARD, 0xF0038, "assets/icons/kind-module.svg"),
+    ("kind_snippet", FIT_STANDARD, 0xF0039, "assets/icons/kind-snippet.svg"),
+    ("kind_property", FIT_STANDARD, 0xF003A, "assets/icons/kind-property.svg"),
+    ("kind_word", FIT_STANDARD, 0xF003B, "assets/icons/kind-word.svg"),
 ]
 
 

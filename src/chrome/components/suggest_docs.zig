@@ -37,18 +37,26 @@ pub const State = struct {
     }
 };
 
-/// 패널 rect — 목록 상자 `beside` 옆. 펼치지 않았거나 줄이 없거나 자리가 없으면 null.
+/// 패널 rect — 목록 상자 `beside`(`suggest_box.boxRect` — 행 rect) 옆. 펼치지 않았거나 줄이 없거나 자리가 없으면 null.
+///
+/// 간격은 **보이는 두 패널 사이**에서 센다(§8.2g-e) — 목록도 패널 quad 를 내 사방 `suggest_box.panelPadding`(테두리 폭) 커져 그려지므로 그
+/// 패딩을 간격에 더하고, 이 패널의 패딩(`modal_padding_px` — 호버 상자와 같은 패널)은 `placeBeside` 의 `visible_outset_px` 가 센다. 목록 패딩을 안 세면 문서 패널이 목록 패딩 위에 겹친다.
+/// `beside` 를 키워 넘기지 않는 이유: 맞춤 축(동·서면 위, 남·북이면 왼쪽)은 rect 끼리 맞춰야 패딩이 같은 두 패널의 보이는 테두리가 맞는다.
 pub fn boxRect(state: *const State, lines: []const Line, beside: draw.Rect, p: props.ChromeProps) ?draw.Rect {
     if (!state.expanded) return null;
     const sz = hover_box.size(lines) orelse return null;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
-    const placed = popup_box.placeBeside(sz.cols * cw, sz.rows * ch, beside, gap_cols * cw, p.shape.modal_padding_px, p) orelse return null;
+    const pad = p.shape.modal_padding_px;
+    const placed = popup_box.placeBeside(sz.cols * cw, sz.rows * ch, beside, gap_cols * cw + suggest_box.panelPadding(p), pad, p) orelse return null;
     return placed.rect;
 }
 
+/// 포인터가 **보이는** 패널(패딩 포함) 안인가 — 패딩을 누르면 패널의 것이다(목록 `suggest_box.contains` 와 같은 규율).
 pub fn contains(state: *const State, lines: []const Line, beside: draw.Rect, p: props.ChromeProps, x_px: f64, y_px: f64) bool {
-    const r = boxRect(state, lines, beside, p) orelse return false;
+    const rect = boxRect(state, lines, beside, p) orelse return false;
+    const pad = p.shape.modal_padding_px;
+    const r = rect.outset(.{ .left = pad, .right = pad, .top = pad, .bottom = pad });
     return x_px >= @as(f64, @floatFromInt(r.x)) and x_px < @as(f64, @floatFromInt(r.x)) + @as(f64, @floatFromInt(r.w)) and
         y_px >= @as(f64, @floatFromInt(r.y)) and y_px < @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h));
 }
@@ -66,18 +74,24 @@ fn testProps() props.ChromeProps {
     return .{ .metrics = .{ .cell_width_px = 10, .cell_height_px = 20, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 } };
 }
 
-test "SGD2 패딩 — 문서 패널은 보이는 테두리(사방 패딩만큼 키운 것)가 목록과 한 칸 떨어진다(동·서)" {
-    // rich lowering 은 문서 패널 quad 를 사방 12px 키워 그린다(목록에는 패널 quad 가 없다). 간격을 rect 에서 세면
-    // 보이는 패널이 목록을 2px 덮는다(간격 10 < 패딩 12 — `popup_box.placeBeside` visible_outset_px, 2026-10-07).
+test "SGD2 패딩 — 문서 패널과 목록은 둘 다 사방 패딩만큼 커져 그려지고, 보이는 두 테두리가 한 칸 떨어진다(동·서); 패딩 안 포인터는 패널의 것 (§8.2g-e)" {
+    // rich lowering 은 두 패널 quad 를 다 사방 12px 키워 그린다(목록도 패널 quad 를 낸다 — §8.2g-e). 간격을 rect 에서 세면 보이는 두 패널이
+    // 겹친다(간격 10 < 패딩 12 + 12 — `popup_box.placeBeside` visible_outset_px, 2026-10-07; 목록 패딩은 2026-10-10).
     var p = testProps();
     p.shape.modal_padding_px = 12;
+    p.shape.border_width_px = 1; // 목록 패딩 = 테두리 폭(`suggest_box.panelPadding`), 문서 패널 패딩 = 12
     const lines = [_]Line{.{ .text = "fn lazy() -> i32" }};
     var st = State{};
     st.toggle();
     const east = boxRect(&st, &lines, .{ .x = 300, .y = 200, .w = 400, .h = 60 }, p).?;
-    try testing.expectEqual(@as(i32, 300 + 400 + 10), east.x - 12); // 보이는 좌단 = 목록 우단 + 한 칸
+    try testing.expectEqual(@as(i32, 300 + 400 + 1 + 10), east.x - 12); // 보이는 좌단 = 목록의 보이는 우단 + 한 칸
+    try testing.expectEqual(@as(i32, 200), east.y); // 위 맞춤 — 패딩이 같으니 rect 끼리 맞추면 보이는 테두리도 맞는다
     const west = boxRect(&st, &lines, .{ .x = 900, .y = 200, .w = 290, .h = 60 }, p).?; // 오른쪽엔 자리가 없다
-    try testing.expectEqual(@as(i32, 900 - 10), west.x + @as(i32, @intCast(west.w)) + 12); // 보이는 우단 = 목록 좌단 − 한 칸
+    try testing.expectEqual(@as(i32, 900 - 1 - 10), west.x + @as(i32, @intCast(west.w)) + 12); // 보이는 우단 = 목록의 보이는 좌단 − 한 칸
+    const beside = draw.Rect{ .x = 300, .y = 200, .w = 400, .h = 60 };
+    try testing.expect(contains(&st, &lines, beside, p, @floatFromInt(east.x - 12), @floatFromInt(east.y)));
+    try testing.expect(!contains(&st, &lines, beside, p, @floatFromInt(east.x - 13), @floatFromInt(east.y)));
+    try testing.expect(contains(&st, &lines, beside, p, @floatFromInt(east.x), @floatFromInt(east.y + @as(i32, @intCast(east.h)) + 11)));
 }
 
 test "SGD1 문서 패널 — 펼쳐야 서고, 목록 상자 오른쪽 한 칸 옆 위 맞춤, 크기는 hover_box 규칙, 줄은 rect 안에, 휠은 넘칠 때만, 자리 없으면 왼쪽 (§8.2g-d)" {

@@ -61,6 +61,14 @@
 #define MARU_ICON_SEARCH_FILTER 0xF0031u
 #define MARU_ICON_SEARCH_STOP 0xF0032u
 #define MARU_ICON_CHECK 0xF0033u
+#define MARU_ICON_KIND_FUNCTION 0xF0034u
+#define MARU_ICON_KIND_VARIABLE 0xF0035u
+#define MARU_ICON_KIND_TYPE 0xF0036u
+#define MARU_ICON_KIND_KEYWORD 0xF0037u
+#define MARU_ICON_KIND_MODULE 0xF0038u
+#define MARU_ICON_KIND_SNIPPET 0xF0039u
+#define MARU_ICON_KIND_PROPERTY 0xF003Au
+#define MARU_ICON_KIND_WORD 0xF003Bu
 
 static inline bool maru_is_registered_icon_cp(uint32_t cp) {
     switch (cp) {
@@ -114,6 +122,14 @@ static inline bool maru_is_registered_icon_cp(uint32_t cp) {
         case 0xF0031u:
         case 0xF0032u:
         case 0xF0033u:
+        case 0xF0034u:
+        case 0xF0035u:
+        case 0xF0036u:
+        case 0xF0037u:
+        case 0xF0038u:
+        case 0xF0039u:
+        case 0xF003Au:
+        case 0xF003Bu:
             return true;
         default:
             return false;

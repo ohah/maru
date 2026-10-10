@@ -103,33 +103,78 @@ pub fn parse(allocator: std.mem.Allocator, result: ?std.json.Value) Error!List {
 /// 정확한 접두사(대소문자까지) > 접두사(무시) > 낱말 경계 일치(`_`·camelCase 뒤) > 연속 일치 > 나머지 — ①-a 의 「대소문자 맞는 접두사 우선」
 /// (clangd 실측: `pri` 에 `•PRId16` 가 `printf` 를 앞섰다)이 그대로 최상위다. 빈 접두사는 0(전부 같다).
 pub fn fuzzyScore(filter: []const u8, prefix: []const u8) ?u32 {
+    return fuzzyMatch(filter, prefix, null, null);
+}
+
+/// `fuzzyScore` 와 **같은 탐욕 걸음**으로 맞춘 자리(`filter` 의 글자 첫 바이트 첨자, 오름차순 — 접두사 글자 하나에 하나)를 `out` 에 쓴다 —
+/// 목록이 일치 글자를 강조한다(§8.2g-e). 걸음 규칙이 하나라 「무엇을 맞췄나」의 판정이 필터와 갈리지 않는다(순위는 `filterText` 로,
+/// 강조는 호출자가 고른 글 — 제품은 보이는 label — 로 잰다). 안 맞거나 `out` 이 접두사 **바이트 수**보다 짧으면 `null`(글자 수 ≤ 바이트 수라 그만큼이면 늘 넉넉하다), 빈 접두사는 빈 조각.
+pub fn matchPositions(filter: []const u8, prefix: []const u8, out: []u32) ?[]const u32 {
+    if (prefix.len > out.len) return null; // 글자 수 ≤ 바이트 수 — 바이트 수만큼이면 늘 모자라지 않다
+    var n: usize = 0;
+    _ = fuzzyMatch(filter, prefix, out[0..prefix.len], &n) orelse return null;
+    return out[0..n];
+}
+
+/// 걸음은 **글자 단위**다 — ASCII 는 대소문자를 무시하고, 여러 바이트 글자(한글 등)는 바이트 전부가 같아야 맞는다. 예전에는 바이트끼리
+/// 맞춰 `나`(EB 82 98)가 `난하`(EB 82 9C · ED 95 98)의 바이트 셋에 흩어져 맞았다 — 그 오탐이 강조(§8.2g-e)로 화면에 드러났다(적대적 1회차).
+fn fuzzyMatch(filter: []const u8, prefix: []const u8, positions: ?[]u32, count: ?*usize) ?u32 {
     if (prefix.len == 0) return 0;
-    if (std.mem.startsWith(u8, filter, prefix)) return 1_000_000;
-    if (startsWithIgnoreCase(filter, prefix)) return 900_000;
+    // 접두사 둘(대소문자까지·무시)은 걸음 없이 정한다 — 자리는 접두사 글자들의 시작(온전한 UTF-8 이면 걸음과 같은 자리).
+    const exact_head: ?u32 = if (std.mem.startsWith(u8, filter, prefix)) 1_000_000 else if (startsWithIgnoreCase(filter, prefix)) 900_000 else null;
+    if (exact_head) |h| {
+        // 접두사면 걸음 없이 자리 = 접두사 글자들의 시작 — 걸음에 맡기면 잘린 접두사(`\xEB`)가 filter 의 온전한 글자(`나`)와 안 맞아 null 이
+        // 됐다(예전 바이트 걸음은 1_000_000 — 적대적 6회차).
+        var n: usize = 0;
+        var i: usize = 0;
+        while (i < prefix.len) : (n += 1) {
+            if (positions) |pos| pos[n] = @intCast(@min(i, std.math.maxInt(u32)));
+            i += utf8Len(prefix, i);
+        }
+        if (count) |c| c.* = n;
+        return h;
+    }
     // 부분열 — 앞에서부터 탐욕으로 맞추되 경계·연속 가산.
     var score: u32 = 0;
     var fi: usize = 0;
-    var prev_match: ?usize = null;
-    for (prefix) |pc| {
+    var prev_end: ?usize = null; // 앞 일치 글자 **다음** 바이트 — 연속은 글자 단위로 잰다
+    var pi: usize = 0;
+    var k: usize = 0;
+    while (pi < prefix.len) : (k += 1) {
+        const plen = utf8Len(prefix, pi);
+        const pch = prefix[pi .. pi + plen];
+        pi += plen;
         var found: ?usize = null;
-        while (fi < filter.len) : (fi += 1) {
-            if (std.ascii.toLower(filter[fi]) == std.ascii.toLower(pc)) {
-                found = fi;
-                fi += 1;
+        while (fi < filter.len) {
+            const flen = utf8Len(filter, fi);
+            const same = if (plen == 1 and flen == 1) std.ascii.toLower(filter[fi]) == std.ascii.toLower(pch[0]) else std.mem.eql(u8, filter[fi .. fi + flen], pch);
+            fi += flen;
+            if (same) {
+                found = fi - flen;
                 break;
             }
         }
         const at = found orelse return null;
+        if (positions) |pos| pos[k] = @intCast(@min(at, std.math.maxInt(u32)));
         score += 10;
-        if (filter[at] == pc) score += 2; // 대소문자까지
+        if (filter[at] == pch[0]) score += 2; // 대소문자까지
         if (at == 0 or filter[at - 1] == '_' or (std.ascii.isUpper(filter[at]) and std.ascii.isLower(filter[at - 1]))) score += 30; // 낱말 경계
-        if (prev_match) |pm| if (pm + 1 == at) {
-            score += 20; // 연속
+        if (prev_end) |pe| if (pe == at) {
+            score += 20; // 연속 — 여러 바이트 글자도(예전 `pm + 1 == at` 은 한글에서 늘 거짓이었다, 적대적 4회차)
         };
-        prev_match = at;
+        prev_end = at + utf8Len(filter, at);
     }
-    // 짧은 filter 가 같은 점수면 앞 — 접두사가 차지하는 비율이 크다.
-    return score * 1000 + @as(u32, @intCast(1000 -| @min(filter.len, 999)));
+    if (count) |c| c.* = k;
+    // 짧은 filter 가 같은 점수면 앞 — 접두사가 차지하는 비율이 크다. 포화 — 아주 긴 접두사(수만 글자)에서 넘치지 않는다.
+    return score *| 1000 +| @as(u32, @intCast(1000 -| @min(filter.len, 999)));
+}
+
+/// `bytes[i]` 에서 시작하는 글자의 바이트 수 — 깨진 바이트·잘린 꼬리는 1(그 바이트 하나가 한 글자).
+fn utf8Len(bytes: []const u8, i: usize) usize {
+    const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch return 1;
+    if (i + n > bytes.len) return 1;
+    _ = std.unicode.utf8Decode(bytes[i .. i + n]) catch return 1;
+    return n;
 }
 
 /// 후보의 **첨자**를 점수 내림차순, 같으면 `sort`(같으면 label) 순으로. 빈 접두사면 전부(점수 0).
@@ -161,7 +206,7 @@ pub fn filterSort(allocator: std.mem.Allocator, list: List, prefix: []const u8) 
 /// 버퍼 단어의 kind(LSP 숫자 밖 — `Text` 는 1 이지만 우리 것은 따로 표시한다).
 pub const word_kind: u8 = 255;
 
-/// kind 글자(§8.2g-b) — 등폭 상자의 한 글자 열.
+/// kind 글자(§8.2g-b) — 플랫폼↔컴포넌트 사이 값이다. 화면에는 글자가 아니라 이 글자가 고르는 아이콘·색이 선다(`suggest_box.kindStyle`, §8.2g-e).
 pub fn kindGlyph(kind: u8) u8 {
     return switch (kind) {
         2, 3, 4 => 'f', // Method · Function · Constructor
@@ -534,6 +579,37 @@ test "CPL6 fuzzy — 부분열이면 후보, 정확한 접두사 > 무시 접두
     const all = try filterSort(a, l, "");
     defer a.free(all);
     try testing.expectEqual(@as(usize, 6), all.len);
+}
+
+test "CPL10 일치 자리 — 점수와 같은 탐욕 걸음: 접두사는 0..n, 부분열은 첫 등장, 대소문자 무시, 안 맞으면 null, 빈 접두사는 빈 조각 (§8.2g-e)" {
+    var buf: [8]u32 = undefined;
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, matchPositions("printf", "pri", &buf).?); // 정확 접두사
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, matchPositions("PRId16", "pri", &buf).?); // 무시 접두사
+    try testing.expectEqualSlices(u32, &.{ 0, 2, 4 }, matchPositions("printf", "pit", &buf).?); // 부분열 — 탐욕(첫 등장): p·i·t
+    try testing.expectEqualSlices(u32, &.{ 0, 6, 11 }, matchPositions("parse_tree_file", "ptf", &buf).?); // 경계 가산이 있어도 자리는 탐욕 그대로(점수 순서와 무관)
+    try testing.expect(matchPositions("printf", "prx", &buf) == null);
+    try testing.expectEqual(@as(usize, 0), matchPositions("printf", "", &buf).?.len);
+    try testing.expect(matchPositions("printf", "printf_too_long", buf[0..4]) == null); // out 이 짧으면 자리를 못 싣는다
+    // 점수와 갈리지 않는다 — 자리가 있으면 점수도 있고 그 반대도.
+    for ([_][]const u8{ "pri", "pit", "ptf", "prx", "PRI", "f" }) |pre| {
+        try testing.expectEqual(fuzzyScore("printf", pre) != null, matchPositions("printf", pre, &buf) != null);
+    }
+    // 여러 바이트 글자는 **글자 단위**로 맞춘다 — `나` 는 `난하` 에 없다(바이트로 맞추면 EB·82 가 `난` 에서, 98 이 `하` 에서 맞았다, 적대적 1회차).
+    try testing.expect(matchPositions("난하", "나", &buf) == null);
+    try testing.expect(fuzzyScore("난하", "나") == null);
+    try testing.expectEqualSlices(u32, &.{3}, matchPositions("가나다", "나", &buf).?); // 자리는 글자 첫 바이트, 접두사 글자 하나에 하나
+    try testing.expectEqualSlices(u32, &.{ 0, 3, 6 }, matchPositions("pr_라벨", "p라벨", &buf).?);
+    try testing.expectEqualSlices(u32, &.{ 0, 1, 2 }, matchPositions("pr_라벨", "pr_", &buf).?); // ASCII 는 그대로 바이트=글자
+    // 연속 가산도 글자 단위 — `가나` 가 붙은 쪽이 흩어진 쪽을 앞선다(바이트로 재면 둘이 같아 짧은 쪽이 이겼다, 적대적 4회차).
+    try testing.expect(fuzzyScore("x가나zz", "가나").? > fuzzyScore("x가y나", "가나").?);
+    // 깨진·잘린 바이트는 한 바이트가 한 글자 — 끝에서 잘린 꼬리를 넘어 읽지 않는다(패닉 없음).
+    try testing.expect(fuzzyScore("a\xEB", "a") != null);
+    try testing.expectEqualSlices(u32, &.{0}, matchPositions("\xEB\x82", "\xEB", &buf).?);
+    try testing.expect(matchPositions("a\xEB", "\xEB\x82", &buf) == null);
+    // 잘린 접두사도 접두사다 — 점수 1_000_000, 자리는 접두사 글자 시작(적대적 6회차: 걸음에 맡기면 null).
+    try testing.expectEqual(@as(?u32, 1_000_000), fuzzyScore("\xEB\x82\x98", "\xEB"));
+    try testing.expectEqualSlices(u32, &.{0}, matchPositions("\xEB\x82\x98", "\xEB", &buf).?);
+    try testing.expectEqualSlices(u32, &.{ 0, 3 }, matchPositions("가나다", "가나", &buf).?); // 온전한 접두사는 걸음과 같은 자리
 }
 
 test "CPL7 kind 글자와 resolve 합치기 (§8.2g-b)" {

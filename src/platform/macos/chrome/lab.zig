@@ -299,6 +299,11 @@ pub const ScenarioId = enum {
     /// (`popup_box` A44) 평범한 캡처로는 구분되지 않는다 — 앵커에 **두께가 있고**(control 한 줄)
     /// 아래가 모자랄 때만 다르다. 그래서 이 시나리오가 없으면 `below_clamp` 는 그림으로 증명되지 않는다.
     dropdown_bottom_clamp,
+    /// **자동완성 목록**(editor-surface-tooling §8.2g-e — 디자인 시스템 목록). 제품과 같은 `suggest_box.view` 를 부르고, 일치 자리는 제품과
+    /// 같은 `completion.matchPositions` 로 잰다. 한 캡처에 kind 아이콘 여덟(색까지) · 일치 글자(접두사·흩어진 부분열) · 꼬리·오른쪽 ·
+    /// 선택 알약(둘째 행) · 한글 label 이 든다. 이 컴포넌트에는 Lab 시나리오가 없었다 — 패널·알약·아이콘 열은 op 판정자만 보았고,
+    /// 셀 lowering 뒤 글자가 알약 위에 서는지·아이콘이 2칸을 차지하는지는 그림만 증언한다.
+    suggest_list,
     /// N1 §3.5 — **디스크에서 읽은 파일이 화면에 뜬다.** 앞의 편집기 시나리오들은 전부 소스에 박은
     /// 배열을 그리므로, `openPath`가 실제로 무엇을 돌려주는지는 증명하지 않는다. 여기서는 호출자가
     /// 파일을 써서 `openPath`로 읽고 그 줄들을 그대로 넘긴다(`Scenario.lines`).
@@ -459,6 +464,7 @@ pub fn buildFrame(
         .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome => buildFileTreeFrame(scenario, tokens, buffers),
         .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right => buildContextMenuFrame(scenario, tokens, buffers),
         .dropdown_open, .dropdown_bottom_clamp => buildDropdownFrame(scenario, tokens, buffers),
+        .suggest_list => buildSuggestListFrame(scenario, tokens, buffers),
         .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow => buildConfirmFrame(scenario, tokens, buffers),
         .notice_long_message => buildNoticeFrame(scenario, tokens, buffers),
         .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline => buildEditorGutterFrame(scenario, buffers),
@@ -1684,7 +1690,7 @@ fn buildDockFrame(
             .sticky_at_rest, .sticky_pinned, .sticky_pushed => &two_groups,
             .empty, .loading, .sidebar_status_strip => &.{}, // strip 시나리오는 목록이 비어야 경계만 남는다
             // editor_gutter는 buildEditorGutterFrame이 처리한다 — 도크 목록을 타지 않는다.
-            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
+            .context_menu_checked, .context_menu_unchecked, .context_menu_send, .context_menu_send_helper, .context_menu_bottom_right, .confirm_long_message, .confirm_lsp_trust, .confirm_lsp_trust_narrow, .confirm_save_conflict, .confirm_paste_narrow, .notice_long_message, .dropdown_open, .dropdown_bottom_clamp, .suggest_list, .scm_rows, .scm_history, .scm_turn_badges, .scm_row_hover, .scm_conflict_hover, .scm_conflict_resolved_hover, .scm_repo_hover, .scm_scrolled, .scm_commit_edit, .scm_blocker, .scm_small_font, .dock_over_status_bar, .file_tree_rows, .file_tree_row_hover, .file_tree_scrolled, .file_tree_over_chrome, .detail_loading, .detail_ready, .detail_stale, .detail_unavailable, .editor_gutter, .editor_widget_row, .editor_conflict, .editor_scrolled, .editor_font_large, .editor_hazard, .editor_wide_glyph, .editor_wrap, .editor_hscroll, .editor_wrap_scrolled, .editor_wrap_stale_scroll, .editor_folded, .editor_real_file, .editor_typescript, .editor_minimap, .editor_selection, .editor_whitespace_inlay, .editor_find, .editor_diagnostics, .editor_caret_bar, .editor_caret_block, .editor_caret_underline, .editor_diff, .editor_diff_scrolled, .editor_diff_selection, .editor_merge_panes, .editor_merge_narrow, .editor_merge_scrolled, .editor_merge_hscrolled, .editor_merge_caret => unreachable,
         },
     };
     const session_frame = try session_dock.build.build(dock_props, .{
@@ -1929,6 +1935,57 @@ fn buildNoticeFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: F
         // notice 는 hit-test 가 없다(키보드 전용) — 빈 트리를 낸다.
         .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
         .draws = .{ .layer = chrome.components.notice.layer, .ops = ops.items },
+    };
+}
+
+/// 자동완성 목록 한 프레임(`ScenarioId.suggest_list`). 행 구성·kind 글자는 Lab 이 고르고, 배치·아이콘·색·일치 run 은 제품 코드가 정한다.
+fn buildSuggestListFrame(scenario: Scenario, tokens: *const chrome.Tokens, buffers: FrameBuffers) !Frame {
+    const arena = buffers.arena orelse return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = .sidebar, .ops = buffers.ops[0..0] },
+    };
+    const completion = maru.session.editor.lsp.completion;
+    const suggest_box = chrome.components.suggest_box;
+    // 접두사 `pr` — 접두사 일치(대소문자 무시 포함)와 흩어진 부분열(`parse_rows`)이 함께 선다. kind 여덟이 다 들어 아이콘·색이 한 그림에 든다.
+    const prefix = "pr";
+    const Spec = struct { label: []const u8, kind: u8, label_detail: []const u8 = "", detail: []const u8 = "" };
+    const specs = [_]Spec{
+        .{ .label = "print_count", .kind = 'f', .label_detail = "(int count)", .detail = "int" },
+        .{ .label = "PrintStyle", .kind = 't', .detail = "enum" },
+        .{ .label = "prev_total", .kind = 'v', .detail = "int" },
+        .{ .label = "private", .kind = 'k' },
+        .{ .label = "process", .kind = 'm', .detail = "module" },
+        .{ .label = "pragma once", .kind = 's', .detail = "snippet" },
+        .{ .label = "priority", .kind = 'p', .detail = "u8" },
+        .{ .label = "parse_rows", .kind = 'w' },
+        .{ .label = "pr_라벨", .kind = 'w' }, // 표시 문구가 아니라 픽스처 낱말(사용자 글) — i18n 원장 46(`tests/boundary/i18n_literals.zig`)
+    };
+    const rows = try arena.alloc(suggest_box.Row, specs.len);
+    for (specs, rows) |sp, *r| {
+        const buf = try arena.alloc(u32, prefix.len);
+        r.* = .{ .label = sp.label, .kind = sp.kind, .label_detail = sp.label_detail, .detail = sp.detail, .match = completion.matchPositions(sp.label, prefix, buf) orelse &.{} };
+    }
+    var state: suggest_box.State = .{};
+    const p: chrome.props.ChromeProps = .{ .metrics = .{
+        .cell_width_px = scenario.cell_w_px,
+        .cell_height_px = scenario.cell_h_px,
+        .sidebar_width_px = 0,
+        .backing_width_px = @intFromFloat(scenario.viewport_px.width),
+        .backing_height_px = @intFromFloat(scenario.viewport_px.height),
+    }, .shape = overlayShape(tokens) };
+    // 앵커 = 낱말 첫 글자 셀(제품은 편집기 caret 줄). **상자 rect 가 셀 배수에 서게** 둔다 — 목록은 앵커 줄 아래 패딩(`panelPadding`)만큼 떠서
+    // (`boxRect`) 그대로면 셀 배수에서 어긋난다. 제품은 오버레이를 묶음마다 자기 원점의 격자로 내려(§5.3) 어긋나도 아이콘이 제자리지만,
+    // Lab 은 글자를 측정 경로로, 아이콘을 **원점 0 인 셀 격자**(`buildIconTextDrawList`)로 그려 그 원점이 없다 — 어긋난 자리면 아이콘만
+    // 위 칸으로 내려앉는다(2026-10-10 첫 캡처에서 아이콘이 한 행 위에 섰다; 실제 앱 캡처는 제자리). 그 한계를 피해 제품 그림과 같게 찍는다.
+    const ch_i: i32 = @intCast(scenario.cell_h_px);
+    // 앵커 줄 = 1행(높이 ch), 상자는 그 아래 패딩만큼 → 상자 윗단 = (앵커 y + ch + 패딩) = 3·ch.
+    state.show(@intCast(scenario.cell_w_px * 4), 2 * ch_i - @as(i32, suggest_box.panelPadding(p)), scenario.cell_h_px);
+    state.reset(1, rows.len); // 선택 = 둘째 행 — 첫 행이면 「기본」과 구별되지 않는다
+    var ops: std.ArrayList(chrome.draw.Op) = .empty;
+    try suggest_box.view(&state, rows, p, tokens, arena, &ops);
+    return .{
+        .tree = .{ .entries = buffers.entries[0..0], .generation = 0 },
+        .draws = .{ .layer = suggest_box.layer, .ops = ops.items, .independent_panel = suggest_box.independent_panel },
     };
 }
 

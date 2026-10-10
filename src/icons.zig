@@ -118,6 +118,22 @@ pub const Icon = enum(u21) {
     search_stop = 0xF0032,
     /// standard: assets/icons/check.svg (0xF0033)
     check = 0xF0033,
+    /// standard: assets/icons/kind-function.svg (0xF0034)
+    kind_function = 0xF0034,
+    /// standard: assets/icons/kind-variable.svg (0xF0035)
+    kind_variable = 0xF0035,
+    /// standard: assets/icons/kind-type.svg (0xF0036)
+    kind_type = 0xF0036,
+    /// standard: assets/icons/kind-keyword.svg (0xF0037)
+    kind_keyword = 0xF0037,
+    /// standard: assets/icons/kind-module.svg (0xF0038)
+    kind_module = 0xF0038,
+    /// standard: assets/icons/kind-snippet.svg (0xF0039)
+    kind_snippet = 0xF0039,
+    /// standard: assets/icons/kind-property.svg (0xF003A)
+    kind_property = 0xF003A,
+    /// standard: assets/icons/kind-word.svg (0xF003B)
+    kind_word = 0xF003B,
 };
 
 /// 이 아이콘에 그 fit의 **자산이 실재하는가**. `codepointFit`은 없는 조합을 기본으로 폴백하므로,
@@ -171,6 +187,14 @@ pub fn hasFit(icon: Icon, fit: Fit) bool {
         .search_filter => fit == .standard,
         .search_stop => fit == .standard,
         .check => fit == .standard,
+        .kind_function => fit == .standard,
+        .kind_variable => fit == .standard,
+        .kind_type => fit == .standard,
+        .kind_keyword => fit == .standard,
+        .kind_module => fit == .standard,
+        .kind_snippet => fit == .standard,
+        .kind_property => fit == .standard,
+        .kind_word => fit == .standard,
     };
 }
 
@@ -244,6 +268,14 @@ pub fn utf8(icon: Icon) []const u8 {
         .search_filter => "\u{F0031}",
         .search_stop => "\u{F0032}",
         .check => "\u{F0033}",
+        .kind_function => "\u{F0034}",
+        .kind_variable => "\u{F0035}",
+        .kind_type => "\u{F0036}",
+        .kind_keyword => "\u{F0037}",
+        .kind_module => "\u{F0038}",
+        .kind_snippet => "\u{F0039}",
+        .kind_property => "\u{F003A}",
+        .kind_word => "\u{F003B}",
     };
 }
 
@@ -317,6 +349,14 @@ pub fn fromCodepoint(cp: u21) ?Resolved {
         0xF0031 => .{ .icon = .search_filter, .fit = .standard },
         0xF0032 => .{ .icon = .search_stop, .fit = .standard },
         0xF0033 => .{ .icon = .check, .fit = .standard },
+        0xF0034 => .{ .icon = .kind_function, .fit = .standard },
+        0xF0035 => .{ .icon = .kind_variable, .fit = .standard },
+        0xF0036 => .{ .icon = .kind_type, .fit = .standard },
+        0xF0037 => .{ .icon = .kind_keyword, .fit = .standard },
+        0xF0038 => .{ .icon = .kind_module, .fit = .standard },
+        0xF0039 => .{ .icon = .kind_snippet, .fit = .standard },
+        0xF003A => .{ .icon = .kind_property, .fit = .standard },
+        0xF003B => .{ .icon = .kind_word, .fit = .standard },
         else => null,
     };
 }

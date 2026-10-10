@@ -3441,9 +3441,50 @@ fn devtoolsData(gpa: std.mem.Allocator, v: ws.message.DevtoolsData) void {
     };
 }
 
+/// 짝 없는 UTF-16 서로게이트 이스케이프(`\uD83D` 하나만)를 `\uFFFD` 로 바꾼다(같은 길이 — 제자리). Chromium 의 DevTools JSON 은
+/// 페이지 글의 짝 없는 서로게이트를 그대로 싣는데(실측 — 이모지를 잘못 자른 글의 접근성 트리), Zig 의 JSON 검사는 그것을 문법
+/// 오류로 거부해 그 페이지의 snapshot 이 통째로 실패했다(W9b①b-1 적대 리뷰 2 회차). 문자열 밖의 `\` 는 JSON 에 없다.
+fn sanitizeLoneSurrogates(bytes: []u8) void {
+    var i: usize = 0;
+    while (i + 1 < bytes.len) {
+        if (bytes[i] != '\\') {
+            i += 1;
+            continue;
+        }
+        if (bytes[i + 1] != 'u' or i + 6 > bytes.len) {
+            i += 2; // 다른 이스케이프(`\\`·`\"` 등) — 다음 바이트를 건너뛴다
+            continue;
+        }
+        const unit = std.fmt.parseInt(u16, bytes[i + 2 .. i + 6], 16) catch {
+            i += 2;
+            continue;
+        };
+        const is_high = unit >= 0xD800 and unit <= 0xDBFF;
+        const is_low = unit >= 0xDC00 and unit <= 0xDFFF;
+        if (is_high and i + 12 <= bytes.len and bytes[i + 6] == '\\' and bytes[i + 7] == 'u') {
+            const next = std.fmt.parseInt(u16, bytes[i + 8 .. i + 12], 16) catch 0;
+            if (next >= 0xDC00 and next <= 0xDFFF) {
+                i += 12; // 짝이 맞는 쌍
+                continue;
+            }
+        }
+        if (is_high or is_low) @memcpy(bytes[i + 2 .. i + 6], "FFFD");
+        i += 6;
+    }
+}
+
+test "짝 없는 서로게이트 이스케이프만 FFFD 로 — 짝 맞는 쌍·다른 이스케이프는 그대로, 결과는 JSON 검사를 지난다" {
+    var buf = "{\"a\":\"x\\ud83dy\",\"b\":\"\\ud83d\\ude00\",\"c\":\"\\\\ud800\",\"d\":\"\\udc00\"}".*;
+    try std.testing.expect(!(try std.json.validate(std.testing.allocator, &buf)));
+    sanitizeLoneSurrogates(&buf);
+    try std.testing.expectEqualStrings("{\"a\":\"x\\uFFFDy\",\"b\":\"\\ud83d\\ude00\",\"c\":\"\\\\ud800\",\"d\":\"\\uFFFD\"}", &buf);
+    try std.testing.expect(try std.json.validate(std.testing.allocator, &buf));
+}
+
 fn devtoolsResult(gpa: std.mem.Allocator, v: ws.message.DevtoolsResult) void {
     const i = devtoolsFind(v.browser, v.call) orelse return;
     const p = &devtools_pending[i].?;
+    sanitizeLoneSurrogates(p.result.items);
     const outcome: DevtoolsOutcome = switch (v.status) {
         .ok, .cdp_error => blk: {
             if (p.overflow) break :blk .too_large;

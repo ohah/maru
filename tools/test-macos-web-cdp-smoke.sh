@@ -20,6 +20,10 @@
 #                   잘린 칸과 원래 값 뒤에 덧붙은 칸(입력 때 원래 값을 앞에 다시 붙인다)은 「did not take」 · **닫힌** shadow root 안의
 #                   칸(snapshot 의 ref)에도 넣는다(초점 검사가 거짓 「focus moved」 를 내지 않는다)
 #   scroll-real     scroll 이 페이지를 실제로 굴린다(scrollY — 신호)
+#   hover           hover 가 그 요소에 진짜 포인터 이동(isTrusted mouseover)을 준다 · 없는 요소는 not ok(W9b①b-2)
+#   press           요소에 Shift+a → 「A」(isTrusted keydown) · Meta+a(편집 명령 selectAll) 뒤 대상 없이 x → 값이 「x」로 바뀐다 ·
+#                   대상 없이 Tab → 초점이 다음 칸으로 · 틀린 키 이름은 invalid params. 붙여넣기(Meta+v)는 사용자 클립보드를 쓰므로 스모크에
+#                   넣지 않는다
 #   back·forward    링크로 다음 문서에 간 뒤 뒤로 → 첫 문서, 앞으로 → 다음 문서, 더 앞으로 → not ok
 #   reload          새로고침 → ok, 문서가 다시 불린다(서버가 받은 요청 수)
 #   wait-nav        기다리는 **도중** 페이지가 다른 문서로 옮겨 가도(0.8 초 뒤 이동, 그 문서가 1 초 뒤 요소를 만든다) 그 요소를 찾는다
@@ -64,6 +68,9 @@ cat > "$root/www/a.html" <<'HTML'
 <input id=in value="old" style="position:absolute;left:20px;top:360px" oninput="hit('in-'+event.isTrusted+'-'+encodeURIComponent(this.value))">
 <button id=mk style="position:absolute;left:20px;top:420px" onclick="setTimeout(function(){document.body.insertAdjacentHTML('beforeend','<p id=late2>late2</p>')},2000)">Make</button>
 <input id=ro readonly value="ro" style="position:absolute;left:20px;top:460px">
+<button id=hv style="position:absolute;left:420px;top:300px" onmouseover="hit('hv-'+event.isTrusted)">Hov</button>
+<input id=pk style="position:absolute;left:420px;top:340px" onkeydown="hit('pkd-'+event.key+'-'+event.isTrusted)" oninput="hit('pkv-'+encodeURIComponent(this.value)+'-'+event.isTrusted)">
+<input id=pk2 style="position:absolute;left:420px;top:380px" onfocus="hit('pk2focus')">
 <input id=ro2 readonly value="old" style="position:absolute;left:220px;top:460px">
 <input id=fs style="position:absolute;left:20px;top:500px" onfocus="document.getElementById('in').focus()">
 <input id=up value="xyz" style="position:absolute;left:20px;top:540px" oninput="this.value=this.value.toUpperCase().slice(0,3);hit('up-'+this.value)">
@@ -166,6 +173,17 @@ run type-ro type --selector '#ro' --text 'x'
 run type-ro2 type --selector '#ro2' --text 'x'
 run type-fs type --selector '#fs' --text 'steal'
 run type-up type --selector '#up' --text 'abcd'
+run hover hover --selector '#hv'
+hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
+run hover-missing hover --selector '#none'
+run press-a press --selector '#pk' --key 'Shift+a'
+hit_seen 'pkv-A-true' && echo yes > "\$out/pk-a" || echo no > "\$out/pk-a"
+run press-all press --selector '#pk' --key 'Meta+a'
+run press-x press --key 'x'
+hit_seen 'pkv-x-true' && echo yes > "\$out/pk-x" || echo no > "\$out/pk-x"
+run press-tab press --key 'Tab'
+hit_seen pk2focus && echo yes > "\$out/pk-tab" || echo no > "\$out/pk-tab"
+run press-bad press --key 'Hyper+a'
 hit_seen up-ABC && echo yes > "\$out/up-hit" || echo no > "\$out/up-hit"
 run type-ml type --selector '#ml' --text 'abcd'
 run type-ap type --selector '#ap' --text 'X'
@@ -266,6 +284,14 @@ ok type-em && [ "$(cat "$out/em-hit")" = yes ] || fail "an email field that trim
 [ -n "$(cat "$out/shref")" ] || fail "snapshot did not list the field inside the closed shadow root ($(tr '\n' ' ' < "$out/snapshot" | cut -c1-400))"
 ok type-sh && [ "$(cat "$out/sh-hit")" = yes ] || fail "typing into a field inside a closed shadow root did not go in for real ($(tr '\n' ' ' < "$out/type-sh"))"
 echo "PASS type-shaped: a reshaping field and an email field's trim are ok, a maxlength cut and an append are refused, a field inside a closed shadow root takes the text"
+ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"
+grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was not not ok ($(tr '\n' ' ' < "$out/hover-missing"))"
+echo "PASS hover: the element got a real (isTrusted) mouseover, a missing element is not ok"
+ok press-a && [ "$(cat "$out/pk-a")" = yes ] || fail "press Shift+a on the field did not type A with a real key ($(tr '\n' ' ' < "$out/press-a") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
+ok press-all && ok press-x && [ "$(cat "$out/pk-x")" = yes ] || fail "Meta+a then x (where the focus is) did not replace the value ($(tr '\n' ' ' < "$out/press-all") · $(tr '\n' ' ' < "$out/press-x") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
+ok press-tab && [ "$(cat "$out/pk-tab")" = yes ] || fail "Tab (where the focus is) did not move the focus to the next field ($(tr '\n' ' ' < "$out/press-tab"))"
+grep -q '(-32602)' "$out/press-bad" || fail "an unknown key name was not invalid params ($(tr '\n' ' ' < "$out/press-bad"))"
+echo "PASS press: Shift+a typed A, Meta+a selected all and x replaced it, Tab moved the focus, an unknown key name is invalid params"
 ok scroll2 && [ "$(cat "$out/sy-hit")" = yes ] || fail "scroll did not move the page ($(tr '\n' ' ' < "$out/scroll2"))"
 echo "PASS scroll-real: scroll moved the page down to the element"
 ok click-next && [ "$(cat "$out/next-title")" = yes ] || fail "clicking the link did not open the next page ($(tr '\n' ' ' < "$out/next-title"))"

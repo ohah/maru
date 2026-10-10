@@ -21,10 +21,11 @@
 
 const std = @import("std");
 const web_cdp_snapshot = @import("web_cdp_snapshot.zig");
+const web_cdp_keys = @import("web_cdp_keys.zig");
 
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
-pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot };
+pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press };
 
 /// 다음에 할 일 — CDP 호출 하나(`params` 는 소유 — 부른 쪽이 놓는다) 또는 끝(`result` 소유).
 pub const Step = union(enum) {
@@ -52,7 +53,7 @@ const max_boxes = 64;
 pub const wait_first_interval_ms: u32 = 50;
 pub const wait_max_interval_ms: u32 = 500;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping };
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up };
 
 pub const Op = struct {
     kind: Kind,
@@ -91,6 +92,9 @@ pub const Op = struct {
     before_len: i64 = 0,
     /// snapshot 선택.
     snap: web_cdp_snapshot.Options = .{},
+    /// press — 키 이름(소유 — 이벤트를 만들 때마다 `web_cdp_keys` 로 다시 푼다)과 대상(없으면 지금 초점에 누른다).
+    press_key: ?[]u8 = null,
+    press_target: bool = false,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
@@ -98,6 +102,7 @@ pub const Op = struct {
         if (self.text) |s| gpa.free(s);
         if (self.wait_selector) |s| gpa.free(s);
         if (self.object_id) |s| gpa.free(s);
+        if (self.press_key) |s| gpa.free(s);
         self.* = undefined;
     }
 
@@ -149,6 +154,16 @@ pub const Op = struct {
                 if (jsonStringBytes(t.string) > max_type_text_json_bytes) return error.InvalidArg;
                 op.text = try gpa.dupe(u8, t.string);
             },
+            .press => {
+                const k = o.get("key") orelse return error.InvalidArg;
+                if (k != .string) return error.InvalidArg;
+                var probe: web_cdp_keys.Press = undefined;
+                web_cdp_keys.parse(k.string, &probe) catch return error.InvalidArg;
+                op.press_key = try gpa.dupe(u8, k.string);
+                // 대상이 없으면 지금 초점에 누른다(페이지의 초점 — 다른 출처 iframe 일 수도 있다).
+                if (o.get("ref") == null and o.get("selector") == null) return op;
+                op.press_target = true;
+            },
             else => {},
         }
         if (o.get("ref")) |r| {
@@ -166,7 +181,8 @@ pub const Op = struct {
     pub fn committed(self: *const Op) bool {
         return switch (self.stage) {
             // 누름·Delete 키 누름을 보냈다 — 뗌·놓기를 끝까지. 넣은 뒤의 다시 읽기도(읽기만 한다 — 놓기까지 가게).
-            .mouse_up, .release, .delete_up, .verify => true,
+            // 키를 눌렀다 — 떼기까지(눌린 채 두지 않는다).
+            .mouse_up, .release, .delete_up, .verify, .key_up => true,
             else => false,
         };
     }
@@ -179,7 +195,13 @@ pub const Op = struct {
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
         return switch (self.kind) {
-            .click, .type_text, .scroll => if (self.selector != null)
+            .press => if (!self.press_target) self.keyStep(gpa, true) else if (self.selector != null)
+                call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{})
+            else if (self.backend == 0)
+                done(gpa, .success, "false")
+            else
+                self.scrollStep(gpa),
+            .click, .type_text, .scroll, .hover => if (self.selector != null)
                 call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{})
             else if (self.backend == 0)
                 done(gpa, .success, "false")
@@ -224,6 +246,20 @@ pub const Op = struct {
                 self.stage = .delete_up;
                 return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyUp\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
             },
+            // 움직임의 답이 늦었다(숨긴 탭은 다음 프레임까지 — 실측 5 초) — 놓고 timeout.
+            .hover_move, .focus_check => {
+                self.late = reply.timed_out;
+                return self.releaseStep(gpa);
+            },
+            // 키 누름이 시한 — 그래도 떼기를 보낸다.
+            .key_down => {
+                self.late = reply.timed_out;
+                return self.keyStep(gpa, false);
+            },
+            .key_up => {
+                self.late = reply.timed_out;
+                return self.afterKeys(gpa);
+            },
             // wait 의 확인이 시한 — 다음 확인으로(시한은 wake 가 본다).
             .check, .world => if (self.kind == .wait) return self.sleepOrTimeout(gpa),
             else => {},
@@ -259,7 +295,7 @@ pub const Op = struct {
             },
             .scroll => switch (self.kind) {
                 .scroll => return done(gpa, .success, "true"),
-                .type_text => {
+                .type_text, .press => {
                     self.stage = .focus;
                     return call(gpa, "DOM.focus", "{{\"backendNodeId\":{d}}}", .{self.backend});
                 },
@@ -309,6 +345,11 @@ pub const Op = struct {
             },
             .resolve => {
                 const oid = stringAt(v, &.{ "object", "objectId" }) orelse return done(gpa, .success, "false");
+                if (self.kind == .press) {
+                    // 초점이 아직 그 요소인가(type 과 같은 걷기 — 요소의 root 에서 host 를 따라 문서까지). 아니면 누르지 않는다.
+                    self.stage = .focus_check;
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var gr=Node.prototype.getRootNode,dae=P(Document.prototype,'activeElement'),sae=P(ShadowRoot.prototype,'activeElement'),host=P(ShadowRoot.prototype,'host'),ce=P(HTMLElement.prototype,'isContentEditable');var cur=t,root=gr.call(cur);for(var i=0;i<64;i++){{var ae=(root instanceof ShadowRoot)?sae.call(root):(root instanceof Document)?dae.call(root):null;if(ae!==cur&&!(cur===t&&ae&&(t instanceof HTMLElement)&&ce.call(t)&&Node.prototype.contains.call(t,ae)))return 'focus moved';if(!(root instanceof ShadowRoot))return 'ok';cur=host.call(root);root=gr.call(cur)}}return 'focus moved'}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
+                }
                 if (self.kind == .type_text) {
                     self.object_id = try gpa.dupe(u8, oid);
                     // 격리 world 에서 그 요소의 글을 고른다(입력칸·글 상자·contenteditable) — 그 위에 넣으면 바꿔 쓴다(WebKit 의 type 과 같다).
@@ -331,17 +372,33 @@ pub const Op = struct {
                 }
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
                 if (std.mem.eql(u8, verdict, "frame")) {
-                    self.miss = "elements inside frames cannot be clicked yet";
+                    self.miss = "elements inside frames are not supported yet";
                     return self.releaseStep(gpa);
                 }
                 if (!std.mem.eql(u8, verdict, "ok")) {
                     self.miss = "the element is covered by another element at its center";
                     return self.releaseStep(gpa);
                 }
+                if (self.kind == .hover) {
+                    // 맞았다 — 그 자리로 포인터를 옮긴다(누르지 않는다 — 페이지는 isTrusted mouseover·:hover).
+                    self.stage = .hover_move;
+                    return call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"mouseMoved\",\"x\":{d},\"y\":{d}}}", .{ self.x, self.y });
+                }
                 // 맞았다 — 왕복 하나 안에 누른다(놓기는 뗀 뒤).
                 self.stage = .mouse_down;
                 return self.mouse(gpa, "mousePressed");
             },
+            .hover_move => return self.releaseStep(gpa),
+            .focus_check => {
+                const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                if (!std.mem.eql(u8, verdict, "ok")) {
+                    self.miss = "focus moved away from the element (the page moved it) — no key was pressed";
+                    return self.releaseStep(gpa);
+                }
+                return self.keyStep(gpa, true);
+            },
+            .key_down => return self.keyStep(gpa, false),
+            .key_up => return self.afterKeys(gpa),
             .mouse_down => {
                 self.stage = .mouse_up;
                 return self.mouse(gpa, "mouseReleased");
@@ -412,6 +469,21 @@ pub const Op = struct {
             },
             .sleeping => unreachable, // 잠든 동안은 답이 오지 않는다(wake 로 깨운다)
         }
+    }
+
+    /// press 의 누름(`down`)·뗌.
+    fn keyStep(self: *Op, gpa: std.mem.Allocator, down: bool) !Step {
+        self.stage = if (down) .key_down else .key_up;
+        const params = web_cdp_keys.eventParams(gpa, self.press_key.?, down) catch |e| return switch (e) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidKey => done(gpa, .invalid_params, "invalid key"), // init 이 이미 걸렀다
+        };
+        return .{ .call = .{ .method = "Input.dispatchKeyEvent", .params = params } };
+    }
+
+    /// 키를 뗀 뒤 — 대상이 있었으면 묶음을 놓고, 없으면 곧 답한다.
+    fn afterKeys(self: *Op, gpa: std.mem.Allocator) !Step {
+        return if (self.press_target) self.releaseStep(gpa) else self.finish(gpa);
     }
 
     /// 없는 요소 — click·type·scroll 은 `{ok:false}`(WebKit 과 같다), snapshot 은 빈 트리.
@@ -496,6 +568,20 @@ pub const Op = struct {
                 break :blk self.releaseStep(gpa);
             },
             .mouse_up => self.releaseStep(gpa), // 떼기 실패 — 그래도 묶음은 놓는다
+            .hover_move => blk: {
+                self.miss = "the pointer could not be moved";
+                break :blk self.releaseStep(gpa);
+            },
+            .focus_check => blk: {
+                self.miss = "could not check the focus";
+                break :blk self.releaseStep(gpa);
+            },
+            // 키 누름 실패 — 누르지 못했다(떼기는 보내지 않는다). 키 떼기 실패 — 누름은 갔다.
+            .key_down => blk: {
+                self.miss = "the key could not be dispatched";
+                break :blk self.afterKeys(gpa);
+            },
+            .key_up => self.afterKeys(gpa),
             // 검사·누름이 CDP 오류 — 누르지 못했다. 쥔 묶음은 놓고 실패로 답한다(3 회차 — 그냥 끝내 묶음이 남았다).
             .hit_test => blk: {
                 self.miss = "could not check what is at the element's position";
@@ -1230,4 +1316,109 @@ test "wait: world 오류(주 frame 이 바뀜)면 frame tree 부터 다시 받�
     defer testing.allocator.free(r.result);
     try testing.expectEqual(Status.success, r.status);
     try testing.expectEqual(@as(usize, 2), trail.count("Page.getFrameTree"));
+}
+
+fn focusMovedPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"focus moved\"}}" };
+    return happyPage(method, params);
+}
+
+fn stuckMovePage(method: []const u8, params: []const u8) Reply {
+    // 숨긴 탭 — 움직임의 답이 다음 프레임까지 늦는다(실측 5 초).
+    if (std.mem.eql(u8, method, "Input.dispatchMouseEvent")) return .{ .timed_out = "DevTools did not answer in time" };
+    return happyPage(method, params);
+}
+
+fn stuckKeyDownPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchKeyEvent") and std.mem.indexOf(u8, params, "keyUp") == null) return .{ .timed_out = "DevTools did not answer in time" };
+    return happyPage(method, params);
+}
+
+fn keyErrorPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Input.dispatchKeyEvent")) return .{ .cdp_error = "{\"code\":-32602,\"message\":\"bad\"}" };
+    return happyPage(method, params);
+}
+
+test "hover: click 과 같은 길(화면 안으로·자리·덮임 검사) 뒤 누르지 않고 그 자리로 움직이기만 — 덮였으면 움직이지 않는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .hover, "{\"selector\":\"#h\"}", 51);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &happyPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqualStrings("true", r.result);
+    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want.len, trail.methods.items.len);
+    for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+    try testing.expectEqualStrings("{\"type\":\"mouseMoved\",\"x\":23,\"y\":10}", trail.params.items[10]);
+    for ([_]struct { answer: *const fn ([]const u8, []const u8) Reply, status: Status, moves: usize }{
+        .{ .answer = &coveredPage, .status = .failed, .moves = 0 },
+        .{ .answer = &stuckMovePage, .status = .timeout, .moves = 1 },
+    }) |c| {
+        trail.reset();
+        var o = try Op.init(testing.allocator, .hover, "{\"selector\":\"#h\"}", 52);
+        defer o.deinit(testing.allocator);
+        const x = try drive(&o, c.answer, &trail);
+        defer testing.allocator.free(x.result);
+        try testing.expectEqual(c.status, x.status);
+        try testing.expectEqual(c.moves, trail.count("Input.dispatchMouseEvent"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+}
+
+test "press: 대상이 없으면 지금 초점에 누르고 떼기만, 누른 뒤에는 철회돼도 뗀다" {
+    var op = try Op.init(testing.allocator, .press, "{\"key\":\"Enter\"}", 61);
+    defer op.deinit(testing.allocator);
+    var step = try op.start(testing.allocator);
+    try testing.expectEqualStrings("Input.dispatchKeyEvent", step.call.method);
+    try testing.expect(std.mem.indexOf(u8, step.call.params, "\"type\":\"keyDown\"") != null);
+    try testing.expect(!op.committed()); // 누르기 전 — 재허가를 거친다
+    testing.allocator.free(step.call.params);
+    step = try op.feed(testing.allocator, .{ .ok = "{}" });
+    try testing.expect(std.mem.indexOf(u8, step.call.params, "\"type\":\"keyUp\"") != null);
+    try testing.expect(op.committed()); // 눌렀다 — 떼기는 끝까지
+    testing.allocator.free(step.call.params);
+    step = try op.feed(testing.allocator, .{ .ok = "{}" });
+    try testing.expectEqual(Status.success, step.done.status);
+    testing.allocator.free(step.done.result);
+    try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .press, "{\"key\":\"Hyper+a\"}", 1));
+    try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .press, "{}", 1));
+}
+
+test "press(selector): 화면 안으로 → 초점 → 격리 world 에서 초점이 그 요소인가 → 누름·뗌(편집 명령) → 놓기, 초점이 옮겨졌으면 누르지 않는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .press, "{\"key\":\"Meta+a\",\"selector\":\"#e\"}", 62);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &happyPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqualStrings("true", r.result);
+    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.focus", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want.len, trail.methods.items.len);
+    for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "focus moved") != null);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[8]));
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "\"commands\":[\"selectAll\"]") != null);
+    for ([_]struct { answer: *const fn ([]const u8, []const u8) Reply, status: Status, keys: usize }{
+        .{ .answer = &focusMovedPage, .status = .failed, .keys = 0 },
+        .{ .answer = &stuckKeyDownPage, .status = .timeout, .keys = 2 }, // 누름이 시한이어도 뗀다
+        .{ .answer = &keyErrorPage, .status = .failed, .keys = 1 }, // 누르지 못했다 — 떼지 않는다
+    }) |c| {
+        trail.reset();
+        var o = try Op.init(testing.allocator, .press, "{\"key\":\"x\",\"selector\":\"#e\"}", 63);
+        defer o.deinit(testing.allocator);
+        const x = try drive(&o, c.answer, &trail);
+        defer testing.allocator.free(x.result);
+        try testing.expectEqual(c.status, x.status);
+        try testing.expectEqual(c.keys, trail.count("Input.dispatchKeyEvent"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+    trail.reset();
+    var unknown = try Op.init(testing.allocator, .press, "{\"key\":\"x\",\"ref\":\"n0\"}", 64);
+    defer unknown.deinit(testing.allocator);
+    const u = try drive(&unknown, &happyPage, &trail);
+    defer testing.allocator.free(u.result);
+    try testing.expectEqualStrings("false", u.result);
+    try testing.expectEqual(@as(usize, 0), trail.methods.items.len);
 }

@@ -97,7 +97,22 @@ HTML
 printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
 printf '<!doctype html><title>page-c</title>c<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=cready>ready</p>")},1000)</script>' > "$root/www/c.html"
 # 느린 문서는 요소가 3 만을 넘는다 — role 로케이터가 질의 전에 거절하는지(W9b②).
-python3 -c "import sys; sys.stdout.write('<!doctype html><title>page-slow</title>slow<button>Big</button>' + '<i></i>' * 31000)" > "$root/www/slow.html"
+python3 -c "import sys; sys.stdout.write('<!doctype html><title>page-slow</title>slow<button>Big</button><a id=next href=c1.html>next</a>' + '<i></i>' * 31000)" > "$root/www/slow.html"
+# 접근성 트리를 비싸게 만드는 구성마다 상한을 하나 넘는 문서(W9b②-1 적대 리뷰 3·4 회차) — role 로케이터가 질의 전에 거절하는지. 다음 문서로 가는 링크를 단다.
+python3 - "$root/www" <<'PY'
+import sys
+d = sys.argv[1]
+pages = [
+    ('c1', ''.join('<a href="#z%d">x</a>' % i for i in range(3001))),
+    ('c2', '<input type=radio>' * 3001),
+    ('c3', '<div role=radiogroup>' + '<span role=radio>r</span>' * 801 + '</div>'),
+    ('c4', '<label><input type=checkbox>l</label>' * 3001),
+    ('c5', '<pre>' + 'line\n' * 10001 + '</pre>'),
+]
+for k, (name, body) in enumerate(pages):
+    nxt = '<a id=next href="%s.html">next</a>' % pages[k + 1][0] if k + 1 < len(pages) else ''
+    open('%s/%s.html' % (d, name), 'w').write('<!doctype html><title>%s</title><button>B</button>%s%s' % (name, nxt, body))
+PY
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
 cat > "$root/server.py" <<'PY'
 import http.server, sys, functools, time
@@ -251,6 +266,11 @@ run wait-load2 wait --load --timeout 8000
 t4=\$(ms)
 echo \$((t4 - t3)) > "\$out/load-ms"
 echo \$((t3 - t2)) > "\$out/reload-ms"
+for c in c1 c2 c3 c4 c5; do
+    run go-\$c click --selector '#next'
+    url_is \$c.html || true
+    run costly-\$c click --role button
+done
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -320,6 +340,12 @@ ok role-level && grep -q 'matched n[0-9]* "Role Heading"' "$out/role-level" || f
 grep -q '(-32602)' "$out/role-unknown" && grep -q 'did you mean "button"' "$out/role-unknown" || fail "an unknown role was not invalid params with a suggestion ($(tr '\n' ' ' < "$out/role-unknown"))"
 ok role-shadow && [ "$(cat "$out/osb-hit")" = yes ] || fail "a button inside nested open shadow roots was not found and clicked by role ($(tr '\n' ' ' < "$out/role-shadow"))"
 grep -q 'too_large: page has [0-9]* elements' "$out/role-big" || fail "a page with over 30000 elements was not refused before the query ($(tr '\n' ' ' < "$out/role-big"))"
+for pair in "c1:same-page #links without a target" "c2:radio inputs" "c3:role=radio elements" "c4:labeled form controls" "c5:lines in one text node"; do
+    c=${pair%%:*}
+    what=${pair#*:}
+    grep -q "too_large: the accessibility query would freeze this page ([0-9]* $what" "$out/costly-$c" || fail "a page with too many $what was not refused before the accessibility query ($(tr '\n' ' ' < "$out/costly-$c"))"
+done
+echo "PASS role-costly: pages with too many #links without a target, radios, role=radio, labeled controls or lines in one text node are refused before the query"
 echo "PASS role: an ambiguous name failed with candidate refs and the ref clicked for real, --nth/--exact/--level picked the right element (matched), an unknown role suggested button, a button in nested open shadow roots was clicked, a 31000-element page was refused"
 ok press-a && [ "$(cat "$out/pk-a")" = yes ] || fail "press Shift+a on the field did not type A with a real key ($(tr '\n' ' ' < "$out/press-a") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"
 ok press-all && ok press-x && [ "$(cat "$out/pk-x")" = yes ] || fail "Meta+a then x (where the focus is) did not replace the value ($(tr '\n' ' ' < "$out/press-all") · $(tr '\n' ' ' < "$out/press-x") · $(grep 'GET /hit?pk' "$root/http.log" | tr '\n' ' '))"

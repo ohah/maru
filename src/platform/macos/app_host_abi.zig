@@ -7063,12 +7063,21 @@ const CdpRun = struct {
 
 /// 실행 중이거나 기다리는 Chromium op(도착 순).
 var cdp_runs: std.ArrayList(*CdpRun) = .empty;
-/// 잠든 op(wait 의 확인 간격) — 매 tick(`maru_macos_control_take_browser_op`) 시각이 된 것을 깨운다. 그 탭의 줄은 계속 쥔다.
+/// 잠든 op(wait 의 확인 간격) — 매 tick(`maru_macos_control_take_browser_op`, 창이 없으면 `has_pending` 게이트를 연
+/// `maru_macos_control_server_drain`) 시각이 된 것을 깨운다. 그 탭의 줄은 계속 쥔다.
 var cdp_sleepers: std.ArrayList(struct { run: *CdpRun, wake_ms: i64 }) = .empty;
 
 fn cdpNowMs() i64 {
     const ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     return @intCast(@divFloor(ns, std.time.ns_per_ms));
+}
+
+/// 시각이 된 잠든 op 이 있는가 — 없으면 drain 게이트를 열지 않는다(창이 있으면 wait 가 자는 동안 매 tick refs 를 할당했다 — 4 회차).
+fn cdpSleeperDue() bool {
+    if (cdp_sleepers.items.len == 0) return false;
+    const now = cdpNowMs();
+    for (cdp_sleepers.items) |e| if (e.wake_ms <= now) return true;
+    return false;
 }
 
 /// 시각이 된 잠든 op 을 깨운다 — 깨운 op 이 다시 잠들 수 있어 먼저 꺼낸 뒤 깨운다.
@@ -7160,7 +7169,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                 error.NotReady => finishCdp(run, .failed, "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)"),
                 error.Busy => finishCdp(run, .failed, "too many DevTools calls on this tab"),
                 // 인자는 이 모듈이 만든 JSON 이다 — 넘치는 것은 사용자의 selector 뿐이다(64 KiB).
-                error.InvalidParams => finishCdp(run, .invalid_params, "invalid DevTools parameters (the selector may be too long)"),
+                error.InvalidParams => finishCdp(run, .invalid_params, "invalid DevTools parameters (the selector or text may be too long)"),
                 error.InvalidMethod => finishCdp(run, .failed, "internal DevTools request error"),
                 error.OutOfMemory => finishCdp(run, .failed, "out of memory"),
             };
@@ -7315,12 +7324,18 @@ pub export fn maru_macos_control_server_start() c_int {
 /// 모달 결정을 폴해야 하므로 **grant_prompt_queue 비어있지 않으면 계속 1** — 안 그러면 요청 held 후 server_drain이 안 불려
 /// 모달 클릭 결과를 영영 못 읽는다(승인해도 무반응 버그). grant는 메인 스레드 전용이라 락 불요(요청 큐만 락).
 pub export fn maru_macos_control_server_has_pending() u32 {
+    // W9b①b: 시각이 된 잠든 Chromium op 이 있으면 drain 을 돌게 한다 — 창이 없으면(다운로드 keep-alive) Swift 는 이 게이트를 지나야 drain 을
+    // 부르고, drain 이 그 op 을 깨운다(서버가 멈췄어도 — 깨운 op 이 재허가에서 끝난다). 적대 리뷰 3 회차: 이 줄이 없어 깨지 않았다.
+    if (cdpSleeperDue()) return 1;
     if (!control_server_active) return 0;
     if (grant_prompt_queue.items.items.len > 0) return 1; // held grant 확인 대기 — server_drain(drainGrantPrompts) 계속 돌게
     return if (control_server_storage.hasPendingRequest()) 1 else 0;
 }
 
 pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSessionRef, count: usize) void {
+    // W9b①b: 잠든 Chromium op(wait 의 확인 간격)을 깨운다 — 창이 없으면(다운로드 keep-alive) take_browser_op 이 불리지 않는다.
+    // 시각이 된 잠든 op 이 있으면 `has_pending` 이 1 이라 Swift 가 이리 온다.
+    wakeCdpSleepers();
     if (!control_server_active) return;
     const server = &control_server_storage;
     const refs: []const ControlSessionRef = if (refs_ptr) |p| p[0..count] else &.{};
@@ -9591,6 +9606,63 @@ test "W9b①: 철회 뒤에는 다음 호출을 보내지 않지만 누른 뒤�
         try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
         try std.testing.expectEqual(attempted + @intFromBool(pressed), cdp_calls_attempted);
     }
+}
+
+test "W9b①b: 잠든 wait 는 drain tick(창이 없어도 오는 길)에서 시각이 되면 깨어 다시 확인하고, 기다림이 끝났으면 보내지 않는다" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":92,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"selector\":\"#late\"}}";
+    const wait_arg = "{\"condition\":\"selector\",\"selector\":\"#late\",\"timeout_ms\":5000}";
+    var pendings: [2]control_server_mod.PendingRequest = undefined;
+    var runs: [2]*CdpRun = undefined;
+    for (&pendings, &runs) |*p, *run| {
+        p.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+        const id = try control_server_storage.deferRequest(p, std.math.maxInt(i128));
+        try active_browser_waits.append(allocator, .{ .async_id = id, .surface_id = 11, .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } });
+        run.* = try allocator.create(CdpRun);
+        run.*.* = .{ .async_id = id, .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .wait, wait_arg, id), .started = true };
+        run.*.op.stage = .sleeping;
+        run.*.op.frame_id = try allocator.dupe(u8, "F1");
+        run.*.op.wait_deadline_ms = std.math.maxInt(i64);
+        try cdp_runs.append(allocator, run.*);
+    }
+    defer for (&pendings) |*p| if (p.response) |r| allocator.free(r);
+    defer active_browser_waits.clearRetainingCapacity();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    // drain 이 요청 큐를 읽는다 — 빈 큐를 준다.
+    control_server_storage.queue = try control_server_mod.ControlRequestQueue.init(std.testing.io, std.testing.allocator, 1);
+    defer control_server_storage.queue.deinit();
+
+    // ① 아직 시각이 아니면 깨우지 않는다. 시각이 된 잠든 op 이 있을 때만 drain 게이트(`has_pending` — 창이 없을 때 Swift 가 본다)가 열린다.
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_server_has_pending());
+    try cdp_sleepers.append(allocator, .{ .run = runs[0], .wake_ms = std.math.maxInt(i64) });
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_server_has_pending()); // 아직 시각이 아니면 게이트를 열지 않는다
+    const before = cdp_calls_attempted;
+    maru_macos_control_server_drain(null, 0);
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len);
+    // ② 시각이 되면 게이트가 열리고 drain tick 에서 깨어 다시 확인한다(보내려 한다 — 엔진이 없어 곧 끝난다).
+    cdp_sleepers.items[0].wake_ms = 0;
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_server_has_pending());
+    maru_macos_control_server_drain(null, 0);
+    try std.testing.expectEqual(before + 1, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 0), cdp_sleepers.items.len);
+    try std.testing.expect(pendings[0].response != null);
+    try std.testing.expectEqual(@as(u32, 0), maru_macos_control_server_has_pending());
+
+    // ③ 기다림이 이미 끝났다(철회·닫힘이 기다림 목록에서 빼고 답했다) — 깨어도 보내지 않고 조용히 끝난다.
+    for (active_browser_waits.items, 0..) |e, i| if (e.async_id == runs[1].async_id) {
+        _ = active_browser_waits.swapRemove(i);
+        break;
+    };
+    try cdp_sleepers.append(allocator, .{ .run = runs[1], .wake_ms = 0 });
+    maru_macos_control_server_drain(null, 0);
+    try std.testing.expectEqual(before + 1, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
 }
 
 test "W9b①: Chromium op 은 그 요청이 살아 있고 허가돼 있을 때만 다음 DevTools 호출(진짜 입력)을 보낸다" {

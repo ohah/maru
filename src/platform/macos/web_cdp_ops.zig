@@ -84,8 +84,11 @@ pub const Op = struct {
     /// 부른 쪽이 넣는 지금 시각(start·wake 전에)과 그 탭이 불러오는 중인가(wait --load — sidecar 의 nav_state).
     now_ms: i64 = 0,
     page_loading: bool = false,
-    /// type — 고른 요소(넣은 뒤 다시 읽는다, 소유).
+    /// type — 고른 요소(넣은 뒤 다시 읽는다, 소유)와 넣기 전 값의 해시·길이(다시 읽을 때 「바뀌지 않았나·덧붙지 않았나」를 본다 —
+    /// 값 자체는 싣지 않는다: 큰 글 상자면 DevTools 인자 상한(64 KiB)을 넘고, 결과의 서로게이트 정화가 값을 바꾼다 — 3 회차).
     object_id: ?[]u8 = null,
+    before_hash: i64 = -1,
+    before_len: i64 = 0,
     /// snapshot 선택.
     snap: web_cdp_snapshot.Options = .{},
 
@@ -141,6 +144,9 @@ pub const Op = struct {
             .type_text => {
                 const t = o.get("text") orelse return error.InvalidArg;
                 if (t != .string) return error.InvalidArg;
+                // 넣기·다시 읽기가 글을 DevTools 인자(64 KiB)에 싣는다 — 다시 읽기 JS 와 함께 넘치지 않게 JSON 으로 48 KiB 까지(넘으면
+                // 넣은 뒤 다시 읽기만 거절돼 「들어갔는데 실패」가 됐다 — 적대 리뷰 4 회차).
+                if (jsonStringBytes(t.string) > max_type_text_json_bytes) return error.InvalidArg;
                 op.text = try gpa.dupe(u8, t.string);
             },
             else => {},
@@ -168,7 +174,7 @@ pub const Op = struct {
     /// `sleep` 뒤에 다시 부른다(부른 쪽이 `now_ms` 를 넣은 뒤) — 시한이 지났으면 timeout, 아니면 다음 확인.
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
         if (self.now_ms >= self.wait_deadline_ms) return done(gpa, .timeout, "");
-        return self.worldStep(gpa);
+        return if (self.frame_id == null) self.frameTreeStep(gpa) else self.worldStep(gpa);
     }
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -308,7 +314,7 @@ pub const Op = struct {
                     // 격리 world 에서 그 요소의 글을 고른다(입력칸·글 상자·contenteditable) — 그 위에 넣으면 바꿔 쓴다(WebKit 의 type 과 같다).
                     // 프로토타입 함수·getter 로 부른다(DOM clobbering).
                     self.stage = .select;
-                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var d=P(Node.prototype,'ownerDocument').call(t),ok=false;if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return 'not editable';HTMLInputElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLTextAreaElement){{HTMLTextAreaElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);ok=true}}if(!ok)return 'not editable';var ae=P(Document.prototype,'activeElement').call(d),sr=P(Element.prototype,'shadowRoot'),sa=P(ShadowRoot.prototype,'activeElement');for(var i=0;ae&&i<64;i++){{var root=sr.call(ae),inner=root?sa.call(root):null;if(!inner)break;ae=inner}}if(ae===t)return 'ok';if(ae&&t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)&&Node.prototype.contains.call(t,ae))return 'ok';return 'focus moved'}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var od=P(Node.prototype,'ownerDocument'),ok=false,before='',H=function(s){{var h=2166136261;for(var i=0;i<s.length;i++){{h=Math.imul(h^String.prototype.charCodeAt.call(s,i),16777619)}}return h|0}};var val=function(e){{return (e instanceof HTMLInputElement)?P(HTMLInputElement.prototype,'value').call(e):(e instanceof HTMLTextAreaElement)?P(HTMLTextAreaElement.prototype,'value').call(e):P(Node.prototype,'textContent').call(e)}};if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return {{r:'not editable'}};before=val(t);HTMLInputElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLTextAreaElement){{before=val(t);HTMLTextAreaElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{before=val(t);var d=od.call(t);var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);ok=true}}if(!ok)return {{r:'not editable'}};var gr=Node.prototype.getRootNode,dae=P(Document.prototype,'activeElement'),sae=P(ShadowRoot.prototype,'activeElement'),host=P(ShadowRoot.prototype,'host'),ce=P(HTMLElement.prototype,'isContentEditable');var cur=t,root=gr.call(cur);for(var i=0;i<64;i++){{var ae=(root instanceof ShadowRoot)?sae.call(root):(root instanceof Document)?dae.call(root):null;if(ae!==cur&&!(cur===t&&ae&&ce.call(t)&&Node.prototype.contains.call(t,ae)))return {{r:'focus moved'}};if(!(root instanceof ShadowRoot))return {{r:'ok',h:H(before),n:before.length}};cur=host.call(root);root=gr.call(cur)}}return {{r:'focus moved'}}}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
                 }
                 self.stage = .hit_test;
                 // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
@@ -353,7 +359,9 @@ pub const Op = struct {
             },
             .navigate_entry, .reload => return done(gpa, .success, "true"),
             .select => {
-                const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                const verdict = stringAt(v, &.{ "result", "value", "r" }) orelse "";
+                self.before_hash = intAt(v, &.{ "result", "value", "h" }) orelse -1;
+                self.before_len = intAt(v, &.{ "result", "value", "n" }) orelse 0;
                 if (std.mem.eql(u8, verdict, "focus moved")) {
                     // 페이지가 초점을 다른 곳으로 옮겼다(모달의 초점 가두기 등) — 넣으면 엉뚱한 칸(다른 출처 iframe 일 수도)에 간다.
                     self.miss = "focus moved away from the element (the page moved it) — nothing was typed";
@@ -378,10 +386,12 @@ pub const Op = struct {
             .insert, .delete_up => {
                 // 넣은 뒤 다시 읽는다 — readonly·disabled·maxlength·형식(number 에 글자)은 insertText 가 조용히 안 넣거나 자른다.
                 self.stage = .verify;
-                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(want){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var v=(t instanceof HTMLInputElement)?P(HTMLInputElement.prototype,'value').call(t):(t instanceof HTMLTextAreaElement)?P(HTMLTextAreaElement.prototype,'value').call(t):P(Node.prototype,'textContent').call(t);if(t instanceof HTMLInputElement||t instanceof HTMLTextAreaElement)return v===want?'ok':'rejected';return (want===''?v.trim()==='':String.prototype.indexOf.call(v,want)>=0)?'ok':'rejected'}}\",\"arguments\":[{{\"value\":{f}}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object_id.?, .{}), std.json.fmt(self.text.?, .{}) });
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(want,bh,bn){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}},S=String.prototype,J=Array.prototype.join,H=function(s){{var h=2166136261;for(var i=0;i<s.length;i++){{h=Math.imul(h^String.prototype.charCodeAt.call(s,i),16777619)}}return h|0}};var same=function(s){{return s.length===bn&&H(s)===bh}};var flat=function(s){{return J.call(S.split.call(J.call(S.split.call(s,String.fromCharCode(13)),''),String.fromCharCode(10)),'')}};var field=(t instanceof HTMLInputElement)||(t instanceof HTMLTextAreaElement);var v=(t instanceof HTMLInputElement)?P(HTMLInputElement.prototype,'value').call(t):(t instanceof HTMLTextAreaElement)?P(HTMLTextAreaElement.prototype,'value').call(t):P(Node.prototype,'textContent').call(t);if(v===want)return 'ok';if(field&&(v===S.trim.call(want)||v===flat(want)||v===S.trim.call(flat(want))))return 'ok';if(same(v)&&!same(want))return 'rejected';if(field&&v.length<want.length&&S.indexOf.call(want,v)===0)return 'rejected';if(bn>0&&v.length===bn+want.length&&((S.slice.call(v,bn)===want&&same(S.slice.call(v,0,bn)))||(S.slice.call(v,0,want.length)===want&&same(S.slice.call(v,want.length)))))return 'rejected';return 'ok'}}\",\"arguments\":[{{\"value\":{f}}},{{\"value\":{d}}},{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object_id.?, .{}), std.json.fmt(self.text.?, .{}), self.before_hash, self.before_len });
             },
             .verify => {
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                // 값이 바뀌지 않았거나·넣은 글의 앞부분으로 잘렸거나·원래 값 앞뒤에 덧붙었을 때만 거절한다 — 칸의 줄바꿈·앞뒤 공백 정리,
+                // 입력 마스크가 바꾼 값은 들어간 것이다.
                 if (!std.mem.eql(u8, verdict, "ok")) self.miss = "the field did not take the text (read-only, disabled, a length limit or its type)";
                 return self.releaseStep(gpa);
             },
@@ -471,10 +481,18 @@ pub const Op = struct {
             .describe, .scroll, .quads, .resolve => if (gone) self.missing(gpa) else done(gpa, .failed, message),
             .focus => done(gpa, .failed, "the element cannot be focused"),
             // wait 의 world·확인 오류 — 이동 중이라 문서·world 가 사라졌다: 다음 확인으로(새 문서의 world).
-            .world, .check => if (self.kind == .wait) self.sleepOrTimeout(gpa) else done(gpa, .failed, message),
+            // world 오류면 주 frame 이 바뀌었을 수 있다(prerender 등) — 다음엔 frame tree 부터 다시 받는다.
+            .world, .check => if (self.kind == .wait) blk: {
+                if (self.stage == .world) if (self.frame_id) |f| {
+                    gpa.free(f);
+                    self.frame_id = null;
+                };
+                break :blk self.sleepOrTimeout(gpa);
+            } else done(gpa, .failed, message),
             // 고르기·넣기 실패 — 쥔 묶음은 놓고 실패.
             .select, .insert, .delete_down, .delete_up, .verify => blk: {
-                self.miss = "the text could not be entered";
+                // 다시 읽기의 오류면 글은 이미 들어갔다 — 「넣지 못했다」 고 하지 않는다.
+                self.miss = if (self.stage == .verify) "the text was entered but could not be read back" else "the text could not be entered";
                 break :blk self.releaseStep(gpa);
             },
             .mouse_up => self.releaseStep(gpa), // 떼기 실패 — 그래도 묶음은 놓는다
@@ -521,6 +539,30 @@ fn at(v: std.json.Value, path: []const []const u8) ?std.json.Value {
         cur = cur.object.get(key) orelse return null;
     }
     return cur;
+}
+
+/// type 의 글 상한(JSON 으로 쓴 길이).
+pub const max_type_text_json_bytes = 48 * 1024;
+
+/// 글을 JSON 문자열로 쓴 바이트 수(따옴표 빼고) — 제어 문자는 `\u00XX`, `"`·`\` 는 두 바이트.
+fn jsonStringBytes(s: []const u8) usize {
+    var n: usize = 0;
+    for (s) |c| n += if (c < 0x20) 6 else if (c == '"' or c == '\\') 2 else 1;
+    return n;
+}
+
+test "type: 글이 JSON 으로 48 KiB 를 넘으면 시작하지 않는다(제어 문자는 여섯 바이트로 센다)" {
+    const big = try testing.allocator.alloc(u8, max_type_text_json_bytes + 1);
+    defer testing.allocator.free(big);
+    @memset(big, 'a');
+    const arg = try std.fmt.allocPrint(testing.allocator, "{{\"selector\":\"#in\",\"text\":{f}}}", .{std.json.fmt(big, .{})});
+    defer testing.allocator.free(arg);
+    try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .type_text, arg, 1));
+    const fits = try std.fmt.allocPrint(testing.allocator, "{{\"selector\":\"#in\",\"text\":{f}}}", .{std.json.fmt(big[0..max_type_text_json_bytes], .{})});
+    defer testing.allocator.free(fits);
+    var ok = try Op.init(testing.allocator, .type_text, fits, 1); // 상한과 같으면 시작한다
+    ok.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 6 + 2 + 1), jsonStringBytes("\n\"a"));
 }
 
 fn intAt(v: std.json.Value, path: []const []const u8) ?i64 {
@@ -943,6 +985,7 @@ const tiny_ax =
 
 fn editorPage(method: []const u8, params: []const u8) Reply {
     if (std.mem.eql(u8, method, "Accessibility.getFullAXTree")) return .{ .ok = tiny_ax };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "isContentEditable") != null and std.mem.indexOf(u8, params, "function(want,bh,bn)") == null) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":{\"r\":\"ok\",\"h\":123,\"n\":3}}}" };
     if (std.mem.eql(u8, method, "Runtime.evaluate")) {
         // wait 의 한 번 확인 — `#late` 면 보인다, `#never` 면 아직, `[` 면 selector 오류, load 는 complete.
         if (std.mem.indexOf(u8, params, "#never") != null) return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":false}}" };
@@ -953,7 +996,7 @@ fn editorPage(method: []const u8, params: []const u8) Reply {
 }
 
 fn notEditablePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "isContentEditable") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"not editable\"}}" };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "isContentEditable") != null) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":{\"r\":\"not editable\"}}}" };
     return editorPage(method, params);
 }
 
@@ -973,17 +1016,17 @@ test "type: 찾기 → 화면 안으로 → 초점 → 격리 world 에서 글 �
     try testing.expect(try std.json.validate(testing.allocator, trail.params.items[8]));
     // 고른 뒤 초점이 그 요소인지 보고, 넣은 뒤 값을 다시 읽는다(넣은 글을 인자로).
     try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "focus moved") != null);
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "\"arguments\":[{\"value\":\"새 \\\"값\\\"\"}]") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "\"arguments\":[{\"value\":\"새 \\\"값\\\"\"},{\"value\":123},{\"value\":3}]") != null);
     try testing.expect(try std.json.validate(testing.allocator, trail.params.items[10]));
 }
 
 fn focusStealPage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "isContentEditable") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"focus moved\"}}" };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "isContentEditable") != null) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":{\"r\":\"focus moved\"}}}" };
     return editorPage(method, params);
 }
 
 fn rejectingPage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "function(want)") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"rejected\"}}" };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "function(want,bh,bn)") != null) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"rejected\"}}" };
     return editorPage(method, params);
 }
 
@@ -1163,4 +1206,28 @@ test "wait 의 간격은 두 배씩 늘어 500 ms 에서 멈추고, 시한을 �
     const end = try op.sleepOrTimeout(testing.allocator);
     defer testing.allocator.free(end.done.result);
     try testing.expectEqual(Status.timeout, end.done.status);
+}
+
+fn frameGonePage(method: []const u8, params: []const u8) Reply {
+    // 주 frame 이 바뀌었다 — 옛 frame id 의 world 는 늘 오류, frame tree 를 다시 받으면 새 id.
+    if (std.mem.eql(u8, method, "Page.createIsolatedWorld") and std.mem.indexOf(u8, params, "\"F1\"") != null and frame_gone_seen > 0) return .{ .cdp_error = "{\"code\":-32000,\"message\":\"No frame for given id found\"}" };
+    if (std.mem.eql(u8, method, "Page.getFrameTree")) {
+        frame_gone_seen += 1;
+        return .{ .ok = if (frame_gone_seen == 1) "{\"frameTree\":{\"frame\":{\"id\":\"F1\"}}}" else "{\"frameTree\":{\"frame\":{\"id\":\"F2\"}}}" };
+    }
+    if (std.mem.eql(u8, method, "Runtime.evaluate") and frame_gone_seen == 1) return .{ .ok = "{\"result\":{\"type\":\"boolean\",\"value\":false}}" };
+    return editorPage(method, params);
+}
+var frame_gone_seen: usize = 0;
+
+test "wait: world 오류(주 frame 이 바뀜)면 frame tree 부터 다시 받는다 — 옛 id 로 시한까지 헛돌지 않는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    frame_gone_seen = 0;
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"selector\":\"#late\",\"timeout_ms\":5000}", 41);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &frameGonePage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqual(@as(usize, 2), trail.count("Page.getFrameTree"));
 }

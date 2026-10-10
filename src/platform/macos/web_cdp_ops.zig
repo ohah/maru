@@ -22,6 +22,10 @@
 const std = @import("std");
 const web_cdp_snapshot = @import("web_cdp_snapshot.zig");
 const web_cdp_keys = @import("web_cdp_keys.zig");
+const web_cdp_locate = @import("web_cdp_locate.zig");
+
+/// 앱이 DevTools 결과 상한을 넘은 답에 싣는 글 — 로케이터 질의가 이것이면 「너무 많다」 로 바꿔 답한다.
+pub const result_too_large = "the DevTools result was too large";
 
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
@@ -60,7 +64,7 @@ pub const wait_max_interval_ms: u32 = 500;
 pub const up_retry_ms: u32 = 50;
 pub const max_up_retries: u8 = 3;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up };
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate };
 
 pub const Op = struct {
     kind: Kind,
@@ -104,6 +108,16 @@ pub const Op = struct {
     press_target: bool = false,
     /// 떼기를 다시 보낸 횟수.
     up_retries: u8 = 0,
+    /// 로케이터(W9b② — role) — 찾는 동안 `locating`. 역할은 Chromium 역할(정적), 이름은 정규화한 것(소유), 입력한 역할 이름(메시지용, 소유).
+    locating: bool = false,
+    loc_role: []const u8 = "",
+    loc_input_role: ?[]u8 = null,
+    loc_name: ?[]u8 = null,
+    loc_level: ?i64 = null,
+    loc_exact: bool = false,
+    loc_nth: ?u32 = null,
+    /// 로케이터로 찾은 요소의 이름(소유) — 성공 답에 `matched` 로 싣는다(부분 일치가 하나면 그것을 누른다 — 무엇을 눌렀는지 보이게).
+    matched_name: ?[]u8 = null,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
@@ -112,6 +126,9 @@ pub const Op = struct {
         if (self.wait_selector) |s| gpa.free(s);
         if (self.object_id) |s| gpa.free(s);
         if (self.press_key) |s| gpa.free(s);
+        if (self.loc_input_role) |s| gpa.free(s);
+        if (self.loc_name) |s| gpa.free(s);
+        if (self.matched_name) |s| gpa.free(s);
         self.* = undefined;
     }
 
@@ -170,11 +187,18 @@ pub const Op = struct {
                 web_cdp_keys.parse(k.string, &probe) catch return error.InvalidKey;
                 op.press_key = try gpa.dupe(u8, k.string);
                 // 대상이 없으면 지금 초점에 누른다(페이지의 초점 — 다른 출처 iframe 일 수도 있다).
-                if (o.get("ref") == null and o.get("selector") == null) return op;
+                if (o.get("ref") == null and o.get("selector") == null and o.get("locator") == null) return op;
                 op.press_target = true;
             },
             else => {},
         }
+        if (o.get("locator")) |l| switch (kind) {
+            .click, .type_text, .scroll, .hover, .press => {
+                try op.parseLocator(gpa, l);
+                return op;
+            },
+            else => return error.InvalidArg,
+        };
         if (o.get("ref")) |r| {
             if (r != .string) return error.InvalidArg;
             op.backend = parseRef(r.string) orelse 0; // 모르는 ref — start 가 곧바로 {ok:false}
@@ -184,6 +208,34 @@ pub const Op = struct {
             op.selector = try gpa.dupe(u8, sel.string);
         } else return error.InvalidArg;
         return op;
+    }
+
+    /// `{"role", "name"?, "level"?, "exact"?, "nth"?}` — 모양은 L2 가 봤다. 역할 이름은 여기서 푼다(모르는 역할은 error.UnknownRole).
+    fn parseLocator(op: *Op, gpa: std.mem.Allocator, l: std.json.Value) !void {
+        if (l != .object) return error.InvalidArg;
+        const lo = l.object;
+        const role = lo.get("role") orelse return error.InvalidArg; // label·text 는 W9b②-2
+        if (role != .string) return error.InvalidArg;
+        op.loc_role = web_cdp_locate.chromiumRole(role.string) orelse return error.UnknownRole;
+        op.loc_input_role = try gpa.dupe(u8, role.string);
+        if (lo.get("name")) |n| {
+            if (n != .string or n.string.len == 0 or n.string.len > web_cdp_locate.max_text_bytes) return error.InvalidArg;
+            op.loc_name = try web_cdp_locate.normalize(gpa, n.string);
+        }
+        if (lo.get("level")) |v| {
+            if (v != .integer or v.integer < 1 or v.integer > 100) return error.InvalidArg;
+            op.loc_level = v.integer;
+        }
+        if (lo.get("exact")) |v| {
+            if (v != .bool) return error.InvalidArg;
+            op.loc_exact = v.bool;
+        }
+        if (lo.get("nth")) |v| {
+            if (v != .integer or v.integer < 0 or v.integer > 1_000_000) return error.InvalidArg;
+            op.loc_nth = @intCast(v.integer);
+        }
+        op.locating = true;
+        if (op.kind == .press) op.press_target = true;
     }
 
     /// 이미 페이지에 누름을 보냈다 — 남은 호출(떼기·놓기)은 그 요청이 철회돼도 보낸다(버튼을 눌린 채 두지 않는다).
@@ -208,18 +260,11 @@ pub const Op = struct {
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
         return switch (self.kind) {
-            .press => if (!self.press_target) self.keyStep(gpa, true) else if (self.selector != null)
-                call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{})
-            else if (self.backend == 0)
-                done(gpa, .success, "false")
-            else
-                self.scrollStep(gpa),
-            .click, .type_text, .scroll, .hover => if (self.selector != null)
-                call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{})
-            else if (self.backend == 0)
-                done(gpa, .success, "false")
-            else
-                self.scrollStep(gpa),
+            // 로케이터 — 먼저 페이지 크기를 보고(격리 world) 접근성 질의로 찾는다.
+            .click, .type_text, .scroll, .hover, .press => if (self.locating) self.frameTreeStep(gpa) else switch (self.kind) {
+                .press => self.startPress(gpa),
+                else => self.startAct(gpa),
+            },
             .back, .forward => blk: {
                 self.stage = .history;
                 break :blk call(gpa, "Page.getNavigationHistory", "", .{});
@@ -234,6 +279,17 @@ pub const Op = struct {
             },
             .snapshot => if (self.selector != null) call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{}) else self.axStep(gpa),
         };
+    }
+
+    fn startPress(self: *Op, gpa: std.mem.Allocator) !Step {
+        if (!self.press_target) return self.keyStep(gpa, true);
+        return self.startAct(gpa);
+    }
+
+    fn startAct(self: *Op, gpa: std.mem.Allocator) !Step {
+        if (self.selector != null) return call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{});
+        if (self.backend == 0) return done(gpa, .success, "false");
+        return self.scrollStep(gpa);
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
@@ -321,6 +377,8 @@ pub const Op = struct {
         }
         if (reply == .failed or reply == .not_sent) {
             const why = if (reply == .failed) reply.failed else reply.not_sent;
+            if (self.stage == .locate and std.mem.eql(u8, why, result_too_large))
+                return done(gpa, .failed, "too_large: the accessibility query result was too large — add a name with exact:true, or use a selector or ref");
             switch (self.stage) {
                 // 놓기의 실패 — 동작은 이미 끝났다: 그 결과로 답한다(4 회차 — 실패로 답하면 다시 시도해 Enter 가 두 번 갔다).
                 .release => return self.finish(gpa),
@@ -365,7 +423,7 @@ pub const Op = struct {
                 return self.scrollStep(gpa);
             },
             .scroll => switch (self.kind) {
-                .scroll => return done(gpa, .success, "true"),
+                .scroll => return self.succeed(gpa),
                 .type_text, .press => {
                     self.stage = .focus;
                     return call(gpa, "DOM.focus", "{{\"backendNodeId\":{d}}}", .{self.backend});
@@ -399,11 +457,17 @@ pub const Op = struct {
             },
             .frame_tree => {
                 const fid = stringAt(v, &.{ "frameTree", "frame", "id" }) orelse return done(gpa, .failed, "no main frame");
+                if (self.frame_id) |old| gpa.free(old); // 로케이터가 찾을 때 한 번, 그 뒤 click 이 다시 받는다
                 self.frame_id = try gpa.dupe(u8, fid);
                 return self.worldStep(gpa);
             },
             .world => {
                 self.context_id = intAt(v, &.{"executionContextId"}) orelse return done(gpa, .failed, "no isolated world");
+                if (self.locating) {
+                    // 요소 수를 먼저 본다 — 접근성 질의는 DOM 크기의 제곱으로 느려지고 그동안 페이지가 멈춘다(프로토타입 함수 — DOM clobbering).
+                    self.stage = .size_check;
+                    return call(gpa, "Runtime.evaluate", "{{\"expression\":\"Document.prototype.getElementsByTagName.call(document,'*').length\",\"contextId\":{d},\"returnByValue\":true}}", .{self.context_id});
+                }
                 if (self.kind == .wait) {
                     // 한 번 확인한다(격리 world — 이동했으면 새 문서의 world 다, 객체를 쥐지 않는다).
                     self.stage = .check;
@@ -536,6 +600,40 @@ pub const Op = struct {
                 if (!std.mem.eql(u8, verdict, "ok")) self.miss = "the field did not take the text (read-only, disabled, a length limit or its type)";
                 return self.releaseStep(gpa);
             },
+            .size_check => {
+                const count = intAt(v, &.{ "result", "value" }) orelse return done(gpa, .failed, "could not count the page's elements");
+                if (count > web_cdp_locate.max_role_page_elements) {
+                    const msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} elements (role locator limit {d}; the query freezes the page) — use a selector or ref", .{ count, web_cdp_locate.max_role_page_elements });
+                    return .{ .done = .{ .status = .failed, .result = msg } };
+                }
+                self.stage = .loc_document;
+                return call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{});
+            },
+            .loc_document => {
+                const root = intAt(v, &.{ "root", "backendNodeId" }) orelse return done(gpa, .failed, "no document");
+                self.stage = .locate;
+                // exact 면 이름도 실어 결과를 줄인다(서버의 이름 비교는 정확 일치 — 시간은 같다).
+                if (self.loc_exact and self.loc_name != null)
+                    return call(gpa, "Accessibility.queryAXTree", "{{\"backendNodeId\":{d},\"role\":{f},\"accessibleName\":{f}}}", .{ root, std.json.fmt(self.loc_role, .{}), std.json.fmt(self.loc_name.?, .{}) });
+                return call(gpa, "Accessibility.queryAXTree", "{{\"backendNodeId\":{d},\"role\":{f}}}", .{ root, std.json.fmt(self.loc_role, .{}) });
+            },
+            .locate => {
+                const pick = web_cdp_locate.pickFromAx(gpa, bytes, .{ .role = self.loc_role, .name = self.loc_name, .level = self.loc_level, .exact = self.loc_exact, .nth = self.loc_nth }, self.loc_input_role orelse self.loc_role) catch |e| return switch (e) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => done(gpa, .failed, "malformed accessibility query result"),
+                };
+                switch (pick) {
+                    .none => return done(gpa, .success, "false"),
+                    .ambiguous => |msg| return .{ .done = .{ .status = .failed, .result = msg } },
+                    .one => |one| {
+                        // 찾았다 — 그 노드를 ref 처럼(화면 안으로 → …).
+                        self.backend = one.backend;
+                        self.matched_name = one.name;
+                        self.locating = false;
+                        return self.scrollStep(gpa);
+                    },
+                }
+            },
             .ax_tree => {
                 const json = web_cdp_snapshot.build(gpa, bytes, self.snap) catch |e| return switch (e) {
                     error.OutOfMemory => error.OutOfMemory,
@@ -608,7 +706,26 @@ pub const Op = struct {
     fn finish(self: *Op, gpa: std.mem.Allocator) !Step {
         if (self.miss) |why| return done(gpa, .failed, why);
         if (self.late) |why| return done(gpa, .timeout, why);
-        return done(gpa, .success, "true");
+        return self.succeed(gpa);
+    }
+
+    /// 성공 — 로케이터로 찾았으면 `{"ok":true,"matched":{"ref","name"}}`(L2 가 그대로 싣는다), 아니면 "true".
+    fn succeed(self: *Op, gpa: std.mem.Allocator) !Step {
+        const name = self.matched_name orelse return done(gpa, .success, "true");
+        const msg = try std.fmt.allocPrint(gpa, "{{\"ok\":true,\"matched\":{{\"ref\":\"n{d}\",\"name\":{f}}}}}", .{ self.backend, std.json.fmt(name, .{}) });
+        return .{ .done = .{ .status = .success, .result = msg } };
+    }
+
+    /// 모르는 역할(Op.init 의 error.UnknownRole)의 답 — 가까운 역할과 흔한 역할(소유).
+    pub fn unknownRoleMessage(gpa: std.mem.Allocator, arg: []const u8) ![]u8 {
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, arg, .{}) catch return gpa.dupe(u8, "unknown role");
+        defer parsed.deinit();
+        const role = stringAt(parsed.value, &.{ "locator", "role" }) orelse "";
+        var clipped = role[0..@min(role.len, 40)];
+        while (clipped.len > 0 and !std.unicode.utf8ValidateSlice(clipped)) clipped = clipped[0 .. clipped.len - 1];
+        if (web_cdp_locate.suggestRole(role)) |near|
+            return std.fmt.allocPrint(gpa, "unknown role {f} — did you mean \"{s}\"? common: {s} (generic, none, presentation and text cannot be located; full list: docs/control-plane-browser.md)", .{ std.json.fmt(clipped, .{}), near, web_cdp_locate.common_roles });
+        return std.fmt.allocPrint(gpa, "unknown role {f} — common: {s} (generic, none, presentation and text cannot be located; full list: docs/control-plane-browser.md)", .{ std.json.fmt(clipped, .{}), web_cdp_locate.common_roles });
     }
 
     fn scrollStep(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -1791,4 +1908,103 @@ test "떼기를 끝까지 못 보내도 앞선 실패 이유로 답한다(엔진
     try testing.expectEqual(Status.failed, step.done.status);
     try testing.expectEqualStrings("the Chromium engine stopped", step.done.result);
     fail_left = 0;
+}
+
+fn rolePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"number\",\"value\":120}}" };
+    if (std.mem.eql(u8, method, "DOM.getDocument")) return .{ .ok = "{\"root\":{\"nodeId\":1,\"backendNodeId\":2}}" };
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"Save\"},\"backendDOMNodeId\":11},{\"ignored\":false,\"name\":{\"value\":\"Save changes\"},\"backendDOMNodeId\":12},{\"ignored\":true,\"name\":{\"value\":\"\"},\"backendDOMNodeId\":13}]}" };
+    return happyPage(method, params);
+}
+
+fn hugeRolePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"number\",\"value\":40000}}" };
+    return rolePage(method, params);
+}
+
+fn tooLargeAxPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .failed = result_too_large };
+    return rolePage(method, params);
+}
+
+test "role 로케이터: 크기 검사 → 문서 → 접근성 질의 → 하나면 ref 처럼 누르고 matched 로 답한다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"Button\",\"name\":\"save\",\"exact\":false,\"nth\":0}}", 200);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &rolePage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
+    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "DOM.getDocument", "Accessibility.queryAXTree", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want.len, trail.methods.items.len);
+    for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+    // 크기 검사는 격리 world·프로토타입 함수로, 질의는 Chromium 역할로(부분 일치라 이름은 싣지 않는다).
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "Document.prototype.getElementsByTagName.call(document,'*').length") != null);
+    try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\"}", trail.params.items[4]);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"backendNodeId\":11") != null);
+}
+
+test "role 로케이터: exact 면 이름도 질의에, 여럿이면 후보 ref 로 실패, 없으면 {ok:false}, 큰 페이지·큰 결과는 too_large" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    {
+        var op = try Op.init(testing.allocator, .scroll, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 201);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &rolePage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\",\"accessibleName\":\"Save\"}", trail.params.items[4]);
+        try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
+    }
+    const cases = [_]struct { arg: []const u8, answer: *const fn ([]const u8, []const u8) Reply, status: Status, want: []const u8, presses: usize }{
+        .{ .arg = "{\"locator\":{\"role\":\"button\",\"name\":\"save\"}}", .answer = &rolePage, .status = .failed, .want = "ambiguous: 2 elements match role=button name~\"save\" — n11 \"Save\", n12 \"Save changes\"", .presses = 0 },
+        .{ .arg = "{\"locator\":{\"role\":\"button\",\"name\":\"nope\"}}", .answer = &rolePage, .status = .success, .want = "false", .presses = 0 },
+        .{ .arg = "{\"locator\":{\"role\":\"button\",\"nth\":5}}", .answer = &rolePage, .status = .success, .want = "false", .presses = 0 },
+        .{ .arg = "{\"locator\":{\"role\":\"button\"}}", .answer = &hugeRolePage, .status = .failed, .want = "too_large: page has 40000 elements", .presses = 0 },
+        .{ .arg = "{\"locator\":{\"role\":\"button\"}}", .answer = &tooLargeAxPage, .status = .failed, .want = "too_large: the accessibility query result", .presses = 0 },
+    };
+    for (cases) |c| {
+        trail.reset();
+        var op = try Op.init(testing.allocator, .click, c.arg, 202);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, c.answer, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(c.status, r.status);
+        try testing.expect(std.mem.indexOf(u8, r.result, c.want) != null);
+        try testing.expectEqual(c.presses, trail.count("Input.dispatchMouseEvent"));
+        try testing.expectEqual(@as(usize, 0), trail.count("DOM.scrollIntoViewIfNeeded"));
+    }
+    // 큰 페이지면 질의 자체를 보내지 않는다.
+    try testing.expectEqual(@as(usize, 1), trail.count("Accessibility.queryAXTree"));
+}
+
+test "role 로케이터: 모르는 역할은 UnknownRole(가까운 역할을 권하는 답), 모양이 틀리면 InvalidArg, press 는 그 요소에 누른다" {
+    try testing.expectError(error.UnknownRole, Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"buton\"}}", 1));
+    const msg = try Op.unknownRoleMessage(testing.allocator, "{\"locator\":{\"role\":\"buton\"}}");
+    defer testing.allocator.free(msg);
+    try testing.expect(std.mem.startsWith(u8, msg, "unknown role \"buton\" — did you mean \"button\"? common: button link"));
+    for ([_][]const u8{
+        "{\"locator\":{\"role\":\"generic\"}}",
+        "{\"locator\":\"button\"}",
+        "{\"locator\":{\"label\":\"Email\"}}",
+        "{\"locator\":{\"role\":\"button\",\"name\":\"\"}}",
+        "{\"locator\":{\"role\":\"button\",\"level\":0}}",
+        "{\"locator\":{\"role\":\"button\",\"nth\":-1}}",
+        "{\"locator\":{\"role\":\"button\",\"exact\":\"yes\"}}",
+    }) |bad| {
+        if (Op.init(testing.allocator, .click, bad, 1)) |op_val| {
+            var op = op_val;
+            op.deinit(testing.allocator);
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .press, "{\"key\":\"Enter\",\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 203);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &rolePage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
+    try testing.expectEqual(@as(usize, 1), trail.count("DOM.focus"));
+    try testing.expectEqual(@as(usize, 2), trail.count("Input.dispatchKeyEvent"));
 }

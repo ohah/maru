@@ -17788,6 +17788,8 @@ test "LSPE15 실행 파일의 출처는 사용자 셸 환경의 자리 변수로
     // 처음엔 `go` 를, 두 번째(다시 읽기)엔 `go2` 를 기다린다 — 시간이 아니라 순서로.
     const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "while [ ! -f \"$HOME/go\" ]; do /bin/sleep 0.02; done\nif [ -f \"$HOME/ran\" ]; then while [ ! -f \"$HOME/go2\" ]; do /bin/sleep 0.02; done; fi\n: > \"$HOME/ran\"\nexport VOLTA_HOME=\"$HOME/vh\"\nexport PATH=\"$HOME/vh/bin:$PATH\"\nexec /bin/sh -c \"$cmd\"", &shell_buf);
     tool_env.setShellForTest(shell, null);
+    // 이 판정자는 홈 환경(WT5a)의 자리 변수를 잰다 — 저장소의 셸 환경(WT5b-2)은 끈다(그 셸이 「다시 읽기」 자리의 둘째 실행을 먹는다).
+    fx.session.loaded_config.config.lsp.repository_environment = false;
     // 실패 경로에서도 관문을 연다 — 셸이 시한(10초)까지 기다리지 않게(`fx.deinit` 이 폴더를 먼저 지우므로 그 뒤엔 못 연다).
     errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {};
     errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go2", .data = "" }) catch {};
@@ -17845,6 +17847,243 @@ test "LSPE15 실행 파일의 출처는 사용자 셸 환경의 자리 변수로
             return tool_env.settled();
         }
     }.f));
+}
+
+// 이름에 「훅」을 넣지 않는다 — `test-agent-turn-capture` 의 이름 필터(68 고정)에 걸린다.
+test "LSPE19 저장소 셸 환경 — 신뢰한 저장소는 그 루트로 cd 한 셸의 환경(cd 로 깨어난 설정이 넣은 PATH·변수)으로 서버를 찾고 띄우며, 신뢰 전·스위치 끔이면 그 저장소의 셸을 안 띄운다 (계획 workspace-trust WT5b-2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", null); // PATH 로 찾게
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    // 서버는 **그 저장소의 훅이 PATH 에 넣는 폴더**(`proj/devbin` — devshell 처럼)에만 있다. 홈 환경으로는 못 찾는다.
+    try fx.dir.dir.createDirPath(testing.io, "proj/devbin");
+    var wrapper_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "proj/devbin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/proj/devbin/zls", .{root})).ptr, 0o755);
+    }
+    // `cd` 를 함수로 덮어 chpwd 훅을 흉내 낸다 — 그 폴더로 들어가면 변수와 PATH 를 세운다(direnv 처럼).
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    // 훅은 관문 파일(`$HOME/go`)을 기다린다 — 저장소 환경을 읽는 사이를 잰다(⑶).
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "exec /bin/sh -c \"cd() { while [ ! -f \\\"\\$HOME/go\\\" ]; do /bin/sleep 0.02; done; command cd \\\"\\$@\\\" && export REPO_HOOK=hooked PATH=\\\"\\$PWD/devbin:\\$PATH\\\"; }; $cmd\"", &shell_buf);
+    errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {}; // 실패 경로에서도 셸을 놓아 준다
+    tool_env.setShellForTest(shell, null);
+    var pp_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    const proj = try std.fmt.bufPrint(&pp_buf, "{s}/proj", .{root});
+    const term = try openProjDoc(&fx, root);
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    const Wait = struct {
+        fn phase(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return v.phase == .missing or v.phase == .ready;
+        }
+    };
+
+    // ⑴ 신뢰 전(결정 없음) — 홈 환경으로 못 찾아 「없음」, 그 저장소의 셸은 띄우지 않는다(신뢰 전엔 저장소 훅을 안 돌린다).
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, Wait.phase));
+    try testing.expectEqual(lsp_client.Phase.missing, lsp_client.statusFor(fx.session, term).?.phase);
+    try testing.expectEqual(@as(u32, 1), tool_env.spawnCountForTest());
+
+    // ⑵ 스위치를 끄면 신뢰한 저장소여도 그 저장소의 셸을 안 띄운다 — 홈 환경 그대로라 「없음」.
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(proj, &kb) orelse return error.TrustKeyMissing;
+    try testing.expect(trust_store.decide(testing.io, key, .allow));
+    fx.session.loaded_config.config.lsp.repository_environment = false;
+    lsp_client.pump(fx.session);
+    _ = pumpLspUntil(&fx, 300, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(_: Ctx) bool {
+            return false;
+        }
+    }.f);
+    try testing.expectEqual(lsp_client.Phase.missing, lsp_client.statusFor(fx.session, term).?.phase);
+    try testing.expectEqual(@as(u32, 1), tool_env.spawnCountForTest());
+
+    // ⑶ 켜면(기본) 신뢰한 저장소는 그 루트로 cd 한 셸의 환경 — 훅이 넣은 PATH 로 서버를 찾아 그 환경으로 띄운다(시트 없이 — 이미 허용).
+    // 읽는 동안 상태는 「셸 환경 읽는 중」에 머문다(tick 마다 「다시 시작」과 오가지 않는다).
+    fx.session.loaded_config.config.lsp.repository_environment = true;
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(_: Ctx) bool {
+            return tool_env.spawnCountForTest() == 2;
+        }
+    }.f));
+    var ticks: usize = 0;
+    while (ticks < 20) : (ticks += 1) {
+        lsp_client.pump(fx.session);
+        try testing.expectEqual(lsp_client.Phase.preparing, lsp_client.statusFor(fx.session, term).?.phase);
+        _ = usleep(2_000);
+    }
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return v.phase == .ready;
+        }
+    }.f));
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqual(@as(u32, 2), tool_env.spawnCountForTest()); // 홈 한 번 + 이 저장소 한 번
+    const server_env = try fx.dir.dir.readFileAlloc(testing.io, "home/server.env", allocator, .limited(1 << 16));
+    defer allocator.free(server_env);
+    try testing.expect(std.mem.indexOf(u8, server_env, "REPO_HOOK=hooked") != null);
+    var devbin_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    try testing.expect(std.mem.indexOf(u8, server_env, try std.fmt.bufPrint(&devbin_buf, "PATH={s}/devbin:", .{proj})) != null);
+}
+
+test "LSPE20 홈 환경에도 있는 서버도 신뢰한 저장소에선 그 저장소의 셸 환경으로 띄운다 — 읽는 동안 상태는 「셸 환경 읽는 중」에 머물고 tick 마다 「다시 시작」과 오가지 않는다 (계획 workspace-trust WT5b-2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", null); // PATH 로 찾게
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    const term = try openProjDoc(&fx, root);
+    // 서버는 홈 환경의 PATH(`home/fakebin` — 셸 설정이 넣는다)에 있다.
+    var wrapper_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/fakebin/zls", .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/server.env\"\nexec {s} \"$@\"\n", .{fake}) });
+    {
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/home/fakebin/zls", .{root})).ptr, 0o755);
+    }
+    // 그 저장소로 `cd` 하면 훅이 변수를 세운다 — 관문 파일(`$HOME/go`)을 기다린 뒤에.
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "export PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"cd() { while [ ! -f \\\"\\$HOME/go\\\" ]; do /bin/sleep 0.02; done; command cd \\\"\\$@\\\" && export REPO_HOOK=hooked; }; $cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    errdefer fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" }) catch {}; // 실패 경로에서도 셸을 놓아 준다
+    var pp_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    const key = trust_store.keyFor(try std.fmt.bufPrint(&pp_buf, "{s}/proj", .{root}), &kb) orelse return error.TrustKeyMissing;
+    try testing.expect(trust_store.decide(testing.io, key, .allow)); // 이미 신뢰한 저장소
+    const Ctx = struct { fx: *PaneFixture, term: *Term };
+    // ⑴ 홈 환경으로 찾았고 신뢰도 섰다 — 띄우기는 그 저장소의 셸 환경을 기다린다(셸이 둘 — 홈 한 번·저장소 한 번).
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(_: Ctx) bool {
+            return tool_env.spawnCountForTest() == 2;
+        }
+    }.f));
+    // ⑵ 읽는 동안 상태는 「셸 환경 읽는 중」에 머문다 — gate 가 「다시 시작」으로 바꾸고 띄우기가 다시 미루며 tick 마다 오가지 않는다.
+    var ticks: usize = 0;
+    while (ticks < 20) : (ticks += 1) {
+        lsp_client.pump(fx.session);
+        try testing.expectEqual(lsp_client.Phase.preparing, lsp_client.statusFor(fx.session, term).?.phase);
+        _ = usleep(2_000);
+    }
+    // ⑶ 다 되면 그 저장소의 환경으로 띄운다 — 홈 환경에 있던 서버여도 훅이 세운 변수를 받는다.
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "home/go", .data = "" });
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .term = term }, struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.term) orelse return false;
+            return v.phase == .ready;
+        }
+    }.f));
+    const server_env = try fx.dir.dir.readFileAlloc(testing.io, "home/server.env", allocator, .limited(1 << 16));
+    defer allocator.free(server_env);
+    try testing.expect(std.mem.indexOf(u8, server_env, "REPO_HOOK=hooked") != null);
+}
+
+test "LSPE21 심링크 루트의 대상이 바뀌면 그 루트의 저장소 셸 환경도 버린다 — 새 대상의 서버는 옛 대상의 환경(cd 로 세운 값)으로 뜨지 않는다 (계획 workspace-trust WT5b-2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var override = try EnvGuard.set("MARU_LSP_SERVER_OVERRIDE", null); // PATH 로 찾게
+    defer override.restore();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var home_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home = try EnvGuard.set("HOME", try std.fmt.bufPrint(&home_path_buf, "{s}/home", .{root}));
+    defer home.restore();
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    try fx.dir.dir.createDirPath(testing.io, "home/fakebin");
+    try fx.dir.dir.createDirPath(testing.io, "repo-a/.git");
+    try fx.dir.dir.createDirPath(testing.io, "repo-b/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo-a/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo-b/b.zig", .data = "const b = 1;\n" });
+    try fx.dir.dir.symLink(testing.io, "repo-a", "alias", .{ .is_directory = true });
+    // 서버 둘(clangd·zls) — 둘째 파일이 **다른 서버**라야 새 클라이언트가 그 root 의 키를 다시 푼다(같은 서버면 굳힌 키를 쓴다 — LSPB26).
+    // 각자 받은 환경을 `$HOME/<이름>.env` 에 적는다.
+    var wrapper_buf: [std.fs.max_path_bytes + 96]u8 = undefined;
+    for ([_][]const u8{ "clangd", "zls" }) |name| {
+        var sp: [64]u8 = undefined;
+        const sub = try std.fmt.bufPrint(&sp, "home/fakebin/{s}", .{name});
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = sub, .data = try std.fmt.bufPrint(&wrapper_buf, "#!/bin/sh\n/usr/bin/env > \"$HOME/{s}.env\"\nexec {s} \"$@\"\n", .{ name, fake }) });
+        var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+        _ = std.c.chmod((try std.fmt.bufPrintZ(&z, "{s}/{s}", .{ root, sub })).ptr, 0o755);
+    }
+    // 그 저장소로 `cd` 하면 훅이 그 **실제 경로**를 변수로 세운다(어느 대상의 환경인지 가른다).
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeLoginShell(fx.dir.dir, root, "zsh", "export PATH=\"$HOME/fakebin:$PATH\"\nexec /bin/sh -c \"cd() { command cd \\\"\\$@\\\" && export REPO_HOOK=\\\"\\$(pwd -P)\\\"; }; $cmd\"", &shell_buf);
+    tool_env.setShellForTest(shell, null);
+    // 두 저장소 다 이미 신뢰했다 — 묻지 않고 뜬다.
+    var kp: [std.fs.max_path_bytes + 16]u8 = undefined;
+    var kb: [std.fs.max_path_bytes]u8 = undefined;
+    for ([_][]const u8{ "repo-a", "repo-b" }) |name| {
+        const key = trust_store.keyFor(try std.fmt.bufPrint(&kp, "{s}/{s}", .{ root, name }), &kb) orelse return error.TrustKeyMissing;
+        try testing.expect(trust_store.decide(testing.io, key, .allow));
+    }
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const t_a = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/a.c", .{root}));
+    const Ctx = struct { fx: *PaneFixture, t: *Term };
+    const Ready = struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.t) orelse return false;
+            return v.phase == .ready;
+        }
+    };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .t = t_a }, Ready.f));
+    var want_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    {
+        const env = try fx.dir.dir.readFileAlloc(testing.io, "home/clangd.env", allocator, .limited(1 << 16));
+        defer allocator.free(env);
+        try testing.expect(std.mem.indexOf(u8, env, try std.fmt.bufPrint(&want_buf, "REPO_HOOK={s}/repo-a\n", .{root})) != null);
+    }
+    // `alias` 가 B 를 가리키게 되고 그 이름으로 새 파일을 연다 — 키를 다시 풀면 옛 대상(A)으로 떠 있던 서버를 내리고, B 의 결정(허용)으로
+    // 다시 띄운다. 그 환경은 B 로 `cd` 한 셸의 것이어야 한다(그 루트의 담아 둔 환경은 A 의 것이었다).
+    try fx.dir.dir.deleteFile(testing.io, "home/clangd.env");
+    try fx.dir.dir.deleteFile(testing.io, "alias");
+    try fx.dir.dir.symLink(testing.io, "repo-b", "alias", .{ .is_directory = true });
+    const t_b = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/alias/b.zig", .{root}));
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .t = t_b }, struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.t) orelse return false;
+            if (v.phase != .ready) return false;
+            c.fx.dir.dir.access(testing.io, "home/zls.env", .{}) catch return false;
+            return true;
+        }
+    }.f));
+    const env = try fx.dir.dir.readFileAlloc(testing.io, "home/zls.env", allocator, .limited(1 << 16));
+    defer allocator.free(env);
+    try testing.expect(std.mem.indexOf(u8, env, try std.fmt.bufPrint(&want_buf, "REPO_HOOK={s}/repo-b\n", .{root})) != null);
+    // 옛 대상으로 떠 있던 clangd 는 내렸다(키가 바뀌었다 — LSPB26) — 다시 뜨면 그것도 B 의 환경이다.
+    if (fx.dir.dir.readFileAlloc(testing.io, "home/clangd.env", allocator, .limited(1 << 16))) |cenv| {
+        defer allocator.free(cenv);
+        try testing.expect(std.mem.indexOf(u8, cenv, try std.fmt.bufPrint(&want_buf, "REPO_HOOK={s}/repo-a\n", .{root})) == null);
+    } else |_| {}
 }
 
 test "LSPE16 환경 제외 목록 — gate 가 창의 설정으로 목록을 정해 서버는 걸린 이름 없이 뜨고(셸 환경), 「Show Environment Variable Names」는 이름만·「제외됨」을 보이며 고르면 닫힐 뿐이고, 목록을 바꾸면 셸을 다시 띄우지 않고 envp 만 (계획 workspace-trust WT5b-1)" {

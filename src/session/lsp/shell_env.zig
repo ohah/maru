@@ -87,8 +87,33 @@ fn isNonce(nonce: []const u8) bool {
 /// 펼침).
 /// 경로나 일회용 값이 안전하지 않으면 `error.Unsafe`.
 pub fn command(out_path: []const u8, nonce: []const u8, buf: []u8) error{ Unsafe, NoSpaceLeft }![]const u8 {
+    return commandIn(null, out_path, nonce, buf);
+}
+
+/// `command` + **저장소 루트로 `cd`**(계획 workspace-trust WT5b-2 — 저장소의 셸 훅 환경). 셸의 시작 cwd 는 홈이고, 이 `cd` 가 zsh 의
+/// chpwd·fish 의 PWD 훅(direnv·mise …)을 깨운다. `cd` 가 실패해도 `;` 라 나머지는 돈다 — 그래서 결과를 읽을 때 `PWD` 가 그 폴더인지
+/// 대 본다(`resolveIn`; 문법을 `&&` 로 넓히지 않는다 — 머리 주석의 「세 셸 모두에서 도는 문법」). 폴더는 `isQuotableDir` 여야 한다.
+pub fn commandIn(dir: ?[]const u8, out_path: []const u8, nonce: []const u8, buf: []u8) error{ Unsafe, NoSpaceLeft }![]const u8 {
     if (!isSafePath(out_path) or !isNonce(nonce)) return error.Unsafe;
-    return std.fmt.bufPrint(buf, "/usr/bin/printf '%s' " ++ begin_prefix ++ "{s} >> '{s}'; /usr/bin/env -0 >> '{s}'; /usr/bin/printf '%s' " ++ end_prefix ++ "{s} >> '{s}'", .{ nonce, out_path, out_path, nonce, out_path });
+    var n: usize = 0;
+    if (dir) |d| {
+        if (!isQuotableDir(d)) return error.Unsafe;
+        n = (try std.fmt.bufPrint(buf, "cd '{s}'; ", .{d})).len;
+    }
+    const rest = try std.fmt.bufPrint(buf[n..], "/usr/bin/printf '%s' " ++ begin_prefix ++ "{s} >> '{s}'; /usr/bin/env -0 >> '{s}'; /usr/bin/printf '%s' " ++ end_prefix ++ "{s} >> '{s}'", .{ nonce, out_path, out_path, nonce, out_path });
+    return buf[0 .. n + rest.len];
+}
+
+/// 작은따옴표로 감싸 세 셸(sh 계열·csh·fish)에 그대로 줄 수 있는 절대 경로인가 — `isSafePath` 보다 넓다(저장소 경로엔 공백·한글이
+/// 흔하다). `'`(따옴표가 끝난다)·제어 문자(개행이 명령을 가른다)·`\`(fish 는 작은따옴표 안에서도 `\'`·`\\` 를 푼다)·`!`(대화형 csh 는
+/// 작은따옴표 안에서도 기록 펼침을 한다)는 거른다.
+pub fn isQuotableDir(dir: []const u8) bool {
+    if (dir.len == 0 or dir[0] != '/') return false;
+    for (dir) |c| switch (c) {
+        '\'', '\\', '!', 0x7f => return false,
+        else => if (c < 0x20) return false,
+    };
+    return true;
 }
 
 /// 터미널에서 띄운 앱이 셸에 넘기는 바탕 — 사용자·셸·로캘(`LANG`·`LC_*`·`__CF_USER_TEXT_ENCODING`)·임시 폴더·에이전트 소켓·launchd
@@ -211,6 +236,14 @@ pub const Resolved = struct {
 /// 있어야 한다** — 명령이 `;` 로 이어져 `env -0` 이 실패해도 표식 둘은 찍히므로, 그것 없이는 빈 출력을 「빈 환경」으로 받는다.
 /// 항목은 `sanitize` 가 거른다(대체 경로 — 셸을 못 읽었다·스위치 끔 — 도 같은 함수다).
 pub fn resolve(allocator: std.mem.Allocator, data: []const u8, nonce: []const u8) error{ Malformed, OutOfMemory }!Resolved {
+    return resolveIn(allocator, data, nonce, &.{});
+}
+
+/// `resolve` + **그 폴더에서 읽었나**(`commandIn` 의 `cd` 가 실패했으면 홈의 환경이다 — 그것을 저장소의 환경으로 받지 않는다). 첫 `PWD`
+/// 항목이 `dirs` 중 하나(끝의 `/` 는 뺀다)여야 한다 — 없거나 다르면 `error.Malformed`. 호출자는 그 폴더와 그 **실제 경로**를 함께 준다
+/// (zsh 의 `CHASE_LINKS`·bash 의 `set -P` 는 심링크를 푼 경로를 `PWD` 로 둔다 — 적대적 검증 4회차 실측). `dirs` 가 비면 대지 않는다.
+/// `PWD` 는 `sanitize` 가 걸러 서버로는 안 간다.
+pub fn resolveIn(allocator: std.mem.Allocator, data: []const u8, nonce: []const u8, dirs: []const []const u8) error{ Malformed, OutOfMemory }!Resolved {
     if (!isNonce(nonce)) return error.Malformed;
     var begin_buf: [begin_prefix.len + nonce_len]u8 = undefined;
     var end_buf: [end_prefix.len + nonce_len]u8 = undefined;
@@ -229,6 +262,15 @@ pub fn resolve(allocator: std.mem.Allocator, data: []const u8, nonce: []const u8
         try entries.append(allocator, entry);
     }
     if (!saw_probe) return error.Malformed;
+    if (dirs.len > 0) {
+        const pwd = for (entries.items) |e| {
+            if (std.mem.startsWith(u8, e, "PWD=")) break e["PWD=".len..];
+        } else return error.Malformed;
+        for (dirs) |d| {
+            const want = if (d.len > 1) std.mem.trimEnd(u8, d, "/") else d;
+            if (std.mem.eql(u8, pwd, want)) break;
+        } else return error.Malformed;
+    }
     return sanitize(allocator, entries.items);
 }
 
@@ -445,4 +487,31 @@ test "shell_env: 결과 읽기는 메모리가 모자라도 새지 않는다" {
             r.deinit(a);
         }
     }.f, .{});
+}
+
+test "shell_env: 저장소 루트로 cd 하는 명령 — 공백·한글 경로는 작은따옴표로 앞에 붙고, 따옴표·제어 문자·역슬래시·느낌표는 거절; 결과의 첫 PWD 가 그 폴더여야 한다 (계획 workspace-trust WT5b-2)" {
+    var buf: [1024]u8 = undefined;
+    const nonce = nonce_a;
+    const cmd = try commandIn("/Users/me/내 저장소", "/var/folders/ab/T/maru-env.x1/out", nonce, &buf);
+    try testing.expect(std.mem.startsWith(u8, cmd, "cd '/Users/me/내 저장소'; /usr/bin/printf "));
+    var plain_buf: [1024]u8 = undefined;
+    try testing.expectEqualStrings(try command("/var/folders/ab/T/maru-env.x1/out", nonce, &plain_buf), cmd["cd '/Users/me/내 저장소'; ".len..]);
+    for ([_][]const u8{ "/a'b", "/a\nb", "/a\\b", "/a!b", "relative", "", "/a\x7fb" }) |bad| {
+        try testing.expectError(error.Unsafe, commandIn(bad, "/var/folders/ab/T/maru-env.x1/out", nonce, &buf));
+    }
+    const begin = begin_prefix ++ nonce;
+    const end = end_prefix ++ nonce;
+    const ok = begin ++ "PWD=/srv/app\x00" ++ probe_extra[0] ++ "\x00HOME=/h\x00" ++ end;
+    var r = try resolveIn(testing.allocator, ok, nonce, &.{"/srv/app/"});
+    r.deinit(testing.allocator);
+    try testing.expectError(error.Malformed, resolveIn(testing.allocator, ok, nonce, &.{"/srv/other"}));
+    // 심링크를 푼 `PWD`(zsh `CHASE_LINKS`·bash `set -P`)도 받는다 — 호출자가 실제 경로를 함께 준다.
+    var real = try resolveIn(testing.allocator, ok, nonce, &.{ "/srv/link", "/srv/app" });
+    real.deinit(testing.allocator);
+    const home = begin ++ "PWD=/Users/me\x00" ++ probe_extra[0] ++ "\x00" ++ end; // cd 가 실패해 홈에 남았다
+    try testing.expectError(error.Malformed, resolveIn(testing.allocator, home, nonce, &.{"/srv/app"}));
+    const none = begin ++ probe_extra[0] ++ "\x00" ++ end;
+    try testing.expectError(error.Malformed, resolveIn(testing.allocator, none, nonce, &.{"/srv/app"}));
+    var plain = try resolveIn(testing.allocator, none, nonce, &.{}); // 폴더를 안 주면 대지 않는다
+    plain.deinit(testing.allocator);
 }

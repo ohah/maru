@@ -69,6 +69,22 @@ var from_reload: bool = false;
 
 const Outcome = union(enum) { ok: shell_env.Resolved, failed: Reason };
 const Result = struct { generation: u64, outcome: Outcome };
+
+/// **저장소 루트마다 담은 환경**(계획 workspace-trust WT5b-2 — 저장소의 셸 훅 환경). 같은 로그인 셸을 그 루트로 `cd` 시켜 읽는다 —
+/// 사용자가 셸 설정에 건 훅(direnv·mise·nix …)이 그 저장소의 터미널과 똑같이 적용된다. 앱 전역 환경(`current` — 홈에서 읽은 것)을 다시
+/// 읽으면(`start`) 함께 버린다. 언어 서버는 신뢰한 저장소에서만 뜨므로 이 환경도 신뢰한 저장소에서만 읽힌다(호출자 `lsp.spawnClient`).
+const RootEnv = struct {
+    root: []u8,
+    /// 읽기 시작한 세대(`root_generation`) — 다시 읽기로 버린 뒤 늦게 온 결과를 가른다.
+    generation: u64,
+    state: enum { resolving, ready, failed },
+    env: ?Env = null,
+};
+var roots: std.ArrayList(RootEnv) = .empty;
+var root_generation: u64 = 0;
+const RootResult = struct { root: []u8, generation: u64, outcome: Outcome };
+/// 워커 → 메인(저장소 환경). `slot_lock` 안에서만 읽고 쓴다.
+var root_results: std.ArrayList(*RootResult) = .empty;
 /// 워커 → 메인. 메인이 가져가기 전에 다음 결과가 오면 앞 것은 버린다(그 세대는 이미 지났다). 잠금 안에서만 읽고 쓴다 — 원자 CAS 로
 /// 두면 워커가 슬롯의 결과를 읽는(세대 비교) 사이 메인이 그것을 가져가 해제할 수 있었다(5회차 적대적 검증 — 해제된 칸의 세대를 읽어
 /// 자기 결과를 버리면 「읽는 중」에 갇힌다). `pty/macos.zig` 의 `winsize_lock` 과 같은 pthread 잠금(이 모듈엔 `Io` 가 없다).
@@ -116,6 +132,8 @@ pub fn resetForTest() void {
         _ = std.c.nanosleep(&ts, null);
     }
     if (takeSlot()) |r| freeResult(r);
+    clearRoots();
+    for (takeRootResults()) |r| freeRootResult(r);
     if (current) |*e| e.deinit();
     current = null;
     current_from_shell = false;
@@ -198,6 +216,21 @@ pub fn setExcluded(text: []const u8) void {
         gpa.free(owned);
         return;
     }) else null;
+    // 저장소 환경도 같은 목록으로 — 하나라도 못 만들면 아무것도 안 바꾼다(위와 같은 이유).
+    const root_ptrs = gpa.alloc(?[:null]?[*:0]const u8, roots.items.len) catch {
+        if (ptrs) |p| gpa.free(p);
+        gpa.free(owned);
+        return;
+    };
+    defer gpa.free(root_ptrs);
+    for (roots.items, 0..) |r, i| {
+        root_ptrs[i] = if (r.env) |e| (filteredEnvp(e.resolved.entries, owned) catch {
+            for (root_ptrs[0..i]) |p| if (p) |q| gpa.free(q);
+            if (ptrs) |p| gpa.free(p);
+            gpa.free(owned);
+            return;
+        }) else null;
+    }
     gpa.free(excluded_text);
     excluded_text = owned;
     excluded_set = true;
@@ -205,6 +238,10 @@ pub fn setExcluded(text: []const u8) void {
         gpa.free(current.?.envp);
         current.?.envp = p;
     }
+    for (roots.items, root_ptrs) |*r, p| if (p) |q| {
+        gpa.free(r.env.?.envp);
+        r.env.?.envp = q;
+    };
 }
 
 /// 아직 아무도 정하지 않았으면 이 창의 설정으로 정한다(처음 시작할 때 — 스위치 `tick(initial)` 와 같은 규율).
@@ -289,6 +326,124 @@ pub fn envp() ?[*:null]const ?[*:0]const u8 {
     return e.envp.ptr;
 }
 
+/// 서버 찾기·띄우기가 쓰는 환경 한 벌.
+pub const View = struct { envp: [*:null]const ?[*:0]const u8, path: []const u8 };
+
+/// **그 저장소 루트의 환경**(계획 workspace-trust WT5b-2) — `null` 이면 아직(읽는 중 — 띄우지 않는다; 처음이면 여기서 시작한다).
+/// 앱 전역 환경을 그대로 주는 경우: `enabled` 가 거짓(`lsp.repository-environment` 끔)·앱 전역을 사용자 셸에서 읽지 못했다(스위치 끔·대체·
+/// 실패 — 그 셸로는 저장소도 못 읽는다)·루트를 작은따옴표로 셸에 줄 수 없다(`shell_env.isQuotableDir`)·저장소 환경을 못 읽었다(시한·
+/// `cd` 실패 등 — 원인은 앱 로그). 신뢰한 저장소에서만 부른다(호출자).
+pub fn rootView(root: []const u8, enabled: bool) ?View {
+    if (!settled()) return null;
+    const global = globalView() orelse return null;
+    if (!enabled or status_ != .ready or !current_from_shell) return global;
+    if (!shell_env.isQuotableDir(root)) return global;
+    for (roots.items) |*r| if (std.mem.eql(u8, r.root, root)) return switch (r.state) {
+        .resolving => null,
+        .ready => viewOf(&r.env.?),
+        .failed => global,
+    };
+    if (!startRoot(root)) return global;
+    return null;
+}
+
+fn globalView() ?View {
+    return .{ .envp = envp() orelse return null, .path = path() };
+}
+
+fn viewOf(e: *const Env) View {
+    return .{ .envp = e.envp.ptr, .path = e.resolved.path orelse "" };
+}
+
+/// 그 루트를 읽기 시작한다 — 못 시작하면 `false`(호출자는 앱 전역 환경으로).
+fn startRoot(root: []const u8) bool {
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const login = loginShell(&shell_buf, &home_buf) orelse return false;
+    const kind = shell_env.shellKind(login.shell) orelse return false;
+    const owned = gpa.dupe(u8, root) catch return false;
+    roots.append(gpa, .{ .root = owned, .generation = root_generation, .state = .resolving }) catch {
+        gpa.free(owned);
+        return false;
+    };
+    const job = Job.create(login.shell, login.home, kind, root_generation, root) catch return failRoot(roots.items.len - 1);
+    const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
+        job.destroy();
+        return failRoot(roots.items.len - 1);
+    };
+    thread.detach();
+    if (builtin.is_test) _ = started_count.fetchAdd(1, .acq_rel);
+    change_count +%= 1;
+    return true;
+}
+
+/// 못 시작한 루트는 「못 읽음」으로 둔다(tick 마다 다시 띄우지 않게 — 다시 읽기가 지운다).
+fn failRoot(i: usize) bool {
+    roots.items[i].state = .failed;
+    return false;
+}
+
+/// 그 루트의 저장소 환경을 버린다 — 다음에 다시 읽는다. 루트가 심링크면 그 대상이 바뀐 뒤(`lsp.rekeyRoot` — 신뢰 키가 바뀌었다) 옛 대상의
+/// 환경으로 새 대상의 서버를 띄우지 않게. 도는 워커의 결과는 짝이 없어져 버려진다(세대를 올린다).
+pub fn forgetRoot(root: []const u8) void {
+    for (roots.items, 0..) |*r, i| if (std.mem.eql(u8, r.root, root)) {
+        if (r.env) |*e| e.deinit();
+        gpa.free(r.root);
+        _ = roots.orderedRemove(i);
+        root_generation +%= 1;
+        return;
+    };
+}
+
+fn clearRoots() void {
+    for (roots.items) |*r| {
+        if (r.env) |*e| e.deinit();
+        gpa.free(r.root);
+    }
+    roots.clearRetainingCapacity();
+    root_generation +%= 1; // 도는 워커의 결과는 이제 짝이 없다
+}
+
+fn takeRootResults() []*RootResult {
+    _ = std.c.pthread_mutex_lock(&slot_lock);
+    defer _ = std.c.pthread_mutex_unlock(&slot_lock);
+    const items = root_results.toOwnedSlice(gpa) catch return &.{};
+    return items;
+}
+
+fn freeRootResult(r: *RootResult) void {
+    if (r.outcome == .ok) r.outcome.ok.deinit(gpa);
+    gpa.free(r.root);
+    gpa.destroy(r);
+}
+
+/// 저장소 환경의 결과를 받는다(`poll`).
+fn pollRoots() void {
+    const taken = takeRootResults();
+    defer gpa.free(taken);
+    for (taken) |r| {
+        defer freeRootResult(r);
+        const entry = for (roots.items) |*e| {
+            if (e.generation == r.generation and e.state == .resolving and std.mem.eql(u8, e.root, r.root)) break e;
+        } else continue;
+        switch (r.outcome) {
+            .ok => |resolved| {
+                entry.env = buildEnv(resolved) catch {
+                    entry.state = .failed;
+                    continue;
+                };
+                r.outcome = .{ .failed = .none }; // 넘겨받았다 — `freeRootResult` 가 다시 풀지 않게
+                entry.state = .ready;
+            },
+            .failed => |why| {
+                entry.state = .failed;
+                if (!builtin.is_test) std.log.scoped(.lsp).warn("repository shell environment unreadable: reason={s}; using the shell environment read at home", .{@tagName(why)});
+            },
+        }
+        change_count +%= 1;
+    }
+}
+
 /// **판정자의 기본**(가짜 셸을 주입하지 않았다 — `test_default`)은 떠 둔 환경이 아니라 **지금의** 앱 환경을 거르지 않고 준다 — 판정자는
 /// 테스트마다 `setenv` 로 가짜 서버의 동작(`MARU_FAKE_LSP_*` — 위생은 `MARU_` 를 뺀다)을 고르고, 이 표는 앱 전역이라 처음 정할 때 뜬 환경이
 /// 낡는다. 위생·해석 경로는 가짜 셸을 주입한 판정자가 잰다.
@@ -298,6 +453,7 @@ fn liveForTest() bool {
 
 fn start() void {
     generation_ +%= 1;
+    clearRoots(); // 앱 전역을 다시 읽으면 저장소 환경도 다시 읽는다(셸 설정이 바뀌었을 수 있다 — 「Reload Shell Environment」)
     if (!enabled_) return settleFallback(.fallback, .disabled);
     if (builtin.is_test and test_shell == null) return settleFallback(.fallback, .test_default);
     if (!osSupportsEnvNul()) return settleFallback(.fallback, .old_macos);
@@ -305,7 +461,7 @@ fn start() void {
     var home_buf: [std.fs.max_path_bytes]u8 = undefined;
     const login = loginShell(&shell_buf, &home_buf) orelse return settleFallback(.fallback, .no_login_shell);
     const kind = shell_env.shellKind(login.shell) orelse return settleFallback(.fallback, .unsupported_shell);
-    const job = Job.create(login.shell, login.home, kind, generation_) catch return settleFallback(.failed, .spawn);
+    const job = Job.create(login.shell, login.home, kind, generation_, null) catch return settleFallback(.failed, .spawn);
     const thread = std.Thread.spawn(.{}, worker, .{job}) catch {
         job.destroy();
         return settleFallback(.failed, .spawn);
@@ -319,6 +475,7 @@ fn start() void {
 
 /// 워커 결과가 왔으면 받는다 — 시작하지는 않는다(LSP pump 가 매 tick 부른다 — 시작은 서버가 필요한 문서의 gate 와 이름 목록 명령만 한다).
 pub fn poll() void {
+    pollRoots();
     const r = takeSlot() orelse return;
     defer gpa.destroy(r);
     if (r.generation != generation_) {
@@ -456,8 +613,10 @@ const Job = struct {
     env: [][]u8,
     /// 사용자 임시 디렉터리(`$TMPDIR` — 같은 이유로 메인에서 떴다).
     tmp: []u8,
+    /// 저장소 루트(계획 WT5b-2 — 이 폴더로 `cd` 한 환경). `null` 이면 앱 전역(홈) 환경이다.
+    dir: ?[]u8 = null,
 
-    fn create(shell: []const u8, home: []const u8, kind: shell_env.Shell, gen: u64) error{OutOfMemory}!*Job {
+    fn create(shell: []const u8, home: []const u8, kind: shell_env.Shell, gen: u64, dir: ?[]const u8) error{OutOfMemory}!*Job {
         const job = try gpa.create(Job);
         errdefer gpa.destroy(job);
         const s = try gpa.dupeZ(u8, shell);
@@ -477,11 +636,14 @@ const Job = struct {
         }
         const t = try gpa.dupe(u8, if (std.c.getenv("TMPDIR")) |v| std.mem.span(v) else "/tmp");
         errdefer gpa.free(t);
-        job.* = .{ .shell = s, .home = h, .kind = kind, .generation = gen, .timeout_ms = test_timeout_ms orelse shell_env.timeout_ms, .env = try env.toOwnedSlice(gpa), .tmp = t };
+        const d: ?[]u8 = if (dir) |x| try gpa.dupe(u8, x) else null;
+        errdefer if (d) |x| gpa.free(x);
+        job.* = .{ .shell = s, .home = h, .kind = kind, .generation = gen, .timeout_ms = test_timeout_ms orelse shell_env.timeout_ms, .env = try env.toOwnedSlice(gpa), .tmp = t, .dir = d };
         return job;
     }
 
     fn destroy(self: *Job) void {
+        if (self.dir) |d| gpa.free(d);
         for (self.env) |e| gpa.free(e);
         gpa.free(self.env);
         gpa.free(self.tmp);
@@ -497,6 +659,7 @@ fn worker(job: *Job) void {
         _ = finished_count.fetchAdd(1, .acq_rel);
     };
     const outcome = run(job);
+    if (job.dir) |dir| return handOverRoot(dir, job.generation, outcome);
     const r = gpa.create(Result) catch {
         if (outcome == .ok) {
             var owned = outcome.ok;
@@ -518,6 +681,29 @@ fn worker(job: *Job) void {
     };
     _ = std.c.pthread_mutex_unlock(&slot_lock);
     freeResult(drop);
+}
+
+/// 저장소 환경의 결과를 메인에 넘긴다 — 못 넘기면 버린다(그 루트는 「읽는 중」에 남는다 — 다시 읽기가 지운다).
+fn handOverRoot(dir: []const u8, generation: u64, outcome: Outcome) void {
+    const r = gpa.create(RootResult) catch return discard(outcome);
+    const owned = gpa.dupe(u8, dir) catch {
+        gpa.destroy(r);
+        return discard(outcome);
+    };
+    r.* = .{ .root = owned, .generation = generation, .outcome = outcome };
+    _ = std.c.pthread_mutex_lock(&slot_lock);
+    root_results.append(gpa, r) catch {
+        _ = std.c.pthread_mutex_unlock(&slot_lock);
+        return freeRootResult(r);
+    };
+    _ = std.c.pthread_mutex_unlock(&slot_lock);
+}
+
+fn discard(outcome: Outcome) void {
+    if (outcome == .ok) {
+        var owned = outcome.ok;
+        owned.deinit(gpa);
+    }
 }
 
 fn freeResult(r: *Result) void {
@@ -545,7 +731,7 @@ fn run(job: *Job) Outcome {
     std.c.arc4random_buf(&nonce_bytes, nonce_bytes.len);
     const nonce = std.fmt.bytesToHex(nonce_bytes, .lower);
     var cmd_buf: [3 * std.fs.max_path_bytes + 256]u8 = undefined;
-    const cmd = shell_env.command(out_path, &nonce, &cmd_buf) catch return .{ .failed = .unsafe_path };
+    const cmd = shell_env.commandIn(job.dir, out_path, &nonce, &cmd_buf) catch return .{ .failed = .unsafe_path };
 
     // argv·envp 를 fork 전에 만든다 — 자식에서 할당하지 않는다.
     var owned: std.ArrayList([:0]u8) = .empty;
@@ -636,7 +822,19 @@ fn run(job: *Job) Outcome {
 
     const data = readSmall(out_path) orelse return .{ .failed = .malformed };
     defer gpa.free(data);
-    const resolved = shell_env.resolve(gpa, data, &nonce) catch return .{ .failed = .malformed };
+    // 저장소 환경이면 그 폴더에서 읽었는지 대 본다 — `cd` 가 실패했으면 홈의 환경이다(`shell_env.resolveIn`). 그 폴더의 실제 경로도
+    // 받는다(심링크를 푸는 셸 옵션 — zsh `CHASE_LINKS`·bash `set -P` 는 `PWD` 를 실제 경로로 둔다; 적대적 검증 4회차).
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var root_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    var dirs_buf: [2][]const u8 = undefined;
+    const dirs: []const []const u8 = if (job.dir) |d| blk: {
+        dirs_buf[0] = d;
+        const dz = std.fmt.bufPrintZ(&root_z, "{s}", .{d}) catch break :blk dirs_buf[0..1];
+        const real = std.c.realpath(dz.ptr, &real_buf) orelse break :blk dirs_buf[0..1];
+        dirs_buf[1] = std.mem.sliceTo(real, 0);
+        break :blk dirs_buf[0..2];
+    } else &.{};
+    const resolved = shell_env.resolveIn(gpa, data, &nonce, dirs) catch return .{ .failed = .malformed };
     return .{ .ok = resolved };
 }
 
@@ -1036,4 +1234,99 @@ test "tool_env: 늦게 끝난 옛 워커가 슬롯의 새 세대 결과를 지�
     try testing.expectEqual(base + 2, finishedCountForTest());
     tick(true);
     try testing.expectEqual(Status.ready, status());
+}
+
+// 이름에 「훅」을 넣지 않는다 — `test-agent-turn-capture` 의 이름 필터(68 고정)에 걸린다.
+test "tool_env: 저장소 셸 환경 — 그 루트로 cd 한 셸에서 읽어 cd 함수(chpwd 흉내)가 세운 변수를 담고, 끄면·따옴표로 못 감싸는 경로·cd 실패는 홈 환경, 다시 읽기·제외 목록·셸 스위치를 따른다 (계획 workspace-trust WT5b-2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(testing.io, &root_buf)];
+    var home = try HomeGuard.set(root);
+    defer home.restore();
+    try tmp.dir.createDirPath(testing.io, "my repo/bin");
+    var repo_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&repo_buf, "{s}/my repo", .{root});
+    // `cd` 를 함수로 덮어 chpwd 훅을 흉내 낸다 — 그 폴더로 들어가면 변수와 PATH 를 세운다(direnv 처럼).
+    var shell_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const shell = try writeFakeShell(tmp.dir, "zsh",
+        \\exec /bin/sh -c "cd() { command cd \"\$@\" && export REPO_HOOK=\"hooked:\$PWD\" PATH=\"\$PWD/bin:\$PATH\"; }; $cmd"
+    , &shell_buf, root);
+    setShellForTest(shell, null);
+    defer resetForTest();
+    try testing.expect(settleForTest(true, 5000));
+    try testing.expectEqual(Status.ready, status());
+    try testing.expect(envValueOf("REPO_HOOK") == null); // 홈 환경엔 훅이 안 돈다
+    const Wait = struct {
+        fn view(dir: []const u8, max_ms: u64) ?View {
+            var waited: u64 = 0;
+            while (waited < max_ms) : (waited += 10) {
+                poll();
+                if (rootView(dir, true)) |v| return v;
+                sleepMs(10);
+            }
+            return null;
+        }
+        fn value(v: View, name: []const u8) ?[]const u8 {
+            var i: usize = 0;
+            while (v.envp[i]) |e| : (i += 1) {
+                const s = std.mem.span(e);
+                if (s.len > name.len and s[name.len] == '=' and std.mem.eql(u8, s[0..name.len], name)) return s[name.len + 1 ..];
+            }
+            return null;
+        }
+    };
+    const spawned_home = spawnCountForTest();
+    // ⑴ 처음엔 읽는 중(null) — 다 되면 그 루트의 환경: 훅이 세운 변수와 PATH.
+    try testing.expect(rootView(repo, true) == null);
+    const v = Wait.view(repo, 5000) orelse return error.RootEnvNeverSettled;
+    var want_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "hooked:{s}", .{repo}), Wait.value(v, "REPO_HOOK").?);
+    try testing.expect(std.mem.startsWith(u8, v.path, try std.fmt.bufPrint(&want_buf, "{s}/bin", .{repo})));
+    try testing.expect(Wait.value(v, "PWD") == null); // 셸 상태 변수는 서버로 안 간다
+    try testing.expectEqual(spawned_home + 1, spawnCountForTest());
+    // 담아 둔 것을 쓴다 — 다시 안 띄운다.
+    _ = rootView(repo, true) orelse return error.RootEnvLost;
+    try testing.expectEqual(spawned_home + 1, spawnCountForTest());
+    // ⑵ 끄면 홈 환경 그대로(셸을 안 띄운다).
+    try testing.expectEqual(envp().?, (rootView(repo, false) orelse return error.NoView).envp);
+    // ⑶ 작은따옴표로 셸에 줄 수 없는 경로는 홈 환경(셸을 안 띄운다).
+    try testing.expectEqual(envp().?, (rootView("/srv/it's", true) orelse return error.NoView).envp);
+    try testing.expectEqual(spawned_home + 1, spawnCountForTest());
+    // ⑶′ 심링크 루트 + 심링크를 푸는 셸(`cd -P` — zsh `CHASE_LINKS`·bash `set -P` 처럼 `PWD` 가 실제 경로) — 그래도 그 루트의 환경이다.
+    var link_buf: [std.fs.max_path_bytes + 16]u8 = undefined;
+    const link = try std.fmt.bufPrint(&link_buf, "{s}/link", .{root});
+    try tmp.dir.symLink(testing.io, "my repo", "link", .{ .is_directory = true });
+    var chase_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try tmp.dir.createDirPath(testing.io, "chase"); // 셸 이름은 `zsh` 여야 한다(셸 종류 판정)
+    const chase = try writeFakeShell(tmp.dir, "chase/zsh",
+        \\exec /bin/sh -c "cd() { command cd -P \"\$@\" && export REPO_HOOK=chased; }; $cmd"
+    , &chase_buf, root);
+    test_shell = chase;
+    try testing.expect(rootView(link, true) == null);
+    const chased = Wait.view(link, 5000) orelse return error.RootEnvNeverSettled;
+    try testing.expectEqualStrings("chased", Wait.value(chased, "REPO_HOOK") orelse return error.ChasedRootFellBackHome);
+    test_shell = shell;
+    // ⑷ `cd` 가 실패하면(없는 폴더) 홈 환경으로 — 그 셸이 남긴 홈의 환경을 저장소의 것으로 받지 않는다.
+    try testing.expect(rootView("/nonexistent-maru-wt5b2", true) == null);
+    const missing = Wait.view("/nonexistent-maru-wt5b2", 5000) orelse return error.RootEnvNeverSettled;
+    try testing.expectEqual(envp().?, missing.envp);
+    // ⑸ 제외 목록도 저장소 환경에 선다.
+    setExcluded("REPO_HOOK");
+    try testing.expect(Wait.value(rootView(repo, true) orelse return error.RootEnvLost, "REPO_HOOK") == null);
+    setExcluded("");
+    // ⑸′ 그 루트만 버리면(심링크 대상이 바뀌었다 — `lsp.rekeyRoot`) 그 루트만 다시 읽는다.
+    forgetRoot(repo);
+    try testing.expect(rootView(repo, true) == null);
+    _ = Wait.view(repo, 5000) orelse return error.RootEnvNeverSettled;
+    // ⑹ 다시 읽기는 저장소 환경도 다시 읽는다.
+    reload(true);
+    try testing.expect(settleForTest(true, 5000));
+    try testing.expect(rootView(repo, true) == null);
+    _ = Wait.view(repo, 5000) orelse return error.RootEnvNeverSettled;
+    // ⑺ 셸 스위치를 끄면 저장소 환경도 없다(홈 대체 그대로).
+    setEnabled(false);
+    try testing.expect(settled());
+    try testing.expectEqual(envp().?, (rootView(repo, true) orelse return error.NoView).envp);
 }

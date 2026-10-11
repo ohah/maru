@@ -14635,7 +14635,7 @@ pub const AppSession = struct {
                 return;
             }
         }
-        if ((mods & 4) != 0 or (mods & 8) != 0) return; // shift·option은 셀렉션 override — 리포트 안 함
+        if (maru.session.mouse_rules.selectionOverride(mods)) return; // shift·option은 셀렉션 override — 리포트 안 함(규칙은 `session/mouse_rules.zig`)
         if (self.pointOnChrome(x_px, y_px)) {
             self.last_motion_cell = null; // chrome(사이드바·탭 바) 경유 — 터미널 재진입 첫 셀이 stale로 막히지 않게
             return;
@@ -15908,7 +15908,7 @@ pub const AppSession = struct {
         // mouse_tracking 읽기는 메인 락-아래(읽기는 위임 안 함 — §9.1). reportMouse(코어 mutate + PTY 응답)는
         // full (a)(P3-4)로 reader에 위임 — reader가 적용 후 pendingResponse를 PTY로 흘린다(메인 직접 mutate 0).
         // host-backed면 placeholder 대신 관측의 mouse_tracking으로 게이트한다(§입력 패리티) — report_mouse는 host로 라우팅.
-        const do_report = ((mods & 4) == 0 and (mods & 8) == 0) and if (click_surface.remote != null)
+        const do_report = !maru.session.mouse_rules.selectionOverride(mods) and if (click_surface.remote != null)
             self.remoteMouseTracking(click_surface.id) != .none
         else blk: {
             click_surface.lockCore(self.io);
@@ -15967,7 +15967,7 @@ pub const AppSession = struct {
                     .motion = kind == 2,
                     // command(32)은 사이드바 그룹 드래그 modifier라 터미널 리포트에 실으면 안 된다 — reportMouse의 cb=button+mods+motion에서
                     // 32가 SGR motion 비트(input_report.zig:68)와 겹쳐 press가 motion으로 오인되거나 cb가 부풀어 리포트가 오염된다(R1 회귀 가드).
-                    .mods = @intCast(mods & ~@as(i32, 32)),
+                    .mods = @intCast(maru.session.mouse_rules.reportModifiers(mods)),
                 },
             }) catch {};
             return;
@@ -15983,7 +15983,7 @@ pub const AppSession = struct {
             1 => {
                 self.mouse_drag_selecting = true;
                 self.drag_autoscroll = 0;
-                self.enqueueCoreCommandForSurface(click_surface.id, .{ .select_start = .{ .row = row, .col = col, .block = (mods & 8) != 0 } }) catch {};
+                self.enqueueCoreCommandForSurface(click_surface.id, .{ .select_start = .{ .row = row, .col = col, .block = maru.session.mouse_rules.blockSelection(mods) } }) catch {};
             },
             2 => {
                 // 드래그가 활성 panel grid 위/아래 밖으로 나가면 자동 스크롤을 건다(tick이 수행). grid 높이용 rows는

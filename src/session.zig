@@ -159,6 +159,8 @@ pub const clampRatio = split_tree.clampRatio; // divider 드래그가 layout과 
 pub const surface = @import("session/surface.zig");
 pub const window = @import("session/window.zig");
 pub const core_command = @import("session/core_command.zig");
+/// 터미널 마우스의 수정자 규칙 — 비트의 뜻과 셀렉션 override·블록 선택·리포트 command 마스킹(호스트 공통, layering §3.5).
+pub const mouse_rules = @import("session/mouse_rules.zig");
 
 /// N1: 네이티브 편집기 L2 문서 모델(docs/native-editor-document-model.md §3). 위치 정본은 UTF-8 byte offset이고
 /// 화면 좌표로의 변환은 L3(chrome)가 맡는다 — 이 네임스페이스는 플랫폼·렌더를 import하지 않는다.

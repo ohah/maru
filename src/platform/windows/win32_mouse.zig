@@ -10,22 +10,25 @@
 //! 자리는 전부 규칙이지 OS 호출이 아니다. OS가 답하는 값(`GetDoubleClickTime`·`SPI_GETWHEELSCROLLLINES`)은
 //! **인자로 받는다**. 그래야 Windows 러너 없이 세 타깃 전부에서 테스트가 돈다(§2h·§2i·§2j와 같은 규율).
 //!
-//! ## 규칙을 새로 만들지 않았다
+//! ## 수정자의 뜻은 중립이 소유한다
 //!
-//! 모디파이어 비트·override 판정·블록 선택·command 마스킹은 전부 `platform/macos/app_session.zig`의 기존
-//! 판정을 읽어 온 것이다. 마우스 관례를 두 플랫폼이 다르게 가지면 같은 코어가 다르게 반응한다.
+//! 모디파이어 비트·override 판정·블록 선택·command 마스킹은 `session/mouse_rules.zig` 하나가 소유하고 macOS 도
+//! 같은 것을 부른다(layering-and-portability.md §3.5). 예전에는 이 파일이 macOS `app_session.zig` 의 인라인 판정을
+//! 읽어 와 따로 적은 사본이었다 — 마우스 관례를 두 플랫폼이 다르게 가지면 같은 코어가 다르게 반응한다. 여기 남은 것은
+//! Win32 의 눌림 상태를 그 비트로 **번역하는** `modifiersFrom` 이다.
 
 const std = @import("std");
 const abi = @import("abi.zig"); // Win32 호출 규약 단일 출처(다른 타깃에서는 `.c`로 접는다)
 const builtin = @import("builtin");
+const mouse_rules = @import("../../maru.zig").session.mouse_rules;
 
-/// 중립 모디파이어 비트(`terminal.input_report.reportMouse`의 `mods` 규약).
-pub const mod_shift: u8 = 4;
-pub const mod_meta: u8 = 8;
-pub const mod_ctrl: u8 = 16;
+/// 중립 모디파이어 비트(`terminal.input_report.reportMouse`의 `mods` 규약) — `session/mouse_rules.zig` 의 것.
+pub const mod_shift = mouse_rules.shift;
+pub const mod_meta = mouse_rules.meta;
+pub const mod_ctrl = mouse_rules.ctrl;
 /// command(⌘). Windows엔 그 키가 없지만 §2h가 `Ctrl`을 `command`로 번역하므로 **마우스 경로에도 같은
 /// 위험이 있다** — 리포트에 실으면 `cb = button + mods + motion`에서 SGR motion 비트와 겹친다.
-pub const mod_command: u8 = 32;
+pub const mod_command = mouse_rules.command;
 
 /// xterm 버튼 코드(`reportMouse`의 `button` 규약).
 pub const button_left: u8 = 0;
@@ -128,31 +131,10 @@ pub fn modifiersFrom(ctrl: bool, shift: bool, alt: bool) u8 {
     return m;
 }
 
-/// 리포트에 실을 `mods` — command 비트를 **뗀다**.
-///
-/// `reportMouse`의 `cb = button + mods + motion`에서 32가 SGR motion 비트와 겹친다. 그대로 실으면 press가
-/// motion으로 오인되거나 `cb`가 부풀어 리포트가 오염된다(macOS가 회귀 가드로 막아 둔 자리다).
-pub fn reportModifiers(mods: u8) u8 {
-    return mods & ~mod_command;
-}
-
-/// 마우스를 셸이 가져가는가, 로컬 선택이 가져가는가.
-///
-/// **shift·alt는 리포팅을 누른다.** TUI가 마우스를 다 먹으면 사용자가 화면의 글자를 복사할 방법이
-/// 없어진다 — 그 탈출구다. macOS의 판정 그대로다:
-/// `if ((mods & 4) != 0 or (mods & 8) != 0) return; // shift·option은 셀렉션 override`
-pub fn reportsToShell(tracking_active: bool, mods: u8) bool {
-    if (!tracking_active) return false;
-    if ((mods & mod_shift) != 0) return false;
-    if ((mods & mod_meta) != 0) return false;
-    return true;
-}
-
-/// 블록(사각) 선택인가. **리포팅을 누르는 것과 같은 키(alt)가 사각 선택을 켠다** — macOS
-/// `select_start{.block = (mods & 8) != 0}` 그대로다.
-pub fn blockSelection(mods: u8) bool {
-    return (mods & mod_meta) != 0;
-}
+/// 리포트에 실을 `mods`·셸이 가져가는가·블록 선택인가 — 뜻은 `session/mouse_rules.zig` 가 소유한다(macOS 와 같은 함수).
+pub const reportModifiers = mouse_rules.reportModifiers;
+pub const reportsToShell = mouse_rules.reportsToShell;
+pub const blockSelection = mouse_rules.blockSelection;
 
 /// 휠 눈금 누적기.
 ///

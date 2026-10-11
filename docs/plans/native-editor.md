@@ -897,6 +897,8 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 
 [AppSession 이식 측정](app-session-portability.md) 중에 나왔다. 이 절이 목록·결함·할 일과 이동 단계를 소유하고, 근거(실험 — 원본 L2 를 복사한 독립 test, 제품 빌드는 미확인 — 와 판정자 사각)는 그 문서 §2 「발견한 결함」에 있다(여섯째 후보는 같은 §2 의 「요청 규율의 반복」). 결함 6~10 은 그 측정 뒤 재현 단계에서 나왔고 근거는 아래 표의 회귀 test 다.
 
+저장 재시도 후속 이관: `search/batch/ui.zig::retrySave`의 save_failed→saved 전이와 집계 판정은 중립 배치 결과 계약의 새 L2 잎으로 옮긴다. Term 해석·IME 상태 확인·실제 CAS 저장은 host 어댑터에 남긴다. 이번 기반 API는 기존 host 배치 저장 구조를 사용하며 별도 이관 슬라이스에서 이 분리를 진행한다.
+
 **계약 이탈** — [레이어 배치](../native-editor-layering.md) §2 의 L2 `buffer.zig`(「텍스트 저장 + 편집 연산 + undo」)·`selection.zig`(「multi-selection(byte range 배열) + goal column」)가 맡는 편집 판정이 `app_session/editor` 에 쓰였다. 옮길 때는 새 파일에 둔다 — 기존 L2 파일에는 넣지 않는다. 자리는 대개 그 파일들 옆(`src/session/editor/` 아래, LSP 쪽은 `src/session/lsp/`)이고, L3 타입을 읽거나 내는 순수 계산은 최상위 잎이다(이식 계획 §1.5).
 - `mod.zig` 의 변경 리터럴을 만드는 제품 함수 13 개: 줄 연산 일곱(`moveLines`·`deleteLines`·`duplicateLines`·`indentLines`·`toggleLineComment`·`transformCase`·`insertNewlineKeepingIndent`), `insertTextWithRange`, `pasteText`, `deleteBy`, `replaceCurrentMatch`·`replaceAllMatches`, `acceptConflict`.
 - 그 밖에 복사(`copySelection` — 문서를 바꾸지 않지만 선택·문서로 결과를 정하는 판정, L2 자리는 `session/editor/clipboard.zig` 옆), 잘라내기(`cutSelection` — 빈 선택이면 줄 전체라는 복사의 규칙을 복제했다), 선택을 바꾸는 판정(`moveCarets`·`movedOffset`·`addCursorVertically`·`addNextOccurrence`·`selectWordOrLineAt`·`toggleCursorAt` — L2 잎 `motion` 등을 L4 에서 섞어 부른다), 선택으로 결과를 정하는 Tab 의 들여쓰기 판정(`selectionSpansLines` — 허브가 쓴다), `completion.accept` 의 caret 이동 계산, 그리고 `backup`·`conflict` 에도 있다. `workspace_edit` 은 변경 구성이 이미 L2(`lsp.text_edits.toChanges`·`inverseOf`)이고, 남은 판정(revision stale·저장 정책·되돌리기 해시 대조)은 LSP 응답을 적용하는 클라이언트 정책이라 이 목록이 아니라 두 계기를 따른다.

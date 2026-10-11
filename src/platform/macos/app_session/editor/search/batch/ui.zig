@@ -218,3 +218,29 @@ pub fn openResult(self: *host.AppSession, index: usize) void {
     self.editor_search.focused = null;
     self.metal_dirty = true;
 }
+
+pub fn canRetrySave(self: *host.AppSession, index: usize) bool {
+    const term = resultTerm(self, index) orelse return false;
+    return self.editor_search.batch.ready.?.specification.targets.items[index].outcome == .save_failed and
+        !self.ime_active and !self.ime_editor_commit_pending and owner.documentCompositionStamp(self, term) == 0;
+}
+
+/// 과거 Plan을 재적용하지 않고 같은 문서의 현재 본문만 기존 CAS 저장으로 전달한다.
+pub fn retrySave(self: *host.AppSession, index: usize) !void {
+    const term = resultTerm(self, index) orelse return error.StaleDocument;
+    const st = &self.editor_search.batch;
+    const target = &st.ready.?.specification.targets.items[index];
+    if (target.outcome != .save_failed) return error.StaleRequest;
+    if (self.ime_active or self.ime_editor_commit_pending or owner.documentCompositionStamp(self, term) != 0) return error.InputTransactionPending;
+    @import("../../mod.zig").saveDocument(self, term) catch |err| {
+        target.save_failure = err;
+        return err;
+    };
+    target.outcome = .saved;
+    target.save_failure = null;
+    st.result.save_failed -= 1;
+    st.result.saved += 1;
+    self.editor_search.invalidate();
+    self.editor_search.result.generation +%= 1;
+    self.metal_dirty = true;
+}

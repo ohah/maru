@@ -104,9 +104,11 @@ extension MaruAppHostController {
         }
         guard ready == 1 else { finish(false); return }
         let matrix = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_MATRIX"] == "1"
-        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict", "search-pane", "search-pane-navigated", "pane-preview-results", "pane-preview-ready", "preview-pane", "replace-applied-saved", "replace-undo", "replace-undo-saved", "batch-results", "right-batch-preview", "bottom-batch-preview", "bottom-batch-saved", "right-batch-saved", "batch-undo", "batch-undo-saved"]
+        let labels = ["before", "query", "results", "navigated", "bottom-scrolled", "disk-navigated", "cancelled", "shared", "independent", "zero-override", "root-changed", "stale-release", "replace-input", "replace-results", "replace-file", "replace-conflict", "replace-single", "replace-disk", "right-replace-disk", "right-replace-file", "right-replace-conflict", "search-pane", "search-pane-navigated", "pane-preview-results", "pane-preview-ready", "preview-pane", "replace-applied-saved", "replace-undo", "replace-undo-saved", "batch-results", "right-batch-preview", "bottom-batch-preview", "bottom-batch-saved", "right-batch-saved", "batch-undo", "batch-undo-saved", "retry-results", "retry-preview", "right-save-failed", "bottom-save-failed", "bottom-retry-saved", "right-retry-saved"]
         let refusing = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE"] == "1"
-        let label = refusing && stage == 26 ? "replace-verifying" : refusing && stage == 27 ? "replace-ime-conflict" : labels[Int(stage)]
+        let retryLabels: [UInt32: String] = [32: "bottom-save-failed", 33: "right-save-failed", 34: "retry-click", 35: "right-retry-saved", 36: "bottom-retry-saved"]
+        let retrying = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] == "1"
+        let label = retrying && retryLabels[stage] != nil ? retryLabels[stage]! : refusing && stage == 26 ? "replace-verifying" : refusing && stage == 27 ? "replace-ime-conflict" : labels[Int(stage)]
         guard editorProjectSearchCapture(label) else { finish(false); return }
         let unicode = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_UNICODE"] == "1"
         switch stage {
@@ -187,10 +189,21 @@ extension MaruAppHostController {
         case 28:
             if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_REPLACE_BATCH"] == "1" { editorProjectSearchAction(28) }
             else { finish(true); return }
-        case 29, 31:
+        case 29:
             guard editorProjectSearchClick(0) else { finish(false); return }
-        case 30, 32, 33, 34: editorProjectSearchAction(stage)
-        case 35: finish(true); return
+        case 31:
+            if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] == "1" { editorProjectSearchAction(31) }
+            guard editorProjectSearchClick(0) else { finish(false); return }
+        case 30, 32, 33: editorProjectSearchAction(stage)
+        case 34:
+            editorProjectSearchAction(34)
+            if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] == "1" {
+                guard editorProjectSearchClick(0) else { finish(false); return }
+            }
+        case 35:
+            if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] == "1" { editorProjectSearchAction(35) }
+            else { finish(true); return }
+        case 36: finish(true); return
         case 11: finish(true); return
         default: editorProjectSearchAction(stage)
         }

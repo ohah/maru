@@ -185,8 +185,8 @@ surface/entry/recovery ID는 소비될 수 있지만 기존 문서의 본문·�
 등록 중 임시 문서는 registry에서 점유 예약으로 보이며 다른 준비가 재사용하지 않는다.
 
 이 API는 혼합 source coordinator가 사용한다. `reservePane`은 commit 전에 슬롯을 준비하고
-`publish`는 포커스 이동 없이 pane에 Term 소유권을 넘기고 예약을 해제한다. 제품 버튼·종료/취소 수명과
-혼합 worker의 전문 검증 배선은 다음 단계다. 준비된 Term을 하나씩
+`publish`는 포커스 이동 없이 pane에 Term 소유권을 넘기고 예약을 해제한다. 제품 전체 결과 UI와
+혼합 worker의 전문 검증·종료/취소 수명까지 연결했다. 준비된 Term을 하나씩
 활성화하거나 실패 후 열린 탭을 자동 닫는 방식으로 연결해서는 안 된다.
 
 게이트는 `test-editor-project-replace-batch-load` (Debug/ReleaseFast)다. 실제 두 문서 준비·입력 해제 뒤
@@ -275,7 +275,7 @@ Ready/결과 문서 신원을 보관한다. 기존 모델 전용 worker API는 �
   원래 fingerprint를 무시해서 외부 변경 검사까지 끄지 않는다.
 - 같은 경로의 독립 문서는 선택 밖 열린 문서까지 점유 검사한다. 디스크 파일은 검증→로드→저장
   사이의 물리 신원 재검증과 symlink/hardlink 별칭 검출은 disk 준비·coordinator·저장 CAS가 담당한다.
-  전체 결과 UI가 이 경로를 호출하며 제품 하네스가 혼합 저장·Undo를 확인한다. 임의 선택과 저장만 재시도하는 UI는 별도 범위다.
+  전체 결과 UI가 이 경로를 호출하며 제품 하네스가 혼합 저장·Undo를 확인한다. 임의 선택은 후속이다. 저장 실패 재시도는 전체 결과 UI의 파일별 버튼으로 연결한다.
 - 현재 파일 항목 한도와 기존 문서를 함께 계산한다. 한도 실패는 편집 전에 전체 거절하며,
   이를 피하려고 기존 문서/Undo를 자동 폐기하지 않는다. 비활성 로드와 준비 실패 후 문서 수명도 검증한다.
 - 결과는 ‘이 배치 당시’ 기록이다. 저장 실패 재시도는 owner/slot/generation을 확인하며
@@ -304,9 +304,10 @@ Ready/결과 문서 신원을 보관한다. 기존 모델 전용 worker API는 �
 - `python3 tools/test-editor-replace-batch-worker-adversarial.py`: 완료 뒤 취소 무시·시작 Ticket
   신원 무시·모델 신원 무시·입력 예산 무시·Ticket stamp 유실 결함과 정상/등가/복원 대조를 검사한다.
   격리 source·결함별 cache·source hash·로그를 보존한다. UI/실제 OS 입력 검증은 아니다.
-- 제품 UI 연결 뒤에도 실제 버튼 진입·늦은 worker·선택 수명, 저장 실패 표시를 확인해야 한다.
-  저장/연결 Undo, 마지막 대상 충돌 시 전부 불변, 저장 실패 후 dirty/Undo,
-  focus/공유 선택·취소/IME/root·닫기/늦은 worker, OOM과 결과 게시 실패를 실제 경로에서 검증해야 한다.
+- 전체 결과 UI gate와 제품 하네스는 버튼 진입·선택 수명·저장 실패 표시, 저장/연결 Undo,
+  마지막 대상 충돌 시 전부 불변, 저장 실패 후 dirty/Undo, focus·취소/IME/root·닫기/늦은 worker,
+  OOM과 결과 게시 실패를 검증한다. 파일별 저장 재시도는 UI 계획의 RPBU3과 실제 AppKit 클릭으로 확인한다.
+  모든 OS 입력·공유 뷰 조합을 이 제품 하네스 하나로 검증한 것으로 확대하지 않는다.
 - 파일 수·총 입력 bytes·피크 RSS·동시 Plan 수·최장 actor tick·취소 응답을 측정한다.
   물리 IME·VoiceOver·모든 파일시스템 전원 손실은 별도 검증 경계다.
 

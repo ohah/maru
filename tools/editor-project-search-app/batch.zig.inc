@@ -2,6 +2,13 @@
 fn editorBatchProbe(self: *AppSession, stage: u32) i32 {
     const st = &self.editor_search;
     const wanted = std.fmt.parseInt(usize, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_OPEN_FILES") orelse "2"), 10) catch return -1;
+    const retrying = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY") orelse "0"), "1");
+    if (retrying and stage >= 32 and stage <= 36) {
+        const failed: usize = if (stage <= 34) 1 else 0;
+        if (st.batch.phase != .completed or st.batch.result.save_failed != failed or st.batch.result.saved != wanted + 2 - failed) return -1;
+        if ((stage >= 33 and stage <= 35) != (self.dock.side == .right)) return -1;
+        return 1;
+    }
     if (stage == 29) return if (st.result.phase == .complete) 1 else 0;
     if (stage == 30 or stage == 31) {
         if (st.batch.phase == .building) return 0;
@@ -44,6 +51,18 @@ fn editorBatchProbe(self: *AppSession, stage: u32) i32 {
 }
 fn editorBatchAction(self: *AppSession, stage: u32) void {
     const d = @import("editor/search/dock.zig");
+    const retrying = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY") orelse "0"), "1");
+    if (retrying and (stage == 31 or stage == 34)) {
+        const ready = &self.editor_search.batch.ready.?;
+        for (ready.specification.targets.items, ready.prepared.items.items) |target, item| {
+            if (target.source != .model or (stage == 34 and target.outcome != .save_failed)) continue;
+            const data = if (stage == 31) "external conflict\n" else item.plan.before;
+            std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = target.absolute, .data = data }) catch return;
+            return;
+        }
+    }
+    if (retrying and stage == 33) return;
+    if (retrying and stage == 35) { self.dispatchAppAction(.toggle_file_panel_dock_side); return; }
     if (stage == 28) {
         // 앞 단일 파일 시나리오가 열었던 disk 탭을 닫아 ‘두 모델 + 닫힌 두 파일’을 만든다.
         close_disk: for (self.tabs.items, 0..) |tab, ti| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |term, i| {

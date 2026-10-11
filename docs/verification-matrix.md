@@ -4247,3 +4247,14 @@ pane 게시/배치 편집은 아래 coordinator와 위 RPBU gate가 검사한다
 문서 slot generation 재사용, 검색 행 drift/미리보기 후 수정, 수집·준비/화면 게시 OOM을 검사한다.
 실제 오른쪽/하단 AppKit mouse·제품 Metal readback은 `tools/editor-project-search-app/run.py --replace-batch`로 검사한다.
 물리 한국어 HID·VoiceOver는 별도 검증 경계다.
+
+### 프로젝트 바꾸기 저장 실패 재시도
+
+완료 배치의 살아 있는 실패 문서를 owner/slot/generation으로 확인하고 현재 본문만 기존 CAS 저장한다.
+`test-editor-project-replace-batch-ui`의 RPBU3은 충돌·IME·확정 대기·공유 분할의 다른 뷰 조합·읽기 전용 거절, 후속 편집 저장,
+Undo 보존과 결과 집계, 성공 반복·닫힌 문서 거절을 검사한다. RPBU7은 문서 슬롯 재사용을 검사한다.
+`test-editor-project-search-dock`은 파일 열기와 버튼 영역 분리, 접근성 이름, 좁은/2배율 경계와
+세대·비활성 클릭을 검사한다. 변이 도구의 `--save-retry`는 RPBU3/RPBU7에 집중하고 전체 UI/OOM은 별도 gate다.
+제품 하네스의 `--replace-batch-save-retry --disk-files 2 --count 20`은 실제 AppKit 클릭·Metal 캡처로
+오른쪽·하단의 저장 실패→재시도 성공과 fixture 원문에서 계산한 최종 파일 내용을 확인한다.
+물리 IME·OS 후보창·VoiceOver 실제 조작을 확인했다고 주장하지 않는다.

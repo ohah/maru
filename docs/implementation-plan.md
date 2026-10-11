@@ -57,7 +57,7 @@ macOS 로컬 shell 1개 surface
 - [도크 아웃라인](plans/editor-outline.md) — 활성 문서 계층·현재 심볼 강조·분할 전환과 클릭 수명
 - [프로젝트 전체 검색](plans/editor-project-search.md) — VS Code 디스크 rg/열린 모델 구성 채택, 번들·프로토콜과 [worker 백엔드](plans/editor-project-search-worker.md) 구현·합성 검증; [앱 owner](plans/editor-project-search-owner.md)의 문서·감시 확인·수명 API 연결, [여러 root 요청](plans/editor-project-search-roots.md)의 후보 합집합·전체 예산 연결, [도크 구현·검증](plans/editor-project-search-dock.md)에 앱 입력·결과 수신·클릭 재검증과 제품 실측을 기록; 두벌식 HID·공유/독립 문서·root 교체 화면을 검증; [바꾸기 미리보기 S3](plans/editor-project-replace-preview.md)는 파일/일치 선택·읽기 전용 diff·충돌 상태를 연결, [S4a 열린 문서·S4b 디스크 단일 파일 적용·자동 저장](plans/editor-project-replace-apply.md)을 연결, [여러 파일 적용 S4c](plans/editor-project-replace-batch.md)는 승인된 전체 준비 정책으로 열린 문서 배치 UI까지 연결, 전체 OS watcher/종료·다른 파일시스템·VoiceOver/OS 후보창 픽셀은 별도 경계
 - [프로젝트 바꾸기 배치](plans/editor-project-replace-batch.md) — 닫힌 파일 읽기·물리 신원/별칭과 비활성 문서 준비·항목 예약 API까지 구현. 혼합 coordinator의 전체 준비/commit·pane 게시·저장까지 구현. 혼합 snapshot/disk worker API까지 구현. 제품 전체 UI의 수집·미리보기·적용과 결과 문서 신원까지 연결.
-- [프로젝트 바꾸기 전체 결과 UI](plans/editor-project-replace-batch-ui.md) — 열린 모델·닫힌 파일 수집/재검증·미리보기·함께 적용·파일별 저장과 결과 문서 신원.
+- [프로젝트 바꾸기 전체 결과 UI](plans/editor-project-replace-batch-ui.md) — 열린 모델·닫힌 파일 수집/재검증·미리보기·함께 적용·파일별 저장과 결과 문서 신원. 저장 실패 항목의 현재 문서만 CAS 저장하는 파일별 재시도 버튼을 연결한다.
 - [공유 편집기 복원 포맷과 구현 계획](plans/editor-shared-restore.md) — 문서 연결과 뷰 상태, v1 선택적 필드와 v2 비교, downgrade와 복원 실패 경계
 - [복구 ID 예약 후보 실험](plans/editor-recovery-reservation.md) — 실제 owner lease·atomic writer, 실패/중단/정리 경계와 비용 비교; 제품 연결 전 비교 이력
 - [로컬 문서 ID 백업과 공유 뷰 복원](plans/editor-recovery-integration.md) — 제품 writer·checkpoint 연결 및 헤드리스 재실행 검증; GUI 공개 gate는 별도

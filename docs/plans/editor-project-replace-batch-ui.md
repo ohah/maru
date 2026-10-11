@@ -13,7 +13,7 @@
   제외한 닫힌 파일을 포함된 것으로 집계하지 않는다. 파일 수는 중립 명세의 canonical target 수다.
 - 변경 있는 모델의 기존 미저장 편집도 함께 저장한다는 안내를 유지한다. 변경 없음인 파일은 Undo·저장을 만들지 않으며,
   닫힌 변경 없음 파일은 새 문서도 만들지 않는다.
-- 파일/일치 checkbox, 저장만 재시도하는 전용 UI는 이 계약 밖의 후속이다.
+- 파일/일치 checkbox는 후속이다. 파일별 저장 재시도 버튼은 2026-10-11 사용자가 승인했다.
 
 ## 수집과 비동기 준비
 
@@ -99,3 +99,24 @@ registry slot이 새 문서에 재사용돼도 generation이 다르면 열지 �
 Raw artifact: `maru-editor-project-search-app-_me5eijx/manifest.json`와
 `maru-editor-project-search-app-emhx4uhn/manifest.json` 및 각각의 `app.log`, `rss.json`.
 각 manifest는 source/binary/harness/PNG SHA-256을 보존하며 절대 경로는 PR 본문에 기록한다.
+
+## 저장만 재시도 — 파일별 버튼
+
+`batch/ui.zig::retrySave`는 완료 결과의 `save_failed` 항목만 받는다.
+배치가 보관한 owner/slot/generation과 살아 있는 Term을 대조하며 닫힌 문서를 경로로 다시 열지 않는다.
+IME 활성·확정 대기·같은 문서의 어느 분할 뷰에 남은 조합도 거절한다. `owner.documentCompositionStamp`는 기존 `composingView` 탐색을 재사용한다. 기존 `saveDocument`의 CAS·읽기 전용·Save As 경로를 사용하고
+과거 Plan을 적용하거나 Undo 기록을 추가하지 않는다. 후속 편집은 현재 본문 기준으로 저장한다.
+성공한 항목만 saved로 전환하고 오류를 비우며 saved/save_failed 집계를 갱신한다.
+재실패하면 기존 실패 상태를 유지하고 가장 최근 저장 오류를 기록한다.
+완료 결과의 살아 있는 저장 실패 문서에만 파일별 ‘저장 재시도’ 버튼을 표시한다.
+파일 열기와 별도 클릭 영역이며 IME·확정 대기·대상 문서 조합 때 버튼은 비활성이다.
+좁은 도크는 ‘재시도’와 파일 이름을 먼저 표시하고 접근성 이름은 ‘저장 재시도’로 유지한다.
+성공하면 버튼이 사라지고 완료 집계를 갱신한다. 실패하면 기존 저장 오류 알림을 표시한다.
+
+RPBU3은 외부 충돌 보존, IME·확정 대기·읽기 전용 거절, 후속 편집 저장, Undo·operation 보존,
+성공 집계·오류 제거, 성공 항목 반복 거절과 닫힌 문서 거절을 확인한다. 공유 분할의 첫 뷰는 조합이 없고 다른 뷰에만 조합이 남은 반례도 재현 후 고쳤다.
+Chrome 판정은 160/240/800 device px와 1x/2x에서 파일 열기·버튼 영역 분리, 버튼 경계,
+세대·비활성 클릭을 확인한다. 실제 AppKit 클릭과 제품 Metal 경로는
+`python3 tools/editor-project-search-app/run.py --replace-batch-save-retry --disk-files 2 --count 20`으로 검증한다.
+`python3 tools/test-editor-replace-batch-ui-adversarial.py --save-retry`는 외부 수정 덮어쓰기,
+IME 검사 생략, 실패 집계 누락, 성공 재실행, 문서 세대 무시 결함을 독립 격리 source에서 검증한다.

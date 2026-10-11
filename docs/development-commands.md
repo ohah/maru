@@ -68,6 +68,13 @@ native 기록기 집중 검증은 `zig build test-agent-log-writer`이며 기본
 `tests/artifacts/agent-log-writer/`에 argv/종료 상태/진단 및 latency 요약을 남긴다.
 테스트 드라이버는 제품에 설치하거나 provider 훅으로 등록하지 않는다.
 
+제품 기록 entrypoint는 `maru agent-hooks record --file=<absolute .ndjson path>`다.
+stdin의 완전한 `provider<TAB>payload<LF>` 한 줄을 기존 소유자 전용 0700 디렉터리에
+기록한다. POSIX만 인증하며 Windows ACL adapter 전에는 거부한다. 기존 provider에
+설치된 훅은 v1을 유지한다. 순수 계약은 `zig build test-agent-log-record`, 실제
+native 훅→제품 CLI 검증은 `zig build test-agent-log-record-process`이며 Ubuntu CI
+check에 포함된다. 결과는 `tests/artifacts/agent-log-record/`에만 남긴다.
+
 세대 codec 집중 검증은 `zig build test-agent-log-generations`다. 기본 `test`에도
 포함되며 header/resume 문법·세대별 offset 조정·snapshot 회전 조건을 OS 중립적으로
 검사한다. 파일 잠금·native 기록기와 제품 스트림 배선의 실행 검증은 후속 단계다.

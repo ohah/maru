@@ -4150,6 +4150,7 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 | --- | --- | --- | --- |
 | 명시적 generation과 payload offset | 부분 구현 | `test-agent-log-generations`가 header/resume codec·세대 reconciliation·overflow·snapshot 회전 조건을 기본 test에서 검증한다. macOS Debug/ReleaseFast와 Ubuntu ARM64 실제 실행, Windows x86_64 cross compile, 방어 무력화와 등가 변형을 확인했다. | native 기록기·공유 잠금·wire 협상·앱 cursor 배선과 Windows native 파일 I/O는 후속이다. 현재 제품 CLI/log 포맷은 유지된다. 계획은 [로그 세대와 이어읽기](plans/agent-log-generations.md)를 따른다. |
 | native 세대 기록 I/O | 부분 구현 | `test-agent-log-writer`와 실제 `test-agent-log-writer-process`가 공유 lock·세대 생성/publish·snapshot/회전 재검사·부분 쓰기 rollback·holder kill·POSIX 링크/FIFO 거부를 확인한다. macOS/Linux 실행과 Windows cross compile을 구분한다. | 제품 훅/CLI/스트리머와 private directory 인증 어댑터 및 Windows native ACL/공유 검증은 후속이다. standalone latency는 실제 provider 전체 비용이 아니다. |
+| native 기록 CLI와 준비된 훅 | 부분 구현 | `test-agent-log-record`와 `test-agent-log-record-process`가 실제 native 훅→제품 CLI→v2 파일, 동시 기록·소유권/권한/링크/FIFO·잠금 deadline과 `sh -e`의 출력/exit 계약을 검사한다. macOS와 Linux 실제 실행을 구분한다. | 기존 설치 훅은 v1을 유지한다. reader/회전·wire 협상과 in-flight 이행 뒤 기본 활성화하며 Windows ACL/native 실행은 미지원이다. UID가 다른 디렉터리의 실제 거절은 Linux root fixture에서 검사했다. |
 
 
 ## 에디터 CLI와 앱 URL

@@ -1333,6 +1333,12 @@ fork·exec)는 다를 수 있다. 다만 그 차이는 spawn 비용 자체의 �
 
 ### 4.1 훅 커맨드 계약
 
+**native 세대 기록 이행은 준비 단계다.** 제품 CLI의 `maru agent-hooks record`와
+`agent_hook_command.buildNative`는 [로그 세대 계획](plans/agent-log-generations.md)의
+2b 계약을 따른다. stdin drain·접기·귀속 로직을 공유하고 마지막 append만 절대 binary
+호출로 바꾼다. 기존 설치기는 아래 인라인 v1 커맨드를 유지한다. reader/회전·wire
+이행 전에는 새 생성기를 기본 설치하거나 v1 로그에 v2 헤더를 삽입하지 않는다.
+
 **스크립트 파일을 두지 않는다 — 커맨드를 설정에 인라인으로 박는다.** 파일을 두면 provider가 매 이벤트마다
 그 절대경로를 실행하므로, 그 파일을 덮어쓸 수 있는 누구든 사용자 권한으로 임의 코드를 돌린다. 우리가 하는
 일은 append 한 줄이라 파일이 필요 없다(파일이 필요한 것은 엔드포인트 조회·전송·가드로 길어지는 경우다).

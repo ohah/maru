@@ -14289,6 +14289,23 @@ fn runAgentHooks(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
+    var rest: std.ArrayList([]const u8) = .empty;
+    defer rest.deinit(allocator);
+    while (args.next()) |a| try rest.append(allocator, a);
+    if (rest.items.len != 0 and std.mem.eql(u8, rest.items[0], "record")) {
+        const record_args = rest.items[1..];
+        if (record_args.len == 1 and (std.mem.eql(u8, record_args[0], "--help") or std.mem.eql(u8, record_args[0], "-h"))) {
+            try stdout.writeAll(maru.cli.agent_log_record.usage);
+            try stdout.flush();
+            return;
+        }
+        maru.agent_log_record.run(io, record_args) catch |err| {
+            // Record content and paths can contain source/user data: report only the error class.
+            try stderr.print("maru agent-hooks record: {s}\n", .{@errorName(err)});
+            return error.UnknownCommand;
+        };
+        return;
+    }
     // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고, 그 아래 전부가 fork·flock·
     // pty 다 — Windows 에 옮길 대상이 아니다. `std.c` 의 이 선언들은 그 타깃에서 **컴파일이
     // 안 되므로**(실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지치기한다.
@@ -14296,10 +14313,6 @@ fn runAgentHooks(
         const ah = maru.cli.agent_hooks;
         const install = maru.session.agent_hook_install;
         const hook_command = maru.session.agent_hook_command;
-
-        var rest: std.ArrayList([]const u8) = .empty;
-        defer rest.deinit(allocator);
-        while (args.next()) |a| try rest.append(allocator, a);
 
         const opts = switch (ah.parseArgs(rest.items)) {
             .help => {
@@ -16015,6 +16028,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru control --stdio
         \\  maru agent-events --stdio --dir=<absolute path> [options]
         \\  maru agent-hooks install|uninstall [options]
+        \\  maru agent-hooks record --file=<absolute .ndjson path>
         \\  maru browser <command> [options]
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
@@ -16055,7 +16069,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  incidents  inspect local incident records (`incidents --help`)
         \\  control    relay control-plane messages over stdio
         \\  agent-events stream remote agent events over stdio
-        \\  agent-hooks install or uninstall remote provider hooks (`agent-hooks --help`)
+        \\  agent-hooks manage provider hooks and record native events (`agent-hooks --help`)
         \\  browser    control web surfaces, storage, input and captures (asks for confirmation; `browser --help`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\

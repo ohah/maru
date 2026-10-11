@@ -5,6 +5,10 @@ pub const agent_log_writer = switch (builtin.os.tag) {
     .macos, .linux, .windows => @import("platform/agent_log_writer.zig"),
     else => struct {},
 };
+pub const agent_log_record = switch (builtin.os.tag) {
+    .macos, .linux, .windows => @import("platform/agent_log_record.zig"),
+    else => struct {},
+};
 pub const chrome = @import("chrome.zig");
 pub const user_paths = @import("user_paths.zig"); // 사용자별 경로 정책(홈·config·캐시 base) — OS를 인자로 받는 순수 판정
 pub const cli = @import("cli.zig");

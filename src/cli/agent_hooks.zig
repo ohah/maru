@@ -197,11 +197,14 @@ pub fn parseOutcome(out: []const u8) Outcome {
 
 pub const usage =
     \\usage: maru agent-hooks install|uninstall --provider=claude|codex --scope=remote --dir=<absolute path>
+    \\       maru agent-hooks record --file=<absolute .ndjson path>
     \\
     \\Installs (or removes) maru's agent hooks in this machine's provider config.
     \\Run this on the machine where the agent runs; maru on the other side reads the
     \\events over its existing ssh connection.
     \\Each option may only be specified once.
+    \\record accepts one bounded provider-tab-payload line on stdin in an existing private directory.
+    \\It prepares generation logs; installed hooks keep the legacy format until reader migration.
     \\
 ;
 

@@ -12,6 +12,19 @@ pub fn main(init: std.process.Init) !void {
     const dir = try std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(init.io);
     const out = std.Io.File.stdout();
+    if (std.mem.eql(u8, mode, "hook") or std.mem.eql(u8, mode, "hook-legacy")) {
+        const binary = args.next() orelse return error.InvalidArguments;
+        const provider = args.next() orelse "claude";
+        var generated: std.ArrayListUnmanaged(u8) = .empty;
+        defer generated.deinit(init.gpa);
+        const command = @import("session/agent_hook_command.zig");
+        if (std.mem.eql(u8, mode, "hook"))
+            try command.buildNative(&generated, init.gpa, provider, directory, directory, binary)
+        else
+            try command.build(&generated, init.gpa, provider, directory, directory);
+        try out.writeStreamingAll(init.io, generated.items);
+        return;
+    }
     if (std.mem.eql(u8, mode, "hold")) {
         const lease = try writer.acquire(init.io, dir, "a");
         defer lease.release(init.io);

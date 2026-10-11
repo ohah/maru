@@ -15055,7 +15055,7 @@ test "WT6b-1a git 읽기의 신뢰 판정은 언어 서버와 같은 표다(허�
     try testing.expectEqual(@as(c_int, 0), std.c.rmdir((try std.fmt.bufPrintZ(&git_z, "{s}/.git", .{root})).ptr));
     try testing.expect(!check.trusted(check.ctx, root));
 
-    // partial clone 안내는 원격에서 「신뢰하면 받아 온다」를 말하지 않는다 — 원격은 신뢰할 수 없다(적대적 검증 2회차).
+    // partial clone 안내는 신뢰를 정할 수 없는 원격(루트·홈을 아직 모름)에서 「신뢰하면 받아 온다」를 말하지 않는다(적대적 검증 2회차; 물을 수 있는 원격은 WT7b 판정자).
     try testing.expectEqualStrings(maru.i18n.t(.scm_partial_clone_untrusted), git_ops.partialCloneNotice(fx.session));
     const saved_dest = fx.session.git_repo_dest;
     fx.session.git_repo_dest = @constCast("user@host");
@@ -15170,7 +15170,7 @@ test "WT6b-2a 도크 신뢰 줄 — 신뢰 전 로컬 저장소는 맨 위에 �
     try testing.expect(trust_store.get(key) == null);
     try testing.expect(!fx.session.editor_lsp.asking_scm);
 
-    // ⑵′ 원격 — 신뢰를 정할 수 없어(WT7 전) 진술만 하고, 눌러도 시트가 안 뜬다(같은 경로의 로컬은 아직 신뢰 전 — 원격 갈래가 막아야
+    // ⑵′ 원격 — 루트·홈을 아직 모르면(WT7b) 진술만 하고, 눌러도 시트가 안 뜬다(같은 경로의 로컬은 아직 신뢰 전 — 원격 갈래가 막아야
     // 시트가 안 뜬다).
     git_ops.rememberGitRepoDest(fx.session, "user@host");
     const remote = (try Probe.first(fx.session, arena_state.allocator())) orelse return error.TrustLineMissing;
@@ -15314,14 +15314,15 @@ test "WT6b-2a 팔레트 「이 저장소 신뢰…」는 도크가 숨어 있으
     try testing.expect(fx.session.pending_confirm != .lsp_trust);
     try testing.expectEqualStrings(maru.i18n.t(.scm_trust_no_repo), fx.session.chrome_host.notice.message);
 
-    // ⑷ 활성 pane 이 원격이면 — 목록을 아직 못 읽었어도(`git_repo_dest` 가 없다) — 원격이라고 알리고 묻지 않는다.
+    // ⑷ 활성 pane 이 원격인데 도크가 그 목록을 보이지 않으면(`git_repo_dest` 가 없다 — 소켓이 없어 로컬 목록이 남았다) 묻지 않고, 그
+    // 목록이 보일 때 도크에서 신뢰하라고 알린다(WT7b — 「목록을 읽은 뒤」가 아니다: 그 목록은 기다려도 안 온다; 적대적 검증 4회차).
     try Cwd.set(term, repo);
     try term.rt.observation.ssh_remote_dest.appendSlice(testing.allocator, "user@host");
     term.rt.observation.ssh_remote_dest_present = true;
     fx.session.dock.presented = false;
     fx.session.dispatchAppAction(.scm_trust_repository);
     try testing.expect(fx.session.pending_confirm != .lsp_trust);
-    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_remote_notice), fx.session.chrome_host.notice.message);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_remote_other_list), fx.session.chrome_host.notice.message);
     // 같은 상태에서 도크 줄을 누르면 — 로컬 목록이 남아 있어 줄은 누를 수 있게 그려진다 — **그 줄이 말하는 저장소**를 묻는다(다시
     // 판정하면 「원격」으로 갈려 엉뚱한 거절이 났다 — 적대적 검증 4회차).
     git_ops.rememberGitRepo(fx.session, repo); // 줄이 말하는 저장소(로컬 목록)
@@ -15690,7 +15691,7 @@ test "WT6b-2b-ii 원격·묻지 않는 root 의 쓰기는 실행하지 않고 �
     fx.session.git_result = .{ .status = try wa.dupe(u8, staged_status), .ok = true };
     git_ops.rememberGitRepo(fx.session, "/srv/app/sub");
     git_ops.rememberGitRepoDest(fx.session, "user@build-box");
-    git_ops.rememberRemoteRepoRoot(fx.session, "/srv/app");
+    git_ops.rememberRemoteRepoRoot(fx.session, "/srv/app", "");
     const seq0 = fx.session.scm_write_seq;
     _ = scm_dock_ops.submitWriteForTest(fx.session, "/srv/app/sub", .stage);
     try testing.expectEqual(seq0, fx.session.scm_write_seq); // 우리가 실행하지 않았다(원격 git 으로도 로컬 git 으로도)
@@ -18913,6 +18914,186 @@ test "WT7a 원격 신뢰 키 — 신뢰 파일의 원격 줄이 관리 목록·�
     lsp_client.manageListed(fx.session, remote);
     try testing.expect(fx.session.pending_confirm == .lsp_trust_manage);
     try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.confirm.notes[0].text, "openclaw:/srv/app") != null);
+}
+
+test "WT7b 원격 신뢰 묻기 — 원격 목록의 도크 줄을 누르면 `목적지:원격 실제 루트` 시트가 뜨고 허용이 원격 키로 서며, 읽기 판정은 그 cwd 의 루트·홈일 때만 그 키를 본다; 원격 홈은 묻지 않고, 호스트가 바뀌면 루트를 놓는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    scm_dock_ops.test_trust_line = true;
+    defer scm_dock_ops.test_trust_line = false;
+    fx.session.git_result = .{ .status = try git_backend_for_test.worker_allocator.dupe(u8, "# branch.head main\n"), .ok = true };
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const Probe = struct {
+        fn first(session: *AppSession, a: std.mem.Allocator) !?maru.chrome.components.scm_dock.types.TrustNoticeItem {
+            const projection = scm_dock_ops.projectTabForTest(session, a) orelse return error.NoProjection;
+            if (projection.items.len == 0) return null;
+            return switch (projection.items[0]) {
+                .trust_notice => |line| line,
+                else => null,
+            };
+        }
+        fn clickFirst(session: *AppSession, a: std.mem.Allocator) !void {
+            const sd = maru.chrome.components.scm_dock;
+            const projection = scm_dock_ops.project(session, a) orelse return error.NoProjection;
+            const props = scm_dock_ops.testProps(session, projection);
+            const sizes = sd.build.bufferSizes(props.items);
+            const frame = try sd.build.build(props, .{
+                .nodes = try a.alloc(maru.chrome.ui.tree.UiNode, sizes.nodes),
+                .entries = try a.alloc(maru.chrome.ui.tree.RectEntry, sizes.entries),
+                .layout_items = try a.alloc(maru.chrome.ui.layout.Item, sizes.layout_items),
+                .flex_scratch = try a.alloc(maru.chrome.ui.layout.FlexScratch, sizes.flex_scratch),
+                .child_rects = try a.alloc(maru.chrome.ui.layout.UiRect, sizes.child_rects),
+                .actions = try a.alloc(sd.ids.Entry, sizes.actions),
+            });
+            scm_dock_ops.publishScmDockFrame(session, frame, props.items);
+            const content = scm_dock_dock_ops.dockGeometry(session).tree_content;
+            var rect: ?maru.chrome.ui.layout.UiRect = null;
+            for (session.scm_dock_entries.items) |e| if (e.id == sd.build.NodeIds.item(0)) {
+                rect = e.rect;
+            };
+            const r = rect orelse return error.MissingTrustRow;
+            const x = @as(f64, @floatFromInt(content.x)) + r.x + r.width / 2;
+            const y = @as(f64, @floatFromInt(content.y)) + r.y + r.height / 2;
+            _ = scm_dock_ops.scmDockPointer(session, .down, x, y);
+            const intent = scm_dock_ops.scmDockPointer(session, .up, x, y) orelse return error.NoIntent;
+            scm_dock_ops.applyScmDockIntentAt(session, intent, x, y);
+        }
+    };
+    _ = try fx.session.resize(fx.session.sidebar_width_px + 800, 600, fx.session.scale_milli);
+    fx.session.dock_initialized = true;
+    fx.session.dock.presented = true;
+    fx.session.dock.collapsed = false;
+    fx.session.dock.view = .source_control;
+    const notice = &fx.session.chrome_host.notice;
+    const check = fx.session.gitTrustCheck();
+    const remote_root_of = check.remote_trusted_root orelse return error.NoRemoteTrustCheck;
+
+    // ⑴ 원격 목록인데 루트·홈을 아직 모른다(첫 목록이 도는 중) — 신뢰 전이라고만 말하고 누를 수 없다. 누르면 시트 대신 그 사유.
+    git_ops.rememberGitRepo(fx.session, "/srv/app/sub");
+    git_ops.rememberGitRepoDest(fx.session, "OpenClaw");
+    const pending = (try Probe.first(fx.session, arena)) orelse return error.TrustLineMissing;
+    try testing.expect(!pending.actionable);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_line_remote), pending.text);
+    try testing.expect(remote_root_of(check.ctx, "/srv/app/sub", "OpenClaw") == null);
+    scm_dock_ops.applyScmDockIntentAt(fx.session, .trust_repo, 0, 0);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_remote_notice), notice.message);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_partial_clone_remote), git_ops.partialCloneNotice(fx.session));
+
+    // ⑵ 목록이 루트·홈을 실어 왔다 — 로컬과 같은 「신뢰 전 — 눌러서 신뢰」 줄. 안내 문구도 로컬과 같다(신뢰하면 받아 온다).
+    git_ops.rememberRemoteRepoRoot(fx.session, "/srv/app", "/home/me");
+    const line = (try Probe.first(fx.session, arena)) orelse return error.TrustLineMissing;
+    try testing.expect(line.actionable);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_line), line.text);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_partial_clone_untrusted), git_ops.partialCloneNotice(fx.session));
+    try testing.expectEqualStrings(maru.i18n.t(.scm_repo_filters_untrusted), git_ops.repoFiltersNotice(fx.session));
+    try testing.expect(remote_root_of(check.ctx, "/srv/app/sub", "OpenClaw") == null); // 아직 결정이 없다
+
+    // ⑵′ 팔레트 「이 저장소 신뢰…」 — 활성 pane 의 목적지가 목록의 목적지와 같으면 같은 원격 시트, 다르면(소켓이 없어 다른 기계의 목록이
+    // 남았다) 묻지 않고 그 사유. 취소는 기억하지 않는다.
+    // 활성 Term 을 그 pane 의 터미널로 둔다(픽스처의 활성은 편집기다 — 목적지는 터미널의 관측에서 온다).
+    const pane = pane_ops.activePane(fx.session);
+    const saved_active = pane.active_term;
+    defer pane.active_term = saved_active;
+    for (pane.terms.items, 0..) |t, i| if (t.kind == .terminal) {
+        pane.active_term = i;
+    };
+    const term = pane.activeTerm();
+    if (term.kind != .terminal) return error.NoTerminalTerm;
+    // 관측을 「지금 것」으로 둔다 — 그래야 관측 갱신이 아래 심은 목적지를 백엔드 값으로 덮지 않는다.
+    term.rt.observation.availability = .current;
+    term.rt.observation.title_generation = term.surface.core.title_generation.load(.monotonic);
+    term.rt.observation.ssh_remote_dest_present = true;
+    defer term.rt.observation.ssh_remote_dest_present = false;
+    try term.rt.observation.ssh_remote_dest.appendSlice(allocator, "elsewhere");
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_remote_other_list), notice.message); // 그 목록은 기다려도 안 온다 — 「목록을 읽은 뒤」가 아니다
+    term.rt.observation.ssh_remote_dest.clearRetainingCapacity();
+    try term.rt.observation.ssh_remote_dest.appendSlice(allocator, "OpenClaw");
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expectEqualStrings("openclaw", (fx.session.editor_lsp.asking_key orelse return error.NotAsking).key().dest);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expect(trust_store.get(.{ .volume = 0, .path = "/srv/app", .dest = "openclaw" }) == null);
+    term.rt.observation.ssh_remote_dest_present = false;
+    pane.active_term = saved_active;
+    // 활성 Term 이 편집기면(목적지를 못 읽는다) 화면에 보이는 원격 목록의 저장소를 묻는다 — 도크 줄을 누른 것과 같은 대상(4회차).
+    fx.session.dispatchAppAction(.scm_trust_repository);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expectEqualStrings("openclaw", (fx.session.editor_lsp.asking_key orelse return error.NotAsking).key().dest);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+
+    // ⑶ 그려진 줄을 누르면 시트 — 대상은 (맞춘 목적지, 원격 실제 루트)이고 경로 줄이 `목적지:경로`, 범위 줄은 원격의 것(쓰기는 아직 터미널).
+    try Probe.clickFirst(fx.session, arena);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    try testing.expect(fx.session.editor_lsp.asking_scm);
+    const ak = (fx.session.editor_lsp.asking_key orelse return error.NotAsking).key();
+    try testing.expectEqualStrings("openclaw", ak.dest);
+    try testing.expectEqualStrings("/srv/app", ak.path);
+    const confirm = &fx.session.chrome_host.confirm;
+    try testing.expect(std.mem.indexOf(u8, confirm.notes[0].text, "openclaw:/srv/app") != null);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_note_scope_remote), confirm.notes[confirm.notes.len - 1].text);
+    // 키보드 허용은 한 번 더 묻는다 — ← ⏎ 뒤 ⌘⏎.
+    _ = try fx.session.handleKeyEvent(.{ .key = .arrow_left });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter });
+    _ = try fx.session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+    const key: maru.session.editor.lsp.trust.Key = .{ .volume = 0, .path = "/srv/app", .dest = "openclaw" };
+    try testing.expect(trust_store.get(key) == .allow);
+    try testing.expect(trust_store.get(.{ .volume = 0, .path = "/srv/app" }) == null); // 같은 경로의 로컬 키는 그대로
+    try testing.expect((try Probe.first(fx.session, arena)) == null); // 신뢰 — 줄이 사라진다
+
+    // ⑷ 읽기 판정 — 그 목적지·그 cwd 면 신뢰 키의 루트, 다른 목적지·다른 cwd 는 신뢰 전.
+    try testing.expectEqualStrings("/srv/app", remote_root_of(check.ctx, "/srv/app/sub", "OpenClaw") orelse return error.NotTrusted);
+    try testing.expect(remote_root_of(check.ctx, "/srv/app/sub", "other") == null);
+    try testing.expect(remote_root_of(check.ctx, "/srv/app", "OpenClaw") == null); // 루트를 물은 cwd 가 아니다
+
+    // ⑸ cwd 를 옮겼다(새 목록이 아직 안 왔다) — 루트는 옛 cwd 의 답이라 쓰지 않는다: 판정은 신뢰 전, 줄은 「모름」.
+    git_ops.rememberGitRepo(fx.session, "/srv/other");
+    try testing.expect(remote_root_of(check.ctx, "/srv/other", "OpenClaw") == null);
+    try testing.expect(!((try Probe.first(fx.session, arena)) orelse return error.TrustLineMissing).actionable);
+
+    // ⑹ 원격 홈 저장소(루트가 홈)·홈의 조상은 묻지 않는다 — 진술만, 눌러도 시트가 없다. 표에 허용이 있어도 신뢰 전이다.
+    git_ops.rememberGitRepo(fx.session, "/home/me");
+    git_ops.rememberRemoteRepoRoot(fx.session, "/home/me", "/home/me");
+    const home_line = (try Probe.first(fx.session, arena)) orelse return error.TrustLineMissing;
+    try testing.expect(!home_line.actionable);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_line_refused), home_line.text);
+    scm_dock_ops.applyScmDockIntentAt(fx.session, .trust_repo, 0, 0);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_refused_notice), notice.message);
+    try testing.expect(trust_store.decide(testing.io, .{ .volume = 0, .path = "/home/me", .dest = "openclaw" }, .allow));
+    try testing.expect(remote_root_of(check.ctx, "/home/me", "OpenClaw") == null);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_partial_clone_remote), git_ops.partialCloneNotice(fx.session));
+    git_ops.rememberRemoteRepoRoot(fx.session, "/", "/home/me");
+    try testing.expect(!((try Probe.first(fx.session, arena)) orelse return error.TrustLineMissing).actionable);
+    try testing.expect(remote_root_of(check.ctx, "/home/me", "OpenClaw") == null);
+
+    // ⑺ 호스트가 바뀌면 루트·홈을 놓는다 — 옛 호스트의 루트로 새 목적지를 판정하지 않는다.
+    git_ops.rememberGitRepo(fx.session, "/srv/app/sub");
+    git_ops.rememberRemoteRepoRoot(fx.session, "/srv/app", "/home/me");
+    try testing.expect(remote_root_of(check.ctx, "/srv/app/sub", "OpenClaw") != null);
+    git_ops.rememberGitRepoDest(fx.session, "elsewhere");
+    try testing.expect(fx.session.git_repo_remote_root == null and fx.session.git_repo_remote_home == null);
+    try testing.expect(remote_root_of(check.ctx, "/srv/app/sub", "elsewhere") == null);
+    git_ops.rememberGitRepoDest(fx.session, null);
 }
 
 test "LSPB38 컨트롤 플레인의 신뢰 조회·철회·잊기(계획 WT4b) — 목록에 서고, 철회는 떠 있는 서버를 내리고 파일에 남으며, 잊으면 「결정 없음」(곧바로 묻지 않음); 심링크 경로도 같은 저장소, 창 없이도 표를 읽는다" {

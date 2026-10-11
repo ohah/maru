@@ -590,8 +590,9 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
     }
     // **신뢰 전 저장소에서는 턴 스냅샷을 찍지 않는다**(계획 workspace-trust WT6b-1a — 2026-10-09 사용자 결정). 임시 index 의
     // `add -A` 는 저장소·submodule 의 필터를 다 돌리고, `read-tree HEAD` 가 지연 가져오기 차단으로 실패하면 unborn 으로 보고
-    // 저장소 전체를 「턴 변경」으로 담는 거짓 스냅샷이 된다. 원격은 늘 신뢰 전이다(원격 신뢰 키가 없다).
-    if (self.git_backend.?.untrustedFor(repo, remote != null)) return;
+    // 저장소 전체를 「턴 변경」으로 담는 거짓 스냅샷이 된다. 원격은 신뢰해도 아직 찍지 않는다 — 원격 턴 스냅샷은 신뢰한 원격 쓰기와
+    // 함께 다시 선다(계획 workspace-trust WT7c).
+    if (remote != null or self.git_backend.?.untrustedFor(repo, null)) return;
     // **요청 시점의 신원을 붙들어 둔다**(적대적 검증 1회차). 수확 때 다시 조회하면 그 사이 `/clear` 로
     // 세션이 갈렸을 때 옛 턴이 새 세션 링에 들어간다.
     const owned = self.allocator.dupe(u8, identity) catch return;

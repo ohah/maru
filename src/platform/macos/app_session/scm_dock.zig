@@ -1960,7 +1960,13 @@ pub var test_trust_line: bool = false;
 fn scmTrustLine(self: *AppSession) ?component.types.TrustNoticeItem {
     if (builtin.is_test and !test_trust_line) return null;
     const repo = self.git_repo orelse return null;
-    if (self.git_repo_dest != null) return .{ .text = maru.i18n.t(.scm_trust_line_remote), .actionable = false }; // 원격은 늘 신뢰 전(WT7 전)
+    if (self.git_repo_dest != null) {
+        // 원격(계획 workspace-trust WT7b) — 키(목적지, 원격 실제 루트)와 홈이 이 cwd 의 목록에서 와야 판정한다. 그 전(첫 목록이 도는
+        // 중·루트나 홈을 못 읽음)은 신뢰 전 규칙으로 읽고 있다는 것만 말한다(누를 수 없다 — 무엇을 신뢰할지 아직 모른다). 판정은 시스템
+        // 호출이 없어(표 조회뿐) 캐시하지 않는다.
+        const target = git_ops.remoteTrustTarget(self, repo) orelse return .{ .text = maru.i18n.t(.scm_trust_line_remote), .actionable = false };
+        return trustLineFor(lsp_client.remoteRepoTrustState(self, target));
+    }
     const repo_hash = std.hash.Wyhash.hash(0, repo);
     const generation = lsp_client.trustGeneration();
     const list_generation = self.scm_dock_snapshot_generation;
@@ -1971,7 +1977,12 @@ fn scmTrustLine(self: *AppSession) ?component.types.TrustNoticeItem {
         self.scm_trust_cache = .{ .repo_hash = repo_hash, .generation = lsp_client.trustGeneration(), .list_generation = list_generation, .state = s };
         break :blk s;
     };
-    return switch (resolved) {
+    return trustLineFor(resolved);
+}
+
+/// 신뢰 상태 → 도크 줄(로컬·원격이 같은 줄이다).
+fn trustLineFor(state: lsp_client.RepoTrustState) ?component.types.TrustNoticeItem {
+    return switch (state) {
         .trusted => null,
         .untrusted => .{ .text = maru.i18n.t(.scm_trust_line), .actionable = true },
         .refused => .{ .text = maru.i18n.t(.scm_trust_line_refused), .actionable = false },
@@ -1982,8 +1993,9 @@ fn scmTrustLine(self: *AppSession) ?component.types.TrustNoticeItem {
 /// 저장소의 것이라는 뜻이라, 팔레트처럼 다시 판정하지 않는다: 활성 pane 이 원격이 됐는데 로컬 목록이 남아 있는 동안(소켓이 죽은
 /// `maru ssh`·맨 `ssh`) 다시 판정하면 「원격」·「저장소 없음」으로 갈려, 누를 수 있게 그려진 줄이 엉뚱한 거절을 냈다(적대적 검증 4회차).
 fn requestScmTrustForLine(self: *AppSession) void {
-    if (self.git_repo_dest != null) return self.showNoticeKey(.scm_trust_remote_notice);
-    askScmTrust(self, self.git_repo orelse return self.showNoticeKey(.scm_trust_no_repo));
+    const repo = self.git_repo orelse return self.showNoticeKey(.scm_trust_no_repo);
+    if (self.git_repo_dest != null) return askScmTrustRemote(self, repo);
+    askScmTrust(self, repo);
 }
 
 /// 도크 저장소를 신뢰할지 묻는다(계획 workspace-trust WT6b-2a — 팔레트 「소스 컨트롤: 이 저장소 신뢰…」). 시트를 못 띄우면 그
@@ -2003,20 +2015,41 @@ pub fn requestScmTrust(self: *AppSession) void {
         git_ops.followActiveTerminalRepo(self);
     }
     var dest_buf: [git_ops.max_remote_dest_bytes]u8 = undefined;
-    if (git_ops.activeTermRemoteDest(self, &dest_buf) != null) return self.showNoticeKey(.scm_trust_remote_notice);
+    if (git_ops.activeTermRemoteDest(self, &dest_buf)) |dest| {
+        // 원격(계획 workspace-trust WT7b) — 묻는 대상은 **이 pane 의 목적지와 같은 목록**의 저장소다. 목록이 다른 기계의 것이거나(소켓이
+        // 없어 로컬 목록이 남았다) 없으면 무엇을 신뢰할지 모른다 — 그 목록은 기다려도 안 온다(소켓이 없다), 그래서 「목록을 읽은 뒤」가
+        // 아니라 「그 목록이 보일 때」를 말한다(적대적 검증 4회차).
+        const listed = self.git_repo_dest orelse return self.showNoticeKey(.scm_trust_remote_other_list);
+        if (!std.mem.eql(u8, listed, dest)) return self.showNoticeKey(.scm_trust_remote_other_list);
+        return askScmTrustRemote(self, self.git_repo orelse return self.showNoticeKey(.scm_trust_remote_notice));
+    }
     var probe: [std.fs.max_path_bytes]u8 = undefined;
     const repo = switch (git_ops.gitRepoTarget(self, &probe)) {
         .repo => |found| found,
         .none => return self.showNoticeKey(.scm_trust_no_repo),
-        // 모른다 — 원격 목록을 보는 중이거나(로컬 순위로 내려가지 않는다 — `gitRepoTarget`) 물을 저장소가 없다.
-        .unknown => return self.showNoticeKey(if (self.git_repo_dest != null) .scm_trust_remote_notice else .scm_trust_no_repo),
+        // 모른다 — 원격 목록을 보는 중이거나(로컬 순위로 내려가지 않는다 — `gitRepoTarget`) 물을 저장소가 없다. 원격 목록이면 **화면에
+        // 보이는 그 저장소**를 묻는다(활성 Term 이 편집기라 목적지를 못 읽어도 — 도크 줄을 누른 것과 같은 대상; 적대적 검증 4회차).
+        .unknown => return if (self.git_repo_dest != null)
+            askScmTrustRemote(self, self.git_repo orelse return self.showNoticeKey(.scm_trust_no_repo))
+        else
+            self.showNoticeKey(.scm_trust_no_repo),
     };
     askScmTrust(self, repo);
 }
 
 /// 그 저장소의 신뢰 시트를 띄운다 — 못 띄우면 그 이유를 알린다.
 fn askScmTrust(self: *AppSession, repo: []const u8) void {
-    switch (lsp_client.askTrustForRepo(self, repo, false)) {
+    noticeAskOutcome(self, lsp_client.askTrustForRepo(self, repo, false));
+}
+
+/// 원격 목록의 저장소(cwd `repo`)의 신뢰 시트(계획 workspace-trust WT7b) — 그 cwd 의 루트·홈을 아직 모르면 묻지 않고 그렇다고 알린다.
+fn askScmTrustRemote(self: *AppSession, repo: []const u8) void {
+    const target = git_ops.remoteTrustTarget(self, repo) orelse return self.showNoticeKey(.scm_trust_remote_notice);
+    noticeAskOutcome(self, lsp_client.askTrustForRemoteRepo(self, target));
+}
+
+fn noticeAskOutcome(self: *AppSession, outcome: lsp_client.AskOutcome) void {
+    switch (outcome) {
         .asked => {},
         .already_trusted => self.showNoticeKey(.scm_trust_already),
         .refused => self.showNoticeKey(.scm_trust_refused_notice),
@@ -3598,10 +3631,10 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
     // (RS3 6회차에서 diff 가 그렇게 샜다). 그 자리는 쓰기라 더 나쁘다 — 남의 파일을 **바꾼다.**
     //
     // 워크스페이스 신뢰(WT6b-2b-ii)에서 원격의 뜻이 또 바뀌었다: **원격 쓰기는 우리가 실행하지 않고 사용자 터미널에 넣는다**
-    // (2026-10-10 결정). 원격은 늘 신뢰 전이다(`Backend.untrustedFor` 의 첫 줄 — 원격 신뢰는 WT7) — 「시트부터, 허용하면 잇는다」가
-    // 성립하지 않으니 실행(훅·서명)을 사용자가 보고 한다. control socket 유무와 무관하다(넣는 곳은 그 pane 의 셸이고, 기계 대조는
+    // (2026-10-10 결정). 원격 신뢰(WT7b)는 아직 읽기만 연다 — 신뢰한 원격도 쓰기는 터미널에 넣고, 신뢰한 원격 쓰기의 실행은 WT7c 다
+    // (실행(훅·서명)을 사용자가 보고 한다). control socket 유무와 무관하다(넣는 곳은 그 pane 의 셸이고, 기계 대조는
     // `injectIntoActiveTerminal` 이 한다) — 소켓이 없어 「읽기 전용」이던 원격도 이제 넣을 수 있다. 원격 쓰기 실행 경로(RS4a·b —
-    // `Backend.submitWrite` 의 `remote`)는 WT7 이 원격을 신뢰하면 다시 이 자리에서 쓴다.
+    // `Backend.submitWrite` 의 `remote`)는 WT7c 가 신뢰한 원격에서 다시 이 자리에서 쓴다.
     var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
     switch (git_ops.writeTargetFor(self, repo, &ctl_buf)) {
         .remote, .unavailable => return injectWrite(self, remoteRepoRootFor(self, repo), kind, paths, null),

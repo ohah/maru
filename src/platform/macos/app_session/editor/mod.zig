@@ -103,6 +103,7 @@ pub const code_action_client = @import("code_action.zig");
 pub const semantic_client = @import("semantic.zig");
 const line_ops = maru.session.editor.line_ops;
 const clipboard_ops = maru.session.editor.clipboard_ops;
+const typing_ops = maru.session.editor.typing_ops;
 pub const fold_lsp_client = @import("fold_lsp.zig");
 pub const inlay_client = @import("inlay.zig");
 pub const symbols_client = @import("symbols.zig");
@@ -8836,32 +8837,6 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         effective_selections = editor_selection.Selections.init(effective.items[0..merged.len], merged.primary);
     }
 
-    // 커서를 문서 순서로 모은다 — delta가 정렬·비겹침을 요구한다.
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    // 자동 닫기가 만든 문자열은 **우리가 소유한다**(호출자의 `text`와 달리 임시다).
-    var pair_texts: std.ArrayList([]u8) = .empty;
-    defer {
-        for (pair_texts.items) |t| self.allocator.free(t);
-        pair_texts.deinit(self.allocator);
-    }
-    // type-over로 지나간 커서 자리 — 변경 없이 caret만 옮긴다. **변경의 인덱스**로 적는다.
-    var skip_overs: std.ArrayList(usize) = .empty;
-    defer skip_overs.deinit(self.allocator);
-    // **커서마다 자기 첫 변경의 인덱스.** 감싸기는 커서 하나에 변경이 둘이라 「변경 i = 커서 i」로
-    // 짝지으면 둘째 커서부터 앞 커서의 닫는 괄호 뒤로 갔다(결함 5).
-    var first_change: std.ArrayList(usize) = .empty;
-    defer first_change.deinit(self.allocator);
-    // 감싼 커서 — 감싼 글자를 고른 채 둔다(§3.7). 원래 선택이 거꾸로였는지도 함께 기억한다.
-    const Surrounded = struct { sel: usize, reversed: bool };
-    var surrounded: std.ArrayList(Surrounded) = .empty;
-    defer surrounded.deinit(self.allocator);
-
-    // **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7). 붙여넣기·IME 확정은 여러 글자가 한 번에
-    // 오는데 그때 괄호를 닫으면 **사용자가 넣지 않은 문자**가 문서에 들어간다.
-    const aid: ?u8 = if (text.len == 1 and replacement == null) text[0] else null;
-    const content_now = doc.file.content;
-
     // **문서 순서로 쌓는다.** 예전에는 `selections()`(primary 먼저) 순서로 쌓고 나중에 정렬했는데,
     // type-over 자리는 정렬 **전** 인덱스로 적혀 primary 가 뒤에 있으면 엉뚱한 커서가 한 칸 넘어갔다
     // (결함 4). 처음부터 `selectionsForEdit` 의 순서면 변경·커서·caret 셋의 인덱스가 한 축이다.
@@ -8872,61 +8847,16 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         order_storage = snap.items;
         break :blk snap.items;
     };
-    for (edit_items) |sel| {
-        first_change.append(self.allocator, ranges.items.len) catch return false;
-        const lo = @min(sel.start(), doc.file.content.len);
-        const hi = @min(sel.end(), doc.file.content.len);
-
-        if (aid) |typed| {
-            const before: ?u8 = if (lo > 0) content_now[lo - 1] else null;
-            const after: ?u8 = if (hi < content_now.len) content_now[hi] else null;
-            switch (editor_pairs.decide(typed, hi > lo, before, after)) {
-                .insert_plain => {},
-                .insert_pair => |pr| {
-                    const owned = self.allocator.dupe(u8, &[_]u8{ pr.open, pr.close }) catch return false;
-                    pair_texts.append(self.allocator, owned) catch {
-                        self.allocator.free(owned);
-                        return false;
-                    };
-                    ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = owned }) catch return false;
-                    continue;
-                },
-                .skip_over => {
-                    // **빈 변경을 넣어 자리를 지킨다.** 아래 caret 재배치가 `inverse.changes`와
-                    // **인덱스로** 맞추는데, 건너뛴 커서가 delta에 안 실리면 그 뒤 커서들이 밀려
-                    // **엉뚱한 자리로 튄다**(적대적 검증 2026-08-27이 실측으로 잡았다 — type-over
-                    // 커서가 다른 커서 자리로 갔다). 길이 0에 빈 텍스트라 버퍼는 안 바뀐다.
-                    skip_overs.append(self.allocator, ranges.items.len) catch return false;
-                    ranges.append(self.allocator, .{ .start = lo, .end = lo, .text = "" }) catch return false;
-                    continue;
-                },
-                .surround => |pr| {
-                    // **감싼다** — 선택을 지우지 않는다. 앞뒤 두 변경으로 나눠 넣으면 그 사이 내용이
-                    // 그대로 살아 사용자가 고른 것이 유지된다.
-                    const o = self.allocator.dupe(u8, &[_]u8{pr.open}) catch return false;
-                    pair_texts.append(self.allocator, o) catch {
-                        self.allocator.free(o);
-                        return false;
-                    };
-                    const c = self.allocator.dupe(u8, &[_]u8{pr.close}) catch return false;
-                    pair_texts.append(self.allocator, c) catch {
-                        self.allocator.free(c);
-                        return false;
-                    };
-                    ranges.append(self.allocator, .{ .start = lo, .end = lo, .text = o }) catch return false;
-                    ranges.append(self.allocator, .{ .start = hi, .end = hi, .text = c }) catch return false;
-                    surrounded.append(self.allocator, .{ .sel = first_change.items.len - 1, .reversed = sel.isReversed() }) catch return false;
-                    continue;
-                },
-            }
-        }
-        ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = text }) catch return false;
-    }
+    // **무엇을 넣을지는 L2 `typing_ops.planTyping` 이 정한다**(§3.7 타이핑 보조 × §9.1 — 쌍 넣기·type-over·감싸기,
+    // 문서 순서, 커서마다 첫 변경의 인덱스). 보조는 재변환(IME)이 아닐 때만 본다.
+    var typing = typing_ops.planTyping(self.allocator, doc.file.content, edit_items, text, replacement == null) catch return false;
+    defer typing.deinit(self.allocator);
+    const ranges = &typing.changes;
     // **type-over만 있었으면 문서는 안 바뀐다** — caret만 한 칸 넘기고 끝낸다(§3.7).
     //
     // 변경이 없으므로 delta도 undo도 만들지 않는다 — 빈 편집을 쌓으면 undo가 헛돈다.
-    if (ranges.items.len == skip_overs.items.len) {
-        if (skip_overs.items.len == 0) return false; // 애초에 아무 커서도 없었다
+    if (typing.onlySkips()) {
+        if (typing.skip_overs.items.len == 0) return false; // 애초에 아무 커서도 없었다
         if (term.rt.editor_selection) |sel| {
             term.rt.editor_selection = editor_selection.Selection.at(sel.focus + 1);
         }
@@ -8936,15 +8866,9 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         return true;
     }
 
-    // **정렬하지 않는다** — 문서 순서로 쌓았다. 순서가 깨졌으면 아래 겹침 검사가 걸러 거절한다
-    // (정렬해 숨기면 `skip_overs`·`first_change` 의 인덱스가 다시 어긋난다).
-
-    // **겹치는 커서는 여기서 걸린다.** `mergeOverlapping`이 selection 단계에서 합치므로 정상
-    // 경로에서는 안 나오지만, 걸러 두지 않으면 `delta.apply`가 `MalformedDelta`로 거절하고
-    // 사용자에게는 "타이핑이 안 먹는다"로 보인다.
-    for (ranges.items, 0..) |c, i| {
-        if (i > 0 and c.start < ranges.items[i - 1].end) return false;
-    }
+    // **겹치는 커서는 여기서 걸린다**(`Typing.wellFormed`) — 문서 순서로 쌓았으니 정렬하지 않는다(정렬해 숨기면
+    // `skip_overs`·`first_change` 의 인덱스가 다시 어긋난다).
+    if (!typing.wellFormed()) return false;
 
     var sels = selectionsForEdit(self, term) orelse return false;
     const sels_storage = sels.items;
@@ -8987,32 +8911,13 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         return false;
     };
 
-    // **친 커서는 넣은 글자 뒤로 간다 — 매핑에 맡기지 않는다.**
-    // `mapOffset`의 경계 규칙은 *"삽입 지점에 정확히 있는 offset은 밀지 않는다"*인데, 그것은
-    // **다른** 커서에는 맞지만 타이핑한 커서 자신에게는 틀리다(친 글자 앞에 남는다 — 실측으로
-    // EDIT1·EDIT5가 그것을 잡았다). 어디로 갈지는 매핑이 아니라 **편집 연산이 정한다.**
-    //
-    // 역연산의 각 range가 편집 **후** 좌표로 "새로 들어간 구간"을 가리키므로, 그 끝이 곧 커서 자리다
-    // (삭제는 길이가 0이라 시작 = 끝이고, 지운 자리에 커서가 선다).
-    // **건너뛴 커서는 한 칸 넘어간다**(type-over) — 빈 변경이라 `ic.end`가 제자리다.
-    //
-    // **`skip_overs`가 오름차순이라는 것을 쓴다.** 커서마다 그 목록을 훑으면 **커서 수에
-    // 곱해진다**(상한 10,000이면 1억 번 — `MC3`이 같은 축을 실측으로 고정한 전례가 있다).
-    // 넣는 자리가 `ranges.items.len`이라 정렬이 보장되므로, 한 번만 앞으로 밀며 본다.
-    // **밀기와 소비 중 하나면 된다.** 둘 다 두었더니 각각을 지운 뮤턴트가 **둘 다 살아남았다**
-    // (적대적 검증 2026-08-27 — 동치였다): `i`가 0부터 하나씩 오르고 목록이 오름차순이라
-    // 소비만 해도 커서가 늘 맞은 자리에 온다. 방어가 둘이면 하나는 반드시 검증 밖에 남는다.
-    var skip_at: usize = 0;
-    for (first_change.items, 0..) |ci, i| {
+    // **caret 은 L2 `typing_ops.baseCarets` 가 놓는다** — 넣은 글자 뒤, type-over 는 한 칸 넘어(매핑에 맡기지 않는다 —
+    // EDIT1·EDIT5). **IME 조합 선택은 여기서 덮어쓴다**(L4 상태를 읽는다 — `typing_ops` 머리 주석).
+    typing_ops.baseCarets(typing, inverse.changes, sels.items);
+    if (ime_selection) |selected| for (typing.first_change.items, 0..) |ci, i| {
         if (i >= sels.items.len or ci >= inverse.changes.len) break;
         const ic = inverse.changes[ci];
-        var at = ic.end;
-        if (skip_at < skip_overs.items.len and skip_overs.items[skip_at] == ci) {
-            at += 1;
-            skip_at += 1;
-        }
-        sels.items[i] = editor_selection.Selection.at(at);
-        if (ime_selection) |selected| switch (selected) {
+        switch (selected) {
             .inserted => |range| sels.items[i] = editor_selection.Selection.fromPoints(ic.start + range.start, ic.start + range.end),
             .preserve_primary => if (i == sels.primary) {
                 const original = before[before_primary];
@@ -9022,8 +8927,8 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
                 sels.items[i].anchor_end = maru.session.editor.delta.mapOffset(delta, original.anchor_end);
                 sels.items[i].focus = maru.session.editor.delta.mapOffset(delta, original.focus);
             },
-        };
-    }
+        }
+    };
 
     if (ime_query) |query| {
         query.after = .{
@@ -9032,34 +8937,9 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         };
     }
 
-    // **자동으로 닫은 쌍은 caret이 가운데다**(§3.7). 위 규칙은 "넣은 것 뒤"라 `()`에서 닫는 괄호
-    // **뒤**에 서게 되는데, 그러면 자동 닫기가 오히려 방해가 된다 — 사용자는 그 안에 이어 친다.
-    //
-    // **감싼 커서는 감싼 글자를 고른 채 둔다**(§3.7, 2026-10-11 — VSCode 관례). 그 커서의 두 변경
-    // (여는 문자·닫는 문자) 사이가 고른 글자다. 커서마다 자기 변경 둘을 보므로 커서가 여럿이어도
-    // 같은 모양이다(결함 5). 원래 선택이 거꾸로였으면 방향도 지킨다.
-    for (first_change.items, 0..) |ci, i| {
-        if (i >= sels.items.len or ci >= ranges.items.len) break;
-        const r = ranges.items[ci];
-        if (replacement == null and r.text.len == 2 and r.start == r.end) {
-            const p = editor_pairs.pairFor(r.text[0]) orelse continue;
-            if (p.close != r.text[1]) continue;
-            sels.items[i] = editor_selection.Selection.at(sels.items[i].focus -| 1);
-            // **자동으로 넣은 닫는 문자를 표시해 둔다**(§3.7) — Backspace가 그것만 함께 지운다.
-            term.rt.editor_auto_closed_at = sels.items[i].focus;
-        }
-    }
-    for (surrounded.items) |sur| {
-        if (sur.sel >= sels.items.len or sur.sel >= first_change.items.len) continue;
-        const ci = first_change.items[sur.sel];
-        if (ci + 1 >= inverse.changes.len) continue;
-        const inner_lo = inverse.changes[ci].end; // 여는 문자 뒤
-        const inner_hi = inverse.changes[ci + 1].start; // 닫는 문자 앞
-        sels.items[sur.sel] = if (sur.reversed)
-            editor_selection.Selection.fromPoints(inner_hi, inner_lo)
-        else
-            editor_selection.Selection.fromPoints(inner_lo, inner_hi);
-    }
+    // **마무리는 L2 `typing_ops.finishCarets`** — 자동으로 닫은 쌍은 caret 이 가운데(§3.7), 감싼 커서는 감싼 글자를 고른
+    // 채(§3.7, 2026-10-11). **자동으로 넣은 닫는 문자를 표시해 둔다** — Backspace 가 그것만 함께 지운다.
+    if (typing_ops.finishCarets(typing, inverse.changes, replacement != null, sels.items)) |at| term.rt.editor_auto_closed_at = at;
 
     // pushUndo owns the inverse and may release it if its own allocation fails.
     if (track_direct) {

@@ -36,6 +36,7 @@ pub const MaterializationFootprint = struct {
 };
 
 pub const AttachScalars = struct {
+    agent_log_format: runtime_metadata_types.AgentLogFormat = .v1,
     stream_id: u64,
     controller_generation: u64,
     observe: bool,
@@ -591,6 +592,7 @@ pub fn decodeAttachEnvelope(
     return switch (preflight.envelope) {
         .wire_error => |code| .{ .wire_error = code },
         .accepted => |accepted| .{ .accepted = .{
+            .agent_log_format = accepted.agent_log_format,
             .stream_id = accepted.stream_id,
             .controller_generation = accepted.controller_generation,
             .observe = accepted.observe,
@@ -2276,4 +2278,32 @@ test "C3-3b2b2 compatibility separates peer violation from forged local provenan
     );
     try std.testing.expectEqual(@as(usize, 0), counter.allocation_calls);
     try std.testing.expectEqual(@as(usize, 0), counter.free_calls);
+}
+
+test "agent log format attach metadata is capability-bound and never guessed" {
+    const a = std.testing.allocator;
+    const prefix = "{\"result\":{\"stream_id\":7,\"controller_generation\":1,\"granted\":{\"observe\":true,\"input\":true,\"resize\":true},\"controller_busy\":false,\"metadata_revision\":0,\"metadata\":null";
+    const profile: AttachDecodeProfile = .{ .generation_schema = .granted_with_generation, .metadata_support = .supported, .agent_log_format_supported = true };
+    for ([_]u8{ 1, 2 }) |value| {
+        const payload = try std.fmt.allocPrint(a, "{s},\"agent_log_format\":{d}}}}}", .{ prefix, value });
+        defer a.free(payload);
+        var parsed = try decodeAttachEnvelope(a, payload, profile);
+        defer parsed.deinit();
+        try std.testing.expectEqual(value, @intFromEnum(parsed.accepted.agent_log_format));
+        var legacy_profile = profile;
+        legacy_profile.agent_log_format_supported = false;
+        try std.testing.expectError(error.Malformed, decodeAttachEnvelope(a, payload, legacy_profile));
+    }
+    for ([_][]const u8{ "", ",\"agent_log_format\":0", ",\"agent_log_format\":3", ",\"agent_log_format\":null", ",\"agent_log_format\":\"2\"", ",\"agent_log_format\":2.0", ",\"agent_log_format\":2,\"agent_log_format\":2" }) |suffix| {
+        const payload = try std.fmt.allocPrint(a, "{s}{s}}}}}", .{ prefix, suffix });
+        defer a.free(payload);
+        try std.testing.expectError(error.Malformed, decodeAttachEnvelope(a, payload, profile));
+    }
+    var legacy_profile = profile;
+    legacy_profile.agent_log_format_supported = false;
+    const legacy_payload = try std.fmt.allocPrint(a, "{s}}}}}", .{prefix});
+    defer a.free(legacy_payload);
+    var legacy = try decodeAttachEnvelope(a, legacy_payload, legacy_profile);
+    defer legacy.deinit();
+    try std.testing.expectEqual(runtime_metadata_types.AgentLogFormat.v1, legacy.accepted.agent_log_format);
 }

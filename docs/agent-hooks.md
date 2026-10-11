@@ -2239,3 +2239,17 @@ OS 배너의 실제 표시 여부는 별도의 앱 실기 검증이다.
 객체/배열 구분·쉼표·문자열 이스케이프·숫자 형식을 확인하고 최상위 신원 키 중복을 거부한다. 구조 깊이 32개·처리 budget 2048·신원과 숫자 토큰의 64바이트 상한을 넘거나 신원 타입이 틀리면 `__oversized__` 표식으로 남긴다. 복잡한 본문에서 budget을 소진하면 신원을 추정해서 턴을 종료하지 않는다. 최종 투영도 기존 이벤트 JSON 파서를 통과해야 한다.
 
 실제 셸 게이트는 메타데이터 앞/뒤의 큰 본문, 필드 순서 32개 조합, 중첩 가짜 ID와 이벤트 이름, 재진입 Stop, UTF-8·이스케이프, 중복·손상·상한 공격을 검증한다. 사용 가능한 sh·dash·bash·zsh(sh 모드)에서 두 개의 큰 문자열을 포함한 약 500 KB 입력도 provider의 2초 제한으로 확인한다. 제품 회귀는 lead Stop 후 큰 자식 Stop의 보존된 ID가 자식을 제거하고 1.5초 유예 뒤 완료 알림을 만드는지 검증한다. OS 배너 실기 검증은 별도다.
+
+### Runtime format 확인과 host handoff
+
+Runtime의 로그 format은 spawn 때 확정하며 실행 중 바꾸지 않는다. 기본은 v1이다.
+명시적 v2 persistent spawn은 `runtime_agent_log_format_v1` capability를 협상한
+host에만 허용한다. 협상한 연결의 `runtime.attach` result에는 정수
+`agent_log_format`(1 또는 2)이 필수다. 협상하지 않은 구 host 응답은 이 필드를
+포함하지 않으며 기존 v1 계약을 따른다. reader는 확인된 format의 namespace를
+읽고, 이미 v2로 확인한 runtime을 재접속할 때 v1로 낮추지 않는다.
+
+Host upgrade snapshot은 v1 runtime의 기존 바이트를 유지한다. v2 runtime에는
+필수 runtime TLV tag 13을 저장해, 이를 모르는 decoder가 restore를 거부하도록
+한다. 정상 종료와 죽은 host 로그 정리는 두 namespace의 동일한 owner 규율을
+따른다. 이 배선은 provider 기본 native 설치나 SSH forwarding 활성화를 뜻하지 않는다.

@@ -3732,7 +3732,9 @@ pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
         // (그래야 host 가 두 번째를 observer 로 강등한다) 그것은 실 fork host + AppSession 둘을 엮는
         // OS-E2E 다. 뮤테이션에서 이 줄만 지워도 초록인 것이 그 증거다.
         if (owned.observer) return null;
+        term.agent_hook_log_profile = owned.profile;
         const base = hookCacheBase(a) orelse return null;
+        defer a.free(base);
         var inst_buf: [hook_command.instance_token_max]u8 = undefined;
         const inst = hook_command.formatHostInstance(&inst_buf, owned.host_id);
         var pane_buf: [hook_command.pane_token_max]u8 = undefined;
@@ -3744,6 +3746,7 @@ pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
             pane,
         }) catch null;
     }
+    if (term.surface.remote != null) return null; // unconfirmed host identity is never a GUI-owned log
     // **인스턴스 칸을 지난다** — 훅이 쓰는 이름과 같아야 한다(계약 §4). 이 둘이 갈리면 그 Term 은 자기
     // 이벤트를 못 읽고, 같은 숫자를 가진 **다른 인스턴스**의 이벤트를 읽는다.
     const dir = agentHookInstanceDirForProfile(a, term.agent_hook_log_profile) orelse return null;
@@ -3757,7 +3760,7 @@ pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
 /// 셋이 한 번에 나오는 이유: 셋 다 같은 원격 backend 조회에서 나오고, 하나라도 없으면 그 Term 의 훅 경로를
 /// 지을 수 없다(그러면 GUI 소유 규칙으로 떨어지는 것이 아니라 **훅이 없는 것**이다 — 이 Term 의 자식은
 /// host 가 띄웠으므로 GUI 칸에는 애초에 아무것도 안 쓴다).
-fn hostOwnedHookIdentity(term: *Term) ?struct { host_id: u128, runtime_id: u128, observer: bool } {
+fn hostOwnedHookIdentity(term: *Term) ?struct { host_id: u128, runtime_id: u128, observer: bool, profile: maru.session.agent_log_profile.Profile } {
     if (!is_macos) return null;
     // ⚠️ **실효 가드는 아래 registry 조회다** — handle 은 앱 전역 유일이라 원격이 아닌 Term 은 그 표에
     // 없어 어차피 null 이 된다. 이 줄은 의도를 적는 자리이고, 그래서 이 줄만 지워도 테스트는 초록이다
@@ -3771,6 +3774,7 @@ fn hostOwnedHookIdentity(term: *Term) ?struct { host_id: u128, runtime_id: u128,
         .host_id = host_id,
         .runtime_id = runtime_id,
         .observer = remote.attachedAsObserver(term.rt.handle),
+        .profile = remote.runtimeHookLogProfile(term.rt.handle) orelse return null,
     };
 }
 

@@ -293,6 +293,7 @@ pub const AttachGenerationSchema = enum {
 };
 
 pub const AttachProfile = struct {
+    agent_log_format_supported: bool = false,
     generation_schema: AttachGenerationSchema,
     metadata_support: MetadataSupport,
 };
@@ -307,6 +308,7 @@ pub const InitialMetadataView = union(enum) {
 
 /// Role/requested-mode policy deliberately stays above this neutral wire result.
 pub const AttachScalarsView = struct {
+    agent_log_format: runtime_metadata_types.AgentLogFormat = .v1,
     stream_id: u64,
     controller_generation: u64,
     observe: bool,
@@ -487,6 +489,7 @@ const AttachResultFields = struct {
     count: usize = 0,
     unknown_count: usize = 0,
     stream_id: ?u64 = null,
+    agent_log_format: ?runtime_metadata_types.AgentLogFormat = null,
     controller_generation_seen: bool = false,
     controller_generation: ?u64 = null,
     granted_seen: bool = false,
@@ -712,7 +715,7 @@ fn finishAttachResult(
     const generation_fields: usize =
         if (profile.generation_schema == .granted_with_generation) 1 else 0;
     const metadata_fields: usize = if (profile.metadata_support == .supported) 2 else 0;
-    if (result.count != 3 + generation_fields + metadata_fields or
+    if (result.count != 3 + generation_fields + metadata_fields + @intFromBool(profile.agent_log_format_supported) or
         result.unknown_count != 0 or !result.granted_seen)
         return error.Malformed;
     const stream_id = result.stream_id orelse return error.Malformed;
@@ -736,6 +739,12 @@ fn finishAttachResult(
     const resize = result.granted.resize orelse return error.Malformed;
     if (!observe or input != resize) return error.Malformed;
 
+    const agent_log_format: runtime_metadata_types.AgentLogFormat = if (profile.agent_log_format_supported)
+        result.agent_log_format orelse return error.Malformed
+    else blk: {
+        if (result.agent_log_format != null) return error.Malformed;
+        break :blk .v1;
+    };
     const initial_metadata: InitialMetadataView = switch (profile.metadata_support) {
         .unsupported => blk: {
             if (result.metadata_revision_seen or result.metadata_seen)
@@ -745,6 +754,7 @@ fn finishAttachResult(
         .supported => try finishSupportedMetadata(payload, result),
     };
     return .{
+        .agent_log_format = agent_log_format,
         .stream_id = stream_id,
         .controller_generation = generation,
         .observe = observe,
@@ -828,6 +838,9 @@ fn parseAttachResult(
         if (spanEquals(payload, key, "stream_id")) {
             if (result.stream_id != null) return error.Malformed;
             result.stream_id = try readUnsigned(u64, scanner);
+        } else if (spanEquals(payload, key, "agent_log_format")) {
+            if (result.agent_log_format != null) return error.Malformed;
+            result.agent_log_format = std.enums.fromInt(runtime_metadata_types.AgentLogFormat, try readUnsigned(u8, scanner)) orelse return error.Malformed;
         } else if (spanEquals(payload, key, "controller_generation")) {
             if (result.controller_generation_seen) return error.Malformed;
             result.controller_generation_seen = true;

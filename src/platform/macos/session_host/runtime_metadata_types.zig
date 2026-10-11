@@ -3,6 +3,10 @@
 //! Keep this leaf free of JSON, allocators, platform state, and product ownership so neither
 //! decoder needs to import the other.
 
+/// Wire numbers are independent of the domain Profile ordinal (0/1).
+pub const AgentLogFormat = enum(u8) { v1 = 1, v2 = 2 };
+pub const agent_log_capability = "runtime_agent_log_format_v1";
+
 pub const max_metadata_fields: usize = 64;
 pub const max_process_entries: usize = 64;
 pub const max_process_fields: usize = 8;

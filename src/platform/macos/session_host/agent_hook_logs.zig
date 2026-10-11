@@ -67,11 +67,18 @@ fn isRealUserHome(home: []const u8) bool {
 /// 이름의 단일 출처는 계약 모듈(`formatHostInstance`)이다 — 여기서 접두를 손으로 적으면 GUI 가 읽는
 /// 이름과 갈린다.
 pub fn instanceDirPathIn(buf: []u8, cache_base: []const u8, host_id: u128) error{NoSpaceLeft}![:0]u8 {
+    return instanceDirPathForProfileIn(buf, cache_base, host_id, .v1);
+}
+
+pub fn instanceDirPathForProfileIn(buf: []u8, cache_base: []const u8, host_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) error{NoSpaceLeft}![:0]u8 {
     var token_buf: [hook_command.instance_token_max]u8 = undefined;
     const token = hook_command.formatHostInstance(&token_buf, host_id);
     return std.fmt.bufPrintZ(buf, "{s}/{s}/{s}", .{
         std.mem.trimEnd(u8, cache_base, "/"),
-        hook_command.log_dir_rel,
+        hook_command.log_profile.localCacheSubdir(switch (profile) {
+            .v1 => .v1,
+            .v2 => .v2,
+        }),
         token,
     });
 }
@@ -83,8 +90,12 @@ pub fn runtimeLogPathIn(
     host_id: u128,
     runtime_id: u128,
 ) error{NoSpaceLeft}![:0]u8 {
+    return runtimeLogPathForProfileIn(buf, cache_base, host_id, runtime_id, .v1);
+}
+
+pub fn runtimeLogPathForProfileIn(buf: []u8, cache_base: []const u8, host_id: u128, runtime_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) error{NoSpaceLeft}![:0]u8 {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = try instanceDirPathIn(&dir_buf, cache_base, host_id);
+    const dir = try instanceDirPathForProfileIn(&dir_buf, cache_base, host_id, profile);
     var pane_buf: [hook_command.pane_token_max]u8 = undefined;
     const pane = hook_command.formatRuntimePane(&pane_buf, runtime_id);
     return std.fmt.bufPrintZ(buf, "{s}/{s}.ndjson", .{ dir, pane });
@@ -96,6 +107,10 @@ pub fn runtimeLogPathIn(
 /// (계약 §7). 파일 자체도 훅이 `umask 077` 로 0600 을 보장하지만, 디렉터리를 넓게 열어 두면 같은 머신의
 /// 다른 사용자가 이름만으로도 무엇이 도는지 읽는다.
 pub fn ensureInstanceDir(io: std.Io, cache_base: []const u8, host_id: u128) void {
+    ensureInstanceDirForProfile(io, cache_base, host_id, .v1);
+}
+
+pub fn ensureInstanceDirForProfile(io: std.Io, cache_base: []const u8, host_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) void {
     if (builtin.os.tag != .macos) return;
     // **상위를 전부 만든다.** `<base>` 위(`~/.cache`)가 없을 수 있다 — 새 머신이거나 사용자가 캐시를
     // 통째로 비운 경우다. mkdir 한 번으로 끝내면 그때 조용히 실패하고 **그 host 의 훅이 통째로 꺼진다**
@@ -103,14 +118,17 @@ pub fn ensureInstanceDir(io: std.Io, cache_base: []const u8, host_id: u128) void
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
     const log_dir = std.fmt.bufPrintZ(&log_buf, "{s}/{s}", .{
         std.mem.trimEnd(u8, cache_base, "/"),
-        hook_command.log_dir_rel,
+        hook_command.log_profile.localCacheSubdir(switch (profile) {
+            .v1 => .v1,
+            .v2 => .v2,
+        }),
     }) catch return;
     std.Io.Dir.cwd().createDirPath(io, log_dir) catch return;
     // 재귀 생성은 기본 권한을 쓰므로 **로그 디렉터리는 우리가 좁힌다**(GUI 도 같은 규율이다 — 이미 있던
     // 0755 도 0700 으로 좁힌다). payload 에 소스와 셸 명령 원문이 실린다(계약 §7).
     _ = c.chmod(log_dir.ptr, 0o700);
     var inst_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const inst = instanceDirPathIn(&inst_buf, cache_base, host_id) catch return;
+    const inst = instanceDirPathForProfileIn(&inst_buf, cache_base, host_id, profile) catch return;
     _ = c.mkdir(inst.ptr, 0o700);
     _ = c.chmod(inst.ptr, 0o700); // 이미 있던 칸도 좁힌다
     // **주인을 적는다** — 이것이 다른 host 의 sweep 이 이 칸을 살릴 유일한 근거다(머리말).
@@ -122,9 +140,13 @@ pub fn ensureInstanceDir(io: std.Io, cache_base: []const u8, host_id: u128) void
 /// **왜 종료 때 지우는가**: 그 이름은 `runtime_id` 라 다시 쓰이지 않으므로, 남겨 두면 아무도 읽지 않는
 /// 파일이 칸에 쌓인다. GUI 는 이 칸을 정리하지 않는다(소유자가 아니다).
 pub fn removeRuntimeLog(cache_base: []const u8, host_id: u128, runtime_id: u128) void {
+    removeRuntimeLogForProfile(cache_base, host_id, runtime_id, .v1);
+}
+
+pub fn removeRuntimeLogForProfile(cache_base: []const u8, host_id: u128, runtime_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) void {
     if (builtin.os.tag != .macos) return;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = runtimeLogPathIn(&buf, cache_base, host_id, runtime_id) catch return;
+    const path = runtimeLogPathForProfileIn(&buf, cache_base, host_id, runtime_id, profile) catch return;
     _ = c.unlink(path.ptr);
     var rotated_buf: [std.fs.max_path_bytes]u8 = undefined;
     const rotated = std.fmt.bufPrintZ(&rotated_buf, "{s}{s}", .{
@@ -138,9 +160,14 @@ pub fn removeRuntimeLog(cache_base: []const u8, host_id: u128, runtime_id: u128)
 ///
 /// ⚠️ 강제 종료(SIGKILL)로는 이 경로가 안 돈다 — 그래서 `sweepDeadHostDirs` 가 안전망이다.
 pub fn removeInstanceDir(io: std.Io, cache_base: []const u8, host_id: u128) void {
+    inline for (.{ @import("runtime_metadata_types.zig").AgentLogFormat.v1, @import("runtime_metadata_types.zig").AgentLogFormat.v2 }) |profile|
+        removeInstanceDirForProfile(io, cache_base, host_id, profile);
+}
+
+fn removeInstanceDirForProfile(io: std.Io, cache_base: []const u8, host_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) void {
     if (builtin.os.tag != .macos) return;
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir = instanceDirPathIn(&buf, cache_base, host_id) catch return;
+    const dir = instanceDirPathForProfileIn(&buf, cache_base, host_id, profile) catch return;
     removeSegment(io, dir);
 }
 
@@ -152,11 +179,19 @@ pub fn removeInstanceDir(io: std.Io, cache_base: []const u8, host_id: u128) void
 ///
 /// **우리 칸과 우리 이름공간이 아닌 이름은 건드리지 않는다.**
 pub fn sweepDeadHostDirs(io: std.Io, cache_base: []const u8, own_host_id: u128) void {
+    inline for (.{ @import("runtime_metadata_types.zig").AgentLogFormat.v1, @import("runtime_metadata_types.zig").AgentLogFormat.v2 }) |profile|
+        sweepDeadHostDirsForProfile(io, cache_base, own_host_id, profile);
+}
+
+fn sweepDeadHostDirsForProfile(io: std.Io, cache_base: []const u8, own_host_id: u128, profile: @import("runtime_metadata_types.zig").AgentLogFormat) void {
     if (builtin.os.tag != .macos) return;
     var log_buf: [std.fs.max_path_bytes]u8 = undefined;
     const log_dir = std.fmt.bufPrintZ(&log_buf, "{s}/{s}", .{
         std.mem.trimEnd(u8, cache_base, "/"),
-        hook_command.log_dir_rel,
+        hook_command.log_profile.localCacheSubdir(switch (profile) {
+            .v1 => .v1,
+            .v2 => .v2,
+        }),
     }) catch return;
     var handle = std.Io.Dir.openDirAbsolute(io, log_dir, .{ .iterate = true }) catch return;
     defer handle.close(io);
@@ -542,4 +577,30 @@ test "심링크로 바꿔친 칸에는 우리 신원을 적지 않는다" {
     const marker = try std.fmt.bufPrintZ(&marker_buf, "{s}/owner.pid", .{victim});
     var st: posix.Stat = undefined;
     try testing.expect(c.fstatat(posix.AT.FDCWD, marker.ptr, &st, posix.AT.SYMLINK_NOFOLLOW) != 0);
+}
+
+test "agent log format cleanup removes only the selected runtime namespace" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(testing.io, &root_buf);
+    const root = root_buf[0..root_len];
+    inline for (.{ @import("runtime_metadata_types.zig").AgentLogFormat.v1, @import("runtime_metadata_types.zig").AgentLogFormat.v2 }) |profile| {
+        ensureInstanceDirForProfile(testing.io, root, 7, profile);
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try runtimeLogPathForProfileIn(&buf, root, 7, 8, profile);
+        const file = try std.Io.Dir.cwd().createFile(testing.io, path, .{});
+        file.close(testing.io);
+    }
+    removeRuntimeLogForProfile(root, 7, 8, .v2);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const v1 = try runtimeLogPathForProfileIn(&buf, root, 7, 8, .v1);
+    const file = try std.Io.Dir.cwd().openFile(testing.io, v1, .{});
+    file.close(testing.io);
+    const v2 = try runtimeLogPathForProfileIn(&buf, root, 7, 8, .v2);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(testing.io, v2, .{}));
+    removeInstanceDir(testing.io, root, 7);
+    const dir = try instanceDirPathForProfileIn(&buf, root, 7, .v2);
+    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openDir(testing.io, dir, .{}));
 }

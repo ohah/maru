@@ -838,6 +838,7 @@ pub const RuntimeManager = struct {
                 .cols = item.entry.cols,
                 .rows = item.entry.rows,
                 .resize_generation = item.entry.resize_generation,
+                .agent_log_format = item.entry.agent_log_format,
                 .fd_slot = inherited_slot,
                 .pty_dev = identity.dev,
                 .pty_ino = identity.ino,
@@ -1286,6 +1287,7 @@ pub const RuntimeManager = struct {
         expected_master: maru.pty.PtySession.MasterIdentity,
         expected_size: maru.terminal.Size,
         expected_resize_generation: u64,
+        expected_agent_log_format: @import("runtime_metadata_types.zig").AgentLogFormat,
     };
 
     const RestoreGraphPhase = enum {
@@ -1335,7 +1337,8 @@ pub const RuntimeManager = struct {
                 if (entry.runtime == null or @intFromPtr(entry.runtime.?) != item.handle or
                     entry.cols != item.expected_size.cols or
                     entry.rows != item.expected_size.rows or
-                    entry.resize_generation != item.expected_resize_generation)
+                    entry.resize_generation != item.expected_resize_generation or
+                    entry.agent_log_format != item.expected_agent_log_format)
                     return error.RestoreGraphChanged;
                 const terminal_slot = self.manager.backend_impl.terminalForHostLifecycle(item.handle) orelse
                     return error.RestoreGraphChanged;
@@ -1524,13 +1527,15 @@ pub const RuntimeManager = struct {
                     &slot.terminal.surface,
                 );
             reader_prepared = true;
-            _ = try self.host_registry.registerRestored(
+            const restored_entry = try self.host_registry.registerRestored(
                 runtime.runtime_id,
                 runtime.cols,
                 runtime.rows,
                 runtime.resize_generation,
                 @ptrFromInt(runtime.surface_id),
             );
+            restored_entry.agent_log_format = runtime.agent_log_format;
+            if (self.hook_identity) |identity| agent_hook_logs.ensureInstanceDirForProfile(self.io, identity.log_base, identity.host_id, runtime.agent_log_format);
             entry_registered = true;
             try self.screen_changes.putNoClobber(
                 self.allocator,
@@ -1557,6 +1562,7 @@ pub const RuntimeManager = struct {
                 },
                 .expected_size = .{ .cols = runtime.cols, .rows = runtime.rows },
                 .expected_resize_generation = runtime.resize_generation,
+                .expected_agent_log_format = runtime.agent_log_format,
             };
             prepared.count += 1;
             entry_registered = false;
@@ -1770,6 +1776,7 @@ pub const RuntimeManager = struct {
                 .cols = item.entry.cols,
                 .rows = item.entry.rows,
                 .resize_generation = item.entry.resize_generation,
+                .agent_log_format = item.entry.agent_log_format,
                 .fd_slot = inherited_slot,
                 .pty_dev = identity.dev,
                 .pty_ino = identity.ino,
@@ -1816,7 +1823,7 @@ pub const RuntimeManager = struct {
             const slot = entry.runtime orelse return error.RuntimeMissing;
             const handle: RuntimeHandle = @intFromPtr(slot);
             if (view.surface_id != handle or entry.cols != view.cols or entry.rows != view.rows or
-                entry.resize_generation != view.resize_generation)
+                entry.resize_generation != view.resize_generation or entry.agent_log_format != view.agent_log_format)
                 return error.UnsafeFrontier;
             const terminal_slot = self.backend_impl.terminalForHostLifecycle(handle) orelse
                 return error.RuntimeMissing;
@@ -3090,7 +3097,7 @@ pub const RuntimeManager = struct {
         // **칸이 없으면 훅은 조용히 나간다**(계약 §4.1 — 훅은 mkdir 하지 않는다). init 에서 한 번 만들지만
         // 그 사이 사용자가 캐시를 비웠을 수 있어 spawn 마다 확인한다(이미 있으면 EEXIST 로 no-op).
         if (self.hook_identity) |identity|
-            agent_hook_logs.ensureInstanceDir(self.io, identity.log_base, identity.host_id);
+            agent_hook_logs.ensureInstanceDirForProfile(self.io, identity.log_base, identity.host_id, params.agent_log_format);
 
         const be = self.backend_impl.backend();
         const size = maru.terminal.Size{ .cols = params.cols, .rows = params.rows };
@@ -3116,6 +3123,10 @@ pub const RuntimeManager = struct {
                 .pane_id = params.pane_id,
                 .hook_instance = hook_instance,
                 .hook_pane = hook_pane,
+                .hook_log_profile = switch (params.agent_log_format) {
+                    .v1 => .v1,
+                    .v2 => .v2,
+                },
                 .size = size,
                 // spawn 시점에 winsize 픽셀 필드를 채운다 — 뜨자마자 크기를 읽는 자식(이미지 TUI)이
                 // 첫 프레임을 맞게 그리려면 이 값이 **그때** 있어야 한다.
@@ -3154,6 +3165,7 @@ pub const RuntimeManager = struct {
         // 갈려, 그 터미널은 자기 훅 로그를 영영 못 읽는다.
         const entry = try self.host_registry.register(runtime_id, params.cols, params.rows);
         errdefer self.host_registry.unregister(runtime_id);
+        entry.agent_log_format = params.agent_log_format;
         entry.runtime = @ptrFromInt(handle); // opaque 슬롯에 handle 보관(그 목적: 실 runtime handle). handle>=1이라 non-null.
         try self.screen_changes.putNoClobber(self.allocator, runtime_id, .{});
         errdefer _ = self.screen_changes.remove(runtime_id);
@@ -3174,7 +3186,7 @@ pub const RuntimeManager = struct {
         // 그 이름(`runtime_id`)은 다시 쓰이지 않으므로 남기면 아무도 읽지 않는 파일이 쌓인다. GUI 는 이
         // 칸의 소유자가 아니라 정리하지 않는다(docs/agent-hooks.md §4).
         if (self.hook_identity) |identity|
-            agent_hook_logs.removeRuntimeLog(identity.log_base, identity.host_id, runtime_id);
+            agent_hook_logs.removeRuntimeLogForProfile(identity.log_base, identity.host_id, runtime_id, entry.agent_log_format);
         const slot = entry.runtime orelse {
             self.host_registry.unregister(runtime_id); // handle 미기록(비정상) — registry만 정리.
             _ = self.metadata_samplers.remove(runtime_id);
@@ -4361,7 +4373,7 @@ test "runtime manager: U2 quiesce encodes and resumes the same live PTY without 
     try ops.write_input(ops.ctx, rid, "after\n");
 }
 
-test "runtime manager: restored graph discard preserves inherited PTY and original child" {
+test "agent log format restored graph preserves v2 inherited PTY and original child" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var source_registry = reg.TerminalRuntimeRegistry.init(allocator);
@@ -4375,6 +4387,7 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
         .cwd = null,
         .cols = 24,
         .rows = 6,
+        .agent_log_format = .v2,
     });
     defer source_ops.terminate(source_ops.ctx, runtime_id);
     const source_handle = source.handleFor(runtime_id) orelse return error.TestUnexpectedResult;
@@ -4401,6 +4414,11 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
         @intCast(first_slot),
     );
     defer capture.deinit();
+    const source_entry = source_registry.get(runtime_id).?;
+    source_entry.agent_log_format = .v1;
+    try std.testing.expectError(error.UnsafeFrontier, source.revalidateQuiescedCapture(&capture));
+    source_entry.agent_log_format = .v2;
+    try source.revalidateQuiescedCapture(&capture);
     var inherited: exec_fd_set.PreparedSlots = .{};
     defer inherited.rollback();
     try inherited.prepare(capture.resources[0].source_fd, first_slot);
@@ -4428,6 +4446,10 @@ test "runtime manager: restored graph discard preserves inherited PTY and origin
     try std.testing.expectEqual(restored_cells, target_registry.liveGridCells());
     const restored_entry = target_registry.get(runtime_id) orelse
         return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@import("runtime_metadata_types.zig").AgentLogFormat.v2, restored_entry.agent_log_format);
+    restored_entry.agent_log_format = .v1;
+    try std.testing.expectError(error.RestoreGraphChanged, graph.revalidateAll());
+    restored_entry.agent_log_format = .v2;
     restored_entry.cols += 1;
     try std.testing.expectError(error.RestoreGraphChanged, graph.revalidateAll());
     restored_entry.cols -= 1;
@@ -5949,4 +5971,44 @@ test "delta base 세대: 격자가 제자리로 돌아온 두 번의 resize 뒤 
     defer allocator.free(after.send);
     defer allocator.free(after.new_base);
     try std.testing.expect(!after.is_snapshot);
+}
+
+test "agent log format host spawn pins child environment and registry independently of user overrides" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    const result_path = try std.fmt.allocPrint(a, "{s}/format", .{root});
+    defer a.free(result_path);
+    const script = try std.fmt.allocPrint(a, "printf '%s' \"$MARU_AGENT_LOG_FORMAT\" > '{s}'; exec /bin/cat", .{result_path});
+    defer a.free(script);
+    var registry = reg.TerminalRuntimeRegistry.init(a);
+    defer registry.deinit();
+    var manager: RuntimeManager = undefined;
+    manager.init(a, std.testing.io, &registry, .{ .host_id = 7, .log_base = root });
+    defer manager.deinit();
+    const ops = manager.runtimeOps();
+    const id = try ops.spawn(ops.ctx, .{ .argv = &.{ "/bin/sh", "-c", script }, .cols = 80, .rows = 24, .agent_log_format = .v2, .env = &.{ "HOME=/nonexistent", "PATH=/nonexistent", "MARU_AGENT_LOG_FORMAT=1" }, .env_overrides = &.{"MARU_AGENT_LOG_FORMAT=3"} });
+    defer ops.terminate(ops.ctx, id);
+    var observed: ?[]u8 = null;
+    defer if (observed) |value| a.free(value);
+    for (0..200) |_| {
+        if (tmp.dir.readFileAlloc(std.testing.io, "format", a, .limited(16)) catch null) |value| {
+            if (value.len != 0) {
+                observed = value;
+                break;
+            }
+            a.free(value);
+        }
+        _ = usleep(10 * 1000);
+    }
+    try std.testing.expectEqualStrings("2", observed orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@import("runtime_metadata_types.zig").AgentLogFormat.v2, registry.get(id).?.agent_log_format);
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = try agent_hook_logs.instanceDirPathForProfileIn(&path_buf, root, 7, .v2);
+    var held = try std.Io.Dir.cwd().openDir(std.testing.io, dir, .{});
+    defer held.close(std.testing.io);
+    try std.testing.expect(std.mem.indexOf(u8, dir, "/agent-turn-events-v2/") != null);
 }

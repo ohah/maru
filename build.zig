@@ -4359,6 +4359,20 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_hook_runtime.step);
         if (macos_host_tests) macos_only_test_step.dependOn(&run_hook_runtime.step);
     }
+    if (posix_host_tests) {
+        const hook_metadata_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agent_hook_host_metadata_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }), .filters = &.{ "agent log format", "client source seal binds explicit", "host adapter classifies current" } });
+        const run_hook_metadata = b.addRunArtifact(hook_metadata_tests);
+        run_hook_metadata.setCwd(b.path("."));
+        b.step("test-agent-hook-host-metadata", "Run immutable host hook format storage transport and handoff contracts").dependOn(&run_hook_metadata.step);
+        test_step.dependOn(&run_hook_metadata.step);
+        if (macos_host_tests) macos_only_test_step.dependOn(&run_hook_metadata.step);
+    }
     const agent_log_writer_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/agent_log_writer_test.zig"),
         .target = target,

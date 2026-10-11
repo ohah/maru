@@ -884,6 +884,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         .{
             .generation_schema = .granted_with_generation,
             .metadata_support = long_client.metadata_support,
+            .agent_log_format_supported = long_client.attachment_capabilities.peer_agent_log_format,
         },
     );
     defer controller_decoded.deinit();
@@ -925,6 +926,7 @@ test "product resolver discovers and pins the one host that owns a live runtime"
         .{
             .generation_schema = .granted_with_generation,
             .metadata_support = takeover_client.metadata_support,
+            .agent_log_format_supported = takeover_client.attachment_capabilities.peer_agent_log_format,
         },
     );
     defer observer_decoded.deinit();

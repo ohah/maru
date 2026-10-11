@@ -20,7 +20,7 @@ const Run = screen_stream.Run;
 ///
 /// **소비자가 정할 수 있어야 한다.** 이 값은 데스크톱 예산이고, 폰에서 그대로 쓰면 손상된 delta
 /// 하나가 앱을 통째로 죽인다(S11-5). 그래서 기본값은 여기 두되 조립기마다 낮출 수 있게 한다.
-const max_reassembled_image: usize = 512 * 1024 * 1024; // 512 MiB
+pub const max_reassembled_image: usize = 512 * 1024 * 1024; // 512 MiB
 
 pub const ApplyError = screen_stream.DecodeError || error{
     /// delta의 `base_generation`이 현재 화면 generation과 다르다 — gap이라 fresh snapshot을 재요청해야 한다(§9).
@@ -52,7 +52,35 @@ pub const StoredImage = struct {
     width: u32 = 0,
     height: u32 = 0,
     bpp: u8 = 0,
-    pixels: []u8 = &.{}, // 조립기 소유(deinit/replace가 free).
+    pixels: []const u8 = &.{}, // 조립기 소유(deinit/replace가 푼다). 매핑일 수 있어 쓰지 않는다.
+    /// null 이면 조립기 allocator 의 힙 픽셀, 아니면 `image_ref` 로 받은 매핑이고 이 함수가 푼다.
+    unmap: ?PixelRelease = null,
+};
+
+/// 매핑을 푸는 함수. 조립기는 OS 를 부르지 않는 계층이라 해제를 주입받는다(docs/session-host-image-channel.md §6).
+pub const PixelRelease = *const fn (pixels: []const u8) void;
+
+/// resolver 가 세그먼트 하나를 매핑해 넘긴 것. `pixels.len` 은 레코드의 `byte_len` 과 같아야 하고, 소유는 조립기로 넘어온다.
+pub const ResolvedImage = struct {
+    pixels: []const u8,
+    unmap: PixelRelease,
+};
+
+/// 세그먼트 표를 쥔 쪽(앱 Client)이 주는 해석기. null 은 채널을 비운 뒤에도 그 레코드에 맞는 세그먼트가 없다는 뜻이다(이유는
+/// resolver 가 남긴다 — 조립기에서는 모두 `MalformedRow` 가 된다). `OutOfMemory` 는 매핑 실패 같은 **로컬** 자원 부족이라 상대
+/// 계약 위반(`MalformedRow`)과 섞지 않고 그대로 올린다. 채널을 아직 못 비운 경우(§7 의 잠금을 못 잡은 tick)는 caller 가 그 배치를
+/// 적용하지 않고 큐 머리에 둔다 — 조립기까지 오지 않는다.
+pub const SegmentResolver = struct {
+    ctx: *anyopaque,
+    resolveFn: *const fn (ctx: *anyopaque, ref: screen_stream.ImageRef) error{OutOfMemory}!?ResolvedImage,
+};
+
+/// 적용 호출의 필수 인자다(§6). 조립기 필드로 두면 복구 스냅샷용으로 새로 만드는 화면에 복사되지 않고, 빠진 적용 자리를
+/// 컴파일러가 못 잡는다.
+pub const ImageRefResolver = union(enum) {
+    /// `image_shm` 을 협상하지 않은 소비자. host 가 이 연결에 `image_ref` 를 낼 일이 없으므로 오면 malformed 다.
+    unnegotiated,
+    channel: SegmentResolver,
 };
 
 /// 여러 image_blob 청크를 재조립하는 중간 버퍼. 청크는 chunk_index 0..count-1로 연속 도착하므로 순서대로 누적하고,
@@ -150,7 +178,7 @@ pub const ScreenAssembler = struct {
     /// 맵/리스트 자체(capacity)는 재사용을 위해 `clearRetainingCapacity`로 두고, 최종 해제는 deinit이 한다.
     fn clearImages(self: *ScreenAssembler) void {
         var it = self.image_store.valueIterator();
-        while (it.next()) |img| self.allocator.free(img.pixels);
+        while (it.next()) |img| self.releasePixels(img.pixels, img.unmap);
         self.image_store.clearRetainingCapacity();
         self.placement_list.clearRetainingCapacity();
         self.virtual_placement_list.clearRetainingCapacity();
@@ -159,20 +187,49 @@ pub const ScreenAssembler = struct {
         self.pending_images.clearRetainingCapacity();
     }
 
-    /// 완성된 이미지 픽셀(소유권 이전 — caller가 dupe/toOwnedSlice로 넘긴다)을 image_store에 넣는다(같은 id 교체 시 옛 픽셀 free).
-    fn putImage(self: *ScreenAssembler, id: u32, gen: u64, w: u32, h: u32, bpp: u8, owned_pixels: []u8) ApplyError!void {
+    /// 픽셀 하나를 소유 방식대로 푼다 — 힙은 allocator, 매핑은 함께 받은 해제 함수.
+    fn releasePixels(self: *ScreenAssembler, pixels: []const u8, unmap: ?PixelRelease) void {
+        if (unmap) |release| release(pixels) else self.allocator.free(pixels);
+    }
+
+    /// 완성된 이미지 픽셀(소유권 이전 — caller가 dupe/toOwnedSlice로 넘기거나 resolver 가 매핑해 넘긴다)을 image_store에
+    /// 넣는다(같은 id 교체 시 옛 픽셀을 푼다). `unmap` 이 null 이면 힙 픽셀이다.
+    fn putImage(self: *ScreenAssembler, id: u32, gen: u64, w: u32, h: u32, bpp: u8, owned_pixels: []const u8, unmap: ?PixelRelease) ApplyError!void {
         const gop = self.image_store.getOrPut(self.allocator, id) catch {
-            self.allocator.free(owned_pixels);
+            self.releasePixels(owned_pixels, unmap);
             return error.OutOfMemory;
         };
-        if (gop.found_existing) self.allocator.free(gop.value_ptr.pixels);
-        gop.value_ptr.* = .{ .generation = gen, .width = w, .height = h, .bpp = bpp, .pixels = owned_pixels };
+        if (gop.found_existing) self.releasePixels(gop.value_ptr.pixels, gop.value_ptr.unmap);
+        gop.value_ptr.* = .{ .generation = gen, .width = w, .height = h, .bpp = bpp, .pixels = owned_pixels, .unmap = unmap };
         image_reconciliation.recordReceivedComplete();
     }
 
-    /// image_store에서 이미지를 제거하고 픽셀을 free한다(리뷰 #12 — host가 evict/delete한 이미지를 client도 회수). 없으면 no-op.
+    /// image_store에서 이미지를 제거하고 픽셀을 푼다(리뷰 #12 — host가 evict/delete한 이미지를 client도 회수). 없으면 no-op.
     fn removeImage(self: *ScreenAssembler, id: u32) void {
-        if (self.image_store.fetchRemove(id)) |kv| self.allocator.free(kv.value.pixels);
+        if (self.image_store.fetchRemove(id)) |kv| self.releasePixels(kv.value.pixels, kv.value.unmap);
+    }
+
+    /// `image_ref` 하나를 해석한다(docs/session-host-image-channel.md §6). 세그먼트는 resolver 가 매핑해 넘기고 그 매핑은
+    /// 함께 받은 해제 함수로 푼다. 미협상 소비자에게 온 `image_ref`·크기가 레코드와 다른 매핑·해석하지 못한 세그먼트는
+    /// 모두 `MalformedRow` 다. GUI 적용 자리는 적용 오류에 그 **연결**을 닫고(`frame_malformed`) 재접속한다 — 탭 하나의
+    /// fresh snapshot 이 아니다. 이름을 새로 만들지 않는 것은 탭 쪽 복구 목록(`drainRemoteNow`)이 이 이름만 알아서, 새 이름은
+    /// 탭을 종료 상태로 보내기 때문이다.
+    fn handleImageRef(self: *ScreenAssembler, body: []const u8, refs: ImageRefResolver) ApplyError!void {
+        const ref = try screen_stream.decodeImageRef(body);
+        // 미협상과 예산 초과는 preflight(`preflightImageRef`)가 화면을 바꾸기 전에 이미 거부했다. 여기 미협상 갈래는 그 순서가
+        // 깨졌을 때의 방어다.
+        const resolver = switch (refs) {
+            .unnegotiated => return error.MalformedRow,
+            .channel => |r| r,
+        };
+        // 픽셀이 0 B 인 이미지는 세그먼트가 없다(host 가 만들지 않는다) — 표를 찾지 않고 빈 이미지로 둔다.
+        if (ref.segment_id == 0) return self.putImage(ref.image_id, ref.generation, ref.width, ref.height, ref.bpp, &.{}, null);
+        const resolved = (try resolver.resolveFn(resolver.ctx, ref)) orelse return error.MalformedRow;
+        if (resolved.pixels.len != ref.byte_len) {
+            resolved.unmap(resolved.pixels);
+            return error.MalformedRow;
+        }
+        return self.putImage(ref.image_id, ref.generation, ref.width, ref.height, ref.bpp, resolved.pixels, resolved.unmap);
     }
 
     /// 다중 청크 재조립 pending 버퍼 상한(리뷰 #8, DoS 방어): 선언된 w*h*bpp(오버플로/과대 시 절대 상한)를 넘으면 폐기한다.
@@ -193,7 +250,7 @@ pub const ScreenAssembler = struct {
                 image_reconciliation.recordDroppedOom();
                 return error.OutOfMemory;
             };
-            return self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned);
+            return self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned, null);
         }
         if (header.chunk_index == 0) {
             if (self.pending_images.getPtr(blob.image_id)) |old| {
@@ -246,8 +303,16 @@ pub const ScreenAssembler = struct {
                 return error.OutOfMemory;
             };
             _ = self.pending_images.remove(blob.image_id);
-            try self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned);
+            try self.putImage(blob.image_id, blob.generation, blob.width, blob.height, blob.bpp, owned, null);
         }
+    }
+
+    /// 레코드 종류와 몸체만으로 판정되는 `image_ref` 거부(미협상·예산 초과)를 화면을 바꾸기 **전에** 한다 — snapshot 은 화면을
+    /// 지운 뒤에 거부하면 복구 권위를 잃는다(아래 preflight 와 같은 규율).
+    fn preflightImageRef(self: *const ScreenAssembler, kind: screen_stream.RecordKind, body: []const u8, refs: ImageRefResolver) ApplyError!void {
+        if (kind != .image_ref) return;
+        if (refs == .unnegotiated) return error.MalformedRow;
+        if ((try screen_stream.decodeImageRef(body)).byte_len > self.image_cap) return error.MalformedRow;
     }
 
     /// 현재 표시 중인 이미지 placement 목록(렌더 입력). remote_screen이 각 placement의 image_id로 `imageById`를 찾아 그린다.
@@ -306,8 +371,8 @@ pub const ScreenAssembler = struct {
     }
 
     /// snapshot record 스트림으로 화면을 **리셋**한다(첫 record는 screen_meta, 이후 row*). generation·크기·커서·mode를 세우고
-    /// 모든 행을 새로 채운다. 이후 delta는 이 base 위에서 적용된다.
-    pub fn applySnapshot(self: *ScreenAssembler, bytes: []const u8) ApplyError!void {
+    /// 모든 행을 새로 채운다. 이후 delta는 이 base 위에서 적용된다. `refs` 는 `image_ref` 를 해석하는 법이다(필수 — §6).
+    pub fn applySnapshot(self: *ScreenAssembler, bytes: []const u8, refs: ImageRefResolver) ApplyError!void {
         var rs = screen_stream.RecordStream{ .bytes = bytes };
         const first = (try rs.next()) orelse return error.Truncated;
         const fs = try screen_stream.RecordStream.splitExact(first, self.expected_codec_version);
@@ -320,6 +385,7 @@ pub const ScreenAssembler = struct {
         while (try preflight.next()) |rec| {
             const split = try screen_stream.RecordStream.splitExact(rec, self.expected_codec_version);
             if (split.header.sequence != fs.header.sequence) return error.GenerationGap;
+            try self.preflightImageRef(split.header.kind, split.body, refs);
         }
         if (self.sequenced_deltas_required) {
             if (!self.frontier_initialized) {
@@ -367,6 +433,7 @@ pub const ScreenAssembler = struct {
                     self.rows[dr.row_index] = owned;
                 },
                 .image_blob => try self.handleImageBlob(s.header, s.body), // 청크 재조립 → image_store.
+                .image_ref => try self.handleImageRef(s.body, refs),
                 .image_placement => {
                     const p = try screen_stream.decodeImagePlacement(s.body);
                     self.placement_list.append(self.allocator, p) catch return error.OutOfMemory;
@@ -385,7 +452,8 @@ pub const ScreenAssembler = struct {
 
     /// delta record 스트림을 현재 화면에 적용한다: set_runs(전체 행 교체), cursor, modes. base_generation이 어긋나면
     /// `GenerationGap`(caller가 fresh snapshot 재요청). scroll_rect/clear_rect/image는 현재 producer 미방출이라 건너뛴다.
-    pub fn applyDelta(self: *ScreenAssembler, bytes: []const u8) ApplyError!void {
+    /// `refs` 는 `image_ref` 를 해석하는 법이다(필수 — §6).
+    pub fn applyDelta(self: *ScreenAssembler, bytes: []const u8, refs: ImageRefResolver) ApplyError!void {
         const expected_sequence = std.math.add(u64, self.sequence, 1) catch return error.GenerationGap;
         // Frontier 전체를 먼저 검사해 stale/mixed batch가 화면 일부를 바꾼 뒤 실패하지 못하게 한다.
         var preflight = screen_stream.RecordStream{ .bytes = bytes };
@@ -397,6 +465,7 @@ pub const ScreenAssembler = struct {
             } else {
                 batch_sequence = split.header.sequence;
             }
+            try self.preflightImageRef(split.header.kind, split.body, refs);
         }
         const admitted_sequence = batch_sequence orelse return error.GenerationGap;
         // sequence=0은 이전 host wire의 compatibility mode다. 새 host가 1을 발행한 뒤에는
@@ -444,6 +513,11 @@ pub const ScreenAssembler = struct {
                 .image_blob => {
                     if (s.header.generation != self.generation) return error.GenerationGap;
                     try self.handleImageBlob(s.header, s.body);
+                },
+                // 세그먼트는 해석하는 순간 표에서 빠지므로 base 대조를 **먼저** 한다 — stale delta 가 세그먼트를 먹으면 안 된다.
+                .image_ref => {
+                    if (s.header.generation != self.generation) return error.GenerationGap;
+                    try self.handleImageRef(s.body, refs);
                 },
                 // U=1 격자는 full-replace 다 — clear 센티넬(image_id=0)이 목록을 비우고 뒤따르는
                 // 레코드가 현재 전체를 채운다(`image_place` 와 같은 규율). 이 분기가 없으면 attach
@@ -573,7 +647,7 @@ test "screen assembler: applySnapshot reconstructs size, cursor, and row runs" {
 
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap);
+    try asm_.applySnapshot(snap, .unnegotiated);
 
     try testing.expectEqual(@as(u16, 4), asm_.cols);
     try testing.expectEqual(@as(u16, 1), asm_.rows_count);
@@ -597,12 +671,12 @@ test "screen assembler binds exact record version to the selected MRSH adapter" 
 
     var current_assembler = ScreenAssembler.initForCodec(allocator, screen_stream.codec_version);
     defer current_assembler.deinit();
-    try testing.expectError(error.BadCodecVersion, current_assembler.applySnapshot(previous));
+    try testing.expectError(error.BadCodecVersion, current_assembler.applySnapshot(previous, .unnegotiated));
 
     var previous_assembler = ScreenAssembler.initForCodec(allocator, 1);
     defer previous_assembler.deinit();
-    try testing.expectError(error.BadCodecVersion, previous_assembler.applySnapshot(current));
-    try previous_assembler.applySnapshot(previous);
+    try testing.expectError(error.BadCodecVersion, previous_assembler.applySnapshot(current, .unnegotiated));
+    try previous_assembler.applySnapshot(previous, .unnegotiated);
 }
 
 test "screen assembler: applyDelta set_runs/cursor/modes updates the model; toSnapshot round-trips" {
@@ -615,7 +689,7 @@ test "screen assembler: applyDelta set_runs/cursor/modes updates the model; toSn
 
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap);
+    try asm_.applySnapshot(snap, .unnegotiated);
 
     // delta: row 1을 "abc"로, 커서를 (row1,col3)으로, modes를 바꾼다.
     var new_runs = [_]Run{ .{ .grapheme = "a", .width = 1, .count = 1 }, .{ .grapheme = "b", .width = 1, .count = 1 }, .{ .grapheme = "c", .width = 1, .count = 1 } };
@@ -636,7 +710,7 @@ test "screen assembler: applyDelta set_runs/cursor/modes updates the model; toSn
         defer allocator.free(rec);
         try screen_stream.appendRecord(&delta, allocator, rec);
     }
-    try asm_.applyDelta(delta.items);
+    try asm_.applyDelta(delta.items, .unnegotiated);
 
     try testing.expectEqualStrings("a", asm_.rowRuns(1)[0].grapheme);
     try testing.expectEqualStrings(" ", asm_.rowRuns(0)[0].grapheme); // row 0은 그대로.
@@ -649,7 +723,7 @@ test "screen assembler: applyDelta set_runs/cursor/modes updates the model; toSn
     defer allocator.free(re);
     var asm2 = ScreenAssembler.init(allocator);
     defer asm2.deinit();
-    try asm2.applySnapshot(re);
+    try asm2.applySnapshot(re, .unnegotiated);
     try testing.expectEqualStrings("a", asm2.rowRuns(1)[0].grapheme);
     try testing.expectEqual(@as(u16, 3), asm2.cursor.col);
     try testing.expectEqual(@as(u32, 0x5), asm2.modes);
@@ -664,7 +738,7 @@ test "screen assembler: delta with a mismatched base_generation is a gap" {
 
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap);
+    try asm_.applySnapshot(snap, .unnegotiated);
 
     // base_generation=2인 delta는 조립기(gen 1)와 안 맞아 gap이다 — caller가 fresh snapshot을 재요청해야 한다.
     var new_runs = [_]Run{.{ .grapheme = "x", .width = 1, .count = 2 }};
@@ -673,7 +747,7 @@ test "screen assembler: delta with a mismatched base_generation is a gap" {
     const rec = try screen_stream.encodeSetRuns(allocator, .{ .kind = .set_runs, .generation = 2 }, .{ .base_generation = 2, .row_index = 0, .start_col = 0, .runs = &new_runs });
     defer allocator.free(rec);
     try screen_stream.appendRecord(&delta, allocator, rec);
-    try testing.expectError(error.GenerationGap, asm_.applyDelta(delta.items));
+    try testing.expectError(error.GenerationGap, asm_.applyDelta(delta.items, .unnegotiated));
 }
 
 /// 테스트 helper: meta + image_blob(단일 청크) + image_placement를 하나의 snapshot 스트림으로 만든다(caller free).
@@ -700,7 +774,7 @@ test "screen assembler: applySnapshot stores single-chunk image + placement" {
 
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap);
+    try asm_.applySnapshot(snap, .unnegotiated);
 
     try testing.expect(asm_.imageById(9) != null);
     const img = asm_.imageById(9).?;
@@ -732,7 +806,7 @@ test "screen assembler: multi-chunk image_blob reassembles into one image" {
 
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(stream.items);
+    try asm_.applySnapshot(stream.items, .unnegotiated);
 
     try testing.expect(asm_.imageById(7) != null);
     try testing.expectEqualSlices(u8, &[_]u8{ 0xA, 0xB, 0xC, 0xD, 0xE, 0xF }, asm_.imageById(7).?.pixels);
@@ -766,7 +840,7 @@ test "screen assembler: 사라지는 자리마다 대조 계수가 오른다 —
         defer allocator.free(stream);
         var asm_ = ScreenAssembler.init(allocator);
         defer asm_.deinit();
-        try asm_.applySnapshot(stream);
+        try asm_.applySnapshot(stream, .unnegotiated);
         const d = recon.snapshot().delta(before);
         try testing.expectEqual(@as(u64, 1), d.received_complete);
         try testing.expect(!d.anyLoss());
@@ -778,7 +852,7 @@ test "screen assembler: 사라지는 자리마다 대조 계수가 오른다 —
         defer allocator.free(stream);
         var asm_ = ScreenAssembler.init(allocator);
         defer asm_.deinit();
-        try asm_.applySnapshot(stream);
+        try asm_.applySnapshot(stream, .unnegotiated);
         const d = recon.snapshot().delta(before);
         try testing.expectEqual(@as(u64, 1), d.dropped_no_head);
         try testing.expectEqual(@as(u64, 0), d.received_complete);
@@ -791,7 +865,7 @@ test "screen assembler: 사라지는 자리마다 대조 계수가 오른다 —
         defer allocator.free(stream);
         var asm_ = ScreenAssembler.init(allocator);
         defer asm_.deinit();
-        try asm_.applySnapshot(stream);
+        try asm_.applySnapshot(stream, .unnegotiated);
         const d = recon.snapshot().delta(before);
         try testing.expectEqual(@as(u64, 1), d.dropped_order);
         try testing.expectEqual(@as(u64, 0), d.received_complete);
@@ -807,7 +881,7 @@ test "screen assembler: applySnapshot resets prior images and placements" {
 
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap1);
+    try asm_.applySnapshot(snap1, .unnegotiated);
     try testing.expect(asm_.imageById(9) != null);
     try testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len);
 
@@ -816,7 +890,7 @@ test "screen assembler: applySnapshot resets prior images and placements" {
     var rows = [_]screen_stream.Row{.{ .row_index = 0, .runs = &runs0 }};
     const snap2 = try buildSnapshot(allocator, 2, .{ .cols = 4, .rows = 1 }, &rows);
     defer allocator.free(snap2);
-    try asm_.applySnapshot(snap2);
+    try asm_.applySnapshot(snap2, .unnegotiated);
     try testing.expect(asm_.imageById(9) == null);
     try testing.expectEqual(@as(usize, 0), asm_.imagePlacements().len);
 }
@@ -829,7 +903,7 @@ test "screen assembler: applyDelta applies image_blob + image_place(clear sentin
     defer allocator.free(snap);
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap);
+    try asm_.applySnapshot(snap, .unnegotiated);
     try testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len); // image 9 placement.
 
     // delta: image_blob(id 4) + clear 센티넬 + image_place(id 4). → image 9 placement 치워지고 image 4로 교체.
@@ -851,7 +925,7 @@ test "screen assembler: applyDelta applies image_blob + image_place(clear sentin
         defer allocator.free(pl);
         try screen_stream.appendRecord(&delta, allocator, pl);
     }
-    try asm_.applyDelta(delta.items);
+    try asm_.applyDelta(delta.items, .unnegotiated);
 
     // image 4 blob 저장(additive), image 9 blob은 그대로(placement만 치워짐).
     try testing.expect(asm_.imageById(4) != null);
@@ -877,7 +951,7 @@ test "screen assembler: prompt_marks record sets per-row marks; snapshot without
 
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(stream.items);
+    try asm_.applySnapshot(stream.items, .unnegotiated);
     try testing.expectEqual(@as(usize, 3), asm_.promptMarks().len);
     try testing.expectEqual(@as(u8, 3), asm_.promptMarks()[1].kind);
     try testing.expectEqual(@as(?i16, 5), asm_.promptMarks()[1].exit);
@@ -888,7 +962,7 @@ test "screen assembler: prompt_marks record sets per-row marks; snapshot without
     var rows = [_]screen_stream.Row{.{ .row_index = 0, .runs = &runs0 }};
     const snap2 = try buildSnapshot(allocator, 2, .{ .cols = 2, .rows = 1 }, &rows);
     defer allocator.free(snap2);
-    try asm_.applySnapshot(snap2);
+    try asm_.applySnapshot(snap2, .unnegotiated);
     try testing.expectEqual(@as(usize, 0), asm_.promptMarks().len);
 
     // delta로 prompt_marks 교체.
@@ -898,7 +972,7 @@ test "screen assembler: prompt_marks record sets per-row marks; snapshot without
     const d_rec = try screen_stream.encodePromptMarks(allocator, .{ .kind = .prompt_marks, .generation = 2 }, .{ .rows = &d_rows });
     defer allocator.free(d_rec);
     try screen_stream.appendRecord(&delta, allocator, d_rec);
-    try asm_.applyDelta(delta.items);
+    try asm_.applyDelta(delta.items, .unnegotiated);
     try testing.expectEqual(@as(usize, 1), asm_.promptMarks().len);
     try testing.expectEqual(@as(u8, 1), asm_.promptMarks()[0].kind);
 }
@@ -910,7 +984,7 @@ test "screen assembler: image/prompt deltas enforce generation gap and missing-i
     defer allocator.free(snap);
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap);
+    try asm_.applySnapshot(snap, .unnegotiated);
 
     // #5: stale generation(2 != 1)인 image_blob delta는 GenerationGap.
     {
@@ -919,7 +993,7 @@ test "screen assembler: image/prompt deltas enforce generation gap and missing-i
         const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 2 }, .{ .image_id = 4, .generation = 1, .width = 1, .height = 1, .bpp = 4, .pixels = &px });
         defer allocator.free(rec);
         try screen_stream.appendRecord(&d, allocator, rec);
-        try testing.expectError(error.GenerationGap, asm_.applyDelta(d.items));
+        try testing.expectError(error.GenerationGap, asm_.applyDelta(d.items, .unnegotiated));
     }
 
     // #7: 이미지 없이 placement만 오면(blob 유실) MalformedRow로 resync 유도. image 7을 place하되 blob은 안 보낸다.
@@ -929,7 +1003,7 @@ test "screen assembler: image/prompt deltas enforce generation gap and missing-i
         const pl = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_place, .generation = 1 }, .{ .image_id = 7, .row = 0, .col = 0 });
         defer allocator.free(pl);
         try screen_stream.appendRecord(&d, allocator, pl);
-        try testing.expectError(error.MalformedRow, asm_.applyDelta(d.items));
+        try testing.expectError(error.MalformedRow, asm_.applyDelta(d.items, .unnegotiated));
     }
 }
 
@@ -940,7 +1014,7 @@ test "screen assembler: image_remove delta evicts the image (review #12)" {
     defer allocator.free(snap);
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(snap);
+    try asm_.applySnapshot(snap, .unnegotiated);
     try testing.expect(asm_.imageById(9) != null);
 
     // clear placements(센티넬) + image_remove(9) → 이미지 회수(placement 없어 #7 검사도 통과).
@@ -952,8 +1026,281 @@ test "screen assembler: image_remove delta evicts the image (review #12)" {
     const rm = try screen_stream.encodeImageRemove(allocator, .{ .kind = .image_remove, .generation = 1 }, .{ .base_generation = 1, .blob_id = 9 });
     defer allocator.free(rm);
     try screen_stream.appendRecord(&d, allocator, rm);
-    try asm_.applyDelta(d.items);
+    try asm_.applyDelta(d.items, .unnegotiated);
 
     try testing.expect(asm_.imageById(9) == null); // 회수됨(무한증가 방지).
     try testing.expectEqual(@as(usize, 0), asm_.imagePlacements().len);
+}
+
+// ─── image_ref 해석(docs/session-host-image-channel.md §6, 계획 IC3a) ───
+//
+// 가짜 resolver 는 「매핑」 대신 testing.allocator 힙 사본을 넘기고, 해제 함수가 그것을 풀며 횟수를 센다. 조립기가 매핑을
+// 자기 allocator 로 풀면 누수 검사는 통과해도 횟수가 어긋나 잡힌다.
+
+var fake_unmapped: usize = 0;
+
+fn fakeUnmap(pixels: []const u8) void {
+    fake_unmapped += 1;
+    testing.allocator.free(pixels);
+}
+
+const FakeSegments = struct {
+    const Entry = struct { segment_id: u64, pixels: []const u8 };
+    entries: []const Entry,
+    /// 매핑 크기를 레코드와 다르게 넘긴다(크기 검사 판정용).
+    pad: usize = 0,
+    /// 매핑 실패 같은 로컬 자원 부족을 흉내 낸다.
+    out_of_memory: bool = false,
+    resolved: usize = 0,
+
+    fn resolver(self: *FakeSegments) ImageRefResolver {
+        return .{ .channel = .{ .ctx = self, .resolveFn = resolve } };
+    }
+
+    fn resolve(ctx: *anyopaque, ref: screen_stream.ImageRef) error{OutOfMemory}!?ResolvedImage {
+        const self: *FakeSegments = @ptrCast(@alignCast(ctx));
+        self.resolved += 1;
+        if (self.out_of_memory) return error.OutOfMemory;
+        for (self.entries) |e| {
+            if (e.segment_id != ref.segment_id) continue;
+            const copy = try testing.allocator.alloc(u8, e.pixels.len + self.pad);
+            @memset(copy, 0);
+            @memcpy(copy[0..e.pixels.len], e.pixels);
+            return .{ .pixels = copy, .unmap = fakeUnmap };
+        }
+        return null;
+    }
+};
+
+fn appendImageRef(stream: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, record_generation: u64, ref: screen_stream.ImageRef) !void {
+    const rec = try screen_stream.encodeImageRef(allocator, .{ .kind = .image_ref, .generation = record_generation }, ref);
+    defer allocator.free(rec);
+    try screen_stream.appendRecord(stream, allocator, rec);
+}
+
+/// screen_meta(generation 1, 4x1) 뒤에 `image_ref` 하나와(있으면) 그 placement 를 둔 snapshot.
+fn buildImageRefSnapshot(allocator: std.mem.Allocator, ref: ?screen_stream.ImageRef) ![]u8 {
+    var stream: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer stream.deinit(allocator);
+    const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 4, .rows = 1 });
+    defer allocator.free(meta_rec);
+    try screen_stream.appendRecord(&stream, allocator, meta_rec);
+    if (ref) |r| {
+        try appendImageRef(&stream, allocator, 1, r);
+        const pl_rec = try screen_stream.encodeImagePlacement(allocator, .{ .kind = .image_placement, .generation = 1 }, .{ .image_id = r.image_id, .placement_id = 0, .row = 0, .col = 0, .columns = 1, .rows = 1 });
+        defer allocator.free(pl_rec);
+        try screen_stream.appendRecord(&stream, allocator, pl_rec);
+    }
+    return stream.toOwnedSlice(allocator);
+}
+
+/// 6 B 픽셀(3x2, bpp 1). 메타의 각 필드가 서로 다른 값이라 필드를 바꿔 넣으면 판정자가 본다.
+fn refFor(image_id: u32, segment_id: u64, pixels: []const u8) screen_stream.ImageRef {
+    std.debug.assert(pixels.len == 6);
+    return .{ .image_id = image_id, .generation = 0x7700 + segment_id, .width = 3, .height = 2, .bpp = 1, .segment_id = segment_id, .byte_len = @intCast(pixels.len) };
+}
+
+test "screen assembler image ref: an unnegotiated consumer rejects image_ref in snapshot and delta, even a zero-byte one, before touching the screen" {
+    const allocator = testing.allocator;
+    const px = [_]u8{ 1, 2, 3, 4, 5, 6 };
+    const heap_px = [_]u8{ 7, 7, 7, 7 };
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    // 지금 화면: 힙 이미지 4. 거부된 snapshot 이 이것을 지우면 복구 권위를 잃는다.
+    const current = try buildImageSnapshot(allocator, 4, 1, 1, 1, 4, &heap_px, 0);
+    defer allocator.free(current);
+    try asm_.applySnapshot(current, .unnegotiated);
+
+    const with_segment = try buildImageRefSnapshot(allocator, refFor(9, 5, &px));
+    defer allocator.free(with_segment);
+    try testing.expectError(error.MalformedRow, asm_.applySnapshot(with_segment, .unnegotiated));
+    try testing.expect(asm_.imageById(4) != null);
+
+    const zero_byte = try buildImageRefSnapshot(allocator, .{ .image_id = 9, .width = 0, .height = 0, .bpp = 4, .segment_id = 0, .byte_len = 0 });
+    defer allocator.free(zero_byte);
+    try testing.expectError(error.MalformedRow, asm_.applySnapshot(zero_byte, .unnegotiated));
+    try testing.expect(asm_.imageById(4) != null);
+
+    // delta 는 앞 레코드가 화면을 바꾼 뒤에 거부되면 안 된다 — 같은 배치의 image_remove(4) 보다 먼저 거부한다.
+    var d: std.ArrayListUnmanaged(u8) = .empty;
+    defer d.deinit(allocator);
+    const rm = try screen_stream.encodeImageRemove(allocator, .{ .kind = .image_remove, .generation = 1 }, .{ .base_generation = 1, .blob_id = 4 });
+    defer allocator.free(rm);
+    try screen_stream.appendRecord(&d, allocator, rm);
+    try appendImageRef(&d, allocator, 1, refFor(9, 5, &px));
+    try testing.expectError(error.MalformedRow, asm_.applyDelta(d.items, .unnegotiated));
+    try testing.expect(asm_.imageById(4) != null);
+    try testing.expect(asm_.imageById(9) == null);
+}
+
+test "screen assembler image ref: image_ref pixels come from the resolver and every release path unmaps them exactly once" {
+    const allocator = testing.allocator;
+    fake_unmapped = 0;
+    const a = [_]u8{ 1, 2, 3, 4, 5, 6 };
+    const b = [_]u8{ 7, 8, 9, 10, 11, 12 };
+    const blob_px = [_]u8{ 9, 9, 9, 9 };
+    var segs = FakeSegments{ .entries = &.{
+        .{ .segment_id = 5, .pixels = &a },
+        .{ .segment_id = 6, .pixels = &b },
+        .{ .segment_id = 7, .pixels = &a },
+        .{ .segment_id = 8, .pixels = &b },
+        .{ .segment_id = 10, .pixels = &a },
+    } };
+    var asm_ = ScreenAssembler.init(allocator);
+    var deinited = false;
+    defer if (!deinited) asm_.deinit();
+
+    // snapshot 이 세그먼트 5 를 매핑으로 들인다 — 조립기 소유, 해제 함수가 붙어 있다.
+    const snap = try buildImageRefSnapshot(allocator, refFor(9, 5, &a));
+    defer allocator.free(snap);
+    try asm_.applySnapshot(snap, segs.resolver());
+    try testing.expectEqual(@as(usize, 1), segs.resolved);
+    const first = asm_.imageById(9).?;
+    try testing.expectEqualSlices(u8, &a, first.pixels);
+    try testing.expect(first.unmap != null);
+    // 메타는 레코드에서 온다 — 렌더러 업로드 캐시가 generation 을 키로 쓴다.
+    try testing.expectEqual(@as(u64, 0x7705), first.generation);
+    try testing.expectEqual(@as(u32, 3), first.width);
+    try testing.expectEqual(@as(u32, 2), first.height);
+    try testing.expectEqual(@as(u8, 1), first.bpp);
+    try testing.expectEqual(@as(usize, 0), fake_unmapped);
+
+    // 같은 id 의 새 세그먼트가 옛 매핑을 푼다.
+    {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(allocator);
+        try appendImageRef(&d, allocator, 1, refFor(9, 6, &b));
+        try asm_.applyDelta(d.items, segs.resolver());
+        try testing.expectEqualSlices(u8, &b, asm_.imageById(9).?.pixels);
+        try testing.expectEqual(@as(u64, 0x7706), asm_.imageById(9).?.generation);
+        try testing.expectEqual(@as(usize, 1), fake_unmapped);
+    }
+    // 힙 image_blob 이 매핑을 대신해도 매핑은 해제 함수로 풀린다.
+    {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(allocator);
+        const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = 1 }, .{ .image_id = 9, .generation = 1, .width = 1, .height = 1, .bpp = 4, .pixels = &blob_px });
+        defer allocator.free(rec);
+        try screen_stream.appendRecord(&d, allocator, rec);
+        try asm_.applyDelta(d.items, segs.resolver());
+        try testing.expectEqual(@as(usize, 2), fake_unmapped);
+        try testing.expect(asm_.imageById(9).?.unmap == null);
+    }
+    // image_remove 가 매핑을 푼다.
+    {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(allocator);
+        try appendImageRef(&d, allocator, 1, refFor(3, 7, &a));
+        const rm = try screen_stream.encodeImageRemove(allocator, .{ .kind = .image_remove, .generation = 1 }, .{ .base_generation = 1, .blob_id = 3 });
+        defer allocator.free(rm);
+        try screen_stream.appendRecord(&d, allocator, rm);
+        try asm_.applyDelta(d.items, segs.resolver());
+        try testing.expect(asm_.imageById(3) == null);
+        try testing.expectEqual(@as(usize, 3), fake_unmapped);
+    }
+    // snapshot 리셋이 매핑을 푼다(그 snapshot 은 힙 이미지 9 만 가진다 — 매핑이 아니므로 세지 않는다).
+    {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(allocator);
+        try appendImageRef(&d, allocator, 1, refFor(4, 8, &b));
+        try asm_.applyDelta(d.items, segs.resolver());
+        const plain = try buildImageRefSnapshot(allocator, null);
+        defer allocator.free(plain);
+        try asm_.applySnapshot(plain, segs.resolver());
+        try testing.expect(asm_.imageById(4) == null);
+        try testing.expectEqual(@as(usize, 4), fake_unmapped);
+    }
+    // deinit 이 매핑을 푼다.
+    {
+        var d: std.ArrayListUnmanaged(u8) = .empty;
+        defer d.deinit(allocator);
+        try appendImageRef(&d, allocator, 1, refFor(4, 10, &a));
+        try asm_.applyDelta(d.items, segs.resolver());
+        deinited = true;
+        asm_.deinit();
+        try testing.expectEqual(@as(usize, 5), fake_unmapped);
+    }
+}
+
+test "screen assembler image ref: a missing or mis-sized segment is MalformedRow and a zero-byte or over-cap ref never reaches the resolver" {
+    const allocator = testing.allocator;
+    fake_unmapped = 0;
+    const a = [_]u8{ 1, 2, 3, 4, 5, 6 };
+    var segs = FakeSegments{ .entries = &.{.{ .segment_id = 5, .pixels = &a }} };
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+
+    // 채널을 비운 뒤에도 표에 없는 세그먼트.
+    const missing = try buildImageRefSnapshot(allocator, refFor(9, 6, &a));
+    defer allocator.free(missing);
+    try testing.expectError(error.MalformedRow, asm_.applySnapshot(missing, segs.resolver()));
+    try testing.expectEqual(@as(usize, 1), segs.resolved);
+
+    // 매핑 크기가 레코드와 다르면 그 매핑을 풀고 거부한다(누수 없음).
+    segs.pad = 1;
+    const sized = try buildImageRefSnapshot(allocator, refFor(9, 5, &a));
+    defer allocator.free(sized);
+    try testing.expectError(error.MalformedRow, asm_.applySnapshot(sized, segs.resolver()));
+    try testing.expectEqual(@as(usize, 1), fake_unmapped);
+    segs.pad = 0;
+
+    // 0 B 이미지는 세그먼트가 없다 — 표를 찾지 않고 빈 이미지로 둔다.
+    const resolved_before = segs.resolved;
+    const zero_byte = try buildImageRefSnapshot(allocator, .{ .image_id = 9, .width = 0, .height = 0, .bpp = 4, .segment_id = 0, .byte_len = 0 });
+    defer allocator.free(zero_byte);
+    try asm_.applySnapshot(zero_byte, segs.resolver());
+    try testing.expectEqual(resolved_before, segs.resolved);
+    try testing.expectEqual(@as(usize, 0), asm_.imageById(9).?.pixels.len);
+
+    // 조립기 예산보다 큰 세그먼트는 매핑하지 않고, 화면도 지우지 않는다(0 B 이미지 9 가 남는다).
+    asm_.limitReassembledImage(a.len - 1);
+    try testing.expectError(error.MalformedRow, asm_.applySnapshot(sized, segs.resolver()));
+    try testing.expectEqual(resolved_before, segs.resolved);
+    try testing.expect(asm_.imageById(9) != null);
+    // 예산과 같은 크기는 받는다.
+    asm_.limitReassembledImage(a.len);
+    try asm_.applySnapshot(sized, segs.resolver());
+    try testing.expectEqual(resolved_before + 1, segs.resolved);
+    try testing.expectEqualSlices(u8, &a, asm_.imageById(9).?.pixels);
+}
+
+test "screen assembler image ref: a stale image_ref delta is a gap before the resolver consumes its segment" {
+    const allocator = testing.allocator;
+    fake_unmapped = 0;
+    const a = [_]u8{ 1, 2, 3, 4, 5, 6 };
+    var segs = FakeSegments{ .entries = &.{.{ .segment_id = 5, .pixels = &a }} };
+    var asm_ = ScreenAssembler.init(allocator);
+    defer asm_.deinit();
+    const plain = try buildImageRefSnapshot(allocator, null);
+    defer allocator.free(plain);
+    try asm_.applySnapshot(plain, segs.resolver());
+
+    var d: std.ArrayListUnmanaged(u8) = .empty;
+    defer d.deinit(allocator);
+    try appendImageRef(&d, allocator, 2, refFor(9, 5, &a));
+    try testing.expectError(error.GenerationGap, asm_.applyDelta(d.items, segs.resolver()));
+    try testing.expectEqual(@as(usize, 0), segs.resolved);
+}
+
+test "screen assembler image ref: resolver OOM stays OutOfMemory and a mapping the store cannot hold is unmapped, not leaked" {
+    fake_unmapped = 0;
+    const a = [_]u8{ 1, 2, 3, 4, 5, 6 };
+    var segs = FakeSegments{ .entries = &.{.{ .segment_id = 5, .pixels = &a }} };
+    const snap = try buildImageRefSnapshot(testing.allocator, refFor(9, 5, &a));
+    defer testing.allocator.free(snap);
+    // 매핑 실패는 로컬 자원 부족이다 — 상대 계약 위반(`MalformedRow`)으로 바꾸면 진단이 host 를 가리킨다.
+    {
+        var oom = FakeSegments{ .entries = segs.entries, .out_of_memory = true };
+        var plain_asm = ScreenAssembler.init(testing.allocator);
+        defer plain_asm.deinit();
+        try testing.expectError(error.OutOfMemory, plain_asm.applySnapshot(snap, oom.resolver()));
+        try testing.expectEqual(@as(usize, 1), oom.resolved);
+    }
+    // 할당 0 = 행 배열, 1 = image_store 확장. 확장이 실패하면 받은 매핑을 해제 함수로 푼다.
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var asm_ = ScreenAssembler.init(failing.allocator());
+    defer asm_.deinit();
+    try testing.expectError(error.OutOfMemory, asm_.applySnapshot(snap, segs.resolver()));
+    try testing.expectEqual(@as(usize, 1), segs.resolved);
+    try testing.expectEqual(@as(usize, 1), fake_unmapped);
 }

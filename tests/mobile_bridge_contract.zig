@@ -6164,7 +6164,7 @@ test "화면 코덱이 모바일 타깃에서 컴파일되고 돈다" {
     const row = try stream.encodeRow(std.testing.allocator, .{ .kind = .row, .generation = 1, .sequence = 1 }, .{ .row_index = 0, .runs = &runs });
     defer std.testing.allocator.free(row);
     try stream.appendRecord(&bytes, std.testing.allocator, row);
-    try a.applySnapshot(bytes.items);
+    try a.applySnapshot(bytes.items, .unnegotiated);
 
     const got = a.rowRuns(0);
     try std.testing.expectEqual(@as(usize, 1), got.len);

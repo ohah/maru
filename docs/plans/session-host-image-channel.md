@@ -68,7 +68,7 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
   아직 논블로킹일 때). 블로킹 경로의 오류 정리는 Client 소멸자 하나로 모았고, 그 과정에서 `finishHello` 가 Client 에 붙인 뒤
   실패할 때 `build_id`·`lifecycle` 을 이중 해제하던 것을 고쳤다. 지금의 호출자는
   모두 광고하지 않는다. `Client.image_channel` 필드 하나(seal 스키마·source seal·projection digest·외부 입양 스냅샷 등록, deinit 이
-  닫음, 이동은 구조체째). 채널 끝의 fd 는 이 필드가, 받은 세그먼트 fd 는 IC3 의 세그먼트 표(따로 둔 필드)가 쥔다. host 는 협상할 수
+  닫음, 이동은 구조체째). 채널 끝의 fd 는 이 필드가, 받은 세그먼트 fd 는 IC3b 의 세그먼트 표(따로 둔 필드)가 쥔다. host 는 협상할 수
   있는 연결에만 hello_ack 기능 목록에 `image_shm` 을 싣는다(협상 기록과 같은 술어 `negotiatesImageChannel`).
 - 판정자: `zig build test-image-channel-app`(test-macos-only — 가짜 host 스레드와 두 경로 모두: 묶임·CLOEXEC·논블로킹·
   SO_NOSIGPIPE(옵션을 직접 잰다 — 러너가 SIGPIPE 를 무시해 EPIPE 만으로는 못 본다)·host 가 닫은 채널에 쓰면 EPIPE·deinit 이 닫음 / 거부·`bind_ack` 형식 오류 → abandon 을 응답까지 읽고 소켓에 남은 바이트 없음 /
@@ -76,21 +76,64 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
   미제공·미광고 / 수립 실패 오류가 connect 오류 집합에 없음(comptime) / public connect 진입점의 hello 미광고, 단위 4). 적대적 검증
   회차마다 고친 자리를 돌연변이로 다시 쟀다 — 집계는 PR 본문.
 
-### IC3 — 앱 세그먼트 표와 해석 (미착수)
+### IC3 — 앱 세그먼트 표와 해석
+
+순수 조립기 계층(IC3a)과 앱 Client 쪽(IC3b)으로 나눴다. 조립기만 먼저 들어가도 모든 적용 자리가 `.unnegotiated` 를 넘기므로 제품
+동작은 같다.
+
+#### IC3a — 조립기의 `image_ref` 해석 (완료)
+
+- `ScreenAssembler.applySnapshot/applyDelta` 와 `RemoteScreen.applySnapshot/applyDelta` 가 `ImageRefResolver` 를 **필수 인자**로
+  받는다(`union { unnegotiated, channel: SegmentResolver }`). 적용 자리 97 곳 중 95 곳(제품·테스트·폰)이 `.unnegotiated` 를 명시하고,
+  나머지 둘은 `RemoteScreen` 이 받은 resolver 를 조립기로 넘기는 자리다 — 채널 resolver 를 넘기는 것은 IC3b 의 GUI 경로다.
+- `image_ref` 처리: 미협상이면 0 B 레코드까지 `MalformedRow`. 미협상·조립기 예산(`image_cap`) 초과는 화면을 바꾸기 전 preflight 에서
+  거부한다. delta 에서는 base generation 대조를 resolver 호출보다 **먼저** 한다(stale delta 가 세그먼트를 소비하지 않게). 0 B 이미지는
+  표를 찾지 않고 빈 이미지, 예산 초과는 매핑하지 않고 `MalformedRow`(세그먼트는 표에 남아 hwm 정리·stream 닫힘이 치운다), resolver
+  가 null(비운 뒤에도 없음)이면 `MalformedRow`, 매핑 크기가 `byte_len` 과 다르면 매핑을 풀고 `MalformedRow`. resolver 의
+  `OutOfMemory`(매핑 실패 같은 로컬 자원 부족)는 그대로 올린다 — `MalformedRow` 로 바꾸면 진단이 host 를 가리킨다.
+- `MalformedRow` 는 GUI 적용 자리에서 연결 fail-closed(`frame_malformed`) → 재접속이다(탭은 `drainRemoteNow` 복구 목록이라 살아
+  있다). 탭 하나의 resync 가 아니다.
+- host 원장의 host 전체 상한(`image_segment_bytes_per_host`)이 조립기 예산(`max_reassembled_image`) 이하임을 `remote_screen.zig` 가
+  comptime 으로 잠근다 — 뒤집히면 큰 이미지 하나가 재접속을 되풀이시킨다.
+- 픽셀 소유: `StoredImage.unmap`(null = 조립기 allocator 힙, 아니면 resolver 가 함께 준 해제 함수). 교체·`image_remove`·snapshot
+  리셋·deinit·저장 실패(OOM) 다섯 자리가 모두 소유 방식대로 푼다. 픽셀은 `[]const u8` 이 됐다(매핑은 읽기 전용이다).
+- 「아직 채널을 못 비움」 갈래는 조립기에 없다 — 적용 도중 멈추면 반쯤 적용된 화면이 남으므로 caller 가 적용 **전에** 그 배치를
+  큐 머리에 둔다(IC3b·IC4).
+- 판정자: `zig build test-image-channel`(check-boundaries — `screen assembler image ref:` 5 개, 전용 루트
+  `src/screen_assembler_test_root.zig`), `zig build test-image-channel-app`(test-macos-only — `remote screen image ref:` 1 개, 원격 화면이
+  resolver 를 그대로 넘긴다). 가짜 resolver 는 testing allocator 사본을 매핑 대신 넘기고 해제 함수가 횟수를 센다 — 조립기가 매핑을
+  자기 allocator 로 풀면 누수 검사는 통과해도 횟수에서 잡힌다. 메타 필드는 서로 다른 값으로 단언한다(렌더러 업로드 캐시가
+  generation 을 키로 쓴다). 적대적 검증 회차마다 고친 자리를 돌연변이로 다시 쟀다 — 집계는 PR 본문.
+
+#### IC3b — 앱 세그먼트 표·채널 리더 (미착수)
 
 - `Client` 필드: 세그먼트 표·닫힌 stream 집합(이동·allowlist·digest 등록). 채널 fd 필드는 IC2b 가 둔다.
 - 채널 리더는 `state == .bound` 와 `fd >= 0` 을 함께 본다. 주 연결이 poison 되면 host 는 채널도 닫으므로(IC2a) poison 경로가 채널
   fd 를 어떻게 놓을지 정한다 — 지금은 회수 때 `finishDeinitGraph` 가 닫는다.
-- 채널 리더(메시지당 fd 정확히 하나 검사·EMFILE 감지), resolver 를 `RemoteScreen.applySnapshot/applyDelta` 필수 인자로, 해석 결과
-  세 갈래, `image_seg_hwm` 정리, 닫힌 stream 처리, release 송신, 조립기 픽셀 소유 `{heap, mapping}` 과 주입 해제.
+- 채널 리더(메시지당 fd 정확히 하나 검사·EMFILE 감지), `SegmentResolver`(표에서 찾아 stream·image_id·generation·byte_len 대조,
+  `fstat` 크기 하한·`mmap(PROT_READ)`·fd close·표에서 제거·release 적재, 해제 함수는 `munmap`; 「없음」은 이유를 로그로 남기고 다른
+  stream 의 항목은 그대로 둔다; mmap 실패는 `OutOfMemory`), `image_seg_hwm` 정리, 닫힌 stream 처리, release 송신.
+- resolver ctx 는 맨 `*Client` 가 아니라 이동하지 않는 adapter·slot 이다(Client 는 generation 노드와 함께 이동한다). ctx 에 그
+  attachment 의 `stream_id` 를 함께 싣는다.
+- GUI 적용 자리 셋에 채널 resolver 를 넘긴다: `RemoteAttachment.pumpScreenInternal`(live·catch-up 공용), `RemoteRuntime.attachAndAssemble`,
+  `initObserverReconnectCandidate`. `external_attach.zig`·`external_attach_cli.zig` 는 `maru attach` 경로라 미협상 그대로다(§8).
+  「이미지 채널 없음」 연결도 협상한 연결이므로 빈 표의 채널 resolver 를 넘긴다(계약 §6).
+- hwm 은 조립기가 건너뛰므로 caller 가 적용 뒤 배치를 놓기(`releaseOrRetain`) **전에** 그 배치에서 다시 읽는다.
+- 채널 resolver 를 넘기는 연결에서 몸체가 망가진 `image_ref` 는 `MalformedRecord`·`Truncated` 로 올라가 `drainRemoteNow` 복구 목록에
+  없다(연결은 재접속하는데 탭은 종료된다 — 다른 레코드의 디코드 오류도 지금 같다). `MalformedRow` 로 접을지 정해 계약 §6 에 적는다.
+- resolver 의 OOM·거부 경로에 이미지 대조 계수(`image_reconciliation`)를 붙이거나 붙이지 않는 이유를 적는다(`image_blob` 경로는
+  OOM 에 `recordDroppedOom` 을 올린다).
+- 「아직 채널을 못 비움」 보류는 `pending_batch_head` 를 넘기고 `accounting.admit` 하기 **전에** 판단한다 — 다음 tick 에 같은 배치를
+  다시 셀 때 이중 계상이 없게.
 - 판정자: 버려진 배치가 남긴 세그먼트를 같은 stream 의 다음 배치가 치운다; detach 뒤 늦게 온 세그먼트가 즉시 반환된다; 연결 둘의
-  같은 segment_id 가 섞이지 않는다; 미협상 resolver 가 `image_ref` 를 malformed 로 거부한다.
+  같은 segment_id 가 섞이지 않는다; 다른 stream 의 세그먼트를 가리키는 `image_ref` 는 해석되지 않고 그 항목은 남는다; 「이미지 채널
+  없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은 종료 상태가 되지 않는다.
 
 ### IC4 — fd 상속 방지 (미착수)
 
 - 전역 rwlock·`pthread_atfork`, `POSIX_SPAWN_CLOEXEC_DEFAULT` spawn 헬퍼와 헬퍼 밖 `posix_spawn`·`system` 을 막는 문법 자리 판정자,
   메인의 `trywrlock`·동기 적용 자리의 블로킹 잠금, 앱 `RLIMIT_NOFILE` 상향.
-- IC3 의 채널 리더는 IC4 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
+- IC3b 의 채널 리더는 IC4 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
 - 판정자: fork 와 「recvmsg + F_SETFD」 의 직렬화, 헬퍼 밖 spawn 금지.
 - 앱 채널 소켓 생성도 볼 것: `connectUnixUntil` 은 `socket()` 과 CLOEXEC 설정이 별개 호출이라 그 사이 fork 한 자식이 채널 소켓을
   물려받을 수 있다(IC2b 적대적 검증 3 회차). 물려받으면 앱이 채널을 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다 — 쓰기 잠금이 채널

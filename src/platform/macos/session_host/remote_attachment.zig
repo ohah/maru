@@ -439,9 +439,9 @@ pub const RemoteAttachment = struct {
         }
         const screen = &(self.screen orelse return error.InvalidAuthority);
         if (completed.is_snapshot) {
-            try screen.applySnapshot(view.bytes, io);
+            try screen.applySnapshot(view.bytes, .unnegotiated, io);
         } else {
-            try screen.applyDelta(view.bytes, io);
+            try screen.applyDelta(view.bytes, .unnegotiated, io);
         }
     }
 
@@ -570,7 +570,7 @@ pub const RemoteAttachment = struct {
             var prepared_screen_live = true;
             defer if (prepared_screen_live) prepared_screen.deinit();
             prepared_screen.prepareRecoveryFrontierFrom(screen);
-            prepared_screen.applySnapshot(batch.bytes, io) catch |err| {
+            prepared_screen.applySnapshot(batch.bytes, .unnegotiated, io) catch |err| {
                 if (err != error.OutOfMemory)
                     logScreenBatchMalformed("recovery_snapshot", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
@@ -613,7 +613,7 @@ pub const RemoteAttachment = struct {
             }
         }
         if (batch.is_snapshot) {
-            screen.applySnapshot(batch.bytes, io) catch |err| {
+            screen.applySnapshot(batch.bytes, .unnegotiated, io) catch |err| {
                 if (err != error.OutOfMemory)
                     logScreenBatchMalformed("snapshot", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
@@ -628,7 +628,7 @@ pub const RemoteAttachment = struct {
                 return err;
             };
         } else {
-            screen.applyDelta(batch.bytes, io) catch |err| {
+            screen.applyDelta(batch.bytes, .unnegotiated, io) catch |err| {
                 if (err != error.OutOfMemory)
                     logScreenBatchMalformed("delta", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)

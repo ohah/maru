@@ -2778,7 +2778,7 @@ fn initObserverReconnectCandidate(
     out.attachment.generation.screenPtr().?.requireSequencedDeltas();
     out.attachment.generation.screenPtr().?.viewport_scrolled_known =
         capabilities.screen_viewport_scrolled;
-    out.attachment.generation.screenPtr().?.applySnapshot(bytes, runtime.io) catch |err| {
+    out.attachment.generation.screenPtr().?.applySnapshot(bytes, .unnegotiated, runtime.io) catch |err| {
         snapshot.deinit() catch
             @panic("CR4a initial snapshot cleanup lost final candidate");
         snapshot_live = false;
@@ -4551,7 +4551,7 @@ pub const RemoteRuntime = struct {
         // 신뢰한다. 구 host는 capability=false로 두고, RemoteScreen이 snapshot별 visible cursor 증거만으로
         // legacy live preedit/candidate를 허용한다. hidden/ambiguous snapshot은 계속 fail-closed다.
         self.currentGeneration().attachment.screenPtr().?.viewport_scrolled_known = capabilities.screen_viewport_scrolled;
-        self.currentGeneration().attachment.screenPtr().?.applySnapshot(snap, self.io) catch |err| {
+        self.currentGeneration().attachment.screenPtr().?.applySnapshot(snap, .unnegotiated, self.io) catch |err| {
             switch (self.currentGeneration().attachment) {
                 .legacy => {},
                 .generation => |*value| {

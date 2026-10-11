@@ -206,6 +206,8 @@ flowchart TD
   generation 유지」 표현이 성립하지 않는다).
 - **용량 사건**(release 수신, 큰 한 장 우선권 해제, 채널 묶임)이 생기면 그 연결에서 이미지를 미룬 스트림 전부에 「화면 변화 없음」
   게이트를 우회하는 플래그를 세우고 producer 를 예약한다. 플래그는 압력 롤백 뒤에도 유지된다. 「전송 불가」 이미지는 깨우지 않는다.
+- delta 의 `image_ref` 는 다른 이미지 레코드처럼 record header 의 `generation` 이 base generation 이다 — 앱 조립기는 그것을 해석
+  **전에** 대조한다(어긋난 delta 가 세그먼트를 소비하지 않게).
 - 배치마다 레코드 `image_seg_hwm{segment_id}` 를 싣는다 = 그 배치가 승인될 때 그 연결에서 마지막으로 **발급**한 id. 주 스트림
   payload 안의 레코드라 프레임 검증과 무관하고, 모르는 레코드를 건너뛰는 base 파서와도 맞는다.
 
@@ -216,19 +218,32 @@ flowchart TD
   둘(채널 끝 `Client.image_channel`, 받은 세그먼트 fd 의 표)뿐이다. 둘은 따로 둔 Client 필드다 — 표를 채널 값 안에 넣으면 seal·digest
   의 손 나열이 그것을 빠뜨린다.
 - 「이미지 채널 없음」 연결의 resolver: host 는 그 연결에 `image_ref` 를 내지 않는다. 다만 앱이 시간 초과로 채널을 닫은 직후처럼
-  host 가 아직 묶인 것으로 아는 짧은 창에는 올 수 있다 — 그 `image_ref` 는 「세그먼트 없음」과 같이 다룬다(아래 해석 결과 셋째).
+  host 가 아직 묶인 것으로 아는 짧은 창에는 올 수 있다. 그 연결은 협상한 연결이라 `.unnegotiated` 가 아니라 **빈 표의 채널
+  resolver** 를 넘긴다 — 그 `image_ref` 는 「세그먼트 없음」(아래 resolver 결과 둘째)이 되어 연결이 재접속하고, 재접속이 채널을 다시
+  수립한다. host owner 가 계속 밀려 있으면 재접속마다 시간 초과가 되풀이될 수 있다 — 그 창은 host 가 채널 EOF 를 볼 때까지라
+  짧지만, 재접속 비용은 연결의 모든 탭이 낸다.
 - 채널 리더는 매 tick 과 배치 적용 직전에 논블로킹 recvmsg 로 채널을 비운다. 메시지당 fd 가 정확히 하나가 아니면 연결을 poison
   한다 — 앱 fd 가 바닥나면(EMFILE) 재시도한 recvmsg 가 fd 를 **조용히 버리고** 제어 버퍼 잘림 표시도 켜지 않는다(실측). 앱은
   daemon 과 같이 시작 때 `RLIMIT_NOFILE` 을 올린다. 받은 fd 는 CLOEXEC 가 꺼져 있어(macOS 에 `MSG_CMSG_CLOEXEC` 가 없다) 받자마자
   켠다(§7).
-- **해석(resolver)은 적용 호출의 필수 인자다.** `RemoteScreen.applySnapshot/applyDelta` 의 시그니처에 넣어 빠진 적용 자리는
-  컴파일러가 잡는다 — 조립기 필드로 두면 복구 스냅샷용으로 새로 만드는 `RemoteScreen` 에 복사되지 않는다. 미협상 소비자는
-  「`image_ref` 를 만나면 malformed」 resolver 를 명시적으로 넘긴다. 해석 결과는 셋이다:
-  - 정상: `segment_id` 로 표를 찾아 `fstat` 크기 하한 확인 → `mmap(PROT_READ)` → fd close → 표에서 제거 → release 적재. 매핑은
-    조립기 이미지가 소유한다(픽셀 소유 `{heap, mapping}`, 해제는 주입 함수 — 조립기는 OS 를 부르지 않는 계층으로 남는다).
-  - 아직 채널을 못 비움(§7 의 잠금을 못 잡은 tick): 배치를 큐 머리에 그대로 둔다.
-  - 비운 뒤에도 없음: 기존 복구 목록에 있는 오류(`MalformedRow`)로 보고한다 — 새 오류 이름을 만들면 탭 복구 경로가 그것을 모르고
-    탭을 종료 상태로 보낸다.
+- **해석(resolver)은 적용 호출의 필수 인자다.** `ScreenAssembler`·`RemoteScreen` 의 `applySnapshot/applyDelta` 시그니처에 넣어
+  빠진 적용 자리는 컴파일러가 잡는다 — 조립기 필드로 두면 복구 스냅샷용으로 새로 만드는 `RemoteScreen` 에 복사되지 않는다. 미협상
+  소비자는 「`image_ref` 를 만나면 malformed」 resolver(`.unnegotiated`)를 명시적으로 넘긴다 — 0 B 레코드도 거부한다. 레코드만
+  보고 정해지는 거부(미협상·조립기 이미지 예산 초과)는 화면을 바꾸기 전 preflight 에서 한다. delta 의 `image_ref` 는 base generation
+  대조를 해석보다 먼저 한다(stale delta 가 세그먼트를 소비하지 않게). 픽셀이 0 B 인 이미지는 세그먼트가 없으므로 표를 찾지 않는다.
+  resolver 의 결과는 둘이다:
+  - 정상: `segment_id` 로 표를 찾아 stream 과 메타(image_id·generation·byte_len)를 레코드와 대조하고 `fstat` 크기 하한 확인 →
+    `mmap(PROT_READ)` → fd close → 표에서 제거 → release 적재. 매핑은 조립기 이미지가 소유한다(픽셀 소유 `{heap, mapping}`, 해제는
+    주입 함수 — 조립기는 OS 를 부르지 않는 계층으로 남는다). 매핑 실패 같은 로컬 자원 부족은 `OutOfMemory` 로 올린다(상대 계약
+    위반이 아니다).
+  - 비운 뒤에도 없음(대조 불일치 포함): resolver 가 이유를 로그로 남기고 「없음」을 돌려주며, 다른 stream 의 항목은 표에서 빼지
+    않는다. 조립기는 이것을 `MalformedRow` 로 보고한다. 매핑 크기가 `byte_len` 과 다르면 매핑을 풀고 같은 오류다. GUI 적용 자리는
+    적용 오류에 그 **연결**을 닫고(`frame_malformed`) 재접속한다 — 탭 하나의 fresh snapshot 이 아니라 그 연결의 모든 탭이다. 이름을
+    새로 만들지 않는 것은 탭 쪽 복구 목록(`drainRemoteNow`)이 `MalformedRow` 를 알아 탭을 살려 두기 때문이다(새 이름은 탭을 종료
+    상태로 보낸다).
+
+  resolver 가 답할 수 없는 경우가 하나 더 있다 — 아직 채널을 못 비움(§7 의 잠금을 못 잡은 tick). 그 배치는 큐 머리에 그대로 둔다.
+  이 판단은 caller 가 적용 **전에**, 배치를 소비·계상하기 전에 한다 — 조립기 안에서 멈추면 반쯤 적용된 화면이 남는다.
 - **죽은 항목 정리**: 같은 stream 의 배치는 주 소켓 순서대로 적용된다(`RemoteAttachment` 의 FIFO). 스트림 S 의 배치 하나를
   적용하고 나면 그 배치의 `image_seg_hwm` = H 로 표에서 stream 이 S 이고 id ≤ H 인 항목을 close + release 한다. host 는 세그먼트를
   배치보다 먼저 보냈으므로 그 항목을 가리키는 레코드는 이 배치나 그 앞 배치에만 있을 수 있다 — 아직 표에 있으면 그 배치가 버려진

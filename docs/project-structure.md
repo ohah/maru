@@ -143,6 +143,7 @@ src/
   text_escape.zig       라인 기반 텍스트 포맷(maru.workspace.v1·maru.trace.v1·snapshot)의 따옴표 escape 규칙 단일 출처. 어느 facade에도 속하지 않는 중립 leaf
   observability.zig     debug event/trace/snapshot facade
   plugin.zig            action/plugin facade
+  screen_assembler_test_root.zig  `session/screen_assembler.zig` 의 이미지 채널 판정자만 고르는 test root(`zig build test-image-channel`). 그 파일을 직접 루트로 걸면 `../image_reconciliation.zig` import 가 모듈 밖이 된다
   ui_test.zig           typed Chrome UI namespace만 좁혀 도는 test root(`zig build test-chrome-ui`). 제품 `chrome.zig`가 모든 component를 import하므로 build entrypoint를 따로 둔다
 
   # 중립 leaf — 어느 facade에도 속하지 않고 여러 층이 함께 import한다(color.zig 결).

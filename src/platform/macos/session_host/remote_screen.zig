@@ -15,6 +15,13 @@ const terminal = maru.terminal;
 const screen_stream = @import("maru").session.screen_stream;
 const screen_assembler = @import("maru").session.screen_assembler;
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
+const image_segment_ledger = @import("image_segment_ledger.zig");
+
+comptime {
+    // host 가 한 장으로 보낼 수 있는 가장 큰 세그먼트(host 전체 상한)는 조립기 예산 안이어야 한다. 넘으면 그 이미지는
+    // `MalformedRow` 로 연결을 닫고 재접속마다 같은 일이 반복된다(`image_blob` 경로는 예산 초과를 조용히 버린다).
+    std.debug.assert(image_segment_ledger.image_segment_bytes_per_host <= screen_assembler.max_reassembled_image);
+}
 
 const Run = screen_stream.Run;
 const ScreenSource = maru.session.surface.ScreenSource;
@@ -352,12 +359,13 @@ pub const RemoteScreen = struct {
     }
 
     /// host의 snapshot record로 화면을 리셋한다(attach 첫 화면·gap 복구). 조립기를 갱신하고 렌더 격자를 다시 편다.
-    pub fn applySnapshot(self: *RemoteScreen, bytes: []const u8, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
+    /// `refs` 는 `image_ref` 를 해석하는 법이다(필수 인자 — docs/session-host-image-channel.md §6).
+    pub fn applySnapshot(self: *RemoteScreen, bytes: []const u8, refs: screen_assembler.ImageRefResolver, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         errdefer self.rebuildOrEmpty(); // 리뷰 #2: apply가 이미지 free 후 에러나면 옛 grid가 freed 픽셀을 빌려 UAF — 실패해도 grid를 현재 조립기로 재구축.
         self.emitBytes(bytes, .snapshot);
-        try self.assembler.applySnapshot(bytes);
+        try self.assembler.applySnapshot(bytes, refs);
         try self.rebuildGrid();
     }
 
@@ -377,12 +385,13 @@ pub const RemoteScreen = struct {
     }
 
     /// host의 delta record를 적용한다(화면 증분). base_generation gap이면 `GenerationGap`(caller가 fresh snapshot 재요청).
-    pub fn applyDelta(self: *RemoteScreen, bytes: []const u8, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
+    /// `refs` 는 `image_ref` 를 해석하는 법이다(필수 인자).
+    pub fn applyDelta(self: *RemoteScreen, bytes: []const u8, refs: screen_assembler.ImageRefResolver, io: std.Io) (screen_assembler.ApplyError || error{OutOfMemory})!void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         errdefer self.rebuildOrEmpty(); // 리뷰 #2: 위와 동형(delta가 putImage로 옛 픽셀 free 후 손상 record면 dangling).
         self.emitBytes(bytes, .delta);
-        try self.assembler.applyDelta(bytes);
+        try self.assembler.applyDelta(bytes, refs);
         try self.rebuildGrid();
     }
 
@@ -634,7 +643,7 @@ test "remote screen: build converts runs to cells (text, wide cell, rgb color, s
 
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(stream.items);
+    try asm_.applySnapshot(stream.items, .unnegotiated);
 
     var grid = try build(allocator, &asm_);
     defer grid.deinit();
@@ -669,7 +678,7 @@ test "remote screen: projection→assembler→cells preserves a real screen's te
     defer allocator.free(p);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(p);
+    try asm_.applySnapshot(p, .unnegotiated);
     var grid = try build(allocator, &asm_);
     defer grid.deinit();
     const remote = grid.renderSnapshot();
@@ -704,7 +713,7 @@ test "remote screen: legacy visible selection reads the assembled projection wit
 
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
-    try rs.applySnapshot(projected, io);
+    try rs.applySnapshot(projected, .unnegotiated, io);
 
     const linear = (try rs.extractVisibleSelection(allocator, io, .{
         .start = .{ .row = 0, .col = 1 },
@@ -750,7 +759,7 @@ test "remote screen: a Surface backed by RemoteScreen renders the assembled remo
 
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
-    try rs.applySnapshot(snap, io);
+    try rs.applySnapshot(snap, .unnegotiated, io);
     const recent_first = try rs.dumpRecentTextUtf8(allocator, io, 2, 128);
     defer allocator.free(recent_first);
     const local_recent_first = try core.dumpRecentTextUtf8(allocator, 2, 128);
@@ -774,7 +783,7 @@ test "remote screen: a Surface backed by RemoteScreen renders the assembled remo
     try core.write("\r\nsecond"); // row1 = "second".
     const d = try screen_snapshot.computeDelta(allocator, snap, &core, .{ .generation = 1 });
     defer d.deinit(allocator);
-    try rs.applyDelta(d.delta, io);
+    try rs.applyDelta(d.delta, .unnegotiated, io);
     const recent_second = try rs.dumpRecentTextUtf8(allocator, io, 1, 128);
     defer allocator.free(recent_second);
     const local_recent_second = try core.dumpRecentTextUtf8(allocator, 1, 128);
@@ -802,7 +811,7 @@ test "remote screen: client-local preedit follows host width policy and latest g
 
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
-    try rs.applySnapshot(initial, io);
+    try rs.applySnapshot(initial, .unnegotiated, io);
 
     var surface = try Surface.init(allocator, 1, .{ .cols = 8, .rows = 2 });
     defer surface.deinit();
@@ -825,7 +834,7 @@ test "remote screen: client-local preedit follows host width policy and latest g
     try core.write("\r\nxy");
     const delta = try screen_snapshot.computeDelta(allocator, initial, &core, .{ .generation = 1 });
     defer delta.deinit(allocator);
-    try rs.applyDelta(delta.delta, io);
+    try rs.applyDelta(delta.delta, .unnegotiated, io);
 
     surface.lockCore(io);
     const recomposed = surface.renderSnapshot();
@@ -855,7 +864,7 @@ test "remote screen: preedit does not render at hidden origin while host viewpor
 
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
-    try rs.applySnapshot(scrolled_records, io);
+    try rs.applySnapshot(scrolled_records, .unnegotiated, io);
     var surface = try Surface.init(allocator, 2, .{ .cols = 8, .rows = 2 });
     defer surface.deinit();
     surface.remote = rs.screenSource();
@@ -877,7 +886,7 @@ test "remote screen: preedit does not render at hidden origin while host viewpor
     core.scrollToBottom();
     const live_delta = try screen_snapshot.computeDelta(allocator, scrolled_records, &core, .{ .generation = 1 });
     defer live_delta.deinit(allocator);
-    try rs.applyDelta(live_delta.delta, io);
+    try rs.applyDelta(live_delta.delta, .unnegotiated, io);
 
     surface.lockCore(io);
     const base_cursor = surface.baseCursorLocked().?;
@@ -901,7 +910,7 @@ test "remote screen: old host visible cursor proves live viewport for client-loc
 
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
-    try rs.applySnapshot(records, io);
+    try rs.applySnapshot(records, .unnegotiated, io);
     rs.viewport_scrolled_known = false;
 
     var surface = try Surface.init(allocator, 3, .{ .cols = 8, .rows = 2 });
@@ -935,7 +944,7 @@ test "remote screen: old host hidden cursor remains ambiguous and live evidence 
 
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
-    try rs.applySnapshot(records, io);
+    try rs.applySnapshot(records, .unnegotiated, io);
     rs.viewport_scrolled_known = false;
 
     // Legacy wire에서 visible cursor는 그 snapshot이 live bottom이라는 증거지만, 이 판정은
@@ -974,7 +983,7 @@ test "remote screen: current host capability keeps hidden live cursor authoritat
 
     var rs = try RemoteScreen.init(allocator);
     defer rs.deinit();
-    try rs.applySnapshot(records, io);
+    try rs.applySnapshot(records, .unnegotiated, io);
     try testing.expect(rs.viewport_scrolled_known);
     rs.grid.cursor.visible = false; // DECTCEM hidden at live bottom, not scrollback.
 
@@ -1015,7 +1024,7 @@ test "remote screen: U=1 virtual placement 격자가 원격 wire 를 건넌다(t
 
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(stream.items);
+    try asm_.applySnapshot(stream.items, .unnegotiated);
 
     var grid = try build(allocator, &asm_);
     defer grid.deinit();
@@ -1050,7 +1059,7 @@ test "remote screen: build exposes kitty images + placements from the assembler 
 
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(stream.items);
+    try asm_.applySnapshot(stream.items, .unnegotiated);
 
     // build가 조립기의 이미지/placement를 renderSnapshot에 노출한다(픽셀은 조립기 빌림 — zero-copy).
     var grid = try build(allocator, &asm_);
@@ -1242,7 +1251,7 @@ test "remote screen: full RenderSnapshot parity with in-process (styles, colors,
     defer allocator.free(p);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(p);
+    try asm_.applySnapshot(p, .unnegotiated);
     var grid = try build(allocator, &asm_);
     defer grid.deinit();
 
@@ -1277,7 +1286,7 @@ test "remote screen: host-backed snapshot renders drawable cells via the real dr
     defer allocator.free(p);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(p);
+    try asm_.applySnapshot(p, .unnegotiated);
     var grid = try build(allocator, &asm_);
     defer grid.deinit();
 
@@ -1292,4 +1301,59 @@ test "remote screen: host-backed snapshot renders drawable cells via the real dr
         if (c.codepoint == 'h') found_h = true;
     }
     try testing.expect(found_h); // 원격 격자 내용이 실제 draw cell로 렌더된다.
+}
+
+// 원격 화면이 적용 호출의 resolver 를 조립기에 **그대로** 넘기는가(docs/session-host-image-channel.md §6, 계획 IC3a). 여기서
+// `.unnegotiated` 로 바꿔 넘기면 GUI 가 채널 resolver 를 넘겨도 모든 `image_ref` 가 malformed 가 되어 연결이 `frame_malformed`
+// 로 닫히고 재접속을 되풀이한다.
+var remote_ref_unmapped: usize = 0;
+
+fn remoteRefUnmap(pixels: []const u8) void {
+    remote_ref_unmapped += 1;
+    testing.allocator.free(pixels);
+}
+
+const RemoteRefSegments = struct {
+    pixels: []const u8,
+    resolved: usize = 0,
+
+    fn resolve(ctx: *anyopaque, ref: screen_stream.ImageRef) error{OutOfMemory}!?screen_assembler.ResolvedImage {
+        const self: *RemoteRefSegments = @ptrCast(@alignCast(ctx));
+        self.resolved += 1;
+        if (ref.byte_len != self.pixels.len) return null;
+        const copy = try testing.allocator.dupe(u8, self.pixels);
+        return .{ .pixels = copy, .unmap = remoteRefUnmap };
+    }
+};
+
+test "remote screen image ref: applySnapshot and applyDelta forward the resolver to the assembler" {
+    const allocator = testing.allocator;
+    const io = testing.io;
+    remote_ref_unmapped = 0;
+    const px = [_]u8{ 0x11, 0x22, 0x33, 0x44 };
+    var segs = RemoteRefSegments{ .pixels = &px };
+    const refs: screen_assembler.ImageRefResolver = .{ .channel = .{ .ctx = &segs, .resolveFn = RemoteRefSegments.resolve } };
+    const ref: screen_stream.ImageRef = .{ .image_id = 5, .generation = 9, .width = 1, .height = 1, .bpp = 4, .segment_id = 3, .byte_len = px.len };
+
+    var snapshot: std.ArrayListUnmanaged(u8) = .empty;
+    defer snapshot.deinit(allocator);
+    const meta_rec = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 4, .rows = 1 });
+    defer allocator.free(meta_rec);
+    try screen_stream.appendRecord(&snapshot, allocator, meta_rec);
+    const ref_rec = try screen_stream.encodeImageRef(allocator, .{ .kind = .image_ref, .generation = 1 }, ref);
+    defer allocator.free(ref_rec);
+    try screen_stream.appendRecord(&snapshot, allocator, ref_rec);
+
+    var rs = try RemoteScreen.init(allocator);
+    defer rs.deinit();
+    try rs.applySnapshot(snapshot.items, refs, io);
+    try testing.expectEqual(@as(usize, 1), segs.resolved);
+    try testing.expectEqualSlices(u8, &px, rs.assembler.imageById(5).?.pixels);
+
+    var delta: std.ArrayListUnmanaged(u8) = .empty;
+    defer delta.deinit(allocator);
+    try screen_stream.appendRecord(&delta, allocator, ref_rec);
+    try rs.applyDelta(delta.items, refs, io);
+    try testing.expectEqual(@as(usize, 2), segs.resolved);
+    try testing.expectEqual(@as(usize, 1), remote_ref_unmapped); // 교체된 첫 매핑.
 }

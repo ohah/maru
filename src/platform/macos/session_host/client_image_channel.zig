@@ -17,7 +17,7 @@
 //! 채널 소켓은 `client_deadline.connectUnixUntil` 로 만든다 — CLOEXEC·NONBLOCK·SO_NOSIGPIPE 가 켜진다. 앱은 SIGPIPE 를 전역으로
 //! 잡지 않으므로 SO_NOSIGPIPE 가 없으면 host 가 닫은 채널에 release 를 쓰는 순간 프로세스가 signal 13 으로 죽는다. 판정자는 소켓
 //! 옵션을 직접 잰다 — 테스트 러너는 SIGPIPE 를 무시하도록 처리기를 걸어 두어 EPIPE 만으로는 옵션이 빠진 것을 못 본다.
-//! 소켓은 논블로킹으로 남긴다 — IC3 의 채널 리더와 release 송신은 논블로킹이다.
+//! 소켓은 논블로킹으로 남긴다 — IC3b 의 채널 리더와 release 송신은 논블로킹이다.
 
 const std = @import("std");
 const c = std.c;
@@ -38,7 +38,7 @@ pub const State = enum(u8) {
     unavailable,
 };
 
-/// `Client` 가 쥐는 이미지 채널의 끝(fd)과 상태. 받은 세그먼트 fd 는 IC3 의 세그먼트 표(따로 둔 Client 필드)가 쥔다(§6). `Client` 이동은 구조체째 옮기고 남은
+/// `Client` 가 쥐는 이미지 채널의 끝(fd)과 상태. 받은 세그먼트 fd 는 IC3b 의 세그먼트 표(따로 둔 Client 필드)가 쥔다(§6). `Client` 이동은 구조체째 옮기고 남은
 /// 자리를 기본값으로 다시 만들므로 fd 가 두 주인을 갖지 않는다.
 pub const Channel = struct {
     fd: c.fd_t = -1,
@@ -144,7 +144,7 @@ pub fn open(
     var ack: [image_channel_wire.bind_ack_len]u8 = undefined;
     var got: usize = 0;
     while (got < ack.len) {
-        // 정확히 `bind_ack` 만큼만 읽는다 — 그 뒤의 세그먼트 메시지(fd 붙음)는 IC3 리더가 recvmsg 로 받아야 한다.
+        // 정확히 `bind_ack` 만큼만 읽는다 — 그 뒤의 세그먼트 메시지(fd 붙음)는 IC3b 리더가 recvmsg 로 받아야 한다.
         got += client_deadline.readSomeUntil(ops, connected.fd, ack[got..], deadline) catch |err|
             return classify(err);
     }

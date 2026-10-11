@@ -462,7 +462,7 @@ pub fn main(init: std.process.Init) !void {
     stage = "controller snapshot";
     const controller_initial = try controller.readSnapshot(controller_stream);
     defer allocator.free(controller_initial);
-    try controller_screen.applySnapshot(controller_initial);
+    try controller_screen.applySnapshot(controller_initial, .unnegotiated);
     var controller_resync_needed = false;
     var controller_drained: u64 = controller_initial.len;
 
@@ -505,7 +505,7 @@ pub fn main(init: std.process.Init) !void {
     stage = "healthy snapshot";
     const healthy_initial = try healthy.readSnapshot(healthy_stream);
     defer allocator.free(healthy_initial);
-    try healthy_screen.applySnapshot(healthy_initial);
+    try healthy_screen.applySnapshot(healthy_initial, .unnegotiated);
     var healthy_resync_needed = false;
     var healthy_drained: u64 = healthy_initial.len;
     stage = "ready marker";
@@ -1573,9 +1573,9 @@ fn pumpHealthy(
     defer batch.deinit();
     drained_bytes.* += batch.bytes.len;
     if (batch.is_snapshot)
-        try assembler.applySnapshot(batch.bytes)
+        try assembler.applySnapshot(batch.bytes, .unnegotiated)
     else
-        try assembler.applyDelta(batch.bytes);
+        try assembler.applyDelta(batch.bytes, .unnegotiated);
     return true;
 }
 

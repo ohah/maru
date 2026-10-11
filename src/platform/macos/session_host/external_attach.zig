@@ -333,7 +333,7 @@ fn attachSnapshot(
     attachment.initScreen(client.screen_codec_version) catch
         return failAttachStage(client, .internal);
     attachment.screen.?.viewport_scrolled_known = client.screen_viewport_scrolled_v1;
-    attachment.screen.?.applySnapshot(snapshot, io) catch |err|
+    attachment.screen.?.applySnapshot(snapshot, .unnegotiated, io) catch |err|
         return failAttachStage(client, switch (err) {
             error.OutOfMemory => .internal,
             else => .protocol,

@@ -273,7 +273,7 @@ test "product rollback preserves one real PTY through exit" {
     defer screen.deinit();
     const snapshot = try client.readSnapshot(stream_id);
     defer std.testing.allocator.free(snapshot);
-    try screen.applySnapshot(snapshot);
+    try screen.applySnapshot(snapshot, .unnegotiated);
     if (!screenContains(&screen, marker_before)) return error.TestUnexpectedResult;
     try client.sendInput(stream_id, marker_after ++ "\r");
     try waitForMarker(&client, stream_id, &screen, marker_after);
@@ -684,7 +684,7 @@ fn runRestoreFaultCase(
         defer screen.deinit();
         const snapshot = try client.readSnapshot(stream_id);
         defer std.testing.allocator.free(snapshot);
-        try screen.applySnapshot(snapshot);
+        try screen.applySnapshot(snapshot, .unnegotiated);
         if (!screenContains(&screen, marker_before)) return error.TestUnexpectedResult;
         try client.sendInput(stream_id, marker_after ++ "\r");
         try waitForMarker(&client, stream_id, &screen, marker_after);
@@ -741,7 +741,7 @@ fn runRestoreFaultCase(
     defer screen.deinit();
     const snapshot = try client.readSnapshot(stream_id);
     defer std.testing.allocator.free(snapshot);
-    try screen.applySnapshot(snapshot);
+    try screen.applySnapshot(snapshot, .unnegotiated);
     if (!screenContains(&screen, marker_before)) return error.TestUnexpectedResult;
     try client.sendInput(stream_id, marker_after ++ "\r");
     try waitForMarker(&client, stream_id, &screen, marker_after);
@@ -1114,9 +1114,9 @@ fn waitForMarker(
         if (try client.readStreamBatch(stream_id)) |batch| {
             defer batch.deinit();
             if (batch.is_snapshot)
-                try screen.applySnapshot(batch.bytes)
+                try screen.applySnapshot(batch.bytes, .unnegotiated)
             else
-                try screen.applyDelta(batch.bytes);
+                try screen.applyDelta(batch.bytes, .unnegotiated);
         }
         _ = usleep(1000);
     }

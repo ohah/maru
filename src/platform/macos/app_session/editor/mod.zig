@@ -4584,19 +4584,13 @@ pub fn visibleDocLine(
     return doc.file.lines.line(doc_line);
 }
 
-/// 선택이 이 줄에서 차지하는 **줄 안 범위**. 겹치지 않으면 null.
+/// 선택이 이 줄에서 차지하는 **줄 안 범위**. 겹치지 않으면 null. 산술은 중립 `selection_marks.markInSpan` 하나다 — Windows 의
+/// `selection_marks.build` 와 같은 것을 쓴다(layering §3.5). 줄 끝 문자는 범위 밖이다(`contentEnd`).
 fn markRangeInLine(
     sel: editor_selection.Selection,
     line: maru.session.editor.line_index.Line,
 ) ?chrome_editor.frame.Mark {
-    const lo = sel.start();
-    const hi = sel.end();
-    const line_end = line.contentEnd();
-    if (line_end <= lo or line.start >= hi) return null;
-    const from = if (lo > line.start) lo - line.start else 0;
-    const to = @min(hi, line_end) - line.start;
-    if (to <= from) return null;
-    return .{ .start = @intCast(from), .len = @intCast(to - from) };
+    return chrome_editor.selection_marks.markInSpan(sel.start(), sel.end(), .{ .start = line.start, .end = line.contentEnd() });
 }
 
 /// 현재 검색 매치가 **보이게** 한다 — 접혀 있으면 펴고, 화면 밖이면 굴린다(§5.1 네비게이션).

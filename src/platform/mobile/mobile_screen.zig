@@ -161,13 +161,13 @@ pub const Screen = struct {
     fn apply(self: *Screen, kind_byte: u8, payload: []const u8) !void {
         switch (kind_byte) {
             @intFromEnum(Kind.snapshot) => {
-                try self.inner.applySnapshot(payload);
+                try self.inner.applySnapshot(payload, .unnegotiated);
                 self.snapshots += 1;
             },
             @intFromEnum(Kind.delta) => {
                 // **첫 덩어리가 delta 면 base 가 없다** — 우리 스트림은 snapshot 으로 시작한다.
                 if (self.state != .ready) return error.OutOfOrder;
-                try self.inner.applyDelta(payload);
+                try self.inner.applyDelta(payload, .unnegotiated);
                 self.deltas += 1;
             },
             else => return error.UnknownKind,

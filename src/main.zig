@@ -14005,12 +14005,12 @@ fn notificationReleaseWaitForBefore(
     defer assembler.deinit();
     const snapshot = try admin.readSnapshotUntil(stream_id, deadline);
     defer allocator.free(snapshot);
-    try assembler.applySnapshot(snapshot);
+    try assembler.applySnapshot(snapshot, .unnegotiated);
     while (!notificationReleaseScreenContains(&assembler, before)) {
         if (std.Io.Clock.awake.now(io).nanoseconds >= deadline_ns) return error.BeforeMarkerTimeout;
         if (try admin.readStreamBatch(stream_id)) |batch| {
             defer batch.deinit();
-            if (batch.is_snapshot) try assembler.applySnapshot(batch.bytes) else try assembler.applyDelta(batch.bytes);
+            if (batch.is_snapshot) try assembler.applySnapshot(batch.bytes, .unnegotiated) else try assembler.applyDelta(batch.bytes, .unnegotiated);
         }
         _ = usleep(10_000);
     }

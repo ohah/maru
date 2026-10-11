@@ -6796,7 +6796,7 @@ pub fn build(b: *std.Build) void {
     // base 파서 판정자는 `maru` 모듈을 끌어와 무거워 Debug 하나만 돈다(값 판정이라 모드가 결과를 바꾸지 않는다).
     const image_channel_step = b.step(
         "test-image-channel",
-        "Image channel segment ledger returns each segment exactly once and the delta base counts image_ref as sent",
+        "Image channel segment ledger returns each segment exactly once, the delta base counts image_ref as sent, and the assembler resolves image_ref",
     );
     const image_ref_base_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -6847,6 +6847,20 @@ pub fn build(b: *std.Build) void {
         run_token_tests.addArg("--maru-expect-passed=3");
         image_channel_step.dependOn(&run_token_tests.step);
     }
+    // 조립기의 `image_ref` 해석(IC3a) — resolver 가 필수 인자이고, 매핑은 주입된 해제 함수로 정확히 한 번 풀린다. 전용 루트
+    // (`src/screen_assembler_test_root.zig`)라 이름 없는 테스트는 그 파일의 하나뿐이다(5 + 1). 값 판정이라 Debug 하나.
+    const assembler_image_ref_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/screen_assembler_test_root.zig"),
+            .target = target,
+            .optimize = .Debug,
+        }),
+        .filters = &.{"screen assembler image ref:"},
+    });
+    const run_assembler_image_ref_tests = b.addRunArtifact(assembler_image_ref_tests);
+    run_assembler_image_ref_tests.addArg("--maru-expect-tests=6");
+    run_assembler_image_ref_tests.addArg("--maru-expect-passed=6");
+    image_channel_step.dependOn(&run_assembler_image_ref_tests.step);
     // hello 판정(role·token·자리 집행·abandon)은 `server.zig` 라 ubuntu 에서도 컴파일된다. base 파서와 같은 이유로 Debug 하나.
     const image_channel_hello_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
@@ -6928,6 +6942,23 @@ pub fn build(b: *std.Build) void {
         image_channel_app_step.dependOn(&run_client_image_channel_tests.step);
         test_step.dependOn(&run_client_image_channel_tests.step);
         macos_only_test_step.dependOn(&run_client_image_channel_tests.step);
+        // 원격 화면이 적용 호출의 resolver 를 조립기에 그대로 넘기는가(IC3a). `remote_screen.zig` 는 macOS 전용 barrel 이다.
+        const remote_screen_image_ref_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_screen.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"remote screen image ref:"},
+        });
+        const run_remote_screen_image_ref_tests = b.addRunArtifact(remote_screen_image_ref_tests);
+        run_remote_screen_image_ref_tests.addArg("--maru-expect-tests=1");
+        run_remote_screen_image_ref_tests.addArg("--maru-expect-passed=1");
+        image_channel_app_step.dependOn(&run_remote_screen_image_ref_tests.step);
+        test_step.dependOn(&run_remote_screen_image_ref_tests.step);
+        macos_only_test_step.dependOn(&run_remote_screen_image_ref_tests.step);
     } else {
         image_channel_app_step.dependOn(&b.addSystemCommand(&.{ "echo", "image channel connect judges need macOS sockets; not executed on this target" }).step);
     }

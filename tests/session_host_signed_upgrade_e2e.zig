@@ -266,7 +266,7 @@ fn run(
         defer screen_before.deinit();
         const initial = try before.readSnapshot(stream_before);
         defer allocator.free(initial);
-        try screen_before.applySnapshot(initial);
+        try screen_before.applySnapshot(initial, .unnegotiated);
         var marker_buf: [96]u8 = undefined;
         const ready = try runtimeMarker(&marker_buf, "READY", index);
         try waitForMarker(&before, stream_before, &screen_before, ready);
@@ -583,9 +583,9 @@ fn waitForMarker(
         if (try client.readStreamBatch(stream_id)) |batch| {
             defer batch.deinit();
             if (batch.is_snapshot)
-                try assembler.applySnapshot(batch.bytes)
+                try assembler.applySnapshot(batch.bytes, .unnegotiated)
             else
-                try assembler.applyDelta(batch.bytes);
+                try assembler.applyDelta(batch.bytes, .unnegotiated);
         }
         _ = usleep(poll_delay_us);
     }

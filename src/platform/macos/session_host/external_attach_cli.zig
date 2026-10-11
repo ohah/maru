@@ -660,7 +660,7 @@ test "흘린 프레임은 소비자의 조립기로 그대로 되살아난다" {
     const row = try screen_stream.encodeRow(allocator, .{ .kind = .row, .generation = 1, .sequence = 1 }, .{ .row_index = 0, .runs = &runs });
     defer allocator.free(row);
     try screen_stream.appendRecord(&stream, allocator, row);
-    try producer.applySnapshot(stream.items);
+    try producer.applySnapshot(stream.items, .unnegotiated);
 
     // 프로듀서가 흘릴 바이트 = 지금 화면의 재직렬화.
     const payload = try producer.toSnapshot(allocator);
@@ -687,7 +687,7 @@ test "흘린 프레임은 소비자의 조립기로 그대로 되살아난다" {
 
     var consumer = screen_assembler.ScreenAssembler.init(allocator);
     defer consumer.deinit();
-    try consumer.applySnapshot(framed.items[stream_header_bytes..][0..len]);
+    try consumer.applySnapshot(framed.items[stream_header_bytes..][0..len], .unnegotiated);
 
     // **같은 화면인가** — 행의 run 이 그대로 살아야 한다.
     const got = consumer.rowRuns(0);

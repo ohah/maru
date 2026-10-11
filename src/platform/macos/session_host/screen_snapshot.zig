@@ -1473,7 +1473,7 @@ test "screen snapshot: projection and assembler are inverses on a real screen (s
     defer allocator.free(p);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(p);
+    try asm_.applySnapshot(p, .unnegotiated);
     {
         const re = try asm_.toSnapshot(allocator);
         defer allocator.free(re);
@@ -1485,7 +1485,7 @@ test "screen snapshot: projection and assembler are inverses on a real screen (s
     const result = try computeDelta(allocator, p, &core, .{ .generation = 4 });
     defer result.deinit(allocator);
     try testing.expect(result.delta.len > 0);
-    try asm_.applyDelta(result.delta);
+    try asm_.applyDelta(result.delta, .unnegotiated);
 
     const p2 = try projectSnapshot(allocator, &core, .{ .generation = 4 });
     defer allocator.free(p2);
@@ -1506,14 +1506,14 @@ test "CR4a frontier는 snapshot zero 뒤 exact contiguous delta만 화면에 적
     var assembler = screen_assembler.ScreenAssembler.init(allocator);
     defer assembler.deinit();
     assembler.requireSequencedDeltas();
-    try assembler.applySnapshot(base);
+    try assembler.applySnapshot(base, .unnegotiated);
     try testing.expectEqual(@as(u64, 0), assembler.sequence);
 
     try core.write("B");
     const legacy_zero = try computeDelta(allocator, base, &core, .{ .generation = 7, .sequence = 0 });
     defer legacy_zero.deinit(allocator);
     try testing.expect(legacy_zero.delta.len != 0);
-    try testing.expectError(error.GenerationGap, assembler.applyDelta(legacy_zero.delta));
+    try testing.expectError(error.GenerationGap, assembler.applyDelta(legacy_zero.delta, .unnegotiated));
 
     const next = try computeDelta(allocator, base, &core, .{ .generation = 7, .sequence = 1 });
     defer next.deinit(allocator);
@@ -1527,16 +1527,16 @@ test "CR4a frontier는 snapshot zero 뒤 exact contiguous delta만 화면에 적
         const split = try screen_stream.RecordStream.split(record);
         try testing.expectEqual(@as(u64, 1), split.header.sequence);
     }
-    try assembler.applyDelta(next.delta);
+    try assembler.applyDelta(next.delta, .unnegotiated);
     try testing.expectEqual(@as(u64, 1), assembler.sequence);
 
     const before_replay = try assembler.toSnapshot(allocator);
     defer allocator.free(before_replay);
-    try testing.expectError(error.GenerationGap, assembler.applyDelta(next.delta));
+    try testing.expectError(error.GenerationGap, assembler.applyDelta(next.delta, .unnegotiated));
     const after_replay = try assembler.toSnapshot(allocator);
     defer allocator.free(after_replay);
     try testing.expectEqualSlices(u8, before_replay, after_replay);
-    try testing.expectError(error.GenerationGap, assembler.applySnapshot(base));
+    try testing.expectError(error.GenerationGap, assembler.applySnapshot(base, .unnegotiated));
     const after_stale_snapshot = try assembler.toSnapshot(allocator);
     defer allocator.free(after_stale_snapshot);
     try testing.expectEqualSlices(u8, before_replay, after_stale_snapshot);
@@ -1547,7 +1547,7 @@ test "CR4a frontier는 snapshot zero 뒤 exact contiguous delta만 화면에 적
     const second_record = 4 + first_len + 4;
     try testing.expect(second_record + screen_stream.record_header_size <= mixed.len);
     std.mem.writeInt(u64, mixed[second_record + 12 ..][0..8], 9, .big);
-    try testing.expectError(error.GenerationGap, assembler.applySnapshot(mixed));
+    try testing.expectError(error.GenerationGap, assembler.applySnapshot(mixed, .unnegotiated));
     const after_mixed_snapshot = try assembler.toSnapshot(allocator);
     defer allocator.free(after_mixed_snapshot);
     try testing.expectEqualSlices(u8, before_replay, after_mixed_snapshot);
@@ -1557,7 +1557,7 @@ test "CR4a frontier는 snapshot zero 뒤 exact contiguous delta만 화면에 적
     prepared_recovery.prepareRecoveryFrontierFrom(&assembler);
     const recovery = try projectSnapshot(allocator, &core, .{ .generation = 7, .sequence = 2 });
     defer allocator.free(recovery);
-    try prepared_recovery.applySnapshot(recovery);
+    try prepared_recovery.applySnapshot(recovery, .unnegotiated);
     std.mem.swap(screen_assembler.ScreenAssembler, &assembler, &prepared_recovery);
     try testing.expectEqual(@as(u64, 2), assembler.sequence);
 
@@ -1570,7 +1570,7 @@ test "CR4a frontier는 snapshot zero 뒤 exact contiguous delta만 화면에 적
     );
     defer downgrade_after_recovery.deinit(allocator);
     try testing.expect(downgrade_after_recovery.delta.len != 0);
-    try testing.expectError(error.GenerationGap, assembler.applyDelta(downgrade_after_recovery.delta));
+    try testing.expectError(error.GenerationGap, assembler.applyDelta(downgrade_after_recovery.delta, .unnegotiated));
     try testing.expectEqual(@as(u64, 2), assembler.sequence);
 }
 
@@ -2091,7 +2091,7 @@ test "screen delta: attach 뒤에 등록된 U=1 격자가 delta 로 client 에 �
     defer allocator.free(base);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(base);
+    try asm_.applySnapshot(base, .unnegotiated);
     try std.testing.expectEqual(@as(usize, 0), asm_.imageVirtualPlacements().len);
 
     // ② 셸이 그 뒤에 이미지를 띄운다 — U=1 등록 + placeholder 셀.
@@ -2105,7 +2105,7 @@ test "screen delta: attach 뒤에 등록된 U=1 격자가 delta 로 client 에 �
 
     var res = try computeDelta(allocator, base, &core, .{ .generation = 1, .sequence = 1 });
     defer res.deinit(allocator);
-    try asm_.applyDelta(res.delta);
+    try asm_.applyDelta(res.delta, .unnegotiated);
 
     // client 가 격자를 받았는가 — 이게 없으면 placeholder 는 타일 크기를 못 정하고 글리프로 떨어진다.
     const vps = asm_.imageVirtualPlacements();
@@ -2118,7 +2118,7 @@ test "screen delta: attach 뒤에 등록된 U=1 격자가 delta 로 client 에 �
     try core.write("\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
     var res2 = try computeDelta(allocator, res.snapshot, &core, .{ .generation = 1, .sequence = 2 });
     defer res2.deinit(allocator);
-    try asm_.applyDelta(res2.delta);
+    try asm_.applyDelta(res2.delta, .unnegotiated);
     try std.testing.expectEqual(@as(usize, 0), asm_.imageVirtualPlacements().len);
 
     // ④ **안 바뀌면 안 싣는다** — 매 tick 격자를 다시 보내면 조용한 화면이 계속 바이트를 쓴다.
@@ -2221,7 +2221,7 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
         defer allocator.free(base);
         var asm_ = screen_assembler.ScreenAssembler.init(allocator);
         defer asm_.deinit();
-        try asm_.applySnapshot(base);
+        try asm_.applySnapshot(base, .unnegotiated);
 
         // attach **뒤에** 그 축을 움직인다 — 실제 셸이 하는 일의 순서다.
         switch (axis) {
@@ -2255,7 +2255,7 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
         defer res.deinit(allocator);
         // ① 그 축의 레코드가 delta 에 실렸는가.
         try std.testing.expect(try deltaHasKind(res.delta, expect_kind.get(axis)));
-        try asm_.applyDelta(res.delta);
+        try asm_.applyDelta(res.delta, .unnegotiated);
 
         // ② client 상태가 실제로 그 변화를 반영하는가 — 「실렸다」는 값이 맞다는 뜻이 아니다.
         switch (axis) {
@@ -2345,7 +2345,7 @@ test "TBPROBE 원격 왕복: unicode placeholder 화면이 투영·조립을 건
 
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(bytes);
+    try asm_.applySnapshot(bytes, .unnegotiated);
 
     // ① 이미지 픽셀이 건넜는가.
     try std.testing.expect(asm_.imageById(image_id) != null);
@@ -2435,7 +2435,7 @@ test "TBPROBE 가시성: 화면이 안 가리키는 이미지는 예산이 남�
 
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(bytes);
+    try asm_.applySnapshot(bytes, .unnegotiated);
     try std.testing.expect(asm_.imageById(1) != null);
     try std.testing.expect(asm_.imageById(2) == null);
 }
@@ -2493,7 +2493,7 @@ test "TBPROBE 규모: 실측 크기 두 장이어도 화면은 건넌다(예전�
 
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(bytes);
+    try asm_.applySnapshot(bytes, .unnegotiated);
     try std.testing.expect(asm_.imageById(1) != null); // 화면이 가리키는 장은 건넜다
     try std.testing.expect(asm_.imageById(2) == null); // 아무도 안 가리키는 장은 안 건넜다
 }
@@ -2544,7 +2544,7 @@ test "TBPROBE 예산: 한 장이 상한을 넘어도 화면은 건넌다 — 이
 
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(bytes);
+    try asm_.applySnapshot(bytes, .unnegotiated);
     try std.testing.expect(asm_.imageById(9) == null); // 픽셀을 포기했고
     // **격자도 함께 포기한다**(2026-09-15 에 바뀐 계약). 앞 판은 격자만 보냈는데, 그러면 클라이언트가
     // 「그려야 하는데 픽셀이 없는」 상태가 되고 그것을 세는 계측이 「떨어짐」과 「의도적 미투영」을
@@ -2636,7 +2636,7 @@ test "TBPROBE 정합 ①: 화면이 안 가리키는 이미지는 픽셀도 plac
     defer allocator.free(bytes);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(bytes);
+    try asm_.applySnapshot(bytes, .unnegotiated);
 
     try std.testing.expect(asm_.imageById(1) != null); // 보이는 장은 픽셀이 건넜다
     try std.testing.expect(asm_.imageById(2) == null); // 안 보이는 장은 안 건넜다
@@ -2673,7 +2673,7 @@ test "TBPROBE 정합 ③: client 가 이미 가진 판은 픽셀을 안 보내�
     defer allocator.free(first);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(first);
+    try asm_.applySnapshot(first, .unnegotiated);
     try std.testing.expect(asm_.imageById(5) != null);
 
     // 2) 화면 글자만 바꾼다 — 이미지는 그대로다. 그래서 delta 는 픽셀을 **다시 보내지 않는다**.
@@ -2683,7 +2683,7 @@ test "TBPROBE 정합 ③: client 가 이미 가진 판은 픽셀을 안 보내�
     try std.testing.expect(!try deltaHasKind(res.delta, .image_blob)); // 픽셀 재전송 없음(이미 가졌다)
 
     // 3) **그런데 placement 는 사라지면 안 된다.** delta 를 적용해도 그 이미지가 계속 그려져야 한다.
-    try asm_.applyDelta(res.delta);
+    try asm_.applyDelta(res.delta, .unnegotiated);
     try std.testing.expect(asm_.imageById(5) != null); // 픽셀은 여전히 client 가 쥐고 있다
     var still_placed = false;
     for (asm_.imagePlacements()) |p| {
@@ -2768,7 +2768,7 @@ test "TBPROBE 정합 ④: 한 번 보낸 이미지는 안 보이게 돼도 다�
     defer allocator.free(base);
     var asm_ = screen_assembler.ScreenAssembler.init(allocator);
     defer asm_.deinit();
-    try asm_.applySnapshot(base);
+    try asm_.applySnapshot(base, .unnegotiated);
     try std.testing.expect(asm_.imageById(1) != null);
 
     // 2) **스크롤로 밀어낸다** — 이제 화면이 그 이미지를 안 가리킨다.
@@ -2783,7 +2783,7 @@ test "TBPROBE 정합 ④: 한 번 보낸 이미지는 안 보이게 돼도 다�
     // 4) 그리고 그 이미지는 client 에서 사라지지도 않는다 — 회수(`image_remove`)는 코어에서 실제로
     //    없어졌을 때만이다. 안 보이는 것과 없어진 것은 다르다.
     try std.testing.expect(!try deltaHasKind(res.delta, .image_remove));
-    try asm_.applyDelta(res.delta);
+    try asm_.applyDelta(res.delta, .unnegotiated);
     try std.testing.expect(asm_.imageById(1) != null);
 
     // 5) **다시 보이게 해도 재전송이 없다.** 재전송은 「안 보이는 동안 기록이 지워졌는가」로 갈리므로

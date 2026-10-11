@@ -1165,7 +1165,7 @@ fn r7ScreenContains(
         client.screen_codec_version,
     );
     defer assembler.deinit();
-    try assembler.applySnapshot(snapshot);
+    try assembler.applySnapshot(snapshot, .unnegotiated);
     var row_buf: [8192]u8 = undefined;
     for (0..assembler.rowCount()) |row_index| {
         var used: usize = 0;

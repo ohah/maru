@@ -132,6 +132,8 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
     const doc = term.rt.editorDocument().opened orelse return;
     highlight.decode(self.allocator, result, doc.file.content, doc.file.lines, enc, &st.spans) catch {
         st.spans.clear();
+        // 할당 실패 — 다시 묻되 **조용 시계를 되감는다**(오류 응답과 같은 규율). `dirty` 만 세우면 다음 `tick` 이 곧바로 같은 요청을 다시 보내 메모리가 모자란 동안 매 프레임 되풀이했다(여섯째 결함 후보, 재현 2026-10-11).
+        st.last_move_ms = self.awakeMs();
         return;
     };
     st.version = st.waiting_version;

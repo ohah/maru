@@ -179,6 +179,8 @@ pub const editor = struct {
     /// 줄 조작의 순수 판정(§3.9a — L4 에서 옮겼다, 이식 계획 D1 이동 단계 1). `ops/` 폴더는 OS 를 안 부른다
     /// (`tests/boundary/editor_ops_sans_io.zig`).
     pub const line_ops = @import("session/editor/ops/line_ops.zig");
+    /// 복사·잘라내기의 순수 판정(§3.4 — 무엇을 담고 무엇을 지우는가. 이동 단계 3).
+    pub const clipboard_ops = @import("session/editor/ops/clipboard_ops.zig");
     /// N2: 열/블록 선택의 **파생**(§3.2a — 사각형 하나를 줄마다 selection 으로 푼다). `selection` 이
     /// 원본(`ColumnAnchor`)을 들고 이쪽이 그것을 배열로 편다. `ColumnMap` 을 주입받아 **chrome 을
     /// 모른다**.

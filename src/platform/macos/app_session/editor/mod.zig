@@ -102,6 +102,7 @@ pub const completion_client = @import("completion.zig");
 pub const code_action_client = @import("code_action.zig");
 pub const semantic_client = @import("semantic.zig");
 const line_ops = maru.session.editor.line_ops;
+const clipboard_ops = maru.session.editor.clipboard_ops;
 pub const fold_lsp_client = @import("fold_lsp.zig");
 pub const inlay_client = @import("inlay.zig");
 pub const symbols_client = @import("symbols.zig");
@@ -3557,76 +3558,24 @@ pub fn copySelection(self: *AppSession) bool {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor) return false;
     const doc = term.rt.editorDocument().opened orelse return false;
-    const bytes = doc.file.content;
-
-    // **커서가 여럿이면 조각도 여럿이다**(§3.4). 시스템 클립보드에는 **문서 순서로 줄바꿈 연결**해
-    // 넣는다 — 다른 앱이 붙여넣을 때 자연스러우라고 그 절이 정한 규칙이다.
-    //
-    // **조각 경계를 함께 기억한다**(§3.4). 붙여넣기가 그 소비처다 — 그것이 없던 동안에는 기억할
-    // 이유가 없어 미뤄 두었고, 이제 함께 선다.
-    var iter = selections(term);
-    if (iter.count() == 0) return false;
-
-    var ranges: std.ArrayList(occurrence.Range) = .empty;
-    defer ranges.deinit(self.allocator);
-    while (iter.next()) |sel| {
-        const lo = sel.start();
-        const hi = @min(sel.end(), bytes.len);
-        if (hi <= lo or lo >= bytes.len) continue; // caret뿐이거나 낡은 offset이다
-        ranges.append(self.allocator, .{ .start = lo, .end = hi }) catch return false;
-    }
-
-    // **선택이 없으면 caret이 있는 줄 전체다**(§3.4). 그 사실을 표식으로 함께 기억해 두었다가
-    // 붙여넣을 때 **줄 단위로** 넣는다 — caret 자리에 끼워 넣으면 줄이 깨진다.
-    //
-    // 이것이 없어서 선택 없이 `⌘C`를 누르면 **아무 일도 안 일어났다**(적대적 검증 2026-08-26 —
-    // 판정자가 오히려 "선택이 없으면 복사도 없다"로 그 상태를 고정하고 있었다). 다른 편집기는
-    // 전부 줄을 담는다.
-    const from_empty = ranges.items.len == 0;
-    if (from_empty) {
-        const primary = term.rt.editor_selection orelse return false;
-        const line_idx = doc.file.lines.lineAt(@min(primary.focus, bytes.len));
-        const line = doc.file.lines.line(line_idx) orelse return false;
-        // **줄 끝 문자를 포함한다** — 줄 단위 삽입이 그것으로 줄을 만든다.
-        ranges.append(self.allocator, .{ .start = line.start, .end = line.end_with_ending }) catch return false;
-    }
-    if (ranges.items.len == 0) return false;
-
-    std.mem.sort(occurrence.Range, ranges.items, {}, struct {
-        fn lessThan(_: void, a: occurrence.Range, b: occurrence.Range) bool {
-            return a.start < b.start;
-        }
-    }.lessThan);
-
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(self.allocator);
-    var ends: std.ArrayList(usize) = .empty;
-    defer ends.deinit(self.allocator);
-    for (ranges.items, 0..) |r, i| {
-        if (i > 0) out.append(self.allocator, '\n') catch return false;
-        out.appendSlice(self.allocator, bytes[r.start..r.end]) catch return false;
-        ends.append(self.allocator, out.items.len) catch return false;
-    }
-
-    const captured = out.toOwnedSlice(self.allocator) catch return false; // OOM이면 복사 안 함(선택 보존)
-    const ends_owned = ends.toOwnedSlice(self.allocator) catch {
-        self.allocator.free(captured);
-        return false;
-    };
-    // **기억은 클립보드 문자열과 한 단위로 선다.** 하나만 서면 붙여넣기가 남의 문자열을 우리
-    // 경계로 자른다 — `describes`가 문자열을 대조해 막지만, 애초에 어긋난 상태를 만들지 않는다.
-    const meta_text = self.allocator.dupe(u8, captured) catch {
-        self.allocator.free(captured);
-        self.allocator.free(ends_owned);
+    // **무엇을 담는지는 L2 `clipboard_ops.planCopy` 가 정한다**(§3.4 — 커서마다 조각, 선택이 없으면 primary 의 줄 전체,
+    // 섞이면 고른 것만). 여기서는 시스템 클립보드와 조각 기억에 쓴다.
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    var copied = (clipboard_ops.planCopy(self.allocator, doc.file.content, doc.file.lines, snap.items, snap.primarySelection()) catch return false) orelse return false; // OOM 이면 복사 안 함(선택 보존)
+    // **기억은 클립보드 문자열과 한 단위로 선다.** 하나만 서면 붙여넣기가 남의 문자열을 우리 경계로 자른다 —
+    // `describes` 가 문자열을 대조해 막지만, 애초에 어긋난 상태를 만들지 않는다.
+    const meta_text = self.allocator.dupe(u8, copied.text) catch {
+        copied.deinit(self.allocator);
         return false;
     };
     if (self.chrome_clipboard_write.len > 0) self.allocator.free(self.chrome_clipboard_write);
-    self.chrome_clipboard_write = captured;
+    self.chrome_clipboard_write = copied.text;
     if (self.editor_clipboard_meta) |*m| m.deinit(self.allocator);
     self.editor_clipboard_meta = .{
         .text = meta_text,
-        .ends = ends_owned,
-        .from_empty_selection = from_empty,
+        .ends = copied.ends,
+        .from_empty_selection = copied.from_empty,
     };
     return true;
 }
@@ -9608,55 +9557,29 @@ pub fn cutSelection(self: *AppSession, term: *Term) bool {
     if (doc.file.read_only) return false;
     if (!copySelection(self)) return false;
 
-    const had_selection = blk: {
-        var it = selections(term);
-        while (it.next()) |sel| if (!sel.isEmpty()) break :blk true;
-        break :blk false;
-    };
-    if (had_selection) return cutChosen(self, term);
-
-    // **선택이 없다 = 줄 전체다.** caret이 있는 줄을 통째로 지운다.
-    const primary = term.rt.editor_selection orelse return false;
-    const line_idx = doc.file.lines.lineAt(@min(primary.focus, doc.file.content.len));
-    const line = doc.file.lines.line(line_idx) orelse return false;
-    term.rt.editor_selection = editor_selection.Selection.fromPoints(line.start, line.end_with_ending);
-    clearExtraSelections(self, term);
-    return deleteText(self, term, false);
-}
-
-/// 선택이 하나라도 있을 때의 잘라내기 — **복사한 것만 지운다**(§3.4).
-///
-/// `copySelection` 은 빈 caret 을 건너뛰고 고른 것만 담는다. 그런데 지우기를 `deleteText` 에 그대로
-/// 맡기면 빈 caret 마다 **다음 글자 하나**를 지워(`deleteBy(.char)`), 클립보드에도 문서에도 없는 글자가
-/// 사라졌다(일곱째 결함). 그래서 빈 caret 을 잠시 빼고 지운 뒤, 지운 만큼 당긴 제자리에 되돌린다.
-fn cutChosen(self: *AppSession, term: *Term) bool {
+    // **무엇을 지울지는 L2 `clipboard_ops.planCut` 이 정한다**(§3.4) — 선택이 없으면 줄 전체, 섞이면 고른 것만.
     const snap = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(snap.items);
-    var empties: usize = 0;
-    for (snap.items) |sel| {
-        if (sel.isEmpty()) empties += 1;
+    var plan = (clipboard_ops.planCut(self.allocator, doc.file.content, doc.file.lines, snap.items, snap.primary) catch return false) orelse return false;
+    defer plan.deinit(self.allocator);
+    switch (plan) {
+        .all => return deleteText(self, term, false),
+        .whole_line => |line| {
+            term.rt.editor_selection = line;
+            clearExtraSelections(self, term);
+            return deleteText(self, term, false);
+        },
+        .chosen => |c| return cutChosen(self, term, c.keep, c.empties),
     }
-    if (empties == 0) return deleteText(self, term, false);
+}
 
-    const chosen_len = snap.items.len - empties;
+/// 섞인 잘라내기의 적용 — 빈 caret 을 잠시 빼고 고른 것만 지운 뒤, 계획이 정한 자리(`empties`)에 되돌린다. 지우기가
+/// 실패하면 원래 커서로 되돌린다.
+fn cutChosen(self: *AppSession, term: *Term, keep: []const editor_selection.Selection, empties: []const usize) bool {
     const old_primary = term.rt.editor_selection;
     const old_extras = term.rt.editor_extra_selections;
-    // 고른 것만 남긴다. primary 가 빈 caret 이면 문서상 첫 선택이 이어받는다.
-    const primary_sel = snap.primarySelection();
-    var new_primary: ?editor_selection.Selection = if (primary_sel.isEmpty()) null else primary_sel;
-    const chosen_extras = self.allocator.alloc(editor_selection.Selection, chosen_len - 1) catch return false;
-    var k: usize = 0;
-    for (snap.items, 0..) |sel, i| {
-        if (sel.isEmpty()) continue;
-        if (new_primary == null) {
-            new_primary = sel;
-            continue;
-        }
-        if (i == snap.primary) continue;
-        chosen_extras[k] = sel;
-        k += 1;
-    }
-    term.rt.editor_selection = new_primary;
+    const chosen_extras = self.allocator.dupe(editor_selection.Selection, keep[1..]) catch return false;
+    term.rt.editor_selection = keep[0];
     term.rt.editor_extra_selections = chosen_extras;
     if (!deleteText(self, term, false)) {
         if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
@@ -9664,23 +9587,13 @@ fn cutChosen(self: *AppSession, term: *Term) bool {
         term.rt.editor_extra_selections = old_extras;
         return false;
     }
-    // 빈 caret 을 되돌린다 — 그 앞에서 지운 길이만큼 당긴 자리.
     const kept = term.rt.editor_extra_selections;
-    const grown = self.allocator.alloc(editor_selection.Selection, kept.len + empties) catch {
+    const grown = self.allocator.alloc(editor_selection.Selection, kept.len + empties.len) catch {
         if (old_extras.len > 0) self.allocator.free(old_extras);
         return true; // 지우기는 섰다 — 빈 caret 만 잃는다
     };
     @memcpy(grown[0..kept.len], kept);
-    var w = kept.len;
-    for (snap.items) |sel| {
-        if (!sel.isEmpty()) continue;
-        var removed: usize = 0;
-        for (snap.items) |other| {
-            if (!other.isEmpty() and other.end() <= sel.focus) removed += other.end() - other.start();
-        }
-        grown[w] = editor_selection.Selection.at(sel.focus - removed);
-        w += 1;
-    }
+    for (empties, kept.len..) |at, i| grown[i] = editor_selection.Selection.at(at);
     if (kept.len > 0) self.allocator.free(kept);
     if (old_extras.len > 0) self.allocator.free(old_extras);
     term.rt.editor_extra_selections = grown;

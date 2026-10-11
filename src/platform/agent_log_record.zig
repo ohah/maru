@@ -7,6 +7,14 @@ const cli = @import("../cli/agent_log_record.zig");
 const event = @import("../session/agent_hook_event.zig");
 
 pub fn openPrivateDirectory(io: std.Io, path: []const u8) !std.Io.Dir {
+    return openDirectory(io, path, false);
+}
+
+pub fn openPrivateDirectoryIterable(io: std.Io, path: []const u8) !std.Io.Dir {
+    return openDirectory(io, path, true);
+}
+
+fn openDirectory(io: std.Io, path: []const u8, iterate: bool) !std.Io.Dir {
     if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.UnsupportedPlatform;
     if (path.len == 0 or path[0] != '/') return error.UnsafeDirectory;
     var held = try std.Io.Dir.cwd().openDir(io, "/", .{ .follow_symlinks = false });
@@ -14,7 +22,7 @@ pub fn openPrivateDirectory(io: std.Io, path: []const u8) !std.Io.Dir {
     var parts = std.mem.splitScalar(u8, path[1..], '/');
     while (parts.next()) |part| {
         if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return error.UnsafeDirectory;
-        const next = try held.openDir(io, part, .{ .follow_symlinks = false });
+        const next = try held.openDir(io, part, .{ .follow_symlinks = false, .iterate = iterate and parts.peek() == null });
         held.close(io);
         held = next;
     }

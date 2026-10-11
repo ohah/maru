@@ -14554,6 +14554,30 @@ fn readSidecar(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, nonce:
     return dir.readFileAlloc(io, name, allocator, .limited(4096)) catch null;
 }
 
+/// v2 must not block on a substituted FIFO or follow a sidecar symlink.
+/// Sidecars are routing hints and do not share the log-generation lock.
+fn readGenerationSidecar(io: std.Io, allocator: std.mem.Allocator, dir: std.Io.Dir, nonce: []const u8) ?[]u8 {
+    // Windows v2 entry fails closed at directory authentication; POSIX mode bits
+    // have no meaning there and must not be analyzed as a Windows ACL check.
+    if (builtin.os.tag == .windows) return null;
+    var name_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const name = std.fmt.bufPrint(&name_buf, "{s}{s}", .{ nonce, maru.session.agent_hook_command.tmux_sidecar_suffix }) catch return null;
+    const file = dir.openFile(io, name, .{ .mode = .read_write, .follow_symlinks = false }) catch return null;
+    defer file.close(io);
+    const stat = file.stat(io) catch return null;
+    if (stat.kind != .file or stat.nlink != 1 or stat.permissions.toMode() & 0o777 != 0o600 or stat.size > 4096) return null;
+    const bytes = allocator.alloc(u8, @intCast(stat.size)) catch return null;
+    const got = file.readPositionalAll(io, bytes, 0) catch {
+        allocator.free(bytes);
+        return null;
+    };
+    if (got != bytes.len) {
+        allocator.free(bytes);
+        return null;
+    }
+    return bytes;
+}
+
 /// 낡은 사이드카를 치운다 — 지웠으면 `true`(RA7.6).
 ///
 /// **옛 tmux 서버 세대의 파일이라 아무도 안 읽는다.** 남겨 두면 죽은 이름이 회차마다 다시 나와
@@ -14824,12 +14848,12 @@ fn runAgentEvents(
 
     const opts = switch (ae.parseArgs(rest.items)) {
         .help => {
-            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec]\nValue options may only be specified once. Each resume file name may only appear once.\n");
+            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec] [--log-format=v1|v2]\nValue options may only be specified once. Each resume file name may only appear once.\n");
             try stdout.flush();
             return;
         },
         .usage_error => {
-            try stderr.writeAll("maru agent-events: --stdio and an absolute --dir= are required; --dir, --heartbeat-ms and --resume may only be specified once\n");
+            try stderr.writeAll("maru agent-events: --stdio and an absolute --dir= are required; --dir, --heartbeat-ms, --resume and --log-format may only be specified once\n");
             try stderr.flush();
             return error.UnknownCommand;
         },
@@ -14843,7 +14867,7 @@ fn runAgentEvents(
         cursors.deinit(allocator);
     }
     // Validate and retain every initial cursor before any wire output or log cleanup.
-    ae.seedResumeCursors(allocator, opts.resume_spec, &cursors) catch |err| switch (err) {
+    (if (opts.log_format == .v2) ae.seedGenerationCursors(allocator, opts.resume_spec, &cursors) else ae.seedResumeCursors(allocator, opts.resume_spec, &cursors)) catch |err| switch (err) {
         error.DuplicateResume, error.InvalidResume => {
             try stderr.writeAll("maru agent-events: --resume requires one cursor per file name\n");
             try stderr.flush();
@@ -14852,8 +14876,17 @@ fn runAgentEvents(
         else => return err,
     };
 
+    const generation_dir: ?std.Io.Dir = if (opts.log_format == .v2)
+        maru.agent_log_record.openPrivateDirectoryIterable(io, opts.dir) catch |err| {
+            try stderr.print("maru agent-events: {s}\n", .{@errorName(err)});
+            return error.UnknownCommand;
+        }
+    else
+        null;
+    defer if (generation_dir) |dir| dir.close(io);
+
     // hello 를 **가장 먼저** 보낸다 — 소비자가 제한 서버(`ForceCommand`)를 이것으로 가른다.
-    try stdout.print("{s}\n", .{ae.hello_line});
+    try stdout.print("{s}\n", .{if (opts.log_format == .v2) ae.generation_hello_line else ae.hello_line});
     try stdout.flush();
 
     const ae_route = maru.session.remote_tmux_route;
@@ -14896,7 +14929,15 @@ fn runAgentEvents(
     // 그 구간의 상한이 없다 — 계약 §4 가 «읽는 Term 이 없는 파일은 상한 없이 자랐다» 로 이미 겪었다.
     // **상한을 넘긴 것만** 거둔다: 이 프로세스는 사용자가 그 pane 을 보고 있는 동안에도 다시 뜨므로
     // (채널이 죽었다 살아난 경우) 전부 지우면 방금 생긴 이벤트를 버린다.
-    if (std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) |startup_dir| {
+    if (opts.log_format == .v2) {
+        const sd = generation_dir.?;
+        var sit = sd.iterate();
+        const now_ns = std.Io.Clock.real.now(io).nanoseconds;
+        while ((sit.next(io) catch null) orelse null) |entry| {
+            const nonce = ae.nonceFromFileName(entry.name) orelse continue;
+            _ = maru.agent_log_writer.cleanupAtStartup(io, sd, nonce, now_ns, ae.stale_after_ns, ae.truncate_at_bytes) catch continue;
+        }
+    } else if (std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) |startup_dir| {
         var sd = startup_dir;
         defer sd.close(io);
         var sit = sd.iterate();
@@ -14929,7 +14970,7 @@ fn runAgentEvents(
     } else |_| {}
 
     while (true) {
-        var dir = std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true }) catch {
+        var dir = (if (generation_dir) |held| @as(anyerror!std.Io.Dir, held) else std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) catch {
             // 디렉터리가 아직 없을 수 있다 — 훅이 한 번도 안 돌았으면 그렇다. 조용히 기다린다
             // (그 사실은 소비자가 «이벤트가 없다» 로 이미 안다).
             std.Io.sleep(io, std.Io.Duration.fromMilliseconds(tick_ms), .awake) catch {};
@@ -14944,55 +14985,48 @@ fn runAgentEvents(
             }
             continue;
         };
-        defer dir.close(io);
+        defer if (generation_dir == null) dir.close(io);
 
         // 이 회차의 시각. 역조회 TTL 이 유일한 캐시 무효화 축이다(옆 파일 값은 이제 안 바뀐다).
         const now_ms: u64 = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms));
         var it = dir.iterate();
         while ((it.next(io) catch null) orelse null) |entry| {
             const nonce = ae.nonceFromFileName(entry.name) orelse continue;
-            var file = dir.openFile(io, entry.name, .{}) catch continue;
-            defer file.close(io);
-            var rbuf: [4096]u8 = undefined;
-            var reader = file.reader(io, &rbuf);
-            const size = reader.getSize() catch continue;
-
-            const gop = cursors.getOrPut(allocator, nonce) catch continue;
+            const gop = try cursors.getOrPut(allocator, nonce);
             if (!gop.found_existing) {
-                gop.key_ptr.* = allocator.dupe(u8, nonce) catch {
+                gop.key_ptr.* = allocator.dupe(u8, nonce) catch |err| {
                     _ = cursors.remove(nonce);
-                    continue;
+                    return err;
                 };
                 gop.value_ptr.* = .{};
             }
-            const cur = ae.advance(gop.value_ptr.*, size);
-            if (size <= cur.offset) {
-                gop.value_ptr.* = cur;
-                continue;
-            }
-            reader.seekTo(cur.offset) catch continue;
-            // ⚠️ **한 회차에 읽는 양을 못 박되, 못 읽은 나머지는 다음 회차로 넘긴다.**
-            //
-            // 예전에는 `allocRemaining(.limited(1 MiB))` 로 «남은 전부» 를 요구했다. 그러면 안 읽은
-            // 구간이 그 상한을 넘긴 파일은 **읽기 자체가 실패하고**, 실패는 `catch continue` 라
-            // 그 파일이 **영영 소비되지 않는다** — 그리고 소비가 안 되니 절단도 안 걸려 계속 자란다.
-            // 즉 상한이 «큰 파일을 지키는 장치» 가 아니라 «큰 파일을 영구히 버리는 장치» 였다
-            // (실측: 1.25 MiB 로그에서 흘린 이벤트 0, stderr 도 비어 있어 조용했다).
-            //
-            // 지금은 고정 크기 한 조각만 읽고 그 안의 완성된 줄까지만 커서를 옮긴다. 폭주한 파일도
-            // 회차를 거듭하며 따라잡고, 따라잡은 뒤에 절단이 걸린다.
-            const chunk_buf = allocator.alloc(u8, ae.read_chunk_bytes) catch continue;
+            const chunk_buf = try allocator.alloc(u8, ae.read_chunk_bytes);
             defer allocator.free(chunk_buf);
-            const got = reader.interface.readSliceShort(chunk_buf) catch continue;
-            if (got == 0) {
-                gop.value_ptr.* = cur;
-                continue;
-            }
-            const chunk = chunk_buf[0..got];
-            // 조각이 파일 끝에 닿았는가 — 닿지 않았다면 마지막 조각은 «아직 쓰는 중» 이 아니라
-            // **우리가 자른 것**이므로, 개행 없는 꼬리를 버리지 않고 다음 회차로 넘긴다(아래 루프가
-            // 개행까지만 세므로 두 경우가 같은 코드로 처리된다).
-
+            var cur: ae.Cursor = undefined;
+            var size: u64 = undefined;
+            const chunk = blk: {
+                if (opts.log_format == .v2) {
+                    const old = gop.value_ptr.*;
+                    const snapshot = maru.agent_log_writer.readSnapshot(io, dir, nonce, .{ .generation = old.generation, .offset = old.offset }, chunk_buf) catch continue;
+                    cur = .{ .generation = snapshot.start.generation, .offset = snapshot.start.offset, .seen_size = snapshot.payload_size };
+                    size = snapshot.payload_size;
+                    break :blk snapshot.bytes;
+                }
+                const file = dir.openFile(io, entry.name, .{}) catch continue;
+                defer file.close(io);
+                var rbuf: [4096]u8 = undefined;
+                var reader = file.reader(io, &rbuf);
+                size = reader.getSize() catch continue;
+                cur = ae.advance(gop.value_ptr.*, size);
+                if (size <= cur.offset) {
+                    gop.value_ptr.* = cur;
+                    continue;
+                }
+                reader.seekTo(cur.offset) catch continue;
+                const got = reader.interface.readSliceShort(chunk_buf) catch continue;
+                if (got == 0) continue;
+                break :blk chunk_buf[0..got];
+            };
             // **이 파일의 줄이 정말 이 이름의 것인가**(RA6). tmux 안에서는 `LC_MARU_PANE` 이 굳어
             // 훅이 **남의 파일에 적는다** — 그래서 파일 이름이 아니라 옆 파일의 tmux 좌표로 되찾는다.
             //
@@ -15007,7 +15041,7 @@ fn runAgentEvents(
             var side_server_buf: [24]u8 = undefined;
             var side_server: []const u8 = "";
             const emit_nonce = blk: {
-                const side = readSidecar(io, allocator, dir, nonce) orelse break :blk nonce;
+                const side = (if (opts.log_format == .v2) readGenerationSidecar(io, allocator, dir, nonce) else readSidecar(io, allocator, dir, nonce)) orelse break :blk nonce;
                 defer allocator.free(side);
                 const obs = ae_route.parseSidecar(side) orelse break :blk nonce; // tmux 밖 → 이름을 믿는다
                 if (obs.pane) |p| {
@@ -15100,8 +15134,8 @@ fn runAgentEvents(
                 try ae.formatEvent(&frame, allocator, emit_nonce, line, emit_pane);
                 try stdout.writeAll(frame.items);
             }
-            const next: ae.Cursor = .{ .offset = cur.offset + consumed, .seen_size = size };
-            gop.value_ptr.* = next;
+            const next: ae.Cursor = .{ .generation = cur.generation, .offset = cur.offset + consumed, .seen_size = size };
+            if (opts.log_format == .v1) gop.value_ptr.* = next;
             // **어디까지 흘렸는지 함께 알린다**(RA5-a). 로컬이 이 값을 들고 있다가 재접속 때
             // `--resume=` 으로 돌려준다. 나아갔을 때만 보낸다 — 안 그러면 조용한 회차마다 같은 값이
             // 흘러 선이 시끄러워진다.
@@ -15119,15 +15153,32 @@ fn runAgentEvents(
             // 파일 이름을 그대로 실어도 사이드바 판정은 달라지지 않는다. 그리고 파일 이름은 역조회
             // 결과와 달리 **안 바뀐다** — 사용자가 다른 pane 에서 attach 해 주인이 바뀌어도 커서는
             // 그 파일을 계속 가리킨다.
-            if (consumed > 0) {
+            const generation_changed = if (next.generation) |gen| if (gop.value_ptr.generation) |old| !std.mem.eql(u8, &gen, &old) else true else false;
+            if (consumed > 0 or generation_changed) {
                 frame.clearRetainingCapacity();
-                try ae.formatCursor(&frame, allocator, nonce, next.offset);
+                if (opts.log_format == .v2)
+                    try ae.formatGenerationCursor(&frame, allocator, nonce, .{ .generation = next.generation.?, .offset = next.offset })
+                else
+                    try ae.formatCursor(&frame, allocator, nonce, next.offset);
                 try stdout.writeAll(frame.items);
             }
 
             // **다 읽었고 상한을 넘겼으면 비운다**(RA3 — 원격에서는 이 프로세스가 그 기계의 소비자다).
             // 디스크 절단 실패는 조용히 지나간다: 못 비워도 이벤트는 흐르고 다음 회차에 다시 시도한다.
-            if (ae.shouldTruncate(next, size)) {
+            if (opts.log_format == .v2) {
+                try stdout.flush();
+                gop.value_ptr.* = next;
+                if (ae.shouldTruncate(next, size)) {
+                    const rotated = maru.agent_log_writer.rotate(io, dir, nonce, .{ .generation = next.generation.?, .offset = next.offset }, size) catch continue;
+                    if (rotated) |position| {
+                        frame.clearRetainingCapacity();
+                        try ae.formatGenerationCursor(&frame, allocator, nonce, position);
+                        try stdout.writeAll(frame.items);
+                        try stdout.flush();
+                        gop.value_ptr.* = .{ .generation = position.generation };
+                    }
+                }
+            } else if (ae.shouldTruncate(next, size)) {
                 // writeAll may only queue bytes in stdout's buffer. Keep the disk copy
                 // until events and their cursor have actually reached the transport.
                 try stdout.flush();

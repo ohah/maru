@@ -647,3 +647,7 @@ entry·파일 항목 예약을 소유한다. 준비 객체의 해제가 기존 p
 `src/platform/macos/app_session/editor/search/batch/coordinator.zig`는 원래 disk source와 준비 문서의
 신원 인계·전체 편집·pane 게시·저장을 조정한다. `editor/history.zig::Prepared`가 Undo/뷰/연결 기록을
 준비하고 commit과 notify 사이에 pane 소유권을 넘길 수 있게 한다.
+
+혼합 프로젝트 바꾸기의 `app_session/editor/search/batch/mixed_worker.zig`는 index를 가진
+모델 snapshot과 디스크 경로를 worker에서 결합한다. Ready가 Plan과 Closed Read를 함께 소유하고
+actor coordinator가 전체 반영한다. 기존 열린 문서 전용 `worker.zig`의 UI 경로는 유지한다.

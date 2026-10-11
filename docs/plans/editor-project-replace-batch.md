@@ -1,6 +1,6 @@
 # 프로젝트 바꾸기 — 여러 파일 적용 S4c
 
-상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 문서 준비·파일 항목 예약 API까지 구현했다. 혼합 source coordinator의 전체 Undo/편집 준비·pane 게시·파일별 저장 API를 연결했다. 혼합 source worker와 프로젝트 전체 UI 연결은 후속이다.
+상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 문서 준비·파일 항목 예약 API까지 구현했다. 혼합 source coordinator의 전체 Undo/편집 준비·pane 게시·파일별 저장 API를 연결했다. 혼합 source worker API를 구현했다. 프로젝트 전체 UI의 수집·적용 연결은 후속이다.
 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo는 [연결 이력 계획](editor-history-transaction.md)이 소유한다.
 [S4a/S4b](editor-project-replace-apply.md)는 단일 파일 적용까지 구현됐다.
 
@@ -230,10 +230,37 @@ source/Plan 변조·늦은 열기/수정·최종 뷰/연결 준비 실패·모�
 마지막 연결 기록 할당 시점의 실제 외부 수정도 재현한다. 결함 주입 도구는 최종 disk 검사·pane 게시·
 변경 없음·canonical Plan·마지막 Undo 준비를 제거한 결함과 정상/등가/복원 대조를 검사한다.
 
-제품 UI와 혼합 snapshot/disk worker는 아직 이 API를 호출하지 않는다. metadata 검사는 최종 전문 해시
+제품 UI는 아직 이 API를 호출하지 않는다. 혼합 worker는 coordinator 입력을 준비하며 fixture가 적용까지 검사한다. metadata 검사는 최종 전문 해시
 재검증·파일 잠금을 대신하지 않는다. worker의 검증된 Read 수명과 종료/취소·큰 입력 시간/메모리,
 실제 제품 입력·시각 캡처는 후속 배선에서 검사한다. 기존 미참여 캡처의 치환 거절 정책은
 [단일 적용 계획](editor-project-replace-apply.md)의 계약을 유지한다.
+
+## 혼합 source worker
+
+`search/batch/mixed_worker.zig::Job.start`는 원래 명세와 시작 Ticket, index를 가진 모델 snapshot,
+index와 `disk.Target`을 가진 디스크 입력, host가 수집한 점유 물리 신원을 받는다.
+성공한 경우에만 명세·모델 배열·snapshot 소유권을 가져간다. 디스크 root/path와 점유 배열은
+복사하므로 caller의 입력 배열을 worker가 빌리지 않는다. allocator는 스레드 안전해야 한다.
+모든 target index를 한 번씩 채우며 source·조합 상태·절대 경로가 원래 명세와 일치해야 한다.
+
+worker는 모델 bytes를 총 입력 예산에서 먼저 빼고 `disk.Prepared.prepare`로 파일별·잔여 총량을
+검사한다. 모델 전문과 디스크 원문을 원래 target 순서의 Body에 결합해 전체 Plan을 준비한다.
+이후 `disk.Prepared.validate`로 모든 디스크 전문·물리 proof를 다시 확인한 뒤 `Ready`를 게시한다.
+마지막 파일 실패도 앞 Plan·Read의 부분 결과를 반환하지 않는다. actor의 문서 포인터나
+현재 입력을 다시 조회하지 않으며 시작 Ticket을 새로 만들지 않는다.
+
+`Ready`는 명세·Plan·Ticket과 index/proof/원문을 가진 `coordinator.Closed` 배열을 함께 소유한다.
+caller는 `coordinator.apply`가 끝날 때까지 Ready를 유지하고 `Ready.deinit`으로 모두 해제한다.
+`take`는 한 번만 인계하며 완료 후 취소도 거절한다. caller가 즉시 종료해도 worker의 독립 참조가
+마지막 snapshot·경로·Read·Plan을 해제하고 끝난다. 종료 대기는 제품 UI 스레드에서 하지 않는다. 테스트 세션 종료는 공통
+`quietDetachedWorkersForTest`에서 `mixed_worker.quietForTest`를 호출해 worker의 마지막 참조 해제까지 기다린다.
+
+`test-editor-project-replace-mixed-worker`는 실제 파일·snapshot→worker→coordinator→저장 경로,
+입력 index 순서, 마지막 hash 충돌, 혼합 총량, 취소, 즉시 caller 종료, 중복 index·경로 불일치,
+선택 밖 물리 점유와 모든 준비 할당 실패를 검사한다. 변이 검증 도구는
+`tools/test-editor-replace-mixed-worker-adversarial.py`다. OS thread spawn 자체 실패는 주입하지 않는다.
+현재 열린 문서 UI는 기존 worker를 유지한다. 프로젝트 전체 UI가 점유 신원과 디스크 hash를
+수집해 이 API에 전달하고 Ready/결과 문서 신원을 보관하는 배선은 다음 단계다.
 
 ## 제품 연결과 후속 범위
 

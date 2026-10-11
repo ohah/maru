@@ -1423,3 +1423,11 @@ python3 tools/test-editor-replace-batch-coordinator-adversarial.py
 ```
 
 [배치 계획](plans/editor-project-replace-batch.md)의 coordinator API를 검사한다. 혼합 worker·제품 전체 바꾸기 UI는 후속이다.
+
+### 혼합 source 배치 worker
+
+`mise exec -- zig build test-editor-project-replace-mixed-worker`와 같은 gate의
+`-Doptimize=ReleaseFast`는 모델 snapshot·닫힌 disk Read의 전체 준비와 소유권을 검사한다.
+`python3 tools/test-editor-replace-mixed-worker-adversarial.py`는 격리 사본에서 hash·점유·취소·
+혼합 총량·source 보호를 제거한 결함과 정상·동등·복원 대조군을 실행한다.
+제품 전체 바꾸기 UI 연결과 실제 OS thread spawn 실패 주입은 이 gate의 범위 밖이다.

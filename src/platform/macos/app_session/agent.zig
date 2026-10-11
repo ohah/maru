@@ -22,6 +22,7 @@ const remote_agent_ops = @import("remote_agent.zig");
 const AppSession = app_session_mod.AppSession;
 const term_ops = @import("term.zig");
 const git_ops = @import("git.zig");
+const editor_lsp_client = @import("editor/lsp.zig"); // 원격 턴 스냅샷의 허용 루트(계획 workspace-trust WT7c-2)
 const capture_file = @import("../capture_file.zig");
 const turn_capture = maru.session.turn_capture;
 const usableRestoreCwd = app_session_mod.usableRestoreCwd;
@@ -590,9 +591,15 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
     }
     // **신뢰 전 저장소에서는 턴 스냅샷을 찍지 않는다**(계획 workspace-trust WT6b-1a — 2026-10-09 사용자 결정). 임시 index 의
     // `add -A` 는 저장소·submodule 의 필터를 다 돌리고, `read-tree HEAD` 가 지연 가져오기 차단으로 실패하면 unborn 으로 보고
-    // 저장소 전체를 「턴 변경」으로 담는 거짓 스냅샷이 된다. 원격은 신뢰해도 아직 찍지 않는다 — 원격 턴 스냅샷은 신뢰한 원격 쓰기와
-    // 함께 다시 선다(계획 workspace-trust WT7c-2).
-    if (remote != null or self.git_backend.?.untrustedFor(repo, null)) return;
+    // 저장소 전체를 「턴 변경」으로 담는 거짓 스냅샷이 된다.
+    if (remote == null and self.git_backend.?.untrustedFor(repo, null)) return;
+    // 원격 턴은 신뢰한 원격 저장소에서만(계획 workspace-trust WT7c-2). 이 Term 의 cwd 는 도크 목록의 저장소와 다를 수 있어 그 루트를
+    // 여기서 모른다 — 그 목적지에서 허용한 원격 루트들을 실어 보내고, 워커가 그 왕복에서 읽은 루트·홈으로 판정한다(신뢰 표는 메인
+    // 스레드 전용이다). 허용한 루트가 하나도 없으면 원격 왕복 없이 돌아간다.
+    var allowed_roots: std.ArrayList(u8) = .empty;
+    defer allowed_roots.deinit(self.allocator);
+    if (remote) |r| editor_lsp_client.allowedRemoteRoots(self, r.dest, &allowed_roots);
+    if (remote != null and allowed_roots.items.len == 0) return;
     // **요청 시점의 신원을 붙들어 둔다**(적대적 검증 1회차). 수확 때 다시 조회하면 그 사이 `/clear` 로
     // 세션이 갈렸을 때 옛 턴이 새 세션 링에 들어간다.
     const owned = self.allocator.dupe(u8, identity) catch return;
@@ -607,7 +614,7 @@ pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts,
         self.allocator.free(owned);
         return;
     };
-    if (!self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id, remote)) {
+    if (!self.git_backend.?.submitSnapshot(git_exe, repo, index_file, surface_id, remote, allowed_roots.items)) {
         // **거절을 조용히 삼키지 않는다**(적대적 검증 3회차). 백엔드 스냅샷 자리가 하나라 다른 세션의
         // 캡처가 도는 중이면 이 턴은 **영영 안 찍힌다** — 재시도하면 스냅샷 시점이 «턴이 끝난 순간» 이
         // 아니라 «재시도한 순간» 이 되어 내용이 틀린 턴을 만드는데, 그것은 없는 것보다 나쁘다.

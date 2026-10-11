@@ -1323,6 +1323,8 @@ pub const Backend = struct {
         surface_id: u64,
         /// 원격 Term 이면 그 목적지(AT3c). `index_file` 은 그때 **원격 경로**다(로컬 파일이 아니다).
         remote: ?git_command.Remote,
+        /// 원격이면 그 목적지에서 허용한 원격 루트들(줄로 이음 — WT7c-2). 워커가 이 안에 그 저장소의 루트가 있을 때만 찍는다.
+        trusted_roots: []const u8,
     ) bool {
         const state = self.state orelse return false;
         state.mutex.lockUncancelable(state.io);
@@ -1342,7 +1344,9 @@ pub const Backend = struct {
         if (remote) |r| {
             job.remote_dest = state.allocator.dupe(u8, r.dest) catch return self.releaseSnapshotJob(job);
             job.remote_ctl = state.allocator.dupe(u8, r.control_path) catch return self.releaseSnapshotJob(job);
+            if (trusted_roots.len > 0) job.trusted_roots = state.allocator.dupe(u8, trusted_roots) catch return self.releaseSnapshotJob(job);
         }
+        // 원격은 워커가 다시 판정한다(`remoteSnapshotTrusted` — 이 값은 신뢰 전으로 시작하는 닫힌 쪽이다).
         job.untrusted = self.untrustedFor(repo, if (remote) |r| r.dest else null); // 계획 workspace-trust WT6b-1a·WT7b — 신뢰 판정(메인 스레드)
         const thread = std.Thread.spawn(.{}, snapshotWorker, .{job}) catch return self.releaseSnapshotJob(job);
         thread.detach();
@@ -1351,6 +1355,7 @@ pub const Backend = struct {
 
     fn releaseSnapshotJob(self: *Backend, job: *SnapshotJob) bool {
         const state = job.state;
+        if (job.trusted_roots.len > 0) state.allocator.free(job.trusted_roots);
         if (job.remote_ctl.len > 0) state.allocator.free(job.remote_ctl);
         if (job.remote_dest.len > 0) state.allocator.free(job.remote_dest);
         if (job.index_file.len > 0) state.allocator.free(job.index_file);
@@ -1502,6 +1507,9 @@ const SnapshotJob = struct {
     /// 원격 Term 의 턴(AT3c) — 비면 로컬. 둘 다 있어야 원격이다(`remoteTarget`).
     remote_dest: []u8 = &.{},
     remote_ctl: []u8 = &.{},
+    /// 원격 턴의 신뢰 판정 재료(계획 workspace-trust WT7c-2) — 제출할 때 그 목적지에서 허용한 원격 루트들(줄로 이음). 신뢰 표는 메인 스레드
+    /// 전용이라 워커는 이것과 그 왕복에서 읽은 루트·홈으로 판정한다(`remoteSnapshotTrusted`). 로컬 턴은 비어 있다(호출자가 이미 걸렀다).
+    trusted_roots: []u8 = &.{},
 
     fn remoteTarget(self: *const SnapshotJob) ?git_command.Remote {
         if (self.remote_dest.len == 0 or self.remote_ctl.len == 0) return null;
@@ -1565,9 +1573,16 @@ fn snapshotWorker(job: *SnapshotJob) void {
     if (job.remoteTarget()) |remote| {
         // **원격 턴**(AT3c): 임시 index 는 원격 `/tmp` 의 파일이고 세 명령이 각각 ControlMaster 위 exec 하나다.
         // 형제 index 정리는 로컬 파일 세계의 일이라 여기선 없다.
-        if (takeTurnSnapshotRemote(state.allocator, remote, job.repo, job.index_file)) |tree| {
-            result.tree = tree;
-        } else |_| {}
+        // **신뢰한 원격 저장소에서만 찍는다**(계획 workspace-trust WT7c-2) — 판정은 이 왕복의 루트·홈으로(그 사이 cwd 의 저장소가 바뀌었을
+        // 수 있다); 아니면 찍지 않는다(실패한 스냅샷처럼 링에 안 든다). 찍을 때는 신뢰 규칙이다(지연 가져오기를 막으면 `read-tree HEAD`
+        // 가 실패해 저장소 전체를 「턴 변경」으로 담는다 — 그래서 신뢰 전엔 아예 안 찍는다).
+        read_untrusted = true;
+        if (remoteSnapshotTrusted(state.allocator, remote, job)) {
+            read_untrusted = false;
+            if (takeTurnSnapshotRemote(state.allocator, remote, job.repo, job.index_file)) |tree| {
+                result.tree = tree;
+            } else |_| {}
+        }
     } else {
         _ = turn_index_cache.sweepStaleSiblingsOnce(state.io, job.index_file);
         if (takeTurnSnapshot(state.allocator, job.git_exe, job.repo, job.index_file)) |tree| {
@@ -1575,6 +1590,7 @@ fn snapshotWorker(job: *SnapshotJob) void {
         } else |_| {}
     }
 
+    if (job.trusted_roots.len > 0) state.allocator.free(job.trusted_roots);
     if (job.remote_ctl.len > 0) state.allocator.free(job.remote_ctl);
     if (job.remote_dest.len > 0) state.allocator.free(job.remote_dest);
     state.allocator.free(job.index_file);
@@ -2123,7 +2139,25 @@ pub fn takeTurnSnapshotRemote(
     return oid;
 }
 
-/// `runOn` + 원격 임시 index(AT3c). 원격 전용이다 — 로컬 index 는 `runWithEnv` 가 자식 env 로 건다.
+/// 원격 턴을 찍어도 되나(계획 workspace-trust WT7c-2) — 이 왕복에서 루트(`rev-parse --show-toplevel`)와 원격 홈을 읽어, 루트가 제출 때
+/// 실어 온 허용 목록(`SnapshotJob.trusted_roots`)에 있고 묻지 않는 root(홈 자체·그 조상 — `trust.remoteRootRefused`)가 아닐 때만 참.
+/// 어느 하나라도 못 읽으면 거짓(닫힌 쪽). 호출자가 이 읽기를 신뢰 전 규칙으로 돌린다.
+fn remoteSnapshotTrusted(allocator: std.mem.Allocator, remote: git_command.Remote, job: *const SnapshotJob) bool {
+    if (job.trusted_roots.len == 0) return false;
+    const out = runOn(allocator, remote, .repo_root, job.git_exe, job.repo, null) catch return false;
+    defer allocator.free(out.bytes);
+    const root = std.mem.trim(u8, out.bytes, " \t\r\n");
+    if (root.len == 0) return false;
+    const home = readRemoteHome(allocator, remote);
+    defer allocator.free(home);
+    if (home.len == 0 or maru.session.editor.lsp.trust.remoteRootRefused(root, home)) return false;
+    var it = std.mem.splitScalar(u8, job.trusted_roots, '\n');
+    while (it.next()) |allowed| if (allowed.len > 0 and std.mem.eql(u8, allowed, root)) return true;
+    return false;
+}
+
+/// `runOn` + 원격 임시 index(AT3c). 원격 전용이다 — 로컬 index 는 `runWithEnv` 가 자식 env 로 건다. 신뢰 전 env 는 이 스레드의 읽기
+/// 정책을 따른다(WT7c-2 — 원격 턴은 신뢰한 저장소에서만 찍으므로 실제로는 신뢰 규칙이다).
 fn runOnWithIndex(
     allocator: std.mem.Allocator,
     remote: git_command.Remote,
@@ -2135,7 +2169,7 @@ fn runOnWithIndex(
     const local = git_command.build(kind, git_command.remote_git_exe, repo, null, &argv_buf);
     var remote_buf: [git_command.max_argv][]const u8 = undefined;
     var cmd_buf: [git_command.max_remote_command_bytes]u8 = undefined;
-    const argv = git_command.buildRemoteWithIndex(local, remote, index_file, &remote_buf, &cmd_buf) orelse return error.GitFailed;
+    const argv = git_command.buildRemoteWithConfig(local, remote, index_file, null, read_untrusted, &remote_buf, &cmd_buf) orelse return error.GitFailed;
     return runArgvWithEnv(allocator, argv, null, true, null, false) catch |err| return mapRemoteExitError(err);
 }
 
@@ -5347,6 +5381,7 @@ test "WT6a 읽기는 서명 검증 프로그램을 실행하지 않는다 — �
 // ── 계획 workspace-trust WT6b-1a — 신뢰 전 읽기는 지연 가져오기를 막고, partial clone 실패를 줄여 보인다 ─────────────────
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 const Wt6bTrust = struct {
     trusted: bool,
@@ -5705,6 +5740,111 @@ test "WT7b SSH 목록 읽기 — 루트를 먼저 묻고(신뢰 전 규칙) 그 
     try std.testing.expect(bare.untrustedFor(cwd, "box"));
 }
 
+// 이름에 「원격」·「턴 스냅샷」을 넣지 않는다 — `test-remote-scm`(실 sshd 하네스, 「원격」)·`test-agent-turn-capture`(「턴 스냅샷」)가 이름으로 골라
+// 수를 센다; 이 판정자는 가짜 ssh 로 돈다.
+test "WT7c-2 SSH 턴 찍기는 신뢰한 저장소에서만 — 그 왕복의 루트가 허용 목록에 있고 그 기계의 홈이 아닐 때만 신뢰 규칙으로 찍고, 아니면 루트·홈만 읽고 멈춘다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0 .. tmp.dir.realPath(io, &root_buf) catch return error.SkipZigTest];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = locate(&exe_buf) orelse return error.SkipZigTest;
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    var b3: [std.fs.max_path_bytes]u8 = undefined;
+    var b4: [std.fs.max_path_bytes]u8 = undefined;
+    var b5: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = try std.fmt.bufPrint(&b1, "{s}/repo", .{base});
+    const cwd = try std.fmt.bufPrint(&b2, "{s}/repo/sub", .{base});
+    const log_path = try std.fmt.bufPrint(&b3, "{s}/ssh.log", .{base});
+    const home = try std.fmt.bufPrint(&b4, "{s}/home", .{base});
+    const index_file = try std.fmt.bufPrint(&b5, "{s}/turn.idx", .{base});
+    try tmp.dir.createDirPath(io, "repo/sub");
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "bin");
+    if (!initRepoForTest(allocator, git_exe, repo)) return error.SkipZigTest;
+    var fb: [std.fs.max_path_bytes]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.bufPrint(&fb, "{s}/f.txt", .{repo}), .data = "x\n" });
+    // 가짜 ssh — 원격 명령 줄을 적고 그대로 이 기계의 sh 로 돌린다. 그 기계의 홈은 `MARU_WT7C2_HOME`(장면마다 바꾼다).
+    var script_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    const script = try std.fmt.bufPrint(&script_buf, "#!/bin/sh\nprintf '%s\\n' \"$6\" >> '{s}'\nHOME=\"$MARU_WT7C2_HOME\"; export HOME\nexec /bin/sh -c \"$6\"\n", .{log_path});
+    var ssh_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const ssh_path = try std.fmt.bufPrint(&ssh_buf, "{s}/bin/ssh", .{base});
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ssh_path, .data = script });
+    var ssh_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    if (std.c.chmod((try std.fmt.bufPrintZ(&ssh_z, "{s}", .{ssh_path})).ptr, 0o755) != 0) return error.SkipZigTest;
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    defer if (saved_path) |p| allocator.free(p);
+    var path_z: [8 * std.fs.max_path_bytes]u8 = undefined;
+    _ = setenv("PATH", (try std.fmt.bufPrintZ(&path_z, "{s}/bin:{s}", .{ base, if (saved_path) |p| p else "/usr/bin:/bin" })).ptr, 1);
+    defer if (saved_path) |p| {
+        _ = setenv("PATH", p.ptr, 1);
+    };
+    var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    defer _ = unsetenv("MARU_WT7C2_HOME");
+    inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| _ = setenv(name, "maru-test", 1);
+    defer inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| {
+        _ = unsetenv(name);
+    };
+    const remote: git_command.Remote = .{ .dest = "box", .control_path = "/tmp/maru-wt7c2-ctl" };
+    var backend = try Backend.init(io);
+    defer backend.deinit();
+    const Take = struct {
+        fn tree(b: *Backend, id: u64) !usize {
+            var spins: usize = 0;
+            while (spins < 1000) : (spins += 1) {
+                if (b.takeSnapshotResult()) |taken| {
+                    var result = taken;
+                    defer result.deinit(worker_allocator);
+                    try std.testing.expectEqual(id, result.surface_id);
+                    return result.tree.len;
+                }
+                var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&ts, null);
+            }
+            return error.SnapshotNeverCompleted;
+        }
+    };
+    var log_buf: [256 * 1024]u8 = undefined;
+    var roots_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+
+    // ⑴ 허용 목록에 그 루트가 없다 — 루트·홈만 읽고(신뢰 전 규칙) 임시 index 는 손대지 않는다.
+    try std.testing.expect(backend.submitSnapshot(git_exe, cwd, index_file, 1, remote, "/srv/other\n"));
+    try std.testing.expectEqual(@as(usize, 0), try Take.tree(&backend, 1));
+    const untrusted_log = try std.Io.Dir.cwd().readFile(io, log_path, &log_buf);
+    try std.testing.expect(std.mem.indexOf(u8, untrusted_log, "'--show-toplevel'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, untrusted_log, "'read-tree'") == null);
+    try std.testing.expect(std.mem.indexOf(u8, untrusted_log, "GIT_INDEX_FILE") == null);
+
+    // ⑵ 그 루트가 그 기계의 홈이다 — 허용 목록에 있어도 찍지 않는다(묻지 않는 root).
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = "" });
+    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{repo})).ptr, 1);
+    try std.testing.expect(backend.submitSnapshot(git_exe, cwd, index_file, 2, remote, try std.fmt.bufPrint(&roots_buf, "/srv/other\n{s}\n", .{repo})));
+    try std.testing.expectEqual(@as(usize, 0), try Take.tree(&backend, 2));
+    try std.testing.expect(std.mem.indexOf(u8, try std.Io.Dir.cwd().readFile(io, log_path, &log_buf), "'read-tree'") == null);
+    _ = setenv("MARU_WT7C2_HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+
+    // ⑶ 허용 목록에 그 루트가 있다(cwd 는 하위 폴더 — 루트로 대 본다) — 찍는다. 루트 읽기만 신뢰 전 규칙이고 스냅샷 명령은 신뢰 규칙이다
+    //    (지연 가져오기 금지 env 가 없다), 임시 index 는 그 자리에 선다.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = log_path, .data = "" });
+    try std.testing.expect(backend.submitSnapshot(git_exe, cwd, index_file, 3, remote, try std.fmt.bufPrint(&roots_buf, "/srv/other\n{s}\n", .{repo})));
+    try std.testing.expect(try Take.tree(&backend, 3) >= 40);
+    const trusted_log = try std.Io.Dir.cwd().readFile(io, log_path, &log_buf);
+    var it = std.mem.splitScalar(u8, trusted_log, '\n');
+    var snapshot_lines: usize = 0;
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "GIT_INDEX_FILE") == null) continue;
+        snapshot_lines += 1;
+        try std.testing.expect(std.mem.indexOf(u8, line, "GIT_NO_LAZY_FETCH") == null);
+    }
+    try std.testing.expect(snapshot_lines >= 3); // read-tree · add -A · write-tree
+    _ = try std.Io.Dir.cwd().statFile(io, index_file, .{});
+}
+
 test "WT6b-1a 신뢰 전 정책은 읽기 워커 아홉이 모두 세우고, 제품은 판정 함수 없이 백엔드를 만들지 않으며, 신뢰 전 저장소는 스냅샷 제출 전에 돌아간다 (계획 workspace-trust)" {
     const src = @embedFile("git_backend.zig");
     // 허용된 자리를 센다 — 워커 진입마다 한 번(아홉), 다른 데서 세우지 않는다.
@@ -5714,7 +5854,10 @@ test "WT6b-1a 신뢰 전 정책은 읽기 워커 아홉이 모두 세우고, 제
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, product, "self.git_backend = git_backend_mod.Backend.init(self.io)"));
     }
     const agent = @embedFile("app_session/agent.zig");
-    const skip = std.mem.indexOf(u8, agent, "if (remote != null or self.git_backend.?.untrustedFor(repo, null)) return;") orelse return error.MissingSnapshotTrustSkip;
+    const skip = std.mem.indexOf(u8, agent, "if (remote == null and self.git_backend.?.untrustedFor(repo, null)) return;") orelse return error.MissingSnapshotTrustSkip;
+    // 원격은 허용한 루트가 하나도 없으면 왕복 없이 돌아가고(WT7c-2), 있으면 그 목록을 실어 워커가 판정한다.
+    const remote_skip = std.mem.indexOf(u8, agent, "if (remote != null and allowed_roots.items.len == 0) return;") orelse return error.MissingRemoteSnapshotTrustSkip;
+    try std.testing.expect(remote_skip < std.mem.indexOf(u8, agent, "self.git_backend.?.submitSnapshot(").?);
     const submit = std.mem.indexOf(u8, agent, "self.git_backend.?.submitSnapshot(") orelse return error.MissingSnapshotSubmit;
     try std.testing.expect(skip < submit);
 }
@@ -6206,10 +6349,28 @@ test "원격 턴 스냅샷: 임시 index 로 tree 를 굳히고 진짜 index 는
     // ⑶ **임시 index 가 원격 경로에 생겼다**(loopback 이라 같은 파일시스템 — 대조에서만 직접 본다).
     _ = try std.Io.Dir.cwd().statFile(io, index_file, .{});
 
-    // ⑷ **`submitSnapshot` 배선** — job 이 원격 두 축을 worker 까지 나른다.
+    // ⑷ **`submitSnapshot` 배선** — job 이 원격 두 축을 worker 까지 나른다. 원격 턴은 **신뢰한 저장소에서만** 찍는다(계획 workspace-trust
+    // WT7c-2): 허용 목록이 비면 tree 가 없고, 그 저장소의 실제 루트가 목록에 있으면 찍는다.
     var backend = try Backend.init(io);
     defer backend.deinit();
-    try std.testing.expect(backend.submitSnapshot(git_command.remote_git_exe, hx.repo, index_file, 77, remote));
+    const root_out = try runOn(allocator, remote, .repo_root, git_command.remote_git_exe, hx.repo, null);
+    defer allocator.free(root_out.bytes);
+    var roots_buf: [std.fs.max_path_bytes + 2]u8 = undefined;
+    const roots = try std.fmt.bufPrint(&roots_buf, "{s}\n", .{std.mem.trim(u8, root_out.bytes, " \t\r\n")});
+    try std.testing.expect(backend.submitSnapshot(git_command.remote_git_exe, hx.repo, index_file, 76, remote, ""));
+    var untrusted_spins: usize = 0;
+    while (untrusted_spins < 1000) : (untrusted_spins += 1) {
+        if (backend.takeSnapshotResult()) |taken| {
+            var result = taken;
+            defer result.deinit(worker_allocator);
+            try std.testing.expectEqual(@as(u64, 76), result.surface_id);
+            try std.testing.expectEqual(@as(usize, 0), result.tree.len); // 신뢰 전 — 안 찍는다
+            break;
+        }
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
+    } else return error.RemoteSnapshotNeverCompleted;
+    try std.testing.expect(backend.submitSnapshot(git_command.remote_git_exe, hx.repo, index_file, 77, remote, roots));
     var spins: usize = 0;
     while (spins < 1000) : (spins += 1) {
         if (backend.takeSnapshotResult()) |taken| {

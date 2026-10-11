@@ -19306,6 +19306,29 @@ test "WT7c-1 원격 쓰기도 같은 관문 — 루트·홈을 모르면 실행�
     try testing.expectEqualStrings("remote commit WT7c\n", head);
 }
 
+// 이름에 「턴 스냅샷」을 넣지 않는다 — `test-agent-turn-capture` 의 이름 필터(68 고정)에 걸린다.
+test "WT7c-2 원격 턴 찍기의 허용 루트 목록 — 그 목적지(맞춰서)의 허용만, 거부·다른 목적지·로컬 키는 안 든다; 줄로 잇는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "state/" ++ trust_store.file_name, .data = "allow\tssh\topenclaw\t/srv/a\ndeny\tssh\topenclaw\t/srv/c\nallow\tssh\tother\t/srv/b\nallow\tssh\topenclaw\t/home/me/x\n" });
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    lsp_client.allowedRemoteRoots(fx.session, "OpenClaw", &out);
+    try testing.expectEqualStrings("/srv/a\n/home/me/x\n", out.items);
+    lsp_client.allowedRemoteRoots(fx.session, "nobody", &out);
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+    lsp_client.allowedRemoteRoots(fx.session, "", &out); // 맞출 수 없는 목적지 — 비운다
+    try testing.expectEqual(@as(usize, 0), out.items.len);
+}
+
 test "LSPB38 컨트롤 플레인의 신뢰 조회·철회·잊기(계획 WT4b) — 목록에 서고, 철회는 떠 있는 서버를 내리고 파일에 남으며, 잊으면 「결정 없음」(곧바로 묻지 않음); 심링크 경로도 같은 저장소, 창 없이도 표를 읽는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

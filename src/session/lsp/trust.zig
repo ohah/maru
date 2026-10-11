@@ -47,6 +47,15 @@ pub fn normalizeDest(dest: []const u8, out: []u8) ?[]const u8 {
     return out[0..dest.len];
 }
 
+/// 원격 저장소의 묻지 않는 root(계획 WT2b·WT7b) — 루트가 원격 홈 자체이거나 그 조상(`/` 포함)이면 신뢰를 정하지 않는다(홈 dotfiles 저장소
+/// 하나로 홈 전체를 열지 않는다). 둘 다 그 기계의 실제 경로다. 세션(도크 줄·시트·쓰기 관문)과 원격 턴 스냅샷 워커가 이 하나를 쓴다 —
+/// 두 벌이면 한쪽만 거절이 낡는다. 경로 성분 경계에서 본다(`/home/me` 는 `/home/mex` 의 조상이 아니다).
+pub fn remoteRootRefused(root: []const u8, home: []const u8) bool {
+    if (std.mem.eql(u8, root, home)) return true;
+    if (std.mem.eql(u8, root, "/")) return home.len > 0 and home[0] == '/';
+    return home.len > root.len and std.mem.startsWith(u8, home, root) and home[root.len] == '/';
+}
+
 /// 한 줄. `decision == null` 은 `forget` 줄이다 — 그 키의 결정을 지운다(계획 WT4 「잊기」).
 pub const Entry = struct { key: Key, decision: ?Decision };
 
@@ -586,4 +595,14 @@ test "LST-R2 원격 키는 표에서 로컬 키와 같은 규칙으로 산다 �
     // 파일의 forget 줄도 원격 키로 지운다.
     try re.load(testing.allocator, "forget\tssh\topenclaw\t/srv/app\n");
     try testing.expect(re.get(remote) == null and re.get(local).? == .deny);
+}
+
+test "WT7c-2 원격 홈 거절은 한 함수 — 홈 자체·조상(`/` 포함)은 거절, 홈 아래·형제·이름만 겹치는 경로는 묻는다" {
+    try std.testing.expect(remoteRootRefused("/home/me", "/home/me"));
+    try std.testing.expect(remoteRootRefused("/home", "/home/me"));
+    try std.testing.expect(remoteRootRefused("/", "/home/me"));
+    try std.testing.expect(!remoteRootRefused("/home/me/app", "/home/me"));
+    try std.testing.expect(!remoteRootRefused("/srv/app", "/home/me"));
+    try std.testing.expect(!remoteRootRefused("/home/m", "/home/me"));
+    try std.testing.expect(!remoteRootRefused("/home/mex", "/home/me"));
 }

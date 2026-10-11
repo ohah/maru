@@ -80,11 +80,12 @@ const Then = union(enum) {
 /// role wait 의 보임 판정은 후보를 이만큼씩 잡아 한 번에 본다(계획 공격 2 회차 — 하나씩이면 확인 한 번에 호출 40 개).
 const judge_batch = 20;
 
-/// 로케이터 wait 의 간격이 무거운 호출 시간으로 늘어나는 상한 — 페이지의 긴 작업이 그 호출 앞에 걸려 시간이 부풀면 다음 확인이 10 초 뒤가 됐다
-/// (적대 리뷰 1 회차 실측 — 요소는 2.7 초에 생겼는데 12.5 초에 답했다).
-const wait_max_heavy_interval_ms: u32 = 2000;
-/// 마지막 확인이 시한을 넘길 수 있는 여유 — 이보다 더 넘길 것 같을 때만 시한 전에 답한다(첫 확인이 긴 작업에 막혀 3 초 걸리자 5 초 시한의 wait
-/// 이 3 초에 포기했다 — 1 회차). wait 시한 상한 25 초 + 이것 < 서버 reaper 30 초.
+/// 첫 무거운 호출 시간의 상한 — 견줄 앞의 것이 없을 때 페이지의 긴 작업에 부푼 값이 다음 확인을 10 초 뒤로 밀지 않게(적대 리뷰 1 회차 실측 —
+/// 요소는 2.7 초에 생겼는데 12.5 초에 답했다). 그 뒤로는 직전 두 번 가운데 작은 것(부푼 한 번을 거른다 — 2 회차: 2 초 상한이 숨은 큰 탭의
+/// 페이지를 절반 넘게 멈췄다).
+const wait_first_heavy_cap_ms: i64 = 500;
+/// 마지막 확인이 시한을 넘길 수 있는 여유 — 다음 잠과 확인이 이보다 더 넘길 것 같을 때만 시한 전에 답한다(첫 확인이 긴 작업에 막혀 3 초
+/// 걸리자 5 초 시한의 wait 이 3 초에 포기했다 — 1 회차). 확인 시간은 앞의 것으로 짐작한다 — 그보다 길면 더 넘긴다.
 const wait_max_overrun_ms: i64 = 2000;
 
 pub const Op = struct {
@@ -156,6 +157,9 @@ pub const Op = struct {
     last_check_ms: i64 = 0,
     heavy_start_ms: i64 = 0,
     last_heavy_ms: i64 = 0,
+    /// 그 앞의 무거운 호출 시간(-1 = 아직 하나뿐이거나 없다).
+    prev_heavy_ms: i64 = -1,
+    heavy_count: u8 = 0,
     /// role 질의의 대상 — 그 확인의 격리 world 의 `document`(묶음 안, 소유). 이동하면 질의가 곧바로 오류다(backendNodeId 로 부르면 옛 문서에
     /// 영영 매달렸다 — 계획 공격 1 회차 실측).
     doc_obj: ?[]u8 = null,
@@ -328,7 +332,13 @@ pub const Op = struct {
     /// 철회됐다(부른 쪽이 다음 호출을 보내기 전에 본다) — 문서·후보 원격 객체를 쥐었으면 놓은 뒤 끝낸다(1 회차 — 그냥 끝내 페이지에 남았다).
     /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
-        if (self.doc_obj == null and self.cands == null) return null;
+        // 덮임 검사·초점 검사·고르기용으로 잡은 그 요소의 원격 객체도(2 회차 — role 상태만 놓았다; 누름 앞이라 누른 것은 없다).
+        const holds = switch (self.stage) {
+            .hit_test, .focus_check, .hover_move, .mouse_down, .select, .insert, .delete_down => true,
+            .key_down => self.press_target,
+            else => false,
+        };
+        if (self.doc_obj == null and self.cands == null and !holds) return null;
         return try self.releaseThenDone(gpa, .failed, "the request was cancelled");
     }
 
@@ -507,7 +517,7 @@ pub const Op = struct {
                     error.OutOfMemory => return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "out of memory") } }),
                     else => web_cdp_locate.Found{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "malformed locator result") } },
                 };
-                self.last_heavy_ms = self.now_ms - self.heavy_start_ms;
+                self.noteHeavy(self.now_ms - self.heavy_start_ms);
                 return self.findRelease(gpa, found);
             },
             .cdp_error => self.find_transient = self.wait_visible,
@@ -887,7 +897,7 @@ pub const Op = struct {
                 return self.locateCall(gpa);
             },
             .locate => {
-                self.last_heavy_ms = self.now_ms - self.heavy_start_ms;
+                self.noteHeavy(self.now_ms - self.heavy_start_ms);
                 const q: web_cdp_locate.RoleQuery = .{ .role = self.loc_role, .name = self.loc_name, .level = self.loc_level, .exact = self.loc_exact, .nth = self.loc_nth };
                 if (self.wait_visible) {
                     // wait — act 와 같은 거르기로 후보를 모아 앞에서부터 보이는 것을 찾는다.
@@ -1000,16 +1010,32 @@ pub const Op = struct {
     fn sleepOrTimeout(self: *Op, gpa: std.mem.Allocator) !Step {
         self.last_check_ms = self.now_ms - self.check_start_ms;
         if (self.now_ms >= self.wait_deadline_ms) return self.waitTimeout(gpa);
-        // 다음 확인이 시한 안에 끝나지 않을 것 같으면 지금 답한다 — 확인 하나가 늦으면 시한(25 초)을 넘겨 서버 reaper(30 초)에 닿았다
-        // (계획 공격 1·3 회차). selector·load 의 확인은 짧다(그대로 둔다).
-        if (self.wait_visible and self.now_ms + self.last_check_ms > self.wait_deadline_ms + wait_max_overrun_ms) return self.waitTimeout(gpa);
         const left: u32 = @intCast(@min(self.wait_deadline_ms - self.now_ms, std.math.maxInt(u32)));
         // 로케이터의 확인(질의·찾기)은 그동안 페이지를 붙잡는다 — 간격을 그 시간의 네 배 이상으로(페이지가 쓰는 시간을 1/5 아래로).
-        const heavy: u32 = if (self.wait_visible) @intCast(@min(@max(self.last_heavy_ms, 0) *| 4, wait_max_heavy_interval_ms)) else 0;
-        const ms = @min(@max(self.wait_interval_ms, heavy), left);
+        const heavy: u32 = if (self.wait_visible) @intCast(@min(self.heavyMs() *| 4, std.math.maxInt(u32))) else 0;
+        const want = @max(self.wait_interval_ms, heavy);
+        // 시한 전에 쉼이 끝나지 않으면 마지막 확인이 시한 즈음 끝나게 일찍 깬다(시한까지 자고 깨면 확인 없이 시한이었다 — 2 회차 시험).
+        const last: u32 = @intCast(@min(@max(self.last_check_ms, 0), std.math.maxInt(u32)));
+        const ms = if (self.wait_visible and want >= left) @max(left -| last, 1) else @min(want, left);
+        // 다음 잠과 확인이 시한을 크게 넘길 것 같으면 지금 답한다 — 확인 하나가 늦으면 시한(25 초)을 넘겨 서버 reaper(30 초)에 닿았다
+        // (계획 공격 1·3 회차, 2 회차 — 잠을 빼고 셌다). selector·load 의 확인은 짧다(그대로 둔다).
+        if (self.wait_visible and self.now_ms + ms + self.last_check_ms > self.wait_deadline_ms + wait_max_overrun_ms) return self.waitTimeout(gpa);
         self.wait_interval_ms = @min(self.wait_interval_ms *| 2, wait_max_interval_ms);
         self.stage = .sleeping;
         return .{ .sleep = @max(ms, 1) };
+    }
+
+    fn noteHeavy(self: *Op, ms: i64) void {
+        self.prev_heavy_ms = if (self.heavy_count > 0) self.last_heavy_ms else -1;
+        self.last_heavy_ms = @max(ms, 0);
+        self.heavy_count +|= 1;
+    }
+
+    /// 간격에 쓸 무거운 호출 시간 — 직전 두 번 가운데 작은 것, 하나뿐이면 그것을 `wait_first_heavy_cap_ms` 까지.
+    fn heavyMs(self: *const Op) i64 {
+        if (self.heavy_count == 0) return 0;
+        if (self.prev_heavy_ms < 0) return @min(self.last_heavy_ms, wait_first_heavy_cap_ms);
+        return @min(self.last_heavy_ms, self.prev_heavy_ms);
     }
 
     /// wait 의 시한 — 로케이터면 마지막 확인의 숨은 일치 수를 싣는다(L2 가 -32004 data 에).
@@ -2814,30 +2840,45 @@ test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 �
     try testing.expectEqualSlices(usize, &.{2}, trail.kicked.items);
 }
 
-test "wait visible 의 간격·마감: 무거운 확인 시간의 네 배 이상(2 초까지) 쉬고, 다음 확인이 시한을 2 초 넘게 넘길 것 같을 때만 미리 시한으로 답한다" {
-    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":10000}", 530);
+test "wait visible 의 간격·마감: 무거운 확인 시간(직전 두 번 가운데 작은 것, 첫 것은 0.5 초까지)의 네 배 이상 쉬고, 다음 잠과 확인이 시한을 2 초 넘게 넘길 것 같을 때만 미리 시한으로 답한다" {
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":25000}", 530);
     defer op.deinit(testing.allocator);
-    op.wait_deadline_ms = 10_000;
+    op.wait_deadline_ms = 25_000;
     op.check_start_ms = 1_000;
-    op.now_ms = 1_300; // 확인 300 ms
-    op.last_heavy_ms = 200;
-    try testing.expectEqual(@as(u32, 800), (try op.sleepOrTimeout(testing.allocator)).sleep);
-    // 긴 작업에 부푼 호출 시간 — 간격은 2 초까지(1 회차: 10 초 잤다).
-    op.check_start_ms = 2_000;
-    op.now_ms = 2_100;
-    op.last_heavy_ms = 2_500;
+    op.now_ms = 1_300;
+    // 첫 무거운 호출이 긴 작업에 부풀었다(2.5 초) — 0.5 초로 본다(1 회차: 10 초 잤다).
+    op.noteHeavy(2_500);
     try testing.expectEqual(@as(u32, 2000), (try op.sleepOrTimeout(testing.allocator)).sleep);
-    // 첫 확인이 3 초 걸렸어도 남은 2 초에 한 번 더 본다(1 회차: 5 초 시한의 wait 이 3 초에 포기했다).
-    op.wait_deadline_ms = 5_000;
-    op.check_start_ms = 0;
-    op.now_ms = 3_000;
-    op.last_heavy_ms = 0;
+    // 숨은 큰 탭의 질의가 늘 1.9 초 — 7.6 초 쉰다(2 회차: 2 초 상한이 페이지를 절반 넘게 멈췄다).
+    op.noteHeavy(1_900);
+    op.check_start_ms = 4_000;
+    op.now_ms = 6_000;
+    try testing.expectEqual(@as(u32, 7600), (try op.sleepOrTimeout(testing.allocator)).sleep);
+    // 한 번만 부푼 것(직전 0.2 초 뒤 3 초)은 작은 쪽 — 0.8 초.
+    op.noteHeavy(200);
+    op.noteHeavy(3_000);
+    op.check_start_ms = 7_000;
+    op.now_ms = 7_100;
     op.wait_interval_ms = 50;
-    try testing.expectEqual(@as(u32, 50), (try op.sleepOrTimeout(testing.allocator)).sleep);
-    // 다음 확인이 시한을 2 초 넘게 넘길 것 같으면 지금 시한으로 — 숨은 일치 수를 싣는다.
-    op.wait_deadline_ms = 10_000;
-    op.check_start_ms = 6_000;
-    op.now_ms = 9_700; // 확인 3.7 초 — 다음 것은 13.4 초에 끝날 것
+    try testing.expectEqual(@as(u32, 800), (try op.sleepOrTimeout(testing.allocator)).sleep);
+    // 첫 확인이 3 초 걸렸어도 남은 시간에 한 번 더 본다(1 회차: 5 초 시한의 wait 이 3 초에 포기했다).
+    var short = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":5000}", 531);
+    defer short.deinit(testing.allocator);
+    short.wait_deadline_ms = 5_000;
+    short.check_start_ms = 0;
+    short.now_ms = 3_000;
+    try testing.expectEqual(@as(u32, 50), (try short.sleepOrTimeout(testing.allocator)).sleep);
+    // 쉼(7.6 초)이 남은 5 초보다 길다 — 마지막 확인(0.3 초)이 시한 즈음 끝나게 4.7 초 뒤에 깬다.
+    op.noteHeavy(1_900);
+    op.noteHeavy(1_900);
+    op.check_start_ms = 19_700;
+    op.now_ms = 20_000;
+    try testing.expectEqual(@as(u32, 4700), (try op.sleepOrTimeout(testing.allocator)).sleep);
+    // 다음 확인(직전처럼 6 초)이 남은 4 초를 지나 시한을 2 초 넘게 넘길 것 같으면 지금 — 숨은 일치 수를 싣는다(2 회차: 잠을 빼고 세 30 초에 닿았다).
+    op.noteHeavy(1_000);
+    op.noteHeavy(1_000);
+    op.check_start_ms = 15_000;
+    op.now_ms = 21_000;
     op.wait_hidden = 4;
     const s2 = try op.sleepOrTimeout(testing.allocator);
     defer testing.allocator.free(s2.done.result);
@@ -2860,4 +2901,15 @@ test "철회: 문서·후보 묶음을 쥐었으면 놓은 뒤(committed) 「can
     try testing.expectEqual(Status.failed, d.done.status);
     try testing.expectEqualStrings("the request was cancelled", d.done.result);
     try testing.expect(op.doc_obj == null);
+    // 덮임 검사 앞(요소의 원격 객체를 잡았다) — 그것도 놓는다(2 회차). 대상 없는 press 의 키 누름 앞은 쥔 것이 없다.
+    var act = try Op.init(testing.allocator, .click, "{\"selector\":\"#b\"}", 541);
+    defer act.deinit(testing.allocator);
+    act.stage = .hit_test;
+    const rel = (try act.cancel(testing.allocator)).?;
+    defer testing.allocator.free(rel.call.params);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", rel.call.method);
+    var press = try Op.init(testing.allocator, .press, "{\"key\":\"Enter\"}", 542);
+    defer press.deinit(testing.allocator);
+    press.stage = .key_down;
+    try testing.expect(try press.cancel(testing.allocator) == null);
 }

@@ -10248,7 +10248,7 @@ test "W9b①: 철회 뒤에는 다음 호출을 보내지 않지만 누른 뒤�
     try std.testing.expect(pendings[1].response != null and pendings[2].response != null);
     try std.testing.expectEqual(before + 1, cdp_calls_attempted);
 
-    // ③ 철회 뒤 — 누르기 전이면 보내지 않고, 누른 뒤면 떼기를 보낸다.
+    // ③ 철회 뒤 — 누르기 전이면 누르지 않고(쥔 묶음만 놓는다), 누른 뒤면 떼기를 보낸다.
     control_pane_grant_store.clearAll();
     // 「누름」 Step 을 보낼 때(단계 mouse_down)는 아직 누르지 않았다 — 재허가를 거친다. 「떼기」(mouse_up)는 누른 뒤다.
     for ([_]bool{ false, true }, [_]usize{ 3, 4 }) |pressed, k| {
@@ -10259,7 +10259,9 @@ test "W9b①: 철회 뒤에는 다음 호출을 보내지 않지만 누른 뒤�
         const attempted = cdp_calls_attempted;
         cdpAdvance(run, .{ .call = .{ .method = "Input.dispatchMouseEvent", .params = try allocator.dupe(u8, "{}") } });
         try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
-        try std.testing.expectEqual(attempted + @intFromBool(pressed), cdp_calls_attempted);
+        // 누르기 전의 철회도 한 번 보낸다 — 누름이 아니라 그 요소의 원격 객체 묶음 놓기다(W9b②-3 적대 리뷰 2 회차 — 놓지 않고 끝내 페이지에
+        // 남았다; 무엇을 보내는지는 web_cdp_ops 의 「철회」 시험이 본다). 누른 뒤면 떼기.
+        try std.testing.expectEqual(attempted + 1, cdp_calls_attempted);
     }
 }
 

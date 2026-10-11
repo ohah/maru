@@ -18,7 +18,7 @@
 이벤트마다 UUID를 바꾸지 않는다. 파일의 새 세대 생성과 회전 때만 생성한다.
 기존 inline 셸의 payload 상한·Codex parent attribution·tmux sidecar·stdin drain은
 그대로 유지해야 한다. native 기록기 호출 방식은 추가 프로세스 비용 및 실패해도
-provider를 막지 않는 계약을 함께 재야 하므로 전략 변경 논의가 필요하다.
+provider를 막지 않는 계약을 함께 잰다. native 기록기 방식은 사용자 승인됐다.
 
 ## 공통 데이터 계약
 
@@ -148,3 +148,64 @@ Windows x86_64 test 모듈 cross compile은 통과했으나 Windows native 실�
 기존 훅 대비 latency 검증이다.
 
 전체 `check-targets`·`check-boundaries`, native build 및 문서 링크/행 인용 검사도 통과했다.
+
+## 2단계 native I/O 계약 — 진행
+
+`maru.agent_log_writer`는 caller가 이미 인증한 private directory handle을 받아
+basename만 다룬다. parent ownership/Windows ACL 검증은 directory를 제공하는
+상위 어댑터의 책임이다. 이름은 기존 nonce 클래스/상한을 사용한다.
+기록/회전 lock domain v1은 `maru.agent_log_writer.lock_slot_count`가 소유하는
+64개 고정 sibling 슬롯을 사용하고 삭제하지 않는다.
+`SHA256(name)[0] & 63`이 슬롯이며 경로는 `.maru-agent-log-lock-v1-<2hex>`다.
+이 관계는 버전 계약이며 변경은 live writer 이행이 필요하다. 서로 다른 이름의 충돌은
+일시적인 직렬화일 뿐 로그/generation을 합치지 않는다. 모든
+잠금은 nonblocking으로 취득하고 바쁜 경우 caller가 provider timeout 안에서
+재시도하거나 실패를 전파한다. 로그 open은 symlink를 따르지 않고 regular file,
+단일 hard link와 POSIX 0600을 확인한다. Windows mode와 ACL을 혼동하지 않는다.
+
+새 파일은 OS secure random generation의 헤더와 첫 이벤트를 private exclusive
+temp에 완성한 뒤 publish한다. append는 공유 잠금 아래 header/EOF/완전한 꼬리를
+확인하고 positional write한다. 쓰기 실패는 원래 길이로 rollback하며 rollback 실패는
+명시적인 오류다. 기존 empty/legacy/corrupt 파일을 자동 변환하지 않는다.
+rotate는 공유 잠금 아래 current generation/EOF를 다시 확인하고, 일치할 때만
+다른 세대의 완전한 헤더 파일로 교체한다. readSnapshot은 caller buffer를 채운 뒤
+잠금을 풀어 반환한다. OS transport/ACK 성공은 여전히 상위 caller의 책임이다.
+
+검증은 native test driver에서 실제 다중 프로세스 기록·잠금 holder 종료·snapshot 후
+append/교체·파일 실패와 latency를 확인한다. 이 driver는 테스트 전용이며 provider
+설정과 제품 CLI의 기록 경로는 아직 전환하지 않는다.
+
+## 2단계 native I/O 구현 결과
+
+`maru.agent_log_writer`는 macOS/Linux/Windows native target에서 공개한다.
+append/readSnapshot/rotate는 동일한 sibling lock을 사용하며 reader는 caller buffer에
+snapshot을 만든 뒤 lock과 file을 닫는다. 임시 파일은 실패 시 close 후 삭제한다.
+FIFO의 readonly open은 block할 수 있어 log open은 read/write 후 regular metadata를
+검사한다. 구형/불완전 로그, 복수 hard link와 POSIX 비공개 권한 위반을 거부한다.
+
+테스트 driver는 8개 프로세스의 200개 기록에서 누락/중복/세대 혼합 없음, lock holder
+SIGKILL 후 재사용, snapshot 후 append와 stale generation 회전 거부를 확인했다.
+POSIX symlink/hard link/FIFO 거부와 실제 RLIMIT_FSIZE 부분 쓰기·rollback도 확인했다.
+난수 실패·rename 실패·새 파일 partial write·rollback 실패는 기존 std.Io vtable
+주입으로 검증하며 공개 제품 env나 fault 토글은 추가하지 않는다.
+
+Linux 최초 실행은 테스트 tmpDir에 iterate 옵션이 빠져 목록 검사에서 BADF로 실패했다.
+macOS에서 우연히 동작하던 테스트의 capability 오류였고 iterate=true로 수정했다.
+Linux 단위/다중 프로세스 실행과 Windows cross compile이 통과했다. Windows native
+공유·ACL·rename 실행 검증은 아직 남아 있다.
+
+ReleaseFast 테스트 driver의 macOS 기록 호출 median은 약 3ms, plain sh printf는
+약 6ms였다. Debug는 약 9ms다. 이 값은 standalone driver이며 실제 provider 훅
+전체 latency 또는 제품 경로 수명 검증을 대신하지 않는다.
+
+제품 훅·CLI 기록 entrypoint와 스트리머는 아직 이 I/O에 연결하지 않았다. 상위
+adapter의 private directory 인증/Windows ACL과 설치 이행, source/control wire
+배선은 후속 단계다. 중단/전원 손실의 fsync durability와 peer ACK는 보장하지 않는다.
+
+최종 검토에서 per-name lock 파일은 stale 로그를 지워도 계속 남아 기존 파일 수
+관리와 충돌함을 발견했다. 제품 적용 전 64개 고정 슬롯 도메인으로 수정했다.
+slot algorithm/path golden과 여러 이름의 실제 파일 수를 검사한다.
+활성 lock을 unlink해 inode를 갈라 놓는 cleanup은 사용하지 않는다.
+
+최종 검증: macOS Debug/ReleaseFast와 실제 Linux 단위 112개 및 process 검사가 통과했다.
+Windows cross compile, native build, 전체 check-targets/check-boundaries와 문서 검사도 통과했다.

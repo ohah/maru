@@ -1,6 +1,6 @@
 # 프로젝트 바꾸기 — 여러 파일 적용 S4c
 
-상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일 배치는 미착수다.
+상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 모델 로드와 배치 worker/actor/UI 연결은 후속이다.
 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo는 [연결 이력 계획](editor-history-transaction.md)이 소유한다.
 [S4a/S4b](editor-project-replace-apply.md)는 단일 파일 적용까지 구현됐다.
 
@@ -122,6 +122,34 @@ worker와 snapshot의 allocator는 스레드 안전해야 하고 마지막 참�
 worker 카운터는 마지막 자원 해제가 끝난 뒤 감소하며 기존 미리보기의 종료 대기 집계에 포함한다.
 기존 bounded shutdown 정책을 무한 대기로 바꾸지 않는다. 열린 문서 UI가 job을 보관하고
 취소/닫기/해제 때 자기 참조를 놓는다. 테스트 종료 대기도 취소 후 마지막 worker 해제를 확인한다.
+
+## 닫힌 파일 읽기 준비
+
+`search/batch/disk.zig::Prepared.prepare`는 root capability·상대 경로·검색 때 본문 hash를 받는다.
+`verify.read`의 검증된 UTF-8 전문과 `verify.Proof`를 독립 소유하며, 마지막 파일 실패에도
+앞 파일의 bytes를 모두 해제한다. 입력은 호출 동안 유효해야 하며 worker에서 실행한다.
+새 detached worker를 만들거나 host 포인터를 빌리는 API가 아니다.
+
+Proof는 직접 연 regular file의 device/inode와 두 SHA-256을 담는다. 검색용 hash는 기존과
+같이 UTF-8 BOM을 제외하고, raw hash는 BOM까지 포함한다. 내용이 같은 다른 inode로의 교체와
+BOM 유무 변경을 재검증에서 구분한다. 읽기 마지막에는 같은 root 상대 경로를 다시 열어
+처음 handle의 신원과 비교한다. 이 검사는 이후 외부 변경을 잠그는 filesystem transaction이 아니다.
+
+여러 대상이 같은 device/inode를 가리키면 `AliasedTargets`, host가 넘긴 열린 문서 신원과
+겹치면 `PathOccupied`로 전체 준비를 거절한다. 자동 합치기나 열린 모델로의 임의 전환을 하지 않는다.
+현재 host는 이 API를 호출하지 않는다. 열린 문서의 물리 신원 수집·누락 없는 점유 목록·경로 정규화와
+로드 직전 재검증은 후속 연결의 책임이며, 이 API에 빈 점유 목록을 넘겨 제품 충돌 검증이 끝났다고
+판단해서는 안 된다. 읽기 경로의 기존 symlink 추적 정책을 변경하지 않는다.
+
+파일별·총 읽기 예산을 모든 대상에 적용하고 취소·잘못된 UTF-8·비정규 파일·root 교체를 거절한다.
+예산은 입력 bytes 한도이며 Plan/Undo/RSS 전체 상한이 아니다. BOM은 디스크 읽기 한도에 포함하며,
+합산 입력은 편집기 전문 bytes를 사용한다. `Prepared.validate`는 같은 순서의 대상으로 전문을
+다시 읽어 proof와 검색 hash를 검사한다. 이 API는 모델 예약·등록·편집·자동 저장을 하지 않는다.
+
+검증 명령은 `mise exec -- zig build test-editor-project-replace-batch-disk` (Debug/ReleaseFast)와
+`python3 tools/test-editor-replace-batch-disk-adversarial.py`다. 실제 파일 교체·BOM 변경·symlink/hardlink·
+열린 신원 점유·마지막 실패·총량/파일별 한도·취소·UTF-8·directory 및 모든 준비/재검증 할당 실패를 검사한다.
+검사 도중의 OS 파일 교체 타이밍·모든 파일시스템·제품 닫힌 파일 배치 완료를 증명하지 않는다.
 
 ## 제품 연결과 후속 범위
 

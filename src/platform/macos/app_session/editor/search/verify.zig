@@ -7,21 +7,38 @@ pub fn outstandingWorkers() usize {
     return workers.load(.acquire);
 }
 const Sha = std.crypto.hash.sha2.Sha256;
+/// 본문 hash는 기존 검색과 같이 BOM을 제외한다. 물리 신원과 raw hash는 파일 교체·BOM 변경을 구분한다.
+pub const Proof = struct {
+    identity: maru.session.file_tree.Identity,
+    hash: [32]u8,
+    raw_hash: [32]u8,
+    pub fn sameFile(self: Proof, other: Proof) bool {
+        return self.identity.eql(other.identity);
+    }
+    pub fn validate(self: Proof, current: Proof) !void {
+        if (!self.sameFile(current) or !std.mem.eql(u8, &self.raw_hash, &current.raw_hash)) return error.FileChanged;
+    }
+};
+pub const Read = struct { bytes: []u8, hash: [32]u8, proof: Proof };
+fn fileIdentity(stat: std.posix.Stat) maru.session.file_tree.Identity {
+    const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(stat.dev))) = @bitCast(stat.dev);
+    return .{ .device = device, .inode = stat.ino, .kind = 1 };
+}
 pub fn disk(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity) ![32]u8 {
-    return readInternal(a, io, root_path, path, control, max_bytes, expected, null);
+    return (try readInternal(a, io, root_path, path, control, max_bytes, expected, null)).hash;
 }
 /// 미리보기 전문도 navigation과 같은 root·regular file·변경 검사를 통과한 경우만 반환한다.
-pub fn read(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity) !struct { bytes: []u8, hash: [32]u8 } {
+pub fn read(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity) !Read {
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(a);
-    const hash = try readInternal(a, io, root_path, path, control, max_bytes, expected, &output);
+    const proof = try readInternal(a, io, root_path, path, control, max_bytes, expected, &output);
     const raw = try output.toOwnedSlice(a);
     defer a.free(raw);
     const text = if (std.mem.startsWith(u8, raw, maru.session.editor.document.utf8_bom)) raw[3..] else raw;
     if (!std.unicode.utf8ValidateSlice(text)) return error.NotUtf8;
-    return .{ .bytes = try a.dupe(u8, text), .hash = hash };
+    return .{ .bytes = try a.dupe(u8, text), .hash = proof.hash, .proof = proof };
 }
-fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity, output: ?*std.ArrayList(u8)) ![32]u8 {
+fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity, output: ?*std.ArrayList(u8)) !Proof {
     var root = try process.openRoot(a, io, root_path);
     defer root.deinit(a, io);
     const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(root.device))) = @bitCast(root.device);
@@ -36,6 +53,7 @@ fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: [
     if (before.mode & std.posix.S.IFMT != std.posix.S.IFREG) return error.UnsupportedFile;
     if (before.size < 0 or @as(u64, @intCast(before.size)) > max_bytes) return error.TooLarge;
     var sha = Sha.init(.{});
+    var raw_sha = Sha.init(.{});
     var buffer: [16 * 1024]u8 = undefined;
     var size: usize = 0;
     var prefix: [3]u8 = undefined;
@@ -50,6 +68,7 @@ fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: [
         }
         if (n == 0) break;
         const count: usize = @intCast(n);
+        raw_sha.update(buffer[0..count]);
         if (count > max_bytes -| size) return error.TooLarge;
         if (output) |bytes| try bytes.appendSlice(a, buffer[0..count]);
         var consumed: usize = 0;
@@ -70,7 +89,14 @@ fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: [
     var after: std.posix.Stat = undefined;
     if (std.c.fstat(fd, &after) != 0 or !std.meta.eql(before.mtime(), after.mtime()) or !std.meta.eql(before.ctime(), after.ctime()) or before.size != after.size or size != @as(u64, @intCast(after.size))) return error.FileChanged;
     try process.validateRoot(io, &root);
-    return sha.finalResult();
+    // 옛 fd를 읽는 동안 경로가 다른 inode로 교체되었으면 같은 bytes여도 거절한다.
+    const current_fd = std.c.openat(root.directory.handle, name, std.c.O{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
+    if (current_fd < 0) return error.FileChanged;
+    defer _ = std.c.close(current_fd);
+    var current: std.posix.Stat = undefined;
+    if (std.c.fstat(current_fd, &current) != 0 or !fileIdentity(before).eql(fileIdentity(current))) return error.FileChanged;
+    if (control.cancelled.load(.acquire)) return error.Cancelled;
+    return .{ .identity = fileIdentity(before), .hash = sha.finalResult(), .raw_hash = raw_sha.finalResult() };
 }
 pub const Loaded = struct {
     a: std.mem.Allocator,

@@ -114,6 +114,7 @@ pub const guides_client = @import("guides.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const project_replace_batch = @import("search/batch.zig");
+pub const project_replace_batch_disk = @import("search/batch/disk.zig");
 pub const project_replace_batch_worker = @import("search/batch/worker.zig");
 pub const linked_history = @import("history.zig");
 pub const workspace_edit_client = @import("workspace_edit.zig");

@@ -634,3 +634,8 @@ Ticket을 소유해 전체 Plan을 만드는 detached worker API다. caller/thre
 `src/platform/macos/app_session/editor/search/batch/ui.zig`는 완료한 열린 문서 결과를 수집하고
 worker·전체 actor 적용·파일별 저장 결과를 연결한다. 컴포넌트는 불변 표시 값만 받는다.
 닫힌 파일 로드의 미연결 범위는 [배치 계획](plans/editor-project-replace-batch.md)을 따른다.
+
+닫힌 파일 배치의 전문 수집·물리 별칭/점유 검증·전체 실패 정산은
+`src/platform/macos/app_session/editor/search/batch/disk.zig`가 소유한다.
+`src/platform/macos/app_session/editor/search/verify.zig::Proof`는 직접 연 파일 신원과 원문 hash를 결속한다.
+모델 로드·등록·commit은 이 읽기 준비 API의 책임이 아니다.

@@ -80,7 +80,18 @@ fn editorBatchAction(self: *AppSession, stage: u32) void {
             defer self.allocator.free(name);
             const path = std.fs.path.join(self.allocator, &.{root, name}) catch return;
             defer self.allocator.free(path);
-            std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = "pub fn sample_peer() void {}\n" }) catch return;
+            // 크기 실험은 일치 개수와 분리한다. 추가 본문은 검색어가 없는 주석이다.
+            const padding = std.fmt.parseInt(usize, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_PEER_BYTES") orelse "0"), 10) catch return;
+            const body = self.allocator.alloc(u8, "pub fn sample_peer() void {}\n".len + if (padding == 0) @as(usize, 0) else padding + 3) catch return;
+            defer self.allocator.free(body);
+            const prefix = "pub fn sample_peer() void {}\n";
+            @memcpy(body[0..prefix.len], prefix);
+            if (padding > 0) {
+                @memcpy(body[prefix.len..][0..2], "//");
+                @memset(body[prefix.len + 2 .. body.len - 1], 'x');
+                body[body.len - 1] = '\n';
+            }
+            std.Io.Dir.cwd().writeFile(self.io, .{ .sub_path = path, .data = body }) catch return;
             _ = editor_ops.openPathInActivePane(self, path) catch return;
         }
         d.preview.back(self);

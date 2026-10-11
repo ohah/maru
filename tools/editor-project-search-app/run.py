@@ -30,6 +30,10 @@ def main():
     parser.add_argument("--replace-batch", action="store_true")
     parser.add_argument("--replace-batch-save-retry", action="store_true")
     parser.add_argument("--batch-open-files", type=int, default=2)
+    parser.add_argument("--batch-peer-bytes", type=int, default=0)
+    parser.add_argument("--disk-padding-lines", type=int, default=5000)
+    parser.add_argument("--batch-save-delay-ms", type=int, default=0)
+    parser.add_argument("--timeout-seconds", type=int, default=60)
     parser.add_argument("--replace-preview", action="store_true")
     parser.add_argument("--replace-apply", action="store_true")
     parser.add_argument("--replace-disk-apply", action="store_true")
@@ -40,10 +44,13 @@ def main():
     parser.add_argument("--render-scale", type=int, choices=(1000, 2000), default=1000)
     parser.add_argument("--count", type=int, default=60)
     parser.add_argument("--disk-files", type=int, default=0)
+    parser.add_argument("--optimize", choices=("Debug", "ReleaseFast"), default="Debug")
     parser.add_argument("--app", type=Path, help="이 하네스로 빌드한 앱을 재사용한다")
     args = parser.parse_args()
     if not 2 <= args.batch_open_files <= 64:
         parser.error("Batch open-file measurement is bounded to 2..64")
+    if not 0 <= args.batch_peer_bytes <= 1048576 or not 0 <= args.disk_padding_lines <= 400000 or not 0 <= args.batch_save_delay_ms <= 50 or not 60 <= args.timeout_seconds <= 300:
+        parser.error("Measurement bounds: peer <=1MiB, disk padding <=400000 lines, delay <=50ms, timeout 60..300s")
     if args.replace_batch_save_retry:
         args.replace_batch = True
     if args.replace_batch:
@@ -127,7 +134,12 @@ def main():
             '    st.batch.phase = .ready;\n    std.debug.print("BATCH_PREPARE elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(self.io).nanoseconds - (batch_prepare_start_ns orelse 0)});'))
         batch_source.write_text(replace_once(batch_source.read_text(), "pub fn apply(self: *host.AppSession) !void {",
             'pub fn apply(self: *host.AppSession) !void {\n    const measured_start = std.Io.Clock.awake.now(self.io).nanoseconds;\n    defer std.debug.print("BATCH_APPLY elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(self.io).nanoseconds - measured_start});'))
-        command = ["mise", "exec", "--", "zig", "build", "macos-app-bundle", "-j2"]
+        save_source = source / "src/platform/macos/app_session/editor/search/batch.zig"
+        save_source.write_text(replace_once(save_source.read_text(), "    var result = initial;",
+            '    const save_start = std.Io.Clock.awake.now(session.io).nanoseconds;\n    defer std.debug.print("BATCH_SAVE elapsed_ns={d}\\n", .{std.Io.Clock.awake.now(session.io).nanoseconds - save_start});\n    var result = initial;'))
+        save_source.write_text(replace_once(save_source.read_text(), "        if (editor.saveDocument(session, term.?)) |_| {",
+            '        const delay = std.fmt.parseInt(u32, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS") orelse "0"), 10) catch 0;\n        if (delay > 0) std.Io.sleep(session.io, std.Io.Duration.fromMilliseconds(delay), .awake) catch {};\n        if (editor.saveDocument(session, term.?)) |_| {'))
+        command = ["mise", "exec", "--", "zig", "build", "macos-app-bundle", "-j2", "-Doptimize=" + args.optimize]
         print(root, flush=True)
         with (root / "build.log").open("wb") as log:
             subprocess.run(command, cwd=source, stdout=log, stderr=subprocess.STDOUT, check=True, timeout=1200)
@@ -146,7 +158,7 @@ def main():
     document = project / "symbols.zig"
     document.write_text("pub const Widget = struct {\n    pub fn first() void {}\n    pub fn second() void {}\n};\n\n" + "".join(f"pub fn sample{i:02}() void {{\n    const value = {i};\n    _ = value;\n}}\n\n" for i in range(args.count)))
     for index in range(args.disk_files):
-        (project / f"disk{index:04}.txt").write_text("sample disk\n" + "padding text\n" * 5000)
+        (project / f"disk{index:04}.txt").write_text("sample disk\n" + "padding text\n" * args.disk_padding_lines)
     if args.physical_ime:
         document.write_text("// 한글\n" + document.read_text())
     if args.unicode_field:
@@ -154,7 +166,7 @@ def main():
     if args.conflict_markers:
         document.write_text(document.read_text() + "\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n")
     peers = [project / ("peer.zig" if i == 1 else f"peer{i}.zig") for i in range(1, args.batch_open_files)] if args.replace_batch else []
-    peer_original = b"pub fn sample_peer() void {}\n"
+    peer_original = b"pub fn sample_peer() void {}\n" + (b"//" + b"x" * args.batch_peer_bytes + b"\n" if args.batch_peer_bytes else b"")
     original = document.read_bytes()
     disk_originals = {p: p.read_bytes() for p in project.glob("disk*.txt")}
     other = root / "other-project"
@@ -168,6 +180,8 @@ def main():
         MARU_NATIVE_EDITOR=str(document), MARU_FT_WINDOW_SIZE=args.window_size, MARU_EDITOR_PROJECT_SEARCH_SCALE=str(args.render_scale), MARU_EDITOR_PROJECT_SEARCH_MATRIX="1" if args.matrix else "0", MARU_EDITOR_PROJECT_REPLACE_PREVIEW="1" if args.replace_preview else "0", MARU_EDITOR_PROJECT_REPLACE_APPLY="1" if args.replace_apply else "0", MARU_EDITOR_PROJECT_REPLACE_DISK_APPLY="1" if args.replace_disk_apply else "0", MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE="1" if args.replace_ime_refuse else "0", MARU_EDITOR_PROJECT_REPLACE_MARKERS="1" if args.conflict_markers else "0", MARU_EDITOR_PROJECT_SEARCH_TINY="1" if args.narrow_hidden else "0", MARU_EDITOR_PROJECT_SEARCH_OTHER_ROOT=str(other), MARU_EDITOR_PROJECT_SEARCH_CAPTURE="1",
         MARU_EDITOR_PROJECT_SEARCH_OUTPUT=str(artifacts), MARU_EDITOR_PROJECT_SEARCH_DISK_FILES=str(args.disk_files), MARU_EDITOR_PROJECT_SEARCH_UNICODE="1" if args.unicode_field else "0", MARU_EDITOR_PROJECT_SEARCH_PHYSICAL="1" if args.physical_ime else "0", MARU_EDITOR_PROJECT_SEARCH_MODEL_MATCHES=str(args.count), MARU_EDITOR_PROJECT_SEARCH_EXPECTED=str(1 if args.unicode_field or args.physical_ime else args.count + args.disk_files), MARU_APP_SUMMARY_PATH=str(root / "summary.txt"))
     env["MARU_EDITOR_PROJECT_BATCH_OPEN_FILES"] = str(args.batch_open_files)
+    env["MARU_EDITOR_PROJECT_BATCH_PEER_BYTES"] = str(args.batch_peer_bytes)
+    env["MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS"] = str(args.batch_save_delay_ms)
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
     env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
     if args.physical_ime:
@@ -184,12 +198,12 @@ def main():
                 hid_log = (root / "hid.log").open("wb")
                 hid = subprocess.Popen([str(root / "hid"), str(child.pid), str(artifacts)], stdout=hid_log, stderr=hid_log)
             samples = []
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + args.timeout_seconds
             while child.poll() is None:
                 if hid is not None and hid.poll() not in (None, 0):
                     raise RuntimeError("Physical IME driver failed; inspect hid.log")
                 if time.monotonic() > deadline:
-                    raise subprocess.TimeoutExpired(str(app), 60)
+                    raise subprocess.TimeoutExpired(str(app), args.timeout_seconds)
                 measurement = subprocess.run(["ps", "-o", "rss=", "-p", str(child.pid)], capture_output=True, text=True)
                 if measurement.stdout.strip().isdigit():
                     samples.append(dict(seconds=time.monotonic(), rss_bytes=int(measurement.stdout.strip()) * 1024))
@@ -246,14 +260,15 @@ def main():
     metrics = dict(zip(("first_result_ns", "completion_ns", "main_search_tick_max_ns", "cancel_call_ns", "cancel_retire_ns"), map(int, match.groups())))
     metrics["peak_rss_bytes"] = max(sample["rss_bytes"] for sample in samples)
     metrics["pane_build_ns"] = [int(value) for value in re.findall(r"SEARCH_PANE_BUILD elapsed_ns=(\d+)", transcript)]
-    for label in ("CAPTURE", "PREPARE", "APPLY"):
+    for label in ("CAPTURE", "PREPARE", "APPLY", "SAVE"):
         metrics["batch_" + label.lower() + "_ns"] = [int(value) for value in re.findall(r"BATCH_" + label + r" elapsed_ns=(\d+)", transcript)]
+    metrics["batch_main_queue_ns"] = [int(value) for value in re.findall(r"BATCH_MAIN_QUEUE elapsed_ns=(\d+)", transcript)]
     metrics["batch_plans"] = [dict(zip(("files", "matches", "closed", "input_bytes", "output_bytes", "plan_rows"), map(int, values))) for values in re.findall(r"BATCH_READY files=(\d+) matches=(\d+) closed=(\d+) input_bytes=(\d+) output_bytes=(\d+) plan_rows=(\d+)", transcript)]
     if args.replace_batch and (not metrics["batch_apply_ns"] or not metrics["batch_plans"]):
         raise RuntimeError("Missing actual batch timing evidence")
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
-        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

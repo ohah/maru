@@ -4266,3 +4266,7 @@ Undo 보존과 결과 집계, 성공 반복·닫힌 문서 거절을 검사한�
 제품 Metal 화면은 기존 `tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --count 20`으로
 오른쪽/하단 결과의 선택 면과 전체 선택 적용·Undo를 확인하며, 일부 선택의 본문 범위는 RPBU10이 확인한다.
 물리 IME·VoiceOver의 증거로 해석하지 않는다.
+
+프로젝트 바꾸기 적용·저장 성능은 [실측 기록](plans/editor-project-replace-performance.md)과
+`tools/editor-project-search-app/measure.py`로 독립 byte oracle·동일 binary·phase 순서·실제 저장/Undo를 확인한다.
+main queue 대기는 FPS가 아니며, 지연 주입은 실제 원격 파일시스템의 측정이 아니다.

@@ -146,3 +146,8 @@ RPBU10은 두 열린 문서·닫힌 파일의 다섯 일치 중 두 개만 적�
 L2/Chrome 판정자는 접힌 파일·다른 root·일부 선택·전체 제외·OOM과 독립 면/세대/비활성 입력을 확인한다.
 `python3 tools/test-editor-replace-batch-ui-adversarial.py --selection`은 선택 무시·열린 문서 누락·닫힌 파일 누락·
 빈 대상 포함·전체 일치로 잘못 집계하는 결함과 정상/복원 대조군을 별도 소스에서 실행한다.
+
+## 적용·저장 스트레스 실측
+
+파일 수·본문 크기·저장 지연을 분리한 ReleaseFast 반복 실측은 [성능 기록](editor-project-replace-performance.md)이 소유한다.
+이 기록의 작은 Debug 표본과 다른 binary/입력이므로 하나의 수치로 합치지 않는다.

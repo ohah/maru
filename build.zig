@@ -4320,6 +4320,25 @@ pub fn build(b: *std.Build) void {
     const posix_host_tests = target.result.os.tag != .windows;
 
     const test_step = b.step("test", "Run all Zig tests");
+    const agent_log_writer_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/agent_log_writer_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_agent_log_writer_tests = b.addRunArtifact(agent_log_writer_tests);
+    b.step("test-agent-log-writer", "Run native generation writer locking, publish and rollback tests").dependOn(&run_agent_log_writer_tests.step);
+    test_step.dependOn(&run_agent_log_writer_tests.step);
+    const agent_log_writer_driver = b.addExecutable(.{ .name = "agent-log-writer-process", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/agent_log_writer_process.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const agent_log_writer_process = b.addSystemCommand(&.{ "python3", "tools/test-agent-log-writer.py", "--output-dir", "tests/artifacts/agent-log-writer", "--driver" });
+    agent_log_writer_process.addArtifactArg(agent_log_writer_driver);
+    agent_log_writer_process.has_side_effects = true;
+    agent_log_writer_process.setCwd(b.path("."));
+    b.step("test-agent-log-writer-process", "Run real multi-process native log writer recovery and latency checks").dependOn(&agent_log_writer_process.step);
+
     // Shared codec gates must run on every host; native writer locks are a later stage.
     const agent_log_generation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/agent_log_generation_test.zig"),

@@ -71,14 +71,16 @@ native 기록기 집중 검증은 `zig build test-agent-log-writer`이며 기본
 제품 기록 entrypoint는 `maru agent-hooks record --file=<absolute .ndjson path>`다.
 stdin의 완전한 `provider<TAB>payload<LF>` 한 줄을 기존 소유자 전용 0700 디렉터리에
 기록한다. POSIX만 인증하며 Windows ACL adapter 전에는 거부한다. 기존 provider에
-설치된 훅은 v1을 유지한다. 순수 계약은 `zig build test-agent-log-record`, 실제
+설치된 훅은 runtime format에 따라 기존 v1 append와 native v2 기록을 선택한다. 순수 계약은 `zig build test-agent-log-record`, 실제
 native 훅→제품 CLI 검증은 `zig build test-agent-log-record-process`이며 Ubuntu CI
 check에 포함된다. 같은 실제 프로세스 게이트가 format별 local/remote 경로, 잘못된 format의 완전한 stdin drain, 늦은 v1 append와 v2 파일 격리, native 실행 실패 시 fallback 금지를 검사한다. 결과는 `tests/artifacts/agent-log-record/`에만 남긴다.
 
 runtime 소유 format의 PTY 환경 경계는 `zig build test-agent-hook-runtime-format`으로
 부모 snapshot·명시 env·사용자 override·중복/빈/미지 값과 v1/v2 선택을 검사한다.
-POSIX 기본 test에 포함된다. macOS에서는 실제 PTY fork/exec 자식의 format도 검사하며 Linux에서는 이 물리 PTY case를 skip한다. 기본은 v1이며 명시적 v2 persistent 요청은 `runtime_agent_log_format_v1` capability를 협상한 host에만 허용한다.
+POSIX 기본 test에 포함된다. macOS에서는 실제 PTY fork/exec 자식의 format도 검사하며 Linux에서는 이 물리 PTY case를 skip한다. 하위 PTY API 기본은 v1이며 명시적 v2 persistent 요청은 `runtime_agent_log_format_v1` capability를 협상한 host에만 허용한다.
 `zig build test-agent-hook-host-metadata`는 host의 불변 format 저장, attach 확인, upgrade handoff와 실제 PTY 환경을 검사한다. Windows native 기록 활성화를 뜻하지 않는다.
+새 macOS GUI runtime은 native CLI·전용 디렉터리·설치 훅 이행이 준비된 경우 v2를 선택하며 구 host에서는 v1을 유지한다. `zig build test-agent-hook-native-default`는 실제 bundle·PTY·설치 명령으로 기존 v1과 새 v2를 함께 검사하고, 일반 파일·심볼릭 링크 CLI에서 GUI/CLI 설치 명령의 바이트가 같은지 대조한다. 설치된 provider 검증은 `python3 tools/test-agent-hook-native-default.py --test <local-reader-test> --cli <maru> --claude <claude> --codex <codex>`로 명시적으로 실행한다. 합성 설정과 읽기 전용 턴을 사용하며 인증 정보와 모델 출력은 결과에 남기지 않는다. SSH 전송은 v1이다.
+
 
 native 이행의 binary 수명은 같은 실제 기록 프로세스 게이트가 합성 앱 번들의
 동일 경로 atomic 교체·삭제·이동·새 경로로 재생성을 검사한다. 신뢰 갱신과

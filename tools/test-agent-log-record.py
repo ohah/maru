@@ -310,7 +310,7 @@ try:
     summary = dict(cases=len(results), native_hook_median_seconds=statistics.median(calls),
                    native_hook_max_seconds=max(calls), legacy_hook_median_seconds=statistics.median(baseline),
                    uid_rejection_tested=os.geteuid() == 0,
-                   product_installation_unchanged=True)
+                   unspecified_format_is_legacy=True)
     (output / 'summary.json').write_text(json.dumps(summary, indent=2))
     print(json.dumps(summary))
 finally:

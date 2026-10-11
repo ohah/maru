@@ -18,6 +18,7 @@ golden="$root/tests/golden/agent_hook_command.sh"
 fail_early() { echo "FAIL: $1" >&2; exit 1; }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/maru-hook-cmd.XXXXXX")
+work=$(cd "$work" && pwd -P)
 trap 'rm -rf "$work"' EXIT
 logdir="$work/events"
 # 커맨드는 `<base>/<인스턴스>/<pane>.ndjson` 에 쓴다 — maru 를 두 개 띄워도 이름이 안 겹치게 하는 칸이다.
@@ -511,7 +512,7 @@ grep -qF "\"$ppid_key\":$$," "$evdir/23.ndjson" || fail "상한 payload 에 부�
 grep -qF '"last_assistant_message":"xxx' "$evdir/23.ndjson" || fail "상한에 딱 맞는 payload 를 접었다(칸 자리 계산이 틀렸다)"
 pass "codex 상한 payload + 칸 ≤ 줄 상한"
 
-echo "8) 원격 설치기(maru agent-hooks)가 심는 바이트는 이 fixture 를 HOME 규칙으로 채운 것과 같다 — 핑퐁의 부재 (RA8)"
+echo "8) 원격 설치기(maru agent-hooks)의 local/remote v1/v2 실제 기록과 멱등성 — HOME 규칙 (RA8)"
 # 로컬 GUI 설치기는 빌더 + HOME 규칙으로 커맨드를 만들고 이 fixture 는 그 빌더에서 나온다. 원격 CLI 가 같은 바이트를
 # 쓰는지는 **제품 바이너리**로만 알 수 있다. 바이너리가 없으면 «못 쟀다» 로 적는다(SKIP — 초록으로 세지 않는다).
 # 빌드 스텝(`zig build check-agent-hook-command` · `zig build test`)은 **방금 빌드한** 바이너리를 첫 인자로 넘긴다.
@@ -530,7 +531,6 @@ if [ -x "$maru_bin" ]; then
   env HOME="$cli_home" XDG_CACHE_HOME="$work/should-be-ignored" \
     "$maru_bin" agent-hooks install --provider=claude --scope=remote --dir="$cli_home/.cache/maru/remote-agent-events" >/dev/null 2>"$work/cli.err" \
     || fail "maru agent-hooks 가 실패했다: $(cat "$work/cli.err")"
-  expected=$(sed "s|__LOG_DIR__|$cli_home/.cache/maru/agent-turn-events|g; s|__REMOTE_LOG_DIR__|$cli_home/.cache/maru/remote-agent-events|g" "$golden")
   actual=$(python3 - "$cli_home/.claude/settings.json" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1]))
@@ -539,7 +539,49 @@ assert len(cmds)==1, cmds
 print(next(iter(cmds)), end="")
 PY
 )
-  [ "$actual" = "$expected" ] || { printf '%s\n' "$actual" > "$work/actual.sh"; printf '%s\n' "$expected" > "$work/expected.sh"; diff "$work/expected.sh" "$work/actual.sh" | head -5 >&2; fail "원격 CLI 가 심은 커맨드가 HOME 규칙 fixture 와 다르다(핑퐁이 되살아난다)"; }
+  # Installed commands now select the pinned runtime format. Keep the legacy
+  # golden oracle above, and independently inspect real installed v1/v2 output.
+  printf '%s' "$actual" > "$work/installed.sh"
+  python3 - "$cli_home" "$work/installed.sh" "$maru_bin" <<'PYCODE'
+from pathlib import Path
+import os, shlex, subprocess, sys
+home, command_path, binary = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]).resolve()
+command = command_path.read_text()
+assert str(binary) in shlex.split(command), 'installed producer is not the canonical product CLI'
+roots = [home / '.cache/maru' / name for name in
+         ('agent-turn-events', 'remote-agent-events', 'agent-turn-events-v2', 'remote-agent-events-v2')]
+data = b'{"hook_event_name":"UserPromptSubmit","prompt":"installed transition"}\n'
+expected = b'claude\t' + data
+for local, native in ((True, False), (True, True), (False, False), (False, True)):
+    env = os.environ.copy()
+    for key in ('MARU_HOOK_INSTANCE', 'MARU_HOOK_PANE', 'MARU_AGENT_LOG_FORMAT',
+                'LC_MARU_PANE', 'LC_MARU_LOG_FORMAT', 'TMUX_PANE'):
+        env.pop(key, None)
+    if local:
+        pane = '102' if native else '101'
+        env.update(MARU_HOOK_INSTANCE='42', MARU_HOOK_PANE=pane)
+        if native: env['MARU_AGENT_LOG_FORMAT'] = '2'
+        path = roots[2 if native else 0] / '42' / (pane + '.ndjson')
+    else:
+        pane = 'nativenonce' if native else 'legacynonce'
+        env['LC_MARU_PANE'] = pane
+        if native: env['LC_MARU_LOG_FORMAT'] = '2'
+        path = roots[3 if native else 1] / (pane + '.ndjson')
+    # Runtime owners prepare their instance directories before any hook runs.
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if native:
+        assert roots[2 if local else 3].stat().st_mode & 0o777 == 0o700
+    run = subprocess.run(['/bin/sh', '-c', command], input=data, env=env, capture_output=True, timeout=2)
+    assert run.returncode == 0 and not run.stdout and not run.stderr, 'installed hook output/exit changed'
+    output = path.read_bytes()
+    if native:
+        header, output = output.split(b'\n', 1)
+        magic, generation = header.split(b'\t')
+        assert magic == b'MARU_AGENT_LOG_V2' and len(generation) == 32
+        assert all(c in b'0123456789abcdef' for c in generation)
+        assert path.stat().st_mode & 0o777 == 0o600
+    assert output == expected, 'installed hook routed or serialized a different record'
+PYCODE
   # XDG 를 무시했다 — 그 자리는 안 만든다. 두 자리는 만든다(0700).
   [ ! -d "$work/should-be-ignored" ] || fail "원격 CLI 가 XDG_CACHE_HOME 을 봤다"
   [ -d "$cli_home/.cache/maru/agent-turn-events" ] || fail "원격 CLI 가 로컬 자리를 안 만들었다"
@@ -548,7 +590,7 @@ PY
   before_sum=$(cksum < "$cli_home/.claude/settings.json")
   env HOME="$cli_home" "$maru_bin" agent-hooks install --provider=claude --scope=remote --dir="$cli_home/.cache/maru/remote-agent-events" >/dev/null 2>&1 || fail "두 번째 설치가 실패했다"
   [ "$(cksum < "$cli_home/.claude/settings.json")" = "$before_sum" ] || fail "같은 바이트인데 두 번째 설치가 파일을 다시 썼다"
-  pass "원격 CLI 바이트 = fixture(HOME 규칙) · XDG 무시 · 두 자리 생성 · 재설치 무변경"
+  pass "설치된 local/remote v1/v2 기록(HOME 규칙) · canonical CLI · XDG 무시 · 재설치 무변경"
 else
   skip "원격 CLI 바이트 대조 — zig-out/bin/maru 가 없다(**안 쟀다**; \`zig build\` 뒤 다시 돌리면 잰다)"
 fi

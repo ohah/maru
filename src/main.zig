@@ -14323,7 +14323,11 @@ fn runAgentHooks(
         }
         var cmd: std.ArrayListUnmanaged(u8) = .empty;
         defer cmd.deinit(allocator);
-        hook_command.build(&cmd, allocator, opts.provider.tag(), local_dir, opts.dir) catch {
+        const raw_executable = try std.process.executablePathAlloc(io, allocator);
+        defer allocator.free(raw_executable);
+        const executable = try std.Io.Dir.realPathFileAbsoluteAlloc(io, raw_executable, allocator);
+        defer allocator.free(executable);
+        hook_command.buildInstalled(&cmd, allocator, opts.provider.tag(), local_dir, opts.dir, home_for_dirs, executable) catch {
             try stderr.writeAll("maru agent-hooks: could not build the hook command\n");
             try stderr.flush();
             std.process.exit(1);
@@ -14336,6 +14340,13 @@ fn runAgentHooks(
         setDirMode0700(opts.dir);
         std.Io.Dir.cwd().createDirPath(io, local_dir) catch {};
         setDirMode0700(local_dir);
+
+        if (opts.action == .install) for ([_]hook_command.log_profile.Scope{ .local, .remote }) |scope| {
+            if (try hook_command.log_profile.dirAlloc(allocator, home_for_dirs, scope, .v2)) |native_dir| {
+                defer allocator.free(native_dir);
+                if (maru.agent_log_record.createPrivateDirectory(io, native_dir)) |held| held.close(io) else |_| {}
+            }
+        };
 
         const hooks_path = try std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ config_dir, install.hooksFileName(opts.provider) }, 0);
         defer allocator.free(hooks_path);

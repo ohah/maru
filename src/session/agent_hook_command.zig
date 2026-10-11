@@ -542,6 +542,16 @@ pub fn buildTransition(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allo
     return buildImpl(out, allocator, provider, legacy_local, legacy_remote, executable, native_dirs);
 }
 
+/// Both GUI and CLI installers use this exact generator. Existing shells lack
+/// the pinned v2 env and retain legacy append, including remote SSH sessions.
+pub fn buildInstalled(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, provider: []const u8, local_dir: []const u8, remote_dir: []const u8, home: ?[]const u8, executable: []const u8) !void {
+    const native_local = (try log_profile.dirAlloc(allocator, home, .local, .v2)) orelse return error.InvalidLogDirectory;
+    defer allocator.free(native_local);
+    const native_remote = (try log_profile.dirAlloc(allocator, home, .remote, .v2)) orelse return error.InvalidLogDirectory;
+    defer allocator.free(native_remote);
+    try buildTransition(out, allocator, provider, local_dir, remote_dir, .{ .local = native_local, .remote = native_remote }, executable);
+}
+
 fn appendTransitionRoot(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, legacy: []const u8, native: []const u8, env: []const u8) !void {
     try out.print(allocator, "mh_log_format=\"${{{s}-1}}\"; case \"$mh_log_format\" in 1) mh_log_root=", .{env});
     try appendQuoted(out, allocator, legacy);

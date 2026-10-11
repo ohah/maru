@@ -4446,8 +4446,18 @@ pub const RemoteTermBackend = struct {
         return &rr.surface;
     }
 
-    /// handle의 host runtime_id(hex)를 돌려준다 — workspace capture가 저장해 재실행 시 `attachTerm`으로 재접속한다(§7, e3-5).
-    /// 없으면(원격 아님·미등록) null.
+    /// Read the selected spawn owner's negotiated capability without a new RPC.
+    pub fn supportsHookLogFormatForSpawn(self: *RemoteTermBackend) bool {
+        if (self.mode == .attach_only) return false;
+        if (self.host_pool) |pool| {
+            const adapter = pool.spawnHost() orelse return false;
+            return adapter.generationCapabilities().agent_log_format;
+        }
+        const client = self.client orelse return false;
+        return client.attachment_capabilities.peer_agent_log_format;
+    }
+
+    /// Confirmed immutable hook profile; null for an unregistered runtime.
     pub fn runtimeHookLogProfile(self: *RemoteTermBackend, handle: RuntimeHandle) ?maru.session.agent_log_profile.Profile {
         const entry = self.runtimes.get(handle) orelse return null;
         return entry.runtime.hook_log_profile;

@@ -616,6 +616,14 @@ pub fn createTerm(
             if (rb.attachedAsObserver(id)) self.observer_attach_notice_pending = true;
             break :surface attached;
         }
+        // Only fresh runtimes adopt the new default. Restore has already attached
+        // its immutable owner format above, including existing v1 runtimes.
+        var persistent_support: ?bool = null;
+        if (is_macos) if (app_session_mod.app_remote_backend) |*remote| {
+            if (be.ctx == remote.backend().ctx)
+                persistent_support = remote.supportsHookLogFormatForSpawn();
+        };
+        req.hook_log_profile = try agent_ops.prepareNewHookLogProfile(self, req.hook_log_profile, persistent_support);
         break :surface be.spawn(.{
             .handle = id,
             .request = req,
@@ -704,6 +712,10 @@ pub fn createTerm(
     errdefer self.allocator.destroy(term);
     term.* = .{};
     term.surface = surface; // backend가 init한 번들 슬롯 surface를 참조(소유는 registry)
+    term.agent_hook_log_profile = if (surface.remote != null) blk: {
+        const remote = if (app_session_mod.app_remote_backend) |*value| value else return error.PersistentRuntimeUnavailable;
+        break :blk remote.runtimeHookLogProfile(id) orelse return error.PersistentRuntimeUnavailable;
+    } else req.hook_log_profile;
     term.rt.handle = id; // opaque runtime handle(= surface_id, in-process) — 이후 backend 호출의 라우팅 키
     term.rt.live_initialized = true;
     term.rt.restored_existing = reconnected;

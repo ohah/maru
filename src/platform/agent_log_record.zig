@@ -7,14 +7,20 @@ const cli = @import("../cli/agent_log_record.zig");
 const event = @import("../session/agent_hook_event.zig");
 
 pub fn openPrivateDirectory(io: std.Io, path: []const u8) !std.Io.Dir {
-    return openDirectory(io, path, false);
+    return openDirectory(io, path, false, false);
 }
 
 pub fn openPrivateDirectoryIterable(io: std.Io, path: []const u8) !std.Io.Dir {
-    return openDirectory(io, path, true);
+    return openDirectory(io, path, true, false);
 }
 
-fn openDirectory(io: std.Io, path: []const u8, iterate: bool) !std.Io.Dir {
+/// Create through held nofollow handles, then authenticate the final owner.
+/// Never chmod a pathname: a symlink race must not change another directory.
+pub fn createPrivateDirectory(io: std.Io, path: []const u8) !std.Io.Dir {
+    return openDirectory(io, path, false, true);
+}
+
+fn openDirectory(io: std.Io, path: []const u8, iterate: bool, create_missing: bool) !std.Io.Dir {
     if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.UnsupportedPlatform;
     if (path.len == 0 or path[0] != '/') return error.UnsafeDirectory;
     var held = try std.Io.Dir.cwd().openDir(io, "/", .{ .follow_symlinks = false });
@@ -22,7 +28,18 @@ fn openDirectory(io: std.Io, path: []const u8, iterate: bool) !std.Io.Dir {
     var parts = std.mem.splitScalar(u8, path[1..], '/');
     while (parts.next()) |part| {
         if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return error.UnsafeDirectory;
-        const next = try held.openDir(io, part, .{ .follow_symlinks = false, .iterate = iterate and parts.peek() == null });
+        // Linux non-iterable directories use O_PATH; fchmod cannot act on that fd.
+        // Open only the final mode-write handle for reading, still with nofollow.
+        const needs_mode_write = create_missing and builtin.os.tag == .linux;
+        const options: std.Io.Dir.OpenOptions = .{ .follow_symlinks = false, .iterate = (iterate or needs_mode_write) and parts.peek() == null };
+        const next = held.openDir(io, part, options) catch |err| blk: {
+            if (!create_missing or err != error.FileNotFound) return err;
+            held.createDir(io, part, .fromMode(0o700)) catch |create_err| switch (create_err) {
+                error.PathAlreadyExists => {},
+                else => return create_err,
+            };
+            break :blk try held.openDir(io, part, options);
+        };
         held.close(io);
         held = next;
     }
@@ -30,7 +47,9 @@ fn openDirectory(io: std.Io, path: []const u8, iterate: bool) !std.Io.Dir {
         // Io.Stat has no uid. Stat this same handle, not a second path lookup.
         var stat: std.c.Stat = undefined;
         if (std.c.fstat(held.handle, &stat) != 0) return error.DirectoryStatFailed;
-        if (stat.uid != std.c.geteuid() or stat.mode & 0o7777 != 0o700) return error.UnsafeDirectory;
+        if (stat.uid != std.c.geteuid()) return error.UnsafeDirectory;
+        if (create_missing and std.c.fchmod(held.handle, 0o700) != 0) return error.UnsafeDirectory;
+        if (!create_missing and stat.mode & 0o7777 != 0o700) return error.UnsafeDirectory;
     } else if (builtin.os.tag == .linux) {
         // Zig 0.16 exposes Linux metadata via statx, including on architectures
         // without the old fstat syscall. EMPTY_PATH authenticates the held fd.
@@ -39,7 +58,9 @@ fn openDirectory(io: std.Io, path: []const u8, iterate: bool) !std.Io.Dir {
         const mask: linux.STATX = .{ .UID = true, .MODE = true };
         if (linux.errno(linux.statx(held.handle, "", linux.AT.EMPTY_PATH, mask, &stat)) != .SUCCESS) return error.DirectoryStatFailed;
         if (!stat.mask.UID or !stat.mask.MODE) return error.DirectoryStatFailed;
-        if (stat.uid != linux.geteuid() or stat.mode & 0o7777 != 0o700) return error.UnsafeDirectory;
+        if (stat.uid != linux.geteuid()) return error.UnsafeDirectory;
+        if (create_missing and std.c.fchmod(held.handle, 0o700) != 0) return error.UnsafeDirectory;
+        if (!create_missing and stat.mode & 0o7777 != 0o700) return error.UnsafeDirectory;
     }
     return held;
 }

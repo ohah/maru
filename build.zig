@@ -2000,10 +2000,20 @@ pub fn build(b: *std.Build) void {
     const run_local_agent_log_reader_tests = b.addRunArtifact(local_agent_log_reader_tests);
     run_local_agent_log_reader_tests.setCwd(b.path("."));
     run_local_agent_log_reader_tests.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.native local reader");
-    run_local_agent_log_reader_tests.addArg("--maru-expect-tests=6");
+    run_local_agent_log_reader_tests.addArg("--maru-expect-tests=7");
     run_local_agent_log_reader_tests.addArg("--maru-expect-passed=1");
     const local_agent_log_reader_step = b.step("test-local-agent-log-reader", "Run native local log generation AppSession fixture");
     local_agent_log_reader_step.dependOn(&run_local_agent_log_reader_tests.step);
+
+    if (target.result.os.tag == .macos) {
+        const native_default_carrier = b.addSystemCommand(&.{ "python3", "tools/test-agent-hook-native-default.py", "--test" });
+        native_default_carrier.addArtifactArg(local_agent_log_reader_tests);
+        native_default_carrier.addArg("--cli");
+        native_default_carrier.addArtifactArg(exe);
+        native_default_carrier.setCwd(b.path("."));
+        b.step("test-agent-hook-native-default", "Verify bundled CLI defaults and live legacy coexistence").dependOn(&native_default_carrier.step);
+        macos_only_test_step.dependOn(&native_default_carrier.step);
+    }
 
     // **teardown UAF 값 판정자**(TAB-UAF·PANE-UAF). 전체 ABI suite 가 PR 에서 이것들을 돌리지만 샤드로 도는 무거운
     // 스텝이라, 탭·pane·Term 해제 순서를 고칠 때 빠르게 되먹이도록 전용 step 을 둔다. 글자 판정(푼 것을 목록에 남기는

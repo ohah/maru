@@ -1310,15 +1310,6 @@ pub fn collectAgentSessionDock(
     const items = buildAgentSessionDockItems(self, arena, scroll_projection) catch return;
     const dock_scale_milli = agentSessionDockScaleMilli(self);
     const props = agentSessionDockProps(self, content, scroll_projection, items);
-    var expansion_actions: usize = 0;
-    var expansion_turns: usize = 0;
-    for (items) |item| switch (item) {
-        .group => {},
-        .card => |card| if (card.expanded) |expanded| {
-            expansion_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
-            expansion_turns += expanded.turns.len;
-        },
-    };
     // 버퍼 크기는 **build가 소유한다**. 여기서 같은 산술을 다시 쓰면 둘이 갈리는 날 build가
     // `InsufficientNodeBuffer`로 실패하고, 아래 `catch return`이 그것을 삼켜 도크가 통째로 멈춘다.
     const sizes = chrome.components.session_dock.build.bufferSizes(items);
@@ -1331,28 +1322,12 @@ pub fn collectAgentSessionDock(
         .actions = arena.alloc(chrome.components.session_dock.ids.Entry, sizes.actions) catch return,
     }) catch return;
 
-    // Card quad + text op capacity: fixed header/scope/search cards plus either one item
-    // quad and title/summary/provider/metadata/disclosure text runs per projection item, or nine inert initial-loading
-    // skeleton stripes. Keep the placeholder budget explicit so the first scan cannot
-    // silently drop its loading affordance through a fixed-capacity overflow.
-    // B1-button-a emits the registered SVG icon and the measured action label as two
-    // semantic ops. Reserve both before the view runs: dropping only the label on a full
-    // fixed buffer would leave an enabled-looking icon with no command text.
-    // generic paint의 quad는 published entry 하나당 최대 하나다. 이 몫을 상수로 세면 tree가
-    // 자라는 변경마다 조용히 모자라는데, 그 결과가 "그 컴포넌트만 안 그려짐"이 아니라 **도크 전체
-    // 정지**다 — `view`가 실패하면 아래 `publishAgentSessionDockFrame`까지 못 가서 hit tree가
-    // 이전 프레임에 멈춘다(scrollbar를 추가하다 실제로 겪었다). 그래서 entry 수에서 유도한다.
-    const paint_quad_budget = frame.tree.entries.len;
-    // +1은 header의 정렬 토글 label이다.
-    const text_op_budget = 22 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4;
-    const ops = arena.alloc(chrome.draw.Op, paint_quad_budget + text_op_budget) catch return;
-    // 카드 하나가 쓰는 run 상한: title·summary·provider·chevron 넷에 **메타 줄의 세그먼트 넷과 그 사이
-    // 구분자 셋**(개수·시각·모델·서브에이전트)이 더해져 11이다. 메타는 op 하나지만 run 은 여럿이라
-    // (한 줄 안의 색 위계 — `chrome.draw.Run`), 이 몫을 op 예산과 같은 값으로 두면 카드가 몇 개만
-    // 늘어도 `view` 가 `InsufficientRunBuffer` 로 실패한다. 그 결과는 "메타 줄만 빠짐"이 아니라
-    // **도크 전체 정지**다(위 paint_quad_budget 주석과 같은 실패 양식). 여유 1을 더해 12로 잡는다.
-    const runs = arena.alloc(chrome.draw.Run, 10 + items.len * 12 + expansion_actions * 2 + expansion_turns * 2 + 4) catch return;
-    const text_bytes = arena.alloc(u8, 1024 + items.len * 1024 + expansion_turns * 1024) catch return;
+    // 그리기 예산은 컴포넌트가 소유한다(`session_dock.view.drawBufferSizes` — 몫마다의 근거는 그 doc). Windows 도 같은 것을 부른다
+    // (layering §3.5) — 모자라면 `view` 가 실패해 아래 `publishAgentSessionDockFrame` 까지 못 가고 hit tree 가 이전 프레임에 멈춘다.
+    const draw_sizes = chrome.components.session_dock.view.drawBufferSizes(items, frame.tree.entries.len);
+    const ops = arena.alloc(chrome.draw.Op, draw_sizes.ops) catch return;
+    const runs = arena.alloc(chrome.draw.Run, draw_sizes.runs) catch return;
+    const text_bytes = arena.alloc(u8, draw_sizes.text_bytes) catch return;
     const tokens = self.buildChromeTokens();
     const draws = chrome.components.session_dock.view.view(props, frame, self.agent_session_dock_interaction, &tokens, .{
         .ops = ops,

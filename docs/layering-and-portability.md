@@ -220,6 +220,9 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 |---|---|
 | 터미널 마우스 규칙 넷(수정자 비트 값·셸 리포트 override·블록 선택·command 마스킹) | Windows `win32_mouse.zig`(W7.4d)가 macOS `app_session.zig` 의 인라인 판정을 「읽어 와」 따로 적었다 — **고쳤다**(2026-10-11): 뜻은 `session/mouse_rules.zig` 하나가 소유하고 두 호스트가 부른다 |
 | 선택 띠 산술 | 중립 `selection_marks.build`(W8 §2m.25)를 새로 쓰고 macOS `buildSelectionMarks` 는 그대로 두었다 — **고쳤다**(2026-10-11): 겹치던 것은 「한 행 안에서 선택을 자르는」 산술이고, 그것을 `selection_marks.markInSpan` 하나로 빼 두 호스트가 부른다(macOS 의 다중 커서 병합 훑기·조합 투영·접힘 축은 macOS 에만 있어 사본이 아니다) |
+| 키 이벤트 → 크롬 위젯 키 이벤트의 표 | macOS `chromeInputFromKeyEvent` 와 Windows `chromeKeyEvent` 가 「같은 표여야 한다」고 적어 둔 채 각자 들었다 — **고쳤다**(2026-10-12): `app/chrome_key.zig`(chrome 은 terminal 을, session 은 chrome 을 몰라 둘을 다 아는 L4 중립 런타임에 둔다) |
+| 도크 divider 잡기 오프셋 | 중립 `dock_layout.grabOffsetPx` 를 Windows 만 부르고 macOS 는 같은 식을 인라인으로 적었다 — **고쳤다**(2026-10-12) |
+| 에이전트 도크 그리기 예산 | Windows 가 macOS 의 식을 「같은 식」이라며 옮겨 적었고, macOS 가 나중에 더한 펼침 몫이 빠진 채 갈라졌다(지금 상한 — turn 셋 · 480 byte — 에서는 버텼다) — **고쳤다**(2026-10-12): `session_dock.view.drawBufferSizes` |
 
 규칙을 지킨 선례도 있다 — [windows-platform.md](windows-platform.md) §2m.24(히트테스트 — macOS `hitTestBody` 가 줄었다)와
 §2m.112(구문 색 — macOS `syntax.zig` 에서 통째로 옮겼다).

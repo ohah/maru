@@ -171,6 +171,10 @@ const boundary_scans: []const BoundaryScan = &.{
     // 디렉터리를 직접 훑는다 — 앞선 판정자가 금지 목록 + 등록 개수라서 무력했던 실측을 그 파일이 적어 뒀다.
     .{ .root = "tests/boundary/ssh_sans_io.zig" },
 
+    // sans-io: L4 에서 옮긴 편집 판정(`src/session/editor/ops/`)이 OS 를 만지는가. session 경계는 `std.c`·`std.Io` 를
+    // 안 막아서 이 폴더만큼은 따로 막는다(docs/plans/app-session-portability.md §1.5). 폴더를 직접 훑는다.
+    .{ .root = "tests/boundary/editor_ops_sans_io.zig" },
+
     // i18n 2차 방어: 번역 대상 레이어에 새 한국어 리터럴이 들어오지 않는가. 1차(파라미터 타입)를
     // 세울 수 없는 sink가 남으므로(정적·동적이 섞이는 컬렉션 — 계약 §7.2) 거기서는 이 검사가 유일한
     // 방어다. 개수 원장이라 늘어도 줄어도 실패한다(줄면 원장을 함께 줄이라는 뜻).

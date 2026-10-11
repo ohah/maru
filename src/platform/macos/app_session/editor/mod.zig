@@ -101,6 +101,7 @@ pub const rename_client = @import("rename.zig");
 pub const completion_client = @import("completion.zig");
 pub const code_action_client = @import("code_action.zig");
 pub const semantic_client = @import("semantic.zig");
+const line_ops = maru.session.editor.line_ops;
 pub const fold_lsp_client = @import("fold_lsp.zig");
 pub const inlay_client = @import("inlay.zig");
 pub const symbols_client = @import("symbols.zig");
@@ -9687,151 +9688,16 @@ fn cutChosen(self: *AppSession, term: *Term) bool {
     return true;
 }
 
-/// **주석 토글**(§3.7) — selection이 걸친 줄 전체를 한 번에 뒤집는다.
-///
-/// **"하나라도 주석이 아니면 전부 주석"**(VSCode 관례를 §3.7이 채택했다). 섞여 있을 때 "전부
-/// 해제"로 가면 **주석이던 줄이 코드가 되어** 사용자가 의도하지 않은 실행이 생긴다 — 반대 방향은
-/// 되돌리기 쉽고 이쪽은 아니다.
-///
-/// **언어를 모르면 아무 일도 안 한다**(그 절이 그렇게 정했다). 모르는 파일에 아무 문법이나 넣으면
-/// 사용자가 **그 언어에 없는 문자**를 문서에 박는다.
-///
-/// **한 번의 토글은 undo 하나다** — 커서가 N개여도 `delta.apply` 한 번이다(§3.3).
-/// 커서들이 **걸친 줄 번호**(중복 없이 오름차순). 줄 조작 넷과 주석 토글이 **같은 답**을 써야 한다
-/// — 갈리면 `⌘/` 로 주석 처리한 범위와 `⇧⌘K` 로 지우는 범위가 달라진다(§3.9a).
-///
-/// **선택이 다음 줄 머리에서 끝나면 그 줄은 뺀다.** 줄 전체를 끌어 고르면 끝이 다음 줄 offset 0이
-/// 되는데, 그대로 넣으면 **고르지 않은 줄이 딸려 온다**(2026-08-27 실측 — `[0,2)`로 첫 줄만 골랐는데
-/// 둘째 줄까지 갔다). VSCode·Xcode 가 같은 자리에서 뺀다.
-///
-/// **중복은 정렬 뒤 인접 비교로 지운다.** 넣을 때마다 앞을 훑으면 O(n²)이고 커서는 `⌘⌃D` 로 수천
-/// 개가 된다(4,000개에서 비교 800만 번을 실측했다). 한 줄에 커서가 여럿이어도 **한 번만** 세야 —
-/// 두 번 세면 주석은 `////` 가 되고 줄 이동은 **두 칸** 움직인다.
-fn selectedLineNumbers(self: *AppSession, term: *Term, out: *std.ArrayList(usize)) bool {
-    const doc = term.rt.editorDocument().opened orelse return false;
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-    var iter = selections(term);
-    if (iter.count() == 0) return false;
-    while (iter.next()) |sel| {
-        const s_off = @min(sel.start(), content.len);
-        var e_off = @min(sel.end(), content.len);
-        if (e_off > s_off) {
-            const e_line = lines.lineAt(e_off);
-            if (lines.line(e_line)) |l| {
-                if (l.start == e_off) e_off -= 1;
-            }
-        }
-        const lo = lines.lineAt(s_off);
-        const hi = lines.lineAt(e_off);
-        var n = lo;
-        while (n <= hi) : (n += 1) out.append(self.allocator, n) catch return false;
-    }
-    if (out.items.len == 0) return false;
-    std.mem.sort(usize, out.items, {}, std.sort.asc(usize));
-    var w: usize = 0;
-    for (out.items, 0..) |n, i| {
-        if (i == 0 or n != out.items[w - 1]) {
-            out.items[w] = n;
-            w += 1;
-        }
-    }
-    out.shrinkRetainingCapacity(w);
-    return true;
-}
-
+/// **주석 토글**(§3.7) — 판정은 L2 `line_ops.planToggleComment` 가 소유한다(하나라도 주석이 아니면 전부 주석, 빈 줄은
+/// 건너뛰고, 표식은 들여쓰기 뒤). **언어를 모르면 아무 일도 안 한다** — 모르는 파일에 아무 문법이나 넣으면 그 언어에 없는
+/// 문자가 박힌다. **한 번의 토글은 undo 하나다**(§3.3).
 pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
-    if (term.kind != .editor) return false;
-    if (term.rt.editor_diff != null) return false; // 비교 뷰는 축이 둘이다(§4.1g)
-    const doc = term.rt.editorDocument().opened orelse return false;
-    if (doc.file.read_only) return false;
-
+    const doc = lineOpDoc(term) orelse return false;
     const path = term.rt.editorDocument().path orelse return false;
-    const lang = maru.session.editor.language.forPath(path);
-    const marker = lang.lineComment() orelse return false; // 모르는 언어 — no-op(§3.7)
-
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-
-    // 커서들이 걸친 **줄 번호**를 모은다. 같은 줄에 커서가 여럿이면 한 번만 — 두 번 주석 처리하면
-    // `////`가 된다.
-    // **줄 번호는 `selectedLineNumbers` 하나가 답한다**(§3.9a) — 줄 조작 넷과 같은 답이어야 한다.
-    var line_nums: std.ArrayList(usize) = .empty;
-    defer line_nums.deinit(self.allocator);
-    if (!selectedLineNumbers(self, term, &line_nums)) return false;
-
-    // **하나라도 주석이 아니면 전부 주석.** 빈 줄은 판단에서 뺀다 — 빈 줄 하나 때문에 전체가
-    // "주석 아님"으로 뒤집히면 이미 다 주석인 블록을 해제할 수 없다.
-    var all_commented = true;
-    var any_content = false;
-    for (line_nums.items) |n| {
-        const line = lines.line(n) orelse continue;
-        const text = content[line.start..line.contentEnd()];
-        const trimmed = std.mem.trimStart(u8, text, " \t");
-        if (trimmed.len == 0) continue; // 빈 줄
-        any_content = true;
-        if (!std.mem.startsWith(u8, trimmed, marker)) all_commented = false;
-    }
-    if (!any_content) return false; // 빈 줄만 골랐다 — 넣을 자리가 없다
-
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    var owned: std.ArrayList([]u8) = .empty;
-    defer {
-        for (owned.items) |t| self.allocator.free(t);
-        owned.deinit(self.allocator);
-    }
-
-    for (line_nums.items) |n| {
-        const line = lines.line(n) orelse continue;
-        const text = content[line.start..line.contentEnd()];
-        const indent = text.len - std.mem.trimStart(u8, text, " \t").len;
-        if (indent == text.len) continue; // 빈 줄은 건드리지 않는다
-        if (all_commented) {
-            // **해제** — 표식과 그 뒤 공백 하나까지 지운다(넣을 때 붙인 그 공백이다).
-            const at = line.start + indent;
-            var end = at + marker.len;
-            if (end < content.len and content[end] == ' ') end += 1;
-            ranges.append(self.allocator, .{ .start = at, .end = end, .text = "" }) catch return false;
-        } else {
-            // **주석** — 들여쓰기 **뒤**에 넣는다. 줄 머리에 넣으면 들여쓰기가 무너져 보인다.
-            const t = std.fmt.allocPrint(self.allocator, "{s} ", .{marker}) catch return false;
-            owned.append(self.allocator, t) catch {
-                self.allocator.free(t);
-                return false;
-            };
-            const at = line.start + indent;
-            ranges.append(self.allocator, .{ .start = at, .end = at, .text = t }) catch return false;
-        }
-    }
-    if (ranges.items.len == 0) return false;
-
-    var sels = selectionsForEdit(self, term) orelse return false;
-    defer self.allocator.free(sels.items);
-    const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
-    const before_primary = sels.primary;
-
-    const scroll_anchor = captureScrollAnchor(term);
-    const rows_before = drawnDocLines(term);
-    const cols_before = drawnContentCols(term); // 가로도 스냅숏이 비워지기 전에 뜬다(폴백은 마지막으로 그린 폭)
-    const max_before = term.rt.editor_max_cols; // 상한도 — `refreshAfterEdit` 가 이것도 버린다
-    const inverse = applyDocumentEdit(self, term, .{ .changes = ranges.items }, &sels) catch {
-        self.allocator.free(before);
-        return false;
-    };
-
-    breakUndoGroup(term); // 타이핑과 다른 연산이다(§3.3 "연산 종류 변경")
-    const edit_span = syntax_color.spanFromInverse(inverse.changes);
-    pushUndo(self, term, inverse, before, before_primary, .insert);
-    writeBackSelections(self, term, sels);
-    // **구문 트리 통지**(§5.3). 역연산이 편집 **후** 좌표라 그대로 범위가 된다.
-    refreshAfterEdit(self, term, edit_span) catch {};
-    restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges.items });
-    revealPrimaryCaretRows(self, term, rows_before);
-    revealPrimaryCaretCols(self, term, cols_before, max_before);
-    breakUndoGroup(term);
-    self.metal_dirty = true;
-    return true;
+    const marker = maru.session.editor.language.forPath(path).lineComment() orelse return false; // 모르는 언어 — no-op(§3.7)
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    return runLinePlan(self, term, line_ops.planToggleComment(self.allocator, doc.file.content, doc.file.lines, snap.items, marker));
 }
 
 /// 줄 조작 넷이 공유하는 **편집 적용 꼬리**(§3.9a) — undo 하나, 스크롤 앵커, 구문 통지, reveal.
@@ -9877,33 +9743,11 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     return true;
 }
 
-/// 줄 머리에서 `offset` 까지의 **글자 수**(코드포인트). 「같은 열」을 byte 로 세면 한글 줄에서 글자
-/// 가운데로 떨어진다.
-fn lineColumn(content: []const u8, line_start: usize, offset: usize) usize {
-    var n: usize = 0;
-    for (content[line_start..@min(offset, content.len)]) |b| {
-        if (b & 0xC0 != 0x80) n += 1;
-    }
-    return n;
-}
-
-/// `col` 글자만큼 들어간 offset — 줄이 짧으면 줄 끝(§3.9a 「다음 줄의 같은 열」).
-fn offsetAtColumn(content: []const u8, line_start: usize, line_end: usize, col: usize) usize {
-    var off = line_start;
-    var n: usize = 0;
-    while (off < line_end and n < col) : (n += 1) {
-        off += 1;
-        while (off < line_end and content[off] & 0xC0 == 0x80) off += 1;
-    }
-    return off;
-}
-
-fn shiftSelection(sel: editor_selection.Selection, delta: i64) editor_selection.Selection {
-    var out = sel;
-    out.anchor_start = @intCast(@as(i64, @intCast(sel.anchor_start)) + delta);
-    out.anchor_end = @intCast(@as(i64, @intCast(sel.anchor_end)) + delta);
-    out.focus = @intCast(@as(i64, @intCast(sel.focus)) + delta);
-    return out;
+/// 줄 조작의 순수 계획을 적용한다. 계획이 없으면(경계·빈 줄만 등) 거짓, 할당 실패도 거짓이다.
+fn runLinePlan(self: *AppSession, term: *Term, planned: anyerror!?line_ops.Plan) bool {
+    var plan = (planned catch return false) orelse return false;
+    defer plan.deinit(self.allocator);
+    return applyLineEdit(self, term, plan.changes.items, plan.after);
 }
 
 /// 줄 조작이 설 수 있는 문서인가 — 편집기이고, 비교가 아니고, 읽기 전용이 아니어야 한다.
@@ -9919,254 +9763,36 @@ fn lineOpDoc(term: *Term) ?Opened {
     return doc;
 }
 
-/// `⇧⌘K` — 걸친 줄들을 지운다(§3.9a).
-///
-/// **마지막 줄이면 앞 개행을 지운다.** 뒤에 개행이 없는데 줄 내용만 지우면 **빈 줄이 남아** 사용자
-/// 눈에는 "지웠는데 자리가 남는다"로 보인다.
+/// `⇧⌘K` — 걸친 줄들을 지운다(§3.9a). 판정·caret 은 L2 `line_ops.planDelete`.
 pub fn deleteLines(self: *AppSession, term: *Term) bool {
     const doc = lineOpDoc(term) orelse return false;
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-    var nums: std.ArrayList(usize) = .empty;
-    defer nums.deinit(self.allocator);
-    if (!selectedLineNumbers(self, term, &nums)) return false;
-
-    // **연속한 줄은 한 덩어리로 지운다.** 줄마다 따로 지우면 「마지막 줄은 앞 개행을 먹는다」가 바로 앞
-    // 줄의 범위와 겹쳐 `delta` 가 통째로 거절했다 — 마지막 내용 줄을 그 앞 줄과 함께 지우면 아무 일도
-    // 안 일어났다(결함 2).
-    const Block = struct { lo: usize, hi: usize, start: usize, end: usize, eat_prev: bool };
-    var blocks: std.ArrayList(Block) = .empty;
-    defer blocks.deinit(self.allocator);
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    var i: usize = 0;
-    while (i < nums.items.len) {
-        var j = i;
-        while (j + 1 < nums.items.len and nums.items[j + 1] == nums.items[j] + 1) j += 1;
-        defer i = j + 1;
-        const first = lines.line(nums.items[i]) orelse continue;
-        const last = lines.line(nums.items[j]) orelse continue;
-        var start = first.start;
-        const end = @min(last.end_with_ending, content.len);
-        // **개행이 없는 마지막 줄까지 걸치면 앞 개행을 먹는다.** 개행이 있는 줄은 자기 개행까지만 —
-        // `"a\nb\n"` 에서 `b` 를 지우면 `"a\n"` 이지 끝 개행까지 사라진 `"a"` 가 아니다.
-        const eat_prev = last.end_with_ending == last.contentEnd() and start > 0;
-        if (eat_prev) start -= 1;
-        blocks.append(self.allocator, .{ .lo = nums.items[i], .hi = nums.items[j], .start = start, .end = end, .eat_prev = eat_prev }) catch return false;
-        ranges.append(self.allocator, .{ .start = start, .end = end, .text = "" }) catch return false;
-    }
-    if (ranges.items.len == 0) return false;
-
-    // **caret 은 다음 줄의 같은 열로 간다, 문서 끝이면 줄 끝**(§3.9a).
     const snap = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(snap.items);
-    for (snap.items) |*sel| {
-        const ln = lines.lineAt(@min(sel.start(), content.len));
-        var removed: usize = 0;
-        for (blocks.items) |b| {
-            defer removed += b.end - b.start;
-            if (ln < b.lo or ln > b.hi) continue;
-            const next = if (b.eat_prev) null else lines.line(b.hi + 1);
-            const target = if (next) |nl| blk: {
-                const focus = @min(sel.focus, content.len);
-                const cur = lines.line(lines.lineAt(focus)) orelse break :blk nl.start;
-                const col = if (lines.lineAt(focus) > b.hi) 0 else lineColumn(content, cur.start, focus);
-                break :blk offsetAtColumn(content, nl.start, nl.contentEnd(), col);
-            } else b.end; // 앞 개행을 먹었다 — 앞 줄 끝(지운 범위의 시작)으로 접힌다
-            sel.* = editor_selection.Selection.at(target - removed - (b.end - b.start));
-            break;
-        }
-    }
-    return applyLineEdit(self, term, ranges.items, snap.items);
+    return runLinePlan(self, term, line_ops.planDelete(self.allocator, doc.file.content, doc.file.lines, snap.items));
 }
 
-/// 걸친 줄들을 **아래에** 복사한다(§3.9a).
-///
-/// **선택은 복사본으로 옮긴다**(VSCode 관례). 원본에 두면 다시 눌렀을 때 **같은 줄이 또 복제되어**
-/// 사용자가 만든 복사본이 아니라 원본만 늘어난다 — `delta.apply`가 삽입 지점 뒤의 selection을 미므로,
-/// 복사본을 **선택 앞이 아니라 뒤**에 넣는 것이 그 동작을 만든다.
+/// 걸친 줄들을 **아래에** 복사하고 선택을 사본으로 옮긴다(§3.9a). 판정·caret 은 L2 `line_ops.planDuplicate`.
 pub fn duplicateLines(self: *AppSession, term: *Term) bool {
     const doc = lineOpDoc(term) orelse return false;
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-    var nums: std.ArrayList(usize) = .empty;
-    defer nums.deinit(self.allocator);
-    if (!selectedLineNumbers(self, term, &nums)) return false;
-
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    var owned: std.ArrayList([]u8) = .empty;
-    defer {
-        for (owned.items) |t| self.allocator.free(t);
-        owned.deinit(self.allocator);
-    }
-    const Block = struct { lo: usize, hi: usize, copy_len: usize };
-    var blocks: std.ArrayList(Block) = .empty;
-    defer blocks.deinit(self.allocator);
-    // **연속한 줄은 한 덩어리로 복사한다.** 줄마다 따로 넣으면 A B 가 A A B B 가 되어 블록이 깨진다.
-    var i: usize = 0;
-    while (i < nums.items.len) {
-        var j = i;
-        while (j + 1 < nums.items.len and nums.items[j + 1] == nums.items[j] + 1) j += 1;
-        defer i = j + 1;
-        const first = lines.line(nums.items[i]) orelse continue;
-        const last = lines.line(nums.items[j]) orelse continue;
-        const block = content[first.start..@min(last.end_with_ending, content.len)];
-        const t = if (block.len > 0 and block[block.len - 1] == '\n')
-            self.allocator.dupe(u8, block) catch return false
-        else
-            std.fmt.allocPrint(self.allocator, "\n{s}", .{block}) catch return false;
-        owned.append(self.allocator, t) catch {
-            self.allocator.free(t);
-            return false;
-        };
-        const at = @min(last.end_with_ending, content.len);
-        ranges.append(self.allocator, .{ .start = at, .end = at, .text = t }) catch return false;
-        blocks.append(self.allocator, .{ .lo = nums.items[i], .hi = nums.items[j], .copy_len = t.len }) catch return false;
-    }
-    if (ranges.items.len == 0) return false;
-
-    // **선택을 사본으로 옮긴다**(§3.9a). 블록 k 의 커서는 앞 블록들의 사본만큼(그 앞에 들어간다)과
-    // **자기 사본 하나만큼** 간다. 사본 전부의 합을 더하면 첫 블록부터 어긋나고 마지막 블록은 문서 끝을
-    // 넘는다(결함 1). `delta.apply` 의 매핑은 블록 뒤에 넣은 자기 사본을 안 세므로 여기서 정한다.
-    //
-    // **앞에 넣어 미는 방법은 안 된다** — 선택이 삽입 지점에서 시작하면 anchor 는 제자리고 focus 만
-    // 밀려 **두 사본을 통째로 덮는다**(실측: 두 번째 복제가 네 벌을 만들었다).
     const snap = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(snap.items);
-    for (snap.items) |*sel| {
-        const ln = lines.lineAt(@min(sel.start(), content.len));
-        var add: usize = 0;
-        for (blocks.items) |b| {
-            add += b.copy_len;
-            if (ln >= b.lo and ln <= b.hi) break;
-        }
-        sel.* = shiftSelection(sel.*, @intCast(add));
-    }
-    return applyLineEdit(self, term, ranges.items, snap.items);
+    return runLinePlan(self, term, line_ops.planDuplicate(self.allocator, doc.file.content, doc.file.lines, snap.items));
 }
 
-/// 걸친 블록을 위/아래 줄과 **통째로 맞바꾼다**(§3.9a).
-///
-/// **문서 처음/끝에서는 무동작이다.** clamp 해서 절반만 움직이면 사용자는 무슨 일이 났는지 못 읽는다.
-/// **연속하지 않은 줄 무리는 각자 옮긴다** — 한 덩어리로 치면 사이의 안 고른 줄까지 끌려간다.
+/// 걸친 블록을 위/아래 줄과 **통째로 맞바꾼다**(§3.9a). 문서 처음/끝에서는 무동작. 판정·caret 은 L2 `line_ops.planMove`.
 pub fn moveLines(self: *AppSession, term: *Term, down: bool) bool {
     const doc = lineOpDoc(term) orelse return false;
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-    var nums: std.ArrayList(usize) = .empty;
-    defer nums.deinit(self.allocator);
-    if (!selectedLineNumbers(self, term, &nums)) return false;
-
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    var owned: std.ArrayList([]u8) = .empty;
-    defer {
-        for (owned.items) |t| self.allocator.free(t);
-        owned.deinit(self.allocator);
-    }
-    // **옮긴 블록의 커서는 블록과 함께 간다**(§3.9a 「선택은 따라간다」) — 무리마다 움직인 거리.
-    const Moved = struct { lo: usize, hi: usize, delta: i64 };
-    var moved: std.ArrayList(Moved) = .empty;
-    defer moved.deinit(self.allocator);
-    var i: usize = 0;
-    while (i < nums.items.len) {
-        var j = i;
-        while (j + 1 < nums.items.len and nums.items[j + 1] == nums.items[j] + 1) j += 1;
-        const lo = nums.items[i];
-        const hi = nums.items[j];
-        i = j + 1;
-        // **경계에서는 그 무리만 건너뛴다** — 다른 무리는 여전히 움직여야 한다.
-        if (!down and lo == 0) continue;
-        if (down and hi + 1 >= lines.lineCount()) continue;
-        // **문서 끝 개행이 만드는 빈 줄은 이동 대상이 아니다.** 그것과 맞바꾸면 내용이 `"c\n"` →
-        // `"\nc"` 가 되어 **빈 줄이 생기고 끝 개행이 사라진다**(적대적 검증 LN4 가 실측했다).
-        // 화면에는 아무 줄도 없는 자리라, 사용자는 "아래로 옮겼는데 줄이 하나 늘었다"만 본다.
-        if (down and (lines.line(hi + 1) orelse continue).start >= content.len) continue;
-        const swap_n = if (down) hi + 1 else lo - 1;
-        const blk_first = lines.line(lo) orelse continue;
-        const blk_last = lines.line(hi) orelse continue;
-        const other = lines.line(swap_n) orelse continue;
-
-        const blk = content[blk_first.start..@min(blk_last.end_with_ending, content.len)];
-        const oth = content[other.start..@min(other.end_with_ending, content.len)];
-        // **개행이 없는 마지막 줄이 섞이면 개행을 손으로 맞춘다** — 그대로 이으면 두 줄이 붙는다.
-        const blk_nl = blk.len > 0 and blk[blk.len - 1] == '\n';
-        const oth_nl = oth.len > 0 and oth[oth.len - 1] == '\n';
-        const blk_body = if (blk_nl) blk[0 .. blk.len - 1] else blk;
-        const oth_body = if (oth_nl) oth[0 .. oth.len - 1] else oth;
-        const region_start = if (down) blk_first.start else other.start;
-        const region_end = if (down) @min(other.end_with_ending, content.len) else @min(blk_last.end_with_ending, content.len);
-        const trailing_nl = if (down) blk_nl and oth_nl else oth_nl and blk_nl;
-        const t = if (down)
-            (if (trailing_nl)
-                std.fmt.allocPrint(self.allocator, "{s}\n{s}\n", .{ oth_body, blk_body }) catch return false
-            else
-                std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ oth_body, blk_body }) catch return false)
-        else
-            (if (trailing_nl)
-                std.fmt.allocPrint(self.allocator, "{s}\n{s}\n", .{ blk_body, oth_body }) catch return false
-            else
-                std.fmt.allocPrint(self.allocator, "{s}\n{s}", .{ blk_body, oth_body }) catch return false);
-        owned.append(self.allocator, t) catch {
-            self.allocator.free(t);
-            return false;
-        };
-        ranges.append(self.allocator, .{ .start = region_start, .end = region_end, .text = t }) catch return false;
-        const step: i64 = @intCast(oth_body.len + 1);
-        moved.append(self.allocator, .{ .lo = lo, .hi = hi, .delta = if (down) step else -step }) catch return false;
-    }
-    if (ranges.items.len == 0) return false;
     const snap = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(snap.items);
-    for (snap.items) |*sel| {
-        const ln = lines.lineAt(@min(sel.start(), content.len));
-        for (moved.items) |m| {
-            if (ln >= m.lo and ln <= m.hi) {
-                sel.* = shiftSelection(sel.*, m.delta);
-                break;
-            }
-        }
-    }
-    return applyLineEdit(self, term, ranges.items, snap.items);
+    return runLinePlan(self, term, line_ops.planMove(self.allocator, doc.file.content, doc.file.lines, snap.items, down));
 }
 
-/// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a).
-///
-/// **들여쓰기는 탭 문자 하나다** — `Tab` 키가 넣는 것과 **같아야** 한다. 갈라 두면 같은 키가 선택
-/// 여부에 따라 다른 문자를 넣는다. **빈 줄은 건드리지 않는다**(§3.7이 주석에서 같은 결정을 했다 —
-/// 공백만 있는 줄이 늘어난다). **내어쓰기는 있는 만큼만** 뺀다: 탭 하나, 없으면 공백을 최대
-/// `editor.tab-width`개. 없는 줄이 섞여도 연산 전체가 실패하지 않는다.
+/// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a — 탭 하나, 내어쓰기는 있는 만큼만). 판정은 L2 `line_ops.planIndent`.
 pub fn indentLines(self: *AppSession, term: *Term, outdent: bool) bool {
     const doc = lineOpDoc(term) orelse return false;
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-    var nums: std.ArrayList(usize) = .empty;
-    defer nums.deinit(self.allocator);
-    if (!selectedLineNumbers(self, term, &nums)) return false;
-
-    const width: usize = @max(1, term.rt.editor_tab_width);
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    for (nums.items) |n| {
-        const line = lines.line(n) orelse continue;
-        const text = content[line.start..line.contentEnd()];
-        if (outdent) {
-            if (text.len == 0) continue;
-            var take: usize = 0;
-            if (text[0] == '\t') {
-                take = 1;
-            } else {
-                while (take < text.len and take < width and text[take] == ' ') take += 1;
-            }
-            if (take == 0) continue; // 뺄 것이 없다 — 이 줄만 건너뛴다
-            ranges.append(self.allocator, .{ .start = line.start, .end = line.start + take, .text = "" }) catch return false;
-        } else {
-            if (std.mem.trimStart(u8, text, " \t").len == 0) continue; // 빈 줄
-            ranges.append(self.allocator, .{ .start = line.start, .end = line.start, .text = "\t" }) catch return false;
-        }
-    }
-    return applyLineEdit(self, term, ranges.items, null);
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    return runLinePlan(self, term, line_ops.planIndent(self.allocator, doc.file.content, doc.file.lines, snap.items, outdent, term.rt.editor_tab_width));
 }
 
 /// 선택이 **여러 줄에 걸치는가** — `Tab` 이 글자를 넣을지 줄을 들여쓸지 가른다(§3.9a).
@@ -10188,148 +9814,27 @@ pub fn selectionSpansLines(term: *Term) bool {
     return false;
 }
 
-/// Enter — 개행을 넣고 **이전 줄의 들여쓰기를 잇는다**(§3.9a).
+/// Enter — 개행을 넣고 **이전 줄의 들여쓰기를 잇는다**(§3.9a). 판정·caret 은 L2 `line_ops.planNewline`.
 ///
-/// **앞 공백을 글자 그대로 잇는다** — 탭이면 탭, 공백이면 공백(§3.5 *"원문을 바꾸지 않는다"*와 같은
-/// 결이다. 변환하면 그 파일의 나머지와 어긋난다).
-///
-/// **caret 앞까지만 본다.** 줄 가운데서 Enter 를 치면 뒤 절반이 다음 줄로 가는데, 그 줄의 들여쓰기는
-/// **원래 줄의 것**이지 잘린 조각의 것이 아니다.
-///
-/// **커서마다 다른 들여쓰기를 잇는다** — 커서가 여럿이면 각자 자기 줄을 본다. 하나로 정하면 다른
-/// 커서 자리에 **그 줄에 없던 공백**이 들어간다.
-///
-/// **읽기 전용·비교에서는 종전 경로로 떨어진다**(그쪽이 거절한다 — 여기서 또 판정하면 출처가 둘이다).
+/// **들여쓸 것이 없으면 종전 경로다** — 같은 결과를 두 자리에서 만들지 않는다. **읽기 전용·비교에서도 종전 경로로
+/// 떨어진다**(그쪽이 거절한다 — 여기서 또 판정하면 출처가 둘이다).
 pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
     const doc = lineOpDoc(term) orelse return insertText(self, term, "\n");
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    var owned: std.ArrayList([]u8) = .empty;
-    defer {
-        for (owned.items) |t| self.allocator.free(t);
-        owned.deinit(self.allocator);
-    }
-    // **문서 순서로 쌓는다.** `selections()` 는 primary 를 먼저 내서, primary 가 뒤에 있으면 변경 목록이
-    // 거꾸로 쌓여 `delta` 가 통째로 거절했다(결함 3 — `transformCase` 가 CS7 에서 고친 것과 같은
-    // 함정). `selectionsForEdit` 은 문서 순서다.
     const snap = selectionsForEdit(self, term) orelse return insertText(self, term, "\n");
     defer self.allocator.free(snap.items);
-    var grown: i64 = 0;
-    for (snap.items) |*sel| {
-        const s_off = @min(sel.start(), content.len);
-        const e_off = @min(sel.end(), content.len);
-        const line = lines.line(lines.lineAt(s_off)) orelse return insertText(self, term, "\n");
-        // **caret 앞까지만** 본다.
-        const head = content[line.start..s_off];
-        const indent_len = head.len - std.mem.trimStart(u8, head, " \t").len;
-        const indent = head[0..indent_len];
-        const t = std.fmt.allocPrint(self.allocator, "\n{s}", .{indent}) catch return false;
-        owned.append(self.allocator, t) catch {
-            self.allocator.free(t);
-            return false;
-        };
-        ranges.append(self.allocator, .{ .start = s_off, .end = e_off, .text = t }) catch return false;
-        // **caret 은 새 줄의 들여쓰기 뒤로 간다**(§3.9a). 매핑에 맡기면 삽입 지점의 caret 이 안 밀려
-        // 새 개행 **앞**에 남았다.
-        sel.* = editor_selection.Selection.at(@intCast(@as(i64, @intCast(s_off + t.len)) + grown));
-        grown += @as(i64, @intCast(t.len)) - @as(i64, @intCast(e_off - s_off));
-    }
-    // **들여쓸 것이 없으면 종전 경로다** — 같은 결과를 두 자리에서 만들지 않는다.
-    var any_indent = false;
-    for (ranges.items) |r| {
-        if (r.text.len > 1) any_indent = true;
-    }
-    if (!any_indent) return insertText(self, term, "\n");
-    return applyLineEdit(self, term, ranges.items, snap.items);
+    var plan = (line_ops.planNewline(self.allocator, doc.file.content, doc.file.lines, snap.items) catch return false) orelse
+        return insertText(self, term, "\n");
+    defer plan.deinit(self.allocator);
+    return applyLineEdit(self, term, plan.changes.items, plan.after);
 }
 
-/// 선택(없으면 caret 의 낱말)을 대문자/소문자로 바꾼다(§3.9b).
-///
-/// **낱말 규칙은 `selection.wordRangeAt` 이 소유한다** — 더블클릭이 잡는 그 범위이고
-/// `add_next_occurrence` 가 씨앗을 고를 때 쓰는 것과 **같은 함수**다. 셋이 다른 낱말을 잡으면
-/// 사용자는 그 차이를 설명할 수 없다.
-///
-/// **대소문자 축은 `maru.terminal.selection` 이 소유한다** — `foldCase` 와 그 짝 `upperCase`. 여기서
-/// 따로 표를 만들면 찾기의 대소문자 무시 비교와 어긋난다.
-///
-/// **줄 조작(§3.9a)과 달리 범위를 합치지 않는다.** 겹치는 것은 줄이 아니라 범위이고, 대소문자는
-/// 멱등이라 겹친 자리를 두 번 바꿔도 결과가 같다.
+/// 선택(없으면 caret 의 낱말)을 대문자/소문자로 바꾼다(§3.9b). 판정은 L2 `line_ops.planTransformCase`(낱말 규칙
+/// `selection.wordRangeAt`, 대소문자 축 `terminal/selection`).
 pub fn transformCase(self: *AppSession, term: *Term, upper: bool) bool {
     const doc = lineOpDoc(term) orelse return false;
-    const content = doc.file.content;
-
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    var owned: std.ArrayList([]u8) = .empty;
-    defer {
-        for (owned.items) |t| self.allocator.free(t);
-        owned.deinit(self.allocator);
-    }
-    var iter = selections(term);
-    if (iter.count() == 0) return false;
-    while (iter.next()) |sel| {
-        var lo = @min(sel.start(), content.len);
-        var hi = @min(sel.end(), content.len);
-        if (hi == lo) {
-            // **선택이 없으면 caret 의 낱말**(§3.9b).
-            const w = editor_selection.wordRangeAt(content, lo);
-            lo = w.lo;
-            hi = w.hi;
-        }
-        // **빈 범위를 따로 안 막는다**(낱말이 없는 자리 — 문서 끝·공백). 아래 「바뀐 것이 없으면
-        // 건너뛴다」가 그 경우를 그대로 덮으므로, 앞에 또 두면 **판정자로 구별할 수 없는 가지**가
-        // 하나 늘 뿐이다(변이 C7 이 그것을 보였다).
-        // **`hi >= lo` 는 두 출처 모두가 보장한다** — `sel.end() >= sel.start()` 이고 `wordRangeAt` 은
-        // `lo <= hi` 를 낸다. 그래서 여기 `@max` 같은 방어를 두면 **닿을 수 없는 가지**가 되어 판정자로
-        // 구별할 수 없다(변이 C16 이 그것을 보였다). 불변식이 깨지면 이 슬라이스가 곧바로 죽는 편이
-        // 낫다 — 조용히 빈 범위로 넘어가면 「아무 일도 안 일어난다」로만 보인다.
-        const src = content[lo..hi];
-        const buf = self.allocator.alloc(u8, src.len) catch return false;
-        owned.append(self.allocator, buf) catch {
-            self.allocator.free(buf);
-            return false;
-        };
-        // **길이가 안 변한다**(§3.9b) — 덮는 블록의 짝이 같은 UTF-8 길이 안에서만 움직인다.
-        // 그래서 자리마다 제자리 인코딩이 성립하고, 선택 범위와 다른 커서가 안 밀린다.
-        //
-        // **그 불변식을 런타임에서 다시 안 막는다.** `CASE3` 이 `upperCase`·`foldCase` 를 코드포인트
-        // 전 구간에 대해 **byte 길이가 같다**로 고정하므로, 여기 방어를 두면 **닿을 수 없는 가지**가
-        // 된다(변이 C5 가 그것을 보였다). 1:N 매핑을 들이는 날 `CASE3` 이 먼저 빨개지고, §3.9b 가
-        // 그때 선택 보정 규칙을 함께 정하라고 적어 뒀다.
-        var w_i: usize = 0;
-        // **문서는 열릴 때 UTF-8 이 검증된다**(`session/editor/document.zig` — 아니면 `error.NotUtf8`
-        // 로 아예 안 열리고 CM6 로 떨어진다). 그래서 여기서 디코드가 실패할 수 없다 — 방어를 두면
-        // **닿을 수 없는 가지**가 되고 판정자로 구별할 수 없다(변이 C5 가 그것을 보였다).
-        // `unreachable` 대신 원문을 두는 이유는 §3.8 이다: 문서를 바꾸는 연산이 ReleaseFast 에서
-        // 죽는 것보다, 그 자리를 안 건드리는 편이 안전한 저하다.
-        var view = std.unicode.Utf8View.init(src) catch {
-            continue;
-        };
-        var cps = view.iterator();
-        while (cps.nextCodepoint()) |cp| {
-            const out = if (upper) maru.terminal.selection.upperCase(cp) else maru.terminal.selection.foldCase(cp);
-            w_i += std.unicode.utf8Encode(out, buf[w_i..]) catch continue;
-        }
-        if (std.mem.eql(u8, buf, src)) continue; // 바뀐 것이 없다 — 빈 delta 를 만들지 않는다
-        ranges.append(self.allocator, .{ .start = lo, .end = hi, .text = buf }) catch return false;
-    }
-    // **문서 순서로 정렬한다.** `delta` 는 *"변경들이 문서 순서로 정렬돼 있고 겹치지 않는다"* 를
-    // **불변식으로 요구**하는데, `selections()` 는 **primary 를 먼저** 낸다 — 커서가 여럿이면
-    // 뒤쪽 커서가 앞에 와 `apply` 가 통째로 거절한다(적대적 검증 CS7 이 실측했다: `⌘⌃D` 로 커서를
-    // 늘린 뒤 변환하면 **아무 일도 안 일어났다**). 줄 조작은 `selectedLineNumbers` 가 정렬해 주므로
-    // 이 자리가 없었고, 그래서 같은 함정을 두 번째로 밟았다.
-    //
-    // **겹침은 만들지 않는다** — 각 selection 은 서로 겹치지 않고(§3.2 불변식), 낱말로 넓힌 범위도
-    // 같은 낱말이면 같은 범위라 정렬 뒤 인접 비교로 볼 필요가 없다.
-    std.mem.sort(maru.session.editor.delta.Change, ranges.items, {}, struct {
-        fn lessThan(_: void, a: maru.session.editor.delta.Change, b: maru.session.editor.delta.Change) bool {
-            return a.start < b.start;
-        }
-    }.lessThan);
-    return applyLineEdit(self, term, ranges.items, null);
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    return runLinePlan(self, term, line_ops.planTransformCase(self.allocator, doc.file.content, snap.items, upper));
 }
 
 /// **클립보드를 커서마다 넣는다**(§3.4)./// **클립보드를 커서마다 넣는다**(§3.4).

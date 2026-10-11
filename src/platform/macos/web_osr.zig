@@ -3421,21 +3421,27 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
 /// 않고(실측 40 초+ — 보이게 하면 그때 답한다), `mouseMoved` 는 5 초 걸리고, rAF·애니메이션으로 나타나는 요소가 생기지 않는다. 주 호출
 /// **바로 뒤에** 1×1 스크린샷을 보내면 프레임 하나를 강제해 풀린다(실측: 숨은 탭 5 천 요소 질의 0.16 초, 0–300 ms 뒤에 숨겨도 240/240,
 /// 순서가 바뀌어 10–30 ms 넘게 먼저 가면 매달린다). Chromium 내부 동작에 기댄다 — 판정자(`devtools_check`)가 CEF 를 올릴 때 본다.
-pub const kick_method = "Page.captureScreenshot";
-pub const kick_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}";
+/// wire 상수(kick 시한 — app_host_abi 의 재시도 상한 검사가 본다).
+pub const ws_message = ws.message;
+pub const kick_method = ws.message.devtools_kick_method;
+pub const kick_params = ws.message.devtools_kick_params;
 
-/// `devtoolsCall` 과 같되 바로 뒤에 kick 을 함께 보낸다 — 그 탭과 전체에 두 자리가 다 비어 있을 때만(아니면 `Busy` — 주 호출도
-/// 보내지 않는다: kick 없이 간 질의가 숨은 탭에서 30 초 매달리지 않게). kick 은 처음부터 버린 자리다(답을 기다리지 않고 알리지 않는다 —
-/// 주 호출의 op 이 끝난 뒤에 와도 된다). 보이는 탭의 비용은 GPU 약 3 ms·페이지 멈춤 0(실측).
-pub fn devtoolsCallKicked(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8, sink: DevtoolsSink) DevtoolsCallError!u32 {
+/// `devtoolsCall` 과 같되 바로 뒤에 kick 을 함께 보낸다 — 그 탭과 전체에 두 자리가 다 비어 있을 때만. 없으면 `optional` 이 아니면
+/// `Busy`(주 호출도 보내지 않는다: kick 없이 간 질의가 숨은 탭에서 30 초 매달리지 않게), `optional` 이면 주 호출만 보낸다(kick 없이도
+/// 답하는 호출 — 적대 리뷰 3 회차). kick 은 처음부터 버린 자리다(답을 기다리지 않고 알리지 않는다 — 주 호출의 op 이 끝난 뒤에 와도
+/// 된다). 이동하는 순간에 보낸 kick 은 답이 오지 않을 수 있다 — sidecar 가 `devtools_kick_stale_ms` 에 `expired` 로 놓아 자리가 풀린다.
+/// 보이는 탭의 비용은 GPU 약 3 ms·페이지 멈춤 0(실측).
+pub fn devtoolsCallKicked(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8, sink: DevtoolsSink, optional: bool) DevtoolsCallError!u32 {
     const s = surfaces.getPtr(surface_id) orelse return error.NotReady;
     if (!s.created or state == .off or state == .failed) return error.NotReady;
     var of_surface: usize = 0;
     for (devtools_pending) |p| if (p) |v| if (v.surface == surface_id) {
         of_surface += 1;
     };
-    if (of_surface + 2 > ws.message.max_devtools_calls_per_browser) return error.Busy;
-    if (devtoolsUsedSlots() + 2 > ws.message.max_devtools_calls) return error.Busy;
+    if (of_surface + 2 > ws.message.max_devtools_calls_per_browser or devtoolsUsedSlots() + 2 > ws.message.max_devtools_calls) {
+        if (optional) return devtoolsCall(gpa, surface_id, method, params, sink);
+        return error.Busy;
+    }
     const call = try devtoolsCall(gpa, surface_id, method, params, sink);
     // 자리는 위에서 셌다 — 이 둘째 자리는 남아 있다.
     const slot = for (&devtools_pending) |*p| {
@@ -5043,7 +5049,7 @@ test "W9b②-3 kick: 주 호출 바로 뒤에 1×1 스크린샷을 버린 자리
     var rec: DevtoolsRecorder = .{};
     var frames: [8]Message = undefined;
 
-    const c = try devtoolsCallKicked(gpa, 7, "Accessibility.queryAXTree", "{\"role\":\"button\"}", rec.sink());
+    const c = try devtoolsCallKicked(gpa, 7, "Accessibility.queryAXTree", "{\"role\":\"button\"}", rec.sink(), false);
     try std.testing.expectEqual(@as(usize, 4), sentFrames(&frames));
     try std.testing.expectEqualStrings("Accessibility.queryAXTree", frames[0].devtools_call.method);
     try std.testing.expectEqual(c, frames[0].devtools_call.call);
@@ -5053,7 +5059,7 @@ test "W9b②-3 kick: 주 호출 바로 뒤에 1×1 스크린샷을 버린 자리
     try std.testing.expect(kick != c);
     try std.testing.expectEqual(@as(usize, 2), devtoolsUsed());
     // 그 탭은 꽉 찼다 — 쌍도 하나도 못 보낸다.
-    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink()));
+    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink(), false));
     try std.testing.expectError(error.Busy, devtoolsCall(gpa, 7, "A.b", "", rec.sink()));
     // kick 의 답(먼저 와도 늦게 와도)은 알리지 않고 자리만 푼다.
     applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = kick, .bytes = "{}" } });
@@ -5062,7 +5068,18 @@ test "W9b②-3 kick: 주 호출 바로 뒤에 1×1 스크린샷을 버린 자리
     try std.testing.expectEqual(@as(usize, 0), rec.count);
     try std.testing.expectEqual(@as(usize, 1), devtoolsUsed());
     // 그 탭에 자리가 하나뿐이면 쌍은 Busy(주 호출만 보내 30 초 매달리지 않게).
-    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink()));
+    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink(), false));
+    // optional 이면 주 호출만 간다(kick 없이) — 그 뒤로는 탭이 꽉 차 optional 도 Busy.
+    outbox_pending.clearRetainingCapacity();
+    const solo = try devtoolsCallKicked(gpa, 7, "Runtime.evaluate", "{}", rec.sink(), true);
+    try std.testing.expectEqual(@as(usize, 2), sentFrames(&frames));
+    try std.testing.expectEqualStrings("Runtime.evaluate", frames[0].devtools_call.method);
+    try std.testing.expectEqual(@as(usize, 2), devtoolsUsed()); // 앞의 주 호출 c + 이 호출(kick 없음)
+    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink(), true));
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = solo, .status = .ok, .size = 0 } });
+    deliverDevtools(gpa);
+    try std.testing.expectEqual(@as(usize, 1), rec.count);
+    rec.count = 0;
     applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c, .bytes = "{}" } });
     applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c, .status = .ok, .size = 2 } });
     deliverDevtools(gpa);
@@ -5074,13 +5091,13 @@ test "W9b②-3 kick: 주 호출 바로 뒤에 1×1 스크린샷을 버린 자리
     };
     _ = try devtoolsCall(gpa, 12, "A.b", "", rec.sink());
     try std.testing.expectEqual(ws.message.max_devtools_calls - 1, devtoolsUsed());
-    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink()));
+    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink(), false));
     // 답이 끝내 오지 않는 kick 도 버린 자리의 시한에 풀린다.
     for (0..devtools_pending.len) |i| if (devtools_pending[i]) |v| {
         applyD(gpa, .{ .devtools_result = .{ .browser = v.surface, .call = v.call, .status = .detached, .size = 0 } });
     };
     deliverDevtools(gpa);
-    _ = try devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink());
+    _ = try devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink(), false);
     const k2 = for (devtools_pending) |p| {
         if (p) |v| if (v.sink == null) break v.call;
     } else unreachable;

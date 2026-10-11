@@ -467,7 +467,7 @@ wire 에 DevTools 요청/응답을 낸다 — 아직 control-plane 에는 잇지
 | 동시 호출 | 전체 8 · **탭마다 2** (넘으면 maru `Busy`, sidecar `busy`) | sidecar 명령 상자 1 MiB — 인자가 다 차도(frame 머리까지 527 360 B) 640 KiB 안(comptime). 탭마다 상한이 있어 렌더러를 멈춘 페이지 하나가 다른 탭을 막지 못한다(전체 4 개만 두었을 때는 막았다 — 1 회차) |
 | 결과 | 16 MiB 까지(넘으면 sidecar 가 조각 없이 `too_large`). maru 는 알린 크기 = 받은 양, JSON 객체여야 `ok`·`cdp_error` | 결과는 페이지가 크기·내용을 정한다 — sidecar 바이트는 공격 입력 |
 | 메시지 번호 | sidecar 가 `[1<<29, 1<<30)` 안에서 매긴다 | 권한(0~)·알림(20000~)·미디어 메뉴(1<<30~)와 겹치지 않게 — 관찰자는 브라우저의 DevTools 세션을 함께 쓰고 모두가 모든 결과를 받는다. `on_dev_tools_message` 는 두지 않는다(원시 메시지가 필요 없다 — 결과·떨어짐 콜백만) |
-| 답 없는 호출 | DevTools 떨어짐·렌더러 죽음·브라우저 닫힘 → `detached`(`browser_closed` 앞). sidecar 35 초(주기 때문에 실제 35~44 초) → `expired` — 기다리는 호출이 있는 동안 UI 스레드 주기 작업(시한의 1/4)이 본다. maru 30 초 → `timeout` | 렌더러가 멈추면 CDP 는 답도 detach 도 주지 않는다(미디어 메뉴 실측). 새 호출이 올 때만 보면 자리를 쥔 maru 가 새 호출을 보내지 않아 풀리지 않는다 |
+| 답 없는 호출 | DevTools 떨어짐·렌더러 죽음·브라우저 닫힘 → `detached`(`browser_closed` 앞). sidecar 35 초(주기 때문에 실제 35~35.75 초, kick 은 3 초 — W9b②-3) → `expired` — 기다리는 호출이 있는 동안 UI 스레드 주기 작업(kick 시한의 1/4 = 750 ms)이 본다. maru 30 초 → `timeout` | 렌더러가 멈추면 CDP 는 답도 detach 도 주지 않는다(미디어 메뉴 실측). 새 호출이 올 때만 보면 자리를 쥔 maru 가 새 호출을 보내지 않아 풀리지 않는다 |
 | 끝낸 호출의 자리(maru) | 시한·maru 가 탭을 닫음 → 콜백은 곧바로, 자리는 sidecar 의 답(어느 상태든)까지 쥔다(늦은 조각은 모으지 않는다). 그래도 안 오면 70 초에 푼다 | 자리를 먼저 풀면 sidecar 가 쥔 것과 상한이 어긋나 모든 탭이 `busy` 를 받고, 늦은 큰 결과를 256 KiB 예산으로 읽어 모든 Chromium 탭이 멈췄다(1 회차) |
 | 정리(maru) | sidecar 죽음·내림 → `sidecar_gone`(버린 자리도 푼다), 페이지가 닫은 탭 → `closed`, 앱 종료 → `sidecar_gone` 곧바로, 늦은 조각·답은 모르는 호출로 버린다 | 30 초 시한까지 매달리지 않게 |
 | 알림 시점(maru) | 끝난 호출은 줄에 넣고 그 tick 의 `pump` 끝에서 알린다(줄 자리는 호출을 받을 때 잡는다). 루프는 자리마다 지금 값을 다시 읽는다 | 처음엔 끝난 자리에서 곧바로 불러, 콜백이 탭을 닫으면 복사본 루프가 비운 자리를 다시 풀었다(ReleaseSafe panic — 1 회차). 고친 뒤에도 탭 닫기·sidecar 정리 한가운데서 콜백이 마지막 탭을 닫으면 sidecar 를 내려 주차할 다운로드를 끊을 수 있었다(2 회차) |
@@ -877,10 +877,12 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - ambiguous 는 「같은 로케이터로 act 하면 여럿」 으로(보이는 것만 세면 act 와 어긋난다), 마감 판단은 직전 확인 전체 시간으로.
 
 **구현:**
-- `web_osr.devtoolsCallKicked` — 주 호출 바로 뒤 `Page.captureScreenshot`(jpeg q1, clip 1×1)을 버린 자리로. Step.call 의 `kick`.
-- `web_cdp_ops`: role 질의는 document objectId(묶음 → 질의 → 놓기, `rel_then` committed)+kick, hover 이동+kick, kick 을 못 보내면 50 ms 뒤 세 번까지.
+- `web_osr.devtoolsCallKicked` — 주 호출 바로 뒤 `Page.captureScreenshot`(jpeg q1, clip 1×1)을 버린 자리로. Step.call 의 `kick`(`none`·`best_effort`·`required` —
+  best_effort 는 자리가 하나뿐이면 주 호출만). sidecar 는 메서드·인자가 `devtools_kick_*` 와 꼭 같은 호출을 3 초(`devtools_kick_stale_ms`)에 `expired` 로 놓는다.
+- `web_cdp_ops`: role 질의는 document objectId(묶음 → 질의 → 놓기, `rel_then` committed)+kick(required), hover 이동+kick(required), required 를 못 보내면 100 ms 뒤 다시
+  (4.5 초까지 — 잃은 kick 이 풀릴 때까지), wait 의 확인(selector·finder)은 best_effort.
   wait `visible`(로케이터): text·label 은 finder 의 wait 모드, role 은 `listFromAx` 후보를 20 개씩 잡아 finder 의 `visible` 판정, 결과 `{ok, matched, ambiguous?}`,
-  시한 `{hidden}`, 간격 max(백오프, 무거운 호출 × 4), 마감 판단.
+  시한 `{hidden}`, 간격 max(백오프, 확인 시간 × 4, 누적 1/5), 마지막 확인 하나를 시한 안으로 앞당김.
 - L2 `condition:"visible"`(엄격 키, selector 는 selector 조건으로, locator 는 WebKit -32008), 결과·시한 data. CLI `wait --role/--by-text/--by-label`.
 
 **W9b②-3 적대 리뷰**(구현 뒤 다섯 회차):
@@ -903,4 +905,16 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
     판정자가 정말 숨었는지 보지 않았다 → `visibilityState` 를 본다.
   - 버틴 것: 스모크가 wait 의 kick 을 증명함(kick 없으면 8 초 동안 rAF 0), 보이는 탭 kick 의 부작용 0(이벤트 여덟 종·hasFocus·크기), canvas 페이지 CPU·GPU 차이 없음,
     text wait 이 click 과 같이 셈, 철회 중 소유, WebKit 경로, 크기 검사 비용.
+- **3 회차**(실측 — 이동하는 페이지·대화상자·페이지 막힘 비율):
+  - 중: 이동하는 순간에 보낸 kick 이 답을 받지 못해(20 번 가운데 3–5 번) sidecar 시한 35 초 동안 그 탭의 둘째 자리를 쥐었다 — 그동안 kick 을 싣는 호출이 모두
+    「자리 없음」이라 스스로 이동하는 숨은 탭의 selector wait 이 25 번 가운데 15 번 시한(이 PR 전에는 kick 이 없었다 — 퇴행), role act·hover 는 곧 「too many」.
+    → sidecar 가 kick(메서드·인자가 꼭 같은 것)을 3 초에 놓는다(검사 주기 750 ms), wait 의 확인은 자리가 하나뿐이면 kick 없이, role 질의·hover 는 4.5 초 다시.
+    판정자 `dt-kick-stale`(경고창이 떠 있는 동안의 kick 이 3 초 남짓에 expired, 같이 보낸 보통 호출은 그대로 기다린다).
+  - 중: 「1/5 아래」 가 실제 wait 에서 깨졌다(숨은 2.5 만 요소 25 초 role wait 40–62 %, 10 초 73 %) — 첫 확인 0.5 초 상한·일찍 깨기·질의만 센 시간 →
+    확인 시간을 찾기·질의·크기 세기·판정의 합으로, 누적 1/5 를 함께, 문서의 약속은 「첫 확인과 마지막 확인은 밖」 으로 고쳤다.
+  - 하: 미리 시한 판정의 불연속 — 숨은 2.95 만 탭의 20.5 초 wait 이 8.4 초에 포기 → 쉬면 시한을 넘길 때는 마지막 확인 하나를 시한 즈음 끝나게 앞당긴다
+    (selector·load 도 — 전에는 시한까지 자고 확인 없이 끝났다).
+  - 하: 대화상자가 떠 있으면 kick 이 전체 자리를 하나 더 35 초 쥐었다 → kick 시한 3 초로 함께.
+  - 버틴 것: 철회의 놓기(보내기 전 단계만 놓고 보낸 뒤는 committed), label·text wait 의 matched 와 셈(click 과 같다), 숨은 큰 탭의 kick 지연 0–52 ms, 문서의 확인 주기
+    8 초, 25 초 wait 의 넘침 +0.03–1.95 초(서버 30 초 안).
 

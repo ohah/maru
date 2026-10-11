@@ -1025,10 +1025,18 @@ pub const devtools_chunk_bytes: usize = 16 * 1024;
 /// 페이지 하나가 다른 탭의 호출을 막지 못한다(W9-0b 적대 리뷰 — 전체 4 개만 두었을 때는 막았다).
 pub const max_devtools_calls: usize = 8;
 pub const max_devtools_calls_per_browser: usize = 2;
-/// sidecar 가 답을 기다리는 시한 — 렌더러가 멈추면 CDP 는 답도 detach 도 주지 않는다. sidecar 는 주기적으로(시한의 1/4) 넘은 호출을
-/// `expired` 로 답하고 버린다 — 그래서 실제로는 35~44 초. maru 는 30 초(control-plane 시한)에 호출을 끝내지만 sidecar 의 답이 올 때까지 그 자리를 쥔다(늦은 큰 결과를 읽는
+/// sidecar 가 답을 기다리는 시한 — 렌더러가 멈추면 CDP 는 답도 detach 도 주지 않는다. sidecar 는 주기적으로(kick 시한의 1/4 — 750 ms) 넘은
+/// 호출을 `expired` 로 답하고 버린다 — 그래서 실제로는 35~35.75 초. maru 는 30 초(control-plane 시한)에 호출을 끝내지만 sidecar 의 답이 올 때까지 그 자리를 쥔다(늦은 큰 결과를 읽는
 /// 예산도) — 그래서 이 값은 maru 시한보다 조금 길다.
 pub const devtools_stale_ms: i64 = 35_000;
+/// 숨은 탭을 깨우는 작은 스크린샷(kick, W9b②-3) — maru 가 주 호출 바로 뒤에 보내고 답은 버린다. sidecar 는 메서드와 인자가 이 바이트와
+/// 꼭 같은 호출을 kick 으로 알아보고 `devtools_kick_stale_ms` 에 `expired` 로 놓는다(이동하는 순간에 보낸 kick 은 답이 영영 오지 않아 —
+/// 실측 20 번 가운데 3–5 번 — 탭의 둘째 자리를 35 초 쥐었다, 적대 리뷰 3 회차). Chromium 안의 요청은 그대로 산다(sidecar 가 잊을 뿐 —
+/// 늦게 오는 프레임도 주 호출을 푼다).
+pub const devtools_kick_method = "Page.captureScreenshot";
+pub const devtools_kick_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}";
+/// kick 을 쥐는 시한 — 답은 보통 0–52 ms 에 온다(숨은 2.5 만 요소 탭에서도). sidecar 의 검사 주기(이 시한의 1/4) 때문에 실제로는 3–3.75 초.
+pub const devtools_kick_stale_ms: i64 = 3_000;
 
 pub const DevtoolsCall = struct {
     browser: BrowserId,

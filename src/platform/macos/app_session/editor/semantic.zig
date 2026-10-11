@@ -11,6 +11,8 @@ const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const editor_lsp = @import("lsp.zig");
 const lsp = maru.session.editor.lsp;
+/// 요청 규율(물을 때인가 · 응답 받기 · 실패 뒤 다시)은 L2 `lsp_requests` 가 소유한다(결함 11 의 후속 이동).
+const lsp_requests = maru.session.editor.lsp_requests;
 const semantic = lsp.semantic;
 
 /// 마지막 편집 뒤 이만큼 조용해야 묻는다(§8.2i 「시점」).
@@ -48,6 +50,20 @@ pub const State = struct {
     }
 };
 
+/// 요청 상태의 필드들 — L2 `lsp_requests` 가 이것으로 읽고 쓴다(상태 모양은 그대로).
+pub fn gate(st: *State) lsp_requests.Gate {
+    return .{
+        .waiting = &st.waiting,
+        .waiting_seq = &st.waiting_seq,
+        .waiting_version = &st.waiting_version,
+        .dirty = &st.dirty,
+        .clock = &st.last_edit_ms,
+        .sent = &st.sent,
+        .dropped_error = &st.dropped_error,
+        .dropped_stale = &st.dropped_stale,
+    };
+}
+
 /// 프레임마다(색을 만드는 자리에서) — 보이는 원본 줄 `[first_src, last_src]` 를 알려 주면 물을 때인지 판정해 보낸다.
 pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) void {
     const st = &term.rt.editor_semantic;
@@ -56,7 +72,7 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     // provider 검사는 `requestSemanticTokens` 가 한다(여기서 또 보면 등가 — 적대적 2회차 B2).
     const doc = term.rt.editorDocument().opened orelse return;
     const now = self.awakeMs();
-    if (st.last_edit_ms != 0 and now -| st.last_edit_ms < quiet_ms) return; // 0 = 아직 편집이 없었다
+    if (!lsp_requests.quiet(gate(st), now, quiet_ms)) return; // 0 = 아직 편집이 없었다
     const line_count = doc.file.lines.lineCount();
     const lo = first_src -| range_pad_lines;
     const hi = @min(last_src + range_pad_lines, line_count -| 1);
@@ -65,46 +81,35 @@ pub fn tick(self: *AppSession, term: *Term, first_src: usize, last_src: usize) v
     if (version_ok and covered and !st.dirty) return;
     const use_full = !c.semantic_caps.range; // provider 가 없으면 `range` 도 false 지만 아래 요청이 `null` 로 막는다
     const seq = editor_lsp.requestSemanticTokens(self, term, use_full, lo, hi) orelse return;
-    st.waiting = true;
-    st.waiting_seq = seq;
-    st.waiting_version = term.rt.editorDocument().notifications.lsp_version;
+    lsp_requests.sent(gate(st), seq, term.rt.editorDocument().notifications.lsp_version);
     st.waiting_lo = if (use_full) 0 else lo;
     st.waiting_hi = if (use_full) std.math.maxInt(usize) else hi;
     st.waiting_full = use_full;
-    st.dirty = false;
-    st.sent += 1;
 }
 
 /// 응답(`editor_lsp` 가 부른다). 낡은 seq·낡은 version·오류는 버린다(오류·낡음은 `dirty` 로 다시 묻는다).
 pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Value, is_error: bool, enc: lsp.rpc.PositionEncoding) void {
     const st = &term.rt.editor_semantic;
-    if (!st.waiting or seq != st.waiting_seq) return;
-    st.waiting = false;
-    if (is_error or result == null) {
-        st.dropped_error += 1;
-        st.dirty = true; // `content modified` 등 — 조용해지면 다시
-        st.last_edit_ms = self.awakeMs(); // 곧바로 되묻지 않는다(quiet 뒤)
-        return;
-    }
-    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
-        st.dropped_stale += 1;
-        st.dirty = true;
-        return;
+    switch (lsp_requests.receive(gate(st), seq, is_error or result == null, term.rt.editorDocument().notifications.lsp_version)) {
+        .ignore, .stale => return,
+        .failed => {
+            lsp_requests.retry(gate(st), self.awakeMs()); // 곧바로 되묻지 않는다(조용 뒤)
+            return;
+        },
+        .take => {},
     }
     const doc = term.rt.editorDocument().opened orelse return;
     const c = editor_lsp.readyClientFor(self, term) orelse return;
     // 할당 실패 — 다시 묻되 **조용 시계를 되감는다**(오류 응답과 같은 규율). `dirty` 만 세우면 다음 `tick` 이 곧바로 같은 요청을 다시 보내 메모리가 모자란 동안 매 프레임 되풀이했다(여섯째 결함 후보, 재현 2026-10-11).
     // 예전에는 `catch return` 이라 실패를 기억조차 안 했다 — version·덮은 범위가 안 바뀌어 결국 같은 꼴로 곧바로 되물었다.
     const decoded = semantic.decode(self.allocator, result, c.semantic_caps.roles, doc.file.content, doc.file.lines, enc) catch {
-        st.dirty = true;
-        st.last_edit_ms = self.awakeMs();
+        lsp_requests.retry(gate(st), self.awakeMs());
         return;
     };
     defer self.allocator.free(decoded);
     st.spans.clearRetainingCapacity();
     st.spans.appendSlice(self.allocator, decoded) catch {
-        st.dirty = true;
-        st.last_edit_ms = self.awakeMs();
+        lsp_requests.retry(gate(st), self.awakeMs());
         return;
     };
     st.version = st.waiting_version;
@@ -117,7 +122,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
 /// 편집 통지(§8.2i 「편집 중」) — 스팬을 밀고 조용 시계를 되감는다. 범위를 모르면(`null`, undo/redo) 전부 버린다.
 pub fn onEdit(self: *AppSession, term: *Term, start: ?u32, old_end: u32, new_end: u32) void {
     const st = &term.rt.editor_semantic;
-    st.last_edit_ms = self.awakeMs();
+    lsp_requests.touch(gate(st), self.awakeMs());
     if (start) |s| {
         semantic.shift(&st.spans, s, old_end, new_end);
         st.shifted += 1;

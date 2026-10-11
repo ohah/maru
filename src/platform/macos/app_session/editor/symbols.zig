@@ -11,6 +11,8 @@ const Term = app_session_mod.Term;
 const editor_lsp = @import("lsp.zig");
 const syntax = @import("syntax");
 const lsp = maru.session.editor.lsp;
+/// 요청 규율(물을 때인가 · 응답 받기 · 실패 뒤 다시)은 L2 `lsp_requests` 가 소유한다(결함 11 의 후속 이동).
+const lsp_requests = maru.session.editor.lsp_requests;
 const symbols = lsp.symbols;
 
 /// 마지막 편집 뒤 이만큼 조용해야 묻는다(§8.2o — 접힘 3층과 같은 시계).
@@ -43,6 +45,20 @@ pub const State = struct {
     }
 };
 
+/// 요청 상태의 필드들 — L2 `lsp_requests` 가 이것으로 읽고 쓴다(상태 모양은 그대로).
+pub fn gate(st: *State) lsp_requests.Gate {
+    return .{
+        .waiting = &st.waiting,
+        .waiting_seq = &st.waiting_seq,
+        .waiting_version = &st.waiting_version,
+        .dirty = &st.dirty,
+        .clock = &st.last_edit_ms,
+        .sent = &st.sent,
+        .dropped_error = &st.dropped_error,
+        .dropped_stale = &st.dropped_stale,
+    };
+}
+
 /// 이 Term 의 2층이 **지금 문서에 유효한가**. 소비자(밴드 체인·피커·형제 목록)가 층을 고르는 유일한 물음이다.
 /// (`version` 검사는 **이중 방어**다 — 적대적 B6: 편집이 목록을 비우고 낡은 응답은 `onResponse` 가 decode 전에 버리므로 「목록이 차 있는데
 /// version 이 낡은」 상태가 오늘은 못 생긴다. 뜻으로 둔다 — 이 함수 하나만 읽고도 「지금 문서의 것인가」를 알 수 있어야 한다.)
@@ -66,43 +82,32 @@ pub fn tick(self: *AppSession, term: *Term) void {
     if (version == 0) return; // 아직 서버에 안 열었다
     if (st.version == version and !st.dirty) return;
     const now = self.awakeMs();
-    if (st.last_edit_ms != 0 and now -| st.last_edit_ms < quiet_ms) return;
+    if (!lsp_requests.quiet(gate(st), now, quiet_ms)) return;
     const seq = editor_lsp.requestDocumentSymbols(self, term) orelse return; // 서버·provider 검사는 요청이 한다
-    st.waiting = true;
-    st.waiting_seq = seq;
-    st.waiting_version = version;
-    st.dirty = false;
-    st.sent += 1;
+    lsp_requests.sent(gate(st), seq, version);
 }
 
 /// 응답(`editor_lsp` 가 부른다). 낡은 seq·낡은 version·오류는 버린다.
 pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Value, is_error: bool, enc: lsp.rpc.PositionEncoding) void {
     const st = &term.rt.editor_symbols;
-    if (!st.waiting or seq != st.waiting_seq) return;
-    st.waiting = false;
-    if (is_error or result == null) {
-        st.dropped_error += 1;
-        st.dirty = true;
-        st.last_edit_ms = self.awakeMs(); // 곧바로 되묻지 않는다(조용 뒤)
-        return;
-    }
-    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
-        st.dropped_stale += 1;
-        st.dirty = true;
-        return;
+    switch (lsp_requests.receive(gate(st), seq, is_error or result == null, term.rt.editorDocument().notifications.lsp_version)) {
+        .ignore, .stale => return,
+        .failed => {
+            lsp_requests.retry(gate(st), self.awakeMs()); // 곧바로 되묻지 않는다(조용 뒤)
+            return;
+        },
+        .take => {},
     }
     const doc = term.rt.editorDocument().opened orelse return;
     symbols.decode(self.allocator, result, doc.file.content, doc.file.lines, enc, &st.decoded) catch {
         // 할당 실패 — 다시 묻되 **조용 시계를 되감는다**(오류 응답과 같은 규율). `dirty` 만 세우면 다음 `tick` 이 곧바로 같은 요청을 다시 보내 메모리가 모자란 동안 매 프레임 되풀이했다(여섯째 결함 후보, 재현 2026-10-11).
-        st.dirty = true;
-        st.last_edit_ms = self.awakeMs();
+        lsp_requests.retry(gate(st), self.awakeMs());
         return;
     };
     // **1층 타입으로 옮긴다** — 필드 뜻이 같아 그대로 베낀다(소비자가 층을 안 가른다). 응답 때 한 번이라 프레임 비용이 없다.
     st.list.clearRetainingCapacity();
     st.list.ensureTotalCapacity(self.allocator, st.decoded.items.items.len) catch {
-        st.dirty = true;
-        st.last_edit_ms = self.awakeMs(); // 위와 같은 할당 실패
+        lsp_requests.retry(gate(st), self.awakeMs()); // 위와 같은 할당 실패
         return;
     };
     for (st.decoded.items.items) |sym| st.list.appendAssumeCapacity(.{
@@ -129,7 +134,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
 /// 편집 통지(§8.2o 「편집 중」) — **버린다**(밀지 않는다). 다음 조용에서 다시 묻는다.
 pub fn onEdit(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_symbols;
-    st.last_edit_ms = self.awakeMs();
+    lsp_requests.touch(gate(st), self.awakeMs());
     if (st.list.items.len > 0) {
         st.list.clearRetainingCapacity();
         st.cleared_by_edit += 1;

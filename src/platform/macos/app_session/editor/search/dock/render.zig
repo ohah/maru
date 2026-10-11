@@ -194,7 +194,7 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .options = state.options,
         .option_labels = .{ i18n.t(.project_search_case), i18n.t(.project_search_word), i18n.t(.project_search_regex), i18n.t(.project_search_filters), i18n.t(.project_search_run), i18n.t(.project_search_cancel) },
         .status = if (state.batch.phase == .completed) status else if (batching) try std.fmt.allocPrint(arena, "{s} · {d} {s}", .{ status, count, i18n.t(.project_search_matches) }) else if (!previewing and state.result.phase == .complete and state.nav == null) try std.fmt.allocPrint(arena, "{d} {s} · {d} {s}", .{ count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }) else try std.fmt.allocPrint(arena, "{s} · {d} {s} · {d} {s}", .{ status, count, i18n.t(.project_search_matches), state.result.excluded, i18n.t(.project_search_excluded) }),
-        .scopes = if (batching) try batchFormat(arena, if (compact) .project_batch_scope_compact else .project_batch_scope, &.{ .{ .d = @intCast(state.batch.files) }, .{ .d = @intCast(state.batch.omitted) } }) else if (previewing) preview.title else scopes.items,
+        .scopes = if (batching) try batchFormat(arena, if (compact) .project_batch_scope_compact else .project_batch_scope, &.{ .{ .d = @intCast(state.batch.files - state.batch.closed) }, .{ .d = @intCast(state.batch.closed) } }) else if (previewing) preview.title else scopes.items,
         .expanded = state.expanded,
         .running = state.batch.phase == .building or state.result.phase == .running or state.result.phase == .waiting or state.nav != null,
         .can_search = search_dock.canSearch(self),

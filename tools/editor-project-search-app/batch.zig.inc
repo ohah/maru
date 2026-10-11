@@ -5,8 +5,8 @@ fn editorBatchProbe(self: *AppSession, stage: u32) i32 {
     if (stage == 29) return if (st.result.phase == .complete) 1 else 0;
     if (stage == 30 or stage == 31) {
         if (st.batch.phase == .building) return 0;
-        std.debug.print("BATCH_OBSERVE stage={d} phase={s} files={d} omitted={d} failure={any}\n", .{stage, @tagName(st.batch.phase), st.batch.files, st.batch.omitted, st.batch.failure});
-        if (st.batch.phase != .ready or st.batch.files != wanted or st.batch.omitted != 2) return -1;
+        std.debug.print("BATCH_OBSERVE stage={d} phase={s} files={d} closed={d} failure={any}\n", .{stage, @tagName(st.batch.phase), st.batch.files, st.batch.closed, st.batch.failure});
+        if (st.batch.phase != .ready or st.batch.files != wanted + 2 or st.batch.closed != 2) return -1;
         if ((stage == 30) != (self.dock.side == .right)) return -1;
         var input_bytes: usize = 0;
         var output_bytes: usize = 0;
@@ -16,11 +16,11 @@ fn editorBatchProbe(self: *AppSession, stage: u32) i32 {
             output_bytes += item.plan.after.len;
             plan_rows += item.plan.rows.items.len;
         }
-        std.debug.print("BATCH_READY files={d} matches={d} omitted={d} input_bytes={d} output_bytes={d} plan_rows={d}\n", .{st.batch.files, st.batch.matches, st.batch.omitted, input_bytes, output_bytes, plan_rows});
+        std.debug.print("BATCH_READY files={d} matches={d} closed={d} input_bytes={d} output_bytes={d} plan_rows={d}\n", .{st.batch.files, st.batch.matches, st.batch.closed, input_bytes, output_bytes, plan_rows});
         return 1;
     }
     if (stage == 32 or stage == 33) {
-        if (st.batch.phase != .completed or st.batch.result.saved != wanted or st.batch.result.save_failed != 0) return -1;
+        if (st.batch.phase != .completed or st.batch.result.saved != wanted + 2 or st.batch.result.save_failed != 0) return -1;
         if ((stage == 33) != (self.dock.side == .right)) return -1;
         std.debug.print("BATCH_SAVED files={d} saved={d} failed={d}\n", .{st.batch.files, st.batch.result.saved, st.batch.result.save_failed});
         return 1;
@@ -32,13 +32,13 @@ fn editorBatchProbe(self: *AppSession, stage: u32) i32 {
             const doc = term.rt.editorDocument();
             const path = doc.path orelse continue;
             const name = std.fs.path.basename(path);
-            if (!std.mem.eql(u8, name, "symbols.zig") and !std.mem.startsWith(u8, name, "peer")) continue;
+            if (!std.mem.eql(u8, name, "symbols.zig") and !std.mem.startsWith(u8, name, "peer") and !std.mem.startsWith(u8, name, "disk")) continue;
             const opened = doc.opened orelse return -1;
             if (std.mem.indexOf(u8, opened.file.content, "renamed") != null) return -1;
             if (stage == 35 and editor_ops.isDirty(term)) return -1;
             count += 1;
         };
-        return if (count == wanted) 1 else -1;
+        return if (count == wanted + 2) 1 else -1;
     }
     return -1;
 }
@@ -84,7 +84,7 @@ fn editorBatchAction(self: *AppSession, stage: u32) void {
             if (term.kind != .editor or !editor_ops.isDirty(term)) continue;
             const path = term.rt.editorDocument().path orelse continue;
             const name = std.fs.path.basename(path);
-            if (std.mem.eql(u8, name, "symbols.zig") or std.mem.startsWith(u8, name, "peer")) editor_ops.saveDocument(self, term) catch return;
+            if (std.mem.eql(u8, name, "symbols.zig") or std.mem.startsWith(u8, name, "peer") or std.mem.startsWith(u8, name, "disk")) editor_ops.saveDocument(self, term) catch return;
         };
     }
 }

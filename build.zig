@@ -5565,7 +5565,7 @@ pub fn build(b: *std.Build) void {
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_coordinator.step);
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });
     const run_batch_ui = b.addRunArtifact(batch_ui_tests);
-    run_batch_ui.addArg("--maru-expect-tests=10");
+    run_batch_ui.addArg("--maru-expect-tests=13");
     run_batch_ui.setCwd(b.path("."));
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
         run_batch_ui.step.dependOn(&ripgrep_prepare.step);

@@ -1,6 +1,6 @@
 # 프로젝트 바꾸기 — 여러 파일 적용 S4c
 
-상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 문서 준비·파일 항목 예약 API까지 구현했다. 혼합 source coordinator의 전체 Undo/편집 준비·pane 게시·파일별 저장 API를 연결했다. 혼합 source worker API를 구현했다. 프로젝트 전체 UI의 수집·적용 연결은 후속이다.
+상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [전체 결과 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 문서 준비·파일 항목 예약 API까지 구현했다. 혼합 source coordinator의 전체 Undo/편집 준비·pane 게시·파일별 저장 API를 연결했다. 혼합 source worker API를 구현했다. 프로젝트 전체 UI의 수집·미리보기·적용·결과 신원 연결까지 구현했다.
 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo는 [연결 이력 계획](editor-history-transaction.md)이 소유한다.
 [S4a/S4b](editor-project-replace-apply.md)는 단일 파일 적용까지 구현됐다.
 
@@ -138,7 +138,7 @@ BOM 유무 변경을 재검증에서 구분한다. 읽기 마지막에는 같은
 여러 대상이 같은 device/inode를 가리키면 `AliasedTargets`, host가 넘긴 열린 문서 신원과
 겹치면 `PathOccupied`로 전체 준비를 거절한다. 자동 합치기나 열린 모델로의 임의 전환을 하지 않는다.
 현재 host는 이 API를 호출하지 않는다. 열린 문서의 물리 신원 수집·누락 없는 점유 목록·경로 정규화와
-로드 직전 재검증은 후속 연결의 책임이며, 이 API에 빈 점유 목록을 넘겨 제품 충돌 검증이 끝났다고
+로드 직전 재검증은 coordinator가 담당한다. 읽기 API 자체에 빈 점유 목록을 넘겨 제품 충돌 검증이 끝났다고
 판단해서는 안 된다. 읽기 경로의 기존 symlink 추적 정책을 변경하지 않는다.
 
 파일별·총 읽기 예산을 모든 대상에 적용하고 취소·잘못된 UTF-8·비정규 파일·root 교체를 거절한다.
@@ -230,9 +230,9 @@ source/Plan 변조·늦은 열기/수정·최종 뷰/연결 준비 실패·모�
 마지막 연결 기록 할당 시점의 실제 외부 수정도 재현한다. 결함 주입 도구는 최종 disk 검사·pane 게시·
 변경 없음·canonical Plan·마지막 Undo 준비를 제거한 결함과 정상/등가/복원 대조를 검사한다.
 
-제품 UI는 아직 이 API를 호출하지 않는다. 혼합 worker는 coordinator 입력을 준비하며 fixture가 적용까지 검사한다. metadata 검사는 최종 전문 해시
+전체 결과 UI가 혼합 worker 입력을 준비하고 이 coordinator를 호출한다. 실제 AppKit/Metal 하네스도 적용·저장·Undo를 검사한다. metadata 검사는 최종 전문 해시
 재검증·파일 잠금을 대신하지 않는다. worker의 검증된 Read 수명과 종료/취소·큰 입력 시간/메모리,
-실제 제품 입력·시각 캡처는 후속 배선에서 검사한다. 기존 미참여 캡처의 치환 거절 정책은
+제품 입력·시각 캡처는 전체 결과 UI 하네스가 검사한다. 실제 물리 한글 HID는 그 하네스의 범위 밖이다. 기존 미참여 캡처의 치환 거절 정책은
 [단일 적용 계획](editor-project-replace-apply.md)의 계약을 유지한다.
 
 ## 혼합 source worker
@@ -259,23 +259,23 @@ caller는 `coordinator.apply`가 끝날 때까지 Ready를 유지하고 `Ready.d
 입력 index 순서, 마지막 hash 충돌, 혼합 총량, 취소, 즉시 caller 종료, 중복 index·경로 불일치,
 선택 밖 물리 점유와 모든 준비 할당 실패를 검사한다. 변이 검증 도구는
 `tools/test-editor-replace-mixed-worker-adversarial.py`다. OS thread spawn 자체 실패는 주입하지 않는다.
-현재 열린 문서 UI는 기존 worker를 유지한다. 프로젝트 전체 UI가 점유 신원과 디스크 hash를
-수집해 이 API에 전달하고 Ready/결과 문서 신원을 보관하는 배선은 다음 단계다.
+전체 결과 UI는 점유 신원과 재검증한 디스크 hash를 수집해 이 API에 전달하고
+Ready/결과 문서 신원을 보관한다. 기존 모델 전용 worker API는 독립 호출자와 회귀 검증을 위해 유지한다.
 
 ## 제품 연결과 후속 범위
 
 - 완료 검색의 선택을 root capability로 해석하고 신원 있는 모델 snapshot을 worker에 전달한다.
-  worker는 Term 포인터를 빌리지 않는다. 열린 문서 UI에 연결했으며 취소/종료와 detached worker 완료 수명을 따로 정산한다.
+  worker는 Term 포인터를 빌리지 않는다. 전체 결과 UI에 연결했으며 취소/종료와 detached worker 완료 수명을 따로 정산한다.
 - worker가 준비한 명세/Plan과 준비 시작 ticket을 독립 소유해 현재 actor API에 연결한다.
   commit 직전 입력·옵션·root와 모든 문서 revision/원문/조합을 재검증한다.
   준비 성공만으로 실제 문서 충돌이 해결됐다고 판단하지 않는다.
 - 연결 조정자는 유효 편집이 둘 이상일 때 사용한다. 유효 편집 하나와 전부 변경 없음도 별도로 검증한다.
   이 경우는 열린 모델 API와 혼합 source coordinator가 모두 처리한다. 기존 단일 파일 UI apply 반복 호출은 focus 이동·검색 상태 폐기 때문에 사용하지 않는다.
-- 열린 문서 UI는 자기 commit이 검색 fingerprint를 바꾸거나 알림이 검색 상태를 해제해도 적용 중 명세/Plan을 잃지 않는다.
+- 전체 결과 UI는 자기 commit이 검색 fingerprint를 바꾸거나 알림이 검색 상태를 해제해도 적용 중 명세/Plan을 잃지 않는다.
   원래 fingerprint를 무시해서 외부 변경 검사까지 끄지 않는다.
 - 같은 경로의 독립 문서는 선택 밖 열린 문서까지 점유 검사한다. 디스크 파일은 검증→로드→저장
   사이의 물리 신원 재검증과 symlink/hardlink 별칭 검출은 disk 준비·coordinator·저장 CAS가 담당한다.
-  제품 worker/UI에 연결하기 전까지 전체 프로젝트 디스크 배치 지원 완료로 판단하지 않는다.
+  전체 결과 UI가 이 경로를 호출하며 제품 하네스가 혼합 저장·Undo를 확인한다. 임의 선택과 저장만 재시도하는 UI는 별도 범위다.
 - 현재 파일 항목 한도와 기존 문서를 함께 계산한다. 한도 실패는 편집 전에 전체 거절하며,
   이를 피하려고 기존 문서/Undo를 자동 폐기하지 않는다. 비활성 로드와 준비 실패 후 문서 수명도 검증한다.
 - 결과는 ‘이 배치 당시’ 기록이다. 저장 실패 재시도는 owner/slot/generation을 확인하며

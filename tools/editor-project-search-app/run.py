@@ -77,7 +77,7 @@ def main():
              "src/platform/macos/app_session/input.zig", "src/platform/macos/app_session/editor/search/navigation.zig",
              "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/disk_apply.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
              "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
-             "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h", "src/platform/macos/app_session/editor/search/batch.zig", "src/platform/macos/app_session/editor/search/batch/ui.zig", "src/platform/macos/app_session/editor/search/batch/worker.zig")
+             "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h", "src/platform/macos/app_session/editor/search/batch.zig", "src/platform/macos/app_session/editor/search/batch/ui.zig", "src/platform/macos/app_session/editor/search/batch/worker.zig", "src/platform/macos/app_session/editor/search/batch/mixed_worker.zig", "src/platform/macos/app_session/editor/search/batch/collect.zig", "src/platform/macos/app_session/editor/search/batch/coordinator.zig", "src/platform/macos/app_session/editor/search/batch/load.zig")
     print(root, flush=True)
     if args.app:
         app = args.app.resolve()
@@ -238,7 +238,7 @@ def main():
     metrics["pane_build_ns"] = [int(value) for value in re.findall(r"SEARCH_PANE_BUILD elapsed_ns=(\d+)", transcript)]
     for label in ("CAPTURE", "PREPARE", "APPLY"):
         metrics["batch_" + label.lower() + "_ns"] = [int(value) for value in re.findall(r"BATCH_" + label + r" elapsed_ns=(\d+)", transcript)]
-    metrics["batch_plans"] = [dict(zip(("files", "matches", "omitted", "input_bytes", "output_bytes", "plan_rows"), map(int, values))) for values in re.findall(r"BATCH_READY files=(\d+) matches=(\d+) omitted=(\d+) input_bytes=(\d+) output_bytes=(\d+) plan_rows=(\d+)", transcript)]
+    metrics["batch_plans"] = [dict(zip(("files", "matches", "closed", "input_bytes", "output_bytes", "plan_rows"), map(int, values))) for values in re.findall(r"BATCH_READY files=(\d+) matches=(\d+) closed=(\d+) input_bytes=(\d+) output_bytes=(\d+) plan_rows=(\d+)", transcript)]
     if args.replace_batch and (not metrics["batch_apply_ns"] or not metrics["batch_plans"]):
         raise RuntimeError("Missing actual batch timing evidence")
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",

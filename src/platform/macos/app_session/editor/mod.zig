@@ -61550,7 +61550,7 @@ fn batchUISearch(fx: *PaneFixture) !void {
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo disk" });
     try replacePreviewSearchWithFiles(fx, "foo", "bar", false, "batch-a.txt,batch-b.txt,disk.txt");
 }
-test "RPBU1 실제 완료 검색의 열린 두 문서를 준비 적용 저장하고 닫힌 파일은 명시적으로 제외한다" {
+test "RPBU1 실제 완료 검색의 열린 두 문서를 준비 적용 저장하고 닫힌 파일도 함께 반영한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try PaneFixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
@@ -61563,24 +61563,30 @@ test "RPBU1 실제 완료 검색의 열린 두 문서를 준비 적용 저장하
     d.apply(fx.session, .{ .option = 10 }, fx.session.editor_search.result.generation);
     try waitBatchUI(fx.session);
     try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.batch.phase), .ready), fx.session.editor_search.batch.phase);
-    try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.files);
-    try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.matches);
-    try testing.expectEqual(@as(usize, 1), fx.session.editor_search.batch.omitted);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.files);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.matches);
+    try testing.expectEqual(@as(usize, 1), fx.session.editor_search.batch.closed);
     try testing.expectEqualStrings("foo A", a.rt.editorDocument().opened.?.file.content);
     try testing.expectEqualStrings("foo B", b.rt.editorDocument().opened.?.file.content);
+    @import("../tab.zig").recomputeVisibleTabs(fx.session);
+    fx.session.chrome_dirty = false;
     d.apply(fx.session, .{ .option = 10 }, fx.session.editor_search.result.generation);
+    try testing.expect(fx.session.chrome_dirty);
+    for (fx.session.sidebar_rows.items) |row| if (row == .agent_toggle) {
+        try testing.expectEqual(pane_ops.activePane(fx.session).terms.items.len, @as(usize, row.agent_toggle.count));
+    };
     try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.batch.phase), .completed), fx.session.editor_search.batch.phase);
-    try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.result.saved);
-    try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.ready.?.specification.targets.items.len);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.result.saved);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.ready.?.specification.targets.items.len);
     try testing.expectEqualStrings("bar A", a.rt.editorDocument().opened.?.file.content);
     try testing.expectEqualStrings("bar B", b.rt.editorDocument().opened.?.file.content);
     try batchApplyDisk(&fx, "batch-a.txt", "bar A");
     try batchApplyDisk(&fx, "batch-b.txt", "bar B");
-    try batchApplyDisk(&fx, "disk.txt", "foo disk");
+    try batchApplyDisk(&fx, "disk.txt", "bar disk");
     try testing.expectEqual(surface, pane_ops.activePane(fx.session).activeTerm().surfaceId());
     try testing.expect(!d.batch_ui.canApply(fx.session));
     d.pump(fx.session);
-    try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.result.saved);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.result.saved);
     try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.batch.phase), .completed), fx.session.editor_search.batch.phase);
     try testing.expect(fx.session.editor_search.batch.ready != null);
     try testing.expectEqualStrings("batch-a.txt", fx.session.editor_search.batch.displayPath(a.rt.editorDocument().path.?));
@@ -61631,7 +61637,7 @@ test "RPBU3 저장 실패의 문서와 Undo 및 뒤 파일 저장 결과를 UI�
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "external" });
     try d.batch_ui.apply(fx.session);
     const batch = &fx.session.editor_search.batch;
-    try testing.expectEqual(@as(usize, 1), batch.result.saved);
+    try testing.expectEqual(@as(usize, 2), batch.result.saved);
     try testing.expectEqual(@as(usize, 1), batch.result.save_failed);
     try testing.expectEqualStrings("bar A", a.rt.editorDocument().opened.?.file.content);
     try testing.expect(isDirty(a));
@@ -61639,7 +61645,7 @@ test "RPBU3 저장 실패의 문서와 Undo 및 뒤 파일 저장 결과를 UI�
     try testing.expectEqualStrings("bar B", b.rt.editorDocument().opened.?.file.content);
     try batchApplyDisk(&fx, "batch-a.txt", "external");
     try batchApplyDisk(&fx, "batch-b.txt", "bar B");
-    try batchApplyDisk(&fx, "disk.txt", "foo disk");
+    try batchApplyDisk(&fx, "disk.txt", "bar disk");
     try testing.expect(!d.batch_ui.canApply(fx.session));
     for (batch.ready.?.specification.targets.items) |target| {
         if (std.mem.endsWith(u8, target.absolute, "batch-a.txt")) try testing.expectEqual(editor.search.batch.Outcome.save_failed, target.outcome);
@@ -61657,19 +61663,19 @@ test "RPBU4 변경 없음 단일 유효 편집과 disk 전용 검색의 적용 �
         try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo disk" });
         try replacePreviewSearchWithFiles(&fx, if (mode == 1) "foo|bar" else "foo", if (mode == 1) "foo" else "foo", mode == 1, if (mode == 2) "disk.txt" else "batch-a.txt,batch-b.txt,disk.txt");
         const ui = @import("search/batch/ui.zig");
-        if (mode == 2) {
-            try testing.expect(!ui.canStart(fx.session));
-            try testing.expectError(error.StaleRequest, ui.start(fx.session));
-            continue;
-        }
+        const before = pane_ops.activePane(fx.session).terms.items.len;
         try ui.start(fx.session);
         try waitBatchUI(fx.session);
         try ui.apply(fx.session);
         const result = fx.session.editor_search.batch.result;
         try testing.expectEqual(@as(usize, if (mode == 1) 1 else 0), result.changed);
-        try testing.expectEqual(@as(usize, if (mode == 1) 1 else 2), result.unchanged);
+        try testing.expectEqual(@as(usize, if (mode == 1) 2 else if (mode == 2) 1 else 3), result.unchanged);
         try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
         try testing.expectEqualStrings("foo B", b.rt.editorDocument().opened.?.file.content);
+        if (mode == 2) {
+            try testing.expect(ui.resultTerm(fx.session, 0) == null);
+            try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len);
+        }
         if (mode == 1) {
             try testing.expect(result.operation == null);
             try testing.expect(undoEdit(fx.session, b));
@@ -61721,7 +61727,7 @@ test "RPBU6 모든 수집과 worker 준비 할당 실패 및 화면 게시 실�
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var failures: usize = 0;
     var success = false;
-    for (0..320) |fail_index| {
+    for (0..1024) |fail_index| {
         var fx = try PaneFixture.init(testing.allocator);
         defer fx.deinit(testing.allocator);
         const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo A");
@@ -61756,6 +61762,7 @@ test "RPBU6 모든 수집과 worker 준비 할당 실패 및 화면 게시 실�
         success = true;
         break;
     }
+    std.debug.print("UI 수집/준비 할당 실패 거절 {d}, 정상 준비 {any}\n", .{ failures, success });
     try testing.expect(success and failures > 0);
 }
 
@@ -62428,4 +62435,59 @@ test "RPMW7 선택 밖 열린 물리 파일 점유는 worker 미리보기를 거
     }
     mixedWorkerWait(job);
     try testing.expectError(error.PathOccupied, job.take());
+}
+
+test "RPBU7 새 disk 결과도 정확한 문서 신원으로 열고 닫은 뒤에는 다시 만들지 않는다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    _ = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo A");
+    _ = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo B");
+    try batchUISearch(&fx);
+    const ui = @import("search/batch/ui.zig");
+    try ui.start(fx.session);
+    try waitBatchUI(fx.session);
+    try ui.apply(fx.session);
+    var index: usize = 0;
+    for (fx.session.editor_search.batch.ready.?.specification.targets.items, 0..) |target, i| if (target.source == .disk) {
+        index = i;
+    };
+    const term = ui.resultTerm(fx.session, index) orelse return error.NoDocument;
+    try testing.expectEqualStrings("bar disk", term.rt.editorDocument().opened.?.file.content);
+    ui.openResult(fx.session, index);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == term);
+    const old = term.rt.editor_document_lease.?.document;
+    linkedFixtureClose(&fx, term);
+    const replacement = try undoFixture(&fx, testing.allocator, "replacement.txt", "other");
+    try testing.expectEqual(old.slot, replacement.rt.editor_document_lease.?.document.slot);
+    try testing.expect(old.generation != replacement.rt.editor_document_lease.?.document.generation);
+    const count = pane_ops.activePane(fx.session).terms.items.len;
+    try testing.expect(ui.resultTerm(fx.session, index) == null);
+    ui.openResult(fx.session, index);
+    try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+}
+test "RPBU8 검색 행과 달라진 disk와 미리보기 뒤 수정은 전체 UI 적용을 거절한다" {
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo A");
+        const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo B");
+        const before = pane_ops.activePane(fx.session).terms.items.len;
+        try batchUISearch(&fx);
+        const ui = @import("search/batch/ui.zig");
+        if (mode == 0) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo changed" });
+        try ui.start(fx.session);
+        try waitBatchUI(fx.session);
+        if (mode == 0) {
+            try testing.expectEqual(@as(@TypeOf(fx.session.editor_search.batch.phase), .failed), fx.session.editor_search.batch.phase);
+        } else {
+            try testing.expect(ui.canApply(fx.session));
+            try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo changed" });
+            try testing.expectError(error.FileChanged, ui.apply(fx.session));
+        }
+        try testing.expectEqualStrings("foo A", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqualStrings("foo B", b.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
+        try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len);
+        try batchApplyDisk(&fx, "disk.txt", "foo changed");
+    }
 }

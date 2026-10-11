@@ -1,4 +1,4 @@
-//! 완료 검색의 열린 문서 전체를 동결한다. 적용 중 자원은 검색 상태 밖으로 옮겨 보존한다.
+//! 완료 검색의 프로젝트 결과 전체를 동결한다. 적용 중 자원은 검색 상태 밖으로 옮겨 보존한다.
 const std = @import("std");
 const maru = @import("maru");
 const host = @import("../../../../app_session.zig");
@@ -7,15 +7,19 @@ const dock = @import("../dock.zig");
 const owner = @import("../owner.zig");
 const preview = @import("../preview.zig");
 const actor = @import("../batch.zig");
-const worker = @import("worker.zig");
+const worker = @import("mixed_worker.zig");
+const collect = @import("collect.zig");
+const coordinator = @import("coordinator.zig");
 pub const State = struct {
     phase: enum { idle, building, ready, conflict, failed, completed } = .idle,
     job: ?*worker.Job = null,
+    collector: ?collect.State = null,
+    documents: ?[]?search.request.DocumentIdentity = null,
     ready: ?worker.Ready = null,
     ticket: ?actor.Ticket = null,
     files: usize = 0,
     matches: usize = 0,
-    omitted: usize = 0,
+    closed: usize = 0,
     result: actor.Result = .{},
     failure: ?anyerror = null,
     display_root: []const u8 = "",
@@ -23,12 +27,17 @@ pub const State = struct {
         return self.phase != .idle;
     }
     pub fn deinit(self: *State, a: std.mem.Allocator) void {
+        if (self.collector) |*collector| collector.deinit();
+        self.collector = null;
         if (self.job) |job| job.deinit();
         if (self.ready) |*ready| ready.deinit(a);
+        if (self.documents) |docs| a.free(docs);
         self.* = .{};
     }
     pub fn invalidate(self: *State, a: std.mem.Allocator) void {
         if (!self.active() or self.phase == .completed) return;
+        if (self.collector) |*collector| collector.deinit();
+        self.collector = null;
         if (self.job) |job| job.deinit();
         self.job = null;
         if (self.ready) |*ready| ready.deinit(a);
@@ -58,8 +67,7 @@ fn displayRoot(targets: []const search.batch.Target) []const u8 {
 pub fn canStart(self: *host.AppSession) bool {
     const st = &self.editor_search;
     if (!dock.canSearch(self) or !st.replacing or st.preview.active() or st.batch.active() or st.result.phase != .complete) return false;
-    for (st.result.model.groups.items) |group| if (group.source == .model) return true;
-    return false;
+    return st.result.model.groups.items.len > 0;
 }
 fn current(self: *host.AppSession) bool {
     const st = &self.editor_search;
@@ -78,15 +86,11 @@ pub fn start(self: *host.AppSession) !void {
     defer arena.deinit();
     const a = arena.allocator();
     var selections: std.ArrayList(search.batch.Selection) = .empty;
-    var omitted: std.StringHashMapUnmanaged(void) = .{};
+    var closed: usize = 0;
     for (st.result.model.groups.items) |group| {
         const root = self.file_tree.rootAt(group.root_index) orelse return error.StaleRequest;
         const name = try search.request.relativePath(group.path);
         const absolute = try std.fs.path.resolve(a, &.{ root, name });
-        if (group.source == .disk) {
-            try omitted.put(a, absolute, {});
-            continue;
-        }
         var ranges: std.ArrayList(search.event.Range) = .empty;
         for (group.rows.items) |index| {
             const row = st.result.model.rows.items[index];
@@ -97,26 +101,17 @@ pub fn start(self: *host.AppSession) !void {
     }
     const query = self.editor_project_search_query orelse return error.StaleRequest;
     var spec = try search.batch.Specification.capture(self.allocator, st.result.identity.?, .complete, st.fields[0].text.items, st.fields[3].text.items, query.options, selections.items);
+    for (spec.targets.items) |target| if (target.source == .disk) {
+        closed += 1;
+    };
     var owns_spec = true;
     defer if (owns_spec) spec.deinit(self.allocator);
     const ticket = try actor.Ticket.capture(self, &spec);
-    const models = try self.allocator.alloc(worker.Model, spec.targets.items.len);
-    var captured: usize = 0;
-    var owns_models = true;
-    defer if (owns_models) {
-        for (models[0..captured]) |*model| model.snapshot.deinit();
-        self.allocator.free(models);
-    };
-    for (spec.targets.items, models) |target, *model| {
-        model.* = .{ .source = target.source, .snapshot = try actor.captureSnapshot(self, target) };
-        captured += 1;
-    }
     const files = spec.targets.items.len;
     const matches = spec.matches;
-    const job = try worker.Job.start(self.allocator, &spec, models, ticket, dock.budget.snapshot_bytes, @import("../../mod.zig").read_limit_bytes);
+    const collector = try collect.State.init(self, &spec, ticket);
     owns_spec = false;
-    owns_models = false;
-    st.batch = .{ .phase = .building, .job = job, .ticket = ticket, .files = files, .matches = matches, .omitted = omitted.count() };
+    st.batch = .{ .phase = .building, .collector = collector, .ticket = ticket, .files = files, .matches = matches, .closed = closed };
     st.scroll.reset();
     st.invalidate();
     st.result.generation +%= 1;
@@ -131,6 +126,20 @@ pub fn poll(self: *host.AppSession) void {
         st.result.generation +%= 1;
         self.metal_dirty = true;
         return;
+    }
+    if (st.batch.collector) |*collector| {
+        const started = collector.poll(self) catch |err| {
+            st.batch.invalidate(self.allocator);
+            st.batch.phase = .failed;
+            st.batch.failure = err;
+            st.invalidate();
+            st.result.generation +%= 1;
+            self.metal_dirty = true;
+            return;
+        } orelse return;
+        collector.deinit();
+        st.batch.collector = null;
+        st.batch.job = started;
     }
     const job = st.batch.job orelse return;
     const ready = job.take() catch |err| {
@@ -166,7 +175,7 @@ pub fn apply(self: *host.AppSession) !void {
     var transaction = self.editor_search.batch;
     self.editor_search.batch = .{};
     const ready = &transaction.ready.?;
-    transaction.result = actor.apply(self, &ready.specification, &ready.prepared, ready.ticket) catch |err| {
+    const applied = coordinator.apply(self, &ready.specification, &ready.prepared, ready.ticket, ready.closed) catch |err| {
         transaction.phase = .conflict;
         transaction.failure = err;
         self.editor_search.batch = transaction;
@@ -175,6 +184,8 @@ pub fn apply(self: *host.AppSession) !void {
         self.metal_dirty = true;
         return err;
     };
+    transaction.result = applied.summary;
+    transaction.documents = applied.documents;
     transaction.phase = .completed;
     self.editor_search.batch = transaction;
     self.editor_search.scroll.reset();
@@ -188,7 +199,8 @@ pub fn resultTerm(self: *host.AppSession, index: usize) ?*host.Term {
     if (st.phase != .completed or st.ready == null) return null;
     const targets = st.ready.?.specification.targets.items;
     if (index >= targets.len) return null;
-    const source = targets[index].source.model.document;
+    const documents = st.documents orelse return null;
+    const source = documents[index] orelse return null;
     for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
         if (term.kind != .editor) continue;
         const lease = term.rt.editor_document_lease orelse continue;

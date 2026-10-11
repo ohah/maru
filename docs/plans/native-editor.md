@@ -893,44 +893,50 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 본문·diff 배치는 어차피 신규다. 레거시 접촉(`context_menu`·`dropdown`)은 N2·N4로 밀려 있어, 그 사이 이관이
 도착하면 새 형태에 붙고 안 오면 붙였다가 함께 움직인다. **동시 진행 시 편집기 쪽 변경은 확장에 한정**한다.
 
-### 다중 커서·여러 블록 편집 연산 결함과 계약 이탈 (2026-10-11 발견 — 미착수. 이 라벨을 떼는 PR: 결함 표의 결함 수정, 여섯째 후보의 수정과 그 후속 이동(계기 1), 일곱째 후보의 처리, 판정자를 세울지의 결정, 아래 「이동 단계」가 모두 끝나는 마지막 PR. 여섯째·일곱째 후보가 재현되지 않으면 그 결과를 적는 PR 이 그 항목을 닫는다)
+### 다중 커서·여러 블록 편집 연산 결함과 계약 이탈 (2026-10-11 발견 — 미착수. 이 라벨을 떼는 PR: 여섯째 후보의 처리(재현되면 수정과 그 후속 이동 — 계기 1), 판정자를 세울지의 결정, 아래 「이동 단계」가 모두 끝나는 마지막 PR. 결함 1~10 은 2026-10-11 수정 PR 이 재현하고 고쳤다. 여섯째 후보가 재현되지 않으면 그 결과를 적는 PR 이 그 항목을 닫는다)
 
-[AppSession 이식 측정](app-session-portability.md) 중에 나왔다. 이 절이 목록·결함·할 일과 이동 단계를 소유하고, 근거(실험 — 원본 L2 를 복사한 독립 test, 제품 빌드는 미확인 — 와 판정자 사각)는 그 문서 §2 「발견한 결함」에 있다(여섯째 후보는 같은 §2 의 「요청 규율의 반복」, 일곱째 후보와 단계 1 의 caret 후보는 이 절의 「이동 단계」).
+[AppSession 이식 측정](app-session-portability.md) 중에 나왔다. 이 절이 목록·결함·할 일과 이동 단계를 소유하고, 근거(실험 — 원본 L2 를 복사한 독립 test, 제품 빌드는 미확인 — 와 판정자 사각)는 그 문서 §2 「발견한 결함」에 있다(여섯째 후보는 같은 §2 의 「요청 규율의 반복」). 결함 6~10 은 그 측정 뒤 재현 단계에서 나왔고 근거는 아래 표의 회귀 test 다.
 
 **계약 이탈** — [레이어 배치](../native-editor-layering.md) §2 의 L2 `buffer.zig`(「텍스트 저장 + 편집 연산 + undo」)·`selection.zig`(「multi-selection(byte range 배열) + goal column」)가 맡는 편집 판정이 `app_session/editor` 에 쓰였다. 옮길 때는 새 파일에 둔다 — 기존 L2 파일에는 넣지 않는다. 자리는 대개 그 파일들 옆(`src/session/editor/` 아래, LSP 쪽은 `src/session/lsp/`)이고, L3 타입을 읽거나 내는 순수 계산은 최상위 잎이다(이식 계획 §1.5).
 - `mod.zig` 의 변경 리터럴을 만드는 제품 함수 13 개: 줄 연산 일곱(`moveLines`·`deleteLines`·`duplicateLines`·`indentLines`·`toggleLineComment`·`transformCase`·`insertNewlineKeepingIndent`), `insertTextWithRange`, `pasteText`, `deleteBy`, `replaceCurrentMatch`·`replaceAllMatches`, `acceptConflict`.
 - 그 밖에 복사(`copySelection` — 문서를 바꾸지 않지만 선택·문서로 결과를 정하는 판정, L2 자리는 `session/editor/clipboard.zig` 옆), 잘라내기(`cutSelection` — 빈 선택이면 줄 전체라는 복사의 규칙을 복제했다), 선택을 바꾸는 판정(`moveCarets`·`movedOffset`·`addCursorVertically`·`addNextOccurrence`·`selectWordOrLineAt`·`toggleCursorAt` — L2 잎 `motion` 등을 L4 에서 섞어 부른다), 선택으로 결과를 정하는 Tab 의 들여쓰기 판정(`selectionSpansLines` — 허브가 쓴다), `completion.accept` 의 caret 이동 계산, 그리고 `backup`·`conflict` 에도 있다. `workspace_edit` 은 변경 구성이 이미 L2(`lsp.text_edits.toChanges`·`inverseOf`)이고, 남은 판정(revision stale·저장 정책·되돌리기 해시 대조)은 LSP 응답을 적용하는 클라이언트 정책이라 이 목록이 아니라 두 계기를 따른다.
 - 옮기는 때는 [이식 계획](app-session-portability.md) §4 D1 이 정했다(사용자 결정 2026-10-11). 아래 「이동 단계」를 따라 지금부터 차례로 계약의 자리(대개 L2)로 옮긴다. 그 사이 그 순수 부분의 의미를 바꾸는 PR 이나 다른 호스트가 그 함수를 필요로 하는 PR 이 오면 단계를 기다리지 않고 그 PR 에서 옮긴다. IME·OS·tree-sitter 와 얽힌 자리는 갈라서 옮길 수 있으면 갈라서 옮기고, 갈라도 못 옮기면 사용자와 논의한다. 수정 커밋을 먼저, 이동 커밋을 나중에 둔다.
 
-**결함**(지금 다섯)
+**결함**(열 — 2026-10-11 수정 PR 이 제품 L4 test 로 모두 재현했고(고치기 전 빨강을 확인), 고친 뒤 초록이다. 결함 10 은 수정 전 범위 계산을 옮긴 임시 test 로 재현했다)
 
-| # | 함수 | 증상 | 재현 조건 |
-|---|---|---|---|
-| 1 | `duplicateLines` | caret 이 사본이 아닌 줄로 간다 · 문서 끝을 넘을 수 있다 | 떨어진 두 블록 |
-| 2 | `deleteLines` | 아무 일도 안 일어난다 | 마지막 내용 줄을 그 바로 앞 줄과 함께(선택 하나로도). 끝 개행이 있는 파일은 {마지막 내용 줄, 빈 마지막 줄}도(커서 둘) |
-| 3 | `insertNewlineKeepingIndent` | 아무 일도 안 일어난다 | primary 가 뒤이고 커서 앞에 들여쓰기가 있는 다중 커서 |
-| 4 | `insertTextWithRange` | caret 이 어긋난다 | 문서상 첫 커서부터 primary 까지 중 일부만 type-over |
-| 5 | `insertTextWithRange` | 둘째 caret 이 첫 단어의 `)` 뒤로 간다 | 여러 커서로 감싸기 |
+| # | 함수 | 증상 | 재현 조건 | 회귀 test |
+|---|---|---|---|---|
+| 1 | `duplicateLines` | caret 이 사본이 아닌 줄로 간다 · 문서 끝을 넘을 수 있다 | 떨어진 두 블록 | LNM1 |
+| 2 | `deleteLines` | 아무 일도 안 일어난다 | 마지막 내용 줄을 그 바로 앞 줄과 함께(선택 하나로도). 끝 개행이 있는 파일은 {마지막 내용 줄, 빈 마지막 줄}도(커서 둘) | LNM2 |
+| 3 | `insertNewlineKeepingIndent` | 아무 일도 안 일어난다 | primary 가 뒤이고 커서 앞에 들여쓰기가 있는 다중 커서 | LNM4 |
+| 4 | `insertTextWithRange` | caret 이 어긋난다 | 문서상 첫 커서부터 primary 까지 중 일부만 type-over | AID12 |
+| 5 | `insertTextWithRange` | 둘째 caret 이 첫 단어의 `)` 뒤로 간다 | 여러 커서로 감싸기 | AID13 |
+| 6 | `moveLines` | caret 이 옮긴 블록을 안 따라가고 그 자리에 올라온 다른 줄에 남는다 | 블록 안 caret 으로 아래로 이동 | LNM5 |
+| 7 | `deleteLines` | caret 이 다음 줄 열 0 으로 간다(§3.9a 는 같은 열) | 줄 가운데 caret | LNM6 |
+| 8 | `insertNewlineKeepingIndent` | caret 이 새 개행 **앞**에 남는다 | 들여쓰기 있는 줄에서 빈 caret 으로 Enter | LNM7 |
+| 9 | `cutSelection` | 복사하지 않은 글자(빈 caret 의 다음 글자)가 지워진다 | 선택과 빈 caret 이 섞인 잘라내기 | CUT2 |
+| 10 | `deleteLines` | 끝 개행까지 지워진다(`"a\nb\n"` → `"a"`) | 개행이 있는 마지막 내용 줄 | LNM3 |
+
+고친 방식: 줄 연산은 `applyLineEdit` 가 편집 **뒤** 선택(`after`)을 받아 caret 을 매핑 대신 직접 정한다(1·6·7·8). 연속한 줄은 한 덩어리로 지운다(2·10 — 앞 개행을 먹는 것은 개행이 없는 마지막 줄뿐). Enter 와 `insertTextWithRange` 는 처음부터 문서 순서 스냅숏(`selectionsForEdit`)으로 변경을 쌓고, 커서마다 자기 첫 변경의 인덱스를 기억한다(3·4·5). 섞인 잘라내기는 고른 것만 지우고 빈 caret 을 지운 만큼 당긴 제자리에 되돌린다(9 — 문서 모델 §3.4). 들여쓰기·주석 토글의 caret 은 재현 단계에서 결함이 아님을 확인하고 LNM8 로 고정했다.
 
 **고치기 전에 알아 둘 것**(측정이 코드에서 확인한 사실)
-- `insertTextWithRange`·`deleteBy` 는 caret 을 직접 정한다 — `delta.mapOffset` 에 맡기지 않는다(예외: `insertTextWithRange` 의 IME `.preserve_primary` 갈래는 primary 를 `mapOffset` 으로 옮긴다, :9020 근처). 줄 연산 일곱 가운데 여섯은 `applyLineEdit` 를, `toggleLineComment` 는 같은 꼬리를 직접 거쳐 caret 을 매핑에 맡긴다 — 단계 1 의 caret 후보가 거기서 나온다. 다만 `duplicateLines` 는 매핑 뒤 선택을 사본으로 직접 옮기고(결함 1 이 그 덧셈이다), `insertNewlineKeepingIndent` 의 들여쓰기 없는 갈래는 `insertText` 로 넘어간다. `mapOffset` 은 삽입 지점에 정확히 있는 offset 을 밀지 않는다. 「매핑에 맡기지 않는다」 주석이 `insertTextWithRange` 의 caret 루프 위(`mod.zig` :8994 근처)와 `deleteBy`(:10351 근처)에 있다(EDIT1·EDIT5).
-- 감싸기 뒤 caret 위치는 [문서 모델](../native-editor-document-model.md) §3.7 에 없다 — 결함 5 를 고치기 전에 정한다.
-- `selections()`(`mod.zig` :3708)는 primary 를 먼저 내고, 렌더·IME 를 포함한 여러 제품 함수가 쓴다. 결함 3·4 의 뿌리지만 공유 판정 잎이 아니다 — 결함 3 처럼 순수 쪽(변경 목록을 만드는 자리)에서 정렬하면 이 순서와 그 소비자들은 끌려오지 않는다.
-- 거절은 조용하다. 대개 `delta.zig:123` 의 `MalformedDelta` 를 호출 쪽 `catch` 가 `false` 로 삼킨다(`applyLineEdit` :9728-9731 등). 결함 2·3 이 「아무 일도 안 일어남」으로 보인 이유다.
+- `insertTextWithRange`·`deleteBy` 는 caret 을 직접 정한다 — `delta.mapOffset` 에 맡기지 않는다(예외: `insertTextWithRange` 의 IME `.preserve_primary` 갈래는 primary 를 `mapOffset` 으로 옮긴다). 줄 연산은 수정 뒤 `applyLineEdit` 의 `after` 로 caret 을 직접 정한다(들여쓰기·대소문자·주석 토글은 매핑 그대로). `mapOffset` 은 삽입 지점에 정확히 있는 offset 을 밀지 않고, 바뀐 범위 안의 offset 은 범위 시작으로 접는다. 「매핑에 맡기지 않는다」 주석이 `insertTextWithRange` 의 caret 루프 위와 `deleteBy` 에 있다(EDIT1·EDIT5).
+- 감싸기 뒤 선택은 [문서 모델](../native-editor-document-model.md) §3.7 에 정했다(2026-10-11 사용자 결정) — 감싼 글자를 고른 채 둔다. 결함 5 는 그 모양을 커서마다 맞춘 것이다(전에는 커서 하나일 때도 선택이 풀리고 caret 이 여는 문자 뒤에 섰다).
+- `selections()` 는 primary 를 먼저 내고, 렌더·IME 를 포함한 여러 제품 함수가 쓴다. 결함 3·4 의 뿌리지만 공유 판정 잎이 아니다 — 고친 함수들은 처음부터 문서 순서 스냅숏(`selectionsForEdit`)을 써서 이 순서와 그 소비자들을 끌고 오지 않았다.
+- 거절은 조용하다. 대개 `delta.zig:123` 의 `MalformedDelta` 를 호출 쪽 `catch` 가 `false` 로 삼킨다(`applyLineEdit` 등). 결함 2·3 이 「아무 일도 안 일어남」으로 보인 이유다.
 
 **이동 단계**(D1 결정 2026-10-11 — 결함이 있는 것부터. 단계는 서로 기다리지 않는다 — 앞 단계가 선행 결정을 기다리는 동안 뒤 단계를 진행해도 된다. 계기로 먼저 옮겨진 함수는 단계에서 빠진다. 단계 중 새 결함이 나오면 결함 표에 다음 번호(6 부터)로 더하고 같은 단계에서 고친다 — 수정 커밋이 먼저. 여섯째·일곱째 같은 후보의 서수 이름은 후보를 가리킬 뿐이고, 재현되면 표의 다음 번호를 받는다. 이동 PR 은 이 절의 `mod.zig` 좌표를 다시 맞춘다 — `check-doc-line-refs` 는 basename 이 겹치는 `mod.zig` 를 판정하지 못한다)
 - **test 규칙**: 이동 전에 그 함수에 대해 [이식 계획](app-session-portability.md) §2 「판정자 사각」의 조건(여러 커서·여러 블록·caret·primary 가 문서상 뒤·줄 조합) 중 해당하는 것을 L4 test 로 잰다. 이미 재는 조건은 그대로 둔다. 기대값이 [문서 모델](../native-editor-document-model.md)에 없으면 test 전에 정한다. 이동 커밋은 L4 test 를 남기고, 같은 조건(결함이면 그 재현 조건까지)을 순수 test 로도 적는다 — L2 로 가면 `src/session.zig` 의 `editor`·`lsp` 구조체에, 최상위 잎으로 가면 `src/maru.zig` 에 등록한다. 기존 L4 test 전부를 옮겨 적는 것은 요구하지 않는다.
-1. 줄 연산 일곱과 공유 잎 `selectedLineNumbers` — 결함 1·2·3 의 수정이 먼저. caret 을 재지 않던 함수가 많아 결함이 더 나올 수 있다. 후보(코드 읽기, 재현 전 — `delta.mapOffset` 은 삽입 지점의 offset 을 밀지 않고, 바뀐 범위 안의 offset 은 범위 시작으로 접는다): `moveLines` 아래로 옮길 때 블록 안 caret 이 따라가지 않는다(§3.9a 「선택은 따라간다」), `deleteLines` 뒤 caret 이 다음 줄 열 0 으로 간다(§3.9a 는 같은 열), `insertNewlineKeepingIndent` 의 caret 이 새 개행 앞에 남는다, `indentLines`·`toggleLineComment` 의 caret(기대값이 문서 모델에 없다).
-2. `insertTextWithRange` — 결함 4·5 의 수정이 먼저. IME 분기를 가를 수 있는지 먼저 확인한다(예외 후보).
-3. `copySelection`·`cutSelection` — 빈 선택 규칙을 함께. 문서 모델 §3.4 는 선택 없는 복사를 caret 이 있는 줄 전체로만 정한다 — 빈 caret 이 여럿이거나 빈 caret 과 선택이 섞인 복사·잘라내기는 test 전에 정한다. 일곱째 결함 후보(코드 읽기, 재현 전): 섞인 경우 잘라내기가 빈 caret 의 다음 글자를 지운다(`cutSelection` → `deleteText(…, false)` → `deleteBy(.char)`).
+1. 줄 연산 일곱과 공유 잎 `selectedLineNumbers` — 수정은 끝났다(결함 1·2·3·6·7·8·10). 남은 것은 이동이다. caret 배치(`after` 를 정하는 계산)도 순수 부분이다.
+2. `insertTextWithRange` — 수정은 끝났다(결함 4·5). IME 분기를 가를 수 있는지 먼저 확인한다(예외 후보).
+3. `copySelection`·`cutSelection`(`cutChosen` 포함) — 빈 선택 규칙을 함께. 섞인 선택의 규칙은 정했고(문서 모델 §3.4) 결함 9 를 고쳤다. 빈 caret 만 여럿인 복사·잘라내기는 지금 primary 의 줄 하나를 담는다 — 커서마다 줄을 담을지는 정하지 않았다.
 4. 선택 판정(`moveCarets`·`movedOffset`·`addCursorVertically`·`addNextOccurrence`·`selectWordOrLineAt`·`toggleCursorAt`)과 `selectionSpansLines`. 예외 후보다 — `movedOffset`·`visualRowSpan` 은 L3 `VisualRow`(`term.rt.editor_hit_rows`)를, 괄호 갈래와 `moveCarets` 는 tree-sitter(`brackets_client`)를, `selectWordOrLineAt` 은 `sticky_client`·픽셀 히트테스트·수정자 비트를 쓴다. 가르면 입력으로 받을 수 있는지 먼저 확인한다(L2 `brackets.jumpTarget` 은 이미 있다). L3 타입을 읽는 순수 계산이면 최상위 잎으로 간다. Windows W8.3 의 남은 일이 먼저 부르면 그 PR 에서 옮긴다(계기 2).
 5. 나머지 — `pasteText`·`deleteBy`·`replaceCurrentMatch`·`replaceAllMatches`·`acceptConflict`(허브 enum `AppSession.ConflictChoice` 를 함께), `conflict.confirmReload` 의 변경 구성, `backup` 의 판정(신원 확인·UTF-8 검사·크기 상한·같은 내용 버림 — `std.c.getenv`·파일 읽기와 갈라서), `completion.accept` 의 caret 이동 계산. `replaceCurrentMatch`·`replaceAllMatches` 는 L3 `chrome_host.find`(질의·regex·current)를 읽는다 — 값을 풀어 넘기면 L2, 그 L3 타입을 받으면 최상위 잎이다.
 
 **할 일**
-- 결함마다 수정한다. 수정 커밋이 L4 자리에 재현 조건의 회귀 test 를 더하고, 따로 머지해도 된다.
+- ~~결함마다 수정한다~~ — 결함 1~10 은 2026-10-11 수정 PR 이 고쳤다(회귀 test 는 위 표). 이동은 따로 남았다(아래).
 - 이어서 이동 커밋이 그 판정을 계약의 자리(대개 L2)로 옮긴다(공유하는 판정 잎을 바꿨으면 그 잎을 쓰는 함수 전부를 함께 — 줄 연산 다섯의 `selectedLineNumbers`. 배선 잎 `applyLineEdit` 는 계기가 아니라, 결함 3 은 순수 쪽에서 정렬해 고친다). 그 test 가 이동 뒤에도 초록인 것으로 확인하고, 같은 재현 조건을 순수 test 로도 더한다(위 test 규칙). 옮긴 코드는 새 파일에 두고, 그 파일을 `tests/boundary/` 의 허용 목록 판정자에 등록한다 — session 경계는 `std.c`·`std.Io` 를 막지 않는다(꼴과 허용 범위는 이식 계획 §1.5. 기존 L2 파일에는 넣지 않는다). 결함 4·5 의 함수처럼 IME 와 얽힌 자리는 갈라서 옮길 수 있으면 갈라서 옮기고, 갈라도 못 옮기면 계약을 바꾸는 일이라 사용자와 먼저 논의한다.
 - 계약 이탈을 판정자로 막을지 정한다. 지금 막는 쪽에 있는 것은 자기 신고식 한 줄(pr-checklist·PR 템플릿 — 2026-10-11)과 windows-platform W8.3 행의 한 줄이다(그 밖의 결정 기록은 이식 계획 §5). 판정자는 없다. 줄 수 래칫 후보는 #4294 꼴(상태 필드로 들어온 정책)을 못 잡고, 배선 줄이 섞이고, 기준값 상향 규칙이 필요하다 — 이 셋을 풀어야 세울 수 있다.
-- 일곱째 후보(잘라내기 — 위 단계 3)를 재현하고, 재현되면 고친다. 기대값을 정하는 것이 먼저다.
 - 여섯째 후보를 재현하고, 재현되면 고친다(고치는 PR 이 계기 1 이라 다섯 클라이언트를 함께 L2 로 옮긴다 — 이식 계획 §4). LSP 응답 decode 가 실패하면 다섯 클라이언트(`fold_lsp`·`highlight`·`inlay`·`semantic`·`symbols`)가 조용 시계 없이 다시 묻는다(코드 읽기 — 재현 전). 요청 규율 쪽 결함이라 편집 연산은 아니지만 같은 측정에서 나와 여기서 추적한다.
 
 ### 네이티브 편집기 — 함께 갱신해야 하는 다른 문서

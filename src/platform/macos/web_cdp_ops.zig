@@ -35,7 +35,9 @@ pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, s
 
 /// 다음에 할 일 — CDP 호출 하나(`params` 는 소유 — 부른 쪽이 놓는다) 또는 끝(`result` 소유).
 pub const Step = union(enum) {
-    call: struct { method: []const u8, params: []u8 },
+    /// `kick` — 바로 뒤에 작은 스크린샷을 함께 보낸다(`web_osr.devtoolsCallKicked` — 숨은 탭의 접근성 질의·포인터 이동·rAF 가 그래야 돈다,
+    /// W9b②-3). 두 자리가 다 비어야 보내고, 없으면 `not_sent`.
+    call: struct { method: []const u8, params: []u8, kick: bool = false },
     done: struct { status: Status, result: []u8 },
     /// 이만큼(ms) 뒤에 `wake` 로 다시 부른다(wait 의 확인 간격 — 페이지 타이머를 쓰지 않는다: 숨긴 탭은 그것을 늦춘다).
     sleep: u32,
@@ -66,7 +68,17 @@ pub const wait_max_interval_ms: u32 = 500;
 pub const up_retry_ms: u32 = 50;
 pub const max_up_retries: u8 = 3;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release };
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release, judge_resolve, judge, rel_then };
+
+/// 묶음을 놓은 뒤에 할 일(`rel_then`) — wait 의 다음 확인, act 의 화면 안으로, 또는 그 답(소유).
+const Then = union(enum) {
+    sleep,
+    scroll,
+    done: struct { status: Status, result: []u8 },
+};
+
+/// role wait 의 보임 판정은 후보를 이만큼씩 잡아 한 번에 본다(계획 공격 2 회차 — 하나씩이면 확인 한 번에 호출 40 개).
+const judge_batch = 20;
 
 pub const Op = struct {
     kind: Kind,
@@ -127,6 +139,27 @@ pub const Op = struct {
     /// text·label 로 찾은 요소 — 덮임 검사가 그 요소에서 가장 가까운 조작 가능한 조상까지의 조상에 맞아도 통과시킨다(2 회차 —
     /// `pointer-events:none` 글·조상의 의사 요소 덮개: 사람이 그 글을 누르면 그 조상이 받는다).
     hit_up: bool = false,
+    /// wait visible(W9b②-3) — 로케이터가 보일 때까지. 시한 답에 마지막 확인의 숨은 일치 수.
+    wait_visible: bool = false,
+    wait_hidden: u64 = 0,
+    /// 찾기가 일시적으로 실패했다(이동 중 context 가 사라짐·시한·자리 없음) — wait 은 다음 확인으로.
+    find_transient: bool = false,
+    /// 이번 확인의 시작과 직전 확인 전체 시간(마감 판단), 무거운 호출(질의·찾기)의 시작과 시간(간격 — 앱의 tick 대기를 빼고, 계획 공격 2 회차).
+    check_start_ms: i64 = 0,
+    last_check_ms: i64 = 0,
+    heavy_start_ms: i64 = 0,
+    last_heavy_ms: i64 = 0,
+    /// role 질의의 대상 — 그 확인의 격리 world 의 `document`(묶음 안, 소유). 이동하면 질의가 곧바로 오류다(backendNodeId 로 부르면 옛 문서에
+    /// 영영 매달렸다 — 계획 공격 1 회차 실측).
+    doc_obj: ?[]u8 = null,
+    /// role wait 의 후보·지금 보는 묶음의 시작·그 묶음에서 잡은 원격 객체(소유, 못 잡았으면 null).
+    cands: ?web_cdp_locate.Cands = null,
+    cand_at: usize = 0,
+    cand_objs: std.ArrayList(?[]u8) = .empty,
+    /// kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(세 번까지).
+    kick_retries: u8 = 0,
+    /// 놓은 뒤에 할 일.
+    then: Then = .sleep,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.selector) |s| gpa.free(s);
@@ -139,6 +172,8 @@ pub const Op = struct {
         if (self.loc_name) |s| gpa.free(s);
         if (self.matched_name) |s| gpa.free(s);
         if (self.loc_found) |*f| f.deinit(gpa);
+        self.dropRoleState(gpa);
+        if (self.then == .done) gpa.free(self.then.done.result);
         self.* = undefined;
     }
 
@@ -164,6 +199,10 @@ pub const Op = struct {
                     const sel = o.get("selector") orelse return error.InvalidArg;
                     if (sel != .string) return error.InvalidArg;
                     op.wait_selector = try gpa.dupe(u8, sel.string);
+                } else if (std.mem.eql(u8, cond.string, "visible")) {
+                    // W9b②-3 — 로케이터(selector 면 L2 가 `selector` 조건으로 바꿔 넘긴다).
+                    try op.parseLocator(gpa, o.get("locator") orelse return error.InvalidArg);
+                    op.wait_visible = true;
                 } else if (!std.mem.eql(u8, cond.string, "load")) return error.InvalidArg;
                 const t = o.get("timeout_ms") orelse return error.InvalidArg;
                 if (t != .integer or t.integer <= 0) return error.InvalidArg;
@@ -274,7 +313,7 @@ pub const Op = struct {
             // 누름·Delete 키 누름을 보냈다 — 뗌·놓기를 끝까지. 넣은 뒤의 다시 읽기도(읽기만 한다 — 놓기까지 가게).
             // 키를 눌렀다 — 떼기까지(눌린 채 두지 않는다).
             // 찾기 결과를 쥔 원격 객체는 철회돼도 놓는다(W9b②-2).
-            .mouse_up, .release, .delete_up, .verify, .key_up, .loc_release => true,
+            .mouse_up, .release, .delete_up, .verify, .key_up, .loc_release, .rel_then => true,
             else => false,
         };
     }
@@ -285,7 +324,11 @@ pub const Op = struct {
         if (self.stage == .key_up) return self.keyStep(gpa, false);
         if (self.stage == .mouse_up) return self.mouse(gpa, "mouseReleased");
         if (self.stage == .delete_up) return deleteUp(gpa);
-        if (self.now_ms >= self.wait_deadline_ms) return done(gpa, .timeout, "");
+        // kick 을 실은 호출을 자리가 없어 못 보냈다 — 다시.
+        if (self.stage == .locate) return self.locateCall(gpa);
+        if (self.stage == .hover_move) return self.hoverMove(gpa);
+        if (self.now_ms >= self.wait_deadline_ms) return self.waitTimeout(gpa);
+        self.check_start_ms = self.now_ms;
         return if (self.frame_id == null) self.frameTreeStep(gpa) else self.worldStep(gpa);
     }
 
@@ -306,6 +349,7 @@ pub const Op = struct {
             },
             .wait => blk: {
                 self.wait_deadline_ms = self.now_ms + self.wait_timeout_ms;
+                self.check_start_ms = self.now_ms;
                 break :blk self.frameTreeStep(gpa);
             },
             .snapshot => if (self.selector != null) call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{}) else self.axStep(gpa),
@@ -332,13 +376,16 @@ pub const Op = struct {
             .hover => "hover",
             .type_text => "type",
             .press => "press",
+            .wait => "wait",
             else => "scroll",
         };
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
         writeFindParams(&s, self, action) catch return error.OutOfMemory;
-        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice() } };
+        self.heavy_start_ms = self.now_ms;
+        // wait 의 확인은 kick 과 함께 — 숨은 탭에서 rAF·애니메이션으로 나타나는 요소도 보게(계획 공격 3 회차).
+        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice(), .kick = self.kind == .wait } };
     }
 
     fn writeFindParams(s: *std.json.Stringify, self: *const Op, action: []const u8) !void {
@@ -393,6 +440,25 @@ pub const Op = struct {
     fn afterFind(self: *Op, gpa: std.mem.Allocator) !Step {
         var found = self.loc_found.?;
         self.loc_found = null;
+        if (self.wait_visible) switch (found) {
+            // 일시적 실패(이동 중·시한·자리 없음)는 다음 확인으로, 멈춤 상한(too_large)·스크립트 오류는 그 답으로.
+            .done => |d| {
+                if (self.find_transient) {
+                    gpa.free(d.msg);
+                    self.find_transient = false;
+                    return self.sleepOrTimeout(gpa);
+                }
+                return .{ .done = .{ .status = if (d.status == .timeout) .timeout else .failed, .result = d.msg } };
+            },
+            .none => |hidden| {
+                self.wait_hidden = hidden;
+                return self.sleepOrTimeout(gpa);
+            },
+            .one => |o| {
+                defer gpa.free(o.name);
+                return self.waitMet(gpa, o.backend, o.name, o.many);
+            },
+        };
         switch (found) {
             .done => |d| return .{ .done = .{ .status = if (d.status == .timeout) .timeout else .failed, .result = d.msg } },
             .none => |hidden| {
@@ -415,6 +481,8 @@ pub const Op = struct {
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
         // 찾기 결과를 둔 채 놓는 중 — 놓기의 답(무엇이든) 뒤에 그 결과대로.
         if (self.stage == .loc_release) return self.afterFind(gpa);
+        // 묶음을 놓았다(무엇이든) — 정해 둔 다음 일로.
+        if (self.stage == .rel_then) return self.afterRelThen(gpa);
         // 찾기 호출 자체가 실패·시한 — 쥔 객체가 있을 수 있어 놓은 뒤 그 이유로 끝낸다.
         if (self.stage == .loc_find) switch (reply) {
             // 답은 곧장 해석해 놓기로 — 공통 JSON 파싱이 깨진 답에 놓지 않고 끝내던 것(1 회차).
@@ -423,11 +491,19 @@ pub const Op = struct {
                     error.OutOfMemory => return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "out of memory") } }),
                     else => web_cdp_locate.Found{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "malformed locator result") } },
                 };
+                self.last_heavy_ms = self.now_ms - self.heavy_start_ms;
                 return self.findRelease(gpa, found);
             },
-            .cdp_error => {},
-            .timed_out => |why| return self.findRelease(gpa, .{ .done = .{ .status = .timeout, .msg = try gpa.dupe(u8, why) } }),
-            .failed, .not_sent => |why| return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, if (std.mem.eql(u8, why, result_too_large)) "too_large: the locator result was too large — use a selector or ref" else why) } }),
+            .cdp_error => self.find_transient = self.wait_visible,
+            .timed_out => |why| {
+                self.find_transient = self.wait_visible;
+                return self.findRelease(gpa, .{ .done = .{ .status = .timeout, .msg = try gpa.dupe(u8, why) } });
+            },
+            .not_sent => |why| {
+                self.find_transient = self.wait_visible;
+                return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, why) } });
+            },
+            .failed => |why| return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, if (std.mem.eql(u8, why, result_too_large)) "too_large: the locator result was too large — use a selector or ref" else why) } }),
         };
         // 누른 뒤의 시한 — 페이지가 막혀 답이 늦을 뿐 입력은 갔을 수 있다: 떼기·놓기를 마저 보내고 끝에 timeout 으로 답한다.
         if (reply == .timed_out) switch (self.stage) {
@@ -466,8 +542,9 @@ pub const Op = struct {
                 self.late = reply.timed_out;
                 return self.afterKeys(gpa);
             },
-            // wait 의 확인이 시한 — 다음 확인으로(시한은 wake 가 본다).
-            .check, .world => if (self.kind == .wait) return self.sleepOrTimeout(gpa),
+            // wait 의 확인이 시한 — 다음 확인으로(시한은 wake 가 본다). 묶음을 쥔 단계면 놓은 뒤.
+            .check, .world, .frame_tree, .size_check, .loc_document => if (self.kind == .wait) return self.sleepOrTimeout(gpa),
+            .locate, .judge_resolve, .judge => return if (self.kind == .wait) self.releaseThen(gpa, .sleep) else self.releaseThenDone(gpa, .timeout, reply.timed_out),
             else => {},
         };
         // 누름의 답이 실패(보내지 못함·결과가 깨짐) — 이미 갔을 수 있으니 떼기·놓기를 마저 보내고 실패로 답한다(2 회차).
@@ -487,6 +564,17 @@ pub const Op = struct {
                 self.stage = .delete_up;
                 return deleteUp(gpa);
             },
+            else => {},
+        };
+        // kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(세 번까지 — 직전 kick 의 답이 아직이면 자리 하나를 쥐고 있다).
+        if (reply == .not_sent and (self.stage == .locate or self.stage == .hover_move) and self.kick_retries < max_up_retries) {
+            self.kick_retries += 1;
+            return .{ .sleep = up_retry_ms };
+        }
+        // wait 의 확인을 보내지 못했다 — 다음 확인으로(묶음을 쥐었으면 놓은 뒤).
+        if (reply == .not_sent and self.kind == .wait) switch (self.stage) {
+            .check, .world, .frame_tree, .size_check, .loc_document => return self.sleepOrTimeout(gpa),
+            .locate, .judge_resolve, .judge => return self.releaseThen(gpa, .sleep),
             else => {},
         };
         // 누름을 확실히 보내지 않았다 — 떼지 않고, 쥔 묶음만 놓는다.
@@ -514,7 +602,9 @@ pub const Op = struct {
         if (reply == .failed or reply == .not_sent) {
             const why = if (reply == .failed) reply.failed else reply.not_sent;
             if (self.stage == .locate and std.mem.eql(u8, why, result_too_large))
-                return done(gpa, .failed, "too_large: the accessibility query result was too large — use a selector or ref"); // exact 는 질의를 줄이지 않는다(2 회차)
+                return self.releaseThenDone(gpa, .failed, "too_large: the accessibility query result was too large — use a selector or ref"); // exact 는 질의를 줄이지 않는다(2 회차)
+            // 문서·후보 묶음을 쥔 단계 — 놓고 그 이유로.
+            if (self.stage == .locate or self.stage == .judge_resolve or self.stage == .judge) return self.releaseThenDone(gpa, .failed, why);
             switch (self.stage) {
                 // 놓기의 실패 — 동작은 이미 끝났다: 그 결과로 답한다(4 회차 — 실패로 답하면 다시 시도해 Enter 가 두 번 갔다).
                 .release => return self.finish(gpa),
@@ -617,7 +707,9 @@ pub const Op = struct {
                     self.stage = .check;
                     const expr = try std.fmt.allocPrint(gpa, "(function(sel,load){{try{{var D=Document.prototype;if(load)return Object.getOwnPropertyDescriptor(D,'readyState').get.call(document)==='complete';var e=D.querySelector.call(document,sel);if(!e)return false;var r=Element.prototype.getBoundingClientRect.call(e),cs=getComputedStyle(e);return r.width>0&&r.height>0&&cs.visibility!=='hidden'&&cs.display!=='none'}}catch(x){{return 'error'}}}})({f},{})", .{ std.json.fmt(self.wait_selector orelse "", .{}), self.wait_selector == null });
                     defer gpa.free(expr);
-                    return call(gpa, "Runtime.evaluate", "{{\"expression\":{f},\"contextId\":{d},\"returnByValue\":true}}", .{ std.json.fmt(expr, .{}), self.context_id });
+                    var step = try call(gpa, "Runtime.evaluate", "{{\"expression\":{f},\"contextId\":{d},\"returnByValue\":true}}", .{ std.json.fmt(expr, .{}), self.context_id });
+                    step.call.kick = true; // 숨은 탭에서도 rAF·애니메이션으로 나타나는 요소를 보게(W9b②-3)
+                    return step;
                 }
                 self.stage = .resolve;
                 return call(gpa, "DOM.resolveNode", "{{\"backendNodeId\":{d},\"executionContextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.backend, self.context_id, self.id });
@@ -658,11 +750,8 @@ pub const Op = struct {
                     self.miss = "the element is covered by another element at its center";
                     return self.releaseStep(gpa);
                 }
-                if (self.kind == .hover) {
-                    // 맞았다 — 그 자리로 포인터를 옮긴다(누르지 않는다 — 페이지는 isTrusted mouseover·:hover).
-                    self.stage = .hover_move;
-                    return call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"mouseMoved\",\"x\":{d},\"y\":{d}}}", .{ self.x, self.y });
-                }
+                // 맞았다 — 그 자리로 포인터를 옮긴다(누르지 않는다 — 페이지는 isTrusted mouseover·:hover).
+                if (self.kind == .hover) return self.hoverMove(gpa);
                 // 맞았다 — 왕복 하나 안에 누른다(놓기는 뗀 뒤).
                 self.stage = .mouse_down;
                 return self.mouse(gpa, "mousePressed");
@@ -771,34 +860,76 @@ pub const Op = struct {
                     const msg = try std.fmt.allocPrint(gpa, "too_large: page has {d} elements (role locator limit {d}; the query freezes the page) — use a selector or ref", .{ count, web_cdp_locate.max_role_page_elements });
                     return .{ .done = .{ .status = .failed, .result = msg } };
                 }
+                // 질의 대상 = 이 확인의 격리 world 의 document(묶음 안) — 이동하면 곧바로 오류다(W9b②-3 계획 공격 1 회차).
                 self.stage = .loc_document;
-                return call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{});
+                return call(gpa, "Runtime.evaluate", "{{\"expression\":\"document\",\"contextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.context_id, self.id });
             },
             .loc_document => {
-                const root = intAt(v, &.{ "root", "backendNodeId" }) orelse return done(gpa, .failed, "no document");
-                self.stage = .locate;
-                // 이름은 싣지 않는다 — 서버는 계산된 이름 원문과 비교해(nbsp·soft hyphen 그대로) 정규화한 exact 이름을 못 찾았다
-                // (W9b②-1 적대 리뷰 1 회차 실측). 이름은 받은 뒤 정규화해 거른다.
-                return call(gpa, "Accessibility.queryAXTree", "{{\"backendNodeId\":{d},\"role\":{f}}}", .{ root, std.json.fmt(self.loc_role, .{}) });
+                const oid = stringAt(v, &.{ "result", "objectId" }) orelse return done(gpa, .failed, "no document");
+                if (self.doc_obj) |old| gpa.free(old);
+                self.doc_obj = try gpa.dupe(u8, oid);
+                return self.locateCall(gpa);
             },
             .locate => {
-                const pick = web_cdp_locate.pickFromAx(gpa, bytes, .{ .role = self.loc_role, .name = self.loc_name, .level = self.loc_level, .exact = self.loc_exact, .nth = self.loc_nth }, self.loc_input_role orelse self.loc_role) catch |e| return switch (e) {
+                self.last_heavy_ms = self.now_ms - self.heavy_start_ms;
+                const q: web_cdp_locate.RoleQuery = .{ .role = self.loc_role, .name = self.loc_name, .level = self.loc_level, .exact = self.loc_exact, .nth = self.loc_nth };
+                if (self.wait_visible) {
+                    // wait — act 와 같은 거르기로 후보를 모아 앞에서부터 보이는 것을 찾는다.
+                    var c = web_cdp_locate.listFromAx(gpa, bytes, q) catch |e| return switch (e) {
+                        error.OutOfMemory => error.OutOfMemory,
+                        else => self.releaseThenDone(gpa, .failed, "malformed accessibility query result"),
+                    };
+                    if (c.backends.len == 0) {
+                        c.deinit(gpa);
+                        self.wait_hidden = 0;
+                        return self.releaseThen(gpa, .sleep);
+                    }
+                    self.cands = c;
+                    self.cand_at = 0;
+                    return self.judgeNext(gpa);
+                }
+                const pick = web_cdp_locate.pickFromAx(gpa, bytes, q, self.loc_input_role orelse self.loc_role) catch |e| return switch (e) {
                     error.OutOfMemory => error.OutOfMemory,
-                    else => done(gpa, .failed, "malformed accessibility query result"),
+                    else => self.releaseThenDone(gpa, .failed, "malformed accessibility query result"),
                 };
                 switch (pick) {
-                    .none => return done(gpa, .success, "false"),
-                    .ambiguous => |msg| return .{ .done = .{ .status = .failed, .result = msg } },
+                    .none => return self.releaseThenDone(gpa, .success, "false"),
+                    .ambiguous => |msg| {
+                        defer gpa.free(msg);
+                        return self.releaseThenDone(gpa, .failed, msg);
+                    },
                     .one => |one| {
-                        // 찾았다 — 그 노드를 ref 처럼(화면 안으로 → …).
+                        // 찾았다 — 문서 묶음을 놓고 그 노드를 ref 처럼(화면 안으로 → …).
                         self.backend = one.backend;
                         // 이름은 잘리지 않고 온다(실측 2 MB) — 답이 CLI 프레임 상한(1 MiB)을 넘으면 클릭은 됐는데 「응답 없음」 이 된다(2 회차).
                         self.matched_name = try clipName(gpa, one.name, max_matched_name_bytes);
                         self.locating = false;
-                        return self.scrollStep(gpa);
+                        return self.releaseThen(gpa, .scroll);
                     },
                 }
             },
+            .judge_resolve => {
+                const oid = stringAt(v, &.{ "object", "objectId" });
+                try self.cand_objs.append(gpa, if (oid) |o| try gpa.dupe(u8, o) else null);
+                return self.judgeNext(gpa);
+            },
+            .judge => {
+                if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .sleep);
+                const idx = intAt(v, &.{ "result", "value" }) orelse -1;
+                const c = &self.cands.?;
+                const end = @min(self.cand_at + judge_batch, c.backends.len);
+                if (idx >= 0 and self.cand_at + @as(usize, @intCast(idx)) < end) {
+                    const i = self.cand_at + @as(usize, @intCast(idx));
+                    const result = try waitResult(gpa, c.backends[i], c.names[i], self.loc_nth == null and c.total > 1);
+                    return self.releaseThen(gpa, .{ .done = .{ .status = .success, .result = result } });
+                }
+                self.cand_at = end;
+                self.freeCandObjs(gpa);
+                if (self.cand_at < c.backends.len) return self.judgeNext(gpa);
+                self.wait_hidden = c.total;
+                return self.releaseThen(gpa, .sleep);
+            },
+            .rel_then => unreachable, // feed 앞에서
             .loc_find, .loc_release => unreachable, // feed 앞에서
             .ax_tree => {
                 const json = web_cdp_snapshot.build(gpa, bytes, self.snap) catch |e| return switch (e) {
@@ -850,12 +981,138 @@ pub const Op = struct {
 
     /// wait — 아직이면 다음 간격 뒤 다시(시한을 넘겨 자지 않는다, 시한이 지났으면 timeout). 간격은 두 배씩 늘린다.
     fn sleepOrTimeout(self: *Op, gpa: std.mem.Allocator) !Step {
-        if (self.now_ms >= self.wait_deadline_ms) return done(gpa, .timeout, "");
+        self.last_check_ms = self.now_ms - self.check_start_ms;
+        if (self.now_ms >= self.wait_deadline_ms) return self.waitTimeout(gpa);
+        // 다음 확인이 시한 안에 끝나지 않을 것 같으면 지금 답한다 — 확인 하나가 늦으면 시한(25 초)을 넘겨 서버 reaper(30 초)에 닿았다
+        // (계획 공격 1·3 회차). selector·load 의 확인은 짧다(그대로 둔다).
+        if (self.wait_visible and self.wait_deadline_ms - self.now_ms < self.last_check_ms) return self.waitTimeout(gpa);
         const left: u32 = @intCast(@min(self.wait_deadline_ms - self.now_ms, std.math.maxInt(u32)));
-        const ms = @min(self.wait_interval_ms, left);
+        // 로케이터의 확인(질의·찾기)은 그동안 페이지를 붙잡는다 — 간격을 그 시간의 네 배 이상으로(페이지가 쓰는 시간을 1/5 아래로).
+        const heavy: u32 = if (self.wait_visible) @intCast(@min(@max(self.last_heavy_ms, 0) *| 4, std.math.maxInt(u32))) else 0;
+        const ms = @min(@max(self.wait_interval_ms, heavy), left);
         self.wait_interval_ms = @min(self.wait_interval_ms *| 2, wait_max_interval_ms);
         self.stage = .sleeping;
         return .{ .sleep = @max(ms, 1) };
+    }
+
+    /// wait 의 시한 — 로케이터면 마지막 확인의 숨은 일치 수를 싣는다(L2 가 -32004 data 에).
+    fn waitTimeout(self: *Op, gpa: std.mem.Allocator) !Step {
+        if (!self.wait_visible) return done(gpa, .timeout, "");
+        return .{ .done = .{ .status = .timeout, .result = try std.fmt.allocPrint(gpa, "{{\"hidden\":{d}}}", .{self.wait_hidden}) } };
+    }
+
+    /// wait 의 성공 답(로케이터).
+    fn waitMet(self: *Op, gpa: std.mem.Allocator, backend: i64, name: []const u8, many: bool) !Step {
+        _ = self;
+        return .{ .done = .{ .status = .success, .result = try waitResult(gpa, backend, name, many) } };
+    }
+
+    /// role 질의(+kick).
+    fn locateCall(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .locate;
+        self.heavy_start_ms = self.now_ms;
+        // 이름은 싣지 않는다 — 서버는 계산된 이름 원문과 비교해(nbsp·soft hyphen 그대로) 정규화한 exact 이름을 못 찾았다
+        // (W9b②-1 적대 리뷰 1 회차 실측). 이름은 받은 뒤 정규화해 거른다. kick — 숨은 탭에서는 그래야 답한다(W9b②-3).
+        var step = try call(gpa, "Accessibility.queryAXTree", "{{\"objectId\":{f},\"role\":{f}}}", .{ std.json.fmt(self.doc_obj.?, .{}), std.json.fmt(self.loc_role, .{}) });
+        step.call.kick = true;
+        return step;
+    }
+
+    /// hover 의 포인터 이동(+kick — 숨은 탭에서 5 초 걸렸다, W9b②-3 계획 공격 3 회차).
+    fn hoverMove(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .hover_move;
+        var step = try call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"mouseMoved\",\"x\":{d},\"y\":{d}}}", .{ self.x, self.y });
+        step.call.kick = true;
+        return step;
+    }
+
+    /// role wait — 지금 묶음의 다음 후보를 잡거나, 다 잡았으면 한 번에 보임을 본다(finder 의 `visible` — text·label 과 같은 판정).
+    fn judgeNext(self: *Op, gpa: std.mem.Allocator) !Step {
+        const c = &self.cands.?;
+        const end = @min(self.cand_at + judge_batch, c.backends.len);
+        const next = self.cand_at + self.cand_objs.items.len;
+        if (next < end) {
+            self.stage = .judge_resolve;
+            return call(gpa, "DOM.resolveNode", "{{\"backendNodeId\":{d},\"executionContextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ c.backends[next], self.context_id, self.id });
+        }
+        self.stage = .judge;
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        writeJudgeParams(&s, self) catch return error.OutOfMemory;
+        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice() } };
+    }
+
+    fn writeJudgeParams(s: *std.json.Stringify, self: *const Op) !void {
+        try s.beginObject();
+        try s.objectField("functionDeclaration");
+        try s.write(finder_js);
+        try s.objectField("executionContextId");
+        try s.write(self.context_id);
+        try s.objectField("arguments");
+        try s.beginArray();
+        for ([_]std.json.Value{ .{ .string = "visible" }, .{ .string = "" }, .{ .bool = false }, .null, .{ .string = "wait" } }) |a| {
+            try s.beginObject();
+            try s.objectField("value");
+            try s.write(a);
+            try s.endObject();
+        }
+        for (self.cand_objs.items) |o| {
+            try s.beginObject();
+            if (o) |id| {
+                try s.objectField("objectId");
+                try s.write(id);
+            } else {
+                try s.objectField("value");
+                try s.write(null);
+            }
+            try s.endObject();
+        }
+        try s.endArray();
+        try s.objectField("returnByValue");
+        try s.write(true);
+        try s.endObject();
+    }
+
+    fn freeCandObjs(self: *Op, gpa: std.mem.Allocator) void {
+        for (self.cand_objs.items) |o| if (o) |id| gpa.free(id);
+        self.cand_objs.clearRetainingCapacity();
+    }
+
+    /// 한 확인의 role 상태(문서·후보·잡은 객체)를 버린다 — 원격 객체는 묶음 놓기가 놓는다.
+    fn dropRoleState(self: *Op, gpa: std.mem.Allocator) void {
+        if (self.doc_obj) |d| gpa.free(d);
+        self.doc_obj = null;
+        if (self.cands) |*c| c.deinit(gpa);
+        self.cands = null;
+        self.freeCandObjs(gpa);
+        self.cand_objs.deinit(gpa);
+        self.cand_objs = .empty;
+    }
+
+    /// 묶음(문서·후보)을 놓은 뒤 `then` 으로 — 놓기는 committed(철회돼도 놓는다).
+    fn releaseThen(self: *Op, gpa: std.mem.Allocator, then: Then) !Step {
+        if (self.then == .done) gpa.free(self.then.done.result);
+        self.then = then;
+        self.stage = .rel_then;
+        return call(gpa, "Runtime.releaseObjectGroup", "{{\"objectGroup\":\"maru-w9b-{d}\"}}", .{self.id});
+    }
+
+    fn releaseThenDone(self: *Op, gpa: std.mem.Allocator, status: Status, result: []const u8) !Step {
+        const owned = try gpa.dupe(u8, result);
+        errdefer gpa.free(owned);
+        return self.releaseThen(gpa, .{ .done = .{ .status = status, .result = owned } });
+    }
+
+    fn afterRelThen(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.dropRoleState(gpa);
+        const then = self.then;
+        self.then = .sleep;
+        return switch (then) {
+            .sleep => self.sleepOrTimeout(gpa),
+            .scroll => self.scrollStep(gpa),
+            .done => |d| .{ .done = .{ .status = d.status, .result = d.result } },
+        };
     }
 
     fn frameTreeStep(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -963,8 +1220,16 @@ pub const Op = struct {
                 break :blk self.releaseStep(gpa);
             },
             .release => self.finish(gpa),
-            // 찾기 스크립트를 DevTools 가 거절했다 — 놓은 뒤 그 이유로.
+            // 찾기 스크립트를 DevTools 가 거절했다 — 놓은 뒤 그 이유로(wait 은 다음 확인 — 이동 중 context 가 사라졌다).
             .loc_find => self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try std.fmt.allocPrint(gpa, "locator script failed: {s}", .{message}) } }),
+            // role 의 단계 — 이동 중이면 context·문서가 사라졌다: wait 은 다음 확인(쥔 묶음은 놓고), act 는 그 이유로.
+            .frame_tree, .size_check, .loc_document => if (self.kind == .wait) self.sleepOrTimeout(gpa) else done(gpa, .failed, message),
+            .locate, .judge => if (self.kind == .wait) self.releaseThen(gpa, .sleep) else self.releaseThenDone(gpa, .failed, message),
+            // 후보 하나를 잡지 못했다 — 사라진 노드면 그것만 빼고 이어서, 이동이면 다음 확인.
+            .judge_resolve => if (gone) blk: {
+                try self.cand_objs.append(gpa, null);
+                break :blk self.judgeNext(gpa);
+            } else self.releaseThen(gpa, .sleep),
             else => done(gpa, .failed, message),
         };
     }
@@ -984,6 +1249,13 @@ fn call(gpa: std.mem.Allocator, method: []const u8, comptime fmt: []const u8, ar
 
 fn done(gpa: std.mem.Allocator, status: Status, result: []const u8) !Step {
     return .{ .done = .{ .status = status, .result = try gpa.dupe(u8, result) } };
+}
+
+/// wait visible 의 성공 답 `{"ok":true,"matched":{"ref","name"},"ambiguous"?:true}` — ambiguous = 같은 로케이터로 act 하면 「여럿」 일 것.
+fn waitResult(gpa: std.mem.Allocator, backend: i64, name: []const u8, many: bool) ![]u8 {
+    const clipped = try clipName(gpa, try gpa.dupe(u8, name), max_matched_name_bytes);
+    defer gpa.free(clipped);
+    return std.fmt.allocPrint(gpa, "{{\"ok\":true,\"matched\":{{\"ref\":\"n{d}\",\"name\":{f}}}{s}}}", .{ backend, std.json.fmt(clipped, .{}), if (many) ",\"ambiguous\":true" else "" });
 }
 
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
@@ -1094,11 +1366,14 @@ const Trail = struct {
     /// 누름 Step 을 받을 때 `committed` 가 거짓이었는가(누르기 직전에는 재허가를 거친다).
     uncommitted_at_press: bool = true,
     sleeps: usize = 0,
+    /// kick 을 실은 호출의 순번(W9b②-3).
+    kicked: std.ArrayList(usize) = .empty,
 
     fn deinit(self: *Trail) void {
         for (self.params.items) |p| testing.allocator.free(p);
         self.params.deinit(testing.allocator);
         self.methods.deinit(testing.allocator);
+        self.kicked.deinit(testing.allocator);
     }
 
     fn reset(self: *Trail) void {
@@ -1128,6 +1403,7 @@ fn drive(op: *Op, answer: *const fn (method: []const u8, params: []const u8) Rep
             step = try op.wake(testing.allocator);
         },
         .call => |c| {
+            if (c.kick) try trail.kicked.append(testing.allocator, trail.methods.items.len);
             try trail.methods.append(testing.allocator, c.method);
             try trail.params.append(testing.allocator, c.params);
             if (pressed and !op.committed()) trail.committed_after_press = false;
@@ -2082,6 +2358,8 @@ test "떼기를 끝까지 못 보내도 앞선 실패 이유로 답한다(엔진
 }
 
 fn rolePage(method: []const u8, params: []const u8) Reply {
+    // 질의 대상 document(W9b②-3 — 격리 world 의 objectId, 묶음 안).
+    if (std.mem.eql(u8, method, "Runtime.evaluate") and std.mem.indexOf(u8, params, "\"expression\":\"document\"") != null) return .{ .ok = "{\"result\":{\"type\":\"object\",\"className\":\"HTMLDocument\",\"objectId\":\"doc-1\"}}" };
     if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[120,0,0,0,0,0,0]}}" };
     if (std.mem.eql(u8, method, "DOM.getDocument")) return .{ .ok = "{\"root\":{\"nodeId\":1,\"backendNodeId\":2}}" };
     if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .ok = "{\"nodes\":[{\"ignored\":false,\"name\":{\"value\":\"Save\"},\"backendDOMNodeId\":11},{\"ignored\":false,\"name\":{\"value\":\"Save changes\"},\"backendDOMNodeId\":12},{\"ignored\":true,\"name\":{\"value\":\"\"},\"backendDOMNodeId\":13}]}" };
@@ -2089,7 +2367,7 @@ fn rolePage(method: []const u8, params: []const u8) Reply {
 }
 
 fn hugeRolePage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[40000,0,0,0,0,0,0]}}" };
+    if (std.mem.eql(u8, method, "Runtime.evaluate") and std.mem.indexOf(u8, params, "\"expression\":\"document\"") == null) return .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":[40000,0,0,0,0,0,0]}}" };
     return rolePage(method, params);
 }
 
@@ -2107,13 +2385,17 @@ test "role 로케이터: 크기 검사 → 문서 → 접근성 질의 → 하�
     defer testing.allocator.free(r.result);
     try testing.expectEqual(Status.success, r.status);
     try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
-    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "DOM.getDocument", "Accessibility.queryAXTree", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
+    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "Runtime.evaluate", "Accessibility.queryAXTree", "Runtime.releaseObjectGroup", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     // 크기 검사는 격리 world·프로토타입 함수로, 질의는 Chromium 역할로(부분 일치라 이름은 싣지 않는다).
     try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "sr=G(Element.prototype,'shadowRoot')") != null); // open shadow 도 센다
     try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "([30000,") != null);
-    try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\"}", trail.params.items[4]);
+    // 질의 대상은 그 격리 world 의 document(묶음 안 — 이동하면 곧 오류, W9b②-3), 질의는 kick 과 함께, 그 묶음은 누르기 전에 놓는다.
+    try testing.expectEqualStrings("{\"expression\":\"document\",\"contextId\":7,\"objectGroup\":\"maru-w9b-200\"}", trail.params.items[3]);
+    try testing.expectEqualStrings("{\"objectId\":\"doc-1\",\"role\":\"button\"}", trail.params.items[4]);
+    try testing.expectEqualSlices(usize, &.{4}, trail.kicked.items);
+    try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-200\"}", trail.params.items[5]);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"backendNodeId\":11") != null);
 }
 
@@ -2125,7 +2407,7 @@ test "role 로케이터: exact 여도 이름은 질의에 싣지 않는다, 여�
         defer op.deinit(testing.allocator);
         const r = try drive(&op, &rolePage, &trail);
         defer testing.allocator.free(r.result);
-        try testing.expectEqualStrings("{\"backendNodeId\":2,\"role\":\"button\"}", trail.params.items[4]); // exact 여도 이름은 싣지 않는다
+        try testing.expectEqualStrings("{\"objectId\":\"doc-1\",\"role\":\"button\"}", trail.params.items[4]); // exact 여도 이름은 싣지 않는다
         try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
     }
     const cases = [_]struct { arg: []const u8, answer: *const fn ([]const u8, []const u8) Reply, status: Status, want: []const u8, presses: usize }{
@@ -2145,6 +2427,8 @@ test "role 로케이터: exact 여도 이름은 질의에 싣지 않는다, 여�
         try testing.expect(std.mem.indexOf(u8, r.result, c.want) != null);
         try testing.expectEqual(c.presses, trail.count("Input.dispatchMouseEvent"));
         try testing.expectEqual(@as(usize, 0), trail.count("DOM.scrollIntoViewIfNeeded"));
+        // 문서를 잡았으면(질의를 보냈으면) 그 묶음을 놓고 끝낸다.
+        try testing.expectEqual(trail.count("Accessibility.queryAXTree"), trail.count("Runtime.releaseObjectGroup"));
     }
     // 큰 페이지면 질의 자체를 보내지 않는다.
     try testing.expectEqual(@as(usize, 1), trail.count("Accessibility.queryAXTree"));
@@ -2202,7 +2486,7 @@ fn clipName(gpa: std.mem.Allocator, name: []u8, max: usize) ![]u8 {
 var costly_counts: []const u8 = "[200,0,0,0,0,0,0]";
 
 fn costlyPage(method: []const u8, params: []const u8) Reply {
-    if (std.mem.eql(u8, method, "Runtime.evaluate")) {
+    if (std.mem.eql(u8, method, "Runtime.evaluate") and std.mem.indexOf(u8, params, "\"expression\":\"document\"") == null) {
         const Buf = struct {
             var b: [128]u8 = undefined;
         };
@@ -2348,4 +2632,185 @@ test "text·label 로케이터: 숨은 일치만이면 ok:false + hint, 여럿�
     }
     try testing.expect(op.committed());
     testing.allocator.free(step.call.params);
+}
+
+// ── W9b②-3 — wait visible(로케이터)·kick ──
+
+var wait_find_calls: usize = 0;
+const found_none_hidden2 = "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":0}],[\"hidden\",{\"type\":\"number\",\"value\":2}]]}}}";
+const found_wait_many = "{\"result\":{\"type\":\"object\",\"objectId\":\"o9\",\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":3}],[\"el\",{\"type\":\"node\",\"value\":{\"backendNodeId\":41}}],[\"name\",{\"type\":\"string\",\"value\":\"Sign in\"}]]}}}";
+
+/// 처음 확인엔 숨은 일치 둘만, 그다음엔 셋이 맞는다(wait 의 답 — 첫 것과 그 수).
+fn waitTextPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "function(KIND, Q, EXACT, NTH, ACTION)") != null) {
+        wait_find_calls += 1;
+        return .{ .ok = if (wait_find_calls == 1) found_none_hidden2 else found_wait_many };
+    }
+    return happyPage(method, params);
+}
+
+fn waitTextNonePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "function(KIND, Q, EXACT, NTH, ACTION)") != null) return .{ .ok = found_none_hidden2 };
+    return happyPage(method, params);
+}
+
+test "wait visible(text): 확인마다 격리 world 의 JS 로(wait 모드·kick) 찾고 놓는다 — 숨은 것만이면 다음 확인, 보이면 matched·여럿이면 ambiguous, 누르거나 스크롤하지 않는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    wait_find_calls = 0;
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Sign in\"},\"timeout_ms\":5000}", 500);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &waitTextPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n41\",\"name\":\"Sign in\"},\"ambiguous\":true}", r.result);
+    try testing.expectEqual(@as(usize, 1), trail.sleeps);
+    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup", "Page.createIsolatedWorld", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want.len, trail.methods.items.len);
+    for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+    try testing.expectEqualSlices(usize, &.{ 2, 5 }, trail.kicked.items);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "{\"value\":\"wait\"}]") != null);
+    // 시한 — 마지막 확인의 숨은 일치 수를 싣는다.
+    trail.reset();
+    var none = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"label\":\"Email\",\"exact\":true},\"timeout_ms\":300}", 501);
+    defer none.deinit(testing.allocator);
+    const t = try drive(&none, &waitTextNonePage, &trail);
+    defer testing.allocator.free(t.result);
+    try testing.expectEqual(Status.timeout, t.status);
+    try testing.expectEqualStrings("{\"hidden\":2}", t.result);
+    try testing.expectEqual(trail.count("Runtime.callFunctionOn"), trail.count("Runtime.releaseObjectGroup"));
+    // 모양: visible 엔 로케이터가 있어야 한다(selector 면 L2 가 selector 조건으로 바꾼다).
+    try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"selector\":\"#a\",\"timeout_ms\":5}", 1));
+    try testing.expectError(error.UnknownRole, Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"buton\"},\"timeout_ms\":5}", 1));
+}
+
+var judge_answer: []const u8 = "{\"result\":{\"type\":\"number\",\"value\":1}}";
+var doc_errors_left: usize = 0;
+
+/// role wait — 후보의 보임 판정(finder 의 visible)에 `judge_answer`, 문서 잡기는 `doc_errors_left` 번 이동 오류.
+fn waitRolePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "{\"value\":\"visible\"}") != null) return .{ .ok = judge_answer };
+    if (doc_errors_left > 0 and std.mem.eql(u8, method, "Runtime.evaluate") and std.mem.indexOf(u8, params, "\"expression\":\"document\"") != null) {
+        doc_errors_left -= 1;
+        return .{ .cdp_error = "{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}" };
+    }
+    return rolePage(method, params);
+}
+
+test "wait visible(role): 질의(kick)로 후보를 모아 한 번에 보임을 보고 묶음을 놓는다 — 보이는 첫 것이 matched, 맞는 것이 여럿이면 ambiguous, 없으면 시한에 hidden" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    judge_answer = "{\"result\":{\"type\":\"number\",\"value\":1}}";
+    doc_errors_left = 0;
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\",\"name\":\"save\"},\"timeout_ms\":5000}", 510);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &waitRolePage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n12\",\"name\":\"Save changes\"},\"ambiguous\":true}", r.result);
+    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "Runtime.evaluate", "Accessibility.queryAXTree", "DOM.resolveNode", "DOM.resolveNode", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(want.len, trail.methods.items.len);
+    for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
+    try testing.expectEqualSlices(usize, &.{4}, trail.kicked.items);
+    // 후보는 그 world 에, 같은 묶음에 잡고 판정 JS 에 넘긴다.
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[5], "\"backendNodeId\":11,\"executionContextId\":7,\"objectGroup\":\"maru-w9b-510\"") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[7], "{\"objectId\":\"o-1\"},{\"objectId\":\"o-1\"}]") != null);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[7]));
+    // nth 면 그 하나만 보고 ambiguous 가 아니다.
+    trail.reset();
+    judge_answer = "{\"result\":{\"type\":\"number\",\"value\":0}}";
+    var nth = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\",\"nth\":0},\"timeout_ms\":5000}", 511);
+    defer nth.deinit(testing.allocator);
+    const n = try drive(&nth, &waitRolePage, &trail);
+    defer testing.allocator.free(n.result);
+    try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", n.result);
+    try testing.expectEqual(@as(usize, 1), trail.count("DOM.resolveNode"));
+    // 보이는 것이 없으면 다음 확인 — 확인마다 묶음을 놓고, 시한엔 맞는 것의 수.
+    trail.reset();
+    judge_answer = "{\"result\":{\"type\":\"number\",\"value\":-1}}";
+    var none = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\",\"name\":\"save\"},\"timeout_ms\":300}", 512);
+    defer none.deinit(testing.allocator);
+    const t = try drive(&none, &waitRolePage, &trail);
+    defer testing.allocator.free(t.result);
+    try testing.expectEqual(Status.timeout, t.status);
+    try testing.expectEqualStrings("{\"hidden\":2}", t.result);
+    try testing.expect(trail.sleeps >= 2);
+    try testing.expectEqual(trail.count("Accessibility.queryAXTree"), trail.count("Runtime.releaseObjectGroup"));
+    try testing.expectEqual(@as(usize, 0), trail.count("DOM.scrollIntoViewIfNeeded") + trail.count("Input.dispatchMouseEvent"));
+    // 이동 중(문서를 잡을 context 가 사라졌다) — 다음 확인으로.
+    trail.reset();
+    judge_answer = "{\"result\":{\"type\":\"number\",\"value\":0}}";
+    doc_errors_left = 1;
+    var nav = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true},\"timeout_ms\":5000}", 513);
+    defer nav.deinit(testing.allocator);
+    const v = try drive(&nav, &waitRolePage, &trail);
+    defer testing.allocator.free(v.result);
+    try testing.expectEqual(Status.success, v.status);
+    try testing.expectEqual(@as(usize, 1), trail.sleeps);
+}
+
+var ax_unsent_left: usize = 0;
+
+fn busyAxPage(method: []const u8, params: []const u8) Reply {
+    if (ax_unsent_left > 0 and std.mem.eql(u8, method, "Accessibility.queryAXTree")) {
+        ax_unsent_left -= 1;
+        return .{ .not_sent = "too many DevTools calls on this tab" };
+    }
+    return rolePage(method, params);
+}
+
+test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 다시(세 번까지) — 그래도 안 되면 묶음을 놓고 실패, hover·selector wait 의 확인도 kick 과 함께" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    ax_unsent_left = 2;
+    var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 520);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &busyAxPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expectEqual(@as(usize, 2), trail.sleeps);
+    try testing.expectEqual(@as(usize, 3), trail.count("Accessibility.queryAXTree"));
+    trail.reset();
+    ax_unsent_left = 10;
+    var busy = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 521);
+    defer busy.deinit(testing.allocator);
+    const b = try drive(&busy, &busyAxPage, &trail);
+    defer testing.allocator.free(b.result);
+    try testing.expectEqual(Status.failed, b.status);
+    try testing.expectEqualStrings("too many DevTools calls on this tab", b.result);
+    try testing.expectEqual(@as(usize, 4), trail.count("Accessibility.queryAXTree"));
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    ax_unsent_left = 0;
+    // hover 의 포인터 이동, selector wait 의 확인.
+    trail.reset();
+    var hover = try Op.init(testing.allocator, .hover, "{\"selector\":\"#h\"}", 522);
+    defer hover.deinit(testing.allocator);
+    const h = try drive(&hover, &happyPage, &trail);
+    defer testing.allocator.free(h.result);
+    try testing.expectEqual(@as(usize, 1), trail.kicked.items.len);
+    try testing.expectEqualStrings("Input.dispatchMouseEvent", trail.methods.items[trail.kicked.items[0]]);
+    trail.reset();
+    var w = try Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"selector\":\"#late\",\"timeout_ms\":5000}", 523);
+    defer w.deinit(testing.allocator);
+    const ws_ = try drive(&w, &editorPage, &trail);
+    defer testing.allocator.free(ws_.result);
+    try testing.expectEqualSlices(usize, &.{2}, trail.kicked.items);
+}
+
+test "wait visible 의 간격·마감: 무거운 확인(질의·찾기) 시간의 네 배 이상 쉬고, 남은 시간이 직전 확인보다 짧으면 지금 시한으로 답한다" {
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":10000}", 530);
+    defer op.deinit(testing.allocator);
+    op.wait_deadline_ms = 10_000;
+    op.check_start_ms = 1_000;
+    op.now_ms = 1_300; // 확인 300 ms
+    op.last_heavy_ms = 200;
+    const s1 = try op.sleepOrTimeout(testing.allocator);
+    try testing.expectEqual(@as(u32, 800), s1.sleep);
+    op.check_start_ms = 9_000;
+    op.now_ms = 9_700; // 확인 700 ms, 남은 300 ms
+    op.wait_hidden = 4;
+    const s2 = try op.sleepOrTimeout(testing.allocator);
+    defer testing.allocator.free(s2.done.result);
+    try testing.expectEqual(Status.timeout, s2.done.status);
+    try testing.expectEqualStrings("{\"hidden\":4}", s2.done.result);
 }

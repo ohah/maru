@@ -1,6 +1,8 @@
 function(KIND, Q, EXACT, NTH, ACTION) {
   // W9b2-2 text/label finder - isolated world, Runtime.callFunctionOn + serializationOptions {serialization:"deep", maxDepth:2}.
-  // Q is already normalized by Zig (web_cdp_locate.normalize); NTH is null or an integer; ACTION: click|hover|type|press|scroll.
+  // Q is already normalized by Zig (web_cdp_locate.normalize); NTH is null or an integer; ACTION: click|hover|type|press|scroll|wait.
+  // wait (W9b2-3): no retarget, several matches answer the first one with their count ({n:k, el, name, more}).
+  // KIND "visible" (W9b2-3 role wait): arguments 5.. are elements (DOM.resolveNode) - the index of the first visible one, or -1.
   // Returns {err:"too_large",elements} | {err:"budget",ms} | {n:0,hidden} | {n:1,el,name} | {n:k,cands,names,more}.
   var CAP = 100000, BUDGET_MS = 300, MAX_NAME = 256, MAX_CANDS = 5;
   var G = function (p, k) { return Object.getOwnPropertyDescriptor(p, k).get; };
@@ -49,6 +51,10 @@ function(KIND, Q, EXACT, NTH, ACTION) {
     return true;
   };
   var boxed = function (e) { var r = gbr.call(e); return r.width > 0 && r.height > 0; };
+  if (KIND === 'visible') { // the same visibility as text/label (checkVisibility, size, off-page traps) - plan attack 1: an off-canvas copy is not visible
+    for (var vi = 5; vi < arguments.length; vi++) { var ve = arguments[vi]; if (ve instanceof Element && !ariaHidden(ve) && visible(ve)) return vi - 5; }
+    return -1;
+  }
   var ROLES = { button: 1, link: 1, tab: 1, menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1, option: 1, checkbox: 1, radio: 1, switch: 1, treeitem: 1 };
   var actionable = function (e) {
     var t = tagG.call(e);
@@ -63,7 +69,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
   var viaLabel = false;
   var target = function (e) {
     viaLabel = false;
-    if (ACTION === 'scroll') return e;
+    if (ACTION === 'scroll' || ACTION === 'wait') return e;
     if (ACTION === 'type' || ACTION === 'press') {
       for (var n = e; n; n = up(n)) if (tagG.call(n) === 'LABEL') { var c = ctlG.call(n); viaLabel = !!c; return c || n; }
       if (ACTION === 'type') return e;
@@ -317,6 +323,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
   // nth past the visible matches: no hint - there were visible ones (round 5: it suggested a hidden checkbox)
   if (NTH !== null && NTH !== undefined) return picked ? { n: 1, el: picked[0], name: clip(picked[1]) } : { n: 0, hidden: hits.length ? 0 : hidden };
   if (hits.length === 0) return { n: 0, hidden: hidden };
+  if (ACTION === 'wait') return { n: hits.length, el: hits[0][0], name: clip(hits[0][1]), more: stopped };
   if (hits.length === 1) return { n: 1, el: hits[0][0], name: clip(hits[0][1]) };
   var nodes = [], names = [];
   for (var h = 0; h < hits.length && h < MAX_CANDS; h++) { nodes.push(hits[h][0]); names.push(clip(hits[h][1])); }

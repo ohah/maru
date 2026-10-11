@@ -35,6 +35,11 @@
 #                   5 회차: 가운데에 링크를 품은 글은 그 링크를 누르지 않고 covered.
 #                   변이로 찾은 빈 곳: 투명 radio 가 덮은 요금제 카드(label 과 control 은 같은 것)는 눌린다, iframe 이 덮은 카드는 covered,
 #                   그려지지 않은 요소 안 aria-hidden 글의 exact 는 hint, nth 가 보이는 일치 수를 넘으면 숨은 사본이 있어도 hint 없이 not ok
+#   wait-visible    wait 의 로케이터(W9b②-3): 2 초 뒤 생기는 버튼을 role 로 기다려 matched, 같은 글이 둘이면 ok 와 ambiguous 경고,
+#                   오프캔버스(left:-9999)의 버튼은 보이지 않아 시한(-32004)
+#   hidden-tab      탭을 숨긴 채(대본 `action new_tab` — pane 대본이 `hide-now` 를 만들면) role 로케이터 click 이 3 초 안에 진짜로 누르고(접근성
+#                   질의 + 1×1 스크린샷 — 그 스크린샷이 없으면 숨은 탭에서 질의가 답하지 않는다), hover 가 3 초 안에 mouseover 를 주고(예전 5 초),
+#                   rAF 로 나타나는 버튼을 text wait 이 본다(확인마다 스크린샷). 그 뒤 `previous_tab` 으로 돌아온다
 #   press           요소에 Shift+a → 「A」(isTrusted keydown — 입력 이벤트만으로는 insertText 와 가를 수 없다) · Meta+a(편집 명령 selectAll)
 #                   뒤 대상 없이 x → 값이 「x」로 바뀐다 · Shift+/ → 「?」(US 배열의 위 글자) ·
 #                   대상 없이 Tab → 초점이 다음 칸으로 · 틀린 키 이름은 invalid params. 붙여넣기(Meta+v)는 사용자 클립보드를 쓰므로 스모크에
@@ -94,6 +99,11 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=icon onclick="hit('icon-'+event.isTrusted)"><span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Close dialog</span>X</button>
 <label for=em2>Work email <span aria-hidden=true>*</span></label><input id=em2 oninput="hit('em2-'+event.isTrusted+'-'+encodeURIComponent(this.value))">
 <label id=dm><input type=checkbox style="display:none" onchange="hit('dm-'+this.checked)">Dark mode</label>
+<button id=wl onclick="setTimeout(function(){document.body.insertAdjacentHTML('beforeend','<button style=position:absolute;left:600px;top:120px>Ready now</button>')},2000)">Start later</button>
+<nav style="position:absolute;left:-9999px"><button>Offcanvas go</button></nav>
+<button onclick="hit('hb-'+event.isTrusted)">Hidden role btn</button>
+<span onmouseover="hit('hh-'+event.isTrusted)">Hover hidden</span>
+<button id=rs onclick="setTimeout(function(){requestAnimationFrame(function(){document.body.insertAdjacentHTML('beforeend','<button style=position:absolute;left:600px;top:160px>Raf ready</button>')})},300)">Start raf</button>
 <button onclick="hit('ar1-'+event.isTrusted)">Archive item</button><button onclick="hit('ar2')">Archive item</button>
 <div role=button tabindex=0 onclick="hit('card-'+event.isTrusted)" style="position:relative;width:300px;height:60px;border:1px solid"><span>Card title</span><button style="position:absolute;left:110px;top:15px;width:80px;height:30px" onclick="event.stopPropagation();hit('cdel')">Del</button></div>
 <a href="#" onclick="hit('rm-'+event.isTrusted);return false">Read more<span style="position:absolute;left:-10000px">Read more about pricing</span></a>
@@ -175,6 +185,8 @@ url="http://127.0.0.1:$port/a.html"
 cat > "$root/pane.sh" <<PANE
 #!/bin/sh
 [ -n "\${MARU_SMOKE_HOME:-}" ] && [ -n "\${MARU_SMOKE_OUT:-}" ] || exec sleep 600
+# 대본의 `action new_tab`(숨은 탭 경우)이 연 새 탭의 셸도 이 대본이다 — 한 번만 돈다.
+mkdir "\$MARU_SMOKE_OUT/pane-once" 2>/dev/null || exec sleep 600
 export HOME="\$MARU_SMOKE_HOME" XDG_CACHE_HOME="\$MARU_SMOKE_HOME/.cache"
 out="\$MARU_SMOKE_OUT"
 cli="$cli"
@@ -295,6 +307,26 @@ hit_seen pro-true && echo yes > "\$out/pro-hit" || echo no > "\$out/pro-hit"
 run tx-iframe click --by-text 'Frame card' --exact
 run tx-unr click --by-text 'Secret plan' --exact
 run tx-nth click --by-text 'Archive item' --nth 5
+run wv-start click --selector '#wl'
+run wv-role wait --role button --name 'Ready now' --exact --timeout 6000
+run wv-amb wait --by-text 'Archive item' --exact --timeout 3000
+run wv-off wait --role button --name 'Offcanvas go' --exact --timeout 1500
+run hid-rs click --selector '#rs'
+# 탭을 숨긴다(앱 대본이 hide-now 를 보면 새 탭을 연다).
+touch "\$out/hide-now"
+sleep 2
+t0=\$(date +%s)
+run hid-role click --role button --name 'Hidden role btn' --exact
+t1=\$(date +%s)
+hit_seen hb-true && echo yes > "\$out/hb-hit" || echo no > "\$out/hb-hit"
+t2=\$(date +%s)
+run hid-hover hover --by-text 'Hover hidden' --exact
+t3=\$(date +%s)
+hit_seen hh-true && echo yes > "\$out/hh-hit" || echo no > "\$out/hh-hit"
+run hid-wait wait --by-text 'Raf ready' --exact --timeout 8000
+echo "\$((t1 - t0)) \$((t3 - t2))" > "\$out/hid-secs"
+touch "\$out/show-now"
+sleep 2
 run hover hover --selector '#hv'
 hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
 run hover-missing hover --selector '#none'
@@ -363,14 +395,16 @@ chmod +x "$root/pane.sh"
 
 out="$root/out"
 mkdir -p "$out" "$root/home"
+# 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
+printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\n' "$out/hide-now" "$out/show-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
-    MARU_TEST_GRANT_DECISION=approve MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home" \
+    MARU_TEST_GRANT_DECISION=approve MARU_SMOKE_OUT="$out" MARU_SMOKE_HOME="$root/home" MARU_WEB_OSR_TEST_INPUT="$root/hide.txt" \
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!
 i=0
-while [ ! -f "$out/done" ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done
+while [ ! -f "$out/done" ] && [ $i -lt 180 ]; do sleep 1; i=$((i + 1)); done
 [ -f "$out/done" ] || { sed -n '1,40p' "$root/app.log" >&2; fail "the pane script did not finish ($(cat "$out/list" 2>/dev/null | tr '\n' ' '))"; }
 kill "$app_pid" 2>/dev/null || true
 wait "$app_pid" 2>/dev/null || true
@@ -439,6 +473,15 @@ ok tx-radio && [ "$(cat "$out/pro-hit")" = yes ] || fail "a plan card whose tran
 grep -q 'covered' "$out/tx-iframe" && ! grep -q 'GET /hit?ifc' "$root/http.log" || fail "an iframe covering a card's text was not refused as covered ($(tr '\n' ' ' < "$out/tx-iframe"))"
 grep -q 'not ok' "$out/tx-unr" && grep -q '^hint: 1 matching' "$out/tx-unr" || fail "an unrendered match with aria-hidden text did not give a hint ($(tr '\n' ' ' < "$out/tx-unr"))"
 grep -q 'not ok' "$out/tx-nth" && ! grep -q '^hint:' "$out/tx-nth" || fail "nth past the visible matches gave a hidden-element hint ($(tr '\n' ' ' < "$out/tx-nth"))"
+ok wv-role && grep -q 'matched n[0-9]* "Ready now"' "$out/wv-role" || fail "waiting by role for a button made 2 s later did not answer ok with matched ($(tr '\n' ' ' < "$out/wv-role"))"
+ok wv-amb && grep -q '^warning: ambiguous' "$out/wv-amb" || fail "waiting for a text matching two buttons did not answer ok with an ambiguous warning ($(tr '\n' ' ' < "$out/wv-amb"))"
+grep -q '(-32004)' "$out/wv-off" || fail "an off-canvas button was taken for visible ($(tr '\n' ' ' < "$out/wv-off"))"
+echo "PASS wait-visible: a role wait sees a button made 2 s later (matched), two matches answer with an ambiguous warning, an off-canvas button times out"
+set -- $(cat "$out/hid-secs")
+ok hid-role && [ "$(cat "$out/hb-hit")" = yes ] && [ "$1" -le 3 ] || fail "a role click on a hidden tab did not press for real within 3 s (${1}s · $(tr '\n' ' ' < "$out/hid-role"))"
+ok hid-hover && [ "$(cat "$out/hh-hit")" = yes ] && [ "$2" -le 3 ] || fail "a hover on a hidden tab did not reach the page within 3 s (${2}s · $(tr '\n' ' ' < "$out/hid-hover"))"
+ok hid-wait || fail "a text wait on a hidden tab did not see a button made in an animation frame ($(tr '\n' ' ' < "$out/hid-wait"))"
+echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"
 grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was not not ok ($(tr '\n' ' ' < "$out/hover-missing"))"

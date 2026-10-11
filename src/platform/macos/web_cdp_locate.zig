@@ -179,20 +179,16 @@ pub const Pick = union(enum) {
     ambiguous: []u8,
 };
 
-/// `Accessibility.queryAXTree` 결과(JSON 글)에서 고른다. 모양이 틀리면 error.Malformed.
-pub fn pickFromAx(gpa: std.mem.Allocator, json: []const u8, q: RoleQuery, input_role: []const u8) !Pick {
+const AxMatch = struct { backend: i64, name: []u8, exact: bool };
+
+/// `Accessibility.queryAXTree` 결과(JSON 글)에서 맞는 노드를 모은다 — 무시된 노드는 빼고 level·이름을 본다. nth 면 그 하나만, 아니면 앞에서
+/// `cap` 개까지(이름은 소유 — 부른 쪽이 놓는다). 맞는 것의 수(nth 와 무관)를 돌려준다. 모양이 틀리면 error.Malformed.
+fn axMatches(gpa: std.mem.Allocator, json: []const u8, q: RoleQuery, cap: usize, out: *std.ArrayList(AxMatch)) !usize {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, json, .{}) catch return error.Malformed;
     defer parsed.deinit();
     if (parsed.value != .object) return error.Malformed;
     const nodes_v = parsed.value.object.get("nodes") orelse return error.Malformed;
     if (nodes_v != .array) return error.Malformed;
-
-    const Match = struct { backend: i64, name: []u8, exact: bool };
-    var matches: std.ArrayList(Match) = .empty;
-    defer {
-        for (matches.items) |m| gpa.free(m.name);
-        matches.deinit(gpa);
-    }
     var total: usize = 0;
     for (nodes_v.array.items) |n| {
         if (n != .object) continue;
@@ -216,10 +212,22 @@ pub fn pickFromAx(gpa: std.mem.Allocator, json: []const u8, q: RoleQuery, input_
         total += 1;
         if (q.nth) |k| {
             if (total - 1 != k) continue;
-        } else if (matches.items.len >= 6) continue; // 후보는 다섯까지(여섯째로 「여럿」 만 안다)
-        try matches.append(gpa, .{ .backend = backend, .name = name, .exact = if (q.name) |want| std.mem.eql(u8, name, want) else false });
+        } else if (out.items.len >= cap) continue;
+        try out.append(gpa, .{ .backend = backend, .name = name, .exact = if (q.name) |want| std.mem.eql(u8, name, want) else false });
         keep = true;
     }
+    return total;
+}
+
+/// `Accessibility.queryAXTree` 결과(JSON 글)에서 고른다. 모양이 틀리면 error.Malformed.
+pub fn pickFromAx(gpa: std.mem.Allocator, json: []const u8, q: RoleQuery, input_role: []const u8) !Pick {
+    var matches: std.ArrayList(AxMatch) = .empty;
+    defer {
+        for (matches.items) |m| gpa.free(m.name);
+        matches.deinit(gpa);
+    }
+    // 후보는 다섯까지(여섯째로 「여럿」 만 안다).
+    const total = try axMatches(gpa, json, q, 6, &matches);
     if (matches.items.len == 0) return .none;
     if (q.nth != null or total == 1) {
         const m = matches.items[0];
@@ -246,6 +254,42 @@ pub fn pickFromAx(gpa: std.mem.Allocator, json: []const u8, q: RoleQuery, input_
     if (total > 5) w.writeAll(", …") catch return error.OutOfMemory;
     w.writeAll("; retry with ref (preferred), exact:true, or nth") catch return error.OutOfMemory;
     return .{ .ambiguous = try aw.toOwnedSlice() };
+}
+
+/// wait visible(W9b②-3) 의 후보 — 맞는 것의 수(act 가 같은 로케이터로 「여럿」 이라 할지)와 보임을 볼 앞의 것들(backendNodeId·이름 — 소유).
+pub const Cands = struct {
+    total: usize,
+    backends: []i64,
+    names: [][]u8,
+
+    pub fn deinit(self: *Cands, gpa: std.mem.Allocator) void {
+        for (self.names) |n| gpa.free(n);
+        gpa.free(self.names);
+        gpa.free(self.backends);
+        self.* = undefined;
+    }
+};
+
+/// 보임을 볼 후보의 상한 — 숨은 사본(오프캔버스 메뉴 등)이 앞에 많아도 뒤의 보이는 것을 보게(계획 공격 1 회차 — 다섯이면 영영 못 봤다).
+pub const max_wait_candidates = 100;
+
+/// `Accessibility.queryAXTree` 결과에서 wait 의 후보를 모은다(nth 면 그 하나). act 와 같은 거르기다.
+pub fn listFromAx(gpa: std.mem.Allocator, json: []const u8, q: RoleQuery) !Cands {
+    var matches: std.ArrayList(AxMatch) = .empty;
+    defer {
+        for (matches.items) |m| gpa.free(m.name);
+        matches.deinit(gpa);
+    }
+    const total = try axMatches(gpa, json, q, max_wait_candidates, &matches);
+    const backends = try gpa.alloc(i64, matches.items.len);
+    errdefer gpa.free(backends);
+    const names = try gpa.alloc([]u8, matches.items.len);
+    for (matches.items, 0..) |*m, i| {
+        backends[i] = m.backend;
+        names[i] = m.name;
+        m.name = m.name[0..0]; // 소유를 넘겼다(길이 0 은 defer 가 놓지 않는다)
+    }
+    return .{ .total = total, .backends = backends, .names = names };
 }
 
 fn levelOf(o: std.json.ObjectMap) ?i64 {
@@ -369,6 +413,35 @@ test "queryAXTree 거르기: 무시된 노드는 빼고, 이름 부분·정확 �
     try testing.expectError(error.Malformed, pickFromAx(g, "[]", .{ .role = "button" }, "button"));
 }
 
+test "wait 후보(W9b②-3): act 와 같은 거르기로 앞에서부터 모으고 맞는 것의 수를 센다, nth 면 그 하나, 상한 100" {
+    const g = testing.allocator;
+    var c = try listFromAx(g, buttons_ax, .{ .role = "button", .name = "save" });
+    defer c.deinit(g);
+    try testing.expectEqual(@as(usize, 3), c.total);
+    try testing.expectEqualSlices(i64, &.{ 11, 12, 14 }, c.backends);
+    try testing.expectEqualStrings("Save changes", c.names[1]);
+    var one = try listFromAx(g, buttons_ax, .{ .role = "button", .name = "save", .nth = 1 });
+    defer one.deinit(g);
+    try testing.expectEqual(@as(usize, 3), one.total);
+    try testing.expectEqualSlices(i64, &.{12}, one.backends);
+    var none = try listFromAx(g, buttons_ax, .{ .role = "button", .name = "save", .nth = 5 });
+    defer none.deinit(g);
+    try testing.expectEqual(@as(usize, 0), none.backends.len);
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(g);
+    try buf.appendSlice(g, "{\"nodes\":[");
+    for (0..150) |i| {
+        if (i > 0) try buf.append(g, ',');
+        try buf.print(g, "{{\"ignored\":false,\"name\":{{\"value\":\"x\"}},\"backendDOMNodeId\":{d}}}", .{i + 1});
+    }
+    try buf.appendSlice(g, "]}");
+    var many = try listFromAx(g, buf.items, .{ .role = "button" });
+    defer many.deinit(g);
+    try testing.expectEqual(@as(usize, 150), many.total);
+    try testing.expectEqual(max_wait_candidates, many.backends.len);
+    try testing.expectError(error.Malformed, listFromAx(g, "[]", .{ .role = "button" }));
+}
+
 test "표시 안전: C1·양방향 제어·줄 구분·tag 글자는 메시지에서 빠진다" {
     var out: [64]u8 = undefined;
     const n = displaySafe("a\x1b[31mb\u{9b}c\u{202e}d\u{2066}e\u{85}f\u{2028}g\u{E0041}h\u{FFF9}i", &out);
@@ -424,8 +497,8 @@ pub const Found = union(enum) {
     done: struct { status: enum { failed, timeout }, msg: []u8 },
     /// 없다 — 숨은 일치 수(0 이 아니면 안내를 싣는다).
     none: u64,
-    /// 하나 — backendNodeId 와 이름(소유).
-    one: struct { backend: i64, name: []u8 },
+    /// 하나 — backendNodeId 와 이름(소유). `many` = wait 의 답에서 맞는 것이 둘 이상(그 첫 것 — act 면 「여럿」 이다).
+    one: struct { backend: i64, name: []u8, many: bool = false },
 
     pub fn deinit(self: *Found, gpa: std.mem.Allocator) void {
         switch (self.*) {
@@ -470,11 +543,12 @@ pub fn parseFound(gpa: std.mem.Allocator, json: []const u8, what: []const u8, qu
         const hidden = if (field(fields, "hidden")) |h| try deepInt(h) else 0;
         return .{ .none = @intCast(@max(hidden, 0)) };
     }
-    if (n == 1) if (field(fields, "el")) |el| {
+    // 하나 — 또는 wait 의 답(여럿이어도 첫 것과 그 수 — W9b②-3).
+    if (field(fields, "el")) |el| {
         const backend = try deepNodeBackend(el);
         const name = if (field(fields, "name")) |nm| try deepString(nm) else "";
-        return .{ .one = .{ .backend = backend, .name = try gpa.dupe(u8, name) } };
-    };
+        return .{ .one = .{ .backend = backend, .name = try gpa.dupe(u8, name), .many = n > 1 } };
+    }
     // 여럿 — 후보(다섯까지)와 이름.
     const cands = try deepArray(field(fields, "cands") orelse return error.Malformed);
     const names = try deepArray(field(fields, "names") orelse return error.Malformed);
@@ -576,6 +650,13 @@ test "text·label 찾기의 답: 하나·없음(숨은 수)·여럿(후보 ref·
         var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":2}],[\"cands\",{\"type\":\"array\",\"value\":[{\"type\":\"node\",\"value\":{\"backendNodeId\":7}},{\"type\":\"node\",\"value\":{\"backendNodeId\":9}}]}],[\"names\",{\"type\":\"array\",\"value\":[{\"type\":\"string\",\"value\":\"Save\"},{\"type\":\"string\",\"value\":\"Save\"}]}],[\"more\",{\"type\":\"boolean\",\"value\":false}]]}}}", "text", "Save", true);
         defer f.deinit(g);
         try testing.expectEqualStrings("ambiguous: 2 elements match text=\"Save\" — n7 \"Save\", n9 \"Save\"; retry with ref (preferred) or nth", f.done.msg);
+    }
+    {
+        // wait 의 답(W9b②-3) — 여럿이어도 첫 것과 그 수.
+        var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"n\",{\"type\":\"number\",\"value\":3}],[\"el\",{\"type\":\"node\",\"value\":{\"backendNodeId\":31}}],[\"name\",{\"type\":\"string\",\"value\":\"Archive\"}]]}}}", "text", "archive", false);
+        defer f.deinit(g);
+        try testing.expectEqual(@as(i64, 31), f.one.backend);
+        try testing.expect(f.one.many);
     }
     {
         var f = try parseFound(g, "{\"result\":{\"deepSerializedValue\":{\"type\":\"object\",\"value\":[[\"err\",{\"type\":\"string\",\"value\":\"too_large\"}],[\"elements\",{\"type\":\"number\",\"value\":120000}]]}}}", "text", "x", false);

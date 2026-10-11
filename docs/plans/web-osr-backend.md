@@ -857,3 +857,29 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - 시간에만 닿는 것: 올라가는 길의 시간 예산, 그려지지 않은 일치로 부모를 가리기.
   - XHTML 소문자 tagName — 스모크에 XHTML 페이지가 없다.
 
+### W9b②-3 — wait visible 과 숨은 탭 kick(2026-10-11)
+
+**계획 공격 세 번**(실측 — 공용 하네스 scratchpad/harness, 탐침 plan_w9b2c_r1·r2·r3; 재부팅으로 /private/tmp 가 비워져 2 회차를 다시 돌렸다):
+- **1 회차:**
+  - 높음: **숨긴 탭에서 `Accessibility.queryAXTree` 가 답하지 않는다**(40 초+ — 보이게 하면 그때 답한다). 머지된 act 의 role 도 같다 — 이 PR 에서 함께.
+  - 중: 이동 사이 옛 문서 노드로 질의하면 영영 매달림 → 격리 world 의 `document` objectId(이동 뒤 0 ms 오류).
+  - 중: act 단계를 그대로 쓰면 스크롤·`{ok:false}`·ambiguous 실패로 끝났다 → wait 갈래. role 의 보임을 selector JS 로 하면 오프캔버스가 보였다 → finder 의 visible.
+  - 중: 결과 직렬화가 matched·hint 를 버렸다, WebKit 검사에 wait 이 없었다, 모르는 키를 무시했다, text 의 matched.ref 는 covered 일 수 있다.
+- **2 회차:**
+  - 숨은 탭의 `getFullAXTree` 대안 — 2.5 만 요소 2.5–3.9 초 멈춤, 약 2.7 만에서 16 MiB 초과, 이동 중 노드 1 개 트리를 ok 로 → 버렸다.
+  - 보이는 탭에서 질의 직후(0 ms) 숨기면 4 초+ 매달린다. **질의 바로 뒤 1×1 스크린샷이 푼다**(숨은 탭 5 천 0.16 초·2.5 만 1.7–4 초, 결과 13 배 작다).
+  - **사용자 결정(2026-10-11): 스크린샷과 함께 보내기(A)** — 숨은 탭이면 거절(B) 대신.
+  - 보임 판정은 resolveNode 묶음 + finder 한 번(getContentQuads 는 오프캔버스를 보인다 함), document 는 묶음에(안 붙이면 확인마다 쌓인다).
+- **3 회차:**
+  - kick 은 0–300 ms 뒤 숨겨도 240/240 답, 보이는 탭 비용 GPU 3 ms·멈춤 0, 200 회 연속 안정, 순서는 같은 파이프라 지켜진다(10–30 ms 넘게 먼저 가면 매달림) → **늘 붙인다**(숨김 감지 배선이 필요 없다).
+  - 전체 자리 8·탭 2 — 쌍은 둘 다 들어갈 때만, kick 은 처음부터 버린 자리(답은 알리지 않는다 — op 이 끝난 뒤 와도 안전).
+  - 숨은 탭에서 rAF·애니메이션으로 나타나는 요소는 kick 없이 영영 안 생긴다 → wait 의 모든 확인에 kick. 숨은 탭 click·type·scroll 은 된다, **hover 의 mouseMoved 는 5 초**(kick 이면 5 ms) → hover 에도.
+  - ambiguous 는 「같은 로케이터로 act 하면 여럿」 으로(보이는 것만 세면 act 와 어긋난다), 마감 판단은 직전 확인 전체 시간으로.
+
+**구현:**
+- `web_osr.devtoolsCallKicked` — 주 호출 바로 뒤 `Page.captureScreenshot`(jpeg q1, clip 1×1)을 버린 자리로. Step.call 의 `kick`.
+- `web_cdp_ops`: role 질의는 document objectId(묶음 → 질의 → 놓기, `rel_then` committed)+kick, hover 이동+kick, kick 을 못 보내면 50 ms 뒤 세 번까지.
+  wait `visible`(로케이터): text·label 은 finder 의 wait 모드, role 은 `listFromAx` 후보를 20 개씩 잡아 finder 의 `visible` 판정, 결과 `{ok, matched, ambiguous?}`,
+  시한 `{hidden}`, 간격 max(백오프, 무거운 호출 × 4), 마감 판단.
+- L2 `condition:"visible"`(엄격 키, selector 는 selector 조건으로, locator 는 WebKit -32008), 결과·시한 data. CLI `wait --role/--by-text/--by-label`.
+

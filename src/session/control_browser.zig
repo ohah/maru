@@ -421,11 +421,15 @@ pub const max_press_key_bytes = 64;
 pub const WaitCondition = enum {
     selector,
     load,
+    /// W9b②-3 — `selector` 나 `locator`(act 와 같은 세 모양)가 보일 때까지. selector 면 엔진에는 `selector` 조건으로 넘긴다(같은 뜻 —
+    /// WebKit 도 안다), locator 는 Chromium 만(WebKit 은 모달 전 `-32008`).
+    visible,
 
     pub fn wire(self: WaitCondition) []const u8 {
         return switch (self) {
             .selector => "selector",
             .load => "load",
+            .visible => "visible",
         };
     }
 };
@@ -439,6 +443,8 @@ pub const WaitParams = struct {
     condition: WaitCondition,
     selector: ?[]const u8,
     timeout_ms: u32,
+    /// `visible` 의 로케이터(role·text·label — selector 는 `selector` 에).
+    locator: ?Locator = null,
 };
 
 /// `browser.screenshot` 선택 params — rect(캡처 영역, CSS 포인트)·scale(출력 배율). 둘 다 부재 가능(=전체 뷰·기기 배율).
@@ -659,18 +665,39 @@ pub fn parseWaitParams(params: ?std.json.Value) ParamError!WaitParams {
         .selector
     else if (eq(condition_wire, "load"))
         .load
+    else if (eq(condition_wire, "visible"))
+        .visible
     else
         return error.InvalidParams;
-    const selector = try optStrFromObj(obj, "selector");
+    var selector = try optStrFromObj(obj, "selector");
+    var locator: ?Locator = null;
     switch (condition) {
         .selector => if (selector == null or selector.?.len == 0) return error.InvalidParams,
         .load => if (selector != null) return error.InvalidParams,
+        .visible => {
+            // 새 조건이라 키를 엄격히 본다(옛 조건은 뒤 호환으로 모르는 키를 그대로 둔다 — `locator` 만 거절).
+            var it = obj.iterator();
+            while (it.next()) |e| {
+                const k = e.key_ptr.*;
+                if (!(eq(k, "id") or eq(k, "condition") or eq(k, "selector") or eq(k, "locator") or eq(k, "timeout_ms"))) return error.InvalidParams;
+            }
+            const loc = try parseLocator(obj); // selector·locator 가운데 정확히 하나(ref 는 위에서 거절)
+            switch (loc) {
+                .selector => |sel| if (sel.len == 0) return error.InvalidParams,
+                .ref => return error.InvalidParams,
+                else => {
+                    locator = loc;
+                    selector = null;
+                },
+            }
+        },
     }
+    if (condition != .visible and obj.get("locator") != null) return error.InvalidParams; // 조용히 버리지 않는다(계획 공격 3 회차)
     const timeout_ms: u32 = if (obj.get("timeout_ms")) |v| switch (v) {
         .integer => |i| if (i < 1 or i > @as(i64, wait_max_timeout_ms)) return error.InvalidParams else @intCast(i),
         else => return error.InvalidParams,
     } else wait_default_timeout_ms;
-    return .{ .id = try idFromObj(obj), .condition = condition, .selector = selector, .timeout_ms = timeout_ms };
+    return .{ .id = try idFromObj(obj), .condition = condition, .selector = selector, .timeout_ms = timeout_ms, .locator = locator };
 }
 
 /// JSON 수(integer 또는 float) → f64. 비수치 → InvalidParams. rect/scale 파싱 공용.
@@ -833,11 +860,13 @@ pub fn serializeWaitArg(gpa: std.mem.Allocator, p: WaitParams) std.mem.Allocator
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     s.beginObject() catch return error.OutOfMemory;
     s.objectField("condition") catch return error.OutOfMemory;
-    s.write(p.condition.wire()) catch return error.OutOfMemory;
+    // visible + selector 는 엔진에 selector 조건으로(같은 뜻 — Swift·Chromium 의 selector 확인), 로케이터만 visible 로(W9b②-3).
+    s.write(if (p.condition == .visible and p.locator == null) WaitCondition.selector.wire() else p.condition.wire()) catch return error.OutOfMemory;
     if (p.selector) |selector| {
         s.objectField("selector") catch return error.OutOfMemory;
         s.write(selector) catch return error.OutOfMemory;
     }
+    if (p.locator) |loc| writeLocatorFields(&s, loc) catch return error.OutOfMemory;
     s.objectField("timeout_ms") catch return error.OutOfMemory;
     s.write(p.timeout_ms) catch return error.OutOfMemory;
     s.endObject() catch return error.OutOfMemory;
@@ -1567,7 +1596,7 @@ fn unsupportedOnSurface(dto: cs.SurfaceDto, m: BrowserMethod) ?cs.WebMeta {
 /// 대상 메서드에 `locator` 키가 있고 그 탭의 엔진이 로케이터를 못 하면(WebKit) 그 탭의 메타.
 fn locatorUnsupported(dto: cs.SurfaceDto, m: BrowserMethod, params: ?std.json.Value) ?cs.WebMeta {
     switch (m) {
-        .click, .type_text, .scroll, .hover, .press => {},
+        .click, .type_text, .scroll, .hover, .press, .wait => {},
         else => return null,
     }
     const w = switch (dto.detail) {
@@ -1702,7 +1731,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
     if (status != .success) {
         return switch (status) {
             .timeout => if (bmethod == .wait)
-                serializeWaitTimeoutError(gpa, req)
+                serializeWaitTimeoutError(gpa, req, result)
             else
                 cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), null),
             .invalid_params => cp.serializeError(gpa, req.id, .invalid_params, if (result.len > 0) result else "Invalid selector", null),
@@ -1749,7 +1778,14 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         // W9b①: back/forward → 갈 곳이 있었는가, reload → true.
         .back, .forward, .reload => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
-        .wait => serializeNavigateResult(gpa, req.id),
+        // 로케이터로 기다렸으면 엔진이 `{"ok":true,"matched":{…},"ambiguous"?:true}` 를 준다(W9b②-3).
+        .wait => if (result.len > 0 and result[0] == '{')
+            serializeActMatchedResult(gpa, req.id, result) catch |e| switch (e) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return cp.serializeError(gpa, req.id, .internal_error, "invalid wait payload", null),
+            }
+        else
+            serializeNavigateResult(gpa, req.id),
         // snapshot(§9.5.4) → {snapshot:<tree JSON>}. Swift가 준 JSON을 구조화 embed(malformed=internal_error 방어).
         .snapshot => serializeSnapshotResult(gpa, req.id, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
@@ -1771,12 +1807,19 @@ fn serializeResultTooLarge(gpa: std.mem.Allocator, id: cp.Id, limit_bytes: usize
     return cp.serializeError(gpa, id, .result_too_large, cp.ErrorCode.result_too_large.defaultMessage(), .{ .object = data });
 }
 
-fn serializeWaitTimeoutError(gpa: std.mem.Allocator, req: cp.Request) std.mem.Allocator.Error![]u8 {
+fn serializeWaitTimeoutError(gpa: std.mem.Allocator, req: cp.Request, result: []const u8) std.mem.Allocator.Error![]u8 {
     const p = parseWaitParams(req.params) catch return cp.serializeError(gpa, req.id, .internal_error, "invalid wait request state", null);
     var data: std.json.ObjectMap = .empty;
     defer data.deinit(gpa);
     try data.put(gpa, "condition", .{ .string = p.condition.wire() });
     try data.put(gpa, "timeout_ms", .{ .integer = p.timeout_ms });
+    // 로케이터 wait — 마지막 확인의 숨은 일치 수(엔진이 `{"hidden":N}` 으로 준다, W9b②-3). 모양이 틀리면 싣지 않는다.
+    if (result.len > 0) if (std.json.parseFromSlice(std.json.Value, gpa, result, .{})) |parsed| {
+        defer parsed.deinit();
+        if (parsed.value == .object) if (parsed.value.object.get("hidden")) |h| if (h == .integer and h.integer >= 0) {
+            try data.put(gpa, "hidden", .{ .integer = h.integer });
+        };
+    } else |e| if (e == error.OutOfMemory) return error.OutOfMemory;
     return cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), .{ .object = data });
 }
 
@@ -1805,10 +1848,12 @@ fn serializeActMatchedResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const
     const ref = matched.object.get("ref") orelse return error.InvalidActPayload;
     const name = matched.object.get("name") orelse return error.InvalidActPayload;
     if (ref != .string or name != .string) return error.InvalidActPayload;
+    // wait 의 「같은 로케이터로 act 하면 여럿」(W9b②-3) — true 일 때만 싣는다.
+    const ambiguous = if (parsed.value.object.get("ambiguous")) |a| a == .bool and a.bool else false;
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    writeActMatched(&s, id, ok.bool, ref.string, name.string) catch return error.OutOfMemory;
+    writeActMatched(&s, id, ok.bool, ref.string, name.string, ambiguous) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
@@ -1821,7 +1866,7 @@ fn writeActHint(s: *std.json.Stringify, id: cp.Id, hint: []const u8) !void {
     try endResult(s);
 }
 
-fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: []const u8, name: []const u8) !void {
+fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: []const u8, name: []const u8, ambiguous: bool) !void {
     try beginResult(s, id);
     try s.objectField("ok");
     try s.write(ok);
@@ -1832,6 +1877,10 @@ fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: []const u8,
     try s.objectField("name");
     try s.write(name);
     try s.endObject();
+    if (ambiguous) {
+        try s.objectField("ambiguous");
+        try s.write(true);
+    }
     try endResult(s);
 }
 
@@ -4071,4 +4120,85 @@ test "serializeBrowserResponse(console): 배열 JSON을 {console} 구조화 embe
 
 test {
     testing.refAllDecls(@This());
+}
+
+test "W9b②-3: wait visible — selector 면 엔진에 selector 조건으로, 로케이터는 visible 로(Chromium), 키는 엄격, 다른 조건의 locator 는 거절, WebKit 은 인가 전 -32008" {
+    var buf: [1]capmod.Capability = undefined;
+    const ok_cases = [_]struct { req: []const u8, arg: []const u8, surface: u64 }{
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"condition\":\"visible\",\"selector\":\"#ready\",\"timeout_ms\":900}}", .arg = "{\"condition\":\"selector\",\"selector\":\"#ready\",\"timeout_ms\":900}", .surface = 11 },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":12,\"condition\":\"visible\",\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"nth\":1}}}", .arg = "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"nth\":1},\"timeout_ms\":25000}", .surface = 12 },
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":12,\"condition\":\"visible\",\"locator\":{\"text\":\"Done\",\"exact\":true},\"timeout_ms\":5}}", .arg = "{\"condition\":\"visible\",\"locator\":{\"text\":\"Done\",\"exact\":true},\"timeout_ms\":5}", .surface = 12 },
+        // 옛 조건의 모르는 키는 그대로 둔다(뒤 호환).
+        .{ .req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":12,\"condition\":\"load\",\"extra\":1}}", .arg = "{\"condition\":\"load\",\"timeout_ms\":25000}", .surface = 12 },
+    };
+    for (ok_cases) |c| switch (try dispatchBrowser(testing.allocator, c.req, fx_engine, capsSlice(&buf, browserCap(c.surface)), null, &no_grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqualStrings(c.arg, op.arg);
+        },
+        .err => |e| {
+            defer testing.allocator.free(e);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    const bad = [_][]const u8{
+        "{\"id\":12,\"condition\":\"visible\"}", // 대상 없음
+        "{\"id\":12,\"condition\":\"visible\",\"selector\":\"#a\",\"locator\":{\"role\":\"button\"}}", // 둘
+        "{\"id\":12,\"condition\":\"visible\",\"ref\":\"n3\"}", // ref 는 받지 않는다
+        "{\"id\":12,\"condition\":\"visible\",\"selector\":\"\"}",
+        "{\"id\":12,\"condition\":\"visible\",\"locator\":{\"role\":\"button\"},\"bogus\":1}", // 엄격 키
+        "{\"id\":12,\"condition\":\"visible\",\"locator\":{\"text\":\"a\",\"name\":\"b\"}}",
+        "{\"id\":12,\"condition\":\"load\",\"locator\":{\"role\":\"button\"}}", // 조용히 버리지 않는다
+        "{\"id\":12,\"condition\":\"selector\",\"selector\":\"#a\",\"locator\":{\"role\":\"button\"}}",
+    };
+    for (bad) |params| {
+        var req_buf: [256]u8 = undefined;
+        const req = try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{s}}}", .{params});
+        switch (try dispatchBrowser(testing.allocator, req, fx_engine, capsSlice(&buf, browserCap(12)), null, &no_grants, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            },
+            .op => |op| {
+                testing.allocator.free(op.arg);
+                return error.TestUnexpectedResult;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+    // WebKit 탭의 로케이터 wait — 인가(모달) 전 -32008. selector 의 visible 은 WebKit 도 된다(위).
+    var grants: cpg.PaneGrantStore = .{};
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.wait\",\"params\":{\"id\":11,\"condition\":\"visible\",\"locator\":{\"role\":\"button\"}}}", fx_engine, &.{}, 6, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            try testing.expect(std.mem.indexOf(u8, e, "\"param\":\"locator\"") != null);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "W9b②-3: wait visible 의 결과 — 로케이터면 {ok, matched, ambiguous?}, 시한 -32004 data 에 condition visible 과 숨은 일치 수" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.wait\",\"params\":{\"id\":12,\"condition\":\"visible\",\"locator\":{\"text\":\"Archive\"},\"timeout_ms\":300}}";
+    const ok = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"ok\":true,\"matched\":{\"ref\":\"n41\",\"name\":\"Archive\"},\"ambiguous\":true}");
+    defer testing.allocator.free(ok);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n41\",\"name\":\"Archive\"},\"ambiguous\":true}}", ok);
+    const one = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"ok\":true,\"matched\":{\"ref\":\"n41\",\"name\":\"Archive\"}}");
+    defer testing.allocator.free(one);
+    try testing.expect(std.mem.indexOf(u8, one, "ambiguous") == null);
+    const plain = try serializeBrowserResponseStatus(testing.allocator, req, .success, "true");
+    defer testing.allocator.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "\"ok\":true") != null);
+    const bad = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"ok\":true}");
+    defer testing.allocator.free(bad);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(bad));
+    const t = try serializeBrowserResponseStatus(testing.allocator, req, .timeout, "{\"hidden\":3}");
+    defer testing.allocator.free(t);
+    try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.timeout)), try errCode(t));
+    try testing.expect(std.mem.indexOf(u8, t, "\"condition\":\"visible\"") != null);
+    try testing.expect(std.mem.indexOf(u8, t, "\"hidden\":3") != null);
+    const t2 = try serializeBrowserResponseStatus(testing.allocator, req, .timeout, "not json");
+    defer testing.allocator.free(t2);
+    try testing.expect(std.mem.indexOf(u8, t2, "hidden") == null);
 }

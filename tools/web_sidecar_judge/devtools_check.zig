@@ -11,6 +11,9 @@
 //!   dt-unknown         없는 브라우저 → unknown_browser
 //!   dt-too-large       16 MiB 를 넘는 결과는 조각 없이 too_large
 //!   dt-big-result-time 8 MiB 결과를 sidecar 가 다 써 보내는 시간(판정자는 바로 읽는다 — maru 의 tick 예산 지연은 재지 않는다)
+//!   dt-hidden-kick     숨긴 탭(W9b②-3): 접근성 질의만 보내면 답하지 않다가(정보 — 답하면 Chromium 이 고친 것이니 kick 을 걷어낼 신호)
+//!                      1×1 스크린샷(kick)을 보내면 풀리고, 질의 바로 뒤 kick 을 함께 보내면 시한 안에 답한다. 포인터 이동(mouseMoved)도
+//!                      kick 과 함께면 곧 답한다(없으면 숨긴 탭에서 5 초). maru 가 기대는 Chromium 내부 동작 — CEF 를 올릴 때 여기서 본다
 //!   dt-busy            탭마다 상한(2)을 넘으면 busy
 //!   dt-busy-other-tab  그 탭이 상한이어도 다른 탭은 부를 수 있다(멈춘 페이지 하나가 다른 탭을 막지 못한다 — `dt-busy` 와 함께여야
 //!                      뜻이 있다: 탭마다 상한이 없던 옛 설계도 이것만은 통과한다)
@@ -275,6 +278,61 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, e
         const ms = os.nowMs() - started;
         const ok = d != null and d.?.status == .ok and d.?.size == r.result.items.len and r.result.items.len > 8 * 1024 * 1024;
         report(ok and ms < 5_000, "dt-big-result-time", std.fmt.bufPrint(&detail, "상태 {s} · {d} 바이트 · 조각 {d} · {d} ms(5 초 안)", .{ statusName(d), r.result.items.len, if (d) |v| v.chunks else 0, ms }) catch "");
+    }
+    // dt-hidden-kick
+    {
+        const kick = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}";
+        try host.send(.{ .set_hidden = .{ .browser = browser_id, .value = true } });
+        r.pump(800);
+        const dc = try r.call("Runtime.evaluate", "{\"expression\":\"document\"}");
+        const dd = r.wait(dc, 5_000);
+        var doc_buf: [256]u8 = undefined;
+        var doc: []const u8 = "";
+        if (r.json()) |p| {
+            defer p.deinit();
+            if (p.value == .object) if (p.value.object.get("result")) |res| if (res == .object) if (res.object.get("objectId")) |o| if (o == .string and o.string.len < doc_buf.len) {
+                @memcpy(doc_buf[0..o.string.len], o.string);
+                doc = doc_buf[0..o.string.len];
+            };
+        }
+        var q_buf: [400]u8 = undefined;
+        const q = std.fmt.bufPrint(&q_buf, "{{\"objectId\":\"{s}\",\"role\":\"button\"}}", .{doc}) catch "";
+        // 질의만 — 숨긴 탭은 답하지 않는다(정보).
+        const bare = try r.call("Accessibility.queryAXTree", q);
+        const bare_d = r.wait(bare, 2_000);
+        // kick 하나가 걸린 질의를 푼다.
+        const k1 = try r.call("Page.captureScreenshot", kick);
+        var unblocked = bare_d != null;
+        var k1_done = false;
+        const deadline = os.nowMs() + 5_000;
+        while (os.nowMs() < deadline and !(unblocked and k1_done)) {
+            const m = (host.next(50) catch null) orelse continue;
+            switch (m) {
+                .devtools_result => |v| {
+                    if (v.call == bare) unblocked = true;
+                    if (v.call == k1) k1_done = true;
+                },
+                else => r.other(m),
+            }
+        }
+        // 질의 바로 뒤 kick — 시한 안에 답한다.
+        const started = os.nowMs();
+        const qc = try r.call("Accessibility.queryAXTree", q);
+        const k2 = try r.call("Page.captureScreenshot", kick);
+        const qd = r.wait(qc, 5_000);
+        const q_ms = os.nowMs() - started;
+        _ = r.wait(k2, 5_000);
+        // 포인터 이동 + kick.
+        const moved_at = os.nowMs();
+        const mc = try r.call("Input.dispatchMouseEvent", "{\"type\":\"mouseMoved\",\"x\":20,\"y\":20}");
+        const k3 = try r.call("Page.captureScreenshot", kick);
+        const md = r.wait(mc, 5_000);
+        const m_ms = os.nowMs() - moved_at;
+        _ = r.wait(k3, 5_000);
+        try host.send(.{ .set_hidden = .{ .browser = browser_id, .value = false } });
+        r.pump(500);
+        const ok = dd != null and doc.len > 0 and unblocked and qd != null and qd.?.status == .ok and q_ms < 5_000 and md != null and md.?.status == .ok and m_ms < 1_500;
+        report(ok, "dt-hidden-kick", std.fmt.bufPrint(&detail, "질의만 {s}(정보 — 답하면 Chromium 이 고쳤다) · kick 이 풂 {} · 질의+kick {s} {d} ms · 이동+kick {s} {d} ms", .{ if (bare_d) |b| @tagName(b.status) else "답 없음", unblocked, statusName(qd), q_ms, statusName(md), m_ms }) catch "");
     }
     // dt-busy — 인자를 다 보내지 않은 호출 하나와 CDP 로 보내 답을 기다리는 호출(끝나지 않는 Promise) 하나가 탭의 자리를 차지한다
     // (이 둘은 dt-closed 가 끝낸다).

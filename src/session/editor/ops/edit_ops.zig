@@ -1,12 +1,15 @@
-//! 붙여넣기·단위 지우기·다시 읽기(문서 모델 §3.2·§3.4, editor-surface §4)의 **순수 판정** — 무엇을 바꾸고 caret 을
-//! 어디에 두는가. 문서 적용·undo·스크롤·클립보드 읽기는 호출자(L4 `app_session/editor` 의 `pasteText`·`deleteBy`,
+//! 붙여넣기·단위 지우기·바꾸기·충돌 고르기·다시 읽기(문서 모델 §3.2·§3.4·§5.1, editor-merge-conflicts, editor-surface §4)의
+//! **순수 판정** — 무엇을 바꾸고 caret 을 어디에 두는가. 문서 적용·undo·스크롤·클립보드 읽기·찾기 상태는 호출자(L4
+//! `app_session/editor` 의 `pasteText`·`deleteBy`·`replaceCurrentMatch`·`replaceAllMatches`·`acceptConflict`,
 //! `conflict.confirmReload`)가 한다. 조각 경계의 기억과 분배 규칙은 옆 `../clipboard.zig` 가, 단위 경계는 `../motion.zig`
 //! 가 소유한다 — 이 파일은 그것으로 변경 목록을 짓는다.
 //!
 //! 이 폴더는 OS 를 부르지 않는다(`tests/boundary/editor_ops_sans_io.zig`).
 const std = @import("std");
 const clipboard = @import("../clipboard.zig");
+const conflict = @import("../conflict.zig");
 const delta = @import("../delta.zig");
+const find = @import("../find.zig");
 const line_index = @import("../line_index.zig");
 const motion = @import("../motion.zig");
 const selection = @import("../selection.zig");
@@ -198,6 +201,110 @@ pub fn planDelete(allocator: std.mem.Allocator, content: []const u8, lines: Line
     }.keep);
 }
 
+/// 찾기 매치 하나의 문서 범위(줄 머리 + 줄 안 offset, 길이는 원문에서 훑은 byte). 줄이 낡았으면 `null`.
+pub fn matchRange(content: []const u8, lines: LineIndex, m: find.Match) ?struct { start: usize, end: usize } {
+    const line = lines.line(m.line) orelse return null;
+    const start = line.start + m.start;
+    if (start > content.len) return null;
+    return .{ .start = start, .end = @min(start + m.len, content.len) };
+}
+
+/// 바꾸기의 변경 목록(§5.1). regex 로 펼친 글은 `owned` 가 들고, 변경이 그것을 빌린다.
+pub const Replace = struct {
+    changes: std.ArrayList(Change),
+    owned: std.ArrayList([]u8),
+
+    pub fn deinit(self: *Replace, allocator: std.mem.Allocator) void {
+        for (self.owned.items) |o| allocator.free(o);
+        self.owned.deinit(allocator);
+        self.changes.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// **매치마다 변경 하나 — 한 번에 적용한다**(§5.1). 하나씩 바꾸고 다시 찾기를 되풀이하면 바꾼 글이 검색어를 품을 때
+/// 끝나지 않는다(`a` → `aa`). regex 면 캡처를 펼친다 — 원문 UTF-8 은 한 번만 검사한다(매치 수만큼 문서 전체를 다시
+/// 훑지 않는다). 낡은 매치는 건너뛰고, 남은 것이 없으면 `null`.
+///
+/// `error.InvalidUtf8` 은 원문이 UTF-8 이 아니고, `error.Expand` 는 바꿀 글을 펼치지 못했다(호출자가 「invalid replace」를
+/// 띄운다).
+pub fn planReplace(allocator: std.mem.Allocator, content: []const u8, lines: LineIndex, matches: []const find.Match, replace: []const u8, pattern: ?*find.regex.Pattern) error{ OutOfMemory, InvalidUtf8, Expand }!?Replace {
+    if (pattern != null and !std.unicode.utf8ValidateSlice(content)) return error.InvalidUtf8;
+    var out: Replace = .{ .changes = .empty, .owned = .empty };
+    errdefer out.deinit(allocator);
+    for (matches) |m| {
+        const r = matchRange(content, lines, m) orelse continue;
+        var text: []const u8 = replace;
+        if (pattern) |p| {
+            const owned = p.expandFromValidated(allocator, content, .{ .start = r.start, .end = r.end }, replace, m.regex_from orelse r.start) catch return error.Expand;
+            out.owned.append(allocator, owned) catch {
+                allocator.free(owned);
+                return error.OutOfMemory;
+            };
+            text = owned;
+        }
+        try out.changes.append(allocator, .{ .start = r.start, .end = r.end, .text = text });
+    }
+    if (out.changes.items.len == 0) {
+        out.deinit(allocator);
+        return null;
+    }
+    return out;
+}
+
+/// 충돌 구간에서 **무엇을 고르는가**(S2). 「Ignore」는 두지 않는다 — 손으로 고치는 것과 같다.
+/// `both` 는 현재 것 → 들어온 것(파일에 적힌 순서). `both_incoming_first` 는 그 반대 — Incoming 판의
+/// 「둘 다 채택 (들어온 것 먼저)」(S3b-3c, VS Code 의 「Accept Combination (X First)」 상당).
+pub const ConflictChoice = enum { current, incoming, both, both_incoming_first };
+
+/// 충돌 고르기의 변경 하나. `owned` 는 둘 다 고를 때 이은 글이다(변경이 빌린다).
+pub const Resolved = struct {
+    change: Change,
+    owned: ?[]u8 = null,
+
+    pub fn deinit(self: *Resolved, allocator: std.mem.Allocator) void {
+        if (self.owned) |o| allocator.free(o);
+        self.* = undefined;
+    }
+};
+
+/// **마커 줄까지 구간 전체를 고른 쪽의 본문으로 바꾼다**(editor-merge-conflicts). 본문은 원문 그대로 빌린다 — 줄을 모아
+/// 새로 이으면 줄바꿈 종류(`\r\n`)가 그 구간에서만 바뀐다. 한쪽이 통째로 지워진 충돌은 빈 글이다. 줄이 낡았으면 `null`.
+pub fn planConflictChoice(allocator: std.mem.Allocator, content: []const u8, lines: LineIndex, r: conflict.Region, choice: ConflictChoice) !?Resolved {
+    const head = lines.line(r.start) orelse return null;
+    const tail = lines.line(r.end) orelse return null;
+    const remove_from = head.start;
+    const remove_to = @min(tail.end_with_ending, content.len);
+    if (remove_to < remove_from) return null;
+
+    const ours = r.ours();
+    const theirs = r.theirs();
+    const ours_text = sliceOfLines(content, lines, ours.from, ours.to);
+    const theirs_text = sliceOfLines(content, lines, theirs.from, theirs.to);
+    const first, const second = switch (choice) {
+        .current => return .{ .change = .{ .start = remove_from, .end = remove_to, .text = ours_text } },
+        .incoming => return .{ .change = .{ .start = remove_from, .end = remove_to, .text = theirs_text } },
+        // **둘 다**는 «현재 것» 다음에 «들어온 것»이다(VS Code 와 같은 순서 — 파일에 적힌 순서다).
+        .both => .{ ours_text, theirs_text },
+        // Incoming 판의 「둘 다 채택 (들어온 것 먼저)」(S3b-3c) — 같은 이어붙이기, 순서만 반대다.
+        .both_incoming_first => .{ theirs_text, ours_text },
+    };
+    const joined = try allocator.alloc(u8, first.len + second.len);
+    @memcpy(joined[0..first.len], first);
+    @memcpy(joined[first.len..], second);
+    return .{ .change = .{ .start = remove_from, .end = remove_to, .text = joined }, .owned = joined };
+}
+
+/// `[from, to)` 줄들의 **원문 조각**(줄바꿈 포함). 범위가 비면 빈 조각이다.
+fn sliceOfLines(content: []const u8, lines: LineIndex, from: u32, to: u32) []const u8 {
+    if (to <= from) return &.{};
+    const first = lines.line(from) orelse return &.{};
+    const last = lines.line(to - 1) orelse return &.{};
+    const end = @min(last.end_with_ending, content.len);
+    if (end <= first.start) return &.{};
+    return content[first.start..end];
+}
+
 /// **다시 읽기의 변경** — 지금 내용 `old` 를 디스크 내용 `new` 로 바꾸되 **같은 앞뒤는 변경 밖에 둔다**(editor-surface
 /// §4 「외부 변경을 받아들일 때 … undo/cursor 를 깨지 않는다」, 결함 14). 문서 전체를 변경 하나로 바꾸면 모든 caret 이
 /// 그 변경 안이라 머리로 접힌다. 경계는 코드포인트 경계로 물린다 — 글자 가운데를 자르면 caret·LSP 위치가 글자 안에 선다.
@@ -377,5 +484,55 @@ test "reloadChange 는 같은 앞뒤를 남기고 코드포인트 경계에서 �
         try testing.expectEqual(@as(usize, 3), c.start);
         try testing.expectEqual(@as(usize, 3), c.end);
         try testing.expectEqualStrings("a", c.text);
+    }
+}
+
+test "planReplace — 매치마다 변경, 낡은 매치는 건너뛴다 (§5.1)" {
+    const a = testing.allocator;
+    const content = "foo bar foo\n";
+    var lines = try line_index.build(a, content);
+    defer lines.deinit();
+    const matches = [_]find.Match{ .{ .line = 0, .start = 0, .len = 3 }, .{ .line = 0, .start = 8, .len = 3 }, .{ .line = 9, .start = 0, .len = 3 } };
+    var r = (try planReplace(a, content, lines, &matches, "X", null)).?;
+    defer r.deinit(a);
+    const out = try applyForTest(a, content, r.changes.items);
+    defer a.free(out);
+    try testing.expectEqualStrings("X bar X\n", out);
+    try testing.expect((try planReplace(a, content, lines, matches[2..], "X", null)) == null);
+}
+
+test "planReplace — regex 캡처를 펼친다 (§5.1)" {
+    const a = testing.allocator;
+    const content = "k=1 k=2\n";
+    var lines = try line_index.build(a, content);
+    defer lines.deinit();
+    var p = try find.regex.Pattern.initDocument("k=(\\d)", true, .anycrlf);
+    defer p.deinit();
+    const matches = [_]find.Match{ .{ .line = 0, .start = 0, .len = 3 }, .{ .line = 0, .start = 4, .len = 3 } };
+    var r = (try planReplace(a, content, lines, &matches, "v$1", &p)).?;
+    defer r.deinit(a);
+    const out = try applyForTest(a, content, r.changes.items);
+    defer a.free(out);
+    try testing.expectEqualStrings("v1 v2\n", out);
+}
+
+test "planConflictChoice — 고른 쪽 본문으로 마커까지 바꾸고, 둘 다는 순서대로 잇는다" {
+    const a = testing.allocator;
+    const content = "x\n<<<<<<< ours\nA\r\n=======\nB\n>>>>>>> theirs\ny\n";
+    var lines = try line_index.build(a, content);
+    defer lines.deinit();
+    const region: conflict.Region = .{ .start = 1, .separator = 3, .end = 5 };
+    const Case = struct { choice: ConflictChoice, want: []const u8 };
+    for ([_]Case{
+        .{ .choice = .current, .want = "x\nA\r\ny\n" },
+        .{ .choice = .incoming, .want = "x\nB\ny\n" },
+        .{ .choice = .both, .want = "x\nA\r\nB\ny\n" },
+        .{ .choice = .both_incoming_first, .want = "x\nB\nA\r\ny\n" },
+    }) |c| {
+        var r = (try planConflictChoice(a, content, lines, region, c.choice)).?;
+        defer r.deinit(a);
+        const out = try applyForTest(a, content, &.{r.change});
+        defer a.free(out);
+        try testing.expectEqualStrings(c.want, out);
     }
 }

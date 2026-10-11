@@ -15119,22 +15119,28 @@ test "LSPB2 서버가 없으면 상태바가 「설치」이고 누르면 새 �
     {
         // 순서가 곧 우선순위다(높이가 모자라면 끝부터 준다) — 대가가 맨 앞, 경로 줄이 맨 끝.
         const notes = fx.session.chrome_host.confirm.notes;
-        try testing.expectEqual(@as(usize, 6), notes.len);
+        try testing.expectEqual(@as(usize, 7), notes.len);
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_privileges), notes[0].text);
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_build), notes[1].text);
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_scope), notes[2].text);
         // 실행 파일(계획 WT5a) — 출처 경고(가짜 서버는 저장소의 zig-out 안이다)가 경고 줄로, 찾아 낸 경로(override 의 절대 경로, 홈 아래면
         // `~`)가 경로 줄로(가운데를 줄인다 — 경고보다 먼저 준다).
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_note_exe_repo), notes[3].text);
+        // 그 서버가 읽는 자리의 저장소 설정(계획 WT5b-3) — 이 판정자의 문서는 maru 저장소 안이라 루트의 `build.zig`·`build.zig.zon`(zls 는
+        // 빌드 스크립트를 실행한다). 경로 줄보다 앞이다.
+        {
+            var want_buf: [256]u8 = undefined;
+            try testing.expectEqualStrings(maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_note_config), &.{.{ .s = "build.zig, build.zig.zon" }}), notes[4].text);
+        }
         {
             var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
             var want_buf: [std.fs.max_path_bytes + 64]u8 = undefined;
             const shown = app_session_mod.homeTildeInto(fake, &shown_buf);
-            try testing.expectEqualStrings(maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = shown }}), notes[4].text);
-            try testing.expect(notes[4].fit == .path);
+            try testing.expectEqualStrings(maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_note_exe), &.{.{ .s = shown }}), notes[5].text);
+            try testing.expect(notes[5].fit == .path);
         }
-        try testing.expect(notes[5].fit == .path);
-        try testing.expect(std.mem.endsWith(u8, notes[5].text, std.fs.path.basename(fx.session.editor_lsp.asking_root.?))); // 묻는 root
+        try testing.expect(notes[6].fit == .path);
+        try testing.expect(std.mem.endsWith(u8, notes[6].text, std.fs.path.basename(fx.session.editor_lsp.asking_root.?))); // 묻는 root
     }
     fx.session.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     fx.session.dispatchChromeAction(.confirm_cancel);
@@ -16970,6 +16976,100 @@ fn clientAt(session: *AppSession, exe: []const u8, root_suffix: []const u8) ?*ls
         if (std.mem.eql(u8, c.server.exe, exe) and std.mem.endsWith(u8, c.root, root_suffix)) return c;
     }
     return null;
+}
+
+test "LSPB43 서버가 읽는 자리의 설정 파일 — 신뢰 시트에 한 줄(경로 줄보다 앞), 정보 명령에 한 줄; 「가장 가까운」 것은 문서에서 올라가 찾고 「루트」 것은 루트에서, 없으면 시트엔 줄이 없고 정보엔 「찾지 못함」 (계획 workspace-trust WT5b-3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    // clangd 의 저장소 — 문서는 src/sub 이고 `.clangd` 는 src 에(가장 가까운 것), `compile_commands.json` 은 루트와 src/sub 위 어디에도.
+    try fx.dir.dir.createDirPath(testing.io, "repo/.git");
+    try fx.dir.dir.createDirPath(testing.io, "repo/src/sub");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/src/sub/a.c", .data = "int a;\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/src/.clangd", .data = "" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/.clangd", .data = "" }); // 더 먼 것 — 안 나온다
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "repo/compile_commands.json", .data = "[]" });
+    // 설정이 없는 저장소.
+    try fx.dir.dir.createDirPath(testing.io, "bare/.git");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "bare/b.c", .data = "int b;\n" });
+    // 픽스처의 doc.zig(바깥 저장소)는 먼저 거부로 넘긴다.
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    var want_buf: [256]u8 = undefined;
+    // ⑴ 신뢰 시트 — 설정 줄이 경로 줄들보다 앞에.
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const t_a = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/repo/src/sub/a.c", .{root}));
+    lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    const want_note = maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_note_config), &.{.{ .s = "src/.clangd, compile_commands.json" }});
+    const notes = fx.session.chrome_host.confirm.notes;
+    var at: ?usize = null;
+    for (notes, 0..) |n, i| if (std.mem.eql(u8, n.text, want_note)) {
+        at = i;
+    };
+    const config_at = at orelse return error.ConfigNoteMissing;
+    try testing.expect(notes[config_at].fit != .path);
+    try testing.expect(config_at + 3 == notes.len); // 그 뒤는 실행 파일·root 경로 줄 둘(끝)
+    // ⑵ 정보 명령 — 같은 목록(허용 뒤).
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    const Ctx = struct { fx: *PaneFixture, t: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .t = t_a }, struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.t) orelse return false;
+            return v.phase == .ready;
+        }
+    }.f));
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.format(&want_buf, maru.i18n.t(.lsp_info_config), &.{.{ .s = "src/.clangd, compile_commands.json" }})) != null);
+    fx.session.chrome_host.notice.dismiss();
+    // ⑵′ 루트와 문서 사이의 폴더 이름은 신뢰 전 저장소가 정한다 — 개행 든 이름이 시트에 가짜 안내 줄을 끼우지 못한다(공백으로 바뀐다).
+    try fx.dir.dir.createDirPath(testing.io, "forged/.git");
+    try fx.dir.dir.createDirPath(testing.io, "forged/a\n• safe/sub");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "forged/a\n• safe/.clangd", .data = "" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "forged/a\n• safe/sub/f.c", .data = "int f;\n" });
+    _ = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/forged/a\n• safe/sub/f.c", .{root}));
+    var forged_tries: usize = 0;
+    while (fx.session.pending_confirm != .lsp_trust and forged_tries < 6) : (forged_tries += 1) lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    const forged_note = maru.i18n.format(&want_buf, maru.i18n.t(.lsp_trust_note_config), &.{.{ .s = "a • safe/.clangd" }});
+    var saw_forged = false;
+    for (fx.session.chrome_host.confirm.notes) |n| {
+        try testing.expect(std.mem.indexOfScalar(u8, n.text, '\n') == null or n.fit == .path);
+        if (std.mem.eql(u8, n.text, forged_note)) saw_forged = true;
+    }
+    try testing.expect(saw_forged);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    // ⑶ 설정이 없는 저장소 — 시트엔 설정 줄이 없고, 정보엔 「찾지 못함」.
+    const t_b = try openPathInActivePane(fx.session, try std.fmt.bufPrint(&p_buf, "{s}/bare/b.c", .{root}));
+    var tries: usize = 0;
+    while (fx.session.pending_confirm != .lsp_trust and tries < 6) : (tries += 1) lsp_client.pump(fx.session);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    for (fx.session.chrome_host.confirm.notes) |n| try testing.expect(std.mem.indexOf(u8, n.text, maru.i18n.t(.lsp_trust_note_config)[0..10]) == null);
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.dispatchChromeAction(.confirm_accept);
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .fx = &fx, .t = t_b }, struct {
+        fn f(c: Ctx) bool {
+            const v = lsp_client.statusFor(c.fx.session, c.t) orelse return false;
+            return v.phase == .ready;
+        }
+    }.f));
+    fx.session.dispatchAppAction(.lsp_show_server_info);
+    try testing.expect(std.mem.indexOf(u8, fx.session.chrome_host.notice.message, maru.i18n.t(.lsp_info_config_none)) != null);
 }
 
 test "LSPB24 「다시 묻기」는 문서가 닫힌 같은 저장소의 서버를 묻지 않고 띄우지 않는다 — 답은 그 클라이언트에도 서고, 허용이면 문서를 다시 열 때 묻지 않고 뜬다 (계획 WT2)" {
@@ -20054,7 +20154,12 @@ test "LSPB40 「Language Server: Show Server Info」 — 상태·서버가 알�
         try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.format(&want_buf, maru.i18n.t(.lsp_info_version), &.{.{ .s = "maru-fake-lsp 9.8.7" }})) != null);
         try testing.expect(std.mem.indexOf(u8, msg, shown_fake) != null);
         try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.t(.lsp_trust_list_allowed)) != null);
-        try testing.expectEqual(@as(usize, 4), std.mem.count(u8, msg, "\n")); // 상태·버전·저장소·출처(저장소 안 — zig-out)·실행 파일 — 다섯 줄
+        try testing.expectEqual(@as(usize, 5), std.mem.count(u8, msg, "\n")); // 상태·버전·저장소·설정 파일·출처(저장소 안 — zig-out)·실행 파일 — 여섯 줄
+        // 설정 파일(계획 WT5b-3) — 저장소 줄 다음, 실행 파일 줄보다 앞(maru 저장소의 루트 — zls 가 읽는 자리).
+        var config_buf: [256]u8 = undefined;
+        const config_line = maru.i18n.format(&config_buf, maru.i18n.t(.lsp_info_config), &.{.{ .s = "build.zig, build.zig.zon" }});
+        try testing.expect(std.mem.indexOf(u8, msg, config_line) != null);
+        try testing.expect(std.mem.indexOf(u8, msg, config_line).? < std.mem.indexOf(u8, msg, shown_fake).?);
         try testing.expect(std.mem.indexOf(u8, msg, maru.i18n.t(.lsp_trust_note_exe_repo)) != null);
         // 경로 줄이 맨 끝 — 알림은 6 행까지라 긴 경로가 접혀 잘려도 저장소·신뢰 결정은 남는다.
         try testing.expect(std.mem.endsWith(u8, msg, shown_fake));
@@ -20121,7 +20226,7 @@ test "LSPB40 「Language Server: Show Server Info」 — 상태·서버가 알�
         try testing.expect(std.unicode.utf8ValidateSlice(msg));
         try testing.expect(std.mem.endsWith(u8, msg, "\u{2026}"));
         try testing.expect(msg.len <= app_session_mod.notice_message_cap);
-        try testing.expectEqual(@as(usize, 4), std.mem.count(u8, msg, "\n"));
+        try testing.expectEqual(@as(usize, 5), std.mem.count(u8, msg, "\n")); // 설정 파일 줄(WT5b-3)까지 — 잘린 것은 끝의 경로 줄이다
         fx.session.chrome_host.notice.dismiss();
     }
     // ⑷ 서버가 보낸 이름·버전은 담을 때 거른다(제품 경로 — 순수 규칙은 `LSJ serverText`): 개행은 공백이라 줄을 위조하지 못하고, 128 바이트 상한.
@@ -20144,7 +20249,7 @@ test "LSPB40 「Language Server: Show Server Info」 — 상태·서버가 알�
         try testing.expectEqualStrings("evil Repository: ~/x (Allowed)", c.server_name.?);
         try testing.expectEqual(@as(usize, 128), c.server_version.?.len);
         fx.session.dispatchAppAction(.lsp_show_server_info);
-        try testing.expectEqual(@as(usize, 4), std.mem.count(u8, fx.session.chrome_host.notice.message, "\n")); // 줄이 늘지 않았다
+        try testing.expectEqual(@as(usize, 5), std.mem.count(u8, fx.session.chrome_host.notice.message, "\n")); // 줄이 늘지 않았다
         fx.session.chrome_host.notice.dismiss();
     }
     // ⑷b 이름만 알려 주는 서버(버전은 선택 필드) — 이름은 남긴다.

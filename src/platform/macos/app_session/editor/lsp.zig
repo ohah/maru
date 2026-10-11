@@ -281,7 +281,9 @@ pub const State = struct {
     /// 실행 파일 줄(경로 — 계획 WT5a)과 그 출처 경고(shim·저장소 안일 때만).
     trust_exe_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
     trust_origin_note_buf: [256]u8 = undefined,
-    trust_notes: [6]maru.chrome.components.confirm.Note = undefined,
+    /// 설정 파일 줄(계획 WT5b-3 — 그 서버가 읽는 자리의 저장소 설정).
+    trust_config_note_buf: [std.fs.max_path_bytes + 128]u8 = undefined,
+    trust_notes: [7]maru.chrome.components.confirm.Note = undefined,
     /// 지금 시트를 **SCM 이 열었다**(계획 workspace-trust WT6b-2a — 도크 줄·팔레트 「이 저장소 신뢰…」). 사용자가 스스로 연 시트라
     /// 취소(Esc)는 「거부」로 기억하지 않고 닫기만 한다 — 거부로 기억하면 그 저장소의 언어 서버가 묻지도 않고 「거부됨」이 된다.
     asking_scm: bool = false,
@@ -843,7 +845,7 @@ pub fn dismissTrustPrompt(self: *AppSession) void {
 /// WT5a)를 밝힌다. 예전 문구(「‹서버› 를 실행할까요? … 설정을 읽고 빌드를 실행할 수 있습니다」)는 서버 하나를 묻는 것처럼, 영향이
 /// 저장소 안에 머무는 것처럼 읽혔다. 실행 파일 줄은 묻는 클라이언트 하나의 것이다(허락은 저장소의 모든 서버에 선다 — 셋째 줄이
 /// 그것을 말한다). 경로 줄은 모달이 가운데를 줄인다(뿌리·잎을 남긴다).
-fn setTrustSheetNotes(self: *AppSession, root: []const u8, exe_path: []const u8, real_root: []const u8) void {
+fn setTrustSheetNotes(self: *AppSession, root: []const u8, exe_path: []const u8, real_root: []const u8, config: []const u8) void {
     const st = &self.editor_lsp;
     var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root_line = maru.i18n.format(&st.trust_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(root, &shown_buf) }});
@@ -852,7 +854,10 @@ fn setTrustSheetNotes(self: *AppSession, root: []const u8, exe_path: []const u8,
     // 경로 줄을 맨 끝에 둔다(경로가 먼저 사라지고 경고는 남는다).
     // 출처 경고(shim·저장소 안)는 경고 줄이라 경로 줄보다 앞이다 — 좁으면 경로가 먼저 준다. 경로 두 줄은 한 행에 가운데를 줄인다.
     var n: usize = 0;
-    for ([_]?[]const u8{ maru.i18n.t(.lsp_trust_note_privileges), maru.i18n.t(.lsp_trust_note_build), maru.i18n.t(.lsp_trust_note_scope), exe.origin_line }) |line| {
+    // 그 서버가 읽는 자리의 저장소 설정(계획 WT5b-3 — 있을 때만): 무엇을 읽고 실행하는지(`build.zig`·`Cargo.toml` 처럼 코드를 돌리는 것도).
+    // 경로 줄보다 앞이다(좁으면 경로가 먼저 준다).
+    const config_line: ?[]const u8 = if (config.len > 0) maru.i18n.format(&st.trust_config_note_buf, maru.i18n.t(.lsp_trust_note_config), &.{.{ .s = config }}) else null;
+    for ([_]?[]const u8{ maru.i18n.t(.lsp_trust_note_privileges), maru.i18n.t(.lsp_trust_note_build), maru.i18n.t(.lsp_trust_note_scope), exe.origin_line, config_line }) |line| {
         st.trust_notes[n] = .{ .text = line orelse continue };
         n += 1;
     }
@@ -954,7 +959,7 @@ fn recordServerInfo(self: *AppSession, c: *Client, result: ?std.json.Value) void
     if (!builtin.is_test) std.log.scoped(.lsp).info("{s} reports {s} {s}", .{ c.server.exe, c.server_name orelse "?", c.server_version orelse "(no version)" });
 }
 
-/// 팔레트 「Language Server: Show Server Info」 — 지금 편집기 문서의 서버: 상태·버전·실행 파일(출처)·저장소와 신뢰 결정을 알림으로
+/// 팔레트 「Language Server: Show Server Info」 — 지금 편집기 문서의 서버: 상태·버전·실행 파일(출처)·저장소와 신뢰 결정·설정 파일(WT5b-3)을 알림으로
 /// 보인다(다른 편집기의 `:LspInfo`·Output 패널 자리 — 계획 WT5a). 아직 안 띄웠으면 지금 환경에서 찾아 낸 경로를 보인다(찾기는
 /// 실행이 아니다).
 pub fn showServerInfo(self: *AppSession) void {
@@ -1001,6 +1006,12 @@ pub fn showServerInfo(self: *AppSession) void {
         const word = if (decision) |d| maru.i18n.t(if (d == .allow) .lsp_trust_list_allowed else .lsp_trust_list_denied) else maru.i18n.t(.lsp_info_undecided);
         var repo_buf: [std.fs.max_path_bytes + 128]u8 = undefined;
         printLine(&w, maru.i18n.format(&repo_buf, maru.i18n.t(.lsp_info_repo), &.{ .{ .s = app_session_mod.homeTildeInto(r, &shown_buf) }, .{ .s = word } }));
+        // 설정 파일(계획 WT5b-3) — 그 서버가 읽는 자리에 있는 저장소 설정(문서에서 가장 가까운 것·루트의 것). 실행 파일 줄보다 앞이다(넘치면 끝부터
+        // 잘린다 — 경로가 먼저 준다).
+        var config_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const config = configFilesText(if (c) |cl| cl.server.exe else server.exe, r, termPath(term), &config_buf);
+        var config_line_buf: [std.fs.max_path_bytes + 128]u8 = undefined;
+        printLine(&w, if (config.len > 0) maru.i18n.format(&config_line_buf, maru.i18n.t(.lsp_info_config), &.{.{ .s = config }}) else maru.i18n.t(.lsp_info_config_none));
     }
     // ④ 실행 파일 — 출처 경고, 그리고 경로를 맨 끝에. 떠 있으면 띄운 경로와 띄울 때 굳힌 출처, 아니면 지금 찾아 낸 경로 — 셸 환경을
     // 담기 전·다시 읽는 중에는 찾지도 재지도 않는다(그 PATH·자리 변수가 아직 없어 「찾지 못함」·「그 밖」이 된다 — 상태바가 「없음」을
@@ -1021,6 +1032,24 @@ pub fn showServerInfo(self: *AppSession) void {
         printLine(&w, e.path_line);
     } else printLine(&w, maru.i18n.t(if (running == null and !tool_env.settled()) .lsp_info_exe_pending else .lsp_info_exe_missing));
     self.showNotice(w.buffered());
+}
+
+/// 그 서버가 읽는 자리에 있는 저장소 설정 파일(계획 workspace-trust WT5b-3 — `lsp.config_files`): 루트 기준 상대 경로를 쉼표로. `doc_path` 의
+/// 폴더에서 「가장 가까운」 것을 찾는다(없으면 루트). 문서와 `root` 는 같은 철자다(`rootFor` 가 문서 경로에서 구하고 `underRoot` 로 묶는다).
+///
+/// **제어 문자는 공백으로**(`rpc.displayByte`) — 루트와 문서 사이 폴더 이름은 신뢰 전 저장소가 정하는 글자다. 확인 상자는 안내 줄을 `\n` 에서
+/// 나누므로, 개행 든 폴더 이름이 신뢰 시트에 가짜 안내 줄(「• 이 저장소는 …」)을 끼울 수 있었다(적대적 검증 1회차).
+fn configFilesText(exe: []const u8, root: []const u8, doc_path: ?[]const u8, out: []u8) []const u8 {
+    const dir: ?[]const u8 = if (doc_path) |p| std.fs.path.dirname(p) else null;
+    const text = lsp.config_files.describe(lsp.config_files.specsFor(exe), root, dir, {}, fileExists, out);
+    for (out[0..text.len]) |*b| b.* = lsp.rpc.displayByte(b.*);
+    return text;
+}
+
+fn fileExists(_: void, path: []const u8) bool {
+    var z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const pz = std.fmt.bufPrintZ(&z, "{s}", .{path}) catch return false;
+    return std.c.access(pz.ptr, std.c.F_OK) == 0;
 }
 
 /// 정보 명령의 root 가 묻는 root 인가 — gate 와 같은 판정(`refusalFor`)을 지금 한다(gate 가 아직 안 봤어도 — 첫 pump 전 등).
@@ -1892,7 +1921,7 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
                 if (c.findDoc(term)) |doc| doc.surface_id = term.surfaceId();
                 if (c.docs.items.len == 0 and c.idle_since_ms != 0) c.idle_since_ms = 0;
                 if (c.retry_at_ms == std.math.maxInt(u64)) c.retry_at_ms = 0; // 잠들어 있던 서버를 깨운다
-                gateTrust(self, c);
+                gateTrust(self, c, termPath(term));
                 if (c.phase != .ready) continue;
                 syncOne(self, c, term, .coalesce);
             }
@@ -1922,7 +1951,8 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
 }
 
 /// 신뢰 게이트(§8.2a): 결정이 없으면 묻고(모달 하나만 — 다른 root 는 기다린다), 거부면 `denied`, 허용이면 띄울 수 있게 둔다.
-fn gateTrust(self: *AppSession, c: *Client) void {
+/// `doc_path` 는 이 gate 를 부른 문서 — 신뢰 시트의 설정 파일 줄이 「가장 가까운」 설정을 그 문서에서 찾는다(계획 WT5b-3).
+fn gateTrust(self: *AppSession, c: *Client, doc_path: ?[]const u8) void {
     switch (c.phase) {
         .restarting, .missing, .preparing => {},
         else => return,
@@ -2032,7 +2062,8 @@ fn gateTrust(self: *AppSession, c: *Client) void {
         // 안 된다(`guardAsync` — 거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더 묻는다). 잘못 들어간 Enter 는 거부로 기억되고
         // 상태바에서 다시 물을 수 있다(보수적인 쪽 — tooling §8.2a).
         self.chrome_host.confirm.guardAsync(maru.i18n.t(.lsp_trust_recheck));
-        setTrustSheetNotes(self, c.root, located, key.path); // `show` 가 안내를 비우므로 그 뒤에 채운다
+        var config_buf: [std.fs.max_path_bytes]u8 = undefined;
+        setTrustSheetNotes(self, c.root, located, key.path, configFilesText(c.server.exe, c.root, doc_path, &config_buf)); // `show` 가 안내를 비우므로 그 뒤에 채운다
         return;
     };
     c.trust_pending = false;

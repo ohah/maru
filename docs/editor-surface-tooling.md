@@ -341,7 +341,7 @@ formatter/linter와 LSP는 모두 저장소의 config/plugin/binary를 실행할
 - 해결된 executable 표시
 - 도구는 shell 없이 argv 로 실행한다(셸은 사용자 환경을 담는 데만 쓴다). canonical cwd=root. environment 는 **사용자 셸 환경에서 maru 내부·터미널 세션 변수를 뺀 것**이고 PATH 는 절대 경로 항목만이다(2026-10-07 사용자 승인). 사용자 셸 환경을 얻으려면 사용자의 셸 설정 파일을 실행한다 — 끄는 스위치 `lsp.shell-environment`(기본 켬 — 끄면 앱 환경 + 통상 설치 위치)를 둔다([계획](plans/workspace-trust.md#결정-2026-10-07), 2026-10-08 사용자 결정). 신뢰한 저장소의 서버는 그 저장소 루트로 `cd` 한 셸의 환경을 쓴다 — 셸 설정에 건 훅(direnv·mise·nix 등)이 그 저장소의 터미널과 같게 적용된다(끄는 스위치 `lsp.repository-environment`, 기본 켬; 신뢰 전 저장소는 홈에서 읽은 환경 — [계획](plans/workspace-trust.md) WT5b-2, 2026-10-11 사용자 결정). 최소화하지 않는 이유: 서버는 사용자 권한으로 돌아 환경을 줄여도 `~` 아래 파일을 그대로 읽고, 허용 목록은 기본값을 바꾼 툴체인 설정을 깨뜨린다. 격리가 필요해지면 OS 샌드박스의 일이다. 사용자가 고른 이름은 `lsp.environment-exclude`(쉼표로 가름, 끝 `*` 는 접두 — 앱 전역 하나)로 뺀다 — 서버를 띄울 때 거르고(셸을 다시 읽지 않는다, 떠 있는 서버는 다음 띄우기부터), 무엇이 넘어가는지는 팔레트 「Language Server: Show Environment Variable Names」가 이름만(값 없이) 목록 상자로 보이며 걸린 이름은 「제외됨」이다. 셸은 앱 환경의 `HOME` 에서 띄운다(`getpwuid` 로 고정하지 않는다 — 쓸 수 없는 `HOME` 일 때만 `getpwuid`). 셸 환경이 없을 때(스위치 끔·첫 실패)의 앱 환경은 PATH 를 줄이지 않는다(위생·제외 목록은 같다) — 터미널에서 띄운 앱이면 그 터미널 저장소의 direnv·venv PATH 가 섞일 수 있다([계획](plans/workspace-trust.md) WT5b-1, 2026-10-09 사용자 결정)
 - timeout, stdout/stderr byte 상한, child/process-group 상한, cancellation/kill/reap
-- config discovery 결과와 실제 executable/version을 사용자 및 trace에 노출
+- config discovery 결과와 실제 executable/version을 사용자 및 trace에 노출 — config discovery 는 서버마다 읽는 자리(문서에서 가장 가까운 것·저장소 루트의 것)에 **있는** 저장소 설정 파일이다(LSP 에 「읽었다」는 표준이 없어 서버별 표로 찾는다). 신뢰 시트가 한 줄로(무엇을 읽고 실행하는지 — `build.zig` 처럼), 「Show Server Info」가 늘 보인다([계획](plans/workspace-trust.md) WT5b-3, 2026-10-11 사용자 결정)
 - 포맷 결과는 곧바로 저장하지 않고 현재 revision에 대한 text edits로 반환
 - tool이 root 밖 파일을 읽거나 쓰는 것을 OS 수준에서 sandbox하지 못하는 초기 버전의 한계를 확인 UX에 명시
 

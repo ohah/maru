@@ -7777,10 +7777,14 @@ chunk_index:u32 | chunk_count:u32 | record_bytes...
   `record_kind:u16 | generation:u64 | sequence:u64 | chunk_index:u32 | chunk_count:u32`. MRSH adapter가 선택한
   exact version과 다른 record는 전역 reader 범위로 우회하지 않고 reject한다.
 - `record_kind`는 snapshot 대역 1~9(`screen_meta=1`, `row=2`, `image_placement=3`, `image_blob=4`, `prompt_marks=5`,
-  `link_spans=6`)와 delta
+  `link_spans=6`, `image_virtual=7`, `image_ref=8`, `image_seg_hwm=9`)와 delta
   대역 10~19(`set_runs=10`, `clear_rect=11`, `scroll_rect=12`, `cursor=13`, `modes=14`, `image_place=15`, `image_remove=16`,
   `scroll_state=17`)로
   나눈 open enum이다(`prompt_marks`·`link_spans`는 full-replace라 두 대역에서 공용; 미래 record는 새 값 — decoder가 optional이면 skip, required면 reject).
+- `image_ref`(`image_id:u32 | generation:u64 | width:u32 | height:u32 | bpp:u8 | segment_id:u64 | byte_len:u32`)와
+  `image_seg_hwm`(`segment_id:u64`)은 `image_shm` 을 협상한 연결에만 실린다. `image_ref` 는 픽셀 대신 이미지 채널의 세그먼트를
+  가리키며 청크하지 않는다. `segment_id = 0` 과 `byte_len = 0` 은 함께만 쓴다(픽셀 0 B = 세그먼트 없음) — 한쪽만 0 이면
+  record 를 reject 한다. 의미와 수명은 [Session host 이미지 채널](session-host-image-channel.md)이 소유한다.
 - `link_spans`의 좌표는 **뷰포트 상대 행**(0..rows-1)이다 — 스크롤은 host가 소유하고 화면이 바뀌면 다음 snapshot/delta가
   full-replace하므로, client가 절대 행을 재계산할 필요가 없다. `kind`는 `LinkKind`(0=url, 1=file_path), `scope`는 그 span이
   매치된 감지 종류 비트(bit0 web, bit1 extra_schemes, bit2 absolute_path, bit3 home_path, bit4 dot_relative,

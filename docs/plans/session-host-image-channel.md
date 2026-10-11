@@ -13,13 +13,19 @@
 
 ## 구현 순서
 
-### IC1 — host 원장·세그먼트·레코드 (미착수)
+### IC1 — host 원장·세그먼트·레코드 (완료)
 
-- `image_ref`·`image_seg_hwm` 레코드 인코딩/디코딩(`screen_stream`), base 파서가 `image_ref` 를 이전 generation 표에 넣는 것.
-- 세그먼트 생성(`shm_open`·`ftruncate`·RO 재오픈·`shm_unlink`·복사)과 연결 원장(준비/발급/반환 정확히 한 번, 상한 상수
-  `image_segment_max_per_connection`·`image_segment_bytes_per_connection`·`image_segment_bytes_per_host`, 개수 상한 comptime 잠금).
-- 판정자: 원장 반환 경로 전수(준비 취소·release·연결 종료·채널 상실)의 정확히-한-번, 모르는/중복 id 무시, RO fd 쓰기 매핑 거부,
-  메타 전용 레코드는 세그먼트 없음. 돌연변이로 각 반환 경로를 지워 빨개지는지 확인한다.
+- `image_ref`(kind 8)·`image_seg_hwm`(kind 9) 레코드 인코딩/디코딩(`src/session/screen_stream.zig`), delta base 파서
+  (`screen_snapshot.computeDelta`)가 `image_ref` 를 이전 generation 표에 넣는 것.
+- 세그먼트 생성 `src/platform/macos/session_host/image_segment.zig`(`shm_open`·`ftruncate`·RO 재오픈·`shm_unlink`·복사).
+- 연결 원장 `src/platform/macos/session_host/image_segment_ledger.zig`(std-only leaf — 준비/발급/반환 정확히 한 번, 상한 상수
+  `image_segment_max_per_connection`·`image_segment_bytes_per_connection`·`image_segment_bytes_per_host`, 개수 상한을 실측 버퍼
+  64 의 절반 이하로 comptime 잠금, 큰 한 장 우선권·「전송 불가」 분류, `image_seg_hwm` 값, latest-wins 조회).
+- 판정자: `zig build test-image-channel`(check-boundaries — 원장 7·base 파서 1)·`zig build test-image-segment`(test-macos-only —
+  RO fd 쓰기 매핑 거부·이름 제거·CLOEXEC·남의 이름 보존·0 B 는 세그먼트 없음)·`screen_stream` 코덱 왕복과 0/비0 짝 손상 거부.
+  돌연변이 21 개(반환 경로·상태 검사·상한·hwm·코덱 검사·base 파서 갈래·RO 재오픈·unlink·복사)가 모두 RED.
+- 이 단계에서 원장·세그먼트는 아직 아무 연결에도 붙지 않는다(광고가 꺼져 있어 만들 일이 없다). 원장을 연결 수명에 붙이는
+  것(연결 종료·채널 상실 → `releaseAll`)은 IC2, 배치 준비물·승인 시점 송신에 붙이는 것은 IC5 다.
 
 ### IC2 — 이미지 채널 수립 (미착수)
 
@@ -27,6 +33,7 @@
   확보 카운터와 hello 집행, token 만료, `image_channel_abandon`, 채널 상실 시 주 연결 유지, reactor 의 연결당 fd 둘, hello_ack 기능
   배열 확대와 comptime 잠금.
 - 앱: 두 connect 함수의 `bind_ack` 대기(`connectUnixUntil`·절대 deadline), `ImageChannelUnavailable` → 「이미지 채널 없음」 반환.
+- 원장(IC1)을 연결 수명에 붙인다: 연결 종료(`destroyAll` 포함)와 채널 상실이 `releaseAll` 을 정확히 한 번 부른다.
 - 판정자: `ImageChannelUnavailable` 이 spawn·업그레이드·unreachable·재접속 실패 판정으로 흐르지 않는다; 슬롯이 꽉 찬 경계에서
   token 이 안 나간다; abandon 뒤 늦은 입양이 주 연결을 닫지 않는다; peer 가 닫힌 뒤 release write 가 EPIPE 를 돌려준다(프로세스 생존);
   `destroyAll`·업그레이드 handoff 가 확보 카운터와 무관하게 진행된다.
@@ -48,6 +55,8 @@
 
 ### IC5 — 흐름 제어와 delta 표현 (미착수)
 
+- producer 가 `image_ref`·`image_seg_hwm` 을 내기 시작한다 — `screen_snapshot.zig` 의 전수 판정자(「attach 뒤 움직인 모든 축이
+  delta 로 client 에 닿는다」)에서 두 종류를 「producer 미방출」 목록에서 축 표로 옮긴다(IC1 이 목록에 올려 뒀다).
 - 미룸 조건, 옛 generation 유지·첫 이미지 placement 빼기, 「보낸 표」 갱신 규칙, 스냅샷 예외, 용량 사건 깨우기 플래그, 큰 한 장 우선권,
   「전송 불가」 진단.
 - 판정자: 미룬 이미지가 있는 정지 화면이 release 뒤에 이미지를 받는다; 미룬 첫 이미지 때문에 앱이 malformed 로 resync 하지 않는다;

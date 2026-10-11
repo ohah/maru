@@ -168,6 +168,7 @@ do {
     h.closeWindowOrQuit(s, faulted: false, sessionEnded: true)
     check(h.keepAliveSurfaces.count == 1 && h.windows.isEmpty && s.window!.ordered == 1, "downloads keep the hidden window")
     check(!h.quitConfirmPending && NSApp.replies == [false], "the hidden window's quit confirmation is answered, not left pending")
+    check(quitCancels == 1, "the hidden session's quit modal is cancelled in Zig too (its tick no longer runs)")
     check(NSApp.terminates == 0, "the app stays while downloading")
 }
 // ③ 창 0 개로 Dock 에 남은 앱(LW1)의 ⌘Q — 받는 중이면 확인 없이 끝내지 않고 새 창에서 묻는다(받던 것이 말없이 취소됐다).
@@ -192,6 +193,9 @@ do {
     check(h.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true) == false && h.created.count == 1, "zero-window app: Dock click opens a window")
     let k = Host(); k.keepAliveSurfaces = [TerminalSurface()]
     check(k.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false) == false && k.created.count == 1, "kept alive for downloads: Dock click opens a window")
+    // 전역 단축키(show/toggle_window)는 `openWindowIfNoneOpen` 만 본다 — Dock 과 같은 판정이어야 한다.
+    let g = Host(); g.keepAliveSurfaces = [TerminalSurface()]
+    check(g.openWindowIfNoneOpen() && g.created.count == 1, "kept alive for downloads: the global hotkey path opens a window")
     let w = Host(); w.windows = [TerminalSurface()]
     check(w.applicationShouldHandleReopen(NSApp, hasVisibleWindows: true) == true && w.created.isEmpty, "with a window: AppKit default")
 }

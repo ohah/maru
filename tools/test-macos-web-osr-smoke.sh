@@ -2043,7 +2043,11 @@ for spid in $(pgrep -f "Maru app shell" 2>/dev/null); do
     case "$(ps -o command= -p "$sppid" 2>/dev/null)" in *"$root"*) kill -TERM "$spid" 2>/dev/null && lw1_killed=1 ;; esac
 done
 [ "$lw1_killed" = 1 ] || fail "the test shell to end was not found (LW1 case)"
-sleep 30
+sleep 1
+# 받는 동안 App Nap 을 막는다(창을 숨겨 받는 W10e 와 같은 activity — 창이 하나도 보이지 않는 앱은 App Nap 대상이라 tick 이 늦어지면
+# sidecar 펌프가 밀린다, 적대 리뷰 2 회차). 전원 assertion 으로 본다.
+lw1_nap=$(pmset -g assertions 2>/dev/null | grep "pid $lw1_pid(" | grep -c "Chromium downloads after the last window closed" || true)
+sleep 29
 lw1_alive=0; kill -0 "$lw1_pid" 2>/dev/null && lw1_alive=1
 lw1_path="$root/home/Downloads/big.zip"
 lw1_size=-1; [ -f "$lw1_path" ] && lw1_size=$(stat -f %z "$lw1_path")
@@ -2051,6 +2055,7 @@ echo "LW1: app alive $lw1_alive · big.zip $lw1_size bytes (want $((30 * 104858)
 grep -ao 'app: last window closed[^(]*' "$root/app-lw1.log" | head -3
 wait "$lw1_pid" || true
 [ "$lw1_alive" = 1 ] || fail "LW1: the app did not stay with zero windows"
+[ "$lw1_nap" -ge 1 ] || fail "LW1: no App Nap prevention while downloading with zero windows ($lw1_nap)"
 [ "$lw1_size" = $((30 * 104858)) ] || fail "LW1: the download did not finish while the app stayed with zero windows ($lw1_size bytes)"
 echo "PASS LW1: the download finished while the app stayed with zero windows"
 

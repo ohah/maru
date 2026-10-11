@@ -458,7 +458,7 @@ typedef struct MaruAppHostGpuImage {
     uint32_t pass;           /* 0=below_bg, 1=below_text, 2=above_text(같은 pass 안 z 오름차순) */
 } MaruAppHostGpuImage;
 
-/* v195(W3c): Chromium(OSR) 탭 본문 한 장. iosurface 는 Zig 가 쥔 IOSurfaceRef(그리는 동안 살아 있다), dest 는 창 backing
+/* v200(W3c): Chromium(OSR) 탭 본문 한 장. iosurface 는 Zig 가 쥔 IOSurfaceRef(그리는 동안 살아 있다), dest 는 창 backing
    px(좌상단), UV 는 장 안에서 그릴 부분(장이 DIP 올림이라 rect 보다 크거나 같다 — 늘리지 않고 자른다). */
 typedef struct MaruAppHostOsrQuad {
     void *iosurface;
@@ -1027,7 +1027,7 @@ int32_t maru_macos_app_session_route_drop(
     double x_px,
     double y_px
 );
-/* v211(W6l①): 링크(파일 아님)를 놓았다 — 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다(http·https).
+/* v216(W6l①): 링크(파일 아님)를 놓았다 — 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다(http·https).
    route_drop 과 같은 3-상태: 1 열었다 · 0 해당 없음(호스트는 기존 경로로) · -1 거부(삽입 금지). */
 int32_t maru_macos_app_session_drop_url(
     MaruAppHostSession *session,
@@ -1036,21 +1036,21 @@ int32_t maru_macos_app_session_drop_url(
     const uint8_t *url,
     size_t url_len
 );
-/* v213(W6m②): 키 대상 Chromium 탭에 제안 목록이 열려 있을 때의 키(↑↓·Enter·Esc — 수식키 없이, 조합 중 아님)면 목록이 먹고 1.
+/* v218(W6m②): 키 대상 Chromium 탭에 제안 목록이 열려 있을 때의 키(↑↓·Enter·Esc — 수식키 없이, 조합 중 아님)면 목록이 먹고 1.
    Swift 는 입력기에 넘기기 전에 묻는다 — 1 이면 그 키를 페이지에 보내지 않는다. mods 는 osr_key 와 같은 비트. */
 int32_t maru_macos_app_session_osr_datalist_key(MaruAppHostSession *session, uint16_t key_code, int32_t mods);
-/* v213(W6m②): 이 창이 띄울 제안 목록 — 세대·항목 수·강조(없으면 -1)·칸 사각형(view backing px, 왼쪽 위 원점 x·y·w·h). 있으면 1.
+/* v218(W6m②): 이 창이 띄울 제안 목록 — 세대·항목 수·강조(없으면 -1)·칸 사각형(view backing px, 왼쪽 위 원점 x·y·w·h). 있으면 1.
    Swift 는 tick 마다 읽어 칸 바로 아래에 네이티브 창(테두리 없는 자식 창 안의 표)으로 띄운다. */
 int32_t maru_macos_app_session_osr_datalist_state(MaruAppHostSession *session, uint32_t *out_generation, uint32_t *out_count, int32_t *out_selected, double out_field[4]);
-/* v213(W6m②): 그 세대 목록의 index 번째 항목 — 값과 레이블(UTF-8, 버퍼에 맞춰 글자 경계에서 자름). 없으면 0. */
+/* v218(W6m②): 그 세대 목록의 index 번째 항목 — 값과 레이블(UTF-8, 버퍼에 맞춰 글자 경계에서 자름). 없으면 0. */
 int32_t maru_macos_app_session_osr_datalist_item(MaruAppHostSession *session, uint32_t generation, uint32_t index, uint8_t *out_value, size_t value_cap, size_t *out_value_len, uint8_t *out_label, size_t label_cap, size_t *out_label_len);
-/* v213(W6m②): Swift 가 띄운(0 = 거둔) 목록의 세대. */
+/* v218(W6m②): Swift 가 띄운(0 = 거둔) 목록의 세대. */
 void maru_macos_app_session_osr_datalist_shown(MaruAppHostSession *session, uint32_t generation);
-/* v213(W6m②): 네이티브 창의 행 위 hover(-1 = 창을 떠남). */
+/* v218(W6m②): 네이티브 창의 행 위 hover(-1 = 창을 떠남). */
 void maru_macos_app_session_osr_datalist_hover(MaruAppHostSession *session, uint32_t generation, int32_t index);
-/* v213(W6m②): 네이티브 창의 행을 눌렀다 — 그 목록이 아직 띄운 그것이면 고른다(1). */
+/* v218(W6m②): 네이티브 창의 행을 눌렀다 — 그 목록이 아직 띄운 그것이면 고른다(1). */
 int32_t maru_macos_app_session_osr_datalist_pick(MaruAppHostSession *session, uint32_t generation, uint32_t index);
-/* v214(W10a): Chromium 탭 다운로드 목록 — 앱 전역(세션 밖). 상태(state)는 0 경로 만드는 중·1 보류(실행될 수 있는 파일)·2 받는 중·
+/* v219(W10a): Chromium 탭 다운로드 목록 — 앱 전역(세션 밖). 상태(state)는 0 경로 만드는 중·1 보류(실행될 수 있는 파일)·2 받는 중·
    3 중단·4 완료·5 취소·6 실패·7 탭이 닫힘·8 엔진 재시작·9 동시 다운로드 상한. 이름·경로는 UTF-8(길이로). */
 typedef struct MaruDownloadRow {
     uint64_t key;
@@ -1075,12 +1075,12 @@ void maru_macos_downloads_clear_finished(void);
 /* 사용자 동작으로 시작한 새 다운로드의 요청 번호(바뀌면 새 요청)와 그 탭. */
 uint64_t maru_macos_downloads_show_request(uint64_t *out_surface);
 uint32_t maru_macos_downloads_active(void);
-/* v216(W10e): 앱을 남겨 둘 다운로드 수(받는 중·준비 중·옮기는 중 — 보류·묻는 중·중단은 세지 않는다). 마지막 셸이 끝나도 이 수가 0 이
+/* v221(W10e): 앱을 남겨 둘 다운로드 수(받는 중·준비 중·옮기는 중 — 보류·묻는 중·중단은 세지 않는다). 마지막 셸이 끝나도 이 수가 0 이
    아니면 창만 닫고 앱은 다 받을 때까지 남는다(사용자 결정 2026-10-09). */
 uint32_t maru_macos_downloads_keep_alive(void);
-/* v216(W10e): 창이 하나도 없는 동안 Chromium sidecar 의 파이프를 비우고 다운로드를 진행한다(창의 tick 이 하던 일). */
+/* v221(W10e): 창이 하나도 없는 동안 Chromium sidecar 의 파이프를 비우고 다운로드를 진행한다(창의 tick 이 하던 일). */
 void maru_macos_web_osr_detached_pump(void);
-/* v215(W10b): 저장할 곳을 물을 다운로드(상태 10 asking) — 이름·처음 열 폴더·저장 창 안내(Zig 문장, UTF-8 길이로). */
+/* v220(W10b): 저장할 곳을 물을 다운로드(상태 10 asking) — 이름·처음 열 폴더·저장 창 안내(Zig 문장, UTF-8 길이로). */
 typedef struct MaruDownloadAsk {
     uint64_t key;
     uint32_t name_len;
@@ -1098,13 +1098,13 @@ int32_t maru_macos_downloads_claim_ask(uint64_t key, MaruDownloadAsk *out);
 /* 저장 창의 답: kind 0 고른 경로(existed — 그때 그 경로에 무언가 있었다), 1 취소, 2 치움(보류로). 묻는 중이면 1. */
 int32_t maru_macos_downloads_answer_ask(uint64_t key, uint32_t kind, const uint8_t *path, size_t path_len, uint32_t existed);
 /* 목록 창의 문장(현재 UI 언어 — 정적, 해제하지 않는다). 0 창 제목, 1~11 상태(준비 중·보류·받는 중·중단·완료·취소·실패·탭 닫힘·
-   엔진 재시작·너무 많음·파일 없음), 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록, 19 저장할 곳 고르기(v215). */
+   엔진 재시작·너무 많음·파일 없음), 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록, 19 저장할 곳 고르기(v220). */
 const char *maru_macos_downloads_text(uint32_t kind);
 /* `show_downloads` 액션(⇧⌘J·메뉴·팔레트)이 목록 창을 청했으면 1(one-shot). */
 int32_t maru_macos_app_session_take_show_downloads_request(MaruAppHostSession *session);
-/* v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다. */
+/* v217(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다. */
 int32_t maru_macos_app_session_osr_drag_over_body(MaruAppHostSession *session, double x_px, double y_px);
-/* 시험 전용(v211, W6l① 스모크): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) — x,y 셋. */
+/* 시험 전용(v216, W6l① 스모크): 활성 pane 의 웹 탭 머리·빈 탭 막대·주소 띠 한 점(backing px, 없으면 -1) — x,y 셋. */
 int32_t maru_macos_app_session_test_url_drop_points(MaruAppHostSession *session, double out[6]);
 /* 드래그앤드롭한 파일 경로들(NUL 구분). maru ssh 원격이면 control socket으로 업로드 후 원격 절대경로를
    paste하고, 로컬이면 경로를 셸 이스케이프해 paste한다(분기는 Zig). Swift는 fileURL 드롭일 때만 부른다
@@ -1237,7 +1237,7 @@ uint32_t maru_macos_app_session_dispatch_web_app_action(MaruAppHostSession *sess
 int32_t maru_macos_app_session_commit_composition(MaruAppHostSession *session);
 /* 마우스 호버 갱신(backing px). *out_cursor_kind에 위치별 커서 종류(0=arrow/사이드바·탭 바, 1=iBeam/터미널,
    2=pointingHand/URL hover, 3=resizeLeftRight/세로 divider, 4=resizeUpDown/가로 divider, 5=openHand/pane grip 호버.
-   v196 Chromium 탭 본문의 페이지 커서: 6=crosshair, 7=closedHand, 8=operationNotAllowed, 9=dragCopy, 10=dragLink,
+   v201 Chromium 탭 본문의 페이지 커서: 6=crosshair, 7=closedHand, 8=operationNotAllowed, 9=dragCopy, 10=dragLink,
    11=contextualMenu, 12=세로 iBeam, 13=숨김).
    Swift가 이 값으로
    NSCursor를 세운다. Zig는 부수적으로 사이드바 슬롯·pane 탭 호버·URL 밑줄을 갱신한다. mods는 마우스 수식키 비트
@@ -1307,10 +1307,10 @@ int32_t maru_macos_app_session_pending_notification(
     uint64_t *runtime_id_lo_out,
     uint64_t *event_id_out
 );
-/* v201(W5c): 방금 pending_notification 이 준 알림이 Chromium 탭의 웹 알림이면 그 번호(0 이면 아니다) — Swift 는 알림 userInfo
+/* v206(W5c): 방금 pending_notification 이 준 알림이 Chromium 탭의 웹 알림이면 그 번호(0 이면 아니다) — Swift 는 알림 userInfo
    에 싣고, 누르면 maru_macos_app_session_web_notification_click 으로 돌려준다(페이지의 알림 onclick). */
 uint64_t maru_macos_app_session_pending_notification_web_token(MaruAppHostSession *session);
-/* v201(W5c): 웹 알림을 눌렀다 — 그 탭(surface_id)의 그 번호일 때만 페이지의 onclick 을 부른다(모르는 번호·다른 탭이면 무동작).
+/* v206(W5c): 웹 알림을 눌렀다 — 그 탭(surface_id)의 그 번호일 때만 페이지의 onclick 을 부른다(모르는 번호·다른 탭이면 무동작).
    탭으로 옮기는 것은 activate_surface 가 한다. */
 void maru_macos_app_session_web_notification_click(MaruAppHostSession *session, uint64_t surface_id, uint64_t token);
 /* 데스크톱 알림 클릭 → 발신 surface로 활성화. Swift가 알림 userInfo의 (창 토큰, surface_id)에서 토큰으로 올바른
@@ -2242,31 +2242,31 @@ uint32_t maru_macos_mermaid_expire_deadline(uint64_t now_ms);
 uint32_t maru_macos_mermaid_complete_termination(uint64_t helper_instance);
 /* physical adapter가 quiesce된 app 종료에서 queue/latch/lease를 최종 회수한다. */
 void maru_macos_mermaid_shutdown(void);
-/* v194(W3b): 앱 종료 때 Chromium sidecar(웹 OSR)를 내린다 — shutdown 뒤 최대 3 초 기다리고 남았으면 죽인다.
+/* v199(W3b): 앱 종료 때 Chromium sidecar(웹 OSR)를 내린다 — shutdown 뒤 최대 3 초 기다리고 남았으면 죽인다.
    Chromium 엔진(설정 browser.engine·개발용 MARU_WEB_OSR_DIR)을 쓰지 않으면 무동작. 메인 스레드에서만. */
 void maru_macos_web_osr_shutdown(void);
-/* v195(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대를 넣는다 — tick 전에 부른다. OSR 탭은 지금 front 를
+/* v200(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대를 넣는다 — tick 전에 부른다. OSR 탭은 지금 front 를
    그린 프레임이 끝나기 전에는 새 프레임을 꺼내지 않는다(front 를 sidecar 에 돌려주면 GPU 가 읽는 장을 덮는다). */
 void maru_macos_app_session_set_osr_completed_generation(MaruAppHostSession *session, uint64_t generation);
-/* v195(W3c): 이번에 그릴 프레임(세대 frame_generation)의 Chromium 탭 본문 사각형을 out 에 채우고 수를 돌려준다. 그린 탭에는
+/* v200(W3c): 이번에 그릴 프레임(세대 frame_generation)의 Chromium 탭 본문 사각형을 out 에 채우고 수를 돌려준다. 그린 탭에는
    이 세대가 기록된다. 메인 스레드에서만. */
 size_t maru_macos_app_session_osr_quads(MaruAppHostSession *session, uint64_t frame_generation, MaruAppHostOsrQuad *out, size_t out_cap);
-/* v196(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 1 과 *out_cursor_kind(hover 와 같은 CursorKind)를 한 번
+/* v201(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 1 과 *out_cursor_kind(hover 와 같은 CursorKind)를 한 번
    돌려준다 — 페이지는 이동을 처리한 뒤 커서를 알리므로, 포인터가 멈춰도 커서를 맞추려고 tick 뒤에 부른다. */
 int32_t maru_macos_app_session_take_osr_cursor(MaruAppHostSession *session, int32_t *out_cursor_kind);
-/* v196(W4b): 추가 마우스 버튼(macOS buttonNumber 3=뒤로·4=앞으로)이 Chromium 탭 본문 위에서 눌렸다(backing px). 그 탭을
+/* v201(W4b): 추가 마우스 버튼(macOS buttonNumber 3=뒤로·4=앞으로)이 Chromium 탭 본문 위에서 눌렸다(backing px). 그 탭을
    뒤로·앞으로 보내고 1. 본문이 아니면 0 — Swift 는 옛 경로(handleMouse)로 흘린다. */
 int32_t maru_macos_app_session_osr_aux_button(MaruAppHostSession *session, int32_t button_number, double x_px, double y_px);
-/* v197(W4c): 키 대상이 Chromium 탭인가(활성 pane 의 OSR browser·입력 초점이 터미널 자리·창 키). 1 이면 Swift 는 키를
-   터미널 경로가 아니라 아래 osr_key·입력기 트랜잭션으로 보낸다. v202(W6a②): 그 탭에 팝업 위젯(`<select>` 목록 등)이
+/* v202(W4c): 키 대상이 Chromium 탭인가(활성 pane 의 OSR browser·입력 초점이 터미널 자리·창 키). 1 이면 Swift 는 키를
+   터미널 경로가 아니라 아래 osr_key·입력기 트랜잭션으로 보낸다. v207(W6a②): 그 탭에 팝업 위젯(`<select>` 목록 등)이
    열려 있으면 2 — Swift 는 입력기를 거치지 않고 osr_key phase 3 으로 보낸다. */
 int32_t maru_macos_app_session_osr_keyboard_active(MaruAppHostSession *session);
-/* v203(W6b): hover 중인 Chromium 탭의 툴팁 글(UTF-8, 여러 줄은 LF)을 out 에 out_cap 까지 쓰고 길이를 out_len 에, (hover 탭, 그 탭의
+/* v208(W6b): hover 중인 Chromium 탭의 툴팁 글(UTF-8, 여러 줄은 LF)을 out 에 out_cap 까지 쓰고 길이를 out_len 에, (hover 탭, 그 탭의
    툴팁 세대)가 바뀔 때마다 오르는 일련번호를 out_serial 에, 그 탭 본문 rect(x·y·w·h — backing px, view 왼쪽 위 원점, 없으면 0)를
    out_rect[4] 에. 글이 있으면 1. Swift 는 일련번호가 바뀌면 macOS 툴팁을 그 rect 에 다시 달고, rect 가 바뀌면 옮긴다. */
 int32_t maru_macos_app_session_osr_tooltip(MaruAppHostSession *session, uint64_t *out_serial, uint8_t *out, size_t out_cap,
                                            size_t *out_len, uint32_t *out_rect);
-/* v204(W6c②): Chromium 탭 우클릭 메뉴. take 는 이 창에 보이는 탭에 온 메뉴를 가져가 항목 수(없으면 0)·메뉴 번호·자리(창 backing
+/* v209(W6c②): Chromium 탭 우클릭 메뉴. take 는 이 창에 보이는 탭에 온 메뉴를 가져가 항목 수(없으면 0)·메뉴 번호·자리(창 backing
    px, view 좌상단 원점)를 준다 — 한 번에 하나, Swift 는 tick 이 끝난 뒤 띄운다. item 은 항목 하나(종류 0 명령·1 구분선·2 찾기·
    3 음성 하위 메뉴·4 말하기 시작·5 말하기 중지·6 서비스 하위 메뉴·7 이모티콘, 명령, 켜짐, 깊이, 문구). selection 은 선택한 글,
    open 이 0 이면 sidecar 가 닫았으니 메뉴를 거둔다. answer 는 고른 명령(macOS 항목·고르지 않음은 0 = 취소), 지금 포인터 자리와 눌린
@@ -2280,7 +2280,7 @@ int32_t maru_macos_app_session_osr_context_menu_selection(MaruAppHostSession *se
 int32_t maru_macos_app_session_osr_context_menu_open(MaruAppHostSession *session, uint32_t menu);
 int32_t maru_macos_app_session_osr_context_menu_answer(MaruAppHostSession *session, uint32_t menu, int32_t command, double x_px,
                                                        double y_px, uint32_t pressed, int32_t activate);
-/* v205(W6d①): 밖에서 끌어 오는 것. reset 으로 비우고(이 창에 보이는 Chromium 탭 본문이 있으면 1) add(종류 0 경로·1 글·2 HTML·3 주소·4 주소 제목, UTF-8)로 실은 뒤,
+/* v210(W6d①): 밖에서 끌어 오는 것. reset 으로 비우고(이 창에 보이는 Chromium 탭 본문이 있으면 1) add(종류 0 경로·1 글·2 HTML·3 주소·4 주소 제목, UTF-8)로 실은 뒤,
  * update(자리 backing px·허용 동작 NSDragOperation 비트 → Chromium 탭 본문이면 페이지가 받아들이는 동작, 아니면 -1),
  * exit(떠남), drop(1 놓음·0 거절·-1 본문 아님). */
 int32_t maru_macos_app_session_osr_drag_reset(MaruAppHostSession *session);
@@ -2288,7 +2288,7 @@ int32_t maru_macos_app_session_osr_drag_add(MaruAppHostSession *session, uint32_
 int32_t maru_macos_app_session_osr_drag_update(MaruAppHostSession *session, double x_px, double y_px, int32_t mods, uint32_t allowed);
 void maru_macos_app_session_osr_drag_exit(MaruAppHostSession *session);
 int32_t maru_macos_app_session_osr_drag_drop(MaruAppHostSession *session, double x_px, double y_px, int32_t mods);
-/* v206(W6d②): 페이지에서 끌어내기. set_source(maru 안에 놓이는 그 끌기 번호 — 이미 끝난 끌기면 0), out_take(이 창이 가져간 끌기 번호 — 0 이면 없음,
+/* v211(W6d②): 페이지에서 끌어내기. set_source(maru 안에 놓이는 그 끌기 번호 — 이미 끝난 끌기면 0), out_take(이 창이 가져간 끌기 번호 — 0 이면 없음,
  * 허용 동작·그림 잡은 자리·그림 크기 DIP), out_part(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG·5 파일 이름(안전하게 고친 것 —
  * 이미지 확장자가 아니면 빈 것) — out 이 NULL 이면 길이만, 넘치면 0),
  * out_started(세션이 열렸다 — 제스처를 끝낸다), out_end(놓인 자리 backing px — NaN 이면 시작 자리·받은 동작, 0 = 취소). */
@@ -2299,38 +2299,38 @@ int32_t maru_macos_app_session_osr_drag_out_part(MaruAppHostSession *session, ui
                                                  size_t *out_len);
 void maru_macos_app_session_osr_drag_out_started(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_out_end(MaruAppHostSession *session, uint32_t drag, double x_px, double y_px, uint32_t operation);
-/* v207(W6d③): 끌어낸 이미지 파일. out_file_size(받아 둔 내용 크기 — 안전한 이름이 없으면 0), drag_file_request(Finder 가 청할 때 — 끌기가
+/* v212(W6d③): 끌어낸 이미지 파일. out_file_size(받아 둔 내용 크기 — 안전한 이름이 없으면 0), drag_file_request(Finder 가 청할 때 — 끌기가
  * 끝난 뒤여도 된다, 못 청하면 0), drag_file_poll(0 아직·1 다 왔다(out 이 넉넉하면 옮겨 적고 놓는다, NULL 이면 길이만)·-1 실패),
  * drag_file_release(기다리다 그만뒀다 — 놓는다). */
 uint32_t maru_macos_app_session_osr_drag_out_file_size(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_file_request(MaruAppHostSession *session, uint32_t drag);
 int32_t maru_macos_app_session_osr_drag_file_poll(MaruAppHostSession *session, uint32_t drag, uint8_t *out, size_t cap, size_t *out_len);
 void maru_macos_app_session_osr_drag_file_release(MaruAppHostSession *session, uint32_t drag);
-/* v208: 창이 뒤에 있을 때 그 자리(창 backing px)의 첫 누름을 view 에 넘기는가 — Chromium 탭 본문이면 1(Chrome 처럼, `acceptsFirstMouse`). */
+/* v213: 창이 뒤에 있을 때 그 자리(창 backing px)의 첫 누름을 view 에 넘기는가 — Chromium 탭 본문이면 1(Chrome 처럼, `acceptsFirstMouse`). */
 int32_t maru_macos_app_session_osr_accepts_first_mouse(MaruAppHostSession *session, double x_px, double y_px);
-/* v209(W6h①): 우클릭 메뉴 항목 종류 8(「…에서 '…' 검색」) — 고르면 context_menu_search 를 부른 뒤 취소(0)로 답한다(설정의 검색 틀로 새 탭).
+/* v214(W6h①): 우클릭 메뉴 항목 종류 8(「…에서 '…' 검색」) — 고르면 context_menu_search 를 부른 뒤 취소(0)로 답한다(설정의 검색 틀로 새 탭).
    take_new_window 는 메뉴 「새 창에서 링크 열기」의 주소 하나(cap 보다 길면 버리고 0), Swift 는 tick 뒤에 새 창을 만들고 그 창 세션에
    open_url_tab(http·https)으로 웹 탭을 연다. */
 int32_t maru_macos_app_session_osr_context_menu_search(MaruAppHostSession *session, uint32_t menu);
 uint32_t maru_macos_app_session_osr_new_windows_pending(MaruAppHostSession *session);
 int32_t maru_macos_app_session_osr_take_new_window(MaruAppHostSession *session, uint8_t *out, size_t cap, size_t *out_len);
 int32_t maru_macos_app_session_osr_open_url_tab(MaruAppHostSession *session, const uint8_t *url, size_t len);
-/* v210(W6h②): 띄운 메뉴 항목의 체크 표시(연속 재생·모든 제어 기능 표시) — 켜져 있으면 1. */
+/* v215(W6h②): 띄운 메뉴 항목의 체크 표시(연속 재생·모든 제어 기능 표시) — 켜져 있으면 1. */
 int32_t maru_macos_app_session_osr_context_menu_item_checked(MaruAppHostSession *session, uint32_t menu, uint32_t index);
-/* v197(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
-   2 = 뗌, 3(v202 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
+/* v202(W4c): 키 한 번. phase 0 = 지금 키 누름(⌘·⌃ chord·기능키), 1 = 입력기 트랜잭션 키로 쥐어 둠(ime_end 가 판정),
+   2 = 뗌, 3(v207 — W6a②) = 열린 팝업 위젯의 키(누름 + 글자, 입력기 없이). key_code 는 NSEvent.keyCode, character·unmodified 는 characters·charactersIgnoringModifiers 의 첫 UTF-16,
    mods 는 shift=4·alt=8·ctrl=16·cmd=32·caps=64·숫자패드=128·반복=256. 키 대상이 Chromium 탭이면 1. */
 int32_t maru_macos_app_session_osr_key(MaruAppHostSession *session, int32_t phase, uint32_t key_code, uint32_t character,
                                        uint32_t unmodified, int32_t mods);
-/* v197(W4c): 메뉴 편집 명령(codec EditCommandKind: 0 undo·1 redo·2 cut·3 copy·4 paste·6 delete·7 select_all)을 키 대상
+/* v202(W4c): 메뉴 편집 명령(codec EditCommandKind: 0 undo·1 redo·2 cut·3 copy·4 paste·6 delete·7 select_all)을 키 대상
    Chromium 탭에 보낸다. 대상이 아니면 0. */
 int32_t maru_macos_app_session_osr_edit(MaruAppHostSession *session, int32_t command);
-/* v197(W4c): 입력기가 키 동작 명령을 냈다(doCommand — deleteBackward 밖의 insertNewline·moveLeft 등). Chromium 탭 트랜잭션
+/* v202(W4c): 입력기가 키 동작 명령을 냈다(doCommand — deleteBackward 밖의 insertNewline·moveLeft 등). Chromium 탭 트랜잭션
    안이면 기록하고(조합을 끝낸 키가 그 동작으로 페이지에 가게), 아니면 무동작. */
 void maru_macos_app_session_ime_command(MaruAppHostSession *session);
-/* v197(W4c): Zig 가 Chromium 탭의 조합을 끝냈다(키 대상이 바뀜) — 1 이면 Swift 는 입력기 세션의 조합을 버린다(한 번). */
+/* v202(W4c): Zig 가 Chromium 탭의 조합을 끝냈다(키 대상이 바뀜) — 1 이면 Swift 는 입력기 세션의 조합을 버린다(한 번). */
 int32_t maru_macos_app_session_take_osr_discard_marked(MaruAppHostSession *session);
-/* v198(W5a): Chromium 탭의 JS 대화상자·파일 선택(C6). kind 는 아래 MARU_OSR_DIALOG_*. 글(UTF-8, NUL 없음)은 답할 때까지
+/* v203(W5a): Chromium 탭의 JS 대화상자·파일 선택(C6). kind 는 아래 MARU_OSR_DIALOG_*. 글(UTF-8, NUL 없음)은 답할 때까지
    (title 은 다음 take 까지) 유효하다. 문구(title·message·버튼)는 Zig 가 번역·조립했다 — cancel_label 이 비면 취소 단추가
    없다(alert). 파일 선택은 message 가 열기 창 안내, default_text 가 처음 경로, accept 가 받을 형식(`image/*,.png`). */
 #define MARU_OSR_DIALOG_ALERT 0u
@@ -2341,11 +2341,11 @@ int32_t maru_macos_app_session_take_osr_discard_marked(MaruAppHostSession *sessi
 #define MARU_OSR_DIALOG_FILE_OPEN_MULTIPLE 11u
 #define MARU_OSR_DIALOG_FILE_OPEN_FOLDER 12u
 #define MARU_OSR_DIALOG_FILE_SAVE 13u
-/* v199(W5b): 권한 요청 — ok_label 은 허용, cancel_label 은 차단(닫기 단추 문구는 maru_macos_web_dialog_string(5)). message 는
+/* v204(W5b): 권한 요청 — ok_label 은 허용, cancel_label 은 차단(닫기 단추 문구는 maru_macos_web_dialog_string(5)). message 는
    청한 권한 목록. permission_kinds·permission_media 는 청한 종류(CEF 비트 — 미디어: 1 마이크 · 2 카메라 · 4 화면 소리 ·
    8 화면, 프롬프트: 4 카메라 · 0x1000 마이크 …) — Swift 는 허용하기 전에 macOS 권한을 받는다. */
 #define MARU_OSR_DIALOG_PERMISSION 20u
-/* v199(W5b): 권한 요청의 답 — maru_macos_app_session_osr_permission_reply 의 result. */
+/* v204(W5b): 권한 요청의 답 — maru_macos_app_session_osr_permission_reply 의 result. */
 #define MARU_OSR_PERMISSION_ACCEPT 0u
 #define MARU_OSR_PERMISSION_DENY 1u
 #define MARU_OSR_PERMISSION_DISMISS 2u
@@ -2375,35 +2375,35 @@ typedef struct MaruAppHostOsrDialog {
     uint32_t permission_kinds;
     uint32_t permission_media;
 } MaruAppHostOsrDialog;
-/* v198(W5a): 이 창에 띄울 대화상자·파일 선택이 있으면 1 과 *out(한 번). 키보드 초점을 가진 탭의 요청만, 한 창에 하나씩. */
+/* v203(W5a): 이 창에 띄울 대화상자·파일 선택이 있으면 1 과 *out(한 번). 키보드 초점을 가진 탭의 요청만, 한 창에 하나씩. */
 int32_t maru_macos_app_session_take_osr_dialog(MaruAppHostSession *session, MaruAppHostOsrDialog *out);
-/* v198(W5a): 띄운 요청이 사라졌다(페이지 이동·탭 닫힘·sidecar 재시작) — 1 이면 Swift 는 sheet 를 답 없이 닫는다(한 번). */
+/* v203(W5a): 띄운 요청이 사라졌다(페이지 이동·탭 닫힘·sidecar 재시작) — 1 이면 Swift 는 sheet 를 답 없이 닫는다(한 번). */
 int32_t maru_macos_app_session_take_osr_dialog_dismiss(MaruAppHostSession *session);
-/* v198(W5a): JS 대화상자의 답(accept = 확인·떠나기, text = prompt 에 친 글 — 상한·제어 문자는 Zig 가 다듬는다, suppress =
+/* v203(W5a): JS 대화상자의 답(accept = 확인·떠나기, text = prompt 에 친 글 — 상한·제어 문자는 Zig 가 다듬는다, suppress =
    이 페이지가 이동할 때까지 대화상자를 더 띄우지 못하게). 이미 사라진 요청이면 무동작. */
 void maru_macos_app_session_osr_dialog_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, int32_t accept,
                                              const uint8_t *text, size_t text_len, int32_t suppress);
-/* v198(W5a): 파일 선택의 경로 하나(여러 개면 여러 번 — 폴더는 안의 파일들로 펼쳐서). 절대 경로가 아니면 버린다. */
+/* v203(W5a): 파일 선택의 경로 하나(여러 개면 여러 번 — 폴더는 안의 파일들로 펼쳐서). 절대 경로가 아니면 버린다. */
 void maru_macos_app_session_osr_file_dialog_path(MaruAppHostSession *session, uint64_t surface_id, uint64_t token,
                                                  const uint8_t *path, size_t path_len);
-/* v198(W5a): 파일 선택을 끝낸다 — accept 0 이면 취소(보낸 경로는 버린다). */
+/* v203(W5a): 파일 선택을 끝낸다 — accept 0 이면 취소(보낸 경로는 버린다). */
 void maru_macos_app_session_osr_file_dialog_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, int32_t accept);
-/* v199(W5b): 권한 요청의 답(MARU_OSR_PERMISSION_*). 허용·차단은 Chromium 이 그 사이트에 기억한다(미디어 요청은 기억하지 않는다),
+/* v204(W5b): 권한 요청의 답(MARU_OSR_PERMISSION_*). 허용·차단은 Chromium 이 그 사이트에 기억한다(미디어 요청은 기억하지 않는다),
    닫기·못 물음은 허용·차단으로 기억하지 않는다(프롬프트는 되풀이되면 Chromium 이 한동안 묻지 않는다 — 닫기 셋·못 물음 넷).
    답했으면 1 — 권한 요청이 아니거나 이미 사라졌으면(이동·닫힘) 0. */
 int32_t maru_macos_app_session_osr_permission_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, uint32_t result);
-/* v200(W5b2): 기억된 위치 요청 — 사용자가 이미 허용한 출처가 위치를 다시 청했다(Chromium 은 부를 때마다 묻는다). sheet 없이
+/* v205(W5b2): 기억된 위치 요청 — 사용자가 이미 허용한 출처가 위치를 다시 청했다(Chromium 은 부를 때마다 묻는다). sheet 없이
    Maru 의 CoreLocation 좌표를 구해 maru_macos_app_session_osr_location_reply 로 답한다. 보이지 않는 탭도 온다. */
 typedef struct MaruAppHostOsrLocationRequest {
     uint64_t surface_id;
     uint64_t token;
 } MaruAppHostOsrLocationRequest;
 int32_t maru_macos_app_session_take_osr_location(MaruAppHostSession *session, MaruAppHostOsrLocationRequest *out);
-/* v200(W5b2): 위치 요청(sheet 의 허용 뒤 또는 기억된 요청)의 좌표 — maru_macos_app_session_osr_location_reply. status 는 아래
+/* v205(W5b2): 위치 요청(sheet 의 허용 뒤 또는 기억된 요청)의 좌표 — maru_macos_app_session_osr_location_reply. status 는 아래
    MARU_OSR_LOCATION_*. POSITION 이면 위도·경도·정확도(m)를 싣고(범위 밖은 「없음」으로 본다), UNAVAILABLE 이면 페이지가 「위치를
    알 수 없음」을 받는다, BLOCKED 는 macOS 가 Maru 의 위치를 막았다(처음 요청이면 못 물음, 기억된 요청이면 허용과 「없음」).
    기다리는 사이 사용자가 그 출처를 차단했으면 허용하지 않는다. 답했으면 1(요청이 이미 사라졌으면 0). */
-/* v200(W5b2): sheet 는 닫혔지만 답은 나중에 한다(위치 — macOS 위치 창·좌표를 기다린다) — 이 창의 다른 대화상자가 기다리지 않게
+/* v205(W5b2): sheet 는 닫혔지만 답은 나중에 한다(위치 — macOS 위치 창·좌표를 기다린다) — 이 창의 다른 대화상자가 기다리지 않게
    표시만 푼다. */
 void maru_macos_app_session_osr_dialog_release(MaruAppHostSession *session, uint64_t surface_id, uint64_t token);
 #define MARU_OSR_LOCATION_POSITION 0u
@@ -2411,8 +2411,8 @@ void maru_macos_app_session_osr_dialog_release(MaruAppHostSession *session, uint
 #define MARU_OSR_LOCATION_BLOCKED 2u
 int32_t maru_macos_app_session_osr_location_reply(MaruAppHostSession *session, uint64_t surface_id, uint64_t token, uint32_t status,
                                                   double latitude, double longitude, double accuracy);
-/* v198(W5a): sheet 의 나머지 문구를 out 에 쓰고 길이를 돌려준다(UTF-8, NUL 없음). which: 0 억제 선택 · 1 폴더 올리기 확인
-   제목(number = 파일 수) · 2 올리기 단추 · 3 취소 단추 · 4 폴더가 너무 크다(number = 상한) · v199(W5b): 5 권한 닫기 단추 ·
+/* v203(W5a): sheet 의 나머지 문구를 out 에 쓰고 길이를 돌려준다(UTF-8, NUL 없음). which: 0 억제 선택 · 1 폴더 올리기 확인
+   제목(number = 파일 수) · 2 올리기 단추 · 3 취소 단추 · 4 폴더가 너무 크다(number = 상한) · v204(W5b): 5 권한 닫기 단추 ·
    6 macOS 가 Maru 의 장치 사용을 막았다(number: 0 카메라 · 1 마이크 · 2 화면 기록 · 3 위치 서비스) · 7 시스템 설정 열기 단추 ·
    8 확인 단추. */
 size_t maru_macos_web_dialog_string(uint32_t which, int64_t number, uint8_t *out, size_t out_cap);
@@ -2466,7 +2466,7 @@ void maru_macos_control_server_stop(void);
 uint32_t maru_macos_control_take_browser_op(uint64_t *out_async_id, uint64_t *out_surface_id, uint8_t *out_op_kind,
                                             const uint8_t **out_arg_ptr, size_t *out_arg_len);
 
-/* v193(쿠키 권한은 사이트에): 방금 take_browser_op 로 꺼낸 op 의 허용 호스트를 out 에 복사하고 길이를 돌려준다(NUL 없음).
+/* v198(쿠키 권한은 사이트에): 방금 take_browser_op 로 꺼낸 op 의 허용 호스트를 out 에 복사하고 길이를 돌려준다(NUL 없음).
    browser_storage 확인 grant 가 인가한 쿠키 op 만 값이 있고, 0 은 검사 없음이다. Swift 는 쿠키 저장소를 만지는 op
    (getCookies·setCookie·deleteCookie·clearStorage) 직전에 대상 문서 호스트가 이 호스트이거나 그 하위 도메인인지 보고,
    아니면 complete_browser_op(status=5 unauthorized)로 끝낸다. out 이 없거나 모자라면 SIZE_MAX 를 돌려준다 — 호출자는

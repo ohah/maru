@@ -4689,7 +4689,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 「앱 유지」로 창 0 개가 된 상태에서만이다. 기본 설정에서도 보호된 파일 패널 때문에 창 0 개로 잠깐 남는
         // 경우가 있는데, 거기서 창을 열면 보호가 풀린 뒤 앱 종료 재시도가 영영 안 온다(적대적 검증 A).
         // 마지막 저장 중인 종료(창 0 개 ⌘Q)에 새 창을 열면 곧 함께 사라진다 — 종료가 끝나거나 취소될 때까지 열지 않는다.
-        guard !smokeMode, windows.isEmpty, openWithoutWindows, !workspaceFinalQuitPending else { return false }
+        // 받느라 창을 숨겨 둔 앱(W10e — `keepAliveSurfaces`)도 같다: Dock·전역 단축키가 새 창을 연다(main 기준 rebase 적대 리뷰 2 회차 —
+        // Dock 만 열었다).
+        guard !smokeMode, windows.isEmpty, openWithoutWindows || !keepAliveSurfaces.isEmpty, !workspaceFinalQuitPending else { return false }
         guard createTerminalWindow(applyingWorkspace: nil) != nil else { return false }
         NSApp.activate(ignoringOtherApps: true)
         return true
@@ -6015,12 +6017,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         _ = flag // quick 패널이 보여도 true 로 온다 — 일반 창 수(windows)로 판단한다.
         // 창 0 개로 Dock 에 남은 앱(window.quit-after-last-window-closed = false)의 Dock 클릭은 빈 새 창을 연다
         // (macOS 관례, 사용자 결정 2026-10-04). 창이 있으면 AppKit 기본 처리(최소화 창 복원 등)에 맡긴다.
+        // 받느라 창을 숨겨 둔 앱(W10e)도 같은 판정이다(`openWindowIfNoneOpen`).
         if openWindowIfNoneOpen() { return false }
-        // W10e: 다운로드를 받느라 남은 앱 — 숨겨 둔 창은 셸이 끝난 세션이다(`windows` 밖). 일반 창이 없으면 새 창을 연다.
-        if !keepAliveSurfaces.isEmpty, windows.isEmpty {
-            _ = createTerminalWindow(applyingWorkspace: nil)
-            return false
-        }
         return true
     }
 
@@ -7441,7 +7439,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 쥐고 있어도(그 사이 연 새 창의 셸도 끝났다) 같이 쥔다 — 곧바로 끝내면 받던 것이 확인 없이 취소됐다(리뷰 2 회차).
             if sessionEnded, maru_macos_downloads_keep_alive() > 0 {
                 // 이 창이 든 종료 확인이 떠 있었다면 거둔다 — 숨긴 세션은 tick 이 돌지 않아 그 결정이 영영 오지 않는다(teardown 이 하던 일,
-                // main 기준 rebase 적대 리뷰).
+                // main 기준 rebase 적대 리뷰). 그 세션의 종료 모달도 Zig 에서 내린다(예전엔 세션을 부숴 함께 사라졌다 — 2 회차).
+                if quitConfirmPending, quitConfirmSurface === surface, !workspaceFinalQuitPending, let session = surface.appSession {
+                    maru_macos_app_session_cancel_app_quit(session)
+                }
                 releaseQuitConfirmHeld(by: surface)
                 fputs("app: last window closed — downloads keep the app alive in the background (\(maru_macos_downloads_keep_alive()) moving)\n", stderr)
                 keepAliveSurfaces.append(surface)
@@ -7713,9 +7714,16 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 숨긴 세션은 앱이 끝날 때 정리한다).
         // 창 0 개로 Dock 에 남은 앱(LW1)은 세션 tick 이 없다 — 닫은 창의 탭이 받던 다운로드(맡겨 둔 브라우저)가 멈추지 않게 sidecar 를
         // 여기서 돌린다(main 기준 rebase 적대 리뷰 — 그동안 파이프가 차 sidecar 의 CEF 스레드가 멈출 수 있었다). 여러 번 불러도 값싸다.
-        if keepAliveSurfaces.isEmpty, windows.isEmpty, openWithoutWindows {
-            maru_macos_web_osr_detached_pump()
-            drainDownloads()
+        // 받는 동안은 App Nap 도 막는다(창이 하나도 보이지 않는 앱은 그 대상이라 tick 이 늦어지면 펌프가 밀린다 — 아래 W10e 와 같은 activity,
+        // 2 회차). 다 받았거나 창이 다시 생기면(그 창의 tick 이 sidecar 를 돌린다) 푼다 — 안 풀면 잠자기를 계속 막는다.
+        if keepAliveSurfaces.isEmpty {
+            if windows.isEmpty, openWithoutWindows {
+                maru_macos_web_osr_detached_pump()
+                drainDownloads()
+                if maru_macos_downloads_keep_alive() > 0 { beginKeepAliveActivity() } else { endKeepAliveActivity() }
+            } else {
+                endKeepAliveActivity()
+            }
         }
         if !keepAliveSurfaces.isEmpty {
             maru_macos_web_osr_detached_pump()
@@ -8868,7 +8876,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     // CursorKind(app_host_abi.h: 0=arrow, 1=iBeam, 2=pointingHand, 3=resizeLeftRight, 4=resizeUpDown, 5=openHand,
-    // v196 Chromium 탭 페이지 커서 6~13) → NSCursor.
+    // v201 Chromium 탭 페이지 커서 6~13) → NSCursor.
     private static func cursor(for kind: Int32) -> NSCursor {
         switch kind {
         case 0: return .arrow

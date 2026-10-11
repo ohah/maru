@@ -528,7 +528,7 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
 
     // Dock 클릭·전역 단축키 둘이 창 0 개에서 빈 새 창을 연다.
     const opener = try swiftFunctionBody(source, "    private func openWindowIfNoneOpen() -> Bool {");
-    try std.testing.expect(std.mem.indexOf(u8, opener, "guard !smokeMode, windows.isEmpty, openWithoutWindows, !workspaceFinalQuitPending else { return false }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, opener, "guard !smokeMode, windows.isEmpty, openWithoutWindows || !keepAliveSurfaces.isEmpty, !workspaceFinalQuitPending else { return false }") != null);
     try std.testing.expect(std.mem.indexOf(u8, opener, "NSApp.activate(ignoringOtherApps: true)") != null); // 다른 앱 뒤에 깔리지 않게
     try std.testing.expect(std.mem.indexOf(u8, opener, "createTerminalWindow(applyingWorkspace: nil)") != null);
     const reopen = try swiftFunctionBody(source, "    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {");
@@ -2399,7 +2399,7 @@ pub export fn maru_macos_app_session_route_drop(
     return @intFromEnum(app_session.routeDropAtPoint(x_px, y_px));
 }
 
-// W6l①(v211): 링크(파일 아님)를 놓았다 — 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다.
+// W6l①(v216): 링크(파일 아님)를 놓았다 — 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠면 그 탭에서 열거나 새 웹 탭으로 연다.
 // route_drop 과 같은 3-상태: 1 열었다 · 0 해당 없음(호스트는 기존 경로로) · -1 거부(삽입 금지 — 모달·허용하지 않는 주소).
 pub export fn maru_macos_app_session_drop_url(
     session: ?*AppSession,
@@ -2835,13 +2835,13 @@ pub export fn maru_macos_app_session_pending_clipboard(
     return @intFromEnum(Status.ok);
 }
 
-/// v201(W5c): 방금 내보낸 알림이 웹 알림이면 그 번호.
+/// v206(W5c): 방금 내보낸 알림이 웹 알림이면 그 번호.
 pub export fn maru_macos_app_session_pending_notification_web_token(session: ?*AppSession) u64 {
     const app = session orelse return 0;
     return app.notification_web_token_out;
 }
 
-/// v201(W5c): 웹 알림을 눌렀다 — 페이지의 onclick.
+/// v206(W5c): 웹 알림을 눌렀다 — 페이지의 onclick.
 pub export fn maru_macos_app_session_web_notification_click(session: ?*AppSession, surface_id: u64, token: u64) void {
     const app = session orelse return;
     session_mod.web_osr.clickWebNotification(app.allocator, surface_id, token);
@@ -5295,27 +5295,27 @@ pub export fn maru_macos_mermaid_shutdown() void {
     session_mod.mermaidCoordinator().shutdown();
 }
 
-/// v194(W3b): 앱 종료 — Chromium sidecar(웹 OSR)가 떠 있으면 shutdown 을 보내고 잠시(3 초) 기다린 뒤 남았으면 죽인다.
+/// v199(W3b): 앱 종료 — Chromium sidecar(웹 OSR)가 떠 있으면 shutdown 을 보내고 잠시(3 초) 기다린 뒤 남았으면 죽인다.
 /// 개발용 환경변수로 켜지 않았으면 무동작. sidecar 는 부모가 사라지면 스스로도 끝나지만(kqueue), 정상 종료는 열린
 /// 브라우저를 닫고 프로필을 깨끗이 쓴다. **메인 스레드 전용.**
 pub export fn maru_macos_web_osr_shutdown() void {
     session_mod.web_osr.shutdownForExit();
 }
 
-/// v195(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대. Swift 가 tick 전에 넣는다(GPU 소비자 규칙).
+/// v200(W3c): 이 창 renderer 에서 GPU 가 끝낸 마지막 프레임 세대. Swift 가 tick 전에 넣는다(GPU 소비자 규칙).
 pub export fn maru_macos_app_session_set_osr_completed_generation(session: ?*AppSession, generation: u64) void {
     const app = session orelse return;
     app.osr_completed_generation = generation;
 }
 
-/// v195(W3c): 이번 프레임에 그릴 Chromium 탭 본문. 그린 탭에 이 세대를 기록한다. **메인 스레드 전용.**
+/// v200(W3c): 이번 프레임에 그릴 Chromium 탭 본문. 그린 탭에 이 세대를 기록한다. **메인 스레드 전용.**
 pub export fn maru_macos_app_session_osr_quads(session: ?*AppSession, frame_generation: u64, out: ?[*]session_mod.web_ops.OsrQuad, out_cap: usize) usize {
     const app = session orelse return 0;
     const buf = out orelse return 0;
     return session_mod.web_ops.osrQuads(app, frame_generation, buf[0..out_cap]);
 }
 
-/// v196(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 한 번(tick 뒤 Swift 가 가져간다).
+/// v201(W4b): hover 중인 Chromium 탭의 페이지 커서가 바뀌었으면 한 번(tick 뒤 Swift 가 가져간다).
 pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_cursor_kind: ?*i32) i32 {
     const app = session orelse return 0;
     const out = out_cursor_kind orelse return 0;
@@ -5324,7 +5324,7 @@ pub export fn maru_macos_app_session_take_osr_cursor(session: ?*AppSession, out_
     return 1;
 }
 
-/// v198(W5a): 이 창에 띄울 Chromium 탭의 대화상자·파일 선택(한 번).
+/// v203(W5a): 이 창에 띄울 Chromium 탭의 대화상자·파일 선택(한 번).
 pub export fn maru_macos_app_session_take_osr_dialog(session: ?*AppSession, out: ?*c.MaruAppHostOsrDialog) i32 {
     const app = session orelse return 0;
     const dst = out orelse return 0;
@@ -5374,7 +5374,7 @@ pub export fn maru_macos_app_session_osr_file_dialog_reply(session: ?*AppSession
     session_mod.web_ops.osrFileDialogReply(app, surface_id, token, accept != 0);
 }
 
-/// v199(W5b): 권한 요청의 답 — 답했으면 1(요청이 이미 사라졌으면 0). 모르는 값이면 「못 물음」으로 본다(차단은 Chromium 이
+/// v204(W5b): 권한 요청의 답 — 답했으면 1(요청이 이미 사라졌으면 0). 모르는 값이면 「못 물음」으로 본다(차단은 Chromium 이
 /// 기억하고 닫기는 embargo 를 쌓는다).
 pub export fn maru_macos_app_session_osr_permission_reply(session: ?*AppSession, surface_id: u64, token: u64, result: u32) i32 {
     const app = session orelse return 0;
@@ -5382,13 +5382,13 @@ pub export fn maru_macos_app_session_osr_permission_reply(session: ?*AppSession,
     return @intFromBool(session_mod.web_ops.osrPermissionReply(app, surface_id, token, value));
 }
 
-/// v200(W5b2): sheet 는 닫혔지만 답은 나중에 — 창의 표시만 푼다.
+/// v205(W5b2): sheet 는 닫혔지만 답은 나중에 — 창의 표시만 푼다.
 pub export fn maru_macos_app_session_osr_dialog_release(session: ?*AppSession, surface_id: u64, token: u64) void {
     const app = session orelse return;
     session_mod.web_ops.osrDialogRelease(app, surface_id, token);
 }
 
-/// v200(W5b2): 기억된 위치 요청 하나(sheet 없이 좌표만 구한다).
+/// v205(W5b2): 기억된 위치 요청 하나(sheet 없이 좌표만 구한다).
 pub export fn maru_macos_app_session_take_osr_location(session: ?*AppSession, out: ?*c.MaruAppHostOsrLocationRequest) i32 {
     const app = session orelse return 0;
     const dst = out orelse return 0;
@@ -5397,7 +5397,7 @@ pub export fn maru_macos_app_session_take_osr_location(session: ?*AppSession, ou
     return 1;
 }
 
-/// v200(W5b2): 위치 요청의 좌표 — 답했으면 1. 모르는 status 는 「없음」으로 본다.
+/// v205(W5b2): 위치 요청의 좌표 — 답했으면 1. 모르는 status 는 「없음」으로 본다.
 pub export fn maru_macos_app_session_osr_location_reply(session: ?*AppSession, surface_id: u64, token: u64, status: u32, latitude: f64, longitude: f64, accuracy: f64) i32 {
     const app = session orelse return 0;
     const value = std.enums.fromInt(session_mod.web_ops.LocationStatus, status) orelse .unavailable;
@@ -5409,13 +5409,13 @@ pub export fn maru_macos_web_dialog_string(which: u32, number: i64, out: ?[*]u8,
     return session_mod.web_ops.osrDialogString(which, number, dst[0..out_cap]).len;
 }
 
-/// v196(W4b): 추가 마우스 버튼(3=뒤로·4=앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 1.
+/// v201(W4b): 추가 마우스 버튼(3=뒤로·4=앞으로)이 Chromium 탭 본문 위면 그 탭을 뒤로·앞으로 보내고 1.
 pub export fn maru_macos_app_session_osr_aux_button(session: ?*AppSession, button_number: i32, x_px: f64, y_px: f64) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrAuxButton(app, button_number, x_px, y_px));
 }
 
-/// v197(W4c): 키 대상이 Chromium 탭인가. 판정 전에 대상을 맞춘다(키로 탭을 바꾼 직후의 키 — 적대 검증). v202(W6a②): 그
+/// v202(W4c): 키 대상이 Chromium 탭인가. 판정 전에 대상을 맞춘다(키로 탭을 바꾼 직후의 키 — 적대 검증). v207(W6a②): 그
 /// 탭에 팝업 위젯이 열려 있으면 2.
 pub export fn maru_macos_app_session_osr_keyboard_active(session: ?*AppSession) i32 {
     const app = session orelse return 0;
@@ -5424,7 +5424,7 @@ pub export fn maru_macos_app_session_osr_keyboard_active(session: ?*AppSession) 
     return if (session_mod.web_ops.osrPopupOpen(app)) 2 else 1;
 }
 
-/// v203(W6b): hover 중인 Chromium 탭의 툴팁 글과 일련번호, 그 탭 본문 rect(x·y·w·h backing px — 없으면 0). 글이 있으면 1. 글은
+/// v208(W6b): hover 중인 Chromium 탭의 툴팁 글과 일련번호, 그 탭 본문 rect(x·y·w·h backing px — 없으면 0). 글이 있으면 1. 글은
 /// 4 KiB(wire 글 상한) 안이라 Swift 가 그만큼 준다 — 더 작으면 UTF-8 글자 경계에서 자른다.
 pub export fn maru_macos_app_session_osr_tooltip(session: ?*AppSession, out_serial: ?*u64, out: ?[*]u8, out_cap: usize, out_len: ?*usize, out_rect: ?*[4]u32) i32 {
     const app = session orelse return 0;
@@ -5437,7 +5437,7 @@ pub export fn maru_macos_app_session_osr_tooltip(session: ?*AppSession, out_seri
     return @intFromBool(text.len != 0);
 }
 
-/// v204(W6c②): 이 창에 보이는 Chromium 탭에 온 우클릭 메뉴를 가져간다 — 항목 수(없으면 0), 메뉴 번호, 띄울 자리(창 backing px,
+/// v209(W6c②): 이 창에 보이는 Chromium 탭에 온 우클릭 메뉴를 가져간다 — 항목 수(없으면 0), 메뉴 번호, 띄울 자리(창 backing px,
 /// view 좌상단 원점). 띄운 메뉴가 있으면 0 — 한 번에 하나다. Swift 는 tick 이 끝난 **뒤** 띄운다(tick 안에서 띄우면 메뉴가 닫힐
 /// 때까지 tick 이 멈춘다 — 시험 앱 실측).
 pub export fn maru_macos_app_session_osr_context_menu_take(session: ?*AppSession, out_menu: ?*u32, out_x: ?*f64, out_y: ?*f64) i32 {
@@ -5449,8 +5449,8 @@ pub export fn maru_macos_app_session_osr_context_menu_take(session: ?*AppSession
     return @intCast(m.items.len);
 }
 
-/// v204(W6c②): 띄운 메뉴의 항목 하나 — 종류(0 명령·1 구분선·2 찾기·3 음성 하위 메뉴·4 말하기 시작·5 말하기 중지·6 서비스 하위
-/// 메뉴·7 이모티콘·8 검색 — v209), 명령(`ContextMenuCommandKind`), 켜짐, 깊이(1 은 바로 앞 하위 메뉴 안), 문구(UTF-8 — `cap` 에서 글자 경계로
+/// v209(W6c②): 띄운 메뉴의 항목 하나 — 종류(0 명령·1 구분선·2 찾기·3 음성 하위 메뉴·4 말하기 시작·5 말하기 중지·6 서비스 하위
+/// 메뉴·7 이모티콘·8 검색 — v214), 명령(`ContextMenuCommandKind`), 켜짐, 깊이(1 은 바로 앞 하위 메뉴 안), 문구(UTF-8 — `cap` 에서 글자 경계로
 /// 자른다). 그 메뉴가 아니거나 범위 밖이면 0.
 pub export fn maru_macos_app_session_osr_context_menu_item(
     session: ?*AppSession,
@@ -5484,7 +5484,7 @@ pub export fn maru_macos_app_session_osr_context_menu_item(
     return 1;
 }
 
-/// v210(W6h②): 띄운 메뉴 항목의 체크 표시(연속 재생·모든 제어 기능 표시의 지금 상태) — 켜져 있으면 1. 그 메뉴가 아니거나 범위
+/// v215(W6h②): 띄운 메뉴 항목의 체크 표시(연속 재생·모든 제어 기능 표시의 지금 상태) — 켜져 있으면 1. 그 메뉴가 아니거나 범위
 /// 밖이면 0.
 pub export fn maru_macos_app_session_osr_context_menu_item_checked(session: ?*AppSession, menu: u32, index: u32) i32 {
     const app = session orelse return 0;
@@ -5493,7 +5493,7 @@ pub export fn maru_macos_app_session_osr_context_menu_item_checked(session: ?*Ap
     return @intFromBool(m.items.items[index].checked);
 }
 
-/// v204(W6c②): 띄운 메뉴의 선택한 글(찾기·음성·서비스 — UTF-8, `cap` 에서 글자 경계로 자른다). 그 메뉴가 아니면 0.
+/// v209(W6c②): 띄운 메뉴의 선택한 글(찾기·음성·서비스 — UTF-8, `cap` 에서 글자 경계로 자른다). 그 메뉴가 아니면 0.
 pub export fn maru_macos_app_session_osr_context_menu_selection(session: ?*AppSession, menu: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
     const app = session orelse return 0;
     _ = session_mod.web_ops.osrContextMenuShown(app, menu) orelse return 0;
@@ -5503,20 +5503,20 @@ pub export fn maru_macos_app_session_osr_context_menu_selection(session: ?*AppSe
     return 1;
 }
 
-/// v209(W6h①): 띄운 메뉴에서 「…에서 '…' 검색」(종류 8)을 골랐다 — 설정의 검색 틀로 새 탭(앞)을 연다. Swift 는 이것을 부른 **뒤**
+/// v214(W6h①): 띄운 메뉴에서 「…에서 '…' 검색」(종류 8)을 골랐다 — 설정의 검색 틀로 새 탭(앞)을 연다. Swift 는 이것을 부른 **뒤**
 /// 평소처럼 취소(0)로 답한다. 그 메뉴가 아니거나 열 수 없으면 0.
 pub export fn maru_macos_app_session_osr_context_menu_search(session: ?*AppSession, menu: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrContextMenuSearch(app, menu));
 }
 
-/// v209(W6h①): 가져가지 않은 「새 창에서 링크 열기」 요청 수 — Swift 는 0 이 아닐 때만 버퍼를 만들어 `take_new_window` 를 부른다.
+/// v214(W6h①): 가져가지 않은 「새 창에서 링크 열기」 요청 수 — Swift 는 0 이 아닐 때만 버퍼를 만들어 `take_new_window` 를 부른다.
 pub export fn maru_macos_app_session_osr_new_windows_pending(session: ?*AppSession) u32 {
     const app = session orelse return 0;
     return @intCast(session_mod.web_ops.osrNewWindowsPending(app));
 }
 
-/// v209(W6h①): 메뉴 「새 창에서 링크 열기」의 주소 하나를 가져간다(UTF-8, 1). `cap` 보다 길면 버리고 0 — Swift 는 wire 주소 상한
+/// v214(W6h①): 메뉴 「새 창에서 링크 열기」의 주소 하나를 가져간다(UTF-8, 1). `cap` 보다 길면 버리고 0 — Swift 는 wire 주소 상한
 /// (32 KiB)만큼 준다. Swift 는 tick 뒤에 새 창을 만들고 그 창 세션에 `osr_open_url_tab` 으로 연다.
 pub export fn maru_macos_app_session_osr_take_new_window(session: ?*AppSession, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
     const app = session orelse return 0;
@@ -5529,7 +5529,7 @@ pub export fn maru_macos_app_session_osr_take_new_window(session: ?*AppSession, 
     return 1;
 }
 
-/// v209(W6h①): 이 창의 활성 pane 에 그 주소(http·https)의 Chromium 웹 탭을 열고 그 탭으로 옮긴다. 열었으면 1.
+/// v214(W6h①): 이 창의 활성 pane 에 그 주소(http·https)의 Chromium 웹 탭을 열고 그 탭으로 옮긴다. 열었으면 1.
 pub export fn maru_macos_app_session_osr_open_url_tab(session: ?*AppSession, url: ?[*]const u8, len: usize) i32 {
     const app = session orelse return 0;
     const p = url orelse return 0;
@@ -5539,13 +5539,13 @@ pub export fn maru_macos_app_session_osr_open_url_tab(session: ?*AppSession, url
     return @intFromBool(opened);
 }
 
-/// v204(W6c②): 띄운 메뉴가 아직 열려 있어야 하면 1 — 0 이면(페이지가 이동했거나 탭이 닫혀 sidecar 가 닫았다) Swift 가 메뉴를 거둔다.
+/// v209(W6c②): 띄운 메뉴가 아직 열려 있어야 하면 1 — 0 이면(페이지가 이동했거나 탭이 닫혀 sidecar 가 닫았다) Swift 가 메뉴를 거둔다.
 pub export fn maru_macos_app_session_osr_context_menu_open(session: ?*AppSession, menu: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrContextMenuOpen(app, menu));
 }
 
-/// v204(W6c②): 띄운 메뉴의 답 — 고른 명령(`ContextMenuCommandKind`, 모르는 값은 취소), 고르지 않았거나 macOS 항목이면 0(취소).
+/// v209(W6c②): 띄운 메뉴의 답 — 고른 명령(`ContextMenuCommandKind`, 모르는 값은 취소), 고르지 않았거나 macOS 항목이면 0(취소).
 /// 지금 포인터 자리(창 backing px)와 지금 눌린 버튼(`NSEvent.pressedMouseButtons`)은 메뉴가 먹은 떼기를 대신 보낼 때 쓴다.
 /// `activate` 가 1 이면 그 탭을 활성으로 올린다(이모티콘). 그 메뉴가 아니면 0.
 pub export fn maru_macos_app_session_osr_context_menu_answer(session: ?*AppSession, menu: u32, command: i32, x_px: f64, y_px: f64, pressed: u32, activate: i32) i32 {
@@ -5554,7 +5554,7 @@ pub export fn maru_macos_app_session_osr_context_menu_answer(session: ?*AppSessi
     return @intFromBool(session_mod.web_ops.osrContextMenuAnswer(app, menu, kind, x_px, y_px, pressed, activate != 0));
 }
 
-/// v205(W6d①): 밖에서 끌어 오는 것 — 끌기가 view 에 들어올 때 비우고(`reset` — 이 창에 보이는 Chromium 탭 본문이 있으면 1,
+/// v210(W6d①): 밖에서 끌어 오는 것 — 끌기가 view 에 들어올 때 비우고(`reset` — 이 창에 보이는 Chromium 탭 본문이 있으면 1,
 /// 없으면 0 이라 실을 필요가 없다) 실은 뒤(`add` — 종류 0 경로·1 글·2 HTML·3 주소·
 /// 4 주소 제목, UTF-8), 움직일 때마다 자리(창 backing px)와 끌어 온 쪽이 허용한 동작(`NSDragOperation` 비트)으로 묻는다
 /// (`update` — Chromium 탭 본문이면 페이지가 받아들이는 동작, 본문이 아니면 -1). 떠나면 `exit`, 놓으면 `drop`(1 놓음·0 거절·
@@ -5577,7 +5577,7 @@ pub export fn maru_macos_app_session_osr_drag_update(session: ?*AppSession, x_px
     return session_mod.web_ops.osrDragUpdate(app, x_px, y_px, mods, allowed);
 }
 
-/// v213(W6m②): 이 창이 띄울 제안 목록(키 대상 Chromium 탭의 것) — 세대·항목 수·강조(없으면 -1)·칸 사각형(view backing px, 왼쪽 위
+/// v218(W6m②): 이 창이 띄울 제안 목록(키 대상 Chromium 탭의 것) — 세대·항목 수·강조(없으면 -1)·칸 사각형(view backing px, 왼쪽 위
 /// 원점 — 그 탭 본문 안으로 자름). Swift 가 tick 마다 읽어 네이티브 창(테두리 없는 자식 창 안의 표)으로 띄운다. 띄울 것이 있으면 1.
 pub export fn maru_macos_app_session_osr_datalist_state(session: ?*AppSession, out_generation: ?*u32, out_count: ?*u32, out_selected: ?*i32, out_field: ?*[4]f64) i32 {
     const app = session orelse return 0;
@@ -5589,7 +5589,7 @@ pub export fn maru_macos_app_session_osr_datalist_state(session: ?*AppSession, o
     return @intFromBool(st.open);
 }
 
-/// v213(W6m②): 그 세대 목록의 `index` 번째 항목 — 값과 레이블(값과 같으면 빈 글)을 UTF-8 로(각 512 바이트 안 — sidecar 가 자른다).
+/// v218(W6m②): 그 세대 목록의 `index` 번째 항목 — 값과 레이블(값과 같으면 빈 글)을 UTF-8 로(각 512 바이트 안 — sidecar 가 자른다).
 /// 버퍼가 작으면 글자 경계에서 자른다. 세대가 지금 목록이 아니거나 범위 밖이면 0.
 pub export fn maru_macos_app_session_osr_datalist_item(session: ?*AppSession, generation: u32, index: u32, out_value: ?[*]u8, value_cap: usize, out_value_len: ?*usize, out_label: ?[*]u8, label_cap: usize, out_label_len: ?*usize) i32 {
     const app = session orelse return 0;
@@ -5603,31 +5603,31 @@ pub export fn maru_macos_app_session_osr_datalist_item(session: ?*AppSession, ge
     return 1;
 }
 
-/// v213(W6m②): Swift 가 띄운(0 = 거둔) 목록의 세대 — 키는 띄운 그 목록에서만 먹는다.
+/// v218(W6m②): Swift 가 띄운(0 = 거둔) 목록의 세대 — 키는 띄운 그 목록에서만 먹는다.
 pub export fn maru_macos_app_session_osr_datalist_shown(session: ?*AppSession, generation: u32) void {
     const app = session orelse return;
     session_mod.web_ops.datalistShown(app, generation);
 }
 
-/// v213(W6m②): 네이티브 창의 행 위 hover(-1 = 창을 떠남).
+/// v218(W6m②): 네이티브 창의 행 위 hover(-1 = 창을 떠남).
 pub export fn maru_macos_app_session_osr_datalist_hover(session: ?*AppSession, generation: u32, index: i32) void {
     const app = session orelse return;
     session_mod.web_ops.datalistHover(app, generation, index);
 }
 
-/// v213(W6m②): 네이티브 창의 행을 눌렀다 — 그 목록이 아직 띄운 그것이면 고른다(1).
+/// v218(W6m②): 네이티브 창의 행을 눌렀다 — 그 목록이 아직 띄운 그것이면 고른다(1).
 pub export fn maru_macos_app_session_osr_datalist_pick(session: ?*AppSession, generation: u32, index: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.datalistPickIndex(app, generation, index));
 }
 
-/// v213(W6m②): 키 대상 Chromium 탭에 제안 목록이 열려 있으면 ↑↓·Enter·Esc 를 목록이 먹는다(1 — Swift 는 페이지에 보내지 않는다).
+/// v218(W6m②): 키 대상 Chromium 탭에 제안 목록이 열려 있으면 ↑↓·Enter·Esc 를 목록이 먹는다(1 — Swift 는 페이지에 보내지 않는다).
 pub export fn maru_macos_app_session_osr_datalist_key(session: ?*AppSession, key_code: u16, mods: i32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDatalistKey(app, key_code, mods));
 }
 
-// ── v214(W10a): Chromium 탭 다운로드 목록 — 앱 전역(sidecar 가 하나라 세션 밖) ──
+// ── v219(W10a): Chromium 탭 다운로드 목록 — 앱 전역(sidecar 가 하나라 세션 밖) ──
 
 /// 목록 행 하나 — 이름·경로는 UTF-8(NUL 없음, 길이로).
 pub const MaruDownloadRow = extern struct {
@@ -5701,7 +5701,7 @@ pub export fn maru_macos_downloads_show_request(out_surface: ?*u64) u64 {
 
 /// 목록 창의 문장(현재 UI 언어 — Swift 는 문장을 만들지 않는다, docs/i18n.md §7.2). 정적 널종단 — 해제하지 않는다. 0 창 제목,
 /// 1~11 상태(1 준비 중·2 보류·3 받는 중·4 중단·5 완료·6 취소·7 실패·8 탭 닫힘·9 엔진 재시작·10 너무 많음·11 파일 없음),
-/// 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록, 19 저장할 곳 고르기(v215 — W10b). 모르는 종류는 빈 글.
+/// 12~17 단추(취소·다시 시도·받기·버리기·Finder 에서 보기·끝난 것 지우기), 18 빈 목록, 19 저장할 곳 고르기(v220 — W10b). 모르는 종류는 빈 글.
 pub export fn maru_macos_downloads_text(kind: u32) [*:0]const u8 {
     const key: maru.i18n.Key = switch (kind) {
         0 => .dl_window_title,
@@ -5734,17 +5734,17 @@ pub export fn maru_macos_downloads_active() u32 {
     return @intCast(session_mod.web_downloads.activeTotal());
 }
 
-/// v216(W10e): 앱을 남겨 둘 다운로드 수 — 받는 중·준비 중·옮기는 중(보류·묻는 중·중단은 세지 않는다 — 끝없이 남지 않게).
+/// v221(W10e): 앱을 남겨 둘 다운로드 수 — 받는 중·준비 중·옮기는 중(보류·묻는 중·중단은 세지 않는다 — 끝없이 남지 않게).
 pub export fn maru_macos_downloads_keep_alive() u32 {
     return @intCast(session_mod.web_downloads.keepAliveCount());
 }
 
-/// v216(W10e): 창이 하나도 없는 동안 sidecar 파이프를 비우고 다운로드를 진행한다(창의 tick 이 하던 일 — `web_osr.pump`).
+/// v221(W10e): 창이 하나도 없는 동안 sidecar 파이프를 비우고 다운로드를 진행한다(창의 tick 이 하던 일 — `web_osr.pump`).
 pub export fn maru_macos_web_osr_detached_pump() void {
     session_mod.web_osr.detachedPump();
 }
 
-/// v215(W10b): 저장할 곳을 물을 다운로드 — 이름(다듬은 제안 이름)·처음 열 폴더·저장 창 안내(Zig 문장).
+/// v220(W10b): 저장할 곳을 물을 다운로드 — 이름(다듬은 제안 이름)·처음 열 폴더·저장 창 안내(Zig 문장).
 pub const MaruDownloadAsk = extern struct {
     key: u64,
     name_len: u32,
@@ -5768,7 +5768,7 @@ fn fillDownloadAsk(e: *const session_mod.web_downloads.Entry, out: *MaruDownload
     out.message_len = @intCast(message.len);
 }
 
-/// v215(W10b): 이 창의 활성 Chromium 탭에서 저장할 곳을 물을 다운로드를 맡는다(맡으면 1 — 그 행은 다른 창이 다시 띄우지 않는다).
+/// v220(W10b): 이 창의 활성 Chromium 탭에서 저장할 곳을 물을 다운로드를 맡는다(맡으면 1 — 그 행은 다른 창이 다시 띄우지 않는다).
 pub export fn maru_macos_app_session_take_download_ask(session: ?*AppSession, out: ?*MaruDownloadAsk) i32 {
     const app = session orelse return 0;
     const ask = out orelse return 0;
@@ -5777,7 +5777,7 @@ pub export fn maru_macos_app_session_take_download_ask(session: ?*AppSession, ou
     return 1;
 }
 
-/// v215(W10b): 목록 창이 그 행의 저장 창을 띄운다(「저장할 곳 고르기」·보류 받기) — 묻는 중이고 아무도 맡지 않았을 때 1.
+/// v220(W10b): 목록 창이 그 행의 저장 창을 띄운다(「저장할 곳 고르기」·보류 받기) — 묻는 중이고 아무도 맡지 않았을 때 1.
 pub export fn maru_macos_downloads_claim_ask(key: u64, out: ?*MaruDownloadAsk) i32 {
     const ask = out orelse return 0;
     const e = session_mod.web_downloads.claimAsk(key) orelse return 0;
@@ -5785,7 +5785,7 @@ pub export fn maru_macos_downloads_claim_ask(key: u64, out: ?*MaruDownloadAsk) i
     return 1;
 }
 
-/// v215(W10b): 저장 창의 답 — `kind` 0 고른 경로(`existed` 는 저장 창이 끝난 그때 그 경로에 무언가 있었는가 — 있었으면 저장 창이
+/// v220(W10b): 저장 창의 답 — `kind` 0 고른 경로(`existed` 는 저장 창이 끝난 그때 그 경로에 무언가 있었는가 — 있었으면 저장 창이
 /// 「바꿀까요?」를 물었다), 1 취소(받지 않는다), 2 치움(종료·창 닫힘 — 보류로 되돌린다). 묻는 중인 행이면 1.
 pub export fn maru_macos_downloads_answer_ask(key: u64, kind: u32, path: ?[*]const u8, path_len: usize, existed: u32) i32 {
     const wd = session_mod.web_downloads;
@@ -5809,7 +5809,7 @@ pub export fn maru_macos_app_session_take_show_downloads_request(session: ?*AppS
     return @intFromBool(app.takeShowDownloadsRequest());
 }
 
-/// v212(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다(enter 전에 실어야 한다).
+/// v217(W6l②): 그 자리가 Chromium 탭 본문이면 1 — 끌어 온 이미지 데이터를 그때 파일로 만든다(enter 전에 실어야 한다).
 pub export fn maru_macos_app_session_osr_drag_over_body(session: ?*AppSession, x_px: f64, y_px: f64) c_int {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDragOverBody(app, x_px, y_px));
@@ -5825,14 +5825,14 @@ pub export fn maru_macos_app_session_osr_drag_drop(session: ?*AppSession, x_px: 
     return session_mod.web_ops.osrDragDrop(app, x_px, y_px, mods);
 }
 
-/// v206(W6d②): 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기(번호)다 — Chromium 본문에 들어가면 그 데이터로 enter 한다. 그
+/// v211(W6d②): 이 끌기는 maru 의 Chromium 탭에서 시작한 그 끌기(번호)다 — Chromium 본문에 들어가면 그 데이터로 enter 한다. 그
 /// 끌기가 이미 끝났으면(원래 탭·창이 닫혔다·sidecar 가 다시 떴다) 0 — Swift 는 pasteboard 로 간다.
 pub export fn maru_macos_app_session_osr_drag_set_source(session: ?*AppSession, drag: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDragSetSource(app, drag));
 }
 
-/// v206(W6d②): 페이지가 시작한 끌기를 이 창이 가져간다(그 탭을 왼쪽으로 누른 채일 때만 — 아니면 sidecar 에 취소로 답한다).
+/// v211(W6d②): 페이지가 시작한 끌기를 이 창이 가져간다(그 탭을 왼쪽으로 누른 채일 때만 — 아니면 sidecar 에 취소로 답한다).
 /// 가져갔으면 끌기 번호(0 이 아니다)와 허용 동작·그림 크기(DIP)·그림 안 잡은 자리를 채운다.
 pub export fn maru_macos_app_session_osr_drag_out_take(session: ?*AppSession, allowed: ?*u32, hotspot_x: ?*i32, hotspot_y: ?*i32, image_width: ?*u32, image_height: ?*u32) u32 {
     const app = session orelse return 0;
@@ -5845,7 +5845,7 @@ pub export fn maru_macos_app_session_osr_drag_out_take(session: ?*AppSession, al
     return info.drag;
 }
 
-/// v206(W6d②): 가져간 끌기의 조각(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG, W6d③ 5 파일 이름(안전하게 고친 것 — 이미지 확장자가
+/// v211(W6d②): 가져간 끌기의 조각(0 글·1 HTML·2 주소·3 주소 제목·4 그림 PNG, W6d③ 5 파일 이름(안전하게 고친 것 — 이미지 확장자가
 /// 아니거나 파일을 받아 두지 않았으면 빈 것)) — `out` 이 null 이면 길이만. 넘치면 0(길이로 다시 부른다).
 pub export fn maru_macos_app_session_osr_drag_out_part(session: ?*AppSession, drag: u32, part: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
     const app = session orelse return 0;
@@ -5858,25 +5858,25 @@ pub export fn maru_macos_app_session_osr_drag_out_part(session: ?*AppSession, dr
     return 1;
 }
 
-/// v206(W6d②): 세션이 열렸다 — 그 탭의 제스처를 조용히 끝낸다(떼기를 보내지 않는다).
+/// v211(W6d②): 세션이 열렸다 — 그 탭의 제스처를 조용히 끝낸다(떼기를 보내지 않는다).
 pub export fn maru_macos_app_session_osr_drag_out_started(session: ?*AppSession, drag: u32) void {
     const app = session orelse return;
     session_mod.web_ops.osrDragOutStarted(app, drag);
 }
 
-/// v207(W6d③): 가져간 끌기가 받아 둔 이미지 파일 내용의 크기(안전한 이름이 없으면 0 — 파일을 만들지 않는다).
+/// v212(W6d③): 가져간 끌기가 받아 둔 이미지 파일 내용의 크기(안전한 이름이 없으면 0 — 파일을 만들지 않는다).
 pub export fn maru_macos_app_session_osr_drag_out_file_size(session: ?*AppSession, drag: u32) u32 {
     const app = session orelse return 0;
     return session_mod.web_ops.osrDragOutFileSize(app, drag);
 }
 
-/// v207(W6d③): Finder 가 파일을 청했다 — 그 번호의 내용을 sidecar 에 청한다(끌기가 끝난 뒤여도 된다). 청할 수 없으면 0.
+/// v212(W6d③): Finder 가 파일을 청했다 — 그 번호의 내용을 sidecar 에 청한다(끌기가 끝난 뒤여도 된다). 청할 수 없으면 0.
 pub export fn maru_macos_app_session_osr_drag_file_request(session: ?*AppSession, drag: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDragFileRequest(app, drag));
 }
 
-/// v207(W6d③): 청한 파일 내용 — 0 아직(또는 `cap` 이 모자라 옮기지 못했다), 1 다 왔다(`out` 이 있고 `cap` 이 넉넉하면 옮겨 적고
+/// v212(W6d③): 청한 파일 내용 — 0 아직(또는 `cap` 이 모자라 옮기지 못했다), 1 다 왔다(`out` 이 있고 `cap` 이 넉넉하면 옮겨 적고
 /// 놓는다, null 이면 길이만), -1 실패(놓는다).
 pub export fn maru_macos_app_session_osr_drag_file_poll(session: ?*AppSession, drag: u32, out: ?[*]u8, cap: usize, out_len: ?*usize) i32 {
     const app = session orelse return -1;
@@ -5897,26 +5897,26 @@ pub export fn maru_macos_app_session_osr_drag_file_poll(session: ?*AppSession, d
     return 1;
 }
 
-/// v208(W6g): 창이 뒤에 있을 때 그 자리(창 backing px)의 첫 누름을 view 에 넘기는가 — Chromium 탭 본문이면 1(`acceptsFirstMouse`).
+/// v213(W6g): 창이 뒤에 있을 때 그 자리(창 backing px)의 첫 누름을 view 에 넘기는가 — Chromium 탭 본문이면 1(`acceptsFirstMouse`).
 pub export fn maru_macos_app_session_osr_accepts_first_mouse(session: ?*AppSession, x_px: f64, y_px: f64) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrAcceptsFirstMouse(app, x_px, y_px));
 }
 
-/// v207(W6d③): 청한 파일 내용을 기다리다 그만뒀다 — 놓는다.
+/// v212(W6d③): 청한 파일 내용을 기다리다 그만뒀다 — 놓는다.
 pub export fn maru_macos_app_session_osr_drag_file_release(session: ?*AppSession, drag: u32) void {
     const app = session orelse return;
     session_mod.web_ops.osrDragFileRelease(app, drag);
 }
 
-/// v206(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px — NaN 이면 시작 자리, 음수는 정상 좌표)와 받은 동작(`NSDragOperation`,
+/// v211(W6d②): 끌기 세션이 끝났다 — 놓인 자리(창 backing px — NaN 이면 시작 자리, 음수는 정상 좌표)와 받은 동작(`NSDragOperation`,
 /// 0 = 취소). 그 끌기가 아니면 0.
 pub export fn maru_macos_app_session_osr_drag_out_end(session: ?*AppSession, drag: u32, x_px: f64, y_px: f64, operation: u32) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.osrDragOutEnd(app, drag, x_px, y_px, operation));
 }
 
-/// v197(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.
+/// v202(W4c): 키 한 번(phase 0 누름·1 쥐어 둠·2 뗌). 키 대상이 Chromium 탭이면 1.
 pub export fn maru_macos_app_session_osr_key(session: ?*AppSession, phase: i32, key_code: u32, character: u32, unmodified: u32, mods: i32) i32 {
     const app = session orelse return 0;
     const key: session_mod.web_ops.OsrKey = .{
@@ -5928,7 +5928,7 @@ pub export fn maru_macos_app_session_osr_key(session: ?*AppSession, phase: i32, 
     return @intFromBool(session_mod.web_ops.osrKey(app, phase, key));
 }
 
-/// v197(W4c): 메뉴 편집 명령을 키 대상 Chromium 탭에.
+/// v202(W4c): 메뉴 편집 명령을 키 대상 Chromium 탭에.
 pub export fn maru_macos_app_session_osr_edit(session: ?*AppSession, command: i32) i32 {
     const app = session orelse return 0;
     if (command < 0 or command > 255) return 0;
@@ -5936,13 +5936,13 @@ pub export fn maru_macos_app_session_osr_edit(session: ?*AppSession, command: i3
     return @intFromBool(session_mod.web_ops.osrEdit(app, kind));
 }
 
-/// v197(W4c): 입력기의 키 동작 명령(deleteBackward 밖).
+/// v202(W4c): 입력기의 키 동작 명령(deleteBackward 밖).
 pub export fn maru_macos_app_session_ime_command(session: ?*AppSession) void {
     const app = session orelse return;
     _ = session_mod.web_ops.osrImeCommand(app, false);
 }
 
-/// v197(W4c): Zig 가 끝낸 조합을 입력기 세션에서도 버리라는 요청(한 번).
+/// v202(W4c): Zig 가 끝낸 조합을 입력기 세션에서도 버리라는 요청(한 번).
 pub export fn maru_macos_app_session_take_osr_discard_marked(session: ?*AppSession) i32 {
     const app = session orelse return 0;
     return @intFromBool(session_mod.web_ops.takeOsrDiscardMarked(app));

@@ -284,6 +284,10 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, e
         const kick = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}";
         try host.send(.{ .set_hidden = .{ .browser = browser_id, .value = true } });
         r.pump(800);
+        // 정말 숨었는가 — 아니면 kick 없이도 답해 아무것도 증명하지 않는다(W9b②-3 적대 리뷰 2 회차).
+        const vc = try r.call("Runtime.evaluate", "{\"expression\":\"document.visibilityState\",\"returnByValue\":true}");
+        _ = r.wait(vc, 5_000);
+        const really_hidden = std.mem.indexOf(u8, r.result.items, "\"value\":\"hidden\"") != null;
         const dc = try r.call("Runtime.evaluate", "{\"expression\":\"document\"}");
         const dd = r.wait(dc, 5_000);
         var doc_buf: [256]u8 = undefined;
@@ -331,8 +335,8 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, e
         _ = r.wait(k3, 5_000);
         try host.send(.{ .set_hidden = .{ .browser = browser_id, .value = false } });
         r.pump(500);
-        const ok = dd != null and doc.len > 0 and unblocked and qd != null and qd.?.status == .ok and q_ms < 5_000 and md != null and md.?.status == .ok and m_ms < 1_500;
-        report(ok, "dt-hidden-kick", std.fmt.bufPrint(&detail, "질의만 {s}(정보 — 답하면 Chromium 이 고쳤다) · kick 이 풂 {} · 질의+kick {s} {d} ms · 이동+kick {s} {d} ms", .{ if (bare_d) |b| @tagName(b.status) else "답 없음", unblocked, statusName(qd), q_ms, statusName(md), m_ms }) catch "");
+        const ok = really_hidden and dd != null and doc.len > 0 and bare_d == null and unblocked and qd != null and qd.?.status == .ok and q_ms < 5_000 and md != null and md.?.status == .ok and m_ms < 1_500;
+        report(ok, "dt-hidden-kick", std.fmt.bufPrint(&detail, "숨김 {} · 질의만 {s}(답하면 Chromium 이 고쳤다 — kick 을 걷어낼 신호) · kick 이 풂 {} · 질의+kick {s} {d} ms · 이동+kick {s} {d} ms", .{ really_hidden, if (bare_d) |b| @tagName(b.status) else "답 없음", unblocked, statusName(qd), q_ms, statusName(md), m_ms }) catch "");
     }
     // dt-busy — 인자를 다 보내지 않은 호출 하나와 CDP 로 보내 답을 기다리는 호출(끝나지 않는 Promise) 하나가 탭의 자리를 차지한다
     // (이 둘은 dt-closed 가 끝낸다).

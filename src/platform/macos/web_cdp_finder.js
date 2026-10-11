@@ -306,7 +306,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
         if (ariaHidden(t) || !visible(t)) { hidden++; continue; }
         // click/hover on a tiny control (sr-only 1x1 checkbox of a toggle) goes to its visible label - the label activates it (round 4);
         // only a label that is not tiny itself and holds no other control (round 5: its center was a Terms link - the link was pressed)
-        if ((ACTION === 'click' || ACTION === 'hover') && ls) {
+        if ((ACTION === 'click' || ACTION === 'hover' || ACTION === 'wait') && ls) { // wait: matched is what click presses (round 2)
           var tr = gbr.call(t);
           if (!(tr.width > 2 && tr.height > 2)) for (var k2 = 0; k2 < ls.length; k2++) {
             var lb2 = ls[k2], lr = gbr.call(lb2), oc = qsaE.call(lb2, CTL), only = true;

@@ -893,4 +893,14 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
     text wait 의 ambiguous 가 click 과 어긋났다(1 px span 둘 → wait 은 여럿, click 은 하나) → click 처럼 바꿔 세기. nth 의 hidden 수 → 판정한 수.
     시한의 hidden 이 CLI 에 안 보였다 → `hint:`. kick 재시도 횟수를 op 전체가 나눠 썼다 → 보낸 뒤 0 으로. CLI 메시지.
   - 버틴 것: kick 순서(조각난 주 호출도 그 뒤), 재시도로 두 번 보내지 않음, rel_then 의 놓기·소유, 판정 순번(null 자리 보존), 숨은 탭 입력(mouseMoved 만 느리다), 판정자 8/8, pane-once 가드.
+- **2 회차**(실측 — 페이지 main thread 가 막힌 비율을 MessageChannel 로 쟀다):
+  - 중: 1 회차의 간격 2 초 상한이 「1/5 아래」 를 깼다 — 숨은 탭 2.5 만 요소 role wait 동안 페이지가 58 % 막혔다 → 상한을 없애고 질의 시간은 직전 두 번 가운데 작은 것
+    (부푼 한 번을 거른다), 첫 번째만 0.5 초까지.
+  - 중: 「wait 이 보인다」 와 「click 이 된다」 가 덮개·모달·접힌 아코디언·clip·opacity 0 에서 어긋났다 → 계약에 「보임은 누를 수 있음이 아니다」.
+  - 하: 마감 판단이 다음 잠을 빼고 셌다(넘침 5 초 — 서버 30 초에 닿음) → 잠까지 넣는다, 쉼이 남은 시간보다 길면 마지막 확인이 시한 즈음 끝나게 일찍 깬다
+    (시한까지 자고 깨면 확인 없이 시한이었다 — 시험을 쓰다 찾았다).
+  - 하: label wait 의 matched 가 click 이 누를 label 이 아니라 1 px 체크박스였다 → wait 도 label 로. 철회가 덮임 검사용 객체를 놓지 않았다 → 그 단계도.
+    판정자가 정말 숨었는지 보지 않았다 → `visibilityState` 를 본다.
+  - 버틴 것: 스모크가 wait 의 kick 을 증명함(kick 없으면 8 초 동안 rAF 0), 보이는 탭 kick 의 부작용 0(이벤트 여덟 종·hasFocus·크기), canvas 페이지 CPU·GPU 차이 없음,
+    text wait 이 click 과 같이 셈, 철회 중 소유, WebKit 경로, 크기 검사 비용.
 

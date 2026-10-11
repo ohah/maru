@@ -893,7 +893,7 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 본문·diff 배치는 어차피 신규다. 레거시 접촉(`context_menu`·`dropdown`)은 N2·N4로 밀려 있어, 그 사이 이관이
 도착하면 새 형태에 붙고 안 오면 붙였다가 함께 움직인다. **동시 진행 시 편집기 쪽 변경은 확장에 한정**한다.
 
-### 다중 커서·여러 블록 편집 연산 결함과 계약 이탈 (2026-10-11 발견 — 미착수. 이 라벨을 떼는 PR: 결함 11 의 후속 이동(다섯 클라이언트 — 계기 1), 판정자를 세울지의 결정, 아래 「이동 단계」가 모두 끝나는 마지막 PR. 결함 1~11 은 2026-10-11 수정 PR 들이 재현하고 고쳤다)
+### 다중 커서·여러 블록 편집 연산 결함과 계약 이탈 (2026-10-11 발견 — 미착수. 이 라벨을 떼는 PR: 결함 11 의 후속 이동(다섯 클라이언트 — 계기 1), 판정자를 세울지의 결정, 아래 「이동 단계」가 모두 끝나는 마지막 PR. 결함 1~11 은 2026-10-11 수정 PR 들이, 12~14 는 이동 단계 5 가 재현하고 고쳤다)
 
 [AppSession 이식 측정](app-session-portability.md) 중에 나왔다. 이 절이 목록·결함·할 일과 이동 단계를 소유하고, 근거(실험 — 원본 L2 를 복사한 독립 test, 제품 빌드는 미확인 — 와 판정자 사각)는 그 문서 §2 「발견한 결함」에 있다(여섯째 후보는 같은 §2 의 「요청 규율의 반복」). 결함 6~10 은 그 측정 뒤 재현 단계에서 나왔고 근거는 아래 표의 회귀 test 다.
 
@@ -902,7 +902,7 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 - 그 밖에 복사(`copySelection` — 문서를 바꾸지 않지만 선택·문서로 결과를 정하는 판정, L2 자리는 `session/editor/clipboard.zig` 옆), 잘라내기(`cutSelection` — 빈 선택이면 줄 전체라는 복사의 규칙을 복제했다), 선택을 바꾸는 판정(`moveCarets`·`movedOffset`·`addCursorVertically`·`addNextOccurrence`·`selectWordOrLineAt`·`toggleCursorAt` — L2 잎 `motion` 등을 L4 에서 섞어 부른다), 선택으로 결과를 정하는 Tab 의 들여쓰기 판정(`selectionSpansLines` — 허브가 쓴다), `completion.accept` 의 caret 이동 계산, 그리고 `backup`·`conflict` 에도 있다. `workspace_edit` 은 변경 구성이 이미 L2(`lsp.text_edits.toChanges`·`inverseOf`)이고, 남은 판정(revision stale·저장 정책·되돌리기 해시 대조)은 LSP 응답을 적용하는 클라이언트 정책이라 이 목록이 아니라 두 계기를 따른다.
 - 옮기는 때는 [이식 계획](app-session-portability.md) §4 D1 이 정했다(사용자 결정 2026-10-11). 아래 「이동 단계」를 따라 지금부터 차례로 계약의 자리(대개 L2)로 옮긴다. 그 사이 그 순수 부분의 의미를 바꾸는 PR 이나 다른 호스트가 그 함수를 필요로 하는 PR 이 오면 단계를 기다리지 않고 그 PR 에서 옮긴다. IME·OS·tree-sitter 와 얽힌 자리는 갈라서 옮길 수 있으면 갈라서 옮기고, 갈라도 못 옮기면 사용자와 논의한다. 수정 커밋을 먼저, 이동 커밋을 나중에 둔다.
 
-**결함**(열하나 — 2026-10-11 수정 PR 들이 제품 L4 test 로 모두 재현했고(고치기 전 빨강을 확인), 고친 뒤 초록이다. 결함 10 은 수정 전 범위 계산을 옮긴 임시 test 로 재현했다)
+**결함**(열넷 — 2026-10-11 수정 PR 들이 제품 L4 test 로 모두 재현했고(고치기 전 빨강을 확인), 고친 뒤 초록이다. 결함 10 은 수정 전 범위 계산을 옮긴 임시 test 로 재현했다)
 
 | # | 함수 | 증상 | 재현 조건 | 회귀 test |
 |---|---|---|---|---|
@@ -917,8 +917,11 @@ GPU 로 그리는 편집기의 가장 가까운 선례(VS Code 실험 GPU 렌더
 | 9 | `cutSelection` | 복사하지 않은 글자(빈 caret 의 다음 글자)가 지워진다 | 선택과 빈 caret 이 섞인 잘라내기 | CUT2 |
 | 10 | `deleteLines` | 끝 개행까지 지워진다(`"a\nb\n"` → `"a"`) | 개행이 있는 마지막 내용 줄 | LNM3 |
 | 11 | `fold_lsp`·`highlight`·`inlay`·`semantic`·`symbols` | 응답 decode 의 할당이 실패하면 조용 시계 없이 다음 프레임에 같은 요청을 다시 보낸다(`semantic` 은 실패를 기억도 안 했다) | 메모리가 모자랄 때 응답이 온다(할당 실패 주입) | LSPQ1~5 |
+| 12 | `pasteText` | 조각이 한 칸씩 밀려 들어간다 | primary 가 문서상 첫 커서가 아닌 다중 커서(⌥⌘↓ 가 primary 를 맨 아래로 보낸다)로 복사 → 붙여넣기 | PASTE9 |
+| 13 | `pasteText`·`deleteBy` | 변경을 안 낸 커서가 다음 커서의 caret 을 받는다 — 커서가 합쳐져 사라지거나 엉뚱한 줄로 뛴다 | 문서 처음의 Backspace · 같은 줄 커서 둘의 줄 단위 붙여넣기 | DEL6·PASTE10 |
+| 14 | `conflict.confirmReload` | 모든 caret 이 문서 처음으로 간다([editor-surface](../editor-surface.md) 「외부 변경을 받아들일 때 … undo/cursor 를 깨지 않는다」와 어긋난다) | 저장 충돌 상자에서 「다시 읽기」 | C1a-12 |
 
-고친 방식: 줄 연산은 `applyLineEdit` 가 편집 **뒤** 선택(`after`)을 받아 caret 을 매핑 대신 직접 정한다(1·6·7·8). 연속한 줄은 한 덩어리로 지운다(2·10 — 앞 개행을 먹는 것은 개행이 없는 마지막 줄뿐). Enter 와 `insertTextWithRange` 는 처음부터 문서 순서 스냅숏(`selectionsForEdit`)으로 변경을 쌓고, 커서마다 자기 첫 변경의 인덱스를 기억한다(3·4·5). 섞인 잘라내기는 고른 것만 지우고 빈 caret 을 지운 만큼 당긴 제자리에 되돌린다(9 — 문서 모델 §3.4). 들여쓰기·주석 토글의 caret 은 재현 단계에서 결함이 아님을 확인하고 LNM8 로 고정했다.
+고친 방식: 줄 연산은 `applyLineEdit` 가 편집 **뒤** 선택(`after`)을 받아 caret 을 매핑 대신 직접 정한다(1·6·7·8). 연속한 줄은 한 덩어리로 지운다(2·10 — 앞 개행을 먹는 것은 개행이 없는 마지막 줄뿐). Enter 와 `insertTextWithRange` 는 처음부터 문서 순서 스냅숏(`selectionsForEdit`)으로 변경을 쌓고, 커서마다 자기 첫 변경의 인덱스를 기억한다(3·4·5). 섞인 잘라내기는 고른 것만 지우고 빈 caret 을 지운 만큼 당긴 제자리에 되돌린다(9 — 문서 모델 §3.4). 들여쓰기·주석 토글의 caret 은 재현 단계에서 결함이 아님을 확인하고 LNM8 로 고정했다. 붙여넣기·단위 지우기는 문서 순서 스냅숏으로 변경을 짓고 커서마다 낸 변경의 인덱스(없으면 비움)를 기억해, 변경을 낸 커서만 넣은 글 뒤로 옮긴다 — 안 낸 커서는 편집을 따라 밀린 제자리다(12·13). 다시 읽기는 같은 앞뒤를 변경 밖에 두고 코드포인트 경계에서 자른다(14).
 
 **고치기 전에 알아 둘 것**(측정이 코드에서 확인한 사실)
 - `insertTextWithRange`·`deleteBy` 는 caret 을 직접 정한다 — `delta.mapOffset` 에 맡기지 않는다(예외: `insertTextWithRange` 의 IME `.preserve_primary` 갈래는 primary 를 `mapOffset` 으로 옮긴다). 줄 연산은 수정 뒤 `applyLineEdit` 의 `after` 로 caret 을 직접 정한다(들여쓰기·대소문자·주석 토글은 매핑 그대로). `mapOffset` 은 삽입 지점에 정확히 있는 offset 을 밀지 않고, 바뀐 범위 안의 offset 은 범위 시작으로 접는다. 「매핑에 맡기지 않는다」 주석이 `insertTextWithRange` 의 caret 루프 위와 `deleteBy` 에 있다(EDIT1·EDIT5).

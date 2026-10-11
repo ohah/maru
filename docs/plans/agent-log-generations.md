@@ -5,7 +5,8 @@
 설계 확정. 사용자는 명시적인 세대 ID와 offset의 공통 계약에 이어 native 기록기
 방식으로 후속 구현을 진행하도록 승인했다(2026-10-11). 아래는 단계별 구현 계획이며
 각 단계의 라이브 배선과 OS 검증이 완료되기 전에는 제품 지원 완료를 뜻하지 않는다.
-1단계 순수 codec과 reconciliation은 구현됐고 native 기록기부터 라이브 배선은 후속이다. peer ACK는 별도 범위다.
+1단계 순수 codec과 reconciliation, 2단계 native I/O 기반은 구현됐다.
+제품 훅의 기본 활성화와 reader/wire 라이브 배선은 후속이며 peer ACK는 별도 범위다.
 
 ## 현재 경로와 필요한 변경
 
@@ -209,3 +210,37 @@ slot algorithm/path golden과 여러 이름의 실제 파일 수를 검사한다
 
 최종 검증: macOS Debug/ReleaseFast와 실제 Linux 단위 112개 및 process 검사가 통과했다.
 Windows cross compile, native build, 전체 check-targets/check-boundaries와 문서 검사도 통과했다.
+
+## 2b 기록 entrypoint와 훅 호출 경로
+
+`maru agent-hooks record --file=<absolute .ndjson path>`는 접힌
+`provider<TAB>payload<LF>` 한 줄만 stdin으로 받는다. 반복 옵션·추가 인자·빈 입력·
+여러 줄·상한 초과는 쓰기 전에 거부하고, 성공 시 stdout 없이 종료한다.
+오류는 CLI의 비영 종료로 관측하며 생성된 훅은 stderr를 숨기고 항상 exit 0을 유지한다.
+
+POSIX adapter는 절대 경로의 각 디렉터리를 no-follow로 열고 최종 handle의
+실효 UID 소유권과 0700을 확인한다. 경로를 만들거나 chmod하지 않는다.
+Windows는 ACL 인증 adapter가 완료되기 전에는 이 entrypoint의 기록을 거부한다.
+고정 슬롯 lock의 WouldBlock은 provider의 2초 timeout보다 짧은 하나의 deadline
+안에서 재시도한다. payload 내용과 파일 이름을 argv 진단에 싣지 않는다.
+
+native 훅 생성은 기존 stdin drain·payload 접기·pane 귀속·Codex 부모 PID·tmux
+sidecar 로직을 공유하고 마지막 append만 인용된 절대 binary 호출로 바꾼다.
+PATH에서 maru를 찾지 않으며 바이너리 경로가 사라지면 조용히 이벤트 기록을 포기한다.
+기존 v1에서도 `sh -e`의 append/sidecar 실패가 마지막 exit 0 전에 종료 코드 1을
+반환하는 것을 재현했다. 공통 생성기에서 두 쓰기의 실패를 흡수한다. 이 수정은
+v1 파일 포맷을 유지하지만 command bytes를 바꾸므로 기존 Codex 신뢰 갱신 절차를 따른다.
+native 설치 기본값은 아직 활성화하지 않는다.
+이 단계의 새 생성기는 fixture에서 실제 CLI로 검증하며 provider 설정에 설치하지 않는다.
+v1 reader/회전기와 구형 in-flight 훅을 v2 기록과 혼합하지 않도록, 기본 활성화는
+3·4단계 reader/회전·capability 이행과 함께 한다. 이 경계는 제품 전환 완료가 아니다.
+
+실제 프로세스 gate는 native command→CLI→파일을 대조하고 정상/상한/다중 기록,
+잠금 시간 초과·권한·디렉터리 링크·기록기 부재에서도 provider stdout/exit 계약을
+검사한다. 합성 HOME와 private temp만 사용하고 사용자 provider 설정은 수정하지 않는다.
+
+
+기록 CLI와 준비된 native 생성기가 구현됐다. 기존 v1과 native의 실패 종료 계약을
+실제 `sh -e`로 검사하며 CLI 도움말과 golden fixture도 함께 갱신했다.
+디렉터리 인증은 macOS의 held-fd fstat, Linux의 statx EMPTY_PATH를 사용한다.
+Windows는 인증 구현 전 UnsupportedPlatform으로 쓰기 전에 거부한다.

@@ -11,6 +11,8 @@
 //! (`/bin/sh -c "exit 0"` 8.04 ms, 훅 전체 12.27 ms). 스크립트가 `cat`·`mkdir`·`head`를 부르면 그만큼
 //! 프로세스가 더 뜨고 도구 호출마다 그 값이 얹힌다. 그래서 stdin은 셸 내장 `read`로 받고, 길이 제한은
 //! `${#var}`로 하고, 디렉터리는 **설치할 때 maru가 미리 만든다**(훅은 없으면 조용히 실패하고 나간다).
+//! 이 규칙은 기본 v1 build에 적용한다. 승인된 native 세대 이행의 buildNative는
+//! 파이프와 제품 CLI를 호출하며 전체 비용을 별도로 잰다(로그 세대 계획 2b).
 
 const std = @import("std");
 const event = @import("agent_hook_event.zig");
@@ -511,6 +513,32 @@ pub fn build(
     local_log_dir_abs: []const u8,
     remote_log_dir_abs: []const u8,
 ) error{ OutOfMemory, InvalidProvider }!void {
+    return buildImpl(out, allocator, provider, local_log_dir_abs, remote_log_dir_abs, null);
+}
+
+/// Prepared native command; installers keep using build until reader migration is complete.
+/// An absolute installed binary is quoted as one word: never resolve an untrusted PATH.
+pub fn buildNative(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    provider: []const u8,
+    local_log_dir_abs: []const u8,
+    remote_log_dir_abs: []const u8,
+    executable: []const u8,
+) !void {
+    if (executable.len == 0 or executable[0] != '/') return error.InvalidExecutable;
+    for (executable) |c| if (c == 0 or c == '\n' or c == '\r') return error.InvalidExecutable;
+    return buildImpl(out, allocator, provider, local_log_dir_abs, remote_log_dir_abs, executable);
+}
+
+fn buildImpl(
+    out: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+    provider: []const u8,
+    local_log_dir_abs: []const u8,
+    remote_log_dir_abs: []const u8,
+    executable: ?[]const u8,
+) error{ OutOfMemory, InvalidProvider }!void {
     // **provider 이름을 검증한다.** 이 값은 줄 앞에 그대로 적히므로 탭이나 개행이 들어오면 **모든 줄이
     // 깨진다**(구분자가 둘이 되거나 줄이 둘로 갈린다). 파서와 같은 규칙을 쓴다 — 두 곳이 기준이 다르면
     // «훅은 적었는데 파서는 못 읽는» 이름이 생긴다.
@@ -665,8 +693,16 @@ pub fn build(
     }
     // 옆 파일은 `>` 로 **덮어쓴다** — 이 값은 기록이 아니라 «지금 어디인가» 이고, append 하면 상한 없이 자란다.
     // tmux 밖이면 두 변수가 비어 이 파일이 빈 채로 남고, 순수 층이 그것을 `direct` 로 접는다.
-    try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" >> \"$mh_o\"; " ++
-        "if [ -n \"$mh_c\" ]; then printf '%s\\t%s\\n' \"$TMUX\" \"$TMUX_PANE\" > \"$mh_c\"; fi; }} 2>/dev/null; exit 0 ", .{provider});
+    if (executable) |binary| {
+        try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" | ", .{provider});
+        try appendQuoted(out, allocator, binary);
+        // || : is essential for provider shells launched with -e; exit 0 alone is too late.
+        try out.appendSlice(allocator, " agent-hooks record \"--file=$mh_o\" || :; ");
+    } else {
+        // Legacy provider shells can also use -e: redirection failure must not stop the turn.
+        try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" >> \"$mh_o\" || :; ", .{provider});
+    }
+    try out.appendSlice(allocator, "if [ -n \"$mh_c\" ]; then printf '%s\\t%s\\n' \"$TMUX\" \"$TMUX_PANE\" > \"$mh_c\" || :; fi; } 2>/dev/null; exit 0 ");
     try out.appendSlice(allocator, marker_comment);
 }
 

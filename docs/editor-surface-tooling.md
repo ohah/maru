@@ -663,11 +663,11 @@ caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집
 | **변환** | `TextEdit{range, newText}` 배열 → `delta.Change[]`: `range` 의 `{line, character}` 를 서버 인코딩으로 byte 에(`position.offsetOf`), `start` 오름차순 정렬(같은 start 의 삽입은 온 순서), **겹치면 전부 거부**(`error.Overlap`), 줄 밖은 문서 끝으로 clamp. `newText` 는 복사해 적용이 끝날 때까지 든다 | `Delta.isWellFormed` 의 불변식(정렬·비겹침)을 변환이 만든다 |
 | **revision** | 요청 때의 `document_state.State.notifications.lsp_version` 을 기억하고 응답 때 다르면 **버린다** + 알림 「문서가 바뀌어 포맷 결과를 버렸습니다」. 서버 응답에는 version 이 없으므로 클라이언트가 잰다 | §3.6 「revision 이 어긋나면 버린다」 |
 | **적용** | `applyEditAsOne` — 되돌리기 **하나**, selection 은 delta 가 민다(삭제 구간 안이면 시작으로), 스크롤 앵커 보존, caret 추종 | §3.6 세 규칙 · 「별도 경로를 만들지 않는다」 |
-| **트리거** | `format_document` — `⇧⌥F`(편집기 컨텍스트 ⑴ `⌘` 없는 `⌥`) · 팔레트 「Editor: Format Document」. 서버가 없거나 `documentFormattingProvider` 가 없으면 무동작. 응답이 빈 배열이면 무동작(이미 정리됨) | VS Code 키. 저장 시 자동 포맷은 「하지 않는 것」(§3.6 — 저장 경로는 editor-surface, 그리고 §8.1 의 tool_execute 판정이 선행) |
+| **트리거** | `format_document` — `⇧⌥F`(편집기 컨텍스트 ⑴ `⌘` 없는 `⌥`) · 팔레트 「Editor: Format Document」. 서버가 없거나 `documentFormattingProvider` 가 없으면 무동작. 응답이 빈 배열이면 무동작(이미 정리됨) | VS Code 키. 저장 시 포맷은 §8.2r(같은 요청·같은 적용 — `⌘S` 가 응답 뒤에 저장한다) |
 | **요청** | id `4e8+seq`, `options = {tabSize: editor.tab-width, insertSpaces: false}`. 보내기 전에 밀린 didChange 를 먼저 보낸다(`flushDocument`, §8.2d 와 같다). 나가 있는 요청이 있으면 **새 것이 대체**한다 — 앞 응답은 seq 가 달라 버려진다(구현이 되먹인 것: 「나가 있으면 무시」로 두면 답을 안 주는 서버(HANG) 뒤로 포맷이 영영 막힌다) | 위 ③ · 정의로 이동과 같은 seq 규율 |
 | **거부** | `Overlap`·`Malformed` 는 **아무것도 적용하지 않고** 알림 「포맷 결과를 거부했습니다 — 겹치거나 모양이 틀립니다」. 응답이 오류(`error` 멤버)면 결과 없음과 같이 무동작 | 위 ④ |
 | **적용 대상** | 요청한 **문서**(surface) — 탭을 옮겨 안 보여도 문서가 살아 있으면 적용한다(포맷은 화면이 아니라 문서에 하는 것 — hover·시그니처의 「보이는 Term 에만」과 다르다). 닫혔으면 버린다 | §3.6 은 문서 모델의 규칙이다 |
-| **하지 않는 것** | 저장 시 포맷 · 범위 포맷(`rangeFormatting`) · 타이핑 시 포맷 · rename(입력 UI 뒤) · `WorkspaceEdit`(여러 파일 — rename 과 함께) · 포맷 뒤 caret 을 「같은 글자」로 되돌리는 것 이상(줄바꿈이 재배치되면 근사) | 다음 조각 |
+| **하지 않는 것** | 범위 포맷(`rangeFormatting`) · 타이핑 시 포맷 · rename(입력 UI 뒤) · `WorkspaceEdit`(여러 파일 — rename 과 함께) · 포맷 뒤 caret 을 「같은 글자」로 되돌리는 것 이상(줄바꿈이 재배치되면 근사) | 다음 조각 |
 
 **관측점**: `LSJ8`(순수: formatting 요청 id·options·`textDocument/formatting` capability) · `TXE*`(순수: `TextEdit[]` → `Change[]` — 정렬·같은 start
 삽입 순서·겹침 거부·인코딩·줄 밖 clamp·빈 배열) · `FMT1`(제품 경계: 가짜 서버 — `⇧⌥F` 로 두 줄이 한 번에 바뀌고 undo 하나로 돌아오며 caret 이
@@ -1243,7 +1243,7 @@ JSON-RPC 프로브): 열면 `cargo check`(rustc) 진단이 오고, 오류를 **�
 | --- | --- | --- |
 | **capability** | `textDocument.synchronization.didSave: true`. 서버의 `textDocumentSync` 를 읽는다: 객체면 `save`(`true` 또는 `{includeText}`), 숫자·없음·`save: false` 면 미지원 | LSP 3.17 · ② |
 | **통지** | `saveDocument` 가 디스크 쓰기에 **성공한 뒤** `textDocument/didSave{textDocument{uri}, text?}` 한 통 — `includeText` 를 냈으면 저장한 본문을 싣는다. 보내기 전 `flushDocument`. 서버가 없거나 ready 가 아니거나 문서를 안 열었거나(크기 상한) 미지원이면 **아무것도 안 한다**(줄 서지 않는다) | ③④ |
-| **하지 않는 것** | `willSave`·`willSaveWaitUntil` · 저장 시 포맷/code action(§8.2e·§8.2h 그대로) · §8.2f 가 **열려 있지 않은** 파일을 디스크에 쓰는 것에 대한 통지(그 파일은 서버에 안 열려 있다 — `didChangeWatchedFiles` 는 별개) · 이름 없는 문서 | 다음 |
+| **하지 않는 것** | `willSave`·`willSaveWaitUntil` · 저장 시 code action(§8.2h 그대로 — 저장 시 포맷은 §8.2r) · §8.2f 가 **열려 있지 않은** 파일을 디스크에 쓰는 것에 대한 통지(그 파일은 서버에 안 열려 있다 — `didChangeWatchedFiles` 는 별개) · 이름 없는 문서 | 다음 |
 
 **관측점**: `LSJ17`(순수: capability 선언·`didSave` 통지 둘(text 유무)·`saveCapsFromResult` — 객체 `true`/`{includeText}`/`false`·숫자·없음) · `SAV1`(제품 경계: 가짜 서버 —
 저장이 `didSave` 를 보내고 그 앞에 밀린 didChange 가 먼저 가며(가짜가 본문 불일치를 진단으로 낸다) `includeText` 본문이 실리고, 저장 뒤 진단이 갈아 끼워진다) ·
@@ -1544,6 +1544,31 @@ id 칸) · `SYN42`·`SYN43`(tree-sitter 조상 사슬·상한) · `SSEL14`(키 �
 드러내기·비교 뷰 팔레트). 카운터 `editor_smart_select.{sent, applied, dropped_stale, dropped_error, timeout_fallback, layer1_only}`·
 `editor_lsp.{sent_selection_range, received_selection_range}`. 가짜 서버 표식 `SSRNONE`·`SSRSTALL`·`SSRERR`·`SSRSHORT`, `MARU_FAKE_LSP_NOSRCAP=1`.
 캡처 훅 `MARU_FORCE_SMART_SELECT=<N>`(서버가 문서를 연 뒤 N 번 — `lsp.enabled = false` 면 1층을 곧바로).
+
+### 8.2r 저장 시 포맷 (2026-10-11, 사용자 결정 — [계획](plans/editor-format-on-save.md))
+
+§8.2e 의 문서 포맷을 사용자의 `⌘S` 앞에 둔다. 요청·변환·revision 검증·적용은 §8.2e 그대로이고, 새로 서는 것은 **「응답(또는 시한) 뒤에 저장한다」**
+하나다 — 저장은 동기(메인 스레드 쓰기)이고 포맷 응답은 비동기라, 그 사이에 기다림 상태가 하나 선다(`format.State.then_save`).
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **설정** | `editor.format-on-save`(기본 `true`) | 2026-10-11 사용자 결정 — VS Code `editor.formatOnSave` 는 기본 끔, Zed `format_on_save` 는 켬. 서버는 신뢰한 저장소에서만 뜨므로(§8.2a) 신뢰 전 저장소는 늘 곧바로 저장한다 |
+| **범위** | 사용자의 `⌘S`(`editor_save`)만. 프로젝트 바꾸기·이름 바꾸기(`WorkspaceEdit`)·충돌 상자의 덮어쓰기는 포맷하지 않는다(덮어쓰기는 이미 포맷된 그 저장의 결말이다). 이름 없는 문서·원격 문서는 서버에 열리지 않아 곧바로 저장한다 | 2026-10-11 사용자 결정 「사용자의 ⌘S만」 — 여러 파일 저장이 파일마다 서버를 기다리고 바꾸기 결과와 포맷 변경이 섞이지 않게(VS Code 도 `applyEdit` 저장은 포맷하지 않는다) |
+| **요청** | 설정이 켜져 있고 그 문서의 서버가 ready 이며 `documentFormattingProvider` 를 냈고 문서가 읽기 전용·비교 뷰가 아니면 §8.2e 의 요청을 보내고 **저장을 미룬다**. 아니면 곧바로 저장한다(알림 없음 — 포맷할 수 없는 것은 실패가 아니다) | §8.2e 「서버가 없거나 … 무동작」과 같은 판정(`readyClientFor`) |
+| **응답** | §8.2e 대로 적용하고(되돌리기 하나 — 저장 앞의 편집과 따로 되돌린다) **그 뒤에 저장한다**(didSave 는 포맷된 본문으로 — §8.2k). 결과가 버려지면(낡은 revision — 기다리는 사이 타이핑 · 겹침/모양 · 오류 응답) **포맷 없이 지금 본문을 저장한다** — 저장은 포맷 때문에 사라지지 않는다. 알림은 「저장했다」까지 말한다(「포맷하는 사이 문서가 바뀌어 포맷 없이 저장했습니다」·「포맷 결과를 거부해 … 포맷 없이 저장했습니다」 — §8.2e 의 「버렸습니다」만 보면 저장도 안 된 줄 안다). 오류 응답은 결과 없음과 같다(알림 없이 저장) | 2026-10-11 사용자 결정 「시한 뒤 그냥 저장」의 취지 |
+| **시한** | 1 초(`format.save_format_timeout_ms`, `awakeMs` 기준). 넘기면 포맷 없이 저장하고 알린다 「언어 서버의 포맷이 늦어 포맷 없이 저장했습니다」. 늦게 온 응답은 seq 가 달라 버려진다. 시한은 언어 서버를 꺼도 잰다(`editor_lsp.pump` 첫머리) | 2026-10-11 사용자 결정. 1 초 — 사람이 저장이 늦다고 느끼기 전이고 정상 서버의 문서 포맷은 대개 그 안에 온다(VS Code 의 옛 `editor.formatOnSaveTimeout` 기본 750ms 와 같은 크기) |
+| **기다리는 동안** | 같은 문서의 `⌘S` 는 무동작(시한 안에 끝난다) · `⇧⌥F` 는 자리를 빼앗지 않는다(무동작) · **다른 문서의 `⌘S`** 는 기다리던 문서를 포맷 없이 먼저 저장하고 새 문서의 포맷을 기다린다(자리가 하나다 — 누른 저장을 잃지 않는다) · 기다리던 문서가 닫히면 할 것이 없다(닫기는 저장하지 않은 편집을 묻는다) | 기다림 자리는 §8.2e 와 같은 세션 하나 |
+| **늦은 알림** | 응답·시한 뒤의 저장 실패 알림은 §8.2a 의 늦은 응답 규칙대로 `showResponseNotice`(그사이 연 오버레이를 닫지 않는다). 외부 충돌은 그대로 묻는다(C1a) | `LATE5` 와 같은 규율 |
+| **응답의 출처** | formatting 응답은 **그 문서를 연 클라이언트가 보낸 것만** 받는다(`format.onClientResponse` — `findDoc`). seq 는 클라이언트(저장소 × 서버)마다 따로 세므로, 다른 저장소의 서버가 늦게 보낸 같은 번호의 응답이 기다리는 문서에 적용될 수 있었다(그 문서의 revision 은 그대로라 검증을 지난다). 남의 응답은 버리지도 적용하지도 않는다 — §8.2e 의 `⇧⌥F` 에도 같다 | 적대적 검증 4회차 — 「다른 문서의 `⌘S`」가 이 길을 쉽게 열었다 |
+| **읽기 전용 문서** | 포맷을 묻지 않고 곧바로 저장을 시도해 「읽기 전용 파일이라 저장하지 않았습니다」를 알린다. 예전 `⌘S` 는 이 이유(`ReadOnly`)를 쓰기 오류 집합으로 `@errorCast` 해 **panic** 했다(이 조각의 판정자가 드러냈다) | §3.9d 「저장 실패는 이유별로 말한다」 |
+| **선택 없는 문서** | 열고 caret 을 한 번도 놓지 않은 문서(선택이 null)도 포맷한다 — 맨 앞을 임시 caret 으로 적용하고 다시 null 로 둔다(`applyEditAsOneWithUndo`). 예전 `applyEditAsOne` 은 선택이 없으면 조용히 실패해 「열고 바로 `⇧⌥F`」도 포맷되지 않았다(이 조각의 판정자가 드러냈다) | §3.6 「실패하면 문서가 그대로다」는 실패를 말해야 한다 |
+| **하지 않는 것** | 저장 시 code action(`source.organizeImports` 등) · 타이핑 시 포맷 · 언어별 켜고 끄기 · 시한 설정 키 · 모두 저장(없다) · `willSaveWaitUntil` | 다음 |
+
+**관측점**: `FOS1`(제품 경계: 가짜 서버 — `⌘S` 가 요청 하나를 보내고 응답 전엔 디스크가 그대로, 응답 뒤 두 줄이 되돌리기 하나로 바뀌고 저장·didSave;
+기다리는 동안 같은 문서의 `⌘S`·`⇧⌥F` 무동작; 설정 끔·포맷 못 하는 서버는 곧바로 저장; 낡은 revision·겹침은 알리고 포맷 없이 저장; `FMTSTALL`
+(가짜가 답하지 않는다)은 시한 전엔 기다리고 시한 뒤 포맷 없이 저장·알림(시한은 구조 필드로 당긴다); 다른 문서의 `⌘S` 는 기다리던 것을 먼저 저장) ·
+`FOS2`(소스 판정 — lsp.zig 는 formatting 응답을 `onClientResponse` 로만 넘긴다) · `LATE5`(응답 함수의 알림 자리 — 그대로) · `FMT1`·`FMT2`(§8.2e 그대로).
+FOS1 의 그 밖: 읽기 전용 문서는 요청 없이 그 자리에서 알림 · 그 문서를 열지 않은 클라이언트의 같은 번호 응답은 기다림을 그대로 둔다 · 응답 뒤의 저장 실패(파일이 지워짐)는 그사이 연 팔레트를 닫지 않고 알림을 미룬다 · 언어 서버를 꺼도 시한이 저장한다.
 
 ### 8.3 관측 가능성과 민감정보
 

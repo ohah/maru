@@ -22210,6 +22210,204 @@ test "FMT1 문서 포맷 — ⇧⌥F 로 두 줄이 한 응답에 바뀌고 되�
     try testing.expectEqualStrings("int x;\nint y;\n", content(term));
 }
 
+test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "fs.c", "int  x;\nint   y;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    try testing.expect(s.loaded_config.config.editor.format_on_save); // 기본 켬(2026-10-11 사용자 결정)
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    const Disk = struct {
+        buf: [256]u8 = undefined,
+        fn read(d: *@This(), fx: *PaneFixture, name: []const u8) ![]const u8 {
+            return fx.dir.dir.readFile(testing.io, name, &d.buf);
+        }
+    };
+    var disk: Disk = .{};
+    const settled = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_format.waiting;
+        }
+    }.g;
+
+    // ⑴ ⌘S — 요청 하나가 나가고 저장은 응답 뒤다(아직 디스크는 그대로). 응답이 오면 두 줄이 한 연산으로 바뀌고(되돌리기 하나) 저장되며 didSave 가 간다.
+    const undo0 = term.rt.editorDocument().history.undo_len;
+    const fmt0 = s.editor_lsp.sent_formattings;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(fmt0 + 1, s.editor_lsp.sent_formattings);
+    try testing.expect(s.editor_format.waiting and s.editor_format.then_save);
+    try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_saves);
+    try testing.expectEqualStrings("int  x;\nint   y;\n", try disk.read(&f.fx, "fs.c"));
+    // ⑴-a 기다리는 동안 같은 문서의 ⌘S 는 무동작(요청을 더 보내지 않는다), ⇧⌥F 도 자리를 빼앗지 않는다.
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expectEqual(fmt0 + 1, s.editor_lsp.sent_formattings);
+    try testing.expect(s.editor_format.then_save);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("int x;\nint y;\n", content(term));
+    try testing.expectEqual(undo0 + 1, term.rt.editorDocument().history.undo_len);
+    try testing.expectEqualStrings("int x;\nint y;\n", try disk.read(&f.fx, "fs.c"));
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_saves);
+    try testing.expect(!term.rt.editorDocument().opened.?.isDirty());
+    try testing.expect(!s.editor_format.then_save);
+
+    // ⑵ 설정을 끄면 곧바로 저장한다 — 요청이 나가지 않고 디스크에 고친 그대로.
+    term.rt.editor_selection = .{ .anchor_start = 3, .anchor_end = 3, .focus = 3 };
+    try testing.expect(insertText(s, term, " ")); // `int  x;`
+    s.loaded_config.config.editor.format_on_save = false;
+    const fmt1 = s.editor_lsp.sent_formattings;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(fmt1, s.editor_lsp.sent_formattings);
+    try testing.expect(!s.editor_format.waiting);
+    try testing.expectEqualStrings("int  x;\nint y;\n", try disk.read(&f.fx, "fs.c"));
+    s.loaded_config.config.editor.format_on_save = true;
+
+    // ⑶ 서버가 포맷을 못 하면 곧바로 저장한다(요청 없음).
+    const client = lsp_client.readyClientFor(s, term) orelse return error.NoClient;
+    client.formatting_supported = false;
+    try testing.expect(insertText(s, term, " ")); // `int   x;`
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(fmt1, s.editor_lsp.sent_formattings);
+    try testing.expectEqualStrings("int   x;\nint y;\n", try disk.read(&f.fx, "fs.c"));
+    client.formatting_supported = true;
+    // ⑶-a 읽기 전용 문서는 포맷을 묻지 않고 곧바로 저장을 시도해 그 자리에서 거절을 알린다(쓸모없는 요청 · 응답 뒤로 늦은 알림이 없다).
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(fmt1, s.editor_lsp.sent_formattings);
+    try testing.expect(!s.editor_format.waiting);
+    try testing.expect(s.chrome_host.notice.open);
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.editor_save_read_only))); // 예전 `⌘S` 는 여기서 panic 했다
+    s.chrome_host.notice.dismiss();
+    term.rt.editorDocument().opened.?.file.read_only = false;
+    // ⑶-b **다른 서버의 같은 번호는 받지 않는다** — seq 는 클라이언트마다 따로 센다. 그 문서를 열지 않은 클라이언트(다른 저장소·다른 서버)의
+    // 응답은 버리지도 적용하지도 않고(기다림이 그대로), 그 문서를 연 클라이언트의 응답만 받는다.
+    {
+        var stranger: lsp_client.Client = .{ .root = &.{}, .server = client.server };
+        s.editor_format.waiting = true;
+        s.editor_format.waiting_seq = 77;
+        s.editor_format.waiting_surface = term.surface.id;
+        s.editor_format.asked_version = term.rt.editorDocument().notifications.lsp_version;
+        format_client.onClientResponse(s, &stranger, 77, null, .utf8);
+        try testing.expect(s.editor_format.waiting);
+        format_client.onClientResponse(s, client, 77, null, .utf8);
+        try testing.expect(!s.editor_format.waiting);
+    }
+
+    // ⑷ 응답 전에 문서를 고치면 그 결과는 버리고(알림) **포맷 없이** 지금 본문을 저장한다 — 저장은 포맷 때문에 사라지지 않는다.
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(s.editor_format.then_save);
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "Z"));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("Zint   x;\nint y;\n", try disk.read(&f.fx, "fs.c"));
+    try testing.expect(!term.rt.editorDocument().opened.?.isDirty());
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.fmt_stale_saved))); // 「버렸다」만이 아니라 「저장했다」까지
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .fmt_stale_saved), "포맷 없이 저장") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .fmt_stale_saved), "saved without formatting") != null);
+    s.chrome_host.notice.dismiss();
+
+    // ⑸ 겹치는 결과는 거부하고(알림) 포맷 없이 저장한다.
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "BADFMT "));
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("BADFMT Zint   x;\nint y;\n", try disk.read(&f.fx, "fs.c"));
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.fmt_rejected_saved)));
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .fmt_rejected_saved), "포맷 없이 저장") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .fmt_rejected_saved), "saved without formatting") != null);
+    s.chrome_host.notice.dismiss();
+
+    // ⑹ 서버가 답하지 않으면(`FMTSTALL`) 시한 뒤 포맷 없이 저장하고 알린다 — 시한은 구조 필드로 당긴다(벽시계를 기다리지 않는다).
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "FMTSTALL "));
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(s.editor_format.then_save);
+    try testing.expect(s.editor_format.save_deadline_ms >= s.awakeMs()); // 시한은 앞날이다 — 곧바로 넘지 않는다
+    lsp_client.pump(s);
+    try testing.expect(s.editor_format.then_save); // 시한 전에는 기다린다
+    s.editor_format.save_deadline_ms = 0;
+    lsp_client.pump(s);
+    try testing.expect(!s.editor_format.waiting and !s.editor_format.then_save);
+    try testing.expectEqual(@as(u64, 1), s.editor_format.save_timeouts);
+    try testing.expectEqualStrings("FMTSTALL BADFMT Zint   x;\nint y;\n", try disk.read(&f.fx, "fs.c"));
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.fmt_save_timeout)));
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .fmt_save_timeout), "without formatting") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .fmt_save_timeout), "포맷 없이") != null);
+    s.chrome_host.notice.dismiss();
+    try removeMarkerHover(s, term, "FMTSTALL ");
+    try removeMarkerHover(s, term, "BADFMT ");
+
+    // ⑺ 기다리는 동안 **다른 문서**의 ⌘S — 기다리던 문서를 포맷 없이 먼저 저장하고 새 문서의 포맷을 기다린다(누른 저장을 잃지 않는다).
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "FMTSTALL "));
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(s.editor_format.then_save);
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "g.c", .data = "int  g;\n" });
+    const other_path = try std.fs.path.join(allocator, &.{ f.root_buf[0..f.root_len], "g.c" });
+    defer allocator.free(other_path);
+    const other = (try pane_ops.openFileTermInActivePane(s, other_path, .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 3000, other, struct {
+        fn g(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    }.g));
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqualStrings("FMTSTALL Zint   x;\nint y;\n", try disk.read(&f.fx, "fs.c"));
+    try testing.expect(s.editor_format.then_save);
+    try testing.expectEqual(other.surface.id, s.editor_format.waiting_surface);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("int g;\n", try disk.read(&f.fx, "g.c"));
+
+    // ⑻ **응답 뒤의 저장 실패는 늦은 알림이다** — 기다리는 사이 사용자가 연 팔레트를 닫지 않고 알림을 미룬다(§8.2a `showResponseNotice`).
+    // 저장을 실패시키려고 파일을 지운다(「사라졌다」 — `editor_save_gone`). 권한으로는 안 막힌다 — 저장은 연 파일을 붙잡아 둔 채 쓴다.
+    other.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, other, "/*a*/  ")); // 포맷 뒤에도 저장한 것과 달라야 「저장 실패」가 수정됨으로 남는다
+    try f.fx.dir.dir.deleteFile(testing.io, "g.c");
+    const deferred0 = s.response_notices_deferred;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(s.editor_format.then_save);
+    s.dispatchAppAction(.toggle_command_palette);
+    try testing.expect(s.chrome_host.palette.open);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("/*a*/ int g;\n", content(other)); // 포맷은 적용됐다
+    try testing.expect(other.rt.editorDocument().opened.?.isDirty()); // 저장은 실패했다
+    try testing.expect(s.chrome_host.palette.open); // 팔레트는 그대로
+    try testing.expectEqual(deferred0 + 1, s.response_notices_deferred);
+    try testing.expect(std.mem.startsWith(u8, &s.deferred_response_notice_buf, maru.i18n.t(.editor_save_gone)));
+    s.dispatchAppAction(.toggle_command_palette);
+    try testing.expect(!s.chrome_host.palette.open);
+    // 마지막으로 저장한 그대로 되돌린다 — 다음 저장이 「바깥에서 바뀌었다」(충돌)가 되지 않게.
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "g.c", .data = "int g;\n" });
+    s.chrome_host.notice.dismiss();
+
+    // ⑼ **언어 서버를 꺼도 시한은 잰다** — 기다리던 저장이 남지 않는다(`editor_lsp.pump` 가 꺼짐 갈래보다 먼저 시한을 본다).
+    other.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, other, "FMTSTALL "));
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(s.editor_format.then_save);
+    s.loaded_config.config.lsp.enabled = false;
+    defer s.loaded_config.config.lsp.enabled = true;
+    s.editor_format.save_deadline_ms = 0;
+    lsp_client.pump(s);
+    try testing.expect(!s.editor_format.then_save);
+    try testing.expectEqualStrings("FMTSTALL /*a*/ int g;\n", try disk.read(&f.fx, "g.c"));
+}
+
+test "FOS2 포맷 응답의 입구는 하나 — lsp.zig 는 formatting 응답을 onClientResponse 로만 넘긴다(보낸 서버 확인을 건너뛰지 않는다) (소스 판정, §8.2r)" {
+    // FOS1 ⑶-b 는 입구 함수를 직접 부른다 — 응답 분기가 입구를 건너뛰고 `onResponse` 를 부르면 그 판정자는 초록인 채 남의 서버 응답이 다시
+    // 적용된다. 두 저장소의 가짜 서버가 같은 번호로 늦게 답하는 장면은 시간에 달려(답이 「늦게」 와야 한다) 제품 경로로 재기 어렵다 — 자리를 센다.
+    const src = @embedFile("lsp.zig");
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, src, "editor_format.onClientResponse("));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, src, "editor_format.onResponse("));
+}
+
 test "FMT2 문서 포맷 — 서버가 documentFormattingProvider 를 안 내면 ⇧⌥F 가 요청을 보내지 않는다 (제품 경계, §8.2e)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

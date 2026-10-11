@@ -1231,8 +1231,11 @@ pub const EditorConfig = struct {
     /// **자동완성 팝업의 타이핑 트리거**(tooling §8.2g) — 식별자 글자를 치면 완성 목록을 묻는다. 끄면 서버 트리거 글자(`.`)와 `trigger_suggest`
     /// 명령만 남는다(VS Code `editor.quickSuggestions` 와 같은 관계).
     quick_suggestions: bool = true,
+    /// **저장 시 포맷**(tooling §8.2r) — `⌘S` 가 언어 서버의 문서 포맷을 먼저 적용하고 저장한다(서버가 포맷할 수 있을 때만; 응답이 1 초 안에
+    /// 안 오면 포맷 없이 저장). 기본 켬 — 2026-10-11 사용자 결정(VS Code `editor.formatOnSave` 는 기본 끔, Zed `format_on_save` 는 켬).
+    format_on_save: bool = true,
 
-    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.guides-indentation · editor.guides-highlight-active-indentation · editor.bracket-pair-colorization · editor.bracket-pair-colorization-independent-pools · editor.render-whitespace · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions
+    pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.guides-indentation · editor.guides-highlight-active-indentation · editor.bracket-pair-colorization · editor.bracket-pair-colorization-independent-pools · editor.render-whitespace · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions · editor.format-on-save
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기
         // 전이라 토글해도 아무 일이 없어 버그로 보인다"*) 값이 렌더에 닿으면서 벗겼다 —
         // `schema.zig`의 "editor.wrap은 설정 UI에 뜬다"가 그 사실을 잰다. 탭 폭도 같은 조건을
@@ -1280,6 +1283,7 @@ pub const EditorConfig = struct {
         .hover_delay = Meta{ .key_seg = "hover-delay", .doc = .cfg_editor_hover_delay, .range = .{ 0, 5000 }, .widget = .number, .section = .editor },
         .parameter_hints = Meta{ .key_seg = "parameter-hints", .doc = .cfg_editor_parameter_hints, .widget = .toggle, .section = .editor },
         .quick_suggestions = Meta{ .key_seg = "quick-suggestions", .doc = .cfg_editor_quick_suggestions, .widget = .toggle, .section = .editor },
+        .format_on_save = Meta{ .key_seg = "format-on-save", .doc = .cfg_editor_format_on_save, .widget = .toggle, .section = .editor },
     };
 };
 

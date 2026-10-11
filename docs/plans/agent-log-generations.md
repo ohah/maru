@@ -8,7 +8,9 @@
 1단계 순수 codec과 reconciliation, 2단계 native I/O 기반은 구현됐다.
 제품 기록 CLI와 준비된 native 훅, 명시적 v2 스트리머는 구현됐다.
 wire 수신·재접속 배선과 명시적으로 선택하는 로컬 native reader가 구현됐다.
-제품 훅의 기본 활성화와 구형 in-flight 훅의 이행은 후속이며 peer ACK는 별도 범위다.
+새 macOS 로컬 runtime의 준비 상태에 따른 native 기본 선택과 구형 in-flight 훅의
+분리된 이행은 4c-5에서 구현됐다. SSH 기본 활성화와 Windows native 실행 검증은
+후속이며 peer ACK는 별도 범위다.
 
 ## 현재 경로와 필요한 변경
 
@@ -448,3 +450,26 @@ fixture로 커밋하지 않는다. provider 실행 검증이 충족되기 전에
 CLI buddy가 심볼릭 링크일 때 GUI 설치는 논리 경로, CLI 설치는 실제 경로를 넣어 훅 명령과 신뢰 해시가 바뀌는 문제를 실제 carrier와 제품 CLI 설치로 재현했다. GUI도 존재하는 sibling CLI의 실제 경로를 사용한다. 없는 CLI의 예상 bundle 경로는 보존하며 기본 v2 활성화는 막는다. 기본 carrier와 symlink carrier 모두에서 Claude·Codex 설치 명령의 바이트를 GUI와 CLI 간에 대조한다. CLI help도 runtime pinned format 선택을 설명한다.
 
 Linux CI는 Zig의 비-iterate 디렉터리 handle이 O_PATH라 fchmod를 거부하는 문제를 발견했다. 생성 API는 Linux의 최종 handle만 읽기 가능하게 열고, nofollow와 동일 handle의 UID 확인·권한 변경을 유지한다. 기존 legacy golden 셸 검증은 유지하고, 제품 CLI 설치 결과는 local/remote 각각의 v1/v2 실제 파일·header·payload·권한과 멱등성으로 독립 판정한다.
+
+## 4c-6 원격 재접속 namespace 정합성
+
+v2 hello를 확인한 host의 재접속은 v2 스트리머와 세대 resume를 선택하지만,
+`spawnStreamerFor`는 항상 v1 `remote_log_dir_rel`을 전달하고 있었다.
+그러면 native 기록기가 쓰는 `remote-agent-events-v2`를 읽지 못하고,
+v1 파일을 native 파일로 열려다 실패할 수 있다.
+
+수정은 기존 협상 계약 안에서 진행한다. 동일한 confirmed profile로 resume와
+원격 홈 기준 디렉터리를 선택하고, 경로 문자열은 기존 `agent_log_profile.homeRelative`
+단일 출처를 사용한다. 미확인 최초 접속과 v1 peer는 기존 경로를 유지한다.
+SSH 환경 전달이나 기본 포맷을 전환하지 않으며 기존 프로세스의 format도 바꾸지 않는다.
+
+검증은 실제 AppSession의 `spawnStreamerFor`가 fork/exec한 SSH 자식의 argv를
+격리된 SSH 대역으로 받아 최초 연결·v1 재접속·v2 세대 재접속의 경로와 resume를
+독립 리터럴로 판정한다. 기존 hello downgrade 거부와 cursor pipe 검증도 함께 실행한다.
+v2 경로를 v1으로 되돌리는 변형이 실패하는지 확인한다. 이 argv 검증은 실제 SSH 서버나
+원격 provider 실행을 증명하지 않으며, 원격 기본 활성화의 완료 게이트로 쓰지 않는다.
+
+격리된 실제 SSH 자식 argv 회귀는 수정 전 v2 디렉터리 검사 실패를 재현했으며,
+수정 후 최초 연결·v1 재접속·v2 재접속과 기존 수신 회귀가 통과했다.
+경로를 legacy/local namespace로 바꾸기, 확인한 v2 강제 downgrade, 미확인 첫 접속의
+v2 강제 선택, resume 세대 삭제는 모두 실행 단계의 회귀 실패로 검출됐다.

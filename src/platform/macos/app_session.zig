@@ -17492,7 +17492,12 @@ pub const AppSession = struct {
             ctl,
             dest,
             "maru",
-            maru.session.agent_hook_command.remote_log_dir_rel,
+            // The same confirmed profile selects both cursor encoding and the
+            // writer's namespace; v2 must never read the legacy append root.
+            maru.session.agent_log_profile.homeRelative(.remote, switch (profile) {
+                .v1 => .v1,
+                .v2 => .v2,
+            }),
             spec.items,
             profile,
         ) catch {
@@ -97023,6 +97028,72 @@ test "generation receiver preserves host capability and ids across restart and r
     try protocol.appendResume(&resume_out, a, "a", .{ .offset = before.offset, .generation = before.generation }, host.stream_profile.?);
     try std.testing.expectEqualStrings("a:18446744073709551615:" ++ generation, resume_out.items);
     remote_agent_ops.closeRemoteAgentHost(&session, dest);
+}
+
+// Capture the real fork/exec SSH argv: a generation resume must read the
+// writer's v2 namespace, while first contact and legacy reconnect stay v1.
+test "generation receiver spawn binds directory and resume to confirmed profile" {
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_path = if (std.c.getenv("PATH")) |v| try a.dupeZ(u8, std.mem.span(v)) else null;
+    defer {
+        if (old_path) |v| {
+            _ = setenv("PATH", v.ptr, 1);
+            a.free(v);
+        } else _ = unsetenv("PATH");
+    }
+    try tmp.dir.writeFile(io, .{ .sub_path = "ssh", .data = "#!/bin/sh\nprintf '%s\\n' \"$@\"\n" });
+    const executable = try tmp.dir.openFile(io, "ssh", .{});
+    defer executable.close(io);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(executable.handle, 0o700));
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.allocPrintSentinel(a, "{s}:/usr/bin:/bin", .{path_buf[0..try tmp.dir.realPath(io, &path_buf)]}, 0);
+    defer a.free(path);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("PATH", path.ptr, 1));
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    // No GUI initialization: spawn only needs the session's empty tab list and clock.
+    const protocol = maru.session.remote_agent_stream.protocol;
+    const cases = [_]struct { profile: ?protocol.Profile, directory: []const u8 }{
+        .{ .profile = null, .directory = ".cache/maru/remote-agent-events" },
+        .{ .profile = .v1, .directory = ".cache/maru/remote-agent-events" },
+        .{ .profile = .v2, .directory = ".cache/maru/remote-agent-events-v2" },
+    };
+    for (cases) |case| {
+        var host: AppSession.RemoteAgentHost = .{ .stream_profile = case.profile };
+        const generation = try maru.session.agent_log_generation.decodeGeneration("00112233445566778899aabbccddeeff");
+        if (case.profile != null) try host.cursors.put(a, "a", .{ .offset = 7, .seen_ms = 0, .generation = if (case.profile == .v2) generation else null });
+        defer host.cursors.deinit(a);
+        session.spawnStreamerFor("fixture-destination", &host, "/fixture-control");
+        if (!host.stream_started) return error.StreamNotSpawned;
+        const stream = host.stream;
+        defer ssh_upload.stopAgentEvents(stream);
+        const flags = std.c.fcntl(stream.out_fd, std.c.F.GETFL, @as(c_int, 0));
+        _ = std.c.fcntl(stream.out_fd, std.c.F.SETFL, flags & ~@as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+        var out: [4096]u8 = undefined;
+        var len: usize = 0;
+        while (true) {
+            const n = std.c.read(stream.out_fd, out[len..].ptr, out.len - len);
+            if (n < 0) return error.CaptureReadFailed;
+            if (n == 0) break;
+            len += @intCast(n);
+            if (len == out.len) return error.CaptureOverflow;
+        }
+        const capture = out[0..len];
+        const quoted = try std.fmt.allocPrint(a, "'{s}'", .{case.directory});
+        defer a.free(quoted);
+        try std.testing.expect(std.mem.indexOf(u8, capture, quoted) != null);
+        if (case.profile == .v2) {
+            try std.testing.expect(std.mem.indexOf(u8, capture, "--log-format=v2") != null);
+            try std.testing.expect(std.mem.indexOf(u8, capture, "a:7:00112233445566778899aabbccddeeff") != null);
+        } else {
+            try std.testing.expect(std.mem.indexOf(u8, capture, "--log-format=v2") == null);
+            if (case.profile == .v1) try std.testing.expect(std.mem.indexOf(u8, capture, "'a:7'") != null);
+            if (case.profile == null) try std.testing.expect(std.mem.indexOf(u8, capture, "--resume") == null);
+        }
+    }
 }
 
 test "generation receiver pipe noise cannot renew retry budget before matching hello" {

@@ -1991,6 +1991,17 @@ pub fn build(b: *std.Build) void {
     );
     macos_terminal_gate_step.dependOn(&run_macos_terminal_gate_tests.step);
 
+    const remote_log_profile_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"generation receiver"},
+    });
+    const run_remote_log_profile_tests = b.addRunArtifact(remote_log_profile_tests);
+    run_remote_log_profile_tests.setCwd(b.path("."));
+    run_remote_log_profile_tests.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.generation receiver");
+    run_remote_log_profile_tests.addArg("--maru-expect-tests=8");
+    run_remote_log_profile_tests.addArg("--maru-expect-passed=3");
+    b.step("test-remote-agent-log-profile", "Run confirmed remote log profile and real SSH argv regressions").dependOn(&run_remote_log_profile_tests.step);
+
     // One real AppSession fixture owns native generation selection, lock failure,
     // replacement and post-consumption rotation; the aggregate ABI suite also runs it.
     const local_agent_log_reader_tests = addProjectTest(b, .{

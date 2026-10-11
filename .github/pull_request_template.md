@@ -44,6 +44,7 @@ flowchart TD
 - [ ] 메모리 전략을 성급하게 복잡하게 만들지 않았습니다.
 - [ ] plugin/extension boundary를 나중에 막지 않습니다.
 - [ ] 가벼운 native shell/workspace UX 목표를 해치지 않습니다.
+- [ ] (해당할 때) `app_session`(허브 `app_session.zig` 포함)의 편집기 코드에서 편집 판정이나 클라이언트 정책(계산 클라이언트 제외)을 새로 쓰거나, 그 동작을 바꾸거나, 새 갈래를 더했거나, 다른 호스트가 그 함수를 쓰게 했다면 — 또는 다른 호스트에서 `app_session` 에 이미 있는 편집 판정과 같은 일을 새로 적었다면 — 그 순수 부분을 계약의 자리(대개 `src/session` L2, L3 타입을 읽거나 내는 순수 계산은 최상위 `src/*.zig`)로 옮겼는가? 수정만 먼저 머지했다면 후속 이동을 `docs/plans/native-editor.md` 에 할 일로 등록했는가? 갈라도 그 자리에 못 가는 경우라면 사용자와 논의하고 사유를 적었는가? (`docs/plans/app-session-portability.md` §1.3)
 
 ## 테스트
 

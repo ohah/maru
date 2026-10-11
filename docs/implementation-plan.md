@@ -46,6 +46,7 @@ macOS 로컬 shell 1개 surface
 - [에이전트 로그 세대와 이어읽기](plans/agent-log-generations.md) — 공통 세대 ID·기록/회전 원자성·버전 이행 설계
 - [ScrollArea 이관 구현 계획](plans/scroll-area.md)
 - [`app_session.zig` 분해 실행 계획·완료 이력](plans/app-session-decomposition.md)
+- [AppSession 이식 — 편집기 코드를 macOS 밖으로](plans/app-session-portability.md)
 - [세션 컨트롤 플레인 Phase·검증·코드 위치](plans/control-plane.md)
 - [네이티브 편집기 구현 계획](plans/native-editor.md) — [여러 뷰 축 실측·선례 원장](plans/native-editor-multi-view.md)(같은 파일 두 곳 보기·병합 편집기·Split in Group) · [B2 op 저장소 후보 실험](plans/editor-op-b2-evaluation.md)
 - [공유 문서와 독립 편집기 뷰 설계 제안](plans/editor-shared-document.md) — 소유·수명·편집 게시·IME·저장 경계와 구현 단계

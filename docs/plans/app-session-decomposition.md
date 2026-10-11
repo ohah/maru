@@ -149,6 +149,8 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 | ~~E5~~ | workspace — 실측 결과 캡처=`captureAgentForRestore`(`term.rt.live_pty` PTY)·복원=`buildWorkspaceTab`(`createPane` spawn)·직렬화=이미 `session.workspace.serializeWindow`. 순수分 미미(surface 메타뿐, agent 콜백 필요) → (b)서 **축소/스킵** | — | 거의 orchestration | — | — |
 | ~~E2 ime·E3 tab UI·E6 scroll·clipboard·command·notification~~ | (b)서 스킵했으나 **(c)에서 부활** — 아래 F 시리즈에 흡수 | — | orchestration | — | — |
 
+> **2026-10 결정(사용자 2026-10-11) — 편집기의 편집 판정은 지금부터 단계를 세워 차례로 계약의 자리(대개 L2, L3 타입을 읽거나 내는 순수 계산은 최상위 잎)로 옮긴다. 그 단계는 [native-editor.md](native-editor.md) 의 「다중 커서·여러 블록 편집 연산 결함과 계약 이탈」 절이 갖는다 — 이 문서의 분해 단계와 별개로, 편집기 계약을 따르는 이동이라서다. 클라이언트 정책(계산 클라이언트 제외)은 그 의미를 바꾸는 PR 이나 다른 호스트가 그 함수를 필요로 하는 PR 에서 옮긴다. 계기가 오지 않은 클라이언트 정책과 계산 클라이언트, OS 결합은 `platform/macos` 에 남는다. 배선·허브도 `platform/macos` 에 둔다 — 지금의 W8 전략으로는 다른 호스트가 함께 쓰지 않고, 바꾸려면 사용자 결정이다. 사유·예외: [app-session-portability.md](app-session-portability.md) §1.3·§4.**
+
 ### 4.1 F 시리즈 — (c) orchestration 그룹 분해 (2026-08-08~)
 
 목적지는 전부 `src/platform/macos/app_session/<group>.zig`, 패턴은 §3(E1 `find.zig` 선례)과 동일하다. "메서드 라인"은 `AppSession` 메서드 이름 기준 실측이고, **동반 이동할 test를 합치면 대략 2배**다(§2-c-3).
@@ -754,7 +756,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 |---|---|---|---|---|---|
 | (잔류) | `tick`·`mouse`·`handleKeyEvent`·`init`/`deinit`·config apply·ABI 진입 facade | `app_session.zig` | L4 허브·어댑터 | — | — |
 
-**(b) 축(이식 기여)은 b1·b2(`layout_math`)로 일단락된 상태 그대로다** — 좌표 변환 기하(grid·hit-test·drop-zone·pt→px·px↔cell)가 session(L2)으로 가 이식 시 통째 재사용된다. E4 sidebar·E5 workspace는 실측 결과 각각 `metal_frame`·PTY agent·spawn 결합이라 순수分이 미미해 (b) 대상이 아니었고, 그 판정은 유지된다. 새로 열린 건 **(c) 축**이다 — 같은 그룹들을 이번엔 이식이 아니라 읽기·편집 비용을 근거로 `app_session/<group>.zig`로 옮긴다(§4.1 F 시리즈). 순수 그룹은 헤드리스 단위 test 동반(이식성 증거), orchestration 그룹은 동반 test가 그대로 회귀 그물이다. accessor pub화분(E1: `activeSurface`)은 각 PR에 기록.
+**(b) 축(이식 기여)은 b1·b2(`layout_math`)로 일단락된 상태 그대로다**(편집기 코드에 대해 재개 — §4 의 2026-10 블록) — 좌표 변환 기하(grid·hit-test·drop-zone·pt→px·px↔cell)가 session(L2)으로 가 이식 시 통째 재사용된다. E4 sidebar·E5 workspace는 실측 결과 각각 `metal_frame`·PTY agent·spawn 결합이라 순수分이 미미해 (b) 대상이 아니었고, 그 판정은 유지된다. 새로 열린 건 **(c) 축**이다 — 같은 그룹들을 이번엔 이식이 아니라 읽기·편집 비용을 근거로 `app_session/<group>.zig`로 옮긴다(§4.1 F 시리즈). 순수 그룹은 헤드리스 단위 test 동반(이식성 증거), orchestration 그룹은 동반 test가 그대로 회귀 그물이다. accessor pub화분(E1: `activeSurface`)은 각 PR에 기록.
 
 ## 5. 검증
 
@@ -765,7 +767,7 @@ pub fn findNext(self: *AppSession) void { find.nextMatch(self); }
 
 ## 6. 리스크 / 한계 (정직)
 
-- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 **이식 기여 0**이다. (c)로 F 시리즈를 열어도 이 사실은 바뀌지 않는다 — (c)가 사는 것은 이식이 아니라 읽기·편집 비용이며, 이를 이식 성과로 포장하지 않는다. 이식에 기여한 건 **순수 그룹(b1·b2 `layout_math`)뿐**이고 그 축은 일단락 상태다(좌표 변환 기하 = 이식 핵심). E1 find·E4 sidebar·E5 workspace는 실측 결과 모두 orchestration 결합이라 (b) 대상이 아니었다 — Explore 사전 추정(순수 85~95%)은 셋 다 빗나갔고, 착수 코드 재검증이 정정했다([[roadmap-docs-stale-verify-with-code]]).
+- **이식 무관(orchestration)**: 허브·런타임 결합 그룹의 분해는 macOS 내부 정리일 뿐 **이식 기여 0**이다. (c)로 F 시리즈를 열어도 이 사실은 바뀌지 않는다 — (c)가 사는 것은 이식이 아니라 읽기·편집 비용이며, 이를 이식 성과로 포장하지 않는다. 이식에 기여한 건 **순수 그룹(b1·b2 `layout_math`)뿐**이고 그 축은 일단락 상태다(좌표 변환 기하 = 이식 핵심. 편집기 코드에 대해 재개 — §4 의 2026-10 블록). E1 find·E4 sidebar·E5 workspace는 실측 결과 모두 orchestration 결합이라 (b) 대상이 아니었다 — Explore 사전 추정(순수 85~95%)은 셋 다 빗나갔고, 착수 코드 재검증이 정정했다([[roadmap-docs-stale-verify-with-code]]).
 - **cross-group accessor pub화**: 캡슐화 일부 양보(§2-c-2). core.zig 선례가 있고, accessor는 어차피 안정 표면이라 수용. F 시리즈는 그룹 수가 많아 pub 표면이 E1보다 넓어지므로, **PR마다 pub화한 accessor를 명시**하고 누적 목록을 §5 검증에서 본다.
 - **허브 잔류**: `tick`·`mouse`·`handleKeyEvent`는 본질적 횡단이라 **파일 분해** 비대상이다. 가독성은 같은 파일 안 소함수 추출로 다뤘고(2026-08-09 완료 — 아래), **F 시리즈가 끝나도 이 셋은 남으므로 `app_session.zig`가 "작은 파일"이 되지는 않는다.** 종착지는 허브 + 그룹 facade + ABI 진입이다.
 
@@ -923,11 +925,14 @@ quiesce axis: src/platform/macos/git_backend.zig 는 detached worker 를 띄우�
 
 `app_session.zig`의 **크기와 분해**는 이 문서가 단일 출처다. 인접 문서는 각자 다른 축을 소유하며, 이 파일의 감소 목표·단계를 따로 정하지 않는다.
 
+편집기 코드를 `platform/macos` 밖으로 옮길지는 [app-session-portability.md](app-session-portability.md)가 측정하고 권장을 냈고, 사용자가 정했다(2026-10-11 — 그 계획의 D1). 편집 판정은 지금부터 단계를 세워 차례로 계약의 자리(대개 L2, L3 타입을 읽거나 내는 순수 계산은 최상위 잎)로 옮긴다(단계는 [native-editor.md](native-editor.md) 의 해당 절). 클라이언트 정책(계산 클라이언트 제외)은 그 의미를 바꾸는 PR 이나 다른 호스트가 그 함수를 필요로 하는 PR 에서 옮긴다. 계기가 오지 않은 클라이언트 정책과 계산 클라이언트, OS 결합은 `platform/macos` 에 남는다. 배선·허브도 `platform/macos` 에 둔다 — 지금의 W8 전략으로는 다른 호스트가 함께 쓰지 않고, 바꾸려면 사용자 결정이다. 결정 블록은 이 문서 §4 의 (b)·(c) 결정 기록 뒤, §4.1 앞에 있다. 그 계획은 이 파일의 분해 단계를 정하지 않는다.
+
 | 문서 | 소유하는 축 | 이 문서와의 관계 |
 |---|---|---|
 | [chrome-strategy.md](../chrome-strategy.md) · [metal-ui-layout.md](metal-ui-layout.md) §8 ML6 | chrome 컴포넌트의 **형태**(rect 직접 계산 + 짝 `hitTest` → `chrome/ui/` typed tree 이주) | app_session 축소는 그 이주의 **부수효과**다. 무엇을 언제 얼마나 줄일지는 이 문서가 정한다 |
 | [layering-and-portability.md](../layering-and-portability.md) §3.3 | L1~L3 **이식** 위상 | L4 내부 분해는 위상 밖이라 이 문서로 위임(원래부터 그렇게 서술) |
 | [app-layer-decomposition.md](../app-layer-decomposition.md) | `src/app`(L4 공통 런타임)의 분해 | 대상 파일이 다르다 |
+| [app-session-portability.md](app-session-portability.md) | 편집기 코드의 이식 여부에 대한 측정과 권장(D1 결정 2026-10-11) | D1 의 결정 블록은 이 문서 §4 가 갖는다(편집 판정의 이동 단계는 편집기 계획) |
 
 ### 두 경로는 배타적이지 않다
 

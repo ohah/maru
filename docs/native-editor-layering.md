@@ -32,6 +32,8 @@ L3  src/chrome/components/editor_view/    표시 — 모델을 props로 읽음
 L4  src/platform/macos/          셀·quad lowering · 입력 이벤트 · IME(§11)
 ```
 
+> 2026-10: `app_session` 의 배선·허브, 계기가 오지 않은 클라이언트 정책, 계산 클라이언트는 L4 에 남는다 — [decomposition](plans/app-session-decomposition.md) §4 의 2026-10 블록. 편집 판정은 계약의 자리(대개 위 L2 자리)로 차례로 옮긴다([plans/app-session-portability.md](plans/app-session-portability.md) §4).
+
 **기존 컴포넌트 두 계열 중 어느 쪽인지 명시한다.** `chrome/components/` 아래에는 성격이 다른 둘이 있다 — `session_dock/`·`archive_detail/`은 **새 typed tree 계열**로 `ui/tree.zig`·`ui/layout.zig`를 쓰고 `build.zig`(UiNode 조립)·`ids.zig`(UiActionId)·`types.zig`·`view.zig` 규약을 따른다([metal-ui-layout.md](metal-ui-layout.md) §2). 나머지 다수(`tabbar`·`sidebar`·`find` 등)는 자체 레이아웃을 가진 단일 파일이다.
 
 **`editor_view/`는 후자 계열이다** — 등폭이라 flex tree가 필요 없으므로 `build.zig`/`ids.zig` 규약을 따르지 않는다. 디렉터리로 나누는 것은 파일 수 때문이지 새 tree 규약을 쓰기 때문이 아니다. **구현 시 `session_dock/`을 형태의 본으로 삼지 않는다.**

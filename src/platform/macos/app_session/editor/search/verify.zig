@@ -12,6 +12,18 @@ pub const Proof = struct {
     identity: maru.session.file_tree.Identity,
     hash: [32]u8,
     raw_hash: [32]u8,
+    stamp: ?Stamp = null,
+    pub const Stamp = struct {
+        size: i64,
+        mtime: @TypeOf(@as(std.posix.Stat, undefined).mtime()),
+        ctime: @TypeOf(@as(std.posix.Stat, undefined).ctime()),
+    };
+    /// actor는 전문 재읽기 없이 준비 뒤의 관측 가능한 in-place 수정을 거절한다. bytes 해시 검증을 대체하지 않는다.
+    pub fn matchesStat(self: Proof, current: std.posix.Stat) bool {
+        const stamp = self.stamp orelse return false;
+        return current.mode & std.posix.S.IFMT == std.posix.S.IFREG and self.identity.eql(fileIdentity(current)) and stamp.size == current.size and
+            std.meta.eql(stamp.mtime, current.mtime()) and std.meta.eql(stamp.ctime, current.ctime());
+    }
     pub fn sameFile(self: Proof, other: Proof) bool {
         return self.identity.eql(other.identity);
     }
@@ -19,7 +31,7 @@ pub const Proof = struct {
         if (!self.sameFile(current) or !std.mem.eql(u8, &self.raw_hash, &current.raw_hash)) return error.FileChanged;
     }
 };
-pub const Read = struct { bytes: []u8, hash: [32]u8, proof: Proof };
+pub const Read = struct { bytes: []u8, hash: [32]u8, proof: Proof, has_bom: bool = false };
 fn fileIdentity(stat: std.posix.Stat) maru.session.file_tree.Identity {
     const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(stat.dev))) = @bitCast(stat.dev);
     return .{ .device = device, .inode = stat.ino, .kind = 1 };
@@ -36,7 +48,7 @@ pub fn read(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []con
     defer a.free(raw);
     const text = if (std.mem.startsWith(u8, raw, maru.session.editor.document.utf8_bom)) raw[3..] else raw;
     if (!std.unicode.utf8ValidateSlice(text)) return error.NotUtf8;
-    return .{ .bytes = try a.dupe(u8, text), .hash = proof.hash, .proof = proof };
+    return .{ .bytes = try a.dupe(u8, text), .hash = proof.hash, .proof = proof, .has_bom = text.len != raw.len };
 }
 fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: []const u8, control: *process.Control, max_bytes: usize, expected: maru.session.file_tree.Identity, output: ?*std.ArrayList(u8)) !Proof {
     var root = try process.openRoot(a, io, root_path);
@@ -96,7 +108,7 @@ fn readInternal(a: std.mem.Allocator, io: std.Io, root_path: []const u8, path: [
     var current: std.posix.Stat = undefined;
     if (std.c.fstat(current_fd, &current) != 0 or !fileIdentity(before).eql(fileIdentity(current))) return error.FileChanged;
     if (control.cancelled.load(.acquire)) return error.Cancelled;
-    return .{ .identity = fileIdentity(before), .hash = sha.finalResult(), .raw_hash = raw_sha.finalResult() };
+    return .{ .identity = fileIdentity(before), .hash = sha.finalResult(), .raw_hash = raw_sha.finalResult(), .stamp = .{ .size = before.size, .mtime = before.mtime(), .ctime = before.ctime() } };
 }
 pub const Loaded = struct {
     a: std.mem.Allocator,

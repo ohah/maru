@@ -169,7 +169,7 @@ fn openFileTerm(self: *AppSession, path: []const u8, kind: dock_panel.EntryKind,
     var count: usize = 0;
     var it = file_panel_ops.fileEntries(self);
     while (it.next()) |_| count += 1;
-    if (count >= dock_panel.max_entries) return error.TooManyEntries;
+    if (count >= dock_panel.max_entries -| self.editor_batch_reserved_entries) return error.TooManyEntries;
 
     const pane = activePane(self);
     const previous_active_term: ?*Term = if (pane.terms.items.len > 0) pane.activeTerm() else null;

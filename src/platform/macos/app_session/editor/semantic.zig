@@ -93,10 +93,20 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
     }
     const doc = term.rt.editorDocument().opened orelse return;
     const c = editor_lsp.readyClientFor(self, term) orelse return;
-    const decoded = semantic.decode(self.allocator, result, c.semantic_caps.roles, doc.file.content, doc.file.lines, enc) catch return;
+    // 할당 실패 — 다시 묻되 **조용 시계를 되감는다**(오류 응답과 같은 규율). `dirty` 만 세우면 다음 `tick` 이 곧바로 같은 요청을 다시 보내 메모리가 모자란 동안 매 프레임 되풀이했다(여섯째 결함 후보, 재현 2026-10-11).
+    // 예전에는 `catch return` 이라 실패를 기억조차 안 했다 — version·덮은 범위가 안 바뀌어 결국 같은 꼴로 곧바로 되물었다.
+    const decoded = semantic.decode(self.allocator, result, c.semantic_caps.roles, doc.file.content, doc.file.lines, enc) catch {
+        st.dirty = true;
+        st.last_edit_ms = self.awakeMs();
+        return;
+    };
     defer self.allocator.free(decoded);
     st.spans.clearRetainingCapacity();
-    st.spans.appendSlice(self.allocator, decoded) catch return;
+    st.spans.appendSlice(self.allocator, decoded) catch {
+        st.dirty = true;
+        st.last_edit_ms = self.awakeMs();
+        return;
+    };
     st.version = st.waiting_version;
     st.covered_lo = st.waiting_lo;
     st.covered_hi = st.waiting_hi;

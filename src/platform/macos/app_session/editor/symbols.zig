@@ -93,13 +93,16 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
     }
     const doc = term.rt.editorDocument().opened orelse return;
     symbols.decode(self.allocator, result, doc.file.content, doc.file.lines, enc, &st.decoded) catch {
+        // 할당 실패 — 다시 묻되 **조용 시계를 되감는다**(오류 응답과 같은 규율). `dirty` 만 세우면 다음 `tick` 이 곧바로 같은 요청을 다시 보내 메모리가 모자란 동안 매 프레임 되풀이했다(여섯째 결함 후보, 재현 2026-10-11).
         st.dirty = true;
+        st.last_edit_ms = self.awakeMs();
         return;
     };
     // **1층 타입으로 옮긴다** — 필드 뜻이 같아 그대로 베낀다(소비자가 층을 안 가른다). 응답 때 한 번이라 프레임 비용이 없다.
     st.list.clearRetainingCapacity();
     st.list.ensureTotalCapacity(self.allocator, st.decoded.items.items.len) catch {
         st.dirty = true;
+        st.last_edit_ms = self.awakeMs(); // 위와 같은 할당 실패
         return;
     };
     for (st.decoded.items.items) |sym| st.list.appendAssumeCapacity(.{

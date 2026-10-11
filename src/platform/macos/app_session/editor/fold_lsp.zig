@@ -85,7 +85,8 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
         return;
     }
     const ranges = fold_range.decode(self.allocator, result, lines.len) catch {
-        st.dirty = true; // 못 셌다 ≠ 접을 것 없음(§4.1f) — 래치하지 않고 다음에 다시
+        // 못 셌다 ≠ 접을 것 없음(§4.1f) — 래치하지 않고 다음에 다시. 할당 실패 — 다시 묻되 **조용 시계를 되감는다**(오류 응답과 같은 규율). `dirty` 만 세우면 다음 `tick` 이 곧바로 같은 요청을 다시 보내 메모리가 모자란 동안 매 프레임 되풀이했다(여섯째 결함 후보, 재현 2026-10-11).
+        retryAfterAllocFailure(self, st);
         return;
     };
     if (ranges.len == 0) {
@@ -97,7 +98,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
     }
     if (!editor.installFoldRanges(self, term, ranges)) {
         self.allocator.free(ranges);
-        st.dirty = true;
+        retryAfterAllocFailure(self, st); // 갈아 끼우기도 할당 실패로만 거절한다
         return;
     }
     term.rt.editor_fold_source = .lsp;
@@ -111,6 +112,12 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
 fn retryLater(self: *AppSession, st: *State) void {
     st.dirty = true;
     st.error_streak +|= 1;
+    st.last_edit_ms = self.awakeMs();
+}
+
+/// 할당 실패 뒤 — 다시 묻되 조용 뒤에. 「아직 아니다」가 아니라 이쪽 사정이라 배수(`error_streak`)는 안 늘린다.
+fn retryAfterAllocFailure(self: *AppSession, st: *State) void {
+    st.dirty = true;
     st.last_edit_ms = self.awakeMs();
 }
 

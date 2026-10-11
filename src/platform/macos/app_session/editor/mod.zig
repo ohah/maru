@@ -25313,6 +25313,125 @@ fn firstLspMessage(term: *Term) []const u8 {
     return if (items.len > 0) items[0].message else "";
 }
 
+test "LSPQ1 fold_lsp — decode 할당이 실패해도 곧바로 되묻지 않는다 (§8.2j 요청 규율)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r6f.c", fld_src);
+    const s = fx.session;
+    term.rt.editorDocument().notifications.lsp_version = 1;
+    var p = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"startLine\":0,\"endLine\":4}]", .{});
+    defer p.deinit();
+    term.rt.editor_fold_lsp = .{ .waiting = true, .waiting_seq = 5, .waiting_version = 1 };
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    s.allocator = failing.allocator();
+    fold_lsp_client.onResponse(s, term, 5, p.value, false);
+    s.allocator = allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expectEqual(@as(u64, 0), term.rt.editor_fold_lsp.applied);
+    try testing.expect(term.rt.editor_fold_lsp.dirty);
+    try testing.expect(term.rt.editor_fold_lsp.last_edit_ms != 0); // 조용 시계를 되감았다 — 다음 tick 이 곧바로 안 묻는다
+}
+
+test "LSPQ2 highlight — decode 할당이 실패해도 곧바로 되묻지 않는다 (§8.2i 요청 규율)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r6h.c", "int foo;\nint bar;\n");
+    const s = fx.session;
+    term.rt.editorDocument().notifications.lsp_version = 1;
+    term.rt.editor_selection = editor_selection.Selection.at(5); // "f|oo"
+    const w = highlight_client.wordAtCaret(term) orelse return error.NoWord;
+    var p = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"range\":{\"start\":{\"line\":0,\"character\":4},\"end\":{\"line\":0,\"character\":7}}}]", .{});
+    defer p.deinit();
+    term.rt.editor_highlight.waiting = true;
+    term.rt.editor_highlight.waiting_seq = 7;
+    term.rt.editor_highlight.waiting_version = 1;
+    term.rt.editor_highlight.waiting_word_start = w.start;
+    term.rt.editor_highlight.waiting_word_end = w.end;
+    term.rt.editor_highlight.last_move_ms = 0;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    s.allocator = failing.allocator();
+    highlight_client.onResponse(s, term, 7, p.value, false, .utf8);
+    s.allocator = allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expect(term.rt.editor_highlight.last_move_ms != 0);
+}
+
+test "LSPQ3 inlay — decode 할당이 실패해도 곧바로 되묻지 않는다 (§8.2n 요청 규율)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r6i.c", "int foo;\nint bar;\n");
+    const s = fx.session;
+    term.rt.editorDocument().notifications.lsp_version = 1;
+    var p = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"position\":{\"line\":0,\"character\":4},\"label\":\"x\"}]", .{});
+    defer p.deinit();
+    term.rt.editor_inlay.waiting = true;
+    term.rt.editor_inlay.waiting_seq = 9;
+    term.rt.editor_inlay.waiting_version = 1;
+    term.rt.editor_inlay.last_edit_ms = 0;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    s.allocator = failing.allocator();
+    inlay_client.onResponse(s, term, 9, p.value, false, .utf8);
+    s.allocator = allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expect(term.rt.editor_inlay.dirty);
+    try testing.expect(term.rt.editor_inlay.last_edit_ms != 0);
+}
+
+test "LSPQ4 symbols — decode 할당이 실패해도 곧바로 되묻지 않는다 (§8.2 요청 규율)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r6s.c", "int foo;\nint bar;\n");
+    const s = fx.session;
+    term.rt.editorDocument().notifications.lsp_version = 1;
+    var p = try std.json.parseFromSlice(std.json.Value, allocator, "[{\"name\":\"foo\",\"kind\":13,\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":8}},\"selectionRange\":{\"start\":{\"line\":0,\"character\":4},\"end\":{\"line\":0,\"character\":7}}}]", .{});
+    defer p.deinit();
+    term.rt.editor_symbols.waiting = true;
+    term.rt.editor_symbols.waiting_seq = 11;
+    term.rt.editor_symbols.waiting_version = 1;
+    term.rt.editor_symbols.last_edit_ms = 0;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    s.allocator = failing.allocator();
+    symbols_client.onResponse(s, term, 11, p.value, false, .utf8);
+    s.allocator = allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expect(term.rt.editor_symbols.dirty);
+    try testing.expect(term.rt.editor_symbols.last_edit_ms != 0);
+}
+
+test "LSPQ5 semantic — decode 할당이 실패해도 곧바로 되묻지 않는다 (§8.2i 요청 규율)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "r6m.c", "int zz;\nint zzz;\n  zz = zz + 1;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    try testing.expect(lsp_client.readyClientFor(s, term) != null);
+    var p = try std.json.parseFromSlice(std.json.Value, allocator, "{\"data\":[0,4,2,0,0]}", .{});
+    defer p.deinit();
+    const v = term.rt.editorDocument().notifications.lsp_version;
+    term.rt.editor_semantic.waiting = true;
+    term.rt.editor_semantic.waiting_seq = 4242;
+    term.rt.editor_semantic.waiting_version = v;
+    term.rt.editor_semantic.dirty = false;
+    term.rt.editor_semantic.last_edit_ms = 0;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    s.allocator = failing.allocator();
+    semantic_client.onResponse(s, term, 4242, p.value, false, .utf8);
+    s.allocator = allocator;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expect(term.rt.editor_semantic.dirty); // 실패를 기억한다
+    try testing.expect(term.rt.editor_semantic.last_edit_ms != 0);
+}
+
 test "SAV1 didSave — 저장이 디스크 쓰기 뒤 서버에 통지하고, 밀린 didChange 가 먼저 가며(가짜가 본문 불일치를 진단으로 낸다), includeText 본문이 실리고, 저장 뒤 진단이 갈아 끼워진다; 변경 없는 저장도 통지한다 (제품 경계, §8.2k)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

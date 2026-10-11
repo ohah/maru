@@ -45,8 +45,9 @@ pub const Size = enum {
 
 /// 셀 그리드 chrome이 한 셀 아이콘을 굽는 배율(밀리). 1.7×는 헤더 아이콘이 옆 글자보다 또렷하게 보이도록
 /// 실측으로 고른 값이다(셀 크기로 굽고 확대하면 partial-alpha가 ~0.69, 목표 px 직접 래스터는 ~0.33 —
-/// `coretext_smoke.m` 측정 test). **`maru_metal_renderer.m`의 quad 확대가 같은 값을 미러**하므로
-/// `tests/boundary/icon_literals.zig`가 둘이 어긋나지 않는지 본다(어긋나면 텍스처와 quad 크기가 달라 흐려진다).
+/// `coretext_smoke.m` 측정 test). **렌더러는 이 값을 다시 적지 않는다** — Zig 가 그 크기로 구운 글리프의 셀에
+/// cell-raster role 을 싣고(`metal_frame.native_cell_role_cell_raster_icon`), `maru_metal_renderer.m` 은 「atlas 크기 ÷
+/// 셀 크기」로 quad 를 키운다(텍스처가 quad 에 1:1). `tests/boundary/icon_literals.zig` 가 `.m` 에 사본이 되살아나지 않는지 본다.
 pub const cell_raster_scale_milli: u32 = 1700;
 
 /// 셀 한 변(px)을 위 배율로 키운 래스터 슬롯 크기. u16 슬롯 한계로 clamp한다(폰트를 아주 키운 창).

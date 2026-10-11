@@ -1002,7 +1002,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
             const cw: f32 = @floatFromInt(self.cell_width_px);
             const ch: f32 = @floatFromInt(self.cell_height_px);
             // hover quad 중심 = 글리프 중심. 1칸 아이콘(◧⚙+)은 셀 중심 (icon_col+0.5)cw. 종(notifications)은 EAW
-            // width 2라 .m(is_bell_icon)이 2칸 footprint 중앙 (icon_col+1)cw에 그리므로 +1.0이라야 한다 — +0.5면 왼쪽
+            // width 2라 .m(cell-raster role 셀은 차지한 칸들의 가운데에 그린다)이 2칸 footprint 중앙 (icon_col+1)cw에 그리므로 +1.0이라야 한다 — +0.5면 왼쪽
             // 셀(cols-12) 중심에 박스가 떨어져 좁아진 종이 박스 우측으로 치우쳐 보인다(예전 3.4cw 종은 박스보다 커서
             // 0.5cw 어긋남이 안 보였으나, width-2 수정으로 1.7cw가 되며 드러난 기존 버그).
             const center_cells: f32 = if (hr == .notifications) 1.0 else 0.5;

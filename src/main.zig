@@ -4401,51 +4401,10 @@ fn openFileFor(
     } };
 }
 
-/// `session` 의 문법 이름을 `syntax` 의 것으로 옮긴다. **두 열거가 같은 축이고**(그 파일 doc:
-/// *"값을 늘릴 때 두 곳이 갈리지 않게 호출자가 옮긴다"*), 이름이 1:1 이라 comptime 에 유도한다 —
-/// 손으로 쓴 switch 는 한쪽에 문법이 늘 때 조용히 `.other` 로 떨어진다.
+/// `session` 의 문법 이름을 `syntax` 의 것으로 옮긴다 — 표는 `syntax.languageFor` 하나다(이름으로 대응하고, 없는 이름은
+/// 컴파일 오류 — macOS 도 같은 것을 부른다, layering §3.5).
 fn syntaxLanguageFor(g: maru.session.editor.language.Grammar) ts.Language {
-    // **두 열거는 같은 축이고 이름이 1:1 이다**(`tree_sitter.zig` 의 doc: *"이 모듈은 maru 를 못
-    // 들여오므로 필요한 것만 다시 적는다 — 값을 늘릴 때 두 곳이 갈리지 않게 **호출자가 옮긴다**"*).
-    // macOS 도 같은 자리를 갖는다(`app_session/editor/syntax.zig` 의 `syntaxLanguage`) — 두 모듈을
-    // 다 보는 공용 자리가 없어서다(§2m.112 의 «배선» 절).
-    //
-    // **드리프트를 컴파일 오류로 만든다.** 손으로 쓴 갈래는 문법이 늘 때 조용히 `.other` 로
-    // 떨어지고 그 증상은 「그 언어만 무색」이라 눈에 잘 안 띈다. 아래 검사가 이름을 대조한다 —
-    // 반사(`@field`)를 안 쓰는 이유는 그것이 이 파일에 생기면 경계 원장 등록이 필요해지고, 그
-    // 갱신 도구가 이 호스트에서 안 돌기 때문이다(§2m.109).
-    comptime {
-        @setEvalBranchQuota(20_000);
-        for (@typeInfo(maru.session.editor.language.Grammar).@"enum".fields) |gf| {
-            if (std.mem.eql(u8, gf.name, "none")) continue;
-            var found = false;
-            for (@typeInfo(ts.Language).@"enum".fields) |lf| {
-                if (std.mem.eql(u8, gf.name, lf.name)) found = true;
-            }
-            if (!found) @compileError("Grammar and syntax.Language names drifted: " ++ gf.name);
-        }
-    }
-    return switch (g) {
-        .zig => .zig,
-        .json => .json,
-        .markdown => .markdown,
-        .javascript => .javascript,
-        .typescript => .typescript,
-        .tsx => .tsx,
-        .c => .c,
-        .cpp => .cpp,
-        .python => .python,
-        .go => .go,
-        .rust => .rust,
-        .java => .java,
-        .ruby => .ruby,
-        .php => .php,
-        .kotlin => .kotlin,
-        .bash => .bash,
-        .css => .css,
-        .html => .html,
-        .none => .other,
-    };
+    return ts.languageFor(g);
 }
 
 /// 합성 창에서 편집기 한 프레임. **스크래치를 여기서 잡고 곧바로 놓는다** — 스모크는 한 파일을

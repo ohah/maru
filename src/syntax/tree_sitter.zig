@@ -86,8 +86,38 @@ pub const Span = struct {
 };
 
 /// `session/editor/language.zig`의 열거와 **같은 축**을 쓰되, 이 모듈은 maru를 못 들여오므로
-/// (모듈이 다르다) 필요한 것만 다시 적는다. 값을 늘릴 때 두 곳이 갈리지 않게 **호출자가 옮긴다**.
+/// (모듈이 다르다) 필요한 것만 다시 적는다. 그 열거를 이 축으로 옮기는 것은 아래 `languageFor` 하나다.
 pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, other };
+
+/// 같은 이름의 태그(`session/editor/language.zig` 의 `Grammar`)를 이 축으로 옮긴다 — **호스트가 다시 적지 않는다**
+/// ([layering-and-portability.md](../../docs/layering-and-portability.md) §3.5). 예전에는 macOS(`app_session/editor/syntax.zig` 의
+/// `syntaxLanguage`)와 Windows(`main.zig` 의 `syntaxLanguageFor`)가 같은 switch 를 각자 들었다.
+///
+/// 이 모듈은 maru 를 못 들여오므로 타입이 아니라 **이름**으로 대응한다(두 열거는 이름이 1:1). `none` 은 무색(`.other`)이다.
+/// **이 열거에 없는 이름은 컴파일 오류다** — 손으로 쓴 switch 는 문법이 늘 때 조용히 `.other` 로 떨어지고, 그 증상은 「그 언어만
+/// 무색」이라 눈에 잘 안 띈다. 늘릴 때 세 자리가 함께 는다: `build.zig` 의 grammar 표 · 이 파일의 표 · `language.zig` 의
+/// `grammarForPath`.
+pub fn languageFor(tag: anytype) Language {
+    switch (tag) {
+        inline else => |t| {
+            const name = @tagName(t);
+            if (comptime std.mem.eql(u8, name, "none")) return .other;
+            const out = comptime blk: {
+                @setEvalBranchQuota(20_000); // 이름 표를 comptime 에 짓는다(기본 1000 을 넘는다)
+                break :blk std.meta.stringToEnum(Language, name) orelse @compileError("syntax.Language 에 없는 문법 이름: " ++ name);
+            };
+            return out;
+        },
+    }
+}
+
+test "languageFor — 같은 이름은 그 값으로, none 은 무색으로 옮긴다" {
+    const Grammar = enum { none, zig, rust, html };
+    try std.testing.expectEqual(Language.zig, languageFor(Grammar.zig));
+    try std.testing.expectEqual(Language.rust, languageFor(Grammar.rust));
+    try std.testing.expectEqual(Language.html, languageFor(Grammar.html));
+    try std.testing.expectEqual(Language.other, languageFor(Grammar.none));
+}
 
 /// 한 언어를 파싱하는 데 필요한 것 전부 — grammar 진입점 · 그 쿼리 캐시 칸 · 쿼리 원문.
 const Slot = struct {

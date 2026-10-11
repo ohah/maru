@@ -6725,6 +6725,8 @@ fn toggleCursorAt(self: *AppSession, term: *Term, off: usize) void {
     };
     buf.append(self.allocator, primary) catch return;
     buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return;
+    // primary 를 **값으로** 기억한다 — 정렬이 자리를 옮긴다(`snapshotSelections` 와 같은 방법).
+    const primary_value = primary;
 
     // **품는 커서를 찾는다.** 배열 순서로 먼저 걸린 하나만 본다.
     // **문서 순서로 세운 뒤 찾는다.** `buf` 는 primary 를 맨 앞에 넣어 모았으므로 배열 순서가 문서
@@ -6756,10 +6758,18 @@ fn toggleCursorAt(self: *AppSession, term: *Term, off: usize) void {
         // 그럼에도 이 줄을 두는 이유는 **의도**다: "마지막 커서는 안 지운다"가 여기서 읽혀야
         // 하고, `writeCursors` 의 가드가 언젠가 바뀌면 그때 이 자리가 답을 낸다.
         if (buf.items.len == 1) return;
+        const primary_at = for (buf.items, 0..) |sel, k| {
+            if (std.meta.eql(sel, primary_value)) break k;
+        } else 0;
         _ = buf.orderedRemove(i);
         // **primary 를 지웠으면 남은 것 중 앞의 것이 잇는다**(§3.2c) — 제품은 primary 를 단수 필드에
         // 들므로 그것을 지우면 필드가 빈다. 배열에서 원소를 빼는 것과 다르다.
-        const new_primary: usize = if (i == 0) 0 else i - 1;
+        //
+        // **다른 커서를 지웠으면 primary 는 그대로다**(결함 15). 예전에는 지운 자리의 앞 커서를 무조건 세워,
+        // 다른 커서를 지우기만 해도 primary 가 옮겨 갔다 — 빠진 자리만큼 인덱스만 당긴다.
+        const new_primary: usize = if (i == primary_at)
+            (if (i == 0) 0 else i - 1)
+        else if (primary_at > i) primary_at - 1 else primary_at;
         writeCursors(self, term, buf.items, new_primary);
     } else {
         if (buf.items.len >= editor_selection.max_cursors) return; // 상한(§3.2) — 조용히 멈춘다
@@ -33896,6 +33906,30 @@ test "OPT2 primary 를 지우면 앞의 것이 잇는다 — 제품은 primary �
     term.rt.editorDocument().history.last_edit_kind = .insert;
     toggleCursorAt(fx.session, term, 15);
     try testing.expectEqual(@as(@TypeOf(term.rt.editorDocument().history.last_edit_kind), .none), term.rt.editorDocument().history.last_edit_kind);
+}
+
+test "OPT6 primary 가 아닌 커서를 지우면 primary 는 그대로다 (§3.2c, 결함 15)" {
+    // §3.2c: 승계는 **지운 것이 primary 였을 때만**이다. 예전에는 지운 자리의 앞 커서를 무조건 primary 로 세워,
+    // 다른 커서를 지우기만 해도 primary 가 옮겨 갔다(화면 추종·IME·자동완성이 primary 를 따른다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "opt6.txt", "aaaa\nbbbb\ncccc\n");
+
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    toggleCursorAt(fx.session, term, 5);
+    toggleCursorAt(fx.session, term, 10); // primary = 10
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_selection.?.focus);
+
+    toggleCursorAt(fx.session, term, 0); // primary 가 아닌 0 을 지운다
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_extra_selections[0].focus);
+
+    toggleCursorAt(fx.session, term, 5); // 가운데도 마찬가지다
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 10), term.rt.editor_selection.?.focus);
 }
 
 test "OPT3 게이트 — 비교 뷰·읽기 전용·커서 없음 (§3.2c)" {

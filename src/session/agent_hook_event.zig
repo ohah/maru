@@ -374,7 +374,11 @@ pub fn parseLine(line: []const u8) ?Event {
         } else if (std.mem.eql(u8, key, "session_id")) {
             ev.session_id = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "transcript_path")) {
-            ev.transcript_path = scan.stringValue() orelse return null;
+            // Codex 0.162.1 exec --ephemeral has no transcript file and sends null.
+            // The document is already validated; only null, not arbitrary types, is absence.
+            if (scan.peek() == 'n') {
+                if (!scan.skipValue()) return null;
+            } else ev.transcript_path = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "cwd")) {
             ev.cwd = scan.stringValue() orelse return null;
         } else if (std.mem.eql(u8, key, "prompt_id") or std.mem.eql(u8, key, "turn_id")) {
@@ -1664,4 +1668,25 @@ test "훅 부모 pid(`maru_hook_ppid`)는 읽히고, 없으면 0 이다 — 다�
     // u32 를 넘는 값은 pid 가 아니다 — 줄은 살리고 칸만 버린다.
     const huge = parseLine("codex\t{\"maru_hook_ppid\":99999999999,\"hook_event_name\":\"Stop\"}").?;
     try testing.expectEqual(@as(u32, 0), huge.hook_ppid);
+}
+
+test "ephemeral Codex null transcript preserves identity prompt tools and completion" {
+    for ([_][]const u8{ "SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop" }) |kind| {
+        var storage: [512]u8 = undefined;
+        const line = try std.fmt.bufPrint(&storage, "codex\t{{\"hook_event_name\":\"{s}\",\"transcript_path\":null,\"session_id\":\"synthetic-session\",\"turn_id\":\"synthetic-turn\",\"prompt\":\"synthetic prompt\",\"tool_name\":\"exec_command\"}}", .{kind});
+        const ev = parseLine(line) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(kindFromName(kind), ev.kind);
+        try testing.expectEqualStrings("synthetic-session", ev.session_id);
+        try testing.expectEqualStrings("synthetic-turn", ev.turn_key);
+        try testing.expectEqualStrings("synthetic prompt", ev.text);
+        try testing.expectEqualStrings("exec_command", ev.tool_name);
+        try testing.expectEqualStrings("", ev.transcript_path);
+    }
+    for ([_][]const u8{ "0", "false", "[]", "{}" }) |bad| {
+        var storage: [256]u8 = undefined;
+        const line = try std.fmt.bufPrint(&storage, "codex\t{{\"hook_event_name\":\"Stop\",\"transcript_path\":{s}}}", .{bad});
+        try testing.expect(parseLine(line) == null);
+    }
+    try testing.expect(parseLine("codex\t{\"hook_event_name\":null,\"transcript_path\":null}") == null);
+    try testing.expect(parseLine("codex\t{\"hook_event_name\":\"Stop\",\"session_id\":null,\"transcript_path\":null}") == null);
 }

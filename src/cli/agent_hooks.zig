@@ -204,7 +204,7 @@ pub const usage =
     \\events over its existing ssh connection.
     \\Each option may only be specified once.
     \\record accepts one bounded provider-tab-payload line on stdin in an existing private directory.
-    \\It prepares generation logs; installed hooks keep the legacy format until reader migration.
+    \\It prepares generation logs; installed hooks select the runtime pinned format (1 or 2).
     \\
 ;
 

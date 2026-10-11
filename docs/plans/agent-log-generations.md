@@ -413,3 +413,38 @@ UnknownRequiredField로 거부하므로 native runtime을 legacy로 복원할 �
 registry capture·복원과 attach bootstrap·클라이언트 보관·reader namespace까지 같은
 값을 연결하고 실제 spawn/reconnect와 snapshot roundtrip으로 검증한다. provider
 기본 설치와 SSH 전송의 format 전환은 이 단계에서 활성화하지 않는다.
+
+## 4c-5 새 로컬 runtime 기본 전환
+
+2026-10-12 사용자 승인에 따라 로컬 기본 전환을 진행한다. GUI와 같은 설치의
+절대 CLI 실행 경로를 사용하는 이행 훅을 Claude·Codex에 설치한다. CLI 설치기도
+같은 네 namespace와 canonical 실행 경로로 동일한 명령을 만들어 재조정 핑퐁을
+막는다. remote format env 전달은 바꾸지 않으며 기존 SSH는 계속 v1이다.
+
+새 GUI runtime은 native CLI가 준비되고 소유자 전용 local v2 instance directory를
+준비할 수 있고 존재하는 provider의 훅 파일 모두가 이행 명령과 일치할 때 v2를 선택한다.
+설정 파일 갱신 실패·부분 설치·기존 append command 잔존 시 자동 선택은 v1이며
+이미 동작하던 provider 이벤트를 다른 namespace로 보내지 않는다. 구 host가 format capability를 지원하지 않으면
+자동 선택은 v1을 유지해 영속 세션을 포기하지 않는다. 명시적 v2 요청은 기존
+엄격한 계약을 유지한다. CLI 부재·경로/namespace 인증 실패 시 자동 v2 활성화를
+하지 않는다. 프로세스가 시작한 뒤에는 환경·reader format을 바꾸지 않는다.
+
+in-process reader도 성공한 spawn 요청의 format을 보관한다. host restore는 요청의
+새 기본값 대신 attach에서 확인한 기존 format을 보관한다. 기존 v1 runtime과
+in-flight v1 command는 계속 v1 namespace를 쓰며 v2 header에 닿지 않는다.
+
+관측과 검증은 실제 자식 env → provider 훅 → native 파일 header/generation →
+제품 reader → 배지·턴 캡처를 연결한다. 설치된 Codex의 hooks/list·trust oracle과
+설치된 Claude의 실제 훅 실행을 격리 provider config에서 검사하고 버전을 기록한다.
+모델 호출이 필요한 검증은 최소한의 합성 입력만 사용한다. 사용자 설정과 원문을
+fixture로 커밋하지 않는다. provider 실행 검증이 충족되기 전에는 기본 전환을 완료로
+처리하지 않는다. binary 부재, 미지원 host, 설정 재조정 반복, 기존 v1 재접속,
+잘못된 env override, native 기록 실패와 늦은 v1 append를 고의 결함으로 검증한다.
+
+실제 Codex 0.162.1의 ephemeral 턴에서 `transcript_path: null`이 관측됐다. 이 선택 필드는 null이면 경로 없음으로 취급하며, 세션 신원·턴 식별자와 필수 event 이름의 검증은 완화하지 않는다. 실제 provider 턴을 소비하기 위한 호환 수정이며 다른 타입은 계속 거부한다.
+
+2026-10-12 검증: Claude Code 2.1.296와 Codex CLI 0.162.1의 설치 훅으로 합성 읽기 전용 턴을 실행했다. 두 provider 모두 v2 generation을 확인한 GUI reader가 프롬프트·도구·완료를 소비하고 완료된 턴 캡처를 봉인했다. 같은 carrier에서 살아 있는 기존 v1 runtime의 환경과 reader를 유지했다. CLI·디렉터리 준비 조건, 구 host 보호, 명시적 v2 불변성과 nofollow를 제거한 잘못된 코드가 실행 판정자에서 거부됐다. HOME 부재의 자동 선택은 v1을 유지하며 명시적 v2는 준비 실패를 반환한다.
+
+CLI buddy가 심볼릭 링크일 때 GUI 설치는 논리 경로, CLI 설치는 실제 경로를 넣어 훅 명령과 신뢰 해시가 바뀌는 문제를 실제 carrier와 제품 CLI 설치로 재현했다. GUI도 존재하는 sibling CLI의 실제 경로를 사용한다. 없는 CLI의 예상 bundle 경로는 보존하며 기본 v2 활성화는 막는다. 기본 carrier와 symlink carrier 모두에서 Claude·Codex 설치 명령의 바이트를 GUI와 CLI 간에 대조한다. CLI help도 runtime pinned format 선택을 설명한다.
+
+Linux CI는 Zig의 비-iterate 디렉터리 handle이 O_PATH라 fchmod를 거부하는 문제를 발견했다. 생성 API는 Linux의 최종 handle만 읽기 가능하게 열고, nofollow와 동일 handle의 UID 확인·권한 변경을 유지한다. 기존 legacy golden 셸 검증은 유지하고, 제품 CLI 설치 결과는 local/remote 각각의 v1/v2 실제 파일·header·payload·권한과 멱등성으로 독립 판정한다.

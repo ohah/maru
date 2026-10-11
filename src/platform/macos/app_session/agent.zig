@@ -1568,11 +1568,16 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
     // 그 사고가 실제로 났다(위 `test_allow_log_cleanup`).
     if (builtin.is_test and !test_allow_log_cleanup) return;
     hook_logs_cleaned = true;
+    inline for (.{ maru.session.agent_log_profile.Profile.v1, maru.session.agent_log_profile.Profile.v2 }) |profile|
+        cleanupAgentHookLogsForProfile(self, profile);
+}
+
+fn cleanupAgentHookLogsForProfile(self: *AppSession, profile: maru.session.agent_log_profile.Profile) void {
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
 
-    const log_dir = agentHookLogDir(a) orelse return;
+    const log_dir = agentHookLogDirForProfile(a, profile) orelse return;
     var dir = openAgentDirAbsolute(self, log_dir, .{ .iterate = true }) orelse return;
     defer dir.close(self.io);
 
@@ -1595,6 +1600,7 @@ pub fn cleanupAgentHookLogs(self: *AppSession) void {
             doomed_dirs.append(a, a.dupe(u8, entry.name) catch return) catch return;
             continue;
         }
+        if (profile == .v2) continue; // native ownership is the instance directory, never a loose root file
         if (entry.kind != .file) continue;
         // **우리가 만든 이름만 지운다** — pane 식별자(숫자) + `.ndjson`. 남이 이 디렉터리에 무엇을 두었든
         // 그것까지 치우는 것은 우리 일이 아니다.
@@ -1688,6 +1694,66 @@ pub fn reconcileAgentHooks(self: *AppSession) void {
     }
 }
 
+/// Defaults are selected before spawn, never inferred from a log's contents.
+/// Validate the same installed command as reconciliation so a failed refresh
+/// cannot send a v2 child to an old append-only hook.
+pub fn prepareNewHookLogProfile(self: *AppSession, requested: maru.session.agent_log_profile.Profile, persistent_support: ?bool) !maru.session.agent_log_profile.Profile {
+    if (!is_macos) return requested;
+    if (requested == .v1 and persistent_support == false) return .v1;
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const executable = self.siblingMaruPath(a) orelse return requested;
+    const cli_ready = app_session_mod.isExecutablePath(executable);
+    if (requested == .v1 and (!cli_ready or !self.loaded_config.config.sidebar.agent_hooks)) return .v1;
+    const dir = agentHookLogDirForProfile(a, .v2) orelse return if (requested == .v2) error.NativeHookDirectoryUnavailable else .v1;
+    const instance = agentHookInstanceDirForProfile(a, .v2) orelse return if (requested == .v2) error.NativeHookDirectoryUnavailable else .v1;
+    var directory_ready = false;
+    if (maru.agent_log_record.createPrivateDirectory(self.io, dir)) |held_root| {
+        held_root.close(self.io);
+        if (maru.agent_log_record.createPrivateDirectory(self.io, instance)) |held| {
+            held.close(self.io);
+            directory_ready = true;
+        } else |_| {}
+    } else |_| {}
+    if (requested == .v2 and !directory_ready) return error.NativeHookDirectoryUnavailable;
+    const installed_ready = if (requested == .v2) true else transitionHooksReady(self, a, executable);
+    return maru.session.agent_log_profile.forNewRuntime(requested, cli_ready and installed_ready, directory_ready, persistent_support);
+}
+
+fn transitionHooksReady(self: *AppSession, a: std.mem.Allocator, executable: []const u8) bool {
+    const install = maru.session.agent_hook_install;
+    const command = maru.session.agent_hook_command;
+    const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else null;
+    const local_dir = agentHookLogDir(a) orelse return false;
+    const remote_dir = remoteAgentHookLogDir(a) orelse return false;
+    var found = false;
+    for ([_]command.Provider{ .claude, .codex }) |provider| {
+        var config_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const env_value = if (std.c.getenv(install.configDirEnv(provider))) |v| std.mem.span(v) else null;
+        const config_dir = install.configDir(provider, &config_buf, env_value, home) orelse return false;
+        const held = openAgentDirAbsolute(self, config_dir, .{}) orelse continue;
+        held.close(self.io);
+        found = true;
+        var want: std.ArrayListUnmanaged(u8) = .empty;
+        command.buildInstalled(&want, a, provider.tag(), local_dir, remote_dir, home, executable) catch return false;
+        const path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ config_dir, install.hooksFileName(provider) }, 0) catch return false;
+        const state = readFileState(self.io, a, path);
+        const text = switch (state) {
+            .present => |value| value,
+            else => return false,
+        };
+        const parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return false;
+        const root = switch (parsed.value) {
+            .object => |value| value,
+            else => return false,
+        };
+        const known = install.scan(provider, .local, root.get("hooks"), want.items) orelse return false;
+        if (install.planForSet(provider, .local, .{ .known = known }, .ensure) != .leave) return false;
+    }
+    return found;
+}
+
 /// 한 provider 의 훅 파일을 맞춘다. 위 `reconcileAgentHooks` 의 doc comment 가 규율의 단일 출처다.
 fn reconcileProviderHooks(
     self: *AppSession,
@@ -1747,7 +1813,8 @@ fn reconcileProviderHooks(
     }
 
     var cmd: std.ArrayListUnmanaged(u8) = .empty;
-    hook_command.build(&cmd, a, provider.tag(), log_dir, remote_log_dir) catch return;
+    const executable = self.siblingMaruPath(a) orelse return;
+    hook_command.buildInstalled(&cmd, a, provider.tag(), log_dir, remote_log_dir, home, executable) catch return;
 
     const hooks_path = std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ config_dir, install.hooksFileName(provider) }, 0) catch return;
 

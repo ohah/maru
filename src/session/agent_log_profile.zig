@@ -70,3 +70,23 @@ test "namespace isolation rejects aliases and overlapping roots" {
     try std.testing.expectEqualStrings("/home/a/.cache/maru/agent-turn-events-v2", path);
     try std.testing.expectEqualStrings(".cache/maru/remote-agent-events", homeRelative(.remote, .v1));
 }
+
+/// A fresh GUI runtime may use native logs only when its producer and owner are
+/// ready. An old persistent host keeps v1 instead of losing persistence through
+/// a local fallback; explicit v2 requests still reach the strict capability gate.
+pub fn forNewRuntime(requested: Profile, cli_ready: bool, directory_ready: bool, persistent_support: ?bool) Profile {
+    if (requested == .v2) return .v2;
+    if (!cli_ready or !directory_ready) return .v1;
+    if (persistent_support) |supported| if (!supported) return .v1;
+    return .v2;
+}
+
+test "native default selection preserves old hosts and explicit runtime intent" {
+    const t = std.testing;
+    try t.expectEqual(Profile.v2, forNewRuntime(.v1, true, true, null));
+    try t.expectEqual(Profile.v2, forNewRuntime(.v1, true, true, true));
+    try t.expectEqual(Profile.v1, forNewRuntime(.v1, true, true, false));
+    try t.expectEqual(Profile.v1, forNewRuntime(.v1, false, true, null));
+    try t.expectEqual(Profile.v1, forNewRuntime(.v1, true, false, null));
+    try t.expectEqual(Profile.v2, forNewRuntime(.v2, false, false, false));
+}

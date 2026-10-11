@@ -9918,10 +9918,18 @@ pub const AppSession = struct {
 
     /// GUI 바이너리의 형제 `maru` CLI 경로(§10 launcher가 `maru __session-host`로 exec). selfExePath는 앱 바이너리라
     /// dirname의 형제 `maru`를 쓴다. 못 찾으면 null. **형제 maru 경로 도출의 단일 출처** — `installCli`도 이걸 쓴다(code-review #15).
-    fn siblingMaruPath(self: *AppSession, a: std.mem.Allocator) ?[:0]const u8 {
-        const exe = std.process.executablePathAlloc(self.io, a) catch return null;
+    pub fn siblingMaruPath(self: *AppSession, a: std.mem.Allocator) ?[:0]const u8 {
+        const raw_exe = std.process.executablePathAlloc(self.io, a) catch return null;
+        defer a.free(raw_exe);
+        const exe = std.Io.Dir.realPathFileAbsoluteAlloc(self.io, raw_exe, a) catch return null;
+        defer a.free(exe);
         const dir = std.fs.path.dirname(exe) orelse return null;
-        return std.fmt.allocPrintSentinel(a, "{s}/maru", .{dir}, 0) catch null;
+        const candidate = std.fmt.allocPrintSentinel(a, "{s}/maru", .{dir}, 0) catch return null;
+        // GUI and CLI install must hash the same producer, including a symlinked buddy.
+        // Keep the expected bundle path when the CLI is absent; automatic v2 stays off.
+        const physical = std.Io.Dir.realPathFileAbsoluteAlloc(self.io, candidate, a) catch return candidate;
+        a.free(candidate);
+        return physical;
     }
 
     /// 세션 host 캐시 base = `${XDG_CACHE_HOME:-$HOME/.cache}/maru`(terminfo_cache 등 다른 maru 캐시와 같은 규칙 —
@@ -25666,6 +25674,8 @@ test "agent hooks install into the claude hooks array and leave user entries unt
         defer a.free(kept);
         try std.testing.expect(std.mem.indexOf(u8, kept, "request_user_input") != null);
     }
+    const producer = session.siblingMaruPath(a) orelse return error.TestUnexpectedResult;
+    defer a.free(producer);
     session.deinit();
 
     {
@@ -25721,7 +25731,7 @@ test "agent hooks install into the claude hooks array and leave user entries unt
     defer want.deinit(a);
     const remote_dir = (try hook_command.remoteLogDirAlloc(a, home)).?; // 설치기와 같은 HOME 규칙(RA8)
     defer a.free(remote_dir);
-    try hook_command.build(&want, a, "claude", log_dir, remote_dir);
+    try hook_command.buildInstalled(&want, a, "claude", log_dir, remote_dir, home, producer);
 
     // The inline command is repeated per hook. Read fixtures with the product's 1 MiB
     // ceiling (readFileAlloc), rather than an unrelated 64 KiB assumption.
@@ -31326,6 +31336,8 @@ test "agent hooks install into codex and record trust without touching existing 
         .queue_capacity = 16,
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
+    const producer = session.siblingMaruPath(a) orelse return error.TestUnexpectedResult;
+    defer a.free(producer);
     session.deinit();
 
     const log_dir = try std.fmt.allocPrint(a, "{s}/.cache/maru/{s}", .{ home, hook_command.log_dir_rel }); // 훅 로그는 HOME 만 본다(RA8)
@@ -31334,7 +31346,7 @@ test "agent hooks install into codex and record trust without touching existing 
     defer want.deinit(a);
     const remote_dir = (try hook_command.remoteLogDirAlloc(a, home)).?; // 설치기와 같은 HOME 규칙(RA8)
     defer a.free(remote_dir);
-    try hook_command.build(&want, a, hook_command.Provider.codex.tag(), log_dir, remote_dir);
+    try hook_command.buildInstalled(&want, a, hook_command.Provider.codex.tag(), log_dir, remote_dir, home, producer);
 
     const hooks_after = try tmp.dir.readFileAlloc(io, "codex/hooks.json", a, .limited(1 << 20));
     defer a.free(hooks_after);
@@ -97272,4 +97284,181 @@ test "host v2 reader selects confirmed format without SSH nonce and excludes lat
     agent_ops.pollAgentHookEvents(&session, term, false);
     try std.testing.expectEqualStrings("host-v2", term.hook.transcript.owned.prompt());
     try std.testing.expectEqualDeep(position.generation, term.agent_hook_generation.?);
+}
+
+test "native local reader default carrier preserves live v1 and consumes installed provider hooks" {
+    if (!is_macos) return error.SkipZigTest;
+    const marker = std.c.getenv("MARU_NATIVE_DEFAULT_CARRIER") orelse return error.SkipZigTest;
+    if (!std.mem.eql(u8, std.mem.span(marker), "1")) return error.SkipZigTest;
+    try session_host.host_adapter.HostAdapter.initializeProcessRuntime();
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer guard.restore();
+    const home = std.mem.span(std.c.getenv("MARU_NATIVE_DEFAULT_HOME") orelse return error.InvalidTestState);
+    const project = std.mem.span(std.c.getenv("MARU_NATIVE_DEFAULT_PROJECT") orelse return error.InvalidTestState);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{home}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    const command = maru.session.agent_hook_command;
+    const install = maru.session.agent_hook_install;
+    const local = (try command.localLogDirAlloc(scratch, home)).?;
+    const remote = (try command.remoteLogDirAlloc(scratch, home)).?;
+    inline for (.{ command.Provider.claude, command.Provider.codex }) |provider| {
+        const config_dir = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ home, install.homeSubdir(provider) });
+        try std.Io.Dir.cwd().createDirPath(io, config_dir);
+        var legacy: std.ArrayListUnmanaged(u8) = .empty;
+        try command.build(&legacy, scratch, provider.tag(), local, remote);
+        var hooks: std.json.ObjectMap = .empty;
+        try install.apply(provider, .local, scratch, &hooks, legacy.items, .install);
+        const text = try std.json.Stringify.valueAlloc(scratch, std.json.Value{ .object = hooks }, .{});
+        const wrapped = try std.fmt.allocPrint(scratch, "{{\"hooks\":{s}}}", .{text});
+        const path = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ config_dir, install.hooksFileName(provider) });
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = wrapped });
+    }
+    const previous_keep_alive = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = false;
+    defer app_keep_alive_after_quit = previous_keep_alive;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 30, .rows = 8, .queue_capacity = 32, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    const executable = session.siblingMaruPath(scratch) orelse return error.InvalidTestState;
+    try std.testing.expect(isExecutablePath(executable)); // actual bundled CLI, never a PATH probe
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", "", 1));
+    const without_home = agent_ops.prepareNewHookLogProfile(&session, .v1, null);
+    const explicit_without_home = agent_ops.prepareNewHookLogProfile(&session, .v2, null);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v1, try without_home);
+    try std.testing.expectError(error.NativeHookDirectoryUnavailable, explicit_without_home);
+    const project_dir = try std.Io.Dir.cwd().openDir(io, project, .{});
+    defer project_dir.close(io);
+    try project_dir.writeFile(io, .{ .sub_path = "old.sh", .data =
+        \\printf '%s' "$MARU_AGENT_LOG_FORMAT" >old-format
+        \\IFS= read -r signal
+        \\printf '%s' '{"hook_event_name":"UserPromptSubmit","prompt":"legacy remains"}' | /bin/sh transition.sh
+        \\exec /bin/cat
+    });
+    const old = try term_ops.createTerm(&session, .{ .command = "/bin/sh", .args = &.{"old.sh"}, .cwd = project, .shell_integration = null }, .{ .cols = 30, .rows = 8 }, 32, "old-v1", "/bin/sh");
+    const pane = session.tabs.items[0].panes.items[0];
+    try pane.terms.append(a, old);
+    term_ops.focusTerm(&session, pane.terms.items.len - 1);
+    defer {
+        term_ops.focusTerm(&session, 0);
+        _ = pane.terms.pop();
+        term_ops.destroyTerm(&session, old);
+    }
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v1, old.agent_hook_log_profile);
+    const previous_writes = agent_ops.test_allow_provider_writes;
+    agent_ops.test_allow_provider_writes = true;
+    defer agent_ops.test_allow_provider_writes = previous_writes;
+    agent_ops.reconcileAgentHooks(&session);
+    const settings = try std.fmt.allocPrint(scratch, "{s}/.claude/settings.json", .{home});
+    const settings_text = try std.Io.Dir.cwd().readFileAlloc(io, settings, scratch, .limited(2 * 1024 * 1024));
+    const parsed = try std.json.parseFromSlice(std.json.Value, scratch, settings_text, .{});
+    const installed = parsed.value.object.get("hooks").?.object.get("UserPromptSubmit").?.array.items[0].object.get("hooks").?.array.items[0].object.get("command").?.string;
+    try project_dir.writeFile(io, .{ .sub_path = "transition.sh", .data = installed });
+    try session.backendFor(old).writeInput(old.rt.handle, "go\n");
+    old.agent_kind = .claude;
+    for (0..200) |_| {
+        _ = old.rt.pump.drainAvailable() catch {};
+        agent_ops.pollAgentHookEvents(&session, old, false);
+        if (std.mem.eql(u8, old.hook.transcript.owned.prompt(), "legacy remains")) break;
+        _ = usleep(10 * 1000);
+    }
+    try std.testing.expectEqualStrings("legacy remains", old.hook.transcript.owned.prompt());
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v1, old.agent_hook_log_profile);
+    const old_format = try project_dir.readFileAlloc(io, "old-format", scratch, .limited(16));
+    try std.testing.expectEqualStrings("1", old_format);
+    var argv: std.ArrayList([]const u8) = .empty;
+    if (std.c.getenv("MARU_NATIVE_DEFAULT_ARGV")) |raw| {
+        const values = try std.json.parseFromSlice(std.json.Value, scratch, std.mem.span(raw), .{});
+        if (values.value != .array or values.value.array.items.len == 0 or values.value.array.items.len > 64) return error.InvalidTestState;
+        for (values.value.array.items) |value| {
+            if (value != .string) return error.InvalidTestState;
+            try argv.append(scratch, value.string);
+        }
+    } else {
+        try argv.appendSlice(scratch, &.{ "/bin/sh", "-c", "printf '%s' '{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"native default\"}' | /bin/sh transition.sh; exec /bin/cat" });
+    }
+    var envs: std.ArrayList([]const u8) = .empty;
+    try envs.append(scratch, "MARU_AGENT_LOG_FORMAT=1"); // user override cannot replace the chosen owner format
+    if (std.c.getenv("MARU_NATIVE_DEFAULT_ENV")) |raw| {
+        const values = try std.json.parseFromSlice(std.json.Value, scratch, std.mem.span(raw), .{});
+        if (values.value != .array) return error.InvalidTestState;
+        for (values.value.array.items) |value| {
+            if (value != .string) return error.InvalidTestState;
+            try envs.append(scratch, value.string);
+        }
+    }
+    agent_ops.test_last_turn_capture = 0;
+    const fresh = try term_ops.createTerm(&session, .{ .command = argv.items[0], .args = argv.items[1..], .cwd = project, .shell_integration = null, .env_overrides = envs.items }, .{ .cols = 30, .rows = 8 }, 32, "new-v2", argv.items[0]);
+    try pane.terms.append(a, fresh);
+    term_ops.focusTerm(&session, pane.terms.items.len - 1);
+    defer {
+        term_ops.focusTerm(&session, 0);
+        _ = pane.terms.pop();
+        term_ops.destroyTerm(&session, fresh);
+    }
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v2, fresh.agent_hook_log_profile);
+    fresh.agent_kind = if (std.c.getenv("MARU_NATIVE_DEFAULT_PROVIDER")) |provider| if (std.mem.eql(u8, std.mem.span(provider), "codex")) .codex else .claude else .claude;
+    const deadline = std.Io.Clock.awake.now(io).nanoseconds + 60 * std.time.ns_per_s;
+    for (0..6000) |_| {
+        if (std.Io.Clock.awake.now(io).nanoseconds >= deadline) break;
+        _ = fresh.rt.pump.drainAvailable() catch {};
+        agent_ops.pollAgentHookEvents(&session, fresh, false);
+        if (fresh.hook.transcript.owned.prompt().len != 0 and fresh.agent_hook_generation != null) {
+            if (std.c.getenv("MARU_NATIVE_DEFAULT_ARGV") == null) break;
+            if (!fresh.hook.progress.turn_open) {
+                if (project_dir.readFileAlloc(io, "provider-status", scratch, .limited(16))) |status| {
+                    try std.testing.expectEqualStrings("0", status);
+                    break;
+                } else |_| {}
+            }
+        }
+        _ = usleep(10 * 1000);
+    }
+    if (std.c.getenv("MARU_NATIVE_DEFAULT_ARGV") != null and agent_ops.test_last_turn_capture == 0) {
+        const path = agent_ops.agentHookLogPath(scratch, fresh).?;
+        std.debug.print("native capture file={s} generation_known={any} offset={d} kind={s}\n", .{ std.fs.path.basename(path), fresh.agent_hook_generation != null, fresh.agent_hook_cursor.offset, @tagName(fresh.agent_kind) });
+        const held = try maru.agent_log_record.openPrivateDirectory(io, std.fs.path.dirname(path).?);
+        defer held.close(io);
+        const base = std.fs.path.basename(path);
+        const buffer = try scratch.alloc(u8, 1024 * 1024);
+        const snap = try maru.agent_log_writer.readSnapshot(io, held, base[0 .. base.len - 7], null, buffer);
+        var lines = std.mem.splitScalar(u8, snap.bytes, '\n');
+        while (lines.next()) |line| {
+            const tab = std.mem.indexOfScalar(u8, line, '\t') orelse continue;
+            const entry = std.json.parseFromSlice(std.json.Value, scratch, line[tab + 1 ..], .{}) catch continue;
+            if (entry.value != .object) continue;
+            const ev = entry.value.object.get("hook_event_name") orelse continue;
+            if (ev != .string) continue;
+            if (ev.string.len < 32) std.debug.print("native event kind={s}\n", .{ev.string});
+            std.debug.print("native capture event_parsed={any}\n", .{maru.session.agent_hook_event.parseLine(line) != null});
+            var fields = entry.value.object.iterator();
+            while (fields.next()) |field| if (field.value_ptr.* == .null) {
+                if (field.key_ptr.*.len < 32) std.debug.print("native capture null_field={s}\n", .{field.key_ptr.*});
+            };
+        }
+        std.debug.print("native capture identity_known={any} turn_failed={any} backlog={any}\n", .{ fresh.hook.transcript.identity().len != 0, fresh.hook.progress.lead_failed, fresh.hook.backlog_catchup });
+    }
+    try std.testing.expect(fresh.hook.transcript.owned.prompt().len != 0);
+    try std.testing.expect(fresh.agent_hook_generation != null);
+    if (std.c.getenv("MARU_NATIVE_DEFAULT_ARGV") != null) {
+        const status = try project_dir.readFileAlloc(io, "provider-status", scratch, .limited(16));
+        try std.testing.expectEqualStrings("0", status);
+        try std.testing.expect(!fresh.hook.progress.turn_open);
+        try std.testing.expectEqual(maru.session.agent_hook_mode.State.idle, fresh.hook.state);
+        try std.testing.expectEqual(.idle, fresh.agent_state);
+        try std.testing.expect(agent_ops.test_last_turn_capture != 0);
+        try std.testing.expect(session.turn_captures.sealedTurn(agent_ops.test_last_turn_capture) != null);
+    }
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v1, old.agent_hook_log_profile);
 }

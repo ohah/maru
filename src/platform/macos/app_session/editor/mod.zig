@@ -8856,8 +8856,7 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
 
-    var iter = selections(term);
-    if (iter.count() == 0) return false;
+    if (selections(term).count() == 0) return false;
 
     // 재변환은 primary 의 편집 범위를 다른 커서 너머로 옮기거나 그 커서와 겹치게 한다.
     // 실제 선택은 undo 용으로 그대로 두고, 편집할 선택만 기존 정규화(owner·primary 승계)로
@@ -8896,18 +8895,35 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         for (pair_texts.items) |t| self.allocator.free(t);
         pair_texts.deinit(self.allocator);
     }
-    // type-over로 지나간 커서 자리 — 변경 없이 caret만 옮긴다.
+    // type-over로 지나간 커서 자리 — 변경 없이 caret만 옮긴다. **변경의 인덱스**로 적는다.
     var skip_overs: std.ArrayList(usize) = .empty;
     defer skip_overs.deinit(self.allocator);
+    // **커서마다 자기 첫 변경의 인덱스.** 감싸기는 커서 하나에 변경이 둘이라 「변경 i = 커서 i」로
+    // 짝지으면 둘째 커서부터 앞 커서의 닫는 괄호 뒤로 갔다(결함 5).
+    var first_change: std.ArrayList(usize) = .empty;
+    defer first_change.deinit(self.allocator);
+    // 감싼 커서 — 감싼 글자를 고른 채 둔다(§3.7). 원래 선택이 거꾸로였는지도 함께 기억한다.
+    const Surrounded = struct { sel: usize, reversed: bool };
+    var surrounded: std.ArrayList(Surrounded) = .empty;
+    defer surrounded.deinit(self.allocator);
 
     // **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7). 붙여넣기·IME 확정은 여러 글자가 한 번에
     // 오는데 그때 괄호를 닫으면 **사용자가 넣지 않은 문자**가 문서에 들어간다.
     const aid: ?u8 = if (text.len == 1 and replacement == null) text[0] else null;
     const content_now = doc.file.content;
 
-    const edit_count = if (effective_selections) |effective| effective.items.len else iter.count();
-    for (0..edit_count) |index| {
-        const sel = if (effective_selections) |effective| effective.items[index] else iter.next().?;
+    // **문서 순서로 쌓는다.** 예전에는 `selections()`(primary 먼저) 순서로 쌓고 나중에 정렬했는데,
+    // type-over 자리는 정렬 **전** 인덱스로 적혀 primary 가 뒤에 있으면 엉뚱한 커서가 한 칸 넘어갔다
+    // (결함 4). 처음부터 `selectionsForEdit` 의 순서면 변경·커서·caret 셋의 인덱스가 한 축이다.
+    var order_storage: []editor_selection.Selection = &.{};
+    defer if (order_storage.len > 0) self.allocator.free(order_storage);
+    const edit_items: []const editor_selection.Selection = if (effective_selections) |effective| effective.items else blk: {
+        const snap = selectionsForEdit(self, term) orelse return false;
+        order_storage = snap.items;
+        break :blk snap.items;
+    };
+    for (edit_items) |sel| {
+        first_change.append(self.allocator, ranges.items.len) catch return false;
         const lo = @min(sel.start(), doc.file.content.len);
         const hi = @min(sel.end(), doc.file.content.len);
 
@@ -8949,6 +8965,7 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
                     };
                     ranges.append(self.allocator, .{ .start = lo, .end = lo, .text = o }) catch return false;
                     ranges.append(self.allocator, .{ .start = hi, .end = hi, .text = c }) catch return false;
+                    surrounded.append(self.allocator, .{ .sel = first_change.items.len - 1, .reversed = sel.isReversed() }) catch return false;
                     continue;
                 },
             }
@@ -8969,11 +8986,8 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
         return true;
     }
 
-    std.mem.sort(maru.session.editor.delta.Change, ranges.items, {}, struct {
-        fn lessThan(_: void, a: maru.session.editor.delta.Change, b: maru.session.editor.delta.Change) bool {
-            return a.start < b.start;
-        }
-    }.lessThan);
+    // **정렬하지 않는다** — 문서 순서로 쌓았다. 순서가 깨졌으면 아래 겹침 검사가 걸러 거절한다
+    // (정렬해 숨기면 `skip_overs`·`first_change` 의 인덱스가 다시 어긋난다).
 
     // **겹치는 커서는 여기서 걸린다.** `mergeOverlapping`이 selection 단계에서 합치므로 정상
     // 경로에서는 안 나오지만, 걸러 두지 않으면 `delta.apply`가 `MalformedDelta`로 거절하고
@@ -9039,10 +9053,11 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     // (적대적 검증 2026-08-27 — 동치였다): `i`가 0부터 하나씩 오르고 목록이 오름차순이라
     // 소비만 해도 커서가 늘 맞은 자리에 온다. 방어가 둘이면 하나는 반드시 검증 밖에 남는다.
     var skip_at: usize = 0;
-    for (inverse.changes, 0..) |ic, i| {
-        if (i >= sels.items.len) break;
+    for (first_change.items, 0..) |ci, i| {
+        if (i >= sels.items.len or ci >= inverse.changes.len) break;
+        const ic = inverse.changes[ci];
         var at = ic.end;
-        if (skip_at < skip_overs.items.len and skip_overs.items[skip_at] == i) {
+        if (skip_at < skip_overs.items.len and skip_overs.items[skip_at] == ci) {
             at += 1;
             skip_at += 1;
         }
@@ -9070,10 +9085,12 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     // **자동으로 닫은 쌍은 caret이 가운데다**(§3.7). 위 규칙은 "넣은 것 뒤"라 `()`에서 닫는 괄호
     // **뒤**에 서게 되는데, 그러면 자동 닫기가 오히려 방해가 된다 — 사용자는 그 안에 이어 친다.
     //
-    // **감싼 경우는 보정하지 않는다**: 여는 것과 닫는 것이 별개 변경이라 그 사이 선택이 그대로
-    // 살아 있고, caret은 그 끝에 서는 것이 맞다.
-    for (ranges.items, 0..) |r, i| {
-        if (i >= sels.items.len) break;
+    // **감싼 커서는 감싼 글자를 고른 채 둔다**(§3.7, 2026-10-11 — VSCode 관례). 그 커서의 두 변경
+    // (여는 문자·닫는 문자) 사이가 고른 글자다. 커서마다 자기 변경 둘을 보므로 커서가 여럿이어도
+    // 같은 모양이다(결함 5). 원래 선택이 거꾸로였으면 방향도 지킨다.
+    for (first_change.items, 0..) |ci, i| {
+        if (i >= sels.items.len or ci >= ranges.items.len) break;
+        const r = ranges.items[ci];
         if (replacement == null and r.text.len == 2 and r.start == r.end) {
             const p = editor_pairs.pairFor(r.text[0]) orelse continue;
             if (p.close != r.text[1]) continue;
@@ -9081,6 +9098,17 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
             // **자동으로 넣은 닫는 문자를 표시해 둔다**(§3.7) — Backspace가 그것만 함께 지운다.
             term.rt.editor_auto_closed_at = sels.items[i].focus;
         }
+    }
+    for (surrounded.items) |sur| {
+        if (sur.sel >= sels.items.len or sur.sel >= first_change.items.len) continue;
+        const ci = first_change.items[sur.sel];
+        if (ci + 1 >= inverse.changes.len) continue;
+        const inner_lo = inverse.changes[ci].end; // 여는 문자 뒤
+        const inner_hi = inverse.changes[ci + 1].start; // 닫는 문자 앞
+        sels.items[sur.sel] = if (sur.reversed)
+            editor_selection.Selection.fromPoints(inner_hi, inner_lo)
+        else
+            editor_selection.Selection.fromPoints(inner_lo, inner_hi);
     }
 
     // pushUndo owns the inverse and may release it if its own allocation fails.
@@ -9584,7 +9612,7 @@ pub fn cutSelection(self: *AppSession, term: *Term) bool {
         while (it.next()) |sel| if (!sel.isEmpty()) break :blk true;
         break :blk false;
     };
-    if (had_selection) return deleteText(self, term, false);
+    if (had_selection) return cutChosen(self, term);
 
     // **선택이 없다 = 줄 전체다.** caret이 있는 줄을 통째로 지운다.
     const primary = term.rt.editor_selection orelse return false;
@@ -9593,6 +9621,70 @@ pub fn cutSelection(self: *AppSession, term: *Term) bool {
     term.rt.editor_selection = editor_selection.Selection.fromPoints(line.start, line.end_with_ending);
     clearExtraSelections(self, term);
     return deleteText(self, term, false);
+}
+
+/// 선택이 하나라도 있을 때의 잘라내기 — **복사한 것만 지운다**(§3.4).
+///
+/// `copySelection` 은 빈 caret 을 건너뛰고 고른 것만 담는다. 그런데 지우기를 `deleteText` 에 그대로
+/// 맡기면 빈 caret 마다 **다음 글자 하나**를 지워(`deleteBy(.char)`), 클립보드에도 문서에도 없는 글자가
+/// 사라졌다(일곱째 결함). 그래서 빈 caret 을 잠시 빼고 지운 뒤, 지운 만큼 당긴 제자리에 되돌린다.
+fn cutChosen(self: *AppSession, term: *Term) bool {
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    var empties: usize = 0;
+    for (snap.items) |sel| {
+        if (sel.isEmpty()) empties += 1;
+    }
+    if (empties == 0) return deleteText(self, term, false);
+
+    const chosen_len = snap.items.len - empties;
+    const old_primary = term.rt.editor_selection;
+    const old_extras = term.rt.editor_extra_selections;
+    // 고른 것만 남긴다. primary 가 빈 caret 이면 문서상 첫 선택이 이어받는다.
+    const primary_sel = snap.primarySelection();
+    var new_primary: ?editor_selection.Selection = if (primary_sel.isEmpty()) null else primary_sel;
+    const chosen_extras = self.allocator.alloc(editor_selection.Selection, chosen_len - 1) catch return false;
+    var k: usize = 0;
+    for (snap.items, 0..) |sel, i| {
+        if (sel.isEmpty()) continue;
+        if (new_primary == null) {
+            new_primary = sel;
+            continue;
+        }
+        if (i == snap.primary) continue;
+        chosen_extras[k] = sel;
+        k += 1;
+    }
+    term.rt.editor_selection = new_primary;
+    term.rt.editor_extra_selections = chosen_extras;
+    if (!deleteText(self, term, false)) {
+        if (term.rt.editor_extra_selections.len > 0) self.allocator.free(term.rt.editor_extra_selections);
+        term.rt.editor_selection = old_primary;
+        term.rt.editor_extra_selections = old_extras;
+        return false;
+    }
+    // 빈 caret 을 되돌린다 — 그 앞에서 지운 길이만큼 당긴 자리.
+    const kept = term.rt.editor_extra_selections;
+    const grown = self.allocator.alloc(editor_selection.Selection, kept.len + empties) catch {
+        if (old_extras.len > 0) self.allocator.free(old_extras);
+        return true; // 지우기는 섰다 — 빈 caret 만 잃는다
+    };
+    @memcpy(grown[0..kept.len], kept);
+    var w = kept.len;
+    for (snap.items) |sel| {
+        if (!sel.isEmpty()) continue;
+        var removed: usize = 0;
+        for (snap.items) |other| {
+            if (!other.isEmpty() and other.end() <= sel.focus) removed += other.end() - other.start();
+        }
+        grown[w] = editor_selection.Selection.at(sel.focus - removed);
+        w += 1;
+    }
+    if (kept.len > 0) self.allocator.free(kept);
+    if (old_extras.len > 0) self.allocator.free(old_extras);
+    term.rt.editor_extra_selections = grown;
+    mergeCarets(self, term);
+    return true;
 }
 
 /// **주석 토글**(§3.7) — selection이 걸친 줄 전체를 한 번에 뒤집는다.
@@ -9747,10 +9839,19 @@ pub fn toggleLineComment(self: *AppSession, term: *Term) bool {
 /// **꼬리를 복사해 두면 넷 중 하나가 반드시 어긋난다.** 실제로 `toggleLineComment`·`pasteText`가
 /// 같은 아홉 줄을 각자 들고 있고, 그 중 하나만 `breakUndoGroup`을 빠뜨려도 **타이핑과 한 undo로
 /// 뭉친다**(§3.3 "연산 종류 변경"). 그래서 넷은 이 자리 하나를 탄다.
-fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.editor.delta.Change) bool {
+///
+/// **`after` 가 있으면 caret 은 그것이 정한다**(`selectionsForEdit` 의 문서 순서 그대로, 편집 **뒤**
+/// 좌표). 줄 조작의 caret 은 `delta.mapOffset` 으로는 못 정한다 — 삽입 지점의 offset 은 안 밀리고 바뀐
+/// 범위 안의 offset 은 범위 시작으로 접혀, 옮긴 줄을 caret 이 안 따라가고(§3.9a 「선택은 따라간다」)
+/// 지운 줄의 caret 이 열 0 으로 가고 Enter 의 caret 이 새 개행 앞에 남았다. 정한 뒤 겹친 커서는
+/// 합친다(§3.2) — 같은 블록의 커서들이 한 자리로 모일 수 있다.
+fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.editor.delta.Change, after: ?[]const editor_selection.Selection) bool {
     if (ranges.len == 0) return false;
     var sels = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(sels.items);
+    if (after) |a| {
+        if (a.len != sels.items.len) return false; // 같은 스냅숏에서 셌어야 한다
+    }
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
     const before_primary = sels.primary;
     const scroll_anchor = captureScrollAnchor(term);
@@ -9764,7 +9865,9 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     breakUndoGroup(term);
     const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .insert);
+    if (after) |a| @memcpy(sels.items, a);
     writeBackSelections(self, term, sels);
+    if (after != null) mergeCarets(self, term);
     refreshAfterEdit(self, term, edit_span) catch {};
     restoreScrollAnchor(self, term, scroll_anchor, .{ .changes = ranges });
     revealPrimaryCaretRows(self, term, rows_before);
@@ -9772,6 +9875,35 @@ fn applyLineEdit(self: *AppSession, term: *Term, ranges: []const maru.session.ed
     breakUndoGroup(term);
     self.metal_dirty = true;
     return true;
+}
+
+/// 줄 머리에서 `offset` 까지의 **글자 수**(코드포인트). 「같은 열」을 byte 로 세면 한글 줄에서 글자
+/// 가운데로 떨어진다.
+fn lineColumn(content: []const u8, line_start: usize, offset: usize) usize {
+    var n: usize = 0;
+    for (content[line_start..@min(offset, content.len)]) |b| {
+        if (b & 0xC0 != 0x80) n += 1;
+    }
+    return n;
+}
+
+/// `col` 글자만큼 들어간 offset — 줄이 짧으면 줄 끝(§3.9a 「다음 줄의 같은 열」).
+fn offsetAtColumn(content: []const u8, line_start: usize, line_end: usize, col: usize) usize {
+    var off = line_start;
+    var n: usize = 0;
+    while (off < line_end and n < col) : (n += 1) {
+        off += 1;
+        while (off < line_end and content[off] & 0xC0 == 0x80) off += 1;
+    }
+    return off;
+}
+
+fn shiftSelection(sel: editor_selection.Selection, delta: i64) editor_selection.Selection {
+    var out = sel;
+    out.anchor_start = @intCast(@as(i64, @intCast(sel.anchor_start)) + delta);
+    out.anchor_end = @intCast(@as(i64, @intCast(sel.anchor_end)) + delta);
+    out.focus = @intCast(@as(i64, @intCast(sel.focus)) + delta);
+    return out;
 }
 
 /// 줄 조작이 설 수 있는 문서인가 — 편집기이고, 비교가 아니고, 읽기 전용이 아니어야 한다.
@@ -9799,20 +9931,53 @@ pub fn deleteLines(self: *AppSession, term: *Term) bool {
     defer nums.deinit(self.allocator);
     if (!selectedLineNumbers(self, term, &nums)) return false;
 
+    // **연속한 줄은 한 덩어리로 지운다.** 줄마다 따로 지우면 「마지막 줄은 앞 개행을 먹는다」가 바로 앞
+    // 줄의 범위와 겹쳐 `delta` 가 통째로 거절했다 — 마지막 내용 줄을 그 앞 줄과 함께 지우면 아무 일도
+    // 안 일어났다(결함 2).
+    const Block = struct { lo: usize, hi: usize, start: usize, end: usize, eat_prev: bool };
+    var blocks: std.ArrayList(Block) = .empty;
+    defer blocks.deinit(self.allocator);
     var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
     defer ranges.deinit(self.allocator);
-    for (nums.items) |n| {
-        const line = lines.line(n) orelse continue;
-        var start = line.start;
-        var end = line.end_with_ending; // 개행 포함
-        if (end >= content.len and start > 0) {
-            // 문서 마지막 줄 — 앞 개행까지 먹는다.
-            start -= 1;
-            end = content.len;
-        }
+    var i: usize = 0;
+    while (i < nums.items.len) {
+        var j = i;
+        while (j + 1 < nums.items.len and nums.items[j + 1] == nums.items[j] + 1) j += 1;
+        defer i = j + 1;
+        const first = lines.line(nums.items[i]) orelse continue;
+        const last = lines.line(nums.items[j]) orelse continue;
+        var start = first.start;
+        const end = @min(last.end_with_ending, content.len);
+        // **개행이 없는 마지막 줄까지 걸치면 앞 개행을 먹는다.** 개행이 있는 줄은 자기 개행까지만 —
+        // `"a\nb\n"` 에서 `b` 를 지우면 `"a\n"` 이지 끝 개행까지 사라진 `"a"` 가 아니다.
+        const eat_prev = last.end_with_ending == last.contentEnd() and start > 0;
+        if (eat_prev) start -= 1;
+        blocks.append(self.allocator, .{ .lo = nums.items[i], .hi = nums.items[j], .start = start, .end = end, .eat_prev = eat_prev }) catch return false;
         ranges.append(self.allocator, .{ .start = start, .end = end, .text = "" }) catch return false;
     }
-    return applyLineEdit(self, term, ranges.items);
+    if (ranges.items.len == 0) return false;
+
+    // **caret 은 다음 줄의 같은 열로 간다, 문서 끝이면 줄 끝**(§3.9a).
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    for (snap.items) |*sel| {
+        const ln = lines.lineAt(@min(sel.start(), content.len));
+        var removed: usize = 0;
+        for (blocks.items) |b| {
+            defer removed += b.end - b.start;
+            if (ln < b.lo or ln > b.hi) continue;
+            const next = if (b.eat_prev) null else lines.line(b.hi + 1);
+            const target = if (next) |nl| blk: {
+                const focus = @min(sel.focus, content.len);
+                const cur = lines.line(lines.lineAt(focus)) orelse break :blk nl.start;
+                const col = if (lines.lineAt(focus) > b.hi) 0 else lineColumn(content, cur.start, focus);
+                break :blk offsetAtColumn(content, nl.start, nl.contentEnd(), col);
+            } else b.end; // 앞 개행을 먹었다 — 앞 줄 끝(지운 범위의 시작)으로 접힌다
+            sel.* = editor_selection.Selection.at(target - removed - (b.end - b.start));
+            break;
+        }
+    }
+    return applyLineEdit(self, term, ranges.items, snap.items);
 }
 
 /// 걸친 줄들을 **아래에** 복사한다(§3.9a).
@@ -9835,20 +10000,17 @@ pub fn duplicateLines(self: *AppSession, term: *Term) bool {
         for (owned.items) |t| self.allocator.free(t);
         owned.deinit(self.allocator);
     }
-    var shift: usize = 0;
+    const Block = struct { lo: usize, hi: usize, copy_len: usize };
+    var blocks: std.ArrayList(Block) = .empty;
+    defer blocks.deinit(self.allocator);
     // **연속한 줄은 한 덩어리로 복사한다.** 줄마다 따로 넣으면 A B 가 A A B B 가 되어 블록이 깨진다.
     var i: usize = 0;
     while (i < nums.items.len) {
         var j = i;
         while (j + 1 < nums.items.len and nums.items[j + 1] == nums.items[j] + 1) j += 1;
-        const first = lines.line(nums.items[i]) orelse {
-            i = j + 1;
-            continue;
-        };
-        const last = lines.line(nums.items[j]) orelse {
-            i = j + 1;
-            continue;
-        };
+        defer i = j + 1;
+        const first = lines.line(nums.items[i]) orelse continue;
+        const last = lines.line(nums.items[j]) orelse continue;
         const block = content[first.start..@min(last.end_with_ending, content.len)];
         const t = if (block.len > 0 and block[block.len - 1] == '\n')
             self.allocator.dupe(u8, block) catch return false
@@ -9860,32 +10022,28 @@ pub fn duplicateLines(self: *AppSession, term: *Term) bool {
         };
         const at = @min(last.end_with_ending, content.len);
         ranges.append(self.allocator, .{ .start = at, .end = at, .text = t }) catch return false;
-        shift += t.len;
-        i = j + 1;
+        blocks.append(self.allocator, .{ .lo = nums.items[i], .hi = nums.items[j], .copy_len = t.len }) catch return false;
     }
-    if (!applyLineEdit(self, term, ranges.items)) return false;
+    if (ranges.items.len == 0) return false;
 
-    // **선택을 사본으로 옮긴다**(§3.9a). `delta.apply` 는 삽입 지점 **뒤**만 밀므로, 블록 뒤에 넣은
-    // 사본은 선택을 안 건드린다 — 그대로 두면 커서가 **위 원본**에 남아, 다시 눌렀을 때 사용자가
-    // 방금 만든 사본이 아니라 원본이 또 복제된다.
+    // **선택을 사본으로 옮긴다**(§3.9a). 블록 k 의 커서는 앞 블록들의 사본만큼(그 앞에 들어간다)과
+    // **자기 사본 하나만큼** 간다. 사본 전부의 합을 더하면 첫 블록부터 어긋나고 마지막 블록은 문서 끝을
+    // 넘는다(결함 1). `delta.apply` 의 매핑은 블록 뒤에 넣은 자기 사본을 안 세므로 여기서 정한다.
     //
     // **앞에 넣어 미는 방법은 안 된다** — 선택이 삽입 지점에서 시작하면 anchor 는 제자리고 focus 만
     // 밀려 **두 사본을 통째로 덮는다**(실측: 두 번째 복제가 네 벌을 만들었다).
-    if (shift > 0) {
-        if (term.rt.editor_selection) |sel| term.rt.editor_selection = .{
-            .anchor_start = sel.anchor_start + shift,
-            .anchor_end = sel.anchor_end + shift,
-            .focus = sel.focus + shift,
-            .kind = sel.kind,
-        };
-        for (term.rt.editor_extra_selections) |*e| e.* = .{
-            .anchor_start = e.anchor_start + shift,
-            .anchor_end = e.anchor_end + shift,
-            .focus = e.focus + shift,
-            .kind = e.kind,
-        };
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    for (snap.items) |*sel| {
+        const ln = lines.lineAt(@min(sel.start(), content.len));
+        var add: usize = 0;
+        for (blocks.items) |b| {
+            add += b.copy_len;
+            if (ln >= b.lo and ln <= b.hi) break;
+        }
+        sel.* = shiftSelection(sel.*, @intCast(add));
     }
-    return true;
+    return applyLineEdit(self, term, ranges.items, snap.items);
 }
 
 /// 걸친 블록을 위/아래 줄과 **통째로 맞바꾼다**(§3.9a).
@@ -9907,6 +10065,10 @@ pub fn moveLines(self: *AppSession, term: *Term, down: bool) bool {
         for (owned.items) |t| self.allocator.free(t);
         owned.deinit(self.allocator);
     }
+    // **옮긴 블록의 커서는 블록과 함께 간다**(§3.9a 「선택은 따라간다」) — 무리마다 움직인 거리.
+    const Moved = struct { lo: usize, hi: usize, delta: i64 };
+    var moved: std.ArrayList(Moved) = .empty;
+    defer moved.deinit(self.allocator);
     var i: usize = 0;
     while (i < nums.items.len) {
         var j = i;
@@ -9951,8 +10113,22 @@ pub fn moveLines(self: *AppSession, term: *Term, down: bool) bool {
             return false;
         };
         ranges.append(self.allocator, .{ .start = region_start, .end = region_end, .text = t }) catch return false;
+        const step: i64 = @intCast(oth_body.len + 1);
+        moved.append(self.allocator, .{ .lo = lo, .hi = hi, .delta = if (down) step else -step }) catch return false;
     }
-    return applyLineEdit(self, term, ranges.items);
+    if (ranges.items.len == 0) return false;
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    for (snap.items) |*sel| {
+        const ln = lines.lineAt(@min(sel.start(), content.len));
+        for (moved.items) |m| {
+            if (ln >= m.lo and ln <= m.hi) {
+                sel.* = shiftSelection(sel.*, m.delta);
+                break;
+            }
+        }
+    }
+    return applyLineEdit(self, term, ranges.items, snap.items);
 }
 
 /// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a).
@@ -9990,7 +10166,7 @@ pub fn indentLines(self: *AppSession, term: *Term, outdent: bool) bool {
             ranges.append(self.allocator, .{ .start = line.start, .end = line.start, .text = "\t" }) catch return false;
         }
     }
-    return applyLineEdit(self, term, ranges.items);
+    return applyLineEdit(self, term, ranges.items, null);
 }
 
 /// 선택이 **여러 줄에 걸치는가** — `Tab` 이 글자를 넣을지 줄을 들여쓸지 가른다(§3.9a).
@@ -10036,9 +10212,13 @@ pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
         for (owned.items) |t| self.allocator.free(t);
         owned.deinit(self.allocator);
     }
-    var iter = selections(term);
-    if (iter.count() == 0) return insertText(self, term, "\n");
-    while (iter.next()) |sel| {
+    // **문서 순서로 쌓는다.** `selections()` 는 primary 를 먼저 내서, primary 가 뒤에 있으면 변경 목록이
+    // 거꾸로 쌓여 `delta` 가 통째로 거절했다(결함 3 — `transformCase` 가 CS7 에서 고친 것과 같은
+    // 함정). `selectionsForEdit` 은 문서 순서다.
+    const snap = selectionsForEdit(self, term) orelse return insertText(self, term, "\n");
+    defer self.allocator.free(snap.items);
+    var grown: i64 = 0;
+    for (snap.items) |*sel| {
         const s_off = @min(sel.start(), content.len);
         const e_off = @min(sel.end(), content.len);
         const line = lines.line(lines.lineAt(s_off)) orelse return insertText(self, term, "\n");
@@ -10052,6 +10232,10 @@ pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
             return false;
         };
         ranges.append(self.allocator, .{ .start = s_off, .end = e_off, .text = t }) catch return false;
+        // **caret 은 새 줄의 들여쓰기 뒤로 간다**(§3.9a). 매핑에 맡기면 삽입 지점의 caret 이 안 밀려
+        // 새 개행 **앞**에 남았다.
+        sel.* = editor_selection.Selection.at(@intCast(@as(i64, @intCast(s_off + t.len)) + grown));
+        grown += @as(i64, @intCast(t.len)) - @as(i64, @intCast(e_off - s_off));
     }
     // **들여쓸 것이 없으면 종전 경로다** — 같은 결과를 두 자리에서 만들지 않는다.
     var any_indent = false;
@@ -10059,7 +10243,7 @@ pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
         if (r.text.len > 1) any_indent = true;
     }
     if (!any_indent) return insertText(self, term, "\n");
-    return applyLineEdit(self, term, ranges.items);
+    return applyLineEdit(self, term, ranges.items, snap.items);
 }
 
 /// 선택(없으면 caret 의 낱말)을 대문자/소문자로 바꾼다(§3.9b).
@@ -10145,7 +10329,7 @@ pub fn transformCase(self: *AppSession, term: *Term, upper: bool) bool {
             return a.start < b.start;
         }
     }.lessThan);
-    return applyLineEdit(self, term, ranges.items);
+    return applyLineEdit(self, term, ranges.items, null);
 }
 
 /// **클립보드를 커서마다 넣는다**(§3.4)./// **클립보드를 커서마다 넣는다**(§3.4).
@@ -38869,6 +39053,10 @@ test "AID3 선택이 있으면 감싼다 — 고른 것을 지우지 않는다 (
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // "alpha"
     try testing.expect(insertText(fx.session, term, "\""));
     try testing.expectEqualStrings("\"alpha\" beta\n", term.rt.editorDocument().opened.?.file.content);
+    // **감싼 글자를 고른 채 둔다**(§3.7) — 이어서 한 번 더 감쌀 수 있다.
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_selection.?.start());
+    try testing.expectEqual(@as(usize, 6), term.rt.editor_selection.?.end());
+    try testing.expect(!term.rt.editor_selection.?.isReversed());
 
     // **한 번의 감싸기는 undo 하나다** — 앞뒤 두 변경이지만 `delta.apply` 한 번이다.
     try testing.expect(undoEdit(fx.session, term));
@@ -38953,6 +39141,10 @@ test "AID7 감싸기가 커서 여럿·역방향 선택에서도 맞는다 (§3.
     t2.rt.editor_selection = editor_selection.Selection.fromPoints(3, 0); // 뒤에서 앞으로
     try testing.expect(insertText(fx.session, t2, "["));
     try testing.expectEqualStrings("[xyz]\n", t2.rt.editorDocument().opened.?.file.content);
+    // 방향도 지킨다 — 거꾸로 고른 것은 거꾸로 남는다.
+    try testing.expectEqual(@as(usize, 1), t2.rt.editor_selection.?.start());
+    try testing.expectEqual(@as(usize, 4), t2.rt.editor_selection.?.end());
+    try testing.expect(t2.rt.editor_selection.?.isReversed());
 }
 
 test "AID8 다른 편집이 끼면 자동 닫기 표식이 낡지 않는다 (§3.7)" {
@@ -39228,6 +39420,177 @@ test "LN6 Enter 가 이전 줄 들여쓰기를 잇는다 — caret 앞까지만 
     term2.rt.editor_selection = editor_selection.Selection.at(1);
     try testing.expect(insertNewlineKeepingIndent(fx.session, term2));
     try testing.expectEqualStrings("x\n\n", term2.rt.editorDocument().opened.?.file.content);
+}
+
+test "LNM1 줄 복제 — 떨어진 블록마다 caret 이 자기 사본으로 간다 (§3.9a, 결함 1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r1.zig", "aa\nbb\ncc\ndd\n");
+    term.rt.editor_selection = editor_selection.Selection.at(0); // "aa"
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(6); // "cc"
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(duplicateLines(fx.session, term));
+    try testing.expectEqualStrings("aa\naa\nbb\ncc\ncc\ndd\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 3), term.rt.editor_selection.?.focus); // 첫 사본 "aa" 머리
+    try testing.expectEqual(@as(usize, 12), term.rt.editor_extra_selections[0].focus); // 둘째 사본 "cc" 머리
+}
+
+test "LNM2 줄 삭제 — 마지막 내용 줄을 앞 줄과 함께 지운다 (§3.9a, 결함 2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r2.zig", "a\nb\nc");
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(2, 5); // b·c 두 줄
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("a", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "LNM3 줄 삭제 — 개행이 있는 마지막 내용 줄은 자기 개행까지만 지운다 (§3.9a, 결함 10)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r2b.zig", "a\nb\n");
+    term.rt.editor_selection = editor_selection.Selection.at(2); // "b"
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("a\n", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "LNM4 Enter — primary 가 뒤인 다중 커서도 들여쓰기를 잇는다 (§3.9a, 결함 3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r3.zig", "\tab\n\tcd\n");
+    term.rt.editor_selection = editor_selection.Selection.at(6); // "\tc" 뒤 — primary 가 뒤
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(2); // "\ta" 뒤
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(insertNewlineKeepingIndent(fx.session, term));
+    try testing.expectEqualStrings("\ta\n\tb\n\tc\n\td\n", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "AID12 type-over 가 일부이고 primary 가 뒤여도 커서마다 제자리 (§3.7 × §9.1, 결함 4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r4.txt", "a b)\n");
+    term.rt.editor_selection = editor_selection.Selection.at(3); // ")" 앞 → 지나간다(primary, 뒤)
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(1); // "a" 뒤 → 넣는다
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(insertText(fx.session, term, ")"));
+    try testing.expectEqualStrings("a) b)\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 5), term.rt.editor_selection.?.focus); // 지나간 `)` 뒤
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections[0].focus); // 넣은 `)` 뒤
+}
+
+test "AID13 여러 커서 감싸기의 caret 이 커서 하나일 때와 같은 모양이다 (§3.7 × §9.1, 결함 5)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 기준: 커서 하나로 감쌌을 때의 선택(시작·끝을 감싼 낱말 기준으로 잰다).
+    const one = try undoFixture(&fx, allocator, "r5a.txt", "aa\n");
+    one.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+    try testing.expect(insertText(fx.session, one, "("));
+    try testing.expectEqualStrings("(aa)\n", one.rt.editorDocument().opened.?.file.content);
+    const s1 = one.rt.editor_selection.?;
+
+    const term = try undoFixture(&fx, allocator, "r5b.txt", "aa bb\n");
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.fromPoints(3, 5);
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(insertText(fx.session, term, "("));
+    try testing.expectEqualStrings("(aa) (bb)\n", term.rt.editorDocument().opened.?.file.content);
+    // 커서 하나면 감싼 "aa" 를 고른 채다(§3.7).
+    try testing.expectEqual(@as(usize, 1), s1.start());
+    try testing.expectEqual(@as(usize, 3), s1.end());
+    // 첫 낱말은 커서 하나일 때와 같다. 둘째 낱말은 같은 모양을 5 만큼 민 자리다("(aa) " 의 길이).
+    try testing.expectEqual(s1.start(), term.rt.editor_selection.?.start());
+    try testing.expectEqual(s1.end(), term.rt.editor_selection.?.end());
+    try testing.expectEqual(s1.start() + 5, term.rt.editor_extra_selections[0].start());
+    try testing.expectEqual(s1.end() + 5, term.rt.editor_extra_selections[0].end());
+}
+
+test "CUT2 섞인 선택은 고른 것만 잘라내고 빈 caret 은 제자리에 남는다 (§3.4, 결함 9)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "r7.txt", "ab cd\n");
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 2); // "ab"
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(4); // "c" 와 "d" 사이 — 빈 caret
+    term.rt.editor_extra_selections = extras;
+    try testing.expect(cutSelection(fx.session, term));
+    // 복사한 것은 "ab" 뿐이다 — 빈 caret 자리의 "d" 를 지우면 클립보드에도 문서에도 없는 글자가 사라진다.
+    try testing.expectEqualStrings(" cd\n", term.rt.editorDocument().opened.?.file.content);
+    // 빈 caret 은 지운 만큼(2) 당긴 제자리 — "c|d" 사이.
+    try testing.expectEqual(@as(usize, 0), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections.len);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections[0].focus);
+}
+
+test "LNM5 줄 이동 — 블록 안 caret 이 블록을 따라간다 (§3.9a, 결함 6)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "c1.zig", "ab\ncd\nef\n");
+    term.rt.editor_selection = editor_selection.Selection.at(1); // "a|b"
+    try testing.expect(moveLines(fx.session, term, true));
+    try testing.expectEqualStrings("cd\nab\nef\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus); // 옮긴 줄의 "a|b"
+}
+
+test "LNM6 줄 삭제 — caret 은 다음 줄의 같은 열로 간다 (§3.9a, 결함 7)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "c2.zig", "abc\ndef\nghi\n");
+    term.rt.editor_selection = editor_selection.Selection.at(2); // "ab|c"
+    try testing.expect(deleteLines(fx.session, term));
+    try testing.expectEqualStrings("def\nghi\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus); // "de|f"
+}
+
+test "LNM7 Enter — caret 은 새 줄의 들여쓰기 뒤로 간다 (§3.9a, 결함 8)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "c3.zig", "\tab\n");
+    term.rt.editor_selection = editor_selection.Selection.at(2); // "\ta|b"
+    try testing.expect(insertNewlineKeepingIndent(fx.session, term));
+    try testing.expectEqualStrings("\ta\n\tb\n", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus); // "\t|b"
+}
+
+test "LNM8 들여쓰기·주석 토글 — caret 은 제 글자를 따라간다 (§3.9a)" {
+    // 줄 머리에 넣는 변경이라 caret 앞에 들어가고, `delta` 매핑이 caret 을 민다. 재현 단계에서 확인한
+    // 동작을 고정한다(결함이 아니었다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const t1 = try undoFixture(&fx, allocator, "lnm8a.zig", "ab\n");
+    t1.rt.editor_selection = editor_selection.Selection.at(1); // "a|b"
+    try testing.expect(indentLines(fx.session, t1, false));
+    try testing.expectEqualStrings("\tab\n", t1.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 2), t1.rt.editor_selection.?.focus); // "\ta|b"
+    const t2 = try undoFixture(&fx, allocator, "lnm8b.zig", "ab\n");
+    t2.rt.editor_selection = editor_selection.Selection.at(1);
+    try testing.expect(toggleLineComment(fx.session, t2));
+    try testing.expectEqualStrings("// ab\n", t2.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 4), t2.rt.editor_selection.?.focus); // "// a|b"
 }
 
 test "LN9 줄 조작은 앞뒤 타이핑과 한 undo 로 뭉치지 않는다 (§3.3 연산 종류 변경)" {

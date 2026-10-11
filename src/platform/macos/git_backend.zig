@@ -4193,6 +4193,11 @@ fn writeFileAt(dir: []const u8, name: []const u8, content: []const u8) !void {
 
 /// argv를 돌려 성공(exit 0)이면 true. 출력은 버린다(테스트 픽스처 준비용).
 pub const testRunQuiet = runQuiet;
+/// argv를 돌려 성공이면 stdout(호출자가 free), 아니면 null — 판정자가 저장소 상태를 대조하는 자리(제품 러너를 지난다).
+pub fn testRunCapture(allocator: std.mem.Allocator, argv: []const []const u8) ?[]u8 {
+    const out = runArgvWithEnv(allocator, argv, null, false, null, false) catch return null;
+    return out.bytes;
+}
 pub const testWriteFile = writeFileAt;
 /// **판정자 전용 하네스를 이 파일 밖으로 연다.** 병합 모드(S3b-1)의 끝에서 끝까지 판정자는 **진짜
 /// 충돌 저장소**가 있어야 「어느 기준으로 무엇을 읽었나」를 잴 수 있는데, 그 저장소를 만드는 어휘는

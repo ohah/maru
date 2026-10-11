@@ -4149,6 +4149,7 @@ LSP 응답을 직접 주입하는 검사는 실제 언어 서버 실행 증거�
 | 범위 | 상태 | 검증 | 한계 |
 | --- | --- | --- | --- |
 | 명시적 generation과 payload offset | 부분 구현 | `test-agent-log-generations`가 header/resume codec·세대 reconciliation·overflow·snapshot 회전 조건을 기본 test에서 검증한다. macOS Debug/ReleaseFast와 Ubuntu ARM64 실제 실행, Windows x86_64 cross compile, 방어 무력화와 등가 변형을 확인했다. | native 기록기·공유 잠금·wire 협상·앱 cursor 배선과 Windows native 파일 I/O는 후속이다. 현재 제품 CLI/log 포맷은 유지된다. 계획은 [로그 세대와 이어읽기](plans/agent-log-generations.md)를 따른다. |
+| native 세대 기록 I/O | 부분 구현 | `test-agent-log-writer`와 실제 `test-agent-log-writer-process`가 공유 lock·세대 생성/publish·snapshot/회전 재검사·부분 쓰기 rollback·holder kill·POSIX 링크/FIFO 거부를 확인한다. macOS/Linux 실행과 Windows cross compile을 구분한다. | 제품 훅/CLI/스트리머와 private directory 인증 어댑터 및 Windows native ACL/공유 검증은 후속이다. standalone latency는 실제 provider 전체 비용이 아니다. |
 
 
 ## 에디터 CLI와 앱 URL

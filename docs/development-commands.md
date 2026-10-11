@@ -62,6 +62,12 @@ offset과 순서에 관계없이 exit 1이며 서로 다른 파일의 커서는 
 안내(exit 0), 중복 뒤라면 오류다. 목록 내부 검증은 help가 선택되지 않았을 때만 수행하므로
 내부 중복 뒤에 help가 있어도 안내다. boolean `--stdio`의 반복 허용은 유지한다.
 
+native 기록기 집중 검증은 `zig build test-agent-log-writer`이며 기본 test에 포함된다.
+실제 다중 프로세스·잠금 holder 종료·부분 쓰기·latency 검증은
+`zig build test-agent-log-writer-process`다. Ubuntu CI check도 실행하고
+`tests/artifacts/agent-log-writer/`에 argv/종료 상태/진단 및 latency 요약을 남긴다.
+테스트 드라이버는 제품에 설치하거나 provider 훅으로 등록하지 않는다.
+
 세대 codec 집중 검증은 `zig build test-agent-log-generations`다. 기본 `test`에도
 포함되며 header/resume 문법·세대별 offset 조정·snapshot 회전 조건을 OS 중립적으로
 검사한다. 파일 잠금·native 기록기와 제품 스트림 배선의 실행 검증은 후속 단계다.

@@ -45,11 +45,12 @@ fn initSweep() void {
     }
 }
 
-/// 기다리는 호출이 있으면 시한의 1/4 뒤에 한 번 본다(이미 걸었으면 그대로).
+/// 기다리는 호출이 있으면 짧은 시한(kick 의 것 — 판정자가 더 줄였으면 그것)의 1/4 뒤에 한 번 본다(이미 걸었으면 그대로). kick 이
+/// 없어도 같은 주기다 — 걸어 둔 긴 검사 뒤에 온 kick 이 늦게 풀리지 않게(검사는 자리 여덟 개를 훑을 뿐이다).
 fn ensureSweep() void {
     if (sweep_posted or table.isEmpty()) return;
     // 걸지 못하면(CEF 가 끝나는 중) 걸었다고 두지 않는다 — 다음 호출이 다시 건다.
-    sweep_posted = browsers.state.api.post_delayed_task(c.TID_UI, &sweep_task, @max(@divTrunc(table.stale_ms, 4), 100)) != 0;
+    sweep_posted = browsers.state.api.post_delayed_task(c.TID_UI, &sweep_task, @max(@divTrunc(@min(table.stale_ms, table.kick_stale_ms), 4), 100)) != 0;
 }
 
 fn sweep(_: [*c]c.cef_task_t) callconv(.c) void {

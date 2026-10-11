@@ -7772,6 +7772,12 @@ fn cdpStillAllowed(async_id: u64) bool {
     return browserExecutionAuthorized(execution, now);
 }
 
+// `required` kick 의 재시도는 잃은 kick 을 sidecar 가 놓을 때(시한 + 검사 주기 1/4)까지 이어야 한다(W9b②-3 적대 리뷰 3 회차).
+comptime {
+    const ws_message = session_mod.web_osr.ws_message;
+    std.debug.assert(@as(i64, web_cdp_ops.max_kick_retries) * web_cdp_ops.kick_retry_ms > ws_message.devtools_kick_stale_ms + @divTrunc(ws_message.devtools_kick_stale_ms, 4));
+}
+
 fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
     switch (step) {
         .done => |d| {
@@ -7789,11 +7795,13 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             }
             if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
-            // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면 Busy.
-            const sent = if (next.kick)
-                session_mod.web_osr.devtoolsCallKicked(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone })
-            else
-                session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, .{ .ctx = run, .done = &cdpDone });
+            // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
+            // required 는 Busy, best_effort 는 주 호출만(`web_cdp_ops.Kick`).
+            const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
+            const sent = switch (next.kick) {
+                .none => session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, sink),
+                .best_effort, .required => |k| session_mod.web_osr.devtoolsCallKicked(gpa, run.surface_id, next.method, next.params, sink, k == .best_effort),
+            };
             _ = sent catch |e| return switch (e) {
                 // 보내지 못했다 — op 이 정한다(누른 뒤의 떼기면 잠깐 뒤 다시, 놓기면 동작의 결과로, 앞선 실패가 있으면 그 이유로 — 3·4 회차).
                 error.NotReady, error.Busy => {

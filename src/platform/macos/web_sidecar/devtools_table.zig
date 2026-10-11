@@ -33,6 +33,8 @@ pub const Call = struct {
     /// 보낸 CDP 메시지 번호(보내기 전 0).
     cdp_id: i32 = 0,
     started_ms: i64,
+    /// maru 의 kick(`message.devtools_kick_*` 와 꼭 같은 호출) — 짧은 시한(`kick_stale_ms`)에 놓는다(W9b②-3 적대 리뷰 3 회차).
+    kick: bool = false,
 
     pub fn method(self: *const Call) []const u8 {
         return self.method_buf[0..self.method_len];
@@ -64,6 +66,8 @@ pub const Table = struct {
     next_id: i32 = id_base,
     /// 답을 기다리는 시한(판정자는 짧게 — `devtools.zig`).
     stale_ms: i64 = message.devtools_stale_ms,
+    /// kick 의 시한(둘 가운데 짧은 것을 쓴다).
+    kick_stale_ms: i64 = message.devtools_kick_stale_ms,
 
     pub fn deinit(self: *Table, gpa: std.mem.Allocator) void {
         for (&self.slots) |*s| if (s.*) |*v| v.deinit(gpa);
@@ -122,6 +126,7 @@ pub const Table = struct {
             if (!try std.json.validate(gpa, params)) return error.InvalidParams;
             if (!protocol.fields.jsonDepthWithin(params, message.max_devtools_params_depth)) return error.InvalidParams;
         }
+        c.kick = std.mem.eql(u8, c.method(), message.devtools_kick_method) and std.mem.eql(u8, params, message.devtools_kick_params);
         const id = self.takeId();
         const json = if (params.len == 0)
             try std.fmt.allocPrint(gpa, "{{\"id\":{d},\"method\":\"{s}\"}}", .{ id, c.method() })
@@ -161,13 +166,17 @@ pub const Table = struct {
         return null;
     }
 
-    /// 시한이 지난 호출 하나를 꺼낸다(null 까지 되풀이해 `expired` 로 답한다).
+    /// 시한이 지난 호출 하나를 꺼낸다(null 까지 되풀이해 `expired` 로 답한다). kick 은 짧은 시한으로.
     pub fn takeStale(self: *Table, now_ms: i64) ?Call {
-        for (&self.slots) |*s| if (s.*) |v| if (now_ms - v.started_ms >= self.stale_ms) {
+        for (&self.slots) |*s| if (s.*) |v| if (now_ms - v.started_ms >= self.staleOf(&v)) {
             s.* = null;
             return v;
         };
         return null;
+    }
+
+    fn staleOf(self: *const Table, c: *const Call) i64 {
+        return if (c.kick) @min(self.stale_ms, self.kick_stale_ms) else self.stale_ms;
     }
 };
 
@@ -238,6 +247,34 @@ test "알린 크기를 넘는 조각·보낸 뒤의 조각은 넘침, 모르는 
     _ = t.addData(testing.allocator, .{ .browser = 3, .call = 2, .bytes = "{}" });
     testing.allocator.free(try t.buildMessage(testing.allocator, d));
     try testing.expect(t.addData(testing.allocator, .{ .browser = 3, .call = 2, .bytes = "{}" }) == .overflow);
+}
+
+test "kick(메서드와 인자가 꼭 같은 것)만 짧은 시한으로 꺼낸다 — 인자가 한 바이트라도 다르면 보통 시한" {
+    var t: Table = .{};
+    defer t.deinit(testing.allocator);
+    const kp = message.devtools_kick_params;
+    const not_kick = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\"y\":0,\"width\":2,\"height\":1,\"scale\":1}}";
+    const cases = [_]struct { browser: BrowserId, method: []const u8, params: []const u8 }{
+        .{ .browser = 3, .method = message.devtools_kick_method, .params = kp },
+        .{ .browser = 3, .method = "Runtime.evaluate", .params = kp },
+        .{ .browser = 4, .method = message.devtools_kick_method, .params = not_kick },
+    };
+    for (cases, 0..) |k, i| {
+        const c = try t.begin(callOf(k.browser, @intCast(i + 1), k.method, @intCast(k.params.len)), 0);
+        _ = t.addData(testing.allocator, .{ .browser = k.browser, .call = @intCast(i + 1), .bytes = k.params });
+        testing.allocator.free(try t.buildMessage(testing.allocator, c));
+    }
+    try testing.expect(t.takeStale(message.devtools_kick_stale_ms - 1) == null);
+    try testing.expectEqual(@as(u32, 1), t.takeStale(message.devtools_kick_stale_ms).?.call);
+    try testing.expect(t.takeStale(message.devtools_kick_stale_ms) == null); // 나머지는 kick 이 아니다
+    try testing.expectEqual(@as(u32, 2), t.takeStale(t.stale_ms).?.call);
+    try testing.expectEqual(@as(u32, 3), t.takeStale(t.stale_ms).?.call);
+    // 판정자가 시한을 kick 보다 짧게 줄이면 그것을 쓴다.
+    t.stale_ms = 1_000;
+    const c = try t.begin(callOf(3, 9, message.devtools_kick_method, kp.len), 0);
+    _ = t.addData(testing.allocator, .{ .browser = 3, .call = 9, .bytes = kp });
+    testing.allocator.free(try t.buildMessage(testing.allocator, c));
+    try testing.expectEqual(@as(u32, 9), t.takeStale(1_000).?.call);
 }
 
 test "자리는 상한까지, 같은 번호는 거절, 브라우저·시한으로 꺼낸다" {

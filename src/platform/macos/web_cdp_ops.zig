@@ -33,11 +33,16 @@ pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_par
 
 pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press };
 
+/// kick 을 붙이는가. `required` — 두 자리가 다 비어야 보내고 없으면 `not_sent`(숨은 탭에서 kick 없이 가면 30 초 매달리는 접근성 질의·
+/// 5 초 걸리는 포인터 이동). `best_effort` — 자리가 하나뿐이면 주 호출만(kick 없이도 답하는 wait 의 확인 — 숨은 탭에서 rAF 로 나타나는
+/// 요소를 늦게 볼 뿐이다; 이동하는 순간에 잃은 kick 이 그 탭의 둘째 자리를 쥔 동안에도 확인이 멈추지 않게 — 적대 리뷰 3 회차).
+pub const Kick = enum { none, best_effort, required };
+
 /// 다음에 할 일 — CDP 호출 하나(`params` 는 소유 — 부른 쪽이 놓는다) 또는 끝(`result` 소유).
 pub const Step = union(enum) {
     /// `kick` — 바로 뒤에 작은 스크린샷을 함께 보낸다(`web_osr.devtoolsCallKicked` — 숨은 탭의 접근성 질의·포인터 이동·rAF 가 그래야 돈다,
-    /// W9b②-3). 두 자리가 다 비어야 보내고, 없으면 `not_sent`.
-    call: struct { method: []const u8, params: []u8, kick: bool = false },
+    /// W9b②-3). `Kick` 참고.
+    call: struct { method: []const u8, params: []u8, kick: Kick = .none },
     done: struct { status: Status, result: []u8 },
     /// 이만큼(ms) 뒤에 `wake` 로 다시 부른다(wait 의 확인 간격 — 페이지 타이머를 쓰지 않는다: 숨긴 탭은 그것을 늦춘다).
     sleep: u32,
@@ -67,6 +72,10 @@ pub const wait_max_interval_ms: u32 = 500;
 /// 누른 뒤의 떼기를 확실히 보내지 못했을 때(DevTools 자리가 참 등) 다시 보내는 간격·횟수(4 회차 — 그냥 끝내 키가 눌린 채 남았다).
 pub const up_retry_ms: u32 = 50;
 pub const max_up_retries: u8 = 3;
+/// `required` kick 을 실은 호출을 자리가 없어 못 보냈을 때 다시 보내는 간격·횟수 — 잃은 kick 을 sidecar 가 놓는 시한(3–3.75 초,
+/// `devtools_kick_stale_ms`)보다 길게(적대 리뷰 3 회차 — 세 번 50 ms 로는 곧 「too many」 로 끝났고 다시 해도 35 초 같았다).
+pub const kick_retry_ms: u32 = 100;
+pub const max_kick_retries: u8 = 45;
 
 const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release, judge_resolve, judge, rel_then };
 
@@ -156,6 +165,13 @@ pub const Op = struct {
     check_start_ms: i64 = 0,
     last_check_ms: i64 = 0,
     heavy_start_ms: i64 = 0,
+    /// 이번 확인의 무거운 호출(찾기·질의·크기 세기·판정) 시간의 합 — 확인이 끝나면 `noteHeavy`(3 회차 — 질의만 셌다).
+    check_heavy_ms: i64 = 0,
+    /// wait 를 시작한 시각과 지금까지 무거운 확인의 합(첫 것은 `wait_first_heavy_cap_ms` 로 센다) — 누적으로 1/5 아래(3 회차).
+    wait_start_ms: i64 = 0,
+    heavy_total_ms: i64 = 0,
+    /// 시한 전 마지막 확인을 앞당겼다 — 한 번만.
+    final_check: bool = false,
     last_heavy_ms: i64 = 0,
     /// 그 앞의 무거운 호출 시간(-1 = 아직 하나뿐이거나 없다).
     prev_heavy_ms: i64 = -1,
@@ -167,7 +183,7 @@ pub const Op = struct {
     cands: ?web_cdp_locate.Cands = null,
     cand_at: usize = 0,
     cand_objs: std.ArrayList(?[]u8) = .empty,
-    /// kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(세 번까지).
+    /// kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(`max_kick_retries` 까지).
     kick_retries: u8 = 0,
     /// 놓은 뒤에 할 일.
     then: Then = .sleep,
@@ -373,6 +389,7 @@ pub const Op = struct {
             },
             .wait => blk: {
                 self.wait_deadline_ms = self.now_ms + self.wait_timeout_ms;
+                self.wait_start_ms = self.now_ms;
                 self.check_start_ms = self.now_ms;
                 break :blk self.frameTreeStep(gpa);
             },
@@ -409,7 +426,7 @@ pub const Op = struct {
         writeFindParams(&s, self, action) catch return error.OutOfMemory;
         self.heavy_start_ms = self.now_ms;
         // wait 의 확인은 kick 과 함께 — 숨은 탭에서 rAF·애니메이션으로 나타나는 요소도 보게(계획 공격 3 회차).
-        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice(), .kick = self.kind == .wait } };
+        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice(), .kick = if (self.kind == .wait) .best_effort else .none } };
     }
 
     fn writeFindParams(s: *std.json.Stringify, self: *const Op, action: []const u8) !void {
@@ -507,7 +524,7 @@ pub const Op = struct {
         if (self.stage == .loc_release) return self.afterFind(gpa);
         // 묶음을 놓았다(무엇이든) — 정해 둔 다음 일로.
         if (self.stage == .rel_then) return self.afterRelThen(gpa);
-        // kick 쌍이 갔다 — 다음 kick 호출은 다시 세 번까지(1 회차 — 한 op 안에서 횟수를 나눠 써 뒤의 호출은 다시 보내지 못했다).
+        // kick 쌍이 갔다 — 다음 kick 호출은 다시 처음부터 센다(1 회차 — 한 op 안에서 횟수를 나눠 써 뒤의 호출은 다시 보내지 못했다).
         if (reply != .not_sent) self.kick_retries = 0;
         // 찾기 호출 자체가 실패·시한 — 쥔 객체가 있을 수 있어 놓은 뒤 그 이유로 끝낸다.
         if (self.stage == .loc_find) switch (reply) {
@@ -517,7 +534,7 @@ pub const Op = struct {
                     error.OutOfMemory => return self.findRelease(gpa, .{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "out of memory") } }),
                     else => web_cdp_locate.Found{ .done = .{ .status = .failed, .msg = try gpa.dupe(u8, "malformed locator result") } },
                 };
-                self.noteHeavy(self.now_ms - self.heavy_start_ms);
+                self.heavyEnd();
                 return self.findRelease(gpa, found);
             },
             .cdp_error => self.find_transient = self.wait_visible,
@@ -592,10 +609,13 @@ pub const Op = struct {
             },
             else => {},
         };
-        // kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(세 번까지 — 직전 kick 의 답이 아직이면 자리 하나를 쥐고 있다).
-        if (reply == .not_sent and (self.stage == .locate or self.stage == .hover_move) and self.kick_retries < max_up_retries) {
+        // kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(직전 kick 의 답이 아직이면 자리 하나를 쥐고 있다 — 잃은 kick 은
+        // sidecar 가 3 초 남짓에 놓는다).
+        // wait 은 시한을 넘겨 다시 보내지 않는다(그때는 아래 「다음 확인」 이 시한으로 끝낸다).
+        const retry_in_time = self.kind != .wait or self.now_ms + kick_retry_ms < self.wait_deadline_ms;
+        if (reply == .not_sent and (self.stage == .locate or self.stage == .hover_move) and self.kick_retries < max_kick_retries and retry_in_time) {
             self.kick_retries += 1;
-            return .{ .sleep = up_retry_ms };
+            return .{ .sleep = kick_retry_ms };
         }
         // wait 의 확인을 보내지 못했다 — 다음 확인으로(묶음을 쥐었으면 놓은 뒤).
         if (reply == .not_sent and self.kind == .wait) switch (self.stage) {
@@ -719,6 +739,7 @@ pub const Op = struct {
                 if (self.locating) {
                     // 요소 수를 먼저 본다 — 접근성 질의는 DOM 크기의 제곱으로 느려지고 그동안 페이지가 멈춘다(프로토타입 함수 — DOM clobbering).
                     self.stage = .size_check;
+                    self.heavy_start_ms = self.now_ms;
                     // open shadow root 안도 센다(1 회차 — 셀 때 빠져 6 만 요소 페이지가 상한을 지나 2.8 초 멈췄다). 상한을 넘으면 곧 멈춘다.
                     // 접근성 트리를 비싸게 만드는 구성도 함께 센다(3·4 회차 — 어떤 역할을 찾든 질의마다 트리를 새로 만든다): 대상 없는 같은 문서
                     // fragment 링크(Chromium 처럼 URL 을 풀어 같은 문서인지 본다 — 대상은 그 트리 범위의 id 로), radio, role=radio, 라벨이 붙은
@@ -734,7 +755,7 @@ pub const Op = struct {
                     const expr = try std.fmt.allocPrint(gpa, "(function(sel,load){{try{{var D=Document.prototype;if(load)return Object.getOwnPropertyDescriptor(D,'readyState').get.call(document)==='complete';var e=D.querySelector.call(document,sel);if(!e)return false;var r=Element.prototype.getBoundingClientRect.call(e),cs=getComputedStyle(e);return r.width>0&&r.height>0&&cs.visibility!=='hidden'&&cs.display!=='none'}}catch(x){{return 'error'}}}})({f},{})", .{ std.json.fmt(self.wait_selector orelse "", .{}), self.wait_selector == null });
                     defer gpa.free(expr);
                     var step = try call(gpa, "Runtime.evaluate", "{{\"expression\":{f},\"contextId\":{d},\"returnByValue\":true}}", .{ std.json.fmt(expr, .{}), self.context_id });
-                    step.call.kick = true; // 숨은 탭에서도 rAF·애니메이션으로 나타나는 요소를 보게(W9b②-3)
+                    step.call.kick = .best_effort; // 숨은 탭에서도 rAF·애니메이션으로 나타나는 요소를 보게(W9b②-3)
                     return step;
                 }
                 self.stage = .resolve;
@@ -860,6 +881,7 @@ pub const Op = struct {
                 return self.releaseStep(gpa);
             },
             .size_check => {
+                self.heavyEnd();
                 const counts = arrayAt(v, &.{ "result", "value" }) orelse return done(gpa, .failed, "could not count the page's elements");
                 if (counts.len != 1 + web_cdp_locate.costly.len) return done(gpa, .failed, "could not count the page's elements");
                 for (counts) |c| if (c != .integer or c.integer < 0) return done(gpa, .failed, "could not count the page's elements");
@@ -897,7 +919,7 @@ pub const Op = struct {
                 return self.locateCall(gpa);
             },
             .locate => {
-                self.noteHeavy(self.now_ms - self.heavy_start_ms);
+                self.heavyEnd();
                 const q: web_cdp_locate.RoleQuery = .{ .role = self.loc_role, .name = self.loc_name, .level = self.loc_level, .exact = self.loc_exact, .nth = self.loc_nth };
                 if (self.wait_visible) {
                     // wait — act 와 같은 거르기로 후보를 모아 앞에서부터 보이는 것을 찾는다.
@@ -940,6 +962,7 @@ pub const Op = struct {
                 return self.judgeNext(gpa);
             },
             .judge => {
+                self.heavyEnd();
                 if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .sleep);
                 const idx = intAt(v, &.{ "result", "value" }) orelse -1;
                 const c = &self.cands.?;
@@ -1006,23 +1029,37 @@ pub const Op = struct {
         return call(gpa, "Page.createIsolatedWorld", "{{\"frameId\":{f},\"worldName\":\"maru-w9b\"}}", .{std.json.fmt(self.frame_id.?, .{})});
     }
 
-    /// wait — 아직이면 다음 간격 뒤 다시(시한을 넘겨 자지 않는다, 시한이 지났으면 timeout). 간격은 두 배씩 늘린다.
+    /// wait — 아직이면 다음 간격 뒤 다시(시한이 지났으면 timeout). 간격은 두 배씩 늘린다. 로케이터의 확인(질의·찾기)은 그동안 페이지를
+    /// 붙잡는다 — 쉼은 그 확인 시간의 네 배 이상, 그리고 지금까지 붙잡은 시간의 합이 지난 시간의 1/5 아래가 되게(3 회차 — 직전 확인만
+    /// 보면 긴 첫 확인·높낮이가 갈리는 확인이 페이지를 절반 넘게 멈췄다). 그만큼 쉬면 시한 안에 확인이 끝나지 않을 때는 마지막 확인
+    /// 하나를 시한 즈음 끝나게 앞당긴다(3 회차 — 전에는 그 자리에서 포기해 20 초 시한의 wait 이 8 초에 끝났다).
     fn sleepOrTimeout(self: *Op, gpa: std.mem.Allocator) !Step {
         self.last_check_ms = self.now_ms - self.check_start_ms;
+        if (self.check_heavy_ms > 0) {
+            self.heavy_total_ms += if (self.heavy_count == 0) @min(self.check_heavy_ms, wait_first_heavy_cap_ms) else self.check_heavy_ms;
+            self.noteHeavy(self.check_heavy_ms);
+            self.check_heavy_ms = 0;
+        }
         if (self.now_ms >= self.wait_deadline_ms) return self.waitTimeout(gpa);
-        const left: u32 = @intCast(@min(self.wait_deadline_ms - self.now_ms, std.math.maxInt(u32)));
-        // 로케이터의 확인(질의·찾기)은 그동안 페이지를 붙잡는다 — 간격을 그 시간의 네 배 이상으로(페이지가 쓰는 시간을 1/5 아래로).
-        const heavy: u32 = if (self.wait_visible) @intCast(@min(self.heavyMs() *| 4, std.math.maxInt(u32))) else 0;
-        const want = @max(self.wait_interval_ms, heavy);
-        // 시한 전에 쉼이 끝나지 않으면 마지막 확인이 시한 즈음 끝나게 일찍 깬다(시한까지 자고 깨면 확인 없이 시한이었다 — 2 회차 시험).
-        const last: u32 = @intCast(@min(@max(self.last_check_ms, 0), std.math.maxInt(u32)));
-        const ms = if (self.wait_visible and want >= left) @max(left -| last, 1) else @min(want, left);
-        // 다음 잠과 확인이 시한을 크게 넘길 것 같으면 지금 답한다 — 확인 하나가 늦으면 시한(25 초)을 넘겨 서버 reaper(30 초)에 닿았다
-        // (계획 공격 1·3 회차, 2 회차 — 잠을 빼고 셌다). selector·load 의 확인은 짧다(그대로 둔다).
-        if (self.wait_visible and self.now_ms + ms + self.last_check_ms > self.wait_deadline_ms + wait_max_overrun_ms) return self.waitTimeout(gpa);
+        const left = self.wait_deadline_ms - self.now_ms;
+        const last = @max(self.last_check_ms, 0);
+        var want: i64 = self.wait_interval_ms;
+        if (self.wait_visible) {
+            want = @max(want, self.heavyMs() *| 4);
+            want = @max(want, self.wait_start_ms + 5 *| self.heavy_total_ms - self.now_ms);
+        }
         self.wait_interval_ms = @min(self.wait_interval_ms *| 2, wait_max_interval_ms);
         self.stage = .sleeping;
-        return .{ .sleep = @max(ms, 1) };
+        if (want +| last <= left) return .{ .sleep = @intCast(@max(want, 1)) };
+        // 쉰 뒤의 확인이 시한 안에 끝나지 않는다 — 마지막 확인 하나(이미 했으면 끝). 지금 시작해도 시한을 크게 넘길 확인이면 하지 않는다
+        // (확인 하나가 늦으면 시한 25 초를 넘겨 서버 reaper 30 초에 닿았다 — 계획 공격 1·3 회차).
+        if (self.final_check or last > left + wait_max_overrun_ms) return self.waitTimeout(gpa);
+        self.final_check = true;
+        return .{ .sleep = @intCast(@max(left - last, 1)) };
+    }
+
+    fn heavyEnd(self: *Op) void {
+        self.check_heavy_ms += @max(self.now_ms - self.heavy_start_ms, 0);
     }
 
     fn noteHeavy(self: *Op, ms: i64) void {
@@ -1057,7 +1094,7 @@ pub const Op = struct {
         // 이름은 싣지 않는다 — 서버는 계산된 이름 원문과 비교해(nbsp·soft hyphen 그대로) 정규화한 exact 이름을 못 찾았다
         // (W9b②-1 적대 리뷰 1 회차 실측). 이름은 받은 뒤 정규화해 거른다. kick — 숨은 탭에서는 그래야 답한다(W9b②-3).
         var step = try call(gpa, "Accessibility.queryAXTree", "{{\"objectId\":{f},\"role\":{f}}}", .{ std.json.fmt(self.doc_obj.?, .{}), std.json.fmt(self.loc_role, .{}) });
-        step.call.kick = true;
+        step.call.kick = .required;
         return step;
     }
 
@@ -1065,7 +1102,7 @@ pub const Op = struct {
     fn hoverMove(self: *Op, gpa: std.mem.Allocator) !Step {
         self.stage = .hover_move;
         var step = try call(gpa, "Input.dispatchMouseEvent", "{{\"type\":\"mouseMoved\",\"x\":{d},\"y\":{d}}}", .{ self.x, self.y });
-        step.call.kick = true;
+        step.call.kick = .required;
         return step;
     }
 
@@ -1079,6 +1116,7 @@ pub const Op = struct {
             return call(gpa, "DOM.resolveNode", "{{\"backendNodeId\":{d},\"executionContextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ c.backends[next], self.context_id, self.id });
         }
         self.stage = .judge;
+        self.heavy_start_ms = self.now_ms;
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
@@ -1411,12 +1449,15 @@ const Trail = struct {
     sleeps: usize = 0,
     /// kick 을 실은 호출의 순번(W9b②-3).
     kicked: std.ArrayList(usize) = .empty,
+    /// 그 가운데 `required`.
+    required: std.ArrayList(usize) = .empty,
 
     fn deinit(self: *Trail) void {
         for (self.params.items) |p| testing.allocator.free(p);
         self.params.deinit(testing.allocator);
         self.methods.deinit(testing.allocator);
         self.kicked.deinit(testing.allocator);
+        self.required.deinit(testing.allocator);
     }
 
     fn reset(self: *Trail) void {
@@ -1446,7 +1487,8 @@ fn drive(op: *Op, answer: *const fn (method: []const u8, params: []const u8) Rep
             step = try op.wake(testing.allocator);
         },
         .call => |c| {
-            if (c.kick) try trail.kicked.append(testing.allocator, trail.methods.items.len);
+            if (c.kick != .none) try trail.kicked.append(testing.allocator, trail.methods.items.len);
+            if (c.kick == .required) try trail.required.append(testing.allocator, trail.methods.items.len);
             try trail.methods.append(testing.allocator, c.method);
             try trail.params.append(testing.allocator, c.params);
             if (pressed and !op.committed()) trail.committed_after_press = false;
@@ -1974,6 +2016,7 @@ test "wait 의 간격은 두 배씩 늘어 500 ms 에서 멈추고, 시한을 �
     op.wait_deadline_ms = 3000;
     var got: [8]u32 = undefined;
     for (&got) |*g| {
+        op.check_start_ms = op.now_ms; // 확인은 0 ms(3 회차 — 마감 판단이 직전 확인 시간을 본다)
         const step = try op.sleepOrTimeout(testing.allocator);
         g.* = step.sleep;
         op.now_ms += g.*;
@@ -1982,6 +2025,7 @@ test "wait 의 간격은 두 배씩 늘어 500 ms 에서 멈추고, 시한을 �
     try testing.expectEqualSlices(u32, &.{ 50, 100, 200, 400, 500, 500, 500, 500 }, &got);
     // 남은 시간이 간격보다 짧으면 남은 만큼만.
     op.now_ms = 2990;
+    op.check_start_ms = 2990;
     try testing.expectEqual(@as(u32, 10), (try op.sleepOrTimeout(testing.allocator)).sleep);
     op.now_ms = 3000;
     const end = try op.sleepOrTimeout(testing.allocator);
@@ -2438,6 +2482,7 @@ test "role 로케이터: 크기 검사 → 문서 → 접근성 질의 → 하�
     try testing.expectEqualStrings("{\"expression\":\"document\",\"contextId\":7,\"objectGroup\":\"maru-w9b-200\"}", trail.params.items[3]);
     try testing.expectEqualStrings("{\"objectId\":\"doc-1\",\"role\":\"button\"}", trail.params.items[4]);
     try testing.expectEqualSlices(usize, &.{4}, trail.kicked.items);
+    try testing.expectEqualSlices(usize, &.{4}, trail.required.items);
     try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-200\"}", trail.params.items[5]);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"backendNodeId\":11") != null);
 }
@@ -2712,6 +2757,7 @@ test "wait visible(text): 확인마다 격리 world 의 JS 로(wait 모드·kick
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     try testing.expectEqualSlices(usize, &.{ 2, 5 }, trail.kicked.items);
+    try testing.expectEqual(@as(usize, 0), trail.required.items.len); // 찾기는 kick 없이도 답한다
     try testing.expect(std.mem.indexOf(u8, trail.params.items[2], "{\"value\":\"wait\"}]") != null);
     // 시한 — 마지막 확인의 숨은 일치 수를 싣는다.
     trail.reset();
@@ -2755,6 +2801,7 @@ test "wait visible(role): 질의(kick)로 후보를 모아 한 번에 보임을 
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     try testing.expectEqualSlices(usize, &.{4}, trail.kicked.items);
+    try testing.expectEqualSlices(usize, &.{4}, trail.required.items); // 질의는 꼭 kick 과(숨은 탭에서 kick 없이 가면 30 초 매달린다)
     // 후보는 그 world 에, 같은 묶음에 잡고 판정 JS 에 넘긴다.
     try testing.expect(std.mem.indexOf(u8, trail.params.items[5], "\"backendNodeId\":11,\"executionContextId\":7,\"objectGroup\":\"maru-w9b-510\"") != null);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[7], "{\"objectId\":\"o-1\"},{\"objectId\":\"o-1\"}]") != null);
@@ -2802,7 +2849,7 @@ fn busyAxPage(method: []const u8, params: []const u8) Reply {
     return rolePage(method, params);
 }
 
-test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 다시(세 번까지) — 그래도 안 되면 묶음을 놓고 실패, hover·selector wait 의 확인도 kick 과 함께" {
+test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 다시(잃은 kick 을 sidecar 가 놓을 때까지) — 그래도 안 되면 묶음을 놓고 실패, hover 는 꼭, wait 의 확인은 되면 kick" {
     var trail: Trail = .{};
     defer trail.deinit();
     ax_unsent_left = 2;
@@ -2814,14 +2861,15 @@ test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 �
     try testing.expectEqual(@as(usize, 2), trail.sleeps);
     try testing.expectEqual(@as(usize, 3), trail.count("Accessibility.queryAXTree"));
     trail.reset();
-    ax_unsent_left = 10;
+    ax_unsent_left = 1000;
     var busy = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 521);
     defer busy.deinit(testing.allocator);
     const b = try drive(&busy, &busyAxPage, &trail);
     defer testing.allocator.free(b.result);
     try testing.expectEqual(Status.failed, b.status);
     try testing.expectEqualStrings("too many DevTools calls on this tab", b.result);
-    try testing.expectEqual(@as(usize, 4), trail.count("Accessibility.queryAXTree"));
+    try testing.expectEqual(@as(usize, 1 + max_kick_retries), trail.count("Accessibility.queryAXTree"));
+    try testing.expectEqual(@as(usize, max_kick_retries), trail.sleeps); // 4.5 초 — sidecar 가 잃은 kick 을 3–3.75 초에 놓는다(app_host_abi 의 comptime 검사)
     try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
     ax_unsent_left = 0;
     // hover 의 포인터 이동, selector wait 의 확인.
@@ -2831,6 +2879,7 @@ test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 �
     const h = try drive(&hover, &happyPage, &trail);
     defer testing.allocator.free(h.result);
     try testing.expectEqual(@as(usize, 1), trail.kicked.items.len);
+    try testing.expectEqualSlices(usize, trail.kicked.items, trail.required.items);
     try testing.expectEqualStrings("Input.dispatchMouseEvent", trail.methods.items[trail.kicked.items[0]]);
     trail.reset();
     var w = try Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"selector\":\"#late\",\"timeout_ms\":5000}", 523);
@@ -2838,52 +2887,84 @@ test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 �
     const ws_ = try drive(&w, &editorPage, &trail);
     defer testing.allocator.free(ws_.result);
     try testing.expectEqualSlices(usize, &.{2}, trail.kicked.items);
+    try testing.expectEqual(@as(usize, 0), trail.required.items.len); // 확인은 kick 없이도 답한다 — 자리가 하나뿐이면 주 호출만
 }
 
-test "wait visible 의 간격·마감: 무거운 확인 시간(직전 두 번 가운데 작은 것, 첫 것은 0.5 초까지)의 네 배 이상 쉬고, 다음 잠과 확인이 시한을 2 초 넘게 넘길 것 같을 때만 미리 시한으로 답한다" {
+test "kick: wait 의 질의 재시도는 시한을 넘기지 않는다 — 자리가 계속 없으면 시한에 끝나고 묶음을 놓는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    ax_unsent_left = 1000;
+    defer ax_unsent_left = 0;
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\"},\"timeout_ms\":300}", 524);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &busyAxPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.timeout, r.status);
+    try testing.expect(op.now_ms <= op.wait_deadline_ms + kick_retry_ms);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+}
+
+/// 확인 하나를 끝낸 것처럼(시작·끝·그 안의 무거운 호출 합) 다음 차례를 묻는다.
+fn endCheck(op: *Op, start: i64, now: i64, heavy: i64) !Step {
+    op.check_start_ms = start;
+    op.now_ms = now;
+    op.check_heavy_ms = heavy;
+    return op.sleepOrTimeout(testing.allocator);
+}
+
+test "wait 의 간격·마감: 확인 시간의 네 배 이상(직전 두 번 가운데 작은 것, 첫 것은 0.5 초까지)과 누적 1/5 를 함께 지키고, 그만큼 쉬면 시한을 넘길 때는 마지막 확인 하나를 앞당긴다" {
     var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":25000}", 530);
     defer op.deinit(testing.allocator);
     op.wait_deadline_ms = 25_000;
-    op.check_start_ms = 1_000;
-    op.now_ms = 1_300;
-    // 첫 무거운 호출이 긴 작업에 부풀었다(2.5 초) — 0.5 초로 본다(1 회차: 10 초 잤다).
-    op.noteHeavy(2_500);
-    try testing.expectEqual(@as(u32, 2000), (try op.sleepOrTimeout(testing.allocator)).sleep);
-    // 숨은 큰 탭의 질의가 늘 1.9 초 — 7.6 초 쉰다(2 회차: 2 초 상한이 페이지를 절반 넘게 멈췄다).
-    op.noteHeavy(1_900);
-    op.check_start_ms = 4_000;
-    op.now_ms = 6_000;
-    try testing.expectEqual(@as(u32, 7600), (try op.sleepOrTimeout(testing.allocator)).sleep);
-    // 한 번만 부푼 것(직전 0.2 초 뒤 3 초)은 작은 쪽 — 0.8 초.
-    op.noteHeavy(200);
-    op.noteHeavy(3_000);
-    op.check_start_ms = 7_000;
-    op.now_ms = 7_100;
-    op.wait_interval_ms = 50;
-    try testing.expectEqual(@as(u32, 800), (try op.sleepOrTimeout(testing.allocator)).sleep);
-    // 첫 확인이 3 초 걸렸어도 남은 시간에 한 번 더 본다(1 회차: 5 초 시한의 wait 이 3 초에 포기했다).
-    var short = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":5000}", 531);
+    // 첫 확인이 긴 작업에 부풀었다(2.5 초) — 0.5 초로 본다(1 회차: 10 초 잤다).
+    try testing.expectEqual(@as(u32, 2000), (try endCheck(&op, 0, 2_500, 2_500)).sleep);
+    // 숨은 큰 탭의 확인이 1.9 초 — 7.6 초 쉰다(2 회차: 2 초 상한이 페이지를 절반 넘게 멈췄다).
+    try testing.expectEqual(@as(u32, 7600), (try endCheck(&op, 4_500, 6_400, 1_900)).sleep);
+    // 한 번만 짧았다(0.2 초) — 직전 두 번 가운데 작은 쪽의 네 배(0.8 초).
+    try testing.expectEqual(@as(u32, 800), (try endCheck(&op, 14_000, 14_200, 200)).sleep);
+    // 다시 길다(3 초) — 직전 둘만 보면 0.8 초지만 누적(0.5+1.9+0.2+3=5.6 초)의 다섯 배인 28 초까지는 쉬어야 한다(3 회차 — 높낮이가
+    // 갈리면 페이지를 절반 넘게 멈췄다). 그러면 시한 안에 확인이 없다 — 마지막 확인(직전처럼 3 초)이 시한에 끝나게 4 초 뒤.
+    try testing.expectEqual(@as(u32, 4000), (try endCheck(&op, 15_000, 18_000, 3_000)).sleep);
+    // 마지막 확인은 한 번 — 그 뒤엔 시한 전이어도 끝, 숨은 일치 수를 싣는다.
+    op.wait_hidden = 4;
+    const t = try endCheck(&op, 22_000, 24_000, 2_000);
+    defer testing.allocator.free(t.done.result);
+    try testing.expectEqual(Status.timeout, t.done.status);
+    try testing.expectEqualStrings("{\"hidden\":4}", t.done.result);
+
+    // 3 회차: 숨은 2.95 만 요소 탭(확인 3.3·3.1 초)의 21 초 wait 이 8.4 초에 포기했다(쉼 12.3 초는 남은 12.6 초보다 짧아 일찍 깨지
+    // 않고, 쉼과 확인이 시한을 2 초 넘겨 곧 포기 — 옛 판으로 재현). 이제 마지막 확인을 시한 즈음에 한다.
+    var mid = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\"},\"timeout_ms\":21000}", 531);
+    defer mid.deinit(testing.allocator);
+    mid.wait_deadline_ms = 21_000;
+    try testing.expectEqual(@as(u32, 2000), (try endCheck(&mid, 0, 3_301, 3_301)).sleep);
+    try testing.expectEqual(@as(u32, 9533), (try endCheck(&mid, 5_301, 8_384, 3_083)).sleep);
+
+    // 첫 확인이 3 초 걸린 5 초 wait — 남은 2 초에 한 번 더 본다(1 회차: 3 초에 포기했다).
+    var short = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":5000}", 532);
     defer short.deinit(testing.allocator);
     short.wait_deadline_ms = 5_000;
-    short.check_start_ms = 0;
-    short.now_ms = 3_000;
-    try testing.expectEqual(@as(u32, 50), (try short.sleepOrTimeout(testing.allocator)).sleep);
-    // 쉼(7.6 초)이 남은 5 초보다 길다 — 마지막 확인(0.3 초)이 시한 즈음 끝나게 4.7 초 뒤에 깬다.
-    op.noteHeavy(1_900);
-    op.noteHeavy(1_900);
-    op.check_start_ms = 19_700;
-    op.now_ms = 20_000;
-    try testing.expectEqual(@as(u32, 4700), (try op.sleepOrTimeout(testing.allocator)).sleep);
-    // 다음 확인(직전처럼 6 초)이 남은 4 초를 지나 시한을 2 초 넘게 넘길 것 같으면 지금 — 숨은 일치 수를 싣는다(2 회차: 잠을 빼고 세 30 초에 닿았다).
-    op.noteHeavy(1_000);
-    op.noteHeavy(1_000);
-    op.check_start_ms = 15_000;
-    op.now_ms = 21_000;
-    op.wait_hidden = 4;
-    const s2 = try op.sleepOrTimeout(testing.allocator);
-    defer testing.allocator.free(s2.done.result);
-    try testing.expectEqual(Status.timeout, s2.done.status);
-    try testing.expectEqualStrings("{\"hidden\":4}", s2.done.result);
+    try testing.expectEqual(@as(u32, 1), (try endCheck(&short, 0, 3_000, 3_000)).sleep);
+
+    // 지금 시작해도 시한을 2 초 넘게 넘길 확인(직전 6 초, 남은 3 초)은 하지 않는다(서버 reaper 30 초 — 계획 공격 1·3 회차).
+    var late = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":25000}", 533);
+    defer late.deinit(testing.allocator);
+    late.wait_deadline_ms = 25_000;
+    _ = try endCheck(&late, 0, 1_000, 1_000);
+    const l = try endCheck(&late, 16_000, 22_000, 6_000);
+    defer testing.allocator.free(l.done.result);
+    try testing.expectEqual(Status.timeout, l.done.status);
+
+    // selector 도 마지막 확인을 시한 안에 한다(3 회차 — 전에는 시한까지 자고 확인 없이 끝났다). 확인은 짧아 누적은 보지 않는다.
+    var sel = try Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"selector\":\"#x\",\"timeout_ms\":1000}", 534);
+    defer sel.deinit(testing.allocator);
+    sel.wait_deadline_ms = 1_000;
+    try testing.expectEqual(@as(u32, 50), (try endCheck(&sel, 0, 5, 0)).sleep);
+    sel.wait_interval_ms = 500;
+    try testing.expectEqual(@as(u32, 395), (try endCheck(&sel, 595, 600, 0)).sleep); // 500 ms 쉬면 시한을 넘는다 — 직전 확인(5 ms)이 시한에 끝나게 395 ms 뒤 마지막 확인
+    const sd = try endCheck(&sel, 995, 1_000, 0);
+    defer testing.allocator.free(sd.done.result);
+    try testing.expectEqual(Status.timeout, sd.done.status);
 }
 
 test "철회: 문서·후보 묶음을 쥐었으면 놓은 뒤(committed) 「cancelled」 로 끝낸다, 쥔 것이 없으면 부른 쪽이 곧 끝낸다" {

@@ -145,6 +145,8 @@ cat > "$root/www/a.html" <<'HTML'
 <button id=far style="position:absolute;top:1500px;left:20px" onclick="hit('far-'+event.isTrusted+'-scrolled-'+(scrollY>0))">Far</button><div style="height:2000px"></div>
 HTML
 printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
+# 3 회차: 0.6 초마다 스스로 새로고침하는 페이지(숨은 탭 경우).
+printf '<!doctype html><title>hop</title><button id=hop>Hop go</button><script>setTimeout(function(){location.reload()},600)</script>' > "$root/www/hop.html"
 printf '<!doctype html><title>page-c</title>c<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=cready>ready</p>")},1000)</script>' > "$root/www/c.html"
 # 느린 문서는 요소가 3 만을 넘는다 — role 로케이터가 질의 전에 거절하는지(W9b②).
 python3 -c "import sys; sys.stdout.write('<!doctype html><title>page-slow</title>slow<button>Big</button><a id=next href=c1.html>next</a>' + '<i></i>' * 31000)" > "$root/www/slow.html"
@@ -161,7 +163,8 @@ pages = [
     ('c6', '<div>' + 't<!---->' * 30000 + '</div>'),
 ]
 for k, (name, body) in enumerate(pages):
-    nxt = '<a id=next href="%s.html">next</a>' % pages[k + 1][0] if k + 1 < len(pages) else ''
+    # 마지막 문서는 스스로 새로고침하는 hop 문서로 간다(숨은 탭 3 회차 사례 — 대본 맨 끝).
+    nxt = '<a id=next href="%s.html">next</a>' % pages[k + 1][0] if k + 1 < len(pages) else '<a id=tohop href="hop.html">hop</a>'
     open('%s/%s.html' % (d, name), 'w').write('<!doctype html><title>%s</title><button>B</button>%s%s' % (name, nxt, body))
 PY
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
@@ -392,6 +395,25 @@ for c in c1 c2 c3 c4 c5 c6; do
     url_is \$c.html || true
     run costly-\$c click --role button
 done
+touch "\$out/hide2-now"
+sleep 2
+# 3 회차: 스스로 계속 이동하는 숨은 탭(맨 끝에서 다시 숨긴다 — 문서를 옮기므로 앞의 ref 를 쓰는 사례 뒤에) — 이동하는 순간 보낸 스크린샷(kick)은 답이 오지 않을 수 있어 그 탭의 자리를 쥔다. 옛 sidecar 는
+# 35 초 쥐어 그동안 selector wait 이 확인을 못 보내 시한이었고(15/25), role 질의는 곧 「too many」 였다. 열 번 모두 곧 맞아야 한다.
+# Chromium 탭은 아직 `navigate` 를 받지 않는다(-32008) — 링크를 눌러 간다.
+run hop-nav click --selector '#tohop'
+sleep 2
+hop_to=0; hop_max=0
+for k in 1 2 3 4 5 6 7 8 9 10; do
+    s0=\$(date +%s)
+    run hop-wait-\$k wait --selector '#hop' --timeout 5000
+    s1=\$(date +%s)
+    grep -q '(-32004)' "\$out/hop-wait-\$k" && hop_to=\$((hop_to + 1))
+    [ \$((s1 - s0)) -gt \$hop_max ] && hop_max=\$((s1 - s0))
+    sleep 0.5 # 이동을 여러 번 넘기게(숨은 탭의 타이머는 1 초 단위)
+done
+for k in 1 2 3; do run hop-role-\$k click --role button --name 'Hop go' --exact; done
+echo "\$hop_to \$hop_max \$(cat "\$out"/hop-role-* | grep -c 'too many DevTools calls')" > "\$out/hop-summary"
+touch "\$out/show2-now"
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -400,7 +422,7 @@ chmod +x "$root/pane.sh"
 out="$root/out"
 mkdir -p "$out" "$root/home"
 # 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
-printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\n' "$out/hide-now" "$out/show-now" > "$root/hide.txt"
+printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
@@ -408,7 +430,7 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!
 i=0
-while [ ! -f "$out/done" ] && [ $i -lt 180 ]; do sleep 1; i=$((i + 1)); done
+while [ ! -f "$out/done" ] && [ $i -lt 260 ]; do sleep 1; i=$((i + 1)); done
 [ -f "$out/done" ] || { sed -n '1,40p' "$root/app.log" >&2; fail "the pane script did not finish ($(cat "$out/list" 2>/dev/null | tr '\n' ' '))"; }
 kill "$app_pid" 2>/dev/null || true
 wait "$app_pid" 2>/dev/null || true
@@ -486,6 +508,11 @@ set -- $(cat "$out/hid-secs")
 ok hid-role && [ "$(cat "$out/hb-hit")" = yes ] && [ "$1" -le 3 ] || fail "a role click on a hidden tab did not press for real within 3 s (${1}s · $(tr '\n' ' ' < "$out/hid-role"))"
 ok hid-hover && [ "$(cat "$out/hh-hit")" = yes ] && [ "$2" -le 3 ] || fail "a hover on a hidden tab did not reach the page within 3 s (${2}s · $(tr '\n' ' ' < "$out/hid-hover"))"
 ok hid-wait || fail "a text wait on a hidden tab did not see a button made in an animation frame ($(tr '\n' ' ' < "$out/hid-wait"))"
+read hop_to hop_max hop_busy < "$out/hop-summary" || true
+hop_loads=$(grep -c 'GET /hop.html' "$root/http.log" || true)
+[ "$hop_loads" -ge 5 ] || fail "the hopping page did not keep reloading on the hidden tab ($hop_loads loads) — the case proves nothing ($(tr '\n' ' ' < "$out/hop-nav"))"
+echo "hidden hopping tab ($hop_loads loads): selector waits timed out $hop_to/10 (longest ${hop_max}s) · role clicks answered 'too many' $hop_busy/3"
+[ "$hop_to" = 0 ] && [ "$hop_busy" = 0 ] || fail "on a hidden tab that keeps navigating, a lost screenshot blocked later calls ($hop_to/10 selector waits timed out, $hop_busy/3 role clicks 'too many')"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"

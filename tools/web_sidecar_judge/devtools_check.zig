@@ -14,6 +14,9 @@
 //!   dt-hidden-kick     숨긴 탭(W9b②-3): 접근성 질의만 보내면 답하지 않다가(정보 — 답하면 Chromium 이 고친 것이니 kick 을 걷어낼 신호)
 //!                      1×1 스크린샷(kick)을 보내면 풀리고, 질의 바로 뒤 kick 을 함께 보내면 시한 안에 답한다. 포인터 이동(mouseMoved)도
 //!                      kick 과 함께면 곧 답한다(없으면 숨긴 탭에서 5 초). maru 가 기대는 Chromium 내부 동작 — CEF 를 올릴 때 여기서 본다
+//!   dt-kick-stale      답이 오지 않는 kick(경고창이 떠 있는 동안 — 이동하는 순간에 보낸 kick 과 같다)을 sidecar 가 3 초 남짓에 expired
+//!                      로 놓는다 — 같이 보낸 보통 호출은 그대로 기다리다가 경고창을 닫으면 답한다(W9b②-3 적대 리뷰 3 회차: 잃은 kick 이
+//!                      탭의 둘째 자리를 35 초 쥐었다)
 //!   dt-busy            탭마다 상한(2)을 넘으면 busy
 //!   dt-busy-other-tab  그 탭이 상한이어도 다른 탭은 부를 수 있다(멈춘 페이지 하나가 다른 탭을 막지 못한다 — `dt-busy` 와 함께여야
 //!                      뜻이 있다: 탭마다 상한이 없던 옛 설계도 이것만은 통과한다)
@@ -337,6 +340,48 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, e
         r.pump(500);
         const ok = really_hidden and dd != null and doc.len > 0 and bare_d == null and unblocked and qd != null and qd.?.status == .ok and q_ms < 5_000 and md != null and md.?.status == .ok and m_ms < 1_500;
         report(ok, "dt-hidden-kick", std.fmt.bufPrint(&detail, "숨김 {} · 질의만 {s}(답하면 Chromium 이 고쳤다 — kick 을 걷어낼 신호) · kick 이 풂 {} · 질의+kick {s} {d} ms · 이동+kick {s} {d} ms", .{ really_hidden, if (bare_d) |b| @tagName(b.status) else "답 없음", unblocked, statusName(qd), q_ms, statusName(md), m_ms }) catch "");
+    }
+    // dt-kick-stale
+    {
+        const msg = protocol.message;
+        const t = try r.call("Runtime.evaluate", "{\"expression\":\"setTimeout(function(){alert('k')},0);1\",\"returnByValue\":true}");
+        _ = r.wait(t, 5_000);
+        var request: ?msg.RequestId = null;
+        const asked_by = os.nowMs() + 5_000;
+        while (os.nowMs() < asked_by and request == null) {
+            const m = (host.next(50) catch null) orelse continue;
+            switch (m) {
+                .js_dialog => |d| if (d.browser == browser_id) {
+                    request = d.request;
+                },
+                else => r.other(m),
+            }
+        }
+        const sent_at = os.nowMs();
+        const k = try r.call(msg.devtools_kick_method, msg.devtools_kick_params);
+        const plain = try r.call("Runtime.evaluate", "{\"expression\":\"2+2\",\"returnByValue\":true}");
+        var kick_status: ?Status = null;
+        var kick_ms: i64 = -1;
+        var plain_early: ?Status = null;
+        const by = os.nowMs() + 8_000;
+        while (os.nowMs() < by and kick_status == null) {
+            const m = (host.next(50) catch null) orelse continue;
+            switch (m) {
+                .devtools_result => |v| {
+                    if (v.call == k) {
+                        kick_status = v.status;
+                        kick_ms = os.nowMs() - sent_at;
+                    }
+                    if (v.call == plain) plain_early = v.status;
+                },
+                else => r.other(m),
+            }
+        }
+        if (request) |req| try host.send(.{ .dialog_reply = .{ .browser = browser_id, .request = req, .accept = true, .text = "" } });
+        const pd = if (plain_early == null) r.wait(plain, 5_000) else null;
+        const plain_ok = pd != null and pd.?.status == .ok;
+        const ok = request != null and kick_status != null and kick_status.? == .expired and kick_ms >= msg.devtools_kick_stale_ms - 100 and kick_ms <= msg.devtools_kick_stale_ms + 2_000 and plain_early == null and plain_ok;
+        report(ok, "dt-kick-stale", std.fmt.bufPrint(&detail, "경고창 {} · kick {s} {d} ms(기대 expired {d}–{d} ms) · 보통 호출: 그동안 {s} · 닫은 뒤 {s}", .{ request != null, if (kick_status) |v| @tagName(v) else "답 없음", kick_ms, msg.devtools_kick_stale_ms - 100, msg.devtools_kick_stale_ms + 2_000, if (plain_early) |v| @tagName(v) else "기다림", statusName(pd) }) catch "");
     }
     // dt-busy — 인자를 다 보내지 않은 호출 하나와 CDP 로 보내 답을 기다리는 호출(끝나지 않는 Promise) 하나가 탭의 자리를 차지한다
     // (이 둘은 dt-closed 가 끝낸다).

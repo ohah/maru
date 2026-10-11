@@ -3080,7 +3080,7 @@ test "setCellPixels updates the live PTY winsize and is idempotent" {
 
 test "runtime pinned format ignores inherited and configured selectors" {
     const a = std.testing.allocator;
-    var inherited = try EnvStorage.initWithParentSnapshot(a, &.{}, &.{"MARU_AGENT_LOG_FORMAT=2"}, &.{"MARU_AGENT_LOG_FORMAT=2"}, "xterm-256color", "maru", null, null, null, "inst", "1");
+    var inherited = try EnvStorage.initWithParentSnapshot(a, &.{}, &.{ "MARU_AGENT_LOG_FORMAT=2", "MARU_AGENT_LOG_FORMAT=1" }, &.{"MARU_AGENT_LOG_FORMAT=2"}, "xterm-256color", "maru", null, null, null, "inst", "1");
     defer inherited.deinit();
     const got = envValueCount(&inherited, "MARU_AGENT_LOG_FORMAT=");
     try std.testing.expectEqual(@as(usize, 1), got.count);

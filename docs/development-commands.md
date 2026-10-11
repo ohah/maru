@@ -77,7 +77,7 @@ check에 포함된다. 같은 실제 프로세스 게이트가 format별 local/r
 
 runtime 소유 format의 PTY 환경 경계는 `zig build test-agent-hook-runtime-format`으로
 부모 snapshot·명시 env·사용자 override·중복/빈/미지 값과 v1/v2 선택을 검사한다.
-POSIX 기본 test에 포함된다. 기본은 v1이며 host 재접속 metadata 배선 전에는
+POSIX 기본 test에 포함된다. macOS에서는 실제 PTY fork/exec 자식의 format도 검사하며 Linux에서는 이 물리 PTY case를 skip한다. 기본은 v1이며 host 재접속 metadata 배선 전에는
 명시적 v2 persistent 요청을 거부한다. Windows native 기록 활성화를 뜻하지 않는다.
 
 native 이행의 binary 수명은 같은 실제 기록 프로세스 게이트가 합성 앱 번들의

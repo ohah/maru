@@ -4357,6 +4357,7 @@ pub fn build(b: *std.Build) void {
         const run_hook_runtime = b.addRunArtifact(hook_runtime_tests);
         b.step("test-agent-hook-runtime-format", "Run process-owned hook format environment contracts").dependOn(&run_hook_runtime.step);
         test_step.dependOn(&run_hook_runtime.step);
+        if (macos_host_tests) macos_only_test_step.dependOn(&run_hook_runtime.step);
     }
     const agent_log_writer_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/agent_log_writer_test.zig"),

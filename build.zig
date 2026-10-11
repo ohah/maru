@@ -5477,6 +5477,12 @@ pub fn build(b: *std.Build) void {
     run_batch_disk.setCwd(b.path("."));
     b.step("test-editor-project-replace-batch-disk", "Run closed file physical identity, alias and preparation judges").dependOn(&run_batch_disk.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_disk.step);
+    const batch_load_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBL"} });
+    const run_batch_load = b.addRunArtifact(batch_load_tests);
+    run_batch_load.addArg("--maru-expect-tests=10");
+    run_batch_load.setCwd(b.path("."));
+    b.step("test-editor-project-replace-batch-load", "Run inactive closed file staging and reservation judges").dependOn(&run_batch_load.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_load.step);
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });
     const run_batch_ui = b.addRunArtifact(batch_ui_tests);
     run_batch_ui.addArg("--maru-expect-tests=10");

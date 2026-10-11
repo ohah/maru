@@ -4205,3 +4205,10 @@ no-op/단일 유효 편집/disk 전용 거절, 닫힌 결과 문서 재열기 �
 `tools/test-editor-replace-batch-disk-adversarial.py`는 신원/raw hash/별칭/점유/총량 보호를 제거한
 컴파일 가능한 결함과 정상·등가·복원 대조를 검사한다. 비활성 문서 로드·host 점유 신원 수집·
 배치 worker/actor/UI 연결·읽는 도중 OS 교체 타이밍은 이 gate의 증거 밖이다.
+
+닫힌 파일의 비활성 준비는 **API만 부분 구현**이다.
+`test-editor-project-replace-batch-load`의 `RPBL1`~`RPBL6`는 pane/focus 유지·입력 해제 후 소유권·
+BOM/선두 U+FEFF/CRLF·파일/root 교체·관측 가능한 동일 inode 수정·늦게 열린 별칭 문서·
+IME·항목 예약과 일반 열기 상한 및 caller/registry 필수 준비 할당 실패의 회수를 검사한다.
+전문 재읽기는 worker 책임이며 metadata 일치만으로 원문 일치를 보장하지 않는다.
+다른 창의 web entry·pane 게시/배치 편집·OS IME·앱 종료 배선은 후속 검증 경계다.

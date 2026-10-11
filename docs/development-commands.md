@@ -1377,3 +1377,13 @@ python3 tools/test-editor-replace-batch-disk-adversarial.py
 ```
 
 [배치 계획](plans/editor-project-replace-batch.md)의 준비 API만 검증한다. 비활성 모델 로드·제품 배치 적용은 포함하지 않는다.
+
+닫힌 파일의 비활성 문서 준비·수명·파일 항목 예약 판정:
+
+```sh
+mise exec -- zig build test-editor-project-replace-batch-load
+mise exec -- zig build test-editor-project-replace-batch-load -Doptimize=ReleaseFast
+python3 tools/test-editor-replace-batch-load-adversarial.py
+```
+
+[배치 계획](plans/editor-project-replace-batch.md)의 Staged API만 검사한다. pane 게시·제품 배치 편집은 후속이다.

@@ -4353,6 +4353,13 @@ pub fn build(b: *std.Build) void {
     agent_log_record_process.has_side_effects = true;
     agent_log_record_process.setCwd(b.path("."));
     b.step("test-agent-log-record-process", "Run isolated native hook to product CLI recording checks").dependOn(&agent_log_record_process.step);
+    const agent_log_stream_process = b.addSystemCommand(&.{ "python3", "tools/test-agent-log-stream.py", "--output-dir", "tests/artifacts/agent-log-stream", "--driver" });
+    agent_log_stream_process.addArtifactArg(agent_log_writer_driver);
+    agent_log_stream_process.addArg("--cli");
+    agent_log_stream_process.addArtifactArg(exe);
+    agent_log_stream_process.has_side_effects = true;
+    agent_log_stream_process.setCwd(b.path("."));
+    b.step("test-agent-log-stream-process", "Run actual generation stream transport and recovery checks").dependOn(&agent_log_stream_process.step);
 
     // Shared codec gates must run on every host; native writer locks are a later stage.
     const agent_log_generation_tests = addProjectTest(b, .{ .root_module = b.createModule(.{

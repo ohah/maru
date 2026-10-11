@@ -157,9 +157,60 @@ pub fn rotate(io: Io, dir: Io.Dir, name: []const u8, consumed: codec.Position, s
     return .{ .generation = try publish(io, dir, name, state.generation, ""), .offset = 0 };
 }
 
+pub const Cleanup = enum { kept, expired, rotated };
+
+/// Startup retention is decided from the current held file under the writer lock.
+/// No observed pathname metadata is trusted; stable lock slots are never removed.
+pub fn cleanupAtStartup(io: Io, dir: Io.Dir, name: []const u8, now_ns: i128, stale_after_ns: i128, payload_limit: u64) !Cleanup {
+    const lease = try acquire(io, dir, name);
+    defer lease.release(io);
+    var buffer: [command.remote_log_name_max + ".ndjson".len]u8 = undefined;
+    const path = try logName(&buffer, name);
+    const file = try dir.openFile(io, path, .{ .mode = .read_write, .follow_symlinks = false });
+    const state = inspect(file, io) catch |err| {
+        file.close(io);
+        return err;
+    };
+    const stat = file.stat(io) catch |err| {
+        file.close(io);
+        return err;
+    };
+    file.close(io);
+    if (stat.mtime.nanoseconds < now_ns and now_ns - stat.mtime.nanoseconds > stale_after_ns) {
+        try dir.deleteFile(io, path);
+        return .expired;
+    }
+    if (state.payload_size >= payload_limit) {
+        _ = try publish(io, dir, name, state.generation, "");
+        return .rotated;
+    }
+    return .kept;
+}
+
 const testing = std.testing;
 const one = "claude\t{\"tag\":\"one\"}\n";
 const two = "codex\t{\"tag\":\"two\"}\n";
+test "startup cleanup shares the lease, rechecks current size and retains lock slots" {
+    var temp = testing.tmpDir(.{ .iterate = true });
+    defer temp.cleanup();
+    const first = try append(testing.io, temp.dir, "a", one);
+    const now = Io.Clock.real.now(testing.io).nanoseconds;
+    try testing.expectEqual(Cleanup.kept, try cleanupAtStartup(testing.io, temp.dir, "a", now, std.time.ns_per_s, one.len + 1));
+    const lease = try acquire(testing.io, temp.dir, "a");
+    try testing.expectError(error.WouldBlock, cleanupAtStartup(testing.io, temp.dir, "a", now, 0, 0));
+    lease.release(testing.io);
+    try testing.expectEqual(Cleanup.rotated, try cleanupAtStartup(testing.io, temp.dir, "a", now, std.time.ns_per_s, one.len));
+    var bytes: [128]u8 = undefined;
+    const snapshot = try readSnapshot(testing.io, temp.dir, "a", .{ .generation = first.generation, .offset = first.offset }, &bytes);
+    try testing.expectEqual(@as(usize, 0), snapshot.bytes.len);
+    try testing.expect(!std.mem.eql(u8, &first.generation, &snapshot.start.generation));
+    try testing.expectEqual(Cleanup.expired, try cleanupAtStartup(testing.io, temp.dir, "a", now + 2 * std.time.ns_per_s, std.time.ns_per_s, 1));
+    var path_buffer: [lock_path_len]u8 = undefined;
+    const lock = try temp.dir.openFile(testing.io, try lockPath(&path_buffer, "a"), .{});
+    lock.close(testing.io);
+    const last = try append(testing.io, temp.dir, "a", two);
+    try testing.expect(!std.mem.eql(u8, &snapshot.start.generation, &last.generation));
+}
 fn readAll(dir: Io.Dir, buffer: []u8) ![]const u8 {
     const file = try dir.openFile(testing.io, "a.ndjson", .{});
     defer file.close(testing.io);
@@ -280,6 +331,32 @@ test "writer entropy and rename failure preserve the old generation and remove t
     var count: usize = 0;
     while (try it.next(testing.io)) |_| count += 1;
     try testing.expectEqual(@as(usize, 2), count); // Only the stable lock and old log.
+}
+
+test "startup rotation failures preserve the previous header and complete payload" {
+    var temp = testing.tmpDir(.{ .iterate = true });
+    defer temp.cleanup();
+    _ = try append(testing.io, temp.dir, "a", one);
+    var bytes: [1024]u8 = undefined;
+    const before = try testing.allocator.dupe(u8, try readAll(temp.dir, &bytes));
+    defer testing.allocator.free(before);
+    var table = testing.io.vtable.*;
+    var io = testing.io;
+    io.vtable = &table;
+    const now = Io.Clock.real.now(testing.io).nanoseconds;
+    table.randomSecure = Faults.entropy;
+    try testing.expectError(error.EntropyUnavailable, cleanupAtStartup(io, temp.dir, "a", now, std.time.ns_per_s, 1));
+    table.randomSecure = testing.io.vtable.randomSecure;
+    table.fileWritePositional = Faults.partial;
+    try testing.expectError(error.DiskQuota, cleanupAtStartup(io, temp.dir, "a", now, std.time.ns_per_s, 1));
+    table.fileWritePositional = testing.io.vtable.fileWritePositional;
+    table.dirRename = Faults.rename;
+    try testing.expectError(error.AccessDenied, cleanupAtStartup(io, temp.dir, "a", now, std.time.ns_per_s, 1));
+    try testing.expectEqualStrings(before, try readAll(temp.dir, &bytes));
+    var it = temp.dir.iterate();
+    var count: usize = 0;
+    while (try it.next(testing.io)) |_| count += 1;
+    try testing.expectEqual(@as(usize, 2), count);
 }
 
 test "writer partial append rolls back and reports rollback failure explicitly" {

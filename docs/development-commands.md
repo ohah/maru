@@ -75,6 +75,13 @@ stdin의 완전한 `provider<TAB>payload<LF>` 한 줄을 기존 소유자 전용
 native 훅→제품 CLI 검증은 `zig build test-agent-log-record-process`이며 Ubuntu CI
 check에 포함된다. 결과는 `tests/artifacts/agent-log-record/`에만 남긴다.
 
+v2 검증용 reader는 `maru agent-events --stdio --dir=<private-directory> --log-format=v2`로
+선택한다. 기본 v1과 혼합하지 않으며
+`maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상/기본 훅 전환은 후속이다.
+`zig build test-agent-log-stream-process`는 실제 CLI pipe로 generation resume,
+시작 정리, 출력 배압 중 append, holder 종료, broken pipe를 검사한다. Ubuntu CI
+check에 포함되며 결과는 `tests/artifacts/agent-log-stream/`에만 남긴다.
+
 세대 codec 집중 검증은 `zig build test-agent-log-generations`다. 기본 `test`에도
 포함되며 header/resume 문법·세대별 offset 조정·snapshot 회전 조건을 OS 중립적으로
 검사한다. 파일 잠금·native 기록기와 제품 스트림 배선의 실행 검증은 후속 단계다.

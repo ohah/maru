@@ -6,7 +6,8 @@
 방식으로 후속 구현을 진행하도록 승인했다(2026-10-11). 아래는 단계별 구현 계획이며
 각 단계의 라이브 배선과 OS 검증이 완료되기 전에는 제품 지원 완료를 뜻하지 않는다.
 1단계 순수 codec과 reconciliation, 2단계 native I/O 기반은 구현됐다.
-제품 훅의 기본 활성화와 reader/wire 라이브 배선은 후속이며 peer ACK는 별도 범위다.
+제품 기록 CLI와 준비된 native 훅, 명시적 v2 스트리머는 구현됐다.
+제품 훅의 기본 활성화와 앱 reader/wire 라이브 배선은 후속이며 peer ACK는 별도 범위다.
 
 ## 현재 경로와 필요한 변경
 
@@ -94,6 +95,18 @@ v2 기능이 확인되기 전에는 v2 resume를 구버전 CLI에 보내지 않�
 | OS 전송 성공 뒤 수신 앱 종료 | generation이 있어도 중복/누락 가능 | ACK/재전송은 이번 범위 밖 |
 
 ## 구현 순서와 완료 게이트
+
+3단계의 제품 검증 경로는 명시적인 `agent-events --log-format=v2` 선택으로
+격리한다. 기본은 v1이며 혼합 디렉터리를 자동 판별하지 않는다. v2 선택은 별도
+`maru-agent-events-v2` hello 식별자/version 2와 generation cursor를 낸다.
+기존 수신기는 version 값이 아니라 닫는 따옴표까지 포함한 v1 식별자 접두사를
+검사하므로, 숫자만 바꾸지 않고 식별자를 분리해 v1으로 오인하지 않도록 한다. 앱의 capability 협상과 기본 훅 전환은 4단계까지 보류한다.
+v2 시작 정리는 같은 잠금 안에서 현재 파일의 generation/EOF/mtime을 읽고
+7일 만료는 삭제, payload 1 MiB 이상은 새 generation으로 교체한다. 바쁜 파일은
+그대로 둔다. sidecar와 영구 lock 슬롯은 이 정리에서 삭제하지 않는다.
+v2 reader는 snapshot 후 잠금을 풀고 이벤트와 커서를 출력하며 flush 성공 뒤에만
+읽기 위치를 확정한다. 회전 재검사가 실패하면 읽은 위치를 유지한다. generation이
+바뀐 빈 파일도 offset 0 cursor를 보내 이전 resume를 남기지 않는다.
 
 1. 순수 Generation/Header/Cursor codec과 reconciliation. macOS·Linux·Windows compile,
    malformed·overflow·same/larger replacement·동일 이름 중복 및 독립 oracle.
@@ -244,3 +257,27 @@ v1 reader/회전기와 구형 in-flight 훅을 v2 기록과 혼합하지 않도�
 실제 `sh -e`로 검사하며 CLI 도움말과 golden fixture도 함께 갱신했다.
 디렉터리 인증은 macOS의 held-fd fstat, Linux의 statx EMPTY_PATH를 사용한다.
 Windows는 인증 구현 전 UnsupportedPlatform으로 쓰기 전에 거부한다.
+
+## 3단계 스트리머 구현 경계
+
+`agent-events --log-format=v2`는 인증한 directory handle을 실행 수명 동안 유지한다.
+기본 v1 hello/읽기/회전은 호환 경로이며 v2는 hello version 2와 generation cursor를
+사용한다. 식별자는 `maru-agent-events-v2`이며 기존 v1 Channel/host 관문이
+이를 열거나 offset-only cursor로 저장하지 않는 경계를 검사한다. v2 startup cleanup은 현재 header/EOF/mtime을 공유 잠금 아래 확인한다.
+7일 만료와 1 MiB payload 제한을 적용하며 바쁜 파일·sidecar·고정 lock 슬롯은 보존한다.
+snapshot lock은 stdout 출력 전에 풀고, flush 성공 뒤에 읽기 위치를 확정한다.
+회전은 같은 generation/EOF를 재검사하며 새 빈 generation도 cursor로 출력한다.
+
+v2 sidecar는 nofollow/read-write open 뒤 단일 링크의 0600 regular file과 4096바이트
+상한을 확인한다. 이는 FIFO open/read로 소비자가 멈추지 않도록 하며, sidecar는
+로그 generation의 일부가 아닌 기존 tmux routing hint다.
+
+`test-agent-log-stream-process`는 실제 product CLI pipe와 native writer로 resume,
+같은 크기 교체, 잠금 holder 종료, startup 회전/만료, backpressure 중 append,
+broken pipe의 원본 보존, FIFO log/sidecar, directory pathname 교체를 검사한다.
+cleanup의 난수/부분 쓰기/rename 실패는 native I/O fault gate에서 원본을 보존한다.
+실제 CLI에 적용한 커널 파일 크기 제한도 startup publish 실패 뒤 원본을 보존했다.
+macOS Debug/ReleaseFast와 방어 조건 무력화·등가 변형을 확인했다. Linux 실행은
+Ubuntu CI에서 확인하며 cross compile만으로 Windows native 실행을 주장하지 않는다.
+결과는 ignored artifacts에만 남긴다. 앱의 capability/수신 cursor와 로컬 reader,
+기본 훅 설치의 in-flight 이행 및 Windows ACL/native 실행은 완료 범위에 넣지 않는다.

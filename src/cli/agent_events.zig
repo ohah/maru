@@ -23,6 +23,7 @@
 const std = @import("std");
 const command = @import("../session/agent_hook_command.zig");
 const hook_event = @import("../session/agent_hook_event.zig");
+const generation = @import("../session/agent_log_generation.zig");
 // wire 상한을 **소비자에게서 빌려 온다**(RA7) — 아래 `max_pane_wire_bytes` 참조.
 const remote_agent_stream = @import("../session/remote_agent_stream.zig");
 
@@ -33,6 +34,9 @@ const remote_agent_stream = @import("../session/remote_agent_stream.zig");
 /// exec 도 못 피한다). 그때 이 줄이 안 오는 것이 유일한 신호다. 정상 서버도 MOTD·rc 잡음을 앞에 붙이므로
 /// «첫 줄» 로 재면 멀쩡한 서버를 제한 서버로 오진한다.
 pub const hello_line = "{\"hello\":\"maru-agent-events\",\"v\":1}";
+// Deployed Channel/host readers match the quoted marker without checking v.
+// A distinct marker prevents them from stripping generation off a v2 cursor.
+pub const generation_hello_line = "{\"hello\":\"maru-agent-events-v2\",\"v\":2}";
 
 /// 우리 프로토콜 판(소비자가 대조한다).
 pub const wire_version: u32 = 1;
@@ -50,6 +54,7 @@ pub const Mode = union(enum) {
 
 pub const Options = struct {
     dir: []const u8,
+    log_format: enum { v1, v2 } = .v1,
     /// 하트비트 주기(ms). **0 이면 안 보낸다** — 그러면 소비자가 사망을 침묵으로 재지 못한다는 뜻이라
     /// 시험용 외에는 쓰지 않는다.
     heartbeat_ms: u32 = 5_000,
@@ -71,6 +76,7 @@ pub fn parseArgs(args: []const []const u8) Mode {
     var resume_spec: []const u8 = "";
     var resume_seen = false;
     var saw_stdio = false;
+    var log_format: ?@FieldType(Options, "log_format") = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -91,13 +97,21 @@ pub fn parseArgs(args: []const []const u8) Mode {
             if (resume_seen) return .usage_error;
             resume_seen = true;
             resume_spec = a["--resume=".len..];
+        } else if (std.mem.startsWith(u8, a, "--log-format=")) {
+            if (log_format != null) return .usage_error;
+            log_format = std.meta.stringToEnum(@FieldType(Options, "log_format"), a["--log-format=".len..]) orelse return .usage_error;
         } else return .usage_error;
     }
     if (!saw_stdio) return .usage_error;
     const d = dir orelse return .usage_error;
     if (d.len == 0 or !std.fs.path.isAbsolute(d)) return .usage_error; // 상대 경로는 cwd 에 끌려간다
-    if (!resumeIsWellFormed(resume_spec)) return .usage_error;
-    return .{ .stdio = .{ .dir = d, .heartbeat_ms = hb, .resume_spec = resume_spec } };
+    if (log_format == .v2) {
+        var fields = std.mem.splitScalar(u8, resume_spec, ',');
+        if (resume_spec.len > 0) while (fields.next()) |field| {
+            _ = generation.decodeResumeEntry(field) catch return .usage_error;
+        };
+    } else if (!resumeIsWellFormed(resume_spec)) return .usage_error;
+    return .{ .stdio = .{ .dir = d, .heartbeat_ms = hb, .resume_spec = resume_spec, .log_format = log_format orelse .v1 } };
 }
 
 /// 디렉터리 항목이 **우리 로그**인가. 맞으면 그 nonce 를 돌려준다.
@@ -288,12 +302,33 @@ pub fn resumeIsWellFormed(spec: []const u8) bool {
 /// 한 파일의 읽기 커서. **파일마다 따로 든다** — 디렉터리 전체를 훑으므로 하나로 두면 pane 이 섞인다
 /// (프로토타입에서 실제로 그 자리를 만났다).
 pub const Cursor = struct {
+    generation: ?generation.Generation = null,
     /// 이미 흘린 바이트 수.
     offset: u64 = 0,
     /// 그때 본 파일 크기. **줄어들면 회전·재생성이므로 커서를 0 으로 되돌린다** — 안 그러면 새 파일의
     /// 앞부분을 영영 건너뛴다.
     seen_size: u64 = 0,
 };
+
+pub fn formatGenerationCursor(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, name: []const u8, position: generation.Position) !void {
+    const encoded = generation.encodeGeneration(position.generation);
+    try out.print(allocator, "{{\"cur\":\"{s}\",\"at\":{d},\"gen\":\"{s}\"}}\n", .{ name, position.offset, encoded });
+}
+
+pub fn seedGenerationCursors(allocator: std.mem.Allocator, spec: []const u8, cursors: *std.StringHashMapUnmanaged(Cursor)) !void {
+    if (spec.len == 0) return;
+    var fields = std.mem.splitScalar(u8, spec, ',');
+    while (fields.next()) |field| {
+        const entry = generation.decodeResumeEntry(field) catch return error.InvalidResume;
+        const gop = try cursors.getOrPut(allocator, entry.name);
+        if (gop.found_existing) return error.DuplicateResume;
+        gop.key_ptr.* = allocator.dupe(u8, entry.name) catch |err| {
+            _ = cursors.remove(entry.name);
+            return err;
+        };
+        gop.value_ptr.* = .{ .generation = entry.cursor.generation, .offset = entry.cursor.offset, .seen_size = entry.cursor.offset };
+    }
+}
 
 /// Seed the existing cursor map before hello or disk cleanup. Each name has one authority;
 /// overwriting it would replay or skip events. Allocation failure must not become offset zero.
@@ -405,6 +440,39 @@ pub fn advance(cur: Cursor, size: u64) Cursor {
 }
 
 const testing = std.testing;
+
+test "v2 streamer is explicit and keeps generation in resume and cursor output" {
+    const spec = "a:20:00112233445566778899aabbccddeeff";
+    const opts = parseArgs(&.{ "--stdio", "--dir=/private/logs", "--log-format=v2", "--resume=" ++ spec }).stdio;
+    try testing.expectEqual(.v2, opts.log_format);
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=/private/logs", "--resume=" ++ spec }) == .usage_error);
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=/private/logs", "--log-format=v2", "--log-format=v1" }) == .usage_error);
+    try testing.expect(parseArgs(&.{ "--stdio", "--dir=/private/logs", "--log-format=auto" }) == .usage_error);
+    var cursors: std.StringHashMapUnmanaged(Cursor) = .empty;
+    defer {
+        var keys = cursors.keyIterator();
+        while (keys.next()) |key| testing.allocator.free(key.*);
+        cursors.deinit(testing.allocator);
+    }
+    try seedGenerationCursors(testing.allocator, spec, &cursors);
+    try testing.expectError(error.DuplicateResume, seedGenerationCursors(testing.allocator, "a:0", &cursors));
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    const cur = cursors.get("a").?;
+    try formatGenerationCursor(&out, testing.allocator, "a", .{ .generation = cur.generation.?, .offset = cur.offset });
+    try testing.expectEqualStrings("{\"cur\":\"a\",\"at\":20,\"gen\":\"00112233445566778899aabbccddeeff\"}\n", out.items);
+}
+
+test "v2 hello never opens the deployed legacy prefix-based channel" {
+    var legacy = remote_agent_stream.Channel.init(0);
+    _ = legacy.feed(generation_hello_line, 1);
+    try testing.expectEqual(remote_agent_stream.State.waiting_hello, legacy.state);
+    // The host's cursor collector uses this exact same legacy marker prefix.
+    try testing.expect(!std.mem.startsWith(u8, generation_hello_line, "{\"hello\":\"maru-agent-events\""));
+    try testing.expect(legacy.feed("{\"cur\":\"a\",\"at\":9,\"gen\":\"00112233445566778899aabbccddeeff\"}", 2) == .ignored);
+    legacy.tick(remote_agent_stream.hello_deadline_ms);
+    try testing.expectEqual(remote_agent_stream.Closed.no_hello, legacy.closed_reason.?);
+}
 
 test "RA7 pane 을 주면 프레임에 실리고, 비면 키 자체가 없다" {
     // **비었을 때 키를 안 싣는 것이 호환의 절반이다.** `"pane":""` 를 보내면 구버전 로컬이 그것을 모르는

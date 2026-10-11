@@ -5665,6 +5665,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         session_host_ssh_upload_product_tests.root_module.linkFramework("QuartzCore", .{});
         session_host_ssh_upload_product_tests.root_module.linkFramework("CoreText", .{});
         session_host_ssh_upload_product_tests.root_module.linkFramework("CoreGraphics", .{});
+        session_host_ssh_upload_product_tests.root_module.linkFramework("IOSurface", .{}); // W3c: tick → tickWebOsr → 링 수신기(main 기준 rebase 적대 리뷰 5 회차 — push 전용 CI 잡이라 PR 에서 안 돌았다)
         session_host_ssh_upload_product_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },

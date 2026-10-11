@@ -103,6 +103,7 @@ cat > "$root/www/a.html" <<'HTML'
 <nav style="position:absolute;left:-9999px"><button>Offcanvas go</button></nav>
 <button onclick="hit('hb-'+event.isTrusted)">Hidden role btn</button>
 <span onmouseover="hit('hh-'+event.isTrusted)">Hover hidden</span>
+<script>document.addEventListener('visibilitychange',function(){hit('vis-'+document.visibilityState)})</script>
 <button id=rs onclick="setTimeout(function(){requestAnimationFrame(function(){document.body.insertAdjacentHTML('beforeend','<button style=position:absolute;left:600px;top:160px>Raf ready</button>')})},300)">Start raf</button>
 <button onclick="hit('ar1-'+event.isTrusted)">Archive item</button><button onclick="hit('ar2')">Archive item</button>
 <div role=button tabindex=0 onclick="hit('card-'+event.isTrusted)" style="position:relative;width:300px;height:60px;border:1px solid"><span>Card title</span><button style="position:absolute;left:110px;top:15px;width:80px;height:30px" onclick="event.stopPropagation();hit('cdel')">Del</button></div>
@@ -311,10 +312,10 @@ run wv-start click --selector '#wl'
 run wv-role wait --role button --name 'Ready now' --exact --timeout 6000
 run wv-amb wait --by-text 'Archive item' --exact --timeout 3000
 run wv-off wait --role button --name 'Offcanvas go' --exact --timeout 1500
-run hid-rs click --selector '#rs'
-# 탭을 숨긴다(앱 대본이 hide-now 를 보면 새 탭을 연다).
+# 탭을 숨긴다(앱 대본이 hide-now 를 보면 새 탭을 연다) — 페이지가 정말 hidden 이 됐는지 본다(적대 리뷰 1 회차).
 touch "\$out/hide-now"
 sleep 2
+hit_seen vis-hidden && echo yes > "\$out/hid-vis" || echo no > "\$out/hid-vis"
 t0=\$(date +%s)
 run hid-role click --role button --name 'Hidden role btn' --exact
 t1=\$(date +%s)
@@ -323,6 +324,9 @@ t2=\$(date +%s)
 run hid-hover hover --by-text 'Hover hidden' --exact
 t3=\$(date +%s)
 hit_seen hh-true && echo yes > "\$out/hh-hit" || echo no > "\$out/hh-hit"
+# rAF 를 일으키는 클릭은 숨긴 뒤, kick 없는 selector 클릭으로 — 그 rAF 는 wait 의 확인에 실린 kick 만 돌린다(1 회차 — 앞의 클릭이면
+# role 질의·hover 의 kick 이 대신 돌려 wait 의 kick 을 증명하지 못했다).
+run hid-rs click --selector '#rs'
 run hid-wait wait --by-text 'Raf ready' --exact --timeout 8000
 echo "\$((t1 - t0)) \$((t3 - t2))" > "\$out/hid-secs"
 touch "\$out/show-now"
@@ -475,8 +479,9 @@ grep -q 'not ok' "$out/tx-unr" && grep -q '^hint: 1 matching' "$out/tx-unr" || f
 grep -q 'not ok' "$out/tx-nth" && ! grep -q '^hint:' "$out/tx-nth" || fail "nth past the visible matches gave a hidden-element hint ($(tr '\n' ' ' < "$out/tx-nth"))"
 ok wv-role && grep -q 'matched n[0-9]* "Ready now"' "$out/wv-role" || fail "waiting by role for a button made 2 s later did not answer ok with matched ($(tr '\n' ' ' < "$out/wv-role"))"
 ok wv-amb && grep -q '^warning: ambiguous' "$out/wv-amb" || fail "waiting for a text matching two buttons did not answer ok with an ambiguous warning ($(tr '\n' ' ' < "$out/wv-amb"))"
-grep -q '(-32004)' "$out/wv-off" || fail "an off-canvas button was taken for visible ($(tr '\n' ' ' < "$out/wv-off"))"
-echo "PASS wait-visible: a role wait sees a button made 2 s later (matched), two matches answer with an ambiguous warning, an off-canvas button times out"
+grep -q '(-32004)' "$out/wv-off" && grep -q '^hint: 1 matching' "$out/wv-off" || fail "an off-canvas button was taken for visible, or the timeout had no hidden hint ($(tr '\n' ' ' < "$out/wv-off"))"
+echo "PASS wait-visible: a role wait sees a button made 2 s later (matched), two matches answer with an ambiguous warning, an off-canvas button times out with a hidden hint"
+[ "$(cat "$out/hid-vis")" = yes ] || fail "the Chromium tab was not hidden by the new tab (no visibilitychange to hidden) — the hidden-tab cases would prove nothing"
 set -- $(cat "$out/hid-secs")
 ok hid-role && [ "$(cat "$out/hb-hit")" = yes ] && [ "$1" -le 3 ] || fail "a role click on a hidden tab did not press for real within 3 s (${1}s · $(tr '\n' ' ' < "$out/hid-role"))"
 ok hid-hover && [ "$(cat "$out/hh-hit")" = yes ] && [ "$2" -le 3 ] || fail "a hover on a hidden tab did not reach the page within 3 s (${2}s · $(tr '\n' ' ' < "$out/hid-hover"))"

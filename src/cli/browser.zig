@@ -1040,6 +1040,7 @@ pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, 
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
+const timeout_code: i64 = -32004;
 const unauthorized_hint =
     \\hint: browser requests are allowed from a command running in a maru pane's foreground job (an agent there,
     \\      or your shell). Not from another terminal, inside tmux/screen, or a background job while another
@@ -1082,6 +1083,9 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
         // unauthorized 만 주므로(존재 oracle 금지) 이유를 묻지 않고 늘 같은 안내를 붙인다 — 서버 정보가 새지 않는다.
         if (e.code == unauthorized_code) try w.writeAll(unauthorized_hint);
+        // 로케이터 wait 의 시한 — 마지막 확인에 숨은 일치가 있었다(W9b②-3 적대 리뷰 1 회차 — data 에만 있어 보이지 않았다).
+        if (e.code == timeout_code) if (e.data) |d| if (d == .object) if (d.object.get("hidden")) |h| if (h == .integer and h.integer > 0)
+            try w.print("hint: {d} matching element(s) are hidden (not rendered, aria-hidden or off-page)\n", .{h.integer});
         return false;
     }
     const result = switch (resp.result orelse {
@@ -2662,4 +2666,11 @@ test "renderResponse: wait 이 찾은 것이 여럿과 맞으면 matched 뒤에 
     var w: std.Io.Writer = .fixed(&buf);
     _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n4\",\"name\":\"Save\"},\"ambiguous\":true}}", .ok, &w);
     try testing.expectEqualStrings("ok\nmatched n4 \"Save\"\nwarning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n", w.buffered());
+}
+
+test "renderResponse: 로케이터 wait 의 시한에 숨은 일치가 있으면 hint 한 줄" {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32004,\"message\":\"Timeout\",\"data\":{\"condition\":\"visible\",\"timeout_ms\":300,\"hidden\":2}}}", .ok, &w);
+    try testing.expectEqualStrings("error: Timeout (-32004)\nhint: 2 matching element(s) are hidden (not rendered, aria-hidden or off-page)\n", w.buffered());
 }

@@ -80,6 +80,13 @@ const Then = union(enum) {
 /// role wait 의 보임 판정은 후보를 이만큼씩 잡아 한 번에 본다(계획 공격 2 회차 — 하나씩이면 확인 한 번에 호출 40 개).
 const judge_batch = 20;
 
+/// 로케이터 wait 의 간격이 무거운 호출 시간으로 늘어나는 상한 — 페이지의 긴 작업이 그 호출 앞에 걸려 시간이 부풀면 다음 확인이 10 초 뒤가 됐다
+/// (적대 리뷰 1 회차 실측 — 요소는 2.7 초에 생겼는데 12.5 초에 답했다).
+const wait_max_heavy_interval_ms: u32 = 2000;
+/// 마지막 확인이 시한을 넘길 수 있는 여유 — 이보다 더 넘길 것 같을 때만 시한 전에 답한다(첫 확인이 긴 작업에 막혀 3 초 걸리자 5 초 시한의 wait
+/// 이 3 초에 포기했다 — 1 회차). wait 시한 상한 25 초 + 이것 < 서버 reaper 30 초.
+const wait_max_overrun_ms: i64 = 2000;
+
 pub const Op = struct {
     kind: Kind,
     stage: Stage = .document,
@@ -318,6 +325,13 @@ pub const Op = struct {
         };
     }
 
+    /// 철회됐다(부른 쪽이 다음 호출을 보내기 전에 본다) — 문서·후보 원격 객체를 쥐었으면 놓은 뒤 끝낸다(1 회차 — 그냥 끝내 페이지에 남았다).
+    /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
+    pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
+        if (self.doc_obj == null and self.cands == null) return null;
+        return try self.releaseThenDone(gpa, .failed, "the request was cancelled");
+    }
+
     /// `sleep` 뒤에 다시 부른다(부른 쪽이 `now_ms` 를 넣은 뒤) — 시한이 지났으면 timeout, 아니면 다음 확인.
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
         // 떼기를 다시 보낸다(못 보냈던 것 — 철회돼도 committed 라 보낸다).
@@ -483,6 +497,8 @@ pub const Op = struct {
         if (self.stage == .loc_release) return self.afterFind(gpa);
         // 묶음을 놓았다(무엇이든) — 정해 둔 다음 일로.
         if (self.stage == .rel_then) return self.afterRelThen(gpa);
+        // kick 쌍이 갔다 — 다음 kick 호출은 다시 세 번까지(1 회차 — 한 op 안에서 횟수를 나눠 써 뒤의 호출은 다시 보내지 못했다).
+        if (reply != .not_sent) self.kick_retries = 0;
         // 찾기 호출 자체가 실패·시한 — 쥔 객체가 있을 수 있어 놓은 뒤 그 이유로 끝낸다.
         if (self.stage == .loc_find) switch (reply) {
             // 답은 곧장 해석해 놓기로 — 공통 JSON 파싱이 깨진 답에 놓지 않고 끝내던 것(1 회차).
@@ -926,7 +942,8 @@ pub const Op = struct {
                 self.cand_at = end;
                 self.freeCandObjs(gpa);
                 if (self.cand_at < c.backends.len) return self.judgeNext(gpa);
-                self.wait_hidden = c.total;
+                // 판정한 것이 모두 보이지 않았다 — 그 수(nth 면 그 하나, 상한 100 을 넘은 것은 보지 않았다).
+                self.wait_hidden = c.backends.len;
                 return self.releaseThen(gpa, .sleep);
             },
             .rel_then => unreachable, // feed 앞에서
@@ -985,10 +1002,10 @@ pub const Op = struct {
         if (self.now_ms >= self.wait_deadline_ms) return self.waitTimeout(gpa);
         // 다음 확인이 시한 안에 끝나지 않을 것 같으면 지금 답한다 — 확인 하나가 늦으면 시한(25 초)을 넘겨 서버 reaper(30 초)에 닿았다
         // (계획 공격 1·3 회차). selector·load 의 확인은 짧다(그대로 둔다).
-        if (self.wait_visible and self.wait_deadline_ms - self.now_ms < self.last_check_ms) return self.waitTimeout(gpa);
+        if (self.wait_visible and self.now_ms + self.last_check_ms > self.wait_deadline_ms + wait_max_overrun_ms) return self.waitTimeout(gpa);
         const left: u32 = @intCast(@min(self.wait_deadline_ms - self.now_ms, std.math.maxInt(u32)));
         // 로케이터의 확인(질의·찾기)은 그동안 페이지를 붙잡는다 — 간격을 그 시간의 네 배 이상으로(페이지가 쓰는 시간을 1/5 아래로).
-        const heavy: u32 = if (self.wait_visible) @intCast(@min(@max(self.last_heavy_ms, 0) *| 4, std.math.maxInt(u32))) else 0;
+        const heavy: u32 = if (self.wait_visible) @intCast(@min(@max(self.last_heavy_ms, 0) *| 4, wait_max_heavy_interval_ms)) else 0;
         const ms = @min(@max(self.wait_interval_ms, heavy), left);
         self.wait_interval_ms = @min(self.wait_interval_ms *| 2, wait_max_interval_ms);
         self.stage = .sleeping;
@@ -2797,20 +2814,50 @@ test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 �
     try testing.expectEqualSlices(usize, &.{2}, trail.kicked.items);
 }
 
-test "wait visible 의 간격·마감: 무거운 확인(질의·찾기) 시간의 네 배 이상 쉬고, 남은 시간이 직전 확인보다 짧으면 지금 시한으로 답한다" {
+test "wait visible 의 간격·마감: 무거운 확인 시간의 네 배 이상(2 초까지) 쉬고, 다음 확인이 시한을 2 초 넘게 넘길 것 같을 때만 미리 시한으로 답한다" {
     var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"text\":\"Go\"},\"timeout_ms\":10000}", 530);
     defer op.deinit(testing.allocator);
     op.wait_deadline_ms = 10_000;
     op.check_start_ms = 1_000;
     op.now_ms = 1_300; // 확인 300 ms
     op.last_heavy_ms = 200;
-    const s1 = try op.sleepOrTimeout(testing.allocator);
-    try testing.expectEqual(@as(u32, 800), s1.sleep);
-    op.check_start_ms = 9_000;
-    op.now_ms = 9_700; // 확인 700 ms, 남은 300 ms
+    try testing.expectEqual(@as(u32, 800), (try op.sleepOrTimeout(testing.allocator)).sleep);
+    // 긴 작업에 부푼 호출 시간 — 간격은 2 초까지(1 회차: 10 초 잤다).
+    op.check_start_ms = 2_000;
+    op.now_ms = 2_100;
+    op.last_heavy_ms = 2_500;
+    try testing.expectEqual(@as(u32, 2000), (try op.sleepOrTimeout(testing.allocator)).sleep);
+    // 첫 확인이 3 초 걸렸어도 남은 2 초에 한 번 더 본다(1 회차: 5 초 시한의 wait 이 3 초에 포기했다).
+    op.wait_deadline_ms = 5_000;
+    op.check_start_ms = 0;
+    op.now_ms = 3_000;
+    op.last_heavy_ms = 0;
+    op.wait_interval_ms = 50;
+    try testing.expectEqual(@as(u32, 50), (try op.sleepOrTimeout(testing.allocator)).sleep);
+    // 다음 확인이 시한을 2 초 넘게 넘길 것 같으면 지금 시한으로 — 숨은 일치 수를 싣는다.
+    op.wait_deadline_ms = 10_000;
+    op.check_start_ms = 6_000;
+    op.now_ms = 9_700; // 확인 3.7 초 — 다음 것은 13.4 초에 끝날 것
     op.wait_hidden = 4;
     const s2 = try op.sleepOrTimeout(testing.allocator);
     defer testing.allocator.free(s2.done.result);
     try testing.expectEqual(Status.timeout, s2.done.status);
     try testing.expectEqualStrings("{\"hidden\":4}", s2.done.result);
+}
+
+test "철회: 문서·후보 묶음을 쥐었으면 놓은 뒤(committed) 「cancelled」 로 끝낸다, 쥔 것이 없으면 부른 쪽이 곧 끝낸다" {
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\"},\"timeout_ms\":5000}", 540);
+    defer op.deinit(testing.allocator);
+    try testing.expect(try op.cancel(testing.allocator) == null);
+    op.doc_obj = try testing.allocator.dupe(u8, "doc-1");
+    const step = (try op.cancel(testing.allocator)).?;
+    defer testing.allocator.free(step.call.params);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", step.call.method);
+    try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-540\"}", step.call.params);
+    try testing.expect(op.committed());
+    const d = try op.feed(testing.allocator, .{ .ok = "{}" });
+    defer testing.allocator.free(d.done.result);
+    try testing.expectEqual(Status.failed, d.done.status);
+    try testing.expectEqualStrings("the request was cancelled", d.done.result);
+    try testing.expect(op.doc_obj == null);
 }

@@ -1,7 +1,8 @@
 function(KIND, Q, EXACT, NTH, ACTION) {
   // W9b2-2 text/label finder - isolated world, Runtime.callFunctionOn + serializationOptions {serialization:"deep", maxDepth:2}.
   // Q is already normalized by Zig (web_cdp_locate.normalize); NTH is null or an integer; ACTION: click|hover|type|press|scroll|wait.
-  // wait (W9b2-3): no retarget, several matches answer the first one with their count ({n:k, el, name, more}).
+  // wait (W9b2-3): counted and retargeted like click (review round 1 - "act with the same locator would be ambiguous" must be click's count),
+  // several matches answer the first one with their count ({n:k, el, name, more}).
   // KIND "visible" (W9b2-3 role wait): arguments 5.. are elements (DOM.resolveNode) - the index of the first visible one, or -1.
   // Returns {err:"too_large",elements} | {err:"budget",ms} | {n:0,hidden} | {n:1,el,name} | {n:k,cands,names,more}.
   var CAP = 100000, BUDGET_MS = 300, MAX_NAME = 256, MAX_CANDS = 5;
@@ -69,7 +70,7 @@ function(KIND, Q, EXACT, NTH, ACTION) {
   var viaLabel = false;
   var target = function (e) {
     viaLabel = false;
-    if (ACTION === 'scroll' || ACTION === 'wait') return e;
+    if (ACTION === 'scroll') return e;
     if (ACTION === 'type' || ACTION === 'press') {
       for (var n = e; n; n = up(n)) if (tagG.call(n) === 'LABEL') { var c = ctlG.call(n); viaLabel = !!c; return c || n; }
       if (ACTION === 'type') return e;

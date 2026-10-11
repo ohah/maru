@@ -294,37 +294,23 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 207: W6a② — osr_keyboard_active 가 키 대상 탭에 팝업 위젯이 열려 있으면 2, osr_key phase 3(열린 목록의 키 — 누름과 글자,
 // 입력기 없이).
 // 208: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
-// 208: W6a② — osr_keyboard_active 가 키 대상 탭에 팝업 위젯이 열려 있으면 2, osr_key phase 3(열린 목록의 키 — 누름과 글자,
-// 203: W6b — osr_tooltip(hover 중인 Chromium 탭의 툴팁 글과 일련번호 — Swift 가 macOS 툴팁으로 띄운다).
 // 209: W6c② — Chromium 탭 우클릭 메뉴(osr_context_menu_take·item·selection·open·answer — 창이 macOS 메뉴로 띄운다).
-// 210: W6c② — Chromium 탭 우클릭 메뉴(osr_context_menu_take·item·selection·open·answer — 창이 macOS 메뉴로 띄운다).
-// 205: W6d① — 밖에서 끌어 놓기(osr_drag_reset·add·update·exit·drop — view 의 끌기 세션을 Chromium 탭 본문에 넘긴다).
-// 211: W6d② — 페이지에서 끌어내기(osr_drag_out_take·part·end·active, osr_drag_set_source — 창이 macOS 끌기 세션을 돌린다).
+// 210: W6d① — 밖에서 끌어 놓기(osr_drag_reset·add·update·exit·drop — view 의 끌기 세션을 Chromium 탭 본문에 넘긴다).
 // 211: W6d② — 페이지에서 끌어내기(osr_drag_out_take·part·started·end, osr_drag_set_source — 창이 macOS 끌기 세션을 돌린다).
-// 212: W6d② — 페이지에서 끌어내기(osr_drag_out_take·part·started·end, osr_drag_set_source — 창이 macOS 끌기 세션을 돌린다).
-// 207: W6d③ — 끌어낸 이미지 파일(osr_drag_out_file_size, osr_drag_file_request·poll — Finder 가 청할 때만 내용을 받는다).
+// 212: W6d③ — 끌어낸 이미지 파일(osr_drag_out_file_size, osr_drag_file_request·poll — Finder 가 청할 때만 내용을 받는다).
 // 213: W6g — osr_accepts_first_mouse(창이 뒤에 있을 때 Chromium 본문의 첫 누름도 페이지로 — acceptsFirstMouse).
-// 214: W6g — osr_accepts_first_mouse(창이 뒤에 있을 때 Chromium 본문의 첫 누름도 페이지로 — acceptsFirstMouse).
-// 209: W6h① — osr_take_new_window·osr_open_url_tab(메뉴 「새 창에서 링크 열기」), osr_context_menu_search(「…에서 '…' 검색」), 메뉴 항목 종류 8.
+// 214: W6h① — osr_take_new_window·osr_open_url_tab(메뉴 「새 창에서 링크 열기」), osr_context_menu_search(「…에서 '…' 검색」), 메뉴 항목 종류 8.
 // 215: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
-// 216: W6h② — osr_context_menu_item_checked(동영상·오디오 메뉴의 연속 재생·모든 제어 기능 표시 체크 표시).
-// 211: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
+// 216: W6l① — drop_url(링크를 웹 탭 머리·웹 pane 의 빈 탭 막대·주소 띠에 놓으면 그 탭에서 열기·새 웹 탭).
 // 217: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
-// 218: W6m② — osr_datalist_key(열린 제안 목록이 ↑↓·Enter·Esc 를 먹는다).
-// 216: W10e — downloads_keep_alive(앱을 남겨 둘 다운로드 수)·web_osr_detached_pump(창이 없을 때 sidecar 펌프) — 마지막 셸이
+// 220: W10b — 다운로드 「매번 묻기」: 행 상태 10(asking), MaruDownloadAsk·app_session_take_download_ask(이 창의 활성 Chromium
+// 탭에서 물을 행)·downloads_claim_ask(목록 창이 맡기)·downloads_answer_ask(고른 경로·취소·치움), 목록 글 19(저장할 곳 고르기).
+// 221: W10e — downloads_keep_alive(앱을 남겨 둘 다운로드 수)·web_osr_detached_pump(창이 없을 때 sidecar 펌프) — 마지막 셸이
 // 끝나도 받는 중이면 창만 숨기고 다 받을 때까지 남는다.
-// 215: W10b — 다운로드 「매번 묻기」: 행 상태 10(asking), MaruDownloadAsk·app_session_take_download_ask(이 창의 활성 Chromium
-// 탭에서 물을 행)·downloads_claim_ask(목록 창이 맡기)·downloads_answer_ask(고른 경로·취소·치움), 목록 글 19(저장할 곳 고르기).
-// 214: W10a — downloads_*(Chromium 탭 다운로드 목록 — 앱 전역: 세대·행·누름·끝난 것 지우기·보이기 요청·받는 중 수),
+// 219: W10a — downloads_*(Chromium 탭 다운로드 목록 — 앱 전역: 세대·행·누름·끝난 것 지우기·보이기 요청·받는 중 수),
 // take_show_downloads_request(`show_downloads` 액션).
-// 213: W6m② — osr_datalist_state·item·shown·hover·pick(제안 목록을 칸 아래 네이티브 창으로 — Zig 가 목록·강조를 쥐고 Swift 가
+// 218: W6m② — osr_datalist_state·item·shown·hover·pick(제안 목록을 칸 아래 네이티브 창으로 — Zig 가 목록·강조를 쥐고 Swift 가
 // 띄운 세대를 알린다), osr_datalist_key(띄운 목록이 ↑↓·Enter·Esc 를 먹는다).
-// 219: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
-// 214: W10a — downloads_*(Chromium 탭 다운로드 목록 — 앱 전역: 세대·행·누름·끝난 것 지우기·보이기 요청·받는 중 수),
-// take_show_downloads_request(`show_downloads` 액션).
-// 220: W6l② — osr_drag_over_body(끌어 온 이미지 데이터를 본문에 처음 들어올 때만 파일로).
-// 215: W10b — 다운로드 「매번 묻기」: 행 상태 10(asking), MaruDownloadAsk·app_session_take_download_ask(이 창의 활성 Chromium
-// 탭에서 물을 행)·downloads_claim_ask(목록 창이 맡기)·downloads_answer_ask(고른 경로·취소·치움), 목록 글 19(저장할 곳 고르기).
 pub const abi_version: u32 = 221;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과

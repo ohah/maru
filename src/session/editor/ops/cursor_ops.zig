@@ -205,6 +205,12 @@ fn stepOne(content: []const u8, lines: LineIndex, sel: Selection, how: Motion, e
         // 도착이 없으면 **앞쪽 끝으로 접힌다**(VS Code 가 `position` = 선택 시작을 돌려준다). 가로 이동이라 목표 열을 버린다.
         goal = .none;
         break :blk jump orelse @min(sel.start(), content.len);
+    } else if (!extend and !sel.isEmpty() and (how == .char_left or how == .char_right)) blk: {
+        // **선택이 있으면 맨 ←/→ 는 선택 끝으로 접는다**(§3.2 — 사용자 결정 2026-10-11, VS Code `CursorLeft`·`CursorRight`·
+        // macOS 와 같다). `←` 는 앞쪽 끝, `→` 는 뒤쪽 끝 — focus 가 어느 쪽이든. 예전에는 focus 에서 한 글자를 더 갔다
+        // ([2,4] 에서 → 가 5). 가로 이동이라 목표 열을 버린다.
+        goal = .none;
+        break :blk if (how == .char_left) @min(sel.start(), content.len) else @min(sel.end(), content.len);
     } else movedOffset(content, lines, sel, how, &goal, o);
     var next = if (extend)
         Selection.fromAnchorRange(sel.anchorLo(), sel.anchorHi(), off, sel.kind)
@@ -478,6 +484,22 @@ test "moveAll — 아무 커서도 안 움직이면 null, Shift 는 anchor 를 �
     const q = moveAll(content, lines, Selection.at(0), &ex2, .bracket_match, false, &.{ 2, null }, o).?;
     try testing.expectEqual(@as(usize, 2), q.focus);
     try testing.expectEqual(@as(usize, 1), ex2[0].focus);
+}
+
+test "moveAll — 선택이 있으면 맨 ←/→ 는 선택 끝으로 접고, Shift·낱말 이동은 focus 에서 간다 (§3.2, 2026-10-11)" {
+    const content = "abcdef\n";
+    var lines = try line_index.build(testing.allocator, content);
+    defer lines.deinit();
+    const o = plain.oracle();
+    var none = [_]Selection{};
+    try testing.expectEqual(@as(usize, 4), moveAll(content, lines, Selection.fromPoints(2, 4), &none, .char_right, false, null, o).?.focus);
+    try testing.expectEqual(@as(usize, 2), moveAll(content, lines, Selection.fromPoints(2, 4), &none, .char_left, false, null, o).?.focus);
+    // 뒤로 고른 선택도 같은 끝이다.
+    try testing.expectEqual(@as(usize, 4), moveAll(content, lines, Selection.fromPoints(4, 2), &none, .char_right, false, null, o).?.focus);
+    // Shift 는 focus 에서 한 글자 간다.
+    try testing.expectEqual(@as(usize, 5), moveAll(content, lines, Selection.fromPoints(2, 4), &none, .char_right, true, null, o).?.focus);
+    // 낱말 이동은 접지 않는다 — focus 에서 간다.
+    try testing.expectEqual(@as(usize, 0), moveAll(content, lines, Selection.fromPoints(2, 4), &none, .word_left, false, null, o).?.focus);
 }
 
 test "planAddVertically — 아래로 더하면 primary 가 맨 아래 사본이고, 끝에서는 안 더한다 (§3.2b)" {

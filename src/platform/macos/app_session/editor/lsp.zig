@@ -449,7 +449,24 @@ fn remoteKey(t: git_ops.RemoteTrustTarget, dest_buf: *[lsp.trust.max_dest_bytes]
 /// 원격 저장소의 묻지 않는 root(WT2b 와 같은 거절 — 원격 홈 자체나 그 위). 홈은 실제 경로다(`git_command.buildRemoteHome`). 저장소 밖은
 /// 원격에선 목록이 안 서서(루트를 못 읽는다) 여기 오지 않는다.
 fn remoteRefused(t: git_ops.RemoteTrustTarget) bool {
-    return selfOrAncestor(t.root, t.home);
+    return lsp.trust.remoteRootRefused(t.root, t.home);
+}
+
+/// 그 목적지에서 **허용한 원격 루트들**을 줄로 이어 `out` 에 담는다(계획 workspace-trust WT7c-2 — 원격 턴 스냅샷). 신뢰 표는 메인 스레드
+/// 전용이라 워커가 못 읽는다 — 제출할 때 이 목록을 싣고, 워커가 그 왕복에서 읽은 루트·홈으로 판정한다(루트가 이 안에 있고 묻지 않는 root 가
+/// 아닐 때만). 경로엔 개행이 없다(표의 줄 형식이 그런 경로를 받지 않는다 — `trust.line`). 목적지를 못 맞추거나 메모리가 모자라면 비운다
+/// (찍지 않는 쪽).
+pub fn allowedRemoteRoots(self: *AppSession, dest: []const u8, out: *std.ArrayList(u8)) void {
+    ensureTrustLoaded(self);
+    out.clearRetainingCapacity();
+    var db: [lsp.trust.max_dest_bytes]u8 = undefined;
+    const want = lsp.trust.normalizeDest(dest, &db) orelse return;
+    var it = trust_store.decided();
+    while (it.next()) |e| {
+        if (e.decision != .allow or !std.mem.eql(u8, e.key.dest, want)) continue;
+        out.appendSlice(self.allocator, e.key.path) catch return out.clearRetainingCapacity();
+        out.append(self.allocator, '\n') catch return out.clearRetainingCapacity();
+    }
 }
 
 /// 원격 저장소의 신뢰 상태(도크 머리 줄 — 계획 workspace-trust WT7b). 판정은 `remoteTrustedRoot` 와 같은 키·같은 거절이다.

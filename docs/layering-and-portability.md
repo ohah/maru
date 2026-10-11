@@ -224,6 +224,12 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 | 도크 divider 잡기 오프셋 | 중립 `dock_layout.grabOffsetPx` 를 Windows 만 부르고 macOS 는 같은 식을 인라인으로 적었다 — **고쳤다**(2026-10-12) |
 | 에이전트 도크 그리기 예산 | Windows 가 macOS 의 식을 「같은 식」이라며 옮겨 적었고, macOS 가 나중에 더한 펼침 몫이 빠진 채 갈라졌다(지금 상한 — turn 셋 · 480 byte — 에서는 버텼다) — **고쳤다**(2026-10-12): `session_dock.view.drawBufferSizes` |
 
+**훑기에서 남은 후보**(2026-10-12 — 호스트 코드를 훑어 나온 10개 중 위 셋을 고친 뒤):
+
+- **사본이 아니었다**: 파일 트리 스크롤 한계(Windows 는 트리를 셀 격자로 그려 `cell_h` 가 그 축이다 — macOS 는 컴포넌트 `Metrics.row_h`), 사이드바 스크롤 한계(뷰포트를 만드는 입력만 다르고 산술은 포화 뺄셈 하나다).
+- **규칙이 실제로 갈렸다 — Windows 화면에서 확인한 뒤 고친다**: 도크 divider 의 잡기 영역. macOS 는 보이는 선 두께에 `outerDividerHitRect` 의 띠(배율 반영, bottom 은 터미널 쪽만)를 더하고, Windows 는 `divider_px = dividerGrabBandPx(1000)` 으로 선 자체를 1x 고정 10px 띠로 그린다 — 고배율에서 잡는 폭과 그리는 두께가 macOS 와 다르다.
+- **합치려면 상태나 경계부터 바꿔야 한다**: SCM 의도 규칙(섹션을 접고 펴면 강조를 내린다 — macOS 는 `AppSession` 필드에 저장소 여럿, Windows 는 자기 `State` 하나), 헤더 아이콘 배율(Windows 는 중립 `isSidebarHeaderIcon`·`cell_raster_scale_milli` 를, macOS Metal `.m` 은 같은 codepoint 와 `1.7f` 를 하드코딩 — ObjC 로 값을 넘기는 ABI 가 필요하다), 문법 이름 매핑(`syntaxLanguageFor`·`syntaxLanguage` — 두 주석 모두 공용 자리가 없다고 적는다), 에이전트 도크 항목 만들기(겹침이 작고 macOS 쪽이 가상화·상세를 더 다룬다).
+
 규칙을 지킨 선례도 있다 — [windows-platform.md](windows-platform.md) §2m.24(히트테스트 — macOS `hitTestBody` 가 줄었다)와
 §2m.112(구문 색 — macOS `syntax.zig` 에서 통째로 옮겼다).
 

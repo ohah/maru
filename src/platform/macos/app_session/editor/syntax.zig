@@ -114,34 +114,10 @@ pub const State = struct {
     }
 };
 
-/// 파일 확장자로 정한 언어(`session/editor/language.zig`)를 `syntax` 모듈의 축으로 옮긴다.
-///
-/// **두 열거가 갈리지 않게 옮기는 일을 여기 하나가 한다** — `syntax`는 `maru`를 못 들여오므로
-/// 자기 열거를 따로 들고, 그 머리말이 *"값을 늘릴 때 호출자가 옮긴다"*고 적어 두었다.
+/// 파일 확장자로 정한 언어(`session/editor/language.zig`)를 `syntax` 모듈의 축으로 옮긴다 — 표는 `syntax.languageFor`
+/// 하나다(이름으로 대응하고, 없는 이름은 컴파일 오류 — Windows 도 같은 것을 부른다, layering §3.5).
 pub fn syntaxLanguage(g: editor_language.Grammar) syntax.Language {
-    return switch (g) {
-        .zig => .zig,
-        .json => .json,
-        .markdown => .markdown,
-        .javascript => .javascript,
-        .typescript => .typescript,
-        .tsx => .tsx,
-        .c => .c,
-        .cpp => .cpp,
-        .python => .python,
-        .go => .go,
-        .rust => .rust,
-        .java => .java,
-        .ruby => .ruby,
-        .php => .php,
-        .kotlin => .kotlin,
-        .bash => .bash,
-        .css => .css,
-        .html => .html,
-        // 번들 목록에 없는 확장자 — 무색이다(§5). 늘릴 때 세 자리가 함께 는다:
-        // `build.zig`의 grammar 표 · `tree_sitter.zig`의 표 · `language.zig`의 `grammarForPath`.
-        .none => .other,
-    };
+    return syntax.languageFor(g);
 }
 
 /// 접을 줄 범위(§4 — 접힘의 tree-sitter 층). `syntax` 의 것을 그대로 다시 내보낸다 —

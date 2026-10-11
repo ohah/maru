@@ -222,6 +222,7 @@ pub const editor = struct {
         /// 도구 환경 해석기의 순수 계산(계획 workspace-trust WT3a) — 셸별 인자·명령·결과 읽기·위생·PATH 정리.
         pub const shell_env = @import("session/lsp/shell_env.zig");
         pub const exe_origin = @import("session/lsp/exe_origin.zig"); // WT5a: 띄울 실행 파일의 출처(저장소 안·shim·그 밖)
+        pub const config_files = @import("session/lsp/config_files.zig"); // WT5b-3: 서버가 읽는 자리의 설정 파일
         /// `TextEdit[]` → `Delta`(tooling §8.2e · document-model §3.6).
         pub const text_edits = @import("session/lsp/text_edits.zig");
         /// `WorkspaceEdit` → 파일별 `TextEdit[]`(tooling §8.2f).

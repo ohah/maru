@@ -189,6 +189,8 @@ pub const editor = struct {
     pub const backup_ops = @import("session/editor/ops/backup_ops.zig");
     /// 자동완성 확정의 순수 판정(§8.2g-f — 덮을 자리·additional·다른 커서·caret. 이동 단계 5).
     pub const completion_ops = @import("session/editor/ops/completion_ops.zig");
+    /// 커서 이동·추가·토글·고르기의 순수 판정(§3.2 — 화면·구문 트리 질의는 `Oracle` 로 받는다. 이동 단계 4).
+    pub const cursor_ops = @import("session/editor/ops/cursor_ops.zig");
     /// N2: 열/블록 선택의 **파생**(§3.2a — 사각형 하나를 줄마다 selection 으로 푼다). `selection` 이
     /// 원본(`ColumnAnchor`)을 들고 이쪽이 그것을 배열로 편다. `ColumnMap` 을 주입받아 **chrome 을
     /// 모른다**.

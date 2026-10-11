@@ -105,6 +105,7 @@ const line_ops = maru.session.editor.line_ops;
 const clipboard_ops = maru.session.editor.clipboard_ops;
 const typing_ops = maru.session.editor.typing_ops;
 const edit_ops = maru.session.editor.edit_ops;
+const cursor_ops = maru.session.editor.cursor_ops;
 pub const fold_lsp_client = @import("fold_lsp.zig");
 pub const inlay_client = @import("inlay.zig");
 pub const symbols_client = @import("symbols.zig");
@@ -3743,31 +3744,8 @@ pub fn mergeCarets(self: *AppSession, term: *Term) void {
 /// 따라가는 기준도 방금 놓은 자리다. 그래서 옛 primary는 나머지 쪽으로 내려간다.
 /// 커서를 옮기는 단위(§3.2). **키가 아니라 의미로 적는다** — 같은 이동을 여러 chord가 부르고
 /// (Home과 ⌘←), 플랫폼마다 관례가 다르기 때문이다.
-pub const Motion = enum {
-    char_left,
-    char_right,
-    word_left,
-    word_right,
-    /// smart home — 첫 글자와 줄 머리를 오간다. **언제나 논리 줄**이다(비교 뷰·병합 판이 쓴다).
-    line_start,
-    /// 논리 줄 끝. `^E` 가 이것이다(VS Code `CursorLineEnd`).
-    line_end,
-    /// `⌘←`·`Home` — **행 첫 글자 → 줄 첫 글자 → 줄 머리**로 넓어진다(VS Code `CursorHome`).
-    /// 랩이 꺼졌거나 스냅숏이 없으면 `line_start` 와 **같은 답**이다.
-    row_then_line_start,
-    /// `⌘→`·`End` — **행 끝 → 줄 끝**으로 넓어진다(VS Code `CursorEnd`). 위의 거울.
-    row_then_line_end,
-    /// `^A` — **무조건 줄 머리**(0열). smart home 토글이 없다(VS Code `CursorLineStart`).
-    hard_line_start,
-    line_up,
-    line_down,
-    doc_start,
-    doc_end,
-    page_up,
-    page_down,
-    /// 괄호 짝으로 점프(§3.9c). 가로 이동 부류다 — goal 열을 버린다.
-    bracket_match,
-};
+/// 이동 단위(§3.2) — L2 `cursor_ops.Motion`(값의 뜻은 그쪽이 소유한다).
+pub const Motion = cursor_ops.Motion;
 
 /// 열↔offset 변환을 **화면과 같은 출처**로 만든다(§5.4 MUST).
 ///
@@ -3951,14 +3929,8 @@ fn movedVisualRow(self: *AppSession, term: *Term, focus: usize, goal: *editor_se
     return dest_line.start + map.offsetOf(map.ctx, dest_text, dest.start_col +| within);
 }
 
-/// 행 경계 offset 을 **어느 행의 것으로 읽을지**(§4 이음매).
-const SeamSide = enum {
-    /// **뒤 행 머리**로 읽는다 — `⌘←` 가 "이 행의 첫 글자가 어디냐"를 물을 때. `movedVisualRow` 의
-    /// `assoc = 1`·`paintCarets` 의 열 거르기와 같은 쪽이다.
-    next_row,
-    /// **앞 행 끝**으로 읽는다 — `⌘→` 가 "이미 이 행 끝이냐"를 물을 때.
-    prev_row,
-};
+/// 행 경계 offset 을 **어느 행의 것으로 읽을지**(§4 이음매) — L2 `cursor_ops.SeamSide`.
+const SeamSide = cursor_ops.SeamSide;
 
 /// caret 이 든 **시각 행**의 원본 byte 범위. 랩이 꺼졌거나 확실히 알 수 없으면 `null`.
 ///
@@ -4047,7 +4019,7 @@ fn docLineOfVisibleRow(term: *const Term, visible_row: u32) ?u32 {
     return n - 1;
 }
 
-/// 한 커서를 옮긴 결과 offset. **선택을 어떻게 다룰지는 호출자가 정한다**(Shift 여부).
+/// 한 커서를 옮긴 결과 offset — 판정은 L2 `cursor_ops.movedOffset`. 여기서는 화면·구문 트리 질의(`MotionQuery`)를 붙인다.
 fn movedOffset(
     self: *AppSession,
     term: *Term,
@@ -4056,114 +4028,42 @@ fn movedOffset(
     how: Motion,
     goal: *editor_selection.Goal,
 ) usize {
-    const content = doc.file.content;
-    const lines = doc.file.lines;
-    const focus = @min(sel.focus, content.len);
-    const line_idx = lines.lineAt(focus);
-    const line = lines.line(line_idx) orelse return focus;
-    var pcm = productColumnMap(term);
-    const map = pcm.map();
-
-    return switch (how) {
-        // **가로 이동은 목표 열을 버린다**(§3.2) — 남기면 다음 세로 이동이 편집 전 열로 튄다.
-        .char_left => blk: {
-            goal.* = .none;
-            break :blk editor_motion.prevCharBoundary(content, focus);
-        },
-        .char_right => blk: {
-            goal.* = .none;
-            break :blk editor_motion.nextCharBoundary(content, focus);
-        },
-        .word_left => blk: {
-            goal.* = .none;
-            break :blk editor_motion.wordLeft(content, focus);
-        },
-        .word_right => blk: {
-            goal.* = .none;
-            break :blk editor_motion.wordRight(content, focus);
-        },
-        .line_start => blk: {
-            goal.* = .none;
-            break :blk editor_motion.lineStartSmart(content, line, focus);
-        },
-        // **`^A` 는 토글이 없다** — `line_start` 와 일부러 갈린다(VS Code 가 `CursorHome` 과
-        // `CursorLineStart` 를 다른 명령으로 둔 그 가름이다).
-        .hard_line_start => blk: {
-            goal.* = .none;
-            break :blk editor_motion.lineStart(line);
-        },
-        // **랩이 켜졌으면 행이 먼저다**(§3.2). 세로 이동(§4.1g)과 클릭이 이미 행을 보는데 가로 끝
-        // 이동만 줄을 보던 어긋남을 닫는다. 행에서 멈추기만 하면 줄 머리로 갈 길이 없어지므로
-        // **한 번 더 누르면 넓어진다** — 단계는 `motion.zig` 의 `lineStartScope` 가 소유한다.
-        .row_then_line_start => blk: {
-            goal.* = .none;
-            if (visualRowSpan(self, term, focus, .next_row)) |row| {
-                if (editor_motion.lineStartScope(content, line, focus, row) == .row)
-                    break :blk editor_motion.rowStartSmart(content, line, row);
-            }
-            break :blk editor_motion.lineStartSmart(content, line, focus);
-        },
-        .row_then_line_end => blk: {
-            if (visualRowSpan(self, term, focus, .prev_row)) |row| {
-                if (editor_motion.lineEndScope(line, focus, row) == .row) {
-                    goal.* = .none;
-                    break :blk editor_motion.rowEnd(line, row);
-                }
-            }
-            // **줄 끝에 가도 목표를 「끝」으로 안 세운다**(VS Code `CursorEnd` 의 `sticky: false`).
-            // 세우면 다음 ↓ 가 길이가 다른 줄에서도 계속 끝을 따라가 **원래 열로 못 돌아온다**.
-            goal.* = .none;
-            break :blk editor_motion.lineEnd(line);
-        },
-        // **짝이 없으면 제자리다**(§3.9c) — 「없다」와 「여기다」는 다른 답이고, 없는데 옮기면
-        // 사용자가 자기 자리를 잃는다.
-        .bracket_match => blk: {
-            goal.* = .none;
-            // **선택의 앞쪽 끝에서 판정하고 커서로 접는다**(§3.9c — VS Code `selection.getStartPosition()`: [1,3] 과 [3,1] 이 같은 데로 간다).
-            // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
-            const from = @min(sel.start(), content.len);
-            break :blk brackets_client.jumpTarget(self.allocator, term, content, from) orelse from;
-        },
-        .line_end => blk: {
-            // **목표를 안 세운다** — 다음 세로 이동이 `goalAt` 으로 **그 자리의 열**을 잡는다.
-            // VS Code 의 `CursorLineEnd`(`^E`)도 `leftoverVisibleColumns` 를 0 으로 둔다.
-            goal.* = .none;
-            break :blk editor_motion.lineEnd(line);
-        },
-        .doc_start => blk: {
-            goal.* = .none;
-            break :blk 0;
-        },
-        .doc_end => blk: {
-            goal.* = .none;
-            break :blk content.len;
-        },
-        .line_up, .line_down, .page_up, .page_down => blk: {
-            // **세로 이동은 목표 열을 유지한다.** 없으면 지금 자리에서 세운다.
-            if (goal.* == .none) goal.* = editor_motion.goalAt(content, line, focus, map);
-            // **랩이 켜졌으면 시각 행이 먼저다**(§4.1g). 논리 줄로만 움직이면 ↓ 한 번이 화면에서
-            // 서너 행을 건너뛴다 — 사용자가 누른 것과 화면이 안 맞는다. 스냅숏 밖으로 나가는
-            // 이동은 `null`이라 아래 논리 줄 경로로 떨어지고, caret 노출이 스크롤을 따라오게 하므로
-            // 다음 눌림에는 다시 시각 축으로 돈다.
-            if (how == .line_up or how == .line_down) {
-                if (movedVisualRow(self, term, focus, goal, how == .line_down)) |v| break :blk v;
-            }
-            const step: usize = switch (how) {
-                .line_up, .line_down => 1,
-                // 페이지는 **보이는 행 수**만큼이다. 화면이 아직 안 굳었으면(첫 프레임) 1로 떨어진다 —
-                // 0으로 두면 PageDown이 아무 일도 안 해 사용자가 키가 죽은 줄 안다.
-                else => pageRows(term),
-            };
-            const down = (how == .line_down or how == .page_down);
-            const target = if (down)
-                @min(line_idx + step, lines.lineCount() -| 1)
-            else
-                line_idx -| step;
-            const dest = lines.line(target) orelse break :blk focus;
-            break :blk editor_motion.offsetForGoal(content, dest, goal.*, map);
-        },
-    };
+    const q: MotionQuery = .{ .self = self, .term = term, .pcm = productColumnMap(term) };
+    return cursor_ops.movedOffset(doc.file.content, doc.file.lines, sel, how, goal, q.oracle());
 }
+
+/// L2 `cursor_ops.Oracle` 의 **제품 답** — 랩된 시각 행은 렌더 스냅숏(L3 `VisualRow`)에서, 괄호 짝은 구문 트리에서, 열은 화면과
+/// 같은 출처(§5.4)에서 읽는다. 판정은 L2 가 하고, 이 셋은 「화면이 지금 무엇을 그렸나」라서 L4 에 남는다(이동 단계 4).
+const MotionQuery = struct {
+    self: *AppSession,
+    term: *Term,
+    pcm: ProductColumnMap,
+
+    fn rowSpan(ctx: *const anyopaque, focus: usize, seam: SeamSide) ?editor_motion.VisualRow {
+        const q: *const MotionQuery = @ptrCast(@alignCast(ctx));
+        return visualRowSpan(q.self, q.term, focus, seam);
+    }
+    fn visualMove(ctx: *const anyopaque, focus: usize, goal: *editor_selection.Goal, down: bool) ?usize {
+        const q: *const MotionQuery = @ptrCast(@alignCast(ctx));
+        return movedVisualRow(q.self, q.term, focus, goal, down);
+    }
+    // 강조(§5.1b)와 **같은 출처**다 — 트리가 있으면 트리(문자열·주석 속 괄호가 빠진다), 없으면 글자 훑기.
+    fn bracketTarget(ctx: *const anyopaque, from: usize) ?usize {
+        const q: *const MotionQuery = @ptrCast(@alignCast(ctx));
+        const doc = q.term.rt.editorDocument().opened orelse return null;
+        return brackets_client.jumpTarget(q.self.allocator, q.term, doc.file.content, from);
+    }
+    fn oracle(q: *const MotionQuery) cursor_ops.Oracle {
+        return .{
+            .ctx = q,
+            .map = q.pcm.map(),
+            .page_rows = pageRows(q.term),
+            .rowSpan = rowSpan,
+            .visualMove = visualMove,
+            .bracketTarget = bracketTarget,
+        };
+    }
+};
 
 /// **커서를 옮긴다**(§3.2). `extend`면 anchor를 남겨 선택이 늘어난다(Shift).
 ///
@@ -4410,33 +4310,9 @@ pub fn moveCarets(self: *AppSession, term: *Term, how: Motion, extend: bool) boo
     defer if (jumps) |j| self.allocator.free(j);
     if (how == .bracket_match) jumps = bracketJumps(self, term, doc, primary) catch null;
 
-    var moved_any = false;
-    var next_primary = primary;
-    {
-        var goal = primary.goal;
-        const off = if (jumps) |j| jumpOrStart(doc, primary, j[0], &goal) else movedOffset(self, term, doc, primary, how, &goal);
-        next_primary = if (extend)
-            editor_selection.Selection.fromAnchorRange(primary.anchorLo(), primary.anchorHi(), off, primary.kind)
-        else
-            editor_selection.Selection.at(off);
-        next_primary.goal = goal;
-        if (off != primary.focus or (!extend and !primary.isEmpty())) moved_any = true;
-    }
-
-    // 나머지 커서도 같은 단위로 옮긴다.
-    for (term.rt.editor_extra_selections, 0..) |*extra, ei| {
-        var goal = extra.goal;
-        const off = if (jumps) |j| jumpOrStart(doc, extra.*, j[ei + 1], &goal) else movedOffset(self, term, doc, extra.*, how, &goal);
-        const next = if (extend)
-            editor_selection.Selection.fromAnchorRange(extra.anchorLo(), extra.anchorHi(), off, extra.kind)
-        else
-            editor_selection.Selection.at(off);
-        if (off != extra.focus or (!extend and !extra.isEmpty())) moved_any = true;
-        extra.* = next;
-        extra.goal = goal;
-    }
-
-    if (!moved_any) return false;
+    // **어디로 갈지는 L2 `cursor_ops.moveAll` 이 정한다** — 커서 전부를 같은 단위로, 나머지는 제자리에서(할당 없음).
+    const q: MotionQuery = .{ .self = self, .term = term, .pcm = productColumnMap(term) };
+    const next_primary = cursor_ops.moveAll(doc.file.content, doc.file.lines, primary, term.rt.editor_extra_selections, how, extend, jumps, q.oracle()) orelse return false;
 
     term.rt.editor_selection = next_primary;
     // **옮긴 뒤 겹치면 합친다**(§3.2 — *「편집·이동으로 두 selection 이 겹치면 하나로 합친다.
@@ -4468,12 +4344,6 @@ fn bracketJumps(self: *AppSession, term: *Term, doc: Opened, primary: editor_sel
     return out;
 }
 
-/// 도착이 없으면 **앞쪽 끝으로 접힌다**(VS Code 가 `position` = 선택 시작을 돌려준다). 가로 이동이라 목표 열을 버린다.
-fn jumpOrStart(doc: Opened, sel: editor_selection.Selection, target: ?usize, goal: *editor_selection.Goal) usize {
-    goal.* = .none;
-    return target orelse @min(sel.start(), doc.file.content.len);
-}
-
 /// 위/아래로 커서 추가 — 각 커서마다 한 줄 위(아래)에 **사본**을 더한다
 /// ([문서 모델](../../../../../docs/native-editor-document-model.md) §3.2b).
 ///
@@ -4491,61 +4361,18 @@ pub fn addCursorVertically(self: *AppSession, term: *Term, down: bool) bool {
     const doc = term.rt.editorDocument().opened orelse return false;
     const primary = term.rt.editor_selection orelse return false; // 씨앗이 없다(§3.2b)
 
-    var buf: std.ArrayList(editor_selection.Selection) = .empty;
-    defer buf.deinit(self.allocator);
-    buf.append(self.allocator, primary) catch return false;
-    buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return false;
+    var current: std.ArrayList(editor_selection.Selection) = .empty;
+    defer current.deinit(self.allocator);
+    current.append(self.allocator, primary) catch return false;
+    current.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return false;
 
-    // **사본은 원본 뒤에 모아 넣는다.** 원본을 먼저 다 훑고 나서 더해야 방금 만든 사본을 다시
-    // 훑어 한 번에 여러 줄이 늘어나지 않는다(VSCode `addCursorUp` 도 원본 배열만 훑는다).
-    const original_len = buf.items.len;
-    var added: usize = 0;
-    var i: usize = 0;
-    while (i < original_len) : (i += 1) {
-        if (original_len + added >= editor_selection.max_cursors) break; // 상한(§3.2)
-        const sel = buf.items[i];
-        const how: Motion = if (down) .line_down else .line_up;
-        // **anchor 와 focus 를 각자의 목표 열로 옮긴다** — 하나만 옮기면 선택이 찌그러진다.
-        // `movedOffset` 을 그대로 쓴다: 랩이 켜졌으면 시각 행, 아니면 논리 줄로 떨어지고 문서 끝은
-        // clamp 한다 — 세로 이동이 이미 정한 그 규칙을 두 번째로 적으면 둘이 갈린다.
-        var focus_goal = sel.goal;
-        const new_focus = movedOffset(self, term, doc, sel, how, &focus_goal);
-        const anchor_lo = sel.anchorLo();
-        var anchor_goal = sel.anchor_goal;
-        const new_anchor = if (anchor_lo == sel.focus)
-            new_focus // caret 하나 — 두 번 재지 않는다
-        else blk: {
-            // anchor 를 focus 자리에 놓은 사본으로 물어본다 — 그 함수는 `focus` 만 옮긴다.
-            var probe = editor_selection.Selection.at(anchor_lo);
-            probe.goal = sel.anchor_goal;
-            const moved = movedOffset(self, term, doc, probe, how, &anchor_goal);
-            break :blk moved;
-        };
-        // **제자리면 안 더한다** — 문서 끝에서 clamp 된 것이고, 더해도 병합이 지운다.
-        if (new_focus == sel.focus and new_anchor == anchor_lo) continue;
-        // `kind` 는 승계하지 않는다(§3.2b) — 한 줄 위에 같은 낱말이 있을 이유가 없다.
-        var copy = editor_selection.Selection.fromPoints(new_anchor, new_focus);
-        copy.goal = focus_goal; // 옮기며 세운 목표 열을 사본이 이어받는다(§3.2)
-        copy.anchor_goal = anchor_goal;
-        buf.append(self.allocator, copy) catch break;
-        added += 1;
-    }
-    if (added == 0) return false;
-
-    // **primary 는 새로 생긴 쪽으로 간다**(§3.2) — 위로 더하면 맨 위, 아래로 더하면 맨 아래.
-    // 그래야 `revealPrimaryCaret` 이 방금 늘어난 곳을 따라간다.
-    var primary_idx: usize = original_len;
-    var k: usize = original_len + 1;
-    while (k < buf.items.len) : (k += 1) {
-        const better = if (down)
-            buf.items[k].focus > buf.items[primary_idx].focus
-        else
-            buf.items[k].focus < buf.items[primary_idx].focus;
-        if (better) primary_idx = k;
-    }
-
-    const merged = editor_selection.mergeOverlapping(buf.items, primary_idx);
-    const items = buf.items[0..merged.len];
+    // **무엇을 더할지는 L2 `cursor_ops.planAddVertically` 가 정한다**(§3.2b — 선택 모양 유지, 못 가면 안 더함, primary 는 새로 생긴
+    // 쪽, 겹치면 합침). 세로 이동과 같은 `movedOffset` 을 쓴다.
+    const q: MotionQuery = .{ .self = self, .term = term, .pcm = productColumnMap(term) };
+    var planned = (cursor_ops.planAddVertically(self.allocator, doc.file.content, doc.file.lines, current.items, down, q.oracle()) catch return false) orelse return false;
+    defer planned.deinit(self.allocator);
+    const items = planned.items;
+    const merged: struct { primary: usize } = .{ .primary = planned.primary };
     const extras = self.allocator.alloc(editor_selection.Selection, items.len - 1) catch return false;
     var w: usize = 0;
     for (items, 0..) |sel, idx| {
@@ -4585,29 +4412,14 @@ pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
     buf.append(self.allocator, seed) catch return false;
     buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return false;
 
-    // **`nextOccurrence`는 문서 순서를 요구한다**(이미 고른 자리를 이분 탐색으로 거른다).
-    // 커서는 추가 순서로 들고 있으므로 여기서 한 번 맞춘다 — primary가 어디로 가든 상관없다.
-    // 씨앗은 값으로 이미 떠 뒀다.
-    std.mem.sort(editor_selection.Selection, buf.items, {}, struct {
-        fn lessThan(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
-            return a.start() < b.start();
-        }
-    }.lessThan);
-    const seed_index = for (buf.items, 0..) |s, i| {
-        if (s.start() == seed.start() and s.end() == seed.end()) break i;
-    } else 0;
-
-    const found = maru.session.editor.occurrence.nextOccurrence(
-        doc.file.content,
-        buf.items,
-        seed_index,
-    ) orelse return false;
+    // **어디를 고를지는 L2 `cursor_ops.planNextOccurrence` 가 정한다**(문서 순서로 훑고, 잡은 단위가 `kind` 다).
+    const next = (cursor_ops.planNextOccurrence(self.allocator, doc.file.content, buf.items) catch return false) orelse return false;
 
     // **caret에서 시작하면 커서가 늘지 않는다 — 낱말이 그 caret을 대신한다.**
     // 옛 판은 caret을 나머지로 내려 커서가 둘이 됐는데, 그 중 하나는 길이 0이라 **화면에 안 보이는데
     // 타이핑은 거기로도 간다.** VSCode도 첫 `⌘D`는 커서를 늘리지 않고 낱말을 잡을 뿐이다.
     // (`occurrence`가 caret 씨앗에 낱말을 답하는 것이 그 첫 걸음이고 — OCC1 — 여기가 그 짝이다.)
-    if (seed.len() > 0) {
+    if (next.demote_seed) {
         // 옛 primary를 나머지로 내리고 새 자리를 primary로 세운다.
         const grown = self.allocator.alloc(
             editor_selection.Selection,
@@ -4619,20 +4431,7 @@ pub fn addNextOccurrence(self: *AppSession, term: *Term) bool {
         term.rt.editor_extra_selections = grown;
     }
 
-    // **`kind`는 잡은 단위를 말한다 — 짐작으로 `.word`를 붙이지 않는다.** 그 값은 이어지는 드래그가
-    // 무엇으로 늘어날지를 정하므로(§3.2 anchor가 점이 아니라 범위인 이유), 낱말이 아닌 조각을
-    // `.word`라 적으면 드래그가 없는 단위로 늘어난다. `occurrence`가 낱말 경계를 봤는지 여부와
-    // 같은 판정을 여기서도 쓴다.
-    const found_is_word = blk: {
-        const w = editor_selection.wordRangeAt(doc.file.content, found.start);
-        break :blk w.lo == found.start and w.hi == found.end;
-    };
-    term.rt.editor_selection = editor_selection.Selection.fromAnchorRange(
-        found.start,
-        found.end,
-        found.end,
-        if (found_is_word) .word else .match,
-    );
+    term.rt.editor_selection = next.primary;
     breakUndoGroup(term); // 커서가 늘었다 — 다음 타이핑은 새 묶음이다(§3.3)
     self.metal_dirty = true;
     return true;
@@ -6529,25 +6328,7 @@ fn pointOnEditorScrollbar(term: *Term, x_px: f64, y_px: f64) bool {
 /// `(row, byte)`이고 방향을 `RowPos.lessThan`으로, 줄 끝을 `text.len`으로 잰다. 억지로 합치려면
 /// 좌표를 추상화해야 하는데 그 값이 이 조각에 없다. 그래서 **단일 편집기 하나만** 뗀다.
 fn widenedFocus(file: *const editor.edit_doc.EditableFile, sel: editor_selection.Selection, off: usize) usize {
-    return switch (sel.kind) {
-        // `.match`(일치로 잡은 범위)는 잡은 단위가 없으므로 글자 단위로 는다 — `.simple`과 같다.
-        .simple, .match => off,
-        .word => blk: {
-            const w = editor_selection.wordRangeAt(file.content, off);
-            // 앞으로 끌면 그 단어의 **끝**, 뒤로 끌면 **시작**까지 삼킨다.
-            break :blk if (off >= sel.anchorHi()) w.hi else w.lo;
-        },
-        .line => blk: {
-            // **`@min` 은 지금 도달하지 않는다**(2026-09-06 변이 검사가 등가임을 보였다):
-            // `lineAt` 이 `offset <= byteLen()` 을 **단언**하고, `off` 는 `hitTestBody` 가 낸 것이라
-            // 늘 그 안이다(`byteAtPoint` 의 모든 반환 경로가 `<= text.len`). 그럼에도 두는 이유는
-            // 이 줄이 **옮겨 온 기존 방어**이기 때문이다 — 이 조각은 자리만 바꿨지 그 판단을
-            // 뒤집지 않는다. 빼려면 `hitTestBody` 의 상한을 계약으로 못 박는 별도 조각이 필요하다.
-            const li = file.lines.lineAt(@min(off, file.lines.byteLen()));
-            const line = file.lines.line(li) orelse break :blk off;
-            break :blk if (off >= sel.anchorHi()) line.contentEnd() else line.start;
-        },
-    };
+    return cursor_ops.widenedFocus(file.content, file.lines, sel, off);
 }
 
 pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px: f64, y_px: f64, mods: i32) bool {
@@ -6567,22 +6348,10 @@ pub fn selectWordOrLineAt(self: *AppSession, pane: *Pane, whole_line: bool, x_px
     const off = hitTestBodyWithSession(self, term, x_px, y_px) orelse return false;
     const doc = term.rt.editorDocument().opened orelse return false;
 
-    const range: struct { lo: usize, hi: usize, kind: editor_selection.AnchorKind } = if (whole_line) blk: {
-        // **줄 전체.** 개행은 뺀다 — 붙여넣기가 줄바꿈을 하나 더 만들지 않게 한다(트리플클릭이
-        // 문단 사이를 벌리는 것은 사용자가 기대하는 바가 아니다).
-        const li = doc.file.lines.lineAt(@min(off, doc.file.lines.byteLen()));
-        const line = doc.file.lines.line(li) orelse return false;
-        break :blk .{ .lo = line.start, .hi = line.contentEnd(), .kind = .line };
-    } else blk: {
-        const w = editor_selection.wordRangeAt(doc.file.content, off);
-        break :blk .{ .lo = w.lo, .hi = w.hi, .kind = .word };
-    };
-
-    // **빈 범위면 `.simple`이어야 한다.** `fromAnchorRange`가 `(kind == .simple) == (lo == hi)`를
-    // 단언하는데, **빈 줄**을 트리플클릭하면 `line.start == contentEnd()`라 그 단언이 깨진다
-    // (안전 빌드는 panic, ReleaseFast는 확장 단위를 모르는 `.line`이 남는다 — 그 assert가 막으려던
-    // 바로 그 상태다). 빈 줄에 caret을 두는 것이 옳다: 고를 것이 없다.
-    const kind = if (range.lo == range.hi) editor_selection.AnchorKind.simple else range.kind;
+    // **무엇을 고를지는 L2 `cursor_ops.wordOrLineRange`** — 낱말, 또는 줄 전체(개행은 뺀다). 빈 범위면 `.simple`(빈 줄
+    // 트리플클릭이 `fromAnchorRange` 의 단언을 깨지 않게).
+    const range = cursor_ops.wordOrLineRange(doc.file.content, doc.file.lines, off, whole_line) orelse return false;
+    const kind = range.kind;
 
     // **`⌥`를 끼면 나머지 커서를 안 지운다**(§3.2d) — §3.2c 가 `⌥클릭`에 대해 정한 것과 같은
     // 근거다: 그것이 **더하는·넓히는** 제스처이기 때문이다.
@@ -6725,59 +6494,12 @@ fn toggleCursorAt(self: *AppSession, term: *Term, off: usize) void {
     };
     buf.append(self.allocator, primary) catch return;
     buf.appendSlice(self.allocator, term.rt.editor_extra_selections) catch return;
-    // primary 를 **값으로** 기억한다 — 정렬이 자리를 옮긴다(`snapshotSelections` 와 같은 방법).
-    const primary_value = primary;
 
-    // **품는 커서를 찾는다.** 배열 순서로 먼저 걸린 하나만 본다.
-    // **문서 순서로 세운 뒤 찾는다.** `buf` 는 primary 를 맨 앞에 넣어 모았으므로 배열 순서가 문서
-    // 순서와 다르다 — 그대로 「앞의 것」을 고르면 **화면에서 뒤에 있는 커서**가 primary 가 된다
-    // (`OPT2` 가 그것을 잡았다: 0·5·10 에서 10 을 지웠는데 0 이 아니라 5 가 이어야 한다).
-    std.mem.sort(editor_selection.Selection, buf.items, {}, struct {
-        fn lt(_: void, a: editor_selection.Selection, b: editor_selection.Selection) bool {
-            return a.start() < b.start();
-        }
-    }.lt);
-
-    var hit: ?usize = null;
-    for (buf.items, 0..) |sel, i| {
-        if (off >= sel.start() and off <= sel.end()) {
-            hit = i;
-            break;
-        }
-    }
-
-    if (hit) |i| {
-        // **커서가 하나뿐이면 아무 일도 안 한다**(§3.2c) — 지우면 caret 이 사라지고, 더하면 같은
-        // 자리에 둘이 생겨 한 프레임 동안 중복이 존재한다(상한도 하나를 더 센다).
-        //
-        // **이 줄을 지워도 판정자가 안 잡는다 — 동등 변이다**(적대적 검증 2026-09-06, 두 회차를
-        // 살아남았고 픽스처를 두 번 고쳐도 그대로였다). 지우면 `buf` 가 비고, 그러면
-        // `writeCursors` 가 `items.len == 0` 에서 **그냥 돌아가** 두 필드를 손대지 않는다 — 결과가
-        // 같다. 그 가드는 **다른 이유로** 필요하다(빈 배열에 `alloc(len - 1)` 은 underflow 다).
-        //
-        // 그럼에도 이 줄을 두는 이유는 **의도**다: "마지막 커서는 안 지운다"가 여기서 읽혀야
-        // 하고, `writeCursors` 의 가드가 언젠가 바뀌면 그때 이 자리가 답을 낸다.
-        if (buf.items.len == 1) return;
-        const primary_at = for (buf.items, 0..) |sel, k| {
-            if (std.meta.eql(sel, primary_value)) break k;
-        } else 0;
-        _ = buf.orderedRemove(i);
-        // **primary 를 지웠으면 남은 것 중 앞의 것이 잇는다**(§3.2c) — 제품은 primary 를 단수 필드에
-        // 들므로 그것을 지우면 필드가 빈다. 배열에서 원소를 빼는 것과 다르다.
-        //
-        // **다른 커서를 지웠으면 primary 는 그대로다**(결함 15). 예전에는 지운 자리의 앞 커서를 무조건 세워,
-        // 다른 커서를 지우기만 해도 primary 가 옮겨 갔다 — 빠진 자리만큼 인덱스만 당긴다.
-        const new_primary: usize = if (i == primary_at)
-            (if (i == 0) 0 else i - 1)
-        else if (primary_at > i) primary_at - 1 else primary_at;
-        writeCursors(self, term, buf.items, new_primary);
-    } else {
-        if (buf.items.len >= editor_selection.max_cursors) return; // 상한(§3.2) — 조용히 멈춘다
-        buf.append(self.allocator, editor_selection.Selection.at(off)) catch return;
-        // primary 는 **새로 찍은 커서**다(§3.2).
-        const merged = editor_selection.mergeOverlapping(buf.items, buf.items.len - 1);
-        writeCursors(self, term, buf.items[0..merged.len], merged.primary);
-    }
+    // **무엇을 지우고 더할지, 어느 것이 primary 인지는 L2 `cursor_ops.planToggle`**(§3.2c — 품는 범위로 찾기, 마지막 커서는 안
+    // 지움, 상한, primary 승계는 primary 를 지웠을 때만 — 결함 15).
+    var planned = (cursor_ops.planToggle(self.allocator, buf.items, off) catch return) orelse return;
+    defer planned.deinit(self.allocator);
+    writeCursors(self, term, planned.items, planned.primary);
     breakUndoGroup(term); // 커서가 편집 아닌 이유로 움직였다(§3.3)
     revealPrimaryCaret(self, term);
     self.metal_dirty = true;
@@ -9592,16 +9314,10 @@ pub fn indentLines(self: *AppSession, term: *Term, outdent: bool) bool {
 /// 두 뜻이 된다.
 pub fn selectionSpansLines(term: *Term) bool {
     const doc = term.rt.editorDocument().opened orelse return false;
-    const lines = doc.file.lines;
     const content = doc.file.content;
-    var iter = selections(term);
-    while (iter.next()) |sel| {
-        const s_off = @min(sel.start(), content.len);
-        const e_off = @min(sel.end(), content.len);
-        if (e_off <= s_off) continue;
-        if (lines.lineAt(s_off) != lines.lineAt(e_off)) return true;
-    }
-    return false;
+    const lines = doc.file.lines;
+    if (term.rt.editor_selection) |p| if (cursor_ops.spansLines(content, lines, &.{p})) return true;
+    return cursor_ops.spansLines(content, lines, term.rt.editor_extra_selections);
 }
 
 /// Enter — 개행을 넣고 **이전 줄의 들여쓰기를 잇는다**(§3.9a). 판정·caret 은 L2 `line_ops.planNewline`.

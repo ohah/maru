@@ -201,7 +201,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 220), abi_version);
+    try std.testing.expectEqual(@as(u32, 221), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -473,7 +473,7 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
     // 진입은 종료 게이트의 **else 안**에서만 — 앞에 두면 기본 설정의 보호 hold 에서도 상태가 서 종료 재시도가 사라진다.
     try std.testing.expect(wc_gate < wc_else and wc_else < wc_enter and wc_enter < wc_teardown);
 
-    const close_or_quit = try swiftFunctionBody(source, "    private func closeWindowOrQuit(_ surface: TerminalSurface, faulted: Bool = false, checkpointRemovalAlreadyCovered: Bool = false) {");
+    const close_or_quit = try swiftFunctionBody(source, "    private func closeWindowOrQuit(_ surface: TerminalSurface, faulted: Bool = false, checkpointRemovalAlreadyCovered: Bool = false, sessionEnded: Bool = false) {");
     const cq_gate = std.mem.indexOf(u8, close_or_quit, "if windows.count <= 1 && (faulted || quitsAfterLastWindowClosed(surface)) {") orelse return error.MissingGate;
     const cq_else = std.mem.lastIndexOf(u8, close_or_quit, "} else {\n") orelse return error.MissingElse;
     const cq_enter = std.mem.indexOf(u8, close_or_quit, "if windows.count <= 1 { enterOpenWithoutWindows() }") orelse return error.MissingFlag;
@@ -484,10 +484,10 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "openWithoutWindows = true"));
     // tick 은 fault 여부를 셸 종료 갈래에 넘긴다.
     try std.testing.expect(std.mem.indexOf(u8, source, "toClose.append((surface, status != Self.statusSessionEnded))") != null);
-    try std.testing.expect(std.mem.indexOf(u8, source, "closeWindowOrQuit(entry.surface, faulted: entry.faulted)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, source, "closeWindowOrQuit(entry.surface, faulted: entry.faulted, sessionEnded: !entry.faulted)") != null);
 
     // quick 셸 종료로 일반 창이 0 개가 돼도 앱 유지면 끝내지 않는다.
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "if windows.isEmpty && !openWithoutWindows && !blockGlobalTerminationForProtectedFilePanels() {"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "if windows.isEmpty && !openWithoutWindows && keepAliveSurfaces.isEmpty && !blockGlobalTerminationForProtectedFilePanels() {"));
 
     // 창 0 개 tick 도 끝까지 돈다 — 컨트롤 플레인 drain 앞에서 체크포인트를 (이번 tick 에 아무도 안 돌렸으면) 돌린다.
     const tick = try swiftFunctionBody(source, "    private func tickAppSession() {");
@@ -509,9 +509,9 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
 
     // 창 0 개 ⌘Q: 숨은 quick 에 모달을 띄우지 않고 마지막 저장을 거쳐 끝낸다. 저장 실패가 종료를 막지 않는다.
     const should_terminate = try swiftFunctionBody(source, "    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {");
-    const zq = std.mem.indexOf(u8, should_terminate, "if openWithoutWindows, windows.isEmpty, quick?.window?.isVisible != true, protectedFilePanelSurface() == nil {") orelse return error.MissingZeroWindowQuit;
+    const zq = std.mem.indexOf(u8, should_terminate, "if keepAliveTarget == nil, openWithoutWindows, windows.isEmpty, quick?.window?.isVisible != true, protected == nil {") orelse return error.MissingZeroWindowQuit;
     const zq_final = std.mem.indexOf(u8, should_terminate, "beginFinalWorkspaceCheckpoint(surface: nil, deferredAppKitQuit: true)") orelse return error.MissingZeroWindowQuit;
-    const zq_target = std.mem.indexOf(u8, should_terminate, "guard let target = protectedFilePanelSurface() ?? activeSurface ?? quick else") orelse return error.MissingQuitTarget;
+    const zq_target = std.mem.indexOf(u8, should_terminate, "guard let target = protected ?? keepAliveTarget ?? activeSurface ?? quick else") orelse return error.MissingQuitTarget;
     try std.testing.expect(zq < zq_final and zq_final < zq_target);
     const final_begin = try swiftFunctionBody(source, "    private func beginFinalWorkspaceCheckpoint(surface: TerminalSurface?, deferredAppKitQuit: Bool) {");
     try std.testing.expect(std.mem.indexOf(u8, final_begin, "guard workspaceCheckpointArmed, !windows.isEmpty || openWithoutWindows else {") != null);
@@ -594,7 +594,13 @@ test "LW1 마지막 창 정책: 앱을 끝내는 갈래 셋이 설정을 보고,
         const destroy = std.mem.indexOf(u8, body, "maru_macos_app_session_destroy(session)") orelse return error.MissingDestroy;
         try std.testing.expect(rel < destroy); // 세션을 부수기 **전에** 답한다
     }
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, source, "releaseQuitConfirmHeld(by: surface)"));
+    // 셋째: 받는 중이라 마지막 창을 숨겨 쥘 때(W10e — 그 세션은 tick 이 없어 결정이 오지 않는다, `tools/test-macos-quit-host.py` ②).
+    const keep_close = try swiftFunctionBody(source, "    private func closeWindowOrQuit(_ surface: TerminalSurface, faulted: Bool = false, checkpointRemovalAlreadyCovered: Bool = false, sessionEnded: Bool = false) {");
+    const keep_branch = std.mem.indexOf(u8, keep_close, "if sessionEnded, maru_macos_downloads_keep_alive() > 0 {") orelse return error.MissingKeepAlive;
+    const keep_release = std.mem.indexOf(u8, keep_close, "releaseQuitConfirmHeld(by: surface)") orelse return error.MissingQuitRelease;
+    const keep_hide = std.mem.indexOf(u8, keep_close, "surface.window?.orderOut(nil)") orelse return error.MissingKeepAlive;
+    try std.testing.expect(keep_branch < keep_release and keep_release < keep_hide);
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, source, "releaseQuitConfirmHeld(by: surface)"));
     // 모달을 연 자리만 그 창을 기억하고(weak — 닫힌 창을 붙잡지 않게), 모달 없는 보류 셋은 비운다.
     try std.testing.expect(std.mem.indexOf(u8, source, "private weak var quitConfirmSurface: TerminalSurface?") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "quitConfirmSurface = target"));

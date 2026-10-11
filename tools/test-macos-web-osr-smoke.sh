@@ -2025,6 +2025,35 @@ check(bool(done) and keep and done[0] > keep[0] and elapsed < 55 and rc == 0, f'
 sys.exit(0 if ok else 1)
 PY
 
+# ── 창 0 개로 남는 앱(LW1)에서 받던 다운로드(main 기준 rebase 적대 리뷰) ─────────────────────────────────────────────
+# 같은 대본으로 받기를 시작하고 웹 탭을 닫은 뒤 마지막 셸을 끝낸다. 이 설정이면 앱은 창 0 개로 Dock 에 남는다(LW1 — 창을 숨기는 W10e 가
+# 아니다). 창의 tick 이 없으니 sidecar 를 누가 돌리는가 — 다 받아 `~/Downloads` 에 놓여야 한다(시험 시간 60 초 안, 셸을 끝내고 30 초 뒤 본다).
+printf 'ui.language = ko\nwindow.quit-after-last-window-closed = false\n' > "$root/lw1.conf"
+: > "$root/requests.log"
+rm -rf "$root/home" && mkdir -p "$root/home"
+env HOME="$root/home" CFFIXED_USER_HOME="$root/home" MARU_SESSION_HOST_ROOT="$root/session-host" \
+    MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="http://127.0.0.1:$port/dlw-app" \
+    MARU_MACOS_APP_SMOKE_MS=60000 MARU_APP_SUMMARY_PATH="$root/lw1.summary" MARU_WEB_OSR_TEST_CONTEXT_MENU=cancel \
+    MARU_WEB_OSR_TEST_INPUT="$root/dlkeep.txt" MARU_CONFIG="$root/lw1.conf" "$app" > "$root/app-lw1.log" 2>&1 &
+lw1_pid=$!
+sleep 14
+lw1_killed=0
+for spid in $(pgrep -f "Maru app shell" 2>/dev/null); do
+    sppid=$(ps -o ppid= -p "$spid" 2>/dev/null | tr -d ' ')
+    case "$(ps -o command= -p "$sppid" 2>/dev/null)" in *"$root"*) kill -TERM "$spid" 2>/dev/null && lw1_killed=1 ;; esac
+done
+[ "$lw1_killed" = 1 ] || fail "the test shell to end was not found (LW1 case)"
+sleep 30
+lw1_alive=0; kill -0 "$lw1_pid" 2>/dev/null && lw1_alive=1
+lw1_path="$root/home/Downloads/big.zip"
+lw1_size=-1; [ -f "$lw1_path" ] && lw1_size=$(stat -f %z "$lw1_path")
+echo "LW1: app alive $lw1_alive · big.zip $lw1_size bytes (want $((30 * 104858)))"
+grep -ao 'app: last window closed[^(]*' "$root/app-lw1.log" | head -3
+wait "$lw1_pid" || true
+[ "$lw1_alive" = 1 ] || fail "LW1: the app did not stay with zero windows"
+[ "$lw1_size" = $((30 * 104858)) ] || fail "LW1: the download did not finish while the app stayed with zero windows ($lw1_size bytes)"
+echo "PASS LW1: the download finished while the app stayed with zero windows"
+
 # ── 끝난 셸의 정리: 마지막 셸이 끝난 뒤 앱이 끝날 때 session host 가 죽지 않는다 ──────────────────────────────
 # 셸이 끝나면 tick 이 원격 runtime 에 finish 를 보낸다. 앱이 끝날 때 정리(`AppSession.close`)가 그 runtime 에 closeAndDetach 를
 # 또 보내 session host 의 close 정산이 `proof_loss(7)` 로 앱을 끝냈다(exit 86). 두 길로 본다: (가) 웹 탭을 닫아 셸만 남긴 뒤 그

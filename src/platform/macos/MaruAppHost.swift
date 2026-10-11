@@ -5777,7 +5777,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 quitConfirmPending = true
                 quitConfirmSurface = nil // 모달 없는 보류 — 마지막 저장이 답한다
             }
-            holdOsrDialogsForExit() // W6k: 이미 정해진 종료에 합류한다
+            // W6k: 페이지 대화상자는 치우기만 한다 — 이 종료는 마지막 저장이 취소하면 그만둘 수 있다(hold 는 되돌릴 수 없어, 그만두면
+            // Chromium 탭의 대화상자가 다시는 뜨지 않았다 — main 기준 rebase 적대 리뷰). 기다리는 동안은 `quitConfirmPending` 이 보류한다.
+            dismissOsrSheetsForQuit()
             return .terminateLater
         }
         if bypassQuitConfirm {
@@ -5805,7 +5807,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 끝나 받던 것이 말없이 취소됐다. 창 0 개로 Dock 에 남은 앱의 「확인 없는 종료」보다 먼저 본다.
         // (숨긴 창은 셸이 끝난 세션이라 거기서 묻지 않는다.)
         var keepAliveTarget: TerminalSurface?
-        if protected == nil, !keepAliveSurfaces.isEmpty, windows.isEmpty, maru_macos_downloads_keep_alive() > 0 {
+        // 창 0 개로 Dock 에 남은 앱(LW1)도 같다 — 닫은 창의 탭이 받던 것이 이어 받는 중이면 아래 「확인 없는 종료」 대신 묻는다.
+        if protected == nil, !keepAliveSurfaces.isEmpty || openWithoutWindows, windows.isEmpty, maru_macos_downloads_keep_alive() > 0 {
             keepAliveTarget = createTerminalWindow(applyingWorkspace: nil)
         }
         // 창 0 개로 Dock 에 남은 앱의 ⌘Q — 물을 창이 없으니 확인 없이 끝내되, 마지막 저장(「창 0 개」)은 거친다.
@@ -6006,10 +6009,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
     }
 
-    /// W10e: 창을 숨긴 채 다운로드만 받는 중에 Dock 을 누르면 새 창을 연다(그 밖의 경우는 AppKit 기본 그대로).
+    /// Dock 클릭 — 창 0 개로 남은 앱이거나(LW1), 창을 숨긴 채 다운로드만 받는 중이면(W10e) 새 창을 연다(그 밖의 경우는 AppKit 기본 그대로).
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         _ = sender
-        // 숨겨 둔 창은 셸이 끝난 세션이다(`windows` 밖) — 일반 창이 없으면 새 창을 연다.
+        _ = flag // quick 패널이 보여도 true 로 온다 — 일반 창 수(windows)로 판단한다.
+        // 창 0 개로 Dock 에 남은 앱(window.quit-after-last-window-closed = false)의 Dock 클릭은 빈 새 창을 연다
+        // (macOS 관례, 사용자 결정 2026-10-04). 창이 있으면 AppKit 기본 처리(최소화 창 복원 등)에 맡긴다.
+        if openWindowIfNoneOpen() { return false }
+        // W10e: 다운로드를 받느라 남은 앱 — 숨겨 둔 창은 셸이 끝난 세션이다(`windows` 밖). 일반 창이 없으면 새 창을 연다.
         if !keepAliveSurfaces.isEmpty, windows.isEmpty {
             _ = createTerminalWindow(applyingWorkspace: nil)
             return false
@@ -6024,15 +6031,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // 명시적 창 닫기(빨간 버튼 등)에 따른 종료는 windowWillClose가 NSApp.terminate로 담당한다(단일 출처). config
         // `window.quit-after-last-window-closed = false` 면 그 경로도 종료하지 않는다(quitsAfterLastWindowClosed).
         return false
-    }
-
-    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        _ = sender
-        _ = flag // quick 패널이 보여도 true 로 온다 — 일반 창 수(windows)로 판단한다.
-        // 창 0 개로 Dock 에 남은 앱(window.quit-after-last-window-closed = false)의 Dock 클릭은 빈 새 창을 연다
-        // (macOS 관례, 사용자 결정 2026-10-04). 창이 있으면 AppKit 기본 처리(최소화 창 복원 등)에 맡긴다.
-        if openWindowIfNoneOpen() { return false }
-        return true
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -7442,6 +7440,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 정리하지 않고 `windows` 에서 빼 쥐어 둔다(`keepAliveSurfaces`). 다 받으면 `tickAppSession` 이 원래 종료 길로 끝낸다. 이미
             // 쥐고 있어도(그 사이 연 새 창의 셸도 끝났다) 같이 쥔다 — 곧바로 끝내면 받던 것이 확인 없이 취소됐다(리뷰 2 회차).
             if sessionEnded, maru_macos_downloads_keep_alive() > 0 {
+                // 이 창이 든 종료 확인이 떠 있었다면 거둔다 — 숨긴 세션은 tick 이 돌지 않아 그 결정이 영영 오지 않는다(teardown 이 하던 일,
+                // main 기준 rebase 적대 리뷰).
+                releaseQuitConfirmHeld(by: surface)
                 fputs("app: last window closed — downloads keep the app alive in the background (\(maru_macos_downloads_keep_alive()) moving)\n", stderr)
                 keepAliveSurfaces.append(surface)
                 keepAliveZeroSince = nil
@@ -7710,6 +7711,12 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         // W10e: 마지막 셸이 끝났지만 받는 중이라 남았다 — 숨긴 창의 세션은 돌리지 않으니 sidecar 를 여기서 돌리고 목록 창도 고친다.
         // 다 받으면(3 초 이어서 0) 일반 창도 보이는 quick 도 없을 때 원래 종료 길로 끝낸다(사용자가 새 창이나 quick 을 쓰는 중이면 그대로 둔다 —
         // 숨긴 세션은 앱이 끝날 때 정리한다).
+        // 창 0 개로 Dock 에 남은 앱(LW1)은 세션 tick 이 없다 — 닫은 창의 탭이 받던 다운로드(맡겨 둔 브라우저)가 멈추지 않게 sidecar 를
+        // 여기서 돌린다(main 기준 rebase 적대 리뷰 — 그동안 파이프가 차 sidecar 의 CEF 스레드가 멈출 수 있었다). 여러 번 불러도 값싸다.
+        if keepAliveSurfaces.isEmpty, windows.isEmpty, openWithoutWindows {
+            maru_macos_web_osr_detached_pump()
+            drainDownloads()
+        }
         if !keepAliveSurfaces.isEmpty {
             maru_macos_web_osr_detached_pump()
             drainDownloads()

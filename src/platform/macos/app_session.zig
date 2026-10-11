@@ -73965,8 +73965,9 @@ test "finish 가 event_pending 이던 Term 은 끝이 다시 오지 않아도 �
     defer app.term_runtime_backend.testing.clear();
     const pane = pane_ops.activePane(session);
     const finishing = pane.terms.items[0];
-    // 원격 pump 는 끝을 한 번만 알린다 — 그 tick 의 finish 가 event_pending 이었다.
+    // 원격 pump 는 끝을 한 번만 알린다 — 그 tick 의 finish 가 event_pending 이었다(그 갈래는 보낸 종류와 들고 갈 끝을 함께 적는다).
     finishing.rt.finish_ended = .{ .exited = .{ .unknown = 0 } };
+    finishing.rt.pending_termination = finishing.rt.finish_ended;
     app.term_runtime_backend.testing.clear();
     app.term_runtime_backend.testing.armCloseSequence(&.{.complete});
     _ = try session.tick();

@@ -2357,6 +2357,11 @@ pub fn build(b: *std.Build) void {
 
     const test_macos_app_host_abi_step = b.step("test-macos-app-host-abi", "Run macOS Swift/Zig app host ABI contract tests");
     test_macos_app_host_abi_step.dependOn(&ime_ack_host.step);
+    // 종료·창 닫기·Dock 다시 열기의 실제 Swift 본문(창 0 개 앱 LW1 × 다운로드 유지 W10c/W10e × 대화상자 보류 W6k — 두 갈래를 손으로 합친 자리).
+    const quit_host = b.addSystemCommand(&.{ "python3", "tools/test-macos-quit-host.py" });
+    quit_host.setCwd(b.path("."));
+    quit_host.has_side_effects = true;
+    test_macos_app_host_abi_step.dependOn(&quit_host.step);
     // fresh-process 행도 서로 병렬 실행하면 daemon fixture와 wall-clock 성능 오라클이 다시 경쟁한다.
     // aggregate 뒤 실제 TTY, 제품 socket 두 행, teardown, CoreText cache 행 순으로 직렬화한다.
     run_macos_external_tty_fresh_tests.step.dependOn(&run_macos_app_host_abi_shards.step);

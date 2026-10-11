@@ -1146,6 +1146,27 @@ test "a sidecar whose channel ended but which is still alive is killed and reape
     try std.testing.expectEqual(@as(c_int, @intFromEnum(std.c.E.CHILD)), std.c._errno().*);
 }
 
+test "a sidecar whose writes stalled (pending cap or out of memory) is treated as crashed — later commands are not dropped silently" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count()); // 크래시 경로가 실제 sidecar 를 띄우지 않게
+    const saved_failures = .{ failures, failure_head };
+    defer {
+        failures = saved_failures[0];
+        failure_head = saved_failures[1];
+        latched = null;
+        state = .off;
+    }
+    process = try lsp_process.spawn(gpa, "/bin/sleep", &.{"30"}, "/", null);
+    const pid = process.?.pid;
+    state = .running;
+    process.?.stalled = true;
+    pump(gpa, 1_000);
+    try std.testing.expect(process == null);
+    var status: c_int = 0;
+    try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(pid, &status, std.c.W.NOHANG));
+}
+
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
@@ -1867,6 +1888,9 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
         return;
     };
     _ = lsp_process.flush(p, gpa) catch {};
+    // 밀린 쓰기가 상한(`lsp_process.max_pending_bytes`)을 넘었거나 메모리가 모자랐다 — 그 뒤 쓰기는 모두 거절된다(`stalled`). sidecar 가
+    // 읽지 않는다는 뜻이라 죽은 것으로 다뤄 다시 띄운다(main 기준 rebase 적대 리뷰 — 그대로 두면 명령이 조용히 버려졌다).
+    if (p.stalled) return crashed(gpa, now_ms);
     // 청한 파일 내용을 받는 동안은 한 번에 더 읽는다 — sidecar 는 다 보낼 때까지 CEF 스레드(모든 Chromium 탭)에서 쓰기를 기다린다.
     // tick 마다 256 KiB 면 32 MiB 에 2 초 넘게 탭이 멈췄다(W6d③ 적대 검증 2 차).
     // DevTools 결과(W9-0b — 16 MiB 까지)도 같다.

@@ -689,7 +689,7 @@ fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs 
             r.exact = true;
             i += 1;
         } else if (matchOpt(a, "--surface")) {
-            r.surface = parseU64(try optValue(rest, &i, "--surface")) catch return error.InvalidSurface;
+            try assignSurface(&r.surface, try optValue(rest, &i, "--surface"));
         } else if (matchOpt(a, "--selector")) {
             r.selector = try optValue(rest, &i, "--selector");
         } else if (matchOpt(a, "--ref")) {
@@ -1979,7 +1979,7 @@ test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 
     {
         var buf: [512]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://a/\",\"title\":\"A\",\"panel_kind\":\"browser\",\"engine\":\"webkit\",\"methods\":[\"navigate\"]},{\"id\":4,\"url\":\"https://b/\",\"title\":\"B\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"methods\":[]}]}}", .list, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"url\":\"https://a/\",\"title\":\"A\",\"panel_kind\":\"browser\",\"engine\":\"webkit\",\"methods\":[\"navigate\"]},{\"id\":4,\"url\":\"https://b/\",\"title\":\"B\",\"panel_kind\":\"browser\",\"engine\":\"chromium\",\"methods\":[]}]}}", .list, &w);
         const out = w.buffered();
         try testing.expect(std.mem.indexOf(u8, out, "surface 3  browser  https://a/  \"A\"  engine=webkit\n") != null);
         try testing.expect(std.mem.indexOf(u8, out, "surface 4  browser  https://b/  \"B\"  engine=chromium (browser commands not supported yet)\n") != null);
@@ -1988,17 +1988,17 @@ test "renderResponse(list): surface별 한 줄(id·panel_kind·url·title), 빈 
     {
         var buf: [512]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":5,\"url\":\"\",\"title\":\"p.html\",\"panel_kind\":\"browser\",\"engine\":\"webkit\",\"controllable\":false,\"methods\":[]}]}}", .list, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":5,\"url\":\"\",\"title\":\"p.html\",\"panel_kind\":\"browser\",\"engine\":\"webkit\",\"controllable\":false,\"methods\":[]}]}}", .list, &w);
         try testing.expectEqualStrings("surface 5  browser    \"p.html\"  engine=webkit (not a browser tab — browser commands do not apply)\n", w.buffered());
     }
     // `-32008` 은 data 의 엔진(과 브라우저 탭 아님)을 붙인다.
     {
         var buf: [256]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported by this browser engine\",\"data\":{\"engine\":\"chromium\"}}}", .navigate, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported by this browser engine\",\"data\":{\"engine\":\"chromium\"}}}", .navigate, &w);
         try testing.expectEqualStrings("error: Not supported by this browser engine (-32008) [engine=chromium]\n", w.buffered());
         w = std.Io.Writer.fixed(&buf);
-        try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported by this browser engine\",\"data\":{\"engine\":\"webkit\",\"controllable\":false}}}", .navigate, &w);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported by this browser engine\",\"data\":{\"engine\":\"webkit\",\"controllable\":false}}}", .navigate, &w);
         try testing.expectEqualStrings("error: Not supported by this browser engine (-32008) [not a browser tab] [engine=webkit]\n", w.buffered());
     }
     // 빈 목록.
@@ -2247,28 +2247,28 @@ test "parse·buildRequestBytes: --by-text·--by-label(W9b②-2) — exact·nth �
 test "renderResponse: 숨은 일치만이면 not ok 에 hint 한 줄" {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":false,\"hint\":\"1 matching element(s) are hidden\"}}", .ok, &w);
+    try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":false,\"hint\":\"1 matching element(s) are hidden\"}}", .ok, &w));
     try testing.expectEqualStrings("error: not ok\nhint: 1 matching element(s) are hidden\n", w.buffered());
 }
 
 test "renderResponse: -32008 의 param 과 오류 메시지는 표시 안전하게 찍는다" {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported\\u001b[2J\",\"data\":{\"engine\":\"webkit\",\"param\":\"locator\"}}}", .ok, &w);
+    try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32008,\"message\":\"Not supported\\u001b[2J\",\"data\":{\"engine\":\"webkit\",\"param\":\"locator\"}}}", .ok, &w));
     try testing.expectEqualStrings("error: Not supported[2J (-32008) [engine=webkit] [param=locator]\n", w.buffered());
 }
 
 test "renderResponse: matched 의 페이지 글은 제어·양방향 제어 글자를 빼고 찍는다" {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Sa\\u001b[2Jve\\u009b\\u202edoc\"}}}", .ok, &w);
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Sa\\u001b[2Jve\\u009b\\u202edoc\"}}}", .ok, &w));
     try testing.expectEqualStrings("ok\nmatched n11 \"Sa[2Jvedoc\"\n", w.buffered());
 }
 
 test "renderResponse: 로케이터로 찾은 ok 는 matched 줄을 덧붙인다(첫 줄은 그대로 ok)" {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
-    try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}}", .ok, &w);
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}}", .ok, &w));
     try testing.expectEqualStrings("ok\nmatched n11 \"Save\"\n", w.buffered());
 }
 
@@ -2547,6 +2547,15 @@ test "browser target is selected once across every verb and option spelling" {
         &.{"snapshot"},
         &.{"console"},
         &.{"screenshot"},
+        // W8–W9 동사·로케이터도 같은 규칙이다(main 기준 rebase 에서 act 파서만 덮어쓰던 것을 이 목록이 잡았다).
+        &.{"back"},
+        &.{"forward"},
+        &.{"reload"},
+        &.{ "hover", "--selector", "#h" },
+        &.{ "press", "--key", "Enter" },
+        &.{ "click", "--role", "button", "--name", "Save" },
+        &.{ "click", "--by-text", "Save" },
+        &.{ "type", "--by-label", "Name", "--text", "t" },
     };
     const firsts = [_][]const []const u8{ &.{ "--surface", "1" }, &.{"--surface=1"} };
     const seconds = [_][]const []const u8{ &.{ "--surface", "1" }, &.{ "--surface", "2" }, &.{"--surface=1"}, &.{"--surface=2"} };

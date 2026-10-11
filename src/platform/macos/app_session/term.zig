@@ -368,8 +368,8 @@ pub fn closeTermAt(self: *AppSession, tab_index: usize, pane: *Pane, term_index:
     // job 이 붙든 runtime 이면 여기서 닫기를 보내지 않는다 — 「아직」으로 돌아가면 ✕ 가 무시되고 다시 부를 자리도
     // 없다. 아래 `destroyTerm` 이 backend 에 맡기고 Term 은 지금 사라진다.
     if (hasClosablePty(target) and !reconnectHoldsTermRuntime(target)) {
-        const progress = finishIfRequested(self, target) orelse self.backendFor(target).closeAndDetach(target.rt.handle);
-        if (progress == .event_pending) return;
+        // 셸이 끝나 finish 를 보낸 원격 Term 은 같은 finish(`finish_ended` 주석) — 다른 종류면 runtime 이 proof_loss 로 끝난다.
+        if ((finishIfRequested(self, target) orelse self.backendFor(target).closeAndDetach(target.rt.handle)) == .event_pending) return;
         target.rt.close_complete = true;
     }
     cancelPointerGestureForTermRemoval(self, tab_index, pane, term_index);

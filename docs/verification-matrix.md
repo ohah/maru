@@ -4229,3 +4229,10 @@ IME·항목 예약과 일반 열기 상한 및 caller/registry 필수 준비 할
 저장 실패·source/Plan 변조·늦은 충돌과 caller/registry 준비 실패를 검사한다. 최종 연결 준비 allocation에서
 실제 파일을 수정해 commit 직전 재검증도 확인한다. 이 API는 제품 전체 바꾸기 UI에서 아직 호출하지 않는다.
 혼합 worker 수명·제품 입력/캡처·모든 파일시스템·OS IME는 후속 게이트다.
+
+### 혼합 바꾸기 worker API
+
+`test-editor-project-replace-mixed-worker`의 RPMW1~7은 실제 혼합 worker→coordinator 저장,
+마지막 disk hash 충돌, 총 입력 예산, 취소, 모든 준비 할당 실패, caller 조기 종료,
+중복 source index·경로 불일치, 선택 밖 물리 점유를 검사한다.
+제품 전체 검색 UI·물리 IME 및 thread spawn OS 실패 주입은 별도 검증 경계다.

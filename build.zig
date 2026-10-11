@@ -5521,6 +5521,12 @@ pub fn build(b: *std.Build) void {
     run_batch_worker.addArg("--maru-expect-tests=7");
     b.step("test-editor-project-replace-batch-worker", "Run immutable batch worker ownership, cancellation and late completion judges").dependOn(&run_batch_worker.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_worker.step);
+    const mixed_worker_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPMW"} });
+    const run_mixed_worker = b.addRunArtifact(mixed_worker_tests);
+    run_mixed_worker.setCwd(b.path("."));
+    run_mixed_worker.addArg("--maru-expect-tests=11");
+    b.step("test-editor-project-replace-mixed-worker", "Run mixed snapshot/disk preparation ownership and cancellation judges").dependOn(&run_mixed_worker.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_mixed_worker.step);
     const batch_disk_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBD"} });
     const run_batch_disk = b.addRunArtifact(batch_disk_tests);
     run_batch_disk.addArg("--maru-expect-tests=6");

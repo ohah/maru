@@ -118,6 +118,7 @@ pub const project_replace_batch_coordinator = @import("search/batch/coordinator.
 pub const project_replace_batch_load = @import("search/batch/load.zig");
 pub const project_replace_batch_disk = @import("search/batch/disk.zig");
 pub const project_replace_batch_worker = @import("search/batch/worker.zig");
+pub const project_replace_mixed_worker = @import("search/batch/mixed_worker.zig");
 pub const linked_history = @import("history.zig");
 pub const workspace_edit_client = @import("workspace_edit.zig");
 
@@ -62275,4 +62276,137 @@ test "RPBC10 마지막 Undo 연결 준비 중 발생한 실제 수정도 commit 
     try testing.expectEqual(@as(usize, 1), input.source.rt.editorDocument().history.redo_len);
     try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
     try batchApplyDisk(&fx, "inactive-b.txt", "late change");
+}
+
+const MixedWorkerOptions = struct { last_index: usize = 1, occupied: []const maru.session.file_tree.Identity = &.{} };
+fn mixedWorkerStart(a: std.mem.Allocator, input: *CoordinatorFixture, total: usize) !*project_replace_mixed_worker.Job {
+    return mixedWorkerStartWith(a, input, total, .{});
+}
+fn mixedWorkerStartWith(a: std.mem.Allocator, input: *CoordinatorFixture, total: usize, opts: MixedWorkerOptions) !*project_replace_mixed_worker.Job {
+    var choices: [3]editor.search.batch.Selection = undefined;
+    for (input.batch.spec.targets.items, &choices) |target, *choice| choice.* = .{ .absolute = target.absolute, .root_index = target.root_index, .source = target.source, .ranges = target.ranges.items };
+    var spec = try editor.search.batch.Specification.capture(a, input.batch.spec.identity, .complete, input.batch.spec.needle, input.batch.spec.replacement, input.batch.spec.options, &choices);
+    var owns = true;
+    defer if (owns) spec.deinit(a);
+    const models = try a.alloc(project_replace_mixed_worker.Model, 1);
+    defer if (owns) {
+        models[0].snapshot.deinit();
+        a.free(models);
+    };
+    models[0] = .{ .index = 0, .source = choices[0].source, .snapshot = input.source.rt.editorDocument().opened.?.file.snapshot() };
+    const disks = [_]project_replace_mixed_worker.Disk{ .{ .index = 2, .target = input.closed[1].target }, .{ .index = opts.last_index, .target = input.closed[0].target } };
+    const job = try project_replace_mixed_worker.Job.start(a, &spec, models, &disks, opts.occupied, input.batch.ticket, total, 1000);
+    owns = false;
+    return job;
+}
+fn mixedWorkerWait(job: *project_replace_mixed_worker.Job) void {
+    while (!job.done.load(.acquire)) std.Thread.yield() catch {};
+}
+fn mixedWorkerDrain() void {
+    while (project_replace_mixed_worker.outstandingWorkers() != 0) std.Thread.yield() catch {};
+}
+test "RPMW1 혼합 worker 결과는 원래 source 순서와 Ticket으로 실제 coordinator에 적용된다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    const job = try mixedWorkerStart(testing.allocator, &input, 1000);
+    mixedWorkerWait(job);
+    var ready = (try job.take()).?;
+    job.deinit();
+    mixedWorkerDrain();
+    defer ready.deinit(testing.allocator);
+    try testing.expect(std.meta.eql(input.batch.ticket, ready.ticket));
+    try testing.expectEqual(@as(usize, 2), ready.closed[0].index);
+    try testing.expectEqualStrings("foo model", ready.prepared.items.items[0].plan.before);
+    try testing.expectEqualStrings("bar disk", ready.prepared.items.items[2].plan.after);
+    var result = try project_replace_batch_coordinator.apply(fx.session, &ready.specification, &ready.prepared, ready.ticket, ready.closed);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), result.summary.saved);
+}
+test "RPMW2 마지막 disk hash 충돌은 앞 Plan과 Read를 게시하지 않는다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    input.closed[0].target.hash[0] ^= 1;
+    const job = try mixedWorkerStart(testing.allocator, &input, 1000);
+    defer {
+        job.deinit();
+        mixedWorkerDrain();
+    }
+    mixedWorkerWait(job);
+    try testing.expectError(error.FileChanged, job.take());
+    try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+}
+test "RPMW3 혼합 총량과 완료 후 취소도 미리보기로 승격하지 않는다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    const total_bytes = input.source.rt.editorDocument().opened.?.file.content.len + input.closed[0].file.bytes.len + input.closed[1].file.bytes.len;
+    const limited = try mixedWorkerStart(testing.allocator, &input, total_bytes - 1);
+    mixedWorkerWait(limited);
+    try testing.expectError(error.TooLarge, limited.take());
+    limited.deinit();
+    mixedWorkerDrain();
+    const cancelled = try mixedWorkerStart(testing.allocator, &input, 1000);
+    mixedWorkerWait(cancelled);
+    cancelled.cancel();
+    try testing.expectError(error.Cancelled, cancelled.take());
+    cancelled.deinit();
+    mixedWorkerDrain();
+}
+fn mixedAllocationTrial(a: std.mem.Allocator, input: *CoordinatorFixture) !void {
+    const job = try mixedWorkerStart(a, input, 1000);
+    defer {
+        job.deinit();
+        mixedWorkerDrain();
+    }
+    mixedWorkerWait(job);
+    var ready = (try job.take()).?;
+    defer ready.deinit(a);
+    try testing.expectEqual(@as(usize, 3), ready.prepared.effective);
+}
+test "RPMW4 혼합 worker 준비의 모든 할당 실패는 snapshot Read 경로를 회수한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    try testing.checkAllAllocationFailures(testing.allocator, mixedAllocationTrial, .{&input});
+}
+test "RPMW5 caller가 즉시 종료해도 detached worker의 마지막 소유권을 회수한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    const job = try mixedWorkerStart(testing.allocator, &input, 1000);
+    job.deinit();
+    project_replace_mixed_worker.quietForTest(testing.io);
+    try testing.expectEqual(@as(usize, 0), project_replace_mixed_worker.outstandingWorkers());
+    try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+}
+
+test "RPMW6 중복 source index와 disk 경로 불일치는 caller 소유권을 보존한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    try testing.expectError(error.StaleTargets, mixedWorkerStartWith(testing.allocator, &input, 1000, .{ .last_index = 2 }));
+    input.closed[0].target.path = "wrong-file";
+    try testing.expectError(error.StaleTargets, mixedWorkerStart(testing.allocator, &input, 1000));
+    try testing.expectEqualStrings("foo", input.batch.spec.needle);
+}
+test "RPMW7 선택 밖 열린 물리 파일 점유는 worker 미리보기를 거절한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    const job = try mixedWorkerStartWith(testing.allocator, &input, 1000, .{ .occupied = &.{input.closed[0].file.proof.identity} });
+    defer {
+        job.deinit();
+        mixedWorkerDrain();
+    }
+    mixedWorkerWait(job);
+    try testing.expectError(error.PathOccupied, job.take());
 }

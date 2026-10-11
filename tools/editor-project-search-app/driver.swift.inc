@@ -192,6 +192,12 @@ extension MaruAppHostController {
         case 29:
             guard editorProjectSearchClick(0) else { finish(false); return }
         case 31:
+            // 적용 클릭 앞에 게시한 main queue 작업이 언제 실행되는지 직접 잰다.
+            let queuedAt = ProcessInfo.processInfo.systemUptime
+            DispatchQueue.main.async {
+                let elapsed = UInt64((ProcessInfo.processInfo.systemUptime - queuedAt) * 1_000_000_000)
+                FileHandle.standardError.write(Data("BATCH_MAIN_QUEUE elapsed_ns=\(elapsed)\n".utf8))
+            }
             if ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] == "1" { editorProjectSearchAction(31) }
             guard editorProjectSearchClick(0) else { finish(false); return }
         case 30, 32, 33: editorProjectSearchAction(stage)

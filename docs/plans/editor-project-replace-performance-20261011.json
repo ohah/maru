@@ -1,0 +1,694 @@
+{
+  "scope": "ReleaseFast product AppKit apply/save/linked Undo; main queue delay is not a frame interval",
+  "binary_sha256": "c06372b4e3a38ee7ce51a4cc2c8acd9e95881078e6db1ea19109d039a2f86391",
+  "samples": [
+    {
+      "case": "small-4-files",
+      "repetition": 1,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-4-files-1/manifest.json",
+      "plan": {
+        "files": 4,
+        "matches": 23,
+        "closed": 2,
+        "input_bytes": 131430,
+        "output_bytes": 131453,
+        "plan_rows": 10135
+      },
+      "apply_ms": 4.022583,
+      "save_ms": 2.164084,
+      "main_queue_ms": 4.728291,
+      "prepare_ms": 105.547875,
+      "capture_ms": 0.134583,
+      "whole_app_peak_rss_mib": 128.734375
+    },
+    {
+      "case": "small-34-files",
+      "repetition": 1,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-34-files-1/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 132300,
+        "output_bytes": 132353,
+        "plan_rows": 10225
+      },
+      "apply_ms": 21.535958,
+      "save_ms": 16.652708,
+      "main_queue_ms": 22.249875,
+      "prepare_ms": 112.486875,
+      "capture_ms": 0.757333,
+      "whole_app_peak_rss_mib": 131.265625
+    },
+    {
+      "case": "small-66-files",
+      "repetition": 1,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-66-files-1/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 133228,
+        "output_bytes": 133313,
+        "plan_rows": 10321
+      },
+      "apply_ms": 43.256958,
+      "save_ms": 34.467209,
+      "main_queue_ms": 43.99275,
+      "prepare_ms": 114.613542,
+      "capture_ms": 1.647042,
+      "whole_app_peak_rss_mib": 130.15625
+    },
+    {
+      "case": "large-34-files",
+      "repetition": 1,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-34-files-1/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": 54.231583,
+      "save_ms": 25.548667,
+      "main_queue_ms": 54.995708,
+      "prepare_ms": 138.836833,
+      "capture_ms": 0.765166,
+      "whole_app_peak_rss_mib": 198.390625
+    },
+    {
+      "case": "large-66-files",
+      "repetition": 1,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-66-files-1/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 18685147,
+        "output_bytes": 18685232,
+        "plan_rows": 167050
+      },
+      "apply_ms": 83.249083,
+      "save_ms": 45.367958,
+      "main_queue_ms": 84.001458,
+      "prepare_ms": 136.566834,
+      "capture_ms": 1.485709,
+      "whole_app_peak_rss_mib": 238.84375
+    },
+    {
+      "case": "large-34-files-delay-10ms",
+      "repetition": 1,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-34-files-delay-10ms-1/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": 687.211542,
+      "save_ms": 606.097792,
+      "main_queue_ms": 687.964041,
+      "prepare_ms": 135.403291,
+      "capture_ms": 0.851875,
+      "whole_app_peak_rss_mib": 206.75
+    },
+    {
+      "case": "small-4-files",
+      "repetition": 2,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-4-files-2/manifest.json",
+      "plan": {
+        "files": 4,
+        "matches": 23,
+        "closed": 2,
+        "input_bytes": 131430,
+        "output_bytes": 131453,
+        "plan_rows": 10135
+      },
+      "apply_ms": 4.015375,
+      "save_ms": 2.201333,
+      "main_queue_ms": 4.702791,
+      "prepare_ms": 103.933833,
+      "capture_ms": 0.194666,
+      "whole_app_peak_rss_mib": 126.140625
+    },
+    {
+      "case": "small-34-files",
+      "repetition": 2,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-34-files-2/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 132300,
+        "output_bytes": 132353,
+        "plan_rows": 10225
+      },
+      "apply_ms": 61.518709,
+      "save_ms": 56.0215,
+      "main_queue_ms": 62.287583,
+      "prepare_ms": 85.988708,
+      "capture_ms": 0.718875,
+      "whole_app_peak_rss_mib": 126.0625
+    },
+    {
+      "case": "small-66-files",
+      "repetition": 2,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-66-files-2/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 133228,
+        "output_bytes": 133313,
+        "plan_rows": 10321
+      },
+      "apply_ms": 43.764958,
+      "save_ms": 34.300584,
+      "main_queue_ms": 44.476249,
+      "prepare_ms": 102.718334,
+      "capture_ms": 1.682875,
+      "whole_app_peak_rss_mib": 133.671875
+    },
+    {
+      "case": "large-34-files",
+      "repetition": 2,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-34-files-2/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": 49.058042,
+      "save_ms": 23.632459,
+      "main_queue_ms": 49.766291,
+      "prepare_ms": 99.158625,
+      "capture_ms": 0.755416,
+      "whole_app_peak_rss_mib": 201.34375
+    },
+    {
+      "case": "large-66-files",
+      "repetition": 2,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-66-files-2/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 18685147,
+        "output_bytes": 18685232,
+        "plan_rows": 167050
+      },
+      "apply_ms": 80.949292,
+      "save_ms": 45.498125,
+      "main_queue_ms": 81.675125,
+      "prepare_ms": 120.917917,
+      "capture_ms": 1.577208,
+      "whole_app_peak_rss_mib": 237.75
+    },
+    {
+      "case": "large-34-files-delay-10ms",
+      "repetition": 2,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-34-files-delay-10ms-2/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": 546.153333,
+      "save_ms": 520.443584,
+      "main_queue_ms": 547.018624,
+      "prepare_ms": 102.798292,
+      "capture_ms": 0.901042,
+      "whole_app_peak_rss_mib": 195.609375
+    },
+    {
+      "case": "small-4-files",
+      "repetition": 3,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-4-files-3/manifest.json",
+      "plan": {
+        "files": 4,
+        "matches": 23,
+        "closed": 2,
+        "input_bytes": 131430,
+        "output_bytes": 131453,
+        "plan_rows": 10135
+      },
+      "apply_ms": 3.945292,
+      "save_ms": 2.194833,
+      "main_queue_ms": 4.607791,
+      "prepare_ms": 119.059459,
+      "capture_ms": 0.130459,
+      "whole_app_peak_rss_mib": 131.203125
+    },
+    {
+      "case": "small-34-files",
+      "repetition": 3,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-34-files-3/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 132300,
+        "output_bytes": 132353,
+        "plan_rows": 10225
+      },
+      "apply_ms": 81.386625,
+      "save_ms": 48.093291,
+      "main_queue_ms": 82.068541,
+      "prepare_ms": 97.840375,
+      "capture_ms": 0.706083,
+      "whole_app_peak_rss_mib": 129.765625
+    },
+    {
+      "case": "small-66-files",
+      "repetition": 3,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/small-66-files-3/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 133228,
+        "output_bytes": 133313,
+        "plan_rows": 10321
+      },
+      "apply_ms": 44.421209,
+      "save_ms": 34.942334,
+      "main_queue_ms": 45.168583,
+      "prepare_ms": 118.796375,
+      "capture_ms": 1.504833,
+      "whole_app_peak_rss_mib": 127.59375
+    },
+    {
+      "case": "large-34-files",
+      "repetition": 3,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-34-files-3/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": 47.135334,
+      "save_ms": 22.151167,
+      "main_queue_ms": 47.824791,
+      "prepare_ms": 118.959125,
+      "capture_ms": 0.721583,
+      "whole_app_peak_rss_mib": 195.765625
+    },
+    {
+      "case": "large-66-files",
+      "repetition": 3,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-66-files-3/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 18685147,
+        "output_bytes": 18685232,
+        "plan_rows": 167050
+      },
+      "apply_ms": 85.877792,
+      "save_ms": 47.030041,
+      "main_queue_ms": 86.601,
+      "prepare_ms": 123.594583,
+      "capture_ms": 1.579333,
+      "whole_app_peak_rss_mib": 236.734375
+    },
+    {
+      "case": "large-34-files-delay-10ms",
+      "repetition": 3,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/large-34-files-delay-10ms-3/manifest.json",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": 516.009,
+      "save_ms": 490.45375,
+      "main_queue_ms": 516.705875,
+      "prepare_ms": 118.90875,
+      "capture_ms": 0.728584,
+      "whole_app_peak_rss_mib": 193.890625
+    },
+    {
+      "case": "near-limit-66-files",
+      "repetition": 1,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/near-limit-66-files-1/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 64101595,
+        "output_bytes": 64101680,
+        "plan_rows": 167050
+      },
+      "whole_app_peak_rss_mib": 498.90625,
+      "apply_ms": 164.339459,
+      "save_ms": 93.423084,
+      "main_queue_ms": 165.051874,
+      "prepare_ms": 147.194417,
+      "capture_ms": 1.54775
+    },
+    {
+      "case": "near-limit-66-files",
+      "repetition": 2,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/near-limit-66-files-2/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 64101595,
+        "output_bytes": 64101680,
+        "plan_rows": 167050
+      },
+      "whole_app_peak_rss_mib": 468.296875,
+      "apply_ms": 144.846333,
+      "save_ms": 70.21825,
+      "main_queue_ms": 145.671583,
+      "prepare_ms": 147.14025,
+      "capture_ms": 1.493708
+    },
+    {
+      "case": "near-limit-66-files",
+      "repetition": 3,
+      "manifest": "/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/near-limit-66-files-3/manifest.json",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 64101595,
+        "output_bytes": 64101680,
+        "plan_rows": 167050
+      },
+      "whole_app_peak_rss_mib": 468.25,
+      "apply_ms": 137.156875,
+      "save_ms": 66.606167,
+      "main_queue_ms": 137.884666,
+      "prepare_ms": 148.9595,
+      "capture_ms": 1.477292
+    }
+  ],
+  "summary": [
+    {
+      "case": "small-4-files",
+      "plan": {
+        "files": 4,
+        "matches": 23,
+        "closed": 2,
+        "input_bytes": 131430,
+        "output_bytes": 131453,
+        "plan_rows": 10135
+      },
+      "apply_ms": {
+        "median": 4.015375,
+        "min": 3.945292,
+        "max": 4.022583
+      },
+      "save_ms": {
+        "median": 2.194833,
+        "min": 2.164084,
+        "max": 2.201333
+      },
+      "main_queue_ms": {
+        "median": 4.702791,
+        "min": 4.607791,
+        "max": 4.728291
+      },
+      "prepare_ms": {
+        "median": 105.547875,
+        "min": 103.933833,
+        "max": 119.059459
+      },
+      "capture_ms": {
+        "median": 0.134583,
+        "min": 0.130459,
+        "max": 0.194666
+      },
+      "whole_app_peak_rss_mib": {
+        "median": 128.734375,
+        "min": 126.140625,
+        "max": 131.203125
+      }
+    },
+    {
+      "case": "small-34-files",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 132300,
+        "output_bytes": 132353,
+        "plan_rows": 10225
+      },
+      "apply_ms": {
+        "median": 61.518709,
+        "min": 21.535958,
+        "max": 81.386625
+      },
+      "save_ms": {
+        "median": 48.093291,
+        "min": 16.652708,
+        "max": 56.0215
+      },
+      "main_queue_ms": {
+        "median": 62.287583,
+        "min": 22.249875,
+        "max": 82.068541
+      },
+      "prepare_ms": {
+        "median": 97.840375,
+        "min": 85.988708,
+        "max": 112.486875
+      },
+      "capture_ms": {
+        "median": 0.718875,
+        "min": 0.706083,
+        "max": 0.757333
+      },
+      "whole_app_peak_rss_mib": {
+        "median": 129.765625,
+        "min": 126.0625,
+        "max": 131.265625
+      }
+    },
+    {
+      "case": "small-66-files",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 133228,
+        "output_bytes": 133313,
+        "plan_rows": 10321
+      },
+      "apply_ms": {
+        "median": 43.764958,
+        "min": 43.256958,
+        "max": 44.421209
+      },
+      "save_ms": {
+        "median": 34.467209,
+        "min": 34.300584,
+        "max": 34.942334
+      },
+      "main_queue_ms": {
+        "median": 44.476249,
+        "min": 43.99275,
+        "max": 45.168583
+      },
+      "prepare_ms": {
+        "median": 114.613542,
+        "min": 102.718334,
+        "max": 118.796375
+      },
+      "capture_ms": {
+        "median": 1.647042,
+        "min": 1.504833,
+        "max": 1.682875
+      },
+      "whole_app_peak_rss_mib": {
+        "median": 130.15625,
+        "min": 127.59375,
+        "max": 133.671875
+      }
+    },
+    {
+      "case": "large-34-files",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": {
+        "median": 49.058042,
+        "min": 47.135334,
+        "max": 54.231583
+      },
+      "save_ms": {
+        "median": 23.632459,
+        "min": 22.151167,
+        "max": 25.548667
+      },
+      "main_queue_ms": {
+        "median": 49.766291,
+        "min": 47.824791,
+        "max": 54.995708
+      },
+      "prepare_ms": {
+        "median": 118.959125,
+        "min": 99.158625,
+        "max": 138.836833
+      },
+      "capture_ms": {
+        "median": 0.755416,
+        "min": 0.721583,
+        "max": 0.765166
+      },
+      "whole_app_peak_rss_mib": {
+        "median": 198.390625,
+        "min": 195.765625,
+        "max": 201.34375
+      }
+    },
+    {
+      "case": "large-66-files",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 18685147,
+        "output_bytes": 18685232,
+        "plan_rows": 167050
+      },
+      "apply_ms": {
+        "median": 83.249083,
+        "min": 80.949292,
+        "max": 85.877792
+      },
+      "save_ms": {
+        "median": 45.498125,
+        "min": 45.367958,
+        "max": 47.030041
+      },
+      "main_queue_ms": {
+        "median": 84.001458,
+        "min": 81.675125,
+        "max": 86.601
+      },
+      "prepare_ms": {
+        "median": 123.594583,
+        "min": 120.917917,
+        "max": 136.566834
+      },
+      "capture_ms": {
+        "median": 1.577208,
+        "min": 1.485709,
+        "max": 1.579333
+      },
+      "whole_app_peak_rss_mib": {
+        "median": 237.75,
+        "min": 236.734375,
+        "max": 238.84375
+      }
+    },
+    {
+      "case": "large-34-files-delay-10ms",
+      "plan": {
+        "files": 34,
+        "matches": 53,
+        "closed": 2,
+        "input_bytes": 10295515,
+        "output_bytes": 10295568,
+        "plan_rows": 166922
+      },
+      "apply_ms": {
+        "median": 546.153333,
+        "min": 516.009,
+        "max": 687.211542
+      },
+      "save_ms": {
+        "median": 520.443584,
+        "min": 490.45375,
+        "max": 606.097792
+      },
+      "main_queue_ms": {
+        "median": 547.018624,
+        "min": 516.705875,
+        "max": 687.964041
+      },
+      "prepare_ms": {
+        "median": 118.90875,
+        "min": 102.798292,
+        "max": 135.403291
+      },
+      "capture_ms": {
+        "median": 0.851875,
+        "min": 0.728584,
+        "max": 0.901042
+      },
+      "whole_app_peak_rss_mib": {
+        "median": 195.609375,
+        "min": 193.890625,
+        "max": 206.75
+      }
+    },
+    {
+      "case": "near-limit-66-files",
+      "plan": {
+        "files": 66,
+        "matches": 85,
+        "closed": 2,
+        "input_bytes": 64101595,
+        "output_bytes": 64101680,
+        "plan_rows": 167050
+      },
+      "apply_ms": {
+        "median": 144.846333,
+        "min": 137.156875,
+        "max": 164.339459
+      },
+      "save_ms": {
+        "median": 70.21825,
+        "min": 66.606167,
+        "max": 93.423084
+      },
+      "main_queue_ms": {
+        "median": 145.671583,
+        "min": 137.884666,
+        "max": 165.051874
+      },
+      "prepare_ms": {
+        "median": 147.194417,
+        "min": 147.14025,
+        "max": 148.9595
+      },
+      "capture_ms": {
+        "median": 1.493708,
+        "min": 1.477292,
+        "max": 1.54775
+      },
+      "whole_app_peak_rss_mib": {
+        "median": 468.296875,
+        "min": 468.25,
+        "max": 498.90625
+      }
+    }
+  ]
+}

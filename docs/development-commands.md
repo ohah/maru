@@ -1465,3 +1465,7 @@ Metal readback에서 네 파일 저장·연결 Undo·다시 저장 및 오른쪽
 - 프로젝트 바꾸기 선택: `mise exec -- zig build test-editor-project-replace-batch-ui test-editor-project-search-dock`.
   `-Doptimize=ReleaseFast`도 검사한다. `python3 tools/test-editor-replace-batch-ui-adversarial.py --selection`은
   선택 범위·source 포함·빈 대상 제외·선택 개수 변이를 정상/복원 대조군과 비교한다.
+
+- 프로젝트 바꾸기 적용/저장 실측: `python3 tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --count 20 --optimize ReleaseFast --timeout-seconds 180`으로 계측 앱을 만든다.
+  같은 앱으로 `python3 tools/editor-project-search-app/measure.py --app <maru-macos-app> --output <저장소 밖의 새 보존 경로> --repetitions 3`을 실행한다.
+  파일 수·본문 크기·지연 주입·main queue 대기·전체 앱 RSS를 분리한다. [실측 해석과 한계](plans/editor-project-replace-performance.md)를 따른다.

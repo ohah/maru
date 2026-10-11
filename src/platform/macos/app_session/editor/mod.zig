@@ -32088,14 +32088,14 @@ test "EDIT9b 안 겹치는 커서는 이동해도 그대로다 — 병합이 과
     try testing.expect(addNextOccurrence(fx.session, term));
     try testing.expect(addNextOccurrence(fx.session, term));
 
-    // 한 글자 오른쪽 — 셋이 서로 멀리 있으므로 여전히 셋이다.
+    // 오른쪽 — 셋이 서로 멀리 있으므로 여전히 셋이다.
     try testing.expect(moveCarets(fx.session, term, .char_right, false));
     try testing.expectEqual(@as(usize, 2), term.rt.editor_extra_selections.len);
 
-    // 그리고 타이핑이 세 자리에 들어간다. **셋째는 개행 «뒤» 다** — focus 가 `\n`(14)에 있었고
-    // 오른쪽 한 칸이 문서 끝(15)이다. 처음에 `...aa Z\n` 으로 적었다가 이 판정자에 걸렸다.
+    // 그리고 타이핑이 세 자리에 들어간다. **선택이 있으면 → 는 그 끝으로 접는다**(§3.2, 사용자 결정 2026-10-11) —
+    // 셋 다 낱말 끝(2·8·14)에 선다. 예전에는 한 글자를 더 가서 셋째가 개행 뒤에 섰다(`...aa\nZ`).
     try testing.expect(insertText(fx.session, term, "Z"));
-    try testing.expectEqualStrings("aa Zbb aa Zcc aa\nZ", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("aaZ bb aaZ cc aaZ\n", term.rt.editorDocument().opened.?.file.content);
 }
 
 test "EDIT9c 셋 중 둘만 합쳐지면 남은 것과 primary 가 제자리다 — 승계가 틀리면 화면이 엉뚱한 곳을 따라간다 (§3.2)" {
@@ -37121,6 +37121,33 @@ test "MOV2 Shift가 선택을 늘리고, 맨몸 이동은 선택을 접는다 (�
     // 맨몸 이동은 **접는다**.
     try pressKey(&fx, .arrow_right, .{});
     try testing.expect(term.rt.editor_selection.?.isEmpty());
+}
+
+test "MOV16 선택이 있으면 맨 ←/→ 는 선택 끝으로 접는다 — 커서마다 (§3.2, 사용자 결정 2026-10-11)" {
+    // VS Code `CursorLeft`·`CursorRight`·macOS 와 같다. 예전에는 focus 에서 한 글자를 더 갔다([2,4] 에서 → 가 5).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const term = try undoFixture(&fx, allocator, "mov16.txt", "abcdef ghij\n");
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(2, 4);
+    try pressKey(&fx, .arrow_right, .{});
+    try testing.expectEqual(@as(usize, 4), term.rt.editor_selection.?.focus);
+    try testing.expect(term.rt.editor_selection.?.isEmpty());
+
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(4, 2); // 뒤로 고른 선택
+    try pressKey(&fx, .arrow_left, .{});
+    try testing.expectEqual(@as(usize, 2), term.rt.editor_selection.?.focus);
+
+    // 커서마다 — primary 가 문서상 뒤여도.
+    term.rt.editor_selection = editor_selection.Selection.fromPoints(7, 9);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.fromPoints(1, 3);
+    term.rt.editor_extra_selections = extras;
+    try pressKey(&fx, .arrow_left, .{});
+    try testing.expectEqual(@as(usize, 7), term.rt.editor_selection.?.focus);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_extra_selections[0].focus);
 }
 
 test "MOV3 세로 이동이 목표 열을 지킨다 — 짧은 줄을 지나도 돌아온다 (§3.2)" {

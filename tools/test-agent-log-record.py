@@ -217,6 +217,57 @@ try:
         results.append(dict(fixture_terminated=True))
         save()
     record(holder_dir / 'a.ndjson')
+    # A copied legacy command may finish after the new writer starts.
+    roots = [directory(name) for name in ('local-v1', 'remote-v1', 'local-v2', 'remote-v2')]
+    for selected in (roots[0], roots[2]):
+        (selected / 'inst').mkdir(mode=0o700)
+    transition, _ = invoke([driver, str(root), 'hook-transition', cli, 'claude', *map(str, roots)])
+    transition = transition.stdout.decode()
+    local_identity = {'MARU_HOOK_INSTANCE': 'inst', 'MARU_HOOK_PANE': '9'}
+    def run_transition(extra, data=b'{}\n', command=transition):
+        return invoke(['/bin/sh', '-e', '-c', command], data, extra=extra, silent=True)
+    run_transition(local_identity)
+    legacy_target, native_target = roots[0] / 'inst/9.ndjson', roots[2] / 'inst/9.ndjson'
+    assert legacy_target.read_bytes() == b'claude\t{}\n' and not native_target.exists()
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2', 'LC_MARU_LOG_FORMAT': 'invalid'})
+    native_before = native_target.read_bytes()
+    assert payload(native_target)[1] == b'claude\t{}\n'
+    copied_old = hook(roots[0], native=False)
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=copied_old)
+    assert native_target.read_bytes() == native_before
+    assert legacy_target.read_bytes() == b'claude\t{}\n' * 2
+    for invalid in ('', '02', '3', ' 2', '2\n'):
+        run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': invalid}, b'x' * 262144)
+        assert native_target.read_bytes() == native_before
+        assert legacy_target.read_bytes() == b'claude\t{}\n' * 2
+    run_transition({'LC_MARU_PANE': 'remote', 'LC_MARU_LOG_FORMAT': '2', 'MARU_AGENT_LOG_FORMAT': 'invalid'})
+    assert payload(roots[3] / 'remote.ndjson')[1] == b'claude\t{}\n'
+    run_transition({'LC_MARU_PANE': 'remote', 'LC_MARU_LOG_FORMAT': '1'})
+    assert (roots[1] / 'remote.ndjson').read_bytes() == b'claude\t{}\n'
+    run_transition({'LC_MARU_PANE': 'remote', 'LC_MARU_LOG_FORMAT': '2', 'TMUX_PANE': '%17', 'TMUX': '/tmp/server,1,0'})
+    assert payload(roots[3] / 'remote_t17.ndjson')[1] == b'claude\t{}\n'
+    assert (roots[3] / 'remote_t17.tmux').exists()
+    remote_before = (roots[3] / 'remote_t17.ndjson').read_bytes()
+    sidecar_before = (roots[3] / 'remote_t17.tmux').read_bytes()
+    run_transition({'LC_MARU_PANE': 'remote', 'LC_MARU_LOG_FORMAT': '', 'TMUX_PANE': '%17', 'TMUX': '/tmp/other,2,0'}, b'x' * 262144)
+    assert (roots[3] / 'remote_t17.ndjson').read_bytes() == remote_before
+    assert (roots[3] / 'remote_t17.tmux').read_bytes() == sidecar_before
+    run_transition(local_identity | {'MARU_HOOK_INSTANCE': '../bad', 'LC_MARU_PANE': 'remote', 'LC_MARU_LOG_FORMAT': '2'})
+    assert payload(roots[3] / 'remote.ndjson')[1] == b'claude\t{}\n'
+    missing, _ = invoke([driver, str(root), 'hook-transition', str(root / 'missing'), 'claude', *map(str, roots)])
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=missing.stdout.decode())
+    assert native_target.read_bytes() == native_before
+    assert legacy_target.read_bytes() == b'claude\t{}\n' * 2
+    invoke([driver, str(root), 'hook-transition', cli, 'claude', str(roots[0]), str(roots[1]), str(roots[0]), str(roots[3])], success=False)
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        list(workers.map(lambda index: run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=copied_old if index % 2 else transition), range(8)))
+    assert payload(native_target)[1] == b'claude\t{}\n' * 5
+    assert legacy_target.read_bytes() == b'claude\t{}\n' * 6
+    quoted_roots = [directory("quoted ' $() " + str(index)) for index in range(4)]
+    (quoted_roots[2] / 'inst').mkdir(mode=0o700)
+    quoted, _ = invoke([driver, str(root), 'hook-transition', cli, 'claude', *map(str, quoted_roots)])
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=quoted.stdout.decode())
+    assert payload(quoted_roots[2] / 'inst/9.ndjson')[1] == b'claude\t{}\n'
     baseline = []
     native_command, legacy_command = hook(local), hook(local, native=False)
     for i in range(8):

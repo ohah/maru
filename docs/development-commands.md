@@ -73,7 +73,7 @@ stdin의 완전한 `provider<TAB>payload<LF>` 한 줄을 기존 소유자 전용
 기록한다. POSIX만 인증하며 Windows ACL adapter 전에는 거부한다. 기존 provider에
 설치된 훅은 v1을 유지한다. 순수 계약은 `zig build test-agent-log-record`, 실제
 native 훅→제품 CLI 검증은 `zig build test-agent-log-record-process`이며 Ubuntu CI
-check에 포함된다. 결과는 `tests/artifacts/agent-log-record/`에만 남긴다.
+check에 포함된다. 같은 실제 프로세스 게이트가 format별 local/remote 경로, 잘못된 format의 완전한 stdin drain, 늦은 v1 append와 v2 파일 격리, native 실행 실패 시 fallback 금지를 검사한다. 결과는 `tests/artifacts/agent-log-record/`에만 남긴다.
 
 v2 검증용 reader는 `maru agent-events --stdio --dir=<private-directory> --log-format=v2`로
 선택한다. 기본 v1과 혼합하지 않으며

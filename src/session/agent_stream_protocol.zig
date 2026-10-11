@@ -2,7 +2,7 @@
 const std = @import("std");
 const codec = @import("agent_log_generation.zig");
 const command = @import("agent_hook_command.zig");
-pub const Profile = enum { v1, v2 };
+pub const Profile = @import("agent_log_profile.zig").Profile;
 pub const cursor_max = 32;
 pub const resume_spec_max = codec.resumeBytesBound(cursor_max) catch @compileError("resume budget overflow");
 

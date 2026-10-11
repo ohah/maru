@@ -287,3 +287,5 @@ test {
     @import("std").testing.refAllDecls(ssh);
     @import("std").testing.refAllDecls(editor.lsp);
 }
+
+pub const agent_log_profile = @import("session/agent_log_profile.zig");

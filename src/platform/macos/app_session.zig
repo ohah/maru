@@ -97094,10 +97094,16 @@ test "native local reader keeps generation cursor on contention and reads same-s
     defer session.deinit();
     const term = pane_ops.activePane(&session).activeTerm();
     try std.testing.expectEqual(maru.session.remote_agent_stream.protocol.Profile.v1, term.agent_hook_log_profile);
-    term.agent_hook_log_profile = .v2;
     var path_arena = std.heap.ArenaAllocator.init(a);
     defer path_arena.deinit();
+    const legacy_path = agent_ops.agentHookLogPath(path_arena.allocator(), term).?;
+    term.agent_hook_log_profile = .v2;
     const path = agent_ops.agentHookLogPath(path_arena.allocator(), term).?;
+    try std.testing.expect(!std.mem.eql(u8, legacy_path, path));
+    try std.testing.expect(std.mem.indexOf(u8, path, "/agent-turn-events-v2/") != null);
+    // A late old hook remains in the v1 namespace and cannot become a v2 event.
+    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(legacy_path).?);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = legacy_path, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"wrong namespace\"}\n" });
     const parent = std.fs.path.dirname(path).?;
     try std.Io.Dir.cwd().createDirPath(io, parent);
     const dir = try std.Io.Dir.cwd().openDir(io, parent, .{});

@@ -3417,6 +3417,42 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     return call;
 }
 
+/// 숨은 탭을 깨우는 작은 스크린샷(W9b②-3 — 사용자 결정 A). 숨긴 OSR 탭은 프레임을 그리지 않아 `Accessibility.queryAXTree` 가 답하지
+/// 않고(실측 40 초+ — 보이게 하면 그때 답한다), `mouseMoved` 는 5 초 걸리고, rAF·애니메이션으로 나타나는 요소가 생기지 않는다. 주 호출
+/// **바로 뒤에** 1×1 스크린샷을 보내면 프레임 하나를 강제해 풀린다(실측: 숨은 탭 5 천 요소 질의 0.16 초, 0–300 ms 뒤에 숨겨도 240/240,
+/// 순서가 바뀌어 10–30 ms 넘게 먼저 가면 매달린다). Chromium 내부 동작에 기댄다 — 판정자(`devtools_check`)가 CEF 를 올릴 때 본다.
+pub const kick_method = "Page.captureScreenshot";
+pub const kick_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}";
+
+/// `devtoolsCall` 과 같되 바로 뒤에 kick 을 함께 보낸다 — 그 탭과 전체에 두 자리가 다 비어 있을 때만(아니면 `Busy` — 주 호출도
+/// 보내지 않는다: kick 없이 간 질의가 숨은 탭에서 30 초 매달리지 않게). kick 은 처음부터 버린 자리다(답을 기다리지 않고 알리지 않는다 —
+/// 주 호출의 op 이 끝난 뒤에 와도 된다). 보이는 탭의 비용은 GPU 약 3 ms·페이지 멈춤 0(실측).
+pub fn devtoolsCallKicked(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8, sink: DevtoolsSink) DevtoolsCallError!u32 {
+    const s = surfaces.getPtr(surface_id) orelse return error.NotReady;
+    if (!s.created or state == .off or state == .failed) return error.NotReady;
+    var of_surface: usize = 0;
+    for (devtools_pending) |p| if (p) |v| if (v.surface == surface_id) {
+        of_surface += 1;
+    };
+    if (of_surface + 2 > ws.message.max_devtools_calls_per_browser) return error.Busy;
+    if (devtoolsUsedSlots() + 2 > ws.message.max_devtools_calls) return error.Busy;
+    const call = try devtoolsCall(gpa, surface_id, method, params, sink);
+    // 자리는 위에서 셌다 — 이 둘째 자리는 남아 있다.
+    const slot = for (&devtools_pending) |*p| {
+        if (p.* == null) break p;
+    } else unreachable;
+    var kick = next_devtools_call;
+    while (true) {
+        kick +%= 1;
+        if (kick != 0 and devtoolsFind(surface_id, kick) == null) break;
+    }
+    next_devtools_call = kick;
+    slot.* = .{ .surface = surface_id, .call = kick, .sink = null, .deadline_ms = monotonicNow() + devtools_abandon_ms };
+    send(gpa, .{ .devtools_call = .{ .browser = surface_id, .call = kick, .method = kick_method, .params_size = @intCast(kick_params.len) } });
+    send(gpa, .{ .devtools_call_data = .{ .browser = surface_id, .call = kick, .bytes = kick_params } });
+    return call;
+}
+
 /// 그 자리의 호출을 끝내 알림 줄에 넣는다 — 자리를 비우거나(`keep` 거짓) 버린 자리로 바꾼다(`keep` — sidecar 의 답을 기다린다).
 /// 이미 버린 자리면 알리지 않고 비우기만 한다(`keep` 이면 그대로). 콜백은 여기서 부르지 않는다(`deliverDevtools`).
 fn devtoolsFinish(gpa: std.mem.Allocator, index: usize, outcome: DevtoolsOutcome, keep: bool, now_ms: i64) void {
@@ -4984,6 +5020,72 @@ test "W9-0b DevTools 호출: 인자는 조각으로 나가고, 결과는 모아 
     applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c6, .status = .ok, .size = ws.message.max_devtools_result_bytes } });
     try std.testing.expectEqual(DevtoolsOutcome.too_large, rec.outcome.?);
     try std.testing.expect(!devtoolsPending());
+}
+
+test "W9b②-3 kick: 주 호출 바로 뒤에 1×1 스크린샷을 버린 자리로 보낸다, 두 자리가 다 비어야 둘 다 보낸다, kick 의 답은 알리지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (&devtools_pending) |*p| if (p.*) |*v| {
+            v.result.deinit(gpa);
+            p.* = null;
+        };
+        for (devtools_done.items) |*d| d.result.deinit(gpa);
+        devtools_done.clearAndFree(gpa);
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    for ([_]u64{ 7, 9, 10, 11, 12 }) |id| try devtoolsTestSurface(id, true);
+    var rec: DevtoolsRecorder = .{};
+    var frames: [8]Message = undefined;
+
+    const c = try devtoolsCallKicked(gpa, 7, "Accessibility.queryAXTree", "{\"role\":\"button\"}", rec.sink());
+    try std.testing.expectEqual(@as(usize, 4), sentFrames(&frames));
+    try std.testing.expectEqualStrings("Accessibility.queryAXTree", frames[0].devtools_call.method);
+    try std.testing.expectEqual(c, frames[0].devtools_call.call);
+    try std.testing.expectEqualStrings(kick_method, frames[2].devtools_call.method); // 주 호출과 그 인자 바로 뒤
+    try std.testing.expectEqualStrings(kick_params, frames[3].devtools_call_data.bytes);
+    const kick = frames[2].devtools_call.call;
+    try std.testing.expect(kick != c);
+    try std.testing.expectEqual(@as(usize, 2), devtoolsUsed());
+    // 그 탭은 꽉 찼다 — 쌍도 하나도 못 보낸다.
+    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink()));
+    try std.testing.expectError(error.Busy, devtoolsCall(gpa, 7, "A.b", "", rec.sink()));
+    // kick 의 답(먼저 와도 늦게 와도)은 알리지 않고 자리만 푼다.
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = kick, .bytes = "{}" } });
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = kick, .status = .ok, .size = 2 } });
+    deliverDevtools(gpa);
+    try std.testing.expectEqual(@as(usize, 0), rec.count);
+    try std.testing.expectEqual(@as(usize, 1), devtoolsUsed());
+    // 그 탭에 자리가 하나뿐이면 쌍은 Busy(주 호출만 보내 30 초 매달리지 않게).
+    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink()));
+    applyD(gpa, .{ .devtools_result_data = .{ .browser = 7, .call = c, .bytes = "{}" } });
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = c, .status = .ok, .size = 2 } });
+    deliverDevtools(gpa);
+    try std.testing.expectEqual(@as(usize, 1), rec.count);
+    try std.testing.expectEqual(c, rec.call);
+    // 전체에 자리가 하나뿐이어도 Busy.
+    for ([_]u64{ 9, 10, 11 }) |id| for (0..ws.message.max_devtools_calls_per_browser) |_| {
+        _ = try devtoolsCall(gpa, id, "A.b", "", rec.sink());
+    };
+    _ = try devtoolsCall(gpa, 12, "A.b", "", rec.sink());
+    try std.testing.expectEqual(ws.message.max_devtools_calls - 1, devtoolsUsed());
+    try std.testing.expectError(error.Busy, devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink()));
+    // 답이 끝내 오지 않는 kick 도 버린 자리의 시한에 풀린다.
+    for (0..devtools_pending.len) |i| if (devtools_pending[i]) |v| {
+        applyD(gpa, .{ .devtools_result = .{ .browser = v.surface, .call = v.call, .status = .detached, .size = 0 } });
+    };
+    deliverDevtools(gpa);
+    _ = try devtoolsCallKicked(gpa, 7, "A.b", "", rec.sink());
+    const k2 = for (devtools_pending) |p| {
+        if (p) |v| if (v.sink == null) break v.call;
+    } else unreachable;
+    expireDevtoolsD(gpa, monotonicNow() + 2 * ws.message.devtools_stale_ms + 1);
+    try std.testing.expect(devtoolsFind(7, k2) == null);
 }
 
 test "W9-0b DevTools 호출: 탭마다·전체 상한, 시한이 지나도 sidecar 가 답할 때까지 자리를 쥐고, 콜백이 탭을 닫아도 한 번씩만 답한다" {

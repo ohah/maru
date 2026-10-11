@@ -8918,6 +8918,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // `MARU_WEB_OSR_TEST_REPORT` 파일에 적는다.
     // 대본 한 줄: `sleep ms` · `mouse kind fx fy dx dy button`(kind 1 누름·2 끌기·3 뗌·4 두 번·5 세 번, button 0 왼·1 가운데·
     // 2 오른) · `hover fx fy dx dy` · `wheel fx fy dx dy lines` · `aux fx fy dx dy buttonNumber` · `action 이름` ·
+    // `waitfile 경로`(그 파일이 생길 때까지 기다린다 — 다른 대본과 때를 맞춘다) ·
     // `key keyCode 글자 [원글자 수식자]`(글자는 U+ 16진, 없으면 -) — 키는 터미널 view 에 NSEvent 를 직접 넣는다(오버레이가
     // 열린 동안 `run_action` 은 무시되므로 Esc 로 닫는 데도 쓴다) · `ime keyCode 단계…`(W4c — 입력기 콜백을 한 트랜잭션
     // 안에서 직접 부른다). 좌표는 창 내용 view 의 (fx×폭 + dx, fy×높이 + dy) pt(왼쪽 위 원점).
@@ -9290,6 +9291,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         var delay = 0.03
         if line[0] == "sleep" {
             delay = (Double(line.count > 1 ? line[1] : "0") ?? 0) / 1000
+        } else if line[0] == "waitfile", line.count >= 2 {
+            // waitfile 경로 — 그 파일이 생길 때까지 이 줄에 머문다(pane 대본과 때를 맞춘다 — W9b②-3 숨은 탭 스모크).
+            if !FileManager.default.fileExists(atPath: line[1]) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                    self?.runOsrTestInput(lines, index)
+                }
+                return
+            }
         } else if let session = appSession, let view = window?.contentView {
             let scale = Double(window?.backingScaleFactor ?? 2)
             func point(_ at: Int) -> (Double, Double) {

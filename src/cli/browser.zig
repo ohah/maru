@@ -40,6 +40,7 @@ pub const browser_help =
     \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
     \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>], instead of --selector/--ref; Chromium tabs)
     \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
+    \\  (wait also takes --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>]: wait until it is visible; Chromium tabs)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
     \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
     \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG (--rect region, --scale factor; omit for full page at device scale)
@@ -96,7 +97,7 @@ pub const Request = union(enum) {
     /// `browser scroll`(act 5f-2·snapshot-2). locator 필수(scrollIntoView). 응답 {ok}.
     scroll: struct { surface_id: u64, locator: Locator },
     /// `browser wait`: visible selector 또는 현재 load idle까지 polling. timeout은 1..25_000ms. 응답 {ok}.
-    wait: struct { surface_id: u64, condition: WaitCondition, selector: ?[]const u8, timeout_ms: u32 },
+    wait: struct { surface_id: u64, condition: WaitCondition, selector: ?[]const u8, timeout_ms: u32, locator: ?Locator = null },
     /// `browser snapshot`(§9.5.4): 페이지 ARIA 트리(role/name/ref). interactive_only/max_depth/selector 선택. 응답 {snapshot}.
     snapshot: struct { surface_id: u64, interactive_only: bool, max_depth: ?u32, selector: ?[]const u8 },
     /// `browser console`(§9.5.9): 서버 버퍼에 쌓인 콘솔을 회수. clear=반환 후 버퍼 비움. 응답 {console:[{level,text}]}.
@@ -121,11 +122,14 @@ pub const Request = union(enum) {
 pub const WaitCondition = enum {
     selector,
     load,
+    /// 로케이터가 보일 때까지(W9b②-3 — Chromium 탭).
+    visible,
 
     fn wire(self: WaitCondition) []const u8 {
         return switch (self) {
             .selector => "selector",
             .load => "load",
+            .visible => "visible",
         };
     }
 };
@@ -349,6 +353,16 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (eq(sub, "wait")) {
         const wa = try parseWaitArgs(rest);
         const s = wa.surface orelse return error.MissingSurface;
+        // 로케이터(role·text·label)면 visible(W9b②-3). `--selector` 는 `--visible` 이 있어도 selector 조건으로 보낸다(같은 뜻 — 옛 앱도 안다).
+        const has_locator = wa.loc.role != null or wa.loc.by_text != null or wa.loc.by_label != null;
+        if (wa.condition == .load and (has_locator or wa.visible)) return error.ConflictingWaitCondition;
+        if (has_locator or wa.loc.hasRoleOptions() or wa.loc.hasMatchOptions()) {
+            var la = wa.loc;
+            la.selector = wa.selector;
+            const loc = try actLocator(la);
+            if (loc == .selector) return error.LocatorOptionWithoutRole; // 위의 has_locator 가 거짓 — 로케이터 옵션만 왔다
+            return .{ .request = .{ .wait = .{ .surface_id = s, .condition = .visible, .selector = null, .timeout_ms = wa.timeout_ms, .locator = loc } } };
+        }
         const condition = wa.condition orelse return error.MissingWaitCondition;
         if (condition == .selector and (wa.selector == null or wa.selector.?.len == 0)) return error.MissingSelector;
         return .{ .request = .{ .wait = .{
@@ -576,6 +590,9 @@ const WaitArgs = struct {
     condition: ?WaitCondition = null,
     selector: ?[]const u8 = null,
     timeout_ms: u32 = wait_default_timeout_ms,
+    /// `--visible`(선택 — 로케이터 옵션이 곧 visible 이다)과 로케이터 옵션(act 와 같은 규칙).
+    visible: bool = false,
+    loc: ActArgs = .{},
 };
 
 fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
@@ -599,6 +616,28 @@ fn parseWaitArgs(rest: []const []const u8) ParseError!WaitArgs {
             if (r.condition != null) return error.ConflictingWaitCondition;
             r.condition = .load;
             i += 1;
+        } else if (eq(a, "--visible")) {
+            r.visible = true;
+            i += 1;
+        } else if (eq(a, "--exact")) {
+            r.loc.exact = true;
+            i += 1;
+        } else if (matchOpt(a, "--role")) {
+            r.loc.role = try optValue(rest, &i, "--role");
+        } else if (matchOpt(a, "--name")) {
+            r.loc.name = try optValue(rest, &i, "--name");
+        } else if (matchOpt(a, "--by-text")) {
+            r.loc.by_text = try optValue(rest, &i, "--by-text");
+        } else if (matchOpt(a, "--by-label")) {
+            r.loc.by_label = try optValue(rest, &i, "--by-label");
+        } else if (matchOpt(a, "--level")) {
+            const v = std.fmt.parseInt(u32, try optValue(rest, &i, "--level"), 10) catch return error.InvalidLocatorNumber;
+            if (v < 1 or v > 100) return error.InvalidLocatorNumber;
+            r.loc.level = v;
+        } else if (matchOpt(a, "--nth")) {
+            const v = std.fmt.parseInt(u32, try optValue(rest, &i, "--nth"), 10) catch return error.InvalidLocatorNumber;
+            if (v > 1_000_000) return error.InvalidLocatorNumber;
+            r.loc.nth = v;
         } else if (matchOpt(a, "--timeout")) {
             const value = optValue(rest, &i, "--timeout") catch |err| switch (err) {
                 error.MissingOptionValue => return error.MissingTimeoutValue,
@@ -883,6 +922,9 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             try obj.put(gpa, "id", .{ .integer = @intCast(w.surface_id) });
             try obj.put(gpa, "condition", .{ .string = w.condition.wire() });
             if (w.selector) |selector| try obj.put(gpa, "selector", .{ .string = selector });
+            var loc_obj: std.json.ObjectMap = .empty;
+            defer loc_obj.deinit(gpa);
+            if (w.locator) |l| try putLocator(gpa, &obj, &loc_obj, l);
             try obj.put(gpa, "timeout_ms", .{ .integer = w.timeout_ms });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.wait", .params = .{ .object = obj } } });
         },
@@ -1119,6 +1161,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 if (name.len > 512) try w.writeAll("…");
                 try w.writeAll("\n");
             };
+            // wait 이 찾은 것이 여럿과 맞는다(W9b②-3) — 같은 로케이터로 누르면 「여럿」 으로 실패한다.
+            if (boolField(result.get("ambiguous"))) try w.writeAll("warning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n");
         },
         .value => try w.print("{s}\n", .{strField(result.get("value"))}), // get-local-storage → {value}
         .get_url => try w.print("{s}\n", .{strField(result.get("url"))}),
@@ -2331,6 +2375,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
         \\  (click/type/scroll/hover/press also take --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>], instead of --selector/--ref; Chromium tabs)
         \\  wait    --surface <id> (--selector <css> | --load) [--timeout <ms>]   wait for a condition (default and max 25000ms)
+        \\  (wait also takes --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>]: wait until it is visible; Chromium tabs)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
         \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
         \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG (--rect region, --scale factor; omit for full page at device scale)
@@ -2556,6 +2601,8 @@ test "browser target is selected once across every verb and option spelling" {
         &.{ "click", "--role", "button", "--name", "Save" },
         &.{ "click", "--by-text", "Save" },
         &.{ "type", "--by-label", "Name", "--text", "t" },
+        &.{ "wait", "--role", "button" },
+        &.{ "wait", "--selector", "#x", "--visible" },
     };
     const firsts = [_][]const []const u8{ &.{ "--surface", "1" }, &.{"--surface=1"} };
     const seconds = [_][]const []const u8{ &.{ "--surface", "1" }, &.{ "--surface", "2" }, &.{"--surface=1"}, &.{"--surface=2"} };
@@ -2578,4 +2625,41 @@ test "browser target is selected once across every verb and option spelling" {
     // Values that happen to look like target options are opaque values, not selections.
     _ = try parse(&.{ "type", "--surface", "1", "--ref", "e1", "--text", "--surface=2" });
     _ = try parse(&.{ "screenshot", "--surface", "1", "--out", "--surface=2" });
+}
+
+test "parse·buildRequestBytes: wait 의 로케이터(W9b②-3) — 로케이터면 visible, --selector 는 --visible 이어도 selector 조건, 옵션 규칙은 act 와 같다" {
+    const r = (try parse(&.{ "wait", "--surface", "3", "--role", "button", "--name", "Save", "--timeout", "900" })).request.wait;
+    try testing.expectEqual(WaitCondition.visible, r.condition);
+    try testing.expectEqualStrings("Save", r.locator.?.role.name.?);
+    try testing.expectEqual(@as(u32, 900), r.timeout_ms);
+    const t = (try parse(&.{ "wait", "--surface=3", "--visible", "--by-text=Done", "--exact", "--nth=1" })).request.wait;
+    try testing.expectEqualStrings("Done", t.locator.?.text.value);
+    try testing.expect(t.locator.?.text.exact);
+    const sel = (try parse(&.{ "wait", "--surface", "3", "--selector", "#a", "--visible" })).request.wait;
+    try testing.expectEqual(WaitCondition.selector, sel.condition);
+    try testing.expect(sel.locator == null);
+    try testing.expectError(error.ConflictingWaitCondition, parse(&.{ "wait", "--surface", "3", "--load", "--role", "button" }));
+    try testing.expectError(error.ConflictingWaitCondition, parse(&.{ "wait", "--surface", "3", "--load", "--visible" }));
+    try testing.expectError(error.ConflictingLocator, parse(&.{ "wait", "--surface", "3", "--selector", "#a", "--role", "button" }));
+    try testing.expectError(error.LocatorOptionWithoutRole, parse(&.{ "wait", "--surface", "3", "--name", "Save" }));
+    try testing.expectError(error.LocatorOptionWithoutRole, parse(&.{ "wait", "--surface", "3", "--selector", "#a", "--nth", "1" }));
+    try testing.expectError(error.ExactWithoutName, parse(&.{ "wait", "--surface", "3", "--role", "button", "--exact" }));
+    try testing.expectError(error.MissingWaitCondition, parse(&.{ "wait", "--surface", "3", "--visible" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "wait", "--surface", "3", "--ref", "n4" }));
+    const b = try buildRequestBytes(testing.allocator, .{ .wait = .{ .surface_id = 11, .condition = .visible, .selector = null, .timeout_ms = 25000, .locator = .{ .label = .{ .value = "Email", .exact = true } } } }, .{ .number = 1 });
+    defer testing.allocator.free(b);
+    var pm = try cp.parseMessage(testing.allocator, b);
+    defer pm.deinit();
+    const params = pm.message.request.params.?.object;
+    try testing.expectEqualStrings("visible", params.get("condition").?.string);
+    try testing.expectEqualStrings("Email", params.get("locator").?.object.get("label").?.string);
+    try testing.expect(params.get("locator").?.object.get("exact").?.bool);
+    try testing.expect(params.get("selector") == null);
+}
+
+test "renderResponse: wait 이 찾은 것이 여럿과 맞으면 matched 뒤에 경고 한 줄" {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n4\",\"name\":\"Save\"},\"ambiguous\":true}}", .ok, &w);
+    try testing.expectEqualStrings("ok\nmatched n4 \"Save\"\nwarning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n", w.buffered());
 }

@@ -12848,6 +12848,8 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     defer allocator.free(editor);
     const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/conflict.zig");
     defer allocator.free(conflict);
+    const format = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/format.zig");
+    defer allocator.free(format);
 
     const countOf3 = struct {
         fn f(hay: []const u8, needle: []const u8) usize {
@@ -12859,11 +12861,14 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     }.f;
 
     // ⑴ **묻는 자리는 `⌘S` 하나다.** 닫기-저장은 자기 안내를 갖고 있고(중복 모달), 일괄 저장은
-    //    파일마다 물으면 스무 개가 뜬다(§3.9d 「소비자는 셋」).
+    //    파일마다 물으면 스무 개가 뜬다(§3.9d 「소비자는 셋」). `⌘S` 의 저장·결과 말하기는 저장 시 포맷
+    //    (tooling §8.2r)이 응답 뒤에도 같은 길을 쓰도록 `format.saveNow` 로 옮겼다 — 자리는 거기 하나,
+    //    디스패치(app_session)에는 0 이다(두 곳에 남으면 한쪽이 낡는다).
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOf3(app_session, "error.ExternalConflict => editor_conflict_ops.ask(self, term),"),
+        countOf3(format, "error.ExternalConflict => conflict_ops.ask(self, term),"),
     );
+    try std.testing.expectEqual(@as(usize, 0), countOf3(app_session, "editor_conflict_ops.ask("));
     // ⑵ **CAS 를 건너뛰는 길은 전용 함수 하나이고, 그것을 부르는 자리도 하나다**(사용자가 고른 그것).
     try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "pub fn overwriteDocument("));
     try std.testing.expectEqual(@as(usize, 1), countOf3(editor, ".overwrite => null,"));

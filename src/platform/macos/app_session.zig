@@ -11536,19 +11536,8 @@ pub const AppSession = struct {
             .editor_redo => _ = editor_ops.redoEdit(self, pane_ops.activePane(self).activeTerm()),
             // **저장 실패는 이유별로 말한다**(§3.9d) — 예전에는 `_ =` 로 결과를 통째로 버려 사용자가
             // `⌘S` 를 누르고 아무 일도 없는 것을 봤다. `AskName` 은 실패가 아니라 「이름을 물었다」다.
-            .editor_save => blk: {
-                const term = pane_ops.activePane(self).activeTerm();
-                editor_ops.saveDocument(self, term) catch |e| switch (e) {
-                    // `Handled` 는 실패가 아니다 — 저쪽 파일이라 이 함수 밖에서 끝난다(U3). 결말이 말한다.
-                    error.AskName, error.NotAnEditor, error.Handled => break :blk,
-                    // ⚠️ **충돌은 알리는 자리가 아니라 «묻는» 자리다**(C1a — editor-surface.md §4).
-                    // C0 은 이유를 올렸을 뿐 「아무것도 저장하지 않았다」로 끝냈고, 그러면 사용자는
-                    // 편집을 든 채 손으로 내용을 옮겨야 한다. 여기만 묻는다 — 닫기-저장은 자기
-                    // 안내를 갖고 있고, 일괄 저장은 파일마다 물으면 스무 개가 뜬다.
-                    error.ExternalConflict => editor_conflict_ops.ask(self, term),
-                    else => self.showNoticeKey(editor_ops.saveFailureNoticeKey(@errorCast(e))),
-                };
-            },
+            // 저장 시 포맷(§8.2r)이 켜져 있으면 포맷 응답(또는 시한) 뒤에 저장한다 — 실패 알림·충돌 묻기는 그 함수가 한다.
+            .editor_save => editor_ops.format_client.saveCommand(self, pane_ops.activePane(self).activeTerm()),
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
             // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).

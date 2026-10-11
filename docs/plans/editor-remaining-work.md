@@ -59,7 +59,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | Markdown 소스 모드의 편집기 선택 | 계약 밖의 정책 미결 | [네이티브 계약 §12](../native-editor.md), [파일 kind 계약](../file-panel-kinds.md). Markdown 소스는 현재 CM6이며 text/diff의 네이티브 이관과 별개다 | 소스도 네이티브로 할지, 웹 모드와의 전환·문서 소유·편집 경험을 어떻게 통일할지 결정 |
 | 언어별 들여쓰기·자동 닫기 문맥 규칙 | 별도 개선 후보, 정책 미결 | 네이티브 계약 §12. 기본 `pairs.zig`·`language.zig`는 있지만 VS Code식 `onEnterRules`·문맥 제외·언어별 정규식 규칙까지 완료된 것은 아니다 | 실제 차이 입력부터 재현하고 grammar별 규칙 소유·엔진을 결정. 검색 PCRE2 채택을 타이핑 규칙 채택으로 해석하지 않는다 |
 | 편집기 plugin 확장점 | 앱 전체 plugin 경계의 별도 결정 | 네이티브 계약 §12: 내부 span/completion provider와 외부 plugin API는 다르다 | 신뢰/권한·수명·확장 API 계약을 해당 이니셔티브에서 결정. 내부 provider 존재를 plugin 지원으로 세지 않는다 |
-| 저장 시 자동 포맷/린트 fix | 남은 기능 + 보안 정책 미결 | 후속 표와 도구 §8.1. `format.zig`는 명시적 LSP 포맷 요청; `saveDocumentGuarded`의 저장은 자동 실행 기능을 제공하지 않는다 | 자동 실행 신뢰/권한과 실패·취소 정책, revision·커서·undo 한 번·저장 순서 검증 |
+| 저장 시 자동 포맷/린트 fix | 언어 서버 포맷은 구현(2026-10-11) · 외부 포매터·린트 fix 는 남은 기능 | 언어 서버의 저장 시 포맷은 [계획](editor-format-on-save.md)·도구 §8.2r(`⌘S` 가 응답 뒤에 저장, 기본 켬, 1 초 시한; 신뢰는 서버가 뜨는 조건). 외부 포매터(Prettier 등)·`--fix` 는 도구 §8.1 의 도구 실행 경로가 없다 | 외부 도구의 실행 경로와 실패·취소 정책 |
 | 선택적 외부 formatter/linter 실행 | E3 계약 잔여 | 도구 §8.1의 trust/allowlist/executable·시간/출력/child 정산 규칙은 LSP 포맷만으로 닫히지 않는다 | registry·명시적 trust UX·취소/폭주/실행 종료 fixture를 별도 대조 후 구현 범위 결정 |
 | B2 op 저장소 제품 적용 | 실험 있음, 제품 연결·정책 미결 | [B2 기록](editor-op-b2-evaluation.md). `B2Experiment`는 test 전용, 제품 `frame.build`는 기존 scratch 경로 | 소유 범위·창/pane 수명·메모리 정책 결정과 제품 출력/입력/실패/성능 검증 |
 | 기본 scratch 부족 시 중요한 표시 보존 | 검증·범위 한계 | #4021은 기본 scratch에 들어간 현재 검색만 성장 실패에서 보호한다 | 부족 종류별 반례부터 재현하고, 실제 결함과 표시 정책을 구분 |

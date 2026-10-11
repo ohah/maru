@@ -21,7 +21,8 @@
 //!   parameters 는 `[8,13]`·`[15,20]`, doc `**adds** two`·첫 파라미터 doc `first`; `int add(double a)`). `(` 가 없거나 닫혔거나 `NOSIG` 면 `null`.
 //!   capability 로 triggerCharacters `(`·`,` 와 retriggerCharacters `)` 를 낸다.
 //! - `textDocument/formatting` → 각 줄에서 **첫 두 칸 이상 공백 묶음**을 한 칸으로 줄이는 `TextEdit[]`(줄마다 하나, 줄 순서의 **역순**으로 보내
-//!   클라이언트가 정렬해야 한다; character = byte — ASCII 본문에서만 맞다). 본문에 `NOFMT` 면 `null`, `BADFMT` 면 겹치는 edit 둘(거부돼야 한다).
+//!   클라이언트가 정렬해야 한다; character = byte — ASCII 본문에서만 맞다). 본문에 `NOFMT` 면 `null`, `BADFMT` 면 겹치는 edit 둘(거부돼야 한다),
+//!   `FMTSTALL` 이면 답하지 않는다(저장 시 포맷의 시한).
 //!   `options` 가 계약(§8.2e ③)과 다르면 — `insertSpaces` 가 false 가 아니거나 `tabSize` 가 1 미만 — `null`(제품 경계에서 options 를 잰다).
 //!   capability `documentFormattingProvider: true`(`MARU_FAKE_LSP_NOFMTCAP=1` 이면 false — 클라이언트가 요청을 안 보내야 한다).
 //! - `textDocument/rename` → 요청 자리의 식별자를 이 문서와 같은 디렉터리 `other.c`(**디스크에서** 읽는다 — 열려 있지 않은 파일의 관측점)에서
@@ -1504,6 +1505,8 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             return;
         }
         const Edit = struct { range: struct { start: Pos, end: Pos }, newText: []const u8 };
+        // 저장 시 포맷의 시한(§8.2r) — `FMTSTALL` 이면 답하지 않는다(`…HANG` 이라 부르면 didChange 의 `HANG` 표식에 걸려 서버째 멈춘다).
+        if (std.mem.indexOf(u8, text, "FMTSTALL") != null) return;
         if (std.mem.indexOf(u8, text, "NOFMT") != null) {
             sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
             return;

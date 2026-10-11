@@ -222,7 +222,7 @@ pub const Client = struct {
         allocator.free(self.root);
     }
 
-    fn findDoc(self: *Client, term: *Term) ?*OpenDoc {
+    pub fn findDoc(self: *Client, term: *Term) ?*OpenDoc {
         for (self.docs.items) |*d| if (d.matches(term)) return d;
         return null;
     }
@@ -1559,6 +1559,8 @@ fn send(self: *AppSession, c: *Client, body: []const u8) bool {
 
 /// 세션 tick — `AppSession.tick` 이 부른다.
 pub fn pump(self: *AppSession) void {
+    // 저장 시 포맷의 시한(§8.2r) — 언어 서버를 꺼도 잰다(기다리던 저장이 남지 않게).
+    editor_format.tick(self, self.awakeMs());
     if (!self.loaded_config.config.lsp.enabled) {
         // 꺼졌다 — 떠 있는 서버를 내린다. 그대로 두면 아무도 stdout 을 안 읽는 서버가 앱 종료까지 남는다.
         if (self.editor_lsp.clients.items.len > 0) stopAll(self);
@@ -1799,7 +1801,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 self.editor_lsp.received_formattings += 1;
                 // 오류 응답은 결과 없음과 같다. JSON-RPC 2.0 은 `error` 가 있으면 `result` 가 **없어야** 한다고 하므로 이 가드를 지워도
                 // 동작이 같다(적대적 2회차 B17 등가) — 명세를 어기는 서버에 대한 방어로 남긴다.
-                editor_format.onResponse(self, seq, if (r.is_error) null else r.result, c.encoding);
+                editor_format.onClientResponse(self, c, seq, if (r.is_error) null else r.result, c.encoding);
             },
             .signature => |seq| {
                 self.editor_lsp.received_signatures += 1;

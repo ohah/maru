@@ -181,6 +181,8 @@ pub const editor = struct {
     pub const line_ops = @import("session/editor/ops/line_ops.zig");
     /// 복사·잘라내기의 순수 판정(§3.4 — 무엇을 담고 무엇을 지우는가. 이동 단계 3).
     pub const clipboard_ops = @import("session/editor/ops/clipboard_ops.zig");
+    /// 입력 조합의 순수 판정(§3.7 × §9.1 — 쌍 넣기·type-over·감싸기와 caret. IME 는 L4 에 남는다. 이동 단계 2).
+    pub const typing_ops = @import("session/editor/ops/typing_ops.zig");
     /// N2: 열/블록 선택의 **파생**(§3.2a — 사각형 하나를 줄마다 selection 으로 푼다). `selection` 이
     /// 원본(`ColumnAnchor`)을 들고 이쪽이 그것을 배열로 편다. `ColumnMap` 을 주입받아 **chrome 을
     /// 모른다**.

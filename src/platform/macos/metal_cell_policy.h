@@ -4,17 +4,20 @@
 #include <stdint.h>
 
 enum {
-    MaruAppHostMetalCellRoleDockToggle = 32,
+    /* 셀보다 크게 구운 아이콘(Zig metal_frame.native_cell_role_cell_raster_icon) — 사이드바 헤더 아이콘과 파일 도크 토글. */
+    MaruAppHostMetalCellRoleCellRasterIcon = 32,
 };
 
 typedef struct MaruMetalCellGlyphPolicy {
-    uint32_t is_dock_toggle;
+    uint32_t is_cell_raster_icon;
     float scale_x;
     float scale_y;
 } MaruMetalCellGlyphPolicy;
 
 /* NativeMetalCell의 명시적 role과 producer가 굳힌 atlas extent를 Metal glyph 정책으로 내린다.
-   codepoint·좌표·별도 1.7 상수는 재추론하지 않는다. 일반 pane의 같은 PUA는 scale 1을 유지한다. */
+   codepoint·좌표·별도 1.7 상수는 재추론하지 않는다 — 어느 아이콘을 몇 배로 굽는가는 Zig가 정했고(목표 크기를
+   선언한 글리프에만 role이 붙는다), 배율은 그 결과인 atlas 크기 ÷ 셀 크기다(텍스처가 quad에 1:1).
+   일반 pane의 같은 PUA는 scale 1을 유지한다. */
 static inline MaruMetalCellGlyphPolicy maru_metal_cell_glyph_policy(
     uint16_t reserved,
     uint32_t atlas_width_px,
@@ -22,9 +25,9 @@ static inline MaruMetalCellGlyphPolicy maru_metal_cell_glyph_policy(
     uint32_t cell_width_px,
     uint32_t cell_height_px
 ) {
-    const uint32_t is_dock_toggle = reserved == MaruAppHostMetalCellRoleDockToggle;
-    MaruMetalCellGlyphPolicy policy = {is_dock_toggle, 1.0f, 1.0f};
-    if (is_dock_toggle && cell_width_px > 0u && cell_height_px > 0u &&
+    const uint32_t is_cell_raster_icon = reserved == MaruAppHostMetalCellRoleCellRasterIcon;
+    MaruMetalCellGlyphPolicy policy = {is_cell_raster_icon, 1.0f, 1.0f};
+    if (is_cell_raster_icon && cell_width_px > 0u && cell_height_px > 0u &&
         atlas_width_px > 0u && atlas_height_px > 0u) {
         policy.scale_x = (float)atlas_width_px / (float)cell_width_px;
         policy.scale_y = (float)atlas_height_px / (float)cell_height_px;

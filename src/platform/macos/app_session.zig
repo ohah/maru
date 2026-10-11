@@ -311,7 +311,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // take_show_downloads_request(`show_downloads` 액션).
 // 218: W6m② — osr_datalist_state·item·shown·hover·pick(제안 목록을 칸 아래 네이티브 창으로 — Zig 가 목록·강조를 쥐고 Swift 가
 // 띄운 세대를 알린다), osr_datalist_key(띄운 목록이 ↑↓·Enter·Esc 를 먹는다).
-pub const abi_version: u32 = 221;
+// 222: NativeMetalCell.reserved=32 가 「파일 도크 토글」에서 「셀보다 크게 구운 아이콘」으로 넓어진다 — 사이드바 헤더 아이콘도
+// 이 role 을 달고 나가고, .m 은 codepoint 목록과 `1.7f` 대신 role 과 atlas 크기로 quad 를 키운다(2칸 글리프는 그 가운데 한 칸).
+// layout 은 그대로지만 낡은 .m 은 2칸 종을 3.4칸으로 늘리므로 짝이 같이 올라가야 한다(130 과 같은 이유).
+pub const abi_version: u32 = 222;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -23625,11 +23628,13 @@ pub const AppSession = struct {
             }
         };
         const pane = builder.shapeOnly(self.allocator, dl, &self.renderer_state.font_registry) catch return;
-        // 헤더 아이콘(gear·plus·bell·sidebar_collapse — 등록 PUA)은 .m이 hscale 1.7로 quad를 키워 셀보다 ~1.7칸 넓게 그린다. 셀 크기로 굽고 GPU에서
-        // 확대하면 anti-alias가 번져 흐리므로(slot-stretch; partial-alpha 비율 ≈0.69 — coretext_smoke 측정 test), atlas
-        // slot을 목표 px(셀×1.7)로 키워 그 크기로 직접 래스터한다 — 1.7× 텍스처가 1.7× quad에 1:1로 들어가 선명(≈0.33).
-        // raster_*_px>0이면 estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡는다(.m·레이아웃 불변). 터미널
-        // 콘텐츠(.pane)의 ◧는 키우지 않도록 헤더 dest로 한정한다(펼침·접힘 토글 모두 .sidebar_header).
+        // 헤더 아이콘(목록은 `cell_text.isSidebarHeaderIcon` — Windows 와 한 곳)은 셀보다 ~1.7칸 크게 그린다. 셀 크기로 굽고
+        // GPU에서 확대하면 anti-alias가 번져 흐리므로(slot-stretch; partial-alpha 비율 ≈0.69 — coretext_smoke 측정 test), atlas
+        // slot을 목표 px(셀×1.7)로 키워 그 크기로 직접 래스터한다 — 텍스처가 quad에 1:1로 들어가 선명(≈0.33).
+        // raster_*_px>0이면 estimateGlyphBitmapSize가 셀 배수 대신 이 크기로 slot을 잡는다. **이 선언이 곧 렌더러의 확대
+        // 근거다** — `metal_frame` 이 선언한 글리프의 셀에 `native_cell_role_cell_raster_icon` 을 싣고, .m 은 그 role 과 atlas
+        // 크기만 보고 quad 를 키운다(codepoint·배율 상수를 다시 적지 않는다, layering §3.5). 터미널 콘텐츠(.pane)의 ◧는
+        // 키우지 않도록 헤더 dest로 한정한다(펼침·접힘 토글 모두 .sidebar_header).
         if ((std.meta.activeTag(dest) == .sidebar_header or std.meta.activeTag(dest) == .dock_toggle) and self.cell_width_px > 0 and self.cell_height_px > 0) {
             const rw: u16 = @intCast(headerIconRasterExtentPx(self.cell_width_px));
             const rh: u16 = @intCast(headerIconRasterExtentPx(self.cell_height_px));
@@ -23638,9 +23643,7 @@ pub const AppSession = struct {
                 // 꽉 채워 그려진다 — 옛 Unicode ◧(U+25E7)·⚙(U+2699)가 타던 cover-fit(center_symbol) 게이트와는
                 // 무관하다(그 게이트는 이제 터미널 콘텐츠의 ◧·⚙만 탄다). 그래서 slot만 1.7×로 키우면 1.7× quad에
                 // 1:1로 들어가 선명해진다.
-                if (g.codepoint == icons.codepoint(.gear) or g.codepoint == icons.codepoint(.plus) or
-                    g.codepoint == icons.codepoint(.bell) or g.codepoint == icons.codepoint(.sidebar_collapse))
-                {
+                if (maru.cell_text.isSidebarHeaderIcon(g.codepoint)) {
                     g.cache_key.raster_width_px = rw;
                     g.cache_key.raster_height_px = rh;
                 }
@@ -53477,7 +53480,7 @@ test "empty file dock launcher presents explorer and empty content requests the 
     _ = try session.tick();
     var saw_launcher = false;
     for (session.metal_buffer.cells) |cell| {
-        if (cell.codepoint == icons.codepoint(.sidebar_collapse) and cell.reserved == metal_frame.native_cell_role_dock_toggle and
+        if (cell.codepoint == icons.codepoint(.sidebar_collapse) and cell.reserved == metal_frame.native_cell_role_cell_raster_icon and
             cell.origin_x >= launcher.x and cell.origin_x < launcher.x + launcher.w and
             cell.origin_y < session.titlebar_strip_px)
         {
@@ -56556,7 +56559,7 @@ test "FP3 파일 도크: right/bottom 기하·surface diff 소스·presence·hit
         {
             // maru_metal_renderer.m의 freely-placed dock-toggle 판정 계약. 왼쪽 헤더(origin 0,0)와
             // 구분되는 명시적 role과 titlebar 배치를 함께 보존해야 1.7× PUA slot과 quad가 같은 경로를 소비한다.
-            try std.testing.expectEqual(metal_frame.native_cell_role_dock_toggle, cell.reserved);
+            try std.testing.expectEqual(metal_frame.native_cell_role_cell_raster_icon, cell.reserved);
             try std.testing.expect(cell.origin_x > 0);
             try std.testing.expect(cell.origin_y + session.cell_height_px <= session.titlebar_strip_px);
             saw_dock_toggle = true;

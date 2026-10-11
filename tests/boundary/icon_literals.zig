@@ -289,23 +289,23 @@ test "아이콘은 이름 registry로만 부른다 — codepoint 리터럴 금�
     }
 }
 
-// 셀 그리드 chrome의 아이콘 배율은 **두 언어에 걸쳐 있다**: Zig가 그 배율로 텍스처를 굽고(`collectShaped`가
-// `raster_*_px`를 주입), Objective-C 렌더러가 같은 배율로 quad를 키운다. 둘이 어긋나면 1.7× 텍스처가 1.0× quad에
-// 들어가(또는 그 반대) 아이콘이 잘리거나 흐려진다 — 컴파일러도 타입도 못 잡고, 헤드리스 테스트는 quad 크기만
-// 보므로 조용히 지나간다.
+// 셀 그리드 chrome의 아이콘 배율은 **Zig 가 소유하고 렌더러는 다시 적지 않는다**. Zig 가 그 배율로 텍스처를 굽고
+// (`collectShaped`가 `raster_*_px`를 선언), `metal_frame` 이 선언한 글리프의 셀에 cell-raster role 을 싣는다. Objective-C
+// 렌더러는 role 과 atlas 크기 ÷ 셀 크기(`metal_cell_policy.h`)로 quad 를 키운다 — 텍스처가 quad 에 1:1 이다.
 //
-// **"어딘가에 그 숫자가 있는가"로는 부족하다.** 첫 판은 `.m` 전체에서 `1.7f` 부분문자열을 찾았는데,
-// 토큰을 흔한 값(1.0/2.0)으로 바꾸면 항상 통과하고, x/y 두 배율 중 **한쪽만** 드리프트해도 통과했으며,
-// 코드를 바꾸고 주석에만 옛 값을 남겨도 통과했다(적대적 검증에서 전부 실행 확인). 이제 아이콘 배율을 쓰는
-// **그 두 표현식을 직접 짚어** 개수와 값을 함께 단언한다.
-const scale_token_file = "src/chrome/ui/icon.zig";
+// 예전에는 `.m` 이 같은 배율을 `1.7f` 로, 대상을 codepoint 넷으로 다시 적었고, 이 가드가 그 미러를 토큰과 맞췄다.
+// 미러를 없앤 지금 이 가드는 **미러가 되살아나지 않는가**를 본다: 배율 대입은 정책 값만 읽고(float 리터럴 0개),
+// 헤더 아이콘을 codepoint 로 고르는 비교가 없다(layering-and-portability.md §3.5). 둘 중 하나라도 돌아오면 Zig 의
+// 목록·배율과 갈릴 수 있는 두 번째 출처가 생긴다.
 const scale_mirror_file = "src/platform/macos/maru_metal_renderer.m";
 /// `.m`에서 아이콘 배율이 실리는 두 문장(x/y 축). **접두사 전체가 아니라 대입 대상만** 짚는다 — 첫 판은
-/// 100자짜리 C 표현식을 통째로 못박아, 공백 하나·줄바꿈·삼항 순서 변경에 거짓 실패했고(게다가 "값 드리프트"로
-/// 오진했다), 반대로 그 표현식을 인용한 주석을 위에 두면 진짜 코드가 바뀌어도 통과했다(적대적 검증에서 실측).
+/// 100자짜리 C 표현식을 통째로 못박아, 공백 하나·줄바꿈·삼항 순서 변경에 거짓 실패했고, 반대로 그 표현식을
+/// 인용한 주석을 위에 두면 진짜 코드가 바뀌어도 통과했다(적대적 검증에서 실측).
 const mirror_assignments = [_][]const u8{ "glyph_scale_x =", "glyph_scale_y =" };
-/// 아이콘이 **아닌** 글리프의 배율. 같은 삼항의 else 갈래라, 이걸 안 보면 전 글리프가 3배가 돼도 가드가 침묵한다.
-const mirror_neutral_scale = "1.0f";
+/// 각 대입이 읽어야 하는 정책 값(같은 순서).
+const policy_reads = [_][]const u8{ "glyph_policy.scale_x", "glyph_policy.scale_y" };
+/// 헤더 아이콘을 codepoint 로 고르던 이름들. 셀 그리드에서 키우는 아이콘 목록은 `cell_text.isSidebarHeaderIcon` 하나다.
+const header_icon_macros = [_][]const u8{ "MARU_ICON_GEAR", "MARU_ICON_PLUS", "MARU_ICON_BELL", "MARU_ICON_SIDEBAR_COLLAPSE" };
 
 /// C 주석(`//`·`/* */`)을 공백으로 바꾼 사본. 주석에 남은 옛 값이 가드를 속이지 못하게 한다.
 fn stripCComments(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
@@ -357,33 +357,14 @@ fn collectFloatLiterals(statement: []const u8, out: [][]const u8) usize {
     return count;
 }
 
-test "아이콘 셀 래스터 배율은 Zig 토큰과 Objective-C 미러가 같다" {
+test "아이콘 셀 래스터 배율과 대상은 Objective-C 가 다시 적지 않는다 — role 과 atlas 크기만 읽는다 (layering §3.5)" {
     const allocator = std.testing.allocator;
-    const token_source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_token_file, allocator, .limited(64 * 1024));
-    defer allocator.free(token_source);
-
-    // `pub const cell_raster_scale_milli: u32 = 1700;` → 1700 → "1.7f"
-    const needle = "cell_raster_scale_milli: u32 = ";
-    const start = (std.mem.indexOf(u8, token_source, needle) orelse return error.TestUnexpectedResult) + needle.len;
-    const end = std.mem.indexOfScalarPos(u8, token_source, start, ';') orelse return error.TestUnexpectedResult;
-    const milli = try std.fmt.parseInt(u32, token_source[start..end], 10);
-    var expected_buf: [24]u8 = undefined;
-    // 소수 자리는 필요한 만큼만 쓴다(1700 → "1.7f", 1750 → "1.75f", 2000 → "2f"가 아니라 "2.0f").
-    const whole = milli / 1000;
-    const frac = milli % 1000;
-    const expected = if (frac % 100 == 0)
-        try std.fmt.bufPrint(&expected_buf, "{d}.{d}f", .{ whole, frac / 100 })
-    else if (frac % 10 == 0)
-        try std.fmt.bufPrint(&expected_buf, "{d}.{d:0>2}f", .{ whole, frac / 10 })
-    else
-        try std.fmt.bufPrint(&expected_buf, "{d}.{d:0>3}f", .{ whole, frac });
-
     const raw_mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
     defer allocator.free(raw_mirror);
     const mirror = try stripCComments(allocator, raw_mirror);
     defer allocator.free(mirror);
 
-    for (mirror_assignments) |assignment| {
+    for (mirror_assignments, policy_reads) |assignment, policy_read| {
         // 대입이 정확히 하나여야 한다 — 여러 개면 어느 것이 아이콘 배율인지 이 가드가 알 수 없다.
         var occurrences: usize = 0;
         var statement: []const u8 = &.{};
@@ -402,25 +383,34 @@ test "아이콘 셀 래스터 배율은 Zig 토큰과 Objective-C 미러가 같�
         }
         if (occurrences != 1) {
             std.debug.print(
-                "\n아이콘 배율 미러 지점 이상: {s}에서 `{s}` 대입이 {d}개입니다(1개여야 함).\n" ++
+                "\n아이콘 배율 지점 이상: {s}에서 `{s}` 대입이 {d}개입니다(1개여야 함).\n" ++
                     "표현식을 옮겼다면 이 가드의 mirror_assignments도 함께 고쳐야 합니다.\n",
                 .{ scale_mirror_file, assignment, occurrences },
             );
             return error.IconScaleMirrorSiteMissing;
         }
-        // 아이콘 갈래인지 확인한 뒤(엉뚱한 대입을 짚지 않게), 그 문장의 float 리터럴 두 개가 각각
-        // "아이콘 배율"과 "그 외 배율"인지 본다. else 갈래를 안 보면 전 글리프 확대가 통과한다.
-        try std.testing.expect(std.mem.indexOf(u8, statement, "is_corner_icon") != null);
-        try std.testing.expect(std.mem.indexOf(u8, statement, "is_bell_icon") != null);
         var literals: [8][]const u8 = undefined;
         const count = collectFloatLiterals(statement, &literals);
-        if (count != 2 or !std.mem.eql(u8, literals[0], expected) or !std.mem.eql(u8, literals[1], mirror_neutral_scale)) {
+        if (count != 0 or std.mem.indexOf(u8, statement, policy_read) == null) {
             std.debug.print(
-                "\n아이콘 배율 미러 불일치: 토큰 {d} milli → `{s}`(아이콘) + `{s}`(그 외)를 기대했는데\n" ++
-                    "  {s}의 `{s}` 문장에는 float 리터럴 {d}개가 있습니다: {s}\n",
-                .{ milli, expected, mirror_neutral_scale, scale_mirror_file, assignment, count, statement },
+                "\n아이콘 배율 사본이 되살아났습니다: {s}의 `{s}` 문장은 `{s}` 만 읽어야 하는데\n" ++
+                    "  float 리터럴 {d}개가 있거나 정책 값을 안 읽습니다: {s}\n" ++
+                    "  배율은 chrome.ui.icon 이, 대상은 cell_text.isSidebarHeaderIcon 이 소유합니다(Zig 가 role 로 내려 보낸다).\n",
+                .{ scale_mirror_file, assignment, policy_read, count, statement },
             );
-            return error.IconScaleMirrorDrift;
+            return error.IconScaleMirrorRevived;
+        }
+    }
+    for (header_icon_macros) |macro| {
+        if (std.mem.indexOf(u8, mirror, macro)) |at| {
+            const line_start = if (std.mem.lastIndexOfScalar(u8, mirror[0..at], '\n')) |nl| nl + 1 else 0;
+            const line_end = std.mem.indexOfScalarPos(u8, mirror, at, '\n') orelse mirror.len;
+            std.debug.print(
+                "\n헤더 아이콘 목록 사본: {s}가 `{s}`로 아이콘을 고릅니다(주석 밖):\n  {s}\n" ++
+                    "  셀보다 크게 그릴 아이콘은 Zig 가 cell-raster role 로 표시해 보냅니다 — 렌더러는 그 role 만 봅니다.\n",
+                .{ scale_mirror_file, macro, std.mem.trim(u8, mirror[line_start..line_end], " ") },
+            );
+            return error.IconTargetMirrorRevived;
         }
     }
 }
@@ -428,7 +418,7 @@ test "아이콘 셀 래스터 배율은 Zig 토큰과 Objective-C 미러가 같�
 test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {
     const allocator = std.testing.allocator;
     var out: [8][]const u8 = undefined;
-    const stmt = "glyph_scale_x = is_dock_toggle ? p.scale_x : ((is_corner_icon || is_bell_icon) ? 1.7f : 1.0f)";
+    const stmt = "glyph_scale_x = is_icon ? p.scale_x : (is_bell ? 1.7f : 1.0f)";
     try std.testing.expectEqual(@as(usize, 2), collectFloatLiterals(stmt, &out));
     try std.testing.expectEqualStrings("1.7f", out[0]);
     try std.testing.expectEqualStrings("1.0f", out[1]);

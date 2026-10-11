@@ -92,7 +92,12 @@ pub const NativeMetalCell = extern struct {
 
 /// NativeMetalCell.reserved의 glyph semantic 값. 커서·선 장식과 같은 기존 ABI 필드를 쓰되, 숫자를
 /// producer와 Metal backend가 각자 재정의하지 않도록 renderer DTO가 단일 출처로 소유한다.
-pub const native_cell_role_dock_toggle: u16 = 32;
+///
+/// **셀보다 크게 구운 아이콘**이다 — producer 가 `raster_*_px` 로 목표 크기를 선언해 그 크기로 구운 글리프.
+/// Metal 은 이 값을 보면 quad 를 「atlas 크기 ÷ 셀 크기」로 키우고(텍스처가 quad 에 1:1), 글리프가 차지한 칸들의
+/// 가운데에 한 칸짜리 quad 를 둔다. **어느 아이콘을 몇 배로 굽는가는 Zig 가 이미 정했다** — 렌더러가 codepoint 나
+/// 배율 상수를 다시 적지 않는다(layering-and-portability.md §3.5). 사이드바 헤더와 파일 도크 토글이 같은 값을 쓴다.
+pub const native_cell_role_cell_raster_icon: u16 = 32;
 
 /// `file_tree`는 셀로 그리는 파일 탐색기 목록이다. 그 pane의 셀 구간을 기록해 두면 렌더러가 그
 /// 구간만 px로 자를 수 있다(ABI v147 seam) — 부분 행 픽셀 스크롤의 전제다. **역할로 찾는 이유는
@@ -102,12 +107,24 @@ pub const PaneClipRange = struct { start: usize, len: usize, rect: ClipPx };
 
 pub const PaneFrameRole = enum { normal, dock_toggle };
 
-fn applyPaneFrameRole(cells: []NativeMetalCell, role: PaneFrameRole) void {
+fn applyPaneFrameRole(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad, role: PaneFrameRole) void {
     if (role != .dock_toggle) return;
-    // semantic role은 실제 atlas glyph에만 싣는다. cursor/underline 같은 장식 cell의 reserved를 덮으면
-    // 미래에 dock-toggle frame이 caret/decoration을 추가할 때 부분 사각형 의미가 조용히 사라진다.
-    for (cells) |*cell| {
-        if (cell.slot_id != 0 and cell.reserved == 0) cell.reserved = native_cell_role_dock_toggle;
+    markCellRasterIcons(cells, glyphs);
+}
+
+/// 목표 크기(`raster_*_px`)를 선언하고 구운 글리프의 셀에 `native_cell_role_cell_raster_icon` 을 싣는다.
+///
+/// 셀과 글리프는 **slot 으로** 짝짓는다 — 목표 크기가 cache identity 의 일부라(`GlyphCacheKey`) 선언한 글리프와 안 한
+/// 글리프는 slot 을 공유하지 않는다. 그래서 같은 frame 에 같은 PUA 가 셀 크기로도 있으면 그쪽은 안 키운다.
+///
+/// semantic role 은 실제 atlas glyph 에만 싣는다. cursor/underline 같은 장식 cell 의 reserved 를 덮으면
+/// 그 frame 이 caret/decoration 을 낼 때 부분 사각형 의미가 조용히 사라진다.
+fn markCellRasterIcons(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad) void {
+    for (glyphs) |g| {
+        if (g.slot.key.raster_width_px == 0 or g.slot.key.raster_height_px == 0) continue;
+        for (cells) |*cell| {
+            if (cell.slot_id != 0 and cell.slot_id == g.slot.id and cell.reserved == 0) cell.reserved = native_cell_role_cell_raster_icon;
+        }
     }
 }
 
@@ -1827,7 +1844,7 @@ pub const MetalFrameBuffer = struct {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
-            applyPaneFrameRole(built.cells, pf.role);
+            applyPaneFrameRole(built.cells, pf.frame.glyph_quad_frame.glyphs, pf.role);
             // **role이 아니라 clip_rect의 유무**가 자를지를 정한다. role은 이제 glyph semantic 전용이다.
             if (pf.clip_rect) |clip| setCellsClipIndex(built.cells, try clipIndexFor(allocator, &clip_table, clip));
             try cells_list.appendSlice(allocator, built.cells);
@@ -1846,6 +1863,9 @@ pub const MetalFrameBuffer = struct {
             const hcells = try buildNativeCellsFromGlyphQuads(allocator, hf.glyph_quad_frame, hf.draw_list.cells, sidebar_colors);
             defer allocator.free(hcells);
             setCellsPaneOrigin(hcells, 0, 0);
+            // 헤더 아이콘(셀보다 크게 굽는 것 — 그 목록은 `cell_text.isSidebarHeaderIcon` 이 소유)이 role 을 달고 나간다.
+            // 예전에는 렌더러(.m)가 같은 목록을 codepoint 로, 배율을 `1.7f` 로 다시 적었다.
+            markCellRasterIcons(hcells, hf.glyph_quad_frame.glyphs);
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, hcells);
         }
         // 터미널 커서 구간의 **시작 index**를 여기서 확정한다 — 위 두 삽입은 모두 커서 '앞'이라 이 시점에 커서는 아직
@@ -3479,46 +3499,70 @@ test "renormalizeGpuGlyphUvs follows the final shared atlas and keeps color sent
     try std.testing.expectEqual(@as(f32, 0.125), glyphs[0].v0);
 }
 
-test "PaneFrameRole lowers dock toggle provenance without classifying the same PUA in a normal pane" {
-    var dock = [_]NativeMetalCell{
-        .{
-            .row = 0,
-            .col = 0,
-            .width = 1,
-            .codepoint = icons.codepoint(.sidebar_collapse),
-            .slot_id = 1,
-            .atlas_x_px = 0,
-            .atlas_y_px = 0,
-            .atlas_width_px = 13,
-            .atlas_height_px = 30,
-            .u0 = 0,
-            .v0 = 0,
-            .u1 = 1,
-            .v1 = 1,
-        },
-        .{
-            .row = 0,
-            .col = 0,
-            .width = 1,
-            .reserved = 9,
-            .codepoint = 0,
-            .slot_id = 0,
-            .atlas_x_px = 0,
-            .atlas_y_px = 0,
-            .atlas_width_px = 0,
-            .atlas_height_px = 0,
-            .u0 = -1,
-            .v0 = -1,
-            .u1 = -1,
-            .v1 = -1,
-        },
+fn testRasterGlyph(slot_id: u32, codepoint: u21, raster_px: u16) renderer.GlyphQuad {
+    const key: renderer.glyph_layout.GlyphCacheKey = .{
+        .font_id = 1,
+        .glyph_id = 0,
+        .font_size_px = 12,
+        .device_scale = 1,
+        .raster_width_px = raster_px,
+        .raster_height_px = raster_px,
     };
+    return .{
+        .run = .{ .row = 0, .col = 0, .cell_width = 1, .codepoint = codepoint, .font_id = 1, .glyph_id = 0, .cache_key = key },
+        .slot = .{ .id = slot_id, .key = key, .x_px = 0, .y_px = 0, .width_px = 13, .height_px = 30, .upload_bytes = 0, .generation = 0 },
+        .uv = .{ .u0 = 0, .v0 = 0, .u1 = 1, .v1 = 1 },
+    };
+}
+
+fn testGlyphCell(slot_id: u32, codepoint: u21, reserved: u16) NativeMetalCell {
+    return .{
+        .row = 0,
+        .col = 0,
+        .width = 1,
+        .reserved = reserved,
+        .codepoint = codepoint,
+        .slot_id = slot_id,
+        .atlas_x_px = 0,
+        .atlas_y_px = 0,
+        .atlas_width_px = if (slot_id == 0) 0 else 13,
+        .atlas_height_px = if (slot_id == 0) 0 else 30,
+        .u0 = if (slot_id == 0) -1 else 0,
+        .v0 = if (slot_id == 0) -1 else 0,
+        .u1 = if (slot_id == 0) -1 else 1,
+        .v1 = if (slot_id == 0) -1 else 1,
+    };
+}
+
+test "셀보다 크게 구운 글리프만 cell-raster role 을 단다 — 같은 PUA 라도 셀 크기로 구웠으면 안 단다 (layering §3.5)" {
+    // 렌더러는 이 role 하나로 「키울지·몇 배로」를 정한다. 그래서 role 은 **구운 크기의 선언**을 따라야 한다 —
+    // codepoint 로 정하면 렌더러가 목록을 다시 적던 예전 구조와 같아진다.
+    const collapse = icons.codepoint(.sidebar_collapse);
+    const glyphs = [_]renderer.GlyphQuad{
+        testRasterGlyph(1, collapse, 30), // 헤더 아이콘 — 목표 크기를 선언하고 구웠다
+        testRasterGlyph(2, collapse, 0), // 같은 PUA 를 셀 크기로 구웠다(헤더 밖의 쓰임)
+    };
+    var cells = [_]NativeMetalCell{
+        testGlyphCell(1, collapse, 0),
+        testGlyphCell(2, collapse, 0),
+        testGlyphCell(0, 0, 9), // 장식선(부분 사각형) — 의미를 덮으면 안 된다
+    };
+    markCellRasterIcons(&cells, &glyphs);
+    try std.testing.expectEqual(native_cell_role_cell_raster_icon, cells[0].reserved);
+    try std.testing.expectEqual(@as(u16, 0), cells[1].reserved);
+    try std.testing.expectEqual(@as(u16, 9), cells[2].reserved);
+}
+
+test "PaneFrameRole lowers dock toggle provenance without classifying the same PUA in a normal pane" {
+    const collapse = icons.codepoint(.sidebar_collapse);
+    const glyphs = [_]renderer.GlyphQuad{testRasterGlyph(1, collapse, 30)};
+    var dock = [_]NativeMetalCell{ testGlyphCell(1, collapse, 0), testGlyphCell(0, 0, 9) };
     var pane = dock;
 
-    applyPaneFrameRole(&dock, .dock_toggle);
-    applyPaneFrameRole(&pane, .normal);
+    applyPaneFrameRole(&dock, &glyphs, .dock_toggle);
+    applyPaneFrameRole(&pane, &glyphs, .normal);
 
-    try std.testing.expectEqual(native_cell_role_dock_toggle, dock[0].reserved);
+    try std.testing.expectEqual(native_cell_role_cell_raster_icon, dock[0].reserved);
     try std.testing.expectEqual(@as(u16, 0), pane[0].reserved);
     try std.testing.expectEqual(@as(u16, 9), dock[1].reserved);
 }

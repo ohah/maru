@@ -2875,11 +2875,13 @@ fn appendSidebarHeaderCells(
         if (std.math.cast(u21, c.codepoint)) |cp| if (cell_text.isSidebarHeaderIcon(cp)) {
             // **한 셀을 키운다 — 그 글리프가 몇 칸을 차지하든.** 종은 EAW 2칸이라 quad 가 2셀인데,
             // 아틀라스 슬롯은 한 셀 ×1.7 로 구웠다. 그대로 곱하면 가로만 3.4셀이 되어 **찌그러진다**
-            // (실측: 종이 납작한 아치로 보였다). macOS 도 2칸 위에 1.7셀 폭으로 그린다 — 중심은
-            // 원래 칸들의 한가운데(그쪽의 `-0.5 nudge`와 같은 자리).
-            const scale = @as(f32, @floatFromInt(icon_scale.cell_raster_scale_milli)) / 1000.0;
-            const sw = @as(f32, @floatFromInt(cell_w)) * scale;
-            const sh = @as(f32, @floatFromInt(cell_h)) * scale;
+            // (실측: 종이 납작한 아치로 보였다). 중심은 원래 칸들의 한가운데다.
+            //
+            // **크기는 구운 크기 그대로다**(atlas 슬롯 = `cellRasterExtentPx`) — 셀에 배율을 다시 곱하면 정수로 내린
+            // 슬롯보다 quad 가 커져 텍스처를 조금 늘려 그린다. macOS Metal 도 같은 규칙이다(cell-raster role 셀을
+            // 「atlas 크기 ÷ 셀 크기」로 키우고 차지한 칸들의 가운데에 둔다 — layering §3.5).
+            const sw: f32 = @floatFromInt(c.atlas_width_px);
+            const sh: f32 = @floatFromInt(c.atlas_height_px);
             const cx = cell.rect[0] + cell.rect[2] / 2;
             const cy = cell.rect[1] + cell.rect[3] / 2;
             cell.rect[0] = cx - sw / 2;

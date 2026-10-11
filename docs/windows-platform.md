@@ -3944,7 +3944,9 @@ zig test -fno-emit-bin --test-no-exec -target aarch64-macos …
 크기로 굽고**, quad 도 같은 배율로 키워 1:1 로 넣는다.
 
 배율은 `chrome.ui.icon.cell_raster_scale_milli`(1700)가 소유하고, **어떤 글리프에 적용하는가**는
-`cell_text.isSidebarHeaderIcon` 이 소유한다 — macOS 는 그 목록을 자기 안에 적어 두고 있었다.
+`cell_text.isSidebarHeaderIcon` 이 소유한다 — macOS 는 그 목록을 자기 안에 적어 두고 있었다(2026-10-12 에 macOS 도 이것을 부르게
+했다 — Metal `.m` 은 목록·배율 대신 Zig 가 실은 cell-raster role 과 atlas 크기만 본다, layering §3.5). 같은 날 Windows 의 quad 도
+셀×배율 대신 **구운 크기(atlas 슬롯)** 로 바꿨다 — 배율을 다시 곱하면 정수로 내린 슬롯보다 quad 가 커져 텍스처를 늘려 그린다.
 
 ## 이음매는 중립이 이미 준다
 

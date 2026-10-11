@@ -201,7 +201,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 221), abi_version);
+    try std.testing.expectEqual(@as(u32, 222), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -8897,13 +8897,13 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // Swift는 C header를 보고, Zig는 이 파일의 extern struct를 쓴다. 둘의 숫자와
     // layout이 갈라지면 다음 제품 앱 PR에서 런타임 버그가 되므로 컴파일 단계에서 막는다.
     try std.testing.expectEqual(@as(u32, c.MARU_MACOS_APP_HOST_ABI_VERSION), abi_version);
-    try std.testing.expectEqual(@as(u16, @intCast(c.MaruAppHostMetalCellRoleDockToggle)), maru.renderer.metal_frame.native_cell_role_dock_toggle);
-    const dock_policy = c.maru_metal_cell_glyph_policy(c.MaruAppHostMetalCellRoleDockToggle, 13, 30, 8, 18);
-    try std.testing.expectEqual(@as(u32, 1), dock_policy.is_dock_toggle);
-    try std.testing.expectApproxEqAbs(@as(f32, 13.0 / 8.0), dock_policy.scale_x, 0.0001);
-    try std.testing.expectApproxEqAbs(@as(f32, 30.0 / 18.0), dock_policy.scale_y, 0.0001);
+    try std.testing.expectEqual(@as(u16, @intCast(c.MaruAppHostMetalCellRoleCellRasterIcon)), maru.renderer.metal_frame.native_cell_role_cell_raster_icon);
+    const icon_policy = c.maru_metal_cell_glyph_policy(c.MaruAppHostMetalCellRoleCellRasterIcon, 13, 30, 8, 18);
+    try std.testing.expectEqual(@as(u32, 1), icon_policy.is_cell_raster_icon);
+    try std.testing.expectApproxEqAbs(@as(f32, 13.0 / 8.0), icon_policy.scale_x, 0.0001);
+    try std.testing.expectApproxEqAbs(@as(f32, 30.0 / 18.0), icon_policy.scale_y, 0.0001);
     const normal_pua_policy = c.maru_metal_cell_glyph_policy(0, 13, 30, 8, 18);
-    try std.testing.expectEqual(@as(u32, 0), normal_pua_policy.is_dock_toggle);
+    try std.testing.expectEqual(@as(u32, 0), normal_pua_policy.is_cell_raster_icon);
     try std.testing.expectEqual(@as(f32, 1), normal_pua_policy.scale_x);
     try std.testing.expectEqual(@as(f32, 1), normal_pua_policy.scale_y);
     try std.testing.expectEqual(@as(u32, @intCast(c.MARU_FILE_TREE_TRASH_KIND_REGULAR)), @as(u32, @intFromEnum(file_tree_mutation_backend.IdentityKind.regular)));

@@ -7439,7 +7439,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             // 쥐고 있어도(그 사이 연 새 창의 셸도 끝났다) 같이 쥔다 — 곧바로 끝내면 받던 것이 확인 없이 취소됐다(리뷰 2 회차).
             if sessionEnded, maru_macos_downloads_keep_alive() > 0 {
                 // 이 창이 든 종료 확인이 떠 있었다면 거둔다 — 숨긴 세션은 tick 이 돌지 않아 그 결정이 영영 오지 않는다(teardown 이 하던 일,
-                // main 기준 rebase 적대 리뷰). 그 세션의 종료 모달도 Zig 에서 내린다(예전엔 세션을 부숴 함께 사라졌다 — 2 회차).
+                // main 기준 rebase 적대 리뷰). 그 세션이 이미 수락한 종료의 앱 전역 표시(`app_quitting` 등)도 되돌린다
+                // — 수락과 셸 종료가 같은 tick 이면 그 결정을 거둘 tick 이 다시 오지 않는다(2·3 회차). 모달 자체는 남지만 숨긴 세션은 다시 보이지 않는다.
                 if quitConfirmPending, quitConfirmSurface === surface, !workspaceFinalQuitPending, let session = surface.appSession {
                     maru_macos_app_session_cancel_app_quit(session)
                 }

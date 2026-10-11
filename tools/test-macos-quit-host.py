@@ -168,7 +168,7 @@ do {
     h.closeWindowOrQuit(s, faulted: false, sessionEnded: true)
     check(h.keepAliveSurfaces.count == 1 && h.windows.isEmpty && s.window!.ordered == 1, "downloads keep the hidden window")
     check(!h.quitConfirmPending && NSApp.replies == [false], "the hidden window's quit confirmation is answered, not left pending")
-    check(quitCancels == 1, "the hidden session's quit modal is cancelled in Zig too (its tick no longer runs)")
+    check(quitCancels == 1, "the hidden session's accepted-quit flags are cancelled in Zig too (its tick no longer runs)")
     check(NSApp.terminates == 0, "the app stays while downloading")
 }
 // ③ 창 0 개로 Dock 에 남은 앱(LW1)의 ⌘Q — 받는 중이면 확인 없이 끝내지 않고 새 창에서 묻는다(받던 것이 말없이 취소됐다).

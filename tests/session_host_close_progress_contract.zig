@@ -48,22 +48,24 @@ test "C3-3b5 중립 계약 close ticket은 1과 max를 허용하고 0과 exhaust
 test "C3-3b5 중립 계약 VTable은 InputOwner와 close 반환형의 field 순서를 고정한다" {
     const Backend = maru.app.term_runtime_backend;
     const fields = @typeInfo(Backend.VTable).@"struct".fields;
-    try std.testing.expectEqual(@as(usize, 19), fields.len);
+    // 21: main 의 `resize_with_cell`(셀 크기와 함께 — 이 판정자는 그때 19 그대로였다) + base 의 `session_leader_pid`(1g — 붙은
+    // 프로세스의 출처로 pane 을 찾는다). main 기준 rebase 에서 맞췄다(적대 리뷰 4 회차가 찾은 cr6a2 링크를 풀자 드러났다).
+    try std.testing.expectEqual(@as(usize, 21), fields.len);
     const expected_names = [_][]const u8{
-        "input_owner",              "spawn",            "attach",                   "pump",        "write_input",              "write_input_nonblocking",
-        "enqueue_core_command",     "resize",           "close_and_detach",         "close",       "finish_after_termination", "remove",
-        "foreground_process_group", "resource_samples", "foreground_process_names", "process_cwd", "read_observation",         "refresh_observation",
-        "dump_recent_text",
+        "input_owner",          "spawn",                    "attach",             "pump",             "write_input",              "write_input_nonblocking",
+        "enqueue_core_command", "resize",                   "resize_with_cell",   "close_and_detach", "close",                    "finish_after_termination",
+        "remove",               "foreground_process_group", "session_leader_pid", "resource_samples", "foreground_process_names", "process_cwd",
+        "read_observation",     "refresh_observation",      "dump_recent_text",
     };
     inline for (fields, expected_names, 0..) |field, expected_name, index| {
         _ = index;
         try std.testing.expectEqualStrings(expected_name, field.name);
     }
-    inline for (.{ 8, 9, 10 }) |index| {
+    inline for (.{ 9, 10, 11 }) |index| {
         const function_info = @typeInfo(@typeInfo(fields[index].type).pointer.child).@"fn";
         try std.testing.expectEqual(Backend.CloseProgress, function_info.return_type.?);
     }
-    const remove_info = @typeInfo(@typeInfo(fields[11].type).pointer.child).@"fn";
+    const remove_info = @typeInfo(@typeInfo(fields[12].type).pointer.child).@"fn";
     try std.testing.expectEqual(Backend.RemoveProgress, remove_info.return_type.?);
 }
 

@@ -512,6 +512,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr0b_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr0b_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         cr0b_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr0b_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         const run_cr0b_app_session_tests = b.addRunArtifact(cr0b_app_session_tests);
         // app_session root/import sentinel 3개와 이름 있는 제품 증거 5개를 함께 실행한다.
         run_cr0b_app_session_tests.addArg("--maru-expect-tests=8");
@@ -537,6 +538,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr0b_gui_bootstrap_tests.root_module.linkFramework("CoreText", .{});
         cr0b_gui_bootstrap_tests.root_module.linkFramework("CoreGraphics", .{});
         cr0b_gui_bootstrap_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr0b_gui_bootstrap_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr0b_gui_bootstrap_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -605,6 +607,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr0b_bootstrap4_gui_child.root_module.linkFramework("CoreText", .{});
         cr0b_bootstrap4_gui_child.root_module.linkFramework("CoreGraphics", .{});
         cr0b_bootstrap4_gui_child.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr0b_bootstrap4_gui_child.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         const cr0b_bootstrap4_daemon_child = addProjectTest(b, .{
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/platform/macos/session_host/daemon.zig"),
@@ -953,6 +956,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr2d1_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr2d1_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         cr2d1_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr2d1_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr2d1_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -1066,6 +1070,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr2d3_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr2d3_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         cr2d3_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr2d3_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr2d3_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -1116,6 +1121,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr2d4_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr2d4_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         cr2d4_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr2d4_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr2d4_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{"-fobjc-arc"},
@@ -2921,6 +2927,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr5d2_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr5d2_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         cr5d2_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr5d2_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr5d2_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -2971,6 +2978,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr6a1_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr6a1_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         cr6a1_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr6a1_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr6a1_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -3034,6 +3042,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr6a2_app_session_tests.root_module.linkFramework("CoreText", .{});
         cr6a2_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         cr6a2_app_session_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr6a2_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr6a2_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -3067,6 +3076,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             cr6a2_abi_tests.root_module.linkFramework("CoreText", .{});
             cr6a2_abi_tests.root_module.linkFramework("CoreGraphics", .{});
             cr6a2_abi_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+            cr6a2_abi_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         }
         const run_cr6a2_abi_tests = b.addRunArtifact(cr6a2_abi_tests);
         run_cr6a2_abi_tests.addArg("--maru-expect-tests=6");
@@ -3154,6 +3164,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         cr6b_product_tests.root_module.linkFramework("CoreText", .{});
         cr6b_product_tests.root_module.linkFramework("CoreGraphics", .{});
         cr6b_product_tests.root_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+        cr6b_product_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — build.zig 의 같은 artifact 들과 같이(main 기준 rebase 적대 리뷰 4 회차)
         cr6b_product_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },
@@ -3784,6 +3795,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             event_c3_3b5_app_session_module.linkFramework("CoreText", .{});
             event_c3_3b5_app_session_module.linkFramework("CoreGraphics", .{});
             event_c3_3b5_app_session_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+            event_c3_3b5_app_session_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — main 기준 rebase 적대 리뷰 4 회차
         }
         // app_session root의 세 무명 module sentinel도 Zig filter와 함께 항상 materialize된다.
         B3SettlementTest.add(b, session_host_2c3d_c3_3b5_step, event_c3_3b5_app_session_module, "C3-3b5 AppSession", 7);
@@ -3841,6 +3853,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             event_c3_3b4_async_close_module.linkFramework("CoreText", .{});
             event_c3_3b4_async_close_module.linkFramework("CoreGraphics", .{});
             event_c3_3b4_async_close_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+            event_c3_3b4_async_close_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — main 기준 rebase 적대 리뷰 4 회차
         }
         // app_session root의 무명 module sentinel 3개가 filter와 함께 materialize되며, named 제품 행은 4개다.
         B3SettlementTest.add(
@@ -4353,6 +4366,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
             event_c3_3b6_app_session_module.linkFramework("CoreText", .{});
             event_c3_3b6_app_session_module.linkFramework("CoreGraphics", .{});
             event_c3_3b6_app_session_module.linkFramework("ImageIO", .{}); // IG3: ImageIO 디코드(image_decode.zig) — CoreGraphics 만으로는 심볼이 안 풀린다
+            event_c3_3b6_app_session_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — main 기준 rebase 적대 리뷰 4 회차
         }
         // app_session root의 무명 module sentinel 3개와 b6 제품 행 8개가 함께 materialize된다.
         B3SettlementTest.add(

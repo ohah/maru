@@ -7898,10 +7898,6 @@ comptime {
     std.debug.assert(@intFromEnum(web_cdp_ops.Status.invalid_params) == @intFromEnum(control_browser.BrowserCompletionStatus.invalid_params));
 }
 
-test {
-    _ = web_cdp_ops;
-}
-
 pub export fn maru_macos_control_server_start() c_int {
     // 비-macOS: 라이브 서버 없음(1b/A2b는 macOS 전용 — 소켓 부트스트랩이 fstatat/arc4random_buf 등 macOS syscall에
     // 의존). comptime-true 조기 반환이 뒤 macOS 바디(Server.bind·instanceNonce)를 linux 컴파일에서 prune한다
@@ -9887,6 +9883,9 @@ test "macOS app exported session API reports null outputs as ABI errors" {
 
 test {
     std.testing.refAllDecls(session_mod);
+    // W9b①a: Chromium 탭의 DevTools 차례(`web_cdp_ops`) 시험도 — 이름 없는 블록을 따로 두면 필터와 무관하게 하나 더 세져 시험 수를
+    // 못박은 단계들이 어긋났다(main 기준 rebase 적대 리뷰 4 회차).
+    _ = web_cdp_ops;
     // 전역 핫키 descriptor 매핑(a2의 Swift가 ABI로 소비)도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("global_hotkey.zig"));
     // 커맨드 카탈로그(메뉴바·팝업 공유) round-trip·chord 포맷 테스트도 테스트 빌드에 포함한다.

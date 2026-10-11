@@ -2155,6 +2155,7 @@ pub fn register(b: *std.Build, ctx: Context) void {
         notification_continuity_app_session_tests.root_module.linkFramework("CoreText", .{});
         notification_continuity_app_session_tests.root_module.linkFramework("CoreGraphics", .{});
         notification_continuity_app_session_tests.root_module.linkFramework("ImageIO", .{});
+        notification_continuity_app_session_tests.root_module.linkFramework("IOSurface", .{}); // W3c: Chromium(OSR) 탭 링(web_osr → ring_receiver) — main 기준 rebase 적대 리뷰 4 회차
         notification_continuity_app_session_tests.root_module.addCSourceFile(.{
             .file = b.path("src/platform/macos/coretext_smoke.m"),
             .flags = &.{ "-fobjc-arc", "-fno-sanitize=undefined" },

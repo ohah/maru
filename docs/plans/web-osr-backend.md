@@ -883,3 +883,14 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   시한 `{hidden}`, 간격 max(백오프, 무거운 호출 × 4), 마감 판단.
 - L2 `condition:"visible"`(엄격 키, selector 는 selector 조건으로, locator 는 WebKit -32008), 결과·시한 data. CLI `wait --role/--by-text/--by-label`.
 
+**W9b②-3 적대 리뷰**(구현 뒤 다섯 회차):
+- **1 회차**(실측 — 공용 하네스로 ops 의 CDP 순서를 재현):
+  - 중: 시간 규칙이 페이지의 긴 작업을 그대로 먹었다 — 첫 확인이 3 초 막히자 5 초 시한의 wait 이 3 초에 포기했고(요소는 3.14 초), 찾기 앞에 2.5 초가 끼자 다음 확인이
+    10 초 뒤(요소 2.7 초 → 답 12.5 초) → 간격 배수는 2 초까지, 미리 시한은 「다음 확인이 시한을 2 초 넘게 넘길 것 같을 때만」.
+  - 중: 스모크의 숨은 탭 wait 이 wait 의 kick 을 증명하지 못했다(앞의 role 질의·hover 의 kick 이 rAF 를 돌렸다), 탭이 정말 숨었는지 보지 않았다 →
+    `visibilitychange` 로 hidden 을 보고, rAF 를 일으키는 클릭은 숨긴 뒤 kick 없는 selector 클릭으로.
+  - 하: 문서·후보 묶음을 쥔 채 철회되면 놓지 않았다 → `cancel` 이 놓은 뒤 끝낸다. 전체 자리가 찼을 때 「이 탭」 탓 메시지 → 고침.
+    text wait 의 ambiguous 가 click 과 어긋났다(1 px span 둘 → wait 은 여럿, click 은 하나) → click 처럼 바꿔 세기. nth 의 hidden 수 → 판정한 수.
+    시한의 hidden 이 CLI 에 안 보였다 → `hint:`. kick 재시도 횟수를 op 전체가 나눠 썼다 → 보낸 뒤 0 으로. CLI 메시지.
+  - 버틴 것: kick 순서(조각난 주 호출도 그 뒤), 재시도로 두 번 보내지 않음, rel_then 의 놓기·소유, 판정 순번(null 자리 보존), 숨은 탭 입력(mouseMoved 만 느리다), 판정자 8/8, pane-once 가드.
+

@@ -7781,7 +7781,12 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
         .sleep => |ms| cdp_sleepers.append(allocator, .{ .run = run, .wake_ms = cdpNowMs() + ms }) catch finishCdp(run, .failed, "out of memory"),
         .call => |next| {
             defer allocator.free(next.params);
-            if (!run.op.committed() and !cdpStillAllowed(run.async_id)) return finishCdp(run, .failed, "the request was cancelled");
+            if (!run.op.committed() and !cdpStillAllowed(run.async_id)) {
+                // 쥔 문서·후보 묶음이 있으면 놓은 뒤 끝낸다(놓기는 committed — W9b②-3 적대 리뷰 1 회차).
+                const release = run.op.cancel(allocator) catch return finishCdp(run, .failed, "out of memory");
+                if (release) |r| return cdpAdvance(run, r);
+                return finishCdp(run, .failed, "the request was cancelled");
+            }
             if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면 Busy.
@@ -7792,7 +7797,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             _ = sent catch |e| return switch (e) {
                 // 보내지 못했다 — op 이 정한다(누른 뒤의 떼기면 잠깐 뒤 다시, 놓기면 동작의 결과로, 앞선 실패가 있으면 그 이유로 — 3·4 회차).
                 error.NotReady, error.Busy => {
-                    const why = if (e == error.NotReady) "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)" else "too many DevTools calls on this tab";
+                    const why = if (e == error.NotReady) "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)" else "too many DevTools calls at once (on this tab, or across all tabs) — retry shortly";
                     const after = run.op.feed(allocator, .{ .not_sent = why }) catch return finishCdp(run, .failed, "out of memory");
                     return cdpAdvance(run, after);
                 },

@@ -5533,6 +5533,12 @@ pub fn build(b: *std.Build) void {
     run_batch_load.setCwd(b.path("."));
     b.step("test-editor-project-replace-batch-load", "Run inactive closed file staging and reservation judges").dependOn(&run_batch_load.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_load.step);
+    const batch_coordinator_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBC"} });
+    const run_batch_coordinator = b.addRunArtifact(batch_coordinator_tests);
+    run_batch_coordinator.addArg("--maru-expect-tests=14");
+    run_batch_coordinator.setCwd(b.path("."));
+    b.step("test-editor-project-replace-batch-coordinator", "Run mixed source atomic model commit publication and save judges").dependOn(&run_batch_coordinator.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_coordinator.step);
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });
     const run_batch_ui = b.addRunArtifact(batch_ui_tests);
     run_batch_ui.addArg("--maru-expect-tests=10");

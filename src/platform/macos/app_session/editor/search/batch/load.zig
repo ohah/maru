@@ -90,6 +90,38 @@ pub const Staged = struct {
         for (self.items.items) |item| try guard(self.session, item.target, item.proof, self);
     }
 };
+/// pane 슬롯을 편집 전에 예약한다. 게시 자체는 할당 없이 소유권만 넘긴다.
+pub fn reservePane(self: *const Staged, pane: *host.Pane) !void {
+    try pane.terms.ensureUnusedCapacity(self.session.allocator, self.items.items.len);
+}
+pub fn publish(self: *Staged, pane: *host.Pane) void {
+    for (self.items.items) |item| {
+        pane.terms.appendAssumeCapacity(item.term);
+        self.session.allocator.free(item.target.root);
+        self.session.allocator.free(item.target.path);
+    }
+    self.items.clearRetainingCapacity();
+    self.session.editor_batch_reserved_entries -= self.reserved;
+    self.reserved = 0;
+}
+/// 변경 없음인 disk도 문서로 만들지 않고 namespace·점유를 재검증한다.
+pub fn validateTarget(session: *host.AppSession, target: disk.Target, proof: verify.Proof, staged: ?*const Staged) !void {
+    try inputReady(session);
+    try guard(session, target, proof, staged);
+}
+/// 열린 모델의 namespace 별칭도 검사한다. 사라진/비정규 경로의 저장 실패는 기존 CAS 결산에 맡긴다.
+pub fn namespaceIdentity(a: std.mem.Allocator, path: []const u8) !?maru.session.file_tree.Identity {
+    const name = try a.dupeZ(u8, path);
+    defer a.free(name);
+    const fd = std.c.open(name, std.c.O{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true });
+    if (fd < 0) switch (std.posix.errno(fd)) {
+        .NOENT, .NOTDIR => return null,
+        else => return error.UnverifiableOccupiedDocument,
+    };
+    defer _ = std.c.close(fd);
+    const current = try identity(fd);
+    return if (current.kind == 1) current else null;
+}
 fn inputReady(session: *host.AppSession) !void {
     if (session.ime_active or session.ime_editor_commit_pending) return error.InputTransactionPending;
     for (session.editor_search.fields) |field| if (field.preedit.items.len != 0) return error.InputTransactionPending;

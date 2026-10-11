@@ -4222,3 +4222,10 @@ BOM/선두 U+FEFF/CRLF·파일/root 교체·관측 가능한 동일 inode 수정
 IME·항목 예약과 일반 열기 상한 및 caller/registry 필수 준비 할당 실패의 회수를 검사한다.
 전문 재읽기는 worker 책임이며 metadata 일치만으로 원문 일치를 보장하지 않는다.
 다른 창의 web entry·pane 게시/배치 편집·OS IME·앱 종료 배선은 후속 검증 경계다.
+
+혼합 source 배치는 **coordinator API까지 부분 구현**이다.
+`test-editor-project-replace-batch-coordinator`의 `RPBC1`~`RPBC10`과 import 판정자는 실제 혼합
+모델·닫힌 두 문서의 commit/저장·연결 Undo/Redo·포커스·no-op·단일 유효 편집/disk 전용·공유 뷰·
+저장 실패·source/Plan 변조·늦은 충돌과 caller/registry 준비 실패를 검사한다. 최종 연결 준비 allocation에서
+실제 파일을 수정해 commit 직전 재검증도 확인한다. 이 API는 제품 전체 바꾸기 UI에서 아직 호출하지 않는다.
+혼합 worker 수명·제품 입력/캡처·모든 파일시스템·OS IME는 후속 게이트다.

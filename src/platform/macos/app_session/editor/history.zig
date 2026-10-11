@@ -62,9 +62,7 @@ fn capture(self: *AppSession, term: *Term, changes: []const delta.Change, restor
     const copied = try cloneChanges(self.allocator, changes);
     return .{ .term = term, .lease = lease, .selections = selections, .allocator = file.allocator, .changes = copied, .restore = restore };
 }
-fn finish(self: *AppSession, staged: []Staged) void {
-    // 통지는 모든 뷰의 빌린 줄이 새 정본을 가리킨 다음에만 보낸다.
-    for (staged) |*item| item.view.?.publish();
+fn notifyViews(self: *AppSession, staged: []Staged) void {
     // 여러 문서 작업도 편집이다 — 자동완성이 쥔 offset 을 같은 delta 로 민다(§8.2g-f, `shared_edit.applyPrepared` 와 같은 훅).
     for (staged) |*item| ops.completion_client.noteDocumentEdit(self, item.term, item.changes.delta());
     for (staged) |*item| if (item.restore) {
@@ -81,6 +79,11 @@ fn finish(self: *AppSession, staged: []Staged) void {
     self.metal_dirty = true;
 }
 
+fn finish(self: *AppSession, staged: []Staged) void {
+    for (staged) |*item| item.view.?.publish();
+    notifyViews(self, staged);
+}
+
 /// 여러 열린 문서의 편집을 한 작업으로 만든다. 파일 로드·자동 저장은 이 API의 책임이 아니다.
 pub fn apply(self: *AppSession, inputs: []const Input) !u64 {
     if (inputs.len < 2) return error.NotMultipleDocuments;
@@ -91,33 +94,73 @@ pub fn apply(self: *AppSession, inputs: []const Input) !u64 {
 pub fn applyDocuments(self: *AppSession, inputs: []const Input) !?u64 {
     if (inputs.len == 0) return error.NoTargets;
     self.editor_documents.pruneHistoryLinks();
-    var staged: std.ArrayList(Staged) = .empty;
-    defer {
-        for (staged.items) |*item| item.deinit(self.allocator);
-        staged.deinit(self.allocator);
-    }
-    try staged.ensureTotalCapacity(self.allocator, inputs.len);
-    for (inputs) |input| staged.appendAssumeCapacity(try capture(self, input.term, input.changes, input.term == @import("../pane.zig").activePane(self).activeTerm() and input.term.rt.editor_selection != null, false));
-    const targets = try self.allocator.alloc(forward.Target, inputs.len);
-    defer self.allocator.free(targets);
-    for (staged.items, targets) |*item, *target| target.* = .{ .file = &item.term.rt.editorDocument().opened.?.file, .state = &item.term.rt.editorDocument().history, .selections = &item.selections, .changes = item.changes.changes, .view_id = item.term.surface.id };
-    var prepared = try forward.Prepared.prepare(self.allocator, targets);
+    var prepared = try Prepared.prepare(self, inputs, &.{});
     defer prepared.deinit();
-    const members = try self.allocator.alloc(links.Member, staged.items.len);
-    defer self.allocator.free(members);
-    for (staged.items, prepared.items.items, members) |*item, model, *member| {
-        member.* = .{ .document = item.lease.document, .epoch = model.epoch, .entry = model.entry.id };
-        item.span = ops.syntax_color.spanFromInverse(model.entry.inverse.changes);
-        item.view = try publication.preparePublication(self, item.term, item.changes.delta(), model.sels.items.len, item.restore);
-    }
-    var record: ?links.Record = if (inputs.len > 1) try self.editor_documents.links.prepare(self.editor_documents.allocator, members) else null;
-    errdefer if (record) |*pending| pending.deinit(self.editor_documents.allocator);
-    try prepared.commit();
-    const id = if (record) |pending| pending.id else null;
-    if (record) |pending| self.editor_documents.links.publish(pending);
-    finish(self, staged.items);
+    const id = try prepared.commit();
+    prepared.notify();
     return id;
 }
+/// 같은 actor 사건에서 prepare→commit→notify한다. commit 후 통지 전에 새 pane 소유권을 넘길 수 있다.
+pub const Prepared = struct {
+    session: *AppSession,
+    staged: std.ArrayList(Staged) = .empty,
+    model: ?forward.Prepared = null,
+    record: ?links.Record = null,
+    committed: bool = false,
+    notified: bool = false,
+    pub fn deinit(self: *Prepared) void {
+        if (self.record) |*record| record.deinit(self.session.editor_documents.allocator);
+        if (self.model) |*model| model.deinit();
+        for (self.staged.items) |*item| item.deinit(self.session.allocator);
+        self.staged.deinit(self.session.allocator);
+    }
+    pub fn prepare(self: *AppSession, inputs: []const Input, detached: []const *Term) !Prepared {
+        if (inputs.len == 0) return error.NoTargets;
+        var result: Prepared = .{ .session = self };
+        errdefer result.deinit();
+        try result.staged.ensureTotalCapacity(self.allocator, inputs.len);
+        for (inputs) |input| result.staged.appendAssumeCapacity(try capture(self, input.term, input.changes, input.term == @import("../pane.zig").activePane(self).activeTerm() and input.term.rt.editor_selection != null, false));
+        const targets = try self.allocator.alloc(forward.Target, inputs.len);
+        defer self.allocator.free(targets);
+        for (result.staged.items, targets) |*item, *target| target.* = .{ .file = &item.term.rt.editorDocument().opened.?.file, .state = &item.term.rt.editorDocument().history, .selections = &item.selections, .changes = item.changes.changes, .view_id = item.term.surface.id };
+        result.model = try forward.Prepared.prepare(self.allocator, targets);
+        const members = try self.allocator.alloc(links.Member, inputs.len);
+        defer self.allocator.free(members);
+        for (result.staged.items, result.model.?.items.items, members) |*item, model, *member| {
+            member.* = .{ .document = item.lease.document, .epoch = model.epoch, .entry = model.entry.id };
+            item.span = ops.syntax_color.spanFromInverse(model.entry.inverse.changes);
+            var private = false;
+            for (detached) |term| if (term == item.term) {
+                private = true;
+                break;
+            };
+            item.view = if (private)
+                try publication.prepareDetachedPublication(self, item.term, item.changes.delta(), model.sels.items.len)
+            else
+                try publication.preparePublication(self, item.term, item.changes.delta(), model.sels.items.len, item.restore);
+        }
+        if (inputs.len > 1) result.record = try self.editor_documents.links.prepare(self.editor_documents.allocator, members);
+        return result;
+    }
+    /// 실패 가능한 재검증은 정본 변경 전에 끝낸다. 모든 줄·선택 게시까지 완료한 뒤 caller에 반환한다.
+    pub fn commit(self: *Prepared) !?u64 {
+        if (self.committed) return error.AlreadyCommitted;
+        if (self.record) |record| if (record.id != self.session.editor_documents.links.next_id) return error.StaleOperation;
+        try self.model.?.commit();
+        const id = if (self.record) |record| record.id else null;
+        if (self.record) |record| self.session.editor_documents.links.publish(record);
+        self.record = null;
+        for (self.staged.items) |*item| item.view.?.publish();
+        self.committed = true;
+        return id;
+    }
+    pub fn notify(self: *Prepared) void {
+        std.debug.assert(self.committed and !self.notified);
+        notifyViews(self.session, self.staged.items);
+        self.notified = true;
+    }
+};
+
 fn top(term: *Term, direction: step.Direction) ?links.Member {
     const lease = term.rt.editor_document_lease orelse return null;
     const h = &term.rt.editorDocument().history;

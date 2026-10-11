@@ -141,3 +141,8 @@ VS Code의 여러 모델 이력과 전체/현재/취소·상위 이력 변경 �
 `ime_active`가 참인 것을 제품 실행으로 재현했다. 조정자는 확인 선택에 한해 확정 텍스트·marked
 변화·삭제·입력 실패·대기 확정이 전혀 없는 경우만 허용한다. 직접 편집 API의 IME 거절은 유지한다.
 `LHG11`은 이 경로와 조합/확정 대기의 보존을 대조한다.
+
+혼합 배치의 닫힌 준비 문서는 `history.Prepared`가 Undo·뷰·연결 기록을 commit 전에 함께 준비한다.
+commit은 본문·줄/선택을 게시하고, caller가 새 pane 소유권을 넘긴 뒤 notify한다. 기존 `applyDocuments`는
+이 준비 API를 즉시 commit/notify하며 같은 동작을 유지한다. 구체적인 source 신원 인계와 결과 수명은
+[혼합 배치 계획](editor-project-replace-batch.md)이 소유한다.

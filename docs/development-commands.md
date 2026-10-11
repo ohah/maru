@@ -1411,3 +1411,13 @@ python3 tools/test-editor-replace-batch-load-adversarial.py
 ```
 
 [배치 계획](plans/editor-project-replace-batch.md)의 Staged API만 검사한다. pane 게시·제품 배치 편집은 후속이다.
+
+혼합 모델/disk 배치의 전체 준비·commit·pane 게시·저장 판정:
+
+```sh
+mise exec -- zig build test-editor-project-replace-batch-coordinator
+mise exec -- zig build test-editor-project-replace-batch-coordinator -Doptimize=ReleaseFast
+python3 tools/test-editor-replace-batch-coordinator-adversarial.py
+```
+
+[배치 계획](plans/editor-project-replace-batch.md)의 coordinator API를 검사한다. 혼합 worker·제품 전체 바꾸기 UI는 후속이다.

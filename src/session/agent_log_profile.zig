@@ -1,9 +1,9 @@
 //! Process-pinned format and disjoint log namespaces; no OS or file-content inference.
 const std = @import("std");
-pub const Profile = enum { v1, v2 };
+pub const Profile = @import("../agent_log_format.zig").Profile;
 pub const Scope = enum { local, remote };
-pub const local_env: [:0]const u8 = "MARU_AGENT_LOG_FORMAT";
-pub const remote_env: [:0]const u8 = "LC_MARU_LOG_FORMAT";
+pub const local_env = @import("../agent_log_format.zig").local_env;
+pub const remote_env = @import("../agent_log_format.zig").remote_env;
 pub fn parse(value: ?[]const u8) ?Profile {
     const text = value orelse return .v1;
     if (std.mem.eql(u8, text, "1")) return .v1;

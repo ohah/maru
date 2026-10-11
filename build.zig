@@ -4346,6 +4346,18 @@ pub fn build(b: *std.Build) void {
     const run_agent_log_record_tests = b.addRunArtifact(agent_log_record_tests);
     b.step("test-agent-log-record", "Run native hook recording argument contracts").dependOn(&run_agent_log_record_tests.step);
     test_step.dependOn(&run_agent_log_record_tests.step);
+    if (posix_host_tests) {
+        const hook_runtime_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agent_log_runtime_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }), .filters = &.{ "runtime pinned format", "EnvStorage" } });
+        hook_runtime_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+        const run_hook_runtime = b.addRunArtifact(hook_runtime_tests);
+        b.step("test-agent-hook-runtime-format", "Run process-owned hook format environment contracts").dependOn(&run_hook_runtime.step);
+        test_step.dependOn(&run_hook_runtime.step);
+    }
     const agent_log_writer_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/agent_log_writer_test.zig"),
         .target = target,
@@ -7218,15 +7230,15 @@ pub fn build(b: *std.Build) void {
     // 훅이 싣는 칸과 파서가 읽는 칸은 같은 상수에서 나온다 — 두 파일의 판정자를 함께 돌린다.
     const codex_daemon_hook_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/session/agent_hook_command.zig"),
+            .root_source_file = b.path("src/agent_hook_command_test.zig"),
             .target = target,
             .optimize = optimize,
         }),
         .filters = &.{ "codex 훅만 데몬 판정 칸을 싣는다", "codex 훅의 상한은 칸 자리만큼" },
     });
     const run_codex_daemon_hook = b.addRunArtifact(codex_daemon_hook_tests);
-    run_codex_daemon_hook.addArg("--maru-expect-tests=2");
-    run_codex_daemon_hook.addArg("--maru-expect-passed=2");
+    run_codex_daemon_hook.addArg("--maru-expect-tests=3");
+    run_codex_daemon_hook.addArg("--maru-expect-passed=3");
     codex_daemon_step.dependOn(&run_codex_daemon_hook.step);
     const codex_daemon_parse_tests = addProjectTest(b, .{
         .root_module = b.createModule(.{

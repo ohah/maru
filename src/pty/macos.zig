@@ -3,6 +3,7 @@ const builtin = @import("builtin"); // 이 파일은 macOS 전용이지만 테�
 const terminal = @import("../terminal.zig");
 const types = @import("types.zig");
 const inherited_env = @import("../inherited_env.zig");
+const agent_log_format = @import("../agent_log_format.zig");
 // maru 자체 terminfo 로컬 캐시(경로·버전·컴파일 명령)의 단일 출처. `maru terminfo` 서브커맨드(cli)와 공유해,
 // 서브커맨드로 재컴파일한 캐시를 여기 spawn 자동 컴파일이 그대로 재사용한다(top-level 중립 모듈 — color.zig 결).
 const terminfo_cache = @import("../terminfo_cache.zig");
@@ -669,7 +670,7 @@ pub const PtySession = struct {
 
         // 중립 계약의 `shell_integration`(파일 갈래)을 이 백엔드의 메커니즘 이름(`zdotdir` = zsh `ZDOTDIR`)으로
         // 넘긴다 — 매핑이 백엔드 몫이라는 계약 그대로다(docs/windows-platform.md §4.2).
-        var env_storage = try EnvStorage.initWithParentSnapshot(allocator, request.env, request.parent_env, request.env_overrides, request.term, request.term_program, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance, request.hook_pane);
+        var env_storage = try EnvStorage.initWithHookProfile(allocator, request.env, request.parent_env, request.env_overrides, request.term, request.term_program, if (request.shell_integration) |si| si.assetsDir() else null, request.ssh_integration_bin, request.pane_id, request.hook_instance, request.hook_pane, request.hook_log_profile);
         defer env_storage.deinit();
 
         var window_size = winsizeFromTerminalSize(request.size, request.cell_width_px, request.cell_height_px);
@@ -1541,6 +1542,10 @@ const EnvStorage = struct {
     }
 
     fn initWithParentSnapshot(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, term_program: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?[]const u8, hook_pane: ?[]const u8) !EnvStorage {
+        return initWithHookProfile(allocator, env, parent_env, env_overrides, term, term_program, zdotdir, ssh_integration_bin, pane_id, hook_instance, hook_pane, .v1);
+    }
+
+    fn initWithHookProfile(allocator: std.mem.Allocator, env: []const []const u8, parent_env: ?[]const []const u8, env_overrides: []const []const u8, term: []const u8, term_program: []const u8, zdotdir: ?[]const u8, ssh_integration_bin: ?[]const u8, pane_id: ?u64, hook_instance: ?[]const u8, hook_pane: ?[]const u8, profile: agent_log_format.Profile) !EnvStorage {
         var entries: std.ArrayList([:0]u8) = .empty;
         errdefer {
             for (entries.items) |owned| allocator.free(owned);
@@ -1598,6 +1603,9 @@ const EnvStorage = struct {
             }
         }
 
+        const format_entry = try std.fmt.allocPrint(allocator, "{s}={s}", .{ agent_log_format.local_env, profile.envValue() });
+        defer allocator.free(format_entry);
+        try upsertEnv(allocator, &entries, format_entry);
         return materialize(allocator, &entries);
     }
 
@@ -1747,7 +1755,8 @@ const EnvStorage = struct {
         // **셋 다 내부 예약 키다.** `MARU_PANE_ID` 는 control-plane self selector이고,
         // `MARU_HOOK_INSTANCE`/`MARU_HOOK_PANE` 은 에이전트 훅 로그 경로의 두 칸이다(docs/agent-hooks.md §4).
         // 부모에게서 상속된 값이 남으면 **다른 인스턴스·다른 pane 의 로그에 쓰게** 되므로 같은 규율로 떨군다.
-        return std.mem.startsWith(u8, entry, "MARU_PANE_ID=") or
+        return inherited_env.keyIs(entry, agent_log_format.local_env, false) or
+            std.mem.startsWith(u8, entry, "MARU_PANE_ID=") or
             std.mem.startsWith(u8, entry, "MARU_HOOK_INSTANCE=") or
             std.mem.startsWith(u8, entry, "MARU_HOOK_PANE=");
     }
@@ -2537,14 +2546,15 @@ test "EnvStorage strips the outer multiplexer identity (TMUX/TMUX_PANE)" {
     try std.testing.expectEqualStrings("TMUX=explicit", std.mem.span(explicit.envpPtr()[0].?));
 }
 
-test "EnvStorage explicit env is passed through verbatim (term arg ignored)" {
+test "EnvStorage explicit env preserves ordinary keys and adds the runtime format (term arg ignored)" {
     // 명시 env면 term 인자는 무시된다(테스트가 완전한 env를 직접 준다).
     var storage = try EnvStorage.init(std.testing.allocator, &.{ "FOO=bar", "TERM=dumb" }, &.{}, "xterm-ghostty", null, null, null, null);
     defer storage.deinit();
     const envp = storage.envpPtr();
     try std.testing.expectEqualStrings("FOO=bar", std.mem.span(envp[0].?));
     try std.testing.expectEqualStrings("TERM=dumb", std.mem.span(envp[1].?));
-    try std.testing.expectEqual(@as(?[*:0]const u8, null), envp[2]);
+    try std.testing.expectEqualStrings("MARU_AGENT_LOG_FORMAT=1", std.mem.span(envp[2].?));
+    try std.testing.expectEqual(@as(?[*:0]const u8, null), envp[3]);
 }
 
 // env.<KEY> 주입(config) — 부모 상속 위에 upsert. 같은 KEY는 덮어쓰고 없으면 추가("부모 + 사용자" 정책).
@@ -3066,4 +3076,26 @@ test "setCellPixels updates the live PTY winsize and is idempotent" {
     try session.setCellPixels(9, 18);
     try std.testing.expect(std.c.ioctl(fd, std.c.T.IOCGWINSZ, &ws) >= 0);
     try std.testing.expectEqual(@as(u16, 180), ws.xpixel); // 20 * 9
+}
+
+test "runtime pinned format ignores inherited and configured selectors" {
+    const a = std.testing.allocator;
+    var inherited = try EnvStorage.initWithParentSnapshot(a, &.{}, &.{"MARU_AGENT_LOG_FORMAT=2"}, &.{"MARU_AGENT_LOG_FORMAT=2"}, "xterm-256color", "maru", null, null, null, "inst", "1");
+    defer inherited.deinit();
+    const got = envValueCount(&inherited, "MARU_AGENT_LOG_FORMAT=");
+    try std.testing.expectEqual(@as(usize, 1), got.count);
+    try std.testing.expectEqualStrings("1", got.last.?);
+}
+
+test "runtime pinned format owns explicit duplicate empty and opposite values" {
+    const a = std.testing.allocator;
+    for ([_]agent_log_format.Profile{ .v1, .v2 }) |profile| {
+        var storage = try EnvStorage.initWithHookProfile(a, &.{ "MARU_AGENT_LOG_FORMAT=", "MARU_AGENT_LOG_FORMAT=2", "MARU_AGENT_LOG_FORMAT=1", "MARU_AGENT_LOG_FORMAT_HINT=ordinary" }, null, &.{ "MARU_AGENT_LOG_FORMAT=3", "MARU_AGENT_LOG_FORMAT=" }, "xterm-256color", "maru", null, null, null, "inst", "1", profile);
+        defer storage.deinit();
+        const got = envValueCount(&storage, "MARU_AGENT_LOG_FORMAT=");
+        try std.testing.expectEqual(@as(usize, 1), got.count);
+        try std.testing.expectEqualStrings(if (profile == .v1) "1" else "2", got.last.?);
+        const hint = envValueCount(&storage, "MARU_AGENT_LOG_FORMAT_HINT=");
+        try std.testing.expectEqualStrings("ordinary", hint.last.?);
+    }
 }

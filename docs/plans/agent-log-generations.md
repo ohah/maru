@@ -383,3 +383,15 @@ Codex hash는 전환 명령과 기존 `agent_hook_trust`로 계산하고 install
 요청 없이 격리 CODEX_HOME의 app-server만 사용한다. 신뢰 정상·명령 변경 후 modified·
 기존 reconciliation 후 trusted와 사용자 승인 값의 divergence 보존을 구분한다.
 실제 설치와 runtime env 기본 전환은 이 검증 뒤 별도 단계로 유지한다.
+
+
+## 4c-3 runtime format 고정 경계
+
+먼저 PTY 생성 요청에 typed profile(default v1)을 둔다. format enum과 env 이름은
+OS 없는 중립 leaf에서 공유하고, namespace·명령 생성 정책은 기존 session 모듈에 둔다.
+부모 snapshot·명시 env·사용자 override의 local format은 제거하고 요청의 profile을
+마지막에 한 번 주입한다. 기존 runtime의 환경은 변경하지 않는다. GUI가 host에
+넘기는 process-local identity는 기존대로 제거한다. metadata/capability 배선 전의
+명시적 v2 persistent 요청은 spawn 전에 거부하며 조용히 v1로 낮추지 않는다. 이 경계가 재접속 metadata와 capability
+협상을 대신하지 않는다. host state·upgrade handoff·attach 관측에 immutable profile을
+연결한 후에만 v2 기본값을 활성화한다.

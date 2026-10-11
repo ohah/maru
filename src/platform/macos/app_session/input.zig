@@ -190,36 +190,9 @@ pub fn chordShadowsBuiltin(chord: config_mod.keybinding.KeyChord) bool {
     return false;
 }
 
-/// terminal.KeyEvent → chrome.input.InputEvent. chrome은 terminal 타입을 모르므로(L1/L3 경계) 이 변환을
-/// 플랫폼 어댑터가 소유한다. 모디파이어(shift/ctrl/opt/cmd)도 매핑한다 — find의 Shift+Enter(이전 매치)·
-/// ⌘/⌃/⌥+글자(닫기) 판정에 쓴다. char가 아닌 키의 codepoint는 0.
+/// terminal.KeyEvent → chrome.input.InputEvent. 표는 중립 `app/chrome_key.zig` 하나다 — Windows 도 같은 것을 부른다(layering §3.5).
 pub fn chromeInputFromKeyEvent(event: terminal.KeyEvent) chrome.input.InputEvent {
-    const key: chrome.input.Key = switch (event.key) {
-        .enter => .enter,
-        .escape => .escape,
-        .arrow_up => .up,
-        .arrow_down => .down,
-        .arrow_left => .left,
-        .arrow_right => .right,
-        .backspace => .backspace,
-        .char => .char,
-        .tab => .tab,
-        else => .other,
-    };
-    const cp: u21 = switch (event.key) {
-        .char => |c| c,
-        else => 0,
-    };
-    return .{ .key = .{
-        .key = key,
-        .codepoint = cp,
-        .mods = .{
-            .shift = event.modifiers.shift,
-            .control = event.modifiers.control,
-            .option = event.modifiers.option,
-            .command = event.modifiers.command,
-        },
-    } };
+    return .{ .key = maru.app.chrome_key.chromeKeyEvent(event) };
 }
 
 /// Metal TerminalView에서 들어온 key는 물리 responder가 최신 사용자 intent다. file-tree와 surface-publish

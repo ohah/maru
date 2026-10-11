@@ -48,6 +48,35 @@ pub const Buffers = struct {
 
 pub const ViewError = ui_paint.PaintError || error{ InsufficientRunBuffer, InsufficientTextBuffer, MissingRect };
 
+pub const DrawBufferSizes = struct { ops: usize, runs: usize, text_bytes: usize };
+
+/// `view` 가 쓸 버퍼 크기 — **호스트가 다시 세지 않는다**(layering-and-portability.md §3.5). 예전에는 macOS(`agent_dock.zig`)와
+/// Windows(`win32_agent_surface.zig`)가 각자 적었고, macOS 가 나중에 더한 펼침 몫이 Windows 에는 빠진 채 갈라져 있었다. 모자라면
+/// 결과는 「일부만 안 그려짐」이 아니라 **도크 전체 정지**다(`view` 가 실패하면 프레임을 못 낸다). 그래서 몫마다 넉넉히 센다.
+///
+/// - **op**: generic paint 의 quad 는 published entry 하나당 최대 하나다(`tree_entries` — 상수로 세면 tree 가 자라는 변경마다
+///   조용히 모자란다). 거기에 고정 header·scope·search 카드의 text 22, 카드마다 title·summary·provider·metadata·disclosure 와
+///   SVG 아이콘·label(B1-button-a — 둘을 함께 잡아야 label 만 빠진 빈 버튼이 안 생긴다) 6, 펼침의 동작·turn 마다 2, 여유 4.
+/// - **run**: 카드 하나가 쓰는 run 은 title·summary·provider·chevron 넷에 메타 줄의 세그먼트 넷과 구분자 셋을 더해 11 — 여유
+///   1 을 더해 12. 메타는 op 하나지만 run 은 여럿이라(한 줄 안의 색 위계) op 예산과 같은 값으로 두면 모자란다.
+/// - **text byte**: 고정 1024, 카드마다 1024, 펼침 turn 마다 1024.
+pub fn drawBufferSizes(items: []const types.Item, tree_entries: usize) DrawBufferSizes {
+    var expansion_actions: usize = 0;
+    var expansion_turns: usize = 0;
+    for (items) |item| switch (item) {
+        .group => {},
+        .card => |card| if (card.expanded) |expanded| {
+            expansion_actions += 2 + @as(usize, @intFromBool(expanded.focus_live_enabled));
+            expansion_turns += expanded.turns.len;
+        },
+    };
+    return .{
+        .ops = tree_entries + 22 + items.len * 6 + expansion_actions * 2 + expansion_turns * 2 + 4,
+        .runs = 10 + items.len * 12 + expansion_actions * 2 + expansion_turns * 2 + 4,
+        .text_bytes = 1024 + items.len * 1024 + expansion_turns * 1024,
+    };
+}
+
 pub fn view(props: types.Props, frame: build.Frame, state: interaction.InteractionState, tk: *const tokens.Tokens, buffers: Buffers) ViewError!draw.ChromeDraw {
     // 스크롤바 fade 는 **여기서** 얹는다 — tree(`frame`)는 alpha 를 모른 채 불변으로 남아야
     // 발행 경로의 동등 비교가 살아 있다(계약 §7).
@@ -2543,4 +2572,48 @@ test "SessionDock never publishes the sort toggle at a width that erases the hea
     // 위 단언이 실제로 실행됐는가. 둘 다 0이 아니어야 이 루프가 경계를 가로지른 것이다.
     try std.testing.expect(published > 0);
     try std.testing.expect(withheld > 0);
+}
+
+test "drawBufferSizes — 펼친 카드가 상세 상한(turn 셋 · 480 byte · 동작 셋)까지 차도 view 가 버퍼 부족으로 멈추지 않는다 (layering §3.5)" {
+    // 두 호스트가 이 예산 하나를 쓴다. 상한에서 재는 이유: 모자라면 그 결과는 「상세만 빠짐」이 아니라 도크 전체 정지다. (상한을 넘는
+    // 3000 byte turn 으로 재면 펼침 몫이 없는 옛 Windows 식은 `InsufficientTextBuffer` 로 실패했다 — 지금 상한에서는 버텼다.)
+    const long = "가" ** 160; // 480 byte — L2 가 자르는 상한(`agent_session_archive_detail.max_turn_bytes`)
+    var turns: [3]types.Turn = undefined; // 카드 하나의 상세 turn 상한(`build` 의 `TooManyTurns`)
+    for (&turns, 0..) |*t, i| t.* = .{ .role = if (i % 2 == 0) .user else .assistant, .text = long };
+    const props = types.Props{
+        .viewport_px = .{ .width = 640, .height = 20000 },
+        .cell_width_px = 8,
+        .cell_height_px = 16,
+        .snapshot_generation = 3,
+        .displayed_count = 1,
+        .expanded_identity = 1,
+        .items = &.{
+            .{ .card = .{ .identity = 1, .provider = .claude, .title = "expanded", .summary = "summary", .metadata = .{ .messages = "meta" }, .expanded = .{ .state = .ready, .resume_enabled = true, .reveal_enabled = true, .focus_live_enabled = true, .turns = &turns } } },
+        },
+    };
+    const sizes = build.bufferSizes(props.items);
+    const a = std.testing.allocator;
+    const nodes = try a.alloc(tree.UiNode, sizes.nodes);
+    defer a.free(nodes);
+    const entries = try a.alloc(tree.RectEntry, sizes.entries);
+    defer a.free(entries);
+    const layout_items = try a.alloc(@import("../../ui/layout.zig").Item, sizes.layout_items);
+    defer a.free(layout_items);
+    const flex_scratch = try a.alloc(@import("../../ui/layout.zig").FlexScratch, sizes.flex_scratch);
+    defer a.free(flex_scratch);
+    const child_rects = try a.alloc(@import("../../ui/layout.zig").UiRect, sizes.child_rects);
+    defer a.free(child_rects);
+    const actions = try a.alloc(@import("ids.zig").Entry, sizes.actions);
+    defer a.free(actions);
+    const frame = try build.build(props, .{ .nodes = nodes, .entries = entries, .layout_items = layout_items, .flex_scratch = flex_scratch, .child_rects = child_rects, .actions = actions });
+    const tk = fixtureTokens();
+
+    const d = drawBufferSizes(props.items, frame.tree.entries.len);
+    const ops = try a.alloc(draw.Op, d.ops);
+    defer a.free(ops);
+    const runs = try a.alloc(draw.Run, d.runs);
+    defer a.free(runs);
+    const text_bytes = try a.alloc(u8, d.text_bytes);
+    defer a.free(text_bytes);
+    _ = try view(props, frame, .{}, &tk, .{ .ops = ops, .runs = runs, .text_bytes = text_bytes });
 }

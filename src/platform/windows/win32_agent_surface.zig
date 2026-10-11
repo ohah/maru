@@ -164,19 +164,13 @@ pub fn build(
         .actions = try a.alloc(component.ids.Entry, bs.actions),
     }) catch return error.TreeBuildFailed;
 
-    // ── 그리기 예산 — **macOS 와 같은 식이다**(`app_session/agent_dock.zig`) ─────────────────
+    // ── 그리기 예산 — 컴포넌트가 소유한다(`session_dock.view.drawBufferSizes`, macOS 도 같은 것을 부른다 — layering §3.5) ──
     //
-    // 이 컴포넌트에는 `drawBufferSizes` 가 없어서 호출자가 잡는다. 그 파일이 왜 이 값들인지까지
-    // 적어 뒀고 여기서 되풀이하지 않는다 — 요점만: **quad 몫은 published entry 수에서 유도한다**
-    // (상수로 세면 tree 가 자라는 변경마다 조용히 모자라고, 그 결과가 "그 컴포넌트만 안 그려짐" 이
-    // 아니라 **도크 전체 정지**다 — `view` 가 실패하면 프레임을 못 낸다).
-    //
-    // 카드 하나가 쓰는 run 은 11 이라 여유 1 을 더해 12 다(제목·요약·provider·셰브런 넷 + 메타 줄의
-    // 세그먼트 넷과 구분자 셋).
-    const item_n = opts.items.len;
-    const ops_budget = frame.tree.entries.len + 22 + item_n * 6 + 4;
-    const runs_budget = 10 + item_n * 12 + 4;
-    const text_budget = 1024 + item_n * 1024;
+    // 예전에는 macOS 의 식을 「같은 식」이라며 여기에 옮겨 적었는데, macOS 가 나중에 더한 펼침 몫이 빠진 채 갈라져 있었다.
+    const draw_sizes = component.view.drawBufferSizes(opts.items, frame.tree.entries.len);
+    const ops_budget = draw_sizes.ops;
+    const runs_budget = draw_sizes.runs;
+    const text_budget = draw_sizes.text_bytes;
     const draws = component.view.view(props, frame, state.interaction, opts.tokens, .{
         .ops = try a.alloc(maru.chrome.draw.Op, ops_budget),
         .runs = try a.alloc(maru.chrome.draw.Run, runs_budget),

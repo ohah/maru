@@ -15344,10 +15344,8 @@ pub const AppSession = struct {
                 const g = dock_ops.dockGeometry(self);
                 // sizePtForPointer의 권위 경계는 dock 본문 시작점이다(divider의 dock 쪽 edge). 포인터가 확장
                 // hit band 어디에 있든 이 간격을 보존해 경계가 클릭점으로 순간 이동하지 않게 한다.
-                const offset_px = switch (self.dock.side) {
-                    .right => @as(f64, @floatFromInt(g.dock.x)) - x_px,
-                    .bottom => @as(f64, @floatFromInt(g.dock.y)) - y_px,
-                };
+                // 그 보정은 `sizePtForPointer` 의 짝이라 부호를 함께 고정한 중립 `grabOffsetPx` 하나다(Windows 도 같은 것을 부른다 — layering §3.5).
+                const offset_px = dock_layout.grabOffsetPx(g, self.dock.side, x_px, y_px);
                 self.beginPointerGesture(.{ .dock_outer_divider = .{ .offset_px = offset_px } });
                 self.drag_autoscroll = 0;
                 self.mouse_drag_selecting = false;

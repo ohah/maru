@@ -114,6 +114,7 @@ pub const guides_client = @import("guides.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const project_replace_batch = @import("search/batch.zig");
+pub const project_replace_batch_load = @import("search/batch/load.zig");
 pub const project_replace_batch_disk = @import("search/batch/disk.zig");
 pub const project_replace_batch_worker = @import("search/batch/worker.zig");
 pub const linked_history = @import("history.zig");
@@ -165,7 +166,7 @@ pub fn openPath(io: std.Io, allocator: std.mem.Allocator, path: []const u8) Open
 }
 
 /// 이 경로에 쓸 수 있는가. **여는 것을 막는 판정이 아니라 표시할 값**이다.
-fn isWritable(path: []const u8) bool {
+pub fn isWritable(path: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     if (path.len >= buf.len) return false;
     @memcpy(buf[0..path.len], path);
@@ -2567,6 +2568,26 @@ pub fn prepareRecoveryPath(self: *AppSession, path: []const u8, restored: ?recov
     // 전부 이 한 줄을 지난다(적대적 검증 2 회차: entry 플래그였다면 길마다 배선이 필요했다).
     if (file_panel_ops.remoteViewPathIsReadOnly(path)) opened.file.read_only = true;
 
+    return prepareOpened(self, path, opened, restored);
+}
+
+/// worker가 검증한 본문과 BOM 속성으로 새 문서를 만든다. 새 복구 ID로 이전 백업과 독립적이다.
+pub fn prepareVerifiedText(self: *AppSession, path: []const u8, bytes: []const u8, has_bom: bool) OpenFileError!Prepared {
+    const bom_bytes: usize = if (has_bom) editor.document.utf8_bom.len else 0;
+    if (bytes.len > read_limit_bytes - bom_bytes) return error.TooLarge;
+    // 이미 해석한 전문이다. 본문 선두 U+FEFF를 파일 BOM으로 다시 소비하지 않는다.
+    var file = try editor.edit_doc.EditableFile.initContent(self.allocator, bytes, !isWritable(path) or file_panel_ops.remoteViewPathIsReadOnly(path));
+    file.format.has_bom = has_bom;
+    var disk_hash = std.hash.Wyhash.init(0);
+    if (has_bom) disk_hash.update(editor.document.utf8_bom);
+    disk_hash.update(file.content);
+    var opened: Opened = .{ .file = file, .saved_hash = contentHash(file.content), .disk_hash = disk_hash.final() };
+    errdefer opened.deinit(self.allocator);
+    return prepareOpened(self, path, opened, null);
+}
+
+// opened의 소유권은 성공할 때만 registry로 넘긴다. 실패 시 caller가 회수한다.
+fn prepareOpened(self: *AppSession, path: []const u8, opened: Opened, restored: ?recovery_store.Id) OpenFileError!Prepared {
     // **줄 슬라이스를 미리 만든다.** `frame.build`는 문서 전체를 받아야 스크롤바 길이가 맞는데(§4.1a),
     // 매 프레임 다시 만들면 프레임마다 할당이 생긴다. 줄들은 문서 버퍼를 빌리므로 문서보다 오래 살면 안 된다.
     const n = opened.file.lineCount();
@@ -61323,4 +61344,202 @@ test "RPBU6 모든 수집과 worker 준비 할당 실패 및 화면 게시 실�
         break;
     }
     try testing.expect(success and failures > 0);
+}
+
+const BatchLoadFixture = struct {
+    targets: [2]project_replace_batch_disk.Target,
+    files: project_replace_batch_disk.Prepared,
+    root: []u8,
+    fn init(fx: *PaneFixture, text: []const u8) !BatchLoadFixture {
+        const a = testing.allocator;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const root = try a.dupe(u8, buf[0..try fx.dir.dir.realPath(testing.io, &buf)]);
+        errdefer a.free(root);
+        var actual = try @import("search/process.zig").openRoot(a, testing.io, root);
+        defer actual.deinit(a, testing.io);
+        const device: std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(actual.device))) = @bitCast(actual.device);
+        const id: maru.session.file_tree.Identity = .{ .device = device, .inode = actual.stat.inode, .kind = 2 };
+        var hash: [32]u8 = undefined;
+        const body = if (std.mem.startsWith(u8, text, editor.document.utf8_bom)) text[3..] else text;
+        std.crypto.hash.sha2.Sha256.hash(body, &hash, .{});
+        var targets: [2]project_replace_batch_disk.Target = undefined;
+        for ([_][]const u8{ "inactive-a.txt", "inactive-b.txt" }, 0..) |path, i| {
+            try fx.dir.dir.writeFile(testing.io, .{ .sub_path = path, .data = text });
+            targets[i] = .{ .root = root, .path = path, .root_identity = id, .hash = hash };
+        }
+        var control: @import("search/process.zig").Control = .{};
+        return .{ .root = root, .targets = targets, .files = try project_replace_batch_disk.Prepared.prepare(a, testing.io, &targets, &.{}, &control, 1000, 1000) };
+    }
+    fn deinit(self: *BatchLoadFixture) void {
+        self.files.deinit(testing.allocator);
+        testing.allocator.free(self.root);
+    }
+};
+fn batchLoadViews(session: *AppSession) usize {
+    var result: usize = 0;
+    for (session.editor_documents.slots.items) |slot| if (slot.document != null) {
+        result += 1;
+    };
+    return result;
+}
+test "RPBL1 두 문서를 비활성으로 준비하고 caller 원문 해제 후에도 소유한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const active = pane_ops.activePane(fx.session);
+    const n = active.terms.items.len;
+    const before_docs = batchLoadViews(fx.session);
+    var input = try BatchLoadFixture.init(&fx, editor.document.utf8_bom ++ editor.document.utf8_bom ++ "한글\r\n");
+    defer input.deinit();
+    var staged = try project_replace_batch_load.Staged.prepare(fx.session, &input.targets, input.files.files.items);
+    defer staged.deinit();
+    input.files.deinit(testing.allocator);
+    try testing.expectEqual(n, active.terms.items.len);
+    try testing.expect(active.activeTerm() == fx.term);
+    try testing.expectEqual(before_docs + 2, batchLoadViews(fx.session));
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_batch_reserved_entries);
+    for (staged.items.items) |item| {
+        const opened = item.term.rt.editorDocument().opened.?;
+        try testing.expectEqualStrings(editor.document.utf8_bom ++ "한글\r\n", opened.file.content);
+        try testing.expect(opened.file.format.has_bom);
+        const raw = try opened.file.saveBytes(testing.allocator);
+        defer testing.allocator.free(raw);
+        try testing.expectEqualStrings(editor.document.utf8_bom ++ editor.document.utf8_bom ++ "한글\r\n", raw);
+        try testing.expectEqual(contentHash(raw), opened.disk_hash.?);
+        try testing.expectEqual(@as(usize, 0), item.term.rt.editorDocument().history.undo_len);
+        try testing.expect(!opened.isDirty());
+        try testing.expect(item.term.file_entry.?.native_editor);
+    }
+    try staged.validate();
+    const oversized = try testing.allocator.alloc(u8, read_limit_bytes + 1);
+    defer testing.allocator.free(oversized);
+    try testing.expectError(error.TooLarge, prepareVerifiedText(fx.session, "unused", oversized, false));
+    try testing.expectError(error.TooLarge, prepareVerifiedText(fx.session, "unused", oversized[0 .. read_limit_bytes - 2], true));
+    try testing.expectEqual(before_docs + 2, batchLoadViews(fx.session));
+}
+test "RPBL2 마지막 대상 교체 점유와 IME는 기존 문서와 예약을 보존한다" {
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var input = try BatchLoadFixture.init(&fx, "foo");
+        defer input.deinit();
+        const before_docs = batchLoadViews(fx.session);
+        const n = pane_ops.activePane(fx.session).terms.items.len;
+        if (mode == 0) {
+            try fx.dir.dir.rename("inactive-b.txt", fx.dir.dir, "old.txt", testing.io);
+            try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "inactive-b.txt", .data = "foo" });
+        }
+        if (mode == 1) {
+            const path = try std.fs.path.join(testing.allocator, &.{ input.root, "inactive-b.txt" });
+            defer testing.allocator.free(path);
+            _ = try openPathInActivePane(fx.session, path);
+        }
+        if (mode == 2) fx.session.ime_editor_commit_pending = true;
+        if (project_replace_batch_load.Staged.prepare(fx.session, &input.targets, input.files.files.items)) |value| {
+            var unexpected = value;
+            unexpected.deinit();
+            return error.UnexpectedStage;
+        } else |_| {}
+        fx.session.ime_editor_commit_pending = false;
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
+        try testing.expectEqual(before_docs + @as(usize, if (mode == 1) 1 else 0), batchLoadViews(fx.session));
+        try testing.expectEqual(n + @as(usize, if (mode == 1) 1 else 0), pane_ops.activePane(fx.session).terms.items.len);
+        try testing.expectEqual(@as(usize, 0), fx.term.rt.editorDocument().history.undo_len);
+    }
+}
+test "RPBL3 준비 뒤의 별칭 문서와 root 교체를 다시 검사한다" {
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var input = try BatchLoadFixture.init(&fx, "foo");
+        defer input.deinit();
+        var staged = try project_replace_batch_load.Staged.prepare(fx.session, &input.targets, input.files.files.items);
+        defer staged.deinit();
+        if (mode == 0) {
+            try fx.dir.dir.symLink(testing.io, "inactive-b.txt", "alias.txt", .{});
+            const path = try std.fs.path.join(testing.allocator, &.{ input.root, "alias.txt" });
+            defer testing.allocator.free(path);
+            _ = try openPathInActivePane(fx.session, path);
+            try testing.expectError(error.PathOccupied, staged.validate());
+        } else {
+            const old = try std.fmt.allocPrint(testing.allocator, "{s}.moved", .{input.root});
+            defer testing.allocator.free(old);
+            try std.Io.Dir.cwd().rename(input.root, std.Io.Dir.cwd(), old, testing.io);
+            defer std.Io.Dir.cwd().rename(old, std.Io.Dir.cwd(), input.root, testing.io) catch unreachable;
+            try std.Io.Dir.cwd().createDir(testing.io, input.root, .default_dir);
+            defer std.Io.Dir.deleteDirAbsolute(testing.io, input.root) catch unreachable;
+            try testing.expectError(error.RootChanged, staged.validate());
+        }
+        try testing.expectEqualStrings("foo", staged.items.items[0].term.rt.editorDocument().opened.?.file.content);
+    }
+}
+test "RPBL4 파일 항목 예약은 일반 열기에도 적용되고 해제 뒤 다시 열린다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try BatchLoadFixture.init(&fx, "foo");
+    defer input.deinit();
+    fx.session.editor_batch_reserved_entries = maru.session.dock_panel.max_entries - 1;
+    try testing.expectError(error.TooManyEntries, project_replace_batch_load.Staged.prepare(fx.session, &input.targets, input.files.files.items));
+    fx.session.editor_batch_reserved_entries = maru.session.dock_panel.max_entries;
+    const path = try std.fs.path.join(testing.allocator, &.{ input.root, "inactive-a.txt" });
+    defer testing.allocator.free(path);
+    try testing.expectError(error.TooManyEntries, pane_ops.openNativeFileTermInActivePane(fx.session, path));
+    fx.session.editor_batch_reserved_entries = 0;
+    _ = try pane_ops.openNativeFileTermInActivePane(fx.session, path);
+}
+
+test "RPBL5 같은 inode의 준비 뒤 외부 수정을 발견한다" {
+    for ([_][]const u8{ "bar", "external-change" }) |changed| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var input = try BatchLoadFixture.init(&fx, "foo");
+        defer input.deinit();
+        var staged = try project_replace_batch_load.Staged.prepare(fx.session, &input.targets, input.files.files.items);
+        defer staged.deinit();
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "inactive-b.txt", .data = changed });
+        try testing.expectError(error.FileChanged, staged.validate());
+    }
+}
+
+test "RPBL6 caller와 registry의 모든 필수 준비 실패는 새 문서와 예약만 회수한다" {
+    for (0..2) |allocator_kind| {
+        var denied: usize = 0;
+        var success = false;
+        for (0..256) |index| {
+            var fx = try PaneFixture.init(testing.allocator);
+            defer fx.deinit(testing.allocator);
+            fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+            try testing.expect(insertText(fx.session, fx.term, "existing:"));
+            breakUndoGroup(fx.term);
+            try testing.expect(insertText(fx.session, fx.term, "temporary:"));
+            try testing.expect(undoEdit(fx.session, fx.term));
+            const before_selection = fx.term.rt.editor_selection;
+            var input = try BatchLoadFixture.init(&fx, "foo");
+            defer input.deinit();
+            const before_docs = batchLoadViews(fx.session);
+            const before_allocator = fx.session.allocator;
+            const registry_allocator = fx.session.editor_documents.allocator;
+            var failing = testing.FailingAllocator.init(if (allocator_kind == 0) before_allocator else registry_allocator, .{ .fail_index = index, .resize_fail_index = 0 });
+            if (allocator_kind == 0) fx.session.allocator = failing.allocator() else fx.session.editor_documents.allocator = failing.allocator();
+            const prepared = project_replace_batch_load.Staged.prepare(fx.session, &input.targets, input.files.files.items);
+            if (prepared) |value| {
+                var staged = value;
+                staged.deinit();
+            } else |_| denied += 1;
+            fx.session.allocator = before_allocator;
+            fx.session.editor_documents.allocator = registry_allocator;
+            try testing.expectEqual(before_docs, batchLoadViews(fx.session));
+            try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
+            try testing.expect(pane_ops.activePane(fx.session).activeTerm() == fx.term);
+            try testing.expectEqual(@as(usize, 1), fx.term.rt.editorDocument().history.undo_len);
+            try testing.expectEqual(@as(usize, 1), fx.term.rt.editorDocument().history.redo_len);
+            try testing.expectEqualDeep(before_selection, fx.term.rt.editor_selection);
+            try testing.expect(std.mem.startsWith(u8, fx.term.rt.editorDocument().opened.?.file.content, "existing:"));
+            if (!failing.has_induced_failure) {
+                success = true;
+                break;
+            }
+        }
+        std.debug.print("batch_load allocator={d} denied={d}\n", .{ allocator_kind, denied });
+        try testing.expect(denied > 0 and success);
+    }
 }

@@ -5847,6 +5847,8 @@ pub const AppSession = struct {
     editor_project_search_failure_stamp: u64 = 0,
     editor_project_search_failure_request: u64 = 0,
     editor_project_search_prepared: ?@import("app_session/editor/search/owner.zig").Prepared = null,
+    // 비활성 배치가 새 파일 entry를 게시하기 전까지 소유하는 창별 임시 예약이다.
+    editor_batch_reserved_entries: usize = 0,
     editor_documents: *maru.session.editor.document_registry.Registry = &app_runtime.editor_documents,
     // maru의 launch cwd가 `/`였는지(.app 더블클릭·launchd·open 증상). init에서 getcwd로 한 번만 판정해 캐시한다 —
     // maru는 자기 cwd를 안 바꾸므로 새 탭/분할마다 getcwd를 반복하지 않고, workspace.root 미설정 시 home 승격

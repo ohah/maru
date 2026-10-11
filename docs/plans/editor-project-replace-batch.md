@@ -1,6 +1,6 @@
 # 프로젝트 바꾸기 — 여러 파일 적용 S4c
 
-상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 모델 로드와 배치 worker/actor/UI 연결은 후속이다.
+상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 문서 준비·파일 항목 예약 API까지 구현했다. pane 게시와 배치 worker/actor/UI 연결은 후속이다.
 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo는 [연결 이력 계획](editor-history-transaction.md)이 소유한다.
 [S4a/S4b](editor-project-replace-apply.md)는 단일 파일 적용까지 구현됐다.
 
@@ -150,6 +150,48 @@ BOM 유무 변경을 재검증에서 구분한다. 읽기 마지막에는 같은
 `python3 tools/test-editor-replace-batch-disk-adversarial.py`다. 실제 파일 교체·BOM 변경·symlink/hardlink·
 열린 신원 점유·마지막 실패·총량/파일별 한도·취소·UTF-8·directory 및 모든 준비/재검증 할당 실패를 검사한다.
 검사 도중의 OS 파일 교체 타이밍·모든 파일시스템·제품 닫힌 파일 배치 완료를 증명하지 않는다.
+
+## 비활성 문서 준비
+
+`search/batch/load.zig::Staged.prepare`는 worker에서 검증한 `verify.Read` 배열과 대응하는
+`disk.Target`을 받는다. 대상 수·IME/확정 대기·본문/원본 hash·중복 물리 신원·현재 root/file 신원과
+선택 밖 점유를 검사하고, 새 문서 lease·Term·native 파일 entry·복구 Owner를 독립 소유한다.
+현재 창의 pane/활성 탭에는 붙이지 않는다. `Staged.validate`는 자기 임시 문서만 registry 점유에서
+제외하며, 늦게 열린 독립 문서나 symlink/hardlink 별칭을 다시 검사한다. native 점유는 앱 전역 registry,
+registry 밖 web/diff entry는 현재 창을 검사한다. 다른 창의 web entry 점유는 이 API의 범위 밖이다.
+
+실제 파일로 준비 뒤 같은 inode의 외부 수정 누락을 재현했다. `verify.Proof.stamp`에 읽기 당시
+size/mtime/ctime을 보관하고 `matchesStat`로 관측 가능한 in-place 변경도 거절한다.
+metadata 확인은 전문 hash 재검증이나 파일 잠금이 아니다. 동일 metadata로 보이는 변경·확인 뒤 OS
+변경까지 보장하지 않으며, 최종 배치 연결은 worker 전문 재검증과 actor ticket/body 검증을 함께 유지해야 한다.
+점유 경로가 사라진 경우 현재 물리 파일이 없지만, 그 외 open/stat 실패를 별칭 검증 성공으로 묵살하지 않는다.
+
+파일 항목 수와 `AppSession.editor_batch_reserved_entries`를 함께 계산한다. 이 값은 config나
+workspace 포맷이 아닌 main actor의 임시 예약 수다. 일반 `pane.openFileTerm`도 예약분을 빼고 상한을
+검사한다. 실패/해제는 자기 예약분만 되돌리며 기존 문서·Undo를 자동 폐기하지 않는다.
+caller는 Plan에서 유효 편집 대상들을 고른 뒤 해당 닫힌 파일만 준비할 수 있다. API 자체는 전달받은
+모든 대상을 준비하며 no-op 여부를 다시 계산하지 않는다.
+
+`editor.prepareVerifiedText`는 이미 해석한 본문을 `EditableFile.initContent`로 만든다.
+선두 U+FEFF를 파일 BOM으로 중복 소비하지 않고 `Read.has_bom`을 별도 파일 속성으로 보존한다.
+저장용 raw Wyhash와 clean 내용 hash도 세운다. 일반 `prepareRecoveryPath`와 공통 `prepareOpened`에서
+줄 배열·경로·복구 Owner·registry 등록을 준비한다. 새 복구 ID가 있는 문서는 기존 `restoreIfAny`의
+guard 때문에 같은 경로의 예전 백업을 임의 복원하지 않는다. 별도 복원 예외 플래그는 추가하지 않는다.
+
+`Staged.deinit`는 목록에서 항목을 먼저 pop한 뒤 새 Term·lease·entry·경로·예약을 정산한다.
+Term 파괴가 닫기 통지를 발생시키므로 해제된 Term을 살아 있는 목록에 남기지 않는다. caller는 session 종료/교체 전에 먼저
+해제해야 한다. 성공 뒤 입력 배열/전문은 caller가 해제해도 된다. 실패 시 새 registry 슬롯의 generation과
+surface/entry/recovery ID는 소비될 수 있지만 기존 문서의 본문·선택·Undo/Redo·pane 목록은 보존한다.
+등록 중 임시 문서는 registry에서 점유 예약으로 보이며 다른 준비가 재사용하지 않는다.
+
+이 API는 제품 버튼에서 아직 호출하지 않는다. pane 게시·전체 Undo/연결 이력 준비와 함께 소유권을
+넘기는 coordinator, 종료/취소 수명과 최종 worker 검증 배선은 다음 단계다. 준비된 Term을 하나씩
+활성화하거나 실패 후 열린 탭을 자동 닫는 방식으로 연결해서는 안 된다.
+
+게이트는 `test-editor-project-replace-batch-load` (Debug/ReleaseFast)다. 실제 두 문서 준비·입력 해제 뒤
+수명·BOM/U+FEFF/CRLF·동일 inode 수정·파일/root 교체·늦은 별칭 점유·IME·예약과 일반 열기 및
+caller/registry 필수 준비 할당 실패를 검사한다. `tools/test-editor-replace-batch-load-adversarial.py`는
+관측 변경·점유·예약 해제·항목 용량·BOM 보호를 제거한 컴파일 가능한 결함과 정상/등가/복원 대조를 남긴다.
 
 ## 제품 연결과 후속 범위
 

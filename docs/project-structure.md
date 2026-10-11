@@ -639,3 +639,7 @@ worker·전체 actor 적용·파일별 저장 결과를 연결한다. 컴포넌�
 `src/platform/macos/app_session/editor/search/batch/disk.zig`가 소유한다.
 `src/platform/macos/app_session/editor/search/verify.zig::Proof`는 직접 연 파일 신원과 원문 hash를 결속한다.
 모델 로드·등록·commit은 이 읽기 준비 API의 책임이 아니다.
+
+`src/platform/macos/app_session/editor/search/batch/load.zig`는 닫힌 파일의 임시 문서·Term·
+entry·파일 항목 예약을 소유한다. 준비 객체의 해제가 기존 pane 문서의 닫기를 대신하지 않는다.
+`editor/mod.zig::prepareVerifiedText`는 검증된 본문을 공통 문서 등록 경로로 넘긴다.

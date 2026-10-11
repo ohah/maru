@@ -37,6 +37,7 @@
 //!   capability `completionProvider{triggerCharacters: ["."]}`(`MARU_FAKE_LSP_NOCOMPCAP=1` 이면 없음).
 //! - `textDocument/codeAction` → 문맥 진단마다 「fake: fix <code>」(range → `FIXED`, 첫 것 isPreferred) + 「fake: lazy」(data 만 — resolve) +
 //!   「fake: command」(command 만) + `Command` 형(둘은 숨겨져야 한다) + `MANYACT` 면 data-only 30 개(상한 관측점). `NOACT` → `[]`.
+//!   `context.only` 가 있으면(저장 시 code action — §8.2s) 그 kind 의 source action 만(`handleSourceActions` 의 표식).
 //!   `codeAction/resolve` → 첫 줄에 `// lazy` 를 넣는 edit; `RESOLVEFAIL` → 오류; `RESOLVEEMPTY` → edit 없는 응답. capability `codeActionProvider{resolveProvider: true}`(`MARU_FAKE_LSP_NOACTCAP=1` 이면 없음).
 //! - `shutdown` → `null` 응답, `exit` → 종료 0.
 //! - 시작하자마자 stderr 에 한 줄을 쓴다(실서버 clangd 가 그렇다) — stdout 에 섞이면 프레임이 깨진다(§8.2a 「stderr」).
@@ -610,6 +611,9 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         if (p.object.get("context")) |c| if (c == .object) if (c.object.get("diagnostics")) |d| if (d == .array) {
             ctx_diags = d.array;
         };
+        if (p.object.get("context")) |c| if (c == .object) if (c.object.get("only")) |o| if (o == .array) {
+            return handleSourceActions(allocator, o.array.items, req_uri, id);
+        };
     };
     const text = docText(req_uri);
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -676,6 +680,73 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         it.put(arena, "title", .{ .string = "fake: Command form" }) catch return;
         it.put(arena, "command", .{ .string = "fake.run" }) catch return;
         items.append(.{ .object = it }) catch return;
+    }
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = items } });
+}
+
+/// 저장 시 code action(§8.2s 관측점) — `context.only` 가 있으면 그 kind 의 source action 만 낸다. 본문 표식:
+/// `CASTALL` 이면 답하지 않는다(시한) · `UNORGANIZED` → `source.organizeImports`(그 낱말을 `ORGANIZED` 로) · `ORGLAZY` → `edit` 없이 `data` 만
+/// (resolve 가 첫 줄에 `// lazy` — 위와 같다) · `ORGOTHER` → 다른 파일도 고치는 edit(건너뛰어져야 한다) · `ORGBAD` → 겹치는 edit 둘(거부) ·
+/// `FIXALL` → `source.fixAll.fake`(하위 kind — `FIXED_ALL` 로) · `WRONGKIND` → 요청과 다른 kind(`quickfix`)의 항목도 낸다(클라이언트가 걸러야 한다).
+fn handleSourceActions(allocator: std.mem.Allocator, only: []const std.json.Value, req_uri: []const u8, id: std.json.Value) void {
+    const text = docText(req_uri);
+    if (std.mem.indexOf(u8, text, "CASTALL") != null) return;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var items: std.json.Array = .init(arena);
+    const Mk = struct {
+        fn replaceItem(a: std.mem.Allocator, title: []const u8, kind: []const u8, uri: []const u8, body: []const u8, marker: []const u8, new_text: []const u8) ?std.json.Value {
+            const at = std.mem.indexOf(u8, body, marker) orelse return null;
+            const line_no = std.mem.count(u8, body[0..at], "\n");
+            const line_start = if (std.mem.lastIndexOfScalar(u8, body[0..at], '\n')) |nl| nl + 1 else 0;
+            const ch = at - line_start;
+            var arr: std.json.Array = .init(a);
+            arr.append(editValue(a, @intCast(line_no), ch, ch + marker.len, new_text) catch return null) catch return null;
+            var changes: std.json.ObjectMap = .empty;
+            changes.put(a, a.dupe(u8, uri) catch return null, .{ .array = arr }) catch return null;
+            var edit: std.json.ObjectMap = .empty;
+            edit.put(a, "changes", .{ .object = changes }) catch return null;
+            var it: std.json.ObjectMap = .empty;
+            it.put(a, "title", .{ .string = title }) catch return null;
+            it.put(a, "kind", .{ .string = kind }) catch return null;
+            it.put(a, "edit", .{ .object = edit }) catch return null;
+            return .{ .object = it };
+        }
+    };
+    for (only) |k| {
+        const kind = if (k == .string) k.string else continue;
+        if (std.mem.eql(u8, kind, "source.organizeImports")) {
+            if (std.mem.indexOf(u8, text, "ORGLAZY") != null) {
+                var it: std.json.ObjectMap = .empty;
+                it.put(arena, "title", .{ .string = "fake: organize (lazy)" }) catch return;
+                it.put(arena, "kind", .{ .string = "source.organizeImports" }) catch return;
+                var data: std.json.ObjectMap = .empty;
+                data.put(arena, "uri", .{ .string = arena.dupe(u8, req_uri) catch return }) catch return;
+                it.put(arena, "data", .{ .object = data }) catch return;
+                items.append(.{ .object = it }) catch return;
+            } else if (std.mem.indexOf(u8, text, "ORGOTHER") != null) {
+                var item = Mk.replaceItem(arena, "fake: organize (other)", "source.organizeImports", req_uri, text, "ORGOTHER", "X") orelse return;
+                const changes = &item.object.getPtr("edit").?.object.getPtr("changes").?.object;
+                var arr: std.json.Array = .init(arena);
+                arr.append(editValue(arena, 0, 0, 0, "// other\n") catch return) catch return;
+                changes.put(arena, "file:///nonexistent-fake-other.c", .{ .array = arr }) catch return;
+                items.append(item) catch return;
+            } else if (std.mem.indexOf(u8, text, "ORGBAD") != null) {
+                var item = Mk.replaceItem(arena, "fake: organize (bad)", "source.organizeImports", req_uri, text, "ORGBAD", "x") orelse return;
+                const arr = &item.object.getPtr("edit").?.object.getPtr("changes").?.object.getPtr(req_uri).?.array;
+                const first = arr.items[0];
+                arr.append(first) catch return; // 같은 범위 둘 — 겹친다
+                items.append(item) catch return;
+            } else if (Mk.replaceItem(arena, "fake: organize imports", "source.organizeImports", req_uri, text, "UNORGANIZED", "ORGANIZED")) |item| {
+                items.append(item) catch return;
+            }
+        } else if (std.mem.eql(u8, kind, "source.fixAll")) {
+            if (Mk.replaceItem(arena, "fake: fix all", "source.fixAll.fake", req_uri, text, "FIXALL", "FIXED_ALL")) |item| items.append(item) catch return;
+        }
+        if (std.mem.indexOf(u8, text, "WRONGKIND") != null) {
+            if (Mk.replaceItem(arena, "fake: wrong kind", "quickfix", req_uri, text, "WRONGKIND", "WRONG_APPLIED")) |item| items.insert(0, item) catch return;
+        }
     }
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = items } });
 }

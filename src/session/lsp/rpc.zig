@@ -550,6 +550,17 @@ pub fn codeActionRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8
     }, .{ .emit_null_optional_fields = false });
 }
 
+/// 저장 시 code action(§8.2s) — 문서 전체 범위에 그 kind 하나만(`only`), `triggerKind: 2`(Automatic — 사용자가 고른 것이 아니다). id 는 §8.2h
+/// 와 같은 칸(`7e8+seq` — seq 는 클라이언트의 `code_action_seq` 를 같이 쓴다, 응답 분기가 기다리는 쪽을 가른다).
+pub fn codeActionOnSaveRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, range: LspRange, diagnostics: []const ContextDiagnostic, kind: []const u8) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = code_action_id_base + seq,
+        .method = "textDocument/codeAction",
+        .params = .{ .textDocument = .{ .uri = uri }, .range = range, .context = .{ .diagnostics = diagnostics, .only = [_][]const u8{kind}, .triggerKind = @as(u8, 2) } },
+    }, .{ .emit_null_optional_fields = false });
+}
+
 /// `codeAction/resolve`(§8.2h) — 고른 항목의 JSON 을 **그대로** 되돌려 준다(`data` 가 서버의 것이라 다시 만들지 않는다).
 pub fn codeActionResolveRequest(allocator: std.mem.Allocator, seq: u32, item_json: []const u8) error{OutOfMemory}![]u8 {
     return std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"codeAction/resolve\",\"params\":{s}}}", .{ code_action_resolve_id_base + seq, item_json });
@@ -1428,6 +1439,11 @@ test "LSJ11 codeAction — 요청 id 7e8+seq·range·context.diagnostics(code �
     try testing.expect(std.mem.indexOf(u8, req, "\"code\":\"-Wexpected-semi\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"message\":\"unused\",\"severity\":2}") != null); // code 없는 것은 생략
     try testing.expect(std.mem.indexOf(u8, req, "\"triggerKind\":1") != null);
+    // 저장 시 code action(§8.2s) — 같은 id 칸, `only` 에 kind 하나, triggerKind 2(Automatic).
+    const sv = try codeActionOnSaveRequest(a, 10, "file:///a.c", .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 9, .character = 0 } }, &.{}, "source.organizeImports");
+    defer a.free(sv);
+    try testing.expect(std.mem.indexOf(u8, sv, "\"id\":700000010") != null);
+    try testing.expect(std.mem.indexOf(u8, sv, "\"context\":{\"diagnostics\":[],\"only\":[\"source.organizeImports\"],\"triggerKind\":2}") != null);
     const res = try codeActionResolveRequest(a, 4, "{\"title\":\"x\",\"data\":{\"id\":7}}");
     defer a.free(res);
     try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":800000004,\"method\":\"codeAction/resolve\",\"params\":{\"title\":\"x\",\"data\":{\"id\":7}}}", res);

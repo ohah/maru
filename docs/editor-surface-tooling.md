@@ -1115,7 +1115,7 @@ Overlap 으로 만들어 다른 커서가 전부 사라짐 · import 와 겹치�
 | **목록** | `(Command \| CodeAction)[]` 중 **`edit` 이 있거나(`resolveProvider` 면) `data` 로 resolve 할 수 있는 `CodeAction`** 만. `disabled` 는 숨긴다. `isPreferred` 가 앞(안정 정렬). 상한 25(메뉴 버퍼). 0 이면 알림 「사용할 수 있는 코드 액션이 없습니다」 | 위 ⑤ · VS Code |
 | **메뉴** | `context_menu` 를 caret 셀 아래에 연다(`at_anchor` — 앵커가 caret 아래 줄). 항목은 `title` 그대로(kind 는 첫 조각에서 표시하지 않는다). `↑↓`/`Enter`/클릭 확정, `Esc`·다른 키·바깥 클릭 닫힘 | ui §8 규칙 넷 · §8:441 |
 | **확정** | `edit` 이 있으면 §8.2f `apply`(전부 검증 → 열린 Term undo 하나·디스크·저장 정책·기록 — `Undo Last Rename` 이 이것도 되돌린다). 없으면 `codeAction/resolve`(id `8e8+seq`, 고른 항목의 JSON 그대로) → 응답의 `edit` 을 같은 길로. 낡음·root 밖·거부 알림은 §8.2f 것 그대로. `command` 는 실행하지 않는다 | 위 ①④⑤ |
-| **하지 않는 것** | 전구(gutter 표시) · 자동 적용(`Fix All`·저장 시) · `command` 실행 · kind 별 묶음·머리글 · `only` 필터 · 저장 시 code action · refactor 미리보기 · 25 넘는 목록 | 다음 조각 |
+| **하지 않는 것** | 전구(gutter 표시) · `Fix All` 명령 · `command` 실행 · kind 별 묶음·머리글 · 메뉴의 `only` 필터 · refactor 미리보기 · 25 넘는 목록(저장 시 code action 은 §8.2s) | 다음 조각 |
 
 **적대적 검증(2026-09-19, 1~4회차 · 변이 30)**: 1회차 순수 10 → 1(무효 2 → 유효로 재실행) · 2회차 상태 기계·요청 13 → 3 · 3회차 배선 7 → 1 ·
 4회차 재실행 5 → 0. 판정자 보강 셋, 죽은 가드 1 제거, 등가 1:
@@ -1243,7 +1243,7 @@ JSON-RPC 프로브): 열면 `cargo check`(rustc) 진단이 오고, 오류를 **�
 | --- | --- | --- |
 | **capability** | `textDocument.synchronization.didSave: true`. 서버의 `textDocumentSync` 를 읽는다: 객체면 `save`(`true` 또는 `{includeText}`), 숫자·없음·`save: false` 면 미지원 | LSP 3.17 · ② |
 | **통지** | `saveDocument` 가 디스크 쓰기에 **성공한 뒤** `textDocument/didSave{textDocument{uri}, text?}` 한 통 — `includeText` 를 냈으면 저장한 본문을 싣는다. 보내기 전 `flushDocument`. 서버가 없거나 ready 가 아니거나 문서를 안 열었거나(크기 상한) 미지원이면 **아무것도 안 한다**(줄 서지 않는다) | ③④ |
-| **하지 않는 것** | `willSave`·`willSaveWaitUntil` · 저장 시 code action(§8.2h 그대로 — 저장 시 포맷은 §8.2r) · §8.2f 가 **열려 있지 않은** 파일을 디스크에 쓰는 것에 대한 통지(그 파일은 서버에 안 열려 있다 — `didChangeWatchedFiles` 는 별개) · 이름 없는 문서 | 다음 |
+| **하지 않는 것** | `willSave`·`willSaveWaitUntil` · (저장 시 포맷·code action 은 §8.2r·§8.2s) · §8.2f 가 **열려 있지 않은** 파일을 디스크에 쓰는 것에 대한 통지(그 파일은 서버에 안 열려 있다 — `didChangeWatchedFiles` 는 별개) · 이름 없는 문서 | 다음 |
 
 **관측점**: `LSJ17`(순수: capability 선언·`didSave` 통지 둘(text 유무)·`saveCapsFromResult` — 객체 `true`/`{includeText}`/`false`·숫자·없음) · `SAV1`(제품 경계: 가짜 서버 —
 저장이 `didSave` 를 보내고 그 앞에 밀린 didChange 가 먼저 가며(가짜가 본문 불일치를 진단으로 낸다) `includeText` 본문이 실리고, 저장 뒤 진단이 갈아 끼워진다) ·
@@ -1562,13 +1562,35 @@ id 칸) · `SYN42`·`SYN43`(tree-sitter 조상 사슬·상한) · `SSEL14`(키 �
 | **응답의 출처** | formatting 응답은 **그 문서를 연 클라이언트가 보낸 것만** 받는다(`format.onClientResponse` — `findDoc`). seq 는 클라이언트(저장소 × 서버)마다 따로 세므로, 다른 저장소의 서버가 늦게 보낸 같은 번호의 응답이 기다리는 문서에 적용될 수 있었다(그 문서의 revision 은 그대로라 검증을 지난다). 남의 응답은 버리지도 적용하지도 않는다 — §8.2e 의 `⇧⌥F` 에도 같다 | 적대적 검증 4회차 — 「다른 문서의 `⌘S`」가 이 길을 쉽게 열었다 |
 | **읽기 전용 문서** | 포맷을 묻지 않고 곧바로 저장을 시도해 「읽기 전용 파일이라 저장하지 않았습니다」를 알린다. 예전 `⌘S` 는 이 이유(`ReadOnly`)를 쓰기 오류 집합으로 `@errorCast` 해 **panic** 했다(이 조각의 판정자가 드러냈다) | §3.9d 「저장 실패는 이유별로 말한다」 |
 | **선택 없는 문서** | 열고 caret 을 한 번도 놓지 않은 문서(선택이 null)도 포맷한다 — 맨 앞을 임시 caret 으로 적용하고 다시 null 로 둔다(`applyEditAsOneWithUndo`). 예전 `applyEditAsOne` 은 선택이 없으면 조용히 실패해 「열고 바로 `⇧⌥F`」도 포맷되지 않았다(이 조각의 판정자가 드러냈다) | §3.6 「실패하면 문서가 그대로다」는 실패를 말해야 한다 |
-| **하지 않는 것** | 저장 시 code action(`source.organizeImports` 등) · 타이핑 시 포맷 · 언어별 켜고 끄기 · 시한 설정 키 · 모두 저장(없다) · `willSaveWaitUntil` | 다음 |
+| **하지 않는 것** | 타이핑 시 포맷 · 언어별 켜고 끄기 · 시한 설정 키 · 모두 저장(없다) · `willSaveWaitUntil` | 다음 |
 
 **관측점**: `FOS1`(제품 경계: 가짜 서버 — `⌘S` 가 요청 하나를 보내고 응답 전엔 디스크가 그대로, 응답 뒤 두 줄이 되돌리기 하나로 바뀌고 저장·didSave;
 기다리는 동안 같은 문서의 `⌘S`·`⇧⌥F` 무동작; 설정 끔·포맷 못 하는 서버는 곧바로 저장; 낡은 revision·겹침은 알리고 포맷 없이 저장; `FMTSTALL`
 (가짜가 답하지 않는다)은 시한 전엔 기다리고 시한 뒤 포맷 없이 저장·알림(시한은 구조 필드로 당긴다); 다른 문서의 `⌘S` 는 기다리던 것을 먼저 저장) ·
 `FOS2`(소스 판정 — lsp.zig 는 formatting 응답을 `onClientResponse` 로만 넘긴다) · `LATE5`(응답 함수의 알림 자리 — 그대로) · `FMT1`·`FMT2`(§8.2e 그대로).
 FOS1 의 그 밖: 읽기 전용 문서는 요청 없이 그 자리에서 알림 · 그 문서를 열지 않은 클라이언트의 같은 번호 응답은 기다림을 그대로 둔다 · 응답 뒤의 저장 실패(파일이 지워짐)는 그사이 연 팔레트를 닫지 않고 알림을 미룬다 · 언어 서버를 꺼도 시한이 저장한다.
+
+### 8.2s 저장 시 code action (2026-10-11, 사용자 결정 — [계획](plans/editor-code-actions-on-save.md))
+
+§8.2h 의 code action 을 사용자의 `⌘S` 앞에 둔다(§8.2r 의 저장 시 포맷보다 먼저 — VS Code `editor.codeActionsOnSave` 와 같은 순서). 요청·항목
+파싱·resolve 는 §8.2h, 적용 규칙(정렬·겹침 거부·되돌리기 하나·선택 없는 문서)은 §8.2e·§8.2r 그대로이고, 새로 서는 것은 **kind 를 하나씩 묻는
+단계**(`save_actions.State`)와 **그 문서만 고친다**는 규칙이다.
+
+| 축 | 결정 | 근거 |
+| --- | --- | --- |
+| **설정** | `editor.code-actions-on-save` — 쉼표로 가른 LSP `CodeActionKind` 목록(`source.organizeImports, source.fixAll`), **기본 빈 값(끔)**. 세팅 화면의 텍스트 행(빈 값을 받는다 — 끄기) | 2026-10-11 사용자 결정 — VS Code `editor.codeActionsOnSave`·Zed `code_actions_on_format` 도 기본 빈 값이고 kind 이름으로 켠다. import 정리·fixAll 은 코드의 뜻을 바꿀 수 있어(쓰지 않는 import 삭제의 부수 효과) 사용자가 켠다 |
+| **범위** | 사용자의 `⌘S` 만(§8.2r 과 같다). 서버가 ready 이고 `codeActionProvider` 를 냈고 문서가 읽기 전용·비교 뷰가 아닐 때. 아니면 곧바로 포맷 단계(§8.2r) | §8.2r |
+| **요청** | 설정의 kind 를 **적힌 순서대로 하나씩**: `textDocument/codeAction{range: 문서 전체, context{diagnostics: 문서의 .lsp 진단 전부, only: [그 kind], triggerKind: 2}}`(id 는 §8.2h 칸 — 같은 seq 카운터라 메뉴와 겹치지 않는다). 하나를 적용하면 revision 이 올라 다음 kind 의 요청이 새 본문을 본다 | VS Code 도 kind 마다 따로 묻는다(앞 적용이 뒤의 범위를 바꾼다). `Automatic` — 사용자가 고른 것이 아니다 |
+| **항목** | §8.2h 의 파싱(edit 이 있거나 resolve 할 수 있는 `CodeAction`, `isPreferred` 가 앞) 뒤 **kind 가 그 kind 와 같거나 그 아래 계층**(`source.fixAll.eslint` 는 `source.fixAll` 에 든다; 점 경계)인 **첫 항목 하나**. kind 가 없거나 다른 항목(`only` 를 무시한 서버의 quickfix)은 거른다. `edit` 이 없으면 `codeAction/resolve`(§8.2h). `command` 는 실행하지 않는다 | LSP 3.17 `CodeActionKind` 계층 · §8.2 seam |
+| **적용** | **그 문서만**: `WorkspaceEdit` 이 다른 파일·파일 연산을 건드리면 그 항목을 건너뛰고 알린다 「다른 파일도 고치는 저장 시 코드 액션(‹kind›)을 건너뛰었습니다」(이 문서도 고치지 않는다). 겹침·모양 오류는 거부하고 알린다. 적용은 kind 마다 되돌리기 하나(`applyEditAsOneWithUndo` — 선택 없는 문서도) | 2026-10-11 사용자 결정 「그 문서만 — 아니면 건너뜀」 — `⌘S` 하나가 화면에 없는 파일을 디스크에 쓰지 않는다 |
+| **시한·낡음** | 요청마다 1 초(`format.save_format_timeout_ms` 와 같은 값). 넘기면 남은 kind 를 건너뛰고 알린 뒤(「저장 시 코드 액션이 늦어 건너뛰고 저장했습니다」) 포맷·저장으로. 응답 전에 문서가 바뀌었으면 남은 kind 를 건너뛰고 알린 뒤 포맷·저장 — 저장은 code action 때문에 사라지지 않는다. 시한은 언어 서버를 꺼도 잰다 | §8.2r 과 같은 규율 |
+| **기다리는 동안** | 이 저장은 **누른 순간의 kind 목록 사본**을 끝까지 돈다(기다리는 사이 Reload Config 가 설정을 바꿔도 — 적대적 검증 2회차) · 읽기 전용 문서는 묻지 않고 곧바로 「읽기 전용」 알림 · 같은 문서의 `⌘S` 무동작 · 다른 문서의 `⌘S` 는 기다리던 문서의 남은 kind 를 건너뛰고 포맷·저장으로 먼저 보낸다 · 응답은 그 문서를 연 클라이언트의 것만 받는다(아니면 메뉴 §8.2h 로 넘긴다 — §8.2r 「응답의 출처」) | §8.2r |
+| **하지 않는 것** | 한 kind 의 항목 여럿 적용(첫 것만) · 언어별 목록 · `source` 밖 kind 의 경고 · 여러 파일 적용 · `command` 실행 · 시한 설정 키 | 다음 |
+
+**관측점**: `CAK1`(순수: 설정 목록 가르기·kind 계층 판정 — 점 경계·위 계층·빈 값) · `LSJ11`(순수: 저장 시 요청 — 같은 id 칸·`only`·`triggerKind: 2`) ·
+`CSA1`(제품 경계: 가짜 서버의 `only` 응답 — kind 둘을 하나씩 묻고 적용(하위 kind 포함)·되돌리기 kind 마다 하나·다 돈 뒤 저장; 같은 문서의 `⌘S` 무동작;
+요청과 다른 kind 거름; resolve; 다른 파일 → 건너뜀·알림; 겹침 → 거부·알림; `CASTALL` 시한(구조 필드로 당긴다); 낡은 revision; 빈 설정은 곧바로 저장;
+code action 이 포맷보다 먼저(포맷 요청은 그 뒤); 남의 클라이언트 응답은 받지 않음; 기다리는 사이 설정이 바뀌어도 누른 순간의 목록; 읽기 전용은 요청 없이 알림).
 
 ### 8.3 관측 가능성과 민감정보
 

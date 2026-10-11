@@ -69,10 +69,19 @@ pub fn formatDocument(self: *AppSession) bool {
 /// 않는다) 곧바로 저장한다. 같은 문서의 저장이 이미 기다리면 무동작(시한 안에 끝난다); 다른 문서의 것이 기다리면 그것을 포맷 없이 먼저
 /// 저장한다(자리가 하나다 — 누른 저장을 잃지 않는다).
 pub fn saveCommand(self: *AppSession, term: *Term) void {
+    saveCommandImpl(self, term, false);
+}
+
+/// 저장 시 code action(§8.2s) 단계가 끝난 뒤 이어 부른다 — 응답·시한 뒤라 곧바로 저장할 때도 실패 알림은 늦은 응답의 규칙이다.
+pub fn continueSave(self: *AppSession, term: *Term) void {
+    saveCommandImpl(self, term, true);
+}
+
+fn saveCommandImpl(self: *AppSession, term: *Term, late: bool) void {
     const st = &self.editor_format;
     if (st.waiting and st.then_save) {
         if (st.waiting_surface == term.surface.id) return;
-        finishPendingSave(self, false);
+        finishPendingSave(self, late);
     }
     if (self.loaded_config.config.editor.format_on_save and term.kind == .editor and term.rt.editor_diff == null) {
         if (term.rt.editorDocument().opened) |doc| if (!doc.file.read_only) {
@@ -87,7 +96,7 @@ pub fn saveCommand(self: *AppSession, term: *Term) void {
             }
         };
     }
-    saveNow(self, term, false);
+    saveNow(self, term, late);
 }
 
 /// 저장 시 포맷의 시한(`editor_lsp.pump` 가 tick 마다 부른다 — 언어 서버를 꺼도 부른다: 기다리던 저장이 남지 않게). 넘겼으면 포맷 없이

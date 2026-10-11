@@ -31,6 +31,7 @@ const editor_ops = @import("mod.zig");
 const editor_definition = @import("definition.zig");
 const editor_signature = @import("signature.zig");
 const editor_format = @import("format.zig");
+const editor_save_actions = @import("save_actions.zig");
 const editor_rename = @import("rename.zig");
 const editor_completion = @import("completion.zig");
 const editor_semantic = @import("semantic.zig");
@@ -1559,7 +1560,8 @@ fn send(self: *AppSession, c: *Client, body: []const u8) bool {
 
 /// 세션 tick — `AppSession.tick` 이 부른다.
 pub fn pump(self: *AppSession) void {
-    // 저장 시 포맷의 시한(§8.2r) — 언어 서버를 꺼도 잰다(기다리던 저장이 남지 않게).
+    // 저장 시 code action·포맷의 시한(§8.2s·§8.2r) — 언어 서버를 꺼도 잰다(기다리던 저장이 남지 않게).
+    editor_save_actions.tick(self, self.awakeMs());
     editor_format.tick(self, self.awakeMs());
     if (!self.loaded_config.config.lsp.enabled) {
         // 꺼졌다 — 떠 있는 서버를 내린다. 그대로 두면 아무도 stdout 을 안 읽는 서버가 앱 종료까지 남는다.
@@ -1756,10 +1758,13 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
             },
             .code_action => |seq| {
                 self.editor_lsp.received_code_actions += 1;
-                editor_code_action.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
+                // 저장 시 code action(§8.2s)이 기다리는 응답이면 그쪽이 받는다 — seq 는 메뉴(§8.2h)와 같은 카운터라 겹치지 않는다.
+                if (!editor_save_actions.onClientResponse(self, c, seq, if (r.is_error) null else r.result))
+                    editor_code_action.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
             },
             .code_action_resolve => |seq| {
-                editor_code_action.onResolveResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
+                if (!editor_save_actions.onClientResolveResponse(self, c, seq, if (r.is_error) null else r.result))
+                    editor_code_action.onResolveResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
             },
             .completion => |seq| {
                 self.editor_lsp.received_completions += 1;
@@ -2351,6 +2356,16 @@ pub fn requestCompletion(self: *AppSession, term: *Term, offset: usize, trigger_
 /// `textDocument/codeAction` 을 보낸다(§8.2h). `range` 는 byte 반열림 — 서버 인코딩의 줄·글자로 옮기고, 그 범위와 겹치는 `.lsp` 진단을
 /// 문맥으로 싣는다(넷: range·message·severity·code). 서버가 없거나 `codeActionProvider` 가 없으면 `null`.
 pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usize) ?u32 {
+    return requestCodeActionImpl(self, term, start, end, null);
+}
+
+/// 저장 시 code action(§8.2s) — 문서 전체에 그 kind 하나만(`only`, `triggerKind: 2`). 문맥 진단은 문서의 `.lsp` 진단 전부(fixAll 류가 쓴다).
+pub fn requestCodeActionOnSave(self: *AppSession, term: *Term, kind: []const u8) ?u32 {
+    const len = (term.rt.editorDocument().opened orelse return null).file.content.len;
+    return requestCodeActionImpl(self, term, 0, len, kind);
+}
+
+fn requestCodeActionImpl(self: *AppSession, term: *Term, start: usize, end: usize, only: ?[]const u8) ?u32 {
     const c = readyClientFor(self, term) orelse return null;
     if (!c.code_action_caps.supported) return null;
     flushDocument(self, c, term);
@@ -2379,7 +2394,7 @@ pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usiz
         }) catch return null;
     }
     c.code_action_seq = lsp.rpc.nextSeq(c.code_action_seq); // i32 칸 안에서 돈다(§8.2a id)
-    const msg = lsp.rpc.codeActionRequest(self.allocator, c.code_action_seq, d.uri, range, diags.items) catch return null;
+    const msg = (if (only) |k| lsp.rpc.codeActionOnSaveRequest(self.allocator, c.code_action_seq, d.uri, range, diags.items, k) else lsp.rpc.codeActionRequest(self.allocator, c.code_action_seq, d.uri, range, diags.items)) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_code_actions += 1;

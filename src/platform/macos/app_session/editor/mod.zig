@@ -104,6 +104,7 @@ pub const semantic_client = @import("semantic.zig");
 const line_ops = maru.session.editor.line_ops;
 const clipboard_ops = maru.session.editor.clipboard_ops;
 const typing_ops = maru.session.editor.typing_ops;
+const edit_ops = maru.session.editor.edit_ops;
 pub const fold_lsp_client = @import("fold_lsp.zig");
 pub const inlay_client = @import("inlay.zig");
 pub const symbols_client = @import("symbols.zig");
@@ -9646,75 +9647,13 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     if (doc.file.read_only) return false;
     if (clipboard.len == 0) return false;
 
-    // **문서 순서 스냅숏으로 짓는다**(결함 12). 조각은 복사가 문서 순서로 담았다(`clipboard_ops.planCopy`) — primary 부터
-    // 나눠 주면 ⌥⌘↓ 로 더한 커서(primary 가 맨 아래)에서 조각이 한 칸씩 밀린다.
+    // **무엇을 어디에 넣을지는 L2 `edit_ops.planPaste` 가 정한다**(§3.4 — 조각 분배는 문서 순서(결함 12), 줄 단위는 caret
+    // 줄의 머리, 겹치면 뒤 것을 버린다(PASTE7), 버린 커서는 caret 을 안 받는다(결함 13)).
     var sels = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(sels.items);
-    const n = sels.items.len;
-
-    const clip = maru.session.editor.clipboard;
-    const line_wise = clip.describes(self.editor_clipboard_meta, clipboard) and
-        self.editor_clipboard_meta.?.from_empty_selection;
-
-    const pieces_buf = self.allocator.alloc([]const u8, n) catch return false;
-    defer self.allocator.free(pieces_buf);
-    const dist = clip.distribute(self.editor_clipboard_meta, clipboard, n, pieces_buf);
-
-    const Tagged = struct { change: maru.session.editor.delta.Change, sel: usize };
-    var ranges: std.ArrayList(Tagged) = .empty;
-    defer ranges.deinit(self.allocator);
-    const content = doc.file.content;
-    for (sels.items, 0..) |sel, i| {
-        const text = switch (dist) {
-            .per_cursor => |ps| ps[i],
-            .whole => |w| w,
-        };
-        if (line_wise) {
-            // **줄 단위**: caret이 있는 줄의 **머리**에 넣는다. 선택이 있어도 그 줄 머리다 —
-            // 줄 단위로 담은 것을 줄 중간에 끼우면 두 줄이 한 줄이 된다.
-            const line_idx = doc.file.lines.lineAt(@min(sel.focus, content.len));
-            const line = doc.file.lines.line(line_idx) orelse continue;
-            ranges.append(self.allocator, .{ .change = .{ .start = line.start, .end = line.start, .text = text }, .sel = i }) catch return false;
-        } else {
-            const lo = @min(sel.start(), content.len);
-            const hi = @min(sel.end(), content.len);
-            ranges.append(self.allocator, .{ .change = .{ .start = lo, .end = hi, .text = text }, .sel = i }) catch return false;
-        }
-    }
-    if (ranges.items.len == 0) return false;
-
-    std.mem.sort(Tagged, ranges.items, {}, struct {
-        fn lessThan(_: void, a: Tagged, b: Tagged) bool {
-            if (a.change.start != b.change.start) return a.change.start < b.change.start;
-            return a.sel < b.sel;
-        }
-    }.lessThan);
-    // 겹치면 `delta.apply`가 거절한다. **줄 단위에서 같은 줄에 커서가 여럿**이면 줄 머리가 같아
-    // 실제로 겹치므로 뒤 것을 버린다 — 두 번 넣으면 사용자는 커서를 둘 뒀다는 이유로 **줄이 두 번**
-    // 들어간 것을 본다(`PASTE7`이 판정한다).
-    //
-    // ⚠️ **`selectionsForEdit` 은 `mergeOverlapping` 을 부르지 않는다**(2026-09-25 정정). 이 주석은
-    // 그렇게 적고 있었고 «지운 뮤턴트가 살아남았다» 를 그 근거로 삼았는데, 뮤턴트가 산 이유는
-    // 「위에서 이미 합쳤다」가 아니라 **정상 경로에서 겹침이 잘 안 생겨서**였다. 실제로 방향키로
-    // 커서를 한 자리에 몰면 겹침이 저장소에 그대로 남았다 — 그쪽은 `mergeCarets` 로 고쳤다.
-    // 그러니 아래 좁히기는 **중복 방어가 아니라 이 경로의 유일한 방어**로 읽어야 한다:
-    // `delta` 계약이 정렬·비겹침을 요구하고, 깨지면 `apply` 가 `MalformedDelta` 로 붙여넣기를
-    // 통째로 거절한다.
-    //
-    // **버린 커서는 caret 을 받지 않는다**(결함 13) — `of_sel` 이 비어 편집을 따라 밀린 제자리를 지킨다. 예전에는
-    // 변경 인덱스를 커서 인덱스로 읽어 다음 커서의 caret 을 받았다.
-    var dedup: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer dedup.deinit(self.allocator);
-    const of_sel = self.allocator.alloc(?usize, n) catch return false;
-    defer self.allocator.free(of_sel);
-    @memset(of_sel, null);
-    for (ranges.items) |t| {
-        const c = t.change;
-        if (dedup.items.len > 0 and c.start < dedup.items[dedup.items.len - 1].end) continue;
-        if (dedup.items.len > 0 and line_wise and c.start == dedup.items[dedup.items.len - 1].start) continue;
-        of_sel[t.sel] = dedup.items.len;
-        dedup.append(self.allocator, c) catch return false;
-    }
+    var edit = (edit_ops.planPaste(self.allocator, doc.file.content, doc.file.lines, sels.items, self.editor_clipboard_meta, clipboard) catch return false) orelse return false;
+    defer edit.deinit(self.allocator);
+    const dedup = &edit.changes;
 
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
     const before_primary = sels.primary;
@@ -9728,10 +9667,7 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
         return false;
     };
 
-    for (of_sel, 0..) |k, i| {
-        const ci = k orelse continue;
-        if (ci < inverse.changes.len) sels.items[i] = editor_selection.Selection.at(inverse.changes[ci].end);
-    }
+    edit.placeCarets(inverse.changes, sels.items);
     // **앞뒤로 끊는다**(§3.3 "연산 종류 변경"). 뒤에만 끊으면 **붙여넣기 자신이** 앞 타이핑과 한
     // 묶음이 되어, 붙여넣기를 되돌리려는 undo 한 번에 친 것까지 사라진다 — `pushUndo`가 묶음을
     // 정하므로 그 **전에** 끊어야 붙여넣기가 자기 묶음을 갖는다(적대적 검증 2026-08-26이 잡았다).
@@ -9749,12 +9685,8 @@ pub fn pasteText(self: *AppSession, term: *Term, clipboard: []const u8) bool {
     return true;
 }
 
-/// 삭제가 지우는 **단위**(§3.2 "문자/단어/줄 단위 삭제").
-///
-/// **이동 일습의 거울이다** — `Motion`이 커서를 옮기는 자리를 이쪽은 지운다. 그래서 경계 계산을
-/// `motion.zig`가 그대로 소유하고, 여기서 다시 세지 않는다. 세면 **"⌥←로 간 자리"와 "⌥⌫가 지운
-/// 자리"가 갈리고**, 사용자는 그 차이를 설명할 수 없다.
-pub const DeleteUnit = enum { char, word, line_edge };
+/// 삭제가 지우는 **단위**(§3.2) — L2 `edit_ops.DeleteUnit`(이동 일습의 거울. 경계는 `motion.zig` 가 소유한다).
+pub const DeleteUnit = edit_ops.DeleteUnit;
 
 pub fn deleteText(self: *AppSession, term: *Term, backward: bool) bool {
     return deleteBy(self, term, backward, .char);
@@ -9768,102 +9700,13 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
 
-    // **문서 순서 스냅숏으로 짓고, 커서마다 낸 변경을 기록한다**(결함 13). 문서 처음의 Backspace 처럼 변경을 안 낸 커서가
-    // 다음 커서의 caret 을 받으면 둘이 겹쳐 합쳐진다.
+    // **무엇을 지울지는 L2 `edit_ops.planDelete` 가 정한다**(§3.2 — 단위 경계는 `motion.zig`, 자동으로 넣은 닫는 문자는
+    // 함께(§3.7), 겹치면 통째로 거절, 변경을 안 낸 커서는 caret 을 안 받는다(결함 13)).
     var sels = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(sels.items);
-    const content = doc.file.content;
-
-    const Tagged = struct { change: maru.session.editor.delta.Change, sel: usize };
-    var tagged: std.ArrayList(Tagged) = .empty;
-    defer tagged.deinit(self.allocator);
-    for (sels.items, 0..) |sel, sel_index| {
-        var lo = @min(sel.start(), content.len);
-        var hi = @min(sel.end(), content.len);
-        if (lo == hi) {
-            // caret뿐 — **단위만큼** 무른다. 경계는 `motion.zig`가 소유한다(이동과 같은 자리여야
-            // "⌥←로 간 곳"과 "⌥⌫가 지운 곳"이 갈리지 않는다).
-            if (backward) {
-                if (lo == 0) continue; // 문서 처음: 지울 것이 없다
-                // **자동으로 넣은 닫는 문자를 함께 지운다**(§3.7). `(|)`에서 Backspace를 누르면
-                // 여는 것만 지우고 닫는 것이 남으면 사용자가 그것을 또 지워야 한다 — 자동 닫기가
-                // 만든 일을 자동 닫기가 되무르는 것이 맞다.
-                //
-                // **표시가 지금 caret 바로 뒤일 때만** 그렇게 한다. 사용자가 직접 친 닫는 문자는
-                // 표시가 없고, 그 자리를 떠났다가 돌아온 경우도 표시가 버려져 있다.
-                if (unit == .char and term.rt.editor_auto_closed_at == hi and hi < content.len) {
-                    hi = nextCharBoundary(content, hi);
-                }
-                lo = switch (unit) {
-                    .char => prevCharBoundary(content, lo),
-                    .word => editor_motion.wordLeft(content, lo),
-                    .line_edge => blk: {
-                        // **줄 머리까지 — 들여쓰기도 함께 지운다**(§3.2, 2026-09-26).
-                        //
-                        // 예전에는 smart home 과 같은 자리(첫 글자)였다. 그러면 들여쓴 줄에서 `⌘⌫`를
-                        // **두 번** 눌러야 줄이 비고, 그 사이에 「지웠는데 안 지워진 것처럼 보이는」
-                        // 상태가 남는다. VS Code 도 macOS 도 **한 번에 0열**까지다 —
-                        // `DeleteAllLeftAction` 이 `Range(line, 1, line, column)` 을 지운다.
-                        //
-                        // **이동과 일부러 갈린다.** 위 주석의 「이동과 같은 자리」는 `⌥` 짝의 규율이고
-                        // (`⌥←`/`⌥⌫`는 여전히 `wordLeft` 하나를 쓴다), `⌘` 는 VS Code 자신이
-                        // `CursorHome`(하이브리드+smart home)과 `DeleteAllLeft`(0열)로 가른다.
-                        // 경계는 여전히 `motion.zig` 가 소유한다 — `^A` 와 **같은** `lineStart` 다.
-                        const li = doc.file.lines.lineAt(lo);
-                        const line = doc.file.lines.line(li) orelse break :blk lo;
-                        const start = editor_motion.lineStart(line);
-                        // **줄 머리에 있으면 앞 줄과 합친다.** 안 그러면 `lo` 가 안 줄어 아무것도 안
-                        // 지우는 **죽은 키**가 된다 — `⌘⌦`가 줄 끝에서 겪던 것과 같은 함정이고,
-                        // macOS 도 VS Code 도 그 자리에서 앞 개행을 지운다
-                        // (적대적 검증 2026-08-27이 실측으로 잡았다).
-                        break :blk if (start < lo) start else prevCharBoundary(content, lo);
-                    },
-                };
-            } else {
-                if (hi >= content.len) continue; // 문서 끝
-                hi = switch (unit) {
-                    .char => nextCharBoundary(content, hi),
-                    .word => editor_motion.wordRight(content, hi),
-                    .line_edge => blk: {
-                        const li = doc.file.lines.lineAt(hi);
-                        const line = doc.file.lines.line(li) orelse break :blk hi;
-                        const end = editor_motion.lineEnd(line);
-                        // **이미 줄 끝이면 개행 하나를 먹는다** — 안 그러면 `⌘⌦`가 죽은 키가 된다.
-                        break :blk if (end > hi) end else nextCharBoundary(content, hi);
-                    },
-                };
-            }
-        }
-        // **지금은 닿지 않는 방어다**(적대적 검증 2026-08-27). caret 갈래가 단위마다 반드시
-        // 전진하고(`lo == 0`·문서 끝은 그 앞에서 걸러진다), 선택이 있으면 `start() <= end()`가
-        // 보장되므로 여기서 `lo >= hi`가 되는 입력을 만들지 못했다 — 지운 뮤턴트가 살아남아
-        // 그것을 보였다.
-        //
-        // 그래도 남기는 이유: **`delta`의 계약이 빈 변경을 금지하지는 않는다.** 빈 범위가 흘러가면
-        // 아무것도 안 바꾸는 undo 항목이 쌓여 **undo가 헛돈다** — `DEL3`이 그 증상(빈 문서에서
-        // 무동작)을 재고, 이 줄은 그 성질을 **여기서** 지킨다. 위에 같은 검사를 하나 더 두었다가
-        // 중복임을 확인하고 지웠다: 방어가 둘이면 하나는 반드시 검증 밖에 남는다.
-        if (lo >= hi) continue;
-        tagged.append(self.allocator, .{ .change = .{ .start = lo, .end = hi, .text = "" }, .sel = sel_index }) catch return false;
-    }
-    if (tagged.items.len == 0) return false;
-
-    std.mem.sort(Tagged, tagged.items, {}, struct {
-        fn lessThan(_: void, a: Tagged, b: Tagged) bool {
-            if (a.change.start != b.change.start) return a.change.start < b.change.start;
-            return a.sel < b.sel;
-        }
-    }.lessThan);
-    var ranges: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer ranges.deinit(self.allocator);
-    const of_sel = self.allocator.alloc(?usize, sels.items.len) catch return false;
-    defer self.allocator.free(of_sel);
-    @memset(of_sel, null);
-    for (tagged.items, 0..) |t, i| {
-        if (i > 0 and t.change.start < tagged.items[i - 1].change.end) return false; // 겹침 — 호출자 결함
-        of_sel[t.sel] = ranges.items.len;
-        ranges.append(self.allocator, t.change) catch return false;
-    }
+    var edit = (edit_ops.planDelete(self.allocator, doc.file.content, doc.file.lines, sels.items, backward, unit, term.rt.editor_auto_closed_at) catch return false) orelse return false;
+    defer edit.deinit(self.allocator);
+    const ranges = &edit.changes;
 
     // **편집 전 커서를 떠 둔다** — undo가 그것을 되살린다(§3.3).
     const before = self.allocator.dupe(editor_selection.Selection, sels.items) catch return false;
@@ -9879,19 +9722,9 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
         return false;
     };
 
-    // **친 커서는 넣은 글자 뒤로 간다 — 매핑에 맡기지 않는다.**
-    // `mapOffset`의 경계 규칙은 *"삽입 지점에 정확히 있는 offset은 밀지 않는다"*인데, 그것은
-    // **다른** 커서에는 맞지만 타이핑한 커서 자신에게는 틀리다(친 글자 앞에 남는다 — 실측으로
-    // EDIT1·EDIT5가 그것을 잡았다). 어디로 갈지는 매핑이 아니라 **편집 연산이 정한다.**
-    //
-    // 역연산의 각 range가 편집 **후** 좌표로 "새로 들어간 구간"을 가리키므로, 그 끝이 곧 커서 자리다
-    // (삭제는 길이가 0이라 시작 = 끝이고, 지운 자리에 커서가 선다).
-    //
-    // **변경을 안 낸 커서는 caret 을 받지 않는다**(결함 13) — 편집을 따라 밀린 제자리를 지킨다.
-    for (of_sel, 0..) |k, i| {
-        const ci = k orelse continue;
-        if (ci < inverse.changes.len) sels.items[i] = editor_selection.Selection.at(inverse.changes[ci].end);
-    }
+    // **caret 은 `Edit.placeCarets` 가 놓는다** — 지운 자리에 선다. 매핑에 맡기지 않는다(EDIT1·EDIT5 — `mapOffset` 은
+    // 삽입 지점의 offset 을 밀지 않는다). 변경을 안 낸 커서는 편집을 따라 밀린 제자리를 지킨다(결함 13).
+    edit.placeCarets(inverse.changes, sels.items);
 
     const edit_span = syntax_color.spanFromInverse(inverse.changes);
     pushUndo(self, term, inverse, before, before_primary, .delete);
@@ -9909,26 +9742,9 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     return true;
 }
 
-/// `at` **앞** 글자의 시작 byte. UTF-8 이어지는 byte(`0b10xxxxxx`)를 건너뛴다.
-///
-/// **cluster가 아니라 code point 경계다.** 결합 문자(한글 NFD·이모지 ZWJ)는 여러 code point가
-/// 한 글자로 보이는데, 그것까지 한 번에 무르려면 §3.8의 cluster 규칙이 필요하다 — 그 규칙은
-/// `grapheme` 층이 소유하고 이 슬라이스 밖이다. **지금은 code point 단위이고, 깨진 UTF-8은
-/// 만들지 않는다**(그것이 이 함수가 막는 것이다).
-fn prevCharBoundary(bytes: []const u8, at: usize) usize {
-    var i = @min(at, bytes.len);
-    if (i == 0) return 0;
-    i -= 1;
-    while (i > 0 and (bytes[i] & 0xC0) == 0x80) i -= 1;
-    return i;
-}
-
-/// `at` **뒤** 글자의 끝 byte.
-fn nextCharBoundary(bytes: []const u8, at: usize) usize {
-    if (at >= bytes.len) return bytes.len;
-    const n = std.unicode.utf8ByteSequenceLength(bytes[at]) catch return at + 1;
-    return @min(at + n, bytes.len);
-}
+/// 글자(code point) 경계 — L2 `edit_ops` 가 소유한다(단위 지우기와 같은 규칙. cluster 가 아니다, §3.8).
+const prevCharBoundary = edit_ops.prevCharBoundary;
+const nextCharBoundary = edit_ops.nextCharBoundary;
 
 /// **편집 뒤에 낡는 것을 전부 다시 세운다**(§3.3 — 편집은 문서를 바꾼다).
 ///

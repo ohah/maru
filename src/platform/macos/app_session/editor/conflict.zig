@@ -208,8 +208,8 @@ pub fn confirmReload(self: *AppSession, surface_id: u64) void {
     }
 
     // **바뀐 곳만 고친다**(editor-surface §4 「undo/cursor 를 깨지 않는다」, 결함 14). 문서 전체를 변경 하나로 바꾸면
-    // 모든 caret 이 그 변경 안이라 머리(0)로 접혔다 — 같은 앞뒤는 변경 밖에 둔다.
-    var changes = [_]maru.session.editor.delta.Change{reloadChange(doc.file.content, fresh.file.content)};
+    // 모든 caret 이 그 변경 안이라 머리(0)로 접혔다 — 같은 앞뒤는 변경 밖에 둔다(L2 `edit_ops.reloadChange`).
+    var changes = [_]maru.session.editor.delta.Change{maru.session.editor.edit_ops.reloadChange(doc.file.content, fresh.file.content)};
     if (!editor_ops.applyEditAsOne(self, term, &changes)) {
         self.showNoticeKey(.editor_reload_failed);
         return;
@@ -225,23 +225,6 @@ pub fn confirmReload(self: *AppSession, surface_id: u64) void {
     // 를 지나므로(그 함수 주석: 「제품의 편집 경로 여섯이 전부 이 함수를 지난다」) 여기서 다시 부르면
     // 그 통지가 두 번 간다.
     self.metal_dirty = true;
-}
-
-/// 지금 내용 `old` 를 `new` 로 바꾸는 변경 하나 — 같은 앞뒤는 변경 밖에 둔다. 경계는 코드포인트 경계로 물린다(글자
-/// 가운데를 자르면 caret·LSP 위치가 글자 안에 선다). `text` 는 `new` 를 빌린다.
-fn reloadChange(old: []const u8, new: []const u8) maru.session.editor.delta.Change {
-    const limit = @min(old.len, new.len);
-    var prefix: usize = 0;
-    while (prefix < limit and old[prefix] == new[prefix]) prefix += 1;
-    while (prefix > 0 and (isContinuation(old, prefix) or isContinuation(new, prefix))) prefix -= 1;
-    var suffix: usize = 0;
-    while (suffix < limit - prefix and old[old.len - 1 - suffix] == new[new.len - 1 - suffix]) suffix += 1;
-    while (suffix > 0 and (isContinuation(old, old.len - suffix) or isContinuation(new, new.len - suffix))) suffix -= 1;
-    return .{ .start = prefix, .end = old.len - suffix, .text = new[prefix .. new.len - suffix] };
-}
-
-fn isContinuation(bytes: []const u8, at: usize) bool {
-    return at < bytes.len and (bytes[at] & 0xC0) == 0x80;
 }
 
 /// **다시 읽기 실패의 이유 → 사용자에게 할 말.** §3.9d 의 저장 표와 **같은 규율**이고 **다른 표**다 —

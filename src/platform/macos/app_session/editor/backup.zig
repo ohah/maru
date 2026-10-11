@@ -19,6 +19,7 @@ const Term = app_session_mod.Term;
 const editor_ops = @import("mod.zig");
 const editor_selection = maru.session.editor.selection;
 const backup = maru.session.editor.backup;
+const backup_ops = maru.session.editor.backup_ops;
 
 /// **테스트 주입 자리**(비공개 — `test_config_text` 와 같은 관례). 실제 자리는 앱 전역이므로 이
 /// 주입도 앱 전역이다. `null` 이면 `$HOME/Library/Application Support/maru/editor-backups`.
@@ -362,15 +363,8 @@ pub fn observeRecordedUntitledNumbers(self: *AppSession) void {
     }
 }
 
-/// `u-<16진수>.bak` 의 번호. 그 모양이 아니거나 0 이면 null — 임시 파일·경로 레코드는 건너뛴다.
-fn recordedUntitledNumber(name: []const u8) ?u32 {
-    const prefix = "u-";
-    const suffix = ".bak";
-    if (name.len <= prefix.len + suffix.len) return null;
-    if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, suffix)) return null;
-    const n = std.fmt.parseInt(u32, name[prefix.len .. name.len - suffix.len], 16) catch return null;
-    return if (n == 0) null else n;
-}
+/// `u-<16진수>.bak` 의 번호 — L2 `backup_ops.recordedUntitledNumber`.
+const recordedUntitledNumber = backup_ops.recordedUntitledNumber;
 
 test "recorded untitled numbers parse only the record name shape" {
     try std.testing.expectEqual(@as(?u32, 1), recordedUntitledNumber("u-1.bak"));
@@ -449,36 +443,21 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
     var parsed = record.parsed;
     defer parsed.deinit(self.allocator);
 
-    // **신원을 다시 확인한다** — 이름은 해시라 충돌이 가능하고(경로), 번호는 파일 이름에 그대로
-    // 들어가지만 **레코드가 말하는 신원**과 다를 수 있다(손으로 옮긴 파일). 남의 내용을 되살리는 것은
-    // 「조용히 다른 문서로 연다」가 된다.
-    switch (want) {
-        .path => |w| switch (parsed.doc) {
-            .path => |p| if (!std.mem.eql(u8, p.path, w.path)) return,
-            else => return,
+    // **되살릴지는 L2 `backup_ops.judgeRestore` 가 정한다**(§3.10) — 신원(이름만 믿지 않는다) → 내용(UTF-8 · 저장 상한,
+    // §3.8) → 같은가. 남의 레코드·되살릴 수 없는 내용은 손상 레코드와 같은 대우다(무시하고 파일 그대로).
+    if (want == .remote) return; // 위에서 걸렀다 — 여기 오면 갈래가 갈린 것이다
+    switch (backup_ops.judgeRestore(want, parsed, doc.file.content)) {
+        .foreign, .inadmissible => return,
+        // 내용이 이미 같으면 되살릴 것이 없다 — 레코드만 걷는다(다음 실행이 또 보지 않게).
+        .same => {
+            // 이름 없는 백업은 저장 이력이 없다. 빈 본문을 clean과 혼동해 없애지 않는다.
+            if (want == .untitled) {
+                term.rt.editorDocument().opened.?.needs_save = true;
+                term.rt.editorDocument().notifications.backup_on_disk = true;
+            } else dropConsumed(self, parsed.doc);
+            return;
         },
-        .untitled => |n| switch (parsed.doc) {
-            .untitled => |m| if (m != n) return,
-            else => return,
-        },
-        .remote => return, // 위에서 걸렀다 — 여기 오면 갈래가 갈린 것이다
-    }
-    // **적대적 입력으로 본다**(§3.8 — 문서 내용은 신뢰 입력이 아니다). 레코드는 앱 전용 자리에 있지만
-    // 파일이고, 우리가 쓴 것과 다른 바이트가 들어 있을 수 있다. 여는 경로는 UTF-8 을 검증하는데
-    // (`document.zig` → `error.NotUtf8`) **편집 경로는 검증하지 않는다** — IME·붙여넣기가 UTF-8 이기
-    // 때문이다. 그래서 여기서 막는다: 아니면 손상 레코드와 같은 대우(무시하고 파일 그대로)다.
-    if (!std.unicode.utf8ValidateSlice(parsed.content)) return;
-    // **되쓸 수 없는 내용은 되살리지 않는다** — 저장 상한을 넘는 문서는 `⌘S` 가 `TooLarge` 라, 되살리면
-    // 「지울 수도 저장할 수도 없는 dirty」가 된다(레코드 상한은 그보다 조금 크다).
-    if (parsed.content.len > backup.pause_bytes) return;
-    // 내용이 이미 같으면 되살릴 것이 없다 — 레코드만 걷는다(다음 실행이 또 보지 않게).
-    if (std.mem.eql(u8, parsed.content, doc.file.content)) {
-        // 이름 없는 백업은 저장 이력이 없다. 빈 본문을 clean과 혼동해 없애지 않는다.
-        if (want == .untitled) {
-            term.rt.editorDocument().opened.?.needs_save = true;
-            term.rt.editorDocument().notifications.backup_on_disk = true;
-        } else dropConsumed(self, parsed.doc);
-        return;
+        .apply => {},
     }
 
     // **커서를 먼저 세운다** — 파일을 열 때 커서는 클릭이 세우므로(그 규칙은 `openPathInActivePane`
@@ -566,18 +545,8 @@ pub fn reviveAsUntitled(self: *AppSession, lost: backup.Doc) void {
     defer if (source) |*retained| retained.deinit();
     var record = source.?.read() catch return;
     defer record.deinit(self.allocator);
-    // 수동 목록과 달리 자동 복구는 요청한 원본이 있다. 파일명 해시가 같아도 정확한 신원을 대조한다.
-    switch (lost) {
-        .path => |w| switch (record.parsed.doc) {
-            .path => |p| if (!std.mem.eql(u8, p.path, w.path)) return,
-            else => return,
-        },
-        .remote => |w| switch (record.parsed.doc) {
-            .remote => |r| if (!std.mem.eql(u8, r.dest, w.dest) or !std.mem.eql(u8, r.path, w.path)) return,
-            else => return,
-        },
-        .untitled => unreachable,
-    }
+    // 수동 목록과 달리 자동 복구는 요청한 원본이 있다. 파일명 해시가 같아도 정확한 신원을 대조한다(L2 `backup_ops`).
+    if (!backup_ops.identityMatches(lost, record.parsed.doc)) return;
     // 본문·줄 준비 실패는 원본을 소비하지 않는다. 성공한 source의 수명은 새 문서가 가진다.
     _ = editor_ops.openRecoveredSource(self, &source.?) catch return;
     source = null;

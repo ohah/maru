@@ -1980,6 +1980,7 @@ pub const RuntimeInventory = union(enum) {
 };
 
 pub const AttachmentCapabilities = struct {
+    peer_agent_log_format: bool = false,
     peer_attach_generation: bool = false,
     negotiated_controller_transfer: bool = false,
 };
@@ -2041,7 +2042,7 @@ test "external transfer profile field inventory seals every compatibility input"
     inline for (fields, expected) |field, name|
         try testing.expectEqualStrings(name, field.name);
     try testing.expectEqual(
-        @as(usize, 2),
+        @as(usize, 3),
         @typeInfo(AttachmentCapabilities).@"struct".fields.len,
     );
     try testing.expectEqual(
@@ -3838,6 +3839,7 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.runtime_inventory_v1);
         writer.writeBool(client.runtime_catchup_barrier_v1);
         writer.writeBool(client.attachment_capabilities.peer_attach_generation);
+        writer.writeBool(client.attachment_capabilities.peer_agent_log_format);
         writer.writeBool(client.attachment_capabilities.negotiated_controller_transfer);
         writer.writeTag(@intFromEnum(client.metadata_support));
         writer.writeBool(client.admin_one_shot_v1);
@@ -7454,6 +7456,8 @@ pub const Client = struct {
         self.attachment_capabilities.negotiated_controller_transfer =
             connection_profile.advertisesControllerTransfer() and
             self.attachment_capabilities.peer_attach_generation;
+        self.attachment_capabilities.peer_agent_log_format = profile.kind == .current and
+            payloadHasCapability(ack.payload, "runtime_agent_log_format_v1");
         self.metadata_support = if (profile.kind == .current and
             payloadHasCapability(ack.payload, "runtime_metadata_v1"))
             .supported
@@ -21628,6 +21632,10 @@ fn buildHelloMajorFeatures(
     advertise_controller_transfer: bool,
     image_channel: client_image_channel.Request,
 ) error{OutOfMemory}![]u8 {
+    const format_capability = if (wire_major == protocol.version_major)
+        ",\"runtime_agent_log_format_v1\""
+    else
+        "";
     const transfer_capability = if (advertise_controller_transfer)
         ",\"controller_transfer_v1\""
     else
@@ -21638,8 +21646,8 @@ fn buildHelloMajorFeatures(
     };
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"async_observation_probe_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_selection_state_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"{s}]}}",
-        .{ wire_major, wire_major, client_kind, transfer_capability, image_capability },
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\"{s},\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"async_observation_probe_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_selection_state_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"{s}]}}",
+        .{ wire_major, wire_major, client_kind, format_capability, transfer_capability, image_capability },
     );
 }
 
@@ -24301,10 +24309,10 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         &scratch,
         .canonical_test,
     );
-    // 2026-10-11: Client 의 이미지 채널(fd·상태)이 seal 에 들어가 값이 바뀌었다(이미지 채널 IC2b).
+    // 2026-10-11: 이미지 채널(fd·상태)과 runtime hook format capability를 함께 seal에 넣는다.
     const frozen_canonical_digest =
-        "\x2a\x3b\x41\xe0\x7e\xdc\x0b\x8e\xc0\xd6\x07\x0e\xa3\x4f\xb7\x36" ++
-        "\x33\x0d\x18\x05\x78\xbd\x41\x92\x76\x57\xfc\x25\xba\x5c\x13\x2d";
+        "\x3c\xf9\x31\x66\x64\x48\x2a\x8c\x1f\x3d\xb3\x6a\xe0\x66\x08\x12" ++
+        "\xc6\x9f\x0e\x3d\x15\x8b\x76\x2d\x43\x51\x4b\x3d\x5e\x53\xd5\xb7";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -24332,6 +24340,11 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     try std.testing.expectEqual(@as(u64, 0x2026), seal.raw_last_success_request_id);
     try std.testing.expectEqual(@as(usize, 4), seal.screen_source_count);
     try std.testing.expectEqual(@as(usize, 1), seal.event_count);
+    try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
+
+    client.attachment_capabilities.peer_agent_log_format = true;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.attachment_capabilities.peer_agent_log_format = false;
     try std.testing.expect(externalSourceSealMatches(&client, 7, seal, &scratch));
 
     client.incident_binding.connection_generation += 1;

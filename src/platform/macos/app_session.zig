@@ -97191,3 +97191,85 @@ test "native local reader keeps generation cursor on contention and reads same-s
     try std.testing.expect(!term.hook.backlog_catchup);
     try std.testing.expectEqual(@as(u64, 3 * maru.session.agent_hook_event.max_line_bytes), term.agent_hook_cursor.offset);
 }
+
+test "host v2 reader selects confirmed format without SSH nonce and excludes late v1 records" {
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer guard.restore();
+    try tmp.dir.createDirPath(io, "home");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const control_dir = try std.fmt.bufPrintZ(&dir_buf, "/tmp/maru-v2-reader-{d}-{s}", .{ std.c.getpid(), tmp.sub_path });
+    defer std.Io.Dir.cwd().deleteTree(io, control_dir) catch {};
+    var socket_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const socket = try std.fmt.bufPrintZ(&socket_buf, "{s}/control.sock", .{control_dir});
+    const child = std.c.fork();
+    if (child < 0) return error.SkipZigTest;
+    if (child == 0) {
+        _ = std.c.setsid();
+        session_host.daemon.runSessionHost(std.heap.page_allocator, io, control_dir, socket) catch {};
+        std.c._exit(0);
+    }
+    defer {
+        _ = std.c.kill(child, std.posix.SIG.TERM);
+        var status: c_int = undefined;
+        _ = std.c.waitpid(child, &status, 0);
+    }
+    var client: session_host.client.Client = blk: {
+        for (0..150) |_| {
+            if (session_host.client.Client.connect(a, socket, .gui)) |value| break :blk value else |_| _ = usleep(20 * 1000);
+        }
+        return error.TestUnexpectedResult;
+    };
+    defer client.deinit();
+    const previous_keep_alive = app_keep_alive_after_quit;
+    app_keep_alive_after_quit = false;
+    defer app_keep_alive_after_quit = previous_keep_alive;
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    app_remote_backend = session_host.remote_term_backend.RemoteTermBackend.init(a, io, &client, session.runtime);
+    defer {
+        app_remote_backend.?.deinit();
+        app_remote_backend = null;
+    }
+    app_keep_alive_after_quit = true;
+    session.loaded_config.config.session.keep_alive_after_quit = true;
+    const term = try term_ops.createTerm(&session, .{ .command = "/bin/cat", .hook_log_profile = .v2, .shell_integration = null }, .{ .cols = 20, .rows = 5 }, 16, "host-v2", "/bin/cat");
+    defer term_ops.destroyTerm(&session, term);
+    try std.testing.expect(term.surface.remote != null);
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v2, app_remote_backend.?.runtimeHookLogProfile(term.rt.handle).?);
+    // A fresh reader must select the host's confirmed format itself, without an SSH nonce call.
+    term.agent_hook_log_profile = .v1;
+    const path = agent_ops.agentHookLogPath(a, term) orelse return error.TestUnexpectedResult;
+    defer a.free(path);
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v2, term.agent_hook_log_profile);
+    try std.testing.expect(std.mem.indexOf(u8, path, "/agent-turn-events-v2/") != null);
+    const legacy_path = try std.mem.replaceOwned(u8, a, path, "/agent-turn-events-v2/", "/agent-turn-events/");
+    defer a.free(legacy_path);
+    try std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(legacy_path).?);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = legacy_path, .data = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"wrong-v1\"}\n" });
+    const dir = try std.Io.Dir.cwd().openDir(io, std.fs.path.dirname(path).?, .{});
+    defer dir.close(io);
+    const basename = std.fs.path.basename(path);
+    const position = try maru.agent_log_writer.append(io, dir, basename[0 .. basename.len - ".ndjson".len], "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"host-v2\"}\n");
+    term.agent_kind = .claude;
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("host-v2", term.hook.transcript.owned.prompt());
+    try std.testing.expectEqualDeep(position.generation, term.agent_hook_generation.?);
+}

@@ -1115,6 +1115,7 @@ pub fn decodeCore(allocator: std.mem.Allocator, bytes: []const u8) Error!Termina
 
 pub const RuntimeView = struct {
     runtime_id: u128,
+    agent_log_format: @import("runtime_metadata_types.zig").AgentLogFormat = .v1,
     surface_id: u64,
     child_pid: i32,
     cols: u16,
@@ -1208,6 +1209,7 @@ pub const HostView = struct {
 
 pub const RuntimeState = struct {
     runtime_id: u128,
+    agent_log_format: @import("runtime_metadata_types.zig").AgentLogFormat = .v1,
     surface_id: u64,
     child_pid: i32,
     cols: u16,
@@ -1355,6 +1357,12 @@ pub fn encodeHostWithMaxBytes(
         try encodeTaggedValue(&writer, 9, i64, &runtime.pty_dev);
         try encodeTaggedValue(&writer, 10, u64, &runtime.pty_ino);
         try encodeTaggedValue(&writer, 11, i64, &runtime.pty_rdev);
+        // Old v1 bytes remain unchanged. A v2 runtime must never be restored
+        // by an old reader that would silently discard its immutable format.
+        if (runtime.agent_log_format == .v2) {
+            const value: u8 = @intFromEnum(runtime.agent_log_format);
+            try encodeTaggedValue(&writer, 13, u8, &value);
+        }
         // 태그 12 는 **반드시 optional** 이다. 구 host 의 디코더는 모르는 태그를 optional 일 때만
         // 건너뛴다 — 필수로 두면 신 host 가 쓴 레코드를 구 host 가 `UnknownRequiredField` 로 거부해
         // **롤백이 막힌다**(#3488 이 tag 99 로 겪은 그대로).
@@ -1593,6 +1601,8 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
     var core_initialized = false;
     var layout_blob: []u8 = &.{};
     var layout_seen = false;
+    var format_seen = false;
+    result.agent_log_format = .v1;
     errdefer if (core_initialized) result.core.deinit();
     errdefer if (layout_blob.len != 0) allocator.free(layout_blob);
     while (section.pos < section.bytes.len) {
@@ -1602,6 +1612,15 @@ fn decodeRuntime(allocator: std.mem.Allocator, section: *Reader) Error!RuntimeSt
         const raw_len = try section.integer(u64);
         if (raw_len > max_single_blob_bytes) return error.LimitExceeded;
         var field = try section.sub(std.math.cast(usize, raw_len) orelse return error.LimitExceeded);
+        if (tag == 13) {
+            if (format_seen) return error.DuplicateField;
+            format_seen = true;
+            if (flags != 0) return error.InvalidValue;
+            const value = try readTagged(u8, &field, allocator);
+            result.agent_log_format = std.enums.fromInt(@import("runtime_metadata_types.zig").AgentLogFormat, value) orelse return error.InvalidValue;
+            if (result.agent_log_format != .v2) return error.InvalidValue;
+            continue;
+        }
         if (tag == 12) {
             // **`seen` 에 넣지 않는다.** 그 배열은 「1..11 은 전부 있어야 한다」를 강제하는데, 태그 12 는
             // 구 host 의 레코드에 아예 없다 — 필수로 세면 업그레이드가 통째로 막힌다.
@@ -2904,4 +2923,79 @@ test "handoff v1 이 재생 상태와 은행까지 나른다 — exec 뒤 위상
     // exec 뒤 host 가 tick 을 다시 준다. 은행 25 + 15 = 40ms 라 **정확히 그 tick 에** 한 장 넘어간다.
     try std.testing.expect(after.advanceAnimations(15));
     try std.testing.expectEqual(@as(u32, 2), after.kitty_images.map.get(1).?.current_frame);
+}
+
+// Walk the TLV structure rather than searching arbitrary core bytes for a tag.
+fn testRuntimeBody(encoded: []const u8) ![]const u8 {
+    const envelope = try readEnvelope(encoded, max_total_bytes - envelope_header_len);
+    var reader: Reader = .{ .bytes = envelope.payload };
+    while (reader.pos < reader.bytes.len) {
+        const tag = try reader.integer(u32);
+        _ = try reader.integer(u16);
+        _ = try reader.integer(u16);
+        const length = try reader.integer(u64);
+        const section = try reader.sub(@intCast(length));
+        if (tag == section_runtime) return section.bytes;
+    }
+    return error.MissingRequiredField;
+}
+
+fn testRuntimeFormatTag(body: []const u8) !?usize {
+    var reader: Reader = .{ .bytes = body };
+    while (reader.pos < reader.bytes.len) {
+        const offset = reader.pos;
+        const tag = try reader.integer(u32);
+        _ = try reader.integer(u16);
+        _ = try reader.integer(u16);
+        const length = try reader.integer(u64);
+        _ = try reader.sub(@intCast(length));
+        if (tag == 13) return offset;
+    }
+    return null;
+}
+
+test "agent log format handoff preserves v1 bytes and requires v2 knowledge" {
+    const a = std.testing.allocator;
+    var core = try TerminalCore.init(a, .{ .cols = 8, .rows = 2 });
+    defer core.deinit();
+    var view: RuntimeView = .{ .runtime_id = 7, .surface_id = 9, .child_pid = 101, .cols = 8, .rows = 2, .resize_generation = 0, .fd_slot = 40, .pty_dev = 1, .pty_ino = 2, .pty_rdev = 3, .core = &core };
+    for ([_]@import("runtime_metadata_types.zig").AgentLogFormat{ .v1, .v2 }) |format| {
+        view.agent_log_format = format;
+        const encoded = try encodeHost(a, .{ .host_id = 1, .upgrade_epoch = 1, .next_handle = 10, .runtimes = &.{view} });
+        defer a.free(encoded);
+        var decoded = try decodeHost(a, encoded);
+        defer decoded.deinit();
+        try std.testing.expectEqual(format, decoded.runtimes[0].agent_log_format);
+        const body = try testRuntimeBody(encoded);
+        const offset = try testRuntimeFormatTag(body);
+        if (format == .v1) {
+            try std.testing.expect(offset == null);
+            continue;
+        }
+        const at = offset.?;
+        // Unknown required TLVs are rejected by the frozen reader; an optional
+        // v2 tag would instead let it recreate the same child as a v1 runtime.
+        try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, body[at + 4 ..][0..2], .big));
+        var bad = try a.dupe(u8, body);
+        defer a.free(bad);
+        std.mem.writeInt(u32, bad[at..][0..4], 999, .big);
+        var unknown: Reader = .{ .bytes = bad };
+        try std.testing.expectError(error.UnknownRequiredField, decodeRuntime(a, &unknown));
+        std.mem.writeInt(u32, bad[at..][0..4], 13, .big);
+        for ([_]u8{ 0, 1, 3, 255 }) |value| {
+            bad[at + tlv_header_len] = value;
+            var invalid: Reader = .{ .bytes = bad };
+            try std.testing.expectError(error.InvalidValue, decodeRuntime(a, &invalid));
+        }
+        bad[at + tlv_header_len] = 2;
+        std.mem.writeInt(u16, bad[at + 4 ..][0..2], flag_optional, .big);
+        var optional: Reader = .{ .bytes = bad };
+        try std.testing.expectError(error.InvalidValue, decodeRuntime(a, &optional));
+        var duplicate: std.ArrayListUnmanaged(u8) = .empty;
+        defer duplicate.deinit(a);
+        try duplicate.appendSlice(a, body);
+        try duplicate.appendSlice(a, body[at .. at + tlv_header_len + 1]);
+        var repeated: Reader = .{ .bytes = duplicate.items };
+        try std.testing.expectError(error.DuplicateField, decodeRuntime(a, &repeated));
+    }
 }

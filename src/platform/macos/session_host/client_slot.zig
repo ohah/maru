@@ -5028,6 +5028,7 @@ pub fn projectGenerationCapabilities(
         .notification_delivery = node.client.notification_delivery_v1,
         .runtime_clipboard = node.client.runtime_clipboard_v1,
         .runtime_core_command = node.client.runtime_core_command_v1,
+        .agent_log_format = node.client.attachment_capabilities.peer_agent_log_format,
         .runtime_link_at = node.client.runtime_link_at_v1,
         .runtime_selected_text = node.client.runtime_selected_text_v1,
         .runtime_selection_state = node.client.runtime_selection_state_v1,

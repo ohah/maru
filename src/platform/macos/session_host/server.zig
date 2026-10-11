@@ -70,6 +70,7 @@ pub const UpgradePreflight = struct {
 
 /// `runtime.spawn`의 중립 파라미터(server가 JSON에서 파싱해 넘긴다). host가 이 argv/크기로 실 PTY를 띄운다.
 pub const RuntimeSpawnParams = struct {
+    agent_log_format: @import("runtime_metadata_types.zig").AgentLogFormat = .v1,
     /// `[command, args...]` — argv[0]은 실행 파일 경로. server는 JSON string 배열만 파싱하고 프로세스는 host가 띄운다.
     argv: []const []const u8,
     cwd: ?[]const u8 = null,
@@ -847,6 +848,7 @@ pub const Connection = struct {
     /// MRSH v2에 후속 비동기 event를 무조건 밀면 같은 major의 구 client가 protocol error로 종료한다. hello에서
     /// 명시적으로 협상한 client에게만 runtime metadata attach/event/RPC를 노출한다.
     runtime_metadata_v1: bool = false,
+    runtime_agent_log_format_v1: bool = false,
     async_observation_probe_v1: bool = false,
     runtime_ended_v1: bool = false,
     controller_transfer_v1: bool = false,
@@ -1121,6 +1123,7 @@ pub const Connection = struct {
         }
         self.client_kind = parseClientKind(strField(obj, "client_kind"));
         self.runtime_metadata_v1 = stringArrayContains(obj, "capabilities", "runtime_metadata_v1");
+        self.runtime_agent_log_format_v1 = self.runtime_metadata_v1 and stringArrayContains(obj, "capabilities", "runtime_agent_log_format_v1");
         self.async_observation_probe_v1 = self.runtime_metadata_v1 and
             stringArrayContains(obj, "capabilities", "async_observation_probe_v1");
         self.runtime_ended_v1 = stringArrayContains(obj, "capabilities", "runtime_ended_v1");
@@ -1887,6 +1890,13 @@ pub const Connection = struct {
             }
         else
             null;
+        const agent_log_format: @import("runtime_metadata_types.zig").AgentLogFormat = if (p.get("agent_log_format")) |value| blk: {
+            if (value != .integer) return self.replyError(request_id, .invalid_request);
+            const number = std.math.cast(u8, value.integer) orelse return self.replyError(request_id, .invalid_request);
+            break :blk std.enums.fromInt(@import("runtime_metadata_types.zig").AgentLogFormat, number) orelse return self.replyError(request_id, .invalid_request);
+        } else .v1;
+        if (agent_log_format == .v2 and !self.runtime_agent_log_format_v1)
+            return self.replyError(request_id, .incompatible_version);
         const initial_notification: ?NotificationConfigSnapshot = if (p.get("notification_config")) |value|
             switch (value) {
                 .null => null,
@@ -1913,6 +1923,7 @@ pub const Connection = struct {
             .rows = rows,
             .initial_config = initial_config,
             .initial_notification = initial_notification,
+            .agent_log_format = agent_log_format,
         }) catch |err| switch (err) {
             error.RuntimeLimitReached, error.AggregateGridLimitReached => return self.replyError(request_id, .resource_exhausted),
             error.InvalidGridSize => return self.replyError(request_id, .invalid_request),
@@ -1968,6 +1979,9 @@ pub const Connection = struct {
         const mode = parseAttachMode(strField(p, "mode")) orelse
             return self.replyError(request_id, .invalid_request);
 
+        const hook_entry = self.registry.get(id.?) orelse return self.replyError(request_id, .runtime_not_found);
+        if (hook_entry.agent_log_format == .v2 and !self.runtime_agent_log_format_v1)
+            return self.replyError(request_id, .incompatible_version);
         if (self.next_stream_id == 0)
             return self.replyError(request_id, .resource_exhausted);
         const stream = self.next_stream_id;
@@ -2127,7 +2141,17 @@ pub const Connection = struct {
             .input = reg.Capability.has(outcome.granted, reg.Capability.input),
             .resize = reg.Capability.has(outcome.granted, reg.Capability.resize),
         };
-        const body = if (self.runtime_metadata_v1)
+        const body = if (self.runtime_agent_log_format_v1)
+            try self.stringify(.{ .result = .{
+                .stream_id = stream,
+                .controller_generation = controller_generation,
+                .granted = granted,
+                .controller_busy = outcome.controller_busy,
+                .metadata_revision = metadata_revision,
+                .metadata = initial_observation,
+                .agent_log_format = @intFromEnum(hook_entry.agent_log_format),
+            } })
+        else if (self.runtime_metadata_v1)
             try self.stringify(.{ .result = .{
                 .stream_id = stream,
                 .controller_generation = controller_generation,
@@ -3595,6 +3619,7 @@ pub const Connection = struct {
         append(buf, &count, "admin_one_shot_v1");
         if (self.runtime_ops != null) append(buf, &count, "admin_runtime_end_v1");
         append(buf, &count, "runtime_metadata_v1");
+        append(buf, &count, "runtime_agent_log_format_v1");
         append(buf, &count, "runtime_ended_v1");
         append(buf, &count, "screen_stream_v2_current_body");
         append(buf, &count, "screen_viewport_scrolled_v1");
@@ -4058,6 +4083,7 @@ const hello_capability_candidates = [_][]const u8{
     "admin_one_shot_v1",
     "admin_runtime_end_v1",
     "runtime_metadata_v1",
+    "runtime_agent_log_format_v1",
     "runtime_ended_v1",
     "screen_stream_v2_current_body",
     "screen_viewport_scrolled_v1",
@@ -9266,4 +9292,38 @@ test "image channel hello: admin 과 null role 은 채널로 가지 않고 자�
         try testing.expectEqual(case.counts, probe.countsAsHandshaken());
     }
     probe.state = .closed;
+}
+
+test "agent log format server rejects old clients and confirms format on reattach" {
+    const a = testing.allocator;
+    var registry = reg.TerminalRuntimeRegistry.init(a);
+    defer registry.deinit();
+    const entry = try registry.register(0xaa, 80, 24);
+    entry.agent_log_format = .v2;
+    var fake: FakeRuntimeOps = .{};
+    const attach = "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"controller\"}}";
+    {
+        var old = Connection.init(a, 1, &registry);
+        defer old.deinit();
+        old.runtime_ops = fake.ops();
+        const hello = try feedJson(&old, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2}");
+        defer if (hello.frame) |f| f.deinit(a);
+        const rejected = try feedJson(&old, .request, 2, attach);
+        defer if (rejected.frame) |f| f.deinit(a);
+        try testing.expect(std.mem.indexOf(u8, rejected.frame.?.payload, "incompatible_version") != null);
+        try testing.expect(entry.controller == null);
+    }
+    for (0..2) |index| {
+        var conn = Connection.init(a, @intCast(index + 2), &registry);
+        defer conn.deinit();
+        conn.runtime_ops = fake.ops();
+        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[\"runtime_metadata_v1\",\"runtime_agent_log_format_v1\"]}");
+        defer if (hello.frame) |f| f.deinit(a);
+        const response = try feedJson(&conn, .request, 2, attach);
+        defer if (response.frame) |f| f.deinit(a);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, response.frame.?.payload, .{});
+        defer parsed.deinit();
+        try testing.expectEqual(@as(i64, 2), parsed.value.object.get("result").?.object.get("agent_log_format").?.integer);
+        try testing.expectEqual(@import("runtime_metadata_types.zig").AgentLogFormat.v2, entry.agent_log_format);
+    }
 }

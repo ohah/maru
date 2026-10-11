@@ -745,6 +745,7 @@ comptime {
 }
 
 pub const AttachResult = struct {
+    agent_log_format: @import("runtime_metadata_types.zig").AgentLogFormat = .v1,
     state: State,
     controller_busy: bool,
     initial_metadata: runtime_metadata_wire.InitialMetadataSeed = .unsupported,
@@ -812,6 +813,7 @@ pub fn decodeAttachResponse(
                     .controller_generation = accepted.controller_generation,
                 },
                 .controller_busy = accepted.controller_busy,
+                .agent_log_format = accepted.agent_log_format,
                 .initial_metadata = accepted.initial_metadata.take(),
             } };
         },
@@ -1080,6 +1082,7 @@ fn decodeAcceptedAttachForTest(
         .accepted => |*accepted| .{
             .state = accepted.state,
             .controller_busy = accepted.controller_busy,
+            .agent_log_format = accepted.agent_log_format,
             .initial_metadata = accepted.initial_metadata.take(),
         },
     };

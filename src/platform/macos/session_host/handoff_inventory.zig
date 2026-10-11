@@ -545,8 +545,8 @@ pub const core_command_queue_groups = [_]Group{
 pub const runtime_entry_groups = [_]Group{
     .{
         .disposition = .serialized,
-        .fields = &.{ "id", "cols", "rows", "resize_generation" },
-        .why = "runtime identity and canonical geometry generation remain stable across exec",
+        .fields = &.{ "id", "cols", "rows", "resize_generation", "agent_log_format" },
+        .why = "runtime identity, canonical geometry generation and immutable hook log format remain stable across exec",
     },
     .{
         .disposition = .reconstructed,

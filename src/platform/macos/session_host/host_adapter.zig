@@ -680,6 +680,7 @@ pub const HostAdapter = struct {
             .notification_delivery = client.notification_delivery_v1,
             .runtime_clipboard = client.runtime_clipboard_v1,
             .runtime_core_command = client.runtime_core_command_v1,
+            .agent_log_format = client.attachment_capabilities.peer_agent_log_format,
             .runtime_link_at = client.runtime_link_at_v1,
             .runtime_selected_text = client.runtime_selected_text_v1,
             .runtime_selection_state = client.runtime_selection_state_v1,
@@ -883,6 +884,7 @@ test "host adapter classifies current and N-1 without exposing N-1 as a current 
         .fd = -1,
         .host_id = 0xAA,
         .wire_major = protocol.version_major,
+        .compatibility_profile = @import("compatibility.zig").profileForMajor(protocol.version_major),
         .parser = @import("framing.zig").FrameParser.init(allocator),
     };
     var current: HostAdapter = undefined;
@@ -891,6 +893,9 @@ test "host adapter classifies current and N-1 without exposing N-1 as a current 
     try std.testing.expectEqual(Kind.current, current.kind);
     try std.testing.expectEqual(@as(u128, 0xAA), current.hostId());
     try std.testing.expect(HostAdapter.testing.rawClient(&current) == current.slot.logicalClientConst());
+    try std.testing.expect(!current.generationCapabilities().agent_log_format);
+    HostAdapter.testing.rawClient(&current).attachment_capabilities.peer_agent_log_format = true;
+    try std.testing.expect(current.generationCapabilities().agent_log_format);
 
     var previous_client: client_mod.Client = .{
         .allocator = allocator,

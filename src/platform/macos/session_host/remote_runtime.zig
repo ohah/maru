@@ -2714,6 +2714,7 @@ fn initObserverReconnectCandidate(
         .observer,
         .{
             .generation_schema = generation_schema,
+            .agent_log_format_supported = args.adapter.generationCapabilities().agent_log_format,
             .metadata_support = switch (capabilities.metadata_support) {
                 .unsupported => .unsupported,
                 .supported => .supported,
@@ -2731,6 +2732,11 @@ fn initObserverReconnectCandidate(
         .wire_error => return error.ObserverAttachRejected,
         .accepted => |*value| value,
     };
+    const profile: maru.session.agent_log_profile.Profile = switch (accepted.agent_log_format) {
+        .v1 => .v1,
+        .v2 => .v2,
+    };
+    if (runtime.hook_log_profile) |known| if (known != profile) return error.AgentLogFormatChanged;
     switch (accepted.initial_metadata) {
         .current => |*dto| {
             _ = try RemoteRuntime.applyMetadataDtoToObservation(
@@ -2809,6 +2815,7 @@ pub const RemoteRuntime = struct {
     reconnect_executor: ReconnectProductExecutor,
     allocator: std.mem.Allocator,
     io: std.Io,
+    hook_log_profile: ?maru.session.agent_log_profile.Profile = null,
     runtime_id_hex: [32]u8, // host 발급 runtime_id(hex) — terminate에 되먹인다.
     /// 이 client 가 **마지막으로 성공적으로 요청한** 열(S11-6). 0 이면 아직 한 번도 안 보냈다.
     requested_cols: u16 = 0,
@@ -3907,6 +3914,7 @@ pub const RemoteRuntime = struct {
                     .notification_delivery = client.notification_delivery_v1,
                     .runtime_clipboard = client.runtime_clipboard_v1,
                     .runtime_core_command = client.runtime_core_command_v1,
+                    .agent_log_format = client.attachment_capabilities.peer_agent_log_format,
                     .runtime_link_at = client.runtime_link_at_v1,
                     .runtime_selected_text = client.runtime_selected_text_v1,
                     .runtime_selection_state = client.runtime_selection_state_v1,
@@ -4039,6 +4047,11 @@ pub const RemoteRuntime = struct {
             .generation => |adapter| adapter.generationCapabilities().notification_delivery,
         };
         if (notification != null and !notification_delivery) return error.UnsupportedSpawnContract;
+        const profile_supported = switch (connection) {
+            .legacy => |client| client.attachment_capabilities.peer_agent_log_format,
+            .generation => |adapter| adapter.generationCapabilities().agent_log_format,
+        };
+        if (request.hook_log_profile == .v2 and !profile_supported) return error.UnsupportedSpawnContract;
         try self.initializeGenerationOwner(connection, allocator, io, size);
         errdefer self.deinitGenerationOwnerAndScreenSource();
         self.direct_input = .empty;
@@ -4085,6 +4098,7 @@ pub const RemoteRuntime = struct {
         // 이 지점부터 실패하면 방금 띄운 host runtime을 회수한다(orphan 방지) — spawn한 건 우리 소유다.
         errdefer self.terminateBestEffort();
 
+        self.hook_log_profile = request.hook_log_profile;
         try self.attachAndAssemble(surface_id, size);
     }
 
@@ -4185,6 +4199,7 @@ pub const RemoteRuntime = struct {
         self.allocator = allocator;
         self.io = io;
         // in-place(`undefined`) 생성이라 필드 기본값이 안 먹는다 — 모든 constructor 가 지나는 여기서 적는다.
+        self.hook_log_profile = null;
         self.layout_size = null;
         self.layout_cell_width_px = 0;
         self.layout_cell_height_px = 0;
@@ -4441,6 +4456,7 @@ pub const RemoteRuntime = struct {
             .controller,
             .{
                 .generation_schema = generation_schema,
+                .agent_log_format_supported = capabilities.agent_log_format,
                 .metadata_support = switch (capabilities.metadata_support) {
                     .unsupported => .unsupported,
                     .supported => .supported,
@@ -4465,6 +4481,15 @@ pub const RemoteRuntime = struct {
             },
             .accepted => |*value| value,
         };
+        const profile: maru.session.agent_log_profile.Profile = switch (accepted.agent_log_format) {
+            .v1 => .v1,
+            .v2 => .v2,
+        };
+        if (self.hook_log_profile) |known| if (known != profile) {
+            self.poisonConnection(.peer_contract_violation);
+            return error.AgentLogFormatChanged;
+        };
+        self.hook_log_profile = profile;
         switch (accepted.initial_metadata) {
             .current => |*dto| _ = self.applyMetadataDto(dto) catch |err| {
                 self.poisonConnection(.peer_contract_violation);
@@ -8570,6 +8595,7 @@ pub const testing_api = if (builtin.is_test) struct {
         // 대부분의 legacy fixture는 `RemoteRuntime = undefined`에서 필요한 owner만 순서대로
         // 조립한다. 제품 constructor와 마찬가지로 mutation owner도 먼저 pristine으로 만들어
         // 이후 input epoch가 정해진 첫 mutation에서 final-address 초기화할 수 있게 한다.
+        runtime.hook_log_profile = null;
         runtime.mutation_owner = .{};
         runtime.layout_size = null;
         runtime.layout_cell_width_px = 0;
@@ -9282,6 +9308,7 @@ fn buildSpawnParams(
         .cell_height_px = request.cell_height_px,
         .runtime_config = if (initial_config) |config| coreConfigToSpawnWire(config) else null,
         .notification_config = notification,
+        .agent_log_format = @as(u8, if (request.hook_log_profile == .v1) 1 else 2),
     }) catch return error.OutOfMemory;
     return allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
 }
@@ -19382,9 +19409,11 @@ test "K3 actual daemon kernel cwd survives detach and preserves authority isolat
     try runtime_a.spawnWithAdapter(&adapter, allocator, io, 1, .{
         .command = "/bin/sh",
         .args = &.{ "-c", command_a },
+        .hook_log_profile = .v2,
         .shell_integration = null,
     }, .{ .cols = 80, .rows = 24 }, null);
     runtime_a_live = true;
+    try testing.expectEqual(maru.session.agent_log_profile.Profile.v2, runtime_a.hook_log_profile.?);
     // **막 spawn 한 runtime 도 아무도 안 좁혔다**(S11-6, attach 쪽과 같은 이유 — in-place `undefined`).
     try testing.expectEqual(@as(u16, 0), runtime_a.requested_cols);
     try testing.expectEqual(@as(u16, 0), runtime_a.narrowedCols());
@@ -19442,6 +19471,7 @@ test "K3 actual daemon kernel cwd survives detach and preserves authority isolat
         .{ .cols = 80, .rows = 24 },
     );
     defer reattached.deinit();
+    try testing.expectEqual(maru.session.agent_log_profile.Profile.v2, reattached.hook_log_profile.?);
     // attachExisting assembles the initial full-state before returning. A pump here would weaken the
     // restore contract by allowing a later delta to hide stale attach metadata.
     const current = &reattached.currentGeneration().observation;
@@ -21657,4 +21687,21 @@ test "S11-6 좁힘 상태는 연결보다 오래 산다 — generation 이 아�
     try testing.expect(!@hasField(RemoteGeneration, "narrowed_cols"));
     try testing.expect(@hasField(RemoteRuntime, "requested_cols"));
     try testing.expect(@hasField(RemoteRuntime, "narrowed_cols"));
+}
+
+test "agent log format fixture initialization clears stale profile before building a generation" {
+    try host_adapter_mod.HostAdapter.initializeProcessRuntime();
+    const allocator = testing.allocator;
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 1,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    var runtime: RemoteRuntime = undefined;
+    runtime.hook_log_profile = .v2;
+    try testing_api.initializeTestGeneration(&runtime, allocator, .{ .legacy = &client });
+    defer runtime.generation_owner.slot.deinitInPlace(allocator, deinitRemoteGeneration) catch @panic("fixture teardown failed");
+    try testing.expect(runtime.hook_log_profile == null);
 }

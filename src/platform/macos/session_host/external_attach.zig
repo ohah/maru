@@ -302,6 +302,7 @@ fn attachSnapshot(
         .{
             .generation_schema = generation_schema,
             .metadata_support = client.metadata_support,
+            .agent_log_format_supported = client.attachment_capabilities.peer_agent_log_format,
         },
     ) catch |err| {
         client.poison(if (err == error.OutOfMemory)

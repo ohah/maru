@@ -292,6 +292,8 @@ fn sameObserverStreams(a: []const ObserverSlot, b: []const ObserverSlot) bool {
 /// opaque 슬롯이다(state machine은 이 값을 해석하지 않는다).
 pub const RuntimeEntry = struct {
     id: RuntimeId,
+    /// Immutable spawn metadata, retained independently of attachments.
+    agent_log_format: @import("runtime_metadata_types.zig").AgentLogFormat = .v1,
     /// 마지막으로 검증된 canonical PTY 크기. client가 0명이어도 유지된다(§9).
     cols: u16,
     rows: u16,

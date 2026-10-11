@@ -395,3 +395,21 @@ OS 없는 중립 leaf에서 공유하고, namespace·명령 생성 정책은 기
 명시적 v2 persistent 요청은 spawn 전에 거부하며 조용히 v1로 낮추지 않는다. 이 경계가 재접속 metadata와 capability
 협상을 대신하지 않는다. host state·upgrade handoff·attach 관측에 immutable profile을
 연결한 후에만 v2 기본값을 활성화한다.
+
+
+## 4c-4 host의 불변 format metadata
+
+host registry는 생성 시 결정한 wire format(1/2)을 runtime별로 보관한다. 새 runtime은
+기본 v1이며 명시적 v2는 `runtime_agent_log_format_v1` capability가 확인된 연결에서만
+요청한다. 앱 재접속은 attach bootstrap의 `agent_log_format`을 같은 capability로
+엄격히 해석한다. 지원을 확인한 peer의 누락·미지 값·중복 값과 기존 runtime의 format
+변경은 거부하며, 이미 확인한 v2를 v1로 낮추지 않는다. format은 생성 시 불변이므로
+매 프레임의 mutable metadata event로 다시 갱신하지 않는다.
+
+upgrade handoff runtime tag 13은 v2에만 required로 기록한다. 태그 부재는 기존
+v1 runtime이며 v1 snapshot의 바이트는 유지한다. v2 tag를 모르는 구 reader는
+UnknownRequiredField로 거부하므로 native runtime을 legacy로 복원할 수 없다.
+원래 v1 host의 rollback snapshot에는 이 tag가 없고 기존 rollback 호환성은 유지한다.
+registry capture·복원과 attach bootstrap·클라이언트 보관·reader namespace까지 같은
+값을 연결하고 실제 spawn/reconnect와 snapshot roundtrip으로 검증한다. provider
+기본 설치와 SSH 전송의 format 전환은 이 단계에서 활성화하지 않는다.

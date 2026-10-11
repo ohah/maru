@@ -643,3 +643,7 @@ worker·전체 actor 적용·파일별 저장 결과를 연결한다. 컴포넌�
 `src/platform/macos/app_session/editor/search/batch/load.zig`는 닫힌 파일의 임시 문서·Term·
 entry·파일 항목 예약을 소유한다. 준비 객체의 해제가 기존 pane 문서의 닫기를 대신하지 않는다.
 `editor/mod.zig::prepareVerifiedText`는 검증된 본문을 공통 문서 등록 경로로 넘긴다.
+
+`src/platform/macos/app_session/editor/search/batch/coordinator.zig`는 원래 disk source와 준비 문서의
+신원 인계·전체 편집·pane 게시·저장을 조정한다. `editor/history.zig::Prepared`가 Undo/뷰/연결 기록을
+준비하고 commit과 notify 사이에 pane 소유권을 넘길 수 있게 한다.

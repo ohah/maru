@@ -179,6 +179,13 @@ pub const Publication = struct {
     }
 };
 pub fn preparePublication(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, result_selection_count: usize, restore_source: bool) !Publication {
+    return preparePublicationImpl(self, term, d, result_selection_count, restore_source, false);
+}
+/// caller가 아직 pane에 게시하지 않은 준비 Term만 넘긴다. 등록된 peer의 부분 게시를 허용하지 않는다.
+pub fn prepareDetachedPublication(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, result_selection_count: usize) !Publication {
+    return preparePublicationImpl(self, term, d, result_selection_count, false, true);
+}
+fn preparePublicationImpl(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, result_selection_count: usize, restore_source: bool, detached: bool) !Publication {
     const state = term.rt.editorDocument();
     const file = &(state.opened orelse return error.DocumentNotOpen).file;
     const lease = term.rt.editor_document_lease orelse return error.DocumentNotRegistered;
@@ -205,40 +212,49 @@ pub fn preparePublication(self: *AppSession, term: *Term, d: maru.session.editor
         if (view.kind != .editor or view.rt.editorDocument() != state) continue;
         if (n == count) return error.SharedViewCountMismatch;
         if (view != term and (view.rt.editor_preedit.len > 0 or (self.ime_editor_commit_pending and self.ime_terminal_target_id == view.surface.id))) return error.SharedCompositionBusy;
-        const lines = try self.allocator.alloc([]const u8, line_count);
-        errdefer self.allocator.free(lines);
-        var primary = view.rt.editor_selection;
-        var extras: []editor_selection.Selection = undefined;
-        if (view == term and restore_source) {
-            extras = try self.allocator.alloc(editor_selection.Selection, result_selection_count -| 1);
-        } else if (primary) |sel| {
-            // 매핑으로 서로 겹친 선택도 정본 변경 전에 합친다. primary 소유는 유지한다.
-            const mapped = try self.allocator.alloc(editor_selection.Selection, view.rt.editor_extra_selections.len + 1);
-            defer self.allocator.free(mapped);
-            mapped[0] = shared_policy.mapSelection(d, sel);
-            for (view.rt.editor_extra_selections, 1..) |extra, i| mapped[i] = shared_policy.mapSelection(d, extra);
-            const merged = editor_selection.mergeOverlapping(mapped, 0);
-            primary = mapped[merged.primary];
-            extras = try self.allocator.alloc(editor_selection.Selection, merged.len - 1);
-            var k: usize = 0;
-            for (mapped[0..merged.len], 0..) |item, i| {
-                if (i == merged.primary) continue;
-                extras[k] = item;
-                k += 1;
-            }
-        } else {
-            extras = try self.allocator.alloc(editor_selection.Selection, 0);
-        }
-        const folds: ?MappedFolds = if ((view == term and restore_source) or view.rt.editor_folded_len == 0) null else prepareFolds(self, view, d, line_count) catch |err| {
-            self.allocator.free(extras);
-            return err;
-        };
-        prepared[n] = .{ .term = view, .lines = lines, .scroll = editor_ops.captureScrollAnchor(view) orelse if (view != term and view.rt.editor_first_line == 0) editor_ops.ScrollAnchor{ .off = 0 } else null, .first_piece = view.rt.editor_first_piece, .primary = primary, .extras = extras, .folds = folds };
+        prepared[n] = try prepareView(self, term, view, d, line_count, result_selection_count, restore_source);
         n += 1;
     };
+    // 명시적으로 넘긴 비활성 준비 Term만 자기 하나의 view를 준비한다. 다른 창의 peer는 여전히 거절한다.
+    if (detached) {
+        if (n != 0 or count != 1 or term.kind != .editor) return error.SharedViewCountMismatch;
+        prepared[0] = try prepareView(self, term, term, d, line_count, result_selection_count, false);
+        n = 1;
+    }
     // 다른 창의 view는 아직 이 coordinator에 연결하지 않았다. 부분 게시로 넘기지 않는다.
     if (n != count) return error.SharedViewCountMismatch;
     return .{ .session = self, .term = term, .change = d, .views = prepared, .line_count = line_count, .restore_source = restore_source };
+}
+fn prepareView(self: *AppSession, term: *Term, view: *Term, d: maru.session.editor.delta.Delta, line_count: usize, result_selection_count: usize, restore_source: bool) !SharedPreparedView {
+    const lines = try self.allocator.alloc([]const u8, line_count);
+    errdefer self.allocator.free(lines);
+    var primary = view.rt.editor_selection;
+    var extras: []editor_selection.Selection = undefined;
+    if (view == term and restore_source) {
+        extras = try self.allocator.alloc(editor_selection.Selection, result_selection_count -| 1);
+    } else if (primary) |sel| {
+        // 매핑으로 서로 겹친 선택도 정본 변경 전에 합친다. primary 소유는 유지한다.
+        const mapped = try self.allocator.alloc(editor_selection.Selection, view.rt.editor_extra_selections.len + 1);
+        defer self.allocator.free(mapped);
+        mapped[0] = shared_policy.mapSelection(d, sel);
+        for (view.rt.editor_extra_selections, 1..) |extra, i| mapped[i] = shared_policy.mapSelection(d, extra);
+        const merged = editor_selection.mergeOverlapping(mapped, 0);
+        primary = mapped[merged.primary];
+        extras = try self.allocator.alloc(editor_selection.Selection, merged.len - 1);
+        var k: usize = 0;
+        for (mapped[0..merged.len], 0..) |item, i| {
+            if (i == merged.primary) continue;
+            extras[k] = item;
+            k += 1;
+        }
+    } else {
+        extras = try self.allocator.alloc(editor_selection.Selection, 0);
+    }
+    const folds: ?MappedFolds = if ((view == term and restore_source) or view.rt.editor_folded_len == 0) null else prepareFolds(self, view, d, line_count) catch |err| {
+        self.allocator.free(extras);
+        return err;
+    };
+    return .{ .term = view, .lines = lines, .scroll = editor_ops.captureScrollAnchor(view) orelse if (view != term and view.rt.editor_first_line == 0) editor_ops.ScrollAnchor{ .off = 0 } else null, .first_piece = view.rt.editor_first_piece, .primary = primary, .extras = extras, .folds = folds };
 }
 pub fn applyPrepared(self: *AppSession, term: *Term, d: maru.session.editor.delta.Delta, sels: *editor_selection.Selections, result_selection_count: usize) !maru.session.editor.delta.Inverse {
     const inverse = try applyPreparedImpl(self, term, d, sels, result_selection_count);

@@ -24,7 +24,7 @@ pub const Ticket = struct {
         try ticket.validate(self, spec);
         return ticket;
     }
-    fn validate(self: Ticket, session: *AppSession, spec: *const search.batch.Specification) !void {
+    pub fn validate(self: Ticket, session: *AppSession, spec: *const search.batch.Specification) !void {
         const st = &session.editor_search;
         if (session.ime_active or session.ime_editor_commit_pending) return error.InputTransactionPending;
         for (st.fields) |field| if (field.preedit.items.len > 0) return error.InputTransactionPending;
@@ -43,7 +43,7 @@ fn document(term: *Term) ?search.request.DocumentIdentity {
     const lease = term.rt.editor_document_lease orelse return null;
     return .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation };
 }
-fn resolve(session: *AppSession, target: search.batch.Target, before: ?[]const u8) !*Term {
+pub fn resolve(session: *AppSession, target: search.batch.Target, before: ?[]const u8) !*Term {
     if (target.source != .model) return error.DiskTargetsNotSupported;
     const source = target.source.model;
     if (source.document.owner != @intFromPtr(session.editor_documents) or source.composition != 0) return error.StaleDocument;
@@ -95,7 +95,7 @@ pub fn apply(session: *AppSession, spec: *search.batch.Specification, prepared: 
     if (spec.targets.items.len == 0 or spec.targets.items.len != prepared.items.items.len) return error.StalePlan;
     for (spec.targets.items) |target| if (target.outcome != .pending) return error.AlreadyApplied;
     try ticket.validate(session, spec);
-    const terms = try session.allocator.alloc(*Term, spec.targets.items.len);
+    const terms = try session.allocator.alloc(?*Term, spec.targets.items.len);
     defer session.allocator.free(terms);
     var inputs: std.ArrayList(editor.linked_history.Input) = .empty;
     defer inputs.deinit(session.allocator);
@@ -103,13 +103,18 @@ pub fn apply(session: *AppSession, spec: *search.batch.Specification, prepared: 
     for (spec.targets.items, prepared.items.items, terms) |target, item, *term| {
         if (item.plan.replacements != target.ranges.items.len or item.changes.len != item.plan.edits.items.len) return error.StalePlan;
         term.* = try resolve(session, target, item.plan.before);
-        if (item.changes.len > 0) inputs.appendAssumeCapacity(.{ .term = term.*, .changes = item.changes });
+        if (item.changes.len > 0) inputs.appendAssumeCapacity(.{ .term = term.*.?, .changes = item.changes });
     }
     if (inputs.items.len != prepared.effective) return error.StalePlan;
     try ticket.validate(session, spec);
     var result: Result = .{};
     // Undo·모든 뷰 예약이 끝나기 전에는 결과의 pending과 본문을 바꾸지 않는다.
     if (inputs.items.len > 0) result.operation = try editor.linked_history.applyDocuments(session, inputs.items);
+    return finishApply(session, spec, prepared, terms, result);
+}
+/// 전체 모델 commit 이후만 호출한다. 파일별 저장 실패는 다음 파일의 저장을 막지 않는다.
+pub fn finishApply(session: *AppSession, spec: *search.batch.Specification, prepared: *const search.batch_plan.Prepared, terms: []const ?*Term, initial: Result) Result {
+    var result = initial;
     for (spec.targets.items, prepared.items.items) |*target, item| {
         target.outcome = if (item.changes.len == 0) .unchanged else .applied;
         if (item.changes.len == 0) result.unchanged += 1 else result.changed += 1;
@@ -117,7 +122,7 @@ pub fn apply(session: *AppSession, spec: *search.batch.Specification, prepared: 
     // commit이 바꾼 fingerprint 때문에 남은 저장을 거절하지 않는다. 이후 실패는 파일별로 결산한다.
     for (spec.targets.items, terms) |*target, term| {
         if (target.outcome != .applied) continue;
-        if (editor.saveDocument(session, term)) |_| {
+        if (editor.saveDocument(session, term.?)) |_| {
             target.outcome = .saved;
             result.saved += 1;
         } else |err| {

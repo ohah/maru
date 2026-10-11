@@ -1,6 +1,6 @@
 # 프로젝트 바꾸기 — 여러 파일 적용 S4c
 
-상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 문서 준비·파일 항목 예약 API까지 구현했다. pane 게시와 배치 worker/actor/UI 연결은 후속이다.
+상태: 중립 선택 명세와 전체 Plan 준비, 열린 모델 actor·파일별 CAS 자동 저장, 불변 snapshot worker API를 구현했다. [열린 문서 배치 UI](editor-project-replace-batch-ui.md)의 snapshot 수집·worker·적용·결과 표시를 연결했다. 닫힌 파일의 물리 신원·원문·별칭·점유를 검증하는 읽기 준비 API를 구현했다. 비활성 문서 준비·파일 항목 예약 API까지 구현했다. 혼합 source coordinator의 전체 Undo/편집 준비·pane 게시·파일별 저장 API를 연결했다. 혼합 source worker와 프로젝트 전체 UI 연결은 후속이다.
 같은 창의 열린 문서 연결 편집과 Cmd+Z/Redo는 [연결 이력 계획](editor-history-transaction.md)이 소유한다.
 [S4a/S4b](editor-project-replace-apply.md)는 단일 파일 적용까지 구현됐다.
 
@@ -184,14 +184,56 @@ Term 파괴가 닫기 통지를 발생시키므로 해제된 Term을 살아 있�
 surface/entry/recovery ID는 소비될 수 있지만 기존 문서의 본문·선택·Undo/Redo·pane 목록은 보존한다.
 등록 중 임시 문서는 registry에서 점유 예약으로 보이며 다른 준비가 재사용하지 않는다.
 
-이 API는 제품 버튼에서 아직 호출하지 않는다. pane 게시·전체 Undo/연결 이력 준비와 함께 소유권을
-넘기는 coordinator, 종료/취소 수명과 최종 worker 검증 배선은 다음 단계다. 준비된 Term을 하나씩
+이 API는 혼합 source coordinator가 사용한다. `reservePane`은 commit 전에 슬롯을 준비하고
+`publish`는 포커스 이동 없이 pane에 Term 소유권을 넘기고 예약을 해제한다. 제품 버튼·종료/취소 수명과
+혼합 worker의 전문 검증 배선은 다음 단계다. 준비된 Term을 하나씩
 활성화하거나 실패 후 열린 탭을 자동 닫는 방식으로 연결해서는 안 된다.
 
 게이트는 `test-editor-project-replace-batch-load` (Debug/ReleaseFast)다. 실제 두 문서 준비·입력 해제 뒤
 수명·BOM/U+FEFF/CRLF·동일 inode 수정·파일/root 교체·늦은 별칭 점유·IME·예약과 일반 열기 및
 caller/registry 필수 준비 할당 실패를 검사한다. `tools/test-editor-replace-batch-load-adversarial.py`는
 관측 변경·점유·예약 해제·항목 용량·BOM 보호를 제거한 컴파일 가능한 결함과 정상/등가/복원 대조를 남긴다.
+
+## 혼합 source coordinator
+
+`search/batch/coordinator.zig::apply`는 원래 `Specification`/`Prepared`/시작 `Ticket`과
+각 disk 대상의 index·`disk.Target`·`verify.Read`를 받는다. Root index/capability·절대 경로·
+Plan.before·원문/raw hash·중복 신원과 canonical edit 배열을 결속한다. disk source를 현재 열린
+모델로 바꾸지 않으며 원래 명세에 `.disk`를 남긴다. 결과의 `documents`가 명시적으로 인계한
+새 문서 owner/slot/generation을 별도로 기록한다. 변경 없음인 닫힌 파일은 이 값이 null이다.
+
+열린 모델은 기존 `batch.resolve`로 원문·revision·점유·공유 조합을 검사한다. 열린 namespace의
+regular file 신원도 수집해 선택 대상의 물리 별칭을 거절한다. 사라진/비정규 namespace의 저장 실패는
+기존 CAS 결산에 맡기며 model 본문을 디스크 원문으로 교체하지 않는다.
+
+유효 편집인 닫힌 파일만 `Staged.prepare`로 만든다. 모든 delta·Undo·연결 기록·뷰 줄/선택 배열,
+새 pane 슬롯·파일 탐색기 candidate/행·결과 신원 배열을 commit 전에 준비한다.
+`linked_history.Prepared.prepare`는 별도 main actor 준비 객체를 반환한다. pane 밖 준비 Term은
+`shared_edit.prepareDetachedPublication`에서 자기 하나의 view만 준비하며 다른 창의 peer나
+이미 게시된 Term을 부분 게시하는 fallback으로 쓰지 않는다.
+
+최종 Ticket·기존 모델·모든 disk(변경 없음 포함)·목적 pane/활성 Term·namespace 별칭을 다시 검사하고,
+실제 준비한 모델의 after도 Plan.after와 대조한다. `Prepared.commit`은 모든 모델과 Undo를 함께 반영하고
+모든 빌린 줄/선택을 게시한다. 그 뒤 새 Term/pane·파일 트리 candidate를 게시하고 `Prepared.notify`로
+편집 통지를 보낸다. 기존 활성 Term은 유지한다. 마지막 준비 실패는 기존 본문/선택/Undo/Redo를
+보존하고 새 Term·문서·예약을 회수한다. commit 이후 준비 실패를 새로 반환하지 않는다.
+
+`batch.finishApply`를 기존 열린 모델 actor와 공유해 파일별 CAS 자동 저장을 결산한다.
+첫 저장 실패도 뒤 파일 저장을 계속하며 실패 문서·dirty·Undo와 결과 신원을 보존한다.
+여러 모델은 기존 전체/현재/취소의 연결 Undo/Redo를 사용한다. 단일 유효 편집은 일반 Undo,
+전부 변경 없음은 새 문서 게시·Undo·저장을 생략한다. 결과 신원은 lease를 보유하지 않으므로
+닫힌 문서를 결과 경로로 임의 재열기하지 않는다. `Result.deinit`는 신원 배열만 해제한다.
+
+게이트는 `test-editor-project-replace-batch-coordinator` (Debug/ReleaseFast)다. 실제 혼합 세 문서의
+적용/저장/Undo/Redo·포커스·전체 변경 없음·단일 유효 편집·disk 전용·공유 뷰·첫 저장 실패·
+source/Plan 변조·늦은 열기/수정·최종 뷰/연결 준비 실패·모든 caller/registry 준비 실패를 검사한다.
+마지막 연결 기록 할당 시점의 실제 외부 수정도 재현한다. 결함 주입 도구는 최종 disk 검사·pane 게시·
+변경 없음·canonical Plan·마지막 Undo 준비를 제거한 결함과 정상/등가/복원 대조를 검사한다.
+
+제품 UI와 혼합 snapshot/disk worker는 아직 이 API를 호출하지 않는다. metadata 검사는 최종 전문 해시
+재검증·파일 잠금을 대신하지 않는다. worker의 검증된 Read 수명과 종료/취소·큰 입력 시간/메모리,
+실제 제품 입력·시각 캡처는 후속 배선에서 검사한다. 기존 미참여 캡처의 치환 거절 정책은
+[단일 적용 계획](editor-project-replace-apply.md)의 계약을 유지한다.
 
 ## 제품 연결과 후속 범위
 
@@ -201,12 +243,12 @@ caller/registry 필수 준비 할당 실패를 검사한다. `tools/test-editor-
   commit 직전 입력·옵션·root와 모든 문서 revision/원문/조합을 재검증한다.
   준비 성공만으로 실제 문서 충돌이 해결됐다고 판단하지 않는다.
 - 연결 조정자는 유효 편집이 둘 이상일 때 사용한다. 유효 편집 하나와 전부 변경 없음도 별도로 검증한다.
-  이 경우의 열린 모델 API는 구현됐다. 기존 단일 파일 UI apply 반복 호출은 focus 이동·검색 상태 폐기 때문에 사용하지 않는다.
+  이 경우는 열린 모델 API와 혼합 source coordinator가 모두 처리한다. 기존 단일 파일 UI apply 반복 호출은 focus 이동·검색 상태 폐기 때문에 사용하지 않는다.
 - 열린 문서 UI는 자기 commit이 검색 fingerprint를 바꾸거나 알림이 검색 상태를 해제해도 적용 중 명세/Plan을 잃지 않는다.
   원래 fingerprint를 무시해서 외부 변경 검사까지 끄지 않는다.
 - 같은 경로의 독립 문서는 선택 밖 열린 문서까지 점유 검사한다. 디스크 파일은 검증→로드→저장
-  사이의 물리 신원 재검증과 symlink/hardlink 별칭 검출을 해결해야 한다.
-  명세에 disk source를 보관하는 것은 디스크 배치 지원 완료가 아니다.
+  사이의 물리 신원 재검증과 symlink/hardlink 별칭 검출은 disk 준비·coordinator·저장 CAS가 담당한다.
+  제품 worker/UI에 연결하기 전까지 전체 프로젝트 디스크 배치 지원 완료로 판단하지 않는다.
 - 현재 파일 항목 한도와 기존 문서를 함께 계산한다. 한도 실패는 편집 전에 전체 거절하며,
   이를 피하려고 기존 문서/Undo를 자동 폐기하지 않는다. 비활성 로드와 준비 실패 후 문서 수명도 검증한다.
 - 결과는 ‘이 배치 당시’ 기록이다. 저장 실패 재시도는 owner/slot/generation을 확인하며

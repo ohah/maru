@@ -114,6 +114,7 @@ pub const guides_client = @import("guides.zig");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const project_replace_batch = @import("search/batch.zig");
+pub const project_replace_batch_coordinator = @import("search/batch/coordinator.zig");
 pub const project_replace_batch_load = @import("search/batch/load.zig");
 pub const project_replace_batch_disk = @import("search/batch/disk.zig");
 pub const project_replace_batch_worker = @import("search/batch/worker.zig");
@@ -61911,4 +61912,344 @@ test "RPBL6 caller와 registry의 모든 필수 준비 실패는 새 문서와 �
         std.debug.print("batch_load allocator={d} denied={d}\n", .{ allocator_kind, denied });
         try testing.expect(denied > 0 and success);
     }
+}
+
+const CoordinatorFixture = struct {
+    source: *Term,
+    disk: BatchLoadFixture,
+    batch: BatchApplyFixture,
+    closed: [2]project_replace_batch_coordinator.Closed,
+    const Options = struct { replacement: []const u8 = "bar", needle: []const u8 = "foo", source_text: []const u8 = "foo model", disk_text: []const u8 = "foo disk", regex: bool = false, seed_history: bool = false, shared: bool = false, disk_only: bool = false };
+    fn init(fx: *PaneFixture, replacement: []const u8) !CoordinatorFixture {
+        return initWith(fx, .{ .replacement = replacement });
+    }
+    fn initWith(fx: *PaneFixture, opts: Options) !CoordinatorFixture {
+        const source = try undoFixture(fx, testing.allocator, "coordinator-model.txt", opts.source_text);
+        source.rt.editor_selection = editor_selection.Selection.at(1);
+        if (opts.seed_history) {
+            try testing.expect(insertText(fx.session, source, "x"));
+            try testing.expect(undoEdit(fx.session, source));
+        }
+        if (opts.shared) {
+            _ = try openSharedViewInActivePane(fx.session, source);
+            _ = fx.session.activateExistingFileTerm(source);
+        }
+        var disk_input = try BatchLoadFixture.init(fx, opts.disk_text);
+        errdefer disk_input.deinit();
+        try projectSearchRootForTest(fx);
+        const st = &fx.session.editor_search;
+        try st.fields[0].insertText(testing.allocator, opts.needle);
+        try st.fields[3].insertText(testing.allocator, opts.replacement);
+        st.replacing = true;
+        st.options[2] = opts.regex;
+        const identity: editor.search.request.Identity = .{ .request = 1, .root = fx.session.file_tree.rootGeneration(), .models = @import("search/owner.zig").fingerprint(fx.session) };
+        st.result.phase = .complete;
+        st.result.identity = identity;
+        st.stamp = identity.models;
+        const lease = source.rt.editor_document_lease.?;
+        const model: editor.search.request.Source = .{ .model = .{ .document = .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation }, .revision = source.rt.editorDocument().opened.?.file.revision, .composition = 0 } };
+        const range: editor.search.event.Range = .{ .start = .{ .line = 0, .byte = 0 }, .end = .{ .line = 0, .byte = 3 } };
+        const first = try std.fs.path.join(testing.allocator, &.{ disk_input.root, disk_input.targets[0].path });
+        defer testing.allocator.free(first);
+        const last = try std.fs.path.join(testing.allocator, &.{ disk_input.root, disk_input.targets[1].path });
+        defer testing.allocator.free(last);
+        const choices = [_]editor.search.batch.Selection{
+            .{ .absolute = source.rt.editorDocument().path.?, .root_index = 0, .source = model, .ranges = &.{range} },
+            .{ .absolute = first, .root_index = 0, .source = .disk, .ranges = &.{range} },
+            .{ .absolute = last, .root_index = 0, .source = .disk, .ranges = &.{range} },
+        };
+        var spec = try editor.search.batch.Specification.capture(testing.allocator, identity, .complete, opts.needle, opts.replacement, .{ .regex = opts.regex }, choices[if (opts.disk_only) 1 else 0..]);
+        errdefer spec.deinit(testing.allocator);
+        const bodies = [_]editor.search.batch_plan.Body{
+            .{ .absolute = source.rt.editorDocument().path.?, .source = model, .text = source.rt.editorDocument().opened.?.file.content },
+            .{ .absolute = first, .source = .disk, .text = disk_input.files.files.items[0].bytes },
+            .{ .absolute = last, .source = .disk, .text = disk_input.files.files.items[1].bytes },
+        };
+        const ticket = try project_replace_batch.Ticket.capture(fx.session, &spec);
+        const cancelled = std.atomic.Value(bool).init(false);
+        const plan = try editor.search.batch_plan.Prepared.prepare(testing.allocator, &spec, bodies[if (opts.disk_only) 1 else 0..], 1000, 1000, &cancelled);
+        return .{ .source = source, .disk = disk_input, .batch = .{ .spec = spec, .prepared = plan, .ticket = ticket }, .closed = .{
+            .{ .index = if (opts.disk_only) 0 else 1, .target = disk_input.targets[0], .file = disk_input.files.files.items[0] },
+            .{ .index = if (opts.disk_only) 1 else 2, .target = disk_input.targets[1], .file = disk_input.files.files.items[1] },
+        } };
+    }
+    fn apply(self: *CoordinatorFixture, session: *AppSession) !project_replace_batch_coordinator.Result {
+        return project_replace_batch_coordinator.apply(session, &self.batch.spec, &self.batch.prepared, self.batch.ticket, &self.closed);
+    }
+    fn deinit(self: *CoordinatorFixture) void {
+        self.batch.deinit();
+        self.disk.deinit();
+    }
+};
+test "RPBC1 열린 문서와 닫힌 두 파일을 함께 편집 게시 저장하고 연결 Undo Redo한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    const pane = pane_ops.activePane(fx.session);
+    const count = pane.terms.items.len;
+    var result = try input.apply(fx.session);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), result.summary.saved);
+    try testing.expect(result.summary.operation != null);
+    try testing.expectEqual(count + 2, pane.terms.items.len);
+    try testing.expect(pane.activeTerm() == input.source);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
+    for (input.batch.spec.targets.items, 0..) |target, i| {
+        try testing.expectEqual(editor.search.batch.Outcome.saved, target.outcome);
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, target.absolute, testing.allocator, .limited(100));
+        defer testing.allocator.free(bytes);
+        try testing.expectEqualStrings(if (i == 0) "bar model" else "bar disk", bytes);
+    }
+    const first = pane.terms.items[count];
+    const last = pane.terms.items[count + 1];
+    try testing.expect(result.documents[1].?.slot == first.rt.editor_document_lease.?.document.slot);
+    try testing.expect(input.batch.spec.targets.items[1].source == .disk);
+    try testing.expectEqualStrings("bar disk", first.rt.editor_lines[0]);
+    try testing.expect(undoEdit(fx.session, input.source));
+    try linkedFixtureChoose(&fx, false);
+    try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("foo disk", first.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("foo disk", last.rt.editorDocument().opened.?.file.content);
+    try testing.expect(redoEdit(fx.session, input.source));
+    try linkedFixtureChoose(&fx, false);
+    try testing.expectEqualStrings("bar disk", first.rt.editorDocument().opened.?.file.content);
+    if (input.apply(fx.session)) |value| {
+        var extra = value;
+        extra.deinit(testing.allocator);
+        return error.Reapplied;
+    } else |_| {}
+}
+test "RPBC2 전체 변경 없음은 닫힌 파일을 게시하지 않고 저장 Undo를 생략한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "foo");
+    defer input.deinit();
+    const count = pane_ops.activePane(fx.session).terms.items.len;
+    var result = try input.apply(fx.session);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), result.summary.unchanged);
+    try testing.expectEqual(@as(usize, 0), result.summary.saved);
+    try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+    try testing.expect(result.documents[1] == null and result.documents[2] == null);
+    try testing.expectEqual(@as(usize, 0), input.source.rt.editorDocument().history.undo_len);
+}
+test "RPBC3 닫힌 마지막 source 점유 외부 수정 입력 변경은 전체를 보존한다" {
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var input = try CoordinatorFixture.init(&fx, "bar");
+        defer input.deinit();
+        if (mode == 0) _ = try openPathInActivePane(fx.session, input.batch.spec.targets.items[2].absolute);
+        if (mode == 1) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "inactive-b.txt", .data = "bar disk" });
+        if (mode == 2) try fx.session.editor_search.fields[3].insertText(testing.allocator, "!");
+        const count = pane_ops.activePane(fx.session).terms.items.len;
+        const docs = batchLoadViews(fx.session);
+        if (input.apply(fx.session)) |value| {
+            var extra = value;
+            extra.deinit(testing.allocator);
+            return error.UnexpectedCommit;
+        } else |_| {}
+        try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), input.source.rt.editorDocument().history.undo_len);
+        try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+        try testing.expectEqual(docs, batchLoadViews(fx.session));
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
+        for (input.batch.spec.targets.items) |target| try testing.expectEqual(editor.search.batch.Outcome.pending, target.outcome);
+    }
+}
+test "RPBC4 저장 첫 실패도 변경 문서 Undo와 뒤 파일 저장을 유지한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.init(&fx, "bar");
+    defer input.deinit();
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "coordinator-model.txt", .data = "external model" });
+    var result = try input.apply(fx.session);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), result.summary.save_failed);
+    try testing.expectEqual(@as(usize, 2), result.summary.saved);
+    try testing.expectEqualStrings("bar model", input.source.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), input.source.rt.editorDocument().history.undo_len);
+    try testing.expect(input.source.rt.editorDocument().opened.?.isDirty());
+    try batchApplyDisk(&fx, "inactive-b.txt", "bar disk");
+}
+
+test "RPBC5 최종 뷰와 연결 기록 준비 실패는 새 문서를 게시하지 않는다" {
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var input = try CoordinatorFixture.init(&fx, "bar");
+        defer input.deinit();
+        var peer: ?editor.document_registry.Lease = null;
+        defer if (peer) |lease| {
+            _ = fx.session.editor_documents.release(lease) catch unreachable;
+        };
+        const old_id = fx.session.editor_documents.links.next_id;
+        defer fx.session.editor_documents.links.next_id = old_id;
+        if (mode == 0) peer = try fx.session.editor_documents.retain(input.source.rt.editor_document_lease.?, .view);
+        if (mode == 1) fx.session.editor_documents.links.next_id = std.math.maxInt(u64);
+        const count = pane_ops.activePane(fx.session).terms.items.len;
+        const docs = batchLoadViews(fx.session);
+        try testing.expectError(if (mode == 0) error.SharedViewCountMismatch else error.OperationIdExhausted, input.apply(fx.session));
+        try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+        try testing.expectEqual(docs, batchLoadViews(fx.session));
+        try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
+        try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), input.source.rt.editorDocument().history.undo_len);
+        for (input.batch.spec.targets.items) |target| try testing.expectEqual(editor.search.batch.Outcome.pending, target.outcome);
+        try batchApplyDisk(&fx, "inactive-a.txt", "foo disk");
+    }
+}
+test "RPBC6 모든 준비 할당 실패는 본문 선택 Redo와 게시를 보존한다" {
+    for (0..2) |kind| {
+        var denied: usize = 0;
+        var succeeded = false;
+        for (0..512) |index| {
+            var fx = try PaneFixture.init(testing.allocator);
+            defer fx.deinit(testing.allocator);
+            var input = try CoordinatorFixture.initWith(&fx, .{ .seed_history = true });
+            defer input.deinit();
+            const count = pane_ops.activePane(fx.session).terms.items.len;
+            const docs = batchLoadViews(fx.session);
+            const selection = input.source.rt.editor_selection;
+            const allocator = fx.session.allocator;
+            const registry_allocator = fx.session.editor_documents.allocator;
+            var failing = testing.FailingAllocator.init(if (kind == 0) allocator else registry_allocator, .{ .fail_index = index, .resize_fail_index = 0 });
+            if (kind == 0) fx.session.allocator = failing.allocator() else fx.session.editor_documents.allocator = failing.allocator();
+            const applied = input.apply(fx.session);
+            if (applied) |value| {
+                var result = value;
+                result.deinit(allocator);
+                try testing.expectEqual(@as(usize, 3), result.summary.changed);
+                try testing.expectEqual(@as(usize, 3), result.summary.saved + result.summary.save_failed);
+                try testing.expectEqualStrings("bar model", input.source.rt.editorDocument().opened.?.file.content);
+            } else |_| {
+                denied += 1;
+                try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+                try testing.expectEqual(docs, batchLoadViews(fx.session));
+                try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+                try testing.expectEqual(@as(usize, 0), input.source.rt.editorDocument().history.undo_len);
+                try testing.expectEqual(@as(usize, 1), input.source.rt.editorDocument().history.redo_len);
+                try testing.expectEqualDeep(selection, input.source.rt.editor_selection);
+                for (input.batch.spec.targets.items) |target| try testing.expectEqual(editor.search.batch.Outcome.pending, target.outcome);
+                try batchApplyDisk(&fx, "inactive-b.txt", "foo disk");
+            }
+            fx.session.allocator = allocator;
+            fx.session.editor_documents.allocator = registry_allocator;
+            try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
+            if (!failing.has_induced_failure) {
+                succeeded = true;
+                break;
+            }
+        }
+        std.debug.print("coordinator allocator={d} denied={d}\n", .{ kind, denied });
+        try testing.expect(denied > 0 and succeeded);
+    }
+}
+test "RPBC7 공유 뷰와 닫힌 두 문서의 줄을 통지 전에 함께 게시한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.initWith(&fx, .{ .shared = true });
+    defer input.deinit();
+    var peer: ?*Term = null;
+    for (pane_ops.activePane(fx.session).terms.items) |term| if (term != input.source and term.rt.editorDocument() == input.source.rt.editorDocument()) {
+        peer = term;
+    };
+    var result = try input.apply(fx.session);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("bar model", peer.?.rt.editor_lines[0]);
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == input.source);
+    try testing.expectEqual(@as(usize, 1), input.source.rt.editorDocument().history.undo_len);
+}
+test "RPBC8 단일 유효 편집과 disk 전용 배치는 현재 포커스를 유지한다" {
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var input = try CoordinatorFixture.initWith(&fx, if (mode == 0) .{ .source_text = "bar model", .needle = "b?(foo|ar)", .replacement = "$1", .regex = true } else .{ .disk_only = true });
+        defer input.deinit();
+        const count = pane_ops.activePane(fx.session).terms.items.len;
+        var result = try input.apply(fx.session);
+        defer result.deinit(testing.allocator);
+        try testing.expect(pane_ops.activePane(fx.session).activeTerm() == input.source);
+        if (mode == 0) {
+            try testing.expectEqual(@as(usize, 1), result.summary.changed);
+            try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+            try testing.expect(result.summary.operation == null);
+            try testing.expectEqualStrings("ar model", input.source.rt.editorDocument().opened.?.file.content);
+        } else {
+            try testing.expectEqual(@as(usize, 2), result.summary.changed);
+            try testing.expectEqual(count + 2, pane_ops.activePane(fx.session).terms.items.len);
+            try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+        }
+    }
+}
+test "RPBC9 교차 source와 변조된 delta를 현재 문서로 임의 승격하지 않는다" {
+    for (0..2) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        var input = try CoordinatorFixture.init(&fx, "bar");
+        defer input.deinit();
+        if (mode == 0) input.closed[1].index = 1;
+        if (mode == 1) input.batch.prepared.items.items[2].changes[0].text = "evil";
+        if (input.apply(fx.session)) |value| {
+            var extra = value;
+            extra.deinit(testing.allocator);
+            return error.UnexpectedCommit;
+        } else |_| {}
+        try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), input.source.rt.editorDocument().history.undo_len);
+    }
+}
+
+/// 마지막 연결 기록 allocation에서 실제 파일을 수정한다. 준비 할당 수 대신 소유자와 모양으로 시점을 고정한다.
+const CoordinatorLateWrite = struct {
+    child: std.mem.Allocator,
+    session: *AppSession,
+    dir: std.Io.Dir,
+    triggered: bool = false,
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (!self.triggered and self.session.editor_batch_reserved_entries == 2 and
+            self.session.editor_documents.links.records.capacity > 0 and len == 3 * @sizeOf(editor.history_links.Member))
+        {
+            self.triggered = true;
+            self.dir.writeFile(testing.io, .{ .sub_path = "inactive-b.txt", .data = "late change" }) catch unreachable;
+        }
+        return self.child.rawAlloc(len, alignment, ra);
+    }
+    fn resize(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) bool {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.child.rawResize(memory, alignment, len, ra);
+    }
+    fn remap(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.child.rawRemap(memory, alignment, len, ra);
+    }
+    fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.child.rawFree(memory, alignment, ra);
+    }
+    fn allocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+};
+test "RPBC10 마지막 Undo 연결 준비 중 발생한 실제 수정도 commit 전에 거절한다" {
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var input = try CoordinatorFixture.initWith(&fx, .{ .seed_history = true });
+    defer input.deinit();
+    const count = pane_ops.activePane(fx.session).terms.items.len;
+    const docs = batchLoadViews(fx.session);
+    const old = fx.session.editor_documents.allocator;
+    var hook: CoordinatorLateWrite = .{ .child = old, .session = fx.session, .dir = fx.dir.dir };
+    fx.session.editor_documents.allocator = hook.allocator();
+    defer fx.session.editor_documents.allocator = old;
+    try testing.expectError(error.FileChanged, input.apply(fx.session));
+    try testing.expect(hook.triggered);
+    try testing.expectEqual(count, pane_ops.activePane(fx.session).terms.items.len);
+    try testing.expectEqual(docs, batchLoadViews(fx.session));
+    try testing.expectEqualStrings("foo model", input.source.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 1), input.source.rt.editorDocument().history.redo_len);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_batch_reserved_entries);
+    try batchApplyDisk(&fx, "inactive-b.txt", "late change");
 }

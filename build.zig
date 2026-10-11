@@ -1987,6 +1987,20 @@ pub fn build(b: *std.Build) void {
     );
     macos_terminal_gate_step.dependOn(&run_macos_terminal_gate_tests.step);
 
+    // One real AppSession fixture owns native generation selection, lock failure,
+    // replacement and post-consumption rotation; the aggregate ABI suite also runs it.
+    const local_agent_log_reader_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"native local reader"},
+    });
+    const run_local_agent_log_reader_tests = b.addRunArtifact(local_agent_log_reader_tests);
+    run_local_agent_log_reader_tests.setCwd(b.path("."));
+    run_local_agent_log_reader_tests.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.native local reader");
+    run_local_agent_log_reader_tests.addArg("--maru-expect-tests=6");
+    run_local_agent_log_reader_tests.addArg("--maru-expect-passed=1");
+    const local_agent_log_reader_step = b.step("test-local-agent-log-reader", "Run native local log generation AppSession fixture");
+    local_agent_log_reader_step.dependOn(&run_local_agent_log_reader_tests.step);
+
     // **teardown UAF 값 판정자**(TAB-UAF·PANE-UAF). 전체 ABI suite 가 PR 에서 이것들을 돌리지만 샤드로 도는 무거운
     // 스텝이라, 탭·pane·Term 해제 순서를 고칠 때 빠르게 되먹이도록 전용 step 을 둔다. 글자 판정(푼 것을 목록에 남기는
     // 루프 금지)은 `test-teardown-live-list`(check-boundaries)가 PR 에서 잰다.

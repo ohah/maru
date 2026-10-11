@@ -2473,6 +2473,10 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
     ch.tick(now_ms);
 }
 
+/// Deterministic real-I/O fixture: grow the log after the allocation-size hint.
+/// The callback is unreachable in product builds and never changes production policy.
+pub var test_after_native_log_stat: ?*const fn (std.Io, std.Io.Dir, []const u8) anyerror!void = null;
+
 /// 훅 이벤트 로그를 읽어 **`term.hook.state`** 를 채운다(계약 §4).
 ///
 /// **배지로 나가는 값은 여기서 정해지지 않는다**(§1.1 · 2026-09-01 개정). 예전에는 이 함수가 훅 모드의
@@ -2500,40 +2504,93 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
         term.agent_hook_log_present = term.agent_hook_routed;
         return;
     };
-    term.agent_hook_log_present = true;
+    // Preserve the legacy descriptor lifetime through event handling/rotation.
+    var legacy_file: ?std.Io.File = null;
+    defer if (legacy_file) |file| file.close(self.io);
+    var native_dir: ?std.Io.Dir = null;
+    defer if (native_dir) |dir| dir.close(self.io);
+    var native_snapshot: ?maru.agent_log_writer.Snapshot = null;
+    var native_name: []const u8 = "";
+    // Also run on an empty snapshot at the consumed EOF: a previous publish
+    // failure must be retried without requiring fresh events or replaying them.
+    defer if (native_snapshot) |snapshot| {
+        if (term.agent_hook_cursor.offset == snapshot.payload_size and event.shouldRotate(snapshot.payload_size)) {
+            const consumed: maru.session.agent_log_generation.Position = .{ .generation = snapshot.start.generation, .offset = term.agent_hook_cursor.offset };
+            const rotated = maru.agent_log_writer.rotate(self.io, native_dir.?, native_name, consumed, snapshot.payload_size) catch null;
+            if (rotated) |position| {
+                term.agent_hook_generation = position.generation;
+                term.agent_hook_cursor.offset = position.offset;
+            }
+        }
+    };
+    const bytes = if (term.agent_hook_log_profile == .v2) native: {
+        const parent = std.fs.path.dirname(log_path) orelse return;
+        const basename = std.fs.path.basename(log_path);
+        if (!std.mem.endsWith(u8, basename, ".ndjson")) return;
+        native_name = basename[0 .. basename.len - ".ndjson".len];
+        const dir = maru.agent_log_record.openPrivateDirectory(self.io, parent) catch return;
+        native_dir = dir; // Keep this authenticated inode through post-consumption rotation.
+        if (builtin.is_test) if (test_after_native_log_stat) |callback| callback(self.io, dir, native_name) catch return;
+        const capacity: usize = @intCast(@min(st.size, @as(u64, event.max_line_bytes * event.max_events_per_tick)));
+        const buffer = a.alloc(u8, capacity) catch return;
+        const old_cursor: ?maru.session.agent_log_generation.Cursor = if (term.agent_hook_generation) |generation|
+            .{ .generation = generation, .offset = term.agent_hook_cursor.offset }
+        else
+            null;
+        const snapshot = maru.agent_log_writer.readSnapshotWithInitialWindow(self.io, dir, native_name, old_cursor, buffer, event.max_line_bytes * 2) catch return;
+        native_snapshot = snapshot;
+        // Commit only after the complete snapshot read succeeds; identity is never
+        // taken from the pathname stat, which is merely a bounded allocation hint.
+        if (term.agent_hook_generation == null or !std.mem.eql(u8, &term.agent_hook_generation.?, &snapshot.start.generation))
+            term.hook.backlog_catchup = snapshot.start.offset != 0;
+        term.agent_hook_generation = snapshot.start.generation;
+        term.agent_hook_cursor.offset = snapshot.start.offset;
+        term.agent_hook_log_present = true;
+        if (snapshot.bytes.len == 0) return;
+        break :native snapshot.bytes;
+    } else legacy: {
+        term.agent_hook_log_present = true;
 
-    // **회전을 크기만으로 판정하지 않는다.** 같은 크기로 갈린 파일이 있으면 옛 오프셋으로 새 내용을 읽어
-    // 줄 가운데부터 파싱한다. inode 를 함께 본다.
-    const same_file = st.inode == term.agent_hook_cursor_inode;
-    const first_read = term.agent_hook_cursor_inode == 0;
-    term.agent_hook_cursor_inode = st.inode;
-    _ = term.agent_hook_cursor.resetIfRotated(st.size, same_file);
+        // **회전을 크기만으로 판정하지 않는다.** 같은 크기로 갈린 파일이 있으면 옛 오프셋으로 새 내용을 읽어
+        // 줄 가운데부터 파싱한다. inode 를 함께 본다.
+        const same_file = st.inode == term.agent_hook_cursor_inode;
+        const first_read = term.agent_hook_cursor_inode == 0;
+        term.agent_hook_cursor_inode = st.inode;
+        _ = term.agent_hook_cursor.resetIfRotated(st.size, same_file);
 
-    // **부재 중 쌓인 것을 처음부터 재생하지 않는다**(계약 §4). 회전은 GUI 소비에 묶여 있어 keep-alive 로
-    // GUI 를 끈 사이엔 아무도 돌리지 않는다 — 재접속한 창이 그 파일을 앞에서부터 읽으면 몇 시간 전 턴을
-    // tick 마다 되짚고, 그 사이 알림이 줄줄이 나간다. 첫 읽기에서 창 하나만큼만 남기고 건너뛴다.
-    // 창 크기는 «한 tick 이 실제로 닿을 수 있는 만큼» 이다. tick 상한이 이벤트 개수라(`max_events_per_tick`)
-    // 창을 그 개수 × 줄 상한으로 잡으면, 짧은 줄이 수만 개인 파일에서 **꼬리에 영영 못 닿는다**(앞에서부터
-    // 64 개씩 되짚는다 — 처음에 그렇게 짰다가 테스트가 잡았다). 줄 상한의 두 배면 부분 줄 하나를 버려도
-    // 완전한 줄이 반드시 하나는 남고, 남는 것은 **가장 최근** 이벤트다.
-    const backlog_window: u64 = maru.session.agent_hook_event.max_line_bytes * 2;
-    if (first_read and st.size > term.agent_hook_cursor.offset + backlog_window) {
-        term.agent_hook_cursor.offset = st.size - backlog_window;
-        term.hook.backlog_catchup = true;
-    }
+        // **부재 중 쌓인 것을 처음부터 재생하지 않는다**(계약 §4). 회전은 GUI 소비에 묶여 있어 keep-alive 로
+        // GUI 를 끈 사이엔 아무도 돌리지 않는다 — 재접속한 창이 그 파일을 앞에서부터 읽으면 몇 시간 전 턴을
+        // tick 마다 되짚고, 그 사이 알림이 줄줄이 나간다. 첫 읽기에서 창 하나만큼만 남기고 건너뛴다.
+        // 창 크기는 «한 tick 이 실제로 닿을 수 있는 만큼» 이다. tick 상한이 이벤트 개수라(`max_events_per_tick`)
+        // 창을 그 개수 × 줄 상한으로 잡으면, 짧은 줄이 수만 개인 파일에서 **꼬리에 영영 못 닿는다**(앞에서부터
+        // 64 개씩 되짚는다 — 처음에 그렇게 짰다가 테스트가 잡았다). 줄 상한의 두 배면 부분 줄 하나를 버려도
+        // 완전한 줄이 반드시 하나는 남고, 남는 것은 **가장 최근** 이벤트다.
+        const backlog_window: u64 = maru.session.agent_hook_event.max_line_bytes * 2;
+        if (first_read and st.size > term.agent_hook_cursor.offset + backlog_window) {
+            term.agent_hook_cursor.offset = st.size - backlog_window;
+            term.hook.backlog_catchup = true;
+        }
 
-    if (st.size <= term.agent_hook_cursor.offset) return; // 새 내용이 없다
+        if (st.size <= term.agent_hook_cursor.offset) return; // 새 내용이 없다
 
-    const want = st.size - term.agent_hook_cursor.offset;
-    const chunk_len: usize = @intCast(@min(want, @as(u64, event.max_line_bytes * event.max_events_per_tick)));
-    const buf = a.alloc(u8, chunk_len) catch return;
-    const file = std.Io.Dir.cwd().openFile(self.io, log_path, .{}) catch return;
-    defer file.close(self.io);
-    const n = file.readPositionalAll(self.io, buf, term.agent_hook_cursor.offset) catch return;
-    if (n == 0) return;
+        const want = st.size - term.agent_hook_cursor.offset;
+        const chunk_len: usize = @intCast(@min(want, @as(u64, event.max_line_bytes * event.max_events_per_tick)));
+        const buf = a.alloc(u8, chunk_len) catch return;
+        const file = std.Io.Dir.cwd().openFile(self.io, log_path, .{}) catch return;
+        legacy_file = file;
+        const n = file.readPositionalAll(self.io, buf, term.agent_hook_cursor.offset) catch return;
+        if (n == 0) return;
+
+        break :legacy buf[0..n];
+    };
 
     var events: [event.max_events_per_tick]event.Event = undefined;
-    const batch = term.agent_hook_cursor.take(buf[0..n], &events);
+    var batch = term.agent_hook_cursor.take(bytes, &events);
+    // A short allocation hint can produce a partial chunk after an append. The
+    // snapshot EOF, not just newlines remaining in this buffer, ends catchup.
+    if (native_snapshot) |snapshot| if (term.agent_hook_cursor.offset < snapshot.payload_size) {
+        batch.more = true;
+    };
 
     const before = term.agent_state;
     const tool_before = term.hook.tool;
@@ -2601,7 +2658,7 @@ pub fn pollAgentHookEvents(self: *AppSession, term: *Term, displayed: bool) void
     // **다 읽은 뒤에 회전한다**(계약 §4.2). 읽기 전에 돌리면 방금 온 이벤트를 회전본에 두고 새 파일부터
     // 읽게 되어, tail 재수집이 없으면 그대로 유실이다. `more` 가 남아 있으면(tick 상한에 걸렸다) 미룬다 —
     // 아직 읽을 것이 있는 파일을 갈아 끼울 이유가 없다.
-    if (!batch.more and event.shouldRotate(st.size)) rotateAgentHookLog(self, term, log_path);
+    if (native_snapshot == null and !batch.more and event.shouldRotate(st.size)) rotateAgentHookLog(self, term, log_path);
     // 응답 줄이 생기거나 사라지면 **행 높이가 바뀐다** — 재투영까지 해야 옛 높이가 남지 않는다
     // (관측 모드의 `pollAgentKinds` 가 같은 이유로 그렇게 한다).
     if (conversation_changed) {

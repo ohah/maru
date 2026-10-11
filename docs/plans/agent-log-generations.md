@@ -7,7 +7,8 @@
 각 단계의 라이브 배선과 OS 검증이 완료되기 전에는 제품 지원 완료를 뜻하지 않는다.
 1단계 순수 codec과 reconciliation, 2단계 native I/O 기반은 구현됐다.
 제품 기록 CLI와 준비된 native 훅, 명시적 v2 스트리머는 구현됐다.
-제품 훅의 기본 활성화와 앱 reader/wire 라이브 배선은 후속이며 peer ACK는 별도 범위다.
+wire 수신·재접속 배선과 명시적으로 선택하는 로컬 native reader가 구현됐다.
+제품 훅의 기본 활성화와 구형 in-flight 훅의 이행은 후속이며 peer ACK는 별도 범위다.
 
 ## 현재 경로와 필요한 변경
 
@@ -308,3 +309,33 @@ resume로 재생하지 않고 기존 재시도 경로로 실패를 드러낸다.
 갱신하지 않는다. 재접속 목록은 최대 32개 서로 다른 파일명만 허용하며, 조립 중
 할당 실패는 완성된 이전 목록과 host 커서를 보존한다. 원격 접속을 다시 시도할 때
 v2 hello로 확인한 host만 `--log-format=v2`와 세대가 포함된 resume를 보낸다.
+
+## 4b단계 로컬 reader 계약
+
+로컬 Term은 설치/이행에서 선택한 profile을 명시적으로 가진다. 기본은 계속 v1이며
+파일 내용을 보고 v2로 자동 전환하지 않는다. v2로 선택한 Term만 native snapshot을
+읽고 generation과 payload offset을 보존한다. 기존 provider 설정은 이 단계에서
+바꾸지 않으며 fixture가 명시적인 v2 경로를 검증한다.
+
+snapshot은 인증한 0700 directory handle과 공유 stable lock으로 읽는다. 처음 읽을
+때의 backlog tail window도 header/EOF를 확인한 같은 lease 안에서 결정한다. 잠금,
+읽기, 인증 실패는 기존 커서를 변경하지 않는다. 바뀐 generation은 크기/inode와
+관계없이 payload 0부터 읽으며 손상된 header를 legacy로 낮추지 않는다. snapshot
+buffer는 기존 tick 읽기 상한을 넘지 않고 pathname stat은 할당 크기 힌트로만 쓴다.
+
+이벤트 파싱·귀속·턴 캡처·backlog 알림 억제는 기존 local 소비 경로를 공유한다.
+소비 뒤 회전은 읽을 때 유지한 directory handle에서 같은 generation/EOF와 소비
+offset을 재검사한다. v1의 rename/tail drain은 v2에 사용하지 않는다. 처리 중 append나
+교체가 생기면 회전을 포기하고 다음 tick에서 재확인한다. provider/OS 실행 검증,
+구형 in-flight 훅을 다른 파일 namespace로 분리하는 설치 이행 및 binary/trust 수명은
+기본 활성화 전에 별도로 닫는다.
+
+backlog 따라잡기의 종료는 버퍼 안의 남은 완전한 줄뿐 아니라 snapshot payload EOF로
+판정한다. pathname stat 뒤 append로 파일이 커지면 할당 힌트가 작은 버퍼를 만들 수
+있다. 그 부분 chunk를 다 읽었다고 알림 억제를 종료하지 않도록 실제 AppSession의
+stat 이후 append fixture로 검사한다.
+
+읽은 EOF에서 회전 publish가 실패하면 커서는 그대로 유지한다. 이후 새 이벤트가
+없어도 다음 tick의 동일 세대 EOF snapshot에서 회전만 다시 시도한다. 이벤트 재생과
+턴 캡처를 반복하지 않는다. 실제 AppSession에 난수 실패를 주입한 뒤 입력을 추가하지
+않고 회전 재시도와 원본 보존을 검사한다.

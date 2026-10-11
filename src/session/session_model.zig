@@ -219,6 +219,10 @@ pub fn Model(comptime Rt: type) type {
             /// 훅 모드에서 이벤트 로그를 어디까지 읽었는가(docs/agent-hooks.md §4.2). 파일이 회전하면
             /// 커서가 스스로 되돌아간다. 훅을 쓰지 않는 Term 에서는 손대지 않으므로 비용이 0이다.
             agent_hook_cursor: agent_hook_event.Cursor = .{},
+            /// Selected by the installation migration; never inferred from file bytes.
+            agent_hook_log_profile: remote_agent_stream.protocol.Profile = .v1,
+            /// Native payload identity; the existing cursor offset excludes its header.
+            agent_hook_generation: ?@import("agent_log_generation.zig").Generation = null,
             /// 그 pane 의 이벤트 로그가 **있는가**(마지막 tick 기준). 모드 판정의 유일한 입력이다
             /// (계약 §1.2 — 이벤트 개수나 시간으로 잡으면 가만히 있는 세션·이미 돌던 세션이 잘못 강등된다).
             agent_hook_log_present: bool = false,

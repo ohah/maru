@@ -129,13 +129,22 @@ pub fn append(io: Io, dir: Io.Dir, name: []const u8, line: []const u8) !codec.Po
 
 pub const Snapshot = struct { start: codec.Position, payload_size: u64, bytes: []const u8 };
 pub fn readSnapshot(io: Io, dir: Io.Dir, name: []const u8, cursor: ?codec.Cursor, buffer: []u8) !Snapshot {
+    return readSnapshotWithInitialWindow(io, dir, name, cursor, buffer, null);
+}
+
+/// Initial backlog positioning and header/EOF observation share one lease.
+/// A replacement of an already-known generation always starts at payload zero.
+pub fn readSnapshotWithInitialWindow(io: Io, dir: Io.Dir, name: []const u8, cursor: ?codec.Cursor, buffer: []u8, initial_window: ?u64) !Snapshot {
     const lease = try acquire(io, dir, name);
     defer lease.release(io);
     var name_buffer: [command.remote_log_name_max + ".ndjson".len]u8 = undefined;
     const file = try dir.openFile(io, try logName(&name_buffer, name), .{ .mode = .read_write, .follow_symlinks = false });
     defer file.close(io);
     const state = try inspect(file, io);
-    const start = codec.reconcile(cursor, state.generation, state.payload_size);
+    var start = codec.reconcile(cursor, state.generation, state.payload_size);
+    if (cursor == null) if (initial_window) |window| {
+        if (state.payload_size > window) start.offset = state.payload_size - window;
+    };
     const want: usize = @intCast(@min(buffer.len, state.payload_size - start.offset));
     const got = try file.readPositionalAll(io, buffer[0..want], try codec.fileOffset(start.offset));
     if (got != want) return error.SnapshotChanged;
@@ -438,4 +447,25 @@ test "writer colliding lock slots serialize without mixing file contents" {
     var bytes: [1024]u8 = undefined;
     try testing.expectEqualStrings(one, (try readSnapshot(testing.io, temp.dir, "a", null, &bytes)).bytes);
     try testing.expectEqualStrings(two, (try readSnapshot(testing.io, temp.dir, "n5", null, &bytes)).bytes);
+}
+
+test "initial tail snapshot shares generation lease and never trims a replacement" {
+    var temp = testing.tmpDir(.{});
+    defer temp.cleanup();
+    _ = try append(testing.io, temp.dir, "a", one);
+    const last = try append(testing.io, temp.dir, "a", two);
+    var bytes: [128]u8 = undefined;
+    const tail = try readSnapshotWithInitialWindow(testing.io, temp.dir, "a", null, &bytes, two.len);
+    try testing.expectEqual(@as(u64, one.len), tail.start.offset);
+    try testing.expectEqualStrings(two, tail.bytes);
+    const previous: codec.Cursor = .{ .generation = last.generation, .offset = last.offset };
+    _ = (try rotate(testing.io, temp.dir, "a", last, last.offset)).?;
+    _ = try append(testing.io, temp.dir, "a", one);
+    _ = try append(testing.io, temp.dir, "a", two);
+    const replacement = try readSnapshotWithInitialWindow(testing.io, temp.dir, "a", previous, &bytes, two.len);
+    try testing.expectEqual(@as(u64, 0), replacement.start.offset);
+    try testing.expectEqualStrings(one ++ two, replacement.bytes);
+    const lease = try acquire(testing.io, temp.dir, "a");
+    defer lease.release(testing.io);
+    try testing.expectError(error.WouldBlock, readSnapshotWithInitialWindow(testing.io, temp.dir, "a", previous, &bytes, two.len));
 }

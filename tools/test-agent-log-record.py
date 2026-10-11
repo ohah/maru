@@ -268,6 +268,34 @@ try:
     quoted, _ = invoke([driver, str(root), 'hook-transition', cli, 'claude', *map(str, quoted_roots)])
     run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=quoted.stdout.decode())
     assert payload(quoted_roots[2] / 'inst/9.ndjson')[1] == b'claude\t{}\n'
+    # Keep one generated command while an app bundle replaces its sibling CLI.
+    bundle = directory('Maru test.app') / 'Contents' / 'MacOS'
+    bundle.mkdir(parents=True, mode=0o700)
+    pinned_binary = bundle / 'maru'
+    shutil.copy2(cli, pinned_binary)
+    lifetime, _ = invoke([driver, str(root), 'hook-transition', str(pinned_binary), 'claude', *map(str, roots)])
+    pinned_command = lifetime.stdout.decode()
+    before = payload(native_target)
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=pinned_command)
+    replacement = bundle / 'maru-next'
+    shutil.copy2(cli, replacement)
+    os.replace(replacement, pinned_binary)
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=pinned_command)
+    assert payload(native_target) == (before[0], before[1] + b'claude\t{}\n' * 2)
+    pinned_binary.unlink()
+    missing_before = native_target.read_bytes()
+    legacy_before = legacy_target.read_bytes()
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=pinned_command)
+    assert native_target.read_bytes() == missing_before and legacy_target.read_bytes() == legacy_before
+    shutil.copy2(cli, pinned_binary)
+    moved_bundle = bundle.parent.parent.with_name('Moved Maru.app')
+    bundle.parent.parent.rename(moved_bundle)
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=pinned_command)
+    assert native_target.read_bytes() == missing_before and legacy_target.read_bytes() == legacy_before
+    moved, _ = invoke([driver, str(root), 'hook-transition', str(moved_bundle / 'Contents/MacOS/maru'), 'claude', *map(str, roots)])
+    assert moved.stdout != lifetime.stdout
+    run_transition(local_identity | {'MARU_AGENT_LOG_FORMAT': '2'}, command=moved.stdout.decode())
+    assert payload(native_target) == (before[0], before[1] + b'claude\t{}\n' * 3)
     baseline = []
     native_command, legacy_command = hook(local), hook(local, native=False)
     for i in range(8):

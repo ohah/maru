@@ -67,7 +67,7 @@ fn displayRoot(targets: []const search.batch.Target) []const u8 {
 pub fn canStart(self: *host.AppSession) bool {
     const st = &self.editor_search;
     if (!dock.canSearch(self) or !st.replacing or st.preview.active() or st.batch.active() or st.result.phase != .complete) return false;
-    return st.result.model.groups.items.len > 0;
+    return st.result.model.selectedCount() > 0;
 }
 fn current(self: *host.AppSession) bool {
     const st = &self.editor_search;
@@ -95,8 +95,11 @@ pub fn start(self: *host.AppSession) !void {
         for (group.rows.items) |index| {
             const row = st.result.model.rows.items[index];
             if (!std.meta.eql(row.source, group.source) or row.root_index != group.root_index) return error.StaleRequest;
-            try ranges.appendSlice(a, row.match.ranges);
+            for (row.match.ranges, 0..) |range, range_index| if (st.result.model.includes(index, range_index)) {
+                try ranges.append(a, range);
+            };
         }
+        if (ranges.items.len == 0) continue;
         try selections.append(a, .{ .absolute = absolute, .root_index = group.root_index, .source = group.source, .ranges = ranges.items });
     }
     const query = self.editor_project_search_query orelse return error.StaleRequest;

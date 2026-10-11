@@ -5378,7 +5378,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }), .filters = &.{".test.project search dock"} });
     const run_search_dock = b.addRunArtifact(search_dock_tests);
-    run_search_dock.addArg("--maru-expect-tests=27");
+    run_search_dock.addArg("--maru-expect-tests=30");
     b.step("test-editor-project-search-dock", "Run project search grouping and dock geometry judges").dependOn(&run_search_dock.step);
     const replace_preview_module = b.createModule(.{ .root_source_file = b.path("src/project_replace_preview_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
     replace_preview_module.addIncludePath(pcre2_dep.?.path("src"));
@@ -5565,7 +5565,7 @@ pub fn build(b: *std.Build) void {
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_coordinator.step);
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });
     const run_batch_ui = b.addRunArtifact(batch_ui_tests);
-    run_batch_ui.addArg("--maru-expect-tests=13");
+    run_batch_ui.addArg("--maru-expect-tests=14");
     run_batch_ui.setCwd(b.path("."));
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
         run_batch_ui.step.dependOn(&ripgrep_prepare.step);

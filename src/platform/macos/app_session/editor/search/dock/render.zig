@@ -131,6 +131,20 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
             row.* = .{ .label = try std.fmt.allocPrint(arena, "  {d}: {s}", .{ span.start.line + 1, snippet }), .index = window.first + index };
         },
     };
+    if (!previewing and state.replacing) for (rows, window.items) |*row, visible| {
+        const checked = state.result.model.checked(visible);
+        row.checked = switch (checked) {
+            .all => .all,
+            .mixed => .mixed,
+            .none => .none,
+        };
+        row.check_label = i18n.t(switch (checked) {
+            .all => .project_batch_selected,
+            .mixed => .project_batch_mixed,
+            .none => .project_batch_unselected,
+        });
+        row.check_enabled = state.result.phase == .complete and search_dock.canSearch(self);
+    };
     var fields: [4][]const u8 = undefined;
 
     var carets: [4]?f32 = .{ null, null, null, null };

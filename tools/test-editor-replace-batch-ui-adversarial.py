@@ -48,21 +48,33 @@ if "--save-retry" in sys.argv:
         ("reuse-document-generation", mutate(ui, ' and source.generation == lease.document.generation', ''), False),
         ("restored-control", original, True),
     ]
-if "--save-retry" in sys.argv:
+if "--selection" in sys.argv:
+    cases = [
+        ("control", original, True),
+        ("include-excluded-ranges", mutate(ui, "if (st.result.model.includes(index, range_index))", "if (true or st.result.model.includes(index, range_index))"), False),
+        ("omit-selected-model", mutate(ui, "for (st.result.model.groups.items) |group| {", "for (st.result.model.groups.items) |group| {\n        if (group.source == .model) continue;"), False),
+        ("omit-selected-disk", mutate(ui, "for (st.result.model.groups.items) |group| {", "for (st.result.model.groups.items) |group| {\n        if (group.source == .disk) continue;"), False),
+        ("retain-empty-target", mutate(ui, "if (ranges.items.len == 0) continue;", "if (false and ranges.items.len == 0) continue;"), False),
+        ("wrong-selected-count", mutate(ui, "const matches = spec.matches;", "const matches = st.result.model.matches;"), False),
+        ("restored-control", original, True),
+    ]
+if "--save-retry" in sys.argv or "--selection" in sys.argv:
     # 전체 OOM 탐색은 원본 gate로 별도 검증한다. 결함 주입은 저장·문서 세대 판정에 집중한다.
     build = source / "build.zig"
     build_text = build.read_text()
     needle = '.filters = &.{".test.RPBU"}'
     assert build_text.count(needle) == 1
-    count_arg = 'run_batch_ui.addArg("--maru-expect-tests=13");'
+    count_arg = 'run_batch_ui.addArg("--maru-expect-tests=14");'
     assert build_text.count(count_arg) == 1
-    build.write_text(build_text.replace(needle, '.filters = &.{".test.RPBU3", ".test.RPBU7"}').replace(count_arg, 'run_batch_ui.addArg("--maru-expect-tests=6");'))
-expected_count = 6 if "--save-retry" in sys.argv else 13
+    filters = '.filters = &.{".test.RPBU10"}' if "--selection" in sys.argv else '.filters = &.{".test.RPBU3", ".test.RPBU7"}'
+    focused_count = 5 if "--selection" in sys.argv else 6
+    build.write_text(build_text.replace(needle, filters).replace(count_arg, f'run_batch_ui.addArg("--maru-expect-tests={focused_count}");'))
+expected_count = 5 if "--selection" in sys.argv else 6 if "--save-retry" in sys.argv else 14
 results = []
 for name, changed, passing in cases:
     for path, content in changed.items():
         (source / path).write_text(content)
-    result = subprocess.run(["mise", "exec", "--", "zig", "build", "test-editor-project-replace-batch-ui", "-j2", "--cache-dir", str(root / ("cache" if "--save-retry" in sys.argv else name + "/cache"))], cwd=source, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+    result = subprocess.run(["mise", "exec", "--", "zig", "build", "test-editor-project-replace-batch-ui", "-j2", "--cache-dir", str(root / ("cache" if "--save-retry" in sys.argv or "--selection" in sys.argv else name + "/cache"))], cwd=source, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
     (root / f"{name}.log").write_text(result.stdout)
     if passing:
         assert result.returncode == 0 and f"All {expected_count} tests passed" in result.stdout, (name, result.stdout[-4000:])

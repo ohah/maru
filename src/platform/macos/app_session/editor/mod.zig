@@ -62495,3 +62495,41 @@ test "RPBU8 검색 행과 달라진 disk와 미리보기 뒤 수정은 전체 UI
         try batchApplyDisk(&fx, "disk.txt", "foo changed");
     }
 }
+
+test "RPBU10 선택한 열린 문서와 닫힌 파일의 일부 일치만 함께 반영한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const a = try undoFixture(&fx, testing.allocator, "batch-a.txt", "foo foo A");
+    const b = try undoFixture(&fx, testing.allocator, "batch-b.txt", "foo B");
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo foo disk" });
+    try replacePreviewSearchWithFiles(&fx, "foo", "bar", false, "batch-a.txt,batch-b.txt,disk.txt");
+    const d = @import("search/dock.zig");
+    const model = &fx.session.editor_search.result.model;
+    const old_generation = fx.session.editor_search.result.generation;
+    d.apply(fx.session, .{ .toggle_selection = 0 }, old_generation - 1);
+    try testing.expectEqual(@as(usize, 5), model.selectedCount());
+    fx.session.ime_active = true;
+    d.apply(fx.session, .{ .toggle_selection = 0 }, old_generation);
+    try testing.expectEqual(@as(usize, 5), model.selectedCount());
+    fx.session.ime_active = false;
+    // 본문 기대값은 Plan에서 가져오지 않는다. 두 파일의 두 번째 일치와 B 전부를 제외한다.
+    for (model.visible.items, 0..) |visible, index| switch (visible) {
+        .hit => |hit| {
+            const row = model.rows.items[hit.row];
+            if (std.mem.eql(u8, row.match.path, "batch-b.txt") or row.match.ranges[hit.range].start.byte == 4)
+                d.apply(fx.session, .{ .toggle_selection = index }, fx.session.editor_search.result.generation);
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 2), model.selectedCount());
+    try d.batch_ui.start(fx.session);
+    try waitBatchUI(fx.session);
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.files);
+    try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.matches);
+    try d.batch_ui.apply(fx.session);
+    try testing.expectEqualStrings("bar foo A", a.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("foo B", b.rt.editorDocument().opened.?.file.content);
+    try batchApplyDisk(&fx, "disk.txt", "bar foo disk");
+    try testing.expectEqual(@as(usize, 0), b.rt.editorDocument().history.undo_len);
+}

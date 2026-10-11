@@ -13,13 +13,16 @@ pub fn optionId(index: usize) u64 {
 pub fn rowId(index: usize) u64 {
     return 100 + index;
 }
+pub fn checkId(index: usize) u64 {
+    return 0x6000000000000000 + index;
+}
 pub fn retryId(index: usize) u64 {
     return 0x4000000000000000 + index;
 }
 pub const Buffers = struct { nodes: []tree.UiNode, entries: []tree.RectEntry, items: []layout.Item, flex: []layout.FlexScratch, rects: []layout.UiRect, actions: []ids.Entry };
 pub const Frame = struct { tree: tree.UiRectTree, actions: []const ids.Entry, metrics: types.Metrics };
 pub fn size(rows: usize) usize {
-    return rows *| 3 +| 43;
+    return rows *| 5 +| 43;
 }
 pub fn build(p: types.Props, b: Buffers) !Frame {
     if (!std.math.isFinite(p.viewport.width) or p.viewport.width < 0 or p.viewport.width >= 4294967296.0) return error.InvalidGeometry;
@@ -116,6 +119,23 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
                 .semantics = .{ .role = .button, .label = row.retry_semantic_label orelse label, .enabled = row.enabled and row.retry_enabled },
             });
             node.* = tree.container(.{ .id = 0x2000000000000000 + row.index, .direction = .row, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, children);
+        }
+        if (row.check_label) |label| {
+            // 선택 면과 미리보기 면은 분리한다. 선택 클릭으로 파일을 열거나 편집하지 않는다.
+            const children = b.nodes[n..][0..2];
+            n += 2;
+            children[1] = node.*;
+            children[1].style.width = .auto;
+            children[1].style.flex = .{ .grow = 1, .shrink = 1 };
+            children[0] = tree.button(.{
+                .id = checkId(row.index),
+                .variant = if (row.checked == .none) .ghost else .secondary,
+                .style = .{ .width = .{ .px = @floatFromInt(m.row) }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } },
+                .action = try table.append(p.generation, .{ .toggle_selection = row.index }, row.check_enabled),
+                .paint = .{ .shadow = .none },
+                .semantics = .{ .role = .button, .label = label, .enabled = row.check_enabled, .selected = row.checked == .all },
+            });
+            node.* = tree.container(.{ .id = 0x3000000000000000 + row.index, .direction = .row, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, children);
         }
     }
     b.nodes[n] = tree.container(.{ .id = 9, .direction = .column, .style = .{ .height = .{ .px = @floatFromInt(content_height) }, .flex = .{ .shrink = 0 } } }, rows);

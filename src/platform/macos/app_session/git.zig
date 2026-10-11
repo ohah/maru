@@ -27,6 +27,7 @@ const git_status = maru.session.git_status; // check-ignore 출력 파서(순수
 const layout_math = app_session_mod.layout_math;
 const scm_dock_ops = @import("scm_dock.zig");
 const trust_store = @import("editor/trust_store.zig"); // 신뢰 세대만 본다(계획 workspace-trust WT6b-1a)
+const editor_lsp_client = @import("editor/lsp.zig"); // 원격 저장소의 신뢰 상태(계획 workspace-trust WT7b — 안내 문구)
 const turn_ring_persist = @import("turn_ring_persist.zig"); // AT7: 봉인 뒤 쓰기·첫 턴 전 되살리기·tree 확인
 const dock_ops = @import("dock.zig");
 const ssh_upload = @import("../ssh_upload.zig"); // 원격 감시자 spawn(RW3)
@@ -84,16 +85,23 @@ pub fn pumpTrustReread(self: *AppSession) void {
     self.scm_base_reread_pending = true; // 도는 목록 읽기가 끝난 뒤 한 번 — `pumpBaseReread` 가 건다
 }
 
-/// 신뢰 전 partial clone 의 안내(계획 workspace-trust WT6b-1a) — 원격은 신뢰할 수 없으므로(원격 신뢰 키가 없다) 「신뢰하면 받아
-/// 온다」를 말하지 않는다(적대적 검증 2회차). 도크의 저장소가 원격인가는 `git_repo_dest` 가 답한다.
-pub fn partialCloneNotice(self: *const AppSession) [:0]const u8 {
-    return maru.i18n.t(if (self.git_repo_dest != null) .scm_partial_clone_remote else .scm_partial_clone_untrusted);
+/// 신뢰 전 partial clone 의 안내(계획 workspace-trust WT6b-1a) — 신뢰를 정할 수 없는 원격(루트·홈을 아직 모름·홈 저장소)이면 「신뢰하면
+/// 받아 온다」를 말하지 않는다(적대적 검증 2회차). 신뢰를 물을 수 있는 원격은 로컬과 같은 안내다(WT7b — 도크 줄·팔레트로 묻는다).
+pub fn partialCloneNotice(self: *AppSession) [:0]const u8 {
+    return maru.i18n.t(if (remoteUntrustable(self)) .scm_partial_clone_remote else .scm_partial_clone_untrusted);
 }
 
-/// 신뢰 전 저장소의 필터가 너무 많아 읽지 않은 안내(계획 workspace-trust WT6b-1b) — 원격은 신뢰할 수 없으므로 「신뢰하면 읽는다」를
+/// 신뢰 전 저장소의 필터가 너무 많아 읽지 않은 안내(계획 workspace-trust WT6b-1b) — 신뢰를 정할 수 없는 원격이면 「신뢰하면 읽는다」를
 /// 말하지 않는다(`partialCloneNotice` 와 같은 규율).
-pub fn repoFiltersNotice(self: *const AppSession) [:0]const u8 {
-    return maru.i18n.t(if (self.git_repo_dest != null) .scm_repo_filters_remote else .scm_repo_filters_untrusted);
+pub fn repoFiltersNotice(self: *AppSession) [:0]const u8 {
+    return maru.i18n.t(if (remoteUntrustable(self)) .scm_repo_filters_remote else .scm_repo_filters_untrusted);
+}
+
+/// 도크의 저장소가 원격이고 신뢰를 정할 수 없나 — 루트·홈을 이 cwd 의 목록에서 아직 못 받았거나 묻지 않는 root(원격 홈)다(WT7b).
+fn remoteUntrustable(self: *AppSession) bool {
+    if (self.git_repo_dest == null) return false;
+    const target = remoteTrustTarget(self, self.git_repo orelse return true) orelse return true;
+    return editor_lsp_client.remoteRepoTrustState(self, target) == .refused;
 }
 
 /// 활성 Term 이 붙어 있는 **기계**(원격이면 그 목적지, 로컬이면 null).
@@ -326,7 +334,7 @@ fn forgetGitRepo(self: *AppSession) void {
     if (self.git_repo) |path| self.allocator.free(path);
     self.git_repo = null;
     rememberGitRepoDest(self, null); // 안내 정리는 그 함수가 진다(같은 판정을 두 곳에 두지 않는다)
-    rememberRemoteRepoRoot(self, null); // 루트도 함께 놓는다 — 셋이 한 쌍이다(경로·호스트·루트)
+    rememberRemoteRepoRoot(self, null, ""); // 루트도 함께 놓는다 — 셋이 한 쌍이다(경로·호스트·루트)
 }
 
 /// 그 목록이 어느 호스트의 것인지 기억한다(null = 로컬). `rememberGitRepo` 와 **같은 자리에서** 부른다 —
@@ -614,6 +622,7 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
         // **양방향이다**(적대적 검증 4회차 — 판정자가 잡았다). 로컬 → 원격만 치우고 반대를 빼먹으면,
         // 원격에서 낸 「원격 세션이라 아직 목록만 읽습니다」가 **로컬 목록 위에** 그대로 남는다.
         if (had != null) {
+            rememberRemoteRepoRoot(self, null, ""); // 루트·홈도 저쪽 기계의 것이다(WT7b — 아래 갈래와 같은 이유)
             scm_dock_ops.clearScmWriteError(self);
             forgetReadFailure(self);
             // **머리 줄 요약도 버린다**(적대적 검증 2026-09-02 3 회차). 그 값들은 **옛 기계**의 것이고,
@@ -636,7 +645,10 @@ pub fn rememberGitRepoDest(self: *AppSession, dest: ?[]const u8) void {
     scm_dock_ops.clearScmWriteError(self);
     forgetReadFailure(self);
     scm_dock_ops.forgetRepoStatus(self); // 같은 이유 — 위 분기의 주석을 본다
-    self.remote_watch.stop(); // 감시 채널도(RW3) — 다음 tick 이 새 호스트로 다시 띄운다
+    self.remote_watch.stop(); // 감시 채널도(RW3) — 새 호스트의 루트가 오면 다음 tick 이 다시 띄운다
+    // **루트·홈도 놓는다**(계획 workspace-trust WT7b) — 옛 호스트의 것이다. 남기면 새 호스트의 목록이 오기 전까지 신뢰 판정이 옛
+    // 호스트의 루트를 새 목적지의 키로 쓰고, 감시자는 새 호스트에서 옛 호스트의 경로를 본다.
+    rememberRemoteRepoRoot(self, null, "");
     self.git_repo_dest = self.allocator.dupe(u8, want) catch null;
 }
 
@@ -760,17 +772,37 @@ pub fn remoteControlSocketFor(self: *AppSession, dest: []const u8, buf: []u8) ?[
 
 /// 원격 저장소 루트를 기억한다(null = 없음/로컬). `git_repo_dest` 와 **같은 규율**이다 — 짝이 어긋나면
 /// 원격 목록을 보면서 옛 루트로 파일을 열게 된다.
-pub fn rememberRemoteRepoRoot(self: *AppSession, root: ?[]const u8) void {
-    const want = root orelse {
-        if (self.git_repo_remote_root) |old| self.allocator.free(old);
-        self.git_repo_remote_root = null;
-        return;
-    };
-    if (self.git_repo_remote_root) |current| {
-        if (std.mem.eql(u8, current, want)) return;
+///
+/// 같은 왕복의 **홈**(빈 값 = 모름)과, 그 루트가 **어느 cwd 의 답인지**(`git_repo` 의 사본)도 함께 든다(계획 workspace-trust WT7b —
+/// 신뢰 판정은 `remoteTrustTarget` 이 이 셋을 지금 cwd 와 대 본다). 루트가 없으면 셋 다 놓는다.
+pub fn rememberRemoteRepoRoot(self: *AppSession, root: ?[]const u8, home: []const u8) void {
+    replaceOwned(self, &self.git_repo_remote_home, if (root != null and home.len > 0) home else null);
+    replaceOwned(self, &self.git_repo_remote_root_cwd, if (root != null) self.git_repo else null);
+    replaceOwned(self, &self.git_repo_remote_root, root);
+}
+
+/// 소유 문자열 칸을 바꾼다 — 같은 값이면 그대로, 사본을 못 만들면 비운다(모름 — 닫힌 쪽).
+fn replaceOwned(self: *AppSession, slot: *?[]u8, want: ?[]const u8) void {
+    if (slot.*) |current| {
+        if (want != null and std.mem.eql(u8, current, want.?)) return;
         self.allocator.free(current);
+        slot.* = null;
     }
-    self.git_repo_remote_root = self.allocator.dupe(u8, want) catch null;
+    slot.* = if (want) |w| self.allocator.dupe(u8, w) catch null else null;
+}
+
+/// 원격 저장소의 신뢰 대상(계획 workspace-trust WT7b) — 목적지·원격 실제 루트·원격 홈. 셋 다 **지금 cwd(`repo`)의 목록 읽기가 준 값일
+/// 때만** 답한다: cwd 를 옮긴 뒤 새 목록이 오기 전·루트나 홈을 못 읽은 동안은 null(모름 — 신뢰 전으로 읽고 묻지 않는다). 같은 저장소의
+/// 다른 워크트리 행도 null 이다(그 행의 루트는 묻지 않았다).
+pub const RemoteTrustTarget = struct { dest: []const u8, root: []const u8, home: []const u8 };
+
+pub fn remoteTrustTarget(self: *const AppSession, repo: []const u8) ?RemoteTrustTarget {
+    const dest = self.git_repo_dest orelse return null;
+    const root = self.git_repo_remote_root orelse return null;
+    const home = self.git_repo_remote_home orelse return null;
+    const cwd = self.git_repo_remote_root_cwd orelse return null;
+    if (!std.mem.eql(u8, cwd, repo)) return null;
+    return .{ .dest = dest, .root = root, .home = home };
 }
 
 /// 지금 목록이 **원격의 것인가**. 로컬 경로로 해석하면 안 되는 자리(파일 열기·감시·쓰기·턴 스냅샷)가
@@ -1125,7 +1157,7 @@ pub fn drainGitStatus(self: *AppSession) void {
         // **원격 저장소 루트를 목록과 같은 결과에서 받는다**(RS3). 이 값이 있어야 diff 가 상대경로를
         // 절대경로로 만들어 작업트리 파일을 읽는다. 로컬 결과에는 비어 있고, 그때는 기억을 비운다 —
         // 남겨 두면 로컬 목록을 보는 동안 옛 원격 루트가 살아 있어 그 쌍으로 파일을 열 수 있다.
-        rememberRemoteRepoRoot(self, if (result.repo_root.len > 0) result.repo_root else null);
+        rememberRemoteRepoRoot(self, if (result.repo_root.len > 0) result.repo_root else null, result.remote_home);
         if (self.git_result) |*old| old.deinit(git_backend_mod.worker_allocator);
         self.git_result = result;
         // 새 결과에는 새 워크트리 목록이 실려 있을 수 있다 — 목록 캐시를 그 자리에서 무효화한다

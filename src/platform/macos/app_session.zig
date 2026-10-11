@@ -7171,6 +7171,11 @@ pub const AppSession = struct {
     /// 이 값이 필요한 이유는 하나다: diff 의 **오른쪽(작업트리)** 은 git 으로 못 읽어 파일을 직접 읽어야
     /// 하고, 그러려면 저장소 루트 기준 상대경로를 절대경로로 만들어야 한다.
     git_repo_remote_root: ?[]u8 = null,
+    /// 원격 루트를 읽은 그 목록의 cwd(`git_repo` 의 사본 — 계획 workspace-trust WT7b). 신뢰 판정은 루트가 **지금 cwd 의 것일 때만**
+    /// 그 루트를 키로 쓴다 — cwd 를 옮긴 뒤 새 목록이 오기 전까지 루트는 옛 저장소의 것이다.
+    git_repo_remote_root_cwd: ?[]u8 = null,
+    /// 원격 홈의 실제 경로(같은 왕복 — `git_backend.Result.remote_home`). 홈 자체·그 위의 저장소는 신뢰를 묻지 않는다(WT2b).
+    git_repo_remote_home: ?[]u8 = null,
     /// 목록 스크롤과 선택 행. 둘 다 창 상태다 — 목록은 매번 새로 계산되므로 저장하지 않는다.
     /// 스크롤 단위는 **backing pixel**이다(SV3a — 탐색기와 같은 좌표계). 브랜치 헤더 한 줄은 이
     /// 좌표 밖이다: 스크롤에서 고정이고 목록만 움직인다.
@@ -24233,7 +24238,18 @@ pub const AppSession = struct {
 
     /// git 읽기의 신뢰 판정(계획 workspace-trust WT6b-1a) — `git_backend` 에 꽂는다(그 층은 편집기의 신뢰 표를 모른다).
     pub fn gitTrustCheck(self: *AppSession) git_backend_mod.Backend.TrustCheck {
-        return .{ .ctx = self, .trusted = gitRepoTrustedThunk };
+        return .{ .ctx = self, .trusted = gitRepoTrustedThunk, .remote_trusted_root = gitRemoteTrustedRootThunk };
+    }
+
+    /// 원격 저장소의 신뢰(계획 workspace-trust WT7b) — 그 목적지가 지금 목록의 목적지이고 루트·홈이 그 cwd 의 답일 때만 판정한다
+    /// (`git_ops.remoteTrustTarget`). 아니면 신뢰 전.
+    fn gitRemoteTrustedRootThunk(ctx: *anyopaque, repo: []const u8, dest: []const u8) ?[]const u8 {
+        const self: *AppSession = @ptrCast(@alignCast(ctx));
+        const target = git_ops.remoteTrustTarget(self, repo) orelse return null;
+        if (!std.mem.eql(u8, target.dest, dest)) return null;
+        const root = editor_ops.lsp_client.remoteTrustedRoot(self, target);
+        if (self.git_trust_generation == null) self.git_trust_generation = editor_ops.lsp_client.trustGeneration();
+        return root;
     }
 
     fn gitRepoTrustedThunk(ctx: *anyopaque, repo: []const u8) bool {
@@ -24408,8 +24424,7 @@ pub const AppSession = struct {
         self.git_repo = null;
         if (self.git_repo_dest) |dest| self.allocator.free(dest);
         self.git_repo_dest = null;
-        if (self.git_repo_remote_root) |root| self.allocator.free(root);
-        self.git_repo_remote_root = null;
+        git_ops.rememberRemoteRepoRoot(self, null, "");
         if (self.turn_index_path) |path| {
             // 파일도 지운다 — 이름이 이 창의 주소라 다음 실행에서 아무도 안 쓴다. 지우기가 풀기보다 앞이다.
             turn_index_cache.removeIndexFile(self.io, path);
@@ -78109,7 +78124,7 @@ test "원격 목록을 보는 동안 로컬 저장소에 손이 가지 않는다
         scm_dock_ops.forgetRepoStatus(session);
     }
 
-    // **원격 쓰기는 우리가 실행하지 않고 그 원격 셸에 넣는다**(워크스페이스 신뢰 WT6b-2b-ii — 원격은 늘 신뢰 전; 2026-10-10 결정).
+    // **원격 쓰기는 우리가 실행하지 않고 그 원격 셸에 넣는다**(워크스페이스 신뢰 WT6b-2b-ii — 원격 쓰기는 신뢰해도 WT7c 까지 터미널로; 2026-10-10 결정).
     // control socket 이 없어도 그렇다 — 넣는 곳은 그 pane 의 셸이다(예전엔 「읽기 전용」으로 거절했다). 로컬 쓰기는 걸리지 않고(로컬
     // git 에 원격 경로를 넘기지 않는다), 넣었다고 말한다.
     // (인텐트로 못 몬다 — 이 스모크 세션에는 저장소 행이 없어 인텐트가 그 문까지 못 간다.)

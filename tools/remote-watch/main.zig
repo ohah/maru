@@ -27,7 +27,7 @@
 //! 비용은 쟀다: **+19,072 B(+8.6%)** — 계획 [원격 에이전트 활동 뷰](../../docs/plans/remote-agent-activity.md) §2.3.
 //!
 //! **폴링 갈래도 하나를 문다 — `git_filter_override`**(계획 [workspace-trust](../../docs/plans/workspace-trust.md) WT6b-1b-ii).
-//! 원격은 늘 신뢰 전이라 다이제스트의 `status`·`diff --numstat` 이 저장소가 정한 필터를 돌리면 안 되는데, 끌 드라이버를 고르는
+//! 감시자는 원격 신뢰와 무관하게 늘 신뢰 전 규칙이라(WT7b — 변화 감지만 한다) 다이제스트의 `status`·`diff --numstat` 이 저장소가 정한 필터를 돌리면 안 되는데, 끌 드라이버를 고르는
 //! 규칙(범위·전역 되살림·표지·상한)을 사본으로 들면 앱과 감시자가 **다른 것을 끈다** — 보안 규칙이 낡는 쪽은 조용히 열린다.
 //! 그 모듈은 `std` 만 임포트하는 순수 계산이다.
 //! 방향은 한 쪽이다 — 헬퍼가 세션 모듈을 물고, 그 반대는 없다.
@@ -938,7 +938,7 @@ const poll_tick_ms: c_int = 250;
 /// `status` 바이트는 그대로인데 `diff --numstat` 은 `1 1` → `3 3` 으로 바뀐다 — 그 숫자가 도크 행마다
 /// 보이는 `+N −M` 이다. 그래서 다이제스트는 **화면의 숫자를 만드는 읽기까지** 봐야 한다.
 ///
-/// 이 다섯 앞에 저장소 필터 조회가 먼저 돈다(`probeFilters` — 원격은 늘 신뢰 전; 작업트리를 읽는 셋에는 덮어쓰기 env 와
+/// 이 다섯 앞에 저장소 필터 조회가 먼저 돈다(`probeFilters` — 감시자는 늘 신뢰 전 규칙; 작업트리를 읽는 셋에는 덮어쓰기 env 와
 /// `--ignore-submodules=dirty` 가 붙고, 끌 수 없으면 셋을 건너뛴다 — 계획 workspace-trust WT6b-1b-ii). 조회가 「모름」으로 끝나도
 /// 다이제스트 실패다.
 ///
@@ -1118,7 +1118,7 @@ fn digest(gpa: std.mem.Allocator, root: []const u8, git_prefix: []const []const 
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    // **원격은 늘 신뢰 전이다**(WT6b-1b-ii) — 주기마다 저장소 필터를 조회한다(앱과 같은 이유로 캐시하지 않는다: include·전역
+    // **감시자는 늘 신뢰 전 규칙이다**(WT6b-1b-ii·WT7b — 원격 신뢰와 무관하다) — 주기마다 저장소 필터를 조회한다(앱과 같은 이유로 캐시하지 않는다: include·전역
     // 변경을 무효화 기준으로 못 잡는다). 끌 수 없으면 필터를 돌리는 읽기는 건너뛴다(그 자리엔 「건너뜀」을 해시한다 — ref 변화는
     // 여전히 잡힌다).
     var filters: filter_override.FilterConfig = .{};

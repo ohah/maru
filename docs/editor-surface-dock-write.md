@@ -58,8 +58,8 @@
 ## 4. 원격은 fetch만 우리가 실행한다
 
 > **여기서 「원격」은 `origin` 이다**(로컬 저장소의 remote). **SSH 원격 호스트의 저장소에 쓰는 축**은 다른
-> 문제이고 [remote-scm.md](plans/remote-scm.md)가 소유한다. 원격 저장소는 늘 신뢰 전이라(원격 신뢰는
-> [workspace-trust](plans/workspace-trust.md) WT7) 그 저장소의 stage·unstage·commit 은 **우리가 실행하지 않고 활성 pane 에
+> 문제이고 [remote-scm.md](plans/remote-scm.md)가 소유한다. 원격 저장소의 쓰기는 신뢰해도 아직 실행하지
+> 않으므로(원격 신뢰는 [workspace-trust](plans/workspace-trust.md) WT7b 가 읽기만 연다 — 신뢰한 원격 쓰기의 실행은 WT7c) 그 저장소의 stage·unstage·commit 은 **우리가 실행하지 않고 활성 pane 에
 > 넣는다** — `git -C '<원격 저장소 루트>' add -- '<경로>'…`·`git -C '…' commit -m '<메시지>'`(모든 토큰을 작은따옴표로 인용, 끝에
 > 개행 없음 — 실행·훅·서명을 사용자가 보고 한다; 제어 문자가 든 경로·메시지는 넣지 않고 그렇다고 말한다). 신뢰를 정할 수 없는
 > 로컬 저장소(홈 폴더 저장소·저장소 밖)의 쓰기·fetch 도 같다(WT6b-2b-ii). 넣으면 그렇다고 말하고, 낙관 반영·커밋 상자 비우기는

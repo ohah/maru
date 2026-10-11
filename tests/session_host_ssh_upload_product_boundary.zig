@@ -54,7 +54,7 @@ test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작�
     );
     defer allocator.free(body);
 
-    const start = std.mem.indexOf(u8, body, "pub fn spawnAgentEvents") orelse return error.SpawnMissing;
+    const start = std.mem.indexOf(u8, body, "pub fn spawnAgentEventsProfile") orelse return error.SpawnMissing;
     const tail = body[start..];
     const end = std.mem.indexOfPos(u8, tail, 1, "\npub fn ") orelse tail.len;
     const fn_body = tail[0..end];

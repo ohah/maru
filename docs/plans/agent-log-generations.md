@@ -281,3 +281,30 @@ macOS Debug/ReleaseFast와 방어 조건 무력화·등가 변형을 확인했�
 Ubuntu CI에서 확인하며 cross compile만으로 Windows native 실행을 주장하지 않는다.
 결과는 ignored artifacts에만 남긴다. 앱의 capability/수신 cursor와 로컬 reader,
 기본 훅 설치의 in-flight 이행 및 Windows ACL/native 실행은 완료 범위에 넣지 않는다.
+
+## 4단계 수신과 재접속 계약
+
+hello가 이번 스트림의 capability다. v1 식별자/version 1과 v2 식별자/version 2를
+엄격한 JSON으로 판정하고 두 값이 일치해야 연결을 연다. Channel과 host cursor 수집은
+같은 판정자를 쓴다. v2 hello를 확인한 host만 재접속에서 `--log-format=v2`와
+세대 resume를 보낸다. capability는 host의 앱 수명 동안 보존하고 새 스트림에서는
+hello를 다시 확인한다. 확인한 v2를 구버전 peer 때문에 v1으로 낮추지 않는다.
+
+v2 cursor는 gen을 반드시 가지며 길이/문자/타입/중복 오류는 프레임 전체를 거부한다.
+v1 cursor에 gen이 있으면 무시하지 않고 거부한다. cursor JSON의 숫자는 문자열로
+해석해 u64 상한에서 부동소수점 반올림이 생기지 않도록 한다. 이벤트 hot path의
+기존 opaque payload 규칙은 유지하고 작은 hello/cursor만 bounded scratch로 파싱한다.
+
+host는 세대를 offset과 함께 저장하고 늦게 attach하는 Channel도 확인한 profile로
+초기화한다. resume 조립은 공통 codec으로 하며, 실패 시 이력을 지우거나 부분/빈
+resume로 재생하지 않고 기존 재시도 경로로 실패를 드러낸다. 32개 커서의 최대
+이름/u64/세대 예산을 공통 상수와 comptime 검사로 연결한다.
+
+이 단계는 수신·capability·재접속 배선이다. 기존 훅의 기본 설치는 v1을 유지한다.
+기본 native 활성화는 로컬 reader와 구형 in-flight 훅의 분리된 이행 경계,
+바이너리 경로 수명·Codex 재승인 검증이 닫힌 뒤 적용한다. ACK/Windows ACL은 별도다.
+
+수신부는 hello 확인 전 잡음과 다른 profile 응답으로 재시도 예산이나 생존 시각을
+갱신하지 않는다. 재접속 목록은 최대 32개 서로 다른 파일명만 허용하며, 조립 중
+할당 실패는 완성된 이전 목록과 host 커서를 보존한다. 원격 접속을 다시 시도할 때
+v2 hello로 확인한 host만 `--log-format=v2`와 세대가 포함된 resume를 보낸다.

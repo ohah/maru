@@ -17312,24 +17312,22 @@ pub const AppSession = struct {
         ///
         /// ⚠️ **개수를 묶는다**(적대적 검증 1 회차). 스트리머는 원격 디렉터리 **전체**를 훑어 옛 pane 의
         /// 로그까지 커서를 내고, 그 파일들은 1 MiB 전에는 안 지워지며 tmux pane 번호는 단조 증가한다.
-        /// 안 묶으면 `--resume` 문자열이 자라 `resumeIsShellSafe` 의 상한(4 KiB)을 넘고, 그러면 조용히
-        /// 처음부터 읽어 **알림이 재생된다** — 이 기능이 막으려던 바로 그것이다. host 소유 nonce 는 한
-        /// 항목이 77 바이트라 53 개면 넘는다.
+        /// 안 묶으면 `--resume` 문자열이 자라 실행 예산을 넘는다. 이름·u64·세대를 모두
+        /// 포함한 32개 최대 항목의 예산을 공통 codec에서 계산한다. 실패해도 커서는 보존한다.
         cursors: std.StringHashMapUnmanaged(Cursor) = .empty,
-        /// 커서 하나. `seen_ms` 는 **밀어낼 것을 고르는 데만** 쓴다(가장 오래 안 본 것부터).
-        const Cursor = struct { offset: u64, seen_ms: u64 };
+        /// 확인한 stream capability. 재시작에서도 보존해 세대 정보를 v1으로 낮추지 않는다.
+        stream_profile: ?maru.session.remote_agent_stream.protocol.Profile = null,
+        /// `seen_ms`는 오래된 항목을 밀어낼 때만 사용한다.
+        const Cursor = struct { offset: u64, seen_ms: u64, generation: ?maru.session.agent_log_generation.Generation = null };
         /// 동시에 기억할 로그 수. 한 pane 이 하나씩 쓰므로 이만큼이면 실사용을 덮는다.
         ///
         /// ⚠️ **이 값이 `--resume` 예산을 정한다.** 누가 여기를 올리면 문자열이 `resumeIsShellSafe` 의
-        /// 상한을 넘고, 그러면 조용히 처음부터 읽어 알림이 재생된다 — 화면에는 아무 단서가 없다.
+        /// 상한을 넘으면 실행이 실패한다. 세대를 버리는 fallback 없이 예산을 맞춘다.
         /// 그래서 관계를 **컴파일 시점에 묶는다**(적대적 검증 2 회차).
-        const cursor_max: usize = 32;
+        const cursor_max: usize = maru.session.remote_agent_stream.protocol.cursor_max;
         comptime {
-            const name_max = maru.session.agent_hook_command.remote_log_name_max;
-            const digits = 20; // u64 십진 최대 자릿수
-            const per_entry = name_max + 1 + digits + 1; // `<이름>:<offset>` + 구분자
-            if (cursor_max * per_entry > ssh_upload.resume_spec_max)
-                @compileError("커서 상한이 --resume 예산을 넘는다 — cursor_max 를 줄이거나 예산을 올려라");
+            if ((maru.session.agent_log_generation.resumeBytesBound(cursor_max) catch unreachable) > ssh_upload.resume_spec_max)
+                @compileError("generation cursor budget exceeds resume limit");
         }
         /// 다시 띄우기 상한과 간격. 백오프는 2 배씩, 첫 간격은 1 초.
         const retry_max: u8 = 6;
@@ -17484,32 +17482,26 @@ pub const AppSession = struct {
         // 새로 켰다」이고, 배지를 세우려면 최근 이벤트를 다시 읽어야 한다.
         var spec: std.ArrayListUnmanaged(u8) = .empty;
         defer spec.deinit(self.allocator);
-        var built = true;
+        const protocol = maru.session.remote_agent_stream.protocol;
+        const profile = host.stream_profile orelse .v1;
         var it = host.cursors.iterator();
         while (it.next()) |e| {
-            if (spec.items.len > 0) spec.append(self.allocator, ',') catch {
-                built = false;
-                break;
-            };
-            spec.print(self.allocator, "{s}:{d}", .{ e.key_ptr.*, e.value_ptr.offset }) catch {
-                built = false;
-                break;
+            // Legacy positions cannot identify a new-generation file. An upgrade
+            // starts those names at zero; a stored generation is never discarded.
+            if (profile == .v2 and e.value_ptr.generation == null) continue;
+            protocol.appendResume(&spec, self.allocator, e.key_ptr.*, .{ .offset = e.value_ptr.offset, .generation = e.value_ptr.generation }, profile) catch {
+                self.scheduleStreamerRetry(dest, host, "resume cursor construction failed");
+                return;
             };
         }
-        // **반쯤 지은 이어읽기는 안 보낸다**(적대적 검증 5 회차). `,` 를 붙인 뒤 실패하면 끝에 쉼표가
-        // 남는데, 그것은 셸 검사(`resumeIsShellSafe`)를 통과하고 **원격의 구조 검사에서 죽는다** —
-        // 스트리머가 곧바로 usage_error 로 나가 EOF → 재시도 → 결국 영구 포기가 된다. 증상은 「배지가
-        // 안 뜬다」 하나뿐이라 원인이 화면에 안 나온다.
-        //
-        // 같은 규칙을 **저쪽 것으로** 다시 본다 — 두 벌로 두면 한쪽이 바뀌는 날 조용히 갈린다.
-        if (!built or !maru.cli.agent_events.resumeIsWellFormed(spec.items)) spec.clearRetainingCapacity();
-        const stream = ssh_upload.spawnAgentEvents(
+        const stream = ssh_upload.spawnAgentEventsProfile(
             self.allocator,
             ctl,
             dest,
             "maru",
             maru.session.agent_hook_command.remote_log_dir_rel,
             spec.items,
+            profile,
         ) catch {
             // **기동 실패도 EOF 와 같은 부류다**(적대적 검증 4 회차). fork 가 한 번 밀린 것으로 그
             // 목적지를 앱 수명 동안 죽이면, 방금 EOF 에서 고친 영구 차단을 형제 경로가 그대로 재현한다.
@@ -17550,15 +17542,19 @@ pub const AppSession = struct {
         for (lines) |line| {
             if (!host.saw_hello) {
                 // 채널과 **같은 판정**을 쓴다(`Channel.feed` 의 `waiting_hello`).
-                if (std.mem.startsWith(u8, line, "{\"hello\":\"maru-agent-events\"")) host.saw_hello = true;
+                const required = if (host.stream_profile == .v2) maru.session.remote_agent_stream.protocol.Profile.v2 else null;
+                if (ras.protocol.parseHello(line, required)) |profile| {
+                    host.stream_profile = profile;
+                    host.saw_hello = true;
+                }
                 continue;
             }
-            const cur = switch (ras.parseFrame(line)) {
+            const cur = switch (ras.parseFrameForProfile(line, host.stream_profile orelse .v1)) {
                 .cursor => |c| c,
                 else => continue,
             };
             if (host.cursors.getPtr(cur.name)) |slot| {
-                slot.* = .{ .offset = cur.offset, .seen_ms = now_ms };
+                slot.* = .{ .offset = cur.offset, .seen_ms = now_ms, .generation = cur.generation };
                 continue;
             }
             // 새 이름이다. 자리가 없으면 **가장 오래 안 본 것**을 밀어낸다 — 그 로그는 이미 안 도는
@@ -17578,7 +17574,7 @@ pub const AppSession = struct {
                 }
             }
             const key = self.allocator.dupe(u8, cur.name) catch continue;
-            host.cursors.put(self.allocator, key, .{ .offset = cur.offset, .seen_ms = now_ms }) catch {
+            host.cursors.put(self.allocator, key, .{ .offset = cur.offset, .seen_ms = now_ms, .generation = cur.generation }) catch {
                 self.allocator.free(key);
                 continue;
             };
@@ -96993,4 +96989,76 @@ test "OVF4 관문을 지나는 오버레이를 하나씩 연다 — 다른 오�
             return error.GateStuck;
         }
     }
+}
+
+test "generation receiver preserves host capability and ids across restart and rejects downgrade" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    const dest = "generation-test";
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{});
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+    const protocol = maru.session.remote_agent_stream.protocol;
+    const generation = "00112233445566778899aabbccddeeff";
+    const cursor = "{\"cur\":\"a\",\"at\":18446744073709551615,\"gen\":\"" ++ generation ++ "\"}";
+    session.recordRemoteCursors(host, &.{ protocol.hello(.v2), cursor }, 1);
+    try std.testing.expectEqual(protocol.Profile.v2, host.stream_profile.?);
+    const before = host.cursors.get("a").?;
+    try std.testing.expectEqual(std.math.maxInt(u64), before.offset);
+    try std.testing.expectEqualDeep(try maru.session.agent_log_generation.decodeGeneration(generation), before.generation.?);
+    session.onStreamerStarted(dest, host, 2);
+    try std.testing.expect(!host.saw_hello);
+    session.recordRemoteCursors(host, &.{ protocol.hello(.v1), "{\"cur\":\"a\",\"at\":0}" }, 3);
+    try std.testing.expect(!host.saw_hello);
+    try std.testing.expectEqualDeep(before, host.cursors.get("a").?);
+    session.recordRemoteCursors(host, &.{ protocol.hello(.v2), "{\"cur\":\"a\",\"at\":0,\"gen\":null}" }, 4);
+    try std.testing.expect(host.saw_hello);
+    try std.testing.expectEqualDeep(before, host.cursors.get("a").?);
+    var resume_out: std.ArrayListUnmanaged(u8) = .empty;
+    defer resume_out.deinit(a);
+    try protocol.appendResume(&resume_out, a, "a", .{ .offset = before.offset, .generation = before.generation }, host.stream_profile.?);
+    try std.testing.expectEqualStrings("a:18446744073709551615:" ++ generation, resume_out.items);
+    remote_agent_ops.closeRemoteAgentHost(&session, dest);
+}
+
+test "generation receiver pipe noise cannot renew retry budget before matching hello" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[1]);
+    const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+    _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+    const dest = "generation-pipe";
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .stream = .{ .pid = 0, .out_fd = fds[0] }, .stream_profile = .v2, .install_done = true, .stream_started = true, .retries = 3, .last_line_ms = 10 });
+    defer remote_agent_ops.closeRemoteAgentHost(&session, dest);
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+    const wrong = "{\"hello\":\"maru-agent-events\",\"v\":1}\n{\"cur\":\"a\",\"at\":99}\n";
+    try std.testing.expectEqual(@as(isize, @intCast(wrong.len)), std.c.write(fds[1], wrong.ptr, wrong.len));
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 100);
+    try std.testing.expect(!host.saw_hello);
+    try std.testing.expectEqual(@as(u8, 3), host.retries);
+    try std.testing.expectEqual(@as(u64, 10), host.last_line_ms);
+    try std.testing.expectEqual(@as(usize, 0), host.cursors.count());
+    const right = "{\"hello\":\"maru-agent-events-v2\",\"v\":2}\n{\"cur\":\"a\",\"at\":42,\"gen\":\"00112233445566778899aabbccddeeff\"}\n";
+    try std.testing.expectEqual(@as(isize, @intCast(right.len)), std.c.write(fds[1], right.ptr, right.len));
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, 200);
+    try std.testing.expect(host.saw_hello);
+    try std.testing.expectEqual(@as(u8, 0), host.retries);
+    try std.testing.expectEqual(@as(u64, 200), host.last_line_ms);
+    try std.testing.expectEqual(@as(u64, 42), host.cursors.get("a").?.offset);
+    try std.testing.expect(host.cursors.get("a").?.generation != null);
 }

@@ -10,6 +10,7 @@
 const std = @import("std");
 const command = @import("agent_hook_command.zig");
 const hook_event = @import("agent_hook_event.zig");
+pub const protocol = @import("agent_stream_protocol.zig");
 
 /// 채널이 열렸다고 인정하기까지 기다리는 시간. §4a 가 정한 값을 그대로 쓴다.
 pub const hello_deadline_ms: u64 = 5_000;
@@ -76,7 +77,7 @@ pub const Frame = union(enum) {
     /// **로컬이 기억했다가 재접속 때 `--resume=` 으로 돌려준다.** 원격 파일에 굳히지 않는 이유는
     /// 「앱을 새로 켰다」와 「채널만 죽었다 살아났다」를 갈라야 하기 때문이다 — 앞은 다시 읽어야 배지가
     /// 서고, 뒤는 다시 읽으면 완료 알림이 재생된다. 로컬 기억은 앱과 함께 죽으므로 그 구분이 저절로 선다.
-    cursor: struct { name: []const u8, offset: u64 },
+    cursor: protocol.Cursor,
     /// **지금 그 원격에 있는 tmux pane 전부**(공백 구분 `%N` 목록). 로컬은 이 목록에 없는 pane 슬롯을
     /// 버린다([계획](../../docs/plans/remote-agent-state.md) RA7).
     ///
@@ -90,9 +91,13 @@ pub const Frame = union(enum) {
 
 /// 한 줄을 프레임으로 푼다. **버퍼를 빌려 가리킨다** — 호출자가 다음 줄을 읽기 전에 소비해야 한다.
 pub fn parseFrame(line: []const u8) Frame {
+    return parseFrameForProfile(line, .v1);
+}
+
+pub fn parseFrameForProfile(line: []const u8, profile: protocol.Profile) Frame {
     if (line.len == 0 or line.len > max_line_bytes) return .ignored;
     if (std.mem.startsWith(u8, line, "{\"hb\":")) return .heartbeat;
-    if (std.mem.startsWith(u8, line, "{\"cur\":")) return parseCursor(line);
+    if (std.mem.startsWith(u8, line, "{\"cur\":")) return if (protocol.parseCursor(line, profile)) |cur| .{ .cursor = cur } else .ignored;
     if (std.mem.startsWith(u8, line, "{\"panes\":")) return parsePanes(line);
     const nonce = jsonStringField(line, "\"nonce\":\"") orelse return .ignored;
     const raw = jsonStringField(line, "\"line\":\"") orelse return .ignored;
@@ -153,20 +158,6 @@ pub fn paneListContains(list: []const u8, pane: []const u8) bool {
 
 /// 커서 프레임을 푼다. **이름을 다시 검증한다** — 이 값이 「어느 로그인가」를 정하므로 선 위에서
 /// 바뀌었을 가능성을 그냥 믿지 않는다(`event` 와 같은 규율).
-fn parseCursor(line: []const u8) Frame {
-    const name = jsonStringField(line, "\"cur\":\"") orelse return .ignored;
-    if (name.len == 0 or name.len > command.remote_log_name_max) return .ignored;
-    if (!command.instance_token_class.accepts(name)) return .ignored;
-    const at_key = "\"at\":";
-    const at = std.mem.indexOf(u8, line, at_key) orelse return .ignored;
-    var end = at + at_key.len;
-    while (end < line.len and line[end] >= '0' and line[end] <= '9') end += 1;
-    const digits = line[at + at_key.len .. end];
-    if (digits.len == 0) return .ignored;
-    const offset = std.fmt.parseInt(u64, digits, 10) catch return .ignored;
-    return .{ .cursor = .{ .name = name, .offset = offset } };
-}
-
 /// `"<key>":"..."` 의 값 구간을 찾는다(이스케이프를 **풀지 않고** 그대로 돌려준다).
 ///
 /// 값 안의 `\"` 를 종료로 오인하지 않는 것만 지키면 된다 — 실제 언이스케이프는 `unescapeInto` 가 한다.
@@ -225,13 +216,15 @@ pub fn unescapeInto(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocat
 /// 채널 하나의 수명. **시계를 안 부른다** — 호출자가 `now_ms` 를 준다.
 pub const Channel = struct {
     state: State = .waiting_hello,
+    profile: protocol.Profile = .v1,
+    required_profile: ?protocol.Profile = null,
     closed_reason: ?Closed = null,
     opened_at_ms: u64 = 0,
     last_alive_ms: u64 = 0,
     noise_bytes: usize = 0,
 
     pub fn init(now_ms: u64) Channel {
-        return .{ .opened_at_ms = now_ms, .last_alive_ms = now_ms };
+        return .{ .opened_at_ms = now_ms, .last_alive_ms = now_ms, .required_profile = .v1 };
     }
 
     /// **이미 `hello` 를 본 스트림**에 뒤늦게 붙는 채널.
@@ -240,6 +233,14 @@ pub const Channel = struct {
     /// `waiting_hello` 로 두면 5 초 뒤 `no_hello` 로 죽고, **그 Term 은 자기 이벤트가 와도 영영 못
     /// 본다** — 죽은 채널도 `null` 이 아니라 분배 셈에는 들어가, 로그에는 「열을 다 먹였는데 하나도
     /// 안 맞는다」로 보인다(2026-09-10 실측: 열 세션 중 둘만 배지가 섰다).
+    pub fn initForProfile(now_ms: u64, required: ?protocol.Profile) Channel {
+        return .{ .opened_at_ms = now_ms, .last_alive_ms = now_ms, .required_profile = required };
+    }
+
+    pub fn initOpenProfile(now_ms: u64, profile: protocol.Profile) Channel {
+        return .{ .state = .open, .opened_at_ms = now_ms, .last_alive_ms = now_ms, .profile = profile, .required_profile = profile };
+    }
+
     pub fn initOpen(now_ms: u64) Channel {
         return .{ .state = .open, .opened_at_ms = now_ms, .last_alive_ms = now_ms };
     }
@@ -263,7 +264,8 @@ pub const Channel = struct {
         switch (self.state) {
             .closed => return .ignored,
             .waiting_hello => {
-                if (std.mem.startsWith(u8, line, "{\"hello\":\"maru-agent-events\"")) {
+                if (protocol.parseHello(line, self.required_profile)) |profile| {
+                    self.profile = profile;
                     self.state = .open;
                     self.last_alive_ms = now_ms;
                     return .ignored;
@@ -274,7 +276,7 @@ pub const Channel = struct {
             },
             .open => {
                 self.last_alive_ms = now_ms;
-                return parseFrame(line);
+                return parseFrameForProfile(line, self.profile);
             },
         }
     }
@@ -697,4 +699,23 @@ test "parseFrame: 커서 프레임을 이름과 위치로 푼다" {
 
     // 이벤트·하트비트와 섞이지 않는다(같은 스트림을 나눠 쓴다).
     try std.testing.expect(parseFrame("{\"hb\":7}") == .heartbeat);
+}
+
+test "negotiated and late attached generation channels retain generation and reject legacy reconnect" {
+    var channel = Channel.initForProfile(0, null);
+    _ = channel.feed(protocol.hello(.v2), 1);
+    try std.testing.expect(channel.isOpen());
+    try std.testing.expectEqual(protocol.Profile.v2, channel.profile);
+    const cursor = "{\"cur\":\"a\",\"at\":42,\"gen\":\"00112233445566778899aabbccddeeff\"}";
+    var late = Channel.initOpenProfile(2, channel.profile);
+    const parsed = late.feed(cursor, 3);
+    try std.testing.expect(parsed == .cursor);
+    try std.testing.expect(parsed.cursor.generation != null);
+    try std.testing.expectEqual(@as(u64, 42), parsed.cursor.offset);
+    var restarted = Channel.initForProfile(4, channel.profile);
+    _ = restarted.feed(protocol.hello(.v1), 5);
+    try std.testing.expect(!restarted.isOpen());
+    try std.testing.expect(restarted.feed(cursor, 6) == .ignored);
+    restarted.tick(4 + hello_deadline_ms);
+    try std.testing.expect(restarted.isClosed());
 }

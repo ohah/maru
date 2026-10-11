@@ -77,14 +77,16 @@ check에 포함된다. 결과는 `tests/artifacts/agent-log-record/`에만 남�
 
 v2 검증용 reader는 `maru agent-events --stdio --dir=<private-directory> --log-format=v2`로
 선택한다. 기본 v1과 혼합하지 않으며
-`maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상/기본 훅 전환은 후속이다.
+`maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상과 재접속 수신은 아래 게이트로 검사하며 기본 훅 전환은 후속이다.
 `zig build test-agent-log-stream-process`는 실제 CLI pipe로 generation resume,
 시작 정리, 출력 배압 중 append, holder 종료, broken pipe를 검사한다. Ubuntu CI
 check에 포함되며 결과는 `tests/artifacts/agent-log-stream/`에만 남긴다.
 
+로그 세대 수신·재접속: `zig build test-cli-failure-contract`가 v1/v2 hello와 cursor의 엄격한 판정, u64 상한, 32개 최대 resume 및 할당 실패 시 이전 목록 보존을 검사한다. `zig build test-macos-app-host-abi`에는 AppSession의 v2 capability 유지·재시작 downgrade 거부 및 실제 pipe의 잘못된 hello/정상 cursor 수신 회귀가 포함된다. 기본 훅을 native로 활성화하는 검증과 Windows 실제 실행을 대신하지 않는다.
+
 세대 codec 집중 검증은 `zig build test-agent-log-generations`다. 기본 `test`에도
 포함되며 header/resume 문법·세대별 offset 조정·snapshot 회전 조건을 OS 중립적으로
-검사한다. 파일 잠금·native 기록기와 제품 스트림 배선의 실행 검증은 후속 단계다.
+검사한다. 파일 잠금·native 기록기와 제품 스트림 실행은 위의 별도 process 게이트가 소유한다.
 
 Ubuntu CI의 `check` 잡은 코드 변경 시 `zig build test-cli-failure-process`를 실행한다.
 이 게이트는 실제 stdout pipe와 private 로그로 agent-events의 축소 회전·짧은 파일 교체·

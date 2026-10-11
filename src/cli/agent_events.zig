@@ -33,10 +33,10 @@ const remote_agent_stream = @import("../session/remote_agent_stream.zig");
 /// 의 `command=` 가 걸린 서버는 우리 명령을 **갈아치우고 `exit 0` 을 준다**(2026-08-29 실측 — 다중화
 /// exec 도 못 피한다). 그때 이 줄이 안 오는 것이 유일한 신호다. 정상 서버도 MOTD·rc 잡음을 앞에 붙이므로
 /// «첫 줄» 로 재면 멀쩡한 서버를 제한 서버로 오진한다.
-pub const hello_line = "{\"hello\":\"maru-agent-events\",\"v\":1}";
+pub const hello_line = remote_agent_stream.protocol.hello(.v1);
 // Deployed Channel/host readers match the quoted marker without checking v.
 // A distinct marker prevents them from stripping generation off a v2 cursor.
-pub const generation_hello_line = "{\"hello\":\"maru-agent-events-v2\",\"v\":2}";
+pub const generation_hello_line = remote_agent_stream.protocol.hello(.v2);
 
 /// 우리 프로토콜 판(소비자가 대조한다).
 pub const wire_version: u32 = 1;
@@ -464,7 +464,7 @@ test "v2 streamer is explicit and keeps generation in resume and cursor output" 
 }
 
 test "v2 hello never opens the deployed legacy prefix-based channel" {
-    var legacy = remote_agent_stream.Channel.init(0);
+    var legacy = remote_agent_stream.Channel.initForProfile(0, .v1);
     _ = legacy.feed(generation_hello_line, 1);
     try testing.expectEqual(remote_agent_stream.State.waiting_hello, legacy.state);
     // The host's cursor collector uses this exact same legacy marker prefix.

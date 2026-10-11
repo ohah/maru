@@ -1480,23 +1480,13 @@ fn releaseWaiting(self: *AppSession, c: *Client) void {
     for (c.docs.items) |d| for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
         if (!d.matches(term)) continue;
         const rt = &term.rt;
-        if (rt.editor_semantic.waiting) {
-            rt.editor_semantic.waiting = false;
-            rt.editor_semantic.dirty = true;
-        }
-        if (rt.editor_inlay.waiting) {
-            rt.editor_inlay.waiting = false;
-            rt.editor_inlay.dirty = true;
-        }
-        if (rt.editor_symbols.waiting) {
-            rt.editor_symbols.waiting = false;
-            rt.editor_symbols.dirty = true;
-        }
-        if (rt.editor_fold_lsp.waiting) {
-            rt.editor_fold_lsp.waiting = false;
-            rt.editor_fold_lsp.dirty = true;
-        }
-        rt.editor_highlight.waiting = false; // 강조는 caret 의 조용 시계가 다시 묻는다
+        // 막음 풀기는 L2 `lsp_requests.release` 하나다(`dirty` 가 있는 넷은 다시 묻게 두고, 강조는 caret 의 조용 시계가 다시 묻는다).
+        const release = maru.session.editor.lsp_requests.release;
+        release(editor_semantic.gate(&rt.editor_semantic));
+        release(editor_inlay.gate(&rt.editor_inlay));
+        release(editor_symbols.gate(&rt.editor_symbols));
+        release(editor_fold_lsp.gate(&rt.editor_fold_lsp));
+        release(editor_highlight.gate(&rt.editor_highlight));
         // 자동완성은 세션에 하나 — 기다리던 것이 **이 문서**의 요청일 때만 놓는다(다른 서버의 응답을 버리지 않게).
         const comp = &self.editor_completion;
         if (comp.waiting and comp.waiting_surface == term.surfaceId()) {

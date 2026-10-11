@@ -12,6 +12,8 @@ const Term = app_session_mod.Term;
 const editor_lsp = @import("lsp.zig");
 const editor = @import("mod.zig");
 const lsp = maru.session.editor.lsp;
+/// 요청 규율(물을 때인가 · 응답 받기 · 실패 뒤 다시)은 L2 `lsp_requests` 가 소유한다(결함 11 의 후속 이동).
+const lsp_requests = maru.session.editor.lsp_requests;
 const fold_range = lsp.fold_range;
 
 /// 마지막 편집 뒤 이만큼 조용해야 묻는다(§8.2j 「시점」 — semantic 2층과 같은 시계).
@@ -40,6 +42,20 @@ pub const State = struct {
     dropped_error: u64 = 0,
 };
 
+/// 요청 상태의 필드들 — L2 `lsp_requests` 가 이것으로 읽고 쓴다(상태 모양은 그대로).
+pub fn gate(st: *State) lsp_requests.Gate {
+    return .{
+        .waiting = &st.waiting,
+        .waiting_seq = &st.waiting_seq,
+        .waiting_version = &st.waiting_version,
+        .dirty = &st.dirty,
+        .clock = &st.last_edit_ms,
+        .sent = &st.sent,
+        .dropped_error = &st.dropped_error,
+        .dropped_stale = &st.dropped_stale,
+    };
+}
+
 fn quietFor(st: *const State) u64 {
     return quiet_ms << @min(st.error_streak, max_error_shift);
 }
@@ -53,29 +69,21 @@ pub fn tick(self: *AppSession, term: *Term) void {
     if (version == 0) return; // 아직 서버에 안 열었다
     if (st.version == version and !st.dirty) return;
     const now = self.awakeMs();
-    if (st.last_edit_ms != 0 and now -| st.last_edit_ms < quietFor(st)) return; // 0 = 아직 편집이 없었다
+    if (!lsp_requests.quiet(gate(st), now, quietFor(st))) return; // 0 = 아직 편집이 없었다
     const seq = editor_lsp.requestFoldingRange(self, term) orelse return; // 서버·provider 검사는 요청이 한다
-    st.waiting = true;
-    st.waiting_seq = seq;
-    st.waiting_version = version;
-    st.dirty = false;
-    st.sent += 1;
+    lsp_requests.sent(gate(st), seq, version);
 }
 
 /// 응답(`editor_lsp` 가 부른다). 낡은 seq·낡은 version·오류는 버린다(오류·낡음은 `dirty` 로 다시 묻는다).
 pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Value, is_error: bool) void {
     const st = &term.rt.editor_fold_lsp;
-    if (!st.waiting or seq != st.waiting_seq) return;
-    st.waiting = false;
-    if (is_error or result == null) {
-        st.dropped_error += 1;
-        retryLater(self, st);
-        return;
-    }
-    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
-        st.dropped_stale += 1;
-        st.dirty = true;
-        return;
+    switch (lsp_requests.receive(gate(st), seq, is_error or result == null, term.rt.editorDocument().notifications.lsp_version)) {
+        .ignore, .stale => return,
+        .failed => {
+            retryLater(self, st);
+            return;
+        },
+        .take => {},
     }
     const doc = term.rt.editorDocument().opened orelse return;
     const lines = editor.foldSourceLines(term);
@@ -110,18 +118,16 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
 
 /// 「아직 아니다」 응답 뒤 — 곧바로 되묻지 않는다(조용 뒤, 이어지면 더 길게).
 fn retryLater(self: *AppSession, st: *State) void {
-    st.dirty = true;
+    lsp_requests.retry(gate(st), self.awakeMs());
     st.error_streak +|= 1;
-    st.last_edit_ms = self.awakeMs();
 }
 
 /// 할당 실패 뒤 — 다시 묻되 조용 뒤에. 「아직 아니다」가 아니라 이쪽 사정이라 배수(`error_streak`)는 안 늘린다.
 fn retryAfterAllocFailure(self: *AppSession, st: *State) void {
-    st.dirty = true;
-    st.last_edit_ms = self.awakeMs();
+    lsp_requests.retry(gate(st), self.awakeMs());
 }
 
 /// 편집 통지 — 조용 시계만 되감는다(범위는 `dropFoldState` 가 이미 놓았고, version 이 올라 `tick` 이 다시 묻는다).
 pub fn onEdit(self: *AppSession, term: *Term) void {
-    term.rt.editor_fold_lsp.last_edit_ms = self.awakeMs();
+    lsp_requests.touch(gate(&term.rt.editor_fold_lsp), self.awakeMs());
 }

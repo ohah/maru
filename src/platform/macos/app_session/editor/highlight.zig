@@ -12,6 +12,8 @@ const AppSession = app_session_mod.AppSession;
 const Term = app_session_mod.Term;
 const editor_lsp = @import("lsp.zig");
 const lsp = maru.session.editor.lsp;
+/// 요청 규율(물을 때인가 · 응답 받기 · 실패 뒤 다시)은 L2 `lsp_requests` 가 소유한다(결함 11 의 후속 이동).
+const lsp_requests = maru.session.editor.lsp_requests;
 const highlight = lsp.highlight;
 
 /// caret 이 멈추고 이만큼 지나야 묻는다(§8.2p).
@@ -45,6 +47,20 @@ pub const State = struct {
         self.* = .{};
     }
 };
+
+/// 요청 상태의 필드들 — L2 `lsp_requests` 가 이것으로 읽고 쓴다(상태 모양은 그대로).
+pub fn gate(st: *State) lsp_requests.Gate {
+    return .{
+        .waiting = &st.waiting,
+        .waiting_seq = &st.waiting_seq,
+        .waiting_version = &st.waiting_version,
+        .dirty = null, // 강조는 `dirty` 가 없다 — 낱말 키로 다시 묻는다
+        .clock = &st.last_move_ms,
+        .sent = &st.sent,
+        .dropped_error = &st.dropped_error,
+        .dropped_stale = &st.dropped_stale,
+    };
+}
 
 /// caret 아래 **낱말** 범위 — 선택이 있거나 낱말이 아니면 `null`. 낱말 규칙은 §5.1 이 정한 소유자(`selection.wordRangeAt`)가 준다.
 pub fn wordAtCaret(term: *Term) ?struct { start: u32, end: u32 } {
@@ -93,32 +109,26 @@ pub fn tick(self: *AppSession, term: *Term) void {
     const fresh = st.version == term.rt.editorDocument().notifications.lsp_version and st.word_start == w.start and st.word_end == w.end;
     if (fresh) return; // 이 낱말의 답을 이미 들고 있다
     const now = self.awakeMs();
-    if (st.last_move_ms != 0 and now -| st.last_move_ms < quiet_ms) return;
+    if (!lsp_requests.quiet(gate(st), now, quiet_ms)) return;
     const doc = term.rt.editorDocument().opened orelse return;
     const line = doc.file.lines.lineAt(w.start);
     const ln = doc.file.lines.line(line) orelse return;
     const seq = editor_lsp.requestDocumentHighlight(self, term, @intCast(line), @intCast(w.start - ln.start)) orelse return;
-    st.waiting = true;
-    st.waiting_seq = seq;
-    st.waiting_version = term.rt.editorDocument().notifications.lsp_version;
+    lsp_requests.sent(gate(st), seq, term.rt.editorDocument().notifications.lsp_version);
     st.waiting_word_start = w.start;
     st.waiting_word_end = w.end;
-    st.sent += 1;
 }
 
 /// 응답(`editor_lsp` 가 부른다).
 pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Value, is_error: bool, enc: lsp.rpc.PositionEncoding) void {
     const st = &term.rt.editor_highlight;
-    if (!st.waiting or seq != st.waiting_seq) return;
-    st.waiting = false;
-    if (is_error or result == null) {
-        st.dropped_error += 1;
-        st.last_move_ms = self.awakeMs(); // 곧바로 되묻지 않는다
-        return;
-    }
-    if (st.waiting_version != term.rt.editorDocument().notifications.lsp_version) {
-        st.dropped_stale += 1;
-        return;
+    switch (lsp_requests.receive(gate(st), seq, is_error or result == null, term.rt.editorDocument().notifications.lsp_version)) {
+        .ignore, .stale => return,
+        .failed => {
+            lsp_requests.retry(gate(st), self.awakeMs()); // 곧바로 되묻지 않는다
+            return;
+        },
+        .take => {},
     }
     // **caret 이 다른 낱말로 갔으면 버린다** — 그 답은 지금 화면의 낱말을 말하지 않는다.
     const w = wordAtCaret(term) orelse {
@@ -133,7 +143,7 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
     highlight.decode(self.allocator, result, doc.file.content, doc.file.lines, enc, &st.spans) catch {
         st.spans.clear();
         // 할당 실패 — 다시 묻되 **조용 시계를 되감는다**(오류 응답과 같은 규율). `dirty` 만 세우면 다음 `tick` 이 곧바로 같은 요청을 다시 보내 메모리가 모자란 동안 매 프레임 되풀이했다(여섯째 결함 후보, 재현 2026-10-11).
-        st.last_move_ms = self.awakeMs();
+        lsp_requests.retry(gate(st), self.awakeMs());
         return;
     };
     st.version = st.waiting_version;
@@ -145,13 +155,13 @@ pub fn onResponse(self: *AppSession, term: *Term, seq: u32, result: ?std.json.Va
 
 /// caret 이 움직였다 — 조용 시계를 되감는다(강조는 `spans` 의 낱말 대조로 이미 안 그려진다).
 pub fn onCaretMove(self: *AppSession, term: *Term) void {
-    term.rt.editor_highlight.last_move_ms = self.awakeMs();
+    lsp_requests.touch(gate(&term.rt.editor_highlight), self.awakeMs());
 }
 
 /// 편집 통지 — **버린다**(§8.2p). 조용해지면 caret 자리로 다시 묻는다.
 pub fn onEdit(self: *AppSession, term: *Term) void {
     const st = &term.rt.editor_highlight;
-    st.last_move_ms = self.awakeMs();
+    lsp_requests.touch(gate(st), self.awakeMs());
     if (st.spans.items.items.len > 0) {
         st.spans.clear();
         st.cleared += 1;

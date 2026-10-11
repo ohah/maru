@@ -105,14 +105,60 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
   자기 allocator 로 풀면 누수 검사는 통과해도 횟수에서 잡힌다. 메타 필드는 서로 다른 값으로 단언한다(렌더러 업로드 캐시가
   generation 을 키로 쓴다). 적대적 검증 회차마다 고친 자리를 돌연변이로 다시 쟀다 — 집계는 PR 본문.
 
-#### IC3b — 앱 세그먼트 표·채널 리더 (미착수)
+#### IC3b — 앱 세그먼트 표·채널 리더
 
-- `Client` 필드: 세그먼트 표·닫힌 stream 집합(이동·allowlist·digest 등록). 채널 fd 필드는 IC2b 가 둔다.
-- 채널 리더는 `state == .bound` 와 `fd >= 0` 을 함께 본다. 주 연결이 poison 되면 host 는 채널도 닫으므로(IC2a) poison 경로가 채널
-  fd 를 어떻게 놓을지 정한다 — 지금은 회수 때 `finishDeinitGraph` 가 닫는다.
-- 채널 리더(메시지당 fd 정확히 하나 검사·EMFILE 감지), `SegmentResolver`(표에서 찾아 stream·image_id·generation·byte_len 대조,
-  `fstat` 크기 하한·`mmap(PROT_READ)`·fd close·표에서 제거·release 적재, 해제 함수는 `munmap`; 「없음」은 이유를 로그로 남기고 다른
-  stream 의 항목은 그대로 둔다; mmap 실패는 `OutOfMemory`), `image_seg_hwm` 정리, 닫힌 stream 처리, release 송신.
+IC3b 도 둘로 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)와 GUI 적용 자리 배선(IC3b-2). 표는 아무 적용 자리에도
+연결되지 않은 채 먼저 들어가도 된다(채널이 묶일 일이 없다 — 광고가 꺼져 있다).
+
+##### IC3b-1 — 세그먼트 표·채널 리더·release (완료)
+
+- 새 `src/platform/macos/session_host/client_image_segments.zig`(`Table`): 고정 크기다 — 항목 `image_segment_max_per_connection`(32)
+  개, 못 보낸 release 버퍼 같은 개수, 덜 받은 세그먼트 메시지 하나와 그 fd, 지금 붙은 stream(동시 상한 256)과 그 최대 id.
+  - `drain`: 메시지 하나의 나머지까지만 recvmsg 한다. 첫 조각 fd 정확히 하나·이어지는 조각 fd 없음·제어 버퍼 잘림 없음이 아니면
+    받은 fd 를 모두 닫고 `PeerContractViolation`. EMFILE·ENFILE 은 재시도 없이 `LocalResourceExhausted`. EOF·오류·머리 불일치는
+    `ChannelLost`. 표 + 못 보낸 release 가 원장 상한에 닿았는데 더 오거나 같은 id 가 다시 오면 위반. 받은 fd 는 바로 CLOEXEC.
+  - 닫힌 stream 은 집합 대신 「최대 id 이하이면서 지금 붙지 않음」(계약 §6) — `openStream`·`closeStream`. 닫힌 stream 의 세그먼트는
+    받는 즉시 반환, 최대 id 보다 큰 stream 은 남긴다. 최대 id 가 오르면 그 때문에 닫힌 것이 된 stream 의 남은 항목도 반환한다 —
+    응답을 못 읽은 채 들어온 stream 이 끝내 열리지 않고 지나가면 그 항목이 sweep 대상도 아닌 채 원장 자리를 영구히 쥔다.
+  - `resolve(stream, ref)`: 표에서 찾아 stream·image_id·generation·byte_len 대조 → `fstat` 크기 하한 → `mmap(PROT_READ)` → fd close
+    → 표에서 제거 → release 적재. 못 찾거나 어긋나면 이유를 로그로 남기고 null, 항목은 그대로. mmap 의 `OutOfMemory` 는 그대로
+    올린다. 해제 함수 `unmapPixels`(`munmap`).
+  - `sweep(stream, hwm)`: 그 stream 의 hwm 이하 항목 반환. `flush`: release 논블로킹 쓰기(부분 쓰기 남김, 쓰기 오류는 `ChannelLost`).
+  - `dropSegments`(채널 상실 — stream 추적은 남김)·`deinit`(연결 종료).
+- `client.zig`: 필드 `Client.image_segments`(heap 표의 포인터 — 채널을 열기 전에 잡고 묶이지 않으면 푼다. source seal 스키마·seal
+  인코더·projection digest·외부 입양 스냅샷(주소와 지문 `Table.fingerprint` 만)·tombstone·allowlist·deinit 등록). 표를 값으로 두었던
+  첫 판은 Client 를 값으로 든 external pump cleanup scratch 를 1 MiB 예산보다 17 KiB 넘겨 CI 컴파일이 깨졌다 — 표 3,928 B 가 Client
+  하나와 스냅샷 사본 여럿에 실렸다. 지금 scratch 는 1,046,480 B(IC3b-1 전과 같은 여유). 표 할당 실패는 「이미지 채널 없음」(연결은
+  산다). 표는 Client 소유 범위 그래프의 범위 하나다(`externalOwnerRangeCount`·`fillExternalOuterOwnerRanges`·
+  `externalRangeOverlapsClient` — 바깥 상한 8→9, 전체 상한 +1, 고정 scratch 148,624→148,640 B). 공개 메서드 `pumpImageChannel`(공유 울타리 안에서 비우고 release 를 쓴다 — 채널 상실은 「이미지 채널
+  없음」·주 연결 유지, host 위반은 `peer_contract_violation`, fd 고갈은 `local_resource_exhausted` 로 poison. allocator callback
+  안이거나 이미 poison 된 연결이면 읽지 않는다 — 위반 뒤 표는 어긋난 자리에서 멈췄을 수 있다). 선언 ledger 넷, 공개
+  receiver 목록과 울타리 증명에 등록. source seal 고정 digest 를 갱신했다.
+- 채널 리더는 `state == .bound` 와 `fd >= 0` 을 함께 본다. 주 연결이 poison 되면 표의 fd 는 Client 소멸(`finishDeinitGraph`)이 닫는다.
+- 판정자: `zig build test-image-channel-app`(test-macos-only) — `client image segments:` 10 개(실제 socketpair·공유 메모리: fd 하나·
+  CLOEXEC·해석·반환 한 번·나뉜 메시지의 fd·fd 개수 위반 셋과 받은 fd 전부 닫힘·닫힌 stream 즉시 반환과 모르는 stream 보존·해석
+  실패 항목 보존과 hwm 정리·원장 상한·중복 id·EOF·머리 불일치·표를 버리면 fd 가 모두 닫힘·release 쓰기 실패·매핑이 fd 보다 오래
+  삶·더 큰 stream id 를 알면 열리지 않은 stream 의 항목을 반환·가장 최근 stream 도 닫히면 닫힘·채널이 찼을 때 release 가 통째로
+  기다렸다 경계가 맞게 도착·지문이 쓰는 칸마다 움직이고 빈 칸은 무시), `image channel pump:` 5 개(표에 넣기와 다음 펌프의 release·
+  Client 소멸이 표의 fd 를 닫음, 채널 상실은 주 연결 유지, fd 개수 위반은 poison 이고 그 뒤 펌프는 읽지 않음, 외부 입양 스냅샷이 표의
+  생김·바꿔 낌·내용 변화를 잡음, generation 할당·R3 retirement·소유 범위 그래프의 alias 증명이 표를 봄). 모든 칸을 채운 Client 가
+  범위 상한과 같다는 기존 판정자에 표를 더했다. `image channel connect:` 의 묶임·거부 판정자가 표가 묶일 때만 남는 것을 잰다(testing allocator 가
+  누수를 잡는다). seal·projection digest 가 표의 유무·주소·변화(항목·못 보낸 release·덜 받은 메시지의 fd·붙은 stream)를 잡는다(기존
+  seal 판정자에 더함). scratch 예산은 기존 comptime 단언(`client_external_pump.zig`)이 잠근다.
+- 안 한 것: EMFILE 판정자 — 테스트 프로세스의 fd 상한을 내리면 같은 프로세스의 다른 판정자를 흔든다. 코드는 errno 로 가른다.
+  제어 버퍼 잘림(CTRUNC) — 버퍼가 커널 상한(254 fd)을 담아 보낼 수 있는 메시지로는 만들 수 없다. 부분 쓰기의 나머지 이어 쓰기 —
+  release 하나가 반쪽만 들어가는 상태를 소켓 버퍼로 재현하지 못했다(통째로 기다리는 갈래만 쟀다). 픽스처에 operation fence 가 없어
+  「울타리 안에서 poison」의 중첩 shared 는 실행으로 재지 않았다(공유 울타리는 개수만 센다).
+
+##### IC3b-2 — GUI 적용 자리 배선 (미착수)
+
+- 채널이 묶인 적 없는 연결은 `Client.image_segments` 가 null 이다 — 그 연결의 채널 resolver 는 빈 표처럼 「세그먼트 없음」으로 답한다.
+- `pumpImageChannel` 은 공유 울타리만 들고 `ownership`·`io_mode` 를 보지 않는다(IC3b-1). 다른 공개 변경 메서드는
+  `requireBlockingMode` 로 external 모드를 막지만, GUI 의 `RemoteRuntime` 도 external 모드로 돌아 같은 울타리를 쓰면 이 배선이
+  막힌다. 호출 자리를 고를 때 external pump 가 입양한(봉인된) Client 에는 부르지 않음을 함께 정하고 판정자로 잰다.
+- `pumpImageChannel` 을 매 tick 과 `image_ref` 배치 적용 직전에 부른다. attach 응답을 **읽는 순서대로**(호출자로 돌아간 뒤가 아니라)
+  `openStream`, detach·종료 정리와 attach 응답 뒤의 모든 실패 경로에서 채널을 비운 뒤 `closeStream`. 적용 뒤 배치를 놓기 전에 그
+  배치의 hwm 으로 `sweep`.
 - resolver ctx 는 맨 `*Client` 가 아니라 이동하지 않는 adapter·slot 이다(Client 는 generation 노드와 함께 이동한다). ctx 에 그
   attachment 의 `stream_id` 를 함께 싣는다.
 - GUI 적용 자리 셋에 채널 resolver 를 넘긴다: `RemoteAttachment.pumpScreenInternal`(live·catch-up 공용), `RemoteRuntime.attachAndAssemble`,
@@ -125,9 +171,10 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
   OOM 에 `recordDroppedOom` 을 올린다).
 - 「아직 채널을 못 비움」 보류는 `pending_batch_head` 를 넘기고 `accounting.admit` 하기 **전에** 판단한다 — 다음 tick 에 같은 배치를
   다시 셀 때 이중 계상이 없게.
-- 판정자: 버려진 배치가 남긴 세그먼트를 같은 stream 의 다음 배치가 치운다; detach 뒤 늦게 온 세그먼트가 즉시 반환된다; 연결 둘의
-  같은 segment_id 가 섞이지 않는다; 다른 stream 의 세그먼트를 가리키는 `image_ref` 는 해석되지 않고 그 항목은 남는다; 「이미지 채널
-  없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은 종료 상태가 되지 않는다.
+- 판정자: 버려진 배치가 남긴 세그먼트를 같은 stream 의 다음 배치가 치운다; detach 뒤 늦게 온 세그먼트가 즉시 반환된다(표 단위는
+  IC3b-1 이 쟀다 — 여기서는 배선); 연결 둘의 같은 segment_id 가 섞이지 않는다; 다른 stream 의 세그먼트를 가리키는 `image_ref` 는
+  해석되지 않고 그 항목은 남는다(표 단위는 IC3b-1); 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
+  종료 상태가 되지 않는다.
 
 ### IC4 — fd 상속 방지 (미착수)
 

@@ -417,6 +417,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "hasBufferedControllerRevokeForStream", .receiver_type = immutable, .class = .guarded },
         .{ .name = "terminalReasonInvariant", .receiver_type = immutable, .class = .guarded },
         .{ .name = "poison", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "pumpImageChannel", .receiver_type = mutable, .class = .guarded },
         .{ .name = "markDeferredPoisonForTest", .receiver_type = mutable, .class = .guarded },
         .{ .name = "firstPoisonReason", .receiver_type = immutable, .class = .guarded },
         .{ .name = "canTerminalizeSharedConnectionNoDestroy", .receiver_type = mutable, .class = .guarded },
@@ -585,6 +586,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "firstPoisonReason", .funnel = "firstPoisonReason", .gate = "beginPublicMutation" },
         .{ .receiver = "canTerminalizeSharedConnectionNoDestroy", .funnel = "canTerminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
         .{ .receiver = "terminalizeSharedConnectionNoDestroy", .funnel = "terminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
+        .{ .receiver = "pumpImageChannel", .funnel = "pumpImageChannel", .gate = "beginPublicMutation" },
     };
     try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
     const client_path = "src/platform/macos/session_host/client.zig";
@@ -1296,6 +1298,12 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "image_channel" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "negotiateImageChannel" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "FakeImageHost" },
+                // 이미지 채널 세그먼트 표(IC3b, 2026-10-12): 표 모듈 import, Client 의 표 필드, 채널을 비우고 release 를 쓰는
+                // 한 곳, 판정자용 fixture. 표 본체는 `client_image_segments.zig` 에 두어 이 파일의 선언을 넷으로 묶었다.
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_image_segments" },
+                .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "image_segments" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpImageChannel" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ImageChannelPumpFixture" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.

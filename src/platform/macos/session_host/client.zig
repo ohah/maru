@@ -34,6 +34,7 @@ const operation_thread_identity = @import("operation_thread_identity.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_image_channel = @import("client_image_channel.zig");
+const client_image_segments = @import("client_image_segments.zig");
 const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const client_poison = @import("client_poison.zig");
 const screen_inbox = @import("screen_inbox.zig");
@@ -2110,7 +2111,9 @@ pub const max_ended_purge_scratch_bytes: usize = 512 * 1024;
 pub const ended_purge_scratch_bytes_v1: usize = 462_344;
 const max_external_owner_range_count: usize = 4 + 1 +
     protocol.max_client_screen_items + protocol.max_client_screen_items + max_pending_event_count +
-    client_external_mode.max_tx_frames + 4;
+    client_external_mode.max_tx_frames + 4 +
+    // 이미지 채널 세그먼트 표(`image_segments` — heap, Client deinit 이 푼다).
+    1;
 comptime {
     if (max_external_owner_range_count > std.math.maxInt(u16))
         @compileError("external owner range index exceeds u16");
@@ -2274,6 +2277,10 @@ const ExternalAdoptionSnapshot = struct {
     runtime_link_at_v1: bool,
     runtime_clipboard_v1: bool,
     image_channel: client_image_channel.Channel,
+    /// 세그먼트 표는 주소와 지문으로만 든다 — 표(약 4 KiB)를 값으로 들면 스냅샷 사본들이 external pump cleanup scratch 예산을
+    /// 넘긴다.
+    image_segments_address: usize,
+    image_segments_fingerprint: [32]u8,
     connection_profile: ConnectionProfile,
     compatibility_profile: compatibility.Profile,
     ownership: ClientOwnership,
@@ -3374,6 +3381,7 @@ fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usi
     };
     inline for (.{
         @as(usize, @intFromBool(self.build_id != null)),
+        @as(usize, @intFromBool(self.image_segments != null)),
         @as(usize, @intFromBool(self.pending_outbound != null)),
         @as(usize, @intFromBool(self.screen_inbox.partial_batch != null)),
         self.screen_inbox.pending_batches.items.len,
@@ -3387,7 +3395,7 @@ fn externalOwnerRangeCount(self: *const Client) ExternalAdoptionInspectError!usi
 
 const max_external_owner_range_scratch_bytes =
     max_external_owner_range_count * @sizeOf(ExternalRange);
-const max_external_outer_owner_range_count = 8;
+const max_external_outer_owner_range_count = 9;
 
 pub const ExternalSourceOwnerRangeScratch = struct {
     ranges: [max_external_owner_range_count]ExternalRange = undefined,
@@ -3437,6 +3445,8 @@ fn fillExternalOuterOwnerRanges(
         },
     };
     for (fixed) |range| try appendExternalRange(ranges, &used, range);
+    if (self.image_segments) |segments|
+        try appendExternalRange(ranges, &used, externalRangeOfValue(segments));
     if (used > ranges.len) return error.InvalidClientState;
     return used;
 }
@@ -3861,6 +3871,27 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.image_channel.fd >= 0);
         if (client.image_channel.fd >= 0) writer.writeI32(encoding.fd(client.image_channel.fd));
         writer.writeTag(@intFromEnum(client.image_channel.state));
+        // 받은 세그먼트 fd 의 표(이미지 채널 §6) — fd 는 위와 같이 정규화하고, 덜 받은 메시지·못 보낸 release·stream 추적까지 덮는다.
+        writer.writeBool(client.image_segments != null);
+        if (client.image_segments) |segments| {
+            writer.writeU64(segments.len);
+            for (segments.entriesSlice()) |entry| {
+                writer.writeI32(encoding.fd(entry.fd));
+                writer.writeU64(entry.segment.segment_id);
+                writer.writeU64(entry.segment.stream_id);
+                writer.writeU32(entry.segment.image_id);
+                writer.writeU64(entry.segment.generation);
+                writer.writeU32(entry.segment.byte_len);
+            }
+            writer.writeU64(segments.rx_len);
+            try writer.writeBytes(segments.rx[0..segments.rx_len]);
+            writer.writeBool(segments.rx_fd >= 0);
+            if (segments.rx_fd >= 0) writer.writeI32(encoding.fd(segments.rx_fd));
+            try writer.writeBytes(segments.tx[0..segments.tx_len]);
+            writer.writeU64(segments.live_len);
+            for (segments.liveStreams()) |stream| writer.writeU64(stream);
+            writer.writeU64(segments.max_known_stream);
+        }
         writer.writeTag(@intFromEnum(client.connection_profile.?));
         try writeSourceCompatibilityProfile(&writer, client.compatibility_profile.?);
         writer.writeU64(client.attach_instance_id);
@@ -5722,6 +5753,8 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .runtime_link_at_v1 = self.runtime_link_at_v1,
         .runtime_clipboard_v1 = self.runtime_clipboard_v1,
         .image_channel = self.image_channel,
+        .image_segments_address = if (self.image_segments) |segments| @intFromPtr(segments) else 0,
+        .image_segments_fingerprint = if (self.image_segments) |segments| segments.fingerprint() else @splat(0),
         .connection_profile = self.connection_profile.?,
         .compatibility_profile = self.compatibility_profile.?,
         .ownership = self.ownership,
@@ -5897,6 +5930,8 @@ fn externalRangeOverlapsClient(
     };
     for (fixed) |range| if (range) |present|
         if (externalRangesOverlap(target, present)) return true;
+    if (self.image_segments) |segments|
+        if (externalRangesOverlap(target, externalRangeOfValue(segments))) return true;
     if (self.screen_inbox.partial_batch) |partial|
         if (try externalRangeForSlice(partial.bytes.items, partial.bytes.capacity)) |range|
             if (externalRangesOverlap(target, range)) return true;
@@ -7019,6 +7054,10 @@ pub const Client = struct {
     /// 이 연결의 이미지 채널 끝(fd)과 상태(이미지 채널 §3.1·§6). 이동은 구조체째 옮기고 남은 자리는 기본값(fd -1)으로 다시
     /// 만든다. 필드가 늘면 source seal·projection digest 의 손 나열도 늘려야 한다(seal 판정자가 필드 수를 잠근다).
     image_channel: client_image_channel.Channel = .{},
+    /// 이미지 채널로 받은 세그먼트 fd 의 표(이미지 채널 §6). 채널이 묶일 때 heap 에 잡고 Client 소멸이 푼다 — 채널이 한 번이라도
+    /// 묶였으면 null 이 아니다. 표(약 4 KiB)를 값으로 들면 Client 를 값으로 든 external pump cleanup scratch 가 1 MiB 예산을
+    /// 넘는다. 채널 끝과 따로 둔다 — 채널 값 안에 넣으면 seal·digest 의 손 나열이 빠뜨린다. 이동은 포인터째다.
+    image_segments: ?*client_image_segments.Table = null,
 
     const PendingOutbound = struct {
         frame: []u8,
@@ -7340,8 +7379,20 @@ pub const Client = struct {
         const token = offer.token orelse return;
         // abandon 몫을 남길 수 없으면 채널을 열지 않는다. token 은 host 의 만료로 풀린다.
         const bind_deadline = client_image_channel.bindDeadline(deadline) orelse return;
+        // 표는 채널을 열기 전에 잡는다 — 묶인 뒤에 못 잡으면 받은 fd 를 둘 곳이 없다. 여기서 잡은 표는 묶이지 않으면 바로 푼다.
+        // 못 잡으면 채널을 열지 않는다(「이미지 채널 없음」 — 연결 실패로 올리지 않는다). token 은 host 의 만료로 풀린다.
+        const fresh_table = self.image_segments == null;
+        const table = self.image_segments orelse table: {
+            const created = self.allocator.create(client_image_segments.Table) catch return;
+            created.* = .{};
+            break :table created;
+        };
+        var bound = false;
+        defer if (fresh_table and !bound) self.allocator.destroy(table);
         if (client_image_channel.open(self.allocator, ops, socket_path, token, self.wire_major, bind_deadline)) |fd| {
             self.image_channel = .{ .fd = fd, .state = .bound };
+            self.image_segments = table;
+            bound = true;
             return;
         } else |err| switch (err) {
             // 거부 — host 가 응답하고 있다. 아래에서 abandon 을 응답까지 읽어 token 을 바로 돌려준다.
@@ -7367,6 +7418,35 @@ pub const Client = struct {
             return error.HandshakeFailed;
         // 성공한 왕복이다 — 남기지 않으면 첫 RPC 전의 EOF 진단이 abandon 을 「진행 중」으로 센다.
         self.last_success_request_id = request_id;
+    }
+
+    /// 이미지 채널을 논블로킹으로 비우고 쌓인 release 를 쓴다(이미지 채널 §6 — 매 tick 과 `image_ref` 배치를 적용하기 직전).
+    /// 채널 상실은 「이미지 채널 없음」으로 내리고 주 연결은 그대로 둔다(§3.2). host 의 「메시지당 fd 하나」·미반환 상한
+    /// 위반과 앱 fd 고갈은 연결을 poison 한다 — fd 를 잃었을 수 있어 그 연결의 이미지 상태를 더 믿을 수 없다.
+    pub fn pumpImageChannel(self: *Client) void {
+        const operation_fence_held = self.beginPublicMutation() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
+        // allocator callback 안에서는 wire 를 만지지 않는다(모든 public 진입점의 규칙). 이미 poison 된 연결은 표가 어긋난 자리에서
+        // 멈췄을 수 있다 — 다시 읽지 않는다(표는 Client 소멸이 닫는다).
+        if (checkedAllocatorReentry(self) or self.unusable) return;
+        if (self.image_channel.state != .bound or self.image_channel.fd < 0) return;
+        // 묶인 채널에는 늘 표가 있다(`negotiateImageChannel` 이 먼저 잡는다).
+        const segments = self.image_segments orelse return;
+        const lost = lost: {
+            segments.drain(self.image_channel.fd) catch |err| switch (err) {
+                error.ChannelLost => break :lost true,
+                // 공유 울타리는 겹쳐 잡힌다(개수만 센다) — poison 이 자기 울타리를 다시 잡아도 된다. 표의 fd 는 Client 소멸이 닫는다.
+                error.PeerContractViolation => return self.poison(.peer_contract_violation),
+                error.LocalResourceExhausted => return self.poison(.local_resource_exhausted),
+            };
+            segments.flush(self.image_channel.fd) catch break :lost true;
+            break :lost false;
+        };
+        if (!lost) return;
+        // 채널 상실 — host 는 채널 EOF 로 원장을 전부 반환하므로 표의 fd 와 못 보낸 release 를 함께 버린다.
+        self.image_channel.deinit();
+        self.image_channel.state = .unavailable;
+        segments.dropSegments();
     }
 
     fn deinitHandshakeAttempt(self: *Client, ops: client_deadline.Ops) void {
@@ -7601,6 +7681,11 @@ pub const Client = struct {
     fn finishDeinitGraph(self: *Client) void {
         if (self.fd >= 0) _ = c.close(self.fd);
         self.image_channel.deinit();
+        if (self.image_segments) |segments| {
+            segments.deinit();
+            self.allocator.destroy(segments);
+            self.image_segments = null;
+        }
         if (self.build_id) |build_id| self.allocator.free(build_id);
         if (self.lifecycle.len != 0) self.allocator.free(self.lifecycle);
         self.clearPendingOutbound();
@@ -8006,6 +8091,12 @@ pub const Client = struct {
         writer.writeUsize(@intFromPtr(self.allocator.vtable));
         writer.writeU64(@bitCast(@as(i64, self.fd)));
         writer.writeU64(@bitCast(@as(i64, self.image_channel.fd)));
+        writer.writeUsize(if (self.image_segments) |segments| @intFromPtr(segments) else 0);
+        if (self.image_segments) |segments| {
+            writer.writeUsize(segments.len);
+            for (segments.entriesSlice()) |entry| writer.writeU64(@bitCast(@as(i64, entry.fd)));
+            writer.writeU64(@bitCast(@as(i64, segments.rx_fd)));
+        }
         writer.writeU128(self.host_id);
         writer.writeUsize(if (self.build_id) |bytes|
             if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr)
@@ -13487,6 +13578,7 @@ pub const Client = struct {
         self.fd = -1;
         // 주 fd 와 같은 격리 규칙 — 무결성이 깨진 그래프의 자원은 닫지 않고 놓는다. 상태도 내려 「묶였는데 fd 없음」이 남지 않게.
         self.image_channel = .{ .state = if (self.image_channel.state == .not_negotiated) .not_negotiated else .unavailable };
+        self.image_segments = null;
         self.build_id = null;
         self.lifecycle = &.{};
         self.pending_outbound = null;
@@ -16169,6 +16261,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "generation_allocator_scope_epoch",
     "active_generation_allocator_scope",
     "image_channel",
+    "image_segments",
 };
 comptime {
     @setEvalBranchQuota(2_000);
@@ -24090,6 +24183,8 @@ test "external adoption owner alias validation stays n log n at every queue cap"
     client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     client.build_id = try allocator.dupe(u8, "build");
     client.lifecycle = try allocator.dupe(u8, "running");
+    client.image_segments = try allocator.create(client_image_segments.Table);
+    client.image_segments.?.* = .{};
     try client.parser.buf.append(allocator, 0);
     client.screen_inbox.partial_batch = .{
         .stream_id = 7,
@@ -24180,7 +24275,7 @@ test "external adoption owner alias validation stays n log n at every queue cap"
             (source_stats.outer_ranges + source_stats.total_ranges) * 64,
     );
     try std.testing.expectEqual(
-        @as(usize, 148_624),
+        @as(usize, 148_640),
         max_external_owner_range_scratch_bytes,
     );
     var ended_scratch: EndedPurgeScratch = .{};
@@ -24310,9 +24405,10 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         .canonical_test,
     );
     // 2026-10-11: 이미지 채널(fd·상태)과 runtime hook format capability를 함께 seal에 넣는다.
+    // 2026-10-12: 세그먼트 표(유무·항목·덜 받은 메시지·못 보낸 release·stream 추적)가 들어가 다시 바뀌었다(이미지 채널 IC3b).
     const frozen_canonical_digest =
-        "\x3c\xf9\x31\x66\x64\x48\x2a\x8c\x1f\x3d\xb3\x6a\xe0\x66\x08\x12" ++
-        "\xc6\x9f\x0e\x3d\x15\x8b\x76\x2d\x43\x51\x4b\x3d\x5e\x53\xd5\xb7";
+        "\x7e\xd4\x81\x8f\xb6\x67\xfb\x53\x93\xcf\x48\x34\xbd\x11\x69\xa5" ++
+        "\x9c\x26\xe9\x0a\xad\xfb\x5a\x78\x24\x10\xfb\x02\x9d\xf4\x0b\xee";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -24420,6 +24516,32 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.image_channel.fd = fds[1];
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.image_channel.fd = -1;
+    // 세그먼트 표도 덮는다 — 표가 생기기만 해도, 붙은 stream 하나만 달라져도 맞지 않는다.
+    comptime std.debug.assert(std.meta.fields(client_image_segments.Table).len == 10);
+    var segments: client_image_segments.Table = .{};
+    client.image_segments = &segments;
+    // 스택 표다 — 판정이 중간에 실패해도 deinit 이 heap 으로 풀지 않게.
+    defer client.image_segments = null;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    const seal_with_table = try encodeExternalSourceForTest(&client, 7, &scratch);
+    try std.testing.expect(externalSourceSealMatches(&client, 7, seal_with_table, &scratch));
+    try segments.openStream(9);
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal_with_table, &scratch));
+    segments = .{};
+    segments.rx_fd = fds[1];
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal_with_table, &scratch));
+    segments.rx_fd = -1;
+    // 항목 하나·못 보낸 release 바이트도 덮는다.
+    segments.entries[0] = .{ .segment = .{ .segment_id = 3, .stream_id = 1, .image_id = 2, .generation = 4, .byte_len = 5 }, .fd = -1 };
+    segments.len = 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal_with_table, &scratch));
+    segments = .{};
+    segments.tx[0] = 'M';
+    segments.tx_len = 1;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal_with_table, &scratch));
+    segments = .{};
+    try std.testing.expect(externalSourceSealMatches(&client, 7, seal_with_table, &scratch));
+    client.image_segments = null;
     client.host_id ^= 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.host_id ^= 1;
@@ -25288,6 +25410,28 @@ test "client poison reason participates in projection authority and terminal inv
     const with_channel = client.clientProjectionAuthorityDigest();
     client.image_channel.fd = -1;
     try std.testing.expect(!std.mem.eql(u8, &changed_reason, &with_channel));
+    // 세그먼트 표(heap)와 그 표가 쥔 fd(덜 받은 메시지의 fd 포함)도 deinit 이 푼다.
+    var segments: client_image_segments.Table = .{};
+    client.image_segments = &segments;
+    // 스택 표다 — 판정이 중간에 실패해도 deinit 이 heap 으로 풀지 않게.
+    defer client.image_segments = null;
+    const with_table = client.clientProjectionAuthorityDigest();
+    try std.testing.expect(!std.mem.eql(u8, &changed_reason, &with_table));
+    // 내용이 같은 다른 표로 바뀌어도 달라진다 — deinit 이 푸는 것은 그 주소다.
+    var other: client_image_segments.Table = .{};
+    client.image_segments = &other;
+    const with_other = client.clientProjectionAuthorityDigest();
+    client.image_segments = &segments;
+    try std.testing.expect(!std.mem.eql(u8, &with_table, &with_other));
+    segments.rx_fd = 1_000_001;
+    const with_segment = client.clientProjectionAuthorityDigest();
+    segments.rx_fd = -1;
+    try std.testing.expect(!std.mem.eql(u8, &with_table, &with_segment));
+    segments.entries[0].fd = 1_000_002;
+    segments.len = 1;
+    const with_entry = client.clientProjectionAuthorityDigest();
+    segments = .{};
+    try std.testing.expect(!std.mem.eql(u8, &with_table, &with_entry));
 }
 
 test "external transfer normalize quarantine latches typed reason on production branch" {
@@ -26697,6 +26841,188 @@ const FakeImageHost = struct {
     }
 };
 
+/// 이미지 채널이 묶인 Client 하나(주 연결과 채널 모두 socketpair). host 쪽 끝은 테스트가 직접 쓴다.
+const ImageChannelPumpFixture = struct {
+    client: Client,
+    main_host: c.fd_t,
+    channel_host: c.fd_t,
+    client_live: bool = true,
+
+    fn init() !ImageChannelPumpFixture {
+        var main: [2]c.fd_t = undefined;
+        if (c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &main) != 0) return error.TestUnexpectedResult;
+        var channel: [2]c.fd_t = undefined;
+        if (c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &channel) != 0) return error.TestUnexpectedResult;
+        for (channel) |fd| {
+            const one: c_int = 1;
+            _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, std.mem.asBytes(&one), @sizeOf(c_int));
+        }
+        // host 끝도 논블로킹 — release 가 안 오는 결함에서 판정자가 멈추지 않고 실패하게.
+        for (channel) |fd| _ = c.fcntl(fd, c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+        var client: Client = .{
+            .allocator = std.testing.allocator,
+            .fd = main[0],
+            .host_id = 1,
+            .wire_major = protocol.version_major,
+            .parser = framing.FrameParser.init(std.testing.allocator),
+        };
+        client.image_channel = .{ .fd = channel[0], .state = .bound };
+        // 묶인 채널에는 늘 표가 있다 — `negotiateImageChannel` 처럼 heap 에 잡는다(Client 소멸이 푼다).
+        const segments = try std.testing.allocator.create(client_image_segments.Table);
+        segments.* = .{};
+        client.image_segments = segments;
+        return .{ .client = client, .main_host = main[1], .channel_host = channel[1] };
+    }
+
+    fn deinit(self: *ImageChannelPumpFixture) void {
+        if (self.client_live) self.client.deinit();
+        _ = c.close(self.main_host);
+        if (self.channel_host >= 0) _ = c.close(self.channel_host);
+    }
+
+    /// 세그먼트 메시지를 fd 개수만큼의 공유 메모리 fd 와 함께 보낸다.
+    fn sendSegment(self: *ImageChannelPumpFixture, segment_id: u64, stream_id: u64, fd_count: usize) !void {
+        const image_segment = @import("image_segment.zig");
+        const wire = @import("image_channel_wire.zig");
+        const pixels = [_]u8{ 1, 2, 3, 4 };
+        var fds: [2]c.fd_t = undefined;
+        for (fds[0..fd_count]) |*fd| fd.* = (try image_segment.create(&pixels)).?.fd;
+        defer for (fds[0..fd_count]) |fd| {
+            _ = c.close(fd);
+        };
+        const bytes = try wire.encodeSegment(.{ .segment_id = segment_id, .stream_id = stream_id, .image_id = 3, .generation = 4, .byte_len = pixels.len });
+        var control: [32]u8 align(@alignOf(c.cmsghdr)) = @splat(0);
+        const data_len = fd_count * @sizeOf(c.fd_t);
+        const header: c.cmsghdr = .{ .len = @intCast(@sizeOf(c.cmsghdr) + data_len), .level = c.SOL.SOCKET, .type = c.SCM.RIGHTS };
+        @memcpy(control[0..@sizeOf(c.cmsghdr)], std.mem.asBytes(&header));
+        @memcpy(control[@sizeOf(c.cmsghdr)..][0..data_len], std.mem.sliceAsBytes(fds[0..fd_count]));
+        var iov = [_]posix.iovec_const{.{ .base = &bytes, .len = bytes.len }};
+        const msg: c.msghdr_const = .{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = if (fd_count != 0) &control else null,
+            .controllen = if (fd_count != 0) @intCast(std.mem.alignForward(usize, @sizeOf(c.cmsghdr) + data_len, @sizeOf(u32))) else 0,
+            .flags = 0,
+        };
+        if (c.sendmsg(self.channel_host, &msg, 0) != bytes.len) return error.TestUnexpectedResult;
+    }
+};
+
+test "image channel pump: every owned-backing alias proof sees the segment table" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    const segments = fx.client.image_segments.?;
+    const table = externalRangeOfValue(segments);
+    // 표의 마지막 바이트 하나만 겹쳐도 alias 다(generation 할당·R3 retirement 범위·소유 범위 그래프).
+    const last: [*]u8 = @ptrFromInt(table.start + table.len - 1);
+    try testing.expect(generationAllocationAliasesOwnedBacking(&fx.client, last, 1));
+    try testing.expect(fx.client.retirementRangeAliasesOwnedBacking(table.start + table.len - 1, 1));
+    const with_table = try externalOwnerRangeCount(&fx.client);
+    try testing.expectError(error.InvalidAlias, validateExternalOwnerRangesAgainst(&fx.client, .{ .start = table.start, .len = 1 }));
+
+    // 표가 없으면 같은 바이트는 Client 의 것이 아니다 — 위 판정이 표 때문에 참이었음을 보인다.
+    fx.client.image_segments = null;
+    defer fx.client.image_segments = segments;
+    try testing.expect(!generationAllocationAliasesOwnedBacking(&fx.client, last, 1));
+    try testing.expect(!fx.client.retirementRangeAliasesOwnedBacking(table.start + table.len - 1, 1));
+    try testing.expectEqual(with_table - 1, try externalOwnerRangeCount(&fx.client));
+    _ = try validateExternalOwnerRangesAgainst(&fx.client, .{ .start = table.start, .len = 1 });
+}
+
+test "image channel pump: the external adoption snapshot sees the segment table by address and by content" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+    defer _ = c.close(fds[1]);
+    var client = makeConnectedTestClient(std.testing.allocator, fds[0]);
+    defer client.deinit();
+    try client.enterExternalMode();
+    client.ownership = .external_pump;
+    client.connection_profile = .cli_attach;
+    client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    const without = externalAdoptionSnapshot(&client);
+    var segments: client_image_segments.Table = .{};
+    client.image_segments = &segments;
+    // 스택 표다 — 판정이 중간에 실패해도 deinit 이 heap 으로 풀지 않게.
+    defer client.image_segments = null;
+    const with_table = externalAdoptionSnapshot(&client);
+    try std.testing.expect(!std.meta.eql(without, with_table));
+    try std.testing.expect(std.meta.eql(with_table, externalAdoptionSnapshot(&client)));
+    // 내용이 같은 다른 표로 바뀌어도 달라진다(주소).
+    var other: client_image_segments.Table = .{};
+    client.image_segments = &other;
+    try std.testing.expect(!std.meta.eql(with_table, externalAdoptionSnapshot(&client)));
+    client.image_segments = &segments;
+    // 표는 값으로 들지 않지만(scratch 예산) 내용이 바뀌면 스냅샷이 달라진다.
+    try segments.openStream(3);
+    try std.testing.expect(!std.meta.eql(with_table, externalAdoptionSnapshot(&client)));
+}
+
+test "image channel pump: segments land in the client's table and a returned one goes back as a release on the next pump" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    try fx.client.image_segments.?.openStream(1);
+    try fx.sendSegment(7, 1, 1);
+    fx.client.pumpImageChannel();
+    try std.testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
+    fx.client.image_segments.?.sweep(1, 7);
+    fx.client.pumpImageChannel();
+    var buf: [64]u8 = undefined;
+    const n = c.read(fx.channel_host, &buf, buf.len);
+    try std.testing.expectEqual(@as(isize, @import("image_channel_wire.zig").release_len), n);
+    try std.testing.expectEqual(@as(u64, 7), try @import("image_channel_wire.zig").decodeRelease(buf[0..@intCast(n)]));
+    try std.testing.expectEqual(client_image_channel.State.bound, fx.client.image_channel.state);
+    try std.testing.expect(fx.client.firstPoisonReason() == null);
+    // 표에 남은 세그먼트 fd 는 Client 소멸이 닫는다(덜 받은 메시지의 fd 는 표 판정자가 잰다).
+    try fx.sendSegment(8, 1, 1);
+    fx.client.pumpImageChannel();
+    const held = fx.client.image_segments.?.entriesSlice()[0].fd;
+    try std.testing.expect(c.fcntl(held, c.F.GETFD) != -1);
+    fx.client.deinit();
+    fx.client_live = false;
+    try std.testing.expectEqual(@as(c_int, -1), c.fcntl(held, c.F.GETFD));
+}
+
+test "image channel pump: a lost channel drops to no image channel and keeps the main connection" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    try fx.client.image_segments.?.openStream(1);
+    try fx.sendSegment(7, 1, 1);
+    _ = c.close(fx.channel_host);
+    fx.channel_host = -1;
+    fx.client.pumpImageChannel();
+    try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
+    try std.testing.expectEqual(@as(c.fd_t, -1), fx.client.image_channel.fd);
+    try std.testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.outstanding());
+    try std.testing.expect(fx.client.fd >= 0);
+    try std.testing.expect(fx.client.firstPoisonReason() == null);
+    // 다시 불러도 아무 일도 없다.
+    fx.client.pumpImageChannel();
+    try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
+}
+
+test "image channel pump: a segment without exactly one fd poisons the connection as a host contract violation" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]usize{ 0, 2 }) |fd_count| {
+        var fx = try ImageChannelPumpFixture.init();
+        defer fx.deinit();
+        try fx.client.image_segments.?.openStream(1);
+        try fx.sendSegment(7, 1, fd_count);
+        fx.client.pumpImageChannel();
+        try std.testing.expectEqual(client_poison.ConnectionReason.peer_contract_violation, fx.client.firstPoisonReason().?);
+        try std.testing.expectEqual(@as(c.fd_t, -1), fx.client.fd);
+        // poison 된 연결은 표가 어긋난 자리에서 멈췄을 수 있다 — 펌프가 다시 읽지 않는다.
+        try fx.sendSegment(8, 1, 1);
+        fx.client.pumpImageChannel();
+        try std.testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
+    }
+}
+
 test "image channel connect: 묶이면 채널 fd 를 쥐고 host 가 닫은 채널에 쓰면 프로세스가 아니라 EPIPE 다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     for ([_]bool{ true, false }) |deadline_path| {
@@ -26712,6 +27038,8 @@ test "image channel connect: 묶이면 채널 fd 를 쥐고 host 가 닫은 채�
         client_open = true;
         try testing.expect(host.saw_image_shm);
         try testing.expectEqual(client_image_channel.State.bound, client.image_channel.state);
+        // 묶인 채널에는 표가 있다 — 펌프가 받은 fd 를 둘 곳(Client 소멸이 푼다).
+        try testing.expect(client.image_segments != null);
         const fd = client.image_channel.fd;
         try testing.expect(fd >= 0);
         // SO_NOSIGPIPE 는 옵션을 직접 잰다 — 테스트 러너가 SIGPIPE 를 무시하므로 아래 EPIPE 만으로는 옵션이 빠져도 초록이다.
@@ -26763,6 +27091,8 @@ test "image channel connect: 채널이 거부되면 abandon 을 응답까지 읽
         client_open = true;
         try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
         try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
+        // 채널을 열기 전에 잡은 표는 묶이지 않았으니 바로 풀렸다.
+        try testing.expectEqual(@as(?*client_image_segments.Table, null), client.image_segments);
         // abandon 응답이 parser 에도 소켓에도 남아 있지 않다 — 첫 요청이 남의 응답을 받지 않는다.
         try testing.expectEqual(@as(usize, 0), client.parser.bufferedBytes());
         var peek: [1]u8 = undefined;

@@ -1471,8 +1471,12 @@ fn hookCacheBase(a: std.mem.Allocator) ?[]const u8 {
 }
 
 fn agentHookLogDir(a: std.mem.Allocator) ?[:0]const u8 {
+    return agentHookLogDirForProfile(a, .v1);
+}
+
+fn agentHookLogDirForProfile(a: std.mem.Allocator, profile: maru.session.agent_log_profile.Profile) ?[:0]const u8 {
     const base = hookCacheBase(a) orelse return null;
-    return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ base, maru.session.agent_hook_command.log_dir_rel }, 0) catch null;
+    return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ base, maru.session.agent_log_profile.localCacheSubdir(profile) }, 0) catch null;
 }
 
 /// 원격 훅 로그 디렉터리(`<home>/.cache/maru/remote-agent-events`) — 커맨드 하나에 두 자리가 박히므로(RA8) 로컬 설치기도
@@ -1506,7 +1510,11 @@ pub fn hookInstanceToken(buf: *[maru.session.agent_hook_command.instance_token_m
 /// 이 인스턴스의 훅 로그 칸(`<로그 디렉터리>/<인스턴스>`). 훅이 파일을 만드는 자리이자, 우리가 읽고
 /// 종료할 때 지우는 자리다.
 fn agentHookInstanceDir(a: std.mem.Allocator) ?[:0]const u8 {
-    const dir = agentHookLogDir(a) orelse return null;
+    return agentHookInstanceDirForProfile(a, .v1);
+}
+
+fn agentHookInstanceDirForProfile(a: std.mem.Allocator, profile: maru.session.agent_log_profile.Profile) ?[:0]const u8 {
+    const dir = agentHookLogDirForProfile(a, profile) orelse return null;
     var token_buf: [maru.session.agent_hook_command.instance_token_max]u8 = undefined;
     return std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, hookInstanceToken(&token_buf) }, 0) catch null;
 }
@@ -3731,14 +3739,14 @@ pub fn agentHookLogPath(a: std.mem.Allocator, term: *Term) ?[]const u8 {
         const pane = hook_command.formatRuntimePane(&pane_buf, owned.runtime_id);
         return std.fmt.allocPrint(a, "{s}/{s}/{s}/{s}.ndjson", .{
             base,
-            hook_command.log_dir_rel,
+            maru.session.agent_log_profile.localCacheSubdir(term.agent_hook_log_profile),
             inst,
             pane,
         }) catch null;
     }
     // **인스턴스 칸을 지난다** — 훅이 쓰는 이름과 같아야 한다(계약 §4). 이 둘이 갈리면 그 Term 은 자기
     // 이벤트를 못 읽고, 같은 숫자를 가진 **다른 인스턴스**의 이벤트를 읽는다.
-    const dir = agentHookInstanceDir(a) orelse return null;
+    const dir = agentHookInstanceDirForProfile(a, term.agent_hook_log_profile) orelse return null;
     var pane_buf: [hook_command.pane_token_max]u8 = undefined;
     const pane = hook_command.formatSurfacePane(&pane_buf, term.surfaceId());
     return std.fmt.allocPrint(a, "{s}/{s}.ndjson", .{ dir, pane }) catch null;

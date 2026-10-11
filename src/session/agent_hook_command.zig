@@ -17,6 +17,7 @@
 const std = @import("std");
 const event = @import("agent_hook_event.zig");
 const attribution = @import("codex_daemon_attribution.zig");
+pub const log_profile = @import("agent_log_profile.zig");
 
 /// 커맨드 끝에 붙는 표식. **우리 항목을 고르는 유일한 근거**다(파일이 없으므로 파일명 매칭이 불가능하다).
 ///
@@ -48,7 +49,7 @@ pub const timeout_seconds: u32 = 2;
 /// 이벤트 로그가 사는 자리(`sessionCacheBase()` 아래 상대 경로). platform 이 **미리 만들고**(0700) 그
 /// 절대 경로를 `build` 에 넘긴다 — 커맨드는 디렉터리를 만들지 않는다(훅이 하는 일이 적을수록 턴이 빨리 끝나고,
 /// `mkdir` 이 실패하는 경우를 훅 안에서 처리할 방법도 없다).
-pub const log_dir_rel = "agent-turn-events";
+pub const log_dir_rel = log_profile.localCacheSubdir(.v1);
 
 /// 원격 훅이 이벤트를 적는 자리(원격 **홈 기준** 상대 경로). RA3 의 훅 커맨드와 RA5 의 스트리머가 **같은
 /// 값을 봐야 한다** — 갈리면 훅은 도는데 스트리머가 빈 디렉터리를 tail 하고, 증상은 «이벤트가 영영 0» 이라
@@ -57,14 +58,14 @@ pub const log_dir_rel = "agent-turn-events";
 /// **로컬(`log_dir_rel`)과 자리를 나눈다.** 원격은 pane 칸이 `LC_MARU_PANE`(인스턴스+pane 을 합친 nonce)
 /// 하나뿐이라 디렉터리가 평평하고, 로컬처럼 인스턴스 하위 디렉터리를 두지 않는다. 같은 디렉터리를 쓰면
 /// 같은 기계에 로컬 maru 도 돌 때 두 이름 규칙이 한 디렉터리에서 섞인다.
-pub const remote_log_dir_rel = ".cache/maru/remote-agent-events";
+pub const remote_log_dir_rel = log_profile.homeRelative(.remote, .v1);
 
 /// 로컬 훅 로그의 **홈 기준** 자리(`<home>/.cache/maru/agent-turn-events`) — RA8 부터 `XDG_CACHE_HOME` 을 **보지
 /// 않는다**([계획](../../docs/plans/remote-agent-state.md) RA8 설계 2, 사용자 결정 2026-09-21). 이유: 커맨드에 이
 /// 절대경로가 박히는데, 로컬 앱(GUI env)과 원격 CLI(sshd env)가 그것을 각자 계산한다. XDG 를 보면 두 env 에서
 /// 값이 갈릴 수 있고 그러면 바이트가 달라 두 설치기가 서로를 덮는다(핑퐁). HOME 만 보면 같은 사용자면 같다.
 /// 원격 자리(`remote_log_dir_rel`)는 원래 그랬다. 다른 캐시는 그대로 XDG 를 본다 — 훅 로그만이다.
-pub const local_log_dir_rel = ".cache/maru/" ++ log_dir_rel;
+pub const local_log_dir_rel = log_profile.homeRelative(.local, .v1);
 
 /// 로컬 훅 로그 base(`<home>/.cache/maru`) — GUI·session host·원격 CLI 가 **이 하나**로 계산한다. `cache_path.maruBaseAlloc`
 /// 과 달리 XDG 를 안 본다(위 `local_log_dir_rel`). `home` 이 비면 null.
@@ -513,7 +514,7 @@ pub fn build(
     local_log_dir_abs: []const u8,
     remote_log_dir_abs: []const u8,
 ) error{ OutOfMemory, InvalidProvider }!void {
-    return buildImpl(out, allocator, provider, local_log_dir_abs, remote_log_dir_abs, null);
+    return buildImpl(out, allocator, provider, local_log_dir_abs, remote_log_dir_abs, null, null);
 }
 
 /// Prepared native command; installers keep using build until reader migration is complete.
@@ -528,7 +529,25 @@ pub fn buildNative(
 ) !void {
     if (executable.len == 0 or executable[0] != '/') return error.InvalidExecutable;
     for (executable) |c| if (c == 0 or c == '\n' or c == '\r') return error.InvalidExecutable;
-    return buildImpl(out, allocator, provider, local_log_dir_abs, remote_log_dir_abs, executable);
+    return buildImpl(out, allocator, provider, local_log_dir_abs, remote_log_dir_abs, executable, null);
+}
+
+/// Prepared rollout: existing processes default to legacy; only pinned v2 uses
+/// the native binary and separate directories. No provider config is modified here.
+pub const TransitionDirectories = struct { local: []const u8, remote: []const u8 };
+pub fn buildTransition(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, provider: []const u8, legacy_local: []const u8, legacy_remote: []const u8, native_dirs: TransitionDirectories, executable: []const u8) !void {
+    if (executable.len == 0 or executable[0] != '/') return error.InvalidExecutable;
+    for (executable) |byte| if (byte == 0 or byte == '\n' or byte == '\r') return error.InvalidExecutable;
+    if (!log_profile.disjoint(.{ legacy_local, legacy_remote, native_dirs.local, native_dirs.remote })) return error.OverlappingLogDirectories;
+    return buildImpl(out, allocator, provider, legacy_local, legacy_remote, executable, native_dirs);
+}
+
+fn appendTransitionRoot(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, legacy: []const u8, native: []const u8, env: []const u8) !void {
+    try out.print(allocator, "mh_log_format=\"${{{s}-1}}\"; case \"$mh_log_format\" in 1) mh_log_root=", .{env});
+    try appendQuoted(out, allocator, legacy);
+    try out.appendSlice(allocator, ";; 2) mh_log_root=");
+    try appendQuoted(out, allocator, native);
+    try out.appendSlice(allocator, ";; *) exit 0 ;; esac; mh_o=\"$mh_log_root\"");
 }
 
 fn buildImpl(
@@ -538,6 +557,7 @@ fn buildImpl(
     local_log_dir_abs: []const u8,
     remote_log_dir_abs: []const u8,
     executable: ?[]const u8,
+    transition: ?TransitionDirectories,
 ) error{ OutOfMemory, InvalidProvider }!void {
     // **provider 이름을 검증한다.** 이 값은 줄 앞에 그대로 적히므로 탭이나 개행이 들어오면 **모든 줄이
     // 깨진다**(구분자가 둘이 되거나 줄이 둘로 갈린다). 파서와 같은 규칙을 쓴다 — 두 곳이 기준이 다르면
@@ -584,8 +604,12 @@ fn buildImpl(
         instance_env, comptime instance_token_class.shellClass(),
     });
     // 경로는 `<로컬 로그 디렉터리>/<인스턴스>/<pane>.ndjson` 이다 — 따옴표 밖에서 확장해야 값이 들어간다. 옆 파일은 없다.
-    try out.appendSlice(allocator, "mh_o=");
-    try appendQuoted(out, allocator, local_log_dir_abs);
+    if (transition) |dirs| {
+        try appendTransitionRoot(out, allocator, local_log_dir_abs, dirs.local, log_profile.local_env);
+    } else {
+        try out.appendSlice(allocator, "mh_o=");
+        try appendQuoted(out, allocator, local_log_dir_abs);
+    }
     try out.print(allocator, "\"/${s}/${s}.ndjson\"; mh_c=\"\"; else ", .{ instance_env, pane_env });
     // **원격 분기는 칸이 하나다.** 합쳐진 값이므로 두 클래스의 합집합(`instance_token_class` 가 `pane_token_class` 를
     // 덮는 상위집합)으로 검증한다. 지키는 성질은 로컬과 같다: `/` 와 `.` 가 없어 경로를 벗어나지 못한다.
@@ -621,11 +645,16 @@ fn buildImpl(
     // tmux 좌표를 남긴다(RA6): 훅이 B 의 이벤트를 A 의 파일에 적을 때 진짜 주인은 `pane → session → client` 역조회로만
     // 되찾을 수 있고, 그러려면 **어느 서버의 어느 pane 이었는지** 가 남아 있어야 한다. 줄에 칸을 더하지 않는 이유는
     // `<provider>\t<payload>` 형식이 원격에서만 달라지면 §4 의 「파서를 나누지 않는다」가 깨지기 때문이다.
-    try out.appendSlice(allocator, "mh_o=");
-    try appendQuoted(out, allocator, remote_log_dir_abs);
-    try out.appendSlice(allocator, "\"/$mh_n$mh_t.ndjson\"; mh_c=");
-    try appendQuoted(out, allocator, remote_log_dir_abs);
-    try out.print(allocator, "\"/$mh_n$mh_t{s}\"; fi; ", .{tmux_sidecar_suffix});
+    if (transition) |dirs| {
+        try appendTransitionRoot(out, allocator, remote_log_dir_abs, dirs.remote, log_profile.remote_env);
+        try out.print(allocator, "\"/$mh_n$mh_t.ndjson\"; mh_c=\"${{mh_o%.ndjson}}{s}\"; fi; ", .{tmux_sidecar_suffix});
+    } else {
+        try out.appendSlice(allocator, "mh_o=");
+        try appendQuoted(out, allocator, remote_log_dir_abs);
+        try out.appendSlice(allocator, "\"/$mh_n$mh_t.ndjson\"; mh_c=");
+        try appendQuoted(out, allocator, remote_log_dir_abs);
+        try out.print(allocator, "\"/$mh_n$mh_t{s}\"; fi; ", .{tmux_sidecar_suffix});
+    }
     // Preserve ownership as well as event kind. An oversized SubagentStop without agent_id
     // cannot retire its worker, and an oversized lead Stop without turn/session IDs cannot
     // be checked against delayed events. Bulk prose is expendable; root identity is not.
@@ -693,7 +722,11 @@ fn buildImpl(
     }
     // 옆 파일은 `>` 로 **덮어쓴다** — 이 값은 기록이 아니라 «지금 어디인가» 이고, append 하면 상한 없이 자란다.
     // tmux 밖이면 두 변수가 비어 이 파일이 빈 채로 남고, 순수 층이 그것을 `direct` 로 접는다.
-    if (executable) |binary| {
+    if (transition != null) {
+        try out.print(allocator, "{{ if [ \"$mh_log_format\" = 2 ]; then printf '{s}\\t%s\\n' \"$mh_p\" | ", .{provider});
+        try appendQuoted(out, allocator, executable.?);
+        try out.print(allocator, " agent-hooks record \"--file=$mh_o\" || :; else printf '{s}\\t%s\\n' \"$mh_p\" >> \"$mh_o\" || :; fi; ", .{provider});
+    } else if (executable) |binary| {
         try out.print(allocator, "{{ printf '{s}\\t%s\\n' \"$mh_p\" | ", .{provider});
         try appendQuoted(out, allocator, binary);
         // || : is essential for provider shells launched with -e; exit 0 alone is too late.

@@ -339,3 +339,29 @@ stat 이후 append fixture로 검사한다.
 없어도 다음 tick의 동일 세대 EOF snapshot에서 회전만 다시 시도한다. 이벤트 재생과
 턴 캡처를 반복하지 않는다. 실제 AppSession에 난수 실패를 주입한 뒤 입력을 추가하지
 않고 회전 재시도와 원본 보존을 검사한다.
+
+## 4c단계 훅 format 선택과 이름공간 분리
+
+기본 설치 전환은 세 부분으로 나눈다. 먼저 프로세스에 고정된 format과 분리된
+이름공간을 생성기/reader에 연결한다. 다음에 기록 바이너리의 수명·provision과
+provider 신뢰 갱신을 검증한다. 마지막에 새 runtime의 env와 재접속 metadata를
+연결하고 실제 provider 전환을 검사한 뒤 기본 활성화한다. 이미 살아 있는 runtime의
+format을 설정 파일 변경만으로 바꾸지 않는다.
+
+첫 부분의 준비된 이행 커맨드는 local context에서 `MARU_AGENT_LOG_FORMAT`, remote
+context에서 `LC_MARU_LOG_FORMAT`을 읽는다. 미지정은 v1, 정확한 `1`/`2`만 허용한다.
+빈 값·미지 버전·형식 오류는 stdin을 끝까지 비운 뒤 기록 없이 exit 0이며 v1로
+내리지 않는다. local identity가 있으면 remote format은 사용하지 않는다.
+
+v1은 기존 디렉터리와 셸 append를 사용한다. v2는 local
+`.cache/maru/agent-turn-events-v2`, remote `.cache/maru/remote-agent-events-v2`를
+사용하고 절대 binary의 native record만 호출한다. 생성기의 네 디렉터리는 canonical
+absolute path이며 서로 동일하거나 조상/자손이면 거부한다. 실제 native I/O의
+nofollow/UID/권한 인증은 계속 별도로 적용한다. 임의 path alias의 물리적 동일성을
+순수 문자열 검증이 증명한다고 주장하지 않는다.
+
+reader는 선택한 profile의 이름공간만 읽는다. 구형 로그를 변환하거나 지우지 않는다.
+오래 전에 생성한 v1 커맨드가 늦게 실행돼도 v2 header와 native 회전에 닿지 않는지,
+서로 다른 scope의 format·불명확한 값·binary 부재·quote와 stdin drain·실패 종료
+계약을 합성 HOME의 실제 프로세스로 검사한다. 이 준비 단계는 provider 설정을
+자동 전환하거나 기존 runtime env를 변경하지 않는다.

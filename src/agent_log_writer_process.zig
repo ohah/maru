@@ -12,6 +12,19 @@ pub fn main(init: std.process.Init) !void {
     const dir = try std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(init.io);
     const out = std.Io.File.stdout();
+    if (std.mem.eql(u8, mode, "hook-transition")) {
+        const binary = args.next() orelse return error.InvalidArguments;
+        const provider = args.next() orelse return error.InvalidArguments;
+        const local = args.next() orelse return error.InvalidArguments;
+        const remote = args.next() orelse return error.InvalidArguments;
+        const native_local = args.next() orelse return error.InvalidArguments;
+        const native_remote = args.next() orelse return error.InvalidArguments;
+        var generated: std.ArrayListUnmanaged(u8) = .empty;
+        defer generated.deinit(init.gpa);
+        try @import("session/agent_hook_command.zig").buildTransition(&generated, init.gpa, provider, local, remote, .{ .local = native_local, .remote = native_remote }, binary);
+        try out.writeStreamingAll(init.io, generated.items);
+        return;
+    }
     if (std.mem.eql(u8, mode, "hook") or std.mem.eql(u8, mode, "hook-legacy")) {
         const binary = args.next() orelse return error.InvalidArguments;
         const provider = args.next() orelse "claude";

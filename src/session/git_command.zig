@@ -561,7 +561,7 @@ pub const env_overrides = [_]EnvOverride{
 /// envp 에 같은 이름이 둘이면 git 의 getenv 는 앞 것을 읽고, 상속한 `GIT_ALLOW_PROTOCOL=file` 은 문을 연다 — 실측).
 ///
 /// **신뢰한 저장소에는 싣지 않는다** — 늘 막으면 정상 partial clone 사용자의 커밋 펼침·목록이 실패한다(WT6a 적대적 검증 —
-/// 그래서 신뢰에 따라 가른다). 원격(SSH) 저장소는 늘 싣는다(원격은 늘 신뢰 전 — 2026-10-09 사용자 결정).
+/// 그래서 신뢰에 따라 가른다). 원격(SSH) 저장소도 신뢰에 따라 가른다(계획 workspace-trust WT7b — 키는 목적지와 원격 실제 경로).
 pub const untrusted_env_overrides = [_]EnvOverride{
     .{ .name = "GIT_NO_LAZY_FETCH", .value = "1" },
     .{ .name = "GIT_ALLOW_PROTOCOL", .value = "" },
@@ -715,7 +715,7 @@ pub fn buildRemote(
     buf: *[max_argv][]const u8,
     cmd_buf: []u8,
 ) ?[]const []const u8 {
-    return buildRemoteWithConfig(local_argv, remote, null, null, buf, cmd_buf);
+    return buildRemoteWithConfig(local_argv, remote, null, null, true, buf, cmd_buf);
 }
 
 /// `buildRemote` + **원격 임시 index**(AT3c 턴 스냅샷). 로컬은 `GIT_INDEX_FILE` 을 자식 env 로 거는데
@@ -728,13 +728,16 @@ pub fn buildRemoteWithIndex(
     buf: *[max_argv][]const u8,
     cmd_buf: []u8,
 ) ?[]const []const u8 {
-    return buildRemoteWithConfig(local_argv, remote, index_file, null, buf, cmd_buf);
+    return buildRemoteWithConfig(local_argv, remote, index_file, null, true, buf, cmd_buf);
 }
 
 /// `buildRemoteWithIndex` + **신뢰 전 필터 덮어쓰기**(계획 workspace-trust WT6b-1b) — `GIT_CONFIG_COUNT`/`KEY_n`/`VALUE_n` 을 다른
 /// env 와 같은 자리에 싣는다. `config` 가 null 이 아니면 비어도 `GIT_CONFIG_COUNT=0` 을 싣는다 — 원격 셸이 물려준 `GIT_CONFIG_*` 를
 /// 조회와 필터 읽기가 똑같이 버리게(적대적 검증 WT6b-1b-ii 1회차). 드라이버 이름·전역 값엔 `'`·공백이 들 수 있어 `K=V` 를 통째로 `quoteAppend` 로 인용한다. 명령 상한을
 /// 넘으면 null — 호출자는 그 읽기를 하지 않는다(끄지 못한 필터가 원격에서 도는 일이 없게).
+///
+/// `untrusted` 면 신뢰 전 env(`untrusted_env_overrides` — 지연 가져오기·전송 금지)도 싣는다. 신뢰한 원격 저장소의 읽기만 끈다(계획
+/// workspace-trust WT7b — 판정은 읽기 워커의 `read_untrusted`); `buildRemote`·`buildRemoteWithIndex` 는 늘 싣는다(닫힌 쪽).
 fn appendEnvToken(cmd_buf: []u8, at: usize, token: []const u8) ?usize {
     if (at >= cmd_buf.len) return null;
     cmd_buf[at] = ' ';
@@ -746,6 +749,7 @@ pub fn buildRemoteWithConfig(
     remote: Remote,
     index_file: ?[]const u8,
     config_or_null: ?[]const ConfigPair,
+    untrusted: bool,
     buf: *[max_argv][]const u8,
     cmd_buf: []u8,
 ) ?[]const []const u8 {
@@ -756,8 +760,9 @@ pub fn buildRemoteWithConfig(
     // **POSIX sh 를 한 겹 씌운다**(근거는 `remote_path_script` 주석) — 로그인 셸은 인용된 토큰만 본다.
     n = remote_shell.appendShPrologue(cmd_buf, n, remote_path_script) orelse return null;
     n = quoteAppend(cmd_buf, n, "env") orelse return null;
-    // **원격은 늘 신뢰 전이다**(계획 workspace-trust WT6b-1a) — 신뢰 전 env(지연 가져오기 금지)도 늘 싣는다.
-    for ([_][]const EnvOverride{ &env_overrides, &untrusted_env_overrides }) |list| for (list) |override| {
+    // 신뢰 전이면 신뢰 전 env(지연 가져오기 금지)도 싣는다 — 원격은 신뢰한 저장소만 뺀다(계획 workspace-trust WT7b).
+    const lists: []const []const EnvOverride = if (untrusted) &.{ &env_overrides, &untrusted_env_overrides } else &.{&env_overrides};
+    for (lists) |list| for (list) |override| {
         if (!remoteTokenIsSafe(override.name) or !remoteTokenIsSafe(override.value)) return null;
         // `K=V` 를 **한 토큰으로** 인용한다 — 셸이 인용을 벗기면 env(1) 가 그대로 한 인자로 받는다.
         if (n >= cmd_buf.len) return null;
@@ -876,6 +881,17 @@ pub fn buildRemoteFileRead(
     n += 1;
     n = quoteAppend(cmd_buf, n, abs_path) orelse return null;
     return remoteArgv(remote, buf, cmd_buf[0..n]);
+}
+
+/// 원격 홈의 **실제 경로**를 묻는 명령(계획 workspace-trust WT7b) — 원격 `$HOME` 자체·그 위의 저장소는 신뢰를 묻지 않는다(WT2b 와
+/// 같은 거절). 저장소 루트(`rev-parse --show-toplevel`)는 심링크를 푼 경로라 홈도 `pwd -P` 로 푼다 — 홈이 심링크(`/home → /usr/home`)
+/// 인 기계에서 문자열이 갈려 홈 저장소를 물었다. git 으로는 못 묻는다(`~` 를 풀어 주는 자리는 있어도 심링크를 풀지 않는다).
+/// 스크립트는 고정 글자이고 사용자 값이 안 실린다.
+pub const remote_home_script = "cd && pwd -P";
+
+pub fn buildRemoteHome(remote: Remote, buf: *[max_argv][]const u8, cmd_buf: []u8) ?[]const []const u8 {
+    const n = remote_shell.appendShPrologue(cmd_buf, 0, remote_home_script) orelse return null;
+    return remoteArgv(remote, buf, cmd_buf[0 .. n - 1]); // 접두 끝의 공백은 뒤에 이을 인자가 없어 되돌린다
 }
 
 pub fn build(kind: Kind, git_exe: []const u8, repo: []const u8, arg: ?[]const u8, buf: *[max_argv][]const u8) []const []const u8 {
@@ -2065,7 +2081,38 @@ test "tree_exists: tree 들을 각각의 인자로 싣고 상한을 넘기지 �
     try std.testing.expectEqualStrings("a8", argv9[argv9.len - 1]);
 }
 
-test "WT6b-1a 원격 읽기는 늘 신뢰 전 env(지연 가져오기 금지)를 싣는다 — 원격은 늘 신뢰 전 (계획 workspace-trust)" {
+test "WT7b 신뢰한 원격 저장소의 읽기만 신뢰 전 env 를 뺀다 — 늘 싣는 덮어쓰기는 그대로, 두 감싸개는 늘 싣는다 (계획 workspace-trust)" {
+    var buf: [max_argv][]const u8 = undefined;
+    const local = build(.status, "/usr/bin/git", "/repo", null, &buf);
+    const remote: Remote = .{ .dest = "host", .control_path = "/tmp/ctl" };
+    var rb: [max_argv][]const u8 = undefined;
+    var cb: [max_remote_command_bytes]u8 = undefined;
+    const trusted = buildRemoteWithConfig(local, remote, null, null, false, &rb, &cb) orelse return error.RemoteBuildFailed;
+    const cmd = trusted[trusted.len - 1];
+    for (untrusted_env_overrides) |o| try testing.expect(std.mem.indexOf(u8, cmd, o.name) == null);
+    for (env_overrides) |o| try testing.expect(std.mem.indexOf(u8, cmd, o.name) != null);
+    var rb2: [max_argv][]const u8 = undefined;
+    var cb2: [max_remote_command_bytes]u8 = undefined;
+    const untrusted = buildRemoteWithConfig(local, remote, null, null, true, &rb2, &cb2) orelse return error.RemoteBuildFailed;
+    for (untrusted_env_overrides) |o| try testing.expect(std.mem.indexOf(u8, untrusted[untrusted.len - 1], o.name) != null);
+    var rb3: [max_argv][]const u8 = undefined;
+    var cb3: [max_remote_command_bytes]u8 = undefined;
+    const indexed = buildRemoteWithIndex(local, remote, "/tmp/i.idx", &rb3, &cb3) orelse return error.RemoteBuildFailed;
+    for (untrusted_env_overrides) |o| try testing.expect(std.mem.indexOf(u8, indexed[indexed.len - 1], o.name) != null);
+}
+
+test "WT7b 원격 홈은 심링크를 푼 경로로 묻는다 — 고정 스크립트 하나, 인자 없음, 같은 ssh 전송 (계획 workspace-trust)" {
+    var rb: [max_argv][]const u8 = undefined;
+    var cb: [max_remote_command_bytes]u8 = undefined;
+    const argv = buildRemoteHome(.{ .dest = "me@box", .control_path = "/tmp/ctl" }, &rb, &cb) orelse return error.RemoteBuildFailed;
+    try testing.expectEqual(remote_shell.ssh_argv_len, argv.len);
+    try testing.expectEqualStrings("me@box", argv[6]);
+    try testing.expectEqualStrings("'sh' '-c' 'cd && pwd -P' 'sh'", argv[7]);
+    // 전송 검증은 같은 자리(`sshArgv`)다 — `-` 로 시작하는 목적지는 만들지 않는다.
+    try testing.expect(buildRemoteHome(.{ .dest = "-oProxyCommand=x", .control_path = "/tmp/ctl" }, &rb, &cb) == null);
+}
+
+test "WT6b-1a 원격 읽기 감싸개(buildRemote)는 늘 신뢰 전 env(지연 가져오기 금지)를 싣는다 — 신뢰한 원격만 따로 뺀다(WT7b) (계획 workspace-trust)" {
     var buf: [max_argv][]const u8 = undefined;
     const local = build(.status, "/usr/bin/git", "/repo", null, &buf);
     var remote_buf: [max_argv][]const u8 = undefined;
@@ -2135,11 +2182,11 @@ test "WT6b-1b 원격 명령은 필터 덮어쓰기를 env 토큰으로 싣고 �
     };
     var b2: [max_argv][]const u8 = undefined;
     var cmd: [max_remote_command_bytes]u8 = undefined;
-    const argv = buildRemoteWithConfig(local, remote, null, &config, &b2, &cmd) orelse return error.RemoteBuildFailed;
+    const argv = buildRemoteWithConfig(local, remote, null, &config, true, &b2, &cmd) orelse return error.RemoteBuildFailed;
     // 덮어쓰기가 비어도(드라이버 없음) 필터 읽기는 `COUNT=0` 을 싣는다 — 원격 셸이 물려준 `GIT_CONFIG_*` 를 조회와 똑같이 버린다.
     var b3: [max_argv][]const u8 = undefined;
     var cmd3: [max_remote_command_bytes]u8 = undefined;
-    const empty_argv = buildRemoteWithConfig(local, remote, null, &.{}, &b3, &cmd3) orelse return error.RemoteBuildFailed;
+    const empty_argv = buildRemoteWithConfig(local, remote, null, &.{}, true, &b3, &cmd3) orelse return error.RemoteBuildFailed;
     try testing.expect(std.mem.indexOf(u8, empty_argv[empty_argv.len - 1], "'GIT_CONFIG_COUNT=0'") != null);
     var b4: [max_argv][]const u8 = undefined;
     var cmd4: [max_remote_command_bytes]u8 = undefined;
@@ -2153,11 +2200,11 @@ test "WT6b-1b 원격 명령은 필터 덮어쓰기를 env 토큰으로 싣고 �
     // env 토큰은 git 앞이다.
     try testing.expect(std.mem.indexOf(u8, c, "GIT_CONFIG_VALUE_1").? < std.mem.indexOf(u8, c, "'status'").?);
     const bad = [_]ConfigPair{.{ .key = "filter.x.clean", .value = "a\nb" }};
-    try testing.expect(buildRemoteWithConfig(local, remote, null, &bad, &b2, &cmd) == null);
+    try testing.expect(buildRemoteWithConfig(local, remote, null, &bad, true, &b2, &cmd) == null);
     var many: [max_filter_drivers * 4]ConfigPair = undefined;
     const long_value = "v" ** 200;
     for (&many) |*p| p.* = .{ .key = "filter.some-long-driver-name.process", .value = long_value };
-    try testing.expect(buildRemoteWithConfig(local, remote, null, &many, &b2, &cmd) == null);
+    try testing.expect(buildRemoteWithConfig(local, remote, null, &many, true, &b2, &cmd) == null);
     try testing.expectEqual(ConfigEnvName.count, configEnvName("GIT_CONFIG_COUNT").?);
     try testing.expectEqual(@as(usize, 3), configEnvName("GIT_CONFIG_KEY_3").?.entry);
     try testing.expectEqual(@as(usize, 12), configEnvName("GIT_CONFIG_VALUE_12").?.entry);

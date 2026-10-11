@@ -2174,7 +2174,7 @@ help는 기존 인자 순서로 판정한다: 중복 전에 help가 오면 안�
 - **선다(이어서)**: **codex 도 자동으로 깐다**(§11.5 정정). 훅과 함께 **신뢰 항목까지** 그 기계의
   `maru` 가 쓴다 — 로컬 설치기와 같은 순수 판정이다. 원격 세션에는 승인 TUI 를 볼 사람이 없으므로
   그것을 사용자에게 미루면 훅이 영영 안 도는 것과 같다.
-- **선다(2026-09-21, AT3c) — 지금은 멈춤**: 원격은 늘 신뢰 전이고 신뢰 전에는 턴 스냅샷을 찍지 않는다([workspace-trust](plans/workspace-trust.md) WT6b-1a, [턴 변경분 §8-15](agent-turn-changes.md)). 아래는 원격 신뢰([workspace-trust](plans/workspace-trust.md) WT7)가 생기면 다시 서는 배선이다. **턴 스냅샷·`✎` 귀속도 원격에서 선다.** 원격 세트는 로컬과 **같다**
+- **선다(2026-09-21, AT3c) — 지금은 멈춤**: 신뢰 전에는 턴 스냅샷을 찍지 않고, 원격은 신뢰해도 아직 찍지 않는다([workspace-trust](plans/workspace-trust.md) WT6b-1a·WT7b, [턴 변경분 §8-15](agent-turn-changes.md)). 아래는 신뢰한 원격 쓰기와 함께([workspace-trust](plans/workspace-trust.md) WT7c) 다시 서는 배선이다. **턴 스냅샷·`✎` 귀속도 원격에서 선다.** 원격 세트는 로컬과 **같다**
   (`remote_excluded` 가 비었다 — `PreToolUse(*)`·`PostToolUse(Bash)`·`PostToolUseFailure(Bash)` 포함). 도착한
   프레임은 로컬 배치 루프와 같은 `TurnBatch` 로 봉인·스냅샷을 청하고, 스냅샷은 **그 Term 의 기계에서**
   (`GIT_INDEX_FILE` 을 명령 문자열의 env 로, 임시 index 는 원격 `/tmp`) 찍는다. 다만 그림자 사본은 원격에서

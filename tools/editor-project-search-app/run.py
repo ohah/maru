@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--physical-ime", action="store_true")
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--replace-batch", action="store_true")
+    parser.add_argument("--replace-batch-save-retry", action="store_true")
     parser.add_argument("--batch-open-files", type=int, default=2)
     parser.add_argument("--replace-preview", action="store_true")
     parser.add_argument("--replace-apply", action="store_true")
@@ -43,6 +44,8 @@ def main():
     args = parser.parse_args()
     if not 2 <= args.batch_open_files <= 64:
         parser.error("Batch open-file measurement is bounded to 2..64")
+    if args.replace_batch_save_retry:
+        args.replace_batch = True
     if args.replace_batch:
         args.replace_apply = True
         if args.disk_files != 2:
@@ -165,6 +168,7 @@ def main():
         MARU_NATIVE_EDITOR=str(document), MARU_FT_WINDOW_SIZE=args.window_size, MARU_EDITOR_PROJECT_SEARCH_SCALE=str(args.render_scale), MARU_EDITOR_PROJECT_SEARCH_MATRIX="1" if args.matrix else "0", MARU_EDITOR_PROJECT_REPLACE_PREVIEW="1" if args.replace_preview else "0", MARU_EDITOR_PROJECT_REPLACE_APPLY="1" if args.replace_apply else "0", MARU_EDITOR_PROJECT_REPLACE_DISK_APPLY="1" if args.replace_disk_apply else "0", MARU_EDITOR_PROJECT_REPLACE_IME_REFUSE="1" if args.replace_ime_refuse else "0", MARU_EDITOR_PROJECT_REPLACE_MARKERS="1" if args.conflict_markers else "0", MARU_EDITOR_PROJECT_SEARCH_TINY="1" if args.narrow_hidden else "0", MARU_EDITOR_PROJECT_SEARCH_OTHER_ROOT=str(other), MARU_EDITOR_PROJECT_SEARCH_CAPTURE="1",
         MARU_EDITOR_PROJECT_SEARCH_OUTPUT=str(artifacts), MARU_EDITOR_PROJECT_SEARCH_DISK_FILES=str(args.disk_files), MARU_EDITOR_PROJECT_SEARCH_UNICODE="1" if args.unicode_field else "0", MARU_EDITOR_PROJECT_SEARCH_PHYSICAL="1" if args.physical_ime else "0", MARU_EDITOR_PROJECT_SEARCH_MODEL_MATCHES=str(args.count), MARU_EDITOR_PROJECT_SEARCH_EXPECTED=str(1 if args.unicode_field or args.physical_ime else args.count + args.disk_files), MARU_APP_SUMMARY_PATH=str(root / "summary.txt"))
     env["MARU_EDITOR_PROJECT_BATCH_OPEN_FILES"] = str(args.batch_open_files)
+    env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
     env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
     if args.physical_ime:
         main = root / "main.swift"
@@ -204,8 +208,10 @@ def main():
             if hid_log is not None:
                 hid_log.close()
     transcript = (root / "app.log").read_text()
+    # 재시도 시나리오는 치환된 본문을 저장한 채 종료한다. 기대값은 Plan 대신 fixture 원문에서 계산한다.
+    expected_bytes = lambda data: data.replace(b"sample", b"renamed") if args.replace_batch_save_retry else data
     if (code != 0 or "EDITOR_PROJECT_SEARCH_FINISH passed=true" not in transcript or
-        any(peer.read_bytes() != peer_original for peer in peers) or document.read_bytes() != original or any(p.read_bytes() != data for p, data in disk_originals.items())):
+        any(peer.read_bytes() != expected_bytes(peer_original) for peer in peers) or document.read_bytes() != expected_bytes(original) or any(p.read_bytes() != expected_bytes(data) for p, data in disk_originals.items())):
         raise RuntimeError("Product verification failed; inspect app.log")
     expected = ("before", "query", "results", "query-selection", "navigated", "bottom-scrolled", "cancelled")
     if args.disk_files:
@@ -220,8 +226,12 @@ def main():
         expected += ("replace-verifying", "replace-ime-conflict")
     elif args.replace_apply:
         expected += ("replace-applied-saved", "replace-undo", "replace-undo-saved")
+    if args.replace_batch_save_retry:
+        expected += ("right-save-failed", "bottom-save-failed", "bottom-retry-saved", "right-retry-saved")
     if args.replace_batch:
-        expected += ("batch-results", "right-batch-preview", "bottom-batch-preview", "bottom-batch-saved", "right-batch-saved", "batch-undo", "batch-undo-saved")
+        expected += ("batch-results", "right-batch-preview", "bottom-batch-preview")
+        if not args.replace_batch_save_retry:
+            expected += ("bottom-batch-saved", "right-batch-saved", "batch-undo", "batch-undo-saved")
     if args.matrix:
         expected += ("shared", "independent", "zero-override", "root-changed", "stale-release")
     for label in expected:
@@ -243,7 +253,7 @@ def main():
         raise RuntimeError("Missing actual batch timing evidence")
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
-        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(Path(__file__).parent / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

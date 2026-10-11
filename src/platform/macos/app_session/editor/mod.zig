@@ -61413,6 +61413,56 @@ test "RPBU3 저장 실패의 문서와 Undo 및 뒤 파일 저장 결과를 UI�
         if (std.mem.endsWith(u8, target.absolute, "batch-a.txt")) try testing.expectEqual(editor.search.batch.Outcome.save_failed, target.outcome);
         if (std.mem.endsWith(u8, target.absolute, "batch-b.txt")) try testing.expectEqual(editor.search.batch.Outcome.saved, target.outcome);
     }
+    var failed_index: usize = 0;
+    for (batch.ready.?.specification.targets.items, 0..) |target, index| {
+        if (target.outcome == .save_failed) failed_index = index;
+    }
+    const operation = batch.result.operation;
+    try testing.expect(d.batch_ui.canRetrySave(fx.session, failed_index));
+    // 외부 충돌을 무시해 저장하거나 치환을 다시 적용하면 이 검증이 실패한다.
+    try testing.expectError(error.ExternalConflict, d.batch_ui.retrySave(fx.session, failed_index));
+    try batchApplyDisk(&fx, "batch-a.txt", "external");
+    try testing.expectEqual(@as(usize, 1), batch.result.save_failed);
+    fx.session.ime_active = true;
+    try testing.expect(!d.batch_ui.canRetrySave(fx.session, failed_index));
+    try testing.expectError(error.InputTransactionPending, d.batch_ui.retrySave(fx.session, failed_index));
+    fx.session.ime_active = false;
+    fx.session.ime_editor_commit_pending = true;
+    try testing.expectError(error.InputTransactionPending, d.batch_ui.retrySave(fx.session, failed_index));
+    fx.session.ime_editor_commit_pending = false;
+    // 같은 문서의 다른 분할 뷰에 남은 조합도 저장 트랜잭션을 막아야 한다.
+    _ = fx.session.activateExistingFileTerm(a);
+    const composing_peer = try pane_ops.splitSharedEditorPane(fx.session, .horizontal, false);
+    composing_peer.rt.editor_preedit = try testing.allocator.dupe(u8, "가");
+    composing_peer.rt.editor_preedit_at = 0;
+    composing_peer.rt.editor_preedit_end = 1;
+    try testing.expect(!d.batch_ui.canRetrySave(fx.session, failed_index));
+    try testing.expectError(error.InputTransactionPending, d.batch_ui.retrySave(fx.session, failed_index));
+    testing.allocator.free(composing_peer.rt.editor_preedit);
+    composing_peer.rt.editor_preedit = &.{};
+    linkedFixtureClose(&fx, composing_peer);
+    a.rt.editorDocument().opened.?.file.read_only = true;
+    try testing.expectError(error.ReadOnly, d.batch_ui.retrySave(fx.session, failed_index));
+    a.rt.editorDocument().opened.?.file.read_only = false;
+    _ = fx.session.activateExistingFileTerm(a);
+    a.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, a, "!"));
+    const current_body = try testing.allocator.dupe(u8, a.rt.editorDocument().opened.?.file.content);
+    defer testing.allocator.free(current_body);
+    const undo_len = a.rt.editorDocument().history.undo_len;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "foo A" });
+    try d.batch_ui.retrySave(fx.session, failed_index);
+    try batchApplyDisk(&fx, "batch-a.txt", current_body);
+    try testing.expect(!isDirty(a));
+    try testing.expectEqual(undo_len, a.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(operation, batch.result.operation);
+    try testing.expectEqual(@as(usize, 3), batch.result.saved);
+    try testing.expectEqual(@as(usize, 0), batch.result.save_failed);
+    try testing.expect(batch.ready.?.specification.targets.items[failed_index].save_failure == null);
+    try testing.expect(!d.batch_ui.canRetrySave(fx.session, failed_index));
+    try testing.expectError(error.StaleRequest, d.batch_ui.retrySave(fx.session, failed_index));
+    linkedFixtureClose(&fx, a);
+    try testing.expectError(error.StaleDocument, d.batch_ui.retrySave(fx.session, failed_index));
 }
 
 test "RPBU4 변경 없음 단일 유효 편집과 disk 전용 검색의 적용 범위를 구분한다" {

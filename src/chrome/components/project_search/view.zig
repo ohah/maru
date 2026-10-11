@@ -10,7 +10,7 @@ const icons = @import("../../../icons.zig");
 const spacing = @import("../../ui/spacing.zig");
 pub const Buffers = struct { ops: []draw.Op, runs: []draw.Run };
 pub fn bufferSizes(row_count: usize, entry_count: usize) struct { ops: usize, runs: usize } {
-    const runs = row_count +| 17;
+    const runs = row_count *| 2 +| 17;
     return .{ .ops = entry_count +| runs +| 6, .runs = runs };
 }
 pub fn view(p: types.Props, f: build.Frame, state: interaction.InteractionState, tokens: *const tk.Tokens, b: Buffers) !draw.ChromeDraw {
@@ -38,7 +38,10 @@ pub fn view(p: types.Props, f: build.Frame, state: interaction.InteractionState,
     for (labels, 0..) |label, index| try text(p, f, build.optionId(index), label, .surface_fg, &count, &runs, b);
     try text(p, f, 7, p.scopes, .muted_fg, &count, &runs, b);
     try text(p, f, 8, p.status, .muted_fg, &count, &runs, b);
-    for (p.rows) |row| try text(p, f, build.rowId(row.index), row.label, .surface_fg, &count, &runs, b);
+    for (p.rows) |row| {
+        try text(p, f, build.rowId(row.index), row.label, .surface_fg, &count, &runs, b);
+        if (row.retry_label) |label| try text(p, f, build.retryId(row.index), label, .surface_fg, &count, &runs, b);
+    }
     const carets = p.carets ++ [1]?f32{p.replacement_caret};
     for (carets, 0..) |caret, index| if (caret) |x| {
         const entry = f.tree.entries[f.tree.find(build.fieldId(index)) orelse continue];

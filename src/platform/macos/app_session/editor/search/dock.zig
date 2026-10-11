@@ -589,6 +589,13 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             run(self);
         },
         .cancel => cancel(self),
+        .retry_save => |index| {
+            batch_ui.retrySave(self, index) catch |err| switch (err) {
+                // 이름/원격 저장은 기존 경로가 이미 안내한다. 늦은 클릭·조합은 저장 실패로 표시하지 않는다.
+                error.AskName, error.Handled, error.InputTransactionPending, error.StaleRequest, error.StaleDocument => {},
+                else => self.showNoticeKey(if (err == error.ExternalConflict) .editor_save_external_conflict else .app_save_failed),
+            };
+        },
         .row => |index| {
             if (st.batch.active()) {
                 batch_ui.openResult(self, index);

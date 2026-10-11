@@ -13,10 +13,13 @@ pub fn optionId(index: usize) u64 {
 pub fn rowId(index: usize) u64 {
     return 100 + index;
 }
+pub fn retryId(index: usize) u64 {
+    return 0x4000000000000000 + index;
+}
 pub const Buffers = struct { nodes: []tree.UiNode, entries: []tree.RectEntry, items: []layout.Item, flex: []layout.FlexScratch, rects: []layout.UiRect, actions: []ids.Entry };
 pub const Frame = struct { tree: tree.UiRectTree, actions: []const ids.Entry, metrics: types.Metrics };
 pub fn size(rows: usize) usize {
-    return rows +| 43;
+    return rows *| 3 +| 43;
 }
 pub fn build(p: types.Props, b: Buffers) !Frame {
     if (!std.math.isFinite(p.viewport.width) or p.viewport.width < 0 or p.viewport.width >= 4294967296.0) return error.InvalidGeometry;
@@ -89,13 +92,32 @@ pub fn build(p: types.Props, b: Buffers) !Frame {
     header[tail + 1] = tree.card(.{ .id = 8, .style = .{ .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } }, .paint = .{ .opacity = 0, .shadow = .none }, .semantics = .{ .role = .text, .label = p.status } }, &.{});
     const rows = b.nodes[n..][0..p.rows.len];
     n += rows.len;
-    for (rows, p.rows) |*node, row| node.* = tree.card(.{
-        .id = rowId(row.index),
-        .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } },
-        .action = if (row.enabled) try table.append(p.generation, .{ .row = row.index }, true) else null,
-        .paint = .{ .background = if (row.file) .tab_active_bg else if (row.kind == .added) .diff_added_bg else if (row.kind == .removed) .diff_removed_bg else .surface_bg, .shadow = .none, .opacity = if (row.kind == .normal) 255 else 46 },
-        .semantics = .{ .role = .list_item, .label = row.label, .enabled = row.enabled, .expanded = if (row.file) row.expanded else null },
-    }, &.{});
+    for (rows, p.rows) |*node, row| {
+        node.* = tree.card(.{
+            .id = rowId(row.index),
+            .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } },
+            .action = if (row.enabled) try table.append(p.generation, .{ .row = row.index }, true) else null,
+            .paint = .{ .background = if (row.file) .tab_active_bg else if (row.kind == .added) .diff_added_bg else if (row.kind == .removed) .diff_removed_bg else .surface_bg, .shadow = .none, .opacity = if (row.kind == .normal) 255 else 46 },
+            .semantics = .{ .role = .list_item, .label = row.label, .enabled = row.enabled, .expanded = if (row.file) row.expanded else null },
+        }, &.{});
+        if (row.retry_label) |label| {
+            // 파일 열기와 재시도는 서로 다른 면·동작으로 발행해 클릭과 접근성 판정을 일치시킨다.
+            const children = b.nodes[n..][0..2];
+            n += 2;
+            children[0] = node.*;
+            children[0].style.width = .auto;
+            children[0].style.flex = .{ .grow = 1, .shrink = 1 };
+            children[1] = tree.button(.{
+                .id = retryId(row.index),
+                .variant = .ghost,
+                .style = .{ .width = .{ .px = @min(p.viewport.width * 0.6, @as(f32, @floatFromInt(m.row * 4))) }, .height = .{ .percent = 1 }, .flex = .{ .shrink = 0 } },
+                .action = try table.append(p.generation, .{ .retry_save = row.index }, row.enabled and row.retry_enabled),
+                .paint = .{ .shadow = .none },
+                .semantics = .{ .role = .button, .label = row.retry_semantic_label orelse label, .enabled = row.enabled and row.retry_enabled },
+            });
+            node.* = tree.container(.{ .id = 0x2000000000000000 + row.index, .direction = .row, .style = .{ .width = .{ .percent = 1 }, .height = .{ .px = @floatFromInt(m.row) }, .flex = .{ .shrink = 0 } } }, children);
+        }
+    }
     b.nodes[n] = tree.container(.{ .id = 9, .direction = .column, .style = .{ .height = .{ .px = @floatFromInt(content_height) }, .flex = .{ .shrink = 0 } } }, rows);
     const scroll_child = b.nodes[n .. n + 1];
     n += 1;

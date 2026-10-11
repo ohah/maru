@@ -40,6 +40,11 @@ fn batchRow(self: *AppSession, a: std.mem.Allocator, index: usize) !component.ty
         if (offset == 0) {
             row.file = true;
             row.enabled = !self.ime_active and !self.ime_editor_commit_pending and search_dock.batch_ui.resultTerm(self, index) != null;
+            if (target.outcome == .save_failed and search_dock.batch_ui.resultTerm(self, index) != null) {
+                row.retry_label = i18n.t(if (compact) .project_batch_retry_save_compact else .project_batch_retry_save);
+                row.retry_semantic_label = i18n.t(.project_batch_retry_save);
+                row.retry_enabled = search_dock.batch_ui.canRetrySave(self, index);
+            }
             const outcome = switch (target.outcome) {
                 .saved => i18n.t(.project_batch_saved),
                 .save_failed => i18n.t(.project_batch_save_failed),
@@ -50,7 +55,8 @@ fn batchRow(self: *AppSession, a: std.mem.Allocator, index: usize) !component.ty
             for (path) |*byte| if (byte.* == '\n' or byte.* == '\r' or byte.* == '\t') {
                 byte.* = ' ';
             };
-            row.label = try std.fmt.allocPrint(a, "{s} · {s}", .{ if (compact and batch.phase == .completed) outcome else path, if (compact and batch.phase == .completed) path else outcome });
+            const status_first = compact and batch.phase == .completed and target.outcome != .save_failed;
+            row.label = try std.fmt.allocPrint(a, "{s} · {s}", .{ if (status_first) outcome else path, if (status_first) path else outcome });
             return row;
         }
         offset -= 1;

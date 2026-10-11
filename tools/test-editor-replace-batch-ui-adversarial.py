@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import sys
 
 repo = Path(__file__).resolve().parents[1]
 root = Path(tempfile.mkdtemp(prefix="maru-project-all-ui-adversarial-"))
@@ -36,14 +37,35 @@ cases = [
     ("equivalent-control", mutate(collect, "self.cursor += 1;", "self.cursor = self.cursor + 1;"), True),
     ("restored-control", original, True),
 ]
+# 저장 재시도는 편집 commit과 별도이므로 기존 UI 변이와 독립 실행한다.
+if "--save-retry" in sys.argv:
+    cases = [
+        ("control", original, True),
+        ("overwrite-external-change", mutate(ui, '.saveDocument(self, term) catch |err| {', '.overwriteDocument(self, term) catch |err| {'), False),
+        ("save-during-ime", mutate(ui, 'if (self.ime_active or self.ime_editor_commit_pending or owner.documentCompositionStamp(self, term) != 0) return error.InputTransactionPending;', 'if (false and (self.ime_active or self.ime_editor_commit_pending or owner.documentCompositionStamp(self, term) != 0)) return error.InputTransactionPending;'), False),
+        ("keep-failed-count", mutate(ui, 'st.result.save_failed -= 1;', 'st.result.save_failed -= 0;'), False),
+        ("repeat-successful-save", mutate(ui, 'if (target.outcome != .save_failed) return error.StaleRequest;', 'if (target.outcome == .saved) return; if (target.outcome != .save_failed) return error.StaleRequest;'), False),
+        ("reuse-document-generation", mutate(ui, ' and source.generation == lease.document.generation', ''), False),
+        ("restored-control", original, True),
+    ]
+if "--save-retry" in sys.argv:
+    # 전체 OOM 탐색은 원본 gate로 별도 검증한다. 결함 주입은 저장·문서 세대 판정에 집중한다.
+    build = source / "build.zig"
+    build_text = build.read_text()
+    needle = '.filters = &.{".test.RPBU"}'
+    assert build_text.count(needle) == 1
+    count_arg = 'run_batch_ui.addArg("--maru-expect-tests=13");'
+    assert build_text.count(count_arg) == 1
+    build.write_text(build_text.replace(needle, '.filters = &.{".test.RPBU3", ".test.RPBU7"}').replace(count_arg, 'run_batch_ui.addArg("--maru-expect-tests=6");'))
+expected_count = 6 if "--save-retry" in sys.argv else 13
 results = []
 for name, changed, passing in cases:
     for path, content in changed.items():
         (source / path).write_text(content)
-    result = subprocess.run(["mise", "exec", "--", "zig", "build", "test-editor-project-replace-batch-ui", "-j2", "--cache-dir", str(root / name / "cache")], cwd=source, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
+    result = subprocess.run(["mise", "exec", "--", "zig", "build", "test-editor-project-replace-batch-ui", "-j2", "--cache-dir", str(root / ("cache" if "--save-retry" in sys.argv else name + "/cache"))], cwd=source, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=300)
     (root / f"{name}.log").write_text(result.stdout)
     if passing:
-        assert result.returncode == 0 and "All 13 tests passed" in result.stdout, (name, result.stdout[-4000:])
+        assert result.returncode == 0 and f"All {expected_count} tests passed" in result.stdout, (name, result.stdout[-4000:])
     else:
         assert result.returncode != 0 and "FAIL (" in result.stdout, (name, result.stdout[-4000:])
     results.append(dict(name=name, expected_pass=passing, exit_code=result.returncode, sha256={str(path): hashlib.sha256(content.encode()).hexdigest() for path, content in changed.items()}))

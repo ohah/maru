@@ -1392,6 +1392,8 @@ worker API만 검사하며 실제 검색 UI의 시작/적용은 아래 제품 �
 mise exec -- zig build test-editor-project-replace-batch-ui test-editor-project-search-dock
 mise exec -- zig build test-editor-project-replace-batch-ui -Doptimize=ReleaseFast
 python3 tools/test-editor-replace-batch-ui-adversarial.py
+python3 tools/test-editor-replace-batch-ui-adversarial.py --save-retry
+python3 tools/editor-project-search-app/run.py --replace-batch-save-retry --disk-files 2 --count 20
 python3 tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --count 20
 ```
 

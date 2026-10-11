@@ -152,6 +152,10 @@ fn composingView(session: *app.AppSession, term: *app.Term) ?*app.Term {
     };
     return null;
 }
+/// 문서별 저장 판정은 첫 뷰가 아니라 같은 문서를 공유하는 모든 뷰의 조합을 본다.
+pub fn documentCompositionStamp(session: *app.AppSession, term: *app.Term) u64 {
+    return compositionStamp(composingView(session, term));
+}
 pub fn compositionStamp(term: ?*app.Term) u64 {
     const owner = term orelse return 0;
     if (owner.rt.editor_preedit.len == 0) return 0;

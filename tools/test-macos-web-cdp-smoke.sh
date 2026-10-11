@@ -32,7 +32,9 @@
 #                   3 회차: 버튼 밖 상자의 로딩 덮개는 covered 이고 아무것도 눌리지 않는다, 버튼 안 터치 영역(Material)은 그 버튼이 받는다(shadow 안
 #                   버튼 + slot 도), 카드 안 다른 버튼이 글을 덮으면 covered, 화면 밖 같은 글 사본이 있어도 exact(빼낼 글의 길이 하한).
 #                   4 회차: select 를 품은 label 의 글 exact, sr-only 토글 체크박스는 label 로케이터로 그 label 을 눌러 켠다.
-#                   5 회차: 가운데에 링크를 품은 글은 그 링크를 누르지 않고 covered
+#                   5 회차: 가운데에 링크를 품은 글은 그 링크를 누르지 않고 covered.
+#                   변이로 찾은 빈 곳: 투명 radio 가 덮은 요금제 카드(label 과 control 은 같은 것)는 눌린다, iframe 이 덮은 카드는 covered,
+#                   그려지지 않은 요소 안 aria-hidden 글의 exact 는 hint, nth 가 보이는 일치 수를 넘으면 숨은 사본이 있어도 hint 없이 not ok
 #   press           요소에 Shift+a → 「A」(isTrusted keydown — 입력 이벤트만으로는 insertText 와 가를 수 없다) · Meta+a(편집 명령 selectAll)
 #                   뒤 대상 없이 x → 값이 「x」로 바뀐다 · Shift+/ → 「?」(US 배열의 위 글자) ·
 #                   대상 없이 Tab → 초점이 다음 칸으로 · 틀린 키 이름은 invalid params. 붙여넣기(Meta+v)는 사용자 클립보드를 쓰므로 스모크에
@@ -107,6 +109,10 @@ cat > "$root/www/a.html" <<'HTML'
 <label>Country <span aria-hidden=true>*</span> <select onchange="hit('ct')"><option>Korea</option><option>Japan</option></select></label>
 <label style="display:inline-flex"><input type=checkbox style="position:absolute;width:1px;height:1px;margin:-1px;overflow:hidden;clip:rect(0,0,0,0)" onchange="hit('tg-'+this.checked)"><span>Toggle wifi</span></label>
 <div style="display:inline-block">I agree <a href="#" onclick="hit('tos-link');return false">to the Terms of Service</a> now</div>
+<label style="position:relative;display:inline-block"><input type=radio name=plan style="position:absolute;left:0;top:0;width:100%;height:100%;margin:0;opacity:0" onchange="hit('pro-'+this.checked)"><span>Pro plan</span></label>
+<div role=button tabindex=0 onclick="hit('ifc')" style="position:relative;display:inline-block"><span>Frame card</span><iframe srcdoc="x" style="position:absolute;left:0;top:0;width:100%;height:100%;border:0"></iframe></div>
+<div style="display:none"><p>Secret plan<i aria-hidden=true>*</i><span style="display:none">long hidden words here</span></p></div>
+<span style="display:none">Archive item</span>
 </div>
 <script>(function(){var h=document.getElementById('xtb');h.attachShadow({mode:'open'}).innerHTML='<button style="position:relative"><slot></slot><span style="position:absolute;left:-4px;right:-4px;top:-4px;bottom:-4px"></span></button>';h.shadowRoot.querySelector('button').addEventListener('click',function(e){hit('stb-'+e.isTrusted)})})()</script>
 <script>(function(){var h=document.getElementById('xm');h.innerHTML='<div>Settings panel</div>';h.attachShadow({mode:'open'}).innerHTML='<button onclick="hit(\'xm-\'+event.isTrusted)">Menu</button>'})()</script>
@@ -284,6 +290,11 @@ run tx-sel hover --by-text 'Country' --exact
 run lb-tiny click --by-label 'Toggle wifi'
 hit_seen tg-true && echo yes > "\$out/tg-hit" || echo no > "\$out/tg-hit"
 run tx-link click --by-text 'I agree'
+run tx-radio click --by-text 'Pro plan' --exact
+hit_seen pro-true && echo yes > "\$out/pro-hit" || echo no > "\$out/pro-hit"
+run tx-iframe click --by-text 'Frame card' --exact
+run tx-unr click --by-text 'Secret plan' --exact
+run tx-nth click --by-text 'Archive item' --nth 5
 run hover hover --selector '#hv'
 hit_seen hv-true && echo yes > "\$out/hv-hit" || echo no > "\$out/hv-hit"
 run hover-missing hover --selector '#none'
@@ -424,7 +435,11 @@ ok tx-gone && [ "$(cat "$out/gs-hit")" = yes ] || fail "an off-page copy of the 
 ok tx-sel || fail "a label holding a select was not found by its text exactly ($(tr '\n' ' ' < "$out/tx-sel"))"
 ok lb-tiny && [ "$(cat "$out/tg-hit")" = yes ] || fail "an sr-only toggle checkbox found by label was not turned on through its label ($(tr '\n' ' ' < "$out/lb-tiny"))"
 grep -q 'covered' "$out/tx-link" && ! grep -q 'GET /hit?tos-link' "$root/http.log" || fail "text whose center is a link inside it pressed the link or was not refused ($(tr '\n' ' ' < "$out/tx-link"))"
-echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link"
+ok tx-radio && [ "$(cat "$out/pro-hit")" = yes ] || fail "a plan card whose transparent radio covers its text was refused or the radio was not chosen ($(tr '\n' ' ' < "$out/tx-radio"))"
+grep -q 'covered' "$out/tx-iframe" && ! grep -q 'GET /hit?ifc' "$root/http.log" || fail "an iframe covering a card's text was not refused as covered ($(tr '\n' ' ' < "$out/tx-iframe"))"
+grep -q 'not ok' "$out/tx-unr" && grep -q '^hint: 1 matching' "$out/tx-unr" || fail "an unrendered match with aria-hidden text did not give a hint ($(tr '\n' ' ' < "$out/tx-unr"))"
+grep -q 'not ok' "$out/tx-nth" && ! grep -q '^hint:' "$out/tx-nth" || fail "nth past the visible matches gave a hidden-element hint ($(tr '\n' ' ' < "$out/tx-nth"))"
+echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"
 grep -q 'not ok' "$out/hover-missing" || fail "hovering a missing element was not not ok ($(tr '\n' ' ' < "$out/hover-missing"))"
 echo "PASS hover: the element got a real (isTrusted) mouseover, a missing element is not ok"

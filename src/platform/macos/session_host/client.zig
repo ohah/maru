@@ -33,6 +33,7 @@ const owner_seal = @import("external_owner_seal.zig");
 const operation_thread_identity = @import("operation_thread_identity.zig");
 const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
+const client_image_channel = @import("client_image_channel.zig");
 const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const client_poison = @import("client_poison.zig");
 const screen_inbox = @import("screen_inbox.zig");
@@ -2271,6 +2272,7 @@ const ExternalAdoptionSnapshot = struct {
     notification_delivery_v1: bool,
     runtime_link_at_v1: bool,
     runtime_clipboard_v1: bool,
+    image_channel: client_image_channel.Channel,
     connection_profile: ConnectionProfile,
     compatibility_profile: compatibility.Profile,
     ownership: ClientOwnership,
@@ -3853,6 +3855,10 @@ const ExternalSourceSealEncoder = struct {
         writer.writeBool(client.notification_delivery_v1);
         writer.writeBool(client.runtime_link_at_v1);
         writer.writeBool(client.runtime_clipboard_v1);
+        // 주 fd 와 같이 정규화한다 — canonical 골든이 프로세스의 fd 번호에 기대지 않게.
+        writer.writeBool(client.image_channel.fd >= 0);
+        if (client.image_channel.fd >= 0) writer.writeI32(encoding.fd(client.image_channel.fd));
+        writer.writeTag(@intFromEnum(client.image_channel.state));
         writer.writeTag(@intFromEnum(client.connection_profile.?));
         try writeSourceCompatibilityProfile(&writer, client.compatibility_profile.?);
         writer.writeU64(client.attach_instance_id);
@@ -5713,6 +5719,7 @@ fn externalAdoptionSnapshot(self: *const Client) ExternalAdoptionSnapshot {
         .notification_delivery_v1 = self.notification_delivery_v1,
         .runtime_link_at_v1 = self.runtime_link_at_v1,
         .runtime_clipboard_v1 = self.runtime_clipboard_v1,
+        .image_channel = self.image_channel,
         .connection_profile = self.connection_profile.?,
         .compatibility_profile = self.compatibility_profile.?,
         .ownership = self.ownership,
@@ -7007,6 +7014,9 @@ pub const Client = struct {
     prepared_request_execution_fence_mode: PreparedRequestExecutionFenceMode = .unbound,
     generation_allocator_scope_epoch: u64 = 0,
     active_generation_allocator_scope: ?GenerationAllocatorScopeIdentity = null,
+    /// 이 연결의 이미지 채널 끝(fd)과 상태(이미지 채널 §3.1·§6). 이동은 구조체째 옮기고 남은 자리는 기본값(fd -1)으로 다시
+    /// 만든다. 필드가 늘면 source seal·projection digest 의 손 나열도 늘려야 한다(seal 판정자가 필드 수를 잠근다).
+    image_channel: client_image_channel.Channel = .{},
 
     const PendingOutbound = struct {
         frame: []u8,
@@ -7082,6 +7092,7 @@ pub const Client = struct {
             deadline,
             client_deadline.posix_ops,
             .frozen_shutdown,
+            .off,
         );
     }
 
@@ -7116,6 +7127,7 @@ pub const Client = struct {
             connection_profile,
             wire_major,
             .strict,
+            .off,
         );
     }
 
@@ -7133,7 +7145,7 @@ pub const Client = struct {
             return error.IncompatibleVersion;
         if (profile.kind != .previous or !std.mem.eql(u8, &frozen, &artifact_sha256))
             return error.IncompatibleVersion;
-        var client = try connectMajorWithPolicy(allocator, socket_path, .gui, wire_major, .frozen_gui);
+        var client = try connectMajorWithPolicy(allocator, socket_path, .gui, wire_major, .frozen_gui, .off);
         errdefer client.deinit();
         if (client.build_id == null or !compatibility.artifactBuildIdMatches(client.build_id.?, artifact_sha256))
             return error.IncompatibleVersion;
@@ -7146,13 +7158,17 @@ pub const Client = struct {
         connection_profile: ConnectionProfile,
         wire_major: u16,
         legacy_hello_policy: LegacyHelloPolicy,
+        image_channel: client_image_channel.Request,
     ) ClientError!Client {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
         if (!socket_server.socketPathFits(socket_path.len)) return error.EndpointDenied;
         const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         if (fd < 0) return endpointError(posix.errno(fd));
-        errdefer _ = c.close(fd);
+        var fd_transferred = false;
+        errdefer if (!fd_transferred) {
+            _ = c.close(fd);
+        };
         socket_server.setCloseOnExec(fd) catch return error.HandshakeFailed;
         // host가 죽은 socket에 write하면 SIGPIPE로 **프로세스가 죽는다** — EPIPE로 바꿔 catchable하게 한다(server accept 경로와 대칭).
         socket_server.setNoSigPipe(fd);
@@ -7171,7 +7187,15 @@ pub const Client = struct {
             .wire_major = wire_major,
             .parser = framing.FrameParser.initForMajor(allocator, wire_major),
         };
-        errdefer self.parser.deinit();
+        fd_transferred = true;
+        // Client 소멸자 하나로 정리한다 — hello 뒤에는 build_id·lifecycle·이미지 채널이 붙고, poison 이 이미 fd 를 떼었을
+        // 수도 있다(그때 `self.fd` 는 -1 이라 두 번 닫지 않는다). 주 fd 는 소멸자보다 먼저 닫는다 — 소멸자는 allocator 재진입
+        // 중이면 아무것도 하지 않는다(deadline 경로의 `deinitHandshakeAttempt` 와 같은 순서).
+        errdefer {
+            if (self.fd >= 0) _ = c.close(self.fd);
+            self.fd = -1;
+            self.deinit();
+        }
 
         // hello 전송.
         const hello = buildHelloMajorFeatures(
@@ -7179,6 +7203,7 @@ pub const Client = struct {
             connection_profile.wireKind(),
             wire_major,
             connection_profile.advertisesControllerTransfer(),
+            image_channel,
         ) catch return error.OutOfMemory;
         defer allocator.free(hello);
         const hello_frame = framing.encodeFrame(
@@ -7193,6 +7218,17 @@ pub const Client = struct {
         const ack = try self.readFrame();
         defer ack.deinit(allocator);
         try self.finishHelloWithPolicy(connection_profile, profile, ack, legacy_hello_policy);
+        // deadline 이 없는 경로라 read timeout 과 같은 길이의 절대 deadline 을 만들어 채널 수립에 쓴다(이미지 채널 §3.1).
+        self.negotiateImageChannel(
+            image_channel,
+            ack.payload,
+            socket_path,
+            client_image_channel.monotonicDeadline(client_image_channel.blocking_budget_ns),
+            client_deadline.posix_ops,
+        ) catch |err| return switch (err) {
+            error.DeadlineExceeded => error.HandshakeFailed,
+            else => |typed| typed,
+        };
         return self;
     }
 
@@ -7212,6 +7248,7 @@ pub const Client = struct {
             deadline,
             ops,
             .strict,
+            .off,
         );
     }
 
@@ -7223,6 +7260,7 @@ pub const Client = struct {
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
         legacy_hello_policy: LegacyHelloPolicy,
+        image_channel: client_image_channel.Request,
     ) DeadlineClientError!Client {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         const connected = client_deadline.connectUnixUntil(
@@ -7252,6 +7290,7 @@ pub const Client = struct {
             connection_profile.wireKind(),
             wire_major,
             connection_profile.advertisesControllerTransfer(),
+            image_channel,
         ) catch return error.OutOfMemory;
         defer allocator.free(hello);
         const hello_frame = framing.encodeFrame(
@@ -7269,10 +7308,63 @@ pub const Client = struct {
 
         const ack = try self.readFrameUntil(deadline, ops);
         defer ack.deinit(allocator);
-        connected.restoreBlocking(ops) catch return error.ConnectionClosed;
         try self.finishHelloWithPolicy(connection_profile, profile, ack, legacy_hello_policy);
+        // 주 소켓이 아직 논블로킹일 때 한다 — abandon 응답을 같은 deadline 안에서 읽어야 한다(이미지 채널 §3.2).
+        try self.negotiateImageChannel(image_channel, ack.payload, socket_path, deadline, ops);
+        connected.restoreBlocking(ops) catch return error.ConnectionClosed;
         if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
         return self;
+    }
+
+    /// hello_ack 뒤 이미지 채널을 연다(이미지 채널 §3.1·§3.2). 채널을 못 열어도 **연결 실패로 올리지 않는다** — 거부면 abandon
+    /// 을 응답까지 읽고, 시간 초과·연결 단계 실패면 채널만 닫고 「이미지 채널 없음」으로 돌려준다. 여기서 나가는 오류는 주 소켓의
+    /// abandon 왕복 실패와 hello_ack 해석 실패뿐이다.
+    fn negotiateImageChannel(
+        self: *Client,
+        request: client_image_channel.Request,
+        ack_payload: []const u8,
+        socket_path: [:0]const u8,
+        deadline: client_deadline.AbsoluteDeadline,
+        ops: client_deadline.Ops,
+    ) DeadlineClientError!void {
+        if (request == .off) return;
+        const offer = client_image_channel.parseOffer(self.allocator, ack_payload) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.MalformedHelloAck => error.HandshakeFailed,
+        };
+        if (!offer.offered) return;
+        self.image_channel.state = .unavailable;
+        // 자리 없음 — 버릴 token 도 없다.
+        const token = offer.token orelse return;
+        // abandon 몫을 남길 수 없으면 채널을 열지 않는다. token 은 host 의 만료로 풀린다.
+        const bind_deadline = client_image_channel.bindDeadline(deadline) orelse return;
+        if (client_image_channel.open(self.allocator, ops, socket_path, token, self.wire_major, bind_deadline)) |fd| {
+            self.image_channel = .{ .fd = fd, .state = .bound };
+            return;
+        } else |err| switch (err) {
+            // 거부 — host 가 응답하고 있다. 아래에서 abandon 을 응답까지 읽어 token 을 바로 돌려준다.
+            error.ImageChannelUnavailable => {},
+            // 시간 초과 — host owner 가 밀려 있다. 같은 owner 가 abandon 에도 늦게 답하면 그 왕복이 연결을 실패시킨다.
+            // 채널 소켓은 `open` 이 이미 닫았다. token 은 host 의 만료로, 늦게 묶인 채널은 EOF 로 풀린다(이미지 채널 §3.2).
+            error.ImageChannelTimedOut => return,
+        }
+        // 보내고 안 읽으면 첫 attach 가 이 응답을 받아 상관 오류로 주 연결이 죽는다 — 응답까지 읽는다.
+        const request_id = self.next_request_id;
+        self.next_request_id += 1;
+        const frame = framing.encodeFrame(
+            self.allocator,
+            .{ .kind = .request, .request_id = request_id, .major = self.wire_major },
+            "{\"method\":\"image_channel.abandon\"}",
+        ) catch return error.OutOfMemory;
+        defer self.allocator.free(frame);
+        client_deadline.writeAllUntil(ops, self.fd, frame, deadline) catch |err| return deadlineHelloError(err);
+        const response = try self.readFrameUntil(deadline, ops);
+        defer response.deinit(self.allocator);
+        if (response.header.kind != .response or response.header.request_id != request_id or
+            std.mem.indexOf(u8, response.payload, "\"result\"") == null)
+            return error.HandshakeFailed;
+        // 성공한 왕복이다 — 남기지 않으면 첫 RPC 전의 EOF 진단이 abandon 을 「진행 중」으로 센다.
+        self.last_success_request_id = request_id;
     }
 
     fn deinitHandshakeAttempt(self: *Client, ops: client_deadline.Ops) void {
@@ -7324,10 +7416,11 @@ pub const Client = struct {
             }
         };
         self.host_id = parseHostId(ack.payload) orelse return error.HandshakeFailed;
+        // Client 에 붙인 뒤의 실패는 Client 소멸자가 해제한다 — 붙이기 전의 실패만 여기서 해제한다(둘 다 하면 이중 해제다).
         const build_id = try parseStringFieldAlloc(self.allocator, ack.payload, "build_id");
-        errdefer if (build_id) |owned| self.allocator.free(owned);
+        errdefer if (build_id) |owned| if (self.build_id == null) self.allocator.free(owned);
         const lifecycle = try parseStringFieldAlloc(self.allocator, ack.payload, "lifecycle");
-        errdefer if (lifecycle) |owned| self.allocator.free(owned);
+        errdefer if (lifecycle) |owned| if (self.lifecycle.len == 0) self.allocator.free(owned);
         const upgrade_epoch = parseUnsignedField(ack.payload, "upgrade_epoch");
         const authority_generation = parseUnsignedField(ack.payload, "authority_generation");
         const peer_screen_codec = parseUnsignedField(ack.payload, "screen_codec_version");
@@ -7503,6 +7596,7 @@ pub const Client = struct {
 
     fn finishDeinitGraph(self: *Client) void {
         if (self.fd >= 0) _ = c.close(self.fd);
+        self.image_channel.deinit();
         if (self.build_id) |build_id| self.allocator.free(build_id);
         if (self.lifecycle.len != 0) self.allocator.free(self.lifecycle);
         self.clearPendingOutbound();
@@ -7907,6 +8001,7 @@ pub const Client = struct {
         writer.writeUsize(@intFromPtr(self.allocator.ptr));
         writer.writeUsize(@intFromPtr(self.allocator.vtable));
         writer.writeU64(@bitCast(@as(i64, self.fd)));
+        writer.writeU64(@bitCast(@as(i64, self.image_channel.fd)));
         writer.writeU128(self.host_id);
         writer.writeUsize(if (self.build_id) |bytes|
             if (bytes.len == 0) 0 else @intFromPtr(bytes.ptr)
@@ -13386,6 +13481,8 @@ pub const Client = struct {
 
     fn tombstoneEndedPurgeOwnedGraph(self: *Client) void {
         self.fd = -1;
+        // 주 fd 와 같은 격리 규칙 — 무결성이 깨진 그래프의 자원은 닫지 않고 놓는다. 상태도 내려 「묶였는데 fd 없음」이 남지 않게.
+        self.image_channel = .{ .state = if (self.image_channel.state == .not_negotiated) .not_negotiated else .unavailable };
         self.build_id = null;
         self.lifecycle = &.{};
         self.pending_outbound = null;
@@ -16067,6 +16164,7 @@ const client_source_schema_field_allowlist = [_][]const u8{
     "prepared_request_execution_fence_mode",
     "generation_allocator_scope_epoch",
     "active_generation_allocator_scope",
+    "image_channel",
 };
 comptime {
     @setEvalBranchQuota(2_000);
@@ -21519,6 +21617,7 @@ fn buildHelloMajor(
         client_kind,
         wire_major,
         std.mem.eql(u8, client_kind, "cli"),
+        .off,
     );
 }
 
@@ -21527,15 +21626,20 @@ fn buildHelloMajorFeatures(
     client_kind: []const u8,
     wire_major: u16,
     advertise_controller_transfer: bool,
+    image_channel: client_image_channel.Request,
 ) error{OutOfMemory}![]u8 {
     const transfer_capability = if (advertise_controller_transfer)
         ",\"controller_transfer_v1\""
     else
         "";
+    const image_capability = switch (image_channel) {
+        .off => "",
+        .advertise => ",\"image_shm\"",
+    };
     return std.fmt.allocPrint(
         allocator,
-        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"async_observation_probe_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_selection_state_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"]}}",
-        .{ wire_major, wire_major, client_kind, transfer_capability },
+        "{{\"protocol_min\":{d},\"protocol_max\":{d},\"client_kind\":\"{s}\",\"capabilities\":[\"runtime_metadata_v1\",\"runtime_ended_v1\"{s},\"screen_viewport_scrolled_v1\",\"async_scroll_to_bottom_v1\",\"async_observation_probe_v1\",\"runtime_core_command_v1\",\"runtime_clear_screen_v1\",\"runtime_selected_text_v1\",\"runtime_selection_state_v1\",\"runtime_link_at_v1\",\"runtime_clipboard_v1\",\"runtime_catchup_barrier_v1\"{s}]}}",
+        .{ wire_major, wire_major, client_kind, transfer_capability, image_capability },
     );
 }
 
@@ -24197,9 +24301,10 @@ test "client source seal binds explicit schema descriptors and ordered payload b
         &scratch,
         .canonical_test,
     );
+    // 2026-10-11: Client 의 이미지 채널(fd·상태)이 seal 에 들어가 값이 바뀌었다(이미지 채널 IC2b).
     const frozen_canonical_digest =
-        "\xa0\xb9\x06\x32\xc9\xa3\x56\xf4\xc8\x3c\xda\xeb\x0a\x3c\x85\xf1" ++
-        "\x1e\xc2\xae\xb9\x9e\x68\x27\xda\x45\x62\xcb\x85\xe1\x9b\x74\x48";
+        "\x2a\x3b\x41\xe0\x7e\xdc\x0b\x8e\xc0\xd6\x07\x0e\xa3\x4f\xb7\x36" ++
+        "\x33\x0d\x18\x05\x78\xbd\x41\x92\x76\x57\xfc\x25\xba\x5c\x13\x2d";
     try std.testing.expectEqualSlices(
         u8,
         frozen_canonical_digest,
@@ -24294,6 +24399,14 @@ test "client source seal binds explicit schema descriptors and ordered payload b
     client.fd = fds[1];
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.fd = saved_fd;
+    // 이미지 채널(fd·상태)도 seal 이 덮는다. 인코더는 하위 필드를 손으로 나열하므로 필드가 늘면 여기서 멈춘다.
+    comptime std.debug.assert(std.meta.fields(client_image_channel.Channel).len == 2);
+    client.image_channel.state = .unavailable;
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.image_channel.state = .not_negotiated;
+    client.image_channel.fd = fds[1];
+    try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
+    client.image_channel.fd = -1;
     client.host_id ^= 1;
     try std.testing.expect(!externalSourceSealMatches(&client, 7, seal, &scratch));
     client.host_id ^= 1;
@@ -25157,6 +25270,11 @@ test "client poison reason participates in projection authority and terminal inv
     client.first_poison_reason = .frame_malformed;
     const changed_reason = client.clientProjectionAuthorityDigest();
     try std.testing.expect(!std.mem.eql(u8, &after, &changed_reason));
+    // deinit 이 닫는 fd 는 모두 projection authority 에 든다 — 이미지 채널 fd 도.
+    client.image_channel.fd = 1_000_000;
+    const with_channel = client.clientProjectionAuthorityDigest();
+    client.image_channel.fd = -1;
+    try std.testing.expect(!std.mem.eql(u8, &changed_reason, &with_channel));
 }
 
 test "external transfer normalize quarantine latches typed reason on production branch" {
@@ -25282,9 +25400,35 @@ test "finish hello keeps frozen N-1 metadata unsupported despite peer advertisem
     client.deinit();
 }
 
-test "finish hello rejects selection state without command and copy dependencies" {
+test "finish hello frees build_id and lifecycle when it fails before attaching them" {
+    // 붙이기 **전**의 실패 — host_manifest_v1 을 광고했는데 upgrade_epoch 가 없다. finishHello 가 직접 해제해야 한다(안 하면
+    // 누수, testing allocator 가 잡는다).
     const payload =
-        \\{"version":2,"host_id":"00000000000000000000000000000001","capabilities":["runtime_selection_state_v1"]}
+        \\{"version":2,"host_id":"00000000000000000000000000000001","build_id":"b","lifecycle":"ready","screen_codec_version":1,"capabilities":["host_manifest_v1"]}
+    ;
+    var client = Client{
+        .allocator = std.testing.allocator,
+        .fd = -1,
+        .host_id = 0,
+        .parser = framing.FrameParser.init(std.testing.allocator),
+    };
+    defer client.deinit();
+    const ack: framing.Frame = .{
+        .header = .{ .kind = .hello_ack, .payload_len = payload.len },
+        .payload = @constCast(payload),
+    };
+    try std.testing.expectError(
+        error.HandshakeFailed,
+        client.finishHello(.cli_attach, compatibility.profileForMajor(protocol.version_major).?, ack),
+    );
+    try std.testing.expect(client.build_id == null);
+}
+
+test "finish hello rejects selection state without command and copy dependencies" {
+    // build_id·lifecycle 이 Client 에 붙은 **뒤**에 실패하는 갈래다 — Client 소멸자만 해제해야 한다(finishHello 의 errdefer 까지
+    // 해제하면 이중 해제, testing allocator 가 잡는다).
+    const payload =
+        \\{"version":2,"host_id":"00000000000000000000000000000001","build_id":"b","lifecycle":"ready","capabilities":["runtime_selection_state_v1"]}
     ;
     var client = Client{
         .allocator = std.testing.allocator,
@@ -26328,4 +26472,481 @@ test "generation allocator scope 무효 축은 하나씩 구별된다" {
     try std.testing.expectEqual(Client.ScopeInvalidAxis.ledger_absent, identity.firstInvalidAxis(&client).?);
     client.screen_inbox.generation_batch_accounting.ledger = saved_ledger;
     try std.testing.expectEqual(@as(?Client.ScopeInvalidAxis, null), identity.firstInvalidAxis(&client));
+}
+
+// ── 이미지 채널 수립(앱 쪽, docs/session-host-image-channel.md §3.1·§3.2) ───────────────────────────────────────────
+
+/// 판정자용 가짜 host. 실제 host 는 IC5 전까지 제공 스위치가 꺼져 있어 채널이 묶이는 경로를 낼 수 없다 — 프로토콜만 흉내 낸다.
+/// 스레드 하나가 주 연결과 채널 연결을 차례로 받는다. 판정자가 실패해도 멈추지 않도록 `finish` 가 listen 소켓을 **닫아**
+/// accept 를 깨운다(macOS 에서 listen 소켓 shutdown 은 ENOTCONN 이고 막힌 accept 를 깨우지 않는다 — 실측).
+const FakeImageHost = struct {
+    const Mode = enum {
+        /// 제공하고 token 을 주고 채널을 묶은 뒤 채널을 닫는다(앱의 release 송신이 EPIPE 가 되는지 본다).
+        bind,
+        /// token 을 주지만 채널을 `bind_ack` 없이 닫는다 — 앱은 abandon 을 응답까지 읽어야 한다.
+        reject_channel,
+        /// token 을 주지만 채널에 `bind_ack` 가 아닌 8 B 를 보내고 닫는다 — 앱은 형식을 확인하고 abandon 해야 한다.
+        bad_ack,
+        /// token 을 주고 채널을 쥔 채 `bind_ack` 를 보내지 않는다 — 앱은 시간 초과 뒤 abandon 없이 채널만 닫아야 한다.
+        stall,
+        /// 채널을 거부하고 abandon 에 답하지 않고 주 연결을 닫는다 — abandon 왕복 실패는 주 소켓의 실패다.
+        abandon_unanswered,
+        /// 채널을 거부하고 abandon 에 **다른 request_id** 로 답한다 — 남의 응답을 abandon 응답으로 받으면 안 된다.
+        abandon_wrong_id,
+        /// token 을 준 뒤 소켓 경로를 지운다 — 채널 connect 가 연결 단계에서 실패한다(backlog 가 찬 것과 같은 갈래). 앱은 abandon
+        /// 하지 않고 채널만 포기해야 한다.
+        vanished,
+        /// 제공하지만 token 이 없다 — 자리 없음.
+        no_seat,
+        /// 제공하지 않는다(제공 스위치가 꺼진 host·N-1 host).
+        not_offered,
+    };
+    const token: u128 = 0x0123456789abcdef_fedcba9876543210;
+    const wire = @import("image_channel_wire.zig");
+
+    mode: Mode,
+    listen_fd: c.fd_t = -1,
+    dir_buf: [32]u8 = undefined,
+    path_buf: [64]u8 = undefined,
+    dir: [:0]const u8 = "",
+    path: [:0]const u8 = "",
+    thread: ?std.Thread = null,
+    saw_image_shm: bool = false,
+    channel_hello_ok: bool = false,
+    abandon_request_id: u64 = 0,
+    channel_closed_by_app: bool = false,
+    frames_after_hello: usize = 0,
+    failed: bool = false,
+
+    extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
+
+    fn start(self: *FakeImageHost) !void {
+        const template = try std.fmt.bufPrintZ(&self.dir_buf, "/tmp/maru-ic-XXXXXX", .{});
+        if (mkdtemp(template.ptr) == null) return error.SkipZigTest;
+        self.dir = template;
+        errdefer _ = c.rmdir(self.dir.ptr);
+        self.path = try std.fmt.bufPrintZ(&self.path_buf, "{s}/h.sock", .{template});
+        const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        if (fd < 0) return error.TestUnexpectedResult;
+        errdefer _ = c.close(fd);
+        var addr = posix.sockaddr.un{ .family = posix.AF.UNIX, .path = undefined };
+        @memset(&addr.path, 0);
+        @memcpy(addr.path[0..self.path.len], self.path);
+        if (c.bind(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un)) != 0) return error.TestUnexpectedResult;
+        errdefer _ = c.unlink(self.path.ptr);
+        if (c.listen(fd, 4) != 0) return error.TestUnexpectedResult;
+        self.listen_fd = fd;
+        self.thread = try std.Thread.spawn(.{}, run, .{self});
+    }
+
+    /// 앱 쪽 Client 를 먼저 닫은 뒤 부른다 — 주 연결 EOF 로 스레드가 끝나고, accept 에 막혀 있으면 listen 을 닫아 깨운다.
+    fn finish(self: *FakeImageHost) void {
+        if (self.listen_fd >= 0) _ = c.close(self.listen_fd);
+        self.listen_fd = -1;
+        if (self.thread) |thread| thread.join();
+        self.thread = null;
+        _ = c.unlink(self.path.ptr);
+        _ = c.rmdir(self.dir.ptr);
+    }
+
+    fn run(self: *FakeImageHost) void {
+        self.serve() catch {
+            self.failed = true;
+        };
+    }
+
+    fn readFrame(fd: c.fd_t, parser: *framing.FrameParser) !framing.Frame {
+        var buf: [4096]u8 = undefined;
+        while (true) {
+            if (try parser.next()) |frame| return frame;
+            const rc = c.recv(fd, &buf, buf.len, 0);
+            if (rc <= 0) return error.PeerClosed;
+            try parser.push(buf[0..@intCast(rc)]);
+        }
+    }
+
+    fn sendFrame(fd: c.fd_t, header: protocol.Header, payload: []const u8) !void {
+        const bytes = try framing.encodeFrame(testing.allocator, header, payload);
+        defer testing.allocator.free(bytes);
+        try socket_server.writeAll(fd, bytes);
+    }
+
+    fn serve(self: *FakeImageHost) !void {
+        const main = c.accept(self.listen_fd, null, null);
+        if (main < 0) return error.AcceptFailed;
+        var main_open = true;
+        defer if (main_open) {
+            _ = c.close(main);
+        };
+        var parser = framing.FrameParser.init(testing.allocator);
+        defer parser.deinit();
+        const hello = try readFrame(main, &parser);
+        self.saw_image_shm = std.mem.indexOf(u8, hello.payload, "\"image_shm\"") != null;
+        hello.deinit(testing.allocator);
+
+        const token_text = wire.formatToken(token);
+        var ack_buf: [256]u8 = undefined;
+        const ack = switch (self.mode) {
+            .not_offered => try std.fmt.bufPrint(&ack_buf, "{{\"version\":{d},\"host_id\":\"000000000000000000000000000000c1\",\"build_id\":\"fake-build\",\"lifecycle\":\"ready\",\"capabilities\":[\"host.info\"]}}", .{protocol.version_major}),
+            .no_seat => try std.fmt.bufPrint(&ack_buf, "{{\"version\":{d},\"host_id\":\"000000000000000000000000000000c1\",\"build_id\":\"fake-build\",\"lifecycle\":\"ready\",\"capabilities\":[\"host.info\",\"image_shm\"]}}", .{protocol.version_major}),
+            .bind, .reject_channel, .bad_ack, .stall, .abandon_unanswered, .abandon_wrong_id, .vanished => try std.fmt.bufPrint(&ack_buf, "{{\"version\":{d},\"host_id\":\"000000000000000000000000000000c1\",\"build_id\":\"fake-build\",\"lifecycle\":\"ready\",\"capabilities\":[\"host.info\",\"image_shm\"],\"image_channel_token\":\"{s}\"}}", .{ protocol.version_major, &token_text }),
+        };
+        // vanished 는 hello_ack 를 보내기 **전에** 경로를 지운다 — 뒤에 지우면 앱이 그 틈에 붙어 시간 초과 갈래를 탄다.
+        if (self.mode == .vanished) _ = c.unlink(self.path.ptr);
+        try sendFrame(main, .{ .kind = .hello_ack }, ack);
+
+        var held_channel: c.fd_t = -1;
+        defer if (held_channel >= 0) {
+            _ = c.close(held_channel);
+        };
+        switch (self.mode) {
+            .not_offered, .no_seat, .vanished => {},
+            .bind, .reject_channel, .bad_ack, .stall, .abandon_unanswered, .abandon_wrong_id => {
+                const channel = c.accept(self.listen_fd, null, null);
+                if (channel < 0) return error.AcceptFailed;
+                held_channel = channel;
+                var channel_parser = framing.FrameParser.init(testing.allocator);
+                defer channel_parser.deinit();
+                const channel_hello = try readFrame(channel, &channel_parser);
+                self.channel_hello_ok = std.mem.indexOf(u8, channel_hello.payload, "\"role\":\"image_channel\"") != null and
+                    std.mem.indexOf(u8, channel_hello.payload, &token_text) != null;
+                channel_hello.deinit(testing.allocator);
+                switch (self.mode) {
+                    .bind => try socket_server.writeAll(channel, &wire.encodeBindAck()),
+                    .bad_ack => {
+                        var wrong = wire.encodeBindAck();
+                        wrong[4] = @intFromEnum(wire.Kind.release);
+                        try socket_server.writeAll(channel, &wrong);
+                    },
+                    else => {},
+                }
+                // stall 만 채널을 쥔다 — 앱이 시간 초과 뒤 스스로 닫는지 본다. 나머지는 여기서 닫는다.
+                if (self.mode != .stall) {
+                    _ = c.close(channel);
+                    held_channel = -1;
+                }
+            },
+        }
+        switch (self.mode) {
+            .reject_channel, .bad_ack => {
+                const request = try readFrame(main, &parser);
+                defer request.deinit(testing.allocator);
+                if (request.header.kind != .request or
+                    std.mem.indexOf(u8, request.payload, "image_channel.abandon") == null)
+                    return error.UnexpectedFrame;
+                self.abandon_request_id = request.header.request_id;
+                try sendFrame(main, .{ .kind = .response, .request_id = request.header.request_id }, "{\"result\":{}}");
+            },
+            .abandon_unanswered => {
+                const request = try readFrame(main, &parser);
+                request.deinit(testing.allocator);
+                _ = c.close(main);
+                main_open = false;
+                return;
+            },
+            .abandon_wrong_id => {
+                const request = try readFrame(main, &parser);
+                defer request.deinit(testing.allocator);
+                try sendFrame(main, .{ .kind = .response, .request_id = request.header.request_id + 100 }, "{\"result\":{}}");
+            },
+            else => {},
+        }
+        // 앱이 연결을 닫을 때까지 더 오는 frame 을 센다 — 수립 뒤에는 아무것도 안 보내야 한다(stall 에는 abandon 도 없다).
+        while (readFrame(main, &parser)) |frame| {
+            frame.deinit(testing.allocator);
+            self.frames_after_hello += 1;
+        } else |_| {}
+        if (held_channel >= 0) {
+            var byte: [1]u8 = undefined;
+            self.channel_closed_by_app = c.recv(held_channel, &byte, 1, posix.MSG.DONTWAIT) == 0;
+        }
+    }
+
+    fn connect(
+        host: *FakeImageHost,
+        deadline_path: bool,
+        request: client_image_channel.Request,
+    ) !Client {
+        if (deadline_path) {
+            const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 5 * std.time.ns_per_s);
+            return Client.connectMajorUntilWithOpsPolicy(
+                testing.allocator,
+                host.path,
+                .gui,
+                protocol.version_major,
+                deadline,
+                client_deadline.posix_ops,
+                .strict,
+                request,
+            );
+        }
+        return Client.connectMajorWithPolicy(testing.allocator, host.path, .gui, protocol.version_major, .strict, request);
+    }
+};
+
+test "image channel connect: 묶이면 채널 fd 를 쥐고 host 가 닫은 채널에 쓰면 프로세스가 아니라 EPIPE 다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ true, false }) |deadline_path| {
+        var host: FakeImageHost = .{ .mode = .bind };
+        try host.start();
+        var client_open = false;
+        var client: Client = undefined;
+        defer {
+            if (client_open) client.deinit();
+            host.finish();
+        }
+        client = try FakeImageHost.connect(&host, deadline_path, .advertise);
+        client_open = true;
+        try testing.expect(host.saw_image_shm);
+        try testing.expectEqual(client_image_channel.State.bound, client.image_channel.state);
+        const fd = client.image_channel.fd;
+        try testing.expect(fd >= 0);
+        // SO_NOSIGPIPE 는 옵션을 직접 잰다 — 테스트 러너가 SIGPIPE 를 무시하므로 아래 EPIPE 만으로는 옵션이 빠져도 초록이다.
+        var nosigpipe: c_int = 0;
+        var nosigpipe_len: c.socklen_t = @sizeOf(c_int);
+        try testing.expectEqual(@as(c_int, 0), c.getsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, &nosigpipe, &nosigpipe_len));
+        try testing.expect(nosigpipe != 0);
+        const fd_flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
+        try testing.expect(fd_flags >= 0 and fd_flags & c.FD_CLOEXEC != 0);
+        const fl = c.fcntl(fd, c.F.GETFL, @as(c_int, 0));
+        const nonblocking: c_int = @bitCast(posix.O{ .NONBLOCK = true });
+        try testing.expect(fl >= 0 and fl & nonblocking != 0);
+        // host 가 채널을 닫은 뒤의 release 송신은 EPIPE 다. 가짜 host 는 bind_ack 바로 뒤에 닫지만 스레드 스케줄링이 늦을 수
+        // 있어 넉넉히 기다린다.
+        const release = try FakeImageHost.wire.encodeRelease(1);
+        var saw_epipe = false;
+        for (0..1000) |_| {
+            const rc = c.send(fd, &release, release.len, 0);
+            if (rc < 0 and posix.errno(rc) == .PIPE) {
+                saw_epipe = true;
+                break;
+            }
+            _ = usleepMs(5);
+        }
+        try testing.expect(saw_epipe);
+        client.deinit();
+        client_open = false;
+        // Client 가 채널 fd 의 유일한 주인이다 — deinit 이 닫는다(가짜 host 는 지금 recv 에 막혀 fd 를 새로 만들지 않는다).
+        try testing.expect(c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) < 0);
+        host.finish();
+        try testing.expect(!host.failed);
+        try testing.expect(host.channel_hello_ok);
+        try testing.expectEqual(@as(usize, 0), host.frames_after_hello);
+    }
+}
+
+test "image channel connect: 채널이 거부되면 abandon 을 응답까지 읽고 연결은 「이미지 채널 없음」으로 돌아온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]FakeImageHost.Mode{ .reject_channel, .bad_ack }) |mode| for ([_]bool{ true, false }) |deadline_path| {
+        var host: FakeImageHost = .{ .mode = mode };
+        try host.start();
+        var client_open = false;
+        var client: Client = undefined;
+        defer {
+            if (client_open) client.deinit();
+            host.finish();
+        }
+        client = try FakeImageHost.connect(&host, deadline_path, .advertise);
+        client_open = true;
+        try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+        try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
+        // abandon 응답이 parser 에도 소켓에도 남아 있지 않다 — 첫 요청이 남의 응답을 받지 않는다.
+        try testing.expectEqual(@as(usize, 0), client.parser.bufferedBytes());
+        var peek: [1]u8 = undefined;
+        const pending = c.recv(client.fd, &peek, 1, posix.MSG.PEEK | posix.MSG.DONTWAIT);
+        try testing.expect(pending < 0 and posix.errno(pending) == .AGAIN);
+        try testing.expect(host.abandon_request_id != 0);
+        try testing.expect(client.next_request_id > host.abandon_request_id);
+        client.deinit();
+        client_open = false;
+        host.finish();
+        try testing.expect(!host.failed);
+        try testing.expect(host.channel_hello_ok);
+        try testing.expectEqual(@as(usize, 0), host.frames_after_hello);
+    };
+}
+
+test "image channel connect: bind_ack 가 늦으면 abandon 없이 채널만 닫고 바깥 deadline 안에 돌아온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var host: FakeImageHost = .{ .mode = .stall };
+    try host.start();
+    var client_open = false;
+    var client: Client = undefined;
+    defer {
+        if (client_open) client.deinit();
+        host.finish();
+    }
+    // 바깥 1.5 초 — `bind_ack` 대기는 abandon 몫(0.5 초)을 남긴 1 초다. 바깥 deadline 을 그대로 넘기면 connect 가 deadline 을
+    // 다 써서 실패한다.
+    const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 3 * std.time.ns_per_s / 2);
+    client = try Client.connectMajorUntilWithOpsPolicy(
+        testing.allocator,
+        host.path,
+        .gui,
+        protocol.version_major,
+        deadline,
+        client_deadline.posix_ops,
+        .strict,
+        .advertise,
+    );
+    client_open = true;
+    try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+    try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
+    try testing.expect(deadline.remainingNs() > 0);
+    client.deinit();
+    client_open = false;
+    host.finish();
+    try testing.expect(!host.failed);
+    // abandon 이 없다 — 밀린 host 에 왕복을 하나 더 얹지 않는다. 채널은 앱이 닫았다(host 는 EOF 로 정리한다).
+    try testing.expectEqual(@as(usize, 0), host.frames_after_hello);
+    try testing.expect(host.channel_closed_by_app);
+}
+
+test "image channel connect: 채널 연결 단계가 실패하면 abandon 없이 「이미지 채널 없음」으로 돌아온다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ true, false }) |deadline_path| {
+        var host: FakeImageHost = .{ .mode = .vanished };
+        try host.start();
+        var client_open = false;
+        var client: Client = undefined;
+        defer {
+            if (client_open) client.deinit();
+            host.finish();
+        }
+        client = try FakeImageHost.connect(&host, deadline_path, .advertise);
+        client_open = true;
+        try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+        try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
+        client.deinit();
+        client_open = false;
+        host.finish();
+        try testing.expect(!host.failed);
+        // 연결 단계의 실패는 host 의 응답이 아니다(backlog 가 차면 커널이 곧바로 거부한다) — 밀렸을 수 있는 owner 에 abandon
+        // 왕복을 얹지 않는다.
+        try testing.expectEqual(@as(usize, 0), host.frames_after_hello);
+    }
+}
+
+test "image channel connect: abandon 왕복이 실패하면 주 소켓의 실패로 돌아오고 아무것도 새지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 답이 없거나 남의 id 로 답하면 그 응답은 abandon 의 것이 아니다 — 남은 응답이 첫 RPC 를 속이지 않게 실패로 끝낸다.
+    for ([_]FakeImageHost.Mode{ .abandon_unanswered, .abandon_wrong_id }) |mode| for ([_]bool{ true, false }) |deadline_path| {
+        var host: FakeImageHost = .{ .mode = mode };
+        try host.start();
+        defer host.finish();
+        // testing.allocator 가 hello 뒤에 붙은 build_id·lifecycle 같은 할당의 누수를 잡는다.
+        if (FakeImageHost.connect(&host, deadline_path, .advertise)) |connected| {
+            var unexpected = connected;
+            unexpected.deinit();
+            return error.TestUnexpectedResult;
+        } else |err| switch (err) {
+            error.HandshakeFailed, error.ConnectionClosed, error.ReadFailed, error.DeadlineExceeded => {},
+            else => return err,
+        }
+    };
+}
+
+test "image channel connect: abandon 몫밖에 안 남았으면 채널을 열지 않지만 협상은 「이미지 채널 없음」이다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var host: FakeImageHost = .{ .mode = .bind };
+    try host.start();
+    var client_open = false;
+    var client: Client = undefined;
+    defer {
+        if (client_open) client.deinit();
+        host.finish();
+    }
+    // 바깥 deadline 이 abandon 몫(0.5 초)보다 짧다 — 채널을 열면 abandon 을 읽을 시간이 없으므로 열지 않는다. 그래도 host 는
+    // 협상한 것으로 보므로 앱도 미협상이 아니라 「이미지 채널 없음」이어야 형식이 갈리지 않는다.
+    const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 400 * std.time.ns_per_ms);
+    client = try Client.connectMajorUntilWithOpsPolicy(
+        testing.allocator,
+        host.path,
+        .gui,
+        protocol.version_major,
+        deadline,
+        client_deadline.posix_ops,
+        .strict,
+        .advertise,
+    );
+    client_open = true;
+    try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+    try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
+}
+
+test "image channel connect: 자리 없음은 「이미지 채널 없음」, 미제공·미광고는 미협상이고 둘 다 채널을 열지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const Case = struct { mode: FakeImageHost.Mode, request: client_image_channel.Request, state: client_image_channel.State };
+    for ([_]Case{
+        .{ .mode = .no_seat, .request = .advertise, .state = .unavailable },
+        .{ .mode = .not_offered, .request = .advertise, .state = .not_negotiated },
+        // 광고하지 않은 연결은 host 가 제공해도 채널을 열지 않는다.
+        .{ .mode = .no_seat, .request = .off, .state = .not_negotiated },
+    }) |case| {
+        for ([_]bool{ true, false }) |deadline_path| {
+            var host: FakeImageHost = .{ .mode = case.mode };
+            try host.start();
+            var client_open = false;
+            var client: Client = undefined;
+            defer {
+                if (client_open) client.deinit();
+                host.finish();
+            }
+            client = try FakeImageHost.connect(&host, deadline_path, case.request);
+            client_open = true;
+            try testing.expectEqual(case.state, client.image_channel.state);
+            try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
+            try testing.expectEqual(case.request == .advertise, host.saw_image_shm);
+            client.deinit();
+            client_open = false;
+            host.finish();
+            try testing.expect(!host.failed);
+            try testing.expectEqual(@as(usize, 0), host.frames_after_hello);
+        }
+    }
+}
+
+test "image channel connect: 채널 수립 실패는 connect 오류 집합에 없다" {
+    // 이미지 채널을 못 연 것은 연결 실패가 아니다(이미지 채널 §3.2). 이 오류들이 connect 오류 집합에 들어가면 앱 시작·업그레이드·
+    // 재접속 판정이 그것을 「이 host 에 못 붙는다」로 읽고 host 를 하나 더 띄울 수 있다 — 집합에 없으면 그 판정에 닿을 길이 없다.
+    comptime {
+        for (@typeInfo(client_image_channel.OpenError).error_set.?) |open_err|
+            for (@typeInfo(DeadlineClientError).error_set.?) |connect_err|
+                if (std.mem.eql(u8, open_err.name, connect_err.name))
+                    @compileError("image channel open error escapes a connect function: " ++ open_err.name);
+    }
+}
+
+test "image channel connect: gui·admin public connect 진입점은 광고하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // GUI 제품 호출자가 광고를 넘기는 것은 IC6 이다. 그 전에는 public 진입점이 `image_shm` 을 싣지 않는다 — 진입점을 실제로
+    // 태워 hello 바이트를 본다. frozen N-1 진입점 둘은 artifact 가 맞아야 열려 여기서 못 태운다(둘 다 `.off` 를 직접 넘긴다).
+    for (0..5) |entry| {
+        var host: FakeImageHost = .{ .mode = .not_offered };
+        try host.start();
+        var client_open = false;
+        var client: Client = undefined;
+        defer {
+            if (client_open) client.deinit();
+            host.finish();
+        }
+        const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 5 * std.time.ns_per_s);
+        const connected: anyerror!Client = switch (entry) {
+            0 => Client.connect(testing.allocator, host.path, .gui),
+            1 => Client.connectUntil(testing.allocator, host.path, .gui, protocol.version_major, deadline),
+            2 => Client.connectMajor(testing.allocator, host.path, .gui, protocol.version_major),
+            // admin 진입점은 가짜 host 가 admin 기능을 안 실어 hello 뒤에 거절된다 — hello 바이트는 이미 보냈다.
+            3 => Client.connectAdmin(testing.allocator, host.path),
+            else => Client.connectAdminUntil(testing.allocator, host.path, deadline),
+        };
+        if (connected) |opened| {
+            client = opened;
+            client_open = true;
+            try testing.expectEqual(client_image_channel.State.not_negotiated, client.image_channel.state);
+            client.deinit();
+            client_open = false;
+        } else |err| if (entry < 3) return err;
+        host.finish();
+        try testing.expect(!host.saw_image_shm);
+    }
 }

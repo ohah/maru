@@ -56,7 +56,7 @@ sequenceDiagram
   M->>O: 턴이 끝난 뒤 입양 요청
   O->>O: token 표로 주 연결 확인, fd 이동
   O-->>App: bind_ack (이미지 채널로)
-  App->>App: bind_ack 를 받은 뒤에만 Client 반환
+  App->>App: 채널 상태가 정해진 뒤에만 Client 반환 (묶임 또는 §3.2)
 ```
 
 - host 는 hello 처리 때 이미지 채널 자리를 확보할 수 있을 때만 hello_ack 에 128-bit 랜덤 `image_channel_token` 을 싣는다.
@@ -67,7 +67,8 @@ sequenceDiagram
   종료(`destroyAll` 포함)·abandon 넷 중 하나로 풀린다. 집행이 hello 에서만 이뤄지므로 확보는 보장이 아니다 — 아직 hello 를 안
   보낸 연결이 마지막 슬롯을 쥐고 있으면 채널 connect 가 거부되고 앱은 「이미지 채널 없음」으로 간다. 토큰은 기능 목록이 아니라 hello_ack 의 별도 필드 `image_channel_token`(32 자 소문자
   hex, 0 은 쓰지 않는다)이고, 없으면 필드째 빠진다. host 의 지원 여부는 hello_ack 기능 목록의 `image_shm` 이 말한다 — 기능은 있는데
-  token 이 없으면 「자리 없음」, 기능이 없으면 이미지 채널을 모르는 host 다. host 쪽 token 만료는 10 초(`token_ttl_ns`)다.
+  token 이 없으면 「자리 없음」, 기능이 없으면 이미지 채널을 모르거나 이 연결과 협상하지 않는 host 다(host 는 협상할 수 있는 연결
+  — admin 이 아닌 제품 연결 — 에만 기능을 싣는다). host 쪽 token 만료는 10 초(`token_ttl_ns`)다.
   host 는 producer 가 `image_ref` 를 내기 시작하는 단계(계획 IC5)부터 제공한다(`host_offers_image_channel`). 그 전에 광고하면 오래
   살아남는 host(업그레이드 side-by-side drain)에 붙은 새 앱이 채널을 묶고도 여전히 `image_blob` 을 받는다.
 - 앱은 같은 리스너에 두 번째 연결을 열고 첫 프레임으로 `.hello` 의 변형 `hello{role:"image_channel", token}` 을 보낸다. 새 frame
@@ -83,8 +84,9 @@ sequenceDiagram
   한 번만 하는 destroy 변형으로 지운다. 로그는 「closed client connection」 대신 `session host image channel adopted:` 한 줄이다(거절은 `… rejected:`, 상실은
   `session host image channel lost:`). token 은 처음
   쓰일 때 표에서 지운다. NONBLOCK·CLOEXEC·NOSIGPIPE 는 fd 속성이라 옮겨도 유지된다(accept 경로의 `configureOwnedSocket`).
-- 앱의 connect 함수 둘(hello 를 만드는 두 자리)은 `finishHello` 뒤에 이미지 채널을 열고 **`bind_ack` 를 받은 뒤에야** Client 를
-  반환한다. 그래서 attach 는 언제나 채널이 묶인 뒤에 온다(재접속 워커가 연결된 Client 를 attach 전에 넘기는 구조와 맞다).
+- 앱의 connect 함수 둘(hello 를 만드는 두 자리)은 `finishHello` 뒤에 이미지 채널 수립을 **끝낸 뒤에야** Client 를 반환한다 —
+  `bind_ack` 를 받았거나(묶임) §3.2 의 실패 처리를 마쳤거나(「이미지 채널 없음」). 그래서 attach 는 언제나 채널 상태가 정해진 뒤에
+  온다(재접속 워커가 연결된 Client 를 attach 전에 넘기는 구조와 맞다).
   이미지 채널 소켓은 `client_deadline.connectUnixUntil` 로 만든다 — 앱은 SIGPIPE 를 전역으로 잡지 않으므로 SO_NOSIGPIPE 가
   없으면 닫힌 소켓에 쓰는 순간 프로세스가 signal 13 으로 죽는다(실측). deadline 이 없는 블로킹 connect 경로는 기존 read
   timeout 에 해당하는 절대 deadline 을 만들어 `bind_ack` 대기에 쓴다.
@@ -92,14 +94,20 @@ sequenceDiagram
 
 ### 3.2 수립 실패와 채널 상실
 
-- 채널을 못 연 경우(token 거부·deadline·자원 고갈): connect 함수는 전용 오류 `ImageChannelUnavailable` 을 **연결 실패로 올리지
-  않는다.** 주 연결을 「이미지 채널 없음」 표시와 함께 반환하기 전에 주 소켓으로 요청 `image_channel.abandon` 을 보내 host 가 token 을
-  버리게 한다(attach 보다 먼저 가므로 그 시점에 세그먼트는 없다). abandon 은 **응답(`{"result":{}}`)까지 읽는 동기 요청**이다 —
+- 채널을 못 연 경우 connect 함수는 수립 실패 오류 둘 — 거부 `ImageChannelUnavailable`, 시간 초과·연결 단계 실패
+  `ImageChannelTimedOut` — 을 **연결 실패로 올리지 않고** 주 연결을 「이미지 채널 없음」 표시와 함께 반환한다. 거부일 때는 반환
+  전에 주 소켓으로 요청 `image_channel.abandon` 을 보내 host 가 token 을 바로 버리게 한다(attach 보다 먼저 가므로 그 시점에
+  세그먼트는 없다). abandon 은 **응답(`{"result":{}}`)까지 읽는 동기 요청**이다 —
   보내고 안 읽으면 첫 attach 가 그 응답을 받아 상관 오류로 주 연결이 죽는다. 그래서 `bind_ack` 대기는 connect deadline 전체가 아니라
-  abandon 왕복 몫을 남긴 하위 예산을 쓴다. 남은 예산이 없으면 abandon 없이 채널 소켓만 닫고 「이미지 채널 없음」으로 반환한다 —
-  token 은 host 의 만료(10 초)로, 늦게 묶인 채널은 EOF(채널 상실)로 풀리고, 어느 쪽도 주 연결을 닫지 않는다. 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못 붙는다」로
-  읽고 host 를 하나 더 띄운다 — `ImageChannelUnavailable` 이 spawn·업그레이드·unreachable·재접속 실패 판정 어디로도 흐르지 않음을
-  판정자가 잰다.
+  abandon 왕복 몫을 남긴 하위 예산을 쓴다(그 몫밖에 안 남았으면 채널을 열지 않는다). abandon 은 **거부**(채널 hello 를 보낸 뒤의
+  EOF·`bind_ack` 형식 오류 — host 가 응답하고 있다)일 때만 보낸다. **시간 초과**(`bind_ack` 가 하위 예산 안에 안 옴)이거나
+  **연결 단계 실패**(listen backlog 가 차면 커널이 곧바로 ECONNREFUSED 를 준다 — host 의 응답이 아니다)면 host owner 가 밀려 있을
+  수 있으므로 abandon 없이 채널 소켓만 닫고 「이미지 채널 없음」으로 반환한다. 밀린 owner 에 왕복을 하나 더 얹으면 그 응답도 늦어 채널 때문에 연결이
+  실패한다. token 은 host 의 만료(10 초)로, 늦게 묶인 채널은 EOF(채널 상실)로 풀리고, 어느 쪽도 주 연결을 닫지 않는다. abandon
+  왕복 자체가 실패하거나 hello_ack 를 해석하지 못하면(JSON 아님·망가진 token) 그것은 주 연결의 실패라 connect 의 기존 오류
+  (`HandshakeFailed` 등)로 돌아간다. 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못 붙는다」로
+  읽고 host 를 하나 더 띄운다 — 수립 실패 오류 둘이 connect 오류 집합에 없어 spawn·업그레이드·unreachable·재접속 실패 판정
+  어디로도 흐르지 않음을 판정자가 comptime 으로 잰다.
 - 「이미지 채널 없음」 연결: 앱은 그 연결의 탭에 notice(이미지를 표시할 수 없음, 재접속 때 다시 시도)를 띄우고, host 는 그
   연결에 세그먼트를 만들지 않고 이미지 placement 를 빼고 보낸다.
 - 입양 뒤 채널이 죽으면(EOF·HUP·오류, 입양 뒤 늦게 온 abandon 포함) **주 연결은 닫지 않는다.** abandon 이 먼저 오면 token 이
@@ -205,7 +213,10 @@ flowchart TD
 
 - **세그먼트 표와 이미지 채널 fd 는 `Client` 필드다**(연결 축 — 앱은 여러 host 에 동시에 붙을 수 있어 id 가 섞이면 안 된다).
   Client 이동(generation 노드 이동)에 함께 실리고 Client 필드 allowlist·projection digest 에 등록한다. 앱에서 fd 를 쥐는 곳은 이
-  표 하나뿐이다.
+  둘(채널 끝 `Client.image_channel`, 받은 세그먼트 fd 의 표)뿐이다. 둘은 따로 둔 Client 필드다 — 표를 채널 값 안에 넣으면 seal·digest
+  의 손 나열이 그것을 빠뜨린다.
+- 「이미지 채널 없음」 연결의 resolver: host 는 그 연결에 `image_ref` 를 내지 않는다. 다만 앱이 시간 초과로 채널을 닫은 직후처럼
+  host 가 아직 묶인 것으로 아는 짧은 창에는 올 수 있다 — 그 `image_ref` 는 「세그먼트 없음」과 같이 다룬다(아래 해석 결과 셋째).
 - 채널 리더는 매 tick 과 배치 적용 직전에 논블로킹 recvmsg 로 채널을 비운다. 메시지당 fd 가 정확히 하나가 아니면 연결을 poison
   한다 — 앱 fd 가 바닥나면(EMFILE) 재시도한 recvmsg 가 fd 를 **조용히 버리고** 제어 버퍼 잘림 표시도 켜지 않는다(실측). 앱은
   daemon 과 같이 시작 때 `RLIMIT_NOFILE` 을 올린다. 받은 fd 는 CLOEXEC 가 꺼져 있어(macOS 에 `MSG_CMSG_CLOEXEC` 가 없다) 받자마자

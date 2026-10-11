@@ -6862,6 +6862,49 @@ pub fn build(b: *std.Build) void {
         image_channel_host_step.dependOn(&b.addSystemCommand(&.{ "echo", "image channel owner judges need macOS sockets; not executed on this target" }).step);
     }
 
+    // 앱 쪽 수립(IC2b) — connect 함수가 채널을 묶거나, 거부면 abandon 을 응답까지 읽고 시간 초과·연결 단계 실패면 채널만 닫아
+    // 「이미지 채널 없음」으로 돌아오는가.
+    // 실제 host 는 IC5 전까지 제공하지 않으므로 가짜 host 스레드와 왕복한다. macOS 소켓 경로라 macOS 잡에서 돈다.
+    const image_channel_app_step = b.step(
+        "test-image-channel-app",
+        "The app binds the image channel or abandons it without failing the connection",
+    );
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        const image_channel_connect_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"image channel connect:"},
+        });
+        const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=9");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=9");
+        image_channel_app_step.dependOn(&run_image_channel_connect_tests.step);
+        test_step.dependOn(&run_image_channel_connect_tests.step);
+        macos_only_test_step.dependOn(&run_image_channel_connect_tests.step);
+        const client_image_channel_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client_image_channel.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{"client image channel:"},
+        });
+        const run_client_image_channel_tests = b.addRunArtifact(client_image_channel_tests);
+        run_client_image_channel_tests.addArg("--maru-expect-tests=4");
+        run_client_image_channel_tests.addArg("--maru-expect-passed=4");
+        image_channel_app_step.dependOn(&run_client_image_channel_tests.step);
+        test_step.dependOn(&run_client_image_channel_tests.step);
+        macos_only_test_step.dependOn(&run_client_image_channel_tests.step);
+    } else {
+        image_channel_app_step.dependOn(&b.addSystemCommand(&.{ "echo", "image channel connect judges need macOS sockets; not executed on this target" }).step);
+    }
+
     // 세그먼트 생성은 macOS 공유 메모리 syscall 이라 macOS 잡에서 돈다(읽기 전용 fd·이름 제거·CLOEXEC).
     const image_segment_step = b.step("test-image-segment", "Image channel segments are read-only, unnamed, close-on-exec shared memory");
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {

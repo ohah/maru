@@ -54,18 +54,33 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
   연결은 같은 턴에 정리돼 재현할 수 없는 방어 갈래), owner 가 자리 셈에 `countsAsHandshaken` 대신 다른 상태 검사를 부르는 것(슬롯
   경계 판정 시점에 `.image_channel`·`.closed` 연결을 만들 수 없다).
 
-#### IC2b — 앱 (미착수)
+#### IC2b — 앱 (완료)
 
-- 두 connect 함수의 `bind_ack` 대기(`connectUnixUntil`·절대 deadline 의 하위 예산), `ImageChannelUnavailable` → `image_channel.abandon`
-  을 응답까지 읽은 뒤(예산이 없으면 채널 소켓만 닫고) 「이미지 채널 없음」 반환(계약 §3.2).
-- `Client` 필드: 이미지 채널 fd 와 「이미지 채널 없음」 상태(이동·allowlist·projection digest·seal 스키마 등록, deinit 정리). connect
-  함수가 묶인 fd 를 Client 에 실어 반환해야 하므로 IC3 이 아니라 여기서 둔다 — fd 를 닫고 반환하면 host 는 곧바로 채널 상실로 본다.
-- 판정자: `ImageChannelUnavailable` 이 spawn·업그레이드·unreachable·재접속 실패 판정으로 흐르지 않는다; peer 가 닫힌 뒤 release
-  write 가 EPIPE 를 돌려준다(프로세스 생존).
+- 새 `src/platform/macos/session_host/client_image_channel.zig`: hello_ack 해석(`image_shm` 기능 = 제공, token 없음 = 자리 없음,
+  기능 없이 온 token 은 믿지 않음, 할당 실패는 오류로 올림), `bind_ack` 대기 하위 예산(`bindDeadline` — abandon 몫 500 ms 를 남기고,
+  남는 것이 없으면 채널을 열지 않는다), 채널 hello 와 `bind_ack` 수신(`open` — `connectUnixUntil` 이라 CLOEXEC·NONBLOCK·SO_NOSIGPIPE,
+  정확히 8 B 만 읽는다, 실패를 거부 `ImageChannelUnavailable`(hello 뒤 EOF·형식 오류)와 `ImageChannelTimedOut`(시간 초과·연결 단계
+  실패)으로 가른다),
+  블로킹 경로용 단조 deadline(read timeout 과 같은 5 초), 상태 `not_negotiated`·`bound`·`unavailable`. 망가진 token 도 해석
+  실패로 올린다.
+- `client.zig`: 두 connect 함수(`connectMajorWithPolicy`·`connectMajorUntilWithOpsPolicy`)에 광고 여부 인자를 받고, hello_ack 뒤
+  `negotiateImageChannel` 이 채널을 묶거나, 거부면 abandon 을 응답까지 읽고 시간 초과면 채널만 닫는다(deadline 경로는 주 소켓이
+  아직 논블로킹일 때). 블로킹 경로의 오류 정리는 Client 소멸자 하나로 모았고, 그 과정에서 `finishHello` 가 Client 에 붙인 뒤
+  실패할 때 `build_id`·`lifecycle` 을 이중 해제하던 것을 고쳤다. 지금의 호출자는
+  모두 광고하지 않는다. `Client.image_channel` 필드 하나(seal 스키마·source seal·projection digest·외부 입양 스냅샷 등록, deinit 이
+  닫음, 이동은 구조체째). 채널 끝의 fd 는 이 필드가, 받은 세그먼트 fd 는 IC3 의 세그먼트 표(따로 둔 필드)가 쥔다. host 는 협상할 수
+  있는 연결에만 hello_ack 기능 목록에 `image_shm` 을 싣는다(협상 기록과 같은 술어 `negotiatesImageChannel`).
+- 판정자: `zig build test-image-channel-app`(test-macos-only — 가짜 host 스레드와 두 경로 모두: 묶임·CLOEXEC·논블로킹·
+  SO_NOSIGPIPE(옵션을 직접 잰다 — 러너가 SIGPIPE 를 무시해 EPIPE 만으로는 못 본다)·host 가 닫은 채널에 쓰면 EPIPE·deinit 이 닫음 / 거부·`bind_ack` 형식 오류 → abandon 을 응답까지 읽고 소켓에 남은 바이트 없음 /
+  `bind_ack` 지연 → abandon 없이 채널만 닫고 1.5 초 deadline 안에 반환 / abandon 왕복 실패 → 기존 오류, 누수 없음 / 자리 없음·
+  미제공·미광고 / 수립 실패 오류가 connect 오류 집합에 없음(comptime) / public connect 진입점의 hello 미광고, 단위 4). 적대적 검증
+  회차마다 고친 자리를 돌연변이로 다시 쟀다 — 집계는 PR 본문.
 
 ### IC3 — 앱 세그먼트 표와 해석 (미착수)
 
 - `Client` 필드: 세그먼트 표·닫힌 stream 집합(이동·allowlist·digest 등록). 채널 fd 필드는 IC2b 가 둔다.
+- 채널 리더는 `state == .bound` 와 `fd >= 0` 을 함께 본다. 주 연결이 poison 되면 host 는 채널도 닫으므로(IC2a) poison 경로가 채널
+  fd 를 어떻게 놓을지 정한다 — 지금은 회수 때 `finishDeinitGraph` 가 닫는다.
 - 채널 리더(메시지당 fd 정확히 하나 검사·EMFILE 감지), resolver 를 `RemoteScreen.applySnapshot/applyDelta` 필수 인자로, 해석 결과
   세 갈래, `image_seg_hwm` 정리, 닫힌 stream 처리, release 송신, 조립기 픽셀 소유 `{heap, mapping}` 과 주입 해제.
 - 판정자: 버려진 배치가 남긴 세그먼트를 같은 stream 의 다음 배치가 치운다; detach 뒤 늦게 온 세그먼트가 즉시 반환된다; 연결 둘의
@@ -77,6 +92,9 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
   메인의 `trywrlock`·동기 적용 자리의 블로킹 잠금, 앱 `RLIMIT_NOFILE` 상향.
 - IC3 의 채널 리더는 IC4 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
 - 판정자: fork 와 「recvmsg + F_SETFD」 의 직렬화, 헬퍼 밖 spawn 금지.
+- 앱 채널 소켓 생성도 볼 것: `connectUnixUntil` 은 `socket()` 과 CLOEXEC 설정이 별개 호출이라 그 사이 fork 한 자식이 채널 소켓을
+  물려받을 수 있다(IC2b 적대적 검증 3 회차). 물려받으면 앱이 채널을 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다 — 쓰기 잠금이 채널
+  소켓 생성도 덮게 한다(주 소켓에도 원래 있는 틈이다).
 - host 쪽도 볼 것: host 가 받는 fd 는 프로토콜 위반(release 에 붙은 fd)뿐이고 owner 스레드가 받자마자 닫는다. 다른 스레드가 그
   사이에 fork 하는 자리가 host 에 있는지(IC2a 적대적 검증 2 회차 메모) 확인해 같은 잠금 범위에 넣을지 정한다.
 
@@ -97,7 +115,9 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
 
 ### IC6 — 광고를 켜고 실측 (미착수)
 
-- GUI 제품 connect 경로에서 `image_shm` 광고 플래그를 켠다.
+- 이미지 채널 리더·세그먼트 표·resolver 를 설치하는 GUI 제품 호출자가 connect 함수에 `Request.advertise` 를 넘긴다(`client_kind`
+  로 정하지 않는다 — `.gui` 로 붙지만 resolver 없이 조립기를 쓰는 소비자가 있다, 계약 §2). 그 호출 자리를 「public 진입점은
+  광고하지 않는다」 판정자의 예외로 옮긴다.
 - 실측 gate(2026-10-10 기준선과 같은 방법): terminal-browser 를 연 채 스크롤할 때
   - host 로그 `session host stream invalidated:` 0 줄, `resync sweep blocked` 의 반복 0,
   - xctrace `runloop-events` 로 16.7 ms 초과 반복이 브라우저를 닫은 상태(초당 0.3, 최대 19.9 ms)와 같은 수준,

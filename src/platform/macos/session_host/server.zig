@@ -963,6 +963,12 @@ pub const Connection = struct {
         return self.state != .pre_hello;
     }
 
+    /// 이 연결이 이미지 채널을 협상할 수 있는가 — host 가 제공하고, admin 이 아닌 제품 연결이다. hello_ack 의 `image_shm` 기능과
+    /// 협상 기록이 이 하나를 본다: 둘이 갈리면 앱은 「이미지 채널 없음」, host 는 `image_blob` 으로 형식이 어긋난다(이미지 채널 §2).
+    fn negotiatesImageChannel(self: *const Connection) bool {
+        return self.image_channel != null and self.client_kind != .admin and self.subscription_identity != null;
+    }
+
     /// 채널 자리 셈의 「handshake 를 마친 연결」인가(이미지 채널 §3.1) — hello 를 받아 열려 있는 연결만이다. 이미지 채널
     /// 연결은 token 이 이미 자리를 세고, 닫히는 연결(버전 불일치 응답을 flush 중인 것 등)은 곧 슬롯을 돌려준다.
     pub fn countsAsHandshaken(self: *const Connection) bool {
@@ -1163,7 +1169,7 @@ pub const Connection = struct {
         self.selected_version = protocol.version_major;
         self.state = .ready;
         if (self.image_channel) |ops| {
-            if (self.client_kind != .admin and self.subscription_identity != null and
+            if (self.negotiatesImageChannel() and
                 stringArrayContains(obj, "capabilities", image_channel_wire.capability))
             {
                 self.image_shm_negotiated = true;
@@ -1369,7 +1375,8 @@ pub const Connection = struct {
         };
     }
 
-    /// 앱이 이미지 채널을 못 묶었다(이미지 채널 §3.2 — token 거부·deadline·자원 고갈). attach 보다 먼저 오므로 세그먼트는
+    /// 앱이 채널 hello 뒤 거부를 받았다(이미지 채널 §3.2 — 채널 EOF·`bind_ack` 형식 오류. 시간 초과·연결 단계 실패에는 앱이
+    /// abandon 하지 않는다). attach 보다 먼저 오므로 세그먼트는
     /// 없다. 같은 연결의 두 번째 abandon·채널 없는 연결의 abandon 도 같은 응답이다 — 결과는 「이 연결에 이미지 채널 없음」
     /// 하나뿐이라 멱등이다.
     fn dispatchImageChannelAbandon(self: *Connection, request_id: u64) HandleError!Action {
@@ -3606,7 +3613,9 @@ pub const Connection = struct {
         }
         if (self.subscription_identity != null)
             append(buf, &count, catchup_barrier_contract.capability);
-        if (self.image_channel != null) append(buf, &count, image_channel_wire.capability);
+        // 이 연결이 협상할 수 있을 때만 싣는다 — 앱은 기능 목록의 `image_shm` 을 협상으로 읽으므로(이미지 채널 §2), 협상하지 않는
+        // 연결(admin·구독 표가 없는 자리)에 실으면 앱은 「이미지 채널 없음」, host 는 `image_blob` 으로 형식이 갈린다.
+        if (self.negotiatesImageChannel()) append(buf, &count, image_channel_wire.capability);
         return buf[0..count];
     }
 
@@ -9092,8 +9101,8 @@ test "image channel hello: token 은 image_shm 을 광고한 product hello 에�
         defer if (r.frame) |frame| frame.deinit(testing.allocator);
         try testing.expectEqualStrings("reply", r.action);
         const payload = r.frame.?.payload;
-        // host 가 이미지 채널을 지원한다는 사실은 기능 목록이, 이 연결의 자리는 token 필드가 말한다.
-        try testing.expect(std.mem.indexOf(u8, payload, "\"image_shm\"") != null);
+        // 협상할 수 있는 연결(product)에만 기능 목록에 실린다. 이 연결의 자리는 token 필드가 말한다.
+        try testing.expectEqual(case.product, std.mem.indexOf(u8, payload, "\"image_shm\"") != null);
         try testing.expectEqual(@intFromBool(case.token), owner.issued);
         try testing.expectEqual(case.token, conn.image_shm_negotiated);
         if (case.token) {
@@ -9122,6 +9131,7 @@ test "image channel hello: token 은 image_shm 을 광고한 product hello 에�
     const u = try feedJson(&unoffered, .hello, 1, cases[0].json);
     defer if (u.frame) |frame| frame.deinit(testing.allocator);
     try testing.expect(!unoffered.image_shm_negotiated);
+    try testing.expect(std.mem.indexOf(u8, u.frame.?.payload, "\"image_shm\"") == null);
 
     // owner 가 없는 host 는 기능 목록에도 싣지 않는다.
     var plain = Connection.init(testing.allocator, 0x1234, &registry);
@@ -9229,6 +9239,8 @@ test "image channel hello: admin 과 null role 은 채널로 가지 않고 자�
     defer if (admin_hello.frame) |frame| frame.deinit(testing.allocator);
     try testing.expectEqualStrings("reply", admin_hello.action);
     try testing.expect(std.mem.indexOf(u8, admin_hello.frame.?.payload, "image_channel_token") == null);
+    // 협상하지 않는 연결에는 기능 목록에도 싣지 않는다 — 앱이 「이미지 채널 없음」으로 읽고 host 는 image_blob 을 보내는 어긋남이 없게.
+    try testing.expect(std.mem.indexOf(u8, admin_hello.frame.?.payload, "\"image_shm\"") == null);
     try testing.expectEqual(@as(usize, 0), owner.issued);
     try testing.expect(!admin.image_shm_negotiated);
 

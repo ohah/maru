@@ -213,17 +213,28 @@ flowchart TD
 
 ## 6. 앱: 세그먼트 표와 해석
 
-- **세그먼트 표와 이미지 채널 fd 는 `Client` 필드다**(연결 축 — 앱은 여러 host 에 동시에 붙을 수 있어 id 가 섞이면 안 된다).
+- **세그먼트 표와 이미지 채널 fd 는 `Client` 가 쥔다**(연결 축 — 앱은 여러 host 에 동시에 붙을 수 있어 id 가 섞이면 안 된다).
   Client 이동(generation 노드 이동)에 함께 실리고 Client 필드 allowlist·projection digest 에 등록한다. 앱에서 fd 를 쥐는 곳은 이
-  둘(채널 끝 `Client.image_channel`, 받은 세그먼트 fd 의 표)뿐이다. 둘은 따로 둔 Client 필드다 — 표를 채널 값 안에 넣으면 seal·digest
-  의 손 나열이 그것을 빠뜨린다.
+  둘(채널 끝 `Client.image_channel`, 받은 세그먼트 fd 의 표 `Client.image_segments`)뿐이다. 둘은 따로 둔 Client 필드다 — 표를 채널
+  값 안에 넣으면 seal·digest 의 손 나열이 그것을 빠뜨린다.
+- **표는 채널이 묶일 때 heap 에 잡는다**(`Client.image_segments` 는 포인터, Client 소멸이 푼다). 표(약 4 KiB)를 값으로 들면 Client 를
+  값으로 든 external pump cleanup scratch 가 1 MiB 예산을 넘는다 — 같은 까닭으로 외부 입양 스냅샷도 표를 주소와 지문으로만 든다.
+  채널을 열기 전에 잡고(묶인 뒤에 못 잡으면 받은 fd 를 둘 곳이 없다) 묶이지 않으면 바로 푼다. 못 잡으면 채널을 열지 않는다 —
+  「이미지 채널 없음」이고 연결은 실패하지 않는다(token 은 host 의 만료로 풀린다). 그래서 채널이 묶인 적 없는 연결에는 표가 없다 —
+  그 연결의 resolver 는 빈 표와 같게 「세그먼트 없음」으로 답한다. 표는 Client 가 소멸 때 푸는 backing 이라 Client 소유 범위
+  그래프(generation 할당·R3 retirement·입양·ended purge 의 alias 증명)에 범위 하나로 들어간다.
 - 「이미지 채널 없음」 연결의 resolver: host 는 그 연결에 `image_ref` 를 내지 않는다. 다만 앱이 시간 초과로 채널을 닫은 직후처럼
   host 가 아직 묶인 것으로 아는 짧은 창에는 올 수 있다. 그 연결은 협상한 연결이라 `.unnegotiated` 가 아니라 **빈 표의 채널
   resolver** 를 넘긴다 — 그 `image_ref` 는 「세그먼트 없음」(아래 resolver 결과 둘째)이 되어 연결이 재접속하고, 재접속이 채널을 다시
   수립한다. host owner 가 계속 밀려 있으면 재접속마다 시간 초과가 되풀이될 수 있다 — 그 창은 host 가 채널 EOF 를 볼 때까지라
   짧지만, 재접속 비용은 연결의 모든 탭이 낸다.
-- 채널 리더는 매 tick 과 배치 적용 직전에 논블로킹 recvmsg 로 채널을 비운다. 메시지당 fd 가 정확히 하나가 아니면 연결을 poison
-  한다 — 앱 fd 가 바닥나면(EMFILE) 재시도한 recvmsg 가 fd 를 **조용히 버리고** 제어 버퍼 잘림 표시도 켜지 않는다(실측). 앱은
+- 채널 리더는 매 tick 과 배치 적용 직전에 논블로킹 recvmsg 로 채널을 비운다. 한 번에 메시지 하나의 나머지까지만 읽는다 — fd 는
+  메시지 첫 바이트와 함께 오므로 경계를 넘겨 읽으면 다음 메시지의 fd 를 이 메시지 몫으로 센다. 첫 조각에 fd 가 정확히 하나, 이어
+  읽는 조각에는 없어야 한다. 아니면(fd 없음·둘 이상·이어지는 조각의 fd·제어 버퍼 잘림) 받은 fd 를 모두 닫고 연결을 poison 한다
+  (`peer_contract_violation`). 앱 fd 가 바닥나면(EMFILE·ENFILE) 재시도한 recvmsg 가 fd 를 **조용히 버리고** 제어 버퍼 잘림 표시도
+  켜지 않으므로(실측) 재시도하지 않고 poison 한다(`local_resource_exhausted`). 표의 항목과 아직 못 보낸 release 의 합이 host 원장
+  상한(`image_segment_max_per_connection`)에 닿은 채 세그먼트가 더 오거나 같은 `segment_id` 가 다시 오면 host 위반이다. 채널 EOF·
+  오류·머리 불일치는 채널 상실(§3.2)이다 — 표의 fd 와 못 보낸 release 를 버리고 「이미지 채널 없음」, 주 연결은 그대로다. 앱은
   daemon 과 같이 시작 때 `RLIMIT_NOFILE` 을 올린다. 받은 fd 는 CLOEXEC 가 꺼져 있어(macOS 에 `MSG_CMSG_CLOEXEC` 가 없다) 받자마자
   켠다(§7).
 - **해석(resolver)은 적용 호출의 필수 인자다.** `ScreenAssembler`·`RemoteScreen` 의 `applySnapshot/applyDelta` 시그니처에 넣어
@@ -248,12 +259,15 @@ flowchart TD
   적용하고 나면 그 배치의 `image_seg_hwm` = H 로 표에서 stream 이 S 이고 id ≤ H 인 항목을 close + release 한다. host 는 세그먼트를
   배치보다 먼저 보냈으므로 그 항목을 가리키는 레코드는 이 배치나 그 앞 배치에만 있을 수 있다 — 아직 표에 있으면 그 배치가 버려진
   것이다. 그래서 주 파이프라인의 버림 경로(복구 discard, inbox 상한, `discardStream`, deadline 등)는 이미지 때문에 바뀌지 않는다.
-- **닫힌 stream**: stream detach·종료 정리 때 채널을 best-effort 로 비우고 그 stream 항목을 close + release 한 뒤, Client 의 「닫힌
-  stream」 집합에 넣는다. 이후 그 stream 의 세그먼트가 오면 즉시 close + release 한다. 「모르는 stream」을 죽은 것으로 보지 않는다
-  — 첫 스냅샷의 세그먼트는 attach 응답보다 먼저 올 수 있다. stream id 는 재사용되지 않으므로 집합은 연결 수명 동안 유지되고 연결당
-  stream 상한으로 묶인다. 재접속 freeze 중이나 공유 연결이 이미 끝난 경우에는 이 정리를 건너뛴다(연결 종료가 표 전체를 정리한다).
-- release 는 이미지 채널에 직접 논블로킹으로 쓴다(주 연결의 단일 송신 슬롯과 무관해 입력이 몰려도 굶지 않는다). 막히면 목록에
-  남겨 다음 tick 에 다시 쓴다(목록 크기 ≤ 표 크기).
+- **닫힌 stream**: stream detach·종료 정리 때 채널을 best-effort 로 비우고 그 stream 항목을 close + release 한다. 이후 그 stream 의
+  세그먼트가 오면 즉시 close + release 한다. host 는 연결마다 stream id 를 1 씩 늘려 매기고 재사용하지 않으므로(`Connection.next_stream_id`),
+  닫힌 stream 은 집합으로 쌓지 않고 **「attach 응답으로 알게 된 가장 큰 id 이하이면서 지금 붙어 있지 않은 stream」** 으로 판정한다 —
+  표는 지금 붙은 stream(연결당 동시 상한)과 그 최대 id 만 든다. 연결 수명 동안 자라는 집합은 attach·detach 를 되풀이하는 긴 연결에서
+  상한이 없다. 「모르는 stream」(최대 id 보다 큰 것)을 죽은 것으로 보지 않는다 — 첫 스냅샷의 세그먼트는 attach 응답보다 먼저 올 수
+  있다. 재접속 freeze 중이나 공유 연결이 이미 끝난 경우에는 이 정리를 건너뛴다(연결 종료가 표 전체를 정리한다).
+- release 는 이미지 채널에 직접 논블로킹으로 쓴다(주 연결의 단일 송신 슬롯과 무관해 입력이 몰려도 굶지 않는다). 막히면 남겨(부분
+  쓰기 포함) 다음 tick 에 다시 쓴다. 못 보낸 release 는 host 에게 아직 미반환이라 표의 항목과 합쳐 원장 상한 안이다 — 버퍼는 고정
+  크기로 넘치지 않는다. 쓰기 오류(EPIPE 등)는 채널 상실이다.
 - 렌더는 지금처럼 코어 락 아래에서 픽셀을 복사하므로 munmap 규율은 지금의 free 와 같다. 읽기·적용은 소유 스레드에서 한다.
 
 ## 7. 앱: 받은 fd 가 자식 프로세스로 새지 않게

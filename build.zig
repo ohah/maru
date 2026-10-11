@@ -6919,11 +6919,12 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            .filters = &.{"image channel connect:"},
+            // 수립(IC2b) 9 와 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison) 3.
+            .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
-        run_image_channel_connect_tests.addArg("--maru-expect-tests=9");
-        run_image_channel_connect_tests.addArg("--maru-expect-passed=9");
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=14");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=14");
         image_channel_app_step.dependOn(&run_image_channel_connect_tests.step);
         test_step.dependOn(&run_image_channel_connect_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_connect_tests.step);
@@ -6942,6 +6943,22 @@ pub fn build(b: *std.Build) void {
         image_channel_app_step.dependOn(&run_client_image_channel_tests.step);
         test_step.dependOn(&run_client_image_channel_tests.step);
         macos_only_test_step.dependOn(&run_client_image_channel_tests.step);
+        // 세그먼트 표(IC3b) — 실제 socketpair·공유 메모리로 fd 하나 규칙·닫힌 stream·hwm 정리·release·채널 상실을 잰다.
+        const client_image_segments_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/client_image_segments.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+            .filters = &.{"client image segments:"},
+        });
+        const run_client_image_segments_tests = b.addRunArtifact(client_image_segments_tests);
+        run_client_image_segments_tests.addArg("--maru-expect-tests=10");
+        run_client_image_segments_tests.addArg("--maru-expect-passed=10");
+        image_channel_app_step.dependOn(&run_client_image_segments_tests.step);
+        test_step.dependOn(&run_client_image_segments_tests.step);
+        macos_only_test_step.dependOn(&run_client_image_segments_tests.step);
         // 원격 화면이 적용 호출의 resolver 를 조립기에 그대로 넘기는가(IC3a). `remote_screen.zig` 는 macOS 전용 barrel 이다.
         const remote_screen_image_ref_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

@@ -1,7 +1,7 @@
 //! 도크 표시 값은 불변이다. 파일 I/O·문서 포인터를 컴포넌트로 보내지 않는다.
 const layout = @import("../../ui/layout.zig");
 const spacing = @import("../../ui/spacing.zig");
-pub const Row = struct { retry_label: ?[]const u8 = null, retry_semantic_label: ?[]const u8 = null, retry_enabled: bool = true, label: []const u8, index: usize, file: bool = false, expanded: bool = true, enabled: bool = true, kind: enum { normal, added, removed } = .normal };
+pub const Row = struct { check_label: ?[]const u8 = null, checked: enum { all, mixed, none } = .all, check_enabled: bool = true, retry_label: ?[]const u8 = null, retry_semantic_label: ?[]const u8 = null, retry_enabled: bool = true, label: []const u8, index: usize, file: bool = false, expanded: bool = true, enabled: bool = true, kind: enum { normal, added, removed } = .normal };
 pub const Selection = struct { left: f32, right: f32 };
 pub const Props = struct {
     viewport: layout.UiSize,

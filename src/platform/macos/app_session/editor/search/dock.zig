@@ -589,6 +589,16 @@ pub fn apply(self: *AppSession, intent: component.ids.Intent, generation: u64) v
             run(self);
         },
         .cancel => cancel(self),
+        .toggle_selection => |index| {
+            if (!canSearch(self) or !st.replacing or st.preview.active() or st.batch.active() or st.result.phase != .complete) return;
+            st.result.model.toggleSelection(self.allocator, index) catch |err| {
+                if (err == error.OutOfMemory) self.showNoticeKey(.dbg_editor_oom);
+                return;
+            };
+            st.invalidate();
+            st.result.generation +%= 1;
+            self.metal_dirty = true;
+        },
         .retry_save => |index| {
             batch_ui.retrySave(self, index) catch |err| switch (err) {
                 // 이름/원격 저장은 기존 경로가 이미 안내한다. 늦은 클릭·조합은 저장 실패로 표시하지 않는다.

@@ -263,3 +263,28 @@ test "project search dock batch action is explicit bounded and rejects stale or 
         try std.testing.expect(hidden.tree.find(44) == null);
     };
 }
+
+test "project search dock selection surface is separate from preview and rejects stale disabled input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        var p = props(160, 1200, scale);
+        p.shift = 0;
+        p.replacing = true;
+        p.rows = &.{.{ .label = "file.txt", .index = 3, .check_label = "Select file", .checked = .mixed }};
+        const f = try make(a, p);
+        var table = ids.Table.init(@constCast(f.actions));
+        table.count = f.actions.len;
+        const check = f.tree.entries[f.tree.find(build.checkId(3)).?];
+        const row = f.tree.entries[f.tree.find(build.rowId(3)).?];
+        try std.testing.expect(check.rect.x + check.rect.width <= row.rect.x);
+        const hit = interaction.hitAction(f.tree, check.rect.x + 5, check.rect.y + 5).?;
+        try std.testing.expectEqualDeep(ids.Intent{ .toggle_selection = 3 }, table.resolve(hit.action_id, p.generation).?);
+        try std.testing.expect(table.resolve(hit.action_id, p.generation + 1) == null);
+        p.rows = &.{.{ .label = "file.txt", .index = 3, .check_label = "Select file", .check_enabled = false }};
+        const disabled = try make(a, p);
+        const rect = disabled.tree.entries[disabled.tree.find(build.checkId(3)).?].rect;
+        try std.testing.expect(interaction.hitAction(disabled.tree, rect.x + 5, rect.y + 5) == null);
+    }
+}

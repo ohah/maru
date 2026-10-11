@@ -17,6 +17,48 @@ pub const Model = struct {
     keys: std.StringHashMapUnmanaged(usize) = .{},
     visible: std.ArrayList(Visible) = .empty,
     matches: usize = 0,
+    // 표시 인덱스는 접기에 따라 움직인다. 제외 목록은 소유 행과 범위의 신원을 사용한다.
+    omitted: std.AutoHashMapUnmanaged(Hit, void) = .{},
+    pub const Hit = struct { row: usize, range: usize };
+    pub const Checked = enum { all, mixed, none };
+    pub fn includes(self: *const Model, row: usize, range: usize) bool {
+        return !self.omitted.contains(.{ .row = row, .range = range });
+    }
+    pub fn selectedCount(self: *const Model) usize {
+        return self.matches - self.omitted.count();
+    }
+    pub fn checked(self: *const Model, visible: Visible) Checked {
+        switch (visible) {
+            .hit => |hit| return if (self.includes(hit.row, hit.range)) .all else .none,
+            .file => |index| {
+                const group = self.groups.items[index];
+                var selected: usize = 0;
+                for (group.rows.items) |row| for (0..self.rows.items[row].match.ranges.len) |range| {
+                    selected += @intFromBool(self.includes(row, range));
+                };
+                return if (selected == 0) .none else if (selected == group.matches) .all else .mixed;
+            },
+        }
+    }
+    pub fn toggleSelection(self: *Model, a: std.mem.Allocator, index: usize) !void {
+        if (index >= self.visible.items.len) return error.StaleRequest;
+        const visible = self.visible.items[index];
+        // 일부만 고른 상태는 전체 선택으로 바꾼다. 제외는 먼저 예약해 OOM의 부분 선택을 막는다.
+        const omit = self.checked(visible) == .all;
+        switch (visible) {
+            .hit => |hit| {
+                const key: Hit = .{ .row = hit.row, .range = hit.range };
+                if (omit) try self.omitted.put(a, key, {}) else _ = self.omitted.remove(key);
+            },
+            .file => |group| {
+                if (omit) try self.omitted.ensureUnusedCapacity(a, @intCast(self.groups.items[group].matches));
+                for (self.groups.items[group].rows.items) |row| for (0..self.rows.items[row].match.ranges.len) |range| {
+                    const key: Hit = .{ .row = row, .range = range };
+                    if (omit) self.omitted.putAssumeCapacity(key, {}) else _ = self.omitted.remove(key);
+                };
+            },
+        }
+    }
     pub fn deinit(self: *Model, a: std.mem.Allocator) void {
         for (self.groups.items) |*group| group.rows.deinit(a);
         self.groups.deinit(a);
@@ -26,6 +68,7 @@ pub const Model = struct {
         for (self.rows.items) |*row| row.match.deinit(a);
         self.rows.deinit(a);
         self.visible.deinit(a);
+        self.omitted.deinit(a);
         self.* = .{};
     }
     /// 실패해도 caller의 row는 그대로다. 모든 capacity를 예약한 뒤에만 소유권을 받는다.
@@ -219,4 +262,45 @@ test "project search dock twenty thousand matches project only a viewport and re
         try std.testing.expectEqual(measured.allocated_bytes, measured.freed_bytes);
         std.debug.print("search-dock-model allocator={s} count=20000 retained_bytes={d} append_ns={d} rebuild_ns={d} free_ns={d} window_allocations=0\n", .{ if (allocator_case == 0) "testing" else "smp", retained, append_ns, rebuild_ns, free_ns });
     }
+}
+
+test "project search dock selection survives folding and keeps independent source groups apart" {
+    const a = std.testing.allocator;
+    var model: Model = .{};
+    defer model.deinit(a);
+    try model.append(a, try sample(a, .disk, 0));
+    try model.append(a, try sample(a, .disk, 0));
+    try model.append(a, try sample(a, .disk, 1));
+    try model.rebuild(a);
+    try model.toggleSelection(a, 1);
+    try std.testing.expectEqual(@as(usize, 2), model.selectedCount());
+    try std.testing.expectEqual(Model.Checked.mixed, model.checked(.{ .file = 0 }));
+    try std.testing.expect(model.includes(2, 0));
+    model.groups.items[0].collapsed = true;
+    try model.rebuild(a);
+    try model.toggleSelection(a, 0);
+    try std.testing.expectEqual(@as(usize, 3), model.selectedCount());
+    try model.toggleSelection(a, 0);
+    try std.testing.expectEqual(@as(usize, 1), model.selectedCount());
+    try std.testing.expect(!model.includes(0, 0));
+    try std.testing.expect(!model.includes(1, 0));
+    try std.testing.expect(model.includes(2, 0));
+    try model.toggleSelection(a, 1);
+    try std.testing.expectEqual(@as(usize, 0), model.selectedCount());
+    try std.testing.expectError(error.StaleRequest, model.toggleSelection(a, 99));
+}
+
+test "project search dock selection reservation failure cannot exclude part of a file" {
+    const a = std.testing.allocator;
+    var model: Model = .{};
+    defer model.deinit(a);
+    try model.append(a, try sample(a, .disk, 0));
+    try model.append(a, try sample(a, .disk, 0));
+    try model.rebuild(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, model.toggleSelection(failing.allocator(), 0));
+    try std.testing.expectEqual(@as(usize, 2), model.selectedCount());
+    try std.testing.expect(model.includes(0, 0) and model.includes(1, 0));
+    model.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), model.omitted.count());
 }

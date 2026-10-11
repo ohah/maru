@@ -4259,3 +4259,10 @@ Undo 보존과 결과 집계, 성공 반복·닫힌 문서 거절을 검사한�
 제품 하네스의 `--replace-batch-save-retry --disk-files 2 --count 20`은 실제 AppKit 클릭·Metal 캡처로
 오른쪽·하단의 저장 실패→재시도 성공과 fixture 원문에서 계산한 최종 파일 내용을 확인한다.
 물리 IME·OS 후보창·VoiceOver 실제 조작을 확인했다고 주장하지 않는다.
+
+프로젝트 바꾸기 파일·일치 선택은 `test-editor-project-replace-batch-ui`의 RPBU10과
+`test-editor-project-search-dock`의 접힘·root 분리·OOM·선택 면·stale/disabled 입력으로 검사한다.
+`tools/test-editor-replace-batch-ui-adversarial.py --selection`은 실제 실행 실패로 변이 검출을 확인한다.
+제품 Metal 화면은 기존 `tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --count 20`으로
+오른쪽/하단 결과의 선택 면과 전체 선택 적용·Undo를 확인하며, 일부 선택의 본문 범위는 RPBU10이 확인한다.
+물리 IME·VoiceOver의 증거로 해석하지 않는다.

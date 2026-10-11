@@ -1367,3 +1367,13 @@ python3 tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --
 좁은 2× 화면이다. build한 하네스 앱은 `--app <binary>`로 재사용할 수 있다.
 수집/준비/동기 적용 시간·Plan bytes/행과 앱 RSS를 manifest에 기록한다.
 범위와 물리 OS 검증 경계는 [UI 계획](plans/editor-project-replace-batch-ui.md)을 따른다.
+
+닫힌 파일 배치의 읽기 준비·물리 신원·별칭·점유·재검증 판정:
+
+```sh
+mise exec -- zig build test-editor-project-replace-batch-disk
+mise exec -- zig build test-editor-project-replace-batch-disk -Doptimize=ReleaseFast
+python3 tools/test-editor-replace-batch-disk-adversarial.py
+```
+
+[배치 계획](plans/editor-project-replace-batch.md)의 준비 API만 검증한다. 비활성 모델 로드·제품 배치 적용은 포함하지 않는다.

@@ -4197,3 +4197,11 @@ no-op/단일 유효 편집/disk 전용 거절, 닫힌 결과 문서 재열기 �
 화면 게시 OOM을 검사한다. `test-editor-project-search-dock`는 배치 동작을 포함해 27개를 고른다.
 실제 AppKit 클릭과 오른쪽/하단 제품 Metal 화면은 [배치 UI 계획](plans/editor-project-replace-batch-ui.md)의
 하네스가 검사한다. Undo/Save fixture API 호출을 물리 키 입력이나 VoiceOver 증거로 표현하지 않는다.
+
+닫힌 파일 배치는 **읽기 준비 API만 부분 구현**이다.
+`test-editor-project-replace-batch-disk`의 `RPBD1`~`RPBD5`와 import 판정자 하나는
+같은 bytes의 inode 교체·BOM 변경·symlink/hardlink 별칭·host가 준 열린 신원 점유·마지막 충돌·
+예산·취소·잘못된 UTF-8·directory 거절 및 모든 읽기/재검증 할당 실패 정산을 검사한다.
+`tools/test-editor-replace-batch-disk-adversarial.py`는 신원/raw hash/별칭/점유/총량 보호를 제거한
+컴파일 가능한 결함과 정상·등가·복원 대조를 검사한다. 비활성 문서 로드·host 점유 신원 수집·
+배치 worker/actor/UI 연결·읽는 도중 OS 교체 타이밍은 이 gate의 증거 밖이다.

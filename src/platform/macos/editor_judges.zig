@@ -60,6 +60,7 @@ test "LOOP1 빠른 고리가 편집기 영역 모듈을 통째로 고른다 — 
 
 test {
     _ = @import("app_session/editor/search/batch/worker.zig");
+    _ = @import("app_session/editor/search/batch/disk.zig");
     _ = @import("app_session/editor/mod.zig");
     _ = @import("app_session/editor/syntax.zig");
     _ = @import("app_session/editor/diff.zig");

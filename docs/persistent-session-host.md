@@ -7341,7 +7341,7 @@ request_id:u64 | stream_id:u64 | payload_len:u32
 
 | `kind` | 값 | payload |
 | --- | ---: | --- |
-| `hello` / `hello_ack` | 1 / 2 | JSON version range, client kind, capabilities / selected version, `host_id`, capabilities |
+| `hello` / `hello_ack` | 1 / 2 | JSON version range, client kind, capabilities(이미지 채널 연결이면 `role:"image_channel"`·`token`) / selected version, `host_id`, capabilities, 선택 `image_channel_token` — 이미지 채널은 [이미지 채널](session-host-image-channel.md) §3.1 |
 | `request` / `response` | 3 / 4 | JSON command params / result or typed error |
 | `event` | 5 | JSON lifecycle/metadata/controller/`runtime.resized`/notification event |
 | `snapshot_chunk` | 6 | versioned binary neutral-screen snapshot chunk |
@@ -7621,6 +7621,7 @@ migration할 수 있다. 실행 중 PTY를 **다른 PID**로 넘기는 방식은
 | `runtime.terminate` | `runtime_id`, graceful deadline | idempotent 종료 요청과 최종 exit event |
 | `notification.subscribe` / `notification.ack` | cursor/config version / event ID | bounded pending/live event stream / 소비 확인 |
 | `config.update` | config generation, host 관련 allowlisted keys | `notifications.osc` 등 GUI 없는 동작의 검증된 snapshot 교체 |
+| `image_channel.abandon` | 없음 | 이 연결의 이미지 채널 token 을 버리고, 이미 묶인 채널이 있으면 채널 상실로 내린다. 주 연결은 유지. 이미지 채널이 없는 host 는 `unauthorized`. 계약은 [이미지 채널](session-host-image-channel.md) §3.2 |
 
 attach 성공 순서는 response metadata → `snapshot_chunk*`의 마지막 `end_stream` → 같은 generation을 base로 하는
 `delta_chunk*`다. snapshot 중 발생한 output은 host가 bounded delta로 보존하고 snapshot보다 앞서 보내지 않는다. client는

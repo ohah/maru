@@ -6772,8 +6772,71 @@ pub fn build(b: *std.Build) void {
         run_ledger_tests.addArg("--maru-expect-tests=7");
         run_ledger_tests.addArg("--maru-expect-passed=7");
         image_channel_step.dependOn(&run_ledger_tests.step);
+        // 채널 메시지 코덱과 token 표(IC2) — 둘 다 std-only leaf.
+        const wire_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/image_channel_wire.zig"),
+                .target = target,
+                .optimize = ledger_optimize,
+            }),
+        });
+        const run_wire_tests = b.addRunArtifact(wire_tests);
+        run_wire_tests.addArg("--maru-expect-tests=4");
+        run_wire_tests.addArg("--maru-expect-passed=4");
+        image_channel_step.dependOn(&run_wire_tests.step);
+        const token_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/image_channel_tokens.zig"),
+                .target = target,
+                .optimize = ledger_optimize,
+            }),
+        });
+        const run_token_tests = b.addRunArtifact(token_tests);
+        run_token_tests.addArg("--maru-expect-tests=3");
+        run_token_tests.addArg("--maru-expect-passed=3");
+        image_channel_step.dependOn(&run_token_tests.step);
     }
+    // hello 판정(role·token·자리 집행·abandon)은 `server.zig` 라 ubuntu 에서도 컴파일된다. base 파서와 같은 이유로 Debug 하나.
+    const image_channel_hello_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/server.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{ "image channel hello:", "image channel abandon:" },
+    });
+    const run_image_channel_hello_tests = b.addRunArtifact(image_channel_hello_tests);
+    run_image_channel_hello_tests.addArg("--maru-expect-tests=7");
+    run_image_channel_hello_tests.addArg("--maru-expect-passed=7");
+    image_channel_step.dependOn(&run_image_channel_hello_tests.step);
     boundary_step.dependOn(image_channel_step);
+
+    // 실제 리스너로 도는 입양·채널 상실·원장 반환·슬롯 경계(IC2). poll owner 는 macOS 소켓 경로라 macOS 잡에서 돈다.
+    const image_channel_host_step = b.step(
+        "test-image-channel-host",
+        "The host adopts an image channel after the turn, keeps the main connection on channel loss, and returns ledgers exactly once",
+    );
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        const image_channel_host_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/poll_owner.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"image channel owner:"},
+        });
+        const run_image_channel_host_tests = b.addRunArtifact(image_channel_host_tests);
+        run_image_channel_host_tests.addArg("--maru-expect-tests=12");
+        run_image_channel_host_tests.addArg("--maru-expect-passed=12");
+        image_channel_host_step.dependOn(&run_image_channel_host_tests.step);
+        test_step.dependOn(&run_image_channel_host_tests.step);
+        macos_only_test_step.dependOn(&run_image_channel_host_tests.step);
+    } else {
+        image_channel_host_step.dependOn(&b.addSystemCommand(&.{ "echo", "image channel owner judges need macOS sockets; not executed on this target" }).step);
+    }
 
     // 세그먼트 생성은 macOS 공유 메모리 syscall 이라 macOS 잡에서 돈다(읽기 전용 fd·이름 제거·CLOEXEC).
     const image_segment_step = b.step("test-image-segment", "Image channel segments are read-only, unnamed, close-on-exec shared memory");

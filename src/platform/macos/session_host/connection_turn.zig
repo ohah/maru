@@ -20,6 +20,8 @@ const upgrade_wire = @import("upgrade_wire.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const collect_failure = @import("collect_failure.zig");
+const image_channel_wire = @import("image_channel_wire.zig");
+const image_segment_ledger = @import("image_segment_ledger.zig");
 
 pub const CloseReason = enum {
     eof,
@@ -91,9 +93,50 @@ pub const Options = struct {
     pressure_reclaim: ?OwnerPressureReclaim = null,
     controller_transition: ?OwnerControllerTransition = null,
     resize: ?OwnerResize = null,
+    image_channel: ?OwnerImageChannel = null,
     now_ns: u64 = 0,
     process_identity: ?process_seal_service.ReadyIdentity = null,
 };
+
+/// 이미지 채널 자리 확보·token 표는 owner 층이다(이미지 채널 §3.1). Client 는 자기 hello 판정 때 묻고, abandon 때
+/// 자기 token 을 버리게 한다.
+pub const OwnerImageChannel = struct {
+    ctx: *anyopaque,
+    admit_hello: *const fn (ctx: *anyopaque, requester: *Client) bool,
+    issue_token: *const fn (ctx: *anyopaque, requester: *Client) ?u128,
+    drop_tokens: *const fn (ctx: *anyopaque, requester: *Client) void,
+};
+
+/// 이미지 채널을 내린 이유(이미지 채널 §3.2). 주 연결은 어느 경우에도 닫지 않는다.
+pub const ImageChannelLoss = enum {
+    /// 앱이 `image_channel.abandon` 을 보냈다(입양 뒤 늦게 온 abandon 포함).
+    abandoned,
+    /// 채널이 EOF·HUP 로 끝났다.
+    peer_closed,
+    socket_error,
+    /// 앱이 release 가 아닌 바이트나 fd 를 보냈다(§3.3).
+    protocol_error,
+    /// `bind_ack` 를 다 쓰지 못했다. 빈 소켓에 8 B 라 앱이 살아 있으면 생기지 않는다 — 앱이 이미 채널을 닫은 경우다.
+    bind_ack_send,
+};
+
+/// 이미지 fd 의 한 읽기 턴에서 받는 최대 바이트(release 256 개).
+pub const image_channel_read_bytes: usize = 256 * image_channel_wire.release_len;
+
+/// 이 맥에서 한 메시지에 실리는 fd 상한(255 개부터 `sendmsg` 가 EINVAL, 2026-10-11 실측).
+pub const image_channel_max_fds_per_message: usize = 254;
+
+/// release 에 붙어 올 수 있는 SCM_RIGHTS 를 **전부** 담는 제어 버퍼. 잘리면 커널은 fd 를 전부 설치하고 잘린 만큼은
+/// 알려 주지 않아 닫을 수 없다(이미지 채널 §10). `CMSG_SPACE(254 * 4)` 는 1028 B 다.
+pub const image_channel_control_bytes: usize = 2048;
+
+comptime {
+    // 「적정화」로 줄이면 fd 가 새는데 판정자가 못 볼 수 있다 — 상한 하나를 담는 크기 아래로는 못 내려가게 잠근다.
+    const header = std.mem.alignForward(usize, @sizeOf(c.cmsghdr), @sizeOf(u32));
+    const data = std.mem.alignForward(usize, image_channel_max_fds_per_message * @sizeOf(c.fd_t), @sizeOf(u32));
+    if (image_channel_control_bytes < header + data)
+        @compileError("image channel control buffer must hold the largest SCM_RIGHTS message the kernel accepts");
+}
 
 pub const OwnerUpgradePreflight = struct {
     ctx: *anyopaque,
@@ -352,6 +395,16 @@ pub const Client = struct {
     pressure_reclaim_available: bool = false,
     projection_global_unavailable: bool = false,
     process_identity: ?process_seal_service.ReadyIdentity = null,
+    image_channel: ?OwnerImageChannel = null,
+    /// 입양된 이미지 채널 fd(이미지 채널 §3.5). -1 이면 이 연결에 이미지 채널이 없다.
+    image_fd: c.fd_t = -1,
+    /// 이미지 채널이 묶인 동안만 있다. 연결 종료와 채널 상실이 `releaseAll` 을 정확히 한 번 부른다(§4.3).
+    image_ledger: ?image_segment_ledger.Ledger = null,
+    /// 소켓은 메시지 경계를 지키지 않는다 — 지난 읽기 끝에 남은 release 반쪽.
+    image_rx: [image_channel_wire.release_len]u8 = undefined,
+    image_rx_len: usize = 0,
+    /// 이 연결 자신이 hello{role:"image_channel"} 을 보낸 보조 연결이면 그 token. 턴이 끝난 뒤 owner 가 꺼내 입양한다.
+    image_channel_bind: ?u128 = null,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -394,6 +447,12 @@ pub const Client = struct {
             .controller_transition = options.controller_transition,
             .resize = options.resize,
             .process_identity = options.process_identity,
+            .image_channel = options.image_channel,
+        };
+        if (options.image_channel != null) self.connection.image_channel = .{
+            .ctx = self,
+            .admit_hello = admitImageChannelHello,
+            .issue_token = issueImageChannelToken,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
@@ -431,7 +490,9 @@ pub const Client = struct {
             self.admission_gate.?.cancelClose();
             self.upgrade_gate_closed = false;
         }
-        _ = c.close(self.fd);
+        // 주 연결이 닫히면 채널도 닫는다(§3.2). 입양된 보조 연결은 fd 를 주 연결로 넘겨 -1 이다.
+        self.dropImageChannel();
+        if (self.fd >= 0) _ = c.close(self.fd);
         self.fd = -1;
         self.connection.deinit();
         self.trackers.deinit(self.allocator);
@@ -510,8 +571,138 @@ pub const Client = struct {
     }
 
     pub fn hasBufferedReadWork(self: *const Client) bool {
-        return !self.isClosing() and self.close_after_flush == null and
+        return !self.isClosing() and self.close_after_flush == null and self.image_channel_bind == null and
             self.parser.bufferState() == .complete_or_error;
+    }
+
+    /// 이 보조 연결이 입양을 기다리는 token. owner 가 턴 뒤에 한 번 꺼낸다.
+    pub fn takeImageChannelBind(self: *Client) ?u128 {
+        const token = self.image_channel_bind;
+        self.image_channel_bind = null;
+        return token;
+    }
+
+    /// 채널 hello 뒤에 이미 와 있는 바이트가 있는가 — parser 에 읽힌 것과 아직 소켓에 있는 것 둘 다. 앱은 `bind_ack` 전에
+    /// 아무것도 보내지 않는다. `readReady` 는 bind 에서 읽기를 멈추므로 소켓에 남은 것은 엿봐야 보인다.
+    pub fn hasTrailingInbound(self: *const Client) bool {
+        if (self.parser.bufferedBytes() != 0) return true;
+        var byte: [1]u8 = undefined;
+        var interrupted: u8 = 0;
+        while (true) {
+            const rc = c.recv(self.fd, &byte, byte.len, posix.MSG.PEEK | posix.MSG.DONTWAIT);
+            if (rc < 0 and posix.errno(rc) == .INTR and interrupted < 8) {
+                interrupted += 1;
+                continue;
+            }
+            return rc > 0;
+        }
+    }
+
+    /// 입양 때 owner 가 보조 연결의 fd 를 떼어 간다. 이 Client 는 이후 fd 없이 destroy 된다.
+    pub fn detachFdForImageChannel(self: *Client) c.fd_t {
+        const fd = self.fd;
+        self.fd = -1;
+        return fd;
+    }
+
+    pub fn hasImageChannel(self: *const Client) bool {
+        return self.image_fd >= 0;
+    }
+
+    /// 입양할 수 있는 주 연결인가 — 닫히는 중이 아니고(응답 뒤 닫기 대기 포함) 아직 채널이 없다.
+    pub fn acceptsImageChannel(self: *const Client) bool {
+        return !self.isClosing() and self.close_after_flush == null and self.image_fd < 0;
+    }
+
+    pub fn imageLedger(self: *Client) ?*image_segment_ledger.Ledger {
+        return if (self.image_ledger) |*ledger| ledger else null;
+    }
+
+    /// 입양한 채널 fd 를 이 주 연결에 묶고 `bind_ack` 를 보낸다(§3.1). fd 의 NONBLOCK·CLOEXEC·NOSIGPIPE 는 accept 때
+    /// `configureOwnedSocket` 이 켠 fd 속성이라 옮겨도 남는다. `bind_ack` 를 다 못 쓰면 채널 상실로 내리고 false.
+    pub fn bindImageChannel(self: *Client, fd: c.fd_t, host_budget: *image_segment_ledger.HostBudget) bool {
+        std.debug.assert(self.image_fd < 0 and self.image_ledger == null);
+        self.image_fd = fd;
+        self.image_ledger = image_segment_ledger.Ledger.init(host_budget);
+        self.image_rx_len = 0;
+        const ack = image_channel_wire.encodeBindAck();
+        while (true) {
+            const rc = c.send(fd, &ack, ack.len, posix.MSG.DONTWAIT);
+            // 신호가 끼면 다시 쓴다 — 논블로킹 송신이라 기다리는 일은 없고, 8 B 를 다음 턴으로 미룰 자리가 없다.
+            if (rc < 0 and posix.errno(rc) == .INTR) continue;
+            if (rc == ack.len) return true;
+            self.loseImageChannel(.bind_ack_send);
+            return false;
+        }
+    }
+
+    /// 이미지 fd 의 읽기 턴(§3.5). release 만 읽어 원장을 바꾼다 — admission 게이트가 닫힌 동안에도 owner 가 부른다.
+    /// 받은 fd 가 있으면 닫고 채널 상실이다(앱 → host 방향에는 fd 가 없다, §3.3).
+    pub fn imageReadReady(self: *Client) void {
+        if (self.image_fd < 0) return;
+        var buf: [image_channel_read_bytes]u8 = undefined;
+        @memcpy(buf[0..self.image_rx_len], self.image_rx[0..self.image_rx_len]);
+        var filled = self.image_rx_len;
+        var control: [image_channel_control_bytes]u8 align(@alignOf(c.cmsghdr)) = undefined;
+        var iov = [_]posix.iovec{.{ .base = buf[filled..].ptr, .len = buf.len - filled }};
+        var msg: c.msghdr = .{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = &control,
+            .controllen = control.len,
+            .flags = 0,
+        };
+        var interruptions: u8 = 0;
+        const rc = while (true) {
+            const n = c.recvmsg(self.image_fd, &msg, posix.MSG.DONTWAIT);
+            if (n < 0 and posix.errno(n) == .INTR and interruptions < 8) {
+                interruptions += 1;
+                continue;
+            }
+            break n;
+        };
+        if (rc < 0) {
+            // 신호가 계속 끼면 다음 poll 로 미룬다 — 주 연결의 `readReady` 와 같다. 레벨 트리거라 다시 깨어난다.
+            if (posix.errno(rc) == .AGAIN or posix.errno(rc) == .INTR) return;
+            return self.loseImageChannel(.socket_error);
+        }
+        if (msg.controllen != 0 or msg.flags & c.MSG.CTRUNC != 0) {
+            closeReceivedFds(control[0..@min(msg.controllen, control.len)]);
+            return self.loseImageChannel(.protocol_error);
+        }
+        if (rc == 0) return self.loseImageChannel(.peer_closed);
+        filled += @intCast(rc);
+        var split: image_channel_wire.ReleaseSplit = .{ .bytes = buf[0..filled] };
+        const ledger = &self.image_ledger.?;
+        while (split.next() catch return self.loseImageChannel(.protocol_error)) |segment_id|
+            _ = ledger.release(segment_id);
+        const rest = split.rest();
+        @memcpy(self.image_rx[0..rest.len], rest);
+        self.image_rx_len = rest.len;
+    }
+
+    /// 채널 HUP/ERR(§3.5 — 레벨 트리거라 미루면 계속 깨어난다).
+    pub fn imagePeerBroken(self: *Client) void {
+        self.loseImageChannel(.peer_closed);
+    }
+
+    /// 이미지 채널을 내린다(§3.2). 원장을 전부 반환하고 「이미지 채널 없음」으로 간다. 주 연결은 그대로다.
+    pub fn loseImageChannel(self: *Client, reason: ImageChannelLoss) void {
+        if (self.image_fd < 0) return;
+        noteImageChannelLost(self.admission.index, reason, self.image_ledger.?);
+        self.dropImageChannel();
+    }
+
+    /// 채널 fd 를 닫고 원장을 반환한다. 연결 종료와 채널 상실이 모두 여기를 지나고, 두 번째 호출은 아무것도 안 한다 —
+    /// 그래서 `releaseAll` 은 연결 수명 동안 정확히 한 번이다.
+    fn dropImageChannel(self: *Client) void {
+        if (self.image_ledger) |*ledger| ledger.releaseAll();
+        self.image_ledger = null;
+        if (self.image_fd >= 0) _ = c.close(self.image_fd);
+        self.image_fd = -1;
+        self.image_rx_len = 0;
     }
 
     pub fn isClosing(self: *const Client) bool {
@@ -681,7 +872,7 @@ pub const Client = struct {
     /// One nonblocking readable turn. At most 1 MiB and 64 complete frames are admitted.
     pub fn readReady(self: *Client, now_ns: u64) void {
         if (!self.validateProcessIdentity()) return self.beginClose(.protocol_error);
-        if (self.isClosing() or self.close_after_flush != null) return;
+        if (self.isClosing() or self.close_after_flush != null or self.image_channel_bind != null) return;
         var budget: slot_mod.TurnBudget = .{};
         var buf: [64 * 1024]u8 = undefined;
         var interruptions: u8 = 0;
@@ -761,7 +952,7 @@ pub const Client = struct {
                     };
                 },
             }
-            if (self.close_after_flush != null or self.isClosing()) return true;
+            if (self.close_after_flush != null or self.isClosing() or self.image_channel_bind != null) return true;
         }
         switch (self.parser.bufferState()) {
             .incomplete => slot.notePartial(.read, now_ns, read_progressed),
@@ -1361,6 +1552,13 @@ pub const Client = struct {
                 if (!owner.apply(owner.ctx, self, resize))
                     return self.beginClose(.resource_exhausted);
             },
+            // 입양은 owner 가 턴 뒤에 한다(§3.1). 여기서는 token 만 맡기고 읽기를 멈춘다.
+            .image_channel_bind => |token| self.image_channel_bind = token,
+            .image_channel_abandon => |bytes| {
+                try self.adoptControl(bytes);
+                if (self.image_channel) |owner| owner.drop_tokens(owner.ctx, self);
+                self.loseImageChannel(.abandoned);
+            },
         }
     }
 
@@ -1749,6 +1947,44 @@ pub const Client = struct {
         self.close_ra = @returnAddress();
     }
 };
+
+fn admitImageChannelHello(ctx: *anyopaque) bool {
+    const self: *Client = @ptrCast(@alignCast(ctx));
+    const owner = self.image_channel orelse return true;
+    return owner.admit_hello(owner.ctx, self);
+}
+
+fn issueImageChannelToken(ctx: *anyopaque) ?u128 {
+    const self: *Client = @ptrCast(@alignCast(ctx));
+    const owner = self.image_channel orelse return null;
+    return owner.issue_token(owner.ctx, self);
+}
+
+/// 받은 SCM_RIGHTS 의 fd 를 모두 닫는다 — 해석하지 않을 fd 라도 프로세스에 이미 설치됐다(이미지 채널 §10). 잘린
+/// 헤더는 원래 길이를 그대로 들고 있으므로 버퍼 끝에서 자른다 — 그래야 보이는 fd 만이라도 닫는다.
+fn closeReceivedFds(control: []const u8) void {
+    var offset: usize = 0;
+    while (offset + @sizeOf(c.cmsghdr) <= control.len) {
+        const header = std.mem.bytesToValue(c.cmsghdr, control[offset..][0..@sizeOf(c.cmsghdr)]);
+        if (header.len < @sizeOf(c.cmsghdr)) return;
+        const end = @min(offset + header.len, control.len);
+        if (header.level == c.SOL.SOCKET and header.type == c.SCM.RIGHTS) {
+            const data = control[offset + @sizeOf(c.cmsghdr) .. end];
+            var i: usize = 0;
+            while (i + @sizeOf(c.fd_t) <= data.len) : (i += @sizeOf(c.fd_t))
+                _ = c.close(std.mem.bytesToValue(c.fd_t, data[i..][0..@sizeOf(c.fd_t)]));
+        }
+        offset += std.mem.alignForward(usize, header.len, @sizeOf(u32));
+    }
+}
+
+fn noteImageChannelLost(slot: usize, reason: ImageChannelLoss, ledger: image_segment_ledger.Ledger) void {
+    if (builtin.is_test) return;
+    host_log.line(
+        "session host image channel lost: slot={d} reason={s} outstanding={d} ignored_releases={d}",
+        .{ slot, @tagName(reason), ledger.count(), ledger.ignored_releases },
+    );
+}
 
 fn reserveServerUpgrade(ctx: *anyopaque) bool {
     const client: *Client = @ptrCast(@alignCast(ctx));

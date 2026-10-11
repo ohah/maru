@@ -11,6 +11,9 @@ const c = std.c;
 const posix = std.posix;
 const connection_slot = @import("connection_slot.zig");
 const connection_turn = @import("connection_turn.zig");
+const image_channel_tokens = @import("image_channel_tokens.zig");
+const image_channel_wire = @import("image_channel_wire.zig");
+const image_segment_ledger = @import("image_segment_ledger.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const server_mod = @import("server.zig");
 const socket_server = @import("socket_server.zig");
@@ -94,6 +97,14 @@ pub const Owner = struct {
     controller_transition_admission_fail_once: bool = false,
     resize_admission_fail_once: bool = false,
     process_identity: ?process_seal_service.ReadyIdentity,
+    /// 이미지 채널 token 표(이미지 채널 §3.1). 미사용 token 하나가 채널 연결 자리 하나를 확보한다 — `SlotTable`·
+    /// `ReactorCore` 에는 예약 상태가 없다.
+    image_tokens: image_channel_tokens.Table(max_clients) = .{},
+    /// host 전체 미반환 세그먼트 바이트. 모든 연결 원장이 이 하나를 가리키므로 owner 가 옮겨져도 주소가 변하지 않게
+    /// 따로 할당한다.
+    image_host_budget: *image_segment_ledger.HostBudget,
+    /// 새 연결에 이미지 채널을 제공하는가(`image_channel_wire.host_offers_image_channel`). 판정자만 미리 켠다.
+    image_channel_offered: bool = image_channel_wire.host_offers_image_channel,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -105,6 +116,9 @@ pub const Owner = struct {
         const process_identity = process_seal_service.currentReadyIdentity() catch
             if (builtin.is_test) null else return error.ProcessIdentityUnavailable;
         const reactor = try connection_slot.ReactorCore.create(allocator);
+        errdefer reactor.destroy();
+        const image_host_budget = try allocator.create(image_segment_ledger.HostBudget);
+        image_host_budget.* = .{};
         const now_ns = monotonicNow(io);
         return .{
             .allocator = allocator,
@@ -113,12 +127,14 @@ pub const Owner = struct {
             .reactor = reactor,
             .process_identity = process_identity,
             .next_cadence_ns = now_ns +| cadence_ns,
+            .image_host_budget = image_host_budget,
         };
     }
 
     pub fn deinit(self: *Owner) void {
         self.destroyAll();
         self.reactor.destroy();
+        self.allocator.destroy(self.image_host_budget);
         self.* = undefined;
     }
 
@@ -201,8 +217,10 @@ pub const Owner = struct {
         const before_poll_ns = monotonicNow(self.io);
         self.scheduleCadence(before_poll_ns);
 
-        var poll_fds: [max_clients + 2]c.pollfd = undefined;
+        // 연결당 fd 둘(주·이미지 채널, 이미지 채널 §3.5). 이미지 fd 는 주 fd 들 뒤에 둔다.
+        var poll_fds: [max_clients * 2 + 2]c.pollfd = undefined;
         var poll_slots: [max_clients]?usize = [_]?usize{null} ** max_clients;
+        var image_poll_slots: [max_clients]usize = undefined;
         // Once an upgrade closes admission, the listener must leave the readiness set. Accepting
         // and immediately rejecting peers would still consume fd/client budgets while the upgrade
         // reply is draining.
@@ -234,6 +252,17 @@ pub const Owner = struct {
             poll_slots[poll_count - 2] = slot_index;
             poll_count += 1;
         }
+        const main_poll_count = poll_count;
+        var image_poll_count: usize = 0;
+        // admission 게이트가 닫힌 동안에도 이미지 fd 는 읽는다 — release 는 원장만 바꾼다(§3.5).
+        for (self.clients, 0..) |maybe_client, slot_index| {
+            const client = maybe_client orelse continue;
+            if (!client.hasImageChannel()) continue;
+            poll_fds[poll_count] = .{ .fd = client.image_fd, .events = c.POLL.IN, .revents = 0 };
+            image_poll_slots[image_poll_count] = slot_index;
+            image_poll_count += 1;
+            poll_count += 1;
+        }
         const timeout_ms = self.pollTimeout(before_poll_ns, outer_timeout_ms);
         const rc = c.poll(&poll_fds, @intCast(poll_count), timeout_ms);
         if (rc < 0) {
@@ -260,12 +289,24 @@ pub const Owner = struct {
             return .listener_broken;
         }
 
+        // 이미지 fd 는 라운드로빈 한 턴을 기다리지 않는다. release 읽기는 작고 턴당 상한이 있으며, HUP 은 레벨 트리거라
+        // 미루면 다음 poll 이 곧바로 다시 깨어난다(§3.5).
+        for (image_poll_slots[0..image_poll_count], poll_fds[main_poll_count..poll_count]) |slot_index, pfd| {
+            if (pfd.revents == 0) continue;
+            const client = self.clients[slot_index] orelse continue;
+            if (pfd.revents & c.POLL.IN != 0)
+                client.imageReadReady()
+            else if (pfd.revents & (c.POLL.ERR | c.POLL.HUP | c.POLL.NVAL) != 0)
+                client.imagePeerBroken();
+            progressed = true;
+        }
+
         var ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var read_ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var write_ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var peer_broken: [max_clients]bool = [_]bool{false} ** max_clients;
         var poll_index: usize = 2;
-        while (poll_index < poll_count) : (poll_index += 1) {
+        while (poll_index < main_poll_count) : (poll_index += 1) {
             const slot_index = poll_slots[poll_index - 2].?;
             const revents = poll_fds[poll_index].revents;
             if (revents & c.POLL.IN != 0) read_ready[slot_index] = true;
@@ -332,6 +373,12 @@ pub const Owner = struct {
             client.tick(now_ns);
         }
         progressed = true;
+        // 이미지 채널 hello 를 받은 보조 연결은 턴이 끝난 지금 입양한다(§3.1). dispatch 안에서 하면 진행 중인
+        // dispatch 가 해제된 Slot 을 쓴다.
+        if (client.takeImageChannelBind()) |token| {
+            self.adoptImageChannel(slot_index, token);
+            return .progress;
+        }
         if (client.isClosing()) {
             const marker = client.takeArmedUpgrade();
             self.destroyClient(slot_index, if (closed_by_peer) .peer_broken else .client_closing);
@@ -406,6 +453,12 @@ pub const Owner = struct {
                     .ctx = self,
                     .apply = applyResize,
                 },
+                .image_channel = if (self.image_channel_offered) .{
+                    .ctx = self,
+                    .admit_hello = admitImageChannelHello,
+                    .issue_token = issueImageChannelToken,
+                    .drop_tokens = dropImageChannelTokens,
+                } else null,
                 .now_ns = now_ns,
             },
         ) catch |err| switch (err) {
@@ -480,12 +533,47 @@ pub const Owner = struct {
     }
 
     fn destroyClient(self: *Owner, index: usize, reason: ClientCloseReason) void {
-        const client = self.clients[index] orelse return;
+        if (self.clients[index] == null) return;
         self.logClientClosed(index, reason);
+        self.retireClient(index);
+    }
+
+    /// 슬롯 정리를 한 번만 하는 제거. 주 연결이 끝나면 그 token 도 버린다 — 확보는 주 연결 종료(`destroyAll` 포함)로
+    /// 풀린다(이미지 채널 §3.1).
+    fn retireClient(self: *Owner, index: usize) void {
+        const client = self.clients[index] orelse return;
+        _ = self.image_tokens.dropFor(client.admission.key.monotonic_id);
         self.clients[index] = null;
         self.producer_remaining[index] = 0;
         client.destroy();
         self.syncClientCount();
+    }
+
+    /// 보조 연결의 fd 를 token 이 가리키는 주 연결로 옮기고 보조 연결을 지운다(이미지 채널 §3.1). 주 연결을 못 찾으면
+    /// 보조 연결만 닫는다 — 주 연결은 어느 경우에도 건드리지 않는다(abandon 뒤 늦게 온 채널도 같다).
+    fn adoptImageChannel(self: *Owner, index: usize, token: u128) void {
+        const temp = self.clients[index] orelse return;
+        const why: []const u8 = adopt: {
+            const entry = self.image_tokens.take(token) orelse break :adopt "unknown_token";
+            // 앱은 `bind_ack` 전에 아무것도 보내지 않는다. 같이 읽힌 바이트는 입양하면 조용히 버려지고, 소켓에 남은
+            // 바이트는 release 로 읽혀 채널 상실이 된다 — 커널 분할 타이밍에 따라 갈리지 않게 여기서 거절한다.
+            if (temp.hasTrailingInbound()) break :adopt "trailing_bytes";
+            // 앱이 deadline 으로 채널을 이미 닫았다(hello 와 HUP 이 같은 poll). abandon 이 곧 주 소켓으로 온다.
+            if (temp.isClosing()) break :adopt "peer_closed";
+            const main = self.clients[entry.index] orelse break :adopt "main_gone";
+            if (main == temp or main.admission.key.monotonic_id != entry.monotonic_id) break :adopt "main_gone";
+            if (!main.acceptsImageChannel()) break :adopt "main_closing";
+            const fd = temp.detachFdForImageChannel();
+            // 입양 줄을 먼저 남긴다 — `bind_ack` 송신이 실패하면 그 뒤에 `lost:` 줄이 이어진다.
+            noteImageChannel("adopted", index, entry.index, "-");
+            _ = main.bindImageChannel(fd, self.image_host_budget);
+            // 채널은 연결이 아니라 그 연결의 두 번째 fd 다 — admitted 수를 채널만큼 부풀리지 않는다.
+            self.total_admitted -|= 1;
+            self.retireClient(index);
+            return;
+        };
+        noteImageChannel("rejected", index, null, why);
+        self.retireClient(index);
     }
 
     fn destroyAll(self: *Owner) void {
@@ -541,6 +629,8 @@ pub const Owner = struct {
     fn scheduleCadence(self: *Owner, now_ns: u64) void {
         if (now_ns < self.next_cadence_ns) return;
         self.next_cadence_ns = now_ns +| cadence_ns;
+        // 앱이 abandon 없이 사라진 token 의 바닥(이미지 채널 §3.1).
+        _ = self.image_tokens.expire(now_ns);
         self.server.sampleMetadataSources(now_ns);
         // 애니메이션은 **여기**가 유일한 시계다. 출력 wake 갈래에 두면 셸이 조용한 세션에서 영영 안 돈다 —
         // 애니메이션은 스스로 PTY 출력을 만들지 않는다(뷰포트 조정이 같은 이유로 여기 있는 것과 같다).
@@ -1029,6 +1119,44 @@ pub const Owner = struct {
         return @min(timeout_ms, std.math.cast(i32, until_ms) orelse std.math.maxInt(i32));
     }
 };
+
+fn handshakenExcept(self: *const Owner, requester: *const connection_turn.Client) usize {
+    var count: usize = 0;
+    for (self.clients) |maybe_client| {
+        const client = maybe_client orelse continue;
+        if (client != requester and client.connection.countsAsHandshaken()) count += 1;
+    }
+    return count;
+}
+
+fn admitImageChannelHello(ctx: *anyopaque, requester: *connection_turn.Client) bool {
+    const self: *Owner = @ptrCast(@alignCast(ctx));
+    return image_channel_tokens.helloAdmits(handshakenExcept(self, requester), self.image_tokens.count(), max_clients);
+}
+
+fn issueImageChannelToken(ctx: *anyopaque, requester: *connection_turn.Client) ?u128 {
+    const self: *Owner = @ptrCast(@alignCast(ctx));
+    if (!image_channel_tokens.tokenIssuable(handshakenExcept(self, requester), self.image_tokens.count(), max_clients))
+        return null;
+    var token: u128 = 0;
+    while (token == 0) c.arc4random_buf(std.mem.asBytes(&token).ptr, @sizeOf(u128));
+    const key = requester.admission.key;
+    if (!self.image_tokens.issue(token, requester.admission.index, key.monotonic_id, monotonicNow(self.io))) return null;
+    return token;
+}
+
+fn dropImageChannelTokens(ctx: *anyopaque, requester: *connection_turn.Client) void {
+    const self: *Owner = @ptrCast(@alignCast(ctx));
+    _ = self.image_tokens.dropFor(requester.admission.key.monotonic_id);
+}
+
+fn noteImageChannel(what: []const u8, slot: usize, main_slot: ?usize, why: []const u8) void {
+    if (builtin.is_test) return;
+    host_log.line(
+        "session host image channel {s}: slot={d} main_slot={?d} why={s}",
+        .{ what, slot, main_slot, why },
+    );
+}
 
 fn capTimeoutAt(now_ns: u64, deadline_ns: u64, outer_timeout_ms: i32) i32 {
     if (now_ns >= deadline_ns) return 0;
@@ -4845,4 +4973,657 @@ test "승계 preflight: 요청자는 이 host 의 클라이언트 목록에 정�
     // 0 이면 남의 요청이고, 둘 이상이면 장부가 깨진 것이다. 둘 다 승계를 걸면 안 된다.
     try t.expectEqual(Owner.PreflightRefusal.requester_not_a_member, Owner.preflightMembershipRefusal(0).?);
     try t.expectEqual(Owner.PreflightRefusal.requester_not_a_member, Owner.preflightMembershipRefusal(2).?);
+}
+
+// ── 이미지 채널 수립(docs/session-host-image-channel.md §3) ─────────────────────────────────────────────────────────
+
+fn ensureTestProcessSeal() !void {
+    _ = process_seal_service.currentReadyIdentity() catch |err| switch (err) {
+        error.NotReady => {
+            const pid = process_seal_service.currentProcessId();
+            const nonce = try process_seal_service.generateProcessNonce();
+            process_seal_service.commitReady(try process_seal_service.prepare(pid, nonce));
+            return;
+        },
+        else => return err,
+    };
+}
+
+/// 실제 리스너·owner 하나. 주소가 바뀌면 server·owner 가 쥔 포인터가 깨지므로 제자리에서 `init` 한다.
+const ImageChannelFixture = struct {
+    socket_root: ShortSocketRoot = .{},
+    runtime_registry: registry.TerminalRuntimeRegistry = undefined,
+    server: socket_server.SocketServer = undefined,
+    owner: Owner = undefined,
+
+    fn init(self: *ImageChannelFixture, leaf: []const u8) !void {
+        try self.initOffering(leaf, true);
+    }
+
+    /// `offer` 가 null 이면 제품 owner 그대로(`Owner.init` 의 기본값)를 쓴다.
+    fn initOffering(self: *ImageChannelFixture, leaf: []const u8, offer: ?bool) !void {
+        if (builtin.os.tag != .macos) return error.SkipZigTest;
+        try ensureTestProcessSeal();
+        try self.socket_root.init(leaf);
+        errdefer self.socket_root.deinit();
+        self.runtime_registry = registry.TerminalRuntimeRegistry.init(testing.allocator);
+        errdefer self.runtime_registry.deinit();
+        self.server = try socket_server.SocketServer.bind(
+            testing.allocator,
+            self.socket_root.dir,
+            self.socket_root.socket,
+            0xC1,
+            &self.runtime_registry,
+        );
+        errdefer self.server.deinit();
+        self.owner = try Owner.init(testing.allocator, testing.io, &self.server);
+        // 판정자가 시계를 쥔다 — cadence 가 끼어들면 token 만료가 판정 도중에 일어날 수 있다.
+        self.owner.next_cadence_ns = std.math.maxInt(u64);
+        // 제품은 producer 가 `image_ref` 를 낼 때(IC5)까지 제공하지 않는다. 수립 판정자는 미리 켠다.
+        if (offer) |value| self.owner.image_channel_offered = value;
+    }
+
+    fn deinit(self: *ImageChannelFixture) void {
+        self.owner.deinit();
+        self.server.deinit();
+        self.runtime_registry.deinit();
+        self.socket_root.deinit();
+    }
+
+    fn connect(self: *ImageChannelFixture) !c.fd_t {
+        const fd = try connectTestClient(self.socket_root.socket);
+        errdefer _ = c.close(fd);
+        const before = self.owner.activeCount();
+        for (0..200) |_| {
+            _ = try self.owner.pollOnce(5);
+            if (self.owner.activeCount() > before) return fd;
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    /// 주 연결 hello. `image_shm` 을 광고하면 hello_ack 의 token 을 돌려준다(없으면 null).
+    fn helloMain(self: *ImageChannelFixture, fd: c.fd_t, advertise: bool) !?u128 {
+        try sendTestRequest(fd, .hello, 1, if (advertise)
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}"
+        else
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+        const payload = try pumpFramePayload(&self.owner, fd, "host_id");
+        defer testing.allocator.free(payload);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, payload, .{});
+        defer parsed.deinit();
+        const token = parsed.value.object.get("image_channel_token") orelse return null;
+        return image_channel_wire.parseToken(token.string) orelse error.TestUnexpectedResult;
+    }
+
+    /// 두 번째 연결을 열어 채널 hello 를 보낸다. 입양되면 그 fd 로 `bind_ack` 가 온다.
+    fn openChannel(self: *ImageChannelFixture, token: u128) !c.fd_t {
+        const fd = try self.connect();
+        errdefer _ = c.close(fd);
+        try self.sendChannelHello(fd, token);
+        var ack: [image_channel_wire.bind_ack_len]u8 = undefined;
+        var got: usize = 0;
+        for (0..1000) |_| {
+            _ = try self.owner.pollOnce(2);
+            const rc = c.recv(fd, ack[got..].ptr, ack.len - got, posix.MSG.DONTWAIT);
+            if (rc < 0) {
+                if (posix.errno(rc) == .AGAIN) continue;
+                return error.TestUnexpectedResult;
+            }
+            if (rc == 0) return error.ImageChannelRejected;
+            got += @intCast(rc);
+            if (got == ack.len) {
+                try image_channel_wire.decodeBindAck(&ack);
+                return fd;
+            }
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    fn sendChannelHello(self: *ImageChannelFixture, fd: c.fd_t, token: u128) !void {
+        _ = self;
+        const text = image_channel_wire.formatToken(token);
+        var buf: [160]u8 = undefined;
+        const json = try std.fmt.bufPrint(
+            &buf,
+            "{{\"role\":\"image_channel\",\"token\":\"{s}\",\"protocol_min\":2,\"protocol_max\":2}}",
+            .{&text},
+        );
+        try sendTestRequest(fd, .hello, 1, json);
+    }
+
+    fn clientWithChannel(self: *ImageChannelFixture) ?*connection_turn.Client {
+        for (self.owner.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            if (client.hasImageChannel()) return client;
+        }
+        return null;
+    }
+
+    fn channelCount(self: *ImageChannelFixture) usize {
+        var count: usize = 0;
+        for (self.owner.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            if (client.hasImageChannel()) count += 1;
+        }
+        return count;
+    }
+
+    /// 주 연결이 아직 응답하는가 — 채널 상실이 주 연결을 닫지 않았다는 증거.
+    fn expectMainAlive(self: *ImageChannelFixture, fd: c.fd_t, request_id: u64) !void {
+        try sendTestRequest(fd, .request, request_id, "{\"method\":\"host.info\"}");
+        try pumpUntilResponse(&self.owner, fd, "\"result\"");
+    }
+
+    fn pumpUntil(self: *ImageChannelFixture, comptime predicate: fn (*ImageChannelFixture) bool) !void {
+        for (0..1000) |_| {
+            if (predicate(self)) return;
+            _ = try self.owner.pollOnce(2);
+        }
+        return error.TestUnexpectedResult;
+    }
+};
+
+fn pumpFramePayload(owner: *Owner, fd: c.fd_t, needle: []const u8) ![]u8 {
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    var buf: [4096]u8 = undefined;
+    for (0..1000) |_| {
+        _ = try owner.pollOnce(5);
+        const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+        if (rc < 0) {
+            if (posix.errno(rc) == .AGAIN) continue;
+            return error.TestUnexpectedResult;
+        }
+        if (rc == 0) return error.TestUnexpectedResult;
+        try parser.push(buf[0..@intCast(rc)]);
+        while (try parser.next()) |frame| {
+            defer frame.deinit(testing.allocator);
+            if (std.mem.indexOf(u8, frame.payload, needle) != null)
+                return testing.allocator.dupe(u8, frame.payload);
+        }
+    }
+    return error.TestUnexpectedResult;
+}
+
+fn sendAll(fd: c.fd_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rc = c.send(fd, bytes.ptr + offset, bytes.len - offset, 0);
+        if (rc <= 0) return error.TestUnexpectedResult;
+        offset += @intCast(rc);
+    }
+}
+
+fn noChannel(fx: *ImageChannelFixture) bool {
+    return fx.channelCount() == 0;
+}
+
+test "image channel owner: 입양하면 bind_ack 가 오고 보조 연결 자리가 풀리며 token 은 다시 쓰이지 않는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-adopt.sock");
+    defer fx.deinit();
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), fx.owner.image_tokens.count());
+
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    // 보조 연결의 슬롯은 입양과 함께 풀린다 — 연결 하나가 fd 둘을 쓴다.
+    try testing.expectEqual(@as(usize, 1), fx.owner.activeCount());
+    // admitted 수도 연결 하나다 — 채널은 그 연결의 두 번째 fd 다.
+    try testing.expectEqual(@as(usize, 1), fx.owner.total_admitted);
+    try testing.expectEqual(@as(usize, 0), fx.owner.image_tokens.count());
+    const main = fx.clientWithChannel() orelse return error.TestUnexpectedResult;
+    try testing.expect(main.imageLedger() != null);
+
+    // 같은 token 을 다시 쓰는 연결은 닫힌다 — 이미 묶인 채널과 주 연결은 그대로다.
+    const replay = try fx.connect();
+    defer _ = c.close(replay);
+    try fx.sendChannelHello(replay, token);
+    try pumpUntilClosed(&fx.owner, replay);
+    try testing.expectEqual(@as(usize, 1), fx.channelCount());
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+test "image channel owner: 채널 EOF 는 원장을 반환하고 주 연결을 닫지 않는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-eof.sock");
+    defer fx.deinit();
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    errdefer _ = c.close(channel_fd);
+    const ledger = fx.clientWithChannel().?.imageLedger().?;
+    const id = try ledger.reserve(1, 7, 1, 4096);
+    try testing.expect(ledger.issue(id));
+    try testing.expectEqual(@as(u64, 4096), fx.owner.image_host_budget.bytes);
+
+    _ = c.close(channel_fd);
+    try fx.pumpUntil(noChannel);
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_host_budget.bytes);
+    try testing.expectEqual(@as(usize, 1), fx.owner.activeCount());
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+test "image channel owner: release 는 반쪽으로 와도 원장을 비우고 fd 가 붙은 release 는 그 fd 를 닫고 채널만 내린다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-release.sock");
+    defer fx.deinit();
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const ledger = fx.clientWithChannel().?.imageLedger().?;
+    var ids: [3]u64 = undefined;
+    for (&ids) |*id| {
+        id.* = try ledger.reserve(1, 7, 1, 100);
+        try testing.expect(ledger.issue(id.*));
+    }
+
+    // 둘을 한 번에, 셋째는 두 조각으로 — 소켓은 메시지 경계를 지키지 않는다.
+    var two: [image_channel_wire.release_len * 2]u8 = undefined;
+    @memcpy(two[0..image_channel_wire.release_len], &(try image_channel_wire.encodeRelease(ids[0])));
+    @memcpy(two[image_channel_wire.release_len..], &(try image_channel_wire.encodeRelease(ids[1])));
+    try sendAll(channel_fd, &two);
+    const third = try image_channel_wire.encodeRelease(ids[2]);
+    try sendAll(channel_fd, third[0..5]);
+    for (0..200) |_| {
+        _ = try fx.owner.pollOnce(2);
+        if (ledger.count() == 1) break;
+    }
+    try testing.expectEqual(@as(usize, 1), ledger.count());
+    try sendAll(channel_fd, third[5..]);
+    for (0..200) |_| {
+        _ = try fx.owner.pollOnce(2);
+        if (ledger.count() == 0) break;
+    }
+    // 원장이 빈 것만으로는 「읽었다」와 「채널을 잃었다(releaseAll)」가 갈리지 않는다 — 채널이 살아 있어야 한다.
+    try testing.expectEqual(@as(usize, 1), fx.channelCount());
+    try testing.expectEqual(@as(usize, 0), ledger.count());
+    try testing.expectEqual(@as(u64, 0), ledger.ignored_releases);
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_host_budget.bytes);
+
+    // 앱 → host 방향에는 fd 가 없다. 붙어 오면 host 는 그 fd 를 닫는다 — 파이프 쓰기 끝을 실어 보내고 우리 몫을 닫은
+    // 뒤 읽기 끝이 EOF 를 보면 host 도 닫은 것이다(새면 쓰기 끝이 살아 있어 EAGAIN).
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.TestUnexpectedResult;
+    defer _ = c.close(pipe_fds[0]);
+    var write_end_open = true;
+    defer if (write_end_open) {
+        _ = c.close(pipe_fds[1]);
+    };
+    _ = c.fcntl(pipe_fds[0], c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+    var control: [16]u8 align(@alignOf(c.cmsghdr)) = @splat(0);
+    const header: c.cmsghdr = .{ .len = 16, .level = c.SOL.SOCKET, .type = c.SCM.RIGHTS };
+    @memcpy(control[0..@sizeOf(c.cmsghdr)], std.mem.asBytes(&header));
+    @memcpy(control[@sizeOf(c.cmsghdr)..][0..@sizeOf(c.fd_t)], std.mem.asBytes(&pipe_fds[1]));
+    const payload = try image_channel_wire.encodeRelease(99);
+    var iov = [_]posix.iovec_const{.{ .base = &payload, .len = payload.len }};
+    const msg: c.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = control.len,
+        .flags = 0,
+    };
+    if (c.sendmsg(channel_fd, &msg, 0) != payload.len) return error.TestUnexpectedResult;
+    _ = c.close(pipe_fds[1]);
+    write_end_open = false;
+    try fx.pumpUntil(noChannel);
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), c.read(pipe_fds[0], &byte, 1));
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+test "image channel owner: 주 연결 종료와 destroyAll 이 그 연결의 원장만 정확히 반환한다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-release-all.sock");
+    defer fx.deinit();
+
+    var mains: [2]c.fd_t = .{ -1, -1 };
+    var channels: [2]c.fd_t = .{ -1, -1 };
+    errdefer for (mains ++ channels) |fd| {
+        if (fd >= 0) _ = c.close(fd);
+    };
+    for (&mains, &channels, [_]u64{ 300, 500 }) |*main_fd, *channel_fd, bytes| {
+        main_fd.* = try fx.connect();
+        const token = (try fx.helloMain(main_fd.*, true)) orelse return error.TestUnexpectedResult;
+        const before = fx.channelCount();
+        channel_fd.* = try fx.openChannel(token);
+        try testing.expectEqual(before + 1, fx.channelCount());
+        // 방금 묶인 연결을 찾는다 — 원장이 빈 쪽이다.
+        for (fx.owner.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            const ledger = client.imageLedger() orelse continue;
+            if (ledger.count() != 0) continue;
+            const id = try ledger.reserve(1, 1, 1, bytes);
+            try testing.expect(ledger.issue(id));
+        }
+    }
+    try testing.expectEqual(@as(u64, 800), fx.owner.image_host_budget.bytes);
+
+    // 첫 주 연결을 닫으면 그 연결 몫(300)만 돌아온다 — 남의 원장을 건드리지도, 두 번 빼지도 않는다.
+    _ = c.close(mains[0]);
+    for (0..500) |_| {
+        _ = try fx.owner.pollOnce(2);
+        if (fx.owner.activeCount() == 1) break;
+    }
+    try testing.expectEqual(@as(usize, 1), fx.owner.activeCount());
+    try testing.expectEqual(@as(u64, 500), fx.owner.image_host_budget.bytes);
+
+    fx.owner.destroyAll();
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_host_budget.bytes);
+    _ = c.close(mains[1]);
+    for (channels) |fd| _ = c.close(fd);
+}
+
+test "image channel owner: 슬롯 경계에서 token 이 안 나가고 확보된 자리를 다른 hello 가 못 먹는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-slots.sock");
+    defer fx.deinit();
+
+    var plain: [max_clients]c.fd_t = undefined;
+    var plain_count: usize = 0;
+    defer for (plain[0..plain_count]) |fd| {
+        _ = c.close(fd);
+    };
+    // 30 개가 붙어 있으면 31 번째 주 연결과 그 채널까지 정확히 32 자리다.
+    while (plain_count < max_clients - 2) : (plain_count += 1) {
+        plain[plain_count] = try fx.connect();
+        try testing.expectEqual(@as(?u128, null), try fx.helloMain(plain[plain_count], false));
+    }
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+
+    // 32 번째 슬롯은 아직 비었지만 token 의 몫이다 — 다른 hello 는 닫힌다.
+    const intruder = try fx.connect();
+    defer _ = c.close(intruder);
+    try sendTestRequest(intruder, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try pumpUntilClosed(&fx.owner, intruder);
+    for (0..50) |_| _ = try fx.owner.pollOnce(1);
+
+    // 그래서 채널은 자리를 찾는다.
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    try testing.expectEqual(@as(usize, 1), fx.channelCount());
+
+    // 이제 31 개가 handshake 를 마쳤다. 32 번째 주 연결은 hello 는 성공하지만 채널 자리가 없어 token 이 없다.
+    const last = try fx.connect();
+    defer _ = c.close(last);
+    try testing.expectEqual(@as(?u128, null), try fx.helloMain(last, true));
+    try testing.expectEqual(@as(usize, 0), fx.owner.image_tokens.count());
+}
+
+test "image channel owner: abandon 뒤 늦게 온 채널과 입양 뒤 늦게 온 abandon 은 주 연결을 닫지 않는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-abandon.sock");
+    defer fx.deinit();
+
+    // abandon 이 먼저: token 이 버려져 늦게 온 채널만 닫힌다.
+    const early = try fx.connect();
+    defer _ = c.close(early);
+    const early_token = (try fx.helloMain(early, true)) orelse return error.TestUnexpectedResult;
+    try sendTestRequest(early, .request, 2, "{\"method\":\"image_channel.abandon\"}");
+    try pumpUntilResponse(&fx.owner, early, "\"result\"");
+    try testing.expectEqual(@as(usize, 0), fx.owner.image_tokens.count());
+    try testing.expectError(error.ImageChannelRejected, fx.openChannel(early_token));
+    try fx.expectMainAlive(early, 3);
+
+    // abandon 은 자기 token 만 버린다 — 다른 주 연결의 확보는 그대로라 그 채널은 묶인다.
+    const bystander = try fx.connect();
+    defer _ = c.close(bystander);
+    const bystander_token = (try fx.helloMain(bystander, true)) orelse return error.TestUnexpectedResult;
+    const quitter = try fx.connect();
+    defer _ = c.close(quitter);
+    _ = (try fx.helloMain(quitter, true)) orelse return error.TestUnexpectedResult;
+    try sendTestRequest(quitter, .request, 2, "{\"method\":\"image_channel.abandon\"}");
+    try pumpUntilResponse(&fx.owner, quitter, "\"result\"");
+    try testing.expectEqual(@as(usize, 1), fx.owner.image_tokens.count());
+    const bystander_channel = try fx.openChannel(bystander_token);
+    defer _ = c.close(bystander_channel);
+    try testing.expectEqual(@as(usize, 1), fx.channelCount());
+
+    // 입양이 먼저: abandon 이 채널을 내리고(채널 EOF) 주 연결은 남는다.
+    const late = try fx.connect();
+    defer _ = c.close(late);
+    const late_token = (try fx.helloMain(late, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(late_token);
+    defer _ = c.close(channel_fd);
+    try sendTestRequest(late, .request, 2, "{\"method\":\"image_channel.abandon\"}");
+    try pumpUntilResponse(&fx.owner, late, "\"result\"");
+    // 방관자의 채널은 남는다.
+    try testing.expectEqual(@as(usize, 1), fx.channelCount());
+    try pumpUntilClosed(&fx.owner, channel_fd);
+    try fx.expectMainAlive(late, 3);
+}
+
+test "image channel owner: 미사용 token 이 있어도 destroyAll 과 업그레이드 drain 은 막히지 않고 만료는 cadence 가 한다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-drain.sock");
+    defer fx.deinit();
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    _ = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), fx.owner.image_tokens.count());
+
+    // 만료: 발급 시각을 과거로 돌리고 cadence 를 한 번 열면 token 이 사라진다.
+    fx.owner.image_tokens.entries[0].issued_ns = 0;
+    fx.owner.next_cadence_ns = 0;
+    _ = try fx.owner.pollOnce(0);
+    fx.owner.next_cadence_ns = std.math.maxInt(u64);
+    try testing.expectEqual(@as(usize, 0), fx.owner.image_tokens.count());
+
+    // 다시 발급받은 token 을 쥔 채 destroyAll — token 은 주 연결과 함께 사라지고 drain 판정은 token 을 보지 않는다.
+    const second = try fx.connect();
+    defer _ = c.close(second);
+    _ = (try fx.helloMain(second, true)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), fx.owner.image_tokens.count());
+    fx.owner.destroyAll();
+    try testing.expectEqual(@as(usize, 0), fx.owner.image_tokens.count());
+    try testing.expect(fx.owner.upgradeTeardownDrained());
+    // drain 판정은 token 을 보지 않는다 — 남은 token(주 연결 없이)이 있어도 handoff 를 막지 않는다.
+    try testing.expect(fx.owner.image_tokens.issue(0x77, 0, 999, 0));
+    try testing.expect(fx.owner.upgradeTeardownDrained());
+    _ = fx.owner.image_tokens.dropFor(999);
+}
+
+fn sendReleaseWithFds(channel_fd: c.fd_t, fds: []const c.fd_t) !void {
+    var control: [connection_turn.image_channel_control_bytes]u8 align(@alignOf(c.cmsghdr)) = @splat(0);
+    const data_len = fds.len * @sizeOf(c.fd_t);
+    const header: c.cmsghdr = .{ .len = @intCast(@sizeOf(c.cmsghdr) + data_len), .level = c.SOL.SOCKET, .type = c.SCM.RIGHTS };
+    @memcpy(control[0..@sizeOf(c.cmsghdr)], std.mem.asBytes(&header));
+    @memcpy(control[@sizeOf(c.cmsghdr)..][0..data_len], std.mem.sliceAsBytes(fds));
+    const payload = try image_channel_wire.encodeRelease(99);
+    var iov = [_]posix.iovec_const{.{ .base = &payload, .len = payload.len }};
+    const msg: c.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = @intCast(std.mem.alignForward(usize, @sizeOf(c.cmsghdr) + data_len, @sizeOf(u32))),
+        .flags = 0,
+    };
+    if (c.sendmsg(channel_fd, &msg, 0) != payload.len) return error.TestUnexpectedResult;
+}
+
+test "image channel owner: fd 가 많이 붙은 release 도 받은 fd 를 모두 닫는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-many-fds.sock");
+    defer fx.deinit();
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+
+    // 파이프 쓰기 끝의 사본을 커널 상한(254 개)만큼 한 메시지에 싣는다. 제어 버퍼가 작으면 커널은 전부 설치하고 잘린
+    // 만큼은 알려 주지 않는다 — 하나라도 남으면 쓰기 끝이 살아 있어 읽기 끝이 EOF 를 못 본다. 보내는 쪽과 받는 쪽이
+    // 같은 프로세스라 fd 가 두 배로 필요하다 — 기본 연성 상한 256 으로는 모자라 올린다.
+    const original_limit = try posix.getrlimit(.NOFILE);
+    defer posix.setrlimit(.NOFILE, original_limit) catch {};
+    if (original_limit.cur < 2048) {
+        var raised = original_limit;
+        raised.cur = @min(original_limit.max, 2048);
+        try posix.setrlimit(.NOFILE, raised);
+    }
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.TestUnexpectedResult;
+    defer _ = c.close(pipe_fds[0]);
+    _ = c.fcntl(pipe_fds[0], c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+    var copies: [connection_turn.image_channel_max_fds_per_message]c.fd_t = undefined;
+    var opened: usize = 0;
+    defer for (copies[0..opened]) |fd| {
+        _ = c.close(fd);
+    };
+    while (opened < copies.len) : (opened += 1) {
+        copies[opened] = c.dup(pipe_fds[1]);
+        if (copies[opened] < 0) {
+            _ = c.close(pipe_fds[1]);
+            return error.TestUnexpectedResult;
+        }
+    }
+    _ = c.close(pipe_fds[1]);
+    try sendReleaseWithFds(channel_fd, &copies);
+    for (copies) |fd| _ = c.close(fd);
+    opened = 0;
+    try fx.pumpUntil(noChannel);
+    var byte: [1]u8 = undefined;
+    try testing.expectEqual(@as(isize, 0), c.read(pipe_fds[0], &byte, 1));
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+test "image channel owner: admission 게이트가 닫혀도 이미지 fd 의 release 를 읽는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-gate.sock");
+    defer fx.deinit();
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const ledger = fx.clientWithChannel().?.imageLedger().?;
+    const id = try ledger.reserve(1, 7, 1, 100);
+    try testing.expect(ledger.issue(id));
+
+    // 업그레이드가 게이트를 닫으면 주 fd 는 poll 에서 빠진다. release 는 원장만 바꾸므로 계속 읽어야 한다(§3.5).
+    var gate = upgrade.AdmissionGate.init(testing.io);
+    fx.server.admission_gate = &gate;
+    defer fx.server.admission_gate = null;
+    try testing.expect(gate.close());
+    try sendAll(channel_fd, &(try image_channel_wire.encodeRelease(id)));
+    for (0..200) |_| {
+        _ = try fx.owner.pollOnce(2);
+        if (ledger.count() == 0) break;
+    }
+    // 채널을 잃어도 원장은 빈다 — 읽었다는 증거는 채널이 살아 있고 무시된 release 가 없는 것이다.
+    try testing.expectEqual(@as(usize, 1), fx.channelCount());
+    try testing.expectEqual(@as(usize, 0), ledger.count());
+    try testing.expectEqual(@as(u64, 0), ledger.ignored_releases);
+    gate.reopen();
+}
+
+test "image channel owner: 제품 owner 는 제공 스위치를 그대로 따른다" {
+    var fx: ImageChannelFixture = .{};
+    // 덮어쓰지 않는다 — 제품 `Owner.init` 의 기본값이 스위치를 따르는지가 재는 대상이다.
+    try fx.initOffering("ic-offer.sock", null);
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    try sendTestRequest(main_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}");
+    const payload = try pumpFramePayload(&fx.owner, main_fd, "host_id");
+    defer testing.allocator.free(payload);
+    // producer 가 `image_ref` 를 내기 전(IC5 전)에는 광고도 token 도 없다 — 스위치와 배선이 같은 값을 말한다.
+    const offered = image_channel_wire.host_offers_image_channel;
+    try testing.expectEqual(offered, std.mem.indexOf(u8, payload, "\"image_shm\"") != null);
+    try testing.expectEqual(offered, std.mem.indexOf(u8, payload, "image_channel_token") != null);
+}
+
+test "image channel owner: 채널 hello 와 함께 온 바이트가 있으면 입양하지 않는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-trailing.sock");
+    defer fx.deinit();
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+
+    // 앱은 `bind_ack` 전에 아무것도 보내지 않는다. 채널 hello 와 다른 frame 을 한 번에 쓰면 거절된다 — 입양하면 그
+    // 바이트가 조용히 버려지거나 release 로 읽혀, 커널 분할 타이밍에 따라 결과가 갈린다.
+    const channel_fd = try fx.connect();
+    defer _ = c.close(channel_fd);
+    const text = image_channel_wire.formatToken(token);
+    var json_buf: [160]u8 = undefined;
+    const hello_json = try std.fmt.bufPrint(
+        &json_buf,
+        "{{\"role\":\"image_channel\",\"token\":\"{s}\",\"protocol_min\":2,\"protocol_max\":2}}",
+        .{&text},
+    );
+    const hello = try framing.encodeFrame(testing.allocator, .{ .kind = .hello, .request_id = 1 }, hello_json);
+    defer testing.allocator.free(hello);
+    const extra = try framing.encodeFrame(testing.allocator, .{ .kind = .request, .request_id = 2 }, "{\"method\":\"host.info\"}");
+    defer testing.allocator.free(extra);
+    const both = try std.mem.concat(testing.allocator, u8, &.{ hello, extra });
+    defer testing.allocator.free(both);
+    try sendAll(channel_fd, both);
+    try pumpUntilClosed(&fx.owner, channel_fd);
+    try testing.expectEqual(@as(usize, 0), fx.channelCount());
+    // token 은 한 번 쓰였다 — 같은 token 으로 다시 열 수 없다.
+    try testing.expectEqual(@as(usize, 0), fx.owner.image_tokens.count());
+    try fx.expectMainAlive(main_fd, 2);
+
+    // frame 이 아닌 바이트(release 반쪽)가 같이 와도 같다 — parser 가 frame 으로 못 묶는 바이트도 거절 대상이다.
+    const second_main = try fx.connect();
+    defer _ = c.close(second_main);
+    const second_token = (try fx.helloMain(second_main, true)) orelse return error.TestUnexpectedResult;
+    const second_channel = try fx.connect();
+    defer _ = c.close(second_channel);
+    const second_text = image_channel_wire.formatToken(second_token);
+    const second_json = try std.fmt.bufPrint(
+        &json_buf,
+        "{{\"role\":\"image_channel\",\"token\":\"{s}\",\"protocol_min\":2,\"protocol_max\":2}}",
+        .{&second_text},
+    );
+    const second_hello = try framing.encodeFrame(testing.allocator, .{ .kind = .hello, .request_id = 1 }, second_json);
+    defer testing.allocator.free(second_hello);
+    const release = try image_channel_wire.encodeRelease(1);
+    const partial = try std.mem.concat(testing.allocator, u8, &.{ second_hello, release[0..5] });
+    defer testing.allocator.free(partial);
+    try sendAll(second_channel, partial);
+    try pumpUntilClosed(&fx.owner, second_channel);
+    try testing.expectEqual(@as(usize, 0), fx.channelCount());
+}
+
+test "image channel owner: 입양 순간의 남은 바이트 검사는 아직 소켓에 있는 바이트도 본다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-peek.sock");
+    defer fx.deinit();
+
+    // `readReady` 는 bind 에서 읽기를 멈추므로 그 뒤에 도착한 바이트는 parser 에 없다. 입양 직전의 검사는 그것도 봐야
+    // 한다 — 아직 owner 가 읽지 않은 연결로 같은 상태를 만든다(parser 는 비었고 소켓에만 바이트가 있다).
+    const fd = try fx.connect();
+    defer _ = c.close(fd);
+    const client = for (fx.owner.clients) |maybe_client| {
+        const candidate = maybe_client orelse continue;
+        if (!candidate.connection.handshakeComplete()) break candidate;
+    } else return error.TestUnexpectedResult;
+    try testing.expect(!client.hasTrailingInbound());
+    try sendAll(fd, "x");
+    for (0..200) |_| {
+        if (client.hasTrailingInbound()) break;
+        _ = usleep(1000);
+    }
+    try testing.expect(client.hasTrailingInbound());
 }

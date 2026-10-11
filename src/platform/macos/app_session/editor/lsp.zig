@@ -134,6 +134,9 @@ pub const Client = struct {
     started_at_ms: u64 = 0,
     /// 신뢰 결정을 기다린다(이 root 의 모달이 떠 있거나, 다른 root 의 모달이 먼저거나, 다른 창이 같은 저장소를 묻는다) — 띄우지 않는다.
     trust_pending: bool = false,
+    /// 이 저장소의 셸 환경을 읽는 중이라 띄우기를 미뤘다(`.preparing` — 계획 workspace-trust WT5b-2). `pumpClient` 가 다시 띄우기를 건다
+    /// (문서 없이 재시작을 기다리던 클라이언트는 gate 를 안 지난다).
+    root_env_wait: bool = false,
     /// 이 root 의 신뢰 키(실제 경로·볼륨 — `trust_store.keyFor`). 처음 신뢰를 볼 때 구해 굳힌다.
     trust_key: ?OwnedKey = null,
     /// 실제로 띄운 실행 파일 경로(소유) — `spawnClient` 가 띄울 때 굳힌다(gate 가 찾은 경로와 다를 수 있다 — 그 사이 셸 환경을 다시
@@ -571,6 +574,7 @@ fn rekeyRoot(self: *AppSession, root: []const u8, key: lsp.trust.Key) void {
         };
         if (old.key().eql(key)) continue;
         if (st.asking_key) |ak| if (ak.key().eql(old.key())) dropTrustPrompt(self);
+        tool_env.forgetRoot(root); // 그 저장소의 셸 환경도 옛 대상의 것이다(계획 WT5b-2)
         const owned = OwnedKey.dupe(self.allocator, key) catch continue;
         old.deinit(self.allocator);
         o.trust_key = owned;
@@ -863,8 +867,8 @@ const exe_origin = lsp.exe_origin;
 
 /// 사용자 셸 환경(`tool_env.envp()`)의 변수 — 실행 파일의 출처를 그 환경의 자리 변수(`MISE_DATA_DIR` 등)로 가른다(앱 환경과 갈리면
 /// 서버가 실제로 받은 자리와 어긋난다).
-fn toolEnvValue(_: void, name: []const u8) ?[]const u8 {
-    const envp = tool_env.envp() orelse return null;
+fn toolEnvValue(env: ?[*:null]const ?[*:0]const u8, name: []const u8) ?[]const u8 {
+    const envp = env orelse return null;
     var i: usize = 0;
     while (envp[i]) |e| : (i += 1) {
         const s = std.mem.span(e);
@@ -877,13 +881,18 @@ fn toolEnvValue(_: void, name: []const u8) ?[]const u8 {
 /// 심링크든)인지로 잰다 — 그 폴더(`~/.cargo/bin`·Homebrew rustup 의 bin)엔 `cargo install` 한 일반 바이너리도 있다. 사용자 셸 환경을
 /// 담은 뒤에만 부른다(자리 변수).
 fn exeOrigin(path: []const u8, root: []const u8, real_root: []const u8) exe_origin.Origin {
-    const home = toolEnvValue({}, "HOME") orelse (if (std.c.getenv("HOME")) |h| std.mem.span(h) else "");
+    return exeOriginIn(path, root, real_root, tool_env.envp());
+}
+
+/// `exeOrigin` + 그 서버가 받은 환경(`envp` — 저장소의 셸 환경일 수 있다, 계획 WT5b-2)의 자리 변수로.
+fn exeOriginIn(path: []const u8, root: []const u8, real_root: []const u8, envp: ?[*:null]const ?[*:0]const u8) exe_origin.Origin {
+    const home = toolEnvValue(envp, "HOME") orelse (if (std.c.getenv("HOME")) |h| std.mem.span(h) else "");
     const proxy = sameFileAsSibling(path, "rustup");
     // 저장소 안인지는 실행 파일의 실제 경로로도 본다(보이는 경로는 PATH 표기 그대로라 root 의 실제 경로와 표기가 갈린다 — 적대적 검증).
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
     const real_path: ?[]const u8 = if (std.fmt.bufPrintZ(&z, "{s}", .{path})) |pz| (if (std.c.realpath(pz.ptr, &real_buf)) |r| std.mem.sliceTo(r, 0) else null) else |_| null;
-    return exe_origin.classify(path, real_path, &.{ root, real_root }, home, {}, toolEnvValue, proxy);
+    return exe_origin.classify(path, real_path, &.{ root, real_root }, home, envp, toolEnvValue, proxy);
 }
 
 /// `path` 가 같은 폴더의 `name` 과 같은 파일인가(장치·inode — 링크를 따라간다).
@@ -920,10 +929,10 @@ test "LSPB42 앱 로그의 경로 사본 — 제어 문자는 공백(서버 문�
 }
 
 /// 띄웠다 — 경로를 굳히고 지난 서버의 이름·버전을 지운다. 앱 로그에 한 줄(tooling §8.1 「실제 executable 을 trace 에 노출」).
-fn recordLaunch(self: *AppSession, c: *Client, path: []const u8) void {
+fn recordLaunch(self: *AppSession, c: *Client, path: []const u8, envp: [*:null]const ?[*:0]const u8) void {
     if (c.launched_path) |p| self.allocator.free(p);
     c.launched_path = self.allocator.dupe(u8, path) catch null;
-    c.launched_origin = exeOrigin(path, c.root, if (c.trust_key) |k| k.path else c.root);
+    c.launched_origin = exeOriginIn(path, c.root, if (c.trust_key) |k| k.path else c.root, envp);
     if (c.server_name) |n| self.allocator.free(n);
     if (c.server_version) |v| self.allocator.free(v);
     c.server_name = null;
@@ -1395,22 +1404,25 @@ fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server,
 
 fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     if (!trustKeyHolds(self, c)) return;
-    // 환경을 담기 전에는 띄우지 않는다(gate 가 먼저 막지만 문서 없이 재시작을 기다리던 클라이언트도 여기로 온다).
-    const env = tool_env.envp() orelse {
+    // 환경을 담기 전에는 띄우지 않는다(gate 가 먼저 막지만 문서 없이 재시작을 기다리던 클라이언트도 여기로 온다). 이 저장소는 신뢰했다 —
+    // 그 저장소의 셸 환경(계획 WT5b-2 — 루트로 `cd` 한 로그인 셸; 끄거나 못 읽으면 홈 환경)으로 찾고 띄운다. 읽는 중이면 미룬다.
+    const view = tool_env.rootView(c.root, repoEnvironmentEnabled(self)) orelse {
         c.phase = .preparing;
+        c.root_env_wait = true;
         return;
     };
+    c.root_env_wait = false;
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) orelse {
+    const exe = lsp_process.locate(c.server.exe, view.path, &pbuf) orelse {
         c.phase = .missing;
         return;
     };
-    const proc = lsp_process.spawn(self.allocator, exe, c.server.args, c.root, env) catch {
+    const proc = lsp_process.spawn(self.allocator, exe, c.server.args, c.root, view.envp) catch {
         scheduleRestart(self, c, now_ms);
         return;
     };
     c.proc = proc;
-    recordLaunch(self, c, exe);
+    recordLaunch(self, c, exe, view.envp);
     c.inbuf.clearRetainingCapacity();
     c.encoding = .utf16;
     c.shutdown_at_ms = 0;
@@ -1578,8 +1590,14 @@ pub fn environmentExcludeOverride() ?[]const u8 {
     return tool_env.excludedOverride();
 }
 
-/// 팔레트 「Language Server: Reload Shell Environment」 — 사용자 셸 환경을 다시 읽는다(셸 설정을 고친 뒤). 떠 있는 서버는 다시 띄울 때
-/// 새 환경을 쓴다.
+/// 이 창의 설정 `lsp.repository-environment`(계획 workspace-trust WT5b-2 — 기본 켜짐). 셸 환경 스위치가 꺼져 있으면 `tool_env` 가 홈
+/// 환경(대체)을 준다.
+fn repoEnvironmentEnabled(self: *AppSession) bool {
+    return self.loaded_config.config.lsp.repository_environment;
+}
+
+/// 팔레트 「Language Server: Reload Shell Environment」 — 사용자 셸 환경을 다시 읽는다(셸 설정을 고친 뒤 — 저장소의 셸 환경도 함께, 계획
+/// WT5b-2). 떠 있는 서버는 다시 띄울 때 새 환경을 쓴다.
 pub fn reloadShellEnvironment(self: *AppSession) void {
     if (!self.loaded_config.config.lsp.enabled) return self.showNoticeKey(.lsp_reload_env_disabled);
     tool_env.reload(self.loaded_config.config.lsp.shell_environment);
@@ -1589,8 +1607,10 @@ pub fn reloadShellEnvironment(self: *AppSession) void {
 fn pumpClient(self: *AppSession, c: *Client, now_ms: u64) void {
     switch (c.phase) {
         .restarting => if (!c.trust_pending and now_ms >= c.retry_at_ms) spawnClient(self, c, now_ms),
+        // 이 저장소의 셸 환경을 기다린다(계획 WT5b-2) — 다 되면 띄운다(`spawnClient` 가 다시 미루거나 띄운다).
+        .preparing => if (c.root_env_wait and !c.trust_pending) spawnClient(self, c, now_ms) else return,
         .starting, .ready => {},
-        .missing, .preparing, .asking, .denied, .failed, .home_root, .outside_repo, .unasked => return,
+        .missing, .asking, .denied, .failed, .home_root, .outside_repo, .unasked => return,
     }
     const p = &(c.proc orelse return);
     // 밀린 쓰기가 상한을 넘었다 — 서버가 stdin 을 안 읽는다. 죽은 것으로 보고 재시작 경로로(§8.2a).
@@ -1943,6 +1963,16 @@ fn gateTrust(self: *AppSession, c: *Client) void {
     // 늘 「없음」이라 신뢰를 묻지도 못한다(LSPB9 가 드러냈다). 찾은 경로는 신뢰 시트의 실행 파일 줄이 보인다(계획 WT5a).
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
     const located = lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) orelse blk: {
+        // 이미 신뢰한 저장소면 그 저장소의 셸 환경으로도 찾는다(계획 WT5b-2 — nix·devbox 처럼 저장소 셸에서만 생기는 서버). 신뢰 전에는
+        // 그 저장소의 훅을 돌리지 않는다 — 결정이 허용일 때만(「다시 묻기」 중도 아니다). 읽는 중이면 그 환경을 기다린다.
+        if (repoEnvironmentEnabled(self) and !c.reask and trustOf(self, key) == .allow) {
+            const view = tool_env.rootView(c.root, true) orelse {
+                c.phase = .preparing;
+                c.root_env_wait = true;
+                return;
+            };
+            if (lsp_process.locate(c.server.exe, view.path, &pbuf)) |p| break :blk p;
+        }
         if (!repickIfMissing(self, c)) {
             c.phase = .missing;
             return;
@@ -1952,7 +1982,9 @@ fn gateTrust(self: *AppSession, c: *Client) void {
             return;
         };
     };
-    if (c.phase == .missing or c.phase == .preparing) c.phase = .restarting; // 설치된 것을 이제 봤다
+    // 설치된 것을 이제 봤다. 저장소 셸 환경을 기다리는 중이었어도 같다 — 같은 tick 의 `pumpClient` 가 띄우기를 다시 걸어 그 환경을 기다리면
+    // 다시 「읽는 중」이 된다(화면엔 오가지 않는다 — LSPE20).
+    if (c.phase == .missing or c.phase == .preparing) c.phase = .restarting;
     const stored = if (c.reask) null else trustOf(self, key);
     const decision = stored orelse {
         if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {

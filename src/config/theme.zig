@@ -1680,11 +1680,16 @@ pub const LspConfig = struct {
     /// 서버에 넘기지 않을 환경 변수 이름 — 쉼표로 가르고, 이름 끝의 `*` 는 접두다(`AWS_*, GITHUB_TOKEN`; 계획 workspace-trust WT5b-1).
     /// **기본 빈 값**(아무것도 빼지 않는다 — 시스템 위생만). 앱 전역 하나다(셸 환경 해석기가 하나) — 이 값은 창마다의 미러다.
     environment_exclude: []const u8 = "",
+    /// 신뢰한 저장소의 서버를 **그 저장소의 셸 훅 환경**으로 찾고 띄울지(로그인 셸을 그 저장소 루트로 `cd` 시켜 읽는다 — direnv·mise 같은
+    /// 훅이 그 저장소의 터미널과 똑같이 적용된다; 계획 workspace-trust WT5b-2). **기본 true**(2026-10-11 사용자 결정 — 「신뢰한다면 켜짐」).
+    /// `shell_environment` 가 꺼져 있으면 쓰지 않는다(셸을 안 띄운다).
+    repository_environment: bool = true,
 
-    pub const schema = .{ // 키: lsp.enabled · lsp.shell-environment · lsp.environment-exclude
+    pub const schema = .{ // 키: lsp.enabled · lsp.shell-environment · lsp.environment-exclude · lsp.repository-environment
         .enabled = Meta{ .doc = .cfg_lsp_enabled, .widget = .toggle, .section = .editor },
         .shell_environment = Meta{ .doc = .cfg_lsp_shell_environment, .widget = .toggle, .section = .editor },
         .environment_exclude = Meta{ .doc = .cfg_lsp_environment_exclude, .widget = .text, .section = .editor },
+        .repository_environment = Meta{ .doc = .cfg_lsp_repository_environment, .widget = .toggle, .section = .editor },
     };
 };
 

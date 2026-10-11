@@ -570,6 +570,7 @@ const Table = struct {
     cfg_lsp_enabled: [:0]const u8,
     cfg_lsp_shell_environment: [:0]const u8,
     cfg_lsp_environment_exclude: [:0]const u8,
+    cfg_lsp_repository_environment: [:0]const u8,
     /// LSP 신뢰 프롬프트(§8.2a) — `{0}` 은 서버 실행 파일 이름.
     lsp_trust_prompt: [:0]const u8,
     /// 신뢰 시트의 안내 줄(tooling §8.1 「sandbox 하지 못하는 한계를 확인 UX 에 명시」) — `{0}` 은 root 경로.
@@ -1968,6 +1969,7 @@ const en: Table = .{
     .cfg_lsp_enabled = "Use language servers (asks once per workspace)",
     .cfg_lsp_shell_environment = "Find and run language servers with your shell environment (runs your shell profile once)",
     .cfg_lsp_environment_exclude = "Environment variables not passed to language servers (comma-separated; NAME* is a prefix)",
+    .cfg_lsp_repository_environment = "In trusted repositories, run language servers with the repository's shell environment (direnv, mise and other shell hooks)",
     .lsp_trust_prompt = "Run language servers for this workspace? Needed now: {0}",
     .lsp_trust_note_root = "Workspace: {0}",
     .lsp_trust_note_scope = "• This applies to every language server in this workspace and to Source Control's git reads and writes (filters, submodules, partial clone, hooks, signing).",
@@ -2878,6 +2880,7 @@ const ko: Table = .{
     .cfg_lsp_enabled = "언어 서버 사용(워크스페이스마다 한 번 묻는다)",
     .cfg_lsp_shell_environment = "언어 서버를 사용자 셸 환경으로 찾고 실행(셸 설정 파일을 한 번 실행한다)",
     .cfg_lsp_environment_exclude = "언어 서버에 넘기지 않을 환경 변수(쉼표로 가름, 이름* 은 접두)",
+    .cfg_lsp_repository_environment = "신뢰한 저장소의 언어 서버를 그 저장소의 셸 환경으로 실행(direnv·mise 등 셸 훅)",
     .lsp_trust_prompt = "이 저장소에서 언어 서버를 실행할까요? 지금 필요한 서버: {0}",
     .lsp_trust_note_root = "저장소: {0}",
     .lsp_trust_note_scope = "• 이 허락은 이 저장소의 모든 언어 서버와 소스 컨트롤의 git 읽기·쓰기(필터·submodule·partial clone·훅·서명)에 적용됩니다.",

@@ -22,7 +22,8 @@ test "P4 E3b runtime sampler is the sole metadata producer gate and owns actual 
     defer allocator.free(manager);
     const server = try read(allocator, "src/platform/macos/session_host/server.zig", 512 * 1024);
     defer allocator.free(server);
-    const poll_owner = try read(allocator, "src/platform/macos/session_host/poll_owner.zig", 256 * 1024);
+    // 512 KiB: 이미지 채널 판정자(IC2a)가 더해져 256 KiB 의 97% 에 닿았다 — 상한은 크기 판정이 아니라 읽기 버퍼다.
+    const poll_owner = try read(allocator, "src/platform/macos/session_host/poll_owner.zig", 512 * 1024);
     defer allocator.free(poll_owner);
     const handoff = try read(allocator, "src/platform/macos/session_host/handoff_inventory.zig", 128 * 1024);
     defer allocator.free(handoff);

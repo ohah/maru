@@ -26,6 +26,7 @@ const subscription_identity = @import("subscription_identity.zig");
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const collect_failure = @import("collect_failure.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
+const image_channel_wire = @import("image_channel_wire.zig");
 
 pub const HostStatus = struct {
     manifest_capable: bool = false,
@@ -593,6 +594,13 @@ pub const Action = union(enum) {
     /// Canonical resize and its all-subscription event are committed only by the daemon owner
     /// after every destination queue has admitted the complete response/event batch.
     resize_requested: ResizeRequested,
+    /// 이 연결은 이미지 채널이다(hello{role:"image_channel"}, 이미지 채널 §3.1). 값은 앱이 실어 온 token 이다. 입양은
+    /// **턴이 끝난 뒤** owner 가 한다 — dispatch 안에서 이 연결을 정리하면 진행 중인 dispatch 가 해제된 Slot 을 쓴다.
+    /// 이 연결은 이후 모든 frame 을 거부하는 종단 상태다.
+    image_channel_bind: u128,
+    /// `image_channel.abandon` 응답. 응답이 큐에 들어간 뒤 owner 가 이 연결의 token 을 버리고, 이미 입양된 채널이
+    /// 있으면 채널 상실로 내린다(§3.2 — 주 연결은 닫지 않는다).
+    image_channel_abandon: []u8,
 };
 
 pub const OutboundClass = union(enum) {
@@ -692,6 +700,16 @@ pub const ProjectionBudgetOps = struct {
         ctx: *anyopaque,
         stream: subscription_identity.LocalStreamId,
     ) void,
+};
+
+/// 이미지 채널 자리 확보와 token 발급(이미지 채널 §3.1)은 owner 층이 정한다. Connection 은 hello 를 판정해 묻기만 한다.
+/// null 이면 이미지 채널이 없는 host(순수 프로토콜 테스트·legacy 자리)라 `image_shm` 을 광고하지 않는다.
+pub const ImageChannelOps = struct {
+    ctx: *anyopaque,
+    /// 이미지 채널이 아닌 hello 를 받아도 되는가 — 미사용 token 이 확보한 자리를 이 연결이 먹지 않는가.
+    admit_hello: *const fn (ctx: *anyopaque) bool,
+    /// `image_shm` 을 광고한 hello 에 token 을 발급한다. 채널 자리가 없으면 null(앱은 「이미지 채널 없음」으로 간다).
+    issue_token: *const fn (ctx: *anyopaque) ?u128,
 };
 
 pub const CollectedOutput = struct {
@@ -843,6 +861,14 @@ pub const Connection = struct {
     /// Product poll-owner injection. Null is retained only for isolated pure protocol tests and
     /// read-only legacy seams that never expose a multi-fd product connection.
     projection_budget: ?ProjectionBudgetOps = null,
+    /// Product poll-owner injection(이미지 채널 §3.1). null 이면 hello_ack 에 `image_shm` 을 싣지 않는다.
+    image_channel: ?ImageChannelOps = null,
+    /// hello 에서 발급한 이미지 채널 token. hello_ack 에 한 번 실리고, 그 뒤로는 owner 의 token 표가 소유한다.
+    image_channel_token: ?u128 = null,
+    /// 이 연결이 `image_shm` 을 협상했는가 — token 이 나갔는지와 **무관하다**. 형식 선택(이미지 채널 §2)은 이 값이 정한다:
+    /// 협상한 연결은 채널이 없어도(자리 없음·abandon·채널 상실) `image_blob` 으로 돌아가지 않고 placement 를 뺀다(§3.2).
+    /// token 이나 채널 유무로 형식을 고르면 그 연결에 8 MiB 넘는 blob 이 다시 나간다 — 계약이 없앤 바이트 대체 경로다.
+    image_shm_negotiated: bool = false,
     subscription_identity: ?struct {
         connection: connection_slot.ConnectionKey,
         table: *subscription_identity.Table,
@@ -878,7 +904,8 @@ pub const Connection = struct {
         catchup: catchup_barrier_contract.HostState = .idle,
     };
 
-    pub const State = enum { pre_hello, ready, closed };
+    /// `image_channel`: hello{role:"image_channel"} 을 받은 보조 연결. 입양을 기다리며 이후 frame 을 모두 거부한다.
+    pub const State = enum { pre_hello, ready, image_channel, closed };
 
     fn init(allocator: std.mem.Allocator, host_id: u128, registry: *reg.TerminalRuntimeRegistry) Connection {
         return .{ .allocator = allocator, .host_id = host_id, .registry = registry };
@@ -934,6 +961,12 @@ pub const Connection = struct {
 
     pub fn handshakeComplete(self: *const Connection) bool {
         return self.state != .pre_hello;
+    }
+
+    /// 채널 자리 셈의 「handshake 를 마친 연결」인가(이미지 채널 §3.1) — hello 를 받아 열려 있는 연결만이다. 이미지 채널
+    /// 연결은 token 이 이미 자리를 세고, 닫히는 연결(버전 불일치 응답을 flush 중인 것 등)은 곧 슬롯을 돌려준다.
+    pub fn countsAsHandshaken(self: *const Connection) bool {
+        return self.state == .ready;
     }
 
     /// Readiness owner projection for producer-side terminals that do not have a peer request to
@@ -1041,6 +1074,10 @@ pub const Connection = struct {
         return switch (self.state) {
             .pre_hello => self.handleHello(frame),
             .ready => self.handleReady(frame, now_ns),
+            .image_channel => blk: {
+                self.state = .closed;
+                break :blk .{ .close = .at("image_channel_extra_frame", .protocol_error) };
+            },
             .closed => .{ .close = .at("already_closed", .protocol_error) },
         };
     }
@@ -1064,6 +1101,9 @@ pub const Connection = struct {
                 return .{ .close = .at("hello_json_not_object", .protocol_error) };
             },
         };
+        // 이미지 채널은 다른 필드보다 먼저 가른다(이미지 채널 §3.1) — 기능 목록·client_kind 를 보지 않는다.
+        // `"role":null` 은 role 이 없는 것이다 — 선택 필드를 null 로 직렬화하는 hello 가 채널 hello 로 오인되지 않게.
+        if (obj.get("role")) |role| if (role != .null) return self.handleImageChannelHello(obj, role);
 
         const pmin = intField(obj, "protocol_min") orelse 0;
         const pmax = intField(obj, "protocol_max") orelse 0;
@@ -1095,6 +1135,13 @@ pub const Connection = struct {
             return .{ .reply_and_close = wire };
         }
 
+        // 미사용 token 이 확보한 자리는 그 token 의 채널 연결 몫이다. 이 hello 가 그 자리를 먹으면 앱의 두 번째
+        // connect 가 슬롯을 못 찾는다(이미지 채널 §3.1). 지금 슬롯이 꽉 찬 accept 와 같은 모양(응답 없이 닫기)이다.
+        if (self.image_channel) |ops| if (!ops.admit_hello(ops.ctx)) {
+            self.state = .closed;
+            return .{ .close = .at("hello_slot_reserved_for_image_channel", .resource_exhausted) };
+        };
+
         if (self.client_kind == .admin) {
             const admission = self.admin_admission orelse {
                 const body = try self.errorJson(.unauthorized);
@@ -1115,10 +1162,42 @@ pub const Connection = struct {
 
         self.selected_version = protocol.version_major;
         self.state = .ready;
+        if (self.image_channel) |ops| {
+            if (self.client_kind != .admin and self.subscription_identity != null and
+                stringArrayContains(obj, "capabilities", image_channel_wire.capability))
+            {
+                self.image_shm_negotiated = true;
+                self.image_channel_token = ops.issue_token(ops.ctx);
+            }
+        }
         const ack = try self.helloAckJson();
         defer self.allocator.free(ack);
         const wire = try self.encodeSmall(.hello_ack, frame.header.request_id, 0, ack);
         return .{ .reply = wire };
+    }
+
+    /// hello{role:"image_channel", token} — 이미지 채널 수립(이미지 채널 §3.1). major·JSON 검사는 이미 거쳤다. 잘못된
+    /// 입력은 이름 붙은 close 로 닫고 응답하지 않는다 — 이 연결은 MRSH 응답을 받는 연결이 아니다.
+    fn handleImageChannelHello(self: *Connection, obj: std.json.ObjectMap, role: std.json.Value) Action {
+        self.state = .closed;
+        const role_text = switch (role) {
+            .string => |text| text,
+            else => return .{ .close = .at("image_channel_role_malformed", .protocol_error) },
+        };
+        if (!std.mem.eql(u8, role_text, image_channel_wire.role))
+            return .{ .close = .at("hello_role_unknown", .protocol_error) };
+        if (self.image_channel == null)
+            return .{ .close = .at("image_channel_unsupported", .protocol_error) };
+        const pmin = intField(obj, "protocol_min") orelse 0;
+        const pmax = intField(obj, "protocol_max") orelse 0;
+        if (!(pmin <= protocol.version_major and protocol.version_major <= pmax))
+            return .{ .close = .at("image_channel_incompatible_version", .protocol_error) };
+        const token_text = strField(obj, "token") orelse
+            return .{ .close = .at("image_channel_token_missing", .protocol_error) };
+        const token = image_channel_wire.parseToken(token_text) orelse
+            return .{ .close = .at("image_channel_token_malformed", .protocol_error) };
+        self.state = .image_channel;
+        return .{ .image_channel_bind = token };
     }
 
     fn handleReady(self: *Connection, frame: framing.Frame, now_ns: u64) HandleError!Action {
@@ -1286,6 +1365,21 @@ pub const Connection = struct {
             .runtime_viewports => self.dispatchViewports(frame.header.request_id, params),
             .runtime_notification => self.dispatchNotification(frame.header.request_id, params),
             .notification_config_update => self.dispatchNotificationConfigUpdate(frame.header.request_id, params),
+            .image_channel_abandon => self.dispatchImageChannelAbandon(frame.header.request_id),
+        };
+    }
+
+    /// 앱이 이미지 채널을 못 묶었다(이미지 채널 §3.2 — token 거부·deadline·자원 고갈). attach 보다 먼저 오므로 세그먼트는
+    /// 없다. 같은 연결의 두 번째 abandon·채널 없는 연결의 abandon 도 같은 응답이다 — 결과는 「이 연결에 이미지 채널 없음」
+    /// 하나뿐이라 멱등이다.
+    fn dispatchImageChannelAbandon(self: *Connection, request_id: u64) HandleError!Action {
+        if (self.image_channel == null) return self.replyError(request_id, .unauthorized);
+        self.image_channel_token = null;
+        const body = try self.stringify(.{ .result = .{} });
+        defer self.allocator.free(body);
+        return switch (try self.replyResult(request_id, body)) {
+            .reply => |bytes| .{ .image_channel_abandon = bytes },
+            else => |other| other,
         };
     }
 
@@ -3428,17 +3522,24 @@ pub const Connection = struct {
     fn helloAckJson(self: *Connection) HandleError![]u8 {
         const host_hex = try self.hostHex();
         defer self.allocator.free(host_hex);
-        var capability_buf: [24][]const u8 = undefined;
+        var capability_buf: [hello_capability_candidates.len][]const u8 = undefined;
         const capabilities = self.helloCapabilities(&capability_buf);
+        // token 은 기능 목록이 아니라 별도 필드다(이미지 채널 §3.1). 없으면 필드째 빠져 이전 hello_ack 와 같은 바이트다.
+        const token_text: ?[image_channel_wire.token_hex_len]u8 = if (self.image_channel_token) |token|
+            image_channel_wire.formatToken(token)
+        else
+            null;
+        const image_channel_token: ?[]const u8 = if (token_text) |*text| text else null;
         if (!self.host_status.manifest_capable) {
-            return self.stringify(.{
+            return self.stringifyOmitNull(.{
                 .version = self.selected_version,
                 .host_id = host_hex,
                 .capabilities = capabilities,
+                .image_channel_token = image_channel_token,
             });
         }
         if (self.host_status.upgrade_capable) {
-            return self.stringify(.{
+            return self.stringifyOmitNull(.{
                 .version = self.selected_version,
                 .host_id = host_hex,
                 .build_id = self.host_status.build_id,
@@ -3448,9 +3549,10 @@ pub const Connection = struct {
                 .lifecycle = @tagName(self.host_status.lifecycle),
                 .authority_generation = self.host_status.authority_generation,
                 .capabilities = capabilities,
+                .image_channel_token = image_channel_token,
             });
         }
-        return self.stringify(.{
+        return self.stringifyOmitNull(.{
             .version = self.selected_version,
             .host_id = host_hex,
             .build_id = self.host_status.build_id,
@@ -3460,13 +3562,17 @@ pub const Connection = struct {
             .lifecycle = @tagName(self.host_status.lifecycle),
             .authority_generation = self.host_status.authority_generation,
             .capabilities = capabilities,
+            .image_channel_token = image_channel_token,
         });
     }
 
-    fn helloCapabilities(self: *const Connection, buf: *[24][]const u8) []const []const u8 {
+    fn helloCapabilities(self: *const Connection, buf: *[hello_capability_candidates.len][]const u8) []const []const u8 {
         var count: usize = 0;
         const append = struct {
-            fn one(target: *[24][]const u8, index: *usize, value: []const u8) void {
+            fn one(target: *[hello_capability_candidates.len][]const u8, index: *usize, comptime value: []const u8) void {
+                comptime requireHelloCapabilityCandidate(value);
+                // 같은 이름을 두 번 싣는 갈래가 생겨도 칸을 넘지 않는다 — 후보가 서로 다르므로 버퍼가 곧 상한이다.
+                for (target[0..index.*]) |existing| if (std.mem.eql(u8, existing, value)) return;
                 target[index.*] = value;
                 index.* += 1;
             }
@@ -3500,6 +3606,7 @@ pub const Connection = struct {
         }
         if (self.subscription_identity != null)
             append(buf, &count, catchup_barrier_contract.capability);
+        if (self.image_channel != null) append(buf, &count, image_channel_wire.capability);
         return buf[0..count];
     }
 
@@ -3640,6 +3747,15 @@ pub const Connection = struct {
             error.PayloadTooLarge => return self.replyError(request_id, .payload_too_large),
         };
         return .{ .reply = wire };
+    }
+
+    /// null 인 선택 필드를 싣지 않는다 — 새 선택 필드가 그 값이 없는 연결의 바이트를 바꾸지 않게.
+    fn stringifyOmitNull(self: *Connection, value: anytype) HandleError![]u8 {
+        var out: std.Io.Writer.Allocating = .init(self.allocator);
+        defer out.deinit();
+        var js: std.json.Stringify = .{ .writer = &out.writer, .options = .{ .emit_null_optional_fields = false } };
+        js.write(value) catch return error.OutOfMemory;
+        return self.allocator.dupe(u8, out.written()) catch return error.OutOfMemory;
     }
 
     fn stringify(self: *Connection, value: anytype) HandleError![]u8 {
@@ -3920,6 +4036,50 @@ fn parseClientKind(s: ?[]const u8) ClientKind {
     return .unknown;
 }
 
+/// hello_ack 기능 목록에 실릴 수 있는 문자열 전부. `helloCapabilities` 의 버퍼 크기가 이 목록 길이이고, 목록에 없는
+/// 문자열을 싣는 자리는 컴파일 오류다 — 버퍼가 24 칸이던 때 제품 host 가 정확히 24 개를 채워, 기능 하나를 더하면
+/// 실행 중에 범위를 넘을 뻔했다(이미지 채널 §3.1).
+const hello_capability_candidates = [_][]const u8{
+    "host.info",
+    "runtime.list",
+    "runtime.get",
+    "runtime_inventory_v1",
+    "host_manifest_v1",
+    "host_exec_upgrade_v1",
+    "admin_one_shot_v1",
+    "admin_runtime_end_v1",
+    "runtime_metadata_v1",
+    "runtime_ended_v1",
+    "screen_stream_v2_current_body",
+    "screen_viewport_scrolled_v1",
+    "async_scroll_to_bottom_v1",
+    "async_observation_probe_v1",
+    "runtime_core_command_v1",
+    "runtime_clear_screen_v1",
+    "runtime_selected_text_v1",
+    "runtime_selection_state_v1",
+    "runtime_link_at_v1",
+    "runtime_clipboard_v1",
+    "controller_transfer_v1",
+    "notification_stream_auth_v1",
+    "notification_delivery_v1",
+    catchup_barrier_contract.capability,
+    image_channel_wire.capability,
+};
+
+fn requireHelloCapabilityCandidate(comptime value: []const u8) void {
+    for (hello_capability_candidates) |candidate|
+        if (std.mem.eql(u8, candidate, value)) return;
+    @compileError("hello_ack capability is not listed in hello_capability_candidates: " ++ value);
+}
+
+comptime {
+    // 후보가 겹치면 버퍼 길이가 실제 최대 개수보다 커 보여 잠금이 헐거워진다.
+    for (hello_capability_candidates, 0..) |a, i|
+        for (hello_capability_candidates[i + 1 ..]) |b|
+            if (std.mem.eql(u8, a, b)) @compileError("duplicate hello_ack capability candidate: " ++ a);
+}
+
 const RequestMethod = enum {
     host_info,
     host_upgrade_prepare,
@@ -3950,6 +4110,7 @@ const RequestMethod = enum {
     runtime_viewports,
     runtime_notification,
     notification_config_update,
+    image_channel_abandon,
 
     fn wireName(self: RequestMethod) []const u8 {
         return switch (self) {
@@ -3982,6 +4143,7 @@ const RequestMethod = enum {
             .runtime_viewports => "runtime.viewports",
             .runtime_notification => "runtime.notification",
             .notification_config_update => "config.update",
+            .image_channel_abandon => "image_channel.abandon",
         };
     }
 };
@@ -4021,6 +4183,7 @@ fn requestPolicy(method: RequestMethod) RequestPolicy {
         .runtime_declare_viewport,
         .runtime_notification,
         .notification_config_update,
+        .image_channel_abandon,
         => .privileged,
     };
 }
@@ -4092,6 +4255,15 @@ fn runWire(conn: *Connection, wire: []const u8) !FedResult {
         },
         .none => return .{ .action = "none", .frame = null },
         .resync_ack => return .{ .action = "resync_ack", .frame = null },
+        .image_channel_bind => return .{ .action = "image_channel_bind", .frame = null },
+        .image_channel_abandon => |bytes| {
+            defer allocator.free(bytes);
+            var rp = framing.FrameParser.init(allocator);
+            defer rp.deinit();
+            try rp.push(bytes);
+            const out = (try rp.next()).?;
+            return .{ .action = "image_channel_abandon", .frame = out };
+        },
         .reply, .reply_and_close => |bytes| {
             defer allocator.free(bytes);
             var rp = framing.FrameParser.init(allocator);
@@ -8820,4 +8992,266 @@ test "collect 실패 기록: resync 스냅샷의 sequence 가 어긋나면 snaps
         "session host collect failed: site=snapshot_seq_mismatch err=- runtime=000000000000000000000000000000aa seq=1->8 gen=0->9 snapshot=1 send=14",
         line,
     );
+}
+
+/// 이미지 채널 판정자의 owner 대역. 자리 판정과 token 발급만 흉내 낸다.
+const FakeImageChannelOwner = struct {
+    admit: bool = true,
+    token: ?u128 = 0x0123456789abcdef_fedcba9876543210,
+    issued: usize = 0,
+
+    fn admitHello(ctx: *anyopaque) bool {
+        const self: *FakeImageChannelOwner = @ptrCast(@alignCast(ctx));
+        return self.admit;
+    }
+
+    fn issueToken(ctx: *anyopaque) ?u128 {
+        const self: *FakeImageChannelOwner = @ptrCast(@alignCast(ctx));
+        if (self.token != null) self.issued += 1;
+        return self.token;
+    }
+
+    fn ops(self: *FakeImageChannelOwner) ImageChannelOps {
+        return .{ .ctx = self, .admit_hello = admitHello, .issue_token = issueToken };
+    }
+};
+
+test "image channel hello: role 은 다른 필드보다 먼저 갈리고 이후 frame 을 모두 거부한다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var owner: FakeImageChannelOwner = .{};
+    var conn = Connection.init(testing.allocator, 0xABCD, &registry);
+    defer conn.deinit();
+    conn.image_channel = owner.ops();
+    // 기능 목록이 망가져 있어도(주 hello 라면 닫힐 입력) role 이 먼저 갈린다 — 채널 hello 는 기능을 보지 않는다.
+    const bind = try feedJson(
+        &conn,
+        .hello,
+        1,
+        "{\"role\":\"image_channel\",\"token\":\"0123456789abcdeffedcba9876543210\",\"protocol_min\":2,\"protocol_max\":2,\"capabilities\":[{}]}",
+    );
+    try testing.expectEqualStrings("image_channel_bind", bind.action);
+    try testing.expectEqual(Connection.State.image_channel, conn.state);
+    // 채널 자리 셈에서 빠진다 — token 이 이미 그 자리를 센다.
+    try testing.expect(!conn.countsAsHandshaken());
+    try testing.expectEqual(@as(usize, 0), owner.issued);
+
+    const extra = try feedJson(&conn, .request, 2, "{\"method\":\"host.info\"}");
+    try testing.expectEqualStrings("close", extra.action);
+    try testing.expectEqualStrings("image_channel_extra_frame", extra.close_site.?);
+    try testing.expectEqual(Connection.State.closed, conn.state);
+}
+
+test "image channel hello: 잘못된 채널 hello 는 응답 없이 이름 붙은 자리에서 닫힌다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var owner: FakeImageChannelOwner = .{};
+    const cases = [_]struct { json: []const u8, site: []const u8, ops: bool = true }{
+        .{ .json = "{\"role\":7,\"token\":\"0123456789abcdeffedcba9876543210\",\"protocol_min\":2,\"protocol_max\":2}", .site = "image_channel_role_malformed" },
+        .{ .json = "{\"role\":\"video\",\"token\":\"0123456789abcdeffedcba9876543210\",\"protocol_min\":2,\"protocol_max\":2}", .site = "hello_role_unknown" },
+        .{ .json = "{\"role\":\"image_channel\",\"token\":\"0123456789abcdeffedcba9876543210\",\"protocol_min\":2,\"protocol_max\":2}", .site = "image_channel_unsupported", .ops = false },
+        .{ .json = "{\"role\":\"image_channel\",\"token\":\"0123456789abcdeffedcba9876543210\",\"protocol_min\":3,\"protocol_max\":3}", .site = "image_channel_incompatible_version" },
+        .{ .json = "{\"role\":\"image_channel\",\"protocol_min\":2,\"protocol_max\":2}", .site = "image_channel_token_missing" },
+        .{ .json = "{\"role\":\"image_channel\",\"token\":\"0123\",\"protocol_min\":2,\"protocol_max\":2}", .site = "image_channel_token_malformed" },
+        .{ .json = "{\"role\":\"image_channel\",\"token\":\"00000000000000000000000000000000\",\"protocol_min\":2,\"protocol_max\":2}", .site = "image_channel_token_malformed" },
+    };
+    for (cases) |case| {
+        var conn = Connection.init(testing.allocator, 0xABCD, &registry);
+        defer conn.deinit();
+        if (case.ops) conn.image_channel = owner.ops();
+        const r = try feedJson(&conn, .hello, 1, case.json);
+        try testing.expectEqualStrings("close", r.action);
+        try testing.expectEqual(@as(?framing.Frame, null), r.frame);
+        try testing.expectEqualStrings(case.site, r.close_site.?);
+        try testing.expectEqual(Connection.State.closed, conn.state);
+    }
+}
+
+test "image channel hello: token 은 image_shm 을 광고한 product hello 에만 hello_ack 별도 필드로 나간다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    const Case = struct { json: []const u8, product: bool, token: bool };
+    const cases = [_]Case{
+        .{ .json = "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}", .product = true, .token = true },
+        // 광고하지 않은 연결(`--stream`·ANSI·N-1 앱)은 token 이 없다.
+        .{ .json = "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[]}", .product = true, .token = false },
+        // product 가 아닌 연결(구독 표가 없는 자리)은 이미지를 받을 stream 이 없다.
+        .{ .json = "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}", .product = false, .token = false },
+    };
+    for (cases, 1..) |case, id| {
+        var owner: FakeImageChannelOwner = .{};
+        var conn = if (case.product)
+            Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = id, .slot_generation = 1 }, &subscriptions)
+        else
+            Connection.init(testing.allocator, 0x1234, &registry);
+        defer conn.deinit();
+        conn.image_channel = owner.ops();
+        const r = try feedJson(&conn, .hello, 1, case.json);
+        defer if (r.frame) |frame| frame.deinit(testing.allocator);
+        try testing.expectEqualStrings("reply", r.action);
+        const payload = r.frame.?.payload;
+        // host 가 이미지 채널을 지원한다는 사실은 기능 목록이, 이 연결의 자리는 token 필드가 말한다.
+        try testing.expect(std.mem.indexOf(u8, payload, "\"image_shm\"") != null);
+        try testing.expectEqual(@intFromBool(case.token), owner.issued);
+        try testing.expectEqual(case.token, conn.image_shm_negotiated);
+        if (case.token) {
+            try testing.expect(std.mem.indexOf(u8, payload, "\"image_channel_token\":\"0123456789abcdeffedcba9876543210\"") != null);
+        } else {
+            // 필드째 빠진다 — null 로 실리면 새 필드가 그 값이 없는 연결의 바이트를 바꾼다.
+            try testing.expect(std.mem.indexOf(u8, payload, "image_channel_token") == null);
+        }
+    }
+
+    // 채널 자리가 없으면 owner 가 null 을 준다 — hello 는 성공하고 token 만 없다(앱은 「이미지 채널 없음」).
+    var full: FakeImageChannelOwner = .{ .token = null };
+    var conn = Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = 9, .slot_generation = 1 }, &subscriptions);
+    defer conn.deinit();
+    conn.image_channel = full.ops();
+    const r = try feedJson(&conn, .hello, 1, cases[0].json);
+    defer if (r.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply", r.action);
+    try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "image_channel_token") == null);
+    // 자리가 없어도 협상은 됐다 — 이 연결은 채널이 없어도 `image_blob` 으로 돌아가지 않는다.
+    try testing.expect(conn.image_shm_negotiated);
+
+    // 제공하지 않는 product host(제공 스위치가 꺼진 제품)는 광고를 받아도 협상하지 않는다 — 형식은 `image_blob` 그대로다.
+    var unoffered = Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = 10, .slot_generation = 1 }, &subscriptions);
+    defer unoffered.deinit();
+    const u = try feedJson(&unoffered, .hello, 1, cases[0].json);
+    defer if (u.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(!unoffered.image_shm_negotiated);
+
+    // owner 가 없는 host 는 기능 목록에도 싣지 않는다.
+    var plain = Connection.init(testing.allocator, 0x1234, &registry);
+    defer plain.deinit();
+    const p = try feedJson(&plain, .hello, 1, cases[0].json);
+    defer if (p.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, p.frame.?.payload, "image_shm") == null);
+}
+
+test "image channel hello: 미사용 token 이 확보한 자리는 다른 hello 가 먹지 못한다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var owner: FakeImageChannelOwner = .{ .admit = false };
+    var conn = Connection.init(testing.allocator, 0xABCD, &registry);
+    defer conn.deinit();
+    conn.image_channel = owner.ops();
+    const r = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    try testing.expectEqualStrings("close", r.action);
+    try testing.expectEqualStrings("hello_slot_reserved_for_image_channel", r.close_site.?);
+    try testing.expectEqual(CloseReason.resource_exhausted, r.close_reason.?);
+
+    // 채널 hello 자신은 이 집행을 받지 않는다 — 확보된 자리가 바로 그 연결 몫이다.
+    var channel = Connection.init(testing.allocator, 0xABCD, &registry);
+    defer channel.deinit();
+    channel.image_channel = owner.ops();
+    const bind = try feedJson(
+        &channel,
+        .hello,
+        1,
+        "{\"role\":\"image_channel\",\"token\":\"0123456789abcdeffedcba9876543210\",\"protocol_min\":2,\"protocol_max\":2}",
+    );
+    try testing.expectEqualStrings("image_channel_bind", bind.action);
+}
+
+test "image channel abandon: 응답과 함께 owner 에 알리고 이미지 채널이 없는 host 는 거부한다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    var owner: FakeImageChannelOwner = .{};
+    var conn = Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = 1, .slot_generation = 1 }, &subscriptions);
+    defer conn.deinit();
+    conn.image_channel = owner.ops();
+    const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}");
+    defer if (hello.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expect(conn.image_channel_token != null);
+
+    for (0..2) |round| {
+        const r = try feedJson(&conn, .request, 2 + round, "{\"method\":\"image_channel.abandon\"}");
+        defer if (r.frame) |frame| frame.deinit(testing.allocator);
+        // 두 번째 abandon 도 같은 응답이다 — 결과는 「이 연결에 이미지 채널 없음」 하나뿐이다.
+        try testing.expectEqualStrings("image_channel_abandon", r.action);
+        try testing.expect(std.mem.indexOf(u8, r.frame.?.payload, "\"result\"") != null);
+        try testing.expect(conn.image_channel_token == null);
+        try testing.expectEqual(Connection.State.ready, conn.state);
+        // abandon 은 채널을 버릴 뿐 협상을 되돌리지 않는다.
+        try testing.expect(conn.image_shm_negotiated);
+    }
+
+    var plain = Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = 2, .slot_generation = 1 }, &subscriptions);
+    defer plain.deinit();
+    const plain_hello = try feedJson(&plain, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    defer if (plain_hello.frame) |frame| frame.deinit(testing.allocator);
+    const refused = try feedJson(&plain, .request, 2, "{\"method\":\"image_channel.abandon\"}");
+    defer if (refused.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply", refused.action);
+    try testing.expect(std.mem.indexOf(u8, refused.frame.?.payload, "unauthorized") != null);
+}
+
+test "image channel hello: 기능 후보 전부를 켠 hello_ack 가 버퍼를 넘지 않는다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    var owner: FakeImageChannelOwner = .{};
+    var fake: FakeRuntimeOps = .{};
+    var conn = Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = 1, .slot_generation = 1 }, &subscriptions);
+    defer conn.deinit();
+    conn.runtime_ops = fake.ops();
+    conn.image_channel = owner.ops();
+    conn.host_status.manifest_capable = true;
+    conn.host_status.upgrade_capable = true;
+    var buf: [hello_capability_candidates.len][]const u8 = undefined;
+    const capabilities = conn.helloCapabilities(&buf);
+    // 모든 조건을 켜면 후보가 정확히 한 번씩 실린다 — 겹치면 버퍼 길이가 최대 개수를 못 지킨다.
+    try testing.expectEqual(hello_capability_candidates.len, capabilities.len);
+    for (capabilities, 0..) |a, i|
+        for (capabilities[i + 1 ..]) |b| try testing.expect(!std.mem.eql(u8, a, b));
+}
+
+test "image channel hello: admin 과 null role 은 채널로 가지 않고 자리 셈은 열린 연결만 센다" {
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    var owner: FakeImageChannelOwner = .{};
+
+    // admin 은 한 번 쓰고 닫는 연결이라 이미지를 받을 stream 이 없다 — 광고해도 token 이 없다.
+    var admission: AdminAdmission = .{};
+    var admin = Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = 1, .slot_generation = 1 }, &subscriptions);
+    defer admin.deinit();
+    admin.image_channel = owner.ops();
+    admin.admin_admission = &admission;
+    const admin_hello = try feedJson(&admin, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"admin\",\"capabilities\":[\"image_shm\"]}");
+    defer if (admin_hello.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply", admin_hello.action);
+    try testing.expect(std.mem.indexOf(u8, admin_hello.frame.?.payload, "image_channel_token") == null);
+    try testing.expectEqual(@as(usize, 0), owner.issued);
+    try testing.expect(!admin.image_shm_negotiated);
+
+    // `"role":null` 은 role 이 없는 것이다 — 주 hello 로 끝난다.
+    var plain = Connection.init(testing.allocator, 0xABCD, &registry);
+    defer plain.deinit();
+    plain.image_channel = owner.ops();
+    const null_role = try feedJson(&plain, .hello, 1, "{\"role\":null,\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+    defer if (null_role.frame) |frame| frame.deinit(testing.allocator);
+    try testing.expectEqualStrings("reply", null_role.action);
+    try testing.expectEqual(Connection.State.ready, plain.state);
+
+    // 자리 셈은 hello 를 받아 열려 있는 연결만 센다.
+    var probe = Connection.init(testing.allocator, 0xABCD, &registry);
+    defer probe.deinit();
+    for ([_]struct { state: Connection.State, counts: bool }{
+        .{ .state = .pre_hello, .counts = false },
+        .{ .state = .ready, .counts = true },
+        .{ .state = .image_channel, .counts = false },
+        .{ .state = .closed, .counts = false },
+    }) |case| {
+        probe.state = case.state;
+        try testing.expectEqual(case.counts, probe.countsAsHandshaken());
+    }
+    probe.state = .closed;
 }

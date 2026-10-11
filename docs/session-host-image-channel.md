@@ -22,6 +22,10 @@ terminal-browser 는 같은 kitty image id 로 RGBA 프레임을 계속 다시 �
   - `image_shm` 을 협상한 연결: 주 스트림에 `image_ref` 레코드, 픽셀은 이미지 채널(§3)의 공유 메모리 세그먼트.
   - 협상하지 않은 연결: 지금의 `image_blob`. `maru attach --stream`(폰이 ssh 로 소비)·ANSI attach·N-1 앱·resolver 가 없는
     `.gui` 소비자가 여기 해당한다. 이것은 실패 대체가 아니라 협상 결과다.
+  - **협상의 정의:** 앱이 hello 에 `image_shm` 을 싣고 host 가 그것을 제공했다(hello_ack 기능 목록의 `image_shm`). token 이
+    나갔는지, 채널이 묶였는지, 나중에 abandon·채널 상실이 있었는지와 **무관하다**(host 는 `Connection.image_shm_negotiated`).
+    협상한 연결에 채널이 없으면 「이미지 채널 없음」(§3.2 — placement 를 뺀다)이지 `image_blob` 이 아니다. 형식을 token 이나 채널
+    유무로 고르면 그 연결에 바이트 대체 경로가 생긴다.
 - `image_shm` 은 `client_kind` 로 정하지 않는다. 이미지 채널 리더·세그먼트 표·resolver 를 설치하는 GUI 제품 연결 경로만 명시
   플래그로 광고한다(`.gui` 로 붙지만 `ScreenAssembler` 를 resolver 없이 쓰는 소비자가 있다).
 - 앱·조립기의 `image_blob` 디코더는 남는다. 폰이 같은 `ScreenAssembler` 를 쓰고, 새 앱이 N-1 host 에 오래 붙어 있는 경우
@@ -58,16 +62,26 @@ sequenceDiagram
 - host 는 hello 처리 때 이미지 채널 자리를 확보할 수 있을 때만 hello_ack 에 128-bit 랜덤 `image_channel_token` 을 싣는다.
   자리 확보는 **Owner 층 카운터**다(`SlotTable`·`ReactorCore` 에는 예약 상태가 없다 — 실제 슬롯을 Client 없이 쥐면
   `destroyAll` 이 못 돌려줘 업그레이드 handoff 가 거부된다). 집행은 hello 에서 한다: 이미지 채널이 아닌 hello 는
-  `handshake 를 마친 연결 수 + 미사용 token 수` 가 슬롯 상한에 닿으면 이름 붙은 close 로 닫는다. 확보는 입양·token 만료·주 연결
-  종료(`destroyAll` 포함) 셋 중 하나로 풀린다. 토큰은 기능 목록이 아니라 hello_ack 의 별도 필드다.
+  `handshake 를 마친 연결 수 + 미사용 token 수` 가 슬롯 상한에 닿으면 이름 붙은 close 로 닫는다(admin 연결도 대상이다 — admin
+  lease 는 동시 개수만 묶고 슬롯은 따로 세지 않는다). 확보는 입양·token 만료·주 연결
+  종료(`destroyAll` 포함)·abandon 넷 중 하나로 풀린다. 집행이 hello 에서만 이뤄지므로 확보는 보장이 아니다 — 아직 hello 를 안
+  보낸 연결이 마지막 슬롯을 쥐고 있으면 채널 connect 가 거부되고 앱은 「이미지 채널 없음」으로 간다. 토큰은 기능 목록이 아니라 hello_ack 의 별도 필드 `image_channel_token`(32 자 소문자
+  hex, 0 은 쓰지 않는다)이고, 없으면 필드째 빠진다. host 의 지원 여부는 hello_ack 기능 목록의 `image_shm` 이 말한다 — 기능은 있는데
+  token 이 없으면 「자리 없음」, 기능이 없으면 이미지 채널을 모르는 host 다. host 쪽 token 만료는 10 초(`token_ttl_ns`)다.
+  host 는 producer 가 `image_ref` 를 내기 시작하는 단계(계획 IC5)부터 제공한다(`host_offers_image_channel`). 그 전에 광고하면 오래
+  살아남는 host(업그레이드 side-by-side drain)에 붙은 새 앱이 채널을 묶고도 여전히 `image_blob` 을 받는다.
 - 앱은 같은 리스너에 두 번째 연결을 열고 첫 프레임으로 `.hello` 의 변형 `hello{role:"image_channel", token}` 을 보낸다. 새 frame
   kind 로 두지 않는 이유: pre_hello 에서 첫 프레임이 `.hello` 가 아니면 연결이 닫힌다. 판정은 `Connection.handleHello` 안에서
   `role` 을 다른 필드보다 먼저 보고 Action `.image_channel_bind` 를 돌려준다 — major·JSON·범위 검사를 그대로 거치고, 잘못된 입력은
-  이름 붙은 close-site 로 닫힌다. 그 Connection 은 이후 프레임을 모두 거부하는 종단 상태가 된다.
+  이름 붙은 close-site 로 닫힌다. 그 Connection 은 이후 프레임을 모두 거부하는 종단 상태가 된다. 앱은 채널 hello 뒤 `bind_ack`
+  를 받기 전에 아무것도 보내지 않는다 — 입양 순간 이미 와 있는 바이트(parser 에 읽힌 것과 소켓에 남은 것)가 있으면 host 는
+  입양을 거절한다. 입양 뒤에 도착한 바이트는 release 로 읽혀 형식이 어긋나면 채널 상실이 된다. 어느 쪽이든 결과는 「이미지 채널
+  없음」이다.
 - **입양은 턴이 끝난 뒤 Owner 가 한다.** dispatch 안에서 임시 연결을 정리하면 진행 중인 dispatch 가 해제된 Slot 을 쓴다.
   Owner 는 token 표(token → 주 연결 slot·admission key)로 주 연결을 찾고, key 가 살아 있고 닫히는 중이 아닌지 확인한 뒤 임시
   Client 의 fd 를 주 연결의 이미지 fd 로 옮기고(-1 로 떼어 냄), 이미지 채널로 `bind_ack` 를 보내고, 임시 Client 를 슬롯 정리를
-  한 번만 하는 destroy 변형으로 지운다. 로그는 「closed client connection」 대신 `image_channel_adopted` 한 줄이다. token 은 처음
+  한 번만 하는 destroy 변형으로 지운다. 로그는 「closed client connection」 대신 `session host image channel adopted:` 한 줄이다(거절은 `… rejected:`, 상실은
+  `session host image channel lost:`). token 은 처음
   쓰일 때 표에서 지운다. NONBLOCK·CLOEXEC·NOSIGPIPE 는 fd 속성이라 옮겨도 유지된다(accept 경로의 `configureOwnedSocket`).
 - 앱의 connect 함수 둘(hello 를 만드는 두 자리)은 `finishHello` 뒤에 이미지 채널을 열고 **`bind_ack` 를 받은 뒤에야** Client 를
   반환한다. 그래서 attach 는 언제나 채널이 묶인 뒤에 온다(재접속 워커가 연결된 Client 를 attach 전에 넘기는 구조와 맞다).
@@ -79,13 +93,17 @@ sequenceDiagram
 ### 3.2 수립 실패와 채널 상실
 
 - 채널을 못 연 경우(token 거부·deadline·자원 고갈): connect 함수는 전용 오류 `ImageChannelUnavailable` 을 **연결 실패로 올리지
-  않는다.** 주 연결을 「이미지 채널 없음」 표시와 함께 반환하기 전에 주 소켓으로 `image_channel_abandon` 을 보내 host 가 token 을
-  버리게 한다(attach 보다 먼저 가므로 그 시점에 세그먼트는 없다). 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못 붙는다」로
+  않는다.** 주 연결을 「이미지 채널 없음」 표시와 함께 반환하기 전에 주 소켓으로 요청 `image_channel.abandon` 을 보내 host 가 token 을
+  버리게 한다(attach 보다 먼저 가므로 그 시점에 세그먼트는 없다). abandon 은 **응답(`{"result":{}}`)까지 읽는 동기 요청**이다 —
+  보내고 안 읽으면 첫 attach 가 그 응답을 받아 상관 오류로 주 연결이 죽는다. 그래서 `bind_ack` 대기는 connect deadline 전체가 아니라
+  abandon 왕복 몫을 남긴 하위 예산을 쓴다. 남은 예산이 없으면 abandon 없이 채널 소켓만 닫고 「이미지 채널 없음」으로 반환한다 —
+  token 은 host 의 만료(10 초)로, 늦게 묶인 채널은 EOF(채널 상실)로 풀리고, 어느 쪽도 주 연결을 닫지 않는다. 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못 붙는다」로
   읽고 host 를 하나 더 띄운다 — `ImageChannelUnavailable` 이 spawn·업그레이드·unreachable·재접속 실패 판정 어디로도 흐르지 않음을
   판정자가 잰다.
 - 「이미지 채널 없음」 연결: 앱은 그 연결의 탭에 notice(이미지를 표시할 수 없음, 재접속 때 다시 시도)를 띄우고, host 는 그
   연결에 세그먼트를 만들지 않고 이미지 placement 를 빼고 보낸다.
-- 입양 뒤 채널이 죽으면(EOF·HUP·오류, abandon 뒤 늦게 입양된 경우 포함) **주 연결은 닫지 않는다.** host 는 그 연결의 원장을 전부
+- 입양 뒤 채널이 죽으면(EOF·HUP·오류, 입양 뒤 늦게 온 abandon 포함) **주 연결은 닫지 않는다.** abandon 이 먼저 오면 token 이
+  사라져 늦게 온 채널은 입양되지 않고 닫힌다. host 는 그 연결의 원장을 전부
   반환하고 「이미지 채널 없음」으로 내린다. 앱도 채널 EOF 를 보는 순간 같은 상태가 된다. 주 연결이 닫히면 채널도 닫는다.
 - 업그레이드: 두 소켓 모두 accepted/client socket 이라 exec 로 넘어가지 않는다. 새 host 는 모르는 token 의 채널 연결을 닫는다.
 
@@ -99,6 +117,11 @@ sequenceDiagram
 
 메시지 하나에 fd 하나라 한 메시지 fd 상한·제어 버퍼 잘림·개수 대조 문제가 단순해진다. host→앱 채널에는 위 두 종류 외의
 메시지를 섞지 않는다(§4.3 의 「막힐 수 없다」 근거가 메시지 개수에 기대기 때문이다).
+
+모든 메시지는 같은 8 B 머리(`MRIC` + 종류 1 B + 0 으로 채운 3 B)로 시작하고 정수는 little-endian 이다. 길이는 `bind_ack` 8 B,
+세그먼트 40 B(`segment_id` u64·`stream_id` u64·`image_id` u32·`byte_len` u32·`generation` u64), release 16 B(`segment_id` u64)다.
+`segment_id` 0 과 0 B 세그먼트는 어느 방향으로도 싣지 않는다. 소켓은 메시지 경계를 지키지 않으므로 받는 쪽은 반쪽을 남겨 다음
+읽기 앞에 붙인다. 머리가 어긋나면 그 채널은 더 해석하지 않고 채널 상실로 처리한다.
 
 ### 3.4 순서 보장
 
@@ -230,7 +253,8 @@ CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데
 ## 8. 다른 소비자
 
 - in-process 터미널: 바이트 스트림을 쓰지 않는다 — 변화 없음.
-- `maru attach --stream`·ANSI attach·N-1 앱: `image_shm` 을 광고하지 않는다 → 이미지 채널 없음, 지금의 `image_blob`.
+- `maru attach --stream`·ANSI attach·N-1 앱: `image_shm` 을 광고하지 않는다 → 미협상, 지금의 `image_blob`(§3.2 의 「이미지 채널
+  없음」과 다르다 — 그것은 협상한 연결의 상태다).
   `--stream` 이 받은 `image_ref` 를 다시 바이트로 펼치는 안은 기각했다(§9).
 - handoff·업그레이드: 코어 저장소를 지금처럼 직렬화한다. 업그레이드는 attachment·tracker 가 0 일 때만 진행되고 두 소켓 모두
   exec 로 넘어가지 않으므로 원장은 연결 종료로 반환된다.
@@ -261,7 +285,8 @@ CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데
   보낸 쪽이 매핑·fd 를 모두 놓아도 받은 쪽 매핑은 유효하다. 읽기 전용 fd 로 쓰기 매핑은 EPERM.
 - 일반 read 는 fd 를 설치해 누수한다. 제어 버퍼 잘림도 설치·누수한다. 받은 fd 는 CLOEXEC 가 없다. EMFILE 에서 재시도한 recvmsg 는
   fd 를 조용히 버린다. socketpair 는 CLOEXEC 가 없다. `shm_open` fd 는 FD_CLOEXEC 가 켜져 있다.
-- fd 를 붙인 send: 부분 쓰기 가능, 상대 여유가 16 B 미만이면 `EMSGSIZE`. 한 메시지 fd 128 개 가능·256 개 `EINVAL`.
+- fd 를 붙인 send: 부분 쓰기 가능, 상대 여유가 16 B 미만이면 `EMSGSIZE`. 한 메시지 fd 254 개까지 가능·255 개부터 `EINVAL`
+  (`CMSG_SPACE(254 * 4)` = 1028 B). 받는 쪽 제어 버퍼가 그보다 작으면 잘린 fd 도 설치되고 알려지지 않는다.
   `MSG_DONTWAIT` 만으로는 블로킹 소켓에서 막힌다(소켓 자체가 `O_NONBLOCK` 이어야 한다). `SO_NWRITE` 는 AF_UNIX 에서 늘 0.
 - 받는 쪽이 읽지 않을 때 들어가는 메시지: fd 붙은 것 64 개(크기 무관), fd 없는 56 B 146 개.
 - recvmsg 는 fd 가 붙은 send 의 경계에서 멈추고 fd 는 그 첫 바이트와 함께 온다.

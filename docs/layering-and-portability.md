@@ -52,6 +52,8 @@ flowchart TD
 
 추출 후 `platform/macos`엔 **L4 어댑터만** 남는다: CoreText 프레임 빌드, render projection, Metal 렌더러, ABI, Swift host. (`split_tree.zig`는 이미 `src/app`에 generic·platform 무참조로 있어 2차의 선례다.)
 
+> 2026-10: `app_session` 의 배선·허브, 계기가 오지 않은 클라이언트 정책, 계산 클라이언트는 남는다 — [decomposition](plans/app-session-decomposition.md) §4 의 2026-10 블록.
+
 ### 3.1 S2 추출 설계 (Term 모델/런타임 분리 — 측정 후 재개)
 
 **보류 사유의 실체:** `Term`(`app_session.zig`)이 런타임 핸들(`app.LivePtySession`·`RuntimeEventPump`)을 필드로 품고, `app`이 "의도적 혼합 레이어"라(§8) 모델을 `src/session/`(순수)으로 통째 옮기면 session→pty 의존이 생긴다. 그래서 한동안 "상호 합의 보류"였다.
@@ -112,7 +114,7 @@ flowchart TD
 
 위 S2·3차는 **L1~L3을 이식 가능하게** 정리하는 추출이다. 반면 L4 어댑터 자체의 거대 단일 파일(`platform/macos/app_session.zig` — 2026-08-08 실측 **72,317줄**)을 목적별로 가르는 정리는 **이식과 무관한 가독성·테스트 격리** 작업이라 별도 문서 [app-session-decomposition.md](plans/app-session-decomposition.md)를 단일 출처로 둔다(L4는 재작성 대상이라 위상엔 영향 없음). 그 문서의 두 축을 구분한다:
 
-- **(b) 이식 기여 축** — 안에 섞인 OS-중립 순수 로직(좌표 변환 기하)을 `src/session`(L2)으로 뺀다. **b1·b2 `session/layout_math.zig`(grid·hit-test·drop-zone·pt→px·px↔cell)로 일단락**했고, 이 축이 위상에 영향을 주는 유일한 부분이다(find·sidebar·workspace는 실측 결과 각각 `chrome`·`metal_frame`·PTY 결합 orchestration이라 제외).
+- **(b) 이식 기여 축** — 안에 섞인 OS-중립 순수 로직(좌표 변환 기하)을 `src/session`(L2)으로 뺀다. **b1·b2 `session/layout_math.zig`(grid·hit-test·drop-zone·pt→px·px↔cell)로 일단락**했고, 이 축이 위상에 영향을 주는 유일한 부분이다(find·sidebar·workspace는 실측 결과 각각 `chrome`·`metal_frame`·PTY 결합 orchestration이라 제외). 편집기 코드에 대해 재개했다 — [decomposition](plans/app-session-decomposition.md) §4 의 2026-10 블록.
 - **(c) 읽기·편집 비용 축(2026-08-08 추가)** — 남은 orchestration을 `platform/macos/app_session/<group>.zig`로 가른다. **위상 기여 0**이며(L4 안에서만 이동), 근거·단계·리스크는 전적으로 위 문서가 소유한다. 이 문서는 그것을 이식 성과로 계상하지 않는다.
 
 ### 3.4 공용 코드에 새 폴더를 만들지 않는다 (실측 2026-08-23, Windows 포팅 중)
@@ -179,9 +181,19 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 | 무엇이 | 왜 |
 |---|---|
 | `app_session.zig` 가 `../../app/…` 를 못 읽는다 | 그 파일은 **모듈 루트가 `platform/macos` 안**인 아티팩트에서도 컴파일된다 — 위는 모듈 밖이다(`import of file outside module path`). |
-| 배럴(`src/maru.zig`)로 우회하면 **wasm 이 깨진다** | `src/maru.zig` 는 wasm(freestanding, **libc 없음**)·모바일의 **모듈 루트이기도 하다**. `git_backend.zig` 의 `std.c` 호출 **63 개**가 그때 따라 들어간다 — `check-targets` 가 그 자리에서 실패한다. |
+| 배럴(`src/maru.zig`)로 우회하면 **`check-targets` 의 Windows 타깃이 깨진다**(처음엔 「wasm 이 깨진다」로 적었다 — 표 아래 정정) | `src/maru.zig` 는 wasm(freestanding, **libc 없음**)·모바일의 **모듈 루트이기도 하다**. `git_backend.zig` 의 `std.c` 호출 **63 개**가 그때 따라 들어간다 — `check-targets` 가 그 자리에서 실패한다. |
 | 배럴에 걸면 그 파일의 `@import("maru")` 가 자기 자신이 된다 | `no module named 'maru' available within module 'maru'`. `maru_mod.addImport("maru", maru_mod)` 같은 **자기 의존 배선**이 새로 필요하다(`build.zig` 와 `tools/check-macos-typecheck.sh` 양쪽). |
 | `git_backend.zig` 가 **셋째 파일을 끌고 온다** | `safe_open.zig`(64 줄)를 쓰는데 그것을 `platform/macos/capture_file.zig` 도 쓴다. 남겨 두고 상대 경로로 가리키면 같은 파일이 `maru` 와 `root` 두 모듈에 걸린다. |
+
+> **정정(실측 2026-10-11): 깨지는 것은 wasm 이 아니라 `check-targets` 의 `x86_64-windows` 다.**
+> 배럴에 `pub fn probe() void { _ = std.c.fork(); }` 하나를 걸고 두 게이트를 돌렸다.
+> `zig build check-targets` 는 **Windows 트리플에서만** `type 'void' not a function` 으로 실패했다
+> (참조 경로 `src/cross_target_surface.zig` 의 `refAllRecursive` — 그 walker 가 `maru.zig` 의 공개
+> 선언 본문을 주소 참조로 강제 분석한다). `aarch64-macos`·`x86_64-linux` 는 libc 가 있어 통과했다.
+> `tools/check-wasm-sync.sh`(격리 `wasm-lib` 빌드, 모듈 루트 `src/maru.zig`)는 **해시 그대로 OK** 였다 —
+> wasm 은 `wasm_bridge.zig` 가 닿는 선언만 분석하므로(Zig 의 lazy analysis) 안 닿는 `std.c` 호출을
+> 보지 않는다. **결정(옮기지 않는다)은 바뀌지 않는다** — 이 행의 결론(배럴 우회가 게이트를 깨뜨린다)과
+> 나머지 세 행이 그대로 서 있다. 고친 것은 깨지는 게이트의 이름뿐이다.
 
 즉 옮기는 일은 **파일 이동이 아니라 빌드 그래프 변경**이다 — macOS 아티팩트에 새 모듈을 주입하거나
 (두 번째 배럴), 배럴을 타깃별로 가르거나 해야 한다. **둘 다 이 절이 폴더를 안 만든 것과 같은 종류의

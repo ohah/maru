@@ -143,10 +143,10 @@
 §1.3 의 규칙으로 옮길 때 이 표가 자리를 정한다. 배선을 `src/app` 으로 옮기는 길은 이 규칙이 쓰지 않는다 — 그것은 D1 의 선택지가 아니라 W8 전략의 결정이다(§4 (라)).
 
 - 정책을 L2 에 두는 이유는 import 금지다. session 은 `app`·`platform`·`pty`·`chrome` import 가 금지되어 실행부에 닿을 수 없다. `src/app` 에는 그런 규칙이 없다(layering §8 「의도적 혼합 레이어」).
-- 그 금지는 `std.c`·`std.Io` 를 막지 않는다. 그래서 `platform/macos` 밖으로 옮긴 코드(L2 든 최상위 잎이든, 판정이든 정책이든)는 새 파일에 두고, 그 파일을 `tests/boundary/` 의 허용 목록 판정자에 등록한다. 꼴은 `ssh_sans_io` 다.
+- 그 금지는 `std.c`·`std.Io` 를 막지 않는다. 그래서 `platform/macos` 밖으로 옮긴 코드(L2 든 최상위 잎이든, 판정이든 정책이든)는 새 파일에 두고, `tests/boundary/` 의 허용 목록 판정자가 그 파일을 훑게 한다. 꼴은 `ssh_sans_io` 다.
   - `std.<X>` 는 허용 목록 안이어야 한다. 옮길 코드가 쓰는 이름(예: 단계 1 의 `ArrayList`·`sort`·`unicode`)은 이유를 적고 연다. `c`·`posix`·`Io`·`fs`·`Thread`·`time` 은 열지 않는다. `extern`·`@cImport` 는 막는다.
   - import 는 `ssh_sans_io` 의 같은 폴더 규칙 대신 허용 목록으로 본다 — 옮긴 판정은 `terminal` 같은 다른 폴더를 읽는다. 허용은 L2 파일이면 `src/session` 아래와 `terminal`, 최상위 잎이면 배럴(`session.zig`·`chrome.zig`)과 `src/session`·`src/chrome` 아래, `terminal` 까지다(선례 `syntax_colors` 는 두 배럴을 import 한다). `root`·`builtin` 은 막는다.
-  - 파일 목록으로 등록한다 — 그 폴더에는 OS 를 쓰는 기존 파일이 섞여 있어(예: `session/editor/backup.zig`·`edit_doc.zig` 가 `std.Io`·`std.c` 를 쓴다) 폴더를 훑을 수 없다. 그래서 새 파일을 목록에 올리는 것은 이동 커밋의 일이다. 기존 L2 파일에는 옮긴 코드를 넣지 않는다.
+  - **전용 하위 폴더에 두고 판정자가 그 폴더를 직접 훑는다**(편집기는 `src/session/editor/ops/` — `tests/boundary/editor_ops_sans_io.zig`, 2026-10-11 이동 단계 1). `session/editor` 에는 OS 를 쓰는 기존 파일이 섞여 있어(예: `backup.zig` 의 `std.Io`, `edit_doc.zig` 의 `std.c`) 그 폴더를 통째로는 못 훑는다. 처음엔 파일 목록 등록으로 적었는데, 목록은 새 파일을 올리지 않으면 조용히 검사 밖이 된다(`ssh_sans_io` 가 적어 둔 실측) — 그래서 폴더로 바꿨다. 기존 L2 파일에는 옮긴 코드를 넣지 않는다.
   - 최상위 잎은 import 규칙이 없는 자리라(§3) 이 판정자가 유일한 울타리다.
 - [editor-surface-structure.md](../editor-surface-structure.md) §3(:72)의 원칙도 같다: 「L2는 file descriptor, DispatchSource, FSEvents, child process, AppKit/WebKit 타입을 몰라야 한다. … 실제 파일·git·watch·process I/O는 `src/app` 공통 runtime 또는 `src/platform/macos` adapter가 주입한다.」
 

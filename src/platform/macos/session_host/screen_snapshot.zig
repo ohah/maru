@@ -873,6 +873,12 @@ pub fn computeDelta(allocator: std.mem.Allocator, prev_bytes: []const u8, core: 
                 const blob = try screen_stream.decodeImageBlob(s.body);
                 prev_image_gens.put(allocator, blob.image_id, blob.generation) catch return error.OutOfMemory;
             },
+            // 이미지 채널 연결의 snapshot base 는 실제로 보낸 바이트라 픽셀 자리에 `image_ref` 가 있다. 여기서 빼면 resize·
+            // resync 마다 모든 이미지가 「처음 보내는 것」이 되어 다시 나간다(docs/session-host-image-channel.md §5).
+            .image_ref => {
+                const ref = try screen_stream.decodeImageRef(s.body);
+                prev_image_gens.put(allocator, ref.image_id, ref.generation) catch return error.OutOfMemory;
+            },
             .prompt_marks => {
                 if (prev_pm) |p| p.deinit(allocator); // 중복 방어.
                 prev_pm = null; // 리뷰 #6: free 후 null — 아래 decode가 실패하면 함수 defer가 이미-해제된 PM을 다시 free하지 않게.
@@ -1624,6 +1630,73 @@ test "screen snapshot: computeDelta emits image_blob + image_place when an image
     try testing.expect(!blob_again); // 변화 없으니 blob 재송 안 함.
 }
 
+/// base 의 `image_blob` 을 같은 이미지의 `image_ref` 로 바꾼다 — 이미지 채널 연결이 실제로 보낸 snapshot 의 모양이다.
+/// `keep_images = false` 면 이미지 레코드를 아예 뺀다(「client 가 아무 이미지도 안 가졌다」 대조군).
+fn rewriteBaseImagesAsRefs(allocator: std.mem.Allocator, base: []const u8, keep_images: bool) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    var rs = screen_stream.RecordStream{ .bytes = base };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind != .image_blob) {
+            try screen_stream.appendRecord(&out, allocator, rec);
+            continue;
+        }
+        if (!keep_images) continue;
+        const blob = try screen_stream.decodeImageBlob(s.body);
+        const ref = try screen_stream.encodeImageRef(allocator, .{ .kind = .image_ref, .generation = s.header.generation }, .{
+            .image_id = blob.image_id,
+            .generation = blob.generation,
+            .width = blob.width,
+            .height = blob.height,
+            .bpp = blob.bpp,
+            .segment_id = 1,
+            .byte_len = @intCast(blob.pixels.len),
+        });
+        defer allocator.free(ref);
+        try screen_stream.appendRecord(&out, allocator, ref);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+test "screen delta: image_ref 를 담은 base 는 그 이미지를 client 가 가진 것으로 센다" {
+    const allocator = testing.allocator;
+    var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 4 });
+    defer core.deinit();
+    var raw = [_]u8{0} ** 16;
+    raw[0] = 0x7A;
+    var b64: [32]u8 = undefined;
+    const b64s = std.base64.standard.Encoder.encode(&b64, &raw);
+    var seq: [96]u8 = undefined;
+    try core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i=3;{s}\x1b\\", .{b64s}));
+
+    const sent = try projectSnapshot(allocator, &core, .{ .generation = 1 });
+    defer allocator.free(sent);
+
+    // 대조군: base 에 이미지가 없으면 같은 화면에서 픽셀이 delta 로 나간다 — 아래 판정이 헛돌지 않는다는 근거.
+    const without = try rewriteBaseImagesAsRefs(allocator, sent, false);
+    defer allocator.free(without);
+    const fresh = try computeDelta(allocator, without, &core, .{ .generation = 1 });
+    defer fresh.deinit(allocator);
+    try testing.expect(try deltaCarriesImageBlob(fresh.delta, 3));
+
+    // 이미지 채널 연결이 보낸 base: 픽셀 대신 `image_ref`. 같은 generation 이면 다시 보낼 것이 없다.
+    const with_refs = try rewriteBaseImagesAsRefs(allocator, sent, true);
+    defer allocator.free(with_refs);
+    const again = try computeDelta(allocator, with_refs, &core, .{ .generation = 1 });
+    defer again.deinit(allocator);
+    try testing.expect(!try deltaCarriesImageBlob(again.delta, 3));
+}
+
+fn deltaCarriesImageBlob(delta: []const u8, image_id: u32) !bool {
+    var rs = screen_stream.RecordStream{ .bytes = delta };
+    while (try rs.next()) |rec| {
+        const s = try screen_stream.RecordStream.split(rec);
+        if (s.header.kind == .image_blob and (try screen_stream.decodeImageBlob(s.body)).image_id == image_id) return true;
+    }
+    return false;
+}
+
 test "screen snapshot: computeDelta emits prompt_marks when an OSC 133 mark appears" {
     const allocator = testing.allocator;
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 10, .rows = 3 });
@@ -2107,6 +2180,10 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
             .image_blob, // 아래 image_pixels 축이 본다 — snapshot·delta 공용이라 두 대역에 다 있다
             .clear_rect, // producer 미방출(§12 — 지금은 set_runs 가 전부를 덮는다)
             .scroll_rect, // producer 미방출(같은 이유)
+            // 이미지 채널 연결 전용 — `image_shm` 광고가 꺼져 있어 producer 가 아직 안 낸다. producer 가 내기 시작하는
+            // 단계(계획 session-host-image-channel IC5)가 이 둘을 축 표로 옮긴다.
+            .image_ref,
+            .image_seg_hwm,
         };
         for (std.enums.values(screen_stream.RecordKind)) |kind| {
             var classified = false;

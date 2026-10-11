@@ -6734,6 +6734,62 @@ pub fn build(b: *std.Build) void {
     delta_base_generation_step.dependOn(&run_base_gen_wiring.step);
     boundary_step.dependOn(delta_base_generation_step);
 
+    // 이미지 채널(docs/session-host-image-channel.md, 계획 IC1~IC6)의 순수 판정자. 원장은 std-only leaf 이고 base 파서는
+    // `screen_snapshot.zig` 라, 둘 다 ubuntu 에서 컴파일된다 — session-host 잡은 PR 에서 안 돌므로 여기에 건다.
+    // base 파서 판정자는 `maru` 모듈을 끌어와 무거워 Debug 하나만 돈다(값 판정이라 모드가 결과를 바꾸지 않는다).
+    const image_channel_step = b.step(
+        "test-image-channel",
+        "Image channel segment ledger returns each segment exactly once and the delta base counts image_ref as sent",
+    );
+    const image_ref_base_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/platform/macos/session_host/screen_snapshot.zig"),
+            .target = target,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "maru", .module = maru_mod }},
+        }),
+        .filters = &.{"image_ref 를 담은 base"},
+    });
+    const run_image_ref_base_tests = b.addRunArtifact(image_ref_base_tests);
+    run_image_ref_base_tests.addArg("--maru-expect-tests=1");
+    run_image_ref_base_tests.addArg("--maru-expect-passed=1");
+    image_channel_step.dependOn(&run_image_ref_base_tests.step);
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |ledger_optimize| {
+        const ledger_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/image_segment_ledger.zig"),
+                .target = target,
+                .optimize = ledger_optimize,
+            }),
+        });
+        const run_ledger_tests = b.addRunArtifact(ledger_tests);
+        run_ledger_tests.addArg("--maru-expect-tests=7");
+        run_ledger_tests.addArg("--maru-expect-passed=7");
+        image_channel_step.dependOn(&run_ledger_tests.step);
+    }
+    boundary_step.dependOn(image_channel_step);
+
+    // 세그먼트 생성은 macOS 공유 메모리 syscall 이라 macOS 잡에서 돈다(읽기 전용 fd·이름 제거·CLOEXEC).
+    const image_segment_step = b.step("test-image-segment", "Image channel segments are read-only, unnamed, close-on-exec shared memory");
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        const image_segment_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/image_segment.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        const run_image_segment_tests = b.addRunArtifact(image_segment_tests);
+        run_image_segment_tests.addArg("--maru-expect-tests=5");
+        run_image_segment_tests.addArg("--maru-expect-passed=5");
+        image_segment_step.dependOn(&run_image_segment_tests.step);
+        test_step.dependOn(&run_image_segment_tests.step);
+        macos_only_test_step.dependOn(&run_image_segment_tests.step);
+    } else {
+        image_segment_step.dependOn(&b.addSystemCommand(&.{ "echo", "image segment judges need macOS shared memory; not executed on this target" }).step);
+    }
+
     // 업그레이드 스캔이 **결과를 보고** 다음 후보로 넘어가는가(2026-09-30: 확정적으로 실패하는 host 하나가
     // readdir 순서상 늘 먼저 걸려 나머지 host 의 교체를 영구히 막았다). 판정은 std-only leaf 라 PR 에서 돌고,
     // 스캔 루프(readdir·소켓)가 그 판정을 제자리에서 부르는지는 wiring 경계가 잰다.

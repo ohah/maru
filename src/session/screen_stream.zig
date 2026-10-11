@@ -47,6 +47,11 @@ pub const RecordKind = enum(u16) {
     // U=1 virtual placement(unicode placeholder) 격자. full-replace라 snapshot·delta 공용 —
     // 목록이 작고(이미지당 하나) 자주 안 바뀌어 증분 표현이 이득이 없다.
     image_virtual = 7,
+    // 이미지 채널(docs/session-host-image-channel.md)을 협상한 연결 전용. `image_blob` 처럼 snapshot·delta 공용이다.
+    // `image_ref` 는 픽셀 대신 공유 메모리 세그먼트를 가리키고, `image_seg_hwm` 은 배치마다 하나 실려 그 배치가 승인될 때
+    // 연결이 마지막으로 발급한 세그먼트 id 를 알린다(앱이 버려진 배치의 세그먼트를 치우는 근거).
+    image_ref = 8,
+    image_seg_hwm = 9,
     // delta records (증분 변경)
     set_runs = 10,
     clear_rect = 11,
@@ -60,7 +65,7 @@ pub const RecordKind = enum(u16) {
 
     pub fn isKnown(self: RecordKind) bool {
         return switch (self) {
-            .screen_meta, .row, .image_placement, .image_virtual, .image_blob, .prompt_marks, .link_spans, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove, .scroll_state => true,
+            .screen_meta, .row, .image_placement, .image_virtual, .image_blob, .image_ref, .image_seg_hwm, .prompt_marks, .link_spans, .set_runs, .clear_rect, .scroll_rect, .cursor, .modes, .image_place, .image_remove, .scroll_state => true,
             _ => false,
         };
     }
@@ -244,6 +249,27 @@ pub const ImageBlob = struct {
     height: u32,
     bpp: u8,
     pixels: []const u8,
+};
+
+/// `image_blob` 의 픽셀 대신 이미지 채널로 먼저 건너간 공유 메모리 세그먼트를 가리킨다(docs/session-host-image-channel.md
+/// §3·§6). 메타는 `ImageBlob` 과 같고 청크하지 않는다 — 픽셀 전체가 세그먼트 하나에 있다. 픽셀이 0 B 인 이미지는
+/// 세그먼트를 만들지 않으므로 `segment_id = 0`·`byte_len = 0` 이다. 둘 중 하나만 0 이면 손상이다.
+/// wire: image_id:u32 | generation:u64 | width:u32 | height:u32 | bpp:u8 | segment_id:u64 | byte_len:u32.
+pub const ImageRef = struct {
+    image_id: u32,
+    generation: u64 = 0,
+    width: u32,
+    height: u32,
+    bpp: u8,
+    segment_id: u64,
+    byte_len: u32,
+};
+
+/// 배치가 승인될 때 그 연결에서 마지막으로 **발급**한 세그먼트 id(0 = 아직 없음). 앱은 같은 stream 의 배치를 적용한 뒤
+/// 이 값 이하의 남은 세그먼트를 버려진 배치의 것으로 보고 치운다(docs/session-host-image-channel.md §6).
+/// wire: segment_id:u64.
+pub const ImageSegHwm = struct {
+    segment_id: u64,
 };
 
 /// 한 행의 OSC 133 semantic prompt(분류 + 그 프롬프트의 명령 종료코드). `terminal.RowPrompt`의 wire 대응이다 — 순수 codec은
@@ -754,6 +780,55 @@ pub fn decodeImageBlob(body: []const u8) DecodeError!ImageBlob {
     };
 }
 
+/// 세그먼트가 있는가(`segment_id`)와 픽셀이 있는가(`byte_len`)는 같은 사실이다 — 한쪽만 0 이면 앱이 없는 세그먼트를
+/// 찾거나 0 B 매핑을 만든다.
+fn imageRefConsistent(ref: ImageRef) bool {
+    return (ref.segment_id == 0) == (ref.byte_len == 0);
+}
+
+pub fn encodeImageRef(allocator: std.mem.Allocator, header: RecordHeader, ref: ImageRef) DecodeError![]u8 {
+    if (!imageRefConsistent(ref)) return error.MalformedRecord;
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    const w = BodyWriter{ .buf = &body, .allocator = allocator };
+    try w.u32v(ref.image_id);
+    try w.u64v(ref.generation);
+    try w.u32v(ref.width);
+    try w.u32v(ref.height);
+    try w.u8v(ref.bpp);
+    try w.u64v(ref.segment_id);
+    try w.u32v(ref.byte_len);
+    return finishRecord(allocator, .{ .kind = .image_ref, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+}
+
+pub fn decodeImageRef(body: []const u8) DecodeError!ImageRef {
+    var r = BodyReader{ .bytes = body };
+    const ref = ImageRef{
+        .image_id = try r.u32v(),
+        .generation = try r.u64v(),
+        .width = try r.u32v(),
+        .height = try r.u32v(),
+        .bpp = try r.u8v(),
+        .segment_id = try r.u64v(),
+        .byte_len = try r.u32v(),
+    };
+    if (!imageRefConsistent(ref)) return error.MalformedRecord;
+    return ref;
+}
+
+pub fn encodeImageSegHwm(allocator: std.mem.Allocator, header: RecordHeader, hwm: ImageSegHwm) DecodeError![]u8 {
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    defer body.deinit(allocator);
+    const w = BodyWriter{ .buf = &body, .allocator = allocator };
+    try w.u64v(hwm.segment_id);
+    return finishRecord(allocator, .{ .kind = .image_seg_hwm, .generation = header.generation, .version = header.version, .sequence = header.sequence, .chunk_index = header.chunk_index, .chunk_count = header.chunk_count }, body.items);
+}
+
+pub fn decodeImageSegHwm(body: []const u8) DecodeError!ImageSegHwm {
+    var r = BodyReader{ .bytes = body };
+    return .{ .segment_id = try r.u64v() };
+}
+
 pub fn encodePromptMarks(allocator: std.mem.Allocator, header: RecordHeader, pm: PromptMarks) DecodeError![]u8 {
     var body: std.ArrayListUnmanaged(u8) = .empty;
     defer body.deinit(allocator);
@@ -1213,6 +1288,50 @@ test "screen-stream: image_blob round-trips decoded pixels + chunk header, rejec
         .bpp = 4,
         .pixels = big,
     }));
+}
+
+test "screen-stream: image_ref round-trips the segment reference and keeps segment and pixel presence together" {
+    const allocator = testing.allocator;
+    // 8 MiB 를 넘는 한 장(실측 8,466,273 B)도 레코드는 수십 바이트다 — 그것이 이 레코드가 있는 이유다.
+    const ref = ImageRef{ .image_id = 9, .generation = 0x0102030405060708, .width = 1003, .height = 2110, .bpp = 4, .segment_id = 0xA1B2C3D4E5F60718, .byte_len = 8_466_273 };
+    const rec = try encodeImageRef(allocator, .{ .kind = .image_ref, .generation = 3, .sequence = 2 }, ref);
+    defer allocator.free(rec);
+    try testing.expectEqual(@as(usize, record_header_size + 4 + 8 + 4 + 4 + 1 + 8 + 4), rec.len);
+    const hdr = try RecordHeader.decode(rec[0..record_header_size]);
+    try testing.expectEqual(RecordKind.image_ref, hdr.kind);
+    try testing.expectEqual(@as(u16, 8), std.mem.readInt(u16, rec[2..4], .big));
+    try testing.expectEqual(@as(u64, 2), hdr.sequence);
+    try testing.expectEqual(ref, try decodeImageRef(rec[record_header_size..]));
+    try testing.expectError(error.Truncated, decodeImageRef(rec[record_header_size .. rec.len - 1]));
+
+    // 픽셀이 0 B 인 이미지는 세그먼트가 없다 — 둘 다 0 이면 정상.
+    const empty = ImageRef{ .image_id = 2, .width = 0, .height = 0, .bpp = 4, .segment_id = 0, .byte_len = 0 };
+    const empty_rec = try encodeImageRef(allocator, .{ .kind = .image_ref }, empty);
+    defer allocator.free(empty_rec);
+    try testing.expectEqual(empty, try decodeImageRef(empty_rec[record_header_size..]));
+
+    // 한쪽만 0 이면 손상이다 — 만들지도, 받지도 않는다.
+    try testing.expectError(error.MalformedRecord, encodeImageRef(allocator, .{ .kind = .image_ref }, .{ .image_id = 1, .width = 1, .height = 1, .bpp = 4, .segment_id = 0, .byte_len = 4 }));
+    try testing.expectError(error.MalformedRecord, encodeImageRef(allocator, .{ .kind = .image_ref }, .{ .image_id = 1, .width = 1, .height = 1, .bpp = 4, .segment_id = 5, .byte_len = 0 }));
+    const forged = try allocator.dupe(u8, rec);
+    defer allocator.free(forged);
+    std.mem.writeInt(u64, forged[forged.len - 12 ..][0..8], 0, .big); // segment_id 만 0 으로
+    try testing.expectError(error.MalformedRecord, decodeImageRef(forged[record_header_size..]));
+    std.mem.writeInt(u64, forged[forged.len - 12 ..][0..8], 5, .big);
+    std.mem.writeInt(u32, forged[forged.len - 4 ..][0..4], 0, .big); // byte_len 만 0 으로
+    try testing.expectError(error.MalformedRecord, decodeImageRef(forged[record_header_size..]));
+}
+
+test "screen-stream: image_seg_hwm round-trips the last issued segment id" {
+    const allocator = testing.allocator;
+    const rec = try encodeImageSegHwm(allocator, .{ .kind = .image_seg_hwm, .generation = 4, .sequence = 7 }, .{ .segment_id = 0xFFFF_FFFF_0000_0001 });
+    defer allocator.free(rec);
+    try testing.expectEqual(@as(usize, record_header_size + 8), rec.len);
+    const hdr = try RecordHeader.decode(rec[0..record_header_size]);
+    try testing.expectEqual(RecordKind.image_seg_hwm, hdr.kind);
+    try testing.expectEqual(@as(u16, 9), std.mem.readInt(u16, rec[2..4], .big));
+    try testing.expectEqual(@as(u64, 0xFFFF_FFFF_0000_0001), (try decodeImageSegHwm(rec[record_header_size..])).segment_id);
+    try testing.expectError(error.Truncated, decodeImageSegHwm(rec[record_header_size .. rec.len - 1]));
 }
 
 test "screen-stream: prompt_marks round-trips dense per-row semantic + exit code" {

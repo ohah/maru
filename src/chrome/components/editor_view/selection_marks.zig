@@ -41,13 +41,22 @@ pub fn build(lo: usize, hi: usize, row_spans: []const Span, out_rows: [][]const 
     if (hi <= lo) return;
 
     for (row_spans, 0..) |span, i| {
-        if (span.end <= lo or span.start >= hi) continue; // 이 행은 선택 밖
-        const from = if (lo > span.start) lo - span.start else 0;
-        const to = @min(hi, span.end) - span.start;
-        if (to <= from) continue;
-        out_buf[i] = .{ .start = @intCast(from), .len = @intCast(to - from) };
+        out_buf[i] = markInSpan(lo, hi, span) orelse continue; // 이 행은 선택 밖
         out_rows[i] = out_buf[i .. i + 1];
     }
+}
+
+/// 선택 `[lo, hi)` 가 한 행(`span`)에서 차지하는 **행 안 범위**. 안 걸리면 `null`.
+///
+/// **이 산술 하나를 호스트들이 함께 쓴다**([layering-and-portability.md](../../../../docs/layering-and-portability.md) §3.5) —
+/// 선택 하나를 자르는 `build` 와, 커서 여럿을 문서 순서로 함께 걷는 macOS `buildSelectionMarks` 가 같은 이것을 부른다. 예전에는
+/// macOS 가 `markRangeInLine` 으로 같은 계산을 따로 적었다(이 파일을 Windows 를 위해 새로 쓰고 macOS 를 안 바꾼 사본).
+pub fn markInSpan(lo: usize, hi: usize, span: Span) ?frame.Mark {
+    if (span.end <= lo or span.start >= hi) return null;
+    const from = if (lo > span.start) lo - span.start else 0;
+    const to = @min(hi, span.end) - span.start;
+    if (to <= from) return null;
+    return .{ .start = @intCast(from), .len = @intCast(to - from) };
 }
 
 const testing = std.testing;
@@ -140,4 +149,17 @@ test "빈 행(span 폭 0)은 선택 안에 있어도 띠가 없다" {
     run(0, 100, &spans, &rows, &buf);
     try testing.expectEqual(@as(usize, 0), rows[0].len);
     try testing.expectEqual(@as(u32, 3), rows[1][0].len);
+}
+
+test "markInSpan — 행 안 범위만 내고, 안 걸리거나 caret 이면 null 이다(build 와 macOS 가 같은 이것을 쓴다)" {
+    const span: Span = .{ .start = 10, .end = 20 };
+    const m = markInSpan(5, 15, span).?;
+    try testing.expectEqual(@as(u32, 0), m.start);
+    try testing.expectEqual(@as(u32, 5), m.len);
+    const inner = markInSpan(12, 18, span).?;
+    try testing.expectEqual(@as(u32, 2), inner.start);
+    try testing.expectEqual(@as(u32, 6), inner.len);
+    try testing.expect(markInSpan(20, 25, span) == null); // 줄 끝 문자부터 — 행 밖
+    try testing.expect(markInSpan(0, 10, span) == null); // 행 머리 앞에서 끝난다
+    try testing.expect(markInSpan(14, 14, span) == null); // caret 뿐
 }

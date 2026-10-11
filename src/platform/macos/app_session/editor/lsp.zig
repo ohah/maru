@@ -468,8 +468,9 @@ pub fn remoteTrustedRoot(self: *AppSession, t: git_ops.RemoteTrustTarget) ?[]con
 }
 
 /// **SCM 이 원격 저장소의 신뢰를 묻는다**(계획 workspace-trust WT7b — 도크 줄·팔레트). 로컬(`askTrustForRepo`)과 같은 상자·같은 표·같은
-/// 키 규칙이고 키만 (목적지, 원격 실제 루트)다. 경로 줄은 `목적지:경로` 다(`trustKeyLabel`).
-pub fn askTrustForRemoteRepo(self: *AppSession, t: git_ops.RemoteTrustTarget) AskOutcome {
+/// 키 규칙이고 키만 (목적지, 원격 실제 루트)다. 경로 줄은 `목적지:경로` 다(`trustKeyLabel`). `pending_write` 는 로컬과 같다(WT7c-1 —
+/// 원격 쓰기도 시트부터).
+pub fn askTrustForRemoteRepo(self: *AppSession, t: git_ops.RemoteTrustTarget, pending_write: bool) AskOutcome {
     ensureTrustLoaded(self);
     var db: [lsp.trust.max_dest_bytes]u8 = undefined;
     const key = remoteKey(t, &db) orelse return .refused;
@@ -491,7 +492,7 @@ pub fn askTrustForRemoteRepo(self: *AppSession, t: git_ops.RemoteTrustTarget) As
     self.editor_lsp.asking_root = owned_root;
     self.editor_lsp.asking_key = owned_key;
     self.editor_lsp.asking_scm = true;
-    setScmTrustSheetNotes(self, owned_key.key(), t.root, false);
+    setScmTrustSheetNotes(self, owned_key.key(), t.root, pending_write);
     return .asked;
 }
 

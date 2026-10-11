@@ -2045,7 +2045,7 @@ fn askScmTrust(self: *AppSession, repo: []const u8) void {
 /// 원격 목록의 저장소(cwd `repo`)의 신뢰 시트(계획 workspace-trust WT7b) — 그 cwd 의 루트·홈을 아직 모르면 묻지 않고 그렇다고 알린다.
 fn askScmTrustRemote(self: *AppSession, repo: []const u8) void {
     const target = git_ops.remoteTrustTarget(self, repo) orelse return self.showNoticeKey(.scm_trust_remote_notice);
-    noticeAskOutcome(self, lsp_client.askTrustForRemoteRepo(self, target));
+    noticeAskOutcome(self, lsp_client.askTrustForRemoteRepo(self, target, false));
 }
 
 fn noticeAskOutcome(self: *AppSession, outcome: lsp_client.AskOutcome) void {
@@ -2224,7 +2224,7 @@ fn submitFetch(self: *AppSession) void {
     if (git_ops.scmTargetIsRemote(self)) return injectRemoteFetch(self);
     // 신뢰 전 로컬 저장소는 시트부터(계획 workspace-trust WT6b-2b-i) — fetch 는 저장소 config 의 `uploadpack`·`core.sshCommand`·
     // `credential.helper` 를 돌린다.
-    switch (trustGate(self, repo, .fetch)) {
+    switch (trustGate(self, repo, .fetch, false)) {
         .run => {},
         // 묻지 않는 root 는 원격처럼 터미널에 넣는다(WT6b-2b-ii).
         .terminal => {
@@ -3553,10 +3553,14 @@ fn submitStageAllFor(self: *AppSession, repo: []const u8) void {
 
 /// 「모두 스테이지」의 실제 걸기(S4b) — 저장소 머리 줄과 「변경 사항」 머리 줄이 같은 길을 쓴다.
 fn submitStageAllPlanned(self: *AppSession, repo: []const u8) void {
-    // 신뢰 전 로컬 저장소는 계획을 세우기 **전에** 시트부터(계획 workspace-trust WT6b-2b-i — `TrustHeldWrite.Op.stage_all`).
-    // 묻지 않는 root·원격은 계획대로 세운 경로를 `submitWrite` 가 터미널에 넣는다(WT6b-2b-ii).
+    // 신뢰 전 저장소는 계획을 세우기 **전에** 시트부터(계획 workspace-trust WT6b-2b-i·WT7c-1 — `TrustHeldWrite.Op.stage_all`; 원격도).
+    // 묻지 않는 root·원격의 「모름」·소켓 없는 원격은 계획대로 세운 경로를 `submitWrite` 가 터미널에 넣는다(WT6b-2b-ii).
     var gate_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (git_ops.writeTargetFor(self, repo, &gate_ctl_buf) == .local and trustGate(self, repo, .stage_all) == .stop) return;
+    switch (git_ops.writeTargetFor(self, repo, &gate_ctl_buf)) {
+        .unavailable => {},
+        .local => if (trustGate(self, repo, .stage_all, false) == .stop) return,
+        .remote => if (trustGate(self, repo, .stage_all, true) == .stop) return,
+    }
     // status 전문과 마커 판정: 활성 저장소는 읽기 결과에서, 비활성은 status 만(판정 없음 → 충돌 전부 미해결).
     const is_current = if (self.git_repo) |cur| std.mem.eql(u8, cur, repo) else false;
     const status: []const u8, const markers: ?[]const u8, const truncated: bool = if (is_current) blk: {
@@ -3630,26 +3634,32 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
     // `remoteScmTarget` 이 `.unknown` 을 내고, 그때 로컬로 떨어뜨리면 **원격 경로를 로컬 git 에 넘긴다**
     // (RS3 6회차에서 diff 가 그렇게 샜다). 그 자리는 쓰기라 더 나쁘다 — 남의 파일을 **바꾼다.**
     //
-    // 워크스페이스 신뢰(WT6b-2b-ii)에서 원격의 뜻이 또 바뀌었다: **원격 쓰기는 우리가 실행하지 않고 사용자 터미널에 넣는다**
-    // (2026-10-10 결정). 원격 신뢰(WT7b)는 아직 읽기만 연다 — 신뢰한 원격도 쓰기는 터미널에 넣고, 신뢰한 원격 쓰기의 실행은 WT7c 다
-    // (실행(훅·서명)을 사용자가 보고 한다). control socket 유무와 무관하다(넣는 곳은 그 pane 의 셸이고, 기계 대조는
-    // `injectIntoActiveTerminal` 이 한다) — 소켓이 없어 「읽기 전용」이던 원격도 이제 넣을 수 있다. 원격 쓰기 실행 경로(RS4a·b —
-    // `Backend.submitWrite` 의 `remote`)는 WT7c 가 신뢰한 원격에서 다시 이 자리에서 쓴다.
+    // 워크스페이스 신뢰(WT6b-2b-ii)에서 원격의 뜻이 또 바뀌었다: 신뢰를 정할 수 없는 원격 쓰기는 **우리가 실행하지 않고 사용자 터미널에
+    // 넣는다**(2026-10-10 결정 — 실행(훅·서명)을 사용자가 보고 한다). 원격 신뢰(WT7b) 뒤로는 로컬과 같은 관문을 지난다(WT7c-1): 신뢰한
+    // 원격은 우리가 그 원격에서 실행하고(RS4a·b 의 실행 경로), 신뢰 전이면 시트부터, 신뢰를 정할 수 없으면(루트·홈을 아직 모름·원격 홈
+    // 저장소) 터미널에 넣는다. control socket 이 없으면 실행할 수 없어 늘 터미널이다(넣는 곳은 그 pane 의 셸이고, 기계 대조는
+    // `injectIntoActiveTerminal` 이 한다).
     var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    switch (git_ops.writeTargetFor(self, repo, &ctl_buf)) {
-        .remote, .unavailable => return injectWrite(self, remoteRepoRootFor(self, repo), kind, paths, null),
-        .local => {},
-    }
+    const remote: ?git_write_command.Remote = switch (git_ops.writeTargetFor(self, repo, &ctl_buf)) {
+        .local => null,
+        .remote => |r| .{ .dest = r.dest, .control_path = r.control_path },
+        .unavailable => return injectWrite(self, remoteRepoRootFor(self, repo), kind, paths, null),
+    };
+    // 원격 명령의 `-C` 는 원격 저장소 **루트**다 — 목록의 경로는 루트 기준인데 원격 목록의 저장소 자리는 그 pane 의 cwd(하위 폴더일 수
+    // 있다)라, cwd 를 주면 같은 이름의 다른 파일을 가리킨다(RS4a 의 실행 경로가 cwd 를 줬다 — WT7c-1 이 고쳤다).
+    const run_repo = if (remote != null) remoteRepoRootFor(self, repo) else repo;
     if (self.scm_write_inflight != 0) return false;
-    // **신뢰 전 로컬 저장소는 시트부터**(계획 workspace-trust WT6b-2b-i) — 쓰기는 저장소의 fsmonitor·필터(`add` 의 clean)를 돌린다.
-    // 묻지 않는 root(홈·저장소 밖)는 신뢰를 정할 수 없어 원격처럼 터미널에 넣는다(WT6b-2b-ii).
-    switch (trustGate(self, repo, .{ .write = .{ .kind = kind, .paths = paths, .after = after } })) {
+    // **신뢰 전 저장소는 시트부터**(계획 workspace-trust WT6b-2b-i·WT7c-1) — 쓰기는 저장소의 fsmonitor·필터(`add` 의 clean)를 돌린다.
+    // 묻지 않는 root(홈·저장소 밖)는 신뢰를 정할 수 없어 터미널에 넣는다(WT6b-2b-ii).
+    switch (trustGate(self, repo, .{ .write = .{ .kind = kind, .paths = paths, .after = after } }, remote != null)) {
         .run => {},
-        .terminal => return injectWrite(self, repo, kind, paths, null),
+        .terminal => return injectWrite(self, run_repo, kind, paths, null),
         .stop => return false,
     }
+    // **원격이면 로컬 git 경로를 안 찾는다** — 원격의 설치 위치는 우리가 모르고, `buildRemote` 가 `argv[0]` 을 버리고
+    // `remote_git_exe` 로 바꾼다. 로컬에 git 이 없다고 원격 쓰기가 막히면 안 된다(RS4a).
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return false;
+    const git_exe = if (remote != null) git_write_command.remote_git_exe else git_backend_mod.locate(&exe_buf) orelse return false;
     if (self.git_backend == null) {
         self.git_backend = git_backend_mod.Backend.initWithTrust(self.io, self.gitTrustCheck()) catch return false;
     }
@@ -3657,9 +3667,9 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
     // **판정자용 기록**(S4b): 무엇을 걸었는지 — 종류와 경로 수. 백엔드 큐를 들여다보지 않고 이 경계를 잰다.
     self.scm_last_write_kind = kind;
     self.scm_last_write_path_count = paths.len;
-    if (!self.git_backend.?.submitWrite(git_exe, repo, kind, paths, null, self.scm_write_seq, null)) return false;
+    if (!self.git_backend.?.submitWrite(git_exe, run_repo, kind, paths, null, self.scm_write_seq, remote)) return false;
     self.scm_write_inflight = self.scm_write_seq;
-    rememberWriteRepo(self, repo, null);
+    rememberWriteRepo(self, repo, if (remote) |r| r.dest else null);
     clearScmWriteError(self);
     if (after.optimistic_from) |from| setScmPending(self, paths[0], from); // 행 하나의 쓰기만 세운다(`submitRowWrite`)
     if (after.notice) |key| setScmWriteNotice(self, maru.i18n.t(key));
@@ -3671,6 +3681,8 @@ fn submitWrite(self: *AppSession, repo: []const u8, kind: git_write_command.Kind
 /// 시트를 거치는 동안 신뢰 재읽기로 목록과 세대가 바뀐다(같은 인덱스가 다른 파일이다). 문자열은 세션 allocator 소유다.
 pub const TrustHeldWrite = struct {
     repo: []u8,
+    /// 누른 순간의 원격 목적지(로컬이면 null — 계획 workspace-trust WT7c-1). 이어 할 때 대상이 **같은 기계**일 때만 건다.
+    dest: ?[]u8 = null,
     op: Op,
 
     pub const Op = union(enum) {
@@ -3683,9 +3695,11 @@ pub const TrustHeldWrite = struct {
         stage_all,
     };
 
-    fn dupe(allocator: std.mem.Allocator, repo: []const u8, op: Op) !TrustHeldWrite {
+    fn dupe(allocator: std.mem.Allocator, repo: []const u8, dest: ?[]const u8, op: Op) !TrustHeldWrite {
         const owned_repo = try allocator.dupe(u8, repo);
         errdefer allocator.free(owned_repo);
+        const owned_dest: ?[]u8 = if (dest) |d| try allocator.dupe(u8, d) else null;
+        errdefer if (owned_dest) |d| allocator.free(d);
         const owned_op: Op = switch (op) {
             .write => |w| blk: {
                 const paths = try allocator.alloc([]const u8, w.paths.len);
@@ -3704,7 +3718,7 @@ pub const TrustHeldWrite = struct {
             .fetch => .fetch,
             .stage_all => .stage_all,
         };
-        return .{ .repo = owned_repo, .op = owned_op };
+        return .{ .repo = owned_repo, .dest = owned_dest, .op = owned_op };
     }
 
     fn deinit(self: *TrustHeldWrite, allocator: std.mem.Allocator) void {
@@ -3716,6 +3730,7 @@ pub const TrustHeldWrite = struct {
             .commit => |m| allocator.free(m),
             .fetch, .stage_all => {},
         }
+        if (self.dest) |d| allocator.free(d);
         allocator.free(self.repo);
     }
 };
@@ -3728,9 +3743,17 @@ pub const TrustHeldWrite = struct {
 /// 멈춘다(시트를 띄우고 미뤘다, 또는 띄울 수 없어 사유를 알렸다).
 const Gate = enum { run, terminal, stop };
 
-fn trustGate(self: *AppSession, repo: []const u8, op: TrustHeldWrite.Op) Gate {
+/// 쓰기 대상의 신뢰 상태(계획 workspace-trust WT6b-2b·WT7c-1) — 로컬은 그 저장소, 원격(`remote`)은 (목적지, 원격 실제 루트) 키. 원격의
+/// 「모름」(루트·홈을 이 cwd 의 목록에서 아직 못 받았다)은 묻지 않는 root 와 같이 다룬다 — 무엇을 신뢰할지 몰라 터미널에 넣는다.
+fn writeTrustState(self: *AppSession, repo: []const u8, remote: bool) lsp_client.RepoTrustState {
+    if (!remote) return lsp_client.repoTrustState(self, repo);
+    const target = git_ops.remoteTrustTarget(self, repo) orelse return .refused;
+    return lsp_client.remoteRepoTrustState(self, target);
+}
+
+fn trustGate(self: *AppSession, repo: []const u8, op: TrustHeldWrite.Op, remote: bool) Gate {
     if (builtin.is_test and !test_write_gate) return .run;
-    switch (lsp_client.repoTrustState(self, repo)) {
+    switch (writeTrustState(self, repo, remote)) {
         .trusted => return .run,
         .refused => return .terminal,
         .untrusted => {},
@@ -3743,8 +3766,15 @@ fn trustGate(self: *AppSession, repo: []const u8, op: TrustHeldWrite.Op) Gate {
         return .stop;
     }
     // 묻기 전에 든다 — 물은 뒤에 못 들면 「신뢰」를 눌러도 아무 일도 안 일어난다. 못 들면(메모리) 묻지 않는다.
-    var held = TrustHeldWrite.dupe(self.allocator, repo, op) catch return .stop;
-    switch (lsp_client.askTrustForRepo(self, repo, true)) {
+    var held = TrustHeldWrite.dupe(self.allocator, repo, if (remote) self.git_repo_dest else null, op) catch return .stop;
+    const asked = if (remote) blk: {
+        const target = git_ops.remoteTrustTarget(self, repo) orelse {
+            held.deinit(self.allocator);
+            return .terminal; // 위 판정이 「신뢰 전」이라 했으므로 오지 않는다 — 오면 「모름」과 같이 다룬다
+        };
+        break :blk lsp_client.askTrustForRemoteRepo(self, target, true);
+    } else lsp_client.askTrustForRepo(self, repo, true);
+    switch (asked) {
         .asked => {
             self.scm_trust_write = held;
             self.metal_dirty = true;
@@ -3826,7 +3856,7 @@ pub fn pumpTrustWrite(self: *AppSession) void {
     // 답은 **시트가 끝난 그 순간에** 본다 — 슬롯을 기다린 뒤에 보면, 취소한 쓰기가 슬롯을 기다리는 동안 다른 길(도크 줄)로 그 저장소를
     // 신뢰했을 때 취소한 쓰기가 실행됐다(적대적 검증 3회차). 신뢰 전이면 지금 버린다. 기다리는 동안에도 매 tick 여기를 지나므로 그 사이
     // 신뢰가 철회·잊히면 다음 tick 에 버린다.
-    if (lsp_client.repoTrustState(self, held.repo) != .trusted) {
+    if (writeTrustState(self, held.repo, held.dest != null) != .trusted) {
         dropTrustWrite(self);
         return self.showNoticeKey(.scm_trust_write_dropped); // 조용히 버리면 「누른 것이 안 먹었다」로 읽힌다(2회차)
     }
@@ -3839,14 +3869,19 @@ pub fn pumpTrustWrite(self: *AppSession) void {
     var h = held;
     self.scm_trust_write = null;
     defer h.deinit(self.allocator);
-    // 미룬 것은 **이 기계의** 쓰기다 — 시트 뒤에 대상이 원격이 됐으면(같은 경로의 원격 pane 이 그 목록이 됐다) 보내지 않는다: 허락한
-    // 것은 로컬 저장소의 신뢰다(적대적 검증 1회차 — 이어 걸 때 다시 판정한 대상이 원격 git·원격 터미널로 갔다).
+    // 미룬 것은 **누른 그 기계의** 쓰기다 — 시트 뒤에 대상이 다른 기계가 됐으면(같은 경로의 원격 pane 이 그 목록이 됐다·목적지가
+    // 바뀌었다·소켓이 사라졌다) 보내지 않는다: 허락한 것은 그 기계의 그 저장소의 신뢰다(적대적 검증 1회차 — 이어 걸 때 다시 판정한
+    // 대상이 원격 git·원격 터미널로 갔다; WT7c-1 — 원격도 이어 한다).
     var ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const still_local = switch (h.op) {
-        .fetch => !git_ops.scmTargetIsRemote(self),
-        .write, .commit, .stage_all => git_ops.writeTargetFor(self, h.repo, &ctl_buf) == .local,
+    const same_machine = switch (h.op) {
+        .fetch => !git_ops.scmTargetIsRemote(self), // fetch 는 로컬만 미룬다(원격 fetch 는 늘 터미널 — RS4c)
+        .write, .commit, .stage_all => switch (git_ops.writeTargetFor(self, h.repo, &ctl_buf)) {
+            .local => h.dest == null,
+            .remote => |r| if (h.dest) |d| std.mem.eql(u8, r.dest, d) else false,
+            .unavailable => false,
+        },
     };
-    if (!still_local) return self.showNoticeKey(.scm_trust_write_dropped);
+    if (!same_machine) return self.showNoticeKey(.scm_trust_write_dropped);
     switch (h.op) {
         .write => |w| _ = submitWrite(self, h.repo, w.kind, w.paths, w.after),
         .commit => |m| runCommit(self, h.repo, m),
@@ -4499,24 +4534,26 @@ pub fn submitCommitFor(self: *AppSession, repo_path: []const u8) void {
         return;
     }
 
-    // 신뢰 전 로컬 저장소는 시트부터(계획 workspace-trust WT6b-2b-i) — 커밋은 저장소의 훅·서명·fsmonitor 를 돌린다. 원격은 신뢰할 수
-    // 없어 WT6b-2b-ii 가 따로 다룬다.
-    // 원격·묻지 않는 root 는 커밋을 터미널에 넣는다(WT6b-2b-ii — `git commit -m '…'`; 훅·서명을 사용자가 보고 실행한다).
+    // 신뢰 전 저장소는 시트부터(계획 workspace-trust WT6b-2b-i·WT7c-1 — 원격도) — 커밋은 저장소의 훅·서명·fsmonitor 를 돌린다.
+    // 묻지 않는 root·원격의 「모름」·소켓 없는 원격은 커밋을 터미널에 넣는다(WT6b-2b-ii — `git commit -m '…'`; 훅·서명을 사용자가 보고
+    // 실행한다).
     const text = self.scm_commit_field.text.items;
     var gate_ctl_buf: [std.fs.max_path_bytes]u8 = undefined;
-    switch (git_ops.writeTargetFor(self, repo_path, &gate_ctl_buf)) {
-        .remote, .unavailable => {
+    const remote = switch (git_ops.writeTargetFor(self, repo_path, &gate_ctl_buf)) {
+        .unavailable => {
             _ = injectWrite(self, remoteRepoRootFor(self, repo_path), .commit, &.{}, text);
             return;
         },
-        .local => switch (trustGate(self, repo_path, .{ .commit = text })) {
-            .run => {},
-            .terminal => {
-                _ = injectWrite(self, repo_path, .commit, &.{}, text);
-                return;
-            },
-            .stop => return,
+        .local => false,
+        .remote => true,
+    };
+    switch (trustGate(self, repo_path, .{ .commit = text }, remote)) {
+        .run => {},
+        .terminal => {
+            _ = injectWrite(self, if (remote) remoteRepoRootFor(self, repo_path) else repo_path, .commit, &.{}, text);
+            return;
         },
+        .stop => return,
     }
     runCommit(self, repo_path, text);
 }
@@ -4531,8 +4568,6 @@ fn runCommit(self: *AppSession, repo_path: []const u8, message_text: []const u8)
         return;
     };
 
-    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const git_exe = git_backend_mod.locate(&exe_buf) orelse return;
     // **그 상자의 저장소로 간다**(②b·②d) — 활성 저장소를 다시 구하면 화면에 보이는 상자와 커밋되는
     // 곳이 갈린다.
     const repo = repo_path;
@@ -4555,7 +4590,12 @@ fn runCommit(self: *AppSession, repo_path: []const u8, message_text: []const u8)
             return;
         },
     };
-    if (!self.git_backend.?.submitWrite(git_exe, repo, .commit, &.{}, path, self.scm_write_seq, commit_remote)) {
+    // 원격이면 로컬 git 을 안 찾는다(`submitWrite` 와 같은 이유 — 로컬에 git 이 없다고 원격 커밋이 막히면 안 된다).
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const git_exe = if (commit_remote != null) git_write_command.remote_git_exe else git_backend_mod.locate(&exe_buf) orelse return;
+    // 원격은 루트로 건다(`submitWrite` 와 같은 이유 — WT7c-1). 갱신 대상(`rememberWriteRepo`)은 목록의 저장소 그대로.
+    const run_repo = if (commit_remote != null) remoteRepoRootFor(self, repo) else repo;
+    if (!self.git_backend.?.submitWrite(git_exe, run_repo, .commit, &.{}, path, self.scm_write_seq, commit_remote)) {
         deleteCommitMessageFile(path);
         return;
     }

@@ -19063,7 +19063,7 @@ test "WT7b 원격 신뢰 묻기 — 원격 목록의 도크 줄을 누르면 `�
     _ = try fx.session.handleKeyEvent(.{ .key = .escape });
     try testing.expect(fx.session.pending_confirm != .lsp_trust);
 
-    // ⑶ 그려진 줄을 누르면 시트 — 대상은 (맞춘 목적지, 원격 실제 루트)이고 경로 줄이 `목적지:경로`, 범위 줄은 원격의 것(쓰기는 아직 터미널).
+    // ⑶ 그려진 줄을 누르면 시트 — 대상은 (맞춘 목적지, 원격 실제 루트)이고 경로 줄이 `목적지:경로`, 범위 줄은 원격의 것(그 기계의 읽기·쓰기 — fetch·push·pull 은 터미널).
     try Probe.clickFirst(fx.session, arena);
     try testing.expect(fx.session.pending_confirm == .lsp_trust);
     try testing.expect(fx.session.editor_lsp.asking_scm);
@@ -19116,6 +19116,194 @@ test "WT7b 원격 신뢰 묻기 — 원격 목록의 도크 줄을 누르면 `�
     try testing.expect(fx.session.git_repo_remote_root == null and fx.session.git_repo_remote_home == null);
     try testing.expect(remote_root_of(check.ctx, "/srv/app/sub", "elsewhere") == null);
     git_ops.rememberGitRepoDest(fx.session, null);
+}
+
+test "WT7c-1 원격 쓰기도 같은 관문 — 루트·홈을 모르면 실행하지 않고, 신뢰 전이면 시트부터·허용하면 그 원격에서 **루트로** 실행(stage·커밋 stdin), 신뢰한 원격은 바로 실행하며, 시트 뒤 목적지가 바뀌었으면 잇지 않는다 (계획 workspace-trust)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 홈(커밋 메시지 파일·control socket 자리)·git 신원·PATH(가짜 ssh)는 세션보다 먼저 세우고 나중에 되돌린다(WT6b-2b-i 와 같은 이유).
+    var home_buf: [64]u8 = undefined;
+    const home = try std.fmt.bufPrint(&home_buf, "/private/tmp/mwr-{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(testing.io, home) catch {};
+    defer std.Io.Dir.cwd().deleteTree(testing.io, home) catch {};
+    var cache_buf: [96]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&cache_buf, "{s}/.cache", .{home}));
+    var bin_buf: [96]u8 = undefined;
+    const bin = try std.fmt.bufPrint(&bin_buf, "{s}/bin", .{home});
+    try std.Io.Dir.cwd().createDirPath(testing.io, bin);
+    var log_buf: [96]u8 = undefined;
+    const log_path = try std.fmt.bufPrint(&log_buf, "{s}/ssh.log", .{home});
+    // 가짜 ssh — 인자는 `-o BatchMode=yes -S <ctl> <dest> <cmd>`. 목적지와 원격 명령 줄을 적고 그대로 이 기계의 sh 로 돌린다(stdin 은
+    // 그대로 넘어간다 — 커밋 메시지).
+    var script_buf: [512]u8 = undefined;
+    const script = try std.fmt.bufPrint(&script_buf, "#!/bin/sh\nprintf '%s %s\\n' \"$5\" \"$6\" >> '{s}'\nexec /bin/sh -c \"$6\"\n", .{log_path});
+    var ssh_buf: [128]u8 = undefined;
+    const ssh_path = try std.fmt.bufPrint(&ssh_buf, "{s}/ssh", .{bin});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = ssh_path, .data = script });
+    var ssh_z: [129]u8 = undefined;
+    if (std.c.chmod((try std.fmt.bufPrintZ(&ssh_z, "{s}", .{ssh_path})).ptr, 0o755) != 0) return error.SkipZigTest;
+    var saved_home_buf: [std.fs.max_path_bytes + 1]u8 = undefined;
+    const saved_home: ?[:0]const u8 = if (std.c.getenv("HOME")) |h| try std.fmt.bufPrintZ(&saved_home_buf, "{s}", .{std.mem.span(h)}) else null;
+    var home_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("HOME", (try std.fmt.bufPrintZ(&home_z, "{s}", .{home})).ptr, 1);
+    defer _ = if (saved_home) |h| setenv("HOME", h.ptr, 1) else unsetenv("HOME");
+    const saved_path: ?[:0]u8 = if (std.c.getenv("PATH")) |p| try allocator.dupeZ(u8, std.mem.span(p)) else null;
+    defer if (saved_path) |p| allocator.free(p);
+    var path_z: [8 * std.fs.max_path_bytes]u8 = undefined;
+    _ = setenv("PATH", (try std.fmt.bufPrintZ(&path_z, "{s}:{s}", .{ bin, if (saved_path) |p| p else "/usr/bin:/bin" })).ptr, 1);
+    defer if (saved_path) |p| {
+        _ = setenv("PATH", p.ptr, 1);
+    };
+    inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| _ = setenv(name, "maru-test", 1);
+    defer inline for (.{ "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL" }) |name| {
+        _ = unsetenv(name);
+    };
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe = git_backend_for_test.locate(&exe_buf) orelse return error.SkipZigTest;
+    if (!git_backend_for_test.testRunQuiet(&.{ exe, "init", "-q", "-b", "main", root })) return error.SkipZigTest;
+    if (!git_backend_for_test.testRunQuiet(&.{ exe, "-C", root, "config", "core.hooksPath", "/dev/null" })) return error.SkipZigTest;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    try fx.dir.dir.createDirPath(testing.io, "sub");
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var cfg_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_CONFIG", (try std.fmt.bufPrintZ(&cfg_z, "{s}/config", .{root})).ptr, 1);
+    defer _ = unsetenv("MARU_CONFIG");
+    if (fx.session.config_path_buffer) |b| allocator.free(b);
+    fx.session.config_path_buffer = null;
+    scm_dock_ops.test_write_gate = true;
+    defer scm_dock_ops.test_write_gate = false;
+    // 이 기계의 저장소를 「원격」으로 본다 — 목록의 cwd 는 하위 폴더, 루트는 저장소. 목적지 둘의 control socket 자리를 세운다.
+    var cwd_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    const cwd = try std.fmt.bufPrint(&cwd_buf, "{s}/sub", .{root});
+    for ([_][]const u8{ "box", "box2" }) |dest| {
+        const ctl = try maru.cli.ssh.controlSocketPath(allocator, home, dest);
+        defer allocator.free(ctl);
+        try std.Io.Dir.cwd().createDirPath(testing.io, std.fs.path.dirname(ctl).?);
+        try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = ctl, .data = "" });
+    }
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "a.txt", .data = "a\n" });
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.txt", .data = "b\n" });
+    if (!git_backend_for_test.testRunQuiet(&.{ exe, "-C", root, "add", "a.txt" })) return error.SkipZigTest;
+    const wa = git_backend_for_test.worker_allocator;
+    fx.session.git_result = .{
+        .status = try wa.dupe(u8, "# branch.head main\n1 A. N... 000000 100644 100644 0000000000000000000000000000000000000000 78981922613b2afb6025042ff6bd878ac1994e85 a.txt\n? b.txt\n"),
+        .ok = true,
+    };
+    git_ops.rememberGitRepo(fx.session, cwd);
+    git_ops.rememberGitRepoDest(fx.session, "box");
+    const Probe = struct {
+        fn bRow(session: *AppSession) !u32 {
+            var rows_buf: [64]maru.session.scm_view.Row = undefined;
+            var scratch: [std.fs.max_path_bytes]u8 = undefined;
+            const model = git_ops.buildScmModel(session, &rows_buf, &scratch) orelse return error.MissingModel;
+            for (model.rows, 0..) |row, i| switch (row) {
+                .file => |f| if (std.mem.eql(u8, f.path, "b.txt")) return @intCast(i),
+                else => {},
+            };
+            return error.MissingRow;
+        }
+        fn waitWrite(session: *AppSession) !void {
+            var spins: usize = 0;
+            while (spins < 600 and session.scm_write_inflight != 0) : (spins += 1) {
+                scm_dock_ops.drainScmWrite(session);
+                var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&ts, null);
+            }
+            try testing.expectEqual(@as(u64, 0), session.scm_write_inflight);
+        }
+        fn allow(session: *AppSession) !void {
+            _ = try session.handleKeyEvent(.{ .key = .arrow_left });
+            _ = try session.handleKeyEvent(.{ .key = .enter });
+            _ = try session.handleKeyEvent(.{ .key = .enter, .modifiers = .{ .command = true } });
+        }
+        fn log(path: []const u8, buf: []u8) ![]const u8 {
+            return std.Io.Dir.cwd().readFile(testing.io, path, buf) catch "";
+        }
+        fn staged(git: []const u8, repo: []const u8, name: []const u8) bool {
+            const out = git_backend_for_test.testRunCapture(testing.allocator, &.{ git, "-C", repo, "diff", "--cached", "--name-only" }) orelse return false;
+            defer testing.allocator.free(out);
+            return std.mem.indexOf(u8, out, name) != null;
+        }
+    };
+    const stage_b: maru.chrome.components.scm_dock.ids.Intent = .{ .row_action = .{ .repo_index = 0, .model_index = try Probe.bRow(fx.session) } };
+    const seq0 = fx.session.scm_write_seq;
+    var lb: [64 * 1024]u8 = undefined;
+
+    // ⑴ 루트·홈을 아직 모른다 — 무엇을 신뢰할지 몰라 묻지도 실행하지도 않는다(터미널로 건넨다 — WT6b-2b-ii).
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expectEqualStrings("", try Probe.log(log_path, &lb));
+
+    // ⑵ 루트·홈이 왔다 — 신뢰 전이면 로컬처럼 시트부터(쓰기로 열렸다고 말한다). 취소하면 버린다.
+    git_ops.rememberRemoteRepoRoot(fx.session, root, "/home/me");
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust and fx.session.scm_trust_write != null);
+    try testing.expectEqualStrings("box", fx.session.scm_trust_write.?.dest orelse return error.HeldWithoutDest);
+    try testing.expectEqualStrings("box", (fx.session.editor_lsp.asking_key orelse return error.NotAsking).key().dest);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_note_pending_write), fx.session.chrome_host.confirm.notes[1].text);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    _ = try fx.session.handleKeyEvent(.{ .key = .escape });
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expectEqualStrings(maru.i18n.t(.scm_trust_write_dropped), fx.session.chrome_host.notice.message);
+
+    // ⑶ 시트 뒤에 목적지가 바뀌었으면(그 cwd·그 루트가 다른 목적지에서도 신뢰된 상태라도) 잇지 않는다 — 허락한 것은 그 기계의 저장소다.
+    try testing.expect(trust_store.decide(testing.io, .{ .volume = 0, .path = root, .dest = "box2" }, .allow));
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try testing.expect(fx.session.pending_confirm == .lsp_trust);
+    git_ops.rememberGitRepoDest(fx.session, "box2");
+    git_ops.rememberRemoteRepoRoot(fx.session, root, "/home/me");
+    var ctl_probe: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expect(git_ops.writeTargetFor(fx.session, cwd, &ctl_probe) == .remote); // 이어 걸면 box2 로 갈 상태다
+    try Probe.allow(fx.session);
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0, fx.session.scm_write_seq);
+    try testing.expectEqualStrings("", try Probe.log(log_path, &lb));
+    try testing.expect(trust_store.forget(testing.io, .{ .volume = 0, .path = root, .dest = "box" }));
+    try testing.expect(trust_store.forget(testing.io, .{ .volume = 0, .path = root, .dest = "box2" }));
+    git_ops.rememberGitRepoDest(fx.session, "box");
+    git_ops.rememberRemoteRepoRoot(fx.session, root, "/home/me");
+
+    // ⑷ 허용하면 누른 쓰기를 같은 제출로 이어 한다 — **그 원격에서**(ssh 로) **루트**(`-C <루트>` — cwd 가 아니다)로 실행해 b.txt 가 올라간다.
+    scm_dock_ops.applyScmDockIntent(fx.session, stage_b);
+    try Probe.allow(fx.session);
+    try testing.expect(trust_store.get(.{ .volume = 0, .path = root, .dest = "box" }) == .allow);
+    scm_dock_ops.pumpTrustWrite(fx.session);
+    try testing.expect(fx.session.scm_trust_write == null);
+    try testing.expectEqual(seq0 + 1, fx.session.scm_write_seq);
+    try Probe.waitWrite(fx.session);
+    var root_tok_buf: [std.fs.max_path_bytes + 8]u8 = undefined;
+    const root_tok = try std.fmt.bufPrint(&root_tok_buf, "'-C' '{s}' ", .{root});
+    const after_stage = try Probe.log(log_path, &lb);
+    try testing.expect(std.mem.startsWith(u8, after_stage, "box "));
+    try testing.expect(std.mem.indexOf(u8, after_stage, root_tok) != null);
+    try testing.expect(std.mem.indexOf(u8, after_stage, "'add' '--' 'b.txt'") != null);
+    try testing.expect(Probe.staged(exe, root, "b.txt"));
+
+    // ⑸ 신뢰한 원격의 커밋은 시트 없이 그 원격에서 실행한다 — 메시지는 stdin(`commit -F -`), 이 기계의 메시지 파일 경로는 안 실린다.
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = log_path, .data = "" });
+    try fx.session.scm_commit_field.text.appendSlice(fx.session.allocator, "remote commit WT7c");
+    scm_dock_ops.applyScmDockIntent(fx.session, .{ .commit = 0 });
+    try testing.expect(fx.session.pending_confirm != .lsp_trust);
+    try testing.expectEqual(seq0 + 2, fx.session.scm_write_seq);
+    try Probe.waitWrite(fx.session);
+    const after_commit = try Probe.log(log_path, &lb);
+    try testing.expect(std.mem.indexOf(u8, after_commit, root_tok) != null);
+    try testing.expect(std.mem.indexOf(u8, after_commit, "'commit'") != null);
+    try testing.expect(std.mem.indexOf(u8, after_commit, "'-F' '-'") != null);
+    try testing.expect(std.mem.indexOf(u8, after_commit, ".cache") == null);
+    const head = git_backend_for_test.testRunCapture(allocator, &.{ exe, "-C", root, "log", "-1", "--format=%s" }) orelse return error.NoCommit;
+    defer allocator.free(head);
+    try testing.expectEqualStrings("remote commit WT7c\n", head);
 }
 
 test "LSPB38 컨트롤 플레인의 신뢰 조회·철회·잊기(계획 WT4b) — 목록에 서고, 철회는 떠 있는 서버를 내리고 파일에 남으며, 잊으면 「결정 없음」(곧바로 묻지 않음); 심링크 경로도 같은 저장소, 창 없이도 표를 읽는다" {

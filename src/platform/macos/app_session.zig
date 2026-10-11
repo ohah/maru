@@ -97063,3 +97063,140 @@ test "generation receiver pipe noise cannot renew retry budget before matching h
     try std.testing.expectEqual(@as(u64, 42), host.cursors.get("a").?.offset);
     try std.testing.expect(host.cursors.get("a").?.generation != null);
 }
+
+test "native local reader keeps generation cursor on contention and reads same-size replacement" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var env_guard = try workspace_ops.ProviderEnvGuard.capture(a);
+    defer env_guard.restore();
+    try tmp.dir.createDirPath(io, "home");
+    try tmp.dir.createDirPath(io, "cache");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    const home = try std.fmt.allocPrintSentinel(a, "{s}/home", .{root}, 0);
+    defer a.free(home);
+    const cache = try std.fmt.allocPrintSentinel(a, "{s}/cache", .{root}, 0);
+    defer a.free(cache);
+    const config = try std.fmt.allocPrintSentinel(a, "{s}/missing-config", .{root}, 0);
+    defer a.free(config);
+    try std.testing.expectEqual(@as(c_int, 0), setenv("HOME", home.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("MARU_CONFIG", config.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", cache.ptr, 1));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CLAUDE_CONFIG_DIR"));
+    try std.testing.expectEqual(@as(c_int, 0), unsetenv("CODEX_HOME"));
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    const term = pane_ops.activePane(&session).activeTerm();
+    try std.testing.expectEqual(maru.session.remote_agent_stream.protocol.Profile.v1, term.agent_hook_log_profile);
+    term.agent_hook_log_profile = .v2;
+    var path_arena = std.heap.ArenaAllocator.init(a);
+    defer path_arena.deinit();
+    const path = agent_ops.agentHookLogPath(path_arena.allocator(), term).?;
+    const parent = std.fs.path.dirname(path).?;
+    try std.Io.Dir.cwd().createDirPath(io, parent);
+    const dir = try std.Io.Dir.cwd().openDir(io, parent, .{});
+    defer dir.close(io);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmod(dir.handle, 0o700));
+    const basename = std.fs.path.basename(path);
+    const name = basename[0 .. basename.len - ".ndjson".len];
+    const writer = maru.agent_log_writer;
+    const old = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"old\"}\n";
+    const fresh = "claude\t{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"new\"}\n";
+    const first = try writer.append(io, dir, name, old);
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("old", term.hook.transcript.owned.prompt());
+    try std.testing.expectEqualDeep(first.generation, term.agent_hook_generation.?);
+    try std.testing.expectEqual(first.offset, term.agent_hook_cursor.offset);
+    {
+        const lease = try writer.acquire(io, dir, name);
+        defer lease.release(io);
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqualDeep(first.generation, term.agent_hook_generation.?);
+        try std.testing.expectEqual(first.offset, term.agent_hook_cursor.offset);
+    }
+    _ = (try writer.rotate(io, dir, name, first, first.offset)).?;
+    const next = try writer.append(io, dir, name, fresh);
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualStrings("new", term.hook.transcript.owned.prompt());
+    try std.testing.expectEqualDeep(next.generation, term.agent_hook_generation.?);
+    try std.testing.expectEqual(next.offset, term.agent_hook_cursor.offset);
+    // Consume a >1 MiB snapshot through the actual application path. Native
+    // rotation must publish a new header, never leave a legacy .rotated file.
+    const prefix = "claude\t{\"hook_event_name\":\"Stop\",\"unused\":\"";
+    const suffix = "\"}\n";
+    const filler = try a.alloc(u8, maru.session.agent_hook_event.max_line_bytes - prefix.len - suffix.len);
+    defer a.free(filler);
+    @memset(filler, 'x');
+    const record = try std.fmt.allocPrint(a, "{s}{s}{s}", .{ prefix, filler, suffix });
+    defer a.free(record);
+    for (0..32) |_| _ = try writer.append(io, dir, name, record);
+    const Failure = struct {
+        fn entropy(_: ?*anyopaque, _: []u8) std.Io.RandomSecureError!void {
+            return error.EntropyUnavailable;
+        }
+    };
+    {
+        const normal_io = session.io;
+        defer session.io = normal_io;
+        var failed_table = normal_io.vtable.*;
+        failed_table.randomSecure = Failure.entropy;
+        session.io = .{ .userdata = normal_io.userdata, .vtable = &failed_table };
+        agent_ops.pollAgentHookEvents(&session, term, false);
+        try std.testing.expectEqualDeep(next.generation, term.agent_hook_generation.?);
+        try std.testing.expectEqual(next.offset + 32 * maru.session.agent_hook_event.max_line_bytes, term.agent_hook_cursor.offset);
+    }
+    // No new bytes: retry publication only, with no event replay.
+    const snapshots_before_retry = agent_ops.test_turn_snapshot_calls;
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqual(snapshots_before_retry, agent_ops.test_turn_snapshot_calls);
+    const rotated_generation = term.agent_hook_generation.?;
+    try std.testing.expect(!std.mem.eql(u8, &next.generation, &rotated_generation));
+    try std.testing.expectEqual(@as(u64, 0), term.agent_hook_cursor.offset);
+    var snapshot_buffer: [128]u8 = undefined;
+    const empty = try writer.readSnapshot(io, dir, name, null, &snapshot_buffer);
+    try std.testing.expectEqual(@as(u64, 0), empty.payload_size);
+    try std.testing.expectEqualDeep(rotated_generation, empty.start.generation);
+    const legacy_rotation = try std.fmt.allocPrint(a, "{s}.rotated", .{basename});
+    defer a.free(legacy_rotation);
+    try std.testing.expectError(error.FileNotFound, dir.statFile(io, legacy_rotation, .{}));
+    // Corrupt native bytes are rejected with no legacy fallback or cursor mutation.
+    const file = try dir.openFile(io, basename, .{ .mode = .read_write });
+    defer file.close(io);
+    try file.writePositionalAll(io, "BROKEN", 0);
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expectEqualDeep(rotated_generation, term.agent_hook_generation.?);
+    try std.testing.expectEqual(@as(u64, 0), term.agent_hook_cursor.offset);
+    // Reproduce growth between stat and snapshot: the small allocation hint
+    // cannot end backlog suppression before the native snapshot EOF is consumed.
+    const header = maru.session.agent_log_generation.encodeHeader(rotated_generation);
+    try file.writePositionalAll(io, &header, 0);
+    term.agent_hook_generation = null;
+    term.agent_hook_cursor = .{};
+    term.hook.backlog_catchup = false;
+    const Race = struct {
+        fn grow(race_io: std.Io, race_dir: std.Io.Dir, race_name: []const u8) !void {
+            agent_ops.test_after_native_log_stat = null;
+            var row: [maru.session.agent_hook_event.max_line_bytes]u8 = undefined;
+            @memset(&row, 'x');
+            const begin = "claude\t{\"hook_event_name\":\"Stop\",\"unused\":\"";
+            const finish = "\"}\n";
+            @memcpy(row[0..begin.len], begin);
+            @memcpy(row[row.len - finish.len ..], finish);
+            for (0..3) |_| _ = try maru.agent_log_writer.append(race_io, race_dir, race_name, &row);
+        }
+    };
+    agent_ops.test_after_native_log_stat = Race.grow;
+    defer agent_ops.test_after_native_log_stat = null;
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expect(term.hook.backlog_catchup);
+    try std.testing.expectEqual(@as(u64, maru.session.agent_hook_event.max_line_bytes), term.agent_hook_cursor.offset);
+    agent_ops.pollAgentHookEvents(&session, term, false);
+    try std.testing.expect(!term.hook.backlog_catchup);
+    try std.testing.expectEqual(@as(u64, 3 * maru.session.agent_hook_event.max_line_bytes), term.agent_hook_cursor.offset);
+}

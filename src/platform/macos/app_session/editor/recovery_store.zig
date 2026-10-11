@@ -172,7 +172,7 @@ pub const Source = struct {
             break :blk .{ .doc = .{ .path = record.doc }, .content = record.content };
         } else try backup.parse(self.allocator, body);
         errdefer parsed.deinit(self.allocator);
-        if (parsed.content.len > backup.pause_bytes or !std.unicode.utf8ValidateSlice(parsed.content)) return error.BadRecord;
+        if (!maru.session.editor.backup_ops.admissible(parsed.content)) return error.BadRecord; // UTF-8 · 저장 상한(§3.8·§3.10)
         switch (parsed.doc) {
             .path => |p| if (!validLabel(p.path)) return error.BadRecord,
             .remote => |r| if (!validLabel(r.dest) or !validLabel(r.path)) return error.BadRecord,

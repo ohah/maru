@@ -12982,6 +12982,8 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     defer allocator.free(backup_mod);
     const backup_rules_src = try readZigFileZ(allocator, "src/session/editor/backup.zig");
     defer allocator.free(backup_rules_src);
+    const backup_ops_src = try readZigFileZ(allocator, "src/session/editor/ops/backup_ops.zig");
+    defer allocator.free(backup_ops_src);
     const host = try readZigFileZ(allocator, "src/platform/macos/MaruAppHost.swift");
     defer allocator.free(host);
     const pane_src = try readZigFileZ(allocator, "src/platform/macos/app_session/pane.zig");
@@ -13097,10 +13099,13 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
 
     // ⑾ **신원을 다시 확인한다 — 레코드를 읽는 «두 자리 모두»**(복원과 되살리기). 이름이 해시라 충돌하면
     //    남의 문서를 조용히 되살린다. 한쪽만 확인하면 그 한쪽이 그 사고의 입구로 남는다.
-    try std.testing.expectEqual(
-        @as(usize, 2),
-        countOfB(backup_mod, "if (!std.mem.eql(u8, p.path, w.path)) return"),
-    );
+    //    대조는 L2 `backup_ops.identityMatches` 하나가 한다(이동 단계 5) — 두 자리가 그것을 지나고(복원은
+    //    `judgeRestore` 가 신원부터 본다), L4 에 손으로 쓴 대조가 다시 생기지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "backup_ops.judgeRestore(want, parsed, doc.file.content)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_mod, "backup_ops.identityMatches(lost, record.parsed.doc)"));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(backup_mod, "std.mem.eql(u8, p.path, w.path)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_ops_src, "if (!identityMatches(want, parsed.doc)) return .foreign;"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(backup_ops_src, ".path => |p| std.mem.eql(u8, p.path, w.path),"));
     // ⑿ **레코드를 소비하는 진입점은 둘이고 갈래가 갈려 있다**(U4c): 경로 문서는 여는 자리에서,
     //    이름 없는 문서는 **되살리는 자리에서만**. 하나로 합치면 새로 만든 빈 문서가 옛 번호의
     //    레코드를 삼킨다(번호는 재시작마다 1 부터 난다).

@@ -84,7 +84,7 @@ test "원격 감시자는 libc 상수로 디렉터리를 판정하지 않는다"
     // ⚠️ **다이제스트는 도크가 읽는 것과 «같은 범위» 여야 한다**(§11.3). `status` 하나만 보면 다른
     // 곳에서 만든 브랜치·워크트리를 못 잡아 inotify 보다 좁아진다 — 셋을 합쳐도 0.04 s 다(실측).
     const reads = try bodyOf(src, "const digest_reads = [_]DigestRead{", "\n};", 2048);
-    // ⚠️ **작업트리를 읽는 셋은 저장소 필터를 끈 채로 돈다**(계획 workspace-trust WT6b-1b-ii — 원격은 늘 신뢰 전). 표시를 빼면
+    // ⚠️ **작업트리를 읽는 셋은 저장소 필터를 끈 채로 돈다**(계획 workspace-trust WT6b-1b-ii — 감시자는 원격 신뢰와 무관하게 늘 신뢰 전 규칙). 표시를 빼면
     // 그 읽기가 저장소가 정한 프로그램을 원격에서 돌린다. 허용된 자리를 센다(`status` 하나·`numstat` 둘).
     try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, reads, ".runs_filters = true"));
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, reads, ".runs_filters = false"));

@@ -25,6 +25,7 @@ const input_ops = @import("../input.zig");
 const term_ops = @import("../term.zig");
 const file_tree_backend = @import("../../file_tree_backend.zig");
 const trust_store = @import("trust_store.zig");
+const git_ops = @import("../git.zig"); // 원격 저장소의 신뢰 대상(계획 workspace-trust WT7b)
 const editor_hover = @import("hover.zig");
 const editor_ops = @import("mod.zig");
 const editor_definition = @import("definition.zig");
@@ -273,7 +274,7 @@ pub const State = struct {
     manage_notes: [5]maru.chrome.components.confirm.Note = undefined,
     /// 신뢰 시트의 안내 줄(`setTrustSheetNotes`) — 모달이 빌려 그리므로 모달이 떠 있는 동안 여기 산다. 경로 두 줄과 shim 출처
     /// 경고(도구 이름)는 버퍼를 쓰고 나머지는 번역 표의 정적 문장이다.
-    trust_root_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
+    trust_root_note_buf: [std.fs.max_path_bytes + lsp.trust.max_dest_bytes + 64]u8 = undefined,
     /// 실행 파일 줄(경로 — 계획 WT5a)과 그 출처 경고(shim·저장소 안일 때만).
     trust_exe_note_buf: [std.fs.max_path_bytes + 64]u8 = undefined,
     trust_origin_note_buf: [256]u8 = undefined,
@@ -433,17 +434,78 @@ pub fn askTrustForRepo(self: *AppSession, root: []const u8, pending_write: bool)
     self.editor_lsp.asking_root = owned_root;
     self.editor_lsp.asking_key = owned_key;
     self.editor_lsp.asking_scm = true;
-    setScmTrustSheetNotes(self, root, pending_write);
+    setScmTrustSheetNotes(self, owned_key.key(), root, pending_write);
+    return .asked;
+}
+
+/// 원격 저장소의 신뢰 키(계획 workspace-trust WT7b — 목적지는 맞추고 경로는 원격 실제 루트). 못 맞추면(목적지가 키 모양이 아니다·루트가
+/// 절대 경로가 아니다) null — 신뢰를 정할 수 없다.
+fn remoteKey(t: git_ops.RemoteTrustTarget, dest_buf: *[lsp.trust.max_dest_bytes]u8) ?lsp.trust.Key {
+    const dest = lsp.trust.normalizeDest(t.dest, dest_buf) orelse return null;
+    if (t.root.len == 0 or t.root[0] != '/' or t.root.len > std.fs.max_path_bytes) return null;
+    return .{ .volume = 0, .path = t.root, .dest = dest };
+}
+
+/// 원격 저장소의 묻지 않는 root(WT2b 와 같은 거절 — 원격 홈 자체나 그 위). 홈은 실제 경로다(`git_command.buildRemoteHome`). 저장소 밖은
+/// 원격에선 목록이 안 서서(루트를 못 읽는다) 여기 오지 않는다.
+fn remoteRefused(t: git_ops.RemoteTrustTarget) bool {
+    return selfOrAncestor(t.root, t.home);
+}
+
+/// 원격 저장소의 신뢰 상태(도크 머리 줄 — 계획 workspace-trust WT7b). 판정은 `remoteTrustedRoot` 와 같은 키·같은 거절이다.
+pub fn remoteRepoTrustState(self: *AppSession, t: git_ops.RemoteTrustTarget) RepoTrustState {
+    ensureTrustLoaded(self);
+    var db: [lsp.trust.max_dest_bytes]u8 = undefined;
+    const key = remoteKey(t, &db) orelse return .refused;
+    if (remoteRefused(t)) return .refused;
+    return if (trust_store.get(key) == .allow) .trusted else .untrusted;
+}
+
+/// git 읽기가 묻는 「이 원격 저장소를 신뢰했나」(계획 workspace-trust WT7b — `git_backend.Backend.remoteTrustedRoot`). 신뢰했으면 그 키의
+/// 루트(세션이 든 조각), 아니면 null.
+pub fn remoteTrustedRoot(self: *AppSession, t: git_ops.RemoteTrustTarget) ?[]const u8 {
+    return if (remoteRepoTrustState(self, t) == .trusted) t.root else null;
+}
+
+/// **SCM 이 원격 저장소의 신뢰를 묻는다**(계획 workspace-trust WT7b — 도크 줄·팔레트). 로컬(`askTrustForRepo`)과 같은 상자·같은 표·같은
+/// 키 규칙이고 키만 (목적지, 원격 실제 루트)다. 경로 줄은 `목적지:경로` 다(`trustKeyLabel`).
+pub fn askTrustForRemoteRepo(self: *AppSession, t: git_ops.RemoteTrustTarget) AskOutcome {
+    ensureTrustLoaded(self);
+    var db: [lsp.trust.max_dest_bytes]u8 = undefined;
+    const key = remoteKey(t, &db) orelse return .refused;
+    if (remoteRefused(t)) return .refused;
+    if (trust_store.get(key) == .allow) return .already_trusted;
+    if (self.editor_lsp.asking_key != null) return .busy;
+    const owned_root = self.allocator.dupe(u8, t.root) catch return .busy;
+    const owned_key = OwnedKey.dupe(self.allocator, key) catch {
+        self.allocator.free(owned_root);
+        return .busy;
+    };
+    if (!trust_store.claim(key, trustOwner(self))) {
+        self.allocator.free(owned_root);
+        owned_key.deinit(self.allocator);
+        return .busy;
+    }
+    self.showConfirmText(.lsp_trust, maru.i18n.t(.scm_trust_prompt), .{ .confirm = .scm_trust_allow, .cancel = .common_cancel });
+    self.chrome_host.confirm.guardAsync(maru.i18n.t(.scm_trust_recheck));
+    self.editor_lsp.asking_root = owned_root;
+    self.editor_lsp.asking_key = owned_key;
+    self.editor_lsp.asking_scm = true;
+    setScmTrustSheetNotes(self, owned_key.key(), t.root, false);
     return .asked;
 }
 
 /// SCM 신뢰 시트의 안내 줄 — **어느 저장소인지가 맨 앞**이다: 질문이 「이 저장소를 신뢰할까요?」뿐이라 경로가 곧 대상이다(언어 서버
 /// 시트는 질문이 서버 이름을 들어 경로를 맨 끝에 둔다; 신뢰 관리 상자 `setManageNotes` 와 같은 이유 — 적대적 검증 1회차: 낮은 창에선 끝
 /// 줄부터 사라져 무엇을 신뢰하는지가 빠졌다). 그다음 무엇이 실행될 수 있는지·무엇에 서는지.
-fn setScmTrustSheetNotes(self: *AppSession, root: []const u8, pending_write: bool) void {
+///
+/// 원격 키면 경로 줄이 `목적지:경로` 이고 범위 줄이 원격의 것이다(계획 WT7b — 원격 쓰기는 신뢰해도 아직 터미널에 넣는다).
+fn setScmTrustSheetNotes(self: *AppSession, key: lsp.trust.Key, root: []const u8, pending_write: bool) void {
     const st = &self.editor_lsp;
-    var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root_line = maru.i18n.format(&st.trust_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = app_session_mod.homeTildeInto(root, &shown_buf) }});
+    var shown_buf: [std.fs.max_path_bytes + lsp.trust.max_dest_bytes + 1]u8 = undefined;
+    // 로컬은 사용자가 보는 그 경로(심링크 그대로 — 홈을 `~` 로), 원격은 키 그대로(`목적지:원격 실제 루트`).
+    const shown = if (key.isRemote()) trustKeyLabel(key, &shown_buf) else app_session_mod.homeTildeInto(root, &shown_buf);
+    const root_line = maru.i18n.format(&st.trust_root_note_buf, maru.i18n.t(.lsp_trust_note_root), &.{.{ .s = shown }});
     var n: usize = 0;
     st.trust_notes[n] = .{ .text = root_line, .fit = .path };
     n += 1;
@@ -453,7 +515,7 @@ fn setScmTrustSheetNotes(self: *AppSession, root: []const u8, pending_write: boo
         n += 1;
     }
     st.trust_notes[n] = .{ .text = maru.i18n.t(.scm_trust_note_privileges) };
-    st.trust_notes[n + 1] = .{ .text = maru.i18n.t(.scm_trust_note_scope) };
+    st.trust_notes[n + 1] = .{ .text = maru.i18n.t(if (key.isRemote()) .scm_trust_note_scope_remote else .scm_trust_note_scope) };
     self.chrome_host.confirm.notes = st.trust_notes[0 .. n + 2];
 }
 

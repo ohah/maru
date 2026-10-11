@@ -5196,10 +5196,8 @@ pub fn matchRangePublic(doc: Opened, m: maru.session.editor.find.Match) ?DocRang
 }
 
 fn matchRange(doc: Opened, m: maru.session.editor.find.Match) ?DocRange {
-    const line = doc.file.lines.line(m.line) orelse return null;
-    const start = line.start + m.start;
-    if (start > doc.file.content.len) return null;
-    return .{ .start = start, .end = @min(start + m.len, doc.file.content.len) };
+    const r = edit_ops.matchRange(doc.file.content, doc.file.lines, m) orelse return null;
+    return .{ .start = r.start, .end = r.end };
 }
 
 /// **현재 매치 하나를 바꾼다**(§5.1). 바꾸기는 편집 연산이므로 되돌리기 하나다(§3.3).
@@ -5218,27 +5216,29 @@ pub fn replaceCurrentMatch(self: *AppSession, term: *Term) bool {
 
     const idx = self.chrome_host.find.current;
     if (idx >= self.editor_find_matches.items.len) return false;
-    const match = self.editor_find_matches.items[idx];
-    const r = matchRange(doc, match) orelse return false;
-
-    var expanded: ?[]u8 = null;
-    defer if (expanded) |owned| self.allocator.free(owned);
-    if (self.chrome_host.find.regex) {
-        var pattern = maru.session.editor.find.regex.Pattern.initDocument(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case, .anycrlf) catch return false;
-        defer pattern.deinit();
-        expanded = pattern.expandFrom(self.allocator, doc.file.content, .{ .start = r.start, .end = r.end }, self.chrome_host.find.replace.query.items, match.regex_from orelse r.start) catch {
-            self.chrome_host.find.regex_error = "invalid replace";
+    // **무엇으로 바꿀지는 L2 `edit_ops.planReplace` 가 정한다**(§5.1 — regex 면 캡처를 펼친다). 여기서는 찾기 상태를 풀어 넘긴다.
+    const find = &self.chrome_host.find;
+    var pattern: ?maru.session.editor.find.regex.Pattern = if (find.regex)
+        maru.session.editor.find.regex.Pattern.initDocument(find.input.query.items, find.match_case, .anycrlf) catch return false
+    else
+        null;
+    defer if (pattern) |*pat| pat.deinit();
+    var plan = (edit_ops.planReplace(self.allocator, doc.file.content, doc.file.lines, self.editor_find_matches.items[idx .. idx + 1], find.replace.query.items, if (pattern) |*pat| pat else null) catch |e| switch (e) {
+        error.Expand, error.InvalidUtf8 => {
+            find.regex_error = "invalid replace";
             self.metal_dirty = true;
             return false;
-        };
-    }
-    const text = expanded orelse self.chrome_host.find.replace.query.items;
-    var changes = [_]maru.session.editor.delta.Change{.{ .start = r.start, .end = r.end, .text = text }};
+        },
+        error.OutOfMemory => return false,
+    }) orelse return false;
+    defer plan.deinit(self.allocator);
+    const changes = plan.changes.items;
+    const replaced = changes[0];
 
-    if (!applyEditAsOne(self, term, &changes)) return false;
+    if (!applyEditAsOne(self, term, changes)) return false;
 
     // **바꾼 자리 뒤의 첫 매치로 간다.** 목록은 방금 낡았으므로 다시 찾고, 그 안에서 고른다.
-    const after = r.start + text.len;
+    const after = replaced.start + replaced.text.len;
     find_ops.recomputeEditorFindPublic(self, term);
     selectNextMatchAtOrAfter(self, term, after);
     return true;
@@ -5259,38 +5259,24 @@ pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
     if (!isFindTarget(self, term)) return false;
     if (self.editor_find_matches.items.len == 0) return false;
 
-    // 같은 불변 원문을 한 번 검증해 매치 수만큼 문서 전체 UTF-8을 반복 검사하지 않는다.
-    if (self.chrome_host.find.regex and !std.unicode.utf8ValidateSlice(doc.file.content)) return false;
-    var pattern: ?maru.session.editor.find.regex.Pattern = if (self.chrome_host.find.regex)
-        maru.session.editor.find.regex.Pattern.initDocument(self.chrome_host.find.input.query.items, self.chrome_host.find.match_case, .anycrlf) catch return false
+    // **무엇으로 바꿀지는 L2 `edit_ops.planReplace` 가 정한다**(§5.1 — 매치마다 변경 하나, regex 캡처, 원문 UTF-8 은 한 번만
+    // 검사). 여기서는 찾기 상태를 풀어 넘긴다.
+    const find = &self.chrome_host.find;
+    var pattern: ?maru.session.editor.find.regex.Pattern = if (find.regex)
+        maru.session.editor.find.regex.Pattern.initDocument(find.input.query.items, find.match_case, .anycrlf) catch return false
     else
         null;
-    defer if (pattern) |*p| p.deinit();
-    var expansions: std.ArrayList([]u8) = .empty;
-    defer {
-        for (expansions.items) |owned| self.allocator.free(owned);
-        expansions.deinit(self.allocator);
-    }
-    var changes: std.ArrayList(maru.session.editor.delta.Change) = .empty;
-    defer changes.deinit(self.allocator);
-    for (self.editor_find_matches.items) |m| {
-        const r = matchRange(doc, m) orelse continue;
-        var text: []const u8 = self.chrome_host.find.replace.query.items;
-        if (pattern) |*p| {
-            const owned = p.expandFromValidated(self.allocator, doc.file.content, .{ .start = r.start, .end = r.end }, text, m.regex_from orelse r.start) catch {
-                self.chrome_host.find.regex_error = "invalid replace";
-                self.metal_dirty = true;
-                return false;
-            };
-            expansions.append(self.allocator, owned) catch {
-                self.allocator.free(owned);
-                return false;
-            };
-            text = owned;
-        }
-        changes.append(self.allocator, .{ .start = r.start, .end = r.end, .text = text }) catch return false;
-    }
-    if (changes.items.len == 0) return false;
+    defer if (pattern) |*pat| pat.deinit();
+    var plan = (edit_ops.planReplace(self.allocator, doc.file.content, doc.file.lines, self.editor_find_matches.items, find.replace.query.items, if (pattern) |*pat| pat else null) catch |e| switch (e) {
+        error.Expand => {
+            find.regex_error = "invalid replace";
+            self.metal_dirty = true;
+            return false;
+        },
+        error.InvalidUtf8, error.OutOfMemory => return false,
+    }) orelse return false;
+    defer plan.deinit(self.allocator);
+    const changes = &plan.changes;
 
     if (!applyEditAsOne(self, term, changes.items)) return false;
 
@@ -10006,43 +9992,10 @@ pub fn acceptConflict(self: *AppSession, term: *Term, region_index: usize, choic
     if (region_index >= term.rt.editor_conflicts.len) return false;
     const r = term.rt.editor_conflicts[region_index];
 
-    const lines = doc.file.lines;
-    const head = lines.line(r.start) orelse return false;
-    const tail = lines.line(r.end) orelse return false;
-    const content = doc.file.content;
-    const remove_from = head.start;
-    const remove_to = @min(tail.end_with_ending, content.len);
-    if (remove_to < remove_from) return false;
-
-    // 고른 쪽의 **본문 줄들**을 원문 그대로 잇는다. 줄 범위가 비면 빈 글이다(한쪽이 통째로 지워진
-    // 충돌이 그렇다 — 그때 결과도 비어야 맞다).
-    const ours = r.ours();
-    const theirs = r.theirs();
-    const ours_text = sliceOfLines(doc, ours.from, ours.to);
-    const theirs_text = sliceOfLines(doc, theirs.from, theirs.to);
-
-    var joined: ?[]u8 = null;
-    defer if (joined) |j| self.allocator.free(j);
-    const replacement: []const u8 = switch (choice) {
-        .current => ours_text,
-        .incoming => theirs_text,
-        // **둘 다**는 «현재 것» 다음에 «들어온 것»이다(VS Code 와 같은 순서 — 파일에 적힌 순서다).
-        .both => blk: {
-            const j = self.allocator.alloc(u8, ours_text.len + theirs_text.len) catch return false;
-            @memcpy(j[0..ours_text.len], ours_text);
-            @memcpy(j[ours_text.len..], theirs_text);
-            joined = j;
-            break :blk j;
-        },
-        // Incoming 판의 「둘 다 채택 (들어온 것 먼저)」(S3b-3c) — 같은 이어붙이기, 순서만 반대다.
-        .both_incoming_first => blk: {
-            const j = self.allocator.alloc(u8, ours_text.len + theirs_text.len) catch return false;
-            @memcpy(j[0..theirs_text.len], theirs_text);
-            @memcpy(j[theirs_text.len..], ours_text);
-            joined = j;
-            break :blk j;
-        },
-    };
+    // **무엇으로 바꿀지는 L2 `edit_ops.planConflictChoice` 가 정한다** — 마커 줄까지 구간 전체를 고른 쪽 본문으로(원문 그대로
+    // 빌린다 — 줄바꿈 종류를 안 바꾼다). 둘 다는 «현재 것» 다음 «들어온 것»(파일 순서), `both_incoming_first` 는 반대.
+    var plan = (edit_ops.planConflictChoice(self.allocator, doc.file.content, doc.file.lines, r, choice) catch return false) orelse return false;
+    defer plan.deinit(self.allocator);
 
     // **커서가 없으면 구간 머리에 놓는다.** 편집 경로는 커서 집합을 통해 문서를 고치는데
     // (`applyEditAsOne`), 위젯을 누르는 것은 **본문을 한 번도 안 누른 상태**에서도 일어난다 —
@@ -10052,25 +10005,10 @@ pub fn acceptConflict(self: *AppSession, term: *Term, region_index: usize, choic
     // **이미 있으면 안 건드린다** — 누르는 것은 CodeLens 를 누르는 일이고, 그것이 커서를 옮기는
     // 동작은 아니다. 있는 커서는 `applyEditAsOne` 이 편집을 지나 옮겨 준다.
     if (term.rt.editor_selection == null) {
-        term.rt.editor_selection = editor_selection.Selection.at(remove_from);
+        term.rt.editor_selection = editor_selection.Selection.at(plan.change.start);
     }
-    var changes = [_]maru.session.editor.delta.Change{.{ .start = remove_from, .end = remove_to, .text = replacement }};
+    var changes = [_]maru.session.editor.delta.Change{plan.change};
     return applyEditAsOne(self, term, &changes);
-}
-
-/// `[from, to)` 줄들의 **원문 조각**(줄바꿈 포함). 범위가 비면 빈 조각이다.
-///
-/// **원문을 그대로 빌린다 — 다시 짓지 않는다.** 줄을 모아 새로 이으면 줄바꿈 종류(`\r\n`)가 바뀌고,
-/// 그러면 「한쪽을 골랐을 뿐인데 파일 전체의 줄 끝이 달라지는」 일이 그 구간에서만 일어난다.
-fn sliceOfLines(doc: anytype, from: u32, to: u32) []const u8 {
-    if (to <= from) return &.{};
-    const lines = doc.file.lines;
-    const first = lines.line(from) orelse return &.{};
-    const last = lines.line(to - 1) orelse return &.{};
-    const content = doc.file.content;
-    const end = @min(last.end_with_ending, content.len);
-    if (end <= first.start) return &.{};
-    return content[first.start..end];
 }
 
 /// 한 문서에서 인식할 충돌 구간의 상한. **§3.8 규율** — 초장문·극단 입력에서 기능을 줄인다.

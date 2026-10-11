@@ -11626,10 +11626,8 @@ pub const AppSession = struct {
         if (action) |a| self.dispatchAppAction(a);
     }
 
-    /// 충돌 구간에서 **무엇을 고르는가**(S2). 「Ignore」는 두지 않는다 — 손으로 고치는 것과 같다.
-    /// `both` 는 현재 것 → 들어온 것(파일에 적힌 순서). `both_incoming_first` 는 그 반대 — Incoming 판의
-    /// 「둘 다 채택 (들어온 것 먼저)」(S3b-3c, VS Code 의 「Accept Combination (X First)」 상당).
-    pub const ConflictChoice = enum { current, incoming, both, both_incoming_first };
+    /// 충돌 구간에서 **무엇을 고르는가**(S2) — L2 `edit_ops.ConflictChoice`(값의 뜻은 그쪽이 소유한다).
+    pub const ConflictChoice = maru.session.editor.edit_ops.ConflictChoice;
 
     /// 위젯 행의 **한 동작이 차지하는 열 구간**과 그것이 가리키는 구간·선택.
     pub const ConflictActionSpan = struct {

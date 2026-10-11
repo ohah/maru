@@ -79,6 +79,27 @@ fn strOf(v: ?std.json.Value) ?[]const u8 {
     return if (x == .string) x.string else null;
 }
 
+/// 저장 시 code action(docs/editor-surface-tooling.md §8.2s) — 설정 `editor.code-actions-on-save` 의 kind 목록(쉼표로 가름, 앞뒤 공백 무시,
+/// 빈 항목 건너뜀)에서 `pos` 부터 다음 kind 를 낸다. 끝이면 null.
+pub fn nextKind(list: []const u8, pos: *usize) ?[]const u8 {
+    while (pos.* < list.len) {
+        const start = pos.*;
+        const end = std.mem.indexOfScalarPos(u8, list, start, ',') orelse list.len;
+        pos.* = if (end < list.len) end + 1 else list.len;
+        const k = std.mem.trim(u8, list[start..end], " \t");
+        if (k.len > 0) return k;
+    }
+    return null;
+}
+
+/// 서버가 낸 항목의 kind 가 요청한 kind 에 드는가 — 같거나 그 아래(`source.fixAll.eslint` 는 `source.fixAll` 에 든다; LSP 3.17 `CodeActionKind`
+/// 는 점으로 가른 계층이다). kind 가 없는 항목은 들지 않는다(`only` 를 무시한 서버의 quickfix 를 저장마다 적용하지 않는다).
+pub fn kindMatches(kind: []const u8, wanted: []const u8) bool {
+    if (kind.len == 0 or wanted.len == 0) return false;
+    if (std.mem.eql(u8, kind, wanted)) return true;
+    return kind.len > wanted.len and std.mem.startsWith(u8, kind, wanted) and kind[wanted.len] == '.';
+}
+
 // ── 판정 ────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -124,4 +145,24 @@ test "CAX1 항목 파싱 — edit 있는 것·resolve 되는 data 만, Command �
     var bad = try parseJson(a, "{\"x\":1}");
     defer bad.deinit();
     try testing.expectError(error.Malformed, parse(a, bad.value, true));
+}
+
+test "CAK1 저장 시 code action 의 kind — 설정 목록은 쉼표로 가르고 공백·빈 항목을 건너뛰며, 항목 kind 는 같거나 점 아래 계층만 든다 (§8.2s)" {
+    var pos: usize = 0;
+    const list = " source.organizeImports , ,source.fixAll,";
+    try testing.expectEqualStrings("source.organizeImports", nextKind(list, &pos).?);
+    try testing.expectEqualStrings("source.fixAll", nextKind(list, &pos).?);
+    try testing.expectEqual(@as(?[]const u8, null), nextKind(list, &pos));
+    pos = 0;
+    try testing.expectEqual(@as(?[]const u8, null), nextKind("", &pos));
+    pos = 0;
+    try testing.expectEqual(@as(?[]const u8, null), nextKind(" , ", &pos));
+    try testing.expect(kindMatches("source.organizeImports", "source.organizeImports"));
+    try testing.expect(kindMatches("source.fixAll.eslint", "source.fixAll"));
+    try testing.expect(kindMatches("source.organizeImports", "source"));
+    try testing.expect(!kindMatches("source.fixAllX", "source.fixAll")); // 점 경계
+    try testing.expect(!kindMatches("source", "source.fixAll")); // 위 계층은 안 든다
+    try testing.expect(!kindMatches("quickfix", "source.organizeImports"));
+    try testing.expect(!kindMatches("", "source"));
+    try testing.expect(!kindMatches("source", ""));
 }

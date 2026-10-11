@@ -97,6 +97,7 @@ pub const references_client = @import("references.zig");
 /// 시그니처 힌트(tooling §8.2d) — 호버 박스를 같이 쓴다.
 pub const signature_client = @import("signature.zig");
 pub const format_client = @import("format.zig");
+pub const save_actions = @import("save_actions.zig");
 pub const rename_client = @import("rename.zig");
 pub const completion_client = @import("completion.zig");
 pub const code_action_client = @import("code_action.zig");
@@ -22398,6 +22399,169 @@ test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌�
     lsp_client.pump(s);
     try testing.expect(!s.editor_format.then_save);
     try testing.expectEqualStrings("FMTSTALL /*a*/ int g;\n", try disk.read(&f.fx, "g.c"));
+}
+
+test "CSA1 저장 시 code action — ⌘S 가 설정한 kind 를 순서대로 묻고(only·triggerKind 2) 그 문서에 적용한 뒤 포맷·저장; 하위 kind 는 들고 다른 kind 는 거름, edit 없으면 resolve, 다른 파일을 고치면 건너뛰고 알림, 겹침은 거부, 시한·낡은 revision 은 남은 것을 건너뛰고 저장, 빈 설정은 곧바로 저장 (제품 경계, §8.2s)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.open(allocator, "ca.c", "UNORGANIZED FIXALL\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    const term = f.term;
+    try testing.expect(f.ready());
+    try testing.expectEqualStrings("", s.loaded_config.config.editor.code_actions_on_save); // 기본 빈 값(끔 — 2026-10-11 사용자 결정)
+    s.loaded_config.config.editor.code_actions_on_save = "source.organizeImports, source.fixAll";
+    s.loaded_config.config.editor.format_on_save = false; // 포맷 단계는 ⑼ 에서 함께 잰다
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    const Disk = struct {
+        buf: [256]u8 = undefined,
+        fn read(d: *@This(), fx: *PaneFixture) ![]const u8 {
+            return fx.dir.dir.readFile(testing.io, "ca.c", &d.buf);
+        }
+    };
+    var disk: Disk = .{};
+    const settled = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_save_actions.active and !ss.editor_format.waiting;
+        }
+    }.g;
+    const replaceAll = struct {
+        fn g(ss: *AppSession, t: *Term, text: []const u8) !void {
+            const len: u32 = @intCast(t.rt.editorDocument().opened.?.file.content.len);
+            t.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = len, .focus = len };
+            try testing.expect(insertText(ss, t, text));
+        }
+    }.g;
+
+    // ⑴ ⌘S — 첫 kind 를 묻고(저장은 아직), 응답마다 적용하고 다음 kind, 다 돌면 저장. 적용은 kind 마다 되돌리기 하나.
+    const ca0 = s.editor_lsp.sent_code_actions;
+    const undo0 = term.rt.editorDocument().history.undo_len;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(ca0 + 1, s.editor_lsp.sent_code_actions);
+    try testing.expect(s.editor_save_actions.active);
+    try testing.expectEqualStrings("UNORGANIZED FIXALL\n", try disk.read(&f.fx));
+    // ⑴-a 같은 문서의 ⌘S 는 무동작(요청을 더 보내지 않는다).
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(ca0 + 1, s.editor_lsp.sent_code_actions);
+    // ⑴-b 기다리는 사이 설정이 바뀌어도(Reload Config) 이 저장은 누른 순간의 목록을 끝까지 돈다 — 사본을 든다.
+    s.loaded_config.config.editor.code_actions_on_save = "x";
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqual(ca0 + 2, s.editor_lsp.sent_code_actions); // kind 둘 — 하나씩
+    try testing.expectEqualStrings("ORGANIZED FIXED_ALL\n", content(term)); // `source.fixAll.fake` 는 `source.fixAll` 에 든다
+    try testing.expectEqualStrings("ORGANIZED FIXED_ALL\n", try disk.read(&f.fx));
+    try testing.expectEqual(undo0 + 2, term.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(@as(u64, 2), s.editor_save_actions.applied);
+    try testing.expect(!term.rt.editorDocument().opened.?.isDirty());
+    s.loaded_config.config.editor.code_actions_on_save = "source.organizeImports, source.fixAll";
+
+    // ⑵ 요청한 kind 가 아닌 항목(서버가 `only` 를 무시하고 앞에 낸 quickfix)은 거른다.
+    try replaceAll(s, term, "UNORGANIZED WRONGKIND\n");
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("ORGANIZED WRONGKIND\n", try disk.read(&f.fx));
+
+    // ⑶ edit 이 없으면 resolve 로 받아 적용한다.
+    try replaceAll(s, term, "ORGLAZY\n");
+    const rs0 = s.editor_lsp.sent_code_action_resolves;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqual(rs0 + 1, s.editor_lsp.sent_code_action_resolves);
+    try testing.expectEqualStrings("// lazy\nORGLAZY\n", try disk.read(&f.fx));
+
+    // ⑷ 다른 파일도 고치는 항목은 건너뛰고(이 문서도 안 고친다) 알린다 — 저장은 한다.
+    try replaceAll(s, term, "ORGOTHER\n");
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("ORGOTHER\n", try disk.read(&f.fx));
+    try testing.expectEqual(@as(u64, 1), s.editor_save_actions.skipped_other_files);
+    var want_buf: [256]u8 = undefined;
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.format(&want_buf, maru.i18n.t(.csa_other_files), &.{.{ .s = "source.organizeImports" }})));
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .csa_other_files), "다른 파일") != null);
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.en, .csa_other_files), "other files") != null);
+    s.chrome_host.notice.dismiss();
+
+    // ⑸ 겹치는 edit 은 거부하고 알린다 — 저장은 한다.
+    try replaceAll(s, term, "ORGBAD\n");
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("ORGBAD\n", try disk.read(&f.fx));
+    try testing.expectEqual(@as(u64, 1), s.editor_save_actions.rejected);
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.format(&want_buf, maru.i18n.t(.csa_rejected), &.{.{ .s = "source.organizeImports" }})));
+    try testing.expect(std.mem.indexOf(u8, maru.i18n.tIn(.ko, .csa_rejected), "거부") != null);
+    s.chrome_host.notice.dismiss();
+
+    // ⑹ 서버가 답하지 않으면(`CASTALL`) 시한 전엔 기다리고, 시한 뒤 남은 kind 를 건너뛰고 알린 뒤 저장한다(시한은 구조 필드로 당긴다).
+    try replaceAll(s, term, "CASTALL UNORGANIZED\n");
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(s.editor_save_actions.active);
+    lsp_client.pump(s);
+    try testing.expect(s.editor_save_actions.active);
+    s.editor_save_actions.deadline_ms = 0;
+    lsp_client.pump(s);
+    try testing.expect(!s.editor_save_actions.active);
+    try testing.expectEqual(@as(u64, 1), s.editor_save_actions.timeouts);
+    try testing.expectEqualStrings("CASTALL UNORGANIZED\n", try disk.read(&f.fx));
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.csa_timeout)));
+    s.chrome_host.notice.dismiss();
+
+    // ⑺ 응답 전에 문서를 고치면 남은 kind 를 건너뛰고 알린 뒤 지금 본문을 저장한다.
+    try replaceAll(s, term, "UNORGANIZED\n");
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, term, "Z"));
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqualStrings("ZUNORGANIZED\n", try disk.read(&f.fx));
+    try testing.expectEqual(@as(u64, 1), s.editor_save_actions.stale);
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.csa_stale)));
+    s.chrome_host.notice.dismiss();
+
+    // ⑺-a 읽기 전용 문서는 code action 을 묻지 않고 곧바로 저장을 시도해 그 자리에서 거절을 알린다(쓸모없는 요청·늦은 알림이 없다).
+    term.rt.editorDocument().opened.?.file.read_only = true;
+    const ca_ro = s.editor_lsp.sent_code_actions;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(ca_ro, s.editor_lsp.sent_code_actions);
+    try testing.expect(!s.editor_save_actions.active);
+    try testing.expect(std.mem.startsWith(u8, &s.notice_message_buf, maru.i18n.t(.editor_save_read_only)));
+    s.chrome_host.notice.dismiss();
+    term.rt.editorDocument().opened.?.file.read_only = false;
+
+    // ⑻ 빈 설정은 곧바로 저장한다(요청 없음).
+    s.loaded_config.config.editor.code_actions_on_save = "";
+    try replaceAll(s, term, "UNORGANIZED\n");
+    const ca1 = s.editor_lsp.sent_code_actions;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(ca1, s.editor_lsp.sent_code_actions);
+    try testing.expect(!s.editor_save_actions.active);
+    try testing.expectEqualStrings("UNORGANIZED\n", try disk.read(&f.fx));
+
+    // ⑼ **code action 이 포맷보다 먼저다** — 포맷 요청은 code action 단계가 끝난 뒤에 나가고, 둘 다 적용된 본문이 저장된다.
+    s.loaded_config.config.editor.code_actions_on_save = "source.organizeImports";
+    s.loaded_config.config.editor.format_on_save = true;
+    try replaceAll(s, term, "UNORGANIZED  x;\n");
+    const fmt0 = s.editor_lsp.sent_formattings;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(s.editor_save_actions.active);
+    try testing.expectEqual(fmt0, s.editor_lsp.sent_formattings); // 아직 포맷을 묻지 않았다
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqual(fmt0 + 1, s.editor_lsp.sent_formattings);
+    try testing.expectEqualStrings("ORGANIZED x;\n", try disk.read(&f.fx));
+
+    // ⑽ 그 문서를 열지 않은 클라이언트의 같은 번호 응답은 이 단계가 받지 않는다(메뉴 §8.2h 로 넘긴다).
+    {
+        const client = lsp_client.readyClientFor(s, term) orelse return error.NoClient;
+        var stranger: lsp_client.Client = .{ .root = &.{}, .server = client.server };
+        s.editor_save_actions.active = true;
+        s.editor_save_actions.surface = term.surface.id;
+        s.editor_save_actions.stage = .request;
+        s.editor_save_actions.waiting_seq = 55;
+        try testing.expect(!save_actions.onClientResponse(s, &stranger, 55, null));
+        try testing.expect(s.editor_save_actions.active);
+        s.editor_save_actions.active = false;
+    }
 }
 
 test "FOS2 포맷 응답의 입구는 하나 — lsp.zig 는 formatting 응답을 onClientResponse 로만 넘긴다(보낸 서버 확인을 건너뛰지 않는다) (소스 판정, §8.2r)" {

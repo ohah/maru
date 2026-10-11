@@ -6163,6 +6163,7 @@ pub const AppSession = struct {
     /// 시그니처 힌트 상태(tooling §8.2d) — 상자의 주인 여부·요청 seq·줄.
     editor_signature: editor_ops.signature_client.State = .{},
     editor_format: editor_ops.format_client.State = .{},
+    editor_save_actions: editor_ops.save_actions.State = .{},
     editor_rename: editor_ops.rename_client.State = .{},
     editor_completion: editor_ops.completion_client.State = .{},
     editor_code_action: editor_ops.code_action_client.State = .{},
@@ -11536,8 +11537,8 @@ pub const AppSession = struct {
             .editor_redo => _ = editor_ops.redoEdit(self, pane_ops.activePane(self).activeTerm()),
             // **저장 실패는 이유별로 말한다**(§3.9d) — 예전에는 `_ =` 로 결과를 통째로 버려 사용자가
             // `⌘S` 를 누르고 아무 일도 없는 것을 봤다. `AskName` 은 실패가 아니라 「이름을 물었다」다.
-            // 저장 시 포맷(§8.2r)이 켜져 있으면 포맷 응답(또는 시한) 뒤에 저장한다 — 실패 알림·충돌 묻기는 그 함수가 한다.
-            .editor_save => editor_ops.format_client.saveCommand(self, pane_ops.activePane(self).activeTerm()),
+            // 저장 시 code action(§8.2s) → 저장 시 포맷(§8.2r) → 저장. 각 단계는 응답(또는 시한) 뒤에 다음으로 넘긴다 — 실패 알림·충돌 묻기는 포맷 단계의 `saveNow` 가 한다.
+            .editor_save => editor_ops.save_actions.saveCommand(self, pane_ops.activePane(self).activeTerm()),
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
             // 레벨 접기 — 그 레벨에 블록이 없으면 무동작이다(빈 집합을 넣어 화면이 펼쳐지지 않게).

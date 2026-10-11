@@ -1046,6 +1046,14 @@ pub fn resetSelectedTextRow(self: *AppSession, t: config_mod.schema.TextField, d
         self.metal_dirty = true;
         return;
     }
+    if (std.mem.eql(u8, t.key, "editor.code-actions-on-save")) {
+        // 기본값(빈 목록 — 끔)으로 — setText 는 빈 값을 거부하므로 필드를 직접(tooling §8.2s).
+        self.loaded_config.config.editor.code_actions_on_save = "";
+        reapplyLoadedConfig(self);
+        markConfigKeyRemoved(self, "editor.code-actions-on-save");
+        self.metal_dirty = true;
+        return;
+    }
     if (std.mem.eql(u8, t.key, "lsp.environment-exclude")) {
         // 기본값(빈 목록)으로 — setText 는 빈 값을 거부하므로 필드를 직접. 앱 전역을 재적용 **전에**(미러 되맞춤이 옛 전역으로 되돌리지 않게).
         self.loaded_config.config.lsp.environment_exclude = "";
@@ -3494,6 +3502,15 @@ pub fn restoreDropdownSnapshot(self: *AppSession) void {
     }
 }
 
+/// 저장 시 code action 의 kind 목록 커밋(tooling §8.2s) — 빈 값은 끈다(파일에서 그 줄을 지운다; setText 는 빈 값을 거부한다).
+fn setCodeActionsOnSave(self: *AppSession, text: []const u8) void {
+    const trimmed = std.mem.trim(u8, text, " \t");
+    const owned = self.loaded_config.arena.allocator().dupe(u8, trimmed) catch return;
+    self.loaded_config.config.editor.code_actions_on_save = owned;
+    reapplyLoadedConfig(self);
+    if (owned.len == 0) markConfigKeyRemoved(self, "editor.code-actions-on-save") else markConfigKeyDirty(self, "editor.code-actions-on-save");
+}
+
 /// 환경 제외 목록 커밋 — 빈 값은 목록을 비운다(파일에서 그 줄을 지운다; setText 는 빈 값을 거부한다). **앱 전역을 재적용 전에** 세운다
 /// (`currentSectionFields` 의 미러 되맞춤이 옛 전역으로 되돌리지 않게 — 스위치 토글과 같은 순서).
 fn setEnvironmentExclude(self: *AppSession, text: []const u8) void {
@@ -3555,6 +3572,8 @@ pub fn commitSelectedText(self: *AppSession) void {
             workspace_ops.setWorkspaceRoot(self, editor); // 시작 디렉터리 — loader와 형식 검증 공유
         } else if (std.mem.eql(u8, tkey, "lsp.environment-exclude")) {
             setEnvironmentExclude(self, editor); // 빈 값(목록 비우기)도 받는다 — 앱 전역(계획 WT5b-1)
+        } else if (std.mem.eql(u8, tkey, "editor.code-actions-on-save")) {
+            setCodeActionsOnSave(self, editor); // 빈 값(끄기)도 받는다(tooling §8.2s)
         } else if (std.mem.eql(u8, tkey, "env.")) {
             addEnvVar(self, editor); // 추가 행 — "KEY=VALUE" 파싱
             refreshSettingsFieldCount(self); // 행 늘어남 → count 갱신(연속 추가가 키보드로 도달 가능)

@@ -478,6 +478,8 @@ pub const SpawnRequest = struct {
     /// process-local 이라 host 가 띄운 자식에 실을 수 없다. 한 변수가 두 일을 하면 «훅 신원을 host 소유
     /// 값으로 바꾸는 것» 이 곧 «selector 를 거짓말하게 만드는 것» 이 된다(계약 §4).
     hook_pane: ?[]const u8 = null,
+    /// Selected by the runtime owner before fork; never inherited from user env.
+    hook_log_profile: @import("../agent_log_format.zig").Profile = .v1,
     size: terminal.Size = terminal.Size.default,
     /// 셀 픽셀 크기 — PTY winsize의 `ws_xpixel`/`ws_ypixel`을 spawn 시점부터 채운다. 0(기본)이면 "모른다"로
     /// 두고, 이후 `PtySession.setCellPixels`가 채운다. 시작하자마자 크기를 읽는 앱(이미지 TUI)이 첫 프레임을

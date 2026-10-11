@@ -4650,7 +4650,7 @@ pub const RemoteTermBackend = struct {
         };
         const rr = try self.allocator.create(RemoteRuntime);
         errdefer self.allocator.destroy(rr);
-        const request = persistentSpawnRequest(params.request);
+        const request = try persistentSpawnRequest(params.request);
         const notification: remote_runtime.NotificationBootstrap = .{
             .config_generation = self.notification_config_generation,
             .notifications_osc = self.notifications_osc,
@@ -5532,7 +5532,10 @@ pub const RemoteTermBackend = struct {
     }
 };
 
-fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) maru.pty.SpawnRequest {
+fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) error{UnsupportedAgentLogFormat}!maru.pty.SpawnRequest {
+    // Until host metadata can confirm the selected profile, explicit v2 must
+    // fail before spawning instead of becoming an unannounced legacy child.
+    if (request_in.hook_log_profile != .v1) return error.UnsupportedAgentLogFormat;
     var request = request_in;
     // MARU_PANE_ID는 GUI process-local surface id라 재실행 후 같은 persistent child 안에서 stale selector가 된다.
     // runtime↔새 surface rebinding 프로토콜 전에는 주입하지 않아 잘못된 다른 pane을 self로 선택하는 것보다 fail-closed한다.
@@ -5545,6 +5548,8 @@ fn persistentSpawnRequest(request_in: maru.pty.SpawnRequest) maru.pty.SpawnReque
     // host_id 와 runtime_id 는 GUI 재실행을 넘어 살아 있는 유일한 이름이다). 그 배선은 host 쪽 슬라이스다.
     request.hook_instance = null;
     request.hook_pane = null;
+    // The host owns the persistent child format; do not leak GUI-local selection.
+    request.hook_log_profile = .v1;
     return request;
 }
 
@@ -5571,6 +5576,12 @@ test "P4 N2b1 remote backend binding은 UTF-8 display label을 256-byte 경계�
     try testing.expectEqual(std.math.maxInt(u64), backend.notification_config_generation);
 }
 
+test "persistent spawn rejects unconfirmed v2 format instead of downgrading" {
+    const request: maru.pty.SpawnRequest = .{ .command = "/bin/sh", .hook_log_profile = .v2 };
+    try std.testing.expectError(error.UnsupportedAgentLogFormat, persistentSpawnRequest(request));
+    try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v2, request.hook_log_profile);
+}
+
 test "persistent spawn omits process-local MARU_PANE_ID without mutating local fallback request" {
     const local: maru.pty.SpawnRequest = .{
         .command = "/bin/zsh",
@@ -5578,7 +5589,7 @@ test "persistent spawn omits process-local MARU_PANE_ID without mutating local f
         .hook_instance = "4242",
         .hook_pane = "42",
     };
-    const persistent = persistentSpawnRequest(local);
+    const persistent = try persistentSpawnRequest(local);
     try std.testing.expectEqual(@as(?u64, 42), local.pane_id);
     try std.testing.expectEqual(@as(?u64, null), persistent.pane_id);
     // 훅 경로의 두 칸도 같이 떨어진다 — 남기면 재실행 뒤 남의 칸에 쓴다.

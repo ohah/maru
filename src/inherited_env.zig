@@ -18,9 +18,10 @@
 const std = @import("std");
 
 pub const terminal_session_keys = [_][]const u8{
-    "TERM",               "COLORTERM",      "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
-    "TERMINFO",           "CLICOLOR_FORCE", "FORCE_COLOR",  "MARU_PANE_ID",
-    "MARU_HOOK_INSTANCE", "MARU_HOOK_PANE", "TMUX",         "TMUX_PANE",
+    "TERM",                                    "COLORTERM",      "TERM_PROGRAM", "TERM_PROGRAM_VERSION",
+    "TERMINFO",                                "CLICOLOR_FORCE", "FORCE_COLOR",  "MARU_PANE_ID",
+    "MARU_HOOK_INSTANCE",                      "MARU_HOOK_PANE", "TMUX",         "TMUX_PANE",
+    @import("agent_log_format.zig").local_env,
 };
 
 /// 환경 항목(`KEY=VALUE`)의 키. `=` 가 없으면 `null`. Windows 의 `=C:=C:\work` 처럼 이름이 `=` 로 시작하는 항목은 키가 빈다.

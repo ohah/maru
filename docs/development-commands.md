@@ -93,12 +93,14 @@ provider correction 반복 방지는 `test-agent-log-record`에 포함된다.
 
 v2 검증용 reader는 `maru agent-events --stdio --dir=<private-directory> --log-format=v2`로
 선택한다. 기본 v1과 혼합하지 않으며
-`maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상과 재접속 수신은 아래 게이트로 검사하며 기본 훅 전환은 후속이다.
+`maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상과 재접속 수신은 아래 게이트로 검사한다. 준비된 macOS 로컬 runtime의 기본 전환은 구현됐으며 SSH 기본 전환은 후속이다.
 `zig build test-agent-log-stream-process`는 실제 CLI pipe로 generation resume,
 시작 정리, 출력 배압 중 append, holder 종료, broken pipe를 검사한다. Ubuntu CI
 check에 포함되며 결과는 `tests/artifacts/agent-log-stream/`에만 남긴다.
 
 로그 세대 수신·재접속: `zig build test-cli-failure-contract`가 v1/v2 hello와 cursor의 엄격한 판정, u64 상한, 32개 최대 resume 및 할당 실패 시 이전 목록 보존을 검사한다. `zig build test-macos-app-host-abi`에는 AppSession의 v2 capability 유지·재시작 downgrade 거부 및 실제 pipe의 잘못된 hello/정상 cursor 수신 회귀가 포함된다. 기본 훅을 native로 활성화하는 검증과 Windows 실제 실행을 대신하지 않는다.
+
+macOS의 `zig build test-remote-agent-log-profile`은 실제 AppSession의 SSH 자식 argv에서 최초 연결·v1 재접속·v2 재접속의 로그 namespace와 resume 정합성을 검사하고, hello downgrade 거부 및 cursor pipe 회귀를 함께 실행한다. SSH는 격리된 대역이며 실제 원격 서버·provider 실행 검증은 별도다.
 
 로컬 v2 reader는 `zig build test-local-agent-log-reader`로 실제 AppSession의 명시적
 profile 선택·payload cursor·공유 잠금 충돌·같은 크기 교체·소비 뒤 회전·손상된

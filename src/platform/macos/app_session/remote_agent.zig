@@ -176,9 +176,9 @@ pub fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, 
         // 셈에는 들어가 「열을 다 먹였는데 하나도 안 맞는다」가 된다(2026-09-10 실측).
         const ras = maru.session.remote_agent_stream;
         term.agent_remote_channel = if (gop.value_ptr.saw_hello)
-            ras.Channel.initOpen(now_ms)
+            ras.Channel.initOpenProfile(now_ms, gop.value_ptr.stream_profile orelse .v1)
         else
-            ras.Channel.init(now_ms);
+            ras.Channel.initForProfile(now_ms, if (gop.value_ptr.stream_profile == .v2) .v2 else null);
     }
 }
 
@@ -297,15 +297,19 @@ pub fn drainRemoteAgentHost(self: *AppSession, dest: []const u8, host: *RemoteAg
             consumed += nl + 1;
         }
         if (count == 0) break;
-        // **줄이 왔다 = 채널이 산다.** 재시도 예산을 되돌린다(적대적 검증 3 회차).
+        // **hello를 확인한 스트림의 줄이 왔다 = 채널이 산다.** 재시도 예산을 되돌린다(적대적 검증 3 회차).
         //
         // 안 되돌리면 `retries` 가 **오직 증가만** 해서, 슬립·빌드로 며칠에 걸쳐 여섯 번 끊긴
         // 목적지가 그 뒤로 영영 안 붙는다 — 재접속을 넣고도 오늘 이전과 같은 상태가 된다.
         // 예산은 「연달아 실패한 횟수」여야지 「살아온 동안의 총합」이면 안 된다.
-        host.retries = 0;
         // **Term 에 먹이기 전에** 커서를 건진다 — 먹이는 쪽은 Term 마다 돌고 커서는 host 소유다.
-        host.last_line_ms = now_ms; // 하트비트도 줄이다 — 살아 있다는 증거다
         self.recordRemoteCursors(host, lines[0..count], now_ms);
+        // Noise or an incompatible hello must not renew the retry budget or
+        // hide the host silence deadline. Only negotiated streams are alive.
+        if (host.saw_hello) {
+            host.retries = 0;
+            host.last_line_ms = now_ms;
+        }
         feedRemoteAgentTerms(self, dest, lines[0..count], now_ms);
     }
     if (consumed > 0) {

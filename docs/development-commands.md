@@ -1386,7 +1386,7 @@ worker API만 검사하며 실제 검색 UI의 시작/적용은 아래 제품 �
 물리 IME·OS thread spawn 실패 주입은 포함하지 않는다.
 
 
-열린 문서 배치 UI 연결과 실제 제품 캡처:
+전체 결과 배치 UI 연결과 실제 제품 캡처:
 
 ```sh
 mise exec -- zig build test-editor-project-replace-batch-ui test-editor-project-search-dock
@@ -1437,3 +1437,11 @@ python3 tools/test-editor-replace-batch-coordinator-adversarial.py
 `python3 tools/test-editor-replace-mixed-worker-adversarial.py`는 격리 사본에서 hash·점유·취소·
 혼합 총량·source 보호를 제거한 결함과 정상·동등·복원 대조군을 실행한다.
 제품 전체 바꾸기 UI 연결과 실제 OS thread spawn 실패 주입은 이 gate의 범위 밖이다.
+
+### 프로젝트 결과 전체 바꾸기 UI
+
+`zig build test-editor-project-replace-batch-ui` (Debug/ReleaseFast)는 열린 문서와 닫힌 파일을 함께
+수집·미리보기·적용하는 제품 UI의 RPBU1~9을 검사한다. 닫힌 파일은 더 이상 제외하지 않는다.
+`python3 tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --count 20`는 실제 AppKit mouse와
+Metal readback에서 네 파일 저장·연결 Undo·다시 저장 및 오른쪽/하단 도크를 검사한다.
+`--window-size 640x480 --render-scale 2000`은 좁은 도크 검증이며 물리 한글 HID의 증명은 아니다.

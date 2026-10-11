@@ -161,6 +161,9 @@ pub fn apply(session: *host.AppSession, spec: *search.batch.Specification, prepa
     if (history) |*pending| pending.notify();
     if (detached.items.len > 0) {
         session.workspaceChanged(.persisted_surface);
+        // 포커스를 바꾸지 않은 새 탭도 cached sidebar 행과 개수에 즉시 반영한다.
+        @import("../../../tab.zig").recomputeVisibleTabs(session);
+        session.chrome_dirty = true;
         session.metal_dirty = true;
     }
     summary = actor.finishApply(session, spec, prepared, terms, summary);

@@ -650,4 +650,8 @@ entry·파일 항목 예약을 소유한다. 준비 객체의 해제가 기존 p
 
 혼합 프로젝트 바꾸기의 `app_session/editor/search/batch/mixed_worker.zig`는 index를 가진
 모델 snapshot과 디스크 경로를 worker에서 결합한다. Ready가 Plan과 Closed Read를 함께 소유하고
-actor coordinator가 전체 반영한다. 기존 열린 문서 전용 `worker.zig`의 UI 경로는 유지한다.
+actor coordinator가 전체 반영한다. 기존 모델 전용 `worker.zig`는 독립 API로 유지하며 제품 UI는 혼합 worker를 사용한다.
+
+`app_session/editor/search/batch/collect.zig`는 완료 검색의 명세·Match·snapshot·점유를 독립 소유하고
+닫힌 파일의 기존 RG 행과 전문 hash를 검증한다. `batch/ui.zig`가 collect→mixed_worker→coordinator를
+연결하며, 완료 결과의 실제 document ID를 유지한다. 기존 model-only worker는 독립 API로 유지한다.

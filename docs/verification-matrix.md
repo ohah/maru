@@ -13,7 +13,7 @@
 | 문서 전체 정규식 | 구현·집중 자동/Metal 검증 | `FND35~39`, `EDREG1~4`, 독립 원문 범위·오류 대조와 현재/비현재 여러 줄 강조의 픽셀 대조 | 실제 OS/HID/IME 콜백과 프로젝트 worker는 이 검사의 범위 밖 |
 | VS Code 기본 검색 판정 | 구현·집중 검증 | `FND40~41`, `EDREG5`, 실제 VS Code Searcher와 공통 문법 1,380조합 범위 대조, 단어 강조/비강조 제품 Metal 픽셀 | 기본 구분자·단일 줄 오라클 범위. 사용자 지정 구분자·전체 JS 정규식 호환·실제 OS 입력의 증거는 아님 |
 | 프로젝트 검색 rg 기반 | 구현·로컬 검증 | query/event/stream unit와 OOM·전문 절단, 실제 offline helper/어댑터 fixture, 앱 내 universal helper·114 notice·서명, 변조/누락 음성 대조 | 제품 worker·열린 모델 우선·취소·도크·실제 IME는 후속. CLI 통과를 앱 검색 완료로 표시하지 않는다 |
-| 프로젝트 전체 검색·바꾸기 미리보기 | 검색 worker·도크와 읽기 전용 바꾸기 미리보기 구현 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·전체 파일시스템·OS watcher/종료 경계·바꾸기. 검색 UI·실제 HID·제품 취소·앱 RSS·시각 캡처의 표본은 [도크 검증](plans/editor-project-search-dock.md)을 따른다. 바꾸기 미리보기는 [S3 판정](plans/editor-project-replace-preview.md)의 범위를 따르며 S4a 열린 문서·S4b 디스크 단일 파일 적용·저장은 [적용 판정](plans/editor-project-replace-apply.md)을 따른다. 여러 열린 문서 적용은 [배치 UI](plans/editor-project-replace-batch-ui.md)로 연결했으며 닫힌 파일 배치는 미구현이다. 디스크 적용은 worker 재검증과 main actor 문서 로드·원문 대조를 거치며 외부 변경·늦은 완료·OOM·저장 실패의 보호 경계를 별도로 검사한다. CLI 통과는 제품 완료의 증거가 아니다 |
+| 프로젝트 전체 검색·바꾸기 미리보기 | 검색 worker·도크와 읽기 전용 바꾸기 미리보기 구현 | [설계·후보 실측](plans/editor-project-search.md). 실제 rg와 기존 matcher의 차이·전체 범위·첫 결과/시간/CLI RSS를 검사한다. 제품 문서 해석의 독립 oracle, VCS include·겹친 root·제외 후보 변경 반례와 음성 대조를 기록한다 | 엔진/rg 의존성/default는 2026-10-07 승인. 불변 사본·지원 형식 이동·worker·변경 감지·열린 문서·전체 파일시스템·OS watcher/종료 경계·바꾸기. 검색 UI·실제 HID·제품 취소·앱 RSS·시각 캡처의 표본은 [도크 검증](plans/editor-project-search-dock.md)을 따른다. 바꾸기 미리보기는 [S3 판정](plans/editor-project-replace-preview.md)의 범위를 따르며 S4a 열린 문서·S4b 디스크 단일 파일 적용·저장은 [적용 판정](plans/editor-project-replace-apply.md)을 따른다. 열린 모델과 닫힌 파일의 전체 결과 적용은 [배치 UI](plans/editor-project-replace-batch-ui.md)로 연결했다. 디스크 적용은 worker 재검증과 main actor 문서 로드·원문 대조를 거치며 외부 변경·늦은 완료·OOM·저장 실패의 보호 경계를 별도로 검사한다. CLI 통과는 제품 완료의 증거가 아니다 |
 
 ### 영속 세션 P5 세부 상태
 
@@ -4202,15 +4202,15 @@ caller 조기 종료와 detached worker 완료 해제, 신원/예산/disk 거절
 실제 UI 호출/취소·actor 적용 연결은 아래 gate로 확인한다. 물리 IME·OS thread spawn 실패 주입은 별도 문턱이다.
 
 
-`test-editor-project-replace-batch-ui`의 `RPBU1`~`RPBU6`와 import 판정자 4개는 실제 완료 검색에서
-열린 문서 전체를 동결/준비/적용/자동 저장한다. 닫힌 파일 수 표시·접힌 결과 포함,
+`test-editor-project-replace-batch-ui`의 `RPBU1`~`RPBU9`와 import 판정자 4개는 실제 완료 검색에서
+열린 모델과 닫힌 파일 전체를 동결/재검증/준비/적용/자동 저장한다. 닫힌 파일 수 표시·접힌 결과 포함,
 자기 알림 뒤 과거 결과 보존/연결 Undo, 입력·IME·취소·닫기, 첫 저장 실패 뒤 다음 저장,
-no-op/단일 유효 편집/disk 전용 거절, 닫힌 결과 문서 재열기 금지, 모든 수집/worker 준비 OOM·
+no-op/단일 유효 편집/disk 전용 처리, 닫힌 결과 문서 재열기 금지, 모든 수집/worker 준비 OOM·
 화면 게시 OOM을 검사한다. `test-editor-project-search-dock`는 배치 동작을 포함해 27개를 고른다.
 실제 AppKit 클릭과 오른쪽/하단 제품 Metal 화면은 [배치 UI 계획](plans/editor-project-replace-batch-ui.md)의
 하네스가 검사한다. Undo/Save fixture API 호출을 물리 키 입력이나 VoiceOver 증거로 표현하지 않는다.
 
-닫힌 파일 배치는 **읽기 준비 API만 부분 구현**이다.
+닫힌 파일의 독립 읽기 준비 API는 아래 gate가 검사한다. 전체 UI 연결은 위 RPBU gate의 범위다.
 `test-editor-project-replace-batch-disk`의 `RPBD1`~`RPBD5`와 import 판정자 하나는
 같은 bytes의 inode 교체·BOM 변경·symlink/hardlink 별칭·host가 준 열린 신원 점유·마지막 충돌·
 예산·취소·잘못된 UTF-8·directory 거절 및 모든 읽기/재검증 할당 실패 정산을 검사한다.
@@ -4218,19 +4218,19 @@ no-op/단일 유효 편집/disk 전용 거절, 닫힌 결과 문서 재열기 �
 컴파일 가능한 결함과 정상·등가·복원 대조를 검사한다. 비활성 문서 로드·host 점유 신원 수집·
 배치 worker/actor/UI 연결·읽는 도중 OS 교체 타이밍은 이 gate의 증거 밖이다.
 
-닫힌 파일의 비활성 준비는 **API만 부분 구현**이다.
+닫힌 파일의 독립 비활성 준비 API는 아래 gate가 검사한다.
 `test-editor-project-replace-batch-load`의 `RPBL1`~`RPBL6`는 pane/focus 유지·입력 해제 후 소유권·
 BOM/선두 U+FEFF/CRLF·파일/root 교체·관측 가능한 동일 inode 수정·늦게 열린 별칭 문서·
 IME·항목 예약과 일반 열기 상한 및 caller/registry 필수 준비 할당 실패의 회수를 검사한다.
 전문 재읽기는 worker 책임이며 metadata 일치만으로 원문 일치를 보장하지 않는다.
-다른 창의 web entry·pane 게시/배치 편집·OS IME·앱 종료 배선은 후속 검증 경계다.
+pane 게시/배치 편집은 아래 coordinator와 위 RPBU gate가 검사한다. 다른 창의 web entry·OS IME는 별도 검증 경계다.
 
-혼합 source 배치는 **coordinator API까지 부분 구현**이다.
+혼합 source의 원자적 모델 반영·게시·저장은 아래 coordinator gate가 검사한다.
 `test-editor-project-replace-batch-coordinator`의 `RPBC1`~`RPBC10`과 import 판정자는 실제 혼합
 모델·닫힌 두 문서의 commit/저장·연결 Undo/Redo·포커스·no-op·단일 유효 편집/disk 전용·공유 뷰·
 저장 실패·source/Plan 변조·늦은 충돌과 caller/registry 준비 실패를 검사한다. 최종 연결 준비 allocation에서
-실제 파일을 수정해 commit 직전 재검증도 확인한다. 이 API는 제품 전체 바꾸기 UI에서 아직 호출하지 않는다.
-혼합 worker 수명·제품 입력/캡처·모든 파일시스템·OS IME는 후속 게이트다.
+실제 파일을 수정해 commit 직전 재검증도 확인한다. 전체 결과 UI가 이 API를 호출하며 제품 입력/캡처는 RPBU와 AppKit/Metal 하네스가 검사한다.
+혼합 worker 수명은 RPMW가 검사한다. 모든 파일시스템·물리 OS IME는 별도 검증 경계다.
 
 ### 혼합 바꾸기 worker API
 
@@ -4238,3 +4238,11 @@ IME·항목 예약과 일반 열기 상한 및 caller/registry 필수 준비 할
 마지막 disk hash 충돌, 총 입력 예산, 취소, 모든 준비 할당 실패, caller 조기 종료,
 중복 source index·경로 불일치, 선택 밖 물리 점유를 검사한다.
 제품 전체 검색 UI·물리 IME 및 thread spawn OS 실패 주입은 별도 검증 경계다.
+
+### 전체 결과 바꾸기 UI
+
+`test-editor-project-replace-batch-ui`의 RPBU1~9은 완료 검색의 model/disk 전체 수집·worker·UI apply,
+혼합 저장/Undo, 입력·IME·취소·닫기, CAS 실패 후 다음 저장, no-op/disk 전용,
+문서 slot generation 재사용, 검색 행 drift/미리보기 후 수정, 수집·준비/화면 게시 OOM을 검사한다.
+실제 오른쪽/하단 AppKit mouse·제품 Metal readback은 `tools/editor-project-search-app/run.py --replace-batch`로 검사한다.
+물리 한국어 HID·VoiceOver는 별도 검증 경계다.

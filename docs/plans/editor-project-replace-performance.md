@@ -71,3 +71,37 @@ python3 tools/editor-project-search-app/measure.py --app <위 하네스의 maru-
 - [집계·개별 표본 JSON](editor-project-replace-performance-20261011.json): 21개 표본, 조건별 중앙값과 최소/최대.
 - manifest·app/build log·Metal PNG·RSS 표본 원본은 `/Users/yoonhb/.cache/maru/editor-project-replace-measurements/20261011-releasefast-v2/`에 보존한다.
 - 바이너리 변경·파일 누락·입력/치환 byte 오집계·잘못된 queue 시간·주입 대기 누락을 변조해 validator가 거절함을 확인했다. 정상 표본 21개는 같은 validator를 통과했다.
+
+## 비동기 저장 설계의 추가 적대적 검토
+
+2026-10-12 사용자 요청으로 현재 저장·백업·배치 결과와 reference 저장 경로를 대조했다.
+아래는 **설계 누락과 실행 순서 반례**다. 비동기 구현이 아직 없으므로 제품에서 재현/수정 완료했다고 주장하지 않는다.
+새 UX나 종료/취소/큐 정책을 승인한 기록도 아니다. 구현 전에 기존 계약과 함께 구체화할 조건이다.
+
+| 겹치는 실행 순서 | 앞선 제안의 누락 | 설계와 판정자가 다룰 조건 |
+|---|---|---|
+| A 저장 성공 → B 대기 저장 시작 | B가 예약 때의 옛 disk hash를 쓰면 자기 저장을 외부 수정으로 오인한다 | 성공한 쓰기의 disk 기준을 순서대로 인계한다. A가 외부 충돌로 실패하면 외부 내용의 hash를 임의로 새 기준으로 삼아 B를 덮어쓰지 않는다 |
+| 대기 중 새 편집·IME 시작 | 실행 때 무조건 최신 본문을 뜨면 사용자가 저장을 요청하지 않은 시점/조합 내용을 저장할 수 있다 | 배치/수동 저장의 snapshot 확보 시점과 IME 경계를 구분한다. 앞선 '항상 실행 시점 최신 확보' 제안은 정책으로 확정하지 않는다 |
+| 공유 뷰·독립 문서·hardlink/경로 별칭 | 문서별 큐 하나만으로 다른 문서의 같은 물리 대상 쓰기까지 조정되지는 않는다 | 공유 뷰는 문서 정본을 쓰고, 독립 문서는 기존 pinned parent·inode·내용 검사와 별칭 계약을 유지한다. 경로 문자열만으로 합치지 않는다 |
+| 파일 교체 → watcher 통지 → main 완료 소비 | 자신의 쓰기가 외부 수정으로 먼저 처리될 수 있다 | 진행 중 쓰기와 watcher 결과의 신원/내용을 대조한다. 저장 동안 모든 외부 이벤트를 무시하는 방식은 외부 변경을 숨긴다 |
+| 오래된 저장 완료 → 새 편집/Undo/백업 게시 | 완료 시점 본문으로 saved hash를 만들거나 최신 백업을 제거할 수 있다 | 실제 쓴 논리 본문 hash와 raw bytes hash를 구분한다(BOM). Undo로 같은 내용에 돌아온 경우 기존 hash dirty 판정을 유지하고, 미저장 새 버전의 백업 수명을 보존한다 |
+| 오래된 저장 완료 → LSP 통지/경고 | 현재 본문을 didSave에 보내면 디스크와 다른 내용을 알린다 | 실제 저장된 본문으로 알리고 문서 수명/경로를 확인한다. 충돌 마커 경고의 본문 기준도 명세에 둔다 |
+| 저장 중 Save As/rename/삭제/닫기/slot 재사용 | 늦은 완료가 새 경로/새 문서의 상태를 갱신하거나 삭제된 옛 경로를 다시 만들 수 있다 | 문서 owner/slot/generation뿐 아니라 저장 대상의 세대와 pinned 대상 수명을 검사한다. 쓰기 시작 전/commit 후를 구분한다 |
+| 취소/종료와 swap commit 경합 | 취소가 이미 일어난 디스크 반영을 되돌린다는 잘못된 전제 | 대기 작업 취소·실행 중 쓰기·반영 완료를 구분한다. 종료 drain/실패 안내는 UX 검토 대상이며 silent detach/임의 rollback으로 정하지 않는다 |
+| rename/swap 뒤 오류 또는 완료 전달 실패 | 실패를 무조건 '디스크 변화 없음'으로 취급하면 잘못된 재시도/백업 삭제가 가능하다 | 기존 writer의 commit/identity 확인 한계를 보존한다. 완료 슬롯을 쓰기 전에 확보하고, 전달 실패/불확실한 결과의 재검증 경로를 설계한다 |
+| 많은 문서의 저장 요청 | 문서마다 worker/thread와 본문 복사를 만들면 작업 수·메모리가 폭증한다 | 전역 동시 작업 수와 대기 snapshot 소유 비용을 제한한다. 숫자는 이번 실측으로 결정하지 않는다. 동일 요청 합류/대기 교체는 명시적 요청의 의미를 보존해야 한다 |
+| 배치 적용 후 저장 중 결과를 닫거나 새 검색 | UI State가 job 소유자이면 결과 해제와 함께 진행 중 저장이 파괴될 수 있다 | 저장 소유자는 검색 결과 표시 수명과 분리한다. 결과는 작업 신원을 참조하며 pending/saved/failed와 이후 재편집의 dirty 상태를 섞지 않는다 |
+| 로컬 저장을 분리하면서 Save As·remote·readonly 경로도 통합 | 기존 동기 로컬 write와 이미 별도인 이름/원격 저장의 계약을 한꺼번에 바꿀 위험 | 먼저 이름 있는 로컬 저장의 경계를 정한다. 이름·원격·명시적 overwrite·read-only·용량·metadata 보존을 기존 경로와 대조한다 |
+
+근거: `editor/mod.zig`의 `saveDocumentGuarded`/`writeDocumentBytes`, `editor/backup.zig::markClean`,
+`file_panel.zig::writePinnedFilePanel`, `search/batch/ui.zig::State.deinit`/`retrySave`, `editor/untitled_save.zig`.
+기존 macOS writer는 ACL/xattr/owner를 복사하고 sync·내용/inode 검사·swap/후검증을 수행한다.
+비동기화가 이 저장 계약을 단순한 bytes write로 축소하거나 외부 프로그램과의 완전한 원자적 CAS를 새로 보장하는 것은 아니다.
+
+Reference 확인 범위: VS Code의 `textFileEditorModel.ts`는 같은 버전 요청 합류·중복 쓰기 직렬화와 성공 후 버전 검사를 확인했다.
+Zed의 `buffer_store.rs`/`worktree.rs`는 Rope·버전 확보와 background 쓰기를 확인했다. 이것만으로 동일한 큐/취소/충돌 정책까지 확인한 것은 아니다.
+
+경로 변경과 완료 신원 검사는 별개다. **늦은 완료를 무시하는 것만으로 이미 일어난 옛 대상의 쓰기를 막지는 못한다.**
+앱 내부 rename/삭제/Save As와 저장 commit의 상호 조정도 설계해야 한다. 부모 디렉터리 이동과 root 교체도 포함한다.
+또한 worker가 snapshot만 소유해도 충분하지 않다. allocator·I/O executor·완료 통로가 먼저 해제되면 작업은 살아 있는 본문을 들고도 실패한다.
+앱 종료의 quiesce는 이 자원 수명까지 포함해야 한다. 이는 기존 detached worker 종료 규율과 대조할 구현 전 조건이다.

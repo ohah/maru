@@ -21,6 +21,7 @@ const pane_ops = @import("../pane.zig");
 const term_ops = @import("../term.zig");
 const lsp = maru.session.editor.lsp;
 const completion = lsp.completion;
+const completion_ops = maru.session.editor.completion_ops;
 const editor_selection = maru.session.editor.selection;
 const suggest_box = chrome.components.suggest_box;
 const suggest_docs = chrome.components.suggest_docs;
@@ -767,55 +768,16 @@ pub fn accept(self: *AppSession) void {
     const item_idx = if (st.pending_item) |pi| (if (pi < st.items.items.len) pi else st.order.items[pick]) else st.order.items[pick];
     st.pending_item = null;
     const item = st.items.items[item_idx];
-    const caret = @min(sel.focus, doc.file.content.len);
-    var start = st.word_start;
-    if (item.edit_start) |es| if (es <= caret) {
-        start = es;
-    };
-    // 응답 뒤 문서가 바뀌었으면 additional 은 전부 낱말 앞에서 끝날 때만.
-    var allow = term.rt.editorDocument().notifications.lsp_version == st.response_version;
-    if (!allow) {
-        allow = true;
-        for (item.additional.items) |c| if (c.end > start) {
-            allow = false;
-        };
-    }
-    if (!allow and item.additional.items.len > 0) st.dropped_additional += 1;
-    // **멀티 커서**(§8.2g-f) — 다른 커서마다 같은 글을 넣는다. 앞 글이 primary 가 덮는 글(`[start, caret)`)과 같으면 그만큼 덮고, 다르면 넣기만
-    // 한다(VS Code `snippetSession` 의 규칙). additional(자동 import)은 **한 번**, 전부 `applyEditAsOne` 하나 = undo 하나. 예전에는 다른 커서를
-    // 접어 버렸다(첫 조각은 primary 만이었다).
-    const content = doc.file.content;
-    const extras = term.rt.editor_extra_selections;
-    var others: std.ArrayList(completion.Span) = .empty;
-    defer others.deinit(self.allocator);
-    for (extras) |e| others.append(self.allocator, .{ .start = e.start(), .end = e.end() }) catch return;
-    const primary_site: completion.Span = .{ .start = @min(start, caret), .end = caret };
-    const decided = completion.multiSites(self.allocator, content, primary_site, others.items) catch return;
-    defer self.allocator.free(decided);
-    var sites: std.ArrayList(completion.Span) = .empty;
-    defer sites.deinit(self.allocator);
-    sites.append(self.allocator, primary_site) catch return;
-    for (decided) |d| if (d) |site| sites.append(self.allocator, site) catch return;
-    const additional = if (allow) item.additional.items else &.{};
-    var changes = completion.mergeMany(self.allocator, additional, sites.items, item.insert) catch |err| switch (err) {
-        // additional 이 다른 커서의 자리와 겹치면 **그 커서만** 놓는다 — primary 의 확정(과 import)이 먼저다(적대적 1회차: 예전엔 전부 놓았다).
-        error.Overlap => blk: {
-            var k: usize = 1;
-            while (k < sites.items.len) {
-                var hit = false;
-                for (additional) |c| if (completion.conflicts(sites.items[k], .{ .start = c.start, .end = c.end })) {
-                    hit = true;
-                };
-                if (hit) _ = sites.orderedRemove(k) else k += 1;
-            }
-            break :blk completion.mergeMany(self.allocator, additional, sites.items, item.insert) catch return;
-        },
-        else => return,
-    };
-    defer changes.deinit(self.allocator);
-    // caret 은 자리마다 insert 끝 — 정렬된 목록에서 **그 자리 자신의 항목**까지 길이 차를 쌓아 잰다(같은 시작의 import 가 앞에 있어도 맞다).
-    const ends = completion.siteEnds(self.allocator, changes, additional.len, sites.items) catch return;
-    defer self.allocator.free(ends);
+    // **무엇을 어디에 넣을지는 L2 `completion_ops.planAccept` 가 정한다**(§8.2g-f) — 덮을 낱말 시작(textEdit 머리가 caret 앞이면
+    // 그것), 응답 뒤 문서가 바뀌었으면 additional 은 낱말 앞에서 끝날 때만, **멀티 커서**는 다른 커서마다 같은 글(앞 글이 primary
+    // 가 덮는 글과 같으면 그만큼 덮는다 — VS Code `snippetSession` 의 규칙), additional(자동 import)은 **한 번**, 전부 한 편집 =
+    // undo 하나, caret 은 자리마다 넣은 글 끝. 예전에는 다른 커서를 접어 버렸다(첫 조각은 primary 만이었다).
+    const same_version = term.rt.editorDocument().notifications.lsp_version == st.response_version;
+    var plan = completion_ops.planAccept(self.allocator, doc.file.content, sel.focus, st.word_start, item.edit_start, item.insert, item.additional.items, same_version, term.rt.editor_extra_selections) catch return;
+    defer plan.deinit(self.allocator);
+    if (!plan.allow and item.additional.items.len > 0) st.dropped_additional += 1;
+    const changes = &plan.changes;
+    const ends = plan.ends;
     st.accepting = true;
     const applied = editor_ops.applyEditAsOne(self, term, changes.items);
     st.accepting = false;
@@ -831,9 +793,9 @@ pub fn accept(self: *AppSession) void {
         term.rt.editor_extra_selections = next;
         editor_ops.mergeCarets(self, term);
     }
-    st.accepted_sites += sites.items.len;
+    st.accepted_sites += plan.site_count;
     st.accepted += 1;
-    if (allow and item.additional.items.len > 0) st.accepted_with_additional += 1;
+    if (plan.allow and item.additional.items.len > 0) st.accepted_with_additional += 1;
     self.metal_dirty = true;
 }
 

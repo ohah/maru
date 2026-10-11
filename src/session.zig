@@ -187,6 +187,8 @@ pub const editor = struct {
     pub const edit_ops = @import("session/editor/ops/edit_ops.zig");
     /// 미저장 편집 백업의 순수 판정(§3.10 — 신원 대조·UTF-8·저장 상한·같은 내용. 이동 단계 5).
     pub const backup_ops = @import("session/editor/ops/backup_ops.zig");
+    /// 자동완성 확정의 순수 판정(§8.2g-f — 덮을 자리·additional·다른 커서·caret. 이동 단계 5).
+    pub const completion_ops = @import("session/editor/ops/completion_ops.zig");
     /// N2: 열/블록 선택의 **파생**(§3.2a — 사각형 하나를 줄마다 selection 으로 푼다). `selection` 이
     /// 원본(`ColumnAnchor`)을 들고 이쪽이 그것을 배열로 편다. `ColumnMap` 을 주입받아 **chrome 을
     /// 모른다**.

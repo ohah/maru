@@ -75,6 +75,15 @@ stdin의 완전한 `provider<TAB>payload<LF>` 한 줄을 기존 소유자 전용
 native 훅→제품 CLI 검증은 `zig build test-agent-log-record-process`이며 Ubuntu CI
 check에 포함된다. 같은 실제 프로세스 게이트가 format별 local/remote 경로, 잘못된 format의 완전한 stdin drain, 늦은 v1 append와 v2 파일 격리, native 실행 실패 시 fallback 금지를 검사한다. 결과는 `tests/artifacts/agent-log-record/`에만 남긴다.
 
+native 이행의 binary 수명은 같은 실제 기록 프로세스 게이트가 합성 앱 번들의
+동일 경로 atomic 교체·삭제·이동·새 경로로 재생성을 검사한다. 신뢰 갱신과
+provider correction 반복 방지는 `test-agent-log-record`에 포함된다.
+설치된 Codex를 독립 oracle로 쓰는 검증은 opt-in이다. 먼저 실제 기록 프로세스
+게이트를 실행한 뒤 `python3 tools/test-agent-hook-native-trust.py --codex "$(command -v codex)"`
+로 `hooks/list`의 세트 전체 해시와 untrusted→trusted→modified→trusted를 대조한다.
+합성 CODEX_HOME만 사용하고 모델·로그인·사용자 설정을 호출하지 않는다. Codex가 없는
+기본 CI에 새 외부 의존성을 넣지 않는다. 검사한 provider 버전은 결과 stdout에 기록한다.
+
 v2 검증용 reader는 `maru agent-events --stdio --dir=<private-directory> --log-format=v2`로
 선택한다. 기본 v1과 혼합하지 않으며
 `maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상과 재접속 수신은 아래 게이트로 검사하며 기본 훅 전환은 후속이다.

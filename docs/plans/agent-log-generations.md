@@ -365,3 +365,21 @@ reader는 선택한 profile의 이름공간만 읽는다. 구형 로그를 변�
 서로 다른 scope의 format·불명확한 값·binary 부재·quote와 stdin drain·실패 종료
 계약을 합성 HOME의 실제 프로세스로 검사한다. 이 준비 단계는 provider 설정을
 자동 전환하거나 기존 runtime env를 변경하지 않는다.
+
+
+## 4c-2 바이너리 수명과 신뢰 검증
+
+로컬 준비 명령의 실행 경로는 기존 앱의 형제 `maru` CLI 절대 경로를 사용한다.
+별도 복사 캐시나 PATH 검색을 도입하지 않는다. 같은 설치 경로의 atomic binary
+교체는 command bytes와 Codex hash를 바꾸지 않는다. 삭제·이동 중 경로 부재는 기존
+계약대로 기록 없이 exit 0이고 v1 fallback이 없다. 앱 이동 후 새 경로를 반영하면
+command가 바뀌므로 기존 trust reconciliation을 반드시 다시 적용해야 한다.
+이 계약은 업데이트가 구형 record 프로토콜 호환성을 유지한다는 조건이며, 다른
+실행 파일을 해당 경로에 바꿔 놓는 공격에 대한 새 인증 보장을 뜻하지 않는다.
+
+검증은 합성 bundle의 CLI 교체·제거·재배치에서 보관한 훅을 실제 실행한다.
+Codex hash는 전환 명령과 기존 `agent_hook_trust`로 계산하고 installed Codex의
+`hooks/list`를 독립 oracle로 대조한다. 실제 provider 검증은 opt-in이며 계정·모델
+요청 없이 격리 CODEX_HOME의 app-server만 사용한다. 신뢰 정상·명령 변경 후 modified·
+기존 reconciliation 후 trusted와 사용자 승인 값의 divergence 보존을 구분한다.
+실제 설치와 runtime env 기본 전환은 이 검증 뒤 별도 단계로 유지한다.

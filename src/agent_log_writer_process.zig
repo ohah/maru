@@ -12,7 +12,7 @@ pub fn main(init: std.process.Init) !void {
     const dir = try std.Io.Dir.cwd().openDir(init.io, directory, .{ .iterate = true, .follow_symlinks = false });
     defer dir.close(init.io);
     const out = std.Io.File.stdout();
-    if (std.mem.eql(u8, mode, "hook-transition")) {
+    if (std.mem.eql(u8, mode, "hook-transition") or std.mem.eql(u8, mode, "hook-trust")) {
         const binary = args.next() orelse return error.InvalidArguments;
         const provider = args.next() orelse return error.InvalidArguments;
         const local = args.next() orelse return error.InvalidArguments;
@@ -22,7 +22,30 @@ pub fn main(init: std.process.Init) !void {
         var generated: std.ArrayListUnmanaged(u8) = .empty;
         defer generated.deinit(init.gpa);
         try @import("session/agent_hook_command.zig").buildTransition(&generated, init.gpa, provider, local, remote, .{ .local = native_local, .remote = native_remote }, binary);
-        try out.writeStreamingAll(init.io, generated.items);
+        if (std.mem.eql(u8, mode, "hook-trust")) {
+            // Export product hashes for an external provider oracle, not a duplicate formula.
+            const trust = @import("session/agent_hook_trust.zig");
+            var arena = std.heap.ArenaAllocator.init(init.gpa);
+            defer arena.deinit();
+            const a = arena.allocator();
+            const hooks_path = try std.fmt.allocPrint(a, "{s}/hooks.json", .{directory});
+            const Entry = struct { event: []const u8, key: []const u8, hash: []const u8 };
+            var entries: [trust.events.len]Entry = undefined;
+            var slots: [trust.events.len]trust.Slot = undefined;
+            for (trust.events, 0..) |event, i| {
+                var key: std.ArrayListUnmanaged(u8) = .empty;
+                var hash: std.ArrayListUnmanaged(u8) = .empty;
+                try trust.appendKey(&key, a, hooks_path, event, 0, 0);
+                try trust.appendHash(&hash, a, event, generated.items, @import("session/agent_hook_command.zig").timeout_seconds, "*");
+                entries[i] = .{ .event = event.json_name, .key = key.items, .hash = hash.items };
+                slots[i] = .{ .json_name = event.json_name, .group_index = 0, .handler_index = 0, .matcher = "*" };
+            }
+            var config: std.ArrayListUnmanaged(u8) = .empty;
+            try config.appendSlice(a, args.next() orelse "");
+            const stats = try trust.applyEntries(&config, a, hooks_path, &slots, generated.items, @import("session/agent_hook_command.zig").timeout_seconds);
+            const json = try std.json.Stringify.valueAlloc(a, .{ .command = generated.items, .entries = entries, .config = config.items, .stats = stats }, .{});
+            try out.writeStreamingAll(init.io, json);
+        } else try out.writeStreamingAll(init.io, generated.items);
         return;
     }
     if (std.mem.eql(u8, mode, "hook") or std.mem.eql(u8, mode, "hook-legacy")) {

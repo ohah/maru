@@ -44,9 +44,10 @@ terminal runtime 소유 분리), 렌더링 방식, 단계 분해, 레퍼런스 �
   - 심볼·색(베이스/결정): 브랜드 전용 유니코드가 없어 근사 글리프 — claude=`✶`(U+2736 6각별, Anthropic 선버스트 근사)·
     codex=`◆`(U+25C6 다이아)로 **종류**를 구분한다(`agentSymbolCodepoint`). 글리프는 **터미널 폰트(JetBrains Mono)가
     보유한 것만** 고른다 — 미보유 코드포인트(예전 `✳` U+2733)는 CoreText fallback 폰트로 넘어가 한글 '정' 등으로 글리프가
-    어긋나 간헐 깨짐이 났다(근본 수정: 폰트가 가진 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다). 아이콘은 카드 왼쪽 독립 gutter에
-    **2칸(width 2)**으로 또렷이 그린다(`icon_cols=3`; `.m` gscale 1.1× 보조 확대). 단 ✶/◆는 **OS 폰트로 그리는 알림 제목용 심볼**
-    (`agentSymbolCodepoint`)이고, **사이드바 gutter는 maru 합성 PUA**(`agentIconCodepoint` — sparkle `0xF0007`/diamond `0xF0008`,
+    어긋나 간헐 깨짐이 났다(근본 수정: 폰트가 가진 글리프만 쓰면 fallback 자체가 일어나지 않아 깨질 여지가 사라진다). 아이콘은 세션 목록 행의 이름줄 선두
+    (인라인, `session_row_indent_cols` 열)에 **2칸(width 2)**으로 또렷이 그린다(`icon_cols=3`, 셀 크기 그대로 — 옛 gutter 시절 `.m`이
+    codepoint로 골라 걸던 1.1× 확대는 아이콘이 인라인으로 옮겨 간 뒤 한 번도 안 걸려 2026-10-12 지웠다). 단 ✶/◆는 **OS 폰트로 그리는 알림 제목용 심볼**
+    (`agentSymbolCodepoint`)이고, **사이드바는 maru 합성 PUA**(`agentIconCodepoint` — sparkle `0xF0007`/diamond `0xF0008`,
     `assets/icons/{sparkle,diamond}.svg`→coverage)다. **claude sparkle는 두꺼운 4갈래 별로 코덱스 diamond와 잉크 mass를 맞췄다** —
     얇은 4갈래 스파클이 작은 gutter 크기에서 다이아보다 작고 흐려 보인다는 사용자 피드백 반영(SVG arms를 두껍게 → `svg_to_coverage.py` 재생성,
     잉크 ≈diamond). **색은 종류**를 따른다 —

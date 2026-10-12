@@ -44,7 +44,7 @@
 | 사이드바 셀 배치 합성 | 같은 파일, 사이드바 셀 루프 | `py_top = origin_y + header − scroll`(**이 항 자체는 아래 선 기준 계약**), `cell_h = atlas_height_px ?: slot_h`(폴백=조건 분기), 좌측 여백 `cw*0.5` | **Zig에 같은 합성이 따로 있다**(`app_session`의 사이드바 quad 경로) — 가드 없는 미러 |
 | tui 사이드바 활성 밴드 | `app_session.sidebarBandCell` + 같은 루프 | Zig가 rowTop·행 높이·칸수를 다 실어 보내고 `.m`은 헤더·스크롤 평행이동 + `atlas_height_px == 0 → slot_h` 폴백만 한다 | **선 위에 걸친 행** — 남은 예외분이 폴백 하나뿐이라 이관 비용이 가장 작다. rich는 `GpuQuad`라 무관 |
 | 접힘 헤더 세로 중앙 | 같은 파일, 접힘 토글 분기 | `(titlebar_strip_px − ch) * 0.5` | 규칙이 명시한 "띠 높이에서 유도"의 실제 사례 |
-| 아이콘 배율·세로 보정·벨 가로 재배치 | 같은 파일 | `1.7×`·`ch*0.30` nudge·에이전트 `1.1×`·벨 `width=1` + `cw*0.5` 이동 | **결합이 양방향**이다 — Zig의 hover quad·배지 좌표가 이 값들을 전제로 계산된다 |
+| 아이콘 세로·가로 배치 | 같은 파일 | 헤더 줄0의 띠 세로 중앙 `(titlebar_strip_px − ch) * 0.5`, cell-raster role 셀을 차지한 칸들 가운데에 두는 `cw*0.5*(span−1)` 이동. **배율은 이제 `.m` 것이 아니다** — Zig가 목표 px로 굽고 role을 실어 `.m`은 atlas 크기 ÷ 셀 크기만 읽는다(ABI 222). 옛 `0.30ch` nudge는 띠 중앙으로 바뀌었고, 에이전트 `1.1×`는 한 번도 안 걸리던 죽은 분기라 지웠다(2026-10-12) | **결합이 양방향**이다 — Zig의 hover quad·배지 좌표가 이 배치를 전제로 계산된다 |
 | 그림자 blur 확장 | 같은 파일, shadow 분기 | Zig가 준 rect 밖으로 blur만큼 확장한 rect를 만든다 | `GpuShadow`는 `GpuQuad`와 **별도 채널**이다 |
 | OSC 133 거터 좌단 clamp | 같은 파일, reserved 8 분기 | `max(px_left, 0)` — 주석이 "사이드바 폭은 `.m`이 모르니 0 하한만" | 폭을 넘기면 사라진다 |
 | `reserved` 부분사각형 두께·여백 | 같은 파일 `maru_fill_cell_quad` 계열 | 커서 바/underline·SGR 장식선 두께를 셀 높이 15%·7.5%로(가로 변인 커서 바·hollow 우측은 `cw`의 15%), 거터 gap을 `cw*0.12`로 계산한다. 전부(divider 제외 — 그쪽 하한은 Zig가 갖는다) `max(2px)`·`max(1px)` 하한이 붙어 **작은 셀에선 비율이 아니라 하한이 값을 정한다** | **의도된 근사** — 폰트 metric(underline thickness)을 `.m`에 안 넘겨서다(그 근거가 해당 주석에 있다) |
@@ -54,7 +54,7 @@
 
 - **divider는 값이 아니라 규칙 쪽이다.** 두께 자체는 config `split.divider-thickness` → Zig(pt × scale) → ABI라 값 계약이지만, 그 두께를 seam에 중앙정렬하고 셀폭으로 clamp하는 규칙은 `.m`이 갖는다 — 위 `reserved` 행과 **같은 함수·같은 성격**이다. 표에 따로 올리지 않은 것은 "두께는 Zig 소유"를 강조하려는 편의이고, 축 2 기준으로는 예외다.
 - **chrome hairline(`tokens.border.line_thickness_px`)과 터미널 셀 장식선은 별개 개념이다.** 앞은 탭바 하이라인·focus 테두리·pill 테두리(전부 `GpuQuad`), 뒤는 커서 바·SGR 밑줄이다. 코드가 의도적으로 분리했으므로 섞어서 "두 출처"라고 부르지 않는다.
-- **미러 가드가 덮는 범위는 좁다.** `tests/boundary/icon_literals.zig`는 아이콘 **배율(1.7) 두 표현식**만 강제한다. `ch*0.30` nudge·에이전트 `1.1×`·벨 `+cw*0.5`는 가드 밖이다([chrome-strategy.md](chrome-strategy.md) §9.7).
+- **되살아남 가드가 덮는 범위는 좁다.** `tests/boundary/icon_literals.zig`는 `.m`의 배율 대입 두 문장이 정책 값만 읽는지(float 리터럴 0개)와, 아이콘을 codepoint 이름으로 고르는 비교(헤더 넷·에이전트 심볼 둘)가 주석 밖에 없는지만 본다. 띠 세로 중앙·`cw*0.5*(span−1)` 이동은 가드 밖이다([chrome-strategy.md](chrome-strategy.md) §9.7).
 
 **규칙을 이미 따르는 표면**(전부 Zig가 rect를 정해 `GpuQuad`로 낸다): 도크 패널 배경(`appendBarBgQuad` — 탭 바 배경과 공용)·도크 카드/버튼 배경(`chrome_draw_lowering.appendBackgroundQuads`), 모달 배경·테두리, 탭 밴드와 활성 탭 cutout, **rich** 사이드바 활성 밴드, 스크롤바 thumb, 시각 벨 플래시. 모달 **그림자**만 `GpuShadow` 별도 채널이고 blur 확장을 `.m`이 한다(위 표).
 

@@ -304,8 +304,10 @@ const scale_mirror_file = "src/platform/macos/maru_metal_renderer.m";
 const mirror_assignments = [_][]const u8{ "glyph_scale_x =", "glyph_scale_y =" };
 /// 각 대입이 읽어야 하는 정책 값(같은 순서).
 const policy_reads = [_][]const u8{ "glyph_policy.scale_x", "glyph_policy.scale_y" };
-/// 헤더 아이콘을 codepoint 로 고르던 이름들. 셀 그리드에서 키우는 아이콘 목록은 `cell_text.isSidebarHeaderIcon` 하나다.
-const header_icon_macros = [_][]const u8{ "MARU_ICON_GEAR", "MARU_ICON_PLUS", "MARU_ICON_BELL", "MARU_ICON_SIDEBAR_COLLAPSE" };
+/// 렌더러가 아이콘을 codepoint 로 골라 키우던 이름들. 헤더 넷(셀 그리드에서 키우는 목록은 `cell_text.isSidebarHeaderIcon`
+/// 하나다)과, 사이드바 gutter 의 에이전트 심볼 둘(1.1× — 아이콘이 인라인으로 옮겨 간 뒤 한 번도 참이 안 되던 죽은
+/// 분기라 지웠다). 렌더러는 이 이름 중 어느 것도 비교할 일이 없다 — 키울 글리프는 Zig 가 role 로 표시해 보낸다.
+const icon_selector_macros = [_][]const u8{ "MARU_ICON_GEAR", "MARU_ICON_PLUS", "MARU_ICON_BELL", "MARU_ICON_SIDEBAR_COLLAPSE", "MARU_ICON_SPARKLE", "MARU_ICON_DIAMOND" };
 
 /// C 주석(`//`·`/* */`)을 공백으로 바꾼 사본. 주석에 남은 옛 값이 가드를 속이지 못하게 한다.
 fn stripCComments(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
@@ -401,12 +403,12 @@ test "아이콘 셀 래스터 배율과 대상은 Objective-C 가 다시 적지 
             return error.IconScaleMirrorRevived;
         }
     }
-    for (header_icon_macros) |macro| {
+    for (icon_selector_macros) |macro| {
         if (std.mem.indexOf(u8, mirror, macro)) |at| {
             const line_start = if (std.mem.lastIndexOfScalar(u8, mirror[0..at], '\n')) |nl| nl + 1 else 0;
             const line_end = std.mem.indexOfScalarPos(u8, mirror, at, '\n') orelse mirror.len;
             std.debug.print(
-                "\n헤더 아이콘 목록 사본: {s}가 `{s}`로 아이콘을 고릅니다(주석 밖):\n  {s}\n" ++
+                "\n아이콘 목록 사본: {s}가 `{s}`로 아이콘을 고릅니다(주석 밖):\n  {s}\n" ++
                     "  셀보다 크게 그릴 아이콘은 Zig 가 cell-raster role 로 표시해 보냅니다 — 렌더러는 그 role 만 봅니다.\n",
                 .{ scale_mirror_file, macro, std.mem.trim(u8, mirror[line_start..line_end], " ") },
             );

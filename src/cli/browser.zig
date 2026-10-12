@@ -194,6 +194,7 @@ pub const ParseError = error{
     MissingScript, // `exec`에 script 없음
     MissingArgsValue,
     InvalidArgs,
+    ArgsTooDeep, // `exec --args` 가 서버 계약(배열 안쪽 128 단)보다 깊다
     MissingMaxResultBytesValue,
     InvalidMaxResultBytes,
     MissingOutValue, // `screenshot --out`에 값 없음
@@ -591,7 +592,7 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
         }
     }
     // 깊게 중첩된 인자는 요청을 만들 때 JSON 쓰개의 중첩 한도(256)를 넘겨 panic 했다(W9f 적대 리뷰 1 회차) — 여기서 거절한다.
-    if (args_json) |j| if (jsonTextDepth(j) > max_args_depth) return error.InvalidArgs;
+    if (args_json) |j| if (jsonTextDepth(j) > max_args_depth) return error.ArgsTooDeep;
     return .{
         .surface_id = surface orelse return error.MissingSurface,
         .script = script orelse return error.MissingScript,
@@ -871,8 +872,9 @@ fn takesValue(opt: []const u8) bool {
     return true;
 }
 
-/// exec 인자 JSON 의 중첩 상한 — 요청 JSON 의 쓰개 한도(256) 안쪽으로 넉넉히.
-pub const max_args_depth = 64;
+/// exec 인자 JSON 의 중첩 상한(글 깊이) — 서버 계약 `control_browser.execute_script_args_max_depth`(배열 안쪽 128 단)에 바깥 배열 하나를
+/// 더한 129(시험이 둘을 맞춘다 — W9f 적대 리뷰 2 회차: 64 로 좁혀 서버가 받는 인자를 CLI 가 막았다). 요청 JSON 쓰개 한도(256) 안쪽이다.
+pub const max_args_depth = 129;
 
 /// JSON 글의 가장 깊은 중첩(문자열 안의 괄호는 세지 않는다).
 pub fn jsonTextDepth(text: []const u8) usize {
@@ -3046,9 +3048,33 @@ test "W9f 적대 리뷰 1 회차: 값 자리의 -h·--help 는 도움말이 아�
     var deep: std.ArrayList(u8) = .empty;
     for (0..300) |_| try deep.append(a, '[');
     for (0..300) |_| try deep.append(a, ']');
-    try testing.expectError(error.InvalidArgs, parse(&.{ "exec", "--surface", "1", "--args", deep.items, "1" }));
+    try testing.expectError(error.ArgsTooDeep, parse(&.{ "exec", "--surface", "1", "--args", deep.items, "1" }));
     // 고른 탭 — i64 를 넘는 id 는 「use 가 틀렸다」(전에는 받아 놓고 뒤 명령이 모두 실패했다).
     try testing.expect(try replLine(a, "use 9223372036854775808", null) == .bad_use);
     // 대상이 이미 있고 다른 이유로 틀린 명령에는 붙이지 않는다(붙이면 「--surface 두 번」 이 진짜 이유를 가린다).
     try testing.expectError(error.UnknownOption, parse((try replLine(a, "click --surface 9 --bogus", 7)).command));
+}
+
+test "W9f 적대 리뷰 2 회차: exec args 깊이는 서버 계약(배열 안쪽 128 단 = 글 깊이 129)까지 받는다 — 문자열 안의 괄호는 세지 않는다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var ok: std.ArrayList(u8) = .empty;
+    try ok.appendNTimes(a, '[', 129);
+    try ok.appendNTimes(a, ']', 129);
+    const cmd = try parse(&.{ "exec", "--surface", "1", "--args", ok.items, "1" });
+    try testing.expect((try buildRequestBytes(a, cmd.request, .{ .number = 1 })).len > 0);
+    var deep: std.ArrayList(u8) = .empty;
+    try deep.appendNTimes(a, '[', 130);
+    try deep.appendNTimes(a, ']', 130);
+    if (parse(&.{ "exec", "--surface", "1", "--args", deep.items, "1" })) |_| return error.TestUnexpectedResult else |_| {}
+    // 요청을 만드는 자리도 막는다(파서를 거치지 않은 값).
+    var raw = cmd.request;
+    raw.exec.args_json = deep.items;
+    if (buildRequestBytes(a, raw, .{ .number = 1 })) |_| return error.TestUnexpectedResult else |_| {}
+    try testing.expectEqual(@as(usize, 1), jsonTextDepth("[\"[[[[\", \"\\\"]]\", \"\\\\\"]"));
+    try testing.expectEqual(@as(usize, 2), jsonTextDepth("[{\"a\":\"}}}\"}]"));
+    // 값 없는 플래그 뒤의 -h 는 도움말이고, `--opt=값` 뒤도 그렇다.
+    for ([_][]const u8{ "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--surface=1" }) |flag|
+        try testing.expect(try parse(&.{ "snapshot", flag, "-h" }) == .help);
 }

@@ -70,6 +70,7 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.MissingScript => "exec needs a script",
         error.MissingArgsValue => "exec --args needs a JSON array value",
         error.InvalidArgs => "exec --args must be a valid JSON array",
+        error.ArgsTooDeep => "exec --args nests deeper than 128 levels inside the array",
         error.MissingMaxResultBytesValue => "exec --max-result-bytes needs a value",
         error.InvalidMaxResultBytes => "exec --max-result-bytes must be an integer in 1..16777216",
         error.MissingOutValue => "screenshot --out needs a value",
@@ -84,8 +85,8 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.ConflictingLocator => "give only one target: --selector, --ref (not for wait), --role, --by-text or --by-label",
         error.MissingWaitCondition => "wait needs --selector, --load, --role, --by-text or --by-label",
         error.ConflictingWaitCondition => "wait takes only one of --selector and --load (--load does not go with --visible or a locator)",
-        error.MissingTimeoutValue => "wait --timeout needs a value",
-        error.InvalidTimeout => "wait --timeout must be an integer in 1..25000",
+        error.MissingTimeoutValue => "--timeout needs a value",
+        error.InvalidTimeout => "--timeout must be an integer in 1..25000 (ms)",
         error.MissingText => "type needs --text",
         error.LocatorOptionWithoutRole => "--name and --level go with --role; --exact and --nth go with --role, --by-text or --by-label",
         error.ExactWithoutName => "--exact needs --name",
@@ -526,12 +527,53 @@ const repl_help =
 
 /// `maru browser repl` — 줄마다 하위 명령 하나를 돌린다. 한 명령이 실패해도 다음 줄로 간다(실패는 끝의 종료 상태로).
 /// 표준 입력이 터미널이면 표준 오류에 프롬프트(`maru browser[7]> `)를 낸다 — 표준 출력은 명령 출력만(파이프로 넘겨도 섞이지 않게).
-fn runRepl(io: std.Io, allocator: std.mem.Allocator, first: ?u64, fd: ?std.c.fd_t, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+fn runRepl(io: std.Io, allocator: std.mem.Allocator, first: ?u64, fd: ?std.c.fd_t, stdout: *std.Io.Writer, stderr_raw: *std.Io.Writer) !void {
     var current = first;
     var any_failed = false;
     const interactive = std.c.isatty(fd orelse std.Io.File.stdin().handle) == 1;
     var reader: LineReader = .{ .fd = fd, .max = repl_max_line_bytes };
     defer reader.deinit(allocator);
+    // 표준 오류를 못 써도(닫혔다) 명령은 계속 돈다 — 오류 줄 하나에 repl 이 끝나 뒤 명령이 「성공」 으로 사라졌다(W9f 적대 리뷰 2 회차).
+    // 그래서 아래에서 나는 WriteFailed 는 표준 출력의 것이다: 끝내되 앞선 실패는 종료 상태로 남긴다.
+    var lenient_buf: [256]u8 = undefined;
+    var lenient: LenientWriter = .init(stderr_raw, &lenient_buf);
+    const stderr = &lenient.interface;
+    replLoop(io, allocator, &reader, interactive, &current, &any_failed, stdout, stderr) catch |e| switch (e) {
+        error.WriteFailed => {},
+        else => return e,
+    };
+    if (any_failed) return error.UnknownCommand;
+}
+
+/// 쓰기 실패를 삼키는 writer(repl 의 표준 오류).
+const LenientWriter = struct {
+    inner: *std.Io.Writer,
+    interface: std.Io.Writer,
+
+    fn init(inner: *std.Io.Writer, buffer: []u8) LenientWriter {
+        return .{ .inner = inner, .interface = .{ .vtable = &.{ .drain = drain }, .buffer = buffer } };
+    }
+
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *LenientWriter = @alignCast(@fieldParentPtr("interface", w));
+        self.inner.writeAll(w.buffered()) catch {};
+        w.end = 0;
+        var n: usize = 0;
+        for (data[0 .. data.len - 1]) |d| {
+            self.inner.writeAll(d) catch {};
+            n += d.len;
+        }
+        const last = data[data.len - 1];
+        for (0..splat) |_| self.inner.writeAll(last) catch {};
+        n += last.len * splat;
+        self.inner.flush() catch {};
+        return n;
+    }
+};
+
+fn replLoop(io: std.Io, allocator: std.mem.Allocator, reader: *LineReader, interactive: bool, current_ptr: *?u64, any_failed: *bool, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var current = current_ptr.*;
+    defer current_ptr.* = current;
     while (true) {
         if (interactive) {
             if (current) |id| try stderr.print("maru browser[{d}]> ", .{id}) else try stderr.writeAll("maru browser> ");
@@ -542,7 +584,7 @@ fn runRepl(io: std.Io, allocator: std.mem.Allocator, first: ?u64, fd: ?std.c.fd_
             .too_long => {
                 try stderr.writeAll("error: line too long\n");
                 try stderr.flush();
-                any_failed = true;
+                any_failed.* = true;
                 continue;
             },
             .line => |l| l,
@@ -561,19 +603,18 @@ fn runRepl(io: std.Io, allocator: std.mem.Allocator, first: ?u64, fd: ?std.c.fd_
             .bad_use => {
                 try stderr.writeAll("error: use needs one tab id (see `list`)\n");
                 try stderr.flush();
-                any_failed = true;
+                any_failed.* = true;
             },
             .unterminated_quote => {
                 try stderr.writeAll("error: unterminated quote\n");
                 try stderr.flush();
-                any_failed = true;
+                any_failed.* = true;
             },
             .command => |argv| if (!try replCommand(io, allocator, argv, &current, stdout, stderr)) {
-                any_failed = true;
+                any_failed.* = true;
             },
         }
     }
-    if (any_failed) return error.UnknownCommand;
 }
 
 /// repl 명령 하나 — 성공이면 true. 파싱 실패는 도움말 전체 대신 이유 한 줄. `open` 은 출력을 받아 그대로 내고 연 탭을 고른다.
@@ -725,5 +766,28 @@ test "W9f 적대 리뷰 1 회차: non-blocking 입력에서 아직 읽을 것이
         defer r.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings("late", (try r.next(std.testing.allocator)).?.line);
         try std.testing.expect((try r.next(std.testing.allocator)) == null);
+    }
+}
+
+test "W9f 적대 리뷰 2 회차: CLI 의 exec args 깊이 상한은 서버 계약과 같다" {
+    try std.testing.expectEqual(control_browser.execute_script_args_max_depth + 1, browser.max_args_depth);
+}
+
+test "W9f 적대 리뷰 2 회차: repl — 표준 오류를 못 써도 다음 줄로 가고, 표준 출력이 닫혀 끝나도 앞선 실패는 종료 1" {
+    const gpa = std.testing.allocator;
+    for ([_]bool{ true, false }) |stderr_fails| {
+        var fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        defer _ = std.c.close(fds[0]);
+        const input = "click\nhelp\n";
+        try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
+        _ = std.c.close(fds[1]);
+        var ok_out: std.Io.Writer.Allocating = .init(gpa);
+        defer ok_out.deinit();
+        var dead = std.Io.Writer.failing;
+        const out = if (stderr_fails) &ok_out.writer else &dead;
+        const err = if (stderr_fails) &dead else &ok_out.writer;
+        try std.testing.expectError(error.UnknownCommand, runRepl(std.testing.io, gpa, null, fds[0], out, err));
+        if (stderr_fails) try std.testing.expect(std.mem.indexOf(u8, ok_out.written(), "use <id>") != null); // help 는 돌았다
     }
 }

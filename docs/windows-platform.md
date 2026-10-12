@@ -8863,6 +8863,24 @@ CAPTURE-OK ... distinct_colors=149
 **Windows 화면은 이 환경에서 못 봤다** — 사이드바에 긴 이름의 비활성 카드를 두고 오른쪽 끝 글자가 카드 오른쪽 inset 안에
 머무는지 손으로 본다.
 
+### 2m.116 도크 divider 가 1px 선이 되고 그 양옆도 잡힌다 — macOS 와 같은 규칙 (2026-10-12)
+
+예전 Windows 는 누르는 띠 폭(`dividerGrabBandPx(1000)` = 10px)을 `compute` 의 divider **두께**로 넘겼다. 그래서
+divider 가 10px 막대로 그려지고 작업영역 10px 를 먹었으며, 누르는 자리는 그 막대뿐이었다. macOS 는 보이는 선
+(`split.divider-thickness`, 기본 1pt)만 그리고 그 양옆 10pt 띠를 더해 눌렀다 — 같은 divider 가 호스트마다 다르게
+보이고 눌렸다(layering §3.5).
+
+이제 두 호스트가 같은 규칙이다: 두께는 중립 `dock_layout.dividerThicknessPx`, 누르는 띠는 `compute` 가 내는
+`Geometry.divider_hit`(`outerDividerHitRect` — 오른쪽 도크는 선 양옆, 아래 도크는 터미널 쪽만)이고 `regionAt` 이
+그것으로 divider 를 가른다. **Windows 화면에서 보이는 변화**: divider 가 1px 선이 되고 터미널·도크가 9px 넓어진다.
+선에서 10px 떨어진 곳을 눌러 끌어도 divider 가 움직인다(`grabOffsetPx` 가 띠 어디서 잡든 막대가 튀지 않게 한다).
+판정자: `main` 「도크 divider: Windows 기하가 macOS 와 같은 두께·누르는 띠를 쓴다」(고치기 전 `expected 1, found 10`,
+선 왼쪽 5px 이 `terminal`).
+
+**남은 일**: Windows 는 아직 배율을 1x(`scale_milli = 1000`)로 고정하고 두께 설정을 이 경로에 넘기지 않는다(기본값 1pt).
+**Windows 화면은 이 환경에서 못 봤다** — 도크를 열고 ① 선이 1px 인지 ② 선 양옆 10px 안을 눌러 끌면 도크 폭이 바뀌는지
+③ 그 띠 밖(터미널·도크 본문)을 누르면 평소처럼 동작하는지 손으로 본다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

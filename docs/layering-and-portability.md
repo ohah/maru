@@ -225,11 +225,11 @@ L3 `src/chrome/`·L4 중립 런타임 `src/app/` 이 그것이고, 어느 계층
 | 에이전트 도크 그리기 예산 | Windows 가 macOS 의 식을 「같은 식」이라며 옮겨 적었고, macOS 가 나중에 더한 펼침 몫이 빠진 채 갈라졌다(지금 상한 — turn 셋 · 480 byte — 에서는 버텼다) — **고쳤다**(2026-10-12): `session_dock.view.drawBufferSizes` |
 | 문법 이름 매핑(`session` 의 `Grammar` → `syntax` 의 `Language`) | macOS `syntaxLanguage` 와 Windows `syntaxLanguageFor` 가 같은 switch 를 각자 들었다(둘 다 「두 모듈을 다 보는 공용 자리가 없다」고 적었다) — **고쳤다**(2026-10-12): `syntax` 모듈의 `languageFor` 가 **이름으로** 대응한다(그 모듈은 maru 를 못 들여온다). 없는 이름은 컴파일 오류다 |
 | 헤더 아이콘 배율(어느 아이콘을 셀보다 크게 굽고 몇 배로 그리는가) | Windows 는 중립 `cell_text.isSidebarHeaderIcon`·`chrome.ui.icon.cell_raster_scale_milli` 를 불렀고, macOS 는 같은 목록을 두 번 더 적었다 — `collectShaped` 의 codepoint 넷, Metal `.m` 의 codepoint 넷과 `1.7f` — **고쳤다**(2026-10-12, ABI 222): `collectShaped` 는 중립 목록을 부르고, `metal_frame` 이 목표 크기(`raster_*_px`)를 선언한 글리프의 셀에 cell-raster role(`reserved=32`, 파일 도크 토글이 쓰던 값)을 싣고, `.m` 은 그 role 과 「atlas 크기 ÷ 셀 크기」만 본다. 2칸 글리프(종)는 차지한 칸들의 가운데에 한 칸을 키운다(Windows 와 같은 규칙). 크기는 두 호스트 모두 **구운 크기 그대로**다 — 예전에는 둘 다 셀×1.7 로 quad 를 잡아 정수로 내린 텍스처를 1px 남짓 늘려 그렸다(캡처 전후 비교: 아이콘 폭 1px 감소, 높이·자리 불변, 다른 픽셀 변화 없음). `icon_literals` 가드는 미러를 맞추는 대신 미러가 되살아나지 않는지 본다 |
+| 도크 divider 두께와 잡기 영역 | macOS 는 보이는 선(`split.divider-thickness`)에 `outerDividerHitRect` 띠를 더해 눌렀고, Windows 는 띠 폭(`dividerGrabBandPx(1000)`, 10px)을 divider 두께 자체로 넘겨 10px 막대를 그리고 그 막대만 눌렀다 — **고쳤다**(2026-10-12): 두께는 중립 `dock_layout.dividerThicknessPx`, 누르는 띠는 `compute` 가 내는 `Geometry.divider_hit` 하나이고, macOS `dockDividerAtPoint` 와 Windows `regionAt` 이 그것을 본다(Windows 는 아직 배율 1x·두께 설정 기본값 — 남은 일) |
 
-**훑기에서 남은 후보**(2026-10-12 — 호스트 코드를 훑어 나온 10개 중 위 표의 다섯을 고친 뒤):
+**훑기에서 남은 후보**(2026-10-12 — 호스트 코드를 훑어 나온 10개 중 위 표의 여섯을 고친 뒤):
 
 - **사본이 아니었다**: 파일 트리 스크롤 한계(Windows 는 트리를 셀 격자로 그려 `cell_h` 가 그 축이다 — macOS 는 컴포넌트 `Metrics.row_h`), 사이드바 스크롤 한계(뷰포트를 만드는 입력만 다르고 산술은 포화 뺄셈 하나다).
-- **규칙이 실제로 갈렸다 — Windows 화면에서 확인한 뒤 고친다**: 도크 divider 의 잡기 영역. macOS 는 보이는 선 두께에 `outerDividerHitRect` 의 띠(배율 반영, bottom 은 터미널 쪽만)를 더하고, Windows 는 `divider_px = dividerGrabBandPx(1000)` 으로 선 자체를 1x 고정 10px 띠로 그린다 — 고배율에서 잡는 폭과 그리는 두께가 macOS 와 다르다.
 - **합치려면 상태나 경계부터 바꿔야 한다**: SCM 의도 규칙(섹션을 접고 펴면 강조를 내린다 — macOS 는 `AppSession` 필드에 저장소 여럿, Windows 는 자기 `State` 하나), 에이전트 도크 항목 만들기(겹침이 작고 macOS 쪽이 가상화·상세를 더 다룬다).
 
 규칙을 지킨 선례도 있다 — [windows-platform.md](windows-platform.md) §2m.24(히트테스트 — macOS `hitTestBody` 가 줄었다)와

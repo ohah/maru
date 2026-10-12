@@ -1227,9 +1227,8 @@ pub fn detachPaneFromTab(self: *AppSession, tab: *Tab, pane: *Pane) bool {
 /// 0으로 없애 양수 config인데 divider가 통째 사라지는 걸 막는다(code-review: 1x에서 0.4pt 등). @intFromFloat 음수 UB도
 /// 이 게이트가 막는다. metalFrame(렌더 값)·appendActiveTabDividers(0이면 셀 emit 스킵)의 단일 출처. 커서 강조선(15%)과 무관.
 pub fn dividerThicknessPx(self: *const AppSession) u32 {
-    if (self.scale_milli == 0 or self.appearance.split_divider_thickness <= 0.0) return 0;
-    const px_f = self.appearance.split_divider_thickness * @as(f32, @floatFromInt(self.scale_milli)) / 1000.0;
-    return @max(@as(u32, 1), @as(u32, @intFromFloat(@round(px_f))));
+    // 산술은 중립이 소유한다 — Windows 도 같은 함수로 두께를 낸다(`dock_layout.dividerThicknessPx`).
+    return dock_layout.dividerThicknessPx(self.appearance.split_divider_thickness, self.scale_milli);
 }
 
 /// 사이드바/탭바/비활성/오버레이/floating 공용 frame builder(cursor_unfocused 없음 — 활성 panel만 cursor 모드를
@@ -1820,11 +1819,8 @@ pub fn recomputeActivePaneRect(self: *AppSession) void {
 
 pub fn dockDividerAtPoint(self: *const AppSession, x_px: f64, y_px: f64) bool {
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-    return layout_math.pointInRect(
-        x_px,
-        y_px,
-        dock_layout.outerDividerHitRect(dock_ops.dockGeometry(self), self.dock.side, dockDividerGrabBandPx(self)),
-    );
+    // 누르는 띠는 기하가 이미 들고 있다(`Geometry.divider_hit`) — Windows 의 `regionAt` 과 같은 사각형이다.
+    return layout_math.pointInRect(x_px, y_px, dock_ops.dockGeometry(self).divider_hit);
 }
 
 /// 이름 없는 문서를 이번에 되살리지 못했다 — **레코드는 디스크에 남는다**(다음 실행이 다시 시도한다). 탭이 왜

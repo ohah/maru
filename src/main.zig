@@ -1954,6 +1954,48 @@ test "판정용 앞부분: 안 잘린 문자열은 그대로, 잘리면 글자 �
     try t.expectEqualStrings("", codepointPrefix("마", 2));
 }
 
+// **도크 divider 는 두 호스트에서 같은 규칙이다** — 보이는 두께만 차지하고(`dividerThicknessPx`), 누르는 띠는
+// 그 양옆으로 넓다(`Geometry.divider_hit`). 예전 Windows 는 누르는 띠(10px)를 두께로 넘겨 10px 막대를 그리고
+// 작업영역 10px 를 먹었고, 누르는 자리는 그 막대뿐이었다(2026-10-12 — macOS 는 1px 선 + 양옆 10pt).
+// OS 와 무관한 순수 기하라 어느 플랫폼에서든 돈다.
+test "도크 divider: Windows 기하가 macOS 와 같은 두께·누르는 띠를 쓴다" {
+    const dock_layout = maru.session.dock_layout;
+    const w: u32 = 1400;
+    const h: u32 = 800;
+    const win = dockGeometryFor(w, h, 9, 19, true, 0, .explorer, 0, 0, 0);
+    try std.testing.expect(win.dock.w > 0); // 도크가 서는 폭이다(아니면 아래가 아무것도 안 잰다)
+    // macOS 가 같은 창에서 내는 기하 — 설정 기본 두께(1pt)·같은 배율.
+    const mac = dock_layout.compute(.{
+        .backing_width_px = w,
+        .backing_height_px = h,
+        .sidebar_width_px = 0,
+        .titlebar_height_px = 0,
+        .cell_width_px = 9,
+        .cell_height_px = 19,
+        .scale_milli = 1000,
+        .divider_px = dock_layout.dividerThicknessPx((maru.config.theme.Config{}).split_divider_thickness, 1000),
+        .side = .right,
+        .size_pt = 0,
+        .visible = true,
+        .view = .explorer,
+        .view_bar_px = 19 * 2,
+    });
+    // ⑴ 그리는 두께: 보이는 선(1px)이다 — 누르는 띠 폭(10px)이 아니다.
+    try std.testing.expectEqual(@as(u32, 1), win.divider.w);
+    try std.testing.expectEqual(mac.divider.w, win.divider.w);
+    // ⑵ 누르는 띠: 선 양옆으로 `dividerGrabBandPx` 만큼 넓다 — 두 호스트가 같은 사각형이다.
+    try std.testing.expectEqual(mac.divider_hit, win.divider_hit);
+    try std.testing.expectEqual(win.divider.w + 2 * dock_layout.dividerGrabBandPx(1000), win.divider_hit.w);
+    // ⑶ 판정: 선에서 띠 끝 바로 안쪽까지 divider 로 읽힌다(Windows 입력 경로가 쓰는 `regionAt`).
+    const y: f64 = @floatFromInt(win.divider.y + win.divider.h / 2);
+    const left_edge: f64 = @floatFromInt(win.divider_hit.x);
+    const right_edge: f64 = @floatFromInt(win.divider_hit.x + win.divider_hit.w);
+    try std.testing.expectEqual(dock_layout.Region.divider, dock_layout.regionAt(win, left_edge, y));
+    try std.testing.expectEqual(dock_layout.Region.divider, dock_layout.regionAt(win, right_edge - 0.5, y));
+    try std.testing.expect(dock_layout.regionAt(win, left_edge - 0.5, y) != .divider);
+    try std.testing.expect(dock_layout.regionAt(win, right_edge, y) != .divider);
+}
+
 test "합성 기하: 창이 좁으면 도크가 사라지고, 있을 때는 겹치지 않는다" {
     if (@import("builtin").os.tag != .windows) return error.SkipZigTest;
     const cell_w: u32 = 9;
@@ -5232,7 +5274,10 @@ fn dockGeometryFor(
         .cell_width_px = cell_w,
         .cell_height_px = cell_h,
         .scale_milli = 1000,
-        .divider_px = dock_layout.dividerGrabBandPx(1000),
+        // divider 는 **보이는 두께**만 차지한다(macOS 와 같은 `dividerThicknessPx`). 누르는 띠는 그보다 넓고
+        // `compute` 가 `Geometry.divider_hit` 으로 낸다 — 예전에는 그 띠(10px)를 두께로 넘겨 10px 막대를 그리고
+        // 작업영역 10px 를 먹었다. 두께 설정(`split.divider-thickness`)은 아직 이 경로에 안 들어와 기본값이다.
+        .divider_px = dock_layout.dividerThicknessPx((maru.config.theme.Config{}).split_divider_thickness, 1000),
         .side = .right,
         .size_pt = size_pt,
         .visible = visible,

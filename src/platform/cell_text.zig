@@ -871,7 +871,7 @@ pub fn buildSidebarDrawList(
         const active = active_row != null and active_row.? == i;
         // 고정 핀(📌): 이름줄(line 0) **우측 끝**에 둔다 — 선두 칼럼은 동작/활성 마커(·/*, 호출자가 이름 prefix로 붙임)
         // 전용이라 핀이 그걸 가리지 않게(사용자 요청). 핀은 width 2 + 컬러 이모지(빨간 핀, style.fg 무관)다. **cols-1은
-        // 우측 패딩 1칸으로 예약**돼 있으므로(아래 end_col 주석: glyph_pad가 마지막 칸을 ~0.5칸 우측으로 밀어 경계 넘침),
+        // 우측 패딩 1칸으로 예약**돼 있으므로(아래 end_col 주석: 칸 미만 여백 `Columns.text_offset_px`가 마지막 칸을 우측으로 밀어 경계 넘침),
         // 핀의 오른쪽 끝이 cols-2가 되도록 비호버는 pin_col=cols-3(→ cols-3,2 차지·cols-1 패딩 보존)에 둔다. 호버 슬롯이면
         // 닫기 ✕가 cols-2(width 1)에 오므로 핀은 그 왼쪽 pin_col=cols-5(→ cols-5,4·cols-3 gap·cols-2 ✕·cols-1 패딩)에.
         // 폭이 좁아 핀이 text_col을 침범하면 생략(degrade).
@@ -892,9 +892,9 @@ pub fn buildSidebarDrawList(
             // 이름줄(j==0)만 활성 강조(active_fg+bold), 보조줄(브랜치·경로·상태)은 흐린 fg. bold는 셰이퍼가 bold face 선택.
             const row_style: terminal.Style = if (active and j == 0) .{ .foreground = active_fg, .bold = true } else style;
             // OSC 0/2(신뢰 불가)라 깨진 UTF-8은 U+FFFD, 폭 넘으면 "…" 말줄임(appendEllipsizedTitle 단일 출처).
-            // **우측 패딩 1칸 예약(cols-1)**: 카드 글리프는 렌더러가 glyph_pad(=cw×0.5)만큼 오른쪽으로 미는데,
+            // **우측 패딩 1칸 예약(cols-1)**: 카드 글리프는 `Columns.text_offset_px`(macOS 반 칸 — 예전에는 렌더러의 glyph_pad)만큼 오른쪽으로 밀리는데,
             // end_col=cols면 마지막 칸이 사이드바 경계를 반 칸 넘쳐 말줄임/텍스트가 경계에 붙어 답답했다(사용자
-            // 피드백). cols-1로 두면 우측에 ~0.5칸 여백이 생겨 좌측 glyph_pad와 균형이 맞는다.
+            // 피드백). cols-1로 두면 우측에 ~0.5칸 여백이 생겨 좌측 반 칸 여백과 균형이 맞는다. Windows 는 여백이 0 이라 이 예약이 근거 없이 한 칸을 비운다(남은 정리).
             // 핀이 있는 이름줄(j==0)은 핀 앞(pin_col)에서 잘라 긴 이름이 핀을 덮지 않게 한다(✕는 호버 전용이라 종전대로 overpaint).
             // ✕가 **고정 표시**로 바뀌었으므로 제목도 그 왼쪽에서 멈춰야 한다 — 예전엔 호버 순간에만 겹쳤지만 이제
             // 긴 이름·경로의 말줄임표 위에 ✕가 영구히 덧그려진다(code-review max). ✕는 cols-3이라 제목은 cols-4까지.

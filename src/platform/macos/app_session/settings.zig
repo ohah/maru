@@ -206,7 +206,7 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             const block_off: i64 = @intCast((row_h_caret -| sidebar_ops.sidebarBlockHeight(line_count, ch)) / 2);
             const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
             return .{
-                .x = @intCast(caret_col * cw),
+                .x = @intCast(cl.colLeftPx(caret_col, cw)), // 그린 글자와 같은 x(칸 미만 여백 포함 — `Columns.text_offset_px`)
                 .y = @intCast(caret_y),
                 .w = @intCast(cw),
                 .h = @intCast(ch),
@@ -285,7 +285,7 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             const slot_top = chrome.components.sidebar.rowTop(rrows, sr, self.sidebar_header_height_px, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px);
             const block_off: i64 = @intCast((self.sidebar_header_row_h_px -| ch) / 2); // 헤더 1줄 세로 중앙
             const caret_y = @max(slot_top + block_off, @as(i64, self.sidebar_header_height_px));
-            return .{ .x = @intCast(caret_col * cw), .y = @intCast(caret_y), .w = @intCast(cw), .h = @intCast(ch) };
+            return .{ .x = @intCast(cl.colLeftPx(caret_col, cw)), .y = @intCast(caret_y), .w = @intCast(cw), .h = @intCast(ch) };
         },
         .file_tree => |edit| {
             const index = file_tree.findIdentity(self.file_tree_rows.items, .{ .kind = edit.row_kind, .path = edit.path() }) orelse

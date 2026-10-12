@@ -1456,7 +1456,6 @@ bool maru_metal_renderer_draw(
         // 헤더 위로 샌 카드를 자른다(밴드/glyph 둘 다 이 패스라 함께 클립).
         const float sidebar_header_px = (float)sidebar_header_height_px;
         const float sidebar_scroll = (float)sidebar_scroll_offset_px;
-        const float glyph_pad = cw * 0.5f; // 제목 텍스트 좌측 여백(폰트 크기에 비례)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
             float py_top, cell_h, sx_origin;
@@ -1474,7 +1473,10 @@ bool maru_metal_renderer_draw(
                 // 넣고(헤더·스크롤 제외 content 상대), 여기선 헤더 시프트·세로 스크롤만 더한다 — 밴드와 같은 단일 스크롤 소스.
                 py_top = (float)sc.origin_y + sidebar_header_px - sidebar_scroll;
                 cell_h = ch;
-                sx_origin = glyph_pad;
+                // 가로 자리는 Zig가 origin_x에 싣는다(칸 미만 여백 — `chrome.components.sidebar.Columns.text_offset_px`).
+                // 예전에는 여기서 `cw*0.5`를 더했는데 hit-test·IME caret이 그 반 칸을 몰라, ✕가 누르는 칸보다 반 칸
+                // 오른쪽에 그려졌다(그린 ✕의 오른쪽 절반을 누르면 카드 전환 — 2026-10-12). 렌더러는 값을 다시 적지 않는다.
+                sx_origin = (float)sc.origin_x;
             }
             // 사이드바 글리프는 확대하지 않는다 — 에이전트 심볼(✶/◆)도 셀 크기 그대로다. 예전에는 여기서 「gutter col 0
             // 의 sparkle·diamond」를 codepoint로 골라 1.1×로 늘렸는데, 세션 목록 아이콘이 인라인(col

@@ -2577,6 +2577,9 @@ fn rebuildSidebarCells(
         scrollGutterPx(),
         @as(u32, sp.card_gap_px) + @as(u32, sp.accent_bar_width_px), // 좌측 accent 막대 + 카드 패딩
         sp.card_gap_px, // 우측 카드 패딩
+        // 칸 미만 여백은 두지 않는다 — Windows 카드 글자는 칸 경계에 선다. 값을 바꾸면 그리기(아래 `origin_x`)와
+        // `closeButton` 이 같은 `Columns` 에서 함께 따라온다(macOS 는 반 칸을 쓴다).
+        0,
     ) orelse {
         card_cols_out.* = 0;
         card_columns_out.* = null;
@@ -2670,6 +2673,7 @@ fn rebuildSidebarCells(
         // y=14~58 인데 글자가 y=189·229 였다). `fillOriginY` 가 이미 최종 y 를 넣어 뒀다.
         c.row = 0;
         c.col +|= indent_cols;
+        c.origin_x +|= layout.text_offset_px; // 칸 미만 여백 — hit-test(`closeXRange`)와 같은 값
         const cell = win32_terminal.cellFromNative(c, cell_w, cell_h, atlas_w.*, atlas_h.*);
         // **글자가 사이드바 사각형을 벗어나면 안 된다** — 벗어나면 터미널 위에 얹힌다.
         if (cell.rect[0] < 0 or cell.rect[0] + cell.rect[2] > x1 or

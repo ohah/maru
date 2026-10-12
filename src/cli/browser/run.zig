@@ -50,7 +50,10 @@ pub fn run(
         },
         .request => |req| try runRequest(io, allocator, req, stdout, stderr),
         .screenshot => |shot| try runScreenshot(io, allocator, shot, stdout, stderr),
-        .repl => |r| try runRepl(io, allocator, r.surface, null, stdout, stderr),
+        .repl => |r| runRepl(io, allocator, r.surface, null, stdout, stderr) catch |e| switch (e) {
+            error.WriteFailed => {}, // 출력을 받는 쪽이 닫았다(`| head` 등) — 조용히 끝낸다(W9f 적대 리뷰 1 회차)
+            else => return e,
+        },
     }
 }
 
@@ -480,11 +483,26 @@ pub const LineReader = struct {
                 return .{ .line = self.pending.items };
             }
             var buf: [16 * 1024]u8 = undefined;
-            const n = std.c.read(self.fd orelse std.Io.File.stdin().handle, &buf, buf.len);
+            const fd = self.fd orelse std.Io.File.stdin().handle;
+            const n = std.c.read(fd, &buf, buf.len);
             if (n < 0) {
-                if (std.posix.errno(n) == .INTR) continue;
-                self.eof = true;
-                continue;
+                switch (std.posix.errno(n)) {
+                    .INTR => continue,
+                    // non-blocking 입력 — 아직 없다: 읽을 수 있을 때까지 기다린다(W9f 적대 리뷰 1 회차 — 끝으로 보아 MCP 서버가 곧 끝났다).
+                    .AGAIN => {
+                        if (comptime builtin.os.tag == .windows) {
+                            self.eof = true;
+                        } else {
+                            var pfd = [_]std.c.pollfd{.{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 }};
+                            _ = std.c.poll(&pfd, 1, -1);
+                        }
+                        continue;
+                    },
+                    else => {
+                        self.eof = true;
+                        continue;
+                    },
+                }
             }
             if (n == 0) {
                 self.eof = true;
@@ -666,5 +684,46 @@ test "W9f repl: 한 줄이라도 실패하면 종료 상태 1, exit 뒤 줄은 �
         if (c.fails) try std.testing.expectError(error.UnknownCommand, r) else try r;
         if (c.out_has) |h| try std.testing.expect(std.mem.indexOf(u8, out.written(), h) != null);
         if (c.err_has) |h| try std.testing.expect(std.mem.indexOf(u8, err.written(), h) != null);
+    }
+}
+
+test "W9f 적대 리뷰 1 회차: 정확히 상한 길이의 줄은 받는다(넘는 줄만 알린다)" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    const exact = "z" ** 64;
+    const input = exact ++ "\n" ++ exact ++ "z\n";
+    try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
+    _ = std.c.close(fds[1]);
+    var r: LineReader = .{ .fd = fds[0], .max = 64 };
+    defer r.deinit(std.testing.allocator);
+    try std.testing.expectEqualStrings(exact, (try r.next(std.testing.allocator)).?.line);
+    try std.testing.expect((try r.next(std.testing.allocator)).? == .too_long);
+    try std.testing.expect((try r.next(std.testing.allocator)) == null);
+}
+
+test "W9f 적대 리뷰 1 회차: non-blocking 입력에서 아직 읽을 것이 없으면(EAGAIN) 끝이 아니라 기다린다" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest else {
+        var fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        defer _ = std.c.close(fds[0]);
+        const fl = std.c.fcntl(fds[0], std.c.F.GETFL);
+        var flags: std.c.O = @bitCast(@as(u32, @intCast(fl)));
+        flags.NONBLOCK = true;
+        _ = std.c.fcntl(fds[0], std.c.F.SETFL, @as(c_int, @bitCast(flags)));
+        const Writer = struct {
+            fn run(fd: std.c.fd_t) void {
+                var ts: std.c.timespec = .{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&ts, null);
+                _ = std.c.write(fd, "late\n", 5);
+                _ = std.c.close(fd);
+            }
+        };
+        const t = try std.Thread.spawn(.{}, Writer.run, .{fds[1]});
+        defer t.join();
+        var r: LineReader = .{ .fd = fds[0], .max = 64 };
+        defer r.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("late", (try r.next(std.testing.allocator)).?.line);
+        try std.testing.expect((try r.next(std.testing.allocator)) == null);
     }
 }

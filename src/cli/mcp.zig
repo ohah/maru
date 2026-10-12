@@ -9,7 +9,9 @@ const std = @import("std");
 const cp = @import("../session/control_plane.zig");
 
 /// 우리가 아는 MCP 판(새 것부터). 클라이언트가 청한 판이 이 안에 있으면 그것으로, 아니면 첫 것으로 답한다(스펙의 협상).
-pub const protocol_versions = [_][]const u8{ "2025-06-18", "2025-03-26", "2024-11-05" };
+/// 받는 MCP 판 — 2025-03-26 은 batch 받기를 요구해(이 서버는 받지 않는다) 알리지 않는다(W9f 적대 리뷰 1 회차). 클라이언트가 그 판을 청하면
+/// 최신으로 답한다(규약: 서버가 다른 판을 내면 클라이언트가 고른다).
+pub const protocol_versions = [_][]const u8{ "2025-06-18", "2024-11-05" };
 pub const server_name = "maru";
 
 /// 도구 인자 하나가 CLI 에서 어떤 모양인가.
@@ -35,6 +37,8 @@ pub const Arg = struct {
     flag: []const u8 = "",
     description: []const u8,
     required: bool = false,
+    /// 정수 인자의 최솟값(스키마 `minimum` — 파서가 지키는 값과 같게).
+    min: i64 = 0,
 };
 
 pub const Tool = struct {
@@ -51,11 +55,22 @@ const locator_args = [_]Arg{
     .{ .key = "ref", .kind = .string, .flag = "--ref", .description = "element ref from browser_snapshot (like n123)" },
     .{ .key = "role", .kind = .string, .flag = "--role", .description = "ARIA role (Chromium tabs), with name/level" },
     .{ .key = "name", .kind = .string, .flag = "--name", .description = "accessible name for role" },
-    .{ .key = "level", .kind = .int, .flag = "--level", .description = "heading level for role=heading" },
+    .{ .key = "level", .kind = .int, .flag = "--level", .description = "heading level for role=heading", .min = 1 },
     .{ .key = "by_text", .kind = .string, .flag = "--by-text", .description = "visible text (Chromium tabs)" },
     .{ .key = "by_label", .kind = .string, .flag = "--by-label", .description = "form label text (Chromium tabs)" },
     .{ .key = "exact", .kind = .flag, .flag = "--exact", .description = "match the name/text exactly" },
     .{ .key = "nth", .kind = .int, .flag = "--nth", .description = "pick the nth match (0-based)" },
+};
+
+/// wait 의 로케이터 — CLI wait 는 `--ref` 를 받지 않는다(W9f 적대 리뷰 1 회차: 스키마가 내보였는데 파서가 거절했다).
+const wait_locator_args = blk: {
+    var out: [locator_args.len - 1]Arg = undefined;
+    var n: usize = 0;
+    for (locator_args) |a| if (!std.mem.eql(u8, a.key, "ref")) {
+        out[n] = a;
+        n += 1;
+    };
+    break :blk out;
 };
 
 fn withSurface(comptime extra: []const Arg) []const Arg {
@@ -66,7 +81,7 @@ pub const tools = [_]Tool{
     .{ .name = "browser_list", .subcommand = "list", .description = "List the browser tabs of this maru instance (id, url, title, engine, controllable methods).", .args = &.{} },
     .{ .name = "browser_open", .subcommand = "open", .description = "Open a Chromium tab behind the current one in this pane and wait for its first load. Returns the new tab id. Only from a maru pane; up to 8 tabs per pane.", .args = &.{
         .{ .key = "url", .kind = .string, .flag = "--url", .description = "http(s) address to load (omit for a blank tab)" },
-        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)" },
+        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1 },
     } },
     .{ .name = "browser_close", .subcommand = "close", .description = "Close a tab this pane opened (asks the page; a page that asks before leaving is not closed).", .args = withSurface(&.{}) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address.", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
@@ -76,10 +91,10 @@ pub const tools = [_]Tool{
     .{ .name = "browser_scroll", .subcommand = "scroll", .description = "Scroll an element into view.", .args = withSurface(&locator_args) },
     .{ .name = "browser_hover", .subcommand = "hover", .description = "Move the pointer onto an element (real input; Chromium tabs).", .args = withSurface(&locator_args) },
     .{ .name = "browser_press", .subcommand = "press", .description = "Press a key like Enter, Shift+Tab or Meta+a (on the element, or where the focus is; Chromium tabs).", .args = withSurface(&([_]Arg{.{ .key = "key", .kind = .string, .flag = "--key", .description = "key spec", .required = true }} ++ locator_args)) },
-    .{ .name = "browser_wait", .subcommand = "wait", .description = "Wait for a selector, the page load, or a locator to be visible (default and max 25000 ms).", .args = withSurface(&(locator_args ++ [_]Arg{
+    .{ .name = "browser_wait", .subcommand = "wait", .description = "Wait for a selector, the page load, or a locator to be visible (default and max 25000 ms).", .args = withSurface(&(wait_locator_args ++ [_]Arg{
         .{ .key = "load", .kind = .flag, .flag = "--load", .description = "wait until the page is loaded" },
         .{ .key = "visible", .kind = .flag, .flag = "--visible", .description = "with a locator: wait until it is visible" },
-        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "1-25000" },
+        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "1-25000", .min = 1 },
     })) },
     .{ .name = "browser_snapshot", .subcommand = "snapshot", .description = "Print the page accessibility tree with refs for later actions. On big pages pass interactive, max_depth or selector to keep the result small.", .args = withSurface(&.{
         .{ .key = "interactive", .kind = .flag, .flag = "--interactive", .description = "only interactive elements" },
@@ -93,7 +108,7 @@ pub const tools = [_]Tool{
     .{ .name = "browser_exec", .subcommand = "exec", .description = "Run and await a JavaScript expression in the page; prints its result.", .args = withSurface(&.{
         .{ .key = "expression", .kind = .positional, .description = "JavaScript expression", .required = true },
         .{ .key = "args", .kind = .json_array, .flag = "--args", .description = "JSON array of arguments" },
-        .{ .key = "max_result_bytes", .kind = .int, .flag = "--max-result-bytes", .description = "result size limit" },
+        .{ .key = "max_result_bytes", .kind = .int, .flag = "--max-result-bytes", .description = "result size limit", .min = 1 },
     }) },
     .{ .name = "browser_screenshot", .subcommand = "screenshot", .description = "Capture the tab as a PNG image (the whole page at device scale, or a region).", .args = withSurface(&.{
         .{ .key = "rect", .kind = .string, .flag = "--rect", .description = "region x,y,w,h in CSS pixels" },
@@ -104,6 +119,23 @@ pub const tools = [_]Tool{
 /// 결과를 그림으로 돌려주는 도구(CLI 가 표준 출력에 PNG 바이트를 쓴다).
 pub fn returnsImage(tool: *const Tool) bool {
     return std.mem.eql(u8, tool.subcommand, "screenshot");
+}
+
+/// JSON 값의 가장 깊은 중첩(재귀 — 받은 값은 파서가 이미 만든 것이라 깊이는 그 파서의 상한 안이다).
+fn jsonDepth(v: std.json.Value) usize {
+    return switch (v) {
+        .array => |a| blk: {
+            var d: usize = 0;
+            for (a.items) |x| d = @max(d, jsonDepth(x));
+            break :blk d + 1;
+        },
+        .object => |o| blk: {
+            var d: usize = 0;
+            for (o.values()) |x| d = @max(d, jsonDepth(x));
+            break :blk d + 1;
+        },
+        else => 0,
+    };
 }
 
 pub fn findTool(name: []const u8) ?*const Tool {
@@ -138,12 +170,15 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                     .string => |s| try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, s })),
                     else => return error.WrongType,
                 },
-                .int => switch (v) {
-                    .integer => |n| {
-                        if (n < 0) return error.WrongType;
-                        try out.append(arena, try std.fmt.allocPrint(arena, "{s}={d}", .{ spec.flag, n }));
-                    },
-                    else => return error.WrongType,
+                .int => {
+                    // JSON Schema 의 integer 는 7.0 도 받는다(W9f 적대 리뷰 1 회차).
+                    const n: i64 = switch (v) {
+                        .integer => |n| n,
+                        .float => |f| if (f == @trunc(f) and f >= 0 and f < 9.007199254740992e15) @intFromFloat(f) else return error.WrongType,
+                        else => return error.WrongType,
+                    };
+                    if (n < 0) return error.WrongType;
+                    try out.append(arena, try std.fmt.allocPrint(arena, "{s}={d}", .{ spec.flag, n }));
                 },
                 .number => switch (v) {
                     .integer => |n| try out.append(arena, try std.fmt.allocPrint(arena, "{s}={d}", .{ spec.flag, n })),
@@ -160,6 +195,8 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                 },
                 .json_array => switch (v) {
                     .array => {
+                        // 깊게 중첩된 배열은 글로 펼 때 쓰개의 중첩 한도(256)에서 서버째 panic 했다(W9f 적대 리뷰 1 회차).
+                        if (jsonDepth(v) > browser.max_args_depth) return error.WrongType;
                         var aw: std.Io.Writer.Allocating = .init(arena);
                         std.json.Stringify.value(v, .{}, &aw.writer) catch return error.OutOfMemory;
                         try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, aw.written() }));
@@ -198,6 +235,8 @@ pub fn handleLine(gpa: std.mem.Allocator, arena: std.mem.Allocator, line: []cons
         .request => |r| r,
         .notification, .response => return .none, // notifications/initialized·cancelled 등 — 답하지 않는다
     };
+    // MCP 는 요청 id 가 null 이면 안 된다(W9f 적대 리뷰 1 회차 — 답하고 있었다).
+    if (req.id == .null) return .{ .reply = try cp.serializeError(gpa, .null, .invalid_request, "request id must not be null", null) };
     const id = try dupeId(arena, req.id);
     if (std.mem.eql(u8, req.method, "initialize")) return .{ .reply = try initializeResult(gpa, id, req.params) };
     if (std.mem.eql(u8, req.method, "ping")) return .{ .reply = try emptyResult(gpa, id) };
@@ -315,7 +354,7 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
         });
         if (a.kind == .int) {
             try s.objectField("minimum");
-            try s.write(0);
+            try s.write(a.min);
         }
         try s.objectField("description");
         try s.write(a.description);
@@ -481,9 +520,9 @@ test "W9f: JSON-RPC — initialize 는 아는 판으로, tools/list·ping·모�
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     {
-        const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}")).reply;
+        const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"t\",\"version\":\"1\"}}}")).reply;
         defer testing.allocator.free(r);
-        try testing.expect(std.mem.indexOf(u8, r, "\"protocolVersion\":\"2025-03-26\"") != null);
+        try testing.expect(std.mem.indexOf(u8, r, "\"protocolVersion\":\"2024-11-05\"") != null);
         try testing.expect(std.mem.indexOf(u8, r, "\"tools\":{}") != null);
     }
     {
@@ -593,4 +632,104 @@ test "W9f: `-` 로 시작하거나 `--help` 인 값도 값으로 간다(도움�
             return error.TestUnexpectedResult;
         }
     }
+}
+
+fn jsonOf(arena: std.mem.Allocator, text: []const u8) !std.json.Value {
+    return (try std.json.parseFromSlice(std.json.Value, arena, text, .{})).value;
+}
+
+test "W9f 적대 리뷰 1 회차: 아주 깊게 중첩된 exec args 는 서버를 죽이지 않고 거절한다(전에는 256 단에서 panic — 세션의 도구가 모두 사라졌다)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for ([_]usize{ 200, 255, 300, 2000 }) |depth| {
+        var buf: std.ArrayList(u8) = .empty;
+        try buf.appendSlice(arena, "{\"surface\":2,\"expression\":\"1\",\"args\":[");
+        for (0..depth) |_| try buf.append(arena, '[');
+        for (0..depth) |_| try buf.append(arena, ']');
+        try buf.appendSlice(arena, "]}");
+        // 파싱 자체가 깊이를 거절할 수도 있다 — 그러면 handleLine 이 -32700 으로 답한다(죽지 않는다).
+        const v = std.json.parseFromSlice(std.json.Value, arena, buf.items, .{}) catch continue;
+        const a = argv(arena, findTool("browser_exec").?, v.value) catch |e| {
+            try testing.expect(e == error.WrongType);
+            continue;
+        };
+        // 받았다면 CLI 파서도 받아야 하고, 요청을 만들 수 있어야 한다.
+        const cmd = try browser.parse(a);
+        const bytes = try browser.buildRequestBytes(arena, cmd.request, .{ .number = 1 });
+        try testing.expect(bytes.len > 0);
+    }
+}
+
+test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가 browser.parse 를 지난다(스키마가 내보인 인자를 파서가 거절하지 않는다)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for (&tools) |*t| for (t.args) |opt| {
+        if (opt.required) continue;
+        var obj: std.json.ObjectMap = .empty;
+        for (t.args) |a| if (a.required) try obj.put(arena, a.key, switch (a.kind) {
+            .int => .{ .integer = 4 },
+            else => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
+        });
+        // 이 인자와 함께 써야 하는 짝(로케이터는 하나가 있어야, --name·--exact 는 role 과).
+        const needs_locator = std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "wait");
+        const is_locator = std.mem.eql(u8, opt.key, "selector") or std.mem.eql(u8, opt.key, "ref") or std.mem.eql(u8, opt.key, "role") or std.mem.eql(u8, opt.key, "by_text") or std.mem.eql(u8, opt.key, "by_label");
+        const with_role = std.mem.eql(u8, opt.key, "name") or std.mem.eql(u8, opt.key, "level") or std.mem.eql(u8, opt.key, "exact") or std.mem.eql(u8, opt.key, "nth");
+        if (with_role) {
+            try obj.put(arena, "role", .{ .string = "button" });
+            if (std.mem.eql(u8, opt.key, "exact")) try obj.put(arena, "name", .{ .string = "Go" });
+        } else if (needs_locator and !is_locator and !std.mem.eql(u8, opt.key, "load")) try obj.put(arena, "selector", .{ .string = "#a" });
+        if (std.mem.eql(u8, opt.key, "visible")) _ = obj.swapRemove("selector");
+        if (std.mem.eql(u8, opt.key, "visible")) try obj.put(arena, "role", .{ .string = "button" });
+        try obj.put(arena, opt.key, switch (opt.kind) {
+            .int => .{ .integer = 3 },
+            .number => .{ .float = 0.5 },
+            .flag => .{ .bool = true },
+            .json_array => try jsonOf(arena, "[1]"),
+            else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else "x" },
+        });
+        const a = try argv(arena, t, .{ .object = obj });
+        _ = browser.parse(a) catch |err| {
+            std.debug.print("tool {s} arg {s} → {any}\n", .{ t.name, opt.key, err });
+            return err;
+        };
+    };
+}
+
+test "W9f 적대 리뷰 1 회차: 거짓 플래그는 싣지 않고, 정수 값의 부동소수(7.0)는 정수로, 스키마는 모르는 키를 막고 파서의 최솟값을 알린다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const snap = findTool("browser_snapshot").?;
+    const a = try argv(arena, snap, try jsonOf(arena, "{\"surface\":7.0,\"interactive\":false}"));
+    try testing.expectEqual(@as(usize, 2), a.len); // snapshot --surface=7
+    try testing.expectEqualStrings("--surface=7", a[1]);
+    try testing.expectError(error.WrongType, argv(arena, snap, try jsonOf(arena, "{\"surface\":7.5}")));
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(r);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer parsed.deinit();
+    for (parsed.value.object.get("result").?.object.get("tools").?.array.items) |t| {
+        const schema = t.object.get("inputSchema").?.object;
+        try testing.expect(!schema.get("additionalProperties").?.bool);
+        if (std.mem.eql(u8, t.object.get("name").?.string, "browser_wait")) {
+            const props = schema.get("properties").?.object;
+            try testing.expectEqual(@as(i64, 1), props.get("timeout_ms").?.object.get("minimum").?.integer);
+            try testing.expectEqual(@as(i64, 1), props.get("level").?.object.get("minimum").?.integer);
+        }
+    }
+}
+
+test "W9f 적대 리뷰 1 회차: id 가 null 인 요청은 -32600(MCP 는 null id 를 금한다), batch 를 받지 않으니 batch 가 있는 2025-03-26 은 알리지 않는다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}")).reply;
+    defer testing.allocator.free(r);
+    try testing.expect(std.mem.indexOf(u8, r, "-32600") != null);
+    for (protocol_versions) |v| try testing.expect(!std.mem.eql(u8, v, "2025-03-26"));
+    const i = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\"}}")).reply;
+    defer testing.allocator.free(i);
+    try testing.expect(std.mem.indexOf(u8, i, "\"protocolVersion\":\"2025-06-18\"") != null);
 }

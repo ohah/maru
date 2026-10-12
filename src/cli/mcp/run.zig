@@ -23,6 +23,14 @@ const SliceArgs = struct {
 };
 
 pub fn run(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    // 클라이언트가 표준 출력을 닫았다 — 답할 곳이 없으니 조용히 끝낸다(W9f 적대 리뷰 1 회차: 스택 트레이스와 종료 1).
+    serve(io, allocator, stdout, stderr) catch |e| switch (e) {
+        error.WriteFailed => return,
+        else => return e,
+    };
+}
+
+fn serve(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
     var reader: browser_run.LineReader = .{ .max = max_line_bytes };
     defer reader.deinit(allocator);
     while (try reader.next(allocator)) |item| switch (item) {

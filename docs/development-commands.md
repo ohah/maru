@@ -1496,6 +1496,10 @@ Metal readback에서 네 파일 저장·연결 Undo·다시 저장 및 오른쪽
 
 `python3 tools/test-editor-local-save-worker-adversarial.py`는 worker의 실제 실패 경로와 정상/복원 대조군을 격리 사본에서 실행하고 결과 JSON과 로그를 출력한 임시 디렉터리에 남긴다.
 
+로컬 저장 gate에는 LSAVEQ1~6의 요청 큐·완료 승인·성공 CAS 기준 인계·실패 보존·예산·대상 수명 검사도 포함된다. 큐는 아직 사용자 저장 경로에 연결하지 않았다.
+
+`python3 tools/test-editor-local-save-queue-adversarial.py`는 성공 기준 인계 누락·실패 기준 인계·오래된 요청 합류·실행 중 예산 누락·대상 epoch 무시의 변이를 격리 사본에서 실제 실행해 검출하고 정상/복원 대조군을 확인한다.
+
 SSH mixed 재접속 검증은 `python3 tools/test-remote-agent-native.py --cli zig-out/bin/maru --frames-output /tmp/remote-native-wire`로 실행한다(명령은 한 줄로 입력).
 소유 ControlMaster 중단·단절 중 v1/v2 훅 기록·새 연결 resume를 검사한다.
 `zig build test-remote-agent-log-profile -Dremote-native-frames=/tmp/remote-native-wire.reconnect`

@@ -309,12 +309,14 @@ CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데
   보장이 아니다) — Zig 판정자는 Swift 를 보지 않으므로 그 재고(`Process`·`NSTask` 생성 자리)를 같은 판정자 파일이 파일·개수·이유로
   고정한다.
 - 소켓도 같은 틈이 있다 — macOS 에는 `SOCK_CLOEXEC` 가 없어 `socket()` 과 `F_SETFD` 가 별개 호출이다. 앱의 연결 소켓(주·채널)은 수신
-  잠금 안에서 만들고 CLOEXEC 까지 켠다. 채널 소켓을 자식이 물려받으면 앱이 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다.
+  잠금 안에서 만들고 CLOEXEC 까지 켠다. 채널 소켓을 자식이 물려받으면 앱이 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다. 이 자리도
+  블로킹 쓰기 잠금이다(메인의 connect 포함 — 연결은 tick 이 아니라 다시 올 기회가 없다). 대기는 fork 시스템콜 길이로 묶인다.
 - host 는 이 울타리를 쓰지 않는다 — host 가 받는 fd 는 프로토콜 위반뿐이고 owner 스레드가 받은 자리에서 닫는다(계획 IC4b).
 - 구현(IC4a): 울타리 `session_host/fork_fd_fence.zig`(앱 세션 생성이 세션 전에 설치), CLOEXEC_DEFAULT 헬퍼 `maru.pty.macos_spawn`,
   헬퍼 밖 `posix_spawn`·`posix_spawnp`·`system` 을 막는 `tests/boundary/spawn_cloexec_axis.zig`.
-- 구현(IC4b): `Client.pumpImageChannel(wait)` 가 `drain` 을 수신 잠금 안에서 한다 — tick·큐 머리는 `.try_lock`, 첫 snapshot 은
-  `.block`(`AttachmentTransport.prepare_image_apply` 가 `wait` 를 넘긴다). 소켓 생성은 `client_deadline.posix_ops.socket`.
+- 구현(IC4b): `Client.pumpImageChannel(wait)` 가 `drain` 을 수신 잠금 안에서 한다 — tick 의 펌프·큐 머리는 `.try_lock`, 첫
+  snapshot 과 관찰자 재접속 후보의 catch-up 은 `.block`(`AttachmentTransport.prepare_image_apply` 가 `wait` 를 넘긴다). 소켓 생성은
+  `client_deadline.posix_ops.socket`.
 
 ## 8. 다른 소비자
 

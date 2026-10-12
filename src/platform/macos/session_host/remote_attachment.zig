@@ -492,13 +492,17 @@ pub const RemoteAttachment = struct {
 
     /// 큐 머리 배치가 `image_ref` 를 싣는데 이번 tick 에 그 연결의 채널을 비울 수 없는가(§6) — 그러면 그 배치를 머리에 그대로
     /// 둔다. head 를 넘기고 계상하기 **전**에 부르므로 다음 tick 에 같은 배치를 다시 셀 때 이중 계상이 없다. 협상하지 않은 연결은
-    /// `image_ref` 가 malformed 라 볼 것이 없다. 엿보기는 소비하지 않는다(빌린 view 만 본다).
-    fn headHeldForImageChannel(self: *const RemoteAttachment, transport: AttachmentTransport) bool {
+    /// `image_ref` 가 malformed 라 볼 것이 없다. 엿보기는 소비하지 않는다(빌린 view 만 본다). `wait` 는 fork 울타리의 수신 잠금을
+    /// 기다릴지다(§7 — 다시 오는 tick 이면 `.try_lock`, 동기 catch-up 이면 `.block`).
+    fn headHeldForImageChannel(
+        self: *const RemoteAttachment,
+        transport: AttachmentTransport,
+        wait: fork_fd_fence.ReceiveWait,
+    ) bool {
         if (!transport.image_shm_negotiated(transport.context)) return false;
         const peek = self.pending_batches.items[self.pending_batch_head].borrow(transport) catch
             return false; // 정식 borrow 가 같은 실패를 그 자리의 규칙대로 다룬다.
-        // 다음 tick 이 다시 센다 — 수신 잠금을 기다리지 않는다(§7).
-        return batchCarriesImageRef(peek.bytes) and !transport.prepare_image_apply(transport.context, .try_lock);
+        return batchCarriesImageRef(peek.bytes) and !transport.prepare_image_apply(transport.context, wait);
     }
 
     /// Pull one stream-local batch from the borrowed connection into attachment-owned storage,
@@ -587,9 +591,12 @@ pub const RemoteAttachment = struct {
             transport.fail_closed(transport.context, .attachment_cleanup_failed);
             return error.LedgerInvariant;
         }
+        // 수신 잠금(§7): tick 펌프는 다음 tick 이 다시 세므로 기다리지 않는다. catch-up(관찰자 재접속 후보)은 같은 스레드의 동기
+        // 루프라 다시 올 tick 이 없다 — 물러서면 fork 하나와 겹친 재접속이 `Busy` 로 실패한다. 대기는 fork 시스템콜 길이로 묶인다.
+        const receive_wait: fork_fd_fence.ReceiveWait = if (catchup_accounting != null) .block else .try_lock;
         // 큐 머리가 이미 있으면 그 배치부터 본다 — 보류 중에 새 배치를 읽어 붙이면 보류가 이어지는 동안 큐가 자란다.
         const head_was_queued = self.pending_batch_head < self.pending_batches.items.len;
-        if (head_was_queued and self.headHeldForImageChannel(transport)) return .held;
+        if (head_was_queued and self.headHeldForImageChannel(transport, receive_wait)) return .held;
         if (try transport.read_batch(transport.context, self.state.stream_id)) |lease| {
             self.pending_batches.append(self.allocator, lease) catch {
                 transport.fail_closed(transport.context, .local_resource_exhausted);
@@ -603,7 +610,7 @@ pub const RemoteAttachment = struct {
         if (self.pending_batch_head == self.pending_batches.items.len) return .idle;
         const lease = self.pending_batches.items[self.pending_batch_head];
         // 방금 읽어 머리가 된 배치는 여기서 본다(읽기 전에 본 머리는 같은 배치라 다시 보지 않는다 — 준비는 펌프당 한 번).
-        if (!head_was_queued and self.headHeldForImageChannel(transport)) return .held;
+        if (!head_was_queued and self.headHeldForImageChannel(transport, receive_wait)) return .held;
         self.pending_batch_head += 1;
         const batch = lease.borrow(transport) catch {
             transport.fail_closed(transport.context, .local_invariant_violation);
@@ -1731,9 +1738,11 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
     // 채널을 비울 수 없는 tick — 배치는 머리에 남고(소비·해석·계상 없음), 다시 펌프해도 같은 배치를 다시 본다.
     var accounting: catchup_stage_contract.Accounting = .{};
     try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreenInternal(std.testing.io, &accounting));
+    // catch-up(관찰자 재접속 후보)은 다시 올 tick 이 없어 수신 잠금을 기다린다(§7).
+    try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .block), transport.last_wait);
     try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 2), transport.prepared);
-    // 큐 머리의 준비는 수신 잠금을 기다리지 않는다 — 다음 tick 이 다시 센다(§7).
+    // tick 펌프의 큐 머리 준비는 수신 잠금을 기다리지 않는다 — 다음 tick 이 다시 센다(§7).
     try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .try_lock), transport.last_wait);
     try std.testing.expectEqual(@as(usize, 0), transport.resolved);
     try std.testing.expectEqual(@as(usize, 0), attachment.pending_batch_head);

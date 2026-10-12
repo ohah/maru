@@ -291,23 +291,26 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
 - `Client.pumpImageChannel(wait)` 가 「recvmsg + `F_SETFD`」(`Table.drain`)만 수신 잠금 안에서 한다(release 쓰기·poison 은 밖).
   `wait` 는 `fork_fd_fence.ReceiveWait` — tick 이 다시 오는 자리는 `.try_lock`(못 잡으면 false, fd 는 커널 큐에 남는다), tick 이 없는
   동기 적용 자리는 `.block`(fork 시스템콜 길이로 묶인다).
-  - `.try_lock`: 유지보수 tick 펌프(generation `ClientSlot.currentPumpImageChannel`·legacy `backend_api.pumpImageChannel`)와 큐 머리
-    보류(`headHeldForImageChannel` — 못 잡으면 IC3b-2b-1 의 보류가 그 배치를 머리에 둔다).
-  - `.block`: 첫 snapshot 의 `imageRefResolverAfterPump`.
+  - `.try_lock`: 유지보수 tick 펌프(generation `ClientSlot.currentPumpImageChannel`·legacy `backend_api.pumpImageChannel`)와 tick
+    펌프(`pumpScreen`)의 큐 머리 보류(`headHeldForImageChannel` — 못 잡으면 IC3b-2b-1 의 보류가 그 배치를 머리에 둔다).
+  - `.block`: 첫 snapshot 의 `imageRefResolverAfterPump`, 관찰자 재접속 후보의 catch-up(`pumpCatchupScreen` — 같은 스레드의 동기
+    루프라 물러서면 fork 하나와 겹친 재접속이 `Busy` 로 실패한다, 적대적 검증 1 회차).
   - 그래서 `AttachmentTransport.prepare_image_apply` 가 `wait` 를 받는다(ClientSlot·generation adapter·legacy 콜백이 그대로 넘긴다).
 - 소켓 생성: `client_deadline.posix_ops.socket` 이 수신 잠금 안에서 `socket()` 과 `FD_CLOEXEC` 를 함께 한다(macOS 에는 `SOCK_CLOEXEC`
   가 없다). 채널 소켓과 주 소켓이 같은 길이라 둘 다 덮인다 — 그 틈에 fork 한 자식이 채널 소켓을 물려받으면 앱이 닫아도 host 가 EOF 를
   못 봐 원장이 붙잡힌다(IC2b 적대적 검증 3 회차).
 - Swift·ObjC spawn 재고: `tests/boundary/spawn_cloexec_axis.zig` 가 `src` 의 `.swift`·`.m`·`.mm`·`.c`·`.h` 에서 주석·문자열 밖의
-  `Process`·`NSTask` 생성·메시지(`Process(`·`Process.`·`[NSTask`)와 `posix_spawn`·`posix_spawnp`·`popen`·`system(` 를 세어 파일·개수·이유로
-  고정한다 — Mermaid 도우미 1, IME 후보 관찰 smoke 1, `chrome-lab-smoke`(별도 실행 파일) 1. 타입 표기(`let p: Process`)는 세지 않는다.
+  `Process`·`NSTask` 생성·메시지(`Process(`·`Process.`·`[NSTask`)와 `posix_spawn`·`posix_spawnp`·`popen`·`vfork`·`system(` 를 세어
+  파일·개수·이유로 고정한다 — Mermaid 도우미 1, IME 후보 관찰 smoke 1, `chrome-lab-smoke`(별도 실행 파일) 1. 단순 타입 표기
+  (`let p: Process`)는 세지 않는다. Zig 스캐너도 `vfork` 를 센다(Darwin `vfork` 는 atfork 를 부르지 않는다).
 - host 는 잠그지 않는다: host 가 받는 fd 는 프로토콜 위반(release 에 붙은 fd)뿐이고 owner 스레드가 같은 함수에서 닫는다. 그 틈에 host 의
   PTY spawn(fork)이 겹치면 셸이 그 fd 를 물려받을 수 있지만 그것은 위반한 앱이 보낸 fd 이고 host 원장과 무관하다(앱의 공유 메모리를
   host 가 붙잡지 않는다). accept 한 소켓의 같은 틈도 IC 이전부터 있다 — 이 단계의 범위가 아니다.
 - 판정자(`test-image-channel-app`):
   - Client: 다른 스레드가 수신 잠금을 쥔 동안 tick 펌프(`.try_lock`)는 false 이고 세그먼트는 커널 큐에 남는다, 동기 펌프(`.block`)는
     풀릴 때까지 기다린 뒤 받는다, 소켓 생성은 잠금이 풀린 뒤에 CLOEXEC 가 켜진 채 돌아온다.
-  - 배선: 큐 머리 보류는 `.try_lock`, 첫 snapshot resolver 는 `.block`, 미협상 transport 는 부르지 않는다.
+  - 배선: tick 펌프의 큐 머리 보류는 `.try_lock`, catch-up 의 큐 머리와 첫 snapshot resolver 는 `.block`, 미협상 transport 는
+    부르지 않는다.
   - generation adapter: tick 의 길(`currentPumpImageChannel`)은 다른 스레드가 쥔 동안 false. legacy tick 은 글자로(`.try_lock` 1·
     `pumpImageChannel(.block)` 0).
   - 잠금을 쥔 스레드는 2 초 상한으로 푼다 — 잘못 기다리는 변이가 판정자를 멈추지 않는다.

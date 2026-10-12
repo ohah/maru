@@ -9,7 +9,7 @@
 //! 않는다. fork(·`std.process.spawn` — Zig 0.16 은 fork 로 띄운다)는 울타리가 덮으므로 여기서 세지 않는다.
 //!
 //! **세는 것**(최상위 test 블록 밖):
-//! - `posix_spawn`·`posix_spawnp`·`popen`(Darwin `popen` 은 안에서 posix_spawn 을 쓴다) 식별자 — 뒤 토큰과 상관없이. 별칭
+//! - `posix_spawn`·`posix_spawnp`·`popen`(Darwin `popen` 은 안에서 posix_spawn 을 쓴다)·`vfork`(atfork 를 부르지 않는다) 식별자 — 뒤 토큰과 상관없이. 별칭
 //!   (`const ps = std.c.posix_spawn;`)·함수 포인터·`@call` 로도 피하지 못한다.
 //! - `system` 식별자 바로 뒤의 `(` — 호출과 extern 선언(`.system` 열거 값은 흔해서 이름만으로는 안 센다).
 //! - `@field(…, "posix_spawn")` 처럼 이름을 문자열로 꺼내는 자리.
@@ -25,7 +25,7 @@ const allowed = [_]Allowed{
 };
 
 /// 이름만으로 센다(어디에 쓰여도 부를 뜻이다).
-const always = [_][]const u8{ "posix_spawn", "posix_spawnp", "popen" };
+const always = [_][]const u8{ "posix_spawn", "posix_spawnp", "popen", "vfork" };
 /// 바로 뒤에 `(` 가 올 때만 센다.
 const called = [_][]const u8{"system"};
 /// `@field(…, "<이름>")` 으로 꺼내도 센다.
@@ -129,9 +129,9 @@ test "spawn cloexec axis: the scanner counts calls, declarations, aliases and by
         \\test "t" { _ = system("x"); _ = posix_spawn(a, b, c, d, e, f); }
     ));
     // 별칭·`@call`·`popen`·이름 문자열로도 피하지 못한다.
-    try std.testing.expectEqual(@as(usize, 4), countSpawnCalls(
+    try std.testing.expectEqual(@as(usize, 5), countSpawnCalls(
         \\const ps = std.c.posix_spawn;
-        \\fn h() void { _ = @call(.auto, std.c.posix_spawnp, .{}); _ = popen("ls", "r"); }
+        \\fn h() void { _ = @call(.auto, std.c.posix_spawnp, .{}); _ = popen("ls", "r"); _ = std.c.vfork(); }
         \\fn k() void { _ = @field(std.c, "system")("ls"); _ = @field(theme, "light"); }
     ));
 }
@@ -203,8 +203,10 @@ test "spawn cloexec axis: the app installs the fork fence before any session exi
 // 앱의 fd 를 물려받지 않아 세지 않는다.
 //
 // **세는 것**(주석·문자열 밖): `Process`·`NSTask` 가 바로 뒤에 `(`·`.` 가 오거나(Swift 생성·`Process.run`) 바로 앞에 `[` 가 올
-// 때(ObjC 메시지 — `[NSTask alloc]`·`[NSTask launchedTaskWith…]`) — 타입 표기(`let p: Process`)는 세지 않는다.
-// `posix_spawn`·`posix_spawnp`·`popen` 은 이름만으로, `system` 은 바로 뒤의 `(` 와 함께.
+// 때(ObjC 메시지 — `[NSTask alloc]`·`[NSTask launchedTaskWith…]`) — 단순 타입 표기(`let p: Process`)는 세지 않는다(중첩 타입
+// `Process.TerminationReason`·배열 `[Process]` 는 세어 안전한 쪽으로 틀린다). `posix_spawn`·`posix_spawnp`·`popen`·`vfork`(Darwin
+// `vfork` 도 atfork 를 부르지 않는다)는 이름만으로, `system` 은 바로 뒤의 `(` 와 함께.
+// 못 보는 것: 타입을 앞에 둔 `.init()`(`let p: Process = .init()`)·typealias·`NSClassFromString(@"NSTask")` — 새 자리는 리뷰가 본다.
 
 const NativeAllowed = struct { path: []const u8, count: usize, why: []const u8 };
 

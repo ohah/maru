@@ -139,8 +139,6 @@ void maru_macos_chrome_lab_smoke_render(
         sidebar_bg, // 토큰에서 온 strip 색 — alpha 0이면 strip을 안 그린다(기존 시나리오)
         NULL,
         0,
-        0,
-        0,
         quads,
         quad_count,
         0, // modal_cells_start — lab은 모달을 안 띄운다
@@ -159,9 +157,7 @@ void maru_macos_chrome_lab_smoke_render(
            스크롤바가 있다"처럼 읽힌다(§4.1b). 창 배경이 편집기보다 조금 어둡다는 자연스러운 관계로
            둔다 — 픽스처가 제품에 없는 색을 지어내면 리뷰어를 오도한다. */
         0xFF0A0A0Au,
-        0,
         1000,
-        0,
         0,
         0,
         0,

@@ -279,10 +279,11 @@ Node = leaf(Pane)
   스크롤백으로 안 흘림). 이는 "휠은 커서 아래 surface 소유"(Ghostty/Warp) 원칙을 사이드바로 확장한 것으로, 카드가 안 넘쳐도
   소비해 뒤 터미널이 굴러가는 위화감을 막는다(`scrollWheel`의 `inSidebar` 분기, 가로 탭바 스크롤보다 먼저). ② **헤더 고정·
   클리핑** — 헤더(검색바·아이콘)는 스크롤과 무관하게 고정이고(헤더 glyph는 터미널 셀 패스라 사이드바 셀 시프트와 분리),
-  헤더 위로 밀려 올라간 카드는 **렌더러가 사이드바 셀 draw에 `[header_h, drawable_h]` scissor**를 걸어 자른다(offset>0일 때만;
-  `MetalFrame.sidebar_scroll_offset_px`). GPU quad 밴드·tint·accent 막대는 host lowering(`sidebarScrollClipQuad`)이 **같은
-  오프셋으로 빼고 헤더 경계에서 클립**한다(상단 라운드는 죽임) — 셀(.m)과 quad(Zig)가 같은 `sidebar_scroll_offset_px`를 써
-  단일 출처. ③ **스크롤바** — 우측에 pane 스크롤바와 **동형 pill thumb**(muted 색·`computeScrollbarAlpha` fade·layer 3 over,
+  헤더 위로 밀려 올라간 카드는 **렌더러가 사이드바 셀 draw에 scissor**를 걸어 자른다 — 구간은 Zig 가 정해
+  `MetalFrame.sidebar_scissor_top/bottom_px`로 싣는다(v168). 셀 시프트도 Zig 가 셀 `origin_y`에 이미 반영한다(ABI 224 —
+  렌더러는 `sidebar_scroll_offset_px`를 읽지 않고, ABI 227 에서 그 draw 인자를 뺐다). GPU quad 밴드·tint·accent 막대는
+  host lowering(`sidebarScrollClipQuad`)이 **같은 오프셋으로 빼고 헤더 경계에서 클립**한다(상단 라운드는 죽임) — 셀과 quad가
+  같은 `sidebar_scroll_offset_px`(Zig)에서 나와 단일 출처. ③ **스크롤바** — 우측에 pane 스크롤바와 **동형 pill thumb**(muted 색·`computeScrollbarAlpha` fade·layer 3 over,
   단일 트랙 `sidebar_scrollbar_idle_ticks`)를 카드가 넘칠 때만 그린다. hit-test(`slotAt`/`dragTargetSlot`)도 같은 오프셋을
   더해 "보이는 카드 = 클릭되는 카드"를 지킨다(헤더 영역 y는 스크롤 무관하게 헤더로 판정).
 - **split 재배치 드래그(④)**: Term 탭을 다른 pane **본문**의 상/하/좌/우 절반(`paneDropZone` — X자 4등분)에 드롭하면

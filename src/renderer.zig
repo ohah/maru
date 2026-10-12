@@ -98,12 +98,11 @@ pub const glyphFontSizePt = state.glyphFontSizePt;
 pub const uvRectForSlot = glyph_quads.uvRectForSlot;
 
 /// cp가 합성 글리프(폰트 대신 rasterizer가 코드포인트로 직접 그리는)인지 — 모든 합성 모듈 술어의 합집합.
-/// **합성 여부의 단일 Zig 출처**: 네이티브 셰이퍼의 drawable 판정과 cache_key glyph_id=0 정규화가 이걸 쓴다.
-/// platform/macos/coretext_smoke.m의 `maru_is_synthesized_glyph`(C 게이트)는 이 집합을 미러해야 한다(언어가
-/// 달라 컴파일 차원 공유는 못 하므로 같은 집합을 유지 — 어긋나면 그 코드포인트가 blank로 빠진다). 아이콘은
+/// **합성 여부의 단일 출처**: 네이티브 셰이퍼의 drawable 판정과 cache_key glyph_id=0 정규화가 이걸 쓴다.
+/// CoreText 셰이퍼(platform/macos/coretext_smoke.m)는 이 판정을 셀 비트로 받는다(`coretext_shaper.zig`
+/// `draw_cell_synthesized_bit`) — 예전에는 `.m`이 같은 집합을 `maru_is_synthesized_glyph`로 주석-동기 미러했다. 아이콘은
 /// **등록된 것만**(`isRegisteredIcon`, 범위 전체 `isIcon` 아님): Nerd Fonts v3가 MDI를 Plane-15 PUA(U+F0001~)로
 /// 옮겨 겹치므로, 미등록 in-range를 합성으로 가로채면 그 글리프가 blank가 됐다 → 미등록은 폰트로 폴백한다.
-/// C 게이트는 같은 등록 집합을 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다.
 pub fn isSynthesizedCodepoint(cp: u32) bool {
     return isTerminalSynthesizedCodepoint(cp) or icon_glyph.isRegisteredIcon(cp);
 }
@@ -159,7 +158,7 @@ pub fn synthesizeTerminalGlyph(cp: u32, width_px: u32, height_px: u32, bytes_per
 test "isSynthesizedCodepoint: 각 합성 범위 대표 + 비합성 대조" {
     const std = @import("std");
     const icons = @import("icons.zig");
-    // 각 모듈 범위에서 하나씩(C 게이트 maru_is_synthesized_glyph와 같은 집합이어야 한다).
+    // 각 모듈 범위에서 하나씩.
     for ([_]u32{
         0x2588, // block █
         0x2592, // shade ▒

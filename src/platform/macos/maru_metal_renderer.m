@@ -983,13 +983,11 @@ typedef struct {
     const MaruAppHostMetalCell *cells;
     const MaruAppHostClipRect *cell_clips;
     size_t cell_clip_count;
-    // 사이드바 스크롤 scissor 판정용.
+    // 사이드바 셀 scissor 판정용(앞 sidebar_cells_n 개가 사이드바 셀).
     size_t sidebar_cells_n;
-    uint32_t sidebar_scroll_offset_px;
     uint32_t status_bar_height_px; // SB1: 창 바닥 상태표시줄 높이 — 사이드바 배경 strip 바닥에 쓴다
     uint32_t sidebar_scissor_top_px;    // 셀 scissor 구간 — 호출자가 게이트·클램프까지 끝낸 값이라 그대로 쓴다
     uint32_t sidebar_scissor_bottom_px;
-    uint32_t sidebar_header_height_px;
 } MaruDrawPass;
 
 // 셀/quad/이미지 draw 매크로(컨텍스트 c 기준). 커서 페이드 pass만 op<1이라 셀 fragment opacity를 넘긴다.
@@ -1214,8 +1212,6 @@ bool maru_metal_renderer_draw(
     uint32_t sidebar_bg,
     const MaruAppHostMetalCell *sidebar_cells,
     size_t sidebar_cell_count,
-    uint32_t sidebar_slot_height_px,
-    uint32_t sidebar_header_height_px,
     /* C4b: chrome rich GPU quad 프리미티브(둥근 사각형). NULL/0이면 안 그림(tui 테마). 셀 패스 아래
        (배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads,
@@ -1234,9 +1230,7 @@ bool maru_metal_renderer_draw(
     const uint32_t *live_image_ids,
     size_t live_image_id_count,
     uint32_t terminal_bg,
-    uint32_t titlebar_strip_px,
     uint32_t window_opacity_milli,
-    uint32_t sidebar_scroll_offset_px,
     /* pane divider(reserved 30 세로·31 가로)의 device px 두께(config split.divider-thickness → app_session가 pt×scale). seam 중앙정렬·셀 clamp. 0=안 그림. */
     uint32_t divider_thickness_px,
     /* 커서 blink 페이드: 커서 overlay가 차지하는 cells suffix 길이(cells[cell_count-cursor_cells..])와 그 불투명도×1000.
@@ -1286,7 +1280,6 @@ bool maru_metal_renderer_draw(
     // 배경 quad 1개를 추가로 그린다. 터미널 셀은 origin_x만큼 오른쪽으로 offset된다("surface→rect" — split도
     // 같은 origin 방식을 확장). 사이드바 quad는 cells 뒤(인덱스 cell_count)에 붙인다.
     const float origin_x = (float)terminal_origin_x_px;
-    (void)titlebar_strip_px; // 헤더 아이콘 줄 세로 자리는 이제 Zig 가 셀 origin_y 로 싣는다 — C ABI 인자라 남는다
     const bool draw_sidebar = (terminal_origin_x_px > 0u) && (((sidebar_bg >> 24) & 0xffu) != 0u);
 
     // vertex buffer를 drawable 획득 전에 만든다. 그래야 calloc/buffer 생성 실패가 이미 잡은
@@ -1438,7 +1431,6 @@ bool maru_metal_renderer_draw(
         //    그대로 그리고, 헤더 위로 샌 셀은 아래 scissor가 자른다(구간도 Zig가 정한다). 예전에는 여기서 헤더−스크롤과
         //    반 칸을 더했고, 옛 tui 밴드 셀(slot_id==0)을 `atlas_height_px ?: slot_h` 높이로 따로 그리는 갈래가 있었다 —
         //    그 밴드는 GPU quad 로 옮겨 가 갈래가 비어 있었다(판정자가 사이드바 셀의 글자 아닌 셀 개수 0 을 쟀다).
-        (void)sidebar_slot_height_px; // 옛 밴드 갈래만 쓰던 값 — C ABI 시그니처라 인자는 남는다(Swift 호출부와 함께 지울 일)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
             const float py_top = (float)sc.origin_y;
@@ -1714,11 +1706,9 @@ bool maru_metal_renderer_draw(
         .cell_clips = cell_clips,
         .cell_clip_count = cell_clip_count,
         .sidebar_cells_n = sidebar_cells_n,
-        .sidebar_scroll_offset_px = sidebar_scroll_offset_px,
         .status_bar_height_px = status_bar_height_px,
         .sidebar_scissor_top_px = sidebar_scissor_top_px,
         .sidebar_scissor_bottom_px = sidebar_scissor_bottom_px,
-        .sidebar_header_height_px = sidebar_header_height_px,
     };
     memcpy(pass_ctx.osr_textures, osr_textures, sizeof(osr_textures));
 

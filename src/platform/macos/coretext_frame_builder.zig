@@ -1562,30 +1562,10 @@ test "wideIconPredicate widens only registered maru icon PUA to width 2" {
     try std.testing.expectEqual(@as(usize, 5), text_layout.displayCols(comptime icons.utf8(.mark_github) ++ " abc", null)); // 1 + 공백 + abc(3)
 }
 
-// 두 생성물 동기 가드: C 셰이핑 게이트 icon_codepoints.h(maru_is_registered_icon_cp)와 Zig 등록 집합
-// (icon_glyph.isRegisteredIcon/coverageFor)이 같은 codepoint들을 봐야 한다 — 둘 다 svg_to_coverage.py의 ICONS에서
-// 생성되지만, 한쪽만 손편집/부분 재생성하면 드리프트해 그 아이콘이 실제 앱에서 blank가 된다(zig test는 .h를 안 봐서
-// 안 잡힘). 여기서 .h를 파싱해 (1) 각 case cp가 Zig 등록이고 (2) 개수가 같음을 확인해 set 동일성을 못박는다.
-test "icon_codepoints.h(C 게이트)와 Zig 등록 아이콘 집합이 일치한다" {
-    const header = @embedFile("icon_codepoints.h"); // 같은 디렉터리(src/platform/macos)
-    var c_count: usize = 0;
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, header, i, "case 0x")) |pos| {
-        const hex_start = pos + "case 0x".len;
-        var hex_end = hex_start;
-        while (hex_end < header.len and std.ascii.isHex(header[hex_end])) : (hex_end += 1) {}
-        const cp = try std.fmt.parseInt(u32, header[hex_start..hex_end], 16);
-        try std.testing.expect(renderer.icon_glyph.isRegisteredIcon(cp)); // C ⊆ Zig 등록
-        c_count += 1;
-        i = hex_end;
-    }
-    try std.testing.expect(c_count > 0); // 파싱이 실제로 됐다
-    try std.testing.expectEqual(renderer.icon_glyph.registeredIconCount(), c_count); // 개수 동일 → set 동일
-}
-
-// 위 가드는 **집합**만 본다. `.m`이 이제 `MARU_ICON_GEAR` 같은 이름 매크로로 아이콘을 고르므로(IC4), 이름↔cp
-// **대응**이 어긋나면 1.7× 확대·bell 특례·에이전트 배율이 엉뚱한 글리프에 붙는다 — 값 집합은 그대로라 위
-// 테스트는 통과한다(적대적 검증이 짚은 구멍). 여기서 매크로를 파싱해 Zig 이름 registry와 1:1로 맞춘다.
+// `.m`은 `MARU_ICON_GEAR` 같은 이름 매크로로 아이콘을 고른다(IC4). 이름↔cp **대응**이 어긋나면 1.7× 확대·bell
+// 특례·에이전트 배율이 엉뚱한 글리프에 붙는다 — 값 집합만 보면 그대로라 놓친다(적대적 검증이 짚은 구멍). 여기서
+// 매크로를 파싱해 Zig 이름 registry와 1:1로 맞춘다. (예전 「C 셰이핑 게이트 집합 = Zig 등록 집합」 가드는 그 C
+// 집합 `maru_is_registered_icon_cp`가 소비처를 잃어 헤더에서 빠질 때 함께 지웠다 — 합성 판정은 Zig 셀 비트다.)
 test "icon_codepoints.h의 MARU_ICON_* 매크로가 Zig 이름 registry와 같은 대응을 준다" {
     const header = @embedFile("icon_codepoints.h");
     var macro_count: usize = 0;

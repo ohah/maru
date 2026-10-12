@@ -10,7 +10,7 @@
 - **wide-render-symbol**(폰트가 셀보다 넓게 그리는 기호 — Enclosed Alphanumerics ①②③ U+2460~24FF) → 셀에 안 들어가면 **cover-fit**(종횡비 유지 축소).
 - **emoji**(컬러 글리프) → cover-fit + **ink-center**(보이는 픽셀 세로중앙).
 - **legacy centred symbol**(◧ U+25E7·⚙ U+2699 — **터미널 콘텐츠 전용**) → ink-center. 래스터의 `center_symbol`은 이 **두 codepoint만** 매칭한다. maru 헤더 아이콘은 2026-08 이후 등록 PUA라 이 역할이 아니라 합성(synthesized) 경로다.
-- **synthesized**(box/block/powerline/braille/legacy + **등록 chrome 아이콘**(maru PUA) — `glyph_id==0`) → zig 렌더러가 절차적으로 그린다(slot=셀폭, 타일링). 이 경로(rasterize-glyph) 자체에 **안 온다** — chrome 아이콘은 `maru_is_synthesized_glyph`로 분류돼 합성되므로 header-icon 게이트가 아니다.
+- **synthesized**(box/block/powerline/braille/legacy + **등록 chrome 아이콘**(maru PUA) — `glyph_id==0`) → zig 렌더러가 절차적으로 그린다(slot=셀폭, 타일링). 이 경로(rasterize-glyph) 자체에 **안 온다** — chrome 아이콘은 `renderer.isSynthesizedCodepoint`(셀 비트 `MaruDrawCellSynthesizedBit`로 셰이퍼에 전달)로 분류돼 합성되므로 header-icon 게이트가 아니다.
 
 - **kitty unicode placeholder**(U+10EEEE) → **글리프가 아니다 — 그리지 않는다.** 그 셀의 codepoint·전경색·결합문자는 「어느 이미지의 어느 타일을 여기 놓아라」는 **좌표**이고(kitty graphics protocol, "Unicode placeholders"), 그림은 이미지 패스가 `snapshot.cells`를 직접 읽어 타일 quad로 만든다. 그래서 `draw_list`가 그 셀을 셰이퍼에 넘기기 전에 **공백으로 바꾸고 결합문자도 싣지 않는다**(배경색은 그 칸의 칠이라 남긴다). 안 그러면 폰트에 없는 U+10EEEE가 tofu 박스로 찍혀 **이미지가 늦거나 유실될 때 화면이 통째로 쓰레기가 된다** — 실측(2026-09-15): tmux 안 terminal-browser의 이미지가 원격 투영 상한에 막히자 그 pane 전체가 박스 문자로 덮였다. 「이미지가 못 오는 것」과 「그 자리에 쓰레기를 그리는 것」은 다른 결함이고, 이 역할 규칙이 뒤엣것을 막는다.
 
@@ -38,7 +38,7 @@
 | **Windows Terminal** | 자연 메트릭 | box/line(U+2500–259F)을 **셀에 맞춰 스케일** | 안 함 | PR microsoft/terminal#5743 |
 | **WezTerm** | 자연 메트릭 | 심볼 폰트 스케일을 config로 | 안 함 | 폰트 스케일/fallback 설정 |
 
-공통점: **(a) 텍스트는 자연 메트릭+baseline**(아무도 텍스트를 ink-center하지 않는다), **(b) 셀-맞춤/절차 그리기는 특정 범위(box·powerline·legacy·기호)에만**, **(c) 역할/범위로 결정**(전역 ink 측정 아님). maru는 (a)(b)(c)를 모두 따르되, box류는 이미 절차 합성(`maru_is_synthesized_glyph`)하고, 셀-맞춤은 `isWideRenderSymbol`로 한정한다.
+공통점: **(a) 텍스트는 자연 메트릭+baseline**(아무도 텍스트를 ink-center하지 않는다), **(b) 셀-맞춤/절차 그리기는 특정 범위(box·powerline·legacy·기호)에만**, **(c) 역할/범위로 결정**(전역 ink 측정 아님). maru는 (a)(b)(c)를 모두 따르되, box류는 이미 절차 합성(`renderer.isSynthesizedCodepoint`)하고, 셀-맞춤은 `isWideRenderSymbol`로 한정한다.
 
 ## maru의 역할 매핑 (이미 가진 조각들)
 
@@ -46,7 +46,7 @@ maru는 역할 분류 조각을 이미 갖고 있다. 버그는 분류 부재가
 
 | 역할 | 단일 출처 | 래스터 게이트(`coretext_smoke.m`) |
 | --- | --- | --- |
-| synthesized | `renderer/{box,block,powerline,braille,legacy,icon}_glyph.zig` ↔ `maru_is_synthesized_glyph`(등록 chrome PUA 아이콘 포함) | (이 경로 밖 — `glyph_id==0`) |
+| synthesized | **`renderer.isSynthesizedCodepoint`** = `renderer/{box,block,powerline,braille,legacy,icon}_glyph.zig` 합집합(등록 chrome PUA 아이콘 포함) → 셀 비트 `draw_cell_synthesized_bit` | (이 경로 밖 — `glyph_id==0`. 셰이퍼는 `style_flags & MaruDrawCellSynthesizedBit`만 읽는다) |
 | emoji | 폰트 컬러 테이블(sbix/COLR) | `maru_font_is_color(draw_font)` |
 | wide-render-symbol | **`width.isWideRenderSymbol`** (U+2460~24FF) → `width.rasterFitFor` = `.fit_if_overflow` | `raster_fit == FitIfOverflow` `&& ink>slot` |
 | legacy centred symbol(터미널 콘텐츠) | **`width.rasterFitFor`** = `.ink_center` — `0x25E7`(◧)·`0x2699`(⚙) **두 codepoint만** | `raster_fit == InkCenter` |
@@ -58,11 +58,12 @@ cover-fit 게이트 = `is_emoji ‖ center_symbol ‖ (is_wide_render_symbol && 
 
 역할은 **codepoint의 순수 함수**이므로 단일 출처는 `src/width.zig`다(`isWideRenderSymbol`·`rasterFitFor`). **래스터 배치 역할은 이제 미러가 아니다**(2026-10-12): `coretext_smoke.m`의 래스터 함수를 부르는 쪽은 언제나 Zig(`coretext_raster.zig` — smoke 실행파일도 같은 래퍼를 함수 포인터로 쓴다)이므로, 호출자가 `width.rasterFitFor(codepoint)`를 정해 **`raster_fit` 인자로 넘기고** `.m`은 그 값만 읽는다. 「zig 심볼을 `.m`에서 부를 수 없다」는 옛 사유는 `.m`이 판정을 *스스로* 할 때의 이야기였고, 인자로 받으면 링크가 늘지 않는다. 옛 미러(`maru_is_wide_render_symbol`·`0x25E7`/`0x2699` 비교)는 지웠고 `tests/boundary/icon_literals.zig`가 되살아남을 막는다.
 
-- **남은 미러**: `maru_is_synthesized_glyph`·`maru_category_for_codepoint`는 아직 같은 방식(주석-동기)이다. 같은 길(호출자가 역할을 인자로 넘김)로 옮길 수 있다(→ [레이어링과 이식성](layering-and-portability.md)).
+- **합성 여부도 미러가 아니다**(2026-10-12): 셰이퍼 `.m`은 예전에 `maru_is_synthesized_glyph`로 `renderer/*_glyph.zig` 범위 열한 개와 등록 아이콘 집합(생성 헤더의 `maru_is_registered_icon_cp`)을 다시 적었다. 지금은 셀을 넘기는 Zig(`coretext_shaper.zig`)가 `renderer.isSynthesizedCodepoint`로 정해 셀의 `style_flags` 비트(`draw_cell_synthesized_bit` = `MaruDrawCellSynthesizedBit`, 1<<3)로 싣는다. 비트는 런 분할에 쓰이지 않는다(굵기·기울임·커서 비트만 본다). 소비처를 잃은 C 등록 집합은 생성 헤더에서 뺐다. `tests/boundary/icon_literals.zig`가 `.m`에 범위가 되살아남을 막는다.
+- **미러가 아닌 것**: `maru_category_for_codepoint`는 Zig 사본이 없다. 셰이퍼 안에서 쓰이는 결과는 「공백(0·`' '`)이면 그리지 않는다」뿐이고, ASCII/CJK/Emoji 갈래는 record 에 실리지 않는다(probe 의 category 는 `maru_category_for_string_index` — 고정 probe 문자열의 위치 계약이다).
 
 ## 트레이드오프와 한계
 
-- **wide-render-symbol 밖의 기호**(geometric ◆·dingbat ✦ 등 **비합성** 단색 기호): 폰트가 셀보다 넓게 그려도 fit-scale하지 않고 자연 메트릭으로 둔다(이웃으로 미세 overflow 또는 슬롯 경계 클립). 이는 xterm.js·Alacritty(클립)와 일치하고 maru 폭 정책(`isWideRenderSymbol`만 wide)과도 일관된다. **영향 범위는 작다** — box/block/powerline/braille/legacy·chrome 아이콘은 절차 합성(`maru_is_synthesized_glyph`, `glyph_id==0`)이라 이 경로에 안 오고, 번들 폰트(JetBrains Mono·Fira·Cascadia·Hack)는 Nerd Font가 아니라 PUA 아이콘 글리프가 없다. 실제 대상은 폰트가 1칸보다 의미 있게 넓게 그리는 비합성 기호 소수뿐. 특정 기호가 fit이 필요하면 `width.isWideRenderSymbol`에 **한 곳만** 추가한다.
+- **wide-render-symbol 밖의 기호**(geometric ◆·dingbat ✦ 등 **비합성** 단색 기호): 폰트가 셀보다 넓게 그려도 fit-scale하지 않고 자연 메트릭으로 둔다(이웃으로 미세 overflow 또는 슬롯 경계 클립). 이는 xterm.js·Alacritty(클립)와 일치하고 maru 폭 정책(`isWideRenderSymbol`만 wide)과도 일관된다. **영향 범위는 작다** — box/block/powerline/braille/legacy·chrome 아이콘은 절차 합성(`renderer.isSynthesizedCodepoint`, `glyph_id==0`)이라 이 경로에 안 오고, 번들 폰트(JetBrains Mono·Fira·Cascadia·Hack)는 Nerd Font가 아니라 PUA 아이콘 글리프가 없다. 실제 대상은 폰트가 1칸보다 의미 있게 넓게 그리는 비합성 기호 소수뿐. 특정 기호가 fit이 필요하면 `width.isWideRenderSymbol`에 **한 곳만** 추가한다.
 - **왜 `isWideRenderSymbol` 게이트인가(텍스트-제외 게이트 대신)**: Ghostty는 포괄적 Unicode 카테고리(`isSymbol`)로 "기호 전체"를 fit하지만, maru의 `src/width.zig`는 의도적으로 최소 테이블이라 포괄적 text/symbol 분류가 없다. "텍스트면 cover-fit 제외"(`!isText`) 게이트는 **미수록 스크립트**(아르메니아·조지아·태국 등)의 타이트한 글자가 분류에서 빠지면 다시 떠오를 수 있다 — 즉 회귀의 핵심(텍스트 들뜸)을 일부 스크립트에 재도입할 위험. 반면 `isWideRenderSymbol`(U+2460~24FF)은 **어떤 스크립트의 텍스트도 절대 이 집합에 없으므로** 텍스트 들뜸을 전 스크립트에서 0으로 보장한다. 비용은 위의 "비합성 기호 fit 상실"(소수, 문서화된 트레이드오프)이고, 이쪽이 보고된 버그 클래스(텍스트 들뜸)를 더 확실히 막는다. 포괄적 fit이 필요해지면 width.zig에 Unicode symbol 분류를 들이고 게이트를 거기로 확장한다(후속).
 - **텍스트의 미세 가장자리**: ink가 advance를 ~0.5px 넘는 타이트한 글리프는 advance-center에서 가장자리 안티앨리어싱이 최대 ~1px 깎일 수 있으나, 세로로 뜨는 것보다 눈에 띄지 않는다(Ghostty·xterm.js도 텍스트 overflow를 허용/클립).
 

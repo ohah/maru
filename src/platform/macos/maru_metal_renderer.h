@@ -84,11 +84,6 @@ bool maru_metal_renderer_draw(
        NULL이거나 origin_x==0이면 그리지 않는다. */
     const MaruAppHostMetalCell *sidebar_cells,
     size_t sidebar_cell_count,
-    /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). 사이드바 셀을 cell 높이가 아니라 이 슬롯
-       높이로 세로 배치한다(셀 row → py=row×slot_h, 높이 slot_h). 0이면 cell 높이로 폴백. */
-    uint32_t sidebar_slot_height_px,
-    /* 사이드바 상단 헤더(검색바 + 아이콘) 높이(px). 사이드바 셀 py_top에 더해 헤더만큼 아래로 민다. 0이면 없음. */
-    uint32_t sidebar_header_height_px,
     /* chrome rich GPU quad 프리미티브(C4b — 둥근 사각형: per-corner radius+border+gradient, SDF AA).
        NULL/0이면 안 그림(tui 테마는 셀 fill 유지). 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads,
@@ -117,17 +112,9 @@ bool maru_metal_renderer_draw(
     /* 화면 clear color(0xAARRGGBB) — render pass clearColor. OSC 11(배경 set) 있으면 그 색, 없으면
        theme.background. 0이면 기존 기본 clear(어두운 남색)로 폴백. 빈 영역/기본 배경(A0) 셀이 비치는 색. */
     uint32_t terminal_bg,
-    /* 상단 타이틀바 띠(신호등·헤더 아이콘 줄) 높이(px). 접힘 펼치기 토글(◧) 글리프를 이 띠 [0, strip] 안에
-       세로 중앙 배치해 신호등과 정렬시키는 데만 쓴다. terminal_origin_x_px>0(펼침)이면 무관(헤더 아이콘은
-       기존 0.3ch nudge). 0이면 띠 없음(0.3ch nudge 폴백). */
-    uint32_t titlebar_strip_px,
     /* 창 배경 투명도 × 1000(0~1000, 1000=불투명). 화면 clear color alpha에 이 값/1000을 곱한다 — default 배경
        (빈 영역/기본 배경 A0 셀)만 투명, 명시적 배경색 셀은 불투명 유지. layer/창 비불투명은 host(Swift)가 별도로. */
     uint32_t window_opacity_milli,
-    /* 사이드바 세로 스크롤량(backing px). 사이드바 셀(밴드·카드 glyph) py_top에서 빼 카드를 위로 밀고, >0이면 사이드바
-       셀 draw에 [sidebar_header_height_px, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다(헤더 glyph는 터미널
-       셀 패스라 무관). 0이면 기존 동작(scissor 없음). 끝에 추가해 기존 인자 순서 불변(ABI v86). */
-    uint32_t sidebar_scroll_offset_px,
     /* pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
        scale로 환산해 넘긴다. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다. 커서 강조선
        (reserved 2~5, 셀 15%)·GPU quad FocusOwner border와 분리돼 divider만 이 값으로 두께가 정해진다. 0=안 그림. 끝에 추가해 인자 순서 불변(ABI v94). */

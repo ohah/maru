@@ -34,10 +34,6 @@ void maru_macos_coretext_shape_diag_stats(uint64_t *out_prep_ns, uint64_t *out_l
 // 메모리를 새는지를 테스트가 직접 재려면 프로세스 자신의 footprint 를 봐야 한다.
 #include <mach/mach.h>
 
-// 등록된 maru 아이콘 codepoint 집합(생성 — tools/svg_to_coverage.py). maru_is_synthesized_glyph가
-// 아이콘 분기에서 이걸 써 **등록 아이콘만** 합성으로 본다(미등록 in-range는 폰트 폴백 — Nerd Fonts v3 MDI 겹침).
-#include "icon_codepoints.h"
-
 typedef struct {
     int32_t status;
     uint32_t primary_font_found;
@@ -93,6 +89,9 @@ enum {
     /// **합자 없이** 셰이핑된다. 편집 중에는 `===` 가 이어진 한 덩어리보다 개별 글자로 보여야 커서가
     /// 어느 글자에 있는지 알 수 있다(Ghostty 와 같은 동작 — 사용자 요청 2026-08-17).
     MaruDrawCellCursorBit = 1u << 2,
+    /// **렌더러가 코드포인트로 합성하는 칸**(Zig `renderer.isSynthesizedCodepoint` 이 정해 싣는다). 예전에는 이
+    /// 판정을 `maru_is_synthesized_glyph` 가 `renderer/*_glyph.zig` 범위 열한 개를 주석-동기로 다시 적어 했다.
+    MaruDrawCellSynthesizedBit = 1u << 3,
 };
 
 typedef struct {
@@ -573,56 +572,6 @@ static uint32_t maru_category_for_codepoint(uint32_t codepoint) {
     return MaruGlyphCategoryOther;
 }
 
-/* Zig renderer가 코드포인트로 직접 합성하는 글리프(폰트 글리프 불요)인지. **renderer/block_glyph.zig·
-   box_glyph.zig의 집합과 동기 유지**(거기 추가하면 여기도). CoreText가 글리프를 못 줘도(glyph==0) 이
-   코드포인트는 record를 남겨야 rasterizer 합성에 도달한다(안 그러면 셰이퍼가 드롭 → 보더가 안 보임). */
-static bool maru_is_synthesized_glyph(uint32_t cp) {
-    // block_glyph: **U+2580~259F 전체**(eighth/half/full·shade ░▒▓ 균일 alpha·quadrant). renderer/block_glyph.zig와 동기.
-    if (cp >= 0x2580 && cp <= 0x259F) {
-        return true;
-    }
-    // box_glyph: **U+2500~257F 전체** 합성(직선·모서리·T·사거리·dashed·둥근·이중선·single↔double 혼합·대각선·
-    // 반선 — light·heavy·혼합 전부). **renderer/box_glyph.zig specFor가 이 범위를 빠짐없이 덮음**(동기 유지).
-    if (cp >= 0x2500 && cp <= 0x257F) {
-        return true;
-    }
-    // powerline_glyph: Powerline separator(U+E0B0~E0BF — 삼각형·반원·thin) + Powerline-extra 사다리꼴(E0D2·E0D4).
-    // renderer/powerline_glyph.zig와 동기.
-    if ((cp >= 0xE0B0 && cp <= 0xE0BF) || cp == 0xE0D2 || cp == 0xE0D4) {
-        return true;
-    }
-    // braille_glyph: Braille 점 패턴(U+2800~28FF — 2열×4행 8점 비트마스크). renderer/braille_glyph.zig와 동기.
-    if (cp >= 0x2800 && cp <= 0x28FF) {
-        return true;
-    }
-    // legacy_mosaic_glyph: Legacy Computing 블록 모자이크 — sextant(U+1FB00~1FB3B 2×3)·octant(U+1CD00~1CDE5
-    // 2×4). renderer/legacy_mosaic_glyph.zig와 동기.
-    if ((cp >= 0x1FB00 && cp <= 0x1FB3B) || (cp >= 0x1CD00 && cp <= 0x1CDE5)) {
-        return true;
-    }
-    // legacy_wedge_glyph: edge wedge 삼각형(U+1FB68~1FB6F)·bowtie(U+1FB9A~1FB9B). renderer/legacy_wedge_glyph.zig와 동기.
-    if ((cp >= 0x1FB68 && cp <= 0x1FB6F) || (cp >= 0x1FB9A && cp <= 0x1FB9B)) {
-        return true;
-    }
-    // legacy_smooth_glyph: smooth mosaic(U+1FB3C~1FB67 — 대각 폴리곤 44개). renderer/legacy_smooth_glyph.zig와 동기.
-    if (cp >= 0x1FB3C && cp <= 0x1FB67) {
-        return true;
-    }
-    // legacy_wedge_glyph corner 삼각형: ◢◣◤◥(U+25E2~25E5, solid)·🮜🮝🮞🮟(U+1FB9C~1FB9F, 50% 음영). 동기.
-    if ((cp >= 0x25E2 && cp <= 0x25E5) || (cp >= 0x1FB9C && cp <= 0x1FB9F)) {
-        return true;
-    }
-    // legacy_diagonal_glyph: 대각선 stroke/hatch — hatch(U+1FB98/99)·코너 다이아몬드(U+1FBA0~1FBAE)·cell
-    // 대각(U+1FBD0~1FBDF). renderer/legacy_diagonal_glyph.zig와 동기.
-    if ((cp >= 0x1FB98 && cp <= 0x1FB99) || (cp >= 0x1FBA0 && cp <= 0x1FBAE) || (cp >= 0x1FBD0 && cp <= 0x1FBDF)) {
-        return true;
-    }
-    // icon_glyph: maru chrome 아이콘(빌드타임 SVG→coverage 합성) — Plane-15 PUA. **등록된 codepoint만** 합성으로
-    // 본다(maru_is_registered_icon_cp, 생성 헤더). 미등록 in-range는 폰트로 폴백한다 — Nerd Fonts v3가 Material
-    // Design Icons를 이 범위(U+F0001~)로 옮겨 겹치므로, 미등록 cp를 가로채면 그 글리프가 blank가 됐다. renderer/
-    // icon_glyph.zig의 isRegisteredIcon과 **동일 집합**이어야 한다(같은 ICONS 소스 생성 → 항상 일치). 어긋나면 blank.
-    return maru_is_registered_icon_cp(cp);
-}
 
 /* 슬롯 안 배치 역할 — **src/width.zig `RasterFit` 과 같은 값**이고 호출자(Zig `coretext_raster.zig`)가
    `width.rasterFitFor(codepoint)` 로 정해 `raster_fit` 인자로 넘긴다. 예전에는 여기서 wide-render-symbol 범위
@@ -1514,7 +1463,8 @@ static void maru_append_draw_glyph_record(
     //       모인다(옛 `glyph==0 &&` 조건은 폰트 보유 시 일반 경로로 새서 폰트 glyph_id로 키잉 → 같은 합성
     //       비트맵을 두 슬롯에 중복 업로드, 드물게 다른 글자와 glyph_id가 겹치면 aliasing).
     //   (2) font_name 복사 실패 시에도 드롭하지 않는다(합성은 폰트명 불요).
-    const bool synth = maru_is_synthesized_glyph(cell.codepoint);
+    // 합성 여부는 Zig 가 정해 셀 비트로 싣는다(`renderer.isSynthesizedCodepoint` → MaruDrawCellSynthesizedBit).
+    const bool synth = (cell.style_flags & MaruDrawCellSynthesizedBit) != 0;
     // **ink 가 없는 글리프는 그리지 않는다.** 합자를 켜면 폰트가 첫 칸을 빈 글리프로 치환하는데(실측:
     // `//`·`::`·`~~` 가 모두 첫 칸에 같은 글리프 1742), 그것을 drawable 로 두면 atlas 슬롯을 하나
     // 먹고 "모든 글리프가 샘플됨" 계약을 깨뜨린다(macos-metal-smoke 가 그 이유로 실패했다).

@@ -1,13 +1,8 @@
 // 생성된 파일 — tools/svg_to_coverage.py가 ICONS 목록에서 만든다. 직접 수정 말 것(스크립트 재실행으로 갱신).
-// 등록된 maru chrome 아이콘(icon_glyph)의 Plane-15 PUA codepoint 집합. coretext_smoke.m의
-// maru_is_synthesized_glyph가 이걸 써서 **등록 아이콘만** 합성으로 본다 — 미등록 in-range(Nerd Fonts v3가
-// Plane-15 PUA로 옮긴 Material Design Icons U+F0001~ 등)는 폰트 글리프로 폴백한다. renderer/icon_glyph.zig의
-// isRegisteredIcon과 동일 집합(같은 ICONS 소스 생성)이라 Zig 래스터와 C 셰이핑 게이트가 항상 일치한다.
+// 등록된 maru chrome 아이콘(icon_glyph)의 Plane-15 PUA codepoint 이름 매크로. 합성 여부(등록 집합)는
+// Zig(renderer.isSynthesizedCodepoint)가 정해 셀 비트로 넘기므로 이 헤더는 C 집합을 내지 않는다.
 #ifndef MARU_ICON_CODEPOINTS_H
 #define MARU_ICON_CODEPOINTS_H
-
-#include <stdbool.h>
-#include <stdint.h>
 
 // 이름 매크로 — Objective-C 렌더 경로도 codepoint 리터럴 대신 이름으로 아이콘을 고른다(Zig의
 // src/icons.zig와 같은 규율). 자산이 재배치되면 이름은 그대로 새 cp를 가리키므로 조용히 어긋나지 않는다.
@@ -69,71 +64,5 @@
 #define MARU_ICON_KIND_SNIPPET 0xF0039u
 #define MARU_ICON_KIND_PROPERTY 0xF003Au
 #define MARU_ICON_KIND_WORD 0xF003Bu
-
-static inline bool maru_is_registered_icon_cp(uint32_t cp) {
-    switch (cp) {
-        case 0xF0001u:
-        case 0xF0002u:
-        case 0xF0003u:
-        case 0xF0004u:
-        case 0xF0005u:
-        case 0xF0006u:
-        case 0xF0007u:
-        case 0xF0008u:
-        case 0xF0009u:
-        case 0xF000Au:
-        case 0xF000Bu:
-        case 0xF000Cu:
-        case 0xF000Du:
-        case 0xF000Eu:
-        case 0xF000Fu:
-        case 0xF0011u:
-        case 0xF0012u:
-        case 0xF0013u:
-        case 0xF0014u:
-        case 0xF0015u:
-        case 0xF0016u:
-        case 0xF0017u:
-        case 0xF0018u:
-        case 0xF0019u:
-        case 0xF001Au:
-        case 0xF001Bu:
-        case 0xF001Cu:
-        case 0xF001Du:
-        case 0xF001Eu:
-        case 0xF001Fu:
-        case 0xF0020u:
-        case 0xF0021u:
-        case 0xF0022u:
-        case 0xF0023u:
-        case 0xF0024u:
-        case 0xF0025u:
-        case 0xF0026u:
-        case 0xF0027u:
-        case 0xF0028u:
-        case 0xF0029u:
-        case 0xF002Au:
-        case 0xF002Bu:
-        case 0xF002Cu:
-        case 0xF002Du:
-        case 0xF002Eu:
-        case 0xF002Fu:
-        case 0xF0030u:
-        case 0xF0031u:
-        case 0xF0032u:
-        case 0xF0033u:
-        case 0xF0034u:
-        case 0xF0035u:
-        case 0xF0036u:
-        case 0xF0037u:
-        case 0xF0038u:
-        case 0xF0039u:
-        case 0xF003Au:
-        case 0xF003Bu:
-            return true;
-        default:
-            return false;
-    }
-}
 
 #endif  // MARU_ICON_CODEPOINTS_H

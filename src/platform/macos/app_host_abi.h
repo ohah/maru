@@ -19,7 +19,7 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 226u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 227u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -519,11 +519,10 @@ typedef struct MaruAppHostMetalFrame {
        사이드바 셀 없음("surface→rect"의 두 번째 surface — split도 rect별 cell 배열로 확장). */
     const MaruAppHostMetalCell *sidebar_cells;
     size_t sidebar_cell_count;
-    /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). renderer가 사이드바 셀을 cell 높이가 아니라
-       이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h) — 큰 탭 슬롯. 0이면 cell 높이로 폴백. */
+    /* 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height)와 상단 헤더(검색바 + 아이콘) 높이(px). frame 이 드는
+       기하 스탬프다 — **renderer 는 읽지 않는다**(ABI 227 에서 draw 인자를 뺐다). 사이드바 셀의 세로 자리는 Zig 가
+       셀 origin_y 로 이미 싣는다(ABI 224·225). MetalFrame(Zig extern)과 같은 위치·타입(ABI 일치). */
     uint32_t sidebar_slot_height_px;
-    /* 사이드바 상단 헤더(검색바 + 아이콘) 높이(px). renderer가 사이드바 셀 py_top에 더해 헤더만큼 아래로
-       민다(밴드·카드 glyph 공통). 0이면 헤더 없음. MetalFrame(Zig extern)과 같은 위치·타입(ABI 일치). */
     uint32_t sidebar_header_height_px;
     /* chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 그리드 유지),
        rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다. */
@@ -552,19 +551,19 @@ typedef struct MaruAppHostMetalFrame {
        theme.background. host가 render pass clearColor로 쓴다(셀이 default 배경=A0일 때 드러나는 색). 0이면
        renderer 기본 clear로 폴백. 끝에 추가해 기존 필드 offset 불변(ABI v51). */
     uint32_t terminal_bg;
-    /* 상단 타이틀바 띠(신호등·헤더 아이콘 줄)의 픽셀 높이. renderer가 접힘 펼치기 토글(◧) 글리프를 이 띠
-       [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 정렬시키는 데만 쓴다(펼침 헤더 아이콘은
-       terminal_origin_x_px>0이라 영향 없음). 0이면 기존 0.3ch nudge 폴백. 끝에 추가해 기존 offset 불변(ABI v66). */
+    /* 상단 타이틀바 띠(신호등·헤더 아이콘 줄)의 픽셀 높이. frame 이 드는 기하 스탬프다 — **renderer 는 읽지
+       않는다**(ABI 227 에서 draw 인자를 뺐다). 헤더 아이콘 줄의 세로 자리는 Zig 가 셀 origin_y 로 싣는다(ABI 226).
+       끝에 추가해 기존 offset 불변(ABI v66). */
     uint32_t titlebar_strip_px;
     /* 창 배경 투명도 × 1000(0~1000, 1000=불투명). renderer가 화면 clear color alpha에 이 값/1000을 곱한다 —
        default 배경(빈 영역·기본 배경 셀 A=0)만 투명해지고 명시적 배경색 셀은 불투명 유지(iTerm2/Ghostty
        background-opacity 모델). host가 opacity<1이면 metal layer/NSWindow도 비불투명으로. float 대신 milli
        정수로 ABI를 정수 유지. 끝에 추가해 기존 offset 불변(ABI v70). */
     uint32_t window_opacity_milli;
-    /* 사이드바 세로 스크롤량(backing px). renderer가 사이드바 셀(밴드·카드 glyph) py_top에서 빼 카드를 위로 밀고,
-       >0이면 사이드바 셀 draw에 [header_h, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다(헤더 glyph는
-       터미널 셀 패스라 영향 없음). GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 클립한다(단일 출처).
-       0이면 기존 동작(scissor 없음). 끝에 추가해 기존 offset 불변(ABI v86). */
+    /* 사이드바 세로 스크롤량(backing px). frame 이 드는 기하 스탬프다 — **renderer 는 읽지 않는다**(ABI 227 에서
+       draw 인자를 뺐다). 셀 시프트는 Zig 가 셀 origin_y 에 이미 반영하고(ABI 224), 셀 scissor 구간은
+       sidebar_scissor_top/bottom_px 가 따로 싣는다(v168). GPU quad 는 host lowering 이 같은 값으로 뺀다.
+       끝에 추가해 기존 offset 불변(ABI v86). */
     uint32_t sidebar_scroll_offset_px;
     /* pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
        scale로 환산. renderer가 seam 중앙정렬·셀 clamp로 divider strip을 그린다(커서 강조선 reserved 2~5·GPU quad

@@ -186,6 +186,14 @@ const Surface = struct {
     page_loads: u32 = 0,
     /// 지난번에 센 주소의 해시(같은 주소의 「거짓」 되풀이를 다시 세지 않게).
     page_loads_url_hash: u64 = 0,
+    /// maru 가 이동을 보냈고 그 끝을 아직 세지 않았다 — 그 뒤 「불러오는 중」 을 봤으면 다음 「거짓」 을 주소와 상관없이 센다. 실패한
+    /// 이동(접속 거부·DNS)은 오류 페이지로 바뀌어도 `url_changed` 가 없어 주소가 about:blank 그대로였다(적대 리뷰 1 회차 — open 이
+    /// 25 초를 다 기다렸다). 보내기 전의 about:blank 는 세지 않는다.
+    nav_pending: bool = false,
+    nav_saw_loading: bool = false,
+    /// 만들어진 브라우저의 첫 about:blank 불러오기가 아직 끝나지 않았다 — 그 `load_finished` 는 이동의 끝이 아니다. 실패한 이동은 앱에서
+    /// 「불러오는 중=참」 없이 끝(`load_finished`·「거짓」)만 왔다(적대 리뷰 1 회차 스모크 — 닫힌 포트를 열면 25 초).
+    initial_load_pending: bool = false,
     /// 그 물은 닫기는 에이전트가 했다(W9b③ — `browser.close`). 창의 마지막 탭이 됐어도 창·앱 닫기로 번지지 않는다.
     close_ask_agent: bool = false,
 };
@@ -1499,6 +1507,14 @@ pub fn testApply(gpa: std.mem.Allocator, message: Message) void {
     apply(gpa, message, 0);
 }
 
+/// 시험 전용(W9b③): 그 탭의 첫 대화상자 번호.
+pub fn testDialogToken(surface_id: u64) ?u64 {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    if (s.dialogs.items.len == 0) return null;
+    return s.dialogs.items[0].token;
+}
+
 /// 시험 전용(W9b③): 지금 시각으로 적용한다(지금 받은 새 탭 장과 견준다).
 pub fn testApplyNow(gpa: std.mem.Allocator, message: Message) void {
     if (!builtin.is_test) @compileError("test only");
@@ -1527,12 +1543,26 @@ pub fn isLoading(surface_id: u64) bool {
     return s.loading;
 }
 
+/// 그 탭에 페이지를 멈추는 JS 대화상자(alert·confirm·prompt·떠나기 확인)가 떠 있는가 — 그동안 그 페이지로 가는 DevTools 호출은
+/// 답하지 않는다(W9b③ 적대 리뷰 1 회차: 떠나기 확인으로 남은 숨은 탭에 보낸 click 이 30 초 시한까지 붙잡혔다). 파일 선택·권한은 아니다.
+pub fn jsDialogShowing(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    for (s.dialogs.items) |d| switch (d.kind) {
+        .alert, .confirm, .prompt, .before_unload => return true,
+        else => {},
+    };
+    return false;
+}
+
 /// W9b③: DevTools 로 보내는 진짜 입력이 활성을 주는가(sidecar 와 같은 규칙 — `new_tab.devtoolsInputActivates`).
 pub const devtoolsInputActivates = ws.new_tab.devtoolsInputActivates;
 
 /// W9b③: 에이전트가 자기가 연 탭에 진짜 누름·키를 보냈다 — 사람의 입력처럼 새 탭 장 하나(그 페이지가 새 탭을 열 수 있게).
-pub fn grantNewTabCredit(surface_id: u64) void {
-    if (surfaces.getPtr(surface_id)) |s| s.new_tab_credits.grant(monotonicNow());
+pub fn grantNewTabCredit(gpa: std.mem.Allocator, surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.new_tab_credits.grant(monotonicNow());
+    // sidecar 도 장을 쥔다(팝업을 만들지는 sidecar 가 먼저 정한다) — 같은 관이라 뒤따르는 DevTools 입력보다 먼저 닿는다.
+    if (s.created and (state == .running or state == .starting)) send(gpa, .{ .new_tab_credit = surface_id });
 }
 
 /// W9b③: 그 탭의 브라우저가 만들어졌고, 빈 페이지가 아닌 주소에서 불러오기를 몇 번 끝냈는가(`browser.open` 이 첫 불러오기를
@@ -1609,7 +1639,11 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
     const owned = gpa.dupe(u8, url) catch return;
     if (s.last_url) |old| gpa.free(old);
     s.last_url = owned;
-    if (s.created) send(gpa, .{ .navigate = .{ .browser = surface_id, .url = url } });
+    if (s.created) {
+        send(gpa, .{ .navigate = .{ .browser = surface_id, .url = url } });
+        s.nav_pending = true;
+        s.nav_saw_loading = false;
+    }
 }
 
 /// 사용자가 주소창에서 이 탭을 이동시켰다(W10a) — 친 주소가 곧바로 파일이면(문서를 커밋하지 않는다) 사용자가 시작한 다운로드다. 복원·
@@ -3840,8 +3874,13 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             break :blk surfaces.getPtr(id);
         }) |s| {
             s.created = true;
+            s.initial_load_pending = true;
             dropPopup(s);
-            if (s.last_url) |u| send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
+            if (s.last_url) |u| {
+                send(gpa, .{ .navigate = .{ .browser = id, .url = u } });
+                s.nav_pending = true;
+                s.nav_saw_loading = false;
+            }
             if (s.focused) send(gpa, .{ .set_focus = .{ .browser = id, .value = true } });
             s.composing = false;
         },
@@ -3928,11 +3967,21 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .nav_state => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.can_go_back = v.can_go_back;
             s.can_go_forward = v.can_go_forward;
-            if (!v.loading) if (s.url) |u| if (!std.mem.eql(u8, u, "about:blank")) {
-                const h = std.hash.Wyhash.hash(0, u);
-                if (s.loading or h != s.page_loads_url_hash) s.page_loads +%= 1;
-                s.page_loads_url_hash = h;
-            };
+            if (v.loading and s.nav_pending) s.nav_saw_loading = true;
+            if (!v.loading) {
+                var counted = false;
+                if (s.url) |u| if (!std.mem.eql(u8, u, "about:blank")) {
+                    const h = std.hash.Wyhash.hash(0, u);
+                    if (s.loading or h != s.page_loads_url_hash) counted = true;
+                    s.page_loads_url_hash = h;
+                };
+                if (!counted and s.nav_pending and s.nav_saw_loading) counted = true;
+                if (counted) {
+                    s.page_loads +%= 1;
+                    s.nav_pending = false;
+                    s.nav_saw_loading = false;
+                }
+            }
             s.loading = v.loading;
             s.nav_dirty = true;
         },
@@ -3947,7 +3996,17 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             .browser_create_failed => if (takeReserved(f.browser)) |r| if (r.ring) |ring| ring.release(),
             .unknown_browser, .duplicate_browser, .frame_channel_failed => {},
         },
-        .title_changed, .load_finished => {},
+        // W9b③: 이동을 보낸 뒤의 주 프레임 불러오기 끝 — 실패한 이동(오류 페이지)도 온다. 만들어진 뒤 첫 about:blank 의 끝은 넘긴다.
+        .load_finished => |v| if (surfaces.getPtr(v.browser)) |s| {
+            if (s.initial_load_pending) {
+                s.initial_load_pending = false;
+            } else if (s.nav_pending) {
+                s.page_loads +%= 1;
+                s.nav_pending = false;
+                s.nav_saw_loading = false;
+            }
+        },
+        .title_changed => {},
         // 렌더러가 죽으면 그 페이지의 툴팁도 끝났다(CEF 가 빈 글을 부르지 않을 수 있다).
         .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| {
             setTooltip(gpa, s, ""); // 메뉴는 sidecar 가 닫음을 보낸다(W6c①)
@@ -4053,7 +4112,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             };
         },
         // 방향이 다른 tag 는 decoder 가 이미 거절했다.
-        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
+        .hello, .create_browser, .destroy_browser, .resize, .set_hidden, .set_focus, .navigate, .shutdown, .frame_channel, .nav_action, .mouse, .wheel, .key, .ime_set_composition, .ime_commit_text, .ime_finish_composing, .ime_cancel_composition, .edit_command, .capture_lost, .dialog_reply, .file_dialog_path, .file_dialog_reply, .permission_reply, .geolocation, .web_notification_click, .context_menu_command, .drag_data, .drag_target, .drag_source_end, .drag_file_request, .popup_reserve, .close_asking, .new_tab_credit, .datalist_pick, .download_decide, .download_control, .devtools_call, .devtools_call_data => unreachable,
     }
 }
 
@@ -5361,4 +5420,71 @@ test "W9b③: 불러오는 중=참 이 묶여 오지 않아도(거짓→거짓, 
     try std.testing.expectEqual(@as(u32, 1), pageState(32).?.loads);
     testApply(gpa, .{ .nav_state = .{ .browser = 32, .can_go_back = false, .can_go_forward = false, .loading = false } });
     try std.testing.expectEqual(@as(u32, 1), pageState(32).?.loads);
+}
+
+test "W9b③ 적대 리뷰 1 회차: 실패한 이동(접속 거부·DNS — 주소가 about:blank 그대로)도 이동을 보낸 뒤 불러오기 끝을 센다 — 보내기 전 about:blank 는 세지 않는다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 33);
+    testRunning(33);
+    // 하네스 실측(접속 거부·DNS 실패): about:blank 의 끝 → (이동) → loading 1 → load_finished → loading 0, url_changed 없음.
+    testApply(gpa, .{ .url_changed = .{ .browser = 33, .url = "about:blank" } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 33, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 33, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 0), pageState(33).?.loads); // 이동을 보내기 전
+    navigate(gpa, 33, "http://127.0.0.1:1/");
+    testApply(gpa, .{ .nav_state = .{ .browser = 33, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 33, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 1), pageState(33).?.loads);
+}
+
+test "W9b③ 적대 리뷰 1 회차: 사람의 닫기와 에이전트 닫기가 겹치면 사람의 닫기다 — 에이전트 표시는 지워지거나 붙지 않는다(창으로 번질 수 있게)" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 34);
+    testRunning(34);
+    // 에이전트가 묻는 중에 사람이 ⌘W — 사람의 닫기가 된다.
+    try std.testing.expect(askCloseByAgent(gpa, 34, 0));
+    try std.testing.expect(closeAskedByAgent(34));
+    try std.testing.expect(askClose(gpa, 34, 0));
+    try std.testing.expect(!closeAskedByAgent(34));
+    // 사람이 묻는 중에 에이전트 — 표시를 붙이지 않는다.
+    try testHold(gpa, 35);
+    testRunning(35);
+    try std.testing.expect(askClose(gpa, 35, 0));
+    try std.testing.expect(askCloseByAgent(gpa, 35, 0));
+    try std.testing.expect(!closeAskedByAgent(35));
+}
+
+test "W9b③ 적대 리뷰 1 회차: 만들어지자마자 보낸 이동이 실패해도(「참」 없이 끝만) 첫 about:blank 끝 다음의 load_finished 를 센다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 36);
+    try testHold(gpa, 37);
+    testRunning(37); // 엔진이 돈다(36 은 아직 만들어지지 않았다)
+    navigate(gpa, 36, "http://127.0.0.1:1/"); // 만들어지기 전 — 만들어지면 보낸다
+    testApply(gpa, .{ .browser_created = 36 });
+    // 스모크 실측(앱): about:blank 의 끝(「거짓」·load_finished) 다음 실패 이동의 끝 — 「불러오는 중=참」 은 오지 않았다.
+    testApply(gpa, .{ .url_changed = .{ .browser = 36, .url = "about:blank" } });
+    testApply(gpa, .{ .load_finished = .{ .browser = 36, .http_status = 0 } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 36, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 0), pageState(36).?.loads);
+    testApply(gpa, .{ .load_finished = .{ .browser = 36, .http_status = 0 } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 36, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 1), pageState(36).?.loads);
 }

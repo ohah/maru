@@ -457,10 +457,25 @@ c1=\$(date +%s)
 echo "\$((c1 - c0))" > "\$out/ag-close-ask-secs"
 "\$cli" browser close --surface "\$ag2" > "\$out/ag-close" 2>&1; echo "rc=\$?" >> "\$out/ag-close"
 "\$cli" browser list > "\$out/ag-list2" 2>&1
+# 접속이 안 되는 주소 — 실패한 이동도 곧 끝이다(적대 리뷰 1 회차: 25 초를 다 기다렸다).
+f0=\$(date +%s)
+"\$cli" browser open --url "http://127.0.0.1:1/" > "\$out/ag-refused" 2>&1; echo "rc=\$?" >> "\$out/ag-refused"
+f1=\$(date +%s)
+echo "\$((f1 - f0))" > "\$out/ag-refused-secs"
+af=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/ag-refused")
+"\$cli" browser close --surface "\$af" > /dev/null 2>&1 || true
 # 상한 — 이 pane 의 에이전트 탭 8 개(ag 가 하나 남았다 — 일곱 더, 아홉째는 거절).
-for k in 1 2 3 4 5 6 7 8; do
+"\$cli" browser open --url "http://127.0.0.1:$port/ag.html?cap" > "\$out/ag-cap-1" 2>&1; echo "rc=\$?" >> "\$out/ag-cap-1"
+for k in 2 3 4 5 6 7 8; do
     "\$cli" browser open > "\$out/ag-cap-\$k" 2>&1; echo "rc=\$?" >> "\$out/ag-cap-\$k"
 done
+# 상한에 닿은 뒤 에이전트 탭의 팝업은 더 열리지 않는다(적대 리뷰 1 회차: 보통 탭으로 계속 생겼다). 떠나기 확인이 없는 탭에서 — 누름은 닿는다.
+capt=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/ag-cap-1")
+"\$cli" browser list > "\$out/ag-cap-list0" 2>&1
+"\$cli" browser click --surface "\$capt" --selector '#ab' > "\$out/ag-cap-ab" 2>&1; echo "rc=\$?" >> "\$out/ag-cap-ab"
+"\$cli" browser click --surface "\$capt" --selector '#pop' > "\$out/ag-cap-pop" 2>&1; echo "rc=\$?" >> "\$out/ag-cap-pop"
+sleep 2
+"\$cli" browser list > "\$out/ag-cap-list1" 2>&1
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -573,7 +588,10 @@ echo "$ag2_place" | grep -q 'placement=background' && [ "$(echo "$ag2_place" | s
 grep -q 'not opened by this pane' "$out/ag-close-user" && ! grep -q '^rc=0$' "$out/ag-close-user" || fail "the agent closed (or tried to close) a tab it did not open ($(tr '\n' ' ' < "$out/ag-close-user"))"
 ok ag-type && grep -q '^not closed: the page asks before leaving' "$out/ag-close-ask" && [ "$(cat "$out/ag-close-ask-secs")" -le 3 ] || fail "closing a tab whose page asks before leaving did not answer 'not closed' at once ($(tr '\n' ' ' < "$out/ag-close-ask") · $(cat "$out/ag-close-ask-secs")s)"
 grep -q '^closed$' "$out/ag-close" && grep -q '^rc=0$' "$out/ag-close" && ! grep -q 'ag2\.html' "$out/ag-list2" || fail "the agent could not close the tab its page opened ($(tr '\n' ' ' < "$out/ag-close"))"
-for k in 1 2 3 4 5 6 7; do grep -q '^opened [0-9]* ' "$out/ag-cap-$k" && grep -q '^rc=0$' "$out/ag-cap-$k" || fail "agent tab $k of 8 did not open ($(tr '\n' ' ' < "$out/ag-cap-$k"))"; done
+for k in 1 2 3 4 5 6 7; do grep -q '^opened [0-9]*' "$out/ag-cap-$k" && grep -q '^rc=0$' "$out/ag-cap-$k" || fail "agent tab $k of 8 did not open ($(tr '\n' ' ' < "$out/ag-cap-$k"))"; done
+[ "$(cat "$out/ag-refused-secs")" -le 5 ] && grep -q '^opened [0-9]*' "$out/ag-refused" || fail "opening an address that refuses connections did not answer soon ($(cat "$out/ag-refused-secs")s · $(tr '\n' ' ' < "$out/ag-refused"))"
+ok ag-cap-pop && [ "$(grep -c 'GET /hit?ab-true' "$root/http.log")" -ge 2 ] || fail "the click on a capped agent tab did not reach the page — the popup check proves nothing ($(tr '\n' ' ' < "$out/ag-cap-pop"))"
+[ "$(grep -c '^surface ' "$out/ag-cap-list0")" = "$(grep -c '^surface ' "$out/ag-cap-list1")" ] || fail "a popup from the agent's tab opened past the cap of 8 ($(grep -c '^surface ' "$out/ag-cap-list0") → $(grep -c '^surface ' "$out/ag-cap-list1") tabs)"
 grep -q 'already has 8 tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not refused ($(tr '\n' ' ' < "$out/ag-cap-8"))"
 echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a user tab cannot be closed, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"

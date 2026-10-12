@@ -1952,17 +1952,26 @@ fn serializeActMatchedResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const
         writeActHint(&hs, id, hint.string) catch return error.OutOfMemory;
         return haw.toOwnedSlice();
     }
-    const matched = parsed.value.object.get("matched") orelse return error.InvalidActPayload;
-    if (matched != .object) return error.InvalidActPayload;
-    const ref = matched.object.get("ref") orelse return error.InvalidActPayload;
-    const name = matched.object.get("name") orelse return error.InvalidActPayload;
-    if (ref != .string or name != .string) return error.InvalidActPayload;
+    // 입력 뒤 페이지가 JS 대화상자를 띄웠다(W9b③ 적대 리뷰 3 회차) — true 일 때만 싣는다. 그때는 matched 없이도(selector·ref 로 누른 것).
+    const dialog = if (parsed.value.object.get("dialog")) |d| d == .bool and d.bool else false;
+    const matched_value = parsed.value.object.get("matched");
+    if (matched_value == null and !dialog) return error.InvalidActPayload;
+    var ref: ?[]const u8 = null;
+    var name: []const u8 = "";
+    if (matched_value) |matched| {
+        if (matched != .object) return error.InvalidActPayload;
+        const r = matched.object.get("ref") orelse return error.InvalidActPayload;
+        const n = matched.object.get("name") orelse return error.InvalidActPayload;
+        if (r != .string or n != .string) return error.InvalidActPayload;
+        ref = r.string;
+        name = n.string;
+    }
     // wait 의 「같은 로케이터로 act 하면 여럿」(W9b②-3) — true 일 때만 싣는다.
     const ambiguous = if (parsed.value.object.get("ambiguous")) |a| a == .bool and a.bool else false;
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
-    writeActMatched(&s, id, ok.bool, ref.string, name.string, ambiguous) catch return error.OutOfMemory;
+    writeActMatched(&s, id, ok.bool, ref, name, ambiguous, dialog) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
@@ -1975,19 +1984,25 @@ fn writeActHint(s: *std.json.Stringify, id: cp.Id, hint: []const u8) !void {
     try endResult(s);
 }
 
-fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: []const u8, name: []const u8, ambiguous: bool) !void {
+fn writeActMatched(s: *std.json.Stringify, id: cp.Id, ok: bool, ref: ?[]const u8, name: []const u8, ambiguous: bool, dialog: bool) !void {
     try beginResult(s, id);
     try s.objectField("ok");
     try s.write(ok);
-    try s.objectField("matched");
-    try s.beginObject();
-    try s.objectField("ref");
-    try s.write(ref);
-    try s.objectField("name");
-    try s.write(name);
-    try s.endObject();
+    if (ref) |r| {
+        try s.objectField("matched");
+        try s.beginObject();
+        try s.objectField("ref");
+        try s.write(r);
+        try s.objectField("name");
+        try s.write(name);
+        try s.endObject();
+    }
     if (ambiguous) {
         try s.objectField("ambiguous");
+        try s.write(true);
+    }
+    if (dialog) {
+        try s.objectField("dialog");
         try s.write(true);
     }
     try endResult(s);
@@ -4443,4 +4458,14 @@ test "W9b③: open·close 결과는 엔진이 준 필드만 — 모양이 틀리
         defer testing.allocator.free(w);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
     }
+}
+
+test "W9b③ 적대 리뷰 3 회차: act 결과의 dialog(누른 뒤 페이지가 대화상자를 띄웠다)는 ok 와 함께 싣는다 — matched 는 로케이터일 때만" {
+    const plain = try serializeActMatchedResult(testing.allocator, .{ .number = 5 }, "{\"ok\":true,\"dialog\":true}");
+    defer testing.allocator.free(plain);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"ok\":true,\"dialog\":true}}", plain);
+    const located = try serializeActMatchedResult(testing.allocator, .{ .number = 6 }, "{\"ok\":true,\"matched\":{\"ref\":\"n1\",\"name\":\"Go\"},\"dialog\":true}");
+    defer testing.allocator.free(located);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n1\",\"name\":\"Go\"},\"dialog\":true}}", located);
+    try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 7 }, "{\"ok\":true}"));
 }

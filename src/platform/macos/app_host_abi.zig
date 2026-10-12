@@ -8075,7 +8075,13 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
     const run: *CdpRun = @ptrCast(@alignCast(ctx));
     run.op.now_ms = cdpNowMs();
     run.op.page_loading = session_mod.web_osr.isLoading(run.surface_id);
-    const reply: web_cdp_ops.Reply = switch (outcome) {
+    const step = run.op.feed(allocator, cdpReply(outcome, result)) catch return finishCdp(run, .failed, "out of memory");
+    cdpAdvance(run, step);
+}
+
+/// DevTools 호출의 끝을 op 이 받는 답으로.
+fn cdpReply(outcome: session_mod.web_osr.DevtoolsOutcome, result: []const u8) web_cdp_ops.Reply {
+    return switch (outcome) {
         .ok => .{ .ok = result },
         .cdp_error => .{ .cdp_error = result },
         .timeout, .expired => .{ .timed_out = "DevTools did not answer in time" },
@@ -8089,8 +8095,6 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
         // 보냈을 수도 있다 — 누름이면 op 이 떼기·놓기를 거쳐 동작의 결과로 답한다(그 호출들은 대화상자 동안 곧 거절된다).
         .dialog => .{ .failed = web_cdp_ops.dialog_reason },
     };
-    const step = run.op.feed(allocator, reply) catch return finishCdp(run, .failed, "out of memory");
-    cdpAdvance(run, step);
 }
 
 fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void {
@@ -10617,7 +10621,9 @@ test "W9b①b-2: 확실히 못 보낸 키 누름(busy)은 떼지 않고, 보냈�
         defer _ = active_browser_executions.finish(id);
         const run = try allocator.create(CdpRun);
         run.* = .{ .async_id = id, .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .press, "{\"key\":\"Enter\"}", id), .started = true };
-        const first = try run.op.start(allocator); // 누름 Step(보낸 셈 친다)
+        const frame = try run.op.start(allocator); // 누르기 전 프레임(W9b③ 적대 리뷰 3 회차)
+        allocator.free(frame.call.params);
+        const first = try run.op.feed(allocator, .{ .ok = "{}" }); // 누름 Step(보낸 셈 친다)
         allocator.free(first.call.params);
         try cdp_runs.append(allocator, run);
         const before = cdp_calls_attempted;
@@ -10645,7 +10651,9 @@ test "W9b①b-2: 떼기를 보내는 순간 탭이 준비되지 않았으면(Not
     defer _ = active_browser_executions.finish(id);
     const run = try allocator.create(CdpRun);
     run.* = .{ .async_id = id, .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .press, "{\"key\":\"Enter\"}", id), .started = true };
-    const down = try run.op.start(allocator);
+    const frame = try run.op.start(allocator); // 누르기 전 프레임(W9b③ 적대 리뷰 3 회차)
+    allocator.free(frame.call.params);
+    const down = try run.op.feed(allocator, .{ .ok = "{}" });
     allocator.free(down.call.params);
     const up = try run.op.feed(allocator, .{ .ok = "{}" }); // 누름은 갔다 — 다음은 떼기
     try cdp_runs.append(allocator, run);
@@ -11956,4 +11964,12 @@ test "W9b③ 적대 리뷰 2 회차: 에이전트 탭 자리 — grant 표가 �
     onAppSessionSurfaceClosed(null, 3); // 에이전트 pane 이 닫혔다
     try std.testing.expect(!isAgentTab(31));
     try std.testing.expect(isAgentTab(41));
+}
+
+test "W9b③ 적대 리뷰 3 회차: 대화상자로 끝난 호출은 op 에 그 이유의 실패로 간다(시한이 아니다 — 입력 뒤면 「갔다 + 대화상자」 로 답하게)" {
+    const r = cdpReply(.dialog, "");
+    try std.testing.expect(r == .failed);
+    try std.testing.expectEqualStrings(web_cdp_ops.dialog_reason, r.failed);
+    try std.testing.expect(cdpReply(.timeout, "") == .timed_out);
+    try std.testing.expect(cdpReply(.busy, "") == .not_sent);
 }

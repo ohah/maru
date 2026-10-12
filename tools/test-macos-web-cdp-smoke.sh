@@ -149,6 +149,11 @@ printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){docum
 # W9b③: 에이전트가 연 탭(뒤쪽 — 처음부터 숨김). 첫 클릭·새 창 열기(결정 ④ — 뒤쪽 에이전트 탭)·떠나기 확인(글이 있으면).
 printf '<!doctype html><title>ag</title><button id=ab style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?ab-&#39;+event.isTrusted">Agent go</button><button id=pop style="position:absolute;left:30px;top:100px;width:120px;height:40px" onclick="window.open(&#39;ag2.html&#39;,&#39;_blank&#39;)">Pop</button><input id=t aria-label=Note style="position:absolute;left:30px;top:170px"><button id=al2 style="position:absolute;left:30px;top:220px;width:120px;height:40px" onclick="setTimeout(function(){alert(&#39;later&#39;)},1500)">Later alert</button><script>new Image().src="/hit?agvis-"+document.visibilityState;addEventListener("beforeunload",function(e){if(document.getElementById("t").value){e.preventDefault();e.returnValue=""}})</script>' > "$root/www/ag.html"
 printf '<!doctype html><title>ag2</title>ag2<script>new Image().src="/hit?ag2vis-"+document.visibilityState;document.addEventListener("visibilitychange",function(){new Image().src="/hit?ag2vis-"+document.visibilityState})</script>' > "$root/www/ag2.html"
+# W9b③ 적대 리뷰 3 회차: 숨긴 탭의 키(제출 신호), 제출이 alert 를 띄우는 문서, 같은 출처 팝업의 alert.
+printf '<!doctype html><title>frm</title><form onsubmit="new Image().src=&#39;/hit?submit-&#39;+location.search.slice(1);return false"><input id=q aria-label=Q style="position:absolute;left:30px;top:30px"></form>' > "$root/www/frm.html"
+printf '<!doctype html><title>frma</title><form onsubmit="navigator.sendBeacon(&#39;/hit?dsubmit-&#39;+location.search.slice(1));alert(&#39;sent&#39;);return false"><input id=q aria-label=Q style="position:absolute;left:30px;top:30px"></form>' > "$root/www/frma.html"
+printf '<!doctype html><title>shr</title><button id=pop style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="window.open(&#39;shr2.html&#39;,&#39;_blank&#39;)">Pop</button><button id=ok style="position:absolute;left:30px;top:100px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?okclick&#39;">OK</button>' > "$root/www/shr.html"
+printf '<!doctype html><title>shr2</title>shr2<script>new Image().src="/hit?shr2-load";setTimeout(function(){alert("popup")},800)</script>' > "$root/www/shr2.html"
 # W9b③: 숨은 채 불러온 문서 — 그 뒤 첫 마우스 누르기가 페이지에 닿는가(숨긴 탭은 새 문서를 그리지 않아 누르기가 사라졌다, 계획 공격 2 회차).
 printf '<!doctype html><title>fresh</title><button id=fb style="position:absolute;left:30px;top:30px;width:140px;height:40px" onclick="new Image().src=&#39;/hit?fb-&#39;+event.isTrusted">Fresh go</button><a id=tohop href="hop.html" style="position:absolute;left:30px;top:120px">hop</a>' > "$root/www/fresh.html"
 printf '<!doctype html><title>hop</title><button id=hop>Hop go</button><script>new Image().src="/hit?hopvis-"+document.visibilityState;setTimeout(function(){location.reload()},600)</script>' > "$root/www/hop.html"
@@ -180,6 +185,12 @@ class H(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/slow.html"):
             time.sleep(2)  # wait-load: 응답이 늦는 문서
         super().do_GET()
+    def do_POST(self):
+        # 3 회차: alert 바로 앞의 신호는 sendBeacon(POST) — 이미지 요청은 alert 가 렌더러를 멈춰 나가지 못한다.
+        n = int(self.headers.get("Content-Length") or 0)
+        if n: self.rfile.read(n)
+        sys.stderr.write("POST %s\n" % self.path); sys.stderr.flush()
+        self.send_response(204); self.end_headers()
     def log_message(self, fmt, *args):
         sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
     def end_headers(self):
@@ -464,6 +475,18 @@ f1=\$(date +%s)
 echo "\$((f1 - f0))" > "\$out/ag-refused-secs"
 af=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/ag-refused")
 "\$cli" browser close --surface "\$af" > /dev/null 2>&1 || true
+# 3 회차: 처음부터 숨긴 새 탭에 곧장 키 — 요소에 Enter, 글을 넣은 뒤 대상 없는 Enter 가 제출한다(전에는 ok 로 답하고 닿지 않았다).
+"\$cli" browser open --url "http://127.0.0.1:$port/frm.html?p1" > "\$out/r3-p1-open" 2>&1
+fp1=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/r3-p1-open")
+"\$cli" browser press --surface "\$fp1" --selector '#q' --key Enter > "\$out/r3-p1" 2>&1; echo "rc=\$?" >> "\$out/r3-p1"
+hit_seen submit-p1 && echo yes > "\$out/r3-p1-hit" || echo no > "\$out/r3-p1-hit"
+"\$cli" browser open --url "http://127.0.0.1:$port/frm.html?p2" > "\$out/r3-p2-open" 2>&1
+fp2=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/r3-p2-open")
+"\$cli" browser type --surface "\$fp2" --selector '#q' --text 'x' > "\$out/r3-p2-type" 2>&1
+"\$cli" browser press --surface "\$fp2" --key Enter > "\$out/r3-p2" 2>&1; echo "rc=\$?" >> "\$out/r3-p2"
+hit_seen submit-p2 && echo yes > "\$out/r3-p2-hit" || echo no > "\$out/r3-p2-hit"
+"\$cli" browser close --surface "\$fp1" > /dev/null 2>&1 || true
+"\$cli" browser close --surface "\$fp2" > /dev/null 2>&1 || true
 # 상한 — 이 pane 의 에이전트 탭 8 개(ag 가 하나 남았다 — 일곱 더, 아홉째는 거절).
 "\$cli" browser open --url "http://127.0.0.1:$port/ag.html?cap" > "\$out/ag-cap-1" 2>&1; echo "rc=\$?" >> "\$out/ag-cap-1"
 for k in 2 3 4 5 6 7 8; do
@@ -482,6 +505,27 @@ d0=\$(date +%s)
 "\$cli" browser wait --surface "\$capt" --selector '#never' --timeout 8000 > "\$out/ag-dlg-wait" 2>&1; echo "rc=\$?" >> "\$out/ag-dlg-wait"
 d1=\$(date +%s)
 echo "\$((d1 - d0))" > "\$out/ag-dlg-secs"
+# 3 회차 — 빈 상한 탭 셋을 닫아 자리를 낸다.
+for k in 2 3 4; do
+    bid=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/ag-cap-\$k")
+    "\$cli" browser close --surface "\$bid" > "\$out/r3-free-\$k" 2>&1
+done
+# 제출이 alert 를 띄운다 — 키는 갔다: ok 와 「다시 하지 말라」(전에는 실패로 답해 다시 하면 두 번 제출).
+"\$cli" browser open --url "http://127.0.0.1:$port/frma.html?d" > "\$out/r3-da-open" 2>&1
+da=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/r3-da-open")
+"\$cli" browser press --surface "\$da" --selector '#q' --key Enter > "\$out/r3-da" 2>&1; echo "rc=\$?" >> "\$out/r3-da"
+n=0; while [ \$n -lt 20 ] && ! grep -q 'POST /hit?dsubmit-d' "$root/http.log"; do sleep 0.25; n=\$((n + 1)); done
+grep -q 'POST /hit?dsubmit-d' "$root/http.log" && echo yes > "\$out/r3-da-hit" || echo no > "\$out/r3-da-hit"
+# 같은 출처 팝업이 alert 를 띄운다 — 연 탭의 op 은 30 초 매달리지 않고 곧 그 이유로 끝난다.
+"\$cli" browser open --url "http://127.0.0.1:$port/shr.html?f" > "\$out/r3-sh-open" 2>&1
+sh=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/r3-sh-open")
+"\$cli" browser click --surface "\$sh" --selector '#pop' > "\$out/r3-sh-pop" 2>&1
+hit_seen shr2-load || true
+sleep 2
+f0=\$(date +%s)
+"\$cli" browser click --surface "\$sh" --selector '#ok' > "\$out/r3-fam" 2>&1; echo "rc=\$?" >> "\$out/r3-fam"
+f1=\$(date +%s)
+echo "\$((f1 - f0))" > "\$out/r3-fam-secs"
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -498,7 +542,7 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!
 i=0
-while [ ! -f "$out/done" ] && [ $i -lt 260 ]; do sleep 1; i=$((i + 1)); done
+while [ ! -f "$out/done" ] && [ $i -lt 320 ]; do sleep 1; i=$((i + 1)); done
 [ -f "$out/done" ] || { sed -n '1,40p' "$root/app.log" >&2; fail "the pane script did not finish ($(cat "$out/list" 2>/dev/null | tr '\n' ' '))"; }
 kill "$app_pid" 2>/dev/null || true
 wait "$app_pid" 2>/dev/null || true
@@ -600,6 +644,12 @@ ok ag-cap-pop && [ "$(grep -c 'GET /hit?ab-true' "$root/http.log")" -ge 2 ] || f
 ok ag-al && grep -q 'showing a dialog' "$out/ag-dlg-wait" && [ "$(cat "$out/ag-dlg-secs")" -le 6 ] || fail "a wait on a tab whose page showed an alert mid-way did not end at once with the dialog reason ($(cat "$out/ag-dlg-secs")s · $(tr '\n' ' ' < "$out/ag-dlg-wait"))"
 [ "$(grep -c '^surface ' "$out/ag-cap-list0")" = "$(grep -c '^surface ' "$out/ag-cap-list1")" ] || fail "a popup from the agent's tab opened past the cap of 8 ($(grep -c '^surface ' "$out/ag-cap-list0") → $(grep -c '^surface ' "$out/ag-cap-list1") tabs)"
 grep -q 'already has 8 tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not refused ($(tr '\n' ' ' < "$out/ag-cap-8"))"
+# W9b③ 적대 리뷰 3 회차
+[ "$(cat "$out/r3-p1-hit")" = yes ] && grep -q '^ok$' "$out/r3-p1" || fail "Enter on an element of a new hidden tab did not submit the form ($(tr '\n' ' ' < "$out/r3-p1") · $(tr '\n' ' ' < "$out/r3-p1-open"))"
+[ "$(cat "$out/r3-p2-hit")" = yes ] && grep -q '^ok$' "$out/r3-p2" || fail "Enter where the focus is on a new hidden tab did not submit the form ($(tr '\n' ' ' < "$out/r3-p2") · $(tr '\n' ' ' < "$out/r3-p2-type"))"
+grep -q '^ok$' "$out/r3-da" && grep -q '^warning: the page opened a dialog' "$out/r3-da" && grep -q '^rc=0$' "$out/r3-da" && [ "$(cat "$out/r3-da-hit")" = yes ] || fail "a key whose submit opened an alert was not answered as delivered with a do-not-repeat warning ($(tr '\n' ' ' < "$out/r3-da") · hit $(cat "$out/r3-da-hit"))"
+grep -q 'showing a dialog' "$out/r3-fam" && [ "$(cat "$out/r3-fam-secs")" -le 5 ] || fail "an op on a tab whose same-origin popup showed an alert did not end at once with the dialog reason ($(cat "$out/r3-fam-secs")s · $(tr '\n' ' ' < "$out/r3-fam") · pop $(tr '\n' ' ' < "$out/r3-sh-pop"))"
+echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a user tab cannot be closed, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"

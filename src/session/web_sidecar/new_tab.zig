@@ -174,7 +174,46 @@ pub const Credits = struct {
     pub fn any(self: *const Credits) bool {
         return self.len != 0;
     }
+
+    /// 가장 새 산 장의 시각(없으면 null).
+    pub fn newest(self: *Credits, now_ms: i64) ?i64 {
+        self.prune(now_ms);
+        return if (self.len == 0) null else self.at[self.len - 1];
+    }
 };
+
+/// 사람의 장과 에이전트의 장 가운데 어느 것을 쓸까(W9b③ 적대 리뷰 3 회차) — 어느 입력이 팝업을 열었는지는 알 수 없어(CEF 는 「사용자
+/// 입력 중」만 알린다) 시각으로 짐작한다. 전달 여유(`transit_ms`) 안에 받은 장이 있으면 그 가운데 가장 새 것(방금 그 입력이 열었다),
+/// 아니면 가장 오래된 것(차례대로). 사람이 몇 초 전 초점만 준 뒤 에이전트가 연 팝업이 사람의 앞 탭이 되던 것을 막는다. 둘 다 1 초 안에
+/// 팝업을 열면 틀릴 수 있다(한계). 쓸 장이 없으면 null, 에이전트의 장이면 true.
+pub fn takeCredit(human: *Credits, agent: *Credits, now_ms: i64) ?bool {
+    const h = human.newest(now_ms);
+    const a = agent.newest(now_ms);
+    if (h == null and a == null) return null;
+    const use_agent = if (h == null) true else if (a == null) false else blk: {
+        const recent = @max(h.?, a.?);
+        if (now_ms - recent <= Credits.transit_ms) break :blk a.? > h.?;
+        break :blk agent.at[0] < human.at[0];
+    };
+    _ = if (use_agent) agent.take(now_ms) else human.take(now_ms);
+    return use_agent;
+}
+
+test "W9b③ 적대 리뷰 3 회차: 장 고르기 — 방금(1 초 안) 받은 장이 먼저, 아니면 오래된 것, 하나뿐이면 그것" {
+    var h: Credits = .{};
+    var a: Credits = .{};
+    try std.testing.expectEqual(@as(?bool, null), takeCredit(&h, &a, 10_000));
+    h.grant(7_000);
+    a.grant(10_000);
+    try std.testing.expectEqual(@as(?bool, true), takeCredit(&h, &a, 10_000)); // 방금 에이전트
+    try std.testing.expectEqual(@as(?bool, false), takeCredit(&h, &a, 10_000)); // 남은 사람
+    h.grant(10_000);
+    a.grant(7_000);
+    try std.testing.expectEqual(@as(?bool, false), takeCredit(&h, &a, 10_000)); // 방금 사람
+    h.grant(8_000); // 에이전트 7 초·사람 8 초 — 둘 다 1 초 넘게 지났다: 오래된 에이전트 것부터
+    try std.testing.expectEqual(@as(?bool, true), takeCredit(&h, &a, 10_000));
+    try std.testing.expectEqual(@as(?bool, false), takeCredit(&h, &a, 10_000));
+}
 
 /// 새 탭을 끼울 자리(pane 의 탭 순서). `last_child` 는 같은 탭이 이어 연 마지막 뒤 탭의 자리(없으면 null) — 그것이 연 탭
 /// 오른쪽에 있을 때만 따른다.

@@ -30,7 +30,7 @@ const finder_js = @embedFile("web_cdp_finder.js");
 pub const result_too_large = "the DevTools result was too large";
 
 /// 페이지가 JS 대화상자(alert·confirm·prompt·떠나기 확인)를 띄워 멈췄다 — 사용자가 그 탭에서 답해야 한다(W9b③ 적대 리뷰 1·2 회차).
-pub const dialog_reason = "the page is showing a dialog (alert, confirm or leave-page question) — it must be answered in that tab first";
+pub const dialog_reason = "the page, or a tab it opened or that opened it, is showing a dialog (alert, confirm or leave-page question) — it must be answered in that tab first";
 
 /// 누르기 전 프레임(W9b③)의 인자 — **kick 과 바이트까지 같아야 한다**(`app_host_abi` 가 컴파일 때 본다). sidecar 는 kick 과 꼭 같은
 /// 호출만 짧은 시한(3 초)에 놓는다 — 다르면 이동하는 순간 답을 잃은 프레임이 35 초 자리를 쥐어 click 이 30 초 시한이 됐다(적대 리뷰
@@ -125,6 +125,10 @@ pub const Op = struct {
     miss: ?[]const u8 = null,
     /// 누름·떼기의 답이 시한을 넘겼다 — 그래도 떼기·놓기를 보내고 끝에 timeout 으로 답한다.
     late: ?[]const u8 = null,
+    /// 누름·넣기를 보냈다(W9b③ 적대 리뷰 3 회차) — 그 뒤 대화상자 이유가 오면 실패가 아니라 「갔다 + 대화상자」 다.
+    sent_input: bool = false,
+    /// 입력을 보낸 뒤 페이지가 JS 대화상자를 띄웠다 — 성공에 `"dialog":true` 를 싣는다(다시 하면 두 번 제출된다).
+    dialog: bool = false,
     /// type 의 글(소유).
     text: ?[]u8 = null,
     /// wait — selector 가 보일 때까지(null 이면 문서가 다 불릴 때까지), 시한.
@@ -414,8 +418,27 @@ pub const Op = struct {
     }
 
     fn startPress(self: *Op, gpa: std.mem.Allocator) !Step {
-        if (!self.press_target) return self.keyStep(gpa, true);
+        if (!self.press_target) return self.frameStep(gpa);
         return self.startAct(gpa);
+    }
+
+    /// 누르기 전 프레임(W9b③) — 숨긴 탭이 숨은 채 새 문서를 받으면 그 뒤 첫 누르기(마우스·키)가 페이지에 닿지 않는다. 답을 받은 뒤
+    /// `afterFrame` 으로. click 만 했다가 press·Delete 키도 같았다(3 회차 실측: 새 숨긴 탭의 Enter 넷 모두 ok, 닿은 것은 click 뒤 둘).
+    fn frameStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .frame;
+        return call(gpa, "Page.captureScreenshot", "{s}", .{frame_params});
+    }
+
+    fn afterFrame(self: *Op, gpa: std.mem.Allocator) !Step {
+        return switch (self.kind) {
+            .press => self.keyStep(gpa, true),
+            .type_text => blk: {
+                self.stage = .delete_down;
+                self.sent_input = true;
+                break :blk call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyDown\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
+            },
+            else => self.hitTestCall(gpa, self.object_id.?),
+        };
     }
 
     fn startAct(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -536,8 +559,15 @@ pub const Op = struct {
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
-        // 누르기 전 프레임의 답(무엇이든 — 오류여도 그린 뒤다) — 덮임 검사로. 못 보냈으면 아래에서 놓고 실패.
-        if (self.stage == .frame and reply != .not_sent) return self.hitTestCall(gpa, self.object_id.?);
+        // 누르기 전 프레임의 답(무엇이든 — 오류여도 그린 뒤다) — 덮임 검사·키·Delete 로. 못 보냈으면 아래에서 놓고 실패.
+        if (self.stage == .frame and reply != .not_sent) return self.afterFrame(gpa);
+        // 입력을 보낸 뒤 대화상자 이유 — 입력은 갔다(3 회차: 실패로 답해 다시 하면 두 번 제출됐다).
+        if (self.sent_input) switch (reply) {
+            .failed, .not_sent => |why| if (std.mem.eql(u8, why, dialog_reason)) {
+                self.dialog = true;
+            },
+            else => {},
+        };
         // 찾기 결과를 둔 채 놓는 중 — 놓기의 답(무엇이든) 뒤에 그 결과대로.
         if (self.stage == .loc_release) return self.afterFind(gpa);
         // 묶음을 놓았다(무엇이든) — 정해 둔 다음 일로.
@@ -612,20 +642,25 @@ pub const Op = struct {
         // 누름의 답이 실패(보내지 못함·결과가 깨짐) — 이미 갔을 수 있으니 떼기·놓기를 마저 보내고 실패로 답한다(2 회차).
         if (reply == .failed) switch (self.stage) {
             .mouse_down => {
-                self.miss = reply.failed;
+                if (!self.dialog) self.miss = reply.failed;
                 self.stage = .mouse_up;
                 return self.mouse(gpa, "mouseReleased");
             },
             .key_down => {
-                self.miss = reply.failed;
+                if (!self.dialog) self.miss = reply.failed;
                 return self.keyStep(gpa, false);
             },
             // Delete 누름도 같다 — 떼기를 마저(5 회차 — 시한에는 떼면서 실패에는 떼지 않았다).
             .delete_down => {
-                self.miss = reply.failed;
+                if (!self.dialog) self.miss = reply.failed;
                 self.stage = .delete_up;
                 return deleteUp(gpa);
             },
+            else => {},
+        };
+        // 입력 뒤 대화상자 — 넣기·떼기·다시 읽기는 답하지 않는다: 다시 읽지 않고 놓기로(놓기는 web_osr 가 대화상자 뒤로 미룬다).
+        if (self.dialog and (reply == .failed or reply == .not_sent)) switch (self.stage) {
+            .insert, .verify, .delete_up => return self.releaseStep(gpa),
             else => {},
         };
         // kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(직전 kick 의 답이 아직이면 자리 하나를 쥐고 있다 — 잃은 kick 은
@@ -809,10 +844,10 @@ pub const Op = struct {
                     // 누르기 전에 프레임 하나를 그리게 하고 그 답을 기다린다 — 숨긴 탭이 숨은 채 새 문서를 받으면 그 뒤 첫 마우스 누르기가
                     // 페이지에 닿지 않았다(W9b③ 계획 공격 2 회차 실측: 제품 차례로 0/3, 2 초 기다려도 0/3 — 답은 「눌렀다」). 1×1 스크린샷을
                     // kick 으로 곁들이면 그 프레임이 누르기보다 늦을 수 있어(6 번 가운데 3–5 번) 보통 호출로 보내 답을 받은 뒤 덮임 검사로 간다
-                    // (20/20). 보이는 탭에서는 GPU 약 3 ms 의 왕복 하나다. hover 의 이동·글 넣기·키는 새 숨은 문서에서도 닿았다(3/3).
+                    // (20/20). 보이는 탭에서는 GPU 약 3 ms 의 왕복 하나다. hover 의 이동·글 넣기는 새 숨은 문서에서도 닿았다(3/3). 키는 계획 공격
+                    // 때 닿았지만 적대 리뷰 3 회차에 새 숨긴 탭의 Enter 가 닿지 않았다 — press·Delete 도 같은 단계를 거친다(`frameStep`).
                     self.object_id = try gpa.dupe(u8, oid);
-                    self.stage = .frame;
-                    return call(gpa, "Page.captureScreenshot", "{s}", .{frame_params});
+                    return self.frameStep(gpa);
                 }
                 return self.hitTestCall(gpa, oid);
             },
@@ -835,6 +870,7 @@ pub const Op = struct {
                 if (self.kind == .hover) return self.hoverMove(gpa);
                 // 맞았다 — 왕복 하나 안에 누른다(놓기는 뗀 뒤).
                 self.stage = .mouse_down;
+                self.sent_input = true;
                 return self.mouse(gpa, "mousePressed");
             },
             .hover_move => return self.releaseStep(gpa),
@@ -853,7 +889,7 @@ pub const Op = struct {
                     self.miss = "focus moved away from the element (the page moved it) — no key was pressed";
                     return self.releaseStep(gpa);
                 }
-                return self.keyStep(gpa, true);
+                return self.frameStep(gpa);
             },
             .key_down => return self.keyStep(gpa, false),
             .key_up => return self.afterKeys(gpa),
@@ -891,11 +927,9 @@ pub const Op = struct {
                     return self.releaseStep(gpa);
                 }
                 // 빈 글이면 고른 것을 지운다(Delete 키 — 진짜 입력). 아니면 고른 것 위에 넣는다(`Input.insertText` — 한 번의 입력 이벤트).
-                if (self.text.?.len == 0) {
-                    self.stage = .delete_down;
-                    return call(gpa, "Input.dispatchKeyEvent", "{{\"type\":\"keyDown\",\"key\":\"Delete\",\"code\":\"Delete\",\"windowsVirtualKeyCode\":46}}", .{});
-                }
+                if (self.text.?.len == 0) return self.frameStep(gpa);
                 self.stage = .insert;
+                self.sent_input = true;
                 return call(gpa, "Input.insertText", "{{\"text\":{f}}}", .{std.json.fmt(self.text.?, .{})});
             },
             .delete_down => {
@@ -1041,6 +1075,7 @@ pub const Op = struct {
     /// press 의 누름(`down`)·뗌.
     fn keyStep(self: *Op, gpa: std.mem.Allocator, down: bool) !Step {
         self.stage = if (down) .key_down else .key_up;
+        if (down) self.sent_input = true;
         const params = web_cdp_keys.eventParams(gpa, self.press_key.?, down) catch |e| return switch (e) {
             error.OutOfMemory => error.OutOfMemory,
             error.InvalidKey => done(gpa, .invalid_params, "invalid key"), // init 이 이미 걸렀다
@@ -1267,8 +1302,13 @@ pub const Op = struct {
 
     /// 성공 — 로케이터로 찾았으면 `{"ok":true,"matched":{"ref","name"}}`(L2 가 그대로 싣는다), 아니면 "true".
     fn succeed(self: *Op, gpa: std.mem.Allocator) !Step {
-        const name = self.matched_name orelse return done(gpa, .success, "true");
-        const msg = try std.fmt.allocPrint(gpa, "{{\"ok\":true,\"matched\":{{\"ref\":\"n{d}\",\"name\":{f}}}}}", .{ self.backend, std.json.fmt(name, .{}) });
+        // 입력 뒤 페이지가 대화상자를 띄웠다 — `"dialog":true`(L2 가 싣고 CLI 가 「다시 하지 말라」 를 낸다, 3 회차).
+        const dialog: []const u8 = if (self.dialog) ",\"dialog\":true" else "";
+        const name = self.matched_name orelse {
+            if (!self.dialog) return done(gpa, .success, "true");
+            return .{ .done = .{ .status = .success, .result = try gpa.dupe(u8, "{\"ok\":true,\"dialog\":true}") } };
+        };
+        const msg = try std.fmt.allocPrint(gpa, "{{\"ok\":true,\"matched\":{{\"ref\":\"n{d}\",\"name\":{f}}}{s}}}", .{ self.backend, std.json.fmt(name, .{}), dialog });
         return .{ .done = .{ .status = .success, .result = msg } };
     }
 
@@ -2274,6 +2314,11 @@ test "press: 대상이 없으면 지금 초점에 누르고 떼기만, 누른 �
     var op = try Op.init(testing.allocator, .press, "{\"key\":\"Enter\"}", 61);
     defer op.deinit(testing.allocator);
     var step = try op.start(testing.allocator);
+    // 누르기 전 프레임(W9b③ 적대 리뷰 3 회차) — 아직 누르지 않았다.
+    try testing.expectEqualStrings("Page.captureScreenshot", step.call.method);
+    try testing.expect(!op.committed());
+    testing.allocator.free(step.call.params);
+    step = try op.feed(testing.allocator, .{ .ok = "{\"data\":\"\"}" });
     try testing.expectEqualStrings("Input.dispatchKeyEvent", step.call.method);
     try testing.expect(std.mem.indexOf(u8, step.call.params, "\"type\":\"keyDown\"") != null);
     try testing.expect(!op.committed()); // 누르기 전 — 재허가를 거친다
@@ -2297,12 +2342,13 @@ test "press(selector): 화면 안으로 → 초점 → 격리 world 에서 초�
     const r = try drive(&op, &happyPage, &trail);
     defer testing.allocator.free(r.result);
     try testing.expectEqualStrings("true", r.result);
-    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.focus", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Runtime.releaseObjectGroup" };
+    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.focus", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Page.captureScreenshot", "Input.dispatchKeyEvent", "Input.dispatchKeyEvent", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "focus moved") != null);
     try testing.expect(try std.json.validate(testing.allocator, trail.params.items[8]));
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "\"commands\":[\"selectAll\"]") != null);
+    try testing.expectEqualStrings(frame_params, trail.params.items[9]); // 누르기 전 프레임(W9b③ 적대 리뷰 3 회차)
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "\"commands\":[\"selectAll\"]") != null);
     for ([_]struct { answer: *const fn ([]const u8, []const u8) Reply, status: Status, keys: usize }{
         .{ .answer = &focusMovedPage, .status = .failed, .keys = 0 },
         .{ .answer = &stuckKeyDownPage, .status = .timeout, .keys = 2 }, // 누름이 시한이어도 뗀다
@@ -2478,8 +2524,10 @@ test "떼기를 끝까지 못 보내도 앞선 실패 이유로 답한다(엔진
     fail_left = 1;
     var op = try Op.init(testing.allocator, .press, "{\"key\":\"x\"}", 120);
     defer op.deinit(testing.allocator);
-    // 누름이 실패 → 떼기는 못 보냄(not_sent) 셋 — 마지막 답은 앞선 이유.
+    // 누름이 실패 → 떼기는 못 보냄(not_sent) 셋 — 마지막 답은 앞선 이유. 처음은 누르기 전 프레임.
     var step = try op.start(testing.allocator);
+    testing.allocator.free(step.call.params);
+    step = try op.feed(testing.allocator, .{ .ok = "{\"data\":\"\"}" });
     testing.allocator.free(step.call.params);
     step = try op.feed(testing.allocator, fail_reply);
     var n: usize = 0;
@@ -3435,4 +3483,77 @@ test "W9b③ 적대 리뷰 2 회차: wait 의 확인이 대화상자로 거절�
     try testing.expectEqual(Status.failed, r.status);
     try testing.expectEqualStrings(dialog_reason, r.result);
     try testing.expectEqual(@as(usize, 0), trail.sleeps);
+}
+
+test "W9b③ 적대 리뷰 3 회차: press(대상 있음·없음)와 빈 글 type 의 Delete 도 누르기 바로 앞에 프레임을 그린다 — 숨긴 탭의 키가 닿게" {
+    const cases = [_]struct { kind: Kind, arg: []const u8, down: []const u8, page: *const fn ([]const u8, []const u8) Reply = &happyPage }{
+        .{ .kind = .press, .arg = "{\"key\":\"Enter\",\"selector\":\"#e\"}", .down = "\"keyDown\"" },
+        .{ .kind = .press, .arg = "{\"key\":\"Enter\"}", .down = "\"keyDown\"" },
+        .{ .kind = .type_text, .arg = "{\"selector\":\"#e\",\"text\":\"\"}", .down = "\"keyDown\",\"key\":\"Delete\"", .page = &editorPage },
+    };
+    for (cases, 0..) |c, n| {
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, c.kind, c.arg, 830 + n);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, c.page, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.success, r.status);
+        const down = for (trail.params.items, 0..) |p, i| {
+            if (std.mem.indexOf(u8, p, c.down) != null) break i;
+        } else return error.TestUnexpectedResult;
+        try testing.expect(down > 0);
+        try testing.expectEqualStrings("Page.captureScreenshot", trail.methods.items[down - 1]);
+        try testing.expectEqualStrings(frame_params, trail.params.items[down - 1]);
+    }
+}
+
+fn w9b3r3DialogOnPress(method: []const u8, params: []const u8) Reply {
+    // 누름을 받자 페이지가 대화상자를 띄웠다 — sidecar 는 그 호출을 곧 끝내고(.dialog → failed), 놓기는 대화상자가 답해질 때까지 거절한다.
+    if (std.mem.indexOf(u8, params, "\"keyDown\"") != null or std.mem.indexOf(u8, params, "mousePressed") != null) return .{ .failed = dialog_reason };
+    if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .not_sent = dialog_reason };
+    return happyPage(method, params);
+}
+
+test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄우면 떼기를 보내고 「눌렀다 — 대화상자」 로 답한다(실패로 답하면 다시 해 두 번 제출)" {
+    const cases = [_]struct { kind: Kind, arg: []const u8, up: []const u8 }{
+        .{ .kind = .press, .arg = "{\"key\":\"Enter\"}", .up = "\"keyUp\"" },
+        .{ .kind = .press, .arg = "{\"key\":\"Enter\",\"selector\":\"#e\"}", .up = "\"keyUp\"" },
+        .{ .kind = .click, .arg = "{\"selector\":\"#b\"}", .up = "mouseReleased" },
+    };
+    for (cases, 0..) |c, n| {
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, c.kind, c.arg, 840 + n);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &w9b3r3DialogOnPress, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(Status.success, r.status);
+        try testing.expect(std.mem.indexOf(u8, r.result, "\"dialog\":true") != null);
+        var ups: usize = 0;
+        for (trail.params.items) |p| if (std.mem.indexOf(u8, p, c.up) != null) {
+            ups += 1;
+        };
+        try testing.expectEqual(@as(usize, 1), ups);
+    }
+}
+
+fn w9b3r3DialogOnInsert(method: []const u8, params: []const u8) Reply {
+    // 글을 넣자 페이지가 대화상자를 띄웠다(oninput 의 alert) — 다시 읽기·놓기는 대화상자 동안 답하지 않는다.
+    if (std.mem.eql(u8, method, "Input.insertText")) return .{ .failed = dialog_reason };
+    if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .not_sent = dialog_reason };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, params, "function(want,bh,bn)") != null) return .{ .not_sent = dialog_reason };
+    return editorPage(method, params);
+}
+
+test "W9b③ 적대 리뷰 3 회차: 글을 넣은 뒤 대화상자가 뜨면 다시 읽지 않고 「갔다 + 대화상자」 로 답한다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .type_text, "{\"selector\":\"#e\",\"text\":\"x\"}", 850);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &w9b3r3DialogOnInsert, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expect(std.mem.indexOf(u8, r.result, "\"dialog\":true") != null);
+    for (trail.params.items) |p| try testing.expect(std.mem.indexOf(u8, p, "function(want,bh,bn)") == null); // 다시 읽기를 보내지 않았다
 }

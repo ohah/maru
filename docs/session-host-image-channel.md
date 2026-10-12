@@ -298,19 +298,20 @@ CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데
   은 exec 완료를 기다린다) 느린 spawn 하나가 모든 원격 터미널의 이미지 적용을 멈춘다.
 - `posix_spawn` 계열(Darwin `system()` 포함)은 atfork 를 부르지 않는다 → `POSIX_SPAWN_CLOEXEC_DEFAULT` 를 쓰는 헬퍼를 거치게 하고,
   헬퍼를 거치지 않는 `posix_spawn`·`system` 호출을 문법 자리 판정자로 막는다.
-- 메인 스레드는 쓰기 잠금을 **`pthread_rwlock_trywrlock`** 으로만 잡는다. Darwin rwlock 에는 우선순위 상속이 없어, 메인이
+- 메인 스레드의 **tick** 은 쓰기 잠금을 **`pthread_rwlock_trywrlock`** 으로만 잡는다. Darwin rwlock 에는 우선순위 상속이 없어, 메인이
   BACKGROUND QoS 의 읽기 보유자를 기다리면 CPU 2 배 부하에서 최악 181 ms 를 멈춘다(실측, 부하 없으면 1.6 ms). 못 잡은 tick 에는
   채널 recvmsg 를 건너뛰고, `image_ref` 를 담은 배치를 만난 **그 스트림의 적용만** 그 배치에서 멈춘다(delta 는 앞 배치에 대한
   차이라 같은 스트림의 뒤 배치를 먼저 적용할 수 없다). 이미지가 없는 다른 스트림은 그대로 적용한다. fd 는 recvmsg 전까지 커널 큐에
-  있으므로 새지 않는다. tick 이 없는 동기 적용 자리(첫 attach 조립, 관찰자 재접속 후보)는 블로킹 쓰기 잠금을 허용한다 — 읽기
-  잠금이 fork 시스템콜 길이로 묶이므로 대기도 그만큼으로 묶인다.
+  있으므로 새지 않는다. tick 이 없는 동기 자리(첫 attach 조립, 관찰자 재접속 후보, 아래의 연결 소켓 생성)는 블로킹 쓰기 잠금을
+  허용한다 — 다시 올 기회가 없고 드물어서, 위의 최악 ~181 ms 를 받아들인다(읽기 잠금이 fork 시스템콜 하나만 덮어도 우선순위 상속이
+  없어 대기는 그보다 길 수 있다).
 - Swift/ObjC 쪽: WKWebView·NSWorkspace 는 XPC/launchd 로 뜨며 fd 를 물려받지 않는다. `Process()` 가 둘 있다(Mermaid 도우미 —
   제품, IME 후보 관찰 — 환경 변수 smoke). Foundation 의 `Process` 가 fd 를 넘기지 않는다는 것은 실측에 기댄다(Apple 내부 구현이라
   보장이 아니다) — Zig 판정자는 Swift 를 보지 않으므로 그 재고(`Process`·`NSTask` 생성 자리)를 같은 판정자 파일이 파일·개수·이유로
   고정한다.
 - 소켓도 같은 틈이 있다 — macOS 에는 `SOCK_CLOEXEC` 가 없어 `socket()` 과 `F_SETFD` 가 별개 호출이다. 앱의 연결 소켓(주·채널)은 수신
   잠금 안에서 만들고 CLOEXEC 까지 켠다. 채널 소켓을 자식이 물려받으면 앱이 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다. 이 자리도
-  블로킹 쓰기 잠금이다(메인의 connect 포함 — 연결은 tick 이 아니라 다시 올 기회가 없다). 대기는 fork 시스템콜 길이로 묶인다.
+  블로킹 쓰기 잠금이다(메인의 connect 포함 — 연결은 tick 이 아니라 다시 올 기회가 없다).
 - host 는 이 울타리를 쓰지 않는다 — host 가 받는 fd 는 프로토콜 위반뿐이고 owner 스레드가 받은 자리에서 닫는다(계획 IC4b).
 - 구현(IC4a): 울타리 `session_host/fork_fd_fence.zig`(앱 세션 생성이 세션 전에 설치), CLOEXEC_DEFAULT 헬퍼 `maru.pty.macos_spawn`,
   헬퍼 밖 `posix_spawn`·`posix_spawnp`·`system` 을 막는 `tests/boundary/spawn_cloexec_axis.zig`.

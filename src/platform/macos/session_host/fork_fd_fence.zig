@@ -50,8 +50,9 @@ pub fn tryLockReceive() bool {
     return c.pthread_rwlock_trywrlock(&lock) == .SUCCESS;
 }
 
-/// tick 이 없는 동기 적용 자리(첫 attach 조립·관찰자 재접속 후보)의 수신 잠금 — 읽기 잠금이 fork 시스템콜 길이로 묶이므로 대기도
-/// 그만큼으로 묶인다.
+/// tick 이 없는 동기 자리(첫 attach 조립·관찰자 재접속 후보·연결 소켓 생성)의 수신 잠금. 읽기 잠금은 fork 시스템콜 하나만 덮지만
+/// 우선순위 상속이 없어, 메인이 BACKGROUND QoS 의 fork 를 기다리면 부하에서 최악 ~181 ms 다(§7 실측) — 드물고 tick 이 아닌 자리만
+/// 그 값을 받아들인다.
 pub fn lockReceive() void {
     if (c.pthread_rwlock_wrlock(&lock) != .SUCCESS) @panic("image fd fence: wrlock failed");
 }

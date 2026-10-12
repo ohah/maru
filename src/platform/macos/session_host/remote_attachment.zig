@@ -312,8 +312,8 @@ pub const RemoteAttachment = struct {
     }
 
     /// 큐를 거치지 않는 적용 자리(첫 snapshot)의 resolver — 채널을 먼저 비운다. 그 snapshot 의 세그먼트는 attach 응답보다 먼저
-    /// 올 수 있다(§6). tick 이 없어 다시 올 기회가 없으므로 fork 울타리의 수신 잠금은 기다린다(`.block` — fork 시스템콜 길이로
-    /// 묶인다, §7). 비울 수 없어도(다른 연산이 slot 을 쥠) resolver 는 준다 — 맞는 세그먼트가 없으면 malformed 로 그 연결이
+    /// 올 수 있다(§6). tick 이 없어 다시 올 기회가 없으므로 fork 울타리의 수신 잠금은 기다린다(`.block` — 부하에서 최악
+    /// ~181 ms, §7). 비울 수 없어도(다른 연산이 slot 을 쥠) resolver 는 준다 — 맞는 세그먼트가 없으면 malformed 로 그 연결이
     /// 재접속한다.
     pub fn imageRefResolverAfterPump(self: *const RemoteAttachment, ctx: *ImageResolveCtx) ImageRefResolver {
         const resolver = self.imageRefResolver(ctx);
@@ -592,7 +592,7 @@ pub const RemoteAttachment = struct {
             return error.LedgerInvariant;
         }
         // 수신 잠금(§7): tick 펌프는 다음 tick 이 다시 세므로 기다리지 않는다. catch-up(관찰자 재접속 후보)은 같은 스레드의 동기
-        // 루프라 다시 올 tick 이 없다 — 물러서면 fork 하나와 겹친 재접속이 `Busy` 로 실패한다. 대기는 fork 시스템콜 길이로 묶인다.
+        // 루프라 다시 올 tick 이 없다 — 물러서면 fork 하나와 겹친 재접속이 `Busy` 로 실패한다. 대기는 부하에서 최악 ~181 ms(§7).
         const receive_wait: fork_fd_fence.ReceiveWait = if (catchup_accounting != null) .block else .try_lock;
         // 큐 머리가 이미 있으면 그 배치부터 본다 — 보류 중에 새 배치를 읽어 붙이면 보류가 이어지는 동안 큐가 자란다.
         const head_was_queued = self.pending_batch_head < self.pending_batches.items.len;
@@ -1761,6 +1761,29 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
     try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 4), transport.prepared);
     try std.testing.expectEqual(@as(usize, 2), transport.resolved);
+
+    // 순서를 뒤집어 남은 두 조합을 잰다 — 빈 큐에서 읽어 머리가 된 배치(tick)는 `.try_lock`, 이미 머리에 있는 배치(catch-up)는
+    // `.block`. 위는 빈 큐 catch-up 과 머리가 있는 tick 이었다.
+    var reversed = ImageTestTransport{
+        .batches = .{ try imageRefBatch(allocator, true), null },
+        .negotiated = true,
+        .ready = false,
+    };
+    var reversed_attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xab,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer reversed_attachment.deinit();
+    try reversed_attachment.bindTransport(reversed.interface());
+    try reversed_attachment.initScreen(screen_stream.codec_version);
+    try std.testing.expectEqual(PumpScreenResult.held, try reversed_attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .try_lock), reversed.last_wait);
+    var reversed_accounting: catchup_stage_contract.Accounting = .{};
+    try std.testing.expectEqual(PumpScreenResult.held, try reversed_attachment.pumpScreenInternal(std.testing.io, &reversed_accounting));
+    try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .block), reversed.last_wait);
+    try std.testing.expectEqual(@as(usize, 2), reversed.prepared);
 
     // `image_ref` 가 없는 배치는 채널과 무관하다 — 준비를 부르지 않고 보류하지 않는다.
     transport.ready = false;

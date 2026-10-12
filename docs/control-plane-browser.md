@@ -77,7 +77,21 @@ Phase 5 첫 슬라이스. **실 WKWebView 실행 없이**(=5d) `browser.*`의 **
 
 **확인 모달의 URL 은 「어느 사이트인가」를 지킨다**(2026-10-06). 권한은 출처가 아니라 **그 탭**(pane·target·scope)에 묶여 탭이 살아 있는 동안 유효하므로, 이후 그 탭에서 여는 사이트까지 열린다 — 그래서 사용자가 읽는 사이트 이름이 틀리면 안 된다. 동의문은 URL 을 60칸 안에 싣되(`app_host_abi.grantPromptUrl`) **스킴과 호스트는 줄이지 않고**, `user:pass@` 는 버리고(진짜 호스트는 `@` 뒤), 호스트 자체가 너무 길면 **왼쪽을** 「…」로 줄여 등록 도메인(오른쪽 끝)을 남기며, 경로·질의만 남은 칸에서 가운데를 줄인다. 예전에는 URL 전체의 가운데를 줄여 `https://accounts.google.com.session-verify-portal-x91.attacker.io/…` 가 `https://accounts.google.com.session-ver…` 로 보였다(적대적 검증).
 
-**슬라이스**: **CLI-0(doc, = 이 절)**. **CLI-1(L2 순수)**=`cli/browser.zig`(파싱·요청 바이트·렌더링) 헤드리스 TDD. **CLI-2(main 배선)**=main.zig `browser` 서브커맨드→소켓 왕복(runSessionCli 재사용/미러). 손 테스트(에이전트가 CLI로 브라우저 제어→모달→실행). **MCP 어댑터**는 CLI 검증 후 별도(§10 note — wire가 JSON-RPC 2.0이라 얇게 얹힘).
+**슬라이스**: **CLI-0(doc, = 이 절)**. **CLI-1(L2 순수)**=`cli/browser.zig`(파싱·요청 바이트·렌더링) 헤드리스 TDD. **CLI-2(main 배선)**=main.zig `browser` 서브커맨드→소켓 왕복(runSessionCli 재사용/미러). 손 테스트(에이전트가 CLI로 브라우저 제어→모달→실행). **MCP 어댑터**는 CLI 검증 후 별도(§10 note — wire가 JSON-RPC 2.0이라 얇게 얹힘) — W9f 에서 구현(§9.6.2).
+
+### 9.6.2 `maru mcp`·`maru browser repl` (W9f, 2026-10-12)
+
+에이전트가 브라우저 제어를 **도구**로 쓰는 두 입구. 둘 다 `maru browser` 러너를 그대로 돌린다 — 요청 모양·인가(1g pane 신원·확인 모달)·출력이 CLI 와 같다.
+
+- **`maru mcp`** — stdio MCP 서버(줄 하나에 JSON-RPC 메시지 하나). 에이전트 설정 예: `claude mcp add maru -- maru mcp`.
+  - `initialize` 는 클라이언트가 청한 판이 아는 것(`2025-06-18`·`2025-03-26`·`2024-11-05`)이면 그것, 아니면 최신으로 답한다. `ping`, `tools/list`, `tools/call`. 그 밖의 메서드는 `-32601`, 알림은 답하지 않는다.
+  - 도구 이름은 `browser_<하위 명령>`(`browser_list`·`browser_open`·`browser_close`·`browser_navigate`·`browser_get_url`·`browser_click`·`browser_type`·`browser_scroll`·`browser_hover`·`browser_press`·`browser_wait`·`browser_snapshot`·`browser_console`·`browser_back`·`browser_forward`·`browser_reload`·`browser_exec`·`browser_screenshot`). 인자 스키마는 `additionalProperties:false` — 모르는 키·틀린 형·빠진 필수는 실행 전에 거절한다.
+  - 인자는 CLI 인자로 옮긴다: 값은 `--flag=값` 한 토큰, 위치 인자는 `--` 뒤(값이 `-` 로 시작하거나 `--help` 여도 옵션·도움말로 읽히지 않는다).
+  - 결과는 CLI 가 낼 글(`content:[{type:"text"}]`, 실패면 `isError:true`). `browser_screenshot` 은 PNG 를 `type:"image"`(base64)로.
+  - **표준 출력에는 MCP 메시지만** — CLI 의 안내(인스턴스 없음 등)는 결과 글에 싣는다. 요청은 하나씩 처리한다. 연결은 호출마다 새로 맺어 그때의 pane 신원으로 인가한다.
+  - 한 호출의 길이: 확인 모달은 최대 120 초 기다리고(무응답이면 연결이 닫혀 「응답 없음」), 그 뒤 op 은 최대 25 초(wait·open) — 약 150 초. Codex 의 기본 도구 시한(60 초)보다 길어 `initialize` 의 `instructions` 에 「도구 시한을 150 초 이상으로」를 싣는다. 클라이언트가 먼저 포기하면(`notifications/cancelled` — 무시한다) 그 호출이 끝날 때까지 다음 호출이 기다린다.
+  - pane 신원: MCP 서버는 에이전트가 띄운 자식이다(제어 터미널 없이 새 세션일 수 있다) — 1g 가 조상 사슬에서 그 pane 의 foreground 조상(에이전트)을 찾는다(스모크로 실측).
+- **`maru browser repl [--surface <id>]`** — 줄마다 하위 명령 하나(`maru browser` 빼고, 따옴표 `'…'`·`"…"`). `use <id>` 로 고른 탭은 대상이 빠진 명령에 `--surface` 로 붙는다(`open` 은 연 탭을 곧 고른다). `exit`·`quit`·입력 끝으로 끝나고, 한 명령이라도 실패했으면 종료 상태 1. 표준 입력이 터미널이면 프롬프트를 표준 오류에 낸다(표준 출력은 명령 출력만).
 
 ### CLI 대상 서페이스 단일 지정
 

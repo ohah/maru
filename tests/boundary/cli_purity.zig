@@ -76,7 +76,7 @@ const inventory = [_]Entry{
     .{
         .path = "browser/run.zig",
         .expect = .exempt,
-        .why = "cli/의 의도된 impure 예외 — browser.zig(순수)의 짝으로 응답 수신 read/close와 --out 원자 공개를 갖는다.",
+        .why = "cli/의 의도된 impure 예외 — browser.zig(순수)의 짝으로 응답 수신 read/close와 --out 원자 공개, 표준 입력 줄 읽기(`LineReader` — repl·`maru mcp`, W9f)를 갖는다.",
     },
     .{
         .path = "incidents_run.zig",

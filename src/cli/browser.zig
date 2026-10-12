@@ -51,6 +51,7 @@ pub const browser_help =
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
     \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane)
     \\  close   --surface <id>                     close a tab this pane opened (asks the page; "not closed" if it asks before leaving)
+    \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
 
@@ -177,6 +178,8 @@ pub const Command = union(enum) {
     request: Request,
     screenshot: ScreenshotCmd,
     help,
+    /// `browser repl [--surface <id>]`(W9f) — 줄마다 하위 명령을 읽어 돌린다. 고른 탭(`use <id>`·`open`)은 `--surface` 를 생략한다.
+    repl: struct { surface: ?u64 },
 };
 
 /// 파싱 실패. main이 usage/에러 메시지를 stderr에 낸다(sessions.ParseError와 동형 규율).
@@ -255,6 +258,11 @@ pub fn parse(args: []const []const u8) ParseError!Command {
     if (args.len == 0) return error.MissingSubcommand;
     const sub = args[0];
     const rest = args[1..];
+    if (eq(sub, "repl")) {
+        const p = try parseSurfaceArg(rest);
+        if (p.arg != null) return error.UnexpectedArgument;
+        return .{ .repl = .{ .surface = p.surface } };
+    }
     if (eq(sub, "list")) {
         // 발견 — 대상 surface 불요(전부 나열). 남는 인자(옵션/위치)는 에러(오타 방지).
         if (rest.len != 0) {
@@ -569,6 +577,11 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
         } else if (std.mem.startsWith(u8, arg, "--out=")) {
             out = arg["--out=".len..];
             i += 1;
+        } else if (eq(arg, "--")) {
+            // 그 뒤 하나는 `-` 로 시작해도 식이다(W9f).
+            if (script != null or rest.len != i + 2) return if (rest.len == i + 1) error.MissingScript else error.UnexpectedArgument;
+            script = rest[i + 1];
+            i += 2;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownOption;
         } else {
@@ -603,6 +616,11 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
         } else if (std.mem.startsWith(u8, a, "--surface=")) {
             try assignSurface(&surface, a["--surface=".len..]);
             i += 1;
+        } else if (eq(a, "--")) {
+            // 그 뒤 하나는 `-` 로 시작해도 위치 인자다(W9f).
+            if (arg != null or rest.len > i + 2) return error.UnexpectedArgument;
+            if (rest.len == i + 2) arg = rest[i + 1];
+            i = rest.len;
         } else if (std.mem.startsWith(u8, a, "-")) {
             return error.UnknownOption;
         } else {
@@ -835,7 +853,10 @@ fn optValue(rest: []const []const u8, i: *usize, opt: []const u8) ParseError![]c
 }
 
 fn hasHelpFlag(args: []const []const u8) bool {
-    for (args) |a| if (eq(a, "--help") or eq(a, "-h")) return true;
+    for (args) |a| {
+        if (eq(a, "--")) return false; // 그 뒤는 위치 인자(W9f — `exec -- -h` 는 식이다)
+        if (eq(a, "--help") or eq(a, "-h")) return true;
+    }
     return false;
 }
 
@@ -2457,6 +2478,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
         \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane)
         \\  close   --surface <id>                     close a tab this pane opened (asks the page; "not closed" if it asks before leaving)
+        \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
         browser_help,
@@ -2806,4 +2828,163 @@ test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄
     var w: std.Io.Writer = .fixed(&buf);
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"dialog\":true}}", .ok, &w));
     try testing.expectEqualStrings("ok\nwarning: the page opened a dialog right after the input — the input reached the page, do not repeat it; answer the dialog in that tab\n", w.buffered());
+}
+
+// ── W9f: repl ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// repl 한 줄을 셸처럼 나눈다 — 공백으로 가르고, 작은따옴표 안은 그대로, 큰따옴표 안은 `\"`·`\\` 만 푼다. 따옴표가 닫히지 않으면 null.
+/// 돌려준 글은 `arena` 소유.
+pub fn splitLine(arena: std.mem.Allocator, line: []const u8) std.mem.Allocator.Error!?[]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var cur: std.ArrayList(u8) = .empty;
+    var in_token = false;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        const ch = line[i];
+        switch (ch) {
+            ' ', '\t', '\r', '\n' => if (in_token) {
+                try out.append(arena, try cur.toOwnedSlice(arena));
+                in_token = false;
+            },
+            '\'' => {
+                in_token = true;
+                const end = std.mem.indexOfScalarPos(u8, line, i + 1, '\'') orelse return null;
+                try cur.appendSlice(arena, line[i + 1 .. end]);
+                i = end;
+            },
+            '"' => {
+                in_token = true;
+                i += 1;
+                while (true) : (i += 1) {
+                    if (i >= line.len) return null;
+                    if (line[i] == '"') break;
+                    if (line[i] == '\\' and i + 1 < line.len and (line[i + 1] == '"' or line[i + 1] == '\\')) i += 1;
+                    try cur.append(arena, line[i]);
+                }
+            },
+            else => {
+                in_token = true;
+                try cur.append(arena, ch);
+            },
+        }
+    }
+    if (in_token) try out.append(arena, try cur.toOwnedSlice(arena));
+    return try out.toOwnedSlice(arena);
+}
+
+pub const ReplLine = union(enum) {
+    empty,
+    exit,
+    help,
+    use: u64,
+    /// `use` 뒤가 탭 id 하나가 아니다.
+    bad_use,
+    unterminated_quote,
+    /// 돌릴 하위 명령 인자(고른 탭이 있고 필요하면 `--surface` 를 붙였다).
+    command: []const []const u8,
+};
+
+/// 대상 탭을 받지 않는 하위 명령.
+fn takesNoSurface(sub: []const u8) bool {
+    return eq(sub, "list") or eq(sub, "open") or eq(sub, "help") or eq(sub, "repl");
+}
+
+/// repl 한 줄 — `exit`·`quit`, `help`·`?`, `use <id>`, `#` 주석, 그 밖은 하위 명령(고른 탭이 있고 대상이 빠졌으면 `--surface` 를 붙인다).
+pub fn replLine(arena: std.mem.Allocator, line: []const u8, current: ?u64) std.mem.Allocator.Error!ReplLine {
+    const toks = (try splitLine(arena, line)) orelse return .unterminated_quote;
+    if (toks.len == 0 or std.mem.startsWith(u8, toks[0], "#")) return .empty;
+    if (eq(toks[0], "exit") or eq(toks[0], "quit")) return .exit;
+    if (eq(toks[0], "help") or eq(toks[0], "?")) return .help;
+    if (eq(toks[0], "use")) {
+        if (toks.len != 2) return .bad_use;
+        return .{ .use = std.fmt.parseInt(u64, toks[1], 10) catch return .bad_use };
+    }
+    // 대상이 빠졌을 때만 붙인다 — 파서에 묻는다(`--text --surface=2` 의 값은 대상 옵션이 아니다, `--` 뒤도).
+    const missing_surface = if (parse(toks)) |_| false else |e| e == error.MissingSurface;
+    if (current == null or !missing_surface or takesNoSurface(toks[0])) return .{ .command = toks };
+    var out: std.ArrayList([]const u8) = .empty;
+    try out.append(arena, toks[0]);
+    try out.appendSlice(arena, &.{ "--surface", try std.fmt.allocPrint(arena, "{d}", .{current.?}) });
+    try out.appendSlice(arena, toks[1..]);
+    return .{ .command = try out.toOwnedSlice(arena) };
+}
+
+/// `opened <id> …` 줄에서 id(repl 이 연 탭을 곧 고른다).
+pub fn openedId(output: []const u8) ?u64 {
+    if (!std.mem.startsWith(u8, output, "opened ")) return null;
+    const rest = output["opened ".len..];
+    const end = std.mem.indexOfAny(u8, rest, " \n") orelse rest.len;
+    return std.fmt.parseInt(u64, rest[0..end], 10) catch null;
+}
+
+test "W9f repl: 줄 나누기 — 공백·작은따옴표·큰따옴표(\\\" 풀기), 닫히지 않은 따옴표는 null" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const t = (try splitLine(a, "click  --role button --name 'Save draft'")).?;
+    try testing.expectEqual(@as(usize, 5), t.len);
+    try testing.expectEqualStrings("Save draft", t[4]);
+    const q = (try splitLine(a, "type --text \"say \\\"hi\\\"\" x")).?;
+    try testing.expectEqual(@as(usize, 4), q.len);
+    try testing.expectEqualStrings("say \"hi\"", q[2]);
+    try testing.expectEqualStrings("a'b", (try splitLine(a, "x \"a'b\"")).?[1]);
+    try testing.expectEqualStrings("ab", (try splitLine(a, "x a'b'")).?[1]);
+    try testing.expect((try splitLine(a, "click --name 'open")) == null);
+    try testing.expect((try splitLine(a, "type --text \"x")) == null);
+    try testing.expectEqual(@as(usize, 0), (try splitLine(a, "   ")).?.len);
+    try testing.expectEqualStrings("", (try splitLine(a, "type --text ''")).?[2]);
+}
+
+test "W9f repl: 줄 해석 — use·exit·help·주석, 고른 탭은 --surface 로 붙이고(이미 있거나 list·open 이면 그대로)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expectEqual(@as(u64, 7), (try replLine(a, "use 7", null)).use);
+    try testing.expect(try replLine(a, "use x", null) == .bad_use);
+    try testing.expect(try replLine(a, "use", null) == .bad_use);
+    try testing.expect(try replLine(a, "quit", 3) == .exit);
+    try testing.expect(try replLine(a, "?", 3) == .help);
+    try testing.expect(try replLine(a, "# note", 3) == .empty);
+    try testing.expect(try replLine(a, "", 3) == .empty);
+    try testing.expect(try replLine(a, "click --name 'x", 3) == .unterminated_quote);
+    const c = (try replLine(a, "click --selector '#b'", 7)).command;
+    try testing.expectEqual(@as(u64, 7), (try parse(c)).request.click.surface_id);
+    const own = (try replLine(a, "click --surface 9 --selector a", 7)).command;
+    try testing.expectEqual(@as(u64, 9), (try parse(own)).request.click.surface_id);
+    const own_eq = (try replLine(a, "click --surface=9 --selector a", 7)).command;
+    try testing.expectEqual(@as(u64, 9), (try parse(own_eq)).request.click.surface_id);
+    const nav = (try replLine(a, "navigate https://e.test/", 7)).command;
+    try testing.expectEqual(@as(u64, 7), (try parse(nav)).request.navigate.surface_id);
+    try testing.expectEqual(@as(usize, 1), (try replLine(a, "list", 7)).command.len);
+    const op = (try replLine(a, "open --url https://e.test/", 7)).command;
+    try testing.expect((try parse(op)).request.open.url != null);
+    try testing.expectError(error.MissingSurface, parse((try replLine(a, "click --selector a", null)).command));
+    try testing.expectEqual(@as(?u64, 12), openedId("opened 12 https://e.test/\n"));
+    try testing.expectEqual(@as(?u64, 4), openedId("opened 4\n"));
+    try testing.expectEqual(@as(?u64, null), openedId("error: x"));
+    try testing.expectEqual(@as(u64, 5), (try parse(&.{ "repl", "--surface", "5" })).repl.surface.?);
+    try testing.expectEqual(@as(?u64, null), (try parse(&.{"repl"})).repl.surface);
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "repl", "x" }));
+}
+
+test "W9f: `--` 뒤 하나는 `-` 로 시작해도 위치 인자 — 도움말 검사도 거기서 멈춘다" {
+    try testing.expectEqualStrings("-1", (try parse(&.{ "exec", "--surface", "2", "--", "-1" })).request.exec.script);
+    try testing.expectEqualStrings("-h", (try parse(&.{ "exec", "--surface", "2", "--", "-h" })).request.exec.script);
+    try testing.expectEqualStrings("--help", (try parse(&.{ "navigate", "--surface", "2", "--", "--help" })).request.navigate.url);
+    try testing.expect(try parse(&.{ "exec", "--help", "--", "-1" }) == .help);
+    try testing.expectError(error.MissingScript, parse(&.{ "exec", "--surface", "2", "--" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "exec", "--surface", "2", "--", "a", "b" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "exec", "--surface", "2", "x", "--", "a" }));
+    try testing.expectError(error.MissingUrl, parse(&.{ "navigate", "--surface", "2", "--" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "navigate", "--surface", "2", "--", "a", "b" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "navigate", "--surface", "2", "a", "--", "b" }));
+    try testing.expectEqualStrings("--help", (try parse(&.{ "type", "--surface", "2", "--selector", "a", "--text=--help" })).request.type_text.text);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const c = (try replLine(arena_state.allocator(), "exec -- --surface", 7)).command;
+    try testing.expectEqual(@as(u64, 7), (try parse(c)).request.exec.surface_id);
+    // 값이 대상 옵션처럼 보여도 대상이 아니다(「CLI 대상 서페이스 단일 지정」) — 고른 탭을 붙인다.
+    const t = (try replLine(arena_state.allocator(), "type --selector a --text --surface=2", 7)).command;
+    try testing.expectEqual(@as(u64, 7), (try parse(t)).request.type_text.surface_id);
+    try testing.expectEqualStrings("--surface=2", (try parse(t)).request.type_text.text);
 }

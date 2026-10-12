@@ -7796,12 +7796,9 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
-            // required 는 Busy, best_effort 는 주 호출만(`web_cdp_ops.Kick`).
+            // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
-            const sent = switch (next.kick) {
-                .none => session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, sink),
-                .best_effort, .required => |k| session_mod.web_osr.devtoolsCallKicked(gpa, run.surface_id, next.method, next.params, sink, k.optional()),
-            };
+            const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
             _ = sent catch |e| return switch (e) {
                 // 보내지 못했다 — op 이 정한다(누른 뒤의 떼기면 잠깐 뒤 다시, 놓기면 동작의 결과로, 앞선 실패가 있으면 그 이유로 — 3·4 회차).
                 error.NotReady, error.Busy => {

@@ -11,7 +11,8 @@
 //!   dt-unknown         없는 브라우저 → unknown_browser
 //!   dt-too-large       16 MiB 를 넘는 결과는 조각 없이 too_large
 //!   dt-big-result-time 8 MiB 결과를 sidecar 가 다 써 보내는 시간(판정자는 바로 읽는다 — maru 의 tick 예산 지연은 재지 않는다)
-//!   dt-hidden-kick     숨긴 탭(W9b②-3): 접근성 질의만 보내면 답하지 않다가(정보 — 답하면 Chromium 이 고친 것이니 kick 을 걷어낼 신호)
+//!   dt-hidden-kick     숨긴 탭(W9b②-3): 접근성 질의만 보내면 답하지 않다가(이것도 합격 조건이다 — 답하면 이 판정이 실패한다: Chromium 이
+//!                      고친 것이니 kick 을 걷어낼 신호, 5 회차에 머리말을 판정에 맞췄다)
 //!                      1×1 스크린샷(kick)을 보내면 풀리고, 질의 바로 뒤 kick 을 함께 보내면 시한 안에 답한다. 포인터 이동(mouseMoved)도
 //!                      kick 과 함께면 곧 답한다(없으면 숨긴 탭에서 5 초). maru 가 기대는 Chromium 내부 동작 — CEF 를 올릴 때 여기서 본다
 //!   dt-kick-stale      답이 오지 않는 kick(경고창이 떠 있는 동안 — 이동하는 순간에 보낸 kick 과 같다)을 sidecar 가 3 초 남짓에 expired

@@ -879,7 +879,9 @@ fn identityFromStat(stat: std.posix.Stat) file_tree.Identity {
 
 fn hashFile(allocator: std.mem.Allocator, io: std.Io, owned_path: []u8) Result {
     var result = Result{ .kind = .file_hash, .path = owned_path };
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, owned_path, allocator, .limited(8 * 1024 * 1024)) catch return result;
+    // 해시하는 파일은 대개 **방금 바뀐**(아직 쓰이는) 파일이다 — std readFileAlloc 은 그 사이 파일이 자라면 패닉한다
+    // (크기 캐시 넘침, `maru.file_read` 머리말). 이 워커가 죽으면 앱 전체가 죽는다.
+    const bytes = maru.file_read.readFileAlloc(io, std.Io.Dir.cwd(), owned_path, allocator, 8 * 1024 * 1024) catch return result;
     defer allocator.free(bytes);
     result.file_hash = std.hash.Wyhash.hash(0, bytes);
     result.ok = true;
@@ -1672,4 +1674,58 @@ test "원격 매핑: 원격 오류(`!`)는 완결된 답이다 — 메시지가 
     try std.testing.expect(!result.ok);
     try std.testing.expectEqualStrings("opendir failed: AccessDenied", result.remote_error.?);
     try std.testing.expectEqual(@as(usize, 0), result.entries.items.len);
+}
+
+// **쓰는 중인 파일도 해시할 수 있어야 한다.** 파일 감시가 바뀐 파일을 해시하는 순간은 대개 그 파일이 **아직 쓰이는
+// 중**이다(로그·빌드 산출물). std `readFileAlloc` 은 크기를 한 번 재서 캐시하고 그 크기를 기준으로 남은 양을 셈하므로,
+// 그 사이 파일이 자라면 `Io/Writer.zig` sendFile 의 `size - pos` 가 넘쳐 **패닉**한다(Debug — `catch` 로 못 잡는다,
+// 워커 스레드라 앱 전체가 죽는다). 2026-10-12 판정자 `live_pty` 에서 같은 원인을 5% 로 재현했다.
+test "hashFile: 다른 스레드가 쓰는 중인 파일을 반복해 해시해도 죽지 않는다" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "grow.log", .data = "start\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrintZ(&path_buf, "{s}/grow.log", .{root});
+
+    const Writer = struct {
+        stop: std.atomic.Value(bool) = .init(false),
+        writes: std.atomic.Value(usize) = .init(0),
+        fn run(self: *@This(), p: [:0]const u8) void {
+            const fd = std.c.open(p.ptr, .{ .ACCMODE = .WRONLY, .APPEND = true, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+            if (fd < 0) return;
+            defer _ = std.c.close(fd);
+            const chunk = "x" ** 4096;
+            var written: usize = 0;
+            while (!self.stop.load(.acquire)) {
+                _ = std.c.write(fd, chunk, chunk.len);
+                written += chunk.len;
+                // 끝없이 자라 상한(8 MiB)에 닿지 않게 가끔 비운다 — 줄어드는 순간(로그 회전)도 실제로 있는 일이다.
+                if (written >= 1 << 20) {
+                    _ = std.c.ftruncate(fd, 0);
+                    written = 0;
+                }
+                _ = self.writes.fetchAdd(1, .monotonic);
+            }
+        }
+    };
+    var writer: Writer = .{};
+    const thread = try std.Thread.spawn(.{}, Writer.run, .{ &writer, path });
+    defer {
+        writer.stop.store(true, .release);
+        thread.join();
+    }
+    var hashed: usize = 0;
+    for (0..3000) |_| {
+        var result = hashFile(allocator, io, try allocator.dupe(u8, path));
+        defer result.deinit(allocator, io);
+        hashed += @intFromBool(result.ok);
+    }
+    // 개수로 확인한다 — 쓰기가 실제로 겹쳤고(쓰는 스레드가 돌았고) 해시도 실제로 됐다.
+    try std.testing.expect(writer.writes.load(.monotonic) > 0);
+    try std.testing.expect(hashed > 0);
 }

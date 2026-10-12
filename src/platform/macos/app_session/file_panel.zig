@@ -2068,12 +2068,9 @@ pub fn readOpenedFile(self: *AppSession, gpa: std.mem.Allocator, file: std.Io.Fi
     if (stat.kind != .file) return error.NotRegularFile;
     if (stat.size > file_panel_bridge.max_file_bytes) return error.TooLarge;
 
-    var read_buf: [64 * 1024]u8 = undefined;
-    var reader = file.reader(self.io, &read_buf);
-    const bytes = reader.interface.allocRemaining(
-        gpa,
-        .limited(file_panel_bridge.max_file_bytes + 1),
-    ) catch |err| switch (err) {
+    // 미리보기 대상은 사용자 파일이라 **쓰이는 중일 수 있다**(로그 등). std `allocRemaining` 은 그 사이 파일이 자라면
+    // 크기 캐시가 넘쳐 패닉한다 — 크기를 묻지 않는 `maru.file_read` 로 읽는다(위 stat 은 「너무 큰가」 사전 판정일 뿐이다).
+    const bytes = maru.file_read.readOpenedAlloc(self.io, gpa, file, file_panel_bridge.max_file_bytes + 1) catch |err| switch (err) {
         error.StreamTooLong => return error.TooLarge,
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.NotFound,

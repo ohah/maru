@@ -1286,6 +1286,14 @@ pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.Clo
                 if (self.osr_key_target == surface_id and web_osr.composing(surface_id)) self.osr_discard_marked = true;
                 if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test pageclose {s}\n", .{@tagName(outcome)});
                 if (self.tabs.items.len == 1 and tab.panes.items.len == 1 and pane.terms.items.len == 1) {
+                    // W9b③: 에이전트가 물은 닫기는 창·앱 닫기로 번지지 않는다(묻는 사이 창의 유일한 탭이 됐다) — 빈 탭으로 둔다.
+                    if (web_osr.closeAskedByAgent(surface_id)) {
+                        if (outcome == .closed and !web_osr.browserLive(surface_id)) {
+                            web_osr.revivePageClosed(self.allocator, surface_id);
+                        } else if (outcome == .closed) web_osr.settleClosedPark(self.allocator, surface_id);
+                        setWebNavState(self, surface_id, false, false, "");
+                        return;
+                    }
                     if (self.is_last_window) {
                         // 브라우저가 닫혔으면 빈 탭으로 둔다(종료를 그만두면 남는 탭 — 죽은 번호로 입력을 보내지 않게). 받는 중이라
                         // about:blank 로 보낸 브라우저(W10c)는 살아 있다 — 되살리면 같은 번호를 sidecar 가 거절해 먹통 탭이 됐다(적대 리뷰
@@ -1426,7 +1434,10 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
         for (pane.terms.items, 0..) |t, i| if (t.surfaceId() == run.child) break :blk i;
         break :blk null;
     };
-    const plan = ws.new_tab.place(opener_index, pane.active_term, last_child, request.placement, visible);
+    // W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽 탭으로(사용자 화면을 가로채지 않는다 — 사용자 결정 2026-10-12).
+    const agent_pane = pane.terms.items[opener_index].agent_opener;
+    const placement: ws.new_tab.Placement = if (agent_pane != 0) .background else request.placement;
+    const plan = ws.new_tab.place(opener_index, pane.active_term, last_child, placement, visible);
     // 페이지가 연 탭 = 비신뢰 browser(WebKit 의 팝업 adopt 와 같다). 이어 받은 팝업(W6f②)은 sidecar 에 맡긴 그 번호로 — 브라우저는 이미
     // 돈다(주소를 싣지 않는다).
     const term = if (request.adopt != 0) try createWebTermWithId(self, .browser, request.adopt) else try createWebTerm(self, .browser);
@@ -1436,6 +1447,10 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
     };
     if (request.adopt != 0) self.allocator.free(request.url) else term.pending_url = request.url; // 주소는 이제 탭이 놓는다(`destroyTerm`·소비)
     if (request.adopt == 0) web_osr.notePageOpened(term.surfaceId()); // W10c: 문서 없이 다운로드만 하면 닫을 탭(이어 받은 팝업은 web_osr 가 안다)
+    // W9b③: 그 pane 의 에이전트 탭으로 친다(상한 안이면 — 넘치면 보통 탭). 곧 조작·닫기 가능.
+    if (agent_pane != 0) if (self.agent_page_tab_callback) |cb| if (cb(agent_pane, term.surfaceId())) {
+        term.agent_opener = agent_pane;
+    };
     if (plan.focus) {
         pane.active_term += @intFromBool(plan.at <= pane.active_term); // 끼운 자리만큼 민 뒤 옮긴다(focusTerm 은 같은 자리면 일찍 끝난다)
         self.focusTerm(plan.at);
@@ -1452,7 +1467,7 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
         for (pane.terms.items, 0..) |t, i| if (t.surfaceId() == opener) {
             opener_now = i;
         };
-        std.debug.print("osr-test newtab at={d} tabs={d} opener={d} active={d} placement={s} adopted={}\n", .{ plan.at, pane.terms.items.len, opener_now, pane.active_term, @tagName(request.placement), request.adopt != 0 });
+        std.debug.print("osr-test newtab at={d} tabs={d} opener={d} active={d} placement={s} adopted={}\n", .{ plan.at, pane.terms.items.len, opener_now, pane.active_term, @tagName(placement), request.adopt != 0 });
     }
 }
 
@@ -1598,6 +1613,86 @@ pub fn osrOpenUrlTab(self: *AppSession, url: []const u8) bool {
     self.workspaceChanged(.topology);
     self.metal_dirty = true;
     return true;
+}
+
+pub const AgentOpenError = error{ CallerNotFound, TabsHidden, OutOfMemory };
+
+/// W9b③: 에이전트(그 pane 의 surface `opener`)가 연 탭 — 그 pane 의 탭 줄 끝에 **뒤쪽 탭**으로(포커스·화면 그대로 — 사용자 결정
+/// 2026-10-12). 주소는 새 탭 규칙(http·https — L2 가 이미 걸렀다). 레이아웃과 상관없이 숨긴 채 곧 만든다 — 레이아웃은 창의 활성
+/// 최상위 탭의 pane 만 모아, 에이전트 pane 이 다른 최상위 탭에 있으면 브라우저가 만들어지지 않았다(첫 주소도 안 간다 — 계획 공격
+/// 1 회차). 크기는 창의 본문 — 배치되면 그 크기로 맞춘다. 탭 줄을 숨긴 창에서는 사용자가 볼 수 없어 열지 않는다. 엔진이 켜졌는지는
+/// 부른 쪽(app_host_abi)이 본다.
+pub fn openAgentTab(self: *AppSession, opener: u64, url: ?[]const u8) AgentOpenError!u64 {
+    if (self.tabsBlocked()) return error.TabsHidden;
+    const pane = paneHolding(self, opener) orelse return error.CallerNotFound;
+    const owned: ?[]u8 = if (url) |u| try self.allocator.dupe(u8, u) else null;
+    errdefer if (owned) |o| self.allocator.free(o);
+    const term = createWebTerm(self, .browser) catch return error.OutOfMemory;
+    pane.terms.append(self.allocator, term) catch {
+        term_ops.destroyTerm(self, term);
+        return error.OutOfMemory;
+    };
+    term.agent_opener = opener;
+    term.pending_url = owned;
+    if (web_osr.enabled()) {
+        const r = self.termRect();
+        web_osr.ensure(self.allocator, .{ .surface_id = term.surfaceId(), .width_px = r.w, .height_px = r.h, .visible = false }, self.scale_milli, @intCast(app_session_mod.monotonicMs()));
+    }
+    self.workspaceChanged(.topology);
+    self.metal_dirty = true;
+    return term.surfaceId();
+}
+
+/// 그 surface 를 든 pane(이 창 안).
+fn paneHolding(self: *AppSession, surface_id: u64) ?*app_session_mod.Pane {
+    for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (term.surfaceId() == surface_id) return pane;
+    };
+    return null;
+}
+
+pub const AgentCloseStart = enum {
+    /// 곧 닫았다(브라우저가 아직 없거나 엔진이 멈췄다 — 물을 페이지가 없다).
+    closed,
+    /// 페이지에 물었다 — 창의 tick 이 닫거나(`osrCloseAskedTab`), 페이지가 떠나기 확인으로 묻는다.
+    asking,
+    /// 이미 떠나기 확인이 떠 있다 — 사용자가 그 탭에서 정한다.
+    page_asks,
+    /// 그 pane 이 연 탭이 아니다.
+    not_owner,
+    /// 그 창의 유일한 탭이다 — 닫으면 창이 닫힌다.
+    only_tab,
+    not_found,
+};
+
+/// W9b③: 에이전트가 자기가 연 탭을 닫는다 — 페이지에 묻는 닫기(사용자 결정 2026-10-10). 활성 탭 기준이 아니라 그 탭에(`closeAskingPage`
+/// 는 활성 pane·Term 을 본다). 창으로 번지지 않는다 — 창의 유일한 탭이면 닫지 않는다(완료 때 다시 본다 — `osrCloseAskedTab`).
+pub fn agentCloseTab(self: *AppSession, surface_id: u64, opener: u64) AgentCloseStart {
+    for (self.tabs.items, 0..) |tab, tab_index| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |term, index| {
+        if (term.surfaceId() != surface_id) continue;
+        if (opener == 0 or term.agent_opener != opener) return .not_owner;
+        if (self.tabs.items.len == 1 and tab.panes.items.len == 1 and pane.terms.items.len == 1) return .only_tab;
+        if (web_osr.closeAskPhase(surface_id) == .asked) return .page_asks;
+        if (web_osr.askCloseByAgent(self.allocator, surface_id, @intCast(app_session_mod.monotonicMs()))) return .asking;
+        term_ops.closeTermAt(self, tab_index, pane, index);
+        self.workspaceChanged(.topology);
+        self.metal_dirty = true;
+        return .closed;
+    };
+    return .not_found;
+}
+
+/// 에이전트 탭을 묻지 않고 곧 닫는다(W9b③ — 연 직후 grant 를 넣지 못해 거둘 때. 페이지는 아직 아무것도 받지 않았다). 창으로 번지지 않는다.
+pub fn agentCloseTabNow(self: *AppSession, surface_id: u64) bool {
+    for (self.tabs.items, 0..) |tab, tab_index| for (tab.panes.items) |pane| for (pane.terms.items, 0..) |term, index| {
+        if (term.surfaceId() != surface_id) continue;
+        if (self.tabs.items.len == 1 and tab.panes.items.len == 1 and pane.terms.items.len == 1) return false;
+        term_ops.closeTermAt(self, tab_index, pane, index);
+        self.workspaceChanged(.topology);
+        self.metal_dirty = true;
+        return true;
+    };
+    return false;
 }
 
 /// 띄운 메뉴에서 「…에서 '…' 검색」을 골랐다(W6h①) — 설정의 검색 틀로 주소를 만들어 그 탭 오른쪽에 앞 탭으로 연다(새 탭 경로).

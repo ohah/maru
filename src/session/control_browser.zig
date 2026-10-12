@@ -44,7 +44,8 @@ const cp = @import("control_plane.zig");
 const capmod = @import("control_capability.zig");
 const cs = @import("control_surface.zig");
 const cev = @import("control_events.zig"); // 5f-0b-3b: browser.subscribe params의 events 필터(EventKind/EventFilter)
-const cpg = @import("control_pane_grant.zig"); // 1e-confirm-1b: pane-bound confirm-grant 조회(§9.2 Model B — 세션 cap OR pane grant 가법)
+const cpg = @import("control_pane_grant.zig");
+const new_tab = @import("web_sidecar/new_tab.zig"); // W9b③: browser.open 의 주소 규칙(페이지가 여는 새 탭과 같다) // 1e-confirm-1b: pane-bound confirm-grant 조회(§9.2 Model B — 세션 cap OR pane grant 가법)
 
 // ── ① browser.* wire 스키마(§9.1 ①) ──────────────────────────────────────────────────────────────────────
 
@@ -122,6 +123,15 @@ pub const BrowserMethod = enum {
     /// key=`수식키+…+키`(예 `Enter`·`Shift+Tab`·`Meta+a`). 대상이 있으면 그 요소에 초점을 주고 누르고, 없으면 지금 초점에.
     /// op.arg=`{key, selector?|ref?}`. **op_kind=22 고정**.
     press,
+    /// `browser.open {url?, timeout_ms?}`(W9b③ — Chromium 전용) → `{id, url, loaded}`. 대상 탭이 아직 없어 `id` 를 받지 않는다 —
+    /// op 의 `surface_id` 는 부른 pane(1g 가 찾은 pane). 확인 모달 없음(사용자 결정 2026-10-10 — pane 신원만). 앱이 그 pane 의 탭 줄
+    /// 끝에 뒤쪽 탭으로 열고(포커스 그대로) 그 pane 이 곧 제어하게 grant 를 넣은 뒤, 요청한 주소의 첫 불러오기까지 기다려 답한다.
+    /// op.arg=`{url?, timeout_ms}`. **op_kind=23 고정**.
+    open,
+    /// `browser.close {id}`(W9b③ — Chromium 전용) → `{closed:true}` 또는 `{closed:false, reason}`. 그 pane 이 연 탭만(앱이 본다).
+    /// 여는 순간 넣은 `browser` grant 가 없으면 확인 모달 없이 `unauthorized`(남의 탭을 닫으려고 허락을 묻지 않는다). 페이지에 묻는
+    /// 닫기 — 떠나기 확인으로 물으면 기다리지 않고 `closed:false`(사용자가 그 탭에서 정한다). op.arg 빈 것. **op_kind=24 고정**.
+    close,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -151,6 +161,8 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "reload")) return .reload;
     if (eq(rest, "hover")) return .hover;
     if (eq(rest, "press")) return .press;
+    if (eq(rest, "open")) return .open;
+    if (eq(rest, "close")) return .close;
     return null;
 }
 
@@ -180,6 +192,8 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .reload => "reload",
         .hover => "hover",
         .press => "press",
+        .open => "open",
+        .close => "close",
     };
 }
 
@@ -190,13 +204,13 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press => false,
+            .back, .forward, .reload, .hover, .press, .open, .close => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press => true,
+            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close => true,
             else => false,
         },
     };
@@ -204,6 +218,8 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
 
 /// 그 web 탭에서 이 메서드를 실행할 수 있는가 — 목록의 `methods` 와 확인 모달 전 거절이 함께 쓴다.
 pub fn surfaceSupports(w: cs.WebMeta, m: BrowserMethod) bool {
+    // `open` 은 탭에 쓰는 메서드가 아니다(대상이 부른 pane) — 탭마다의 목록에 싣지 않는다(W9b③).
+    if (m == .open) return false;
     return w.controllable and engineSupports(w.engine, m);
 }
 
@@ -414,6 +430,10 @@ pub const TypeParams = struct { id: u64, locator: Locator, text: []const u8 };
 /// `browser.press` params `{id, key, selector? | ref?}`. key 필수(비지 않고 `max_press_key_bytes` 이하 — 키 이름의 해석은 실행하는
 /// 엔진이 한다), 대상은 없어도 된다(지금 초점에 누른다).
 pub const PressParams = struct { id: u64, key: []const u8, locator: ?Locator };
+/// `browser.open` params(W9b③) — url 은 없거나 http·https(`new_tab.urlAllowed` — 페이지가 여는 새 탭과 같은 규칙).
+pub const OpenParams = struct { url: ?[]const u8, timeout_ms: u32 };
+pub const open_default_timeout_ms: u32 = 25_000;
+pub const open_max_timeout_ms: u32 = 25_000;
 pub const max_press_key_bytes = 64;
 
 /// `browser.wait` 조건. 첫 슬라이스는 명시적 selector visible·현재 load 완료만 지원한다. URL/text/fn/network-idle과
@@ -646,6 +666,40 @@ pub fn parseActParams(params: ?std.json.Value) ParamError!ActParams {
 pub fn parseTypeParams(params: ?std.json.Value) ParamError!TypeParams {
     const obj = try paramsObject(params);
     return .{ .id = try idFromObj(obj), .locator = try parseLocator(obj), .text = try strFromObj(obj, "text") };
+}
+
+/// 새 메서드라 키를 엄격히 본다 — 모르는 키·`id` 는 거절(대상 탭이 없다 — 있으면 잘못 쓴 것이다).
+pub fn parseOpenParams(params: ?std.json.Value) ParamError!OpenParams {
+    const obj = if (params) |p| switch (p) {
+        .object => |o| o,
+        else => return error.InvalidParams,
+    } else return .{ .url = null, .timeout_ms = open_default_timeout_ms };
+    var it = obj.iterator();
+    while (it.next()) |e| if (!(eq(e.key_ptr.*, "url") or eq(e.key_ptr.*, "timeout_ms"))) return error.InvalidParams;
+    const url = try optStrFromObj(obj, "url");
+    if (url) |u| if (!new_tab.urlAllowed(u)) return error.InvalidParams;
+    const timeout_ms: u32 = if (obj.get("timeout_ms")) |v| switch (v) {
+        .integer => |i| if (i < 1 or i > @as(i64, open_max_timeout_ms)) return error.InvalidParams else @intCast(i),
+        else => return error.InvalidParams,
+    } else open_default_timeout_ms;
+    return .{ .url = url, .timeout_ms = timeout_ms };
+}
+
+pub fn serializeOpenArg(gpa: std.mem.Allocator, p: OpenParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        if (p.url) |u| {
+            s.objectField("url") catch |e| break :blk e;
+            s.write(u) catch |e| break :blk e;
+        }
+        s.objectField("timeout_ms") catch |e| break :blk e;
+        s.write(p.timeout_ms) catch |e| break :blk e;
+        s.endObject() catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
 }
 
 pub fn parsePressParams(params: ?std.json.Value) ParamError!PressParams {
@@ -1778,6 +1832,11 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
         // W9b①: back/forward → 갈 곳이 있었는가, reload → true.
         .back, .forward, .reload => serializeOkBoolResult(gpa, req.id, std.mem.eql(u8, result, "true")),
+        // W9b③: 엔진이 준 `{"id","url","loaded"}`·`{"closed","reason"?}` 을 검사해 그 필드만 싣는다.
+        .open, .close => serializeTabResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return cp.serializeError(gpa, req.id, .internal_error, "invalid tab payload", null),
+        },
         // 로케이터로 기다렸으면 엔진이 `{"ok":true,"matched":{…},"ambiguous"?:true}` 를 준다(W9b②-3).
         .wait => if (result.len > 0 and result[0] == '{')
             serializeActMatchedResult(gpa, req.id, result) catch |e| switch (e) {
@@ -1797,6 +1856,56 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             error.InvalidConsoleJson => return cp.serializeError(gpa, req.id, .internal_error, "invalid console payload", null),
         },
     };
+}
+
+/// W9b③ 결과 — open `{"id":<u64>,"url":<str>,"loaded":<bool>}`, close `{"closed":<bool>,"reason"?:<str>}`. 다른 키·모양은 거절.
+fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, payload: []const u8) (std.mem.Allocator.Error || error{InvalidTabPayload})![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidTabPayload,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidTabPayload;
+    const o = parsed.value.object;
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    switch (method) {
+        .open => {
+            const tab = o.get("id") orelse return error.InvalidTabPayload;
+            const url = o.get("url") orelse return error.InvalidTabPayload;
+            const loaded = o.get("loaded") orelse return error.InvalidTabPayload;
+            if (tab != .integer or tab.integer <= 0 or url != .string or loaded != .bool) return error.InvalidTabPayload;
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                s.objectField("id") catch |e| break :blk e;
+                s.write(tab.integer) catch |e| break :blk e;
+                s.objectField("url") catch |e| break :blk e;
+                s.write(url.string) catch |e| break :blk e;
+                s.objectField("loaded") catch |e| break :blk e;
+                s.write(loaded.bool) catch |e| break :blk e;
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        .close => {
+            const closed = o.get("closed") orelse return error.InvalidTabPayload;
+            if (closed != .bool) return error.InvalidTabPayload;
+            const reason = o.get("reason");
+            if (reason) |r| if (r != .string) return error.InvalidTabPayload;
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                s.objectField("closed") catch |e| break :blk e;
+                s.write(closed.bool) catch |e| break :blk e;
+                if (reason) |r| {
+                    s.objectField("reason") catch |e| break :blk e;
+                    s.write(r.string) catch |e| break :blk e;
+                }
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        else => return error.InvalidTabPayload,
+    }
+    return aw.toOwnedSlice();
 }
 
 fn serializeResultTooLarge(gpa: std.mem.Allocator, id: cp.Id, limit_bytes: usize, observed_at_least: usize) std.mem.Allocator.Error![]u8 {
@@ -2036,6 +2145,14 @@ pub fn browserOpFromRequest(
     const method = cp.parseMethod(req.method);
     if (method.core != .browser) return .{ .err = try errorResponse(gpa, req.id, .method_not_found) };
 
+    // ── W9b③: browser.open 은 대상 탭이 없다 — 부른 pane(1g)이 대상이다. pane 을 못 찾았으면(cap 만 든 연결 포함) 균일
+    //    unauthorized, 확인 모달 없음(사용자 결정 — pane 신원만). params 는 pane 이 확인된 뒤에만 푼다(§8.3 oracle 불변식). ──
+    if (eq(method.rest, "open")) {
+        const pane = pane_selector orelse return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
+        const p = parseOpenParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+        return .{ .op = .{ .surface_id = pane, .method = .open, .arg = try serializeOpenArg(gpa, p) } };
+    }
+
     // ── 3. id 파싱(target web surface_id). authz(4)가 target을 알아야 하므로 먼저. 형식 오류는 surface 존재
     //       oracle이 아니라 요청 형식 오류다(session.get과 동일) → invalid_params. ──
     const target_id = readIdParam(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
@@ -2108,6 +2225,8 @@ pub fn browserOpFromRequest(
     if (unsupportedOnSurface(dto.?, bmethod)) |w| return .{ .err = try unsupportedByEngineResponse(gpa, req.id, w.engine, w.controllable) };
     // W9b②: 로케이터(`locator`)는 Chromium 만 — 키가 있는지만 본다(인가 전에는 params 값을 풀지 않는다 — §8.3 oracle 불변식).
     if (locatorUnsupported(dto.?, bmethod, req.params)) |w| return .{ .err = try unsupportedByEngineParamResponse(gpa, req.id, w.engine, w.controllable, "locator") };
+    // W9b③: close 는 그 pane 이 연 탭만 — 여는 순간 넣은 grant 가 없으면 확인 모달로 묻지 않고 거절한다(남의 탭을 닫으려고 허락을 묻지 않는다).
+    if (!authorized and bmethod == .close) return .{ .err = try errorResponse(gpa, req.id, .unauthorized) };
     if (!authorized) return ungrantedResult(gpa, req.id, pane_selector, target_id, req_scope);
 
     // ── 7. execute_script params 사전 검증(id 길이·args wire). 이제 authorized만 도달하므로 invalid_params가 oracle 아님. ──
@@ -2155,8 +2274,9 @@ pub fn browserOpFromRequest(
         .snapshot => try serializeSnapshotArg(gpa, parseSnapshotParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // console(§9.5.9): clear 플래그를 arg에 실어 Swift가 pull(서버 버퍼 반환 + clear면 비움). base browser scope.
         .console => try serializeConsoleArg(gpa, parseConsoleParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
-        .back, .forward, .reload => try gpa.dupe(u8, ""), // {id}만
+        .back, .forward, .reload, .close => try gpa.dupe(u8, ""), // {id}만
         .subscribe => unreachable, // 위에서 이미 분기
+        .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
     // arg는 이제 gpa-owned. surface·authz는 step 6에서 이미 접혔으므로(op 반환만 남음) 여기서 free할 실패 경로가 없다
     // — 파싱 실패는 switch 각 arm이 arg 할당 전 return하고, 여기 도달하면 곧장 op에 arg 소유권을 넘긴다.
@@ -3297,14 +3417,15 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const webkit = arr.items[0].object;
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
-    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 5), webkit.get("methods").?.array.items.len);
+    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close 는 Chromium 전용 — WebKit 은 걷어낼 예정).
+    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 7), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
     // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
-    const want_chromium = [_][]const u8{ "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press" };
+    // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다.
+    const want_chromium = [_][]const u8{ "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -4201,4 +4322,125 @@ test "W9b②-3: wait visible 의 결과 — 로케이터면 {ok, matched, ambigu
     const t2 = try serializeBrowserResponseStatus(testing.allocator, req, .timeout, "not json");
     defer testing.allocator.free(t2);
     try testing.expect(std.mem.indexOf(u8, t2, "hidden") == null);
+}
+
+// ── W9b③: 탭 열기·닫기 ─────────────────────────────────────────────────────────────────────────────────────
+
+test "W9b③: browser.open 은 부른 pane(1g)이 대상 — pane 이 없으면 unauthorized, 주소·키·시한이 틀리면 invalid_params, 확인 모달 없음" {
+    var grants: cpg.PaneGrantStore = .{};
+    const ok_cases = [_]struct { bytes: []const u8, arg: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"https://example.com/a?b=1\"}}", .arg = "{\"url\":\"https://example.com/a?b=1\",\"timeout_ms\":25000}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"timeout_ms\":500}}", .arg = "{\"timeout_ms\":500}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\"}", .arg = "{\"timeout_ms\":25000}" },
+    };
+    for (ok_cases) |c| switch (try dispatchBrowser(testing.allocator, c.bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.open, op.method);
+            try testing.expectEqual(@as(u64, 10), op.surface_id); // 부른 pane
+            try testing.expect(op.pane_grant == null);
+            try testing.expectEqualStrings(c.arg, op.arg);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    // pane 을 못 찾았다(cap 만 든 연결) — 균일 unauthorized(params 를 풀기 전에).
+    var buf: [1]capmod.Capability = undefined;
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"file:///etc/passwd\"}}", fx_engine, capsSlice(&buf, browserCap(12)), null, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(e));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    const bad = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"file:///etc/passwd\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"javascript:alert(1)\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"about:blank\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":\"\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"url\":7}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"id\":12}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"background\":false}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"timeout_ms\":0}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":{\"timeout_ms\":25001}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.open\",\"params\":[]}",
+    };
+    for (bad) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+}
+
+test "W9b③: browser.close 는 그 탭의 browser grant 가 있어야 op — 없으면 확인 모달 없이 unauthorized, WebKit 탭은 모달 전 -32008" {
+    var grants: cpg.PaneGrantStore = .{};
+    const close12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":12}}";
+    // grant 없음 — pane 이 있어도 needs_grant 가 아니라 unauthorized(남의 탭을 닫으려고 허락을 묻지 않는다).
+    switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.close, op.method);
+            try testing.expectEqual(@as(u64, 12), op.surface_id);
+            try testing.expectEqual(@as(u64, 10), op.pane_grant.?.pane); // 앱이 이 pane 이 연 탭인지 본다
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    // 다른 pane 의 grant 로는 닫지 못한다.
+    switch (try dispatchBrowser(testing.allocator, close12, fx_engine, &.{}, 99, &grants, 0)) {
+        .err => |e| testing.allocator.free(e),
+        else => return error.TestUnexpectedResult,
+    }
+    // WebKit 탭 — 확인 모달 전 -32008.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.close\",\"params\":{\"id\":11}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "W9b③: open·close 결과는 엔진이 준 필드만 — 모양이 틀리면 internal_error" {
+    const open_req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}";
+    const close_req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.close\",\"params\":{\"id\":12}}";
+    const cases = [_]struct { req: []const u8, payload: []const u8, want: []const u8 }{
+        .{ .req = open_req, .payload = "{\"id\":42,\"url\":\"https://e.test/\",\"loaded\":true,\"extra\":1}", .want = "\"result\":{\"id\":42,\"url\":\"https://e.test/\",\"loaded\":true}" },
+        .{ .req = close_req, .payload = "{\"closed\":true}", .want = "\"result\":{\"closed\":true}" },
+        .{ .req = close_req, .payload = "{\"closed\":false,\"reason\":\"asking\"}", .want = "\"result\":{\"closed\":false,\"reason\":\"asking\"}" },
+    };
+    for (cases) |c| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, c.want) != null);
+    }
+    const bad = [_]struct { req: []const u8, payload: []const u8 }{
+        .{ .req = open_req, .payload = "{\"id\":0,\"url\":\"x\",\"loaded\":true}" },
+        .{ .req = open_req, .payload = "{\"id\":4,\"loaded\":true}" },
+        .{ .req = open_req, .payload = "true" },
+        .{ .req = close_req, .payload = "{\"closed\":\"yes\"}" },
+        .{ .req = close_req, .payload = "{\"closed\":false,\"reason\":5}" },
+        .{ .req = close_req, .payload = "{" },
+    };
+    for (bad) |c| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+    }
 }

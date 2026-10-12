@@ -102,6 +102,29 @@ pub fn grantsActivation(kind: message.KeyKind, windows_key_code: i32, native_key
     return windows_key_code != 0x1b and native_key_code != 0x35; // VK_ESCAPE · kVK_Escape
 }
 
+/// W9b③: DevTools 로 보내는 진짜 입력이 사람의 입력처럼 활성을 주는가 — 누름(`mousePressed`)과 Esc 아닌 키 누름(`keyDown`·
+/// `rawKeyDown`). sidecar 는 그 호출을 보낼 때 그 브라우저에 새 탭 장을 준다(에이전트의 누름은 maru 를 거친 마우스·키 프레임이
+/// 아니라 장이 없었다 — 에이전트 탭의 `window.open` 이 조용히 막혔다). maru 는 다시 거른다 — 에이전트가 연 탭에만 장을 준다.
+/// 인자는 maru 가 만든 JSON(`web_cdp_ops`·`web_cdp_keys`)이다.
+pub fn devtoolsInputActivates(method: []const u8, params: []const u8) bool {
+    if (std.mem.eql(u8, method, "Input.dispatchMouseEvent")) return std.mem.indexOf(u8, params, "\"type\":\"mousePressed\"") != null;
+    if (!std.mem.eql(u8, method, "Input.dispatchKeyEvent")) return false;
+    const down = std.mem.indexOf(u8, params, "\"type\":\"keyDown\"") != null or std.mem.indexOf(u8, params, "\"type\":\"rawKeyDown\"") != null;
+    return down and std.mem.indexOf(u8, params, "\"key\":\"Escape\"") == null;
+}
+
+test "W9b③: DevTools 입력 가운데 누름·Esc 아닌 키 누름만 활성을 준다" {
+    try std.testing.expect(devtoolsInputActivates("Input.dispatchMouseEvent", "{\"type\":\"mousePressed\",\"x\":1,\"y\":2,\"button\":\"left\",\"clickCount\":1}"));
+    try std.testing.expect(!devtoolsInputActivates("Input.dispatchMouseEvent", "{\"type\":\"mouseReleased\",\"x\":1,\"y\":2}"));
+    try std.testing.expect(!devtoolsInputActivates("Input.dispatchMouseEvent", "{\"type\":\"mouseMoved\",\"x\":1,\"y\":2}"));
+    try std.testing.expect(devtoolsInputActivates("Input.dispatchKeyEvent", "{\"type\":\"keyDown\",\"key\":\"Enter\"}"));
+    try std.testing.expect(devtoolsInputActivates("Input.dispatchKeyEvent", "{\"type\":\"rawKeyDown\",\"key\":\"Tab\"}"));
+    try std.testing.expect(!devtoolsInputActivates("Input.dispatchKeyEvent", "{\"type\":\"keyUp\",\"key\":\"Enter\"}"));
+    try std.testing.expect(!devtoolsInputActivates("Input.dispatchKeyEvent", "{\"type\":\"rawKeyDown\",\"key\":\"Escape\"}"));
+    try std.testing.expect(!devtoolsInputActivates("Input.insertText", "{\"text\":\"mousePressed\"}"));
+    try std.testing.expect(!devtoolsInputActivates("Runtime.evaluate", "{\"expression\":\"\\\"type\\\":\\\"mousePressed\\\"\"}"));
+}
+
 /// 그 장이 아직 쓸 수 있는가(받은 시각 `granted_ms`, 0 이면 없음).
 pub fn creditLive(granted_ms: i64, now_ms: i64) bool {
     return granted_ms != 0 and now_ms - granted_ms <= activation_ms;

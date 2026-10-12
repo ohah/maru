@@ -3065,6 +3065,9 @@ const GrantConfirmDecision = struct { async_id: u64, approved: bool };
 /// surface teardown 관찰 훅. AppSession은 컨트롤 서버를 import하지 않고 surface 수명만 알리며, macOS ABI 계층이
 /// pane-bound browser grant/wait 취소에 연결한다. null이면 순수/헤드리스 세션 동작은 기존과 동일하다.
 pub const SurfaceClosedCallback = *const fn (context: ?*anyopaque, surface_id: u64) void;
+/// W9b③: 에이전트 탭의 페이지가 새 탭을 열었다 — app_host_abi 가 그 pane 의 에이전트 탭으로 칠 수 있는가(상한·grant)를 답한다.
+/// 참이면 새 탭이 그 pane 의 것이 된다(`agent_opener`). 없으면(시험·컨트롤 꺼짐) 보통 사람의 탭이다.
+pub const AgentPageTabCallback = *const fn (opener_pane: u64, tab: u64) bool;
 
 /// 닫기 진입점(PendingClose)을 실제로 teardown될 **범위**로 해석한 결과. resolveCloseScope가 cascade(Term>pane>탭>창)를
 /// 한 곳에서 풀어 이 값으로 돌려주고, scopeHasRunningJob(실행 중 명령 검사)과 executeClose(실제 닫기)가 같은 값을
@@ -6035,6 +6038,7 @@ pub const AppSession = struct {
     // destroy가 아니라 소유 이전이므로 호출하지 않는다. app_host_abi가 browser grant/wait 수명에 연결한다.
     surface_closed_context: ?*anyopaque = null,
     surface_closed_callback: ?SurfaceClosedCallback = null,
+    agent_page_tab_callback: ?AgentPageTabCallback = null,
     // MARU_TRACE=<파일경로>면 세션의 base kind 이벤트(output/resize/process-exit)를 **파일로 증분 append**한다
     // (레코더는 이벤트마다 flush → 크래시 직전까지 디스크에 남음, observability replayTrace로 화면 재생). 미설정이면
     // null(오버헤드 0). 레코더는 self가 소유한 file writer(`trace_writer`, heap 버퍼 `trace_buf`)에 쓴다 — self가 안정
@@ -11453,7 +11457,7 @@ pub const AppSession = struct {
     /// minimal 스크래치 세션에서 탭(워크스페이스·Term) 생성을 막는가. chrome_minimal이면서 minimal_tabs=false일 때만
     /// true — 사이드바·탭 바가 없어 안 보이는 탭을 만드는 걸 차단한다(split은 divider로 보이므로 막지 않는다).
     /// full 세션(chrome_minimal=false)은 항상 false라 탭이 정상 동작한다.
-    fn tabsBlocked(self: *const AppSession) bool {
+    pub fn tabsBlocked(self: *const AppSession) bool {
         return self.chrome_minimal and !self.minimal_tabs;
     }
 
@@ -99110,4 +99114,140 @@ test "remote automatic reconnect preserves mixed cursor and seals recovered turn
         _ = std.c.poll(&idle, 0, 20);
     }
     return error.AutomaticReconnectTimedOut;
+}
+
+// ── W9b③: 에이전트가 연 탭 ──────────────────────────────────────────────────────────────────────────────
+
+test "W9b③: 에이전트 탭은 부른 pane 의 탭 줄 끝에 뒤쪽 탭으로 — 활성 탭·포커스는 그대로, 연 pane 이 적힌다, 탭 줄을 숨긴 창·모르는 pane 은 거절" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const active_before = pane.active_term;
+    const tab = try web_ops.openAgentTab(session, shell, "https://e.test/a");
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    const term = pane.terms.items[1];
+    try std.testing.expectEqual(tab, term.surfaceId());
+    try std.testing.expectEqual(shell, term.agent_opener);
+    try std.testing.expectEqualStrings("https://e.test/a", term.pending_url.?);
+    try std.testing.expectEqual(active_before, pane.active_term); // 화면 그대로
+    try std.testing.expectEqual(shell, pane.activeTerm().surfaceId());
+    // 사람이 연 탭(이 탭을 연 pane 이 아니다)은 0 이다.
+    try std.testing.expectEqual(@as(u64, 0), pane.terms.items[0].agent_opener);
+    try std.testing.expectError(error.CallerNotFound, web_ops.openAgentTab(session, 999_999, null));
+    session.chrome_minimal = true;
+    session.minimal_tabs = false;
+    try std.testing.expectError(error.TabsHidden, web_ops.openAgentTab(session, shell, null));
+}
+
+test "W9b③: 에이전트 닫기 — 남이 연 탭·사람 탭은 not_owner, 창의 유일한 탭은 only_tab, 떠나기 확인이 떠 있으면 page_asks, 아니면 그 탭에 묻는다(활성 탭이 아니어도)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const tab = try web_ops.openAgentTab(session, shell, null);
+    try web_osr.testHold(allocator, tab);
+    web_osr.testRunning(tab);
+    try std.testing.expectEqual(web_ops.AgentCloseStart.not_owner, web_ops.agentCloseTab(session, tab, shell + 1000));
+    try std.testing.expectEqual(web_ops.AgentCloseStart.not_owner, web_ops.agentCloseTab(session, tab, 0));
+    try std.testing.expectEqual(web_ops.AgentCloseStart.not_owner, web_ops.agentCloseTab(session, shell, shell)); // 사람의 탭
+    try std.testing.expectEqual(web_ops.AgentCloseStart.not_found, web_ops.agentCloseTab(session, 999_999, shell));
+    // 묻는다 — 활성 탭(셸)이 아니어도 그 탭에. 창의 tick 이 닫힘을 꺼내면 그 탭만 닫는다.
+    try std.testing.expectEqual(web_ops.AgentCloseStart.asking, web_ops.agentCloseTab(session, tab, shell));
+    try std.testing.expectEqual(web_osr.CloseAskPhase.asking, web_osr.closeAskPhase(tab));
+    try std.testing.expect(web_osr.closeAskedByAgent(tab));
+    web_ops.osrCloseAskedTab(session, tab, .closed);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expectEqual(shell, pane.activeTerm().surfaceId());
+    // 페이지가 이미 떠나기 확인을 띄웠다 — 다시 묻지 않고 page_asks.
+    const tab2 = try web_ops.openAgentTab(session, shell, null);
+    try web_osr.testHold(allocator, tab2);
+    web_osr.testRunning(tab2);
+    try std.testing.expectEqual(web_ops.AgentCloseStart.asking, web_ops.agentCloseTab(session, tab2, shell));
+    web_osr.testApply(allocator, .{ .js_dialog = .{ .browser = tab2, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
+    try std.testing.expectEqual(web_osr.CloseAskPhase.asked, web_osr.closeAskPhase(tab2));
+    try std.testing.expectEqual(web_ops.AgentCloseStart.page_asks, web_ops.agentCloseTab(session, tab2, shell));
+    // 브라우저가 아직 없으면(물을 페이지가 없다) 곧 닫는다.
+    const tab3 = try web_ops.openAgentTab(session, shell, null);
+    try std.testing.expectEqual(web_ops.AgentCloseStart.closed, web_ops.agentCloseTab(session, tab3, shell));
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    // 창의 유일한 탭(셸을 닫아 에이전트 탭만 남았다) — 닫으면 창이 닫힌다: 닫지 않는다.
+    term_ops.closeTermAt(session, 0, pane, 0);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    try std.testing.expectEqual(web_ops.AgentCloseStart.only_tab, web_ops.agentCloseTab(session, tab2, shell));
+}
+
+test "W9b③: 에이전트가 물은 닫기는 그사이 창의 유일한 탭이 됐어도 창·앱 닫기로 번지지 않는다 — 사람의 닫기는 그대로 번진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    inline for (.{ true, false }) |agent| {
+        const session = try w6jSession(allocator);
+        defer allocator.destroy(session);
+        defer web_osr.testForget(allocator);
+        defer session.deinit();
+        const pane = pane_ops.activePane(session);
+        const shell = pane.activeTerm().surfaceId();
+        const tab = try web_ops.openAgentTab(session, shell, null);
+        try web_osr.testHold(allocator, tab);
+        web_osr.testRunning(tab);
+        session.is_last_window = true;
+        if (agent) {
+            try std.testing.expectEqual(web_ops.AgentCloseStart.asking, web_ops.agentCloseTab(session, tab, shell));
+        } else {
+            session.focusTerm(1);
+            web_ops.closeAskingPage(session, .term_or_pane);
+        }
+        term_ops.closeTermAt(session, 0, pane, 0); // 묻는 사이 셸이 닫혀 에이전트 탭만 남았다
+        web_ops.osrCloseAskedTab(session, tab, .closed);
+        try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+        if (agent) {
+            try std.testing.expect(session.pending_confirm != .quit); // 앱 종료 확인으로 번지지 않았다
+            try std.testing.expect(!session.ended_seen);
+        } else {
+            try std.testing.expect(session.pending_confirm == .quit);
+        }
+    }
+}
+
+var w9b3_adopt_answer = true;
+var w9b3_adopted: u64 = 0;
+fn w9b3AdoptPageTab(pane: u64, tab: u64) bool {
+    _ = pane;
+    w9b3_adopted = tab;
+    return w9b3_adopt_answer;
+}
+
+test "W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽으로, app_host_abi 가 받으면 그 pane 의 에이전트 탭, 못 받으면 보통 탭" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    inline for (.{ true, false }) |adopt| {
+        const session = try w6jSession(allocator);
+        defer allocator.destroy(session);
+        defer web_osr.testForget(allocator);
+        defer session.deinit();
+        session.agent_page_tab_callback = w9b3AdoptPageTab;
+        w9b3_adopt_answer = adopt;
+        w9b3_adopted = 0;
+        const pane = pane_ops.activePane(session);
+        const shell = pane.activeTerm().surfaceId();
+        const tab = try web_ops.openAgentTab(session, shell, null);
+        try web_osr.testHold(allocator, tab);
+        web_osr.testRunning(tab);
+        web_osr.grantNewTabCredit(tab); // 에이전트의 누름(app_host_abi 가 준다)
+        web_osr.testApplyNow(allocator, .{ .open_tab = .{ .browser = tab, .placement = .foreground, .url = "https://e.test/popup" } });
+        web_ops.tickWebOsr(session);
+        try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+        const child = pane.terms.items[2];
+        try std.testing.expectEqual(shell, pane.activeTerm().surfaceId()); // 앞으로 오지 않았다
+        try std.testing.expectEqual(child.surfaceId(), w9b3_adopted);
+        try std.testing.expectEqual(if (adopt) shell else 0, child.agent_opener);
+    }
 }

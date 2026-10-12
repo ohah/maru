@@ -122,6 +122,9 @@ pub fn Model(comptime Rt: type) type {
             /// `created`를 내고 Swift가 붙인 뒤에야 존재한다(docs/workspace-restore.md §WP-P). 주소창 commit이 쓰는
             /// 단일 슬롯은 복원(여러 개 동시)을 담을 수 없어 소유를 Term으로 둔다.
             pending_url: ?[]u8 = null,
+            /// W9b③: 이 웹 탭을 연 에이전트 pane 의 surface id(0 = 사람이 연 탭). 그 pane 만 이 탭을 닫을 수 있다(`browser.close`). 탭을
+            /// pane·창으로 옮겨도 따라간다(Term 포인터가 옮겨 간다). 메모리에만 — 복원한 탭은 사람의 탭이다.
+            agent_opener: u64 = 0,
             /// 런타임 부착(PTY 세션·pump·생애 플래그) — generic `Rt`로 주입. platform이 `TermRuntime`을 넣는다.
             rt: Rt = .{},
             /// git 브랜치 표시 캐시(owned, cwd 파생). termGitBranch가 cwd 변경 또는 주기 만료에 재계산. destroyTerm이 해제.

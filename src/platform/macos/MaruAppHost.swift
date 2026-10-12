@@ -6900,8 +6900,6 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.sidebar_bg,           // 사이드바 배경색(0=안 그림)
             frame.sidebar_cells,        // 사이드바 셀(탭 엔트리) — origin 0에 그림
             frame.sidebar_cell_count,
-            frame.sidebar_slot_height_px, // 탭 슬롯 높이(≈2.5×cell) — 사이드바 셀 세로 배치
-            frame.sidebar_header_height_px, // 상단 헤더(검색바·아이콘) 높이 — 사이드바 셀을 이만큼 아래로
             frame.gpu_quads,              // C4b: chrome rich 둥근 사각형(tui면 NULL — Swift는 패스스루만)
             frame.gpu_quad_count,
             frame.modal_cells_start,      // C4b 모달: over quad를 모달 텍스트 앞에 끼우는 분할점(패스스루)
@@ -6916,9 +6914,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.live_image_ids,         // kitty graphics(K4c): 살아있는 이미지 id 집합(없는 텍스처 evict)
             frame.live_image_id_count,
             frame.terminal_bg,            // 화면 clear color(OSC 11 배경 set 또는 theme.background; 0=기본 clear)
-            frame.titlebar_strip_px,      // 상단 타이틀바 띠 높이 — 접힘 펼치기 토글(◧)을 띠 안 세로 중앙(신호등 정렬)
             frame.window_opacity_milli,   // 창 배경 투명도 ×1000 — clear color alpha(default 배경만 투명)
-            frame.sidebar_scroll_offset_px, // 사이드바 세로 스크롤량(px) — 카드를 위로 밀고 헤더 아래로 scissor 클립
             frame.divider_thickness_px,   // pane divider(reserved 30/31) 두께(px) — config split.divider-thickness(패스스루)
             frame.cursor_cells,           // 커서 blink 페이드: 커서 overlay 구간 길이(본문서 제외·별도 pass; 패스스루)
             frame.cursor_fade_milli,      // 커서 overlay 불투명도 ×1000 — blink 페이드 위상(cursor.blink-fade-ms; 패스스루)

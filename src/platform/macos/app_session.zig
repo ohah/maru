@@ -327,7 +327,12 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 배지 원과 같은 값)을 origin_y 로 든다. .m 은 「origin (0,0) 이면 헤더」 짐작과 `(strip − ch) × 0.5` 를 지우고
 // `origin_y + row × ch` 만 쓴다. 낡은 .m 은 헤더를 일반 셀로 읽어도 같은 자리지만 새 Zig + 낡은 .m 이면 짐작 갈래가
 // 다른 (0,0) 셀을 움직이므로 짝이 같이 올라간다.
-pub const abi_version: u32 = 226;
+// 227: 렌더러 draw 에서 안 읽던 인자 넷(`sidebar_slot_height_px`·`sidebar_header_height_px`·`titlebar_strip_px`·
+// `sidebar_scroll_offset_px`)을 뺀다 — MetalFrame 필드는 그대로라 layout 은 같지만 Swift 호출부와 .m 시그니처가 같이
+// 바뀐다. 그리고 CoreText 셰이퍼 셀에 합성 글리프 비트(`draw_cell_synthesized_bit` = 1<<3)를 싣고 .m 의 범위 미러
+// (`maru_is_synthesized_glyph`)를 지웠다 — 낡은 .m 은 그 비트를 모른 채 자기 범위로 판정하고, 새 .m 은 낡은 Zig 가
+// 비트를 안 실으면 box·Powerline 을 드롭하므로 짝이 같이 올라간다.
+pub const abi_version: u32 = 227;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -23748,7 +23753,7 @@ pub const AppSession = struct {
             const rw: u16 = @intCast(headerIconRasterExtentPx(self.cell_width_px));
             const rh: u16 = @intCast(headerIconRasterExtentPx(self.cell_height_px));
             for (pane.shaped.runs.glyphs) |*g| {
-                // 헤더 아이콘은 등록 PUA라 coretext_smoke.m의 **합성 경로**(maru_is_synthesized_glyph)로 슬롯을
+                // 헤더 아이콘은 등록 PUA라 **합성 경로**(renderer.isSynthesizedCodepoint → 셀 비트)로 슬롯을
                 // 꽉 채워 그려진다 — 옛 Unicode ◧(U+25E7)·⚙(U+2699)가 타던 cover-fit(center_symbol) 게이트와는
                 // 무관하다(그 게이트는 이제 터미널 콘텐츠의 ◧·⚙만 탄다). 그래서 slot만 1.7×로 키우면 1.7× quad에
                 // 1:1로 들어가 선명해진다.

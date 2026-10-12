@@ -15,6 +15,12 @@ pub const draw_cell_italic_bit: u16 = 1 << 1;
 /// 커서가 앉은 칸(`MaruDrawCellCursorBit`). 셰이퍼가 이 비트로 run 을 갈라 그 칸만 합자 없이 그린다 —
 /// 근거는 `cellIsAtCursor` 주석.
 pub const draw_cell_cursor_bit: u16 = 1 << 2;
+/// 렌더러가 코드포인트로 **직접 합성하는** 글리프(box·block·Powerline·Braille·Legacy Computing·등록 아이콘 —
+/// `renderer.isSynthesizedCodepoint`)인 칸(`MaruDrawCellSynthesizedBit`). 셰이퍼는 이 비트로 「폰트 글리프가
+/// 없어도 record 를 남긴다」·「glyph_id 를 0 으로 정규화한다」를 정한다. 예전에는 `coretext_smoke.m` 이 같은 범위
+/// 열한 개를 `renderer/*_glyph.zig` 와 주석-동기로 다시 적었다(2026-10-12) — Zig 에만 범위를 더하면 그 글리프가
+/// 셰이핑에서 드롭돼 합성에 닿지 못한다.
+pub const draw_cell_synthesized_bit: u16 = 1 << 3;
 
 pub const NativeDrawCell = extern struct {
     row: u16,
@@ -343,7 +349,8 @@ fn nativeDrawCellFromDrawCell(cell: renderer.DrawCell, cursor: terminal.Cursor) 
         .width = cell.width,
         .style_flags = (if (cell.style.bold) draw_cell_bold_bit else 0) |
             (if (cell.style.italic) draw_cell_italic_bit else 0) |
-            (if (cellIsAtCursor(cell, cursor)) draw_cell_cursor_bit else 0),
+            (if (cellIsAtCursor(cell, cursor)) draw_cell_cursor_bit else 0) |
+            (if (renderer.isSynthesizedCodepoint(cell.codepoint)) draw_cell_synthesized_bit else 0),
         .codepoint = cell.codepoint,
         .grapheme_offset = cell.grapheme_offset,
         .grapheme_count = cell.grapheme_count,
@@ -403,7 +410,7 @@ fn coreTextGlyphRecordFromDrawRecord(
         // Computing 모자이크/wedge/삼각형/대각선 등)은 rasterizer가 코드포인트로 직접 합성하므로 폰트 글리프가
         // 없어도(glyph_id==0) drawable이어야 한다** — 안 그러면 폰트에 그 글리프가 없거나 CoreText가 notdef를 줄
         // 때 셀이 스킵돼 합성에 도달조차 못 한다(보더가 안 보이던 원인). 합성 여부는 renderer의 단일 출처
-        // `isSynthesizedCodepoint`로 판정한다(C 게이트 maru_is_synthesized_glyph가 같은 집합을 미러).
+        // `isSynthesizedCodepoint`로 판정한다(셰이퍼에는 같은 판정이 셀 비트 `draw_cell_synthesized_bit`로 간다).
         .drawable = record.drawable != 0 and
             (record.glyph_id != 0 or renderer.isSynthesizedCodepoint(record.codepoint)),
     };
@@ -860,6 +867,35 @@ test "nativeDrawCellFromDrawCell marks the cursor cell so its run drops ligature
     // **커서가 안 보이면 풀지 않는다.** 깜빡임마다 합자가 붙었다 떨어지면 글자가 흔들린다.
     const hidden = nativeDrawCellFromDrawCell(cell, .{ .row = 3, .col = 5, .visible = false });
     try std.testing.expectEqual(@as(u16, 0), hidden.style_flags & draw_cell_cursor_bit);
+}
+
+// 합성 글리프 칸(box·Powerline·Braille·등록 아이콘 …)은 셰이퍼가 **셀 비트로만** 안다 — `.m` 은 범위를 다시 적지
+// 않는다(2026-10-12). 이 매핑이 끊기면 폰트가 그 글리프를 안 주는 칸이 셰이핑에서 드롭돼 합성에 닿지 못한다(보더가
+// 사라진다). 미등록 PUA 는 폰트 폴백(Nerd Fonts MDI)이라 비트가 없어야 한다. 비트는 런 키가 아니라 다른 비트와 섞이지
+// 않는지도 본다.
+test "nativeDrawCellFromDrawCell marks synthesized glyph cells from the renderer's single predicate" {
+    const no_cursor: terminal.Cursor = .{ .row = 9, .col = 9, .visible = false };
+    for ([_]u32{
+        0x2500, 0x257F, // box ─ ╿
+        0x2588, // block █
+        0xE0B0, // powerline
+        0x2800, // braille
+        0x1FB00, // sextant
+        0x1CD00, // octant
+        maru.icons.codepoint(.gear), // 등록 chrome 아이콘
+    }) |cp| {
+        try std.testing.expect(renderer.isSynthesizedCodepoint(cp)); // 대표값이 실제 합성 집합 안이다
+        const cell = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = @intCast(cp) }, no_cursor);
+        try std.testing.expectEqual(draw_cell_synthesized_bit, cell.style_flags);
+    }
+    for ([_]u32{ 'A', ' ', 0xAC00, 0x25E7, 0xF0050 }) |cp| {
+        try std.testing.expect(!renderer.isSynthesizedCodepoint(cp));
+        const cell = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = @intCast(cp) }, no_cursor);
+        try std.testing.expectEqual(@as(u16, 0), cell.style_flags & draw_cell_synthesized_bit);
+    }
+    // 다른 비트와 함께 실린다(굵은 box 선).
+    const bold_box = nativeDrawCellFromDrawCell(.{ .row = 0, .col = 0, .codepoint = 0x2500, .style = .{ .bold = true } }, no_cursor);
+    try std.testing.expectEqual(draw_cell_bold_bit | draw_cell_synthesized_bit, bold_box.style_flags);
 }
 
 test "CoreText draw list shaper preserves DrawList metadata and styles" {

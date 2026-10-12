@@ -529,6 +529,36 @@ test "래스터 배치 역할은 Objective-C 가 codepoint 로 다시 고르지 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "(raster_fit == MaruRasterFitInkCenter)"));
 }
 
+// 합성 글리프 판정(폰트 글리프 없이 Zig 가 코드포인트로 그리는 칸)도 Objective-C 셰이퍼가 다시 적지 않는다
+// (2026-10-12). 셀을 넘기는 Zig(`coretext_shaper.zig`)가 `renderer.isSynthesizedCodepoint` 로 정해 셀 비트
+// (`MaruDrawCellSynthesizedBit`)로 싣는다. 예전 `.m` 은 `maru_is_synthesized_glyph` 로 `renderer/*_glyph.zig`
+// 범위 열한 개와 생성 헤더의 등록 아이콘 집합을 주석-동기로 미러했다 — Zig 에만 범위를 더하면 그 글리프가 셰이핑에서
+// 드롭돼 합성에 닿지 못한다. 범위 시작값은 각 합성 모듈의 대표 경계다.
+test "합성 글리프 판정은 Objective-C 셰이퍼가 다시 적지 않는다 — 셀 비트만 읽는다 (layering §3.5)" {
+    const allocator = std.testing.allocator;
+    const raw = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, raster_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(raw);
+    const code = try stripCComments(allocator, raw);
+    defer allocator.free(code);
+    const forbidden = [_][]const u8{
+        "maru_is_synthesized_glyph", "maru_is_registered_icon_cp", "icon_codepoints.h",
+        "0x2500",                    "0x2580",                     "0x259F",
+        "0xE0B0",                    "0xE0b0",                     "0x2800",
+        "0x28FF",                    "0x28ff",                     "0x1FB00",
+        "0x1fb00",                   "0x1CD00",                    "0x1cd00",
+        "0x1FB3C",                   "0x1fb3c",                    "0x1FB68",
+        "0x1fb68",                   "0x25E2",                     "0x25e2",
+    };
+    for (forbidden) |needle| {
+        if (std.mem.indexOf(u8, code, needle) != null) {
+            std.debug.print("\n합성 글리프 판정 사본이 되살아났습니다: {s} 에 `{s}`\n  합성 여부는 renderer.isSynthesizedCodepoint 가 정해 MaruDrawCellSynthesizedBit 로 넘깁니다.\n", .{ raster_file, needle });
+            return error.SynthesizedGlyphMirrorRevived;
+        }
+    }
+    // 판정이 실제로 셀 비트를 읽는다 — 이름이 바뀌어 위 검사가 빈 것을 지키지 않게 개수로 본다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "const bool synth = (cell.style_flags & MaruDrawCellSynthesizedBit) != 0;"));
+}
+
 test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {
     const allocator = std.testing.allocator;
     var out: [8][]const u8 = undefined;

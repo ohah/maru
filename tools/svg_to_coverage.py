@@ -8,12 +8,11 @@ rsvg-convert(투명 배경 PNG) → PIL alpha 추출 → MASTER×MASTER u8 배�
 않고 커밋된 Zig 데이터만 쓴다. 외부 dev/test 의존성은 프로젝트 규칙에 따라 opt-in이며 기본 CI는
 Zig test로 SVG SHA-256 manifest와 C/Zig registry를 검증한다. `--check`는 로컬 재생성 drift 확인용이다.
 
-**세 산출물을 만든다(같은 ICONS 소스):** (1) Zig coverage 데이터를 `src/renderer/icon_coverage_data.zig`로, (2) 등록 codepoint
-집합을 C 헤더 `src/platform/macos/icon_codepoints.h`로, (3) semantic 이름 registry를 중립 leaf
-`src/icons.zig`로 파일 쓰기. C 셰이핑 게이트
-(coretext_smoke.m `maru_is_synthesized_glyph`)와 Zig 래스터(`icon_glyph.isRegisteredIcon`)가
-**같은 등록 집합**을 봐야 일치하므로(미등록 in-range는 폰트로 폴백 — Nerd Fonts v3 MDI 겹침), 둘을
-한 소스에서 생성한다. (3)은 소비처가 `"\\u{F0023}"`·`0xF0023` 같은 codepoint 리터럴 대신 이름
+**세 산출물을 만든다(같은 ICONS 소스):** (1) Zig coverage 데이터를 `src/renderer/icon_coverage_data.zig`로, (2) 아이콘
+이름 매크로(`MARU_ICON_*`)를 C 헤더 `src/platform/macos/icon_codepoints.h`로, (3) semantic 이름 registry를 중립 leaf
+`src/icons.zig`로 파일 쓰기. 합성 게이트는 Zig(`icon_glyph.isRegisteredIcon` → `renderer.isSynthesizedCodepoint`)
+한 곳이고, CoreText 셰이퍼(coretext_smoke.m)는 그 판정을 셀 비트(`MaruDrawCellSynthesizedBit`)로 받는다 —
+예전에 이 헤더가 내던 C 등록 집합(`maru_is_registered_icon_cp`)은 소비처가 사라져 2026-10-12 에 뺐다. (3)은 소비처가 `"\\u{F0023}"`·`0xF0023` 같은 codepoint 리터럴 대신 이름
 (`icons.utf8Fit(.chevron_down, .tight)`)을 쓰게 해, 어느 SVG인지 코드에서 읽히고 자산이 재배치돼도
 조용히 어긋나지 않게 한다(docs/chrome-strategy.md §9.7).
 
@@ -48,7 +47,7 @@ ICONS_ZIG_PATH = "src/icons.zig"
 
 # (semantic 이름, fit, codepoint, svg경로). codepoint는 Plane 15 PUA(0xF0000~). **주의**: Nerd Fonts v3가 Material
 # Design Icons를 Plane-15 PUA(U+F0001~)로 옮겨 이 범위와 겹친다 — 그래서 합성 게이트는 **등록된 cp만**
-# 가로채고(isRegisteredIcon / maru_is_registered_icon_cp) 미등록 in-range는 폰트로 폴백한다.
+# 가로채고(isRegisteredIcon) 미등록 in-range는 폰트로 폴백한다.
 #
 # **fit = 같은 그림의 optical 변형**(docs/chrome-strategy.md §9.7). 소비처마다 아이콘을 새 이름으로 등록하던
 # 것(`session_dock_chevron_down`)을 직교 축으로 바꾼 자리다. coverage 마스터는 alpha 한 채널이라 여백·stroke는
@@ -173,37 +172,20 @@ def svg_to_coverage(svg_path, size):
 
 
 def c_header(entries):
-    """등록 codepoint 집합을 C 헤더(maru_is_registered_icon_cp)로 쓴다 — coretext_smoke.m의 셰이핑 게이트가
-    Zig 래스터(isRegisteredIcon)와 같은 등록 집합을 보게 한다(미등록 in-range는 폰트 폴백)."""
+    """등록 아이콘의 이름 매크로(MARU_ICON_*)를 C 헤더로 쓴다 — Objective-C 렌더 경로가 codepoint 리터럴 대신
+    이름으로 아이콘을 고르게 한다. 합성 여부(등록 집합)는 Zig 가 셀 비트로 넘기므로 C 집합은 내지 않는다."""
     lines = [
         "// 생성된 파일 — tools/svg_to_coverage.py가 ICONS 목록에서 만든다. 직접 수정 말 것(스크립트 재실행으로 갱신).",
-        "// 등록된 maru chrome 아이콘(icon_glyph)의 Plane-15 PUA codepoint 집합. coretext_smoke.m의",
-        "// maru_is_synthesized_glyph가 이걸 써서 **등록 아이콘만** 합성으로 본다 — 미등록 in-range(Nerd Fonts v3가",
-        "// Plane-15 PUA로 옮긴 Material Design Icons U+F0001~ 등)는 폰트 글리프로 폴백한다. renderer/icon_glyph.zig의",
-        "// isRegisteredIcon과 동일 집합(같은 ICONS 소스 생성)이라 Zig 래스터와 C 셰이핑 게이트가 항상 일치한다.",
+        "// 등록된 maru chrome 아이콘(icon_glyph)의 Plane-15 PUA codepoint 이름 매크로. 합성 여부(등록 집합)는",
+        "// Zig(renderer.isSynthesizedCodepoint)가 정해 셀 비트로 넘기므로 이 헤더는 C 집합을 내지 않는다.",
         "#ifndef MARU_ICON_CODEPOINTS_H",
         "#define MARU_ICON_CODEPOINTS_H",
-        "",
-        "#include <stdbool.h>",
-        "#include <stdint.h>",
         "",
         "// 이름 매크로 — Objective-C 렌더 경로도 codepoint 리터럴 대신 이름으로 아이콘을 고른다(Zig의",
         "// src/icons.zig와 같은 규율). 자산이 재배치되면 이름은 그대로 새 cp를 가리키므로 조용히 어긋나지 않는다.",
     ]
     for cp, symbol in entries:
         lines.append(f"#define MARU_ICON_{symbol.upper()} 0x{cp:X}u")
-    lines.extend([
-        "",
-        "static inline bool maru_is_registered_icon_cp(uint32_t cp) {",
-        "    switch (cp) {",
-    ])
-    for cp, _ in entries:
-        lines.append(f"        case 0x{cp:X}u:")
-    lines.append("            return true;")
-    lines.append("        default:")
-    lines.append("            return false;")
-    lines.append("    }")
-    lines.append("}")
     lines.append("")
     lines.append("#endif  // MARU_ICON_CODEPOINTS_H")
     return "\n".join(lines) + "\n"

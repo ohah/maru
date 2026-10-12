@@ -6,8 +6,8 @@
 //! codepoint는 **Plane 15 PUA(0xF0000~)**에 둔다. **주의**: Nerd Fonts v3가 Material Design Icons를 Plane-15
 //! PUA(U+F0001~U+F1AF0)로 옮겨 이 영역과 겹친다(BMP PUA만 겹친다고 본 옛 가정은 틀렸다). 그래서 합성 게이트는
 //! **등록된 codepoint만**(`isRegisteredIcon`) 가로채고, 미등록 PUA는 폰트로 폴백한다 — 터미널 콘텐츠의 Nerd Fonts
-//! MDI 글리프가 blank가 되지 않게. C 셰이핑 게이트(coretext_smoke.m `maru_is_synthesized_glyph`)도 같은 등록 집합을
-//! 생성 헤더(`icon_codepoints.h` — svg_to_coverage.py)에서 받아 항상 일치한다(어긋나면 그 글리프가 blank).
+//! MDI 글리프가 blank가 되지 않게. CoreText 셰이퍼(coretext_smoke.m)는 이 판정을 따로 들지 않고 Zig 가 실어 주는
+//! 셀 비트(`renderer.isSynthesizedCodepoint` → `MaruDrawCellSynthesizedBit`)로 받는다.
 //! 생성 manifest에 등록된 작은 집합만 Nerd Fonts MDI와 정확히 겹칠 때 maru 아이콘으로 가로채진다 — 아이콘 폰트
 //! 라우팅 인프라를 안 만든 대가를 registry membership으로 좁게 한정한다.
 
@@ -17,13 +17,13 @@ const data = @import("icon_coverage_data.zig");
 
 /// cp가 **등록된**(coverage 데이터가 있는) maru 아이콘인지 — 합성 게이트의 단일 술어. `synthesizeGlyph`·
 /// `renderer.isSynthesizedCodepoint`·카드/제목 렌더 폭(`chrome/text_layout.clusterCols`에 주입되는 predicate)이 이걸 쓴다. 미등록 PUA(Nerd Fonts v3가
-/// Plane-15로 옮긴 MDI 등)는 false → 폰트로 폴백. C 게이트(`maru_is_registered_icon_cp`, 생성 헤더)와 동일 집합.
+/// Plane-15로 옮긴 MDI 등)는 false → 폰트로 폴백.
 pub fn isRegisteredIcon(cp: u32) bool {
     return coverageFor(cp) != null;
 }
 
-/// 등록된 아이콘 개수 — C 셰이핑 게이트(`icon_codepoints.h`)와 Zig 등록 집합이 같은지 검증하는 테스트에 쓴다
-/// (두 생성물이 같은 `ICONS` 소스에서 나왔는지 가드). 런타임 경로엔 안 쓴다.
+/// 등록된 아이콘 개수 — C 이름 매크로(`icon_codepoints.h`)가 자산마다 하나씩인지 검증하는 테스트에 쓴다
+/// (생성물들이 같은 `ICONS` 소스에서 나왔는지 가드). 런타임 경로엔 안 쓴다.
 pub fn registeredIconCount() usize {
     return data.icons.len;
 }
@@ -115,7 +115,7 @@ test "icon_glyph: 미등록 PUA는 null(폰트 경로로 폴백)" {
     try std.testing.expectEqual(@as(?u32, null), fillCoverage(0xF0050, w, h, bpr, &pixels));
 }
 
-// 세 생성물 동기 가드(3/3): coverage 데이터(이 파일이 소비)·C 셰이핑 게이트(icon_codepoints.h — coretext_frame_builder가
+// 세 생성물 동기 가드(3/3): coverage 데이터(이 파일이 소비)·C 이름 매크로(icon_codepoints.h — coretext_frame_builder가
 // 가드)·**semantic 이름 registry**(src/icons.zig)가 모두 svg_to_coverage.py의 같은 ICONS에서 나온다. 이름 registry가
 // 어긋나면 소비처가 이름으로 고른 아이콘이 미등록 cp로 lower돼 **폰트 폴백(빈 칸 또는 엉뚱한 Nerd Fonts 글리프)**이
 // 되므로, 외부 도구 없이 CI가 잡게 여기서 못박는다. `--check`(로컬, rsvg 필요)와 달리 이 테스트는 Zig만 쓴다.

@@ -32,6 +32,8 @@ pub const RequestId = union(enum) {
     document_symbol: u32,
     document_highlight: u32,
     selection_range: u32,
+    /// pull 진단 `textDocument/diagnostic`(보조 서버 §8.2u — ESLint 는 push 를 안 한다).
+    diagnostic: u32,
 };
 /// 요청 id 는 **i32 안**이어야 한다(2026-09-20 실측): rust-analyzer·ruff 가 쓰는 Rust `lsp-server` 크레이트는 정수 id 를 i32 로만 읽고,
 /// 넘치면 그 메시지를 **알림으로 오인해 버린다**(`6_000_000_001` 짜리 completion 이 stderr 에 `unhandled notification` 으로만 남고 응답이
@@ -74,10 +76,12 @@ pub const inlay_hint_id_base: u32 = 16 * id_span;
 pub const document_symbol_id_base: u32 = 17 * id_span;
 /// 같은 낱말 강조(§8.2p).
 pub const document_highlight_id_base: u32 = 18 * id_span;
-/// 구조 기반 선택 확장(§8.2q). **i32 안에 남은 칸은 이것 다음 하나(20e8)뿐이다** — 21e8 부터는 넘친다.
+/// 구조 기반 선택 확장(§8.2q).
 pub const selection_range_id_base: u32 = 19 * id_span;
+/// pull 진단(§8.2u). **i32 안의 마지막 칸이다** — 21e8 부터는 넘친다. 새 요청 종류는 칸을 나누지 않고는 못 더한다.
+pub const diagnostic_id_base: u32 = 20 * id_span;
 comptime {
-    std.debug.assert(@as(u64, selection_range_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    std.debug.assert(@as(u64, diagnostic_id_base) + id_span - 1 <= std.math.maxInt(i32));
 }
 /// 종류별 seq 의 다음 값 — 칸 안에서 돈다(0 은 안 쓴다: 처음 보내는 요청이 `base + 1`).
 pub fn nextSeq(seq: u32) u32 {
@@ -88,7 +92,7 @@ pub fn nextSeq(seq: u32) u32 {
 fn requestIdOf(id_num: i64) ?RequestId {
     if (id_num == initialize_id) return .initialize;
     if (id_num == shutdown_id) return .shutdown;
-    if (id_num < hover_id_base or id_num >= @as(i64, selection_range_id_base) + id_span) return null;
+    if (id_num < hover_id_base or id_num >= @as(i64, diagnostic_id_base) + id_span) return null;
     const slot: u32 = @intCast(@divTrunc(id_num, id_span));
     const seq: u32 = @intCast(@mod(id_num, id_span));
     return switch (slot) {
@@ -111,6 +115,7 @@ fn requestIdOf(id_num: i64) ?RequestId {
         17 => .{ .document_symbol = seq },
         18 => .{ .document_highlight = seq },
         19 => .{ .selection_range = seq },
+        20 => .{ .diagnostic = seq },
         else => null,
     };
 }
@@ -118,7 +123,17 @@ fn requestIdOf(id_num: i64) ?RequestId {
 /// 위치 인코딩 — `initialize` 에서 utf-8 을 먼저 제안하고 서버가 고른 것을 쓴다(§8.2a).
 pub const PositionEncoding = enum { utf8, utf16 };
 
-pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid: i64) error{OutOfMemory}![]u8 {
+/// 클라이언트마다 다른 능력(§8.2u) — 보조 서버 ESLint 는 pull 진단만 내고 `workspace/configuration` 을 묻는다. 주 서버에는 둘 다 알리지
+/// 않는다(tsgo 등이 push 에서 pull 로 바꾸면 지금 동작이 바뀐다).
+pub const InitOptions = struct {
+    /// `textDocument.diagnostic` 을 알린다(pull 진단).
+    pull_diagnostics: bool = false,
+    /// `workspace.configuration` 을 참으로 — 그 서버의 설정 요청에 답한다.
+    configuration: bool = false,
+};
+
+pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid: i64, opts: InitOptions) error{OutOfMemory}![]u8 {
+    const DiagnosticCaps = struct { dynamicRegistration: bool = false, relatedDocumentSupport: bool = false };
     return std.json.Stringify.valueAlloc(allocator, .{
         .jsonrpc = "2.0",
         .id = initialize_id,
@@ -132,6 +147,7 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                 .textDocument = .{
                     .synchronization = .{ .dynamicRegistration = false, .didSave = true }, // §8.2k — rustc 진단은 저장에만 다시 돈다
                     .publishDiagnostics = .{ .versionSupport = true },
+                    .diagnostic = if (opts.pull_diagnostics) @as(?DiagnosticCaps, .{}) else null, // §8.2u — 보조 서버에만(없으면 키도 없다)
                     .hover = .{ .contentFormat = [_][]const u8{ "markdown", "plaintext" } },
                     // 자동완성(§8.2g) — 스니펫은 받지 않는다(`snippetSupport = false` 면 서버가 평문 insertText 를 낸다). resolve 도 아직.
                     .completion = .{
@@ -195,10 +211,74 @@ pub fn initializeRequest(allocator: std.mem.Allocator, root_uri: []const u8, pid
                 },
                 // `inlayHint.refreshSupport` — rust-analyzer 는 색인이 끝나기 전엔 `[]` 를 내고 끝나면 `workspace/inlayHint/refresh` 를
                 // 보낸다(§8.2n 실측 2026-09-22). 이것을 안 받으면 서버가 뜬 뒤 연 파일의 힌트가 **영영** 안 온다.
-                .workspace = .{ .applyEdit = false, .configuration = false, .workspaceFolders = false, .inlayHint = .{ .refreshSupport = true } },
+                .workspace = .{ .applyEdit = false, .configuration = opts.configuration, .workspaceFolders = false, .inlayHint = .{ .refreshSupport = true } },
             },
         },
+    }, .{ .emit_null_optional_fields = false });
+}
+
+/// 서버 → 클라이언트 `workspace/configuration`(§8.2u — 고정 설정이 있는 서버에만 답한다; 나머지는 지금처럼 거부).
+pub const configuration_method = "workspace/configuration";
+/// 서버 → 클라이언트 `workspace/diagnostic/refresh`(LSP 3.17) — pull 서버가 설정이 바뀌어 다시 물어 달라고 한다. `null` 로 답하고 다시 묻는다.
+pub const diagnostic_refresh_method = "workspace/diagnostic/refresh";
+
+/// `workspace/configuration` 응답 — 요청의 `items` 수만큼 같은 설정 객체(JSON 원문)를 배열로. `id` 는 서버가 준 값 그대로.
+pub fn configurationResult(allocator: std.mem.Allocator, id: std.json.Value, blob: []const u8, count: usize) error{OutOfMemory}![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, "{\"jsonrpc\":\"2.0\",\"id\":");
+    const id_json = try std.json.Stringify.valueAlloc(allocator, id, .{});
+    defer allocator.free(id_json);
+    try out.appendSlice(allocator, id_json);
+    try out.appendSlice(allocator, ",\"result\":[");
+    for (0..count) |i| {
+        if (i > 0) try out.append(allocator, ',');
+        try out.appendSlice(allocator, blob);
+    }
+    try out.appendSlice(allocator, "]}");
+    return out.toOwnedSlice(allocator);
+}
+
+/// `workspace/configuration` 요청의 `items` 수(없거나 모양이 틀리면 1 — 하나는 답한다).
+pub fn configurationItemCount(params: ?std.json.Value) usize {
+    const p = params orelse return 1;
+    if (p != .object) return 1;
+    const items = p.object.get("items") orelse return 1;
+    return if (items == .array) items.array.items.len else 1;
+}
+
+/// `textDocument/diagnostic`(pull, §8.2u) — `20e8+seq`.
+pub fn diagnosticRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8) error{OutOfMemory}![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, .{
+        .jsonrpc = "2.0",
+        .id = diagnostic_id_base + seq,
+        .method = "textDocument/diagnostic",
+        .params = .{ .textDocument = .{ .uri = uri } },
     }, .{});
+}
+
+/// `initialize` 결과에 `diagnosticProvider` 가 있나(pull 진단을 내는 서버).
+pub fn diagnosticProviderFromResult(result: ?std.json.Value) bool {
+    const r = result orelse return false;
+    if (r != .object) return false;
+    const caps = r.object.get("capabilities") orelse return false;
+    if (caps != .object) return false;
+    const prov = caps.object.get("diagnosticProvider") orelse return false;
+    return prov == .object or (prov == .bool and prov.bool);
+}
+
+/// pull 진단 응답(`DocumentDiagnosticReport`) — `full` 이면 `items`, `unchanged` 면 그대로 둔다. 모양이 틀리면 `null`.
+pub const PullReport = union(enum) { full: std.json.Value, unchanged };
+pub fn pullReportFromResult(result: ?std.json.Value) ?PullReport {
+    const r = result orelse return null;
+    if (r != .object) return null;
+    const kind = r.object.get("kind") orelse return null;
+    if (kind != .string) return null;
+    if (std.mem.eql(u8, kind.string, "unchanged")) return .unchanged;
+    if (!std.mem.eql(u8, kind.string, "full")) return null;
+    const items = r.object.get("items") orelse return null;
+    if (items != .array) return null;
+    return .{ .full = items };
 }
 
 /// 서버 → 클라이언트 요청 `workspace/inlayHint/refresh`(§8.2n) — 받으면 `nullResult` 로 답하고 힌트를 다시 묻는다.
@@ -1028,7 +1108,7 @@ pub const Incoming = union(enum) {
     /// 서버 알림(`publishDiagnostics` 등).
     notification: struct { method: []const u8, params: ?std.json.Value },
     /// 서버 → 클라이언트 요청(id 있음) — 거부 대상.
-    request: struct { id: std.json.Value, method: []const u8 },
+    request: struct { id: std.json.Value, method: []const u8, params: ?std.json.Value = null },
     /// 모르는 id 의 응답이나 모양이 아닌 것 — 버린다.
     ignore,
 };
@@ -1044,7 +1124,7 @@ pub fn classify(root: std.json.Value) Incoming {
     }) else null;
     const id = obj.get("id");
     if (method) |m| {
-        if (id != null and id.? != .null) return .{ .request = .{ .id = id.?, .method = m } };
+        if (id != null and id.? != .null) return .{ .request = .{ .id = id.?, .method = m, .params = obj.get("params") } };
         return .{ .notification = .{ .method = m, .params = obj.get("params") } };
     }
     const id_val = id orelse return .ignore;
@@ -1177,7 +1257,7 @@ fn parse(a: std.mem.Allocator, text: []const u8) !std.json.Parsed(std.json.Value
 
 test "LSJ1 initialize 는 id 1·rootUri·utf-8 먼저인 positionEncodings·applyEdit false 를 싣는다 (§8.2a)" {
     const a = testing.allocator;
-    const msg = try initializeRequest(a, "file:///r", 42);
+    const msg = try initializeRequest(a, "file:///r", 42, .{});
     defer a.free(msg);
     var p = try parse(a, msg);
     defer p.deinit();
@@ -1267,7 +1347,7 @@ test "LSJ5 hover — 요청 id 는 1000+seq·contentFormat 에 markdown, 응답�
     try testing.expect(std.mem.indexOf(u8, req, "\"id\":100000007") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/hover\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"line\":3,\"character\":5") != null);
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"hover\":{\"contentFormat\":[\"markdown\",\"plaintext\"]}") != null);
     // 응답 대조 — 1007 은 hover seq 7, 999 는 모르는 id.
@@ -1347,7 +1427,7 @@ test "LSJ7 signatureHelp — 요청 id 3e8+seq·context, capability, 트리거 �
     const req2 = try signatureHelpRequest(a, 6, "file:///a.c", 2, 7, .content_change, null, true);
     defer a.free(req2);
     try testing.expect(std.mem.indexOf(u8, req2, "\"context\":{\"triggerKind\":3,\"isRetrigger\":true}") != null); // 글자 없음 → 키 생략
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"labelOffsetSupport\":true") != null);
     try testing.expect(std.mem.indexOf(u8, init, "\"contextSupport\":true") != null);
@@ -1494,7 +1574,7 @@ test "LSJ10 completion — 요청 id 6e8+seq·context(triggerKind 1/2·글자), 
     var none = try parse(a, "{\"capabilities\":{\"hoverProvider\":true}}");
     defer none.deinit();
     try testing.expect(!completionTriggersFromResult(none.value).supported);
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"snippetSupport\":false") != null);
 }
@@ -1541,7 +1621,7 @@ test "LSJ11 codeAction — 요청 id 7e8+seq·range·context.diagnostics(code �
     var c3 = try parse(a, "{\"capabilities\":{\"hoverProvider\":true}}");
     defer c3.deinit();
     try testing.expect(!codeActionCapsFromResult(c3.value).supported);
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"resolveSupport\":{\"properties\":[\"edit\"]}") != null);
     try testing.expect(std.mem.indexOf(u8, init, "\"dataSupport\":true") != null);
@@ -1564,7 +1644,7 @@ test "LSJ12 completionItem/resolve — 요청은 항목 JSON 그대로(9e8+seq),
     var caps2 = try parse(a, "{\"capabilities\":{\"completionProvider\":{}}}");
     defer caps2.deinit();
     try testing.expect(completionTriggersFromResult(caps2.value).supported and !completionTriggersFromResult(caps2.value).resolve);
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"resolveSupport\":{\"properties\":[\"additionalTextEdits\",\"detail\",\"documentation\"]}") != null);
 }
@@ -1627,7 +1707,7 @@ test "LSJ13 요청 id 는 i32 안 — 종류마다 1e8 칸, seq 는 칸 안에�
 
 test "LSJ14 initialize 가 completionItem.labelDetailsSupport 를 선언한다 (§8.2g-c)" {
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"labelDetailsSupport\":true") != null);
     // §8.2g-d — completion 의 `completionItem` 블록 안에서(시그니처 쪽에도 같은 키가 있어 전체 검색은 헛것).
@@ -1641,7 +1721,7 @@ test "LSJ20 capability 의 JSON «모양» — symbolKind.valueSet 은 정수 �
     // `[_]u8{…}` 은 Zig 가 **JSON 문자열**로 내고(tsgo: `cannot unmarshal JSON string into []SymbolKind`),
     // `.{}`(빈 튜플)는 **`[]`** 로 나간다(tsgo: `cannot unmarshal JSON array into InitializedParams`). 둘 다 세션 전체를 죽였다.
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     var p = try parse(a, init);
     defer p.deinit();
@@ -1664,7 +1744,7 @@ test "LSJ20 capability 의 JSON «모양» — symbolKind.valueSet 은 정수 �
 
 test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)·요청 둘의 id 칸(10e8)·classify (§8.2i)" {
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 1);
+    const init = try initializeRequest(a, "file:///r", 1, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"semanticTokens\":{\"requests\":{\"range\":true,\"full\":true}") != null);
     try testing.expect(std.mem.indexOf(u8, init, "\"tokenTypes\":[\"namespace\",\"type\"") != null);
@@ -1681,14 +1761,14 @@ test "LSJ15 semanticTokens — initialize capability(range·full·표준 종류)
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .semantic_tokens and classify(p1.value).response.id.semantic_tokens == 3);
     try testing.expect(@as(u64, semantic_tokens_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2000000000,\"result\":null}"); // 칸 밖(마지막 칸 19e8 의 다음)
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2100000000,\"result\":null}"); // 칸 밖(마지막 칸 20e8 의 다음)
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
 }
 
 test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)·요청·id 칸(11e8)·classify·칸 밖 (§8.2j)" {
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 42);
+    const init = try initializeRequest(a, "file:///r", 42, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"foldingRange\":{\"lineFoldingOnly\":true,\"foldingRangeKind\":{\"valueSet\":[\"comment\",\"imports\",\"region\"]}}") != null);
     const fr = try foldingRangeRequest(a, 7, "file:///a.rs");
@@ -1701,14 +1781,14 @@ test "LSJ16 foldingRange — initialize capability(lineFoldingOnly·종류 셋)�
     var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1199999999,\"result\":null}"); // 칸 끝
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .folding_range and classify(p2.value).response.id.folding_range == 99999999);
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2000000000,\"result\":null}"); // 칸 밖(마지막 칸 19e8 의 다음)
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2100000000,\"result\":null}"); // 칸 밖(마지막 칸 20e8 의 다음)
     defer p3.deinit();
     try testing.expect(classify(p3.value) == .ignore);
 }
 
 test "SSEL8 selectionRange — capability · 위치 여럿을 한 요청에(배열) · id 칸(19e8)·classify·칸 끝·칸 밖 (§8.2q)" {
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 42);
+    const init = try initializeRequest(a, "file:///r", 42, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"selectionRange\":{\"dynamicRegistration\":false}") != null);
     const positions = [_]Position{ .{ .line = 2, .character = 9 }, .{ .line = 5, .character = 0 } };
@@ -1721,14 +1801,14 @@ test "SSEL8 selectionRange — capability · 위치 여럿을 한 요청에(배�
     var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":1999999999,\"result\":null}"); // 칸 끝 — i32 안
     defer p2.deinit();
     try testing.expect(classify(p2.value).response.id == .selection_range and classify(p2.value).response.id.selection_range == 99999999);
-    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2000000000,\"result\":null}"); // 칸 밖
+    var p3 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2100000000,\"result\":null}"); // 칸 밖(마지막 칸 20e8 의 다음)
     defer p3.deinit();
     try testing.expect(classify(p3.value) == .ignore);
 }
 
 test "LSJ17 didSave — capability 선언·통지 둘(text 유무)·서버 save 선언 파싱(객체 true·{includeText}·false·숫자·없음) (§8.2k)" {
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 42);
+    const init = try initializeRequest(a, "file:///r", 42, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"synchronization\":{\"dynamicRegistration\":false,\"didSave\":true}") != null);
     const bare = try didSave(a, "file:///a.rs", null);
@@ -1759,7 +1839,7 @@ test "LSJ17 didSave — capability 선언·통지 둘(text 유무)·서버 save 
 
 test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)·classify·칸 밖·locationsFromResult 세 모양 (§8.2l)" {
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 42);
+    const init = try initializeRequest(a, "file:///r", 42, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"references\":{\"dynamicRegistration\":false}") != null);
     const req = try referencesRequest(a, 9, "file:///a.rs", 2, 11);
@@ -1769,7 +1849,7 @@ test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)�
     defer p1.deinit();
     try testing.expect(classify(p1.value).response.id == .references and classify(p1.value).response.id.references == 9);
     try testing.expect(@as(u64, references_id_base) + id_span - 1 <= std.math.maxInt(i32));
-    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2000000000,\"result\":null}"); // 칸 밖
+    var p2 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2100000000,\"result\":null}"); // 칸 밖(마지막 칸 20e8 의 다음)
     defer p2.deinit();
     try testing.expect(classify(p2.value) == .ignore);
     // 결과 세 모양: Location[] · LocationLink[](selection range 우선) · 단일 Location; 모양 아닌 항목은 뺀다; null 은 빈 목록.
@@ -1793,7 +1873,7 @@ test "LSJ18 references — capability·요청(includeDeclaration)·id 칸(12e8)�
 
 test "LSJ19 implementation·typeDefinition·declaration — capability 셋(linkSupport)·요청 셋(context 없음)·id 칸 13~15e8·classify·provider 파싱(bool·객체·없음) (§8.2m)" {
     const a = testing.allocator;
-    const init = try initializeRequest(a, "file:///r", 42);
+    const init = try initializeRequest(a, "file:///r", 42, .{});
     defer a.free(init);
     try testing.expect(std.mem.indexOf(u8, init, "\"implementation\":{\"dynamicRegistration\":false,\"linkSupport\":true}") != null);
     try testing.expect(std.mem.indexOf(u8, init, "\"typeDefinition\":{\"dynamicRegistration\":false,\"linkSupport\":true}") != null);
@@ -1891,4 +1971,51 @@ test "CAK4 문맥 진단은 서버의 data(JSON 원문)와 source 를 그대로 
     try testing.expect(std.mem.indexOf(u8, without, "data") == null);
     try testing.expect(std.mem.indexOf(u8, without, "source") == null);
     try testing.expect(std.mem.indexOf(u8, without, "\"code\"") == null);
+}
+
+test "LSJ22 pull 진단 — 요청은 i32 안의 마지막 칸(20e8), classify, 결과 full·unchanged, provider 판정, 능력은 고른 클라이언트에만, 설정 응답은 items 수만큼 (tooling §8.2u)" {
+    const a = testing.allocator;
+    const req = try diagnosticRequest(a, 7, "file:///r/a.ts");
+    defer a.free(req);
+    try testing.expect(std.mem.indexOf(u8, req, "\"id\":2000000007,\"method\":\"textDocument/diagnostic\",\"params\":{\"textDocument\":{\"uri\":\"file:///r/a.ts\"}}") != null);
+    try testing.expect(@as(u64, diagnostic_id_base) + id_span - 1 <= std.math.maxInt(i32));
+    var p = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":2099999999,\"result\":null}"); // 칸 끝
+    defer p.deinit();
+    try testing.expectEqual(@as(u32, 99_999_999), classify(p.value).response.id.diagnostic);
+    // 결과.
+    var full = try parse(a, "{\"kind\":\"full\",\"items\":[{\"message\":\"m\"}]}");
+    defer full.deinit();
+    try testing.expectEqual(@as(usize, 1), pullReportFromResult(full.value).?.full.array.items.len);
+    var same = try parse(a, "{\"kind\":\"unchanged\",\"resultId\":\"1\"}");
+    defer same.deinit();
+    try testing.expect(pullReportFromResult(same.value).? == .unchanged);
+    var bad = try parse(a, "{\"kind\":\"full\"}");
+    defer bad.deinit();
+    try testing.expect(pullReportFromResult(bad.value) == null);
+    try testing.expect(pullReportFromResult(null) == null);
+    // provider.
+    var caps = try parse(a, "{\"capabilities\":{\"diagnosticProvider\":{\"identifier\":\"eslint\"}}}");
+    defer caps.deinit();
+    try testing.expect(diagnosticProviderFromResult(caps.value));
+    var none = try parse(a, "{\"capabilities\":{}}");
+    defer none.deinit();
+    try testing.expect(!diagnosticProviderFromResult(none.value));
+    // 능력 — 기본(주 서버)엔 pull 도 설정도 없다(키도 없다), 고른 클라이언트에만.
+    const plain = try initializeRequest(a, "file:///r", 1, .{});
+    defer a.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "\"diagnostic\":") == null);
+    try testing.expect(std.mem.indexOf(u8, plain, "\"configuration\":false") != null);
+    const pull = try initializeRequest(a, "file:///r", 1, .{ .pull_diagnostics = true, .configuration = true });
+    defer a.free(pull);
+    try testing.expect(std.mem.indexOf(u8, pull, "\"diagnostic\":{\"dynamicRegistration\":false,\"relatedDocumentSupport\":false}") != null);
+    try testing.expect(std.mem.indexOf(u8, pull, "\"configuration\":true") != null);
+    // 설정 응답 — items 수만큼, id 는 서버의 것 그대로(문자열도).
+    var q = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":\"c-1\",\"method\":\"workspace/configuration\",\"params\":{\"items\":[{\"section\":\"\"},{\"section\":\"\"}]}}");
+    defer q.deinit();
+    const req2 = classify(q.value).request;
+    try testing.expectEqual(@as(usize, 2), configurationItemCount(req2.params));
+    const ans = try configurationResult(a, req2.id, "{\"validate\":\"on\"}", configurationItemCount(req2.params));
+    defer a.free(ans);
+    try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":\"c-1\",\"result\":[{\"validate\":\"on\"},{\"validate\":\"on\"}]}", ans);
+    try testing.expectEqual(@as(usize, 1), configurationItemCount(null));
 }

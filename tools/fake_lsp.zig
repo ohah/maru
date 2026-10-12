@@ -57,6 +57,11 @@
 //!   `AUXFIX` → `AUX_FIXED`, 본문에 `AUXSTALL` 이 있으면 메뉴 요청에 답하지 않는다. `AUXSLOW` 면 메뉴 요청에 150ms 늦게 답한다. `AUXLAZY` 면 resolve 가 필요한 「aux: lazy」를 더 내고,
 //!   보조 역할의 resolve 는 첫 줄에 `# aux lazy` 를 넣는다(주 역할은 `// lazy`). 주 역할은 `quickfix`·`refactor`·
 //!   `source.organizeImports`·`source.fixAll` 을 알린다.
+//! - **ESLint 역할**(tooling §8.2u): 실행 파일 이름(argv[0])이 `vscode-eslint-language-server` 면(판정자가 저장소 `node_modules/.bin` 에 사본을
+//!   둔다) push 를 안 하고 `diagnosticProvider` 를 알린다(클라이언트가 `textDocument.diagnostic` 을 알렸을 때만, `MARU_FAKE_LSP_NOPULLCAP=1` 이면 안 알린다). 첫 `textDocument/diagnostic` 에서 `workspace/configuration`(`srv-c`)을 묻고 그 pull 은
+//!   답을 받은 뒤에 답한다 — 설정 객체(`validate: "on"`·`workingDirectory`·`experimental` 객체)가 아니면 실서버처럼 오류. 진단은 첫 줄 0..3 의 `eslint: <version> <didOpen 의 languageId>`(code `no-var`, source
+//!   `eslint`), `ESLQUIET` 면 빈 목록, didChange 본문에 `ESLREFRESH` 면 `workspace/diagnostic/refresh` 를 보낸다. code action 은 보조 역할과
+//!   같은 모양(`eslint: fix no-var`·`source.fixAll.eslint` 는 `ESLFIX` → `ESL_FIXED`).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
 
 const std = @import("std");
@@ -149,6 +154,8 @@ pub fn main(init: std.process.Init) void {
     const allocator = std.heap.c_allocator;
     if (init.minimal.args.toSlice(allocator)) |argv| {
         auxiliary = argv.len > 1 and std.mem.eql(u8, argv[1], "server");
+        // ESLint 역할(보조 서버 표의 `vscode-eslint-language-server` — 판정자가 저장소 `node_modules/.bin` 에 사본으로 둔다).
+        eslint_mode = argv.len > 0 and std.mem.eql(u8, std.fs.path.basename(argv[0]), "vscode-eslint-language-server");
     } else |_| {}
     const noise = "fake: stderr noise\n";
     _ = std.c.write(2, noise.ptr, noise.len);
@@ -184,6 +191,25 @@ var answered = false;
 var auxiliary = false;
 const primary_action_kinds = [_][]const u8{ "quickfix", "refactor", "source.organizeImports", "source.fixAll" };
 const aux_action_kinds = [_][]const u8{ "quickfix", "source.fixAll.ruff" };
+const eslint_action_kinds = [_][]const u8{ "quickfix", "source.fixAll.eslint" };
+/// ESLint 역할로 떴다 — pull 진단만, `workspace/configuration` 에 설정 객체를 받아야 검사한다.
+var eslint_mode = false;
+/// 우리가 낸 설정 요청(`srv-c`)에 설정 객체(`validate: "on"`)로 답을 받았다 / 답을 기다리는 중이다.
+var eslint_config_ok = false;
+var eslint_config_asked = false;
+/// 설정 답을 기다리는 pull 하나(실서버처럼 설정을 받은 뒤 검사한다) — id 원문과 uri.
+var eslint_pending_id: [64]u8 = undefined;
+var eslint_pending_id_len: usize = 0;
+var eslint_pending_uri: [1024]u8 = undefined;
+var eslint_pending_uri_len: usize = 0;
+
+/// 보조 역할들(ruff 꼴·ESLint 꼴)의 이름 — code action 의 모양은 같고 이름만 다르다.
+const Persona = struct { prefix: []const u8, source: []const u8, fix_kind: []const u8, marker: []const u8, fixed: []const u8 };
+fn persona() ?Persona {
+    if (eslint_mode) return .{ .prefix = "eslint", .source = "eslint", .fix_kind = "source.fixAll.eslint", .marker = "ESLFIX", .fixed = "ESL_FIXED" };
+    if (auxiliary) return .{ .prefix = "aux", .source = "aux", .fix_kind = "source.fixAll.ruff", .marker = "AUXFIX", .fixed = "AUX_FIXED" };
+    return null;
+}
 /// `initialize` 에서 협상한 위치 인코딩이 utf-16 인가(기본은 utf-8 — 클라이언트가 먼저 제안한다). documentHighlight 가 자리를 이 단위로 읽고 낸다.
 var negotiated_utf16 = false;
 /// `initialized` 의 `params` 가 객체가 아니었다 — 그 뒤 전부 `ServerNotInitialized`(tsgo 꼴).
@@ -217,7 +243,7 @@ fn setDocMode(uri: []const u8, mode: DefMode) void {
 }
 
 /// 문서 본문을 uri 별로 기억한다(signatureHelp 가 caret 앞을 본다). 상한 8 문서·64 KB.
-const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0 };
+const DocText = struct { uri: [1024]u8 = undefined, len: usize = 0, text: [65536]u8 = undefined, text_len: usize = 0, version: i64 = 0, lang: [32]u8 = undefined, lang_len: usize = 0 };
 var doc_texts: [8]DocText = [_]DocText{.{}} ** 8;
 
 fn setDocText(uri: []const u8, text: []const u8, version: i64) void {
@@ -236,6 +262,21 @@ fn setDocText(uri: []const u8, text: []const u8, version: i64) void {
     @memcpy(d.text[0..text.len], text);
     d.text_len = text.len;
     d.version = version;
+}
+
+/// didOpen 이 실어 온 `languageId` 를 기억한다(ESLint 꼴의 진단 메시지가 그것을 보인다 — 문서마다 그 문법의 값인지, tooling §8.2u).
+fn setDocLang(uri: []const u8, lang: []const u8) void {
+    for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) {
+        const n = @min(lang.len, d.lang.len);
+        @memcpy(d.lang[0..n], lang[0..n]);
+        d.lang_len = n;
+        return;
+    };
+}
+
+fn docLang(uri: []const u8) []const u8 {
+    for (&doc_texts) |*d| if (d.len == uri.len and std.mem.eql(u8, d.uri[0..d.len], uri)) return d.lang[0..d.lang_len];
+    return "";
 }
 
 fn docVersion(uri: []const u8) i64 {
@@ -649,9 +690,10 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         // 문맥 진단의 `data.fix`(보조 서버가 publish 에 실은 것)를 제목에 — 클라이언트가 되돌렸는지 보인다.
         const data_fix: ?[]const u8 = if (dg.object.get("data")) |dd| (if (dd == .object) str(dd.object.get("fix")) else null) else null;
         // 보조 역할은 ruff 처럼 문맥 진단의 `source` 가 제 것(`aux`)일 때만 quickfix 를 낸다.
-        if (auxiliary and !std.mem.eql(u8, str(dg.object.get("source")) orelse "", "aux")) continue;
+        if (persona()) |pp| if (!std.mem.eql(u8, str(dg.object.get("source")) orelse "", pp.source)) continue;
         var it: std.json.ObjectMap = .empty;
-        const title = if (data_fix) |df| std.fmt.allocPrint(arena, "{s}: fix {s} (data {s})", .{ if (auxiliary) "aux" else "fake", code, df }) catch return else std.fmt.allocPrint(arena, "{s}: fix {s}", .{ if (auxiliary) "aux" else "fake", code }) catch return;
+        const who = if (persona()) |pp| pp.prefix else "fake";
+        const title = if (data_fix) |df| std.fmt.allocPrint(arena, "{s}: fix {s} (data {s})", .{ who, code, df }) catch return else std.fmt.allocPrint(arena, "{s}: fix {s}", .{ who, code }) catch return;
         it.put(arena, "title", .{ .string = title }) catch return;
         it.put(arena, "kind", .{ .string = "quickfix" }) catch return;
         if (i == 0) it.put(arena, "isPreferred", .{ .bool = true }) catch return;
@@ -667,7 +709,7 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         it.put(arena, "edit", .{ .object = edit }) catch return;
         items.append(.{ .object = it }) catch return;
     };
-    if (auxiliary) { // 보조 서버(ruff 꼴)는 진단별 quickfix 만 — `AUXLAZY` 면 resolve 가 필요한 「aux: lazy」 하나 더
+    if (persona() != null) { // 보조 서버(ruff 꼴·ESLint 꼴)는 진단별 quickfix 만 — `AUXLAZY` 면 resolve 가 필요한 「aux: lazy」 하나 더
         if (std.mem.indexOf(u8, text, "AUXLAZY") != null) {
             var it: std.json.ObjectMap = .empty;
             it.put(arena, "title", .{ .string = "aux: lazy" }) catch return;
@@ -752,10 +794,11 @@ fn handleSourceActions(allocator: std.mem.Allocator, only: []const std.json.Valu
     };
     for (only) |k| {
         const kind = if (k == .string) k.string else continue;
-        if (auxiliary) {
-            // 보조 서버(ruff 꼴): `source.fixAll`·`source.fixAll.ruff` 만 — `AUXFIX` → `AUX_FIXED`.
-            if (std.mem.eql(u8, kind, "source.fixAll") or std.mem.eql(u8, kind, "source.fixAll.ruff")) {
-                if (Mk.replaceItem(arena, "aux: fix all", "source.fixAll.ruff", req_uri, text, "AUXFIX", "AUX_FIXED")) |item| items.append(item) catch return;
+        if (persona()) |pp| {
+            // 보조 서버: `source.fixAll`·그 도구의 fixAll kind 만 — 표식(`AUXFIX`·`ESLFIX`)을 바꾼다.
+            if (std.mem.eql(u8, kind, "source.fixAll") or std.mem.eql(u8, kind, pp.fix_kind)) {
+                const t = std.fmt.allocPrint(arena, "{s}: fix all", .{pp.prefix}) catch return;
+                if (Mk.replaceItem(arena, t, pp.fix_kind, req_uri, text, pp.marker, pp.fixed)) |item| items.append(item) catch return;
             }
             continue;
         }
@@ -795,6 +838,44 @@ fn handleSourceActions(allocator: std.mem.Allocator, only: []const std.json.Valu
 }
 
 /// `codeAction/resolve` — `data.uri` 의 문서 첫 줄 머리에 `// lazy\n` 을 넣는 `edit`. `RESOLVEFAIL` 이면 오류.
+/// pull 진단(ESLint 꼴 — §8.2u): 설정 답을 못 받았으면 실서버처럼 오류. 아니면 `full` — 첫 줄 0..3 에 warning `eslint: <version> <languageId>`(code `no-var`,
+/// source `eslint`, data 없음 — ESLint 는 data 를 안 싣는다). `ESLQUIET` 면 빈 목록.
+fn handlePullDiagnostics(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
+    var uri: []const u8 = "";
+    if (obj.get("params")) |p| if (p == .object) if (p.object.get("textDocument")) |td| if (td == .object) {
+        uri = str(td.object.get("uri")) orelse "";
+    };
+    if (!eslint_config_asked) {
+        // 처음이면 설정을 묻고 이 pull 은 답을 받은 뒤에(실서버는 진단 요청을 처리하며 설정을 묻고 기다린다).
+        eslint_config_asked = true;
+        const id_json = std.json.Stringify.valueAlloc(allocator, id, .{}) catch return;
+        defer allocator.free(id_json);
+        if (id_json.len > eslint_pending_id.len or uri.len > eslint_pending_uri.len) return;
+        @memcpy(eslint_pending_id[0..id_json.len], id_json);
+        eslint_pending_id_len = id_json.len;
+        @memcpy(eslint_pending_uri[0..uri.len], uri);
+        eslint_pending_uri_len = uri.len;
+        // 항목 둘 — 클라이언트가 `items` 수만큼 답하는지(실서버는 하나를 묻는다).
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-c", .method = "workspace/configuration", .params = .{ .items = [_]struct { scopeUri: []const u8, section: []const u8 }{ .{ .scopeUri = uri, .section = "" }, .{ .scopeUri = uri, .section = "" } } } });
+        return;
+    }
+    answerPull(allocator, id, uri);
+}
+
+fn answerPull(allocator: std.mem.Allocator, id: std.json.Value, uri: []const u8) void {
+    if (!eslint_config_ok) {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .@"error" = .{ .code = @as(i32, -32603), .message = "Request textDocument/diagnostic failed with message: Cannot read properties of null (reading 'workingDirectory')" } });
+        return;
+    }
+    const text = docText(uri);
+    var msg_buf: [64]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, "eslint: {d} {s}", .{ docVersion(uri), docLang(uri) }) catch "eslint";
+    const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8, source: []const u8 };
+    const one = [_]Diag{.{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 2, .message = msg, .code = "no-var", .source = "eslint" }};
+    const quiet = std.mem.indexOf(u8, text, "ESLQUIET") != null;
+    sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .kind = "full", .items = if (quiet) one[0..0] else one[0..] } });
+}
+
 fn handleCodeActionResolve(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
     var uri: []const u8 = "";
     if (obj.get("params")) |p| if (p == .object) if (p.object.get("data")) |d| if (d == .object) {
@@ -1465,6 +1546,22 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         // 응답 — 우리가 낸 `srv-1` 에 대한 것이면(거부여도) 「답을 받았다」.
         if (str(id)) |i| {
             if (std.mem.eql(u8, i, "srv-1")) answered = true;
+            if (std.mem.eql(u8, i, "srv-c")) {
+                // 설정 객체여야 한다 — 배열의 첫 항목에 `validate: "on"`. 그 뒤 기다리던 pull 에 답한다(거부·`null` 이면 실서버처럼 오류).
+                if (obj.get("result")) |r| if (r == .array and r.array.items.len == 2 and r.array.items[0] == .object) {
+                    const o = r.array.items[0].object;
+                    // 실서버는 `workingDirectory`·`experimental` 객체를 읽는다 — 없으면 진단 요청이 실패한다(4.10 실측).
+                    const wd_ok = if (o.get("workingDirectory")) |w| w == .object else false;
+                    const exp_ok = if (o.get("experimental")) |e| e == .object else false;
+                    eslint_config_ok = std.mem.eql(u8, str(o.get("validate")) orelse "", "on") and wd_ok and exp_ok;
+                };
+                if (eslint_pending_id_len > 0) {
+                    var idp = std.json.parseFromSlice(std.json.Value, allocator, eslint_pending_id[0..eslint_pending_id_len], .{}) catch return;
+                    defer idp.deinit();
+                    eslint_pending_id_len = 0;
+                    answerPull(allocator, idp.value, eslint_pending_uri[0..eslint_pending_uri_len]);
+                }
+            }
             if (std.mem.eql(u8, i, "srv-2") and obj.get("error") == null) refresh_answered = true;
         }
         return;
@@ -1501,6 +1598,13 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                 utf8 = true;
             };
         };
+        // ESLint 꼴은 클라이언트가 pull 능력(`textDocument.diagnostic`)을 알렸을 때만 `diagnosticProvider` 를 낸다(그렇게 하는 서버가 흔하다 —
+        // 클라이언트가 고른 클라이언트에만 능력을 알리는지 잰다). `MARU_FAKE_LSP_NOPULLCAP=1` 이면 알려도 내지 않는다(provider 없는 서버).
+        var client_pull = false;
+        if (obj.get("params")) |p| if (p == .object) if (p.object.get("capabilities")) |c| if (c == .object) if (c.object.get("textDocument")) |td| if (td == .object) {
+            client_pull = td.object.get("diagnostic") != null;
+        };
+        const offer_pull = eslint_mode and client_pull and std.c.getenv("MARU_FAKE_LSP_NOPULLCAP") == null;
         // `MARU_FAKE_LSP_UTF16=1` 이면 제안과 무관하게 utf-16 을 고른다 — 클라이언트의 byte ↔ character 변환을 제품 경계에서 재는 데 쓴다.
         const force_utf16 = std.c.getenv("MARU_FAKE_LSP_UTF16") != null;
         negotiated_utf16 = !(utf8 and !force_utf16); // 협상 결과를 기억한다 — 자리를 읽고 내는 처리기가 같은 단위를 쓴다
@@ -1526,7 +1630,9 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
                     .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."}, .resolveProvider = true } else null,
                     // 내는 kind 를 실서버처럼 알린다 — 클라이언트는 알린 kind 만 저장 시 묻는다(tooling §8.2u). 보조 역할은 ruff 꼴.
-                    .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = if (auxiliary) aux_action_kinds[0..] else primary_action_kinds[0..], .resolveProvider = true } else null,
+                    .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = if (eslint_mode) eslint_action_kinds[0..] else if (auxiliary) aux_action_kinds[0..] else primary_action_kinds[0..], .resolveProvider = true } else null,
+                    // pull 진단(ESLint 꼴 — §8.2u). 다른 역할은 없다(push).
+                    .diagnosticProvider = if (offer_pull) @as(?struct { identifier: []const u8, interFileDependencies: bool, workspaceDiagnostics: bool }, .{ .identifier = "eslint", .interFileDependencies = false, .workspaceDiagnostics = false }) else null,
                     // semantic tokens(§8.2i) — legend 다섯(하나는 클라이언트가 모르는 이름·`variable` 은 무색). `MARU_FAKE_LSP_SEMFULL=1` 이면 range 없이
                     // full 만(clangd 꼴), `MARU_FAKE_LSP_NOSEMCAP=1` 이면 provider 없음.
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
@@ -1557,7 +1663,12 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             not_initialized = true;
             return;
         }
+        if (eslint_mode) return; // ESLint 꼴은 첫 pull 때 설정을 묻는다(실서버와 같다)
         sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-1", .method = "workspace/configuration", .params = .{ .items = [_]struct { section: []const u8 }{.{ .section = "fake" }} } });
+        return;
+    }
+    if (std.mem.eql(u8, method, "textDocument/diagnostic")) {
+        handlePullDiagnostics(allocator, obj, id orelse .null);
         return;
     }
     if (not_initialized) {
@@ -1818,6 +1929,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         no_hover = std.mem.indexOf(u8, text, "NOHOVER") != null;
         mute_hover = std.mem.indexOf(u8, text, "MUTEHOVER") != null;
         setDocText(uri, text, version);
+        if (str(td.object.get("languageId"))) |lang| setDocLang(uri, lang);
         setDocMode(uri, if (std.mem.indexOf(u8, text, "NODEF") != null) .none else if (std.mem.indexOf(u8, text, "XFILE") != null) .other else if (std.mem.indexOf(u8, text, "OUTSIDE") != null) .outside else .same);
         if (std.mem.indexOf(u8, text, "BOOM") != null) std.c._exit(1);
         if (std.mem.indexOf(u8, text, "HANG") != null) {
@@ -1827,6 +1939,12 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         const v = if (std.mem.indexOf(u8, text, "STALE") != null) version - 1 else version;
         var msg_buf: [64]u8 = undefined;
         const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8 };
+        if (eslint_mode) {
+            // ESLint 꼴은 push 하지 않는다 — 클라이언트가 pull 로 물어야 한다. `ESLREFRESH` 면 다시 물어 달라고 한다(`workspace/diagnostic/refresh`).
+            if (std.mem.indexOf(u8, text, "ESLREFRESH") != null and std.mem.eql(u8, method, "textDocument/didChange"))
+                sendJson(allocator, .{ .jsonrpc = "2.0", .id = "srv-r", .method = "workspace/diagnostic/refresh", .params = null });
+            return;
+        }
         if (auxiliary) {
             // 보조 서버(tooling §8.2u) — 둘째 줄 0..2 에 warning 하나(주 서버의 첫 줄 error 와 자리가 다르다). `AUXQUIET` 이면 빈 목록.
             if (std.mem.indexOf(u8, text, "AUXSPOOF") != null and std.mem.eql(u8, method, "textDocument/didChange"))

@@ -162,10 +162,15 @@ pub const max_config_read_bytes: usize = 1 << 20;
 
 /// `package.json` 본문의 최상위에 `"prettier"` 키가 있나(값은 무엇이든 — 설정 객체 또는 공유 설정 이름).
 pub fn packageJsonHasPrettier(allocator: std.mem.Allocator, text: []const u8) bool {
+    return packageJsonHasKey(allocator, text, "prettier");
+}
+
+/// `package.json` 본문의 최상위에 그 키가 있나(Prettier 의 `"prettier"`, ESLint 의 `"eslintConfig"` — 보조 서버 tooling §8.2u).
+pub fn packageJsonHasKey(allocator: std.mem.Allocator, text: []const u8, key: []const u8) bool {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, text, .{}) catch return false;
     defer parsed.deinit();
     return switch (parsed.value) {
-        .object => |o| o.contains("prettier"),
+        .object => |o| o.contains(key),
         else => false,
     };
 }

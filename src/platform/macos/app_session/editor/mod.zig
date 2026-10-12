@@ -23260,6 +23260,212 @@ test "ASB3 보조 언어 서버의 code action (tooling §8.2u) — ⌘. 는 서
     try testing.expect(std.mem.indexOf(u8, content(term), "ORGANIZED") != null and std.mem.indexOf(u8, content(term), "UNORGANIZED") == null);
 }
 
+/// 가짜 언어 서버의 사본을 픽스처 안에 둔다(실행 파일 이름이 역할을 가른다 — `vscode-eslint-language-server` 면 ESLint 꼴, tooling §8.2u).
+fn installFakeLspCopy(fx: *PaneFixture, sub_path: []const u8) !void {
+    var fake_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&fake_buf)) orelse return error.FakeLspNotInstalled;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, fake, testing.allocator, .limited(64 << 20));
+    defer testing.allocator.free(bytes);
+    if (std.fs.path.dirname(sub_path)) |d| try fx.dir.dir.createDirPath(testing.io, d);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = bytes });
+    try fx.dir.dir.setFilePermissions(testing.io, sub_path, @enumFromInt(0o755), .{});
+}
+
+test "ASB4 보조 언어 서버 ESLint (tooling §8.2u) — 설정이 있으면 저장소의 ESLint 가 떠 workspace/configuration 에 고정 설정으로 답하고, 문서를 보낼 때마다 pull 진단을 물어 그 칸에 세우며(빈 목록·refresh·문서마다 languageId), ⌘.·저장 시 fixAll 도 그 서버에서" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "a.ts", "var a = 1;\nlet b = 2;\nESLFIX\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    s.loaded_config.config.editor.format_on_save = false; // code action 만 잰다
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "eslint.config.mjs", .data = "export default [];\n" });
+    try installFakeLspCopy(&f.fx, "node_modules/.bin/vscode-eslint-language-server");
+    try testing.expect(f.ready());
+    const term = f.term;
+    const esl = struct {
+        fn diag(t: *Term) ?maru.session.editor.diagnostic.Diagnostic {
+            for (&t.rt.editor_diagnostics.aux) |*set| for (set.list.items) |d| if (std.mem.startsWith(u8, d.message, "eslint: ")) return d;
+            return null;
+        }
+        fn count(t: *Term) usize {
+            var n: usize = 0;
+            for (&t.rt.editor_diagnostics.aux) |*set| n += set.list.items.len;
+            return n;
+        }
+        fn client(ss: *AppSession) ?*lsp_client.Client {
+            for (ss.editor_lsp.clients.items) |*c| if (c.role == .auxiliary) return c;
+            return null;
+        }
+    };
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    // ⑴ 떠서 설정에 답하고(그래야 가짜 ESLint 가 검사한다 — 실서버도 그렇다), 문서를 보낸 뒤 pull 로 물어 진단을 그 칸에 세운다.
+    const HasDiag = struct {
+        fn g(t: *Term) bool {
+            return esl.diag(t) != null;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, term, HasDiag.g));
+    const c = esl.client(s) orelse return error.NoEslintClient;
+    try testing.expectEqualStrings("vscode-eslint-language-server", c.server.exe);
+    try testing.expect(c.pull_diagnostics and c.diagnostic_provider and c.answers_configuration);
+    try testing.expect(std.mem.endsWith(u8, c.launched_path.?, "/node_modules/.bin/vscode-eslint-language-server"));
+    try testing.expect(s.editor_lsp.answered_configurations >= 1);
+    try testing.expect(s.editor_lsp.sent_pulls >= 1);
+    var want_buf: [64]u8 = undefined;
+    const v1 = term.rt.editorDocument().notifications.lsp_version;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "eslint: {d} typescript", .{v1}), esl.diag(term).?.message);
+    try testing.expectEqualStrings("no-var", esl.diag(term).?.code);
+    try testing.expectEqualStrings("eslint", esl.diag(term).?.source_text);
+    try testing.expectEqualStrings("vscode-eslint-language-server", esl.diag(term).?.server);
+    try testing.expect(term.rt.editor_diagnostics.lsp.items.len >= 1); // 주 서버(tsgo 자리 — 가짜)의 진단도 제 칸에
+    // ⑵ 편집하면 그 version 을 보낸 뒤 다시 묻는다 — 메시지가 새 version.
+    term.rt.editor_selection = .{ .anchor_start = content(term).len, .anchor_end = content(term).len, .focus = content(term).len };
+    try testing.expect(insertText(s, term, "x"));
+    const Ctx = struct { t: *Term };
+    const Fresh = struct {
+        fn g(cx: Ctx) bool {
+            const d = esl.diag(cx.t) orelse return false;
+            var b: [64]u8 = undefined;
+            const want = std.fmt.bufPrint(&b, "eslint: {d} typescript", .{cx.t.rt.editorDocument().notifications.lsp_version}) catch return false;
+            return std.mem.eql(u8, d.message, want);
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = term }, Fresh.g));
+    // ⑶ 빈 목록 — ESLint 칸만 비고 주 서버 칸은 남는다.
+    try testing.expect(insertText(s, term, " ESLQUIET"));
+    const Quiet = struct {
+        fn g(t: *Term) bool {
+            return esl.count(t) == 0 and t.rt.editor_diagnostics.lsp.items.len >= 1;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, term, Quiet.g));
+    try removeMarkerHover(s, term, " ESLQUIET");
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = term }, Fresh.g));
+    // ⑷ 서버가 다시 물어 달라고 하면(`workspace/diagnostic/refresh`) `null` 로 답하고 다시 묻는다.
+    try testing.expect(insertText(s, term, " ESLREFRESH"));
+    const pulls0 = s.editor_lsp.sent_pulls;
+    const Refreshed = struct {
+        fn g(ss: *AppSession) bool {
+            return ss.editor_lsp.diag_refreshes > 0;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, Refreshed.g));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = term }, Fresh.g));
+    try testing.expect(s.editor_lsp.sent_pulls >= pulls0 + 2); // 편집 뒤 하나 + refresh 뒤 하나
+    try removeMarkerHover(s, term, " ESLREFRESH");
+    try testing.expect(pumpLspUntil(&f.fx, 5000, Ctx{ .t = term }, Fresh.g));
+    // ⑸ 같은 ESLint 클라이언트를 나눠 쓰는 `.tsx` — 그 문서의 languageId 는 `typescriptreact`(클라이언트를 세운 `.ts` 의 값이 아니다).
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.tsx", .data = "var c = <div/>;\n" });
+    var b_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const b = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&b_path_buf, "{s}/b.tsx", .{f.root_buf[0..f.root_len]}), .text)).term;
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, HasDiag.g));
+    try testing.expect(std.mem.endsWith(u8, esl.diag(b).?.message, " typescriptreact"));
+    var n_eslint: usize = 0;
+    for (s.editor_lsp.clients.items) |*cl| if (std.mem.eql(u8, cl.server.exe, "vscode-eslint-language-server")) {
+        n_eslint += 1;
+    };
+    try testing.expectEqual(@as(usize, 1), n_eslint);
+    // ⑹ ⌘. — ESLint 의 진단(source `eslint`)으로 묻고 그 fix 가 메뉴에. 저장 시 `source.fixAll.eslint` 는 ESLint 가 고친다.
+    pane_ops.activePane(s).active_term = for (pane_ops.activePane(s).terms.items, 0..) |t, i| {
+        if (t == term) break i;
+    } else return error.NoTerm;
+    {
+        var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    s.dismissMessageOverlays();
+    term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
+    const Settled = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_code_action.waiting;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, Settled.g));
+    var found = false;
+    for (settings_ops.contextMenuItems(s)) |t| if (std.mem.eql(u8, t, "eslint: fix no-var")) {
+        found = true;
+    };
+    try testing.expect(found);
+    s.dismissMessageOverlays();
+    s.loaded_config.config.editor.code_actions_on_save = "source.fixAll.eslint";
+    defer s.loaded_config.config.editor.code_actions_on_save = "";
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    const Saved = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_save_actions.active and !ss.editor_format.waiting;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, Saved.g));
+    try testing.expect(std.mem.indexOf(u8, content(term), "ESL_FIXED") != null);
+    // ⑺ ESLint 가 죽었다 다시 뜨면 문서를 다시 열고 다시 묻는다 — 옛 프로세스에 걸어 둔 pull 대기는 끝난 것으로(아니면 「기다리는 중」이라
+    // 영영 묻지 않는다). 대기 중인 pull 을 하나 걸어 둔 채로 죽인다.
+    const ec = esl.client(s).?;
+    const pid = ec.proc.?.pid;
+    const before = s.editor_lsp.sent_pulls;
+    for (ec.docs.items) |*d| d.pull_seq = 99; // 대기 중인 pull(옛 프로세스의 것)
+    _ = std.c.kill(pid, std.c.SIG.KILL);
+    for (&term.rt.editor_diagnostics.aux) |*set| set.list.clearRetainingCapacity();
+    const Back = struct {
+        fn g(cx: Ctx) bool {
+            return esl.diag(cx.t) != null;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 8000, Ctx{ .t = term }, Back.g));
+    try testing.expect(s.editor_lsp.sent_pulls > before);
+    try testing.expect(esl.client(s).?.proc.?.pid != pid);
+    try testing.expect(std.mem.endsWith(u8, esl.diag(term).?.message, " typescript")); // 다시 연 문서도 그 문법의 languageId
+    // ⑻ 서버가 본 본문이 아닌 답은 버린다 — 지난 version 으로 기다리던 pull 에 답이 오면(그 사이 아직 보내지 않은 편집이 있다) 칸을 안 바꾼다.
+    {
+        const ec2 = esl.client(s).?;
+        const d = ec2.findDoc(term).?;
+        const cur = term.rt.editorDocument().notifications.lsp_version;
+        d.pull_seq = 4242;
+        d.pull_version = cur - 1;
+        d.pull_dirty = false;
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, "{\"kind\":\"full\",\"items\":[{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"message\":\"eslint: stale\"}]}", .{});
+        defer parsed.deinit();
+        lsp_client.onPullDiagnostics(s, ec2, 4242, parsed.value);
+        try testing.expect(!std.mem.eql(u8, esl.diag(term).?.message, "eslint: stale"));
+        try testing.expectEqual(@as(u32, 0), d.pull_seq);
+        // 같은 version 이면 받는다(위 거름이 모든 답을 버리는 것이 아니다).
+        d.pull_seq = 4243;
+        d.pull_version = cur;
+        lsp_client.onPullDiagnostics(s, ec2, 4243, parsed.value);
+        try testing.expectEqualStrings("eslint: stale", esl.diag(term).?.message);
+    }
+}
+
+test "ASB5 보조 언어 서버 ESLint (tooling §8.2u) — 서버가 diagnosticProvider 를 내지 않으면 pull 을 묻지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    _ = setenv("MARU_FAKE_LSP_NOPULLCAP", "1", 1);
+    defer _ = unsetenv("MARU_FAKE_LSP_NOPULLCAP");
+    var f = (try SmtFixture.openRepo(allocator, "a.ts", "var a = 1;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "eslint.config.mjs", .data = "export default [];\n" });
+    try installFakeLspCopy(&f.fx, "node_modules/.bin/vscode-eslint-language-server");
+    try testing.expect(f.ready());
+    const Ready = struct {
+        fn g(ss: *AppSession) bool {
+            for (ss.editor_lsp.clients.items) |*c| if (c.role == .auxiliary) return c.phase == .ready and c.docs.items.len > 0;
+            return false;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, Ready.g));
+    for (0..20) |_| {
+        lsp_client.pump(s);
+        _ = usleep(5_000);
+    }
+    for (s.editor_lsp.clients.items) |*c| if (c.role == .auxiliary) try testing.expect(c.pull_diagnostics and !c.diagnostic_provider);
+    try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_pulls);
+}
+
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

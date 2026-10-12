@@ -1,6 +1,6 @@
 # 보조 언어 서버 구현 계획
 
-상태: AS1(구조·ruff 진단) 완료, AS2(code action 을 서버 여럿에서) 진행. 계약은 [tooling §8.2u](../editor-surface-tooling.md)가 소유하고, 이 문서는 결정·설계·조각·검증을 소유한다. 언어 서버의 공통 계약은 §8.2a 다.
+상태: AS1(구조·ruff 진단)·AS2(code action 을 서버 여럿에서) 완료, AS3(ESLint) 진행. 계약은 [tooling §8.2u](../editor-surface-tooling.md)가 소유하고, 이 문서는 결정·설계·조각·검증을 소유한다. 언어 서버의 공통 계약은 §8.2a 다.
 
 ## 왜
 
@@ -51,7 +51,7 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 - 합친 목록(`list`)은 서버 칸 전부 + 구문 오류를 정렬한 것이다(§5.4 — 지금 규칙 그대로).
 - 진단마다 **어느 서버의 것인지**를 든다. 호버의 진단 줄(§8.3)은 지금 문법의 주 서버 이름을 붙이는데, 그러면 ruff 의 진단이 「pyright」로 보인다 — 진단이 든 서버 이름을 쓴다.
 - code action 요청의 문맥 진단(`context.diagnostics`)은 **그 서버의 진단만** 싣는다 — 서버는 자기가 낸 진단의 `data` 로 fix 를 만든다.
-- pull 진단(AS3): `diagnosticProvider` 가 있고 push 를 안 하는 서버(ESLint)에는 보조 클라이언트의 `initialize` 에 `textDocument.diagnostic` 능력을 알리고, 문서를 보낼 때마다(didOpen·didChange 뒤, 같은 묶음 규칙) `textDocument/diagnostic`(id 칸 `17e8`)을 묻는다. 응답의 `kind: full` 은 그 서버 칸을 갈아 끼우고 `unchanged` 는 그대로 둔다. 물은 뒤 문서가 바뀌었으면 버린다. 주 서버에는 알리지 않는다(tsgo 등이 push 에서 pull 로 바꾸면 지금 동작이 바뀐다).
+- pull 진단(AS3): `diagnosticProvider` 가 있고 push 를 안 하는 서버(ESLint)에는 보조 클라이언트의 `initialize` 에 `textDocument.diagnostic` 능력을 알리고, 문서를 보낼 때마다(didOpen·didChange 뒤, 같은 묶음 규칙) `textDocument/diagnostic`(id 칸 `20e8` — `17e8`~`19e8` 은 그 사이 심볼·강조·선택 확장이 썼다; i32 안의 마지막 칸)을 묻는다. 응답의 `kind: full` 은 그 서버 칸을 갈아 끼우고 `unchanged` 는 그대로 둔다. 물은 뒤 문서가 바뀌었으면 버린다. 주 서버에는 알리지 않는다(tsgo 등이 push 에서 pull 로 바꾸면 지금 동작이 바뀐다).
 
 ### code action (AS2)
 
@@ -76,7 +76,15 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 ### 서버 → 클라이언트 요청 (AS3)
 
 - §8.2a 는 서버 요청을 전부 거부한다. 예외를 하나 더한다: **`workspace/configuration` 에 서버 표의 고정 설정으로 답한다**(그 서버에 정해 둔 블롭이 있을 때만 — ESLint; 없으면 지금처럼 거부). 읽기 요청이고 답은 우리 상수라 승인 UI 가 필요한 「행동」이 아니다.
-- `client/registerCapability` 는 지금처럼 거부한다(ESLint 는 작업 폴더 변경 알림만 등록하려 한다 — 거부돼도 진단·fix 는 돈다; AS3 에서 실측으로 확인).
+- `client/registerCapability` 는 지금처럼 거부한다(ESLint 는 작업 폴더 변경 알림만 등록하려 한다 — 거부돼도 진단·fix 는 돈다; 진짜 서버로 확인).
+- `workspace/diagnostic/refresh`(설정·의존 파일이 바뀌면 pull 서버가 보낸다)는 `null` 로 받고 그 서버의 문서를 다시 묻는다.
+
+### AS3 설계 메모
+
+- **ESLint 의 설정**: vscode-eslint 확장이 보내는 모양을 따른다. 진짜 서버(4.10)로 잰 필수: `workingDirectory` 객체(없으면 `reading 'workingDirectory'`), `experimental` 객체(없으면 `reading 'useFlatConfig'`). `useFlatConfig` 는 두지 않는다 — 서버가 ESLint 판(9 는 flat 기본)에 맞춰 알아보고, 넣으면 9 가 경고한다. 저장 시 고치기(`codeActionOnSave`)는 서버가 하지 않게 끈다 — §8.2s 의 kind 로 묻는다.
+- **빈 객체**: Zig 의 빈 익명 리터럴 `.{}` 는 튜플이라 JSON `[]` 로 나간다(진짜 서버는 JS 라 배열도 객체로 받아 줘 안 보였다 — 가짜 서버가 객체를 요구해 드러났다). 이름 있는 빈 struct 로 낸다.
+- **문서마다 languageId**: TS·TSX·JS 는 서버 하나를 나눠 쓰는데 didOpen 이 그 클라이언트를 세운 문서의 값을 보내, `.ts` 를 먼저 열면 `.tsx` 가 `typescript` 로 갔다(주 서버에도 있던 결함). 그 문서의 문법의 값을 보낸다(`servers.languageIdFor`).
+- **가짜 ESLint**: 실행 파일 이름(argv[0])이 `vscode-eslint-language-server` 면 그 꼴로 선다(판정자가 저장소 `node_modules/.bin` 에 사본을 둔다). 실서버처럼 첫 pull 을 받으면 설정을 묻고 그 답을 받은 뒤에 답한다 — 처음엔 `initialized` 에 물어, 클라이언트가 설정 답보다 pull 을 먼저 보내는 순서에서 실서버와 달리 실패했다.
 
 ### 보이기
 
@@ -87,8 +95,8 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 | 조각 | 내용 | 상태 |
 | --- | --- | --- |
 | AS1 | 구조 — 보조 서버 표·ruff 감지·`Client.role`·저장소 실행 파일·동기화·서버별 진단 칸·진단의 서버 이름(호버)·보조 응답 거름·정보 명령·계약 §8.2u | 완료 |
-| AS2 | code action 을 서버 여럿에서 — `⌘.` 메뉴 합치기(첫 답 뒤 0.5 초)·resolve 를 그 서버로·저장 시 kind 를 알린 서버로·진단 `data`·`source` 왕복 | 진행 |
-| AS3 | ESLint — 감지·`workspace/configuration` 고정 답·pull 진단(`17e8`)·`eslint/*` 알림 | 대기 |
+| AS2 | code action 을 서버 여럿에서 — `⌘.` 메뉴 합치기(첫 답 뒤 0.5 초)·resolve 를 그 서버로·저장 시 kind 를 알린 서버로·진단 `data`·`source` 왕복 | 완료 |
+| AS3 | ESLint — 감지·`workspace/configuration` 고정 답·pull 진단(`20e8`)·refresh·문서마다 languageId | 진행(계획 끝 — 다음은 Biome·oxlint 를 같은 표에) |
 
 ## 한계 (받아들일 것)
 
@@ -112,6 +120,14 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 3. 동작 변화의 근거 — 「알린 kind 만 묻는다」는 주 서버에도 적용된다. VS Code 도 저장 시 code action 에서 `providedCodeActionKinds` 가 요청 kind 와 위계로 겹치는 provider 에만 묻는다(동작만) — 같은 규칙이다. 실서버의 목록(typescript-language-server 의 `source.organizeImports.ts`·gopls 의 `source.organizeImports`)은 위계 양쪽 덮기로 그대로 묻힌다.
 4. 순서·번호 충돌 — 메뉴와 저장 단계가 같은 클라이언트의 seq 를 나눠 쓰고, 다른 서버의 resolve 가 같은 번호일 수 있다. 두 단계 모두 (서버, seq) 로 가른다 — 결함 없음. 메뉴 항목 상한(25)은 주 서버가 먼저 채운다(받아들임).
 5. 변이 — 21개. 처음 살아남은 일곱을 판정자를 더해 잡았다: B1·B13·B17·B20(응답을 서버 이름 없이 seq 로만 대조 — 두 서버의 첫 요청이 같은 번호라 판정자가 응답 순서를 못 정한다 → 실제 두 클라이언트로 입구를 직접 부르는 장면), B9(고른 항목을 주 서버로 resolve — 보조 항목이 모두 edit 을 들어 resolve 를 안 탔다 → 가짜 보조 서버의 `AUXLAZY`), B21(`source` 길이를 저장소 셈에서 뺌 — ArrayList 여유분 안이라 재할당이 안 났다 → 400 자), B8(시한 0 — 두 서버의 답이 같은 pump 에 읽혀 tick 이 끼지 못했다 → `AUXSLOW` 150ms). B8 은 처음 컴파일 오류로만 죽어 의미 변이로 다시 돌렸다. 21개 모두 잡혔다.
+
+## 적대적 검증 (AS3, 5회)
+
+1. 상태 — pull 답이 왔을 때 본문이 서버가 본 version 이 아니면 「다시 묻기」를 했는데, 그 경우는 아직 보내지 않은 편집(밀린 쓰기로 동기화가 미뤄진 사이)이라 **옛 version 으로 묻고 버리기를 보낼 때까지 되풀이**했다. → 버리기만 하고, 그 편집을 보낼 때 묻는다(고침). 서버가 죽으면 옛 프로세스의 pull 대기를 끝낸다(다시 띄울 때 — 아니면 「기다리는 중」이라 영영 안 묻는다).
+2. 진짜 도구 — `vscode-langservers-extracted` 4.10 + ESLint 9.39 를 픽스처 저장소의 `node_modules` 로 걸고 제품 경로로(임시 판정자, 커밋하지 않음). **pull 이 `Cannot read properties of undefined (reading 'useFlatConfig')` 로 실패했다** — 설정에 `experimental` 객체가 없었다. → 넣었다(고침, `AUX4`; 가짜 ESLint 도 실서버처럼 그 객체를 요구한다). 그 과정에서 Zig 의 빈 익명 리터럴 `.{}` 가 JSON `[]` 로 나가 `options`·`experimental` 이 배열이었던 것도 드러났다(실서버는 JS 라 받아 줬다) → 이름 있는 빈 struct(고침). 고친 뒤: 진단 넷(no-var·prefer-const·no-undef 둘)이 ESLint 칸에 바른 범위로, 저장 시 `source.fixAll.eslint` 가 `var`·`let` 을 `const` 로, 정보 줄 「Lint server ESLint — config eslint.config.js · node_modules/.bin/vscode-eslint-language-server」. `⌘.` 메뉴엔 ESLint 항목이 없다 — 줄 단위 fix·「이 줄 끄기」·「모두 고치기」가 전부 `eslint.apply*` 명령이라 §8.2h ⑤ 가 숨긴다(받아들인 한계).
+3. 문서 정합성 — §8.2a 의 「동기화」(languageId)·「하지 않는 것」(설정 답·refresh 예외), §8.2u 의 표·감지·실행 파일·pull·설정 답·하지 않는 것·관측점을 이었다. 계획의 id 칸 `17e8` 은 그 사이 다른 요청이 써서 `20e8`(i32 안의 마지막 칸)로 고쳤다.
+4. 상호작용 — 주 TS 서버와 ESLint 가 같은 문서의 code action 을 받는다: `source.organizeImports` 는 ESLint 가 알리지 않아 가지 않고, `source.fixAll` 은 둘 다(VS Code 와 같다). 가짜 ESLint 를 처음엔 `initialized` 에 설정을 묻게 만들었다가, 클라이언트의 pull 이 설정 답보다 먼저 닿는 순서에서 실서버와 달리 실패했다 — 실서버처럼 첫 pull 에서 묻고 답을 받은 뒤 답하게 고쳤다.
+5. 변이 — 21개. 처음 살아남은 넷을 판정자를 더해 잡았다: C5(답의 version 대조 빼기 — 같은 pump 안에서 보내기가 읽기보다 먼저라 판정자에서 그 순서가 안 생겼다 → 지난 version 으로 기다리는 pull 에 답을 직접 넣는 장면) · C12(다시 연 문서의 languageId — 재시작 뒤에도 `typescript`) · C17·C18(`diagnosticProvider` 확인·클라이언트 능력 — 가짜 ESLint 가 클라이언트가 pull 을 알렸을 때만 provider 를 내게 하고 provider 없는 장면 `ASB5`). 21개 모두 잡혔다.
 
 ## 검증
 

@@ -102,6 +102,10 @@ const OpenDoc = struct {
     uri: []u8,
     /// 서버에 보낸 마지막 version.
     sent_version: u64,
+    /// pull 진단(§8.2u) — 대기 중인 요청의 seq(0 = 없음), 그때 서버가 본 version, 기다리는 사이 다시 보냈다(답을 버리고 다시 묻는다).
+    pull_seq: u32 = 0,
+    pull_version: u64 = 0,
+    pull_dirty: bool = false,
 
     fn matches(self: OpenDoc, term: *Term) bool {
         if (term.kind != .editor or term.rt.editor_diff != null) return false;
@@ -129,6 +133,12 @@ pub const Client = struct {
     local_exe: ?[]u8 = null,
     /// 보조 서버를 띄운 까닭인 저장소 설정 파일(절대 경로, 소유 — 정보 명령이 보인다).
     aux_config: ?[]u8 = null,
+    /// pull 진단으로 받는 서버(보조 서버 표 — ESLint)와 `workspace/configuration` 에 답하는 서버. `initialize` 의 능력이 둘을 알린다.
+    pull_diagnostics: bool = false,
+    answers_configuration: bool = false,
+    /// 서버가 `diagnosticProvider` 를 냈다(그래야 묻는다).
+    diagnostic_provider: bool = false,
+    diagnostic_seq: u32 = 0,
     phase: Phase = .missing,
     proc: ?lsp_process.Process = null,
     inbuf: std.ArrayList(u8) = .empty,
@@ -306,6 +316,10 @@ pub const State = struct {
     sent_changes: u64 = 0,
     received_diagnostics: u64 = 0,
     rejected_requests: u64 = 0,
+    /// 판정자 관측: 보낸 pull 진단 수·답한 `workspace/configuration` 수(§8.2u).
+    sent_pulls: u64 = 0,
+    answered_configurations: u64 = 0,
+    diag_refreshes: u64 = 0,
     /// 판정자 관측: 보조 서버가 보낸 청하지 않은 응답(진단·code action 밖)을 버린 수(§8.2u).
     aux_dropped_responses: u64 = 0,
     /// 판정자 관측: 보낸 hover 요청 수·받은 hover 응답 수(§8.2b).
@@ -1528,7 +1542,7 @@ fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server,
 fn ensureAuxClient(self: *AppSession, root: []const u8, aux: lsp.auxiliary.Auxiliary, term: *Term, config: []const u8) ?*Client {
     if (clientFor(self, root, aux.server)) |c| return c;
     const owned = self.allocator.dupe(u8, root) catch return null;
-    var c: Client = .{ .root = owned, .server = aux.server, .role = .auxiliary, .phase = .restarting, .grammar = term.rt.editor_grammar };
+    var c: Client = .{ .root = owned, .server = aux.server, .role = .auxiliary, .phase = .restarting, .grammar = term.rt.editor_grammar, .pull_diagnostics = aux.pull_diagnostics, .answers_configuration = aux.answers_configuration };
     c.aux_config = self.allocator.dupe(u8, config) catch null;
     if (termPath(term)) |path| {
         const fs: external_formatter.RealFs = .{ .io = self.io };
@@ -1551,7 +1565,7 @@ fn auxiliariesFor(self: *AppSession, term: *Term, root: []const u8) std.EnumSet(
     const fs: external_formatter.RealFs = .{ .io = self.io };
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
-        if (lsp.auxiliary.detect(fs, aux.tool, std.fs.path.dirname(path) orelse root, root, &buf) != null) set.insert(aux.tool);
+        if (lsp.auxiliary.detect(self.allocator, fs, aux.tool, std.fs.path.dirname(path) orelse root, root, &buf) != null) set.insert(aux.tool);
     }
     term.rt.editor_lsp_aux = set;
     return set;
@@ -1561,7 +1575,7 @@ fn auxiliariesFor(self: *AppSession, term: *Term, root: []const u8) std.EnumSet(
 fn auxConfigFor(self: *AppSession, term: *Term, root: []const u8, tool: lsp.auxiliary.Tool, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     const path = termPath(term) orelse return null;
     const fs: external_formatter.RealFs = .{ .io = self.io };
-    return lsp.auxiliary.detect(fs, tool, std.fs.path.dirname(path) orelse root, root, buf);
+    return lsp.auxiliary.detect(self.allocator, fs, tool, std.fs.path.dirname(path) orelse root, root, buf);
 }
 
 /// 그 클라이언트의 실행 파일을 찾는다 — 보조 서버의 저장소 실행 파일이 있으면 그것(실행할 수 있을 때), 아니면 `path` 에서 이름으로.
@@ -1599,11 +1613,15 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     c.shutdown_at_ms = 0;
     c.started_at_ms = now_ms;
     c.phase = .starting;
-    // 열려 있던 문서는 다시 열어야 한다(새 프로세스는 모른다).
-    for (c.docs.items) |*d| d.sent_version = 0;
+    // 열려 있던 문서는 다시 열어야 한다(새 프로세스는 모른다). 옛 프로세스에 걸어 둔 pull 진단도 끝났다.
+    for (c.docs.items) |*d| {
+        d.sent_version = 0;
+        d.pull_seq = 0;
+        d.pull_dirty = false;
+    }
     var uri_buf: [std.fs.max_path_bytes * 3]u8 = undefined;
     const root_uri = fileUriBuf(c.root, &uri_buf) orelse return;
-    const msg = lsp.rpc.initializeRequest(self.allocator, root_uri, @intCast(std.c.getpid())) catch return;
+    const msg = lsp.rpc.initializeRequest(self.allocator, root_uri, @intCast(std.c.getpid()), .{ .pull_diagnostics = c.pull_diagnostics, .configuration = c.answers_configuration }) catch return;
     defer self.allocator.free(msg);
     _ = send(self, c, msg);
 }
@@ -1857,7 +1875,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
     // 넘기면 주 서버의 hover·완성 대기를 번호가 같은 보조 서버의 응답이 채운다.
     if (c.role == .auxiliary and kind == .response) {
         switch (kind.response.id) {
-            .initialize, .shutdown, .code_action, .code_action_resolve => {},
+            .initialize, .shutdown, .code_action, .code_action_resolve, .diagnostic => {},
             else => {
                 self.editor_lsp.aux_dropped_responses += 1;
                 return;
@@ -1893,6 +1911,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 c.symbols_supported = lsp.symbols.supportedFromResult(r.result); // §8.2o
                 c.highlight_supported = lsp.highlight.supportedFromResult(r.result); // §8.2p
                 c.selection_range_supported = lsp.selection_range.supportedFromResult(r.result); // §8.2q
+                c.diagnostic_provider = lsp.rpc.diagnosticProviderFromResult(r.result); // §8.2u — pull 진단
                 c.phase = .ready;
                 c.restarts = 0;
                 const msg = lsp.rpc.initializedNotification(self.allocator) catch return;
@@ -1992,6 +2011,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 const target: ?lsp.rpc.Target = if (r.is_error) null else lsp.rpc.definitionTarget(r.result);
                 editor_definition.onDefinitionResponse(self, seq, target, c.encoding);
             },
+            .diagnostic => |seq| onPullDiagnostics(self, c, seq, if (r.is_error) null else r.result),
             .hover => |seq| {
                 // 낡은 응답(다른 seq)·에러·빈 내용은 전부 「내용 없음」으로 호버 층에 넘긴다 — 판정은 그쪽이 한다(§8.2b 「요청」).
                 const md: ?[]u8 = if (r.is_error) null else lsp.rpc.hoverMarkdown(self.allocator, r.result) catch null;
@@ -2014,6 +2034,19 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 self.metal_dirty = true;
                 return;
             }
+            // §8.2u — 고정 설정이 있는 서버(ESLint)의 `workspace/configuration` 에는 그 설정으로 답한다(읽기 요청 — 답은 우리 상수다).
+            if (c.answers_configuration and std.mem.eql(u8, q.method, lsp.rpc.configuration_method)) {
+                if (answerConfiguration(self, c, q.id, q.params)) return;
+            }
+            // §8.2u — pull 서버가 다시 물어 달라고 한다(설정·의존 파일이 바뀌었다): `null` 로 답하고 그 서버의 문서를 다시 묻는다.
+            if (c.pull_diagnostics and std.mem.eql(u8, q.method, lsp.rpc.diagnostic_refresh_method)) {
+                const ok = lsp.rpc.nullResult(self.allocator, q.id) catch return;
+                defer self.allocator.free(ok);
+                _ = send(self, c, ok);
+                self.editor_lsp.diag_refreshes += 1;
+                for (c.docs.items) |*d| requestPull(self, c, d);
+                return;
+            }
             // §8.2a 「하지 않는 것」 — 나머지는 전부 거부.
             self.editor_lsp.rejected_requests += 1;
             const msg = lsp.rpc.methodNotFound(self.allocator, q.id) catch return;
@@ -2022,6 +2055,76 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
         },
         .ignore => {},
     }
+}
+
+/// 그 서버의 고정 설정으로 `workspace/configuration` 에 답한다(§8.2u). 설정이 없는 도구면 false(호출자가 거부한다).
+fn answerConfiguration(self: *AppSession, c: *Client, id: std.json.Value, params: ?std.json.Value) bool {
+    const aux = lsp.auxiliary.byExe(c.server.exe) orelse return false;
+    var uri_buf: [std.fs.max_path_bytes * 3]u8 = undefined;
+    const root_uri = fileUriBuf(c.root, &uri_buf) orelse return false;
+    const blob = (lsp.auxiliary.settingsJson(self.allocator, aux.tool, root_uri, std.fs.path.basename(c.root)) catch return false) orelse return false;
+    defer self.allocator.free(blob);
+    const msg = lsp.rpc.configurationResult(self.allocator, id, blob, lsp.rpc.configurationItemCount(params)) catch return false;
+    defer self.allocator.free(msg);
+    if (send(self, c, msg)) self.editor_lsp.answered_configurations += 1;
+    return true;
+}
+
+/// pull 진단을 묻는다(§8.2u) — pull 서버에 그 문서를 보낸 뒤마다. 이미 기다리는 것이 있으면 다시 물을 표시만(답이 오면 버리고 묻는다).
+fn requestPull(self: *AppSession, c: *Client, d: *OpenDoc) void {
+    if (!c.pull_diagnostics or !c.diagnostic_provider or c.phase != .ready or d.sent_version == 0) return;
+    if (d.pull_seq != 0) {
+        d.pull_dirty = true;
+        return;
+    }
+    c.diagnostic_seq = lsp.rpc.nextSeq(c.diagnostic_seq);
+    const msg = lsp.rpc.diagnosticRequest(self.allocator, c.diagnostic_seq, d.uri) catch return;
+    defer self.allocator.free(msg);
+    if (!send(self, c, msg)) return;
+    d.pull_seq = c.diagnostic_seq;
+    d.pull_version = d.sent_version;
+    d.pull_dirty = false;
+    self.editor_lsp.sent_pulls += 1;
+}
+
+/// pull 진단 응답(§8.2u) — `full` 이면 그 서버의 칸을 갈아 끼우고(`publishDiagnostics` 와 같은 길), `unchanged` 면 둔다. 기다리는 사이 문서를
+/// 다시 보냈으면 버리고 다시 묻는다. 본문이 서버가 본 version 이 아니면(아직 보내지 않은 편집) 버리기만 한다 — 그 편집을 보낼 때 묻는다(여기서
+/// 다시 물으면 옛 version 으로 묻고 버리기를 보낼 때까지 되풀이한다).
+pub fn onPullDiagnostics(self: *AppSession, c: *Client, seq: u32, result: ?std.json.Value) void {
+    const d = for (c.docs.items) |*d| {
+        if (d.pull_seq != 0 and d.pull_seq == seq) break d;
+    } else return;
+    d.pull_seq = 0;
+    const again = d.pull_dirty;
+    const report = lsp.rpc.pullReportFromResult(result);
+    if (!again) if (report) |rep| switch (rep) {
+        .unchanged => {},
+        .full => |items| {
+            var wrapper: std.json.ObjectMap = .empty;
+            defer wrapper.deinit(self.allocator);
+            wrapper.put(self.allocator, "diagnostics", items) catch return;
+            const params: std.json.Value = .{ .object = wrapper };
+            var accepted = false;
+            for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+                if (!d.matches(term)) continue;
+                const opened = term.rt.editorDocument().opened orelse continue;
+                if (term.rt.editorDocument().notifications.lsp_version != d.pull_version) continue; // 서버가 본 본문이 아니다 — 보낼 때 다시 묻는다
+                const st = &term.rt.editor_diagnostics;
+                const set = serverDiagnostics(st, c) orelse continue;
+                accepted = true;
+                set.list.clearRetainingCapacity();
+                set.messages.clearRetainingCapacity();
+                _ = lsp.position.appendDiagnostics(self.allocator, params, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch {};
+                for (set.list.items) |*dg| dg.server = c.server.exe;
+                st.lsp_dirty = true;
+            };
+            if (accepted) {
+                self.editor_lsp.received_diagnostics += 1;
+                self.metal_dirty = true;
+            }
+        },
+    };
+    if (again) requestPull(self, c, d);
 }
 
 fn onPublishDiagnostics(self: *AppSession, c: *Client, params: ?std.json.Value) void {
@@ -2255,7 +2358,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
         if (d.sent_version == version) return;
         if (mode == .coalesce and d.sent_version != 0) if (c.proc) |p| if (p.pending_out.items.len > 0) return; // 밀린 것이 빠진 뒤의 tick 에 최신 본문으로
         if (d.sent_version == 0) {
-            const msg = lsp.rpc.didOpen(self.allocator, d.uri, c.server.language_id, @intCast(version), opened.file.content) catch return;
+            const msg = lsp.rpc.didOpen(self.allocator, d.uri, lsp.servers.languageIdFor(term.rt.editor_grammar) orelse c.server.language_id, @intCast(version), opened.file.content) catch return;
             defer self.allocator.free(msg);
             if (!send(self, c, msg)) return;
         } else {
@@ -2265,6 +2368,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
             self.editor_lsp.sent_changes += 1;
         }
         d.sent_version = version;
+        requestPull(self, c, d); // §8.2u — pull 서버는 보낸 뒤에 물어야 검사한다
         return;
     }
     const path = termPath(term) orelse return;
@@ -2286,7 +2390,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
     defer if (!committed) {
         if (pin) |held| _ = @constCast(held.owner).release(held) catch false;
     };
-    const msg = lsp.rpc.didOpen(self.allocator, uri, c.server.language_id, @intCast(v), opened.file.content) catch {
+    const msg = lsp.rpc.didOpen(self.allocator, uri, lsp.servers.languageIdFor(term.rt.editor_grammar) orelse c.server.language_id, @intCast(v), opened.file.content) catch {
         self.allocator.free(uri);
         return;
     };
@@ -2297,6 +2401,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
     }
     c.docs.appendAssumeCapacity(.{ .surface_id = term.surfaceId(), .document = pin, .uri = uri, .sent_version = v });
     committed = true;
+    requestPull(self, c, &c.docs.items[c.docs.items.len - 1]); // §8.2u
 }
 
 /// 문서 크기 상한(§3.0 의 상한과 같은 자리 — Full sync 라 전문이 프레임마다 갈 수 있다).

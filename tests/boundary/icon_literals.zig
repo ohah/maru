@@ -507,6 +507,28 @@ test "헤더 아이콘 줄의 세로 자리는 Objective-C 가 다시 적지 않
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mirror, "const float py_top = (float)tc.origin_y + (float)tc.row * ch;"));
 }
 
+// 래스터 배치 역할(cover-fit·ink 중앙)도 Objective-C 가 codepoint 로 다시 고르지 않는다(2026-10-12). 호출자(Zig
+// `coretext_raster.zig`)가 `width.rasterFitFor` 로 정해 `raster_fit` 인자로 넘긴다. 예전 `.m` 은 wide-render-symbol
+// 범위(U+2460~24FF)를 주석-동기로 미러했고 ◧·⚙ 를 codepoint 로 골랐다.
+const raster_file = "src/platform/macos/coretext_smoke.m";
+test "래스터 배치 역할은 Objective-C 가 codepoint 로 다시 고르지 않는다 — raster_fit 인자만 읽는다 (layering §3.5)" {
+    const allocator = std.testing.allocator;
+    const raw = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, raster_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(raw);
+    const code = try stripCComments(allocator, raw);
+    defer allocator.free(code);
+    const forbidden = [_][]const u8{ "0x25E7", "0x25e7", "0x2699", "0x2460", "0x24FF", "0x24ff", "maru_is_wide_render_symbol" };
+    for (forbidden) |needle| {
+        if (std.mem.indexOf(u8, code, needle) != null) {
+            std.debug.print("\n래스터 배치 역할 사본이 되살아났습니다: {s} 에 `{s}`\n  역할은 width.rasterFitFor 가 정해 raster_fit 인자로 넘깁니다.\n", .{ raster_file, needle });
+            return error.RasterFitMirrorRevived;
+        }
+    }
+    // 두 역할 판정이 실제로 인자를 읽는다 — 이름이 바뀌어 위 검사가 빈 것을 지키지 않게 개수로 본다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "(raster_fit == MaruRasterFitIfOverflow)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "(raster_fit == MaruRasterFitInkCenter)"));
+}
+
 test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {
     const allocator = std.testing.allocator;
     var out: [8][]const u8 = undefined;

@@ -46,7 +46,7 @@
 | 그림자 blur 확장 | 같은 파일, shadow 분기 | Zig가 준 rect 밖으로 blur만큼 확장한 rect를 만든다 | `GpuShadow`는 `GpuQuad`와 **별도 채널**이다 |
 | OSC 133 거터 좌단 clamp | 같은 파일, reserved 8 분기 | `max(px_left, 0)` — 주석이 "사이드바 폭은 `.m`이 모르니 0 하한만" | 폭을 넘기면 사라진다 |
 | `reserved` 부분사각형 두께·여백 | 같은 파일 `maru_fill_cell_quad` 계열 | 커서 바/underline·SGR 장식선 두께를 셀 높이 15%·7.5%로(가로 변인 커서 바·hollow 우측은 `cw`의 15%), 거터 gap을 `cw*0.12`로 계산한다. 전부(divider 제외 — 그쪽 하한은 Zig가 갖는다) `max(2px)`·`max(1px)` 하한이 붙어 **작은 셀에선 비율이 아니라 하한이 값을 정한다** | **의도된 근사** — 폰트 metric(underline thickness)을 `.m`에 안 넘겨서다(그 근거가 해당 주석에 있다) |
-| 래스터 슬롯 안쪽 배치 | `coretext_smoke.m` | cover-fit 스케일, ink 측정 후 세로 재중심(`maru_center_ink_vertically`), baseline `descent + (avail_h − line_height)/2`, advance 가로 중앙, 그리고 **어느 글리프를 ink-center할지 codepoint로 판정**(`0x25E7`·`0x2699` 하드코딩). `width.zig`의 wide-render-symbol 목록을 주석-동기로 **미러**한다(가드 없음) | [glyph-role-render-model.md](glyph-role-render-model.md)가 **역할→배치 매핑 정책**을 승인한 자리다. 단 `width.zig` 미러는 그 문서가 "**지금은** smoke 모듈성·저위험을 위해 유지, 백엔드가 늘면 `width.glyphRole`을 C-ABI로 export하거나 역할을 `reserved`에 실어 plumbing"이라 적은 **유예된 이관 대상**이다 — 승인된 것은 배치 정책이고 미러는 기한부다 |
+| 래스터 슬롯 안쪽 배치 | `coretext_smoke.m` | cover-fit 스케일, ink 측정 후 세로 재중심(`maru_center_ink_vertically`), baseline `descent + (avail_h − line_height)/2`, advance 가로 중앙 | [glyph-role-render-model.md](glyph-role-render-model.md)가 **역할→배치 매핑 정책**을 승인한 자리다. **어느 글리프가 어느 역할인지는 이제 `.m` 것이 아니다**(2026-10-12) — 예전 `.m`은 wide-render-symbol 범위를 `width.zig`와 주석-동기로 미러하고 ◧(`0x25E7`)·⚙(`0x2699`)를 codepoint로 골랐다. 지금은 호출자(Zig)가 `width.rasterFitFor`로 정해 `raster_fit` 인자로 넘긴다. 남은 미러는 `maru_is_synthesized_glyph`·`maru_category_for_codepoint`다 |
 
 주의할 점 셋:
 

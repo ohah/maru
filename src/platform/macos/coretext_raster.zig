@@ -28,6 +28,8 @@ pub const RasterizeGlyphFn = *const fn (
     font_postscript_name_len: usize,
     codepoint: u32,
     glyph_id: u32,
+    /// 슬롯 안 배치 역할(`maru.width.RasterFit` 의 값). 래스터라이저는 codepoint 로 역할을 다시 고르지 않는다.
+    raster_fit: u32,
     width_px: usize,
     height_px: usize,
     bytes_per_row: usize,
@@ -86,6 +88,9 @@ pub const CoreTextGlyphRasterizer = struct {
             font_identity.postscript_name.len,
             request.run.codepoint,
             request.run.glyph_id,
+            // 어느 글리프를 cover-fit·ink 중앙에 둘지는 중립이 정한다(`width.rasterFitFor`) — 예전에는 `.m` 이
+            // 같은 범위·codepoint 를 주석-동기로 다시 적었다.
+            @intFromEnum(maru.width.rasterFitFor(request.run.codepoint)),
             request.slot.width_px,
             request.slot.height_px,
             request.bytes_per_row,
@@ -134,6 +139,7 @@ const TestBridgeCapture = struct {
     font_postscript_name: []const u8 = "",
     requested_font_size: f64 = 0,
     glyph_id: u32 = 0,
+    raster_fit: u32 = 0,
     width_px: usize = 0,
     height_px: usize = 0,
     bytes_per_row: usize = 0,
@@ -158,6 +164,7 @@ fn captureRasterizeGlyph(
     font_postscript_name_len: usize,
     _: u32,
     glyph_id: u32,
+    raster_fit: u32,
     width_px: usize,
     height_px: usize,
     bytes_per_row: usize,
@@ -170,6 +177,7 @@ fn captureRasterizeGlyph(
         .font_postscript_name = font_postscript_name[0..font_postscript_name_len],
         .requested_font_size = requested_font_size,
         .glyph_id = glyph_id,
+        .raster_fit = raster_fit,
         .width_px = width_px,
         .height_px = height_px,
         .bytes_per_row = bytes_per_row,
@@ -266,6 +274,37 @@ test "CoreText rasterizer honors a rich text role size override" {
     };
     _ = try rasterizer.rasterize(.{ .run = run, .slot = slot, .pixels = &pixels, .bytes_per_row = 8 });
     try std.testing.expectEqual(@as(f64, 36), test_bridge_capture.requested_font_size);
+}
+
+// **슬롯 안 배치 역할은 Zig 가 정해 넘긴다**(`width.rasterFitFor` → C 인자 `raster_fit`). 래스터라이저(`coretext_smoke.m`)는
+// 예전처럼 codepoint 로 다시 고르지 않는다 — 그래서 이 인자가 실제로 실려 가는지가 그 계약 전부다.
+test "CoreText rasterizer passes the neutral raster fit role to the native bridge" {
+    var registry = renderer.FontIdentityRegistry.init(std.testing.allocator);
+    defer registry.deinit();
+    const font_id = try registry.intern(.{ .postscript_name = "Menlo-Regular" });
+    const rasterizer = CoreTextGlyphRasterizer{
+        .appearance = try config.resolveAppearance(.{}),
+        .font_registry = &registry,
+        .rasterize_glyph = captureRasterizeGlyph,
+        .scale_milli = 1000,
+    };
+    const Case = struct { cp: u21, want: maru.width.RasterFit };
+    const cases = [_]Case{
+        .{ .cp = 0x25E7, .want = .ink_center }, // ◧
+        .{ .cp = 0x2699, .want = .ink_center }, // ⚙
+        .{ .cp = 0x2462, .want = .fit_if_overflow }, // ③
+        .{ .cp = 'w', .want = .natural },
+    };
+    for (cases) |c| {
+        resetTestBridge(0, 1);
+        var run = testRun(font_id, 42);
+        run.codepoint = c.cp;
+        const slot = testSlot(run.cache_key);
+        var pixels = [_]u8{0} ** 16;
+        _ = try rasterizer.rasterize(.{ .run = run, .slot = slot, .pixels = &pixels, .bytes_per_row = 8 });
+        try std.testing.expectEqual(@as(usize, 1), test_bridge_capture.call_count); // 폰트 경로를 실제로 탔다
+        try std.testing.expectEqual(@as(u32, @intFromEnum(c.want)), test_bridge_capture.raster_fit);
+    }
 }
 
 test "CoreText rasterizer fails closed when font identity is missing" {

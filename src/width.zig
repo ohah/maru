@@ -16,10 +16,41 @@ pub fn cellWidth(codepoint: u21) u2 {
 /// **이 집합은 래스터 cover-fit 게이트의 단일 출처이기도 하다**(docs/glyph-role-render-model.md). 폰트가 셀보다
 /// 넓게 그린 글리프를 종횡비 유지 축소(cover-fit)하는 대상은 이 wide-render-symbol뿐이다 — 일반 텍스트는 ink가
 /// advance를 미세하게 넘어도 자연 메트릭+baseline으로 둔다(스케일/ink-center 안 함). `coretext_smoke.m`의
-/// `maru_is_wide_render_symbol`이 이 범위를 주석-동기로 미러한다(그 `.m`은 풀 코어 비링크 smoke 하니스 공유라
-/// zig 직접 호출 불가). 범위를 바꾸면 거기도 동기.
+/// 래스터라이저(`coretext_smoke.m`)는 이 판정을 다시 적지 않고 `rasterFitFor` 가 내는 역할만 받는다(2026-10-12 —
+/// 예전에는 `maru_is_wide_render_symbol` 이 이 범위를 주석-동기로 미러했다).
 pub fn isWideRenderSymbol(codepoint: u21) bool {
     return codepoint >= 0x2460 and codepoint <= 0x24FF;
+}
+
+/// 폰트 글리프를 래스터 슬롯에 **어떻게 앉히는가**(docs/glyph-role-render-model.md 의 역할→배치). 값이 C ABI 로
+/// 래스터라이저(`coretext_smoke.m` `raster_fit` 인자)에 그대로 간다 — 숫자를 바꾸면 그쪽 enum 도 함께 바꾼다.
+pub const RasterFit = enum(u32) {
+    /// 자연 메트릭 + 공통 baseline(일반 텍스트 — 한글·CJK 포함). ink 가 advance 를 미세하게 넘어도 그대로 둔다.
+    natural = 0,
+    /// 슬롯보다 넓게 그려질 때만 종횡비 유지 축소(cover-fit) — wide-render-symbol(①②③ …, `isWideRenderSymbol`).
+    fit_if_overflow = 1,
+    /// 늘 ink 중심을 슬롯 가운데에 맞춘다 — 글리프마다 baseline 대비 ink 위치가 달라 한 줄에 놓으면 세로로 어긋나
+    /// 보이는 심볼. 지금은 ◧(U+25E7)·⚙(U+2699)뿐이다(옛 헤더 아이콘 — 지금 헤더는 등록 PUA 합성이라 터미널 내용의
+    /// 이 둘만 탄다, 사용자 피드백 「3개 아이콘 수평이 안 맞음」). 예전에는 이 목록이 `.m` 에만 codepoint 로 있었다.
+    ink_center = 2,
+};
+
+/// 그 codepoint 의 래스터 배치 역할. 이모지(컬러 글리프)는 폰트 속성이라 래스터라이저가 따로 본다.
+pub fn rasterFitFor(codepoint: u21) RasterFit {
+    if (codepoint == 0x25E7 or codepoint == 0x2699) return .ink_center;
+    if (isWideRenderSymbol(codepoint)) return .fit_if_overflow;
+    return .natural;
+}
+
+test "rasterFitFor: ◧⚙ 는 ink 중앙, ①②③ 은 넘칠 때만 축소, 나머지 텍스트는 자연 배치" {
+    try std.testing.expectEqual(RasterFit.ink_center, rasterFitFor(0x25E7));
+    try std.testing.expectEqual(RasterFit.ink_center, rasterFitFor(0x2699));
+    try std.testing.expectEqual(RasterFit.fit_if_overflow, rasterFitFor(0x2460));
+    try std.testing.expectEqual(RasterFit.fit_if_overflow, rasterFitFor(0x24FF));
+    try std.testing.expectEqual(RasterFit.natural, rasterFitFor(0x24FF + 1));
+    try std.testing.expectEqual(RasterFit.natural, rasterFitFor('w'));
+    try std.testing.expectEqual(RasterFit.natural, rasterFitFor(0xD55C)); // 한
+    try std.testing.expectEqual(RasterFit.natural, rasterFitFor('+')); // math-axis 라 이미 가운데 근처 — 텍스트와 공유
 }
 
 /// `text.ambiguous-width` 설정을 반영한 셀 폭. `ambiguous_wide`가 false면 cellWidth와 같다(narrow — 기본).

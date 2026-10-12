@@ -624,14 +624,15 @@ static bool maru_is_synthesized_glyph(uint32_t cp) {
     return maru_is_registered_icon_cp(cp);
 }
 
-/* 폰트가 셀보다 넓게 그려 cover-fit(종횡비 축소)할 wide-render-symbol인지 — **src/width.zig의
-   isWideRenderSymbol과 동기**(Enclosed Alphanumerics U+2460~24FF: ①②③ 등). 래스터 cover-fit 게이트의
-   단일 출처는 width.zig이고 여기는 주석-동기 미러다(이 .m은 풀 코어 비링크 smoke 하니스 공유라 zig 직접
-   호출 불가 — maru_is_synthesized_glyph·maru_category_for_codepoint와 동일 이유). 일반 텍스트는 ink가
-   advance를 미세하게 넘어도 이 집합 밖이라 자연 메트릭+baseline으로 둔다(docs/glyph-role-render-model.md). */
-static bool maru_is_wide_render_symbol(uint32_t cp) {
-    return cp >= 0x2460 && cp <= 0x24FF;
-}
+/* 슬롯 안 배치 역할 — **src/width.zig `RasterFit` 과 같은 값**이고 호출자(Zig `coretext_raster.zig`)가
+   `width.rasterFitFor(codepoint)` 로 정해 `raster_fit` 인자로 넘긴다. 예전에는 여기서 wide-render-symbol 범위
+   (U+2460~24FF)와 ink 중앙 심볼(◧ U+25E7·⚙ U+2699)을 codepoint 로 다시 적었다 — 앞의 것은 width.zig 와 주석으로만
+   맞춰 둔 미러였고, 뒤의 것은 이 파일에만 있었다(docs/glyph-role-render-model.md 가 「유예된 이관」으로 적어 둔 자리). */
+enum {
+    MaruRasterFitNatural = 0,       /* 자연 메트릭 + 공통 baseline(일반 텍스트) */
+    MaruRasterFitIfOverflow = 1,    /* 슬롯보다 넓을 때만 cover-fit(①②③ …) */
+    MaruRasterFitInkCenter = 2,     /* 늘 ink 중심을 슬롯 가운데로(◧⚙) */
+};
 
 static bool maru_append_utf16_scalar(uint32_t codepoint, UniChar *buffer, CFIndex *len, CFIndex capacity) {
     if (buffer == NULL || len == NULL) {
@@ -2541,6 +2542,7 @@ void maru_macos_coretext_smoke_rasterize_glyph(
     size_t font_postscript_name_len,
     uint32_t codepoint,
     uint32_t glyph_id,
+    uint32_t raster_fit,
     size_t width_px,
     size_t height_px,
     size_t bytes_per_row,
@@ -2678,13 +2680,14 @@ void maru_macos_coretext_smoke_rasterize_glyph(
         // 폭 정책과 일관). box/block/powerline/braille/legacy·chrome 아이콘은 합성(glyph_id==0)이라 이
         // 경로에 안 와 영향 없다. 특정 기호가 fit이 필요하면 width.isWideRenderSymbol에 한 곳만 추가.
         const bool is_emoji = maru_font_is_color(draw_font);
-        const bool is_wide_render_symbol = maru_is_wide_render_symbol(codepoint);
+        // 역할은 호출자가 정해 넘긴다(`raster_fit` — width.rasterFitFor). 여기는 codepoint 로 다시 고르지 않는다.
+        const bool is_wide_render_symbol = (raster_fit == MaruRasterFitIfOverflow);
         const bool overflows_slot = is_wide_render_symbol && (bounds.size.width > avail_w);
         // ◧(U+25E7)·⚙(U+2699)은 글리프마다 baseline 대비 ink 위치가 달라, 공통-baseline
         // 정렬이면 같은 줄에 그려도 서로 세로로 어긋나 보인다(사용자 피드백 "3개 아이콘 수평이 안 맞음").
         // 심볼은 ink-center가 자연스럽고(baseline 흔들림 우려는 글자에만 해당 — 심볼은 텍스트 줄과 안 섞임)
         // 셀 중앙에 일관되게 앉아 서로 정렬된다. '+'(ASCII)는 math-axis라 이미 중앙 근처라 제외(텍스트 공유).
-        const bool center_symbol = (codepoint == 0x25E7u || codepoint == 0x2699u);
+        const bool center_symbol = (raster_fit == MaruRasterFitInkCenter);
         if ((is_emoji || overflows_slot || center_symbol) && bounds.size.width > 0.0 && bounds.size.height > 0.0) {
             // 이모지는 슬롯을 꽉 채우도록 종횡비 유지하며 키우거나 줄인다(Ghostty의 .cover와 같은
             // 의도 — 풀사이즈). 두 축 비율 중 작은 쪽으로 스케일하면 슬롯 안에 정확히 들어맞고

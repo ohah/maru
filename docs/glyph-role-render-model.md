@@ -48,17 +48,17 @@ maru는 역할 분류 조각을 이미 갖고 있다. 버그는 분류 부재가
 | --- | --- | --- |
 | synthesized | `renderer/{box,block,powerline,braille,legacy,icon}_glyph.zig` ↔ `maru_is_synthesized_glyph`(등록 chrome PUA 아이콘 포함) | (이 경로 밖 — `glyph_id==0`) |
 | emoji | 폰트 컬러 테이블(sbix/COLR) | `maru_font_is_color(draw_font)` |
-| wide-render-symbol | **`width.isWideRenderSymbol`** (U+2460~24FF) | `is_wide_render_symbol`(미러) `&& ink>slot` |
-| legacy centred symbol(터미널 콘텐츠) | `0x25E7`(◧)·`0x2699`(⚙) **두 codepoint만** | `center_symbol` |
+| wide-render-symbol | **`width.isWideRenderSymbol`** (U+2460~24FF) → `width.rasterFitFor` = `.fit_if_overflow` | `raster_fit == FitIfOverflow` `&& ink>slot` |
+| legacy centred symbol(터미널 콘텐츠) | **`width.rasterFitFor`** = `.ink_center` — `0x25E7`(◧)·`0x2699`(⚙) **두 codepoint만** | `raster_fit == InkCenter` |
 | text | 위 어디에도 안 듦 | (셋 다 false → 자연+baseline) |
 
 cover-fit 게이트 = `is_emoji ‖ center_symbol ‖ (is_wide_render_symbol && ink>slot)`. 텍스트는 셋 다 거짓이라 자연 메트릭+baseline 경로로 간다.
 
 ## SSOT와 미러링
 
-역할은 **codepoint의 순수 함수**이므로 단일 출처는 `src/width.zig`다(`isWideRenderSymbol` 등). 래스터 `coretext_smoke.m`은 이 집합을 **주석-동기 미러**로 둔다 — `maru_is_synthesized_glyph`·`maru_category_for_codepoint`가 이미 같은 방식인 것과 동일한 이유다: 이 `.m`은 여러 최소 smoke 실행파일(`build.zig`의 `macos_metal_smoke`·`macos_app_pty_metal_smoke` 등)에 컴파일되어 **풀 코어를 링크하지 않으므로**, zig 심볼을 직접 호출하면(C-ABI export) smoke 모듈성이 깨진다. 미러는 `width.zig`를 가리키는 동기 주석을 단다.
+역할은 **codepoint의 순수 함수**이므로 단일 출처는 `src/width.zig`다(`isWideRenderSymbol`·`rasterFitFor`). **래스터 배치 역할은 이제 미러가 아니다**(2026-10-12): `coretext_smoke.m`의 래스터 함수를 부르는 쪽은 언제나 Zig(`coretext_raster.zig` — smoke 실행파일도 같은 래퍼를 함수 포인터로 쓴다)이므로, 호출자가 `width.rasterFitFor(codepoint)`를 정해 **`raster_fit` 인자로 넘기고** `.m`은 그 값만 읽는다. 「zig 심볼을 `.m`에서 부를 수 없다」는 옛 사유는 `.m`이 판정을 *스스로* 할 때의 이야기였고, 인자로 받으면 링크가 늘지 않는다. 옛 미러(`maru_is_wide_render_symbol`·`0x25E7`/`0x2699` 비교)는 지웠고 `tests/boundary/icon_literals.zig`가 되살아남을 막는다.
 
-- **후속(이식성)**: 백엔드가 늘면(Linux/Win) 미러 중복을 없애려면 `width.glyphRole`을 C-ABI로 export하고 smoke 하니스를 분리하거나, 역할을 `NativeDrawCell.reserved`에 실어 plumbing한다. 지금은 smoke 모듈성·저위험을 위해 미러 유지(→ [레이어링과 이식성](layering-and-portability.md)).
+- **남은 미러**: `maru_is_synthesized_glyph`·`maru_category_for_codepoint`는 아직 같은 방식(주석-동기)이다. 같은 길(호출자가 역할을 인자로 넘김)로 옮길 수 있다(→ [레이어링과 이식성](layering-and-portability.md)).
 
 ## 트레이드오프와 한계
 

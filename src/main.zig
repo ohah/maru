@@ -115,12 +115,14 @@ pub const panic = std.debug.FullPanic(panicWritingReasonFirst);
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
+    // 이어 쓰기(streaming) — 위치 지정 쓰기면 `> f 2>&1` 처럼 같은 파일을 받은 둘이 각자 0 에서 써 서로 덮었고, `(echo x; maru …) > f` 의
+    // 앞 출력도 덮었다(W9f 적대 리뷰 1 회차 — repl 이 둘을 섞어 계속 쓴다).
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
+    var stdout_file_writer: std.Io.File.Writer = .initStreaming(.stdout(), io, &stdout_buffer);
     const stdout = &stdout_file_writer.interface;
 
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_file_writer: std.Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    var stderr_file_writer: std.Io.File.Writer = .initStreaming(.stderr(), io, &stderr_buffer);
     const stderr = &stderr_file_writer.interface;
 
     // `error.UnknownCommand`는 "usage 에러를 이미 stderr에 안내했다"는 sentinel이다. main 밖으로 전파시키면 Zig가

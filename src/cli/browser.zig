@@ -590,6 +590,8 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
             i += 1;
         }
     }
+    // 깊게 중첩된 인자는 요청을 만들 때 JSON 쓰개의 중첩 한도(256)를 넘겨 panic 했다(W9f 적대 리뷰 1 회차) — 여기서 거절한다.
+    if (args_json) |j| if (jsonTextDepth(j) > max_args_depth) return error.InvalidArgs;
     return .{
         .surface_id = surface orelse return error.MissingSurface,
         .script = script orelse return error.MissingScript,
@@ -853,11 +855,48 @@ fn optValue(rest: []const []const u8, i: *usize, opt: []const u8) ParseError![]c
 }
 
 fn hasHelpFlag(args: []const []const u8) bool {
-    for (args) |a| {
+    for (args, 0..) |a, i| {
         if (eq(a, "--")) return false; // 그 뒤는 위치 인자(W9f — `exec -- -h` 는 식이다)
+        // 값을 받는 옵션 바로 뒤는 값이다 — `type --text -h` 는 글 「-h」(W9f 적대 리뷰 1 회차: repl 에서 도움말을 「성공」 으로 냈다).
+        if (i > 0 and takesValue(args[i - 1])) continue;
         if (eq(a, "--help") or eq(a, "-h")) return true;
     }
     return false;
+}
+
+/// 다음 토큰을 값으로 받는 옵션인가(`--opt=값` 꼴과 값 없는 플래그는 아니다).
+fn takesValue(opt: []const u8) bool {
+    if (!std.mem.startsWith(u8, opt, "--") or std.mem.indexOfScalar(u8, opt, '=') != null) return false;
+    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure" }) |flag| if (eq(opt, flag)) return false;
+    return true;
+}
+
+/// exec 인자 JSON 의 중첩 상한 — 요청 JSON 의 쓰개 한도(256) 안쪽으로 넉넉히.
+pub const max_args_depth = 64;
+
+/// JSON 글의 가장 깊은 중첩(문자열 안의 괄호는 세지 않는다).
+pub fn jsonTextDepth(text: []const u8) usize {
+    var depth: usize = 0;
+    var deepest: usize = 0;
+    var in_string = false;
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const ch = text[i];
+        if (in_string) {
+            if (ch == '\\') i += 1 else if (ch == '"') in_string = false;
+            continue;
+        }
+        switch (ch) {
+            '"' => in_string = true,
+            '[', '{' => {
+                depth += 1;
+                deepest = @max(deepest, depth);
+            },
+            ']', '}' => depth -|= 1,
+            else => {},
+        }
+    }
+    return deepest;
 }
 
 /// 10진 파싱 후 wire i64 범위 제한(surface_id는 JSON integer=i64). sessions.parseU64와 동일 규율.
@@ -924,6 +963,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             var parsed_args: ?std.json.Parsed(std.json.Value) = null;
             defer if (parsed_args) |*parsed| parsed.deinit();
             if (e.args_json) |raw| {
+                if (jsonTextDepth(raw) > max_args_depth) return error.InvalidArgs; // 쓰개의 중첩 한도(256)에서 panic 했다(W9f 적대 리뷰 1 회차)
                 // Preserve number lexemes through the CLI request. The server validates -0 and the JS safe-number
                 // boundary against the original spelling before WebKit receives NSNumber values.
                 parsed_args = std.json.parseFromSlice(std.json.Value, gpa, raw, .{ .parse_numbers = false }) catch |err| switch (err) {
@@ -2897,7 +2937,10 @@ pub fn replLine(arena: std.mem.Allocator, line: []const u8, current: ?u64) std.m
     if (eq(toks[0], "help") or eq(toks[0], "?")) return .help;
     if (eq(toks[0], "use")) {
         if (toks.len != 2) return .bad_use;
-        return .{ .use = std.fmt.parseInt(u64, toks[1], 10) catch return .bad_use };
+        // wire 의 탭 id 는 JSON 정수(i64) — 넘으면 받아 놓고 뒤 명령이 모두 틀렸다(W9f 적대 리뷰 1 회차).
+        const id = std.fmt.parseInt(u64, toks[1], 10) catch return .bad_use;
+        if (id > std.math.maxInt(i64)) return .bad_use;
+        return .{ .use = id };
     }
     // 대상이 빠졌을 때만 붙인다 — 파서에 묻는다(`--text --surface=2` 의 값은 대상 옵션이 아니다, `--` 뒤도).
     const missing_surface = if (parse(toks)) |_| false else |e| e == error.MissingSurface;
@@ -2987,4 +3030,25 @@ test "W9f: `--` 뒤 하나는 `-` 로 시작해도 위치 인자 — 도움말 �
     const t = (try replLine(arena_state.allocator(), "type --selector a --text --surface=2", 7)).command;
     try testing.expectEqual(@as(u64, 7), (try parse(t)).request.type_text.surface_id);
     try testing.expectEqualStrings("--surface=2", (try parse(t)).request.type_text.text);
+}
+
+test "W9f 적대 리뷰 1 회차: 값 자리의 -h·--help 는 도움말이 아니다(repl 에서 `type --text -h` 가 도움말을 「성공」 으로 냈다)" {
+    try testing.expectEqualStrings("-h", (try parse(&.{ "type", "--surface", "1", "--selector", "a", "--text", "-h" })).request.type_text.text);
+    try testing.expectEqualStrings("--help", (try parse(&.{ "press", "--surface", "1", "--key", "--help" })).request.press.key);
+    try testing.expect(try parse(&.{ "click", "--help" }) == .help);
+    try testing.expect(try parse(&.{ "snapshot", "--interactive", "--help" }) == .help); // 값을 받지 않는 옵션 뒤는 도움말
+    try testing.expect(try parse(&.{"-h"}) == .help);
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    try testing.expect((try parse((try replLine(a, "type --selector a --text -h", 3)).command)) == .request);
+    // 깊게 중첩된 exec 인자는 거절한다(요청을 만들 때 panic 했다).
+    var deep: std.ArrayList(u8) = .empty;
+    for (0..300) |_| try deep.append(a, '[');
+    for (0..300) |_| try deep.append(a, ']');
+    try testing.expectError(error.InvalidArgs, parse(&.{ "exec", "--surface", "1", "--args", deep.items, "1" }));
+    // 고른 탭 — i64 를 넘는 id 는 「use 가 틀렸다」(전에는 받아 놓고 뒤 명령이 모두 실패했다).
+    try testing.expect(try replLine(a, "use 9223372036854775808", null) == .bad_use);
+    // 대상이 이미 있고 다른 이유로 틀린 명령에는 붙이지 않는다(붙이면 「--surface 두 번」 이 진짜 이유를 가린다).
+    try testing.expectError(error.UnknownOption, parse((try replLine(a, "click --surface 9 --bogus", 7)).command));
 }

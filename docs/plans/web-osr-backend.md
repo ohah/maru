@@ -1077,3 +1077,12 @@ stdio 만(HTTP transport 없음 — 소켓을 새로 열지 않는다). REPL 은
 **구현**: `src/cli/mcp.zig`(순수 — 도구 표·인자 옮기기·JSON-RPC 한 줄 처리), `src/cli/mcp/run.zig`(표준 입력 줄 읽기·러너 호출), `src/cli/browser.zig`
 (`repl` 명령·줄 나누기·줄 해석·`--`), `src/cli/browser/run.zig`(`LineReader`·repl 루프). 스모크 `mcp`·`repl` 경우.
 Chromium 탭의 `exec`·`screenshot` 은 아직 -32008(W9a) — 스모크는 지금 「엔진까지 갔다」만 보고, W9a 에서 결과(`-1`·PNG 그림)를 요구하게 조인다.
+
+**W9f 적대 리뷰**(구현 뒤 다섯 회차):
+- **1 회차**(탐침·순수 시험·변이 16(걸림 10)): 중 — 255 단 넘게 중첩된 `browser_exec.args` 하나에 MCP 서버가 panic(JSON 쓰개 중첩 한도 256 — CLI `exec --args` 도
+  같았다) → 64 단 상한(MCP 는 WrongType, CLI 는 InvalidArgs, 요청 만들기도 거절). 중 — `browser_wait` 스키마가 `ref` 를 내보였는데 파서가 거절 → 뺐고, 모든 도구의
+  선택 인자를 하나씩 파서에 통과시키는 시험. 하 — `> f 2>&1` 로 받으면 stdout·stderr 가 각자 0 에서 써 서로 덮었다(모든 명령 — main 의 위치 지정 쓰기) → 이어
+  쓰기(스모크 repl 이 stderr 줄을 섞어 본다). 하 — 값 자리의 `-h` 를 도움말로(repl `type --text -h` 가 「성공」) → 값을 받는 옵션 뒤는 건너뛴다. 하 —
+  2025-03-26 을 알리면서 batch 를 받지 않음·null id 에 답함 → 그 판을 빼고 null id 는 -32600. 하 — `use` 가 i64 를 넘는 id 를 받음, `7.0` 거절, 스키마 최솟값
+  0 → 고침. 코드로 찾은 것 둘도 재현 뒤 고쳤다: non-blocking 표준 입력의 EAGAIN 을 끝으로 봄(곧 종료), 표준 출력이 닫히면 스택 트레이스·종료 1. 남은 생존 변이:
+  repl 의 `open` 이 연 탭 고르기(스모크만 — 단위 시험은 서버가 필요), 스크린샷 그림 결과(Chromium 스크린샷이 W9a 전까지 -32008 — W9a 에서 스모크를 조인다).

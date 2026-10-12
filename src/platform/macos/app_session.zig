@@ -6044,6 +6044,9 @@ pub const AppSession = struct {
     surface_closed_callback: ?SurfaceClosedCallback = null,
     agent_page_tab_callback: ?AgentPageTabCallback = null,
     agent_tab_room_callback: ?AgentTabRoomCallback = null,
+    /// W9b③ 적대 리뷰 4 회차: 그 pane(셸 surface)이 아직 에이전트 탭을 가진 살아 있는 pane 인가 — app_host_abi 의 에이전트 탭 표로 본다(pane 이
+    /// 닫히거나 사용자가 grant 를 철회하면 비운다). 창을 가리지 않는다(다른 창으로 옮긴 탭의 셸은 이 창에 없다). 없으면(시험) 이 창 안에서 찾는다.
+    agent_pane_known_callback: ?AgentTabRoomCallback = null,
     // MARU_TRACE=<파일경로>면 세션의 base kind 이벤트(output/resize/process-exit)를 **파일로 증분 append**한다
     // (레코더는 이벤트마다 flush → 크래시 직전까지 디스크에 남음, observability replayTrace로 화면 재생). 미설정이면
     // null(오버헤드 0). 레코더는 self가 소유한 file writer(`trace_writer`, heap 버퍼 `trace_buf`)에 쓴다 — self가 안정
@@ -99360,4 +99363,32 @@ test "W9b③ 적대 리뷰 2 회차: 사람이 에이전트 탭에서 연 새 �
 fn w9b3YesRoom(pane: u64) bool {
     _ = pane;
     return true;
+}
+
+test "W9b③ 적대 리뷰 4 회차: 다른 창으로 옮긴 에이전트 탭이 에이전트 장으로 연 팝업도 그 pane 의 상한·소유를 탄다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const a = try w6jSession(allocator);
+    defer allocator.destroy(a);
+    defer a.deinit();
+    const b = try w6jSession(allocator);
+    defer allocator.destroy(b);
+    defer web_osr.testForget(allocator);
+    defer b.deinit();
+    b.agent_page_tab_callback = w9b3AdoptPageTab;
+    b.agent_tab_room_callback = w9b3NoRoom; // 그 pane 은 이미 8 개
+    b.agent_pane_known_callback = w9b3YesRoom; // A 창의 셸은 살아 있다(app_host_abi 의 에이전트 탭 표에 있다)
+    w9b3_adopt_answer = true;
+    w9b3_adopted = 0;
+    const shell_a = pane_ops.activePane(a).activeTerm().surfaceId();
+    const pane_b = pane_ops.activePane(b);
+    const shell_b = pane_b.activeTerm().surfaceId();
+    const tab = try web_ops.openAgentTab(b, shell_b, null);
+    pane_b.terms.items[1].agent_opener = shell_a; // A 창의 셸이 열고 B 창으로 옮긴 탭(옮겨도 agent_opener 가 따라간다)
+    try web_osr.testHold(allocator, tab);
+    web_osr.testRunning(tab);
+    web_osr.grantNewTabCredit(allocator, tab);
+    web_osr.testApplyNow(allocator, .{ .open_tab = .{ .browser = tab, .placement = .foreground, .url = "https://e.test/popup" } });
+    web_ops.tickWebOsr(b);
+    try std.testing.expectEqual(@as(usize, 2), pane_b.terms.items.len); // 상한 — 열지 않아야 한다
 }

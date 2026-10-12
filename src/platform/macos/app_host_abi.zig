@@ -1696,6 +1696,7 @@ pub export fn maru_macos_app_session_create(
     session.setSurfaceClosedCallback(null, onAppSessionSurfaceClosed);
     session.agent_page_tab_callback = onAgentPageTab; // W9b③: 에이전트 탭의 페이지가 연 새 탭
     session.agent_tab_room_callback = onAgentTabRoom;
+    session.agent_pane_known_callback = onAgentPaneKnown;
 
     out.* = session;
     return @intFromEnum(Status.ok);
@@ -7851,6 +7852,11 @@ fn agentTabRoom(pane: u64) bool {
     return agentTabCount(pane) < max_agent_tabs_per_pane and control_pane_grant_store.len < control_pane_grant.max_grants;
 }
 
+/// 그 pane 이 아직 에이전트 탭을 가졌는가(`AppSession.agent_pane_known_callback` — 창을 가리지 않는 생존 판정, W9b③ 적대 리뷰 4 회차).
+fn onAgentPaneKnown(pane: u64) bool {
+    return agentTabCount(pane) > 0;
+}
+
 /// 에이전트 탭의 페이지가 새 탭을 열려 한다 — 자리가 없으면 열지 않는다(`AppSession.agent_tab_room_callback`).
 fn onAgentTabRoom(pane: u64) bool {
     return control_server_active and agentTabRoom(pane);
@@ -9043,6 +9049,8 @@ pub export fn maru_macos_control_push_browser_closed(surface_id: u64) void {
 pub export fn maru_macos_control_revoke_all_browser_grants() u32 {
     const n: u32 = @intCast(control_pane_grant_store.len);
     control_pane_grant_store.clearAll();
+    // 에이전트가 연 탭도 이제 사람의 탭이다 — 표가 남으면 에이전트는 그 탭을 닫지도(grant 없음) 새로 열지도(「8 개」) 못했다(W9b③ 적대 리뷰 4 회차).
+    agent_tabs.clearRetainingCapacity();
     if (control_server_active) {
         cancelAllPaneGrantBrowserWaits(&control_server_storage);
         cancelAllPaneGrantBrowserExecutions(&control_server_storage);
@@ -11972,4 +11980,17 @@ test "W9b③ 적대 리뷰 3 회차: 대화상자로 끝난 호출은 op 에 그
     try std.testing.expectEqualStrings(web_cdp_ops.dialog_reason, r.failed);
     try std.testing.expect(cdpReply(.timeout, "") == .timed_out);
     try std.testing.expect(cdpReply(.busy, "") == .not_sent);
+}
+
+test "W9b③ 적대 리뷰 4 회차: 사용자가 browser grant 를 모두 철회하면 에이전트 탭 표도 비운다(닫지도 새로 열지도 못하는 막다른 길)" {
+    defer agent_tabs.clearRetainingCapacity();
+    defer control_pane_grant_store.clearAll();
+    for (0..max_agent_tabs_per_pane) |i| try std.testing.expect(adoptAgentTab(5, 900 + i));
+    try std.testing.expect(!agentTabRoom(5));
+    try std.testing.expect(onAgentPaneKnown(5)); // 에이전트 탭이 있는 pane — 살아 있다(창을 가리지 않는 판정)
+    try std.testing.expect(!onAgentPaneKnown(6));
+    _ = maru_macos_control_revoke_all_browser_grants();
+    try std.testing.expectEqual(@as(usize, 0), agentTabCount(5));
+    try std.testing.expect(agentTabRoom(5));
+    try std.testing.expect(!onAgentPaneKnown(5)); // 철회 뒤에는 에이전트 pane 이 아니다
 }

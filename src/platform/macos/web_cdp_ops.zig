@@ -562,7 +562,9 @@ pub const Op = struct {
         // 누르기 전 프레임의 답(무엇이든 — 오류여도 그린 뒤다) — 덮임 검사·키·Delete 로. 못 보냈으면 아래에서 놓고 실패.
         if (self.stage == .frame and reply != .not_sent) return self.afterFrame(gpa);
         // 입력을 보낸 뒤 대화상자 이유 — 입력은 갔다(3 회차: 실패로 답해 다시 하면 두 번 제출됐다).
-        if (self.sent_input) switch (reply) {
+        // 누름·넣기 단계의 not_sent 는 확실히 보내지 않은 것이다 — 「갔다」 가 아니다(4 회차: 넣기를 못 보냈는데 dialog:true 성공이었다).
+        const unsent_input = reply == .not_sent and (self.stage == .insert or self.stage == .key_down or self.stage == .mouse_down or self.stage == .delete_down);
+        if (self.sent_input and !unsent_input) switch (reply) {
             .failed, .not_sent => |why| if (std.mem.eql(u8, why, dialog_reason)) {
                 self.dialog = true;
             },
@@ -686,6 +688,11 @@ pub const Op = struct {
         // 누름을 확실히 보내지 않았다 — 떼지 않고, 쥔 묶음만 놓는다.
         if (reply == .not_sent) switch (self.stage) {
             .mouse_down => {
+                self.miss = reply.not_sent;
+                return self.releaseStep(gpa);
+            },
+            // Delete 누름도 — 쥔 묶음을 놓고 실패(4 회차: 놓지 않고 끝나 묶음이 이동 전까지 남았다).
+            .delete_down => {
                 self.miss = reply.not_sent;
                 return self.releaseStep(gpa);
             },
@@ -3556,4 +3563,55 @@ test "W9b③ 적대 리뷰 3 회차: 글을 넣은 뒤 대화상자가 뜨면 �
     try testing.expectEqual(Status.success, r.status);
     try testing.expect(std.mem.indexOf(u8, r.result, "\"dialog\":true") != null);
     for (trail.params.items) |p| try testing.expect(std.mem.indexOf(u8, p, "function(want,bh,bn)") == null); // 다시 읽기를 보내지 않았다
+}
+
+fn w9b3r4InsertNotSent(method: []const u8, params: []const u8) Reply {
+    // 고르기의 답과 대화상자가 같은 tick 에 왔다 — 넣기는 대화상자로 거절(확실히 보내지 않았다).
+    if (std.mem.eql(u8, method, "Input.insertText")) return .{ .not_sent = dialog_reason };
+    if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .not_sent = dialog_reason };
+    return editorPage(method, params);
+}
+
+test "W9b③ 적대 리뷰 4 회차: 넣기를 보내지 못했으면(대화상자가 같은 tick 에 왔다) 「갔다 + dialog」 가 아니라 실패" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .type_text, "{\"selector\":\"#e\",\"text\":\"x\"}", 851);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &w9b3r4InsertNotSent, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expect(r.status != .success);
+}
+
+fn w9b3r4DeleteNotSent(method: []const u8, params: []const u8) Reply {
+    if (std.mem.indexOf(u8, params, "\"keyDown\",\"key\":\"Delete\"") != null) return .{ .not_sent = busy_reason };
+    return editorPage(method, params);
+}
+
+test "W9b③ 적대 리뷰 4 회차: 빈 글 type 의 Delete 를 보내지 못해도 쥔 묶음은 놓는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .type_text, "{\"selector\":\"#e\",\"text\":\"\"}", 852);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &w9b3r4DeleteNotSent, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.failed, r.status);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+}
+
+test "W9b③ 적대 리뷰 4 회차: 로케이터로 누른 뒤 대화상자가 뜨면 matched 와 dialog 를 함께 싣는다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 853);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &w9b3r4RoleDialog, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    try testing.expect(std.mem.indexOf(u8, r.result, "\"matched\"") != null);
+    try testing.expect(std.mem.indexOf(u8, r.result, "\"dialog\":true") != null);
+}
+
+fn w9b3r4RoleDialog(method: []const u8, params: []const u8) Reply {
+    if (std.mem.indexOf(u8, params, "mousePressed") != null) return .{ .failed = dialog_reason };
+    if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .not_sent = dialog_reason };
+    return rolePage(method, params);
 }

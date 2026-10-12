@@ -1604,14 +1604,13 @@ const max_deferred_releases = 16;
 fn flushDeferredReleases(gpa: std.mem.Allocator) void {
     for (surfaces.keys(), surfaces.values()) |id, *s| {
         if (s.deferred_releases.items.len == 0 or jsDialogShowing(id)) continue;
-        while (s.deferred_releases.items.len > 0) {
-            const params = s.deferred_releases.items[0];
-            _ = devtoolsCall(gpa, id, "Runtime.releaseObjectGroup", params, discard_sink) catch |e| switch (e) {
-                error.Busy => break, // 다음 tick
-                else => {}, // 보낼 수 없다(탭이 준비 안 됨 등) — 버린다
-            };
-            gpa.free(s.deferred_releases.orderedRemove(0));
-        }
+        // tick 마다 탭에 하나씩 — 몰아 보내면 탭의 DevTools 자리(2)를 차 다음 op 의 첫 호출이 Busy 를 받았다(4 회차).
+        const params = s.deferred_releases.items[0];
+        _ = devtoolsCall(gpa, id, "Runtime.releaseObjectGroup", params, discard_sink) catch |e| switch (e) {
+            error.Busy, error.DialogShowing => continue, // 다음 tick(대화상자는 위에서 걸렀다 — 여기서 다시 미루면 같은 것을 두 번 담는다)
+            else => {}, // 보낼 수 없다(탭이 준비 안 됨 등) — 버린다
+        };
+        gpa.free(s.deferred_releases.orderedRemove(0));
     }
 }
 
@@ -5758,4 +5757,31 @@ test "W9b③ 적대 리뷰 3 회차: 대화상자로 곧 끝낸 호출도 sideca
     const opener = surfaces.getPtr(9).?;
     try std.testing.expectEqual(@as(usize, 1), opener.new_tabs.items.len);
     try std.testing.expect(opener.new_tabs.items[0].by_agent);
+}
+
+test "W9b③ 적대 리뷰 4 회차: 대화상자가 떠 있으면 미룬 놓기를 보내지 않고 그대로 둔다 · 팝업이 연 팝업(손주)의 대화상자도 뿌리 탭을 막는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    var rec: DevtoolsRecorder = .{};
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "hi" } });
+    try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-5\"}", rec.sink()));
+    var buf: [32]Message = undefined;
+    const before = sentFrames(&buf);
+    flushDeferredReleases(gpa);
+    flushDeferredReleases(gpa);
+    try std.testing.expectEqual(before, sentFrames(&buf));
+    try std.testing.expectEqual(@as(usize, 1), surfaces.getPtr(7).?.deferred_releases.items.len);
+    // 손주 — 7 이 연 100, 100 이 연 101. 101 의 alert 는 뿌리 7 의 호출도 막는다.
+    try devtoolsTestSurface(8, true);
+    surfaces.getPtr(8).?.new_tab_credits.grant(monotonicNow());
+    reservePopupId(gpa, 100);
+    applyD(gpa, .{ .popup_created = .{ .opener = 8, .browser = 100, .placement = .background, .url = "https://a.example/p" } });
+    surfaces.getPtr(100).?.new_tab_credits.grant(monotonicNow());
+    reservePopupId(gpa, 101);
+    applyD(gpa, .{ .popup_created = .{ .opener = 100, .browser = 101, .placement = .background, .url = "https://a.example/q" } });
+    try std.testing.expect(surfaces.contains(101));
+    applyD(gpa, .{ .js_dialog = .{ .browser = 101, .request = 2, .kind = .alert, .origin = "", .message = "grandchild" } });
+    try std.testing.expect(jsDialogShowing(8));
 }

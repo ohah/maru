@@ -182,19 +182,15 @@ pub const Credits = struct {
     }
 };
 
-/// 사람의 장과 에이전트의 장 가운데 어느 것을 쓸까(W9b③ 적대 리뷰 3 회차) — 어느 입력이 팝업을 열었는지는 알 수 없어(CEF 는 「사용자
-/// 입력 중」만 알린다) 시각으로 짐작한다. 전달 여유(`transit_ms`) 안에 받은 장이 있으면 그 가운데 가장 새 것(방금 그 입력이 열었다),
-/// 아니면 가장 오래된 것(차례대로). 사람이 몇 초 전 초점만 준 뒤 에이전트가 연 팝업이 사람의 앞 탭이 되던 것을 막는다. 둘 다 1 초 안에
+/// 사람의 장과 에이전트의 장 가운데 어느 것을 쓸까(W9b③ 적대 리뷰 3·4 회차) — 어느 입력이 팝업을 열었는지는 알 수 없어(CEF 는 「사용자
+/// 입력 중」만 알린다) **가장 새 장의 주인**으로 짐작한다(같은 시각이면 사람). 팝업을 연 것은 대개 그 직전 입력이다 — 사람이 몇 초 전 초점만 준
+/// 뒤 에이전트가 연 팝업(비동기로 1 초 넘게 늦어도 — 4 회차)이 사람의 앞 탭이 되던 것을 막는다. 사람과 에이전트가 장의 수명(5 초) 안에 둘 다
 /// 팝업을 열면 틀릴 수 있다(한계). 쓸 장이 없으면 null, 에이전트의 장이면 true.
 pub fn takeCredit(human: *Credits, agent: *Credits, now_ms: i64) ?bool {
     const h = human.newest(now_ms);
     const a = agent.newest(now_ms);
     if (h == null and a == null) return null;
-    const use_agent = if (h == null) true else if (a == null) false else blk: {
-        const recent = @max(h.?, a.?);
-        if (now_ms - recent <= Credits.transit_ms) break :blk a.? > h.?;
-        break :blk agent.at[0] < human.at[0];
-    };
+    const use_agent = if (h == null) true else if (a == null) false else a.? > h.?;
     _ = if (use_agent) agent.take(now_ms) else human.take(now_ms);
     return use_agent;
 }
@@ -210,8 +206,11 @@ test "W9b③ 적대 리뷰 3 회차: 장 고르기 — 방금(1 초 안) 받은 
     h.grant(10_000);
     a.grant(7_000);
     try std.testing.expectEqual(@as(?bool, false), takeCredit(&h, &a, 10_000)); // 방금 사람
-    h.grant(8_000); // 에이전트 7 초·사람 8 초 — 둘 다 1 초 넘게 지났다: 오래된 에이전트 것부터
+    h.grant(6_000); // 사람 6 초·에이전트 7 초 — 둘 다 1 초 넘게 지났어도 가장 새 것(비동기 팝업 — 4 회차)
     try std.testing.expectEqual(@as(?bool, true), takeCredit(&h, &a, 10_000));
+    try std.testing.expectEqual(@as(?bool, false), takeCredit(&h, &a, 10_000));
+    h.grant(9_000);
+    a.grant(9_000); // 같은 시각이면 사람
     try std.testing.expectEqual(@as(?bool, false), takeCredit(&h, &a, 10_000));
 }
 

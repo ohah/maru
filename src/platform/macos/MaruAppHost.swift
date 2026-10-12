@@ -5480,12 +5480,61 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             UNUserNotificationCenter.current().delegate = delegate
         }
         app.setActivationPolicy(.regular)
+        armScreenshotWatchdog()
         app.run()
         Darwin.exit(delegate.exitCode)
     }
 
+    /// `applicationDidFinishLaunching` 이 불렸는가 — 스크린샷 감시가 「어디서 멈췄나」를 말하려고 읽는다.
+    private static let screenshotWatchdogLock = NSLock()
+    private nonisolated(unsafe) static var screenshotLaunchFinished = false
+
+    /// **스크린샷 모드가 영영 기다리지 않게 한다.** `MARU_SCREENSHOT` 은 내용 있는 첫 frame 한 장을 PPM 으로 쓰고
+    /// 종료하는 하니스 계약인데, 그 frame 이 끝내 안 오면 프로세스가 **아무 출력 없이** 남는다. 실측(2026-10-12):
+    /// 콘솔이 잠긴 동안(`IOConsoleLocked` — 로그인 창이 콘솔을 쥐고 이 사용자의 GUI 세션이 화면에 없다) AppKit 이
+    /// `applicationDidFinishLaunching` 까지 가지 못해 앱이 이벤트 루프에서 10 분 넘게 기다렸고(두 번), 하니스는 그것을
+    /// 앱 결함과 구별할 수 없었다. 마감(`MARU_SCREENSHOT_TIMEOUT_MS`, 기본 60 초 + `MARU_SCREENSHOT_DELAY_MS`)까지
+    /// 파일이 안 쓰였으면 **어느 단계에서 멈췄는지와 콘솔 상태**를 stderr 에 남기고 75(EX_TEMPFAIL)로 끝낸다.
+    /// 메인 스레드가 막혀도 돌도록 별도 스레드다. 파일이 이미 쓰였으면(정상·Chrome Lab 의 프로세스 유지) 아무것도 안 한다.
+    private static func armScreenshotWatchdog() {
+        let env = ProcessInfo.processInfo.environment
+        guard let path = env["MARU_SCREENSHOT"], !path.isEmpty else { return }
+        let delayMs = max(0, Int(env["MARU_SCREENSHOT_DELAY_MS"] ?? "") ?? 0)
+        let limitMs = Int(env["MARU_SCREENSHOT_TIMEOUT_MS"] ?? "") ?? (60_000 + delayMs)
+        guard limitMs > 0 else { return } // 0 이하 = 감시 끔(손으로 오래 들여다볼 때)
+        let started = Date()
+        Thread.detachNewThread {
+            Thread.sleep(forTimeInterval: Double(limitMs) / 1000.0)
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+               let written = attrs[.modificationDate] as? Date,
+               written >= started
+            {
+                return // 찍혔다 — 정상 종료를 기다리거나(Chrome Lab 은 프로세스를 유지한다) 이미 끝나는 중이다
+            }
+            screenshotWatchdogLock.lock()
+            let launched = screenshotLaunchFinished
+            screenshotWatchdogLock.unlock()
+            // 이 프로세스의 GUI 세션이 콘솔에 없으면(화면 잠김·로그아웃·사용자 전환) CGSession 사전이 아예 없다 —
+            // 2026-10-12 실측에서 그랬다(`ioreg` 의 `IOConsoleLocked = Yes`). 그 자체가 원인의 증거라 그대로 적는다.
+            var console = "cgsession=none(이 GUI 세션이 콘솔에 없다 — 화면 잠김·로그아웃·사용자 전환)"
+            if let session = CGSessionCopyCurrentDictionary() as? [String: Any] {
+                let onConsole = (session["kCGSSessionOnConsoleKey"] as? Bool) ?? false
+                let locked = (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
+                console = "on_console=\(onConsole) screen_locked=\(locked)"
+            }
+            let stage = launched
+                ? "앱은 떴지만 내용 있는 첫 frame 이 안 왔다"
+                : "AppKit 이 applicationDidFinishLaunching 을 부르지 않았다(콘솔이 잠겨 이 GUI 세션이 화면에 없으면 이렇다)"
+            fputs("MARU_SCREENSHOT: \(limitMs)ms 안에 캡처하지 못했다 — \(stage) [\(console)] → \(path)\n", stderr)
+            Darwin.exit(75)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         _ = notification
+        Self.screenshotWatchdogLock.lock()
+        Self.screenshotLaunchFinished = true
+        Self.screenshotWatchdogLock.unlock()
         // W6d③: 끌어낸 이미지 파일 — Finder 가 청하면 대리자 대기열에서 이것으로 sidecar 의 내용을 받아 온다(main 에서 청하고 기다린다 —
         // sidecar 의 답은 main 의 tick 이 받는다).
         OsrImagePromiseDelegate.fetch = { [weak self] drag in

@@ -10,6 +10,66 @@ def run(argv, **kw):
     if result.returncode: raise AssertionError((argv[0],result.returncode,result.stderr.decode(errors='replace')[-1000:]))
     return result
 
+def reconnect_probe(peer, remote, sshconfig, alias, controls, frames):
+    """Drop the owned master, write offline hooks, resume through a fresh SSH transport."""
+    cursors = {}
+    for row in frames[1:]:
+        frame = row.get('frame', {})
+        if 'cur' in frame:
+            cursors[row['format'], frame['cur']] = frame
+    assert (1, '4331_7') in cursors and (2, '4331_7') in cursors
+    for control in controls:
+        run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias])
+    settings = json.loads((remote / '.claude/settings.json').read_text())
+    for profile in [1, 2]:
+        env = dict(os.environ, HOME=str(remote), XDG_CACHE_HOME=str(remote / '.cache'),
+                   LC_MARU_PANE='4331_7', LC_MARU_LOG_FORMAT=str(profile))
+        for key in ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'MARU_HOOK_INSTANCE', 'MARU_HOOK_PANE', 'TMUX', 'TMUX_PANE']:
+            env.pop(key, None)
+        for event in ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']:
+            command = settings['hooks'][event][0]['hooks'][0]['command']
+            payload = {'hook_event_name': event, 'session_id': f'offline-{profile}',
+                       'cwd': str(remote), 'prompt': 'synthetic offline turn',
+                       'transcript_path': str(remote / f'offline-{profile}.jsonl'),
+                       'tool_name': 'Bash', 'tool_use_id': f'offline-tool-{profile}',
+                       'tool_input': {'command': 'pwd'}}
+            run(['/bin/sh', '-c', command], input=json.dumps(payload).encode(), env=env)
+    resumes = []
+    for (profile, name), frame in cursors.items():
+        entry = f"{profile}:{name}:{frame['at']}"
+        if profile == 2:
+            entry += ':' + frame['gen']
+        resumes.append(entry)
+    command = shlex.join([peer, 'agent-events', '--stdio', f'--dir={remote}/.cache/maru',
+                          '--log-format=mixed', '--heartbeat-ms=200', '--resume=' + ','.join(resumes)])
+    proc = subprocess.Popen(['/usr/bin/ssh', '-F', str(sshconfig), alias, command],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    q = queue.Queue()
+    reader = threading.Thread(target=lambda: [q.put(line) for line in iter(proc.stdout.readline, b'')], daemon=True)
+    reader.start()
+    received = []; raw = []; deadline = time.monotonic() + 2
+    try:
+        while time.monotonic() < deadline:
+            try:
+                line = q.get(timeout=max(.01, deadline - time.monotonic()))
+                raw.append(line); received.append(json.loads(line))
+            except queue.Empty:
+                break
+    finally:
+        proc.terminate(); proc.wait(timeout=3); proc.stdout.close(); proc.stderr.close(); reader.join(timeout=1)
+    assert received and received[0] == {'hello': 'maru-agent-events-mixed', 'v': 3}
+    events = []
+    for row in received[1:]:
+        frame = row.get('frame', {})
+        if frame.get('nonce') == '4331_7' and 'line' in frame:
+            payload = json.loads(frame['line'].split('\t', 1)[1])
+            events.append((row['format'], payload['session_id'], payload['hook_event_name']))
+    expected = [(profile, f'offline-{profile}', event)
+                for profile in [1, 2] for event in ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']]
+    assert sorted(events) == sorted(expected), events
+    print(json.dumps({'case': 'reconnect', 'offline_events': len(events), 'old_events_replayed': 0}), flush=True)
+    return b''.join(raw)
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');args=ap.parse_args()
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
@@ -100,20 +160,42 @@ print("fixture:"+json.dumps({"received":env.get("LC_MARU_LOG_FORMAT"),"hooks":2}
                 else:assert not native.exists()
                 if peer==cli:
                     command=f'"{peer}" agent-events --stdio --dir="{remote}/.cache/maru" --log-format=mixed --heartbeat-ms=200'
-                    proc=subprocess.Popen(['/usr/bin/ssh','-F',str(sshconfig),alias,command],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+                    proc=subprocess.Popen(['/usr/bin/ssh','-F',str(sshconfig),'-S',next(iter(controls)),alias,command],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
                     q=queue.Queue();reader=threading.Thread(target=lambda:[q.put(l) for l in iter(proc.stdout.readline,b'')],daemon=True);reader.start();frames=[];raw_frames=[];deadline=time.monotonic()+1
                     try:
                         while time.monotonic()<deadline:
                             try:
                                 line=q.get(timeout=max(.01,deadline-time.monotonic()));raw_frames.append(line);frames.append(json.loads(line))
                             except queue.Empty:break
-                    finally:proc.terminate();proc.wait(timeout=3);proc.stdout.close();proc.stderr.close();reader.join(timeout=1)
+                    finally:
+                        if tag == 'allowed':
+                            # Drop the transport while its stream is still alive, rather than gracefully stopping it.
+                            assert proc.poll() is None
+                            for control in controls:
+                                run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias])
+                            controls.clear()
+                            try:
+                                proc.wait(timeout=3)
+                            except subprocess.TimeoutExpired:
+                                proc.kill(); proc.wait(timeout=3)
+                                raise AssertionError('owned master did not disconnect its stream')
+                            assert proc.returncode != 0, 'transport loss must terminate the live SSH stream'
+                        else:
+                            proc.terminate(); proc.wait(timeout=3)
+                        proc.stdout.close();proc.stderr.close();reader.join(timeout=1)
                     assert frames[0]=={'hello':'maru-agent-events-mixed','v':3},frames[:1]
                     if args.frames_output and tag=='allowed':
                         target=Path(args.frames_output);target.write_bytes(b''.join(raw_frames));target.chmod(0o600)
                     profiles={f['format'] for f in frames[1:] if 'line' in f.get('frame',{}) and 'UserPromptSubmit' in f['frame']['line']}
                     assert profiles==({1,2} if tag=='allowed' else {1}),profiles
                     print(json.dumps({'case':tag,'actual_ssh_mixed_profiles':sorted(profiles)}),flush=True)
+                    if tag == 'allowed':
+                        resumed_wire = reconnect_probe(peer, remote, sshconfig, alias, controls, frames)
+                        controls.clear()
+                        if args.frames_output:
+                            Path(args.frames_output + '.reconnect').write_bytes(resumed_wire)
+                            Path(args.frames_output + '.reconnect').chmod(0o600)
+
             finally:
                 if trace.exists():controls.update(e['control'] for e in map(json.loads,trace.read_text().splitlines()) if e['control'])
                 for control in controls:subprocess.run(['/usr/bin/ssh','-F',str(sshconfig),'-S',control,'-O','exit',alias],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=3)

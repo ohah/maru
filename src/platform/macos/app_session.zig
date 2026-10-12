@@ -332,7 +332,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 바뀐다. 그리고 CoreText 셰이퍼 셀에 합성 글리프 비트(`draw_cell_synthesized_bit` = 1<<3)를 싣고 .m 의 범위 미러
 // (`maru_is_synthesized_glyph`)를 지웠다 — 낡은 .m 은 그 비트를 모른 채 자기 범위로 판정하고, 새 .m 은 낡은 Zig 가
 // 비트를 안 실으면 box·Powerline 을 드롭하므로 짝이 같이 올라간다.
-pub const abi_version: u32 = 227;
+// 228: `NativeMetalCell` 의 패딩 `_clip_pad`(u16)가 `glyph_offset_x_px` 가 된다 — 셀보다 크게 구운 아이콘의 전경 quad 를
+// 차지한 칸들의 가운데로 미는 px 를 Zig(`metal_frame.cellRasterIconGlyphOffsetPx`)가 싣고, .m 은 `cw × 0.5 × (span − 1)` 를
+// 지우고 그 값만 더한다. layout 은 같다. 낡은 .m + 새 Zig 는 이 값을 무시하고 자기 식으로 밀어 결과가 같지만, 새 .m +
+// 낡은 Zig 는 0(옛 패딩)을 받아 종을 반 칸 왼쪽에 그리므로 짝이 같이 올라간다.
+pub const abi_version: u32 = 228;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -66793,6 +66797,56 @@ test "sidebar 헤더: 투영된 종 아이콘 셀이 알림 배지와 같은 줄
         try std.testing.expectEqual(want, c.origin_y); // 렌더러 계약: py_top = origin_y + row × ch
     }
     try std.testing.expect(bells >= 1); // 개수로 확인 — 종이 없으면 위 단언이 아무것도 안 잰다
+}
+
+// **헤더 아이콘 hover 사각형은 그려지는 글리프 한가운데에 선다.** 렌더러는 크게 구운 아이콘을 한 칸 quad 로 키워
+// `origin_x + col × cw + glyph_offset_x_px` 에 그린다(ABI 228 — 그 이동은 Zig `cellRasterIconGlyphOffsetPx`). hover 는
+// 예전에 「종이면 +1.0칸」과 열 번호(`cols -| 12` 등)를 따로 들었다 — 둘 중 하나만 바뀌면 박스가 아이콘 한쪽으로 치우친다.
+// 여기서는 실제 셀 스트림의 role 셀에서 그 자리를 읽어 hover quad 중심과 맞춘다. 종(2칸)이 반 칸 이동을 실제로 받는지도 본다.
+test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘 중심(origin_x + col×cw + glyph_offset_x_px + cw/2)과 같다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const Case = struct { region: chrome.components.sidebar.HeaderRegion, cp: u21, span: u16 };
+    const cases = [_]Case{
+        .{ .region = .notifications, .cp = icons.codepoint(.bell), .span = maru.cell_text.sidebar_bell_cols },
+        .{ .region = .toggle_sidebar, .cp = maru.cell_text.sidebar_toggle_codepoint, .span = 1 },
+        .{ .region = .view_options, .cp = icons.codepoint(.gear), .span = 1 },
+        .{ .region = .new_workspace, .cp = icons.codepoint(.plus), .span = 1 },
+    };
+    const cw: f32 = @floatFromInt(session.cell_width_px);
+    var checked: usize = 0;
+    for (cases) |case| {
+        session.setHoveredHeaderRegion(case.region);
+        for (0..4) |_| {
+            _ = try session.tick();
+            if (!session.metal_dirty) break;
+        }
+        // 렌더러가 그 아이콘을 그리는 가로 중심 — 헤더 줄(row 0)의 role 셀.
+        var glyph_center: ?f32 = null;
+        for (session.metal_buffer.cells) |c| {
+            if (c.codepoint != case.cp or c.row != 0 or c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
+            if (c.origin_x != 0) continue; // 사이드바 헤더 frame(origin_x 0) — 파일 도크 토글(◧)은 띠 오른쪽 끝이라 제외
+            try std.testing.expectEqual(case.span, c.width);
+            try std.testing.expectEqual(metal_frame.cellRasterIconGlyphOffsetPx(session.cell_width_px, case.span), c.glyph_offset_x_px);
+            glyph_center = @as(f32, @floatFromInt(c.origin_x)) + @as(f32, @floatFromInt(c.col)) * cw + @as(f32, @floatFromInt(c.glyph_offset_x_px)) + cw / 2.0;
+        }
+        const want = glyph_center orelse return error.TestUnexpectedResult; // 아이콘 셀이 실제로 나갔다
+        // hover quad = 헤더 띠 위쪽(y 0)의 2.6칸 폭 둥근 quad.
+        var hover_center: ?f32 = null;
+        for (session.gpu_quads.items) |q| {
+            if (q.y != 0 or @abs(q.w - cw * 2.6) > 0.01) continue;
+            hover_center = q.x + q.w / 2.0;
+        }
+        const got = hover_center orelse return error.TestUnexpectedResult;
+        try std.testing.expectApproxEqAbs(want, got, 0.01);
+        checked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, cases.len), checked);
+    // 종의 반 칸 이동이 0 이 아닌 값으로 실제로 실렸다(1칸 아이콘만 보면 이동을 안 해도 통과한다).
+    try std.testing.expect(metal_frame.cellRasterIconGlyphOffsetPx(session.cell_width_px, maru.cell_text.sidebar_bell_cols) > 0);
 }
 
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS

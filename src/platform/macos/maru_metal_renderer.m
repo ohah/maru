@@ -1413,14 +1413,14 @@ bool maru_metal_renderer_draw(
                 } else {
                     // 셀보다 크게 구운 아이콘(cell-raster role): **한 칸을 키운다 — 그 글리프가 몇 칸을 차지하든.** atlas는
                     // 셀 한 칸 ×배율로 구웠으므로 2칸 글리프(종 — EAW width 2)의 quad를 2칸으로 잡고 키우면 가로만 두 배가 돼
-                    // 찌그러진다. 그래서 한 칸 quad를 차지한 칸들의 가운데에 둔다(1칸이면 제자리, 2칸이면 +0.5칸 —
-                    // sidebar.zig hover 중심 (icon_col+1)cw · Windows main.zig 의 같은 규칙과 한 자리).
+                    // 찌그러진다. 그래서 한 칸 quad를 그린다. **칸들의 가운데로 미는 px 는 Zig 가 셀에 싣는다**
+                    // (`glyph_offset_x_px` = `metal_frame.cellRasterIconGlyphOffsetPx`, ABI 228 — hover 사각형도 같은 값).
+                    // 예전에는 여기서 `cw × 0.5 × (span − 1)` 를 따로 셈했다.
                     MaruAppHostMetalCell fgc = tc;
-                    const uint32_t span_u = (tc.width == 0u) ? 1u : tc.width;
                     fgc.reserved = 0u;
                     fgc.width = 1;
                     fgc.background = 0u;
-                    maru_fill_cell_quad(fg_p, fgc, (float)tc.origin_x + cw * 0.5f * (float)(span_u - 1u), cw, py_top, ch, drawable_w, drawable_h, glyph_scale_x, glyph_scale_y, divider_thickness_px);
+                    maru_fill_cell_quad(fg_p, fgc, (float)tc.origin_x + (float)tc.glyph_offset_x_px, cw, py_top, ch, drawable_w, drawable_h, glyph_scale_x, glyph_scale_y, divider_thickness_px);
                 }
             }
         }

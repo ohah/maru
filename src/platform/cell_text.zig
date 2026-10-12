@@ -1107,9 +1107,12 @@ pub fn buildDockViewBarDrawList(
 /// 사이드바 접기 토글 글리프 — 헤더와 접힘 토글이 공유한다.
 pub const sidebar_toggle_codepoint: u21 = icons.codepoint(.sidebar_collapse);
 
+/// 종 글리프가 차지하는 칸 수(EAW 2칸). 배지 열·hover 사각형 중심이 이 값을 본다.
+pub const sidebar_bell_cols: u16 = 2;
+
 /// 알림 배지 숫자가 앉는 열. 종 글리프가 2칸(EAW)이라 `bell_col + 2` 다.
 pub fn notificationBadgeCol(bell_col: u16) u16 {
-    return bell_col + 2;
+    return bell_col + sidebar_bell_cols;
 }
 
 /// 헤더가 아이콘 줄을 낼 수 있는 최소 폭(칸). 검색 줄 + 우측 아이콘 넷(종·◧·⚙·＋, 3칸 간격)이
@@ -1134,7 +1137,7 @@ pub fn appendSidebarBellAndBadge(
     unread: usize,
     round_badge: bool,
 ) !void {
-    try cells.append(allocator, .{ .row = 0, .col = bell_col, .codepoint = icons.codepoint(.bell), .width = 2, .style = .{ .foreground = fg } });
+    try cells.append(allocator, .{ .row = 0, .col = bell_col, .codepoint = icons.codepoint(.bell), .width = sidebar_bell_cols, .style = .{ .foreground = fg } });
     if (unread == 0) return;
     if (round_badge) {
         // 원형 1칸 제약상 1~9 는 숫자, 10 개 이상은 '9' 로 cap 한다(2칸 "9+" 는 종 우측 ◧ 때문에 자리가 없다).

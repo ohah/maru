@@ -22,16 +22,37 @@ const SliceArgs = struct {
     }
 };
 
-pub fn run(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+pub fn run(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var collected: std.ArrayList([]const u8) = .empty;
+    defer collected.deinit(allocator);
+    while (args.next()) |a| try collected.append(allocator, a);
+    switch (mcp.invocation(collected.items)) {
+        .serve => {},
+        .help => {
+            try stdout.writeAll(mcp.usage);
+            return stdout.flush();
+        },
+        .bad => {
+            try stderr.writeAll("maru mcp: unexpected argument\n\n");
+            try stderr.writeAll(mcp.usage);
+            try stderr.flush();
+            return error.UnknownCommand;
+        },
+    }
     // 클라이언트가 표준 출력을 닫았다 — 답할 곳이 없으니 조용히 끝낸다(W9f 적대 리뷰 1 회차: 스택 트레이스와 종료 1).
-    serve(io, allocator, stdout, stderr) catch |e| switch (e) {
+    return serveQuietly(io, allocator, null, stdout, stderr);
+}
+
+/// 클라이언트가 표준 출력을 닫았다 — 답할 곳이 없으니 조용히 끝낸다(W9f 적대 리뷰 1 회차: 스택 트레이스와 종료 1).
+fn serveQuietly(io: std.Io, allocator: std.mem.Allocator, fd: ?std.c.fd_t, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    serveFd(io, allocator, fd, stdout, stderr) catch |e| switch (e) {
         error.WriteFailed => return,
         else => return e,
     };
 }
 
-fn serve(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
-    var reader: browser_run.LineReader = .{ .max = max_line_bytes };
+fn serveFd(io: std.Io, allocator: std.mem.Allocator, fd: ?std.c.fd_t, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var reader: browser_run.LineReader = .{ .fd = fd, .max = max_line_bytes };
     defer reader.deinit(allocator);
     while (try reader.next(allocator)) |item| switch (item) {
         .too_long => try writeLine(stdout, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"message too large\"}}"),
@@ -91,4 +112,19 @@ fn writeLine(stdout: *std.Io.Writer, bytes: []const u8) !void {
     try stdout.writeAll(bytes);
     try stdout.writeAll("\n");
     try stdout.flush();
+}
+
+test "W9f 적대 리뷰 2 회차: 클라이언트가 표준 출력을 닫으면 서버는 오류 없이 끝난다" {
+    if (comptime @import("builtin").os.tag == .windows) return error.SkipZigTest else {
+        var fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        defer _ = std.c.close(fds[0]);
+        const input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+        try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
+        _ = std.c.close(fds[1]);
+        var dead = std.Io.Writer.failing;
+        var err: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer err.deinit();
+        try serveQuietly(std.testing.io, std.testing.allocator, fds[0], &dead, &err.writer);
+    }
 }

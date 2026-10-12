@@ -79,6 +79,11 @@ const inventory = [_]Entry{
         .why = "cli/의 의도된 impure 예외 — browser.zig(순수)의 짝으로 응답 수신 read/close와 --out 원자 공개, 표준 입력 줄 읽기(`LineReader` — repl·`maru mcp`, W9f)를 갖는다.",
     },
     .{
+        .path = "mcp/run.zig",
+        .expect = .exempt,
+        .why = "cli/의 의도된 impure 예외 — mcp.zig(순수)의 짝으로 표준 입력 fd 를 받아 줄을 읽고(시험이 파이프를 넘긴다) 도구 호출을 browser 러너로 돌린다(W9f)",
+    },
+    .{
         .path = "incidents_run.zig",
         .expect = .exempt,
         .why = "cli/의 의도된 impure 예외 — incidents.zig(순수)의 짝으로 incident 디렉터리 열거와 봉투 읽기를 갖는다(browser.zig ↔ browser/run.zig와 같은 분할). 파싱·포맷은 순수 절반이 갖고 여긴 디스크 접착만 남는다.",

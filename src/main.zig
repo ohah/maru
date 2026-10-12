@@ -377,7 +377,7 @@ fn dispatch(
 
     // W9f: MCP stdio 서버 — 에이전트 설정에 `maru mcp` 로 넣는다(표준 출력은 MCP 메시지만).
     if (std.mem.eql(u8, command, "mcp")) {
-        try maru.cli.mcp_run.run(io, allocator, stdout, stderr);
+        try maru.cli.mcp_run.run(io, allocator, &args, stdout, stderr);
         return;
     }
 

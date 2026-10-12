@@ -37,8 +37,11 @@ pub const Arg = struct {
     flag: []const u8 = "",
     description: []const u8,
     required: bool = false,
-    /// 정수 인자의 최솟값(스키마 `minimum` — 파서가 지키는 값과 같게).
+    /// 정수 인자의 최솟값·최댓값(스키마 `minimum`·`maximum` — 파서가 지키는 값과 같게, W9f 적대 리뷰 2 회차).
     min: i64 = 0,
+    max: ?i64 = null,
+    /// 수(소수) 인자가 0 보다 커야 하는가(스키마 `exclusiveMinimum: 0`).
+    positive: bool = false,
 };
 
 pub const Tool = struct {
@@ -55,11 +58,11 @@ const locator_args = [_]Arg{
     .{ .key = "ref", .kind = .string, .flag = "--ref", .description = "element ref from browser_snapshot (like n123)" },
     .{ .key = "role", .kind = .string, .flag = "--role", .description = "ARIA role (Chromium tabs), with name/level" },
     .{ .key = "name", .kind = .string, .flag = "--name", .description = "accessible name for role" },
-    .{ .key = "level", .kind = .int, .flag = "--level", .description = "heading level for role=heading", .min = 1 },
+    .{ .key = "level", .kind = .int, .flag = "--level", .description = "heading level for role=heading", .min = 1, .max = 100 },
     .{ .key = "by_text", .kind = .string, .flag = "--by-text", .description = "visible text (Chromium tabs)" },
     .{ .key = "by_label", .kind = .string, .flag = "--by-label", .description = "form label text (Chromium tabs)" },
     .{ .key = "exact", .kind = .flag, .flag = "--exact", .description = "match the name/text exactly" },
-    .{ .key = "nth", .kind = .int, .flag = "--nth", .description = "pick the nth match (0-based)" },
+    .{ .key = "nth", .kind = .int, .flag = "--nth", .description = "pick the nth match (0-based)", .max = 1_000_000 },
 };
 
 /// wait 의 로케이터 — CLI wait 는 `--ref` 를 받지 않는다(W9f 적대 리뷰 1 회차: 스키마가 내보였는데 파서가 거절했다).
@@ -81,7 +84,7 @@ pub const tools = [_]Tool{
     .{ .name = "browser_list", .subcommand = "list", .description = "List the browser tabs of this maru instance (id, url, title, engine, controllable methods).", .args = &.{} },
     .{ .name = "browser_open", .subcommand = "open", .description = "Open a Chromium tab behind the current one in this pane and wait for its first load. Returns the new tab id. Only from a maru pane; up to 8 tabs per pane.", .args = &.{
         .{ .key = "url", .kind = .string, .flag = "--url", .description = "http(s) address to load (omit for a blank tab)" },
-        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1 },
+        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1, .max = 25000 },
     } },
     .{ .name = "browser_close", .subcommand = "close", .description = "Close a tab this pane opened (asks the page; a page that asks before leaving is not closed).", .args = withSurface(&.{}) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address.", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
@@ -94,7 +97,7 @@ pub const tools = [_]Tool{
     .{ .name = "browser_wait", .subcommand = "wait", .description = "Wait for a selector, the page load, or a locator to be visible (default and max 25000 ms).", .args = withSurface(&(wait_locator_args ++ [_]Arg{
         .{ .key = "load", .kind = .flag, .flag = "--load", .description = "wait until the page is loaded" },
         .{ .key = "visible", .kind = .flag, .flag = "--visible", .description = "with a locator: wait until it is visible" },
-        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "1-25000", .min = 1 },
+        .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "1-25000", .min = 1, .max = 25000 },
     })) },
     .{ .name = "browser_snapshot", .subcommand = "snapshot", .description = "Print the page accessibility tree with refs for later actions. On big pages pass interactive, max_depth or selector to keep the result small.", .args = withSurface(&.{
         .{ .key = "interactive", .kind = .flag, .flag = "--interactive", .description = "only interactive elements" },
@@ -107,12 +110,12 @@ pub const tools = [_]Tool{
     .{ .name = "browser_reload", .subcommand = "reload", .description = "Reload the page (Chromium tabs).", .args = withSurface(&.{}) },
     .{ .name = "browser_exec", .subcommand = "exec", .description = "Run and await a JavaScript expression in the page; prints its result.", .args = withSurface(&.{
         .{ .key = "expression", .kind = .positional, .description = "JavaScript expression", .required = true },
-        .{ .key = "args", .kind = .json_array, .flag = "--args", .description = "JSON array of arguments" },
-        .{ .key = "max_result_bytes", .kind = .int, .flag = "--max-result-bytes", .description = "result size limit", .min = 1 },
+        .{ .key = "args", .kind = .json_array, .flag = "--args", .description = "JSON array passed to the expression as the variable `args` (up to 128 levels of nesting inside the array)" },
+        .{ .key = "max_result_bytes", .kind = .int, .flag = "--max-result-bytes", .description = "result size limit in bytes (default and max 16777216)", .min = 1, .max = 16 * 1024 * 1024 },
     }) },
     .{ .name = "browser_screenshot", .subcommand = "screenshot", .description = "Capture the tab as a PNG image (the whole page at device scale, or a region).", .args = withSurface(&.{
         .{ .key = "rect", .kind = .string, .flag = "--rect", .description = "region x,y,w,h in CSS pixels" },
-        .{ .key = "scale", .kind = .number, .flag = "--scale", .description = "scale factor (for example 0.5 for a smaller image)" },
+        .{ .key = "scale", .kind = .number, .flag = "--scale", .description = "scale factor (for example 0.5 for a smaller image)", .positive = true },
     }) },
 };
 
@@ -121,22 +124,36 @@ pub fn returnsImage(tool: *const Tool) bool {
     return std.mem.eql(u8, tool.subcommand, "screenshot");
 }
 
-/// JSON 값의 가장 깊은 중첩(재귀 — 받은 값은 파서가 이미 만든 것이라 깊이는 그 파서의 상한 안이다).
-fn jsonDepth(v: std.json.Value) usize {
-    return switch (v) {
-        .array => |a| blk: {
-            var d: usize = 0;
-            for (a.items) |x| d = @max(d, jsonDepth(x));
-            break :blk d + 1;
-        },
-        .object => |o| blk: {
-            var d: usize = 0;
-            for (o.values()) |x| d = @max(d, jsonDepth(x));
-            break :blk d + 1;
-        },
-        else => 0,
+/// JSON 값의 중첩이 `limit` 을 넘는가 — `limit` 단에서 멈춘다(재귀 깊이도 그만큼). std.json 의 값 파서는 깊이 상한이 없어 끝까지
+/// 재는 재귀는 수십만 단에서 스택을 넘겨 서버째 죽었다(W9f 적대 리뷰 2 회차).
+fn jsonDeeperThan(v: std.json.Value, limit: usize) bool {
+    const children: []const std.json.Value = switch (v) {
+        .array => |a| a.items,
+        .object => |o| o.values(),
+        else => return false,
     };
+    if (limit == 0) return true; // 컨테이너 하나가 더 있다
+    for (children) |x| if (jsonDeeperThan(x, limit - 1)) return true;
+    return false;
 }
+
+/// `maru mcp` 의 인자 — 없으면 서버, `--help`·`-h` 면 사용법, 그 밖은 usage 오류(W9f 적대 리뷰 2 회차: 모두 무시해 터미널에서 `--help` 를
+/// 치면 말없이 입력을 기다렸다).
+pub const Invocation = enum { serve, help, bad };
+
+pub fn invocation(args: []const []const u8) Invocation {
+    if (args.len == 0) return .serve;
+    if (args.len == 1 and (std.mem.eql(u8, args[0], "--help") or std.mem.eql(u8, args[0], "-h"))) return .help;
+    return .bad;
+}
+
+pub const usage =
+    \\usage: maru mcp
+    \\Serve the browser commands as MCP tools over stdio (one JSON-RPC message per line).
+    \\Add it to an agent, for example: claude mcp add maru -- maru mcp
+    \\Run it from a maru pane — requests act for that pane (see `maru browser --help`).
+    \\
+;
 
 pub fn findTool(name: []const u8) ?*const Tool {
     for (&tools) |*t| if (std.mem.eql(u8, t.name, name)) return t;
@@ -196,7 +213,7 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                 .json_array => switch (v) {
                     .array => {
                         // 깊게 중첩된 배열은 글로 펼 때 쓰개의 중첩 한도(256)에서 서버째 panic 했다(W9f 적대 리뷰 1 회차).
-                        if (jsonDepth(v) > browser.max_args_depth) return error.WrongType;
+                        if (jsonDeeperThan(v, browser.max_args_depth)) return error.WrongType;
                         var aw: std.Io.Writer.Allocating = .init(arena);
                         std.json.Stringify.value(v, .{}, &aw.writer) catch return error.OutOfMemory;
                         try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, aw.written() }));
@@ -355,6 +372,14 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
         if (a.kind == .int) {
             try s.objectField("minimum");
             try s.write(a.min);
+            if (a.max) |m| {
+                try s.objectField("maximum");
+                try s.write(m);
+            }
+        }
+        if (a.positive) {
+            try s.objectField("exclusiveMinimum");
+            try s.write(0);
         }
         try s.objectField("description");
         try s.write(a.description);
@@ -732,4 +757,57 @@ test "W9f 적대 리뷰 1 회차: id 가 null 인 요청은 -32600(MCP 는 null 
     const i = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\"}}")).reply;
     defer testing.allocator.free(i);
     try testing.expect(std.mem.indexOf(u8, i, "\"protocolVersion\":\"2025-06-18\"") != null);
+}
+
+test "W9f 적대 리뷰 2 회차: 수십만 단으로 중첩된 args 도 스택을 넘지 않고 거절한다(깊이 재기 재귀가 서버를 죽였다)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const depth = 300_000;
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(arena, "{\"surface\":2,\"expression\":\"1\",\"args\":");
+    try buf.appendNTimes(arena, '[', depth);
+    try buf.appendNTimes(arena, ']', depth);
+    try buf.append(arena, '}');
+    const v = try std.json.parseFromSlice(std.json.Value, arena, buf.items, .{});
+    try testing.expectError(error.WrongType, argv(arena, findTool("browser_exec").?, v.value));
+}
+
+test "W9f 적대 리뷰 2 회차: 스키마가 파서의 최댓값과 scale 의 양수 조건을 알린다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(r);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer parsed.deinit();
+    var seen: usize = 0;
+    for (parsed.value.object.get("result").?.object.get("tools").?.array.items) |t| {
+        const props = t.object.get("inputSchema").?.object.get("properties").?.object;
+        const name = t.object.get("name").?.string;
+        if (std.mem.eql(u8, name, "browser_wait")) {
+            try testing.expectEqual(@as(i64, 25000), props.get("timeout_ms").?.object.get("maximum").?.integer);
+            try testing.expectEqual(@as(i64, 100), props.get("level").?.object.get("maximum").?.integer);
+            try testing.expectEqual(@as(i64, 1_000_000), props.get("nth").?.object.get("maximum").?.integer);
+            seen += 1;
+        }
+        if (std.mem.eql(u8, name, "browser_exec")) {
+            try testing.expectEqual(@as(i64, 16 * 1024 * 1024), props.get("max_result_bytes").?.object.get("maximum").?.integer);
+            try testing.expect(std.mem.indexOf(u8, props.get("args").?.object.get("description").?.string, "`args`") != null);
+            seen += 1;
+        }
+        if (std.mem.eql(u8, name, "browser_screenshot")) {
+            try testing.expectEqual(@as(i64, 0), props.get("scale").?.object.get("exclusiveMinimum").?.integer);
+            seen += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "W9f 적대 리뷰 2 회차: `maru mcp` 의 인자 — 없으면 서버, --help·-h 는 사용법, 그 밖은 오류" {
+    try testing.expectEqual(Invocation.serve, invocation(&.{}));
+    try testing.expectEqual(Invocation.help, invocation(&.{"--help"}));
+    try testing.expectEqual(Invocation.help, invocation(&.{"-h"}));
+    try testing.expectEqual(Invocation.bad, invocation(&.{"bogus"}));
+    try testing.expectEqual(Invocation.bad, invocation(&.{ "--help", "x" }));
 }

@@ -12887,6 +12887,8 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     const format = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/format.zig");
     defer allocator.free(format);
 
+    const local_save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/local_save.zig");
+    defer allocator.free(local_save);
     const countOf3 = struct {
         fn f(hay: []const u8, needle: []const u8) usize {
             var n: usize = 0;
@@ -12907,14 +12909,14 @@ test "저장 충돌: 묻는 자리 하나 · CAS 를 건너뛰는 길 하나 · 
     try std.testing.expectEqual(@as(usize, 0), countOf3(app_session, "editor_conflict_ops.ask("));
     // ⑵ **CAS 를 건너뛰는 길은 전용 함수 하나이고, 그것을 부르는 자리도 하나다**(사용자가 고른 그것).
     try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "pub fn overwriteDocument("));
-    try std.testing.expectEqual(@as(usize, 1), countOf3(editor, ".overwrite => null,"));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(local_save, ".overwrite => null,"));
     try std.testing.expectEqual(@as(usize, 1), countOf3(conflict, "editor_ops.overwriteDocument(self, term)"));
     // 제품 코드 전체에서 그 함수를 부르는 자리가 **그 하나뿐**이어야 한다 — 자동 경로가 몰래 쓰면
     // 사용자가 본 적 없는 외부 변경이 조용히 사라진다.
     try std.testing.expectEqual(@as(usize, 0), countOf3(app_session, "overwriteDocument("));
     // ⑶ **두 저장이 같은 꼬리를 쓴다** — 쓰는 자리가 갈리면 지문 갱신·clean 판정·LSP 통지 중 하나가 낡는다.
     try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "fn saveDocumentGuarded("));
-    try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "try writeDocumentBytes(self, path, bytes, switch (guard)"));
+    try std.testing.expectEqual(@as(usize, 1), countOf3(editor, "try prepared.write(self.io);"));
     // ⑷ **`primary` 에는 아무것도 버리지 않는 선택만 선다**(C1b). 상자는 열 때 `primary` 에 포커스를
     //    두므로 Enter 가 그것을 실행한다 — 파괴적인 것을 그 자리로 올리는 변이가 여기서 죽는다.
     //    ⚠️ **네 번째 자리가 있는 이유도 함께 센다**: `cancel` 은 Esc 라 행동을 못 놓는다.
@@ -13011,6 +13013,8 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     // 지워도 런타임 판정자가 초록일 수 있다(종료 flush 가 그 부류다: 헤드리스로는 함수를 직접 부르므로
     // 제품 종료 경로가 그것을 안 불러도 안 걸린다).
     const allocator = std.testing.allocator;
+    const local_save = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/local_save.zig");
+    defer allocator.free(local_save);
     const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/mod.zig");
     defer allocator.free(editor);
     const conflict = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/conflict.zig");
@@ -13047,9 +13051,10 @@ test "미저장 백업: 종료가 굳히고 수락된 닫기가 지운다 — cl
     //    그 문서는 「저장했는데 백업이 남는다」 — 그 백업이 다음 실행에서 되살아난다. 넷은 각각
     //    보통 저장 · 다시 읽기 · 저쪽 채택 · 이름이 붙는 저장이다(둘이 한 파일에 있다).
     try std.testing.expectEqual(@as(usize, 0), countOfB(editor, "editorDocument().opened.?.saved_hash = "));
+    try std.testing.expectEqual(@as(usize, 0), countOfB(local_save, "editorDocument().opened.?.saved_hash = "));
     try std.testing.expectEqual(@as(usize, 0), countOfB(conflict, "editorDocument().opened.?.saved_hash = "));
     try std.testing.expectEqual(@as(usize, 0), countOfB(save, "editorDocument().opened.?.saved_hash = "));
-    try std.testing.expectEqual(@as(usize, 1), countOfB(editor, "editor_backup_ops.markClean(self, term, saved_content, null)"));
+    try std.testing.expectEqual(@as(usize, 1), countOfB(local_save, "editor_backup_ops.markClean(session, term, self.content(), null)"));
     try std.testing.expectEqual(@as(usize, 1), countOfB(conflict, "editor_backup_ops.markClean(self, term, fresh.file.content, null)"));
     try std.testing.expectEqual(@as(usize, 2), countOfB(save, "editor_backup_ops.markClean(self, term, "));
     // **신원이 바뀌는 둘은 옛 신원을 먼저 뜬다** — 새 이름으로는 옛 파일을 지울 수 없다.

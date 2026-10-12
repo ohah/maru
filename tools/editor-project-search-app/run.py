@@ -149,6 +149,10 @@ def main():
             if len(apps) != 1:
                 raise RuntimeError("Expected one app bundle")
             app = apps[0]
+    # 예전 계측 앱에는 새 저장 잎이 없다. 존재하는 앱에서는 그 잎까지 source 증거에 묶는다.
+    for name in ("src/platform/macos/app_session/editor/local_save.zig", "src/session/editor/ops/save_ops.zig"):
+        if (source / name).exists():
+            hashes[name] = sha(source / name)
     artifacts = root / "artifacts"
     artifacts.mkdir()
     (root / "home").mkdir()

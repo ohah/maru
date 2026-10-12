@@ -958,7 +958,8 @@ pub fn rebuildSidebar(self: *AppSession) !void {
     clampSidebarScroll(self); // 표시 카드 수/뷰포트가 바뀌었을 수 있으니 stale 스크롤 정정 — 아래 quad가 이 오프셋을 쓴다
     if (self.tabs.items.len == 0) return;
     // 밴드(활성/호버 슬롯·"+" 호버)는 chrome `sidebar.view`가 fill op으로 단일 출처. `lowerSidebar`가 그 fill을
-    // sidebarBandCell(행=슬롯)로 lower한다(색·NativeMetalCell은 platform). host가 중립 Tab(활성)을 주입(palette Row 선례).
+    // GPU quad(layer 0)로 lower한다 — 화면 y는 `sidebarScrollClipQuad`가 글자 셀과 같은 식으로 낸다(색은 platform).
+    // host가 중립 Tab(활성)을 주입(palette Row 선례).
     var arena_state = std.heap.ArenaAllocator.init(self.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1325,9 +1326,6 @@ pub fn appendSidebarScrollbar(self: *AppSession) void {
     chrome_draw_lowering.appendBackgroundQuads(self.allocator, &.{draws}, &tokens, 0, 0, &self.gpu_quads, 3);
 }
 
-/// chrome `sidebar.view`가 낸 밴드 fill op을 sidebar 셀(NativeMetalCell)로 lower한다 — fill rect.y / slot_h = 슬롯 행,
-/// role(tab_active_bg/tab_hover_bg) → sidebarActiveBg/HoverBg. sidebarBandCell이 폭을 cell로 floor해 한 칸 밴드로.
-/// (옛 rebuildSidebar의 밴드 emit을 view 경로로 — 색 해석·NativeMetalCell은 platform 책임, divider lowerDividerRules와 동형.)
 /// 슬롯 콘텐츠 GpuQuad(밴드·accent 막대·배경 tint)의 **목록 상대** y와 높이를 화면 y로 옮기고(헤더·스크롤 —
 /// `chrome.components.sidebar.listToScreenY`, 호출자는 아무것도 더하지 않는다) 헤더 아래로 클립한다. 헤더 quad(검색 underline·아이콘 호버·배지)는 고정이라
 /// 이걸 안 거친다. 반환 null = 완전히 헤더 위(스킵). clipped=true면 위쪽이 잘려(상단이 헤더 경계에 abut) 호출자가 둥근
@@ -1354,7 +1352,7 @@ pub fn sidebarScrollClipQuad(self: *const AppSession, list_y: i32, h: f32) ?stru
 
 /// 밴드 slot-상대 y(chrome bandFill이 rowTop 누적으로 낸 값 + card_gap inset) → 표시 row 인덱스. 가변 높이
 /// (카드=slot_h·헤더=header_row_h)라 고정 y/slot_h 나눗셈 대신 각 row 높이를 누적해 역산한다(bandFill의 역).
-/// 콘텐츠 아래(목록 끝 초과)·음수면 null. lowerSidebar의 tint 역매핑·tui 셀 밴드 행 산출의 단일 출처.
+/// 콘텐츠 아래(목록 끝 초과)·음수면 null. lowerSidebar의 tint 역매핑의 단일 출처.
 pub fn sidebarBandRow(self: *const AppSession, band_y: i32) ?usize {
     if (band_y < 0) return null;
     const metrics = sidebarMetrics(self);

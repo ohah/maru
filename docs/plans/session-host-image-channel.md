@@ -108,7 +108,7 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
 #### IC3b — 앱 세그먼트 표·채널 리더
 
 IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)와 GUI 적용 자리 배선(IC3b-2). IC3b-2 는 다시 resolver 를 적용
-자리에 넘기는 것(IC3b-2a), 펌프와 보류(IC3b-2b-1), stream 수명·hwm 정리(IC3b-2b-2)로 나눴다. 표와 배선은 광고 전에 먼저 들어가도 된다(채널이
+자리에 넘기는 것(IC3b-2a), 펌프와 보류(IC3b-2b-1), stream 수명·hwm 정리(IC3b-2b-2), 남은 정리(IC3b-2c)로 나눴다. 표와 배선은 광고 전에 먼저 들어가도 된다(채널이
 묶일 일이 없다 — 광고가 꺼져 있다).
 
 ##### IC3b-1 — 세그먼트 표·채널 리더·release (완료)
@@ -207,32 +207,52 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   `local_invariant_violation` 으로 봉인된다 — 위 이유로 닿지 않지만, IC3b-2b-2 에서 재시도로 분류할지 정한다. 채널 위반으로 poison 한
   펌프는 true(돌았다)를 돌려준다 — 그 배치는 적용으로 가 해석 실패(`frame_malformed`)로 닫힌다(첫 poison 이유는 그대로 남는다).
 
-##### IC3b-2b-2 — stream 수명·hwm 정리 (미착수)
+##### IC3b-2b-2 — stream 수명·hwm 정리 (PR 진행 중)
 
-- attach 응답을 **읽는 순서대로**(호출자로 돌아간 뒤가 아니라) `openStream` — decode 가 `.accepted` 를 낸 직후(controller·observer
-  둘). decode 와 commit 사이 실패(`AgentLogFormatChanged`·metadata·commit)와 commit 뒤 실패·detach·종료 정리에서 채널을 비운 뒤
-  `closeStream`(열리지 않은 stream 에도 안전하다 — 최대 id 를 올린다). 정상 정리는 `Client.dropBufferedStream` 이 사실상 유일한 자리지만
-  generation 의 `finishActiveAttachmentDrop` 은 no-fail 구간(`active_cleanup`)이라 울타리가 잡히는지 확인한다.
-- 적용 뒤 배치를 놓기(`releaseOrRetain`) **전에** 그 배치에서 hwm 을 다시 읽어 `sweep`(조립기는 hwm 을 건너뛴다) — 보류 엿보기와
-  같은 레코드 훑기로 `{has_ref, hwm}` 을 한 번에 낸다. 복구 스냅샷은 게시가 mark 뒤라는 점에 맞춘다.
-- 셋 다 Client 의 울타리 든 공개 메서드로 한다(IC3b-2a 와 같은 규칙).
+- **열기**: `RemoteAttachment.bindTransport` 가 transport 를 묶는 순간 그 stream 을 연다(`AttachmentTransport.open_image_stream`).
+  legacy(`bindLegacyTransport`)와 generation(`commitAccepted`)이 모두 stream 이 정해진 직후·배치를 읽기 전에 이 자리를 지난다. GUI 의
+  attach 는 runtime 하나씩 같은 스레드에서 요청→응답→커밋을 동기로 돌아 응답을 읽은 순서와 여는 순서가 같다. decode 와 커밋 사이의
+  실패(`AgentLogFormatChanged`·metadata)는 연결을 poison 하므로 닫을 필요가 없다(표는 Client 소멸이 푼다). 울타리 때문에 열지
+  못하면 무해하지 않다 — 그 stream 은 「닫힌 stream」이라 세그먼트가 받는 즉시 반환되고 `image_ref` 가 해석되지 않아 연결이
+  재접속한다. 제품의 커밋 경로(generation 은 실행 연산이 끝난 뒤 커밋, legacy 는 blocking 모드)는 막히지 않음을 실제 HostAdapter
+  판정자가 잰다(그 판정자는 실행을 `abortPreparedRequest` 로 흉내 낸다 — 실제 execute 경로로 바꾸는 것은 IC3b-2c).
+- **닫기**: `Client.dropBufferedStream` — legacy 의 stream drop·legacy ended 처리와 generation 의 `finishActiveAttachmentDrop`
+  (`tryDeinit`·`commitHostRetirementNoFail` 양쪽)이 모두 지나는 자리 — 가 이미지 표의 그 stream 도 닫는다(이벤트 검증이 poison 하기
+  전에). legacy ended 는 attachment 큐 머리에 보류된 `image_ref` 배치가 있어도 닫는다 — 그 배치는 다음 펌프에서 해석 실패로 끝난다
+  (legacy 에서 준비가 실패하는 일은 드물다). 닫기 전에 채널을 비우지 않는다 — 늦게 온 세그먼트는
+  「최대 id 이하이면서 열려 있지 않음」이라 받는 즉시 반환된다.
+- **hwm 정리**: 큐를 거친 배치(복구 스냅샷·snapshot·delta)를 적용한 **뒤**·놓기 **전**에 그 배치의 `image_seg_hwm` 중 가장 큰 값으로
+  그 stream 을 정리한다(`sweep_image_segments`) — 조립기는 hwm 레코드를 건너뛴다. 적용 앞으로 옮기면 그 배치가 자기 세그먼트를 먼저
+  반환해 해석이 실패한다(판정자가 정리 순간까지의 해석 횟수로 잰다). 협상하지 않은 연결과 hwm 이 없는 배치는 정리하지 않는다. 적용이
+  실패하면 연결을 닫으므로 정리하지 않는다. 큐를 거치지 않는 첫 snapshot 은 정리하지 않는다 — hwm 은 연결 단위로 단조라 다음 배치가
+  메운다.
+- 셋 다 Client 의 울타리 든 공개 메서드(`openImageStream`·`sweepImageSegments`, 닫기는 기존 `dropBufferedStream`)로 한다. GUI 본선은
+  adapter(자기 stream·live) → slot(`openAttachmentImageStream`·`sweepAttachmentImageSegments` — 같은 접근 규칙) → Client. 붙은 stream
+  이 host 상한을 넘으면 host 위반이라 poison 한다.
+- 판정자: `image channel wiring:` 에 1(묶으면 그 stream 이 열림, hwm 을 실은 배치를 적용하면 그 hwm 으로 정리, hwm 없으면·미협상이면
+  안 함, 복구 스냅샷도 정리), `image channel pump:` 에 1(열기·hwm 정리·stream drop 의 닫기, poison 뒤에는 열지도 정리하지도 않음),
+  `image channel adapter:` 에 자기 stream 만 열고 정리·slot 이 바쁘면 정리 안 함, `image channel attachment:` 에 **실제 HostAdapter 의
+  커밋이 그 stream 을 열고 실제 teardown 이 닫아 남은 세그먼트를 반환**, `image channel legacy:` 에 legacy 열기·정리.
+
+##### IC3b-2c — 남은 정리 (미착수)
+
 - 스레드: 표는 재접속 worker 가 connect 할 때 할당되고(`build_id` 와 같은 꼴) 펌프·해석·적용·정리는 모두 소유 스레드에서 돈다 — 표에
   잠금이 없다는 전제를 배선이 지키는지(worker 스레드에서 펌프·해석을 부르지 않는지) 판정자로 잰다.
 - `enterExternalMode` 는 묶인 채널을 거부하지 않는다 — 협상한 Client 가 external 모드에 들어가면 펌프가 돌지 않아 원장이 찬다.
   GUI 는 이 경로를 쓰지 않지만, 광고(IC6) 전에 불변식(채널을 협상한 Client 는 external 모드에 들어가지 않는다)으로 잠근다.
 - 「이미지 채널 없음」 탭 notice(계약 §3.2)는 아직 어느 단계에도 없다 — 호출자는 `image_channel.state` 로 상실을 본다. notice 를 이
   단계나 IC6 에서 단다.
-- 펌프·해석이 울타리에서 빠지는 일(prepared lease·실행 lease 의 AdminBusy)은 지금 계수도 로그도 없다 — lease 가 오래 잡혀 host 원장
-  32 칸이 차면 진단할 근거가 없으니 거부 계수를 단다(보류가 길어지는 것도 같은 계수로 본다).
+- 펌프·해석·열기·정리가 울타리에서 빠지는 일(prepared lease·실행 lease 의 AdminBusy)은 계수도 로그도 없다 — lease 가 오래 잡혀 host
+  원장 32 칸이 차면 진단할 근거가 없으니 거부 계수를 단다(보류가 길어지는 것도 같은 계수로 본다).
 - attach 응답을 끝내 못 읽어 id 를 모르는 stream 의 세그먼트는 더 큰 id 를 알 때까지(다음 attach) 표에 남아 원장 자리를 쥔다 —
-  id 를 모르니 `closeStream` 으로도 못 닫는다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 본다.
+  id 를 모르니 닫지도 못한다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 본다.
 - 채널 resolver 를 넘기는 연결에서 몸체가 망가진 `image_ref` 는 `MalformedRecord`·`Truncated` 로 올라가 `drainRemoteNow` 복구 목록에
   없다(연결은 재접속하는데 탭은 종료된다 — 다른 레코드의 디코드 오류도 지금 같다). `MalformedRow` 로 접을지 정해 계약 §6 에 적는다.
 - resolver 의 OOM·거부 경로에 이미지 대조 계수(`image_reconciliation`)를 붙이거나 붙이지 않는 이유를 적는다(`image_blob` 경로는
   OOM 에 `recordDroppedOom` 을 올린다).
-- 판정자: 버려진 배치가 남긴 세그먼트를 같은 stream 의 다음 배치가 치운다; detach 뒤 늦게 온 세그먼트가 즉시 반환된다(표 단위는
-  IC3b-1 이 쟀다 — 여기서는 배선); 연결 둘의 같은 segment_id 가 섞이지 않는다; 다른 stream 의 세그먼트를 가리키는 `image_ref` 는
-  해석되지 않고 그 항목은 남는다(표 단위는 IC3b-1); 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
+- catch-up 의 `held → Busy` 가 후보 준비 실패 분류에서 재시도가 아니라 `local_invariant_violation` 으로 봉인된다(IC3b-2b-1 — 지금은
+  닿지 않는다). 재시도로 분류할지 정한다.
+- 판정자: 연결 둘의 같은 segment_id 가 섞이지 않는다; 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
   종료 상태가 되지 않는다.
 
 ### IC4 — fd 상속 방지

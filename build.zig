@@ -7035,8 +7035,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
-        run_image_channel_connect_tests.addArg("--maru-expect-tests=16");
-        run_image_channel_connect_tests.addArg("--maru-expect-passed=16");
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=17");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=17");
         // 적용 자리 배선(IC3b-2) — attachment 가 협상한 transport 의 resolver 를 snapshot·delta 에 넘기고, 협상하지 않은 transport
         // 는 resolver 를 부르지 않는다.
         const image_channel_wiring_tests = addProjectTest(b, .{
@@ -7050,8 +7050,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image channel wiring:"},
         });
         const run_image_channel_wiring_tests = b.addRunArtifact(image_channel_wiring_tests);
-        run_image_channel_wiring_tests.addArg("--maru-expect-tests=4");
-        run_image_channel_wiring_tests.addArg("--maru-expect-passed=4");
+        run_image_channel_wiring_tests.addArg("--maru-expect-tests=5");
+        run_image_channel_wiring_tests.addArg("--maru-expect-passed=5");
         image_channel_app_step.dependOn(&run_image_channel_wiring_tests.step);
         test_step.dependOn(&run_image_channel_wiring_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_wiring_tests.step);

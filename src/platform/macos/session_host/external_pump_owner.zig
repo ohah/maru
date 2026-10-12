@@ -323,6 +323,8 @@ const ExternalAttachmentAdapter = struct {
             .image_shm_negotiated = remote_attachment.imageNotNegotiated,
             .resolve_image = remote_attachment.noImageSegment,
             .prepare_image_apply = remote_attachment.noImageChannel,
+            .open_image_stream = remote_attachment.noImageStream,
+            .sweep_image_segments = remote_attachment.noImageSweep,
         };
     }
 };

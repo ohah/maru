@@ -57,7 +57,8 @@ test "CR3a-2c3d C3-1 inline attachment event boundary" {
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 1, .top_level_test = 0 },
     });
     try expectSourceIdentifierInventory(allocator, "dropBufferedStream", &.{
-        .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 3 },
+        // 이미지 채널 판정자(IC3b-2b-2)가 stream drop 이 이미지 표의 stream 도 닫는지 잰다(test-only, +1).
+        .{ .path = "platform/macos/session_host/client.zig", .product = 1, .top_level_test = 4 },
         .{ .path = "platform/macos/session_host/client_slot.zig", .product = 1, .top_level_test = 0 },
         .{ .path = "platform/macos/session_host/generation_transport.zig", .product = 0, .top_level_test = 2 },
         .{ .path = "platform/macos/session_host/remote_runtime.zig", .product = 2, .top_level_test = 1 },

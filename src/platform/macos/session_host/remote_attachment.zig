@@ -153,6 +153,8 @@ fn terminalTestTransport() AttachmentTransport {
         .image_shm_negotiated = imageNotNegotiated,
         .resolve_image = noImageSegment,
         .prepare_image_apply = noImageChannel,
+        .open_image_stream = noImageStream,
+        .sweep_image_segments = noImageSweep,
     };
 }
 
@@ -203,6 +205,11 @@ pub const AttachmentTransport = struct {
     /// `image_ref` 를 실은 배치를 적용하기 직전에 그 연결의 이미지 채널을 비운다. false 면 지금 비울 수 없다(울타리) — 호출자는
     /// 그 배치를 보류한다.
     prepare_image_apply: *const fn (context: *anyopaque) bool,
+    /// 이 attachment 의 stream 이 그 연결의 표에 열린다 — transport 를 묶는 자리(attach 응답 뒤 stream 이 정해진 직후)에서
+    /// 부른다(§6). 닫기는 그 연결의 stream drop(`Client.dropBufferedStream`)이 한다.
+    open_image_stream: *const fn (context: *anyopaque, stream_id: u64) void,
+    /// 적용한 배치의 `image_seg_hwm` 이하로 그 stream 에 남은 세그먼트를 반환한다(§6 — 버려진 배치의 것이다).
+    sweep_image_segments: *const fn (context: *anyopaque, stream_id: u64, hwm: u64) void,
 };
 
 /// `image_shm` 을 협상하지 않는 transport(`maru attach`·테스트)의 몫 — 적용 자리는 `.unnegotiated` 를 넘긴다(§6·§8).
@@ -218,6 +225,25 @@ pub fn noImageSegment(_: *anyopaque, _: u64, _: ImageRef) error{OutOfMemory}!?[]
 /// 협상하지 않는 transport 의 적용 준비 — 비울 채널이 없다.
 pub fn noImageChannel(_: *anyopaque) bool {
     return true;
+}
+
+/// 협상하지 않는 transport 의 stream 열기 — 표가 없다.
+pub fn noImageStream(_: *anyopaque, _: u64) void {}
+
+/// 협상하지 않는 transport 의 hwm 정리 — 표가 없다.
+pub fn noImageSweep(_: *anyopaque, _: u64, _: u64) void {}
+
+/// 배치에 실린 `image_seg_hwm` 중 가장 큰 것 — 없거나 배치가 망가졌으면 null(정리하지 않는다).
+fn batchImageSegHwm(bytes: []const u8) ?u64 {
+    var records: screen_stream.RecordStream = .{ .bytes = bytes };
+    var hwm: ?u64 = null;
+    while (records.next() catch return null) |record| {
+        const split = screen_stream.RecordStream.split(record) catch return null;
+        if (split.header.kind != .image_seg_hwm) continue;
+        const mark = screen_stream.decodeImageSegHwm(split.body) catch return null;
+        hwm = @max(hwm orelse 0, mark.segment_id);
+    }
+    return hwm;
 }
 
 /// 배치가 `image_ref` 를 싣는가 — 레코드 머리만 훑는다. 망가진 배치는 false 다(적용이 그 오류를 그대로 낸다).
@@ -299,6 +325,17 @@ pub const RemoteAttachment = struct {
     pub fn bindTransport(self: *RemoteAttachment, transport: AttachmentTransport) error{AlreadyBound}!void {
         if (self.transport != null) return error.AlreadyBound;
         self.transport = transport;
+        // stream 이 정해진 직후, 그 stream 의 배치를 읽기 전 — 응답을 읽는 순서대로 연다(§6). 늦게 열면 더 큰 id 가 먼저 열려
+        // 이 stream 의 세그먼트가 「닫힌 stream」으로 반환된다.
+        transport.open_image_stream(transport.context, self.state.stream_id);
+    }
+
+    /// 적용한 배치의 hwm 으로 이 stream 의 남은 세그먼트를 반환한다 — 배치를 놓기 **전**(bytes 가 산 동안)에 부른다. 조립기는
+    /// hwm 레코드를 건너뛰므로 여기서 다시 읽는다. 협상하지 않은 연결은 표가 없다.
+    fn sweepAppliedBatch(self: *const RemoteAttachment, transport: AttachmentTransport, bytes: []const u8) void {
+        if (!transport.image_shm_negotiated(transport.context)) return;
+        const hwm = batchImageSegHwm(bytes) orelse return;
+        transport.sweep_image_segments(transport.context, self.state.stream_id, hwm);
     }
 
     pub fn initScreen(self: *RemoteAttachment, codec: u16) anyerror!void {
@@ -681,6 +718,7 @@ pub const RemoteAttachment = struct {
                 if (released != .completed) return error.LedgerInvariant;
                 return err;
             };
+            self.sweepAppliedBatch(transport, batch.bytes);
             if (self.releaseOrRetain(lease, transport) != .completed) {
                 self.compactConsumedBatches();
                 transport.fail_closed(transport.context, .attachment_cleanup_failed);
@@ -740,6 +778,7 @@ pub const RemoteAttachment = struct {
                 return err;
             };
         }
+        self.sweepAppliedBatch(transport, batch.bytes);
         if (self.releaseOrRetain(lease, transport) != .completed) {
             self.compactConsumedBatches();
             transport.fail_closed(transport.context, .attachment_cleanup_failed);
@@ -1503,6 +1542,8 @@ const TestTransport = struct {
             .image_shm_negotiated = imageNotNegotiated,
             .resolve_image = noImageSegment,
             .prepare_image_apply = noImageChannel,
+            .open_image_stream = noImageStream,
+            .sweep_image_segments = noImageSweep,
         };
     }
 };
@@ -1515,6 +1556,13 @@ const ImageTestTransport = struct {
     /// 적용 준비(채널 비우기)가 이번 tick 에 되는가 — false 면 `image_ref` 배치는 보류된다.
     ready: bool = true,
     prepared: usize = 0,
+    opened: ?u64 = null,
+    sweeps: usize = 0,
+    swept_stream: u64 = 0,
+    swept_hwm: u64 = 0,
+    /// 정리 순간까지 해석이 몇 번 일어났나 — 정리가 적용(해석) **뒤**에 오는지 잰다. 앞에 오면 그 배치가 자기 세그먼트를 먼저
+    /// 반환해 해석이 실패한다.
+    resolved_at_sweep: usize = 0,
     resolved: usize = 0,
     resolved_stream: u64 = 0,
     first_fail_reason: ?client_poison.ConnectionReason = null,
@@ -1546,6 +1594,19 @@ const ImageTestTransport = struct {
         return self.ready;
     }
 
+    fn openStream(context: *anyopaque, stream_id: u64) void {
+        const self: *ImageTestTransport = @ptrCast(@alignCast(context));
+        self.opened = stream_id;
+    }
+
+    fn sweep(context: *anyopaque, stream_id: u64, hwm: u64) void {
+        const self: *ImageTestTransport = @ptrCast(@alignCast(context));
+        self.sweeps += 1;
+        self.swept_stream = stream_id;
+        self.swept_hwm = hwm;
+        self.resolved_at_sweep = self.resolved;
+    }
+
     fn resolve(context: *anyopaque, stream_id: u64, ref: ImageRef) error{OutOfMemory}!?[]const u8 {
         const self: *ImageTestTransport = @ptrCast(@alignCast(context));
         self.resolved += 1;
@@ -1571,12 +1632,19 @@ const ImageTestTransport = struct {
             .image_shm_negotiated = negotiatedFn,
             .resolve_image = resolve,
             .prepare_image_apply = prepare,
+            .open_image_stream = openStream,
+            .sweep_image_segments = sweep,
         };
     }
 };
 
 /// `image_ref` 하나를 실은 배치 — snapshot 이면 화면 메타를 앞에 둔다.
 fn imageRefBatch(allocator: std.mem.Allocator, is_snapshot: bool) !AttachmentBatchLease {
+    return imageBatch(allocator, is_snapshot, true, null);
+}
+
+/// `image_ref`(있으면)와 `image_seg_hwm`(있으면)을 실은 배치.
+fn imageBatch(allocator: std.mem.Allocator, is_snapshot: bool, with_ref: bool, hwm: ?u64) !AttachmentBatchLease {
     var bytes: std.ArrayListUnmanaged(u8) = .empty;
     errdefer bytes.deinit(allocator);
     if (is_snapshot) {
@@ -1584,17 +1652,24 @@ fn imageRefBatch(allocator: std.mem.Allocator, is_snapshot: bool) !AttachmentBat
         defer allocator.free(meta);
         try screen_stream.appendRecord(&bytes, allocator, meta);
     }
-    const ref = try screen_stream.encodeImageRef(allocator, .{ .kind = .image_ref, .generation = 1 }, .{
-        .image_id = 5,
-        .generation = 9,
-        .width = 1,
-        .height = 1,
-        .bpp = 4,
-        .segment_id = 3,
-        .byte_len = 4,
-    });
-    defer allocator.free(ref);
-    try screen_stream.appendRecord(&bytes, allocator, ref);
+    if (with_ref) {
+        const ref = try screen_stream.encodeImageRef(allocator, .{ .kind = .image_ref, .generation = 1 }, .{
+            .image_id = 5,
+            .generation = 9,
+            .width = 1,
+            .height = 1,
+            .bpp = 4,
+            .segment_id = 3,
+            .byte_len = 4,
+        });
+        defer allocator.free(ref);
+        try screen_stream.appendRecord(&bytes, allocator, ref);
+    }
+    if (hwm) |mark| {
+        const record = try screen_stream.encodeImageSegHwm(allocator, .{ .kind = .image_seg_hwm, .generation = 1 }, .{ .segment_id = mark });
+        defer allocator.free(record);
+        try screen_stream.appendRecord(&bytes, allocator, record);
+    }
     return .{ .untracked = .{
         .is_snapshot = is_snapshot,
         .stream_id = 7,
@@ -1681,6 +1756,54 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
     } };
     try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 4), transport.prepared);
+}
+
+test "image channel wiring: binding opens the attachment's stream, and an applied batch's hwm sweeps it, never without a mark or a negotiation" {
+    const allocator = std.testing.allocator;
+    var transport = ImageTestTransport{
+        .batches = .{ try imageBatch(allocator, true, true, 3), try imageRefBatch(allocator, false) },
+        .negotiated = true,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    // 묶는 순간 그 stream 이 열린다 — 배치를 읽기 전, 응답을 읽은 순서대로.
+    try std.testing.expectEqual(@as(?u64, null), transport.opened);
+    try attachment.bindTransport(transport.interface());
+    try std.testing.expectEqual(@as(?u64, 7), transport.opened);
+    try attachment.initScreen(screen_stream.codec_version);
+
+    // hwm 을 실은 배치를 적용하면 그 stream 을 그 hwm 으로 정리한다.
+    try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.sweeps);
+    try std.testing.expectEqual(@as(u64, 7), transport.swept_stream);
+    try std.testing.expectEqual(@as(u64, 3), transport.swept_hwm);
+    // 정리는 그 배치를 적용(해석)한 뒤다.
+    try std.testing.expectEqual(@as(usize, 1), transport.resolved_at_sweep);
+    // hwm 이 없는 배치는 정리하지 않는다.
+    try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.sweeps);
+
+    // 협상하지 않은 연결은 표가 없다 — hwm 이 와도 정리하지 않는다.
+    var plain = ImageTestTransport{
+        .batches = .{ try imageBatch(allocator, true, false, 5), null },
+        .negotiated = false,
+    };
+    var other = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xab,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer other.deinit();
+    try other.bindTransport(plain.interface());
+    try other.initScreen(screen_stream.codec_version);
+    try std.testing.expectEqual(PumpScreenResult.applied, try other.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 0), plain.sweeps);
 }
 
 test "image channel wiring: an unnegotiated transport never reaches the resolver and image_ref fails the batch closed" {
@@ -1797,6 +1920,8 @@ const ChargedTestTransport = struct {
             .image_shm_negotiated = imageNotNegotiated,
             .resolve_image = noImageSegment,
             .prepare_image_apply = noImageChannel,
+            .open_image_stream = noImageStream,
+            .sweep_image_segments = noImageSweep,
         };
     }
 };
@@ -1807,6 +1932,8 @@ const RecoveryTestTransport = struct {
     /// 이미지 채널 판정자만 켠다 — 해석은 `ImageTestTransport.resolve` 와 같은 익명 매핑이다.
     image_negotiated: bool = false,
     image_resolved: usize = 0,
+    image_sweeps: usize = 0,
+    image_resolved_at_sweep: usize = 0,
     release_fails: bool = false,
     preflight_result: external_recovery_types.BatchAuthority = .recovery_exact,
     mark_result: MarkResyncAppliedResult = .commit_pending,
@@ -1848,6 +1975,12 @@ const RecoveryTestTransport = struct {
     fn imageNegotiated(context: *anyopaque) bool {
         const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
         return self.image_negotiated;
+    }
+
+    fn sweepImage(context: *anyopaque, _: u64, _: u64) void {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        self.image_sweeps += 1;
+        self.image_resolved_at_sweep = self.image_resolved;
     }
 
     fn resolveImage(context: *anyopaque, stream_id: u64, ref: ImageRef) error{OutOfMemory}!?[]const u8 {
@@ -1900,6 +2033,8 @@ const RecoveryTestTransport = struct {
             .image_shm_negotiated = imageNegotiated,
             .resolve_image = resolveImage,
             .prepare_image_apply = noImageChannel,
+            .open_image_stream = noImageStream,
+            .sweep_image_segments = sweepImage,
             .fail_closed = failClosed,
         };
     }
@@ -2188,7 +2323,7 @@ test "remote attachment applies and releases a charged snapshot with an empty qu
 
 test "image channel wiring: a recovery snapshot resolves image_ref through the same resolver before it is published" {
     const allocator = std.testing.allocator;
-    const lease = try imageRefBatch(allocator, true);
+    const lease = try imageBatch(allocator, true, true, 3);
     defer allocator.free(lease.untracked.bytes);
     var transport = RecoveryTestTransport{
         .view = .{
@@ -2212,6 +2347,9 @@ test "image channel wiring: a recovery snapshot resolves image_ref through the s
     try std.testing.expectEqual(PumpScreenResult.recovery_commit_pending, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 1), transport.image_resolved);
     try std.testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1 }, attachment.screen.?.assembler.imageById(5).?.pixels);
+    // 복구 스냅샷의 hwm 도 적용 뒤·놓기 전에 정리한다.
+    try std.testing.expectEqual(@as(usize, 1), transport.image_sweeps);
+    try std.testing.expectEqual(@as(usize, 1), transport.image_resolved_at_sweep);
     try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
 }
 

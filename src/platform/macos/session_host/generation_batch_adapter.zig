@@ -357,6 +357,8 @@ pub const GenerationBatchAdapter = struct {
             .image_shm_negotiated = imageShmNegotiated,
             .resolve_image = resolveImage,
             .prepare_image_apply = prepareImageApply,
+            .open_image_stream = openImageStream,
+            .sweep_image_segments = sweepImageSegments,
         };
     }
 
@@ -471,6 +473,21 @@ pub const GenerationBatchAdapter = struct {
         const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
         const slot = self.borrowSlot(.live) orelse return false;
         return slot.pumpAttachmentImageChannel();
+    }
+
+    /// 자기 stream 만 연다 — live 가 아니거나 다른 stream 이면 아무것도 하지 않는다.
+    fn openImageStream(context: *anyopaque, stream_id: u64) void {
+        const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
+        const slot = self.borrowSlot(.live) orelse return;
+        if (stream_id != self.stream_id) return;
+        slot.openAttachmentImageStream(stream_id);
+    }
+
+    fn sweepImageSegments(context: *anyopaque, stream_id: u64, hwm: u64) void {
+        const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
+        const slot = self.borrowSlot(.live) orelse return;
+        if (stream_id != self.stream_id) return;
+        slot.sweepAttachmentImageSegments(stream_id, hwm);
     }
 
     fn rejectPayloadDrop(_: *anyopaque, _: u64) void {
@@ -648,6 +665,28 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
     const pixels = (try during_snapshot) orelse return error.TestUnexpectedResult;
     defer @import("client_image_segments.zig").unmapPixels(pixels);
     try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, pixels);
+    try std.testing.expectEqual(@as(usize, 1), table.len);
+
+    // stream 열기·hwm 정리도 자기 stream 만 — 다른 stream(8)은 열지도 정리하지도 않는다.
+    transport.open_image_stream(transport.context, 8);
+    try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 8) == null);
+    transport.sweep_image_segments(transport.context, 8, 2);
+    try std.testing.expectEqual(@as(usize, 1), table.len);
+    transport.open_image_stream(transport.context, 7);
+    try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 7) != null);
+    // 다른 연산이 slot 을 쥐면 정리하지 않는다.
+    try sendTestSegment(channel[1], 3, 7, &.{ 2, 2, 2, 2 });
+    try std.testing.expect(transport.prepare_image_apply(transport.context));
+    try std.testing.expectEqual(@as(usize, 2), table.len);
+    slot.current.active_operation_generation = 1;
+    slot.current.active_operation_kind = .control;
+    slot.current.active_operation_owner_thread_incarnation = own_thread;
+    transport.sweep_image_segments(transport.context, 7, 3);
+    slot.current.active_operation_generation = 0;
+    slot.current.active_operation_kind = .none;
+    slot.current.active_operation_owner_thread_incarnation = 0;
+    try std.testing.expectEqual(@as(usize, 2), table.len);
+    transport.sweep_image_segments(transport.context, 7, 3);
     try std.testing.expectEqual(@as(usize, 1), table.len);
 
     // live 가 아닌 adapter 는 slot 에 닿지 않는다.

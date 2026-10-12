@@ -532,6 +532,16 @@ fn attachmentPrepareImageApply(context: *anyopaque) bool {
     return client.pumpImageChannel();
 }
 
+fn attachmentOpenImageStream(context: *anyopaque, stream_id: u64) void {
+    const client: *client_mod.Client = @ptrCast(@alignCast(context));
+    client.openImageStream(stream_id);
+}
+
+fn attachmentSweepImageSegments(context: *anyopaque, stream_id: u64, hwm: u64) void {
+    const client: *client_mod.Client = @ptrCast(@alignCast(context));
+    client.sweepImageSegments(stream_id, hwm);
+}
+
 fn attachmentTransport(client: *client_mod.Client) remote_attachment.AttachmentTransport {
     return .{
         .context = client,
@@ -541,6 +551,8 @@ fn attachmentTransport(client: *client_mod.Client) remote_attachment.AttachmentT
         .image_shm_negotiated = attachmentImageShmNegotiated,
         .resolve_image = attachmentResolveImage,
         .prepare_image_apply = attachmentPrepareImageApply,
+        .open_image_stream = attachmentOpenImageStream,
+        .sweep_image_segments = attachmentSweepImageSegments,
     };
 }
 
@@ -13531,8 +13543,9 @@ fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
         // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
         // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-        .Debug => 3632,
-        .ReleaseFast => 3616,
+        // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+        .Debug => 3648,
+        .ReleaseFast => 3632,
         else => error.SkipZigTest,
     };
 }
@@ -17087,12 +17100,13 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // ReleaseFast **+16** — 머지 전 로컬 `zig build test` 가 `expected 11840, found 11872` / `expected 11792, found 11808` 로 실측.
             // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
             // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-            .Debug => 11904,
+            // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+            .Debug => 11920,
             // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
             // 2026-10-03 셀 픽셀 결정 번호(`TerminalCore.cell_metrics_epoch`, u64 — 원격 Surface 의 코어 안): Debug +0(기존
             // 패딩에 들어감) · ReleaseFast **+16** — `test-session-host-2c3d-c3-3b2b3` 에서 실측(u32 로 줄여도 +16 이었다).
             // 2026-10-03 화면별 kitty placement(`saved_kitty_placements`): ReleaseFast +16(Debug 는 위 줄 +32).
-            .ReleaseFast => 11840,
+            .ReleaseFast => 11856,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -17107,8 +17121,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9168, // 2026-10-12 이미지 채널 IC3b-2a +16 · IC3b-2b-1 +16 · 2026-09-30 #4017 +96 · 2026-10-03 화면별 kitty placement +32(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
-            .ReleaseFast => 9104, // 2026-10-12 이미지 채널 IC3b-2a +16 · IC3b-2b-1 +16 · 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 kitty placement +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .Debug => 9184, // 2026-10-12 이미지 채널 IC3b-2a +16 · IC3b-2b-1 +16 · IC3b-2b-2 +16 · 2026-09-30 #4017 +96 · 2026-10-03 화면별 kitty placement +32(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .ReleaseFast => 9120, // 2026-10-12 이미지 채널 IC3b-2a +16 · IC3b-2b-1 +16 · IC3b-2b-2 +16 · 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 kitty placement +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -20716,8 +20730,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
     const expected_generation_size: usize = switch (builtin.mode) {
         // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
         // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-        .Debug => 3584,
-        .ReleaseFast => 3568,
+        // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+        .Debug => 3600,
+        .ReleaseFast => 3584,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
@@ -20734,8 +20749,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // 2026-10-03 화면별 kitty placement(`saved_kitty_placements`) Debug +32 · ReleaseFast +16 — 위 표와 같은 실측.
             // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
             // 2026-10-12 이미지 채널 IC3b-2b-1(`AttachmentTransport.prepare_image_apply`): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
-            .Debug => 11904,
-            .ReleaseFast => 11840, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 placement +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            // 2026-10-12 이미지 채널 IC3b-2b-2(`AttachmentTransport` 의 stream 열기·hwm 정리): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+            .Debug => 11920,
+            .ReleaseFast => 11856, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 placement +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -21810,6 +21826,9 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
         .flags = 0,
     };
     if (c.sendmsg(channel[1], &msg, 0) != bytes.len) return error.TestUnexpectedResult;
+    // legacy transport 도 stream 을 연다·정리한다.
+    transport.open_image_stream(transport.context, 7);
+    try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 7) != null);
     // 적용 준비가 그 세그먼트를 받는다(§6 — `image_ref` 배치 적용 직전).
     try std.testing.expect(transport.prepare_image_apply(transport.context));
     try std.testing.expectEqual(@as(usize, 1), table.len);
@@ -21818,6 +21837,12 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     const pixels = (try transport.resolve_image(transport.context, 7, ref)) orelse return error.TestUnexpectedResult;
     defer segments.unmapPixels(pixels);
     try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, pixels);
+    try std.testing.expectEqual(@as(usize, 0), table.len);
+    // 같은 세그먼트가 다시 오면(버려진 배치의 것) 그 hwm 으로 정리한다.
+    if (c.sendmsg(channel[1], &msg, 0) != bytes.len) return error.TestUnexpectedResult;
+    try std.testing.expect(transport.prepare_image_apply(transport.context));
+    try std.testing.expectEqual(@as(usize, 1), table.len);
+    transport.sweep_image_segments(transport.context, 7, 1);
     try std.testing.expectEqual(@as(usize, 0), table.len);
 
     // GUI 적용 자리(첫 attach 조립·관찰자 재접속 후보)는 attachment 의 resolver 를 넘긴다 — 미협상 resolver 를 이 파일에 적으면

@@ -15601,6 +15601,19 @@ pub const ClientSlot = struct {
         return self.current.client.resolveImageSegment(stream_id, ref);
     }
 
+    /// attach 가 정한 stream 을 이 slot 의 Client 표에 연다(§6). 다른 attachment 연산이 slot 을 쥐면 열지 않는다(Client 가 거부를
+    /// 로그로 남기지 않으므로 여기서도 같은 규칙만 따른다 — 판정자가 실제 커밋 경로에서 열림을 잰다).
+    pub fn openAttachmentImageStream(self: *ClientSlot, stream_id: u64) void {
+        if (!self.attachmentImageAccessAllowed()) return;
+        self.current.client.openImageStream(stream_id);
+    }
+
+    /// 적용한 배치의 hwm 으로 이 slot 의 Client 표에서 그 stream 의 남은 세그먼트를 반환한다(§6).
+    pub fn sweepAttachmentImageSegments(self: *ClientSlot, stream_id: u64, hwm: u64) void {
+        if (!self.attachmentImageAccessAllowed()) return;
+        self.current.client.sweepImageSegments(stream_id, hwm);
+    }
+
     /// 적용 직전에 이 slot 의 Client 이미지 채널을 비운다(§6) — 그 배치의 `image_ref` 가 가리키는 세그먼트를 먼저 받는다. false 면
     /// 지금 비울 수 없다(다른 attachment 연산·Client 울타리) — 호출자는 그 배치를 보류한다.
     pub fn pumpAttachmentImageChannel(self: *ClientSlot) bool {

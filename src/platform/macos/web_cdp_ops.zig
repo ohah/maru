@@ -29,6 +29,9 @@ const finder_js = @embedFile("web_cdp_finder.js");
 /// 앱이 DevTools 결과 상한을 넘은 답에 싣는 글 — 로케이터 질의가 이것이면 「너무 많다」 로 바꿔 답한다.
 pub const result_too_large = "the DevTools result was too large";
 
+/// 페이지가 JS 대화상자(alert·confirm·prompt·떠나기 확인)를 띄워 멈췄다 — 사용자가 그 탭에서 답해야 한다(W9b③ 적대 리뷰 1·2 회차).
+pub const dialog_reason = "the page is showing a dialog (alert, confirm or leave-page question) — it must be answered in that tab first";
+
 /// 누르기 전 프레임(W9b③)의 인자 — **kick 과 바이트까지 같아야 한다**(`app_host_abi` 가 컴파일 때 본다). sidecar 는 kick 과 꼭 같은
 /// 호출만 짧은 시한(3 초)에 놓는다 — 다르면 이동하는 순간 답을 잃은 프레임이 35 초 자리를 쥐어 click 이 30 초 시한이 됐다(적대 리뷰
 /// 1 회차 하네스 실측: 같으면 3.0–3.6 초에 풀린다).
@@ -637,6 +640,8 @@ pub const Op = struct {
             self.check_wait_ms += kick_retry_ms;
             return .{ .sleep = kick_retry_ms };
         }
+        // 페이지가 JS 대화상자로 멈췄다 — wait 은 되풀이해도 시한까지 막힌다: 쥔 묶음을 놓고 곧 그 이유로(W9b③ 적대 리뷰 2 회차).
+        if (reply == .not_sent and self.kind == .wait and std.mem.eql(u8, reply.not_sent, dialog_reason)) return self.releaseThenDone(gpa, .failed, dialog_reason);
         // wait 의 확인을 보내지 못했다 — 다음 확인으로(묶음을 쥐었으면 놓은 뒤).
         if (reply == .not_sent and self.kind == .wait) switch (self.stage) {
             .check, .world, .frame_tree, .size_check, .loc_document => return self.sleepOrTimeout(gpa),
@@ -3413,4 +3418,21 @@ test "W9b③: 누르기 전 프레임을 기다리는 동안 철회되면 묶음
     const release = (try op.cancel(testing.allocator)) orelse return error.TestUnexpectedResult;
     defer testing.allocator.free(release.call.params);
     try testing.expectEqualStrings("Runtime.releaseObjectGroup", release.call.method);
+}
+
+fn w9b3DialogCheck(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Runtime.evaluate")) return .{ .not_sent = dialog_reason };
+    return happyPage(method, params);
+}
+
+test "W9b③ 적대 리뷰 2 회차: wait 의 확인이 대화상자로 거절되면 시한까지 되풀이하지 않고 곧 그 이유로 끝난다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"selector\",\"selector\":\"#never\",\"timeout_ms\":4000}", 820);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &w9b3DialogCheck, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.failed, r.status);
+    try testing.expectEqualStrings(dialog_reason, r.result);
+    try testing.expectEqual(@as(usize, 0), trail.sleeps);
 }

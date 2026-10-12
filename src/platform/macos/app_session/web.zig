@@ -1435,7 +1435,8 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
         break :blk null;
     };
     // W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽 탭으로(사용자 화면을 가로채지 않는다 — 사용자 결정 2026-10-12).
-    const agent_pane = pane.terms.items[opener_index].agent_opener;
+    // 에이전트의 장으로 열린 새 탭만(W9b③ 적대 리뷰 2 회차 — 사람이 에이전트 탭에서 연 새 탭은 사람의 탭이다).
+    const agent_pane = if (request.by_agent) pane.terms.items[opener_index].agent_opener else 0;
     // 그 pane 이 에이전트 탭을 더 가질 자리가 없으면 열지 않는다 — 보통 탭으로 열면 상한이 팝업으로 뚫렸다(적대 리뷰 1 회차). 부른 쪽이
     // 주소를 놓고 이어 받은 팝업은 닫는다.
     if (agent_pane != 0) if (self.agent_tab_room_callback) |room| if (!room(agent_pane)) return error.AgentTabLimit;
@@ -1450,7 +1451,7 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
     };
     if (request.adopt != 0) self.allocator.free(request.url) else term.pending_url = request.url; // 주소는 이제 탭이 놓는다(`destroyTerm`·소비)
     if (request.adopt == 0) web_osr.notePageOpened(term.surfaceId()); // W10c: 문서 없이 다운로드만 하면 닫을 탭(이어 받은 팝업은 web_osr 가 안다)
-    // W9b③: 그 pane 의 에이전트 탭으로 친다(상한 안이면 — 넘치면 보통 탭). 곧 조작·닫기 가능.
+    // W9b③: 그 pane 의 에이전트 탭으로 친다(자리는 위에서 걸렀다). 곧 조작·닫기 가능.
     if (agent_pane != 0) if (self.agent_page_tab_callback) |cb| if (cb(agent_pane, term.surfaceId())) {
         term.agent_opener = agent_pane;
     };

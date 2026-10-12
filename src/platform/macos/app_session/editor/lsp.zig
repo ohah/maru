@@ -716,10 +716,11 @@ fn trustOf(self: *AppSession, key: lsp.trust.Key) ?lsp.trust.Decision {
 }
 
 /// 결정을 앱 전역 표에 둔다(파일에 한 줄 — 마지막 줄이 이긴다). 다른 창은 세대를 보고 따른다(`applyTrustChanges`).
-/// 파일에 남지 못했으면 `false` — 이번 실행에만 먹는다(`trust_store.decide`).
-fn recordTrust(io: std.Io, config_path: ?[]const u8, key: lsp.trust.Key, decision: lsp.trust.Decision) bool {
+/// 파일에 남지 못했으면 `false` — 이번 실행에만 먹는다(`trust_store.decide`). `origin` 은 감사 기록의 출처다(계획
+/// workspace-trust-audit — 시트의 답·관리 상자·컨트롤 플레인).
+fn recordTrust(io: std.Io, config_path: ?[]const u8, origin: trust_store.Origin, key: lsp.trust.Key, decision: lsp.trust.Decision) bool {
     loadTrust(io, config_path);
-    return trust_store.decide(io, key, decision);
+    return trust_store.decide(io, origin, key, decision);
 }
 
 /// 묻던 자리를 비운다 — 앱 전역 자리도 놓는다(그 키를 기다리던 다른 창이 다음 gate 에 묻는다).
@@ -1095,7 +1096,7 @@ pub fn answerTrust(self: *AppSession, allow: bool) void {
     defer clearAsking(self);
     const decision: lsp.trust.Decision = if (allow) .allow else .deny;
     // 파일에 못 남은 답은 말하지 않는다 — 다음 실행이 다시 묻는다(계획 WT4a 「한계」: 「다시 묻기」의 거부만 옛 허용으로 돌아간다).
-    _ = recordTrust(self.io, self.configPath(), ak.key(), decision);
+    _ = recordTrust(self.io, self.configPath(), .{ .source = .sheet }, ak.key(), decision);
     // 같은 저장소의 이 창 클라이언트 **전부** — 묻던 것만이 아니라 「다시 묻기」로 기다리던 것(문서가 닫혀 gate 를 안 지나는 것까지).
     for (st.clients.items) |*c| {
         if (!sameKey(c, ak.key())) continue;
@@ -1187,8 +1188,8 @@ pub fn answerManage(self: *AppSession, slot: enum { primary, alternate }) void {
     const now_decision = trustOf(self, k.key()) orelse return self.showNoticeKey(.lsp_trust_current_none);
     if (action == .revoke and now_decision != .allow) return self.showNoticeKey(.lsp_trust_current_not_allowed);
     const saved = switch (action) {
-        .revoke => recordTrust(self.io, self.configPath(), k.key(), .deny),
-        .forget => forgetTrust(self.io, self.configPath(), k.key()),
+        .revoke => recordTrust(self.io, self.configPath(), .{ .source = .manage }, k.key(), .deny),
+        .forget => forgetTrust(self.io, self.configPath(), .{ .source = .manage }, k.key()),
     };
     // 파일에 못 남았다 — 표에는 서서 서버는 내렸지만 다음 실행은 파일의 옛 결정을 읽는다(철회했는데 허용이 돌아온다). 말 없이 두면
     // 사용자는 거둔 줄 안다.
@@ -1205,9 +1206,9 @@ pub fn clearManage(self: *AppSession) void {
 
 /// 결정을 잊는다(관리 상자의 답) — 앱 전역 표에 「잊었다」를 남긴다. 각 창이 세대를 보고 제 서버를 내린다(`forgetClient`).
 /// 파일에 남지 못했으면 `false`.
-fn forgetTrust(io: std.Io, config_path: ?[]const u8, key: lsp.trust.Key) bool {
+fn forgetTrust(io: std.Io, config_path: ?[]const u8, origin: trust_store.Origin, key: lsp.trust.Key) bool {
     loadTrust(io, config_path);
-    return trust_store.forget(io, key);
+    return trust_store.forget(io, origin, key);
 }
 
 /// 팔레트 「이 저장소 신뢰 철회·잊기」 — 지금 편집기 문서의 저장소. 할 것이 없으면(언어 서버를 쓰지 않는 문서·결정이 없다·이미 거부다)
@@ -1290,8 +1291,8 @@ const ControlTrust = struct {
             .list => unreachable, // `respond` 가 목록은 `entries` 로 답한다
             // 철회는 지금 허용인 결정만 거부로 — 이미 거부면 그대로(다시 적지 않는다; 결정이 없던 저장소는 위에서 「없음」이다 — 관리 상자
             // `manageCurrent` 와 같은 규칙).
-            .revoke => if (previous == .allow) recordTrust(self.io, self.config_path, key, .deny) else return .{ .done = .{ .previous = prev_wire, .changed = false, .saved = true, .key = matched } },
-            .forget => forgetTrust(self.io, self.config_path, key),
+            .revoke => if (previous == .allow) recordTrust(self.io, self.config_path, .{ .source = .control }, key, .deny) else return .{ .done = .{ .previous = prev_wire, .changed = false, .saved = true, .key = matched } },
+            .forget => forgetTrust(self.io, self.config_path, .{ .source = .control }, key),
         };
         return .{ .done = .{ .previous = prev_wire, .changed = true, .saved = saved, .key = matched } };
     }
@@ -2015,7 +2016,7 @@ fn gateTrust(self: *AppSession, c: *Client, doc_path: ?[]const u8) void {
     const stored = if (c.reask) null else trustOf(self, key);
     const decision = stored orelse {
         if (builtin.is_test) if (self.editor_lsp.auto_trust_answer) |ans| {
-            _ = recordTrust(self.io, self.configPath(), key, ans);
+            _ = recordTrust(self.io, self.configPath(), .{ .source = .sheet }, key, ans);
             c.trust_pending = false;
             c.reask = false;
             if (ans == .deny) c.phase = .denied;

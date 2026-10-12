@@ -1309,8 +1309,8 @@ extern "c" fn localtime_r(timep: *const i64, result: *CTm) ?*CTm;
 
 /// 그 **시점의** UTC 오프셋(초). 시점마다 구하는 이유는 서머타임이다 — 지금 오프셋 하나로 과거 턴을
 /// 환산하면 경계를 넘은 턴이 한 시간 어긋난다. 실패하면 0(UTC)으로 본다: 시각을 안 보여 주는 것보다
-/// 낫고, 그 환경에서는 어차피 로컬이 UTC다.
-fn utcOffsetAt(unix_s: i64) i64 {
+/// 낫고, 그 환경에서는 어차피 로컬이 UTC다. 신뢰 목록의 마지막 변경 시각(`trust_ui`)도 이것을 쓴다.
+pub fn utcOffsetAt(unix_s: i64) i64 {
     var tm: CTm = undefined;
     if (localtime_r(&unix_s, &tm) == null) return 0;
     return @intCast(tm.gmtoff);

@@ -9,11 +9,15 @@
 //!
 //! 파일은 상태 디렉터리 `~/Library/Application Support/maru/lsp-trust` 다 — 사용자가 손으로 고치는 설정이 아니라 앱이 기록하는 상태다.
 //! 옛 자리(설정 파일 옆 `lsp-trust`, 옛 형식)는 새 파일이 아직 없을 때 한 번 이관하고 지운다(`ensureLoaded`).
+//!
+//! 결정이 바뀔 때마다 옆의 감사 기록 `lsp-trust-log` 에 시각·출처를 한 줄 남긴다(계획 docs/plans/workspace-trust-audit.md —
+//! 줄 형식은 `trust_log`). 기록을 못 남겨도 결정은 그대로 선다(감사 기록은 결정의 단일 출처가 아니다).
 
 const std = @import("std");
 const builtin = @import("builtin");
 const maru = @import("maru");
 const trust = maru.session.editor.lsp.trust;
+const trust_log = maru.session.editor.lsp.trust_log;
 
 /// 표가 쓰는 allocator — 창보다 오래 사는 앱 전역 수명이라 `app_runtime` 과 같은 `smp_allocator`.
 const gpa = std.heap.smp_allocator;
@@ -33,6 +37,20 @@ var dir_override: ?[]const u8 = null;
 var legacy_override: ?[]const u8 = null;
 
 pub const file_name = "lsp-trust";
+/// 감사 기록(계획 workspace-trust-audit). 넘치면 `.1` 로 옮긴다.
+pub const log_name = "lsp-trust-log";
+const log_rotated_name = log_name ++ ".1";
+
+/// 결정을 바꾼 자리 — 감사 기록의 출처(`trust_log.Source`)와 컨트롤 연결의 소켓 상대(계획 TA2).
+pub const Origin = struct { source: trust_log.Source, peer: ?trust_log.Peer = null };
+
+/// 기록의 시각 주입(판정자 전용 — 0 이 아니면 그 값을 쓴다).
+var now_ms_override: i64 = 0;
+
+pub fn setNowForTest(ms: i64) void {
+    if (!builtin.is_test) @compileError("test-only");
+    now_ms_override = ms;
+}
 
 /// 주입을 바꾸고 표를 비운다(다음 읽기가 그 자리에서 다시 읽는다). 표는 앱 전역이라 판정자끼리 결정이 새지 않게 픽스처가 부른다.
 /// 옛 자리 주입도 비운다. 판정자 전용 — 제품 빌드에서 부르면 컴파일되지 않는다.
@@ -56,6 +74,7 @@ pub fn resetForTest() void {
     store.generation = gen;
     loaded = false;
     file_writable = true;
+    now_ms_override = 0;
 }
 
 pub fn get(key: trust.Key) ?trust.Decision {
@@ -173,29 +192,101 @@ pub fn ensureLoaded(io: std.Io, legacy_path: ?[]const u8) void {
         return;
     }
     std.Io.Dir.cwd().deleteFile(io, legacy) catch {};
+    // 이관한 결정마다 한 줄 — 시각은 이관한 때다(옛 파일에는 시각이 없다).
+    var it = store.decided();
+    while (it.next()) |e| appendLog(io, .{ .source = .migrate }, e.decision, e.key);
 }
 
 /// 결정을 둔다 — 표를 고치고(세대가 오른다) 파일에 한 줄 덧붙인다(마지막 줄이 이긴다). **사용자의 답만** 여기로 온다
 /// (`lsp.zig` `recordTrust` ← `answerTrust` — 계획 WT2 「신뢰 부여는 사용자 클릭으로만」, LSPB23).
 /// 파일에 남지 못했으면(못 읽은 파일이라 손대지 않는다·자리를 못 만들었다·쓰다 실패했다) `false` — 표에는 섰으니 이번 실행에만
 /// 먹고, 다음 실행은 파일의 옛 결정을 읽는다(관리 상자의 철회라면 허용이 돌아온다 — 호출자가 사용자에게 말한다).
-pub fn decide(io: std.Io, key: trust.Key, decision: trust.Decision) bool {
+/// 바뀌었으면 감사 기록에 `origin` 과 함께 한 줄(같은 답은 남기지 않는다 — 계획 workspace-trust-audit 「남기는 때」).
+pub fn decide(io: std.Io, origin: Origin, key: trust.Key, decision: trust.Decision) bool {
     const changed = store.put(gpa, key, decision) catch return false;
     if (!changed) {
         store.touch(key); // 같은 답 — 파일은 그대로, 다시 묻던 다른 창이 이것을 답으로 본다
         return true;
     }
     var line_buf: [trust.max_line_bytes]u8 = undefined;
-    return persist(io, trust.line(decision, key, &line_buf) orelse return false);
+    const saved = persist(io, trust.line(decision, key, &line_buf) orelse return false);
+    appendLog(io, origin, decision, key);
+    return saved;
 }
 
 /// 결정을 잊는다(사용자의 답 — 팔레트의 신뢰 목록, 계획 WT4). 표에 「잊었다」 표시를 남기고(세대가 오른다 — 각 창이 제 서버를 내린다)
 /// 파일에 `forget` 줄을 덧붙인다. 다시 읽을 때 그 줄이 항목을 지워 다음 실행은 결정이 없다(열면 묻는다). 파일에 남지 못했으면 `false`
-/// (`decide` 와 같다 — 다음 실행은 옛 결정을 읽는다). 잊을 결정이 없었으면 할 일이 없어 `true`.
-pub fn forget(io: std.Io, key: trust.Key) bool {
+/// (`decide` 와 같다 — 다음 실행은 옛 결정을 읽는다). 잊을 결정이 없었으면 할 일이 없어 `true`(기록도 안 남긴다).
+pub fn forget(io: std.Io, origin: Origin, key: trust.Key) bool {
     if (!store.forget(key)) return true;
     var line_buf: [trust.max_line_bytes]u8 = undefined;
-    return persist(io, trust.line(null, key, &line_buf) orelse return false);
+    const saved = persist(io, trust.line(null, key, &line_buf) orelse return false);
+    appendLog(io, origin, null, key);
+    return saved;
+}
+
+/// 감사 기록에 한 줄(계획 workspace-trust-audit). 못 남겨도 말하지 않는다 — 결정은 이미 섰고, 결정의 저장 실패는 호출자가 따로 알린다.
+/// 지금 파일이 상한을 넘었으면 먼저 `.1` 로 옮긴다(덮어쓴다 — 파일은 둘까지). 신뢰 파일을 못 읽은 실행(`file_writable == false`)에도
+/// 남긴다 — 기록은 표를 다시 쓰지 않는다.
+fn appendLog(io: std.Io, origin: Origin, decision: ?trust.Decision, key: trust.Key) void {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dirPath(&dir_buf) orelse return;
+    if (!ensureDir(io, dir)) return;
+    var line_buf: [trust_log.max_line_bytes]u8 = undefined;
+    const rec: trust_log.Record = .{ .at_ms = nowMs(io), .decision = decision, .source = origin.source, .peer = origin.peer, .key = key };
+    const l = trust_log.line(rec, &line_buf) orelse return;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}/" ++ log_name, .{dir}) catch return;
+    rotateIfFull(io, dir, path);
+    _ = appendSmall(path, l);
+}
+
+/// 지금(unix ms) — 판정자는 주입한 값(`setNowForTest`). 기록의 시각과 목록 행의 「올해」 판정이 같은 시계를 쓴다.
+pub fn nowMs(io: std.Io) i64 {
+    if (builtin.is_test and now_ms_override != 0) return now_ms_override;
+    return @intCast(@divFloor(std.Io.Clock.real.now(io).nanoseconds, std.time.ns_per_ms));
+}
+
+/// 지금 기록이 상한(`trust_log.max_file_bytes`)을 넘었으면 `.1` 로 옮긴다. 두 인스턴스가 같은 순간 옮기면 한쪽의 `.1` 을 잃을 수 있다
+/// (계획 「한계」 — 기록은 결정의 단일 출처가 아니다).
+fn rotateIfFull(io: std.Io, dir: []const u8, path: []const u8) void {
+    const st = std.Io.Dir.cwd().statFile(io, path, .{}) catch return;
+    if (st.size < trust_log.max_file_bytes) return;
+    var rbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const rotated = std.fmt.bufPrint(&rbuf, "{s}/" ++ log_rotated_name, .{dir}) catch return;
+    std.Io.Dir.cwd().rename(path, std.Io.Dir.cwd(), rotated, io) catch {};
+}
+
+/// 감사 기록 전체 — `.1` 다음 지금 파일(줄 순서가 시간 순서). 둘 다 없거나 못 읽으면(메모리 포함) `null`. 호출자가 `allocator` 로 푼다.
+pub fn readLog(io: std.Io, allocator: std.mem.Allocator) ?[]u8 {
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir = dirPath(&dir_buf) orelse return null;
+    // 오류 반환이라야 `errdefer` 가 쌓던 버퍼를 푼다(`return null` 은 오류가 아니다 — 적대적 검증 3회차).
+    return joinLogs(io, allocator, dir) catch null;
+}
+
+fn joinLogs(io: std.Io, allocator: std.mem.Allocator, dir: []const u8) !?[]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    inline for (.{ log_rotated_name, log_name }) |name| {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "{s}/" ++ name, .{dir});
+        // 넘치기 전에 옮기므로 한 파일은 상한 + 한 줄을 넘지 않는다 — 넘으면(손으로 붙였다) 그 파일은 건너뛴다.
+        if (std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(trust_log.max_file_bytes + trust_log.max_line_bytes))) |text| {
+            defer allocator.free(text);
+            // 앞 파일이 끊긴 줄로 끝났으면 닫는다 — 뒤 파일의 첫 줄과 붙어 한 줄로 읽히지 않게(`\t` 로 그 줄은 못 읽는다).
+            if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') try out.appendSlice(allocator, "\t\n");
+            try out.appendSlice(allocator, text);
+        } else |e| switch (e) {
+            error.OutOfMemory => return e,
+            else => {},
+        }
+    }
+    if (out.items.len == 0) {
+        out.deinit(allocator);
+        return null;
+    }
+    return try out.toOwnedSlice(allocator);
 }
 
 /// 표에 선 변경을 파일에 한 줄 덧붙인다 — 못 읽은 파일(`file_writable == false`)에는 손대지 않는다.
@@ -291,6 +382,17 @@ fn writeAll(fd: c_int, bytes: []const u8) bool {
 // ── 판정 ────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+/// 판정자의 결정 출처 — 이 파일의 판정자는 기록이 아니라 표·파일을 본다(기록은 TAB1).
+const test_origin: Origin = .{ .source = .sheet };
+
+/// 판정자가 파일 끝에 바이트를 붙인다(끊긴 줄·채우기를 흉내 낸다).
+fn appendRawForTest(dir: std.Io.Dir, sub_path: []const u8, bytes: []const u8) !void {
+    const old = try dir.readFileAlloc(testing.io, sub_path, testing.allocator, .unlimited);
+    defer testing.allocator.free(old);
+    const both = try std.mem.concat(testing.allocator, u8, &.{ old, bytes });
+    defer testing.allocator.free(both);
+    try dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = both });
+}
 
 fn joinBuf(buf: []u8, a: []const u8, b: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ a, b });
@@ -336,7 +438,7 @@ test "LST7 테스트 빌드는 주입 없이 사용자 자리로 떨어지지 �
     try testing.expect(dirPath(&buf) == null);
     try testing.expect(legacyPathFor("/Users/someone/.config/maru/config", &buf) == null); // 사용자의 옛 파일을 지우지 않는다
     ensureLoaded(testing.io, null);
-    try testing.expect(!decide(testing.io, .{ .volume = 1, .path = "/never/written" }, .allow)); // 파일에 안 남았다고 말한다
+    try testing.expect(!decide(testing.io, test_origin, .{ .volume = 1, .path = "/never/written" }, .allow)); // 파일에 안 남았다고 말한다
     try testing.expectEqual(@as(?trust.Decision, .allow), get(.{ .volume = 1, .path = "/never/written" }));
 
     var tmp = testing.tmpDir(.{});
@@ -353,8 +455,8 @@ test "LST7 테스트 빌드는 주입 없이 사용자 자리로 떨어지지 �
     try testing.expect(get(.{ .volume = 1, .path = "/never/written" }) == null); // 주입을 바꾸면 표가 빈다
     try testing.expectEqual(gen_before, generation()); // 세대는 이어 간다(되돌리면 살아 있는 창이 전파를 건너뛴다)
     ensureLoaded(testing.io, null);
-    try testing.expect(decide(testing.io, .{ .volume = 7, .path = "/r" }, .deny));
-    try testing.expect(decide(testing.io, .{ .volume = 7, .path = "/r" }, .deny)); // 같은 답은 줄을 늘리지 않는다(이미 남아 있다)
+    try testing.expect(decide(testing.io, test_origin, .{ .volume = 7, .path = "/r" }, .deny));
+    try testing.expect(decide(testing.io, test_origin, .{ .volume = 7, .path = "/r" }, .deny)); // 같은 답은 줄을 늘리지 않는다(이미 남아 있다)
     const text = try tmp.dir.readFileAlloc(testing.io, "state/maru/" ++ file_name, testing.allocator, .limited(4096));
     defer testing.allocator.free(text);
     try testing.expectEqualStrings("deny\t7\t/r\n", text);
@@ -397,6 +499,11 @@ test "LST8 옛 자리 이관 — 새 파일이 없으면 합쳐 쓴 뒤 옛 파�
     try testing.expectEqual(@as(?trust.Decision, .allow), get(other));
     try testing.expectEqual(@as(usize, 2), store.entries.items.len); // 사라진 root 는 버렸다
     try testing.expectError(error.FileNotFound, tmp.dir.statFile(io, "config-lsp-trust", .{})); // 옛 파일을 지웠다
+    // 이관한 결정마다 감사 기록 한 줄(계획 workspace-trust-audit) — 출처 `migrate`.
+    const log = readLog(io, testing.allocator).?;
+    defer testing.allocator.free(log);
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, log, "\tmigrate\t-\t"));
+    try testing.expectEqual(trust.Decision.deny, trust_log.lastFor(log, repo).?.decision.?);
 
     // 새 자리만으로 다시 읽어도 같다(앱을 다시 띄웠다).
     resetForTest();
@@ -489,7 +596,7 @@ test "LST11 새 표를 못 읽으면(권한) 옛 파일을 이관하지도, 새 
     ensureLoaded(io, try joinBuf(&legacy_buf, root, "legacy"));
     try testing.expectEqual(@as(usize, 0), store.entries.items.len); // 옛 허용을 들이지 않았다
     _ = try tmp.dir.statFile(io, "legacy", .{});
-    try testing.expect(!decide(io, .{ .volume = 1, .path = "/new" }, .allow)); // 메모리에만 — 그렇다고 말한다
+    try testing.expect(!decide(io, test_origin, .{ .volume = 1, .path = "/new" }, .allow)); // 메모리에만 — 그렇다고 말한다
     try testing.expectEqual(@as(?trust.Decision, .allow), get(.{ .volume = 1, .path = "/new" }));
     try tmp.dir.setFilePermissions(io, "state/" ++ file_name, @enumFromInt(0o600), .{});
     const after = try tmp.dir.readFileAlloc(io, "state/" ++ file_name, testing.allocator, .limited(4096));
@@ -513,7 +620,7 @@ test "LST12 덧붙이다 끊긴 줄 — 그 줄은 읽지 않고(잘린 경로�
     ensureLoaded(io, null);
     try testing.expect(get(.{ .volume = 1, .path = "/r" }) == null);
     try testing.expectEqual(@as(?trust.Decision, .deny), get(.{ .volume = 1, .path = "/a" }));
-    try testing.expect(decide(io, .{ .volume = 1, .path = "/q" }, .deny));
+    try testing.expect(decide(io, test_origin, .{ .volume = 1, .path = "/q" }, .deny));
     resetForTest();
     ensureLoaded(io, null);
     try testing.expectEqual(@as(?trust.Decision, .deny), get(.{ .volume = 1, .path = "/q" }));
@@ -543,10 +650,112 @@ test "LST14 못 읽은 표(1 MB 넘음 — 권한은 있다)에는 결정도 잊
     ensureLoaded(io, null);
     try testing.expect(!file_writable);
     const k: trust.Key = .{ .volume = 1, .path = "/r" };
-    try testing.expect(!decide(io, k, .allow));
-    try testing.expect(!forget(io, k));
+    try testing.expect(!decide(io, test_origin, k, .allow));
+    try testing.expect(!forget(io, test_origin, k));
     try testing.expect(get(k) == null); // 표에는 섰다(이번 실행은 잊은 채다)
-    try testing.expect(forget(io, k)); // 이미 잊었다 — 할 일이 없다
+    try testing.expect(forget(io, test_origin, k)); // 이미 잊었다 — 할 일이 없다
     const st = try tmp.dir.statFile(io, "state/" ++ file_name, .{});
     try testing.expectEqual(@as(u64, big.len), st.size); // 한 줄도 안 붙었다
+}
+
+test "TAB1 감사 기록 — 바뀐 결정·잊기만 출처와 함께 남고(같은 답·없는 잊기는 아니다), 원격 키·상대도 적으며, 끊긴 끝은 `\\t\\n` 으로 닫고, 넘치면 `.1` 로 옮겨 둘을 이어 읽는다; 0600 (계획 workspace-trust-audit)" {
+    const io = testing.io;
+    const saved = dir_override;
+    defer setDirForTest(saved);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    setDirForTest(try joinBuf(&dir_buf, root, "state"));
+    ensureLoaded(io, null);
+    try testing.expect(readLog(io, testing.allocator) == null); // 아직 없다
+
+    const k: trust.Key = .{ .volume = 7, .path = "/r" };
+    const remote: trust.Key = .{ .volume = 0, .path = "/srv/app", .dest = "openclaw" };
+    setNowForTest(1000);
+    try testing.expect(decide(io, .{ .source = .sheet }, k, .allow));
+    try testing.expect(decide(io, .{ .source = .sheet }, k, .allow)); // 같은 답 — 남기지 않는다
+    setNowForTest(2000);
+    try testing.expect(decide(io, .{ .source = .manage }, k, .deny)); // 철회
+    setNowForTest(3000);
+    try testing.expect(forget(io, .{ .source = .control, .peer = .{ .pid = 42, .name = "maru" } }, k));
+    try testing.expect(forget(io, .{ .source = .control }, k)); // 잊을 것이 없다 — 남기지 않는다
+    setNowForTest(4000);
+    try testing.expect(decide(io, .{ .source = .sheet }, remote, .allow));
+    {
+        const text = try tmp.dir.readFileAlloc(io, "state/" ++ log_name, testing.allocator, .limited(4096));
+        defer testing.allocator.free(text);
+        try testing.expectEqualStrings(
+            "1000\tallow\tsheet\t-\t7\t/r\n" ++
+                "2000\tdeny\tmanage\t-\t7\t/r\n" ++
+                "3000\tforget\tcontrol\t42:maru\t7\t/r\n" ++
+                "4000\tallow\tsheet\t-\tssh\topenclaw\t/srv/app\n",
+            text,
+        );
+        const st = try tmp.dir.statFile(io, "state/" ++ log_name, .{});
+        try testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(@intFromEnum(st.permissions) & 0o777)));
+    }
+
+    // 끊긴 끝(디스크가 찼다) — 닫고 붙인다. 잘린 경로가 부모의 기록으로 읽히지 않는다.
+    {
+        try appendRawForTest(tmp.dir, "state/" ++ log_name, "5000\tallow\tsheet\t-\t7\t/r/su");
+    }
+    setNowForTest(6000);
+    try testing.expect(decide(io, .{ .source = .sheet }, .{ .volume = 7, .path = "/q" }, .deny));
+    {
+        const log = readLog(io, testing.allocator).?;
+        defer testing.allocator.free(log);
+        try testing.expect(std.mem.endsWith(u8, log, "/r/su\t\n6000\tdeny\tsheet\t-\t7\t/q\n"));
+        try testing.expect(trust_log.lastFor(log, .{ .volume = 7, .path = "/r/su" }) == null);
+        try testing.expectEqual(@as(i64, 3000), trust_log.lastFor(log, k).?.at_ms);
+    }
+
+    // 넘치면 `.1` 로 옮긴다 — 덧붙이기 전에. 읽기는 `.1` 다음 지금 파일.
+    {
+        const filler = try testing.allocator.alloc(u8, trust_log.max_file_bytes);
+        defer testing.allocator.free(filler);
+        @memset(filler, '#');
+        filler[filler.len - 1] = '\n';
+        try appendRawForTest(tmp.dir, "state/" ++ log_name, filler);
+    }
+    setNowForTest(7000);
+    try testing.expect(decide(io, .{ .source = .manage }, .{ .volume = 7, .path = "/q" }, .allow));
+    {
+        const fresh = try tmp.dir.readFileAlloc(io, "state/" ++ log_name, testing.allocator, .limited(4096));
+        defer testing.allocator.free(fresh);
+        try testing.expectEqualStrings("7000\tallow\tmanage\t-\t7\t/q\n", fresh);
+        const old = try tmp.dir.statFile(io, "state/" ++ log_name ++ ".1", .{});
+        try testing.expect(old.size > trust_log.max_file_bytes);
+        const log = readLog(io, testing.allocator).?;
+        defer testing.allocator.free(log);
+        try testing.expectEqual(@as(i64, 3000), trust_log.lastFor(log, k).?.at_ms); // 옮긴 파일의 기록도 읽는다
+        try testing.expectEqual(@as(i64, 7000), trust_log.lastFor(log, .{ .volume = 7, .path = "/q" }).?.at_ms); // 뒤 파일이 이긴다
+    }
+    // 한 번 더 넘치면 `.1` 을 덮는다 — 파일은 둘까지. 이번엔 끊긴 줄로 끝난 채 옮긴다 — 읽기는 두 파일 사이를 닫아 뒤 파일의 첫 줄이
+    // 그 조각에 붙지 않게 한다.
+    {
+        const filler = try testing.allocator.alloc(u8, trust_log.max_file_bytes);
+        defer testing.allocator.free(filler);
+        @memset(filler, '#');
+        try appendRawForTest(tmp.dir, "state/" ++ log_name, filler);
+    }
+    setNowForTest(8000);
+    try testing.expect(decide(io, .{ .source = .sheet }, k, .deny));
+    {
+        const log = readLog(io, testing.allocator).?;
+        defer testing.allocator.free(log);
+        try testing.expect(std.mem.indexOf(u8, log, "1000\tallow") == null); // 첫 파일은 사라졌다
+        try testing.expect(std.mem.indexOf(u8, log, "7000\tallow\tmanage") != null);
+        try testing.expectEqual(@as(i64, 8000), trust_log.lastFor(log, k).?.at_ms);
+    }
+    // 두 파일을 잇다가 할당이 실패하면 쌓던 버퍼를 푼다 — 실패 지점마다(누수는 판정자 allocator 가 잡는다).
+    const Join = struct {
+        fn f(a: std.mem.Allocator, d: []const u8) !void {
+            const joined = try joinLogs(testing.io, a, d) orelse return error.NoLog;
+            a.free(joined);
+        }
+    };
+    var jd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.checkAllAllocationFailures(testing.allocator, Join.f, .{try joinBuf(&jd_buf, root, "state")});
 }

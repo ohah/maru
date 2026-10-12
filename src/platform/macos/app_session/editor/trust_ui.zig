@@ -1,6 +1,7 @@
 //! 언어 서버 목록 상자 — 두 가지를 같은 피커 컴포넌트·같은 행 모양으로 보인다(복구 목록 `recovery.zig` 와 같은 모양):
 //! - 저장소 신뢰 결정 목록(계획 WT4 — 팔레트 「Language Server: Repository Trust…」). 앱 전역 신뢰 표(`trust_store`)의 결정을 보이고,
 //!   고르면 신뢰 관리 확인 상자(`lsp.manageListed` — 철회·잊기)로 간다. 신뢰를 **주는** 길은 여기 없다(신뢰 시트의 답뿐 — LSPB23).
+//!   행마다 마지막 변경의 시각·출처를 감사 기록에서 붙인다(계획 workspace-trust-audit — 그 기록이 지금 결정과 같은 동사일 때만).
 //! - 서버에 넘기는 환경 변수 **이름** 목록(계획 WT5b-1 — 팔레트 「Language Server: Show Environment Variable Names」). 값은 보이지
 //!   않는다. 사용자 제외 목록(`lsp.environment-exclude`)에 걸린 이름은 「제외됨」. 읽기 전용이라 고르면 닫힌다.
 const std = @import("std");
@@ -10,8 +11,10 @@ const AppSession = app_session_mod.AppSession;
 const trust_store = @import("trust_store.zig");
 const lsp_client = @import("lsp.zig");
 const tool_env = @import("../../tool_env.zig");
+const scm_dock = @import("../scm_dock.zig"); // 시점의 UTC 오프셋(`utcOffsetAt` — 서머타임)
 const chrome = maru.chrome;
 const trust = maru.session.editor.lsp.trust;
+const trust_log = maru.session.editor.lsp.trust_log;
 
 pub const Mode = enum { trust, env_names };
 
@@ -26,7 +29,17 @@ pub const State = struct {
     env_pending: bool = false,
 
     /// `text` 는 저장소의 실제 경로(신뢰) 또는 변수 이름(환경)이다. `dest` 는 원격 키의 목적지(로컬·환경이면 빈 조각 — 계획 WT7a).
-    pub const Item = struct { text: []u8, volume: u64 = 0, dest: []u8 = &.{}, decision: trust.Decision = .deny, excluded: bool = false };
+    /// `changed` 는 감사 기록의 마지막 변경(계획 workspace-trust-audit) — 기록이 없거나 그 동사가 지금 결정과 다르면 `null`.
+    pub const Item = struct {
+        text: []u8,
+        volume: u64 = 0,
+        dest: []u8 = &.{},
+        decision: trust.Decision = .deny,
+        excluded: bool = false,
+        changed: ?Changed = null,
+    };
+
+    pub const Changed = struct { at_ms: i64, source: trust_log.Source };
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         for (self.items.items) |it| {
@@ -44,6 +57,8 @@ pub fn open(self: *AppSession) void {
     lsp_client.loadTrustForList(self);
     const state = &self.editor_trust_list;
     state.deinit(self.allocator);
+    const log = trust_store.readLog(self.io, self.allocator);
+    defer if (log) |l| self.allocator.free(l);
     var it = trust_store.decided();
     while (it.next()) |e| {
         const path = self.allocator.dupe(u8, e.key.path) catch break;
@@ -51,7 +66,7 @@ pub fn open(self: *AppSession) void {
             self.allocator.free(path);
             break;
         };
-        state.items.append(self.allocator, .{ .text = path, .volume = e.key.volume, .dest = dest, .decision = e.decision }) catch {
+        state.items.append(self.allocator, .{ .text = path, .volume = e.key.volume, .dest = dest, .decision = e.decision, .changed = changedFor(log, e.key, e.decision) }) catch {
             self.allocator.free(path);
             self.allocator.free(dest);
             break;
@@ -86,6 +101,14 @@ pub fn openEnvNames(self: *AppSession) void {
     self.chrome_host.trust_picker.show();
     recompute(self);
     self.metal_dirty = true;
+}
+
+/// 그 결정의 마지막 변경 — 그 키의 마지막 기록이 **지금 결정과 같은 동사**일 때만(기록 없이 바뀐 결정 — 이 기능 전·기록을 못 남김·옛
+/// 빌드 — 에 남의 기록을 붙이지 않는다; 계획 workspace-trust-audit 「목록 행」).
+fn changedFor(log: ?[]const u8, key: trust.Key, decision: trust.Decision) ?State.Changed {
+    const rec = trust_log.lastFor(log orelse return null, key) orelse return null;
+    if (rec.decision != decision) return null;
+    return .{ .at_ms = rec.at_ms, .source = rec.source };
 }
 
 pub fn closed(self: *AppSession) void {
@@ -176,7 +199,30 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
     accept(self);
 }
 
-/// 행 — 저장소 경로(`~` 로 줄이고 넘치면 앞을 줄인다)와 결정(허용/거부), 또는 변수 이름과 「제외됨」.
+/// 행의 주인인 저장소 경로에 남길 최소 칸 — 상세 칸이 이보다 더 밀어내면 시각·출처를 빼고 결정만 보인다.
+const min_path_cols: u32 = 16;
+
+/// 신뢰 행의 상세 칸 — 결정, 마지막 변경이 있으면 「‹결정› · ‹시각› · ‹출처›」(시각은 그 시점의 로컬 오프셋으로, 올해면 `MM-DD HH:MM`
+/// 다른 해면 `YYYY-MM-DD` — `trust_log.formatStamp`).
+fn trustDetail(self: *AppSession, arena: std.mem.Allocator, it: State.Item) ![]const u8 {
+    const decision = maru.i18n.t(if (it.decision == .allow) .lsp_trust_list_allowed else .lsp_trust_list_denied);
+    const changed = it.changed orelse return decision;
+    var stamp_buf: [24]u8 = undefined;
+    const now_ms = trust_store.nowMs(self.io);
+    const at_off = scm_dock.utcOffsetAt(@divFloor(changed.at_ms, std.time.ms_per_s));
+    const now_off = scm_dock.utcOffsetAt(@divFloor(now_ms, std.time.ms_per_s));
+    const stamp = trust_log.formatStamp(&stamp_buf, changed.at_ms, at_off, now_ms, now_off);
+    if (stamp.len == 0) return decision;
+    const source = maru.i18n.t(switch (changed.source) {
+        .sheet => .lsp_trust_source_sheet,
+        .manage => .lsp_trust_source_manage,
+        .control => .lsp_trust_source_control,
+        .migrate => .lsp_trust_source_migrate,
+    });
+    return std.fmt.allocPrint(arena, "{s} · {s} · {s}", .{ decision, stamp, source });
+}
+
+/// 행 — 저장소 경로(`~` 로 줄이고 넘치면 앞을 줄인다)와 결정(허용/거부 — 마지막 변경의 시각·출처와 함께), 또는 변수 이름과 「제외됨」.
 pub fn rows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {
     const state = &self.editor_trust_list;
     const total = state.shown.items.len;
@@ -187,7 +233,12 @@ pub fn rows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.pa
     for (result, 0..) |*row, i| {
         const it = state.items.items[state.shown.items[start + i]];
         const detail: []const u8 = switch (state.mode) {
-            .trust => maru.i18n.t(if (it.decision == .allow) .lsp_trust_list_allowed else .lsp_trust_list_denied),
+            .trust => blk: {
+                const full = try trustDetail(self, arena, it);
+                // 좁은 패널에서 시각·출처가 경로를 밀어내면 결정만 — 무엇의 결정인지가 먼저다.
+                if (layout.panel_cols -| (chrome.components.overlay_input.displayCols(full) + 5) >= min_path_cols) break :blk full;
+                break :blk maru.i18n.t(if (it.decision == .allow) .lsp_trust_list_allowed else .lsp_trust_list_denied);
+            },
             .env_names => if (it.excluded) maru.i18n.t(.lsp_env_list_excluded) else "",
         };
         const shown: []const u8 = switch (state.mode) {

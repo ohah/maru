@@ -53,6 +53,7 @@ macOS 로컬 shell 1개 surface
 - [공유 편집기 분할 명령](plans/editor-shared-split.md) — 로컬 파일 공유 뷰의 메뉴·팔레트·단축키 연결과 제품 검증
 - [심볼 미리보기](plans/editor-symbol-preview.md) — 현재 pane 표시·취소·확정, 대상 수명 검사와 실제 앱 캡처
 - [워크스페이스 신뢰와 도구 환경](plans/workspace-trust.md) — 저장소 단위 신뢰 하나·정직한 신뢰 시트·앱 전역 신뢰 저장소·사용자 셸 환경 해석·신뢰 전 git(WT1~WT6)
+- [신뢰 감사 기록](plans/workspace-trust-audit.md) — 신뢰 결정이 언제·어디서 바뀌었나(로그 파일·목록 행·CLI)
 - [저장 시 포맷](plans/editor-format-on-save.md) — `⌘S` 가 언어 서버의 문서 포맷을 먼저 적용하고 저장(기본 켬·1 초 시한·사용자 저장만)
 - [저장 시 code action](plans/editor-code-actions-on-save.md) — `⌘S` 가 설정한 kind(`source.organizeImports` 등)를 묻고 그 문서에만 적용한 뒤 포맷·저장(기본 끔)
 - [도크 아웃라인](plans/editor-outline.md) — 활성 문서 계층·현재 심볼 강조·분할 전환과 클릭 수명

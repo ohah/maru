@@ -1009,8 +1009,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
             // 그린다 — 그 이동(`metal_frame.cellRasterIconGlyphOffsetPx`)을 렌더러가 셀의 `glyph_offset_x_px` 로 받아
             // 더하므로, 여기서도 같은 함수로 중심을 낸다(1칸이면 셀 중심, 종(2칸)이면 반 칸 오른쪽). 예전에는 「종이면
             // +1.0칸」을 여기서 따로 들었다 — 어긋나면 좁아진 종이 박스 한쪽으로 치우쳐 보인다(실제로 있었던 버그).
-            const offset: f32 = @floatFromInt(metal_frame.cellRasterIconGlyphOffsetPx(self.cell_width_px, span));
-            const center_x: f32 = @as(f32, @floatFromInt(icon_col)) * cw + offset + cw / 2.0; // 그려진 글리프 중심
+            const center_x: f32 = metal_frame.cellRasterIconCenterXPx(icon_col * self.cell_width_px, self.cell_width_px, span); // 그려진 글리프 중심
             const w: f32 = cw * 2.6; // 좌우 패딩을 더 줘 버튼처럼(아이콘 ~1.7칸 + 양옆 여백) — 사용자 피드백
             const h: f32 = ch * 1.7;
             const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼

@@ -131,6 +131,28 @@ pub fn cellRasterIconGlyphOffsetPx(cell_width_px: u32, span: u16) u16 {
     return @intCast(@min(cell_width_px * extra / 2, std.math.maxInt(u16)));
 }
 
+/// 크게 구운 아이콘이 **그려지는 가로 중심**(px) — 그 글리프가 시작하는 칸의 왼쪽 px 에서. 한 칸 quad 를
+/// `cellRasterIconGlyphOffsetPx` 만큼 민 그 칸의 중심이다. 렌더러 quad(`cellRasterIconQuadPx`, macOS `.m`)와 두 호스트의
+/// hover 사각형이 이 값 하나에 맞춘다 — 따로 셈하면 hover 박스가 아이콘 한쪽으로 치우친다.
+pub fn cellRasterIconCenterXPx(glyph_left_px: u32, cell_width_px: u32, span: u16) f32 {
+    const left: f32 = @floatFromInt(glyph_left_px + cellRasterIconGlyphOffsetPx(cell_width_px, span));
+    return left + @as(f32, @floatFromInt(cell_width_px)) / 2.0;
+}
+
+/// cell-raster role 셀의 **전경 quad 사각형**(px, `{x, y, w, h}`) — 한 칸 중심에 구운 크기(atlas) 그대로.
+///
+/// 텍스처가 quad 에 1:1 이라 선명하다(셀에 배율을 다시 곱하면 정수로 내린 슬롯보다 quad 가 커져 늘려 그린다). macOS `.m` 은
+/// 같은 사각형을 「한 칸 quad 를 atlas ÷ 셀 배율로 중심 고정 확대」로 그린다(C 라 이 함수를 못 부른다 — 결과가 같다).
+/// Windows 헤더는 이 함수를 부른다. 세로 중심은 그 셀 줄(`origin_y + row × ch`)의 가운데다.
+pub fn cellRasterIconQuadPx(cell: NativeMetalCell, cell_width_px: u32, cell_height_px: u32) [4]f32 {
+    const glyph_left: u32 = cell.origin_x + @as(u32, cell.col) * cell_width_px;
+    const cx = cellRasterIconCenterXPx(glyph_left, cell_width_px, cell.width);
+    const cy: f32 = @as(f32, @floatFromInt(cell.origin_y + @as(u32, cell.row) * cell_height_px)) + @as(f32, @floatFromInt(cell_height_px)) / 2.0;
+    const w: f32 = @floatFromInt(cell.atlas_width_px);
+    const h: f32 = @floatFromInt(cell.atlas_height_px);
+    return .{ cx - w / 2.0, cy - h / 2.0, w, h };
+}
+
 /// 목표 크기(`raster_*_px`)를 선언하고 구운 글리프의 셀에 `native_cell_role_cell_raster_icon` 을 싣는다.
 ///
 /// 셀과 글리프는 **slot 으로** 짝짓는다 — 목표 크기가 cache identity 의 일부라(`GlyphCacheKey`) 선언한 글리프와 안 한
@@ -138,7 +160,7 @@ pub fn cellRasterIconGlyphOffsetPx(cell_width_px: u32, span: u16) u16 {
 ///
 /// semantic role 은 실제 atlas glyph 에만 싣는다. cursor/underline 같은 장식 cell 의 reserved 를 덮으면
 /// 그 frame 이 caret/decoration 을 낼 때 부분 사각형 의미가 조용히 사라진다.
-fn markCellRasterIcons(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad, cell_width_px: u32) void {
+pub fn markCellRasterIcons(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad, cell_width_px: u32) void {
     for (glyphs) |g| {
         if (g.slot.key.raster_width_px == 0 or g.slot.key.raster_height_px == 0) continue;
         for (cells) |*cell| {
@@ -3615,6 +3637,31 @@ test "cell-raster role 아이콘은 차지한 칸들의 가운데로 미는 px �
     try std.testing.expectEqual(@as(u16, 0), cells[1].glyph_offset_x_px);
     try std.testing.expectEqual(@as(u16, 0), cells[2].glyph_offset_x_px);
     try std.testing.expectEqual(@as(u16, 2), cells[0].width); // 배경은 칸 전체 그대로 — 폭을 줄이지 않는다
+}
+
+// 크게 구운 아이콘이 **그려지는 사각형**은 한 칸(`origin_x + col×cw + glyph_offset_x_px`)의 중심에 구운 크기 그대로다.
+// macOS `.m` 이 「한 칸 quad 를 atlas ÷ 셀로 중심 고정 확대」로 그리는 것과 같은 사각형이고, Windows 헤더가 이 함수를 쓴다.
+// 예전 Windows 는 codepoint 목록으로 대상을 고르고 **칸 전체(span 폭) 사각형의 실수 중심**에 놓아, 셀 폭이 홀수면 macOS·hover
+// 와 0.5px 갈렸다.
+test "cellRasterIconQuadPx: 한 칸 중심에 atlas 크기 그대로 — 2칸 종은 반 칸(정수) 민 칸의 중심" {
+    var bell = testGlyphCell(1, icons.codepoint(.bell), native_cell_role_cell_raster_icon);
+    bell.width = 2;
+    bell.col = 3;
+    bell.origin_x = 100;
+    bell.origin_y = 5;
+    bell.atlas_width_px = 29;
+    bell.atlas_height_px = 54;
+    bell.glyph_offset_x_px = cellRasterIconGlyphOffsetPx(17, 2); // 8 — 17 의 반을 내린 값
+    const r = cellRasterIconQuadPx(bell, 17, 32);
+    // 가로 중심 = 100 + 3×17 + 8 + 8.5 = 167.5, 세로 중심 = 5 + 16 = 21
+    try std.testing.expectApproxEqAbs(@as(f32, 167.5 - 14.5), r[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 21.0 - 27.0), r[1], 0.001);
+    try std.testing.expectEqual(@as(f32, 29), r[2]);
+    try std.testing.expectEqual(@as(f32, 54), r[3]);
+    // hover 가 쓰는 중심과 같은 값이다.
+    try std.testing.expectApproxEqAbs(@as(f32, 167.5), cellRasterIconCenterXPx(100 + 3 * 17, 17, 2), 0.001);
+    // 1칸 아이콘은 그 칸의 중심이다.
+    try std.testing.expectApproxEqAbs(@as(f32, 8.5), cellRasterIconCenterXPx(0, 17, 1), 0.001);
 }
 
 // 렌더러 슬라이스(web-panel.md §5): 탭/pane 드래그 시각물(drop 하이라이트·floating 고스트)을 **최상위 오버레이

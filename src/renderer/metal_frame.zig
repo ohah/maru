@@ -1481,14 +1481,8 @@ pub const MetalFrame = extern struct {
     // 계약(소유 버퍼의 다음 갱신/해제까지) — AppSession이 owned ArrayList로 보관한다.
     sidebar_cells: ?[*]const NativeMetalCell = null,
     sidebar_cell_count: usize = 0,
-    // 사이드바 탭 슬롯 한 칸의 픽셀 높이(≈2.5×cell_height). 렌더러가 사이드바 셀을 cell 높이가
-    // 아니라 이 슬롯 높이로 세로 배치한다(밴드 row i → py=i×slot_h, 높이 slot_h) — 큰 탭
-    // 슬롯. 0이면 cell 높이로 폴백(슬롯=한 줄). 호버/X(후속)의 픽셀 hit-test 기준 높이도 이 값.
-    sidebar_slot_height_px: u32 = 0,
-    // 사이드바 상단 헤더(검색바 + 아이콘) 높이(px). 렌더러가 사이드바 셀(밴드·카드 glyph) py_top에 더해
-    // 헤더만큼 아래로 민다(밴드 view는 슬롯 상대 좌표라 .m이 시프트 단일 책임). 0이면 헤더 없음. C struct
-    // MaruAppHostMetalFrame과 같은 위치·타입(ABI 일치).
-    sidebar_header_height_px: u32 = 0,
+    // (예전 `sidebar_slot_height_px`·`sidebar_header_height_px` 자리. 렌더러가 사이드바 셀 세로 배치에 쓰던 값인데, 그 배치를
+    // Zig 가 셀 origin_y 로 싣게 되며(ABI 224·225) 할 일을 잃어 ABI 229 에서 뺐다 — tests/boundary/metal_frame_consumers.zig.)
     // chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(null/0)이라 렌더가 무동작 — 셀 그리드 유지.
     // rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다.
     // 설계: docs/layering-and-portability.md §5(C4b). 포인터 수명은 cells와 같은 계약(다음 갱신/해제까지).
@@ -1520,20 +1514,13 @@ pub const MetalFrame = extern struct {
     // theme.background. 렌더 pass의 clearColor로 쓴다 — 셀이 default 배경(A=0)일 때 드러나는 색. app이 활성
     // surface 기준으로 채운다(0이면 렌더러가 기존 기본 clear로 폴백). 끝에 추가해 기존 필드 offset 불변(ABI v51).
     terminal_bg: u32 = 0,
-    // 상단 타이틀바 띠(신호등·헤더 아이콘 줄)의 픽셀 높이. 렌더러가 **접힘 펼치기 토글(◧)** 글리프를 이 띠
-    // [0, titlebar_strip_px] 안에 세로 중앙 배치해 신호등과 수직 정렬시키는 데만 쓴다(펼침 헤더 아이콘은 영향
-    // 없음 — 사이드바 폭>0이라 구분). 0이면 띠 없음(렌더러가 기존 0.3ch nudge 폴백). 끝에 추가해 기존 offset 불변(ABI v66).
-    titlebar_strip_px: u32 = 0,
     // 창 배경 투명도 × 1000(0~1000, 기본 1000=불투명). 렌더러가 화면 clear color alpha에 이 값/1000을 곱한다 —
     // default 배경(빈 영역·기본 배경 셀 A=0)만 투명해지고 명시적 배경색 셀은 불투명 유지(근거는 config.window_opacity
     // 주석 단일 출처). float 대신 milli u32로 실어 extern ABI를 정수로 유지(SessionConfig.scale_milli 선례). 끝에
     // 추가해 기존 offset 불변(ABI v70). app이 ResolvedAppearance.window_opacity에서 채운다.
     window_opacity_milli: u32 = 1000,
-    // 사이드바 세로 스크롤량(backing px). 렌더러가 사이드바 셀(밴드·카드 glyph)의 py_top에서 이만큼 빼 카드를 위로
-    // 밀고, >0이면 사이드바 셀 draw에 헤더 아래[header_h, drawable_h] scissor를 적용해 헤더 위로 샌 카드를 자른다
-    // (헤더 glyph는 터미널 셀 패스라 영향 없음). GPU quad 밴드·tint는 host lowering이 같은 값으로 이미 빼 헤더 위를
-    // 클립한다(sidebar_scroll_offset_px 단일 출처). 0이면 기존 동작 그대로(scissor 없음). 끝에 추가해 기존 offset 불변(ABI v86).
-    sidebar_scroll_offset_px: u32 = 0,
+    // (예전 `titlebar_strip_px`(v66)·`sidebar_scroll_offset_px`(v86) 자리. 헤더 줄 세로 자리·사이드바 셀 시프트를 Zig 가
+    // 셀 origin_y 로, scissor 구간을 `sidebar_scissor_*_px` 로 싣게 되며 할 일을 잃어 ABI 229 에서 뺐다.)
     // pane divider(reserved 30 세로·31 가로)의 device px 두께 — config split.divider-thickness(pt)를 app_session가
     // scale_milli로 환산(metalFrame가 스탬프). renderer가 divider strip 폭을 이 값으로 정하되 seam 중앙정렬·셀 clamp한다
     // (커서 강조선 reserved 2~5·GPU quad FocusOwner border와 분리라 divider만 config로 조절). 0이면 divider 안 그림(숨김).
@@ -1726,6 +1713,10 @@ fn buildMergedUploadsN(
 /// 셀을 옳은 자리에 놓는다(예: 사이드바 셀 py_top = origin_y + header − scroll).
 pub const ChromeGeometry = struct {
     terminal_origin_x_px: u32 = 0,
+    /// **스탬프 전용**(frame 으로 안 나간다 — `stamp_only_fields`). 이 넷은 사이드바 셀 자리(헤더·스크롤 → 카드 origin_y,
+    /// 띠 → 헤더 줄 y)를 정한 입력이라 「이 투영이 어떤 기하로 만들어졌나」의 일부다 — 사이드바 지문(`appendSidebarLayoutKey`)과
+    /// 부분 교체 판정(`chrome_geometry_moved`)이 이 구조체를 통째로 비교한다. 렌더러는 안 읽어 ABI 229 에서 `MetalFrame` 에서만 뺐다
+    /// (처음엔 여기서도 뺐다가 SO8 이 「스크롤만 바뀐 사이드바가 옛 셀을 adopt 한다」로 잡았다).
     sidebar_slot_height_px: u32 = 0,
     sidebar_header_height_px: u32 = 0,
     sidebar_scroll_offset_px: u32 = 0,
@@ -2188,10 +2179,6 @@ pub const MetalFrameBuffer = struct {
             .atlas_height_px = self.atlas_height_px,
             // chrome 기하는 셀과 **같은 투영**에서 나온 스탬프를 쓴다(호출자의 live 값 덮어쓰기 금지).
             .terminal_origin_x_px = self.chrome_geometry.terminal_origin_x_px,
-            .sidebar_slot_height_px = self.chrome_geometry.sidebar_slot_height_px,
-            .sidebar_header_height_px = self.chrome_geometry.sidebar_header_height_px,
-            .sidebar_scroll_offset_px = self.chrome_geometry.sidebar_scroll_offset_px,
-            .titlebar_strip_px = self.chrome_geometry.titlebar_strip_px,
             .divider_thickness_px = self.chrome_geometry.divider_thickness_px,
             .status_bar_height_px = self.chrome_geometry.status_bar_height_px,
             .sidebar_scissor_top_px = self.chrome_geometry.sidebar_scissor_top_px,
@@ -3958,22 +3945,31 @@ test "SB1-S2a: status_bar_height_px는 스탬프를 타고 나가고, 0이면 �
     try std.testing.expectEqual(@as(u32, 0), buffer.view().status_bar_height_px);
 
     // 다른 chrome 기하만 찍고 상태바를 안 주면 여전히 0이다(기존 동작 보존).
-    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .titlebar_strip_px = 30 });
+    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .divider_thickness_px = 3 });
     try std.testing.expectEqual(@as(u32, 0), buffer.view().status_bar_height_px);
     try std.testing.expectEqual(@as(u32, 240), buffer.view().terminal_origin_x_px);
 
     // 값이 서면 그대로 실려 나간다 — 렌더러가 strip 바닥을 이만큼 올린다(S2b가 실제로 세운다).
-    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .titlebar_strip_px = 30, .status_bar_height_px = 24 });
+    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .divider_thickness_px = 3, .status_bar_height_px = 24 });
     try std.testing.expectEqual(@as(u32, 24), buffer.view().status_bar_height_px);
     // 같은 스탬프의 다른 필드가 훼손되지 않는다(끝에 추가한 필드라 기존 의미 불변).
     try std.testing.expectEqual(@as(u32, 240), buffer.view().terminal_origin_x_px);
-    try std.testing.expectEqual(@as(u32, 30), buffer.view().titlebar_strip_px);
+    try std.testing.expectEqual(@as(u32, 3), buffer.view().divider_thickness_px);
 }
 
-// **`ChromeGeometry`의 모든 필드가 `view()`로 나가야 한다.** 매핑이 손-미러라(필드마다 한 줄) 새 필드를
+/// `ChromeGeometry` 중 frame 으로 **안 나가는** 스탬프 전용 필드(필드 주석 참조). 여기 없는 필드는 전부 `view()` 로 나가야 한다.
+const stamp_only_fields = [_][]const u8{ "sidebar_slot_height_px", "sidebar_header_height_px", "sidebar_scroll_offset_px", "titlebar_strip_px" };
+
+fn isStampOnly(comptime name: []const u8) bool {
+    inline for (stamp_only_fields) |s| if (comptime std.mem.eql(u8, s, name)) return true;
+    return false;
+}
+
+// **`ChromeGeometry`의 frame 필드는 모두 `view()`로 나가야 한다.** 매핑이 손-미러라(필드마다 한 줄) 새 필드를
 // 더하면서 `view()`를 잊으면 컴파일러가 안 잡아 주고, 렌더러는 그 값을 **0으로 받는다** — 화면에서만
 // 드러나는 조용한 유실이다(이 스택이 방금 상태바 필드를 더하며 지나온 자리). comptime으로 필드를 세어
-// 강제한다: 이름이 다른 상대가 없으면 컴파일 에러, 값이 안 실리면 런타임 실패.
+// 강제한다: 이름이 다른 상대가 없으면 컴파일 에러, 값이 안 실리면 런타임 실패. 스탬프 전용 필드는 반대로
+// frame 에 **없어야** 한다(렌더러가 안 읽는 값이 frame 에 되살아나지 않게 — tests/boundary/metal_frame_consumers.zig 와 짝).
 test "ChromeGeometry의 모든 필드가 view()로 나간다 (comptime 커버리지)" {
     var buffer: MetalFrameBuffer = .{};
     defer buffer.deinit(std.testing.allocator);
@@ -3981,7 +3977,9 @@ test "ChromeGeometry의 모든 필드가 view()로 나간다 (comptime 커버리
     // 필드마다 서로 다른 값을 넣어야 "옆 필드를 실었는데 우연히 통과"를 배제할 수 있다.
     var geometry: ChromeGeometry = .{};
     inline for (@typeInfo(ChromeGeometry).@"struct".fields, 0..) |field, i| {
-        if (!@hasField(MetalFrame, field.name)) {
+        if (comptime isStampOnly(field.name)) {
+            if (@hasField(MetalFrame, field.name)) @compileError("스탬프 전용 ChromeGeometry." ++ field.name ++ " 이 MetalFrame 에 되살아났다");
+        } else if (!@hasField(MetalFrame, field.name)) {
             @compileError("ChromeGeometry." ++ field.name ++ "에 대응하는 MetalFrame 필드가 없다 — view()가 실을 수 없다");
         }
         @field(geometry, field.name) = @as(u32, @intCast((i + 1) * 7));
@@ -3990,6 +3988,7 @@ test "ChromeGeometry의 모든 필드가 view()로 나간다 (comptime 커버리
 
     const frame = buffer.view();
     inline for (@typeInfo(ChromeGeometry).@"struct".fields) |field| {
+        if (comptime isStampOnly(field.name)) continue;
         try std.testing.expectEqual(@field(geometry, field.name), @field(frame, field.name));
     }
 }

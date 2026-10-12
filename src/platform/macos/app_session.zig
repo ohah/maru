@@ -336,7 +336,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 차지한 칸들의 가운데로 미는 px 를 Zig(`metal_frame.cellRasterIconGlyphOffsetPx`)가 싣고, .m 은 `cw × 0.5 × (span − 1)` 를
 // 지우고 그 값만 더한다. layout 은 같다. 낡은 .m + 새 Zig 는 이 값을 무시하고 자기 식으로 밀어 결과가 같지만, 새 .m +
 // 낡은 Zig 는 0(옛 패딩)을 받아 종을 반 칸 왼쪽에 그리므로 짝이 같이 올라간다.
-pub const abi_version: u32 = 228;
+// 229: `MetalFrame`(C `MaruAppHostMetalFrame`)에서 렌더러가 안 읽던 기하 넷(`sidebar_slot_height_px`·
+// `sidebar_header_height_px`·`titlebar_strip_px`·`sidebar_scroll_offset_px`)을 뺀다 — ABI 227 에서 draw 인자를 뺀 뒤에도
+// frame 필드로 남아 매 프레임 스탬프됐다. layout 이 바뀌므로(뒤 필드 offset 이동) 짝이 같이 올라간다.
+pub const abi_version: u32 = 229;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -6447,8 +6450,8 @@ pub const AppSession = struct {
     // hit-test(slotAt/rowTop/dragTargetSlot의 rowHeight 누적)·렌더가 이 값으로 헤더 행을 짧게 센다. 0=헤더 없음(SG3b-2-ii 전 하위호환).
     sidebar_header_row_h_px: u32 = 0,
     // 사이드바 세로 스크롤량(backing px) — 워크스페이스 카드가 헤더 아래 뷰포트 높이를 넘으면 휠/트랙패드로 스크롤한다.
-    // 카드(밴드·glyph·tint)는 이만큼 위로 밀리고, 헤더는 고정. .m이 사이드바 셀 py_top에서 빼고 헤더 아래로 scissor
-    // 클리핑하며(frame.sidebar_scroll_offset_px), GPU quad(밴드·tint·accent)는 lowering이 빼고 헤더 위는 클립한다.
+    // 카드(밴드·glyph·tint)는 이만큼 위로 밀리고, 헤더는 고정. 사이드바 셀은 Zig 가 셀 origin_y 에서 빼고(ABI 224) 헤더
+    // 아래 scissor 구간을 `sidebar_scissor_*_px` 로 싣는다. GPU quad(밴드·tint·accent)는 lowering이 빼고 헤더 위는 클립한다.
     // clampSidebarScroll이 [0, sidebarMaxScroll]로 잡고(탭 추가/삭제·검색·resize·휠마다), 0이면 기존 동작 그대로.
     sidebar_scroll_offset_px: u32 = 0,
     // 사이드바 스크롤바 thumb fade 타이머(pane scrollbar_idle_ticks 동형, 단일 트랙). 스크롤 활동(offset 변화)에서
@@ -24600,6 +24603,7 @@ pub const AppSession = struct {
         );
         return .{
             .terminal_origin_x_px = self.sidebar_width_px,
+            // 스탬프 전용(frame 으로 안 나간다) — 사이드바 셀 자리를 정한 입력이라 지문·부분 교체 판정이 본다.
             .sidebar_slot_height_px = self.sidebar_slot_height_px,
             .sidebar_header_height_px = self.sidebar_header_height_px,
             .sidebar_scroll_offset_px = self.sidebar_scroll_offset_px,
@@ -24626,10 +24630,6 @@ pub const AppSession = struct {
         if (!self.metal_buffer.chrome_geometry_stamped) {
             const live = self.chromeGeometrySnapshot();
             frame.terminal_origin_x_px = live.terminal_origin_x_px;
-            frame.sidebar_slot_height_px = live.sidebar_slot_height_px;
-            frame.sidebar_header_height_px = live.sidebar_header_height_px;
-            frame.sidebar_scroll_offset_px = live.sidebar_scroll_offset_px;
-            frame.titlebar_strip_px = live.titlebar_strip_px;
             frame.divider_thickness_px = live.divider_thickness_px;
         }
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
@@ -58976,8 +58976,9 @@ test "sidebar gets an active-tab highlight band that follows tab create and swit
         // 밴드를 그릴 사이드바 폭은 터미널 origin offset과 같은 단일 출처다.
         try std.testing.expectEqual(session.sidebar_width_px, frame.terminal_origin_x_px);
         // 탭 슬롯 높이는 cell 높이 × 비율(큰 슬롯, 2줄 카드 수용) — 단일 출처 상수에서 파생, cell 높이보다 크다.
-        try std.testing.expectEqual(session.cell_height_px * sidebar_ops.sidebar_slot_height_ratio_milli / 1000, frame.sidebar_slot_height_px);
-        try std.testing.expect(frame.sidebar_slot_height_px > session.cell_height_px);
+        // (frame 은 이 값을 더는 싣지 않는다 — 렌더러가 안 읽어 ABI 229 에서 뺐다. 레이아웃이 쓰는 세션 값을 본다.)
+        try std.testing.expectEqual(session.cell_height_px * sidebar_ops.sidebar_slot_height_ratio_milli / 1000, session.sidebar_slot_height_px);
+        try std.testing.expect(session.sidebar_slot_height_px > session.cell_height_px);
     }
 
     // 2번째 탭 생성 → 활성=1 → 밴드가 row 1로 이동(여전히 1개).
@@ -69499,7 +69500,7 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
     try std.testing.expect(!session.metal_buffer.chrome_geometry_stamped);
     try std.testing.expect(session.sidebar_width_px > 0);
     try std.testing.expectEqual(session.sidebar_width_px, session.metalFrame().terminal_origin_x_px);
-    try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
+    try std.testing.expectEqual(pane_ops.dividerThicknessPx(session), session.metalFrame().divider_thickness_px);
 
     // 폴백 술어는 **스탬프 유무**여야 한다(generation 아님). `setCursorFadeMilli`는 셀도 기하도 안 바꾸면서
     // generation을 올리므로, 첫 투영 전 blink tick 하나가 generation을 1로 만든다 — 그때도 폴백은 살아야 한다.
@@ -69510,21 +69511,29 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
 
     _ = try session.tick(); // 첫 투영 — 셀과 기하가 함께 확정된다
 
-    const stamped_slot = session.metalFrame().sidebar_slot_height_px;
-    const stamped_strip = session.metalFrame().titlebar_strip_px;
-    try std.testing.expectEqual(session.sidebar_slot_height_px, stamped_slot);
+    const stamped = session.metal_buffer.chrome_geometry;
+    try std.testing.expect(std.meta.eql(session.chromeGeometrySnapshot(), stamped)); // 첫 투영의 스탬프 = 그때의 live
 
-    // 폰트를 키우면 live 메트릭이 즉시 바뀐다(슬롯/띠는 cell 높이 파생). 아직 재투영 전이므로 frame은 **옛 값**을
-    // 유지해야 한다 — 그래야 그 프레임의 셀과 정합한다.
+    // 폰트를 키우면 live 메트릭이 즉시 바뀐다(헤더 높이 → scissor 구간 등). 아직 재투영 전이므로 frame은 **옛 값**을
+    // 유지해야 한다 — 그래야 그 프레임의 셀과 정합한다. 스탬프 기하 **전부**를 필드마다 본다(예전에는 슬롯·띠
+    // 둘만 봤는데, 그 둘은 렌더러가 안 읽어 ABI 229 에서 frame 에서 빠졌다).
     session.dispatchAppAction(.{ .increase_font_size = font_size_step });
-    try std.testing.expect(session.sidebar_slot_height_px != stamped_slot or session.titlebar_strip_px != stamped_strip);
-    try std.testing.expectEqual(stamped_slot, session.metalFrame().sidebar_slot_height_px);
-    try std.testing.expectEqual(stamped_strip, session.metalFrame().titlebar_strip_px);
+    try std.testing.expect(!std.meta.eql(session.chromeGeometrySnapshot(), stamped)); // live 가 실제로 바뀌었다
+    const held = session.metalFrame();
+    inline for (@typeInfo(metal_frame.ChromeGeometry).@"struct".fields) |f| {
+        if (comptime !@hasField(metal_frame.MetalFrame, f.name)) continue; // 스탬프 전용 필드는 frame 에 없다
+        try std.testing.expectEqual(@field(stamped, f.name), @field(held, f.name));
+    }
 
-    // 재투영되면 둘이 함께 새 값으로 간다.
+    // 재투영되면 스탬프 기하가 모두 함께 새 값으로 간다.
     _ = try session.tick();
-    try std.testing.expectEqual(session.sidebar_slot_height_px, session.metalFrame().sidebar_slot_height_px);
-    try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
+    const live_after = session.chromeGeometrySnapshot();
+    const fresh = session.metalFrame();
+    inline for (@typeInfo(metal_frame.ChromeGeometry).@"struct".fields) |f| {
+        if (comptime !@hasField(metal_frame.MetalFrame, f.name)) continue;
+        try std.testing.expectEqual(@field(live_after, f.name), @field(fresh, f.name));
+    }
+    try std.testing.expect(std.meta.eql(live_after, session.metal_buffer.chrome_geometry)); // 스탬프 전용까지 새 값
 }
 
 // quad 수명·순서 계약(S0): `dropQuadsByLayer`는 **자기 레이어만** 지우고 **나머지 순서를 보존**해야 하며,
@@ -73310,10 +73319,12 @@ test "placement_failed: 배치 진입에서 지워진다 — 부분 투영의 �
     try std.testing.expect(!session.placement_failed);
 }
 
-// 접힘 펼치기 토글(◧) 폴리시: (1) hoverCursor가 토글 위에서 호버 배경 quad를 켜고 밖에서 끈다(접힘 시 사이드바
-// 폭 0이라 헤더 호버 경로가 안 타므로 별도 추적), (2) metalFrame이 titlebar_strip_px를 실어 렌더러가 ◧를 띠 안
-// 세로 중앙에 정렬(신호등 정렬)할 수 있게 한다. 호버 quad는 distinctive한 fg-반투명 색(packRgbAlpha 0x40)으로 식별.
-test "collapsed toggle: hover emits a highlight quad and metalFrame carries titlebar_strip_px" {
+// 접힘 펼치기 토글(◧) 폴리시: hoverCursor가 토글 위에서 호버 배경 quad를 켜고 밖에서 끈다(접힘 시 사이드바
+// 폭 0이라 헤더 호버 경로가 안 타므로 별도 추적). 호버 quad는 distinctive한 fg-반투명 색(packRgbAlpha 0x40)으로 식별.
+// (예전에는 「metalFrame 이 titlebar_strip_px 를 실어 렌더러가 ◧ 를 띠 안 세로 중앙에 둔다」도 봤다 — 그 세로 자리는
+// 이제 Zig 가 셀 origin_y 로 싣고(ABI 226, 「투영된 종 아이콘 셀이 알림 배지와 같은 줄 y」 판정자), 렌더러가 안 읽는
+// frame 필드는 ABI 229 에서 뺐다.)
+test "collapsed toggle: hover emits a highlight quad" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -73332,12 +73343,8 @@ test "collapsed toggle: hover emits a highlight quad and metalFrame carries titl
     sidebar_ops.toggleSidebarCollapsed(session);
     try std.testing.expect(session.sidebar_collapsed);
 
-    // metalFrame이 띠 높이를 실어 렌더러가 ◧를 띠 안 세로 중앙에 정렬할 수 있다(접힘 띠 = max(cell_h, 30pt) > 0).
-    // chrome 기하는 **투영 시점 스탬프**라(셀과 한 프레임) tick을 한 번 돌려 확정한 뒤 읽는다 — draw 시점의 live
-    // 값을 덮어쓰면 메트릭이 바뀐 프레임에서 옛 셀과 새 기하가 섞인다.
-    try std.testing.expect(session.titlebar_strip_px > 0);
+    try std.testing.expect(session.titlebar_strip_px > 0); // 접힘 띠 = max(cell_h, 30pt) > 0
     _ = try session.tick();
-    try std.testing.expectEqual(session.titlebar_strip_px, session.metalFrame().titlebar_strip_px);
 
     // 호버 quad를 식별하는 distinctive 색 — 헤더 아이콘 호버와 같은 밝은 fg 반투명(straight-alpha).
     const hover_fill = packRgbAlpha(session.appearance.theme.sidebar_foreground, 0x40);
@@ -73382,9 +73389,10 @@ test "collapsed toggle: hover emits a highlight quad and metalFrame carries titl
 // (maru_metal_renderer.m `py_top = (strip - ch) * 0.5`). 띠가 셀보다 높은 실제 창에서 원만 위로 떠 숫자가
 // 원 밖으로 빠져나갔고, 좌표 계측은 origin 0인 실행에서만 돌아 다섯 번을 통과했다.
 //
-// 그래서 이 판정자는 헬퍼를 호출하지 않고 **렌더러 공식을 그대로 다시 푼다** — 소비되는 ABI 값
-// (metalFrame().titlebar_strip_px)에서 셀 줄 y를 재구성해 원이 그 줄을 덮는지 본다. 헬퍼를 부르면
-// 두 쪽이 같이 틀려도 통과하므로 판정자가 아니게 된다.
+// 그래서 이 판정자는 헬퍼를 호출하지 않고 **렌더러가 실제로 그리는 자리를 읽는다** — 렌더러는 셀을
+// `origin_y + row × ch` 에 그리므로(ABI 226) 셀 스트림의 종 셀에서 줄 y 를 집어 원이 그 줄을 덮는지 본다. 헬퍼를
+// 부르면 두 쪽이 같이 틀려도 통과하므로 판정자가 아니게 된다. (예전에는 frame 의 titlebar_strip_px 로 렌더러 옛 공식
+// `(strip − ch) × 0.5` 를 다시 풀었다 — 그 공식은 ABI 226 에서, 그 frame 필드는 ABI 229 에서 사라졌다.)
 test "notification badge circle vertically contains the header icon row the renderer draws the digit on" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
@@ -73406,11 +73414,15 @@ test "notification badge circle vertically contains the header icon row the rend
     _ = try session.tick(); // chrome 기하는 투영 시점 스탬프 — 한 프레임 확정 후 읽는다
 
     const ch = session.cell_height_px;
-    const strip = session.metalFrame().titlebar_strip_px;
+    const strip = session.titlebar_strip_px;
     // 띠 > 셀이어야 이 판정자가 의미를 갖는다(둘이 같으면 py_top이 0이라 옛 코드도 통과한다).
     try std.testing.expect(strip > ch);
-    // 렌더러가 헤더 아이콘 줄 셀에 쓰는 py_top — 공식을 여기서 다시 푼다.
-    const row_top: f32 = @floatFromInt((strip - ch) / 2);
+    // 렌더러가 헤더 아이콘 줄 셀을 그리는 py_top — 셀 스트림의 종 셀(헤더 frame, row 0)에서 읽는다.
+    var bell_row_top: ?u32 = null;
+    for (session.metal_buffer.cells) |cell| {
+        if (cell.codepoint == icons.codepoint(.bell) and cell.row == 0 and cell.origin_x == 0) bell_row_top = cell.origin_y;
+    }
+    const row_top: f32 = @floatFromInt(bell_row_top orelse return error.TestUnexpectedResult);
     try std.testing.expect(row_top > 0); // 0이면 옛 코드(원점 무시)와 구분이 안 돼 판정자가 아니게 된다
 
     // 제품이 낸 배지 원을 찾는다: layer 4 + 정사각(w==h) + 반지름 = w/2.

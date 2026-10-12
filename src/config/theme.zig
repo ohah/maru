@@ -1094,6 +1094,18 @@ pub const MatchBrackets = enum { never, near, always };
 /// 공백 표시(visual-mapping §5.1e) — VS Code `editor.renderWhitespace` 와 같은 값.
 pub const RenderWhitespace = enum { none, boundary, selection, trailing, all };
 
+/// 외부 포매터 설정 `editor.formatter.<언어>` 의 언어 이름 — 편집기 문법 이름(`session/editor/language.Grammar` 에서 `none` 을 뺀 것;
+/// 판정자 EXF4 가 둘을 맞춘다).
+pub const formatter_languages = [_][]const u8{ "zig", "json", "markdown", "javascript", "typescript", "tsx", "c", "cpp", "python", "go", "rust", "java", "ruby", "php", "kotlin", "bash", "css", "html" };
+
+/// `editor.formatter.<언어>` 의 값(tooling §8.2t). `auto` 는 저장소 설정 감지, `lsp` 는 언어 서버만, `off` 는 포맷 안 함, 나머지는 그 포매터.
+pub const FormatterChoice = enum { auto, lsp, off, prettier };
+
+pub fn formatterLanguageIndex(name: []const u8) ?usize {
+    for (formatter_languages, 0..) |n, i| if (std.mem.eql(u8, n, name)) return i;
+    return null;
+}
+
 pub const EditorConfig = struct {
     /// 본문 폭을 넘는 줄을 다음 시각 행으로 접을지
     /// ([native-editor-visual-mapping.md](../../docs/native-editor-visual-mapping.md) §4 세로 축).
@@ -1238,6 +1250,9 @@ pub const EditorConfig = struct {
     /// 저장한다. 쉼표로 가른 LSP `CodeActionKind`(`source.organizeImports, source.fixAll`) — 그 아래 계층도 든다(`source.fixAll.eslint`).
     /// **기본 빈 값**(끔) — 2026-10-11 사용자 결정(VS Code `editor.codeActionsOnSave`·Zed `code_actions_on_format` 도 기본 빈 값).
     code_actions_on_save: []const u8 = "",
+    /// **외부 포매터**(tooling §8.2t) — `editor.formatter.<언어>`(언어는 `formatter_languages`). 기본 `auto` 는 저장소 설정을 감지한다
+    /// (Prettier 설정이 있으면 Prettier, 없으면 언어 서버 — 2026-10-12 사용자 결정). 동적 키라 스키마 밖이다(로더가 읽는다).
+    formatter: [formatter_languages.len]FormatterChoice = @splat(.auto),
 
     pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.guides-indentation · editor.guides-highlight-active-indentation · editor.bracket-pair-colorization · editor.bracket-pair-colorization-independent-pools · editor.render-whitespace · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions · editor.format-on-save · editor.code-actions-on-save
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기

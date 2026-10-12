@@ -36,6 +36,8 @@ pub const Action = union(enum) {
     lsp_reload_shell_environment,
     /// 언어 서버 정보(상태·버전·실행 파일과 출처·저장소와 신뢰 결정)를 알림으로 보인다(계획 workspace-trust WT5a).
     lsp_show_server_info,
+    /// 지금 문서의 포매터(언어 서버·외부 포매터·꺼짐)와 감지한 설정·실행 파일·저장소 신뢰를 알림으로 보인다(tooling §8.2t).
+    show_formatter_info,
     /// 언어 서버에 넘기는 환경 변수 **이름**(값 아님)을 목록 상자로 보인다 — 제외 목록에 걸린 이름은 「제외됨」(계획 workspace-trust WT5b-1).
     lsp_show_environment_names,
     // Markdown/HTML 파일 선택창을 열어 현재 창의 전역 도크에 연다. 기본 Cmd+O(macOS Open 관례), 커맨드 팔릿·메뉴와
@@ -340,6 +342,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "lsp_forget_trust")) return .lsp_forget_trust;
     if (std.mem.eql(u8, value, "lsp_reload_shell_environment")) return .lsp_reload_shell_environment;
     if (std.mem.eql(u8, value, "lsp_show_server_info")) return .lsp_show_server_info;
+    if (std.mem.eql(u8, value, "show_formatter_info")) return .show_formatter_info;
     if (std.mem.eql(u8, value, "lsp_show_environment_names")) return .lsp_show_environment_names;
     if (std.mem.eql(u8, value, "toggle_file_panel_dock_side")) return .toggle_file_panel_dock_side;
     if (std.mem.eql(u8, value, "toggle_file_panel_focus")) return .toggle_file_panel_focus;

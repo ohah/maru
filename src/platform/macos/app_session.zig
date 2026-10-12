@@ -11531,6 +11531,7 @@ pub const AppSession = struct {
             .lsp_revoke_trust => editor_ops.lsp_client.manageCurrent(self, .revoke),
             .lsp_reload_shell_environment => editor_ops.lsp_client.reloadShellEnvironment(self),
             .lsp_show_server_info => editor_ops.lsp_client.showServerInfo(self),
+            .show_formatter_info => editor_ops.external_formatter.showInfo(self),
             .lsp_show_environment_names => editor_ops.trust_ui.openEnvNames(self),
             .lsp_forget_trust => editor_ops.lsp_client.manageCurrent(self, .forget),
             .show_project_search => if (!self.tabsBlocked()) project_search_ops.open(self),
@@ -24705,6 +24706,7 @@ pub const AppSession = struct {
         if (self.osr_drag_out) |shown| _ = web_ops.osrDragOutEnd(self, shown.drag, std.math.nan(f64), std.math.nan(f64), 0);
         self.osr_drag.deinit(self.allocator);
         editor_ops.lsp_client.deinit(self); // §8.2a: 서버 자식을 거둔다(짧게 — 종료 경로)
+        editor_ops.format_client.deinit(self); // §8.2t: 기다리던 외부 포매터의 결과를 버린다(전역 결과 목록에 남지 않게)
         editor_ops.hover_client.deinit(self);
         editor_ops.signature_client.deinit(self);
         self.editor_workspace_edit.deinit(self.allocator); // 마지막 WorkspaceEdit 기록(§8.2f)

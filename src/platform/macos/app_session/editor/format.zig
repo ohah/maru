@@ -9,6 +9,10 @@
 //! **저장 시 포맷**(§8.2r — 계획 docs/plans/editor-format-on-save.md): 사용자의 `⌘S` 가 같은 요청을 보내고 응답(또는 시한
 //! `save_format_timeout_ms`) 뒤에 그 문서를 저장한다. 응답이 버려지면(낡은 revision·겹침·오류) 포맷 없이 저장한다 — 저장은 포맷 때문에
 //! 막히지 않는다.
+//!
+//! **외부 포매터**(§8.2t — 계획 docs/plans/editor-external-formatter.md): 그 문서의 언어에 외부 포매터가 정해지면(설정·저장소 감지)
+//! 두 길 모두 언어 서버 대신 그것을 띄운다(`external_formatter.prepare`). 기다림 자리는 같다 — `external_id` 가 서면 결과는 tick 이
+//! 가져가 적용한다(`external_formatter.apply`).
 
 const std = @import("std");
 const maru = @import("maru");
@@ -20,6 +24,8 @@ const editor_lsp = @import("lsp.zig");
 const pane_ops = @import("../pane.zig");
 const conflict_ops = @import("conflict.zig");
 const term_ops = @import("../term.zig");
+const external_formatter = @import("external_formatter.zig");
+const format_process = @import("../../format_process.zig");
 const lsp = maru.session.editor.lsp;
 
 pub const State = struct {
@@ -38,7 +44,43 @@ pub const State = struct {
     save_deadline_ms: u64 = 0,
     /// 판정자 관측: 시한을 넘겨 포맷 없이 저장한 횟수.
     save_timeouts: u64 = 0,
+    /// **외부 포매터**(§8.2t) — 기다리는 실행의 id(0 이면 언어 서버를 기다린다)와 그 종류. 이때 `waiting_seq` 는 어떤 응답과도 맞지 않는다.
+    external_id: u64 = 0,
+    external_kind: maru.session.editor.external_format.Kind = .prettier,
+    /// 외부 포매터를 띄운 순간의 본문 revision(`opened.file.revision` — 편집마다 오른다). 낡음은 이것으로 잰다 — `lsp_version` 은 언어
+    /// 서버가 그 문서를 열 때(didOpen) 0 → 1 로 올라, 막 연 문서의 결과를 그사이 언어 서버가 열면 멀쩡한 결과를 버렸다(적대적 검증).
+    external_revision: u64 = 0,
+    /// 사용자 셸 환경을 담는 중이라 외부 포매터를 아직 못 띄웠다(`⌘S` 만) — tick 이 다시 준비한다.
+    preparing: bool = false,
 };
+
+/// 외부 포매터를 기다릴 때의 `waiting_seq` — 언어 서버의 응답 번호와 겹치지 않는다.
+const no_seq: u32 = std.math.maxInt(u32);
+
+/// 외부 포매터를 기다리기 시작한다(`started`). 앞서 기다리던 외부 실행이 있으면 버린다.
+fn waitExternal(st: *State, term: *Term, started: external_formatter.Started) void {
+    dropExternal(st);
+    st.waiting = true;
+    st.waiting_seq = no_seq;
+    st.waiting_surface = term.surface.id;
+    st.asked_version = term.rt.editorDocument().notifications.lsp_version;
+    st.external_id = started.id;
+    st.external_kind = started.kind;
+    st.external_revision = documentRevision(term);
+}
+
+/// 편집기의 본문 revision(문서가 없으면 0).
+fn documentRevision(term: *Term) u64 {
+    const doc = term.rt.editorDocument().opened orelse return 0;
+    return doc.file.revision;
+}
+
+/// 기다리던 외부 실행이 있으면 그 결과를 버린다(새 요청·시한·다른 문서의 저장).
+fn dropExternal(st: *State) void {
+    if (st.external_id != 0) format_process.abandon(st.external_id);
+    st.external_id = 0;
+    st.preparing = false;
+}
 
 /// 저장 시 포맷이 응답을 기다리는 시한(ms) — 넘기면 포맷 없이 저장한다(2026-10-11 사용자 결정 「시한 뒤 그냥 저장」). 1 초: 사람이 「저장이
 /// 늦다」고 느끼기 전이고, 정상 서버의 문서 포맷은 대개 그 안에 온다(VS Code 의 옛 `editor.formatOnSaveTimeout` 기본 750ms 와 같은 크기).
@@ -56,7 +98,20 @@ pub fn formatDocument(self: *AppSession) bool {
     const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false; // 싼 조기 반환 — 실제 방어는 `EditableFile.apply` 의 `error.ReadOnly`(§3.5)
     const st = &self.editor_format;
+    switch (external_formatter.prepare(self, term, .command)) {
+        .lsp => {},
+        .started => |started| {
+            waitExternal(st, term, started);
+            return true;
+        },
+        .preparing => {
+            self.showNoticeKey(.fmt_external_preparing);
+            return false;
+        },
+        .skip => return false,
+    }
     const seq = editor_lsp.requestFormatting(self, term) orelse return false;
+    dropExternal(st);
     st.waiting = true;
     st.waiting_seq = seq;
     st.waiting_surface = term.surface.id;
@@ -85,14 +140,36 @@ fn saveCommandImpl(self: *AppSession, term: *Term, late: bool) void {
     }
     if (self.loaded_config.config.editor.format_on_save and term.kind == .editor and term.rt.editor_diff == null) {
         if (term.rt.editorDocument().opened) |doc| if (!doc.file.read_only) {
-            if (editor_lsp.requestFormatting(self, term)) |seq| {
-                st.waiting = true;
-                st.waiting_seq = seq;
-                st.waiting_surface = term.surface.id;
-                st.asked_version = term.rt.editorDocument().notifications.lsp_version;
-                st.then_save = true;
-                st.save_deadline_ms = self.awakeMs() + save_format_timeout_ms;
-                return;
+            switch (external_formatter.prepare(self, term, .save)) {
+                .lsp => if (editor_lsp.requestFormatting(self, term)) |seq| {
+                    dropExternal(st);
+                    st.waiting = true;
+                    st.waiting_seq = seq;
+                    st.waiting_surface = term.surface.id;
+                    st.asked_version = term.rt.editorDocument().notifications.lsp_version;
+                    st.then_save = true;
+                    st.save_deadline_ms = self.awakeMs() + save_format_timeout_ms;
+                    return;
+                },
+                .started => |started| {
+                    waitExternal(st, term, started);
+                    st.then_save = true;
+                    st.save_deadline_ms = self.awakeMs() + external_save_timeout_ms;
+                    return;
+                },
+                .preparing => |kind| {
+                    dropExternal(st);
+                    st.external_kind = kind;
+                    st.waiting = true;
+                    st.waiting_seq = no_seq;
+                    st.waiting_surface = term.surface.id;
+                    st.asked_version = term.rt.editorDocument().notifications.lsp_version;
+                    st.preparing = true;
+                    st.then_save = true;
+                    st.save_deadline_ms = self.awakeMs() + external_save_timeout_ms;
+                    return;
+                },
+                .skip => {},
             }
         };
     }
@@ -103,15 +180,71 @@ fn saveCommandImpl(self: *AppSession, term: *Term, late: bool) void {
 /// 저장하고 알린다 — 늦게 온 응답은 seq 가 달라 버려진다.
 pub fn tick(self: *AppSession, now_ms: u64) void {
     const st = &self.editor_format;
-    if (!st.waiting or !st.then_save or now_ms < st.save_deadline_ms) return;
+    if (!st.waiting) return;
+    if (st.preparing) retryPrepare(self);
+    if (st.external_id != 0) if (format_process.take(st.external_id)) |r| {
+        defer r.deinit();
+        return onExternal(self, r);
+    };
+    if (!st.then_save or now_ms < st.save_deadline_ms) return;
     st.save_timeouts += 1;
-    self.showResponseNotice(.fmt_save_timeout, &.{}); // 저장 실패면 그 알림이 이것을 덮는다(더 중요하다)
+    // 저장 실패면 그 알림이 이것을 덮는다(더 중요하다). 외부 포매터·셸 환경을 기다렸으면 그 이름으로 — 「언어 서버가 늦었다」는 거짓이다
+    // (적대적 검증 EF1 2회차).
+    if (st.external_id != 0 or st.preparing)
+        self.showResponseNotice(.fmt_external_timeout_saved, &.{.{ .s = st.external_kind.displayName() }})
+    else
+        self.showResponseNotice(.fmt_save_timeout, &.{});
     finishPendingSave(self, true);
+}
+
+/// 창이 닫힌다 — 기다리던 외부 포매터가 있으면 그 결과를 버린다. 결과 목록은 앱 전역이라 그대로 두면 아무도 안 가져가 남는다(적대적 검증
+/// EF1 1회차).
+pub fn deinit(self: *AppSession) void {
+    dropExternal(&self.editor_format);
+}
+
+/// 외부 포매터를 기다리는 저장의 시한 — 실행기의 시한(`format_process.default_timeout_ms`) 뒤에 결과가 올 여유를 둔다. 실행기가 먼저
+/// 그룹째 끝내고 `timeout` 결과를 내므로, 이것은 결과가 안 오는 경우(스레드를 못 띄웠다)의 마지막 그물이다.
+pub const external_save_timeout_ms: u64 = format_process.default_timeout_ms + 1000;
+
+/// 셸 환경을 기다리던 `⌘S` — 담겼으면 다시 준비한다(외부 포매터를 띄우거나, 그사이 설정·신뢰가 바뀌었으면 그대로 저장).
+fn retryPrepare(self: *AppSession) void {
+    const st = &self.editor_format;
+    const term = editorTerm(self, st.waiting_surface) orelse {
+        st.waiting = false;
+        st.then_save = false;
+        st.preparing = false;
+        return;
+    };
+    switch (external_formatter.prepare(self, term, .save)) {
+        .preparing => {},
+        .started => |started| {
+            st.preparing = false;
+            st.external_id = started.id;
+            st.external_kind = started.kind;
+            // 문서는 그사이 바뀌었을 수 있다 — 띄운 순간의 revision 으로 결과를 잰다.
+            st.external_revision = documentRevision(term);
+        },
+        .lsp, .skip => finishPendingSave(self, true),
+    }
+}
+
+/// 외부 포매터의 결과 — 적용(또는 버림·실패 알림) 뒤 저장 시 포맷이면 저장한다.
+fn onExternal(self: *AppSession, r: *const format_process.Result) void {
+    const st = &self.editor_format;
+    st.waiting = false;
+    st.external_id = 0;
+    const then_save = st.then_save;
+    st.then_save = false;
+    const term = editorTerm(self, st.waiting_surface) orelse return;
+    defer if (then_save) saveNow(self, term, true);
+    external_formatter.apply(self, term, st.external_kind, r, st.external_revision, then_save);
 }
 
 /// 기다리던 저장을 포맷 없이 지금 한다(시한 — `late`·다른 문서의 저장). 문서가 닫혔으면 할 것이 없다(닫기는 저장하지 않은 편집을 묻는다).
 fn finishPendingSave(self: *AppSession, late: bool) void {
     const st = &self.editor_format;
+    dropExternal(st);
     st.waiting = false;
     st.then_save = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;

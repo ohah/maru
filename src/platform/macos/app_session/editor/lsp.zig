@@ -357,6 +357,27 @@ fn rootFor(self: *AppSession, term: *Term) ?[]const u8 {
     return root;
 }
 
+/// 외부 포매터(tooling §8.2t)가 쓰는 문서의 저장소 루트 — 언어 서버와 **같은 판정**(`rootFor`)이다(두 벌이면 한쪽만 낡는다).
+pub fn documentRoot(self: *AppSession, term: *Term) ?[]const u8 {
+    return rootFor(self, term);
+}
+
+/// 외부 포매터(tooling §8.2t)가 자식에 줄 그 저장소의 도구 환경 — 언어 서버를 띄울 때와 **같은 것**(사용자 셸 환경·제외 목록·저장소 셸
+/// 환경 스위치, §8.1). 아직 담는 중이면 `null` 이고 담기를 시작한다(처음이면 — `gateTrust` 와 같은 순서: 제외 목록을 먼저 정한다).
+pub fn toolEnvironment(self: *AppSession, root: []const u8) ?tool_env.View {
+    if (!ensureToolEnvironment(self)) return null;
+    return tool_env.rootView(root, repoEnvironmentEnabled(self));
+}
+
+/// 사용자 셸 환경을 담기 시작하고(처음이면 — 제외 목록을 먼저 이 창의 설정으로 정한다, 계획 WT5b-1) 다 담았나. 언어 서버의 gate 와
+/// 외부 포매터(§8.2t)가 **이 하나**를 지난다 — 두 벌이면 한쪽만 순서가 낡는다(LSPE17 이 자리를 센다).
+fn ensureToolEnvironment(self: *AppSession) bool {
+    tool_env.initExcluded(self.loaded_config.config.lsp.environment_exclude);
+    if (tool_env.settled()) return true;
+    tool_env.tick(self.loaded_config.config.lsp.shell_environment);
+    return tool_env.settled();
+}
+
 /// 문서의 절대 경로 — 편집기 Term 이 여는 순간 굳힌 `editor_document.path`(탭 라벨·컨트롤 플레인이 읽는 그것).
 fn termPath(term: *const Term) ?[]const u8 {
     return term.rt.editorDocument().path;
@@ -1986,13 +2007,9 @@ fn gateTrust(self: *AppSession, c: *Client, doc_path: ?[]const u8) void {
     // 사용자 셸 환경을 담는 중이면 「없음」을 판정하지 않는다(계획 WT3b) — 담으면 다음 gate 가 그 환경으로 찾는다. 처음이면 여기서 시작한다
     // (서버가 필요한 문서가 처음 생긴 순간 — 셸을 안 띄우는 경우는 그 자리에서 정해져 같은 gate 가 바로 이어 간다).
     // 제외 목록은 띄우기 전에 정한다 — 아직 아무도 정하지 않았으면 이 창의 설정으로(다시 읽기 명령이 먼저 담았어도; 계획 WT5b-1).
-    tool_env.initExcluded(self.loaded_config.config.lsp.environment_exclude);
-    if (!tool_env.settled()) {
-        tool_env.tick(self.loaded_config.config.lsp.shell_environment);
-        if (!tool_env.settled()) {
-            c.phase = .preparing;
-            return;
-        }
+    if (!ensureToolEnvironment(self)) {
+        c.phase = .preparing;
+        return;
     }
     // 실행 파일이 없으면 신뢰를 묻지 않는다 — 「설치」가 먼저다. 없는 채면 다른 후보가 생겼는지 다시 고른다(TS 계열 — §8.2a 「서버 찾기」).
     // 사용자 셸 환경의 PATH 로 찾는다. 찾기는 실행이 아니므로 저장소 아래 PATH 항목도 거르지 않는다 — 거르면 저장소 안에 설치한 서버가

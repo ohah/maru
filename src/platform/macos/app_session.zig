@@ -22727,7 +22727,18 @@ pub const AppSession = struct {
             // 교체한다. 사이드바 place가 atlas를 grow/repack하면 retained self.cells의 UV가 stale이 되므로, place
             // 전후 atlas.generation 변화를 감지해 변했으면 부분 swap을 버리고 metal_dirty로 다음 tick 전체 재투영을
             // 예약한다(모든 pane+사이드바를 한 세대로 다시 정규화 — docs/io-render-present.md §11).
-            if (builtin.os.tag == .macos) {
+            //
+            // **chrome 기하가 바뀌었으면 부분 교체를 하지 않는다.** 이 경로는 사이드바 글자 셀만 바꾸고 밴드·tint·accent
+            // quad(`gpu_quads`)는 전체 투영만 버퍼로 옮긴다. 그런데 글자 셀은 이제 헤더·스크롤까지 화면 y 로 굽는다
+            // (`applySidebarGlyphPyTop`) — sync hold 중 사이드바를 굴린 뒤 여기로 오면 글자는 새 스크롤, 밴드는 옛
+            // 스크롤에 그려졌다(판정자 「sidebar 부분 교체: sync hold 중 …」가 실측: 글자 18px·밴드 0px). 기하가 같을 때만
+            // 부분 교체하고, 다르면 둘을 함께 옮기는 전체 투영에 맡긴다 — 그 투영은 hold 가 풀리거나(ESU) timeout 이면 돈다.
+            const chrome_geometry_moved = self.metal_buffer.chrome_geometry_stamped and
+                !std.meta.eql(self.metal_buffer.chrome_geometry, self.chromeGeometrySnapshot());
+            if (chrome_geometry_moved) {
+                self.metal_dirty = true; // 스크롤이 이미 세웠지만, 기하를 바꾼 다른 경로가 빠뜨려도 전체 투영이 온다
+                self.chrome_dirty = false;
+            } else if (builtin.os.tag == .macos) {
                 var collected: std.ArrayList(CollectedPane) = .empty;
                 defer {
                     for (collected.items) |*c| c.deinit(self.allocator);
@@ -66583,6 +66594,82 @@ test "sidebar 세로: 투영된 카드 글자 셀은 화면 y 로 나오고, 스
         moved += 1;
     }
     try std.testing.expect(moved >= 1);
+}
+
+// **사이드바만 다시 그리는 경로는 글자만 옮기지 않는다.** sync hold(DECSET 2026) 동안 전체 투영은 막히고, 다른 탭
+// 출력이 사이드바만 다시 그린다(`replaceSidebar`). 그 경로는 글자 셀만 바꾸고 밴드 quad(`gpu_quads`)는 전체 투영만
+// 옮긴다 — 그 사이 스크롤이 바뀌었으면 글자는 새 자리, 밴드는 옛 자리에 그려졌다(2026-10-12 적대적 검증이 찾았다).
+test "sidebar 부분 교체: sync hold 중 스크롤이 바뀌어도 글자와 밴드 quad 가 같이 움직인다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영 + 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try session.resize(1200, 320, 1000);
+    var added: usize = 0;
+    while (added < 8 and sidebar_ops.sidebarMaxScroll(session) == 0) : (added += 1) {
+        _ = try tab_ops.createTab(
+            session,
+            .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 40, .rows = 10 } },
+            .{ .cols = 40, .rows = 10 },
+            16,
+            "tab",
+            "sh",
+        );
+        try sidebar_ops.rebuildSidebar(session);
+    }
+    try std.testing.expect(sidebar_ops.sidebarMaxScroll(session) > 0);
+    const H = struct {
+        fn project(s: *AppSession) !void {
+            s.metal_dirty = true;
+            for (0..4) |_| {
+                _ = try s.tick();
+                if (!s.metal_dirty) break;
+            }
+        }
+        /// 올려 둔 글자 셀 중 가장 아래 이름줄 y — 스크롤에 함께 움직이는 기준점.
+        fn lowestNameY(s: *AppSession) ?u32 {
+            var best: ?u32 = null;
+            for (s.metal_buffer.sidebar_cells) |c| {
+                if (c.slot_id == 0 or maru.sidebar_glyph_rows.decode(c.row).line_index != 0) continue;
+                if (best == null or c.origin_y > best.?) best = c.origin_y;
+            }
+            return best;
+        }
+        /// 올려 둔 사이드바(layer 0) quad 중 가장 아래 y.
+        fn lowestBandY(s: *AppSession) ?f32 {
+            var best: ?f32 = null;
+            for (s.metal_buffer.gpu_quads) |q| {
+                if (q.layer != 0) continue;
+                if (best == null or q.y > best.?) best = q.y;
+            }
+            return best;
+        }
+    };
+    try H.project(session);
+    const text0 = H.lowestNameY(session).?;
+    const band0 = H.lowestBandY(session).?;
+
+    // sync hold 에 들어간다 — 활성 셸이 BSU 를 열고 아직 ESU 를 안 보낸 순간(전체 투영이 막힌다).
+    const surface = term_ops.activeSurface(session);
+    surface.core.sync_output = true;
+    defer surface.core.sync_output = false;
+    // 그 사이 사용자가 사이드바를 굴리고, 다른 탭 출력이 사이드바만 다시 그리라고 한다.
+    const scroll: u32 = @min(sidebar_ops.sidebarMaxScroll(session), sidebar_ops.sidebarMetrics(session).line_h);
+    sidebar_ops.setSidebarScrollOffsetPx(session, scroll);
+    session.chrome_dirty = true;
+    _ = try session.tick();
+    try std.testing.expect(session.metal_dirty); // 전체 투영은 여전히 막혀 있다(이 판정이 sync hold 를 잰다는 전제)
+    const text_moved: i64 = @as(i64, text0) - @as(i64, H.lowestNameY(session).?);
+    const band_moved: i64 = @intFromFloat(band0 - H.lowestBandY(session).?);
+    // ★ 글자와 밴드는 **같은 양**만큼 움직인다(둘 다 0 이든 둘 다 scroll 이든). 갈리면 글자가 밴드 밖에 그려진다.
+    try std.testing.expectEqual(band_moved, text_moved);
+
+    // hold 가 풀리면 전체 투영이 둘을 함께 새 스크롤로 옮긴다.
+    surface.core.sync_output = false;
+    try H.project(session);
+    try std.testing.expectEqual(@as(i64, scroll), @as(i64, text0) - @as(i64, H.lowestNameY(session).?));
+    try std.testing.expectEqual(@as(i64, scroll), @as(i64, @intFromFloat(band0 - H.lowestBandY(session).?)));
 }
 
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS

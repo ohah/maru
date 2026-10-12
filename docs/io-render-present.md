@@ -296,6 +296,7 @@ continuation·atlas slot 재사용)는 그대로이고 수치만 「글자 수�
 3. **`replaceSidebar()`**(`metal_frame.zig`): `sidebar_cells` + `uploads`/`pixels`(사이드바 delta)만 build-then-swap하고 `generation++`. `self.cells`(터미널+chrome+헤더+오버레이)와 `cursor_cells`/`modal_cells_start` 인덱스는 **불변** — 헤드리스 테스트로 고정.
 4. **사이드바 전용 빌드 분기**: `buildSidebarTitleDrawList` → `collectShaped(.sidebar)` → `placeAndDistribute`(사이드바만, 나머지 out은 throwaway) → `replaceSidebar`. grid shapeOnly/core 재읽기는 건너뛴다.
 5. **atlas.generation 폴백**: 사이드바 place 전후 `renderer_state.atlas.generation` 변화(grow **또는** clean-repack)를 감지해 변했으면 부분 swap을 버리고 `metal_dirty=true`로 다음 tick 전체 재투영(모든 pane+사이드바를 한 세대로 재정규화). 스피너 글리프 resident라 드묾.
+6. **chrome 기하 폴백**(2026-10-12): 버퍼에 스탬프된 chrome 기하(`ChromeGeometry` — 사이드바 스크롤·헤더 높이 등)가 지금 값과 다르면 부분 swap을 **아예 하지 않고** `metal_dirty`로 전체 투영에 맡긴다. 이 경로는 사이드바 **글자 셀만** 바꾸고 밴드·tint·accent quad(`gpu_quads`)는 전체 투영만 버퍼로 옮기는데, 글자 셀은 헤더·스크롤까지 화면 y로 굽는다(`listToScreenY`, ABI 224). sync hold 중 사이드바를 굴린 뒤 다른 탭 출력이 이 경로를 돌리면 글자는 새 스크롤, 밴드는 옛 스크롤에 그려졌다(판정자 「sidebar 부분 교체: sync hold 중 …」 실측: 글자 18px·밴드 0px). hold가 풀리거나(ESU) timeout이면 전체 투영이 둘을 함께 옮긴다 — 그때까지 사이드바는 옛 프레임 그대로라 서로는 맞는다.
 
    **정정(2026-09-29): 「버리고 다음 tick 에 재투영」 만으로는 GPU 가 안 맞는다.** 버린 사이드바 배치의 글리프는 아틀라스에
    「올라감」으로 남는데, 그 업로드는 버려졌다. 다음 전체 투영은 그 글리프를 hit 로 처리해 **올리지 않고**, 텍스처의 그

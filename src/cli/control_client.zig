@@ -31,6 +31,14 @@ pub const gate_reason: []const u8 = "the control socket is not supported on Wind
 /// named pipe 이식 없이 Windows 빌드를 뚫는 방법이라, 런타임 분기로 바꾸면 링크가 깨진다.
 pub const gate: ?[]const u8 = if (builtin.os.tag == .windows) gate_reason else null;
 
+/// 서버는 한 줄이 1 MiB(`default_max_frame`)를 넘는 요청을 읽지 않고 연결을 버린다 — 보내다 끊기면 「인스턴스 없음」 으로 보였다
+/// (W9f 적대 리뷰 5 회차). 넘으면 stderr 에 이유를 쓰고 참.
+pub fn requestTooLarge(request_bytes: []const u8, stderr: *std.Io.Writer) bool {
+    if (request_bytes.len <= cp.default_max_frame) return false;
+    stderr.print("request too large: {d} bytes; the control channel takes at most {d} bytes per request — send less text at once.\n", .{ request_bytes.len, cp.default_max_frame }) catch {};
+    return true;
+}
+
 /// 살아있는 maru 인스턴스가 없거나 connect가 실패했을 때의 graceful 종료. stderr에 안내를 쓰고
 /// `error.UnknownCommand`(main이 트레이스 없이 exit 1로 접는 sentinel)를 돌려준다 — 사용자 오타/부재에
 /// crash처럼 보이지 않게. `detail`은 있으면 괄호로 덧붙인다.
@@ -91,6 +99,7 @@ fn connectSendAs(io: std.Io, allocator: std.mem.Allocator, request_bytes: []cons
     // `c.socket`이 undefined symbol이 되지 않는다(실측 확인) — 이것이 named pipe 이식 없이 빌드를 뚫는 방법이다.
     if (gate) |reason|
         return noInstance(stderr, reason);
+    if (requestTooLarge(request_bytes, stderr)) return error.UnknownCommand;
 
     const c = std.c;
     const posix = std.posix;
@@ -236,4 +245,15 @@ test "W9b③ 적대 리뷰 3 회차: 「답 없음」 은 연결 수 초과도 �
     try std.testing.expectEqual(error.UnknownCommand, noAnswer(&w));
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "too many connections") != null);
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "time limit") != null);
+}
+
+test "W9f 적대 리뷰 5 회차: 프레임 상한(1 MiB)을 넘는 요청은 보내기 전에 크기를 알린다 — 「인스턴스 없음」 이 아니다" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const big = try std.testing.allocator.alloc(u8, cp.default_max_frame + 1);
+    defer std.testing.allocator.free(big);
+    try std.testing.expect(!requestTooLarge(big[0..cp.default_max_frame], &w));
+    try std.testing.expectEqual(@as(usize, 0), w.buffered().len);
+    try std.testing.expect(requestTooLarge(big, &w));
+    try std.testing.expect(std.mem.startsWith(u8, w.buffered(), "request too large: 1048577 bytes"));
 }

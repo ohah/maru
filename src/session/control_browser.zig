@@ -1330,6 +1330,9 @@ fn writeGetCookiesResult(s: *std.json.Stringify, id: cp.Id, cookies: std.json.Va
     try endResult(s);
 }
 
+/// snapshot 트리 노드 깊이 상한 — Chromium 의 `web_cdp_snapshot.max_emit_depth` 와 같다(W9f 적대 리뷰 5 회차).
+pub const max_snapshot_node_depth: usize = 100;
+
 /// Swift `BrowserControl.snapshot`가 직렬화한 **JSON**(`{tree:[...]}` 또는 selector 미발견/루트 없음 시 `null`)을 파싱해
 /// `{result:{snapshot:<value>}}`로 구조화 embed(§9.5.4 — getCookies와 동형, 에이전트 이중 파싱 불요). 파싱 실패(malformed)=
 /// `InvalidSnapshotJson`(L4가 internal_error로 접음 — Swift 직렬화 버그 방어). caller free.
@@ -1339,11 +1342,25 @@ pub fn serializeSnapshotResult(gpa: std.mem.Allocator, id: cp.Id, snapshot_json:
         else => return error.InvalidSnapshotJson,
     };
     defer parsed.deinit();
+    // 깊은 트리를 그대로 다시 쓰면 `std.json.Stringify` 의 중첩 스택(256)을 넘어 앱이 죽었다(W9f 적대 리뷰 5 회차 — WebKit 의 snapshot 은
+    // 깊이 상한이 없다). Chromium 과 같은 깊이에서 자식을 끊는다.
+    if (parsed.value == .object) if (parsed.value.object.getPtr("tree")) |tree| pruneSnapshotDepth(tree, 0);
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
     (writeSnapshotResult(&s, id, parsed.value)) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
+}
+
+/// `nodes`(snapshot 노드 배열)에서 깊이 `max_snapshot_node_depth` 를 넘는 자식을 뗀다 — 재귀는 그 깊이로 묶인다.
+fn pruneSnapshotDepth(nodes: *std.json.Value, depth: usize) void {
+    if (nodes.* != .array) return;
+    for (nodes.array.items) |*node| {
+        if (node.* != .object) continue;
+        if (depth + 1 >= max_snapshot_node_depth) {
+            _ = node.object.orderedRemove("children");
+        } else if (node.object.getPtr("children")) |kids| pruneSnapshotDepth(kids, depth + 1);
+    }
 }
 
 fn writeSnapshotResult(s: *std.json.Stringify, id: cp.Id, snap: std.json.Value) !void {
@@ -4468,4 +4485,19 @@ test "W9b③ 적대 리뷰 3 회차: act 결과의 dialog(누른 뒤 페이지�
     defer testing.allocator.free(located);
     try testing.expectEqualStrings("{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"ok\":true,\"matched\":{\"ref\":\"n1\",\"name\":\"Go\"},\"dialog\":true}}", located);
     try testing.expectError(error.InvalidActPayload, serializeActMatchedResult(testing.allocator, .{ .number = 7 }, "{\"ok\":true}"));
+}
+
+test "W9f 적대 리뷰 5 회차: WebKit snapshot 이 아주 깊어도 앱이 죽지 않는다 — Chromium 과 같은 깊이(100)에서 자식을 끊는다" {
+    const depth = 300;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(testing.allocator);
+    try src.appendSlice(testing.allocator, "{\"tree\":[");
+    for (0..depth) |_| try src.appendSlice(testing.allocator, "{\"role\":\"group\",\"ref\":\"e1\",\"children\":[");
+    for (0..depth) |_| try src.appendSlice(testing.allocator, "]}");
+    try src.appendSlice(testing.allocator, "]}");
+    const out = try serializeSnapshotResult(testing.allocator, .{ .number = 1 }, src.items);
+    defer testing.allocator.free(out);
+    try testing.expectEqual(@as(usize, max_snapshot_node_depth), std.mem.count(u8, out, "\"role\":\"group\""));
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    parsed.deinit();
 }

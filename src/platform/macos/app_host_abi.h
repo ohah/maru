@@ -19,7 +19,7 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 227u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 228u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -357,7 +357,9 @@ typedef struct MaruAppHostMetalCell {
     /* 이 셀을 자를 사각형의 cell_clips index + 1(0 = 자르지 않음). ABI v169 — 자세한 근거는 아래
        cell_clips 주석. */
     uint16_t clip_index;
-    uint16_t _clip_pad;
+    /* 전경 글리프 quad 를 셀 왼쪽에서 미는 px(ABI 228). 셀보다 크게 구운 아이콘(cell-raster role)이 차지한 칸들의
+       가운데에 서게 Zig(`metal_frame.cellRasterIconGlyphOffsetPx`)가 정한다. 배경 quad 는 안 본다. 그 밖의 셀은 0. */
+    uint16_t glyph_offset_x_px;
 } MaruAppHostMetalCell;
 
 /* 셀이 clip_index로 가리키는 사각형(backing px, 좌상단 원점 — MTLScissorRect와 같은 규약). */

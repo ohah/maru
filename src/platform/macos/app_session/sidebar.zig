@@ -987,27 +987,30 @@ pub fn rebuildSidebar(self: *AppSession) !void {
         self.appendSolidQuad(0, uy, @floatFromInt(self.sidebar_width_px), thickness, pane_ops.dividerColor(self), 0);
     }
     // 헤더 아이콘 호버 배경(웹 버튼 hover) — hovered_header_region이 아이콘이면 그 아이콘 뒤에 둥근 quad(layer 0,
-    // 아이콘 셀 아래). 아이콘 col은 buildSidebarHeaderDrawList과 같은 단일 레이아웃(◧ cols-8·⚙ cols-5·+ cols-2).
-    // 아이콘은 .m이 1.7×로 확대+py_nudge 0.30하므로 셀 중심(가로)·~0.8ch(세로)에 앉는다 — quad를 거기에 맞춰 약 2칸×
-    // 1.7줄로 덮고 가운데 정렬. 색은 탭 ‹›/슬롯 호버와 같은 sidebarHoverBg(중간 톤).
+    // 아이콘 셀 아래). 아이콘 col은 헤더 셀을 내는 `cell_text.appendSidebarHeaderIcons` 와 같은 출처(`headerIconCol`·
+    // `sidebarBellCol`)에서 읽는다. 아이콘은 Zig 가 셀×1.7 로 굽고 그려진 글리프 중심에 quad 를 맞춰 약 2.6칸×1.7줄로
+    // 덮는다. 색은 전경색 기반 반투명(아래).
     if (self.hovered_header_region) |hr| {
         if (self.cell_width_px > 0 and self.cell_height_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10) {
             const cols: u32 = self.sidebar_width_px / self.cell_width_px;
-            const icon_col: u32 = switch (hr) {
-                .toggle_sidebar => cols -| 8,
-                .view_options => cols -| 5,
-                .new_workspace => cols -| 2,
-                .notifications => cols -| 12, // 벨 글리프(col cols-12, 2칸 폭)와 hover 정렬 — 2.6칸 폭 quad가 cols-12·cols-11 글리프를 덮는다
-                .search, .none => cols, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
+            const sb = chrome.components.sidebar;
+            // 아이콘 열과 폭은 헤더 셀을 내는 쪽(`cell_text.appendSidebarHeaderIcons`)과 같은 출처에서 읽는다 — 예전에는
+            // 여기서 `cols -| 8` · `cols -| 12` 를 다시 적었다.
+            const icon_col: u32, const span: u16 = switch (hr) {
+                .toggle_sidebar => .{ sb.headerIconCol(.toggle_sidebar, cols), 1 },
+                .view_options => .{ sb.headerIconCol(.view_options, cols), 1 },
+                .new_workspace => .{ sb.headerIconCol(.new_workspace, cols), 1 },
+                .notifications => .{ cell_text.sidebarBellCol(@intCast(@min(cols, std.math.maxInt(u16)))), cell_text.sidebar_bell_cols },
+                .search, .none => .{ cols, 1 }, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
             };
             const cw: f32 = @floatFromInt(self.cell_width_px);
             const ch: f32 = @floatFromInt(self.cell_height_px);
-            // hover quad 중심 = 글리프 중심. 1칸 아이콘(◧⚙+)은 셀 중심 (icon_col+0.5)cw. 종(notifications)은 EAW
-            // width 2라 .m(cell-raster role 셀은 차지한 칸들의 가운데에 그린다)이 2칸 footprint 중앙 (icon_col+1)cw에 그리므로 +1.0이라야 한다 — +0.5면 왼쪽
-            // 셀(cols-12) 중심에 박스가 떨어져 좁아진 종이 박스 우측으로 치우쳐 보인다(예전 3.4cw 종은 박스보다 커서
-            // 0.5cw 어긋남이 안 보였으나, width-2 수정으로 1.7cw가 되며 드러난 기존 버그).
-            const center_cells: f32 = if (hr == .notifications) 1.0 else 0.5;
-            const center_x: f32 = (@as(f32, @floatFromInt(icon_col)) + center_cells) * cw; // 글리프 중심(=.m cell-raster footprint 중심)
+            // hover quad 중심 = 그려진 글리프 중심. 크게 구운 아이콘은 **한 칸** quad 를 키워 차지한 칸들의 가운데에
+            // 그린다 — 그 이동(`metal_frame.cellRasterIconGlyphOffsetPx`)을 렌더러가 셀의 `glyph_offset_x_px` 로 받아
+            // 더하므로, 여기서도 같은 함수로 중심을 낸다(1칸이면 셀 중심, 종(2칸)이면 반 칸 오른쪽). 예전에는 「종이면
+            // +1.0칸」을 여기서 따로 들었다 — 어긋나면 좁아진 종이 박스 한쪽으로 치우쳐 보인다(실제로 있었던 버그).
+            const offset: f32 = @floatFromInt(metal_frame.cellRasterIconGlyphOffsetPx(self.cell_width_px, span));
+            const center_x: f32 = @as(f32, @floatFromInt(icon_col)) * cw + offset + cw / 2.0; // 그려진 글리프 중심
             const w: f32 = cw * 2.6; // 좌우 패딩을 더 줘 버튼처럼(아이콘 ~1.7칸 + 양옆 여백) — 사용자 피드백
             const h: f32 = ch * 1.7;
             const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼

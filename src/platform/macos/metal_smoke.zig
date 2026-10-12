@@ -855,7 +855,7 @@ test "NativeMetalCell ABI keeps atlas placement and uv fields tightly packed" {
     // NativeMetalCell은 appkit_metal_smoke.m의 MaruMetalSmokeCell과 같은 메모리 모양이어야
     // 한다. 필드를 추가할 때 이 크기가 예고 없이 바뀌면 ObjC bridge가 atlas 좌표를 다른
     // 값으로 읽어 Metal smoke가 거짓 신호를 낼 수 있다. foreground·background(u32)에 이어 panel
-    // 픽셀 origin_x/origin_y(u32) 추가로 64바이트가 됐고, **clip_index/_clip_pad(u16 둘)** 로 68이
+    // 픽셀 origin_x/origin_y(u32) 추가로 64바이트가 됐고, **clip_index/glyph_offset_x_px(u16 둘 — 뒤의 것은 v169 에 `_clip_pad` 패딩이었고 ABI 228 에서 의미를 얻었다)** 로 68이
     // 됐다(ABI v169). offset도 고정해, 새 필드를 끼워 넣어 기존 필드가 밀리면 크기는 같아도 잡히게 한다.
     //
     // 🔥 **이 판정자가 실제로 그 일을 잡았다** — `clip_index` 를 더한 커밋이 ObjC 미러
@@ -869,6 +869,7 @@ test "NativeMetalCell ABI keeps atlas placement and uv fields tightly packed" {
     try std.testing.expectEqual(@as(usize, 60), @offsetOf(NativeMetalCell, "origin_y"));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(NativeMetalCell, "codepoint"));
     try std.testing.expectEqual(@as(usize, 64), @offsetOf(NativeMetalCell, "clip_index"));
+    try std.testing.expectEqual(@as(usize, 66), @offsetOf(NativeMetalCell, "glyph_offset_x_px"));
 }
 
 test "ObjC 미러(MaruMetalSmokeCell)가 Zig 필드를 «하나도 빠뜨리지 않는다»" {
@@ -907,8 +908,7 @@ test "ObjC 미러(MaruMetalSmokeCell)가 Zig 필드를 «하나도 빠뜨리지 
     // `NativeMetalCell` 의 **모든 필드**가 미러에 있어야 한다 — 이름으로 센다(순서는 아래 offset
     // 판정자가 이미 못박는다).
     inline for (@typeInfo(NativeMetalCell).@"struct".fields) |f| {
-        // Zig 의 `_clip_pad` 는 C 에서 `clip_pad` 다(선행 밑줄은 예약어 관례라 안 쓴다).
-        const want = comptime if (std.mem.eql(u8, f.name, "_clip_pad")) "clip_pad" else f.name;
+        const want = f.name;
         if (std.mem.indexOf(u8, body, want) == null) {
             std.debug.print(
                 "🔥 ObjC 미러에 `{s}` 가 없다 — Zig {d} B 짜리 셀을 ObjC 가 더 짧게 훑어 자리가 밀린다.\n",

@@ -89,7 +89,11 @@ pub const NativeMetalCell = extern struct {
     /// scissor 분기에 **한 번도 진입하지 못했다**(v147이 죽은 채로 있었다). 셀과 index가 같은 배열에
     /// 있으면 그 어긋남이 정의상 불가능하다 — `GpuQuad.clip_*`가 quad에서 이미 그렇게 한다.
     clip_index: u16 = 0,
-    _clip_pad: u16 = 0,
+    /// **전경 글리프 quad 를 셀 왼쪽에서 미는 px**(ABI 228). 지금은 셀보다 크게 구운 아이콘(cell-raster role)만 쓴다 —
+    /// 그 quad 는 「한 칸」을 키운 것이고(atlas 를 셀 한 칸 ×배율로 구웠다), 글리프가 차지한 칸들의 가운데에 서야 한다
+    /// (`cellRasterIconGlyphOffsetPx`). 배경 quad 는 이 값을 안 본다 — 칸 전체를 그대로 칠한다. 예전에는 렌더러(.m)가
+    /// `cw × 0.5 × (span − 1)` 로 이 이동을 따로 셈했고, hover 사각형은 「종이면 +1.0칸」을 따로 들었다.
+    glyph_offset_x_px: u16 = 0,
 };
 
 /// NativeMetalCell.reserved의 glyph semantic 값. 커서·선 장식과 같은 기존 ABI 필드를 쓰되, 숫자를
@@ -109,9 +113,22 @@ pub const PaneClipRange = struct { start: usize, len: usize, rect: ClipPx };
 
 pub const PaneFrameRole = enum { normal, dock_toggle };
 
-fn applyPaneFrameRole(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad, role: PaneFrameRole) void {
+fn applyPaneFrameRole(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad, role: PaneFrameRole, cell_width_px: u32) void {
     if (role != .dock_toggle) return;
-    markCellRasterIcons(cells, glyphs);
+    markCellRasterIcons(cells, glyphs, cell_width_px);
+}
+
+/// 셀보다 크게 구운 아이콘(cell-raster role)의 전경 quad 를 셀 왼쪽에서 미는 px — **그 글리프가 차지한 칸들의 가운데**.
+///
+/// atlas 는 셀 **한 칸** ×배율로 굽는다. 그래서 2칸 글리프(종 — EAW width 2)의 quad 를 2칸으로 잡고 키우면 가로만 두 배가
+/// 돼 찌그러진다. 한 칸 quad 를 키우고 칸들의 가운데에 둔다: 1칸이면 0, 2칸이면 반 칸. 렌더러(`glyph_offset_x_px`)와
+/// hover 사각형 중심(`app_session/sidebar.zig`)이 이 값 하나를 쓴다.
+///
+/// 정수 px 다 — 셀 폭이 홀수면 반 칸을 내린다(예전 렌더러의 실수 `cw × 0.5` 보다 0.5px 왼쪽). hover 가 같은 값을 쓰므로
+/// 둘은 어긋나지 않는다.
+pub fn cellRasterIconGlyphOffsetPx(cell_width_px: u32, span: u16) u16 {
+    const extra: u32 = if (span > 1) span - 1 else 0;
+    return @intCast(@min(cell_width_px * extra / 2, std.math.maxInt(u16)));
 }
 
 /// 목표 크기(`raster_*_px`)를 선언하고 구운 글리프의 셀에 `native_cell_role_cell_raster_icon` 을 싣는다.
@@ -121,11 +138,14 @@ fn applyPaneFrameRole(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQu
 ///
 /// semantic role 은 실제 atlas glyph 에만 싣는다. cursor/underline 같은 장식 cell 의 reserved 를 덮으면
 /// 그 frame 이 caret/decoration 을 낼 때 부분 사각형 의미가 조용히 사라진다.
-fn markCellRasterIcons(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad) void {
+fn markCellRasterIcons(cells: []NativeMetalCell, glyphs: []const renderer.GlyphQuad, cell_width_px: u32) void {
     for (glyphs) |g| {
         if (g.slot.key.raster_width_px == 0 or g.slot.key.raster_height_px == 0) continue;
         for (cells) |*cell| {
-            if (cell.slot_id != 0 and cell.slot_id == g.slot.id and cell.reserved == 0) cell.reserved = native_cell_role_cell_raster_icon;
+            if (cell.slot_id != 0 and cell.slot_id == g.slot.id and cell.reserved == 0) {
+                cell.reserved = native_cell_role_cell_raster_icon;
+                cell.glyph_offset_x_px = cellRasterIconGlyphOffsetPx(cell_width_px, cell.width);
+            }
         }
     }
 }
@@ -1851,7 +1871,7 @@ pub const MetalFrameBuffer = struct {
             const built = try buildNativeCellsSplit(allocator, pf.frame.glyph_quad_frame, pf.frame.draw_list.cells, pf.colors);
             defer allocator.free(built.cells);
             setCellsPaneOrigin(built.cells, pf.origin_x, pf.origin_y);
-            applyPaneFrameRole(built.cells, pf.frame.glyph_quad_frame.glyphs, pf.role);
+            applyPaneFrameRole(built.cells, pf.frame.glyph_quad_frame.glyphs, pf.role, cell_width_px);
             // **role이 아니라 clip_rect의 유무**가 자를지를 정한다. role은 이제 glyph semantic 전용이다.
             if (pf.clip_rect) |clip| setCellsClipIndex(built.cells, try clipIndexFor(allocator, &clip_table, clip));
             try cells_list.appendSlice(allocator, built.cells);
@@ -1872,7 +1892,7 @@ pub const MetalFrameBuffer = struct {
             setCellsPaneOrigin(hcells, 0, self.sidebar_header_origin_y_px); // 화면 y 는 Zig 가 정한다(필드 주석)
             // 헤더 아이콘(셀보다 크게 굽는 것 — 그 목록은 `cell_text.isSidebarHeaderIcon` 이 소유)이 role 을 달고 나간다.
             // 예전에는 렌더러(.m)가 같은 목록을 codepoint 로, 배율을 `1.7f` 로 다시 적었다.
-            markCellRasterIcons(hcells, hf.glyph_quad_frame.glyphs);
+            markCellRasterIcons(hcells, hf.glyph_quad_frame.glyphs, cell_width_px);
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, hcells);
         }
         // 터미널 커서 구간의 **시작 index**를 여기서 확정한다 — 위 두 삽입은 모두 커서 '앞'이라 이 시점에 커서는 아직
@@ -3554,7 +3574,7 @@ test "셀보다 크게 구운 글리프만 cell-raster role 을 단다 — 같�
         testGlyphCell(2, collapse, 0),
         testGlyphCell(0, 0, 9), // 장식선(부분 사각형) — 의미를 덮으면 안 된다
     };
-    markCellRasterIcons(&cells, &glyphs);
+    markCellRasterIcons(&cells, &glyphs, 16);
     try std.testing.expectEqual(native_cell_role_cell_raster_icon, cells[0].reserved);
     try std.testing.expectEqual(@as(u16, 0), cells[1].reserved);
     try std.testing.expectEqual(@as(u16, 9), cells[2].reserved);
@@ -3566,12 +3586,35 @@ test "PaneFrameRole lowers dock toggle provenance without classifying the same P
     var dock = [_]NativeMetalCell{ testGlyphCell(1, collapse, 0), testGlyphCell(0, 0, 9) };
     var pane = dock;
 
-    applyPaneFrameRole(&dock, &glyphs, .dock_toggle);
-    applyPaneFrameRole(&pane, &glyphs, .normal);
+    applyPaneFrameRole(&dock, &glyphs, .dock_toggle, 16);
+    applyPaneFrameRole(&pane, &glyphs, .normal, 16);
 
     try std.testing.expectEqual(native_cell_role_cell_raster_icon, dock[0].reserved);
     try std.testing.expectEqual(@as(u16, 0), pane[0].reserved);
     try std.testing.expectEqual(@as(u16, 9), dock[1].reserved);
+}
+
+// 크게 구운 아이콘의 quad 는 한 칸을 키운 것이라, 2칸 글리프(종)면 반 칸 밀어야 칸들의 가운데에 선다. 그 이동을 Zig 가
+// 셀에 싣는다(`glyph_offset_x_px`) — 렌더러는 더하기만 한다. 예전에는 렌더러가 `cw × 0.5 × (span − 1)` 를 따로 셈했고
+// hover 사각형은 「종이면 +1.0칸」을 따로 들었다(layering §3.5). role 이 없는 셀은 0 이라 일반 글리프는 안 움직인다.
+test "cell-raster role 아이콘은 차지한 칸들의 가운데로 미는 px 를 셀에 싣는다 — 2칸이면 반 칸, 1칸이면 0" {
+    try std.testing.expectEqual(@as(u16, 0), cellRasterIconGlyphOffsetPx(16, 0));
+    try std.testing.expectEqual(@as(u16, 0), cellRasterIconGlyphOffsetPx(16, 1));
+    try std.testing.expectEqual(@as(u16, 8), cellRasterIconGlyphOffsetPx(16, 2));
+    try std.testing.expectEqual(@as(u16, 8), cellRasterIconGlyphOffsetPx(17, 2)); // 홀수 폭은 반 칸을 내린다
+    try std.testing.expectEqual(@as(u16, 16), cellRasterIconGlyphOffsetPx(16, 3));
+
+    const bell = icons.codepoint(.bell);
+    const collapse = icons.codepoint(.sidebar_collapse);
+    const glyphs = [_]renderer.GlyphQuad{ testRasterGlyph(1, bell, 30), testRasterGlyph(2, collapse, 30), testRasterGlyph(3, 'a', 0) };
+    var cells = [_]NativeMetalCell{ testGlyphCell(1, bell, 0), testGlyphCell(2, collapse, 0), testGlyphCell(3, 'a', 0) };
+    cells[0].width = 2;
+    cells[2].width = 2; // role 이 없으면 폭이 2여도 안 민다
+    markCellRasterIcons(&cells, &glyphs, 18);
+    try std.testing.expectEqual(@as(u16, 9), cells[0].glyph_offset_x_px);
+    try std.testing.expectEqual(@as(u16, 0), cells[1].glyph_offset_x_px);
+    try std.testing.expectEqual(@as(u16, 0), cells[2].glyph_offset_x_px);
+    try std.testing.expectEqual(@as(u16, 2), cells[0].width); // 배경은 칸 전체 그대로 — 폭을 줄이지 않는다
 }
 
 // 렌더러 슬라이스(web-panel.md §5): 탭/pane 드래그 시각물(drop 하이라이트·floating 고스트)을 **최상위 오버레이

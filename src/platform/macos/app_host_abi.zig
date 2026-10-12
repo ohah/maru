@@ -201,7 +201,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 227), abi_version);
+    try std.testing.expectEqual(@as(u32, 228), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -9077,6 +9077,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     // 프레임의 다른 포인터/usize와 같은 폭이라 @sizeOf로는 어느 쪽도 reorder를 못 잡는다 — 자리까지 고정한다.
     // 어긋나면 렌더러가 **다른 사각형으로** 자르므로 화면은 그럴듯한데 틀린 곳이 잘린다.
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalCell, "clip_index"), @offsetOf(AppMetalCell, "clip_index"));
+    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalCell, "glyph_offset_x_px"), @offsetOf(AppMetalCell, "glyph_offset_x_px"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "cell_clips"), @offsetOf(AppMetalFrame, "cell_clips"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "cell_clip_count"), @offsetOf(AppMetalFrame, "cell_clip_count"));
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostClipRect), @sizeOf(maru.renderer.metal_frame.ClipPx));

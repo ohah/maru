@@ -507,6 +507,26 @@ test "헤더 아이콘 줄의 세로 자리는 Objective-C 가 다시 적지 않
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mirror, "const float py_top = (float)tc.origin_y + (float)tc.row * ch;"));
 }
 
+// 크게 구운 아이콘의 가로 자리(차지한 칸들의 가운데)도 렌더러가 다시 적지 않는다(ABI 228). Zig 가 그 이동을 셀의
+// `glyph_offset_x_px`(`metal_frame.cellRasterIconGlyphOffsetPx`)로 싣고 hover 사각형도 같은 값을 쓴다. 예전 `.m` 은
+// `cw × 0.5 × (span − 1)` 를 따로 셈했고, hover 는 「종이면 +1.0칸」을 따로 들었다.
+test "크게 구운 아이콘의 가로 자리는 Objective-C 가 다시 적지 않는다 — 셀 glyph_offset_x_px 만 더한다 (layering §3.5)" {
+    const allocator = std.testing.allocator;
+    const raw_mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(raw_mirror);
+    const mirror = try stripCComments(allocator, raw_mirror);
+    defer allocator.free(mirror);
+    const forbidden = [_][]const u8{ "span_u - 1u", "cw * 0.5f * (float)" };
+    for (forbidden) |needle| {
+        if (std.mem.indexOf(u8, mirror, needle) != null) {
+            std.debug.print("\n아이콘 가로 자리 사본이 되살아났습니다: {s} 에 `{s}`\n  셀의 glyph_offset_x_px(`cellRasterIconGlyphOffsetPx`)를 그대로 더하세요.\n", .{ scale_mirror_file, needle });
+            return error.IconSpanCenterMirrorRevived;
+        }
+    }
+    // 전경 quad 가 그 값을 실제로 읽는다 — 이 식이 사라지면 위 검사가 무엇을 지키는지 모른다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mirror, "(float)tc.origin_x + (float)tc.glyph_offset_x_px"));
+}
+
 // 래스터 배치 역할(cover-fit·ink 중앙)도 Objective-C 가 codepoint 로 다시 고르지 않는다(2026-10-12). 호출자(Zig
 // `coretext_raster.zig`)가 `width.rasterFitFor` 로 정해 `raster_fit` 인자로 넘긴다. 예전 `.m` 은 wide-render-symbol
 // 범위(U+2460~24FF)를 주석-동기로 미러했고 ◧·⚙ 를 codepoint 로 골랐다.

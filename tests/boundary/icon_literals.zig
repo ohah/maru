@@ -527,6 +527,31 @@ test "크게 구운 아이콘의 가로 자리는 Objective-C 가 다시 적지 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mirror, "(float)tc.origin_x + (float)tc.glyph_offset_x_px"));
 }
 
+// Windows 헤더도 크게 구운 아이콘의 대상·사각형을 다시 적지 않는다(2026-10-13). 대상은 macOS 와 같은
+// `metal_frame.markCellRasterIcons`(구운 크기를 선언한 글리프에 role)가, 사각형은 `cellRasterIconQuadPx` 가, hover 판 중심은
+// `cellRasterIconCenterXPx` 가 정한다. 예전 `main.zig` 는 codepoint 목록으로 대상을 고르고 칸 전체 사각형의 실수 중심(`cx - sw / 2`)
+// 에 놓았고, hover 판의 왼쪽을 `hover_col` 칸 왼쪽(`@floatFromInt(hover_col *| cell_w)`)에 두고 2칸 폭으로 깔아 1칸 아이콘에서
+// 반 칸 치우쳤다(폭 2칸 자체는 디자인이라 그대로다).
+const windows_host_file = "src/main.zig";
+test "Windows 헤더의 크게 구운 아이콘 자리는 호스트가 다시 적지 않는다 — 중립 metal_frame 함수만 부른다 (layering §3.5)" {
+    const allocator = std.testing.allocator;
+    const raw = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, windows_host_file, allocator, .limited(16 * 1024 * 1024));
+    defer allocator.free(raw);
+    const code = try stripCComments(allocator, raw);
+    defer allocator.free(code);
+    const forbidden = [_][]const u8{ "cx - sw / 2", "@floatFromInt(hover_col *| cell_w)" };
+    for (forbidden) |needle| {
+        if (std.mem.indexOf(u8, code, needle) != null) {
+            std.debug.print("\nWindows 헤더 아이콘 자리 사본이 되살아났습니다: {s} 에 `{s}`\n  metal_frame.cellRasterIconQuadPx·cellRasterIconCenterXPx 를 부르세요.\n", .{ windows_host_file, needle });
+            return error.WindowsHeaderIconMirrorRevived;
+        }
+    }
+    // 세 함수를 실제로 부른다 — 이름이 바뀌어 위 검사가 빈 것을 지키지 않게 개수로 본다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "metal_frame.markCellRasterIcons(native, frame.glyph_quad_frame.glyphs, cell_w)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "metal_frame.cellRasterIconQuadPx(c, cell_w, cell_h)"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "metal_frame.cellRasterIconCenterXPx(hover_col *| cell_w, cell_w, span)"));
+}
+
 // 래스터 배치 역할(cover-fit·ink 중앙)도 Objective-C 가 codepoint 로 다시 고르지 않는다(2026-10-12). 호출자(Zig
 // `coretext_raster.zig`)가 `width.rasterFitFor` 로 정해 `raster_fit` 인자로 넘긴다. 예전 `.m` 은 wide-render-symbol
 // 범위(U+2460~24FF)를 주석-동기로 미러했고 ◧·⚙ 를 codepoint 로 골랐다.

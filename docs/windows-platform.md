@@ -3976,6 +3976,12 @@ macOS 가 헤더를 셀 높이 **×3** 으로 두는 이유가 이것이다:
 3.4셀이 되어 **납작한 아치**로 보였다. **한 셀을 키운다 — 그 글리프가 몇 칸을 차지하든.** 중심은 원래
 칸들의 한가운데다(macOS 의 `-0.5 nudge` 와 같은 자리).
 
+**2026-10-13 갱신 — 이 규칙은 이제 Windows 것이 아니다.** 대상은 macOS 와 같은 `metal_frame.markCellRasterIcons`(목표 크기를
+선언하고 구운 글리프의 셀에 cell-raster role 과 `glyph_offset_x_px`)가, 그려질 사각형은 `metal_frame.cellRasterIconQuadPx`
+(한 칸을 반 칸(정수 px) 밀어 그 중심에 구운 크기 그대로)가 정한다. 예전 `main.zig` 는 codepoint 목록으로 대상을 고르고 칸 전체
+사각형의 **실수** 중심에 놓아, 셀 폭이 홀수면 macOS·hover 와 0.5px 갈렸다. hover 판도 같은 중심(`cellRasterIconCenterXPx`)에
+선다 — 예전에는 `hover_col` 에서 2칸 폭으로 깔아 1칸 아이콘(◧⚙+)에서 반 칸 오른쪽으로 치우쳤다.
+
 ## 판정 — "선명한가" 를 숫자로 잰다
 
 개수도 자리도 맞는데 흐린 경우가 있다. 그래서 **구운 높이(아틀라스)와 그린 높이(quad)를 함께** 싣고

@@ -2812,16 +2812,19 @@ fn appendSidebarHeaderCells(
     // 아이콘이 오히려 어두워졌다(공유 모듈 주석이 그 실패를 적어 뒀다).
     if (hover_header) |hr| hover: {
         const sb_h = maru.chrome.components.sidebar;
-        const hover_col: u32 = switch (hr) {
-            .toggle_sidebar => sb_h.headerIconCol(.toggle_sidebar, cols),
-            .view_options => sb_h.headerIconCol(.view_options, cols),
-            .new_workspace => sb_h.headerIconCol(.new_workspace, cols),
-            .notifications => cell_text.sidebarBellCol(cols),
+        const hover_col: u32, const span: u16 = switch (hr) {
+            .toggle_sidebar => .{ sb_h.headerIconCol(.toggle_sidebar, cols), 1 },
+            .view_options => .{ sb_h.headerIconCol(.view_options, cols), 1 },
+            .new_workspace => .{ sb_h.headerIconCol(.new_workspace, cols), 1 },
+            .notifications => .{ cell_text.sidebarBellCol(cols), cell_text.sidebar_bell_cols },
             .search, .none => break :hover,
         };
+        // **판 중심 = 그려지는 아이콘 중심**(`metal_frame.cellRasterIconCenterXPx` — macOS hover·렌더러와 같은 값). 예전에는
+        // 판을 `hover_col` 에서 2칸 폭으로 깔아, 2칸인 종에는 맞았지만 1칸 아이콘(◧⚙+)에서는 판이 반 칸 오른쪽으로 치우쳤다.
+        const center_x = maru.renderer.metal_frame.cellRasterIconCenterXPx(hover_col *| cell_w, cell_w, span);
         const hb = tk.get(.tab_hover_bg);
         try out.append(allocator, d3d11_cells.solidCell(
-            @floatFromInt(hover_col *| cell_w),
+            center_x - @as(f32, @floatFromInt(cell_w)),
             @floatFromInt(top_y + (icon_band_px -| cell_h) / 2),
             @floatFromInt(cell_w *| 2),
             @floatFromInt(cell_h),
@@ -2900,6 +2903,9 @@ fn appendSidebarHeaderCells(
     };
     const native = try maru.renderer.metal_frame.buildNativeCellsFromGlyphQuads(allocator, frame.glyph_quad_frame, frame.draw_list.cells, colors);
     defer allocator.free(native);
+    // **어느 셀을 키울지는 구운 크기의 선언이 정한다** — 위에서 목표 크기(`raster_*_px`)를 선언하고 구운 글리프의 셀에
+    // cell-raster role 과 가로 이동(`glyph_offset_x_px`)을 싣는다. macOS 헤더(`MetalFrameBuffer.replace`)와 같은 함수다.
+    maru.renderer.metal_frame.markCellRasterIcons(native, frame.glyph_quad_frame.glyphs, cell_w);
     const x1: f32 = @floatFromInt(sidebar_w);
     const y0: f32 = @floatFromInt(top_y);
     // **사이드바 바닥을 기준으로 잰다.** 헤더 높이로 재면 자기 자신과 견주는 꼴이라 아무것도 못 잡는다.
@@ -2916,25 +2922,13 @@ fn appendSidebarHeaderCells(
         c.origin_y = top_y + if (is_icon_row) (icon_band_px -| cell_h) / 2 else icon_band_px;
         c.row = 0;
         var cell = win32_terminal.cellFromNative(c, cell_w, cell_h, atlas_w.*, atlas_h.*);
-        // **quad 도 같은 배율로 키운다** — 텍스처만 키우면 1.7× 그림이 1칸에 눌려 들어간다. 중심을
-        // 고정한 채 넓힌다(열은 그대로라 히트테스트와 안 갈린다).
-        if (std.math.cast(u21, c.codepoint)) |cp| if (cell_text.isSidebarHeaderIcon(cp)) {
-            // **한 셀을 키운다 — 그 글리프가 몇 칸을 차지하든.** 종은 EAW 2칸이라 quad 가 2셀인데,
-            // 아틀라스 슬롯은 한 셀 ×1.7 로 구웠다. 그대로 곱하면 가로만 3.4셀이 되어 **찌그러진다**
-            // (실측: 종이 납작한 아치로 보였다). 중심은 원래 칸들의 한가운데다.
-            //
-            // **크기는 구운 크기 그대로다**(atlas 슬롯 = `cellRasterExtentPx`) — 셀에 배율을 다시 곱하면 정수로 내린
-            // 슬롯보다 quad 가 커져 텍스처를 조금 늘려 그린다. macOS Metal 도 같은 규칙이다(cell-raster role 셀을
-            // 「atlas 크기 ÷ 셀 크기」로 키우고 차지한 칸들의 가운데에 둔다 — layering §3.5).
-            const sw: f32 = @floatFromInt(c.atlas_width_px);
-            const sh: f32 = @floatFromInt(c.atlas_height_px);
-            const cx = cell.rect[0] + cell.rect[2] / 2;
-            const cy = cell.rect[1] + cell.rect[3] / 2;
-            cell.rect[0] = cx - sw / 2;
-            cell.rect[1] = cy - sh / 2;
-            cell.rect[2] = sw;
-            cell.rect[3] = sh;
-        };
+        // **quad 도 구운 크기 그대로 키운다** — 텍스처만 키우면 1.7× 그림이 1칸에 눌려 들어간다. 한 칸 quad 를 키워
+        // 차지한 칸들의 가운데에 두는 규칙(종은 2칸이라 2칸 quad 를 키우면 찌그러진다 — 실측: 납작한 아치)과 그 사각형은
+        // 중립 `metal_frame.cellRasterIconQuadPx` 가 소유한다. 예전에는 여기서 codepoint 목록으로 대상을 고르고 칸 전체
+        // 사각형의 실수 중심에 놓아, 셀 폭이 홀수면 macOS·hover 와 0.5px 갈렸다(layering §3.5).
+        if (c.reserved == maru.renderer.metal_frame.native_cell_role_cell_raster_icon) {
+            cell.rect = maru.renderer.metal_frame.cellRasterIconQuadPx(c, cell_w, cell_h);
+        }
         // **구운 크기와 그린 크기를 함께 싣는다** — 둘 중 하나만 커도 흐려지는데, 개수·자리 판정은
         // 그것을 못 본다.
         if (std.math.cast(u21, c.codepoint)) |cp| {

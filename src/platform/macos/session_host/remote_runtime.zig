@@ -12770,6 +12770,9 @@ fn runCr4aCatchupStageCase(selected: Cr4aCatchupStageCase) !void {
     runtime.allocator = generation_allocator;
     runtime.io = std.testing.io;
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+    // `initializeTestGeneration` 를 거치지 않으니 제품 constructor 가 세우는 값을 여기서 세운다 — 안 세우면
+    // ReleaseFast 의 쓰레기 바이트가 「이미 정해진 다른 hook 형식」으로 읽혀 attach 가 AgentLogFormatChanged 로 끝난다.
+    runtime.hook_log_profile = null;
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();
@@ -13322,6 +13325,9 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
     runtime.allocator = allocator;
     runtime.io = std.testing.io;
     runtime.runtime_id_hex = "000000000000000000000000000000aa".*;
+    // `initializeTestGeneration` 를 거치지 않으니 제품 constructor 가 세우는 값을 여기서 세운다 — 안 세우면
+    // ReleaseFast 의 쓰레기 바이트가 「이미 정해진 다른 hook 형식」으로 읽혀 attach 가 AgentLogFormatChanged 로 끝난다.
+    runtime.hook_log_profile = null;
     runtime.pending_event_owner = .{};
     runtime.runtime_lifetime = .{};
     try runtime.initializePendingEventOwner();

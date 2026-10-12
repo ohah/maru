@@ -319,6 +319,9 @@ const ExternalAttachmentAdapter = struct {
             .mark_resync_applied = markResyncApplied,
             .drop_stream = dropStream,
             .fail_closed = failClosed,
+            // `maru attach` 는 이미지 채널을 광고하지 않는다(§8).
+            .image_shm_negotiated = remote_attachment.imageNotNegotiated,
+            .resolve_image = remote_attachment.noImageSegment,
         };
     }
 };

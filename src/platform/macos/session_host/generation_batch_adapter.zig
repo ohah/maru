@@ -354,6 +354,8 @@ pub const GenerationBatchAdapter = struct {
             .release_generation = releaseGeneration,
             .drop_stream = rejectPayloadDrop,
             .fail_closed = failClosed,
+            .image_shm_negotiated = imageShmNegotiated,
+            .resolve_image = resolveImage,
         };
     }
 
@@ -446,6 +448,24 @@ pub const GenerationBatchAdapter = struct {
         slot.poisonAttachmentConnection(reason) catch {};
     }
 
+    fn imageShmNegotiated(context: *anyopaque) bool {
+        const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
+        const slot = self.borrowSlot(.live) orelse return false;
+        return slot.attachmentImageShmNegotiated();
+    }
+
+    /// 적용 중인 배치의 `image_ref` 를 이 adapter 의 stream 으로만 해석한다 — 다른 stream 이면 「세그먼트 없음」.
+    fn resolveImage(
+        context: *anyopaque,
+        stream_id: u64,
+        ref: remote_attachment.ImageRef,
+    ) error{OutOfMemory}!?[]const u8 {
+        const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
+        const slot = self.borrowSlot(.live) orelse return null;
+        if (stream_id != self.stream_id) return null;
+        return slot.resolveAttachmentImage(stream_id, ref);
+    }
+
     fn rejectPayloadDrop(_: *anyopaque, _: u64) void {
         @panic("generation payload attempted to bypass canonical attachment drop");
     }
@@ -513,6 +533,116 @@ test "CR3a-2b2 batch adapter rejects copy foreign slot and wrong thread before m
     try std.testing.expect(wrong_thread_rejected);
     try owner.adapter.preflightDraining();
     owner.adapter.commitDraining();
+    owner.adapter.finishDraining();
+}
+
+/// slot 안 Client 의 채널 host 끝에 세그먼트 메시지 하나를 공유 메모리 fd 와 함께 보낸다(이미지 채널 §3.3).
+fn sendTestSegment(host: std.c.fd_t, segment_id: u64, stream_id: u64, pixels: []const u8) !void {
+    const c = std.c;
+    const created = (try @import("image_segment.zig").create(pixels)).?;
+    defer _ = c.close(created.fd);
+    const bytes = try @import("image_channel_wire.zig").encodeSegment(.{
+        .segment_id = segment_id,
+        .stream_id = stream_id,
+        .image_id = 3,
+        .generation = 4,
+        .byte_len = @intCast(pixels.len),
+    });
+    var control: [32]u8 align(@alignOf(c.cmsghdr)) = @splat(0);
+    const header: c.cmsghdr = .{ .len = @intCast(@sizeOf(c.cmsghdr) + @sizeOf(c.fd_t)), .level = c.SOL.SOCKET, .type = c.SCM.RIGHTS };
+    @memcpy(control[0..@sizeOf(c.cmsghdr)], std.mem.asBytes(&header));
+    @memcpy(control[@sizeOf(c.cmsghdr)..][0..@sizeOf(c.fd_t)], std.mem.asBytes(&created.fd));
+    var iov = [_]std.posix.iovec_const{.{ .base = &bytes, .len = bytes.len }};
+    const msg: c.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = @intCast(std.mem.alignForward(usize, @sizeOf(c.cmsghdr) + @sizeOf(c.fd_t), @sizeOf(u32))),
+        .flags = 0,
+    };
+    if (c.sendmsg(host, &msg, 0) != bytes.len) return error.TestUnexpectedResult;
+}
+
+test "image channel adapter: the generation adapter reads negotiation and resolves only through its live slot and its own stream" {
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    const c = std.c;
+    const Owner = struct { adapter: GenerationBatchAdapter = .{} };
+    var channel: [2]c.fd_t = undefined;
+    if (c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &channel) != 0) return error.TestUnexpectedResult;
+    defer _ = c.close(channel[1]);
+    for (channel) |fd| _ = c.fcntl(fd, c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x1C3B,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    var slot: client_slot_mod.ClientSlot = undefined;
+    try client_slot_mod.ClientSlot.initInPlace(&slot, allocator, &client, 0x1C3B);
+    defer slot.deinit();
+    var owner: Owner = .{};
+    try GenerationBatchAdapter.initPreparedInPlace(&owner.adapter, &slot, @intFromPtr(&owner), @sizeOf(Owner), 7);
+    try owner.adapter.activateCommitted();
+    const transport = owner.adapter.interface();
+    const ref: remote_attachment.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 1, .byte_len = 4 };
+
+    // 협상하지 않은 연결 — 적용 자리는 `.unnegotiated` 를 넘긴다.
+    try std.testing.expect(!transport.image_shm_negotiated(transport.context));
+    // 채널을 묶고(표는 Client 소멸이 푼다) 세그먼트 하나를 받는다.
+    const live = &slot.current.client;
+    live.image_channel = .{ .fd = channel[0], .state = .bound };
+    const table = try allocator.create(@import("client_image_segments.zig").Table);
+    table.* = .{};
+    live.image_segments = table;
+    try std.testing.expect(transport.image_shm_negotiated(transport.context));
+    try sendTestSegment(channel[1], 1, 7, &.{ 9, 8, 7, 6 });
+    live.pumpImageChannel();
+    try std.testing.expectEqual(@as(usize, 1), table.len);
+
+    // 다른 stream(8)의 실제 항목 — 표 대조와 따로, adapter 가 자기 stream 이 아니면 slot 에 닿지 않는다.
+    try sendTestSegment(channel[1], 2, 8, &.{ 1, 1, 1, 1 });
+    live.pumpImageChannel();
+    try std.testing.expectEqual(@as(usize, 2), table.len);
+    var other = ref;
+    other.segment_id = 2;
+    try std.testing.expect((try transport.resolve_image(transport.context, 8, other)) == null);
+    try std.testing.expectEqual(@as(usize, 2), table.len);
+    // 다른 attachment 연산이 slot 을 쥐고 있으면 해석하지 않는다 — 같은 스레드의 다른 종류도, 다른 스레드의 첫 snapshot 도.
+    const own_thread = slot.operation_owner_thread_incarnation;
+    const Busy = struct { kind: client_slot_mod.StreamOperationKind, thread: u64 };
+    for ([_]Busy{ .{ .kind = .control, .thread = own_thread }, .{ .kind = .initial_snapshot, .thread = own_thread +% 1 } }) |busy_case| {
+        slot.current.active_operation_generation = 1;
+        slot.current.active_operation_kind = busy_case.kind;
+        slot.current.active_operation_owner_thread_incarnation = busy_case.thread;
+        const busy = transport.resolve_image(transport.context, 7, ref);
+        slot.current.active_operation_generation = 0;
+        slot.current.active_operation_kind = .none;
+        slot.current.active_operation_owner_thread_incarnation = 0;
+        try std.testing.expect((try busy) == null);
+        try std.testing.expectEqual(@as(usize, 2), table.len);
+    }
+    // 첫 snapshot 은 그 owner 가 `.initial_snapshot` permit 을 쥔 채 적용된다 — 그 permit 은 해석을 막지 않는다(실제 permit).
+    var binding: @import("generation_attachment_contract.zig").PreparedAttachmentBinding = .{};
+    var lease: @import("connection_lease.zig").ConnectionLease = .{};
+    const reservation = try slot.reserveAttachmentBindingForTest(&binding, &lease, 0x44);
+    defer slot.abortAttachmentBinding(&binding, reservation) catch
+        @panic("image channel adapter binding cleanup drifted");
+    const permit = try slot.prepareInitialSnapshotPermit(0x1000, 9, reservation.identity);
+    const during_snapshot = transport.resolve_image(transport.context, 7, ref);
+    try slot.abortInitialSnapshotPermit(permit);
+    const pixels = (try during_snapshot) orelse return error.TestUnexpectedResult;
+    defer @import("client_image_segments.zig").unmapPixels(pixels);
+    try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, pixels);
+    try std.testing.expectEqual(@as(usize, 1), table.len);
+
+    // live 가 아닌 adapter 는 slot 에 닿지 않는다.
+    try owner.adapter.preflightDraining();
+    owner.adapter.commitDraining();
+    try std.testing.expect(!transport.image_shm_negotiated(transport.context));
+    try std.testing.expect((try transport.resolve_image(transport.context, 7, ref)) == null);
     owner.adapter.finishDraining();
 }
 

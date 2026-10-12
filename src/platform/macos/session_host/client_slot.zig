@@ -13,6 +13,7 @@ const TerminalDrainRunnerChannel = if (builtin.is_test) struct {
     extern var maru_c3b3_death_child_path_len: usize;
 } else struct {};
 const client_mod = @import("client.zig");
+const screen_stream = @import("maru").session.screen_stream;
 const lease_mod = @import("connection_lease.zig");
 const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
 const batch_registry_mod = @import("generation_batch_registry.zig");
@@ -15565,6 +15566,30 @@ pub const ClientSlot = struct {
         stream_id: u64,
     ) BatchError!AttachmentBatchRead {
         return self.readAttachmentBatchInternal(stream_id);
+    }
+
+    /// 이 slot 의 연결이 `image_shm` 을 협상했는가(이미지 채널 §6) — 적용 자리가 넘길 resolver 를 고른다.
+    pub fn attachmentImageShmNegotiated(self: *const ClientSlot) bool {
+        if (!self.valid()) return false;
+        return self.current.client.imageShmNegotiated();
+    }
+
+    /// 적용 중인 배치의 `image_ref` 하나를 이 slot 의 Client 세그먼트 표로 해석한다(§6). 다른 attachment 연산이 slot 을 쥐고
+    /// 있으면 해석하지 않는다 — 「세그먼트 없음」(null). 첫 snapshot 은 그 owner 가 `.initial_snapshot` permit 을 쥔 채(owner
+    /// deinit 까지) 같은 스레드에서 적용된다 — 그 permit 은 막지 않는다. 막으면 협상한 연결의 첫 snapshot 이 늘 malformed 로 닫혀
+    /// 재접속을 되풀이한다.
+    pub fn resolveAttachmentImage(
+        self: *ClientSlot,
+        stream_id: u64,
+        ref: screen_stream.ImageRef,
+    ) error{OutOfMemory}!?[]const u8 {
+        if (!self.valid()) return null;
+        const own_initial_snapshot = self.current.active_operation_kind == .initial_snapshot and
+            operationThreadMatches(self.current.active_operation_owner_thread_incarnation);
+        if ((self.current.active_operation_generation != 0 and !own_initial_snapshot) or
+            terminal_drain_callback_binding.continuation_addr != 0)
+            return null;
+        return self.current.client.resolveImageSegment(stream_id, ref);
     }
 
     pub fn readAttachmentCatchupBarrierPlanUntil(

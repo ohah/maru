@@ -261,6 +261,12 @@ flowchart TD
 
   resolver 가 답할 수 없는 경우가 하나 더 있다 — 아직 채널을 못 비움(§7 의 잠금을 못 잡은 tick). 그 배치는 큐 머리에 그대로 둔다.
   이 판단은 caller 가 적용 **전에**, 배치를 소비·계상하기 전에 한다 — 조립기 안에서 멈추면 반쯤 적용된 화면이 남는다.
+  Client 의 울타리(`requireBlockingMode` — prepared lease·allocator callback 안 등)나 slot 의 다른 attachment 연산 때문에 해석할 수
+  없는 tick 도 같은 보류 대상이다. 지금(IC3b-2a)은 그 경우 「없음」으로 답하고, 보류는 IC3b-2b 가 단다 — 광고가 꺼져 있어 아직 닿지
+  않는다.
+- GUI 가 resolver 를 넘기는 길: attachment 의 transport 가 「협상했나」와 「stream·ref 로 해석」을 준다. 적용 하나 동안 사는 ctx 에
+  transport 와 그 attachment 의 stream 을 묶어 넘기고(맨 `*Client` 를 쥐지 않는다 — Client 는 generation 노드와 함께 이동한다), 해석은
+  Client 의 울타리 든 공개 메서드로 표에 닿는다(표 내용이 봉인 지문에 들어가므로 봉인된 Client 를 바꾸지 않는다).
 - **죽은 항목 정리**: 같은 stream 의 배치는 주 소켓 순서대로 적용된다(`RemoteAttachment` 의 FIFO). 스트림 S 의 배치 하나를
   적용하고 나면 그 배치의 `image_seg_hwm` = H 로 표에서 stream 이 S 이고 id ≤ H 인 항목을 close + release 한다. host 는 세그먼트를
   배치보다 먼저 보냈으므로 그 항목을 가리키는 레코드는 이 배치나 그 앞 배치에만 있을 수 있다 — 아직 표에 있으면 그 배치가 버려진

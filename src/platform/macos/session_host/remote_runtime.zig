@@ -125,6 +125,17 @@ const RuntimeAttachment = union(enum) {
         try generation_attachment_mod.GenerationAttachment.initInPlace(&self.generation, adapter);
     }
 
+    /// 첫 snapshot 적용에 넘길 resolver(이미지 채널 §6) — legacy·generation 모두 묶인 transport 로 고른다.
+    fn imageRefResolver(
+        self: *RuntimeAttachment,
+        ctx: *remote_attachment.ImageResolveCtx,
+    ) remote_attachment.ImageRefResolver {
+        return switch (self.*) {
+            .legacy => |*value| value.imageRefResolver(ctx),
+            .generation => |*value| value.imageRefResolver(ctx),
+        };
+    }
+
     fn deinit(self: *RuntimeAttachment) void {
         switch (self.*) {
             .legacy => |*value| value.deinit(),
@@ -502,12 +513,28 @@ fn attachmentFailClosed(context: *anyopaque, reason: client_poison.ConnectionRea
     client.poison(reason);
 }
 
+fn attachmentImageShmNegotiated(context: *anyopaque) bool {
+    const client: *client_mod.Client = @ptrCast(@alignCast(context));
+    return client.imageShmNegotiated();
+}
+
+fn attachmentResolveImage(
+    context: *anyopaque,
+    stream_id: u64,
+    ref: remote_attachment.ImageRef,
+) error{OutOfMemory}!?[]const u8 {
+    const client: *client_mod.Client = @ptrCast(@alignCast(context));
+    return client.resolveImageSegment(stream_id, ref);
+}
+
 fn attachmentTransport(client: *client_mod.Client) remote_attachment.AttachmentTransport {
     return .{
         .context = client,
         .read_batch = attachmentReadBatch,
         .drop_stream = attachmentDropStream,
         .fail_closed = attachmentFailClosed,
+        .image_shm_negotiated = attachmentImageShmNegotiated,
+        .resolve_image = attachmentResolveImage,
     };
 }
 
@@ -2778,7 +2805,9 @@ fn initObserverReconnectCandidate(
     out.attachment.generation.screenPtr().?.requireSequencedDeltas();
     out.attachment.generation.screenPtr().?.viewport_scrolled_known =
         capabilities.screen_viewport_scrolled;
-    out.attachment.generation.screenPtr().?.applySnapshot(bytes, .unnegotiated, runtime.io) catch |err| {
+    var image_ctx: remote_attachment.ImageResolveCtx = undefined;
+    const image_refs = out.attachment.generation.imageRefResolver(&image_ctx);
+    out.attachment.generation.screenPtr().?.applySnapshot(bytes, image_refs, runtime.io) catch |err| {
         snapshot.deinit() catch
             @panic("CR4a initial snapshot cleanup lost final candidate");
         snapshot_live = false;
@@ -4551,7 +4580,9 @@ pub const RemoteRuntime = struct {
         // 신뢰한다. 구 host는 capability=false로 두고, RemoteScreen이 snapshot별 visible cursor 증거만으로
         // legacy live preedit/candidate를 허용한다. hidden/ambiguous snapshot은 계속 fail-closed다.
         self.currentGeneration().attachment.screenPtr().?.viewport_scrolled_known = capabilities.screen_viewport_scrolled;
-        self.currentGeneration().attachment.screenPtr().?.applySnapshot(snap, .unnegotiated, self.io) catch |err| {
+        var image_ctx: remote_attachment.ImageResolveCtx = undefined;
+        const image_refs = self.currentGeneration().attachment.imageRefResolver(&image_ctx);
+        self.currentGeneration().attachment.screenPtr().?.applySnapshot(snap, image_refs, self.io) catch |err| {
             switch (self.currentGeneration().attachment) {
                 .legacy => {},
                 .generation => |*value| {
@@ -13481,8 +13512,9 @@ const ReconnectResidentLedger = if (builtin.is_test) struct {
 
 fn reconnectCandidateResidentBytes() !usize {
     return switch (builtin.mode) {
-        .Debug => 3600,
-        .ReleaseFast => 3584,
+        // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+        .Debug => 3616,
+        .ReleaseFast => 3600,
         else => error.SkipZigTest,
     };
 }
@@ -17035,12 +17067,13 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
             // `expected 11696, found 11776` 으로 실측했다. ⚠️ **그 PR 도 초록이었다** — 이 pin 은 PR 에서 돌지 않는다.
             // 2026-10-03 화면별 kitty placement(`TerminalCore.saved_kitty_placements`, ArrayList): Debug **+32** ·
             // ReleaseFast **+16** — 머지 전 로컬 `zig build test` 가 `expected 11840, found 11872` / `expected 11792, found 11808` 로 실측.
-            .Debug => 11872,
+            // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+            .Debug => 11888,
             // 2026-09-23 빈 드레인 건너뛰기(`idle_drain_epoch`·`idle_drain_generation`, u64 둘): Debug +16 · ReleaseFast +16(실측).
             // 2026-10-03 셀 픽셀 결정 번호(`TerminalCore.cell_metrics_epoch`, u64 — 원격 Surface 의 코어 안): Debug +0(기존
             // 패딩에 들어감) · ReleaseFast **+16** — `test-session-host-2c3d-c3-3b2b3` 에서 실측(u32 로 줄여도 +16 이었다).
             // 2026-10-03 화면별 kitty placement(`saved_kitty_placements`): ReleaseFast +16(Debug 는 위 줄 +32).
-            .ReleaseFast => 11808,
+            .ReleaseFast => 11824,
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -17055,8 +17088,8 @@ test "C3-3b2b3 integration adapter prepares a canonical real-take event" {
     };
     const expected_runtime_remainder: usize = switch (builtin.os.tag) {
         .macos => switch (builtin.mode) {
-            .Debug => 9136, // 2026-09-30 #4017 +96 · 2026-10-03 화면별 kitty placement +32(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
-            .ReleaseFast => 9072, // 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 kitty placement +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .Debug => 9152, // 2026-10-12 이미지 채널 IC3b-2a +16 · 2026-09-30 #4017 +96 · 2026-10-03 화면별 kitty placement +32(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
+            .ReleaseFast => 9088, // 2026-10-12 이미지 채널 IC3b-2a +16 · 2026-09-30 #4017 +80 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 kitty placement +16(위 표와 같은 델타 — PendingEventOwner 2736 은 불변)
             else => unreachable,
         },
         // 위와 같은 이유로 측정 불가 — 원래 값 그대로다.
@@ -20662,8 +20695,9 @@ test "C3-3b2b2 compatibility maps event materialization failures by provenance" 
 test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 포함한다" {
     const fields = @typeInfo(RemoteGeneration).@"struct".fields;
     const expected_generation_size: usize = switch (builtin.mode) {
-        .Debug => 3552,
-        .ReleaseFast => 3536,
+        // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+        .Debug => 3568,
+        .ReleaseFast => 3552,
         else => unreachable,
     };
     try testing.expectEqual(expected_generation_size, @sizeOf(RemoteGeneration));
@@ -20678,8 +20712,9 @@ test "CR2a RemoteGeneration field inventory는 generation owner 열두 개만 �
             // Debug +16 · ReleaseFast +0(기존 패딩에 들어감) — `test-session-host-2c3d-c3-3b2b3` 에서 실측.
             // 2026-09-30 #4017 Debug +96 · ReleaseFast +80 — 위 `C3-3b2b3` 표와 같은 CI 실측.
             // 2026-10-03 화면별 kitty placement(`saved_kitty_placements`) Debug +32 · ReleaseFast +16 — 위 표와 같은 실측.
-            .Debug => 11872,
-            .ReleaseFast => 11808, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 placement +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
+            // 2026-10-12 이미지 채널 IC3b-2a(`AttachmentTransport` 에 함수 포인터 둘): Debug +16 · ReleaseFast +16 — 임시 comptime 출력으로 실측.
+            .Debug => 11888,
+            .ReleaseFast => 11824, // 2026-09-23 빈 드레인 건너뛰기 +16 · 2026-10-03 셀 픽셀 결정 번호 +16 · 같은 날 화면별 placement +16 — 위 사본과 «같은 값이어야 한다»(CR2a 가 둘을 센다)
             else => unreachable,
         },
         // ⚠️ 이 두 값은 **이 트리에서 측정할 수 없다.** `remote_runtime` 은 배럴이 macOS 에서만 열어서
@@ -21710,4 +21745,59 @@ test "agent log format fixture initialization clears stale profile before buildi
     try testing_api.initializeTestGeneration(&runtime, allocator, .{ .legacy = &client });
     defer runtime.generation_owner.slot.deinitInPlace(allocator, deinitRemoteGeneration) catch @panic("fixture teardown failed");
     try testing.expect(runtime.hook_log_profile == null);
+}
+
+test "image channel legacy: the legacy transport reads negotiation and resolves through the Client's fenced method, and no GUI apply site hard-codes the unnegotiated resolver" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    var channel: [2]c.fd_t = undefined;
+    if (c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &channel) != 0) return error.TestUnexpectedResult;
+    defer _ = c.close(channel[1]);
+    for (channel) |fd| _ = c.fcntl(fd, c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+    var client: client_mod.Client = .{
+        .allocator = allocator,
+        .fd = -1,
+        .host_id = 0x1C3C,
+        .parser = @import("framing.zig").FrameParser.init(allocator),
+    };
+    defer client.deinit();
+    const transport = attachmentTransport(&client);
+    try std.testing.expect(!transport.image_shm_negotiated(transport.context));
+    client.image_channel = .{ .fd = channel[0], .state = .bound };
+    const segments = @import("client_image_segments.zig");
+    const table = try allocator.create(segments.Table);
+    table.* = .{};
+    client.image_segments = table;
+    try std.testing.expect(transport.image_shm_negotiated(transport.context));
+
+    // 세그먼트 하나를 공유 메모리 fd 와 함께 보낸다(이미지 채널 §3.3).
+    const created = (try @import("image_segment.zig").create(&.{ 9, 8, 7, 6 })).?;
+    defer _ = c.close(created.fd);
+    const bytes = try @import("image_channel_wire.zig").encodeSegment(.{ .segment_id = 1, .stream_id = 7, .image_id = 3, .generation = 4, .byte_len = 4 });
+    var control: [32]u8 align(@alignOf(c.cmsghdr)) = @splat(0);
+    const header: c.cmsghdr = .{ .len = @intCast(@sizeOf(c.cmsghdr) + @sizeOf(c.fd_t)), .level = c.SOL.SOCKET, .type = c.SCM.RIGHTS };
+    @memcpy(control[0..@sizeOf(c.cmsghdr)], std.mem.asBytes(&header));
+    @memcpy(control[@sizeOf(c.cmsghdr)..][0..@sizeOf(c.fd_t)], std.mem.asBytes(&created.fd));
+    var iov = [_]std.posix.iovec_const{.{ .base = &bytes, .len = bytes.len }};
+    const msg: c.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = @intCast(std.mem.alignForward(usize, @sizeOf(c.cmsghdr) + @sizeOf(c.fd_t), @sizeOf(u32))),
+        .flags = 0,
+    };
+    if (c.sendmsg(channel[1], &msg, 0) != bytes.len) return error.TestUnexpectedResult;
+    client.pumpImageChannel();
+
+    const ref: remote_attachment.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 1, .byte_len = 4 };
+    const pixels = (try transport.resolve_image(transport.context, 7, ref)) orelse return error.TestUnexpectedResult;
+    defer segments.unmapPixels(pixels);
+    try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, pixels);
+    try std.testing.expectEqual(@as(usize, 0), table.len);
+
+    // GUI 적용 자리(첫 attach 조립·관찰자 재접속 후보)는 attachment 의 resolver 를 넘긴다 — 미협상 resolver 를 이 파일에 적으면
+    // 협상한 연결의 첫 snapshot 이 `image_ref` 에 malformed 로 닫힌다.
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, @embedFile("remote_runtime.zig"), "." ++ "unnegotiated"));
 }

@@ -7448,6 +7448,32 @@ pub const Client = struct {
         segments.dropSegments();
     }
 
+    /// 이 연결이 `image_shm` 을 협상했는가(이미지 채널 §2·§6). 협상했으면 채널이 없어도(「이미지 채널 없음」) 적용 자리는 채널
+    /// resolver 를 넘긴다 — host 가 그 연결에 `image_ref` 를 낼 수 있다.
+    pub fn imageShmNegotiated(self: *const Client) bool {
+        return self.image_channel.state != .not_negotiated;
+    }
+
+    /// `image_ref` 하나를 이 연결의 세그먼트 표로 해석해 매핑한 픽셀을 준다(§6) — null 은 「세그먼트 없음」. 표를 바꾸므로 다른
+    /// 공개 변경 메서드와 같은 울타리를 든다: 들 수 없으면(allocator callback 안·poison·옮겨 간 Client·external 모드·prepared
+    /// lease) 해석하지 않는다. 채널이 묶인 적 없는 연결은 표가 없어 빈 표처럼 null 이다.
+    pub fn resolveImageSegment(
+        self: *Client,
+        stream_id: u64,
+        ref: screen_stream.ImageRef,
+    ) error{OutOfMemory}!?[]const u8 {
+        const operation_fence_held = self.requireBlockingMode() catch return null;
+        defer if (operation_fence_held) self.endPublicMutation();
+        const segments = self.image_segments orelse return null;
+        const mapping = (try segments.resolve(stream_id, .{
+            .segment_id = ref.segment_id,
+            .image_id = ref.image_id,
+            .generation = ref.generation,
+            .byte_len = ref.byte_len,
+        })) orelse return null;
+        return mapping.pixels;
+    }
+
     fn deinitHandshakeAttempt(self: *Client, ops: client_deadline.Ops) void {
         // The injected connector owns close observability until a successful Client is returned.
         ops.close(ops.context, self.fd);
@@ -26908,6 +26934,46 @@ const ImageChannelPumpFixture = struct {
         if (c.sendmsg(self.channel_host, &msg, 0) != bytes.len) return error.TestUnexpectedResult;
     }
 };
+
+test "image channel pump: resolveImageSegment maps a pumped segment once, for its own stream, behind the fence and only with a table" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    // 협상 여부는 채널 상태로 — 「이미지 채널 없음」도 협상한 연결이다.
+    try testing.expect(fx.client.imageShmNegotiated());
+    fx.client.image_channel.state = .unavailable;
+    try testing.expect(fx.client.imageShmNegotiated());
+    fx.client.image_channel.state = .not_negotiated;
+    try testing.expect(!fx.client.imageShmNegotiated());
+    fx.client.image_channel.state = .bound;
+
+    try fx.sendSegment(1, 3, 1);
+    fx.client.pumpImageChannel();
+    const first: screen_stream.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 1, .byte_len = 4 };
+    // 다른 stream 은 「세그먼트 없음」이고 항목은 남는다.
+    try testing.expect((try fx.client.resolveImageSegment(2, first)) == null);
+    // 표가 없으면(채널이 묶인 적 없는 연결) 빈 표처럼 없다.
+    const table = fx.client.image_segments.?;
+    fx.client.image_segments = null;
+    const without_table = fx.client.resolveImageSegment(3, first);
+    fx.client.image_segments = table;
+    try testing.expect((try without_table) == null);
+    const pixels = (try fx.client.resolveImageSegment(3, first)) orelse return error.TestUnexpectedResult;
+    defer client_image_segments.unmapPixels(pixels);
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, pixels);
+    // 반환됐다 — 다시 해석하면 없다.
+    try testing.expect((try fx.client.resolveImageSegment(3, first)) == null);
+
+    // 울타리: poison 된 연결은 표를 건드리지 않는다.
+    try fx.sendSegment(2, 3, 1);
+    fx.client.pumpImageChannel();
+    try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
+    fx.client.poison(.peer_contract_violation);
+    var second = first;
+    second.segment_id = 2;
+    try testing.expect((try fx.client.resolveImageSegment(3, second)) == null);
+    try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
+}
 
 test "image channel pump: an external-mode client is not pumped, so its sealed state does not move" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

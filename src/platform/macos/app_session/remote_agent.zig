@@ -467,15 +467,13 @@ pub fn feedRemoteAgentTerms(self: *AppSession, dest: []const u8, lines: []const 
 /// 계속 «채널이 열렸다» 로 읽혀 훅 모드에 갇힌다 — 게이트를 껐는데 배지가 안 풀리는 모양이 된다.
 pub fn closeAllRemoteAgentHosts(self: *AppSession) void {
     if (self.remote_agent_hosts.count() == 0) return;
-    var it = self.remote_agent_hosts.iterator();
-    while (it.next()) |entry| {
-        if (entry.value_ptr.install) |st| ssh_upload.stopAgentEvents(st);
-        ssh_upload.stopAgentEvents(entry.value_ptr.stream);
-        entry.value_ptr.pending.deinit(self.allocator);
-        entry.value_ptr.install_out.deinit(self.allocator);
-        self.allocator.free(entry.key_ptr.*);
+    // One owner cleanup must serve both app shutdown and a single detached host.
+    // Separate copies previously omitted the mixed resume keys/map in this path.
+    while (self.remote_agent_hosts.count() != 0) {
+        var it = self.remote_agent_hosts.keyIterator();
+        const dest = it.next().?.*;
+        closeRemoteAgentHost(self, dest);
     }
-    self.remote_agent_hosts.clearRetainingCapacity();
     for (self.tabs.items) |tab| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {

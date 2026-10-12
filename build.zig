@@ -2054,6 +2054,23 @@ pub fn build(b: *std.Build) void {
     run_remote_log_profile_tests.addArg(if (remote_native_frames != null) "--maru-expect-passed=7" else "--maru-expect-passed=6");
     b.step("test-remote-agent-log-profile", "Run confirmed remote log profile and real SSH argv regressions").dependOn(&run_remote_log_profile_tests.step);
 
+    const ssh_failure_carrier = b.addSystemCommand(&.{ "python3", "tools/test-ssh-reconnect-failure.py", "--cli" });
+    ssh_failure_carrier.addArtifactArg(exe);
+    ssh_failure_carrier.setCwd(b.path("."));
+    b.step("test-ssh-reconnect-failure-process", "Product CLI refusal and SIGINT during backoff with owned fault injector").dependOn(&ssh_failure_carrier.step);
+
+    const remote_failure_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"remote reconnect failure"},
+    });
+    const run_remote_failure_tests = b.addRunArtifact(remote_failure_tests);
+    run_remote_failure_tests.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.remote reconnect failure");
+    run_remote_failure_tests.setCwd(b.path("."));
+    run_remote_failure_tests.addArg("--maru-expect-tests=8");
+    run_remote_failure_tests.addArg("--maru-expect-passed=3");
+    b.step("test-remote-agent-failure-paths", "Remote retry and shutdown ownership regression").dependOn(&run_remote_failure_tests.step);
+    if (target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_remote_failure_tests.step);
+
     const remote_auto_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"remote automatic reconnect"},

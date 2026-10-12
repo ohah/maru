@@ -79,7 +79,7 @@ pub const max_up_retries: u8 = 3;
 pub const kick_retry_ms: u32 = 100;
 pub const max_kick_retries: u8 = 45;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release, judge_resolve, judge, rel_then };
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, frame, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release, judge_resolve, judge, rel_then };
 
 /// 묶음을 놓은 뒤에 할 일(`rel_then`) — wait 의 다음 확인, act 의 화면 안으로, 또는 그 답(소유).
 const Then = union(enum) {
@@ -355,7 +355,7 @@ pub const Op = struct {
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
         // 덮임 검사·초점 검사·고르기용으로 잡은 그 요소의 원격 객체도(2 회차 — role 상태만 놓았다; 누름 앞이라 누른 것은 없다).
         const holds = switch (self.stage) {
-            .hit_test, .focus_check, .hover_move, .mouse_down, .select, .insert, .delete_down => true,
+            .frame, .hit_test, .focus_check, .hover_move, .mouse_down, .select, .insert, .delete_down => true,
             .key_down => self.press_target,
             else => false,
         };
@@ -528,6 +528,8 @@ pub const Op = struct {
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
+        // 누르기 전 프레임의 답(무엇이든 — 오류여도 그린 뒤다) — 덮임 검사로. 못 보냈으면 아래에서 놓고 실패.
+        if (self.stage == .frame and reply != .not_sent) return self.hitTestCall(gpa, self.object_id.?);
         // 찾기 결과를 둔 채 놓는 중 — 놓기의 답(무엇이든) 뒤에 그 결과대로.
         if (self.stage == .loc_release) return self.afterFind(gpa);
         // 묶음을 놓았다(무엇이든) — 정해 둔 다음 일로.
@@ -673,7 +675,7 @@ pub const Op = struct {
                 // 놓기의 실패 — 동작은 이미 끝났다: 그 결과로 답한다(4 회차 — 실패로 답하면 다시 시도해 Enter 가 두 번 갔다).
                 .release => return self.finish(gpa),
                 // 원격 객체 묶음을 쥔 단계의 실패 — 놓고 실패(4 회차 — 곧장 끝내 묶음이 남았다).
-                .resolve, .hit_test, .focus_check, .hover_move, .select, .insert, .delete_up, .verify => {
+                .resolve, .frame, .hit_test, .focus_check, .hover_move, .select, .insert, .delete_up, .verify => {
                     if (self.miss == null) self.miss = why;
                     return self.releaseStep(gpa);
                 },
@@ -793,14 +795,18 @@ pub const Op = struct {
                     self.stage = .select;
                     return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(){{var t=this,P=function(o,k){{return Object.getOwnPropertyDescriptor(o,k).get}};var od=P(Node.prototype,'ownerDocument');if((od.call(t)||t)!==document)return {{r:'frame'}};var ok=false,before='',H=function(s){{var h=2166136261;for(var i=0;i<s.length;i++){{h=Math.imul(h^String.prototype.charCodeAt.call(s,i),16777619)}}return h|0}};var val=function(e){{return (e instanceof HTMLInputElement)?P(HTMLInputElement.prototype,'value').call(e):(e instanceof HTMLTextAreaElement)?P(HTMLTextAreaElement.prototype,'value').call(e):P(Node.prototype,'textContent').call(e)}};if(t instanceof HTMLInputElement){{var ty=P(HTMLInputElement.prototype,'type').call(t);if(!{{text:1,search:1,url:1,tel:1,email:1,password:1,number:1}}[ty])return {{r:'not editable'}};before=val(t);HTMLInputElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLTextAreaElement){{before=val(t);HTMLTextAreaElement.prototype.select.call(t);ok=true}}else if(t instanceof HTMLElement&&P(HTMLElement.prototype,'isContentEditable').call(t)){{before=val(t);var d=od.call(t);var g=Document.prototype.getSelection.call(d),r=Document.prototype.createRange.call(d);Range.prototype.selectNodeContents.call(r,t);Selection.prototype.removeAllRanges.call(g);Selection.prototype.addRange.call(g,r);ok=true}}if(!ok)return {{r:'not editable'}};var gr=Node.prototype.getRootNode,dae=P(Document.prototype,'activeElement'),sae=P(ShadowRoot.prototype,'activeElement'),host=P(ShadowRoot.prototype,'host'),ce=P(HTMLElement.prototype,'isContentEditable');var cur=t,root=gr.call(cur);for(var i=0;i<64;i++){{var ae=(root instanceof ShadowRoot)?sae.call(root):(root instanceof Document)?dae.call(root):null;if(ae!==cur&&!(cur===t&&ae&&ce.call(t)&&Node.prototype.contains.call(t,ae)))return {{r:'focus moved'}};if(!(root instanceof ShadowRoot))return {{r:'ok',h:H(before),n:before.length}};cur=host.call(root);root=gr.call(cur)}}return {{r:'focus moved'}}}}\",\"returnByValue\":true}}", .{std.json.fmt(oid, .{})});
                 }
-                self.stage = .hit_test;
-                // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
-                // 그 frame 에서 보면 어긋난다). 그림자 DOM 안이면 그 뿌리에서 맞히고, slot 에 꽂힌 내용·host 를 따라 올라가며 본다.
-                // **DOM 속성은 프로토타입의 getter 로 읽는다** — 격리 world 여도 `<form>` 안의 `<input name=parentNode>` 같은 이름
-                // 속성(DOM clobbering)이 `n.parentNode` 를 가린다: 실측으로 걷기가 끝없이 돌거나(렌더러 멈춤) 덮인 요소를 「맞음」으로
-                // 통과시켰다(W9b①a 적대 리뷰 3 회차). 걷기는 4096 단계로 끊는다.
-                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y,up){{var G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}};var od=G(Node.prototype,'ownerDocument'),pn=G(Node.prototype,'parentNode'),es=G(Element.prototype,'assignedSlot'),ts=G(Text.prototype,'assignedSlot'),hs=G(ShadowRoot.prototype,'host');var grn=Node.prototype.getRootNode,def=Document.prototype.elementFromPoint,sef=ShadowRoot.prototype.elementFromPoint;var me=this;if(me instanceof Text)me=G(Node.prototype,'parentElement').call(me)||me;if((od.call(me)||me)!==document)return 'frame';var r=grn.call(me);var h=(r instanceof ShadowRoot)?sef.call(r,x,y):def.call(document,x,y);if(up){{var tg=G(Element.prototype,'tagName'),ga=Element.prototype.getAttribute,SP=String.prototype,sr=G(Element.prototype,'shadowRoot'),ce=G(HTMLElement.prototype,'isContentEditable'),lc=G(HTMLLabelElement.prototype,'control'),R=',button,link,tab,menuitem,menuitemcheckbox,menuitemradio,option,checkbox,radio,switch,treeitem,textbox,searchbox,combobox,slider,spinbutton,listbox,';var act=function(m){{var t=SP.toUpperCase.call(tg.call(m));if(t==='BUTTON'||t==='LABEL'||t==='SUMMARY'||t==='INPUT'||t==='SELECT'||t==='TEXTAREA'||t==='IFRAME'||t==='FRAME'||t==='EMBED'||t==='OBJECT'||(t==='A'&&ga.call(m,'href')!==null))return true;if(m instanceof HTMLElement&&ce.call(m))return true;var ro=ga.call(m,'role');return ro!==null&&SP.indexOf.call(R,','+SP.split.call(SP.toLowerCase.call(SP.trim.call(ro)),/\\\\s/)[0]+',')>=0}};var upf=function(m){{var q=es.call(m)||pn.call(m);if(q instanceof ShadowRoot)q=hs.call(q);return(q instanceof Element)?q:null}};}}var via=false;for(var n=h,i=0;n&&i<4096;i++){{if(n===me)return via?'covered':'ok';if(up&&(n instanceof Element)&&act(n)&&!((me instanceof HTMLLabelElement)&&lc.call(me)===n))via=true;var s=(n instanceof Element)?es.call(n):(n instanceof Text)?ts.call(n):null;n=s||pn.call(n)||((n instanceof ShadowRoot)?hs.call(n):null)}}if(up){{var A=null;for(var m=me,j=0;m&&j<4096;j++,m=upf(m))if(act(m)){{A=m;break}}if(A){{var d=h;for(var k=0;d&&k<64;k++){{var s3=sr.call(d);if(!s3)break;var d2=sef.call(s3,x,y);if(!d2||d2===d)break;d=d2}}for(var n2=d,j2=0;n2&&j2<4096;j2++,n2=upf(n2)){{if(n2===A||(n2 instanceof HTMLLabelElement&&lc.call(n2)===A)||(A instanceof HTMLLabelElement&&lc.call(A)===n2))return 'ok';if(act(n2))break}}}}}}return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}},{{\"value\":{s}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y, if (self.hit_up) "true" else "false" });
+                if (self.kind == .click) {
+                    // 누르기 전에 프레임 하나를 그리게 하고 그 답을 기다린다 — 숨긴 탭이 숨은 채 새 문서를 받으면 그 뒤 첫 마우스 누르기가
+                    // 페이지에 닿지 않았다(W9b③ 계획 공격 2 회차 실측: 제품 차례로 0/3, 2 초 기다려도 0/3 — 답은 「눌렀다」). 1×1 스크린샷을
+                    // kick 으로 곁들이면 그 프레임이 누르기보다 늦을 수 있어(6 번 가운데 3–5 번) 보통 호출로 보내 답을 받은 뒤 덮임 검사로 간다
+                    // (20/20). 보이는 탭에서는 GPU 약 3 ms 의 왕복 하나다. hover 의 이동·글 넣기·키는 새 숨은 문서에서도 닿았다(3/3).
+                    self.object_id = try gpa.dupe(u8, oid);
+                    self.stage = .frame;
+                    return call(gpa, "Page.captureScreenshot", "{{\"format\":\"jpeg\",\"quality\":1,\"clip\":{{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}}}", .{});
+                }
+                return self.hitTestCall(gpa, oid);
             },
+            .frame => unreachable, // 답은 위에서 덮임 검사로 넘겼다
             .hit_test => {
                 if (at(v, &.{"exceptionDetails"}) != null) {
                     self.miss = "could not check what is at the element's position";
@@ -1121,6 +1127,17 @@ pub const Op = struct {
         var step = try call(gpa, "Accessibility.queryAXTree", "{{\"objectId\":{f},\"role\":{f}}}", .{ std.json.fmt(self.doc_obj.?, .{}), std.json.fmt(self.loc_role, .{}) });
         step.call.kick = .required;
         return step;
+    }
+
+    /// 덮임 검사 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가.
+    fn hitTestCall(self: *Op, gpa: std.mem.Allocator, oid: []const u8) !Step {
+        self.stage = .hit_test;
+        // 격리 world 에서 — 그 자리에서 맞는 것이 이 요소(또는 그 안)인가. 다른 frame 의 요소면 "frame"(자리가 주 화면 좌표라
+        // 그 frame 에서 보면 어긋난다). 그림자 DOM 안이면 그 뿌리에서 맞히고, slot 에 꽂힌 내용·host 를 따라 올라가며 본다.
+        // **DOM 속성은 프로토타입의 getter 로 읽는다** — 격리 world 여도 `<form>` 안의 `<input name=parentNode>` 같은 이름
+        // 속성(DOM clobbering)이 `n.parentNode` 를 가린다: 실측으로 걷기가 끝없이 돌거나(렌더러 멈춤) 덮인 요소를 「맞음」으로
+        // 통과시켰다(W9b①a 적대 리뷰 3 회차). 걷기는 4096 단계로 끊는다.
+        return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":\"function(x,y,up){{var G=function(p,k){{return Object.getOwnPropertyDescriptor(p,k).get}};var od=G(Node.prototype,'ownerDocument'),pn=G(Node.prototype,'parentNode'),es=G(Element.prototype,'assignedSlot'),ts=G(Text.prototype,'assignedSlot'),hs=G(ShadowRoot.prototype,'host');var grn=Node.prototype.getRootNode,def=Document.prototype.elementFromPoint,sef=ShadowRoot.prototype.elementFromPoint;var me=this;if(me instanceof Text)me=G(Node.prototype,'parentElement').call(me)||me;if((od.call(me)||me)!==document)return 'frame';var r=grn.call(me);var h=(r instanceof ShadowRoot)?sef.call(r,x,y):def.call(document,x,y);if(up){{var tg=G(Element.prototype,'tagName'),ga=Element.prototype.getAttribute,SP=String.prototype,sr=G(Element.prototype,'shadowRoot'),ce=G(HTMLElement.prototype,'isContentEditable'),lc=G(HTMLLabelElement.prototype,'control'),R=',button,link,tab,menuitem,menuitemcheckbox,menuitemradio,option,checkbox,radio,switch,treeitem,textbox,searchbox,combobox,slider,spinbutton,listbox,';var act=function(m){{var t=SP.toUpperCase.call(tg.call(m));if(t==='BUTTON'||t==='LABEL'||t==='SUMMARY'||t==='INPUT'||t==='SELECT'||t==='TEXTAREA'||t==='IFRAME'||t==='FRAME'||t==='EMBED'||t==='OBJECT'||(t==='A'&&ga.call(m,'href')!==null))return true;if(m instanceof HTMLElement&&ce.call(m))return true;var ro=ga.call(m,'role');return ro!==null&&SP.indexOf.call(R,','+SP.split.call(SP.toLowerCase.call(SP.trim.call(ro)),/\\\\s/)[0]+',')>=0}};var upf=function(m){{var q=es.call(m)||pn.call(m);if(q instanceof ShadowRoot)q=hs.call(q);return(q instanceof Element)?q:null}};}}var via=false;for(var n=h,i=0;n&&i<4096;i++){{if(n===me)return via?'covered':'ok';if(up&&(n instanceof Element)&&act(n)&&!((me instanceof HTMLLabelElement)&&lc.call(me)===n))via=true;var s=(n instanceof Element)?es.call(n):(n instanceof Text)?ts.call(n):null;n=s||pn.call(n)||((n instanceof ShadowRoot)?hs.call(n):null)}}if(up){{var A=null;for(var m=me,j=0;m&&j<4096;j++,m=upf(m))if(act(m)){{A=m;break}}if(A){{var d=h;for(var k=0;d&&k<64;k++){{var s3=sr.call(d);if(!s3)break;var d2=sef.call(s3,x,y);if(!d2||d2===d)break;d=d2}}for(var n2=d,j2=0;n2&&j2<4096;j2++,n2=upf(n2)){{if(n2===A||(n2 instanceof HTMLLabelElement&&lc.call(n2)===A)||(A instanceof HTMLLabelElement&&lc.call(A)===n2))return 'ok';if(act(n2))break}}}}}}return 'covered'}}\",\"arguments\":[{{\"value\":{d}}},{{\"value\":{d}}},{{\"value\":{s}}}],\"returnByValue\":true}}", .{ std.json.fmt(oid, .{}), self.x, self.y, if (self.hit_up) "true" else "false" });
     }
 
     /// hover 의 포인터 이동(+kick — 숨은 탭에서 5 초 걸렸다, W9b②-3 계획 공격 3 회차).
@@ -1642,19 +1659,22 @@ test "click(selector): 찾기 → 화면 안으로 → 자리 → 화면과 겹�
     defer testing.allocator.free(r.result);
     try testing.expectEqual(Status.success, r.status);
     try testing.expectEqualStrings("true", r.result);
-    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
+    const want = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Page.captureScreenshot", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     // 검사는 격리 world(페이지가 바꿔 놓은 함수를 쓰지 않는다)·묶음 이름은 요청마다.
     try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "\"executionContextId\":7") != null);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[8], "\"objectGroup\":\"maru-w9b-42\"") != null);
-    try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-42\"}", trail.params.items[12]);
+    try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-42\"}", trail.params.items[13]);
     // selector·ref 는 그 요소(또는 그 안)에 맞아야 한다 — 조상 허용은 text·label 로케이터만(W9b②-2 2 회차).
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "{\"value\":false}],") != null);
-    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[9]));
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "{\"value\":false}],") != null);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[10]));
+    // 누르기 전 프레임은 kick 이 아니라 답을 기다리는 보통 호출이다(W9b③ — kick 이면 프레임이 누르기보다 늦었다).
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "\"width\":1,\"height\":1") != null);
+    try testing.expectEqual(@as(usize, 0), trail.kicked.items.len);
     // 누르기 앞에 움직임이 없다(숨긴 탭에서 답이 없었다) — 검사 바로 다음이 누름이다.
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "mousePressed") != null);
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[11], "mouseReleased") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[11], "mousePressed") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[12], "mouseReleased") != null);
     try testing.expect(trail.committed_after_press);
     try testing.expect(trail.uncommitted_at_press);
     try testing.expectEqual(@as(f64, 23), op.x);
@@ -2497,7 +2517,7 @@ test "role 로케이터: 크기 검사 → 문서 → 접근성 질의 → 하�
     defer testing.allocator.free(r.result);
     try testing.expectEqual(Status.success, r.status);
     try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n11\",\"name\":\"Save\"}}", r.result);
-    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "Runtime.evaluate", "Accessibility.queryAXTree", "Runtime.releaseObjectGroup", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
+    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.evaluate", "Runtime.evaluate", "Accessibility.queryAXTree", "Runtime.releaseObjectGroup", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Page.captureScreenshot", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     // 크기 검사는 격리 world·프로토타입 함수로, 질의는 Chromium 역할로(부분 일치라 이름은 싣지 않는다).
@@ -2681,7 +2701,7 @@ test "text·label 로케이터: 격리 world 의 JS 로 찾고(deep 직렬화) �
     const r = try drive(&op, &findPage, &trail);
     defer testing.allocator.free(r.result);
     try testing.expectEqualStrings("{\"ok\":true,\"matched\":{\"ref\":\"n41\",\"name\":\"Sign in\"}}", r.result);
-    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
+    const want = [_][]const u8{ "Page.getFrameTree", "Page.createIsolatedWorld", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup", "DOM.scrollIntoViewIfNeeded", "DOM.getContentQuads", "Page.getLayoutMetrics", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Page.captureScreenshot", "Runtime.callFunctionOn", "Input.dispatchMouseEvent", "Input.dispatchMouseEvent", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(want.len, trail.methods.items.len);
     for (want, trail.methods.items) |w, got| try testing.expectEqualStrings(w, got);
     // 질의는 정규화해 인자로(문자열로 끼워 넣지 않는다), deep 직렬화·묶음.
@@ -2692,12 +2712,12 @@ test "text·label 로케이터: 격리 world 의 JS 로 찾고(deep 직렬화) �
     try testing.expectEqualStrings("{\"objectGroup\":\"maru-w9b-400\"}", trail.params.items[3]);
     try testing.expect(std.mem.indexOf(u8, trail.params.items[4], "\"backendNodeId\":41") != null);
     // 덮임 검사는 가장 가까운 조작 가능한 조상까지의 조상을 받는다(2 회차 — pointer-events:none 글·의사 요소 덮개).
-    try testing.expectEqualStrings("Runtime.callFunctionOn", trail.methods.items[10]);
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "{\"value\":true}],") != null);
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "if(up){") != null);
+    try testing.expectEqualStrings("Runtime.callFunctionOn", trail.methods.items[11]);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[11], "{\"value\":true}],") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[11], "if(up){") != null);
     // 맞은 것에서 대상까지 다른 조작 가능한 요소(링크·버튼)를 지나면 covered — 그것이 눌린다(5 회차).
-    try testing.expect(std.mem.indexOf(u8, trail.params.items[10], "return via?'covered':'ok'") != null);
-    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[10]));
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[11], "return via?'covered':'ok'") != null);
+    try testing.expect(try std.json.validate(testing.allocator, trail.params.items[11]));
     // label·exact·nth 없음·동작 이름도 그대로 인자로(1 회차 변이 — exact 를 버려도 살아남았다).
     trail.reset();
     var op2 = try Op.init(testing.allocator, .hover, "{\"locator\":{\"label\":\"Email\",\"exact\":true}}", 401);
@@ -3338,4 +3358,54 @@ test "5 회차: 질의 재시도도 마지막 무거운 확인으로 짐작한�
         .call => |c| testing.allocator.free(c.params),
         .done => |d| testing.allocator.free(d.result),
     }
+}
+
+// ── W9b③: 누르기 전 프레임 ────────────────────────────────────────────────────────────────────────────────
+
+var w9b3_frame_reply: Reply = .{ .ok = "{\"data\":\"\"}" };
+fn w9b3FramePage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Page.captureScreenshot")) return w9b3_frame_reply;
+    return happyPage(method, params);
+}
+
+test "W9b③: 누르기 전 프레임 — 스크린샷이 오류로 답해도(그린 뒤다) 덮임 검사·누르기로, 못 보냈으면 누르지 않고 놓고 실패" {
+    defer w9b3_frame_reply = .{ .ok = "{\"data\":\"\"}" };
+    const cases = [_]struct { reply: Reply, status: Status, presses: usize }{
+        .{ .reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"Unable to capture screenshot\"}" }, .status = .success, .presses = 1 },
+        .{ .reply = .{ .not_sent = busy_reason }, .status = .failed, .presses = 0 },
+    };
+    for (cases, 0..) |c, n| {
+        var trail: Trail = .{};
+        defer trail.deinit();
+        w9b3_frame_reply = c.reply;
+        var op = try Op.init(testing.allocator, .click, "{\"selector\":\"#b\"}", 800 + n);
+        defer op.deinit(testing.allocator);
+        const r = try drive(&op, &w9b3FramePage, &trail);
+        defer testing.allocator.free(r.result);
+        try testing.expectEqual(c.status, r.status);
+        var presses: usize = 0;
+        for (trail.params.items) |p| if (std.mem.indexOf(u8, p, "mousePressed") != null) {
+            presses += 1;
+        };
+        try testing.expectEqual(c.presses, presses);
+        // 어느 쪽이든 쥔 묶음은 놓는다.
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+}
+
+test "W9b③: 누르기 전 프레임을 기다리는 동안 철회되면 묶음을 놓는다(누르지 않는다)" {
+    var op = try Op.init(testing.allocator, .click, "{\"selector\":\"#b\"}", 810);
+    defer op.deinit(testing.allocator);
+    var step = try op.start(testing.allocator);
+    while (true) switch (step) {
+        .call => |c| {
+            defer testing.allocator.free(c.params);
+            if (std.mem.eql(u8, c.method, "Page.captureScreenshot")) break;
+            step = try op.feed(testing.allocator, happyPage(c.method, c.params));
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    const release = (try op.cancel(testing.allocator)) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(release.call.params);
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", release.call.method);
 }

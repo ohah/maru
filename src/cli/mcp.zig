@@ -101,7 +101,7 @@ pub const tools = [_]Tool{
     })) },
     .{ .name = "browser_snapshot", .subcommand = "snapshot", .description = "Print the page accessibility tree with refs for later actions. On big pages pass interactive, max_depth or selector to keep the result small.", .args = withSurface(&.{
         .{ .key = "interactive", .kind = .flag, .flag = "--interactive", .description = "only interactive elements" },
-        .{ .key = "max_depth", .kind = .int, .flag = "--max-depth", .description = "tree depth limit" },
+        .{ .key = "max_depth", .kind = .int, .flag = "--max-depth", .description = "tree depth limit", .max = std.math.maxInt(u32) },
         .{ .key = "selector", .kind = .string, .flag = "--selector", .description = "only under this element" },
     }) },
     .{ .name = "browser_console", .subcommand = "console", .description = "Print page console logs.", .args = withSurface(&.{.{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "empty the log after reading" }}) },
@@ -124,16 +124,26 @@ pub fn returnsImage(tool: *const Tool) bool {
     return std.mem.eql(u8, tool.subcommand, "screenshot");
 }
 
-/// JSON 값의 중첩이 `limit` 을 넘는가 — `limit` 단에서 멈춘다(재귀 깊이도 그만큼). std.json 의 값 파서는 깊이 상한이 없어 끝까지
-/// 재는 재귀는 수십만 단에서 스택을 넘겨 서버째 죽었다(W9f 적대 리뷰 2 회차).
-fn jsonDeeperThan(v: std.json.Value, limit: usize) bool {
+/// exec 인자(배열)의 어느 값이 서버 셈법의 깊이 `limit` 을 넘는가 — 원소가 깊이 0(서버 `validExecuteScriptArg` 와 같다, W9f 적대 리뷰 3 회차).
+/// `limit` 을 넘는 순간 멈춘다(재귀 깊이도 그만큼 — std.json 의 값 파서는 깊이 상한이 없어 끝까지 재는 재귀는 수십만 단에서 스택을 넘겨
+/// 서버째 죽었다, 2 회차).
+fn argsDeeperThan(args: std.json.Value, limit: usize) bool {
+    const items = switch (args) {
+        .array => |a| a.items,
+        else => return false,
+    };
+    for (items) |x| if (valueDeeperThan(x, 0, limit)) return true;
+    return false;
+}
+
+fn valueDeeperThan(v: std.json.Value, depth: usize, limit: usize) bool {
+    if (depth > limit) return true;
     const children: []const std.json.Value = switch (v) {
         .array => |a| a.items,
         .object => |o| o.values(),
         else => return false,
     };
-    if (limit == 0) return true; // 컨테이너 하나가 더 있다
-    for (children) |x| if (jsonDeeperThan(x, limit - 1)) return true;
+    for (children) |x| if (valueDeeperThan(x, depth + 1, limit)) return true;
     return false;
 }
 
@@ -213,7 +223,7 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                 .json_array => switch (v) {
                     .array => {
                         // 깊게 중첩된 배열은 글로 펼 때 쓰개의 중첩 한도(256)에서 서버째 panic 했다(W9f 적대 리뷰 1 회차).
-                        if (jsonDeeperThan(v, browser.max_args_depth)) return error.WrongType;
+                        if (argsDeeperThan(v, browser.max_args_depth)) return error.WrongType;
                         var aw: std.Io.Writer.Allocating = .init(arena);
                         std.json.Stringify.value(v, .{}, &aw.writer) catch return error.OutOfMemory;
                         try out.append(arena, try std.fmt.allocPrint(arena, "{s}={s}", .{ spec.flag, aw.written() }));
@@ -345,7 +355,8 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "then act on them by id (surface). Prefer locators (role/by_text/by_label) or refs from browser_snapshot over CSS selectors. " ++
             "Requests come from the maru pane this process runs in; controlling a tab you did not open asks the user once. " ++
             "While the user answers that confirmation a call can take up to about 150 seconds (2 minutes for the answer, then the action), " ++
-            "so give this server a tool timeout of at least 150 seconds. Calls run one at a time.") catch |e| break :blk e;
+            "so give this server a tool timeout of at least 150 seconds. Calls run one at a time. " ++
+            "On Chromium tabs (engine=chromium in browser_list) navigate, get_url, exec, console and screenshot are not available yet and answer -32008.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -810,4 +821,60 @@ test "W9f 적대 리뷰 2 회차: `maru mcp` 의 인자 — 없으면 서버, --
     try testing.expectEqual(Invocation.help, invocation(&.{"-h"}));
     try testing.expectEqual(Invocation.bad, invocation(&.{"bogus"}));
     try testing.expectEqual(Invocation.bad, invocation(&.{ "--help", "x" }));
+}
+
+test "W9f 적대 리뷰 3 회차: MCP 도 exec args 를 서버 셈법으로 — 129 단 스칼라는 받고 130 단은 거절, 가장 안쪽 빈 배열은 한 단 더" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const Case = struct { brackets: usize, inner: []const u8, ok: bool };
+    for ([_]Case{
+        .{ .brackets = 129, .inner = "1", .ok = true },
+        .{ .brackets = 130, .inner = "1", .ok = false },
+        .{ .brackets = 130, .inner = "", .ok = true },
+        .{ .brackets = 131, .inner = "", .ok = false },
+    }) |c| {
+        var buf: std.ArrayList(u8) = .empty;
+        try buf.appendSlice(arena, "{\"surface\":2,\"expression\":\"1\",\"args\":");
+        try buf.appendNTimes(arena, '[', c.brackets);
+        try buf.appendSlice(arena, c.inner);
+        try buf.appendNTimes(arena, ']', c.brackets);
+        try buf.append(arena, '}');
+        const v = try std.json.parseFromSlice(std.json.Value, arena, buf.items, .{});
+        const r = argv(arena, findTool("browser_exec").?, v.value);
+        if (c.ok) {
+            const a = try r;
+            _ = try browser.parse(a); // CLI 파서도 같은 셈
+        } else try testing.expectError(error.WrongType, r);
+    }
+}
+
+test "W9f 적대 리뷰 3 회차: 모든 정수 인자의 스키마 상한은 파서와 같다 — 상한은 받고 상한+1 은 거절" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    for (&tools) |*t| for (t.args) |arg| {
+        if (arg.kind != .int or std.mem.eql(u8, arg.key, "surface")) continue;
+        const max = arg.max orelse {
+            std.debug.print("int arg {s}.{s} has no maximum\n", .{ t.name, arg.key });
+            return error.TestUnexpectedResult;
+        };
+        for ([_]i64{ max, max + 1 }) |value| {
+            var obj: std.json.ObjectMap = .empty;
+            for (t.args) |a| if (a.required) try obj.put(arena, a.key, switch (a.kind) {
+                .int => .{ .integer = 4 },
+                else => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
+            });
+            if (std.mem.eql(u8, arg.key, "level") or std.mem.eql(u8, arg.key, "nth")) try obj.put(arena, "role", .{ .string = "button" });
+            if (std.mem.eql(u8, t.subcommand, "wait") and std.mem.eql(u8, arg.key, "timeout_ms")) try obj.put(arena, "selector", .{ .string = "#a" });
+            if ((std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover")) and !obj.contains("role")) try obj.put(arena, "selector", .{ .string = "#a" });
+            try obj.put(arena, arg.key, .{ .integer = value });
+            const a = try argv(arena, t, .{ .object = obj });
+            const ok = if (browser.parse(a)) |_| true else |_| false;
+            if (ok != (value == max)) {
+                std.debug.print("{s}.{s}={d}: parse ok={}\n", .{ t.name, arg.key, value, ok });
+                return error.TestUnexpectedResult;
+            }
+        }
+    };
 }

@@ -586,7 +586,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "firstPoisonReason", .funnel = "firstPoisonReason", .gate = "beginPublicMutation" },
         .{ .receiver = "canTerminalizeSharedConnectionNoDestroy", .funnel = "canTerminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
         .{ .receiver = "terminalizeSharedConnectionNoDestroy", .funnel = "terminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
-        .{ .receiver = "pumpImageChannel", .funnel = "pumpImageChannel", .gate = "beginPublicMutation" },
+        .{ .receiver = "pumpImageChannel", .funnel = "pumpImageChannel", .gate = "requireBlockingMode" },
     };
     try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
     const client_path = "src/platform/macos/session_host/client.zig";

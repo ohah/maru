@@ -6987,12 +6987,12 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            // 수립(IC2b) 9 와 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison) 3.
+            // 수립(IC2b) 9 와 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위) 6.
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
-        run_image_channel_connect_tests.addArg("--maru-expect-tests=14");
-        run_image_channel_connect_tests.addArg("--maru-expect-passed=14");
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=15");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=15");
         image_channel_app_step.dependOn(&run_image_channel_connect_tests.step);
         test_step.dependOn(&run_image_channel_connect_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_connect_tests.step);
@@ -7022,8 +7022,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"client image segments:"},
         });
         const run_client_image_segments_tests = b.addRunArtifact(client_image_segments_tests);
-        run_client_image_segments_tests.addArg("--maru-expect-tests=10");
-        run_client_image_segments_tests.addArg("--maru-expect-passed=10");
+        run_client_image_segments_tests.addArg("--maru-expect-tests=11");
+        run_client_image_segments_tests.addArg("--maru-expect-passed=11");
         image_channel_app_step.dependOn(&run_client_image_segments_tests.step);
         test_step.dependOn(&run_client_image_segments_tests.step);
         macos_only_test_step.dependOn(&run_client_image_segments_tests.step);

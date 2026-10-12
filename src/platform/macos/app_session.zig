@@ -17476,6 +17476,8 @@ pub const AppSession = struct {
         cursors: std.StringHashMapUnmanaged(Cursor) = .empty,
         /// 확인한 stream capability. 재시작에서도 보존해 세대 정보를 v1으로 낮추지 않는다.
         stream_profile: ?maru.session.remote_agent_stream.protocol.Profile = null,
+        mixed_stream: bool = false,
+        recheck_native: bool = false,
         /// `seen_ms`는 오래된 항목을 밀어낼 때만 사용한다.
         const Cursor = struct { offset: u64, seen_ms: u64, generation: ?maru.session.agent_log_generation.Generation = null };
         /// 동시에 기억할 로그 수. 한 pane 이 하나씩 쓰므로 이만큼이면 실사용을 덮는다.
@@ -17587,6 +17589,19 @@ pub const AppSession = struct {
         host.install_done = true;
         switch (maru.cli.agent_hooks.parseOutcome(host.install_out.items)) {
             .ok => |o| {
+                if (o.mixed_ready and !host.mixed_stream) {
+                    // Drain the existing legacy pipe before changing cursor identity.
+                    if (host.stream_started) remote_agent_ops.drainRemoteAgentHost(self, dest, host, now_ms);
+                    self.upgradeRemoteMixed(host) catch {
+                        host.recheck_native = true;
+                        self.scheduleStreamerRetry(dest, host, "mixed cursor upgrade failed");
+                        return;
+                    };
+                    if (host.stream_started) {
+                        ssh_upload.stopAgentEvents(host.stream);
+                        host.stream_started = false;
+                    }
+                }
                 // 설치가 됐다 = 그 목적지로 가는 길이 산다 — 재시도 예산은 「연달아 실패한 횟수」라 여기서 끊는다(`scheduleStreamerRetry`
                 // doc). 안 끊으면 설치 시한 초과를 몇 번 겪은 뒤의 스트리머가 그만큼 적은 재시도로 굳는다.
                 host.retries = 0;
@@ -17609,6 +17624,8 @@ pub const AppSession = struct {
             },
         }
         host.install_out.clearAndFree(self.allocator);
+
+        if (host.stream_started) return; // A legacy recheck need not replace a live stream.
 
         // 설치가 끝났다 — **이제** 스트리머를 띄운다.
         //
@@ -17645,6 +17662,25 @@ pub const AppSession = struct {
         const profile = host.stream_profile orelse .v1;
         var it = host.cursors.iterator();
         while (it.next()) |e| {
+            if (host.mixed_stream) {
+                if (e.key_ptr.*.len < 3 or e.key_ptr.*[1] != ':') {
+                    self.scheduleStreamerRetry(dest, host, "mixed resume identity mismatch");
+                    return;
+                }
+                const cursor_profile: protocol.Profile = switch (e.key_ptr.*[0]) {
+                    '1' => .v1,
+                    '2' => .v2,
+                    else => {
+                        self.scheduleStreamerRetry(dest, host, "mixed resume profile mismatch");
+                        return;
+                    },
+                };
+                maru.session.agent_stream_mixed.appendResume(&spec, self.allocator, e.key_ptr.*[2..], .{ .offset = e.value_ptr.offset, .generation = e.value_ptr.generation }, cursor_profile) catch {
+                    self.scheduleStreamerRetry(dest, host, "mixed resume cursor construction failed");
+                    return;
+                };
+                continue;
+            }
             // Legacy positions cannot identify a new-generation file. An upgrade
             // starts those names at zero; a stored generation is never discarded.
             if (profile == .v2 and e.value_ptr.generation == null) continue;
@@ -17653,19 +17689,20 @@ pub const AppSession = struct {
                 return;
             };
         }
-        const stream = ssh_upload.spawnAgentEventsProfile(
+        const stream = ssh_upload.spawnAgentEventsMode(
             self.allocator,
             ctl,
             dest,
             "maru",
             // The same confirmed profile selects both cursor encoding and the
             // writer's namespace; v2 must never read the legacy append root.
-            maru.session.agent_log_profile.homeRelative(.remote, switch (profile) {
+            if (host.mixed_stream) ".cache/maru" else maru.session.agent_log_profile.homeRelative(.remote, switch (profile) {
                 .v1 => .v1,
                 .v2 => .v2,
             }),
             spec.items,
             profile,
+            host.mixed_stream,
         ) catch {
             // **기동 실패도 EOF 와 같은 부류다**(적대적 검증 4 회차). fork 가 한 번 밀린 것으로 그
             // 목적지를 앱 수명 동안 죽이면, 방금 EOF 에서 고친 영구 차단을 형제 경로가 그대로 재현한다.
@@ -17701,10 +17738,38 @@ pub const AppSession = struct {
     }
 
     /// 선에서 온 커서를 기억한다(RA5-a 로컬 절반). **host 소유**라 Term 마다가 아니라 여기 한 곳이다.
+    fn upgradeRemoteMixed(self: *AppSession, host: *RemoteAgentHost) !void {
+        var next: std.StringHashMapUnmanaged(RemoteAgentHost.Cursor) = .empty;
+        errdefer {
+            var keys = next.keyIterator();
+            while (keys.next()) |key| self.allocator.free(key.*);
+            next.deinit(self.allocator);
+        }
+        const profile = host.stream_profile orelse .v1;
+        var entries = host.cursors.iterator();
+        while (entries.next()) |entry| {
+            const key = try std.fmt.allocPrint(self.allocator, "{s}:{s}", .{ profile.envValue(), entry.key_ptr.* });
+            next.put(self.allocator, key, entry.value_ptr.*) catch |err| {
+                self.allocator.free(key);
+                return err;
+            };
+        }
+        var old_keys = host.cursors.keyIterator();
+        while (old_keys.next()) |key| self.allocator.free(key.*);
+        host.cursors.deinit(self.allocator);
+        host.cursors = next;
+        host.mixed_stream = true;
+        host.recheck_native = false;
+    }
+
     pub fn recordRemoteCursors(self: *AppSession, host: *RemoteAgentHost, lines: []const []const u8, now_ms: u64) void {
         const ras = maru.session.remote_agent_stream;
         for (lines) |line| {
             if (!host.saw_hello) {
+                if (host.mixed_stream) {
+                    if (maru.session.agent_stream_mixed.isHello(line)) host.saw_hello = true;
+                    continue;
+                }
                 // 채널과 **같은 판정**을 쓴다(`Channel.feed` 의 `waiting_hello`).
                 const required = if (host.stream_profile == .v2) maru.session.remote_agent_stream.protocol.Profile.v2 else null;
                 if (ras.protocol.parseHello(line, required)) |profile| {
@@ -17713,14 +17778,25 @@ pub const AppSession = struct {
                 }
                 continue;
             }
-            const cur = switch (ras.parseFrameForProfile(line, host.stream_profile orelse .v1)) {
+            const cur = switch (if (host.mixed_stream) ras.parseMixedFrame(line) else ras.parseFrameForProfile(line, host.stream_profile orelse .v1)) {
                 .cursor => |c| c,
                 else => continue,
             };
-            if (host.cursors.getPtr(cur.name)) |slot| {
+            if (std.mem.eql(u8, cur.name, maru.session.agent_stream_mixed.capability_log_name)) continue;
+            var key_buf: [maru.session.agent_hook_command.remote_log_name_max + 2]u8 = undefined;
+            const cursor_name = if (host.mixed_stream) blk: {
+                const envelope = maru.session.agent_stream_mixed.unwrap(line) orelse continue;
+                break :blk std.fmt.bufPrint(&key_buf, "{s}:{s}", .{ envelope.profile.envValue(), cur.name }) catch continue;
+            } else cur.name;
+            if (host.cursors.getPtr(cursor_name)) |slot| {
                 slot.* = .{ .offset = cur.offset, .seen_ms = now_ms, .generation = cur.generation };
                 continue;
             }
+            const key = self.allocator.dupe(u8, cursor_name) catch continue;
+            host.cursors.ensureUnusedCapacity(self.allocator, 1) catch {
+                self.allocator.free(key);
+                continue;
+            };
             // 새 이름이다. 자리가 없으면 **가장 오래 안 본 것**을 밀어낸다 — 그 로그는 이미 안 도는
             // pane 의 것일 가능성이 높고, 틀렸더라도 그 하나만 처음부터 읽는다(전부가 아니다).
             if (host.cursors.count() >= RemoteAgentHost.cursor_max) {
@@ -17737,11 +17813,7 @@ pub const AppSession = struct {
                     if (host.cursors.fetchRemove(k)) |old| self.allocator.free(old.key);
                 }
             }
-            const key = self.allocator.dupe(u8, cur.name) catch continue;
-            host.cursors.put(self.allocator, key, .{ .offset = cur.offset, .seen_ms = now_ms, .generation = cur.generation }) catch {
-                self.allocator.free(key);
-                continue;
-            };
+            host.cursors.putAssumeCapacity(key, .{ .offset = cur.offset, .seen_ms = now_ms, .generation = cur.generation });
         }
     }
 
@@ -98717,4 +98789,123 @@ test "native local reader default carrier preserves live v1 and consumes install
         try std.testing.expect(session.turn_captures.sealedTurn(agent_ops.test_last_turn_capture) != null);
     }
     try std.testing.expectEqual(maru.session.agent_log_profile.Profile.v1, old.agent_hook_log_profile);
+}
+
+// Same-name cursors belong to different process formats during gradual migration.
+test "generation receiver mixed cursors isolate profiles and keep both on restart" {
+    const a = std.testing.allocator;
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    var host: AppSession.RemoteAgentHost = .{ .mixed_stream = true };
+    defer {
+        var keys = host.cursors.keyIterator();
+        while (keys.next()) |key| a.free(key.*);
+        host.cursors.deinit(a);
+    }
+    const hello = maru.session.agent_stream_mixed.hello_line;
+    const legacy = "{\"format\":1,\"frame\":{\"cur\":\"a\",\"at\":7}}";
+    const native = "{\"format\":2,\"frame\":{\"cur\":\"a\",\"at\":9,\"gen\":\"00112233445566778899aabbccddeeff\"}}";
+    session.recordRemoteCursors(&host, &.{ hello, legacy, native }, 1);
+    try std.testing.expect(host.saw_hello);
+    try std.testing.expectEqual(@as(usize, 2), host.cursors.count());
+    try std.testing.expectEqual(@as(u64, 7), host.cursors.get("1:a").?.offset);
+    const before = host.cursors.get("2:a").?;
+    try std.testing.expect(before.generation != null);
+    session.onStreamerStarted("mixed-fixture", &host, 2);
+    session.recordRemoteCursors(&host, &.{ maru.session.remote_agent_stream.protocol.hello(.v2), native }, 3);
+    try std.testing.expect(!host.saw_hello);
+    try std.testing.expectEqualDeep(before, host.cursors.get("2:a").?);
+    session.recordRemoteCursors(&host, &.{ hello, "{\"format\":2,\"frame\":{\"cur\":\"a\",\"at\":0}}" }, 4);
+    try std.testing.expectEqualDeep(before, host.cursors.get("2:a").?);
+    var channel = maru.session.remote_agent_stream.Channel.initMixed(1, false);
+    _ = channel.feed(maru.session.remote_agent_stream.protocol.hello(.v2), 2);
+    try std.testing.expect(!channel.isOpen());
+    _ = channel.feed(hello, 3);
+    try std.testing.expect(channel.isOpen());
+    try std.testing.expect(channel.feed(legacy, 4) == .cursor);
+    try std.testing.expect(channel.feed(native, 5) == .cursor);
+    _ = channel.feed("{\"format\":2,\"frame\":{broken}}", 6);
+    try std.testing.expectEqual(@as(u64, 5), channel.last_alive_ms);
+}
+
+// Failure before storing a new cursor must not evict an existing resume entry.
+test "generation receiver mixed cursor allocation failure preserves full history" {
+    const a = std.testing.allocator;
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    var host: AppSession.RemoteAgentHost = .{ .mixed_stream = true, .saw_hello = true };
+    defer {
+        var keys = host.cursors.keyIterator();
+        while (keys.next()) |key| a.free(key.*);
+        host.cursors.deinit(a);
+    }
+    for (0..32) |i| {
+        const key = try std.fmt.allocPrint(a, "1:a{d}", .{i});
+        try host.cursors.put(a, key, .{ .offset = @intCast(i), .seen_ms = @intCast(i) });
+    }
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    session.allocator = fail.allocator();
+    session.recordRemoteCursors(&host, &.{"{\"format\":1,\"frame\":{\"cur\":\"new\",\"at\":999}}"}, 100);
+    try std.testing.expectEqual(@as(usize, 32), host.cursors.count());
+    try std.testing.expect(host.cursors.get("1:a0") != null);
+    try std.testing.expect(host.cursors.get("1:new") == null);
+}
+
+test "generation receiver legacy upgrade preserves cursors atomically on allocation failure" {
+    const a = std.testing.allocator;
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    var host: AppSession.RemoteAgentHost = .{ .stream_profile = .v1 };
+    defer {
+        var keys = host.cursors.keyIterator();
+        while (keys.next()) |key| a.free(key.*);
+        host.cursors.deinit(a);
+    }
+    try host.cursors.put(a, try a.dupe(u8, "a"), .{ .offset = 31, .seen_ms = 1 });
+    var fail = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    session.allocator = fail.allocator();
+    try std.testing.expectError(error.OutOfMemory, session.upgradeRemoteMixed(&host));
+    try std.testing.expect(!host.mixed_stream);
+    try std.testing.expectEqual(@as(u64, 31), host.cursors.get("a").?.offset);
+    session.allocator = a;
+    try session.upgradeRemoteMixed(&host);
+    try std.testing.expect(host.mixed_stream);
+    try std.testing.expect(host.cursors.get("a") == null);
+    try std.testing.expectEqual(@as(u64, 31), host.cursors.get("1:a").?.offset);
+}
+
+// Replay real loopback SSH frames, including installed provider turns, through
+// the product Channel, hook state arbiter and remote capture path.
+test "generation receiver actual mixed SSH frames reach badge and sealed capture" {
+    if (!is_macos) return error.SkipZigTest;
+    const path = std.c.getenv("MARU_REMOTE_NATIVE_FRAMES") orelse return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    session.window_focused = false;
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initMixed(0, false);
+    const nonce = "4331_7"; // Issued to the owned SSH fixture, as in AT3c.
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    term.rt.observation.ssh_remote_dest_present = true;
+    const bytes = try std.Io.Dir.cwd().readFileAlloc(io, std.mem.span(path), a, .limited(2 * 1024 * 1024));
+    defer a.free(bytes);
+    agent_ops.test_last_turn_capture = 0;
+    var frames = std.mem.splitScalar(u8, bytes, '\n');
+    var now: u64 = 1;
+    while (frames.next()) |frame| {
+        if (frame.len == 0) continue;
+        agent_ops.consumeRemoteAgentLines(&session, term, &.{frame}, now);
+        now += 1;
+    }
+    try std.testing.expect(term.agent_remote_channel.?.isOpen());
+    try std.testing.expect(session.remote_nonce_matched > 0);
+    try std.testing.expectEqual(maru.session.agent_hook_mode.State.idle, term.hook.state);
+    try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+    try std.testing.expect(agent_ops.test_last_turn_capture != 0);
+    const sealed = session.turn_captures.sealedTurn(agent_ops.test_last_turn_capture) orelse return error.NoSealedTurn;
+    try std.testing.expect(sealed.remote);
+    try std.testing.expect(!term.hook.progress.turn_open);
 }

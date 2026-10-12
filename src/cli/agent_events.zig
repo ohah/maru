@@ -54,7 +54,7 @@ pub const Mode = union(enum) {
 
 pub const Options = struct {
     dir: []const u8,
-    log_format: enum { v1, v2 } = .v1,
+    log_format: enum { v1, v2, mixed } = .v1,
     /// 하트비트 주기(ms). **0 이면 안 보낸다** — 그러면 소비자가 사망을 침묵으로 재지 못한다는 뜻이라
     /// 시험용 외에는 쓰지 않는다.
     heartbeat_ms: u32 = 5_000,
@@ -105,7 +105,9 @@ pub fn parseArgs(args: []const []const u8) Mode {
     if (!saw_stdio) return .usage_error;
     const d = dir orelse return .usage_error;
     if (d.len == 0 or !std.fs.path.isAbsolute(d)) return .usage_error; // 상대 경로는 cwd 에 끌려간다
-    if (log_format == .v2) {
+    if (log_format == .mixed) {
+        if (!@import("../session/agent_stream_mixed.zig").validResume(resume_spec)) return .usage_error;
+    } else if (log_format == .v2) {
         var fields = std.mem.splitScalar(u8, resume_spec, ',');
         if (resume_spec.len > 0) while (fields.next()) |field| {
             _ = generation.decodeResumeEntry(field) catch return .usage_error;
@@ -819,4 +821,11 @@ test "resume cursor initialization cleans up after every allocation failure" {
             try std.testing.expectEqual(std.math.maxInt(u64), cursors.get("b").?.offset);
         }
     }.run, .{});
+}
+
+test "mixed transport options require profile-specific resumes" {
+    const t = std.testing;
+    const args = [_][]const u8{ "--stdio", "--dir=/private/cache", "--log-format=mixed", "--resume=1:a:7,2:a:9:00112233445566778899aabbccddeeff" };
+    try t.expect(parseArgs(&args) == .stdio);
+    try t.expect(parseArgs(&.{ "--stdio", "--dir=/private/cache", "--log-format=mixed", "--resume=a:7" }) == .usage_error);
 }

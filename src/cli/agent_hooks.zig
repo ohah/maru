@@ -98,6 +98,14 @@ const install_all_script = remote_shell.path_assign ++
     "maru agent-hooks \"$1\" --provider=claude --scope=remote --dir=\"$HOME/$2\"; " ++
     "maru agent-hooks \"$1\" --provider=codex --scope=remote --dir=\"$HOME/$2\"";
 
+/// Constant, quoted POSIX command shared with the SSH session preflight.
+pub const native_complete_marker = "!maru-agent-hooks/native-complete-v3";
+const native_prepare_script = install_all_script ++ "; printf \"%s\\n\" \"" ++ native_complete_marker ++ "\"";
+pub const native_prepare_command = "'sh' '-c' '" ++ native_prepare_script ++ "' 'sh' 'install' '.cache/maru/remote-agent-events'";
+comptime {
+    if (std.mem.indexOfScalar(u8, native_prepare_script, '\'') != null) @compileError("native prepare script needs shell quote escaping");
+}
+
 /// 로컬이 ControlMaster 위에서 실행할 **원격 명령 문자열**([계획](../../docs/plans/remote-agent-state.md)
 /// RA3 배선). 이 문자열은 원격 셸이 받으므로 인용 규칙이 전부다.
 ///
@@ -174,7 +182,7 @@ pub const install_output_max: usize = 64 * 1024;
 
 /// 원격이 돌려준 한 줄을 읽는다. **`changed` 까지 본다** — 로컬이 «설치가 끝났다» 를 그것으로 판정한다.
 pub const Outcome = union(enum) {
-    ok: struct { changed: bool },
+    ok: struct { changed: bool, mixed_ready: bool = false, format_forwarded: bool = false },
     /// 원격에 `maru` 가 없다.
     no_maru,
     /// 우리 줄이 아니다(MOTD·rc 잡음, 또는 `ForceCommand` 가 갈아치운 결과).
@@ -182,15 +190,66 @@ pub const Outcome = union(enum) {
 };
 
 pub fn parseOutcome(out: []const u8) Outcome {
+    if (out.len > install_output_max) return .unknown;
     var lines = std.mem.splitScalar(u8, out, '\n');
     var result: Outcome = .unknown;
+    var ready: u2 = 0;
+    var forwarded: u2 = 0;
+    var seen_native: u2 = 0;
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0) continue;
-        // **상한 안에서 찾는다**(첫 줄로 판정하지 않는다) — 정상 서버도 MOTD·rc 잡음을 앞에 붙인다.
         if (std.mem.eql(u8, line, no_maru_marker)) return .no_maru;
-        if (!std.mem.startsWith(u8, line, "{\"maru-agent-hooks\":1")) continue;
-        result = .{ .ok = .{ .changed = std.mem.indexOf(u8, line, "\"changed\":true") != null } };
+        if (line[0] != '{') continue; // MOTD is not an installation reply.
+        const claims_reply = std.mem.indexOf(u8, line, "\"maru-agent-hooks\"") != null;
+        var scratch: [4096]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&scratch);
+        const parsed = std.json.parseFromSlice(std.json.Value, fba.allocator(), line, .{ .parse_numbers = false }) catch {
+            if (claims_reply) return .unknown;
+            continue;
+        };
+        defer parsed.deinit();
+        if (parsed.value != .object) continue;
+        const object = parsed.value.object;
+        const version = object.get("maru-agent-hooks") orelse continue;
+        if (version != .number_string or !std.mem.eql(u8, version.number_string, "1")) return .unknown;
+        const changed = object.get("changed") orelse return .unknown;
+        if (changed != .bool) return .unknown;
+        // Historical summaries omit provider/action. If present, these typed
+        // identities must match the installed protocol rather than arbitrary text.
+        if (object.get("provider")) |provider| {
+            if (provider != .string) return .unknown;
+            if (!std.mem.eql(u8, provider.string, "claude") and !std.mem.eql(u8, provider.string, "codex")) return .unknown;
+        }
+        if (object.get("action")) |action| {
+            if (action != .string) return .unknown;
+            if (!std.mem.eql(u8, action.string, "install") and !std.mem.eql(u8, action.string, "uninstall")) return .unknown;
+        }
+        if (object.get("transport")) |transport| {
+            const native = object.get("native_ready") orelse return .unknown;
+            if (transport != .number_string or native != .bool) return .unknown;
+            const provider = object.get("provider") orelse return .unknown;
+            const action = object.get("action") orelse return .unknown;
+            if (provider != .string or action != .string) return .unknown;
+            const bit: u2 = if (std.mem.eql(u8, provider.string, "claude")) 1 else 2;
+            if (seen_native & bit != 0) return .unknown;
+            seen_native |= bit;
+            const received = object.get("received_format") orelse return .unknown;
+            if (received != .null and (received != .number_string or (!std.mem.eql(u8, received.number_string, "1") and !std.mem.eql(u8, received.number_string, "2")))) return .unknown;
+            if (std.mem.eql(u8, transport.number_string, "3") and native.bool and std.mem.eql(u8, action.string, "install")) {
+                ready |= bit;
+                if (received == .number_string and std.mem.eql(u8, received.number_string, "2")) forwarded |= bit;
+            }
+        } else if (object.get("native_ready") != null or object.get("received_format") != null) return .unknown;
+        const previous = switch (result) {
+            .ok => |ok| ok.changed,
+            else => false,
+        };
+        result = .{ .ok = .{ .changed = previous or changed.bool } };
+    }
+    if (result == .ok) {
+        result.ok.mixed_ready = ready == 3;
+        result.ok.format_forwarded = forwarded == 3;
     }
     return result;
 }
@@ -198,6 +257,7 @@ pub fn parseOutcome(out: []const u8) Outcome {
 pub const usage =
     \\usage: maru agent-hooks install|uninstall --provider=claude|codex --scope=remote --dir=<absolute path>
     \\       maru agent-hooks record --file=<absolute .ndjson path>
+    \\       maru agent-hooks check-native
     \\
     \\Installs (or removes) maru's agent hooks in this machine's provider config.
     \\Run this on the machine where the agent runs; maru on the other side reads the
@@ -362,4 +422,48 @@ test "원격 명령은 PATH 를 앞에 붙여 maru 를 찾는다 — 비대화�
         const lookup_at = std.mem.indexOf(u8, cmd, "command -v maru").?;
         try testing.expect(path_at < lookup_at);
     }
+}
+
+// Readiness must not be inferred from a textual prefix: a restricted remote
+// can return malformed JSON or an unsupported version with exit status zero.
+test "parseOutcome rejects malformed typed installation results" {
+    const invalid = [_][]const u8{
+        "{\"maru-agent-hooks\":11,\"changed\":true}",
+        "{\"maru-agent-hooks\":1,\"changed\":\"true\"}",
+        "{\"maru-agent-hooks\":1,\"changed\":true",
+        "{\"maru-agent-hooks\":1,\"changed\":true} trailing",
+        "{\"maru-agent-hooks\":1,\"changed\":true,\"changed\":false}",
+        "{\"maru-agent-hooks\":1,\"changed\":true,\"provider\":\"other\"}",
+        "{\"maru-agent-hooks\":1,\"changed\":true,\"action\":false}",
+        "{\"maru-agent-hooks\":1}",
+    };
+    for (invalid) |line| {
+        try testing.expect(parseOutcome(line) == .unknown);
+        const mixed = try std.fmt.allocPrint(testing.allocator, "{s}\n{{\"maru-agent-hooks\":1,\"changed\":false}}\n", .{line});
+        defer testing.allocator.free(mixed);
+        try testing.expect(parseOutcome(mixed) == .unknown);
+    }
+}
+
+test "parseOutcome accumulates provider changes and accepts JSON key order" {
+    const both = "{\"maru-agent-hooks\":1,\"provider\":\"claude\",\"action\":\"install\",\"changed\":true}\n" ++
+        "{\"maru-agent-hooks\":1,\"provider\":\"codex\",\"action\":\"install\",\"changed\":false}\n";
+    const result = parseOutcome(both);
+    try testing.expect(result == .ok);
+    try testing.expect(result.ok.changed);
+    const reordered = parseOutcome("{\"changed\":false,\"maru-agent-hooks\":1}");
+    try testing.expect(reordered == .ok);
+    try testing.expect(!reordered.ok.changed);
+}
+
+test "native installation readiness requires both providers and forwarded format" {
+    const claude = "{\"maru-agent-hooks\":1,\"provider\":\"claude\",\"action\":\"install\",\"changed\":false,\"transport\":3,\"native_ready\":true,\"received_format\":2}\n";
+    const codex = "{\"maru-agent-hooks\":1,\"provider\":\"codex\",\"action\":\"install\",\"changed\":false,\"transport\":3,\"native_ready\":true,\"received_format\":2}\n";
+    try testing.expect(parseOutcome(claude ++ codex).ok.mixed_ready);
+    try testing.expect(parseOutcome(claude ++ codex).ok.format_forwarded);
+    try testing.expect(!parseOutcome(claude).ok.mixed_ready);
+    try testing.expect(parseOutcome(claude ++ claude) == .unknown);
+    const no_env = "{\"maru-agent-hooks\":1,\"provider\":\"codex\",\"action\":\"install\",\"changed\":false,\"transport\":3,\"native_ready\":true,\"received_format\":null}\n";
+    try testing.expect(parseOutcome(claude ++ no_env).ok.mixed_ready);
+    try testing.expect(!parseOutcome(claude ++ no_env).ok.format_forwarded);
 }

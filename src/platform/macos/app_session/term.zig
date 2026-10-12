@@ -641,6 +641,13 @@ pub fn createTerm(
             if (be.ctx == remote.backend().ctx)
                 persistent_support = remote.supportsHookLogFormatForSpawn();
         };
+        var remote_protocol_env: std.ArrayList([]const u8) = .empty;
+        defer remote_protocol_env.deinit(self.allocator);
+        for (req.env_overrides) |entry| {
+            if (!std.mem.startsWith(u8, entry, "MARU_AGENT_REMOTE_PROTOCOL=")) try remote_protocol_env.append(self.allocator, entry);
+        }
+        try remote_protocol_env.append(self.allocator, "MARU_AGENT_REMOTE_PROTOCOL=3");
+        req.env_overrides = remote_protocol_env.items;
         req.hook_log_profile = try agent_ops.prepareNewHookLogProfile(self, req.hook_log_profile, persistent_support);
         break :surface be.spawn(.{
             .handle = id,

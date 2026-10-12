@@ -14271,6 +14271,35 @@ fn runAgentHooks(
         };
         return;
     }
+    if (rest.items.len == 1 and std.mem.eql(u8, rest.items[0], "check-native")) {
+        if (builtin.os.tag == .windows) return error.UnknownCommand;
+        var bytes: [maru.cli.agent_hooks.install_output_max + 1]u8 = undefined;
+        var len: usize = 0;
+        const deadline = std.Io.Clock.awake.now(io).nanoseconds + 5 * std.time.ns_per_s;
+        while (true) {
+            const now = std.Io.Clock.awake.now(io).nanoseconds;
+            if (now >= deadline or len == bytes.len) return error.UnknownCommand;
+            var ready: std.c.pollfd = .{ .fd = 0, .events = std.c.POLL.IN, .revents = 0 };
+            if (std.c.poll(@ptrCast(&ready), 1, @intCast(@divFloor(deadline - now, std.time.ns_per_ms))) <= 0) return error.UnknownCommand;
+            const n = std.c.read(0, bytes[len..].ptr, bytes.len - len);
+            if (n < 0) return error.UnknownCommand;
+            if (n == 0) break;
+            len += @intCast(n);
+            // A multiplexed SSH process may retain the FIFO after the command
+            // finishes. A framed terminal marker closes the readiness packet.
+            if (std.mem.indexOf(u8, bytes[0..len], maru.cli.agent_hooks.native_complete_marker ++ "\n")) |at| {
+                if (at == 0 or bytes[at - 1] == '\n') {
+                    len = at;
+                    break;
+                }
+            }
+        }
+        const outcome = maru.cli.agent_hooks.parseOutcome(bytes[0..len]);
+        if (outcome != .ok or !outcome.ok.mixed_ready or !outcome.ok.format_forwarded) return error.UnknownCommand;
+        try stdout.writeAll("native-ready\n");
+        try stdout.flush();
+        return;
+    }
     // **POSIX 전용 경로다.** 이 축은 `maru ssh` 위에서만 서고, 그 아래 전부가 fork·flock·
     // pty 다 — Windows 에 옮길 대상이 아니다. `std.c` 의 이 선언들은 그 타깃에서 **컴파일이
     // 안 되므로**(실측: `check-targets` 가 x86_64-windows 에서 잡았다) 본문을 통째로 가지치기한다.
@@ -14320,9 +14349,11 @@ fn runAgentHooks(
             std.process.exit(1);
         };
         defer allocator.free(local_dir);
+        var canonical_ready = false;
         if (hook_command.remoteLogDirAlloc(allocator, home_for_dirs) catch null) |canonical_remote| {
             defer allocator.free(canonical_remote);
-            if (!std.mem.eql(u8, canonical_remote, opts.dir)) {
+            canonical_ready = std.mem.eql(u8, canonical_remote, opts.dir);
+            if (!canonical_ready) {
                 try stderr.print("maru agent-hooks: --dir differs from the canonical remote log directory ({s}); the local installer will rewrite this entry\n", .{canonical_remote});
                 try stderr.flush();
             }
@@ -14347,10 +14378,13 @@ fn runAgentHooks(
         std.Io.Dir.cwd().createDirPath(io, local_dir) catch {};
         setDirMode0700(local_dir);
 
+        var native_ready = opts.action == .install and canonical_ready;
         if (opts.action == .install) for ([_]hook_command.log_profile.Scope{ .local, .remote }) |scope| {
             if (try hook_command.log_profile.dirAlloc(allocator, home_for_dirs, scope, .v2)) |native_dir| {
                 defer allocator.free(native_dir);
-                if (maru.agent_log_record.createPrivateDirectory(io, native_dir)) |held| held.close(io) else |_| {}
+                if (maru.agent_log_record.createPrivateDirectory(io, native_dir)) |held| held.close(io) else |_| {
+                    native_ready = false;
+                }
             }
         };
 
@@ -14371,7 +14405,9 @@ fn runAgentHooks(
         // 값은 로컬 GUI 설치기와 **같은 순수 판정**(`agent_hook_trust.applyEntries`)이 만든다 — 그
         // 결정에는 루프 방지와 드리프트 감지가 들어 있어 두 곳에 적으면 반드시 갈린다.
         if (opts.provider == .codex) switch (opts.action) {
-            .install => applyRemoteCodexTrust(io, allocator, config_dir, hooks_path, cmd.items) catch {},
+            .install => applyRemoteCodexTrust(io, allocator, config_dir, hooks_path, cmd.items) catch {
+                native_ready = false;
+            },
             // **잔재를 거둔다.** 훅을 빼고 신뢰 항목을 남기면 `config.toml` 이 없는 파일의 없는 자리를
             // 가리키는 표를 계속 들고 있게 된다 — 나중에 다시 깔면 그 낡은 값이 «키는 있는데 값이 다른»
             // 상태를 만들어 그 훅이 안 돈다(로컬 설치기가 같은 이유로 같은 일을 한다).
@@ -14379,13 +14415,44 @@ fn runAgentHooks(
         };
 
         // **stdout 은 호출자가 읽는 결과다.** 한 줄로 못 박아 두면 로컬이 그것으로 성공을 판정할 수 있다.
-        try stdout.print("{{\"maru-agent-hooks\":1,\"provider\":\"{s}\",\"action\":\"{s}\",\"changed\":{s}}}\n", .{
+        const remote_format = if (std.c.getenv(maru.session.agent_log_profile.remote_env)) |value| std.mem.span(value) else "";
+        const received = if (std.mem.eql(u8, remote_format, "2")) "2" else if (std.mem.eql(u8, remote_format, "1")) "1" else "null";
+        if (native_ready and std.mem.eql(u8, received, "2")) {
+            const pane = if (std.c.getenv(hook_command.remote_pane_env)) |value| std.mem.span(value) else "";
+            if (pane.len == 0 or pane.len > hook_command.remote_pane_nonce_max or !hook_command.instance_token_class.accepts(pane))
+                native_ready = false
+            else
+                announceRemoteMixed(io, allocator, home_for_dirs) catch {
+                    native_ready = false;
+                };
+        }
+        try stdout.print("{{\"maru-agent-hooks\":1,\"provider\":\"{s}\",\"action\":\"{s}\",\"changed\":{s},\"transport\":3,\"native_ready\":{s},\"received_format\":{s}}}\n", .{
             opts.provider.tag(),
             @tagName(opts.action),
             if (changed) "true" else "false",
+            if (native_ready) "true" else "false",
+            received,
         });
         try stdout.flush();
     }
+}
+
+/// Advertise a new peer to an already-running legacy reader without changing
+/// any provider log or introducing another SSH channel. The GUI revalidates it.
+fn announceRemoteMixed(io: std.Io, allocator: std.mem.Allocator, home: ?[]const u8) !void {
+    if (builtin.os.tag == .windows) return error.UnsupportedPlatform;
+    const path = (try maru.session.agent_hook_command.remoteLogDirAlloc(allocator, home)) orelse return error.UnsafeDirectory;
+    defer allocator.free(path);
+    const dir = try maru.agent_log_record.openPrivateDirectory(io, path);
+    defer dir.close(io);
+    const fd = std.c.openat(dir.handle, maru.session.agent_stream_mixed.capability_log_name ++ ".ndjson", .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0o600));
+    if (fd < 0) return error.UnsafeFile;
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file or stat.nlink != 1 or stat.permissions.toMode() & 0o7777 != 0o600) return error.UnsafeFile;
+    const line = maru.session.agent_stream_mixed.announcement_line;
+    if (std.c.write(fd, line.ptr, line.len) != line.len) return error.WriteFailed;
 }
 
 /// provider 훅 파일의 read-modify-write. **락을 쥐고 한 번에** 한다.
@@ -14814,17 +14881,19 @@ fn runAgentEvents(
     io: std.Io,
     allocator: std.mem.Allocator,
     args: *std.process.Args.Iterator,
-    stdout: *std.Io.Writer,
+    original_stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
     const ae = maru.cli.agent_events;
+    const mixed_protocol = maru.session.agent_stream_mixed;
+    var stdout = original_stdout;
     var rest: std.ArrayList([]const u8) = .empty;
     defer rest.deinit(allocator);
     while (args.next()) |a| try rest.append(allocator, a);
 
-    const opts = switch (ae.parseArgs(rest.items)) {
+    var opts = switch (ae.parseArgs(rest.items)) {
         .help => {
-            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec] [--log-format=v1|v2]\nValue options may only be specified once. Each resume file name may only appear once.\n");
+            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec] [--log-format=v1|v2|mixed]\nValue options may only be specified once. Each resume file name may only appear once.\n");
             try stdout.flush();
             return;
         },
@@ -14836,24 +14905,39 @@ fn runAgentEvents(
         .stdio => |o| o,
     };
 
-    var cursors: std.StringHashMapUnmanaged(ae.Cursor) = .empty;
-    defer {
-        var it = cursors.keyIterator();
-        while (it.next()) |k| allocator.free(k.*);
-        cursors.deinit(allocator);
-    }
-    // Validate and retain every initial cursor before any wire output or log cleanup.
-    (if (opts.log_format == .v2) ae.seedGenerationCursors(allocator, opts.resume_spec, &cursors) else ae.seedResumeCursors(allocator, opts.resume_spec, &cursors)) catch |err| switch (err) {
-        error.DuplicateResume, error.InvalidResume => {
-            try stderr.writeAll("maru agent-events: --resume requires one cursor per file name\n");
-            try stderr.flush();
-            return error.UnknownCommand;
-        },
-        else => return err,
+    const mixed = opts.log_format == .mixed;
+    const normal_index: usize = if (opts.log_format == .v2) 1 else 0;
+    const legacy_path = if (mixed) try std.fmt.allocPrint(allocator, "{s}/remote-agent-events", .{opts.dir}) else opts.dir;
+    defer if (mixed) allocator.free(legacy_path);
+    const native_path = if (mixed) try std.fmt.allocPrint(allocator, "{s}/remote-agent-events-v2", .{opts.dir}) else opts.dir;
+    defer if (mixed) allocator.free(native_path);
+    const paths: [2][]const u8 = .{ legacy_path, native_path };
+    var cursor_maps: [2]std.StringHashMapUnmanaged(ae.Cursor) = .{ .empty, .empty };
+    defer for (&cursor_maps) |*map| {
+        var it = map.keyIterator();
+        while (it.next()) |key| allocator.free(key.*);
+        map.deinit(allocator);
     };
-
-    const generation_dir: ?std.Io.Dir = if (opts.log_format == .v2)
-        maru.agent_log_record.openPrivateDirectoryIterable(io, opts.dir) catch |err| {
+    var cursors = &cursor_maps[normal_index];
+    if (mixed) {
+        var entries = std.mem.splitScalar(u8, opts.resume_spec, ',');
+        if (opts.resume_spec.len != 0) while (entries.next()) |text| {
+            const entry = mixed_protocol.decodeEntry(text) orelse return error.UnknownCommand;
+            const map = &cursor_maps[if (entry.profile == .v1) @as(usize, 0) else 1];
+            const key = try allocator.dupe(u8, entry.entry.name);
+            errdefer allocator.free(key);
+            try map.put(allocator, key, .{ .offset = entry.entry.cursor.offset, .seen_size = entry.entry.cursor.offset, .generation = entry.entry.cursor.generation });
+        };
+    } else {
+        (if (opts.log_format == .v2) ae.seedGenerationCursors(allocator, opts.resume_spec, cursors) else ae.seedResumeCursors(allocator, opts.resume_spec, cursors)) catch |err| switch (err) {
+            error.DuplicateResume, error.InvalidResume => return error.UnknownCommand,
+            else => return err,
+        };
+    }
+    var envelope_writer = mixed_protocol.Writer.init(original_stdout);
+    if (mixed) stdout = &envelope_writer.writer;
+    const generation_dir: ?std.Io.Dir = if (mixed or opts.log_format == .v2)
+        maru.agent_log_record.openPrivateDirectoryIterable(io, paths[1]) catch |err| {
             try stderr.print("maru agent-events: {s}\n", .{@errorName(err)});
             return error.UnknownCommand;
         }
@@ -14862,8 +14946,8 @@ fn runAgentEvents(
     defer if (generation_dir) |dir| dir.close(io);
 
     // hello 를 **가장 먼저** 보낸다 — 소비자가 제한 서버(`ForceCommand`)를 이것으로 가른다.
-    try stdout.print("{s}\n", .{if (opts.log_format == .v2) ae.generation_hello_line else ae.hello_line});
-    try stdout.flush();
+    try original_stdout.print("{s}\n", .{if (mixed) mixed_protocol.hello_line else if (opts.log_format == .v2) ae.generation_hello_line else ae.hello_line});
+    try original_stdout.flush();
 
     const ae_route = maru.session.remote_tmux_route;
     // tmux 역조회 결과 캐시(RA6). **옆 파일 내용이 키다** — 그 값이 그대로면 pane 이 안 옮겨 간
@@ -14884,16 +14968,17 @@ fn runAgentEvents(
     // 여기서 옛 세대의 사이드카를 가르는 데만 쓴다.
     var last_server: std.ArrayListUnmanaged(u8) = .empty;
     defer last_server.deinit(allocator);
-    var routes: std.StringHashMapUnmanaged(RouteCache) = .empty;
-    defer {
-        var rit = routes.iterator();
+    var route_maps: [2]std.StringHashMapUnmanaged(RouteCache) = .{ .empty, .empty };
+    var routes = &route_maps[normal_index];
+    defer for (&route_maps) |*map| {
+        var rit = map.iterator();
         while (rit.next()) |e| {
             if (e.value_ptr.resolved) |r| allocator.free(r);
             if (e.value_ptr.seen_sidecar.len > 0) allocator.free(e.value_ptr.seen_sidecar);
             allocator.free(e.key_ptr.*);
         }
-        routes.deinit(allocator);
-    }
+        map.deinit(allocator);
+    };
     var frame: std.ArrayListUnmanaged(u8) = .empty;
     defer frame.deinit(allocator);
 
@@ -14901,280 +14986,305 @@ fn runAgentEvents(
     var since_hb_ms: u64 = 0;
     const tick_ms: u64 = 200;
 
-    // **스트리머가 없던 동안 자란 파일을 한 번 거둔다**(RA3). 소비자가 없으면 아무도 안 비우므로
-    // 그 구간의 상한이 없다 — 계약 §4 가 «읽는 Term 이 없는 파일은 상한 없이 자랐다» 로 이미 겪었다.
-    // **상한을 넘긴 것만** 거둔다: 이 프로세스는 사용자가 그 pane 을 보고 있는 동안에도 다시 뜨므로
-    // (채널이 죽었다 살아난 경우) 전부 지우면 방금 생긴 이벤트를 버린다.
-    if (opts.log_format == .v2) {
-        const sd = generation_dir.?;
-        var sit = sd.iterate();
-        const now_ns = std.Io.Clock.real.now(io).nanoseconds;
-        while ((sit.next(io) catch null) orelse null) |entry| {
-            const nonce = ae.nonceFromFileName(entry.name) orelse continue;
-            _ = maru.agent_log_writer.cleanupAtStartup(io, sd, nonce, now_ns, ae.stale_after_ns, ae.truncate_at_bytes) catch continue;
-        }
-    } else if (std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) |startup_dir| {
-        var sd = startup_dir;
-        defer sd.close(io);
-        var sit = sd.iterate();
-        const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
-        while ((sit.next(io) catch null) orelse null) |entry| {
-            if (entry.kind != .file) continue;
-            const is_log = ae.nonceFromFileName(entry.name) != null;
-            const is_side = std.mem.endsWith(u8, entry.name, maru.session.agent_hook_command.tmux_sidecar_suffix);
-            if (!is_log and !is_side) continue; // 우리가 만든 파일이 아니다 — 손대지 않는다
-
-            var f = sd.openFile(io, entry.name, .{}) catch continue;
-            const st = f.stat(io) catch {
-                f.close(io);
-                continue;
-            };
-            f.close(io);
-
-            // ⚠️ **바이트는 상한이 있는데 «파일 수» 는 없었다**(적대적 검증 2026-08-29). 비워진 로그와
-            // 옆 파일은 그 pane 이 사라져도 남고, tmux pane 번호는 단조 증가라 이름이 재사용되지 않는다.
-            // 스트리머는 매 회차 이 디렉터리를 통째로 훑으므로 **훑는 비용 자체가 자란다.**
-            // 저장소가 원격 드롭 디렉터리에 이미 쓰는 정책(7 일)을 그대로 옮긴다.
-            if (ae.isStale(now_ns, st.mtime.nanoseconds)) {
-                sd.deleteFile(io, entry.name) catch {};
-                continue;
+    const indexes: [2]usize = if (mixed) .{ 0, 1 } else .{ normal_index, normal_index };
+    for (indexes[0..if (mixed) @as(usize, 2) else 1]) |index| {
+        opts.log_format = if (index == 0) .v1 else .v2;
+        opts.dir = paths[index];
+        // **스트리머가 없던 동안 자란 파일을 한 번 거둔다**(RA3). 소비자가 없으면 아무도 안 비우므로
+        // 그 구간의 상한이 없다 — 계약 §4 가 «읽는 Term 이 없는 파일은 상한 없이 자랐다» 로 이미 겪었다.
+        // **상한을 넘긴 것만** 거둔다: 이 프로세스는 사용자가 그 pane 을 보고 있는 동안에도 다시 뜨므로
+        // (채널이 죽었다 살아난 경우) 전부 지우면 방금 생긴 이벤트를 버린다.
+        if (opts.log_format == .v2) {
+            const sd = generation_dir.?;
+            var sit = sd.iterate();
+            const now_ns = std.Io.Clock.real.now(io).nanoseconds;
+            while ((sit.next(io) catch null) orelse null) |entry| {
+                const nonce = ae.nonceFromFileName(entry.name) orelse continue;
+                _ = maru.agent_log_writer.cleanupAtStartup(io, sd, nonce, now_ns, ae.stale_after_ns, ae.truncate_at_bytes) catch continue;
             }
-            if (!is_log) continue; // 옆 파일은 자라지 않는다 — 절단할 것이 없다
-            if (!ae.shouldDropAtStartup(st.size)) continue;
-            _ = sd.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } }) catch {};
-        }
-    } else |_| {}
+        } else if (std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) |startup_dir| {
+            var sd = startup_dir;
+            defer sd.close(io);
+            var sit = sd.iterate();
+            const now_ns: i128 = std.Io.Clock.real.now(io).nanoseconds;
+            while ((sit.next(io) catch null) orelse null) |entry| {
+                if (entry.kind != .file) continue;
+                const is_log = ae.nonceFromFileName(entry.name) != null;
+                const is_side = std.mem.endsWith(u8, entry.name, maru.session.agent_hook_command.tmux_sidecar_suffix);
+                if (!is_log and !is_side) continue; // 우리가 만든 파일이 아니다 — 손대지 않는다
 
-    while (true) {
-        var dir = (if (generation_dir) |held| @as(anyerror!std.Io.Dir, held) else std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) catch {
-            // 디렉터리가 아직 없을 수 있다 — 훅이 한 번도 안 돌았으면 그렇다. 조용히 기다린다
-            // (그 사실은 소비자가 «이벤트가 없다» 로 이미 안다).
-            std.Io.sleep(io, std.Io.Duration.fromMilliseconds(tick_ms), .awake) catch {};
-            since_hb_ms += tick_ms;
-            if (opts.heartbeat_ms != 0 and since_hb_ms >= opts.heartbeat_ms) {
-                frame.clearRetainingCapacity();
-                try ae.formatHeartbeat(&frame, allocator, hb_seq);
-                hb_seq += 1;
-                since_hb_ms = 0;
-                try stdout.writeAll(frame.items);
-                try stdout.flush();
-            }
-            continue;
-        };
-        defer if (generation_dir == null) dir.close(io);
-
-        // 이 회차의 시각. 역조회 TTL 이 유일한 캐시 무효화 축이다(옆 파일 값은 이제 안 바뀐다).
-        const now_ms: u64 = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms));
-        var it = dir.iterate();
-        while ((it.next(io) catch null) orelse null) |entry| {
-            const nonce = ae.nonceFromFileName(entry.name) orelse continue;
-            const gop = try cursors.getOrPut(allocator, nonce);
-            if (!gop.found_existing) {
-                gop.key_ptr.* = allocator.dupe(u8, nonce) catch |err| {
-                    _ = cursors.remove(nonce);
-                    return err;
+                var f = sd.openFile(io, entry.name, .{}) catch continue;
+                const st = f.stat(io) catch {
+                    f.close(io);
+                    continue;
                 };
-                gop.value_ptr.* = .{};
-            }
-            const chunk_buf = try allocator.alloc(u8, ae.read_chunk_bytes);
-            defer allocator.free(chunk_buf);
-            var cur: ae.Cursor = undefined;
-            var size: u64 = undefined;
-            const chunk = blk: {
-                if (opts.log_format == .v2) {
-                    const old = gop.value_ptr.*;
-                    const snapshot = maru.agent_log_writer.readSnapshot(io, dir, nonce, .{ .generation = old.generation, .offset = old.offset }, chunk_buf) catch continue;
-                    cur = .{ .generation = snapshot.start.generation, .offset = snapshot.start.offset, .seen_size = snapshot.payload_size };
-                    size = snapshot.payload_size;
-                    break :blk snapshot.bytes;
-                }
-                const file = dir.openFile(io, entry.name, .{}) catch continue;
-                defer file.close(io);
-                var rbuf: [4096]u8 = undefined;
-                var reader = file.reader(io, &rbuf);
-                size = reader.getSize() catch continue;
-                cur = ae.advance(gop.value_ptr.*, size);
-                if (size <= cur.offset) {
-                    gop.value_ptr.* = cur;
+                f.close(io);
+
+                // ⚠️ **바이트는 상한이 있는데 «파일 수» 는 없었다**(적대적 검증 2026-08-29). 비워진 로그와
+                // 옆 파일은 그 pane 이 사라져도 남고, tmux pane 번호는 단조 증가라 이름이 재사용되지 않는다.
+                // 스트리머는 매 회차 이 디렉터리를 통째로 훑으므로 **훑는 비용 자체가 자란다.**
+                // 저장소가 원격 드롭 디렉터리에 이미 쓰는 정책(7 일)을 그대로 옮긴다.
+                if (ae.isStale(now_ns, st.mtime.nanoseconds)) {
+                    sd.deleteFile(io, entry.name) catch {};
                     continue;
                 }
-                reader.seekTo(cur.offset) catch continue;
-                const got = reader.interface.readSliceShort(chunk_buf) catch continue;
-                if (got == 0) continue;
-                break :blk chunk_buf[0..got];
+                if (!is_log) continue; // 옆 파일은 자라지 않는다 — 절단할 것이 없다
+                if (!ae.shouldDropAtStartup(st.size)) continue;
+                _ = sd.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } }) catch {};
+            }
+        } else |_| {}
+    }
+    var scan_starts: [2]usize = .{ 0, 0 };
+    while (true) {
+        for (indexes[0..if (mixed) @as(usize, 2) else 1]) |index| {
+            opts.log_format = if (index == 0) .v1 else .v2;
+            opts.dir = paths[index];
+            cursors = &cursor_maps[index];
+            routes = &route_maps[index];
+            envelope_writer.profile = if (index == 0) .v1 else .v2;
+            var dir = (if (opts.log_format == .v2) @as(anyerror!std.Io.Dir, generation_dir.?) else std.Io.Dir.cwd().openDir(io, opts.dir, .{ .iterate = true })) catch {
+                // 디렉터리가 아직 없을 수 있다 — 훅이 한 번도 안 돌았으면 그렇다. 조용히 기다린다
+                // (그 사실은 소비자가 «이벤트가 없다» 로 이미 안다).
+                std.Io.sleep(io, std.Io.Duration.fromMilliseconds(tick_ms), .awake) catch {};
+                since_hb_ms += tick_ms;
+                if (opts.heartbeat_ms != 0 and since_hb_ms >= opts.heartbeat_ms) {
+                    frame.clearRetainingCapacity();
+                    try ae.formatHeartbeat(&frame, allocator, hb_seq);
+                    hb_seq += 1;
+                    since_hb_ms = 0;
+                    try stdout.writeAll(frame.items);
+                    try stdout.flush();
+                }
+                continue;
             };
-            // **이 파일의 줄이 정말 이 이름의 것인가**(RA6). tmux 안에서는 `LC_MARU_PANE` 이 굳어
-            // 훅이 **남의 파일에 적는다** — 그래서 파일 이름이 아니라 옆 파일의 tmux 좌표로 되찾는다.
-            //
-            // **옆 파일 내용이 그대로면 다시 안 묻는다.** 훅은 매 이벤트마다 그것을 덮어쓰지만 값은
-            // pane 이 옮겨 갈 때만 바뀐다 — 매번 물으면 이벤트마다 `tmux` 프로세스가 둘씩 뜬다.
-            // **tmux pane 축은 nonce 와 따로 나른다**(RA7). 역조회가 nonce 를 Term 신원으로 치환하고 나면
-            // 「어느 pane 이었나」가 사라지는데, 한 tmux 세션에 pane 이 여럿이면 그 축이 곧 «각각 다른
-            // 에이전트» 다. 사이드카 버퍼는 아래 `defer` 로 사라지므로 **값을 복사해 둔다.**
-            var pane_buf: [16]u8 = undefined;
-            var emit_pane: []const u8 = "";
-            // 사이드카가 적어 둔 **서버 세대**. 아래 `defer` 로 버퍼가 사라지므로 값을 복사해 둔다.
-            var side_server_buf: [24]u8 = undefined;
-            var side_server: []const u8 = "";
-            const emit_nonce = blk: {
-                const side = (if (opts.log_format == .v2) readGenerationSidecar(io, allocator, dir, nonce) else readSidecar(io, allocator, dir, nonce)) orelse break :blk nonce;
-                defer allocator.free(side);
-                const obs = ae_route.parseSidecar(side) orelse break :blk nonce; // tmux 밖 → 이름을 믿는다
-                if (obs.pane) |p| {
-                    if (p.len > 0 and p.len <= pane_buf.len) {
-                        @memcpy(pane_buf[0..p.len], p);
-                        emit_pane = pane_buf[0..p.len];
-                    }
+            defer if (opts.log_format == .v1) dir.close(io);
+
+            // 이 회차의 시각. 역조회 TTL 이 유일한 캐시 무효화 축이다(옆 파일 값은 이제 안 바뀐다).
+            const now_ms: u64 = @intCast(@divTrunc(std.Io.Clock.awake.now(io).nanoseconds, std.time.ns_per_ms));
+            var it = dir.iterate();
+            var scanned: usize = 0;
+            var processed: usize = 0;
+            var hit_limit = false;
+            while ((it.next(io) catch null) orelse null) |entry| {
+                const scan_position = scanned;
+                scanned += 1;
+                if (mixed and scan_position < scan_starts[index]) continue;
+                if (mixed and processed == 64) {
+                    scan_starts[index] = scan_position;
+                    hit_limit = true;
+                    break;
                 }
-                if (obs.server) |sv| {
-                    if (sv.len > 0 and sv.len <= side_server_buf.len) {
-                        @memcpy(side_server_buf[0..sv.len], sv);
-                        side_server = side_server_buf[0..sv.len];
-                    }
-                }
-                const rgop = routes.getOrPut(allocator, nonce) catch break :blk nonce;
-                if (!rgop.found_existing) {
-                    rgop.key_ptr.* = allocator.dupe(u8, nonce) catch {
-                        _ = routes.remove(nonce);
-                        break :blk nonce;
+                processed += 1;
+                const nonce = ae.nonceFromFileName(entry.name) orelse continue;
+                const gop = try cursors.getOrPut(allocator, nonce);
+                if (!gop.found_existing) {
+                    gop.key_ptr.* = allocator.dupe(u8, nonce) catch |err| {
+                        _ = cursors.remove(nonce);
+                        return err;
                     };
-                    rgop.value_ptr.* = .{};
-                } else if (std.mem.eql(u8, rgop.value_ptr.seen_sidecar, side) and
-                    rgop.value_ptr.asked and
-                    !ae.shouldRefreshRoute(now_ms, rgop.value_ptr.last_lookup_ms))
-                {
-                    break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
+                    gop.value_ptr.* = .{};
                 }
-                // 좌표가 바뀌었거나 시한이 지났다(또는 처음이다) — 한 번 묻는다.
-                if (rgop.value_ptr.resolved) |r| allocator.free(r);
-                const look = tmuxResolveNonce(allocator, obs);
-                rgop.value_ptr.resolved = look.nonce;
-                // **같은 조회에 얹혀 온 pane 목록**(RA7). 바뀌었을 때만 선에 싣는다.
-                if (look.panes) |raw| {
-                    defer allocator.free(raw);
-                    var wire: std.ArrayListUnmanaged(u8) = .empty;
-                    defer wire.deinit(allocator);
-                    if (ae.panesWireFrom(&wire, allocator, raw) catch null) |list| {
-                        if (!std.mem.eql(u8, last_panes.items, list)) {
-                            frame.clearRetainingCapacity();
-                            if (ae.formatPanes(&frame, allocator, list)) |_| {
-                                stdout.writeAll(frame.items) catch {};
-                                last_panes.clearRetainingCapacity();
-                                last_panes.appendSlice(allocator, list) catch last_panes.clearRetainingCapacity();
-                            } else |_| {}
+                const chunk_buf = try allocator.alloc(u8, ae.read_chunk_bytes);
+                defer allocator.free(chunk_buf);
+                var cur: ae.Cursor = undefined;
+                var size: u64 = undefined;
+                const chunk = blk: {
+                    if (opts.log_format == .v2) {
+                        const old = gop.value_ptr.*;
+                        const snapshot = maru.agent_log_writer.readSnapshot(io, dir, nonce, .{ .generation = old.generation, .offset = old.offset }, chunk_buf) catch continue;
+                        cur = .{ .generation = snapshot.start.generation, .offset = snapshot.start.offset, .seen_size = snapshot.payload_size };
+                        size = snapshot.payload_size;
+                        break :blk snapshot.bytes;
+                    }
+                    const file = dir.openFile(io, entry.name, .{}) catch continue;
+                    defer file.close(io);
+                    var rbuf: [4096]u8 = undefined;
+                    var reader = file.reader(io, &rbuf);
+                    size = reader.getSize() catch continue;
+                    cur = ae.advance(gop.value_ptr.*, size);
+                    if (size <= cur.offset) {
+                        gop.value_ptr.* = cur;
+                        continue;
+                    }
+                    reader.seekTo(cur.offset) catch continue;
+                    const got = reader.interface.readSliceShort(chunk_buf) catch continue;
+                    if (got == 0) continue;
+                    break :blk chunk_buf[0..got];
+                };
+                // **이 파일의 줄이 정말 이 이름의 것인가**(RA6). tmux 안에서는 `LC_MARU_PANE` 이 굳어
+                // 훅이 **남의 파일에 적는다** — 그래서 파일 이름이 아니라 옆 파일의 tmux 좌표로 되찾는다.
+                //
+                // **옆 파일 내용이 그대로면 다시 안 묻는다.** 훅은 매 이벤트마다 그것을 덮어쓰지만 값은
+                // pane 이 옮겨 갈 때만 바뀐다 — 매번 물으면 이벤트마다 `tmux` 프로세스가 둘씩 뜬다.
+                // **tmux pane 축은 nonce 와 따로 나른다**(RA7). 역조회가 nonce 를 Term 신원으로 치환하고 나면
+                // 「어느 pane 이었나」가 사라지는데, 한 tmux 세션에 pane 이 여럿이면 그 축이 곧 «각각 다른
+                // 에이전트» 다. 사이드카 버퍼는 아래 `defer` 로 사라지므로 **값을 복사해 둔다.**
+                var pane_buf: [16]u8 = undefined;
+                var emit_pane: []const u8 = "";
+                // 사이드카가 적어 둔 **서버 세대**. 아래 `defer` 로 버퍼가 사라지므로 값을 복사해 둔다.
+                var side_server_buf: [24]u8 = undefined;
+                var side_server: []const u8 = "";
+                const emit_nonce = blk: {
+                    const side = (if (opts.log_format == .v2) readGenerationSidecar(io, allocator, dir, nonce) else readSidecar(io, allocator, dir, nonce)) orelse break :blk nonce;
+                    defer allocator.free(side);
+                    const obs = ae_route.parseSidecar(side) orelse break :blk nonce; // tmux 밖 → 이름을 믿는다
+                    if (obs.pane) |p| {
+                        if (p.len > 0 and p.len <= pane_buf.len) {
+                            @memcpy(pane_buf[0..p.len], p);
+                            emit_pane = pane_buf[0..p.len];
                         }
                     }
-                }
-                if (look.server) |sv| {
-                    defer allocator.free(sv);
-                    last_server.clearRetainingCapacity();
-                    last_server.appendSlice(allocator, sv) catch last_server.clearRetainingCapacity();
-                }
-                rgop.value_ptr.last_lookup_ms = now_ms;
-                rgop.value_ptr.asked = true;
-                allocator.free(rgop.value_ptr.seen_sidecar);
-                rgop.value_ptr.seen_sidecar = allocator.dupe(u8, side) catch "";
-                break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
-            };
+                    if (obs.server) |sv| {
+                        if (sv.len > 0 and sv.len <= side_server_buf.len) {
+                            @memcpy(side_server_buf[0..sv.len], sv);
+                            side_server = side_server_buf[0..sv.len];
+                        }
+                    }
+                    const rgop = routes.getOrPut(allocator, nonce) catch break :blk nonce;
+                    if (!rgop.found_existing) {
+                        rgop.key_ptr.* = allocator.dupe(u8, nonce) catch {
+                            _ = routes.remove(nonce);
+                            break :blk nonce;
+                        };
+                        rgop.value_ptr.* = .{};
+                    } else if (std.mem.eql(u8, rgop.value_ptr.seen_sidecar, side) and
+                        rgop.value_ptr.asked and
+                        !ae.shouldRefreshRoute(now_ms, rgop.value_ptr.last_lookup_ms))
+                    {
+                        break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
+                    }
+                    // 좌표가 바뀌었거나 시한이 지났다(또는 처음이다) — 한 번 묻는다.
+                    if (rgop.value_ptr.resolved) |r| allocator.free(r);
+                    const look = tmuxResolveNonce(allocator, obs);
+                    rgop.value_ptr.resolved = look.nonce;
+                    // **같은 조회에 얹혀 온 pane 목록**(RA7). 바뀌었을 때만 선에 싣는다.
+                    if (look.panes) |raw| {
+                        defer allocator.free(raw);
+                        var wire: std.ArrayListUnmanaged(u8) = .empty;
+                        defer wire.deinit(allocator);
+                        if (ae.panesWireFrom(&wire, allocator, raw) catch null) |list| {
+                            if (!std.mem.eql(u8, last_panes.items, list)) {
+                                frame.clearRetainingCapacity();
+                                if (ae.formatPanes(&frame, allocator, list)) |_| {
+                                    stdout.writeAll(frame.items) catch {};
+                                    last_panes.clearRetainingCapacity();
+                                    last_panes.appendSlice(allocator, list) catch last_panes.clearRetainingCapacity();
+                                } else |_| {}
+                            }
+                        }
+                    }
+                    if (look.server) |sv| {
+                        defer allocator.free(sv);
+                        last_server.clearRetainingCapacity();
+                        last_server.appendSlice(allocator, sv) catch last_server.clearRetainingCapacity();
+                    }
+                    rgop.value_ptr.last_lookup_ms = now_ms;
+                    rgop.value_ptr.asked = true;
+                    allocator.free(rgop.value_ptr.seen_sidecar);
+                    rgop.value_ptr.seen_sidecar = allocator.dupe(u8, side) catch "";
+                    break :blk if (rgop.value_ptr.resolved) |r| r else nonce;
+                };
 
-            // **죽은 이름은 안 싣는다**(RA7.6). 소비자(`slotFor`)는 이름이 살았는지 묻지 않으므로,
-            // 여기서 안 거르면 가지치기가 지운 행이 다음 이벤트에 **그대로 되살아난다** — 그리고
-            // 살아 있는 목록은 안 바뀌니 두 번째 공지도 안 온다. 2026-09-25 에 실제로 그랬다:
-            // 옛 서버(pid 1591)의 사이드카가 `%16`·`%18`·`%27`·`%36` 을 계속 냈고, 앱 로그의
-            // 가지치기는 딱 한 줄이었다. 판정은 `ae.shouldEmitPane` 이 소유한다(모름은 안 건드린다).
-            if (emit_pane.len > 0 and (!ae.sidecarIsCurrent(last_server.items, side_server) or
-                !ae.shouldEmitPane(last_panes.items, emit_pane)))
-            {
-                emit_pane = "";
-                // **근원을 치운다.** 이 검사만 두면 같은 이름이 회차마다 다시 와 검사가 영원히 돈다.
-                if (deleteSidecar(io, dir, nonce)) {
-                    // **지운 그 순간 한 번만 다시 공지한다.** 이미 쌓인 행은 「바뀔 때만 보낸다」
-                    // 게이트 때문에 영영 안 지워진다 — 방아쇠는 주기가 아니라 **낡음을 발견한
-                    // 시점**이다. 사이드카를 지웠으므로 다음 회차엔 이 자리에 안 온다(한 번뿐).
+                // **죽은 이름은 안 싣는다**(RA7.6). 소비자(`slotFor`)는 이름이 살았는지 묻지 않으므로,
+                // 여기서 안 거르면 가지치기가 지운 행이 다음 이벤트에 **그대로 되살아난다** — 그리고
+                // 살아 있는 목록은 안 바뀌니 두 번째 공지도 안 온다. 2026-09-25 에 실제로 그랬다:
+                // 옛 서버(pid 1591)의 사이드카가 `%16`·`%18`·`%27`·`%36` 을 계속 냈고, 앱 로그의
+                // 가지치기는 딱 한 줄이었다. 판정은 `ae.shouldEmitPane` 이 소유한다(모름은 안 건드린다).
+                if (emit_pane.len > 0 and (!ae.sidecarIsCurrent(last_server.items, side_server) or
+                    !ae.shouldEmitPane(last_panes.items, emit_pane)))
+                {
+                    emit_pane = "";
+                    // **근원을 치운다.** 이 검사만 두면 같은 이름이 회차마다 다시 와 검사가 영원히 돈다.
+                    if (deleteSidecar(io, dir, nonce)) {
+                        // **지운 그 순간 한 번만 다시 공지한다.** 이미 쌓인 행은 「바뀔 때만 보낸다」
+                        // 게이트 때문에 영영 안 지워진다 — 방아쇠는 주기가 아니라 **낡음을 발견한
+                        // 시점**이다. 사이드카를 지웠으므로 다음 회차엔 이 자리에 안 온다(한 번뿐).
+                        frame.clearRetainingCapacity();
+                        if (ae.formatPanes(&frame, allocator, last_panes.items)) |_| {
+                            stdout.writeAll(frame.items) catch {};
+                        } else |_| {}
+                    }
+                }
+
+                var consumed: usize = 0;
+                var lines = std.mem.splitScalar(u8, chunk, '\n');
+                while (lines.next()) |line| {
+                    // 마지막 조각이 개행으로 안 끝나면 **아직 쓰는 중이거나 우리가 자른 것**이다 —
+                    // 어느 쪽이든 다음 회차에 그 자리부터 다시 본다.
+                    if (consumed + line.len >= chunk.len) break;
+                    consumed += line.len + 1;
+                    if (line.len == 0) continue;
                     frame.clearRetainingCapacity();
-                    if (ae.formatPanes(&frame, allocator, last_panes.items)) |_| {
-                        stdout.writeAll(frame.items) catch {};
+                    try ae.formatEvent(&frame, allocator, emit_nonce, line, emit_pane);
+                    try stdout.writeAll(frame.items);
+                }
+                const next: ae.Cursor = .{ .generation = cur.generation, .offset = cur.offset + consumed, .seen_size = size };
+                if (opts.log_format == .v1) gop.value_ptr.* = next;
+                // **어디까지 흘렸는지 함께 알린다**(RA5-a). 로컬이 이 값을 들고 있다가 재접속 때
+                // `--resume=` 으로 돌려준다. 나아갔을 때만 보낸다 — 안 그러면 조용한 회차마다 같은 값이
+                // 흘러 선이 시끄러워진다.
+                //
+                // ⚠️ **커서는 `emit_nonce` 가 아니라 `nonce`(파일 이름)로 보낸다.** 이벤트는 역조회로 치환된
+                // 이름을 쓰지만(귀속을 위해 — RA6), 커서는 **이 스트리머가 다음 회차에 그 파일을 다시 찾는
+                // 열쇠**다. 치환된 이름으로 보내면 로컬이 그것을 되돌려 줘도 위 `cursors.getOrPut(…, nonce)`
+                // 가 못 찾아 **오프셋이 0 에 머문다** — 재접속마다 파일을 처음부터 다시 읽고(중복),
+                // `shouldTruncate` 의 `cur.offset == size` 가 영영 거짓이라 **파일도 안 비워진다**.
+                // 실측으로 그 비대칭이 잡혔다(2026-09-03): 역조회가 도는 `t*` 는 400~950KB 로 자라 있는데
+                // 치환이 없는 `host_*` 는 1.5KB 였다.
+                //
+                // 로컬은 이 이름을 **귀속에 쓰지 않는다** — `host.cursors` 는 재개 문자열을 만들 때 그대로
+                // 되돌려 보내는 **왕복 토큰**일 뿐이다(`app_session.zig` 의 `recordRemoteCursors`). 그래서
+                // 파일 이름을 그대로 실어도 사이드바 판정은 달라지지 않는다. 그리고 파일 이름은 역조회
+                // 결과와 달리 **안 바뀐다** — 사용자가 다른 pane 에서 attach 해 주인이 바뀌어도 커서는
+                // 그 파일을 계속 가리킨다.
+                const generation_changed = if (next.generation) |gen| if (gop.value_ptr.generation) |old| !std.mem.eql(u8, &gen, &old) else true else false;
+                if (consumed > 0 or generation_changed) {
+                    frame.clearRetainingCapacity();
+                    if (opts.log_format == .v2)
+                        try ae.formatGenerationCursor(&frame, allocator, nonce, .{ .generation = next.generation.?, .offset = next.offset })
+                    else
+                        try ae.formatCursor(&frame, allocator, nonce, next.offset);
+                    try stdout.writeAll(frame.items);
+                }
+
+                // **다 읽었고 상한을 넘겼으면 비운다**(RA3 — 원격에서는 이 프로세스가 그 기계의 소비자다).
+                // 디스크 절단 실패는 조용히 지나간다: 못 비워도 이벤트는 흐르고 다음 회차에 다시 시도한다.
+                if (opts.log_format == .v2) {
+                    try stdout.flush();
+                    gop.value_ptr.* = next;
+                    if (ae.shouldTruncate(next, size)) {
+                        const rotated = maru.agent_log_writer.rotate(io, dir, nonce, .{ .generation = next.generation.?, .offset = next.offset }, size) catch continue;
+                        if (rotated) |position| {
+                            frame.clearRetainingCapacity();
+                            try ae.formatGenerationCursor(&frame, allocator, nonce, position);
+                            try stdout.writeAll(frame.items);
+                            try stdout.flush();
+                            gop.value_ptr.* = .{ .generation = position.generation };
+                        }
+                    }
+                } else if (ae.shouldTruncate(next, size)) {
+                    // writeAll may only queue bytes in stdout's buffer. Keep the disk copy
+                    // until events and their cursor have actually reached the transport.
+                    try stdout.flush();
+                    // `O_TRUNC` 로 열어 아무것도 안 쓴다 — 파일이 이미 있으므로 **권한은 그대로 남는다**
+                    // (훅이 `umask 077` 로 만든 0600 이다. 지우고 다시 만들면 그 값을 잃는다).
+                    if (dir.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } })) |_| {
+                        // 비운 뒤 커서도 0 으로 되돌린다. `advance` 의 회전 감지가 다음 회차에 같은 일을
+                        // 하겠지만, 여기서 함께 두어야 «비웠는데 커서가 남아» 새 이벤트를 건너뛰는 한
+                        // 회차가 안 생긴다.
+                        gop.value_ptr.* = .{ .offset = 0, .seen_size = 0 };
+                        // **비웠다는 것도 알린다.** 로컬이 옛 offset 을 든 채 재접속하면 새 파일의 앞을
+                        // 건너뛴다 — `advance` 의 회전 감지가 결국 되돌리지만, 그 한 회차를 안 만든다.
+                        frame.clearRetainingCapacity();
+                        try ae.formatCursor(&frame, allocator, nonce, 0);
+                        try stdout.writeAll(frame.items);
+                        try stdout.flush();
                     } else |_| {}
                 }
             }
-
-            var consumed: usize = 0;
-            var lines = std.mem.splitScalar(u8, chunk, '\n');
-            while (lines.next()) |line| {
-                // 마지막 조각이 개행으로 안 끝나면 **아직 쓰는 중이거나 우리가 자른 것**이다 —
-                // 어느 쪽이든 다음 회차에 그 자리부터 다시 본다.
-                if (consumed + line.len >= chunk.len) break;
-                consumed += line.len + 1;
-                if (line.len == 0) continue;
-                frame.clearRetainingCapacity();
-                try ae.formatEvent(&frame, allocator, emit_nonce, line, emit_pane);
-                try stdout.writeAll(frame.items);
-            }
-            const next: ae.Cursor = .{ .generation = cur.generation, .offset = cur.offset + consumed, .seen_size = size };
-            if (opts.log_format == .v1) gop.value_ptr.* = next;
-            // **어디까지 흘렸는지 함께 알린다**(RA5-a). 로컬이 이 값을 들고 있다가 재접속 때
-            // `--resume=` 으로 돌려준다. 나아갔을 때만 보낸다 — 안 그러면 조용한 회차마다 같은 값이
-            // 흘러 선이 시끄러워진다.
-            //
-            // ⚠️ **커서는 `emit_nonce` 가 아니라 `nonce`(파일 이름)로 보낸다.** 이벤트는 역조회로 치환된
-            // 이름을 쓰지만(귀속을 위해 — RA6), 커서는 **이 스트리머가 다음 회차에 그 파일을 다시 찾는
-            // 열쇠**다. 치환된 이름으로 보내면 로컬이 그것을 되돌려 줘도 위 `cursors.getOrPut(…, nonce)`
-            // 가 못 찾아 **오프셋이 0 에 머문다** — 재접속마다 파일을 처음부터 다시 읽고(중복),
-            // `shouldTruncate` 의 `cur.offset == size` 가 영영 거짓이라 **파일도 안 비워진다**.
-            // 실측으로 그 비대칭이 잡혔다(2026-09-03): 역조회가 도는 `t*` 는 400~950KB 로 자라 있는데
-            // 치환이 없는 `host_*` 는 1.5KB 였다.
-            //
-            // 로컬은 이 이름을 **귀속에 쓰지 않는다** — `host.cursors` 는 재개 문자열을 만들 때 그대로
-            // 되돌려 보내는 **왕복 토큰**일 뿐이다(`app_session.zig` 의 `recordRemoteCursors`). 그래서
-            // 파일 이름을 그대로 실어도 사이드바 판정은 달라지지 않는다. 그리고 파일 이름은 역조회
-            // 결과와 달리 **안 바뀐다** — 사용자가 다른 pane 에서 attach 해 주인이 바뀌어도 커서는
-            // 그 파일을 계속 가리킨다.
-            const generation_changed = if (next.generation) |gen| if (gop.value_ptr.generation) |old| !std.mem.eql(u8, &gen, &old) else true else false;
-            if (consumed > 0 or generation_changed) {
-                frame.clearRetainingCapacity();
-                if (opts.log_format == .v2)
-                    try ae.formatGenerationCursor(&frame, allocator, nonce, .{ .generation = next.generation.?, .offset = next.offset })
-                else
-                    try ae.formatCursor(&frame, allocator, nonce, next.offset);
-                try stdout.writeAll(frame.items);
-            }
-
-            // **다 읽었고 상한을 넘겼으면 비운다**(RA3 — 원격에서는 이 프로세스가 그 기계의 소비자다).
-            // 디스크 절단 실패는 조용히 지나간다: 못 비워도 이벤트는 흐르고 다음 회차에 다시 시도한다.
-            if (opts.log_format == .v2) {
-                try stdout.flush();
-                gop.value_ptr.* = next;
-                if (ae.shouldTruncate(next, size)) {
-                    const rotated = maru.agent_log_writer.rotate(io, dir, nonce, .{ .generation = next.generation.?, .offset = next.offset }, size) catch continue;
-                    if (rotated) |position| {
-                        frame.clearRetainingCapacity();
-                        try ae.formatGenerationCursor(&frame, allocator, nonce, position);
-                        try stdout.writeAll(frame.items);
-                        try stdout.flush();
-                        gop.value_ptr.* = .{ .generation = position.generation };
-                    }
-                }
-            } else if (ae.shouldTruncate(next, size)) {
-                // writeAll may only queue bytes in stdout's buffer. Keep the disk copy
-                // until events and their cursor have actually reached the transport.
-                try stdout.flush();
-                // `O_TRUNC` 로 열어 아무것도 안 쓴다 — 파일이 이미 있으므로 **권한은 그대로 남는다**
-                // (훅이 `umask 077` 로 만든 0600 이다. 지우고 다시 만들면 그 값을 잃는다).
-                if (dir.writeFile(io, .{ .sub_path = entry.name, .data = "", .flags = .{ .truncate = true } })) |_| {
-                    // 비운 뒤 커서도 0 으로 되돌린다. `advance` 의 회전 감지가 다음 회차에 같은 일을
-                    // 하겠지만, 여기서 함께 두어야 «비웠는데 커서가 남아» 새 이벤트를 건너뛰는 한
-                    // 회차가 안 생긴다.
-                    gop.value_ptr.* = .{ .offset = 0, .seen_size = 0 };
-                    // **비웠다는 것도 알린다.** 로컬이 옛 offset 을 든 채 재접속하면 새 파일의 앞을
-                    // 건너뛴다 — `advance` 의 회전 감지가 결국 되돌리지만, 그 한 회차를 안 만든다.
-                    frame.clearRetainingCapacity();
-                    try ae.formatCursor(&frame, allocator, nonce, 0);
-                    try stdout.writeAll(frame.items);
-                    try stdout.flush();
-                } else |_| {}
-            }
+            if (mixed and !hit_limit) scan_starts[index] = 0;
+            try stdout.flush();
         }
-        try stdout.flush();
 
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(tick_ms), .awake) catch {};
         since_hb_ms += tick_ms;
@@ -15289,9 +15399,11 @@ fn runSsh(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.
     // 그때는 스키마 기본값과 같은 `SessionOpts` 기본값으로 간다(설정 파일이 없는 새 사용자와 같은 자리).
     // 여기서 읽는 이유는 이 값이 wrapper 스크립트의 인자이고, 스크립트는 execve 뒤에 config를 못 읽기 때문이다.
     var session_opts: maru.cli.ssh.SessionOpts = .{};
+    var remote_hooks_enabled = false;
     if (maru.config.loader.loadDefault(io, allocator)) |loaded_config| {
         var loaded = loaded_config;
         defer loaded.deinit();
+        remote_hooks_enabled = loaded.config.sidebar.agent_hooks;
         session_opts = .{
             .server_alive_interval = loaded.config.ssh.server_alive_interval,
             .server_alive_count_max = loaded.config.ssh.server_alive_count_max,
@@ -15314,6 +15426,14 @@ fn runSsh(io: std.Io, allocator: std.mem.Allocator, args: anytype, stderr: *std.
         break :blk hc.formatRemotePaneNonce(&nonce_buf, std.mem.span(inst), std.mem.span(pane));
     };
 
+    var native_cli: ?[]u8 = null;
+    defer if (native_cli) |path| allocator.free(path);
+    if (std.c.getenv("MARU_AGENT_REMOTE_PROTOCOL")) |value| {
+        if (maru.cli.ssh.canPrepareNative(std.mem.span(value), session_opts.remote_pane_nonce, remote_hooks_enabled)) {
+            native_cli = try std.process.executablePathAlloc(io, allocator);
+            session_opts.remote_native_cli = native_cli;
+        }
+    }
     var scratch: maru.cli.ssh.ArgvScratch = .{};
     const argv = try maru.cli.ssh.buildArgv(allocator, parsed, ctl, session_opts, &scratch);
     defer allocator.free(argv);

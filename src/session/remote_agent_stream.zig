@@ -94,6 +94,12 @@ pub fn parseFrame(line: []const u8) Frame {
     return parseFrameForProfile(line, .v1);
 }
 
+pub fn parseMixedFrame(line: []const u8) Frame {
+    if (line.len > max_line_bytes) return .ignored;
+    const envelope = @import("agent_stream_mixed.zig").unwrap(line) orelse return .ignored;
+    return parseFrameForProfile(envelope.frame, envelope.profile);
+}
+
 pub fn parseFrameForProfile(line: []const u8, profile: protocol.Profile) Frame {
     if (line.len == 0 or line.len > max_line_bytes) return .ignored;
     if (std.mem.startsWith(u8, line, "{\"hb\":")) return .heartbeat;
@@ -218,6 +224,8 @@ pub const Channel = struct {
     state: State = .waiting_hello,
     profile: protocol.Profile = .v1,
     required_profile: ?protocol.Profile = null,
+    mixed: bool = false,
+    required_mixed: bool = false,
     closed_reason: ?Closed = null,
     opened_at_ms: u64 = 0,
     last_alive_ms: u64 = 0,
@@ -239,6 +247,10 @@ pub const Channel = struct {
 
     pub fn initOpenProfile(now_ms: u64, profile: protocol.Profile) Channel {
         return .{ .state = .open, .opened_at_ms = now_ms, .last_alive_ms = now_ms, .profile = profile, .required_profile = profile };
+    }
+
+    pub fn initMixed(now_ms: u64, open: bool) Channel {
+        return .{ .state = if (open) .open else .waiting_hello, .opened_at_ms = now_ms, .last_alive_ms = now_ms, .mixed = open, .required_mixed = true };
     }
 
     pub fn initOpen(now_ms: u64) Channel {
@@ -264,6 +276,17 @@ pub const Channel = struct {
         switch (self.state) {
             .closed => return .ignored,
             .waiting_hello => {
+                if (self.required_mixed) {
+                    if (@import("agent_stream_mixed.zig").isHello(line)) {
+                        self.mixed = true;
+                        self.state = .open;
+                        self.last_alive_ms = now_ms;
+                    } else {
+                        self.noise_bytes += line.len + 1;
+                        if (self.noise_bytes > hello_noise_max) self.close(.noise_overflow);
+                    }
+                    return .ignored;
+                }
                 if (protocol.parseHello(line, self.required_profile)) |profile| {
                     self.profile = profile;
                     self.state = .open;
@@ -275,6 +298,11 @@ pub const Channel = struct {
                 return .ignored;
             },
             .open => {
+                if (self.mixed) {
+                    const frame = parseMixedFrame(line);
+                    if (frame != .ignored) self.last_alive_ms = now_ms;
+                    return frame;
+                }
                 self.last_alive_ms = now_ms;
                 return parseFrameForProfile(line, self.profile);
             },

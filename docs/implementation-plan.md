@@ -44,6 +44,7 @@ macOS 로컬 shell 1개 surface
 - [에이전트 세션 기록 도크 구현 계획](plans/agent-session-dock.md)
 - [원격 에이전트 상태(배지·대화 줄) 구현 계획](plans/remote-agent-state.md)
 - [에이전트 로그 세대와 이어읽기](plans/agent-log-generations.md) — 공통 세대 ID·기록/회전 원자성·버전 이행 설계
+- [SSH 원격 에이전트 native 활성화](plans/remote-agent-native.md) — 준비 판정·프로세스 format 고정·단일 채널의 v1/v2 점진 이행과 실제 SSH 게이트
 - [ScrollArea 이관 구현 계획](plans/scroll-area.md)
 - [`app_session.zig` 분해 실행 계획·완료 이력](plans/app-session-decomposition.md)
 - [AppSession 이식 — 편집기 코드를 macOS 밖으로](plans/app-session-portability.md)

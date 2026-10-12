@@ -103,18 +103,29 @@ const notify_lifecycle =
 ///
 /// 백오프는 1→2→4→8→16→30초로 늘고 30초에서 멈춘다. 세션이 2초 넘게 살았으면 1초로 되돌린다 —
 /// 자리를 옮기며 여러 번 끊기는 이동 중에 대기가 계속 길어지지 않게 한다.
+const native_probe =
+    "native_probe() { [ \"$nf\" = 1 ] && [ \"$elig\" = 1 ] && [ -n \"$lcp\" ] && [ -n \"$maru_self\" ] && [ -n \"$ctl\" ] || return 0; " ++
+    "prep_dir=$(umask 077; mktemp -d \"${TMPDIR:-/tmp}/hook-remote-ready.XXXXXXXX\") || return 0; " ++
+    "mkfifo \"$prep_dir/in\" || { rm -rf \"$prep_dir\"; return 0; }; " ++
+    "env LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=2 ssh $ka $lce -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\" \"$prepare_cmd\" >\"$prep_dir/in\" 2>/dev/null & prep_pid=$!; " ++
+    "cleanup_probe() { kill \"$prep_pid\" 2>/dev/null || :; wait \"$prep_pid\" 2>/dev/null || :; rm -rf \"$prep_dir\"; }; " ++
+    "trap 'cleanup_probe; exit 129' HUP; trap 'cleanup_probe; exit 130' INT; trap 'cleanup_probe; exit 143' TERM; " ++
+    "reply=$(\"$maru_self\" agent-hooks check-native <\"$prep_dir/in\" 2>/dev/null); rc=$?; " ++
+    "cleanup_probe; trap - HUP INT TERM; [ \"$rc\" = 0 ] && [ \"$reply\" = native-ready ] && lcf=2; return 0; }; ";
+
 const session_loop =
     // 대기: bash(= macOS의 `/bin/sh`)이고 stdin이 tty면 `read -t`로 기다려 **Enter로 즉시 건너뛸 수 있게**
     // 한다. dash 등 `read -t`가 없는 셸에서는 `sleep`으로 같은 시간을 기다린다(기능 축소일 뿐 동작은 같다).
     // tty가 아니면(파이프) `read`가 즉시 EOF로 돌아와 대기가 사라지므로 그 경우도 `sleep`으로 보낸다.
     "wait_retry() { if [ -n \"$BASH_VERSION\" ] && [ -t 0 ]; then read -t \"$1\" -r _skip 2>/dev/null || :; else sleep \"$1\"; fi; }; " ++
-    "run() { attempt=1; delay=1; short=0; while :; do " ++
+    native_probe ++
+    "run() { native_probe \"$@\"; attempt=1; delay=1; short=0; while :; do " ++
     "[ \"$nf\" = 1 ] && begin_notify; " ++
     "t0=$(date +%s 2>/dev/null || printf 0); case \"$t0\" in ''|*[!0-9]*) t0=0 ;; esac; " ++
     "case \"$cmode\" in " ++
-    "1) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\" ;; " ++
-    "2) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlPath=\"$ctl\" \"$@\" ;; " ++
-    "*) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce \"$@\" ;; " ++
+    "1) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=\"$lcf\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\" ;; " ++
+    "2) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=\"$lcf\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlPath=\"$ctl\" \"$@\" ;; " ++
+    "*) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=\"$lcf\" ssh $ka -o SendEnv=COLORTERM $lce \"$@\" ;; " ++
     "esac; rc=$?; end_notify; " ++
     "[ \"$rcon\" = 1 ] || return \"$rc\"; " ++
     "[ \"$rc\" = 255 ] || return \"$rc\"; " ++
@@ -198,7 +209,7 @@ const session_loop =
 /// 기본값은 대개 `LANG LC_*`). 허용하는 호스트에서는 원격 셸 실행 방식을 건드리지 않고 색이 돌아오고,
 /// 아닌 호스트에서는 지금과 같다.
 pub const wrapper_script =
-    "elig=\"$1\"; dest=\"$2\"; ctl=\"$3\"; alive=\"$4\"; amax=\"$5\"; rcon=\"$6\"; lcp=\"$7\"; shift 7; cache=\"" ++ cache_path ++ "\"; " ++
+    "elig=\"$1\"; dest=\"$2\"; ctl=\"$3\"; alive=\"$4\"; amax=\"$5\"; rcon=\"$6\"; lcp=\"$7\"; maru_self=\"$8\"; prepare_cmd=\"$9\"; lcf=1; shift 9; cache=\"" ++ cache_path ++ "\"; " ++
     // 원격 pane 신원(계획 RA2). **조립은 Zig 가 했다** — 셸에서 이어 붙이면 «훅이 쓰는 이름 ≠ maru 가
     // 읽는 이름» 이 조용히 성립한다(계약 §4). 값이 없으면 옵션을 **아예 안 붙인다**: 항상 붙이면
     // 사용자 `~/.ssh/config` 의 `SendEnv` 목록에 빈 이름이 끼어 든다(keepalive 가 0 일 때와 같은 규율).
@@ -211,7 +222,7 @@ pub const wrapper_script =
     //
     // 빈 값을 보내는 것은 무해하다 — 원격 훅의 첫 가드가 빈 nonce 를 거른다. 서버가 `LC_*` 를 안
     // 받으면 그때도 무해하다(그 옵션은 그냥 무시된다).
-    "lce=\"-o SendEnv=LC_MARU_PANE\"; " ++
+    "lce=\"-o SendEnv=LC_MARU_PANE -o SendEnv=LC_MARU_LOG_FORMAT\"; " ++
     "[ -n \"$ctl\" ] && mkdir -p \"${ctl%/*}\" 2>/dev/null; " ++
     // keepalive는 **값이 0이면 아예 안 붙인다**. ssh는 커맨드라인 `-o`가 설정 파일보다 우선이라, 항상
     // 붙이면 사용자가 `~/.ssh/config`에 적어 둔 ServerAlive* 를 말없이 덮는다(`ssh -G` 실측 규칙과 같은 결).
@@ -244,8 +255,8 @@ pub const wrapper_script =
 /// 목적지를 캐시에 기록한다(중복 없이).
 pub const terminfo_only_script =
     // ctl($3)·keepalive($4·$5)·재접속($6)은 안 쓰지만(설치만 하고 세션을 안 띄움) buildArgv가 항상
-    // 같은 자리에 넣으므로 자리를 맞춰 shift 7 한다(RA2 가 $7 = 원격 pane 신원을 더했다).
-    "elig=\"$1\"; dest=\"$2\"; shift 7; cache=\"" ++ cache_path ++ "\"; " ++
+    // 같은 자리에 넣으므로 자리를 맞춰 shift 9 한다(RA2 가 $7 = 원격 pane 신원을 더했다).
+    "elig=\"$1\"; dest=\"$2\"; shift 9; cache=\"" ++ cache_path ++ "\"; " ++
     "[ \"$elig\" = 1 ] || { echo 'maru ssh --terminfo-only: specify only the destination (no remote command)' >&2; exit 2; }; " ++
     emit_terminfo ++ " | ssh \"$@\" '" ++ remote_install ++ "'; rc=$?; " ++
     "[ \"$rc\" = 0 ] && [ -n \"$dest\" ] && { grep -qxF \"$dest\" \"$cache\" 2>/dev/null || { mkdir -p \"${cache%/*}\" 2>/dev/null; printf '%s\\n' \"$dest\" >> \"$cache\" 2>/dev/null; }; }; " ++
@@ -392,6 +403,13 @@ pub fn destination(ssh_args: []const []const u8) ?[]const u8 {
 
 /// 세션 수명 정책 — config `ssh.*`(theme.SshConfig)에서 온다. 기본값은 **그 스키마의 기본값과 같아야
 /// 한다**: config를 못 읽는 경로(로드 실패)도 같은 동작을 내야 "설정을 안 건드렸는데 왜 다르지"가 안 생긴다.
+/// The GUI version is a capability, not a snapshot of mutable user settings.
+pub fn canPrepareNative(gui_version: ?[]const u8, nonce: ?[]const u8, hooks_enabled: bool) bool {
+    const version = gui_version orelse return false;
+    const pane = nonce orelse return false;
+    return hooks_enabled and pane.len != 0 and std.mem.eql(u8, version, "3");
+}
+
 pub const SessionOpts = struct {
     /// `ServerAliveInterval` 초. **0이면 `-o`를 아예 안 붙인다**(사용자 `~/.ssh/config` 존중).
     server_alive_interval: u32 = 15,
@@ -403,6 +421,8 @@ pub const SessionOpts = struct {
     /// 만든 값만 넣는다** — 조립을 두 곳에 두지 않는다(계약 §4). `null`이면 `SendEnv` 옵션을 아예
     /// 안 붙인다(계획 RA2).
     remote_pane_nonce: ?[]const u8 = null,
+    /// Only a new GUI runtime that can consume mixed wire supplies this CLI.
+    remote_native_cli: ?[]const u8 = null,
 };
 
 /// `buildArgv`가 숫자 옵션을 십진 문자열로 찍는 자리. **호출자가 소유**한다 — 반환 argv가 이 버퍼를
@@ -444,6 +464,8 @@ pub fn buildArgv(
     try list.append(allocator, if (opts.reconnect) "1" else "0"); // $6 = 재접속 플래그
     // $7 = 원격 pane 신원(빈 문자열이면 `SendEnv` 를 안 붙인다 — keepalive 0 과 같은 규율).
     try list.append(allocator, opts.remote_pane_nonce orelse "");
+    try list.append(allocator, opts.remote_native_cli orelse "");
+    try list.append(allocator, @import("agent_hooks.zig").native_prepare_command);
     for (parsed.ssh_args) |a| try list.append(allocator, a);
     return list.toOwnedSlice(allocator);
 }
@@ -475,9 +497,9 @@ test "wrapper 스크립트: 결정론적 ctl·캐시 hit 유지·ControlMaster·
     const s = scriptFor(false);
     // 핵심 동작을 바이트로 고정한다("추측 말고 캡처").
     // ctl은 $3로 받고(buildArgv/controlSocketPath가 결정론적 경로를 만든다) 디렉터리를 준비한다.
-    try std.testing.expect(std.mem.indexOf(u8, s, "ctl=\"$3\"; alive=\"$4\"; amax=\"$5\"; rcon=\"$6\"; lcp=\"$7\"; shift 7") != null); // ctl($3)·keepalive($4·$5)·재접속($6)·pane 신원($7) 수신
+    try std.testing.expect(std.mem.indexOf(u8, s, "ctl=\"$3\"; alive=\"$4\"; amax=\"$5\"; rcon=\"$6\"; lcp=\"$7\"; maru_self=\"$8\"; prepare_cmd=\"$9\"; lcf=1; shift 9") != null); // ctl($3)·keepalive($4·$5)·재접속($6)·pane 신원($7) 수신
     try std.testing.expect(std.mem.indexOf(u8, s, "[ -n \"$ctl\" ] && mkdir -p \"${ctl%/*}\"") != null); // socket 디렉터리 준비
-    try std.testing.expect(std.mem.indexOf(u8, s, "mktemp") == null); // 랜덤 mktemp 제거(결정론적 경로로 대체)
+    // ControlPath stays deterministic; the bounded readiness FIFO is private and temporary.
     // 부트스트랩=master, 세션=슬레이브(같은 $ctl 재사용 → 인증 1회).
     try std.testing.expect(std.mem.indexOf(u8, s, "ssh -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10 \"$@\"") != null); // 부트스트랩=master
     try std.testing.expect(std.mem.indexOf(u8, s, "tic -x -o \"$HOME/.terminfo\" -") != null); // 원격 설치
@@ -723,7 +745,7 @@ test "terminfo-only 스크립트: 캐시 무시 강제 설치, 성공 시 기록
     try std.testing.expect(std.mem.indexOf(u8, s, ">> \"$cache\"") != null); // 성공 시 캐시 기록
     try std.testing.expect(std.mem.indexOf(u8, s, "grep -qxF \"$dest\" \"$cache\"") != null); // 중복 없이(기록 전 확인)
     try std.testing.expect(std.mem.indexOf(u8, s, "exec ") == null); // 세션을 띄우지 않는다
-    try std.testing.expect(std.mem.indexOf(u8, s, "shift 7") != null); // 일곱 자리 소비(buildArgv argv 일관 — RA2 가 $7 을 더했다)
+    try std.testing.expect(std.mem.indexOf(u8, s, "shift 9") != null); // 일곱 자리 소비(buildArgv argv 일관 — RA2 가 $7 을 더했다)
 }
 
 test "bootstrapEligible: 순수 세션은 적격, 원격 command가 있으면 부적격" {
@@ -754,7 +776,7 @@ test "buildArgv: /bin/sh -c <script> sh <elig> <dest> <ctl> <alive> <amax> <rcon
     var scratch: ArgvScratch = .{};
     const argv = try buildArgv(a, p, "/tmp/ctl-x", .{}, &scratch);
     defer a.free(argv);
-    try std.testing.expectEqual(@as(usize, 12), argv.len); // $7(원격 pane 신원)이 늘었다
+    try std.testing.expectEqual(@as(usize, 14), argv.len); // $7(원격 pane 신원)이 늘었다
     try std.testing.expectEqualStrings("/bin/sh", argv[0]);
     try std.testing.expectEqualStrings("-c", argv[1]);
     try std.testing.expectEqualStrings(scriptFor(false), argv[2]);
@@ -763,7 +785,7 @@ test "buildArgv: /bin/sh -c <script> sh <elig> <dest> <ctl> <alive> <amax> <rcon
     try std.testing.expectEqualStrings("user@host", argv[5]); // $2 = 목적지(캐시 키)
     try std.testing.expectEqualStrings("/tmp/ctl-x", argv[6]); // $3 = control socket 경로
     try std.testing.expectEqualStrings("", argv[10]); // $7 = 원격 pane 신원(기본 없음)
-    try std.testing.expectEqualStrings("user@host", argv[11]); // $4~$7 뒤부터 ssh 인자
+    try std.testing.expectEqualStrings("user@host", argv[13]); // $4~$7 뒤부터 ssh 인자
 }
 
 test "buildArgv: 원격 pane 신원이 있으면 $7 에 실리고 스크립트가 SendEnv 를 붙인다" {
@@ -779,13 +801,13 @@ test "buildArgv: 원격 pane 신원이 있으면 $7 에 실리고 스크립트�
     const s2 = scriptFor(false);
     // **조건 없이 붙는다** — 마스터를 만든 첫 호출에 이 옵션이 없으면 그 마스터를 재사용하는
     // 이후 pane 들이 자기 값을 조용히 잃는다(실서버 실측).
-    try std.testing.expect(std.mem.indexOf(u8, s2, "lce=\"-o SendEnv=LC_MARU_PANE\";") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s2, "lce=\"-o SendEnv=LC_MARU_PANE -o SendEnv=LC_MARU_LOG_FORMAT\";") != null);
     try std.testing.expect(std.mem.indexOf(u8, s2, "[ -n \"$lcp\" ] && lce=") == null);
     // 세 갈래 모두 그 값을 env 로 싣고 옵션 자리를 갖는다.
-    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, s2, "LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce"));
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, s2, "LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=\"$lcf\" ssh $ka -o SendEnv=COLORTERM $lce"));
 }
 
-test "buildArgv: 신원이 없으면 $7 은 빈 문자열이다 — 자리는 늘 있어야 shift 7 이 맞는다" {
+test "buildArgv: 신원이 없으면 $7 은 빈 문자열이다 — 자리는 늘 있어야 shift 9 이 맞는다" {
     const a = std.testing.allocator;
     const p = try parse(&.{ "host", "ls" }); // 원격 command 가 있는 경우도 자리는 같다
     var scratch: ArgvScratch = .{};
@@ -887,9 +909,9 @@ test "wrapper 스크립트: keepalive는 0이면 안 붙고, 세션 세 갈래 �
     // 조립 자리: 0이면 `$ka`가 빈 문자열이라 `-o`가 **아예 안 나간다**(사용자 `~/.ssh/config` 존중).
     try std.testing.expect(std.mem.indexOf(u8, s, "ka=\"\"; [ \"$alive\" != 0 ] && ka=\"-o ServerAliveInterval=$alive -o ServerAliveCountMax=$amax\"") != null);
     // 세 갈래 전부에 실린다 — 한 갈래만 빠지면 그 경로에서만 감지가 늦어 원인을 짚기 어렵다.
-    try std.testing.expect(std.mem.indexOf(u8, s, "1) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\" ;;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "2) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlPath=\"$ctl\" \"$@\" ;;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "*) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" ssh $ka -o SendEnv=COLORTERM $lce \"$@\" ;;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "1) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=\"$lcf\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlMaster=auto -o ControlPath=\"$ctl\" \"$@\" ;;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "2) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=\"$lcf\" ssh $ka -o SendEnv=COLORTERM $lce -o ControlPath=\"$ctl\" \"$@\" ;;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "*) env TERM=\"$tv\" COLORTERM=truecolor LC_MARU_PANE=\"$lcp\" LC_MARU_LOG_FORMAT=\"$lcf\" ssh $ka -o SendEnv=COLORTERM $lce \"$@\" ;;") != null);
     // 부트스트랩(원격 tic 실행)에는 안 붙인다 — 짧은 명령이라 keepalive가 할 일이 없다.
     try std.testing.expect(std.mem.indexOf(u8, s, "ControlPersist=10 \"$@\" $ka") == null);
     try std.testing.expect(std.mem.indexOf(u8, s, "$ka -o ControlMaster=auto -o ControlPath=\"$ctl\" -o ControlPersist=10") == null);
@@ -931,7 +953,7 @@ test "buildArgv: keepalive·재접속이 $4~$6 자리에 십진으로 들어간�
     try std.testing.expectEqualStrings("3", argv[8]); // $5 ServerAliveCountMax 기본
     try std.testing.expectEqualStrings("1", argv[9]); // $6 재접속 기본 on
     try std.testing.expectEqualStrings("", argv[10]); // $7 원격 pane 신원 — 기본은 없음(SendEnv 미부착)
-    try std.testing.expectEqualStrings("user@host", argv[11]); // 그 뒤부터 ssh 인자
+    try std.testing.expectEqualStrings("user@host", argv[13]); // 그 뒤부터 ssh 인자
 
     var scratch_off: ArgvScratch = .{};
     const argv_off = try buildArgv(a, p, "", .{ .server_alive_interval = 0, .reconnect = false }, &scratch_off);
@@ -1087,4 +1109,13 @@ test "재접속 루프(실행): 안 붙는 호스트는 3번 만에 포기한다
     try std.testing.expect(std.mem.indexOf(u8, text, "try4") == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "giving up") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "rc=255") != null);
+}
+
+test "native SSH preparation requires GUI capability, pane and current hook setting" {
+    const t = std.testing;
+    try t.expect(canPrepareNative("3", "4331_7", true));
+    try t.expect(!canPrepareNative("3", "4331_7", false));
+    try t.expect(!canPrepareNative("3", null, true));
+    try t.expect(!canPrepareNative(null, "4331_7", true));
+    for ([_][]const u8{ "", "2", "03", " 3" }) |version| try t.expect(!canPrepareNative(version, "4331_7", true));
 }

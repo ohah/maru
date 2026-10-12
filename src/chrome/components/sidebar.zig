@@ -450,11 +450,21 @@ pub const Columns = struct {
     /// gutter를 뺀 전체 열 수. 시프트된 셀(`indent_cols + cols`)을 담을 surface 폭이다 — 이보다 좁게 잡으면
     /// 폭을 꽉 채운 줄이 surface 밖으로 나가 프레임이 통째로 실패한다. 항상 `indent_cols + cols` 이상이다.
     full_cols: u16,
+    /// 모든 열을 통째로 오른쪽으로 미는 px(칸보다 작은 여백). 열 경계가 칸 단위라 들여쓰기(`indent_cols`)로는
+    /// 반 칸 같은 여백을 못 낸다 — 그 나머지를 여기 둔다. **그리는 쪽과 누르는 쪽이 이 값을 함께 본다**(`colLeftPx`).
+    /// 예전에는 macOS 렌더러가 카드 글자에 `cw*0.5`를 몰래 더해, ✕가 누르는 칸보다 반 칸 오른쪽에 그려졌다
+    /// (그린 ✕의 오른쪽 절반을 누르면 카드 전환이 됐다 — 2026-10-12 측정, 잉크 x 285–291 대 hit [280,288)).
+    text_offset_px: u32 = 0,
+
+    /// 열 `col`(최종 열, `indent_cols` 반영 뒤)의 왼쪽 끝 x(px). 그리기(셀 origin)·hit-test·caret 이 이 하나를 쓴다.
+    pub fn colLeftPx(self: Columns, col: u32, cell_width_px: u32) u32 {
+        return self.text_offset_px + col * cell_width_px;
+    }
 
     /// ✕ 열이 차지하는 x 구간 [start, end). hit-test가 이걸 그대로 쓰므로 "보이는 칸 = 눌리는 칸"이다.
     pub fn closeXRange(self: Columns, cell_width_px: u32) struct { start: f64, end: f64 } {
         const cw: f64 = @floatFromInt(cell_width_px);
-        const start = @as(f64, @floatFromInt(self.close_col)) * cw;
+        const start: f64 = @floatFromInt(self.colLeftPx(self.close_col, cell_width_px));
         return .{ .start = start, .end = start + cw };
     }
 };
@@ -472,6 +482,8 @@ pub fn columns(
     gutter_px: u32,
     text_left_px: u32,
     text_right_px: u32,
+    /// 열 전체를 미는 칸 미만 여백(`Columns.text_offset_px`). 0 이면 열이 칸 경계에 그대로 선다.
+    text_offset_px: u32,
 ) ?Columns {
     if (sidebar_width_px == 0 or cell_width_px == 0) return null;
     const cw = cell_width_px;
@@ -489,6 +501,7 @@ pub fn columns(
         .cols = @intCast(@min(cols, @as(u32, std.math.maxInt(u16)))),
         .close_col = @intCast(@min(indent_cols + cols - close_col_from_end, @as(u32, std.math.maxInt(u16)))),
         .full_cols = @intCast(@min(full_cols, @as(u32, std.math.maxInt(u16)))),
+        .text_offset_px = text_offset_px,
     };
 }
 
@@ -718,7 +731,7 @@ test "sidebar hit-test: inSidebar·onResizeEdge·slotAt·headerHit·closeButton�
     try std.testing.expectEqual(@as(u32, 28), headerSearchBandTop(68, 28, 10)); // 정상 밴드
     // closeButton: ✕가 실제로 그려지는 **그 칸**이다. w=100·cw=8·gutter/inset 0이면 cols=12, close_col=9 → [72, 80).
     {
-        const c = columns(100, 8, 0, 0, 0).?;
+        const c = columns(100, 8, 0, 0, 0, 0).?;
         try std.testing.expectEqual(@as(u16, 9), c.close_col);
         try std.testing.expect(closeButton(72, c, 8));
         try std.testing.expect(closeButton(79, c, 8));
@@ -949,7 +962,7 @@ test "sidebar closeButton: gutter·indent가 있어도 그려진 ✕ 칸과 클�
     // 실측 재현: 사용자 로그의 sidebar_px=348, cell=8. gutter=11(스크롤바 8+inset 3), 좌 inset 11(카드 패딩
     // 8 + accent 막대 3), 우 inset 8.
     {
-        const c = columns(348, 8, 11, 11, 8).?;
+        const c = columns(348, 8, 11, 11, 8, 0).?;
         const range = c.closeXRange(8);
         // 그리는 자리 = close_col 칸. 그 칸의 양 끝과 중앙이 전부 눌려야 한다.
         try std.testing.expectEqual(@as(f64, @floatFromInt(c.close_col)) * 8.0, range.start);
@@ -969,7 +982,7 @@ test "sidebar closeButton: gutter·indent가 있어도 그려진 ✕ 칸과 클�
         .{ .w = 137, .cw = 9, .gutter = 7, .left = 5, .right = 3 }, // 어느 것도 배수가 아닌 경우
     };
     for (cases) |t| {
-        const c = columns(t.w, t.cw, t.gutter, t.left, t.right).?;
+        const c = columns(t.w, t.cw, t.gutter, t.left, t.right, 0).?;
         const range = c.closeXRange(t.cw);
         // ✕ 칸은 항상 사이드바 안이고 gutter를 침범하지 않는다(스크롤바 위에 ✕가 앉으면 둘 다 못 누른다).
         try std.testing.expect(range.end <= @as(f64, @floatFromInt(t.w -| t.gutter)));
@@ -986,14 +999,35 @@ test "sidebar closeButton: gutter·indent가 있어도 그려진 ✕ 칸과 클�
     }
 
     // 폭이 모자라면 배치 자체가 없다 — 반쯤 걸친 ✕를 그리거나 누르게 두지 않는다.
-    try std.testing.expect(columns(8, 8, 0, 0, 0) == null);
-    try std.testing.expect(columns(0, 8, 0, 0, 0) == null);
-    try std.testing.expect(columns(100, 0, 0, 0, 0) == null);
+    try std.testing.expect(columns(8, 8, 0, 0, 0, 0) == null);
+    try std.testing.expect(columns(0, 8, 0, 0, 0, 0) == null);
+    try std.testing.expect(columns(100, 0, 0, 0, 0, 0) == null);
+}
+
+// **칸보다 작은 여백도 그리는 쪽과 누르는 쪽이 같이 민다.** macOS 는 카드 글자를 반 칸 안쪽에 둔다. 그 반 칸을
+// 렌더러만 알면 ✕가 누르는 칸보다 반 칸 오른쪽에 그려진다(2026-10-12 실측 — 그린 ✕의 오른쪽 절반이 카드 전환).
+test "sidebar closeButton: text_offset_px 는 ✕ 를 그리는 자리와 누르는 구간을 함께 민다" {
+    const plain = columns(348, 8, 11, 11, 8, 0).?;
+    const shifted = columns(348, 8, 11, 11, 8, 4).?;
+    // 열 배치(칸 수·✕ 열)는 여백과 무관하다 — 여백은 열을 통째로 옮길 뿐이다.
+    try std.testing.expectEqual(plain.close_col, shifted.close_col);
+    try std.testing.expectEqual(plain.indent_cols, shifted.indent_cols);
+    try std.testing.expectEqual(plain.cols, shifted.cols);
+    // 그리는 자리(셀 origin + col×cw)와 누르는 구간의 시작이 같은 식에서 나온다.
+    const drawn_left = shifted.colLeftPx(shifted.close_col, 8);
+    try std.testing.expectEqual(plain.colLeftPx(plain.close_col, 8) + 4, drawn_left);
+    const range = shifted.closeXRange(8);
+    try std.testing.expectEqual(@as(f64, @floatFromInt(drawn_left)), range.start);
+    // 그린 ✕ 칸의 오른쪽 끝 바로 안쪽이 눌린다 — 여백을 모르는 판정이면 여기가 빠진다.
+    try std.testing.expect(closeButton(@as(f64, @floatFromInt(drawn_left + 8)) - 0.5, shifted, 8));
+    try std.testing.expect(!closeButton(@as(f64, @floatFromInt(drawn_left)) - 0.5, shifted, 8));
+    // 여백을 더해도 ✕ 는 스크롤바 gutter 를 침범하지 않는다.
+    try std.testing.expect(range.end <= @as(f64, @floatFromInt(348 - 11)));
 }
 
 test "sidebar closeButton: 메트릭이 없으면 누를 수 없다" {
     const cw: u32 = 10;
-    const c = columns(200, cw, 0, 0, 0).?;
+    const c = columns(200, cw, 0, 0, 0, 0).?;
     // 셀 폭 0(렌더 전)이면 누를 수 없다 — 자리를 모르는 채 닫기가 일어나면 안 된다.
     try std.testing.expect(!closeButton(170, c, 0));
     // 사이드바 밖(폭 경계 너머)도 false.
@@ -1211,7 +1245,7 @@ test "sidebar 목록 행 호버 밴드: 글자 블록을 덮고 클릭 행과 �
 test "sidebar closeButton: 옛 폭-역산 zone은 실측 메트릭에서 그려진 ✕와 겹치지 않았다" {
     const w: u32 = 348;
     const cw: u32 = 8;
-    const c = columns(w, cw, 11, 11, 8).?;
+    const c = columns(w, cw, 11, 11, 8, 0).?;
     const range = c.closeXRange(cw);
 
     // 옛 구현이 보던 구간: [w - 3cw, w) = [324, 348).

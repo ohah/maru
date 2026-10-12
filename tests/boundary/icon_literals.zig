@@ -417,6 +417,43 @@ test "아이콘 셀 래스터 배율과 대상은 Objective-C 가 다시 적지 
     }
 }
 
+// 사이드바 카드 글자의 **가로 여백도 렌더러가 다시 적지 않는다**(같은 미러 가드 — 파싱 조각을 공유해서 여기 산다).
+// 예전에는 `.m` 이 `sx_origin = glyph_pad`(`cw * 0.5f`)를 직접 더했고, Zig 의 hit-test·IME caret 은 그 반 칸을 몰라
+// 그린 ✕ 의 오른쪽 절반이 카드 전환이 됐다(2026-10-12). 이제 여백은 `chrome.components.sidebar.Columns.text_offset_px`
+// 가 소유하고 Zig 가 셀 `origin_x` 에 싣는다. 이 가드는 `.m` 의 `sx_origin` 대입이 셀 값만 읽는지(글자 갈래) 또는
+// 0 인지(밴드 갈래)를 본다 — 배율·상수가 하나라도 붙으면 두 번째 출처다.
+test "사이드바 카드 글자의 가로 여백은 Objective-C 가 다시 적지 않는다 — 셀 origin_x 만 읽는다 (layering §3.5)" {
+    const allocator = std.testing.allocator;
+    const raw_mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(raw_mirror);
+    const mirror = try stripCComments(allocator, raw_mirror);
+    defer allocator.free(mirror);
+    const assignment = "sx_origin =";
+    var reads_cell: usize = 0;
+    var zero: usize = 0;
+    var search: usize = 0;
+    while (std.mem.indexOfPos(u8, mirror, search, assignment)) |at| {
+        const stmt_end = std.mem.indexOfScalarPos(u8, mirror, at, ';') orelse mirror.len;
+        const value = std.mem.trim(u8, mirror[at + assignment.len .. stmt_end], " \t\r\n");
+        search = stmt_end;
+        if (std.mem.eql(u8, value, "(float)sc.origin_x")) {
+            reads_cell += 1;
+        } else if (std.mem.eql(u8, value, "0.0f")) {
+            zero += 1;
+        } else {
+            std.debug.print(
+                "\n사이드바 가로 여백 사본이 되살아났습니다: {s}의 `sx_origin = {s}`\n" ++
+                    "  여백은 Columns.text_offset_px 가 소유하고 Zig 가 셀 origin_x 에 싣습니다 — 렌더러는 그 값만 읽습니다.\n",
+                .{ scale_mirror_file, value },
+            );
+            return error.SidebarTextOffsetMirrorRevived;
+        }
+    }
+    // 개수로 확인한다 — 대입이 사라지거나 이름이 바뀌면 위 루프가 아무것도 안 잰다.
+    try std.testing.expectEqual(@as(usize, 1), reads_cell);
+    try std.testing.expectEqual(@as(usize, 1), zero);
+}
+
 test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {
     const allocator = std.testing.allocator;
     var out: [8][]const u8 = undefined;

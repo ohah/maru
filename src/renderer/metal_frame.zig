@@ -76,7 +76,8 @@ pub const NativeMetalCell = extern struct {
     // 이 cell이 속한 panel(split leaf)의 픽셀 origin(backing px). 렌더러가 cell을 origin_x + col*cw,
     // origin_y + row*ch에 둔다. 단일 panel이면 모든 터미널 cell이 (사이드바 폭, 0)으로 동작이 기존과
     // 같다. split(PR3)이 panel별로 다른 origin을 줘 N개 surface가 각자 sub-사각형에 그려진다. 사이드바
-    // cell은 자체 위치 로직(origin 0/슬롯 높이)을 쓰므로 이 필드를 무시한다(0).
+    // 카드 glyph cell은 의미가 다르다: origin_x = 칸 미만 여백(`chrome.components.sidebar.Columns.text_offset_px`,
+    // ABI 223), origin_y = content 상대 세로 자리(`sidebar_glyph_rows.fillOriginY`) — 렌더러가 헤더·스크롤만 더한다.
     origin_x: u32 = 0,
     origin_y: u32 = 0,
     /// 이 셀을 자를 사각형의 **프레임 clip 테이블 index + 1**(0 = 자르지 않음).

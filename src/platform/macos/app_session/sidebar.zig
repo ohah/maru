@@ -1390,6 +1390,10 @@ pub fn sidebarColumns(self: *const AppSession) ?chrome.components.sidebar.Column
         sidebarScrollGutterPx(self),
         sp.card_gap_px + sp.accent_bar_width_px, // 좌측 accent 막대 + 카드 패딩
         sp.card_gap_px, // 우측 카드 패딩
+        // 카드 글자를 반 칸 더 안쪽에 둔다(제목 좌측 여백이 폰트 크기에 비례). 예전에는 렌더러가 이 반 칸을
+        // `cw*0.5` 로 몰래 더해, 누르는 칸(✕)·IME caret 이 그린 자리보다 반 칸 왼쪽에 있었다. 이제 이 값이 셀
+        // `origin_x`(`applySidebarGlyphPyTop`)와 hit-test·caret 의 단일 출처다. 홀수 폭은 내림(.5px 차이).
+        self.cell_width_px / 2,
     );
 }
 
@@ -2473,6 +2477,12 @@ pub fn applySidebarGlyphPyTop(self: *AppSession) void {
     // 셀을 제자리로 고친다 — 그 셀을 만든 입력의 지문은 여기서 죽고, 호출자가 이 뒤에 다시 adopt 한다.
     self.metal_buffer.invalidateSidebarSource();
     fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, sidebarRenderRows(self), sidebarMetrics(self));
+    // 가로 자리도 Zig 가 정한다 — 렌더러는 `origin_x + col×cw` 를 그대로 그린다. 그 값은 hit-test(`closeXRange`)·
+    // rename caret 과 같은 `Columns.text_offset_px` 다(여기서 따로 셈하면 그리는 자리와 누르는 자리가 다시 갈린다).
+    const offset_px: u32 = if (sidebarColumns(self)) |cl| cl.text_offset_px else 0;
+    for (self.metal_buffer.sidebar_cells) |*c| {
+        if (c.slot_id != 0) c.origin_x = offset_px;
+    }
 }
 
 /// 사이드바 셀을 만드는 **입력 전체**를 `out` 에 바이트로 적는다 — `MetalFrameBuffer.sidebarSourceIs` 의 지문.

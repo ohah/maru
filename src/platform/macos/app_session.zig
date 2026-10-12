@@ -314,7 +314,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 222: NativeMetalCell.reserved=32 가 「파일 도크 토글」에서 「셀보다 크게 구운 아이콘」으로 넓어진다 — 사이드바 헤더 아이콘도
 // 이 role 을 달고 나가고, .m 은 codepoint 목록과 `1.7f` 대신 role 과 atlas 크기로 quad 를 키운다(2칸 글리프는 그 가운데 한 칸).
 // layout 은 그대로지만 낡은 .m 은 2칸 종을 3.4칸으로 늘리므로 짝이 같이 올라가야 한다(130 과 같은 이유).
-pub const abi_version: u32 = 222;
+// 223: 사이드바 카드 glyph 셀의 `origin_x` 가 의미를 갖는다 — 칸 미만 여백(`chrome.components.sidebar.Columns.text_offset_px`,
+// macOS 는 반 칸). .m 은 예전에 이 필드를 무시하고 `cw*0.5` 를 직접 더했다(hit-test·IME caret 과 반 칸 어긋남). layout 은
+// 그대로지만 낡은 .m 은 여백을 두 번 더하거나(새 Zig) 안 더하므로(새 .m + 옛 Zig) 짝이 같이 올라가야 한다.
+pub const abi_version: u32 = 223;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -35688,7 +35691,9 @@ test "code-review #5: 그룹 rename 캐럿이 사이드바 indent_cols를 반영
     const rect = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
     // depth1(hindent=0): caret_col = indent_cols + 2(삼각+공백) + qcols. 옛 코드는 indent_cols가 빠져(=2+qcols)
     // 캐럿·IME 후보창이 indent_cols칸 왼쪽으로 어긋났다(code-review #5). buildSidebarTitleDrawList의 전역 shift와 정합.
-    try std.testing.expectEqual(@as(i32, @intCast((indent_cols + 2 + qcols) * cw)), rect.x);
+    // x 는 그린 글자와 같은 식이다 — 열 × cw 에 칸 미만 여백(`Columns.text_offset_px`, macOS 반 칸)을 더한다.
+    const cl = sidebar_ops.sidebarColumns(session) orelse return error.NoColumns;
+    try std.testing.expectEqual(@as(i32, @intCast(cl.colLeftPx(indent_cols + 2 + qcols, cw))), rect.x);
 }
 
 test "remove_from_group: 그룹 소속 카드→최상위(depth0·첫 그룹 앞)·최상위 no-op·마커 카드 승계·마지막 멤버 소멸(주입 조건)" {
@@ -47044,7 +47049,7 @@ test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret
     // 글이 그려지지 않는 여백 위였고, 그려진 caret 과 후보창이 칸 단위로 갈렸다. 렌더는 rename 중 카드 이름줄을
     // `sidebarColumns()` 의 [indent, indent + cols - 1) 에 tail 앵커로 그리므로 넘친 줄 끝 caret 은 indent+cols-2 열이다.
     const cl = sidebar_ops.sidebarColumns(session) orelse return error.NoColumns;
-    const clamp_x: i32 = @intCast((@as(u32, cl.indent_cols) + cl.cols - 2) * cw);
+    const clamp_x: i32 = @intCast(cl.colLeftPx(@as(u32, cl.indent_cols) + cl.cols - 2, cw)); // 그린 글자와 같은 x(칸 미만 여백 포함)
 
     // 넘침: 긴 이름(20칸) → tail 앵커로 끝이 보이고 caret 은 이름영역 우경계 — 사이드바 안에 머문다.
     for (0..20) |_| try session.rename_input.insertCp(allocator, 'a');
@@ -47060,7 +47065,7 @@ test "renameCaretRect(.workspace): 이름이 사이드바 폭을 넘치면 caret
     {
         const sp = session.buildChromeTokens().space;
         const indent_cols = (sp.card_gap_px + sp.accent_bar_width_px + cw - 1) / cw;
-        const head_x: i32 = @intCast((indent_cols + 2) * cw);
+        const head_x: i32 = @intCast(cl.colLeftPx(indent_cols + 2, cw));
         try std.testing.expect(head_x < clamp_x); // 이 셋업에선 head가 우경계보다 왼쪽(=비넘침 케이스 성립)
         const r = settings_ops.renameCaretRect(session) orelse return error.NoCaret;
         try std.testing.expectEqual(head_x, r.x);
@@ -47083,7 +47088,7 @@ test "renameCaretRect(.group): 헤더 이름이 넘치면 caret x를 사이드�
     const cw = session.cell_width_px;
     // 헤더 줄도 카드와 같은 열 배치([indent, indent + cols - 1), tail 앵커)로 그려진다 — .workspace 판정자의 기준선 정정과 같다.
     const cl = sidebar_ops.sidebarColumns(session) orelse return error.NoColumns;
-    const clamp_x: i32 = @intCast((@as(u32, cl.indent_cols) + cl.cols - 2) * cw);
+    const clamp_x: i32 = @intCast(cl.colLeftPx(@as(u32, cl.indent_cols) + cl.cols - 2, cw)); // 그린 글자와 같은 x(칸 미만 여백 포함)
 
     // 넘침: 긴 헤더 이름 → caret 은 그려진 자리(우경계), 사이드바 안.
     for (0..20) |_| try session.rename_input.insertCp(allocator, 'a');
@@ -66437,6 +66442,52 @@ test "clicking the hovered slot close zone closes that tab, elsewhere switches" 
     const before = session.tabs.items.len;
     session.mouse(1, w - 1, sidebar_ops.testSidebarRowCenterY(session, 0), 0, 0);
     try std.testing.expectEqual(before, session.tabs.items.len);
+}
+
+// **그려진 ✕ 픽셀과 누르는 구간이 같은 자리인가** — 위 테스트는 좌표를 `closeXRange` 에서 만들어 그 자신을 확인할
+// 뿐이라, 렌더러가 글자를 반 칸 더 밀던 동안(✕ 잉크 x 285–291 대 hit [280,288), 2026-10-12 캡처) 계속 green 이었다.
+// 여기서는 **실제로 투영된 사이드바 셀**의 그리는 자리(렌더러 계약: `origin_x + col×cw`)를 읽어 판정과 맞춘다.
+test "sidebar ✕: 투영된 ✕ 셀의 그리는 자리가 클릭 구간과 같고, 그린 ✕ 오른쪽 끝을 누르면 닫힌다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영 + 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = try tab_ops.createTab(
+        session,
+        .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 40, .rows = 10 } },
+        .{ .cols = 40, .rows = 10 },
+        16,
+        "tab 2",
+        "sh",
+    );
+    try std.testing.expectEqual(@as(usize, 2), session.tabs.items.len);
+    markAllTermsAtPrompt(session); // idle 셸 흉내 — ✕ 닫기가 확인 모달 없이 즉시 닫게
+    for (0..4) |_| {
+        _ = try session.tick();
+        if (!session.metal_dirty) break;
+    }
+    const cw = session.cell_width_px;
+    try std.testing.expect(cw > 0);
+    const cols_layout = sidebar_ops.sidebarColumns(session).?;
+    try std.testing.expect(cols_layout.text_offset_px > 0); // macOS 는 반 칸 여백을 둔다 — 0 이면 이 판정이 아무것도 안 잰다
+    const range = cols_layout.closeXRange(cw);
+    // 슬롯 0 카드의 ✕ 셀(행 인코딩의 slot 0). 그리는 자리를 렌더러 계약대로 계산한다.
+    var drawn_left: ?u32 = null;
+    var close_cells: usize = 0;
+    for (session.metal_buffer.sidebar_cells) |c| {
+        if (c.slot_id == 0 or c.codepoint != maru.cell_text.sidebar_close_glyph) continue;
+        close_cells += 1;
+        if (c.row / coretext_frame_builder.sidebar_line_base == 0) drawn_left = c.origin_x + c.col * cw;
+    }
+    try std.testing.expect(close_cells >= 2); // 카드 둘 다 ✕ 를 단다(개수로 확인 — 0 이면 아래가 안 돈다)
+    try std.testing.expectEqual(@as(f64, @floatFromInt(drawn_left.?)), range.start);
+    // 그린 ✕ 칸의 **오른쪽 끝 바로 안쪽**을 누른다 — 반 칸 어긋나 있던 동안 여기는 카드 전환이었다.
+    const press_x: f64 = @as(f64, @floatFromInt(drawn_left.? + cw)) - 0.5;
+    const slot0_y: f64 = sidebar_ops.testSidebarRowCenterY(session, 0);
+    _ = session.hoverCursor(press_x, slot0_y, 0);
+    session.mouse(1, press_x, slot0_y, 0, 0);
+    try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
 }
 
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS

@@ -150,6 +150,12 @@ pub fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, 
         self.spawnRemoteHookInstall(gop.value_ptr, ctx);
     }
     gop.value_ptr.seen_this_tick = true;
+    if (gop.value_ptr.recheck_native and !gop.value_ptr.mixed_stream and gop.value_ptr.install_done and !gop.value_ptr.stopped and now_ms >= gop.value_ptr.retry_at_ms) {
+        gop.value_ptr.recheck_native = false;
+        gop.value_ptr.install_done = false;
+        gop.value_ptr.install_started_ms = 0;
+        self.spawnRemoteHookInstall(gop.value_ptr, ctx);
+    }
 
     // 끝난 목적지에는 **파싱 상태도 새로 안 연다** — 열면 hello 를 5 초 기다렸다 `no_hello` 로 닫히는
     // 헛도는 채널이 Term 마다 생긴다.
@@ -175,7 +181,9 @@ pub fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, 
         // 뒤늦게 여는 채널을 `waiting_hello` 로 두면 5 초 뒤 죽는다 — 그리고 죽은 채널도 분배
         // 셈에는 들어가 「열을 다 먹였는데 하나도 안 맞는다」가 된다(2026-09-10 실측).
         const ras = maru.session.remote_agent_stream;
-        term.agent_remote_channel = if (gop.value_ptr.saw_hello)
+        term.agent_remote_channel = if (gop.value_ptr.mixed_stream)
+            ras.Channel.initMixed(now_ms, gop.value_ptr.saw_hello)
+        else if (gop.value_ptr.saw_hello)
             ras.Channel.initOpenProfile(now_ms, gop.value_ptr.stream_profile orelse .v1)
         else
             ras.Channel.initForProfile(now_ms, if (gop.value_ptr.stream_profile == .v2) .v2 else null);
@@ -200,6 +208,7 @@ pub fn clearRemoteAgentChannels(self: *AppSession, dest: []const u8) void {
 
 /// 한 목적지의 자식 stdout 을 훑어 **완성된 줄만** 그 목적지의 Term 들에 먹인다.
 pub fn drainRemoteAgentHost(self: *AppSession, dest: []const u8, host: *RemoteAgentHost, now_ms: u64) void {
+    const ras = maru.session.remote_agent_stream;
     if (host.stopped) return;
     // 설치가 아직이면 그것부터 훑는다 — 끝나면 그 안에서 스트리머가 뜬다.
     if (!host.install_done) {
@@ -304,9 +313,23 @@ pub fn drainRemoteAgentHost(self: *AppSession, dest: []const u8, host: *RemoteAg
         // 예산은 「연달아 실패한 횟수」여야지 「살아온 동안의 총합」이면 안 된다.
         // **Term 에 먹이기 전에** 커서를 건진다 — 먹이는 쪽은 Term 마다 돌고 커서는 host 소유다.
         self.recordRemoteCursors(host, lines[0..count], now_ms);
+        if (host.saw_hello and !host.mixed_stream) for (lines[0..count]) |line| {
+            const frame = ras.parseFrameForProfile(line, host.stream_profile orelse .v1);
+            if (frame == .event and std.mem.eql(u8, frame.event.nonce, maru.session.agent_stream_mixed.capability_log_name)) {
+                var scratch: [256]u8 = undefined;
+                var fba = std.heap.FixedBufferAllocator.init(&scratch);
+                var raw: std.ArrayListUnmanaged(u8) = .empty;
+                ras.unescapeInto(&raw, fba.allocator(), frame.event.line) catch continue;
+                if (std.mem.eql(u8, raw.items, std.mem.trimEnd(u8, maru.session.agent_stream_mixed.announcement_line, "\n"))) host.recheck_native = true;
+            }
+        };
         // Noise or an incompatible hello must not renew the retry budget or
         // hide the host silence deadline. Only negotiated streams are alive.
-        if (host.saw_hello) {
+        var accepted = !host.mixed_stream;
+        if (host.mixed_stream) for (lines[0..count]) |line| {
+            if (ras.parseMixedFrame(line) != .ignored or maru.session.agent_stream_mixed.isHello(line)) accepted = true;
+        };
+        if (host.saw_hello and accepted) {
             host.retries = 0;
             host.last_line_ms = now_ms;
         }

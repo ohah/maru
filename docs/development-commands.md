@@ -79,7 +79,7 @@ runtime 소유 format의 PTY 환경 경계는 `zig build test-agent-hook-runtime
 부모 snapshot·명시 env·사용자 override·중복/빈/미지 값과 v1/v2 선택을 검사한다.
 POSIX 기본 test에 포함된다. macOS에서는 실제 PTY fork/exec 자식의 format도 검사하며 Linux에서는 이 물리 PTY case를 skip한다. 하위 PTY API 기본은 v1이며 명시적 v2 persistent 요청은 `runtime_agent_log_format_v1` capability를 협상한 host에만 허용한다.
 `zig build test-agent-hook-host-metadata`는 host의 불변 format 저장, attach 확인, upgrade handoff와 실제 PTY 환경을 검사한다. Windows native 기록 활성화를 뜻하지 않는다.
-새 macOS GUI runtime은 native CLI·전용 디렉터리·설치 훅 이행이 준비된 경우 v2를 선택하며 구 host에서는 v1을 유지한다. `zig build test-agent-hook-native-default`는 실제 bundle·PTY·설치 명령으로 기존 v1과 새 v2를 함께 검사하고, 일반 파일·심볼릭 링크 CLI에서 GUI/CLI 설치 명령의 바이트가 같은지 대조한다. 설치된 provider 검증은 `python3 tools/test-agent-hook-native-default.py --test <local-reader-test> --cli <maru> --claude <claude> --codex <codex>`로 명시적으로 실행한다. 합성 설정과 읽기 전용 턴을 사용하며 인증 정보와 모델 출력은 결과에 남기지 않는다. SSH 전송은 v1이다.
+새 macOS GUI runtime은 native CLI·전용 디렉터리·설치 훅 이행이 준비된 경우 v2를 선택하며 구 host에서는 v1을 유지한다. `zig build test-agent-hook-native-default`는 실제 bundle·PTY·설치 명령으로 기존 v1과 새 v2를 함께 검사하고, 일반 파일·심볼릭 링크 CLI에서 GUI/CLI 설치 명령의 바이트가 같은지 대조한다. 설치된 provider 검증은 `python3 tools/test-agent-hook-native-default.py --test <local-reader-test> --cli <maru> --claude <claude> --codex <codex>`로 명시적으로 실행한다. 합성 설정과 읽기 전용 턴을 사용하며 인증 정보와 모델 출력은 결과에 남기지 않는다. SSH 점진 native 전환은 새 GUI runtime의 수신 capability, 현재 훅 설정, 원격 준비 응답과 실제 env 전달이 확인된 새 프로세스만 v2를 선택한다. 기존 v1과 새 v2는 서버당 혼합 스트리머 하나가 함께 읽는다.
 
 
 native 이행의 binary 수명은 같은 실제 기록 프로세스 게이트가 합성 앱 번들의
@@ -93,12 +93,22 @@ provider correction 반복 방지는 `test-agent-log-record`에 포함된다.
 
 v2 검증용 reader는 `maru agent-events --stdio --dir=<private-directory> --log-format=v2`로
 선택한다. 기본 v1과 혼합하지 않으며
-`maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상과 재접속 수신은 아래 게이트로 검사한다. 준비된 macOS 로컬 runtime의 기본 전환은 구현됐으며 SSH 기본 전환은 후속이다.
+`maru-agent-events-v2` hello/version 2와 `gen` cursor를 내보낸다. 앱 협상과 재접속 수신은 아래 게이트로 검사한다. 준비된 macOS 로컬 runtime의 기본 전환은 구현됐으며 SSH 점진 전환은 아래 혼합 수신·실물 SSH 게이트로 검사한다.
 `zig build test-agent-log-stream-process`는 실제 CLI pipe로 generation resume,
 시작 정리, 출력 배압 중 append, holder 종료, broken pipe를 검사한다. Ubuntu CI
 check에 포함되며 결과는 `tests/artifacts/agent-log-stream/`에만 남긴다.
 
 로그 세대 수신·재접속: `zig build test-cli-failure-contract`가 v1/v2 hello와 cursor의 엄격한 판정, u64 상한, 32개 최대 resume 및 할당 실패 시 이전 목록 보존을 검사한다. `zig build test-macos-app-host-abi`에는 AppSession의 v2 capability 유지·재시작 downgrade 거부 및 실제 pipe의 잘못된 hello/정상 cursor 수신 회귀가 포함된다. 기본 훅을 native로 활성화하는 검증과 Windows 실제 실행을 대신하지 않는다.
+
+`zig build test-ssh-native-profile`은 기존 SSH argv와 새 준비 조건, typed 설치 응답을 검사한다.
+`python3 tools/test-remote-agent-native.py --cli <maru> [--old-cli <legacy maru>] [--providers] [--frames-output <private file>]`는 별도 키·HOME·
+sshd로 실제 SSH를 실행해 기존/새 프로세스, 환경 전달 차단, 훅 비활성화, 구 CLI와 설치된
+합성 provider 훅의 파일·혼합 wire를 대조한다. 사용자 설정·인증 정보는 수정하지 않는다.
+기본 하네스는 합성 payload를 사용한다. `--providers`는 설치된 Claude/Codex의 읽기 전용 모델 턴을 명시적으로 실행하고 버전을 기록한다. `--frames-output`은 실제 SSH wire를 로컬 전용 파일에 저장한다. `zig build test-remote-agent-log-profile -Dremote-native-frames=<private file>`은 그 wire를 제품 GUI의 배지·턴 캡처 경로에 재생한다.
+혼합 CLI는 `maru agent-events --stdio --dir=<home>/.cache/maru --log-format=mixed`다.
+profile별 resume는 `1:<name>:<offset>`·`2:<name>:<offset>:<generation>`이며 같은 이름을
+다른 profile에 사용할 수 있지만 같은 profile/name 중복은 거부한다. `agent-hooks check-native`
+는 두 provider의 준비 응답과 완료 표식을 bounded stdin에서 검증하는 준비 단계 helper다.
 
 macOS의 `zig build test-remote-agent-log-profile`은 실제 AppSession의 SSH 자식 argv에서 최초 연결·v1 재접속·v2 재접속의 로그 namespace와 resume 정합성을 검사하고, hello downgrade 거부 및 cursor pipe 회귀를 함께 실행한다. SSH는 격리된 대역이며 실제 원격 서버·provider 실행 검증은 별도다.
 

@@ -473,3 +473,9 @@ v2 경로를 v1으로 되돌리는 변형이 실패하는지 확인한다. 이 a
 수정 후 최초 연결·v1 재접속·v2 재접속과 기존 수신 회귀가 통과했다.
 경로를 legacy/local namespace로 바꾸기, 확인한 v2 강제 downgrade, 미확인 첫 접속의
 v2 강제 선택, resume 세대 삭제는 모두 실행 단계의 회귀 실패로 검출됐다.
+
+## 다음 단계: SSH 기본 활성화
+
+[원격 native 활성화 초안](remote-agent-native.md)은 기존 v1과 새 v2의 동시 수신,
+원격 준비 판정, ControlMaster env pinning과 실제 SSH 완료 게이트를 다룬다.
+혼합 reader 방식은 사용자 논의 전이며 아직 기본 활성화를 구현한 상태가 아니다.

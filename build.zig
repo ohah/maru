@@ -2021,6 +2021,17 @@ pub fn build(b: *std.Build) void {
     );
     macos_terminal_gate_step.dependOn(&run_macos_terminal_gate_tests.step);
 
+    const ssh_native_profile_tests = addProjectTest(b, .{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/ssh_native_profile_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    ssh_native_profile_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
+    ssh_native_profile_tests.root_module.addAnonymousImport("config_doc_md", .{ .root_source_file = b.path("docs/configuration.md") });
+    const run_ssh_native_profile_tests = b.addRunArtifact(ssh_native_profile_tests);
+    b.step("test-ssh-native-profile", "Run SSH legacy/profile and mixed-readiness contracts").dependOn(&run_ssh_native_profile_tests.step);
+
     const remote_log_profile_tests = addProjectTest(b, .{
         .root_module = macos_app_host_abi_tests.root_module,
         .filters = &.{"generation receiver"},
@@ -2028,8 +2039,10 @@ pub fn build(b: *std.Build) void {
     const run_remote_log_profile_tests = b.addRunArtifact(remote_log_profile_tests);
     run_remote_log_profile_tests.setCwd(b.path("."));
     run_remote_log_profile_tests.setEnvironmentVariable("MARU_TEST_KEEP_ONLY_PREFIX", "app_session.test.generation receiver");
-    run_remote_log_profile_tests.addArg("--maru-expect-tests=8");
-    run_remote_log_profile_tests.addArg("--maru-expect-passed=3");
+    run_remote_log_profile_tests.addArg("--maru-expect-tests=12");
+    const remote_native_frames = b.option([]const u8, "remote-native-frames", "Owned loopback SSH mixed frames for GUI hook/capture replay");
+    if (remote_native_frames) |path| run_remote_log_profile_tests.setEnvironmentVariable("MARU_REMOTE_NATIVE_FRAMES", path);
+    run_remote_log_profile_tests.addArg(if (remote_native_frames != null) "--maru-expect-passed=7" else "--maru-expect-passed=6");
     b.step("test-remote-agent-log-profile", "Run confirmed remote log profile and real SSH argv regressions").dependOn(&run_remote_log_profile_tests.step);
 
     // One real AppSession fixture owns native generation selection, lock failure,

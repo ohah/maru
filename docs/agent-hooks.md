@@ -2254,4 +2254,34 @@ host에만 허용한다. 협상한 연결의 `runtime.attach` result에는 정�
 Host upgrade snapshot은 v1 runtime의 기존 바이트를 유지한다. v2 runtime에는
 필수 runtime TLV tag 13을 저장해, 이를 모르는 decoder가 restore를 거부하도록
 한다. 정상 종료와 죽은 host 로그 정리는 두 namespace의 동일한 owner 규율을
-따른다. GUI와 CLI 설치는 같은 절대 경로의 이행 명령을 생성한다. 기존 v1 프로세스는 계속 v1 namespace에 기록한다. SSH forwarding은 v1을 유지하고 Windows native 실행은 활성화하지 않는다.
+따른다. GUI와 CLI 설치는 같은 절대 경로의 이행 명령을 생성한다. 기존 v1 프로세스는 계속 v1 namespace에 기록한다. SSH는 아래 점진 전환 계약을 따르며 Windows native 실행은 활성화하지 않는다.
+
+
+### SSH native 점진 전환
+
+사용자는 기존 세션을 유지하는 점진 이행을 선택했다. 새 GUI runtime은 수신 capability
+`MARU_AGENT_REMOTE_PROTOCOL=3`을 전달한다. 이 값은 포맷이 아니라 GUI의 혼합 수신 지원이다.
+CLI는 현재 `sidebar.agent-hooks` 설정과 pane 신원도 확인한다. 준비되지 않은 기존 runtime과
+GUI 밖 호출은 기존 v1을 유지한다.
+
+새 SSH 프로세스는 같은 ControlMaster의 원격 설치 결과에서 두 provider의 transport=3,
+private namespace·명령·신뢰 준비 및 실제 `LC_MARU_LOG_FORMAT=2` 수신을 확인한 뒤만
+v2를 선택한다. 준비 호출에도 pane 신원을 명시적으로 보낸다. 값은 해당 SSH wrapper의
+수명 동안 고정하고 재접속에서 다시 선택하지 않는다. 구 CLI·차단된 env·비활성 훅은
+선택 전에 v1을 유지한다. 이미 확인한 혼합 reader의 capability는 다운그레이드하지 않는다.
+
+서버당 SSH 채널은 하나다. `agent-events --log-format=mixed`는 독립 v1/v2 cursor와
+디렉터리를 유지하고 명시적인 v3 envelope를 전송한다. 같은 파일명도 profile별 key로
+갈라지며 합계 32개의 커서와 bounded argv 예산을 유지한다. native batch는 lease를 풀고
+실제 stdout flush를 마친 뒤 cursor/rotation을 진행한다.
+
+기존 v1 스트리머가 살아 있는 동안 원격 CLI가 업그레이드되면, provider 로그와 겹치지 않는
+예약된 control 로그 `maru_native_transport_v3.ndjson`의 힌트로 GUI가 준비를 재검증한다.
+힌트만으로 혼합 모드를 켜지 않는다. 두 설치 결과를 다시 확인하고 기존 pipe를 소비한 뒤,
+커서의 profile key를 원자적으로 옮겨 스트리머를 교체한다. 할당 실패는 이전 커서를 보존한다.
+이 control payload는 에이전트 활동/턴으로 취급하지 않는다.
+
+CLI 준비 응답은 명시적인 완료 표식으로 끝난다. SSH 다중화가 FIFO를 계속 열어 둘 수
+있으므로 EOF만으로 완료를 판단하지 않는다. 입력 크기와 대기 시간은 제한하고 준비용
+SSH 자식만 종료·회수한다. 기존 master나 원격 사용자 프로세스를 강제로 종료하지 않는다.
+상세 구현과 실패 경로는 [원격 native 계획](plans/remote-agent-native.md)이 소유한다.

@@ -147,7 +147,7 @@ HTML
 printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
 # 3 회차: 0.6 초마다 스스로 새로고침하는 페이지(숨은 탭 경우).
 # W9b③: 에이전트가 연 탭(뒤쪽 — 처음부터 숨김). 첫 클릭·새 창 열기(결정 ④ — 뒤쪽 에이전트 탭)·떠나기 확인(글이 있으면).
-printf '<!doctype html><title>ag</title><button id=ab style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?ab-&#39;+event.isTrusted">Agent go</button><button id=pop style="position:absolute;left:30px;top:100px;width:120px;height:40px" onclick="window.open(&#39;ag2.html&#39;,&#39;_blank&#39;)">Pop</button><input id=t aria-label=Note style="position:absolute;left:30px;top:170px"><script>new Image().src="/hit?agvis-"+document.visibilityState;addEventListener("beforeunload",function(e){if(document.getElementById("t").value){e.preventDefault();e.returnValue=""}})</script>' > "$root/www/ag.html"
+printf '<!doctype html><title>ag</title><button id=ab style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?ab-&#39;+event.isTrusted">Agent go</button><button id=pop style="position:absolute;left:30px;top:100px;width:120px;height:40px" onclick="window.open(&#39;ag2.html&#39;,&#39;_blank&#39;)">Pop</button><input id=t aria-label=Note style="position:absolute;left:30px;top:170px"><button id=al2 style="position:absolute;left:30px;top:220px;width:120px;height:40px" onclick="setTimeout(function(){alert(&#39;later&#39;)},1500)">Later alert</button><script>new Image().src="/hit?agvis-"+document.visibilityState;addEventListener("beforeunload",function(e){if(document.getElementById("t").value){e.preventDefault();e.returnValue=""}})</script>' > "$root/www/ag.html"
 printf '<!doctype html><title>ag2</title>ag2<script>new Image().src="/hit?ag2vis-"+document.visibilityState;document.addEventListener("visibilitychange",function(){new Image().src="/hit?ag2vis-"+document.visibilityState})</script>' > "$root/www/ag2.html"
 # W9b③: 숨은 채 불러온 문서 — 그 뒤 첫 마우스 누르기가 페이지에 닿는가(숨긴 탭은 새 문서를 그리지 않아 누르기가 사라졌다, 계획 공격 2 회차).
 printf '<!doctype html><title>fresh</title><button id=fb style="position:absolute;left:30px;top:30px;width:140px;height:40px" onclick="new Image().src=&#39;/hit?fb-&#39;+event.isTrusted">Fresh go</button><a id=tohop href="hop.html" style="position:absolute;left:30px;top:120px">hop</a>' > "$root/www/fresh.html"
@@ -476,6 +476,12 @@ capt=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/ag-cap-1")
 "\$cli" browser click --surface "\$capt" --selector '#pop' > "\$out/ag-cap-pop" 2>&1; echo "rc=\$?" >> "\$out/ag-cap-pop"
 sleep 2
 "\$cli" browser list > "\$out/ag-cap-list1" 2>&1
+# op 도중 뜬 JS 대화상자 — 시한·30 초를 기다리지 않고 그 이유로 곧 끝난다(적대 리뷰 2 회차: 30 초 뒤 「maru 가 없다」).
+"\$cli" browser click --surface "\$capt" --selector '#al2' > "\$out/ag-al" 2>&1; echo "rc=\$?" >> "\$out/ag-al"
+d0=\$(date +%s)
+"\$cli" browser wait --surface "\$capt" --selector '#never' --timeout 8000 > "\$out/ag-dlg-wait" 2>&1; echo "rc=\$?" >> "\$out/ag-dlg-wait"
+d1=\$(date +%s)
+echo "\$((d1 - d0))" > "\$out/ag-dlg-secs"
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -591,6 +597,7 @@ grep -q '^closed$' "$out/ag-close" && grep -q '^rc=0$' "$out/ag-close" && ! grep
 for k in 1 2 3 4 5 6 7; do grep -q '^opened [0-9]*' "$out/ag-cap-$k" && grep -q '^rc=0$' "$out/ag-cap-$k" || fail "agent tab $k of 8 did not open ($(tr '\n' ' ' < "$out/ag-cap-$k"))"; done
 [ "$(cat "$out/ag-refused-secs")" -le 5 ] && grep -q '^opened [0-9]*' "$out/ag-refused" || fail "opening an address that refuses connections did not answer soon ($(cat "$out/ag-refused-secs")s · $(tr '\n' ' ' < "$out/ag-refused"))"
 ok ag-cap-pop && [ "$(grep -c 'GET /hit?ab-true' "$root/http.log")" -ge 2 ] || fail "the click on a capped agent tab did not reach the page — the popup check proves nothing ($(tr '\n' ' ' < "$out/ag-cap-pop"))"
+ok ag-al && grep -q 'showing a dialog' "$out/ag-dlg-wait" && [ "$(cat "$out/ag-dlg-secs")" -le 6 ] || fail "a wait on a tab whose page showed an alert mid-way did not end at once with the dialog reason ($(cat "$out/ag-dlg-secs")s · $(tr '\n' ' ' < "$out/ag-dlg-wait"))"
 [ "$(grep -c '^surface ' "$out/ag-cap-list0")" = "$(grep -c '^surface ' "$out/ag-cap-list1")" ] || fail "a popup from the agent's tab opened past the cap of 8 ($(grep -c '^surface ' "$out/ag-cap-list0") → $(grep -c '^surface ' "$out/ag-cap-list1") tabs)"
 grep -q 'already has 8 tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not refused ($(tr '\n' ' ' < "$out/ag-cap-8"))"
 echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a user tab cannot be closed, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"

@@ -3066,7 +3066,8 @@ const GrantConfirmDecision = struct { async_id: u64, approved: bool };
 /// pane-bound browser grant/wait 취소에 연결한다. null이면 순수/헤드리스 세션 동작은 기존과 동일하다.
 pub const SurfaceClosedCallback = *const fn (context: ?*anyopaque, surface_id: u64) void;
 /// W9b③: 에이전트 탭의 페이지가 새 탭을 열었다 — app_host_abi 가 그 pane 의 에이전트 탭으로 칠 수 있는가(상한·grant)를 답한다.
-/// 참이면 새 탭이 그 pane 의 것이 된다(`agent_opener`). 없으면(시험·컨트롤 꺼짐) 보통 사람의 탭이다.
+/// 참이면 새 탭이 그 pane 의 것이 된다(`agent_opener`). 거짓이면 보통 탭으로 남는다(자리는 `agent_tab_room_callback` 이 먼저 거른다 —
+/// 거기서 막히면 열지 않는다). 콜백이 없으면(시험) 에이전트 규칙을 쓰지 않는다.
 pub const AgentPageTabCallback = *const fn (opener_pane: u64, tab: u64) bool;
 /// W9b③: 그 pane 이 에이전트 탭을 하나 더 가질 자리가 있는가(상한·grant 표) — 없으면 에이전트 탭의 페이지가 연 새 탭을 열지 않는다
 /// (보통 탭으로 열면 상한이 팝업으로 뚫렸다 — 적대 리뷰 1 회차).
@@ -99303,4 +99304,35 @@ test "W9b③ 적대 리뷰 1 회차: 에이전트 탭이 보이는 활성 탭이
     web_ops.tickWebOsr(session);
     try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
     try std.testing.expectEqual(tab, pane.activeTerm().surfaceId()); // 그대로 에이전트 탭
+}
+
+test "W9b③ 적대 리뷰 2 회차: 사람이 에이전트 탭에서 연 새 탭(메뉴 검색·사람의 누름)은 사람의 탭 — 자리가 없어도 열리고, 앞 탭이며, 에이전트 것이 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    inline for (.{ false, true }) |room| {
+        const session = try w6jSession(allocator);
+        defer allocator.destroy(session);
+        defer web_osr.testForget(allocator);
+        defer session.deinit();
+        session.agent_page_tab_callback = w9b3AdoptPageTab;
+        session.agent_tab_room_callback = if (room) w9b3YesRoom else w9b3NoRoom;
+        w9b3_adopt_answer = true;
+        const pane = pane_ops.activePane(session);
+        const shell = pane.activeTerm().surfaceId();
+        const tab = try web_ops.openAgentTab(session, shell, null);
+        session.focusTerm(1); // 사용자가 에이전트 탭을 보고 있다
+        try web_osr.testHold(allocator, tab);
+        web_osr.testRunning(tab);
+        try std.testing.expect(web_osr.queueSearchTab(allocator, tab, "https://e.test/search?q=x")); // 사람이 고른 메뉴
+        web_ops.tickWebOsr(session);
+        try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+        const child = pane.activeTerm(); // 앞 탭(사람의 새 탭 규칙)
+        try std.testing.expect(child.surfaceId() != tab);
+        try std.testing.expectEqual(@as(u64, 0), child.agent_opener);
+    }
+}
+
+fn w9b3YesRoom(pane: u64) bool {
+    _ = pane;
+    return true;
 }

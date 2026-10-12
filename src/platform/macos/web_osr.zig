@@ -164,6 +164,8 @@ const Surface = struct {
     /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」·「새 탭에서 이미지 열기」(W6h①) 답이 준다. sidecar 의 `open_tab`
     /// 하나가 쓴다 — sidecar 도 같은 규칙을 지키지만 maru 는 sidecar 가 보낸 것을 그대로 믿지 않는다(W6e 적대 검증 2 차).
     new_tab_credits: ws.new_tab.Credits = .{},
+    /// 에이전트의 누름이 준 장(W9b③ — 에이전트가 연 탭에만). 사람의 장을 먼저 쓴다.
+    agent_new_tab_credits: ws.new_tab.Credits = .{},
     /// 새 창 한 장(W6h①) — 메뉴 「새 창에서 링크 열기」 답만 준다(그때의 단조 시각 ms, 0 은 없음). 자리가 `new_window` 인 `open_tab`
     /// 하나가 쓴다 — 페이지 입력의 새 탭 장으로는 새 창을 받지 않는다(sidecar 가 새 창 자리를 보내도). 한 칸이다 — sidecar 의 답이 오기
     /// 전에 같은 탭에서 또 고르면 앞 것은 쓰지 못한다(드물다 — W6h① 적대 검증에서 받아들임).
@@ -225,6 +227,9 @@ pub const NewTab = struct {
     arrived_ms: i64,
     /// 0 이 아니면 이미 도는 팝업 브라우저(W6f② — 그 번호로 탭을 붙인다, 주소는 싣지 않는다). 붙이지 못하면 `abandonPopup`.
     adopt: u64 = 0,
+    /// 에이전트의 누름이 준 장으로 열렸다(W9b③) — 그때만 뒤쪽·상한·에이전트 소유. 사람의 누름·메뉴로 연 새 탭은 사람의 탭이다(적대 리뷰
+    /// 2 회차: 사람이 에이전트 탭에서 연 탭이 상한에 걸려 사라지거나 에이전트 것이 됐다).
+    by_agent: bool = false,
 };
 
 // ── W6f②: 팝업 이어 받기 ─────────────────────────────────────────────────────────────────────────────────
@@ -1560,7 +1565,7 @@ pub const devtoolsInputActivates = ws.new_tab.devtoolsInputActivates;
 /// W9b③: 에이전트가 자기가 연 탭에 진짜 누름·키를 보냈다 — 사람의 입력처럼 새 탭 장 하나(그 페이지가 새 탭을 열 수 있게).
 pub fn grantNewTabCredit(gpa: std.mem.Allocator, surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
-    s.new_tab_credits.grant(monotonicNow());
+    s.agent_new_tab_credits.grant(monotonicNow());
     // sidecar 도 장을 쥔다(팝업을 만들지는 sidecar 가 먼저 정한다) — 같은 관이라 뒤따르는 DevTools 입력보다 먼저 닿는다.
     if (s.created and (state == .running or state == .starting)) send(gpa, .{ .new_tab_credit = surface_id });
 }
@@ -2791,13 +2796,18 @@ pub fn answerContextMenu(gpa: std.mem.Allocator, surface_id: u64, menu: u32, com
 
 fn queueNewTab(gpa: std.mem.Allocator, s: *Surface, v: ws.message.OpenTab, now_ms: i64) void {
     if (!ws.new_tab.urlAllowed(v.url) or s.new_tabs.items.len >= max_new_tabs) return;
+    var by_agent = false;
     if (v.placement == .new_window) {
         // 새 창은 메뉴 「새 창에서 링크 열기」를 고른 직후에만(W6h①) — 한 번 쓴다.
         if (!ws.new_tab.creditLive(s.new_window_credit_ms, now_ms)) return;
         s.new_window_credit_ms = 0;
-    } else if (!s.new_tab_credits.take(now_ms)) return; // 이 탭에 보낸 사용자 입력이 없다(5 초 안) — sidecar 가 보냈어도 받지 않는다.
+    } else if (!s.new_tab_credits.take(now_ms)) {
+        // 이 탭에 보낸 사용자 입력이 없다(5 초 안) — sidecar 가 보냈어도 받지 않는다. 에이전트의 장이면 에이전트가 연 새 탭이다(W9b③).
+        if (!s.agent_new_tab_credits.take(now_ms)) return;
+        by_agent = true;
+    }
     const url = gpa.dupe(u8, v.url) catch return;
-    s.new_tabs.append(gpa, .{ .url = url, .placement = v.placement, .arrived_ms = now_ms }) catch gpa.free(url);
+    s.new_tabs.append(gpa, .{ .url = url, .placement = v.placement, .arrived_ms = now_ms, .by_agent = by_agent }) catch gpa.free(url);
 }
 
 /// 우클릭 메뉴 「…에서 '…' 검색」(W6h①) — maru 가 만든 검색 주소를 그 탭의 새 탭 줄에 앞 탭으로 넣는다(사용자가 maru 의 메뉴에서
@@ -2878,10 +2888,14 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
         if (!surfaces.contains(v.browser)) send(gpa, .{ .destroy_browser = v.browser });
         return;
     };
+    var by_agent = false;
     const accepted = blk: {
         const opener = surfaces.getPtr(v.opener) orelse break :blk false;
         if (opener.new_tabs.items.len >= max_new_tabs or !ws.new_tab.popupUrlAllowed(v.url)) break :blk false;
-        if (!opener.new_tab_credits.take(now_ms)) break :blk false;
+        if (opener.new_tab_credits.take(now_ms)) break :blk true;
+        // 에이전트의 장(W9b③) — 사람의 장을 먼저 쓴다.
+        if (!opener.agent_new_tab_credits.take(now_ms)) break :blk false;
+        by_agent = true;
         break :blk true;
     };
     if (!accepted) {
@@ -2928,7 +2942,7 @@ fn adoptPopup(gpa: std.mem.Allocator, v: ws.message.PopupCreated, now_ms: i64) v
     if (reserved.ring) |ring| if (adopted.view.adopt(ring)) |never_drawn| never_drawn.release();
     // `put` 이 표를 옮겼을 수 있다 — 연 탭을 다시 찾는다.
     const opener = surfaces.getPtr(v.opener).?;
-    opener.new_tabs.append(gpa, .{ .url = queued_url.?, .placement = v.placement, .arrived_ms = now_ms, .adopt = v.browser }) catch {
+    opener.new_tabs.append(gpa, .{ .url = queued_url.?, .placement = v.placement, .arrived_ms = now_ms, .adopt = v.browser, .by_agent = by_agent }) catch {
         gpa.free(queued_url.?);
         abandonPopup(gpa, v.browser);
     };
@@ -3412,6 +3426,8 @@ pub const DevtoolsOutcome = enum {
     timeout,
     /// sidecar 의 답이 규칙에 맞지 않았다(알린 크기와 받은 양이 다르다·JSON 이 아니다).
     protocol,
+    /// 페이지가 JS 대화상자를 띄워 멈췄다 — 그 탭의 호출은 답하지 않는다(W9b③ 적대 리뷰 2 회차). 보냈을 수는 있다.
+    dialog,
 };
 
 /// 끝나면 메인 스레드에서 한 번 부른다 — 끝난 그 자리(탭 닫기·sidecar 정리·알림 적용 한가운데)가 아니라 그 tick 의 `pump` 끝에서
@@ -3452,7 +3468,7 @@ const DevtoolsDone = struct {
 /// 끝났지만 아직 알리지 않은 호출. 자리는 호출을 받을 때 잡는다(`devtoolsCall`) — 끝낼 때 메모리가 모자라 알림을 잃지 않게.
 var devtools_done: std.ArrayList(DevtoolsDone) = .empty;
 
-pub const DevtoolsCallError = error{ NotReady, Busy, InvalidMethod, InvalidParams, OutOfMemory };
+pub const DevtoolsCallError = error{ NotReady, Busy, InvalidMethod, InvalidParams, OutOfMemory, DialogShowing };
 
 fn devtoolsPending() bool {
     for (devtools_pending) |p| if (p != null) return true;
@@ -3488,6 +3504,8 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     if (params.len != 0 and (!isJsonObject(gpa, params) or !ws.fields.jsonDepthWithin(params, ws.message.max_devtools_params_depth))) return error.InvalidParams;
     const s = surfaces.getPtr(surface_id) orelse return error.NotReady;
     if (!s.created or state == .off or state == .failed) return error.NotReady;
+    // 페이지가 JS 대화상자로 멈췄다 — 보내면 답이 없다(사용자가 그 탭에서 답해야 한다, W9b③ 적대 리뷰 2 회차).
+    if (jsDialogShowing(surface_id)) return error.DialogShowing;
     var of_surface: usize = 0;
     for (devtools_pending) |p| if (p) |v| if (v.surface == surface_id) {
         of_surface += 1;
@@ -4039,12 +4057,17 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 .prompt => .prompt,
                 .before_unload => .before_unload,
             };
-            if (!queueDialog(gpa, v.browser, v.request, kind, v.origin, v.message, v.default_text, "", v.offer_suppress))
-                send(gpa, .{ .dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = kind == .before_unload } })
-            else if (kind == .before_unload) if (surfaces.getPtr(v.browser)) |s| {
-                // 물은 닫기에 페이지가 떠나기 확인으로 답했다(W6j) — 사용자가 답할 때까지 시한 없이 기다린다.
-                if (s.close_ask == .asking) s.close_ask = .asked;
-            };
+            if (!queueDialog(gpa, v.browser, v.request, kind, v.origin, v.message, v.default_text, "", v.offer_suppress)) {
+                send(gpa, .{ .dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = kind == .before_unload } });
+            } else {
+                // 페이지가 멈췄다 — 그 탭의 DevTools 호출은 답하지 않는다: 곧 끝낸다(자리는 sidecar 의 답까지 쥔다). op 이 정한다 —
+                // 누름을 보냈으면 동작의 결과로, 아니면 실패로(W9b③ 적대 리뷰 2 회차: click 뒤 alert 면 30 초 뒤 답 없이 끊겼다).
+                failDevtools(gpa, v.browser, .dialog, true);
+                if (kind == .before_unload) if (surfaces.getPtr(v.browser)) |s| {
+                    // 물은 닫기에 페이지가 떠나기 확인으로 답했다(W6j) — 사용자가 답할 때까지 시한 없이 기다린다.
+                    if (s.close_ask == .asking) s.close_ask = .asked;
+                };
+            }
         },
         .file_dialog => |v| {
             const kind: DialogKind = switch (v.mode) {
@@ -5487,4 +5510,53 @@ test "W9b③ 적대 리뷰 1 회차: 만들어지자마자 보낸 이동이 실�
     testApply(gpa, .{ .load_finished = .{ .browser = 36, .http_status = 0 } });
     testApply(gpa, .{ .nav_state = .{ .browser = 36, .can_go_back = false, .can_go_forward = false, .loading = false } });
     try std.testing.expectEqual(@as(u32, 1), pageState(36).?.loads);
+}
+
+test "W9b③ 적대 리뷰 2 회차: JS 대화상자가 오면 그 탭의 DevTools 호출을 곧 끝내고(페이지가 멈췄다 — 30 초 기다리지 않게), 떠 있는 동안 새 호출은 거절한다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer {
+        for (&devtools_pending) |*p| if (p.*) |*v| {
+            v.result.deinit(gpa);
+            p.* = null;
+        };
+        for (devtools_done.items) |*d| d.result.deinit(gpa);
+        devtools_done.clearAndFree(gpa);
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    for ([_]u64{ 7, 9 }) |id| try devtoolsTestSurface(id, true);
+    var rec: DevtoolsRecorder = .{};
+    var other: DevtoolsRecorder = .{};
+    _ = try devtoolsCall(gpa, 7, "Runtime.evaluate", "{}", rec.sink());
+    _ = try devtoolsCall(gpa, 9, "Runtime.evaluate", "{}", other.sink());
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "hi" } });
+    try std.testing.expectEqual(@as(usize, 1), rec.count); // 곧 끝났다
+    try std.testing.expectEqual(@as(usize, 0), other.count); // 다른 탭은 그대로
+    if (devtoolsCall(gpa, 7, "Runtime.evaluate", "{}", rec.sink())) |_| return error.TestUnexpectedResult else |_| {}
+}
+
+test "W9b③ 적대 리뷰 2 회차: 에이전트의 장은 sidecar 에도 new_tab_credit 으로 알리고, 사람의 장과 따로 센다" {
+    const gpa = std.testing.allocator;
+    state = .starting; // 보낸 frame 이 시험용 보관함에 남는다
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        outbox_pending.deinit(gpa);
+        outbox_pending = .empty;
+        state = .off;
+    }
+    try devtoolsTestSurface(7, true);
+    var frames: [4]Message = undefined;
+    grantNewTabCredit(gpa, 7);
+    try std.testing.expectEqual(@as(usize, 1), sentFrames(&frames));
+    try std.testing.expectEqual(@as(u64, 7), frames[0].new_tab_credit);
+    const s = surfaces.getPtr(7).?;
+    try std.testing.expect(s.agent_new_tab_credits.any());
+    try std.testing.expect(!s.new_tab_credits.any());
 }

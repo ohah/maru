@@ -42,6 +42,14 @@ pub fn noInstance(stderr: *std.Io.Writer, detail: ?[]const u8) error{UnknownComm
     return error.UnknownCommand;
 }
 
+/// 인스턴스에 붙어 요청을 보냈는데 답 없이 연결이 끝났다 — 「인스턴스가 없다」 가 아니다(W9b③ 적대 리뷰 2 회차: 페이지 대화상자에 막힌
+/// op 이 30 초 뒤 거둬지자 에이전트는 「maru 가 안 떠 있다」 를 받았다). 서버는 시한(30 초)이 지난 요청을 답 없이 닫는다.
+pub fn noAnswer(stderr: *std.Io.Writer) error{UnknownCommand} {
+    stderr.writeAll("error: maru did not answer this request (it gave up after its time limit, or the app closed)\n") catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
+}
+
 /// 부분 write를 처리하는 blocking write-all(소켓 stream). 성공하면 true.
 /// `platform/macos/control_socket.zig`의 writeAll과 같은 결이지만, 그 파일은 서버 쪽이라 여기 둔다.
 pub fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) bool {
@@ -207,7 +215,7 @@ pub fn fetchResponseAs(io: std.Io, allocator: std.mem.Allocator, request_bytes: 
         if (n <= 0) break; // EOF/에러 — 응답 없이 종료(grant 무응답 timeout 서버 reap 포함)
         framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
-    return noInstance(stderr, "the server did not respond");
+    return noAnswer(stderr);
 }
 
 test "컨트롤 소켓 gate는 Windows에서만 닫히고, 닫혔으면 이유가 비어 있지 않다" {

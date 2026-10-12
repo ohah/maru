@@ -7787,7 +7787,7 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
 
 fn beginCdp(run: *CdpRun) void {
     // 페이지가 JS 대화상자를 띄우고 멈춰 있다 — 보내면 시한(30 초)까지 답이 없다. 사용자가 그 탭에서 답해야 한다.
-    if (session_mod.web_osr.jsDialogShowing(run.surface_id)) return finishCdp(run, .failed, "the page is showing a dialog (alert, confirm or leave-page question) — it must be answered in that tab first");
+    if (session_mod.web_osr.jsDialogShowing(run.surface_id)) return finishCdp(run, .failed, web_cdp_ops.dialog_reason);
     run.started = true;
     run.op.now_ms = cdpNowMs();
     _ = active_browser_executions.markRunning(run.async_id);
@@ -7837,10 +7837,12 @@ fn isAgentTab(tab: u64) bool {
     return false;
 }
 
-fn forgetAgentTab(tab: u64) void {
+/// 그 탭(또는 그 pane — 에이전트가 끝났다)의 항목을 뺀다. pane 이 닫히면 그 탭들은 사람의 탭처럼 다룬다 — 장·상한·자리를 그 pane
+/// 이름으로 쥐지 않는다(W9b③ 적대 리뷰 2 회차).
+fn forgetAgentTab(surface_id: u64) void {
     var i: usize = 0;
     while (i < agent_tabs.items.len) {
-        if (agent_tabs.items[i].tab == tab) _ = agent_tabs.swapRemove(i) else i += 1;
+        if (agent_tabs.items[i].tab == surface_id or agent_tabs.items[i].pane == surface_id) _ = agent_tabs.swapRemove(i) else i += 1;
     }
 }
 
@@ -8050,9 +8052,13 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
             _ = sent catch |e| return switch (e) {
                 // 보내지 못했다 — op 이 정한다(누른 뒤의 떼기면 잠깐 뒤 다시, 놓기면 동작의 결과로, 앞선 실패가 있으면 그 이유로 — 3·4 회차).
-                error.NotReady, error.Busy => {
+                error.NotReady, error.Busy, error.DialogShowing => {
                     // 자리 없음은 ops 가 아는 그 글이어야 한다 — kick 을 실은 호출은 그때만 다시 보낸다(`web_cdp_ops.busy_reason`).
-                    const why = if (e == error.NotReady) "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)" else web_cdp_ops.busy_reason;
+                    const why = switch (e) {
+                        error.NotReady => "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)",
+                        error.DialogShowing => web_cdp_ops.dialog_reason, // 확실히 보내지 않았다(W9b③ 적대 리뷰 2 회차)
+                        else => web_cdp_ops.busy_reason,
+                    };
                     const after = run.op.feed(allocator, .{ .not_sent = why }) catch return finishCdp(run, .failed, "out of memory");
                     return cdpAdvance(run, after);
                 },
@@ -8080,6 +8086,8 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
         .busy => .{ .not_sent = web_cdp_ops.busy_reason },
         .unknown_browser, .invalid_request, .send_failed => .{ .not_sent = "DevTools request failed" },
         .protocol => .{ .failed = "DevTools request failed" },
+        // 보냈을 수도 있다 — 누름이면 op 이 떼기·놓기를 거쳐 동작의 결과로 답한다(그 호출들은 대화상자 동안 곧 거절된다).
+        .dialog => .{ .failed = web_cdp_ops.dialog_reason },
     };
     const step = run.op.feed(allocator, reply) catch return finishCdp(run, .failed, "out of memory");
     cdpAdvance(run, step);
@@ -11827,7 +11835,7 @@ test "W9b③: 에이전트가 자기가 연 탭에 보낸 누름·키 누름만 
     onAppSessionSurfaceClosed(null, 41);
     try std.testing.expect(!isAgentTab(41));
     try std.testing.expect(!control_pane_grant_store.authorizes(5, 41, .browser, null));
-    // 상한 — pane 하나 8 개까지만 받는다(넘치면 보통 탭).
+    // 상한 — pane 하나 8 개까지만 받는다(넘치면 새 탭을 열지 않는다 — 자리를 먼저 본다).
     for (0..max_agent_tabs_per_pane) |i| try std.testing.expect(onAgentPageTab(6, 700 + i));
     try std.testing.expect(!onAgentPageTab(6, 799));
 }
@@ -11925,4 +11933,27 @@ test "W9b③ 적대 리뷰 1 회차: 탭 op 이 있으면 has_pending 이 1, dra
         try std.testing.expectEqualStrings("the tab was kept open", r.get("reason").?.string);
     }
     try std.testing.expectEqual(@as(usize, 0), tab_runs.items.len);
+}
+
+test "W9b③ 적대 리뷰 2 회차: 에이전트 탭 자리 — grant 표가 차거나 컨트롤 서버가 꺼지면 없다, pane 이 닫히면 그 pane 의 항목을 뺀다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    defer {
+        agent_tabs.clearAndFree(allocator);
+        control_pane_grant_store.clearAll();
+        control_server_active = false;
+    }
+    control_server_active = true;
+    try std.testing.expect(onAgentTabRoom(3));
+    control_server_active = false;
+    try std.testing.expect(!onAgentTabRoom(3));
+    control_server_active = true;
+    var i: u64 = 0;
+    while (control_pane_grant_store.len < control_pane_grant.max_grants) : (i += 1) try control_pane_grant_store.grant(.{ .pane = 1000 + i, .target = 2000 + i, .scope = .browser });
+    try std.testing.expect(!agentTabRoom(3)); // grant 표가 찼다
+    control_pane_grant_store.clearAll();
+    try std.testing.expect(onAgentPageTab(3, 31));
+    try std.testing.expect(onAgentPageTab(4, 41));
+    onAppSessionSurfaceClosed(null, 3); // 에이전트 pane 이 닫혔다
+    try std.testing.expect(!isAgentTab(31));
+    try std.testing.expect(isAgentTab(41));
 }

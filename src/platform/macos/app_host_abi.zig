@@ -30,6 +30,7 @@ const editor_ime_ops = @import("app_session/editor_ime.zig");
 const editor_lsp_ops = @import("app_session/editor/lsp.zig");
 const session_host = @import("session_host.zig");
 const ime_candidate_evidence = @import("session_host/ime_candidate_evidence.zig");
+const fork_fd_fence = @import("session_host/fork_fd_fence.zig");
 const keycode = @import("keycode.zig");
 const keyhint_hold = maru.session.keyhint_hold; // OS-중립 홀드 gesture 정책(session L2 — session/keyhint_hold.zig)
 const command_catalog = @import("command_catalog.zig");
@@ -1670,6 +1671,9 @@ pub export fn maru_macos_app_session_create(
     logBuildIdentity();
     // 종료 마커는 시작 마커와 짝이어야 의미가 있으므로 같은 자리에서 건다.
     installExitDiagnostics();
+    // 이미지 채널이 묶이기(받은 fd 가 생기기) 전에 fork 울타리를 걸고 열린 fd 상한을 올린다(docs/session-host-image-channel.md §7).
+    fork_fd_fence.install();
+    fork_fd_fence.raiseOpenFileLimit();
     const raw_config = (config orelse return @intFromEnum(Status.null_out)).*;
     const out = out_session orelse return @intFromEnum(Status.null_out);
     out.* = null;

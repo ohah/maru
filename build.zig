@@ -222,6 +222,11 @@ const boundary_scans: []const BoundaryScan = &.{
     // 그래서 다른 이름으로 재수출하는 것(`pub const ko2 = ko;`)은 **이 게이트가 안 잡는다** —
     // 인정된 한계로 `pinned_language.zig` 머리와 `docs/i18n.md` §7.2 에 적혀 있다.
     .{ .root = "tests/boundary/pinned_language.zig", .deps = &.{"i18n_table"} },
+
+    // 앱이 받은 이미지 세그먼트 fd 가 자식으로 새는 spawn 이 0 인가(docs/session-host-image-channel.md §7, IC4) —
+    // `posix_spawn` 계열·`system` 은 fork 울타리(`pthread_atfork`)를 지나지 않으므로 CLOEXEC_DEFAULT 헬퍼
+    // (`src/pty/macos_spawn.zig`) 밖에서 부르지 않는다. 헬퍼 밖 호출 하나가 받은 fd 를 자식에게 넘긴다.
+    .{ .root = "tests/boundary/spawn_cloexec_axis.zig" },
 };
 
 /// 표에서 그 판정자의 자리. `check-boundaries` **말고 다른 step** 에도 매다는 행이 조회에 쓴다.
@@ -7098,6 +7103,36 @@ pub fn build(b: *std.Build) void {
         image_channel_app_step.dependOn(&run_image_channel_attachment_tests.step);
         test_step.dependOn(&run_image_channel_attachment_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_attachment_tests.step);
+        // fd 상속 방지(IC4) — 수신 쓰기 잠금을 쥔 동안 다른 스레드의 fork 가 기다리고, CLOEXEC_DEFAULT 헬퍼로 띄운 자식은 stdio
+        // 말고는 부모의 fd 를 보지 못한다. 실제 fork·셸로 잰다(std 전용 루트).
+        const image_fd_fence_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/fork_fd_fence.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        const run_image_fd_fence_tests = b.addRunArtifact(image_fd_fence_tests);
+        run_image_fd_fence_tests.addArg("--maru-expect-tests=4");
+        run_image_fd_fence_tests.addArg("--maru-expect-passed=4");
+        image_channel_app_step.dependOn(&run_image_fd_fence_tests.step);
+        test_step.dependOn(&run_image_fd_fence_tests.step);
+        macos_only_test_step.dependOn(&run_image_fd_fence_tests.step);
+        const macos_spawn_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/pty/macos_spawn.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        const run_macos_spawn_tests = b.addRunArtifact(macos_spawn_tests);
+        run_macos_spawn_tests.addArg("--maru-expect-tests=3");
+        run_macos_spawn_tests.addArg("--maru-expect-passed=3");
+        image_channel_app_step.dependOn(&run_macos_spawn_tests.step);
+        test_step.dependOn(&run_macos_spawn_tests.step);
+        macos_only_test_step.dependOn(&run_macos_spawn_tests.step);
         image_channel_app_step.dependOn(&run_image_channel_connect_tests.step);
         test_step.dependOn(&run_image_channel_connect_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_connect_tests.step);

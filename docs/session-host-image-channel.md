@@ -300,7 +300,11 @@ CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데
   차이라 같은 스트림의 뒤 배치를 먼저 적용할 수 없다). 이미지가 없는 다른 스트림은 그대로 적용한다. fd 는 recvmsg 전까지 커널 큐에
   있으므로 새지 않는다. tick 이 없는 동기 적용 자리(첫 attach 조립, 관찰자 재접속 후보)는 블로킹 쓰기 잠금을 허용한다 — 읽기
   잠금이 fork 시스템콜 길이로 묶이므로 대기도 그만큼으로 묶인다.
-- Swift/ObjC 쪽에는 spawn 이 없다(WKWebView·NSWorkspace 는 XPC/launchd 로 뜨며 fd 를 물려받지 않는다; Swift `Process` 실측도 같다).
+- Swift/ObjC 쪽: WKWebView·NSWorkspace 는 XPC/launchd 로 뜨며 fd 를 물려받지 않는다. `Process()` 가 둘 있다(Mermaid 도우미 —
+  제품, IME 후보 관찰 — 환경 변수 smoke). Foundation 의 `Process` 가 fd 를 넘기지 않는다는 것은 실측에 기댄다(Apple 내부 구현이라
+  보장이 아니다) — Zig 판정자는 Swift 를 보지 않으므로 그 재고는 따로 고정한다(계획 IC4b).
+- 구현(IC4a): 울타리 `session_host/fork_fd_fence.zig`(앱 세션 생성이 세션 전에 설치), CLOEXEC_DEFAULT 헬퍼 `maru.pty.macos_spawn`,
+  헬퍼 밖 `posix_spawn`·`posix_spawnp`·`system` 을 막는 `tests/boundary/spawn_cloexec_axis.zig`.
 
 ## 8. 다른 소비자
 

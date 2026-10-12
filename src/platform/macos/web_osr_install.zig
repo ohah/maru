@@ -27,27 +27,12 @@ const ws = maru.session.web_sidecar;
 
 extern "c" fn csops(pid: std.c.pid_t, ops: c_uint, useraddr: ?*anyopaque, usersize: usize) c_int;
 extern "c" fn fclonefileat(src_fd: c_int, dst_dir_fd: c_int, dst: [*:0]const u8, flags: u32) c_int;
-extern "c" fn posix_spawn(
-    pid: *std.c.pid_t,
-    path: [*:0]const u8,
-    file_actions: *const ?*anyopaque,
-    attrp: *const ?*anyopaque,
-    argv: [*:null]const ?[*:0]const u8,
-    envp: [*:null]const ?[*:0]const u8,
-) c_int;
-extern "c" fn posix_spawnattr_init(attr: *?*anyopaque) c_int;
-extern "c" fn posix_spawnattr_setflags(attr: *?*anyopaque, flags: c_short) c_int;
-extern "c" fn posix_spawnattr_destroy(attr: *?*anyopaque) c_int;
-extern "c" fn posix_spawn_file_actions_init(actions: *?*anyopaque) c_int;
-extern "c" fn posix_spawn_file_actions_addopen(actions: *?*anyopaque, fd: c_int, path: [*:0]const u8, oflag: c_int, mode: std.c.mode_t) c_int;
-extern "c" fn posix_spawn_file_actions_destroy(actions: *?*anyopaque) c_int;
 extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
 extern "c" fn nanosleep(rqtp: *const std.c.timespec, rmtp: ?*std.c.timespec) c_int;
 
 const cs_ops_status: c_uint = 0;
 const cs_runtime: u32 = 0x0001_0000;
 const clone_nofollow: u32 = 0x0001;
-const posix_spawn_cloexec_default: c_short = 0x4000;
 const lock_ex: c_int = 2;
 const lock_nb: c_int = 4;
 const s_ifmt: u32 = 0o170000;
@@ -302,19 +287,7 @@ const Signature = enum { valid, invalid, unknown };
 fn signature(path: [*:0]const u8) Signature {
     const argv = [_:null]?[*:0]const u8{ "/usr/bin/codesign", "--verify", "--strict", path };
     const envp = [_:null]?[*:0]const u8{};
-    var attr: ?*anyopaque = null;
-    if (posix_spawnattr_init(&attr) != 0) return .unknown;
-    defer _ = posix_spawnattr_destroy(&attr);
-    if (posix_spawnattr_setflags(&attr, posix_spawn_cloexec_default) != 0) return .unknown;
-    var actions: ?*anyopaque = null;
-    if (posix_spawn_file_actions_init(&actions) != 0) return .unknown;
-    defer _ = posix_spawn_file_actions_destroy(&actions);
-    for ([_]c_int{ 0, 1, 2 }) |fd| {
-        const flags: c_int = if (fd == 0) 0 else 1; // O_RDONLY · O_WRONLY
-        if (posix_spawn_file_actions_addopen(&actions, fd, "/dev/null", flags, 0) != 0) return .unknown;
-    }
-    var pid: std.c.pid_t = 0;
-    if (posix_spawn(&pid, "/usr/bin/codesign", &actions, &attr, &argv, &envp) != 0) return .unknown;
+    const pid = maru.pty.macos_spawn.spawn("/usr/bin/codesign", &argv, &envp, .dev_null) catch return .unknown;
     const status = waitWithin(pid, codesign_timeout_ms) orelse return .unknown;
     return signatureFromStatus(status);
 }
@@ -706,19 +679,13 @@ test "waiting for a child: its exit status as soon as it ends, killed and reaped
     const argv_false = [_:null]?[*:0]const u8{"/usr/bin/false"};
     const argv_sleep = [_:null]?[*:0]const u8{ "/bin/sleep", "5" };
     const envp = [_:null]?[*:0]const u8{};
-    var attr: ?*anyopaque = null;
-    var actions: ?*anyopaque = null;
-    _ = posix_spawnattr_init(&attr);
-    defer _ = posix_spawnattr_destroy(&attr);
-    _ = posix_spawn_file_actions_init(&actions);
-    defer _ = posix_spawn_file_actions_destroy(&actions);
     // 곧 끝나는 자식 — 종료 상태를 그대로 준다(`false` 는 1).
     var pid: std.c.pid_t = 0;
-    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/usr/bin/false", &actions, &attr, &argv_false, &envp));
+    pid = try maru.pty.macos_spawn.spawn("/usr/bin/false", &argv_false, &envp, .dev_null);
     const status = waitWithin(pid, 2_000) orelse return error.TimedOut;
     try std.testing.expectEqual(@as(u32, 1), (@as(u32, @bitCast(status)) >> 8) & 0xff);
     // 기다리기 전에 이미 끝난 자식(좀비) — kqueue 등록이 ESRCH 여도 끝난 것이고 종료 상태를 준다.
-    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/usr/bin/false", &actions, &attr, &argv_false, &envp));
+    pid = try maru.pty.macos_spawn.spawn("/usr/bin/false", &argv_false, &envp, .dev_null);
     const peek_deadline = uptimeMs() + 2_000;
     while (peekChild(pid) != .exited and uptimeMs() < peek_deadline) sleepMs(1);
     try std.testing.expectEqual(ChildState.exited, peekChild(pid));
@@ -726,14 +693,14 @@ test "waiting for a child: its exit status as soon as it ends, killed and reaped
     const zombie_status = waitWithin(pid, 2_000) orelse return error.TimedOut;
     try std.testing.expectEqual(@as(u32, 1), (@as(u32, @bitCast(zombie_status)) >> 8) & 0xff);
     // 남이 이미 거둔 pid — 종료 상태를 모르니 null(0 이면 서명 검사가 통과한다).
-    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/usr/bin/false", &actions, &attr, &argv_false, &envp));
+    pid = try maru.pty.macos_spawn.spawn("/usr/bin/false", &argv_false, &envp, .dev_null);
     var taken: c_int = 0;
     try std.testing.expectEqual(pid, std.c.waitpid(pid, &taken, 0));
     try std.testing.expectEqual(ChildState.not_child, peekChild(pid));
     try std.testing.expect(waitWithin(pid, 2_000) == null);
     try std.testing.expect(reap(pid) == null); // 거두기도 추측하지 않는다(두 겹 방어의 다른 쪽)
     // 기한을 넘는 자식 — 기한 안에 돌아오고, 죽여 거둔다(좀비를 남기지 않는다).
-    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/bin/sleep", &actions, &attr, &argv_sleep, &envp));
+    pid = try maru.pty.macos_spawn.spawn("/bin/sleep", &argv_sleep, &envp, .dev_null);
     try std.testing.expectEqual(ChildState.running, peekChild(pid));
     const started = uptimeMs();
     try std.testing.expect(waitWithin(pid, 150) == null);
@@ -741,7 +708,7 @@ test "waiting for a child: its exit status as soon as it ends, killed and reaped
     try std.testing.expect(took >= 150 and took < 1_500);
     try std.testing.expectEqual(ChildState.not_child, peekChild(pid));
     // kqueue 가 없을 때의 대비 — 도는 자식은 기한에 `running`, 끝나면 `exited`(거두지 않는다).
-    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/bin/sleep", &actions, &attr, &argv_sleep, &envp));
+    pid = try maru.pty.macos_spawn.spawn("/bin/sleep", &argv_sleep, &envp, .dev_null);
     const poll_started = uptimeMs();
     try std.testing.expectEqual(ChildState.running, pollChild(pid, uptimeMs() + 60));
     try std.testing.expect(uptimeMs() - poll_started >= 60);
@@ -771,14 +738,8 @@ test "a codesign exit status maps to intact, broken, or could not tell — never
     // 신호로 죽은 실제 종료 상태 — `sleep` 을 SIGTERM 으로 죽여 거둔 값(SEGV 면 코어 파일이 생길 수 있다).
     const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "5" };
     const envp = [_:null]?[*:0]const u8{};
-    var attr: ?*anyopaque = null;
-    var actions: ?*anyopaque = null;
-    _ = posix_spawnattr_init(&attr);
-    defer _ = posix_spawnattr_destroy(&attr);
-    _ = posix_spawn_file_actions_init(&actions);
-    defer _ = posix_spawn_file_actions_destroy(&actions);
     var pid: std.c.pid_t = 0;
-    try std.testing.expectEqual(@as(c_int, 0), posix_spawn(&pid, "/bin/sleep", &actions, &attr, &argv, &envp));
+    pid = try maru.pty.macos_spawn.spawn("/bin/sleep", &argv, &envp, .dev_null);
     _ = std.c.kill(pid, .TERM);
     const status = waitWithin(pid, 2_000) orelse return error.TimedOut;
     try std.testing.expectEqual(Signature.unknown, signatureFromStatus(status));

@@ -1749,6 +1749,11 @@ pub const MetalFrameBuffer = struct {
     // `generation`으로는 못 한다: `setCursorFadeMilli`가 셀·기하와 무관하게 generation을 올리므로
     // 첫 투영 전에 blink tick 하나만 끼어도 "투영됐다"로 오판해 기본값 0 기하가 나간다.
     chrome_geometry_stamped: bool = false,
+    /// 다음 `replace` 가 사이드바 헤더 frame(아이콘 줄 — 펼침·접힘 모두)을 놓을 화면 y(backing px). 호출자가
+    /// `replace` 직전에 정한다(app_session `sidebarHeaderIconRowTopPx` — 신호등 띠 안 세로 중앙, 알림 배지 원이 쓰는
+    /// 바로 그 값). 예전에는 헤더를 (0,0)에 박고 렌더러가 「origin (0,0) 이면 헤더」로 짐작해 `(strip − ch) × 0.5` 를
+    /// 따로 셈했다 — Zig 의 정수 나눗셈과 .m 의 실수 곱이 차이가 홀수일 때 0.5px 갈렸다(2026-10-12).
+    sidebar_header_origin_y_px: u32 = 0,
     generation: u64 = 0,
     // 커서 overlay cell 수(buildNativeCellsSplit). view()가 아래 cursor_start와 함께 MetalFrame으로 넘겨 렌더러가
     // 커서 구간을 본문에서 분리해 cursor_fade_milli 불투명도로 별도 pass로 그린다 — blink 페이드가 frame rebuild
@@ -1864,7 +1869,7 @@ pub const MetalFrameBuffer = struct {
         if (sidebar_header_frame) |hf| {
             const hcells = try buildNativeCellsFromGlyphQuads(allocator, hf.glyph_quad_frame, hf.draw_list.cells, sidebar_colors);
             defer allocator.free(hcells);
-            setCellsPaneOrigin(hcells, 0, 0);
+            setCellsPaneOrigin(hcells, 0, self.sidebar_header_origin_y_px); // 화면 y 는 Zig 가 정한다(필드 주석)
             // 헤더 아이콘(셀보다 크게 굽는 것 — 그 목록은 `cell_text.isSidebarHeaderIcon` 이 소유)이 role 을 달고 나간다.
             // 예전에는 렌더러(.m)가 같은 목록을 codepoint 로, 배율을 `1.7f` 로 다시 적었다.
             markCellRasterIcons(hcells, hf.glyph_quad_frame.glyphs);

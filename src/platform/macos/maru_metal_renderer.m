@@ -1286,6 +1286,7 @@ bool maru_metal_renderer_draw(
     // 배경 quad 1개를 추가로 그린다. 터미널 셀은 origin_x만큼 오른쪽으로 offset된다("surface→rect" — split도
     // 같은 origin 방식을 확장). 사이드바 quad는 cells 뒤(인덱스 cell_count)에 붙인다.
     const float origin_x = (float)terminal_origin_x_px;
+    (void)titlebar_strip_px; // 헤더 아이콘 줄 세로 자리는 이제 Zig 가 셀 origin_y 로 싣는다 — C ABI 인자라 남는다
     const bool draw_sidebar = (terminal_origin_x_px > 0u) && (((sidebar_bg >> 24) & 0xffu) != 0u);
 
     // vertex buffer를 drawable 획득 전에 만든다. 그래야 calloc/buffer 생성 실패가 이미 잡은
@@ -1371,28 +1372,16 @@ bool maru_metal_renderer_draw(
             //   icon role)를 싣는다. 여기서는 그 role과 atlas 크기 ÷ 셀 크기만 본다 — 텍스처가 quad에 1:1(선명).
             //   예전에는 이 자리가 codepoint 넷과 `1.7f`를 다시 적었다(layering §3.5: 호스트 사이 사본 금지).
             //   🔍(검색)은 선언이 없어 셀 크기 그대로다. 일반 pane이 같은 PUA를 출력해도 선언이 없으니 확대되지 않는다.
-            const bool is_header = (tc.origin_x == 0u && tc.origin_y == 0u);
             const MaruMetalCellGlyphPolicy glyph_policy = maru_metal_cell_glyph_policy(
                 tc.reserved, tc.atlas_width_px, tc.atlas_height_px, cell_width_px, cell_height_px);
             const bool is_raster_icon = glyph_policy.is_cell_raster_icon != 0u;
-            // 헤더 줄0 글리프(◧ 펼치기 토글 + ⚙ + `+` + 알림 종 🔔 + 배지)는 **펼침·접힘 모두** 타이틀바 띠
-            // [0, titlebar_strip_px] 안에 세로 중앙 배치한다 — 신호등과 같은 띠에 있으므로 그 띠가 정렬 기준이다.
-            //
-            // 예전에는 접힘(terminal_origin_x_px==0)에만 이 공식을 쓰고, 펼침에는 `0.30ch` nudge를 썼다. 그 nudge는
-            // 띠 높이와 무관한 근사라 폰트가 커지면 다시 어긋나고, 무엇보다 **왼쪽 사이드바 헤더만 다른 기준을 쓰게**
-            // 만들어 검색 줄이 오른쪽 탭 바와 갈리는 원인의 일부였다(docs/file-explorer.md §3.5, 사용자 보고).
-            // 이제 두 상태가 같은 식을 쓴다 — 접힘↔펼침 토글에 아이콘이 위아래로 튀지 않는다.
-            const bool is_header_icon_row = is_header && tc.row == 0u;
             const float glyph_scale_x = glyph_policy.scale_x;
             const float glyph_scale_y = glyph_policy.scale_y;
-            float py_top;
-            if (is_header_icon_row && titlebar_strip_px > 0u) {
-                const float strip = (float)titlebar_strip_px;
-                py_top = (strip > ch) ? (strip - ch) * 0.5f : 0.0f; // 띠 안 세로 중앙(신호등 정렬)
-            } else {
-                // 검색 줄은 자기 frame origin이 이미 상단 바 밴드 중앙이라(`row = 0`) 여기서 보정하지 않는다.
-                py_top = (float)tc.origin_y + (float)tc.row * ch;
-            }
+            // 세로 자리는 셀이 든 origin 그대로다 — 사이드바 헤더 아이콘 줄(펼침·접힘)도 Zig 가 신호등 띠 안 세로 중앙
+            // (`sidebarHeaderIconRowTopPx`, 알림 배지 원과 같은 값)을 origin_y 에 실어 보낸다. 예전에는 여기서 「origin
+            // (0,0) 의 row 0 이면 헤더」로 짐작해 `(strip − ch) × 0.5` 를 따로 셈했다 — Zig 의 정수 나눗셈과 갈려 차이가
+            // 홀수인 창에서 종 아이콘과 배지가 0.5px 어긋났고, (0,0) 에 놓인 다른 셀도 헤더로 오인될 수 있었다(2026-10-12).
+            const float py_top = (float)tc.origin_y + (float)tc.row * ch;
             // PUA 합성 아이콘은 fillCoverage가 슬롯(EAW width 폭) 중앙에 그리므로, 이모지 시절 종(width 2)의 슬롯 중심이
             // 셀 경계에 떨어져 1칸 아이콘과 반칸 어긋나 px_nudge(-0.5칸)로 보정하던 것이 불필요하다 — 합성 아이콘 중심이
             // 곧 슬롯 중심이라 어느 width·col이든 정합한다(검색이 width 2여도 보정 0).

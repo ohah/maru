@@ -96,6 +96,13 @@ pub fn appendDiagnostics(
     };
     // **메시지 저장소를 먼저 넉넉히 잡는다** — 슬라이스가 그 안을 가리키므로 더하는 동안 옮겨지면 앞 항목이 허공을 본다. 호출자는
     // 갈아 끼울 때 `messages` 를 비우고 부른다(이전 배치의 슬라이스는 더 안 쓴다).
+    // `data`(LSP 3.16 — 서버가 code action 문맥으로 되돌려 받는 값)는 JSON 원문으로 든다. 길이를 알려면 먼저 써 봐야 해서 항목마다 한 번
+    // 쓰고(아래에서 저장소로 옮긴 뒤 푼다) 그 길이도 센다.
+    var datas: std.ArrayList([]u8) = .empty;
+    defer {
+        for (datas.items) |x| allocator.free(x);
+        datas.deinit(allocator);
+    }
     var total: usize = 0;
     for (arr.items) |item| {
         const d = switch (item) {
@@ -107,14 +114,25 @@ pub fn appendDiagnostics(
             else => 0,
         };
         total += codeLen(d.get("code"));
+        total += switch (d.get("source") orelse std.json.Value{ .null = {} }) {
+            .string => |src| src.len,
+            else => 0,
+        };
+        const raw: []u8 = if (d.get("data")) |v| try std.json.Stringify.valueAlloc(allocator, v, .{}) else &.{};
+        errdefer if (raw.len > 0) allocator.free(raw);
+        try datas.append(allocator, raw);
+        total += raw.len;
     }
     try messages.ensureTotalCapacity(allocator, messages.items.len + total);
+    var data_i: usize = 0;
     var n: usize = 0;
     for (arr.items) |item| {
         const d = switch (item) {
             .object => |o| o,
             else => continue,
         };
+        const data_raw = datas.items[data_i];
+        data_i += 1;
         const range = switch (d.get("range") orelse continue) {
             .object => |o| o,
             else => continue,
@@ -144,6 +162,14 @@ pub fn appendDiagnostics(
         const code_start = messages.items.len;
         try appendCode(allocator, messages, d.get("code"));
         const code_end = messages.items.len;
+        const data_start = messages.items.len;
+        try messages.appendSlice(allocator, data_raw);
+        const src: []const u8 = switch (d.get("source") orelse std.json.Value{ .null = {} }) {
+            .string => |x| x,
+            else => "",
+        };
+        const src_start = messages.items.len;
+        try messages.appendSlice(allocator, src);
         try out.append(allocator, .{
             .start = start,
             .end = end,
@@ -151,6 +177,8 @@ pub fn appendDiagnostics(
             .source = .lsp,
             .message = messages.items[msg_start .. msg_start + msg.len], // 위에서 잡아 둔 저장소 안 — 이 배치 동안 안 옮겨진다
             .code = messages.items[code_start..code_end],
+            .data = messages.items[data_start .. data_start + data_raw.len],
+            .source_text = messages.items[src_start .. src_start + src.len],
         });
         n += 1;
     }
@@ -202,7 +230,7 @@ test "LSP1 character → byte: utf-8 은 그대로, utf-16 은 한글 1 unit=3 b
     try testing.expectEqual(@as(u32, 9), characterOf(line, 50, .utf8));
 }
 
-test "LSP3 저장소를 message + code 만큼 먼저 잡는다 — 코드가 커서 재할당이 나면 앞 항목의 슬라이스가 허공을 본다 (변이 A2)" {
+test "LSP3 저장소를 message + code + data + source 만큼 먼저 잡는다 — 코드가 커서 재할당이 나면 앞 항목의 슬라이스가 허공을 본다 (변이 A2)" {
     const a = testing.allocator;
     const content = "int x;\n";
     var idx = try line_index.build(a, content);
@@ -216,6 +244,11 @@ test "LSP3 저장소를 message + code 만큼 먼저 잡는다 — 코드가 커
         if (i > 0) try text.append(a, ',');
         try text.appendSlice(a, "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"message\":\"m\",\"code\":\"");
         try text.appendNTimes(a, 'c', 100);
+        // `data`(LSP 3.16)도 같은 저장소에 원문으로 — 셈에 안 넣으면 여기서 자란다(tooling §8.2u).
+        try text.appendSlice(a, "\",\"data\":{\"k\":\"");
+        try text.appendNTimes(a, 'd', 100);
+        try text.appendSlice(a, "\"},\"source\":\"");
+        try text.appendNTimes(a, 's', 400); // 셈에서 빠지면 ArrayList 의 여유분을 넘어 재할당이 난다(변이 B21 — 100 이면 여유분 안이라 살아남았다)
         try text.appendSlice(a, "\"}");
     }
     try text.appendSlice(a, "]}");
@@ -233,6 +266,11 @@ test "LSP3 저장소를 message + code 만큼 먼저 잡는다 — 코드가 커
         try testing.expect(@intFromPtr(d.message.ptr) >= lo and @intFromPtr(d.message.ptr) + d.message.len <= hi);
         try testing.expect(@intFromPtr(d.code.ptr) >= lo and @intFromPtr(d.code.ptr) + d.code.len <= hi);
         try testing.expectEqual(@as(usize, 100), d.code.len);
+        try testing.expect(@intFromPtr(d.data.ptr) >= lo and @intFromPtr(d.data.ptr) + d.data.len <= hi);
+        try testing.expectEqual(@as(usize, 100 + "{\"k\":\"\"}".len), d.data.len);
+        try testing.expect(std.mem.startsWith(u8, d.data, "{\"k\":\"ddd"));
+        try testing.expect(@intFromPtr(d.source_text.ptr) >= lo and @intFromPtr(d.source_text.ptr) + d.source_text.len <= hi);
+        try testing.expectEqual(@as(usize, 400), d.source_text.len);
     }
 }
 

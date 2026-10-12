@@ -23085,6 +23085,181 @@ test "ASB2 보조 언어 서버 (tooling §8.2u) — 저장소 밖 문서의 roo
     try testing.expect(t.rt.editor_lsp_aux.?.contains(.ruff));
 }
 
+test "ASB3 보조 언어 서버의 code action (tooling §8.2u) — ⌘. 는 서버마다 그 서버의 진단(과 data)으로 묻고 주 서버 먼저 합쳐 그 서버의 항목을 적용하며, 늦은 서버는 첫 답 뒤 시한까지만 기다리고, 저장 시 kind 는 그 kind 를 알린 서버에만 차례로 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "b.py", "import os\nprint(x)\nFIXALL AUXFIX UNORGANIZED\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    s.loaded_config.config.editor.format_on_save = false; // 이 판정자는 code action 만 잰다(Python 의 외부 포매터 감지가 끼지 않게)
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pyproject.toml", .data = "[tool.ruff.lint]\nselect = [\"F\"]\n" });
+    try testing.expect(f.ready());
+    const term = f.term;
+    const Both = struct {
+        fn g(t: *Term) bool {
+            for (&t.rt.editor_diagnostics.aux) |*set| if (set.list.items.len > 0) return t.rt.editor_diagnostics.lsp.items.len > 0;
+            return false;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, term, Both.g));
+    {
+        var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const settled = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_code_action.waiting and !ss.editor_code_action.resolve_waiting;
+        }
+    }.g;
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    const print_off = std.mem.indexOf(u8, content(term), "print").? + 1;
+
+    // ⑴ ⌘. — 두 서버에 각자 묻는다(같은 seq 라도 서버로 가른다). 주 서버는 그 자리에 자기 진단이 없어 「fake: lazy」만, 보조 서버는 자기
+    // 진단 A1 과 그 `data`(aux-1)를 문맥으로 받아 「aux: fix A1 (data aux-1)」. 주 서버 먼저. 주 서버가 보조 서버의 진단을 받았다면
+    // 「fake: fix A1」이 섞인다.
+    s.dismissMessageOverlays();
+    term.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
+    const ca0 = s.editor_lsp.sent_code_actions;
+    try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expectEqual(ca0 + 2, s.editor_lsp.sent_code_actions);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    {
+        const titles = settings_ops.contextMenuItems(s);
+        try testing.expectEqual(@as(usize, 2), titles.len);
+        try testing.expectEqualStrings("fake: lazy", titles[0]);
+        try testing.expectEqualStrings("aux: fix A1 (data aux-1)", titles[1]);
+    }
+    // 보조 서버의 항목을 고른다 — 그 서버의 edit(진단 범위 `pr` → FIXED).
+    try pressKey(&f.fx, .arrow_down, .{});
+    try pressKey(&f.fx, .enter, .{});
+    try testing.expectEqualStrings("import os\nFIXEDint(x)\nFIXALL AUXFIX UNORGANIZED\n", content(term));
+    try testing.expectEqual(@as(u64, 1), s.editor_code_action.applied);
+    s.dismissMessageOverlays();
+    try testing.expect(pumpLspUntil(&f.fx, 5000, term, Both.g)); // 편집 뒤 두 서버의 진단이 다시 온다
+
+    // ⑵ 늦은 서버 — 보조 서버가 메뉴 요청에 답하지 않으면 주 서버의 답 뒤 시한까지만 기다리고 주 서버의 항목으로 연다.
+    const grace0 = code_action_client.aux_grace_ms;
+    code_action_client.aux_grace_ms = 300;
+    defer code_action_client.aux_grace_ms = grace0;
+    const end = content(term).len;
+    term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+    try testing.expect(insertText(s, term, "AUXSTALL"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, term, Both.g));
+    {
+        var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    term.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
+    const opened0 = s.editor_code_action.opened_count;
+    try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqual(opened0 + 1, s.editor_code_action.opened_count);
+    try testing.expectEqual(@as(usize, 1), settings_ops.contextMenuItems(s).len);
+    try testing.expectEqualStrings("fake: lazy", settings_ops.contextMenuItems(s)[0]);
+    s.dismissMessageOverlays();
+    try removeMarkerHover(s, term, "AUXSTALL");
+    // 늦지만 시한 안(150ms < 300ms)에 답한 서버의 항목은 든다 — 첫 답 바로 다음 tick 에 내면 빠진다.
+    try testing.expect(insertText(s, term, "AUXSLOW"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, term, Both.g));
+    {
+        var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    term.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
+    try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqual(@as(usize, 2), settings_ops.contextMenuItems(s).len);
+    try testing.expectEqualStrings("aux: fix A1 (data aux-1)", settings_ops.contextMenuItems(s)[1]);
+    s.dismissMessageOverlays();
+    try removeMarkerHover(s, term, "AUXSLOW");
+
+    // ⑸ 보조 서버의 지연 항목(edit 없음)을 고르면 **그 서버에** resolve 한다 — 주 서버에 보내면 그 서버의 resolve(`// lazy`)가 온다.
+    try testing.expect(insertText(s, term, "AUXLAZY"));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, term, Both.g));
+    {
+        var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    term.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
+    try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expectEqual(@as(usize, 3), settings_ops.contextMenuItems(s).len);
+    try testing.expectEqualStrings("aux: lazy", settings_ops.contextMenuItems(s)[2]);
+    try pressKey(&f.fx, .arrow_down, .{});
+    try pressKey(&f.fx, .arrow_down, .{});
+    try pressKey(&f.fx, .enter, .{});
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expect(std.mem.startsWith(u8, content(term), "# aux lazy\n"));
+    s.dismissMessageOverlays();
+    try removeMarkerHover(s, term, "# aux lazy\n");
+    try removeMarkerHover(s, term, "AUXLAZY");
+    // 다른 서버가 **같은 번호**로 답하면 받지 않는다 — 메뉴·resolve·저장 단계 모두(seq 는 클라이언트마다 따로 센다). 응답 순서는 판정자가
+    // 정할 수 없어(두 서버 모두 첫 요청이 같은 번호) 실제 두 클라이언트로 입구를 직접 부른다.
+    {
+        var cbuf: [lsp_client.max_doc_clients]*lsp_client.Client = undefined;
+        const cs = lsp_client.codeActionClients(s, term, &cbuf);
+        try testing.expectEqual(@as(usize, 2), cs.len);
+        const primary = cs[0];
+        const auxc = cs[1];
+        try testing.expect(primary.role == .primary and auxc.role == .auxiliary);
+        const ca = &s.editor_code_action;
+        ca.waiting = true;
+        ca.waits_len = 1;
+        ca.waits[0] = .{ .exe = primary.server.exe, .seq = 4242 };
+        ca.first_answer_ms = 0;
+        code_action_client.onResponse(s, auxc, 4242, null, false, null);
+        try testing.expect(ca.waiting and !ca.waits[0].done and ca.first_answer_ms == 0);
+        ca.waiting = false;
+        ca.resolve_waiting = true;
+        ca.resolve_seq = 4243;
+        ca.resolve_exe = primary.server.exe;
+        code_action_client.onResolveResponse(s, auxc, 4243, null, false, null);
+        try testing.expect(ca.resolve_waiting);
+        ca.resolve_waiting = false;
+        const sa = &s.editor_save_actions;
+        sa.active = true;
+        sa.surface = term.surface.id;
+        sa.stage = .request;
+        sa.waiting_seq = 4244;
+        sa.waiting_exe = primary.server.exe;
+        sa.asked_version = term.rt.editorDocument().notifications.lsp_version;
+        try testing.expect(!save_actions.onClientResponse(s, auxc, 4244, null));
+        sa.stage = .resolve;
+        try testing.expect(!save_actions.onClientResolveResponse(s, auxc, 4244, null));
+        try testing.expect(sa.active);
+        sa.active = false;
+    }
+
+    // ⑶ 저장 시 `source.fixAll` — 두 서버 모두 그 kind 를 덮는다(주 서버 `source.fixAll`, 보조 서버 `source.fixAll.ruff`). 주 서버 먼저
+    // 차례로 묻고 각자의 것을 적용한다(되돌리기 둘).
+    const saved_list = s.loaded_config.config.editor.code_actions_on_save;
+    defer s.loaded_config.config.editor.code_actions_on_save = saved_list;
+    s.loaded_config.config.editor.code_actions_on_save = "source.fixAll";
+    const saveSettled = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_save_actions.active and !ss.editor_format.waiting;
+        }
+    }.g;
+    const applied0 = s.editor_save_actions.applied;
+    const sent0 = s.editor_lsp.sent_code_actions;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, saveSettled));
+    try testing.expectEqualStrings("import os\nFIXEDint(x)\nFIXED_ALL AUX_FIXED UNORGANIZED\n", content(term));
+    try testing.expectEqual(applied0 + 2, s.editor_save_actions.applied);
+    try testing.expectEqual(sent0 + 2, s.editor_lsp.sent_code_actions);
+    // ⑷ `source.organizeImports` — 보조 서버는 그 kind 를 알리지 않았다(`quickfix`·`source.fixAll.ruff`) → 주 서버에만 묻는다.
+    s.loaded_config.config.editor.code_actions_on_save = "source.organizeImports";
+    const sent1 = s.editor_lsp.sent_code_actions;
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, saveSettled));
+    try testing.expectEqual(sent1 + 1, s.editor_lsp.sent_code_actions);
+    try testing.expect(std.mem.indexOf(u8, content(term), "ORGANIZED") != null and std.mem.indexOf(u8, content(term), "UNORGANIZED") == null);
+}
+
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -26408,14 +26583,17 @@ test "CA1 code action — ⌘. 로 진단 자리의 fix 와 lazy 가 메뉴에(c
     s.chrome_host.notice.dismiss();
     try removeMarkerHover(s, term, "// RESOLVEFAIL\n");
     // ⑺ 낡은 seq 는 버린다(둘 다).
+    const cl = lsp_client.readyClientFor(s, term) orelse return error.NoClient;
     s.editor_code_action.waiting = true;
-    s.editor_code_action.waiting_seq = 99;
-    code_action_client.onResponse(s, 98, null, false, null);
+    s.editor_code_action.waits_len = 1;
+    s.editor_code_action.waits[0] = .{ .exe = cl.server.exe, .seq = 99 };
+    code_action_client.onResponse(s, cl, 98, null, false, null);
     try testing.expect(s.editor_code_action.waiting);
     s.editor_code_action.waiting = false;
     s.editor_code_action.resolve_waiting = true;
     s.editor_code_action.resolve_seq = 77;
-    code_action_client.onResolveResponse(s, 76, null, false, null, .utf8);
+    s.editor_code_action.resolve_exe = cl.server.exe;
+    code_action_client.onResolveResponse(s, cl, 76, null, false, null);
     try testing.expect(s.editor_code_action.resolve_waiting);
     s.editor_code_action.resolve_waiting = false;
 }
@@ -59365,7 +59543,10 @@ test "LATE3 정의·포맷·빠른 수정 적용의 늦은 응답이 사용자�
             const seq = Seq.next();
             ss.editor_code_action.resolve_waiting = true;
             ss.editor_code_action.resolve_seq = seq;
-            code_action_client.onResolveResponse(ss, seq, null, false, null, .utf8);
+            ss.editor_code_action.resolve_exe = "fake-resolver";
+            var cl_root = [_]u8{'/'};
+            var cl: lsp_client.Client = .{ .root = &cl_root, .server = .{ .exe = "fake-resolver", .args = &.{}, .language_id = "", .install = "" }, .encoding = .utf8 };
+            code_action_client.onResolveResponse(ss, &cl, seq, null, false, null);
         }
     }.f;
     s.dispatchAppAction(.toggle_settings);

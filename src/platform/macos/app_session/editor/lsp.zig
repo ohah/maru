@@ -1703,6 +1703,7 @@ fn send(self: *AppSession, c: *Client, body: []const u8) bool {
 pub fn pump(self: *AppSession) void {
     // 저장 시 code action·포맷의 시한(§8.2s·§8.2r) — 언어 서버를 꺼도 잰다(기다리던 저장이 남지 않게).
     editor_save_actions.tick(self, self.awakeMs());
+    editor_code_action.tick(self, self.awakeMs()); // 메뉴가 늦은 서버를 기다리는 시한(§8.2u)
     editor_format.tick(self, self.awakeMs());
     if (!self.loaded_config.config.lsp.enabled) {
         // 꺼졌다 — 떠 있는 서버를 내린다. 그대로 두면 아무도 stdout 을 안 읽는 서버가 앱 종료까지 남는다.
@@ -1856,7 +1857,7 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
     // 넘기면 주 서버의 hover·완성 대기를 번호가 같은 보조 서버의 응답이 채운다.
     if (c.role == .auxiliary and kind == .response) {
         switch (kind.response.id) {
-            .initialize, .shutdown => {},
+            .initialize, .shutdown, .code_action, .code_action_resolve => {},
             else => {
                 self.editor_lsp.aux_dropped_responses += 1;
                 return;
@@ -1917,11 +1918,11 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 self.editor_lsp.received_code_actions += 1;
                 // 저장 시 code action(§8.2s)이 기다리는 응답이면 그쪽이 받는다 — seq 는 메뉴(§8.2h)와 같은 카운터라 겹치지 않는다.
                 if (!editor_save_actions.onClientResponse(self, c, seq, if (r.is_error) null else r.result))
-                    editor_code_action.onResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
+                    editor_code_action.onResponse(self, c, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
             },
             .code_action_resolve => |seq| {
                 if (!editor_save_actions.onClientResolveResponse(self, c, seq, if (r.is_error) null else r.result))
-                    editor_code_action.onResolveResponse(self, seq, if (r.is_error) null else r.result, r.is_error, r.error_message, c.encoding);
+                    editor_code_action.onResolveResponse(self, c, seq, if (r.is_error) null else r.result, r.is_error, r.error_message);
             },
             .completion => |seq| {
                 self.editor_lsp.received_completions += 1;
@@ -2533,20 +2534,43 @@ pub fn requestCompletion(self: *AppSession, term: *Term, offset: usize, trigger_
     return c.completion_seq;
 }
 
-/// `textDocument/codeAction` 을 보낸다(§8.2h). `range` 는 byte 반열림 — 서버 인코딩의 줄·글자로 옮기고, 그 범위와 겹치는 `.lsp` 진단을
-/// 문맥으로 싣는다(넷: range·message·severity·code). 서버가 없거나 `codeActionProvider` 가 없으면 `null`.
-pub fn requestCodeAction(self: *AppSession, term: *Term, start: usize, end: usize) ?u32 {
-    return requestCodeActionImpl(self, term, start, end, null);
+/// 그 클라이언트에 `textDocument/codeAction` 을 보낸다(§8.2h). `range` 는 byte 반열림 — 서버 인코딩의 줄·글자로 옮기고, 그 범위와 겹치는
+/// **그 서버의** 진단을 문맥으로 싣는다(range·message·severity·code·data — §8.2u). `codeActionProvider` 가 없으면 `null`.
+pub fn requestCodeAction(self: *AppSession, c: *Client, term: *Term, start: usize, end: usize) ?u32 {
+    return requestCodeActionImpl(self, c, term, start, end, null);
 }
 
-/// 저장 시 code action(§8.2s) — 문서 전체에 그 kind 하나만(`only`, `triggerKind: 2`). 문맥 진단은 문서의 `.lsp` 진단 전부(fixAll 류가 쓴다).
-pub fn requestCodeActionOnSave(self: *AppSession, term: *Term, kind: []const u8) ?u32 {
+/// 저장 시 code action(§8.2s) — 문서 전체에 그 kind 하나만(`only`, `triggerKind: 2`). 문맥 진단은 **그 서버의** 진단 전부(fixAll 류가 쓴다).
+pub fn requestCodeActionOnSave(self: *AppSession, c: *Client, term: *Term, kind: []const u8) ?u32 {
     const len = (term.rt.editorDocument().opened orelse return null).file.content.len;
-    return requestCodeActionImpl(self, term, 0, len, kind);
+    return requestCodeActionImpl(self, c, term, 0, len, kind);
 }
 
-fn requestCodeActionImpl(self: *AppSession, term: *Term, start: usize, end: usize, only: ?[]const u8) ?u32 {
-    const c = readyClientFor(self, term) orelse return null;
+/// 그 문서의 code action 을 하는 클라이언트들(§8.2h·§8.2u) — 준비됐고 그 문서를 열었으며 `codeActionProvider` 가 있는 것, **주 서버 먼저**.
+pub const max_doc_clients: usize = 1 + editor_ops.diagnostics.max_aux;
+pub fn codeActionClients(self: *AppSession, term: *Term, buf: *[max_doc_clients]*Client) []*Client {
+    var n: usize = 0;
+    for ([_]Role{ .primary, .auxiliary }) |role| for (self.editor_lsp.clients.items) |*c| {
+        if (n == buf.len) break;
+        if (c.role != role or c.phase != .ready or c.proc == null or !c.code_action_caps.supported) continue;
+        if (c.findDoc(term) == null) continue;
+        buf[n] = c;
+        n += 1;
+    };
+    return buf[0..n];
+}
+
+/// 그 문서를 연 준비된 클라이언트 중 그 실행 파일의 것(메뉴 항목·저장 단계가 기억한 서버를 되찾는다 — 클라이언트 표는 자라며 옮겨지므로
+/// 포인터 대신 이름으로 든다).
+pub fn docClientByExe(self: *AppSession, term: *Term, exe: []const u8) ?*Client {
+    for (self.editor_lsp.clients.items) |*c| {
+        if (!std.mem.eql(u8, c.server.exe, exe) or c.phase != .ready or c.proc == null) continue;
+        if (c.findDoc(term) != null) return c;
+    }
+    return null;
+}
+
+fn requestCodeActionImpl(self: *AppSession, c: *Client, term: *Term, start: usize, end: usize, only: ?[]const u8) ?u32 {
     if (!c.code_action_caps.supported) return null;
     flushDocument(self, c, term);
     const d = c.findDoc(term) orelse return null;
@@ -2557,7 +2581,9 @@ fn requestCodeActionImpl(self: *AppSession, term: *Term, start: usize, end: usiz
     const range: lsp.rpc.LspRange = .{ .start = lspPos(opened, s, c.encoding), .end = lspPos(opened, e, c.encoding) };
     var diags: std.ArrayList(lsp.rpc.ContextDiagnostic) = .empty;
     defer diags.deinit(self.allocator);
-    for (term.rt.editor_diagnostics.lsp.items) |dg| {
+    // **그 서버의** 진단만(§8.2u) — 서버는 자기가 낸 진단(과 그 `data`)으로 fix 를 만든다.
+    const own = serverDiagnostics(&term.rt.editor_diagnostics, c) orelse return null;
+    for (own.list.items) |dg| {
         // 겹침(반열림) — caret 하나(s == e)는 그 자리를 덮는 진단.
         const overlaps = if (s == e) (dg.start <= s and s < @max(dg.end, dg.start + 1)) else (dg.start < e and s < dg.end);
         if (!overlaps) continue;
@@ -2571,6 +2597,8 @@ fn requestCodeActionImpl(self: *AppSession, term: *Term, start: usize, end: usiz
                 .hint => 4,
             },
             .code = if (dg.code.len > 0) dg.code else null,
+            .data = dg.data,
+            .source = dg.source_text,
         }) catch return null;
     }
     c.code_action_seq = lsp.rpc.nextSeq(c.code_action_seq); // i32 칸 안에서 돈다(§8.2a id)
@@ -2763,8 +2791,7 @@ fn termWaitingFolding(self: *AppSession, c: *Client, seq: u32) ?*Term {
 }
 
 /// `codeAction/resolve`(§8.2h) — 고른 항목의 JSON 그대로. 보냈으면 seq.
-pub fn requestCodeActionResolve(self: *AppSession, term: *Term, item_json: []const u8) ?u32 {
-    const c = readyClientFor(self, term) orelse return null;
+pub fn requestCodeActionResolve(self: *AppSession, c: *Client, item_json: []const u8) ?u32 {
     // 등가다(적대적 2회차 B13) — `code_action.parse` 가 resolve 불가 서버의 data-only 항목을 이미 숨겨 이 길로 못 온다. 방어로 남긴다.
     if (!c.code_action_caps.resolve) return null;
     c.code_action_resolve_seq = lsp.rpc.nextSeq(c.code_action_resolve_seq); // i32 칸 안에서 돈다(§8.2a id)
@@ -2773,11 +2800,6 @@ pub fn requestCodeActionResolve(self: *AppSession, term: *Term, item_json: []con
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_code_action_resolves += 1;
     return c.code_action_resolve_seq;
-}
-
-pub fn codeActionCapsFor(self: *AppSession, term: *Term) ?lsp.rpc.CodeActionCaps {
-    const c = readyClientFor(self, term) orelse return null;
-    return c.code_action_caps;
 }
 
 fn lspPos(opened: editor_ops.Opened, off: usize, enc: lsp.rpc.PositionEncoding) lsp.rpc.Pos {

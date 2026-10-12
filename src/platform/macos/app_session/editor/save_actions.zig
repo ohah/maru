@@ -9,6 +9,8 @@
 //! - 요청마다 시한(`format.save_format_timeout_ms` — 같은 1 초)이 있다. 넘기면 남은 kind 를 건너뛰고 알린 뒤 포맷·저장으로 간다. 응답 뒤
 //!   문서가 바뀌었으면(기다리는 사이 타이핑) 남은 kind 를 건너뛰고 알린 뒤 포맷·저장으로 간다 — 저장은 code action 때문에 사라지지 않는다.
 //! - 각 적용은 되돌리기 하나다(포맷과 따로).
+//! - **서버가 여럿이면**(보조 언어 서버 §8.2u) kind 마다 그 kind 를 알린 서버(`codeActionKinds` 가 덮는 것 — 알리지 않았으면 무엇이든)에
+//!   **주 서버 먼저** 차례로 묻는다. 하나를 적용하면 revision 이 올라 다음 서버의 요청이 새 본문을 본다. 서버마다 시한이 따로다.
 
 const std = @import("std");
 const maru = @import("maru");
@@ -37,6 +39,12 @@ pub const State = struct {
     kind_len: usize = 0,
     stage: Stage = .request,
     waiting_seq: u32 = 0,
+    /// 지금 kind 를 물을 서버들(그 문서의 code action 클라이언트 — 주 서버 먼저, 이름으로 든다)과 다음 자리.
+    targets: [editor_lsp.max_doc_clients][]const u8 = undefined,
+    targets_len: usize = 0,
+    target_pos: usize = 0,
+    /// 지금 기다리는 서버 — 응답은 이 서버의 것이어야 한다(seq 는 클라이언트마다 따로 센다).
+    waiting_exe: []const u8 = "",
     asked_version: u64 = 0,
     deadline_ms: u64 = 0,
     /// 판정자 관측.
@@ -82,24 +90,38 @@ fn eligible(self: *AppSession, term: *Term) bool {
     if (term.kind != .editor or term.rt.editor_diff != null) return false;
     const doc = term.rt.editorDocument().opened orelse return false;
     if (doc.file.read_only) return false;
-    const caps = editor_lsp.codeActionCapsFor(self, term) orelse return false;
-    return caps.supported;
+    var buf: [editor_lsp.max_doc_clients]*editor_lsp.Client = undefined;
+    return editor_lsp.codeActionClients(self, term, &buf).len > 0;
 }
 
 /// 다음 kind 를 묻는다. 보냈으면 true, 더 물을 것이 없으면(목록 끝·보내지 못함) false.
 fn next(self: *AppSession, term: *Term) bool {
     const st = &self.editor_save_actions;
-    while (lsp.code_action.nextKind(st.list(), &st.kind_pos)) |k| {
+    while (true) {
+        // 이 kind 의 남은 서버 — 그 kind 를 알린 것에만 묻는다.
+        while (st.target_pos < st.targets_len) {
+            const exe = st.targets[st.target_pos];
+            st.target_pos += 1;
+            const c = editor_lsp.docClientByExe(self, term, exe) orelse continue;
+            if (!c.code_action_caps.covers(st.kind())) continue;
+            const seq = editor_lsp.requestCodeActionOnSave(self, c, term, st.kind()) orelse continue;
+            st.stage = .request;
+            st.waiting_seq = seq;
+            st.waiting_exe = c.server.exe;
+            st.asked_version = term.rt.editorDocument().notifications.lsp_version;
+            st.deadline_ms = self.awakeMs() + format_client.save_format_timeout_ms;
+            return true;
+        }
+        // 다음 kind — 그 문서의 code action 서버를 주 서버 먼저로 다시 센다.
+        const k = lsp.code_action.nextKind(st.list(), &st.kind_pos) orelse return false;
         st.kind_start = @intFromPtr(k.ptr) - @intFromPtr(&st.list_buf);
         st.kind_len = k.len;
-        const seq = editor_lsp.requestCodeActionOnSave(self, term, st.kind()) orelse return false;
-        st.stage = .request;
-        st.waiting_seq = seq;
-        st.asked_version = term.rt.editorDocument().notifications.lsp_version;
-        st.deadline_ms = self.awakeMs() + format_client.save_format_timeout_ms;
-        return true;
+        var buf: [editor_lsp.max_doc_clients]*editor_lsp.Client = undefined;
+        const cs = editor_lsp.codeActionClients(self, term, &buf);
+        for (cs, 0..) |c, i| st.targets[i] = c.server.exe;
+        st.targets_len = cs.len;
+        st.target_pos = 0;
     }
-    return false;
 }
 
 /// code action 단계를 끝내고 포맷·저장으로 넘긴다. `late` — 응답·시한 뒤(실패 알림은 늦은 응답의 규칙). 문서가 닫혔으면 할 것이 없다.
@@ -123,15 +145,14 @@ pub fn tick(self: *AppSession, now_ms: u64) void {
 /// 서버가 그 문서를 연 서버여야 한다(seq 는 클라이언트마다 따로 센다 — 포맷의 `onClientResponse` 와 같은 규율).
 pub fn onClientResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, result: ?std.json.Value) bool {
     const st = &self.editor_save_actions;
-    if (!st.active or st.stage != .request or seq != st.waiting_seq) return false;
+    if (!st.active or st.stage != .request or seq != st.waiting_seq or !std.mem.eql(u8, c.server.exe, st.waiting_exe)) return false;
     const term = editorTerm(self, st.surface) orelse {
         st.active = false;
         return true;
     };
     if (c.findDoc(term) == null) return false;
     if (!sameRevision(self, term)) return true;
-    const caps = editor_lsp.codeActionCapsFor(self, term) orelse lsp.rpc.CodeActionCaps{};
-    var list = lsp.code_action.parse(self.allocator, result, caps.resolve) catch lsp.code_action.List{};
+    var list = lsp.code_action.parse(self.allocator, result, c.code_action_caps.resolve) catch lsp.code_action.List{};
     defer list.deinit(self.allocator);
     for (list.items) |it| {
         if (!lsp.code_action.kindMatches(it.kind, st.kind())) continue;
@@ -142,7 +163,7 @@ pub fn onClientResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, resu
         // `edit` 이 없다 — resolve(§8.2h 와 같다). 항목 JSON 그대로.
         const raw = std.json.Stringify.valueAlloc(self.allocator, it.raw, .{}) catch break;
         defer self.allocator.free(raw);
-        const rseq = editor_lsp.requestCodeActionResolve(self, term, raw) orelse break;
+        const rseq = editor_lsp.requestCodeActionResolve(self, c, raw) orelse break;
         st.stage = .resolve;
         st.waiting_seq = rseq;
         st.deadline_ms = self.awakeMs() + format_client.save_format_timeout_ms;
@@ -155,7 +176,7 @@ pub fn onClientResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, resu
 /// codeAction/resolve 응답의 입구 — 이 단계가 기다리는 것이면 받고 true.
 pub fn onClientResolveResponse(self: *AppSession, c: *editor_lsp.Client, seq: u32, result: ?std.json.Value) bool {
     const st = &self.editor_save_actions;
-    if (!st.active or st.stage != .resolve or seq != st.waiting_seq) return false;
+    if (!st.active or st.stage != .resolve or seq != st.waiting_seq or !std.mem.eql(u8, c.server.exe, st.waiting_exe)) return false;
     const term = editorTerm(self, st.surface) orelse {
         st.active = false;
         return true;

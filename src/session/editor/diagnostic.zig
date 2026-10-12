@@ -35,6 +35,12 @@ pub const Diagnostic = struct {
     /// 그 진단을 낸 언어 서버의 이름(정적 문자열 — 서버 표의 실행 파일 이름). 한 문서에 서버가 여럿일 수 있어(보조 서버 tooling §8.2u)
     /// 호버의 `출처(코드)` 가 이것을 쓴다. 서버 진단이 아니거나 모르면 빈 문자열.
     server: []const u8 = "",
+    /// 서버가 진단에 실어 보낸 `data`(JSON 원문 — 출처가 소유하는 메모리). code action 요청의 문맥 진단에 **그대로** 되돌린다(LSP 3.16 —
+    /// ruff 는 줄 단위 fix 를 여기 싣는다, tooling §8.2u). 없으면 빈 문자열.
+    data: []const u8 = "",
+    /// 서버가 진단에 단 `source` 문자열(`Ruff`·`eslint` — 출처가 소유하는 메모리). code action 문맥에 `data` 와 함께 되돌린다 — ruff 는
+    /// 문맥 진단의 `source` 가 제 것일 때만 줄 단위 quickfix 를 낸다(2026-10-13 실측, tooling §8.2u). 없으면 빈 문자열.
+    source_text: []const u8 = "",
 };
 
 /// `start` 오름차순, 같으면 severity 높은 것이 앞(줄 접기가 첫 항목을 그대로 쓸 수 있게).

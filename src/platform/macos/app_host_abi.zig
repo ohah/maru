@@ -7800,12 +7800,13 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
             const sent = switch (next.kick) {
                 .none => session_mod.web_osr.devtoolsCall(gpa, run.surface_id, next.method, next.params, sink),
-                .best_effort, .required => |k| session_mod.web_osr.devtoolsCallKicked(gpa, run.surface_id, next.method, next.params, sink, k == .best_effort),
+                .best_effort, .required => |k| session_mod.web_osr.devtoolsCallKicked(gpa, run.surface_id, next.method, next.params, sink, k.optional()),
             };
             _ = sent catch |e| return switch (e) {
                 // 보내지 못했다 — op 이 정한다(누른 뒤의 떼기면 잠깐 뒤 다시, 놓기면 동작의 결과로, 앞선 실패가 있으면 그 이유로 — 3·4 회차).
                 error.NotReady, error.Busy => {
-                    const why = if (e == error.NotReady) "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)" else "too many DevTools calls at once (on this tab, or across all tabs) — retry shortly";
+                    // 자리 없음은 ops 가 아는 그 글이어야 한다 — kick 을 실은 호출은 그때만 다시 보낸다(`web_cdp_ops.busy_reason`).
+                    const why = if (e == error.NotReady) "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)" else web_cdp_ops.busy_reason;
                     const after = run.op.feed(allocator, .{ .not_sent = why }) catch return finishCdp(run, .failed, "out of memory");
                     return cdpAdvance(run, after);
                 },
@@ -7830,7 +7831,7 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
         .sidecar_gone => .{ .failed = "the Chromium engine stopped" },
         .too_large => .{ .failed = web_cdp_ops.result_too_large },
         // 확실히 보내지 않은 것과 보냈을 수도 있는 것(결과가 깨짐)을 가른다 — 누름이면 떼기를 보낼지가 달라진다.
-        .busy => .{ .not_sent = "too many DevTools calls on this tab" },
+        .busy => .{ .not_sent = web_cdp_ops.busy_reason },
         .unknown_browser, .invalid_request, .send_failed => .{ .not_sent = "DevTools request failed" },
         .protocol => .{ .failed = "DevTools request failed" },
     };

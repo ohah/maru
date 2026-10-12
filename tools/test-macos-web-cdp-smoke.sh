@@ -411,8 +411,14 @@ for k in 1 2 3 4 5 6 7 8 9 10; do
     [ \$((s1 - s0)) -gt \$hop_max ] && hop_max=\$((s1 - s0))
     sleep 0.5 # 이동을 여러 번 넘기게(숨은 탭의 타이머는 1 초 단위)
 done
-for k in 1 2 3; do run hop-role-\$k click --role button --name 'Hop go' --exact; done
-echo "\$hop_to \$hop_max \$(cat "\$out"/hop-role-* | grep -c 'too many DevTools calls')" > "\$out/hop-summary"
+hop_role_max=0
+for k in 1 2 3; do
+    r0=\$(date +%s)
+    run hop-role-\$k click --role button --name 'Hop go' --exact
+    r1=\$(date +%s)
+    [ \$((r1 - r0)) -gt \$hop_role_max ] && hop_role_max=\$((r1 - r0))
+done
+echo "\$hop_to \$hop_max \$(cat "\$out"/hop-role-* | grep -c 'too many DevTools calls') \$hop_role_max" > "\$out/hop-summary"
 touch "\$out/show2-now"
 touch "\$out/done"
 exec sleep 600
@@ -508,11 +514,12 @@ set -- $(cat "$out/hid-secs")
 ok hid-role && [ "$(cat "$out/hb-hit")" = yes ] && [ "$1" -le 3 ] || fail "a role click on a hidden tab did not press for real within 3 s (${1}s · $(tr '\n' ' ' < "$out/hid-role"))"
 ok hid-hover && [ "$(cat "$out/hh-hit")" = yes ] && [ "$2" -le 3 ] || fail "a hover on a hidden tab did not reach the page within 3 s (${2}s · $(tr '\n' ' ' < "$out/hid-hover"))"
 ok hid-wait || fail "a text wait on a hidden tab did not see a button made in an animation frame ($(tr '\n' ' ' < "$out/hid-wait"))"
-read hop_to hop_max hop_busy < "$out/hop-summary" || true
+read hop_to hop_max hop_busy hop_role_max < "$out/hop-summary" || true
 hop_loads=$(grep -c 'GET /hop.html' "$root/http.log" || true)
 [ "$hop_loads" -ge 5 ] || fail "the hopping page did not keep reloading on the hidden tab ($hop_loads loads) — the case proves nothing ($(tr '\n' ' ' < "$out/hop-nav"))"
-echo "hidden hopping tab ($hop_loads loads): selector waits timed out $hop_to/10 (longest ${hop_max}s) · role clicks answered 'too many' $hop_busy/3"
-[ "$hop_to" = 0 ] && [ "$hop_busy" = 0 ] || fail "on a hidden tab that keeps navigating, a lost screenshot blocked later calls ($hop_to/10 selector waits timed out, $hop_busy/3 role clicks 'too many')"
+echo "hidden hopping tab ($hop_loads loads): selector waits timed out $hop_to/10 (longest ${hop_max}s) · role clicks answered 'too many' $hop_busy/3 (longest ${hop_role_max}s)"
+# role 클릭은 새로고침 사이에 「context 없음」으로 끝날 수 있다 — 다만 자리를 기다려도(최대 4.5 초) 곧 답해야 한다(4 회차).
+[ "$hop_to" = 0 ] && [ "$hop_busy" = 0 ] && [ "${hop_role_max:-99}" -le 6 ] || fail "on a hidden tab that keeps navigating, a lost screenshot blocked later calls ($hop_to/10 selector waits timed out, $hop_busy/3 role clicks 'too many')"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"

@@ -54,3 +54,16 @@ LSAVEQ1~6은 실제 worker의 성공→후속 CAS(BOM 포함), 실패 뒤 기준
 추가 실행 검증에서 다른 epoch의 요청을 건너뛰어 오래된 요청에 합류하는 결함을 재현했고, `sameDocument`로 가장 최근 문서 요청을 찾는 순서 장벽으로 수정했다. 완료의 `apply`도 현재 Target을 다시 대조하며 중복 apply가 성공 플래그를 지우지 않는다. 제출 시점의 확인만으로 완료를 반영하지 않는다.
 
 쓰기 시작 전 슬롯 재사용뿐 아니라 실행 중 문서를 강제로 닫고 같은 슬롯의 새 문서를 만든 경우도 검사한다. 이미 시작된 디스크 쓰기는 끝날 수 있지만, 완료는 새 문서의 본문·disk 기준·clean 상태를 바꾸지 않는다. 이것이 제품의 닫기 대기 UX를 구현했다는 뜻은 아니다.
+
+## 저장 중 lifecycle 정책의 reference 확인
+
+2026-10-12 실제 소스를 VS Code `7151ef01a8ddf294266858b3039c37f124d6bc64`, Zed `93d745668805029476e6d7fbb19652116fed51de`로 고정해 확인했다. 아래는 source 확인이며 두 앱의 실제 GUI/OS 경합을 재현했다는 뜻은 아니다. 기존 제안의 「모든 동작을 완료 뒤 처리」는 Maru의 보수적 초기안으로, 이 reference와 동일한 정책이라고 확정하지 않는다.
+
+- VS Code 앱 종료: [NativeTextFileService](https://github.com/microsoft/vscode/blob/7151ef01a8ddf294266858b3039c37f124d6bc64/src/vs/workbench/services/textfile/electron-browser/nativeTextFileService.ts)의 onWillShutdown이 PENDING_SAVE 모델이 없어질 때까지 joinState를 await한다.
+- VS Code 일반 파일 탭 닫기: [EditorGroupView](https://github.com/microsoft/vscode/blob/7151ef01a8ddf294266858b3039c37f124d6bc64/src/vs/workbench/browser/parts/editor/editorGroupView.ts)는 미저장 확인에서 Save 선택 시 editor.save를 await하고 다시 dirty를 검사해 닫기를 veto한다. 다른 그룹에 같은 편집기가 남으면 확인을 생략한다. [FileEditorInput](https://github.com/microsoft/vscode/blob/7151ef01a8ddf294266858b3039c37f124d6bc64/src/vs/workbench/contrib/files/browser/editors/fileEditorInput.ts)의 isSaving은 PENDING_SAVE를 직접 검사하지 않는다고 명시한다. 따라서 일반 수동 저장 중 탭 닫기가 무조건 저장을 기다리거나, 무조건 즉시 닫힌다고 단순화하지 않는다. [모델 manager](https://github.com/microsoft/vscode/blob/7151ef01a8ddf294266858b3039c37f124d6bc64/src/vs/workbench/services/textfile/common/textFileEditorModelManager.ts)의 canDispose는 dirty 모델을 saved/reverted까지 해제하지 않는다.
+- VS Code Save As: [TextFileService](https://github.com/microsoft/vscode/blob/7151ef01a8ddf294266858b3039c37f124d6bc64/src/vs/workbench/services/textfile/browser/textFileService.ts)는 다른 경로의 target 모델을 해결하고 source snapshot을 옮겨 target을 저장한 뒤 source를 revert한다. source와 동일한 URI는 기존 저장으로 보내고, 파일시스템상 같은 identity의 다른 URI는 move 후 save라는 별도 갈래다. 모든 Save As를 원래 문서 저장 완료 대기 하나로 통합한 것으로 보지 않는다.
+- VS Code move/copy/delete: [WorkingCopyFileService](https://github.com/microsoft/vscode/blob/7151ef01a8ddf294266858b3039c37f124d6bc64/src/vs/workbench/services/workingCopy/common/workingCopyFileService.ts)는 비동기 participants/working-copy operation 이벤트를 거쳐 파일 연산을 수행한다. 모델 manager가 move/copy 전 미저장 snapshot·encoding·언어·새 경로를 기록하고 실패/성공 후 복원하는 별도 계약이다. 이 확인으로 모든 rename/delete와 진행 중 저장의 경합이 안전하다고 검증한 것은 아니다.
+- Zed 닫기: [Pane](https://github.com/zed-industries/zed/blob/93d745668805029476e6d7fbb19652116fed51de/crates/workspace/src/pane.rs)의 close_items는 save_item을 await하고 실패 시 Close Without Saving/Cancel을 묻는다. Save As도 item.save_as의 Task를 기다리는 별도 갈래다.
+- Zed 창 닫기/앱 종료: [Workspace](https://github.com/zed-industries/zed/blob/93d745668805029476e6d7fbb19652116fed51de/crates/workspace/src/workspace.rs)의 prepare_to_close는 save_all_internal을 await한다. hot exit가 허용되면 미저장 항목을 DB에 serialize하고 실패/미지원 항목은 저장 확인으로 남긴다. 원본 파일 저장을 강제하는 동작과 백업 직렬화를 구분한다.
+
+실제 ⌘S 연결 전에 닫기 확인·모델 유지·앱 종료 drain·Save As/rename의 계약을 별도로 결정한다. 이번 큐 구현은 해당 제품 정책을 선택하거나 UI에 적용하지 않는다.

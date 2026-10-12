@@ -7050,8 +7050,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image channel wiring:"},
         });
         const run_image_channel_wiring_tests = b.addRunArtifact(image_channel_wiring_tests);
-        run_image_channel_wiring_tests.addArg("--maru-expect-tests=3");
-        run_image_channel_wiring_tests.addArg("--maru-expect-passed=3");
+        run_image_channel_wiring_tests.addArg("--maru-expect-tests=4");
+        run_image_channel_wiring_tests.addArg("--maru-expect-passed=4");
         image_channel_app_step.dependOn(&run_image_channel_wiring_tests.step);
         test_step.dependOn(&run_image_channel_wiring_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_wiring_tests.step);

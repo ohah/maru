@@ -108,7 +108,7 @@ host 쪽(IC2a)과 앱 쪽(IC2b)으로 나눴다. 광고가 꺼져 있어 앱이 
 #### IC3b — 앱 세그먼트 표·채널 리더
 
 IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)와 GUI 적용 자리 배선(IC3b-2). IC3b-2 는 다시 resolver 를 적용
-자리에 넘기는 것(IC3b-2a)과 stream 수명·펌프·hwm 정리·보류(IC3b-2b)로 나눴다. 표와 배선은 광고 전에 먼저 들어가도 된다(채널이
+자리에 넘기는 것(IC3b-2a), 펌프와 보류(IC3b-2b-1), stream 수명·hwm 정리(IC3b-2b-2)로 나눴다. 표와 배선은 광고 전에 먼저 들어가도 된다(채널이
 묶일 일이 없다 — 광고가 꺼져 있다).
 
 ##### IC3b-1 — 세그먼트 표·채널 리더·release (완료)
@@ -176,23 +176,54 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   1(울타리 든 해석 — 자기 stream·한 번·poison·표 없음). GUI 정적 라이브러리(`maru-macos-app-host-abi`)가 이 경로를 컴파일한다.
 - 광고가 꺼져 있어(IC6) 지금 모든 연결은 `not_negotiated` 다 — 제품 동작은 그대로다.
 
-##### IC3b-2b — stream 수명·펌프·hwm 정리·보류 (미착수)
+##### IC3b-2b-1 — 펌프와 보류 (PR 진행 중)
 
-- **울타리를 못 잡은 해석은 지금 「세그먼트 없음」 → `MalformedRow` → 재동기화다**(IC3b-2a). prepared lease·slot 연산이 겹친 tick 에
-  `image_ref` 배치를 적용하면 그렇게 된다. 「아직 채널을 못 비움·해석 불가」 보류로 막는다 — 그 배치를 적용하지 않고 큐 머리에 둔다.
-  판단은 `pending_batch_head` 를 넘기고 `accounting.admit` 하기 **전에** 한다(다음 tick 에 같은 배치를 다시 셀 때 이중 계상이 없게).
-- `pumpImageChannel` 을 매 tick(`RemoteTermBackend.maintenanceEventTick` 의 host 당 한 번 — `quietPumpProven` 이 건너뛰지 않게)과
-  `image_ref` 배치 적용 직전에 부른다. attach 응답을 **읽는 순서대로**(호출자로 돌아간 뒤가 아니라) `openStream`, detach·종료 정리와
-  attach 응답 뒤의 모든 실패 경로에서 채널을 비운 뒤 `closeStream`. 적용 뒤 배치를 놓기(`releaseOrRetain`) **전에** 그 배치에서 hwm 을
-  다시 읽어 `sweep`(조립기는 hwm 을 건너뛴다). 셋 다 Client 의 울타리 든 공개 메서드로 한다(IC3b-2a 와 같은 규칙).
+- `image_ref` 를 실은 배치는 적용 직전에 그 연결의 채널을 비운다 — `AttachmentTransport.prepare_image_apply`(필수 필드). 비울 수
+  없는 tick(Client 울타리·slot 의 다른 attachment 연산)이면 그 배치를 적용하지 않고 큐 머리에 둔다(`PumpScreenResult.held`).
+  판단은 `pending_batch_head` 를 넘기고 `accounting.admit` 하기 **전**이다 — 다음 tick 에 같은 배치를 다시 셀 때 이중 계상이 없다.
+  엿보기는 배치를 빌린 view 로 레코드 머리만 훑는다(소비하지 않는다). 협상하지 않은 연결과 `image_ref` 가 없는 배치는 보지 않는다.
+- `held` 를 받는 쪽: GUI 펌프(`pumpDeltaInner`)는 `idle` 과 같게(다음 tick), catch-up(`prepareCatchupStage`)은 같은 스레드에서 마감까지
+  헛돌지 않고 `Busy`, external pump 는 미협상이라 닿지 않는다(오면 `retry`).
+- 첫 snapshot(큐를 거치지 않는다)은 resolver 를 줄 때 채널을 먼저 비운다(`imageRefResolverAfterPump`) — 그 snapshot 의 세그먼트는
+  attach 응답보다 먼저 올 수 있다. 비울 수 없어도 resolver 는 준다(맞는 세그먼트가 없으면 malformed 로 재접속).
+- 유지보수 tick(`maintenanceEventTick`)의 host 당 루프가 중복 host 를 건너뛴 바로 다음에 그 host 의 채널을 한 번 펌프한다 — 화면
+  배치가 없는 tick 에도 release 가 host 원장을 돌린다. `quietPumpProven` 은 `drainRemoteNow` 만 건너뛰어 이 자리와 무관하다. GUI 본선은
+  `HostAdapter.pumpImageChannel` → `ClientSlot.currentPumpImageChannel`(`withCurrent` — 다른 연산 중이면 이번 tick 은 건너뜀),
+  legacy 는 Client 직접.
+- `Client.pumpImageChannel` 은 울타리를 못 잡으면 false 를 돌려준다(보류 판단의 근거). slot 의 해석·펌프는 같은 접근 규칙
+  (`attachmentImageAccessAllowed` — 다른 연산 중이면 거부, 같은 스레드의 첫 snapshot permit 만 허용)을 쓴다.
+- 판정자(`test-image-channel-app`): `image channel wiring:` 에 1(못 비우면 `held` — 머리에 남고 해석·계상 없음, 다시 펌프해도 같은
+  배치, 비울 수 있게 되면 적용, `image_ref` 없는 배치는 준비를 부르지 않음 — 미협상 판정자는 준비 0 회), `image channel adapter:` 에
+  바쁨·첫 snapshot permit 아래 준비와 tick 경로, `image channel attachment:` 에 첫 snapshot resolver 가 채널을 먼저 비움,
+  `image channel legacy:` 에 legacy 준비가 세그먼트를 받음과 tick 배선(host 당 루프의 중복 건너뛰기 바로 다음 — 글자), `image
+  channel pump:` 에 울타리면 false.
+- 큐 머리가 이미 있으면 새 배치를 읽기 **전에** 그 머리를 본다 — 보류 중에 읽어 붙이면 보류가 이어지는 동안 큐가 자란다(generation 은
+  registry 가 차고 legacy 는 상한이 없다). 준비는 펌프당 한 번이다.
+- `held` 는 정상 상태에서 사실상 나지 않는다: 펌프는 매번 배치 읽기(`read_batch`)부터 하는데 그 경로가 같은 울타리(Client
+  `requireBlockingMode`, slot 의 다른 연산)를 먼저 지나 막히면 에러로 끝난다. 보류는 그 사이(읽기 뒤·적용 전)에 울타리가 바뀌는 경우의
+  안전망이다.
+- 안 한 것: catch-up 의 `held → Busy` 와 GUI 펌프의 `held → idle` 은 판정자가 없다(그 경로 fixture 는 실제 attach 왕복이 필요하다).
+  tick 배선은 글자로 잰다. catch-up 의 `Busy` 는 후보 준비 실패 분류(`classifyCandidatePrepareFailure`)의 else 로 가서 재시도가 아니라
+  `local_invariant_violation` 으로 봉인된다 — 위 이유로 닿지 않지만, IC3b-2b-2 에서 재시도로 분류할지 정한다. 채널 위반으로 poison 한
+  펌프는 true(돌았다)를 돌려준다 — 그 배치는 적용으로 가 해석 실패(`frame_malformed`)로 닫힌다(첫 poison 이유는 그대로 남는다).
+
+##### IC3b-2b-2 — stream 수명·hwm 정리 (미착수)
+
+- attach 응답을 **읽는 순서대로**(호출자로 돌아간 뒤가 아니라) `openStream` — decode 가 `.accepted` 를 낸 직후(controller·observer
+  둘). decode 와 commit 사이 실패(`AgentLogFormatChanged`·metadata·commit)와 commit 뒤 실패·detach·종료 정리에서 채널을 비운 뒤
+  `closeStream`(열리지 않은 stream 에도 안전하다 — 최대 id 를 올린다). 정상 정리는 `Client.dropBufferedStream` 이 사실상 유일한 자리지만
+  generation 의 `finishActiveAttachmentDrop` 은 no-fail 구간(`active_cleanup`)이라 울타리가 잡히는지 확인한다.
+- 적용 뒤 배치를 놓기(`releaseOrRetain`) **전에** 그 배치에서 hwm 을 다시 읽어 `sweep`(조립기는 hwm 을 건너뛴다) — 보류 엿보기와
+  같은 레코드 훑기로 `{has_ref, hwm}` 을 한 번에 낸다. 복구 스냅샷은 게시가 mark 뒤라는 점에 맞춘다.
+- 셋 다 Client 의 울타리 든 공개 메서드로 한다(IC3b-2a 와 같은 규칙).
 - 스레드: 표는 재접속 worker 가 connect 할 때 할당되고(`build_id` 와 같은 꼴) 펌프·해석·적용·정리는 모두 소유 스레드에서 돈다 — 표에
   잠금이 없다는 전제를 배선이 지키는지(worker 스레드에서 펌프·해석을 부르지 않는지) 판정자로 잰다.
 - `enterExternalMode` 는 묶인 채널을 거부하지 않는다 — 협상한 Client 가 external 모드에 들어가면 펌프가 돌지 않아 원장이 찬다.
   GUI 는 이 경로를 쓰지 않지만, 광고(IC6) 전에 불변식(채널을 협상한 Client 는 external 모드에 들어가지 않는다)으로 잠근다.
-- 「이미지 채널 없음」 탭 notice(계약 §3.2)는 아직 어느 단계에도 없다 — `pumpImageChannel` 이 void 라 호출자는
-  `image_channel.state` 로 상실을 본다. notice 를 이 단계나 IC6 에서 단다.
+- 「이미지 채널 없음」 탭 notice(계약 §3.2)는 아직 어느 단계에도 없다 — 호출자는 `image_channel.state` 로 상실을 본다. notice 를 이
+  단계나 IC6 에서 단다.
 - 펌프·해석이 울타리에서 빠지는 일(prepared lease·실행 lease 의 AdminBusy)은 지금 계수도 로그도 없다 — lease 가 오래 잡혀 host 원장
-  32 칸이 차면 진단할 근거가 없으니 거부 계수를 단다.
+  32 칸이 차면 진단할 근거가 없으니 거부 계수를 단다(보류가 길어지는 것도 같은 계수로 본다).
 - attach 응답을 끝내 못 읽어 id 를 모르는 stream 의 세그먼트는 더 큰 id 를 알 때까지(다음 attach) 표에 남아 원장 자리를 쥔다 —
   id 를 모르니 `closeStream` 으로도 못 닫는다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 본다.
 - 채널 resolver 를 넘기는 연결에서 몸체가 망가진 `image_ref` 는 `MalformedRecord`·`Truncated` 로 올라가 `drainRemoteNow` 복구 목록에
@@ -202,7 +233,7 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
 - 판정자: 버려진 배치가 남긴 세그먼트를 같은 stream 의 다음 배치가 치운다; detach 뒤 늦게 온 세그먼트가 즉시 반환된다(표 단위는
   IC3b-1 이 쟀다 — 여기서는 배선); 연결 둘의 같은 segment_id 가 섞이지 않는다; 다른 stream 의 세그먼트를 가리키는 `image_ref` 는
   해석되지 않고 그 항목은 남는다(표 단위는 IC3b-1); 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
-  종료 상태가 되지 않는다; 울타리를 못 잡은 tick 의 `image_ref` 배치는 보류되고 다음 tick 에 적용된다.
+  종료 상태가 되지 않는다.
 
 ### IC4 — fd 상속 방지
 

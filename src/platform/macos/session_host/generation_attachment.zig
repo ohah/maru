@@ -1577,7 +1577,7 @@ pub const GenerationAttachment = struct {
         ctx: *remote_attachment.ImageResolveCtx,
     ) remote_attachment.ImageRefResolver {
         const payload = if (self.payload) |*value| value else return .unnegotiated;
-        return payload.imageRefResolver(ctx);
+        return payload.imageRefResolverAfterPump(ctx);
     }
 
     pub fn initScreen(self: *GenerationAttachment, codec: u16) anyerror!void {
@@ -1704,6 +1704,9 @@ pub const GenerationAttachment = struct {
                     self.poison(.local_invariant_violation) catch return error.InvalidAuthority;
                     return error.InvalidAuthority;
                 },
+                // 이미지 채널을 이번에 비울 수 없었다(§6) — 배치는 큐 머리에 남고 계상하지 않았다. 같은 스레드에서 마감까지
+                // 헛돌지 않고 Busy 로 돌려준다.
+                .held => return error.Busy,
                 .terminal => return error.ConnectionClosed,
             }
         }
@@ -3796,6 +3799,28 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
 }
 
+/// 채널 host 끝에 세그먼트 메시지 하나를 공유 메모리 fd 와 함께 보낸다(이미지 채널 §3.3).
+fn sendImageChannelTestSegment(host: std.c.fd_t, segment_id: u64, stream_id: u64) !void {
+    const created = (try @import("image_segment.zig").create(&.{ 1, 2, 3, 4 })).?;
+    defer _ = std.c.close(created.fd);
+    const bytes = try @import("image_channel_wire.zig").encodeSegment(.{ .segment_id = segment_id, .stream_id = stream_id, .image_id = 3, .generation = 4, .byte_len = 4 });
+    var control: [32]u8 align(@alignOf(std.c.cmsghdr)) = @splat(0);
+    const header: std.c.cmsghdr = .{ .len = @intCast(@sizeOf(std.c.cmsghdr) + @sizeOf(std.c.fd_t)), .level = std.c.SOL.SOCKET, .type = std.c.SCM.RIGHTS };
+    @memcpy(control[0..@sizeOf(std.c.cmsghdr)], std.mem.asBytes(&header));
+    @memcpy(control[@sizeOf(std.c.cmsghdr)..][0..@sizeOf(std.c.fd_t)], std.mem.asBytes(&created.fd));
+    var iov = [_]std.posix.iovec_const{.{ .base = &bytes, .len = bytes.len }};
+    const msg: std.c.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = @intCast(std.mem.alignForward(usize, @sizeOf(std.c.cmsghdr) + @sizeOf(std.c.fd_t), @sizeOf(u32))),
+        .flags = 0,
+    };
+    if (std.c.sendmsg(host, &msg, 0) != bytes.len) return error.TestUnexpectedResult;
+}
+
 test "image channel attachment: a committed generation attachment hands its transport's resolver to the first snapshot" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     try client_slot_mod.ClientSlot.initializeProcessRuntime();
@@ -3852,6 +3877,24 @@ test "image channel attachment: a committed generation attachment hands its tran
         .channel => |resolver| try std.testing.expect(resolver.ctx == @as(*anyopaque, &ctx)),
     }
     try std.testing.expectEqual(@as(u64, 0x3B24), ctx.stream_id);
+
+    // 첫 snapshot 의 세그먼트는 attach 응답보다 먼저 올 수 있다 — resolver 를 줄 때 채널을 먼저 비운다.
+    var channel: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &channel));
+    defer _ = std.c.close(channel[1]);
+    for (channel) |fd| _ = std.c.fcntl(fd, std.c.F.SETFL, @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true })));
+    logical_client.image_channel = .{ .fd = channel[0], .state = .bound };
+    const table = try allocator.create(@import("client_image_segments.zig").Table);
+    table.* = .{};
+    logical_client.image_segments = table;
+    try sendImageChannelTestSegment(channel[1], 1, 0x3B24);
+    try std.testing.expectEqual(@as(usize, 0), table.len);
+    try std.testing.expect(attachment.imageRefResolver(&ctx) != .unnegotiated);
+    try std.testing.expectEqual(@as(usize, 1), table.len);
+    // 유지보수 tick 의 길 — HostAdapter 가 slot 의 현재 연결로 전달한다.
+    try sendImageChannelTestSegment(channel[1], 2, 0x3B24);
+    try std.testing.expect(try adapter.pumpImageChannel());
+    try std.testing.expectEqual(@as(usize, 2), table.len);
     logical_client.image_channel.state = .not_negotiated;
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }

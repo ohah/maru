@@ -322,6 +322,7 @@ const ExternalAttachmentAdapter = struct {
             // `maru attach` 는 이미지 채널을 광고하지 않는다(§8).
             .image_shm_negotiated = remote_attachment.imageNotNegotiated,
             .resolve_image = remote_attachment.noImageSegment,
+            .prepare_image_apply = remote_attachment.noImageChannel,
         };
     }
 };
@@ -580,7 +581,8 @@ pub const ExternalPumpOwner = struct {
         };
         return switch (outcome) {
             .idle => .idle,
-            .recovery_commit_pending => .retry,
+            // 미협상(§8)이라 `image_ref` 배치를 보류할 일이 없다 — 오더라도 다음 차례에 다시 본다.
+            .recovery_commit_pending, .held => .retry,
             .terminal => .{ .terminal = .protocol_error },
             .applied => blk: {
                 const screen = if (self.attachment.screen) |*value| value else return .{ .terminal = .invariant_failure };

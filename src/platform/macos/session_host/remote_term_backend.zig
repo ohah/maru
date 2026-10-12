@@ -3484,6 +3484,8 @@ pub const RemoteTermBackend = struct {
         std.mem.sort(HostProbe, host_probes[0..handle_count], {}, hostProbeLessThan);
         for (host_probes[0..handle_count], 0..) |probe, index| {
             if (index != 0 and host_probes[index - 1].host_id == probe.host_id) continue;
+            // host 의 연결 하나에 이미지 채널 펌프 한 번(이미지 채널 §6) — 화면 배치가 없는 tick 에도 release 가 host 원장을 돌린다.
+            RemoteRuntime.backend_api.pumpImageChannel(probe.runtime);
             if (RemoteRuntime.backend_api.hasAnyBufferedFrameWork(probe.runtime) catch false) {
                 ready_hosts[ready_host_count] = probe.host_id;
                 ready_host_count += 1;

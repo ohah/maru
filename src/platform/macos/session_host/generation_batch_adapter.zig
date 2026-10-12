@@ -356,6 +356,7 @@ pub const GenerationBatchAdapter = struct {
             .fail_closed = failClosed,
             .image_shm_negotiated = imageShmNegotiated,
             .resolve_image = resolveImage,
+            .prepare_image_apply = prepareImageApply,
         };
     }
 
@@ -464,6 +465,12 @@ pub const GenerationBatchAdapter = struct {
         const slot = self.borrowSlot(.live) orelse return null;
         if (stream_id != self.stream_id) return null;
         return slot.resolveAttachmentImage(stream_id, ref);
+    }
+
+    fn prepareImageApply(context: *anyopaque) bool {
+        const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
+        const slot = self.borrowSlot(.live) orelse return false;
+        return slot.pumpAttachmentImageChannel();
     }
 
     fn rejectPayloadDrop(_: *anyopaque, _: u64) void {
@@ -599,12 +606,13 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
     live.image_segments = table;
     try std.testing.expect(transport.image_shm_negotiated(transport.context));
     try sendTestSegment(channel[1], 1, 7, &.{ 9, 8, 7, 6 });
-    live.pumpImageChannel();
+    _ = live.pumpImageChannel();
     try std.testing.expectEqual(@as(usize, 1), table.len);
 
-    // 다른 stream(8)의 실제 항목 — 표 대조와 따로, adapter 가 자기 stream 이 아니면 slot 에 닿지 않는다.
+    // 다른 stream(8)의 실제 항목 — 표 대조와 따로, adapter 가 자기 stream 이 아니면 slot 에 닿지 않는다. 이번에는 유지보수
+    // tick 의 길(`currentPumpImageChannel`)로 받는다.
     try sendTestSegment(channel[1], 2, 8, &.{ 1, 1, 1, 1 });
-    live.pumpImageChannel();
+    try std.testing.expect(try slot.currentPumpImageChannel(slot.connectionGeneration()));
     try std.testing.expectEqual(@as(usize, 2), table.len);
     var other = ref;
     other.segment_id = 2;
@@ -617,11 +625,13 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
         slot.current.active_operation_generation = 1;
         slot.current.active_operation_kind = busy_case.kind;
         slot.current.active_operation_owner_thread_incarnation = busy_case.thread;
+        const busy_prepare = transport.prepare_image_apply(transport.context);
         const busy = transport.resolve_image(transport.context, 7, ref);
         slot.current.active_operation_generation = 0;
         slot.current.active_operation_kind = .none;
         slot.current.active_operation_owner_thread_incarnation = 0;
         try std.testing.expect((try busy) == null);
+        try std.testing.expect(!busy_prepare);
         try std.testing.expectEqual(@as(usize, 2), table.len);
     }
     // 첫 snapshot 은 그 owner 가 `.initial_snapshot` permit 을 쥔 채 적용된다 — 그 permit 은 해석을 막지 않는다(실제 permit).
@@ -631,8 +641,10 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
     defer slot.abortAttachmentBinding(&binding, reservation) catch
         @panic("image channel adapter binding cleanup drifted");
     const permit = try slot.prepareInitialSnapshotPermit(0x1000, 9, reservation.identity);
+    const prepared_during_snapshot = transport.prepare_image_apply(transport.context);
     const during_snapshot = transport.resolve_image(transport.context, 7, ref);
     try slot.abortInitialSnapshotPermit(permit);
+    try std.testing.expect(prepared_during_snapshot);
     const pixels = (try during_snapshot) orelse return error.TestUnexpectedResult;
     defer @import("client_image_segments.zig").unmapPixels(pixels);
     try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, pixels);

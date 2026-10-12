@@ -5661,11 +5661,11 @@ pub fn build(b: *std.Build) void {
     const local_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LSAVE"} });
     const run_local_save = b.addRunArtifact(local_save_tests);
     run_local_save.setCwd(b.path("."));
-    run_local_save.addArg("--maru-expect-tests=6");
+    run_local_save.addArg("--maru-expect-tests=11");
     const local_save_step = b.step("test-editor-local-save", "Run local save preparation and completion judges");
     local_save_step.dependOn(&run_local_save.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_local_save.addArg("--maru-expect-passed=6");
+        run_local_save.addArg("--maru-expect-passed=11");
         macos_only_test_step.dependOn(&run_local_save.step);
     }
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });

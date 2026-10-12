@@ -157,3 +157,20 @@ flush한 뒤에만 cursor/rotation을 진행한다. 두 profile은 각 tick에 �
 설치된 Claude Code 2.1.296와 Codex CLI 0.162.1도 loopback SSH의 합성 읽기 전용 턴을
 완료했다. 실제 mixed 프레임을 제품 AppSession에 재생해 nonce 귀속, idle 배지,
 턴 종료와 remote capture 봉인을 확인했다. 이 검증은 화면 PNG나 OS 배너 검증은 아니다.
+
+## SSH 스트림 재접속 검증 계획
+
+동일 이름의 v1/v2 로그를 실제 SSH로 받은 뒤, 수신한 profile별 cursor를 저장한다.
+하네스가 소유한 ControlMaster를 종료해 연결을 끊고, 단절 중 설치된 훅으로 두 포맷의
+새 턴을 기록한다. 새 SSH 연결에 저장한 resume를 전달하여 이전 턴 재생이 없고 새 턴 이벤트가
+각각 한 번 전달되는지 독립 session_id 목록으로 판정한다. 재접속 원문 wire를 제품
+AppSession에 재생하여 최종 idle 배지와 remote capture 봉인을 확인한다.
+이는 GUI 재시도 스케줄러나 터미널 셸 wrapper 자체의 자동 재접속을 입증하지 않는다.
+ACK 없는 전송 도중 종료에서 exactly-once를 보장한다고 주장하지 않는다.
+
+실행 결과: live mixed 스트림이 붙은 소유 ControlMaster 종료를 실제 비정상 SSH 종료로
+확인했다. 단절 중 설치된 Claude 훅에 합성 시작·도구 전후·종료 이벤트를 넣어 v1/v2에
+각각 기록했고, 새 연결에서 8개 이벤트를 각각 한 번 수신했다. 이전 턴은 재생되지 않았다.
+재접속 wire의 제품 AppSession 재생은 idle 배지·원격 캡처 봉인 검사를 통과했다.
+합성 transcript 경로는 귀속 식별자이며 실제 provider transcript 파일을 읽은 증거가 아니다.
+resume를 제거한 결함 대조군에서는 이전 턴이 재생되어 판정자가 실패했다.

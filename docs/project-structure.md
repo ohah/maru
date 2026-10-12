@@ -148,7 +148,7 @@ src/
 
   # 중립 leaf — 어느 facade에도 속하지 않고 여러 층이 함께 import한다(color.zig 결).
   # 한 파일뿐인 범용 leaf는 억지로 한-file 폴더를 만들지 않는다(아래 네이밍 컨벤션).
-  width.zig             코드포인트 셀 폭·wide 렌더 심볼 판정 단일 출처. C 게이트(coretext_smoke.m)와 주석-동기 미러
+  width.zig             코드포인트 셀 폭·wide 렌더 심볼·래스터 배치 역할(`rasterFitFor`) 단일 출처. coretext_smoke.m 은 역할을 `raster_fit` 인자로 받는다(사본 없음)
   display_width.zig     편집기 본문의 표시 폭. `width.cellWidth`(터미널 협상용)를 대체하지 않고 그 위에 편집기 규칙을 얹는다(native-editor-visual-mapping.md §4.2)
   grapheme.zig          한글 grapheme cluster 분절 — NFD conjoining 자모(macOS 파일시스템 기본)를 한 음절로 묶는다
   path_shape.zig        경로 모양 판정(절대·구분자). L1 링크 감지와 L2 경로 가드 양쪽이 필요한데 L1은 L2를 import할 수 없어 최상위에 둔다

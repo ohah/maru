@@ -1098,9 +1098,9 @@ pub fn rebuildSidebar(self: *AppSession) !void {
         // 않는다(사용자 피드백). 범위·기하를 여기서 다시 누적하지 않고 `cardSpanEnd`+`spanRect`를 부른다 —
         // 예전엔 같은 누적이 chrome·platform 두 벌이라 한쪽 인셋만 바꾸면 막대가 밴드 안쪽에 떠 보였다.
         const card_rect = chrome.components.sidebar.spanRect(rows, i, chrome.components.sidebar.cardSpanEnd(rows, i), self.sidebar_width_px, sidebarMetrics(self));
-        // spanRect는 슬롯 상대(헤더 제외)라 헤더 높이를 더해 절대 y로 올린다(헤더 시프트는 platform 단일 책임).
-        // 스크롤은 sidebarScrollClipQuad가 빼므로 여기서 더하지 않는다(이중 차감 방지).
-        const card_top: f32 = @floatFromInt(card_rect.y + @as(i32, @intCast(self.sidebar_header_height_px)));
+        // spanRect는 목록 상대 y다 — 헤더·스크롤은 sidebarScrollClipQuad가 글자 셀과 같은 식으로 반영한다
+        // (여기서 더하면 이중 시프트).
+        const card_top: i32 = card_rect.y;
         const card_h: f32 = @floatFromInt(card_rect.h);
         // ① 배경 tint — **밴드 없는 idle 슬롯에만** 오버레이 quad. 활성/호버/드롭 슬롯은 lowerSidebar가 밴드 색에
         // tint를 blend하므로 여기서 또 그리면 이중 tint(code-review). 카드 rect(=행)·둥근 모서리를 밴드와 맞춘다.
@@ -1153,7 +1153,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
         if (dp.ghost_hi > dp.ghost_lo and dp.ghost_lo < rows.len and slot_h > 0 and self.sidebar_width_px > 0) {
             // 고스트 구간도 카드 rect와 같은 `spanRect`로 잰다(밴드와 한 벌 — 누적을 여기서 다시 굴리지 않는다).
             const ghost_rect = chrome.components.sidebar.spanRect(rows, dp.ghost_lo, dp.ghost_hi, self.sidebar_width_px, sidebarMetrics(self));
-            const top_abs: f32 = @floatFromInt(ghost_rect.y + @as(i32, @intCast(self.sidebar_header_height_px)));
+            const top_abs: i32 = ghost_rect.y; // 목록 상대 — 화면 y는 sidebarScrollClipQuad가 낸다
             const band_h: u32 = ghost_rect.h;
             const is_nest = dp.plan == .group_nest;
             const is_sibling = dp.plan == .group_sibling;
@@ -1191,7 +1191,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                 if (pr < dp.ghost_lo) {
                     // 부모 그룹 상단 ~ 고스트 하단 = rows [pr, ghost_hi) 한 구간 — 같은 spanRect로 잰다.
                     const hl_rect = chrome.components.sidebar.spanRect(rows, pr, dp.ghost_hi, self.sidebar_width_px, sidebarMetrics(self));
-                    const parent_top: f32 = @floatFromInt(hl_rect.y + @as(i32, @intCast(self.sidebar_header_height_px)));
+                    const parent_top: i32 = hl_rect.y; // 목록 상대 — 화면 y는 sidebarScrollClipQuad가 낸다
                     if (sidebarScrollClipQuad(self, parent_top, @floatFromInt(hl_rect.h))) |sr| {
                         const rr: f32 = if (sr.clipped) 0 else @floatFromInt(card_tk.space.corner_radius_px);
                         const hl_fill = packRgbAlpha(card_tk.palette.get(.accent_bar), 0x22); // 타깃 그룹 accent tint(≈13%)
@@ -1328,19 +1328,19 @@ pub fn appendSidebarScrollbar(self: *AppSession) void {
 /// chrome `sidebar.view`가 낸 밴드 fill op을 sidebar 셀(NativeMetalCell)로 lower한다 — fill rect.y / slot_h = 슬롯 행,
 /// role(tab_active_bg/tab_hover_bg) → sidebarActiveBg/HoverBg. sidebarBandCell이 폭을 cell로 floor해 한 칸 밴드로.
 /// (옛 rebuildSidebar의 밴드 emit을 view 경로로 — 색 해석·NativeMetalCell은 platform 책임, divider lowerDividerRules와 동형.)
-/// 슬롯 콘텐츠 GpuQuad(밴드·accent 막대·배경 tint)의 절대 y(슬롯 상대 y + 헤더 시프트는 호출자가 더해 넘김)와
-/// 높이에 사이드바 세로 스크롤을 적용하고 헤더 아래로 클립한다. 헤더 quad(검색 underline·아이콘 호버·배지)는 고정이라
+/// 슬롯 콘텐츠 GpuQuad(밴드·accent 막대·배경 tint)의 **목록 상대** y와 높이를 화면 y로 옮기고(헤더·스크롤 —
+/// `chrome.components.sidebar.listToScreenY`, 호출자는 아무것도 더하지 않는다) 헤더 아래로 클립한다. 헤더 quad(검색 underline·아이콘 호버·배지)는 고정이라
 /// 이걸 안 거친다. 반환 null = 완전히 헤더 위(스킵). clipped=true면 위쪽이 잘려(상단이 헤더 경계에 abut) 호출자가 둥근
-/// 상단 모서리를 죽인다(라운드 quad가 헤더 경계에서 어색하지 않게). 셀(밴드 sentinel·glyph)은 .m이 frame 오프셋으로
-/// 따로 스크롤+scissor하므로 이 경로는 GpuQuad 전용이다(둘 다 같은 sidebar_scroll_offset_px를 쓴다 — 단일 출처).
+/// 상단 모서리를 죽인다(라운드 quad가 헤더 경계에서 어색하지 않게). 글자 셀은 `applySidebarGlyphPyTop`이 같은 식으로
+/// origin_y에 굽고 렌더러 scissor가 자르므로 이 경로는 GpuQuad 전용이다(두 경로가 한 식을 부른다 — 단일 출처).
 ///
 /// **하단은 여기서 자르지 않는다.** 뷰포트 아래(상태바 띠)는 렌더러가 `SidebarScissor`로 셀과 quad를 함께
 /// 자른다 — 안전망을 호출자마다 반복하지 않기 위해서다. 여기 남은 상단 산술은 "라운드 모서리를 죽인다"는
 /// **시각 규칙** 때문이지 안전망이 아니다: scissor는 자를 수 있어도 모서리를 각지게 만들 수는 없다.
-pub fn sidebarScrollClipQuad(self: *const AppSession, abs_y: f32, h: f32) ?struct { y: f32, h: f32, clipped: bool } {
+pub fn sidebarScrollClipQuad(self: *const AppSession, list_y: i32, h: f32) ?struct { y: f32, h: f32, clipped: bool } {
+    // 목록 y → 화면 y 는 글자 셀(`applySidebarGlyphPyTop`)과 같은 식이다 — 헤더·스크롤을 호출자가 따로 더하지 않는다.
     const header: f32 = @floatFromInt(sidebarViewport(self).top);
-    const off: f32 = @floatFromInt(self.sidebar_scroll_offset_px);
-    var y = abs_y - off;
+    var y: f32 = @floatFromInt(chrome.components.sidebar.listToScreenY(list_y, self.sidebar_header_height_px, self.sidebar_scroll_offset_px));
     var hh = h;
     if (y + hh <= header) return null; // 헤더 위로 완전히 스크롤됨 — 안 그림
     var clipped = false;
@@ -1522,10 +1522,9 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
     if (slot_h == 0) return;
     // SG8d: tint 소스 역매핑도 렌더 도메인(카드 드래그 중=preview_rows) — 밴드 op을 낸 view와 같은 rows를 본다.
     const rrows = sidebarRenderRows(self);
-    // gpu_quad(밴드)는 슬롯 상대 y를 절대 좌표로 박으므로 상단 헤더만큼 내려야 한다 — .m이 header_h 시프트하는
-    // 건 사이드바 셀(= 제목 glyph)뿐이라 gpu_quad는 여기서 header_h를 더한다(위치 정합). 좌측 accent 막대는
-    // chrome op이 아니라 카드별 색으로 rebuildSidebar의 per-tab accent 루프가 직접 그린다(배경 tint와 같은 경로).
-    const header_f: f32 = @floatFromInt(self.sidebar_header_height_px);
+    // gpu_quad(밴드)의 y는 목록 상대다 — 헤더·스크롤은 sidebarScrollClipQuad가 글자 셀과 같은 식
+    // (`listToScreenY`)으로 반영한다. 좌측 accent 막대는 chrome op이 아니라 카드별 색으로 rebuildSidebar의 per-tab
+    // accent 루프가 직접 그린다(배경 tint와 같은 경로).
     for (ops) |op| switch (op) {
         .quad => |q| {
             var color = switch (q.fill_role) {
@@ -1560,7 +1559,7 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
                 // 낮췄다. tui 제거로 `Tokens.rich`가 유일 토큰셋이 되어 `shape.corner_radius_px`가 항상 8이고
                 // (`chrome/components/sidebar.zig`의 `bandFill`이 그 값을 그대로 radii에 싣는다), 그 갈래는
                 // 도달할 수 없게 됐다 — 테스트 전 범위·실앱 기본·실앱 그룹 헤더 강제에서 모두 도달 0회로 실측했다.
-                const sr = sidebarScrollClipQuad(self, @as(f32, @floatFromInt(q.rect.y)) + header_f, @floatFromInt(q.rect.h)) orelse continue;
+                const sr = sidebarScrollClipQuad(self, q.rect.y, @floatFromInt(q.rect.h)) orelse continue;
                 // 상단이 헤더에 걸려 잘리면 둥근 모서리를 죽인다(헤더 경계에 abut한 라운드 상단이 어색하지 않게).
                 const radii: [4]f32 = if (sr.clipped) .{ 0, 0, 0, 0 } else .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) };
                 // 드롭 타겟은 불투명 유지(tui 분기와 동일 이유), 나머지 밴드만 window.opacity(quad straight-alpha). 한 번만 계산해 두 fill에 공유.
@@ -2467,16 +2466,27 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
 
 /// 사이드바 **카드 glyph 셀**의 세로 위치(py_top)를 Zig에서 `rowTop` 기반으로 완전 계산해 각 셀 `origin_y`에 싣는다
 /// (docs/sidebar-groups.md §10 옵션2 — SG3b-2-ii-(b)+(d)). .m 렌더러는 옛 `slot_idx*slot_h + 블록중앙` 균일 기하 대신
-/// 이 origin_y에 헤더 시프트·스크롤만 더한다(maru_metal_renderer.m 사이드바 카드 glyph 분기). 그룹 헤더(높이
+/// 이 origin_y를 그대로 그린다(maru_metal_renderer.m 사이드바 카드 glyph 분기). 그룹 헤더(높이
 /// header_row_h<slot_h)가 앞서면 카드 glyph가 헤더 높이만큼 위로 어긋나던 버그(code-review #1·#5·#6)를 닫고,
-/// renameCaretRect의 `(slot_h -| line*ch)/2` 정수 블록중앙과 자동 정합한다(caret·⌘배지 정합). origin_y는 **content
-/// 상대**(헤더·스크롤 제외, ≥0)라 스크롤만 바뀌는 프레임엔 재계산이 필요 없다(.m이 live로 header−scroll 적용 — 밴드와
-/// 같은 단일 스크롤 소스). slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 밴드/배경 셀(slot_id==0)은
-/// 손대지 않는다(그 경로는 row 인덱스·별도 기하). replace/replaceSidebar 직후 metal_buffer.sidebar_cells에 in-place 적용.
+/// renameCaretRect의 `(slot_h -| line*ch)/2` 정수 블록중앙과 자동 정합한다(caret·⌘배지 정합). origin_y는 **화면 y**다 —
+/// 헤더·스크롤까지 `chrome.components.sidebar.listToScreenY`로 반영한다(밴드 quad 의 `sidebarScrollClipQuad`·caret 의
+/// `rowTop` 과 같은 식, ABI 224). 예전에는 목록 상대로 두고 .m 이 헤더−스크롤을 더했다 — 「스크롤만 바뀌면 재계산이
+/// 필요 없다」는 이유였지만 스크롤은 어차피 전체 투영을 일으켜 셀을 매번 다시 만들었으므로 얻는 것이 없었다.
+/// 스크롤은 사이드바 지문(`sidebarSourceKey` 의 chrome 기하)에 들어 있어, 바뀌면 셀도 다시 만들어진다.
+/// slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 밴드/배경 셀(slot_id==0)은 손대지 않는다.
+/// replace/replaceSidebar **성공** 직후 metal_buffer.sidebar_cells에 in-place 적용한다 — 실패한 교체 뒤에 부르면 옛
+/// 셀에 새 스크롤이 들어가 옛 밴드 quad 와 어긋난다.
 pub fn applySidebarGlyphPyTop(self: *AppSession) void {
     // 셀을 제자리로 고친다 — 그 셀을 만든 입력의 지문은 여기서 죽고, 호출자가 이 뒤에 다시 adopt 한다.
     self.metal_buffer.invalidateSidebarSource();
-    fillSidebarGlyphPyTop(self.allocator, self.metal_buffer.sidebar_cells, sidebarRenderRows(self), sidebarMetrics(self));
+    maru.sidebar_glyph_rows.fillScreenOriginY(
+        self.allocator,
+        self.metal_buffer.sidebar_cells,
+        sidebarRenderRows(self),
+        sidebarMetrics(self),
+        self.sidebar_header_height_px,
+        self.sidebar_scroll_offset_px,
+    );
     // 가로 자리도 Zig 가 정한다 — 렌더러는 `origin_x + col×cw` 를 그대로 그린다. 그 값은 hit-test(`closeXRange`)·
     // rename caret 과 같은 `Columns.text_offset_px` 다(여기서 따로 셈하면 그리는 자리와 누르는 자리가 다시 갈린다).
     const offset_px: u32 = if (sidebarColumns(self)) |cl| cl.text_offset_px else 0;

@@ -1449,13 +1449,11 @@ bool maru_metal_renderer_draw(
         //    (py=row×slot_h, 높이 slot_h). 카드 glyph(slot_id≠0)는 **세로 위치를 Zig가 origin_y에 실어 준다**
         //    (app_session.applySidebarGlyphPyTop: rowTop 기반 content-상대 py = Σ앞선 row 높이 + 블록중앙 + 줄오프셋).
         //    옛 균일 인코딩(row=slot*32… → slot×slot_h + 블록중앙)은 그룹 헤더가 slot보다 낮아 카드가 위로 어긋나
-        //    폐기했다(SG3b-2-ii, code-review #1·#5·#6). 여기선 origin_y에 헤더 시프트·스크롤만 더한다. 좌측 여백 cw×0.5.
+        //    폐기했다(SG3b-2-ii, code-review #1·#5·#6). **origin_x·origin_y는 이미 화면 좌표다** — 헤더 시프트·스크롤
+        //    (`chrome.components.sidebar.listToScreenY`, ABI 224)과 칸 미만 여백(ABI 223)을 Zig가 반영한다. 렌더러는
+        //    그대로 그리고, 헤더 위로 샌 셀은 아래 scissor가 자른다(구간도 Zig가 정한다). 예전에는 여기서 헤더−스크롤을
+        //    더했는데 같은 식이 밴드 quad·caret 쪽 Zig 에도 있어 셋이 따로 움직일 수 있었다.
         const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
-        // 상단 헤더(검색바·아이콘)만큼 셀을 아래로 밀고, 사이드바 세로 스크롤만큼 위로 당긴다(카드가 헤더 아래 뷰포트를
-        // 넘으면 스크롤). 헤더 glyph는 터미널 셀 패스(origin 0,0)라 여기 안 걸려 고정된다. scroll>0이면 아래 scissor가
-        // 헤더 위로 샌 카드를 자른다(밴드/glyph 둘 다 이 패스라 함께 클립).
-        const float sidebar_header_px = (float)sidebar_header_height_px;
-        const float sidebar_scroll = (float)sidebar_scroll_offset_px;
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
             float py_top, cell_h, sx_origin;
@@ -1464,14 +1462,15 @@ bool maru_metal_renderer_draw(
                 // 격자로 어긋났다(code-review #7). 이제 lowerSidebar가 chrome content-상대 rowTop을 origin_y로, 실제 row
                 // 높이를 atlas_height_px로 실어 준다(glyph 옵션2와 동형). 여기선 헤더 시프트·스크롤만 더한다 — 밴드/glyph
                 // 단일 스크롤 소스. past-end(리스트 아래 새 워크스페이스 드롭 행)도 origin_y=contentHeight로 정상 방출(#8).
-                py_top = (float)sc.origin_y + sidebar_header_px - sidebar_scroll;
+                // (rich 이후 사이드바 셀은 글자뿐이라 이 갈래는 비어 있다 — 판정자가 개수 0 을 고정한다.)
+                py_top = (float)sc.origin_y;
                 cell_h = (sc.atlas_height_px > 0u) ? (float)sc.atlas_height_px : slot_h;
                 sx_origin = 0.0f;
             } else { // 카드 glyph — 세로 위치(블록중앙 포함 content-상대 py)는 Zig가 origin_y에 실어 준다(가변 높이, SG3b-2-ii)
                 // 옛 균일 기하(slot_idx*slot_h + 블록중앙)를 폐기: 그룹 헤더(header_row_h<slot_h)가 앞서면 카드가 헤더
                 // 높이만큼 위로 어긋났다(code-review #1·#5·#6). 이제 applySidebarGlyphPyTop이 rowTop 기반 py를 origin_y에
-                // 넣고(헤더·스크롤 제외 content 상대), 여기선 헤더 시프트·세로 스크롤만 더한다 — 밴드와 같은 단일 스크롤 소스.
-                py_top = (float)sc.origin_y + sidebar_header_px - sidebar_scroll;
+                // 넣는다 — 헤더·스크롤까지 반영한 화면 y다(밴드 quad 와 같은 식).
+                py_top = (float)sc.origin_y;
                 cell_h = ch;
                 // 가로 자리는 Zig가 origin_x에 싣는다(칸 미만 여백 — `chrome.components.sidebar.Columns.text_offset_px`).
                 // 예전에는 여기서 `cw*0.5`를 더했는데 hit-test·IME caret이 그 반 칸을 몰라, ✕가 누르는 칸보다 반 칸

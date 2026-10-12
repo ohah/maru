@@ -317,7 +317,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 223: 사이드바 카드 glyph 셀의 `origin_x` 가 의미를 갖는다 — 칸 미만 여백(`chrome.components.sidebar.Columns.text_offset_px`,
 // macOS 는 반 칸). .m 은 예전에 이 필드를 무시하고 `cw*0.5` 를 직접 더했다(hit-test·IME caret 과 반 칸 어긋남). layout 은
 // 그대로지만 낡은 .m 은 여백을 두 번 더하거나(새 Zig) 안 더하므로(새 .m + 옛 Zig) 짝이 같이 올라가야 한다.
-pub const abi_version: u32 = 223;
+// 224: 사이드바 카드 glyph 셀의 `origin_y` 가 목록 상대에서 **화면 y** 로 바뀐다 — 헤더·스크롤을 Zig 가
+// `chrome.components.sidebar.listToScreenY`(밴드 quad·caret 과 같은 식)로 반영하고 .m 은 그대로 그린다. layout 은
+// 그대로지만 낡은 .m 은 헤더−스크롤을 한 번 더 더하므로 짝이 같이 올라가야 한다.
+pub const abi_version: u32 = 224;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -22792,9 +22795,11 @@ pub const AppSession = struct {
                         const sidebar_replaced = if (self.metal_buffer.replaceSidebar(self.allocator, sidebar_frame, sidebar_colors, self.renderer_state.atlas.config)) |_| blk: {
                             self.glyph_placement.commit(); // 사이드바 배치의 업로드가 metal_buffer 로 넘어갔다
                             self.metal_buffer.stampChromeGeometry(self.chromeGeometrySnapshot());
+                            // 카드 glyph 화면 y(헤더·스크롤 포함)를 **교체가 성공했을 때만** 굽는다 — 실패면 버퍼는 옛 셀과
+                            // 옛 밴드 quad를 들고 있으므로, 여기서 새 스크롤을 넣으면 글자만 옮겨 간다(스탬프와 같은 트랜잭션).
+                            sidebar_ops.applySidebarGlyphPyTop(self);
                             break :blk true;
                         } else |_| false;
-                        sidebar_ops.applySidebarGlyphPyTop(self); // chrome-only 부분 경로도 카드 glyph py_top 정합(가변 높이 — SG3b-2-ii)
                         // 교체에 **성공했을 때만** 입력을 기억한다 — 실패면 버퍼는 옛 셀을 들고 있다.
                         if (sidebar_layout_at) |at| if (sidebar_replaced and
                             sidebar_ops.sidebarLayoutUnchanged(self, self.chromeGeometrySnapshot(), self.sidebar_source_scratch.items[at..], &self.sidebar_layout_scratch))
@@ -66488,6 +66493,96 @@ test "sidebar ✕: 투영된 ✕ 셀의 그리는 자리가 클릭 구간과 같
     _ = session.hoverCursor(press_x, slot0_y, 0);
     session.mouse(1, press_x, slot0_y, 0, 0);
     try std.testing.expectEqual(@as(usize, 1), session.tabs.items.len);
+}
+
+// **글자 셀의 세로 자리는 caret·hit-test(`rowTop`)·밴드 quad 와 같은 식이다**(`listToScreenY`). 예전에는 셀이 목록
+// 상대 y 만 들고 .m 이 헤더−스크롤을 더했다 — 같은 식이 세 곳에 있어 한쪽만 바뀌면 글자와 밴드가 갈렸다.
+// 여기서는 **투영된 셀**이 헤더 아래 자기 행 안에 있고, 스크롤한 만큼 정확히 올라가는지를 잰다.
+test "sidebar 세로: 투영된 카드 글자 셀은 화면 y 로 나오고, 스크롤한 만큼 rowTop 과 함께 올라간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영 + 실 PTY
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    // 목록이 뷰포트를 넘게 창을 낮추고 탭을 늘린다(스크롤이 생겨야 이 판정이 무엇이든 잰다).
+    _ = try session.resize(1200, 320, 1000);
+    var added: usize = 0;
+    while (added < 8 and sidebar_ops.sidebarMaxScroll(session) == 0) : (added += 1) {
+        _ = try tab_ops.createTab(
+            session,
+            .{ .command = "/bin/sh", .args = &.{ "-c", "cat" }, .size = .{ .cols = 40, .rows = 10 } },
+            .{ .cols = 40, .rows = 10 },
+            16,
+            "tab",
+            "sh",
+        );
+        try sidebar_ops.rebuildSidebar(session);
+    }
+    const max_scroll = sidebar_ops.sidebarMaxScroll(session);
+    try std.testing.expect(max_scroll > 0);
+    const H = struct {
+        fn project(s: *AppSession) !void {
+            s.metal_dirty = true;
+            for (0..4) |_| {
+                _ = try s.tick();
+                if (!s.metal_dirty) break;
+            }
+        }
+        /// 슬롯별 이름줄 셀의 y(첫 셀). 슬롯 수만큼 담는다 — 없는 슬롯은 null.
+        fn nameYs(s: *AppSession, out: []?u32) void {
+            @memset(out, null);
+            for (s.metal_buffer.sidebar_cells) |c| {
+                if (c.slot_id == 0) continue;
+                const d = maru.sidebar_glyph_rows.decode(c.row);
+                if (d.line_index != 0 or d.slot >= out.len) continue;
+                if (out[d.slot] == null) out[d.slot] = c.origin_y;
+            }
+        }
+    };
+    const header = session.sidebar_header_height_px;
+    const m = sidebar_ops.sidebarMetrics(session);
+    var ys0: [16]?u32 = undefined;
+    var ys1: [16]?u32 = undefined;
+
+    try H.project(session);
+    H.nameYs(session, &ys0);
+    // 행 목록은 투영(=rebuildSidebar)이 다시 채우므로 **투영 뒤에** 읽는다 — 앞에서 잡은 슬라이스는 재할당으로 무효일 수 있다.
+    const rows = sidebar_ops.sidebarRenderRows(session);
+    // 렌더러가 헤더·스크롤을 안 더하므로 사이드바 셀은 글자뿐이어야 한다(밴드 갈래 개수 0 — `.m` 주석의 전제).
+    var non_glyph: usize = 0;
+    for (session.metal_buffer.sidebar_cells) |c| non_glyph += @intFromBool(c.slot_id == 0);
+    try std.testing.expectEqual(@as(usize, 0), non_glyph);
+    // 스크롤 0: 각 이름줄은 **헤더 아래 자기 행 안**에 있다(목록 상대 y 였다면 헤더 높이만큼 위였다).
+    var checked: usize = 0;
+    for (ys0[0..@min(rows.len, ys0.len)], 0..) |maybe_y, slot| {
+        const y = maybe_y orelse continue;
+        const top = chrome.components.sidebar.rowTop(rows, slot, header, m, 0);
+        const bottom = top + chrome.components.sidebar.rowHeight(rows[slot], m);
+        try std.testing.expect(@as(i64, y) >= top and @as(i64, y) < bottom);
+        try std.testing.expect(y >= header);
+        checked += 1;
+    }
+    try std.testing.expect(checked >= 2); // 개수로 확인 — 0 이면 위 루프가 아무것도 안 쟀다
+
+    // 스크롤 S: 같은 이름줄이 정확히 S 만큼 올라간다(rowTop 도 같은 S 만큼). 헤더 아래 남는 줄만 잰다.
+    const scroll: u32 = @min(max_scroll, m.line_h);
+    sidebar_ops.setSidebarScrollOffsetPx(session, scroll);
+    try std.testing.expectEqual(scroll, session.sidebar_scroll_offset_px);
+    try H.project(session);
+    H.nameYs(session, &ys1);
+    const rows1 = sidebar_ops.sidebarRenderRows(session);
+    try std.testing.expectEqual(rows.len, rows1.len); // 스크롤은 행을 바꾸지 않는다
+    var moved: usize = 0;
+    for (ys0[0..@min(rows1.len, ys0.len)], ys1[0..@min(rows1.len, ys1.len)], 0..) |a, b, slot| {
+        const y0 = a orelse continue;
+        const y1 = b orelse continue;
+        if (y0 < header + scroll) continue; // 헤더 위로 넘어간 줄은 0 으로 눌린다(scissor 가 자르는 자리)
+        try std.testing.expectEqual(y0 - scroll, y1);
+        const top_s = chrome.components.sidebar.rowTop(rows1, slot, header, m, scroll);
+        try std.testing.expectEqual(@as(i64, y0) - chrome.components.sidebar.rowTop(rows1, slot, header, m, 0), @as(i64, y1) - top_s);
+        moved += 1;
+    }
+    try std.testing.expect(moved >= 1);
 }
 
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS

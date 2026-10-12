@@ -452,7 +452,7 @@ pub fn scrollWheel(self: *AppSession, delta_y: f64, delta_x: f64, precise: bool,
             const clamped: u32 = @intCast(std.math.clamp(next, 0, @as(i64, max)));
             if (clamped != self.sidebar_scroll_offset_px) { // 실제로 움직였을 때만 재배치
                 self.sidebar_scroll_offset_px = clamped;
-                sidebar_ops.rebuildSidebar(self) catch {}; // 밴드·tint quad를 새 오프셋으로 재배치(셀은 .m이 frame 오프셋으로 자동, 스크롤바는 per-frame)
+                sidebar_ops.rebuildSidebar(self) catch {}; // 밴드·tint quad를 새 오프셋으로 재배치(글자 셀은 다음 전체 투영이 같은 식으로 다시 굽는다, 스크롤바는 per-frame)
                 self.metal_dirty = true;
             }
         }

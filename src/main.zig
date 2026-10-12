@@ -14898,7 +14898,7 @@ fn runAgentEvents(
             return;
         },
         .usage_error => {
-            try stderr.writeAll("maru agent-events: --stdio and an absolute --dir= are required; --dir, --heartbeat-ms, --resume and --log-format may only be specified once\n");
+            try stderr.writeAll("maru agent-events: --stdio and an absolute --dir= are required; --dir, --heartbeat-ms, --resume and --log-format may only be specified once; use one cursor per file name (per profile in mixed mode)\n");
             try stderr.flush();
             return error.UnknownCommand;
         },
@@ -14930,7 +14930,11 @@ fn runAgentEvents(
         };
     } else {
         (if (opts.log_format == .v2) ae.seedGenerationCursors(allocator, opts.resume_spec, cursors) else ae.seedResumeCursors(allocator, opts.resume_spec, cursors)) catch |err| switch (err) {
-            error.DuplicateResume, error.InvalidResume => return error.UnknownCommand,
+            error.DuplicateResume, error.InvalidResume => {
+                try stderr.writeAll("maru agent-events: invalid resume; use one cursor per file name\n");
+                try stderr.flush();
+                return error.UnknownCommand;
+            },
             else => return err,
         };
     }

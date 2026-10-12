@@ -186,6 +186,12 @@ def verify(cli, root):
         for flag in ['--help', '-h']:
             p = run(['agent-events', '--stdio', f'--dir={stream_dirs[0]}', f'--resume={spec}', flag], 0)
             assert 'Each resume file name may only appear once' in p.stdout
+    # Mixed resumes also reject duplicates within a profile before any cleanup.
+    for spec in ['1:a:0,1:a:1',
+                 '2:a:0:00112233445566778899aabbccddeeff,2:a:1:00112233445566778899aabbccddeeff']:
+        p = run(['agent-events', '--stdio', f'--dir={streams}',
+                 '--log-format=mixed', f'--resume={spec}'], 1)
+        assert not p.stdout and 'one cursor per file name' in p.stderr
     after = {str(p): (p.lstat().st_mode, p.read_bytes() if p.is_file() else None)
              for p in streams.rglob('*')}
     assert before == after, 'rejected stream options started log cleanup'

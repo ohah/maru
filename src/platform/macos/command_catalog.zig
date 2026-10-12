@@ -48,6 +48,7 @@ pub const entries = [_]Entry{
     // 언어 서버 도구 환경(계획 WT3b) — 셸 설정을 고친 뒤 다시 읽는다.
     .{ .action = .lsp_reload_shell_environment, .key = "lsp_reload_shell_environment", .title = "Language Server: Reload Shell Environment", .search_ko = "언어 서버 셸 환경 다시 읽기" },
     .{ .action = .lsp_show_server_info, .key = "lsp_show_server_info", .title = "Language Server: Show Server Info", .search_ko = "언어 서버 정보 실행 파일 버전 보기" },
+    .{ .action = .show_formatter_info, .key = "show_formatter_info", .title = "Editor: Show Formatter Info", .search_ko = "포매터 정보 실행 파일 설정 보기 프리티어" },
     .{ .action = .lsp_show_environment_names, .key = "lsp_show_environment_names", .title = "Language Server: Show Environment Variable Names", .search_ko = "언어 서버 환경 변수 이름 보기 제외" },
     .{ .action = .new_editor_tab, .key = "new_editor_tab", .title = "New Editor Tab", .search_ko = "새 편집기 탭" },
     .{ .action = .open_file_panel, .key = "open_file_panel", .title = "Open File Panel…", .search_ko = "파일 패널 열기" },

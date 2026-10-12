@@ -278,6 +278,18 @@ fn applyKey(
         try env_overrides.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, value }));
         return;
     }
+    if (std.mem.startsWith(u8, key, "editor.formatter.")) {
+        // 외부 포매터(tooling §8.2t): editor.formatter.<언어> = auto|lsp|off|prettier. 모르는 언어·값은 forgiving(진단 + 기존 값).
+        const idx = theme.formatterLanguageIndex(key["editor.formatter.".len..]) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "editor.formatter.<언어>의 언어 이름을 모른다 — 무시" });
+            return;
+        };
+        config.editor.formatter[idx] = std.meta.stringToEnum(theme.FormatterChoice, value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "editor.formatter.<언어>는 auto|lsp|off|prettier — 기존 값 유지" });
+            return;
+        };
+        return;
+    }
     // shell.command는 스키마-주도로 이주(CS-2) — 아래 schema.tryParse가 처리. shell.args만 특수(공백-토큰 리스트).
     if (std.mem.eql(u8, key, "shell.args")) {
         // 공백으로 토큰 분리해 argv로(따옴표 미지원 — 셸 플래그는 단순). 빈 값이면 인자 없음(&.{}). 줄 여러 번이면 마지막이 이김.
@@ -3205,6 +3217,25 @@ test "SC3 theme.syntax.<역할>: 유효 색은 실리고, 틀린 색·모르는 
     // 틀린 색은 그 역할을 **파생인 채로** 둔다(끄지 않는다).
     try std.testing.expect(t.syntax[@intFromEnum(theme.SyntaxRole.string)] == null);
     // 진단이 둘(틀린 색·모르는 역할) — 조용히 삼키지 않는다.
+    try std.testing.expect(parsed.diagnostics.len >= 2);
+}
+
+test "EXF5 editor.formatter.<언어> (tooling §8.2t): 알려진 값은 실리고 기본은 auto, 모르는 언어·값은 forgiving(진단 + 기존 값)" {
+    const a = std.testing.allocator;
+    var parsed = try parse(a,
+        \\editor.formatter.typescript = prettier
+        \\editor.formatter.markdown = off
+        \\editor.formatter.python = lsp
+        \\editor.formatter.json = nope
+        \\editor.formatter.cobol = prettier
+    );
+    defer parsed.deinit();
+    const f = parsed.config.editor.formatter;
+    try std.testing.expectEqual(theme.FormatterChoice.prettier, f[theme.formatterLanguageIndex("typescript").?]);
+    try std.testing.expectEqual(theme.FormatterChoice.off, f[theme.formatterLanguageIndex("markdown").?]);
+    try std.testing.expectEqual(theme.FormatterChoice.lsp, f[theme.formatterLanguageIndex("python").?]);
+    try std.testing.expectEqual(theme.FormatterChoice.auto, f[theme.formatterLanguageIndex("json").?]); // 틀린 값 — 기본 그대로
+    try std.testing.expectEqual(theme.FormatterChoice.auto, f[theme.formatterLanguageIndex("tsx").?]);
     try std.testing.expect(parsed.diagnostics.len >= 2);
 }
 

@@ -216,6 +216,8 @@ pub const editor = struct {
     pub const open = @import("session/editor/open.zig");
     /// N1.5: diff 본문의 줄 대응(§7 — git은 두 쪽 전문만 주고 대응은 여기서 만든다).
     pub const diff = @import("session/editor/diff.zig");
+    /// 외부 포매터(tooling §8.2t) — 설정 값·Prettier 감지·argv·결과를 덩어리 편집으로.
+    pub const external_format = @import("session/editor/external_format.zig");
     pub const diff_state = @import("session/editor/diff_state.zig");
     pub const intraline = @import("session/editor/intraline.zig");
     pub const fold = @import("session/editor/fold.zig");

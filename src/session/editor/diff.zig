@@ -184,6 +184,50 @@ pub fn compute(
     return .{ .compare = .{ .left = left_rows, .right = right_rows, .changed = changed } };
 }
 
+/// 줄 대응의 바뀐 덩어리 — 줄 번호(0 부터)이고 끝은 포함하지 않는다. 삭제·추가가 붙은 한 줄기가 덩어리 하나다.
+pub const Hunk = struct { old_start: usize, old_end: usize, new_start: usize, new_end: usize };
+
+/// 두 줄 배열의 바뀐 덩어리들(`compute` 와 같은 Myers 대응 — 양 끝의 같은 줄을 먼저 떼어 낸다). 편집으로 옮길 때 쓴다(외부
+/// 포매터의 결과를 문서에 적용 — tooling §8.2t). 대응을 못 만들 만큼 크면(`max_edits`·`max_trace_bytes`) `null`, 같으면 빈 조각.
+/// 호출자가 해제한다.
+pub fn hunks(allocator: std.mem.Allocator, left_lines: []const []const u8, right_lines: []const []const u8, opts: Options) error{OutOfMemory}!?[]Hunk {
+    var head: usize = 0;
+    while (head < left_lines.len and head < right_lines.len and
+        std.mem.eql(u8, left_lines[head], right_lines[head])) : (head += 1)
+    {}
+    var tail: usize = 0;
+    while (tail < left_lines.len - head and tail < right_lines.len - head and
+        std.mem.eql(u8, left_lines[left_lines.len - 1 - tail], right_lines[right_lines.len - 1 - tail])) : (tail += 1)
+    {}
+    const script = try scriptFor(allocator, left_lines[head .. left_lines.len - tail], right_lines[head .. right_lines.len - tail], opts.max_edits, head, tail) orelse return null;
+    defer allocator.free(script);
+    var out: std.ArrayList(Hunk) = .empty;
+    errdefer out.deinit(allocator);
+    var li: usize = 0;
+    var ri: usize = 0;
+    var i: usize = 0;
+    while (i < script.len) {
+        if (script[i] == .equal) {
+            li += 1;
+            ri += 1;
+            i += 1;
+            continue;
+        }
+        var h: Hunk = .{ .old_start = li, .old_end = li, .new_start = ri, .new_end = ri };
+        while (i < script.len and script[i] != .equal) : (i += 1) {
+            switch (script[i]) {
+                .delete => li += 1,
+                .insert => ri += 1,
+                .equal => unreachable,
+            }
+        }
+        h.old_end = li;
+        h.new_end = ri;
+        try out.append(allocator, h);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 // ── Myers ───────────────────────────────────────────────────────────────────────
 
 const Op = enum { equal, delete, insert };
@@ -802,4 +846,41 @@ test "빈 문서 둘은 변경 없음이다" {
     var v = try compute(testing.allocator, &.{}, &.{}, .{});
     defer if (v == .compare) v.compare.deinit(testing.allocator);
     try expectView(v, .unchanged);
+}
+
+test "DFH1 바뀐 덩어리 — 떨어진 두 곳은 덩어리 둘(사이의 같은 줄은 안 든다), 삭제·추가가 붙으면 하나, 같으면 빈 조각, 한쪽이 비어도 (외부 포매터 — tooling §8.2t)" {
+    const a = testing.allocator;
+    {
+        const hs = (try hunks(a, &.{ "a\n", "b\n", "c\n", "d\n", "e\n" }, &.{ "A\n", "b\n", "c\n", "d\n", "E\n", "F\n" }, .{})).?;
+        defer a.free(hs);
+        try testing.expectEqual(@as(usize, 2), hs.len);
+        try testing.expectEqual(Hunk{ .old_start = 0, .old_end = 1, .new_start = 0, .new_end = 1 }, hs[0]);
+        try testing.expectEqual(Hunk{ .old_start = 4, .old_end = 5, .new_start = 4, .new_end = 6 }, hs[1]);
+    }
+    {
+        const hs = (try hunks(a, &.{ "x\n", "y\n" }, &.{ "x\n", "y\n" }, .{})).?;
+        defer a.free(hs);
+        try testing.expectEqual(@as(usize, 0), hs.len);
+    }
+    {
+        const hs = (try hunks(a, &.{}, &.{ "n\n", "m\n" }, .{})).?;
+        defer a.free(hs);
+        try testing.expectEqual(@as(usize, 1), hs.len);
+        try testing.expectEqual(Hunk{ .old_start = 0, .old_end = 0, .new_start = 0, .new_end = 2 }, hs[0]);
+    }
+    {
+        // 가운데 줄만 지웠다.
+        const hs = (try hunks(a, &.{ "a\n", "b\n", "c\n" }, &.{ "a\n", "c\n" }, .{})).?;
+        defer a.free(hs);
+        try testing.expectEqual(@as(usize, 1), hs.len);
+        try testing.expectEqual(Hunk{ .old_start = 1, .old_end = 2, .new_start = 1, .new_end = 1 }, hs[0]);
+    }
+    // 대응을 못 만들 만큼 크면 null(상한을 작게 주입).
+    try testing.expect((try hunks(a, &.{ "a\n", "b\n", "c\n", "d\n" }, &.{ "w\n", "x\n", "y\n", "z\n" }, .{ .max_edits = 1 })) == null);
+    try testing.checkAllAllocationFailures(a, struct {
+        fn f(al: std.mem.Allocator) !void {
+            const hs = (try hunks(al, &.{ "a\n", "b\n", "c\n" }, &.{ "a\n", "B\n", "c\n", "d\n" }, .{})) orelse return;
+            al.free(hs);
+        }
+    }.f, .{});
 }

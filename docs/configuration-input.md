@@ -114,7 +114,7 @@ keybind = F4 = esc:[2J
   §8.2b. **기본 chord 없음** — VS Code 의 `⌘K ⌘I` 는 두 단계 chord 라 키 계약에 없다)·`goto_references`(`⇧F12` — 참조 피커, §8.2l)·`goto_implementation`·`goto_type_definition`·`goto_declaration`(**기본 chord 없음** — 팔레트만, §8.2m)·`goto_definition`(`F12`·`⌘클릭` — 언어 서버의
   정의로, §8.2c)·`navigate_back`·`navigate_forward`(`⌃-`·`⌃⇧-` — 이동 스택 뒤로/앞으로, [시각 매핑](native-editor-visual-mapping.md) §5.2;
   편집기 Term 에서만 — 터미널에서는 `⌃-` 가 PTY 로 간다)·`trigger_parameter_hints`(`⇧⌘Space` — 시그니처 힌트, §8.2d)·
-  `format_document`(`⇧⌥F` — 언어 서버로 문서 전체 포맷, §8.2e; 서버가 포맷을 못 하면 무동작; 저장 시 포맷은 설정 `editor.format-on-save` — §8.2r)·
+  `format_document`(`⇧⌥F` — 언어 서버로 문서 전체 포맷, §8.2e; 서버가 포맷을 못 하면 무동작; 외부 포매터가 정해진 언어는 그것 — `editor.formatter.<언어>`, §8.2t; 저장 시 포맷은 설정 `editor.format-on-save` — §8.2r)·
   `rename_symbol`(`F2` — caret 아래 낱말을 씨앗으로 상자를 열고 `Enter` 면 언어 서버의 rename; 여러 파일이면 관련 파일 전부 저장, §8.2f)·
   `undo_workspace_edit`(기본 chord 없음 — 팔레트 「Editor: Undo Last Rename」; 마지막 rename 의 모든 파일이 그대로일 때만 되돌린다)·
   `trigger_suggest`(`⌃Space`·`⌥Esc` — 자동완성 목록을 지금 자리에서 연다, §8.2g; 설정 `editor.quick-suggestions` 를 꺼도 온다)·

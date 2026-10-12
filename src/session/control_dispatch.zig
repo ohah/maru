@@ -220,7 +220,11 @@ pub fn dispatchAuthenticatedAnchored(
         if (std.mem.eql(u8, m.namespace, clt.namespace)) {
             if (clt.opFor(m.rest)) |op| {
                 if (selector != null) return .{ .immediate = try errorResponse(gpa, req.id, .unauthorized) };
-                const params_ok = if (op == .list) clt.checkListParams(req.params) else if (clt.parseTarget(req.params)) |_| {} else |e| e;
+                const params_ok = switch (op) {
+                    .list => clt.checkListParams(req.params),
+                    .log => if (clt.parseLogParams(req.params)) |_| {} else |e| e,
+                    .revoke, .forget => if (clt.parseTarget(req.params)) |_| {} else |e| e,
+                };
                 params_ok catch return .{ .immediate = try errorResponse(gpa, req.id, .invalid_params) };
                 return .{ .lsp_trust = op };
             }
@@ -977,4 +981,11 @@ test "WT4b lsp.trust.*: 셀렉터 없는 연결은 L4 로 넘기고(params 검�
     try expectImmediateCode(try lspDispatch(revoke, 10, n_all), .unauthorized);
     // 부여 메서드는 없다 — 이름이 무엇이든 method_not_found.
     try expectImmediateCode(try lspDispatch(grant, null, null), .method_not_found);
+    // 감사 기록 조회(계획 workspace-trust-audit TA2) — 같은 관문: 셀렉터 없으면 L4, 있으면 unauthorized, limit 이 틀리면 invalid_params.
+    const log = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"lsp.trust.log\",\"params\":{\"limit\":10}}";
+    try expectLspOp(try lspDispatch(log, null, null), .log);
+    try expectLspOp(try lspDispatch("{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"lsp.trust.log\"}", null, null), .log);
+    try expectImmediateCode(try lspDispatch(log, 10, null), .unauthorized);
+    try expectImmediateCode(try lspDispatch("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"lsp.trust.log\",\"params\":{\"limit\":0}}", null, null), .invalid_params);
+    try expectImmediateCode(try lspDispatch("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"lsp.trust.log\",\"params\":{\"path\":\"/r\"}}", null, null), .invalid_params);
 }

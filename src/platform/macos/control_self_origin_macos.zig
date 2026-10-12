@@ -82,6 +82,17 @@ pub fn procInfo(pid: i32) ?so.ProcInfo {
     };
 }
 
+extern "c" fn proc_name(pid: c_int, buffer: ?*anyopaque, buffersize: u32) c_int;
+
+/// 그 프로세스의 실행 파일 이름(`proc_name` — `p_name`, 최대 32 바이트). 못 읽으면(끝났다·남의 것) `null`. 신뢰 감사 기록의 컨트롤 상대
+/// (계획 workspace-trust-audit TA2)가 쓴다.
+pub fn procName(pid: i32, buf: *[64]u8) ?[]const u8 {
+    if (pid <= 0) return null;
+    const n = proc_name(pid, buf, buf.len);
+    if (n <= 0) return null;
+    return buf[0..@intCast(n)];
+}
+
 pub fn sessionOf(pid: i32) ?i32 {
     const sid = getsid(pid);
     return if (sid > 0) sid else null;
@@ -118,6 +129,15 @@ test "자기 프로세스의 정보가 OS 와 맞는다 — 구조체 레이아�
     try std.testing.expectEqual(c.getuid(), info.uid);
     try std.testing.expect(info.start_us > 0 and info.start_us <= nowUs());
     try std.testing.expectEqual(getsid(me), sessionOf(me).?);
+}
+
+test "자기 프로세스의 실행 파일 이름 — 판정자 바이너리 이름(`test`)이고, 없는 pid 는 이름이 없다" {
+    var buf: [64]u8 = undefined;
+    const name = procName(c.getpid(), &buf) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(name.len > 0 and name.len <= 32);
+    try std.testing.expect(std.mem.indexOfScalar(u8, name, 0) == null);
+    try std.testing.expect(procName(0, &buf) == null);
+    try std.testing.expect(procName(-1, &buf) == null);
 }
 
 test "socketpair 의 peer pid 는 그 소켓에 쓴 자기 자신이다" {

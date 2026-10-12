@@ -18,7 +18,7 @@
 
 | 루트 | 현재 형태 | 점검 판단 |
 | --- | --- | --- |
-| editor | open, lsp trust list/revoke/forget | 에디터 제품 명령이 같은 namespace다. `-l`/`-c`와 long alias 지원. 반복 editor는 거부한다. |
+| editor | open, lsp trust list/revoke/forget/log | 에디터 제품 명령이 같은 namespace다. `-l`/`-c`와 long alias 지원. 반복 editor는 거부한다. |
 | lsp | trust list/revoke/forget | editor lsp와 같은 helper를 쓰는 명시적 호환 별칭. 다른 editor 기능을 여기에 추가하지 않는다. |
 | browser | list, navigate, get-url, exec, get-cookies, set-cookie, delete-cookie, get-local-storage, set-local-storage, remove-local-storage, clear-storage, click, type, scroll, wait, screenshot, snapshot, console | 18개 verb가 browser namespace 및 자체 help에 있다. root description은 옛 4개 verb만 적어 설명이 낡았다. |
 | sessions | list | surface 목록 계약의 독립 명령. session과 singular/plural 구분이 문서화돼 있다. |

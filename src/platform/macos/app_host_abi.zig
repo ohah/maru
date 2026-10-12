@@ -7072,6 +7072,7 @@ const control_hello_caps = [_][]const u8{
     "lsp.trust.list",
     "lsp.trust.revoke",
     "lsp.trust.forget",
+    "lsp.trust.log", // 감사 기록 조회(계획 workspace-trust-audit TA2 — 읽기만)
     // 빠져 있던 둘(W9b① 에서 「모든 메서드를 광고」 시험으로 찾았다)과 W9b① 의 방문 기록.
     "browser.snapshot",
     "browser.console",
@@ -7205,7 +7206,13 @@ fn handleControlRequest(
         //     drainGrantPrompts가 결정 시 grant+재구동 or unauthorized(§9.2 Model B). 수단 없으면 즉시 unauthorized(1c-1).
         .needs_grant => |g| handleNeedsGrant(server, pending, g, now_ns),
         // WT4b: lsp.trust.* — 앱 전역 신뢰 표로 즉시 답한다(창이 없어도 — 표는 창의 것이 아니다).
-        .lsp_trust => server.resolveRequest(pending, editor_lsp_ops.controlTrust(server.cross_gpa, appHostIo(), firstAppSession(refs), pending.request_bytes)),
+        .lsp_trust => {
+            // 감사 기록의 상대(계획 workspace-trust-audit TA2) — 이 요청 프레임을 쓴 프로세스(`LOCAL_PEERPID` 는 그 소켓을 마지막으로 다룬
+            // 프로세스라, 연결 스레드가 프레임을 읽은 직후인 지금이 그것에 가장 가깝다 — 1g 와 같은 한계).
+            var name_buf: [64]u8 = undefined;
+            const peer = lspTrustPeer(pending.connection_fd, &name_buf);
+            server.resolveRequest(pending, editor_lsp_ops.controlTrust(server.cross_gpa, appHostIo(), firstAppSession(refs), pending.request_bytes, peer));
+        },
     }
 }
 
@@ -7378,6 +7385,13 @@ fn drainGrantPrompts(server: *control_server_mod.ControlServer, refs: []const Co
 
 /// grant 확인 모달을 띄울 폴백 AppSession — refs 중 첫 non-null 창. `appSessionOwningSurface`가 대상 창을 못 찾을 때
 /// (surface 닫힘 등)만 쓰인다. 창 없으면 null(헤드리스).
+/// 컨트롤 연결의 소켓 상대 — pid 와 실행 파일 이름. 이름을 못 읽으면(그사이 끝났다) `?`(pid 는 남긴다), pid 를 못 읽으면 `null`.
+fn lspTrustPeer(fd: std.c.fd_t, name_buf: *[64]u8) ?maru.session.editor.lsp.trust_log.Peer {
+    if (fd < 0) return null;
+    const pid = control_self_origin_macos.peerPid(fd) orelse return null;
+    return .{ .pid = pid, .name = control_self_origin_macos.procName(pid, name_buf) orelse "?" };
+}
+
 fn firstAppSession(refs: []const ControlSessionRef) ?*AppSession {
     for (refs) |ref| if (ref.app_session) |app| return app;
     return null;
@@ -9181,9 +9195,9 @@ test "live hello capabilities advertise browser.wait and only parsed browser met
     }
 }
 
-test "WT4b live hello 는 lsp.trust.* 를 dispatch 가 아는 메서드 그대로 광고한다 — 조회·철회·잊기 셋, 부여 없음" {
+test "WT4b live hello 는 lsp.trust.* 를 dispatch 가 아는 메서드 그대로 광고한다 — 조회·철회·잊기·감사 기록 넷, 부여 없음" {
     const clt = maru.session.control_lsp_trust;
-    var seen: [3]bool = .{ false, false, false };
+    var seen: [@typeInfo(clt.Op).@"enum".fields.len]bool = @splat(false);
     var lsp_count: usize = 0;
     for (control_hello_caps) |method| {
         const parsed = control_plane.parseMethod(method);
@@ -9193,8 +9207,23 @@ test "WT4b live hello 는 lsp.trust.* 를 dispatch 가 아는 메서드 그대�
         try std.testing.expectEqualStrings(op.method(), method);
         seen[@intFromEnum(op)] = true;
     }
-    try std.testing.expectEqual(@as(usize, 3), lsp_count);
+    try std.testing.expectEqual(@as(usize, 4), lsp_count);
     for (seen) |b| try std.testing.expect(b);
+}
+
+test "TA2 컨트롤 상대 — 소켓에 마지막으로 쓴 프로세스의 pid 와 실행 파일 이름을 감사 기록의 상대로 낸다; 닫힌 fd 는 상대가 없다 (계획 workspace-trust-audit)" {
+    var fds: [2]std.c.fd_t = undefined;
+    if (std.c.socketpair(std.c.AF.UNIX, std.c.SOCK.STREAM, 0, &fds) != 0) return error.SkipZigTest;
+    defer _ = std.c.close(fds[1]);
+    _ = std.c.write(fds[1], "x", 1);
+    var name_buf: [64]u8 = undefined;
+    const peer = lspTrustPeer(fds[0], &name_buf) orelse return error.NoPeer;
+    try std.testing.expectEqual(std.c.getpid(), peer.pid);
+    var want_buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings(control_self_origin_macos.procName(std.c.getpid(), &want_buf).?, peer.name);
+    _ = std.c.close(fds[0]);
+    try std.testing.expect(lspTrustPeer(fds[0], &name_buf) == null); // 닫힌 fd
+    try std.testing.expect(lspTrustPeer(-1, &name_buf) == null);
 }
 
 test "macOS app host capabilities describe ownership before runtime exists" {

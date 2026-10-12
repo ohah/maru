@@ -1248,7 +1248,8 @@ const control_trust = maru.session.control_lsp_trust;
 /// 결정 — 옛 자리 이관에 쓸 설정 경로는 첫 창의 것, 창이 없으면 기본 자리). 효과는 관리 상자(WT4a)와 같은 길이다 — 표의 세대가 오르면
 /// 각 창의 pump 가 `applyTrustChanges` 로 따른다(거부면 서버를 내리고, 잊으면 「결정 없음」 — 곧바로 묻지 않는다). **부여는 없다**:
 /// 철회는 지금 허용인 결정만 거부로 적고, 잊기는 결정을 지울 뿐이다. 응답을 못 만들면(메모리) `null` — 호출자가 응답 없이 닫는다.
-pub fn controlTrust(gpa: std.mem.Allocator, io: std.Io, session: ?*AppSession, request_bytes: []const u8) ?[]u8 {
+/// `peer` 는 그 요청을 보낸 소켓 상대 — 철회·잊기의 감사 기록에 남는다(계획 workspace-trust-audit TA2).
+pub fn controlTrust(gpa: std.mem.Allocator, io: std.Io, session: ?*AppSession, request_bytes: []const u8, peer: ?lsp.trust_log.Peer) ?[]u8 {
     var owned_path: ?[]const u8 = null;
     defer if (owned_path) |p| gpa.free(p);
     const config_path: ?[]const u8 = if (session) |sess| sess.configPath() else blk: {
@@ -1256,13 +1257,15 @@ pub fn controlTrust(gpa: std.mem.Allocator, io: std.Io, session: ?*AppSession, r
         break :blk owned_path;
     };
     loadTrust(io, config_path);
-    var impl: ControlTrust = .{ .io = io, .config_path = config_path };
+    var impl: ControlTrust = .{ .io = io, .config_path = config_path, .peer = peer };
     return control_trust.respond(gpa, request_bytes, &impl) catch null;
 }
 
 const ControlTrust = struct {
     io: std.Io,
     config_path: ?[]const u8,
+    /// 감사 기록의 상대(빌린 이름 — 요청을 처리하는 동안만 산다).
+    peer: ?lsp.trust_log.Peer,
     /// 맞은 키의 경로 사본 — 응답(`repository`)을 다 쓸 때까지 산다(`apply` 의 지역 버퍼면 응답을 쓸 때 이미 풀렸다 — 판정자 LSPB38 이
     /// 잡았다). 표를 고치는 동안 표가 빌려 준 경로를 쥐지 않으려고 복사한다.
     path_buf: [std.fs.max_path_bytes]u8 = undefined,
@@ -1278,6 +1281,11 @@ const ControlTrust = struct {
         return list.toOwnedSlice(gpa);
     }
 
+    /// 감사 기록 전체(`.1` 다음 지금 파일) — 응답을 쓴 뒤 `respond` 가 푼다.
+    pub fn logText(self: *ControlTrust, gpa: std.mem.Allocator) ?[]u8 {
+        return trust_store.readLog(self.io, gpa);
+    }
+
     pub fn apply(self: *ControlTrust, op: control_trust.Op, target: control_trust.Target) control_trust.Outcome {
         const key = switch (findTrustKey(target, &self.path_buf, &self.dest_buf)) {
             .none => return .{ .none = .{ .containing = containingDecision(target, &self.dest_buf) } },
@@ -1288,11 +1296,11 @@ const ControlTrust = struct {
         const prev_wire = wireDecision(previous);
         const matched: control_trust.Key = .{ .volume = key.volume, .path = key.path, .host = key.dest };
         const saved = switch (op) {
-            .list => unreachable, // `respond` 가 목록은 `entries` 로 답한다
+            .list, .log => unreachable, // `respond` 가 목록은 `entries`, 기록은 `logText` 로 답한다
             // 철회는 지금 허용인 결정만 거부로 — 이미 거부면 그대로(다시 적지 않는다; 결정이 없던 저장소는 위에서 「없음」이다 — 관리 상자
             // `manageCurrent` 와 같은 규칙).
-            .revoke => if (previous == .allow) recordTrust(self.io, self.config_path, .{ .source = .control }, key, .deny) else return .{ .done = .{ .previous = prev_wire, .changed = false, .saved = true, .key = matched } },
-            .forget => forgetTrust(self.io, self.config_path, .{ .source = .control }, key),
+            .revoke => if (previous == .allow) recordTrust(self.io, self.config_path, .{ .source = .control, .peer = self.peer }, key, .deny) else return .{ .done = .{ .previous = prev_wire, .changed = false, .saved = true, .key = matched } },
+            .forget => forgetTrust(self.io, self.config_path, .{ .source = .control, .peer = self.peer }, key),
         };
         return .{ .done = .{ .previous = prev_wire, .changed = true, .saved = saved, .key = matched } };
     }

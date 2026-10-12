@@ -14,9 +14,13 @@
 //! 같은 표기). 요청은 경로만 줘도 된다 — 같은 경로가 여러 볼륨에 있으면 `volume` 으로 고르라고 `invalid_params` 로 돌려준다.
 //! 원격(SSH) 저장소는 (목적지, 원격 실제 경로)다(계획 WT7a) — 목록·결과에서 `volume` 자리에 `host`(목적지)가 서고, 요청은 `host` 로 원격
 //! 키를 고른다(`volume` 과 함께 주면 `invalid_params` — 둘은 다른 종류의 키다). `host` 가 없는 요청은 로컬 키만 본다.
+//!
+//! **감사 기록 조회**(`lsp.trust.log` — 계획 docs/plans/workspace-trust-audit.md TA2): 결정이 바뀐 기록(`lsp-trust-log`)의 최근 `limit`
+//! 건을 시간 순서로 낸다. 읽기만 한다 — 기록을 지우거나 고치는 메서드는 없다.
 
 const std = @import("std");
 const cp = @import("control_plane.zig");
+const trust_log = @import("lsp/trust_log.zig");
 
 /// 네임스페이스(`lsp.*`)와 그 아래 메서드.
 pub const namespace = "lsp";
@@ -25,12 +29,15 @@ pub const Op = enum {
     list,
     revoke,
     forget,
+    /// 감사 기록 조회(계획 workspace-trust-audit TA2) — 읽기만 한다.
+    log,
 
     pub fn method(self: Op) []const u8 {
         return switch (self) {
             .list => "lsp.trust.list",
             .revoke => "lsp.trust.revoke",
             .forget => "lsp.trust.forget",
+            .log => "lsp.trust.log",
         };
     }
 };
@@ -40,6 +47,7 @@ pub fn opFor(rest: []const u8) ?Op {
     if (std.mem.eql(u8, rest, "trust.list")) return .list;
     if (std.mem.eql(u8, rest, "trust.revoke")) return .revoke;
     if (std.mem.eql(u8, rest, "trust.forget")) return .forget;
+    if (std.mem.eql(u8, rest, "trust.log")) return .log;
     return null;
 }
 
@@ -104,6 +112,32 @@ pub fn checkListParams(params: ?std.json.Value) ParamError!void {
     }
 }
 
+/// `lsp.trust.log` 의 기본·최대 건수. 최대는 응답이 프레임 상한(1 MiB)에 들게 둔다 — 한 건은 경로 상한(1 KiB)을 넣어도 2 KiB 아래다.
+pub const default_log_limit: u32 = 50;
+pub const max_log_limit: u32 = 200;
+
+/// `lsp.trust.log` 의 params — 없거나 빈 객체, 또는 `{limit: 1..200}`(정수). 모르는 키는 거절한다.
+pub fn parseLogParams(params: ?std.json.Value) ParamError!u32 {
+    const p = params orelse return default_log_limit;
+    const obj = switch (p) {
+        .object => |o| o,
+        .null => return default_log_limit,
+        else => return error.InvalidParams,
+    };
+    var limit = default_log_limit;
+    var it = obj.iterator();
+    while (it.next()) |e| {
+        if (!std.mem.eql(u8, e.key_ptr.*, "limit")) return error.InvalidParams;
+        const n = switch (e.value_ptr.*) {
+            .integer => |i| i,
+            else => return error.InvalidParams,
+        };
+        if (n < 1 or n > max_log_limit) return error.InvalidParams;
+        limit = @intCast(n);
+    }
+    return limit;
+}
+
 /// 표의 키(볼륨·실제 경로, 원격이면 목적지·원격 경로 — `host` 가 비면 로컬).
 pub const Key = struct { volume: u64, path: []const u8, host: []const u8 = "" };
 
@@ -128,8 +162,8 @@ pub const Outcome = union(enum) {
     ambiguous,
 };
 
-/// 요청 한 줄에 답한다. `impl` 은 `entries(gpa) ![]Entry`(목록 — 호출자가 빌려 준 경로, 응답을 쓰는 동안만 살면 된다)와
-/// `apply(op, target) Outcome` 을 가진다. 요청은 `control_dispatch` 가 이미 메서드·params 를 검사한 것이다 — 그래도 여기서 다시 읽어
+/// 요청 한 줄에 답한다. `impl` 은 `entries(gpa) ![]Entry`(목록 — 호출자가 빌려 준 경로, 응답을 쓰는 동안만 살면 된다),
+/// `apply(op, target) Outcome`, `logText(gpa) ?[]u8`(감사 기록 파일의 내용 — 없으면 `null`; 여기서 푼다)을 가진다. 요청은 `control_dispatch` 가 이미 메서드·params 를 검사한 것이다 — 그래도 여기서 다시 읽어
 /// 어긋나면 `invalid_params` 다(앞 판정에 기대지 않는다).
 pub fn respond(gpa: std.mem.Allocator, request_bytes: []const u8, impl: anytype) std.mem.Allocator.Error![]u8 {
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
@@ -150,6 +184,12 @@ pub fn respond(gpa: std.mem.Allocator, request_bytes: []const u8, impl: anytype)
             const entries = try impl.entries(gpa);
             defer gpa.free(entries);
             return serializeList(gpa, req.id, entries);
+        },
+        .log => {
+            const limit = parseLogParams(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
+            const text = impl.logText(gpa);
+            defer if (text) |t| gpa.free(t);
+            return serializeLog(gpa, req.id, text orelse "", limit);
         },
         .revoke, .forget => {
             const target = parseTarget(req.params) catch return errorResponse(gpa, req.id, .invalid_params);
@@ -244,6 +284,71 @@ fn writeWhere(s: *std.json.Stringify, volume: u64, host: []const u8) !void {
     try s.write(std.fmt.bufPrint(&vbuf, "{x}", .{volume}) catch unreachable);
 }
 
+/// `{"records":[{"at":<unix ms>,"action":"allow"|"deny"|"forget","source":"sheet"|"manage"|"control"|"migrate","peer"?:{"pid","name"},
+/// "volume"|"host":…,"path":…}],"more":bool}` — 기록 `text` 의 읽히는 줄 중 **마지막 `limit` 건**을 줄 순서대로(시간 순서 — 시계가 아니라
+/// 줄 순서다). `more` 는 그보다 앞선 기록이 더 있나. 못 읽는 줄·끊긴 마지막 줄은 세지 않는다(`trust_log.Records`).
+///
+/// 응답이 `budget` 바이트를 넘으면 건수를 반씩 줄여 다시 쓴다(오래된 것부터 빠지고 `more` 가 선다) — 경로의 제어 문자는 JSON 에서
+/// `\u00XX` 로 여섯 배가 되어, 상한 건수로도 프레임 상한(`cp.default_max_frame`)을 넘으면 CLI 가 응답을 통째로 거절한다(적대적 검증
+/// TA2 1회차). 한 건이어도 넘으면 그대로 낸다(그 한 건은 경로 상한으로 6 KiB 아래다).
+pub fn serializeLog(gpa: std.mem.Allocator, id: cp.Id, text: []const u8, limit: u32) std.mem.Allocator.Error![]u8 {
+    return serializeLogWithin(gpa, id, text, limit, log_response_budget);
+}
+
+/// `lsp.trust.log` 응답의 바이트 예산 — 프레임 상한에서 여유를 둔다.
+pub const log_response_budget: usize = cp.default_max_frame - 16 * 1024;
+
+pub fn serializeLogWithin(gpa: std.mem.Allocator, id: cp.Id, text: []const u8, limit: u32, budget: usize) std.mem.Allocator.Error![]u8 {
+    var total: usize = 0;
+    var count_it = trust_log.Records.init(text);
+    while (count_it.next()) |_| total += 1;
+    var n: usize = limit;
+    while (true) {
+        const skip = total -| n;
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        writeLog(&s, id, text, skip) catch return error.OutOfMemory;
+        if (aw.written().len <= budget or n <= 1) return aw.toOwnedSlice();
+        n /= 2;
+    }
+}
+
+fn writeLog(s: *std.json.Stringify, id: cp.Id, text: []const u8, skip: usize) !void {
+    try cp.beginResult(s, id);
+    try s.objectField("records");
+    try s.beginArray();
+    var it = trust_log.Records.init(text);
+    var i: usize = 0;
+    while (it.next()) |r| : (i += 1) {
+        if (i < skip) continue;
+        try s.beginObject();
+        try s.objectField("at");
+        try s.write(r.at_ms);
+        try s.objectField("action");
+        try s.write(if (r.decision) |d| @tagName(d) else "forget");
+        try s.objectField("source");
+        try s.write(@tagName(r.source));
+        if (r.peer) |p| {
+            try s.objectField("peer");
+            try s.beginObject();
+            try s.objectField("pid");
+            try s.write(p.pid);
+            try s.objectField("name");
+            try s.write(p.name);
+            try s.endObject();
+        }
+        try writeWhere(s, r.key.volume, r.key.dest);
+        try s.objectField("path");
+        try s.write(r.key.path);
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.objectField("more");
+    try s.write(skip > 0);
+    try cp.endResult(s);
+}
+
 fn writeEntry(s: *std.json.Stringify, e: Entry) !void {
     try s.beginObject();
     try writeWhere(s, e.volume, e.host);
@@ -257,12 +362,13 @@ fn writeEntry(s: *std.json.Stringify, e: Entry) !void {
 // ══ 테스트 ══════════════════════════════════════════════════════════════════════════════════════════════════
 const testing = std.testing;
 
-test "control_lsp_trust: 메서드 이름 — trust.list·revoke·forget 셋뿐(부여 메서드는 없다)" {
+test "control_lsp_trust: 메서드 이름 — trust.list·revoke·forget·log 넷뿐(부여 메서드는 없다)" {
     try testing.expectEqual(Op.list, opFor("trust.list").?);
     try testing.expectEqual(Op.revoke, opFor("trust.revoke").?);
     try testing.expectEqual(Op.forget, opFor("trust.forget").?);
-    for ([_][]const u8{ "trust.allow", "trust.grant", "trust.decide", "trust.set", "trust", "list", "" }) |m| try testing.expect(opFor(m) == null);
-    try testing.expectEqual(@as(usize, 3), @typeInfo(Op).@"enum".fields.len);
+    try testing.expectEqual(Op.log, opFor("trust.log").?);
+    for ([_][]const u8{ "trust.allow", "trust.grant", "trust.decide", "trust.set", "trust.clear", "trust.log.clear", "trust", "list", "" }) |m| try testing.expect(opFor(m) == null);
+    try testing.expectEqual(@as(usize, 4), @typeInfo(Op).@"enum".fields.len);
     inline for (@typeInfo(Op).@"enum".fields) |f| {
         const op: Op = @field(Op, f.name);
         const p = cp.parseMethod(op.method());
@@ -325,6 +431,9 @@ const FakeImpl = struct {
 
     fn entries(self: *FakeImpl, gpa: std.mem.Allocator) ![]Entry {
         return gpa.dupe(Entry, self.list);
+    }
+    fn logText(_: *FakeImpl, _: std.mem.Allocator) ?[]u8 {
+        return null;
     }
     fn apply(self: *FakeImpl, op: Op, t: Target) Outcome {
         self.seen_op = op;
@@ -468,4 +577,115 @@ test "control_lsp_trust: 원격 키 (계획 workspace-trust WT7a) — `host` 로
     const repo = parsed_out.value.object.get("result").?.object.get("repository").?.object;
     try testing.expectEqual(@as(usize, 2), repo.count());
     try testing.expectEqualStrings("openclaw", repo.get("host").?.string);
+}
+
+test "control_lsp_trust: 감사 기록 조회 (계획 workspace-trust-audit TA2) — 마지막 limit 건을 줄 순서대로, 상대·원격 키·잊기, 못 읽는 줄은 세지 않고 앞선 기록이 더 있으면 more; params 는 limit 1..200 뿐" {
+    const Impl = struct {
+        text: []const u8,
+        fn entries(_: *@This(), gpa: std.mem.Allocator) ![]Entry {
+            return gpa.alloc(Entry, 0);
+        }
+        fn apply(_: *@This(), _: Op, _: Target) Outcome {
+            return .ambiguous;
+        }
+        fn logText(self: *@This(), gpa: std.mem.Allocator) ?[]u8 {
+            if (self.text.len == 0) return null;
+            return gpa.dupe(u8, self.text) catch null;
+        }
+    };
+    var impl: Impl = .{ .text = "1\tallow\tsheet\t-\t1f\t/r\n" ++
+        "garbage\n" ++
+        "2\tdeny\tmanage\t-\t1f\t/r\n" ++
+        "3\tforget\tcontrol\t4321:maru\tssh\topenclaw\t/srv/app\n" ++
+        "4\tallow\tsheet\t-\t1f\t/cut" }; // 끊긴 마지막 줄 — 세지 않는다
+    {
+        const resp = try respond(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"lsp.trust.log\",\"params\":{\"limit\":2}}", &impl);
+        defer testing.allocator.free(resp);
+        var pm = try cp.parseMessage(testing.allocator, resp);
+        defer pm.deinit();
+        const obj = pm.message.response.result.?.object;
+        try testing.expectEqual(@as(usize, 2), obj.count());
+        try testing.expect(obj.get("more").?.bool);
+        const recs = obj.get("records").?.array.items;
+        try testing.expectEqual(@as(usize, 2), recs.len);
+        const a = recs[0].object;
+        try testing.expectEqual(@as(usize, 5), a.count()); // at·action·source·volume·path — 상대가 없으면 그 칸도 없다
+        try testing.expectEqual(@as(i64, 2), a.get("at").?.integer);
+        try testing.expectEqualStrings("deny", a.get("action").?.string);
+        try testing.expectEqualStrings("manage", a.get("source").?.string);
+        try testing.expectEqualStrings("1f", a.get("volume").?.string);
+        try testing.expectEqualStrings("/r", a.get("path").?.string);
+        const b = recs[1].object;
+        try testing.expectEqualStrings("forget", b.get("action").?.string);
+        try testing.expectEqualStrings("control", b.get("source").?.string);
+        try testing.expectEqual(@as(i64, 4321), b.get("peer").?.object.get("pid").?.integer);
+        try testing.expectEqualStrings("maru", b.get("peer").?.object.get("name").?.string);
+        try testing.expectEqualStrings("openclaw", b.get("host").?.string);
+        try testing.expect(b.get("volume") == null);
+    }
+    {
+        // 기본 limit(50) — 셋 다, 더 없다.
+        const resp = try respond(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"lsp.trust.log\"}", &impl);
+        defer testing.allocator.free(resp);
+        var pm = try cp.parseMessage(testing.allocator, resp);
+        defer pm.deinit();
+        const obj = pm.message.response.result.?.object;
+        try testing.expectEqual(@as(usize, 3), obj.get("records").?.array.items.len);
+        try testing.expect(!obj.get("more").?.bool);
+        try testing.expectEqual(@as(i64, 1), obj.get("records").?.array.items[0].object.get("at").?.integer);
+    }
+    impl.text = "";
+    {
+        const resp = try respond(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"lsp.trust.log\",\"params\":{}}", &impl);
+        defer testing.allocator.free(resp);
+        var pm = try cp.parseMessage(testing.allocator, resp);
+        defer pm.deinit();
+        const obj = pm.message.response.result.?.object;
+        try testing.expectEqual(@as(usize, 0), obj.get("records").?.array.items.len);
+        try testing.expect(!obj.get("more").?.bool);
+    }
+    // params.
+    for ([_][]const u8{ "{\"limit\":0}", "{\"limit\":201}", "{\"limit\":\"5\"}", "{\"limit\":1.5}", "{\"x\":1}", "[]", "7" }) |j| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, j, .{});
+        defer parsed.deinit();
+        try testing.expectError(error.InvalidParams, parseLogParams(parsed.value));
+    }
+    try testing.expectEqual(default_log_limit, try parseLogParams(null));
+    {
+        const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, "{\"limit\":200}", .{});
+        defer parsed.deinit();
+        try testing.expectEqual(@as(u32, 200), try parseLogParams(parsed.value));
+    }
+}
+
+test "control_lsp_trust: 감사 기록 응답이 예산을 넘으면 건수를 반씩 줄여 최근 것을 남기고 more 를 세운다 — 제어 문자 경로는 JSON 에서 여섯 배다 (적대적 검증 TA2 1회차)" {
+    // 제어 문자(0x01) 200 개짜리 경로 — 줄은 230 바이트 남짓인데 JSON 에서는 1.2 KiB 다.
+    const weird = "/" ++ "\x01" ** 200;
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (0..8) |i| {
+        var buf: [512]u8 = undefined;
+        try text.appendSlice(testing.allocator, try std.fmt.bufPrint(&buf, "{d}\tallow\tsheet\t-\t1\t{s}\n", .{ i + 1, weird }));
+    }
+    // 예산 3 KiB — 여덟 건(10 KiB 남짓)은 넘고, 둘은 든다.
+    const resp = try serializeLogWithin(testing.allocator, .{ .number = 1 }, text.items, 8, 3 * 1024);
+    defer testing.allocator.free(resp);
+    try testing.expect(resp.len <= 3 * 1024);
+    var pm = try cp.parseMessage(testing.allocator, resp);
+    defer pm.deinit();
+    const obj = pm.message.response.result.?.object;
+    try testing.expect(obj.get("more").?.bool);
+    const recs = obj.get("records").?.array.items;
+    try testing.expectEqual(@as(usize, 2), recs.len);
+    try testing.expectEqual(@as(i64, 7), recs[0].object.get("at").?.integer); // 최근 것이 남는다
+    try testing.expectEqual(@as(i64, 8), recs[1].object.get("at").?.integer);
+    try testing.expectEqualStrings(weird, recs[1].object.get("path").?.string);
+    // 한 건도 안 들면 한 건은 낸다(빈 응답보다 낫다 — 프레임 상한 안이다).
+    const one = try serializeLogWithin(testing.allocator, .{ .number = 2 }, text.items, 8, 100);
+    defer testing.allocator.free(one);
+    var po = try cp.parseMessage(testing.allocator, one);
+    defer po.deinit();
+    try testing.expectEqual(@as(usize, 1), po.message.response.result.?.object.get("records").?.array.items.len);
+    // 상한 건수의 최악(경로 상한 1 KiB 가 모두 제어 문자) 한 건도 프레임 상한 아래다.
+    try testing.expect(log_response_budget < cp.default_max_frame);
 }

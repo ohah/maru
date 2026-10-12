@@ -152,6 +152,13 @@ pub fn formatStamp(buf: []u8, at_ms: i64, at_offset_s: i64, now_ms: i64, now_off
     return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2}", .{ at.year, at.month, at.day }) catch "";
 }
 
+/// CLI 의 기록 시각 — 늘 `YYYY-MM-DD HH:MM:SS`(로컬 시각, `offset_s` 는 그 시점의 UTC 오프셋). 1970 이전이면 빈 조각.
+pub fn formatFull(buf: []u8, at_ms: i64, offset_s: i64) []const u8 {
+    const at = localDate(at_ms, offset_s) orelse return "";
+    const second: u8 = @intCast(@mod(@divFloor(at_ms, std.time.ms_per_s) + offset_s, 60));
+    return std.fmt.bufPrint(buf, "{d}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ at.year, at.month, at.day, at.hour, at.minute, second }) catch "";
+}
+
 const LocalDate = struct { year: u16, month: u8, day: u8, hour: u8, minute: u8 };
 
 fn localDate(ms: i64, offset_s: i64) ?LocalDate {
@@ -273,4 +280,8 @@ test "TAL2 키의 마지막 기록과 시각 표기 — 줄 순서가 이기고 
     try testing.expectEqualStrings("01-01 00:00", formatStamp(&buf, 999, 0, 0, 0)); // 초 아래는 버린다
     try testing.expectEqualStrings("", formatStamp(&buf, 0, -3600, 0, 0));
     try testing.expectEqualStrings("1970-01-01", formatStamp(&buf, 0, 0, 0, -3600)); // 지금을 못 구하면(1970 이전) 해를 붙인다
+    // CLI — 늘 날짜·초까지.
+    try testing.expectEqualStrings("2026-10-12 14:30:00", formatFull(&buf, at, 9 * 3600));
+    try testing.expectEqualStrings("2026-10-11 22:30:59", formatFull(&buf, at + 59_999, -7 * 3600));
+    try testing.expectEqualStrings("", formatFull(&buf, 0, -1));
 }

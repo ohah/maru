@@ -617,7 +617,7 @@ L2 `session/editor/search/request.zig`는 요청 전체 예산과 행의 root �
 `src/cli/editor/open.zig`는 `maru editor open`의 인자 해석과 앱 URL 생성만 소유한다. 현재 디렉터리 조회와
 `/usr/bin/open`의 직접 exec는 `main.zig`가 맡는다. 기존 CLI 순수 경계를 유지한다.
 
-LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget …`이며,
+LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget|log …`이며,
 기존 `maru lsp …`는 동일한 parser와 request 실행 경로를 쓰는 호환 별칭이다.
 `maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.
 

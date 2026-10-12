@@ -2045,6 +2045,17 @@ pub fn build(b: *std.Build) void {
     run_remote_log_profile_tests.addArg(if (remote_native_frames != null) "--maru-expect-passed=7" else "--maru-expect-passed=6");
     b.step("test-remote-agent-log-profile", "Run confirmed remote log profile and real SSH argv regressions").dependOn(&run_remote_log_profile_tests.step);
 
+    const remote_auto_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"remote automatic reconnect"},
+    });
+    const remote_auto_carrier = b.addSystemCommand(&.{ "python3", "tools/test-remote-agent-native.py", "--automatic", "--gui-test" });
+    remote_auto_carrier.addArtifactArg(remote_auto_tests);
+    remote_auto_carrier.addArg("--cli");
+    remote_auto_carrier.addArtifactArg(exe);
+    remote_auto_carrier.setCwd(b.path("."));
+    b.step("test-remote-agent-automatic-reconnect", "Owned SSH transport loss through product CLI and GUI retry scheduling").dependOn(&remote_auto_carrier.step);
+
     // One real AppSession fixture owns native generation selection, lock failure,
     // replacement and post-consumption rotation; the aggregate ABI suite also runs it.
     const local_agent_log_reader_tests = addProjectTest(b, .{

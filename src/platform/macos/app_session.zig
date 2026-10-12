@@ -98909,3 +98909,89 @@ test "generation receiver actual mixed SSH frames reach badge and sealed capture
     try std.testing.expect(sealed.remote);
     try std.testing.expect(!term.hook.progress.turn_open);
 }
+
+// The carrier owns sshd/master and marker files. This test never spawns the replacement
+// itself: EOF schedules it through the same drain path used by the GUI tick.
+test "remote automatic reconnect preserves mixed cursor and seals recovered turn" {
+    if (!is_macos) return error.SkipZigTest;
+    const root_z = std.c.getenv("MARU_REMOTE_AUTO_ROOT") orelse return error.SkipZigTest;
+    const root = std.mem.span(root_z);
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const dest_path = try std.fs.path.join(a, &.{ root, "gui-dest" });
+    defer a.free(dest_path);
+    const ctl_path = try std.fs.path.join(a, &.{ root, "gui-control" });
+    defer a.free(ctl_path);
+    const ready = try std.fs.path.join(a, &.{ root, "gui-ready" });
+    defer a.free(ready);
+    const dest = try std.Io.Dir.cwd().readFileAlloc(io, dest_path, a, .limited(512));
+    defer a.free(dest);
+    const ctl = try std.Io.Dir.cwd().readFileAlloc(io, ctl_path, a, .limited(512));
+    defer a.free(ctl);
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    session.window_focused = false;
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+    const nonce = "4331_7";
+    @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
+    term.agent_remote_nonce_len = nonce.len;
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .install_done = true, .mixed_stream = true });
+    defer remote_agent_ops.closeRemoteAgentHost(&session, dest);
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+    var nonce_buf: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined;
+    const gui_nonce = agent_ops.remotePaneNonceFor(term, &nonce_buf) orelse return error.NoRemoteNonce;
+    const key_v1 = try std.fmt.allocPrint(a, "1:{s}", .{gui_nonce});
+    defer a.free(key_v1);
+    const key_v2 = try std.fmt.allocPrint(a, "2:{s}", .{gui_nonce});
+    defer a.free(key_v2);
+    session.spawnStreamerFor(dest, host, ctl);
+    try std.testing.expect(host.stream_started);
+    const initial_pid = host.stream.pid;
+    const ctx: AppSession.RemoteUpload = .{ .dest = dest, .ctl = ctl };
+    var first_v1: u64 = 0;
+    var first_v2: u64 = 0;
+    var ready_sent = false;
+    var saw_retry = false;
+    var sealed_before: maru.session.turn_capture.Id = 0;
+    agent_ops.test_last_turn_capture = 0;
+    for (0..1000) |_| {
+        const now = session.awakeMs();
+        remote_agent_ops.ensureRemoteAgentTerm(&session, term, ctx, now);
+        remote_agent_ops.drainRemoteAgentHost(&session, dest, host, now);
+        if (!ready_sent and host.saw_hello and host.cursors.contains("1:4331_7") and host.cursors.contains("2:4331_7")) {
+            first_v1 = host.cursors.get("1:4331_7").?.offset;
+            first_v2 = host.cursors.get("2:4331_7").?.offset;
+            sealed_before = agent_ops.test_last_turn_capture;
+            try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = ready, .data = gui_nonce });
+            ready_sent = true;
+        }
+        if (ready_sent and !host.stream_started) {
+            try std.testing.expect(host.retry_at_ms > now);
+            try std.testing.expect(host.mixed_stream and !host.stopped);
+            try std.testing.expectEqual(first_v1, host.cursors.get("1:4331_7").?.offset);
+            try std.testing.expectEqual(first_v2, host.cursors.get("2:4331_7").?.offset);
+            saw_retry = true;
+        }
+        if (saw_retry and host.stream_started and host.stream.pid != initial_pid and host.saw_hello and
+            host.cursors.contains(key_v1) and host.cursors.contains(key_v2))
+        {
+            try std.testing.expect(term.agent_remote_channel != null and term.agent_remote_channel.?.isOpen());
+            try std.testing.expectEqual(maru.session.agent_hook_mode.State.idle, term.hook.state);
+            try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+            try std.testing.expect(agent_ops.test_last_turn_capture != 0 and agent_ops.test_last_turn_capture != sealed_before);
+            const sealed = session.turn_captures.sealedTurn(agent_ops.test_last_turn_capture) orelse return error.NoSealedTurn;
+            try std.testing.expect(sealed.remote);
+            try std.testing.expectEqual(@as(u8, 0), host.retries);
+            return;
+        }
+        var idle: [0]std.c.pollfd = .{};
+        _ = std.c.poll(&idle, 0, 20);
+    }
+    return error.AutomaticReconnectTimedOut;
+}

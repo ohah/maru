@@ -10,6 +10,22 @@ def run(argv, **kw):
     if result.returncode: raise AssertionError((argv[0],result.returncode,result.stderr.decode(errors='replace')[-1000:]))
     return result
 
+def emit_offline_hooks(remote, identity="offline", nonce="4331_7"):
+    settings = json.loads((remote / '.claude/settings.json').read_text())
+    for profile in [1, 2]:
+        env = dict(os.environ, HOME=str(remote), XDG_CACHE_HOME=str(remote / '.cache'),
+                   LC_MARU_PANE=nonce, LC_MARU_LOG_FORMAT=str(profile))
+        for key in ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'MARU_HOOK_INSTANCE', 'MARU_HOOK_PANE', 'TMUX', 'TMUX_PANE']:
+            env.pop(key, None)
+        for event in ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']:
+            command = settings['hooks'][event][0]['hooks'][0]['command']
+            payload = {'hook_event_name': event, 'session_id': f'{identity}-{profile}',
+                       'cwd': str(remote), 'prompt': 'synthetic offline turn',
+                       'transcript_path': str(remote / f'{identity}-{profile}.jsonl'),
+                       'tool_name': 'Bash', 'tool_use_id': f'{identity}-tool-{profile}',
+                       'tool_input': {'command': 'pwd'}}
+            run(['/bin/sh', '-c', command], input=json.dumps(payload).encode(), env=env)
+
 def reconnect_probe(peer, remote, sshconfig, alias, controls, frames):
     """Drop the owned master, write offline hooks, resume through a fresh SSH transport."""
     cursors = {}
@@ -20,20 +36,7 @@ def reconnect_probe(peer, remote, sshconfig, alias, controls, frames):
     assert (1, '4331_7') in cursors and (2, '4331_7') in cursors
     for control in controls:
         run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias])
-    settings = json.loads((remote / '.claude/settings.json').read_text())
-    for profile in [1, 2]:
-        env = dict(os.environ, HOME=str(remote), XDG_CACHE_HOME=str(remote / '.cache'),
-                   LC_MARU_PANE='4331_7', LC_MARU_LOG_FORMAT=str(profile))
-        for key in ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'MARU_HOOK_INSTANCE', 'MARU_HOOK_PANE', 'TMUX', 'TMUX_PANE']:
-            env.pop(key, None)
-        for event in ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']:
-            command = settings['hooks'][event][0]['hooks'][0]['command']
-            payload = {'hook_event_name': event, 'session_id': f'offline-{profile}',
-                       'cwd': str(remote), 'prompt': 'synthetic offline turn',
-                       'transcript_path': str(remote / f'offline-{profile}.jsonl'),
-                       'tool_name': 'Bash', 'tool_use_id': f'offline-tool-{profile}',
-                       'tool_input': {'command': 'pwd'}}
-            run(['/bin/sh', '-c', command], input=json.dumps(payload).encode(), env=env)
+    emit_offline_hooks(remote)
     resumes = []
     for (profile, name), frame in cursors.items():
         entry = f"{profile}:{name}:{frame['at']}"
@@ -70,8 +73,86 @@ def reconnect_probe(peer, remote, sshconfig, alias, controls, frames):
     print(json.dumps({'case': 'reconnect', 'offline_events': len(events), 'old_events_replayed': 0}), flush=True)
     return b''.join(raw)
 
+def automatic_wrapper_probe(cli, root, remote, sshconfig, alias, env, trace):
+    """The product shell wrapper, not this harness, opens the second connection."""
+    settings = Path(env['MARU_CONFIG'])
+    settings.write_text('sidebar.agent-hooks = true\nssh.reconnect = true\n')
+    hold = remote / 'automatic-hold'; hold.touch()
+    childenv = dict(env, MARU_AGENT_REMOTE_PROTOCOL='3')
+    before = len(trace.read_text().splitlines())
+    proc = subprocess.Popen([cli, 'ssh', '-F', str(sshconfig), '-T', alias], env=childenv,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    q = queue.Queue(); output = []
+    reader = threading.Thread(target=lambda: [q.put(line) for line in iter(proc.stdout.readline, b'')], daemon=True)
+    reader.start()
+    try:
+        for phase in [1, 2]:
+            deadline = time.monotonic() + 15
+            while True:
+                line = q.get(timeout=max(.01, deadline - time.monotonic())); output.append(line)
+                if b'held:' + str(phase).encode() in line: break
+                assert time.monotonic() < deadline
+            if phase == 1:
+                entries = [json.loads(line) for line in trace.read_text().splitlines()[before:]]
+                control = next(e['control'] for e in reversed(entries) if e['control'] and not e['prepare'])
+                run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias])
+                (remote / 'release-1').touch()
+                # Current config changes cannot rewrite the running wrapper's pinned format.
+                settings.write_text('sidebar.agent-hooks = false\nssh.reconnect = true\n')
+            else:
+                (remote / 'release-2').touch()
+        proc.wait(timeout=5)
+        reader.join(timeout=1)
+        while not q.empty(): output.append(q.get())
+        stderr = proc.stderr.read()
+        assert proc.returncode == 0, stderr.decode(errors='replace')
+        wire = b''.join(output)
+        replies = [json.loads(v) for v in re.findall(rb'fixture:(\{[^\r\n]+\})', wire)]
+        assert [v['received'] for v in replies] == ['2', '2'], replies
+        entries = [json.loads(line) for line in trace.read_text().splitlines()[before:]]
+        assert sum(e['prepare'] for e in entries) == 1, entries
+        assert b'reconnecting in' in stderr
+        assert wire.count(b'\x1b]5379;ssh;') == 2 and wire.count(b'\x1b]5379;ssh-end') == 2
+        print(json.dumps({'case': 'automatic-wrapper', 'connections': 2, 'preparations': 1, 'formats': [2, 2]}), flush=True)
+    finally:
+        (remote / 'release-1').touch(); (remote / 'release-2').touch(); hold.unlink(missing_ok=True)
+        if proc.poll() is None: proc.kill(); proc.wait(timeout=3)
+        proc.stdout.close(); proc.stderr.close(); reader.join(timeout=1)
+        settings.write_text('sidebar.agent-hooks = true\nssh.reconnect = false\n')
+
+def automatic_gui_probe(test_binary, root, remote, sshconfig, alias, env, trace):
+    """Let the product scheduler own replacement SSH spawn; the carrier only drops transport."""
+    entries = [json.loads(line) for line in trace.read_text().splitlines()]
+    control = next(e['control'] for e in reversed(entries) if e['control'])
+    run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-M', '-N', '-f',
+         '-o', 'ControlPersist=no', alias])
+    (root / 'gui-dest').write_text(alias); (root / 'gui-control').write_text(control)
+    childenv = dict(env, MARU_REMOTE_AUTO_ROOT=str(root),
+                    MARU_TEST_KEEP_ONLY_PREFIX='app_session.test.remote automatic reconnect')
+    log = (root / 'gui-test.log').open('wb')
+    proc = subprocess.Popen([test_binary, '--maru-expect-tests=6', '--maru-expect-passed=1'],
+                            env=childenv, stdout=log, stderr=log)
+    try:
+        deadline = time.monotonic() + 10
+        while not (root / 'gui-ready').exists():
+            assert proc.poll() is None, (root / 'gui-test.log').read_text()[-3000:]
+            assert time.monotonic() < deadline, 'GUI initial stream timeout'
+            time.sleep(.02)
+        run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias])
+        emit_offline_hooks(remote, 'gui-offline', (root / 'gui-ready').read_text())
+        proc.wait(timeout=25)
+        if proc.returncode != 0:
+            failure = Path('/tmp/remote-native-auto-gui-failure.log'); failure.write_bytes((root / 'gui-test.log').read_bytes()); failure.chmod(0o600)
+            raise AssertionError(failure.read_text()[:3500])
+        print(json.dumps({'case': 'automatic-gui', 'retry_spawn': 'product', 'badge': 'idle', 'capture': 'sealed'}), flush=True)
+    finally:
+        if proc.poll() is None: proc.kill(); proc.wait(timeout=3)
+        log.close()
+        subprocess.run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
+
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');args=ap.parse_args()
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
     provider_paths=[shutil.which(name) or '' for name in ['claude','codex']] if args.providers else ['', '']
     if args.providers:assert all(provider_paths),'installed Claude/Codex required'
@@ -114,10 +195,21 @@ if len(sys.argv)>4 and sys.argv[3] and env.get("LC_MARU_LOG_FORMAT")=="2":
   version=subprocess.run([argv[0],"--version"],env=penv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5).stdout.decode().strip()
   print("provider:"+json.dumps({"name":provider,"version":version,"completed":True}),flush=True)
 print("fixture:"+json.dumps({"received":env.get("LC_MARU_LOG_FORMAT"),"hooks":2}),flush=True)
+if (root/"automatic-hold").exists():
+ import time
+ counter=root/"automatic-count"
+ phase=int(counter.read_text())+1 if counter.exists() else 1
+ counter.write_text(str(phase))
+ print("held:"+str(phase),flush=True)
+ deadline=time.monotonic()+20
+ while not (root/("release-"+str(phase))).exists():
+  assert time.monotonic()<deadline,"owned hold timeout"
+  time.sleep(.02)
+
 ''')
             force=root/'force.sh';force.write_text("#!/bin/sh\nexec "+shlex.join([sys.executable,str(worker),str(remote),source_home,*provider_paths,os.environ.get("PATH","/usr/bin:/bin")])+"\n");force.chmod(0o700)
             proxy=bindir/'ssh';trace=root/'trace.jsonl'
-            proxy.write_text(f'''#!{sys.executable}\nimport json,os,sys\na=sys.argv[1:];control=next((v.split("=",1)[1] for v in a if v.startswith("ControlPath=")),None)\nwith open({str(trace)!r},"a") as out:out.write(json.dumps({{"control":control,"format":os.environ.get("LC_MARU_LOG_FORMAT"),"prepare":any("agent-hooks" in v for v in a)}})+"\\n")\nos.execv("/usr/bin/ssh",["ssh"]+a)\n''');proxy.chmod(0o700)
+            proxy.write_text(f'''#!{sys.executable}\nimport json,os,sys\na=sys.argv[1:];control=next((v.split("=",1)[1] for v in a if v.startswith("ControlPath=")),None)\nwith open({str(trace)!r},"a") as out:out.write(json.dumps({{"control":control,"format":os.environ.get("LC_MARU_LOG_FORMAT"),"prepare":any("agent-hooks" in v for v in a)}})+"\\n")\nos.execv("/usr/bin/ssh",["ssh","-F",{str(root / "ssh_config")!r}]+a)\n''');proxy.chmod(0o700)
             for name in ['hostkey','userkey']:run(['/usr/bin/ssh-keygen','-q','-t','ed25519','-N','','-f',str(root/name)])
             (root/'authorized_keys').write_bytes((root/'userkey.pub').read_bytes());(root/'authorized_keys').chmod(0o600)
             with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
@@ -158,6 +250,8 @@ print("fixture:"+json.dumps({"received":env.get("LC_MARU_LOG_FORMAT"),"hooks":2}
                 assert legacy.exists() and b'UserPromptSubmit' in legacy.read_bytes()
                 if tag=='allowed':assert native.read_bytes().startswith(b'MARU_AGENT_LOG_V2\t') and b'Stop' in native.read_bytes()
                 else:assert not native.exists()
+                if args.automatic and tag == 'allowed':
+                    automatic_wrapper_probe(cli, root, remote, sshconfig, alias, env, trace)
                 if peer==cli:
                     command=f'"{peer}" agent-events --stdio --dir="{remote}/.cache/maru" --log-format=mixed --heartbeat-ms=200'
                     proc=subprocess.Popen(['/usr/bin/ssh','-F',str(sshconfig),'-S',next(iter(controls)),alias,command],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
@@ -195,6 +289,8 @@ print("fixture:"+json.dumps({"received":env.get("LC_MARU_LOG_FORMAT"),"hooks":2}
                         if args.frames_output:
                             Path(args.frames_output + '.reconnect').write_bytes(resumed_wire)
                             Path(args.frames_output + '.reconnect').chmod(0o600)
+                        if args.gui_test:
+                            automatic_gui_probe(str(Path(args.gui_test).resolve()), root, remote, sshconfig, alias, env, trace)
 
             finally:
                 if trace.exists():controls.update(e['control'] for e in map(json.loads,trace.read_text().splitlines()) if e['control'])

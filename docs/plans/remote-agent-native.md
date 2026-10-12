@@ -174,3 +174,22 @@ ACK 없는 전송 도중 종료에서 exactly-once를 보장한다고 주장하�
 재접속 wire의 제품 AppSession 재생은 idle 배지·원격 캡처 봉인 검사를 통과했다.
 합성 transcript 경로는 귀속 식별자이며 실제 provider transcript 파일을 읽은 증거가 아니다.
 resume를 제거한 결함 대조군에서는 이전 턴이 재생되어 판정자가 실패했다.
+
+## 제품 자동 재접속 검증 계획
+
+실제 CLI wrapper를 reconnect=true로 실행하고 소유 SSH master를 끊는다. wrapper가
+스스로 두 번째 연결을 열며 준비 호출을 반복하지 않고 포맷을 유지하는지 검사한다.
+GUI는 제품 AppSession의 drain·재시도 예약·spawnStreamerFor를 실제 SSH 자식에 연결한다.
+EOF 전후 cursor와 재기동 시점·새 hello·배지·캡처를 확인한다. 하네스가 재접속 스트림을
+대신 띄우지 않는다. 소유 subprocess와 private fixture만 중단하며 OS 화면 검증은 아니다.
+
+제품 경로 실행 결과: `test-remote-agent-automatic-reconnect`에서 CLI wrapper가 실제
+연결 종료 255를 받고 두 번째 SSH 연결을 열었다. 시작 후 config를 바꿔도 두 연결 모두
+v2를 유지하며 준비 명령은 한 번이었다. 제품 AppSession은 실제 SSH EOF에서 1초
+백오프를 예약하고 drain 경로가 replacement를 띄웠다. 기존 v1/v2 커서를 보존하고 새
+GUI nonce의 혼합 이벤트를 받아 idle 배지·원격 캡처 봉인과 재시도 예산 초기화를 확인했다.
+하네스의 GUI nonce를 고정값으로 놓았을 때 실제 GUI가 발급한 신원과 달라지는 것을
+확인해, 마커로 발급된 값을 전달하도록 보완했다. 제품 신원 정책은 바꾸지 않았다.
+재시도 예약을 막는 결함은 예약 시각 검사에서, 준비 명령을 매 연결 반복하는 결함은
+독립 SSH argv 장부에서 실행 중 검출됐다. 결함 소스는 복원하고 정상 검증을 다시 실행했다.
+OS 화면·입력·실제 네트워크 장비 장애와 ACK 없는 전송의 exactly-once 보장은 포함하지 않는다.

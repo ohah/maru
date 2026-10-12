@@ -1098,8 +1098,26 @@ pub const RenderWhitespace = enum { none, boundary, selection, trailing, all };
 /// 판정자 EXF4 가 둘을 맞춘다).
 pub const formatter_languages = [_][]const u8{ "zig", "json", "markdown", "javascript", "typescript", "tsx", "c", "cpp", "python", "go", "rust", "java", "ruby", "php", "kotlin", "bash", "css", "html" };
 
-/// `editor.formatter.<언어>` 의 값(tooling §8.2t). `auto` 는 저장소 설정 감지, `lsp` 는 언어 서버만, `off` 는 포맷 안 함, 나머지는 그 포매터.
-pub const FormatterChoice = enum { auto, lsp, off, prettier };
+/// `editor.formatter.<언어>` 의 값(tooling §8.2t). `auto` 는 저장소 설정 감지, `lsp` 는 언어 서버만, `off` 는 포맷 안 함, 나머지는 그 포매터,
+/// `command` 는 사용자 명령(`command: ‹argv›` — 문자열은 `FormatterSetting.command`).
+pub const FormatterChoice = enum { auto, lsp, off, prettier, biome, oxfmt, ruff, black, rustfmt, zig_fmt, command };
+
+/// 한 언어의 외부 포매터 설정 — 선택지와(사용자 명령이면) 그 명령 줄(arena).
+pub const FormatterSetting = struct { choice: FormatterChoice = .auto, command: []const u8 = "" };
+
+/// 설정 값을 읽는다 — 사용자 철자(`zig-fmt`)와 `command: ‹argv›`. 모르는 값·빈 명령은 `null`. `command` 문자열은 `text` 를 빌린다.
+pub fn parseFormatterSetting(text: []const u8) ?FormatterSetting {
+    const v = std.mem.trim(u8, text, " \t");
+    if (std.mem.startsWith(u8, v, "command:")) {
+        const cmd = std.mem.trim(u8, v["command:".len..], " \t");
+        if (cmd.len == 0) return null;
+        return .{ .choice = .command, .command = cmd };
+    }
+    if (std.mem.eql(u8, v, "zig-fmt")) return .{ .choice = .zig_fmt };
+    const c = std.meta.stringToEnum(FormatterChoice, v) orelse return null;
+    if (c == .command or c == .zig_fmt) return null; // 철자가 따로다(`command: …`·`zig-fmt`)
+    return .{ .choice = c };
+}
 
 pub fn formatterLanguageIndex(name: []const u8) ?usize {
     for (formatter_languages, 0..) |n, i| if (std.mem.eql(u8, n, name)) return i;
@@ -1252,7 +1270,7 @@ pub const EditorConfig = struct {
     code_actions_on_save: []const u8 = "",
     /// **외부 포매터**(tooling §8.2t) — `editor.formatter.<언어>`(언어는 `formatter_languages`). 기본 `auto` 는 저장소 설정을 감지한다
     /// (Prettier 설정이 있으면 Prettier, 없으면 언어 서버 — 2026-10-12 사용자 결정). 동적 키라 스키마 밖이다(로더가 읽는다).
-    formatter: [formatter_languages.len]FormatterChoice = @splat(.auto),
+    formatter: [formatter_languages.len]FormatterSetting = @splat(.{}),
 
     pub const schema = .{ // 키: editor.wrap · editor.tab-width · editor.cursor-shape · editor.scroll-beyond-last-column · editor.cursor-surrounding-lines · editor.cursor-surrounding-columns · editor.minimap · editor.minimap-width · editor.sticky-scroll · editor.sticky-scroll-max-lines · editor.render-line-highlight · editor.match-brackets · editor.guides-indentation · editor.guides-highlight-active-indentation · editor.bracket-pair-colorization · editor.bracket-pair-colorization-independent-pools · editor.render-whitespace · editor.diagnostics · editor.hover · editor.hover-delay · editor.parameter-hints · editor.quick-suggestions · editor.format-on-save · editor.code-actions-on-save
         // **둘 다 설정 GUI에 뜬다.** `wrap`은 한때 `hidden`이었는데(*"편집기가 제품 화면에 배선되기

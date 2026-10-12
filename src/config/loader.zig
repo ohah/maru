@@ -279,15 +279,17 @@ fn applyKey(
         return;
     }
     if (std.mem.startsWith(u8, key, "editor.formatter.")) {
-        // 외부 포매터(tooling §8.2t): editor.formatter.<언어> = auto|lsp|off|prettier. 모르는 언어·값은 forgiving(진단 + 기존 값).
+        // 외부 포매터(tooling §8.2t): editor.formatter.<언어> = auto|lsp|off|‹포매터›|command: ‹argv›. 모르는 언어·값은 forgiving(진단 + 기존 값).
         const idx = theme.formatterLanguageIndex(key["editor.formatter.".len..]) orelse {
             try diags.append(a, .{ .line = line_no, .message = "editor.formatter.<언어>의 언어 이름을 모른다 — 무시" });
             return;
         };
-        config.editor.formatter[idx] = std.meta.stringToEnum(theme.FormatterChoice, value) orelse {
-            try diags.append(a, .{ .line = line_no, .message = "editor.formatter.<언어>는 auto|lsp|off|prettier — 기존 값 유지" });
+        const setting = theme.parseFormatterSetting(value) orelse {
+            try diags.append(a, .{ .line = line_no, .message = "editor.formatter.<언어>는 auto|lsp|off|prettier|biome|oxfmt|ruff|black|rustfmt|zig-fmt|command: ‹명령› — 기존 값 유지" });
             return;
         };
+        // 사용자 명령은 그 줄의 값을 빌린다 — arena 로 옮긴다.
+        config.editor.formatter[idx] = if (setting.choice == .command) .{ .choice = .command, .command = try a.dupe(u8, setting.command) } else setting;
         return;
     }
     // shell.command는 스키마-주도로 이주(CS-2) — 아래 schema.tryParse가 처리. shell.args만 특수(공백-토큰 리스트).
@@ -3220,23 +3222,37 @@ test "SC3 theme.syntax.<역할>: 유효 색은 실리고, 틀린 색·모르는 
     try std.testing.expect(parsed.diagnostics.len >= 2);
 }
 
-test "EXF5 editor.formatter.<언어> (tooling §8.2t): 알려진 값은 실리고 기본은 auto, 모르는 언어·값은 forgiving(진단 + 기존 값)" {
+test "EXF5 editor.formatter.<언어> (tooling §8.2t): 알려진 값·`zig-fmt`·`command: ‹argv›` 는 실리고 기본은 auto, 모르는 언어·값·빈 명령은 forgiving(진단 + 기존 값)" {
     const a = std.testing.allocator;
     var parsed = try parse(a,
         \\editor.formatter.typescript = prettier
         \\editor.formatter.markdown = off
         \\editor.formatter.python = lsp
+        \\editor.formatter.zig = zig-fmt
+        \\editor.formatter.go = command: gofumpt -extra "{path}"
         \\editor.formatter.json = nope
+        \\editor.formatter.css = command:
+        \\editor.formatter.html = zig_fmt
         \\editor.formatter.cobol = prettier
     );
     defer parsed.deinit();
     const f = parsed.config.editor.formatter;
-    try std.testing.expectEqual(theme.FormatterChoice.prettier, f[theme.formatterLanguageIndex("typescript").?]);
-    try std.testing.expectEqual(theme.FormatterChoice.off, f[theme.formatterLanguageIndex("markdown").?]);
-    try std.testing.expectEqual(theme.FormatterChoice.lsp, f[theme.formatterLanguageIndex("python").?]);
-    try std.testing.expectEqual(theme.FormatterChoice.auto, f[theme.formatterLanguageIndex("json").?]); // 틀린 값 — 기본 그대로
-    try std.testing.expectEqual(theme.FormatterChoice.auto, f[theme.formatterLanguageIndex("tsx").?]);
-    try std.testing.expect(parsed.diagnostics.len >= 2);
+    const at = struct {
+        fn g(name: []const u8) usize {
+            return theme.formatterLanguageIndex(name).?;
+        }
+    }.g;
+    try std.testing.expectEqual(theme.FormatterChoice.prettier, f[at("typescript")].choice);
+    try std.testing.expectEqual(theme.FormatterChoice.off, f[at("markdown")].choice);
+    try std.testing.expectEqual(theme.FormatterChoice.lsp, f[at("python")].choice);
+    try std.testing.expectEqual(theme.FormatterChoice.zig_fmt, f[at("zig")].choice);
+    try std.testing.expectEqual(theme.FormatterChoice.command, f[at("go")].choice);
+    try std.testing.expectEqualStrings("gofumpt -extra \"{path}\"", f[at("go")].command);
+    try std.testing.expectEqual(theme.FormatterChoice.auto, f[at("json")].choice); // 틀린 값 — 기본 그대로
+    try std.testing.expectEqual(theme.FormatterChoice.auto, f[at("css")].choice); // 빈 명령
+    try std.testing.expectEqual(theme.FormatterChoice.auto, f[at("html")].choice); // 내부 이름(`zig_fmt`)은 철자가 아니다
+    try std.testing.expectEqual(theme.FormatterChoice.auto, f[at("tsx")].choice);
+    try std.testing.expect(parsed.diagnostics.len >= 4);
 }
 
 test "SC6 theme.preset 이 뒤 줄에 오면 구문 색 override 가 지워진다 (순차 적용)" {

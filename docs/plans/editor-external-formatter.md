@@ -1,6 +1,6 @@
 # 외부 포매터 구현 계획
 
-상태: EF1 완료, EF2 대기. 계약은 [tooling §8.2t](../editor-surface-tooling.md)가 소유하고, 이 문서는 결정·설계·조각·검증을 소유한다. 도구 실행의 공통 계약은 §8.1 이다.
+상태: EF1·EF2 완료(계획 끝). 계약은 [tooling §8.2t](../editor-surface-tooling.md)가 소유하고, 이 문서는 결정·설계·조각·검증을 소유한다. 도구 실행의 공통 계약은 §8.1 이다.
 
 ## 왜
 
@@ -67,7 +67,7 @@
 | 조각 | 내용 | 상태 |
 | --- | --- | --- |
 | EF1 | 실행기·Prettier 감지·설정 키 `editor.formatter.<언어>`(`auto`·`lsp`·`off`·`prettier`)·`⌘S`·`⇧⌥F`·줄 대응 편집·신뢰·정보 명령·계약 §8.2t | 완료 |
-| EF2 | Biome·oxfmt(JS 계열 — 여럿이면 알림)·ruff·black(Python)·rustfmt·zig fmt(언어 서버가 포맷 못 할 때)·사용자 명령(`command:`) — 아래 「EF2 결정」 | 대기 |
+| EF2 | Biome·oxfmt(JS 계열 — 여럿이면 알림)·ruff·black(Python)·rustfmt·zig fmt(언어 서버가 포맷 못 할 때)·사용자 명령(`command:`) — 아래 「EF2 결정」 | 완료 |
 
 ## EF2 결정 (2026-10-12 사용자)
 
@@ -77,14 +77,24 @@
   - Biome: `biome.json`·`biome.jsonc` → `biome format --stdin-file-path=<경로>`. 보호 파일(`tsconfig.json` 등)에서 빈 stdout 을 낸다 — EF1 의 「빈 결과는 받지 않는다」가 지킨다.
   - oxfmt(베타): `.oxfmtrc.json`·`.oxfmtrc.jsonc` → `oxfmt --stdin-filepath <경로>`.
 - **Python 은 포맷 설정이 있는 쪽**(권장안): `[tool.ruff.format]`·`ruff.toml`/`.ruff.toml` 의 `[format]` 이 있으면 ruff, 아니면 `[tool.black]` 이 있으면 black, 그것도 없고 ruff 설정만 있으면 ruff. ruff 를 린터로만 쓰고 포맷은 black 인 저장소를 따른다. `ruff format --stdin-filename <경로> -`·`black --stdin-filename <경로> -`. 실행 파일은 가장 가까운 `.venv/bin`·`venv/bin`, 없으면 PATH. TOML 해석기는 없어 표 머리(`[tool.ruff.format]` 등)를 줄 단위로 찾는다.
-- **rustfmt·zig fmt 는 언어 서버가 포맷 못 할 때만 직접**(권장안): rust-analyzer·zls 가 떠서 포맷할 수 있으면 지금처럼 언어 서버(같은 도구를 부른다), 없거나 준비 전이면 `rustfmt --emit stdout`(cwd 루트 — `rustfmt.toml`·edition 은 `Cargo.toml` 에서 읽게 `--edition` 을 넘길지 실측으로 정한다)·`zig fmt --stdin`.
+- **rustfmt·zig fmt 는 언어 서버가 포맷 못 할 때만 직접**(권장안): rust-analyzer·zls 가 떠서 포맷할 수 있으면 지금처럼 언어 서버(같은 도구를 부른다), 없거나 준비 전이면 `rustfmt --emit stdout --edition ‹가장 가까운 Cargo.toml 의 [package] edition›`·`zig fmt --stdin`. edition 을 넘기는 것은 실측으로 정했다 — rustfmt 의 기본은 2015 라 `async fn` 에서 「not permitted in Rust 2015」로 실패한다(rust-analyzer 도 Cargo 의 edition 을 넘긴다).
 - **사용자 명령은 `command:` 앞에 argv**(권장안): `editor.formatter.go = command: gofumpt`. 공백으로 가르고 큰따옴표로 묶으며 `{path}` 가 문서 경로로 바뀐다. 셸 없이 실행하고 stdin→stdout 규칙은 같다. 머리를 두어 내장 이름이 늘어도 안 겹친다.
 - **clippy 는 이 계획 밖**: 린터이고 고치기(`cargo clippy --fix`)가 크레이트 전체의 디스크 파일을 고쳐 「그 문서만」 규칙에 맞지 않는다. 린트 수정(보조 언어 서버·rust-analyzer 의 check 명령)과 함께 따로 다룬다.
 - **실측**: 각 도구를 임시 폴더에 받아 진짜로 돌린다(EF1 은 Prettier 3.3.3 으로 TS 를 쟀다).
 
+### EF2 설계 메모
+
+- 설정 값은 선택지와 사용자 명령 문자열(`FormatterSetting`)이다. 철자는 `zig-fmt`·`command: ‹argv›`(내부 이름 `zig_fmt`·맨 `command` 는 받지 않는다).
+- Rust·Zig 의 「언어 서버가 포맷할 수 있나」는 요청을 보내지 않는 `lsp.canFormat`(준비된 클라이언트·`documentFormattingProvider` — `requestFormatting` 과 같은 조건)이다.
+- 기다림 자리는 포매터 이름의 **사본**을 든다 — 사용자 명령의 이름은 설정 문자열을 빌리는데, 기다리는 사이 설정을 다시 읽으면 그 메모리가 사라진다.
+- `⌘S` 의 「한 문서에 한 번」 알림은 최근 문서 여덟 개(surface id 고리)로 센다 — 아홉 번째 문서부터는 옛 문서가 다시 한 번 알릴 수 있다(받아들인 것).
+- 실패 이유 줄은 도구마다 모양이 달라(Biome 은 첫 줄이 `‹경로›:1:7 parse ━━━` 이고 오류는 `×` 줄, black 은 `error: cannot format ‹경로›: …`) `×` 줄을 먼저 고르고 줄 안의 문서 경로를 뗀다.
+
 ## 한계 (받아들일 것)
 
 - 외부 포매터는 문서 전체를 포맷한다(범위 포맷 없음).
+- JS 계열에서 Prettier·Biome·oxfmt 설정이 함께 있으면 `editor.formatter.<언어>` 로 고를 때까지 포맷하지 않는다(사용자 결정).
+- Python 감지는 TOML 해석기 없이 표 머리 줄만 본다 — 인라인 표(`tool = { ruff = {…} }`)는 못 본다.
 - 원격(SSH) 문서는 포맷하지 않는다(언어 서버도 없다).
 - 이름 없는 문서는 경로가 없어 감지하지 않는다(`auto` 는 언어 서버, `prettier` 를 적었으면 경로 없이 확장자로 파서를 고르게 한다 — EF1 은 포맷하지 않고 알린다).
 - OS 샌드박스는 없다 — 도구는 사용자 권한으로 저장소 밖에도 닿는다(§8.1, 신뢰 시트가 말한다).
@@ -103,3 +113,17 @@
 4. 문서 정합성 — 설정 문서의 `editor.format-on-save`·`⇧⌥F` 줄과 계약 §8.2r 이 「언어 서버의 포맷」만 말했다. → 외부 포매터로 이었다(고침).
 6. (EF2 를 만들다 찾음) 막 연 문서 — 낡음을 `lsp_version` 으로 쟀는데, 그 값은 언어 서버가 문서를 열 때(didOpen) 0 → 1 로 오른다. 파일을 열자마자 `⌘S`·`⇧⌥F` 를 누르면 외부 포매터가 도는 사이 언어 서버가 열어 멀쩡한 결과를 버렸다(EF1 판정자는 언어 서버가 연 뒤에만 포맷해 안 보였다). → 편집기의 본문 revision(`opened.file.revision`)으로 잰다(고침, `EXFB1` ⑴-b — 옛 비교로 되돌리면 잡힌다).
 5. 변이 — 30개. 살아남은 둘(C20 빈 결과 받음·C29 도구 환경 대신 앱 환경)은 판정자를 더해 잡았다(가짜 포매터의 `FMTEMPTY`·셸 환경을 담기 시작한 뒤 앱 환경에 넣은 변수가 자식에 안 감 — 판정자 빌드의 셸 없는 갈래는 살아 있는 앱 환경을 그대로 주어 그 축을 못 가르므로 가짜 로그인 셸 판정자 EXFB2 에서 잰다). 셋(C1·C30 컴파일 오류, C9 무한 루프)은 의미 변이로 다시 써 돌렸다. 30개 모두 잡혔다.
+
+## 적대적 검증 (EF2, 5회)
+
+1. 막 연 문서 — 낡음을 `lsp_version` 으로 재 멀쩡한 결과를 버렸다(EF1 에도 있던 결함 — 위 EF1 6회차, EF1 PR 에 함께 고쳤다).
+2. 진짜 도구의 실패 줄 — Biome 은 첫 줄이 `‹경로›:1:7 parse ━━━` 이고 오류는 `×` 줄, black 은 경로가 줄 가운데라 알림에 오류가 안 보였다. → `×` 줄을 먼저 고르고 줄 안의 문서 경로를 뗀다(고침, `EXFL1`).
+3. 정보 명령의 이유 — 언어 서버가 포맷할 수 없어 직접 부른 rustfmt·zig fmt 를 「editor.formatter 설정」이라 말했다(진짜 도구 제품 경로 실측에서 찾음). → 이유별 문구(고침, `EXFB3`).
+4. 기계 속도 — `⌘S` 의 저장 시한이 상수(실행기 시한 + 1 초)라, 판정자가 실행기 시한을 넉넉히 당겨도 따라오지 않아 부하가 큰 기계에서 결과보다 먼저 저장했다(로컬에서 한 번 흔들림). → 저장 시한을 실행기 시한에서 계산하고, 판정자의 실행기 시한은 20 초(시한 장면만 짧게)로(고침).
+5. 변이 — 27개. 살아남은 D20(사용자 명령의 상대 경로 거절)은 PATH 에 저장소 루트를 넣은 장면으로 잡았다(규칙이 없으면 `‹루트›/fakebin/gofumpt` 가 실제로 실행된다). D8(TOML 배열 표 거르기)은 등가라 그 조건을 지웠다. 둘(D3·D15)은 컴파일 오류로만 죽어 의미 변이로 다시 돌렸다. 모두 잡혔다.
+
+**진짜 도구 실측**(임시 폴더에 설치 — Biome 2·oxfmt·ruff·black, 이 기계의 rustfmt·zig 0.16):
+- CLI 로 EF2 가 만드는 argv 그대로 — Biome·oxfmt(TS·Markdown)·ruff·black·rustfmt(edition 2021)·zig fmt 가 포맷했다.
+- Biome 의 보호 파일(`tsconfig.json`)은 이 판에서 입력을 그대로 낸다(무변경). 구문 오류는 Biome 1·black 123·rustfmt 1 로 끝난다(black 은 stdout 에 입력을 내지만 0 이 아니라 적용하지 않는다).
+- rustfmt 는 edition 없이 `async fn` 에서 실패한다(그래서 넘긴다).
+- 앱의 제품 경로로 Biome·ruff·rustfmt·zig fmt 를 한 번씩 돌렸다(임시 판정자, 커밋하지 않음 — 정보 명령과 `⇧⌥F` 적용).

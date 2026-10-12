@@ -2238,6 +2238,13 @@ pub fn signatureTriggersFor(self: *AppSession, term: *Term) ?lsp.rpc.SignatureTr
     return c.signature_triggers;
 }
 
+/// 그 문서의 언어 서버가 **지금** 문서 포맷을 할 수 있나(요청은 보내지 않는다) — `requestFormatting` 과 같은 조건(준비된 클라이언트·
+/// `documentFormattingProvider`). 외부 포매터(§8.2t)가 Rust·Zig 의 `auto` 에서 rustfmt·zig fmt 를 직접 부를지 가른다.
+pub fn canFormat(self: *AppSession, term: *Term) bool {
+    const c = readyClientFor(self, term) orelse return false;
+    return c.formatting_supported;
+}
+
 /// `textDocument/formatting` 을 보낸다(§8.2e). 서버가 없거나 지원하지 않으면 `null`. 요청 전에 밀린 didChange 를 먼저 보낸다.
 pub fn requestFormatting(self: *AppSession, term: *Term) ?u32 {
     const c = readyClientFor(self, term) orelse return null;

@@ -46,10 +46,13 @@ pub const State = struct {
     save_timeouts: u64 = 0,
     /// **외부 포매터**(§8.2t) — 기다리는 실행의 id(0 이면 언어 서버를 기다린다)와 그 종류. 이때 `waiting_seq` 는 어떤 응답과도 맞지 않는다.
     external_id: u64 = 0,
-    external_kind: maru.session.editor.external_format.Kind = .prettier,
+    external_name: external_formatter.Name = .{},
     /// 외부 포매터를 띄운 순간의 본문 revision(`opened.file.revision` — 편집마다 오른다). 낡음은 이것으로 잰다 — `lsp_version` 은 언어
-    /// 서버가 그 문서를 열 때(didOpen) 0 → 1 로 올라, 막 연 문서의 결과를 그사이 언어 서버가 열면 멀쩡한 결과를 버렸다(적대적 검증).
+    /// 서버가 그 문서를 열 때(didOpen) 0 → 1 로 올라, 막 연 문서의 결과를 그사이 언어 서버가 열면 멀쩡한 결과를 버렸다(적대적 검증 EF2 1회차).
     external_revision: u64 = 0,
+    /// JS 계열 도구가 둘 이상이라 `⌘S` 에서 이미 알린 문서(surface) — 한 문서에 한 번만(저장마다 알리면 성가시다, 계획 EF2 결정).
+    conflict_noticed: [8]u64 = @splat(0),
+    conflict_next: u8 = 0,
     /// 사용자 셸 환경을 담는 중이라 외부 포매터를 아직 못 띄웠다(`⌘S` 만) — tick 이 다시 준비한다.
     preparing: bool = false,
 };
@@ -65,7 +68,7 @@ fn waitExternal(st: *State, term: *Term, started: external_formatter.Started) vo
     st.waiting_surface = term.surface.id;
     st.asked_version = term.rt.editorDocument().notifications.lsp_version;
     st.external_id = started.id;
-    st.external_kind = started.kind;
+    st.external_name = started.name;
     st.external_revision = documentRevision(term);
 }
 
@@ -154,19 +157,19 @@ fn saveCommandImpl(self: *AppSession, term: *Term, late: bool) void {
                 .started => |started| {
                     waitExternal(st, term, started);
                     st.then_save = true;
-                    st.save_deadline_ms = self.awakeMs() + external_save_timeout_ms;
+                    st.save_deadline_ms = self.awakeMs() + externalSaveTimeoutMs();
                     return;
                 },
-                .preparing => |kind| {
+                .preparing => |name| {
                     dropExternal(st);
-                    st.external_kind = kind;
+                    st.external_name = name;
                     st.waiting = true;
                     st.waiting_seq = no_seq;
                     st.waiting_surface = term.surface.id;
                     st.asked_version = term.rt.editorDocument().notifications.lsp_version;
                     st.preparing = true;
                     st.then_save = true;
-                    st.save_deadline_ms = self.awakeMs() + external_save_timeout_ms;
+                    st.save_deadline_ms = self.awakeMs() + externalSaveTimeoutMs();
                     return;
                 },
                 .skip => {},
@@ -191,7 +194,7 @@ pub fn tick(self: *AppSession, now_ms: u64) void {
     // 저장 실패면 그 알림이 이것을 덮는다(더 중요하다). 외부 포매터·셸 환경을 기다렸으면 그 이름으로 — 「언어 서버가 늦었다」는 거짓이다
     // (적대적 검증 EF1 2회차).
     if (st.external_id != 0 or st.preparing)
-        self.showResponseNotice(.fmt_external_timeout_saved, &.{.{ .s = st.external_kind.displayName() }})
+        self.showResponseNotice(.fmt_external_timeout_saved, &.{.{ .s = st.external_name.slice() }})
     else
         self.showResponseNotice(.fmt_save_timeout, &.{});
     finishPendingSave(self, true);
@@ -203,9 +206,12 @@ pub fn deinit(self: *AppSession) void {
     dropExternal(&self.editor_format);
 }
 
-/// 외부 포매터를 기다리는 저장의 시한 — 실행기의 시한(`format_process.default_timeout_ms`) 뒤에 결과가 올 여유를 둔다. 실행기가 먼저
-/// 그룹째 끝내고 `timeout` 결과를 내므로, 이것은 결과가 안 오는 경우(스레드를 못 띄웠다)의 마지막 그물이다.
-pub const external_save_timeout_ms: u64 = format_process.default_timeout_ms + 1000;
+/// 외부 포매터를 기다리는 저장의 시한 — 실행기의 시한(`external_formatter.timeout_ms`) 뒤에 결과가 올 여유를 둔다. 실행기가 먼저
+/// 그룹째 끝내고 `timeout` 결과를 내므로, 이것은 결과가 안 오는 경우(스레드를 못 띄웠다)의 마지막 그물이다. 실행기 시한에서 **계산한다**
+/// — 상수면 판정자가 실행기 시한을 넉넉히 당겨도 저장 시한이 따라오지 않아, 부하가 큰 기계에서 결과보다 먼저 저장했다.
+pub fn externalSaveTimeoutMs() u64 {
+    return @as(u64, external_formatter.timeout_ms) + 1000;
+}
 
 /// 셸 환경을 기다리던 `⌘S` — 담겼으면 다시 준비한다(외부 포매터를 띄우거나, 그사이 설정·신뢰가 바뀌었으면 그대로 저장).
 fn retryPrepare(self: *AppSession) void {
@@ -221,7 +227,7 @@ fn retryPrepare(self: *AppSession) void {
         .started => |started| {
             st.preparing = false;
             st.external_id = started.id;
-            st.external_kind = started.kind;
+            st.external_name = started.name;
             // 문서는 그사이 바뀌었을 수 있다 — 띄운 순간의 revision 으로 결과를 잰다.
             st.external_revision = documentRevision(term);
         },
@@ -238,7 +244,7 @@ fn onExternal(self: *AppSession, r: *const format_process.Result) void {
     st.then_save = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;
     defer if (then_save) saveNow(self, term, true);
-    external_formatter.apply(self, term, st.external_kind, r, st.external_revision, then_save);
+    external_formatter.apply(self, term, st.external_name.slice(), r, st.external_revision, then_save);
 }
 
 /// 기다리던 저장을 포맷 없이 지금 한다(시한 — `late`·다른 문서의 저장). 문서가 닫혔으면 할 것이 없다(닫기는 저장하지 않은 편집을 묻는다).

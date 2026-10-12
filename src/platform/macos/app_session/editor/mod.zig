@@ -22405,6 +22405,9 @@ const fake_prettier_script =
     \\
 ;
 
+/// 외부 포매터 판정자의 실행기 시한 — 제품(3 초)의 여러 배. 판정이 기계 속도에 달리지 않게(시한 장면만 따로 당긴다).
+const test_formatter_timeout_ms: u32 = 20_000;
+
 fn installFakePrettier(fx: *PaneFixture) !void {
     try fx.dir.dir.createDirPath(testing.io, "node_modules/.bin");
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "node_modules/.bin/prettier", .data = fake_prettier_script });
@@ -22423,6 +22426,8 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     try installFakePrettier(&f.fx);
     try testing.expectEqualStrings(f.root_buf[0..f.root_len], lsp_client.documentRoot(s, term).?); // 픽스처가 저장소다
     const ext = @import("external_formatter.zig");
+    // 실행기 시한은 넉넉히 — 부하가 큰 기계에서 가짜 포매터(셸 스크립트)가 제품 시한(3 초)을 넘겨 흔들리지 않게. 시한 장면만 짧게 당긴다.
+    ext.timeout_ms = test_formatter_timeout_ms;
     defer ext.timeout_ms = @import("../../format_process.zig").default_timeout_ms;
     const content = struct {
         fn g(t: *Term) []const u8 {
@@ -22515,7 +22520,7 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     try testing.expectEqual(fmt0, s.editor_lsp.sent_formattings);
 
     // ⑶ 설정 `lsp` — 언어 서버로(지금 동작). `off` — ⌘S 는 곧바로 저장, ⇧⌥F 는 알림.
-    s.loaded_config.config.editor.formatter[ts_idx] = .lsp;
+    s.loaded_config.config.editor.formatter[ts_idx] = .{ .choice = .lsp };
     s.dismissMessageOverlays();
     s.dispatchAppAction(.show_formatter_info);
     try testing.expectEqualStrings(maru.i18n.t(.fmt_info_lsp), notice(s));
@@ -22523,12 +22528,12 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expectEqual(fmt0 + 1, s.editor_lsp.sent_formattings);
     try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
-    s.loaded_config.config.editor.formatter[ts_idx] = .off;
+    s.loaded_config.config.editor.formatter[ts_idx] = .{ .choice = .off };
     s.dismissMessageOverlays(); // 앞 장면의 알림이 키를 먹지 않게(알림은 키 하나로 내려간다)
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expect(!s.editor_format.waiting);
     try testing.expectEqualStrings(maru.i18n.t(.fmt_formatter_off), notice(s));
-    s.loaded_config.config.editor.formatter[ts_idx] = .auto;
+    s.loaded_config.config.editor.formatter[ts_idx] = .{ .choice = .auto };
 
     // ⑷ 실패 — stderr 첫 줄을 알리고 포맷 없이 저장한다(본문 그대로).
     try resetDoc(s, term, "//FMTFAIL\nz=3\n");
@@ -22565,7 +22570,7 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqual(timeouts0 + 1, ext.counters.timeouts);
     try testing.expect(!term.rt.editorDocument().opened.?.isDirty());
-    ext.timeout_ms = @import("../../format_process.zig").default_timeout_ms;
+    ext.timeout_ms = test_formatter_timeout_ms;
 
     // ⑹ 낡음 — 결과가 오기 전에 문서가 바뀌면 버리고 포맷 없이 저장한다(그 순간의 본문이 저장된다).
     try resetDoc(s, term, "//FMTSLOW\nz=5\n");
@@ -22610,6 +22615,8 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
     try testing.expect(f.ready());
     try installFakePrettier(&f.fx);
     const ext = @import("external_formatter.zig");
+    ext.timeout_ms = test_formatter_timeout_ms; // 부하가 큰 기계에서 흔들리지 않게(EXFB1 주석)
+    defer ext.timeout_ms = @import("../../format_process.zig").default_timeout_ms;
     const root = f.root_buf[0..f.root_len];
     const content = struct {
         fn g(t: *Term) []const u8 {
@@ -22640,7 +22647,7 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
     try testing.expectEqualStrings("const a=1\n", try f.fx.dir.dir.readFile(testing.io, "b.ts", &disk_buf));
     // ⑴-a 저장 시한이 지나면 포맷 없이 저장하고 **그 포매터의 이름으로** 알린다(「언어 서버가 늦었다」가 아니다 — 적대적 검증 EF1 2회차).
     // 시한은 구조 필드 — 벽시계를 기다리지 않고 tick 에 먼 미래를 준다.
-    format_client.tick(s, s.awakeMs() + format_client.external_save_timeout_ms + 1);
+    format_client.tick(s, s.awakeMs() + format_client.externalSaveTimeoutMs() + 1);
     try testing.expect(!s.editor_format.waiting and !s.editor_format.preparing);
     var to_buf: [256]u8 = undefined;
     try testing.expectEqualStrings(maru.i18n.format(&to_buf, maru.i18n.t(.fmt_external_timeout_saved), &.{.{ .s = "Prettier" }}), s.chrome_host.notice.message);
@@ -22705,6 +22712,180 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
     try testing.expect(s.pending_confirm == .lsp_trust);
     try testing.expect(!s.editor_format.waiting);
     try testing.expectEqualStrings("const c=3\n", content(term));
+}
+
+/// 가짜 포매터(셸 스크립트, 이름은 무엇이든) — 받은 인자를 `|` 로 이어 저장소 루트의 `.fmt_args` 에 적고(cwd 도), `=` 둘레에 공백을 넣어
+/// 낸다(멱등). 어느 도구의 argv 모양으로 불렸는지 판정자가 본다.
+const fake_formatter_script =
+    \\#!/bin/sh
+    \\out="$(pwd -P)/.fmt_args"
+    \\{ for a in "$@"; do printf '%s|' "$a"; done; printf '\n'; } > "$out"
+    \\/usr/bin/sed -e 's/\([^ ]\)=\([^ ]\)/\1 = \2/g'
+    \\
+;
+
+fn installFakeFormatter(fx: *PaneFixture, sub_path: []const u8) !void {
+    if (std.fs.path.dirname(sub_path)) |d| try fx.dir.dir.createDirPath(testing.io, d);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = sub_path, .data = fake_formatter_script });
+    try fx.dir.dir.setFilePermissions(testing.io, sub_path, @enumFromInt(0o755), .{});
+}
+
+test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이면 고르지 않고 알리며(⌘S 는 문서마다 한 번) 설정으로 고르면 그것(Biome argv), Python 은 포맷 설정의 ruff 를 .venv 에서, 언어 서버가 못 하면 zig fmt·rustfmt(Cargo edition)를 PATH 에서, 사용자 명령은 {path} 를 바꿔 PATH 에서" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "c.ts", "const a=1\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    try testing.expect(f.ready());
+    const root = f.root_buf[0..f.root_len];
+    const ext = @import("external_formatter.zig");
+    ext.timeout_ms = test_formatter_timeout_ms; // 부하가 큰 기계에서 흔들리지 않게(EXFB1 주석)
+    defer ext.timeout_ms = @import("../../format_process.zig").default_timeout_ms;
+    defer ext.test_path = null;
+    const settled = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_format.waiting;
+        }
+    }.g;
+    const notice = struct {
+        fn g(ss: *AppSession) []const u8 {
+            return ss.chrome_host.notice.message;
+        }
+    }.g;
+    var args_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var want_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
+    var disk_buf: [256]u8 = undefined;
+    const idx = struct {
+        fn g(name: []const u8) usize {
+            return maru.config.theme.formatterLanguageIndex(name).?;
+        }
+    }.g;
+
+    // ⑴ JS 도구 둘(Prettier·Biome) — 고르지 않는다. ⇧⌥F 는 누를 때마다 알리고, ⌘S 는 그 문서에서 한 번만 알리고 포맷 없이 저장한다.
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = ".prettierrc", .data = "{}\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "biome.json", .data = "{}\n" });
+    try installFakeFormatter(&f.fx, "node_modules/.bin/biome");
+    try installFakeFormatter(&f.fx, "node_modules/.bin/prettier");
+    var conflict_buf: [256]u8 = undefined;
+    const conflict = maru.i18n.format(&conflict_buf, maru.i18n.t(.fmt_external_conflict), &.{ .{ .s = "Prettier·Biome" }, .{ .s = "typescript" } });
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(!s.editor_format.waiting);
+    try testing.expectEqualStrings(conflict, notice(s));
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(!s.editor_format.waiting);
+    try testing.expectEqualStrings(conflict, notice(s)); // 첫 ⌘S 는 알린다
+    try testing.expectEqualStrings("const a=1\n", try f.fx.dir.dir.readFile(testing.io, "c.ts", &disk_buf)); // 포맷 없이 저장
+    s.dismissMessageOverlays();
+    s.chrome_host.notice.message = "";
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqualStrings("", notice(s)); // 같은 문서의 다음 ⌘S 는 알리지 않는다
+    // 설정으로 고르면 그것 — Biome 의 argv(`format --stdin-file-path=<경로>`), cwd 는 저장소 루트.
+    s.loaded_config.config.editor.formatter[idx("typescript")] = .{ .choice = .biome };
+    defer s.loaded_config.config.editor.formatter[idx("typescript")] = .{};
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try testing.expectEqualStrings("const a = 1\n", try f.fx.dir.dir.readFile(testing.io, "c.ts", &disk_buf));
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "format|--stdin-file-path={s}|\n", .{f.path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
+
+    // ⑵ Python — 포맷 설정이 ruff 이면 가장 가까운 `.venv/bin/ruff`(`format --stdin-filename <경로> -`).
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pyproject.toml", .data = "[tool.ruff.format]\n[tool.black]\n" });
+    try installFakeFormatter(&f.fx, ".venv/bin/ruff");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "m.py", .data = "x=1\n" });
+    var py_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const py_path = try std.fmt.bufPrint(&py_path_buf, "{s}/m.py", .{root});
+    const py = (try pane_ops.openFileTermInActivePane(s, py_path, .text)).term;
+    py.rt.editor_selection = editor_selection.Selection.at(0);
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try testing.expectEqualStrings("x = 1\n", py.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "format|--stdin-filename|{s}|-|\n", .{py_path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
+
+    // ⑶ Zig·Rust — 언어 서버가 포맷할 수 없으면(언어 서버를 끈다) PATH 의 `zig fmt --stdin`·`rustfmt --emit stdout --edition <Cargo>`.
+    try installFakeFormatter(&f.fx, "fakebin/zig");
+    try installFakeFormatter(&f.fx, "fakebin/rustfmt");
+    try installFakeFormatter(&f.fx, "fakebin/gofumpt");
+    var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    ext.test_path = try std.fmt.bufPrint(&bin_buf, "{s}/fakebin", .{root});
+    s.loaded_config.config.lsp.enabled = false;
+    defer s.loaded_config.config.lsp.enabled = true;
+    lsp_client.pump(s);
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "z.zig", .data = "const a=1;\n" });
+    var zig_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const zt = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&zig_path_buf, "{s}/z.zig", .{root}), .text)).term;
+    zt.rt.editor_selection = editor_selection.Selection.at(0);
+    // 정보 명령은 「설정으로 골랐다」가 아니라 「언어 서버가 포맷할 수 없어 직접」이라 말한다(적대적 검증 EF2 3회차).
+    s.dismissMessageOverlays();
+    s.dispatchAppAction(.show_formatter_info);
+    {
+        var head_buf: [128]u8 = undefined;
+        try testing.expect(std.mem.startsWith(u8, notice(s), maru.i18n.format(&head_buf, maru.i18n.t(.fmt_info_fallback), &.{.{ .s = "zig fmt" }})));
+    }
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try testing.expectEqualStrings("const a = 1;\n", zt.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("fmt|--stdin|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "Cargo.toml", .data = "[package]\nname = \"x\"\nedition = \"2021\"\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "r.rs", .data = "let a=1;\n" });
+    var rs_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const rt = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&rs_path_buf, "{s}/r.rs", .{root}), .text)).term;
+    rt.rt.editor_selection = editor_selection.Selection.at(0);
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try testing.expectEqualStrings("let a = 1;\n", rt.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings("--emit|stdout|--edition|2021|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
+
+    // ⑷ 사용자 명령 — 첫 낱말은 PATH 에서, `{path}` 는 낱말 안에서도 문서 경로로.
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "g.go", .data = "a=1\n" });
+    var go_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const go_path = try std.fmt.bufPrint(&go_path_buf, "{s}/g.go", .{root});
+    const gt = (try pane_ops.openFileTermInActivePane(s, go_path, .text)).term;
+    gt.rt.editor_selection = editor_selection.Selection.at(0);
+    s.loaded_config.config.editor.formatter[idx("go")] = .{ .choice = .command, .command = "gofumpt -extra \"--file={path}\"" };
+    defer s.loaded_config.config.editor.formatter[idx("go")] = .{};
+    // 적어 둔 명령은 「설정」이다(직접 실행 이유가 아니다).
+    s.dismissMessageOverlays();
+    s.dispatchAppAction(.show_formatter_info);
+    {
+        var head_buf: [128]u8 = undefined;
+        try testing.expect(std.mem.startsWith(u8, notice(s), maru.i18n.format(&head_buf, maru.i18n.t(.fmt_info_configured), &.{.{ .s = "gofumpt" }})));
+    }
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try testing.expectEqualStrings("a = 1\n", gt.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "-extra|--file={s}|\n", .{go_path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
+    // 첫 낱말이 상대 경로(`fakebin/gofumpt`)면 찾지 않는다 — cwd 가 그 뜻을 바꾼다(절대 경로나 PATH 의 이름만). PATH 에 저장소 루트를
+    // 넣어 둔다 — 상대 경로를 PATH 항목에 붙여 찾으면 `‹루트›/fakebin/gofumpt` 가 실제로 있어 실행되고 만다(변이 D20).
+    var with_root_buf: [2 * std.fs.max_path_bytes + 2]u8 = undefined;
+    ext.test_path = try std.fmt.bufPrint(&with_root_buf, "{s}/fakebin:{s}", .{ root, root });
+    s.loaded_config.config.editor.formatter[idx("go")] = .{ .choice = .command, .command = "fakebin/gofumpt" };
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(!s.editor_format.waiting);
+    {
+        var miss_buf: [256]u8 = undefined;
+        try testing.expectEqualStrings(maru.i18n.format(&miss_buf, maru.i18n.t(.fmt_external_missing), &.{.{ .s = "gofumpt" }}), notice(s));
+    }
+    // 절대 경로는 그것.
+    var abs_cmd_buf: [std.fs.max_path_bytes + 32]u8 = undefined;
+    s.loaded_config.config.editor.formatter[idx("go")] = .{ .choice = .command, .command = try std.fmt.bufPrint(&abs_cmd_buf, "{s}/fakebin/gofumpt -abs", .{root}) };
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try testing.expectEqualStrings("-abs|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
+    // 따옴표가 닫히지 않은 명령은 실행하지 않고 알린다.
+    s.loaded_config.config.editor.formatter[idx("go")] = .{ .choice = .command, .command = "gofumpt \"oops" };
+    s.dismissMessageOverlays();
+    try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+    try testing.expect(!s.editor_format.waiting);
+    var bad_buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(maru.i18n.format(&bad_buf, maru.i18n.t(.fmt_external_bad_command), &.{.{ .s = "go" }}), notice(s));
 }
 
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {

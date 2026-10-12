@@ -3799,8 +3799,12 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
         forgetDrag(s); // 새 sidecar 는 그 끌기를 모른다 — enter 없이 drop 을 보내지 않게(W6d①)
         dropDragOut(gpa, s); // 페이지 끌기도 — 답할 곳이 없다(W6d②)
         failFileFetch(s.record.surface_id); // 청한 파일 내용도 오지 않는다(W6d③)
-        // 물은 닫기(W6j) — 답할 곳이 없다. 사용자는 닫기를 골랐다(떠나기 확인도 함께 사라졌다) — 창이 닫는다.
-        if (s.close_ask == .asking or s.close_ask == .asked) s.close_ask = .closed;
+        // 물은 닫기(W6j) — 답할 곳이 없다. 사용자는 닫기를 골랐다(떠나기 확인도 함께 사라졌다) — 창이 닫는다. 에이전트가 물은 닫기는 아니다 —
+        // 떠나기 확인은 사용자가 그 탭에서 정한다(결정 ③): 탭을 남기고 에이전트에게는 「kept open」(W9b③ 적대 리뷰 5 회차).
+        if (s.close_ask == .asking or s.close_ask == .asked) {
+            s.close_ask = if (s.close_ask_agent) .none else .closed;
+            s.close_ask_agent = false;
+        }
     }
     failDevtools(gpa, 0, .sidecar_gone, false); // W9-0b: 답은 오지 않는다 — 버린 자리도 푼다(알림은 pump 끝에)
     forgetReserved(); // 맡긴 번호도 새 sidecar 는 모른다(W6f②) — 붙은 팝업은 새 sidecar 에서 보통 탭으로 되살아난다
@@ -5784,4 +5788,32 @@ test "W9b③ 적대 리뷰 4 회차: 대화상자가 떠 있으면 미룬 놓기
     try std.testing.expect(surfaces.contains(101));
     applyD(gpa, .{ .js_dialog = .{ .browser = 101, .request = 2, .kind = .alert, .origin = "", .message = "grandchild" } });
     try std.testing.expect(jsDialogShowing(8));
+}
+
+test "W9b③ 적대 리뷰 5 회차: 에이전트가 물은 닫기가 떠나기 확인을 기다리는 동안 sidecar 가 다시 떠도 탭을 닫지 않는다(사용자가 정한다)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    try devtoolsTestSurface(8, true);
+    state = .running; // 물은 닫기는 엔진이 돌 때만(보낸 frame 은 시험이 보지 않는다)
+    try std.testing.expect(askCloseByAgent(gpa, 7, monotonicNow()));
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
+    try std.testing.expectEqual(CloseAskPhase.asked, closeAskPhase(7));
+    try std.testing.expect(askClose(gpa, 8, monotonicNow())); // 사람의 닫기 — 그대로 닫는다(W6j)
+    forgetSidecar(gpa);
+    try std.testing.expect(closeAskPhase(7) != .closed);
+    try std.testing.expectEqual(CloseAskPhase.closed, closeAskPhase(8));
+}
+
+test "W9b③ 적대 리뷰 5 회차: 미룬 놓기는 tick 마다 탭에 하나씩 보낸다(몰아 보내면 다음 op 의 자리를 뺏는다)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    var rec: DevtoolsRecorder = .{};
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "hi" } });
+    for (0..3) |_| try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"g\"}", rec.sink()));
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 하나 보낸다
+    try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(7).?.deferred_releases.items.len);
 }

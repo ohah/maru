@@ -35,6 +35,16 @@ pub fn dividerGrabBandPx(scale_milli: u32) u32 {
     return @intCast((@as(u64, divider_grab_band_pt) * scale + 999) / 1000);
 }
 
+/// terminal↔dock 외곽 divider가 **차지하고 그리는** 두께(backing px) — 설정 `split.divider-thickness`(logical pt)를
+/// 배율로 올린다. 0 이하면 0(보이지 않는다), 보이면 최소 1px. **누르는 띠는 이것보다 넓다**(`Geometry.divider_hit` —
+/// 이 두께 양옆으로 `dividerGrabBandPx`). 예전에는 Windows 가 누르는 띠(10px)를 divider 두께 자체로 넘겨 10px 막대를
+/// 그리고 작업영역 10px 를 먹었고, macOS 는 두께 1pt + 양옆 띠였다 — 같은 divider 가 호스트마다 다르게 보이고 눌렸다.
+pub fn dividerThicknessPx(thickness_pt: f32, scale_milli: u32) u32 {
+    if (scale_milli == 0 or !(thickness_pt > 0.0)) return 0;
+    const px_f = thickness_pt * @as(f32, @floatFromInt(scale_milli)) / 1000.0;
+    return @max(@as(u32, 1), @as(u32, @intFromFloat(@round(px_f))));
+}
+
 pub const Geometry = struct {
     /// 사이드바와 titlebar strip만 제외한 전체 작업영역. terminal·divider·dock의 합이며 전역 모달 중심의 권위다.
     workspace: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -55,6 +65,9 @@ pub const Geometry = struct {
     terminal: Rect,
     dock: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     divider: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
+    /// divider 를 **누르는** 자리 — 그리는 `divider` 보다 넓다(`outerDividerHitRect` 에 `dividerGrabBandPx`).
+    /// `regionAt` 과 호스트의 divider hit-test 가 이 하나를 본다. divider 가 없으면 빈 사각형이다.
+    divider_hit: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     /// 도크 최상단 뷰 스위처(docs/file-explorer.md §3.5). 옛 제목 행을 흡수해 **chrome 2행**을 쓰고, 도크가
     /// 낮으면 1행 → 0행 순으로 줄인다 — 스위처가 콘텐츠를 굶기지 않는다.
     view_bar: Rect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
@@ -346,7 +359,9 @@ pub fn regionAt(geom: Geometry, x_px: f64, y_px: f64) Region {
     // **사이드바가 먼저다.** 작업영역 밖이라 아래 판정들과 겹치지 않지만, 순서를 적어 두는 편이
     // 나중에 겹치는 자리(스크롤바·리사이즈 띠)가 생겼을 때 규칙이 분명하다.
     if (contains(geom.sidebar, x_px, y_px)) return .sidebar;
-    if (contains(geom.divider, x_px, y_px)) return .divider;
+    // 그리는 선이 아니라 **누르는 띠**로 판정한다(선은 1px 이라 그것만으로는 잡기 어렵다). 띠는 터미널·도크
+    // 가장자리와 겹치므로 그 둘보다 먼저 본다.
+    if (contains(geom.divider_hit, x_px, y_px)) return .divider;
     if (contains(geom.view_bar, x_px, y_px)) return .view_bar;
     if (contains(geom.tree_content, x_px, y_px)) return .dock_content;
     // **도크 안이지만 본문도 스위처도 아닌 자리**(여백)는 도크가 먹는다 — 터미널로 흘리면 도크
@@ -374,6 +389,13 @@ fn contains(r: Rect, x_px: f64, y_px: f64) bool {
 }
 
 pub fn compute(in: Input) Geometry {
+    var g = computeLayout(in);
+    // 누르는 띠는 배치가 끝난 divider 에서 유도한다 — 띠 폭은 배율에서 나오고(10pt), 작업영역 밖으로는 안 나간다.
+    g.divider_hit = outerDividerHitRect(g, in.side, dividerGrabBandPx(in.scale_milli));
+    return g;
+}
+
+fn computeLayout(in: Input) Geometry {
     // 상태바는 **창 전폭**(사이드바 아래까지)이라 `available` 밖에 산다. 그래서 창 높이에서 **먼저** 깎고,
     // 아래 모든 기하가 그 짧아진 높이(`usable_h`)에서 파생되게 한다 — terminal·dock·divider·조기 반환이
     // 전부 한 지점에서 정합한다. 창보다 크게 요청되면 창 높이로 clamp(작업영역 0은 허용, 음수는 없다).
@@ -965,7 +987,7 @@ fn regionFixture() Geometry {
         .cell_width_px = 9,
         .cell_height_px = 19,
         .scale_milli = 1000,
-        .divider_px = dividerGrabBandPx(1000),
+        .divider_px = dividerThicknessPx(1.0, 1000), // 보이는 선(1px) — 누르는 띠는 `divider_hit`
         .side = .right,
         .size_pt = 0,
         .visible = true,
@@ -979,15 +1001,19 @@ test "regionAt: 터미널·디바이더·도크가 갈린다" {
     const g = regionFixture();
     try region_testing.expectEqual(Region.terminal, regionAt(g, 10, 10));
     try region_testing.expectEqual(Region.divider, regionAt(g, @floatFromInt(g.divider.x + g.divider.w / 2), 10));
-    try region_testing.expectEqual(Region.dock_content, regionAt(g, @floatFromInt(g.dock.x + 5), @floatFromInt(g.tree_content.y + 5)));
+    // 도크 본문은 **누르는 띠 너머**다 — 선 양옆 `dividerGrabBandPx` 안은 divider 가 먹는다.
+    const past_band = g.divider_hit.x + g.divider_hit.w;
+    try region_testing.expectEqual(Region.dock_content, regionAt(g, @floatFromInt(past_band + 5), @floatFromInt(g.tree_content.y + 5)));
 }
 
 test "regionAt: 디바이더를 먼저 본다 — 잡기 띠가 이웃과 겹친다" {
     const g = regionFixture();
     // 잡기 띠는 눈에 보이는 선보다 넓다. 그 안의 점은 이웃 사각형에도 들 수 있는데, **디바이더가
     // 이긴다** — 안 그러면 겹친 폭만큼 막대를 영영 못 잡는다.
-    var x = g.divider.x;
-    while (x < g.divider.x + g.divider.w) : (x += 1) {
+    // 눈에 보이는 선(1px)보다 넓은 **띠 전체**를 훑는다 — 선 양옆이 이웃(터미널·도크)에 안 뺏긴다.
+    try region_testing.expect(g.divider_hit.w > g.divider.w);
+    var x = g.divider_hit.x;
+    while (x < g.divider_hit.x + g.divider_hit.w) : (x += 1) {
         try region_testing.expectEqual(Region.divider, regionAt(g, @floatFromInt(x), 100));
     }
 }
@@ -996,7 +1022,7 @@ test "regionAt: 도크 여백도 도크가 먹는다 — 터미널로 안 흘린
     const g = regionFixture();
     // 뷰 스위처 바 위(도크 안, 본문 밖)를 눌러도 터미널이 아니다.
     const y: f64 = @floatFromInt(g.dock.y + 1);
-    const r = regionAt(g, @floatFromInt(g.dock.x + 1), y);
+    const r = regionAt(g, @floatFromInt(g.divider_hit.x + g.divider_hit.w + 1), y); // 누르는 띠 너머 첫 칸
     try region_testing.expect(r == .view_bar or r == .dock_content);
 }
 
@@ -1032,8 +1058,9 @@ test "regionAt: 창 밖은 none 이다" {
 test "grabOffsetPx: 잡기 띠 어디를 눌러도 누른 순간 크기가 안 바뀐다" {
     const g = regionFixture();
     const want_pt = sizePtForEffectiveWidth(g.dock.w, 0, 1000);
-    var x = g.divider.x;
-    while (x < g.divider.x + g.divider.w) : (x += 1) {
+    // 누를 수 있는 곳은 **띠 전체**다(`divider_hit`) — 선에서 떨어진 띠 끝을 눌러도 막대가 튀지 않아야 한다.
+    var x = g.divider_hit.x;
+    while (x < g.divider_hit.x + g.divider_hit.w) : (x += 1) {
         const px: f64 = @floatFromInt(x);
         const off = grabOffsetPx(g, .right, px, 100);
         const got = sizePtForPointer(g, .right, px + off, 100, 1000).?;

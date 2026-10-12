@@ -252,6 +252,9 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   OOM 에 `recordDroppedOom` 을 올린다).
 - catch-up 의 `held → Busy` 가 후보 준비 실패 분류에서 재시도가 아니라 `local_invariant_violation` 으로 봉인된다(IC3b-2b-1 — 지금은
   닿지 않는다). 재시도로 분류할지 정한다.
+- tick 의 `held` 는 `.idle` 로 접힌다(`drainRemoteNow`). host 출력이 더 오지 않을 때 보류된 배치를 다음 프레임 루프가 다시 펌프하는지
+  — `hasImmediateFrameWork` 는 attachment 큐 머리를 세지 않는다 — 확인하고, 아니면 보류를 「즉시 할 일」로 센다(IC4b 로 보류 이유에
+  fork 와 겹친 순간이 더해졌다, 적대적 검증 2 회차).
 - 판정자: 연결 둘의 같은 segment_id 가 섞이지 않는다; 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
   종료 상태가 되지 않는다.
 
@@ -290,14 +293,14 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
 
 - `Client.pumpImageChannel(wait)` 가 「recvmsg + `F_SETFD`」(`Table.drain`)만 수신 잠금 안에서 한다(release 쓰기·poison 은 밖).
   `wait` 는 `fork_fd_fence.ReceiveWait` — tick 이 다시 오는 자리는 `.try_lock`(못 잡으면 false, fd 는 커널 큐에 남는다), tick 이 없는
-  동기 적용 자리는 `.block`(fork 시스템콜 길이로 묶인다).
+  동기 적용 자리는 `.block`(드물고 다시 올 기회가 없어 부하에서 최악 ~181 ms 를 받아들인다, §7).
   - `.try_lock`: 유지보수 tick 펌프(generation `ClientSlot.currentPumpImageChannel`·legacy `backend_api.pumpImageChannel`)와 tick
     펌프(`pumpScreen`)의 큐 머리 보류(`headHeldForImageChannel` — 못 잡으면 IC3b-2b-1 의 보류가 그 배치를 머리에 둔다).
   - `.block`: 첫 snapshot 의 `imageRefResolverAfterPump`, 관찰자 재접속 후보의 catch-up(`pumpCatchupScreen` — 같은 스레드의 동기
     루프라 물러서면 fork 하나와 겹친 재접속이 `Busy` 로 실패한다, 적대적 검증 1 회차).
   - 그래서 `AttachmentTransport.prepare_image_apply` 가 `wait` 를 받는다(ClientSlot·generation adapter·legacy 콜백이 그대로 넘긴다).
 - 소켓 생성: `client_deadline.posix_ops.socket` 이 수신 잠금 안에서 `socket()` 과 `FD_CLOEXEC` 를 함께 한다(macOS 에는 `SOCK_CLOEXEC`
-  가 없다). 채널 소켓과 주 소켓이 같은 길이라 둘 다 덮인다 — 그 틈에 fork 한 자식이 채널 소켓을 물려받으면 앱이 닫아도 host 가 EOF 를
+  가 없다). 채널 소켓과 주 소켓(deadline 연결, 그리고 일반 연결 `connectMajor` — 적대적 검증 2 회차)이 같은 길이라 모두 덮인다 — 그 틈에 fork 한 자식이 채널 소켓을 물려받으면 앱이 닫아도 host 가 EOF 를
   못 봐 원장이 붙잡힌다(IC2b 적대적 검증 3 회차).
 - Swift·ObjC spawn 재고: `tests/boundary/spawn_cloexec_axis.zig` 가 `src` 의 `.swift`·`.m`·`.mm`·`.c`·`.h` 에서 주석·문자열 밖의
   `Process`·`NSTask` 생성·메시지(`Process(`·`Process.`·`[NSTask`)와 `posix_spawn`·`posix_spawnp`·`popen`·`vfork`·`system(` 를 세어

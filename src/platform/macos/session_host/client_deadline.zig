@@ -318,7 +318,8 @@ pub const posix_ops = Ops{
 const PosixOps = struct {
     /// macOS 에는 `SOCK_CLOEXEC` 가 없어 `socket()` 과 `F_SETFD` 가 별개 호출이다 — 그 사이에 다른 스레드가 fork 하면 자식이
     /// 소켓을 물려받아, 앱이 닫아도 host 가 EOF 를 못 본다(이미지 채널이면 원장이 붙잡힌다). 받은 fd 와 같은 fork 울타리의 수신
-    /// 잠금 안에서 만들고 CLOEXEC 까지 켠다(docs/session-host-image-channel.md §7). 기다림은 fork 시스템콜 길이로 묶인다.
+    /// 잠금 안에서 만들고 CLOEXEC 까지 켠다(docs/session-host-image-channel.md §7). 기다림은 부하에서 최악 ~181 ms 다(§7 실측 —
+    /// 연결은 tick 이 아니라 드물다).
     /// `connectUnixUntil` 의 `set_cloexec` 는 그 뒤에 한 번 더 켤 뿐이다(주입 ops 의 실패 판정자가 그 자리를 잰다).
     fn socket(_: *anyopaque) c.fd_t {
         fork_fd_fence.lockReceive();

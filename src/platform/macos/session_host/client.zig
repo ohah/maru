@@ -7205,13 +7205,13 @@ pub const Client = struct {
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
         if (!socket_server.socketPathFits(socket_path.len)) return error.EndpointDenied;
-        const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        // fork 울타리의 수신 잠금 안에서 만들고 CLOEXEC 까지 켠다(이미지 채널 §7 — macOS 에는 `SOCK_CLOEXEC` 가 없다).
+        const fd = client_deadline.posix_ops.socket(client_deadline.posix_ops.context);
         if (fd < 0) return endpointError(posix.errno(fd));
         var fd_transferred = false;
         errdefer if (!fd_transferred) {
             _ = c.close(fd);
         };
-        socket_server.setCloseOnExec(fd) catch return error.HandshakeFailed;
         // host가 죽은 socket에 write하면 SIGPIPE로 **프로세스가 죽는다** — EPIPE로 바꿔 catchable하게 한다(server accept 경로와 대칭).
         socket_server.setNoSigPipe(fd);
         // host가 연결만 받고(backlog) 응답하지 않으면 read가 영원히 막힌다 — recv timeout으로 ConnectionClosed로 빠져나온다.
@@ -27004,7 +27004,7 @@ test "image channel connect: a socket is created close-on-exec inside the fork f
     // macOS 에는 `SOCK_CLOEXEC` 가 없다 — `socket()` 과 `F_SETFD` 사이의 fork 가 채널·주 소켓을 자식에게 넘기지 않게 수신 잠금
     // 안에서 만든다(§7). 다른 스레드가 잠금을 쥔 동안 소켓 생성은 기다린다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    var holder: ReceiveFenceHolder = .{ .hold_ms = 50 };
+    var holder: ReceiveFenceHolder = .{ .hold_ms = 200 };
     const thread = try std.Thread.spawn(.{}, ReceiveFenceHolder.run, .{&holder});
     holder.waitHeld();
     const fd = client_deadline.posix_ops.socket(client_deadline.posix_ops.context);
@@ -27014,6 +27014,24 @@ test "image channel connect: a socket is created close-on-exec inside the fork f
     defer _ = c.close(fd);
     try testing.expect(waited);
     try testing.expect(c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) & c.FD_CLOEXEC != 0);
+}
+
+test "image channel connect: the plain connect path also creates its socket inside the fork fence's receive lock" {
+    // deadline 이 없는 연결(`connectMajor` — N-1 adapter)도 같은 소켓 생성 길을 지난다. 없는 경로라 연결은 실패하지만 소켓은 그
+    // 전에 만들어진다 — 다른 스레드가 잠금을 쥔 동안 기다렸다가 실패해야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var holder: ReceiveFenceHolder = .{ .hold_ms = 200 };
+    const thread = try std.Thread.spawn(.{}, ReceiveFenceHolder.run, .{&holder});
+    holder.waitHeld();
+    const result = Client.connectMajor(testing.allocator, "/tmp/maru-ic4b-no-such-host.sock", .gui, protocol.version_major);
+    const waited = holder.released.load(.acquire);
+    thread.join();
+    if (result) |connected| {
+        var client = connected;
+        client.deinit();
+        return error.TestUnexpectedResult;
+    } else |_| {}
+    try testing.expect(waited);
 }
 
 test "image channel pump: the tick pump backs off while the fork fence's receive lock is held, leaving the segment in the kernel queue" {
@@ -27045,7 +27063,7 @@ test "image channel pump: the synchronous apply pump waits for the fork fence's 
     const segments = fx.client.image_segments.?;
     fx.client.openImageStream(3);
     try fx.sendSegment(1, 3, 1);
-    var holder: ReceiveFenceHolder = .{ .hold_ms = 50 };
+    var holder: ReceiveFenceHolder = .{ .hold_ms = 200 };
     const thread = try std.Thread.spawn(.{}, ReceiveFenceHolder.run, .{&holder});
     holder.waitHeld();
     const pumped = fx.client.pumpImageChannel(.block);

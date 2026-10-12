@@ -281,7 +281,7 @@ Node = leaf(Pane)
   클리핑** — 헤더(검색바·아이콘)는 스크롤과 무관하게 고정이고(헤더 glyph는 터미널 셀 패스라 사이드바 셀 시프트와 분리),
   헤더 위로 밀려 올라간 카드는 **렌더러가 사이드바 셀 draw에 scissor**를 걸어 자른다 — 구간은 Zig 가 정해
   `MetalFrame.sidebar_scissor_top/bottom_px`로 싣는다(v168). 셀 시프트도 Zig 가 셀 `origin_y`에 이미 반영한다(ABI 224 —
-  렌더러는 `sidebar_scroll_offset_px`를 읽지 않고, ABI 227 에서 그 draw 인자를 뺐다). GPU quad 밴드·tint·accent 막대는
+  렌더러는 `sidebar_scroll_offset_px`를 읽지 않고, ABI 227 에서 그 draw 인자를, ABI 229 에서 `MetalFrame` 필드를 뺐다). GPU quad 밴드·tint·accent 막대는
   host lowering(`sidebarScrollClipQuad`)이 **같은 오프셋으로 빼고 헤더 경계에서 클립**한다(상단 라운드는 죽임) — 셀과 quad가
   같은 `sidebar_scroll_offset_px`(Zig)에서 나와 단일 출처. ③ **스크롤바** — 우측에 pane 스크롤바와 **동형 pill thumb**(muted 색·`computeScrollbarAlpha` fade·layer 3 over,
   단일 트랙 `sidebar_scrollbar_idle_ticks`)를 카드가 넘칠 때만 그린다. hit-test(`slotAt`/`dragTargetSlot`)도 같은 오프셋을

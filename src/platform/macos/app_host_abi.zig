@@ -202,7 +202,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 228), abi_version);
+    try std.testing.expectEqual(@as(u32, 229), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -9129,12 +9129,8 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "live_image_ids"), @offsetOf(AppMetalFrame, "live_image_ids"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "live_image_id_count"), @offsetOf(AppMetalFrame, "live_image_id_count"));
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "terminal_bg"), @offsetOf(AppMetalFrame, "terminal_bg"));
-    // v66: 상단 타이틀바 띠 높이(접힘 펼치기 토글 ◧ 세로 중앙 정렬용) — 끝에 추가, 위치 대조로 C↔Zig 정합 보장.
-    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "titlebar_strip_px"), @offsetOf(AppMetalFrame, "titlebar_strip_px"));
     // v70: 창 배경 투명도 × 1000(clear color alpha) — 끝에 추가, 위치 대조로 C↔Zig 정합 보장.
     try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "window_opacity_milli"), @offsetOf(AppMetalFrame, "window_opacity_milli"));
-    // v86: 사이드바 세로 스크롤량(px) — 끝에 추가, 위치 대조로 C↔Zig 정합 보장.
-    try std.testing.expectEqual(@offsetOf(c.MaruAppHostMetalFrame, "sidebar_scroll_offset_px"), @offsetOf(AppMetalFrame, "sidebar_scroll_offset_px"));
     // v99 Phase 4c: 웹 패널 surface 전이 struct — mixed-width(u32/u64/f64)라 @sizeOf만으론 필드 reorder를 못 잡으므로
     // 모든 필드 offset을 C↔Zig 대조한다(surface_id↔frame_pt 뒤바뀌면 Swift가 엉뚱한 frame을 읽는다).
     try std.testing.expectEqual(@sizeOf(c.MaruAppHostWebSurfaceTransition), @sizeOf(WebSurfaceTransitionAbi));

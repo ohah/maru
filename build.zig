@@ -116,6 +116,10 @@ const boundary_scans: []const BoundaryScan = &.{
     // 안 읽히고 자산 재배치 때 조용히 폰트 폴백으로 빠진다(docs/chrome-strategy.md §9.7). 같은 결의 소스 스캔.
     .{ .root = "tests/boundary/icon_literals.zig" },
 
+    // `MetalFrame` 의 죽은 필드 0 개 — Swift host 가 `frame.<필드>` 로 읽지 않는 frame 필드는 렌더러로 안 가는 값이다.
+    // 렌더러 미러를 Zig 로 옮기며 할 일을 잃은 기하 넷이 그대로 남아 매 프레임 스탬프됐다(2026-10-13).
+    .{ .root = "tests/boundary/metal_frame_consumers.zig" },
+
     // cwd 축 규율 — "이 터미널이 서 있는 폴더"를 푸는 지점이 하나여야 한다(docs/editor-surface-dock.md §3.5).
     // 그 규칙이 주석에만 있던 동안 소비자 여섯이 관측(`observation.cwd`)을 직독해 갈렸고, 셸 통합이 없는 셸과
     // 재개 Term에서 사이드바·상태바·검색·도크 범위 칩·대화 매핑이 한꺼번에 죽었다. 같은 결의 소스 스캔으로

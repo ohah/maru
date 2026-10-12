@@ -162,6 +162,8 @@ pub extern fn maru_macos_coretext_smoke_rasterize_glyph(
     font_postscript_name_len: usize,
     codepoint: u32,
     glyph_id: u32,
+    /// 슬롯 안 배치 역할(`maru.width.RasterFit` 의 값). 래스터라이저는 codepoint 로 역할을 다시 고르지 않는다.
+    raster_fit: u32,
     width_px: usize,
     height_px: usize,
     bytes_per_row: usize,

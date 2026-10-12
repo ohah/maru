@@ -1151,6 +1151,7 @@ fn testRasterizeGlyph(
     _: usize,
     _: u32,
     _: u32,
+    _: u32, // raster_fit
     _: usize,
     _: usize,
     _: usize,

@@ -146,6 +146,8 @@ cat > "$root/www/a.html" <<'HTML'
 HTML
 printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
 # 3 회차: 0.6 초마다 스스로 새로고침하는 페이지(숨은 탭 경우).
+# W9b③: 숨은 채 불러온 문서 — 그 뒤 첫 마우스 누르기가 페이지에 닿는가(숨긴 탭은 새 문서를 그리지 않아 누르기가 사라졌다, 계획 공격 2 회차).
+printf '<!doctype html><title>fresh</title><button id=fb style="position:absolute;left:30px;top:30px;width:140px;height:40px" onclick="new Image().src=&#39;/hit?fb-&#39;+event.isTrusted">Fresh go</button><a id=tohop href="hop.html" style="position:absolute;left:30px;top:120px">hop</a>' > "$root/www/fresh.html"
 printf '<!doctype html><title>hop</title><button id=hop>Hop go</button><script>new Image().src="/hit?hopvis-"+document.visibilityState;setTimeout(function(){location.reload()},600)</script>' > "$root/www/hop.html"
 printf '<!doctype html><title>page-c</title>c<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=cready>ready</p>")},1000)</script>' > "$root/www/c.html"
 # 느린 문서는 요소가 3 만을 넘는다 — role 로케이터가 질의 전에 거절하는지(W9b②).
@@ -164,7 +166,7 @@ pages = [
 ]
 for k, (name, body) in enumerate(pages):
     # 마지막 문서는 스스로 새로고침하는 hop 문서로 간다(숨은 탭 3 회차 사례 — 대본 맨 끝).
-    nxt = '<a id=next href="%s.html">next</a>' % pages[k + 1][0] if k + 1 < len(pages) else '<a id=tohop href="hop.html">hop</a>'
+    nxt = '<a id=next href="%s.html">next</a>' % pages[k + 1][0] if k + 1 < len(pages) else '<a id=tofresh href="fresh.html">fresh</a>'
     open('%s/%s.html' % (d, name), 'w').write('<!doctype html><title>%s</title><button>B</button>%s%s' % (name, nxt, body))
 PY
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
@@ -400,6 +402,10 @@ sleep 2
 # 3 회차: 스스로 계속 이동하는 숨은 탭(맨 끝에서 다시 숨긴다 — 문서를 옮기므로 앞의 ref 를 쓰는 사례 뒤에) — 이동하는 순간 보낸 스크린샷(kick)은 답이 오지 않을 수 있어 그 탭의 자리를 쥔다. 옛 sidecar 는
 # 35 초 쥐어 그동안 selector wait 이 확인을 못 보내 시한이었고(15/25), role 질의는 곧 「too many」 였다. 열 번 모두 곧 맞아야 한다.
 # Chromium 탭은 아직 `navigate` 를 받지 않는다(-32008) — 링크를 눌러 간다.
+run fr-nav click --selector '#tofresh'
+sleep 2
+run fr-click click --selector '#fb'
+hit_seen fb-true && echo yes > "\$out/fb-hit" || echo no > "\$out/fb-hit"
 run hop-nav click --selector '#tohop'
 sleep 2
 # 이 탭이 정말 다시 숨었는지(5 회차 — 첫 숨김의 hid-vis 같은 확인이 없었다): 새로 불린 hop 문서가 hidden 으로 알린다.
@@ -516,6 +522,7 @@ set -- $(cat "$out/hid-secs")
 ok hid-role && [ "$(cat "$out/hb-hit")" = yes ] && [ "$1" -le 3 ] || fail "a role click on a hidden tab did not press for real within 3 s (${1}s · $(tr '\n' ' ' < "$out/hid-role"))"
 ok hid-hover && [ "$(cat "$out/hh-hit")" = yes ] && [ "$2" -le 3 ] || fail "a hover on a hidden tab did not reach the page within 3 s (${2}s · $(tr '\n' ' ' < "$out/hid-hover"))"
 ok hid-wait || fail "a text wait on a hidden tab did not see a button made in an animation frame ($(tr '\n' ' ' < "$out/hid-wait"))"
+ok fr-click && [ "$(cat "$out/fb-hit")" = yes ] || fail "a selector click on a document loaded while the tab was hidden did not reach the page ($(tr '\n' ' ' < "$out/fr-click") · fresh loads $(grep -c 'GET /fresh.html' "$root/http.log"))"
 read hop_to hop_max hop_busy hop_role_max < "$out/hop-summary" || true
 hop_loads=$(grep -c 'GET /hop.html' "$root/http.log" || true)
 [ "$(cat "$out/hop-vis")" = yes ] || fail "the hopping page was not hidden by the second new tab (no hidden load) — the case proves nothing ($(grep -o 'hopvis-[a-z]*' "$root/http.log" | sort | uniq -c | tr '\n' ' '))"

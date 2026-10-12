@@ -1319,6 +1319,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 정리하는 하나. 닫기는 기존 stream drop(`dropBufferedStream`)이 한다.
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "openImageStream" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sweepImageSegments" },
+                // fork 울타리(IC4b, 2026-10-13): 채널 수신(recvmsg + F_SETFD)을 수신 잠금으로 감싸는 울타리 import 하나와, 다른
+                // 스레드가 그 잠금을 쥐게 하는 판정자용 보유자 하나.
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "fork_fd_fence" },
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ReceiveFenceHolder" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.
@@ -1688,6 +1692,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // stream 수명·hwm 정리(IC3b-2b-2): 같은 접근 규칙 아래 Client 의 열기·정리로 전달하는 둘.
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "openAttachmentImageStream" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sweepAttachmentImageSegments" },
+                // fork 울타리(IC4b, 2026-10-13): 적용 직전 펌프가 수신 잠금을 기다릴지(`ReceiveWait`) 받아 Client 로 넘기는 타입 import.
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "fork_fd_fence" },
                 // post snapshot 을 쓴 판정자의 번호(2026-10-02) — 판정자 빌드 전용(`void`). 앞선 판정자가 남긴 snapshot 이 실행
                 // 순서에 따라 뒤 판정자의 «아직 게시 안 됨» 단언을 깨던 것을 UI 프레임 도장과 같은 장치로 순서와 무관하게 닫는다.
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_post_snapshot_test_generation" },

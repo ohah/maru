@@ -35,6 +35,7 @@ const socket_server = @import("socket_server.zig");
 const client_deadline = @import("client_deadline.zig");
 const client_image_channel = @import("client_image_channel.zig");
 const client_image_segments = @import("client_image_segments.zig");
+const fork_fd_fence = @import("fork_fd_fence.zig");
 const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const client_poison = @import("client_poison.zig");
 const screen_inbox = @import("screen_inbox.zig");
@@ -7425,7 +7426,10 @@ pub const Client = struct {
     /// 위반과 앱 fd 고갈은 연결을 poison 한다 — fd 를 잃었을 수 있어 그 연결의 이미지 상태를 더 믿을 수 없다.
     /// false 는 울타리를 못 잡아 비우지 못했다는 뜻이다 — 적용 직전 호출자는 그 배치를 보류한다(§6). 채널이 없거나 이미 비운
     /// 연결은 true 다(비울 것이 없다).
-    pub fn pumpImageChannel(self: *Client) bool {
+    /// 「recvmsg + `F_SETFD`」(`drain`)는 fork 울타리의 수신 잠금 안에서 한다(§7 — 그 틈에 다른 스레드가 fork 하면 자식이 받은
+    /// fd 를 물려받는다). `wait` 는 tick 이 다시 오는 자리면 `.try_lock`(못 잡으면 false — fd 는 recvmsg 전까지 커널 큐에 있다),
+    /// tick 이 없는 동기 적용 자리면 `.block` 이다.
+    pub fn pumpImageChannel(self: *Client, wait: fork_fd_fence.ReceiveWait) bool {
         // 다른 공개 변경 메서드와 같은 울타리 — allocator callback 안·이미 poison 된 연결(표가 어긋난 자리에서 멈췄을 수 있다)·
         // 옮겨 간 Client·external 모드(입양되어 봉인된 상태를 바꾸면 안 된다)에서는 읽지 않는다. 표는 Client 소멸이 닫는다.
         const operation_fence_held = self.requireBlockingMode() catch return false;
@@ -7434,7 +7438,11 @@ pub const Client = struct {
         // 묶인 채널에는 늘 표가 있다(`negotiateImageChannel` 이 먼저 잡는다).
         const segments = self.image_segments orelse return true;
         const lost = lost: {
-            segments.drain(self.image_channel.fd) catch |err| {
+            if (!fork_fd_fence.acquireReceive(wait)) return false;
+            const drained = segments.drain(self.image_channel.fd);
+            // poison 은 잠금 밖에서 — 잠금은 recvmsg 와 `F_SETFD` 만 덮는다(fork 를 그만큼만 막는다).
+            fork_fd_fence.unlockReceive();
+            drained catch |err| {
                 // 공유 울타리는 겹쳐 잡힌다(개수만 센다) — poison 이 자기 울타리를 다시 잡아도 된다. 표의 fd 는 Client 소멸이 닫는다.
                 switch (err) {
                     error.ChannelLost => break :lost true,
@@ -26964,6 +26972,91 @@ const ImageChannelPumpFixture = struct {
     }
 };
 
+/// 다른 스레드가 fork 울타리의 수신 잠금을 쥔다(울타리 판정자). `hold_ms` 가 null 이면 `release` 가 켜질 때까지(기다리는 쪽이
+/// 잘못 기다려도 판정자가 멈추지 않게 2 초 상한), 아니면 그만큼 쥐고 푼다. 풀기 직전에 `released` 를 켠다 — 잠금을 기다린 쪽은
+/// 돌아왔을 때 그것을 본다.
+const ReceiveFenceHolder = struct {
+    held: std.atomic.Value(bool) = .init(false),
+    release: std.atomic.Value(bool) = .init(false),
+    released: std.atomic.Value(bool) = .init(false),
+    hold_ms: ?u64 = null,
+
+    fn run(self: *ReceiveFenceHolder) void {
+        fork_fd_fence.lockReceive();
+        self.held.store(true, .release);
+        if (self.hold_ms) |ms| {
+            std.Io.sleep(testing.io, .fromMilliseconds(@intCast(ms)), .awake) catch {};
+        } else {
+            var waited_ms: usize = 0;
+            while (!self.release.load(.acquire) and waited_ms < 2000) : (waited_ms += 1)
+                std.Io.sleep(testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        self.released.store(true, .release);
+        fork_fd_fence.unlockReceive();
+    }
+
+    fn waitHeld(self: *const ReceiveFenceHolder) void {
+        while (!self.held.load(.acquire)) std.Io.sleep(testing.io, .fromMilliseconds(1), .awake) catch {};
+    }
+};
+
+test "image channel connect: a socket is created close-on-exec inside the fork fence's receive lock" {
+    // macOS 에는 `SOCK_CLOEXEC` 가 없다 — `socket()` 과 `F_SETFD` 사이의 fork 가 채널·주 소켓을 자식에게 넘기지 않게 수신 잠금
+    // 안에서 만든다(§7). 다른 스레드가 잠금을 쥔 동안 소켓 생성은 기다린다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var holder: ReceiveFenceHolder = .{ .hold_ms = 50 };
+    const thread = try std.Thread.spawn(.{}, ReceiveFenceHolder.run, .{&holder});
+    holder.waitHeld();
+    const fd = client_deadline.posix_ops.socket(client_deadline.posix_ops.context);
+    const waited = holder.released.load(.acquire);
+    thread.join();
+    try testing.expect(fd >= 0);
+    defer _ = c.close(fd);
+    try testing.expect(waited);
+    try testing.expect(c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) & c.FD_CLOEXEC != 0);
+}
+
+test "image channel pump: the tick pump backs off while the fork fence's receive lock is held, leaving the segment in the kernel queue" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    const segments = fx.client.image_segments.?;
+    fx.client.openImageStream(3);
+    try fx.sendSegment(1, 3, 1);
+    var holder: ReceiveFenceHolder = .{};
+    const thread = try std.Thread.spawn(.{}, ReceiveFenceHolder.run, .{&holder});
+    holder.waitHeld();
+    // 잠금을 못 잡은 tick 은 recvmsg 를 하지 않는다 — false 는 「비우지 못함」(적용 직전 호출자는 그 배치를 보류한다).
+    const pumped_while_held = fx.client.pumpImageChannel(.try_lock);
+    const len_while_held = segments.len;
+    holder.release.store(true, .release);
+    thread.join();
+    try testing.expect(!pumped_while_held);
+    try testing.expectEqual(@as(usize, 0), len_while_held);
+    // 다음 tick 이 그대로 받는다.
+    try testing.expect(fx.client.pumpImageChannel(.try_lock));
+    try testing.expectEqual(@as(usize, 1), segments.len);
+}
+
+test "image channel pump: the synchronous apply pump waits for the fork fence's receive lock and then drains" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    const segments = fx.client.image_segments.?;
+    fx.client.openImageStream(3);
+    try fx.sendSegment(1, 3, 1);
+    var holder: ReceiveFenceHolder = .{ .hold_ms = 50 };
+    const thread = try std.Thread.spawn(.{}, ReceiveFenceHolder.run, .{&holder});
+    holder.waitHeld();
+    const pumped = fx.client.pumpImageChannel(.block);
+    const waited = holder.released.load(.acquire);
+    thread.join();
+    try testing.expect(pumped);
+    // 잠금이 풀린 뒤에야 recvmsg 했다.
+    try testing.expect(waited);
+    try testing.expectEqual(@as(usize, 1), segments.len);
+}
+
 test "image channel pump: resolveImageSegment maps a pumped segment once, for its own stream, behind the fence and only with a table" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try ImageChannelPumpFixture.init();
@@ -26977,7 +27070,7 @@ test "image channel pump: resolveImageSegment maps a pumped segment once, for it
     fx.client.image_channel.state = .bound;
 
     try fx.sendSegment(1, 3, 1);
-    try testing.expect(fx.client.pumpImageChannel());
+    try testing.expect(fx.client.pumpImageChannel(.try_lock));
     const first: screen_stream.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 1, .byte_len = 4 };
     // 다른 stream 은 「세그먼트 없음」이고 항목은 남는다.
     try testing.expect((try fx.client.resolveImageSegment(2, first)) == null);
@@ -26995,7 +27088,7 @@ test "image channel pump: resolveImageSegment maps a pumped segment once, for it
 
     // 울타리: poison 된 연결은 표를 건드리지 않는다.
     try fx.sendSegment(2, 3, 1);
-    _ = fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel(.try_lock);
     try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
     fx.client.poison(.peer_contract_violation);
     var second = first;
@@ -27013,7 +27106,7 @@ test "image channel pump: an opened stream keeps its segments until its hwm swee
     try testing.expect(std.mem.indexOfScalar(u64, segments.liveStreams(), 3) != null);
     try fx.sendSegment(1, 3, 1);
     try fx.sendSegment(2, 3, 1);
-    try testing.expect(fx.client.pumpImageChannel());
+    try testing.expect(fx.client.pumpImageChannel(.try_lock));
     try testing.expectEqual(@as(usize, 2), segments.len);
     // hwm 1 이하만 반환한다 — 세그먼트 2 는 아직 쓰일 수 있다.
     fx.client.sweepImageSegments(3, 1);
@@ -27027,7 +27120,7 @@ test "image channel pump: an opened stream keeps its segments until its hwm swee
     // 울타리: poison 된 연결은 열지도 정리하지도 않는다.
     fx.client.openImageStream(4);
     try fx.sendSegment(3, 4, 1);
-    try testing.expect(fx.client.pumpImageChannel());
+    try testing.expect(fx.client.pumpImageChannel(.try_lock));
     try testing.expectEqual(@as(usize, 1), segments.len);
     fx.client.poison(.peer_contract_violation);
     fx.client.openImageStream(9);
@@ -27047,7 +27140,7 @@ test "image channel pump: an external-mode client is not pumped, so its sealed s
     fx.client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     const before = externalAdoptionSnapshot(&fx.client);
     // 울타리를 못 잡았다고 알린다 — 적용 직전 호출자는 그 배치를 보류한다.
-    try testing.expect(!fx.client.pumpImageChannel());
+    try testing.expect(!fx.client.pumpImageChannel(.try_lock));
     try testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
     try testing.expect(!fx.client.unusable);
     try testing.expect(std.meta.eql(before, externalAdoptionSnapshot(&fx.client)));
@@ -27110,10 +27203,10 @@ test "image channel pump: segments land in the client's table and a returned one
     defer fx.deinit();
     try fx.client.image_segments.?.openStream(1);
     try fx.sendSegment(7, 1, 1);
-    _ = fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel(.try_lock);
     try std.testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
     fx.client.image_segments.?.sweep(1, 7);
-    _ = fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel(.try_lock);
     var buf: [64]u8 = undefined;
     const n = c.read(fx.channel_host, &buf, buf.len);
     try std.testing.expectEqual(@as(isize, @import("image_channel_wire.zig").release_len), n);
@@ -27122,7 +27215,7 @@ test "image channel pump: segments land in the client's table and a returned one
     try std.testing.expect(fx.client.firstPoisonReason() == null);
     // 표에 남은 세그먼트 fd 는 Client 소멸이 닫는다(덜 받은 메시지의 fd 는 표 판정자가 잰다).
     try fx.sendSegment(8, 1, 1);
-    _ = fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel(.try_lock);
     const held = fx.client.image_segments.?.entriesSlice()[0].fd;
     try std.testing.expect(c.fcntl(held, c.F.GETFD) != -1);
     fx.client.deinit();
@@ -27139,14 +27232,14 @@ test "image channel pump: a lost channel drops to no image channel and keeps the
     _ = c.close(fx.channel_host);
     fx.channel_host = -1;
     // 채널을 잃어도 펌프는 돌았다(true) — 보류할 이유가 아니다.
-    try std.testing.expect(fx.client.pumpImageChannel());
+    try std.testing.expect(fx.client.pumpImageChannel(.try_lock));
     try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
     try std.testing.expectEqual(@as(c.fd_t, -1), fx.client.image_channel.fd);
     try std.testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.outstanding());
     try std.testing.expect(fx.client.fd >= 0);
     try std.testing.expect(fx.client.firstPoisonReason() == null);
     // 다시 불러도 아무 일도 없다 — 비울 채널이 없다(true).
-    try std.testing.expect(fx.client.pumpImageChannel());
+    try std.testing.expect(fx.client.pumpImageChannel(.try_lock));
     try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
 }
 
@@ -27158,13 +27251,13 @@ test "image channel pump: a segment without exactly one fd poisons the connectio
         try fx.client.image_segments.?.openStream(1);
         try fx.sendSegment(7, 1, fd_count);
         // 펌프는 돌았다(true) — 위반을 poison 으로 올렸다.
-        try std.testing.expect(fx.client.pumpImageChannel());
+        try std.testing.expect(fx.client.pumpImageChannel(.try_lock));
         try std.testing.expectEqual(client_poison.ConnectionReason.peer_contract_violation, fx.client.firstPoisonReason().?);
         try std.testing.expectEqual(@as(c.fd_t, -1), fx.client.fd);
         // poison 된 연결은 표가 어긋난 자리에서 멈췄을 수 있다 — 펌프가 다시 읽지 않는다.
         try fx.sendSegment(8, 1, 1);
         // poison 뒤에는 울타리를 못 잡는다(false).
-        try std.testing.expect(!fx.client.pumpImageChannel());
+        try std.testing.expect(!fx.client.pumpImageChannel(.try_lock));
         try std.testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
     }
 }

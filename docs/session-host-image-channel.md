@@ -292,7 +292,8 @@ flowchart TD
 CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데이트 확인·PTY 자식·에디터 검색 워커의 `std.process.spawn`·`system()`).
 
 - 프로세스 전역 rwlock 하나: 「recvmsg + `F_SETFD`」 는 쓰기 잠금, fork 는 읽기 잠금.
-- 읽기 잠금은 **fork 시스템콜 하나**만 덮는다 — `pthread_atfork(prepare=rdlock, parent=unlock, child=unlock)`. 자식은 fork 순간 fd
+- 읽기 잠금은 **fork 시스템콜 하나**만 덮는다 — `pthread_atfork(prepare=rdlock, parent=unlock, child=새로 초기화)`(자식에서 unlock
+  하면 fork 순간 줄 서 있던 writer — 자식에 없는 스레드 — 에게 소유가 넘어가 자식의 다음 fork 가 멈춘다). 자식은 fork 순간 fd
   표를 복사하므로 그 구간이면 충분하고, 의존 라이브러리 내부의 fork 도 같이 덮인다. exec 완료까지 잠금을 잡으면(`std.process.spawn`
   은 exec 완료를 기다린다) 느린 spawn 하나가 모든 원격 터미널의 이미지 적용을 멈춘다.
 - `posix_spawn` 계열(Darwin `system()` 포함)은 atfork 를 부르지 않는다 → `POSIX_SPAWN_CLOEXEC_DEFAULT` 를 쓰는 헬퍼를 거치게 하고,
@@ -305,9 +306,15 @@ CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데
   잠금이 fork 시스템콜 길이로 묶이므로 대기도 그만큼으로 묶인다.
 - Swift/ObjC 쪽: WKWebView·NSWorkspace 는 XPC/launchd 로 뜨며 fd 를 물려받지 않는다. `Process()` 가 둘 있다(Mermaid 도우미 —
   제품, IME 후보 관찰 — 환경 변수 smoke). Foundation 의 `Process` 가 fd 를 넘기지 않는다는 것은 실측에 기댄다(Apple 내부 구현이라
-  보장이 아니다) — Zig 판정자는 Swift 를 보지 않으므로 그 재고는 따로 고정한다(계획 IC4b).
+  보장이 아니다) — Zig 판정자는 Swift 를 보지 않으므로 그 재고(`Process`·`NSTask` 생성 자리)를 같은 판정자 파일이 파일·개수·이유로
+  고정한다.
+- 소켓도 같은 틈이 있다 — macOS 에는 `SOCK_CLOEXEC` 가 없어 `socket()` 과 `F_SETFD` 가 별개 호출이다. 앱의 연결 소켓(주·채널)은 수신
+  잠금 안에서 만들고 CLOEXEC 까지 켠다. 채널 소켓을 자식이 물려받으면 앱이 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다.
+- host 는 이 울타리를 쓰지 않는다 — host 가 받는 fd 는 프로토콜 위반뿐이고 owner 스레드가 받은 자리에서 닫는다(계획 IC4b).
 - 구현(IC4a): 울타리 `session_host/fork_fd_fence.zig`(앱 세션 생성이 세션 전에 설치), CLOEXEC_DEFAULT 헬퍼 `maru.pty.macos_spawn`,
   헬퍼 밖 `posix_spawn`·`posix_spawnp`·`system` 을 막는 `tests/boundary/spawn_cloexec_axis.zig`.
+- 구현(IC4b): `Client.pumpImageChannel(wait)` 가 `drain` 을 수신 잠금 안에서 한다 — tick·큐 머리는 `.try_lock`, 첫 snapshot 은
+  `.block`(`AttachmentTransport.prepare_image_apply` 가 `wait` 를 넘긴다). 소켓 생성은 `client_deadline.posix_ops.socket`.
 
 ## 8. 다른 소비자
 

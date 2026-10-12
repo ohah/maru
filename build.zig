@@ -229,7 +229,8 @@ const boundary_scans: []const BoundaryScan = &.{
 
     // 앱이 받은 이미지 세그먼트 fd 가 자식으로 새는 spawn 이 0 인가(docs/session-host-image-channel.md §7, IC4) —
     // `posix_spawn` 계열·`system` 은 fork 울타리(`pthread_atfork`)를 지나지 않으므로 CLOEXEC_DEFAULT 헬퍼
-    // (`src/pty/macos_spawn.zig`) 밖에서 부르지 않는다. 헬퍼 밖 호출 하나가 받은 fd 를 자식에게 넘긴다.
+    // (`src/pty/macos_spawn.zig`) 밖에서 부르지 않는다. 헬퍼 밖 호출 하나가 받은 fd 를 자식에게 넘긴다. Swift·ObjC 의
+    // `Process`·`NSTask` spawn 자리는 재고(파일·개수·이유)로 고정한다(IC4b).
     .{ .root = "tests/boundary/spawn_cloexec_axis.zig" },
 };
 
@@ -7067,12 +7068,12 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             // 수립(IC2b) 9 와 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위·
-            // 울타리 든 해석) 7.
+            // 울타리 든 해석) 7, fork 울타리(IC4b — 소켓 생성이 수신 잠금 안, tick 펌프는 물러서고 동기 적용 펌프는 기다린다) 3.
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
-        run_image_channel_connect_tests.addArg("--maru-expect-tests=17");
-        run_image_channel_connect_tests.addArg("--maru-expect-passed=17");
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=20");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=20");
         // 적용 자리 배선(IC3b-2) — attachment 가 협상한 transport 의 resolver 를 snapshot·delta 에 넘기고, 협상하지 않은 transport
         // 는 resolver 를 부르지 않는다.
         const image_channel_wiring_tests = addProjectTest(b, .{
@@ -7086,8 +7087,8 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image channel wiring:"},
         });
         const run_image_channel_wiring_tests = b.addRunArtifact(image_channel_wiring_tests);
-        run_image_channel_wiring_tests.addArg("--maru-expect-tests=5");
-        run_image_channel_wiring_tests.addArg("--maru-expect-passed=5");
+        run_image_channel_wiring_tests.addArg("--maru-expect-tests=6");
+        run_image_channel_wiring_tests.addArg("--maru-expect-passed=6");
         image_channel_app_step.dependOn(&run_image_channel_wiring_tests.step);
         test_step.dependOn(&run_image_channel_wiring_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_wiring_tests.step);

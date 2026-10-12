@@ -195,3 +195,224 @@ test "spawn cloexec axis: the app installs the fork fence before any session exi
     try std.testing.expect(install_at < init_at);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "fork_fd_fence." ++ "install();"));
 }
+
+// ── Swift·ObjC·C 쪽(계획 IC4b) ──────────────────────────────────────────────────────────────────────────────────────────────
+// 위 스캐너는 Zig 만 본다. 앱 바이너리에는 Swift·ObjC 도 있다 — Foundation `Process`(`NSTask`)는 안에서 `posix_spawn` 을 쓰고
+// atfork 를 부르지 않는다. 그것이 fd 를 넘기지 않는다는 것(`POSIX_SPAWN_CLOEXEC_DEFAULT`)은 계약 §7 의 실측에 기댈 뿐 Apple 의
+// 보장이 아니므로, 새 자리가 조용히 늘지 않게 재고를 **파일·개수·이유**로 고정한다. WKWebView·NSWorkspace 는 XPC/launchd 로 떠
+// 앱의 fd 를 물려받지 않아 세지 않는다.
+//
+// **세는 것**(주석·문자열 밖): `Process`·`NSTask` 가 바로 뒤에 `(`·`.` 가 오거나(Swift 생성·`Process.run`) 바로 앞에 `[` 가 올
+// 때(ObjC 메시지 — `[NSTask alloc]`·`[NSTask launchedTaskWith…]`) — 타입 표기(`let p: Process`)는 세지 않는다.
+// `posix_spawn`·`posix_spawnp`·`popen` 은 이름만으로, `system` 은 바로 뒤의 `(` 와 함께.
+
+const NativeAllowed = struct { path: []const u8, count: usize, why: []const u8 };
+
+const native_allowed = [_]NativeAllowed{
+    .{ .path = "src/platform/macos/MermaidHelperProcess.swift", .count = 1, .why = "Mermaid 도우미(제품) — Foundation `Process`, 계약 §7 실측으로 fd 를 넘기지 않는다" },
+    .{ .path = "src/platform/macos/SessionHostIMECandidateObservation.swift", .count = 1, .why = "IME 후보 관찰 smoke(환경 변수로만 켜짐) — `screencapture` 를 Foundation `Process` 로" },
+    .{ .path = "src/platform/macos/chrome_lab_smoke.m", .count = 1, .why = "`chrome-lab-smoke` 별도 실행 파일 — 앱이 아니라 이미지 채널이 없다" },
+};
+
+const native_named = [_][]const u8{ "Process", "NSTask" };
+
+fn isIdentByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
+}
+
+fn nextSignificant(code: []const u8, from: usize) u8 {
+    var i = from;
+    while (i < code.len and (code[i] == ' ' or code[i] == '\t')) i += 1;
+    return if (i < code.len) code[i] else 0;
+}
+
+fn prevSignificant(code: []const u8, before: usize) u8 {
+    var i = before;
+    while (i > 0 and (code[i - 1] == ' ' or code[i - 1] == '\t')) i -= 1;
+    return if (i > 0) code[i - 1] else 0;
+}
+
+/// 주석·문자열을 공백으로 지운 사본(줄 수와 위치는 그대로). Swift 의 중첩 블록 주석·`"""` 여러 줄 문자열, ObjC 의 `@"…"` 와
+/// 문자 리터럴(`'"'`)을 다룬다. Swift 문자열 보간 `\(…)` 안의 코드는 문자열로 친다(그 안에서 띄우지 않는다).
+fn stripNative(allocator: std.mem.Allocator, source: []const u8, swift: bool) ![]u8 {
+    const out = try allocator.dupe(u8, source);
+    var i: usize = 0;
+    while (i < out.len) {
+        if (std.mem.startsWith(u8, out[i..], "//")) {
+            while (i < out.len and out[i] != '\n') : (i += 1) out[i] = ' ';
+        } else if (std.mem.startsWith(u8, out[i..], "/*")) {
+            var depth: usize = 0;
+            while (i < out.len) {
+                if (swift and std.mem.startsWith(u8, out[i..], "/*")) {
+                    depth += 1;
+                    out[i] = ' ';
+                    out[i + 1] = ' ';
+                    i += 2;
+                } else if (!swift and depth == 0 and std.mem.startsWith(u8, out[i..], "/*")) {
+                    depth = 1;
+                    out[i] = ' ';
+                    out[i + 1] = ' ';
+                    i += 2;
+                } else if (std.mem.startsWith(u8, out[i..], "*/")) {
+                    depth -= 1;
+                    out[i] = ' ';
+                    out[i + 1] = ' ';
+                    i += 2;
+                    if (depth == 0) break;
+                } else {
+                    if (out[i] != '\n') out[i] = ' ';
+                    i += 1;
+                }
+            }
+        } else if (swift and std.mem.startsWith(u8, out[i..], "\"\"\"")) {
+            const end = std.mem.indexOfPos(u8, out, i + 3, "\"\"\"") orelse out.len;
+            const stop = @min(out.len, end + 3);
+            while (i < stop) : (i += 1) {
+                if (out[i] != '\n') out[i] = ' ';
+            }
+        } else if (out[i] == '"' or (!swift and out[i] == '\'')) {
+            const quote = out[i];
+            out[i] = ' ';
+            i += 1;
+            while (i < out.len and out[i] != quote and out[i] != '\n') : (i += 1) {
+                if (out[i] == '\\' and i + 1 < out.len and out[i + 1] != '\n') {
+                    out[i] = ' ';
+                    i += 1;
+                }
+                out[i] = ' ';
+            }
+            if (i < out.len and out[i] == quote) {
+                out[i] = ' ';
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    return out;
+}
+
+fn countNativeSpawns(allocator: std.mem.Allocator, source: []const u8, swift: bool) !usize {
+    const code = try stripNative(allocator, source, swift);
+    defer allocator.free(code);
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < code.len) {
+        if (!isIdentByte(code[i]) or (i > 0 and isIdentByte(code[i - 1]))) {
+            i += 1;
+            continue;
+        }
+        var end = i;
+        while (end < code.len and isIdentByte(code[end])) end += 1;
+        const word = code[i..end];
+        const next = nextSignificant(code, end);
+        if (isOneOf(word, &native_named)) {
+            if (next == '(' or next == '.' or prevSignificant(code, i) == '[') count += 1;
+        } else if (isOneOf(word, &always)) {
+            count += 1;
+        } else if (isOneOf(word, &called) and next == '(') {
+            count += 1;
+        }
+        i = end;
+    }
+    return count;
+}
+
+const NativeKind = enum { swift, c_family };
+
+fn nativeKind(name: []const u8) ?NativeKind {
+    if (std.mem.endsWith(u8, name, ".swift")) return .swift;
+    for ([_][]const u8{ ".m", ".mm", ".c", ".h" }) |ext| if (std.mem.endsWith(u8, name, ext)) return .c_family;
+    return null;
+}
+
+fn collectNativeFiles(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8, out: *std.ArrayList([]const u8)) !void {
+    var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        const child = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir_path, entry.name });
+        switch (entry.kind) {
+            .directory => {
+                defer allocator.free(child);
+                try collectNativeFiles(allocator, io, child, out);
+            },
+            .file => if (nativeKind(entry.name) != null) {
+                try out.append(allocator, child);
+            } else allocator.free(child),
+            else => allocator.free(child),
+        }
+    }
+}
+
+test "spawn cloexec axis: the native scanner counts spawns, not type annotations, comments or strings" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(usize, 3), try countNativeSpawns(allocator,
+        \\let process: Process
+        \\let p = Process()
+        \\try Process.run(url, arguments: [])
+        \\func f(p: Process,
+        \\  info: ProcessInfo) { _ = MyProcess() }
+        \\// let q = Process()
+        \\/* outer /* nested Process() */ still Process() */
+        \\let s = "Process() \(x) system(1)"
+        \\let t = """
+        \\  Process() popen
+        \\  """
+        \\let u = Foundation.Process ()
+    , true));
+    try std.testing.expectEqual(@as(usize, 4), try countNativeSpawns(allocator,
+        \\NSTask *task = [[NSTask alloc] init];
+        \\char q = '"'; NSString *s = @"[NSTask alloc] system(";
+        \\int r = system ("ls"); FILE *f = popen("ls", "r");
+        \\extern int posix_spawn(void);
+        \\/* [NSTask alloc] /* system( */ int my_system(void); enum { system_like };
+    , false));
+}
+
+test "spawn cloexec axis: Swift and ObjC spawns stay in the inventory" {
+    const allocator = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var paths: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (paths.items) |p| allocator.free(p);
+        paths.deinit(allocator);
+    }
+    try collectNativeFiles(allocator, io, "src", &paths);
+    var swift_files: usize = 0;
+    for (paths.items) |path| {
+        if (nativeKind(path) == .swift) swift_files += 1;
+    }
+    try std.testing.expect(swift_files > 20);
+
+    var failed = false;
+    var seen: [native_allowed.len]bool = @splat(false);
+    for (paths.items) |path| {
+        const source = try readZigFileZ(allocator, io, path);
+        defer allocator.free(source);
+        const count = try countNativeSpawns(allocator, source, nativeKind(path).? == .swift);
+        var expected: usize = 0;
+        var why: []const u8 = "";
+        for (native_allowed, 0..) |entry, i| if (std.mem.eql(u8, entry.path, path)) {
+            seen[i] = true;
+            expected = entry.count;
+            why = entry.why;
+        };
+        if (count != expected) {
+            failed = true;
+            std.debug.print(
+                \\
+                \\[spawn cloexec 축 — Swift·ObjC] {s}: `Process`·`NSTask`·`posix_spawn`·`system` spawn 자리가 {d} 곳(재고 {d}).
+                \\  앱이 띄우는 자식은 이미지 채널로 받은 fd 를 물려받을 수 있다(docs/session-host-image-channel.md §7). Foundation
+                \\  `Process` 가 fd 를 넘기지 않는다는 것은 실측일 뿐이다 — 새 자리는 Zig 의 `maru.pty.macos_spawn` 으로 띄우거나,
+                \\  앱이 아닌 프로세스·실측으로 확인한 자리라면 재고에 **이유와 함께** 개수를 올려라. 재고 사유: {s}
+                \\
+            , .{ path, count, expected, why });
+        }
+    }
+    for (native_allowed, 0..) |entry, i| if (!seen[i]) {
+        failed = true;
+        std.debug.print("\n[spawn cloexec 축 — Swift·ObjC] 재고의 {s} 가 없다 — 재고를 고쳐라.\n", .{entry.path});
+    };
+    try std.testing.expect(!failed);
+}

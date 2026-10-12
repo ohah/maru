@@ -8,6 +8,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
+const fork_fd_fence = @import("fork_fd_fence.zig");
 
 pub const Error = error{
     InvalidDeadline,
@@ -315,11 +316,27 @@ pub const posix_ops = Ops{
 };
 
 const PosixOps = struct {
+    /// macOS 에는 `SOCK_CLOEXEC` 가 없어 `socket()` 과 `F_SETFD` 가 별개 호출이다 — 그 사이에 다른 스레드가 fork 하면 자식이
+    /// 소켓을 물려받아, 앱이 닫아도 host 가 EOF 를 못 본다(이미지 채널이면 원장이 붙잡힌다). 받은 fd 와 같은 fork 울타리의 수신
+    /// 잠금 안에서 만들고 CLOEXEC 까지 켠다(docs/session-host-image-channel.md §7). 기다림은 fork 시스템콜 길이로 묶인다.
+    /// `connectUnixUntil` 의 `set_cloexec` 는 그 뒤에 한 번 더 켤 뿐이다(주입 ops 의 실패 판정자가 그 자리를 잰다).
     fn socket(_: *anyopaque) c.fd_t {
-        return c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        fork_fd_fence.lockReceive();
+        defer fork_fd_fence.unlockReceive();
+        const fd = c.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        if (fd < 0) return fd;
+        if (!closeOnExec(fd)) {
+            _ = c.close(fd);
+            return -1;
+        }
+        return fd;
     }
 
     fn setCloseOnExec(_: *anyopaque, fd: c.fd_t) bool {
+        return closeOnExec(fd);
+    }
+
+    fn closeOnExec(fd: c.fd_t) bool {
         const flags = c.fcntl(fd, c.F.GETFD, @as(c_int, 0));
         return flags >= 0 and c.fcntl(fd, c.F.SETFD, flags | c.FD_CLOEXEC) == 0;
     }

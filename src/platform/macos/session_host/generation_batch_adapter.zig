@@ -11,6 +11,7 @@ const incident_publication_contract = @import("maru").observability.incident_pub
 const generation_batch_registry = @import("generation_batch_registry.zig");
 const terminal_contract = @import("terminal_cleanup_handoff_contract.zig");
 const remote_attachment = @import("remote_attachment.zig");
+const fork_fd_fence = @import("fork_fd_fence.zig");
 const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const client_deadline = @import("client_deadline.zig");
 
@@ -469,10 +470,10 @@ pub const GenerationBatchAdapter = struct {
         return slot.resolveAttachmentImage(stream_id, ref);
     }
 
-    fn prepareImageApply(context: *anyopaque) bool {
+    fn prepareImageApply(context: *anyopaque, wait: fork_fd_fence.ReceiveWait) bool {
         const self: *GenerationBatchAdapter = @ptrCast(@alignCast(context));
         const slot = self.borrowSlot(.live) orelse return false;
-        return slot.pumpAttachmentImageChannel();
+        return slot.pumpAttachmentImageChannel(wait);
     }
 
     /// 자기 stream 만 연다 — live 가 아니거나 다른 stream 이면 아무것도 하지 않는다.
@@ -623,12 +624,35 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
     live.image_segments = table;
     try std.testing.expect(transport.image_shm_negotiated(transport.context));
     try sendTestSegment(channel[1], 1, 7, &.{ 9, 8, 7, 6 });
-    _ = live.pumpImageChannel();
+    _ = live.pumpImageChannel(.try_lock);
     try std.testing.expectEqual(@as(usize, 1), table.len);
 
     // 다른 stream(8)의 실제 항목 — 표 대조와 따로, adapter 가 자기 stream 이 아니면 slot 에 닿지 않는다. 이번에는 유지보수
     // tick 의 길(`currentPumpImageChannel`)로 받는다.
     try sendTestSegment(channel[1], 2, 8, &.{ 1, 1, 1, 1 });
+    // tick 의 길은 fork 울타리의 수신 잠금을 기다리지 않는다(§7) — 다른 스레드가 쥔 동안은 비우지 않고 다음 tick 에 받는다.
+    const FenceHolder = struct {
+        held: std.atomic.Value(bool) = .init(false),
+        release: std.atomic.Value(bool) = .init(false),
+        fn run(holder: *@This()) void {
+            fork_fd_fence.lockReceive();
+            holder.held.store(true, .release);
+            // 기다리는 쪽이 잘못 기다려도 판정자가 멈추지 않게 2 초 상한.
+            var waited_ms: usize = 0;
+            while (!holder.release.load(.acquire) and waited_ms < 2000) : (waited_ms += 1)
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            fork_fd_fence.unlockReceive();
+        }
+    };
+    var fence_holder: FenceHolder = .{};
+    const holder_thread = try std.Thread.spawn(.{}, FenceHolder.run, .{&fence_holder});
+    while (!fence_holder.held.load(.acquire)) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    const pumped_while_held = slot.currentPumpImageChannel(slot.connectionGeneration());
+    const len_while_held = table.len;
+    fence_holder.release.store(true, .release);
+    holder_thread.join();
+    try std.testing.expect(!(try pumped_while_held));
+    try std.testing.expectEqual(@as(usize, 1), len_while_held);
     try std.testing.expect(try slot.currentPumpImageChannel(slot.connectionGeneration()));
     try std.testing.expectEqual(@as(usize, 2), table.len);
     var other = ref;
@@ -642,7 +666,7 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
         slot.current.active_operation_generation = 1;
         slot.current.active_operation_kind = busy_case.kind;
         slot.current.active_operation_owner_thread_incarnation = busy_case.thread;
-        const busy_prepare = transport.prepare_image_apply(transport.context);
+        const busy_prepare = transport.prepare_image_apply(transport.context, .try_lock);
         const busy = transport.resolve_image(transport.context, 7, ref);
         slot.current.active_operation_generation = 0;
         slot.current.active_operation_kind = .none;
@@ -658,7 +682,7 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
     defer slot.abortAttachmentBinding(&binding, reservation) catch
         @panic("image channel adapter binding cleanup drifted");
     const permit = try slot.prepareInitialSnapshotPermit(0x1000, 9, reservation.identity);
-    const prepared_during_snapshot = transport.prepare_image_apply(transport.context);
+    const prepared_during_snapshot = transport.prepare_image_apply(transport.context, .try_lock);
     const during_snapshot = transport.resolve_image(transport.context, 7, ref);
     try slot.abortInitialSnapshotPermit(permit);
     try std.testing.expect(prepared_during_snapshot);
@@ -676,7 +700,7 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
     try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 7) != null);
     // 다른 연산이 slot 을 쥐면 정리하지 않는다.
     try sendTestSegment(channel[1], 3, 7, &.{ 2, 2, 2, 2 });
-    try std.testing.expect(transport.prepare_image_apply(transport.context));
+    try std.testing.expect(transport.prepare_image_apply(transport.context, .try_lock));
     try std.testing.expectEqual(@as(usize, 2), table.len);
     slot.current.active_operation_generation = 1;
     slot.current.active_operation_kind = .control;

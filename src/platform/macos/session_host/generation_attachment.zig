@@ -1571,6 +1571,15 @@ pub const GenerationAttachment = struct {
         return if (payload.screen) |*screen| screen else null;
     }
 
+    /// 첫 snapshot 적용에 넘길 resolver — payload attachment 의 transport 로 고른다(이미지 채널 §6).
+    pub fn imageRefResolver(
+        self: *GenerationAttachment,
+        ctx: *remote_attachment.ImageResolveCtx,
+    ) remote_attachment.ImageRefResolver {
+        const payload = if (self.payload) |*value| value else return .unnegotiated;
+        return payload.imageRefResolver(ctx);
+    }
+
     pub fn initScreen(self: *GenerationAttachment, codec: u16) anyerror!void {
         return self.payloadMut().initScreen(codec);
     }
@@ -3785,6 +3794,66 @@ test "CR3a-2b2 generation GUI pump transfers a direct parser frame through the n
     try std.testing.expectEqual(@as(usize, 1), try adapter.slot.current.batch_registry.count());
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
     try std.testing.expectEqual(@as(usize, 0), try adapter.slot.current.batch_registry.count());
+}
+
+test "image channel attachment: a committed generation attachment hands its transport's resolver to the first snapshot" {
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    try client_slot_mod.ClientSlot.initializeProcessRuntime();
+    const allocator = std.testing.allocator;
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(
+        @as(c_int, 0),
+        std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds),
+    );
+    defer _ = std.c.close(fds[1]);
+    var client: @import("client.zig").Client = .{
+        .allocator = allocator,
+        .fd = fds[0],
+        .host_id = 0x3B21,
+        .parser = framing.FrameParser.init(allocator),
+    };
+    var adapter: host_adapter_mod.HostAdapter = undefined;
+    try host_adapter_mod.HostAdapter.initInPlace(&adapter, allocator, &client);
+    defer adapter.deinit();
+    var attachment: GenerationAttachment = .{};
+    try GenerationAttachment.initInPlace(&attachment, &adapter);
+    var ctx: remote_attachment.ImageResolveCtx = undefined;
+    // 아직 payload 가 없다 — 미협상.
+    try std.testing.expect(attachment.imageRefResolver(&ctx) == .unnegotiated);
+    const receipt = try attachment.prepareControllerAttach(&adapter, 0x3B22);
+    try attachment.binding.beginExecute(receipt);
+    attachment.lifecycle = .executing;
+    try attachment.transport.abortPreparedRequest(receipt);
+    const executed = contract.ExecutedCallReceipt.fromPrepared(receipt).?;
+    const accepted = contract.CorrelatedExecutedCall.init(executed, receipt.request_id).?;
+    const response_bytes = try allocator.dupe(u8, "accepted");
+    try attachment.response.initAcceptedFromPromotedInPlace(
+        allocator,
+        try adapter.responseOwnerSeal(attachment.reservation.?),
+        0x3B23,
+        accepted,
+        response_bytes,
+        testAllocationProvenance(0x3B23),
+    );
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.finishResponse(&adapter));
+    try attachment.commitAccepted(&adapter, accepted, .{
+        .runtime_id = 0x3B22,
+        .stream_id = 0x3B24,
+        .role = .controller,
+        .controller_generation = 1,
+    }, allocator);
+
+    // 협상하지 않은 연결은 미협상, 협상한 연결(이미지 채널 없음 포함)은 그 attachment 의 stream 으로 묶인 채널 resolver.
+    try std.testing.expect(attachment.imageRefResolver(&ctx) == .unnegotiated);
+    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+    logical_client.image_channel.state = .unavailable;
+    switch (attachment.imageRefResolver(&ctx)) {
+        .unnegotiated => return error.TestUnexpectedResult,
+        .channel => |resolver| try std.testing.expect(resolver.ctx == @as(*anyopaque, &ctx)),
+    }
+    try std.testing.expectEqual(@as(u64, 0x3B24), ctx.stream_id);
+    logical_client.image_channel.state = .not_negotiated;
+    try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
 }
 
 test "CR3a-2e 원복은 typed reject 뒤 row와 pin과 batch를 terminal로 정리한다" {

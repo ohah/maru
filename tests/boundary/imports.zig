@@ -418,6 +418,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "terminalReasonInvariant", .receiver_type = immutable, .class = .guarded },
         .{ .name = "poison", .receiver_type = mutable, .class = .guarded },
         .{ .name = "pumpImageChannel", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "resolveImageSegment", .receiver_type = mutable, .class = .guarded },
         .{ .name = "markDeferredPoisonForTest", .receiver_type = mutable, .class = .guarded },
         .{ .name = "firstPoisonReason", .receiver_type = immutable, .class = .guarded },
         .{ .name = "canTerminalizeSharedConnectionNoDestroy", .receiver_type = mutable, .class = .guarded },
@@ -526,6 +527,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "hasBufferedRuntimeWork", .receiver_type = immutable, .class = .observation },
         .{ .name = "hasAnyBufferedRuntimeWork", .receiver_type = immutable, .class = .observation },
         .{ .name = "quietPumpProven", .receiver_type = immutable, .class = .observation },
+        .{ .name = "imageShmNegotiated", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
     const guarded = [_]ClientGuardProof{
@@ -587,6 +589,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "canTerminalizeSharedConnectionNoDestroy", .funnel = "canTerminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
         .{ .receiver = "terminalizeSharedConnectionNoDestroy", .funnel = "terminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
         .{ .receiver = "pumpImageChannel", .funnel = "pumpImageChannel", .gate = "requireBlockingMode" },
+        .{ .receiver = "resolveImageSegment", .funnel = "resolveImageSegment", .gate = "requireBlockingMode" },
     };
     try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
     const client_path = "src/platform/macos/session_host/client.zig";
@@ -1304,6 +1307,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "Client", .kind = "field", .visibility = "private", .modifier = "", .name = "image_segments" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpImageChannel" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ImageChannelPumpFixture" },
+                // 적용 자리 배선(IC3b-2a, 2026-10-12): 협상 여부를 읽는 관측 하나와 울타리 든 해석 하나. 표는 Client 의 공개
+                // 메서드로만 바꾼다(봉인 지문) — transport·slot·adapter 는 이 둘만 부른다.
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "imageShmNegotiated" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "resolveImageSegment" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.
@@ -1660,6 +1667,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 "RpcPublicationFailureByteOutcome",
             },
             .allowed = &.{
+                // 적용 자리 배선(IC3b-2a, 2026-10-12): `image_ref` 타입 import, 협상 여부 관측 하나, 다른 attachment 연산이 slot 을
+                // 쥐지 않을 때만 Client 의 울타리 든 해석에 닿는 하나.
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "screen_stream" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "attachmentImageShmNegotiated" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "resolveAttachmentImage" },
                 // post snapshot 을 쓴 판정자의 번호(2026-10-02) — 판정자 빌드 전용(`void`). 앞선 판정자가 남긴 snapshot 이 실행
                 // 순서에 따라 뒤 판정자의 «아직 게시 안 됨» 단언을 깨던 것을 UI 프레임 도장과 같은 장치로 순서와 무관하게 닫는다.
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_post_snapshot_test_generation" },
@@ -8674,7 +8686,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         countOccurrences(runtime, "        .context = client,"),
     );
     try std.testing.expectEqual(
-        @as(usize, 3),
+        // legacy transport 의 콜백 다섯 — 배치 읽기·stream 버리기·fail-close 와 이미지 협상·해석(IC3b-2a).
+        @as(usize, 5),
         countOccurrences(
             runtime,
             "const client: *client_mod.Client = @ptrCast(@alignCast(context));",

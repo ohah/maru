@@ -15,6 +15,11 @@ const remote_screen = @import("remote_screen.zig");
 const screen_assembler = @import("maru").session.screen_assembler;
 const screen_stream = @import("maru").session.screen_stream;
 const catchup_stage_contract = @import("catchup_stage_contract.zig");
+const client_image_segments = @import("client_image_segments.zig");
+
+/// 적용 호출의 필수 resolver(이미지 채널 §6) — attachment 를 쓰는 쪽이 조립기 모듈을 따로 부르지 않게 다시 낸다.
+pub const ImageRefResolver = screen_assembler.ImageRefResolver;
+pub const ImageRef = screen_stream.ImageRef;
 
 /// 화면 배치를 해석하지 못해 연결을 `frame_malformed` 로 닫을 때 **어느 단계에서 무슨 오류였는지** 남긴다.
 ///
@@ -142,6 +147,8 @@ fn terminalTestTransport() AttachmentTransport {
         .read_batch = Fixture.read,
         .drop_stream = Fixture.drop,
         .fail_closed = Fixture.failClosed,
+        .image_shm_negotiated = imageNotNegotiated,
+        .resolve_image = noImageSegment,
     };
 }
 
@@ -180,6 +187,39 @@ pub const AttachmentTransport = struct {
     ) MarkResyncAppliedResult = null,
     drop_stream: *const fn (context: *anyopaque, stream_id: u64) void,
     fail_closed: *const fn (context: *anyopaque, reason: client_poison.ConnectionReason) void,
+    /// 이 연결이 `image_shm` 을 협상했는가 — 적용 자리가 넘길 resolver 를 고른다(이미지 채널 §6). 필수다: 빠진 transport 를
+    /// 컴파일러가 잡는다.
+    image_shm_negotiated: *const fn (context: *anyopaque) bool,
+    /// 협상한 연결에서 `image_ref` 하나를 그 연결의 세그먼트 표로 해석해 매핑한 픽셀을 준다. null 은 「세그먼트 없음」이다.
+    resolve_image: *const fn (
+        context: *anyopaque,
+        stream_id: u64,
+        ref: ImageRef,
+    ) error{OutOfMemory}!?[]const u8,
+};
+
+/// `image_shm` 을 협상하지 않는 transport(`maru attach`·테스트)의 몫 — 적용 자리는 `.unnegotiated` 를 넘긴다(§6·§8).
+pub fn imageNotNegotiated(_: *anyopaque) bool {
+    return false;
+}
+
+/// 협상하지 않는 transport 의 해석 — `.unnegotiated` 는 resolver 를 부르지 않으므로 닿지 않는다.
+pub fn noImageSegment(_: *anyopaque, _: u64, _: ImageRef) error{OutOfMemory}!?[]const u8 {
+    return null;
+}
+
+/// 적용 하나 동안만 사는 resolver ctx — 연결의 transport 와 이 attachment 의 stream 을 묶는다. 맨 `*Client` 를 쥐지 않는다
+/// (Client 는 generation 노드와 함께 이동한다 — 이미지 채널 §6). 매핑은 조립기 소유로 넘어가고 `unmapPixels` 가 푼다.
+pub const ImageResolveCtx = struct {
+    transport: AttachmentTransport,
+    stream_id: u64,
+
+    fn resolve(ctx: *anyopaque, ref: ImageRef) error{OutOfMemory}!?screen_assembler.ResolvedImage {
+        const self: *ImageResolveCtx = @ptrCast(@alignCast(ctx));
+        const pixels = (try self.transport.resolve_image(self.transport.context, self.stream_id, ref)) orelse
+            return null;
+        return .{ .pixels = pixels, .unmap = client_image_segments.unmapPixels };
+    }
 };
 
 pub const Role = enum { observer, controller };
@@ -211,6 +251,15 @@ pub const RemoteAttachment = struct {
 
     pub fn streamId(self: *const RemoteAttachment) u64 {
         return self.state.stream_id;
+    }
+
+    /// 이 attachment 의 적용 호출에 넘길 resolver(이미지 채널 §6). 협상한 연결이면 「이미지 채널 없음」이어도 채널 resolver 다 —
+    /// 빈 표가 「세그먼트 없음」으로 답한다. `ctx` 는 그 적용이 끝날 때까지 살아 있어야 한다.
+    pub fn imageRefResolver(self: *const RemoteAttachment, ctx: *ImageResolveCtx) ImageRefResolver {
+        const transport = self.transport orelse return .unnegotiated;
+        if (!transport.image_shm_negotiated(transport.context)) return .unnegotiated;
+        ctx.* = .{ .transport = transport, .stream_id = self.state.stream_id };
+        return .{ .channel = .{ .ctx = ctx, .resolveFn = ImageResolveCtx.resolve } };
     }
 
     pub fn allowsMutation(self: *const RemoteAttachment) bool {
@@ -547,6 +596,9 @@ pub const RemoteAttachment = struct {
                 return err;
             };
         } else null;
+        // 세 적용 자리(복구 스냅샷·snapshot·delta)가 같은 resolver 를 쓴다 — ctx 는 이 함수가 끝날 때까지 산다.
+        var image_ctx: ImageResolveCtx = undefined;
+        const image_refs = self.imageRefResolver(&image_ctx);
         if (batch_authority == .recovery_exact) {
             const key = recovery_key orelse unreachable;
             // Recovery snapshots are assembled off-screen. A callback may invalidate transport
@@ -570,7 +622,7 @@ pub const RemoteAttachment = struct {
             var prepared_screen_live = true;
             defer if (prepared_screen_live) prepared_screen.deinit();
             prepared_screen.prepareRecoveryFrontierFrom(screen);
-            prepared_screen.applySnapshot(batch.bytes, .unnegotiated, io) catch |err| {
+            prepared_screen.applySnapshot(batch.bytes, image_refs, io) catch |err| {
                 if (err != error.OutOfMemory)
                     logScreenBatchMalformed("recovery_snapshot", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
@@ -613,7 +665,7 @@ pub const RemoteAttachment = struct {
             }
         }
         if (batch.is_snapshot) {
-            screen.applySnapshot(batch.bytes, .unnegotiated, io) catch |err| {
+            screen.applySnapshot(batch.bytes, image_refs, io) catch |err| {
                 if (err != error.OutOfMemory)
                     logScreenBatchMalformed("snapshot", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
@@ -628,7 +680,7 @@ pub const RemoteAttachment = struct {
                 return err;
             };
         } else {
-            screen.applyDelta(batch.bytes, .unnegotiated, io) catch |err| {
+            screen.applyDelta(batch.bytes, image_refs, io) catch |err| {
                 if (err != error.OutOfMemory)
                     logScreenBatchMalformed("delta", err, self.state.stream_id, batch.bytes.len);
                 transport.fail_closed(transport.context, if (err == error.OutOfMemory)
@@ -1403,9 +1455,145 @@ const TestTransport = struct {
             .read_batch = read,
             .drop_stream = drop,
             .fail_closed = failClosed,
+            .image_shm_negotiated = imageNotNegotiated,
+            .resolve_image = noImageSegment,
         };
     }
 };
+
+/// 협상 여부와 해석을 흉내 내는 transport(이미지 채널 §6). 해석은 익명 매핑을 준다 — 조립기가 `unmapPixels`(munmap)로 푼다.
+const ImageTestTransport = struct {
+    batches: [2]?AttachmentBatchLease,
+    next: usize = 0,
+    negotiated: bool,
+    resolved: usize = 0,
+    resolved_stream: u64 = 0,
+    first_fail_reason: ?client_poison.ConnectionReason = null,
+
+    fn read(context: *anyopaque, _: u64) client_mod.ClientError!?AttachmentBatchLease {
+        const self: *ImageTestTransport = @ptrCast(@alignCast(context));
+        if (self.next == self.batches.len) return null;
+        const batch = self.batches[self.next];
+        self.batches[self.next] = null;
+        self.next += 1;
+        return batch;
+    }
+
+    fn drop(_: *anyopaque, _: u64) void {}
+
+    fn failClosed(context: *anyopaque, reason: client_poison.ConnectionReason) void {
+        const self: *ImageTestTransport = @ptrCast(@alignCast(context));
+        if (self.first_fail_reason == null) self.first_fail_reason = reason;
+    }
+
+    fn negotiatedFn(context: *anyopaque) bool {
+        const self: *ImageTestTransport = @ptrCast(@alignCast(context));
+        return self.negotiated;
+    }
+
+    fn resolve(context: *anyopaque, stream_id: u64, ref: ImageRef) error{OutOfMemory}!?[]const u8 {
+        const self: *ImageTestTransport = @ptrCast(@alignCast(context));
+        self.resolved += 1;
+        self.resolved_stream = stream_id;
+        const page = std.posix.mmap(
+            null,
+            std.heap.page_size_min,
+            .{ .READ = true, .WRITE = true },
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+            -1,
+            0,
+        ) catch return error.OutOfMemory;
+        @memset(page[0..ref.byte_len], @truncate(self.resolved));
+        return page[0..ref.byte_len];
+    }
+
+    fn interface(self: *ImageTestTransport) AttachmentTransport {
+        return .{
+            .context = self,
+            .read_batch = read,
+            .drop_stream = drop,
+            .fail_closed = failClosed,
+            .image_shm_negotiated = negotiatedFn,
+            .resolve_image = resolve,
+        };
+    }
+};
+
+/// `image_ref` 하나를 실은 배치 — snapshot 이면 화면 메타를 앞에 둔다.
+fn imageRefBatch(allocator: std.mem.Allocator, is_snapshot: bool) !AttachmentBatchLease {
+    var bytes: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer bytes.deinit(allocator);
+    if (is_snapshot) {
+        const meta = try screen_stream.encodeScreenMeta(allocator, .{ .kind = .screen_meta, .generation = 1 }, .{ .cols = 1, .rows = 1 });
+        defer allocator.free(meta);
+        try screen_stream.appendRecord(&bytes, allocator, meta);
+    }
+    const ref = try screen_stream.encodeImageRef(allocator, .{ .kind = .image_ref, .generation = 1 }, .{
+        .image_id = 5,
+        .generation = 9,
+        .width = 1,
+        .height = 1,
+        .bpp = 4,
+        .segment_id = 3,
+        .byte_len = 4,
+    });
+    defer allocator.free(ref);
+    try screen_stream.appendRecord(&bytes, allocator, ref);
+    return .{ .untracked = .{
+        .is_snapshot = is_snapshot,
+        .stream_id = 7,
+        .bytes = try bytes.toOwnedSlice(allocator),
+        .allocator = allocator,
+    } };
+}
+
+test "image channel wiring: a negotiated transport resolves image_ref in snapshot and delta through its own stream" {
+    const allocator = std.testing.allocator;
+    var transport = ImageTestTransport{
+        .batches = .{ try imageRefBatch(allocator, true), try imageRefBatch(allocator, false) },
+        .negotiated = true,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(screen_stream.codec_version);
+
+    try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.resolved);
+    try std.testing.expectEqual(@as(u64, 7), transport.resolved_stream);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1 }, attachment.screen.?.assembler.imageById(5).?.pixels);
+    // delta 도 같은 resolver 로 — 새 매핑이 앞 매핑을 갈아 끼운다(앞 매핑은 조립기가 푼다).
+    try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 2), transport.resolved);
+    try std.testing.expectEqualSlices(u8, &.{ 2, 2, 2, 2 }, attachment.screen.?.assembler.imageById(5).?.pixels);
+    try std.testing.expectEqual(@as(?client_poison.ConnectionReason, null), transport.first_fail_reason);
+}
+
+test "image channel wiring: an unnegotiated transport never reaches the resolver and image_ref fails the batch closed" {
+    const allocator = std.testing.allocator;
+    var transport = ImageTestTransport{
+        .batches = .{ try imageRefBatch(allocator, true), null },
+        .negotiated = false,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(screen_stream.codec_version);
+
+    if (attachment.pumpScreen(std.testing.io)) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expectEqual(@as(usize, 0), transport.resolved);
+    try std.testing.expectEqual(@as(?client_poison.ConnectionReason, .frame_malformed), transport.first_fail_reason);
+}
 
 test "CR3a-2a GUI payload-only teardown leaves stream drop to generation owner" {
     var transport = TestTransport{ .batch = null };
@@ -1495,6 +1683,8 @@ const ChargedTestTransport = struct {
             .release_charged = release,
             .drop_stream = drop,
             .fail_closed = failClosed,
+            .image_shm_negotiated = imageNotNegotiated,
+            .resolve_image = noImageSegment,
         };
     }
 };
@@ -1502,6 +1692,9 @@ const ChargedTestTransport = struct {
 const RecoveryTestTransport = struct {
     view: AttachmentBatchView,
     batch_available: bool = true,
+    /// 이미지 채널 판정자만 켠다 — 해석은 `ImageTestTransport.resolve` 와 같은 익명 매핑이다.
+    image_negotiated: bool = false,
+    image_resolved: usize = 0,
     release_fails: bool = false,
     preflight_result: external_recovery_types.BatchAuthority = .recovery_exact,
     mark_result: MarkResyncAppliedResult = .commit_pending,
@@ -1538,6 +1731,18 @@ const RecoveryTestTransport = struct {
         const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
         self.release_calls += 1;
         if (self.release_fails) return error.InvariantFailure;
+    }
+
+    fn imageNegotiated(context: *anyopaque) bool {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        return self.image_negotiated;
+    }
+
+    fn resolveImage(context: *anyopaque, stream_id: u64, ref: ImageRef) error{OutOfMemory}!?[]const u8 {
+        const self: *RecoveryTestTransport = @ptrCast(@alignCast(context));
+        self.image_resolved += 1;
+        var images = ImageTestTransport{ .batches = .{ null, null }, .negotiated = true };
+        return ImageTestTransport.resolve(&images, stream_id, ref);
     }
 
     fn mark(
@@ -1580,6 +1785,8 @@ const RecoveryTestTransport = struct {
             .preflight_batch_authority = preflight,
             .mark_resync_applied = mark,
             .drop_stream = drop,
+            .image_shm_negotiated = imageNegotiated,
+            .resolve_image = resolveImage,
             .fail_closed = failClosed,
         };
     }
@@ -1864,6 +2071,35 @@ test "remote attachment applies and releases a charged snapshot with an empty qu
     try std.testing.expectEqual(@as(usize, 0), attachment.pending_batches.items.len);
     attachment.deinit();
     try ledger.finish();
+}
+
+test "image channel wiring: a recovery snapshot resolves image_ref through the same resolver before it is published" {
+    const allocator = std.testing.allocator;
+    const lease = try imageRefBatch(allocator, true);
+    defer allocator.free(lease.untracked.bytes);
+    var transport = RecoveryTestTransport{
+        .view = .{
+            .is_snapshot = true,
+            .stream_id = 7,
+            .recovery_key = .{ .owner_incarnation = 41, .origin = .host, .recovery_epoch = 7, .expected_token_generation = 9 },
+            .bytes = lease.untracked.bytes,
+        },
+        .image_negotiated = true,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(screen_stream.codec_version);
+
+    try std.testing.expectEqual(PumpScreenResult.recovery_commit_pending, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.image_resolved);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 1, 1, 1 }, attachment.screen.?.assembler.imageById(5).?.pixels);
+    try std.testing.expectEqual(@as(usize, 0), transport.fail_closed_calls);
 }
 
 test "remote attachment copies recovery key then releases before exact mark" {

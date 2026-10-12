@@ -808,6 +808,9 @@ pub fn buildSidebarDrawList(
     inline_icons: []const u21,
     pinned: []const bool, // pinned[i]=true면 그 슬롯 이름줄 우측 끝에 📌(빈 슬라이스=핀 없음)
     cols: u16,
+    /// ✕ 없는 줄이 오른쪽에 비워 둘 칸 수. 글자가 칸 미만 여백(`Columns.text_offset_px`)만큼 밀리면 마지막 칸이 사이드바
+    /// 경계를 넘치므로 그만큼 비운다 — 값은 `Columns.trailingPadCols`(여백을 칸으로 올림)가 낸다. macOS 1, Windows 0.
+    trailing_pad_cols: u16,
     fg: terminal.Color,
     close_rows: []const bool, // close_rows[i]=true면 그 row 우측에 닫기 ✕(호버 전용이 아니라 **행별 고정 표시**)
     ages: []const []const u8, // ages[i]=마지막 활동 상대 시각("5m"·"now", 빈 슬라이스=표시 안 함) — 이름줄 우측, ✕ 왼쪽
@@ -871,7 +874,7 @@ pub fn buildSidebarDrawList(
         const active = active_row != null and active_row.? == i;
         // 고정 핀(📌): 이름줄(line 0) **우측 끝**에 둔다 — 선두 칼럼은 동작/활성 마커(·/*, 호출자가 이름 prefix로 붙임)
         // 전용이라 핀이 그걸 가리지 않게(사용자 요청). 핀은 width 2 + 컬러 이모지(빨간 핀, style.fg 무관)다. **cols-1은
-        // 우측 패딩 1칸으로 예약**돼 있으므로(아래 end_col 주석: 칸 미만 여백 `Columns.text_offset_px`가 마지막 칸을 우측으로 밀어 경계 넘침),
+        // (macOS — `trailing_pad_cols` 1) 우측 패딩 1칸으로 예약**돼 있으므로(아래 end_col 주석: 칸 미만 여백 `Columns.text_offset_px`가 마지막 칸을 우측으로 밀어 경계 넘침),
         // 핀의 오른쪽 끝이 cols-2가 되도록 비호버는 pin_col=cols-3(→ cols-3,2 차지·cols-1 패딩 보존)에 둔다. 호버 슬롯이면
         // 닫기 ✕가 cols-2(width 1)에 오므로 핀은 그 왼쪽 pin_col=cols-5(→ cols-5,4·cols-3 gap·cols-2 ✕·cols-1 패딩)에.
         // 폭이 좁아 핀이 text_col을 침범하면 생략(degrade).
@@ -892,13 +895,14 @@ pub fn buildSidebarDrawList(
             // 이름줄(j==0)만 활성 강조(active_fg+bold), 보조줄(브랜치·경로·상태)은 흐린 fg. bold는 셰이퍼가 bold face 선택.
             const row_style: terminal.Style = if (active and j == 0) .{ .foreground = active_fg, .bold = true } else style;
             // OSC 0/2(신뢰 불가)라 깨진 UTF-8은 U+FFFD, 폭 넘으면 "…" 말줄임(appendEllipsizedTitle 단일 출처).
-            // **우측 패딩 1칸 예약(cols-1)**: 카드 글리프는 `Columns.text_offset_px`(macOS 반 칸 — 예전에는 렌더러의 glyph_pad)만큼 오른쪽으로 밀리는데,
+            // **우측 패딩 예약(cols − trailing_pad_cols)**: 카드 글리프는 `Columns.text_offset_px`(macOS 반 칸 — 예전에는 렌더러의 glyph_pad)만큼 오른쪽으로 밀리는데,
             // end_col=cols면 마지막 칸이 사이드바 경계를 반 칸 넘쳐 말줄임/텍스트가 경계에 붙어 답답했다(사용자
-            // 피드백). cols-1로 두면 우측에 ~0.5칸 여백이 생겨 좌측 반 칸 여백과 균형이 맞는다. Windows 는 여백이 0 이라 이 예약이 근거 없이 한 칸을 비운다(남은 정리).
+            // 피드백). 한 칸을 비우면 우측에 ~0.5칸 여백이 생겨 좌측 반 칸 여백과 균형이 맞는다. 예약 칸 수는 그 여백에서
+            // 나온다(`Columns.trailingPadCols`) — 예전에는 1 로 고정이라 여백이 0 인 Windows 도 근거 없이 한 칸을 비웠다.
             // 핀이 있는 이름줄(j==0)은 핀 앞(pin_col)에서 잘라 긴 이름이 핀을 덮지 않게 한다(✕는 호버 전용이라 종전대로 overpaint).
             // ✕가 **고정 표시**로 바뀌었으므로 제목도 그 왼쪽에서 멈춰야 한다 — 예전엔 호버 순간에만 겹쳤지만 이제
             // 긴 이름·경로의 말줄임표 위에 ✕가 영구히 덧그려진다(code-review max). ✕는 cols-3이라 제목은 cols-4까지.
-            const close_limit: u16 = if (close_here) (cols -| 4) else (cols -| 1);
+            const close_limit: u16 = if (close_here) (cols -| 4) else (cols -| trailing_pad_cols);
             // 활동 시각이 있으면 이름줄 제목은 그 **왼쪽**에서 멈춘다(시각 폭 + 간격 1칸). 안 그러면 긴 제목의
             // 말줄임표 위에 시각이 덧그려져 둘 다 못 읽는다 — ✕에서 겪은 것과 같은 문제다.
             //
@@ -1523,4 +1527,34 @@ test "CT6 호출자가 더러운 버퍼를 줘도 답이 같다 — 함수가 �
     try testing.expectEqual(@as(u16, 2), spans[0].end);
     try testing.expectEqual(@as(u16, 2), spans[1].start);
     try testing.expectEqual(@as(u16, 4), spans[1].end);
+}
+
+// **오른쪽 예약 칸은 칸 미만 여백이 있을 때만 필요하다.** 예약(`cols-1` 에서 멈춤)의 근거는 「글자가 반 칸 밀려
+// 마지막 칸이 경계를 넘친다」였다(macOS `Columns.text_offset_px` = 반 칸). Windows 는 여백이 0 인데도 같은 예약을
+// 받아 ✕ 없는 행이 근거 없이 한 칸을 비웠다(2026-10-12 적대적 검증). 여백이 0 이면 글자가 마지막 칸까지 쓴다.
+test "buildSidebarDrawList: 칸 미만 여백이 0 이면 ✕ 없는 행의 글자가 마지막 칸까지 쓴다" {
+    const allocator = std.testing.allocator;
+    const cols: u16 = 20;
+    const names = [_][]const u8{"abcdefghijklmnopqrstuvwxyz0123456789"};
+    var dl = try buildSidebarDrawList(allocator, &names, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, cols, 0, .default, &.{}, &.{}, null, null, .default, null);
+    defer dl.deinit(allocator);
+    var last: u16 = 0;
+    var counted: usize = 0;
+    for (dl.cells) |c| {
+        last = @max(last, c.col + @max(c.width, 1) - 1);
+        counted += 1;
+    }
+    try std.testing.expect(counted > 0); // 개수로 확인 — 셀이 없으면 아래가 아무것도 안 잰다
+    try std.testing.expectEqual(cols - 1, last);
+
+    // macOS(반 칸 여백 → 예약 1칸)는 예전처럼 한 칸 앞에서 멈춘다 — 값은 `Columns` 가 여백에서 낸다.
+    const mac = chrome.components.sidebar.columns(200, 8, 0, 0, 0, 4).?;
+    try std.testing.expectEqual(@as(u16, 1), mac.trailingPadCols(8));
+    var dl_mac = try buildSidebarDrawList(allocator, &names, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, cols, mac.trailingPadCols(8), .default, &.{}, &.{}, null, null, .default, null);
+    defer dl_mac.deinit(allocator);
+    var last_mac: u16 = 0;
+    for (dl_mac.cells) |c| last_mac = @max(last_mac, c.col + @max(c.width, 1) - 1);
+    try std.testing.expectEqual(cols - 2, last_mac);
+    // Windows(여백 0)는 예약이 0 이다.
+    try std.testing.expectEqual(@as(u16, 0), chrome.components.sidebar.columns(200, 8, 0, 0, 0, 0).?.trailingPadCols(8));
 }

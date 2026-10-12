@@ -8851,6 +8851,18 @@ $ powershell -File tools/windows/capture-window.ps1 -OutPath scrolled.png
 CAPTURE-OK ... distinct_colors=149
 ```
 
+### 2m.115 사이드바 카드 줄이 마지막 칸까지 쓴다 — macOS 반 칸 여백 때문에 비우던 한 칸 (2026-10-12)
+
+`cell_text.buildSidebarDrawList` 는 ✕ 없는 줄의 글자를 `cols-1` 에서 멈췄다. 근거는 「카드 글자가 반 칸 밀려 마지막 칸이
+경계를 넘친다」였는데, 그 반 칸은 **macOS 렌더러의 여백**이다(지금은 `Columns.text_offset_px` — macOS 반 칸, Windows 0,
+#4363). Windows 는 여백이 없는데도 같은 예약을 받아 ✕ 없는 카드(활성이 아닌 카드)가 근거 없이 오른쪽 한 칸을 비웠다.
+
+이제 예약 칸 수를 여백에서 낸다(`Columns.trailingPadCols` = 여백을 칸으로 올림 — macOS 1, Windows 0). 그래서 **Windows 의
+✕ 없는 카드 줄은 한 칸 더 쓴다**(긴 이름·경로가 한 글자 늦게 말줄임된다). ✕·핀 자리는 그대로다(✕ 열 기준).
+판정자: `cell_text` 「칸 미만 여백이 0 이면 ✕ 없는 행의 글자가 마지막 칸까지 쓴다」(고치기 전 `expected 19, found 18`).
+**Windows 화면은 이 환경에서 못 봤다** — 사이드바에 긴 이름의 비활성 카드를 두고 오른쪽 끝 글자가 카드 오른쪽 inset 안에
+머무는지 손으로 본다.
+
 ### 2m.2 게이트가 ADE 표면을 안 본다 (W8 이 먼저 메울 자리)
 
 `check-targets` 는 `addProjectTest` 로 `maru.zig` 를 세 타깃에 컴파일한다 — 형태는 맞지만

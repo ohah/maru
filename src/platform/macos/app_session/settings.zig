@@ -166,7 +166,7 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             // caret 을 앞으로 옮겼으면 뒤도 잘린다. 따로 셈하면 그 두 경우에 후보창이 수 칸씩 어긋났다(적대적 검증
             // 2026-09-29) — 렌더와 **같은 계획**(`inline_edit.drawnCaretCol`)으로 caret 열을 잰다.
             const cl = sidebar_ops.sidebarColumns(self) orelse return null;
-            const edit_col = chrome.components.inline_edit.drawnCaretCol(self.allocator, "", &self.rename_input, "|", sidebarRenameFitCols(cl.cols, 0), cl.cols -| 1) catch return null;
+            const edit_col = chrome.components.inline_edit.drawnCaretCol(self.allocator, "", &self.rename_input, "|", sidebarRenameFitCols(cl.cols, 0), cl.cols -| cl.trailingPadCols(cw)) catch return null; // 그리는 쪽(`trailing_pad_cols`)과 같은 우경계
             const caret_col: u32 = @as(u32, cl.indent_cols) + edit_col;
             // 리네임 카드 줄 수: 이름줄(항상) + 상태줄(running·idle 에이전트면). 리네임 중 branch/path 보조줄은
             // buildSidebarTitleDrawList가 항상 숨겨 줄 수에 안 든다. 렌더러(maru_metal_renderer.m)가 n줄 블록을 슬롯
@@ -280,7 +280,7 @@ pub fn renameCaretRect(self: *AppSession) ?chrome.draw.Rect {
             var lead_buf: [256]u8 = undefined;
             const lead_cols: usize = @min(@as(usize, hindent_cols) + 2, lead_buf.len);
             @memset(lead_buf[0..lead_cols], ' ');
-            const header_col = chrome.components.inline_edit.drawnCaretCol(self.allocator, lead_buf[0..lead_cols], &self.rename_input, "|", sidebarRenameFitCols(cl.cols, lead_cols), cl.cols -| 1) catch return null;
+            const header_col = chrome.components.inline_edit.drawnCaretCol(self.allocator, lead_buf[0..lead_cols], &self.rename_input, "|", sidebarRenameFitCols(cl.cols, lead_cols), cl.cols -| cl.trailingPadCols(cw)) catch return null;
             const caret_col: u32 = @as(u32, cl.indent_cols) + header_col;
             const slot_top = chrome.components.sidebar.rowTop(rrows, sr, self.sidebar_header_height_px, sidebar_ops.sidebarMetrics(self), self.sidebar_scroll_offset_px);
             const block_off: i64 = @intCast((self.sidebar_header_row_h_px -| ch) / 2); // 헤더 1줄 세로 중앙

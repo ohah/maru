@@ -2356,6 +2356,9 @@ const TermRuntime = struct {
     /// 이 문서의 워크스페이스 root(§8.2a — 파일 트리와 같은 규칙: 가장 가까운 `.git` 의 디렉터리, 없으면 파일의 디렉터리).
     /// 처음 물을 때 한 번 정해 굳힌다(owned — `releaseEditorTerm` 이 푼다).
     editor_lsp_root: ?[]u8 = null,
+    /// 이 문서의 보조 언어 서버(tooling §8.2u — 저장소 설정을 찾은 것들). 처음 동기화할 때 한 번 감지해 굳힌다(`null` = 아직 안 봄).
+    /// root 를 다시 풀면 함께 비운다.
+    editor_lsp_aux: ?std.EnumSet(maru.session.editor.lsp.auxiliary.Tool) = null,
 
     /// 이 문서에 쓰는 tree-sitter 문법. **상태바 언어 항목이 읽는다**(`status-bar.md` 「언어 항목」).
     ///

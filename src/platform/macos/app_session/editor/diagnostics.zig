@@ -14,6 +14,13 @@ const LineIndex = maru.session.editor.line_index.LineIndex;
 
 pub const Diagnostic = diagnostic.Diagnostic;
 
+/// 한 문서에 붙는 보조 서버 칸 수(tooling §8.2u — 한 문법의 보조 서버 표 길이보다 크거나 같아야 한다).
+pub const max_aux: usize = 2;
+
+comptime {
+    for (std.enums.values(maru.session.editor.language.Grammar)) |g| std.debug.assert(maru.session.editor.lsp.auxiliary.forGrammar(g).len <= max_aux);
+}
+
 pub const State = struct {
     /// 정렬된 목록(§5.4 모델). 출처가 여럿이어도 하나다.
     list: std.ArrayList(Diagnostic) = .empty,
@@ -22,6 +29,8 @@ pub const State = struct {
     /// 언어 서버가 준 목록(§8.2a) — `publishDiagnostics` 마다 통째로 갈아 끼운다. 메시지는 `lsp_messages` 안의 조각.
     lsp: std.ArrayList(Diagnostic) = .empty,
     lsp_messages: std.ArrayList(u8) = .empty,
+    /// 보조 언어 서버(tooling §8.2u)의 목록 — 서버마다 한 칸(그 서버의 `publishDiagnostics` 는 자기 칸만 갈아 끼운다). 주 서버는 `lsp`.
+    aux: [max_aux]ServerSet = @splat(.{}),
     /// 서버 목록이 바뀌었는데 아직 `list` 에 합치지 않았다.
     lsp_dirty: bool = false,
     /// 아래 셋은 **보이는 줄 축**의 표. 길이는 보이는 줄 수까지 자란다.
@@ -31,11 +40,32 @@ pub const State = struct {
     lines: []chrome_diag.LineMark = &.{},
     lines_len: usize = 0,
 
+    /// 한 서버의 진단 칸. `exe` 는 서버 표의 정적 이름(빈 문자열 = 빈 칸).
+    pub const ServerSet = struct {
+        exe: []const u8 = "",
+        list: std.ArrayList(Diagnostic) = .empty,
+        messages: std.ArrayList(u8) = .empty,
+    };
+
+    /// 그 보조 서버의 칸 — 없으면 빈 칸을 잡는다. 칸이 모자라면 `null`(그 서버의 진단은 안 보인다 — 한 문법의 보조 서버 수가 상한).
+    pub fn auxSet(self: *State, exe: []const u8) ?*ServerSet {
+        for (&self.aux) |*set| if (std.mem.eql(u8, set.exe, exe)) return set;
+        for (&self.aux) |*set| if (set.exe.len == 0) {
+            set.exe = exe;
+            return set;
+        };
+        return null;
+    }
+
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.list.deinit(allocator);
         self.raw.deinit(allocator);
         self.lsp.deinit(allocator);
         self.lsp_messages.deinit(allocator);
+        for (&self.aux) |*set| {
+            set.list.deinit(allocator);
+            set.messages.deinit(allocator);
+        }
         if (self.marks.len > 0) allocator.free(self.marks);
         if (self.mark_buf.len > 0) allocator.free(self.mark_buf);
         if (self.markers.len > 0) allocator.free(self.markers);
@@ -57,6 +87,7 @@ pub fn refreshFromSyntax(self: *State, allocator: std.mem.Allocator, provider: ?
     self.lsp_dirty = false;
     self.list.clearRetainingCapacity();
     for (self.lsp.items) |d| self.list.append(allocator, d) catch break;
+    for (&self.aux) |*set| for (set.list.items) |d| self.list.append(allocator, d) catch break;
     for (self.raw.items) |e| {
         self.list.append(allocator, .{
             .start = e.start,

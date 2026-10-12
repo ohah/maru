@@ -341,12 +341,16 @@ pub fn findNearest(fs: anytype, doc_dir: []const u8, root: []const u8, name: []c
 /// 저장소 안의 실행 파일 — 문서 폴더에서 루트까지 각 폴더의 `localBinDirs` 아래 가장 가까운 것(실행할 수 있는 파일만). 없으면 `null`
 /// (호출자가 PATH 를 본다).
 pub fn findLocalBin(fs: anytype, kind: Kind, doc_dir: []const u8, root: []const u8, out: *[std.fs.max_path_bytes]u8) ?[]const u8 {
-    const bins = kind.localBinDirs();
+    return findLocalBinIn(fs, kind.localBinDirs(), kind.exeName(), doc_dir, root, out);
+}
+
+/// `findLocalBin` 의 몸 — 폴더 목록과 실행 파일 이름으로(보조 언어 서버 tooling §8.2u 도 같은 규칙으로 찾는다).
+pub fn findLocalBinIn(fs: anytype, bins: []const []const u8, exe: []const u8, doc_dir: []const u8, root: []const u8, out: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     if (bins.len == 0) return null;
     var dirs = DirsUp.init(doc_dir, root);
     while (dirs.next()) |dir| {
         for (bins) |b| {
-            const p = std.fmt.bufPrint(out, "{s}/{s}/{s}", .{ if (std.mem.eql(u8, dir, "/")) "" else dir, b, kind.exeName() }) catch continue;
+            const p = std.fmt.bufPrint(out, "{s}/{s}/{s}", .{ if (std.mem.eql(u8, dir, "/")) "" else dir, b, exe }) catch continue;
             if (fs.isExecutable(p)) return p;
         }
     }

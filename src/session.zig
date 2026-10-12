@@ -231,6 +231,8 @@ pub const editor = struct {
         pub const rpc = @import("session/lsp/rpc.zig");
         pub const position = @import("session/lsp/position.zig");
         pub const servers = @import("session/lsp/servers.zig");
+        /// 보조 언어 서버(tooling §8.2u) — 주 서버와 함께 뜨는 린트 서버의 표와 저장소 설정 감지.
+        pub const auxiliary = @import("session/lsp/auxiliary.zig");
         pub const trust = @import("session/lsp/trust.zig");
         /// 신뢰 감사 기록(계획 workspace-trust-audit) — 결정이 언제·어디서 바뀌었나의 줄 형식·읽기·시각 표기.
         pub const trust_log = @import("session/lsp/trust_log.zig");

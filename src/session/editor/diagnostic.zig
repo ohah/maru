@@ -32,6 +32,9 @@ pub const Diagnostic = struct {
     message: []const u8 = "",
     /// 출처의 코드(LSP `Diagnostic.code` — 문자열이든 정수든 글자로). 호버 박스가 `출처(코드)` 로 낸다(tooling §8.2b). 없으면 빈 문자열.
     code: []const u8 = "",
+    /// 그 진단을 낸 언어 서버의 이름(정적 문자열 — 서버 표의 실행 파일 이름). 한 문서에 서버가 여럿일 수 있어(보조 서버 tooling §8.2u)
+    /// 호버의 `출처(코드)` 가 이것을 쓴다. 서버 진단이 아니거나 모르면 빈 문자열.
+    server: []const u8 = "",
 };
 
 /// `start` 오름차순, 같으면 severity 높은 것이 앞(줄 접기가 첫 항목을 그대로 쓸 수 있게).

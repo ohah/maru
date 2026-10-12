@@ -52,7 +52,13 @@
 
 - **divider는 값이 아니라 규칙 쪽이다.** 두께 자체는 config `split.divider-thickness` → Zig(pt × scale) → ABI라 값 계약이지만, 그 두께를 seam에 중앙정렬하고 셀폭으로 clamp하는 규칙은 `.m`이 갖는다 — 위 `reserved` 행과 **같은 함수·같은 성격**이다. 표에 따로 올리지 않은 것은 "두께는 Zig 소유"를 강조하려는 편의이고, 축 2 기준으로는 예외다.
 - **chrome hairline(`tokens.border.line_thickness_px`)과 터미널 셀 장식선은 별개 개념이다.** 앞은 탭바 하이라인·focus 테두리·pill 테두리(전부 `GpuQuad`), 뒤는 커서 바·SGR 밑줄이다. 코드가 의도적으로 분리했으므로 섞어서 "두 출처"라고 부르지 않는다.
-- **되살아남 가드가 덮는 범위는 좁다.** `tests/boundary/icon_literals.zig`는 `.m`의 배율 대입 두 문장이 정책 값만 읽는지(float 리터럴 0개)와, 아이콘을 codepoint 이름으로 고르는 비교(헤더 넷·에이전트 심볼 둘)가 주석 밖에 없는지만 본다. 같은 파일의 가드가 사이드바 카드 글자의 `sx_origin` 대입이 셀 `origin_x`(또는 밴드 갈래 0)만 읽는지, 셀 `origin_y`에 산술이 붙지 않는지도 본다. 띠 세로 중앙·`cw*0.5*(span−1)` 이동은 가드 밖이다([chrome-strategy.md](chrome-strategy.md) §9.7).
+- **되살아남 가드가 덮는 범위.** `tests/boundary/icon_literals.zig`는 주석을 벗긴 `.m`에서 이관된 규칙이 되살아나는지를 본다(2026-10-12 기준 일곱 가드):
+  - 배율 대입 두 문장이 정책 값만 읽는지(float 리터럴 0개)와, 아이콘을 codepoint 이름으로 고르는 비교가 주석 밖에 없는지.
+  - 사이드바 셀의 `sx_origin`이 셀 `origin_x`만, `py_top`이 셀 `origin_y`만 읽는지.
+  - 헤더 줄의 origin 짐작(`origin_y == 0u`)·띠 중앙 공식(`strip - ch`)이 없고, 터미널 패스 `py_top`이 `origin_y + row × ch` 한 줄인지.
+  - 래스터 배치 역할(wide-render-symbol 범위·◧⚙)과 합성 글리프 범위가 `coretext_smoke.m`에 없고, 각각 `raster_fit` 인자·셀 비트를 읽는지.
+
+  `cw*0.5*(span−1)` 가로 이동과 위 표의 의도된 예외(그림자 blur·OSC 133 clamp·장식선 두께·래스터 슬롯 배치)는 가드 밖이다([chrome-strategy.md](chrome-strategy.md) §9.7).
 
 **규칙을 이미 따르는 표면**(전부 Zig가 rect를 정해 `GpuQuad`로 낸다): 도크 패널 배경(`appendBarBgQuad` — 탭 바 배경과 공용)·도크 카드/버튼 배경(`chrome_draw_lowering.appendBackgroundQuads`), 모달 배경·테두리, 탭 밴드와 활성 탭 cutout, **rich** 사이드바 활성 밴드, 스크롤바 thumb, 시각 벨 플래시. 모달 **그림자**만 `GpuShadow` 별도 채널이고 blur 확장을 `.m`이 한다(위 표).
 

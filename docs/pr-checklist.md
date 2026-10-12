@@ -124,7 +124,7 @@ PR 설명에는 다음 질문에 대한 답이 있어야 한다.
 사용자 UX 목표인 가벼운 native shell/workspace 포지션을 해치지 않는가?
 VT/parser 동작을 추가·변경했다면 유도한 공개 명세 섹션(ECMA-48, vt100.net DEC parser, xterm ctlseqs)을 인용했는가? (해당 없으면 N/A)
 renderer/storage/platform interop를 추가·변경했다면 public spec, platform 문서, 또는 독립 설계 문서에서 유도했는가? (해당 없으면 N/A)
-glyph role, wide-render-symbol, emoji/color glyph, 합성 glyph 분류를 바꿨다면 `src/width.zig`와 `src/platform/macos/coretext_smoke.m`의 주석-동기 미러, [글리프 역할 렌더 모델](glyph-role-render-model.md), 관련 smoke/manual gate를 함께 갱신했는가? (해당 없으면 N/A)
+glyph role, wide-render-symbol, 합성 glyph 분류를 바꿨다면 Zig 단일 출처(`src/width.zig` `rasterFitFor`·`renderer.isSynthesizedCodepoint`)**만** 고치고 `src/platform/macos/coretext_smoke.m`에 범위·codepoint 사본을 만들지 않았는가(`.m`은 `raster_fit` 인자와 셀 비트 `MaruDrawCellSynthesizedBit`로 받는다 — `tests/boundary/icon_literals.zig`가 되살아남을 막는다)? [글리프 역할 렌더 모델](glyph-role-render-model.md)과 관련 smoke/manual gate를 함께 갱신했는가? emoji/color glyph 판정은 폰트 속성(`.m`)이 소유한다. (해당 없으면 N/A)
 reference terminal의 코드 표현(자료구조 레이아웃, 함수 분해, control flow)을 옮기지 않았는가?
 배열의 **자리**를 값으로 드는 필드(인덱스·오프셋)를 새로 만들었다면, 그 배열을 **움직이는 코드**를 전수로 찾아 각각에 판정자를 세웠는가? (아래 "합류 규율")
 소스를 글자로 훑는 경계 판정자를 더했다면, **선언·호출 이름·포맷 문자열의 「존재」가 아니라 「효과가 나는 자리」**를 고정했는가? 그리고 그것을 **돌연변이로 확인**했는가? (아래 "판정자 규율")

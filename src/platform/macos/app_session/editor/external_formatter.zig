@@ -28,13 +28,32 @@ pub const Prepared = union(enum) {
     /// 외부 포매터를 띄웠다 — 결과를 `format_process.take(id)` 로 기다린다.
     started: Started,
     /// 사용자 셸 환경을 담는 중이다 — tick 에서 다시 준비한다(처음 연 문서의 첫 `⌘S` — Prettier 는 PATH 의 `node` 가 필요하다).
-    /// 띄울 포매터의 종류를 싣는다(시한 알림이 그 이름을 말한다).
-    preparing: external_format.Kind,
+    /// 띄울 포매터의 이름을 싣는다(시한 알림이 그 이름을 말한다).
+    preparing: Name,
     /// 포맷하지 않는다. 말할 이유는 이미 알렸다(실행 파일 없음 등)이거나 말할 것이 없다(`off` 의 `⌘S`·신뢰 전의 `⌘S`).
     skip,
 };
 
-pub const Started = struct { id: u64, kind: external_format.Kind };
+pub const Started = struct { id: u64, name: Name };
+
+/// 포매터의 이름 사본(알림 — 시한·실패). 사용자 명령의 이름은 설정 문자열을 빌리는데, 기다리는 사이 설정을 다시 읽으면 그 메모리가
+/// 사라진다 — 그래서 기다림 자리에는 사본을 둔다.
+pub const Name = struct {
+    buf: [64]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn of(text: []const u8) Name {
+        var n: Name = .{};
+        const len = @min(text.len, n.buf.len);
+        @memcpy(n.buf[0..len], text[0..len]);
+        n.len = @intCast(len);
+        return n;
+    }
+
+    pub fn slice(self: *const Name) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
 
 /// 그 문서를 무엇으로 포맷하나 — 부작용 없는 판단(실행·알림·시트 없음). `prepare`(포맷)와 `showInfo`(정보 명령)가 같은 판단을 쓴다
 /// (두 벌이면 한쪽만 낡는다).
@@ -42,47 +61,95 @@ const Resolved = union(enum) {
     lsp,
     off,
     /// 포매터를 적어 뒀는데(`auto` 가 아니다) 경로·저장소가 없다 — 원격·이름 없는 문서.
-    no_path: external_format.Kind,
+    no_path,
+    /// JS 계열 도구의 설정이 둘 이상(사용자 결정 — 고르지 않고 알린다).
+    conflict: external_format.JsDetected,
     external: External,
 
-    const External = struct { kind: external_format.Kind, detected: ?[]const u8, root: []const u8, path: []const u8, doc_dir: []const u8 };
+    const External = struct {
+        kind: external_format.Kind,
+        /// 감지한 설정 파일(루트 기준) — 설정으로 고른 것이면 없을 수 있다.
+        detected: ?[]const u8,
+        root: []const u8,
+        path: []const u8,
+        doc_dir: []const u8,
+        /// 사용자 명령 줄(`command`).
+        command: []const u8 = "",
+        /// 설정으로 고르지 않았고(`auto`) 감지한 설정도 없다 — 언어 서버가 포맷할 수 없어 직접 부른다(Rust·Zig). 정보 명령이 그 이유를
+        /// 말한다(「설정으로 골랐다」는 거짓이다 — 적대적 검증 EF2 3회차).
+        fallback: bool = false,
+
+        /// 알림·정보 명령의 이름 — 사용자 명령이면 그 명령의 이름.
+        fn name(self: External) []const u8 {
+            return if (self.kind == .command) external_format.commandName(self.command) else self.kind.displayName();
+        }
+    };
 };
 
-fn resolve(self: *AppSession, term: *Term, cfg_buf: *[std.fs.max_path_bytes]u8) Resolved {
+/// `cfg_bufs` 는 감지한 설정 파일의 경로가 산다(JS 도구 셋 — Python 은 첫 칸).
+fn resolve(self: *AppSession, term: *Term, cfg_bufs: *[3][std.fs.max_path_bytes]u8) Resolved {
     const g = term.rt.editor_grammar;
-    const choice = external_format.choiceFor(&self.loaded_config.config.editor.formatter, g);
-    switch (choice) {
+    const setting = external_format.settingFor(&self.loaded_config.config.editor.formatter, g);
+    switch (setting.choice) {
         .lsp => return .lsp,
         .off => return .off,
-        .auto, .prettier => {},
+        else => {},
     }
     const doc_state = term.rt.editorDocument();
     if (doc_state.opened == null) return .lsp;
     // 원격·이름 없는 문서는 저장소도 경로도 없다 — `auto` 는 언어 서버로(지금 동작), 적어 둔 포매터면 그 이유를 말한다.
     const path: []const u8 = if (doc_state.remote == null) (doc_state.path orelse "") else "";
     const root = (if (path.len > 0) editor_lsp.documentRoot(self, term) else null) orelse
-        return if (choice == .auto) .lsp else .{ .no_path = .prettier };
+        return if (setting.choice == .auto) .lsp else .no_path;
     const doc_dir = std.fs.path.dirname(path) orelse root;
     const fs: RealFs = .{ .io = self.io };
-    const detected = if (choice == .auto and !external_format.prettierHandles(g)) null else external_format.findPrettierConfig(self.allocator, fs, doc_dir, root, cfg_buf);
-    return switch (external_format.plan(choice, g, detected)) {
+    // 감지는 그 문법에 닿는 것만 — 파일 시스템을 덜 본다.
+    const js = external_format.detectJs(self.allocator, fs, g, doc_dir, root, cfg_bufs);
+    const py = if (g == .python) external_format.detectPython(fs, doc_dir, root, &cfg_bufs[0]) else null;
+    const lsp_can = if (setting.choice == .auto and (g == .rust or g == .zig)) editor_lsp.canFormat(self, term) else true;
+    return switch (external_format.plan(setting, g, js, py, lsp_can)) {
         .lsp => .lsp,
         .off => .off,
-        .external => |e| .{ .external = .{ .kind = e.kind, .detected = detected, .root = root, .path = path, .doc_dir = doc_dir } },
+        .conflict => |c| .{ .conflict = c },
+        .external => |e| .{ .external = .{ .kind = e.kind, .detected = e.config, .root = root, .path = path, .doc_dir = doc_dir, .command = setting.command, .fallback = setting.choice == .auto and e.config == null } },
     };
 }
 
-/// 실행 파일 — 가장 가까운 `node_modules/.bin`(저장소가 고정한 버전), 없으면 그 환경의 PATH.
+/// 실행 파일 — 저장소 폴더(`node_modules/.bin`·`.venv/bin` — 저장소가 고정한 버전), 없으면 그 환경의 PATH. 사용자 명령은 첫 낱말(절대
+/// 경로면 그것, 아니면 PATH).
 fn findExe(self: *AppSession, e: Resolved.External, view_path: []const u8, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     const fs: RealFs = .{ .io = self.io };
-    return external_format.findLocalBin(fs, e.doc_dir, e.root, e.kind.exeName(), buf) orelse
-        locateInPath(e.kind.exeName(), if (builtin.is_test) (test_path orelse view_path) else view_path, buf);
+    const path = if (builtin.is_test) (test_path orelse view_path) else view_path;
+    if (e.kind == .command) {
+        var words: [external_format.max_args][]const u8 = undefined;
+        const first = (external_format.commandArgs(e.command, &words) orelse return null)[0];
+        if (first[0] == '/') {
+            if (!isExecutableFile(first) or first.len > buf.len) return null;
+            @memcpy(buf[0..first.len], first);
+            return buf[0..first.len];
+        }
+        if (std.mem.indexOfScalar(u8, first, '/') != null) return null; // 상대 경로는 받지 않는다(cwd 가 뜻을 바꾼다)
+        return locateInPath(first, path, buf);
+    }
+    return external_format.findLocalBin(fs, e.kind, e.doc_dir, e.root, buf) orelse locateInPath(e.kind.exeName(), path, buf);
+}
+
+/// JS 계열 도구가 둘 이상일 때 알린다(사용자 결정). `⌘S` 는 그 문서에서 한 번만(저장마다 알리면 성가시다 — 구현이 정한 것).
+fn noticeConflict(self: *AppSession, term: *Term, js: external_format.JsDetected, purpose: Purpose) void {
+    if (purpose == .save) {
+        const st = &self.editor_format;
+        for (st.conflict_noticed) |id| if (id == term.surface.id) return;
+        st.conflict_noticed[st.conflict_next] = term.surface.id;
+        st.conflict_next = (st.conflict_next + 1) % @as(u8, st.conflict_noticed.len);
+    }
+    var names_buf: [64]u8 = undefined;
+    self.showResponseNotice(.fmt_external_conflict, &.{ .{ .s = js.names(&names_buf) }, .{ .s = @tagName(term.rt.editor_grammar) } });
 }
 
 /// 그 문서를 무엇으로 포맷할지 정하고, 외부 포매터면 띄운다.
 pub fn prepare(self: *AppSession, term: *Term, purpose: Purpose) Prepared {
-    var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const e = switch (resolve(self, term, &cfg_buf)) {
+    var cfg_bufs: [3][std.fs.max_path_bytes]u8 = undefined;
+    const e = switch (resolve(self, term, &cfg_bufs)) {
         .lsp => return .lsp,
         .off => {
             if (purpose == .command) self.showNoticeKey(.fmt_formatter_off);
@@ -92,38 +159,66 @@ pub fn prepare(self: *AppSession, term: *Term, purpose: Purpose) Prepared {
             if (purpose == .command) self.showNoticeKey(.fmt_external_no_path);
             return .skip;
         },
+        .conflict => |js| {
+            noticeConflict(self, term, js, purpose);
+            return .skip;
+        },
         .external => |e| e,
     };
     const kind = e.kind;
+    const name = e.name();
     // 신뢰(§8.1) — 신뢰한 저장소에서만 실행한다.
     switch (editor_lsp.repoTrustState(self, e.root)) {
         .trusted => {},
         .untrusted => {
             if (purpose == .command) switch (editor_lsp.askTrustForRepo(self, e.root, false)) {
                 .asked, .busy, .already_trusted => {},
-                .refused => self.showResponseNotice(.fmt_external_refused, &.{.{ .s = kind.displayName() }}),
+                .refused => self.showResponseNotice(.fmt_external_refused, &.{.{ .s = name }}),
             };
             return .skip;
         },
         .refused => {
-            if (purpose == .command) self.showResponseNotice(.fmt_external_refused, &.{.{ .s = kind.displayName() }});
+            if (purpose == .command) self.showResponseNotice(.fmt_external_refused, &.{.{ .s = name }});
             return .skip;
         },
     }
-    const view = editor_lsp.toolEnvironment(self, e.root) orelse return .{ .preparing = kind };
+    // 사용자 명령은 먼저 읽어 본다 — 못 읽으면(닫히지 않은 따옴표) 「실행 파일 없음」이 아니라 그 이유를 말한다.
+    if (kind == .command) {
+        var words: [external_format.max_args][]const u8 = undefined;
+        if (external_format.commandArgs(e.command, &words) == null) {
+            self.showResponseNotice(.fmt_external_bad_command, &.{.{ .s = @tagName(term.rt.editor_grammar) }});
+            return .skip;
+        }
+    }
+    const view = editor_lsp.toolEnvironment(self, e.root) orelse return .{ .preparing = Name.of(name) };
     var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe = findExe(self, e, view.path, &exe_buf) orelse {
-        self.showResponseNotice(.fmt_external_missing, &.{.{ .s = kind.displayName() }});
+        self.showResponseNotice(.fmt_external_missing, &.{.{ .s = name }});
         return .skip;
     };
+    // rustfmt 는 Cargo 의 edition 을 받는다(기본 2015 는 `async fn` 등을 깨뜨린다).
+    var edition_text: ?[]u8 = null;
+    defer if (edition_text) |t| std.heap.smp_allocator.free(t);
+    const edition: ?[]const u8 = if (kind == .rustfmt) blk: {
+        var cargo_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fs: RealFs = .{ .io = self.io };
+        const cargo = external_format.findNearest(fs, e.doc_dir, e.root, "Cargo.toml", &cargo_buf) orelse break :blk null;
+        const text = fs.read(cargo, external_format.max_config_read_bytes) orelse break :blk null;
+        edition_text = @constCast(text);
+        break :blk external_format.cargoEdition(text);
+    } else null;
+    var argv: external_format.Argv = undefined;
+    if (!external_format.argv(&argv, kind, exe, e.path, edition, e.command)) {
+        self.showResponseNotice(.fmt_external_bad_command, &.{.{ .s = @tagName(term.rt.editor_grammar) }});
+        return .skip;
+    }
     const doc = term.rt.editorDocument().opened.?;
-    const argv = external_format.argv(kind, exe, e.path);
-    const id = format_process.start(.{ .argv = &argv, .cwd = e.root, .envp = view.envp, .stdin = doc.file.content, .timeout_ms = timeout_ms }) orelse {
-        self.showResponseNotice(.fmt_external_failed, &.{ .{ .s = kind.displayName() }, .{ .s = "spawn" } });
+    const id = format_process.start(.{ .argv = argv.slice(), .cwd = e.root, .envp = view.envp, .stdin = doc.file.content, .timeout_ms = timeout_ms }) orelse {
+        self.showResponseNotice(.fmt_external_failed, &.{ .{ .s = name }, .{ .s = "spawn" } });
         return .skip;
     };
-    log.info("{s}: {s} --stdin-filepath {s} (config {s})", .{ kind.displayName(), exe, e.path, e.detected orelse "-" });
-    return .{ .started = .{ .id = id, .kind = kind } };
+    log.info("{s}: {s} for {s} (config {s})", .{ name, exe, e.path, e.detected orelse "-" });
+    return .{ .started = .{ .id = id, .name = Name.of(name) } };
 }
 
 /// 팔레트 「Editor: Show Formatter Info」(§8.1 「해결된 executable·config discovery 를 사용자에게」) — 지금 문서를 무엇으로 포맷하나,
@@ -132,20 +227,21 @@ pub fn showInfo(self: *AppSession) void {
     if (self.tabs.items.len == 0) return self.showNoticeKey(.fmt_info_unavailable);
     const term = @import("../pane.zig").activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return self.showNoticeKey(.fmt_info_unavailable);
-    var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const e = switch (resolve(self, term, &cfg_buf)) {
+    var cfg_bufs: [3][std.fs.max_path_bytes]u8 = undefined;
+    const e = switch (resolve(self, term, &cfg_bufs)) {
         .lsp => return self.showNoticeKey(.fmt_info_lsp),
         .off => return self.showNoticeKey(.fmt_formatter_off),
         .no_path => return self.showNoticeKey(.fmt_external_no_path),
+        .conflict => |js| return noticeConflict(self, term, js, .command),
         .external => |e| e,
     };
     var out: [3 * std.fs.max_path_bytes + 512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&out);
     var line: [2 * std.fs.max_path_bytes + 128]u8 = undefined;
     const head = if (e.detected) |d|
-        maru.i18n.format(&line, maru.i18n.t(.fmt_info_detected), &.{ .{ .s = e.kind.displayName() }, .{ .s = d } })
+        maru.i18n.format(&line, maru.i18n.t(.fmt_info_detected), &.{ .{ .s = e.name() }, .{ .s = d } })
     else
-        maru.i18n.format(&line, maru.i18n.t(.fmt_info_configured), &.{.{ .s = e.kind.displayName() }});
+        maru.i18n.format(&line, maru.i18n.t(if (e.fallback) .fmt_info_fallback else .fmt_info_configured), &.{.{ .s = e.name() }});
     w.writeAll(head) catch {};
     // 저장소와 신뢰 결정 — 신뢰한 저장소에서만 실행한다.
     var shown_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -163,7 +259,7 @@ pub fn showInfo(self: *AppSession) void {
         if (findExe(self, e, view.path, &exe_buf)) |exe| {
             const in_repo = std.mem.startsWith(u8, exe, e.root) and exe.len > e.root.len and exe[e.root.len] == '/';
             w.writeAll(maru.i18n.format(&line, maru.i18n.t(if (in_repo) .fmt_info_exe_repo else .fmt_info_exe), &.{.{ .s = app_session_mod.homeTildeInto(exe, &shown_buf) }})) catch {};
-        } else w.writeAll(maru.i18n.format(&line, maru.i18n.t(.fmt_external_missing), &.{.{ .s = e.kind.displayName() }})) catch {};
+        } else w.writeAll(maru.i18n.format(&line, maru.i18n.t(.fmt_external_missing), &.{.{ .s = e.name() }})) catch {};
     } else w.writeAll(maru.i18n.t(.fmt_info_exe_pending)) catch {};
     self.showNotice(w.buffered());
 }
@@ -220,8 +316,7 @@ pub var counters: Counters = .{};
 /// 외부 포매터의 결과를 그 문서에 적용한다(`format.zig` 가 결과를 가져와 부른다). `asked_version` 은 띄울 때의 revision, `then_save` 면
 /// 알림은 「저장했다」를 말한다(저장은 호출자가 이 뒤에 한다). 결과는 호출자가 푼다.
 /// `asked_revision` 은 띄운 순간의 본문 revision(`opened.file.revision`).
-pub fn apply(self: *AppSession, term: *Term, kind: external_format.Kind, result: *const format_process.Result, asked_revision: u64, then_save: bool) void {
-    const name = kind.displayName();
+pub fn apply(self: *AppSession, term: *Term, name: []const u8, result: *const format_process.Result, asked_revision: u64, then_save: bool) void {
     switch (result.outcome) {
         .timeout => {
             counters.timeouts += 1;
@@ -261,24 +356,51 @@ pub fn apply(self: *AppSession, term: *Term, kind: external_format.Kind, result:
     }
 }
 
-/// stderr 의 첫 비지 않은 줄(제어 문자는 공백, 상한) — 없으면 종료 코드. Prettier 의 `[error] ‹문서 전체 경로›: SyntaxError: …` 에서 머리
-/// 표식과 그 문서의 경로를 뗀다 — 긴 경로가 상한을 먹어 정작 오류가 잘렸다(실제 Prettier 3 로 잰 적대적 검증 EF1 3회차).
+/// 실패 알림의 이유 한 줄 — stderr 에서 오류 문장을 고른다(제어 문자는 공백, 상한은 글자 경계). 없으면 종료 코드.
+/// - Biome 처럼 진단 문장이 `×` 로 시작하는 줄이 있으면 그 줄(첫 줄은 `‹경로›:1:7 parse ━━━` 같은 머리다).
+/// - 아니면 첫 비지 않은 줄(Prettier 의 머리 표식 `[error]` 를 뗀다).
+/// - 그 줄 안의 **문서 경로**(`‹경로›:` — Prettier 는 앞에, black 은 `error: cannot format ‹경로›: …` 로 가운데)를 뗀다 — 긴 경로가 상한을
+///   먹어 정작 오류가 잘렸다(진짜 Prettier·Biome·black 으로 잰 적대적 검증 EF1 3회차·EF2 2회차).
 pub fn firstLine(stderr: []const u8, code: ?u8, doc_path: []const u8, buf: []u8) []const u8 {
-    var it = std.mem.splitScalar(u8, stderr, '\n');
-    while (it.next()) |raw| {
-        var l = std.mem.trim(u8, raw, " \t\r");
-        if (std.mem.startsWith(u8, l, "[error]")) l = std.mem.trimStart(u8, l["[error]".len..], " ");
-        if (doc_path.len > 0 and std.mem.startsWith(u8, l, doc_path) and std.mem.startsWith(u8, l[doc_path.len..], ": ")) l = l[doc_path.len + 2 ..];
-        if (l.len == 0) continue;
-        const n = @min(l.len, buf.len);
-        var cut = n;
-        if (n < l.len) while (cut > 0 and (l[cut] & 0xC0) == 0x80) {
-            cut -= 1;
-        };
-        for (l[0..cut], 0..) |c, i| buf[i] = if (c < 0x20 or c == 0x7f) ' ' else c;
-        return buf[0..cut];
+    const line: []const u8 = blk: {
+        var it = std.mem.splitScalar(u8, stderr, '\n');
+        while (it.next()) |raw| {
+            const l = std.mem.trim(u8, raw, " \t\r");
+            if (std.mem.startsWith(u8, l, "×")) break :blk std.mem.trimStart(u8, l["×".len..], " ");
+        }
+        it = std.mem.splitScalar(u8, stderr, '\n');
+        while (it.next()) |raw| {
+            var l = std.mem.trim(u8, raw, " \t\r");
+            if (std.mem.startsWith(u8, l, "[error]")) l = std.mem.trimStart(u8, l["[error]".len..], " ");
+            if (l.len > 0) break :blk l;
+        }
+        return std.fmt.bufPrint(buf, "exit {?d}", .{code}) catch "exit";
+    };
+    var n: usize = 0;
+    var i: usize = 0;
+    var truncated = false;
+    while (i < line.len) {
+        if (doc_path.len > 0 and std.mem.startsWith(u8, line[i..], doc_path) and line.len > i + doc_path.len and line[i + doc_path.len] == ':') {
+            i += doc_path.len + 1;
+            if (i < line.len and line[i] == ' ') i += 1;
+            continue;
+        }
+        if (n == buf.len) {
+            truncated = true;
+            break;
+        }
+        const c = line[i];
+        buf[n] = if (c < 0x20 or c == 0x7f) ' ' else c;
+        n += 1;
+        i += 1;
     }
-    return std.fmt.bufPrint(buf, "exit {?d}", .{code}) catch "exit";
+    // 상한에서 글자 가운데를 자르지 않는다 — 다음 바이트가 이어지는 바이트면 그 글자의 머리까지 물린다.
+    if (truncated) while (n > 0 and (line[i] & 0xC0) == 0x80) {
+        n -= 1;
+        i -= 1;
+    };
+    const out = std.mem.trim(u8, buf[0..n], " ");
+    return if (out.len == 0) (std.fmt.bufPrint(buf, "exit {?d}", .{code}) catch "exit") else out;
 }
 
 test "EXFL1 실패 알림의 첫 줄 — Prettier 의 머리 표식과 문서 경로를 떼고, 빈 줄은 건너뛰며, 제어 문자는 공백, 상한은 글자 경계; stderr 가 없으면 종료 코드 (적대적 검증 EF1 3회차)" {
@@ -288,6 +410,11 @@ test "EXFL1 실패 알림의 첫 줄 — Prettier 의 머리 표식과 문서 �
     try std.testing.expectEqualStrings("a b", firstLine("a\x1bb", 1, "", &buf));
     try std.testing.expectEqualStrings("exit 3", firstLine("", 3, "", &buf));
     try std.testing.expectEqualStrings("/other.ts: x", firstLine("[error] /other.ts: x", 2, "/a.ts", &buf)); // 다른 파일의 경로는 그대로
+    // 진짜 도구의 stderr 모양(EF2 실측) — Biome 은 `×` 줄, black 은 경로가 가운데.
+    var wide: [160]u8 = undefined;
+    try std.testing.expectEqualStrings("Expected an identifier, an array pattern, or an object pattern but instead found '='.", firstLine("/r/a.ts:1:7 parse ━━━━━━━━━━\n\n  × Expected an identifier, an array pattern, or an object pattern but instead found '='.\n  \n  > 1 │ const = ;\n", 1, "/r/a.ts", &wide));
+    try std.testing.expectEqualStrings("error: cannot format Cannot parse: 1:5: Unexpected EOF in multi-line statement", firstLine("error: cannot format /r/a.py: Cannot parse: 1:5: Unexpected EOF in multi-line statement\n", 123, "/r/a.py", &wide));
+    try std.testing.expectEqualStrings("exit 1", firstLine("/r/a.ts:\n", 1, "/r/a.ts", &wide)); // 경로만 남는 줄은 이유가 없다
     var small: [5]u8 = undefined;
     try std.testing.expectEqualStrings("가", firstLine("가나다", 1, "", &small)); // 6 바이트를 5 에서 — 글자 가운데에서 자르지 않는다
 }

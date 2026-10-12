@@ -129,11 +129,23 @@ pub const Queue = struct {
     }
     /// 완료 시점에 대상 세대를 다시 본다. start 때 맞았다는 이유만으로 늦은 결과를 반영하지 않는다.
     pub fn apply(self: *Queue, session: *host.AppSession, term: *host.Term, live: ops.Target) bool {
+        return self.applyWithNotice(session, term, live, false);
+    }
+    pub fn applyWithNotice(self: *Queue, session: *host.AppSession, term: *host.Term, live: ops.Target, late: bool) bool {
         const outcome = if (self.outcome) |*value| value else return false;
         if (outcome.applied or outcome.failure != null) return false;
         const running = self.running orelse return false;
         if (!running.target.matches(live)) return false;
-        outcome.applied = outcome.prepared.finish(session, term);
+        outcome.applied = outcome.prepared.finishWithNotice(session, term, late);
+        return outcome.applied;
+    }
+    /// 요청 lease의 모델과 현재 epoch를 모두 확인한다. 닫힌 뷰의 Term 주소는 사용하지 않는다.
+    pub fn applyRetained(self: *Queue, lease: maru.session.editor.document_registry.Lease, live: ops.Target) bool {
+        const outcome = if (self.outcome) |*value| value else return false;
+        if (outcome.applied or outcome.failure != null) return false;
+        const running = self.running orelse return false;
+        if (!running.target.matches(live)) return false;
+        outcome.applied = outcome.prepared.finishRetained(lease);
         return outcome.applied;
     }
     /// 성공 완료를 현재 문서에 반영한 actor만 accepted=true로 승인한다. rejected/오류는 기준을 인계하지 않는다.

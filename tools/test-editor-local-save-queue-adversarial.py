@@ -36,7 +36,7 @@ try:
         if key:
             verified = run.returncode != 0 and ('FAIL (TestUnexpectedResult)' in run.stdout or 'FAIL (TestExpectedEqual)' in run.stdout or 'FAIL (TestExpectedError)' in run.stdout)
         else:
-            verified = run.returncode == 0 and 'All 17 tests passed' in run.stdout
+            verified = run.returncode == 0 and 'All 28 tests passed' in run.stdout
         results.append({'case': name, 'mutation': key is not None, 'exit_code': run.returncode, 'verified': verified})
         (root/'results.json').write_text(json.dumps(results, indent=2)+'\n')
         print(name+': '+str(verified), flush=True)

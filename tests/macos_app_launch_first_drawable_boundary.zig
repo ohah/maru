@@ -32,7 +32,7 @@ test "L1 launch gate preserves product startup and isolates every ambient profil
         return error.MissingDrawOwner;
     try std.testing.expect(successful < frame and frame < submit and submit < terminate);
     try std.testing.expectEqual(@as(usize, 1), count(swift, "if smokeMode || appLaunchFirstDrawableArmed { return finishProjectSearchBeforeTermination() }"));
-    try std.testing.expectEqual(@as(usize, 1), count(swift, "if maru_macos_project_search_outstanding_workers() == 0 { return .terminateNow }"));
+    try std.testing.expectEqual(@as(usize, 1), count(swift, "if maru_macos_editor_save_pending_requests() == 0 && maru_macos_project_search_outstanding_workers() == 0 { return .terminateNow }"));
 
     inline for (.{
         "envPair(allocator, \"HOME\"",                   "envPair(allocator, \"CFFIXED_USER_HOME\"",

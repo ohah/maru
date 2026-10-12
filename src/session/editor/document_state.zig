@@ -95,15 +95,23 @@ pub const State = struct {
     untitled: ?untitled.Name = null,
     history: history.State = .{},
     notifications: Notifications = .{},
+    /// 본문 개정과 별개다. 저장 대상이나 문서 본체를 갈면 이전 완료를 거부한다.
+    save_target_epoch: u64 = 1,
+
+    pub fn invalidateSaveTarget(self: *State) void {
+        self.save_target_epoch +|= 1;
+    }
 
     /// 기존 teardown의 본문/뷰 정산 순서를 유지할 수 있도록 본문 해제를 나눈다.
     pub fn clearOpened(self: *State, allocator: std.mem.Allocator) void {
+        self.invalidateSaveTarget();
         if (self.opened) |*opened| opened.deinit(allocator);
         self.opened = null;
     }
 
     /// 뷰 정산과 경로 정산의 기존 순서를 유지한다. 저장 정책은 호출자 책임이다.
     pub fn clearPath(self: *State, allocator: std.mem.Allocator) void {
+        self.invalidateSaveTarget();
         if (self.path) |path| allocator.free(path);
         self.path = null;
     }

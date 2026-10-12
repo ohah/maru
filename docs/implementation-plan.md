@@ -64,7 +64,7 @@ macOS 로컬 shell 1개 surface
 - [프로젝트 바꾸기 배치](plans/editor-project-replace-batch.md) — 닫힌 파일 읽기·물리 신원/별칭과 비활성 문서 준비·항목 예약 API까지 구현. 혼합 coordinator의 전체 준비/commit·pane 게시·저장까지 구현. 혼합 snapshot/disk worker API까지 구현. 제품 전체 UI의 수집·미리보기·적용과 결과 문서 신원까지 연결.
 - [프로젝트 바꾸기 전체 결과 UI](plans/editor-project-replace-batch-ui.md) — 열린 모델·닫힌 파일 수집/재검증·미리보기·함께 적용·파일별 저장과 결과 문서 신원. 파일·일치 선택과 저장 실패 항목의 현재 문서만 CAS 저장하는 파일별 재시도 버튼을 연결한다.
 - [프로젝트 바꾸기 적용·저장 실측](plans/editor-project-replace-performance.md) — 같은 ReleaseFast 앱으로 파일 수·크기·저장 지연을 분리해 측정하고 개선 범위를 정한다.
-- [로컬 저장 worker와 비동기 연결](plans/editor-local-save-async.md) — 완료 자료·전용 executor·join과 요청 큐·성공 CAS 인계·현재 대상 완료 승인 기반; 사용자 저장·배치·종료 정책 연결은 별도 단계.
+- [로컬 저장 worker와 비동기 연결](plans/editor-local-save-async.md) — 완료 자료·전용 executor·join과 요청 큐·성공 CAS 인계·현재 대상 완료 승인 기반; 일반 로컬 사용자 저장과 요청 모델 수명 연결은 부분 구현; 파일 패널·원격·batch async와 실제 종료 실행 검증은 별도 단계.
 - [로컬 저장의 자료·쓰기·완료 분리](plans/editor-local-save.md) — 기존 동기 저장 계약을 유지하는 비동기 저장 기반과 신원/본문 수명 검증.
 - [공유 편집기 복원 포맷과 구현 계획](plans/editor-shared-restore.md) — 문서 연결과 뷰 상태, v1 선택적 필드와 v2 비교, downgrade와 복원 실패 경계
 - [복구 ID 예약 후보 실험](plans/editor-recovery-reservation.md) — 실제 owner lease·atomic writer, 실패/중단/정리 경계와 비용 비교; 제품 연결 전 비교 이력

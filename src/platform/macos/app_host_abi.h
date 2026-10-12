@@ -19,7 +19,7 @@ uint32_t maru_macos_editor_url_drain(struct MaruAppHostSession *session, uint8_t
 /* 이 header는 실제 앱 동작을 구현하지 않고 Swift/Zig 사이의 약속만 고정한다.
    Swift가 AppKit object나 Swift struct layout을 바로 넘기면 Zig 쪽에서 안전하게
    해석할 수 없으므로, 제품 host가 시작되기 전에 fixed-width C record만 허용한다. */
-#define MARU_MACOS_APP_HOST_ABI_VERSION 229u
+#define MARU_MACOS_APP_HOST_ABI_VERSION 230u
 #define MARU_APP_INSTANCE_LEASE_ACQUIRED 0u
 #define MARU_APP_INSTANCE_LEASE_HELD 1u
 #define MARU_APP_INSTANCE_LEASE_UNSAFE 2u
@@ -1523,6 +1523,8 @@ uint64_t maru_macos_app_session_project_search_watch_generation(MaruAppHostSessi
 void maru_macos_app_session_project_search_watch_ready(MaruAppHostSession *session, uint64_t generation);
 void maru_macos_app_session_project_search_cancel(MaruAppHostSession *session);
 size_t maru_macos_project_search_outstanding_workers(void);
+// 메인 actor에서 완료를 정산하고 남은 편집기 저장 요청 수를 반환한다.
+size_t maru_macos_editor_save_pending_requests(void);
 uint32_t maru_macos_app_session_take_file_tree_watch_reset(MaruAppHostSession *session);
 size_t maru_macos_app_session_take_file_tree_watch_root(MaruAppHostSession *session, uint8_t *out, size_t cap);
 /* ABI v173: 접근성 서술자. Zig 는 **뜻**만 싣고(role/state/집합 위치), NSAccessibility 어휘로의 번역과

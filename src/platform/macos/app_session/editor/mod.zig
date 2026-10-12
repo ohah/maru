@@ -8316,21 +8316,8 @@ pub fn isDirty(term: *const Term) bool {
 /// 없어 같은 문장이 **할 수 없는 일을 지시**한다(적대적 4회차). 중복으로 보고 합치면 한쪽이 거짓이 된다 —
 /// 합칠 수 있는 날은 네이티브에 다시 불러오기가 생기는 날이고, 그것은 C1 의 범위다.
 pub fn saveFailureNoticeKey(e: AppSession.FilePanelWriteError) maru.i18n.Key {
-    return switch (e) {
-        // 파일이 그 사이 바뀌었다 — 사용자가 고를 일이 있다(C1 이 그 선택을 연다).
-        //
-        // ⚠️ **브리지 문구를 쓰지 않는다.** 그쪽 문장은 *"파일을 다시 불러온 뒤 저장하세요"* 인데
-        // **네이티브 편집기에는 다시 불러오는 길이 없다** — 그 요청은 Swift 에서 `webPanels[sid]` 로만
-        // 가고 네이티브 Term 은 그 표에 없다(적대적 4회차에서 확인). 할 수 없는 일을 시키지 않는다:
-        // **무엇이 일어났고 무엇이 안전한지**만 말하고, 고를 것을 주는 일은 C1 이 한다.
-        error.ExternalConflict => .editor_save_external_conflict,
-        error.TooLarge => .app_save_too_large,
-        // 자리 자체가 없어졌다(지워졌거나 부모가 사라졌다) — 다시 눌러도 같다.
-        error.NotFound => .editor_save_gone,
-        error.NotRegularFile => .editor_untitled_name_not_file,
-        // 나머지는 「쓰지 못했다」로 묶는다 — 사용자가 할 일이 같다(권한·디스크).
-        else => .app_save_failed,
-    };
+    // 실행 방식에 따라 같은 오류의 안내가 갈리지 않도록 중립 정책을 공유한다.
+    return maru.editor_save_notice.key(e);
 }
 
 /// **새 파일을 만들어 쓴다**(U2 — 이름 없는 문서의 첫 저장). `writeDocumentBytes` 는 **있는 파일만**
@@ -8415,6 +8402,7 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
         _ = app_session_mod.editor_untitled_save_ops.begin(self, term);
         return error.AskName;
     }
+    @import("save/dispatch.zig").drainForSynchronousCaller();
     var prepared = try @import("local_save.zig").Prepared.init(self, term, guard);
     defer prepared.deinit(self.allocator);
     try prepared.write(self.io);
@@ -13483,10 +13471,12 @@ fn pumpLspUntil(fx: *PaneFixture, max_ms: u64, ctx: anytype, comptime pred: fn (
     const start = fx.session.awakeMs();
     while (fx.session.awakeMs() - start < max_ms) {
         lsp_client.pump(fx.session);
+        @import("save/dispatch.zig").poll();
         if (pred(ctx)) return true;
         _ = usleep(2_000);
     }
     lsp_client.pump(fx.session);
+    @import("save/dispatch.zig").poll();
     return pred(ctx);
 }
 
@@ -22437,7 +22427,7 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     }.g;
     const settled = struct {
         fn g(ss: *AppSession) bool {
-            return !ss.editor_format.waiting;
+            return !ss.editor_format.waiting and @import("save/dispatch.zig").requestCount() == 0;
         }
     }.g;
     var disk_buf: [512]u8 = undefined;
@@ -22472,6 +22462,7 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     try testing.expectEqual(applied0 + 1, ext.counters.applied);
     try testing.expectEqualStrings("const a = 1\nkeep(1)\nkeep(2)\nconst b = 2\n", content(term));
     try testing.expectEqual(undo0 + 1, term.rt.editorDocument().history.undo_len);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("const a = 1\nkeep(1)\nkeep(2)\nconst b = 2\n", try f.fx.dir.dir.readFile(testing.io, "a.ts", &disk_buf));
     try testing.expectEqual(std.mem.indexOf(u8, content(term), "(2)").?, term.rt.editor_selection.?.focus);
     {
@@ -22549,6 +22540,7 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     try testing.expect(std.mem.indexOf(u8, notice(s), "SyntaxError: Unexpected token (1:5)") != null);
     try testing.expect(std.mem.indexOf(u8, notice(s), "more") == null); // 첫 줄만
     try testing.expect(std.mem.indexOf(u8, notice(s), f.path) == null); // 문서 경로는 뗀다(긴 경로가 오류를 밀어내지 않게)
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(before_fail, try f.fx.dir.dir.readFile(testing.io, "a.ts", &disk_buf));
 
     // ⑷-a 빈 결과 — 종료 코드가 0 이어도 받지 않는다(본문을 통째로 지운다 — Biome 이 보호 파일에서 그런다). 알리고 포맷 없이 저장.
@@ -22559,6 +22551,7 @@ test "EXFB1 외부 포매터 (tooling §8.2t) — Prettier 설정과 저장소 �
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqual(failed1 + 1, ext.counters.failed);
     try testing.expectEqualStrings("//FMTEMPTY\nz=6\n", content(term));
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("//FMTEMPTY\nz=6\n", try f.fx.dir.dir.readFile(testing.io, "a.ts", &disk_buf));
     try testing.expect(std.mem.indexOf(u8, notice(s), "empty output") != null);
 
@@ -22626,7 +22619,7 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
     }.g;
     const settled = struct {
         fn g(ss: *AppSession) bool {
-            return !ss.editor_format.waiting;
+            return !ss.editor_format.waiting and @import("save/dispatch.zig").requestCount() == 0;
         }
     }.g;
     var disk_buf: [256]u8 = undefined;
@@ -22645,13 +22638,16 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
     try testing.expect(s.editor_format.waiting and s.editor_format.preparing and s.editor_format.then_save);
     for (0..5) |_| lsp_client.pump(s);
     try testing.expect(s.editor_format.preparing); // 아직 읽는 중
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("const a=1\n", try f.fx.dir.dir.readFile(testing.io, "b.ts", &disk_buf));
     // ⑴-a 저장 시한이 지나면 포맷 없이 저장하고 **그 포매터의 이름으로** 알린다(「언어 서버가 늦었다」가 아니다 — 적대적 검증 EF1 2회차).
     // 시한은 구조 필드 — 벽시계를 기다리지 않고 tick 에 먼 미래를 준다.
     format_client.tick(s, s.awakeMs() + format_client.externalSaveTimeoutMs() + 1);
     try testing.expect(!s.editor_format.waiting and !s.editor_format.preparing);
+    try awaitDispatchedSavesForTest();
     var to_buf: [256]u8 = undefined;
     try testing.expectEqualStrings(maru.i18n.format(&to_buf, maru.i18n.t(.fmt_external_timeout_saved), &.{.{ .s = "Prettier" }}), s.chrome_host.notice.message);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("const a=1\n", try f.fx.dir.dir.readFile(testing.io, "b.ts", &disk_buf));
     // ⑴-b 아직 읽는 중에 다시 ⌘S — 이번엔 다 읽은 뒤 띄워 적용·저장한다.
     term.rt.editor_selection = editor_selection.Selection.at(content(term).len); // 연 뒤 커서를 놓은 적이 없다
@@ -22666,6 +22662,7 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
     try testing.expect(pumpLspUntil(&f.fx, 8000, s, settled));
     try testing.expectEqual(applied0 + 1, ext.counters.applied);
     try testing.expect(std.mem.indexOf(u8, content(term), "a = 1") != null);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(content(term), try f.fx.dir.dir.readFile(testing.io, "b.ts", &disk_buf));
     {
         var probe_buf: [2 * std.fs.max_path_bytes]u8 = undefined;
@@ -22699,6 +22696,7 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
     try testing.expect(!s.editor_format.waiting);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("const c=3\n", try f.fx.dir.dir.readFile(testing.io, "b.ts", &disk_buf)); // 포맷 없이 곧바로
     for (0..5) |_| lsp_client.pump(s);
     try testing.expectEqual(started0, ext.counters.applied + ext.counters.noop + ext.counters.failed + ext.counters.stale + ext.counters.timeouts);
@@ -22748,7 +22746,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     defer ext.test_path = null;
     const settled = struct {
         fn g(ss: *AppSession) bool {
-            return !ss.editor_format.waiting;
+            return !ss.editor_format.waiting and @import("save/dispatch.zig").requestCount() == 0;
         }
     }.g;
     const notice = struct {
@@ -22780,6 +22778,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
     try testing.expect(!s.editor_format.waiting);
     try testing.expectEqualStrings(conflict, notice(s)); // 첫 ⌘S 는 알린다
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("const a=1\n", try f.fx.dir.dir.readFile(testing.io, "c.ts", &disk_buf)); // 포맷 없이 저장
     s.dismissMessageOverlays();
     s.chrome_host.notice.message = "";
@@ -22791,7 +22790,9 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("const a = 1\n", try f.fx.dir.dir.readFile(testing.io, "c.ts", &disk_buf));
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "format|--stdin-file-path={s}|\n", .{f.path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
 
     // ⑵ Python — 포맷 설정이 ruff 이면 가장 가까운 `.venv/bin/ruff`(`format --stdin-filename <경로> -`).
@@ -22806,6 +22807,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqualStrings("x = 1\n", py.rt.editorDocument().opened.?.file.content);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "format|--stdin-filename|{s}|-|\n", .{py_path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
 
     // ⑶ Zig·Rust — 언어 서버가 포맷할 수 없으면(언어 서버를 끈다) PATH 의 `zig fmt --stdin`·`rustfmt --emit stdout --edition <Cargo>`.
@@ -22832,6 +22834,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqualStrings("const a = 1;\n", zt.rt.editorDocument().opened.?.file.content);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("fmt|--stdin|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "Cargo.toml", .data = "[package]\nname = \"x\"\nedition = \"2021\"\n" });
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "r.rs", .data = "let a=1;\n" });
@@ -22842,6 +22845,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqualStrings("let a = 1;\n", rt.rt.editorDocument().opened.?.file.content);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("--emit|stdout|--edition|2021|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
 
     // ⑷ 사용자 명령 — 첫 낱말은 PATH 에서, `{path}` 는 낱말 안에서도 문서 경로로.
@@ -22863,6 +22867,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqualStrings("a = 1\n", gt.rt.editorDocument().opened.?.file.content);
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "-extra|--file={s}|\n", .{go_path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
     // 첫 낱말이 상대 경로(`fakebin/gofumpt`)면 찾지 않는다 — cwd 가 그 뜻을 바꾼다(절대 경로나 PATH 의 이름만). PATH 에 저장소 루트를
     // 넣어 둔다 — 상대 경로를 PATH 항목에 붙여 찾으면 `‹루트›/fakebin/gofumpt` 가 실제로 있어 실행되고 만다(변이 D20).
@@ -22882,6 +22887,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("-abs|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
     // 따옴표가 닫히지 않은 명령은 실행하지 않고 알린다.
     s.loaded_config.config.editor.formatter[idx("go")] = .{ .choice = .command, .command = "gofumpt \"oops" };
@@ -23096,13 +23102,14 @@ test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌�
     const Disk = struct {
         buf: [256]u8 = undefined,
         fn read(d: *@This(), fx: *PaneFixture, name: []const u8) ![]const u8 {
+            try awaitDispatchedSavesForTest();
             return fx.dir.dir.readFile(testing.io, name, &d.buf);
         }
     };
     var disk: Disk = .{};
     const settled = struct {
         fn g(ss: *AppSession) bool {
-            return !ss.editor_format.waiting;
+            return !ss.editor_format.waiting and @import("save/dispatch.zig").requestCount() == 0;
         }
     }.g;
 
@@ -23288,13 +23295,14 @@ test "CSA1 저장 시 code action — ⌘S 가 설정한 kind 를 순서대로 �
     const Disk = struct {
         buf: [256]u8 = undefined,
         fn read(d: *@This(), fx: *PaneFixture) ![]const u8 {
+            try awaitDispatchedSavesForTest();
             return fx.dir.dir.readFile(testing.io, "ca.c", &d.buf);
         }
     };
     var disk: Disk = .{};
     const settled = struct {
         fn g(ss: *AppSession) bool {
-            return !ss.editor_save_actions.active and !ss.editor_format.waiting;
+            return !ss.editor_save_actions.active and !ss.editor_format.waiting and @import("save/dispatch.zig").requestCount() == 0;
         }
     }.g;
     const replaceAll = struct {
@@ -49853,6 +49861,7 @@ test "C0a 저장 실패는 이유별로 말한다 — 하나로 뭉개면 죽는
             break :blk pane.active_term;
         };
         fx.session.dispatchAppAction(.editor_save);
+        try awaitDispatchedSavesForTest();
         // **C1a 가 이 자리를 「알린다」에서 「묻는다」로 바꿨다**(editor-surface.md §4) — 알림으로
         // 끝내면 사용자는 편집을 든 채 손으로 내용을 옮겨야 한다. 그래서 여기서 재는 것은 확인
         // 상자이고, 그 상자의 문구·선택은 C1a 판정자들이 따로 문다.
@@ -49979,7 +49988,7 @@ const ConflictFixture = struct {
     }
 
     /// **제품 경로로 `⌘S`** — 디스패치를 지나야 「누가 상자를 여는가」가 검사된다.
-    fn pressSave(self: *ConflictFixture) void {
+    fn pressSave(self: *ConflictFixture) !void {
         const pane = pane_ops.activePane(self.fx.session);
         var i: usize = pane.terms.items.len;
         while (i > 0) {
@@ -49990,6 +49999,7 @@ const ConflictFixture = struct {
             }
         }
         self.fx.session.dispatchAppAction(.editor_save);
+        try awaitDispatchedSavesForTest();
     }
 
     /// **제품 키 경로로 답한다** — `handleKeyEvent` → `chrome_host.handleInput` → `confirm.handle`
@@ -50021,7 +50031,7 @@ test "C1a-1 저장 충돌은 «알리지 않고 묻는다» — 행동 셋과 �
 
     try testing.expect(insertText(s, c.term, "x"));
     try c.writeOutside("ask.txt", "outside\n");
-    c.pressSave();
+    try c.pressSave();
 
     // ⑴ 알림이 아니라 확인이다.
     try testing.expect(!s.chrome_host.notice.open);
@@ -50066,7 +50076,7 @@ test "C1a-2 계속 편집은 «아무 일도 안 한다» — 디스크도 버�
     const buffer_before = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(buffer_before);
     try c.writeOutside("keep.txt", "outside\n");
-    c.pressSave();
+    try c.pressSave();
     _ = try s.handleKeyEvent(.{ .key = .escape });
 
     try testing.expect(!s.chrome_host.confirm.open);
@@ -50091,7 +50101,7 @@ test "C1a-3 덮어쓰기는 실제로 쓴다 — 두 번째 충돌에도, 그리
 
     try testing.expect(insertText(s, c.term, "a"));
     try c.writeOutside("ow.txt", "outside1\n");
-    c.pressSave();
+    try c.pressSave();
     try testing.expect(s.chrome_host.confirm.open);
 
     // **상자가 떠 있는 동안 더 친다.** 충돌 시점의 사본을 들고 있으면 이 글자가 조용히 사라진다.
@@ -50124,7 +50134,7 @@ test "C1a-4 다시 읽기는 clean 이고, 되돌리기가 방금 친 것을 되
     const mine = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(mine);
     try c.writeOutside("rl.txt", "outside\n");
-    c.pressSave();
+    try c.pressSave();
     try c.answer('r'); // **다시 읽기는 네 번째 자리(R)**
 
     try testing.expect(!s.chrome_host.confirm.open);
@@ -50156,7 +50166,7 @@ test "C1a-12 다시 읽기는 바뀐 곳만 고쳐 caret 을 문서 처음으로
     try testing.expect(insertText(s, c.term, "X")); // "Xone\ntwo\nthree\n" — dirty
     c.term.rt.editor_selection = editor_selection.Selection.at(11); // "th|ree"
     try c.writeOutside("rlc.txt", "ONE\ntwo\nthree\n");
-    c.pressSave();
+    try c.pressSave();
     try c.answer('r');
 
     try testing.expectEqualStrings("ONE\ntwo\nthree\n", c.term.rt.editorDocument().opened.?.file.content);
@@ -50191,7 +50201,7 @@ test "C1a-5 다시 읽기가 실패하면 이유별로 말하고 편집은 남�
     defer allocator.free(mine);
     // **글자가 아닌 파일로 바꾼다** — 다시 읽기가 이것을 문서에 넣으면 안 된다.
     try c.writeOutside("bad.txt", "\xff\xfe binary\n");
-    c.pressSave();
+    try c.pressSave();
     try c.answer('r');
 
     try testing.expect(s.chrome_host.notice.open);
@@ -50210,7 +50220,7 @@ test "C1a-6 상자가 떠 있는데 그 문서를 닫으면 — 확인도 접히
 
     try testing.expect(insertText(s, c.term, "x"));
     try c.writeOutside("gone.txt", "outside\n");
-    c.pressSave();
+    try c.pressSave();
     try testing.expect(s.chrome_host.confirm.open);
 
     // **제품이 닫는 길로 닫는다**(U2B 와 같은 호출) — `destroyTerm` 을 직접 부르면 pane 정리가 빠져
@@ -50296,7 +50306,7 @@ test "C1a-10 재진입: 두 문서가 잇달아 충돌해도 답은 «마지막�
     try c.writeOutside("two.txt", "two-outside\n");
 
     // ⑴ 첫 문서로 물어 두고,
-    c.pressSave();
+    try c.pressSave();
     try testing.expect(s.pending_confirm == .save_conflict);
     try testing.expectEqual(c.term.surface.id, s.pending_confirm.save_conflict);
 
@@ -50309,6 +50319,7 @@ test "C1a-10 재진입: 두 문서가 잇달아 충돌해도 답은 «마지막�
     }
     pane.active_term = idx;
     s.dispatchAppAction(.editor_save);
+    try awaitDispatchedSavesForTest();
     // 상자는 **하나**이고 대상은 마지막에 물은 그 문서다 — 첫 문서가 남아 있으면 답이 그것을 덮는다.
     try testing.expect(s.chrome_host.confirm.open);
     try testing.expect(s.pending_confirm == .save_conflict);
@@ -50368,7 +50379,7 @@ test "C1a-11 다시 읽기도 «물은 그 문서»에만 간다 — 활성 추�
     try c.writeOutside("rtwo.txt", "r2-outside\n");
 
     // **첫 문서로 묻고**, 활성은 두 번째로 옮긴 뒤 **다시 읽기**를 고른다.
-    c.pressSave();
+    try c.pressSave();
     try testing.expectEqual(c.term.surface.id, s.pending_confirm.save_conflict);
     const pane = pane_ops.activePane(s);
     var idx: usize = pane.terms.items.len;
@@ -50711,7 +50722,7 @@ test "C1b-1 비교는 «디스크 ↔ 내 편집» 탭을 열고 답은 아직 �
     const mine = try allocator.dupe(u8, c.term.rt.editorDocument().opened.?.file.content);
     defer allocator.free(mine);
     try c.writeOutside("cmp.txt", "THEIRS\n");
-    c.pressSave();
+    try c.pressSave();
     // **Enter = 비교**(`primary`) — 그 자리에 안전한 선택을 둔 결과다.
     try c.pressEnter();
 
@@ -50752,7 +50763,7 @@ test "C1b-2 파일이 또 바뀌면 두 쪽이 «함께» 새로워진다 — gi
 
     try testing.expect(insertText(s, c.term, "M1"));
     try c.writeOutside("again.txt", "T1\n");
-    c.pressSave();
+    try c.pressSave();
     try c.pressEnter();
     const diff_term = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = diff_term.file_entry orelse return error.NoEntry;
@@ -50792,7 +50803,7 @@ test "C1b-3 다시 열면 내용이 갱신된다 — 첫 비교를 두 번째 �
 
     try testing.expect(insertText(s, c.term, "A"));
     try c.writeOutside("reopen.txt", "X\n");
-    c.pressSave();
+    try c.pressSave();
     try c.pressEnter();
     const first = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = first.file_entry orelse return error.NoEntry;
@@ -50809,6 +50820,7 @@ test "C1b-3 다시 열면 내용이 갱신된다 — 첫 비교를 두 번째 �
     try testing.expect(insertText(s, c.term, "B"));
     try c.writeOutside("reopen.txt", "Y\n");
     s.dispatchAppAction(.editor_save);
+    try awaitDispatchedSavesForTest();
     try c.pressEnter();
 
     // ⑴ **같은 탭을 쓰고**(하나만 생긴다) ⑵ **내용이 갱신됐다**.
@@ -50827,7 +50839,7 @@ test "C1b-4 문서 Term 이 사라지면 비교는 «실패»다 — 없는 버�
 
     try testing.expect(insertText(s, c.term, "MINE"));
     try c.writeOutside("subject.txt", "THEIRS\n");
-    c.pressSave();
+    try c.pressSave();
     try c.pressEnter();
     const diff_term = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = diff_term.file_entry orelse return error.NoEntry;
@@ -50864,7 +50876,7 @@ test "C1b-5 파일이 사라지면 비교도 비운다 — 낡은 두 쪽을 들
 
     try testing.expect(insertText(s, c.term, "MINE"));
     try c.writeOutside("vanish.txt", "THEIRS\n");
-    c.pressSave();
+    try c.pressSave();
     try c.pressEnter();
     const diff_term = @import("../git.zig").diffTermFor(s, c.path, .save_conflict) orelse return error.NoCompareTerm;
     const entry = diff_term.file_entry orelse return error.NoEntry;
@@ -50900,7 +50912,7 @@ test "C1a-8 다시 읽기는 «그 파일의 형식»을 따른다 — 다음 �
     try testing.expect(insertText(s, c.term, "mine"));
     // **밖에서 형식까지 바뀌었다** — BOM 이 붙고 CRLF 가 됐다.
     try c.writeOutside("fmt.txt", "\xef\xbb\xbfouter\r\n");
-    c.pressSave();
+    try c.pressSave();
     try c.answer('r');
 
     // ⑴ 내용은 BOM 을 뗀 그것이고, **형식은 새 파일의 것**이다.
@@ -64159,4 +64171,401 @@ test "LSAVEQ6 한 문서의 충돌은 다른 문서의 저장 기준과 완료�
     defer testing.allocator.free(disk);
     try testing.expectEqualStrings("peer!", disk);
     try testing.expectEqual(@as(?u64, 99), maru.session.editor.save_ops.successorBaseline(1, 99, 2));
+}
+
+test "LSAVEL1 마지막 뷰를 닫아도 요청 모델은 살아 있고 같은 경로의 새 문서를 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |bom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "lifetime.txt", "old");
+        term.rt.editorDocument().opened.?.file.format.has_bom = bom;
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, term, "!"));
+        var owner = @import("save/owner.zig").Owner.init(testing.allocator);
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            owner.deinit();
+        }
+        const admitted = try owner.enqueue(fx.session, term, 1);
+        const reference = owner.reference(admitted.id).?;
+        const old_state = reference.lease.owner.get(reference.lease).?;
+        try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(reference).?, &gate);
+        pane_ops.closeActiveTermOrPane(fx.session);
+        try testing.expectEqual(@as(usize, 0), reference.lease.owner.viewCount(reference.lease).?);
+        try testing.expect(reference.lease.owner.get(reference.lease).? == old_state);
+        const reopened = try undoFixture(&fx, testing.allocator, "lifetime.txt", "old");
+        try testing.expect(reopened.rt.editor_document_lease.?.document.slot != reference.lease.document.slot);
+        gate.set();
+        const outcome = try awaitSaveQueueForTest(&owner.queue);
+        try testing.expect(outcome.failure == null);
+        try testing.expect(!owner.queue.apply(fx.session, reopened, queueLiveForTest(reopened, 1)));
+        try testing.expect(owner.queue.applyRetained(reference.lease, @import("save/owner.zig").Owner.liveTarget(reference).?));
+        try testing.expect(!old_state.opened.?.isDirty());
+        try testing.expectEqualStrings("old!", old_state.opened.?.file.content);
+        try testing.expectEqual(@as(?u64, contentHash(if (bom) "\xef\xbb\xbfold!" else "old!")), old_state.opened.?.disk_hash);
+        try testing.expectEqualStrings("old", reopened.rt.editorDocument().opened.?.file.content);
+        try owner.ack(true);
+        try testing.expect(reference.lease.owner.get(reference.lease) == null);
+        try testing.expect(owner.reference(admitted.id) == null);
+        const disk = try fx.dir.dir.readFileAlloc(testing.io, "lifetime.txt", testing.allocator, .limited(100));
+        defer testing.allocator.free(disk);
+        try testing.expectEqualStrings(if (bom) "\xef\xbb\xbfold!" else "old!", disk);
+    }
+}
+
+test "LSAVEL2 합류한 요청은 각 발신자의 참조를 승인 전까지 보존하고 실패에서 한 번 해제한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "lifetime.txt", "old");
+    var owner = @import("save/owner.zig").Owner.init(testing.allocator);
+    defer owner.deinit();
+    const first = try owner.enqueue(fx.session, term, 1);
+    const second = try owner.enqueue(fx.session, term, 1);
+    try testing.expect(second.joined and first.id == second.id);
+    try testing.expectEqual(@as(usize, 1), owner.queue.requestCount());
+    try testing.expectEqual(@as(usize, 2), owner.references.items.len);
+    const leases = [_]maru.session.editor.document_registry.Lease{ owner.references.items[0].lease, owner.references.items[1].lease };
+    try testing.expect(leases[0].id != leases[1].id);
+    try owner.queue.failNext(error.OutOfMemory);
+    try testing.expectError(error.UnappliedCompletion, owner.ack(true));
+    for (leases) |lease| try testing.expect(lease.owner.get(lease) != null);
+    try owner.ack(false);
+    try testing.expectEqual(@as(usize, 0), owner.references.items.len);
+    for (leases) |lease| try testing.expect(lease.owner.get(lease) == null);
+    try testing.expect(term.rt.editor_document_lease.?.owner.get(term.rt.editor_document_lease.?) != null);
+    try testing.expectError(error.NotReady, owner.ack(false));
+}
+
+test "LSAVEL3 자료와 큐 등록의 모든 할당 실패는 본문 Undo 선택과 원래 뷰 참조를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "lifetime.txt", "old");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    const undo_len = term.rt.editorDocument().history.undo_len;
+    const selection = term.rt.editor_selection;
+    const source = term.rt.editor_document_lease.?;
+    for (0..4) |fail_index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var owner = @import("save/owner.zig").Owner.init(failing.allocator());
+        defer owner.deinit();
+        const admitted = owner.enqueue(fx.session, term, 1);
+        try testing.expectError(if (fail_index == 1 or fail_index == 2) error.WriteFailed else error.OutOfMemory, admitted);
+        try testing.expectEqual(@as(usize, 0), owner.references.items.len);
+        try testing.expectEqual(@as(usize, 0), owner.queue.requestCount());
+        try testing.expectEqual(@as(u64, 1), owner.queue.next_id);
+        try testing.expectEqualStrings("old!", term.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(undo_len, term.rt.editorDocument().history.undo_len);
+        try testing.expectEqualDeep(selection, term.rt.editor_selection);
+        try testing.expect(source.owner.get(source) != null);
+        try testing.expectEqual(@as(usize, 1), source.owner.viewCount(source).?);
+    }
+}
+
+test "LSAVEL4 대상 무효화는 쓰기 시작 전과 완료 후에 각각 오래된 요청을 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |started| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "lifetime.txt", "old");
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, term, "!"));
+        var owner = @import("save/owner.zig").Owner.init(testing.allocator);
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            owner.deinit();
+        }
+        const admitted = try owner.enqueue(fx.session, term, 1);
+        const reference = owner.reference(admitted.id).?;
+        if (started) try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(reference).?, &gate);
+        term.rt.editorDocument().invalidateSaveTarget();
+        if (started) {
+            gate.set();
+            _ = try awaitSaveQueueForTest(&owner.queue);
+            try testing.expect(!owner.queue.applyRetained(reference.lease, @import("save/owner.zig").Owner.liveTarget(reference).?));
+        } else {
+            try testing.expectError(error.StaleTarget, owner.queue.startNext(@import("save/owner.zig").Owner.liveTarget(reference).?));
+            try owner.queue.rejectNext();
+        }
+        try owner.ack(false);
+        try testing.expect(isDirty(term));
+        try testing.expectEqual(@as(?u64, contentHash("old")), term.rt.editorDocument().opened.?.disk_hash);
+        const disk = try fx.dir.dir.readFileAlloc(testing.io, "lifetime.txt", testing.allocator, .limited(100));
+        defer testing.allocator.free(disk);
+        try testing.expectEqualStrings(if (started) "old!" else "old", disk);
+    }
+}
+
+test "LSAVEL5 최종 정리는 writer가 끝난 뒤 참조를 놓으며 성공 완료를 임의로 게시하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "lifetime.txt", "old");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    var owner = @import("save/owner.zig").Owner.init(testing.allocator);
+    var owns = true;
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer if (owns) {
+        gate.set();
+        owner.deinit();
+    };
+    const admitted = try owner.enqueue(fx.session, term, 1);
+    const reference = owner.reference(admitted.id).?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(reference).?, &gate);
+    const releaser = try std.Thread.spawn(.{}, struct {
+        fn run(g: *@import("save/worker.zig").TestGate) void {
+            _ = usleep(25_000);
+            g.set();
+        }
+    }.run, .{&gate});
+    defer releaser.join();
+    owner.deinit();
+    owns = false;
+    try testing.expect(reference.lease.owner.get(reference.lease) == null);
+    try testing.expect(isDirty(term));
+    try testing.expectEqual(@as(?u64, contentHash("old")), term.rt.editorDocument().opened.?.disk_hash);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "lifetime.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("old!", disk);
+}
+
+fn awaitDispatchedSavesForTest() !void {
+    const dispatch = @import("save/dispatch.zig");
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (dispatch.requestCount() != 0 and std.Io.Clock.awake.now(testing.io).nanoseconds < deadline) {
+        dispatch.poll();
+        _ = usleep(2_000);
+    }
+    try testing.expectEqual(@as(usize, 0), dispatch.requestCount());
+}
+
+test "LSAVEA1 사용자 저장은 입력을 막지 않고 서로 다른 snapshot을 순서대로 실제 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "command.txt", "old");
+    fx.session.loaded_config.config.editor.format_on_save = false;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    try pressKey(&fx, .{ .char = 's' }, .{ .command = true });
+    const dispatch = @import("save/dispatch.zig");
+    try testing.expectEqual(@as(usize, 1), dispatch.requestCount());
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        dispatch.cleanupForTests();
+    }
+    const owner = dispatch.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    try testing.expect(insertText(fx.session, term, "?"));
+    try pressKey(&fx, .{ .char = 's' }, .{ .command = true });
+    try testing.expectEqual(@as(usize, 2), dispatch.requestCount());
+    try testing.expect(isDirty(term));
+    const before = try fx.dir.dir.readFileAlloc(testing.io, "command.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(before);
+    try testing.expectEqualStrings("old", before);
+    gate.set();
+    try awaitDispatchedSavesForTest();
+    const after = try fx.dir.dir.readFileAlloc(testing.io, "command.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings("old!?", after);
+    try testing.expect(!isDirty(term));
+}
+
+test "LSAVEA2 외부 충돌은 본문을 보존하고 사용자가 열어 둔 팔레트를 닫지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "command.txt", "old");
+    fx.session.loaded_config.config.editor.format_on_save = false;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    @import("format.zig").saveCommand(fx.session, term);
+    const dispatch = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        dispatch.cleanupForTests();
+    }
+    const owner = dispatch.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    fx.session.dispatchAppAction(.toggle_command_palette);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "command.txt", .data = "outside" });
+    gate.set();
+    try awaitDispatchedSavesForTest();
+    try testing.expect(fx.session.chrome_host.palette.open);
+    try testing.expect(fx.session.pending_confirm != .save_conflict);
+    try testing.expectEqualStrings("old!", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(term));
+    fx.session.dispatchAppAction(.toggle_command_palette);
+    fx.session.rename = .{ .term = term };
+    dispatch.poll();
+    try testing.expect(fx.session.rename != null);
+    try testing.expect(fx.session.pending_confirm != .save_conflict);
+    fx.session.rename = null;
+    dispatch.poll();
+    try testing.expect(fx.session.pending_confirm == .save_conflict);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "command.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("outside", disk);
+    // 발신 창 신원이 더 이상 없더라도 같은 모델의 살아 있는 뷰에서 일반 쓰기 실패를 알린다.
+    fx.session.chrome_host.confirm.dismiss();
+    fx.session.pending_confirm = .none;
+    try fx.dir.dir.deleteFile(testing.io, "command.txt");
+    @import("format.zig").saveCommand(fx.session, term);
+    dispatch.ownerForTest().?.references.items[0].origin.window = std.math.maxInt(u64);
+    try awaitDispatchedSavesForTest();
+    try testing.expectEqualStrings(maru.i18n.t(.editor_save_gone), fx.session.chrome_host.notice.message);
+    try testing.expect(isDirty(term));
+}
+
+test "LSAVEA3 동기 저장 caller는 앞선 비동기 완료 기준으로 CAS 저장하고 성공을 먼저 응답하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "command.txt", "old");
+    fx.session.loaded_config.config.editor.format_on_save = false;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    @import("format.zig").saveCommand(fx.session, term);
+    const dispatch = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        dispatch.cleanupForTests();
+    }
+    const owner = dispatch.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    try testing.expect(insertText(fx.session, term, "?"));
+    const releaser = try std.Thread.spawn(.{}, struct {
+        fn run(g: *@import("save/worker.zig").TestGate) void {
+            _ = usleep(25_000);
+            g.set();
+        }
+    }.run, .{&gate});
+    defer releaser.join();
+    try saveDocument(fx.session, term);
+    try testing.expectEqual(@as(usize, 0), dispatch.requestCount());
+    try testing.expect(!isDirty(term));
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "command.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("old!?", disk);
+}
+
+test "LSAVEA4 포맷의 저장됨 안내는 요청 등록이 아니라 실제 성공 완료 뒤에 표시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "command.txt", "old");
+    fx.session.loaded_config.config.editor.format_on_save = false;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    fx.session.editor_format = .{ .waiting = true, .waiting_seq = 1, .waiting_surface = term.surface.id, .asked_version = 0, .then_save = true };
+    @import("format.zig").onResponse(fx.session, 1, null, .utf16);
+    const dispatch = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        dispatch.cleanupForTests();
+    }
+    const owner = dispatch.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    try testing.expect(isDirty(term));
+    try testing.expect(!std.mem.eql(u8, maru.i18n.t(.fmt_stale_saved), fx.session.chrome_host.notice.message));
+    gate.set();
+    try awaitDispatchedSavesForTest();
+    try testing.expect(!isDirty(term));
+    try testing.expectEqualStrings(maru.i18n.t(.fmt_stale_saved), fx.session.chrome_host.notice.message);
+}
+
+test "LSAVEA5 실제 사용자 저장 요청은 마지막 뷰 닫기 뒤에도 완료하고 새 문서에 완료를 적용하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "command.txt", "old");
+    fx.session.loaded_config.config.editor.format_on_save = false;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    @import("format.zig").saveCommand(fx.session, term);
+    const dispatch = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        dispatch.cleanupForTests();
+    }
+    const owner = dispatch.ownerForTest().?;
+    const reference = owner.references.items[0];
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(reference).?, &gate);
+    try testing.expect(insertText(fx.session, term, "?"));
+    @import("format.zig").saveCommand(fx.session, term);
+    try testing.expectEqual(@as(usize, 2), dispatch.requestCount());
+    pane_ops.closeActiveTermOrPane(fx.session);
+    const reopened = try undoFixture(&fx, testing.allocator, "command.txt", "old");
+    gate.set();
+    try awaitDispatchedSavesForTest();
+    try testing.expect(reference.lease.owner.get(reference.lease) == null);
+    try testing.expectEqualStrings("old", reopened.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(?u64, contentHash("old")), reopened.rt.editorDocument().opened.?.disk_hash);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "command.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("old!?", disk);
+}
+
+test "LSAVEA6 외부 포매터 진단과 시간 초과 안내는 결과 해제 뒤에도 보존되고 실제 저장 성공 후에만 표시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const dispatch = @import("save/dispatch.zig");
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "external.ts", "old");
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, term, "!"));
+        fx.session.dismissMessageOverlays();
+        var why = [_]u8{'x'} ** 160;
+        @memcpy(why[0..7], "failure");
+        var formatter_name = "tool-one".*;
+        const message = maru.editor_save_notice.Success.external(.fmt_external_failed_saved, &formatter_name, why[0..7]);
+        var notice_args: [2]maru.i18n.Arg = undefined;
+        const args = message.args(&notice_args);
+        if (message.formatter) |*owned_name| try testing.expect(args[0].s.ptr == owned_name.slice().ptr);
+        if (mode == 0) {
+            _ = try dispatch.trySave(fx.session, term, message);
+            @memset(&formatter_name, 'z');
+            @memset(&why, 'z'); // 설정 이름과 formatter 결과가 사라져도 요청의 사본은 살아 있다.
+        } else {
+            const result: @import("../../format_process.zig").Result = .{ .id = 0, .outcome = .timeout, .elapsed_ms = 1 };
+            const timeout_message = @import("external_formatter.zig").apply(fx.session, term, "Prettier", &result, term.rt.editorDocument().opened.?.file.revision, true);
+            _ = try dispatch.trySave(fx.session, term, timeout_message);
+        }
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            dispatch.cleanupForTests();
+        }
+        const owner = dispatch.ownerForTest().?;
+        try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+        try testing.expect(isDirty(term));
+        try testing.expect(!fx.session.chrome_host.notice.open);
+        if (mode == 2) try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "external.ts", .data = "outside" });
+        gate.set();
+        try awaitDispatchedSavesForTest();
+        var buf: [512]u8 = undefined;
+        if (mode == 2) {
+            try testing.expect(isDirty(term));
+            try testing.expect(fx.session.chrome_host.confirm.open);
+            try testing.expect(!std.mem.eql(u8, maru.i18n.format(&buf, maru.i18n.t(.fmt_external_timeout_saved), &.{.{ .s = "Prettier" }}), fx.session.chrome_host.notice.message));
+        } else if (mode == 0) {
+            try testing.expect(!isDirty(term));
+            try testing.expectEqualStrings(maru.i18n.format(&buf, maru.i18n.t(.fmt_external_failed_saved), &.{ .{ .s = "tool-one" }, .{ .s = "failure" } }), fx.session.chrome_host.notice.message);
+        } else {
+            try testing.expect(!isDirty(term));
+            try testing.expectEqualStrings(maru.i18n.format(&buf, maru.i18n.t(.fmt_external_timeout_saved), &.{.{ .s = "Prettier" }}), fx.session.chrome_host.notice.message);
+        }
+    }
 }

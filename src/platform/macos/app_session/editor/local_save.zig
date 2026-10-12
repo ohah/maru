@@ -1,4 +1,4 @@
-//! 이름 있는 로컬 저장의 자료·쓰기·완료를 분리한다. 현재 호출자는 세 단계를 동기로 실행한다.
+//! 이름 있는 로컬 저장의 자료·쓰기·완료를 분리한다. 사용자 저장은 worker로 보내고 기존 동기 caller도 같은 자료·완료 계약을 사용한다.
 const std = @import("std");
 const maru = @import("maru");
 const host = @import("../../app_session.zig");
@@ -15,13 +15,17 @@ pub const Prepared = struct {
     written: bool = false,
     finished: bool = false,
     pub fn init(session: *host.AppSession, term: *host.Term, guard: editor.SaveGuard) editor.SaveError!Prepared {
+        return initWithAllocator(session.allocator, term, guard);
+    }
+    /// 요청 자료는 창보다 오래 살 수 있으므로 coordinator의 allocator로도 준비한다.
+    pub fn initWithAllocator(a: std.mem.Allocator, term: *host.Term, guard: editor.SaveGuard) editor.SaveError!Prepared {
         const state = term.rt.editorDocument();
         const doc = state.opened orelse return error.NotAnEditor;
         const path = state.path orelse return error.NotAnEditor;
-        const bytes = doc.file.saveBytes(session.allocator) catch return error.WriteFailed;
-        errdefer session.allocator.free(bytes);
+        const bytes = doc.file.saveBytes(a) catch return error.WriteFailed;
+        errdefer a.free(bytes);
         if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) return error.TooLarge;
-        const owned_path = session.allocator.dupe(u8, path) catch return error.WriteFailed;
+        const owned_path = a.dupe(u8, path) catch return error.WriteFailed;
         // 논리 본문은 소유한 저장 bytes에서 빌린다. 별도 전문 복사 없이 재편집 뒤에도 살아 있다.
         return .{ .bytes = bytes, .path = owned_path, .logical_start = bytes.len - doc.file.content.len, .document = @intFromPtr(state), .identity = identity(term), .expected_disk = switch (guard) {
             .cas => doc.disk_hash,
@@ -44,13 +48,30 @@ pub const Prepared = struct {
     pub fn matches(self: *const Prepared, term: *host.Term) bool {
         if (term.kind != .editor or term.rt.editor_diff != null) return false;
         const state = term.rt.editorDocument();
+        return self.matchesState(state, identity(term));
+    }
+    pub fn matchesState(self: *const Prepared, state: *const maru.session.editor.document_state.State, current_identity: ?Identity) bool {
         if (state.remote != null or state.untitled != null or state.opened == null) return false;
         const path = state.path orelse return false;
         const token: maru.session.editor.save_ops.Token = .{ .document = self.document, .identity = self.identity, .path = self.path };
-        return token.matches(.{ .document = @intFromPtr(state), .identity = identity(term), .path = path });
+        return token.matches(.{ .document = @intFromPtr(state), .identity = current_identity, .path = path });
+    }
+    /// 마지막 뷰가 사라져도 요청 lease가 보존한 모델에 실제 저장 기준을 반영한다. 뷰 부수효과는 내지 않는다.
+    pub fn finishRetained(self: *Prepared, lease: maru.session.editor.document_registry.Lease) bool {
+        if (!self.written or self.finished) return false;
+        const state = lease.owner.get(lease) orelse return false;
+        const current: Identity = .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation };
+        if (!self.matchesState(state, current)) return false;
+        self.finished = true;
+        maru.session.editor.save_ops.markSaved(&state.opened.?, self.content());
+        state.opened.?.disk_hash = editor.contentHash(self.bytes);
+        return true;
     }
     /// 호출자는 쓰기 성공 후에만 부른다. 완료 거절은 디스크 쓰기의 취소/롤백을 뜻하지 않는다.
     pub fn finish(self: *Prepared, session: *host.AppSession, term: *host.Term) bool {
+        return self.finishWithNotice(session, term, false);
+    }
+    pub fn finishWithNotice(self: *Prepared, session: *host.AppSession, term: *host.Term, late: bool) bool {
         if (!self.written or self.finished) return false;
         self.finished = true;
         if (!self.matches(term)) return false;
@@ -58,7 +79,9 @@ pub const Prepared = struct {
         term.rt.editorDocument().opened.?.disk_hash = editor.contentHash(self.bytes);
         session.metal_dirty = true;
         _ = lsp.noteSaved(session, term, self.content());
-        if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) session.showNoticeKey(.editor_conflict_markers_remain);
+        if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) {
+            if (late) session.showResponseNotice(.editor_conflict_markers_remain, &.{}) else session.showNoticeKey(.editor_conflict_markers_remain);
+        }
         return true;
     }
 };

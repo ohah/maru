@@ -193,11 +193,11 @@ pub fn tick(self: *AppSession, now_ms: u64) void {
     st.save_timeouts += 1;
     // 저장 실패면 그 알림이 이것을 덮는다(더 중요하다). 외부 포매터·셸 환경을 기다렸으면 그 이름으로 — 「언어 서버가 늦었다」는 거짓이다
     // (적대적 검증 EF1 2회차).
-    if (st.external_id != 0 or st.preparing)
-        self.showResponseNotice(.fmt_external_timeout_saved, &.{.{ .s = st.external_name.slice() }})
+    const message: maru.editor_save_notice.Success = if (st.external_id != 0 or st.preparing)
+        .external(.fmt_external_timeout_saved, st.external_name.slice(), null)
     else
-        self.showResponseNotice(.fmt_save_timeout, &.{});
-    finishPendingSave(self, true);
+        .{ .key = .fmt_save_timeout };
+    finishPendingSaveWithNotice(self, true, message);
 }
 
 /// 창이 닫힌다 — 기다리던 외부 포매터가 있으면 그 결과를 버린다. 결과 목록은 앱 전역이라 그대로 두면 아무도 안 가져가 남는다(적대적 검증
@@ -243,24 +243,45 @@ fn onExternal(self: *AppSession, r: *const format_process.Result) void {
     const then_save = st.then_save;
     st.then_save = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;
-    defer if (then_save) saveNow(self, term, true);
-    external_formatter.apply(self, term, st.external_name.slice(), r, st.external_revision, then_save);
+    const message = external_formatter.apply(self, term, st.external_name.slice(), r, st.external_revision, then_save);
+    if (then_save) saveNowWithNotice(self, term, true, message);
 }
 
 /// 기다리던 저장을 포맷 없이 지금 한다(시한 — `late`·다른 문서의 저장). 문서가 닫혔으면 할 것이 없다(닫기는 저장하지 않은 편집을 묻는다).
 fn finishPendingSave(self: *AppSession, late: bool) void {
+    finishPendingSaveWithNotice(self, late, null);
+}
+fn finishPendingSaveWithNotice(self: *AppSession, late: bool, message: ?maru.editor_save_notice.Success) void {
     const st = &self.editor_format;
     dropExternal(st);
     st.waiting = false;
     st.then_save = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;
-    saveNow(self, term, late);
+    saveNowWithNotice(self, term, late, message);
 }
 
 /// 저장하고 결과를 말한다 — 실패는 이유별로(§3.9d), 외부 충돌은 묻는다(C1a — editor-surface.md §4). `late` 는 누른 순간이 아니라 포맷
 /// 응답·시한 뒤에 저장한다는 뜻이다 — 실패 알림은 늦게 온 응답의 규칙대로 그사이 연 오버레이를 닫지 않는다(§8.2a `showResponseNotice`).
 fn saveNow(self: *AppSession, term: *Term, late: bool) void {
-    editor_ops.saveDocument(self, term) catch |e| switch (e) {
+    saveNowWithNotice(self, term, late, null);
+}
+fn saveNowWithNotice(self: *AppSession, term: *Term, late: bool, success_notice: ?maru.editor_save_notice.Success) void {
+    const queued = @import("save/dispatch.zig").trySave(self, term, success_notice) catch |failure| {
+        reportSaveError(self, term, late, failure);
+        return;
+    };
+    if (queued != null) return;
+    editor_ops.saveDocument(self, term) catch |failure| {
+        reportSaveError(self, term, late, failure);
+        return;
+    };
+    if (success_notice) |message| {
+        var args: [2]maru.i18n.Arg = undefined;
+        self.showResponseNotice(message.key, message.args(&args));
+    }
+}
+fn reportSaveError(self: *AppSession, term: *Term, late: bool, failure: editor_ops.SaveError) void {
+    switch (failure) {
         // `Handled` 는 실패가 아니다 — 저쪽 파일이라 이 함수 밖에서 끝난다(U3). 결말이 말한다. `AskName` 은 「이름을 물었다」다.
         error.AskName, error.NotAnEditor, error.Handled => {},
         // ⚠️ **충돌은 알리는 자리가 아니라 «묻는» 자리다**(C1a). C0 은 이유를 올렸을 뿐 「아무것도 저장하지 않았다」로 끝냈고, 그러면
@@ -271,10 +292,10 @@ fn saveNow(self: *AppSession, term: *Term, late: bool) void {
         // 보내 **panic** 했다(`ReadOnly` 는 쓰기 오류 집합에 없다 — 저장 시 포맷 판정자가 드러냈다).
         error.ReadOnly => if (late) self.showResponseNotice(.editor_save_read_only, &.{}) else self.showNoticeKey(.editor_save_read_only),
         else => {
-            const key = editor_ops.saveFailureNoticeKey(@errorCast(e));
+            const key = editor_ops.saveFailureNoticeKey(@errorCast(failure));
             if (late) self.showResponseNotice(key, &.{}) else self.showNoticeKey(key);
         },
-    };
+    }
 }
 
 /// formatting 응답의 입구(`editor_lsp` 가 부른다) — **응답을 보낸 서버가 기다리는 문서를 연 그 서버일 때만** 받는다. seq 는 클라이언트(저장소 ×
@@ -296,19 +317,20 @@ pub fn onResponse(self: *AppSession, seq: u32, result: ?std.json.Value, enc: lsp
     const then_save = st.then_save;
     st.then_save = false;
     const term = editorTerm(self, st.waiting_surface) orelse return;
-    defer if (then_save) saveNow(self, term, true);
+    var success_notice: ?maru.editor_save_notice.Success = null;
+    defer if (then_save) saveNowWithNotice(self, term, true, success_notice);
     const doc = term.rt.editorDocument().opened orelse return;
     // §3.6 revision 검증 — 요청 뒤 문서가 바뀌었으면 결과가 그 문서의 것이 아니다.
     if (term.rt.editorDocument().notifications.lsp_version != st.asked_version) {
         st.stale += 1;
         // 늦게 온 응답 — 사용자가 그사이 연 오버레이를 닫지 않는다. 저장 시 포맷이면 「저장했다」까지 말한다(「버렸다」만 보면 저장도 안 된 줄 안다 — 적대적 5회차).
-        self.showResponseNotice(if (then_save) .fmt_stale_saved else .fmt_stale, &.{});
+        if (then_save) success_notice = .{ .key = .fmt_stale_saved } else self.showResponseNotice(.fmt_stale, &.{});
         return;
     }
     var changes = lsp.text_edits.toChanges(self.allocator, result, doc.file.content, doc.file.lines, enc) catch |err| switch (err) {
         error.Overlap, error.Malformed => {
             st.rejected += 1;
-            self.showResponseNotice(if (then_save) .fmt_rejected_saved else .fmt_rejected, &.{});
+            if (then_save) success_notice = .{ .key = .fmt_rejected_saved } else self.showResponseNotice(.fmt_rejected, &.{});
             return;
         },
         error.OutOfMemory => return,

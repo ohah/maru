@@ -152,8 +152,7 @@ pub fn markClean(self: *AppSession, term: *Term, content: []const u8, previous_i
     //
     // ⚠️ **`&(… orelse …)` 로 잡지 않는다** — 그 형태는 optional 의 «사본»에 포인터를 주므로
     // 저장 해시가 임시 값에 쓰이고 문서는 영원히 dirty 로 남는다(적대적 1회차에서 그 형태를 지웠다).
-    term.rt.editorDocument().opened.?.saved_hash = editor_ops.contentHash(content);
-    term.rt.editorDocument().opened.?.needs_save = false;
+    maru.session.editor.save_ops.markSaved(&term.rt.editorDocument().opened.?, content);
     dropRecoverySource(self, term);
     if (previous_identity) |prev| {
         if (term.rt.editorDocument().notifications.backup_on_disk) {

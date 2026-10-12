@@ -52,7 +52,7 @@ run_scenario() {
     native_editor="$document"
     recovery_checkpoint=""
     case "$scenario" in
-        quit-backup|restore-backup) recovery_checkpoint="maru-test-only-v1" ;;
+        quit-backup|restore-backup|quit-pending-save) recovery_checkpoint="maru-test-only-v1" ;;
     esac
     checkpoint="$home/Library/Application Support/maru/workspace.v1"
     if [ "$scenario" != restore-backup ]; then
@@ -91,7 +91,7 @@ PYBACKUP
     "$app_path" &
     app_pid=$!
 
-    if [ "$scenario" != clean-save ] && [ "$scenario" != quit-backup ] && [ "$scenario" != restore-backup ]; then
+    if [ "$scenario" != clean-save ] && [ "$scenario" != quit-backup ] && [ "$scenario" != restore-backup ] && [ "$scenario" != quit-pending-save ]; then
         # **드라이버가 부를 때까지 기다린다.** 편집기가 파일을 읽고 글자를 넣은 뒤에야 "밖에서
         # 바뀌었다"가 성립한다. 고정 sleep 은 기계에 따라 순서가 뒤집혀 무엇을 쟀는지 알 수 없다.
         waited=0
@@ -158,6 +158,19 @@ grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/clean-save.summary.txt
 # 대조군이 없으면 "무조건 거절"도 위 판정을 통과한다. 여기서는 **우리가 넣은 글자가 디스크에** 있어야 한다.
 grep -q 'xyz' "$document"
 grep -q 'original-from-open' "$document"
+
+# 미정산 저장 요청을 관측한 직후 실제 AppKit 종료/final checkpoint로 간다.
+run_scenario quit-pending-save
+grep -Eq '^editor_save_conflict_smoke_scenario=quit-pending-save$' "$root/quit-pending-save.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_failure=$' "$root/quit-pending-save.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_stage=done$' "$root/quit-pending-save.summary.txt"
+grep -Eq '^editor_save_conflict_smoke_pending_at_quit=true$' "$root/quit-pending-save.summary.txt"
+printf '%sxyz' "$original" > "$reference"
+cmp -s "$document" "$reference"
+test -s "$home/Library/Application Support/maru/workspace.v1"
+if [ -d "$backups" ]; then
+    test "$(find "$backups" -name 'd-*.bak' -type f | wc -l | tr -d ' ')" -eq 0
+fi
 
 # C1a — 충돌 상자에서 **덮어쓰기**를 고르면 내 편집이 디스크에 있다.
 run_scenario conflict-overwrite

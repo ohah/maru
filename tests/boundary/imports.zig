@@ -13210,6 +13210,8 @@ test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {
     defer allocator.free(app_session);
     const editor = try readZigFileZ(allocator, "src/platform/macos/app_session/editor/mod.zig");
     defer allocator.free(editor);
+    const native_notice = try readZigFileZ(allocator, "src/editor_save_notice.zig");
+    defer allocator.free(native_notice);
 
     const countOf2 = struct {
         fn f(hay: []const u8, needle: []const u8) usize {
@@ -13228,9 +13230,10 @@ test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {
     // ⑵ **네이티브 표는 자기 문구를 쓴다** — 브리지 것을 쓰면 할 수 없는 일을 지시한다.
     try std.testing.expectEqual(
         @as(usize, 1),
-        countOf2(editor, "error.ExternalConflict => .editor_save_external_conflict,"),
+        countOf2(native_notice, "error.ExternalConflict => .editor_save_external_conflict,"),
     );
-    try std.testing.expectEqual(@as(usize, 0), countOf2(editor, "=> .app_save_external_conflict,"));
+    try std.testing.expectEqual(@as(usize, 0), countOf2(native_notice, "=> .app_save_external_conflict,"));
+    try std.testing.expectEqual(@as(usize, 1), countOf2(editor, "return maru.editor_save_notice.key(e);"));
     // ⑶ **둘 다 서로를 가리키는 근거를 든다** — 없으면 합쳐진다.
     try std.testing.expect(std.mem.indexOf(u8, app_session, "네이티브 편집기의 것과 합치지 말 것") != null);
     try std.testing.expect(std.mem.indexOf(u8, editor, "일부러 둘이다") != null);

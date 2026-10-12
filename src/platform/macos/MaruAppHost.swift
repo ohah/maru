@@ -5784,18 +5784,19 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     // 모달 결정은 다음 tick FrameSummary.quit_decision으로 와 drainQuitDecision이 NSApp.reply로 종료를 진행/취소한다.
     // 창 닫기와 달리 실행 중 명령 유무와 무관하게 항상 묻는다(사용자 결정 2026-06). 단일 출처: docs/macos-app-host-boundary.md.
     private var projectSearchQuitTimer: Timer?
+    private var editorSaveQuitTimer: Timer?
 
     /// 종료 승인이 끝난 뒤 main actor를 막지 않고 검색 worker의 최종 참조 해제를 기다린다.
     private func finishProjectSearchBeforeTermination() -> NSApplication.TerminateReply {
         for surface in windows + (quick.map { [$0] } ?? []) {
             if let session = surface.appSession { maru_macos_app_session_project_search_cancel(session) }
         }
-        if maru_macos_project_search_outstanding_workers() == 0 { return .terminateNow }
+        if maru_macos_editor_save_pending_requests() == 0 && maru_macos_project_search_outstanding_workers() == 0 { return .terminateNow }
         if projectSearchQuitTimer == nil {
             let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] timer in
                 MainActor.assumeIsolated {
                     guard let self else { timer.invalidate(); return }
-                    if maru_macos_project_search_outstanding_workers() == 0 {
+                    if maru_macos_editor_save_pending_requests() == 0 && maru_macos_project_search_outstanding_workers() == 0 {
                         timer.invalidate()
                         self.projectSearchQuitTimer = nil
                         NSApp.reply(toApplicationShouldTerminate: true)
@@ -15367,6 +15368,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         withSurface(surface) {
             driver.tick(
                 probe: {
+                    // 완료가 UI를 갱신할 수 있으므로 먼저 정산하고 같은 시점의 probe를 읽는다.
+                    let savePending = maru_macos_editor_save_pending_requests() != 0
                     var out = MaruAppHostEditorSaveConflictSmokeProbe()
                     guard maru_macos_app_session_editor_save_conflict_smoke_probe(session, &out) == Self.statusOK
                     else { return nil }
@@ -15374,7 +15377,8 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                         editorPresent: out.editor_present != 0,
                         dirty: out.dirty != 0,
                         overlayOpen: out.overlay_open != 0,
-                        compareReady: out.compare_ready != 0
+                        compareReady: out.compare_ready != 0,
+                        savePending: savePending
                     )
                 },
                 typeText: { text in
@@ -16893,6 +16897,30 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
     private func beginFinalWorkspaceCheckpoint(surface: TerminalSurface?, deferredAppKitQuit: Bool) {
         guard !workspaceFinalQuitPending else { return }
+        // 파일 쓰기 완료를 먼저 정산한 뒤 마지막 workspace/백업 상태를 캡처한다.
+        // timer로 기다려 main run loop와 다른 창의 입력·완료 처리를 멈추지 않는다.
+        if maru_macos_editor_save_pending_requests() != 0 {
+            if editorSaveQuitTimer == nil {
+                let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] timer in
+                    MainActor.assumeIsolated {
+                        guard let self else { timer.invalidate(); return }
+                        if deferredAppKitQuit && !self.quitConfirmPending {
+                            timer.invalidate()
+                            self.editorSaveQuitTimer = nil
+                            return
+                        }
+                        guard maru_macos_editor_save_pending_requests() == 0 else { return }
+                        timer.invalidate()
+                        self.editorSaveQuitTimer = nil
+                        self.beginFinalWorkspaceCheckpoint(surface: surface, deferredAppKitQuit: deferredAppKitQuit)
+                    }
+                }
+                editorSaveQuitTimer = timer
+                RunLoop.main.add(timer, forMode: .common)
+            }
+            return
+        }
+
         guard workspaceCheckpointArmed, !windows.isEmpty || openWithoutWindows else {
             bypassQuitConfirm = true
             if deferredAppKitQuit {
@@ -17265,6 +17293,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         editor_save_conflict_smoke_stage=\(editorSaveSmokeStage)
         editor_save_conflict_smoke_failure=\(editorSaveSmokeFailure)
         editor_save_conflict_smoke_scenario=\(editorSaveSmokeScenario)
+        editor_save_conflict_smoke_pending_at_quit=\(editorSaveConflictSmokeDriver?.pendingAtQuitRequest ?? false)
         agent_session_archive_smoke_fake_resume_verdict=\(archiveSmokeFakeResumeVerdict())
         agent_session_archive_smoke_reveal_allowed_count=\(agentSessionArchiveSmokeRevealAllowedCount)
         agent_session_archive_smoke_reveal_rejected_count=\(agentSessionArchiveSmokeRevealRejectedCount)

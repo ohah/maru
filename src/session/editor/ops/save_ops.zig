@@ -1,5 +1,12 @@
 //! 저장 완료의 신원 판정. 파일 쓰기·dirty/백업 갱신은 호스트가 한다.
 const std = @import("std");
+const document_state = @import("../document_state.zig");
+
+/// 실제 저장한 논리 본문으로 기준을 옮긴다. 저장 중 추가 편집의 본문이나 Undo는 건드리지 않는다.
+pub fn markSaved(opened: *document_state.Opened, logical: []const u8) void {
+    opened.saved_hash = document_state.contentHash(logical);
+    opened.needs_save = false;
+}
 const Identity = @import("../document_registry.zig").DocumentIdentity;
 pub const Token = struct {
     document: usize,

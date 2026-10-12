@@ -36,7 +36,20 @@ pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, s
 /// kick 을 붙이는가. `required` — 두 자리가 다 비어야 보내고 없으면 `not_sent`(숨은 탭에서 kick 없이 가면 30 초 매달리는 접근성 질의·
 /// 5 초 걸리는 포인터 이동). `best_effort` — 자리가 하나뿐이면 주 호출만(kick 없이도 답하는 wait 의 확인 — 숨은 탭에서 rAF 로 나타나는
 /// 요소를 늦게 볼 뿐이다; 이동하는 순간에 잃은 kick 이 그 탭의 둘째 자리를 쥔 동안에도 확인이 멈추지 않게 — 적대 리뷰 3 회차).
-pub const Kick = enum { none, best_effort, required };
+pub const Kick = enum {
+    none,
+    best_effort,
+    required,
+
+    /// `web_osr.devtoolsCallKicked` 의 `optional` — 자리가 하나뿐이면 주 호출만 보내도 되는가.
+    pub fn optional(self: Kick) bool {
+        return self == .best_effort;
+    }
+};
+
+/// 탭·전체 DevTools 자리가 다 찼다 — 부른 쪽(`app_host_abi` `cdpAdvance`·`cdpDone`)이 `not_sent` 에 이 글을 그대로 싣는다. kick 을
+/// 실은 호출은 이 이유일 때만 잠깐 뒤 다시 보낸다(4 회차 — 탭이 준비 안 됨·요청 실패에도 4.5 초 다시 보냈다).
+pub const busy_reason = "too many DevTools calls at once (on this tab, or across all tabs) — retry shortly";
 
 /// 다음에 할 일 — CDP 호출 하나(`params` 는 소유 — 부른 쪽이 놓는다) 또는 끝(`result` 소유).
 pub const Step = union(enum) {
@@ -172,6 +185,9 @@ pub const Op = struct {
     heavy_total_ms: i64 = 0,
     /// 시한 전 마지막 확인을 앞당겼다 — 한 번만.
     final_check: bool = false,
+    /// 이번 확인 안에서 kick 자리를 기다리며 잔 시간 — 확인 시간 짐작에서 뺀다(4 회차 — 4.5 초가 다음 확인 짐작에 들어가 20 초 wait 이
+    /// 14 초에 끝났다).
+    check_wait_ms: i64 = 0,
     last_heavy_ms: i64 = 0,
     /// 그 앞의 무거운 호출 시간(-1 = 아직 하나뿐이거나 없다).
     prev_heavy_ms: i64 = -1,
@@ -366,9 +382,12 @@ pub const Op = struct {
         if (self.stage == .delete_up) return deleteUp(gpa);
         // kick 을 실은 호출을 자리가 없어 못 보냈다 — 다시.
         if (self.stage == .locate) return self.locateCall(gpa);
-        if (self.stage == .hover_move) return self.hoverMove(gpa);
+        // 포인터 이동은 옛 좌표로 다시 보내지 않는다 — 기다린 사이(최대 4.5 초) 페이지가 바뀌었을 수 있다: 묶음을 놓고 화면 안으로·자리·
+        // 덮임 검사부터 다시(4 회차 — 「검사와 이동 사이 왕복 하나」 가 깨졌다).
+        if (self.stage == .hover_move) return self.releaseThen(gpa, .scroll);
         if (self.now_ms >= self.wait_deadline_ms) return self.waitTimeout(gpa);
         self.check_start_ms = self.now_ms;
+        self.check_wait_ms = 0;
         return if (self.frame_id == null) self.frameTreeStep(gpa) else self.worldStep(gpa);
     }
 
@@ -525,7 +544,8 @@ pub const Op = struct {
         // 묶음을 놓았다(무엇이든) — 정해 둔 다음 일로.
         if (self.stage == .rel_then) return self.afterRelThen(gpa);
         // kick 쌍이 갔다 — 다음 kick 호출은 다시 처음부터 센다(1 회차 — 한 op 안에서 횟수를 나눠 써 뒤의 호출은 다시 보내지 못했다).
-        if (reply != .not_sent) self.kick_retries = 0;
+        // (그 사이 다른 답 — hover 를 다시 재는 동안의 상자·덮임 검사 — 으로는 세지 않는다: 끝없이 다시 재지 않게, 4 회차)
+        if (reply != .not_sent and (self.stage == .locate or self.stage == .hover_move)) self.kick_retries = 0;
         // 찾기 호출 자체가 실패·시한 — 쥔 객체가 있을 수 있어 놓은 뒤 그 이유로 끝낸다.
         if (self.stage == .loc_find) switch (reply) {
             // 답은 곧장 해석해 놓기로 — 공통 JSON 파싱이 깨진 답에 놓지 않고 끝내던 것(1 회차).
@@ -611,10 +631,14 @@ pub const Op = struct {
         };
         // kick 을 실은 호출을 자리가 없어 못 보냈다 — 잠깐 뒤 다시(직전 kick 의 답이 아직이면 자리 하나를 쥐고 있다 — 잃은 kick 은
         // sidecar 가 3 초 남짓에 놓는다).
-        // wait 은 시한을 넘겨 다시 보내지 않는다(그때는 아래 「다음 확인」 이 시한으로 끝낸다).
-        const retry_in_time = self.kind != .wait or self.now_ms + kick_retry_ms < self.wait_deadline_ms;
-        if (reply == .not_sent and (self.stage == .locate or self.stage == .hover_move) and self.kick_retries < max_kick_retries and retry_in_time) {
+        // 자리 없음(`busy_reason`)일 때만 — 탭이 준비 안 됨·요청 실패는 기다려도 풀리지 않는다(4 회차). wait 은 시한을 넘겨 다시 보내지
+        // 않고, 남은 확인(직전 확인 시간으로 짐작)이 시한을 2 초 넘게 넘길 것 같아도 다시 보내지 않는다(그때는 아래 「다음 확인」 이 끝낸다).
+        const retry_in_time = self.kind != .wait or (self.now_ms + kick_retry_ms < self.wait_deadline_ms and
+            self.now_ms + kick_retry_ms + @max(self.last_check_ms, 0) <= self.wait_deadline_ms + wait_max_overrun_ms);
+        const busy = reply == .not_sent and std.mem.eql(u8, reply.not_sent, busy_reason);
+        if (busy and (self.stage == .locate or self.stage == .hover_move) and self.kick_retries < max_kick_retries and retry_in_time) {
             self.kick_retries += 1;
+            self.check_wait_ms += kick_retry_ms;
             return .{ .sleep = kick_retry_ms };
         }
         // wait 의 확인을 보내지 못했다 — 다음 확인으로(묶음을 쥐었으면 놓은 뒤).
@@ -1034,7 +1058,8 @@ pub const Op = struct {
     /// 보면 긴 첫 확인·높낮이가 갈리는 확인이 페이지를 절반 넘게 멈췄다). 그만큼 쉬면 시한 안에 확인이 끝나지 않을 때는 마지막 확인
     /// 하나를 시한 즈음 끝나게 앞당긴다(3 회차 — 전에는 그 자리에서 포기해 20 초 시한의 wait 이 8 초에 끝났다).
     fn sleepOrTimeout(self: *Op, gpa: std.mem.Allocator) !Step {
-        self.last_check_ms = self.now_ms - self.check_start_ms;
+        self.last_check_ms = self.now_ms - self.check_start_ms - self.check_wait_ms;
+        self.check_wait_ms = 0;
         if (self.check_heavy_ms > 0) {
             self.heavy_total_ms += if (self.heavy_count == 0) @min(self.check_heavy_ms, wait_first_heavy_cap_ms) else self.check_heavy_ms;
             self.noteHeavy(self.check_heavy_ms);
@@ -2844,7 +2869,7 @@ var ax_unsent_left: usize = 0;
 fn busyAxPage(method: []const u8, params: []const u8) Reply {
     if (ax_unsent_left > 0 and std.mem.eql(u8, method, "Accessibility.queryAXTree")) {
         ax_unsent_left -= 1;
-        return .{ .not_sent = "too many DevTools calls on this tab" };
+        return .{ .not_sent = busy_reason };
     }
     return rolePage(method, params);
 }
@@ -2867,7 +2892,7 @@ test "kick: 자리가 없어 못 보낸 질의·포인터 이동은 잠깐 뒤 �
     const b = try drive(&busy, &busyAxPage, &trail);
     defer testing.allocator.free(b.result);
     try testing.expectEqual(Status.failed, b.status);
-    try testing.expectEqualStrings("too many DevTools calls on this tab", b.result);
+    try testing.expectEqualStrings(busy_reason, b.result);
     try testing.expectEqual(@as(usize, 1 + max_kick_retries), trail.count("Accessibility.queryAXTree"));
     try testing.expectEqual(@as(usize, max_kick_retries), trail.sleeps); // 4.5 초 — sidecar 가 잃은 kick 을 3–3.75 초에 놓는다(app_host_abi 의 comptime 검사)
     try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
@@ -2993,4 +3018,155 @@ test "철회: 문서·후보 묶음을 쥐었으면 놓은 뒤(committed) 「can
     defer press.deinit(testing.allocator);
     press.stage = .key_down;
     try testing.expect(try press.cancel(testing.allocator) == null);
+}
+
+// ── W9b②-3 적대 리뷰 4 회차 ──────────────────────────────────────────────────────────────────────────────
+
+var r4_quads_calls: usize = 0;
+var r4_move_unsent_left: usize = 0;
+
+/// 덮임 검사 뒤 첫 mouseMoved 는 자리가 없다 — 그 사이 요소가 옮겨 간다(두 번째 상자 조회부터 다른 자리).
+fn r4MovingHoverPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "DOM.getContentQuads")) {
+        r4_quads_calls += 1;
+        return .{ .ok = if (r4_quads_calls == 1) "{\"quads\":[[0,0,46,0,46,20,0,20]]}" else "{\"quads\":[[100,200,146,200,146,220,100,220]]}" };
+    }
+    if (r4_move_unsent_left > 0 and std.mem.eql(u8, method, "Input.dispatchMouseEvent")) {
+        r4_move_unsent_left -= 1;
+        return .{ .not_sent = busy_reason };
+    }
+    return happyPage(method, params);
+}
+
+test "4 회차: hover 가 자리를 기다려 다시 보낼 때는 옛 좌표가 아니라 다시 재고(덮임 검사까지) 옮긴다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    r4_quads_calls = 0;
+    r4_move_unsent_left = 1;
+    var op = try Op.init(testing.allocator, .hover, "{\"selector\":\"#h\"}", 600);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &r4MovingHoverPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+    var last_move: []const u8 = "";
+    for (trail.methods.items, trail.params.items) |m, p| if (std.mem.eql(u8, m, "Input.dispatchMouseEvent")) {
+        last_move = p;
+    };
+    try testing.expect(std.mem.indexOf(u8, last_move, "\"x\":123,\"y\":210") != null);
+    try testing.expectEqual(@as(usize, 2), trail.count("Runtime.callFunctionOn")); // 덮임 검사도 다시
+}
+
+var r4_ax_unsent_reason: []const u8 = busy_reason;
+fn r4UnsentAxPage(method: []const u8, params: []const u8) Reply {
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return .{ .not_sent = r4_ax_unsent_reason };
+    return rolePage(method, params);
+}
+
+test "4 회차: 자리 없음(busy)만 다시 보낸다 — 탭이 준비 안 됨·요청 실패는 곧 실패" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    r4_ax_unsent_reason = "the Chromium tab is not ready";
+    defer r4_ax_unsent_reason = busy_reason;
+    var op = try Op.init(testing.allocator, .click, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 601);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &r4UnsentAxPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.failed, r.status);
+    try testing.expectEqual(@as(usize, 0), trail.sleeps);
+    try testing.expectEqual(@as(usize, 1), trail.count("Accessibility.queryAXTree"));
+}
+
+test "4 회차: wait 의 질의가 자리를 계속 못 얻어도 재시도 시간을 확인 시간으로 치지 않는다 — 시한 근처까지 기다린다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    r4_ax_unsent_reason = busy_reason;
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\"},\"timeout_ms\":20000}", 602);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &r4UnsentAxPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.timeout, r.status);
+    try testing.expect(op.now_ms >= op.wait_deadline_ms - 1_000); // 옛 판: 약 14 초에 시한
+    try testing.expect(op.now_ms <= op.wait_deadline_ms + kick_retry_ms);
+}
+
+var r4_unsent_locate: usize = 0;
+var r4_unsent_move: usize = 0;
+fn r4BusyBothPage(method: []const u8, params: []const u8) Reply {
+    if (r4_unsent_locate > 0 and std.mem.eql(u8, method, "Accessibility.queryAXTree")) {
+        r4_unsent_locate -= 1;
+        return .{ .not_sent = busy_reason };
+    }
+    if (r4_unsent_move > 0 and std.mem.eql(u8, method, "Input.dispatchMouseEvent")) {
+        r4_unsent_move -= 1;
+        return .{ .not_sent = busy_reason };
+    }
+    return rolePage(method, params);
+}
+
+test "4 회차: kick 재시도 횟수는 kick 을 실은 호출이 나가면 처음부터 — 질의에서 거의 다 써도 포인터 이동은 다시 다 쓴다" {
+    var trail: Trail = .{};
+    defer trail.deinit();
+    r4_unsent_locate = max_kick_retries - 1;
+    r4_unsent_move = max_kick_retries - 1;
+    var op = try Op.init(testing.allocator, .hover, "{\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true}}", 603);
+    defer op.deinit(testing.allocator);
+    const r = try drive(&op, &r4BusyBothPage, &trail);
+    defer testing.allocator.free(r.result);
+    try testing.expectEqual(Status.success, r.status);
+}
+
+/// 메서드마다 걸리는 시간 — 확인 시간(heavy)은 질의·크기 세기·보임 판정의 합이어야 한다.
+fn r4Cost(method: []const u8, params: []const u8) i64 {
+    if (std.mem.eql(u8, method, "Accessibility.queryAXTree")) return 1_000;
+    if (std.mem.eql(u8, method, "Runtime.evaluate") and std.mem.indexOf(u8, params, "\"expression\":\"document\"") == null) return 200; // 크기 세기
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return 300; // 보임 판정
+    return 5;
+}
+
+test "4 회차: 확인 시간은 그 확인의 질의·크기 세기·판정의 합이다(시계를 흘려 본다)" {
+    judge_answer = "{\"result\":{\"type\":\"number\",\"value\":-1}}";
+    defer judge_answer = "{\"result\":{\"type\":\"number\",\"value\":1}}";
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\",\"name\":\"Save\",\"exact\":true},\"timeout_ms\":5000}", 604);
+    defer op.deinit(testing.allocator);
+    var step = try op.start(testing.allocator);
+    var checks: usize = 0;
+    while (true) switch (step) {
+        .done => |d| {
+            testing.allocator.free(d.result);
+            break;
+        },
+        .sleep => |ms| {
+            checks += 1;
+            if (checks == 1) {
+                try testing.expectEqual(@as(i64, 1_500), op.last_heavy_ms); // 200 + 1000 + 300
+                op.wait_deadline_ms = op.now_ms; // 첫 확인만 본다
+            }
+            op.now_ms += ms;
+            step = try op.wake(testing.allocator);
+        },
+        .call => |c| {
+            op.now_ms += r4Cost(c.method, c.params);
+            const reply = waitRolePage(c.method, c.params);
+            testing.allocator.free(c.params);
+            step = try op.feed(testing.allocator, reply);
+        },
+    };
+    try testing.expect(checks >= 1);
+}
+
+test "4 회차: kick 종류 — best_effort 만 자리가 하나뿐이면 주 호출만 보낸다(optional)" {
+    try testing.expect(Kick.best_effort.optional());
+    try testing.expect(!Kick.required.optional());
+}
+
+test "4 회차: 확인 안에서 kick 자리를 기다린 시간은 그 확인의 시간 짐작에서 뺀다" {
+    var op = try Op.init(testing.allocator, .wait, "{\"condition\":\"visible\",\"locator\":{\"role\":\"button\"},\"timeout_ms\":20000}", 605);
+    defer op.deinit(testing.allocator);
+    op.wait_deadline_ms = 20_000;
+    op.check_start_ms = 0;
+    op.now_ms = 5_000;
+    op.check_wait_ms = 4_500; // 45 번 × 100 ms
+    _ = try op.sleepOrTimeout(testing.allocator);
+    try testing.expectEqual(@as(i64, 500), op.last_check_ms);
+    try testing.expectEqual(@as(i64, 0), op.check_wait_ms);
 }

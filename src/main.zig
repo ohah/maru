@@ -15879,7 +15879,19 @@ fn runSessionCli(
     }
 }
 
-/// `maru editor lsp trust list|revoke|forget` (legacy `maru lsp` alias)(계획 WT4b) — 언어 서버 신뢰 결정을 조회·철회·잊는다(부여 없음). 셀렉터 없이 붙는다(앱 전역 표 —
+/// libc 의 `struct tm`(BSD·glibc 배치 — `gmtoff` 가 `isdst` 뒤). 얻는 것은 오프셋 하나다(날짜 계산은 `trust_log` 이 순수하게 한다).
+const CliTm = extern struct { sec: c_int, min: c_int, hour: c_int, mday: c_int, mon: c_int, year: c_int, wday: c_int, yday: c_int, isdst: c_int, gmtoff: c_long, zone: ?[*:0]const u8 };
+extern "c" fn localtime_r(timep: *const i64, result: *CliTm) ?*CliTm;
+
+/// 그 시점의 이 기계의 UTC 오프셋(초) — `maru editor lsp trust log` 의 로컬 시각(서머타임이 있어 시점마다 구한다). 못 구하면 0(UTC).
+fn localUtcOffsetAt(unix_s: i64) i64 {
+    if (comptime builtin.os.tag == .windows) return 0;
+    var tm: CliTm = undefined;
+    if (localtime_r(&unix_s, &tm) == null) return 0;
+    return @intCast(tm.gmtoff);
+}
+
+/// `maru editor lsp trust list|revoke|forget|log` (legacy `maru lsp` alias)(계획 WT4b·workspace-trust-audit TA2) — 언어 서버 신뢰 결정을 조회·철회·잊는다(부여 없음). 셀렉터 없이 붙는다(앱 전역 표 —
 /// `control_client.Anchor`). 상대 경로는 현재 디렉터리 기준으로 편다(서버는 CLI 의 cwd 를 모른다). 오류 응답이면 exit 1.
 fn runLspTrustCli(
     io: std.Io,
@@ -15915,6 +15927,8 @@ fn runLspTrustArgs(io: std.Io, allocator: std.mem.Allocator, collected: []const 
             error.DuplicateHost => "--host may only be specified once",
             error.HostWithVolume => "--host and --volume pick different kinds of repository — use one",
             error.RelativeRemotePath => "with --host, pass the absolute path on that machine",
+            error.MissingLimitValue => "--limit needs a value",
+            error.InvalidLimitValue => "the --limit value must be a whole number from 1 to 200",
             error.UnknownOption => "unknown option",
             error.UnexpectedArgument => "too many arguments",
         };
@@ -15934,7 +15948,7 @@ fn runLspTrustArgs(io: std.Io, allocator: std.mem.Allocator, collected: []const 
     var abs_path: ?[]u8 = null;
     defer if (abs_path) |p| allocator.free(p);
     switch (req) {
-        .list => {},
+        .list, .log => {},
         .revoke, .forget => |*t| {
             // 절대 경로도 정리한다(끝 `/`·`.`·`..` — 목록의 글자와 맞게). 현재 디렉터리는 상대 경로일 때만 구한다(`Dir.cwd().realPath` 는
             // AT_FDCWD 핸들에서 실패한다 — 실측). 심링크는 서버가 푼다.
@@ -15956,10 +15970,10 @@ fn runLspTrustArgs(io: std.Io, allocator: std.mem.Allocator, collected: []const 
     const resp = try maru.cli.control_client.fetchResponseAs(io, allocator, request_bytes, stderr, .none);
     defer allocator.free(resp);
     const shown = switch (req) {
-        .list => "",
+        .list, .log => "",
         .revoke, .forget => |t| t.path,
     };
-    const ok = try cli.renderResponse(allocator, resp, cli.kindOf(req), shown, stdout);
+    const ok = try cli.renderResponse(allocator, resp, cli.kindOf(req), shown, localUtcOffsetAt, stdout);
     try stdout.flush();
     if (!ok) return error.UnknownCommand;
 }

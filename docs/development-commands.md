@@ -1329,7 +1329,7 @@ ReleaseFast는 `-Doptimize=ReleaseFast`를 추가한다. 후보 합집합·전�
 검색 도크/실제 OS IME를 대체하지 않는다. opt-in 측정은 `tools/editor-project-search/roots-measure.py`와
 [여러 root 계획](plans/editor-project-search-roots.md)을 따른다.
 
-LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget …`이며,
+LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget|log …`이며,
 기존 `maru lsp …`는 동일한 parser와 request 실행 경로를 쓰는 호환 별칭이다.
 `maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.
 

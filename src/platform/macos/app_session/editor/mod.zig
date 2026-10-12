@@ -18118,17 +18118,21 @@ test "LSPB23 신뢰 부여는 사용자의 답으로만 — 표에 쓰는 자리
     // 철회(WT4b — 지금 허용인 것만 거부로) 넷.
     try testing.expectEqual(@as(usize, 5), std.mem.count(u8, lsp_src, "recordTrust")); // 정의 1 + 호출 4
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, ".revoke => recordTrust(self.io, self.configPath(), .{ .source = .manage }, k.key(), .deny),")); // 철회는 거부만 적는다
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, ".revoke => if (previous == .allow) recordTrust(self.io, self.config_path, .{ .source = .control }, key, .deny)")); // 컨트롤 철회도
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, ".revoke => if (previous == .allow) recordTrust(self.io, self.config_path, .{ .source = .control, .peer = self.peer }, key, .deny)")); // 컨트롤 철회도
     // 감사 기록의 출처(계획 workspace-trust-audit)는 부르는 자리가 정한다 — 시트의 답·하니스는 `sheet`, 관리 상자의 철회·잊기는 `manage`,
     // 컨트롤의 철회·잊기는 `control`. 이관은 표 파일이 스스로 남긴다(`migrate`).
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, lsp_src, ".{ .source = .sheet }"));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, lsp_src, ".{ .source = .manage }"));
-    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, lsp_src, ".{ .source = .control }"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, lsp_src, ".{ .source = .control, .peer = self.peer }")); // 상대도 함께(TA2)
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, lsp_src, ".{ .source = .control }"));
     try testing.expectEqual(@as(usize, 0), std.mem.count(u8, lsp_src, ".migrate"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, store_src, ".{ .source = .migrate }"));
-    // 컨트롤 플레인(WT4b)의 wire 는 조회·철회·잊기 셋뿐이고, ABI 는 표를 모른 채 편집기 LSP 모듈의 한 자리로 넘긴다(즉시 답 하나 — 확인
-    // 재구동 갈래는 닿지 않아 표를 안 고치고 unauthorized 로 닫는다).
-    try testing.expectEqual(@as(usize, 3), @typeInfo(maru.session.control_lsp_trust.Op).@"enum".fields.len);
+    // 컨트롤 플레인(WT4b)의 wire 는 조회·철회·잊기와 감사 기록 조회(TA2 — 읽기만) 넷뿐이고, ABI 는 표를 모른 채 편집기 LSP 모듈의 한
+    // 자리로 넘긴다(즉시 답 하나 — 확인 재구동 갈래는 닿지 않아 표를 안 고치고 unauthorized 로 닫는다). 기록을 고치는 길도 없다 — 기록에
+    // 닿는 것은 읽기(`readLog`) 하나다.
+    try testing.expectEqual(@as(usize, 4), @typeInfo(maru.session.control_lsp_trust.Op).@"enum".fields.len);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, lsp_src, "trust_store.readLog("));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, lsp_src, "appendLog"));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "editor_lsp_ops.controlTrust("));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "editor_lsp_ops.")); // ABI 가 편집기 LSP 모듈에 닿는 자리는 그 하나뿐
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, abi_src, "@import(\"app_session/editor/lsp.zig\")"));
@@ -18190,7 +18194,7 @@ fn controlTrustCall(session: ?*AppSession, method: []const u8, params_json: ?[]c
         try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"{s}\",\"params\":{s}}}", .{ method, p })
     else
         try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"{s}\"}}", .{method});
-    const resp = lsp_client.controlTrust(testing.allocator, testing.io, session, req) orelse return error.NoResponse;
+    const resp = lsp_client.controlTrust(testing.allocator, testing.io, session, req, null) orelse return error.NoResponse;
     defer testing.allocator.free(resp);
     var pm = try maru.session.control_plane.parseMessage(testing.allocator, resp);
     defer pm.deinit();
@@ -19054,6 +19058,77 @@ test "LSPB43 신뢰 감사 기록(계획 workspace-trust-audit) — 시트의 �
         defer arena.deinit();
         const rows = try trust_ui.rows(fx.session, arena.allocator());
         try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_list_allowed), rows[row].binding);
+    }
+}
+
+test "LSPB44 컨트롤의 철회·잊기는 소켓 상대(pid·이름)와 함께 기록되고, `lsp.trust.log` 가 그 기록을 최근 limit 건으로 돌려준다 — 창 없이도 (계획 workspace-trust-audit TA2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try fx.dir.dir.createDirPath(testing.io, "state");
+    try fx.dir.dir.createDirPath(testing.io, "repo");
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    var p_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var k_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const repo = trust_store.keyFor(try std.fmt.bufPrint(&p_buf, "{s}/repo", .{root}), &k_buf).?;
+    trust_store.setNowForTest(1_791_783_000_000);
+    try testing.expect(trust_store.decide(testing.io, test_trust_origin, repo, .allow));
+
+    const Call = struct {
+        fn f(session: ?*AppSession, req: []const u8, peer: ?maru.session.editor.lsp.trust_log.Peer) !std.json.Parsed(std.json.Value) {
+            const resp = lsp_client.controlTrust(testing.allocator, testing.io, session, req, peer) orelse return error.NoResponse;
+            defer testing.allocator.free(resp);
+            return std.json.parseFromSlice(std.json.Value, testing.allocator, resp, .{});
+        }
+    };
+    var req_buf: [std.fs.max_path_bytes + 256]u8 = undefined;
+    // ⑴ 철회 — 상대 `4321:agent-cli`.
+    trust_store.setNowForTest(1_791_783_060_000);
+    {
+        const r = try Call.f(fx.session, try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"lsp.trust.revoke\",\"params\":{{\"path\":\"{s}\"}}}}", .{repo.path}), .{ .pid = 4321, .name = "agent-cli" });
+        defer r.deinit();
+        try testing.expect(r.value.object.get("result").?.object.get("changed").?.bool);
+    }
+    // ⑵ 잊기 — 창 없이, 상대를 못 읽었다(`null` — 기록의 상대 칸은 `-`).
+    trust_store.setNowForTest(1_791_783_120_000);
+    {
+        const r = try Call.f(null, try std.fmt.bufPrint(&req_buf, "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"lsp.trust.forget\",\"params\":{{\"path\":\"{s}\"}}}}", .{repo.path}), null);
+        defer r.deinit();
+        try testing.expect(r.value.object.get("result").?.object.get("changed").?.bool);
+    }
+    // ⑶ 기록 조회 — 최근 둘(시트의 허용은 앞선 기록이라 `more`), 줄 순서대로; 창 없이도.
+    {
+        const r = try Call.f(null, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"lsp.trust.log\",\"params\":{\"limit\":2}}", .{ .pid = 99, .name = "reader" });
+        defer r.deinit();
+        const res = r.value.object.get("result").?.object;
+        try testing.expect(res.get("more").?.bool);
+        const recs = res.get("records").?.array.items;
+        try testing.expectEqual(@as(usize, 2), recs.len);
+        try testing.expectEqual(@as(i64, 1_791_783_060_000), recs[0].object.get("at").?.integer);
+        try testing.expectEqualStrings("deny", recs[0].object.get("action").?.string);
+        try testing.expectEqualStrings("control", recs[0].object.get("source").?.string);
+        try testing.expectEqual(@as(i64, 4321), recs[0].object.get("peer").?.object.get("pid").?.integer);
+        try testing.expectEqualStrings("agent-cli", recs[0].object.get("peer").?.object.get("name").?.string);
+        try testing.expectEqualStrings(repo.path, recs[0].object.get("path").?.string);
+        try testing.expectEqualStrings("forget", recs[1].object.get("action").?.string);
+        try testing.expect(recs[1].object.get("peer") == null);
+    }
+    // 조회는 기록을 늘리지 않는다(읽기만) — 파일의 그 저장소 줄은 셋.
+    {
+        const log = trust_store.readLog(testing.io, allocator).?;
+        defer allocator.free(log);
+        var n: usize = 0;
+        var it = maru.session.editor.lsp.trust_log.Records.init(log);
+        while (it.next()) |rec| {
+            if (rec.key.eql(repo)) n += 1;
+        }
+        try testing.expectEqual(@as(usize, 3), n);
+        try testing.expect(std.mem.indexOf(u8, log, "\tcontrol\t4321:agent-cli\t") != null);
     }
 }
 

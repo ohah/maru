@@ -79,7 +79,7 @@ receiver validation·short line 오해 변이는 assertion에서 거부됐고 �
 추가 제품 결함은 발견되지 않았다. source SHA에 귀속된 로컬 집계는
 `~/.cache/maru-editor-cli-rebase-adversarial-20261009/summary.json`이다.
 
-LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget …`이며,
+LSP 신뢰 관리의 canonical 명령은 `maru editor lsp trust list|revoke|forget|log …`이며,
 기존 `maru lsp …`는 동일한 parser와 request 실행 경로를 쓰는 호환 별칭이다.
 `maru editor lsp --help`와 기존 별칭의 도움말은 canonical 사용법을 표시한다.
 

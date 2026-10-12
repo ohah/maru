@@ -6,16 +6,21 @@
 //!   - `maru editor lsp trust revoke <path> [--volume <hex> | --host <dest>]` → `lsp.trust.revoke {path, volume?, host?}` — 지금 허용인 저장소를 거부로.
 //!   - `maru editor lsp trust forget <path> [--volume <hex> | --host <dest>]` → `lsp.trust.forget {path, volume?, host?}` — 결정을 지운다(다시 열면 묻는다).
 //!   - `--host` 는 원격(SSH) 저장소의 키를 고른다(계획 WT7a) — 그때 경로는 저쪽 기계의 절대 경로다(여기 현재 디렉터리로 펴지 않는다).
+//!   - `maru editor lsp trust log [--limit <n>]` → `lsp.trust.log {limit?}` — 결정이 바뀐 기록(계획 docs/plans/workspace-trust-audit.md TA2).
+//!     시각은 이 기계의 로컬 시각으로 찍는다(오프셋은 `main.zig` 가 준다).
 //! 소켓 접착은 `cli/control_client.zig`(셀렉터 없이 — 앱 전역 표라 자기 패인으로 좁힐 이유가 없다, 2026-10-09 사용자 결정), 상대 경로를
 //! 절대 경로로 펴는 데 쓸 현재 디렉터리는 `main.zig` 가 준다.
 
 const std = @import("std");
 const cp = @import("../session/control_plane.zig");
+const trust_log = @import("../session/lsp/trust_log.zig");
 
 pub const Request = union(enum) {
     list,
     revoke: Target,
     forget: Target,
+    /// 최근 몇 건(없으면 서버의 기본 — 50).
+    log: ?u32,
 
     /// `path` 는 절대 경로(`absolutize` 가 편다), `volume` 은 목록이 보여 준 16진 그대로, `host` 는 원격 목적지(목록이 보여 준 그대로).
     pub const Target = struct { path: []const u8, volume: ?u64 = null, host: ?[]const u8 = null };
@@ -51,6 +56,10 @@ pub const ParseError = error{
     HostWithVolume,
     /// `--host` 인데 경로가 절대가 아니다(저쪽 기계의 경로라 여기서 펼 수 없다).
     RelativeRemotePath,
+    /// `--limit` 값이 없다.
+    MissingLimitValue,
+    /// `--limit` 값이 1..200 의 정수가 아니다.
+    InvalidLimitValue,
     UnknownOption,
     UnexpectedArgument,
 };
@@ -67,6 +76,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         if (rest.len > 1) return if (std.mem.startsWith(u8, rest[1], "-")) error.UnknownOption else error.UnexpectedArgument;
         return .{ .request = .list };
     }
+    if (std.mem.eql(u8, sub, "log")) return .{ .request = .{ .log = try parseLogArgs(rest[1..]) } };
     const is_revoke = std.mem.eql(u8, sub, "revoke");
     if (!is_revoke and !std.mem.eql(u8, sub, "forget")) return error.UnknownSubcommand;
     var path: ?[]const u8 = null;
@@ -111,6 +121,30 @@ pub fn absolutize(gpa: std.mem.Allocator, cwd: []const u8, path: []const u8) std
     return std.fs.path.resolve(gpa, &.{ cwd, path });
 }
 
+fn parseLogArgs(args: []const []const u8) ParseError!?u32 {
+    var limit: ?u32 = null;
+    var i: usize = 0;
+    while (i < args.len) {
+        const a = args[i];
+        const value: []const u8 = if (std.mem.eql(u8, a, "--limit")) blk: {
+            if (i + 1 >= args.len) return error.MissingLimitValue;
+            i += 2;
+            break :blk args[i - 1];
+        } else if (std.mem.startsWith(u8, a, "--limit=")) blk: {
+            i += 1;
+            break :blk a["--limit=".len..];
+        } else return if (std.mem.startsWith(u8, a, "-")) error.UnknownOption else error.UnexpectedArgument;
+        if (limit != null) return error.UnexpectedArgument;
+        const n = std.fmt.parseInt(u32, value, 10) catch return error.InvalidLimitValue;
+        if (n < 1 or n > max_log_limit) return error.InvalidLimitValue;
+        limit = n;
+    }
+    return limit;
+}
+
+/// 서버의 상한과 같다(`control_lsp_trust.max_log_limit` — 판정자가 맞춰 본다).
+pub const max_log_limit: u32 = 200;
+
 fn assignHost(target: *?[]const u8, value: []const u8) ParseError!void {
     if (target.* != null) return error.DuplicateHost;
     if (value.len == 0) return error.MissingHostValue;
@@ -126,6 +160,12 @@ fn assignVolume(target: *?u64, value: []const u8) ParseError!void {
 pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.mem.Allocator.Error![]u8 {
     const method, const target = switch (req) {
         .list => return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "lsp.trust.list", .params = null } }),
+        .log => |limit| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            if (limit) |n| try obj.put(gpa, "limit", .{ .integer = n });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "lsp.trust.log", .params = if (limit != null) .{ .object = obj } else null } });
+        },
         .revoke => |t| .{ "lsp.trust.revoke", t },
         .forget => |t| .{ "lsp.trust.forget", t },
     };
@@ -138,19 +178,23 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) std.me
     return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = method, .params = .{ .object = obj } } });
 }
 
-pub const ResponseKind = enum { list, revoke, forget };
+pub const ResponseKind = enum { list, revoke, forget, log };
 
 pub fn kindOf(req: Request) ResponseKind {
     return switch (req) {
         .list => .list,
         .revoke => .revoke,
         .forget => .forget,
+        .log => .log,
     };
 }
 
+/// 그 시점(unix 초)의 UTC 오프셋(초) — `main.zig` 가 이 기계의 시간대로 준다(판정자는 고정값).
+pub const OffsetAt = *const fn (unix_s: i64) i64;
+
 /// 응답을 사람이 읽게 쓴다. 성공했으면 `true` — 오류 응답·모르는 모양이면 `false`(main 이 종료 코드로 쓴다). 철회·잊기에서 `path` 는
 /// 요청 경로(main 이 절대 경로로 편 것 — 맞은 저장소와 다르면 문구에 「matched」로 보인다).
-pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: ResponseKind, path: []const u8, w: *std.Io.Writer) !bool {
+pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: ResponseKind, path: []const u8, offset_at: OffsetAt, w: *std.Io.Writer) !bool {
     var pm = cp.parseMessage(gpa, response_bytes) catch {
         try w.writeAll("error: malformed response from server\n");
         return false;
@@ -195,11 +239,62 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     .object => |o| o,
                     else => continue,
                 };
-                if (o.get("host")) |h|
-                    try w.print("{s: <6} {s}:{s}\n", .{ str(o.get("decision")), str(h), str(o.get("path")) })
-                else
-                    try w.print("{s: <6} {s}  (volume {s})\n", .{ str(o.get("decision")), str(o.get("path")), str(o.get("volume")) });
+                try w.print("{s: <6} ", .{str(o.get("decision"))});
+                if (o.get("host")) |h| {
+                    try writeShown(w, str(h));
+                    try w.writeAll(":");
+                    try writeShown(w, str(o.get("path")));
+                    try w.writeAll("\n");
+                } else {
+                    try writeShown(w, str(o.get("path")));
+                    try w.print("  (volume {s})\n", .{str(o.get("volume"))});
+                }
             }
+            return true;
+        },
+        .log => {
+            const arr = switch (obj.get("records") orelse std.json.Value.null) {
+                .array => |a| a.items,
+                else => {
+                    try w.writeAll("error: unexpected result\n");
+                    return false;
+                },
+            };
+            if (arr.len == 0) try w.writeAll("(no trust changes recorded)\n");
+            for (arr) |item| {
+                const o = switch (item) {
+                    .object => |o| o,
+                    else => continue,
+                };
+                const at: i64 = switch (o.get("at") orelse std.json.Value.null) {
+                    .integer => |n| n,
+                    else => continue,
+                };
+                var stamp_buf: [32]u8 = undefined;
+                const stamp = trust_log.formatFull(&stamp_buf, at, offset_at(@divFloor(at, std.time.ms_per_s)));
+                try w.print("{s}  {s: <6}  {s: <7}", .{ stamp, str(o.get("action")), str(o.get("source")) });
+                if (o.get("peer")) |peer| if (peer == .object) {
+                    const pid: i64 = switch (peer.object.get("pid") orelse std.json.Value.null) {
+                        .integer => |n| n,
+                        else => 0,
+                    };
+                    try w.print(" (pid {d} ", .{pid});
+                    try writeShown(w, str(peer.object.get("name")));
+                    try w.writeAll(")");
+                };
+                try w.writeAll("  ");
+                if (o.get("host")) |h| {
+                    try writeShown(w, str(h));
+                    try w.writeAll(":");
+                }
+                try writeShown(w, str(o.get("path")));
+                try w.writeAll("\n");
+            }
+            const more = switch (obj.get("more") orelse std.json.Value.null) {
+                .bool => |b| b,
+                else => false,
+            };
+            if (more) try w.print("(older changes not shown — pass --limit up to {d})\n", .{max_log_limit});
             return true;
         },
         .revoke, .forget => {
@@ -220,18 +315,18 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             const shown = if (repo) |r| r.path else path;
             if (!changed) {
                 if (previous) |p| {
-                    try w.print("unchanged: {s} is already {s}", .{ shown, if (std.mem.eql(u8, p, "deny")) "denied" else p });
-                    if (!std.mem.eql(u8, shown, path)) try w.print(" (matched {s})", .{path});
+                    try w.print("unchanged: {f} is already {f}", .{ Shown{ .text = shown }, Shown{ .text = if (std.mem.eql(u8, p, "deny")) "denied" else p } });
+                    if (!std.mem.eql(u8, shown, path)) try w.print(" (matched {f})", .{Shown{ .text = path }});
                     try w.writeAll("\n");
                 } else {
-                    try w.print("unchanged: no decision for {s}\n", .{path});
+                    try w.print("unchanged: no decision for {f}\n", .{Shown{ .text = path }});
                     if (entryOf(obj.get("containing"))) |c|
-                        try w.print("hint: decisions are per repository — {s} ({s}) contains this path\n", .{ c.path, c.decision });
+                        try w.print("hint: decisions are per repository — {f} ({f}) contains this path\n", .{ Shown{ .text = c.path }, Shown{ .text = c.decision } });
                 }
                 return true;
             }
-            try w.print("{s}: {s} (was {s}", .{ if (kind == .revoke) "revoked" else "forgot", shown, previous orelse "?" });
-            if (!std.mem.eql(u8, shown, path)) try w.print("; matched {s}", .{path});
+            try w.print("{s}: {f} (was {f}", .{ if (kind == .revoke) "revoked" else "forgot", Shown{ .text = shown }, Shown{ .text = previous orelse "?" } });
+            if (!std.mem.eql(u8, shown, path)) try w.print("; matched {f}", .{Shown{ .text = path }});
             try w.writeAll(")\n");
             if (!saved) try w.writeAll("warning: not saved to the trust file — this applies to this run only; the previous decision returns on the next launch\n");
             return true;
@@ -249,6 +344,20 @@ fn entryOf(v: ?std.json.Value) ?ShownEntry {
     return .{ .path = str(o.get("path")), .decision = str(o.get("decision")) };
 }
 
+/// 서버가 준 이름(경로·목적지·프로세스 이름)을 터미널에 쓴다 — 제어 문자(ESC 등)는 `?` 로. 신뢰 파일은 탭·개행만 막아 경로에
+/// 이스케이프 시퀀스가 들 수 있고, 그대로 쓰면 사용자의 터미널을 조종한다(적대적 검증 TA2 2회차 — 목록에도 있던 구멍).
+fn writeShown(w: *std.Io.Writer, text: []const u8) !void {
+    for (text) |c| try w.writeByte(if (c < 0x20 or c == 0x7f) '?' else c);
+}
+
+/// `writeShown` 의 `{f}` 꼴 — 문구 안에 섞어 쓸 때.
+const Shown = struct {
+    text: []const u8,
+    pub fn format(self: Shown, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writeShown(w, self.text);
+    }
+};
+
 fn str(v: ?std.json.Value) []const u8 {
     return switch (v orelse return "?") {
         .string => |s| s,
@@ -262,16 +371,19 @@ pub const help =
     \\  maru editor lsp trust list
     \\  maru editor lsp trust revoke <path> [--volume <hex> | --host <dest>]
     \\  maru editor lsp trust forget <path> [--volume <hex> | --host <dest>]
+    \\  maru editor lsp trust log [--limit <n>]
     \\
     \\show or withdraw language server trust decisions of the running Maru.
     \\
     \\  list     every repository with a decision (allow or deny)
     \\  revoke   deny a repository that is allowed now (stops its servers)
     \\  forget   remove the decision (Maru asks again when you next open a file there)
+    \\  log      when and where decisions changed (trust sheet, manage box, CLI with its process, migration)
     \\
     \\options:
     \\  --volume <hex>   pick the repository when the same path has decisions on more than one volume (specify once)
     \\  --host <dest>    a remote (SSH) repository: <dest> as `list` shows it, <path> is the absolute path on that machine
+    \\  --limit <n>      log: the latest <n> changes (1-200, default 50), oldest first, in local time
     \\
     \\exit status 0 also when nothing changed ("unchanged: ..."); 1 on an error.
     \\`..` is folded as text before the path is sent (it is not resolved through symlinks).
@@ -354,37 +466,37 @@ test "lsp trust CLI: 서버 직렬화기의 응답을 그대로 렌더한다 —
             .{ .volume = 1, .path = "/tmp/x", .decision = .deny },
         });
         defer testing.allocator.free(resp);
-        try testing.expect(try renderResponse(testing.allocator, resp, .list, "", &out.writer));
+        try testing.expect(try renderResponse(testing.allocator, resp, .list, "", utcForTest, &out.writer));
     }
     {
         const resp = try clt.serializeList(testing.allocator, .{ .number = 1 }, &.{});
         defer testing.allocator.free(resp);
-        try testing.expect(try renderResponse(testing.allocator, resp, .list, "", &out.writer));
+        try testing.expect(try renderResponse(testing.allocator, resp, .list, "", utcForTest, &out.writer));
     }
     {
         const resp = try clt.serializeOutcome(testing.allocator, .{ .number = 1 }, .allow, true, true, .{ .volume = 1, .path = "/real/p" }, null);
         defer testing.allocator.free(resp);
-        try testing.expect(try renderResponse(testing.allocator, resp, .revoke, "/p", &out.writer));
+        try testing.expect(try renderResponse(testing.allocator, resp, .revoke, "/p", utcForTest, &out.writer));
     }
     {
         const resp = try clt.serializeOutcome(testing.allocator, .{ .number = 1 }, .deny, true, false, .{ .volume = 1, .path = "/p" }, null);
         defer testing.allocator.free(resp);
-        try testing.expect(try renderResponse(testing.allocator, resp, .forget, "/p", &out.writer));
+        try testing.expect(try renderResponse(testing.allocator, resp, .forget, "/p", utcForTest, &out.writer));
     }
     {
         const resp = try clt.serializeOutcome(testing.allocator, .{ .number = 1 }, .deny, false, true, .{ .volume = 1, .path = "/p" }, null);
         defer testing.allocator.free(resp);
-        try testing.expect(try renderResponse(testing.allocator, resp, .revoke, "/p", &out.writer));
+        try testing.expect(try renderResponse(testing.allocator, resp, .revoke, "/p", utcForTest, &out.writer));
     }
     {
         const resp = try clt.serializeOutcome(testing.allocator, .{ .number = 1 }, null, false, true, null, .{ .volume = 1, .path = "/repo", .decision = .allow });
         defer testing.allocator.free(resp);
-        try testing.expect(try renderResponse(testing.allocator, resp, .forget, "/q", &out.writer));
+        try testing.expect(try renderResponse(testing.allocator, resp, .forget, "/q", utcForTest, &out.writer));
     }
     {
         const resp = try clt.serializeUnavailable(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"lsp.trust.list\"}");
         defer testing.allocator.free(resp);
-        try testing.expect(!try renderResponse(testing.allocator, resp, .list, "", &out.writer));
+        try testing.expect(!try renderResponse(testing.allocator, resp, .list, "", utcForTest, &out.writer));
     }
     try testing.expectEqualStrings(
         \\allow  /Users/me/proj  (volume ab)
@@ -401,12 +513,17 @@ test "lsp trust CLI: 서버 직렬화기의 응답을 그대로 렌더한다 —
     , out.written());
 }
 
-test "lsp trust CLI: help 는 동작하는 명령만 — 세 줄, 부여 명령 없음" {
+fn utcForTest(_: i64) i64 {
+    return 0;
+}
+
+test "lsp trust CLI: help 는 동작하는 명령만 — 네 줄, 부여 명령 없음" {
     try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust list\n") != null);
     try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust revoke <path> [--volume <hex> | --host <dest>]\n") != null);
     try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust forget <path> [--volume <hex> | --host <dest>]\n") != null);
     for ([_][]const u8{ "trust grant", "trust allow", "trust add", "trust set" }) |w| try testing.expect(std.mem.indexOf(u8, help, w) == null);
-    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, help, "  maru editor lsp trust "));
+    try testing.expect(std.mem.indexOf(u8, help, "maru editor lsp trust log [--limit <n>]\n") != null);
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, help, "  maru editor lsp trust "));
 }
 
 test "lsp selector rejects repeated volume including zero and hexadecimal case" {
@@ -422,7 +539,7 @@ test "lsp selector rejects repeated volume including zero and hexadecimal case" 
             try testing.expectEqualStrings("/fixture/--volume=b", switch (parsed.request) {
                 .revoke => |t| t.path,
                 .forget => |t| t.path,
-                .list => unreachable,
+                .list, .log => unreachable,
             });
             const length = args.items.len;
             for (seconds) |second| {
@@ -453,7 +570,104 @@ test "maru editor lsp trust --host (계획 workspace-trust WT7a) — 원격 키�
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
     const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"decisions\":[{\"host\":\"openclaw\",\"path\":\"/srv/app\",\"decision\":\"allow\"},{\"volume\":\"1f\",\"path\":\"/l\",\"decision\":\"deny\"}]}}";
-    try std.testing.expect(try renderResponse(std.testing.allocator, resp, .list, "", &out.writer));
+    try std.testing.expect(try renderResponse(std.testing.allocator, resp, .list, "", utcForTest, &out.writer));
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "allow  openclaw:/srv/app\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "deny   /l  (volume 1f)\n") != null);
+}
+
+test "maru editor lsp trust log (계획 workspace-trust-audit TA2) — 파싱·요청은 서버 해석기를 지나고, 서버 직렬화기의 응답을 로컬 시각·출처·상대·원격 키로 찍는다" {
+    const clt = @import("../session/control_lsp_trust.zig");
+    try testing.expectEqual(clt.max_log_limit, max_log_limit);
+    try testing.expectEqual(@as(?u32, null), (try parse(&.{ "trust", "log" })).request.log);
+    try testing.expectEqual(@as(?u32, 7), (try parse(&.{ "trust", "log", "--limit", "7" })).request.log);
+    try testing.expectEqual(@as(?u32, 200), (try parse(&.{ "trust", "log", "--limit=200" })).request.log);
+    try testing.expectError(error.MissingLimitValue, parse(&.{ "trust", "log", "--limit" }));
+    for ([_][]const u8{ "0", "201", "-1", "x", "" }) |v| try testing.expectError(error.InvalidLimitValue, parse(&.{ "trust", "log", "--limit", v }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "trust", "log", "--limit", "3", "--limit", "4" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "trust", "log", "--all" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "trust", "log", "/r" }));
+    // 요청 — 서버의 해석기를 지난다.
+    inline for (.{ @as(?u32, null), @as(?u32, 9) }) |limit| {
+        const bytes = try buildRequestBytes(testing.allocator, .{ .log = limit }, .{ .number = 4 });
+        defer testing.allocator.free(bytes);
+        var pm = try cp.parseMessage(testing.allocator, bytes);
+        defer pm.deinit();
+        try testing.expectEqual(clt.Op.log, clt.opFor(cp.parseMethod(pm.message.request.method).rest).?);
+        try testing.expectEqual(limit orelse clt.default_log_limit, try clt.parseLogParams(pm.message.request.params));
+    }
+    // 응답 — 서버 직렬화기의 출력을 그대로.
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const text = "1791783000000\tallow\tsheet\t-\t1f\t/Users/me/repo\n" ++
+        "1791783061000\tforget\tcontrol\t4321:maru\tssh\topenclaw\t/srv/app\n" ++
+        "1791783122000\tdeny\tmanage\t-\t1f\t/Users/me/repo\n";
+    {
+        const resp = try clt.serializeLog(testing.allocator, .{ .number = 4 }, text, 50);
+        defer testing.allocator.free(resp);
+        const Kst = struct {
+            fn f(_: i64) i64 {
+                return 9 * 3600;
+            }
+        };
+        try testing.expect(try renderResponse(testing.allocator, resp, .log, "", Kst.f, &out.writer));
+    }
+    {
+        const resp = try clt.serializeLog(testing.allocator, .{ .number = 5 }, text, 1);
+        defer testing.allocator.free(resp);
+        try testing.expect(try renderResponse(testing.allocator, resp, .log, "", utcForTest, &out.writer));
+    }
+    {
+        const resp = try clt.serializeLog(testing.allocator, .{ .number = 6 }, "", 50);
+        defer testing.allocator.free(resp);
+        try testing.expect(try renderResponse(testing.allocator, resp, .log, "", utcForTest, &out.writer));
+    }
+    try testing.expectEqualStrings(
+        \\2026-10-12 14:30:00  allow   sheet    /Users/me/repo
+        \\2026-10-12 14:31:01  forget  control (pid 4321 maru)  openclaw:/srv/app
+        \\2026-10-12 14:32:02  deny    manage   /Users/me/repo
+        \\2026-10-12 05:32:02  deny    manage   /Users/me/repo
+        \\(older changes not shown — pass --limit up to 200)
+        \\(no trust changes recorded)
+        \\
+    , out.written());
+}
+
+test "lsp trust CLI: 서버가 준 경로·목적지·프로세스 이름의 제어 문자는 터미널에 그대로 쓰지 않는다 — 목록·기록 (적대적 검증 TA2 2회차)" {
+    const clt = @import("../session/control_lsp_trust.zig");
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    {
+        const resp = try clt.serializeList(testing.allocator, .{ .number = 1 }, &.{
+            .{ .volume = 1, .path = "/r\x1b]0;pwn\x07", .decision = .allow },
+            .{ .volume = 0, .path = "/s\x1b[2J", .decision = .deny, .host = "h\x1bx" },
+        });
+        defer testing.allocator.free(resp);
+        try testing.expect(try renderResponse(testing.allocator, resp, .list, "", utcForTest, &out.writer));
+    }
+    {
+        const resp = try clt.serializeLog(testing.allocator, .{ .number = 2 }, "1000\tforget\tcontrol\t7:a\x1bb\t1\t/r\x1b[31m\n", 50);
+        defer testing.allocator.free(resp);
+        try testing.expect(try renderResponse(testing.allocator, resp, .log, "", utcForTest, &out.writer));
+    }
+    {
+        const resp = try clt.serializeOutcome(testing.allocator, .{ .number = 3 }, .allow, true, true, .{ .volume = 1, .path = "/m\x1b" }, null);
+        defer testing.allocator.free(resp);
+        try testing.expect(try renderResponse(testing.allocator, resp, .revoke, "/q\x1b", utcForTest, &out.writer));
+    }
+    {
+        const resp = try clt.serializeOutcome(testing.allocator, .{ .number = 4 }, null, false, true, null, .{ .volume = 1, .path = "/c\x1b", .decision = .allow });
+        defer testing.allocator.free(resp);
+        try testing.expect(try renderResponse(testing.allocator, resp, .forget, "/q\x1b", utcForTest, &out.writer));
+    }
+    try testing.expect(std.mem.indexOfScalar(u8, out.written(), 0x1b) == null);
+    try testing.expect(std.mem.indexOfScalar(u8, out.written(), 0x07) == null);
+    try testing.expectEqualStrings(
+        \\allow  /r?]0;pwn?  (volume 1)
+        \\deny   h?x:/s?[2J
+        \\1970-01-01 00:00:01  forget  control (pid 7 a?b)  /r?[31m
+        \\revoked: /m? (was allow; matched /q?)
+        \\unchanged: no decision for /q?
+        \\hint: decisions are per repository — /c? (allow) contains this path
+        \\
+    , out.written());
 }

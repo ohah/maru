@@ -20,7 +20,7 @@ pub const agent_events = @import("cli/agent_events.zig"); // RA4: `maru agent-ev
 pub const agent_hooks = @import("cli/agent_hooks.zig"); // RA3: `maru agent-hooks install` — 원격 기계에서 그 기계의 provider 설정에 훅을 심는 인자 해석
 pub const trace = @import("cli/trace.zig"); // `maru trace anonymize` — 캡처 trace의 PII 익명화(fixture 승격용)
 pub const agent_log_record = @import("cli/agent_log_record.zig");
-pub const lsp_trust = @import("cli/lsp_trust.zig"); // WT4b: `maru editor lsp trust list|revoke|forget` (legacy `maru lsp` alias) — 언어 서버 신뢰 조회·철회·잊기(파서·wire·렌더, 부여 없음)
+pub const lsp_trust = @import("cli/lsp_trust.zig"); // WT4b·TA2: `maru editor lsp trust list|revoke|forget|log` (legacy `maru lsp` alias) — 언어 서버 신뢰 조회·철회·잊기·감사 기록(파서·wire·렌더, 부여 없음)
 pub const control_relay = @import("cli/control_relay.zig"); // S10c: `maru control --stdio` — 폰이 SSH 채널로 컨트롤 플레인에 닿는 중계
 pub const control_client = @import("cli/control_client.zig"); // cli/의 **유일한 impure 모듈** — 컨트롤 소켓 발견·connect·auth·왕복(sessions·browser 공유)
 

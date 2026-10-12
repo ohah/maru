@@ -265,6 +265,8 @@ flowchart TD
   없는 tick 도 같은 보류 대상이다 — 적용 직전 준비(채널 비우기)가 실패하면 그 배치를 머리에 둔다. 준비는 통과했는데 해석 순간에
   울타리를 못 잡는 경우는 같은 tick·같은 스레드라 나지 않고, 나면 「없음」이다. 큐를 거치지 않는 첫 snapshot 은 resolver 를 줄 때
   채널을 먼저 비운다. 유지보수 tick 은 화면 배치가 없어도 host 당 한 번 펌프한다(release 가 원장을 돌린다).
+- GUI 의 stream 수명: transport 를 묶는 순간(attach 응답 뒤 stream 이 정해진 직후, 배치를 읽기 전) 그 stream 을 열고, stream drop
+  (`dropBufferedStream` — detach·종료·ended 가 모두 지난다)이 닫는다. 적용한 배치는 놓기 전에 그 배치의 hwm 으로 정리한다.
 - GUI 가 resolver 를 넘기는 길: attachment 의 transport 가 「협상했나」와 「stream·ref 로 해석」을 준다. 적용 하나 동안 사는 ctx 에
   transport 와 그 attachment 의 stream 을 묶어 넘기고(맨 `*Client` 를 쥐지 않는다 — Client 는 generation 노드와 함께 이동한다), 해석은
   Client 의 울타리 든 공개 메서드로 표에 닿는다(표 내용이 봉인 지문에 들어가므로 봉인된 Client 를 바꾸지 않는다).

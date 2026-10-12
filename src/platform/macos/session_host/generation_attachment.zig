@@ -3845,6 +3845,16 @@ test "image channel attachment: a committed generation attachment hands its tran
     var ctx: remote_attachment.ImageResolveCtx = undefined;
     // 아직 payload 가 없다 — 미협상.
     try std.testing.expect(attachment.imageRefResolver(&ctx) == .unnegotiated);
+    // 협상한 연결 — 채널과 표가 attach 전에 있다(connect 가 묶는다).
+    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
+    var channel: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &channel));
+    defer _ = std.c.close(channel[1]);
+    for (channel) |fd| _ = std.c.fcntl(fd, std.c.F.SETFL, @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true })));
+    logical_client.image_channel = .{ .fd = channel[0], .state = .bound };
+    const table = try allocator.create(@import("client_image_segments.zig").Table);
+    table.* = .{};
+    logical_client.image_segments = table;
     const receipt = try attachment.prepareControllerAttach(&adapter, 0x3B22);
     try attachment.binding.beginExecute(receipt);
     attachment.lifecycle = .executing;
@@ -3868,9 +3878,12 @@ test "image channel attachment: a committed generation attachment hands its tran
         .controller_generation = 1,
     }, allocator);
 
+    // 실제 커밋 경로가 그 stream 을 표에 열었다(울타리에 막히지 않았다).
+    try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 0x3B24) != null);
+
     // 협상하지 않은 연결은 미협상, 협상한 연결(이미지 채널 없음 포함)은 그 attachment 의 stream 으로 묶인 채널 resolver.
+    logical_client.image_channel.state = .not_negotiated;
     try std.testing.expect(attachment.imageRefResolver(&ctx) == .unnegotiated);
-    const logical_client = host_adapter_mod.HostAdapter.testing.rawClient(&adapter);
     logical_client.image_channel.state = .unavailable;
     switch (attachment.imageRefResolver(&ctx)) {
         .unnegotiated => return error.TestUnexpectedResult,
@@ -3879,14 +3892,7 @@ test "image channel attachment: a committed generation attachment hands its tran
     try std.testing.expectEqual(@as(u64, 0x3B24), ctx.stream_id);
 
     // 첫 snapshot 의 세그먼트는 attach 응답보다 먼저 올 수 있다 — resolver 를 줄 때 채널을 먼저 비운다.
-    var channel: [2]std.c.fd_t = undefined;
-    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &channel));
-    defer _ = std.c.close(channel[1]);
-    for (channel) |fd| _ = std.c.fcntl(fd, std.c.F.SETFL, @as(c_int, @bitCast(std.c.O{ .NONBLOCK = true })));
-    logical_client.image_channel = .{ .fd = channel[0], .state = .bound };
-    const table = try allocator.create(@import("client_image_segments.zig").Table);
-    table.* = .{};
-    logical_client.image_segments = table;
+    logical_client.image_channel.state = .bound;
     try sendImageChannelTestSegment(channel[1], 1, 0x3B24);
     try std.testing.expectEqual(@as(usize, 0), table.len);
     try std.testing.expect(attachment.imageRefResolver(&ctx) != .unnegotiated);
@@ -3895,8 +3901,10 @@ test "image channel attachment: a committed generation attachment hands its tran
     try sendImageChannelTestSegment(channel[1], 2, 0x3B24);
     try std.testing.expect(try adapter.pumpImageChannel());
     try std.testing.expectEqual(@as(usize, 2), table.len);
-    logical_client.image_channel.state = .not_negotiated;
+    // 실제 teardown(stream drop)이 그 stream 을 닫고 남은 세그먼트를 반환한다.
     try std.testing.expectEqual(DeinitOutcome.cleaned, attachment.tryDeinit(&adapter));
+    try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 0x3B24) == null);
+    try std.testing.expectEqual(@as(usize, 0), table.len);
 }
 
 test "CR3a-2e 원복은 typed reject 뒤 row와 pin과 batch를 terminal로 정리한다" {

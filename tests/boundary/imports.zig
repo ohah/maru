@@ -419,6 +419,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "poison", .receiver_type = mutable, .class = .guarded },
         .{ .name = "pumpImageChannel", .receiver_type = mutable, .class = .guarded },
         .{ .name = "resolveImageSegment", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "openImageStream", .receiver_type = mutable, .class = .guarded },
+        .{ .name = "sweepImageSegments", .receiver_type = mutable, .class = .guarded },
         .{ .name = "markDeferredPoisonForTest", .receiver_type = mutable, .class = .guarded },
         .{ .name = "firstPoisonReason", .receiver_type = immutable, .class = .guarded },
         .{ .name = "canTerminalizeSharedConnectionNoDestroy", .receiver_type = mutable, .class = .guarded },
@@ -590,6 +592,8 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .receiver = "terminalizeSharedConnectionNoDestroy", .funnel = "terminalizeSharedConnectionNoDestroy", .gate = "beginPublicMutation" },
         .{ .receiver = "pumpImageChannel", .funnel = "pumpImageChannel", .gate = "requireBlockingMode" },
         .{ .receiver = "resolveImageSegment", .funnel = "resolveImageSegment", .gate = "requireBlockingMode" },
+        .{ .receiver = "openImageStream", .funnel = "openImageStream", .gate = "requireBlockingMode" },
+        .{ .receiver = "sweepImageSegments", .funnel = "sweepImageSegments", .gate = "requireBlockingMode" },
     };
     try expectGuardedClientReceiverPolicies(allocator, source, &manifest, &guarded);
     const client_path = "src/platform/macos/session_host/client.zig";
@@ -1311,6 +1315,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 메서드로만 바꾼다(봉인 지문) — transport·slot·adapter 는 이 둘만 부른다.
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "imageShmNegotiated" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "resolveImageSegment" },
+                // stream 수명·hwm 정리(IC3b-2b-2, 2026-10-12): attach 가 정한 stream 을 표에 여는 하나와 적용한 배치의 hwm 으로
+                // 정리하는 하나. 닫기는 기존 stream drop(`dropBufferedStream`)이 한다.
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "openImageStream" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sweepImageSegments" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.
@@ -1677,6 +1685,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpAttachmentImageChannel" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "attachmentImageAccessAllowed" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "currentPumpImageChannel" },
+                // stream 수명·hwm 정리(IC3b-2b-2): 같은 접근 규칙 아래 Client 의 열기·정리로 전달하는 둘.
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "openAttachmentImageStream" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sweepAttachmentImageSegments" },
                 // post snapshot 을 쓴 판정자의 번호(2026-10-02) — 판정자 빌드 전용(`void`). 앞선 판정자가 남긴 snapshot 이 실행
                 // 순서에 따라 뒤 판정자의 «아직 게시 안 됨» 단언을 깨던 것을 UI 프레임 도장과 같은 장치로 순서와 무관하게 닫는다.
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_post_snapshot_test_generation" },
@@ -8691,8 +8702,9 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         countOccurrences(runtime, "        .context = client,"),
     );
     try std.testing.expectEqual(
-        // legacy transport 의 콜백 여섯 — 배치 읽기·stream 버리기·fail-close 와 이미지 협상·해석(IC3b-2a)·적용 준비(IC3b-2b-1).
-        @as(usize, 6),
+        // legacy transport 의 콜백 여덟 — 배치 읽기·stream 버리기·fail-close 와 이미지 협상·해석(IC3b-2a)·적용 준비(IC3b-2b-1)·
+        // stream 열기·hwm 정리(IC3b-2b-2).
+        @as(usize, 8),
         countOccurrences(
             runtime,
             "const client: *client_mod.Client = @ptrCast(@alignCast(context));",

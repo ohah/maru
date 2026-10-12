@@ -7454,6 +7454,26 @@ pub const Client = struct {
         return true;
     }
 
+    /// attach 가 정한 stream 을 이 연결의 표에 연다(이미지 채널 §6) — 응답을 읽는 순서대로. 표를 바꾸므로 다른 공개 변경
+    /// 메서드와 같은 울타리를 든다. 못 들면 열지 않는데 **무해하지 않다** — 그 stream 은 「닫힌 stream」이 되어 세그먼트가 받는
+    /// 즉시 반환되고 그 stream 의 `image_ref` 가 해석되지 않아 연결이 재접속한다. 제품의 커밋 경로(generation 은 실행 연산이 끝난
+    /// 뒤, legacy 는 blocking 모드)는 막히지 않는다 — 실제 HostAdapter 판정자가 잰다. 붙은 stream 이 상한을 넘으면 host 상한 위반이라
+    /// poison 한다(host 상한과 같아 정상은 안 난다).
+    pub fn openImageStream(self: *Client, stream_id: u64) void {
+        const operation_fence_held = self.requireBlockingMode() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
+        const segments = self.image_segments orelse return;
+        segments.openStream(stream_id) catch self.poison(.peer_contract_violation);
+    }
+
+    /// 적용한 배치의 `image_seg_hwm` 이하로 그 stream 에 남은 세그먼트를 반환한다(§6). 울타리를 못 들면 다음 배치의 hwm 이 치운다.
+    pub fn sweepImageSegments(self: *Client, stream_id: u64, hwm: u64) void {
+        const operation_fence_held = self.requireBlockingMode() catch return;
+        defer if (operation_fence_held) self.endPublicMutation();
+        const segments = self.image_segments orelse return;
+        segments.sweep(stream_id, hwm);
+    }
+
     /// 이 연결이 `image_shm` 을 협상했는가(이미지 채널 §2·§6). 협상했으면 채널이 없어도(「이미지 채널 없음」) 적용 자리는 채널
     /// resolver 를 넘긴다 — host 가 그 연결에 `image_ref` 를 낼 수 있다.
     pub fn imageShmNegotiated(self: *const Client) bool {
@@ -12368,6 +12388,9 @@ pub const Client = struct {
         const operation_fence_held = self.beginPublicMutation() catch return;
         defer if (operation_fence_held) self.endPublicMutation();
         if (checkedAllocatorReentry(self)) return;
+        // stream 이 detach·종료됐다 — 이미지 표에서도 닫는다(§6). 그 stream 의 항목을 반환하고 늦게 온 세그먼트는 받는 즉시
+        // 반환된다(닫기 전에 채널을 비우지 않아도 된다). 아래 이벤트 검증이 poison 하더라도 먼저 닫는다.
+        if (self.image_segments) |segments| segments.closeStream(stream_id);
         // Validate every GUI event before changing earlier batch/stream owners. A corrupted event
         // must not turn a per-stream drop into a mismatched free or a partially mutated graph.
         if (self.pending_events.items.len != 0 and
@@ -26979,6 +27002,38 @@ test "image channel pump: resolveImageSegment maps a pumped segment once, for it
     second.segment_id = 2;
     try testing.expect((try fx.client.resolveImageSegment(3, second)) == null);
     try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
+}
+
+test "image channel pump: an opened stream keeps its segments until its hwm sweep or its stream drop returns them, and only behind the fence" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    const segments = fx.client.image_segments.?;
+    fx.client.openImageStream(3);
+    try testing.expect(std.mem.indexOfScalar(u64, segments.liveStreams(), 3) != null);
+    try fx.sendSegment(1, 3, 1);
+    try fx.sendSegment(2, 3, 1);
+    try testing.expect(fx.client.pumpImageChannel());
+    try testing.expectEqual(@as(usize, 2), segments.len);
+    // hwm 1 이하만 반환한다 — 세그먼트 2 는 아직 쓰일 수 있다.
+    fx.client.sweepImageSegments(3, 1);
+    try testing.expectEqual(@as(usize, 1), segments.len);
+    // stream drop 이 그 stream 을 닫고 남은 항목을 반환한다.
+    fx.client.dropBufferedStream(3);
+    try testing.expect(std.mem.indexOfScalar(u64, segments.liveStreams(), 3) == null);
+    try testing.expectEqual(@as(usize, 0), segments.len);
+    try testing.expectEqual(@as(u64, 3), segments.max_known_stream);
+
+    // 울타리: poison 된 연결은 열지도 정리하지도 않는다.
+    fx.client.openImageStream(4);
+    try fx.sendSegment(3, 4, 1);
+    try testing.expect(fx.client.pumpImageChannel());
+    try testing.expectEqual(@as(usize, 1), segments.len);
+    fx.client.poison(.peer_contract_violation);
+    fx.client.openImageStream(9);
+    try testing.expect(std.mem.indexOfScalar(u64, segments.liveStreams(), 9) == null);
+    fx.client.sweepImageSegments(4, 3);
+    try testing.expectEqual(@as(usize, 1), segments.len);
 }
 
 test "image channel pump: an external-mode client is not pumped, so its sealed state does not move" {

@@ -272,7 +272,9 @@ fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOf
     var buf: [512]u8 = undefined;
     for (covering[0..n]) |d| {
         try appendLine(self, diagnosticText(d, &buf), .surface_fg);
-        const source: []const u8 = if (d.source == .syntax) "" else server_name;
+        // 진단이 든 서버 이름 — 한 문서에 서버가 여럿이면(보조 서버 §8.2u) 그 진단을 낸 서버다(문법의 주 서버 이름이면 ruff 의 진단이
+        // 「pyright」로 보인다). 이름이 없는 진단(판정자가 직접 채운 목록)만 문법의 주 서버 이름으로 물러선다.
+        const source: []const u8 = if (d.source == .syntax) "" else if (d.server.len > 0) d.server else server_name;
         if (source.len == 0 and d.code.len == 0) continue;
         var src_buf: [256]u8 = undefined;
         const src_line = if (source.len > 0 and d.code.len > 0)

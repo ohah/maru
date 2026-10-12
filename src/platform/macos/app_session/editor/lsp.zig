@@ -42,6 +42,7 @@ const editor_symbols = @import("symbols.zig");
 const editor_highlight = @import("highlight.zig");
 const editor_smart_select = @import("smart_select.zig");
 const editor_code_action = @import("code_action.zig");
+const external_formatter = @import("external_formatter.zig"); // 저장소 설정 감지가 보는 파일 시스템(보조 서버 §8.2u)
 
 pub const Phase = enum {
     /// 실행 파일을 못 찾았다(PATH·통상 설치 위치) — 상태바 「설치」. 사용자 셸 환경을 못 읽었으면(`tool_env` 실패) 그렇다고 보이고
@@ -117,9 +118,17 @@ const OpenDoc = struct {
     }
 };
 
+/// 클라이언트의 역할(tooling §8.2u) — 주 서버는 그 문법의 모든 기능을, 보조 서버(린트)는 진단과 code action 만 맡는다.
+pub const Role = enum { primary, auxiliary };
+
 pub const Client = struct {
     root: []u8,
     server: lsp.servers.Server,
+    role: Role = .primary,
+    /// 보조 서버의 저장소 안 실행 파일(절대 경로, 소유 — 그 클라이언트를 세운 문서의 폴더에서 루트까지 `.venv/bin` 등). 없으면 PATH 의 이름.
+    local_exe: ?[]u8 = null,
+    /// 보조 서버를 띄운 까닭인 저장소 설정 파일(절대 경로, 소유 — 정보 명령이 보인다).
+    aux_config: ?[]u8 = null,
     phase: Phase = .missing,
     proc: ?lsp_process.Process = null,
     inbuf: std.ArrayList(u8) = .empty,
@@ -220,6 +229,8 @@ pub const Client = struct {
         if (self.launched_path) |p| allocator.free(p);
         if (self.server_name) |n| allocator.free(n);
         if (self.server_version) |v| allocator.free(v);
+        if (self.local_exe) |p| allocator.free(p);
+        if (self.aux_config) |p| allocator.free(p);
         allocator.free(self.root);
     }
 
@@ -295,6 +306,8 @@ pub const State = struct {
     sent_changes: u64 = 0,
     received_diagnostics: u64 = 0,
     rejected_requests: u64 = 0,
+    /// 판정자 관측: 보조 서버가 보낸 청하지 않은 응답(진단·code action 밖)을 버린 수(§8.2u).
+    aux_dropped_responses: u64 = 0,
     /// 판정자 관측: 보낸 hover 요청 수·받은 hover 응답 수(§8.2b).
     sent_hovers: u64 = 0,
     received_hovers: u64 = 0,
@@ -843,10 +856,19 @@ fn clearClientDiagnostics(self: *AppSession, c: *Client) void {
     for (c.docs.items) |d| for (self.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
         if (!d.matches(term)) continue;
         const diags = &term.rt.editor_diagnostics;
-        diags.lsp.clearRetainingCapacity();
-        diags.lsp_messages.clearRetainingCapacity();
+        // 그 서버의 칸만(보조 서버 §8.2u — 주 서버를 내려도 ruff 의 밑줄은 남는다).
+        const set = serverDiagnostics(diags, c) orelse continue;
+        set.list.clearRetainingCapacity();
+        set.messages.clearRetainingCapacity();
         diags.lsp_dirty = true;
     };
+}
+
+/// 그 클라이언트의 진단 칸 — 주 서버는 `lsp`, 보조 서버는 그 실행 파일 이름의 칸(없으면 잡는다; 칸이 모자라면 `null`).
+fn serverDiagnostics(diags: *editor_ops.diagnostics.State, c: *const Client) ?struct { list: *std.ArrayList(diagnostic.Diagnostic), messages: *std.ArrayList(u8) } {
+    if (c.role == .primary) return .{ .list = &diags.lsp, .messages = &diags.lsp_messages };
+    const set = diags.auxSet(c.server.exe) orelse return null;
+    return .{ .list = &set.list, .messages = &set.messages };
 }
 
 /// 모달이 **답 없이** 닫혔다(다른 모달이 덮었다·앱이 끝난다) — 기억하지 않는다. 클라이언트는 다시 물을 수 있게 되돌린다.
@@ -1015,6 +1037,8 @@ pub fn showServerInfo(self: *AppSession) void {
         break :blk maru.i18n.t(if (cl.phase == .starting) .lsp_info_version_pending else .lsp_info_version_unknown);
     } else maru.i18n.t(.lsp_info_not_running);
     printLine(&w, version_line);
+    // ②-b 보조 서버(§8.2u) — 서버마다 한 줄(상태·설정 파일·실행 파일). 알림은 6 행에서 끝부터 잘리므로 주 서버의 저장소·경로 줄보다 앞이다.
+    if (root) |r| printAuxLines(self, &w, term, r);
     // 묻는 root 일 때만 저장소·실행 파일 줄을 둔다 — 묻지 않는 root(저장소 밖·홈, root 를 못 구함)는 상태 줄이 그 이유를 말하고, 그 폴더를
     // 「저장소」라 하면 「저장소 안」 판정이 거짓이며(홈이면 홈 아래 모든 실행 파일) 셸 환경도 읽지 않아 「읽은 뒤에 찾습니다」는 오지 않을
     // 약속이다(적대적 검증). 둘 다 본다 — phase 만 보면 gate 가 root 를 보기 전(첫 pump 전·클릭 직후)에 새고, 지금의 root 만 보면 gate 가
@@ -1055,6 +1079,39 @@ pub fn showServerInfo(self: *AppSession) void {
         printLine(&w, e.path_line);
     } else printLine(&w, maru.i18n.t(if (running == null and !tool_env.settled()) .lsp_info_exe_pending else .lsp_info_exe_missing));
     self.showNotice(w.buffered());
+}
+
+/// 정보 명령의 보조 서버 줄(§8.2u): 「보조 서버 ‹상태› — 설정 ‹루트 기준 경로› · ‹실행 파일›」. 떠 있으면 띄운 경로, 아니면 지금 찾아 낸 경로
+/// (셸 환경을 담기 전에는 찾지 않는다). 경로는 저장소 안이면 루트 기준, 밖이면 홈을 `~` 로.
+fn printAuxLines(self: *AppSession, w: *std.Io.Writer, term: *Term, root: []const u8) void {
+    const set = auxiliariesFor(self, term, root);
+    for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
+        if (!set.contains(aux.tool)) continue;
+        const c = clientFor(self, root, aux.server);
+        var status_buf: [status_text_cap]u8 = undefined;
+        const status = statusText(.{ .phase = if (c) |cl| cl.phase else .restarting, .exe = aux.tool.displayName() }, &status_buf);
+        var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cfg_abs: []const u8 = if (c) |cl| (cl.aux_config orelse "") else (auxConfigFor(self, term, root, aux.tool, &cfg_buf) orelse "");
+        var cfg_show: [std.fs.max_path_bytes]u8 = undefined;
+        var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+        const exe: ?[]const u8 = if (c) |cl|
+            (if (cl.proc != null and cl.launched_path != null) cl.launched_path.? else if (tool_env.settled()) locateFor(cl, tool_env.path(), &pbuf) else null)
+        else
+            null;
+        var exe_show: [std.fs.max_path_bytes]u8 = undefined;
+        var line_buf: [status_text_cap + 2 * std.fs.max_path_bytes + 64]u8 = undefined;
+        const cfg_text = repoRelative(cfg_abs, root, &cfg_show);
+        printLine(w, if (exe) |e|
+            maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_aux), &.{ .{ .s = status }, .{ .s = cfg_text }, .{ .s = repoRelative(e, root, &exe_show) } })
+        else
+            maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_aux_no_exe), &.{ .{ .s = status }, .{ .s = cfg_text } }));
+    }
+}
+
+/// 저장소 안 경로는 루트 기준으로, 밖이면 홈을 `~` 로 줄여(정보 줄).
+fn repoRelative(path: []const u8, root: []const u8, buf: []u8) []const u8 {
+    if (maru.session.repo_path.underRoot(path, root) and path.len > root.len + 1) return path[root.len + 1 ..];
+    return app_session_mod.homeTildeInto(path, buf);
 }
 
 /// 그 서버가 읽는 자리에 있는 저장소 설정 파일(계획 workspace-trust WT5b-3 — `lsp.config_files`): 루트 기준 상대 경로를 쉼표로. `doc_path` 의
@@ -1432,6 +1489,10 @@ pub fn serverFor(self: *AppSession, g: maru.session.editor.language.Grammar) ?ls
 
 /// 「없음」인 클라이언트가 다른 후보의 설치를 볼 수 있게 — 다시 골라 달라졌으면 그 서버로 바꾼다(프로세스는 아직 없으니 이름만 바뀐다). 바뀌었으면 true.
 fn repickIfMissing(self: *AppSession, c: *Client) bool {
+    // 보조 서버는 후보가 하나다 — 문법의 주 서버로 바꾸면 안 된다(§8.2u). Python(AS1)에선 주 서버 클라이언트가 늘 먼저 있어 아래
+    // `clientFor` 가 막아 등가지만, 주 서버 후보가 여럿인 TS 에 ESLint 가 붙으면(계획 editor-auxiliary-servers AS3) 다시 고른 후보의
+    // 클라이언트가 아직 없을 때 보조 클라이언트가 tsgo 로 바뀐다.
+    if (c.role == .auxiliary) return false;
     const g = c.grammar;
     if (g == .none) return false;
     self.editor_lsp.resolved.set(g, null);
@@ -1462,6 +1523,56 @@ fn ensureClient(self: *AppSession, root: []const u8, server: lsp.servers.Server,
     return &self.editor_lsp.clients.items[self.editor_lsp.clients.items.len - 1];
 }
 
+/// 그 문서의 보조 서버 클라이언트(§8.2u) — `(root, exe)` 로 찾고, 없으면 그 문서의 폴더에서 저장소 실행 파일을 찾아 세운다(저장소 먼저,
+/// 그다음 PATH — 2026-10-13 사용자 결정). `config` 는 감지한 설정 파일.
+fn ensureAuxClient(self: *AppSession, root: []const u8, aux: lsp.auxiliary.Auxiliary, term: *Term, config: []const u8) ?*Client {
+    if (clientFor(self, root, aux.server)) |c| return c;
+    const owned = self.allocator.dupe(u8, root) catch return null;
+    var c: Client = .{ .root = owned, .server = aux.server, .role = .auxiliary, .phase = .restarting, .grammar = term.rt.editor_grammar };
+    c.aux_config = self.allocator.dupe(u8, config) catch null;
+    if (termPath(term)) |path| {
+        const fs: external_formatter.RealFs = .{ .io = self.io };
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        if (maru.session.editor.external_format.findLocalBinIn(fs, aux.bin_dirs, aux.server.exe, std.fs.path.dirname(path) orelse root, root, &buf)) |p|
+            c.local_exe = self.allocator.dupe(u8, p) catch null;
+    }
+    self.editor_lsp.clients.append(self.allocator, c) catch {
+        c.deinit(self.allocator);
+        return null;
+    };
+    return &self.editor_lsp.clients.items[self.editor_lsp.clients.items.len - 1];
+}
+
+/// 그 문서의 보조 서버들 — 저장소 설정을 찾은 것(문서마다 처음 한 번 감지해 굳힌다). 설정 파일 경로는 `config_out` 에 도구마다.
+fn auxiliariesFor(self: *AppSession, term: *Term, root: []const u8) std.EnumSet(lsp.auxiliary.Tool) {
+    if (term.rt.editor_lsp_aux) |set| return set;
+    var set: std.EnumSet(lsp.auxiliary.Tool) = .initEmpty();
+    const path = termPath(term) orelse return set;
+    const fs: external_formatter.RealFs = .{ .io = self.io };
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
+        if (lsp.auxiliary.detect(fs, aux.tool, std.fs.path.dirname(path) orelse root, root, &buf) != null) set.insert(aux.tool);
+    }
+    term.rt.editor_lsp_aux = set;
+    return set;
+}
+
+/// 보조 서버의 설정 파일(정보·클라이언트 세우기) — 감지를 다시 돈다(설정 경로는 굳히지 않는다; 문서마다 한 번 세울 때만 부른다).
+fn auxConfigFor(self: *AppSession, term: *Term, root: []const u8, tool: lsp.auxiliary.Tool, buf: *[std.fs.max_path_bytes]u8) ?[]const u8 {
+    const path = termPath(term) orelse return null;
+    const fs: external_formatter.RealFs = .{ .io = self.io };
+    return lsp.auxiliary.detect(fs, tool, std.fs.path.dirname(path) orelse root, root, buf);
+}
+
+/// 그 클라이언트의 실행 파일을 찾는다 — 보조 서버의 저장소 실행 파일이 있으면 그것(실행할 수 있을 때), 아니면 `path` 에서 이름으로.
+fn locateFor(c: *const Client, path: []const u8, buf: []u8) ?[]const u8 {
+    if (c.local_exe) |p| if (p.len <= buf.len and external_formatter.isExecutableFile(p)) {
+        @memcpy(buf[0..p.len], p);
+        return buf[0..p.len];
+    };
+    return lsp_process.locate(c.server.exe, path, buf);
+}
+
 fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     if (!trustKeyHolds(self, c)) return;
     // 환경을 담기 전에는 띄우지 않는다(gate 가 먼저 막지만 문서 없이 재시작을 기다리던 클라이언트도 여기로 온다). 이 저장소는 신뢰했다 —
@@ -1473,7 +1584,7 @@ fn spawnClient(self: *AppSession, c: *Client, now_ms: u64) void {
     };
     c.root_env_wait = false;
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const exe = lsp_process.locate(c.server.exe, view.path, &pbuf) orelse {
+    const exe = locateFor(c, view.path, &pbuf) orelse {
         c.phase = .missing;
         return;
     };
@@ -1740,7 +1851,19 @@ fn drainFrames(self: *AppSession, c: *Client, now_ms: u64) void {
 fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
     var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, body, .{}) catch return;
     defer parsed.deinit();
-    switch (lsp.rpc.classify(parsed.value)) {
+    const kind = lsp.rpc.classify(parsed.value);
+    // 보조 서버(§8.2u)에는 진단·code action 만 묻는다 — 그 밖의 응답은 **청하지 않은 것**이다. seq 는 클라이언트마다 따로 세므로 그대로
+    // 넘기면 주 서버의 hover·완성 대기를 번호가 같은 보조 서버의 응답이 채운다.
+    if (c.role == .auxiliary and kind == .response) {
+        switch (kind.response.id) {
+            .initialize, .shutdown => {},
+            else => {
+                self.editor_lsp.aux_dropped_responses += 1;
+                return;
+            },
+        }
+    }
+    switch (kind) {
         .response => |r| switch (r.id) {
             .initialize => {
                 if (r.is_error) {
@@ -1775,9 +1898,13 @@ fn handleFrame(self: *AppSession, c: *Client, body: []const u8) void {
                 defer self.allocator.free(msg);
                 _ = send(self, c, msg);
                 // 서버별 설정 블롭(§8.2n 「서버 설정」) — TS 계열은 힌트를 켜야 낸다. `initialized` 뒤 한 번.
-                if (lsp.rpc.didChangeConfigurationFor(self.allocator, c.server.language_id) catch null) |cfg| {
-                    defer self.allocator.free(cfg);
-                    if (send(self, c, cfg)) self.editor_lsp.sent_configs += 1;
+                // 보조 서버(§8.2u)에는 보내지 않는다 — 그 블롭은 언어(`language_id`)의 주 서버 것이다. ruff(AS1)의 `python` 엔 블롭이 없어
+                // 등가지만, ESLint(계획 editor-auxiliary-servers AS3)의 `javascript` 엔 TS 의 힌트 설정이 간다.
+                if (c.role == .primary) {
+                    if (lsp.rpc.didChangeConfigurationFor(self.allocator, c.server.language_id) catch null) |cfg| {
+                        defer self.allocator.free(cfg);
+                        if (send(self, c, cfg)) self.editor_lsp.sent_configs += 1;
+                    }
                 }
                 self.metal_dirty = true;
             },
@@ -1917,11 +2044,14 @@ fn onPublishDiagnostics(self: *AppSession, c: *Client, params: ?std.json.Value) 
             .integer => |n| if (n != @as(i64, @intCast(term.rt.editorDocument().notifications.lsp_version))) continue,
             else => {},
         };
-        accepted = true;
         const st = &term.rt.editor_diagnostics;
-        st.lsp.clearRetainingCapacity();
-        st.lsp_messages.clearRetainingCapacity();
-        _ = lsp.position.appendDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding, &st.lsp, &st.lsp_messages) catch {};
+        // 그 서버의 칸만 갈아 끼운다(§8.2u — 한 문서에 서버가 여럿이면 다른 서버의 진단을 지우지 않는다).
+        const set = serverDiagnostics(st, c) orelse continue;
+        accepted = true;
+        set.list.clearRetainingCapacity();
+        set.messages.clearRetainingCapacity();
+        _ = lsp.position.appendDiagnostics(self.allocator, p, opened.file.content, opened.file.lines, c.encoding, set.list, set.messages) catch {};
+        for (set.list.items) |*d| d.server = c.server.exe; // 호버의 `출처(코드)` — 그 진단을 낸 서버(표의 정적 이름)
         st.lsp_dirty = true;
     };
     if (accepted) {
@@ -1940,17 +2070,23 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) continue;
+                // 보조 서버(§8.2u)가 있는 문법은 늘 주 서버 표도 있다 — 설치되지 않았어도 `serverFor` 는 첫 후보를 낸다(「없음」으로 선다).
                 const server = serverFor(self, term.rt.editor_grammar) orelse continue;
                 const root = rootFor(self, term) orelse continue;
-                const c = ensureClient(self, root, server, term.rt.editor_grammar) orelse continue;
-                seen.put(self.allocator, term.surfaceId(), {}) catch return;
-                // 시작/재연결·크기 제한 중에도 살아 있는 뷰가 연결의 수명을 유지한다.
-                if (c.findDoc(term)) |doc| doc.surface_id = term.surfaceId();
-                if (c.docs.items.len == 0 and c.idle_since_ms != 0) c.idle_since_ms = 0;
-                if (c.retry_at_ms == std.math.maxInt(u64)) c.retry_at_ms = 0; // 잠들어 있던 서버를 깨운다
-                gateTrust(self, c, termPath(term));
-                if (c.phase != .ready) continue;
-                syncOne(self, c, term, .coalesce);
+                if (ensureClient(self, root, server, term.rt.editor_grammar)) |c| {
+                    seen.put(self.allocator, term.surfaceId(), {}) catch return;
+                    attachDocument(self, c, term);
+                }
+                // 보조 서버(§8.2u) — 저장소 설정을 찾은 것마다 같은 길. 주 서버가 설치되지 않아도(「없음」) 뜬다.
+                const aux_set = auxiliariesFor(self, term, root);
+                for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
+                    if (!aux_set.contains(aux.tool)) continue;
+                    var cfg_buf: [std.fs.max_path_bytes]u8 = undefined;
+                    const c = clientFor(self, root, aux.server) orelse
+                        ensureAuxClient(self, root, aux, term, auxConfigFor(self, term, root, aux.tool, &cfg_buf) orelse "") orelse continue;
+                    seen.put(self.allocator, term.surfaceId(), {}) catch return;
+                    attachDocument(self, c, term);
+                }
             }
         }
     }
@@ -1975,6 +2111,17 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
         }
         if (c.docs.items.len == 0 and c.idle_since_ms == 0) c.idle_since_ms = now_ms;
     }
+}
+
+/// 그 문서를 그 클라이언트에 붙인다 — 신뢰 게이트를 거쳐, 준비됐으면 열거나 바뀐 것을 보낸다(tick 의 동기화).
+fn attachDocument(self: *AppSession, c: *Client, term: *Term) void {
+    // 시작/재연결·크기 제한 중에도 살아 있는 뷰가 연결의 수명을 유지한다.
+    if (c.findDoc(term)) |doc| doc.surface_id = term.surfaceId();
+    if (c.docs.items.len == 0 and c.idle_since_ms != 0) c.idle_since_ms = 0;
+    if (c.retry_at_ms == std.math.maxInt(u64)) c.retry_at_ms = 0; // 잠들어 있던 서버를 깨운다
+    gateTrust(self, c, termPath(term));
+    if (c.phase != .ready) return;
+    syncOne(self, c, term, .coalesce);
 }
 
 /// 신뢰 게이트(§8.2a): 결정이 없으면 묻고(모달 하나만 — 다른 root 는 기다린다), 거부면 `denied`, 허용이면 띄울 수 있게 둔다.
@@ -2015,7 +2162,7 @@ fn gateTrust(self: *AppSession, c: *Client, doc_path: ?[]const u8) void {
     // 사용자 셸 환경의 PATH 로 찾는다. 찾기는 실행이 아니므로 저장소 아래 PATH 항목도 거르지 않는다 — 거르면 저장소 안에 설치한 서버가
     // 늘 「없음」이라 신뢰를 묻지도 못한다(LSPB9 가 드러냈다). 찾은 경로는 신뢰 시트의 실행 파일 줄이 보인다(계획 WT5a).
     var pbuf: [std.fs.max_path_bytes]u8 = undefined;
-    const located = lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) orelse blk: {
+    const located = locateFor(c, tool_env.path(), &pbuf) orelse blk: {
         // 이미 신뢰한 저장소면 그 저장소의 셸 환경으로도 찾는다(계획 WT5b-2 — nix·devbox 처럼 저장소 셸에서만 생기는 서버). 신뢰 전에는
         // 그 저장소의 훅을 돌리지 않는다 — 결정이 허용일 때만(「다시 묻기」 중도 아니다). 읽는 중이면 그 환경을 기다린다.
         if (repoEnvironmentEnabled(self) and !c.reask and trustOf(self, key) == .allow) {
@@ -2024,13 +2171,13 @@ fn gateTrust(self: *AppSession, c: *Client, doc_path: ?[]const u8) void {
                 c.root_env_wait = true;
                 return;
             };
-            if (lsp_process.locate(c.server.exe, view.path, &pbuf)) |p| break :blk p;
+            if (locateFor(c, view.path, &pbuf)) |p| break :blk p;
         }
         if (!repickIfMissing(self, c)) {
             c.phase = .missing;
             return;
         }
-        break :blk lsp_process.locate(c.server.exe, tool_env.path(), &pbuf) orelse {
+        break :blk locateFor(c, tool_env.path(), &pbuf) orelse {
             c.phase = .missing;
             return;
         };
@@ -2753,6 +2900,7 @@ pub fn activateStatus(self: *AppSession) void {
                 if (!std.mem.eql(u8, r, root)) continue;
                 self.allocator.free(r);
                 t.rt.editor_lsp_root = null;
+                t.rt.editor_lsp_aux = null; // root 가 바뀌면 설정을 찾는 범위도 바뀐다(§8.2u)
             };
             for (self.editor_lsp.clients.items) |*o| {
                 if (!std.mem.eql(u8, o.root, root) or (o.phase != .home_root and o.phase != .outside_repo)) continue;

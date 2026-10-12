@@ -48,6 +48,10 @@
 //!   죽이기 **전에** stdin 을 닫아 스스로 내려갈 기회를 줬는지 본다.
 //!   `MARU_FAKE_LSP_INIT=silent` — `initialize` 에 답하지 않는다 · `=error` — 오류로 답한다.
 //!   `MARU_FAKE_LSP_STOPREAD=1` — `initialize` 에 답한 뒤 stdin 을 **더 읽지 않는다**(멈춘 서버 — 클라이언트의 쓰기가 밀린다).
+//! - **보조 서버 역할**(tooling §8.2u): 첫 인자가 `server`(보조 서버 표의 `ruff server`)면 보조 서버로 선다 — 진단 message 가 `aux: <version>`·
+//!   code `A1`(주 서버와 갈라 보인다). 본문에 `AUXQUIET` 이 있으면 보조 서버는 **빈** 진단을 낸다(한 서버의 publish 가 다른 서버의 칸을 안
+//!   지우는지). didChange 본문에 `AUXSPOOF` 가 있으면 **청하지 않은 hover 응답**(id `1e8+1`)을 보낸다(보조 서버의 응답이 주 서버의
+//!   대기를 못 채우는지).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
 
 const std = @import("std");
@@ -136,8 +140,11 @@ fn markEof(dir: [*:0]const u8) void {
 /// `MARU_FAKE_LSP_STOPREAD` — initialize 에 답한 뒤 서버가 stdin 읽기를 멈춘다.
 var stop_reading = false;
 
-pub fn main() void {
+pub fn main(init: std.process.Init) void {
     const allocator = std.heap.c_allocator;
+    if (init.minimal.args.toSlice(allocator)) |argv| {
+        auxiliary = argv.len > 1 and std.mem.eql(u8, argv[1], "server");
+    } else |_| {}
     const noise = "fake: stderr noise\n";
     _ = std.c.write(2, noise.ptr, noise.len);
     if (std.c.getenv("MARU_FAKE_LSP_GRANDCHILD")) |pid_path| spawnGrandchild(pid_path);
@@ -168,6 +175,8 @@ pub fn main() void {
 }
 
 var answered = false;
+/// 보조 서버 역할로 떴다(첫 인자 `server`).
+var auxiliary = false;
 /// `initialize` 에서 협상한 위치 인코딩이 utf-16 인가(기본은 utf-8 — 클라이언트가 먼저 제안한다). documentHighlight 가 자리를 이 단위로 읽고 낸다.
 var negotiated_utf16 = false;
 /// `initialized` 의 `params` 가 객체가 아니었다 — 그 뒤 전부 `ServerNotInitialized`(tsgo 꼴).
@@ -1782,8 +1791,18 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         }
         const v = if (std.mem.indexOf(u8, text, "STALE") != null) version - 1 else version;
         var msg_buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version}) catch "fake";
         const Diag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8 };
+        if (auxiliary) {
+            // 보조 서버(tooling §8.2u) — 둘째 줄 0..2 에 warning 하나(주 서버의 첫 줄 error 와 자리가 다르다). `AUXQUIET` 이면 빈 목록.
+            if (std.mem.indexOf(u8, text, "AUXSPOOF") != null and std.mem.eql(u8, method, "textDocument/didChange"))
+                sendJson(allocator, .{ .jsonrpc = "2.0", .id = @as(i64, 100_000_001), .result = .{ .contents = .{ .kind = "markdown", .value = "aux: spoofed hover" } } });
+            const aux_msg = std.fmt.bufPrint(&msg_buf, "aux: {d}", .{version}) catch "aux";
+            const one = [_]Diag{.{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = aux_msg, .code = "A1" }};
+            const quiet = std.mem.indexOf(u8, text, "AUXQUIET") != null;
+            sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = if (quiet) one[0..0] else one[0..] } });
+            return;
+        }
+        const msg = std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version}) catch "fake";
         var diags: [3]Diag = undefined;
         var count: usize = 1;
         diags[0] = .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 1, .message = msg, .code = "E1" };

@@ -9950,6 +9950,7 @@ fn dropSelectionState(self: *AppSession, term: *Term) void {
     term.rt.editor_diagnostics.deinit(self.allocator); // 진단 층(§5.4)도 같은 단위다
     if (term.rt.editor_lsp_root) |r| self.allocator.free(r); // LSP root(§8.2a)
     term.rt.editor_lsp_root = null;
+    term.rt.editor_lsp_aux = null; // 보조 서버 감지(§8.2u)도 같은 단위다
     // 문서 version은 뷰 종료에서 되감지 않는다. 마지막 lease가 State를 정산한다.
     // **예약도 Term과 함께 사라진다.** `drawn` 필드 doc이 적은 규율("한 단위로 세우고 한 단위로
     // 지운다")의 예외를 그 규율을 적은 커밋이 만들어 두었다(적대적 검증 2026-08-24).
@@ -22716,8 +22717,11 @@ test "EXFB2 외부 포매터 (tooling §8.2t) — 셸 환경을 읽는 중이면
 
 /// 가짜 포매터(셸 스크립트, 이름은 무엇이든) — 받은 인자를 `|` 로 이어 저장소 루트의 `.fmt_args` 에 적고(cwd 도), `=` 둘레에 공백을 넣어
 /// 낸다(멱등). 어느 도구의 argv 모양으로 불렸는지 판정자가 본다.
+// `server` 로 불리면(ruff 는 보조 언어 서버이기도 하다 — tooling §8.2u: `.venv/bin/ruff` 와 ruff 설정이 있으면 `ruff server` 로 뜬다) 언어
+// 서버가 아니라 곧 끝난다 — 포매터 인자 기록을 덮지 않게.
 const fake_formatter_script =
     \\#!/bin/sh
+    \\[ "$1" = server ] && exit 0
     \\out="$(pwd -P)/.fmt_args"
     \\{ for a in "$@"; do printf '%s|' "$a"; done; printf '\n'; } > "$out"
     \\/usr/bin/sed -e 's/\([^ ]\)=\([^ ]\)/\1 = \2/g'
@@ -22886,6 +22890,193 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     try testing.expect(!s.editor_format.waiting);
     var bad_buf: [256]u8 = undefined;
     try testing.expectEqualStrings(maru.i18n.format(&bad_buf, maru.i18n.t(.fmt_external_bad_command), &.{.{ .s = "go" }}), notice(s));
+}
+
+test "ASB1 보조 언어 서버 (tooling §8.2u) — 설정이 있는 문서에만 ruff 가 주 서버와 함께 뜨고(저장소 .venv 먼저) 두 서버의 진단이 함께 서며 각자 자기 칸만 갈아 끼우고, 호버는 진단마다 그 서버 이름을, 보조 서버의 청하지 않은 응답은 주 서버의 대기를 못 채운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    // 루트의 a.py 에는 ruff 설정이 없다(설정은 pkg/ 안에만).
+    var f = (try SmtFixture.openRepo(allocator, "a.py", "x = 1\ny = 2\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    try f.fx.dir.dir.createDirPath(testing.io, "pkg/.venv/bin");
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pkg/pyproject.toml", .data = "[project]\nname = \"p\"\n\n[tool.ruff.lint]\nselect = [\"F\"]\n" });
+    try testing.expect(f.ready());
+    const root = f.root_buf[0..f.root_len];
+    const aux = struct {
+        fn client(ss: *AppSession) ?*lsp_client.Client {
+            for (ss.editor_lsp.clients.items) |*c| if (c.role == .auxiliary) return c;
+            return null;
+        }
+        // 서버 칸을 직접 본다 — 합친 목록(`list`)은 그리는 프레임이 만든다.
+        fn auxDiag(t: *Term) ?maru.session.editor.diagnostic.Diagnostic {
+            for (&t.rt.editor_diagnostics.aux) |*set| for (set.list.items) |d| if (std.mem.startsWith(u8, d.message, "aux: ")) return d;
+            for (t.rt.editor_diagnostics.lsp.items) |d| if (std.mem.startsWith(u8, d.message, "aux: ")) return d;
+            return null;
+        }
+        fn primaryDiag(t: *Term) ?maru.session.editor.diagnostic.Diagnostic {
+            for (t.rt.editor_diagnostics.lsp.items) |d| if (std.mem.startsWith(u8, d.message, "fake: ")) return d;
+            for (&t.rt.editor_diagnostics.aux) |*set| for (set.list.items) |d| if (std.mem.startsWith(u8, d.message, "fake: ")) return d;
+            return null;
+        }
+    };
+    // ⑴ 설정이 없는 문서에는 보조 서버가 없다 — 주 서버(pyright)만.
+    try testing.expect(aux.client(s) == null);
+    try testing.expect(aux.auxDiag(f.term) == null);
+    try testing.expect(f.term.rt.editor_lsp_aux != null and f.term.rt.editor_lsp_aux.?.count() == 0);
+
+    // ⑵ 설정이 있는 pkg/b.py — 저장소 `.venv/bin/ruff`(가짜 서버의 사본)가 `server` 인자로 떠 보조 서버로 선다.
+    {
+        var fake_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const fake = (try fakeLspAbs(&fake_buf)).?;
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(testing.io, fake, allocator, .limited(64 << 20));
+        defer allocator.free(bytes);
+        try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pkg/.venv/bin/ruff", .data = bytes });
+        try f.fx.dir.dir.setFilePermissions(testing.io, "pkg/.venv/bin/ruff", @enumFromInt(0o755), .{});
+    }
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "pkg/b.py", .data = "import os\nprint(x)\nMUTEHOVER\n" });
+    var b_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const b_path = try std.fmt.bufPrint(&b_path_buf, "{s}/pkg/b.py", .{root});
+    const b = (try pane_ops.openFileTermInActivePane(s, b_path, .text)).term;
+    const Both = struct {
+        fn g(t: *Term) bool {
+            return aux.auxDiag(t) != null and aux.primaryDiag(t) != null;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, Both.g));
+    const c = aux.client(s) orelse return error.NoAuxClient;
+    try testing.expectEqualStrings("ruff", c.server.exe);
+    try testing.expect(c.findDoc(b) != null);
+    var want_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{s}/pkg/.venv/bin/ruff", .{root}), c.launched_path.?); // 저장소 먼저(PATH 의 override 보다)
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{s}/pkg/pyproject.toml", .{root}), c.aux_config.?);
+    // 주 서버는 그대로 하나 — 같은 문서가 두 클라이언트에 열렸다.
+    var primaries: usize = 0;
+    for (s.editor_lsp.clients.items) |*cl| if (cl.role == .primary and cl.findDoc(b) != null) {
+        primaries += 1;
+        try testing.expectEqualStrings("pyright-langserver", cl.server.exe);
+    };
+    try testing.expectEqual(@as(usize, 1), primaries);
+    // 진단은 서버 이름을 든다(호버의 `출처(코드)`).
+    try testing.expectEqualStrings("ruff", aux.auxDiag(b).?.server);
+    try testing.expectEqualStrings("A1", aux.auxDiag(b).?.code);
+    try testing.expectEqualStrings("pyright-langserver", aux.primaryDiag(b).?.server);
+    try testing.expectEqual(@as(usize, 1), b.rt.editor_diagnostics.lsp.items.len); // 주 서버 칸에 ruff 것이 섞이지 않는다
+    // 다른 Python 문서(설정 없음)의 진단은 그대로 주 서버 것뿐.
+    try testing.expect(aux.auxDiag(f.term) == null);
+    // 정보 명령 — 보조 서버 줄(상태·루트 기준 설정 파일·저장소 실행 파일)이 주 서버의 저장소·경로 줄보다 앞에 선다(알림은 끝부터 잘린다).
+    s.dismissMessageOverlays();
+    lsp_client.showServerInfo(s);
+    {
+        var line_buf: [512]u8 = undefined;
+        const want = maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_aux), &.{ .{ .s = "ruff" }, .{ .s = "pkg/pyproject.toml" }, .{ .s = "pkg/.venv/bin/ruff" } });
+        const msg = s.chrome_host.notice.message;
+        const at = std.mem.indexOf(u8, msg, want) orelse return error.NoAuxInfoLine;
+        const repo_head = std.mem.sliceTo(maru.i18n.t(.lsp_info_repo), '{');
+        try testing.expect(at < (std.mem.indexOf(u8, msg, repo_head) orelse return error.NoRepoLine));
+    }
+    s.dismissMessageOverlays();
+
+    // ⑶ 한 서버가 빈 목록을 내도 다른 서버의 칸은 남는다 — ruff 만 조용히(AUXQUIET).
+    b.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 0 };
+    try testing.expect(insertText(s, b, "AUXQUIET "));
+    const AuxGone = struct {
+        fn g(t: *Term) bool {
+            return aux.auxDiag(t) == null and aux.primaryDiag(t) != null and std.mem.eql(u8, aux.primaryDiag(t).?.message, "fake: 2");
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, AuxGone.g));
+    // 주 서버의 다음 진단이 와도 ruff 칸은 비어 있는 채(서로 덮지 않는다) — 되돌리면 ruff 가 다시 낸다.
+    try removeMarkerHover(s, b, "AUXQUIET ");
+    try testing.expect(pumpLspUntil(&f.fx, 5000, b, Both.g));
+
+    // ⑷ 호버 — 주 서버의 hover 를 기다리는 중(가짜 서버는 MUTEHOVER 로 답하지 않는다)에 보조 서버가 **같은 번호**(1e8+1)의 hover 응답을
+    // 보낸다. 주 서버의 대기는 그대로여야 한다(보조 서버에는 hover 를 묻지 않는다 — 청하지 않은 응답). caret 은 ruff 의 진단 줄(`print`).
+    s.dismissMessageOverlays();
+    const print_off = std.mem.indexOf(u8, b.rt.editorDocument().opened.?.file.content, "print").?;
+    b.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
+    try testing.expect(hover_client.showAtCaret(s));
+    try testing.expect(s.editor_hover.waiting);
+    const seq = s.editor_hover.waiting_seq;
+    try testing.expectEqual(@as(u32, 1), seq); // 보조 서버의 가짜 응답과 같은 번호 — 그래야 이 장면이 거름을 잰다
+    const dropped = s.editor_lsp.aux_dropped_responses;
+    const end = b.rt.editorDocument().opened.?.file.content.len; // 끝에 넣는다 — caret 자리의 offset 이 밀리지 않게
+    b.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
+    try testing.expect(insertText(s, b, "AUXSPOOF"));
+    const Dropped = struct {
+        fn g(ss: *AppSession) bool {
+            return ss.editor_lsp.aux_dropped_responses > 0;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 1500, s, Dropped.g));
+    try testing.expect(s.editor_lsp.aux_dropped_responses > dropped);
+    try testing.expect(s.editor_hover.waiting and s.editor_hover.waiting_seq == seq);
+    try testing.expectEqual(@as(u64, 0), s.editor_hover.opened_count);
+    // 응답 시한(2 초) 뒤 진단만으로 연다 — 그 자리의 진단은 ruff 의 것이고, 출처 줄은 **그 서버 이름**이다(문법의 주 서버 pyright 가 아니다).
+    {
+        // 프레임을 그려 진단을 합치고 히트 기하(호버 앵커)를 굳힌다.
+        var d = appendPaneFrame(s, f.leaf, b) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(testing.allocator);
+    }
+    const HoverOpened = struct {
+        fn g(ss: *AppSession) bool {
+            hover_client.tick(ss);
+            return ss.editor_hover.opened_count > 0;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, HoverOpened.g));
+    const lines = hover_client.lines(s);
+    try testing.expect(lines.len >= 2);
+    try testing.expect(std.mem.startsWith(u8, lines[0].text, "aux: "));
+    try testing.expectEqualStrings(" ruff(A1)", lines[1].text);
+}
+
+test "ASB2 보조 언어 서버 (tooling §8.2u) — 저장소 밖 문서의 root 를 다시 풀면(상위 폴더 git init 뒤 상태바) 보조 서버 감지도 새 root 로 다시 한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var abs_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const fake = (try fakeLspAbs(&abs_buf)) orelse return error.SkipZigTest;
+    var fake_z: [std.fs.max_path_bytes + 1]u8 = undefined;
+    _ = setenv("MARU_LSP_SERVER_OVERRIDE", (try std.fmt.bufPrintZ(&fake_z, "{s}", .{fake})).ptr, 1);
+    defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try fx.dir.dir.realPath(testing.io, &root_buf)];
+    var state_buf: [std.fs.max_path_bytes]u8 = undefined;
+    trust_store.setDirForTest(try std.fmt.bufPrint(&state_buf, "{s}/state", .{root}));
+    defer trust_store.setDirForTest(null);
+    fx.session.editor_lsp.auto_trust_answer = .allow;
+    // 저장소 밖(`/tmp` 바로 아래 — 이 판정자의 tmp 는 체크아웃 안이다, LSPB28). ruff 설정은 **상위 폴더**에 — 처음 root(`sub`)의 범위 밖이다.
+    var out_buf: [96]u8 = undefined;
+    const outside = try std.fmt.bufPrint(&out_buf, "/tmp/maru-asb2-{d}", .{std.c.getpid()});
+    std.Io.Dir.cwd().deleteTree(testing.io, outside) catch {};
+    var sub_buf: [128]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&sub_buf, "{s}/sub", .{outside}));
+    defer std.Io.Dir.cwd().deleteTree(testing.io, outside) catch {};
+    var cfg_buf: [128]u8 = undefined;
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = try std.fmt.bufPrint(&cfg_buf, "{s}/ruff.toml", .{outside}), .data = "line-length = 100\n" });
+    var o_buf: [128]u8 = undefined;
+    const o_path = try std.fmt.bufPrint(&o_buf, "{s}/sub/o.py", .{outside});
+    try std.Io.Dir.cwd().writeFile(testing.io, .{ .sub_path = o_path, .data = "x = 1\n" });
+    const t = try openPathInActivePane(fx.session, o_path);
+    lsp_client.pump(fx.session);
+    try testing.expectEqual(lsp_client.Phase.outside_repo, lsp_client.statusFor(fx.session, t).?.phase);
+    try testing.expect(t.rt.editor_lsp_aux != null and t.rt.editor_lsp_aux.?.count() == 0); // root(`sub`) 안엔 ruff 설정이 없다
+    // 상위 폴더에서 `git init` → 상태바를 누르면 root 부터 다시 — 새 root 의 범위에 ruff.toml 이 든다.
+    var g_buf: [128]u8 = undefined;
+    try std.Io.Dir.cwd().createDirPath(testing.io, try std.fmt.bufPrint(&g_buf, "{s}/.git", .{outside}));
+    try testing.expect(pane_ops.activePane(fx.session).activeTerm() == t);
+    lsp_client.activateStatus(fx.session);
+    const Ctx = struct { s: *AppSession, t: *Term };
+    try testing.expect(pumpLspUntil(&fx, 5000, Ctx{ .s = fx.session, .t = t }, struct {
+        fn g(c: Ctx) bool {
+            for (c.s.editor_lsp.clients.items) |*cl| if (cl.role == .auxiliary and cl.findDoc(c.t) != null and cl.phase == .ready) return true;
+            return false;
+        }
+    }.g));
+    try testing.expect(std.mem.endsWith(u8, t.rt.editor_lsp_root.?, outside));
+    try testing.expect(t.rt.editor_lsp_aux.?.contains(.ruff));
 }
 
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {

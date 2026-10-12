@@ -280,7 +280,7 @@ fn locateInPath(name: []const u8, path: []const u8, buf: *[std.fs.max_path_bytes
     return null;
 }
 
-fn isExecutableFile(p: []const u8) bool {
+pub fn isExecutableFile(p: []const u8) bool {
     var z: [std.fs.max_path_bytes + 1]u8 = undefined;
     const pz = std.fmt.bufPrintZ(&z, "{s}", .{p}) catch return false;
     var st: std.c.Stat = undefined;
@@ -289,8 +289,8 @@ fn isExecutableFile(p: []const u8) bool {
     return std.c.access(pz.ptr, std.c.X_OK) == 0;
 }
 
-/// 감지가 보는 파일 시스템(실제) — `external_format` 의 `fs` 모양.
-const RealFs = struct {
+/// 감지가 보는 파일 시스템(실제) — `external_format` 의 `fs` 모양. 보조 언어 서버의 감지(`lsp.zig` — tooling §8.2u)도 이것을 쓴다.
+pub const RealFs = struct {
     io: std.Io,
 
     pub fn exists(_: RealFs, p: []const u8) bool {

@@ -7966,6 +7966,13 @@ fn startAgentClose(refs: []const ControlSessionRef, async_id: u64, op: control_b
     // cap 으로 인가된 연결은 pane 이 없다 — 그 pane 이 연 탭인지 알 수 없다.
     const pane = if (op.pane_grant) |g| g.pane else return completeTabStatus(async_id, .unauthorized, "");
     const app = appSessionOwningSurface(refs, op.surface_id) orelse return completeAgentClose(async_id, true, null);
+    // 에이전트 탭 표에 없으면(사용자가 grant 를 철회해 사람의 탭이 됐다) 탭에 남은 `agent_opener` 가 같아도 닫지 않는다(5 회차 — 다시 허락받은
+    // 에이전트가 사람의 탭을 닫았다).
+    var listed = false;
+    for (agent_tabs.items) |t| if (t.pane == pane and t.tab == op.surface_id) {
+        listed = true;
+    };
+    if (!listed) return completeTabStatus(async_id, .failed, "this tab was not opened by this pane — only tabs opened with browser open can be closed");
     switch (session_mod.web_ops.agentCloseTab(app, op.surface_id, pane)) {
         .closed, .not_found => completeAgentClose(async_id, true, null),
         .page_asks => completeAgentClose(async_id, false, agent_close_page_asks),
@@ -9099,6 +9106,14 @@ pub export fn maru_macos_control_revoke_browser_grant(pane: u64, target: u64, sc
     const before = control_pane_grant_store.len;
     control_pane_grant_store.revoke(pane, target, sc);
     const removed = control_pane_grant_store.len < before;
+    // 에이전트 탭 하나의 grant 를 철회했다 — 그 탭도 사람의 탭이 된다(W9b③ 적대 리뷰 5 회차: 모두 철회만 표를 비워, 하나 철회한 탭은 상한을
+    // 쥔 채 에이전트가 닫지도 새로 열지도 못했다).
+    if (removed and sc == .browser) {
+        var i: usize = 0;
+        while (i < agent_tabs.items.len) {
+            if (agent_tabs.items[i].pane == pane and agent_tabs.items[i].tab == target) _ = agent_tabs.swapRemove(i) else i += 1;
+        }
+    }
     if (removed and control_server_active) {
         cancelBrowserWaitsForGrant(&control_server_storage, pane, target, sc);
         cancelBrowserExecutionsForGrant(&control_server_storage, pane, target, sc);
@@ -11993,4 +12008,39 @@ test "W9b③ 적대 리뷰 4 회차: 사용자가 browser grant 를 모두 철�
     try std.testing.expectEqual(@as(usize, 0), agentTabCount(5));
     try std.testing.expect(agentTabRoom(5));
     try std.testing.expect(!onAgentPaneKnown(5)); // 철회 뒤에는 에이전트 pane 이 아니다
+}
+
+test "W9b③ 적대 리뷰 5 회차: grant 하나를 철회해도 그 탭은 에이전트 표에서 빠진다(상한·장)" {
+    defer agent_tabs.clearRetainingCapacity();
+    defer control_pane_grant_store.clearAll();
+    for (0..max_agent_tabs_per_pane) |i| try std.testing.expect(adoptAgentTab(5, 900 + i));
+    try std.testing.expectEqual(@as(u32, 1), maru_macos_control_revoke_browser_grant(5, 900, 0));
+    try std.testing.expect(!isAgentTab(900));
+    try std.testing.expectEqual(max_agent_tabs_per_pane - 1, agentTabCount(5));
+    try std.testing.expect(agentTabRoom(5));
+}
+
+test "W9b③ 적대 리뷰 5 회차: 모두 철회(사람의 탭이 됨) 뒤 다시 허락받아도 그 탭은 닫지 못한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    const tab = try session_mod.web_ops.openAgentTab(session, shell, null);
+    try std.testing.expect(adoptAgentTab(shell, tab));
+    session_mod.web_osr.testRunning(tab);
+    _ = maru_macos_control_revoke_all_browser_grants();
+    try control_pane_grant_store.grant(.{ .pane = shell, .target = tab, .scope = .browser }); // 사용자가 다른 op 의 확인 모달을 승인
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.close\",\"params\":{\"id\":1}}";
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentClose(&refs, try control_server_storage.deferRequest(&p, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "", .pane_grant = .{ .pane = shell, .target = tab, .scope = .browser } });
+    try expectPendingErrorCode(&p, .internal_error); // 「이 pane 이 연 탭이 아니다」
+    try std.testing.expectEqual(@as(usize, 0), tab_runs.items.len);
 }

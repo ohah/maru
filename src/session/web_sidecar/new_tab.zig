@@ -195,7 +195,7 @@ pub fn takeCredit(human: *Credits, agent: *Credits, now_ms: i64) ?bool {
     return use_agent;
 }
 
-test "W9b③ 적대 리뷰 3 회차: 장 고르기 — 방금(1 초 안) 받은 장이 먼저, 아니면 오래된 것, 하나뿐이면 그것" {
+test "W9b③ 적대 리뷰 3·4 회차: 장 고르기 — 가장 새 장의 주인(같은 시각이면 사람), 하나뿐이면 그것" {
     var h: Credits = .{};
     var a: Credits = .{};
     try std.testing.expectEqual(@as(?bool, null), takeCredit(&h, &a, 10_000));

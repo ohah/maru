@@ -2624,6 +2624,7 @@ fn rebuildSidebarCells(
         &.{},
         &.{},
         cols -| indent_cols,
+        layout.trailingPadCols(cell_w), // 칸 미만 여백이 0 이라 0 — 마지막 칸까지 쓴다
         fg,
         actives,
         empty,

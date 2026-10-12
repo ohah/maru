@@ -465,6 +465,13 @@ pub const Columns = struct {
     /// (그린 ✕의 오른쪽 절반을 누르면 카드 전환이 됐다 — 2026-10-12 측정, 잉크 x 285–291 대 hit [280,288)).
     text_offset_px: u32 = 0,
 
+    /// ✕ 없는 줄이 오른쪽에 비워 둘 칸 수 — 칸 미만 여백(`text_offset_px`)을 칸으로 올림한 값이다. 글자가 그만큼
+    /// 밀리면 마지막 칸이 경계를 넘치기 때문이다(macOS 반 칸 → 1, Windows 0 → 0). `cell_text.buildSidebarDrawList` 가 받는다.
+    pub fn trailingPadCols(self: Columns, cell_width_px: u32) u16 {
+        if (cell_width_px == 0) return 0;
+        return @intCast(@min((self.text_offset_px + cell_width_px - 1) / cell_width_px, std.math.maxInt(u16)));
+    }
+
     /// 열 `col`(최종 열, `indent_cols` 반영 뒤)의 왼쪽 끝 x(px). 그리기(셀 origin)·hit-test·caret 이 이 하나를 쓴다.
     pub fn colLeftPx(self: Columns, col: u32, cell_width_px: u32) u32 {
         return self.text_offset_px + col * cell_width_px;

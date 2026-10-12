@@ -2359,7 +2359,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     // plus_row=null — 하단 "+" 버튼은 헤더 우측 아이콘으로 이동·폐기(P2). 호버 슬롯엔 닫기 ✕(없으면 null).
     // close_row/active_row는 **표시 row 인덱스**(위 padding 루프가 헤더도 slot을 차지하게 해 i==row) — buildSidebarDrawList가
     // 이 i로 슬롯을 인코딩·비교하므로 도메인이 일치한다(SG3c). 헤더 row는 위 루프가 close_row를 안 세워 ✕가 안 붙는다.
-    var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, inline_icons.items, pins.items, sidebar_cols, fg, close_rows.items, ages.items, null, active_row, active_fg, editing_row);
+    var draw_list = try coretext_frame_builder.buildSidebarDrawList(self.allocator, names.items, branch_lines.items, path_lines.items, status_lines.items, agents.items, inline_icons.items, pins.items, sidebar_cols, cols_layout.trailingPadCols(self.cell_width_px), fg, close_rows.items, ages.items, null, active_row, active_fg, editing_row);
     // 에이전트 아이콘(✶ claude / ◆ codex)과 상태줄 running 스피너(이퀄라이저 바 ▁~█)에 **브랜드색**을 입힌다 — claude=Anthropic 코랄,
     // codex=OpenAI 청록. 종류를 색으로 구분하고, **관측 상태는 상태줄**(running=이퀄라이저 파형[브랜드색]·idle=✓ 대기중)이 담당한다
     // (옛 아이콘 밝기 펄스는 폐기 — 아래 루프는 아이콘·스피너 모두 솔리드 브랜드색). 색은 `term.agent_kind` 단일 출처로 고른다.

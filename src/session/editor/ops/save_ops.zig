@@ -17,3 +17,8 @@ fn sameIdentity(a: ?Identity, b: ?Identity) bool {
     }
     return b == null;
 }
+
+/// 쓰기/완료한 자료를 재사용하면 동일 요청이 두 번 디스크에 반영될 수 있다.
+pub fn writable(written: bool, finished: bool) bool {
+    return !written and !finished;
+}

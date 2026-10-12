@@ -62872,3 +62872,172 @@ test "LSAVE2 동일 주소에서도 문서 세대와 경로가 바뀌면 완료 
         try std.testing.expect(!base.matches(current));
     }
 }
+
+fn awaitLocalSaveForTest(service: *@import("save/worker.zig").Service) !@import("save/worker.zig").Completion {
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(testing.io).nanoseconds < deadline) {
+        if (service.take()) |completion| return completion;
+        _ = usleep(2_000);
+    }
+    return error.WorkerTimeout;
+}
+
+test "LSAVEW1 차단된 저장은 UI 본문을 빌리지 않고 원래 bytes를 쓰며 재편집은 dirty다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const worker = @import("save/worker.zig");
+    for ([_]bool{ false, true }) |bom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "worker.txt", "old");
+        term.rt.editorDocument().opened.?.file.format.has_bom = bom;
+        var prepared = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+        var owns_prepared = true;
+        defer if (owns_prepared) prepared.deinit(testing.allocator);
+        var service = worker.Service.init(testing.allocator);
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            service.deinit(testing.allocator);
+        }
+        try service.startBlockedForTest(&prepared, &gate);
+        owns_prepared = false;
+        try testing.expect(!service.ready());
+        try testing.expect(service.take() == null);
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, term, "!"));
+        gate.set();
+        var completion = try awaitLocalSaveForTest(&service);
+        defer completion.deinit(testing.allocator);
+        try testing.expect(completion.failure == null);
+        try testing.expectEqualStrings("old", completion.prepared.content());
+        const disk = try fx.dir.dir.readFileAlloc(testing.io, "worker.txt", testing.allocator, .limited(100));
+        defer testing.allocator.free(disk);
+        try testing.expectEqualStrings(if (bom) "\xef\xbb\xbfold" else "old", disk);
+        try testing.expect(completion.prepared.finish(fx.session, term));
+        try testing.expect(!completion.prepared.finish(fx.session, term));
+        try testing.expect(service.take() == null);
+        try testing.expect(isDirty(term));
+        try testing.expectEqualStrings("old!", term.rt.editorDocument().opened.?.file.content);
+        try saveDocument(fx.session, term); // worker 완료의 raw hash를 다음 CAS가 쓴다.
+        try testing.expect(!isDirty(term));
+    }
+}
+
+test "LSAVEW2 시작 뒤 외부 변경은 오류를 그대로 돌려주며 본문과 디스크를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "worker.txt", "old");
+    var prepared = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    var owns_prepared = true;
+    defer if (owns_prepared) prepared.deinit(testing.allocator);
+    var service = @import("save/worker.zig").Service.init(testing.allocator);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        service.deinit(testing.allocator);
+    }
+    try service.startBlockedForTest(&prepared, &gate);
+    owns_prepared = false;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "worker.txt", .data = "outside" });
+    gate.set();
+    var completion = try awaitLocalSaveForTest(&service);
+    defer completion.deinit(testing.allocator);
+    try testing.expectEqual(@as(?SaveError, error.ExternalConflict), completion.failure);
+    try testing.expect(!completion.prepared.finish(fx.session, term));
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "worker.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("outside", disk);
+    try testing.expectEqualStrings("old", term.rt.editorDocument().opened.?.file.content);
+}
+
+test "LSAVEW3 OOM과 실행 자리 충돌은 준비 자료의 소유권을 caller에게 남긴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "worker.txt", "old");
+    var prepared = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    defer prepared.deinit(testing.allocator);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var denied = @import("save/worker.zig").Service.init(failing.allocator());
+    defer denied.deinit(testing.allocator);
+    try testing.expectError(error.OutOfMemory, denied.start(&prepared));
+    try testing.expectEqualStrings("old", prepared.content());
+    var first = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    var owns_first = true;
+    defer if (owns_first) first.deinit(testing.allocator);
+    var service = @import("save/worker.zig").Service.init(testing.allocator);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        service.deinit(testing.allocator);
+    }
+    try service.startBlockedForTest(&first, &gate);
+    owns_first = false;
+    try testing.expectError(error.Busy, service.start(&prepared));
+    try testing.expectEqualStrings("old", prepared.content());
+    try testing.expect(prepared.matches(term));
+}
+
+test "LSAVEW4 완료된 자료는 다시 시작하지 않으며 join은 실제 쓰기 종료까지 기다린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "worker.txt", "old");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    var prepared = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    var owns_prepared = true;
+    defer if (owns_prepared) prepared.deinit(testing.allocator);
+    var service = @import("save/worker.zig").Service.init(testing.allocator);
+    defer service.deinit(testing.allocator);
+    for (0..2) |phase| {
+        prepared.written = phase == 0;
+        prepared.finished = phase == 1;
+        const denied = service.start(&prepared);
+        if (denied) |_| {
+            // 잘못 시작한 변이도 caller의 준비 자료를 이중 해제하지 않게 한다.
+            owns_prepared = false;
+        } else |_| {
+            prepared.written = false;
+            prepared.finished = false;
+        }
+        try testing.expectError(error.InvalidPhase, denied);
+    }
+    try service.start(&prepared);
+    owns_prepared = false;
+    service.deinit(testing.allocator);
+    try testing.expect(service.take() == null);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "worker.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("old!", disk);
+    // 자원 정리는 성공 상태 게시가 아니다. 제품 owner가 take/finish를 소비해야 한다.
+    try testing.expect(isDirty(term));
+}
+
+test "LSAVEW5 완료 슬롯은 새 할당 없이 실제 저장을 전달하고 다른 경로는 clean으로 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "worker.txt", "old");
+    var prepared = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    var owns_prepared = true;
+    defer if (owns_prepared) prepared.deinit(testing.allocator);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var service = @import("save/worker.zig").Service.init(failing.allocator());
+    defer service.deinit(testing.allocator);
+    try service.start(&prepared);
+    owns_prepared = false;
+    var completion = try awaitLocalSaveForTest(&service);
+    defer completion.deinit(testing.allocator);
+    try testing.expect(completion.failure == null);
+    try testing.expectEqual(@as(usize, 1), failing.alloc_index);
+    const path = term.rt.editorDocument().path;
+    const other = try testing.allocator.dupe(u8, "other.txt");
+    defer testing.allocator.free(other);
+    term.rt.editorDocument().path = other;
+    const finished = completion.prepared.finish(fx.session, term);
+    term.rt.editorDocument().path = path;
+    try testing.expect(!finished);
+    try testing.expect(!completion.prepared.finish(fx.session, term));
+}

@@ -1478,3 +1478,9 @@ Metal readback에서 네 파일 저장·연결 Undo·다시 저장 및 오른쪽
   파일 수·본문 크기·지연 주입·main queue 대기·전체 앱 RSS를 분리한다. [실측 해석과 한계](plans/editor-project-replace-performance.md)를 따른다.
 
 - 로컬 저장 분리: `mise exec -- zig build test-editor-local-save test-editor-project-replace-batch-ui` (Debug/ReleaseFast). `python3 tools/test-editor-local-save-adversarial.py`는 정상/복원과 저장 보호 결함을 실제 실행으로 대조한다.
+
+### 로컬 저장 worker 기반
+
+`mise exec -- zig build test-editor-local-save`는 동기 준비/완료와 worker의 실제 파일 쓰기·CAS 실패·재편집·소유권·join을 함께 검사한다. `-Doptimize=ReleaseFast`도 같은 검사를 실행한다. 사용자 경로 연결 상태와 미결 정책은 [비동기 연결 계획](plans/editor-local-save-async.md)을 따른다.
+
+`python3 tools/test-editor-local-save-worker-adversarial.py`는 worker의 실제 실패 경로와 정상/복원 대조군을 격리 사본에서 실행하고 결과 JSON과 로그를 출력한 임시 디렉터리에 남긴다.

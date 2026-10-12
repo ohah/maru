@@ -37,7 +37,7 @@ pub const Prepared = struct {
         return self.bytes[self.logical_start..];
     }
     pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {
-        if (self.written or self.finished) return error.WriteFailed;
+        if (!maru.session.editor.save_ops.writable(self.written, self.finished)) return error.WriteFailed;
         try writeBytes(io, self.path, self.bytes, self.expected_disk);
         self.written = true;
     }

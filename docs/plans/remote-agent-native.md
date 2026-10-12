@@ -193,3 +193,32 @@ GUI nonce의 혼합 이벤트를 받아 idle 배지·원격 캡처 봉인과 재
 재시도 예약을 막는 결함은 예약 시각 검사에서, 준비 명령을 매 연결 반복하는 결함은
 독립 SSH argv 장부에서 실행 중 검출됐다. 결함 소스는 복원하고 정상 검증을 다시 실행했다.
 OS 화면·입력·실제 네트워크 장비 장애와 ACK 없는 전송의 exactly-once 보장은 포함하지 않는다.
+
+## 실패·취소·종료 경로 검증 계획
+
+CLI의 빠른 연결 실패는 3회에서 종료하고 대기 중 SIGINT는 다음 접속을 시작하지 않는지
+실제 제품 shell loop로 확인한다. GUI는 연속 비정상 EOF에서 재시도 예산·백오프·cursor
+보존을 검사하고, 전체 종료에서 저장된 mixed cursor의 할당과 자식·채널을 회수하는지
+DebugAllocator와 실제 파이프로 판정한다. 반복 정상 복구와 실제 SSH/PTY 검증은 별도로
+구분하며 사용자 SSH 설정이나 현재 실행 중인 프로세스는 변경하지 않는다.
+
+이번 실패 경로 검증에서 전체 원격 host 종료가 cursor 키·맵의 해제를 빠뜨리는 누수를
+DebugAllocator로 재현했다. 단일 host 종료와 전체 종료가 `closeRemoteAgentHost`를
+공유하도록 수정했다. 실제 설치/스트리머 역할의 소유 자식을 fork해 종료 뒤 fd 닫힘·
+waitpid 회수와 채널·nonce 초기화도 확인한다.
+
+GUI 파이프 판정자는 연속 실패에서 6회 예약(1/2/4/8/16/32초) 뒤 포기하고 v1/v2 cursor를
+보존하는지 검사한다. 정상 hello가 이어지는 반복 복구에서는 예산이 초기화되고 두 포맷의
+시작/종료 이벤트가 배지를 running→idle로 옮기며 cursor가 전진하는지 판정한다.
+실제 시간만큼 기다리는 soak가 아니라 제품 예약 시각과 실제 EOF/프레임 소비를 검사한다.
+
+CLI process 판정자는 private HOME과 장애 주입용 `ssh` 실행 파일을 사용한다. 실제 제품
+CLI wrapper가 3회 빠른 255 실패 후 포기하고, 대기 중 소유 foreground group에 SIGINT를
+보내면 exit 130과 한 쌍의 ssh/ssh-end 뒤 새 시도 없이 종료하는지 확인한다. 키 입력을
+주입한 PTY 검증은 아니며, 이번 sandbox는 loopback bind를 EPERM으로 거부해 실물 sshd
+재검증을 실행하지 못했다. 기존 실제 SSH 검증 결과와 이번 파이프/주입기 결과를 구분한다.
+
+권한 변경 후 최신 main 위에서 실제 loopback SSH와 제품 CLI/GUI 자동 재접속 gate를
+다시 실행해 통과했다. PTY Ctrl-C 후보 검증은 현재 실행 환경에서 `/bin/sh` 대조군도
+같은 입력으로 종료되지 않고 PTY foreground group의 SIGINT가 EPERM으로 거부되어
+제품 결과로 사용하지 않았다. 기존 소유 프로세스 그룹 SIGINT 검증과 구분한다.

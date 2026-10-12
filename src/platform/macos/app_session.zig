@@ -99456,3 +99456,191 @@ test "W9b③ 적대 리뷰 4 회차: 다른 창으로 옮긴 에이전트 탭이
     web_ops.tickWebOsr(b);
     try std.testing.expectEqual(@as(usize, 2), pane_b.terms.items.len); // 상한 — 열지 않아야 한다
 }
+
+// Shutdown must release host-owned resume keys, not just close the transport.
+// Repeated hook disable/enable otherwise retains every prior host's cursor allocation.
+test "remote reconnect failure shutdown releases all mixed cursors and channels" {
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    const term = pane_ops.activePane(&session).activeTerm();
+    term.agent_remote_channel = maru.session.remote_agent_stream.Channel.initMixed(0, true);
+    term.agent_remote_nonce_len = 3;
+    for ([_][]const u8{ "fixture-a", "fixture-b" }) |dest| {
+        const key = try a.dupe(u8, dest);
+        try session.remote_agent_hosts.put(a, key, .{ .mixed_stream = true });
+        const host = session.remote_agent_hosts.getPtr(dest).?;
+        session.recordRemoteCursors(host, &.{
+            "{\"hello\":\"maru-agent-events-mixed\",\"v\":3}",
+            "{\"format\":1,\"frame\":{\"cur\":\"same\",\"at\":41}}",
+            "{\"format\":2,\"frame\":{\"cur\":\"same\",\"at\":57,\"gen\":\"00112233445566778899aabbccddeeff\"}}",
+        }, 1);
+        try std.testing.expectEqual(@as(usize, 2), host.cursors.count());
+        try host.pending.appendSlice(a, "partial");
+    }
+    // Both a running install and streamer are owned children and must be reaped.
+    var child_pids: [2]std.c.pid_t = undefined;
+    var child_fds: [2]c_int = undefined;
+    for (0..2) |index| {
+        var fds: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        const pid = std.c.fork();
+        try std.testing.expect(pid >= 0);
+        if (pid == 0) {
+            _ = std.c.close(fds[0]);
+            const act: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.DFL }, .mask = std.posix.sigemptyset(), .flags = 0 };
+            std.posix.sigaction(std.posix.SIG.TERM, &act, null);
+            _ = std.c.write(fds[1], "r", 1);
+            while (true) {
+                var idle: [0]std.c.pollfd = .{};
+                _ = std.c.poll(&idle, 0, 100);
+            }
+        }
+        _ = std.c.close(fds[1]);
+        const host = session.remote_agent_hosts.getPtr("fixture-a").?;
+        if (index == 0) host.stream = .{ .pid = pid, .out_fd = fds[0] } else host.install = .{ .pid = pid, .out_fd = fds[0] };
+        child_pids[index] = pid;
+        child_fds[index] = fds[0];
+        var ready: [1]u8 = undefined;
+        try std.testing.expectEqual(@as(isize, 1), std.c.read(fds[0], &ready, ready.len));
+    }
+    remote_agent_ops.closeAllRemoteAgentHosts(&session);
+    for (0..2) |index| {
+        try std.testing.expectEqual(@as(c_int, -1), std.c.fcntl(child_fds[index], std.c.F.GETFD, @as(c_int, 0)));
+        var status: c_int = 0;
+        try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(child_pids[index], &status, std.c.W.NOHANG));
+    }
+    try std.testing.expectEqual(@as(usize, 0), session.remote_agent_hosts.count());
+    try std.testing.expect(term.agent_remote_channel == null);
+    try std.testing.expectEqual(@as(u8, 0), term.agent_remote_nonce_len);
+    remote_agent_ops.closeAllRemoteAgentHosts(&session); // Idempotent before deinit.
+}
+
+// Invalid/closed streams must spend the consecutive-failure budget without replacing
+// either profile's stored cursor. Real pipes give EOF; no SSH/server is required.
+test "remote reconnect failure repeated EOF reaches cap and preserves mixed cursors" {
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    const dest = "failure-fixture";
+    const key = try a.dupe(u8, dest);
+    try session.remote_agent_hosts.put(a, key, .{ .install_done = true, .mixed_stream = true });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+    session.recordRemoteCursors(host, &.{
+        "{\"hello\":\"maru-agent-events-mixed\",\"v\":3}",
+        "{\"format\":1,\"frame\":{\"cur\":\"same\",\"at\":41}}",
+        "{\"format\":2,\"frame\":{\"cur\":\"same\",\"at\":57,\"gen\":\"00112233445566778899aabbccddeeff\"}}",
+    }, 1);
+    const saved_v2 = host.cursors.get("2:same").?;
+    for (0..AppSession.RemoteAgentHost.retry_max + 1) |index| {
+        var fds: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        _ = std.c.close(fds[1]);
+        host.stream = .{ .pid = 0, .out_fd = fds[0] };
+        session.onStreamerStarted(dest, host, session.awakeMs());
+        const before = session.awakeMs();
+        remote_agent_ops.drainRemoteAgentHost(&session, dest, host, before);
+        const after = session.awakeMs();
+        try std.testing.expect(!host.stream_started);
+        try std.testing.expectEqual(@as(u64, 41), host.cursors.get("1:same").?.offset);
+        try std.testing.expectEqual(saved_v2.offset, host.cursors.get("2:same").?.offset);
+        try std.testing.expectEqual(saved_v2.generation, host.cursors.get("2:same").?.generation);
+        if (index < AppSession.RemoteAgentHost.retry_max) {
+            const expected_delay = AppSession.RemoteAgentHost.retry_base_ms << @intCast(@min(index, 5));
+            try std.testing.expect(host.retry_at_ms >= before + expected_delay and host.retry_at_ms <= after + expected_delay);
+            try std.testing.expectEqual(@as(u8, @intCast(index + 1)), host.retries);
+            try std.testing.expect(!host.stopped);
+        } else {
+            try std.testing.expect(host.stopped);
+            try std.testing.expectEqual(AppSession.RemoteAgentHost.retry_max, host.retries);
+        }
+    }
+    const last_retry = host.retry_at_ms;
+    remote_agent_ops.drainRemoteAgentHost(&session, dest, host, session.awakeMs() + 1_000_000);
+    try std.testing.expectEqual(last_retry, host.retry_at_ms); // A stopped host stays stopped.
+}
+
+// A fresh negotiated pipe after each EOF must reset the consecutive budget and
+// move the badge both ways; a final idle value alone could hide dropped events.
+test "remote reconnect failure repeated recovery advances both cursors and badge" {
+    if (!is_macos) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const io = std.Io.Threaded.global_single_threaded.io();
+    test_config_text = agent_hooks_on_config;
+    defer test_config_text = "";
+    var session: AppSession = .{ .allocator = a, .io = std.testing.io };
+    try session.init(io, a, .{ .abi_version = abi_version, .cols = 20, .rows = 5, .queue_capacity = 16, .command_kind = @intFromEnum(CommandKind.controlled_smoke) });
+    defer session.deinit();
+    session.window_focused = false;
+    const term = pane_ops.activePane(&session).activeTerm();
+    const dest = try a.dupe(u8, "recovery-fixture");
+    term.rt.observation.ssh_remote_dest_present = true;
+    try term.rt.observation.ssh_remote_dest.appendSlice(a, dest);
+    try session.remote_agent_hosts.put(a, dest, .{ .install_done = true, .mixed_stream = true });
+    const host = session.remote_agent_hosts.getPtr(dest).?;
+    var nonce_buf: [maru.session.agent_hook_command.remote_pane_nonce_max]u8 = undefined;
+    const nonce = agent_ops.remotePaneNonceFor(term, &nonce_buf) orelse return error.NoRemoteNonce;
+    const key_v1 = try std.fmt.allocPrint(a, "1:{s}", .{nonce});
+    defer a.free(key_v1);
+    const key_v2 = try std.fmt.allocPrint(a, "2:{s}", .{nonce});
+    defer a.free(key_v2);
+    const Wire = struct {
+        fn send(session_: *AppSession, fd: c_int, nonce_: []const u8, profile: u8, event: []const u8, cycle: usize) !void {
+            const alloc = session_.allocator;
+            const identity = try std.fmt.allocPrint(alloc, "cycle-{d}-{d}", .{ cycle, profile });
+            defer alloc.free(identity);
+            const payload = try std.json.Stringify.valueAlloc(alloc, .{ .hook_event_name = event, .session_id = identity, .cwd = "/fixture" }, .{});
+            defer alloc.free(payload);
+            const line = try std.fmt.allocPrint(alloc, "claude\t{s}", .{payload});
+            defer alloc.free(line);
+            const frame = try std.json.Stringify.valueAlloc(alloc, .{ .format = profile, .frame = .{ .nonce = nonce_, .line = line } }, .{});
+            defer alloc.free(frame);
+            try std.testing.expectEqual(@as(isize, @intCast(frame.len)), std.c.write(fd, frame.ptr, frame.len));
+            try std.testing.expectEqual(@as(isize, 1), std.c.write(fd, "\n", 1));
+        }
+    };
+    for (0..4) |cycle| {
+        var fds: [2]c_int = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        const fl = std.c.fcntl(fds[0], std.c.F.GETFL, @as(c_int, 0));
+        _ = std.c.fcntl(fds[0], std.c.F.SETFL, fl | @as(c_int, @bitCast(std.posix.O{ .NONBLOCK = true })));
+        host.stream = .{ .pid = 0, .out_fd = fds[0] };
+        session.onStreamerStarted(dest, host, session.awakeMs());
+        remote_agent_ops.ensureRemoteAgentTerm(&session, term, .{ .dest = dest, .ctl = @constCast("/fixture.sock") }, session.awakeMs());
+        const hello = "{\"hello\":\"maru-agent-events-mixed\",\"v\":3}\n";
+        try std.testing.expectEqual(@as(isize, hello.len), std.c.write(fds[1], hello.ptr, hello.len));
+        remote_agent_ops.drainRemoteAgentHost(&session, dest, host, session.awakeMs());
+        try std.testing.expect(term.agent_remote_channel != null and term.agent_remote_channel.?.isOpen());
+        try std.testing.expectEqual(@as(u8, 0), host.retries);
+        for ([_]u8{ 1, 2 }) |profile| {
+            try Wire.send(&session, fds[1], nonce, profile, "UserPromptSubmit", cycle);
+            remote_agent_ops.drainRemoteAgentHost(&session, dest, host, session.awakeMs());
+            try std.testing.expectEqual(maru.session.agent_observer.State.running, term.agent_state);
+            try Wire.send(&session, fds[1], nonce, profile, "Stop", cycle);
+            remote_agent_ops.drainRemoteAgentHost(&session, dest, host, session.awakeMs());
+            try std.testing.expectEqual(maru.session.agent_observer.State.idle, term.agent_state);
+            const cursor = if (profile == 1)
+                try std.json.Stringify.valueAlloc(a, .{ .format = profile, .frame = .{ .cur = nonce, .at = (cycle + 1) * 100 } }, .{})
+            else
+                try std.json.Stringify.valueAlloc(a, .{ .format = profile, .frame = .{ .cur = nonce, .at = (cycle + 1) * 100, .gen = "00112233445566778899aabbccddeeff" } }, .{});
+            defer a.free(cursor);
+            try std.testing.expectEqual(@as(isize, @intCast(cursor.len)), std.c.write(fds[1], cursor.ptr, cursor.len));
+            try std.testing.expectEqual(@as(isize, 1), std.c.write(fds[1], "\n", 1));
+        }
+        _ = std.c.close(fds[1]);
+        remote_agent_ops.drainRemoteAgentHost(&session, dest, host, session.awakeMs());
+        try std.testing.expectEqual(@as(u8, 1), host.retries);
+        try std.testing.expectEqual(@as(u64, (cycle + 1) * 100), host.cursors.get(key_v1).?.offset);
+        try std.testing.expectEqual(@as(u64, (cycle + 1) * 100), host.cursors.get(key_v2).?.offset);
+    }
+}

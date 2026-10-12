@@ -146,7 +146,7 @@ cat > "$root/www/a.html" <<'HTML'
 HTML
 printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
 # 3 회차: 0.6 초마다 스스로 새로고침하는 페이지(숨은 탭 경우).
-printf '<!doctype html><title>hop</title><button id=hop>Hop go</button><script>setTimeout(function(){location.reload()},600)</script>' > "$root/www/hop.html"
+printf '<!doctype html><title>hop</title><button id=hop>Hop go</button><script>new Image().src="/hit?hopvis-"+document.visibilityState;setTimeout(function(){location.reload()},600)</script>' > "$root/www/hop.html"
 printf '<!doctype html><title>page-c</title>c<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=cready>ready</p>")},1000)</script>' > "$root/www/c.html"
 # 느린 문서는 요소가 3 만을 넘는다 — role 로케이터가 질의 전에 거절하는지(W9b②).
 python3 -c "import sys; sys.stdout.write('<!doctype html><title>page-slow</title>slow<button>Big</button><a id=next href=c1.html>next</a>' + '<i></i>' * 31000)" > "$root/www/slow.html"
@@ -402,6 +402,8 @@ sleep 2
 # Chromium 탭은 아직 `navigate` 를 받지 않는다(-32008) — 링크를 눌러 간다.
 run hop-nav click --selector '#tohop'
 sleep 2
+# 이 탭이 정말 다시 숨었는지(5 회차 — 첫 숨김의 hid-vis 같은 확인이 없었다): 새로 불린 hop 문서가 hidden 으로 알린다.
+hit_seen hopvis-hidden && echo yes > "\$out/hop-vis" || echo no > "\$out/hop-vis"
 hop_to=0; hop_max=0
 for k in 1 2 3 4 5 6 7 8 9 10; do
     s0=\$(date +%s)
@@ -516,10 +518,11 @@ ok hid-hover && [ "$(cat "$out/hh-hit")" = yes ] && [ "$2" -le 3 ] || fail "a ho
 ok hid-wait || fail "a text wait on a hidden tab did not see a button made in an animation frame ($(tr '\n' ' ' < "$out/hid-wait"))"
 read hop_to hop_max hop_busy hop_role_max < "$out/hop-summary" || true
 hop_loads=$(grep -c 'GET /hop.html' "$root/http.log" || true)
+[ "$(cat "$out/hop-vis")" = yes ] || fail "the hopping page was not hidden by the second new tab (no hidden load) — the case proves nothing ($(grep -o 'hopvis-[a-z]*' "$root/http.log" | sort | uniq -c | tr '\n' ' '))"
 [ "$hop_loads" -ge 5 ] || fail "the hopping page did not keep reloading on the hidden tab ($hop_loads loads) — the case proves nothing ($(tr '\n' ' ' < "$out/hop-nav"))"
 echo "hidden hopping tab ($hop_loads loads): selector waits timed out $hop_to/10 (longest ${hop_max}s) · role clicks answered 'too many' $hop_busy/3 (longest ${hop_role_max}s)"
 # role 클릭은 새로고침 사이에 「context 없음」으로 끝날 수 있다 — 다만 자리를 기다려도(최대 4.5 초) 곧 답해야 한다(4 회차).
-[ "$hop_to" = 0 ] && [ "$hop_busy" = 0 ] && [ "${hop_role_max:-99}" -le 6 ] || fail "on a hidden tab that keeps navigating, a lost screenshot blocked later calls ($hop_to/10 selector waits timed out, $hop_busy/3 role clicks 'too many')"
+[ "$hop_to" = 0 ] && [ "$hop_busy" = 0 ] && [ "${hop_role_max:-99}" -le 6 ] || fail "on a hidden tab that keeps navigating, a lost screenshot blocked later calls ($hop_to/10 selector waits timed out, longest ${hop_max}s · $hop_busy/3 role clicks 'too many', longest role click ${hop_role_max}s — over 6 s means a call waited for a lost screenshot)"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"

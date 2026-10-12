@@ -877,10 +877,11 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - ambiguous 는 「같은 로케이터로 act 하면 여럿」 으로(보이는 것만 세면 act 와 어긋난다), 마감 판단은 직전 확인 전체 시간으로.
 
 **구현:**
-- `web_osr.devtoolsCallKicked` — 주 호출 바로 뒤 `Page.captureScreenshot`(jpeg q1, clip 1×1)을 버린 자리로. Step.call 의 `kick`(`none`·`best_effort`·`required` —
+- `web_osr.devtoolsCallKick` — 주 호출 바로 뒤 `Page.captureScreenshot`(jpeg q1, clip 1×1)을 버린 자리로. Step.call 의 `kick`(`none`·`best_effort`·`required` —
   best_effort 는 자리가 하나뿐이면 주 호출만). sidecar 는 메서드·인자가 `devtools_kick_*` 와 꼭 같은 호출을 3 초(`devtools_kick_stale_ms`)에 `expired` 로 놓는다.
-- `web_cdp_ops`: role 질의는 document objectId(묶음 → 질의 → 놓기, `rel_then` committed)+kick(required), hover 이동+kick(required), required 를 못 보내면 100 ms 뒤 다시
-  (4.5 초까지 — 잃은 kick 이 풀릴 때까지), wait 의 확인(selector·finder)은 best_effort.
+- `web_cdp_ops`: role 질의는 document objectId(묶음 → 질의 → 놓기, `rel_then` committed)+kick(required), hover 이동+kick(required), required 를 자리 없음(`busy_reason`)으로 못 보내면 100 ms 뒤 다시
+  (45 번·4.5 초까지 — 잃은 kick 이 풀릴 때까지; hover 는 묶음을 놓고 화면 안으로부터 다시 잰다, wait 은 시한·다음 확인 시간 안에서만), wait 의 확인(selector·finder)은 best_effort.
+  누른 뒤 떼기를 끝내 못 보내면 「누름은 이미 갔다 — 다시 하지 말라」 로 실패한다.
   wait `visible`(로케이터): text·label 은 finder 의 wait 모드, role 은 `listFromAx` 후보를 20 개씩 잡아 finder 의 `visible` 판정, 결과 `{ok, matched, ambiguous?}`,
   시한 `{hidden}`, 간격 max(백오프, 확인 시간 × 4, 누적 1/5), 마지막 확인 하나를 시한 안으로 앞당김.
 - L2 `condition:"visible"`(엄격 키, selector 는 selector 조건으로, locator 는 WebKit -32008), 결과·시한 data. CLI `wait --role/--by-text/--by-label`.
@@ -925,4 +926,13 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
   - 시험: 확인 시간 합산(시계를 흘리는 시험)·재시도 횟수·hover 다시 재기·busy 만 다시·기다린 시간 빼기 — 되돌린 변이 다섯이 모두 걸린다. kick 종류
     매핑은 `Kick.optional` 하나로(앱의 그 줄을 뒤집는 변이는 단위 시험이 못 잡는다 — cdp 스모크의 이동하는 숨은 탭 사례가 role 클릭 시간으로 잡을 것으로 보지만 돌려 보지 않았다). 스모크의 role 클릭은
     걸린 시간(6 초 이하)도 본다.
+- **5 회차**(main 위 — 고치기 전에 시험 셋이 실패하는 것부터 보였다):
+  - 중: 직전 확인이 자리 없음으로 곧 끝나면 다음 확인 짐작이 0 에 가까워 「시한을 2 초 넘길 질의는 보내지 않는다」 를 지나쳤다(시계를 흘린
+    시험에서 10 초 wait 이 12.5 초에 끝났다) → 짐작은 직전 확인과 마지막 무거운 확인 가운데 긴 것(`checkEstimateMs` — 재시도와 마지막 확인 둘 다).
+  - 중: 누른 뒤 떼기를 끝내 보내지 못하면 자리 없음의 「retry shortly」 로 실패해 다시 하면 Enter 가 두 번 갔다 → 「누름은 이미 갔다 — 다시 하지 말라」.
+  - 하: kick 종류를 앱이 bool 로 옮겨 적던 줄은 시험이 닿지 않았다 → `web_cdp_kick.zig` 로 옮겨 `web_osr.devtoolsCallKick` 이 그대로 받는다(web_osr 시험이 자리를 채워 본다).
+  - 하: 문서(hover 재시도의 다시 재기·호출 수), CLI 도움말 `--visible`, 판정자 머리말(질의만 보낸 경우도 합격 조건), 스모크 hop 사례가 정말 숨었는지(`hopvis-hidden`)·실패 메시지의 시간.
+  - 변이: 이 회차 수정 여섯과 4 회차에 살아남은 셋(다시 재기 전 놓기·철회·기다린 시간 쌓기) — 아홉 모두 걸린다. 처음에는 재시도 절만 옛 짐작으로 되돌린 변이가
+    살아 시험을 하나 더 붙였다. 다만 기다린 시간 쌓기(MW)의 시험은 그 값을 직접 볼 뿐이다 — 이 줄이 wait 의 끝나는 시각을 바꾸는 사례는 찾지 못했다.
+  - 확인하지 못한 것: hover 가 다시 잴 때마다 격리 world 를 새로 받는다(다 쓰면 45 번) — 쌓이는지는 재지 않았다(wait 도 확인마다 받는다).
 

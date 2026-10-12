@@ -1286,7 +1286,11 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             // 입력 뒤 페이지가 대화상자를 띄웠다(W9b③ 적대 리뷰 3 회차) — 입력은 갔다: 다시 하면 두 번 간다.
             if (boolField(result.get("dialog"))) try w.writeAll("warning: the page opened a dialog right after the input — the input reached the page, do not repeat it; answer the dialog in that tab\n");
         },
-        .value => try w.print("{s}\n", .{strField(result.get("value"))}), // get-local-storage → {value}
+        // get-local-storage → {value}. 값은 페이지가 쓴 글 — 걸러 낸다(W9f 적대 리뷰 5 회차: OSC 52·화면 지우기·줄바꿈이 그대로 나갔다).
+        .value => {
+            try writePageText(gpa, w, strField(result.get("value")), false);
+            try w.writeAll("\n");
+        },
         // W9b③: 연 탭의 id(다음 명령의 --surface)와 주소. 시한 안에 다 불러오지 못했으면 경고 한 줄(탭은 열렸다).
         .open => {
             const tab = if (result.get("id")) |v| (if (v == .integer) v.integer else 0) else 0;
@@ -1303,7 +1307,10 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 return false;
             }
         },
-        .get_url => try w.print("{s}\n", .{strField(result.get("url"))}),
+        .get_url => {
+            try writePageText(gpa, w, strField(result.get("url")), false);
+            try w.writeAll("\n");
+        },
         .exec => try w.print("{s}\n", .{strField(result.get("result"))}),
         .get_cookies => {
             // cookies 배열을 JSON 한 줄로 재직렬화(에이전트가 파싱). 배열 아니면 에러.
@@ -1370,6 +1377,9 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
     return true;
 }
 
+/// snapshot 을 그리는 깊이 상한 — 넘는 자식은 한 줄 안내로 접는다(W9f 적대 리뷰 5 회차).
+pub const max_snapshot_render_depth: usize = 128;
+
 /// snapshot 트리 노드 한 줄 + 자식 재귀(들여쓰기 2칸). `<role> "<name>" [ref=<ref>]`(name/ref 없으면 생략).
 fn renderSnapshotNode(gpa: std.mem.Allocator, node: std.json.Value, depth: usize, w: *std.Io.Writer) !void {
     const o = switch (node) {
@@ -1393,7 +1403,14 @@ fn renderSnapshotNode(gpa: std.mem.Allocator, node: std.json.Value, depth: usize
     }
     try w.writeAll("\n");
     switch (o.get("children") orelse std.json.Value{ .null = {} }) {
-        .array => |kids| for (kids.items) |kid| try renderSnapshotNode(gpa, kid, depth + 1, w),
+        .array => |kids| if (kids.items.len > 0) {
+            // 상한에서 접는다 — 재귀가 스택을 넘고 들여쓰기가 깊이의 제곱으로 커졌다(W9f 적대 리뷰 5 회차: 2 만 단에 죽고 1 만 4 천 단에 196 MB).
+            if (depth + 1 >= max_snapshot_render_depth) {
+                i = 0;
+                while (i <= depth) : (i += 1) try w.writeAll("  ");
+                try w.writeAll("… (deeper levels omitted)\n");
+            } else for (kids.items) |kid| try renderSnapshotNode(gpa, kid, depth + 1, w);
+        },
         else => {},
     }
 }
@@ -3162,4 +3179,35 @@ test "W9f 적대 리뷰 4 회차: unauthorized 안내는 닫힌 탭·목록에 �
     var w: std.Io.Writer = .fixed(&buf);
     _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .ok, &w);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "not in `browser list`") != null);
+}
+
+test "W9f 적대 리뷰 5 회차: get-local-storage 의 값·get-url 의 주소도 페이지가 정한 글이다 — 제어·방향 글자를 거른다" {
+    var buf: [512]u8 = undefined;
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"value\":\"a\\u001b]52;c;eA==\\u0007b\\u202e\\nfake line\"}}", .value, &w);
+        try testing.expectEqualStrings("a]52;c;eA==bfake line\n", w.buffered());
+    }
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"url\":\"https://a/\\u001b[2J\\u202e\"}}", .get_url, &w);
+        try testing.expectEqualStrings("https://a/[2J\n", w.buffered());
+    }
+}
+
+test "W9f 적대 리뷰 5 회차: 아주 깊은 snapshot 트리는 정해진 깊이에서 끊고 한 줄로 알린다(스택·출력이 깊이에 묶인다)" {
+    const depth = 5000;
+    var req: std.ArrayList(u8) = .empty;
+    defer req.deinit(testing.allocator);
+    try req.appendSlice(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[");
+    for (0..depth) |_| try req.appendSlice(testing.allocator, "{\"role\":\"group\",\"children\":[");
+    for (0..depth) |_| try req.appendSlice(testing.allocator, "]}");
+    try req.appendSlice(testing.allocator, "]}}}");
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    _ = try renderResponse(testing.allocator, req.items, .snapshot, &out.writer);
+    const text = out.written();
+    try testing.expectEqual(@as(usize, max_snapshot_render_depth + 1), std.mem.count(u8, text, "\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "deeper levels omitted") != null);
+    try testing.expect(text.len < 64 * 1024);
 }

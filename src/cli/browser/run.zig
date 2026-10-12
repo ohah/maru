@@ -52,7 +52,9 @@ pub fn run(
         },
         .request => |req| try runRequest(io, allocator, req, stdout, stderr),
         .screenshot => |shot| try runScreenshot(io, allocator, shot, stdout, stderr),
-        .repl => |r| runRepl(io, allocator, r.surface, null, stdout, stderr) catch |e| switch (e) {
+        // 컨트롤 소켓이 없는 빌드(Windows) — 줄을 읽기 전에 끝낸다. comptime 이라 repl(`std.c.read` 에 HANDLE 을 넘기던 읽기)이 그 빌드에서
+        // 분석되지 않는다(W9f 적대 리뷰 5 회차).
+        .repl => |r| if (control_client.gate) |reason| return control_client.noInstance(stderr, reason) else runRepl(io, allocator, r.surface, null, stdout, stderr) catch |e| switch (e) {
             error.WriteFailed => {}, // 출력을 받는 쪽이 닫았다(`| head` 등) — 조용히 끝낸다(W9f 적대 리뷰 1 회차)
             else => return e,
         },
@@ -544,6 +546,8 @@ fn runRepl(io: std.Io, allocator: std.mem.Allocator, first: ?u64, fd: ?std.c.fd_
         error.WriteFailed => {},
         else => return e,
     };
+    // 버퍼에 남은 글(Ctrl-D 뒤 줄바꿈 등)을 내보낸다 — 비우지 않아 셸 프롬프트가 repl 프롬프트 뒤에 붙었다(W9f 적대 리뷰 5 회차).
+    stderr.flush() catch {};
     if (any_failed) return error.UnknownCommand;
 }
 
@@ -839,4 +843,23 @@ test "W9f 적대 리뷰 3 회차: repl 의 use 로 고른 탭이 뒤 명령의 �
     defer err.deinit();
     runRepl(std.testing.io, gpa, null, fds[0], &out.writer, &err.writer) catch {};
     try std.testing.expect(std.mem.indexOf(u8, err.written(), "is required") == null);
+}
+
+test "W9f 적대 리뷰 5 회차: 터미널에서 Ctrl-D 로 끝내면 프롬프트 줄을 줄바꿈으로 닫는다(셸 프롬프트가 뒤에 붙지 않게)" {
+    if (comptime builtin.os.tag == .macos) {
+        const pty = struct {
+            extern "c" fn openpty(amaster: *c_int, aslave: *c_int, name: ?[*]u8, termp: ?*anyopaque, winp: ?*anyopaque) c_int;
+        };
+        var master: c_int = undefined;
+        var slave: c_int = undefined;
+        if (pty.openpty(&master, &slave, null, null, null) != 0) return error.SkipZigTest;
+        defer _ = std.c.close(slave);
+        _ = std.c.close(master); // 입력 끝 — 터미널의 Ctrl-D 와 같다(읽기가 0 또는 EIO)
+        var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer err.deinit();
+        try runRepl(std.testing.io, std.testing.allocator, null, slave, &out.writer, &err.writer);
+        try std.testing.expectEqualStrings("maru browser> \n", err.written());
+    } else return error.SkipZigTest;
 }

@@ -8,6 +8,7 @@ const std = @import("std");
 const mcp = @import("../mcp.zig");
 const browser_run = @import("../browser/run.zig");
 const browser = @import("../browser.zig");
+const control_client = @import("../control_client.zig");
 
 /// 한 줄 상한 — 넘는 줄은 버리고 오류로 답한다(끝없는 입력에 메모리를 쓰지 않게). 가장 큰 정상 인자는 type 의 글·exec 의 식이다.
 pub const max_line_bytes: usize = 4 * 1024 * 1024;
@@ -39,6 +40,9 @@ pub fn run(io: std.Io, allocator: std.mem.Allocator, args: anytype, stdout: *std
             return error.UnknownCommand;
         },
     }
+    // 컨트롤 소켓이 없는 빌드(Windows) — 도구가 하나도 돌 수 없으니 표준 입력을 읽기 전에 이유를 알리고 끝낸다(W9f 적대 리뷰 5 회차:
+    // 그 빌드의 `std.c.read` 는 CRT fd 가 아닌 HANDLE 을 받았다). comptime 이라 아래가 그 빌드에서 분석되지 않는다.
+    if (control_client.gate) |reason| return control_client.noInstance(stderr, reason);
     // 클라이언트가 표준 출력을 닫았다 — 답할 곳이 없으니 조용히 끝낸다(W9f 적대 리뷰 1 회차: 스택 트레이스와 종료 1).
     return serveQuietly(io, allocator, null, stdout, stderr);
 }

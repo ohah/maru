@@ -925,7 +925,7 @@ strip은 `.m`이 바닥을 직접 정하는 표면이다([metal-ui-layout-paint.
 
 ### 5.3 사이드바 **표면**(셀 + layer 0 quad)을 아래로도 자른다
 
-`sidebarBandCell`은 세로 경계를 보지 않는다(폭·칸수만 본다) — 스크롤이 0이어도 맨 아래 카드가 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줘 안 드러났을 뿐이다.
+밴드 quad(`sidebarScrollClipQuad` — 헤더 쪽 위만 자른다)도 글자 셀(`sidebar_glyph_rows.fillScreenOriginY`)도 아래 경계를 보지 않는다 — 스크롤이 0이어도 맨 아래 카드가 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줘 안 드러났을 뿐이다.
 
 **자를 구간은 Zig가 정한다**(`sidebarScissorPx` → ABI v168 `sidebar_scissor_top/bottom_px`). 게이트("스크롤됐나", "상태바가 있나")와 클램프, 뒤집힌 rect 방지가 전부 그 순수 함수에 있고 `.m`은 받은 구간을 **그대로** 쓴다 — 배치를 아는 곳을 하나로 두는 규율이다([metal-ui-layout-paint.md](metal-ui-layout-paint.md) §5).
 

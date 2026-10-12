@@ -23271,8 +23271,9 @@ pub const AppSession = struct {
     /// 자르는 이유가 위아래 서로 다르다:
     /// - **위**(header): 스크롤된 카드가 헤더 위로 새는 것을 막는다. 스크롤이 0이면 샐 것이 없으므로 안 자른다
     ///   (기존 동작 보존 — 헤더를 늘 자르면 헤더 영역에 걸친 표면이 없는데도 scissor가 걸린다).
-    /// - **아래**(status bar): `sidebar_ops.sidebarBandCell`이 세로 경계를 안 보므로(폭·칸수만 본다) 스크롤이 0이어도
-    ///   맨 아래 카드가 상태바 띠 안까지 발행된다. 지금까진 drawable 가장자리가 대신 잘라 줬을 뿐이다.
+    /// - **아래**(status bar): 밴드 quad(`sidebar_ops.sidebarScrollClipQuad` — 위만 자른다)도 글자 셀
+    ///   (`sidebar_glyph_rows.fillScreenOriginY`)도 아래 경계를 안 보므로 스크롤이 0이어도 맨 아래 카드가 상태바 띠 안까지
+    ///   발행된다. 지금까진 drawable 가장자리가 대신 잘라 줬을 뿐이다.
     ///
     /// **사이드바 quad(layer 0 = under 버킷)도 이 구간의 `bottom`으로 자른다.** 그 버킷은 사이드바 전용이고,
     /// 그리는 순서가 상태바 배경(bottom 버킷)·상태바 텍스트(터미널 셀 패스)보다 **뒤**라서 클립이 없으면
@@ -69516,7 +69517,7 @@ test "SB1: 사이드바 scissor는 스크롤과 상태바 각각을 이유로 �
     try std.testing.expectEqual(@as(u32, 40), scrolled.top);
     try std.testing.expectEqual(@as(u32, 960), scrolled.bottom);
 
-    // 상태바만 — **스크롤이 0이어도 아래를 자른다**(`sidebar_ops.sidebarBandCell`이 세로 경계를 안 보므로 맨 아래
+    // 상태바만 — **스크롤이 0이어도 아래를 자른다**(밴드 quad·글자 셀이 아래 경계를 안 보므로 맨 아래
     // 카드가 띠 안까지 발행된다). 위는 안 자른다: 스크롤이 0이면 헤더 위로 샐 것이 없다(기존 동작 보존).
     const bar_only = S(960, true, 40, 0, 22);
     try std.testing.expectEqual(@as(u32, 0), bar_only.top);

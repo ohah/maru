@@ -7,6 +7,10 @@ pub const windows_spawn = @import("pty/windows_spawn.zig");
 /// Windows 셸 통합 주입의 내용(cmd `PROMPT` 값·PowerShell 인라인 스크립트). 같은 이유로 배럴에 건다 —
 /// Win32 심볼이 없어 모든 타깃에서 컴파일되고, 그래야 그 규칙이 macOS·Linux CI에서도 검증된다.
 pub const windows_integration = @import("pty/windows_integration.zig");
+/// macOS `posix_spawn` 을 `POSIX_SPAWN_CLOEXEC_DEFAULT` 로만 부르는 헬퍼 — 앱이 받은 이미지 세그먼트 fd 가 자식으로 새지 않게
+/// (docs/session-host-image-channel.md §7). Darwin 전용 API(`addinherit_np`·`CLOEXEC_DEFAULT`)라 macOS 에서만 연다 —
+/// `check-targets` 는 다른 타깃에서 이 배럴의 모든 선언을 분석한다.
+pub const macos_spawn = if (@import("builtin").os.tag == .macos) @import("pty/macos_spawn.zig") else struct {};
 
 pub const ChildPid = types.ChildPid; // 자식 pid의 중립 이름 — POSIX는 std.c.pid_t 그대로, Windows는 u32(계약 §4)
 pub const Backend = types.Backend;

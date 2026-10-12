@@ -204,17 +204,51 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   해석되지 않고 그 항목은 남는다(표 단위는 IC3b-1); 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
   종료 상태가 되지 않는다; 울타리를 못 잡은 tick 의 `image_ref` 배치는 보류되고 다음 tick 에 적용된다.
 
-### IC4 — fd 상속 방지 (미착수)
+### IC4 — fd 상속 방지
 
-- 전역 rwlock·`pthread_atfork`, `POSIX_SPAWN_CLOEXEC_DEFAULT` spawn 헬퍼와 헬퍼 밖 `posix_spawn`·`system` 을 막는 문법 자리 판정자,
-  메인의 `trywrlock`·동기 적용 자리의 블로킹 잠금, 앱 `RLIMIT_NOFILE` 상향.
-- IC3b 의 채널 리더는 IC4 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
-- 판정자: fork 와 「recvmsg + F_SETFD」 의 직렬화, 헬퍼 밖 spawn 금지.
+IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 IC3b-2 와 겹치지 않는다)와 채널 수신을 그 울타리로 감싸기(IC4b — 수신
+코드가 IC3b-2 스택에 있어 그 머지 뒤).
+
+#### IC4a — fork 울타리·CLOEXEC_DEFAULT 헬퍼·판정자 (PR 진행 중)
+
+- `src/platform/macos/session_host/fork_fd_fence.zig`: 프로세스 전역 `pthread_rwlock` 하나와 `pthread_atfork`(prepare=rdlock,
+  parent=unlock, child=**새로 초기화**) — fork 시스템콜 하나만 읽기 잠금이다. 자식에서 unlock 하면 fork 순간 줄 서 있던 writer(자식에
+  없는 스레드)에게 소유가 넘어가 자식이 다시 fork 할 때(host 띄우기의 이중 fork) 영원히 멈춘다 — 적대적 검증으로 재현했고 판정자가
+  잰다. 수신 쪽 API 는 `tryLockReceive`(메인 — 못 잡으면 그 tick 의 수신을
+  건너뜀)·`lockReceive`(tick 이 없는 동기 적용 자리)·`unlockReceive`. 앱 열린 fd 상한 상향(`raiseOpenFileLimit`, host 데몬과 같은
+  8192).
+- 앱 세션 생성(`maru_macos_app_session_create`)이 세션을 만들기 전에 울타리를 설치하고 fd 상한을 올린다(받은 fd 가 생기기 전).
+- `src/pty/macos_spawn.zig`(`maru.pty.macos_spawn`): `posix_spawn` 을 `POSIX_SPAWN_CLOEXEC_DEFAULT` 로만 부른다 — stdio 는 넘기거나
+  (`addinherit_np`) `/dev/null` 로 돌리고 그 밖의 fd 는 하나도 넘기지 않는다. `runShell` 이 `system()` 을 대신한다.
+- 옮긴 것: 앱 안 폴백 PTY 의 terminfo 컴파일(`system()` → `runShell`), codesign 확인(`web_osr_install` — 이미 CLOEXEC_DEFAULT 였으나
+  직접 선언을 헬퍼로) 과 그 파일의 테스트.
+- 판정자:
+  - `tests/boundary/spawn_cloexec_axis.zig`(`boundary_scans`): `src` 전체에서 최상위 test 밖의 `posix_spawn`·`posix_spawnp`·`system`
+    호출·선언을 토큰으로 센다(`posix_spawn`·`posix_spawnp`·`popen` 은 이름만으로 — 별칭·`@call` 로 못 피한다, `system` 은 `(` 와 함께,
+    `@field(…, "이름")` 도) — 재고는 헬퍼 자신 1 과 `maru` CLI(`src/main.zig` — 이미지 채널을 협상하지 않는다) 4 뿐, 개수가 늘어도
+    줄어도 빨갛다. 스캐너 자체 시험(호출·선언은 세고 test 몸체·주석·문자열은 안 센다)과 앱이 세션을 만들기 전에 울타리를 설치하는지
+    (글자)도 같은 파일에 있다.
+  - `test-image-channel-app` 에 울타리 4(writer 가 줄 선 채 fork 한 자식이 다시 fork 할 수 있다, 수신 쓰기 잠금을 쥔 동안 다른
+    스레드의 **실제 fork** 가 기다린다, fork 가 읽기 쪽을 쥔 동안 메인의 try-lock 은 물러선다, fd 상한)·헬퍼 3(**실제 셸**이 CLOEXEC 가
+    꺼진 부모 fd 를 못 보고 stdio 만 본다, 닫힌 stdio 는 `/dev/null` 로 채워 `system()` 처럼 뜬다, `/dev/null` stdio 와 없는 프로그램은
+    `SpawnFailed`).
+- fork 는 세지 않는다 — 울타리가 덮는다. 앱 안 fork 자리(폴백 PTY·host 띄우기·LSP·ssh 업로드 7·git 2·업데이트 확인·로그인 셸 환경·
+  에디터 검색의 `std.process.spawn` — Zig 0.16 은 fork 로 띄운다)는 모두 atfork 를 지난다.
+
+#### IC4b — 채널 수신을 울타리로 감싸기 (미착수 — IC3b-2 머지 뒤)
+
+- `Client.pumpImageChannel` 의 「recvmsg + `F_SETFD`」(`Table.drain`)를 메인에서는 `tryLockReceive` 로 감싼다 — 못 잡으면 펌프는 false
+  (IC3b-2b-1 의 보류가 그 배치를 머리에 둔다). tick 이 없는 동기 적용 자리(첫 snapshot 의 `imageRefResolverAfterPump`)는
+  `lockReceive`.
 - 앱 채널 소켓 생성도 볼 것: `connectUnixUntil` 은 `socket()` 과 CLOEXEC 설정이 별개 호출이라 그 사이 fork 한 자식이 채널 소켓을
   물려받을 수 있다(IC2b 적대적 검증 3 회차). 물려받으면 앱이 채널을 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다 — 쓰기 잠금이 채널
   소켓 생성도 덮게 한다(주 소켓에도 원래 있는 틈이다).
+- Swift 쪽 spawn: `Process()` 가 둘 있다(`MermaidHelperProcess.swift` — 제품, `SessionHostIMECandidateObservation.swift` — 환경 변수
+  smoke). Foundation 의 `Process` 가 CLOEXEC_DEFAULT 로 띄운다는 것은 계약 §7 의 실측에 기댄다(Apple 내부 구현이라 보장은 아니다).
+  Zig 판정자는 Swift 를 보지 않으므로 Swift `Process`·`NSTask` 재고를 같은 결의 글자 판정자로 고정한다.
 - host 쪽도 볼 것: host 가 받는 fd 는 프로토콜 위반(release 에 붙은 fd)뿐이고 owner 스레드가 받자마자 닫는다. 다른 스레드가 그
   사이에 fork 하는 자리가 host 에 있는지(IC2a 적대적 검증 2 회차 메모) 확인해 같은 잠금 범위에 넣을지 정한다.
+- IC3b 의 채널 리더는 IC4b 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
 
 ### IC5 — 흐름 제어와 delta 표현 (미착수)
 

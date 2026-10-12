@@ -1474,8 +1474,9 @@ const MacosLogin = struct {
 /// 따옴표 등)가 있어도 bash가 word-split·해석하지 않고 문자 그대로 넘기게 한다. POSIX 규칙: 토큰을 `'...'`로 감싸고
 /// 내부의 `'`는 `'\''`(따옴표 닫기 → 이스케이프된 `'` → 다시 열기)로 끊는다. 빈 토큰은 `''`가 돼 안전하다.
 
-// `/bin/sh -c <cmd>`를 돌려 기다린다(POSIX). std.c에 노출이 없어 직접 선언한다(setenv/unsetenv와 같은 결).
-extern "c" fn system(command: [*:0]const u8) c_int;
+// `/bin/sh -c <cmd>`를 돌려 기다린다 — `system()` 대신 CLOEXEC_DEFAULT 헬퍼로(앱 안 폴백 PTY 경로라 이미지 세그먼트 fd 를
+// 물려주지 않게, docs/session-host-image-channel.md §7).
+const macos_spawn = @import("macos_spawn.zig");
 
 const ResolvedTerm = struct { term: []const u8, terminfo_dir: ?[]const u8 };
 
@@ -1514,7 +1515,9 @@ fn computeMaruTerminfo() ResolvedTerm {
         return fallback;
     };
     defer page.free(cmd);
-    if (system(cmd.ptr) == 0) return .{ .term = terminfo_cache.term_name, .terminfo_dir = dir }; // dir은 의도적 leak(프로세스 수명)
+    // 이 파일의 테스트는 Linux CI 에서도 컴파일된다 — Darwin 전용 spawn 은 macOS 에서만 분석한다(다른 OS 는 이 경로를 돌지 않는다).
+    const status: c_int = if (comptime builtin.os.tag == .macos) macos_spawn.runShell(cmd.ptr) else -1;
+    if (status == 0) return .{ .term = terminfo_cache.term_name, .terminfo_dir = dir }; // dir은 의도적 leak(프로세스 수명)
     page.free(dir);
     return fallback;
 }

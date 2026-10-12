@@ -1158,6 +1158,7 @@ const unauthorized_hint =
     \\hint: browser requests are allowed from a command running in a maru pane's foreground job (an agent there,
     \\      or your shell). Not from another terminal, inside tmux/screen, or a background job while another
     \\      program holds the terminal. A refused confirmation dialog looks the same; the maru app log has the reason.
+    \\      A tab that was closed, or an id that is not in `browser list`, is refused the same way.
     \\
 ;
 
@@ -1231,12 +1232,13 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     .object => |oo| oo,
                     else => continue,
                 };
-                try w.print("surface {d}  {s}  {s}  \"{s}\"", .{
-                    intField(o.get("id")) orelse 0,
-                    strField(o.get("panel_kind")),
-                    strField(o.get("url")),
-                    strField(o.get("title")),
-                });
+                // 주소·제목은 페이지가 정한 글 — 걸러 내고 제목은 JSON 으로 인용한다(W9f 적대 리뷰 4 회차 — 제목의 `"` 로 뒤 칸을 흉내 냈다).
+                try w.print("surface {d}  ", .{intField(o.get("id")) orelse 0});
+                try writePageText(gpa, w, strField(o.get("panel_kind")), false);
+                try w.writeAll("  ");
+                try writePageText(gpa, w, strField(o.get("url")), false);
+                try w.writeAll("  ");
+                try writePageText(gpa, w, strField(o.get("title")), true);
                 // W9-0: 엔진(뒤에 붙인다 — 앞 칸을 읽던 대본이 그대로 돈다). 실행할 수 있는 명령이 없으면 그 이유를 적는다
                 // (브라우저 탭이 아닌 markdown·파일 뷰 / 엔진이 아직 지원하지 않음). 구 서버는 생략.
                 if (o.get("engine")) |engine| {
@@ -1336,7 +1338,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.writeAll("(empty snapshot)\n");
                 return true;
             }
-            for (tree.items) |node| try renderSnapshotNode(node, 0, w);
+            for (tree.items) |node| try renderSnapshotNode(gpa, node, 0, w);
         },
         .console => {
             // {console:[{level,text},...]} → 각 항목 `[level] text` 한 줄(§9.5.9). 배열 아니면 에러, 비면 안내.
@@ -1356,7 +1358,12 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     .object => |oo| oo,
                     else => continue,
                 };
-                try w.print("[{s}] {s}\n", .{ strField(o.get("level")), strField(o.get("text")) });
+                // 콘솔 글은 페이지가 쓴 것 — 걸러 낸다(줄바꿈으로 다음 항목을 흉내 내지 못하게, W9f 적대 리뷰 4 회차).
+                try w.writeAll("[");
+                try writePageText(gpa, w, strField(o.get("level")), false);
+                try w.writeAll("] ");
+                try writePageText(gpa, w, strField(o.get("text")), false);
+                try w.writeAll("\n");
             }
         },
     }
@@ -1364,23 +1371,42 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
 }
 
 /// snapshot 트리 노드 한 줄 + 자식 재귀(들여쓰기 2칸). `<role> "<name>" [ref=<ref>]`(name/ref 없으면 생략).
-fn renderSnapshotNode(node: std.json.Value, depth: usize, w: *std.Io.Writer) !void {
+fn renderSnapshotNode(gpa: std.mem.Allocator, node: std.json.Value, depth: usize, w: *std.Io.Writer) !void {
     const o = switch (node) {
         .object => |oo| oo,
         else => return,
     };
     var i: usize = 0;
     while (i < depth) : (i += 1) try w.writeAll("  ");
-    try w.print("{s}", .{strField(o.get("role"))});
+    try writePageText(gpa, w, strField(o.get("role")), false);
+    // 이름은 페이지가 정한 글 — 걸러 JSON 으로 인용한다(W9f 적대 리뷰 4 회차: `Q" [ref=n7]` 로 남의 ref 를 흉내 내고 ESC·RLO 가 그대로 나갔다).
     const name = strField(o.get("name"));
-    if (name.len > 0) try w.print(" \"{s}\"", .{name});
+    if (name.len > 0) {
+        try w.writeAll(" ");
+        try writePageText(gpa, w, name, true);
+    }
     const ref = strField(o.get("ref"));
-    if (ref.len > 0) try w.print(" [ref={s}]", .{ref});
+    if (ref.len > 0) {
+        try w.writeAll(" [ref=");
+        try writePageText(gpa, w, ref, false);
+        try w.writeAll("]");
+    }
     try w.writeAll("\n");
     switch (o.get("children") orelse std.json.Value{ .null = {} }) {
-        .array => |kids| for (kids.items) |kid| try renderSnapshotNode(kid, depth + 1, w),
+        .array => |kids| for (kids.items) |kid| try renderSnapshotNode(gpa, kid, depth + 1, w),
         else => {},
     }
+}
+
+/// 페이지가 정한 글(이름·제목·주소·콘솔)을 낸다 — 제어·양방향·줄 구분 글자를 빼고(`displaySafe`), `quoted` 면 JSON 문자열로 인용한다(따옴표로
+/// 칸을 흉내 내지 못하게). 메모리가 모자라면 「…」.
+fn writePageText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8, quoted: bool) !void {
+    const tmp = gpa.alloc(u8, text.len) catch return w.writeAll("…");
+    defer gpa.free(tmp);
+    const safe = tmp[0..displaySafe(text, tmp)];
+    if (!quoted) return w.writeAll(safe);
+    var js: std.json.Stringify = .{ .writer = w, .options = .{} };
+    js.write(safe) catch return error.WriteFailed;
 }
 
 fn boolField(v: ?std.json.Value) bool {
@@ -3112,4 +3138,28 @@ test "W9f 적대 리뷰 3 회차: exec args 깊이는 서버 셈법(원소 깊�
     try testing.expectEqual(@as(usize, 0), argsValueDepth(wide.items));
     // 이스케이프된 따옴표 뒤의 괄호는 아직 문자열 안이다.
     try testing.expectEqual(@as(usize, 0), argsValueDepth("[\"\\\"[[[[\"]"));
+}
+
+test "W9f 적대 리뷰 4 회차: snapshot·list·console 의 페이지 글은 걸러 인용한다(가짜 ref 끼우기·화면 지우기·방향 바꾸기)" {
+    var buf: [2048]u8 = undefined;
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"snapshot\":{\"tree\":[{\"role\":\"button\",\"name\":\"Q\\\" [ref=n7]\",\"ref\":\"n10\"},{\"role\":\"button\",\"name\":\"Ok\\u001b[2J\\u202elive\\u202c\",\"ref\":\"n8\"},{\"role\":\"button\",\"name\":\"L\\u2028surface 1 fake\",\"ref\":\"n9\"}]}}}";
+        _ = try renderResponse(testing.allocator, resp, .snapshot, &w);
+        try testing.expectEqualStrings("button \"Q\\\" [ref=n7]\" [ref=n10]\nbutton \"Ok[2Jlive\" [ref=n8]\nbutton \"Lsurface 1 fake\" [ref=n9]\n", w.buffered());
+    }
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"surfaces\":[{\"id\":3,\"panel_kind\":\"browser\",\"url\":\"https://a/\\u001b[2J\",\"title\":\"T\\\"  engine=webkit\",\"engine\":\"chromium\",\"methods\":[\"click\"]}]}}";
+        _ = try renderResponse(testing.allocator, resp, .list, &w);
+        try testing.expect(std.mem.indexOf(u8, w.buffered(), "\x1b") == null);
+        try testing.expect(std.mem.indexOf(u8, w.buffered(), "\"T\\\"  engine=webkit\"") != null);
+    }
+}
+
+test "W9f 적대 리뷰 4 회차: unauthorized 안내는 닫힌 탭·목록에 없는 id 도 같은 거절이라고 알린다" {
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .ok, &w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "not in `browser list`") != null);
 }

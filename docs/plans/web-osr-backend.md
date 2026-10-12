@@ -1099,3 +1099,11 @@ Chromium 탭의 `exec`·`screenshot` 은 아직 -32008(W9a) — 스모크는 지
   탭에서 아직 안 되는 도구(navigate·get_url·exec·console·screenshot)를 `instructions` 에 적었다(W9a 에서 뺀다). 생존 변이에 시험을 더했다(MCP 129/130 경계·형제
   객체·문자열 안 이스케이프·LenientWriter 의 splat·repl 의 use). 남은 생존: repl 의 「WriteFailed 는 실패로 보고 계속」(서버가 있어야 닿는다)·실패한 스크린샷의
   그림 결과(W9a 의 스모크 몫).
+- **4 회차**(실제 앱 탐침 둘·변이 12(걸림 7)): 중 — snapshot 이 페이지가 정한 이름을 거르지도 인용하지도 않아 `Q" [ref=n7]` 로 남의 ref 를 흉내 내고 ESC·RLO 가
+  터미널에 그대로 나갔다(list 의 주소·제목, console 글도) → 걸러 내고 이름·제목은 JSON 인용. 중 — 닫힌 탭·없는 id 에 「pane foreground 가 아니다」 안내만 →
+  「닫혔거나 목록에 없는 id 도 같은 거절」 을 더했다(작성자 선택 — list 를 다시 불러 가르는 왕복은 두지 않는다). 하 — repl 에서 고른 탭을 닫아도 남음 → 비우고
+  알림, 대상 없음에 `use`·`list`·`open` 안내, `repl --help` 에 repl 명령, Ctrl-D 줄바꿈, 터미널로 PNG 를 쏟는 screenshot 거절. 하 — back·forward 의 「not ok」
+  뜻을 MCP 설명에. 코드로만 찾은 것: 스트림 명령(snapshot·console·exec·screenshot)이 답 없이 끊기면 「깨진 스트림」 으로 고장처럼 보였다 → 「답 없음」 (소켓을
+  흉내 낼 이음매가 없어 재현하지 못하고 코드로 고쳤다). 생존 변이에 시험(파서 거절의 isError·required 일치·안내 글). 남긴 한계: 확인 모달에 요청한 pane 이
+  보이지 않는다(W9f 이전 설계 — 두 pane 의 에이전트가 같은 탭을 청하면 사용자가 어느 쪽인지 모른다; 별도 축), repl 에는 줄 편집·기록이 없고 Ctrl-C 는 repl 을
+  끝낸다.

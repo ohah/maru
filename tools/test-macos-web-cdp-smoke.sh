@@ -536,7 +536,7 @@ echo "\$((c1 - c0))" > "\$out/ag-close-ask-secs"
 python3 "$root/mcp_drive.py" "\$cli" "http://127.0.0.1:$port" "\$out" > "\$out/mcp-py" 2>&1; echo "rc=\$?" >> "\$out/mcp-py"
 hit_seen mb-true && echo yes > "\$out/mb-hit" || echo no > "\$out/mb-hit"
 hit_seen mt-true---help && echo yes > "\$out/mt-hit" || echo no > "\$out/mt-hit"
-printf 'use x\nopen --url http://127.0.0.1:$port/mcp.html?repl\nclick --selector "#rb"\nclose\n' | "\$cli" browser repl > "\$out/repl" 2>&1; echo "rc=\$?" >> "\$out/repl"
+printf 'use x\nopen --url http://127.0.0.1:$port/mcp.html?repl\nclick --selector "#rb"\nclose\nclick --selector "#rb"\n' | "\$cli" browser repl > "\$out/repl" 2>&1; echo "rc=\$?" >> "\$out/repl"
 hit_seen rb2-true && echo yes > "\$out/rb2-hit" || echo no > "\$out/rb2-hit"
 # 접속이 안 되는 주소 — 실패한 이동도 곧 끝이다(적대 리뷰 1 회차: 25 초를 다 기다렸다).
 f0=\$(date +%s)
@@ -738,7 +738,7 @@ mcp_get shot | grep -q '^png$\|(-32008)' || fail "browser_screenshot through MCP
 [ "$(mcp_get rest)" = empty ] && [ "$(mcp_get rc)" = 0 ] || fail "maru mcp wrote extra output or did not exit 0 at the end of input ($(tr '\n' ' ' < "$out/mcp"))"
 echo "PASS mcp: an MCP server started in a new session (no terminal) opens, clicks, types --help as text, sends the expression -1 to the engine, gets an image or the engine's refusal for a screenshot, refuses a misspelled argument and closes, with only JSON-RPC on its output"
 # 첫 줄은 틀린 `use`(표준 오류) — 같은 파일로 받아도 줄이 서로 덮이지 않고(W9f 적대 리뷰 1 회차), 실패가 있었으니 종료 상태 1.
-grep -q '^error: use needs one tab id' "$out/repl" && grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html?repl$' "$out/repl" && grep -q '^ok$' "$out/repl" && grep -q '^closed$' "$out/repl" && grep -q '^rc=1$' "$out/repl" && [ "$(cat "$out/rb2-hit")" = yes ] || fail "repl did not open a tab, click it without --surface and close it, or its output lines overwrote each other ($(tr '\n' ' ' < "$out/repl"))"
+grep -q '^(the picked tab was closed' "$out/repl" && grep -q '^hint: pick a tab with `use <id>`' "$out/repl" && grep -q '^error: use needs one tab id' "$out/repl" && grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html?repl$' "$out/repl" && grep -q '^ok$' "$out/repl" && grep -q '^closed$' "$out/repl" && grep -q '^rc=1$' "$out/repl" && [ "$(cat "$out/rb2-hit")" = yes ] || fail "repl did not open a tab, click it without --surface and close it, or its output lines overwrote each other ($(tr '\n' ' ' < "$out/repl"))"
 echo "PASS repl: open picked the new tab, click and close ran on it without --surface"
 echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a user tab cannot be closed, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"

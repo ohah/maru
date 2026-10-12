@@ -51,7 +51,12 @@
 //! - **보조 서버 역할**(tooling §8.2u): 첫 인자가 `server`(보조 서버 표의 `ruff server`)면 보조 서버로 선다 — 진단 message 가 `aux: <version>`·
 //!   code `A1`(주 서버와 갈라 보인다). 본문에 `AUXQUIET` 이 있으면 보조 서버는 **빈** 진단을 낸다(한 서버의 publish 가 다른 서버의 칸을 안
 //!   지우는지). didChange 본문에 `AUXSPOOF` 가 있으면 **청하지 않은 hover 응답**(id `1e8+1`)을 보낸다(보조 서버의 응답이 주 서버의
-//!   대기를 못 채우는지).
+//!   대기를 못 채우는지). 보조 역할의 code action: `codeActionKinds` 는 `quickfix`·`source.fixAll.ruff`(ruff 꼴), 진단별 quickfix 만 내고
+//!   제목에 문맥 진단의 `data.fix` 를 붙인다(`aux: fix A1 (data aux-1)` — 클라이언트가 data 를 되돌렸는지; ruff 처럼 문맥 진단의
+//!   `source` 가 `aux` 일 때만 낸다 — 진단에 `source: "aux"` 를 단다), `source.fixAll(.ruff)` 는
+//!   `AUXFIX` → `AUX_FIXED`, 본문에 `AUXSTALL` 이 있으면 메뉴 요청에 답하지 않는다. `AUXSLOW` 면 메뉴 요청에 150ms 늦게 답한다. `AUXLAZY` 면 resolve 가 필요한 「aux: lazy」를 더 내고,
+//!   보조 역할의 resolve 는 첫 줄에 `# aux lazy` 를 넣는다(주 역할은 `// lazy`). 주 역할은 `quickfix`·`refactor`·
+//!   `source.organizeImports`·`source.fixAll` 을 알린다.
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
 
 const std = @import("std");
@@ -177,6 +182,8 @@ pub fn main(init: std.process.Init) void {
 var answered = false;
 /// 보조 서버 역할로 떴다(첫 인자 `server`).
 var auxiliary = false;
+const primary_action_kinds = [_][]const u8{ "quickfix", "refactor", "source.organizeImports", "source.fixAll" };
+const aux_action_kinds = [_][]const u8{ "quickfix", "source.fixAll.ruff" };
 /// `initialize` 에서 협상한 위치 인코딩이 utf-16 인가(기본은 utf-8 — 클라이언트가 먼저 제안한다). documentHighlight 가 자리를 이 단위로 읽고 낸다.
 var negotiated_utf16 = false;
 /// `initialized` 의 `params` 가 객체가 아니었다 — 그 뒤 전부 `ServerNotInitialized`(tsgo 꼴).
@@ -625,6 +632,8 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         };
     };
     const text = docText(req_uri);
+    if (auxiliary and std.mem.indexOf(u8, text, "AUXSTALL") != null) return; // 보조 서버가 메뉴 요청에 답하지 않는다(시한 관측점)
+    if (auxiliary and std.mem.indexOf(u8, text, "AUXSLOW") != null) _ = usleep(150_000); // 늦지만 시한 안에 답한다
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -637,8 +646,13 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         if (dg != .object) continue;
         const range = dg.object.get("range") orelse continue;
         const code = str(dg.object.get("code")) orelse "?";
+        // 문맥 진단의 `data.fix`(보조 서버가 publish 에 실은 것)를 제목에 — 클라이언트가 되돌렸는지 보인다.
+        const data_fix: ?[]const u8 = if (dg.object.get("data")) |dd| (if (dd == .object) str(dd.object.get("fix")) else null) else null;
+        // 보조 역할은 ruff 처럼 문맥 진단의 `source` 가 제 것(`aux`)일 때만 quickfix 를 낸다.
+        if (auxiliary and !std.mem.eql(u8, str(dg.object.get("source")) orelse "", "aux")) continue;
         var it: std.json.ObjectMap = .empty;
-        it.put(arena, "title", .{ .string = std.fmt.allocPrint(arena, "fake: fix {s}", .{code}) catch return }) catch return;
+        const title = if (data_fix) |df| std.fmt.allocPrint(arena, "{s}: fix {s} (data {s})", .{ if (auxiliary) "aux" else "fake", code, df }) catch return else std.fmt.allocPrint(arena, "{s}: fix {s}", .{ if (auxiliary) "aux" else "fake", code }) catch return;
+        it.put(arena, "title", .{ .string = title }) catch return;
         it.put(arena, "kind", .{ .string = "quickfix" }) catch return;
         if (i == 0) it.put(arena, "isPreferred", .{ .bool = true }) catch return;
         var te: std.json.ObjectMap = .empty;
@@ -653,6 +667,19 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         it.put(arena, "edit", .{ .object = edit }) catch return;
         items.append(.{ .object = it }) catch return;
     };
+    if (auxiliary) { // 보조 서버(ruff 꼴)는 진단별 quickfix 만 — `AUXLAZY` 면 resolve 가 필요한 「aux: lazy」 하나 더
+        if (std.mem.indexOf(u8, text, "AUXLAZY") != null) {
+            var it: std.json.ObjectMap = .empty;
+            it.put(arena, "title", .{ .string = "aux: lazy" }) catch return;
+            it.put(arena, "kind", .{ .string = "quickfix" }) catch return;
+            var data: std.json.ObjectMap = .empty;
+            data.put(arena, "uri", .{ .string = arena.dupe(u8, req_uri) catch return }) catch return;
+            it.put(arena, "data", .{ .object = data }) catch return;
+            items.append(.{ .object = it }) catch return;
+        }
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = std.json.Value{ .array = items } });
+        return;
+    }
     if (std.mem.indexOf(u8, text, "MANYACT") != null) {
         // 상한(25 = 메뉴 버퍼) 관측점 — data 만 있는 항목 30 개.
         var n: usize = 0;
@@ -725,6 +752,13 @@ fn handleSourceActions(allocator: std.mem.Allocator, only: []const std.json.Valu
     };
     for (only) |k| {
         const kind = if (k == .string) k.string else continue;
+        if (auxiliary) {
+            // 보조 서버(ruff 꼴): `source.fixAll`·`source.fixAll.ruff` 만 — `AUXFIX` → `AUX_FIXED`.
+            if (std.mem.eql(u8, kind, "source.fixAll") or std.mem.eql(u8, kind, "source.fixAll.ruff")) {
+                if (Mk.replaceItem(arena, "aux: fix all", "source.fixAll.ruff", req_uri, text, "AUXFIX", "AUX_FIXED")) |item| items.append(item) catch return;
+            }
+            continue;
+        }
         if (std.mem.eql(u8, kind, "source.organizeImports")) {
             if (std.mem.indexOf(u8, text, "ORGLAZY") != null) {
                 var it: std.json.ObjectMap = .empty;
@@ -780,7 +814,7 @@ fn handleCodeActionResolve(allocator: std.mem.Allocator, obj: std.json.ObjectMap
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var arr: std.json.Array = .init(arena);
-    arr.append(editValue(arena, 0, 0, 0, "// lazy\n") catch return) catch return;
+    arr.append(editValue(arena, 0, 0, 0, if (auxiliary) "# aux lazy\n" else "// lazy\n") catch return) catch return; // 보조 역할은 다른 글 — 어느 서버가 resolve 했는지 보인다
     var changes: std.json.ObjectMap = .empty;
     changes.put(arena, arena.dupe(u8, uri) catch return, .{ .array = arr }) catch return;
     var edit: std.json.ObjectMap = .empty;
@@ -1491,7 +1525,8 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .documentFormattingProvider = std.c.getenv("MARU_FAKE_LSP_NOFMTCAP") == null, // `MARU_FAKE_LSP_NOFMTCAP=1` 이면 false
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
                     .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."}, .resolveProvider = true } else null,
-                    .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = [_][]const u8{"quickfix"}, .resolveProvider = true } else null,
+                    // 내는 kind 를 실서버처럼 알린다 — 클라이언트는 알린 kind 만 저장 시 묻는다(tooling §8.2u). 보조 역할은 ruff 꼴.
+                    .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = if (auxiliary) aux_action_kinds[0..] else primary_action_kinds[0..], .resolveProvider = true } else null,
                     // semantic tokens(§8.2i) — legend 다섯(하나는 클라이언트가 모르는 이름·`variable` 은 무색). `MARU_FAKE_LSP_SEMFULL=1` 이면 range 없이
                     // full 만(clangd 꼴), `MARU_FAKE_LSP_NOSEMCAP=1` 이면 provider 없음.
                     // 접힘 3층(§8.2j) — `MARU_FAKE_LSP_NOFOLDCAP=1` 이면 provider 없음.
@@ -1797,7 +1832,9 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             if (std.mem.indexOf(u8, text, "AUXSPOOF") != null and std.mem.eql(u8, method, "textDocument/didChange"))
                 sendJson(allocator, .{ .jsonrpc = "2.0", .id = @as(i64, 100_000_001), .result = .{ .contents = .{ .kind = "markdown", .value = "aux: spoofed hover" } } });
             const aux_msg = std.fmt.bufPrint(&msg_buf, "aux: {d}", .{version}) catch "aux";
-            const one = [_]Diag{.{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = aux_msg, .code = "A1" }};
+            // `data`(LSP 3.16)를 싣는다 — 클라이언트가 code action 문맥으로 그대로 되돌려야 quickfix 제목에 `(data aux-1)` 이 붙는다.
+            const AuxDiag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8, source: []const u8, data: struct { fix: []const u8 } };
+            const one = [_]AuxDiag{.{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = aux_msg, .code = "A1", .source = "aux", .data = .{ .fix = "aux-1" } }};
             const quiet = std.mem.indexOf(u8, text, "AUXQUIET") != null;
             sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = if (quiet) one[0..0] else one[0..] } });
             return;

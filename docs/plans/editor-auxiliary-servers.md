@@ -1,6 +1,6 @@
 # 보조 언어 서버 구현 계획
 
-상태: AS1 진행(구조·ruff 진단). 계약은 [tooling §8.2u](../editor-surface-tooling.md)가 소유하고, 이 문서는 결정·설계·조각·검증을 소유한다. 언어 서버의 공통 계약은 §8.2a 다.
+상태: AS1(구조·ruff 진단) 완료, AS2(code action 을 서버 여럿에서) 진행. 계약은 [tooling §8.2u](../editor-surface-tooling.md)가 소유하고, 이 문서는 결정·설계·조각·검증을 소유한다. 언어 서버의 공통 계약은 §8.2a 다.
 
 ## 왜
 
@@ -59,6 +59,20 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 - 저장 시 code action: 설정 kind 마다 그 kind 를 지원하는(`codeActionKinds` 가 덮는 — `source.fixAll` 은 `source.fixAll.eslint` 를 덮는다) 서버에 차례로 묻는다(주 서버 먼저). 하나를 적용하면 revision 이 올라 다음 요청이 새 본문을 본다(§8.2s 그대로).
 - ESLint 의 줄 단위 quickfix 는 `command` 만이라 메뉴에 안 뜬다(§8.2h ⑤ 그대로). `workspace/executeCommand`·`workspace/applyEdit` 는 이 계획 밖이다.
 
+### AS2 설계 메모
+
+- **진단 `data`·`source` 왕복**: ruff 는 진단마다 `data`(규칙별 fix 편집·`# noqa` 편집)를 싣고 `⌘.` 의 줄 단위 quickfix 를 그것으로 만든다(LSP 3.16
+  「publish 와 codeAction 사이에 보존」). 그리고 **문맥 진단의 `source` 가 `Ruff` 일 때만** 낸다 — `data` 만 되돌리면 「Fix all」·「Organize imports」만
+  오고 줄 단위 fix 가 없다(진짜 ruff 0.17.0 실측, 적대적 2회차). `Diagnostic.data`(JSON 원문)·`source_text` 를 메시지 저장소에 함께 들고
+  (`appendDiagnostics` 가 먼저 크기를 재 저장소를 잡는다 — 슬라이스가 그 안을 가리킨다), `ContextDiagnostic` 이 그대로 되돌린다(`jsonStringify`).
+- **kind 목록**: `CodeActionCaps` 에 서버가 알린 `codeActionKinds` 의 사본(256 바이트 — 넘치면 모르는 것으로 두고 묻는다). `covers` 는 위계 양쪽
+  (`source.fixAll` ↔ `source.fixAll.ruff`). 목록이 없으면 무엇이든. **주 서버에도 적용된다** — 알린 kind 밖은 묻지 않는다(LSP: 「서버가 낼 수 있는
+  kind」 — VS Code 도 `providedCodeActionKinds` 로 provider 를 거른다). 가짜 서버도 실서버처럼 제 kind 를 알리게 했다.
+- **메뉴 시한**: 첫 답이 오기 전에는 시한이 없다(서버 하나일 때와 같다 — rust-analyzer 의 code action 은 1 초를 넘길 수 있다). 첫 답 뒤 0.5 초.
+  모으는 목록(`pending`)과 열린 메뉴가 빌려 쓰는 목록(`items`)을 갈라, 다 모은 뒤 바꾼다.
+- **서버는 이름으로 든다**: 클라이언트 표는 자라며 옮겨지므로 메뉴 항목·저장 단계는 포인터 대신 실행 파일 이름(서버 표의 정적 문자열)을 들고
+  `docClientByExe` 로 되찾는다.
+
 ### 서버 → 클라이언트 요청 (AS3)
 
 - §8.2a 는 서버 요청을 전부 거부한다. 예외를 하나 더한다: **`workspace/configuration` 에 서버 표의 고정 설정으로 답한다**(그 서버에 정해 둔 블롭이 있을 때만 — ESLint; 없으면 지금처럼 거부). 읽기 요청이고 답은 우리 상수라 승인 UI 가 필요한 「행동」이 아니다.
@@ -72,8 +86,8 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 
 | 조각 | 내용 | 상태 |
 | --- | --- | --- |
-| AS1 | 구조 — 보조 서버 표·ruff 감지·`Client.role`·저장소 실행 파일·동기화·서버별 진단 칸·진단의 서버 이름(호버)·보조 응답 거름·정보 명령·계약 §8.2u | 진행 |
-| AS2 | code action 을 서버 여럿에서 — `⌘.` 메뉴 합치기·resolve 를 그 서버로·저장 시 kind 를 지원 서버로 | 대기 |
+| AS1 | 구조 — 보조 서버 표·ruff 감지·`Client.role`·저장소 실행 파일·동기화·서버별 진단 칸·진단의 서버 이름(호버)·보조 응답 거름·정보 명령·계약 §8.2u | 완료 |
+| AS2 | code action 을 서버 여럿에서 — `⌘.` 메뉴 합치기(첫 답 뒤 0.5 초)·resolve 를 그 서버로·저장 시 kind 를 알린 서버로·진단 `data`·`source` 왕복 | 진행 |
 | AS3 | ESLint — 감지·`workspace/configuration` 고정 답·pull 진단(`17e8`)·`eslint/*` 알림 | 대기 |
 
 ## 한계 (받아들일 것)
@@ -90,6 +104,14 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 3. 문서 정합성 — §8.2a 의 「서버는 `(root, 언어)` 마다 하나」가 코드(`(root, 실행 파일)` 열쇠)와 달랐다 → 고침. 진단 합치기·호버 출처·§8.2t 의 「하지 않는 것」을 보조 서버로 이었다. 새 문서의 식별자를 코드와 기계로 대조했다(남은 것은 외부 API 이름·AS3 의 것).
 4. 순서·신뢰 — 주 서버가 설치되지 않은 문서(보조 서버가 먼저 묻는다)·거부(같은 저장소라 함께)·`lsp.enabled` 끄고 켜기·`ruff server` 가 없는 옛 ruff(재시작 셋 뒤 「실패」, 정보 명령이 보인다)를 따라갔다 — 결함 없음. 외부 포매터 판정자(EXFB3)의 `.venv/bin/ruff`(가짜 포매터)가 이제 보조 서버로도 떠 인자 기록을 덮었다 — 제품에선 같은 ruff 가 포매터이자 보조 서버인 것이 맞으므로 가짜 포매터가 `server` 로 불리면 곧 끝나게 했다.
 5. 변이 — 21개. 잡힘 17. 살아남은 넷: A14(「주 서버가 없으면 보조 서버만이라도」 조건 — 보조 서버가 있는 문법은 늘 주 서버 표가 있어 죽은 조건이었다 → 지웠다) · A17(보조 서버의 다시 고르기 막기)·A18(언어별 설정 블롭은 주 서버에만) — Python 만인 AS1 에선 등가, 주 서버 후보가 여럿인 TS 에 ESLint 가 붙는 AS3 에서 닿는다(코드 주석·AS3 판정자) · A19(위 1회차). A20(root 를 다시 풀 때 감지도 다시)은 처음 살아남아 `ASB2` 를 더해 잡았다. A6·A13·A19 는 처음 컴파일 오류로만 죽어 의미 변이로 다시 돌렸다. 순수 판정자(`AUX1·AUX2`)는 앱 테스트 루트에 들지 않아 처음 회차에서 돌지 않았다 — `src/_probe.zig` 루트로 따로 돌려 A21(`.ruff.toml`)을 잡았다.
+
+## 적대적 검증 (AS2, 5회)
+
+1. 상태·수명 — 기다리는 중 `⌘.` 를 다시 누름(새 seq 로 갈아 옛 응답을 버린다)·열린 메뉴가 빌린 제목(모으는 목록과 갈랐다)·첫 답 전에 서버가 죽음(서버 하나일 때처럼 기다린다)·주 서버가 준비되지 않은 문서의 저장(보조 서버만으로 돈다)을 따라갔다 — 결함 없음.
+2. 진짜 도구 — ruff 0.17.0 을 제품 경로로(임시 판정자, 커밋하지 않음). **`⌘.` 메뉴에 ruff 의 줄 단위 fix 가 없었다** — `data` 만 되돌렸는데 ruff 는 문맥 진단의 `source` 가 `Ruff` 일 때만 낸다(드라이버로 셋을 갈라 확인: source+data → quickfix 둘, data 만·둘 다 없음 → fixAll·organize 만). → `source` 문자열도 들어 되돌린다(고침, `CAK4`·`LSP3`, 가짜 서버도 ruff 처럼 `source` 를 본다). 고친 뒤 메뉴에 「Ruff (F401): Remove unused import」·「Disable for this line」(edit)·「Fix all」·「Organize imports」(resolve)가 주 서버 항목 뒤에, 저장 시 `source.fixAll` 이 resolve 를 거쳐 쓰지 않는 import 둘을 지웠다.
+3. 동작 변화의 근거 — 「알린 kind 만 묻는다」는 주 서버에도 적용된다. VS Code 도 저장 시 code action 에서 `providedCodeActionKinds` 가 요청 kind 와 위계로 겹치는 provider 에만 묻는다(동작만) — 같은 규칙이다. 실서버의 목록(typescript-language-server 의 `source.organizeImports.ts`·gopls 의 `source.organizeImports`)은 위계 양쪽 덮기로 그대로 묻힌다.
+4. 순서·번호 충돌 — 메뉴와 저장 단계가 같은 클라이언트의 seq 를 나눠 쓰고, 다른 서버의 resolve 가 같은 번호일 수 있다. 두 단계 모두 (서버, seq) 로 가른다 — 결함 없음. 메뉴 항목 상한(25)은 주 서버가 먼저 채운다(받아들임).
+5. 변이 — 21개. 처음 살아남은 일곱을 판정자를 더해 잡았다: B1·B13·B17·B20(응답을 서버 이름 없이 seq 로만 대조 — 두 서버의 첫 요청이 같은 번호라 판정자가 응답 순서를 못 정한다 → 실제 두 클라이언트로 입구를 직접 부르는 장면), B9(고른 항목을 주 서버로 resolve — 보조 항목이 모두 edit 을 들어 resolve 를 안 탔다 → 가짜 보조 서버의 `AUXLAZY`), B21(`source` 길이를 저장소 셈에서 뺌 — ArrayList 여유분 안이라 재할당이 안 났다 → 400 자), B8(시한 0 — 두 서버의 답이 같은 pump 에 읽혀 tick 이 끼지 못했다 → `AUXSLOW` 150ms). B8 은 처음 컴파일 오류로만 죽어 의미 변이로 다시 돌렸다. 21개 모두 잡혔다.
 
 ## 검증
 

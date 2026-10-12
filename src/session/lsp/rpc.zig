@@ -6,6 +6,7 @@
 //! `client/registerCapability`·`workspace/applyEdit`… 어느 것이든 `MethodNotFound`(-32601) 로 답한다 — 승인 UI 가 없는 동안은 거부만.
 
 const std = @import("std");
+const code_action = @import("code_action.zig"); // kind 위계(`kindMatches`·`nextKind`) — `CodeActionCaps.covers`
 
 /// 우리가 보내는 요청의 id. 알림은 id 가 없다. `initialize`·`shutdown` 은 고정 번호, `hover`(2단 ①, §8.2b)는 `hover_id_base + seq` —
 /// 응답을 「지금 기다리는 seq」와 대조해 낡은 것을 버린다(`$/cancelRequest` 는 안 보낸다).
@@ -514,7 +515,34 @@ pub fn renameRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, li
 }
 
 /// `codeActionProvider`(§8.2h) — 지원 여부와 `resolveProvider`.
-pub const CodeActionCaps = struct { supported: bool = false, resolve: bool = false };
+pub const CodeActionCaps = struct {
+    supported: bool = false,
+    resolve: bool = false,
+    /// 서버가 알린 `codeActionKinds`(쉼표로 이은 사본 — `code_action.nextKind` 로 읽는다). 알리지 않았으면 `listed` 가 거짓(무엇이든 낼 수
+    /// 있다). 넘치면 들어가는 데까지 담고 `listed` 를 거짓으로 — 모르는 것으로 둔다(묻는 쪽이 안전하다 — 서버는 없으면 빈 목록을 준다).
+    kinds_buf: [max_kinds_bytes]u8 = undefined,
+    kinds_len: usize = 0,
+    listed: bool = false,
+
+    pub const max_kinds_bytes: usize = 256;
+
+    pub fn kinds(self: *const CodeActionCaps) []const u8 {
+        return self.kinds_buf[0..self.kinds_len];
+    }
+
+    /// 이 서버가 `wanted` 종류의 code action 을 낼 수 있나(tooling §8.2u — 저장 시 kind 를 지원하는 서버에만 묻는다). 목록이 없으면 참.
+    /// 위계 양쪽: 서버의 일반 kind(`source`)가 요청(`source.fixAll.ruff`)을 덮거나, 요청의 일반 kind(`source.fixAll`)가 서버의 구체
+    /// kind(`source.fixAll.ruff`)를 덮는다.
+    pub fn covers(self: *const CodeActionCaps, wanted: []const u8) bool {
+        if (!self.supported) return false;
+        if (!self.listed) return true;
+        var pos: usize = 0;
+        while (code_action.nextKind(self.kinds(), &pos)) |k| {
+            if (code_action.kindMatches(wanted, k) or code_action.kindMatches(k, wanted)) return true;
+        }
+        return false;
+    }
+};
 
 pub fn codeActionCapsFromResult(result: ?std.json.Value) CodeActionCaps {
     var out: CodeActionCaps = .{};
@@ -527,6 +555,20 @@ pub fn codeActionCapsFromResult(result: ?std.json.Value) CodeActionCaps {
         .object => |o| {
             out.supported = true;
             if (o.get("resolveProvider")) |rp| out.resolve = rp == .bool and rp.bool;
+            if (o.get("codeActionKinds")) |ks| if (ks == .array) {
+                out.listed = true;
+                for (ks.array.items) |k| {
+                    if (k != .string) continue;
+                    const sep: usize = if (out.kinds_len > 0) 1 else 0;
+                    if (out.kinds_len + sep + k.string.len > out.kinds_buf.len) {
+                        out.listed = false; // 다 못 담았다 — 모르는 것으로(위 주석)
+                        break;
+                    }
+                    if (sep == 1) out.kinds_buf[out.kinds_len] = ',';
+                    @memcpy(out.kinds_buf[out.kinds_len + sep ..][0..k.string.len], k.string);
+                    out.kinds_len += sep + k.string.len;
+                }
+            };
         },
         .bool => |b| out.supported = b,
         else => {},
@@ -538,7 +580,39 @@ pub const Pos = struct { line: u32, character: u32 };
 /// LSP `Range` 모양 그대로(요청에 싣는다). 응답의 `hoverRange` 는 평평한 `Range` 를 쓴다 — 이름이 다르다.
 pub const LspRange = struct { start: Pos, end: Pos };
 /// 문맥으로 되돌려 주는 진단(§8.2h ③ — clangd 는 이 넷으로 fix 를 찾는다). `code` 는 글자로 든 것을 그대로 낸다(없으면 생략).
-pub const ContextDiagnostic = struct { range: LspRange, message: []const u8, severity: u8, code: ?[]const u8 = null };
+pub const ContextDiagnostic = struct {
+    range: LspRange,
+    message: []const u8,
+    severity: u8,
+    code: ?[]const u8 = null,
+    /// 서버가 진단에 실어 보낸 `data`(JSON 원문) — 그대로 되돌린다(LSP 3.16). 빈 문자열이면 싣지 않는다.
+    data: []const u8 = "",
+    /// 서버가 진단에 단 `source`(`Ruff`) — 그대로 되돌린다(ruff 는 이것이 제 것일 때만 줄 단위 fix 를 낸다). 빈 문자열이면 싣지 않는다.
+    source: []const u8 = "",
+
+    pub fn jsonStringify(self: ContextDiagnostic, jw: anytype) !void {
+        try jw.beginObject();
+        try jw.objectField("range");
+        try jw.write(self.range);
+        try jw.objectField("message");
+        try jw.write(self.message);
+        try jw.objectField("severity");
+        try jw.write(self.severity);
+        if (self.code) |c| {
+            try jw.objectField("code");
+            try jw.write(c);
+        }
+        if (self.source.len > 0) {
+            try jw.objectField("source");
+            try jw.write(self.source);
+        }
+        if (self.data.len > 0) {
+            try jw.objectField("data");
+            try jw.print("{s}", .{self.data});
+        }
+        try jw.endObject();
+    }
+};
 
 /// `textDocument/codeAction`(§8.2h). `triggerKind` 1(Invoked).
 pub fn codeActionRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, range: LspRange, diagnostics: []const ContextDiagnostic) error{OutOfMemory}![]u8 {
@@ -1767,4 +1841,54 @@ test "LSJ19 implementation·typeDefinition·declaration — capability 셋(linkS
     defer f.deinit();
     try testing.expect(!locationProviderSupported(f.value, .declaration));
     try testing.expect(!locationProviderSupported(null, .implementation));
+}
+
+test "CAK3 code action kind 목록과 덮기 — 알린 kind 를 사본으로 들고, 위계 양쪽으로 덮으며, 목록이 없거나 넘치면 무엇이든 (tooling §8.2u)" {
+    const a = testing.allocator;
+    var p = try std.json.parseFromSlice(std.json.Value, a, "{\"capabilities\":{\"codeActionProvider\":{\"codeActionKinds\":[\"quickfix\",\"source.fixAll.ruff\",\"source.organizeImports.ruff\"],\"resolveProvider\":true}}}", .{});
+    defer p.deinit();
+    const ruff = codeActionCapsFromResult(p.value);
+    try testing.expect(ruff.supported and ruff.resolve and ruff.listed);
+    try testing.expectEqualStrings("quickfix,source.fixAll.ruff,source.organizeImports.ruff", ruff.kinds());
+    try testing.expect(ruff.covers("source.fixAll.ruff"));
+    try testing.expect(ruff.covers("source.fixAll")); // 요청이 일반 — 서버의 구체 kind 를 덮는다
+    try testing.expect(ruff.covers("source")); // 더 일반
+    try testing.expect(!ruff.covers("source.fixAll.eslint"));
+    try testing.expect(!ruff.covers("source.organizeImports.biome"));
+    try testing.expect(!ruff.covers("refactor"));
+    // 서버가 일반 kind 를 알렸다 — 그 아래 구체 요청도 덮는다.
+    var p2 = try std.json.parseFromSlice(std.json.Value, a, "{\"capabilities\":{\"codeActionProvider\":{\"codeActionKinds\":[\"source\"]}}}", .{});
+    defer p2.deinit();
+    try testing.expect(codeActionCapsFromResult(p2.value).covers("source.organizeImports"));
+    // 목록 없음(`true`) — 무엇이든 묻는다. 지원 안 함 — 아무것도.
+    var p3 = try std.json.parseFromSlice(std.json.Value, a, "{\"capabilities\":{\"codeActionProvider\":true}}", .{});
+    defer p3.deinit();
+    const any = codeActionCapsFromResult(p3.value);
+    try testing.expect(!any.listed and any.covers("source.fixAll.eslint"));
+    try testing.expect(!(CodeActionCaps{}).covers("quickfix"));
+    // 넘치면 모르는 것으로(묻는다).
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(a);
+    try big.appendSlice(a, "{\"capabilities\":{\"codeActionProvider\":{\"codeActionKinds\":[");
+    for (0..40) |i| try big.print(a, "{s}\"source.kind{d:0>4}\"", .{ if (i == 0) "" else ",", i });
+    try big.appendSlice(a, "]}}}");
+    var p4 = try std.json.parseFromSlice(std.json.Value, a, big.items, .{});
+    defer p4.deinit();
+    const over = codeActionCapsFromResult(p4.value);
+    try testing.expect(!over.listed and over.covers("quickfix"));
+}
+
+test "CAK4 문맥 진단은 서버의 data(JSON 원문)와 source 를 그대로 되돌리고, 없으면 싣지 않는다 (LSP 3.16 · tooling §8.2u)" {
+    const a = testing.allocator;
+    const range: LspRange = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } };
+    const with = try codeActionRequest(a, 3, "file:///r/a.py", range, &.{.{ .range = range, .message = "m", .severity = 2, .code = "F401", .data = "{\"code\":\"F401\",\"edits\":[]}", .source = "Ruff" }});
+    defer a.free(with);
+    try testing.expect(std.mem.indexOf(u8, with, "\"code\":\"F401\",\"source\":\"Ruff\",\"data\":{\"code\":\"F401\",\"edits\":[]}}") != null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, with, .{}); // 끼워 넣은 원문이 문서를 깨지 않는다
+    parsed.deinit();
+    const without = try codeActionRequest(a, 3, "file:///r/a.py", range, &.{.{ .range = range, .message = "m", .severity = 2 }});
+    defer a.free(without);
+    try testing.expect(std.mem.indexOf(u8, without, "data") == null);
+    try testing.expect(std.mem.indexOf(u8, without, "source") == null);
+    try testing.expect(std.mem.indexOf(u8, without, "\"code\"") == null);
 }

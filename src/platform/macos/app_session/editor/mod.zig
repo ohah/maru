@@ -63282,6 +63282,20 @@ test "LSAVEQ4 요청 본문 예산과 OOM ID 실패는 실행 중 비용을 포�
     var fx = try PaneFixture.init(testing.allocator);
     defer fx.deinit(testing.allocator);
     const term = try undoFixture(&fx, testing.allocator, "queue.txt", "old");
+    // 동적 큐는 요청을 고정 배열의 자리 수로 거절하지 않는다. 다른 본문 대신 epoch를 바꿔 합류를 막는다.
+    {
+        var dynamic = @import("save/queue.zig").Queue.initDynamic(testing.allocator);
+        defer dynamic.deinit();
+        for (1..65) |epoch| {
+            const admission: ?@import("save/queue.zig").Admission = enqueueSaveForTest(&dynamic, &fx, term, @intCast(epoch)) catch null;
+            try testing.expect(admission != null);
+        }
+        try testing.expectEqual(@as(usize, 64), dynamic.requestCount());
+        for (dynamic.waiting.items, 1..) |entry, id| {
+            try testing.expectEqual(@as(u64, @intCast(id)), entry.id);
+            try testing.expectEqualStrings("old", entry.prepared.content());
+        }
+    }
     for (0..3) |mode| {
         var candidate = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
         var owns_candidate = true;
@@ -63313,7 +63327,7 @@ test "LSAVEQ4 요청 본문 예산과 OOM ID 실패는 실행 중 비용을 포�
     var candidate = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
     defer candidate.deinit(testing.allocator);
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
-    var queue = @import("save/queue.zig").Queue.init(failing.allocator(), .{ .requests = 3, .bytes = 4096 });
+    var queue = @import("save/queue.zig").Queue.initDynamic(failing.allocator());
     defer queue.deinit();
     try testing.expectError(error.OutOfMemory, queue.enqueue(&candidate, 1));
     try testing.expectEqualStrings("old", candidate.content());
@@ -63330,6 +63344,24 @@ test "LSAVEQ4 요청 본문 예산과 OOM ID 실패는 실행 중 비용을 포�
     try testing.expectEqual(charged, queued.charged_bytes);
     try testing.expectEqualStrings("old", queued.waiting.items[0].prepared.content());
     try testing.expect(queued.running == null);
+    // 추가 할당 없이 한 번 실패로 게시한다. 정산 전에는 비용과 결과를 지키며 다음 쓰기를 막는다.
+    try queued.failNext(error.OutOfMemory);
+    const failed = queued.poll().?;
+    try testing.expect(failed.failure.? == error.OutOfMemory);
+    try testing.expectEqualStrings("old", failed.prepared.content());
+    try testing.expectEqual(charged, queued.charged_bytes);
+    try testing.expect(queued.poll().? == failed);
+    try testing.expectError(error.Busy, queued.failNext(error.OutOfMemory));
+    try testing.expectError(error.UnappliedCompletion, queued.ack(true));
+    try queued.ack(false);
+    try testing.expectEqual(@as(usize, 0), queued.requestCount());
+    try testing.expectEqual(@as(usize, 0), queued.charged_bytes);
+    try testing.expect(queued.poll() == null);
+    try testing.expectError(error.Empty, queued.failNext(error.OutOfMemory));
+    try testing.expectEqualStrings("old", term.rt.editorDocument().opened.?.file.content);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "queue.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("old", disk);
 }
 
 test "LSAVEQ5 늦은 대상 epoch와 닫힌 문서 slot 재사용은 시작과 완료에서 거부한다" {

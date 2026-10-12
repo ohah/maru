@@ -35,6 +35,11 @@ pub const Queue = struct {
     pub fn init(a: std.mem.Allocator, limits: Limits) Queue {
         return .{ .a = a, .limits = limits, .service = worker.Service.init(a) };
     }
+    /// 사용자 저장은 임의의 큐 상한 대신 동적 배열을 쓴다. 파일별 저장 한도는 Prepared가 검사한다.
+    /// 할당 실패와 산술 범위 초과는 enqueue의 실패로 남으며 caller 자료를 소비하지 않는다.
+    pub fn initDynamic(a: std.mem.Allocator) Queue {
+        return init(a, .{ .requests = std.math.maxInt(usize), .bytes = std.math.maxInt(usize) });
+    }
     pub fn requestCount(self: *const Queue) usize {
         return self.waiting.items.len + @intFromBool(self.running != null);
     }
@@ -103,11 +108,16 @@ pub const Queue = struct {
     }
     /// actor가 사라진 대상을 확인했을 때, 쓰지 않은 실패 결과로 올려 같은 완료 통로에서 소비한다.
     pub fn rejectNext(self: *Queue) !void {
+        try self.failNext(error.StaleTarget);
+    }
+    /// worker 시작의 할당 실패도 완료 통로에서 한 번 정산한다. 매 tick 재시도로 안내를 반복하지 않는다.
+    /// 이미 시작된 쓰기는 이 함수로 취소하지 않는다.
+    pub fn failNext(self: *Queue, failure: anyerror) !void {
         if (self.running != null) return error.Busy;
         if (self.waiting.items.len == 0) return error.Empty;
         const first = self.waiting.orderedRemove(0);
         self.running = descriptor(&first);
-        self.outcome = .{ .id = first.id, .epoch = first.epoch, .prepared = first.prepared, .failure = error.StaleTarget };
+        self.outcome = .{ .id = first.id, .epoch = first.epoch, .prepared = first.prepared, .failure = failure };
     }
     /// 결과는 ack까지 큐가 소유한다. 결과가 main으로 넘어와도 예산과 실행 자리를 먼저 풀지 않는다.
     pub fn poll(self: *Queue) ?*Outcome {

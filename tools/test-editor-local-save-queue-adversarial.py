@@ -18,6 +18,8 @@ cases = [
     ('join-older-request', 'queue', 'return if (ops.sameRequest(target, prepared.bytes, prepared.expected_disk, entry.target(), entry.prepared.bytes, entry.prepared.expected_disk)) entry.id else null;', 'if (ops.sameRequest(target, prepared.bytes, prepared.expected_disk, entry.target(), entry.prepared.bytes, entry.prepared.expected_disk)) return entry.id;'),
     ('omit-running-cost', 'queue', 'return self.waiting.items.len + @intFromBool(self.running != null);', 'return self.waiting.items.len;'),
     ('ignore-target-epoch', 'ops', 'return self.epoch == current.epoch and self.token.matches(current.token);', 'return self.token.matches(current.token);'),
+    ('cap-dynamic-queue', 'queue', 'return init(a, .{ .requests = std.math.maxInt(usize), .bytes = std.math.maxInt(usize) });', 'return init(a, .{ .requests = 32, .bytes = std.math.maxInt(usize) });'),
+    ('lose-start-failure', 'queue', '.failure = failure };', '.failure = if (failure == error.OutOfMemory) error.StaleTarget else failure };'),
     ('restored-control', None, None, None),
 ]
 results = []

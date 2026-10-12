@@ -880,6 +880,25 @@ test "DECSET 2048 크기 통지는 실제 reader 가 resize 뒤 자식 stdin 으
     try std.testing.expectEqual(@as(u64, 0), live.write_queue.enqueuedTotal());
 }
 
+/// 자식이 **아직 쓰는 중인** 파일을 읽는다(판정자 전용). `std.Io.Dir.readFileAlloc` 은 파일 크기를 먼저 재고
+/// 그 크기를 기준으로 남은 양을 셈하는데, 그 사이 자식이 더 쓰면 std 의 `size - pos` 가 넘쳐 **패닉**한다
+/// (`Io/Writer.zig` sendFile — 2026-10-12 실측: 아래 판정자를 단독으로 20 번 돌려 1 번, `catch` 로는 못 잡는다).
+/// 크기를 묻지 않고 EOF 까지 고정 상한으로 읽는다 — 읽는 순간의 앞부분만 보이면 충분하다(호출자가 폴링한다).
+fn readGrowingFileForTest(allocator: std.mem.Allocator, path: [:0]const u8, limit: usize) ?[]u8 {
+    const fd = std.c.open(path.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return null;
+    defer _ = std.c.close(fd);
+    const buf = allocator.alloc(u8, limit) catch return null;
+    defer allocator.free(buf);
+    var len: usize = 0;
+    while (len < limit) {
+        const got = std.c.read(fd, buf[len..].ptr, limit - len);
+        if (got <= 0) break;
+        len += @intCast(got);
+    }
+    return allocator.dupe(u8, buf[0..len]) catch null;
+}
+
 test "입력 fence 뒤에 밀린 옛 셀 픽셀 명령은 더 새 레이아웃 resize 뒤에 적용되지 않는다 — 2048 통지 하나·winsize 픽셀은 resize 때 맞다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
 
@@ -944,7 +963,7 @@ test "입력 fence 뒤에 밀린 옛 셀 픽셀 명령은 더 새 레이아웃 r
     var bytes: usize = 0;
     while (attempts < 6000) : (attempts += 1) {
         _ = try pump.drainAvailable();
-        const file = std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1 << 20)) catch null;
+        const file = readGrowingFileForTest(allocator, out_path, 1 << 20); // 자식이 쓰는 중이다 — readFileAlloc 은 여기서 패닉한다
         if (file) |data| {
             defer allocator.free(data);
             bytes = data.len;
@@ -955,7 +974,7 @@ test "입력 fence 뒤에 밀린 옛 셀 픽셀 명령은 더 새 레이아웃 r
     }
     _ = usleep(200_000); // 혹시 늦게 오는 둘째 통지까지
     _ = try pump.drainAvailable();
-    if (std.Io.Dir.cwd().readFileAlloc(std.testing.io, out_path, allocator, .limited(1 << 20)) catch null) |data| {
+    if (readGrowingFileForTest(allocator, out_path, 1 << 20)) |data| {
         defer allocator.free(data);
         reports = std.mem.count(u8, data, "\x1b[48;");
         try std.testing.expect(std.mem.indexOf(u8, data, "\x1b[48;10;30;260;390t") != null); // C 의 통지

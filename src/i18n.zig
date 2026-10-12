@@ -641,6 +641,11 @@ const Table = struct {
     lsp_env_list_excluded: [:0]const u8,
     lsp_trust_list_allowed: [:0]const u8,
     lsp_trust_list_denied: [:0]const u8,
+    /// 신뢰 목록 행의 마지막 변경 출처(계획 workspace-trust-audit) — 「‹결정› · ‹시각› · ‹출처›」의 셋째 칸.
+    lsp_trust_source_sheet: [:0]const u8,
+    lsp_trust_source_manage: [:0]const u8,
+    lsp_trust_source_control: [:0]const u8,
+    lsp_trust_source_migrate: [:0]const u8,
     /// 정의로 이동(§8.2c) — 서버가 `null`/빈 결과를 냈다.
     nav_no_definition: [:0]const u8,
     /// `{0}` = 경로. root 밖이라 열지 않았다(§5.2 「표시와 접근을 가른다」).
@@ -2344,6 +2349,10 @@ const en: Table = .{
     .lsp_env_list_excluded = "excluded",
     .lsp_trust_list_allowed = "allowed",
     .lsp_trust_list_denied = "denied",
+    .lsp_trust_source_sheet = "sheet",
+    .lsp_trust_source_manage = "manage",
+    .lsp_trust_source_control = "CLI",
+    .lsp_trust_source_migrate = "migrated",
     .nav_no_definition = "No definition found",
     .nav_outside_root = "Not opened — outside the workspace root: {0}",
     .ref_none = "No references found",
@@ -3405,6 +3414,10 @@ const ko: Table = .{
     .lsp_env_list_excluded = "제외됨",
     .lsp_trust_list_allowed = "허용",
     .lsp_trust_list_denied = "거부",
+    .lsp_trust_source_sheet = "시트",
+    .lsp_trust_source_manage = "관리",
+    .lsp_trust_source_control = "CLI 요청",
+    .lsp_trust_source_migrate = "이관",
     .nav_no_definition = "정의를 찾지 못했습니다",
     .nav_outside_root = "루트 밖이라 열지 않습니다 — {0}",
     .ref_none = "참조를 찾지 못했습니다",

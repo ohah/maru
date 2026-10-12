@@ -323,7 +323,11 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 225: 사이드바의 글자 아닌 셀(slot_id==0 — 배경·장식선)도 글자와 같은 화면 자리(`origin_x`·`origin_y`)를 받고, .m 은
 // 사이드바 셀을 한 갈래로 그린다(옛 tui 밴드 갈래 `atlas_height_px ?: slot_h` 높이를 지웠다). 지금 그런 셀은 안 나오지만
 // 낡은 .m 은 그것을 밴드로 읽어 높이를 바꾸므로 짝이 같이 올라간다.
-pub const abi_version: u32 = 225;
+// 226: 사이드바 헤더 아이콘 줄(펼침·접힘) 셀이 (0,0) 이 아니라 신호등 띠 안 세로 중앙(`sidebarHeaderIconRowTopPx` — 알림
+// 배지 원과 같은 값)을 origin_y 로 든다. .m 은 「origin (0,0) 이면 헤더」 짐작과 `(strip − ch) × 0.5` 를 지우고
+// `origin_y + row × ch` 만 쓴다. 낡은 .m 은 헤더를 일반 셀로 읽어도 같은 자리지만 새 Zig + 낡은 .m 이면 짐작 갈래가
+// 다른 (0,0) 셀을 움직이므로 짝이 같이 올라간다.
+pub const abi_version: u32 = 226;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -21757,7 +21761,8 @@ pub const AppSession = struct {
             defer if (sidebar_header_frame) |*hf| hf.deinit(self.allocator);
             if (builtin.os.tag == .macos) {
                 // 통합 수집: DrawList만 만들고 collect(.sidebar_header) — placeAndDistribute가 sidebar_header_frame을 채운다.
-                // 아이콘 줄은 origin (0,0)을 유지해야 렌더러가 헤더로 인식해 합성 아이콘을 1.7×로 굽는다(§3.5).
+                // 아이콘 줄의 자리(`sidebarHeaderIconRowTopPx`)와 확대(cell-raster role)는 Zig 가 정해 싣는다 — 렌더러는
+                // 예전처럼 「origin (0,0) 이면 헤더」로 짐작하지 않는다.
                 if (sidebar_ops.buildSidebarHeaderDrawList(self, .icons)) |maybe_dl| {
                     if (maybe_dl) |dl| self.collectShaped(&collected, dl, pane_ops.paneFrameBuilder(self), .sidebar_header);
                 } else |_| {}
@@ -22746,6 +22751,8 @@ pub const AppSession = struct {
                 agent_activity_ops.appendHoverQuad(self); // 갤러리 호버 판(이미지보다 뒤 layer)
                 notification_ops.appendBellFlashQuad(self); // 시각 벨(bell.visual): flash 중이면 전경색 반투명 full-screen quad를 맨 위에(F2-4)
                 if (ft_on) ft_rep = std.Io.Clock.awake.now(self.io).nanoseconds; // 조립 끝 = replace(투영) 시작
+                // 헤더 아이콘 줄의 화면 y 는 알림 배지 원과 같은 값이다(`sidebarHeaderIconRowTopPx`) — 렌더러는 다시 셈하지 않는다.
+                self.metal_buffer.sidebar_header_origin_y_px = sidebar_ops.sidebarHeaderIconRowTopPx(self);
                 if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frames.items, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.glyph_placement.commit(); // 이번 배치의 업로드가 metal_buffer 로 넘어갔다
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
@@ -22990,6 +22997,7 @@ pub const AppSession = struct {
         // replaceSidebar는 이미 존재하는 full frame을 보존하는 부분 갱신이다. 0-tab 선택기는 retained
         // frame이 없으므로 full replace의 명시적 empty-pane 경로(1x1 draw guard + absolute chrome cells)를
         // 사용해야 실제 CAMetalLayer가 첫 프레임을 받는다.
+        self.metal_buffer.sidebar_header_origin_y_px = sidebar_ops.sidebarHeaderIconRowTopPx(self); // 배지와 같은 헤더 줄 y
         self.metal_buffer.replace(
             self.allocator,
             &.{},
@@ -66752,6 +66760,32 @@ test "sidebar 부분 교체: sync hold 중 스크롤이 바뀌어도 글자와 �
     try H.project(session);
     try std.testing.expectEqual(@as(i64, scroll), @as(i64, text0) - @as(i64, H.lowestNameY(session).?));
     try std.testing.expectEqual(@as(i64, scroll), @as(i64, @intFromFloat(band0 - H.lowestBandY(session).?)));
+}
+
+// **헤더 아이콘 줄은 알림 배지와 같은 y 에 그려진다.** 예전에는 헤더 frame 을 (0,0)에 박고 렌더러가 「origin (0,0) 이면
+// 헤더」로 짐작해 `(strip − ch) × 0.5`(실수)를 따로 셈했다 — 배지 원은 `sidebarHeaderIconRowTopPx`(정수 나눗셈)를 써서
+// 차이가 홀수인 창에서 0.5px 갈렸다(2026-10-12). 이제 셀이 그 값을 origin_y 로 들고 나간다(ABI 226).
+test "sidebar 헤더: 투영된 종 아이콘 셀이 알림 배지와 같은 줄 y(sidebarHeaderIconRowTopPx)를 든다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    session.metal_dirty = true;
+    for (0..4) |_| {
+        _ = try session.tick();
+        if (!session.metal_dirty) break;
+    }
+    const want = sidebar_ops.sidebarHeaderIconRowTopPx(session);
+    try std.testing.expect(want > 0); // 띠가 셀보다 높은 창이다(0 이면 옛 (0,0) 과 구별이 안 된다)
+    var bells: usize = 0;
+    for (session.metal_buffer.cells) |c| {
+        if (c.codepoint != icons.codepoint(.bell)) continue;
+        bells += 1;
+        try std.testing.expectEqual(@as(u32, 0), c.row);
+        try std.testing.expectEqual(want, c.origin_y); // 렌더러 계약: py_top = origin_y + row × ch
+    }
+    try std.testing.expect(bells >= 1); // 개수로 확인 — 종이 없으면 위 단언이 아무것도 안 잰다
 }
 
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS

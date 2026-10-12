@@ -488,6 +488,25 @@ test "사이드바 셀의 세로 자리는 Objective-C 가 다시 적지 않는�
     try std.testing.expect(reads >= 1); // 개수로 확인 — 읽는 자리가 사라지면 위 검사가 아무것도 안 잰다
 }
 
+// 헤더 아이콘 줄의 세로 자리도 렌더러가 다시 적지 않는다(ABI 226). 예전 `.m` 은 「origin (0,0) 의 row 0 이면 헤더」로
+// 짐작해 `(strip − ch) × 0.5` 를 셈했고, Zig `sidebarHeaderIconRowTopPx`(알림 배지 원이 쓰는 정수 나눗셈)와 0.5px 갈렸다.
+test "헤더 아이콘 줄의 세로 자리는 Objective-C 가 다시 적지 않는다 — origin 짐작·띠 중앙 공식이 없다 (layering §3.5)" {
+    const allocator = std.testing.allocator;
+    const raw_mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(raw_mirror);
+    const mirror = try stripCComments(allocator, raw_mirror);
+    defer allocator.free(mirror);
+    const forbidden = [_][]const u8{ "origin_y == 0u", "strip - ch", "titlebar_strip_px - ch" };
+    for (forbidden) |needle| {
+        if (std.mem.indexOf(u8, mirror, needle) != null) {
+            std.debug.print("\n헤더 줄 세로 자리 사본이 되살아났습니다: {s} 에 `{s}`\n  헤더 frame 의 origin_y(`sidebarHeaderIconRowTopPx`)를 그대로 쓰세요.\n", .{ scale_mirror_file, needle });
+            return error.HeaderRowTopMirrorRevived;
+        }
+    }
+    // 터미널 패스는 셀 origin 을 그대로 읽는다 — 이 대입이 사라지면 위 검사가 무엇을 지키는지 모른다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mirror, "const float py_top = (float)tc.origin_y + (float)tc.row * ch;"));
+}
+
 test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {
     const allocator = std.testing.allocator;
     var out: [8][]const u8 = undefined;

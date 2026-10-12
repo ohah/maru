@@ -89,13 +89,13 @@ pub fn sidebarSearchBandTopPx(self: *const AppSession) u32 {
     return self.titlebar_strip_px;
 }
 
-/// 헤더 아이콘 줄(🔔◧⚙+)의 셀 **상단** y — 렌더러가 이 줄에 실제로 쓰는 py_top과 같은 식이다
-/// (`maru_metal_renderer.m`: `py_top = (strip - ch) * 0.5`). 이 줄만 `row × ch`가 아니라 신호등 띠
-/// [0, titlebar_strip_px] 안 세로 중앙에 놓이므로, 이 줄 위에 무언가를 얹으려면 이 값이 원점이다.
+/// 헤더 아이콘 줄(🔔◧⚙+)의 셀 **상단** y — **이 값이 그 줄이 그려지는 자리 자체다.** 헤더 frame 을 놓을 때
+/// `metal_buffer.sidebar_header_origin_y_px` 로 싣고(셀 origin_y), 렌더러는 그대로 그린다. 이 줄만 `row × ch`가 아니라
+/// 신호등 띠 [0, titlebar_strip_px] 안 세로 중앙에 놓이므로, 이 줄 위에 무언가를 얹으려면 이 값이 원점이다.
 ///
-/// **셀이 아닌 GPU quad(알림 배지 원)도 이 원점을 써야 한다.** 배지는 한때 `ch * 0.46`으로 "줄이 y=0에서
-/// 시작한다"를 가정했는데, 띠가 셀보다 높은 실제 창에서는 원만 `(strip-ch)/2`만큼 위로 떠 숫자가 원
-/// 밖으로 빠져나갔다. 셀 세로 위치는 렌더러가, quad 세로 위치는 host가 정하므로 이 함수가 유일한 접점이다.
+/// **셀이 아닌 GPU quad(알림 배지 원)도 이 원점을 쓴다.** 배지는 한때 `ch * 0.46`으로 "줄이 y=0에서 시작한다"를
+/// 가정해 띠가 셀보다 높은 창에서 원만 위로 떴다. 그 뒤로도 셀 자리는 렌더러가 `(strip − ch) × 0.5`(실수)로 따로
+/// 셈해, 이 함수의 정수 나눗셈과 차이가 홀수일 때 0.5px 갈렸다 — 2026-10-12 부터 셀과 배지가 이 하나를 본다.
 pub fn sidebarHeaderIconRowTopPx(self: *const AppSession) u32 {
     const ch = self.cell_height_px;
     const band = sidebarSearchBandTopPx(self);
@@ -103,7 +103,7 @@ pub fn sidebarHeaderIconRowTopPx(self: *const AppSession) u32 {
 }
 
 /// 헤더 아이콘 줄(🔔◧⚙+)의 세로 중앙 y — 띠 안 세로 중앙에 그려진 한 셀 줄의 가운데.
-/// 렌더러(`maru_metal_renderer.m`의 띠 중앙 공식)·hit-test(`sidebar.headerHit`)와 **같은 기하**를 푼다.
+/// 그리는 자리(헤더 frame origin_y)·hit-test(`sidebar.headerHit`)와 **같은 기하**를 푼다.
 pub fn sidebarHeaderIconRowCenterPx(self: *const AppSession) u32 {
     return sidebarHeaderIconRowTopPx(self) + self.cell_height_px / 2;
 }

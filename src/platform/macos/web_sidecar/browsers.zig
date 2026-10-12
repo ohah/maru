@@ -76,6 +76,7 @@ fn command(_: *anyopaque, message: Message, writer: *events.Writer) void {
         .create_browser => |value| create(value, writer),
         .destroy_browser => |browser| destroy(browser, writer),
         .close_asking => |browser| askClose(browser, writer),
+        .new_tab_credit => |browser| new_tab.grant(browser), // W9b③ — maru 가 에이전트 탭에만
         .resize => |value| resize(value, writer),
         .set_hidden => |value| if (hostFor(value.browser, writer)) |host| {
             defer object.release(host);

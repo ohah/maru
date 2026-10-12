@@ -18,7 +18,6 @@ const message = protocol.message;
 const c = @import("cef.zig").c;
 const object = @import("object.zig");
 const browsers = @import("browsers.zig");
-const new_tab = @import("new_tab.zig");
 const registry_mod = @import("registry.zig");
 const table_mod = @import("devtools_table.zig");
 
@@ -141,8 +140,6 @@ fn dispatchCall(call: *table_mod.Call) void {
     if (host == null) return drop(call, .send_failed);
     defer object.release(host);
     if (!ensureObserver(host, entry.cef_id, entry.id)) return drop(call, .send_failed);
-    // W9b③: 진짜 누름·키 누름은 사람의 입력처럼 새 탭 장 하나(보내기 전에 — 팝업 요청이 장보다 먼저 오지 않게). maru 가 다시 거른다.
-    if (protocol.new_tab.devtoolsInputActivates(call.method(), call.params.items)) new_tab.grant(entry.id);
     const json = table.buildMessage(allocator, call) catch |e| return drop(call, switch (e) {
         error.InvalidParams => .invalid_request,
         error.OutOfMemory => .send_failed,

@@ -3068,6 +3068,9 @@ pub const SurfaceClosedCallback = *const fn (context: ?*anyopaque, surface_id: u
 /// W9b③: 에이전트 탭의 페이지가 새 탭을 열었다 — app_host_abi 가 그 pane 의 에이전트 탭으로 칠 수 있는가(상한·grant)를 답한다.
 /// 참이면 새 탭이 그 pane 의 것이 된다(`agent_opener`). 없으면(시험·컨트롤 꺼짐) 보통 사람의 탭이다.
 pub const AgentPageTabCallback = *const fn (opener_pane: u64, tab: u64) bool;
+/// W9b③: 그 pane 이 에이전트 탭을 하나 더 가질 자리가 있는가(상한·grant 표) — 없으면 에이전트 탭의 페이지가 연 새 탭을 열지 않는다
+/// (보통 탭으로 열면 상한이 팝업으로 뚫렸다 — 적대 리뷰 1 회차).
+pub const AgentTabRoomCallback = *const fn (opener_pane: u64) bool;
 
 /// 닫기 진입점(PendingClose)을 실제로 teardown될 **범위**로 해석한 결과. resolveCloseScope가 cascade(Term>pane>탭>창)를
 /// 한 곳에서 풀어 이 값으로 돌려주고, scopeHasRunningJob(실행 중 명령 검사)과 executeClose(실제 닫기)가 같은 값을
@@ -6039,6 +6042,7 @@ pub const AppSession = struct {
     surface_closed_context: ?*anyopaque = null,
     surface_closed_callback: ?SurfaceClosedCallback = null,
     agent_page_tab_callback: ?AgentPageTabCallback = null,
+    agent_tab_room_callback: ?AgentTabRoomCallback = null,
     // MARU_TRACE=<파일경로>면 세션의 base kind 이벤트(output/resize/process-exit)를 **파일로 증분 append**한다
     // (레코더는 이벤트마다 flush → 크래시 직전까지 디스크에 남음, observability replayTrace로 화면 재생). 미설정이면
     // null(오버헤드 0). 레코더는 self가 소유한 file writer(`trace_writer`, heap 버퍼 `trace_buf`)에 쓴다 — self가 안정
@@ -99241,7 +99245,7 @@ test "W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽으로, app_
         const tab = try web_ops.openAgentTab(session, shell, null);
         try web_osr.testHold(allocator, tab);
         web_osr.testRunning(tab);
-        web_osr.grantNewTabCredit(tab); // 에이전트의 누름(app_host_abi 가 준다)
+        web_osr.grantNewTabCredit(allocator, tab); // 에이전트의 누름(app_host_abi 가 준다)
         web_osr.testApplyNow(allocator, .{ .open_tab = .{ .browser = tab, .placement = .foreground, .url = "https://e.test/popup" } });
         web_ops.tickWebOsr(session);
         try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
@@ -99250,4 +99254,53 @@ test "W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽으로, app_
         try std.testing.expectEqual(child.surfaceId(), w9b3_adopted);
         try std.testing.expectEqual(if (adopt) shell else 0, child.agent_opener);
     }
+}
+
+fn w9b3NoRoom(pane: u64) bool {
+    _ = pane;
+    return false;
+}
+
+test "W9b③ 적대 리뷰 1 회차: 상한에 닿은 pane 의 에이전트 탭이 연 새 탭은 보통 탭으로도 열지 않는다(거절)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    session.agent_page_tab_callback = w9b3AdoptPageTab;
+    session.agent_tab_room_callback = w9b3NoRoom;
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const tab = try web_ops.openAgentTab(session, shell, null);
+    try web_osr.testHold(allocator, tab);
+    web_osr.testRunning(tab);
+    web_osr.grantNewTabCredit(allocator, tab);
+    web_osr.testApplyNow(allocator, .{ .open_tab = .{ .browser = tab, .placement = .foreground, .url = "https://e.test/popup" } });
+    web_ops.tickWebOsr(session);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len); // 셸·에이전트 탭 — 새 탭 없음
+    try std.testing.expect(!web_osr.newTabPending(tab)); // 꺼내 갔다(버렸다)
+}
+
+test "W9b③ 적대 리뷰 1 회차: 에이전트 탭이 보이는 활성 탭이어도 그 페이지가 연 새 탭은 뒤쪽이다(앞으로 오지 않는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    session.agent_page_tab_callback = w9b3AdoptPageTab;
+    w9b3_adopt_answer = true;
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const tab = try web_ops.openAgentTab(session, shell, null);
+    session.focusTerm(1); // 사용자가 에이전트 탭을 보고 있다
+    try std.testing.expectEqual(tab, pane.activeTerm().surfaceId());
+    try web_osr.testHold(allocator, tab);
+    web_osr.testRunning(tab);
+    web_osr.grantNewTabCredit(allocator, tab);
+    web_osr.testApplyNow(allocator, .{ .open_tab = .{ .browser = tab, .placement = .foreground, .url = "https://e.test/popup" } });
+    web_ops.tickWebOsr(session);
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    try std.testing.expectEqual(tab, pane.activeTerm().surfaceId()); // 그대로 에이전트 탭
 }

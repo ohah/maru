@@ -1436,6 +1436,9 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
     };
     // W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽 탭으로(사용자 화면을 가로채지 않는다 — 사용자 결정 2026-10-12).
     const agent_pane = pane.terms.items[opener_index].agent_opener;
+    // 그 pane 이 에이전트 탭을 더 가질 자리가 없으면 열지 않는다 — 보통 탭으로 열면 상한이 팝업으로 뚫렸다(적대 리뷰 1 회차). 부른 쪽이
+    // 주소를 놓고 이어 받은 팝업은 닫는다.
+    if (agent_pane != 0) if (self.agent_tab_room_callback) |room| if (!room(agent_pane)) return error.AgentTabLimit;
     const placement: ws.new_tab.Placement = if (agent_pane != 0) .background else request.placement;
     const plan = ws.new_tab.place(opener_index, pane.active_term, last_child, placement, visible);
     // 페이지가 연 탭 = 비신뢰 browser(WebKit 의 팝업 adopt 와 같다). 이어 받은 팝업(W6f②)은 sidecar 에 맡긴 그 번호로 — 브라우저는 이미

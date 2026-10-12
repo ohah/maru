@@ -82,7 +82,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeByte(@intFromBool(value.hidden));
             try writeUrl(&cursor, value.url);
         },
-        .destroy_browser, .close_asking, .browser_created, .browser_closed, .page_started, .page_close_kept => |browser| try writeBrowser(&cursor, browser),
+        .destroy_browser, .close_asking, .new_tab_credit, .browser_created, .browser_closed, .page_started, .page_close_kept => |browser| try writeBrowser(&cursor, browser),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -440,6 +440,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         } },
         .destroy_browser => .{ .destroy_browser = try readBrowser(&cursor) },
         .close_asking => .{ .close_asking = try readBrowser(&cursor) },
+        .new_tab_credit => .{ .new_tab_credit = try readBrowser(&cursor) },
         .browser_created => .{ .browser_created = try readBrowser(&cursor) },
         .browser_closed => .{ .browser_closed = try readBrowser(&cursor) },
         .page_started => .{ .page_started = try readBrowser(&cursor) },
@@ -866,7 +867,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  17, 0, // v17, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  18, 0, // v18, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -913,6 +914,7 @@ test "every message round trips" {
 
     try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .destroy_browser = 9 })).destroy_browser);
     try std.testing.expectEqual(@as(u64, 10), (try roundTrip(.{ .close_asking = 10 })).close_asking); // W6j
+    try std.testing.expectEqual(@as(u64, 11), (try roundTrip(.{ .new_tab_credit = 11 })).new_tab_credit); // W9b③
     const resized = try roundTrip(.{ .resize = .{ .browser = 9, .size = .{ .width = 1, .height = max_view_extent, .scale = 1.0 } } });
     try std.testing.expectEqual(max_view_extent, resized.resize.size.height);
     try std.testing.expect((try roundTrip(.{ .set_hidden = .{ .browser = 9, .value = true } })).set_hidden.value);
@@ -952,7 +954,7 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     bad = encoded;
     bad[10] = 66; // 정의되지 않은 tag(sidecar → maru 는 W9-0b 의 `devtools_result` 65 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
-    bad[10] = 133; // 둘째 구간(maru → sidecar)도 W9-0b 의 `devtools_call_data` 132 뒤는 비었다
+    bad[10] = 134; // 둘째 구간(maru → sidecar)도 W9b③ 의 `new_tab_credit` 133 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     try std.testing.expectError(error.IncompleteFrame, decodeExact(encoded[0 .. len - 1]));
     encoded[len] = 0;

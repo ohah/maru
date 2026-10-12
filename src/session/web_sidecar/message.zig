@@ -163,6 +163,10 @@ pub const Tag = enum(u8) {
     devtools_call = 131,
     /// `devtools_call` 인자의 한 조각(W9-0b) — 다 모이면 sidecar 가 부른다.
     devtools_call_data = 132,
+    /// 그 브라우저에 새 탭 장 하나(W9b③) — 에이전트가 **자기가 연 탭에** DevTools 로 진짜 누름·키 누름을 보내기 직전에 maru 가 보낸다(같은
+    /// 관이라 그 입력보다 먼저 닿는다). sidecar 는 DevTools 입력에서 장을 짐작하지 않는다 — 짐작하면 사용자 탭에서도 팝업 브라우저를
+    /// 만들어 그 페이지가 돌았다(maru 가 장이 없다며 닫기 전에 — 적대 리뷰 1 회차).
+    new_tab_credit = 133,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1177,6 +1181,7 @@ pub const Message = union(Tag) {
     download_control: DownloadControl,
     devtools_call: DevtoolsCall,
     devtools_call_data: DevtoolsData,
+    new_tab_credit: BrowserId,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

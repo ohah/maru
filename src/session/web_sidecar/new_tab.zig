@@ -103,8 +103,9 @@ pub fn grantsActivation(kind: message.KeyKind, windows_key_code: i32, native_key
 }
 
 /// W9b③: DevTools 로 보내는 진짜 입력이 사람의 입력처럼 활성을 주는가 — 누름(`mousePressed`)과 Esc 아닌 키 누름(`keyDown`·
-/// `rawKeyDown`). sidecar 는 그 호출을 보낼 때 그 브라우저에 새 탭 장을 준다(에이전트의 누름은 maru 를 거친 마우스·키 프레임이
-/// 아니라 장이 없었다 — 에이전트 탭의 `window.open` 이 조용히 막혔다). maru 는 다시 거른다 — 에이전트가 연 탭에만 장을 준다.
+/// `rawKeyDown`). maru 는 에이전트가 **자기가 연 탭에** 이런 입력을 보내기 직전에 그 탭에 새 탭 장을 주고 sidecar 에도
+/// `new_tab_credit` 으로 알린다(에이전트의 누름은 maru 를 거친 마우스·키 프레임이 아니라 장이 없었다 — 에이전트 탭의 `window.open`
+/// 이 조용히 막혔다). sidecar 는 이것으로 짐작하지 않는다(적대 리뷰 1 회차 — 사용자 탭의 팝업 페이지가 돌았다).
 /// 인자는 maru 가 만든 JSON(`web_cdp_ops`·`web_cdp_keys`)이다.
 pub fn devtoolsInputActivates(method: []const u8, params: []const u8) bool {
     if (std.mem.eql(u8, method, "Input.dispatchMouseEvent")) return std.mem.indexOf(u8, params, "\"type\":\"mousePressed\"") != null;

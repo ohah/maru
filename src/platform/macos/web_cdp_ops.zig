@@ -29,6 +29,11 @@ const finder_js = @embedFile("web_cdp_finder.js");
 /// 앱이 DevTools 결과 상한을 넘은 답에 싣는 글 — 로케이터 질의가 이것이면 「너무 많다」 로 바꿔 답한다.
 pub const result_too_large = "the DevTools result was too large";
 
+/// 누르기 전 프레임(W9b③)의 인자 — **kick 과 바이트까지 같아야 한다**(`app_host_abi` 가 컴파일 때 본다). sidecar 는 kick 과 꼭 같은
+/// 호출만 짧은 시한(3 초)에 놓는다 — 다르면 이동하는 순간 답을 잃은 프레임이 35 초 자리를 쥐어 click 이 30 초 시한이 됐다(적대 리뷰
+/// 1 회차 하네스 실측: 같으면 3.0–3.6 초에 풀린다).
+pub const frame_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}";
+
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
 pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press };
@@ -802,7 +807,7 @@ pub const Op = struct {
                     // (20/20). 보이는 탭에서는 GPU 약 3 ms 의 왕복 하나다. hover 의 이동·글 넣기·키는 새 숨은 문서에서도 닿았다(3/3).
                     self.object_id = try gpa.dupe(u8, oid);
                     self.stage = .frame;
-                    return call(gpa, "Page.captureScreenshot", "{{\"format\":\"jpeg\",\"quality\":1,\"clip\":{{\"x\":0,\"y\":0,\"width\":1,\"height\":1,\"scale\":1}}}}", .{});
+                    return call(gpa, "Page.captureScreenshot", "{s}", .{frame_params});
                 }
                 return self.hitTestCall(gpa, oid);
             },

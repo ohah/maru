@@ -1130,7 +1130,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         try w.writeAll("\n");
         // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
         // unauthorized 만 주므로(존재 oracle 금지) 이유를 묻지 않고 늘 같은 안내를 붙인다 — 서버 정보가 새지 않는다.
-        if (e.code == unauthorized_code) try w.writeAll(unauthorized_hint);
+        // W9b③: close 의 거절은 그 pane 이 연 탭이 아니어서다 — 일반 안내(pane 의 foreground job)는 이유를 가린다(적대 리뷰 1 회차).
+        if (e.code == unauthorized_code) try w.writeAll(if (kind == .close) "hint: only tabs this pane opened with `browser open` can be closed\n" else unauthorized_hint);
         // 로케이터 wait 의 시한 — 마지막 확인에 숨은 일치가 있었다(W9b②-3 적대 리뷰 1 회차 — data 에만 있어 보이지 않았다).
         if (e.code == timeout_code) if (e.data) |d| if (d == .object) if (d.object.get("hidden")) |h| if (h == .integer and h.integer > 0)
             try w.print("hint: {d} matching element(s) are hidden (not rendered, aria-hidden or off-page)\n", .{h.integer});
@@ -1222,7 +1223,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             const tab = if (result.get("id")) |v| (if (v == .integer) v.integer else 0) else 0;
             const url = strField(result.get("url"));
             var safe_url: [2048]u8 = undefined;
-            try w.print("opened {d} {s}\n", .{ tab, safe_url[0..displaySafe(url[0..@min(url.len, safe_url.len)], &safe_url)] });
+            if (url.len == 0) try w.print("opened {d}\n", .{tab}) else try w.print("opened {d} {s}\n", .{ tab, safe_url[0..displaySafe(url[0..@min(url.len, safe_url.len)], &safe_url)] });
             if (!boolField(result.get("loaded"))) try w.writeAll("warning: the page did not finish loading in time — wait --load before acting\n");
         },
         .close => {
@@ -2786,7 +2787,8 @@ test "render: open(W9b③) 은 id·주소(다 못 불렀으면 경고), close �
     var buf: [512]u8 = undefined;
     const cases = [_]struct { bytes: []const u8, kind: ResponseKind, want: []const u8, ok: bool }{
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":42,\"url\":\"https://e.test/\",\"loaded\":true}}", .kind = .open, .want = "opened 42 https://e.test/\n", .ok = true },
-        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":42,\"url\":\"\",\"loaded\":false}}", .kind = .open, .want = "opened 42 \nwarning: the page did not finish loading in time — wait --load before acting\n", .ok = true },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":42,\"url\":\"\",\"loaded\":false}}", .kind = .open, .want = "opened 42\nwarning: the page did not finish loading in time — wait --load before acting\n", .ok = true },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}", .kind = .close, .want = "error: Unauthorized (-32002)\nhint: only tabs this pane opened with `browser open` can be closed\n", .ok = false },
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"closed\":true}}", .kind = .close, .want = "closed\n", .ok = true },
         .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"closed\":false,\"reason\":\"asks \\u001b[31m\"}}", .kind = .close, .want = "not closed: asks [31m\n", .ok = false },
     };

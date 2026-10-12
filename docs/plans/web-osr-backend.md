@@ -987,3 +987,19 @@ ok 였다 → 부호 있는 32 비트(`|0`). 하: 시각이 안 된 잠든 op �
 - 팝업 브라우저는 CEF 가 보이게 만들고 maru 가 뒤쪽 탭으로 놓으며 숨긴다 — 그 페이지의 첫 `visibilityState` 는 visible 일 수 있다(그려지지 않는다).
 - 앱: `agent_tabs`(pane·탭 — 상한·장), 탭 op 목록(`tab_runs` — drain 마다 첫 불러오기·물은 닫기를 본다, `has_pending` 이 그동안 1), `Term.agent_opener`
   (연 pane — 소유 판정, 탭과 함께 옮겨 간다), `web_osr.close_ask_agent`(에이전트가 물은 닫기는 창·앱으로 번지지 않는다), pane grant 표 64.
+
+**W9b③ 적대 리뷰**(구현 뒤 다섯 회차):
+- **1 회차**(실측 — 실제 앱 2 번·하네스·변이 30):
+  - 중: 접속이 안 되는 주소·DNS 실패·파일 받는 주소를 `open` 하면 25 초를 다 기다렸다 — 실패한 이동은 `url_changed` 없이 주소가 about:blank 그대로라
+    세지 않았다(하네스: loading 1 → load_finished → 0) → maru 가 이동을 보낸 뒤 「불러오는 중」 을 봤으면 다음 「거짓」 을 주소와 상관없이 센다. 그것만으로는
+    앱에서 여전히 25 초였다(만들어지자마자 보낸 이동은 「참」 없이 끝만 왔다 — 재현 시험) → 이동을 보낸 뒤의 `load_finished`(실패한 이동도 status 0 으로 온다)를
+    세되, 만들어진 브라우저의 첫 about:blank 끝은 넘긴다. 파일을 받는 주소는 문서가 없어(ERR_ABORTED) 여전히 시한까지일 수 있다.
+  - 중: 사용자 탭에서 에이전트가 누른 `target=_blank`·`window.open` 이 탭으로는 안 붙어도 **팝업 문서를 불러 실행했다**(쿠키 그대로) — sidecar 가 모든
+    DevTools 누름에 장을 짐작해 줬다(하네스: 장 없이 `open_tab`) → wire 18 `new_tab_credit`(maru → sidecar): maru 가 에이전트가 연 탭에 누르기 직전에만 보낸다,
+    sidecar 는 짐작하지 않는다(고친 뒤 장 없이는 `open_tab` 이 없고, 장을 주면 있다).
+  - 중: pane 하나 8 개 상한이 팝업으로 뚫렸다(넘친 팝업은 보통 탭으로 계속) → 자리(상한·grant 표)가 없으면 장을 주지 않고, 와도 새 탭을 열지 않는다(재현 시험 둘).
+  - 하: 떠나기 확인이 떠 있는 탭에 보낸 click 이 30 초 시한까지 붙잡혔다 → 페이지를 멈추는 JS 대화상자가 떠 있으면 op 을 시작하지 않고 곧 실패(재현 시험).
+  - 하: 누르기 전 프레임이 kick 과 바이트까지 같아야 sidecar 가 3 초에 놓는다(다르면 35 초 — 하네스) → `frame_params` 를 kick 상수와 컴파일 때 견준다.
+  - 하: close 거절에 엉뚱한 안내(foreground job·tmux) → close 는 「이 pane 이 연 탭만」 안내, url 이 비면 `opened <id>`, 문서(press 의 새 탭 예외, open 의 url·실패 이동).
+  - 시험 공백(살아남은 변이 여덟): 활성 에이전트 탭의 팝업도 뒤쪽·kept open·사람과 에이전트 닫기가 겹칠 때·has_pending·drain·프레임 바이트 — 시험을 더했다.
+  - 버틴 것: 다른 최상위 탭의 pane 에서 open(숨긴 채 만들어지고 첫 클릭이 닿는다), 사용자 탭 close 거절, 동시 close 둘, 아홉째 거절, 바쁜 페이지 close(묻는 시한 뒤 강제), `--timeout 1`.

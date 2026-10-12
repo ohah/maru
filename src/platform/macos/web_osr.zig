@@ -180,6 +180,14 @@ const Surface = struct {
     page_opened: bool = false,
     /// 문서도 사용자 입력도 없이 다운로드만 한 페이지가 연 탭(W10c) — 그 탭이 있는 창이 꺼내 가 닫는다(`takeDownloadBlank`).
     download_blank: bool = false,
+    /// 빈 페이지가 아닌 주소의 불러오기가 끝난 횟수(W9b③ — `browser.open` 이 첫 불러오기를 기다린다). `nav_state` 의 「불러오는 중
+    /// 아님」 — 직전에 불러오는 중이었거나 지난번에 센 뒤 주소가 바뀌었으면(빠른 이동은 「참」 없이 「거짓」 한 번으로 묶여 왔다 — 스모크
+    /// 실측) — 을 센다. 실패한 이동도 센다(오류 페이지로 바뀌어도 불러오기는 끝난다).
+    page_loads: u32 = 0,
+    /// 지난번에 센 주소의 해시(같은 주소의 「거짓」 되풀이를 다시 세지 않게).
+    page_loads_url_hash: u64 = 0,
+    /// 그 물은 닫기는 에이전트가 했다(W9b③ — `browser.close`). 창의 마지막 탭이 됐어도 창·앱 닫기로 번지지 않는다.
+    close_ask_agent: bool = false,
 };
 
 /// 페이지에 물은 닫기의 진행(W6j).
@@ -1491,6 +1499,12 @@ pub fn testApply(gpa: std.mem.Allocator, message: Message) void {
     apply(gpa, message, 0);
 }
 
+/// 시험 전용(W9b③): 지금 시각으로 적용한다(지금 받은 새 탭 장과 견준다).
+pub fn testApplyNow(gpa: std.mem.Allocator, message: Message) void {
+    if (!builtin.is_test) @compileError("test only");
+    apply(gpa, message, monotonicNow());
+}
+
 pub fn testForget(gpa: std.mem.Allocator) void {
     if (!builtin.is_test) @compileError("test only");
     decided = null;
@@ -1511,6 +1525,50 @@ pub fn owns(surface_id: u64) bool {
 pub fn isLoading(surface_id: u64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     return s.loading;
+}
+
+/// W9b③: DevTools 로 보내는 진짜 입력이 활성을 주는가(sidecar 와 같은 규칙 — `new_tab.devtoolsInputActivates`).
+pub const devtoolsInputActivates = ws.new_tab.devtoolsInputActivates;
+
+/// W9b③: 에이전트가 자기가 연 탭에 진짜 누름·키를 보냈다 — 사람의 입력처럼 새 탭 장 하나(그 페이지가 새 탭을 열 수 있게).
+pub fn grantNewTabCredit(surface_id: u64) void {
+    if (surfaces.getPtr(surface_id)) |s| s.new_tab_credits.grant(monotonicNow());
+}
+
+/// W9b③: 그 탭의 브라우저가 만들어졌고, 빈 페이지가 아닌 주소에서 불러오기를 몇 번 끝냈는가(`browser.open` 이 첫 불러오기를
+/// 기다린다). 모르는 탭은 null.
+pub fn pageState(surface_id: u64) ?struct { created: bool, loads: u32, url: []const u8 } {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return .{ .created = s.created, .loads = s.page_loads, .url = s.url orelse "" };
+}
+
+/// W9b③: 그 탭에 물은 닫기가 어디까지 왔는가 — `asked` 면 페이지가 떠나기 확인으로 물었다(사용자가 그 탭에서 정한다).
+pub const CloseAskPhase = enum { none, asking, asked, closed, stayed };
+pub fn closeAskPhase(surface_id: u64) CloseAskPhase {
+    const s = surfaces.getPtr(surface_id) orelse return .none;
+    return switch (s.close_ask) {
+        .none => .none,
+        .asking => .asking,
+        .asked => .asked,
+        .closed => .closed,
+        .stayed => .stayed,
+    };
+}
+
+/// W9b③: 에이전트가 묻는 닫기(`browser.close`) — `askClose` 와 같되, 창의 마지막 탭이 돼도 창·앱 닫기로 번지지 않게 표시한다.
+pub fn askCloseByAgent(gpa: std.mem.Allocator, surface_id: u64, now_ms: i64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    // 사람이 이미 묻는 중이면 그 닫기에 끼지 않는다(표시를 덮지 않는다 — 사람의 닫기는 창으로 번질 수 있다).
+    if (s.close_ask == .asking or s.close_ask == .asked) return true;
+    if (!askClose(gpa, surface_id, now_ms)) return false;
+    s.close_ask_agent = true;
+    return true;
+}
+
+/// 그 물은 닫기를 에이전트가 했는가(W9b③).
+pub fn closeAskedByAgent(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.close_ask_agent;
 }
 
 /// 창 배치 하나를 맞춘다(창 tick 의 web 전이 계산에서, OSR 대상 탭마다).
@@ -1664,10 +1722,15 @@ pub fn askClose(gpa: std.mem.Allocator, surface_id: u64, now_ms: i64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     if (state != .running or !s.created or s.page_closed) return false;
     switch (s.close_ask) {
-        .asking, .asked => return true,
+        // 이미 묻는 중 — 사람이 닫기를 골랐으면 사람의 닫기다(창의 마지막 탭이면 창을 닫는다, W9b③).
+        .asking, .asked => {
+            s.close_ask_agent = false;
+            return true;
+        },
         .none, .closed, .stayed => {},
     }
     s.close_ask = .asking;
+    s.close_ask_agent = false;
     s.close_ask_since_ms = now_ms;
     // W10c: 받던 다운로드가 있으면 닫지 않고 about:blank 로 보낸다(떠나기 확인은 이동에도 온다). 새 문서가 오면 닫힌 것으로 보고, 탭이
     // 사라지면 `destroy` 가 브라우저를 숨겨 남긴다.
@@ -3865,6 +3928,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         .nav_state => |v| if (surfaces.getPtr(v.browser)) |s| {
             s.can_go_back = v.can_go_back;
             s.can_go_forward = v.can_go_forward;
+            if (!v.loading) if (s.url) |u| if (!std.mem.eql(u8, u, "about:blank")) {
+                const h = std.hash.Wyhash.hash(0, u);
+                if (s.loading or h != s.page_loads_url_hash) s.page_loads +%= 1;
+                s.page_loads_url_hash = h;
+            };
             s.loading = v.loading;
             s.nav_dirty = true;
         },
@@ -5253,4 +5321,44 @@ test "W9-0b DevTools 호출: 탭마다·전체 상한, 시한이 지나도 sidec
     try std.testing.expectEqual(before_stop + 1, rec.count);
     try std.testing.expectEqual(DevtoolsOutcome.sidecar_gone, rec.outcome.?);
     try std.testing.expect(!devtoolsPending());
+}
+
+test "W9b③: 빈 페이지가 아닌 주소에서 불러오는 중 → 끝 을 센다(browser.open 의 첫 불러오기) — about:blank 의 끝은 세지 않는다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 31);
+    testRunning(31);
+    testApply(gpa, .{ .url_changed = .{ .browser = 31, .url = "about:blank" } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 31, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 31, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 0), pageState(31).?.loads);
+    testApply(gpa, .{ .nav_state = .{ .browser = 31, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    testApply(gpa, .{ .url_changed = .{ .browser = 31, .url = "https://e.test/" } });
+    try std.testing.expectEqual(@as(u32, 0), pageState(31).?.loads);
+    testApply(gpa, .{ .nav_state = .{ .browser = 31, .can_go_back = true, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 1), pageState(31).?.loads);
+    try std.testing.expectEqualStrings("https://e.test/", pageState(31).?.url);
+}
+
+test "W9b③: 불러오는 중=참 이 묶여 오지 않아도(거짓→거짓, 새 주소) 첫 불러오기를 센다 — 같은 주소의 거짓 되풀이는 한 번" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 32);
+    testRunning(32);
+    // 스모크 실측(W9b③): 새 탭의 nav_state 가 한 번, loading 거짓→거짓 으로 왔다(about:blank·이동이 묶였다).
+    testApply(gpa, .{ .url_changed = .{ .browser = 32, .url = "https://e.test/ag" } });
+    testApply(gpa, .{ .nav_state = .{ .browser = 32, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 1), pageState(32).?.loads);
+    testApply(gpa, .{ .nav_state = .{ .browser = 32, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expectEqual(@as(u32, 1), pageState(32).?.loads);
 }

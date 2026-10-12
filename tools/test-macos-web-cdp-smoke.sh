@@ -146,6 +146,9 @@ cat > "$root/www/a.html" <<'HTML'
 HTML
 printf '<!doctype html><title>page-b</title>b<script>setTimeout(function(){document.body.insertAdjacentHTML("beforeend","<p id=bready>ready</p>")},1000)</script><button id=go onclick="setTimeout(function(){location=&#39;c.html&#39;},800)">Go</button> <a id=slow href="slow.html">slow</a>' > "$root/www/b.html"
 # 3 회차: 0.6 초마다 스스로 새로고침하는 페이지(숨은 탭 경우).
+# W9b③: 에이전트가 연 탭(뒤쪽 — 처음부터 숨김). 첫 클릭·새 창 열기(결정 ④ — 뒤쪽 에이전트 탭)·떠나기 확인(글이 있으면).
+printf '<!doctype html><title>ag</title><button id=ab style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?ab-&#39;+event.isTrusted">Agent go</button><button id=pop style="position:absolute;left:30px;top:100px;width:120px;height:40px" onclick="window.open(&#39;ag2.html&#39;,&#39;_blank&#39;)">Pop</button><input id=t aria-label=Note style="position:absolute;left:30px;top:170px"><script>new Image().src="/hit?agvis-"+document.visibilityState;addEventListener("beforeunload",function(e){if(document.getElementById("t").value){e.preventDefault();e.returnValue=""}})</script>' > "$root/www/ag.html"
+printf '<!doctype html><title>ag2</title>ag2<script>new Image().src="/hit?ag2vis-"+document.visibilityState;document.addEventListener("visibilitychange",function(){new Image().src="/hit?ag2vis-"+document.visibilityState})</script>' > "$root/www/ag2.html"
 # W9b③: 숨은 채 불러온 문서 — 그 뒤 첫 마우스 누르기가 페이지에 닿는가(숨긴 탭은 새 문서를 그리지 않아 누르기가 사라졌다, 계획 공격 2 회차).
 printf '<!doctype html><title>fresh</title><button id=fb style="position:absolute;left:30px;top:30px;width:140px;height:40px" onclick="new Image().src=&#39;/hit?fb-&#39;+event.isTrusted">Fresh go</button><a id=tohop href="hop.html" style="position:absolute;left:30px;top:120px">hop</a>' > "$root/www/fresh.html"
 printf '<!doctype html><title>hop</title><button id=hop>Hop go</button><script>new Image().src="/hit?hopvis-"+document.visibilityState;setTimeout(function(){location.reload()},600)</script>' > "$root/www/hop.html"
@@ -428,6 +431,36 @@ for k in 1 2 3; do
 done
 echo "\$hop_to \$hop_max \$(cat "\$out"/hop-role-* | grep -c 'too many DevTools calls') \$hop_role_max" > "\$out/hop-summary"
 touch "\$out/show2-now"
+sleep 2
+# W9b③: 에이전트가 탭을 연다 — 이 pane 의 탭 줄 끝에 뒤쪽 탭으로(화면 그대로), 첫 불러오기까지 기다려 id 를 준다.
+"\$cli" browser open --url "http://127.0.0.1:$port/ag.html" > "\$out/ag-open" 2>&1; echo "rc=\$?" >> "\$out/ag-open"
+ag=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/ag-open")
+echo "\$ag" > "\$out/ag-id"
+hit_seen agvis-hidden && echo yes > "\$out/ag-hidden" || echo no > "\$out/ag-hidden"
+# 처음부터 숨긴 탭의 첫 클릭이 페이지에 닿는다(누르기 전 프레임).
+"\$cli" browser click --surface "\$ag" --selector '#ab' > "\$out/ag-click" 2>&1; echo "rc=\$?" >> "\$out/ag-click"
+hit_seen ab-true && echo yes > "\$out/ab-hit" || echo no > "\$out/ab-hit"
+# 그 탭의 페이지가 연 새 탭 — 뒤쪽(숨김), 에이전트 탭이라 곧 닫을 수 있다(결정 ④).
+"\$cli" browser click --surface "\$ag" --selector '#pop' > "\$out/ag-pop" 2>&1; echo "rc=\$?" >> "\$out/ag-pop"
+hit_seen ag2vis && echo yes > "\$out/ag2-loaded" || echo no > "\$out/ag2-loaded"
+# 팝업 브라우저는 CEF 가 보이게 만들고 maru 가 뒤쪽 탭으로 놓으며 숨긴다 — 첫 알림은 visible 일 수 있다(곧 hidden 이면 된다).
+hit_seen ag2vis-hidden && echo yes > "\$out/ag2-hidden" || echo no > "\$out/ag2-hidden"
+"\$cli" browser list > "\$out/ag-list" 2>&1
+ag2=\$(awk '/^surface .*ag2\.html/{print \$2; exit}' "\$out/ag-list")
+# 사용자 탭(이 pane 이 열지 않았다 — 조작 허락은 받았다)은 닫지 못한다.
+"\$cli" browser close --surface "\$sid" > "\$out/ag-close-user" 2>&1; echo "rc=\$?" >> "\$out/ag-close-user"
+# 글을 넣은 탭 — 페이지가 떠나기 확인으로 묻는다: 닫지 않고 곧 답한다(사용자가 그 탭에서 정한다).
+"\$cli" browser type --surface "\$ag" --selector '#t' --text 'draft' > "\$out/ag-type" 2>&1; echo "rc=\$?" >> "\$out/ag-type"
+c0=\$(date +%s)
+"\$cli" browser close --surface "\$ag" > "\$out/ag-close-ask" 2>&1; echo "rc=\$?" >> "\$out/ag-close-ask"
+c1=\$(date +%s)
+echo "\$((c1 - c0))" > "\$out/ag-close-ask-secs"
+"\$cli" browser close --surface "\$ag2" > "\$out/ag-close" 2>&1; echo "rc=\$?" >> "\$out/ag-close"
+"\$cli" browser list > "\$out/ag-list2" 2>&1
+# 상한 — 이 pane 의 에이전트 탭 8 개(ag 가 하나 남았다 — 일곱 더, 아홉째는 거절).
+for k in 1 2 3 4 5 6 7 8; do
+    "\$cli" browser open > "\$out/ag-cap-\$k" 2>&1; echo "rc=\$?" >> "\$out/ag-cap-\$k"
+done
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -530,6 +563,19 @@ hop_loads=$(grep -c 'GET /hop.html' "$root/http.log" || true)
 echo "hidden hopping tab ($hop_loads loads): selector waits timed out $hop_to/10 (longest ${hop_max}s) · role clicks answered 'too many' $hop_busy/3 (longest ${hop_role_max}s)"
 # role 클릭은 새로고침 사이에 「context 없음」으로 끝날 수 있다 — 다만 자리를 기다려도(최대 4.5 초) 곧 답해야 한다(4 회차).
 [ "$hop_to" = 0 ] && [ "$hop_busy" = 0 ] && [ "${hop_role_max:-99}" -le 6 ] || fail "on a hidden tab that keeps navigating, a lost screenshot blocked later calls ($hop_to/10 selector waits timed out, longest ${hop_max}s · $hop_busy/3 role clicks 'too many', longest role click ${hop_role_max}s — over 6 s means a call waited for a lost screenshot)"
+# W9b③
+grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/ag.html$' "$out/ag-open" && grep -q '^rc=0$' "$out/ag-open" && ! grep -q '^warning' "$out/ag-open" || fail "browser open did not answer the new tab after its first load ($(tr '\n' ' ' < "$out/ag-open"))"
+[ "$(cat "$out/ag-hidden")" = yes ] || fail "the agent's tab was not opened behind the current one (the page was not hidden — $(grep -o 'agvis-[a-z]*' "$root/http.log" | tr '\n' ' '))"
+ok ag-click && [ "$(cat "$out/ab-hit")" = yes ] || fail "the first click on the agent's new (hidden) tab did not reach the page ($(tr '\n' ' ' < "$out/ag-click"))"
+ag2_place=$(grep 'osr-test newtab .*adopted=true' "$root/app.log" | tail -1)
+echo "$ag2_place" | grep -q 'placement=background' && [ "$(echo "$ag2_place" | sed -n 's/.* at=\([0-9]*\) .*/\1/p')" != "$(echo "$ag2_place" | sed -n 's/.* active=\([0-9]*\) .*/\1/p')" ] || fail "a tab the agent's page opened was put in front ($ag2_place)"
+[ "$(cat "$out/ag2-loaded")" = yes ] && [ "$(cat "$out/ag2-hidden")" = yes ] || fail "a tab the agent's page opened did not open behind (loaded $(cat "$out/ag2-loaded"), hidden $(cat "$out/ag2-hidden"))"
+grep -q 'not opened by this pane' "$out/ag-close-user" && ! grep -q '^rc=0$' "$out/ag-close-user" || fail "the agent closed (or tried to close) a tab it did not open ($(tr '\n' ' ' < "$out/ag-close-user"))"
+ok ag-type && grep -q '^not closed: the page asks before leaving' "$out/ag-close-ask" && [ "$(cat "$out/ag-close-ask-secs")" -le 3 ] || fail "closing a tab whose page asks before leaving did not answer 'not closed' at once ($(tr '\n' ' ' < "$out/ag-close-ask") · $(cat "$out/ag-close-ask-secs")s)"
+grep -q '^closed$' "$out/ag-close" && grep -q '^rc=0$' "$out/ag-close" && ! grep -q 'ag2\.html' "$out/ag-list2" || fail "the agent could not close the tab its page opened ($(tr '\n' ' ' < "$out/ag-close"))"
+for k in 1 2 3 4 5 6 7; do grep -q '^opened [0-9]* ' "$out/ag-cap-$k" && grep -q '^rc=0$' "$out/ag-cap-$k" || fail "agent tab $k of 8 did not open ($(tr '\n' ' ' < "$out/ag-cap-$k"))"; done
+grep -q 'already has 8 tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not refused ($(tr '\n' ' ' < "$out/ag-cap-8"))"
+echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a user tab cannot be closed, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"
 ok hover && [ "$(cat "$out/hv-hit")" = yes ] || fail "hover did not give the element a real pointer move ($(tr '\n' ' ' < "$out/hover"))"

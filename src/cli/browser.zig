@@ -49,6 +49,8 @@ pub const browser_help =
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
     \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
+    \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane)
+    \\  close   --surface <id>                     close a tab this pane opened (asks the page; "not closed" if it asks before leaving)
     \\
 ;
 
@@ -102,6 +104,10 @@ pub const Request = union(enum) {
     snapshot: struct { surface_id: u64, interactive_only: bool, max_depth: ?u32, selector: ?[]const u8 },
     /// `browser console`(§9.5.9): 서버 버퍼에 쌓인 콘솔을 회수. clear=반환 후 버퍼 비움. 응답 {console:[{level,text}]}.
     console: struct { surface_id: u64, clear: bool },
+    /// `browser open`(W9b③ — Chromium). 대상 탭이 없다 — 부른 pane 의 탭 줄 끝에 뒤쪽 탭으로 연다. 응답 {id, url, loaded}.
+    open: struct { url: ?[]const u8, timeout_ms: ?u32 },
+    /// `browser close`(W9b③ — 그 pane 이 연 탭만). 응답 {closed, reason?}.
+    close: struct { surface_id: u64 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -115,6 +121,8 @@ pub const Request = union(enum) {
             .get_local_storage => .value,
             .snapshot => .snapshot,
             .console => .console,
+            .open => .open,
+            .close => .close,
         };
     }
 };
@@ -254,6 +262,38 @@ pub fn parse(args: []const []const u8) ParseError!Command {
             return error.UnexpectedArgument;
         }
         return .{ .request = .list };
+    }
+    if (eq(sub, "open")) {
+        // W9b③: 대상 탭이 없다(부른 pane) — `--surface` 는 받지 않는다.
+        var url: ?[]const u8 = null;
+        var timeout_ms: ?u32 = null;
+        var i: usize = 0;
+        while (i < rest.len) {
+            const a = rest[i];
+            if (matchOpt(a, "--url")) {
+                url = optValue(rest, &i, "--url") catch |err| switch (err) {
+                    error.MissingOptionValue => return error.MissingUrl,
+                    else => return err,
+                };
+            } else if (matchOpt(a, "--timeout")) {
+                const value = optValue(rest, &i, "--timeout") catch |err| switch (err) {
+                    error.MissingOptionValue => return error.MissingTimeoutValue,
+                    else => return err,
+                };
+                const t = std.fmt.parseInt(u32, value, 10) catch return error.InvalidTimeout;
+                if (t == 0 or t > wait_max_timeout_ms) return error.InvalidTimeout;
+                timeout_ms = t;
+            } else if (std.mem.startsWith(u8, a, "-")) {
+                return error.UnknownOption;
+            } else return error.UnexpectedArgument;
+        }
+        return .{ .request = .{ .open = .{ .url = url, .timeout_ms = timeout_ms } } };
+    }
+    if (eq(sub, "close")) {
+        const p = try parseSurfaceArg(rest);
+        const s = p.surface orelse return error.MissingSurface;
+        if (p.arg != null) return error.UnexpectedArgument;
+        return .{ .request = .{ .close = .{ .surface_id = s } } };
     }
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
@@ -900,6 +940,14 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
         .remove_local_storage => |g| return keyRequest(gpa, id, "browser.removeLocalStorage", g.surface_id, g.key, null),
         .clear_storage => |g| return idOnlyRequest(gpa, id, "browser.clearStorage", g.surface_id),
         .back => |g| return idOnlyRequest(gpa, id, "browser.back", g.surface_id),
+        .close => |g| return idOnlyRequest(gpa, id, "browser.close", g.surface_id),
+        .open => |o| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            if (o.url) |u| try obj.put(gpa, "url", .{ .string = u });
+            if (o.timeout_ms) |t| try obj.put(gpa, "timeout_ms", .{ .integer = t });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.open", .params = .{ .object = obj } } });
+        },
         .forward => |g| return idOnlyRequest(gpa, id, "browser.forward", g.surface_id),
         .reload => |g| return idOnlyRequest(gpa, id, "browser.reload", g.surface_id),
         .hover => |c| return actRequest(gpa, id, "browser.hover", c.surface_id, c.locator, null),
@@ -1036,7 +1084,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -1169,6 +1217,22 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             if (boolField(result.get("ambiguous"))) try w.writeAll("warning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n");
         },
         .value => try w.print("{s}\n", .{strField(result.get("value"))}), // get-local-storage → {value}
+        // W9b③: 연 탭의 id(다음 명령의 --surface)와 주소. 시한 안에 다 불러오지 못했으면 경고 한 줄(탭은 열렸다).
+        .open => {
+            const tab = if (result.get("id")) |v| (if (v == .integer) v.integer else 0) else 0;
+            const url = strField(result.get("url"));
+            var safe_url: [2048]u8 = undefined;
+            try w.print("opened {d} {s}\n", .{ tab, safe_url[0..displaySafe(url[0..@min(url.len, safe_url.len)], &safe_url)] });
+            if (!boolField(result.get("loaded"))) try w.writeAll("warning: the page did not finish loading in time — wait --load before acting\n");
+        },
+        .close => {
+            if (boolField(result.get("closed"))) try w.writeAll("closed\n") else {
+                const reason = strField(result.get("reason"));
+                var safe_r: [512]u8 = undefined;
+                try w.print("not closed: {s}\n", .{safe_r[0..displaySafe(reason[0..@min(reason.len, safe_r.len)], &safe_r)]});
+                return false;
+            }
+        },
         .get_url => try w.print("{s}\n", .{strField(result.get("url"))}),
         .exec => try w.print("{s}\n", .{strField(result.get("result"))}),
         .get_cookies => {
@@ -2388,6 +2452,8 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  reload  --surface <id>                     reload the page (Chromium tabs)
         \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
+        \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane)
+        \\  close   --surface <id>                     close a tab this pane opened (asks the page; "not closed" if it asks before leaving)
         \\
     ,
         browser_help,
@@ -2673,4 +2739,60 @@ test "renderResponse: 로케이터 wait 의 시한에 숨은 일치가 있으면
     var w: std.Io.Writer = .fixed(&buf);
     _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32004,\"message\":\"Timeout\",\"data\":{\"condition\":\"visible\",\"timeout_ms\":300,\"hidden\":2}}}", .ok, &w);
     try testing.expectEqualStrings("error: Timeout (-32004)\nhint: 2 matching element(s) are hidden (not rendered, aria-hidden or off-page)\n", w.buffered());
+}
+
+test "parse·build: open(W9b③) — 대상 없이 [--url] [--timeout], close — surface 만" {
+    const o = (try parse(&.{ "open", "--url", "https://e.test/a", "--timeout", "5000" })).request.open;
+    try testing.expectEqualStrings("https://e.test/a", o.url.?);
+    try testing.expectEqual(@as(u32, 5000), o.timeout_ms.?);
+    const bare = (try parse(&.{"open"})).request.open;
+    try testing.expect(bare.url == null and bare.timeout_ms == null);
+    try testing.expectError(error.UnknownOption, parse(&.{ "open", "--surface", "3" })); // 대상 탭이 없다
+    try testing.expectError(error.MissingUrl, parse(&.{ "open", "--url" }));
+    try testing.expectError(error.InvalidTimeout, parse(&.{ "open", "--timeout", "0" }));
+    try testing.expectError(error.InvalidTimeout, parse(&.{ "open", "--timeout", "25001" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "open", "https://e.test/" }));
+    try testing.expectEqual(@as(u64, 9), (try parse(&.{ "close", "--surface", "9" })).request.close.surface_id);
+    try testing.expectError(error.MissingSurface, parse(&.{"close"}));
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "open", "--url", "https://e.test/a", "--timeout", "5000" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.open", pm.message.request.method);
+        const p = pm.message.request.params.?.object;
+        try testing.expectEqualStrings("https://e.test/a", p.get("url").?.string);
+        try testing.expectEqual(@as(i64, 5000), p.get("timeout_ms").?.integer);
+        try testing.expect(p.get("id") == null);
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{"open"})).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqual(@as(usize, 0), pm.message.request.params.?.object.count()); // 엄격 키 — 빈 params
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "close", "--surface", "9" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.close", pm.message.request.method);
+        try testing.expectEqual(@as(i64, 9), pm.message.request.params.?.object.get("id").?.integer);
+    }
+}
+
+test "render: open(W9b③) 은 id·주소(다 못 불렀으면 경고), close 는 closed 또는 not closed: 이유(실패)" {
+    var buf: [512]u8 = undefined;
+    const cases = [_]struct { bytes: []const u8, kind: ResponseKind, want: []const u8, ok: bool }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":42,\"url\":\"https://e.test/\",\"loaded\":true}}", .kind = .open, .want = "opened 42 https://e.test/\n", .ok = true },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":42,\"url\":\"\",\"loaded\":false}}", .kind = .open, .want = "opened 42 \nwarning: the page did not finish loading in time — wait --load before acting\n", .ok = true },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"closed\":true}}", .kind = .close, .want = "closed\n", .ok = true },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"closed\":false,\"reason\":\"asks \\u001b[31m\"}}", .kind = .close, .want = "not closed: asks [31m\n", .ok = false },
+    };
+    for (cases) |c| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expectEqual(c.ok, try renderResponse(testing.allocator, c.bytes, c.kind, &w));
+        try testing.expectEqualStrings(c.want, w.buffered());
+    }
 }

@@ -1694,6 +1694,7 @@ pub export fn maru_macos_app_session_create(
     // AppSession의 terminal/web Term teardown 단일 훅을 컨트롤 수명에 연결한다. terminal pane이 닫힐 때도 그 pane이
     // 발급한 grant-origin wait를 즉시 unauthorized로 끝내야 하므로 WKWebView destroy 전이만 관찰해서는 부족하다.
     session.setSurfaceClosedCallback(null, onAppSessionSurfaceClosed);
+    session.agent_page_tab_callback = onAgentPageTab; // W9b③: 에이전트 탭의 페이지가 연 새 탭
 
     out.* = session;
     return @intFromEnum(Status.ok);
@@ -6644,7 +6645,8 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .hover,
         .press,
         => true,
-        .subscribe, .wait => false,
+        // W9b③: open·close 는 따로 둔 탭 op 목록이 본다(대상이 부른 pane·닫히는 것이 성공 — `enqueueTabOp`).
+        .subscribe, .wait, .open, .close => false,
     };
 }
 
@@ -6683,6 +6685,8 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .reload => "browser.reload",
         .hover => "browser.hover",
         .press => "browser.press",
+        .open => "browser.open",
+        .close => "browser.close",
     };
 }
 
@@ -6955,6 +6959,7 @@ fn onAppSessionSurfaceClosed(_: ?*anyopaque, surface_id: u64) void {
     }
     _ = control_cap_store.revokeSurface(surface_id);
     control_pane_grant_store.removeSurface(surface_id);
+    forgetAgentTab(surface_id);
 }
 
 fn cancelBrowserWaitsForGrant(server: *control_server_mod.ControlServer, pane: u64, target: u64, scope: control_capability.ScopeClass) void {
@@ -7085,6 +7090,9 @@ const control_hello_caps = [_][]const u8{
     "browser.reload",
     "browser.hover",
     "browser.press",
+    // W9b③: 에이전트가 탭을 열고 닫는다.
+    "browser.open",
+    "browser.close",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -7203,7 +7211,7 @@ fn handleControlRequest(
     switch (disp) {
         .immediate => |resp| server.resolveRequest(pending, resp),
         // 5e-2b: 인가·유효한 browser op — §5-async로 defer(즉시 resolve 안 함) + browser op 큐에 enqueue(Swift가 실행).
-        .browser => |op| enqueueBrowserOp(server, pending, op, now_ns),
+        .browser => |op| if (op.method == .open or op.method == .close) enqueueTabOp(server, refs, pending, op, now_ns) else enqueueBrowserOp(server, pending, op, now_ns),
         // 5f-0b-3b: 인가·유효한 browser.subscribe — 메인에서 SubscriberRegistry에 **동기 등록** + `{subscriber_id}` 응답.
         .subscribe => |s| handleSubscribe(server, pending, s),
         // 1e-confirm-2a: 미grant valid 요청 — 확인 수단 있으면 **틱 넘어 붙잡고**(deferRequest) 결정 대기(GrantPrompt 큐),
@@ -7796,6 +7804,206 @@ comptime {
     std.debug.assert(@as(i64, web_cdp_ops.max_kick_retries) * web_cdp_ops.kick_retry_ms > ws_message.devtools_kick_stale_ms + @divTrunc(ws_message.devtools_kick_stale_ms, 4));
 }
 
+// ── W9b③: 에이전트가 탭을 열고 닫기(`browser.open`·`browser.close`) ─────────────────────────────────────────────
+// 실행 목록(권한 출처 — 대상 탭의 grant·cap)이 아니라 따로 둔 목록에서 매 drain 본다: open 은 대상 탭이 아직 없고(부른 pane 이 대상),
+// close 는 대상 탭이 닫히는 것이 성공이라 「탭이 닫히면 op 을 취소」 하는 공통 경로와 맞지 않는다.
+
+/// pane 하나가 열어 둘 수 있는 에이전트 탭 수(사용자 결정 2026-10-12 — 숨긴 탭 하나 약 157 MB, 계획 공격 2 회차).
+const max_agent_tabs_per_pane: usize = 8;
+const agent_tab_close_wait_ms: i64 = 10_000;
+const agent_close_page_asks = "the page asks before leaving (unsaved input); the user decides in that tab";
+
+/// 에이전트 탭(그 pane 이 열었다 — `Term.agent_opener` 와 같은 짝). 상한을 세고, 에이전트가 그 탭에 보낸 누름이 새 탭 장을 주게 한다.
+/// 탭이 닫히면 `onAppSessionSurfaceClosed` 가 뺀다.
+const AgentTab = struct { pane: u64, tab: u64 };
+var agent_tabs: std.ArrayList(AgentTab) = .empty;
+
+fn agentTabCount(pane: u64) usize {
+    var n: usize = 0;
+    for (agent_tabs.items) |t| n += @intFromBool(t.pane == pane);
+    return n;
+}
+
+fn isAgentTab(tab: u64) bool {
+    for (agent_tabs.items) |t| if (t.tab == tab) return true;
+    return false;
+}
+
+fn forgetAgentTab(tab: u64) void {
+    var i: usize = 0;
+    while (i < agent_tabs.items.len) {
+        if (agent_tabs.items[i].tab == tab) _ = agent_tabs.swapRemove(i) else i += 1;
+    }
+}
+
+/// 그 pane 의 에이전트 탭으로 등록하고 곧 제어하게 grant 를 넣는다(사용자 결정 2026-10-10). 상한·grant 표가 차면 거짓(아무것도 남기지 않는다).
+fn adoptAgentTab(pane: u64, tab: u64) bool {
+    if (agentTabCount(pane) >= max_agent_tabs_per_pane) return false;
+    control_pane_grant_store.grant(.{ .pane = pane, .target = tab, .scope = .browser }) catch return false;
+    agent_tabs.append(allocator, .{ .pane = pane, .tab = tab }) catch {
+        control_pane_grant_store.removeSurface(tab);
+        return false;
+    };
+    return true;
+}
+
+/// 에이전트 탭의 페이지가 새 탭을 열었다(W9b③ 결정 ④ — `AppSession.agent_page_tab_callback`).
+fn onAgentPageTab(pane: u64, tab: u64) bool {
+    if (!control_server_active) return false;
+    return adoptAgentTab(pane, tab);
+}
+
+const TabRun = struct {
+    async_id: u64,
+    kind: enum { open, close },
+    tab: u64,
+    pane: u64,
+    /// open — 주소를 줬다(첫 불러오기까지 기다린다). 없으면 브라우저가 만들어질 때까지.
+    want_load: bool = false,
+    deadline_ms: i64,
+};
+var tab_runs: std.ArrayList(TabRun) = .empty;
+
+fn completeTabStatus(async_id: u64, status: control_browser.BrowserCompletionStatus, result: []const u8) void {
+    maru_macos_control_complete_browser_op(async_id, @intFromEnum(status), result.ptr, result.len);
+}
+
+fn completeAgentOpen(async_id: u64, tab: u64, url: []const u8, loaded: bool) void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    std.json.Stringify.value(.{ .id = tab, .url = url, .loaded = loaded }, .{}, &aw.writer) catch return completeTabStatus(async_id, .failed, "out of memory");
+    completeTabStatus(async_id, .success, aw.written());
+}
+
+fn completeAgentClose(async_id: u64, closed: bool, reason: ?[]const u8) void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const ok = if (reason) |r| std.json.Stringify.value(.{ .closed = closed, .reason = r }, .{}, &aw.writer) else std.json.Stringify.value(.{ .closed = closed }, .{}, &aw.writer);
+    ok catch return completeTabStatus(async_id, .failed, "out of memory");
+    completeTabStatus(async_id, .success, aw.written());
+}
+
+/// 인가된 open·close — 요청을 붙잡고(deferRequest) 시작한다. drain 안이라 창 목록(`refs`)이 있다.
+fn enqueueTabOp(
+    server: *control_server_mod.ControlServer,
+    refs: []const ControlSessionRef,
+    pending: *control_server_mod.PendingRequest,
+    op: control_browser.BrowserOp,
+    now_ns: i128,
+) void {
+    defer server.cross_gpa.free(op.arg);
+    const async_id = server.deferRequest(pending, now_ns + browser_op_timeout_ns) catch {
+        const resp = control_browser.serializeBrowserResponse(server.cross_gpa, pending.request_bytes, false, "browser op queue full") catch null;
+        server.resolveRequest(pending, resp);
+        return;
+    };
+    // Chromium 이 아니면 — 이 메서드는 Chromium 만(WebKit 은 걷어낼 예정, `-32008`).
+    if (!session_mod.web_osr.enabled()) {
+        const p = server.inFlightPending(async_id) orelse return;
+        const resp = control_browser.serializeUnsupportedByEngine(server.cross_gpa, p.request_bytes, .webkit) catch null;
+        _ = server.completeInFlight(async_id, resp);
+        return;
+    }
+    switch (op.method) {
+        .open => startAgentOpen(refs, async_id, op.surface_id, op.arg),
+        .close => startAgentClose(refs, async_id, op),
+        else => completeTabStatus(async_id, .failed, "not a tab operation"),
+    }
+}
+
+fn startAgentOpen(refs: []const ControlSessionRef, async_id: u64, pane: u64, arg: []const u8) void {
+    const parsed = std.json.parseFromSlice(struct { url: ?[]const u8 = null, timeout_ms: u32 }, allocator, arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
+    defer parsed.deinit();
+    const app = appSessionOwningSurface(refs, pane) orelse return completeTabStatus(async_id, .failed, "the calling pane was not found in an open window");
+    if (agentTabCount(pane) >= max_agent_tabs_per_pane) return completeTabStatus(async_id, .failed, "this pane already has 8 tabs it opened — close one first (browser close)");
+    const tab = session_mod.web_ops.openAgentTab(app, pane, parsed.value.url) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
+        error.TabsHidden => "this window hides its tab bar — a new tab could not be shown",
+        error.CallerNotFound => "the calling pane was not found in an open window",
+        error.OutOfMemory => "out of memory",
+    });
+    if (!adoptAgentTab(pane, tab)) {
+        // 다른 pane 의 grant 가 표를 채웠다 — 연 탭을 거두고 실패로(제어할 수 없는 탭을 남기지 않는다).
+        _ = session_mod.web_ops.agentCloseTabNow(app, tab);
+        return completeTabStatus(async_id, .failed, "too many tabs are under agent control right now — close some first");
+    }
+    tab_runs.append(allocator, .{
+        .async_id = async_id,
+        .kind = .open,
+        .tab = tab,
+        .pane = pane,
+        .want_load = parsed.value.url != null,
+        .deadline_ms = cdpNowMs() + parsed.value.timeout_ms,
+    }) catch return completeAgentOpen(async_id, tab, "", false);
+}
+
+fn startAgentClose(refs: []const ControlSessionRef, async_id: u64, op: control_browser.BrowserOp) void {
+    // cap 으로 인가된 연결은 pane 이 없다 — 그 pane 이 연 탭인지 알 수 없다.
+    const pane = if (op.pane_grant) |g| g.pane else return completeTabStatus(async_id, .unauthorized, "");
+    const app = appSessionOwningSurface(refs, op.surface_id) orelse return completeAgentClose(async_id, true, null);
+    switch (session_mod.web_ops.agentCloseTab(app, op.surface_id, pane)) {
+        .closed, .not_found => completeAgentClose(async_id, true, null),
+        .page_asks => completeAgentClose(async_id, false, agent_close_page_asks),
+        .not_owner => completeTabStatus(async_id, .failed, "this tab was not opened by this pane — only tabs opened with browser open can be closed"),
+        .only_tab => completeTabStatus(async_id, .failed, "this is the only tab in its window — closing it would close the window, so it is left open"),
+        .asking => tab_runs.append(allocator, .{ .async_id = async_id, .kind = .close, .tab = op.surface_id, .pane = pane, .deadline_ms = cdpNowMs() + agent_tab_close_wait_ms }) catch completeAgentClose(async_id, false, "out of memory"),
+    }
+}
+
+/// 매 drain — 열린 탭이 첫 불러오기를 끝냈는가, 물은 닫기가 어떻게 됐는가.
+fn pollTabRuns(refs: []const ControlSessionRef) void {
+    if (tab_runs.items.len == 0) return;
+    const now = cdpNowMs();
+    var i: usize = 0;
+    while (i < tab_runs.items.len) {
+        const r = tab_runs.items[i];
+        const finished = switch (r.kind) {
+            .open => pollAgentOpen(refs, r, now),
+            .close => pollAgentClose(refs, r, now),
+        };
+        if (finished) _ = tab_runs.orderedRemove(i) else i += 1;
+    }
+}
+
+fn pollAgentOpen(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
+    const st = session_mod.web_osr.pageState(r.tab) orelse {
+        if (appSessionOwningSurface(refs, r.tab) == null) {
+            completeTabStatus(r.async_id, .failed, "the tab was closed before it finished loading");
+            return true;
+        }
+        if (now < r.deadline_ms) return false;
+        completeAgentOpen(r.async_id, r.tab, "", false);
+        return true;
+    };
+    const ready = if (r.want_load) st.loads > 0 else st.created;
+    if (!ready and now < r.deadline_ms) return false;
+    completeAgentOpen(r.async_id, r.tab, st.url, ready);
+    return true;
+}
+
+fn pollAgentClose(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
+    if (appSessionOwningSurface(refs, r.tab) == null) {
+        completeAgentClose(r.async_id, true, null);
+        return true;
+    }
+    switch (session_mod.web_osr.closeAskPhase(r.tab)) {
+        .asked => completeAgentClose(r.async_id, false, agent_close_page_asks),
+        // 창의 tick 이 꺼내 갔는데 탭이 남았다 — 머물렀거나(사람이 답했다), 묻는 사이 창의 유일한 탭이 돼 빈 탭으로 뒀다.
+        .none, .stayed => completeAgentClose(r.async_id, false, "the tab was kept open"),
+        .asking, .closed => {
+            if (now < r.deadline_ms) return false;
+            completeAgentClose(r.async_id, false, "the page did not answer in time");
+        },
+    }
+    return true;
+}
+
+/// 에이전트가 자기가 연 탭에 진짜 누름·키를 보낸다 — 페이지가 새 탭을 열 수 있는 장을 준다(사람의 입력처럼 — 결정 ④가 돌게).
+/// 사람의 탭은 그대로(에이전트의 누름은 사람의 입력이 아니다 — W6e).
+fn grantAgentNewTabCredit(tab: u64, method: []const u8, params: []const u8) void {
+    if (!isAgentTab(tab)) return;
+    if (session_mod.web_osr.devtoolsInputActivates(method, params)) session_mod.web_osr.grantNewTabCredit(tab);
+}
+
 fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
     switch (step) {
         .done => |d| {
@@ -7813,6 +8021,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             }
             if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
+            grantAgentNewTabCredit(run.surface_id, next.method, next.params);
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
             // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
@@ -7983,6 +8192,7 @@ pub export fn maru_macos_control_server_has_pending() u32 {
     // 부르고, drain 이 그 op 을 깨운다(서버가 멈췄어도 — 깨운 op 이 재허가에서 끝난다). 적대 리뷰 3 회차: 이 줄이 없어 깨지 않았다.
     if (cdpSleeperDue()) return 1;
     if (!control_server_active) return 0;
+    if (tab_runs.items.len > 0) return 1; // W9b③: 연 탭의 첫 불러오기·물은 닫기를 매 drain 본다
     if (grant_prompt_queue.items.items.len > 0) return 1; // held grant 확인 대기 — server_drain(drainGrantPrompts) 계속 돌게
     return if (control_server_storage.hasPendingRequest()) 1 else 0;
 }
@@ -8004,6 +8214,7 @@ pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSession
     const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
     drainGrantPrompts(server, refs, now);
+    pollTabRuns(refs);
 }
 
 fn expireActiveBrowserExecutions(server: *control_server_mod.ControlServer, now_ns: i128) void {
@@ -11383,4 +11594,218 @@ test "러너는 판정자마다 번호를 바꾼다 — 프레임 도장 같은 
         if (std.mem.endsWith(u8, t.name, me)) position = i;
     }
     try std.testing.expectEqual(@as(?u64, @as(u64, position orelse return error.TestUnexpectedResult) + 1), @atomicLoad(u64, &root.maru_test_generation, .monotonic));
+}
+
+// ── W9b③: 에이전트 탭 열기·닫기 ─────────────────────────────────────────────────────────────────────────────
+
+fn w9b3Session(ta: std.mem.Allocator) !*AppSession {
+    const session = try ta.create(AppSession);
+    errdefer ta.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), ta, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(session_mod.CommandKind.controlled_smoke),
+    });
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    session.setSurfaceClosedCallback(null, onAppSessionSurfaceClosed);
+    return session;
+}
+
+/// 엔진이 돈다고 친다(시험에는 sidecar 가 없다 — `ensure` 가 띄우러 가지 않게). 표지 번호는 `w9b3Cleanup` 이 놓는다.
+const w9b3_engine_marker: u64 = 900_001;
+fn w9b3EngineRunning(ta: std.mem.Allocator) !void {
+    try session_mod.web_osr.testHold(ta, w9b3_engine_marker);
+    session_mod.web_osr.testRunning(w9b3_engine_marker);
+}
+
+fn w9b3Cleanup(ta: std.mem.Allocator, session: *AppSession) void {
+    session.deinit();
+    ta.destroy(session);
+    session_mod.web_osr.destroy(ta, w9b3_engine_marker);
+    session_mod.web_osr.testForget(ta);
+    agent_tabs.clearAndFree(allocator);
+    tab_runs.clearAndFree(allocator);
+    control_pane_grant_store.clearAll();
+}
+
+fn w9b3Result(pending: *control_server_mod.PendingRequest) !std.json.Parsed(std.json.Value) {
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, response, .{});
+    errdefer parsed.deinit();
+    if (parsed.value.object.get("result") == null) return error.ExpectedResult;
+    return parsed;
+}
+
+test "W9b③: open — 부른 pane 의 창에 뒤쪽 탭을 열고 grant·에이전트 표에 올린다, 첫 불러오기 뒤에 {id,url,loaded:true}, 시한이면 loaded:false, 8 개면 거절" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.open\",\"params\":{\"url\":\"https://e.test/\"}}";
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    startAgentOpen(&refs, id, shell, "{\"url\":\"https://e.test/\",\"timeout_ms\":25000}");
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    const tab = pane.terms.items[1].surfaceId();
+    try std.testing.expect(isAgentTab(tab));
+    try std.testing.expect(control_pane_grant_store.authorizes(shell, tab, .browser, null)); // 곧 제어(모달 없음)
+    try std.testing.expectEqual(shell, pane.activeTerm().surfaceId()); // 화면 그대로
+    // 아직 불러오지 않았다 — 답하지 않는다(about:blank 의 끝은 세지 않는다).
+    pollTabRuns(&refs);
+    try std.testing.expect(pending.response == null);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = tab, .url = "about:blank" } });
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = tab, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    pollTabRuns(&refs);
+    try std.testing.expect(pending.response == null);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = tab, .url = "https://e.test/" } });
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = tab, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&pending);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expectEqual(@as(i64, @intCast(tab)), r.get("id").?.integer);
+        try std.testing.expectEqualStrings("https://e.test/", r.get("url").?.string);
+        try std.testing.expect(r.get("loaded").?.bool);
+    }
+    try std.testing.expectEqual(@as(usize, 0), tab_runs.items.len);
+    // 시한 — 열린 탭은 두고 loaded:false.
+    var slow: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const slow_id = try control_server_storage.deferRequest(&slow, std.math.maxInt(i128));
+    startAgentOpen(&refs, slow_id, shell, "{\"url\":\"https://e.test/slow\",\"timeout_ms\":25000}");
+    tab_runs.items[0].deadline_ms = 0;
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&slow);
+        defer parsed.deinit();
+        try std.testing.expect(!parsed.value.object.get("result").?.object.get("loaded").?.bool);
+    }
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+    // 상한 — 이 pane 의 에이전트 탭이 8 개면 열지 않는다.
+    while (agentTabCount(shell) < max_agent_tabs_per_pane) try agent_tabs.append(allocator, .{ .pane = shell, .tab = 800_000 + agent_tabs.items.len });
+    var full: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const full_id = try control_server_storage.deferRequest(&full, std.math.maxInt(i128));
+    startAgentOpen(&refs, full_id, shell, "{\"timeout_ms\":25000}");
+    try expectPendingErrorCode(&full, .internal_error);
+    try std.testing.expectEqual(@as(usize, 3), pane.terms.items.len);
+}
+
+test "W9b③: close — 그 pane 이 연 탭만, cap 연결은 unauthorized, 물으면 떠나기 확인이 뜰 때 closed:false, 닫히면 closed:true, 창의 유일한 탭은 실패" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    try w9b3EngineRunning(ta);
+    const pane = session.tabs.items[0].panes.items[0];
+    const shell = pane.terms.items[0].surfaceId();
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    const tab = try session_mod.web_ops.openAgentTab(session, shell, null);
+    try std.testing.expect(adoptAgentTab(shell, tab));
+    session_mod.web_osr.testRunning(tab);
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.close\",\"params\":{\"id\":1}}";
+    const grant: control_browser.GrantProvenance = .{ .pane = shell, .target = tab, .scope = .browser };
+    // cap 으로 인가된 연결(pane 없음) — 그 pane 이 연 탭인지 알 수 없다.
+    var cap_pending: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentClose(&refs, try control_server_storage.deferRequest(&cap_pending, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "" });
+    try expectPendingErrorCode(&cap_pending, .unauthorized);
+    // 다른 pane — 실패(남의 탭).
+    var other: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentClose(&refs, try control_server_storage.deferRequest(&other, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "", .pane_grant = .{ .pane = shell + 1, .target = tab, .scope = .browser } });
+    try expectPendingErrorCode(&other, .internal_error);
+    // 물었다 — 페이지가 떠나기 확인을 띄우면 기다리지 않고 closed:false.
+    var asked: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentClose(&refs, try control_server_storage.deferRequest(&asked, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "", .pane_grant = grant });
+    pollTabRuns(&refs);
+    try std.testing.expect(asked.response == null);
+    session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = tab, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&asked);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expect(!r.get("closed").?.bool);
+        try std.testing.expect(std.mem.indexOf(u8, r.get("reason").?.string, "asks before leaving") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    // 다른 에이전트 탭 — 물었더니 닫혔다(창의 tick 이 닫는다) → closed:true.
+    const tab2 = try session_mod.web_ops.openAgentTab(session, shell, null);
+    try std.testing.expect(adoptAgentTab(shell, tab2));
+    session_mod.web_osr.testRunning(tab2);
+    var done: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentClose(&refs, try control_server_storage.deferRequest(&done, std.math.maxInt(i128)), .{ .surface_id = tab2, .method = .close, .arg = "", .pane_grant = .{ .pane = shell, .target = tab2, .scope = .browser } });
+    session_mod.web_ops.osrCloseAskedTab(session, tab2, .closed);
+    try std.testing.expect(!isAgentTab(tab2)); // 닫힘 콜백이 표에서 뺐다
+    pollTabRuns(&refs);
+    {
+        const parsed = try w9b3Result(&done);
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.object.get("result").?.object.get("closed").?.bool);
+    }
+    // 창의 유일한 탭 — 셸·첫 탭을 닫으면 닫지 않는다.
+    const tab3 = try session_mod.web_ops.openAgentTab(session, shell, null);
+    try std.testing.expect(adoptAgentTab(shell, tab3));
+    session_mod.web_osr.testRunning(tab3);
+    try std.testing.expect(session_mod.web_ops.agentCloseTabNow(session, shell)); // 셸
+    try std.testing.expect(session_mod.web_ops.agentCloseTabNow(session, tab)); // 떠나기 확인이 떠 있는 첫 탭
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+    var only: control_server_mod.PendingRequest = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    startAgentClose(&refs, try control_server_storage.deferRequest(&only, std.math.maxInt(i128)), .{ .surface_id = tab3, .method = .close, .arg = "", .pane_grant = .{ .pane = shell, .target = tab3, .scope = .browser } });
+    try expectPendingErrorCode(&only, .internal_error);
+    try std.testing.expectEqual(@as(usize, 1), pane.terms.items.len);
+}
+
+test "W9b③: 에이전트가 자기가 연 탭에 보낸 누름·키 누름만 새 탭 장을 준다 — 사람 탭·떼기·이동은 주지 않는다, 닫히면 표에서 빠진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ta = std.testing.allocator;
+    defer {
+        agent_tabs.clearAndFree(allocator);
+        control_pane_grant_store.clearAll();
+    }
+    for ([_]u64{ 41, 42 }) |sid| try session_mod.web_osr.testHold(ta, sid);
+    defer {
+        session_mod.web_osr.destroy(ta, 41);
+        session_mod.web_osr.destroy(ta, 42);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(41);
+    session_mod.web_osr.testRunning(42);
+    control_server_active = true;
+    defer control_server_active = false;
+    try std.testing.expect(onAgentPageTab(5, 41)); // 41 은 pane 5 의 에이전트 탭
+    const cases = [_]struct { tab: u64, method: []const u8, params: []const u8, credit: bool }{
+        .{ .tab = 41, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}", .credit = true },
+        .{ .tab = 41, .method = "Input.dispatchKeyEvent", .params = "{\"type\":\"keyDown\",\"key\":\"Enter\",\"text\":\"\\r\"}", .credit = true },
+        .{ .tab = 41, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mouseReleased\",\"x\":1,\"y\":1}", .credit = false },
+        .{ .tab = 41, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mouseMoved\",\"x\":1,\"y\":1}", .credit = false },
+        .{ .tab = 42, .method = "Input.dispatchMouseEvent", .params = "{\"type\":\"mousePressed\",\"x\":1,\"y\":1,\"button\":\"left\",\"clickCount\":1}", .credit = false }, // 사람 탭
+    };
+    for (cases) |case| {
+        grantAgentNewTabCredit(case.tab, case.method, case.params);
+        session_mod.web_osr.testApplyNow(ta, .{ .open_tab = .{ .browser = case.tab, .placement = .foreground, .url = "https://e.test/n" } });
+        try std.testing.expectEqual(case.credit, session_mod.web_osr.newTabPending(case.tab));
+        if (session_mod.web_osr.takeNewTab(case.tab)) |n| ta.free(n.url);
+    }
+    // 탭이 닫히면 표·grant 에서 빠진다.
+    onAppSessionSurfaceClosed(null, 41);
+    try std.testing.expect(!isAgentTab(41));
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 41, .browser, null));
+    // 상한 — pane 하나 8 개까지만 받는다(넘치면 보통 탭).
+    for (0..max_agent_tabs_per_pane) |i| try std.testing.expect(onAgentPageTab(6, 700 + i));
+    try std.testing.expect(!onAgentPageTab(6, 799));
 }

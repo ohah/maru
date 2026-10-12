@@ -89,7 +89,7 @@ pub const PaneGrant = struct {
 
 /// bounded — 한 세션의 (pane × target × scope) grant 상한. 실무상 pane 소수 × surface 소수 × 2 scope라 넉넉.
 /// 초과=`error.Full`(호출자 방어 — 정상 사용선 도달 안 함). DoS-safe 고정 배열(allocator 불요).
-pub const max_grants: usize = 32;
+pub const max_grants: usize = 64;
 
 /// pane-bound grant 집합. 고정 배열(주소 안정 불필요·값 복사 안전). L4가 인스턴스 소유(메인 스레드 — §8.8).
 pub const PaneGrantStore = struct {

@@ -1501,3 +1501,8 @@ SSH mixed 재접속 검증은 `python3 tools/test-remote-agent-native.py --cli z
 `zig build test-remote-agent-log-profile -Dremote-native-frames=/tmp/remote-native-wire.reconnect`
 로 복구 wire의 AppSession 배지·캡처 봉인을 검사한다. 자동 GUI 재시도 스케줄러와
 셸 wrapper 자체의 재접속 검증은 포함하지 않는다.
+
+제품 자동 SSH 재접속: `mise exec -- zig build test-remote-agent-automatic-reconnect`.
+`-Doptimize=ReleaseFast`도 같은 검사를 실행한다. 소유 loopback sshd에서 실제 CLI wrapper와
+AppSession drain/재시도/spawn 경로를 검사하며 사용자 SSH 설정과 실행 중 세션은 바꾸지 않는다.
+macOS의 `/usr/sbin/sshd` 실행이 가능한 환경에서 opt-in으로 실행한다. OS 화면 검증은 아니다.

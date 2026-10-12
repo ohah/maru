@@ -99257,6 +99257,31 @@ test "W9b③: 에이전트 탭의 페이지가 연 새 탭은 뒤쪽으로, app_
     }
 }
 
+test "W9b③ 적대 리뷰 3 회차: 에이전트 셸이 끝난 뒤 그 장으로 열린 새 탭은 끝난 셸의 에이전트 탭으로 등록하지 않는다(누구도 치우지 않는 항목이 남았다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    session.agent_page_tab_callback = w9b3AdoptPageTab;
+    w9b3_adopt_answer = true;
+    w9b3_adopted = 0;
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const tab = try web_ops.openAgentTab(session, shell, null);
+    try web_osr.testHold(allocator, tab);
+    web_osr.testRunning(tab);
+    web_osr.grantNewTabCredit(allocator, tab); // 에이전트의 누름
+    term_ops.closeTermAt(session, 0, pane, 0); // 그 뒤 에이전트 셸이 끝났다 — 에이전트 탭만 남았다
+    web_osr.testApplyNow(allocator, .{ .open_tab = .{ .browser = tab, .placement = .foreground, .url = "https://e.test/popup" } });
+    web_ops.tickWebOsr(session);
+    try std.testing.expectEqual(@as(usize, 2), pane.terms.items.len);
+    try std.testing.expectEqual(@as(u64, 0), w9b3_adopted); // 끝난 셸로 등록하지 않았다
+    try std.testing.expectEqual(@as(u64, 0), pane.terms.items[1].agent_opener);
+    try std.testing.expectEqual(tab, pane.activeTerm().surfaceId()); // 에이전트의 입력이 연 탭은 그래도 뒤쪽
+}
+
 fn w9b3NoRoom(pane: u64) bool {
     _ = pane;
     return false;

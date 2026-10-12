@@ -45,7 +45,8 @@ pub fn noInstance(stderr: *std.Io.Writer, detail: ?[]const u8) error{UnknownComm
 /// 인스턴스에 붙어 요청을 보냈는데 답 없이 연결이 끝났다 — 「인스턴스가 없다」 가 아니다(W9b③ 적대 리뷰 2 회차: 페이지 대화상자에 막힌
 /// op 이 30 초 뒤 거둬지자 에이전트는 「maru 가 안 떠 있다」 를 받았다). 서버는 시한(30 초)이 지난 요청을 답 없이 닫는다.
 pub fn noAnswer(stderr: *std.Io.Writer) error{UnknownCommand} {
-    stderr.writeAll("error: maru did not answer this request (it gave up after its time limit, or the app closed)\n") catch {};
+    // 서버가 연결 수 상한(16)을 넘은 연결도 hello 만 보내고 닫는다 — 시한·앱 종료와 가를 수 없어 셋을 다 적는다(W9b③ 적대 리뷰 3 회차).
+    stderr.writeAll("error: maru closed the connection without answering this request (it gave up after its time limit, had too many connections open, or the app closed)\n") catch {};
     stderr.flush() catch {};
     return error.UnknownCommand;
 }
@@ -227,4 +228,12 @@ test "컨트롤 소켓 gate는 Windows에서만 닫히고, 닫혔으면 이유�
     } else {
         try std.testing.expect(gate == null);
     }
+}
+
+test "W9b③ 적대 리뷰 3 회차: 「답 없음」 은 연결 수 초과도 적는다 — 서버는 상한을 넘은 연결에 hello 만 보내고 닫는다" {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try std.testing.expectEqual(error.UnknownCommand, noAnswer(&w));
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "too many connections") != null);
+    try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "time limit") != null);
 }

@@ -1216,6 +1216,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             };
             // wait 이 찾은 것이 여럿과 맞는다(W9b②-3) — 같은 로케이터로 누르면 「여럿」 으로 실패한다.
             if (boolField(result.get("ambiguous"))) try w.writeAll("warning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n");
+            // 입력 뒤 페이지가 대화상자를 띄웠다(W9b③ 적대 리뷰 3 회차) — 입력은 갔다: 다시 하면 두 번 간다.
+            if (boolField(result.get("dialog"))) try w.writeAll("warning: the page opened a dialog right after the input — the input reached the page, do not repeat it; answer the dialog in that tab\n");
         },
         .value => try w.print("{s}\n", .{strField(result.get("value"))}), // get-local-storage → {value}
         // W9b③: 연 탭의 id(다음 명령의 --surface)와 주소. 시한 안에 다 불러오지 못했으면 경고 한 줄(탭은 열렸다).
@@ -2797,4 +2799,11 @@ test "render: open(W9b③) 은 id·주소(다 못 불렀으면 경고), close �
         try testing.expectEqual(c.ok, try renderResponse(testing.allocator, c.bytes, c.kind, &w));
         try testing.expectEqualStrings(c.want, w.buffered());
     }
+}
+
+test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄웠으면 ok 뒤에 「다시 하지 말라」 경고 한 줄" {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"dialog\":true}}", .ok, &w));
+    try testing.expectEqualStrings("ok\nwarning: the page opened a dialog right after the input — the input reached the page, do not repeat it; answer the dialog in that tab\n", w.buffered());
 }

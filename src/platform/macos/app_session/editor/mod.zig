@@ -8361,35 +8361,7 @@ pub fn writeDocumentBytes(
     bytes: []const u8,
     expect_disk: ?u64,
 ) AppSession.FilePanelWriteError!void {
-    // **이유를 지우지 않는다**(§3.9d). 예전에는 다섯 자리가 전부 `catch return false` 였고, 그래서
-    // 읽기 실패·외부 변경·쓰기 실패가 한 개의 `false` 로 뭉개져 사용자는 `⌘S` 를 누르고 아무 일도
-    // 없는 것을 봤다. 아래 층이 이미 `FilePanelWriteError` 를 내므로 **새 어휘를 짓지 않고 올린다**.
-    var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return error.NotFound;
-    defer pinned.dir.close(self.io);
-
-    var original = pinned.dir.openFile(self.io, pinned.basename, .{ .mode = .read_only }) catch return error.NotFound;
-    defer original.close(self.io);
-    const stat = original.stat(self.io) catch return error.NotFound;
-
-    // **지금 디스크에 있는 것의 해시를 넘긴다.** 0을 넘겨 "검사를 건너뛴다"고 적었다가 실제
-    // 구현을 보니 **무조건 비교**한다 — 0이면 정상 파일이 늘 `ExternalConflict`가 된다.
-    // 그 검사가 막는 것은 *"temp를 쓰는 동안 남이 같은 inode를 in-place로 고쳤다"*이므로,
-    // 쓰기 직전에 읽은 값을 기준으로 두는 것이 맞다.
-    const expected = try AppSession.stableOpenedFileHash(self.io, original, stat.inode);
-    // ⚠️ **여기가 「연 뒤 바뀌었나」를 묻는 유일한 자리다.** 아래 `writePinnedFilePanel` 의 검사는
-    // 「쓰는 동안 바뀌었나」라 이 질문에 답하지 않는다 — 그래서 예전에는 밖에서 고친 파일 위에
-    // 조용히 덮어썼다(적대적 검증에서 판정자가 그것을 드러냈다).
-    if (expect_disk) |want| if (want != expected) return error.ExternalConflict;
-
-    try file_panel_ops.writePinnedFilePanel(
-        self.io,
-        pinned.dir,
-        pinned.basename,
-        original,
-        stat,
-        expected,
-        bytes,
-    );
+    return @import("local_save.zig").writeBytes(self.io, path, bytes, expect_disk);
 }
 
 /// 편집기 문서를 저장한다. **실패하면 이유를 돌려준다**(§3.9d) — 예전에는 `bool` 이라 읽기 전용·쓰기
@@ -8441,51 +8413,12 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
         _ = app_session_mod.editor_untitled_save_ops.begin(self, term);
         return error.AskName;
     }
-    const path = term.rt.editorDocument().path orelse return error.NotAnEditor;
-
-    const bytes = doc.file.saveBytes(self.allocator) catch return error.WriteFailed;
-    // **쓴 내용이 무엇이었는지** 기억해 둔다 — 아래에서 clean 판정에 쓴다.
-    const saved_content = doc.file.content;
-    defer self.allocator.free(bytes);
-
-    // **상한은 §3.11 이 정한 그것이다** — 쓰기 앞에서 잰다(뒤에서 재면 이미 쓴 뒤다).
-    if (bytes.len > maru.session.file_panel_bridge.max_file_bytes) return error.TooLarge;
-    // **묻는 것과 안 묻는 것이 같은 꼬리를 쓴다** — 덮어쓰기에 자기 쓰기 경로를 주면 지문 갱신·clean
-    // 판정·LSP 통지·마커 경고가 두 벌이 되고, 한쪽이 낡는다.
-    try writeDocumentBytes(self, path, bytes, switch (guard) {
-        .cas => doc.disk_hash,
-        .overwrite => null,
-    });
-
-    // **여기서 clean이 된다.** 쓰기가 성공한 그 순간의 내용이 곧 디스크 내용이다.
-    //
-    // **`bytes`가 아니라 `content`의 해시다** — `bytes`에는 BOM이 붙어 있고(§3.5 원본 보존)
-    // 편집기가 든 내용에는 없다. `bytes`로 재면 BOM 있는 파일이 저장 직후에도 dirty로 남는다.
-    //
-    // **쓰기 뒤에 읽는다.** 쓰는 동안 사용자가 더 칠 수 있으므로(§1의 "저장 중 재편집은 dirty를
-    // 유지한다") 지금 내용이 방금 쓴 것과 다를 수 있고, 그러면 dirty로 남는 것이 **맞다**.
-    // 그래서 저장 시작 시점이 아니라 **끝난 뒤**의 내용을 재면 안 된다 — `saved_bytes`가 그것을
-    // 위해 남아 있다.
-    // **백업도 여기서 사라진다**(§3.10) — clean 이 되는 순간을 그 모듈이 한 자리로 모은다(신원은 그대로다).
-    app_session_mod.editor_backup_ops.markClean(self, term, saved_content, null);
-    // **디스크 지문도 갱신한다** — 방금 쓴 것이 곧 파일 내용이다. 안 갱신하면 두 번째 저장이 자기가
-    // 쓴 것을 「남이 바꿨다」로 읽는다.
-    term.rt.editorDocument().opened.?.disk_hash = contentHash(bytes);
-    self.metal_dirty = true;
-    // **서버에 저장을 알린다**(§8.2k) — rustc 진단은 저장에만 다시 돌므로, 안 알리면 고친 오류가 다시 열 때까지 남는다. 디스크 쓰기가
-    // 성공한 뒤이고, 실은 본문은 **방금 쓴 것**(`saved_content` — 쓰는 동안 더 친 것은 아직 저장이 아니다; 쓰기가 동기라 오늘은
-    // `doc.file.content` 와 같은 값이다 — 적대적 B6: 등가, 뜻으로 둔다). 서버가 없으면 줄 서지 않는다.
-    _ = lsp_client.noteSaved(self, term, saved_content);
-    // **마커가 남았으면 말한다**(S2 — docs/editor-merge-conflicts.md §5). 저장을 막지는 **않는다**:
-    // 마커를 남긴 채 저장하는 것은 정당한 중간 상태다(반쯤 고치다 멈추는 흐름이 있다). 막아야 하는
-    // 것은 **모른 채** 커밋하는 일이고, 그것을 막는 수단은 「말하는 것」이다 —
-    // `editor-surface-dock.md` 가 충돌 행에 `+` 를 두지 않은 이유로 든 바로 그 사고다.
-    //
-    // **`scan` 과 같은 판정을 쓴다**(`hasUnresolved`) — 여기서 「`<<<<<<<` 가 보이면」으로 따로 재면
-    // 닫히지 않은 마커가 든 멀쩡한 파일마다 경고가 뜬다.
-    if (maru.session.editor.conflict.hasUnresolved(term.rt.editor_lines)) {
-        self.showNoticeKey(.editor_conflict_markers_remain);
-    }
+    var prepared = try @import("local_save.zig").Prepared.init(self, term, guard);
+    defer prepared.deinit(self.allocator);
+    try prepared.write(self.io);
+    // 세 단계 사이에 이벤트를 실행하지 않는다. 비동기 저장 정책은 후속 설계의 범위다.
+    const finished = prepared.finish(self, term);
+    std.debug.assert(finished);
 }
 
 /// **커서마다 텍스트를 넣는다** — 타이핑의 실제 진입점(§3.3).
@@ -62854,4 +62787,81 @@ test "RPBU10 선택한 열린 문서와 닫힌 파일의 일부 일치만 함께
     try testing.expectEqualStrings("foo B", b.rt.editorDocument().opened.?.file.content);
     try batchApplyDisk(&fx, "disk.txt", "bar foo disk");
     try testing.expectEqual(@as(usize, 0), b.rt.editorDocument().history.undo_len);
+}
+
+test "LSAVE1 저장 자료는 재편집 뒤에도 살아 있고 완료는 저장한 본문과 대상만 반영한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |bom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "save.txt", "old");
+        term.rt.editorDocument().opened.?.file.format.has_bom = bom;
+        for (0..2) |fail_index| {
+            var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+            const original_allocator = fx.session.allocator;
+            fx.session.allocator = failing.allocator();
+            const failed = @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+            fx.session.allocator = original_allocator;
+            try testing.expectError(error.WriteFailed, failed);
+            try testing.expectEqualStrings("old", term.rt.editorDocument().opened.?.file.content);
+        }
+
+        var prepared = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+        defer prepared.deinit(testing.allocator);
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, term, "!"));
+        try testing.expectEqualStrings("old", prepared.content());
+        const path = term.rt.editorDocument().path;
+        const different_path = try testing.allocator.dupe(u8, "different.txt");
+        defer testing.allocator.free(different_path);
+        term.rt.editorDocument().path = different_path;
+        const matches_wrong_path = prepared.matches(term);
+        term.rt.editorDocument().path = path;
+        try testing.expect(!matches_wrong_path);
+        try testing.expect(!prepared.finish(fx.session, term));
+        try prepared.write(fx.session.io);
+        try testing.expect(prepared.finish(fx.session, term));
+        try testing.expect(!prepared.finish(fx.session, term));
+        try testing.expectError(error.WriteFailed, prepared.write(fx.session.io));
+        try testing.expect(isDirty(term));
+        try testing.expectEqualStrings("old!", term.rt.editorDocument().opened.?.file.content);
+        try saveDocument(fx.session, term);
+        try testing.expect(!isDirty(term));
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "save.txt", .data = "outside" });
+        var conflict = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+        defer conflict.deinit(testing.allocator);
+        try testing.expectError(error.ExternalConflict, conflict.write(fx.session.io));
+        try testing.expectEqualStrings("old!", conflict.content());
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "save.txt", .data = conflict.bytes });
+        try conflict.write(fx.session.io);
+        term.rt.editorDocument().path = different_path;
+        const finished_wrong_path = conflict.finish(fx.session, term);
+        term.rt.editorDocument().path = path;
+        try testing.expect(!finished_wrong_path);
+        try testing.expect(!conflict.finish(fx.session, term));
+        term.rt.editor_selection = editor_selection.Selection.at(0);
+        try testing.expect(insertText(fx.session, term, maru.session.editor.document.utf8_bom));
+        var literal_bom = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+        defer literal_bom.deinit(testing.allocator);
+        try testing.expectEqualStrings("\xef\xbb\xbfold!", literal_bom.content());
+    }
+}
+
+test "LSAVE2 동일 주소에서도 문서 세대와 경로가 바뀌면 완료 신원이 다르다" {
+    const Token = maru.session.editor.save_ops.Token;
+    const base: Token = .{ .document = 1, .identity = .{ .owner = 2, .slot = 3, .generation = 4 }, .path = "a.txt" };
+    try std.testing.expect(base.matches(base));
+    for (0..6) |field| {
+        var current = base;
+        switch (field) {
+            0 => current.document += 1,
+            1 => current.identity.?.owner += 1,
+            2 => current.identity.?.slot += 1,
+            3 => current.identity.?.generation += 1,
+            4 => current.path = "b.txt",
+            5 => current.identity = null,
+            else => unreachable,
+        }
+        try std.testing.expect(!base.matches(current));
+    }
 }

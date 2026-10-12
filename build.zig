@@ -2118,9 +2118,9 @@ pub fn build(b: *std.Build) void {
     // 101 = 앞의 90(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯 +
     //       C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-8 여덟)에
     //       **U4a-1~U4a-13 열셋 + U4b-1~U4b-9 아홉 + U4c-1~U4c-5·U4c-8 여섯 + U4d-3~U4d-6 넷**을 더한 값이다(U4a 백업 · U4b 복원 · U4c 이름 없는 문서, §3.10).
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=134");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=142");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=134");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=142");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
     const untitled_step = b.step(
         "test-editor-untitled",
@@ -2145,9 +2145,9 @@ pub fn build(b: *std.Build) void {
     untitled_rule_tests.root_module.addAnonymousImport("maru_terminfo", .{ .root_source_file = b.path("terminfo/maru.terminfo") });
     const run_untitled_rule_tests = b.addRunArtifact(untitled_rule_tests);
     // 37 = UT1~UT4 넷 + **UB1~UB10 열**(백업 레코드 규칙 — §3.10) + **U4c-6·U4c-7 둘**(`untitled-term` 왕복·검증) + **U4d-1·U4d-2 둘**(`remote-doc-term`) + 이 그래프의 이름 없는 test 블록들(필터와 무관하게 컴파일된다).
-    run_untitled_rule_tests.addArg("--maru-expect-tests=39");
+    run_untitled_rule_tests.addArg("--maru-expect-tests=41");
     // ⚠️ **필터가 0 개를 골랐어도 「돌았다」로 읽히지 않게** 통과 수까지 못박는다(순수라 SKIP 이 없다).
-    run_untitled_rule_tests.addArg("--maru-expect-passed=39");
+    run_untitled_rule_tests.addArg("--maru-expect-passed=41");
     run_untitled_rule_tests.setCwd(b.path("."));
     untitled_step.dependOn(&run_untitled_rule_tests.step);
 
@@ -5658,6 +5658,16 @@ pub fn build(b: *std.Build) void {
     run_batch_coordinator.setCwd(b.path("."));
     b.step("test-editor-project-replace-batch-coordinator", "Run mixed source atomic model commit publication and save judges").dependOn(&run_batch_coordinator.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_coordinator.step);
+    const local_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LSAVE"} });
+    const run_local_save = b.addRunArtifact(local_save_tests);
+    run_local_save.setCwd(b.path("."));
+    run_local_save.addArg("--maru-expect-tests=6");
+    const local_save_step = b.step("test-editor-local-save", "Run local save preparation and completion judges");
+    local_save_step.dependOn(&run_local_save.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_local_save.addArg("--maru-expect-passed=6");
+        macos_only_test_step.dependOn(&run_local_save.step);
+    }
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });
     const run_batch_ui = b.addRunArtifact(batch_ui_tests);
     run_batch_ui.addArg("--maru-expect-tests=14");

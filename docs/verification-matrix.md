@@ -4270,3 +4270,5 @@ Undo 보존과 결과 집계, 성공 반복·닫힌 문서 거절을 검사한�
 프로젝트 바꾸기 적용·저장 성능은 [실측 기록](plans/editor-project-replace-performance.md)과
 `tools/editor-project-search-app/measure.py`로 독립 byte oracle·동일 binary·phase 순서·실제 저장/Undo를 확인한다.
 main queue 대기는 FPS가 아니며, 지연 주입은 실제 원격 파일시스템의 측정이 아니다.
+
+로컬 저장의 준비/쓰기/완료는 [분리 계획](plans/editor-local-save.md)의 LSAVE1과 기존 배치 회귀, 제품 저장 실패/재시도 하네스로 검증한다. 호출은 동기이며 비동기 정책과 성능 개선의 완료 증거가 아니다.

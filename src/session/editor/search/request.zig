@@ -4,7 +4,7 @@ const event = @import("event.zig");
 pub const Status = enum { running, complete, cancelled, partial, failed };
 pub const Limits = struct { matches: usize = 20_000, result_bytes: usize, event_bytes: usize };
 pub const Identity = struct { request: u64, root: u64, models: u64 };
-pub const DocumentIdentity = struct { owner: usize, slot: usize, generation: u64 };
+pub const DocumentIdentity = @import("../document_registry.zig").DocumentIdentity;
 pub const Source = union(enum) { disk, model: struct { document: DocumentIdentity, revision: u64, composition: u64 } };
 pub const Row = struct { source: Source, match: event.Match, root_index: usize = 0 };
 /// worker와 owner가 같은 root 상대 경로 축을 쓴다. 상위 이동·절대 경로는 받지 않는다.

@@ -4,6 +4,8 @@ const std = @import("std");
 const document_state = @import("document_state.zig");
 const history_links = @import("history/links.zig");
 
+/// 다른 호스트로 전달할 문서 신원이다. owner는 역참조하지 않는 process-local 식별값이다.
+pub const DocumentIdentity = struct { owner: usize, slot: usize, generation: u64 };
 pub const Handle = struct { slot: usize, generation: u64 };
 pub const Kind = enum { view, read, request };
 /// 복사본은 같은 참조다. 별도 수명이 필요하면 retain으로 새 참조를 발급받는다.

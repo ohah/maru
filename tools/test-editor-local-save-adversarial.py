@@ -28,7 +28,7 @@ for name,old,new in cases:
  run=subprocess.run(['mise','exec','--','zig','build','test-editor-local-save','-j2','--cache-dir',str(root/'cache')],cwd=source,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=300)
  (root/(name+'.log')).write_text(run.stdout)
  if old:assert run.returncode!=0 and 'FAIL (' in run.stdout,(name,run.stdout[-3000:])
- else:assert run.returncode==0 and 'All 17 tests passed' in run.stdout,(name,run.stdout[-3000:])
+ else:assert run.returncode==0 and 'All 28 tests passed' in run.stdout,(name,run.stdout[-3000:])
  results.append({'case':name,'mutation':old is not None,'exit_code':run.returncode})
  print(name+': verified',flush=True)
 path.write_text(original)

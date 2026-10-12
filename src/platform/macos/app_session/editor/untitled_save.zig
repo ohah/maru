@@ -529,6 +529,7 @@ fn writeAndAdopt(self: *AppSession, term: *Term, abs: []const u8, overwriting: b
     };
 
     const prev_backup = app_session_mod.editor_backup_ops.identity(term); // 이름이 붙기 «전»의 신원
+    term.rt.editorDocument().invalidateSaveTarget();
     term.rt.editorDocument().path = owned;
     term.rt.editorDocument().untitled = null; // **배타다**(§3.11) — 안 지우면 영원히 「저장 안 한 문서」다
     app_session_mod.editor_backup_ops.markClean(self, term, saved_content, prev_backup);

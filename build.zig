@@ -5694,12 +5694,31 @@ pub fn build(b: *std.Build) void {
     const local_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LSAVE"} });
     const run_local_save = b.addRunArtifact(local_save_tests);
     run_local_save.setCwd(b.path("."));
-    run_local_save.addArg("--maru-expect-tests=17");
+    run_local_save.addArg("--maru-expect-tests=28");
     const local_save_step = b.step("test-editor-local-save", "Run local save preparation and completion judges");
     local_save_step.dependOn(&run_local_save.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
-        run_local_save.addArg("--maru-expect-passed=17");
+        run_local_save.addArg("--maru-expect-passed=28");
         macos_only_test_step.dependOn(&run_local_save.step);
+    }
+    const save_pipeline_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.FOS", ".test.CSA", ".test.EXFB" } });
+    const run_save_pipeline = b.addRunArtifact(save_pipeline_tests);
+    run_save_pipeline.setCwd(b.path("."));
+    run_save_pipeline.addArg("--maru-expect-tests=10");
+    run_save_pipeline.step.dependOn(&install_fake_lsp.step);
+    b.step("test-editor-save-pipeline", "Run formatting and code action save pipeline judges").dependOn(&run_save_pipeline.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_save_pipeline.addArg("--maru-expect-passed=10");
+        macos_only_test_step.dependOn(&run_save_pipeline.step);
+    }
+    const save_conflict_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.C0a", ".test.C1a-", ".test.C1b-" } });
+    const run_save_conflicts = b.addRunArtifact(save_conflict_tests);
+    run_save_conflicts.setCwd(b.path("."));
+    run_save_conflicts.addArg("--maru-expect-tests=22");
+    b.step("test-editor-save-conflicts", "Run save conflict completion and choice regressions").dependOn(&run_save_conflicts.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_save_conflicts.addArg("--maru-expect-passed=22");
+        macos_only_test_step.dependOn(&run_save_conflicts.step);
     }
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });
     const run_batch_ui = b.addRunArtifact(batch_ui_tests);

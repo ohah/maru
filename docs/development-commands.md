@@ -1496,7 +1496,7 @@ Metal readback에서 네 파일 저장·연결 Undo·다시 저장 및 오른쪽
 
 `python3 tools/test-editor-local-save-worker-adversarial.py`는 worker의 실제 실패 경로와 정상/복원 대조군을 격리 사본에서 실행하고 결과 JSON과 로그를 출력한 임시 디렉터리에 남긴다.
 
-로컬 저장 gate에는 LSAVEQ1~6의 요청 큐·완료 승인·성공 CAS 기준 인계·실패 보존·예산·대상 수명 검사도 포함된다. 큐는 아직 사용자 저장 경로에 연결하지 않았다.
+로컬 저장 gate에는 LSAVEQ1~6의 요청 큐·완료 승인·성공 CAS 기준 인계·실패 보존·예산·대상 수명 검사도 포함된다. 일반 로컬 문서의 사용자 저장 연결 범위와 남은 단계는 [비동기 저장 계획](plans/editor-local-save-async.md)을 따른다.
 
 `python3 tools/test-editor-local-save-queue-adversarial.py`는 성공 기준 인계 누락·실패 기준 인계·오래된 요청 합류·실행 중 예산 누락·대상 epoch 무시·동적 큐에 임의 상한 추가·worker 시작 실패 이유 유실의 변이를 격리 사본에서 실제 실행해 검출하고 정상/복원 대조군을 확인한다.
 
@@ -1510,3 +1510,7 @@ SSH mixed 재접속 검증은 `python3 tools/test-remote-agent-native.py --cli z
 `-Doptimize=ReleaseFast`도 같은 검사를 실행한다. 소유 loopback sshd에서 실제 CLI wrapper와
 AppSession drain/재시도/spawn 경로를 검사하며 사용자 SSH 설정과 실행 중 세션은 바꾸지 않는다.
 macOS의 `/usr/sbin/sshd` 실행이 가능한 환경에서 opt-in으로 실행한다. OS 화면 검증은 아니다.
+
+### 일반 로컬 사용자 저장 비동기 연결
+
+`mise exec -- zig build test-editor-local-save test-editor-save-pipeline test-editor-save-conflicts test-editor-project-replace-batch-ui -j4`와 `-Doptimize=ReleaseFast`는 요청 수명과 사용자 키 dispatch·code action/LSP·외부 format·기존 배치 저장 계약을 검증한다. `python3 tools/test-editor-save-command-adversarial.py`는 BOM 기준 혼동·동기 저장 순서 장벽 누락·오버레이 선점·닫힌 모델 완료 누락·조기 저장 성공 안내를 실제 테스트 실패와 정상/복원 대조군으로 검증한다. 헤드리스 판정은 실제 AppKit/물리 IME와 전체 batch 응답 개선을 대신하지 않는다. `zig build macos-editor-save-conflict-smoke`는 제품 ⌘S·충돌 선택·백업/복원 및 `quit-pending-save`의 미정산 요청 관측 직후 정상 종료와 최종 bytes/workspace/clean 백업을 검사한다.

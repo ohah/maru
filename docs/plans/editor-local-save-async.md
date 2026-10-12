@@ -4,8 +4,10 @@
 
 - worker 기반: 구현. 이름 있는 로컬 저장의 독립 bytes/path, 전용 I/O executor, 선할당 완료 슬롯, join 수명을 제공한다.
 - 요청 큐와 완료 승인 기반: 구현. 한 큐의 FIFO 실행·동일 요청 합류·성공 기준 인계·caller 예산·stale 대상 거부를 제공한다.
-- 사용자 저장·닫기·종료 연결: 구현 전. 2026-10-12 승인한 아래 계약으로 연결한다. 배치와 Save As·rename은 별도 계약이다.
-- 저장 응답 지연 개선: 아직 측정하지 않았다. 기존 호출은 계속 동기다.
+- 사용자 저장 연결: 부분 구현. 파일 패널 Entry가 없는 이름 있는 일반 로컬 편집기의 code action→format 뒤 저장을 앱 전역 큐에 연결했다.
+- 정상 종료 연결: 구현. main-actor pump로 저장 완료를 정산한 뒤 마지막 workspace/백업 캡처를 시작한다. 실제 AppKit에서 미정산 저장 요청 직후 종료를 요청하고 최종 bytes·workspace·clean 백업을 검증한다. 느린 파일 I/O 동안 timer 대기와 취소 경합의 제품 실측은 별도다.
+- 닫기의 저장 선택·배치 worker·연결된 파일 패널·원격·Save As·rename: 별도 단계. 기존 경로를 유지한다.
+- 저장 응답 지연 개선: 실제 제품 지연은 아직 측정하지 않았다. 사용자 일반 로컬 저장은 비동기이며, 기존 동기 API와 batch는 계속 완료까지 main에서 기다린다.
 
 ## 기반의 책임
 
@@ -76,3 +78,20 @@ LSAVEQ1~6은 동적 큐의 64개 독립 요청·등록 OOM 보존과 실제 work
 - Zed 창 닫기/앱 종료: [Workspace](https://github.com/zed-industries/zed/blob/93d745668805029476e6d7fbb19652116fed51de/crates/workspace/src/workspace.rs)의 prepare_to_close는 save_all_internal을 await한다. hot exit가 허용되면 미저장 항목을 DB에 serialize하고 실패/미지원 항목은 저장 확인으로 남긴다. 원본 파일 저장을 강제하는 동작과 백업 직렬화를 구분한다.
 
 2026-10-12 사용자는 닫기 확인 유지·저장 선택의 완료 대기와 dirty 재검사·정상 종료의 진행 중 쓰기 보호를 승인했다. 이어 동적 큐와 할당 실패 시 저장 실패 안내도 승인했다. 위 소스 확인을 실제 제품 UI 실행 검증으로 바꾸어 적지 않는다. Save As/rename의 별도 계약과 실제 UI 연결은 아직 구현 완료가 아니다.
+
+
+## 사용자 저장 coordinator 연결
+
+`editor/save/owner.zig::Owner`는 각 등록·합류 발신자의 origin과 registry request lease를 main actor에서 보존한다. bytes/path는 `Prepared.initWithAllocator`로 coordinator allocator에서 준비한다. worker에는 모델 참조를 넘기지 않는다. 준비/등록 실패에서는 임시 참조와 자료를 해제하며 본문·Undo·선택은 바꾸지 않는다. ack 승인 전에 참조를 풀지 않는다.
+
+`editor/save/dispatch.zig`는 이름 있는 일반 로컬 편집기의 사용자 저장을 앱 전역 단일 큐에 보낸다. 현재 연결은 `term.file_entry == null`인 일반 문서에 한정한다. 연결된 파일 패널·diff·원격·이름 없는 문서는 기존 저장 계약을 유지한다. 완료 시 origin window generation/surface와 실제 문서 신원으로 살아 있는 뷰를 다시 찾는다. 마지막 뷰가 사라져도 요청 모델은 남으며 `Queue.applyRetained`가 저장 기준을 반영한 뒤 같은 요청의 참조를 모두 해제한다. 같은 경로의 새 독립 문서에 완료를 적용하지 않는다.
+
+`State.save_target_epoch`는 본문 개정과 별개다. 본체/대상을 해제하거나 이름 있는 대상으로 바인딩할 때 무효화하며, 상한에 이른 epoch의 새 등록은 거절한다. 뷰를 닫는 것만으로 살아 있는 요청 모델의 epoch를 바꾸지 않는다. ordinary typing과 Undo도 epoch를 바꾸지 않는다. 모델에 저장 기준을 반영하는 `save_ops.markSaved`를 기존 backup 완료와 공유한다.
+
+실제 성공만 logical saved hash와 raw disk hash를 옮긴다. 저장 중 추가 편집은 dirty로 남고 Undo를 유지한다. 완료 알림은 late response 경로를 사용한다. 외부 충돌 확인은 다른 오버레이를 닫지 않고, 해당 모델/epoch가 여전히 유효하고 오버레이가 비었을 때 표시한다. 기존 저장 충돌 상자만 열린 경우에는 기존 C1a 재진입 계약에 따라 마지막에 실패한 문서로 갱신하며, 다른 모달·토스트·이름 입력창은 선점하지 않는다. LSP·외부 포매터의 실패·시간 초과·낡은 결과 안내에 붙는 「저장됨」도 등록 시점이 아니라 실제 성공 뒤에 표시한다. 외부 포매터의 기존 64바이트 이름과 160바이트 진단을 요청 안에 복사해 결과 해제 뒤 빌린 메모리가 남지 않으며, 저장 실패 때는 성공 안내를 게시하지 않는다.
+
+기존 `saveDocumentGuarded` caller는 큐 등록을 완료로 오해하지 않는다. 동기 caller가 로컬 파일을 쓰기 전에 기존 앱 전역 큐를 정산하고 최신 disk 기준으로 준비한다. 이 동기 경로는 main을 기다리게 하며 batch 응답 개선의 완료 증거가 아니다. 전용 async batch 연결은 후속 단계다.
+
+AppKit은 `maru_macos_editor_save_pending_requests`로 main-actor 완료를 pump한다. 정상 종료는 저장을 먼저 정산한 뒤 final workspace checkpoint에 진입하고, checkpoint를 생략하는 종료 경로도 파일 저장과 프로젝트 검색 worker가 남았으면 `terminateLater`로 기다린다. 이 getter는 main actor 전용이며 파일 I/O가 영원히 멈추면 종료 대기도 끝난다는 보장은 없다. 강제 종료/전원 손실을 보장하지 않는다.
+
+검증은 `test-editor-local-save`의 LSAVEL1~5와 LSAVEA1~6이 요청 모델 수명·참조 정산·OOM 보존·대상 무효화·실제 사용자 키 dispatch·추가 편집·외부 충돌·동기 caller 순서·완료 전 성공 안내 거부·마지막 뷰 닫기를 검사한다. `test-editor-save-pipeline`은 기존 code action/LSP·외부 포매터/format/didSave 회귀다. `test-editor-save-conflicts`는 기존 충돌 확인·재진입·덮어쓰기·다시 읽기·비교의 완료 후 동작을 검사한다. 이 헤드리스 테스트는 물리 IME/AppKit 증거가 아니다. 제품 `macos-editor-save-conflict-smoke`는 NSEvent ⌘S·충돌 행동·백업/복원과 `quit-pending-save`의 미정산 요청 관측→정상 AppKit 종료→최종 원본 bytes·workspace·백업 정리를 검사한다. 강제로 지연한 OS 파일 쓰기의 대기/취소와 물리 IME는 별도다.

@@ -38,22 +38,7 @@ pub const Started = struct { id: u64, name: Name };
 
 /// 포매터의 이름 사본(알림 — 시한·실패). 사용자 명령의 이름은 설정 문자열을 빌리는데, 기다리는 사이 설정을 다시 읽으면 그 메모리가
 /// 사라진다 — 그래서 기다림 자리에는 사본을 둔다.
-pub const Name = struct {
-    buf: [64]u8 = undefined,
-    len: u8 = 0,
-
-    pub fn of(text: []const u8) Name {
-        var n: Name = .{};
-        const len = @min(text.len, n.buf.len);
-        @memcpy(n.buf[0..len], text[0..len]);
-        n.len = @intCast(len);
-        return n;
-    }
-
-    pub fn slice(self: *const Name) []const u8 {
-        return self.buf[0..self.len];
-    }
-};
+pub const Name = external_format.Name;
 
 /// 그 문서를 무엇으로 포맷하나 — 부작용 없는 판단(실행·알림·시트 없음). `prepare`(포맷)와 `showInfo`(정보 명령)가 같은 판단을 쓴다
 /// (두 벌이면 한쪽만 낡는다).
@@ -314,17 +299,19 @@ pub const Counters = struct { applied: u64 = 0, noop: u64 = 0, stale: u64 = 0, f
 pub var counters: Counters = .{};
 
 /// 외부 포매터의 결과를 그 문서에 적용한다(`format.zig` 가 결과를 가져와 부른다). `asked_version` 은 띄울 때의 revision, `then_save` 면
-/// 알림은 「저장했다」를 말한다(저장은 호출자가 이 뒤에 한다). 결과는 호출자가 푼다.
+/// 저장 완료 뒤 게시할 안내를 반환한다. 사용자 명령 이름도 보존하며 결과는 호출자가 푼다.
 /// `asked_revision` 은 띄운 순간의 본문 revision(`opened.file.revision`).
-pub fn apply(self: *AppSession, term: *Term, name: []const u8, result: *const format_process.Result, asked_revision: u64, then_save: bool) void {
+pub fn apply(self: *AppSession, term: *Term, name: []const u8, result: *const format_process.Result, asked_revision: u64, then_save: bool) ?maru.editor_save_notice.Success {
     switch (result.outcome) {
         .timeout => {
             counters.timeouts += 1;
-            self.showResponseNotice(if (then_save) .fmt_external_timeout_saved else .fmt_external_timeout, &.{.{ .s = name }});
+            if (then_save) return .external(.fmt_external_timeout_saved, name, null);
+            self.showResponseNotice(.fmt_external_timeout, &.{.{ .s = name }});
         },
         .too_large, .spawn_failed => {
             counters.failed += 1;
-            self.showResponseNotice(if (then_save) .fmt_external_failed_saved else .fmt_external_failed, &.{ .{ .s = name }, .{ .s = @tagName(result.outcome) } });
+            if (then_save) return .external(.fmt_external_failed_saved, name, @tagName(result.outcome));
+            self.showResponseNotice(.fmt_external_failed, &.{ .{ .s = name }, .{ .s = @tagName(result.outcome) } });
         },
         .exited => |e| {
             log.info("{s}: exit {?d} in {d} ms ({d} bytes)", .{ name, e.code, result.elapsed_ms, e.stdout.len });
@@ -332,28 +319,35 @@ pub fn apply(self: *AppSession, term: *Term, name: []const u8, result: *const fo
                 counters.failed += 1;
                 var line_buf: [160]u8 = undefined;
                 const why = firstLine(e.stderr, e.code, term.rt.editorDocument().path orelse "", &line_buf);
-                return self.showResponseNotice(if (then_save) .fmt_external_failed_saved else .fmt_external_failed, &.{ .{ .s = name }, .{ .s = why } });
+                if (then_save) return .external(.fmt_external_failed_saved, name, why);
+                self.showResponseNotice(.fmt_external_failed, &.{ .{ .s = name }, .{ .s = why } });
+                return null;
             }
-            const doc = term.rt.editorDocument().opened orelse return;
+            const doc = term.rt.editorDocument().opened orelse return null;
             // §3.6 revision 검증 — 띄운 뒤 문서가 바뀌었으면 결과가 그 문서의 것이 아니다.
             if (doc.file.revision != asked_revision) {
                 counters.stale += 1;
-                return self.showResponseNotice(if (then_save) .fmt_stale_saved else .fmt_stale, &.{});
+                if (then_save) return .{ .key = .fmt_stale_saved };
+                self.showResponseNotice(.fmt_stale, &.{});
+                return null;
             }
             // 빈 결과는 문서를 통째로 지운다 — 성공 코드여도 받지 않는다(포매터가 stdin 을 못 읽고 끝났을 수 있다).
             if (e.stdout.len == 0 and doc.file.content.len > 0) {
                 counters.failed += 1;
-                return self.showResponseNotice(if (then_save) .fmt_external_failed_saved else .fmt_external_failed, &.{ .{ .s = name }, .{ .s = "empty output" } });
+                if (then_save) return .external(.fmt_external_failed_saved, name, "empty output");
+                self.showResponseNotice(.fmt_external_failed, &.{ .{ .s = name }, .{ .s = "empty output" } });
+                return null;
             }
-            const changes = external_format.changesFor(self.allocator, doc.file.content, e.stdout) catch return;
+            const changes = external_format.changesFor(self.allocator, doc.file.content, e.stdout) catch return null;
             defer self.allocator.free(changes);
             if (changes.len == 0) {
                 counters.noop += 1;
-                return;
+                return null;
             }
             if (editor_ops.applyEditAsOneWithUndo(self, term, changes)) counters.applied += 1;
         },
     }
+    return null;
 }
 
 /// 실패 알림의 이유 한 줄 — stderr 에서 오류 문장을 고른다(제어 문자는 공백, 상한은 글자 경계). 없으면 종료 코드.

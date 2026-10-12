@@ -4271,8 +4271,9 @@ Undo 보존과 결과 집계, 성공 반복·닫힌 문서 거절을 검사한�
 `tools/editor-project-search-app/measure.py`로 독립 byte oracle·동일 binary·phase 순서·실제 저장/Undo를 확인한다.
 main queue 대기는 FPS가 아니며, 지연 주입은 실제 원격 파일시스템의 측정이 아니다.
 
-로컬 저장의 준비/쓰기/완료는 [분리 계획](plans/editor-local-save.md)의 LSAVE1과 기존 배치 회귀, 제품 저장 실패/재시도 하네스로 검증한다. 호출은 동기이며 비동기 정책과 성능 개선의 완료 증거가 아니다.
+로컬 저장의 준비/쓰기/완료는 [분리 계획](plans/editor-local-save.md)의 LSAVE1과 기존 배치 회귀, 제품 저장 실패/재시도 하네스로 검증한다. 기존 동기 API와 사용자 비동기 연결의 구분은 아래 단계와 [비동기 연결 계획](plans/editor-local-save-async.md)을 따른다.
 
-로컬 저장 worker 기반은 [비동기 연결 계획](plans/editor-local-save-async.md)의 LSAVEW1~5로 검증한다. 실제 CAS 쓰기·재편집 후 dirty·raw BOM·오류 보존·OOM/Busy 소유권·단일 완료·join을 검사한다. 사용자 저장은 계속 동기이며 종료/큐/watcher/UI 정책과 제품 응답 지연의 개선은 아직 검증 범위 밖이다.
+로컬 저장 worker 기반은 [비동기 연결 계획](plans/editor-local-save-async.md)의 LSAVEW1~5로 검증한다. 실제 CAS 쓰기·재편집 후 dirty·raw BOM·오류 보존·OOM/Busy 소유권·단일 완료·join을 검사한다. worker 기반 검사 자체는 종료/큐/watcher/UI 연결과 제품 응답 지연 개선의 증거가 아니다. 사용자 연결의 범위는 아래 검사를 따른다.
 
-저장 큐 기반은 같은 로컬 저장 gate의 LSAVEQ1~6으로 실제 성공/실패 후 CAS 인계·A→B→A·예산/할당/완료 소유권·대상 epoch·문서 slot 재사용·문서 간 격리를 검사한다. 동적 큐의 64개 독립 요청과 등록 OOM의 caller 소유권 보존도 같은 gate로 검사한다. 제품 ⌘S/watcher/닫기/배치 연결은 별도 단계이며, 동적 큐와 저장 실패 안내 정책은 승인됐으나 사용자 경로에 아직 연결하지 않았다.
+저장 큐 기반은 같은 로컬 저장 gate의 LSAVEQ1~6으로 실제 성공/실패 후 CAS 인계·A→B→A·예산/할당/완료 소유권·대상 epoch·문서 slot 재사용·문서 간 격리를 검사한다. 동적 큐의 64개 독립 요청과 등록 OOM의 caller 소유권 보존도 같은 gate로 검사한다. 일반 로컬 문서의 ⌘S 연결은 아래 사용자 저장 검사로 검증한다. watcher·닫기 저장 선택·배치 비동기 연결은 별도 단계다.
+요청 참조 수명과 일반 로컬 사용자 저장은 LSAVEL1~5/LSAVEA1~6로 검사한다. 사용자 키 dispatch 뒤 blocked writer 동안 추가 입력, 외부 충돌과 오버레이 보존, 마지막 뷰 닫기, 같은 경로 새 문서 격리, 동기 caller의 실제 완료/CAS 기준, 포맷 성공 안내 시점을 검증한다. `test-editor-save-pipeline`은 code action→LSP·외부 format→didSave 회귀를 검사하고 `test-editor-save-conflicts`는 충돌 확인·재진입·덮어쓰기·다시 읽기·비교의 완료 후 동작을 검사한다. 제품 `macos-editor-save-conflict-smoke`는 정상 저장·충돌 선택·백업/복원·미정산 저장 요청 직후 정상 AppKit 종료의 bytes/workspace/백업을 검사한다. 연결된 파일 패널·원격·배치 async·닫기 저장 선택·강제로 느린 I/O의 종료 대기/취소·물리 IME는 완료 범위 밖이다.

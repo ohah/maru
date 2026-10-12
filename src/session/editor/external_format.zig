@@ -17,6 +17,24 @@ const config_theme = @import("../../config/theme.zig");
 pub const Choice = config_theme.FormatterChoice;
 pub const Setting = config_theme.FormatterSetting;
 
+/// 기다림·저장 완료 안내가 공유하는 포매터 이름 사본. 설정을 다시 읽어도 빌린 문자열이 남지 않는다.
+pub const Name = struct {
+    buf: [64]u8 = undefined,
+    len: u8 = 0,
+
+    pub fn of(text: []const u8) Name {
+        var n: Name = .{};
+        const len = @min(text.len, n.buf.len);
+        @memcpy(n.buf[0..len], text[0..len]);
+        n.len = @intCast(len);
+        return n;
+    }
+
+    pub fn slice(self: *const Name) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
 /// 그 문서의 문법에 걸린 설정(설정의 언어 칸 — 문법 이름으로 찾는다; `none` 은 `auto`).
 pub fn settingFor(settings: []const Setting, g: language.Grammar) Setting {
     if (g == .none) return .{};

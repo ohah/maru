@@ -339,7 +339,8 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 229: `MetalFrame`(C `MaruAppHostMetalFrame`)에서 렌더러가 안 읽던 기하 넷(`sidebar_slot_height_px`·
 // `sidebar_header_height_px`·`titlebar_strip_px`·`sidebar_scroll_offset_px`)을 뺀다 — ABI 227 에서 draw 인자를 뺀 뒤에도
 // frame 필드로 남아 매 프레임 스탬프됐다. layout 이 바뀌므로(뒤 필드 offset 이동) 짝이 같이 올라간다.
-pub const abi_version: u32 = 229;
+// 230: 비동기 편집기 저장의 main-actor 완료 pump와 정상 종료 대기 getter를 추가한다. 구조체 레이아웃은 불변이다.
+pub const abi_version: u32 = 230;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -3844,6 +3845,11 @@ fn bindRecoveredEndedManifestOrdinals() void {
             ) orelse std.math.maxInt(u16);
         };
     }
+}
+
+/// 저장 coordinator가 살아 있는 창과 뷰만 다시 찾는다. 이 목록의 포인터를 요청에 저장하지 않는다.
+pub fn editorSaveWindows() []const *AppSession {
+    return app_recovered_session_windows.items;
 }
 
 fn registerRecoveredSessionWindow(session: *AppSession) !void {
@@ -14550,7 +14556,7 @@ pub const AppSession = struct {
     }
 
     /// `anyModalOverlayOpen` 에서 `except` 하나를 뺀 것(`null` 이면 같다). 집합은 같은 `modalInputRole` 에서 파생한다.
-    fn modalOverlayOpenExcept(self: *const AppSession, comptime except: ?ChromeHostField) bool {
+    pub fn modalOverlayOpenExcept(self: *const AppSession, comptime except: ?ChromeHostField) bool {
         inline for (std.meta.fields(ChromeHostField)) |field| {
             if (comptime except != null and @as(ChromeHostField, @enumFromInt(field.value)) == except.?) continue;
             switch (comptime modalInputRole(@as(ChromeHostField, @enumFromInt(field.value)))) {
@@ -21294,6 +21300,7 @@ pub const AppSession = struct {
         // [계측: 프레임 타이밍] tick 단계별 wall-clock을 잰다(MARU_DEBUG 전용). defer가 단일 exit(단일 return)에서 로깅.
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
+        @import("app_session/editor/save/dispatch.zig").poll();
         if (is_macos) {
             @import("app_session/editor/search/owner.zig").poll(self);
             project_search_ops.pump(self);
@@ -24708,6 +24715,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        if (builtin.is_test and live_app_sessions == 1) @import("app_session/editor/save/dispatch.zig").cleanupForTests();
         // backend 에 맡긴 미룬 닫기를 **다른 무엇을 풀기 전에** 한 번 더 묻는다. 앱 quit 은 Session teardown 전에 재접속
         // job 을 취소하므로(`maru_macos_reconnect_product_shutdown`) 첫 창의 teardown 이 아래 앱 quit 의 routing
         // tombstone·연결 terminalize **앞에서** 앱 전역 목록을 닫는다. 그때도 정산이 「아직」인 runtime 은 그대로 남는다 —

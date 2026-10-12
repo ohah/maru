@@ -202,7 +202,7 @@ test "BI1: 못 읽어도 줄은 만든다 — 부재가 같은 혼동을 만들�
 }
 
 test "ABI v192 early app log redirect and pre-session exports match the C header" {
-    try std.testing.expectEqual(@as(u32, 229), abi_version);
+    try std.testing.expectEqual(@as(u32, 230), abi_version);
     const Location = session_mod.web_ops.LocationStatus;
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_POSITION), @intFromEnum(Location.position));
     try std.testing.expectEqual(@as(u32, c.MARU_OSR_LOCATION_UNAVAILABLE), @intFromEnum(Location.unavailable));
@@ -3624,6 +3624,13 @@ pub export fn maru_macos_app_session_project_search_cancel(session: ?*AppSession
 }
 pub export fn maru_macos_project_search_outstanding_workers() usize {
     return @import("app_session/editor/search/backend.zig").outstandingWorkers();
+}
+
+/// AppKit의 정상 종료 대기도 같은 main actor 완료 경로를 사용한다.
+pub export fn maru_macos_editor_save_pending_requests() usize {
+    const dispatch = @import("app_session/editor/save/dispatch.zig");
+    dispatch.poll();
+    return dispatch.requestCount();
 }
 
 pub export fn maru_macos_app_session_take_file_tree_watch_reset(session: ?*AppSession) u32 {

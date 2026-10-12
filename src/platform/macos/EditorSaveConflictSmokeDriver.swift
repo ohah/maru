@@ -17,6 +17,8 @@ final class EditorSaveConflictSmokeDriver {
         case externalConflict = "external-conflict"
         /// 밖에서 바뀌지 않은 파일에 `⌘S` — 조용히 저장되어야 한다(대조군).
         case cleanSave = "clean-save"
+        /// ⌘S 등록이 아직 정산되지 않은 상태에서 정상 종료를 요청해 쓰기와 마지막 checkpoint를 확인한다.
+        case quitPendingSave = "quit-pending-save"
         /// 백업 삭제가 막힌 fixture에서 복원된 문서의 새 편집을 저장한다.
         case residualSave = "residual-save"
         /// 충돌 상자에서 **덮어쓰기**(`D` — `alternate`) — 내 편집이 디스크에 있어야 한다(C1a).
@@ -88,11 +90,14 @@ final class EditorSaveConflictSmokeDriver {
         /// 저장 충돌 비교가 서 있나(C1b). **「비교」의 유일한 밖에서 보이는 결과**다 — 그 선택은
         /// 일부러 디스크를 건드리지 않으므로 파일만 보면 아무 일도 안 한 것과 구별되지 않는다.
         let compareReady: Bool
+        // 요청 등록은 완료가 아니다. 제품 완료 pump가 정산할 때까지 다음 프레임에서 다시 본다.
+        let savePending: Bool
     }
 
     /// **지금 앱을 종료해야 하나.** `quit-backup` 만 참이 된다 — 그 시나리오의 판정은 종료 경로에
     /// 있으므로, 스모크 시간(20 초)을 기다리면 그 사이 debounce 가 만기돼 **무엇이 썼는지** 갈리지 않는다.
-    var wantsPromptQuit: Bool { (scenario == .quitBackup || scenario == .restoreBackup || scenario == .residualSave) && stage == .done }
+    private(set) var pendingAtQuitRequest = false
+    var wantsPromptQuit: Bool { (scenario == .quitBackup || scenario == .restoreBackup || scenario == .residualSave || scenario == .quitPendingSave) && stage == .done }
 
     private(set) var stage: Stage = .notStarted
     private(set) var failure: String = ""
@@ -188,6 +193,11 @@ final class EditorSaveConflictSmokeDriver {
 
         case .typed:
             switch scenario {
+            case .quitPendingSave:
+                guard pressKey(.save) else { return fail("save_key_refused") }
+                guard let pending = probe(), pending.savePending else { return fail("save_not_pending_at_quit_request") }
+                pendingAtQuitRequest = true
+                stage = .done
             case .cleanSave, .residualSave:
                 stage = .saved
                 guard pressKey(.save) else { return fail("save_key_refused") }
@@ -212,8 +222,9 @@ final class EditorSaveConflictSmokeDriver {
             guard pressKey(.save) else { return fail("save_key_refused") }
 
         case .saved:
-            guard let now = diskContent() else { return fail("document_vanished_after_save") }
             guard let p = probe() else { return fail("probe_gone_after_save") }
+            if p.savePending { return }
+            guard let now = diskContent() else { return fail("document_vanished_after_save") }
             switch scenario {
             case .conflictOverwrite, .conflictReload, .conflictCompare:
                 // 세 시나리오의 **공통 전제**: 저장이 멈추고 상자가 떴다. 그것까지는
@@ -241,7 +252,7 @@ final class EditorSaveConflictSmokeDriver {
                 guard p.overlayOpen else { return fail("no_notice_after_conflict") }
                 // ⑶ **편집이 살아 있다** — dirty 로 남아야 한다.
                 guard p.dirty else { return fail("conflict_left_document_clean") }
-            case .quitBackup, .restoreBackup:
+            case .quitBackup, .restoreBackup, .quitPendingSave:
                 return fail("unexpected_saved_stage") // 이 둘은 저장하지 않는다
             case .cleanSave, .residualSave:
                 // 대조군: 저장이 되고 **조용하다**. 이 갈래가 없으면 「전부 거절」도 통과한다.
@@ -270,7 +281,7 @@ final class EditorSaveConflictSmokeDriver {
                 //    버리지 않는 선택이라 그 둘이 함께 참이어야 한다.
                 guard p.compareReady else { return fail("compare_did_not_open") }
                 guard now == contentOnDisk else { return fail("compare_touched_disk") }
-            case .externalConflict, .cleanSave, .residualSave, .quitBackup, .restoreBackup:
+            case .externalConflict, .cleanSave, .residualSave, .quitBackup, .restoreBackup, .quitPendingSave:
                 return fail("unexpected_answer_stage")
             }
             stage = .done

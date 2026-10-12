@@ -373,6 +373,12 @@ fn dispatch(
         return;
     }
 
+    // W9f: MCP stdio 서버 — 에이전트 설정에 `maru mcp` 로 넣는다(표준 출력은 MCP 메시지만).
+    if (std.mem.eql(u8, command, "mcp")) {
+        try maru.cli.mcp_run.run(io, allocator, stdout, stderr);
+        return;
+    }
+
     if (std.mem.eql(u8, command, "trace")) {
         try runTrace(io, allocator, &args, stdout, stderr);
         return;
@@ -16234,6 +16240,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  maru agent-hooks install|uninstall [options]
         \\  maru agent-hooks record --file=<absolute .ndjson path>
         \\  maru browser <command> [options]
+        \\  maru mcp
         \\  maru sessions list [--window <id>]
         \\  maru session get <id>
         \\  maru editor lsp trust list | revoke <path> [--volume <hex>] | forget <path> [--volume <hex>]
@@ -16275,6 +16282,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\  agent-events stream remote agent events over stdio
         \\  agent-hooks manage provider hooks and record native events (`agent-hooks --help`)
         \\  browser    control web surfaces, storage, input and captures (asks for confirmation; `browser --help`)
+        \\  mcp        serve the browser commands as MCP tools over stdio (for agents: `claude mcp add maru -- maru mcp`)
         \\  trace      anonymize a captured MARU_TRACE (paths/IPs/user@host/username) for fixture promotion
         \\
     );

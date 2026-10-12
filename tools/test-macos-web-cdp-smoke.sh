@@ -51,6 +51,10 @@
 #                   새 응답이 다 불린 뒤에야 ok(wait 만 ≥ 1 초). 이동이 진행 중이면 Chromium 의 DevTools 가 그 페이지로 가는 호출을 새 문서가
 #                   올 때까지 붙잡는다(실측 — 이동을 일으킨 클릭도 2.3 초, `nav_state.loading` 을 지운 변이도 이 시험을 지난다) — 옛 문서의
 #                   complete 를 읽을 틈이 없다. 그래서 이 경우는 loading 판정이 아니라 Chromium 이 지킨다
+#   mcp             (W9f) `maru mcp` 를 에이전트처럼 새 세션(제어 터미널 없음)·파이프로 띄워 — pane 신원이 통과해 탭을 열고, 진짜로 누르고,
+#                   글 `--help` 를 글로 넣고(도움말이 아니라), `-1` 식을 엔진에 보내고, 스크린샷은 PNG 그림, 틀린 인자 이름은 거절, 닫는다.
+#                   표준 출력은 JSON-RPC 줄뿐이고 입력 끝에 0 으로 끝난다
+#   repl            (W9f) `maru browser repl` 에 open → click(--surface 없이) → close 를 파이프로 — open 이 고른 탭에 명령이 간다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -154,6 +158,66 @@ printf '<!doctype html><title>frm</title><form onsubmit="new Image().src=&#39;/h
 printf '<!doctype html><title>frma</title><form onsubmit="navigator.sendBeacon(&#39;/hit?dsubmit-&#39;+location.search.slice(1));alert(&#39;sent&#39;);return false"><input id=q aria-label=Q style="position:absolute;left:30px;top:30px"></form>' > "$root/www/frma.html"
 printf '<!doctype html><title>shr</title><button id=pop style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="window.open(&#39;shr2.html&#39;,&#39;_blank&#39;)">Pop</button><button id=ok style="position:absolute;left:30px;top:100px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?okclick&#39;">OK</button>' > "$root/www/shr.html"
 printf '<!doctype html><title>shr2</title>shr2<script>new Image().src="/hit?shr2-load";setTimeout(function(){alert("popup")},800)</script>' > "$root/www/shr2.html"
+# W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
+printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
+# W9f: 에이전트가 MCP 서버를 띄우는 모양 — 새 세션(제어 터미널 없음)·파이프 입출력. 표준 출력의 줄은 모두 JSON-RPC 여야 한다.
+cat > "$root/mcp_drive.py" <<'PY'
+import base64, json, os, signal, subprocess, sys
+cli, base, out = sys.argv[1:4]
+signal.alarm(150)
+p = subprocess.Popen([cli, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+res = {"nosid": "yes" if os.getsid(p.pid) == p.pid else "no"}
+log = open(out + "/mcp-log", "w")
+def send(obj):
+    p.stdin.write((json.dumps(obj) + "\n").encode()); p.stdin.flush()
+def recv():
+    line = p.stdout.readline()
+    log.write(line.decode(errors="replace")[:400].rstrip() + "\n"); log.flush()
+    return json.loads(line)
+nid = [0]
+def call(name, args):
+    nid[0] += 1
+    send({"jsonrpc": "2.0", "id": nid[0], "method": "tools/call", "params": {"name": name, "arguments": args}})
+    r = recv()
+    assert r.get("id") == nid[0], r
+    return r
+def text(r):
+    c = r.get("result", {}).get("content", [{}])[0]
+    return c.get("text", ""), r.get("result", {}).get("isError")
+send({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "smoke", "version": "1"}}})
+res["proto"] = recv()["result"]["protocolVersion"]
+send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+send({"jsonrpc": "2.0", "id": "l", "method": "tools/list"})
+res["tools"] = str(len(recv()["result"]["tools"]))
+# 응답을 기다리지 않고 둘을 잇달아 — 하나씩 처리해 각자의 id 로 답한다.
+send({"jsonrpc": "2.0", "id": "p1", "method": "tools/call", "params": {"name": "browser_list", "arguments": {}}})
+send({"jsonrpc": "2.0", "id": "p2", "method": "tools/call", "params": {"name": "browser_get_url", "arguments": {"surface": 999999}}})
+a, b = recv(), recv()
+res["pipelined"] = "%s,%s,%s" % (a.get("id"), b.get("id"), "listed" if text(a)[0].startswith("surface ") else "nolist")
+t, e = text(call("browser_open", {"url": base + "/mcp.html"}))
+res["open"] = t.strip().replace("\n", " ")
+sid = t.split()[1] if t.startswith("opened ") and not e else "0"
+t, e = text(call("browser_click", {"surface": int(sid), "selector": "#mb"}))
+res["click"] = "%s %s" % (t.strip(), e)
+t, e = text(call("browser_type", {"surface": int(sid), "selector": "#mt", "text": "--help"}))
+res["type"] = "%s %s" % (t.strip()[:60].replace("\n", " "), e)
+t, e = text(call("browser_exec", {"surface": int(sid), "expression": "-1"}))
+res["exec"] = "%s %s" % (t.strip(), e)
+r = call("browser_screenshot", {"surface": int(sid), "scale": 0.25})
+c = r.get("result", {}).get("content", [{}])[0]
+res["shot"] = "png" if c.get("type") == "image" and base64.b64decode(c.get("data", ""))[:4] == b"\x89PNG" else "no " + json.dumps(r)[:200]
+r = call("browser_click", {"surface": int(sid), "selectr": "#mb"})
+res["badarg"] = "error" if "error" in r or r.get("result", {}).get("isError") else "no"
+t, e = text(call("browser_close", {"surface": int(sid)}))
+res["close"] = "%s %s" % (t.strip(), e)
+p.stdin.close()
+rest = p.stdout.read()
+res["rest"] = "empty" if rest == b"" else "extra"
+res["rc"] = str(p.wait(10))
+with open(out + "/mcp", "w") as f:
+    for k, v in res.items():
+        f.write("%s=%s\n" % (k, v))
+PY
 # W9b③: 숨은 채 불러온 문서 — 그 뒤 첫 마우스 누르기가 페이지에 닿는가(숨긴 탭은 새 문서를 그리지 않아 누르기가 사라졌다, 계획 공격 2 회차).
 printf '<!doctype html><title>fresh</title><button id=fb style="position:absolute;left:30px;top:30px;width:140px;height:40px" onclick="new Image().src=&#39;/hit?fb-&#39;+event.isTrusted">Fresh go</button><a id=tohop href="hop.html" style="position:absolute;left:30px;top:120px">hop</a>' > "$root/www/fresh.html"
 printf '<!doctype html><title>hop</title><button id=hop>Hop go</button><script>new Image().src="/hit?hopvis-"+document.visibilityState;setTimeout(function(){location.reload()},600)</script>' > "$root/www/hop.html"
@@ -468,6 +532,12 @@ c1=\$(date +%s)
 echo "\$((c1 - c0))" > "\$out/ag-close-ask-secs"
 "\$cli" browser close --surface "\$ag2" > "\$out/ag-close" 2>&1; echo "rc=\$?" >> "\$out/ag-close"
 "\$cli" browser list > "\$out/ag-list2" 2>&1
+# W9f: MCP 서버(새 세션 — 신원은 이 pane 의 foreground 조상으로 찾는다)와 repl.
+python3 "$root/mcp_drive.py" "\$cli" "http://127.0.0.1:$port" "\$out" > "\$out/mcp-py" 2>&1; echo "rc=\$?" >> "\$out/mcp-py"
+hit_seen mb-true && echo yes > "\$out/mb-hit" || echo no > "\$out/mb-hit"
+hit_seen mt-true---help && echo yes > "\$out/mt-hit" || echo no > "\$out/mt-hit"
+printf 'open --url http://127.0.0.1:$port/mcp.html?repl\nclick --selector "#rb"\nclose\n' | "\$cli" browser repl > "\$out/repl" 2>&1; echo "rc=\$?" >> "\$out/repl"
+hit_seen rb2-true && echo yes > "\$out/rb2-hit" || echo no > "\$out/rb2-hit"
 # 접속이 안 되는 주소 — 실패한 이동도 곧 끝이다(적대 리뷰 1 회차: 25 초를 다 기다렸다).
 f0=\$(date +%s)
 "\$cli" browser open --url "http://127.0.0.1:1/" > "\$out/ag-refused" 2>&1; echo "rc=\$?" >> "\$out/ag-refused"
@@ -650,6 +720,25 @@ grep -q 'already has 8 tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not 
 grep -q '^ok$' "$out/r3-da" && grep -q '^warning: the page opened a dialog' "$out/r3-da" && grep -q '^rc=0$' "$out/r3-da" && [ "$(cat "$out/r3-da-hit")" = yes ] || fail "a key whose submit opened an alert was not answered as delivered with a do-not-repeat warning ($(tr '\n' ' ' < "$out/r3-da") · hit $(cat "$out/r3-da-hit"))"
 grep -q 'showing a dialog' "$out/r3-fam" && [ "$(cat "$out/r3-fam-secs")" -le 5 ] || fail "an op on a tab whose same-origin popup showed an alert did not end at once with the dialog reason ($(cat "$out/r3-fam-secs")s · $(tr '\n' ' ' < "$out/r3-fam") · pop $(tr '\n' ' ' < "$out/r3-sh-pop"))"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
+# W9f
+grep -q '^rc=0$' "$out/mcp-py" || fail "the MCP driver failed ($(tr '\n' ' ' < "$out/mcp-py" | cut -c1-600) · $(tail -3 "$out/mcp-log" 2>/dev/null | tr '\n' ' ' | cut -c1-600))"
+mcp_get() { sed -n "s/^$1=//p" "$out/mcp"; }
+[ "$(mcp_get nosid)" = yes ] || fail "the MCP server was not started in a new session — the identity case proves nothing"
+[ "$(mcp_get proto)" = 2025-06-18 ] && [ "$(mcp_get tools)" -ge 18 ] || fail "MCP initialize or tools/list did not answer ($(tr '\n' ' ' < "$out/mcp"))"
+mcp_get open | grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html$' || fail "browser_open from an MCP server in a new session did not open a tab ($(mcp_get open))"
+[ "$(mcp_get click)" = "ok False" ] && [ "$(cat "$out/mb-hit")" = yes ] || fail "browser_click through MCP did not click for real ($(mcp_get click))"
+[ "$(mcp_get type)" = "ok False" ] && [ "$(cat "$out/mt-hit")" = yes ] || fail "browser_type through MCP did not type the text --help as text ($(mcp_get type) · $(grep 'GET /hit?mt' "$root/http.log" | tr '\n' ' '))"
+# exec 는 Chromium 탭에서 아직 -32008(W9a) — 식 `-1` 이 옵션으로 읽히지 않고 엔진까지 갔는지만 본다(W9a 뒤에는 결과 -1).
+mcp_get exec | grep -q '^-1 False$\|(-32008)' || fail "browser_exec through MCP did not send an expression starting with - to the engine ($(mcp_get exec))"
+# screenshot 도 Chromium 탭에서 아직 -32008(W9a) — W9a 에서 PNG 그림만 받게 조인다.
+mcp_get shot | grep -q '^png$\|(-32008)' || fail "browser_screenshot through MCP did not return a PNG image ($(mcp_get shot))"
+[ "$(mcp_get pipelined)" = "p1,p2,listed" ] || fail "two MCP calls sent back to back did not get their own answers in order ($(mcp_get pipelined))"
+[ "$(mcp_get badarg)" = error ] || fail "a misspelled MCP tool argument was not refused"
+[ "$(mcp_get close)" = "closed False" ] || fail "browser_close through MCP did not close the tab ($(mcp_get close))"
+[ "$(mcp_get rest)" = empty ] && [ "$(mcp_get rc)" = 0 ] || fail "maru mcp wrote extra output or did not exit 0 at the end of input ($(tr '\n' ' ' < "$out/mcp"))"
+echo "PASS mcp: an MCP server started in a new session (no terminal) opens, clicks, types --help as text, sends the expression -1 to the engine, gets an image or the engine's refusal for a screenshot, refuses a misspelled argument and closes, with only JSON-RPC on its output"
+grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html?repl$' "$out/repl" && grep -q '^ok$' "$out/repl" && grep -q '^closed$' "$out/repl" && grep -q '^rc=0$' "$out/repl" && [ "$(cat "$out/rb2-hit")" = yes ] || fail "repl did not open a tab, click it without --surface and close it ($(tr '\n' ' ' < "$out/repl"))"
+echo "PASS repl: open picked the new tab, click and close ran on it without --surface"
 echo "PASS agent-tabs: open answers after the first load with the tab behind the current one, its first click lands, a tab its page opens goes behind and is the agent's, a user tab cannot be closed, a page asking before leaving answers 'not closed' at once, a closed tab leaves the list, the ninth tab is refused"
 echo "PASS hidden-tab: on a hidden tab a role click presses for real (${1}s), hover reaches the page (${2}s), a wait sees a button made in an animation frame"
 echo "PASS text-label: text (hidden duplicate, split exact, sr-only → its button) and label (aria-hidden star excluded) act for real, a hidden checkbox gives a hint and its visible text toggles it, an ambiguous text gives refs, a card title is pressed itself, an off-page span does not hide its link, a shadow host's unrendered light text gives a hint, pointer-events:none text goes to its button, an aria-hidden icon is left out of exact text, display:contents text is found, a loading overlay and another button over the text are covered, a touch target (also in a shadow button) goes to its button, an off-page copy and a select do not break exact text, an sr-only toggle is turned on by its label, text around a link is not pressed on the link, a transparent radio over a plan card is chosen, an iframe over a card is covered, an unrendered match gives a hint, nth past the visible matches gives no hint"

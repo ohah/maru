@@ -50,12 +50,13 @@ pub fn run(
         },
         .request => |req| try runRequest(io, allocator, req, stdout, stderr),
         .screenshot => |shot| try runScreenshot(io, allocator, shot, stdout, stderr),
+        .repl => |r| try runRepl(io, allocator, r.surface, null, stdout, stderr),
     }
 }
 
-/// `maru browser` 파싱 실패 시 사유 + help를 stderr에 낸다(`writeSessionCliUsage` 동형).
-pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
-    const reason = switch (err) {
+/// 파싱 실패의 이유 한 줄(`writeUsage`·`maru mcp` 가 쓴다 — MCP 도구 결과에는 도움말 전체 대신 이것만).
+pub fn usageReason(err: browser.ParseError) []const u8 {
+    return switch (err) {
         error.MissingSubcommand => "a subcommand is required",
         error.UnknownSubcommand => "unknown subcommand",
         error.DuplicateSurface => "--surface may only be specified once",
@@ -94,6 +95,11 @@ pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
         error.UnknownOption => "unknown option",
         error.UnexpectedArgument => "too many arguments",
     };
+}
+
+/// `maru browser` 파싱 실패 시 사유 + help를 stderr에 낸다(`writeSessionCliUsage` 동형).
+pub fn writeUsage(stderr: *std.Io.Writer, err: browser.ParseError) !void {
+    const reason = usageReason(err);
     try stderr.print("maru browser: {s}\n\n", .{reason});
     try stderr.writeAll(browser.browser_help);
     try stderr.flush();
@@ -424,4 +430,241 @@ test "validateJsonSlice: 완결 strict JSON만 통과하고 빈 입력·깊은 �
     for (0..129) |_| try deep.append(a, '[');
     for (0..129) |_| try deep.append(a, ']');
     try std.testing.expect(!validateJsonSlice(a, deep.items));
+}
+
+// ── W9f: repl ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// fd 에서 줄을 하나씩 읽는다(`maru browser repl`·`maru mcp` 가 함께 쓴다). 상한을 넘는 줄은 `.too_long` 한 번으로 알리고 그 줄의
+/// 나머지는 버린다(끝없는 입력에 메모리를 쓰지 않게). 끝의 `\n` 없는 마지막 줄도 돌려준다.
+pub const LineReader = struct {
+    /// null 이면 표준 입력.
+    fd: ?std.c.fd_t = null,
+    max: usize,
+    pending: std.ArrayList(u8) = .empty,
+    /// 앞서 돌려준 줄의 바이트(다음 호출 때 버린다 — 돌려준 줄은 그때까지 유효).
+    consumed: usize = 0,
+    dropping: bool = false,
+    eof: bool = false,
+
+    pub const Item = union(enum) { line: []const u8, too_long };
+
+    pub fn deinit(self: *LineReader, gpa: std.mem.Allocator) void {
+        self.pending.deinit(gpa);
+    }
+
+    pub fn next(self: *LineReader, gpa: std.mem.Allocator) !?Item {
+        self.pending.replaceRangeAssumeCapacity(0, self.consumed, &.{});
+        self.consumed = 0;
+        while (true) {
+            if (std.mem.indexOfScalar(u8, self.pending.items, '\n')) |nl| {
+                const was_dropping = self.dropping;
+                self.dropping = false;
+                if (was_dropping or nl > self.max) {
+                    self.pending.replaceRangeAssumeCapacity(0, nl + 1, &.{});
+                    if (was_dropping) continue;
+                    return .too_long;
+                }
+                self.consumed = nl + 1;
+                return .{ .line = self.pending.items[0..nl] };
+            }
+            if (self.pending.items.len > self.max) {
+                self.pending.clearRetainingCapacity();
+                if (!self.dropping) {
+                    self.dropping = true;
+                    return .too_long;
+                }
+            }
+            if (self.eof) {
+                if (self.dropping or self.pending.items.len == 0) return null;
+                self.consumed = self.pending.items.len;
+                return .{ .line = self.pending.items };
+            }
+            var buf: [16 * 1024]u8 = undefined;
+            const n = std.c.read(self.fd orelse std.Io.File.stdin().handle, &buf, buf.len);
+            if (n < 0) {
+                if (std.posix.errno(n) == .INTR) continue;
+                self.eof = true;
+                continue;
+            }
+            if (n == 0) {
+                self.eof = true;
+                continue;
+            }
+            try self.pending.appendSlice(gpa, buf[0..@intCast(n)]);
+        }
+    }
+};
+
+/// repl 한 줄 상한 — type 의 글·exec 의 식이 가장 크다(`maru mcp` 와 같다).
+pub const repl_max_line_bytes: usize = 4 * 1024 * 1024;
+
+const repl_help =
+    \\repl: one `maru browser` command per line, without the `maru browser` prefix (quote with '…' or "…").
+    \\  use <id>     pick the tab; later commands may leave out --surface (`open` picks the tab it opened)
+    \\  help         show this help and the commands below
+    \\  exit, quit   leave (also end of input); the exit status is 1 if any command failed
+    \\
+;
+
+/// `maru browser repl` — 줄마다 하위 명령 하나를 돌린다. 한 명령이 실패해도 다음 줄로 간다(실패는 끝의 종료 상태로).
+/// 표준 입력이 터미널이면 표준 오류에 프롬프트(`maru browser[7]> `)를 낸다 — 표준 출력은 명령 출력만(파이프로 넘겨도 섞이지 않게).
+fn runRepl(io: std.Io, allocator: std.mem.Allocator, first: ?u64, fd: ?std.c.fd_t, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var current = first;
+    var any_failed = false;
+    const interactive = std.c.isatty(fd orelse std.Io.File.stdin().handle) == 1;
+    var reader: LineReader = .{ .fd = fd, .max = repl_max_line_bytes };
+    defer reader.deinit(allocator);
+    while (true) {
+        if (interactive) {
+            if (current) |id| try stderr.print("maru browser[{d}]> ", .{id}) else try stderr.writeAll("maru browser> ");
+            try stderr.flush();
+        }
+        const item = (try reader.next(allocator)) orelse break;
+        const line = switch (item) {
+            .too_long => {
+                try stderr.writeAll("error: line too long\n");
+                try stderr.flush();
+                any_failed = true;
+                continue;
+            },
+            .line => |l| l,
+        };
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        switch (try browser.replLine(arena_state.allocator(), line, current)) {
+            .empty => {},
+            .exit => break,
+            .help => {
+                try stdout.writeAll(repl_help);
+                try stdout.writeAll(browser.browser_help);
+                try stdout.flush();
+            },
+            .use => |id| current = id,
+            .bad_use => {
+                try stderr.writeAll("error: use needs one tab id (see `list`)\n");
+                try stderr.flush();
+                any_failed = true;
+            },
+            .unterminated_quote => {
+                try stderr.writeAll("error: unterminated quote\n");
+                try stderr.flush();
+                any_failed = true;
+            },
+            .command => |argv| if (!try replCommand(io, allocator, argv, &current, stdout, stderr)) {
+                any_failed = true;
+            },
+        }
+    }
+    if (any_failed) return error.UnknownCommand;
+}
+
+/// repl 명령 하나 — 성공이면 true. 파싱 실패는 도움말 전체 대신 이유 한 줄. `open` 은 출력을 받아 그대로 내고 연 탭을 고른다.
+fn replCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8, current: *?u64, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !bool {
+    const parsed = browser.parse(argv) catch |e| {
+        try stderr.print("error: {s}\n", .{usageReason(e)});
+        try stderr.flush();
+        return false;
+    };
+    switch (parsed) {
+        .help => {
+            try stdout.writeAll(repl_help);
+            try stdout.writeAll(browser.browser_help);
+            try stdout.flush();
+            return true;
+        },
+        .repl => {
+            try stderr.writeAll("error: already in repl\n");
+            try stderr.flush();
+            return false;
+        },
+        .request => |req| if (req == .open) {
+            var out: std.Io.Writer.Allocating = .init(allocator);
+            defer out.deinit();
+            const ok = if (runRequest(io, allocator, req, &out.writer, stderr)) true else |e| try replFailure(e);
+            try stdout.writeAll(out.written());
+            try stdout.flush();
+            if (ok) if (browser.openedId(out.written())) |id| {
+                current.* = id;
+            };
+            return ok;
+        } else {
+            runRequest(io, allocator, req, stdout, stderr) catch |e| return replFailure(e);
+            return true;
+        },
+        .screenshot => |shot| {
+            runScreenshot(io, allocator, shot, stdout, stderr) catch |e| return replFailure(e);
+            return true;
+        },
+    }
+}
+
+/// 명령 하나의 실패 — 출력이 닫히는 것은 repl 을 끝내고(쓸 곳이 없다), 그 밖은 오류 줄만 남기고 다음 줄로 간다.
+fn replFailure(e: anyerror) !bool {
+    if (e == error.WriteFailed or e == error.OutOfMemory) return e;
+    return false;
+}
+
+test "W9f LineReader: 줄·줄바꿈으로 끝나지 않는 마지막 줄·상한 넘는 줄은 한 번만 알리고 나머지를 버린다" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    const big = "x" ** 40;
+    const input = "a b\n\n" ++ big ++ big ++ "\nafter\n" ++ big ++ "\nlast";
+    try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
+    _ = std.c.close(fds[1]);
+    var r: LineReader = .{ .fd = fds[0], .max = 64 };
+    defer r.deinit(std.testing.allocator);
+    const gpa = std.testing.allocator;
+    try std.testing.expectEqualStrings("a b", (try r.next(gpa)).?.line);
+    try std.testing.expectEqualStrings("", (try r.next(gpa)).?.line);
+    try std.testing.expect((try r.next(gpa)).? == .too_long);
+    try std.testing.expectEqualStrings("after", (try r.next(gpa)).?.line);
+    try std.testing.expectEqualStrings(big, (try r.next(gpa)).?.line);
+    try std.testing.expectEqualStrings("last", (try r.next(gpa)).?.line);
+    try std.testing.expect((try r.next(gpa)) == null);
+}
+
+test "W9f LineReader: 읽기 조각을 넘어 상한을 넘는 줄 — 알림 한 번, 그 줄 끝까지 버린다" {
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    const gpa = std.testing.allocator;
+    const long = try gpa.alloc(u8, 40 * 1024);
+    defer gpa.free(long);
+    @memset(long, 'y');
+    // 파이프 버퍼(64 KiB 안)에 한 번에 — 읽기는 16 KiB 조각이라 상한(20 KiB)을 조각 사이에서 넘는다.
+    try std.testing.expectEqual(@as(isize, @intCast(long.len)), std.c.write(fds[1], long.ptr, long.len));
+    try std.testing.expectEqual(@as(isize, 3), std.c.write(fds[1], "\nok", 3));
+    _ = std.c.close(fds[1]);
+    var r: LineReader = .{ .fd = fds[0], .max = 20 * 1024 };
+    defer r.deinit(gpa);
+    try std.testing.expect((try r.next(gpa)).? == .too_long);
+    try std.testing.expectEqualStrings("ok", (try r.next(gpa)).?.line);
+    try std.testing.expect((try r.next(gpa)) == null);
+}
+
+test "W9f repl: 한 줄이라도 실패하면 종료 상태 1, exit 뒤 줄은 읽지 않는다, 오류 뒤에도 다음 줄로 간다" {
+    const gpa = std.testing.allocator;
+    const Case = struct { input: []const u8, fails: bool, out_has: ?[]const u8 = null, err_has: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .input = "use x\nhelp\n", .fails = true, .out_has = "use <id>", .err_has = "use needs one tab id" },
+        .{ .input = "help\nexit\nuse x\n", .fails = false, .out_has = "use <id>" },
+        .{ .input = "use 5\n# c\n\n", .fails = false },
+        .{ .input = "click --name 'x\n", .fails = true, .err_has = "unterminated quote" },
+        .{ .input = "click --bogus\nrepl\n", .fails = true, .err_has = "already in repl" },
+    }) |c| {
+        var fds: [2]std.c.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+        defer _ = std.c.close(fds[0]);
+        try std.testing.expectEqual(@as(isize, @intCast(c.input.len)), std.c.write(fds[1], c.input.ptr, c.input.len));
+        _ = std.c.close(fds[1]);
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(gpa);
+        defer err.deinit();
+        const r = runRepl(std.testing.io, gpa, null, fds[0], &out.writer, &err.writer);
+        if (c.fails) try std.testing.expectError(error.UnknownCommand, r) else try r;
+        if (c.out_has) |h| try std.testing.expect(std.mem.indexOf(u8, out.written(), h) != null);
+        if (c.err_has) |h| try std.testing.expect(std.mem.indexOf(u8, err.written(), h) != null);
+    }
 }

@@ -590,9 +590,9 @@ static void maru_fill_cell_quad(
         px_top = seam - t * 0.5f;
         px_bottom = seam + t * 0.5f;
     }
-    // 글리프 확대: 셀 quad를 중앙 기준으로 키운다. 헤더 줄0 아이콘(1.7×)은 slot도 목표 px(raster_*_px)라 큰
-    // 텍스처를 큰 quad에 1:1로 그려 선명; 사이드바 에이전트 심볼(1.1×)은 slot이 셀 크기라 stretch한다(약간
-    // 부드러우나 보조 심볼이라 무방). UV는 그대로라 글리프만 커진다. glyph_scale=1.0이면 무동작(일반 셀·커서).
+    // 글리프 확대: 셀 quad를 중앙 기준으로 키운다. 확대하는 것은 cell-raster role 아이콘(헤더·도크 토글)뿐이고,
+    // 그 slot은 목표 px(raster_*_px)로 구워져 큰 텍스처가 큰 quad에 1:1로 들어간다(선명). UV는 그대로라 글리프만
+    // 커진다. glyph_scale=1.0이면 무동작(일반 셀·커서·사이드바 셀).
     if (glyph_scale_x != 1.0f || glyph_scale_y != 1.0f) {
         const float cx = (px_left + px_right) * 0.5f;
         const float cy = (px_top + px_bottom) * 0.5f;
@@ -1476,24 +1476,21 @@ bool maru_metal_renderer_draw(
                 cell_h = ch;
                 sx_origin = glyph_pad;
             }
-            // 에이전트 심볼(✶→sparkle 0xF0007 / ◆→diamond 0xF0008, PUA SVG 합성 아이콘)은 width=2(2칸 slot)로 또렷이
-            // 그려지므로 stretch는 보조만(1.1×). **gutter col 0 아이콘만** 확대한다 — col 가드가 없으면 워크스페이스
-            // 이름/경로 텍스트에 같은 글리프가 들어가도 그 텍스트 셀(slot_id≠0·동일 codepoint)까지 1.1×로 안 늘어난다
-            // (app_session.zig 색칠 루프의 col 0 가드와 짝). 색은 agent 브랜드색(claude 코랄·codex 청록)을 foreground로.
-            const float gscale = (sc.slot_id != 0u && sc.col == 0u &&
-                                  (sc.codepoint == MARU_ICON_SPARKLE || sc.codepoint == MARU_ICON_DIAMOND))
-                                     ? 1.1f
-                                     : 1.0f;
-            // A(자간 분리): 사이드바 카드 글리프(slot_id≠0)도 투명 bg·확대 없는 일반 글자면 자연폭으로 — 터미널과 동일
-            // 이유(자간 squish 제거). 밴드(slot_id==0, sentinel UV)·에이전트 심볼(gscale 1.1)·불투명 bg는 combined 유지.
+            // 사이드바 글리프는 확대하지 않는다 — 에이전트 심볼(✶/◆)도 셀 크기 그대로다. 예전에는 여기서 「gutter col 0
+            // 의 sparkle·diamond」를 codepoint로 골라 1.1×로 늘렸는데, 세션 목록 아이콘이 인라인(col
+            // session_row_indent_cols)으로 옮겨 간 뒤(5b620d67d) col 0에는 접기 삼각만 와서 그 조건이 한 번도 참이 되지
+            // 않았다(layering §3.5 — 렌더러가 아이콘을 codepoint로 고르지 않는다). 키울 아이콘이 다시 생기면 헤더처럼
+            // Zig가 목표 px로 굽고 cell-raster role을 싣는다(`metal_cell_policy.h`).
+            // A(자간 분리): 사이드바 카드 글리프(slot_id≠0)도 투명 bg 일반 글자면 자연폭으로 — 터미널과 동일
+            // 이유(자간 squish 제거). 밴드(slot_id==0, sentinel UV)·불투명 bg는 combined 유지.
             MaruRendererVertex *sp = &vertices[(quad_index + i) * vertices_per_cell];
-            const bool sc_natural = (sc.slot_id != 0u && sc.u0 >= 0.0f && gscale == 1.0f && ((sc.background >> 24) & 0xffu) == 0u);
+            const bool sc_natural = (sc.slot_id != 0u && sc.u0 >= 0.0f && ((sc.background >> 24) & 0xffu) == 0u);
             if (sc_natural) {
                 const uint32_t sspan = (sc.width == 0u) ? 1u : sc.width;
                 const float sgw = (sc.atlas_width_px > 0u) ? (float)sc.atlas_width_px : cw * (float)sspan;
                 maru_fill_glyph_quad(sp, sc, sx_origin + (float)sc.col * cw, sgw, py_top, cell_h, drawable_w, drawable_h);
             } else {
-                maru_fill_cell_quad(sp, sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, gscale, gscale, divider_thickness_px);
+                maru_fill_cell_quad(sp, sc, sx_origin, cw, py_top, cell_h, drawable_w, drawable_h, 1.0f, 1.0f, divider_thickness_px);
             }
         }
     }

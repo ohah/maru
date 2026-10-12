@@ -15582,6 +15582,13 @@ test "LSPB22 신뢰 키는 실제 경로다 — 같은 저장소를 심링크 �
             return sa.phase == .ready;
         }
     }.f));
+    // 실제 서버의 ready 응답과 재판정된 alias 의 확인창은 서로 다른 pump 에서 도착할 수 있다.
+    // ready 만 기다리면 CI 부하에 따라 확인창이 서기 전 검사하므로 두 사건을 따로 기다린다.
+    try testing.expect(pumpLspUntil(&fx, 5000, &fx, struct {
+        fn f(c: *PaneFixture) bool {
+            return c.session.pending_confirm == .lsp_trust;
+        }
+    }.f));
     // `alias` 의 서버는 **띄우지 않았다** — 띄우기 직전에 키를 다시 풀어 다른 저장소(`other`)임을 보고, 그 저장소를 묻는다.
     for (fx.session.editor_lsp.clients.items) |c| if (std.mem.endsWith(u8, c.root, "/alias")) {
         try testing.expect(c.proc == null);

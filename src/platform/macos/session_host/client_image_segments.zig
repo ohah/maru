@@ -226,10 +226,15 @@ pub const Table = struct {
         var st: c.Stat = undefined;
         if (c.fstat(entry.fd, &st) != 0) return miss(.stat_failed, stream_id, ref);
         if (st.size < ref.byte_len) return miss(.too_small, stream_id, ref);
-        const mapped = posix.mmap(null, ref.byte_len, .{ .READ = true }, .{ .TYPE = .SHARED }, entry.fd, 0) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return miss(.map_failed, stream_id, ref),
-        };
+        // libc 를 직접 부른다 — `posix.mmap` 은 EINVAL 을 unreachable 로 둔다. host 결함으로 공유 메모리가 아닌 fd(데이터가 든
+        // pipe·socket, 디렉터리)가 오면 크기 하한은 지나도 macOS 의 mmap 이 EINVAL 을 낸다 — 앱을 죽이지 않고 「없음」으로 내린다.
+        const raw = c.mmap(null, ref.byte_len, .{ .READ = true }, .{ .TYPE = .SHARED }, entry.fd, 0);
+        if (raw == c.MAP_FAILED) {
+            const err: c.E = @enumFromInt(c._errno().*);
+            if (err == .NOMEM) return error.OutOfMemory;
+            return miss(.map_failed, stream_id, ref);
+        }
+        const mapped: [*]const u8 = @ptrCast(raw);
         // 매핑은 fd 와 무관하게 산다(§10) — fd 를 닫고 반환한다.
         self.releaseAt(index);
         return .{ .pixels = mapped[0..ref.byte_len] };
@@ -821,6 +826,38 @@ test "client image segments: a release that does not fit waits whole and arrives
     try testing.expectEqual(@as(usize, 2), count);
     try testing.expect(std.mem.indexOfScalar(u64, &got, 40) != null);
     try testing.expect(std.mem.indexOfScalar(u64, &got, 41) != null);
+}
+
+test "client image segments: an fd that is not shared memory resolves to nothing instead of crashing, and its entry stays" {
+    const pair = try Pair.init();
+    defer pair.deinit();
+    var table: Table = .{};
+    defer table.deinit();
+    try table.openStream(1);
+    const pixels = [_]u8{ 5, 5, 5, 5 };
+    // 데이터가 든 pipe — fstat 크기(쌓인 바이트)가 하한을 지나도 mmap 은 EINVAL 이다.
+    var pipe_fds: [2]c.fd_t = undefined;
+    if (c.pipe(&pipe_fds) != 0) return error.TestUnexpectedResult;
+    defer _ = c.close(pipe_fds[1]);
+    if (c.write(pipe_fds[1], "eightbyt", 8) != 8) return error.TestUnexpectedResult;
+    try sendWithFds(pair.host, &(try image_channel_wire.encodeSegment(seg(40, 1, &pixels))), &.{pipe_fds[0]});
+    _ = c.close(pipe_fds[0]);
+    // 디렉터리 — 크기는 크지만 매핑할 수 없다.
+    const dir = c.open("/", .{ .ACCMODE = .RDONLY, .DIRECTORY = true });
+    if (dir < 0) return error.TestUnexpectedResult;
+    try sendWithFds(pair.host, &(try image_channel_wire.encodeSegment(seg(41, 1, &pixels))), &.{dir});
+    _ = c.close(dir);
+    try table.drain(pair.app);
+    try testing.expectEqual(@as(usize, 2), table.len);
+
+    try testing.expect((try table.resolve(1, refOf(seg(40, 1, &pixels)))) == null);
+    try testing.expect((try table.resolve(1, refOf(seg(41, 1, &pixels)))) == null);
+    // 항목은 남는다 — 다른 해석 실패처럼 hwm 정리나 stream 닫힘이 반환한다.
+    try testing.expectEqual(@as(usize, 2), table.len);
+    try testing.expectEqual(@as(usize, 0), table.tx_len);
+    table.sweep(1, 41);
+    try testing.expectEqual(@as(usize, 0), table.len);
+    try testing.expectEqual(2 * image_channel_wire.release_len, table.tx_len);
 }
 
 test "client image segments: the fingerprint moves with every live field and ignores unused slots" {

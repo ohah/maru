@@ -135,11 +135,11 @@ IC3b 도 둘로 나눴다 — Client 안에서 끝나는 표·리더·release(IC
   안이거나 이미 poison 된 연결이면 읽지 않는다 — 위반 뒤 표는 어긋난 자리에서 멈췄을 수 있다). 선언 ledger 넷, 공개
   receiver 목록과 울타리 증명에 등록. source seal 고정 digest 를 갱신했다.
 - 채널 리더는 `state == .bound` 와 `fd >= 0` 을 함께 본다. 주 연결이 poison 되면 표의 fd 는 Client 소멸(`finishDeinitGraph`)이 닫는다.
-- 판정자: `zig build test-image-channel-app`(test-macos-only) — `client image segments:` 10 개(실제 socketpair·공유 메모리: fd 하나·
+- 판정자: `zig build test-image-channel-app`(test-macos-only) — `client image segments:` 11 개(공유 메모리가 아닌 fd(pipe·디렉터리)는 crash 없이 「없음」이고 항목 보존·실제 socketpair·공유 메모리: fd 하나·
   CLOEXEC·해석·반환 한 번·나뉜 메시지의 fd·fd 개수 위반 셋과 받은 fd 전부 닫힘·닫힌 stream 즉시 반환과 모르는 stream 보존·해석
   실패 항목 보존과 hwm 정리·원장 상한·중복 id·EOF·머리 불일치·표를 버리면 fd 가 모두 닫힘·release 쓰기 실패·매핑이 fd 보다 오래
   삶·더 큰 stream id 를 알면 열리지 않은 stream 의 항목을 반환·가장 최근 stream 도 닫히면 닫힘·채널이 찼을 때 release 가 통째로
-  기다렸다 경계가 맞게 도착·지문이 쓰는 칸마다 움직이고 빈 칸은 무시), `image channel pump:` 5 개(표에 넣기와 다음 펌프의 release·
+  기다렸다 경계가 맞게 도착·지문이 쓰는 칸마다 움직이고 빈 칸은 무시), `image channel pump:` 6 개(external 모드 Client 는 펌프하지 않아 봉인 상태가 그대로, 표에 넣기와 다음 펌프의 release·
   Client 소멸이 표의 fd 를 닫음, 채널 상실은 주 연결 유지, fd 개수 위반은 poison 이고 그 뒤 펌프는 읽지 않음, 외부 입양 스냅샷이 표의
   생김·바꿔 낌·내용 변화를 잡음, generation 할당·R3 retirement·소유 범위 그래프의 alias 증명이 표를 봄). 모든 칸을 채운 Client 가
   범위 상한과 같다는 기존 판정자에 표를 더했다. `image channel connect:` 의 묶임·거부 판정자가 표가 묶일 때만 남는 것을 잰다(testing allocator 가
@@ -153,9 +153,24 @@ IC3b 도 둘로 나눴다 — Client 안에서 끝나는 표·리더·release(IC
 ##### IC3b-2 — GUI 적용 자리 배선 (미착수)
 
 - 채널이 묶인 적 없는 연결은 `Client.image_segments` 가 null 이다 — 그 연결의 채널 resolver 는 빈 표처럼 「세그먼트 없음」으로 답한다.
-- `pumpImageChannel` 은 공유 울타리만 들고 `ownership`·`io_mode` 를 보지 않는다(IC3b-1). 다른 공개 변경 메서드는
-  `requireBlockingMode` 로 external 모드를 막지만, GUI 의 `RemoteRuntime` 도 external 모드로 돌아 같은 울타리를 쓰면 이 배선이
-  막힌다. 호출 자리를 고를 때 external pump 가 입양한(봉인된) Client 에는 부르지 않음을 함께 정하고 판정자로 잰다.
+- `pumpImageChannel` 은 다른 공개 변경 메서드와 같은 `requireBlockingMode` 울타리를 든다(IC3b-1) — external 모드(`maru attach`·
+  external pump·입양되어 봉인된 Client)에서는 읽지 않는다. GUI 의 Client 는 `.blocking`·`.standalone` 이라 이 울타리를 지난다.
+- **표 변경은 Client 의 공개 메서드로만** 한다 — `Table` 의 `resolve`·`sweep`·`openStream`·`closeStream` 을 포인터로 바로 부르면
+  `requireBlockingMode`·poison·allocator 재진입 울타리를 건너뛴다. 표 내용은 projection digest·외부 입양 지문에 봉인되므로, 봉인된
+  Client(재접속 worker 의 completion 후보 등)에 닿으면 지문이 바뀌어 `fatalIntegrity` 다. resolver ctx(adapter·slot)는 표를 직접
+  잡지 말고 Client 의 울타리 든 메서드를 거친다.
+- 스레드: 표는 재접속 worker 가 connect 할 때 할당되고(`build_id` 와 같은 꼴) 펌프·해석·적용·정리는 모두 소유 스레드에서 돈다 — 표에
+  잠금이 없다는 전제를 배선이 지키는지(worker 스레드에서 펌프·해석을 부르지 않는지) 판정자로 잰다.
+- `enterExternalMode` 는 묶인 채널을 거부하지 않는다 — 협상한 Client 가 external 모드에 들어가면 펌프가 돌지 않아 원장이 찬다.
+  GUI 는 이 경로를 쓰지 않지만, 광고(IC6) 전에 불변식(채널을 협상한 Client 는 external 모드에 들어가지 않는다)으로 잠근다.
+- 「이미지 채널 없음」 탭 notice(계약 §3.2)는 아직 어느 단계에도 없다 — `pumpImageChannel` 이 void 라 호출자는
+  `image_channel.state` 로 상실을 본다. notice 를 이 단계나 IC6 에서 단다.
+- 조립기에 넘기는 해제 함수 `unmapPixels` 는 `resolve` 가 준 slice 에만 불려야 한다 — `posix.munmap` 은 EINVAL 을 unreachable 로
+  둔다. inline 경로의 heap 픽셀이나 잘라낸 sub-slice 가 섞이지 않음을 판정자로 잠근다.
+- 펌프가 울타리에서 빠지는 일(prepared lease·실행 lease 의 AdminBusy)은 지금 계수도 로그도 없다 — lease 가 오래 잡혀 host 원장
+  32 칸이 차면 진단할 근거가 없으니 배선 때 거부 계수를 단다.
+- attach 응답을 끝내 못 읽어 id 를 모르는 stream 의 세그먼트는 더 큰 id 를 알 때까지(다음 attach) 표에 남아 원장 자리를 쥔다 —
+  id 를 모르니 `closeStream` 으로도 못 닫는다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 배선 때 본다.
 - `pumpImageChannel` 을 매 tick 과 `image_ref` 배치 적용 직전에 부른다. attach 응답을 **읽는 순서대로**(호출자로 돌아간 뒤가 아니라)
   `openStream`, detach·종료 정리와 attach 응답 뒤의 모든 실패 경로에서 채널을 비운 뒤 `closeStream`. 적용 뒤 배치를 놓기 전에 그
   배치의 hwm 으로 `sweep`.

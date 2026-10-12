@@ -7424,11 +7424,10 @@ pub const Client = struct {
     /// 채널 상실은 「이미지 채널 없음」으로 내리고 주 연결은 그대로 둔다(§3.2). host 의 「메시지당 fd 하나」·미반환 상한
     /// 위반과 앱 fd 고갈은 연결을 poison 한다 — fd 를 잃었을 수 있어 그 연결의 이미지 상태를 더 믿을 수 없다.
     pub fn pumpImageChannel(self: *Client) void {
-        const operation_fence_held = self.beginPublicMutation() catch return;
+        // 다른 공개 변경 메서드와 같은 울타리 — allocator callback 안·이미 poison 된 연결(표가 어긋난 자리에서 멈췄을 수 있다)·
+        // 옮겨 간 Client·external 모드(입양되어 봉인된 상태를 바꾸면 안 된다)에서는 읽지 않는다. 표는 Client 소멸이 닫는다.
+        const operation_fence_held = self.requireBlockingMode() catch return;
         defer if (operation_fence_held) self.endPublicMutation();
-        // allocator callback 안에서는 wire 를 만지지 않는다(모든 public 진입점의 규칙). 이미 poison 된 연결은 표가 어긋난 자리에서
-        // 멈췄을 수 있다 — 다시 읽지 않는다(표는 Client 소멸이 닫는다).
-        if (checkedAllocatorReentry(self) or self.unusable) return;
         if (self.image_channel.state != .bound or self.image_channel.fd < 0) return;
         // 묶인 채널에는 늘 표가 있다(`negotiateImageChannel` 이 먼저 잡는다).
         const segments = self.image_segments orelse return;
@@ -26909,6 +26908,22 @@ const ImageChannelPumpFixture = struct {
         if (c.sendmsg(self.channel_host, &msg, 0) != bytes.len) return error.TestUnexpectedResult;
     }
 };
+
+test "image channel pump: an external-mode client is not pumped, so its sealed state does not move" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    try fx.sendSegment(1, 3, 1);
+    try fx.client.enterExternalMode();
+    fx.client.ownership = .external_pump;
+    fx.client.connection_profile = .cli_attach;
+    fx.client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
+    const before = externalAdoptionSnapshot(&fx.client);
+    fx.client.pumpImageChannel();
+    try testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
+    try testing.expect(!fx.client.unusable);
+    try testing.expect(std.meta.eql(before, externalAdoptionSnapshot(&fx.client)));
+}
 
 test "image channel pump: every owned-backing alias proof sees the segment table" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

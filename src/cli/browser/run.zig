@@ -770,7 +770,7 @@ test "W9f 적대 리뷰 1 회차: non-blocking 입력에서 아직 읽을 것이
 }
 
 test "W9f 적대 리뷰 2 회차: CLI 의 exec args 깊이 상한은 서버 계약과 같다" {
-    try std.testing.expectEqual(control_browser.execute_script_args_max_depth + 1, browser.max_args_depth);
+    try std.testing.expectEqual(control_browser.execute_script_args_max_depth, browser.max_args_depth);
 }
 
 test "W9f 적대 리뷰 2 회차: repl — 표준 오류를 못 써도 다음 줄로 가고, 표준 출력이 닫혀 끝나도 앞선 실패는 종료 1" {
@@ -790,4 +790,33 @@ test "W9f 적대 리뷰 2 회차: repl — 표준 오류를 못 써도 다음 �
         try std.testing.expectError(error.UnknownCommand, runRepl(std.testing.io, gpa, null, fds[0], out, err));
         if (stderr_fails) try std.testing.expect(std.mem.indexOf(u8, ok_out.written(), "use <id>") != null); // help 는 돌았다
     }
+}
+
+test "W9f 적대 리뷰 3 회차: 실패를 삼키는 표준 오류도 쓴 것은 그대로 보낸다(splat·버퍼보다 긴 글)" {
+    var inner: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer inner.deinit();
+    var buf: [4]u8 = undefined;
+    var lw: LenientWriter = .init(&inner.writer, &buf);
+    try lw.interface.writeAll("abcdefgh");
+    try lw.interface.splatByteAll('z', 5);
+    var parts = [_][]const u8{ "x", "yz" };
+    try lw.interface.writeSplatAll(&parts, 3);
+    try lw.interface.flush();
+    try std.testing.expectEqualStrings("abcdefghzzzzzxyzyzyz", inner.written());
+}
+
+test "W9f 적대 리뷰 3 회차: repl 의 use 로 고른 탭이 뒤 명령의 대상이 된다(서버 없이 — 「--surface 가 필요」 가 나오지 않는다)" {
+    const gpa = std.testing.allocator;
+    var fds: [2]std.c.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    defer _ = std.c.close(fds[0]);
+    const input = "use 5\nclick --selector a\n";
+    try std.testing.expectEqual(@as(isize, input.len), std.c.write(fds[1], input, input.len));
+    _ = std.c.close(fds[1]);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(gpa);
+    defer err.deinit();
+    runRepl(std.testing.io, gpa, null, fds[0], &out.writer, &err.writer) catch {};
+    try std.testing.expect(std.mem.indexOf(u8, err.written(), "is required") == null);
 }

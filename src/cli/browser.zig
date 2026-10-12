@@ -592,7 +592,7 @@ fn parseExecArgs(rest: []const []const u8) ParseError!ExecCmd {
         }
     }
     // 깊게 중첩된 인자는 요청을 만들 때 JSON 쓰개의 중첩 한도(256)를 넘겨 panic 했다(W9f 적대 리뷰 1 회차) — 여기서 거절한다.
-    if (args_json) |j| if (jsonTextDepth(j) > max_args_depth) return error.ArgsTooDeep;
+    if (args_json) |j| if (argsValueDepth(j) > max_args_depth) return error.ArgsTooDeep;
     return .{
         .surface_id = surface orelse return error.MissingSurface,
         .script = script orelse return error.MissingScript,
@@ -872,13 +872,14 @@ fn takesValue(opt: []const u8) bool {
     return true;
 }
 
-/// exec 인자 JSON 의 중첩 상한(글 깊이) — 서버 계약 `control_browser.execute_script_args_max_depth`(배열 안쪽 128 단)에 바깥 배열 하나를
-/// 더한 129(시험이 둘을 맞춘다 — W9f 적대 리뷰 2 회차: 64 로 좁혀 서버가 받는 인자를 CLI 가 막았다). 요청 JSON 쓰개 한도(256) 안쪽이다.
-pub const max_args_depth = 129;
+/// exec 인자의 값 깊이 상한 — 서버 계약 `control_browser.execute_script_args_max_depth`(시험이 둘을 맞춘다). 서버는 바깥 배열의 원소를
+/// 깊이 0 에 두고 어느 값이든 이 깊이 이하를 요구한다(W9f 적대 리뷰 2·3 회차: 64 로 좁혔다가, 괄호 수로 세어 가장 안쪽이 빈 컨테이너인 인자를
+/// 한 단 엄격하게 막았다). 요청 JSON 쓰개 한도(256) 안쪽이다.
+pub const max_args_depth = 128;
 
-/// JSON 글의 가장 깊은 중첩(문자열 안의 괄호는 세지 않는다).
-pub fn jsonTextDepth(text: []const u8) usize {
-    var depth: usize = 0;
+/// exec 인자 글(JSON 배열)에서 서버 셈법의 가장 깊은 값 — 바깥 배열 안의 값마다 「둘러싼 컨테이너 수 − 1」(문자열 안은 세지 않는다).
+pub fn argsValueDepth(text: []const u8) usize {
+    var open: usize = 0;
     var deepest: usize = 0;
     var in_string = false;
     var i: usize = 0;
@@ -889,13 +890,14 @@ pub fn jsonTextDepth(text: []const u8) usize {
             continue;
         }
         switch (ch) {
-            '"' => in_string = true,
-            '[', '{' => {
-                depth += 1;
-                deepest = @max(deepest, depth);
+            ']', '}' => open -|= 1,
+            ',', ':', ' ', '\t', '\r', '\n' => {},
+            else => {
+                // 값이 여기서 시작한다(컨테이너·문자열·수·리터럴 — 이어지는 글자도 같은 깊이라 셈이 바뀌지 않는다).
+                if (open >= 1) deepest = @max(deepest, open - 1);
+                if (ch == '"') in_string = true;
+                if (ch == '[' or ch == '{') open += 1;
             },
-            ']', '}' => depth -|= 1,
-            else => {},
         }
     }
     return deepest;
@@ -965,7 +967,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             var parsed_args: ?std.json.Parsed(std.json.Value) = null;
             defer if (parsed_args) |*parsed| parsed.deinit();
             if (e.args_json) |raw| {
-                if (jsonTextDepth(raw) > max_args_depth) return error.InvalidArgs; // 쓰개의 중첩 한도(256)에서 panic 했다(W9f 적대 리뷰 1 회차)
+                if (argsValueDepth(raw) > max_args_depth) return error.InvalidArgs; // 쓰개의 중첩 한도(256)에서 panic 했다(W9f 적대 리뷰 1 회차)
                 // Preserve number lexemes through the CLI request. The server validates -0 and the JS safe-number
                 // boundary against the original spelling before WebKit receives NSNumber values.
                 parsed_args = std.json.parseFromSlice(std.json.Value, gpa, raw, .{ .parse_numbers = false }) catch |err| switch (err) {
@@ -3064,17 +3066,50 @@ test "W9f 적대 리뷰 2 회차: exec args 깊이는 서버 계약(배열 안�
     try ok.appendNTimes(a, ']', 129);
     const cmd = try parse(&.{ "exec", "--surface", "1", "--args", ok.items, "1" });
     try testing.expect((try buildRequestBytes(a, cmd.request, .{ .number = 1 })).len > 0);
-    var deep: std.ArrayList(u8) = .empty;
-    try deep.appendNTimes(a, '[', 130);
-    try deep.appendNTimes(a, ']', 130);
+    var deep: std.ArrayList(u8) = .empty; // 가장 안쪽 빈 [] 가 깊이 129(서버 셈법 — 3 회차)
+    try deep.appendNTimes(a, '[', 131);
+    try deep.appendNTimes(a, ']', 131);
     if (parse(&.{ "exec", "--surface", "1", "--args", deep.items, "1" })) |_| return error.TestUnexpectedResult else |_| {}
     // 요청을 만드는 자리도 막는다(파서를 거치지 않은 값).
     var raw = cmd.request;
     raw.exec.args_json = deep.items;
     if (buildRequestBytes(a, raw, .{ .number = 1 })) |_| return error.TestUnexpectedResult else |_| {}
-    try testing.expectEqual(@as(usize, 1), jsonTextDepth("[\"[[[[\", \"\\\"]]\", \"\\\\\"]"));
-    try testing.expectEqual(@as(usize, 2), jsonTextDepth("[{\"a\":\"}}}\"}]"));
+    try testing.expectEqual(@as(usize, 0), argsValueDepth("[\"[[[[\", \"\\\"]]\", \"\\\\\"]"));
+    try testing.expectEqual(@as(usize, 1), argsValueDepth("[{\"a\":\"}}}\"}]"));
     // 값 없는 플래그 뒤의 -h 는 도움말이고, `--opt=값` 뒤도 그렇다.
     for ([_][]const u8{ "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--surface=1" }) |flag|
         try testing.expect(try parse(&.{ "snapshot", flag, "-h" }) == .help);
+}
+
+fn nestedArgs(a: std.mem.Allocator, brackets: usize, inner: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendNTimes(a, '[', brackets);
+    try out.appendSlice(a, inner);
+    try out.appendNTimes(a, ']', brackets);
+    return out.toOwnedSlice(a);
+}
+
+test "W9f 적대 리뷰 3 회차: exec args 깊이는 서버 셈법(원소 깊이 0 부터, 값마다 128 이하)과 같다 — 가장 안쪽이 빈 컨테이너면 한 단 더" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const Case = struct { text: []const u8, ok: bool };
+    for ([_]Case{
+        .{ .text = try nestedArgs(a, 129, "1"), .ok = true }, // 스칼라가 깊이 128
+        .{ .text = try nestedArgs(a, 130, "1"), .ok = false }, // 129
+        .{ .text = try nestedArgs(a, 130, ""), .ok = true }, // 가장 안쪽 [] 가 깊이 128
+        .{ .text = try nestedArgs(a, 131, ""), .ok = false },
+        .{ .text = "[\"[[[[\\\"[[[[\"]", .ok = true }, // 문자열 안 괄호·이스케이프
+    }) |c| {
+        const r = parse(&.{ "exec", "--surface", "1", "--args", c.text, "1" });
+        if (c.ok) _ = try r else try testing.expectError(error.ArgsTooDeep, r);
+    }
+    // 형제 객체가 많아도 깊어지지 않는다.
+    var wide: std.ArrayList(u8) = .empty;
+    try wide.append(a, '[');
+    for (0..300) |i| try wide.appendSlice(a, if (i == 0) "{}" else ",{}");
+    try wide.append(a, ']');
+    try testing.expectEqual(@as(usize, 0), argsValueDepth(wide.items));
+    // 이스케이프된 따옴표 뒤의 괄호는 아직 문자열 안이다.
+    try testing.expectEqual(@as(usize, 0), argsValueDepth("[\"\\\"[[[[\"]"));
 }

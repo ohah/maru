@@ -60,6 +60,21 @@ pub fn unlockReceive() void {
     _ = c.pthread_rwlock_unlock(&lock);
 }
 
+/// 수신 자리가 잠금을 어떻게 잡는가 — tick 이 다시 오는 자리는 물러서고(`tryLockReceive`), tick 이 없는 동기 적용 자리는
+/// 기다린다(`lockReceive`).
+pub const ReceiveWait = enum { try_lock, block };
+
+/// `wait` 대로 수신 잠금을 잡는다. true 면 `unlockReceive` 로 풀어야 한다.
+pub fn acquireReceive(wait: ReceiveWait) bool {
+    switch (wait) {
+        .try_lock => return tryLockReceive(),
+        .block => {
+            lockReceive();
+            return true;
+        },
+    }
+}
+
 /// fd 를 받는 앱은 시작 때 열린 fd 상한을 올린다(§7). 올린 soft limit 은 자식에게 상속된다.
 pub fn raiseOpenFileLimit() void {
     var limit = std.posix.getrlimit(.NOFILE) catch return;

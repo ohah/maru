@@ -16,6 +16,7 @@ const screen_assembler = @import("maru").session.screen_assembler;
 const screen_stream = @import("maru").session.screen_stream;
 const catchup_stage_contract = @import("catchup_stage_contract.zig");
 const client_image_segments = @import("client_image_segments.zig");
+const fork_fd_fence = @import("fork_fd_fence.zig");
 
 /// 적용 호출의 필수 resolver(이미지 채널 §6) — attachment 를 쓰는 쪽이 조립기 모듈을 따로 부르지 않게 다시 낸다.
 pub const ImageRefResolver = screen_assembler.ImageRefResolver;
@@ -204,7 +205,7 @@ pub const AttachmentTransport = struct {
     ) error{OutOfMemory}!?[]const u8,
     /// `image_ref` 를 실은 배치를 적용하기 직전에 그 연결의 이미지 채널을 비운다. false 면 지금 비울 수 없다(울타리) — 호출자는
     /// 그 배치를 보류한다.
-    prepare_image_apply: *const fn (context: *anyopaque) bool,
+    prepare_image_apply: *const fn (context: *anyopaque, wait: fork_fd_fence.ReceiveWait) bool,
     /// 이 attachment 의 stream 이 그 연결의 표에 열린다 — transport 를 묶는 자리(attach 응답 뒤 stream 이 정해진 직후)에서
     /// 부른다(§6). 닫기는 그 연결의 stream drop(`Client.dropBufferedStream`)이 한다.
     open_image_stream: *const fn (context: *anyopaque, stream_id: u64) void,
@@ -223,7 +224,7 @@ pub fn noImageSegment(_: *anyopaque, _: u64, _: ImageRef) error{OutOfMemory}!?[]
 }
 
 /// 협상하지 않는 transport 의 적용 준비 — 비울 채널이 없다.
-pub fn noImageChannel(_: *anyopaque) bool {
+pub fn noImageChannel(_: *anyopaque, _: fork_fd_fence.ReceiveWait) bool {
     return true;
 }
 
@@ -311,10 +312,12 @@ pub const RemoteAttachment = struct {
     }
 
     /// 큐를 거치지 않는 적용 자리(첫 snapshot)의 resolver — 채널을 먼저 비운다. 그 snapshot 의 세그먼트는 attach 응답보다 먼저
-    /// 올 수 있다(§6). 비울 수 없어도 resolver 는 준다 — 맞는 세그먼트가 없으면 malformed 로 그 연결이 재접속한다.
+    /// 올 수 있다(§6). tick 이 없어 다시 올 기회가 없으므로 fork 울타리의 수신 잠금은 기다린다(`.block` — fork 시스템콜 길이로
+    /// 묶인다, §7). 비울 수 없어도(다른 연산이 slot 을 쥠) resolver 는 준다 — 맞는 세그먼트가 없으면 malformed 로 그 연결이
+    /// 재접속한다.
     pub fn imageRefResolverAfterPump(self: *const RemoteAttachment, ctx: *ImageResolveCtx) ImageRefResolver {
         const resolver = self.imageRefResolver(ctx);
-        if (resolver == .channel) _ = ctx.transport.prepare_image_apply(ctx.transport.context);
+        if (resolver == .channel) _ = ctx.transport.prepare_image_apply(ctx.transport.context, .block);
         return resolver;
     }
 
@@ -494,7 +497,8 @@ pub const RemoteAttachment = struct {
         if (!transport.image_shm_negotiated(transport.context)) return false;
         const peek = self.pending_batches.items[self.pending_batch_head].borrow(transport) catch
             return false; // 정식 borrow 가 같은 실패를 그 자리의 규칙대로 다룬다.
-        return batchCarriesImageRef(peek.bytes) and !transport.prepare_image_apply(transport.context);
+        // 다음 tick 이 다시 센다 — 수신 잠금을 기다리지 않는다(§7).
+        return batchCarriesImageRef(peek.bytes) and !transport.prepare_image_apply(transport.context, .try_lock);
     }
 
     /// Pull one stream-local batch from the borrowed connection into attachment-owned storage,
@@ -1556,6 +1560,7 @@ const ImageTestTransport = struct {
     /// 적용 준비(채널 비우기)가 이번 tick 에 되는가 — false 면 `image_ref` 배치는 보류된다.
     ready: bool = true,
     prepared: usize = 0,
+    last_wait: ?fork_fd_fence.ReceiveWait = null,
     opened: ?u64 = null,
     sweeps: usize = 0,
     swept_stream: u64 = 0,
@@ -1588,9 +1593,10 @@ const ImageTestTransport = struct {
         return self.negotiated;
     }
 
-    fn prepare(context: *anyopaque) bool {
+    fn prepare(context: *anyopaque, wait: fork_fd_fence.ReceiveWait) bool {
         const self: *ImageTestTransport = @ptrCast(@alignCast(context));
         self.prepared += 1;
+        self.last_wait = wait;
         return self.ready;
     }
 
@@ -1727,6 +1733,8 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
     try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreenInternal(std.testing.io, &accounting));
     try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 2), transport.prepared);
+    // 큐 머리의 준비는 수신 잠금을 기다리지 않는다 — 다음 tick 이 다시 센다(§7).
+    try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .try_lock), transport.last_wait);
     try std.testing.expectEqual(@as(usize, 0), transport.resolved);
     try std.testing.expectEqual(@as(usize, 0), attachment.pending_batch_head);
     // 보류 중에는 다음 배치를 읽지 않는다 — 큐가 자라지 않는다.
@@ -1756,6 +1764,35 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
     } };
     try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 4), transport.prepared);
+}
+
+test "image channel wiring: the first-snapshot resolver drains the channel waiting for the receive fence, never on an unnegotiated transport" {
+    // 첫 snapshot 은 큐를 거치지 않아 다음 tick 이 없다 — `.try_lock` 이면 fork 하나와 겹친 attach 가 세그먼트를 못 받아 재접속한다(§7).
+    var transport = ImageTestTransport{ .batches = .{ null, null }, .negotiated = true };
+    var attachment = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    var ctx: ImageResolveCtx = undefined;
+    try std.testing.expect(attachment.imageRefResolverAfterPump(&ctx) == .channel);
+    try std.testing.expectEqual(@as(usize, 1), transport.prepared);
+    try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .block), transport.last_wait);
+
+    var plain = ImageTestTransport{ .batches = .{ null, null }, .negotiated = false };
+    var unnegotiated = RemoteAttachment.init(std.testing.allocator, .{
+        .runtime_id = 0xab,
+        .stream_id = 8,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer unnegotiated.deinit();
+    try unnegotiated.bindTransport(plain.interface());
+    try std.testing.expect(unnegotiated.imageRefResolverAfterPump(&ctx) == .unnegotiated);
+    try std.testing.expectEqual(@as(usize, 0), plain.prepared);
 }
 
 test "image channel wiring: binding opens the attachment's stream, and an applied batch's hwm sweeps it, never without a mark or a negotiation" {

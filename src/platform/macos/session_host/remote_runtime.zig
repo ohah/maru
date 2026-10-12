@@ -42,6 +42,7 @@ const runtime_lifetime_owner_mod = @import("runtime_lifetime_owner.zig");
 const reconnect_mutation_seal = @import("reconnect_mutation_seal.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const remote_attachment = @import("remote_attachment.zig");
+const fork_fd_fence = @import("fork_fd_fence.zig");
 const generation_attachment_mod = @import("generation_attachment.zig");
 const attachment_freeze_gate = @import("attachment_freeze_gate.zig");
 const generation_contract = @import("generation_attachment_contract.zig");
@@ -527,9 +528,9 @@ fn attachmentResolveImage(
     return client.resolveImageSegment(stream_id, ref);
 }
 
-fn attachmentPrepareImageApply(context: *anyopaque) bool {
+fn attachmentPrepareImageApply(context: *anyopaque, wait: fork_fd_fence.ReceiveWait) bool {
     const client: *client_mod.Client = @ptrCast(@alignCast(context));
-    return client.pumpImageChannel();
+    return client.pumpImageChannel(wait);
 }
 
 fn attachmentOpenImageStream(context: *anyopaque, stream_id: u64) void {
@@ -3769,7 +3770,7 @@ pub const RemoteRuntime = struct {
         pub fn pumpImageChannel(runtime: *RemoteRuntime) void {
             runtime.admitRuntimeOperation() catch return;
             switch (runtime.currentGeneration().connection) {
-                .legacy => |client| _ = client.pumpImageChannel(),
+                .legacy => |client| _ = client.pumpImageChannel(.try_lock),
                 .generation => |adapter| _ = adapter.pumpImageChannel() catch false,
             }
         }
@@ -21830,7 +21831,7 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     transport.open_image_stream(transport.context, 7);
     try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 7) != null);
     // 적용 준비가 그 세그먼트를 받는다(§6 — `image_ref` 배치 적용 직전).
-    try std.testing.expect(transport.prepare_image_apply(transport.context));
+    try std.testing.expect(transport.prepare_image_apply(transport.context, .try_lock));
     try std.testing.expectEqual(@as(usize, 1), table.len);
 
     const ref: remote_attachment.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 1, .byte_len = 4 };
@@ -21840,7 +21841,7 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     try std.testing.expectEqual(@as(usize, 0), table.len);
     // 같은 세그먼트가 다시 오면(버려진 배치의 것) 그 hwm 으로 정리한다.
     if (c.sendmsg(channel[1], &msg, 0) != bytes.len) return error.TestUnexpectedResult;
-    try std.testing.expect(transport.prepare_image_apply(transport.context));
+    try std.testing.expect(transport.prepare_image_apply(transport.context, .try_lock));
     try std.testing.expectEqual(@as(usize, 1), table.len);
     transport.sweep_image_segments(transport.context, 7, 1);
     try std.testing.expectEqual(@as(usize, 0), table.len);
@@ -21853,6 +21854,10 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     // 에도 release 가 host 원장을 돌린다). 다른 자리로 옮기면 host 당 한 번이 아니게 되거나 빠진다.
     // legacy 첫 snapshot 도 resolver 를 줄 때 채널을 먼저 비운다(그 snapshot 의 세그먼트는 attach 응답보다 먼저 올 수 있다).
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("remote_runtime.zig"), ".legacy => |*value| value." ++ "imageRefResolverAfterPump(ctx),"));
+    // legacy tick 펌프는 fork 울타리의 수신 잠금을 기다리지 않는다(§7 — 메인이 fork 하는 BACKGROUND 스레드를 기다리면 수백 ms 를
+    // 멈춘다). 기다리는 `.block` 은 tick 이 없는 첫 snapshot 자리(`imageRefResolverAfterPump`)만의 것이다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("remote_runtime.zig"), ".legacy => |client| _ = client." ++ "pumpImageChannel(.try_lock),"));
+    try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, @embedFile("remote_runtime.zig"), "pumpImageChannel(" ++ ".block)"));
     const backend = @embedFile("remote_term_backend.zig");
     const dedup = "if (index != 0 and host_probes[index - 1].host_id == probe.host_id) continue;";
     const pump = "RemoteRuntime.backend_api." ++ "pumpImageChannel(probe.runtime);";

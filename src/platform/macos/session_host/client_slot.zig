@@ -13,6 +13,7 @@ const TerminalDrainRunnerChannel = if (builtin.is_test) struct {
     extern var maru_c3b3_death_child_path_len: usize;
 } else struct {};
 const client_mod = @import("client.zig");
+const fork_fd_fence = @import("fork_fd_fence.zig");
 const screen_stream = @import("maru").session.screen_stream;
 const lease_mod = @import("connection_lease.zig");
 const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
@@ -13403,7 +13404,8 @@ pub const ClientSlot = struct {
     ) client_mod.ClientError!bool {
         const Operation = struct {
             fn run(_: void, client: *client_mod.Client) client_mod.ClientError!bool {
-                return client.pumpImageChannel();
+                // 다음 tick 이 다시 온다 — 수신 잠금을 기다리지 않는다(§7).
+                return client.pumpImageChannel(.try_lock);
             }
         };
         return self.withCurrent(expected_generation, {}, Operation.run) catch |err|
@@ -15615,10 +15617,10 @@ pub const ClientSlot = struct {
     }
 
     /// 적용 직전에 이 slot 의 Client 이미지 채널을 비운다(§6) — 그 배치의 `image_ref` 가 가리키는 세그먼트를 먼저 받는다. false 면
-    /// 지금 비울 수 없다(다른 attachment 연산·Client 울타리) — 호출자는 그 배치를 보류한다.
-    pub fn pumpAttachmentImageChannel(self: *ClientSlot) bool {
+    /// 지금 비울 수 없다(다른 attachment 연산·Client 울타리·`.try_lock` 인데 fork 가 수신 잠금을 쥠) — 호출자는 그 배치를 보류한다.
+    pub fn pumpAttachmentImageChannel(self: *ClientSlot, wait: fork_fd_fence.ReceiveWait) bool {
         if (!self.attachmentImageAccessAllowed()) return false;
-        return self.current.client.pumpImageChannel();
+        return self.current.client.pumpImageChannel(wait);
     }
 
     /// 적용 자리의 해석·펌프가 slot 의 Client 에 닿아도 되는가. 다른 attachment 연산이 slot 을 쥐면 아니다 — 첫 snapshot 은 그

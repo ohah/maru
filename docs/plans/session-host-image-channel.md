@@ -151,7 +151,7 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   release 하나가 반쪽만 들어가는 상태를 소켓 버퍼로 재현하지 못했다(통째로 기다리는 갈래만 쟀다). 픽스처에 operation fence 가 없어
   「울타리 안에서 poison」의 중첩 shared 는 실행으로 재지 않았다(공유 울타리는 개수만 센다).
 
-##### IC3b-2a — 적용 자리에 resolver 를 넘긴다 (PR 진행 중)
+##### IC3b-2a — 적용 자리에 resolver 를 넘긴다 (완료)
 
 - `AttachmentTransport` 에 필수 필드 둘: `image_shm_negotiated(context)`·`resolve_image(context, stream_id, ref)` — 해석은 매핑된
   픽셀 slice 만 준다. 빠진 transport 를 컴파일러가 잡는다. `maru attach`(external pump)와 테스트 transport 는 `imageNotNegotiated`·
@@ -176,7 +176,7 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   1(울타리 든 해석 — 자기 stream·한 번·poison·표 없음). GUI 정적 라이브러리(`maru-macos-app-host-abi`)가 이 경로를 컴파일한다.
 - 광고가 꺼져 있어(IC6) 지금 모든 연결은 `not_negotiated` 다 — 제품 동작은 그대로다.
 
-##### IC3b-2b-1 — 펌프와 보류 (PR 진행 중)
+##### IC3b-2b-1 — 펌프와 보류 (완료)
 
 - `image_ref` 를 실은 배치는 적용 직전에 그 연결의 채널을 비운다 — `AttachmentTransport.prepare_image_apply`(필수 필드). 비울 수
   없는 tick(Client 울타리·slot 의 다른 attachment 연산)이면 그 배치를 적용하지 않고 큐 머리에 둔다(`PumpScreenResult.held`).
@@ -207,7 +207,7 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   `local_invariant_violation` 으로 봉인된다 — 위 이유로 닿지 않지만, IC3b-2b-2 에서 재시도로 분류할지 정한다. 채널 위반으로 poison 한
   펌프는 true(돌았다)를 돌려준다 — 그 배치는 적용으로 가 해석 실패(`frame_malformed`)로 닫힌다(첫 poison 이유는 그대로 남는다).
 
-##### IC3b-2b-2 — stream 수명·hwm 정리 (PR 진행 중)
+##### IC3b-2b-2 — stream 수명·hwm 정리 (완료)
 
 - **열기**: `RemoteAttachment.bindTransport` 가 transport 를 묶는 순간 그 stream 을 연다(`AttachmentTransport.open_image_stream`).
   legacy(`bindLegacyTransport`)와 generation(`commitAccepted`)이 모두 stream 이 정해진 직후·배치를 읽기 전에 이 자리를 지난다. GUI 의
@@ -260,7 +260,7 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
 IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 IC3b-2 와 겹치지 않는다)와 채널 수신을 그 울타리로 감싸기(IC4b — 수신
 코드가 IC3b-2 스택에 있어 그 머지 뒤).
 
-#### IC4a — fork 울타리·CLOEXEC_DEFAULT 헬퍼·판정자 (PR 진행 중)
+#### IC4a — fork 울타리·CLOEXEC_DEFAULT 헬퍼·판정자 (완료)
 
 - `src/platform/macos/session_host/fork_fd_fence.zig`: 프로세스 전역 `pthread_rwlock` 하나와 `pthread_atfork`(prepare=rdlock,
   parent=unlock, child=**새로 초기화**) — fork 시스템콜 하나만 읽기 잠금이다. 자식에서 unlock 하면 fork 순간 줄 서 있던 writer(자식에
@@ -286,19 +286,31 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
 - fork 는 세지 않는다 — 울타리가 덮는다. 앱 안 fork 자리(폴백 PTY·host 띄우기·LSP·ssh 업로드 7·git 2·업데이트 확인·로그인 셸 환경·
   에디터 검색의 `std.process.spawn` — Zig 0.16 은 fork 로 띄운다)는 모두 atfork 를 지난다.
 
-#### IC4b — 채널 수신을 울타리로 감싸기 (미착수 — IC3b-2 머지 뒤)
+#### IC4b — 채널 수신을 울타리로 감싸기 (PR 진행 중)
 
-- `Client.pumpImageChannel` 의 「recvmsg + `F_SETFD`」(`Table.drain`)를 메인에서는 `tryLockReceive` 로 감싼다 — 못 잡으면 펌프는 false
-  (IC3b-2b-1 의 보류가 그 배치를 머리에 둔다). tick 이 없는 동기 적용 자리(첫 snapshot 의 `imageRefResolverAfterPump`)는
-  `lockReceive`.
-- 앱 채널 소켓 생성도 볼 것: `connectUnixUntil` 은 `socket()` 과 CLOEXEC 설정이 별개 호출이라 그 사이 fork 한 자식이 채널 소켓을
-  물려받을 수 있다(IC2b 적대적 검증 3 회차). 물려받으면 앱이 채널을 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다 — 쓰기 잠금이 채널
-  소켓 생성도 덮게 한다(주 소켓에도 원래 있는 틈이다).
-- Swift 쪽 spawn: `Process()` 가 둘 있다(`MermaidHelperProcess.swift` — 제품, `SessionHostIMECandidateObservation.swift` — 환경 변수
-  smoke). Foundation 의 `Process` 가 CLOEXEC_DEFAULT 로 띄운다는 것은 계약 §7 의 실측에 기댄다(Apple 내부 구현이라 보장은 아니다).
-  Zig 판정자는 Swift 를 보지 않으므로 Swift `Process`·`NSTask` 재고를 같은 결의 글자 판정자로 고정한다.
-- host 쪽도 볼 것: host 가 받는 fd 는 프로토콜 위반(release 에 붙은 fd)뿐이고 owner 스레드가 받자마자 닫는다. 다른 스레드가 그
-  사이에 fork 하는 자리가 host 에 있는지(IC2a 적대적 검증 2 회차 메모) 확인해 같은 잠금 범위에 넣을지 정한다.
+- `Client.pumpImageChannel(wait)` 가 「recvmsg + `F_SETFD`」(`Table.drain`)만 수신 잠금 안에서 한다(release 쓰기·poison 은 밖).
+  `wait` 는 `fork_fd_fence.ReceiveWait` — tick 이 다시 오는 자리는 `.try_lock`(못 잡으면 false, fd 는 커널 큐에 남는다), tick 이 없는
+  동기 적용 자리는 `.block`(fork 시스템콜 길이로 묶인다).
+  - `.try_lock`: 유지보수 tick 펌프(generation `ClientSlot.currentPumpImageChannel`·legacy `backend_api.pumpImageChannel`)와 큐 머리
+    보류(`headHeldForImageChannel` — 못 잡으면 IC3b-2b-1 의 보류가 그 배치를 머리에 둔다).
+  - `.block`: 첫 snapshot 의 `imageRefResolverAfterPump`.
+  - 그래서 `AttachmentTransport.prepare_image_apply` 가 `wait` 를 받는다(ClientSlot·generation adapter·legacy 콜백이 그대로 넘긴다).
+- 소켓 생성: `client_deadline.posix_ops.socket` 이 수신 잠금 안에서 `socket()` 과 `FD_CLOEXEC` 를 함께 한다(macOS 에는 `SOCK_CLOEXEC`
+  가 없다). 채널 소켓과 주 소켓이 같은 길이라 둘 다 덮인다 — 그 틈에 fork 한 자식이 채널 소켓을 물려받으면 앱이 닫아도 host 가 EOF 를
+  못 봐 원장이 붙잡힌다(IC2b 적대적 검증 3 회차).
+- Swift·ObjC spawn 재고: `tests/boundary/spawn_cloexec_axis.zig` 가 `src` 의 `.swift`·`.m`·`.mm`·`.c`·`.h` 에서 주석·문자열 밖의
+  `Process`·`NSTask` 생성·메시지(`Process(`·`Process.`·`[NSTask`)와 `posix_spawn`·`posix_spawnp`·`popen`·`system(` 를 세어 파일·개수·이유로
+  고정한다 — Mermaid 도우미 1, IME 후보 관찰 smoke 1, `chrome-lab-smoke`(별도 실행 파일) 1. 타입 표기(`let p: Process`)는 세지 않는다.
+- host 는 잠그지 않는다: host 가 받는 fd 는 프로토콜 위반(release 에 붙은 fd)뿐이고 owner 스레드가 같은 함수에서 닫는다. 그 틈에 host 의
+  PTY spawn(fork)이 겹치면 셸이 그 fd 를 물려받을 수 있지만 그것은 위반한 앱이 보낸 fd 이고 host 원장과 무관하다(앱의 공유 메모리를
+  host 가 붙잡지 않는다). accept 한 소켓의 같은 틈도 IC 이전부터 있다 — 이 단계의 범위가 아니다.
+- 판정자(`test-image-channel-app`):
+  - Client: 다른 스레드가 수신 잠금을 쥔 동안 tick 펌프(`.try_lock`)는 false 이고 세그먼트는 커널 큐에 남는다, 동기 펌프(`.block`)는
+    풀릴 때까지 기다린 뒤 받는다, 소켓 생성은 잠금이 풀린 뒤에 CLOEXEC 가 켜진 채 돌아온다.
+  - 배선: 큐 머리 보류는 `.try_lock`, 첫 snapshot resolver 는 `.block`, 미협상 transport 는 부르지 않는다.
+  - generation adapter: tick 의 길(`currentPumpImageChannel`)은 다른 스레드가 쥔 동안 false. legacy tick 은 글자로(`.try_lock` 1·
+    `pumpImageChannel(.block)` 0).
+  - 잠금을 쥔 스레드는 2 초 상한으로 푼다 — 잘못 기다리는 변이가 판정자를 멈추지 않는다.
 - IC3b 의 채널 리더는 IC4b 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
 
 ### IC5 — 흐름 제어와 delta 표현 (미착수)

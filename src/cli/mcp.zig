@@ -105,8 +105,8 @@ pub const tools = [_]Tool{
         .{ .key = "selector", .kind = .string, .flag = "--selector", .description = "only under this element" },
     }) },
     .{ .name = "browser_console", .subcommand = "console", .description = "Print page console logs.", .args = withSurface(&.{.{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "empty the log after reading" }}) },
-    .{ .name = "browser_back", .subcommand = "back", .description = "Go back in the tab's history (Chromium tabs).", .args = withSurface(&.{}) },
-    .{ .name = "browser_forward", .subcommand = "forward", .description = "Go forward in the tab's history (Chromium tabs).", .args = withSurface(&.{}) },
+    .{ .name = "browser_back", .subcommand = "back", .description = "Go back in the tab's history (Chromium tabs). Answers not ok when there is nothing to go back to.", .args = withSurface(&.{}) },
+    .{ .name = "browser_forward", .subcommand = "forward", .description = "Go forward in the tab's history (Chromium tabs). Answers not ok when there is nothing to go forward to.", .args = withSurface(&.{}) },
     .{ .name = "browser_reload", .subcommand = "reload", .description = "Reload the page (Chromium tabs).", .args = withSurface(&.{}) },
     .{ .name = "browser_exec", .subcommand = "exec", .description = "Run and await a JavaScript expression in the page; prints its result.", .args = withSurface(&.{
         .{ .key = "expression", .kind = .positional, .description = "JavaScript expression", .required = true },
@@ -877,4 +877,35 @@ test "W9f 적대 리뷰 3 회차: 모든 정수 인자의 스키마 상한은 �
             }
         }
     };
+}
+
+test "W9f 적대 리뷰 4 회차: 인자가 틀린 도구 호출은 isError 결과, 스키마의 required 는 파서의 필수와 같다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    // 모르는 인자 — argv 에서 거절 → isError 결과(JSON-RPC 오류가 아니다).
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_click\",\"arguments\":{\"surface\":1,\"bogus\":1}}}")).reply;
+    defer testing.allocator.free(r);
+    const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer p.deinit();
+    try testing.expect(p.value.object.get("result").?.object.get("isError").?.bool);
+    // required — 도구마다 스키마의 required 와 표의 required 가 같고, 빼면 파서가 거절한다.
+    const l = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(l);
+    const lp = try std.json.parseFromSlice(std.json.Value, testing.allocator, l, .{});
+    defer lp.deinit();
+    for (lp.value.object.get("result").?.object.get("tools").?.array.items, 0..) |t, i| {
+        const req = t.object.get("inputSchema").?.object.get("required").?.array.items;
+        var n: usize = 0;
+        for (tools[i].args) |a| if (a.required) {
+            n += 1;
+        };
+        try testing.expectEqual(n, req.len);
+        for (req) |k| {
+            const arg = for (tools[i].args) |a| {
+                if (std.mem.eql(u8, a.key, k.string)) break a;
+            } else return error.TestUnexpectedResult;
+            try testing.expect(arg.required);
+        }
+    }
 }

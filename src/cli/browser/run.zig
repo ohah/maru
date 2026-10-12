@@ -45,6 +45,8 @@ pub fn run(
     };
     switch (parsed) {
         .help => {
+            // `repl --help` 는 repl 의 명령(use·exit·help)부터(W9f 적대 리뷰 4 회차 — 안에서 help 를 쳐야만 보였다).
+            if (collected.items.len > 0 and std.mem.eql(u8, collected.items[0], "repl")) try stdout.writeAll(repl_help);
             try stdout.writeAll(browser.browser_help);
             try stdout.flush();
         },
@@ -182,7 +184,7 @@ fn runExecuteScript(
         }
         var read_buf: [4096]u8 = undefined;
         const n = std.c.read(fd, &read_buf, read_buf.len);
-        if (n <= 0) return executeError(stderr, "the server did not finish the response");
+        if (n <= 0) return control_client.noAnswer(stderr); // 답 없이 끊겼다(모달 무응답·시한 — W9f 적대 리뷰 4 회차: 「끝내지 않았다」 로 고장처럼 보였다)
         framer.push(allocator, read_buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
     if (!validateJsonSlice(allocator, result.items))
@@ -254,7 +256,7 @@ fn runWrappedResult(
         }
         var read_buf: [4096]u8 = undefined;
         const n = std.c.read(fd, &read_buf, read_buf.len);
-        if (n <= 0) return wrappedStreamError(stderr, wrap_field);
+        if (n <= 0) return control_client.noAnswer(stderr); // 「깨진 스트림」 이 아니다 — 답 없이 끊겼다(W9f 적대 리뷰 4 회차)
         framer.push(allocator, read_buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
 
@@ -320,7 +322,7 @@ fn runScreenshot(
         }
         var buf: [4096]u8 = undefined;
         const n = c.read(fd, &buf, buf.len); // grant held면 사용자 클릭까지 블록(§9.6)
-        if (n <= 0) return screenshotError(stderr, "the server did not finish the response (incomplete stream)");
+        if (n <= 0) return control_client.noAnswer(stderr);
         framer.push(allocator, buf[0..@intCast(n)]) catch return error.OutOfMemory;
     }
 
@@ -579,7 +581,10 @@ fn replLoop(io: std.Io, allocator: std.mem.Allocator, reader: *LineReader, inter
             if (current) |id| try stderr.print("maru browser[{d}]> ", .{id}) else try stderr.writeAll("maru browser> ");
             try stderr.flush();
         }
-        const item = (try reader.next(allocator)) orelse break;
+        const item = (try reader.next(allocator)) orelse {
+            if (interactive) stderr.writeAll("\n") catch {}; // Ctrl-D — 셸 프롬프트가 repl 프롬프트 뒤에 붙지 않게
+            break;
+        };
         const line = switch (item) {
             .too_long => {
                 try stderr.writeAll("error: line too long\n");
@@ -621,6 +626,8 @@ fn replLoop(io: std.Io, allocator: std.mem.Allocator, reader: *LineReader, inter
 fn replCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u8, current: *?u64, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !bool {
     const parsed = browser.parse(argv) catch |e| {
         try stderr.print("error: {s}\n", .{usageReason(e)});
+        // 고른 탭이 없다 — 고르는 법을 알린다(W9f 적대 리뷰 4 회차).
+        if (e == error.MissingSurface) try stderr.writeAll("hint: pick a tab with `use <id>` (ids are in `list`), or open one with `open`\n");
         try stderr.flush();
         return false;
     };
@@ -648,9 +655,21 @@ fn replCommand(io: std.Io, allocator: std.mem.Allocator, argv: []const []const u
             return ok;
         } else {
             runRequest(io, allocator, req, stdout, stderr) catch |e| return replFailure(e);
+            // 고른 탭을 닫았다 — 닫힌 id 로 다음 명령이 엉뚱한 안내와 실패하지 않게 비운다(W9f 적대 리뷰 4 회차).
+            if (req == .close and current.* == req.close.surface_id) {
+                current.* = null;
+                try stderr.writeAll("(the picked tab was closed — pick another with `use <id>`)\n");
+                try stderr.flush();
+            }
             return true;
         },
         .screenshot => |shot| {
+            // 터미널에 PNG 바이트를 쏟지 않는다(W9f 적대 리뷰 4 회차).
+            if (shot.out == null and std.c.isatty(std.Io.File.stdout().handle) == 1) {
+                try stderr.writeAll("error: screenshot needs --out <file> here (the output is a terminal)\n");
+                try stderr.flush();
+                return false;
+            }
             runScreenshot(io, allocator, shot, stdout, stderr) catch |e| return replFailure(e);
             return true;
         },
@@ -711,6 +730,7 @@ test "W9f repl: 한 줄이라도 실패하면 종료 상태 1, exit 뒤 줄은 �
         .{ .input = "use 5\n# c\n\n", .fails = false },
         .{ .input = "click --name 'x\n", .fails = true, .err_has = "unterminated quote" },
         .{ .input = "click --bogus\nrepl\n", .fails = true, .err_has = "already in repl" },
+        .{ .input = "click --selector a\n", .fails = true, .err_has = "pick a tab with `use <id>`" }, // 고른 탭이 없다 — 고르는 법(W9f 적대 리뷰 4 회차)
     }) |c| {
         var fds: [2]std.c.fd_t = undefined;
         try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));

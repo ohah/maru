@@ -13396,6 +13396,20 @@ pub const ClientSlot = struct {
             return mapCurrentBorrowError(err);
     }
 
+    /// 유지보수 tick 의 이미지 채널 펌프(§6 — host 당 tick 마다 한 번). 다른 연산이 slot 을 쥐면 이번 tick 은 건너뛴다.
+    pub fn currentPumpImageChannel(
+        self: *ClientSlot,
+        expected_generation: u64,
+    ) client_mod.ClientError!bool {
+        const Operation = struct {
+            fn run(_: void, client: *client_mod.Client) client_mod.ClientError!bool {
+                return client.pumpImageChannel();
+            }
+        };
+        return self.withCurrent(expected_generation, {}, Operation.run) catch |err|
+            return mapCurrentBorrowError(err);
+    }
+
     pub fn currentHasAnyBufferedRuntimeWork(
         self: *ClientSlot,
         expected_generation: u64,
@@ -15583,13 +15597,25 @@ pub const ClientSlot = struct {
         stream_id: u64,
         ref: screen_stream.ImageRef,
     ) error{OutOfMemory}!?[]const u8 {
-        if (!self.valid()) return null;
+        if (!self.attachmentImageAccessAllowed()) return null;
+        return self.current.client.resolveImageSegment(stream_id, ref);
+    }
+
+    /// 적용 직전에 이 slot 의 Client 이미지 채널을 비운다(§6) — 그 배치의 `image_ref` 가 가리키는 세그먼트를 먼저 받는다. false 면
+    /// 지금 비울 수 없다(다른 attachment 연산·Client 울타리) — 호출자는 그 배치를 보류한다.
+    pub fn pumpAttachmentImageChannel(self: *ClientSlot) bool {
+        if (!self.attachmentImageAccessAllowed()) return false;
+        return self.current.client.pumpImageChannel();
+    }
+
+    /// 적용 자리의 해석·펌프가 slot 의 Client 에 닿아도 되는가. 다른 attachment 연산이 slot 을 쥐면 아니다 — 첫 snapshot 은 그
+    /// owner 가 `.initial_snapshot` permit 을 쥔 채(owner deinit 까지) 같은 스레드에서 적용되므로 그 permit 만은 막지 않는다.
+    fn attachmentImageAccessAllowed(self: *const ClientSlot) bool {
+        if (!self.valid()) return false;
         const own_initial_snapshot = self.current.active_operation_kind == .initial_snapshot and
             operationThreadMatches(self.current.active_operation_owner_thread_incarnation);
-        if ((self.current.active_operation_generation != 0 and !own_initial_snapshot) or
-            terminal_drain_callback_binding.continuation_addr != 0)
-            return null;
-        return self.current.client.resolveImageSegment(stream_id, ref);
+        return (self.current.active_operation_generation == 0 or own_initial_snapshot) and
+            terminal_drain_callback_binding.continuation_addr == 0;
     }
 
     pub fn readAttachmentCatchupBarrierPlanUntil(

@@ -729,6 +729,11 @@ pub const HostAdapter = struct {
         return self.slot.currentQuietPumpProven(self.slot.connectionGeneration(), stream_id);
     }
 
+    /// 유지보수 tick 의 이미지 채널 펌프(이미지 채널 §6) — host 의 연결 하나에 tick 마다 한 번.
+    pub fn pumpImageChannel(self: *HostAdapter) client_mod.ClientError!bool {
+        return self.slot.currentPumpImageChannel(self.slot.connectionGeneration());
+    }
+
     pub fn hasAnyBufferedRuntimeWork(self: *HostAdapter) client_mod.ClientError!bool {
         return self.slot.currentHasAnyBufferedRuntimeWork(self.slot.connectionGeneration());
     }

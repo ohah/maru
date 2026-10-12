@@ -1672,6 +1672,11 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "screen_stream" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "attachmentImageShmNegotiated" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "resolveAttachmentImage" },
+                // 펌프 배선(IC3b-2b-1, 2026-10-12): 적용 직전 펌프·유지보수 tick 펌프, 그리고 해석·펌프가 함께 쓰는 접근 규칙 하나
+                // (다른 attachment 연산 중이면 거부 — 같은 스레드의 첫 snapshot permit 만 허용).
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "pumpAttachmentImageChannel" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "private", .modifier = "", .name = "attachmentImageAccessAllowed" },
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "currentPumpImageChannel" },
                 // post snapshot 을 쓴 판정자의 번호(2026-10-02) — 판정자 빌드 전용(`void`). 앞선 판정자가 남긴 snapshot 이 실행
                 // 순서에 따라 뒤 판정자의 «아직 게시 안 됨» 단언을 깨던 것을 UI 프레임 도장과 같은 장치로 순서와 무관하게 닫는다.
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_post_snapshot_test_generation" },
@@ -8686,8 +8691,8 @@ test "CR3a-1 ownership capabilities stay in their exact production boundaries" {
         countOccurrences(runtime, "        .context = client,"),
     );
     try std.testing.expectEqual(
-        // legacy transport 의 콜백 다섯 — 배치 읽기·stream 버리기·fail-close 와 이미지 협상·해석(IC3b-2a).
-        @as(usize, 5),
+        // legacy transport 의 콜백 여섯 — 배치 읽기·stream 버리기·fail-close 와 이미지 협상·해석(IC3b-2a)·적용 준비(IC3b-2b-1).
+        @as(usize, 6),
         countOccurrences(
             runtime,
             "const client: *client_mod.Client = @ptrCast(@alignCast(context));",

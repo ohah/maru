@@ -114,6 +114,9 @@ pub const PumpScreenResult = enum {
     applied,
     recovery_commit_pending,
     terminal,
+    /// 큐 머리 배치가 `image_ref` 를 싣는데 이번 tick 에 채널을 비울 수 없었다(이미지 채널 §6) — 배치는 머리에 그대로 있고
+    /// 계상하지 않았다. 다음 tick 에 다시 본다.
+    held,
 };
 
 pub const TerminalCleanupView = struct {
@@ -149,6 +152,7 @@ fn terminalTestTransport() AttachmentTransport {
         .fail_closed = Fixture.failClosed,
         .image_shm_negotiated = imageNotNegotiated,
         .resolve_image = noImageSegment,
+        .prepare_image_apply = noImageChannel,
     };
 }
 
@@ -196,6 +200,9 @@ pub const AttachmentTransport = struct {
         stream_id: u64,
         ref: ImageRef,
     ) error{OutOfMemory}!?[]const u8,
+    /// `image_ref` 를 실은 배치를 적용하기 직전에 그 연결의 이미지 채널을 비운다. false 면 지금 비울 수 없다(울타리) — 호출자는
+    /// 그 배치를 보류한다.
+    prepare_image_apply: *const fn (context: *anyopaque) bool,
 };
 
 /// `image_shm` 을 협상하지 않는 transport(`maru attach`·테스트)의 몫 — 적용 자리는 `.unnegotiated` 를 넘긴다(§6·§8).
@@ -206,6 +213,21 @@ pub fn imageNotNegotiated(_: *anyopaque) bool {
 /// 협상하지 않는 transport 의 해석 — `.unnegotiated` 는 resolver 를 부르지 않으므로 닿지 않는다.
 pub fn noImageSegment(_: *anyopaque, _: u64, _: ImageRef) error{OutOfMemory}!?[]const u8 {
     return null;
+}
+
+/// 협상하지 않는 transport 의 적용 준비 — 비울 채널이 없다.
+pub fn noImageChannel(_: *anyopaque) bool {
+    return true;
+}
+
+/// 배치가 `image_ref` 를 싣는가 — 레코드 머리만 훑는다. 망가진 배치는 false 다(적용이 그 오류를 그대로 낸다).
+fn batchCarriesImageRef(bytes: []const u8) bool {
+    var records: screen_stream.RecordStream = .{ .bytes = bytes };
+    while (records.next() catch return false) |record| {
+        const split = screen_stream.RecordStream.split(record) catch return false;
+        if (split.header.kind == .image_ref) return true;
+    }
+    return false;
 }
 
 /// 적용 하나 동안만 사는 resolver ctx — 연결의 transport 와 이 attachment 의 stream 을 묶는다. 맨 `*Client` 를 쥐지 않는다
@@ -260,6 +282,14 @@ pub const RemoteAttachment = struct {
         if (!transport.image_shm_negotiated(transport.context)) return .unnegotiated;
         ctx.* = .{ .transport = transport, .stream_id = self.state.stream_id };
         return .{ .channel = .{ .ctx = ctx, .resolveFn = ImageResolveCtx.resolve } };
+    }
+
+    /// 큐를 거치지 않는 적용 자리(첫 snapshot)의 resolver — 채널을 먼저 비운다. 그 snapshot 의 세그먼트는 attach 응답보다 먼저
+    /// 올 수 있다(§6). 비울 수 없어도 resolver 는 준다 — 맞는 세그먼트가 없으면 malformed 로 그 연결이 재접속한다.
+    pub fn imageRefResolverAfterPump(self: *const RemoteAttachment, ctx: *ImageResolveCtx) ImageRefResolver {
+        const resolver = self.imageRefResolver(ctx);
+        if (resolver == .channel) _ = ctx.transport.prepare_image_apply(ctx.transport.context);
+        return resolver;
     }
 
     pub fn allowsMutation(self: *const RemoteAttachment) bool {
@@ -420,6 +450,16 @@ pub const RemoteAttachment = struct {
         self.compactConsumedBatches();
     }
 
+    /// 큐 머리 배치가 `image_ref` 를 싣는데 이번 tick 에 그 연결의 채널을 비울 수 없는가(§6) — 그러면 그 배치를 머리에 그대로
+    /// 둔다. head 를 넘기고 계상하기 **전**에 부르므로 다음 tick 에 같은 배치를 다시 셀 때 이중 계상이 없다. 협상하지 않은 연결은
+    /// `image_ref` 가 malformed 라 볼 것이 없다. 엿보기는 소비하지 않는다(빌린 view 만 본다).
+    fn headHeldForImageChannel(self: *const RemoteAttachment, transport: AttachmentTransport) bool {
+        if (!transport.image_shm_negotiated(transport.context)) return false;
+        const peek = self.pending_batches.items[self.pending_batch_head].borrow(transport) catch
+            return false; // 정식 borrow 가 같은 실패를 그 자리의 규칙대로 다룬다.
+        return batchCarriesImageRef(peek.bytes) and !transport.prepare_image_apply(transport.context);
+    }
+
     /// Pull one stream-local batch from the borrowed connection into attachment-owned storage,
     /// then apply it to the attachment-owned screen. The queue owns bytes across any future split
     /// between transport and render turns.
@@ -506,6 +546,9 @@ pub const RemoteAttachment = struct {
             transport.fail_closed(transport.context, .attachment_cleanup_failed);
             return error.LedgerInvariant;
         }
+        // 큐 머리가 이미 있으면 그 배치부터 본다 — 보류 중에 새 배치를 읽어 붙이면 보류가 이어지는 동안 큐가 자란다.
+        const head_was_queued = self.pending_batch_head < self.pending_batches.items.len;
+        if (head_was_queued and self.headHeldForImageChannel(transport)) return .held;
         if (try transport.read_batch(transport.context, self.state.stream_id)) |lease| {
             self.pending_batches.append(self.allocator, lease) catch {
                 transport.fail_closed(transport.context, .local_resource_exhausted);
@@ -518,6 +561,8 @@ pub const RemoteAttachment = struct {
         }
         if (self.pending_batch_head == self.pending_batches.items.len) return .idle;
         const lease = self.pending_batches.items[self.pending_batch_head];
+        // 방금 읽어 머리가 된 배치는 여기서 본다(읽기 전에 본 머리는 같은 배치라 다시 보지 않는다 — 준비는 펌프당 한 번).
+        if (!head_was_queued and self.headHeldForImageChannel(transport)) return .held;
         self.pending_batch_head += 1;
         const batch = lease.borrow(transport) catch {
             transport.fail_closed(transport.context, .local_invariant_violation);
@@ -1457,6 +1502,7 @@ const TestTransport = struct {
             .fail_closed = failClosed,
             .image_shm_negotiated = imageNotNegotiated,
             .resolve_image = noImageSegment,
+            .prepare_image_apply = noImageChannel,
         };
     }
 };
@@ -1466,6 +1512,9 @@ const ImageTestTransport = struct {
     batches: [2]?AttachmentBatchLease,
     next: usize = 0,
     negotiated: bool,
+    /// 적용 준비(채널 비우기)가 이번 tick 에 되는가 — false 면 `image_ref` 배치는 보류된다.
+    ready: bool = true,
+    prepared: usize = 0,
     resolved: usize = 0,
     resolved_stream: u64 = 0,
     first_fail_reason: ?client_poison.ConnectionReason = null,
@@ -1489,6 +1538,12 @@ const ImageTestTransport = struct {
     fn negotiatedFn(context: *anyopaque) bool {
         const self: *ImageTestTransport = @ptrCast(@alignCast(context));
         return self.negotiated;
+    }
+
+    fn prepare(context: *anyopaque) bool {
+        const self: *ImageTestTransport = @ptrCast(@alignCast(context));
+        self.prepared += 1;
+        return self.ready;
     }
 
     fn resolve(context: *anyopaque, stream_id: u64, ref: ImageRef) error{OutOfMemory}!?[]const u8 {
@@ -1515,6 +1570,7 @@ const ImageTestTransport = struct {
             .fail_closed = failClosed,
             .image_shm_negotiated = negotiatedFn,
             .resolve_image = resolve,
+            .prepare_image_apply = prepare,
         };
     }
 };
@@ -1574,6 +1630,59 @@ test "image channel wiring: a negotiated transport resolves image_ref in snapsho
     try std.testing.expectEqual(@as(?client_poison.ConnectionReason, null), transport.first_fail_reason);
 }
 
+test "image channel wiring: an image_ref batch that cannot drain the channel yet is held at the head uncounted, and a plain batch is never held" {
+    const allocator = std.testing.allocator;
+    var transport = ImageTestTransport{
+        .batches = .{ try imageRefBatch(allocator, true), try imageRefBatch(allocator, false) },
+        .negotiated = true,
+        .ready = false,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(screen_stream.codec_version);
+
+    // 채널을 비울 수 없는 tick — 배치는 머리에 남고(소비·해석·계상 없음), 다시 펌프해도 같은 배치를 다시 본다.
+    var accounting: catchup_stage_contract.Accounting = .{};
+    try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreenInternal(std.testing.io, &accounting));
+    try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 2), transport.prepared);
+    try std.testing.expectEqual(@as(usize, 0), transport.resolved);
+    try std.testing.expectEqual(@as(usize, 0), attachment.pending_batch_head);
+    // 보류 중에는 다음 배치를 읽지 않는다 — 큐가 자라지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), attachment.pending_batches.items.len);
+    try std.testing.expectEqual(@as(usize, 1), transport.next);
+    try std.testing.expect(std.meta.eql(catchup_stage_contract.Accounting{}, accounting));
+    try std.testing.expect(attachment.screen.?.assembler.imageById(5) == null);
+    // 비울 수 있게 되면 그 배치를 적용한다 — 준비는 이 펌프에서 한 번뿐이다.
+    transport.ready = true;
+    try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 3), transport.prepared);
+    try std.testing.expectEqual(@as(usize, 1), transport.resolved);
+    try std.testing.expect(attachment.screen.?.assembler.imageById(5) != null);
+    // 그 펌프가 읽어 둔 delta 도 적용된다.
+    try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 4), transport.prepared);
+    try std.testing.expectEqual(@as(usize, 2), transport.resolved);
+
+    // `image_ref` 가 없는 배치는 채널과 무관하다 — 준비를 부르지 않고 보류하지 않는다.
+    transport.ready = false;
+    transport.next = 1;
+    transport.batches[1] = .{ .untracked = .{
+        .is_snapshot = true,
+        .stream_id = 7,
+        .bytes = try testSnapshot(allocator),
+        .allocator = allocator,
+    } };
+    try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 4), transport.prepared);
+}
+
 test "image channel wiring: an unnegotiated transport never reaches the resolver and image_ref fails the batch closed" {
     const allocator = std.testing.allocator;
     var transport = ImageTestTransport{
@@ -1592,6 +1701,8 @@ test "image channel wiring: an unnegotiated transport never reaches the resolver
 
     if (attachment.pumpScreen(std.testing.io)) |_| return error.TestUnexpectedResult else |_| {}
     try std.testing.expectEqual(@as(usize, 0), transport.resolved);
+    // 미협상 연결은 채널이 없다 — 적용 준비도 부르지 않는다.
+    try std.testing.expectEqual(@as(usize, 0), transport.prepared);
     try std.testing.expectEqual(@as(?client_poison.ConnectionReason, .frame_malformed), transport.first_fail_reason);
 }
 
@@ -1685,6 +1796,7 @@ const ChargedTestTransport = struct {
             .fail_closed = failClosed,
             .image_shm_negotiated = imageNotNegotiated,
             .resolve_image = noImageSegment,
+            .prepare_image_apply = noImageChannel,
         };
     }
 };
@@ -1787,6 +1899,7 @@ const RecoveryTestTransport = struct {
             .drop_stream = drop,
             .image_shm_negotiated = imageNegotiated,
             .resolve_image = resolveImage,
+            .prepare_image_apply = noImageChannel,
             .fail_closed = failClosed,
         };
     }

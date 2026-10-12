@@ -7423,29 +7423,35 @@ pub const Client = struct {
     /// 이미지 채널을 논블로킹으로 비우고 쌓인 release 를 쓴다(이미지 채널 §6 — 매 tick 과 `image_ref` 배치를 적용하기 직전).
     /// 채널 상실은 「이미지 채널 없음」으로 내리고 주 연결은 그대로 둔다(§3.2). host 의 「메시지당 fd 하나」·미반환 상한
     /// 위반과 앱 fd 고갈은 연결을 poison 한다 — fd 를 잃었을 수 있어 그 연결의 이미지 상태를 더 믿을 수 없다.
-    pub fn pumpImageChannel(self: *Client) void {
+    /// false 는 울타리를 못 잡아 비우지 못했다는 뜻이다 — 적용 직전 호출자는 그 배치를 보류한다(§6). 채널이 없거나 이미 비운
+    /// 연결은 true 다(비울 것이 없다).
+    pub fn pumpImageChannel(self: *Client) bool {
         // 다른 공개 변경 메서드와 같은 울타리 — allocator callback 안·이미 poison 된 연결(표가 어긋난 자리에서 멈췄을 수 있다)·
         // 옮겨 간 Client·external 모드(입양되어 봉인된 상태를 바꾸면 안 된다)에서는 읽지 않는다. 표는 Client 소멸이 닫는다.
-        const operation_fence_held = self.requireBlockingMode() catch return;
+        const operation_fence_held = self.requireBlockingMode() catch return false;
         defer if (operation_fence_held) self.endPublicMutation();
-        if (self.image_channel.state != .bound or self.image_channel.fd < 0) return;
+        if (self.image_channel.state != .bound or self.image_channel.fd < 0) return true;
         // 묶인 채널에는 늘 표가 있다(`negotiateImageChannel` 이 먼저 잡는다).
-        const segments = self.image_segments orelse return;
+        const segments = self.image_segments orelse return true;
         const lost = lost: {
-            segments.drain(self.image_channel.fd) catch |err| switch (err) {
-                error.ChannelLost => break :lost true,
+            segments.drain(self.image_channel.fd) catch |err| {
                 // 공유 울타리는 겹쳐 잡힌다(개수만 센다) — poison 이 자기 울타리를 다시 잡아도 된다. 표의 fd 는 Client 소멸이 닫는다.
-                error.PeerContractViolation => return self.poison(.peer_contract_violation),
-                error.LocalResourceExhausted => return self.poison(.local_resource_exhausted),
+                switch (err) {
+                    error.ChannelLost => break :lost true,
+                    error.PeerContractViolation => self.poison(.peer_contract_violation),
+                    error.LocalResourceExhausted => self.poison(.local_resource_exhausted),
+                }
+                return true;
             };
             segments.flush(self.image_channel.fd) catch break :lost true;
             break :lost false;
         };
-        if (!lost) return;
+        if (!lost) return true;
         // 채널 상실 — host 는 채널 EOF 로 원장을 전부 반환하므로 표의 fd 와 못 보낸 release 를 함께 버린다.
         self.image_channel.deinit();
         self.image_channel.state = .unavailable;
         segments.dropSegments();
+        return true;
     }
 
     /// 이 연결이 `image_shm` 을 협상했는가(이미지 채널 §2·§6). 협상했으면 채널이 없어도(「이미지 채널 없음」) 적용 자리는 채널
@@ -26948,7 +26954,7 @@ test "image channel pump: resolveImageSegment maps a pumped segment once, for it
     fx.client.image_channel.state = .bound;
 
     try fx.sendSegment(1, 3, 1);
-    fx.client.pumpImageChannel();
+    try testing.expect(fx.client.pumpImageChannel());
     const first: screen_stream.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 1, .byte_len = 4 };
     // 다른 stream 은 「세그먼트 없음」이고 항목은 남는다.
     try testing.expect((try fx.client.resolveImageSegment(2, first)) == null);
@@ -26966,7 +26972,7 @@ test "image channel pump: resolveImageSegment maps a pumped segment once, for it
 
     // 울타리: poison 된 연결은 표를 건드리지 않는다.
     try fx.sendSegment(2, 3, 1);
-    fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel();
     try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
     fx.client.poison(.peer_contract_violation);
     var second = first;
@@ -26985,7 +26991,8 @@ test "image channel pump: an external-mode client is not pumped, so its sealed s
     fx.client.connection_profile = .cli_attach;
     fx.client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     const before = externalAdoptionSnapshot(&fx.client);
-    fx.client.pumpImageChannel();
+    // 울타리를 못 잡았다고 알린다 — 적용 직전 호출자는 그 배치를 보류한다.
+    try testing.expect(!fx.client.pumpImageChannel());
     try testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
     try testing.expect(!fx.client.unusable);
     try testing.expect(std.meta.eql(before, externalAdoptionSnapshot(&fx.client)));
@@ -27048,10 +27055,10 @@ test "image channel pump: segments land in the client's table and a returned one
     defer fx.deinit();
     try fx.client.image_segments.?.openStream(1);
     try fx.sendSegment(7, 1, 1);
-    fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel();
     try std.testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
     fx.client.image_segments.?.sweep(1, 7);
-    fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel();
     var buf: [64]u8 = undefined;
     const n = c.read(fx.channel_host, &buf, buf.len);
     try std.testing.expectEqual(@as(isize, @import("image_channel_wire.zig").release_len), n);
@@ -27060,7 +27067,7 @@ test "image channel pump: segments land in the client's table and a returned one
     try std.testing.expect(fx.client.firstPoisonReason() == null);
     // 표에 남은 세그먼트 fd 는 Client 소멸이 닫는다(덜 받은 메시지의 fd 는 표 판정자가 잰다).
     try fx.sendSegment(8, 1, 1);
-    fx.client.pumpImageChannel();
+    _ = fx.client.pumpImageChannel();
     const held = fx.client.image_segments.?.entriesSlice()[0].fd;
     try std.testing.expect(c.fcntl(held, c.F.GETFD) != -1);
     fx.client.deinit();
@@ -27076,14 +27083,15 @@ test "image channel pump: a lost channel drops to no image channel and keeps the
     try fx.sendSegment(7, 1, 1);
     _ = c.close(fx.channel_host);
     fx.channel_host = -1;
-    fx.client.pumpImageChannel();
+    // 채널을 잃어도 펌프는 돌았다(true) — 보류할 이유가 아니다.
+    try std.testing.expect(fx.client.pumpImageChannel());
     try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
     try std.testing.expectEqual(@as(c.fd_t, -1), fx.client.image_channel.fd);
     try std.testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.outstanding());
     try std.testing.expect(fx.client.fd >= 0);
     try std.testing.expect(fx.client.firstPoisonReason() == null);
-    // 다시 불러도 아무 일도 없다.
-    fx.client.pumpImageChannel();
+    // 다시 불러도 아무 일도 없다 — 비울 채널이 없다(true).
+    try std.testing.expect(fx.client.pumpImageChannel());
     try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
 }
 
@@ -27094,12 +27102,14 @@ test "image channel pump: a segment without exactly one fd poisons the connectio
         defer fx.deinit();
         try fx.client.image_segments.?.openStream(1);
         try fx.sendSegment(7, 1, fd_count);
-        fx.client.pumpImageChannel();
+        // 펌프는 돌았다(true) — 위반을 poison 으로 올렸다.
+        try std.testing.expect(fx.client.pumpImageChannel());
         try std.testing.expectEqual(client_poison.ConnectionReason.peer_contract_violation, fx.client.firstPoisonReason().?);
         try std.testing.expectEqual(@as(c.fd_t, -1), fx.client.fd);
         // poison 된 연결은 표가 어긋난 자리에서 멈췄을 수 있다 — 펌프가 다시 읽지 않는다.
         try fx.sendSegment(8, 1, 1);
-        fx.client.pumpImageChannel();
+        // poison 뒤에는 울타리를 못 잡는다(false).
+        try std.testing.expect(!fx.client.pumpImageChannel());
         try std.testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
     }
 }

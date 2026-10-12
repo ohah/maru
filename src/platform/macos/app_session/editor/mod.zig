@@ -63450,3 +63450,309 @@ test "LSAVEW5 완료 슬롯은 새 할당 없이 실제 저장을 전달하고 �
     try testing.expect(!finished);
     try testing.expect(!completion.prepared.finish(fx.session, term));
 }
+
+fn queueLiveForTest(term: *Term, epoch: u64) maru.session.editor.save_ops.Target {
+    const lease = term.rt.editor_document_lease.?;
+    return .{ .epoch = epoch, .token = .{ .document = @intFromPtr(term.rt.editorDocument()), .identity = .{ .owner = @intFromPtr(lease.owner), .slot = lease.document.slot, .generation = lease.document.generation }, .path = term.rt.editorDocument().path.? } };
+}
+fn enqueueSaveForTest(queue: *@import("save/queue.zig").Queue, fx: *PaneFixture, term: *Term, epoch: u64) !@import("save/queue.zig").Admission {
+    var prepared = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    errdefer prepared.deinit(testing.allocator);
+    return queue.enqueue(&prepared, epoch);
+}
+fn awaitSaveQueueForTest(queue: *@import("save/queue.zig").Queue) !*@import("save/queue.zig").Outcome {
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while (std.Io.Clock.awake.now(testing.io).nanoseconds < deadline) {
+        if (queue.poll()) |outcome| return outcome;
+        _ = usleep(2_000);
+    }
+    return error.QueueTimeout;
+}
+
+test "LSAVEQ1 성공한 A 기준으로 B가 CAS 저장하며 추가 편집과 완료 보관 예산을 지킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |bom| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try undoFixture(&fx, testing.allocator, "queue.txt", "old");
+        term.rt.editorDocument().opened.?.file.format.has_bom = bom;
+        term.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, term, "!"));
+        var queue = @import("save/queue.zig").Queue.init(testing.allocator, .{ .requests = 3, .bytes = 4096 });
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            queue.deinit();
+        }
+        const first = try enqueueSaveForTest(&queue, &fx, term, 1);
+        try queue.startBlockedForTest(queueLiveForTest(term, 1), &gate);
+        try testing.expect(queue.poll() == null);
+        try testing.expect(insertText(fx.session, term, "?"));
+        const second = try enqueueSaveForTest(&queue, &fx, term, 1);
+        const charged = queue.charged_bytes;
+        const joined = try enqueueSaveForTest(&queue, &fx, term, 1);
+        try testing.expect(joined.joined and joined.id == second.id);
+        try testing.expectEqual(charged, queue.charged_bytes);
+        gate.set();
+        const a = try awaitSaveQueueForTest(&queue);
+        try testing.expectEqual(first.id, a.id);
+        try testing.expect(a.failure == null);
+        try testing.expect(queue.poll().? == a);
+        try testing.expectEqual(@as(usize, 2), queue.requestCount());
+        try testing.expectEqual(charged, queue.charged_bytes);
+        try testing.expectError(error.Busy, queue.startNext(queueLiveForTest(term, 1)));
+        try testing.expectError(error.UnappliedCompletion, queue.ack(true));
+        const before_completion = term.rt.editorDocument().opened.?.disk_hash;
+        try testing.expect(!queue.apply(fx.session, term, queueLiveForTest(term, 2)));
+        try testing.expectEqual(before_completion, term.rt.editorDocument().opened.?.disk_hash);
+        try testing.expect(queue.apply(fx.session, term, queueLiveForTest(term, 1)));
+        try testing.expect(!queue.apply(fx.session, term, queueLiveForTest(term, 1)));
+        try testing.expect(isDirty(term));
+        const raw_hash = contentHash(a.prepared.bytes);
+        try queue.ack(true);
+        try testing.expectEqual(@as(?u64, raw_hash), queue.waiting.items[0].prepared.expected_disk);
+        try queue.startNext(queueLiveForTest(term, 1));
+        const b = try awaitSaveQueueForTest(&queue);
+        try testing.expectEqual(second.id, b.id);
+        try testing.expect(b.failure == null);
+        try testing.expect(queue.apply(fx.session, term, queueLiveForTest(term, 1)));
+        try queue.ack(true);
+        try testing.expect(!isDirty(term));
+        try testing.expectEqual(@as(usize, 0), queue.charged_bytes);
+        try testing.expectEqual(@as(usize, 0), queue.requestCount());
+        try testing.expect(queue.poll() == null);
+        const disk = try fx.dir.dir.readFileAlloc(testing.io, "queue.txt", testing.allocator, .limited(100));
+        defer testing.allocator.free(disk);
+        try testing.expectEqualStrings(if (bom) "\xef\xbb\xbfold!?" else "old!?", disk);
+    }
+}
+
+test "LSAVEQ2 A 외부 충돌 뒤 B는 외부 기준을 채택하지 않고 실패 본문과 디스크를 지킨다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "queue.txt", "old");
+    const original_hash = term.rt.editorDocument().opened.?.disk_hash;
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    var queue = @import("save/queue.zig").Queue.init(testing.allocator, .{ .requests = 3, .bytes = 4096 });
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        queue.deinit();
+    }
+    _ = try enqueueSaveForTest(&queue, &fx, term, 1);
+    try queue.startBlockedForTest(queueLiveForTest(term, 1), &gate);
+    try testing.expect(insertText(fx.session, term, "?"));
+    _ = try enqueueSaveForTest(&queue, &fx, term, 1);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "queue.txt", .data = "outside" });
+    gate.set();
+    const a = try awaitSaveQueueForTest(&queue);
+    try testing.expectEqual(@as(?anyerror, error.ExternalConflict), a.failure);
+    try testing.expectError(error.UnappliedCompletion, queue.ack(true));
+    try queue.ack(false);
+    try testing.expectEqual(original_hash, queue.waiting.items[0].prepared.expected_disk);
+    try queue.startNext(queueLiveForTest(term, 1));
+    const b = try awaitSaveQueueForTest(&queue);
+    try testing.expectEqual(@as(?anyerror, error.ExternalConflict), b.failure);
+    try queue.ack(false);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "queue.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("outside", disk);
+    try testing.expectEqualStrings("old!?", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(term));
+}
+
+test "LSAVEQ3 A B A 요청은 옛 A에 합류하지 않고 마지막 A까지 순서대로 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "queue.txt", "old");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    var third_snapshot = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    var owns_third = true;
+    defer if (owns_third) third_snapshot.deinit(testing.allocator);
+    var queue = @import("save/queue.zig").Queue.init(testing.allocator, .{ .requests = 3, .bytes = 4096 });
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        queue.deinit();
+    }
+    const first = try enqueueSaveForTest(&queue, &fx, term, 1);
+    try queue.startBlockedForTest(queueLiveForTest(term, 1), &gate);
+    try testing.expect(insertText(fx.session, term, "?"));
+    const second = try enqueueSaveForTest(&queue, &fx, term, 1);
+    const third = try queue.enqueue(&third_snapshot, 1);
+    owns_third = false;
+    try testing.expect(!third.joined and third.id != first.id and third.id != second.id);
+    try testing.expectEqual(@as(usize, 3), queue.requestCount());
+    gate.set();
+    for ([_]u64{ first.id, second.id, third.id }, 0..) |id, i| {
+        if (i != 0) try queue.startNext(queueLiveForTest(term, 1));
+        const outcome = try awaitSaveQueueForTest(&queue);
+        try testing.expectEqual(id, outcome.id);
+        try testing.expect(outcome.failure == null);
+        try testing.expect(queue.apply(fx.session, term, queueLiveForTest(term, 1)));
+        try queue.ack(true);
+    }
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "queue.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("old!", disk);
+    try testing.expectEqualStrings("old!?", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(term));
+    // 다른 대상 세대가 끼어도 이전 세대의 요청을 다시 꺼내 합류시키지 않는다.
+    var epochs = @import("save/queue.zig").Queue.init(testing.allocator, .{ .requests = 3, .bytes = 4096 });
+    defer epochs.deinit();
+    const old_epoch = try enqueueSaveForTest(&epochs, &fx, term, 1);
+    _ = try enqueueSaveForTest(&epochs, &fx, term, 2);
+    const last_epoch = try enqueueSaveForTest(&epochs, &fx, term, 1);
+    try testing.expect(!last_epoch.joined and old_epoch.id != last_epoch.id);
+    try testing.expectEqual(@as(usize, 3), epochs.requestCount());
+}
+
+test "LSAVEQ4 요청 본문 예산과 OOM ID 실패는 실행 중 비용을 포함하고 caller 자료를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "queue.txt", "old");
+    for (0..3) |mode| {
+        var candidate = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+        var owns_candidate = true;
+        defer if (owns_candidate) candidate.deinit(testing.allocator);
+        const cost = candidate.bytes.len + candidate.path.len;
+        var queue = @import("save/queue.zig").Queue.init(testing.allocator, .{ .requests = if (mode == 0) 1 else 3, .bytes = if (mode == 1) cost - 1 else 4096 });
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            queue.deinit();
+        }
+        if (mode == 0) {
+            _ = try enqueueSaveForTest(&queue, &fx, term, 1);
+            try queue.startBlockedForTest(queueLiveForTest(term, 1), &gate);
+        }
+        if (mode == 2) queue.next_id = std.math.maxInt(u64);
+        // 같은 본문이더라도 다른 target epoch는 합류하지 않는다.
+        const result = queue.enqueue(&candidate, 2);
+        if (result) |_| {
+            owns_candidate = false;
+        } else |_| {}
+        try testing.expectError(switch (mode) {
+            0 => error.QueueFull,
+            1 => error.TooLarge,
+            else => error.IdExhausted,
+        }, result);
+        try testing.expectEqualStrings("old", candidate.content());
+    }
+    var candidate = try @import("local_save.zig").Prepared.init(fx.session, term, .cas);
+    defer candidate.deinit(testing.allocator);
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    var queue = @import("save/queue.zig").Queue.init(failing.allocator(), .{ .requests = 3, .bytes = 4096 });
+    defer queue.deinit();
+    try testing.expectError(error.OutOfMemory, queue.enqueue(&candidate, 1));
+    try testing.expectEqualStrings("old", candidate.content());
+    try testing.expectEqual(@as(usize, 0), queue.charged_bytes);
+    try testing.expectEqual(@as(u64, 1), queue.next_id);
+    // 큐 등록은 성공했지만 worker 완료 슬롯 확보가 실패해도 head와 예산은 그대로다.
+    var fail_start = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });
+    var queued = @import("save/queue.zig").Queue.init(fail_start.allocator(), .{ .requests = 3, .bytes = 4096 });
+    defer queued.deinit();
+    _ = try enqueueSaveForTest(&queued, &fx, term, 1);
+    const charged = queued.charged_bytes;
+    try testing.expectError(error.OutOfMemory, queued.startNext(queueLiveForTest(term, 1)));
+    try testing.expectEqual(@as(usize, 1), queued.requestCount());
+    try testing.expectEqual(charged, queued.charged_bytes);
+    try testing.expectEqualStrings("old", queued.waiting.items[0].prepared.content());
+    try testing.expect(queued.running == null);
+}
+
+test "LSAVEQ5 늦은 대상 epoch와 닫힌 문서 slot 재사용은 시작과 완료에서 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |mode| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const old = try undoFixture(&fx, testing.allocator, "queue.txt", "old");
+        var queue = @import("save/queue.zig").Queue.init(testing.allocator, .{ .requests = 3, .bytes = 4096 });
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            queue.deinit();
+        }
+        if (mode == 2) {
+            old.rt.editor_selection = editor_selection.Selection.at(3);
+            try testing.expect(insertText(fx.session, old, "!"));
+        }
+        _ = try enqueueSaveForTest(&queue, &fx, old, 1);
+        if (mode == 2) try queue.startBlockedForTest(queueLiveForTest(old, 1), &gate);
+        const live = if (mode == 0) old else blk: {
+            const handle = old.rt.editor_document_lease.?.document;
+            linkedFixtureClose(&fx, old);
+            const replacement = try undoFixture(&fx, testing.allocator, "queue.txt", if (mode == 2) "old" else "new");
+            try testing.expectEqual(handle.slot, replacement.rt.editor_document_lease.?.document.slot);
+            try testing.expect(handle.generation != replacement.rt.editor_document_lease.?.document.generation);
+            break :blk replacement;
+        };
+        if (mode == 2) {
+            const baseline = live.rt.editorDocument().opened.?.disk_hash;
+            gate.set();
+            const outcome = try awaitSaveQueueForTest(&queue);
+            try testing.expect(outcome.failure == null);
+            // 이미 시작한 쓰기는 끝나도 새 문서의 disk 기준/clean 상태는 갱신하지 않는다.
+            try testing.expect(!queue.apply(fx.session, live, queueLiveForTest(live, 1)));
+            try testing.expectEqual(baseline, live.rt.editorDocument().opened.?.disk_hash);
+            try testing.expectEqualStrings("old", live.rt.editorDocument().opened.?.file.content);
+        } else {
+            try testing.expectError(error.StaleTarget, queue.startNext(queueLiveForTest(live, 2)));
+            try queue.rejectNext();
+            const outcome = queue.poll().?;
+            try testing.expectEqual(@as(?anyerror, error.StaleTarget), outcome.failure);
+        }
+        try queue.ack(false);
+        try testing.expectEqual(@as(usize, 0), queue.requestCount());
+        const disk = try fx.dir.dir.readFileAlloc(testing.io, "queue.txt", testing.allocator, .limited(100));
+        defer testing.allocator.free(disk);
+        try testing.expectEqualStrings(switch (mode) {
+            0 => "old",
+            1 => "new",
+            else => "old!",
+        }, disk);
+    }
+}
+
+test "LSAVEQ6 한 문서의 충돌은 다른 문서의 저장 기준과 완료를 오염시키지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const first = try undoFixture(&fx, testing.allocator, "queue.txt", "old");
+    first.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, first, "!"));
+    const second = try undoFixture(&fx, testing.allocator, "peer.txt", "peer");
+    second.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(insertText(fx.session, second, "!"));
+    const second_baseline = second.rt.editorDocument().opened.?.disk_hash;
+    var queue = @import("save/queue.zig").Queue.init(testing.allocator, .{ .requests = 3, .bytes = 4096 });
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        queue.deinit();
+    }
+    _ = try enqueueSaveForTest(&queue, &fx, first, 1);
+    try queue.startBlockedForTest(queueLiveForTest(first, 1), &gate);
+    _ = try enqueueSaveForTest(&queue, &fx, second, 1);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "queue.txt", .data = "outside" });
+    gate.set();
+    const a = try awaitSaveQueueForTest(&queue);
+    try testing.expectEqual(@as(?anyerror, error.ExternalConflict), a.failure);
+    try queue.ack(false);
+    try testing.expectEqual(second_baseline, queue.waiting.items[0].prepared.expected_disk);
+    try queue.startNext(queueLiveForTest(second, 1));
+    const b = try awaitSaveQueueForTest(&queue);
+    try testing.expect(b.failure == null);
+    try testing.expect(queue.apply(fx.session, second, queueLiveForTest(second, 1)));
+    try queue.ack(true);
+    try testing.expect(isDirty(first) and !isDirty(second));
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "peer.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("peer!", disk);
+    try testing.expectEqual(@as(?u64, 99), maru.session.editor.save_ops.successorBaseline(1, 99, 2));
+}

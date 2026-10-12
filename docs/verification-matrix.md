@@ -4274,3 +4274,5 @@ main queue 대기는 FPS가 아니며, 지연 주입은 실제 원격 파일시�
 로컬 저장의 준비/쓰기/완료는 [분리 계획](plans/editor-local-save.md)의 LSAVE1과 기존 배치 회귀, 제품 저장 실패/재시도 하네스로 검증한다. 호출은 동기이며 비동기 정책과 성능 개선의 완료 증거가 아니다.
 
 로컬 저장 worker 기반은 [비동기 연결 계획](plans/editor-local-save-async.md)의 LSAVEW1~5로 검증한다. 실제 CAS 쓰기·재편집 후 dirty·raw BOM·오류 보존·OOM/Busy 소유권·단일 완료·join을 검사한다. 사용자 저장은 계속 동기이며 종료/큐/watcher/UI 정책과 제품 응답 지연의 개선은 아직 검증 범위 밖이다.
+
+저장 큐 기반은 같은 로컬 저장 gate의 LSAVEQ1~6으로 실제 성공/실패 후 CAS 인계·A→B→A·예산/할당/완료 소유권·대상 epoch·문서 slot 재사용·문서 간 격리를 검사한다. 제품 ⌘S/watcher/닫기/배치 연결과 전역 기본 예산은 별도 단계다.

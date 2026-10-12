@@ -502,8 +502,7 @@ bool maru_metal_renderer_set_atlas(
 }
 
 /* 한 cell을 6 정점 quad로 채운다(out에 6개 기록). 세로 위치/높이(py_top, cell_h)는 caller가 계산해
-   넘긴다 — 터미널 셀(py=row×ch), 사이드바 밴드(py=row×slot_h, 높이 slot_h), 사이드바 제목 glyph
-   (py=슬롯 안 중앙, 높이 ch)가 같은 함수를 공유한다. 가로는 origin_x + col×cw. reserved 부분 사각형
+   넘긴다 — 터미널 셀(py=row×ch)과 사이드바 셀(py=Zig가 실은 화면 y, 높이 ch)이 같은 함수를 공유한다. 가로는 origin_x + col×cw. reserved 부분 사각형
    (2=underline 하단, 3=bar 좌측)과 색(전경 0x00RRGGBB·배경 0xAARRGGBB) 처리는 동일하다. */
 static void maru_fill_cell_quad(
     MaruRendererVertex *out,
@@ -1444,39 +1443,18 @@ bool maru_metal_renderer_draw(
             }
         }
         quad_index += 2 * cell_count;
-        // 3) 사이드바 cells — origin 0, 배경 quad 위에 그린다(painter 순서). 탭 슬롯 높이로 배치하되 셀 종류를
-        //    slot_id로 구분한다: 밴드(slot_id==0, sentinel UV)는 row=slot(=표시 row 인덱스)으로 슬롯 전체를 채운다
-        //    (py=row×slot_h, 높이 slot_h). 카드 glyph(slot_id≠0)는 **세로 위치를 Zig가 origin_y에 실어 준다**
-        //    (app_session.applySidebarGlyphPyTop: rowTop 기반 content-상대 py = Σ앞선 row 높이 + 블록중앙 + 줄오프셋).
-        //    옛 균일 인코딩(row=slot*32… → slot×slot_h + 블록중앙)은 그룹 헤더가 slot보다 낮아 카드가 위로 어긋나
-        //    폐기했다(SG3b-2-ii, code-review #1·#5·#6). **origin_x·origin_y는 이미 화면 좌표다** — 헤더 시프트·스크롤
-        //    (`chrome.components.sidebar.listToScreenY`, ABI 224)과 칸 미만 여백(ABI 223)을 Zig가 반영한다. 렌더러는
-        //    그대로 그리고, 헤더 위로 샌 셀은 아래 scissor가 자른다(구간도 Zig가 정한다). 예전에는 여기서 헤더−스크롤을
-        //    더했는데 같은 식이 밴드 quad·caret 쪽 Zig 에도 있어 셋이 따로 움직일 수 있었다.
-        const float slot_h = (sidebar_slot_height_px > 0u) ? (float)sidebar_slot_height_px : ch;
+        // 3) 사이드바 cells — 배경 quad 위에 그린다(painter 순서). **자리는 전부 Zig가 정한 화면 좌표다**:
+        //    origin_y = 헤더·스크롤까지 반영한 줄 자리(`sidebar_glyph_rows.fillScreenOriginY` — 글자도 배경·장식선도 같은
+        //    row 인코딩이라 같은 식, ABI 224·225), origin_x = 칸 미만 여백(`Columns.text_offset_px`, ABI 223). 렌더러는
+        //    그대로 그리고, 헤더 위로 샌 셀은 아래 scissor가 자른다(구간도 Zig가 정한다). 예전에는 여기서 헤더−스크롤과
+        //    반 칸을 더했고, 옛 tui 밴드 셀(slot_id==0)을 `atlas_height_px ?: slot_h` 높이로 따로 그리는 갈래가 있었다 —
+        //    그 밴드는 GPU quad 로 옮겨 가 갈래가 비어 있었다(판정자가 사이드바 셀의 글자 아닌 셀 개수 0 을 쟀다).
+        (void)sidebar_slot_height_px; // 옛 밴드 갈래만 쓰던 값 — C ABI 시그니처라 인자는 남는다(Swift 호출부와 함께 지울 일)
         for (size_t i = 0; i < sidebar_cells_n; i++) {
             const MaruAppHostMetalCell sc = sidebar_cells[i];
-            float py_top, cell_h, sx_origin;
-            if (sc.slot_id == 0u) { // 밴드/배경 — 세로 위치(origin_y)·높이(atlas_height_px)를 Zig가 실어 준다(가변 높이 #7·#8)
-                // 옛 균일 기하(row*slot_h·높이 slot_h)를 폐기: 그룹 헤더(header_row_h<slot_h)가 앞서면 밴드가 slot_h
-                // 격자로 어긋났다(code-review #7). 이제 lowerSidebar가 chrome content-상대 rowTop을 origin_y로, 실제 row
-                // 높이를 atlas_height_px로 실어 준다(glyph 옵션2와 동형). 여기선 헤더 시프트·스크롤만 더한다 — 밴드/glyph
-                // 단일 스크롤 소스. past-end(리스트 아래 새 워크스페이스 드롭 행)도 origin_y=contentHeight로 정상 방출(#8).
-                // (rich 이후 사이드바 셀은 글자뿐이라 이 갈래는 비어 있다 — 판정자가 개수 0 을 고정한다.)
-                py_top = (float)sc.origin_y;
-                cell_h = (sc.atlas_height_px > 0u) ? (float)sc.atlas_height_px : slot_h;
-                sx_origin = 0.0f;
-            } else { // 카드 glyph — 세로 위치(블록중앙 포함 content-상대 py)는 Zig가 origin_y에 실어 준다(가변 높이, SG3b-2-ii)
-                // 옛 균일 기하(slot_idx*slot_h + 블록중앙)를 폐기: 그룹 헤더(header_row_h<slot_h)가 앞서면 카드가 헤더
-                // 높이만큼 위로 어긋났다(code-review #1·#5·#6). 이제 applySidebarGlyphPyTop이 rowTop 기반 py를 origin_y에
-                // 넣는다 — 헤더·스크롤까지 반영한 화면 y다(밴드 quad 와 같은 식).
-                py_top = (float)sc.origin_y;
-                cell_h = ch;
-                // 가로 자리는 Zig가 origin_x에 싣는다(칸 미만 여백 — `chrome.components.sidebar.Columns.text_offset_px`).
-                // 예전에는 여기서 `cw*0.5`를 더했는데 hit-test·IME caret이 그 반 칸을 몰라, ✕가 누르는 칸보다 반 칸
-                // 오른쪽에 그려졌다(그린 ✕의 오른쪽 절반을 누르면 카드 전환 — 2026-10-12). 렌더러는 값을 다시 적지 않는다.
-                sx_origin = (float)sc.origin_x;
-            }
+            const float py_top = (float)sc.origin_y;
+            const float cell_h = ch;
+            const float sx_origin = (float)sc.origin_x;
             // 사이드바 글리프는 확대하지 않는다 — 에이전트 심볼(✶/◆)도 셀 크기 그대로다. 예전에는 여기서 「gutter col 0
             // 의 sparkle·diamond」를 codepoint로 골라 1.1×로 늘렸는데, 세션 목록 아이콘이 인라인(col
             // session_row_indent_cols)으로 옮겨 간 뒤(5b620d67d) col 0에는 접기 삼각만 와서 그 조건이 한 번도 참이 되지

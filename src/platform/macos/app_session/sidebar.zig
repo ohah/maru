@@ -2471,7 +2471,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
 /// `rowTop` 과 같은 식, ABI 224). 예전에는 목록 상대로 두고 .m 이 헤더−스크롤을 더했다 — 「스크롤만 바뀌면 재계산이
 /// 필요 없다」는 이유였지만 스크롤은 어차피 전체 투영을 일으켜 셀을 매번 다시 만들었으므로 얻는 것이 없었다.
 /// 스크롤은 사이드바 지문(`sidebarSourceKey` 의 chrome 기하)에 들어 있어, 바뀌면 셀도 다시 만들어진다.
-/// slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 밴드/배경 셀(slot_id==0)은 손대지 않는다.
+/// slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 글자 아닌 셀(slot_id==0 — 배경·장식선)도 같은 줄 자리에 놓는다.
 /// replace/replaceSidebar **성공** 직후 metal_buffer.sidebar_cells에 in-place 적용한다 — 실패한 교체 뒤에 부르면 옛
 /// 셀에 새 스크롤이 들어가 옛 밴드 quad 와 어긋난다.
 pub fn applySidebarGlyphPyTop(self: *AppSession) void {
@@ -2488,9 +2488,7 @@ pub fn applySidebarGlyphPyTop(self: *AppSession) void {
     // 가로 자리도 Zig 가 정한다 — 렌더러는 `origin_x + col×cw` 를 그대로 그린다. 그 값은 hit-test(`closeXRange`)·
     // rename caret 과 같은 `Columns.text_offset_px` 다(여기서 따로 셈하면 그리는 자리와 누르는 자리가 다시 갈린다).
     const offset_px: u32 = if (sidebarColumns(self)) |cl| cl.text_offset_px else 0;
-    for (self.metal_buffer.sidebar_cells) |*c| {
-        if (c.slot_id != 0) c.origin_x = offset_px;
-    }
+    for (self.metal_buffer.sidebar_cells) |*c| c.origin_x = offset_px; // 글자 아닌 셀(배경·장식선)도 같은 열 자리다
 }
 
 /// 사이드바 셀을 만드는 **입력 전체**를 `out` 에 바이트로 적는다 — `MetalFrameBuffer.sidebarSourceIs` 의 지문.
@@ -2590,7 +2588,7 @@ pub fn sidebarBlockHeight(line_count: u32, ch: u32) u32 {
 /// headless-테스트 가능한 코어(self 없이 rows·메트릭만). slot=**표시 row 인덱스**(sidebarGlyphRow 인코딩; SG3c에서 헤더도
 /// slot을 차지해 카드·헤더 통일 도메인). content_tops는 **모든 row**(카드·헤더)에 한 엔트리씩 = Σ(앞선 row 높이;
 /// 카드=slot_h·헤더=header_row_h) — rowTop의 헤더·스크롤 제외분. 블록중앙은 그 row 높이(rowHeight; 헤더=header_row_h·
-/// 카드=slot_h)로 잡아 헤더 한 줄이 얇은 밴드 안에서 세로 중앙에 온다. 밴드/배경 셀(slot_id==0)은 손대지 않는다(row 인덱스·별도 기하).
+/// 카드=slot_h)로 잡아 헤더 한 줄이 얇은 밴드 안에서 세로 중앙에 온다. 글자 아닌 셀(slot_id==0)도 같은 줄 자리에 놓는다(같은 row 인코딩).
 pub fn fillSidebarGlyphPyTop(allocator: std.mem.Allocator, cells: []metal_frame.NativeMetalCell, rows: []const chrome.components.sidebar.Row, m: chrome.components.sidebar.Metrics) void {
     // 규칙은 **중립이 소유한다**(`sidebar_glyph_rows.fillOriginY`) — 접는 쪽(`sidebarGlyphRow`)과
     // 한 파일에 있어야 갈리지 않고, Windows 사이드바도 같은 것을 쓴다.

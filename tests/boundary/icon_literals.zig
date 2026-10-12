@@ -449,9 +449,10 @@ test "사이드바 카드 글자의 가로 여백은 Objective-C 가 다시 적�
             return error.SidebarTextOffsetMirrorRevived;
         }
     }
-    // 개수로 확인한다 — 대입이 사라지거나 이름이 바뀌면 위 루프가 아무것도 안 잰다.
+    // 개수로 확인한다 — 대입이 사라지거나 이름이 바뀌면 위 루프가 아무것도 안 잰다. 사이드바 셀은 한 갈래다
+    // (옛 tui 밴드 갈래 `sx_origin = 0.0f` 는 없어졌다 — 글자 아닌 셀도 Zig가 같은 자리에 놓는다).
     try std.testing.expectEqual(@as(usize, 1), reads_cell);
-    try std.testing.expectEqual(@as(usize, 1), zero);
+    try std.testing.expectEqual(@as(usize, 0), zero);
 }
 
 // 세로도 같다 — 사이드바 셀의 `origin_y` 는 **화면 y** 다(헤더·스크롤까지 `chrome.components.sidebar.listToScreenY`, ABI 224).
@@ -463,8 +464,8 @@ test "사이드바 셀의 세로 자리는 Objective-C 가 다시 적지 않는�
     defer allocator.free(raw_mirror);
     const mirror = try stripCComments(allocator, raw_mirror);
     defer allocator.free(mirror);
-    // 사이드바 루프의 두 갈래(밴드·글자)가 각각 하나씩 그대로 읽는다.
-    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, mirror, "py_top = (float)sc.origin_y;"));
+    // 사이드바 루프는 한 갈래다 — 모든 사이드바 셀이 Zig가 실은 화면 y 를 그대로 읽는다.
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, mirror, "py_top = (float)sc.origin_y;"));
     // 그 값에 산술이 붙으면 안 된다(공백 변형까지 — `sc.origin_y` 바로 뒤에 오는 첫 비공백 글자를 본다).
     var search: usize = 0;
     var reads: usize = 0;
@@ -484,7 +485,7 @@ test "사이드바 셀의 세로 자리는 Objective-C 가 다시 적지 않는�
             return error.SidebarVerticalMirrorRevived;
         }
     }
-    try std.testing.expect(reads >= 2); // 개수로 확인 — 읽는 자리가 사라지면 위 검사가 아무것도 안 잰다
+    try std.testing.expect(reads >= 1); // 개수로 확인 — 읽는 자리가 사라지면 위 검사가 아무것도 안 잰다
 }
 
 test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {

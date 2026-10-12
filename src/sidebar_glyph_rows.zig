@@ -50,8 +50,9 @@ pub fn decode(row: u16) struct { slot: usize, line_count: u16, line_index: u16 }
 /// 누적하면 글자만 여백 위로 올라가 **밴드가 글자보다 한 줄 아래로 밀린다**(사용자 제보). 밴드·
 /// 글자·클릭 셋이 같은 기준을 써야 "보이는 곳 = 눌리는 곳" 이 성립한다.
 ///
-/// **밴드/배경 셀(`slot_id == 0`)은 손대지 않는다** — 그쪽은 행 번호가 인코딩이 아니라 실제 행
-/// 인덱스이고 기하도 따로다.
+/// **글자 아닌 셀(`slot_id == 0` — 배경·장식선)도 같은 규칙으로 놓는다.** 그런 셀은 자기 글자와 같은 `row`
+/// 인코딩을 들고 나오므로 같은 줄 자리에 서야 한다. 예전에는 옛 tui 룩의 밴드 셀(행 번호가 실제 행 인덱스였다)
+/// 때문에 건너뛰었는데, 그 밴드는 GPU quad 로 옮겨 가 이제 사이드바 셀은 전부 이 인코딩이다(2026-10-12).
 pub fn fillOriginY(
     allocator: std.mem.Allocator,
     cells: []metal_frame.NativeMetalCell,
@@ -68,7 +69,6 @@ pub fn fillOriginY(
         acc +|= sidebar.rowHeight(row, m);
     }
     for (cells) |*c| {
-        if (c.slot_id == 0) continue;
         const d = decode(c.row);
         if (d.slot >= content_tops.items.len) continue; // 매핑 밖(비정상)이면 건너뜀
         const row_h = sidebar.rowHeight(rows[d.slot], m);
@@ -98,7 +98,6 @@ pub fn fillScreenOriginY(
 ) void {
     fillOriginY(allocator, cells, rows, m);
     for (cells) |*c| {
-        if (c.slot_id == 0) continue;
         const y = sidebar.listToScreenY(c.origin_y, top_px, scroll_px);
         c.origin_y = @intCast(std.math.clamp(y, 0, std.math.maxInt(u32)));
     }
@@ -184,13 +183,14 @@ test "여러 줄은 line_step 만큼 내려간다" {
     try testing.expectEqual(cells[0].origin_y + 2 * m.line_step, cells[1].origin_y);
 }
 
-test "밴드 셀(slot_id == 0)은 안 건드린다 — 기하가 다르다" {
+test "글자 아닌 셀(slot_id == 0)도 같은 줄의 글자와 같은 자리에 선다 — 배경·장식선" {
     const m = sidebar.Metrics.init(20, 20);
-    const rows = [_]sidebar.Row{.{ .card = .{ .tab = 0, .label = "a", .active = true, .lines = 1 } }};
-    var cells = [_]metal_frame.NativeMetalCell{testCell(0, 0)};
-    cells[0].origin_y = 12345;
+    const rows = [_]sidebar.Row{.{ .card = .{ .tab = 0, .label = "a", .active = true, .lines = 3 } }};
+    // 같은 줄(둘째 줄)의 글자 셀과 배경 셀 — 렌더러는 둘 다 `origin_y` 를 그대로 그린다.
+    var cells = [_]metal_frame.NativeMetalCell{ testCell(encode(0, 1, 3), 7), testCell(encode(0, 1, 3), 0) };
+    cells[1].origin_y = 12345;
     fillOriginY(testing.allocator, &cells, &rows, m);
-    try testing.expectEqual(@as(u32, 12345), cells[0].origin_y);
+    try testing.expectEqual(cells[0].origin_y, cells[1].origin_y);
 }
 
 test "매핑 밖 슬롯은 건너뛴다 — 방어" {
@@ -232,11 +232,11 @@ test "fillScreenOriginY: 위로 밀려 음수가 된 셀은 0 이다 — 헤더 
     try testing.expect(cells[0].origin_y + m.line_h <= header);
 }
 
-test "fillScreenOriginY: 밴드 셀(slot_id == 0)은 안 건드린다" {
+test "fillScreenOriginY: 글자 아닌 셀(slot_id == 0)도 같은 화면 자리에 선다" {
     const m = sidebar.Metrics.init(20, 20);
     const rows = [_]sidebar.Row{.{ .card = .{ .tab = 0, .label = "a", .active = true, .lines = 1 } }};
-    var cells = [_]metal_frame.NativeMetalCell{testCell(0, 0)};
-    cells[0].origin_y = 12345;
+    var cells = [_]metal_frame.NativeMetalCell{ testCell(encode(0, 0, 1), 7), testCell(encode(0, 0, 1), 0) };
+    cells[1].origin_y = 12345;
     fillScreenOriginY(testing.allocator, &cells, &rows, m, 40, 10);
-    try testing.expectEqual(@as(u32, 12345), cells[0].origin_y);
+    try testing.expectEqual(cells[0].origin_y, cells[1].origin_y);
 }

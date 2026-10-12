@@ -320,7 +320,10 @@ fn navButtonAt(x_px: f64, band_x: u32, cw: u32) ?NavButton {
 // 224: 사이드바 카드 glyph 셀의 `origin_y` 가 목록 상대에서 **화면 y** 로 바뀐다 — 헤더·스크롤을 Zig 가
 // `chrome.components.sidebar.listToScreenY`(밴드 quad·caret 과 같은 식)로 반영하고 .m 은 그대로 그린다. layout 은
 // 그대로지만 낡은 .m 은 헤더−스크롤을 한 번 더 더하므로 짝이 같이 올라가야 한다.
-pub const abi_version: u32 = 224;
+// 225: 사이드바의 글자 아닌 셀(slot_id==0 — 배경·장식선)도 글자와 같은 화면 자리(`origin_x`·`origin_y`)를 받고, .m 은
+// 사이드바 셀을 한 갈래로 그린다(옛 tui 밴드 갈래 `atlas_height_px ?: slot_h` 높이를 지웠다). 지금 그런 셀은 안 나오지만
+// 낡은 .m 은 그것을 밴드로 읽어 높이를 바꾸므로 짝이 같이 올라간다.
+pub const abi_version: u32 = 225;
 // 166: CIM4b — MaruAppHostDividerSmokeProbe 끝에 탭 드래그 관측 8필드(tab_bar_present/tab_count/tab_first_x_px/
 // tab_slot_w_px/tab_bar_y_px/tab_drag_active/tab_visible_first_id/tab_model_first_id) 추가. 기존 필드 offset과
 // export 시그니처는 불변이지만 **레코드가 40바이트 커진다** — Swift는 이 구조체를 자기 스택에 잡고 Zig가 채우므로,
@@ -39311,8 +39314,14 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
             return .{ .row = coretext_frame_builder.sidebarGlyphRow(row_idx, li, lc), .col = 0, .width = 1, .codepoint = 'x', .slot_id = 7, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = 0, .v0 = 0, .u1 = 0, .v1 = 0 };
         }
     }.make;
-    // 밴드 셀(slot_id==0, row=표시 row 인덱스) — 손대지 않아야 한다.
-    const bandCell: metal_frame.NativeMetalCell = .{ .row = 1, .col = 0, .width = 1, .codepoint = 0, .slot_id = 0, .atlas_x_px = 0, .atlas_y_px = 0, .atlas_width_px = 0, .atlas_height_px = 0, .u0 = -1, .v0 = -1, .u1 = -1, .v1 = -1 };
+    // 글자 아닌 셀(slot_id==0 — 배경·장식선)은 **자기 글자와 같은 row 인코딩**을 든다. 옛 tui 룩의 밴드 셀(row=표시 row
+    // 인덱스)은 GPU quad 로 옮겨 가 없어졌으므로, 이제 이 셀도 같은 줄 자리에 놓여야 한다(ABI 225).
+    var decoCell = glyphCell(1, 0, 1);
+    decoCell.slot_id = 0;
+    decoCell.u0 = -1;
+    decoCell.v0 = -1;
+    decoCell.u1 = -1;
+    decoCell.v1 = -1;
 
     // (A) 가변 높이 + 헤더 glyph: [헤더(24), 카드(100), 카드(100)]. slot=표시 row 인덱스라 헤더도 slot0을 차지한다.
     const rows = [_]sb.Row{
@@ -39320,8 +39329,8 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
         .{ .card = .{ .tab = 0, .label = "", .active = false, .depth = 1 } },
         .{ .card = .{ .tab = 1, .label = "", .active = false, .depth = 1 } },
     };
-    // 헤더 glyph(slot0, 1줄), 카드0 glyph(slot1), 카드1 glyph(slot2), 밴드 셀.
-    var cells = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1), glyphCell(2, 0, 1), bandCell };
+    // 헤더 glyph(slot0, 1줄), 카드0 glyph(slot1), 카드1 glyph(slot2), 카드0 이름줄의 배경 셀.
+    var cells = [_]metal_frame.NativeMetalCell{ glyphCell(0, 0, 1), glyphCell(1, 0, 1), glyphCell(2, 0, 1), decoCell };
     // 카드 높이는 줄 수 기반(cardHeight)이라 기대값도 그 계산에서 파생한다 — 줄 기하 조정 시 자동 정합.
     const m_t = chrome.components.sidebar.Metrics.init(ch, header_row_h);
     const pad_t = m_t.content_pad_v; // 목록 위 여백 — 밴드·글자·클릭이 공유하는 시작 오프셋
@@ -39331,7 +39340,7 @@ test "fillSidebarGlyphPyTop: 그룹 헤더가 앞서면 카드 glyph py_top이 r
     const block_off_t = (card_h_t - sidebar_ops.sidebarBlockHeight(1, ch)) / 2;
     try std.testing.expectEqual(@as(u32, pad_t + 24 + block_off_t), cells[1].origin_y); // 카드0 slot1: content top=헤더(24) + 블록중앙
     try std.testing.expectEqual(@as(u32, pad_t + 24 + card_h_t + block_off_t), cells[2].origin_y); // 카드1 slot2: + 카드0 높이
-    try std.testing.expectEqual(@as(u32, 0), cells[3].origin_y); // 밴드 셀은 그대로
+    try std.testing.expectEqual(cells[1].origin_y, cells[3].origin_y); // 배경 셀은 같은 줄의 글자와 같은 자리다
 
     // (B) 동작 보존: 헤더 없이 카드만이면 content top = row*slot_h(균일 — 옛 slot_idx*slot_h와 동일).
     const rows_flat = [_]sb.Row{

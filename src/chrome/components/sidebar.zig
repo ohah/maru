@@ -287,13 +287,22 @@ pub fn spanRect(rows: []const Row, from: usize, to: usize, w: u32, m: Metrics) d
     return .{ .x = 0, .y = @intCast(top), .w = w, .h = h };
 }
 
+/// 목록(content) 좌표 y → 화면 y(backing px). 사이드바는 위에 **고정 헤더**가 있고 그 아래 목록만 스크롤된다 —
+/// 그래서 화면 y = 헤더 높이 + 목록 y − 스크롤 양이다. **이 식의 단일 출처다.** 글자 셀(`sidebar_glyph_rows`
+/// `.fillScreenOriginY`)·밴드 quad(host 의 스크롤 클립)·caret·hit-test(`rowTop`)가 모두 이것을 부른다. 예전에는
+/// 같은 식이 Metal 렌더러·`lowerSidebar`(헤더)+스크롤 클립(스크롤)·`rowTop`·Windows 사이드바에 따로 있었다(2026-10-12).
+/// i64라 위로 밀린 음수도 그대로 낸다 — 음수를 담을 수 없는 소비자가 자기 규칙으로 자른다.
+pub fn listToScreenY(list_y: i64, header_height_px: u32, scroll_offset_px: u32) i64 {
+    return @as(i64, header_height_px) + list_y - @as(i64, scroll_offset_px);
+}
+
 /// row 인덱스의 화면 상단 y(backing px) — 옛 slotTop의 가변판(고정 `index*slot_h` 대신 앞 row 높이 누적).
 /// header + Σ(rows[0..index] 높이) − scroll. index≥rows.len이면 전체 콘텐츠 하단(모든 row 합) 기준. i64라 음수(위로 밀림) 안전.
 pub fn rowTop(rows: []const Row, index: usize, header_height_px: u32, m: Metrics, scroll_offset_px: u32) i64 {
     var off: i64 = 0;
     const n = @min(index, rows.len);
     for (rows[0..n]) |r| off += @as(i64, rowHeight(r, m));
-    return @as(i64, header_height_px) + @as(i64, m.content_pad_v) + off - @as(i64, scroll_offset_px);
+    return listToScreenY(@as(i64, m.content_pad_v) + off, header_height_px, scroll_offset_px);
 }
 
 /// **그 슬롯이 보이게 하는 새 스크롤 offset** — 이미 보이면 지금 값을 그대로 돌려준다.

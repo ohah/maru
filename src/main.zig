@@ -2652,12 +2652,11 @@ fn rebuildSidebarCells(
     const rows = try allocator.alloc(maru.chrome.components.sidebar.Row, shown.len);
     defer allocator.free(rows);
     for (shown, 0..) |c, i| rows[i] = .{ .card = .{ .tab = @intCast(first + i), .label = c.name, .active = actives[i], .lines = @intCast(c.lines) } };
-    maru.sidebar_glyph_rows.fillOriginY(allocator, native, rows, m);
-    // `fillOriginY` 는 **content 상대**다(목록 위 여백부터). 띠와 **헤더**만큼 통째로 내린다 —
-    // 밴드와 같은 기준이어야 한다. 헤더를 빼먹었더니 판정이 바로 잡았다(`sidebar_cells_outside=13`).
-    // `fillOriginY` 는 **창을 새 목록처럼** 배치한다(첫 카드가 목록 맨 위). 그래서 띠·헤더만큼
-    // 내리고 **잘린 만큼 올린다** — 그 둘이 도크의 `origin_shift_px` 와 같은 일을 한다.
-    for (native) |*n| n.origin_y = (n.origin_y +| (top_y + header_h)) -| partial;
+    // 화면 y 까지 중립이 낸다(`fillScreenOriginY` — macOS 와 같은 `listToScreenY`). 목록 상대 y 에 띠와
+    // **헤더**만큼 내리고(밴드와 같은 기준 — 헤더를 빼먹었더니 판정이 바로 잡았다, `sidebar_cells_outside=13`)
+    // **잘린 만큼 올린다**. 이 창은 첫 카드부터 새 목록처럼 배치하므로(`first`) 스크롤 자리에 첫 카드의 잘린 양이
+    // 들어간다 — 그 둘이 도크의 `origin_shift_px` 와 같은 일을 한다. 위로 넘친 셀은 0 이 되고 아래 클립이 버린다.
+    maru.sidebar_glyph_rows.fillScreenOriginY(allocator, native, rows, m, top_y +| header_h, partial);
     try out.ensureUnusedCapacity(allocator, native.len);
     // **판정은 카드 밴드 기준이다.** 사이드바 사각형으로 재면 속 빈다 — 글자가 카드 밖으로 나가도
     // 띠 안이라 0 이 나온다(실측: 행 인코딩을 안 지운 뮤턴트가 그렇게 통과했다).

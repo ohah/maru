@@ -80,6 +80,30 @@ pub fn fillOriginY(
     }
 }
 
+/// 글자 셀의 `origin_y` 를 **화면 y** 로 채운다 — `fillOriginY`(목록 상대) 뒤에 `sidebar.listToScreenY` 로 헤더만큼
+/// 내리고 스크롤만큼 올린다. 렌더러는 이 값을 그대로 그린다(헤더·스크롤을 다시 더하지 않는다). 두 호스트가 이것을
+/// 부른다: macOS 는 `top_px` = 헤더 높이·`scroll_px` = 사이드바 스크롤, Windows 는 띠+헤더와 첫 카드의 잘린 양.
+///
+/// **위로 밀려 음수가 된 셀은 0 으로 둔다**(셀 `origin_y` 는 u32 라 음수를 못 담는다). 그 셀은 화면 y < 0 이므로
+/// 높이가 줄 높이(`m.line_h`) 이하면 통째로 `top_px` 위에 있고, 그 구간은 호스트가 자른다(macOS 는 스크롤 중 헤더
+/// 아래부터 scissor, Windows 는 `clipSidebarListCells`) — 0 으로 옮겨도 여전히 잘리는 자리라 보이는 것이 없다.
+/// 이 전제는 `top_px ≥ m.line_h` 다(헤더가 글자 한 줄보다 낮으면 상단 바 글자도 이미 띠를 넘친다).
+pub fn fillScreenOriginY(
+    allocator: std.mem.Allocator,
+    cells: []metal_frame.NativeMetalCell,
+    rows: []const sidebar.Row,
+    m: sidebar.Metrics,
+    top_px: u32,
+    scroll_px: u32,
+) void {
+    fillOriginY(allocator, cells, rows, m);
+    for (cells) |*c| {
+        if (c.slot_id == 0) continue;
+        const y = sidebar.listToScreenY(c.origin_y, top_px, scroll_px);
+        c.origin_y = @intCast(std.math.clamp(y, 0, std.math.maxInt(u32)));
+    }
+}
+
 const testing = std.testing;
 
 test "인코딩 값이 고정이다 — 디코더와 한 쌍이다" {
@@ -176,4 +200,43 @@ test "매핑 밖 슬롯은 건너뛴다 — 방어" {
     cells[0].origin_y = 999;
     fillOriginY(testing.allocator, &cells, &rows, m);
     try testing.expectEqual(@as(u32, 999), cells[0].origin_y);
+}
+
+test "fillScreenOriginY: 목록 y 에 헤더를 더하고 스크롤을 뺀다 — 밴드와 같은 식(listToScreenY)" {
+    const m = sidebar.Metrics.init(20, 20);
+    const rows = [_]sidebar.Row{
+        .{ .card = .{ .tab = 0, .label = "a", .active = true, .lines = 1 } },
+        .{ .card = .{ .tab = 1, .label = "b", .active = false, .lines = 1 } },
+    };
+    var list = [_]metal_frame.NativeMetalCell{ testCell(encode(0, 0, 1), 7), testCell(encode(1, 0, 1), 7) };
+    fillOriginY(testing.allocator, &list, &rows, m);
+    var screen = [_]metal_frame.NativeMetalCell{ testCell(encode(0, 0, 1), 7), testCell(encode(1, 0, 1), 7) };
+    const header: u32 = 60;
+    const scroll: u32 = 15;
+    fillScreenOriginY(testing.allocator, &screen, &rows, m, header, scroll);
+    for (list, screen) |l, sc| try testing.expectEqual(l.origin_y + header - scroll, sc.origin_y);
+    // 밴드 quad 가 쓰는 행 상단(`rowTop`)과 같은 기준이다 — 둘째 카드 글자는 그 카드 상단 + 블록 중앙에 앉는다.
+    const top1: i64 = sidebar.rowTop(&rows, 1, header, m, scroll);
+    const block_off: i64 = @intCast((sidebar.cardHeight(1, m) - m.line_h) / 2);
+    try testing.expectEqual(top1 + block_off, @as(i64, screen[1].origin_y));
+}
+
+test "fillScreenOriginY: 위로 밀려 음수가 된 셀은 0 이다 — 헤더 위라 어차피 잘리는 자리" {
+    const m = sidebar.Metrics.init(20, 20);
+    const rows = [_]sidebar.Row{.{ .card = .{ .tab = 0, .label = "a", .active = true, .lines = 1 } }};
+    var cells = [_]metal_frame.NativeMetalCell{testCell(encode(0, 0, 1), 7)};
+    const header: u32 = 40;
+    fillScreenOriginY(testing.allocator, &cells, &rows, m, header, 10_000);
+    try testing.expectEqual(@as(u32, 0), cells[0].origin_y);
+    // 0 으로 옮긴 셀의 바닥이 헤더 경계를 넘지 않는다(줄 높이 ≤ 헤더) — 잘리는 구간 안에 머문다.
+    try testing.expect(cells[0].origin_y + m.line_h <= header);
+}
+
+test "fillScreenOriginY: 밴드 셀(slot_id == 0)은 안 건드린다" {
+    const m = sidebar.Metrics.init(20, 20);
+    const rows = [_]sidebar.Row{.{ .card = .{ .tab = 0, .label = "a", .active = true, .lines = 1 } }};
+    var cells = [_]metal_frame.NativeMetalCell{testCell(0, 0)};
+    cells[0].origin_y = 12345;
+    fillScreenOriginY(testing.allocator, &cells, &rows, m, 40, 10);
+    try testing.expectEqual(@as(u32, 12345), cells[0].origin_y);
 }

@@ -454,6 +454,39 @@ test "사이드바 카드 글자의 가로 여백은 Objective-C 가 다시 적�
     try std.testing.expectEqual(@as(usize, 1), zero);
 }
 
+// 세로도 같다 — 사이드바 셀의 `origin_y` 는 **화면 y** 다(헤더·스크롤까지 `chrome.components.sidebar.listToScreenY`, ABI 224).
+// 예전 `.m` 은 `origin_y + header − scroll` 을 더했고, 같은 식이 밴드 quad·caret 쪽 Zig 에도 있어 셋이 따로 움직일 수
+// 있었다. `.m` 이 그 값에 무엇이든 다시 더하거나 빼면 두 번째 출처다.
+test "사이드바 셀의 세로 자리는 Objective-C 가 다시 적지 않는다 — 셀 origin_y 만 읽는다 (layering §3.5)" {
+    const allocator = std.testing.allocator;
+    const raw_mirror = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, scale_mirror_file, allocator, .limited(4 * 1024 * 1024));
+    defer allocator.free(raw_mirror);
+    const mirror = try stripCComments(allocator, raw_mirror);
+    defer allocator.free(mirror);
+    // 사이드바 루프의 두 갈래(밴드·글자)가 각각 하나씩 그대로 읽는다.
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, mirror, "py_top = (float)sc.origin_y;"));
+    // 그 값에 산술이 붙으면 안 된다(공백 변형까지 — `sc.origin_y` 바로 뒤에 오는 첫 비공백 글자를 본다).
+    var search: usize = 0;
+    var reads: usize = 0;
+    while (std.mem.indexOfPos(u8, mirror, search, "sc.origin_y")) |at| {
+        search = at + "sc.origin_y".len;
+        reads += 1;
+        var i = search;
+        while (i < mirror.len and (mirror[i] == ' ' or mirror[i] == '\t' or mirror[i] == '\n' or mirror[i] == '\r')) : (i += 1) {}
+        if (i < mirror.len and (mirror[i] == '+' or mirror[i] == '-' or mirror[i] == '*')) {
+            const line_start = if (std.mem.lastIndexOfScalar(u8, mirror[0..at], '\n')) |nl| nl + 1 else 0;
+            const line_end = std.mem.indexOfScalarPos(u8, mirror, at, '\n') orelse mirror.len;
+            std.debug.print(
+                "\n사이드바 세로 자리 사본이 되살아났습니다: {s}가 셀 origin_y 에 산술을 붙입니다:\n  {s}\n" ++
+                    "  헤더·스크롤은 chrome.components.sidebar.listToScreenY 가 소유합니다 — Zig 가 화면 y 로 굽습니다.\n",
+                .{ scale_mirror_file, std.mem.trim(u8, mirror[line_start..line_end], " ") },
+            );
+            return error.SidebarVerticalMirrorRevived;
+        }
+    }
+    try std.testing.expect(reads >= 2); // 개수로 확인 — 읽는 자리가 사라지면 위 검사가 아무것도 안 잰다
+}
+
 test "collectFloatLiterals·stripCComments: 미러 가드의 파싱 조각" {
     const allocator = std.testing.allocator;
     var out: [8][]const u8 = undefined;

@@ -57,7 +57,7 @@ SG1~SG8의 단계 분해와 완료 이력이다. 계약은 [사이드바 그룹]
        도메인 통일** ✅ — glyph slot을 압축 카드 서수(`active_card_ord`/`close_card_ord`)로 일치(§10 함정). (c) 렌더 y 가변 ✅ —
        tint/accent를 `rowTop`, 스크롤을 `contentHeight`로(#4·#7), 드래그 row→tab 변환(#2). (d) `.m` 디코드 **옵션 2** ✅ —
        `applySidebarGlyphPyTop`이 py_top을 Zig `rowTop`+블록중앙으로 계산해 셀 `origin_y`에 싣고 `.m`은 `origin_y+header-scroll`만
-       (code-review #1·3·5·6 해소). (e)(SG3c) `view` 헤더 밴드 `rowTop` + `buildSidebarDrawList` 헤더 삼각(▾/▸)+이름 glyph +
+       (code-review #1·3·5·6 해소). (2026-10-12 이후 헤더·스크롤까지 Zig가 `listToScreenY`로 굽고 `.m`은 `origin_y`만 — ABI 224.) (e)(SG3c) `view` 헤더 밴드 `rowTop` + `buildSidebarDrawList` 헤더 삼각(▾/▸)+이름 glyph +
        `card.depth` 들여쓰기 + **헤더 label borrowed 해소**(`group_header`에 소스 tab 인덱스/dupe — 현재 `tab.group_start` borrow해
        destroyTab 후 dangling, **code-review #8 UAF 잠복**). (f)(SG3c) **macOS 제품 스크린샷 검증**(create_group으로 헤더가 실제 떠야 가능).
      **참고: `/code-review max`가 SG3b-2-ii 계획을 findings #1~7의 정확한 해소 경로로 confirmed 검증했고, #1~7은 (a)~(d)에서 전부 닫혔다.**

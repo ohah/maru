@@ -527,6 +527,9 @@ pub const EnterExternalModeError = error{
     Busy,
     OutOfMemory,
     FlagFailed,
+    /// `image_shm` 을 협상한 연결(이미지 채널 §6) — external 모드에서는 이미지 채널을 펌프하지 않아 host 원장이 차므로 들어가지
+    /// 않는다. 채널을 잃은 연결(「이미지 채널 없음」)도 협상한 연결이라 같다.
+    ImageChannelNegotiated,
 };
 
 pub const ExternalPumpTransferError = error{
@@ -9391,6 +9394,10 @@ pub const Client = struct {
         if (self.unusable) return error.ConnectionClosed;
         if (self.io_mode == .external) return error.AlreadyExternal;
         if (self.pending_outbound != null) return error.Busy;
+        // 불변식: 이미지 채널을 협상한 Client 는 external 모드에 들어가지 않는다(계획 IC3b-2c) — external 모드의 펌프는 채널을
+        // 비우지 않아(`pumpImageChannel` 이 external 모드에서 물러선다) release 가 끊기고 host 원장 32 칸이 찬다. GUI 는 이 길을
+        // 쓰지 않고, external 소비자(`maru attach` 등)는 `image_shm` 을 광고하지 않는다.
+        if (self.imageShmNegotiated()) return error.ImageChannelNegotiated;
 
         const outcome = client_external_mode.transition(
             self.allocator,
@@ -27115,6 +27122,25 @@ test "image channel pump: resolveImageSegment maps a pumped segment once, for it
     try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
 }
 
+test "image channel pump: a Client that negotiated image_shm never enters external mode, bound or lost, and an unnegotiated one is not stopped by that rule" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    // 거부는 플래그를 건드리기 전이다 — 소켓 상태를 바꾸지 않는다.
+    var socket_ops = ConnectedSocketFixture{ .fd = fx.client.fd, .fail_get_at_call = 1 };
+    try testing.expectError(error.ImageChannelNegotiated, fx.client.enterExternalModeWithOps(socket_ops.ops()));
+    // 채널을 잃은 연결(「이미지 채널 없음」)도 협상한 연결이다 — host 는 그 연결에 `image_ref` 를 낼 수 있다.
+    fx.client.image_channel.state = .unavailable;
+    try testing.expectError(error.ImageChannelNegotiated, fx.client.enterExternalModeWithOps(socket_ops.ops()));
+    try testing.expectEqual(@as(usize, 0), socket_ops.get_flags_calls);
+    try testing.expect(fx.client.io_mode == .blocking);
+    // 협상하지 않은 연결은 이 규칙에 걸리지 않고 전환 자체로 간다(첫 플래그 읽기를 실패시켜 전환 전에 멈춘다).
+    fx.client.image_channel.state = .not_negotiated;
+    try testing.expectError(error.FlagFailed, fx.client.enterExternalModeWithOps(socket_ops.ops()));
+    try testing.expectEqual(@as(usize, 1), socket_ops.get_flags_calls);
+    fx.client.image_channel.state = .bound;
+}
+
 test "image channel pump: an opened stream keeps its segments until its hwm sweep or its stream drop returns them, and only behind the fence" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try ImageChannelPumpFixture.init();
@@ -27152,7 +27178,11 @@ test "image channel pump: an external-mode client is not pumped, so its sealed s
     var fx = try ImageChannelPumpFixture.init();
     defer fx.deinit();
     try fx.sendSegment(1, 3, 1);
+    // 협상한 Client 는 external 모드에 들어가지 않는다(불변식, IC3b-2c). 이 판정자는 그 뒤의 방어선 — external 모드면 펌프가
+    // 물러선다 — 을 재므로 불변식을 우회해 상태를 만든다.
+    fx.client.image_channel.state = .not_negotiated;
     try fx.client.enterExternalMode();
+    fx.client.image_channel.state = .bound;
     fx.client.ownership = .external_pump;
     fx.client.connection_profile = .cli_attach;
     fx.client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;

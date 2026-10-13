@@ -519,7 +519,7 @@ IC5c 는 둘로 나눴다 — 용량 사건 깨우기(IC5c-1, 정지 화면의 �
   기다린다. 제품 GUI 는 host 당 광고하는 연결이 하나라 다른 연결이 host 예산을 쥘 일이 드물다 — 둘 이상이 되면 host 전체 반환을
   용량 사건으로 넓힌다.
 
-#### IC5d — host 제공 스위치 (PR 진행 중)
+#### IC5d — host 제공 스위치 (완료)
 
 IC5a–c 가 처음 계획(producer 의 `image_ref`·`image_seg_hwm` 방출, 미룸 표현, 형식 선택, 용량 사건, 우선권, 「전송 불가」)을 층마다
 판정자로 덮었다. IC5d 는 스위치를 켜고 층들을 한 줄로 잇는다.
@@ -553,15 +553,44 @@ IC5a–c 가 처음 계획(producer 의 `image_ref`·`image_seg_hwm` 방출, 미
     85 MB 를 파싱해야 해 판정자로는 무겁다. 우선권 판정은 server 판정자(가짜 owner)와 owner 판정자(실제 원장의 release 깨움)가 나눠
     잰다(IC5c-2).
 
-### IC6 — 광고를 켜고 실측 (미착수)
+### IC6 — 광고를 켜고 실측
 
-- 이미지 채널 리더·세그먼트 표·resolver 를 설치하는 GUI 제품 호출자가 connect 함수에 `Request.advertise` 를 넘긴다(`client_kind`
-  로 정하지 않는다 — `.gui` 로 붙지만 resolver 없이 조립기를 쓰는 소비자가 있다, 계약 §2). 그 호출 자리를 「public 진입점은
-  광고하지 않는다」 판정자의 예외로 옮긴다.
-- external 소비자(`.cli_attach`·`.cli_probe` 프로필)는 광고하지 않는다는 것을 connect 단계에서 구조로 막는다 — 지금은 문서와
-  `enterExternalModeWithOps` 의 거부(IC3b-2c-1)뿐이라, 광고를 공용 connect 헬퍼에 넣으면 `maru attach` 가 협상하고 세그먼트까지
-  받은 **뒤**(`attachSnapshot` 다음의 전환)에야 `internal` 로 실패한다. 그 프로필에 `.advertise` 가 오면 connect 가 거부하거나
-  판정자로 고정하고, external 모드 거부는 2 차 방어선으로 둔다(IC3b-2c-1 적대적 검증 1 회차).
+IC6 는 셋으로 나눴다 — GUI 제품 연결의 광고와 external 차단(IC6a), 「이미지 채널 없음」 탭 안내(IC6b), 실측 gate(IC6c).
+
+#### IC6a — GUI 제품 연결이 광고한다 (PR 진행 중)
+
+- 제품 GUI 연결은 한 자리로 모이지 않는다 — `host_connect` 의 말단 셋(`tryConnect`·`tryConnectMajorKind`·`deadlineConnectAttempt`)
+  을 새 탭·복원·재접속이 쓰고, 그중 둘은 inventory(`recovery_discovery`)·CLI(`attach_product_resolver`)와 함께 쓴다. 그래서
+  `client_image_channel.Request` 를 제품 경로 셋에서 말단까지 인자로 꿴다:
+  - 새 탭 `connectOrLaunchDetailed` → `tryConnect`(이 함수만 쓰는 말단이라 늘 광고);
+  - 복원·재사용 판정·새 host·같은 build host 찾기·업그레이드 뒤 재연결 `connectExistingHost` → `.advertise`(업그레이드 스캔의
+    prepare 연결만 `connectExistingHostWith(.off)` — RPC 하나 보내고 닫는다);
+  - 재접속 worker `connectExistingHostUntil` → `connectDiscoveredHostProfileUntilObserved(.gui, .advertise)`;
+  - inventory `connectDiscoveredHost*`·CLI `connectDiscoveredHostProfileUntil`·legacy `tryConnectMajor`·frozen N-1 → `.off`.
+- 광고하는 client 진입점은 새 공개 함수 둘(`connectGuiWithImageChannel`·`connectGuiWithImageChannelUntil`) — 프로필을 `.gui` 로
+  고정하고 현재 major 일 때만 광고한다. 기존 public 진입점은 그대로 `.off` 다(「public 진입점은 광고하지 않는다」 판정자 유지).
+- external 차단은 두 겹이다: `host_connect` 말단은 GUI 가 아닌 프로필이면 광고 요청을 무시하고, client 의 두 정책 함수는
+  GUI 가 아닌 프로필의 `.advertise` 를 소켓을 열기 전에 `ProtocolError` 로 거부한다. external 모드 거부(IC3b-2c-1)는 3 차 방어선.
+- 옛 host 는 기능 목록을 「포함」으로만 본다 — 모르는 `image_shm` 은 무시되어 연결이 깨지지 않는다.
+- 협상했는데 채널 없이 끝난 연결(자리 없음·거부·시간 초과·표 할당 실패)은 app.log 에 `session host image channel unavailable:`
+  한 줄을, 펌프가 채널을 잃으면 `session host image channel lost:` 한 줄을 남긴다 — IC6b 의 탭 안내 전에는 이미지가 빠진 이유의
+  유일한 앱 쪽 흔적이다.
+- 판정자(`test-image-channel-app`):
+  - `image channel host_connect:` 1(새 판정자 step) — 한 isolated manifest·endpoint 에 hello 만 읽는 peer 를 세우고, 경로마다 실제
+    hello 바이트에 `image_shm` 이 있는지 센다: 새 탭·복원·재접속은 광고, inventory·CLI 둘·legacy 는 광고하지 않음, 말단에 GUI 가
+    아닌 프로필과 광고 요청을 함께 넘겨도 광고하지 않음;
+  - `image channel connect:` 에 1 — 새 진입점 둘이 실제로 광고해 협상하고(자리 없음 host → `unavailable`), GUI 가 아닌 프로필의
+    광고 요청은 없는 경로에서도 `EndpointAbsent` 가 아니라 `ProtocolError`(연결보다 먼저).
+- 돌연변이 9 개 모두 RED: 새 탭·복원·재접속 경로를 `.off`, inventory 를 `.advertise`, 말단 둘이 프로필을 무시, client 가드 둘 제거,
+  GUI 진입점이 `.off`.
+
+#### IC6b — 「이미지 채널 없음」 탭 안내 (미착수)
+
+- 계약 §3.2: 협상했지만 채널이 없는 연결(자리 없음·abandon·채널 상실)의 탭에 notice(이미지를 표시할 수 없음, 재접속 때 다시
+  시도)를 띄운다. IC6a 이후 이 상태가 제품에서 처음 생긴다 — 그때까지는 이미지가 조용히 빠진다(placement 를 뺀다).
+
+#### IC6c — 실측 gate (미착수)
+
 - 실측 gate(2026-10-10 기준선과 같은 방법): terminal-browser 를 연 채 스크롤할 때
   - host 로그 `session host stream invalidated:` 0 줄, `resync sweep blocked` 의 반복 0,
   - xctrace `runloop-events` 로 16.7 ms 초과 반복이 브라우저를 닫은 상태(초당 0.3, 최대 19.9 ms)와 같은 수준,

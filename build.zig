@@ -7158,12 +7158,29 @@ pub fn build(b: *std.Build) void {
             // `connect:` 11 — 수립(IC2b) 9 와 소켓 생성이 fork 울타리의 수신 잠금 안(IC4b — deadline·일반 연결) 2.
             // `pump:` 12 — 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위·
             // 울타리 든 해석) 8, tick 펌프는 물러서고 동기 적용 펌프는 기다린다(IC4b) 2, 협상한 Client 는 external 모드 거부(IC3b-2c-1) 1,
-            // 연결 둘의 표가 섞이지 않음(IC3b-2c-2) 1.
+            // 연결 둘의 표가 섞이지 않음(IC3b-2c-2) 1. `connect:` 에 GUI 제품 진입점의 광고·GUI 가 아닌 프로필 거부(IC6a) 1.
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
-        run_image_channel_connect_tests.addArg("--maru-expect-tests=23");
-        run_image_channel_connect_tests.addArg("--maru-expect-passed=23");
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=24");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=24");
+        // 제품 연결 경로(IC6a) — 새 탭·복원·재접속만 광고하고 inventory·CLI·legacy 는 광고하지 않는다(hello 바이트로 잰다).
+        const image_channel_host_connect_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/host_connect.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"image channel host_connect:"},
+        });
+        const run_image_channel_host_connect_tests = b.addRunArtifact(image_channel_host_connect_tests);
+        run_image_channel_host_connect_tests.addArg("--maru-expect-tests=1");
+        run_image_channel_host_connect_tests.addArg("--maru-expect-passed=1");
+        image_channel_app_step.dependOn(&run_image_channel_host_connect_tests.step);
+        test_step.dependOn(&run_image_channel_host_connect_tests.step);
+        macos_only_test_step.dependOn(&run_image_channel_host_connect_tests.step);
         // 적용 자리 배선(IC3b-2) — attachment 가 협상한 transport 의 resolver 를 snapshot·delta 에 넘기고, 협상하지 않은 transport
         // 는 resolver 를 부르지 않는다.
         const image_channel_wiring_tests = addProjectTest(b, .{

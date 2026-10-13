@@ -27,7 +27,12 @@ terminal-browser 는 같은 kitty image id 로 RGBA 프레임을 계속 다시 �
     협상한 연결에 채널이 없으면 「이미지 채널 없음」(§3.2 — placement 를 뺀다)이지 `image_blob` 이 아니다. 형식을 token 이나 채널
     유무로 고르면 그 연결에 바이트 대체 경로가 생긴다.
 - `image_shm` 은 `client_kind` 로 정하지 않는다. 이미지 채널 리더·세그먼트 표·resolver 를 설치하는 GUI 제품 연결 경로만 명시
-  플래그로 광고한다(`.gui` 로 붙지만 `ScreenAssembler` 를 resolver 없이 쓰는 소비자가 있다).
+  플래그로 광고한다(`.gui` 로 붙지만 `ScreenAssembler` 를 resolver 없이 쓰는 소비자가 있다). 광고하는 진입점은
+  `Client.connectGuiWithImageChannel`·`connectGuiWithImageChannelUntil` 둘이고(프로필 `.gui` 고정, 현재 major 만), 그것을 부르는
+  자리는 `host_connect` 의 제품 경로 셋 — 새 탭(`connectOrLaunchDetailed`), `connectExistingHost`(복원·재사용 판정·새 host·같은
+  build host 찾기·업그레이드 뒤 재연결), 재접속 worker(`connectExistingHostUntil`) — 이다. inventory(`connectDiscoveredHost`)·
+  CLI(`.cli_attach`·`.cli_probe`)·업그레이드 스캔의 prepare 연결·legacy·frozen N-1 은 광고하지 않는다. 광고 요청이 GUI 가 아닌 프로필과 함께 오면 `host_connect` 말단은 광고하지 않고, client 는 소켓을 열기 전에
+  거부한다.
 - 앱·조립기의 `image_blob` 디코더는 남는다. 폰이 같은 `ScreenAssembler` 를 쓰고, 새 앱이 N-1 host 에 오래 붙어 있는 경우
   ([업그레이드](session-host-upgrade.md)의 side-by-side drain)가 있기 때문이다.
 - 이 계약 밖: 세그먼트 재사용, Metal no-copy 텍스처, handoff 로 세그먼트 넘기기, 코어 이미지 저장소(`KittyImageStorage`, wasm 에

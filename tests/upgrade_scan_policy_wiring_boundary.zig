@@ -89,7 +89,8 @@ test "업그레이드 스캔은 공정 순서로 후보를 돌고, 결과를 판
 
     // ② 상한은 **연결·prepare 전에** 보고, 넘으면 그 사실을 한 줄 남긴 뒤 끝낸다.
     const gate_at = try expectOnce(body, "if (!scan.mayPrepareNow(monotonicMsForMeasure())) { if (!builtin.is_test) std.log.info(\"session host upgrade scan bound reached: tried={d} skipped={d} next_host={x:0>32}\", .{ scan.sent, candidate_count - candidate_index, host_id, }); break; }", "상한과 그 로그");
-    const connect_at = try expectOnce(body, "connectExistingHost(allocator, base_cache_dir, host_id)", "후보 연결");
+    // 후보 연결은 prepare RPC 하나만 보내고 닫는다 — 이미지 채널을 광고하지 않는다(이미지 채널 IC6a).
+    const connect_at = try expectOnce(body, "connectExistingHostWith(allocator, base_cache_dir, host_id, .off)", "후보 연결");
     const note_at = try expectOnce(body, "scan.notePrepared();", "prepare 셈");
     const prepare_at = try expectOnce(body, "client.prepareUpgrade(", "prepare");
     try std.testing.expect(loop_at < gate_at and gate_at < connect_at and connect_at < note_at and note_at < prepare_at);

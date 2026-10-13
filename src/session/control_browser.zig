@@ -209,9 +209,9 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
-        // W9a①: navigate·getUrl·screenshot, W9a②: executeScript.
+        // W9a①: navigate·getUrl·screenshot, W9a②: executeScript, W9a③: localStorage·쿠키·clearStorage.
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script => true,
+            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage => true,
             else => false,
         },
     };
@@ -3481,7 +3481,8 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "screenshot", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
+    // W9a③: 쿠키·localStorage·clearStorage.
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).

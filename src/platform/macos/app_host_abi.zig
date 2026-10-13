@@ -7671,16 +7671,16 @@ fn pushBrowserOp(
             return;
         };
     }
-    // wait 도 기다림 목록에 오른 뒤 보낸다 — 탭 닫힘·grant 철회가 그 목록으로 끝낸다(W9b①b).
-    if (chromium) {
-        startCdpOp(async_id, op.surface_id, op.method, backend_arg);
-        server.cross_gpa.free(backend_arg);
-        return;
-    }
     const required_host: control_pane_grant.GrantHost = if (op.pane_grant) |g|
         (if (g.scope == .browser_storage) g.host else .{})
     else
         .{};
+    // wait 도 기다림 목록에 오른 뒤 보낸다 — 탭 닫힘·grant 철회가 그 목록으로 끝낸다(W9b①b).
+    if (chromium) {
+        startCdpOpHost(async_id, op.surface_id, op.method, backend_arg, required_host);
+        server.cross_gpa.free(backend_arg);
+        return;
+    }
     browser_op_queue.push(allocator, .{ .async_id = async_id, .surface_id = op.surface_id, .op_kind = @intFromEnum(op.method), .arg = backend_arg, .required_host = required_host }) catch {
         if (op.method == .wait) _ = removeActiveBrowserWait(async_id);
         if (browserMethodHasTrackedLifecycle(op.method)) _ = active_browser_executions.finish(async_id);
@@ -7702,6 +7702,10 @@ const CdpRun = struct {
     surface_id: u64,
     op: web_cdp_ops.Op,
     started: bool = false,
+    /// W9a③: 쿠키 저장소 op 의 grant 호스트(확인 grant 로 인가됐으면 — 시작에 지금 문서가 그 호스트인지 다시 본다, WebKit 의 마지막 관문과 같다).
+    required_host: control_pane_grant.GrantHost = .{},
+    /// W9a③: 시작할 때 확인한 문서 주소(소유 — op 이 그 주소로만 한다).
+    doc_url: ?[]u8 = null,
 };
 
 /// 실행 중이거나 기다리는 Chromium op(도착 순).
@@ -7793,11 +7797,23 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
         .get_url => .get_url,
         .screenshot => .screenshot,
         .execute_script => .execute_script,
+        // W9a③.
+        .get_local_storage => .get_local_storage,
+        .set_local_storage => .set_local_storage,
+        .remove_local_storage => .remove_local_storage,
+        .get_cookies => .get_cookies,
+        .set_cookie => .set_cookie,
+        .delete_cookie => .delete_cookie,
+        .clear_storage => .clear_storage,
         else => null,
     };
 }
 
 fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMethod, arg: []const u8) void {
+    startCdpOpHost(async_id, surface_id, method, arg, .{});
+}
+
+fn startCdpOpHost(async_id: u64, surface_id: u64, method: control_browser.BrowserMethod, arg: []const u8, required_host: control_pane_grant.GrantHost) void {
     const kind = cdpKind(method) orelse return completeCdp(async_id, .failed, "not supported by the Chromium engine");
     const run = allocator.create(CdpRun) catch return completeCdp(async_id, .failed, "out of memory");
     const op = web_cdp_ops.Op.init(allocator, kind, arg, async_id) catch |e| {
@@ -7815,7 +7831,7 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
             else => "invalid arguments",
         });
     };
-    run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op };
+    run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op, .required_host = required_host };
     // W9a: navigate 는 요청을 받은 때부터 잰다 — 같은 탭의 앞선 op 뒤에 시작해도 요청의 시한(30 초) 안에 `loaded:false` 로 답한다.
     if (run.op.page) |*p| p.deadline_ms = cdpNowMs() + web_cdp_ops.web_cdp_page.navigate_wait_ms;
     const busy = for (cdp_runs.items) |other| {
@@ -7843,6 +7859,30 @@ fn beginCdp(run: *CdpRun) void {
         .get_url => p.url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdp_not_shown_reason)).url,
         .screenshot => {},
     };
+    // W9a③: 확인한 문서 주소를 복사해 op 에 준다 — 쿠키 저장소 op 은 grant 호스트가 그 주소를 덮는지 다시 본다(그사이 다른 사이트로 갔을 수 있다).
+    if (run.op.storage) |*st| {
+        const url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdp_not_shown_reason)).url;
+        run.doc_url = allocator.dupe(u8, url) catch return finishCdp(run, .failed, "out of memory");
+        st.doc_url = run.doc_url.?;
+        if (run.required_host.len > 0) switch (st.kind) {
+            .get_cookies, .set_cookie, .delete_cookie, .clear_storage => {
+                const host = control_pane_grant.hostOfUrl(url) orelse "";
+                if (!control_pane_grant.hostCovers(run.required_host.slice(), host)) {
+                    const async_id = run.async_id;
+                    const surface_id = run.surface_id;
+                    removeCdpRun(run);
+                    run.op.deinit(allocator);
+                    if (run.doc_url) |u| allocator.free(u);
+                    allocator.destroy(run);
+                    // 그 grant 의 사이트가 아니다 — WebKit 의 마지막 관문과 같이 unauthorized.
+                    maru_macos_control_complete_browser_op(async_id, @intFromEnum(control_browser.BrowserCompletionStatus.unauthorized), null, 0);
+                    startNextCdp(surface_id);
+                    return;
+                }
+            },
+            else => {},
+        };
+    }
     run.started = true;
     run.op.now_ms = cdpNowMs();
     _ = active_browser_executions.markRunning(run.async_id);
@@ -7872,6 +7912,9 @@ fn uncommittedReply(run: *CdpRun, method: []const u8) ?web_cdp_ops.Reply {
         };
     }
     if (run.op.page) |*p| if (p.kind == .screenshot) return .{ .not_sent = cdp_loading_reason };
+    // W9a③: localStorage 의 페이지 호출(프레임 트리·격리 world·평가)도 붙잡힌다 — 확정 뒤 다시 하라고. 쿠키(Network·Storage)는 브라우저
+    // 쪽이라 붙잡히지 않는다(확인한 주소로 한다).
+    if (run.op.storage != null and (std.mem.startsWith(u8, method, "Page.") or std.mem.startsWith(u8, method, "Runtime."))) return .{ .not_sent = cdp_loading_reason };
     return null;
 }
 
@@ -8222,6 +8265,7 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
     const exec_max: usize = if (run.op.exec) |*e| e.max_result_bytes else 0;
     removeCdpRun(run);
     run.op.deinit(allocator);
+    if (run.doc_url) |u| allocator.free(u);
     allocator.destroy(run);
     // W9a: 지켜보던 이동을 놓는다(시작한 navigate 만 — 기다리던 것은 아직 보내지 않았다).
     if (kind == .navigate and started) session_mod.web_osr.endAgentNav(surface_id);
@@ -10377,6 +10421,7 @@ test {
     _ = web_cdp_ops;
     _ = web_cdp_ops.web_cdp_page; // W9a 페이지 op
     _ = web_cdp_ops.web_cdp_exec; // W9a② executeScript
+    _ = web_cdp_ops.web_cdp_storage; // W9a③ localStorage·쿠키·clearStorage
     // 전역 핫키 descriptor 매핑(a2의 Swift가 ABI로 소비)도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("global_hotkey.zig"));
     // 커맨드 카탈로그(메뉴바·팝업 공유) round-trip·chord 포맷 테스트도 테스트 빌드에 포함한다.
@@ -12689,4 +12734,55 @@ test "W9a 적대 리뷰 4 회차 재현: 스크립트가 이동을 시작했으�
     defer allocator.free(response);
     p.response = null;
     try std.testing.expect(std.mem.indexOf(u8, response, "\"result\":1") != null);
+}
+
+test "W9a③: 쿠키 저장소 op 은 시작에 grant 호스트가 지금 문서를 덮는지 본다(다른 사이트로 갔으면 unauthorized), localStorage 는 확정 전 이동 중에 보내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 78);
+    defer {
+        session_mod.web_osr.destroy(ta, 78);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(78);
+    // 문서는 b.test 인데 grant 는 a.test(확인했을 때의 사이트).
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 78, .url = "https://b.test/x" } });
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 78, .scope = .browser_storage, .host = host });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.getCookies\",\"params\":{\"id\":78}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    p = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 78, .method = .get_cookies, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 78, .scope = .browser_storage, .host = host } } });
+    const before = cdp_calls_attempted;
+    startCdpOpHost(id, 78, .get_cookies, "", host);
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try expectPendingErrorCode(&p, .unauthorized);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    // 하위 호스트(www.a.test)는 a.test grant 가 덮는다 — 보내려 한다(엔진 할당자가 없어 곧 「not running」 으로 끝나지만 관문은 지났다).
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 78, .url = "https://www.a.test/" } });
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var p2: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id2 = try control_server_storage.deferRequest(&p2, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id2, .surface_id = 78, .method = .get_cookies, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 78, .scope = .browser_storage, .host = host } } });
+    startCdpOpHost(id2, 78, .get_cookies, "", host);
+    try std.testing.expectEqual(before + 1, cdp_calls_attempted);
+    try expectPendingErrorCode(&p2, .internal_error);
+    // localStorage(`browser` 범위) — 확정 전 이동 중이면 보내지 않고 「loading a new page」.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 78, .scope = .browser });
+    session_mod.web_osr.testApply(ta, .{ .main_frame_navigating = 78 });
+    const lreq = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"browser.getLocalStorage\",\"params\":{\"id\":78,\"key\":\"k\"}}";
+    var p3: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p3, lreq, 78, .get_local_storage), 78, .get_local_storage, "{\"key\":\"k\"}");
+    try std.testing.expectEqual(before + 1, cdp_calls_attempted);
+    const response = p3.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    p3.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "loading a new page") != null);
 }

@@ -8491,14 +8491,13 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     // **무엇을 넣을지는 L2 `typing_ops.planTyping` 이 정한다**(§3.7 타이핑 보조 × §9.1 — 쌍 넣기·type-over·감싸기,
     // 문서 순서, 커서마다 첫 변경의 인덱스). 보조는 재변환(IME)이 아닐 때만 본다.
     // 언어 문맥(계획 editor-typing-rules TR2~TR4 — 닫는 괄호·낱말 내어쓰기, 따옴표 자동 닫기의 문자열·주석 판정) — 재변환(IME)이 아닐 때,
-    // 괄호를 아는 문법에서만. 트리 조각은 보조가 보는 한 글자 입력일 때만 뽑는다 — 첫 커서의 줄 머리부터(닫는 괄호면 짝 찾기 상한만큼 더 위).
+    // 괄호를 아는 문법에서만. 트리 조각은 보조가 보는 한 글자 입력일 때만, 커서마다 필요한 데까지만 뽑는다(`typingLiteralRanges`).
     const brackets = if (replacement == null) bracketsOf(term) else null;
-    const typing_spans: ?[]literals.Span = if (brackets != null and text.len == 1 and edit_items.len > 0) blk: {
-        const lines = doc.file.lines;
-        const first = @min(edit_items[0].start(), doc.file.content.len);
-        const head = if (lines.line(lines.lineAt(first))) |l| l.start else first;
-        const lo = if (isCloserIn(brackets.?, text[0])) head -| typing_ops.reindent_scan_limit else head;
-        break :blk treeLiterals(self, term, lo, edit_items[edit_items.len - 1].end() + 1);
+    const typing_spans: ?[]literals.Span = if (brackets != null and text.len == 1) blk: {
+        var ranges: std.ArrayList(LiteralRange) = .empty;
+        defer ranges.deinit(self.allocator);
+        typingLiteralRanges(self, term, edit_items, text[0], brackets.?, &ranges) catch break :blk null;
+        break :blk treeLiterals(self, term, ranges.items);
     } else null;
     defer if (typing_spans) |s| self.allocator.free(s);
     const typing_ctx: ?typing_ops.Context = if (brackets) |b| .{
@@ -9293,56 +9292,125 @@ pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
     const doc = lineOpDoc(term) orelse return insertText(self, term, "\n");
     const snap = selectionsForEdit(self, term) orelse return insertText(self, term, "\n");
     defer self.allocator.free(snap.items);
-    // 구문 트리가 답한 문자열·주석 조각(계획 editor-typing-rules TR4) — 첫 커서의 줄 머리부터 마지막 커서까지.
+    // 구문 트리가 답한 문자열·주석 조각(계획 editor-typing-rules TR4) — 커서마다 그 줄 머리부터 caret 까지(줄 규칙이 그 조각을 읽는다).
     var ctx = enterContext(term);
     var spans: ?[]literals.Span = null;
     defer if (spans) |s| self.allocator.free(s);
-    if (ctx) |*c| if (snap.items.len > 0) {
+    if (ctx) |*c| {
+        var ranges: std.ArrayList(LiteralRange) = .empty;
+        defer ranges.deinit(self.allocator);
+        const content = doc.file.content;
         const lines = doc.file.lines;
-        const first = @min(snap.items[0].start(), doc.file.content.len);
-        const head = if (lines.line(lines.lineAt(first))) |l| l.start else first;
-        spans = treeLiterals(self, term, head, snap.items[snap.items.len - 1].end() + 1);
-        c.literal_spans = spans;
-    };
+        for (snap.items) |sel| {
+            const lo = @min(sel.start(), content.len);
+            const head = if (lines.line(lines.lineAt(lo))) |l| l.start else lo;
+            ranges.append(self.allocator, .{ .start = head, .end = @min(sel.end(), content.len) + 1 }) catch break;
+        } else {
+            spans = treeLiterals(self, term, ranges.items);
+            c.literal_spans = spans;
+        }
+    }
     var plan = (line_ops.planNewline(self.allocator, doc.file.content, doc.file.lines, snap.items, ctx) catch return false) orelse
         return insertText(self, term, "\n");
     defer plan.deinit(self.allocator);
     return applyLineEdit(self, term, plan.changes.items, plan.after);
 }
 
-/// 닫는 괄호인가 — 괄호 쌍(`"()[]{}"` — 여는 것·닫는 것을 번갈아)의 홀수 자리.
-fn isCloserIn(brackets: []const u8, b: u8) bool {
-    var k: usize = 1;
-    while (k < brackets.len) : (k += 2) if (brackets[k] == b) return true;
-    return false;
-}
+/// 트리에 물을 범위 하나(문서 byte `[start, end)`).
+const LiteralRange = struct { start: usize, end: usize };
 
-/// 문자열·주석 조각을 뽑는 범위의 상한(계획 editor-typing-rules TR4) — 커서가 문서 곳곳에 흩어진 입력 한 번이 문서 전체를 쿼리하지 않게.
-/// 넘으면 트리 없이(줄 스캐너로) 간다.
+/// 문자열·주석 조각을 뽑는 범위 합의 상한(계획 editor-typing-rules TR4) — 커서가 수천인 입력 한 번이 문서 전체를 쿼리하지 않게. 넘으면 트리
+/// 없이(줄 스캐너로) 간다.
 const literal_window_limit: usize = 1 << 20;
 
-/// 구문 트리가 **신선하면** `[lo, hi)` 에 닿는 문자열·주석 조각(계획 editor-typing-rules TR4 — 하이라이트 capture 를 `literals.flatten` 으로
-/// 편다, 호출자가 해제한다). 트리가 없거나 낡았으면(처음 여는 큰 문서의 예산 파싱이 안 끝났다 — 편집은 `onEditSpan` 이 끝까지 다시 파므로
-/// 그 뒤로는 늘 신선하다) `null` — 소비처는 줄 스캐너로 간다. 범위가 상한을 넘어도 `null`. 쿼리가 할당에 실패하면 거기까지의 조각이다(색과
-/// 같은 저하 — `spansForRange`).
-fn treeLiterals(self: *AppSession, term: *Term, lo: usize, hi: usize) ?[]literals.Span {
+/// 신선한 구문 트리(계획 editor-typing-rules TR4) — 처음 여는 큰 문서의 예산 파싱이 안 끝났으면 `null`. 편집은 `onEditSpan` 이 끝까지 다시
+/// 파므로 그 뒤로는 늘 신선하다.
+fn freshTree(term: *Term) ?*syntax_mod.Provider {
     const st = &term.rt.editor_syntax;
     if (st.pending) return null;
     const p = if (st.provider) |*p| p else return null;
-    if (p.tree == null) return null;
+    return if (p.tree != null) p else null;
+}
+
+/// 한 글자 입력이 트리에 물을 범위(계획 editor-typing-rules TR4) — 커서마다 **caret 자리만**(`[lo-1, hi+1)` — 따옴표 자동 닫기·낱말
+/// 내어쓰기는 caret 의 문맥만 본다). 닫는 괄호를 공백뿐인 줄 머리에서 쳤으면 짝 찾기가 거슬러 읽는 데까지 — caret 을 품은 트리 조상 중
+/// **그 여는 괄호로 시작하는 가장 안쪽 것**의 머리부터(잘 짜인 코드면 짝 찾기가 거기서 멈춘다), 없으면 짝 찾기 상한(64 KiB)까지.
+/// 줄 머리부터 caret 까지를 통째로 쿼리했더니 긴 한 줄(압축한 JS)에서 키마다 수십 ms 가 들었다(적대적 2회차 실측, ReleaseFast: 쿼리 한 번이
+/// caret 자리 3 µs · 한 줄 15 µs · 64 KiB 5.4 ms). 트리가 없으면 아무것도 안 넣는다.
+fn typingLiteralRanges(self: *AppSession, term: *Term, sels: []const editor_selection.Selection, typed: u8, brackets: []const u8, out: *std.ArrayList(LiteralRange)) error{OutOfMemory}!void {
+    const p = freshTree(term) orelse return;
+    const doc = term.rt.editorDocument().opened orelse return;
+    const content = doc.file.content;
+    const lines = doc.file.lines;
+    const open: ?u8 = blk: {
+        var k: usize = 1;
+        while (k < brackets.len) : (k += 2) if (brackets[k] == typed) break :blk brackets[k - 1];
+        break :blk null;
+    };
+    var ancestors: std.ArrayList(syntax_mod.Provider.ByteRange) = .empty;
+    defer ancestors.deinit(self.allocator);
+    for (sels) |sel| {
+        const lo = @min(sel.start(), content.len);
+        const hi = @min(sel.end(), content.len);
+        var start = lo -| 1;
+        if (open) |o| if (lines.line(lines.lineAt(lo))) |line| {
+            const head = content[line.start..lo];
+            const blank = for (head) |b| {
+                if (b != ' ' and b != '\t') break false;
+            } else true;
+            if (blank) {
+                start = line.start -| typing_ops.reindent_scan_limit;
+                if (std.math.cast(u32, lo)) |lo32| {
+                    try p.enclosingRanges(self.allocator, lo32, lo32, &ancestors);
+                    for (ancestors.items) |r| if (r.start < line.start and content[r.start] == o) {
+                        start = @max(start, r.start);
+                        break;
+                    };
+                }
+            }
+        };
+        try out.append(self.allocator, .{ .start = start, .end = @min(hi + 1, content.len) });
+    }
+}
+
+/// 구문 트리가 **신선하면** `ranges` 에 닿는 문자열·주석 조각(계획 editor-typing-rules TR4 — 하이라이트 capture 를 `literals.flatten` 으로
+/// 편다, 호출자가 해제한다). 트리가 없거나 낡았으면 `null` — 소비처는 줄 스캐너로 간다. 범위 합이 상한을 넘어도 `null`. 범위는 정렬해 겹친
+/// 것을 합친 뒤 묻는다. 쿼리가 할당에 실패하면 거기까지의 조각이다(색과 같은 저하 — `spansForRange`).
+fn treeLiterals(self: *AppSession, term: *Term, ranges: []LiteralRange) ?[]literals.Span {
+    const p = freshTree(term) orelse return null;
     const content = (term.rt.editorDocument().opened orelse return null).file.content;
-    const end = @min(hi, content.len);
-    if (end <= lo or end - lo > literal_window_limit) return null;
-    const lo32 = std.math.cast(u32, lo) orelse return null;
-    const end32 = std.math.cast(u32, end) orelse return null;
+    if (ranges.len == 0) return null;
+    std.mem.sort(LiteralRange, ranges, {}, struct {
+        fn less(_: void, x: LiteralRange, y: LiteralRange) bool {
+            return x.start < y.start;
+        }
+    }.less);
+    var merged: usize = 0;
+    var total: usize = 0;
+    for (ranges) |r| {
+        const end = @min(r.end, content.len);
+        if (end <= r.start) continue;
+        if (merged > 0 and r.start <= ranges[merged - 1].end) {
+            ranges[merged - 1].end = @max(ranges[merged - 1].end, end);
+        } else {
+            ranges[merged] = .{ .start = r.start, .end = end };
+            merged += 1;
+        }
+    }
+    for (ranges[0..merged]) |r| total += r.end - r.start;
+    if (total > literal_window_limit) return null;
+    var caps: std.ArrayList(literals.Capture) = .empty;
+    defer caps.deinit(self.allocator);
     var found: std.ArrayList(syntax_mod.Span) = .empty;
     defer found.deinit(self.allocator);
-    p.spansForRange(self.allocator, content, .{ .start = lo32, .end = end32 }, &found);
-    const caps = self.allocator.alloc(literals.Capture, found.items.len) catch return null;
-    defer self.allocator.free(caps);
-    for (found.items, caps) |sp, *c| c.* = .{ .start = sp.start, .end = sp.end, .name = sp.capture };
+    for (ranges[0..merged]) |r| {
+        const lo32 = std.math.cast(u32, r.start) orelse return null;
+        const end32 = std.math.cast(u32, r.end) orelse return null;
+        p.spansForRange(self.allocator, content, .{ .start = lo32, .end = end32 }, &found);
+        for (found.items) |sp| caps.append(self.allocator, .{ .start = sp.start, .end = sp.end, .name = sp.capture }) catch return null;
+    }
     var out: std.ArrayList(literals.Span) = .empty;
-    literals.flatten(self.allocator, caps, &out) catch {
+    literals.flatten(self.allocator, caps.items, &out) catch {
         out.deinit(self.allocator);
         return null;
     };
@@ -41401,6 +41469,38 @@ test "INDL1 구문 트리 문맥 — 실제 키로: 문자열·주석 안 따옴
     try testing.expect(insertText(fx.session, k, " "));
     try testing.expect(insertText(fx.session, k, "\""));
     try testing.expectEqualStrings("  a();\n// say ' \"\"\n", content(k));
+}
+
+test "INDL4 한 글자 입력이 트리에 묻는 범위 — 커서마다 caret 자리만, 공백뿐인 줄의 닫는 괄호는 감싸는 여는 괄호부터, 트리가 낡았으면 묻지 않는다 (계획 editor-typing-rules TR4 — 적대적 2회차: 줄 머리부터 통째로 물어 긴 줄에서 키마다 수십 ms)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    // 줄 머리: 0 `f() {` · 6 `  if (a) {`(그 `{` 는 15) · 17 `    x();`(`x` 21, `;` 뒤 25) · 26 `    `(끝 30) · 31 `  }`.
+    const src = "f() {\n  if (a) {\n    x();\n    \n  }\n}\n";
+    const t = try undoFixture(&fx, allocator, "indl4.ts", src);
+    t.rt.editor_syntax.deinit(allocator);
+    t.rt.editor_syntax = syntax_color.openParsedBudgeted(src, t.rt.editor_grammar, 0);
+    if (freshTree(t) == null) return error.NoTree;
+    const Sel = editor_selection.Selection;
+    var ranges: std.ArrayList(LiteralRange) = .empty;
+    defer ranges.deinit(allocator);
+    // 글자 — 커서마다 caret 자리만.
+    try typingLiteralRanges(fx.session, t, &.{ Sel.at(10), Sel.at(22) }, 'x', "()[]{}", &ranges);
+    try testing.expectEqualSlices(LiteralRange, &.{ .{ .start = 9, .end = 11 }, .{ .start = 21, .end = 23 } }, ranges.items);
+    // 공백뿐인 줄(30)의 `}` — 감싸는 `if (a) {` 의 `{`(15)부터. 글자 뒤(24)의 `}` 는 caret 자리만.
+    ranges.clearRetainingCapacity();
+    try typingLiteralRanges(fx.session, t, &.{ Sel.at(24), Sel.at(30) }, '}', "()[]{}", &ranges);
+    try testing.expectEqualSlices(LiteralRange, &.{ .{ .start = 23, .end = 25 }, .{ .start = 15, .end = 31 } }, ranges.items);
+    // 감싸는 조상이 그 여는 괄호로 시작하지 않으면(`)` — 블록 안) 짝 찾기 상한까지(문서 머리).
+    ranges.clearRetainingCapacity();
+    try typingLiteralRanges(fx.session, t, &.{Sel.at(30)}, ')', "()[]{}", &ranges);
+    try testing.expectEqualSlices(LiteralRange, &.{.{ .start = 0, .end = 31 }}, ranges.items);
+    // 트리가 낡았으면 묻지 않는다.
+    t.rt.editor_syntax.pending = true;
+    ranges.clearRetainingCapacity();
+    try typingLiteralRanges(fx.session, t, &.{Sel.at(30)}, '}', "()[]{}", &ranges);
+    try testing.expectEqual(@as(usize, 0), ranges.items.len);
 }
 
 test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {

@@ -3,6 +3,8 @@ fn editorBatchProbe(self: *AppSession, stage: u32) i32 {
     const st = &self.editor_search;
     const wanted = std.fmt.parseInt(usize, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_OPEN_FILES") orelse "2"), 10) catch return -1;
     const retrying = std.mem.eql(u8, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY") orelse "0"), "1");
+    const saving = if (@hasField(@TypeOf(st.batch.result), "saving")) st.batch.result.saving else 0;
+    if (stage >= 32 and stage <= 36 and saving != 0) return 0;
     if (retrying and stage >= 32 and stage <= 36) {
         const failed: usize = if (stage <= 34) 1 else 0;
         if (st.batch.phase != .completed or st.batch.result.save_failed != failed or st.batch.result.saved != wanted + 2 - failed) return -1;

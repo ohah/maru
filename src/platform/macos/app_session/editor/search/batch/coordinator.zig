@@ -63,6 +63,17 @@ fn bind(session: *host.AppSession, spec: *const search.batch.Specification, prep
 }
 /// closed Read와 모든 Plan은 worker에서 준비하여 caller가 이 호출 끝까지 소유한다. 새 ticket을 발급하지 않는다.
 pub fn apply(session: *host.AppSession, spec: *search.batch.Specification, prepared: *const search.batch_plan.Prepared, ticket: actor.Ticket, closed: []const Closed) !Result {
+    return applyObserved(session, spec, prepared, ticket, closed, null);
+}
+pub fn applyObserved(session: *host.AppSession, spec: *search.batch.Specification, prepared: *const search.batch_plan.Prepared, ticket: actor.Ticket, closed: []const Closed, receipts: ?[]?*maru.session.editor.save_receipt.Receipt) !Result {
+    if (receipts) |slots| {
+        if (slots.len != spec.targets.items.len or slots.len != prepared.items.items.len) return error.StalePlan;
+        try search.batch.validateSaveReceipts(slots);
+        for (slots, prepared.items.items) |slot, item| if (item.changes.len > 0) {
+            const receipt = slot orelse return error.StalePlan;
+            try receipt.ensureUnused();
+        };
+    }
     for (spec.targets.items) |target| if (target.outcome != .pending) return error.AlreadyApplied;
     try ticket.validate(session, spec);
     try bind(session, spec, prepared, closed);
@@ -161,11 +172,12 @@ pub fn apply(session: *host.AppSession, spec: *search.batch.Specification, prepa
     if (history) |*pending| pending.notify();
     if (detached.items.len > 0) {
         session.workspaceChanged(.persisted_surface);
-        // 포커스를 바꾸지 않은 새 탭도 cached sidebar 행과 개수에 즉시 반영한다.
-        @import("../../../tab.zig").recomputeVisibleTabs(session);
+        // 행 목록과 retained 선택 밴드를 함께 갱신한다. 행만 갱신하면 새 문서의 글자는
+        // 늘어나지만 선택 배경과 accent 막대는 이전 높이로 남는다.
+        @import("../../../sidebar.zig").rebuildSidebar(session) catch {};
         session.chrome_dirty = true;
         session.metal_dirty = true;
     }
-    summary = actor.finishApply(session, spec, prepared, terms, summary);
+    summary = actor.finishApplyObserved(session, spec, prepared, terms, summary, receipts);
     return .{ .summary = summary, .documents = documents };
 }

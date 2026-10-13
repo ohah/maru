@@ -94,7 +94,18 @@ extension MaruAppHostController {
             EditorProjectSearchRun.markedCaptured = true
         }
         let ready = editorProjectSearchProbe(stage)
-        if ready == 0 { return }
+        if ready == 0 {
+            if stage == 32, editorProjectSearchProbe(105) == 1, let root = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_OUTPUT"],
+               !FileManager.default.fileExists(atPath: URL(fileURLWithPath: root).appendingPathComponent("bottom-batch-saving.ppm").path) {
+                // 실제 저장 중 상태를 양쪽 도크에서 그린 뒤 원래 위치로 돌린다.
+                if editorProjectSearchCapture("bottom-batch-saving") {
+                    editorProjectSearchAction(32)
+                    _ = editorProjectSearchCapture("right-batch-saving")
+                    editorProjectSearchAction(32)
+                }
+            }
+            return
+        }
         func finish(_ success: Bool) {
             EditorProjectSearchRun.stage = 99
             if !success { exitCode = 1 }

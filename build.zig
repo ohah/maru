@@ -5783,6 +5783,16 @@ pub fn build(b: *std.Build) void {
         run_save_conflicts.addArg("--maru-expect-passed=22");
         macos_only_test_step.dependOn(&run_save_conflicts.step);
     }
+    const batch_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.batch save "} });
+    const run_batch_save = b.addRunArtifact(batch_save_tests);
+    run_batch_save.setCwd(b.path("."));
+    run_batch_save.addArg("--maru-expect-tests=9");
+    b.step("test-editor-batch-save-async", "Run batch save completion and ownership judges").dependOn(&run_batch_save.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_batch_save.addArg("--maru-expect-passed=9");
+        run_batch_save.step.dependOn(&ripgrep_prepare.step);
+        macos_only_test_step.dependOn(&run_batch_save.step);
+    }
     const batch_ui_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.RPBU"} });
     const run_batch_ui = b.addRunArtifact(batch_ui_tests);
     run_batch_ui.addArg("--maru-expect-tests=14");

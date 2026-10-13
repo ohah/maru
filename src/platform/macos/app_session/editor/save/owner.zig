@@ -7,7 +7,7 @@ const queue_mod = @import("queue.zig");
 pub const Receipt = maru.session.editor.save_receipt.Receipt;
 const registry = maru.session.editor.document_registry;
 pub const Origin = struct { window: u64, surface: u64 };
-pub const Reference = struct { id: u64, lease: registry.Lease, origin: Origin, success_notice: ?maru.editor_save_notice.Success = null, receipt: ?*Receipt = null };
+pub const Reference = struct { id: u64, lease: registry.Lease, origin: Origin, success_notice: ?maru.editor_save_notice.Success = null, receipt: ?*Receipt = null, interactive: bool = true };
 
 pub const Owner = struct {
     queue: queue_mod.Queue,
@@ -23,6 +23,9 @@ pub const Owner = struct {
         return self.enqueueObserved(session, term, epoch, success_notice, null);
     }
     pub fn enqueueObserved(self: *Owner, session: *host.AppSession, term: *host.Term, epoch: u64, success_notice: ?maru.editor_save_notice.Success, receipt: ?*Receipt) !queue_mod.Admission {
+        return self.enqueueNotified(session, term, epoch, success_notice, receipt, true);
+    }
+    pub fn enqueueNotified(self: *Owner, session: *host.AppSession, term: *host.Term, epoch: u64, success_notice: ?maru.editor_save_notice.Success, receipt: ?*Receipt, interactive: bool) !queue_mod.Admission {
         if (receipt) |value| try value.ensureUnused();
         if (term.kind != .editor or term.rt.editor_diff != null) return error.NotAnEditor;
         const state = term.rt.editorDocument();
@@ -45,6 +48,7 @@ pub const Owner = struct {
             .origin = .{ .window = session.recovered_session_window_generation, .surface = term.surface.id },
             .success_notice = success_notice,
             .receipt = receipt,
+            .interactive = interactive,
         });
         return admitted;
     }

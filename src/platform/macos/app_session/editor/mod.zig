@@ -63707,10 +63707,228 @@ fn waitBatchUI(session: *AppSession) !void {
     }
     @import("search/preview.zig").quietForTest(session);
 }
+fn waitBatchSavesUI(session: *AppSession) !void {
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+    while (@import("save/dispatch.zig").requestCount() != 0 or session.editor_search.batch.result.saving != 0) {
+        @import("save/dispatch.zig").poll();
+        @import("search/batch/ui.zig").poll(session);
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+}
 fn batchUISearch(fx: *PaneFixture) !void {
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "disk.txt", .data = "foo disk" });
     try replacePreviewSearchWithFiles(fx, "foo", "bar", false, "batch-a.txt,batch-b.txt,disk.txt");
 }
+fn prepareAsyncBatchFixture(fx: *PaneFixture) !void {
+    _ = try undoFixture(fx, testing.allocator, "batch-a.txt", "foo A");
+    _ = try undoFixture(fx, testing.allocator, "batch-b.txt", "foo B");
+    try batchUISearch(fx);
+    try @import("search/batch/ui.zig").start(fx.session);
+    try waitBatchUI(fx.session);
+}
+fn asyncBatchTerm(fx: *PaneFixture, name: []const u8) *Term {
+    for (fx.session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| {
+        if (term.kind == .editor) if (term.rt.editorDocument().path) |path| if (std.mem.eql(u8, std.fs.path.basename(path), name)) return term;
+    };
+    unreachable;
+}
+
+test "batch save 실제 완료 전 성공을 표시하지 않고 추가 편집과 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try prepareAsyncBatchFixture(&fx);
+    const sidebar = @import("../sidebar.zig");
+    fx.session.sidebar_width_px = 180;
+    fx.session.sidebar_header_row_h_px = 20;
+    fx.session.sidebar_metrics = chrome.components.sidebar.Metrics.init(fx.session.cell_height_px, 20);
+    try sidebar.rebuildSidebar(fx.session);
+    const ui = @import("search/batch/ui.zig");
+    const saves = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        saves.cleanupForTests();
+    }
+    try ui.apply(fx.session);
+    // 닫힌 파일을 게시한 뒤 글자 행만 늘고 retained 선택 밴드가 이전 높이로 남으면 안 된다.
+    const chrome_sidebar = maru.chrome.components.sidebar;
+    const sidebar_rows = fx.session.sidebar_rows.items;
+    const active_row = for (sidebar_rows, 0..) |row, index| {
+        if (row == .card and row.card.active) break index;
+    } else unreachable;
+    const metrics = fx.session.buildCellMetrics();
+    const band_width = metrics.sidebar_width_px -| metrics.sidebar_scroll_gutter_px;
+    const selected_rect = chrome_sidebar.spanRect(sidebar_rows, active_row, chrome_sidebar.cardSpanEnd(sidebar_rows, active_row), band_width, sidebar.sidebarMetrics(fx.session));
+    const painted = sidebar.sidebarScrollClipQuad(fx.session, selected_rect.y, @floatFromInt(selected_rect.h)).?;
+    var selected_band_found = false;
+    for (fx.session.gpu_quads.items) |quad| {
+        if (quad.layer == 0 and quad.x == 0 and quad.w == @as(f32, @floatFromInt(band_width)) and quad.y == painted.y and quad.h == painted.h)
+            selected_band_found = true;
+    }
+    try testing.expect(selected_band_found);
+    const owner = saves.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    for (owner.references.items) |reference| try testing.expectEqual(@as(usize, 2), reference.receipt.?.references);
+    ui.poll(fx.session);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.result.saving);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_search.batch.result.saved);
+    for (fx.session.editor_search.batch.ready.?.specification.targets.items) |target| try testing.expect(target.outcome == .saving);
+    try batchApplyDisk(&fx, "batch-a.txt", "foo A");
+    try batchApplyDisk(&fx, "disk.txt", "foo disk");
+    const a = asyncBatchTerm(&fx, "batch-a.txt");
+    a.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, a, "!"));
+    const undo_len = a.rt.editorDocument().history.undo_len;
+    gate.set();
+    try waitBatchSavesUI(fx.session);
+    try batchApplyDisk(&fx, "batch-a.txt", "bar A");
+    try batchApplyDisk(&fx, "disk.txt", "bar disk");
+    try testing.expectEqualStrings("bar A!", a.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(a));
+    try testing.expectEqual(undo_len, a.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.result.saved);
+}
+
+test "batch save 외부 충돌은 파일별 실패로 남고 현재 본문 재시도만 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try prepareAsyncBatchFixture(&fx);
+    const ui = @import("search/batch/ui.zig");
+    try ui.apply(fx.session);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "external" });
+    try waitBatchSavesUI(fx.session);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+    try batchApplyDisk(&fx, "batch-a.txt", "external");
+    const st = &fx.session.editor_search.batch;
+    var index: usize = 0;
+    for (st.ready.?.specification.targets.items, 0..) |target, n| if (target.outcome == .save_failed) {
+        index = n;
+    };
+    try testing.expectEqual(@as(usize, 2), st.result.saved);
+    try testing.expectEqual(@as(usize, 1), st.result.save_failed);
+    try testing.expect(st.ready.?.specification.targets.items[index].save_failure.? == error.ExternalConflict);
+    const a = ui.resultTerm(fx.session, index).?;
+    a.rt.editor_selection = editor_selection.Selection.at(5);
+    try testing.expect(insertText(fx.session, a, "!"));
+    const undo_len = a.rt.editorDocument().history.undo_len;
+    const operation = st.result.operation;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "foo A" });
+    try ui.retrySave(fx.session, index);
+    try testing.expect(!ui.canRetrySave(fx.session, index));
+    try testing.expectEqual(@as(usize, 1), st.result.saving);
+    try testing.expectEqual(@as(usize, 2), st.result.saved);
+    try testing.expectError(error.StaleRequest, ui.retrySave(fx.session, index));
+    try waitBatchSavesUI(fx.session);
+    try batchApplyDisk(&fx, "batch-a.txt", "bar A!");
+    try testing.expectEqual(undo_len, a.rt.editorDocument().history.undo_len);
+    try testing.expectEqual(operation, st.result.operation);
+    try testing.expectEqual(@as(usize, 3), st.result.saved);
+    try testing.expectEqual(@as(usize, 0), st.result.save_failed);
+}
+
+test "batch save 결과를 닫아도 네이티브 패널의 실제 저장과 완료 수명을 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try prepareAsyncBatchFixture(&fx);
+    const ui = @import("search/batch/ui.zig");
+    const saves = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        saves.cleanupForTests();
+    }
+    try ui.apply(fx.session);
+    const disk = asyncBatchTerm(&fx, "disk.txt");
+    try testing.expect(disk.file_entry != null and disk.file_entry.?.native_editor);
+    const owner = saves.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    ui.back(fx.session);
+    try testing.expectEqual(@as(usize, 3), saves.requestCount());
+    for (owner.references.items) |reference| try testing.expectEqual(@as(usize, 1), reference.receipt.?.references);
+    gate.set();
+    try awaitDispatchedSavesForTest();
+    try batchApplyDisk(&fx, "batch-a.txt", "bar A");
+    try batchApplyDisk(&fx, "disk.txt", "bar disk");
+    try testing.expect(!isDirty(disk));
+    ui.poll(fx.session);
+    try testing.expect(fx.session.editor_search.batch.phase == .idle);
+}
+
+test "batch save 소비자 준비의 모든 할당 실패는 전체 본문과 미리보기를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try prepareAsyncBatchFixture(&fx);
+    const ui = @import("search/batch/ui.zig");
+    for (0..4) |fail_index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        const original = fx.session.allocator;
+        fx.session.allocator = failing.allocator();
+        defer fx.session.allocator = original;
+        try testing.expectError(error.OutOfMemory, ui.apply(fx.session));
+        try testing.expect(ui.canApply(fx.session));
+        try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+        const a = asyncBatchTerm(&fx, "batch-a.txt");
+        try testing.expectEqualStrings("foo A", a.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(@as(usize, 0), a.rt.editorDocument().history.undo_len);
+    }
+    const receipt = try maru.session.editor.save_receipt.Receipt.create(testing.allocator);
+    defer receipt.release();
+    const other = try maru.session.editor.save_receipt.Receipt.create(testing.allocator);
+    defer other.release();
+    var slots = [_]?*maru.session.editor.save_receipt.Receipt{ receipt, receipt, other };
+    var transaction = fx.session.editor_search.batch;
+    fx.session.editor_search.batch = .{};
+    defer transaction.deinit(testing.allocator);
+    const ready = &transaction.ready.?;
+    const applied = @import("search/batch/coordinator.zig").applyObserved(fx.session, &ready.specification, &ready.prepared, ready.ticket, ready.closed, &slots);
+    try testing.expectEqualStrings("foo A", asyncBatchTerm(&fx, "batch-a.txt").rt.editorDocument().opened.?.file.content);
+    try testing.expectError(error.DuplicateReceipt, applied);
+    try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+}
+
+test "batch save 등록 실패는 적용 본문을 유지하며 닫힌 결과의 늦은 실패도 알린다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    try prepareAsyncBatchFixture(&fx);
+    const ui = @import("search/batch/ui.zig");
+    const saves = @import("save/dispatch.zig");
+    const b = asyncBatchTerm(&fx, "batch-b.txt");
+    _ = (try saves.trySave(fx.session, b, null)).?;
+    const owner = saves.ownerForTest().?;
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    const original = owner.queue.a;
+    owner.queue.a = failing.allocator();
+    defer if (saves.ownerForTest()) |live| {
+        live.queue.a = original;
+        saves.cleanupForTests();
+    };
+    try ui.apply(fx.session);
+    try testing.expectEqual(@as(usize, 3), fx.session.editor_search.batch.result.save_failed);
+    try testing.expectEqual(@as(usize, 0), fx.session.editor_search.batch.result.saved);
+    try testing.expectEqualStrings("bar B", b.rt.editorDocument().opened.?.file.content);
+    try testing.expect(b.rt.editorDocument().history.undo_len > 0);
+    owner.queue.a = original;
+    try waitBatchSavesUI(fx.session);
+    var index: usize = 0;
+    for (fx.session.editor_search.batch.ready.?.specification.targets.items, 0..) |target, n| if (std.mem.endsWith(u8, target.absolute, "batch-b.txt")) {
+        index = n;
+    };
+    try ui.retrySave(fx.session, index);
+    ui.back(fx.session);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-b.txt", .data = "external" });
+    try awaitDispatchedSavesForTest();
+    try batchApplyDisk(&fx, "batch-b.txt", "external");
+    try testing.expect(isDirty(b));
+    try testing.expect(fx.session.chrome_host.notice.open);
+    try testing.expect(!fx.session.chrome_host.confirm.open);
+}
+
 test "RPBU1 실제 완료 검색의 열린 두 문서를 준비 적용 저장하고 닫힌 파일도 함께 반영한다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     var fx = try PaneFixture.init(testing.allocator);
@@ -63733,6 +63951,7 @@ test "RPBU1 실제 완료 검색의 열린 두 문서를 준비 적용 저장하
     fx.session.chrome_dirty = false;
     d.apply(fx.session, .{ .option = 10 }, fx.session.editor_search.result.generation);
     try testing.expect(fx.session.chrome_dirty);
+    try waitBatchSavesUI(fx.session);
     for (fx.session.sidebar_rows.items) |row| if (row == .agent_toggle) {
         try testing.expectEqual(pane_ops.activePane(fx.session).terms.items.len, @as(usize, row.agent_toggle.count));
     };
@@ -63797,6 +64016,7 @@ test "RPBU3 저장 실패의 문서와 Undo 및 뒤 파일 저장 결과를 UI�
     try waitBatchUI(fx.session);
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "external" });
     try d.batch_ui.apply(fx.session);
+    try waitBatchSavesUI(fx.session);
     const batch = &fx.session.editor_search.batch;
     try testing.expectEqual(@as(usize, 2), batch.result.saved);
     try testing.expectEqual(@as(usize, 1), batch.result.save_failed);
@@ -63819,7 +64039,9 @@ test "RPBU3 저장 실패의 문서와 Undo 및 뒤 파일 저장 결과를 UI�
     const operation = batch.result.operation;
     try testing.expect(d.batch_ui.canRetrySave(fx.session, failed_index));
     // 외부 충돌을 무시해 저장하거나 치환을 다시 적용하면 이 검증이 실패한다.
-    try testing.expectError(error.ExternalConflict, d.batch_ui.retrySave(fx.session, failed_index));
+    try d.batch_ui.retrySave(fx.session, failed_index);
+    try waitBatchSavesUI(fx.session);
+    try testing.expect(batch.ready.?.specification.targets.items[failed_index].save_failure.? == error.ExternalConflict);
     try batchApplyDisk(&fx, "batch-a.txt", "external");
     try testing.expectEqual(@as(usize, 1), batch.result.save_failed);
     fx.session.ime_active = true;
@@ -63851,6 +64073,7 @@ test "RPBU3 저장 실패의 문서와 Undo 및 뒤 파일 저장 결과를 UI�
     const undo_len = a.rt.editorDocument().history.undo_len;
     try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "batch-a.txt", .data = "foo A" });
     try d.batch_ui.retrySave(fx.session, failed_index);
+    try waitBatchSavesUI(fx.session);
     try batchApplyDisk(&fx, "batch-a.txt", current_body);
     try testing.expect(!isDirty(a));
     try testing.expectEqual(undo_len, a.rt.editorDocument().history.undo_len);
@@ -63878,6 +64101,7 @@ test "RPBU4 변경 없음 단일 유효 편집과 disk 전용 검색의 적용 �
         try ui.start(fx.session);
         try waitBatchUI(fx.session);
         try ui.apply(fx.session);
+        try waitBatchSavesUI(fx.session);
         const result = fx.session.editor_search.batch.result;
         try testing.expectEqual(@as(usize, if (mode == 1) 1 else 0), result.changed);
         try testing.expectEqual(@as(usize, if (mode == 1) 2 else if (mode == 2) 1 else 3), result.unchanged);
@@ -63906,6 +64130,7 @@ test "RPBU5 지난 결과는 닫힌 문서를 경로로 다시 열거나 치환�
     try ui.start(fx.session);
     try waitBatchUI(fx.session);
     try ui.apply(fx.session);
+    try waitBatchSavesUI(fx.session);
     var active_result: usize = 0;
     for (fx.session.editor_search.batch.ready.?.specification.targets.items, 0..) |target, i| if (std.mem.endsWith(u8, target.absolute, "batch-b.txt")) {
         active_result = i;
@@ -64658,6 +64883,7 @@ test "RPBU7 새 disk 결과도 정확한 문서 신원으로 열고 닫은 뒤�
     try ui.start(fx.session);
     try waitBatchUI(fx.session);
     try ui.apply(fx.session);
+    try waitBatchSavesUI(fx.session);
     var index: usize = 0;
     for (fx.session.editor_search.batch.ready.?.specification.targets.items, 0..) |target, i| if (target.source == .disk) {
         index = i;
@@ -64735,6 +64961,7 @@ test "RPBU10 선택한 열린 문서와 닫힌 파일의 일부 일치만 함께
     try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.files);
     try testing.expectEqual(@as(usize, 2), fx.session.editor_search.batch.matches);
     try d.batch_ui.apply(fx.session);
+    try waitBatchSavesUI(fx.session);
     try testing.expectEqualStrings("bar foo A", a.rt.editorDocument().opened.?.file.content);
     try testing.expectEqualStrings("foo B", b.rt.editorDocument().opened.?.file.content);
     try batchApplyDisk(&fx, "disk.txt", "bar foo disk");

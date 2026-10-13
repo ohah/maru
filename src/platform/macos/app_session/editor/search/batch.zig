@@ -37,7 +37,7 @@ pub const Ticket = struct {
         try owner.validateRoots(session);
     }
 };
-pub const Result = struct { operation: ?u64 = null, changed: usize = 0, unchanged: usize = 0, saved: usize = 0, save_failed: usize = 0 };
+pub const Result = struct { operation: ?u64 = null, changed: usize = 0, unchanged: usize = 0, saved: usize = 0, save_failed: usize = 0, saving: usize = 0 };
 
 fn document(term: *Term) ?search.request.DocumentIdentity {
     const lease = term.rt.editor_document_lease orelse return null;
@@ -114,14 +114,40 @@ pub fn apply(session: *AppSession, spec: *search.batch.Specification, prepared: 
 }
 /// 전체 모델 commit 이후만 호출한다. 파일별 저장 실패는 다음 파일의 저장을 막지 않는다.
 pub fn finishApply(session: *AppSession, spec: *search.batch.Specification, prepared: *const search.batch_plan.Prepared, terms: []const ?*Term, initial: Result) Result {
+    return finishApplyObserved(session, spec, prepared, terms, initial, null);
+}
+pub fn finishApplyObserved(session: *AppSession, spec: *search.batch.Specification, prepared: *const search.batch_plan.Prepared, terms: []const ?*Term, initial: Result, receipts: ?[]?*maru.session.editor.save_receipt.Receipt) Result {
     var result = initial;
     for (spec.targets.items, prepared.items.items) |*target, item| {
         target.outcome = if (item.changes.len == 0) .unchanged else .applied;
         if (item.changes.len == 0) result.unchanged += 1 else result.changed += 1;
     }
     // commit이 바꾼 fingerprint 때문에 남은 저장을 거절하지 않는다. 이후 실패는 파일별로 결산한다.
-    for (spec.targets.items, terms) |*target, term| {
+    for (spec.targets.items, terms, 0..) |*target, term, index| {
         if (target.outcome != .applied) continue;
+        if (receipts) |slots| {
+            const receipt = slots[index].?;
+            const admitted = @import("../save/dispatch.zig").trySaveForBatch(session, term.?, receipt) catch |err| {
+                target.outcome = .save_failed;
+                target.save_failure = err;
+                receipt.release();
+                slots[index] = null;
+                result.save_failed += 1;
+                continue;
+            };
+            if (admitted != null) {
+                target.outcome = .saving;
+                result.saving += 1;
+                continue;
+            }
+            // 지원하지 않는 bridge/원격 계약을 동기 저장 성공으로 오인하지 않는다.
+            target.outcome = .save_failed;
+            target.save_failure = error.NotAnEditor;
+            receipt.release();
+            slots[index] = null;
+            result.save_failed += 1;
+            continue;
+        }
         if (editor.saveDocument(session, term.?)) |_| {
             target.outcome = .saved;
             result.saved += 1;

@@ -5775,6 +5775,24 @@ pub fn build(b: *std.Build) void {
         run_local_save.addArg("--maru-expect-passed=28");
         macos_only_test_step.dependOn(&run_local_save.step);
     }
+    const native_close_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.native close save "} });
+    const run_native_close_save = b.addRunArtifact(native_close_save_tests);
+    run_native_close_save.setCwd(b.path("."));
+    run_native_close_save.addArg("--maru-expect-tests=13");
+    b.step("test-editor-close-save-async", "Run native close save completion and preserved state judges").dependOn(&run_native_close_save.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_native_close_save.addArg("--maru-expect-passed=13");
+        macos_only_test_step.dependOn(&run_native_close_save.step);
+    }
+    const native_close_guard_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.DIRTY5 ", ".test.U1h ", ".test.U2k ", ".test.U2l ", ".test.C1a-9 " } });
+    const run_native_close_guards = b.addRunArtifact(native_close_guard_tests);
+    run_native_close_guards.setCwd(b.path("."));
+    run_native_close_guards.addArg("--maru-expect-tests=9");
+    b.step("test-editor-close-save-guards", "Run existing dirty close, untitled, native panel and conflict regressions").dependOn(&run_native_close_guards.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_native_close_guards.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_native_close_guards.step);
+    }
     const save_pipeline_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.FOS", ".test.CSA", ".test.EXFB" } });
     const run_save_pipeline = b.addRunArtifact(save_pipeline_tests);
     run_save_pipeline.setCwd(b.path("."));

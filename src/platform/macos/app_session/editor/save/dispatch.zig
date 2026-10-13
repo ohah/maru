@@ -28,6 +28,19 @@ pub fn trySaveForBatch(session: *host.AppSession, term: *host.Term, receipt: *ow
     if (term.file_entry) |entry| if (!entry.native_editor or entry.usesEditorBridge()) return null;
     return enqueueNative(session, term, null, receipt, false);
 }
+/// 닫기 결과가 실패를 안내한다. 완료 전 덮어쓰기 확인으로 닫기 의도를 바꾸지 않는다.
+pub fn trySaveForClose(session: *host.AppSession, term: *host.Term, success_notice: ?notice.Success, receipt: *owner_mod.Receipt) editor.SaveError!?u64 {
+    if (term.file_entry) |entry| if (!entry.native_editor or entry.usesEditorBridge()) return null;
+    return enqueueNative(session, term, success_notice, receipt, false);
+}
+pub fn hasPendingDocument(identity: RegistryIdentity) bool {
+    const owner = if (active) |*value| value else return false;
+    for (owner.references.items) |entry| {
+        const lease = entry.lease;
+        if (@intFromPtr(lease.owner) == identity.owner and lease.document.slot == identity.slot and lease.document.generation == identity.generation) return true;
+    }
+    return false;
+}
 fn enqueueNative(session: *host.AppSession, term: *host.Term, success_notice: ?notice.Success, receipt: ?*owner_mod.Receipt, interactive: bool) editor.SaveError!?u64 {
     if (term.kind != .editor or term.rt.editor_diff != null) return null;
     const document = term.rt.editorDocument();

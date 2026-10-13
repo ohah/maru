@@ -6,7 +6,8 @@
 - 요청 큐와 완료 승인 기반: 구현. 한 큐의 FIFO 실행·동일 요청 합류·성공 기준 인계·caller 예산·stale 대상 거부를 제공한다.
 - 사용자 저장 연결: 부분 구현. 이름 있는 일반 로컬 편집기와 native 파일 패널의 code action→format 뒤 저장을 앱 전역 큐에 연결했다. 웹 bridge·diff·원격·이름 없는 문서는 제외한다.
 - 정상 종료 연결: 구현. main-actor pump로 저장 완료를 정산한 뒤 마지막 workspace/백업 캡처를 시작한다. 실제 AppKit에서 미정산 저장 요청 직후 종료를 요청하고 최종 bytes·workspace·clean 백업을 검증한다. 느린 파일 I/O 동안 timer 대기와 취소 경합의 제품 실측은 별도다.
-- 배치 적용/재시도 저장: 구현. 전체 본문 commit 뒤 파일별로 큐에 등록하고 실제 완료를 결과에 반영한다. 닫기의 저장 선택·웹 bridge·원격·Save As·rename coordination은 별도 단계다.
+- 문서 하나의 닫기 저장: 구현. 이름 있는 로컬 native 문서의 `term` 범위에 저장/변경사항 버리기/취소를 연결한다. 웹 bridge·원격·이름 없는 문서·다중 문서 범위·사이드바 별도 Term 경로는 기존 계약을 유지한다.
+- 배치 적용/재시도 저장: 구현. 전체 본문 commit 뒤 파일별로 큐에 등록하고 실제 완료를 결과에 반영한다. 웹 bridge·원격·Save As·rename coordination은 별도 단계다.
 - 저장 응답 지연 개선: 실제 AppKit의 배치 적용·메인 이벤트 지연을 측정한다. 등록 시간과 전체 쓰기 완료 시간은 구분한다. 기존 동기 API는 계속 완료까지 main에서 기다리며 모든 명령의 무중단을 보장하지 않는다.
 
 ## 기반의 책임
@@ -36,7 +37,7 @@ worker 기반은 제품 큐·실패 안내·종료 정책을 결정하지 않는
 ### 실제 호출 경로에서 확인한 연결 조건
 
 - `format.saveNowWithNotice`가 사용자 저장의 최종 진입점이다. `save_actions`와 포맷의 응답·시한 뒤에 snapshot을 준비하고, 일반 로컬 문서는 큐에 등록하며 그 밖의 저장 계약은 동기 호출을 유지한다. 큐 등록을 실제 저장 완료로 안내하지 않는다.
-- 네이티브 편집기의 `AppSession.showConfirm`은 현재 닫기/취소 두 버튼이다. 기존 「저장 후 닫기」는 CM6 `file_panel_close`에만 있다. 네이티브의 저장 선택은 별도로 연결하고 CM6의 revision-pinned ACK와 섞지 않는다.
+- 일반 범위의 `AppSession.showConfirm`은 닫기/취소 두 버튼을 유지한다. 이름 있는 로컬 native 문서 하나는 `editor/save/close.zig`가 저장/변경사항 버리기/취소를 제공한다. CM6 `file_panel_close`의 revision-pinned ACK와 섞지 않는다.
 - `search.preview`의 적용/재시도, 배치의 기존 직접 coordinator API, `workspace_edit`, `conflict.confirmOverwrite`는 동기 `saveDocument`의 완료를 전제로 한다. 배치 UI는 별도 `applyObserved`와 저장 완료 자료를 사용한다. 반환을 큐 등록 성공으로 바꾸면 저장 성공·clean 결과가 거짓이 된다. 새 사용자 저장 진입점을 분리하고 같은 대상의 기존 writer와 순서를 조정한다.
 - 닫기 대기 중 포커스·탭 순서가 바뀌어도 원래 대상을 다시 확인한다. `PendingClose`의 활성 위치나 배열 인덱스만 장기간 들고 다른 문서를 닫지 않는다.
 - Swift의 `applicationShouldTerminate`는 이미 `terminateLater`와 완료 응답 경로를 갖는다. 파일 쓰기 drain은 마지막 workspace checkpoint와 성공/실패 정산보다 앞서며, 마지막 worker가 끝났다는 이유만으로 AppKit 종료 성공을 바로 응답하지 않는다.
@@ -166,3 +167,32 @@ AppKit fixture는 실제 mouse 적용/재시도와 Metal readback을 사용한�
 완료 시간은 동기는 적용 반환, 비동기는 마지막 실제 완료 정산에서 측정한다. GUI 관측기의
 대기 시간은 넣지 않는다. 비동기는 화면에 제어를 일찍 돌려주지만 단일 writer와 main 정산 때문에
 전체 완료가 늘 수 있다. 이 작은 fixture로 대용량 본문 준비 비용이나 프레임률을 보장하지 않는다.
+
+## 네이티브 문서 하나의 저장 후 닫기
+
+`requestClose`가 `term` 범위의 마지막 문서 뷰에 미저장 편집을 발견하면 저장/변경사항 버리기/취소를
+묻는다. `save.close.State`는 surface ID·문서 registry 신원·저장 대상 epoch를 고정하며 Term 주소나
+오래된 pane/tab 인덱스를 보관하지 않는다. 다른 뷰가 남는 닫기는 기존처럼 연결만 닫는다.
+
+저장 선택은 완료 소비자를 먼저 준비한다. 확인 Enter도 AppKit 해석 트랜잭션 안에서 들어오므로
+`ime_active` 동안 snapshot을 만들지 않고 `imeEnd` 뒤의 tick으로 시작을 미룬다. 입력 확정 뒤
+기존 code action→포맷 경로를 실행하며 `format.saveNowWithNotice`에서 해당 소비자를 CAS 큐에
+연결한다. 등록 성공은 닫기 성공이 아니다. 준비/등록/실제 쓰기 실패는 본문과 Undo를 유지한다.
+
+완료 뒤 같은 문서의 후속 저장·code action·포맷도 정산한 다음 dirty와 native 패널의 외부 변경을
+다시 검사한다. 편집이 남으면 「저장한 내용과 다른 편집이 남아 탭을 닫지 않았습니다」로 알린다. 저장 성공의 포맷 안내는 닫기 의도를 취소하지 않으며 다른 대화 모달은 보호한다. 성공하고 변경이 남지 않을 때만 surface와
+문서 신원·epoch를 다시 찾은 뒤 닫는다. 오래된 위치나 저장 전 본문으로 닫지 않는다.
+
+확인 취소·포커스/구조 이동·새 확인창·창 해제는 닫기 의도와 소비자 참조만 취소한다. 이미 접수된
+파일 쓰기는 전역 큐가 끝낸다. 결과 수명과 모델 참조는 기존 저장 큐 계약을 따른다. 새 문서를
+열 때도 사이드바 행과 retained 선택 도형을 함께 갱신한다.
+
+`test-editor-close-save-async`는 차단 writer와 실제 bytes, 추가 편집/Undo, 외부 CAS, 취소/포커스,
+소비자 OOM, 공유 뷰, 대상 epoch 변경, 후속 저장, 확인 Enter의 입력 해석 경계를 검사한다.
+`test-editor-close-save-guards`는 기존 dirty·이름 없는 문서·native 패널·충돌 닫기 회귀를 검사한다.
+`tools/test-editor-close-save-adversarial.py`는 조기 닫기·dirty/CAS 무시·소비자 해제 누락·대상 세대
+무시·후속 저장 무시·포맷 완료 소비자 누락·성공 안내가 닫기를 취소하는 결함을 정상/결함/복원 실행으로 대조한다.
+
+GUI 관측기 `tools/editor-project-search-app/run.py --native-close-save`는 격리 writer에만 1초 지연을
+넣고 실제 AppKit ⌘W·확인 Enter·추가 입력과 제품 Metal 캡처를 사용한다. 원본 bytes는 별도로
+대조한다. 합성 NSEvent 증거를 물리 한국어 HID·VoiceOver·OS 후보창 증거로 확대하지 않는다.

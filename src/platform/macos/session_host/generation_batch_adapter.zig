@@ -666,13 +666,17 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
         slot.current.active_operation_generation = 1;
         slot.current.active_operation_kind = busy_case.kind;
         slot.current.active_operation_owner_thread_incarnation = busy_case.thread;
+        const refused_before = @import("maru").image_reconciliation.snapshot();
         const busy_prepare = transport.prepare_image_apply(transport.context, .try_lock);
         const busy = transport.resolve_image(transport.context, 7, ref);
+        // 빠진 둘(준비·해석)은 대조 계수의 흐름 칸에 남는다.
+        const refused = @import("maru").image_reconciliation.snapshot().delta(refused_before).channel_refused;
         slot.current.active_operation_generation = 0;
         slot.current.active_operation_kind = .none;
         slot.current.active_operation_owner_thread_incarnation = 0;
         try std.testing.expect((try busy) == null);
         try std.testing.expect(!busy_prepare);
+        try std.testing.expectEqual(@as(u64, 2), refused);
         try std.testing.expectEqual(@as(usize, 2), table.len);
     }
     // 첫 snapshot 은 그 owner 가 `.initial_snapshot` permit 을 쥔 채 적용된다 — 그 permit 은 해석을 막지 않는다(실제 permit).

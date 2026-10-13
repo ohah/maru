@@ -36,6 +36,7 @@ const client_deadline = @import("client_deadline.zig");
 const client_image_channel = @import("client_image_channel.zig");
 const client_image_segments = @import("client_image_segments.zig");
 const fork_fd_fence = @import("fork_fd_fence.zig");
+const image_reconciliation = @import("maru").image_reconciliation;
 const client_idle_pump_evidence = @import("client_idle_pump_evidence.zig");
 const client_poison = @import("client_poison.zig");
 const screen_inbox = @import("screen_inbox.zig");
@@ -7436,7 +7437,8 @@ pub const Client = struct {
     pub fn pumpImageChannel(self: *Client, wait: fork_fd_fence.ReceiveWait) bool {
         // 다른 공개 변경 메서드와 같은 울타리 — allocator callback 안·이미 poison 된 연결(표가 어긋난 자리에서 멈췄을 수 있다)·
         // 옮겨 간 Client·external 모드(입양되어 봉인된 상태를 바꾸면 안 된다)에서는 읽지 않는다. 표는 Client 소멸이 닫는다.
-        const operation_fence_held = self.requireBlockingMode() catch return false;
+        // 빠진 일은 대조 계수의 흐름 칸(`channel_refused`)에 남는다 — lease 가 오래 잡혀 원장이 차는 것을 가린다.
+        const operation_fence_held = self.requireBlockingMode() catch return imageChannelRefused(bool, false);
         defer if (operation_fence_held) self.endPublicMutation();
         if (self.image_channel.state != .bound or self.image_channel.fd < 0) return true;
         // 묶인 채널에는 늘 표가 있다(`negotiateImageChannel` 이 먼저 잡는다).
@@ -7472,7 +7474,7 @@ pub const Client = struct {
     /// 뒤, legacy 는 blocking 모드)는 막히지 않는다 — 실제 HostAdapter 판정자가 잰다. 붙은 stream 이 상한을 넘으면 host 상한 위반이라
     /// poison 한다(host 상한과 같아 정상은 안 난다).
     pub fn openImageStream(self: *Client, stream_id: u64) void {
-        const operation_fence_held = self.requireBlockingMode() catch return;
+        const operation_fence_held = self.requireBlockingMode() catch return imageChannelRefused(void, {});
         defer if (operation_fence_held) self.endPublicMutation();
         const segments = self.image_segments orelse return;
         segments.openStream(stream_id) catch self.poison(.peer_contract_violation);
@@ -7480,10 +7482,17 @@ pub const Client = struct {
 
     /// 적용한 배치의 `image_seg_hwm` 이하로 그 stream 에 남은 세그먼트를 반환한다(§6). 울타리를 못 들면 다음 배치의 hwm 이 치운다.
     pub fn sweepImageSegments(self: *Client, stream_id: u64, hwm: u64) void {
-        const operation_fence_held = self.requireBlockingMode() catch return;
+        const operation_fence_held = self.requireBlockingMode() catch return imageChannelRefused(void, {});
         defer if (operation_fence_held) self.endPublicMutation();
         const segments = self.image_segments orelse return;
         segments.sweep(stream_id, hwm);
+    }
+
+    /// 이미지 채널 연산이 울타리에서 빠졌다 — 대조 계수의 흐름 칸(`channel_refused`)에 남기고 `value` 를 돌려준다. Client 를 읽지
+    /// 않는다(울타리 밖이다).
+    fn imageChannelRefused(comptime T: type, value: T) T {
+        image_reconciliation.recordChannelRefused();
+        return value;
     }
 
     /// 이 연결이 `image_shm` 을 협상했는가(이미지 채널 §2·§6). 협상했으면 채널이 없어도(「이미지 채널 없음」) 적용 자리는 채널
@@ -7500,7 +7509,7 @@ pub const Client = struct {
         stream_id: u64,
         ref: screen_stream.ImageRef,
     ) error{OutOfMemory}!?[]const u8 {
-        const operation_fence_held = self.requireBlockingMode() catch return null;
+        const operation_fence_held = self.requireBlockingMode() catch return imageChannelRefused(?[]const u8, null);
         defer if (operation_fence_held) self.endPublicMutation();
         const segments = self.image_segments orelse return null;
         const mapping = (try segments.resolve(stream_id, .{
@@ -26917,6 +26926,8 @@ const ImageChannelPumpFixture = struct {
     main_host: c.fd_t,
     channel_host: c.fd_t,
     client_live: bool = true,
+    /// `sendSegment` 이 공유 메모리에 넣는 픽셀 — 연결 둘을 가르는 판정자가 바꾼다.
+    pixels: [4]u8 = .{ 1, 2, 3, 4 },
 
     fn init() !ImageChannelPumpFixture {
         var main: [2]c.fd_t = undefined;
@@ -26954,7 +26965,7 @@ const ImageChannelPumpFixture = struct {
     fn sendSegment(self: *ImageChannelPumpFixture, segment_id: u64, stream_id: u64, fd_count: usize) !void {
         const image_segment = @import("image_segment.zig");
         const wire = @import("image_channel_wire.zig");
-        const pixels = [_]u8{ 1, 2, 3, 4 };
+        const pixels = self.pixels;
         var fds: [2]c.fd_t = undefined;
         for (fds[0..fd_count]) |*fd| fd.* = (try image_segment.create(&pixels)).?.fd;
         defer for (fds[0..fd_count]) |fd| {
@@ -27119,7 +27130,10 @@ test "image channel pump: resolveImageSegment maps a pumped segment once, for it
     fx.client.poison(.peer_contract_violation);
     var second = first;
     second.segment_id = 2;
+    const refused_before = image_reconciliation.snapshot();
     try testing.expect((try fx.client.resolveImageSegment(3, second)) == null);
+    // 빠진 해석은 대조 계수의 흐름 칸에 남는다.
+    try testing.expectEqual(@as(u64, 1), image_reconciliation.snapshot().delta(refused_before).channel_refused);
     try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
 }
 
@@ -27174,10 +27188,14 @@ test "image channel pump: an opened stream keeps its segments until its hwm swee
     try testing.expect(fx.client.pumpImageChannel(.try_lock));
     try testing.expectEqual(@as(usize, 1), segments.len);
     fx.client.poison(.peer_contract_violation);
+    const refused_before = image_reconciliation.snapshot();
     fx.client.openImageStream(9);
     try testing.expect(std.mem.indexOfScalar(u64, segments.liveStreams(), 9) == null);
+    try testing.expectEqual(@as(u64, 1), image_reconciliation.snapshot().delta(refused_before).channel_refused);
     fx.client.sweepImageSegments(4, 3);
     try testing.expectEqual(@as(usize, 1), segments.len);
+    // 빠진 열기·정리는 대조 계수의 흐름 칸에 하나씩 남는다.
+    try testing.expectEqual(@as(u64, 2), image_reconciliation.snapshot().delta(refused_before).channel_refused);
 }
 
 test "image channel pump: an external-mode client is not pumped, so its sealed state does not move" {
@@ -27194,8 +27212,10 @@ test "image channel pump: an external-mode client is not pumped, so its sealed s
     fx.client.connection_profile = .cli_attach;
     fx.client.compatibility_profile = compatibility.profileForMajor(protocol.version_major).?;
     const before = externalAdoptionSnapshot(&fx.client);
-    // 울타리를 못 잡았다고 알린다 — 적용 직전 호출자는 그 배치를 보류한다.
+    // 울타리를 못 잡았다고 알린다 — 적용 직전 호출자는 그 배치를 보류한다. 빠진 일은 대조 계수의 흐름 칸에 남는다.
+    const refused_before = image_reconciliation.snapshot();
     try testing.expect(!fx.client.pumpImageChannel(.try_lock));
+    try testing.expectEqual(@as(u64, 1), image_reconciliation.snapshot().delta(refused_before).channel_refused);
     try testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
     try testing.expect(!fx.client.unusable);
     try testing.expect(std.meta.eql(before, externalAdoptionSnapshot(&fx.client)));
@@ -27296,6 +27316,37 @@ test "image channel pump: a lost channel drops to no image channel and keeps the
     // 다시 불러도 아무 일도 없다 — 비울 채널이 없다(true).
     try std.testing.expect(fx.client.pumpImageChannel(.try_lock));
     try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
+    // 늦게 온 `image_ref`(「이미지 채널 없음」 연결)는 「세그먼트 없음」이다 — 조립기는 `MalformedRow` 로 그 연결을 재접속시키고
+    // 탭은 살아 있다(계약 §3.2·§6). 버린 표의 fd 를 다시 쓰지 않는다.
+    const late: screen_stream.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 7, .byte_len = 4 };
+    try std.testing.expect((try fx.client.resolveImageSegment(1, late)) == null);
+    try std.testing.expect(fx.client.imageShmNegotiated());
+}
+
+test "image channel pump: two connections' tables never mix — the same segment id resolves to each connection's own pixels" {
+    // 세그먼트 id 는 host 의 연결마다 따로 센다 — 두 연결이 같은 id 를 써도 앱의 표는 Client 마다 하나라 섞이지 않아야 한다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var first = try ImageChannelPumpFixture.init();
+    defer first.deinit();
+    var second = try ImageChannelPumpFixture.init();
+    defer second.deinit();
+    second.pixels = .{ 9, 8, 7, 6 };
+    first.client.openImageStream(3);
+    second.client.openImageStream(3);
+    try first.sendSegment(1, 3, 1);
+    try second.sendSegment(1, 3, 1);
+    try std.testing.expect(first.client.pumpImageChannel(.try_lock));
+    try std.testing.expect(second.client.pumpImageChannel(.try_lock));
+    const ref: screen_stream.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 1, .byte_len = 4 };
+    const second_pixels = (try second.client.resolveImageSegment(3, ref)) orelse return error.TestUnexpectedResult;
+    defer client_image_segments.unmapPixels(second_pixels);
+    try std.testing.expectEqualSlices(u8, &.{ 9, 8, 7, 6 }, second_pixels);
+    // 한쪽의 해석은 다른 쪽 표를 건드리지 않는다.
+    try std.testing.expectEqual(@as(usize, 1), first.client.image_segments.?.len);
+    const first_pixels = (try first.client.resolveImageSegment(3, ref)) orelse return error.TestUnexpectedResult;
+    defer client_image_segments.unmapPixels(first_pixels);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, first_pixels);
+    try std.testing.expect(first.client.image_segments != second.client.image_segments);
 }
 
 test "image channel pump: a segment without exactly one fd poisons the connection as a host contract violation" {

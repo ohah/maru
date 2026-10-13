@@ -17,6 +17,7 @@ const screen_stream = @import("maru").session.screen_stream;
 const catchup_stage_contract = @import("catchup_stage_contract.zig");
 const client_image_segments = @import("client_image_segments.zig");
 const fork_fd_fence = @import("fork_fd_fence.zig");
+const image_reconciliation = @import("maru").image_reconciliation;
 
 /// 적용 호출의 필수 resolver(이미지 채널 §6) — attachment 를 쓰는 쪽이 조립기 모듈을 따로 부르지 않게 다시 낸다.
 pub const ImageRefResolver = screen_assembler.ImageRefResolver;
@@ -502,7 +503,10 @@ pub const RemoteAttachment = struct {
         if (!transport.image_shm_negotiated(transport.context)) return false;
         const peek = self.pending_batches.items[self.pending_batch_head].borrow(transport) catch
             return false; // 정식 borrow 가 같은 실패를 그 자리의 규칙대로 다룬다.
-        return batchCarriesImageRef(peek.bytes) and !transport.prepare_image_apply(transport.context, wait);
+        if (!batchCarriesImageRef(peek.bytes) or transport.prepare_image_apply(transport.context, wait)) return false;
+        // 보류는 지연이지 손실이 아니다 — 대조 계수의 흐름 칸(`held`)에 남는다. 보류가 이어지면 펌프마다 센다.
+        image_reconciliation.recordChannelHeld();
+        return true;
     }
 
     /// Pull one stream-local batch from the borrowed connection into attachment-owned storage,
@@ -1737,11 +1741,14 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
 
     // 채널을 비울 수 없는 tick — 배치는 머리에 남고(소비·해석·계상 없음), 다시 펌프해도 같은 배치를 다시 본다.
     var accounting: catchup_stage_contract.Accounting = .{};
+    const held_before = image_reconciliation.snapshot();
     try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreenInternal(std.testing.io, &accounting));
     // catch-up(관찰자 재접속 후보)은 다시 올 tick 이 없어 수신 잠금을 기다린다(§7).
     try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .block), transport.last_wait);
     try std.testing.expectEqual(PumpScreenResult.held, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 2), transport.prepared);
+    // 보류마다 대조 계수의 흐름 칸(`held`)에 남는다.
+    try std.testing.expectEqual(@as(u64, 2), image_reconciliation.snapshot().delta(held_before).channel_held);
     // tick 펌프의 큐 머리 준비는 수신 잠금을 기다리지 않는다 — 다음 tick 이 다시 센다(§7).
     try std.testing.expectEqual(@as(?fork_fd_fence.ReceiveWait, .try_lock), transport.last_wait);
     try std.testing.expectEqual(@as(usize, 0), transport.resolved);
@@ -1751,9 +1758,10 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
     try std.testing.expectEqual(@as(usize, 1), transport.next);
     try std.testing.expect(std.meta.eql(catchup_stage_contract.Accounting{}, accounting));
     try std.testing.expect(attachment.screen.?.assembler.imageById(5) == null);
-    // 비울 수 있게 되면 그 배치를 적용한다 — 준비는 이 펌프에서 한 번뿐이다.
+    // 비울 수 있게 되면 그 배치를 적용한다 — 준비는 이 펌프에서 한 번뿐이다. 적용은 보류로 세지 않는다.
     transport.ready = true;
     try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(u64, 2), image_reconciliation.snapshot().delta(held_before).channel_held);
     try std.testing.expectEqual(@as(usize, 3), transport.prepared);
     try std.testing.expectEqual(@as(usize, 1), transport.resolved);
     try std.testing.expect(attachment.screen.?.assembler.imageById(5) != null);

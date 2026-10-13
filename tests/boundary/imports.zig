@@ -1323,6 +1323,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 스레드가 그 잠금을 쥐게 하는 판정자용 보유자 하나.
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "fork_fd_fence" },
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "ReceiveFenceHolder" },
+                // 이미지 채널 진단(IC3b-2c-2, 2026-10-13): 울타리에서 빠진 채널 연산을 세는 대조 계수 import 하나와, `catch return`
+                // 꼴을 지키며(울타리 판정자) 세고 값을 돌려주는 Client 를 읽지 않는 도우미 하나.
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "image_reconciliation" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "imageChannelRefused" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.
@@ -1694,6 +1698,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "sweepAttachmentImageSegments" },
                 // fork 울타리(IC4b, 2026-10-13): 적용 직전 펌프가 수신 잠금을 기다릴지(`ReceiveWait`) 받아 Client 로 넘기는 타입 import.
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "fork_fd_fence" },
+                // 이미지 채널 진단(IC3b-2c-2, 2026-10-13): slot 의 접근 규칙에서 빠진 채널 연산을 세는 대조 계수 import.
+                .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "image_reconciliation" },
                 // post snapshot 을 쓴 판정자의 번호(2026-10-02) — 판정자 빌드 전용(`void`). 앞선 판정자가 남긴 snapshot 이 실행
                 // 순서에 따라 뒤 판정자의 «아직 게시 안 됨» 단언을 깨던 것을 UI 프레임 도장과 같은 장치로 순서와 무관하게 닫는다.
                 .{ .parent = "root", .kind = "var", .visibility = "private", .modifier = "threadlocal", .name = "event_release_post_snapshot_test_generation" },

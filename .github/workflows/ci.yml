@@ -719,7 +719,7 @@ jobs:
     #     파일을 **안 덮는가**(docs/native-editor-document-model.md §3.9d 「판정」). 헤드리스 판정자는 그
     #     둘을 볼 수 없다 — 하나는 AppKit 키 배달이고 하나는 디스크의 사실이다.
     #   · 헤더 hover 판 골든(2026-10-13) — 사이드바 헤더·접힌 ◧·도크 토글 hover 판을 실제 앱으로 1x·2x 찍어 픽셀 비교한다.
-    #     Chrome Lab 은 app_session 을 타지 않아 판의 자리 계산을 못 본다. 첫 도입은 막지 않는다(스텝 주석).
+    #     Chrome Lab 은 app_session 을 타지 않아 판의 자리 계산을 못 본다.
     if: ${{ github.event.pull_request.draft != true && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.runtime == 'true') && needs.changes.outputs.proven_appkit != 'true' }}
     runs-on: macos-15
     # 세 잡이 각 20분이었다. 합친 실측 예상은 11~12분(콜드 번들 빌드 한 번 + 스모크 합)이라 30분이면
@@ -790,19 +790,12 @@ jobs:
       # 사이드바 헤더·접힌 ◧·도크 토글 hover 판을 실제 앱으로 1x·2x 찍어 커밋된 골든과 비교한다(격리 HOME ·
       # 세션 host 루트 · 고정 셸). Chrome Lab 은 app_session 을 타지 않아 판의 자리 계산을 못 본다 — 2026-10-13 하루에
       # 이 판들의 결함 넷이 숫자 판정자를 지나 캡처로만 보였다(tests/golden/header_hover_visual.zig).
-      # **첫 도입은 막지 않는다(continue-on-error).** 골든은 개발기에서 만들었고 러너의 GPU 로 처음 찍히는 것이라, 픽셀이
-      # 갈리면 main 이 빨개진다. 첫 CI 에서 0 픽셀을 확인한 뒤 이 줄을 지우는 후속으로 막는 게이트가 된다.
+      # 골든은 개발기에서 만들었다. 첫 도입(#4425)은 막지 않고 돌려 러너 GPU 의 캡처가 **0 픽셀**로 맞는 것을 확인했고
+      # (run 38402599021 — 14장 캡처 약 49초, `All 2 tests passed`), 그 뒤로 막는 게이트다.
       - name: 헤더 hover 판 시각 골든
         id: header_hover_golden
         if: ${{ !cancelled() }}
-        continue-on-error: true
         run: mise run macos-header-hover-visual-golden
-      # 단계 도입 중에는 잡이 초록이라 실패가 아무 데도 안 보인다 — 경고와 잡 요약에 한 줄을 남긴다.
-      - name: 헤더 hover 판 시각 골든 실패 알림
-        if: ${{ !cancelled() && steps.header_hover_golden.outcome == 'failure' }}
-        run: |
-          echo "::warning title=헤더 hover 판 시각 골든::러너 캡처가 골든과 갈렸다(단계 도입 중이라 잡은 막지 않는다). 아티팩트 maru-header-hover-capture 를 보라."
-          echo "### ⚠️ 헤더 hover 판 시각 골든이 어긋났다 (continue-on-error — 막지 않음)" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload header hover captures
         if: ${{ !cancelled() && steps.header_hover_golden.outcome == 'failure' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

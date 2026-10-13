@@ -311,3 +311,42 @@ Prompt/Stop이 도착하면 live 턴이 idle로 덮였다. 중립 `HookSlot`이 
 초기 복원은 독립적으로 진행한다. 이 표시는 transport 재접속에서는 보존하고, 훅 끄기·
 원격 이탈·다른 nonce owner로 전환할 때 초기화한다. v3의 기존 경로는 이 규칙을 쓰지 않는다.
 v4는 명시적 replay envelope와 커서의 경계 메타데이터를 요구하며 v3 hello로 낮추지 않는다.
+
+## 실제 macOS 창 종료·복원 검증 계획
+
+#4435의 정확한 소스 사본을 사용하며 제품 이벤트·workspace checkpoint·runtime attach·
+알림 전달 구현은 변경하지 않는다. 사본에는 상태 관측과 소유 창의 종료 요청만 추가한다.
+private HOME·config·session-host root와 소유 loopback SSH를 사용한다. persistent PTY에서
+`maru ssh`를 실행하고 실제 발급 nonce를 원격 fixture가 기록한다. 정상 AppKit 종료로
+checkpoint를 만든 뒤 앱이 없는 동안 같은 nonce에 v1/v2 훅을 기록한다. 새 GUI 프로세스의
+동일 runtime 재부착, 원격 배지, 과거 알림 억제 및 새 live 알림을 검사한다.
+
+GUI는 Aqua 세션에서 실행하며 화면 잠금 상태에서는 진행하지 않는다. 첫/복원 창의 실제
+Metal frame은 로컬 artifact로만 보관한다. Notification Center의 실제 배너는 소유 테스트
+알림의 고유 식별자를 기준으로 확인하고, 전달 요청/예약 성공과 화면 표시를 구분한다.
+기존 사용자 앱·SSH·Notification Center 기록은 종료·삭제하지 않는다. 서명/OS 알림 권한이
+부족하면 정확한 조회 결과를 보고하며 자동 승인이나 정상 표시로 처리하지 않는다.
+
+### 실행 방법과 검증 경계
+
+`python3 tools/remote-restart-app/prepare.py --snapshot <저장소 밖 새 디렉터리> --dependency-root <동일 web lockfile과 node_modules를 가진 checkout>`으로
+제품 소스 사본과 관측용 앱을 만든다. `remote-restart-source.json`은 원본 HEAD, 관측 코드와 서명된 바이너리
+해시를 기록한다. 실행기는 앱/CLI 해시를 대조하고 artifact에 manifest를 복사한다. 정상 GUI 실행을 사용하며 smoke 실행의 workspace 복원 생략을 사용하지 않는다.
+
+`python3 tools/test-remote-agent-native.py --cli <snapshot>/zig-out/Maru.app/Contents/MacOS/maru --gui-app <snapshot>/zig-out/Maru.app/Contents/MacOS/maru-macos-app --gui-output <새 artifact 디렉터리>`로
+실행한다. 기존 private SSH carrier가 원격 훅과 foreground SSH process를 소유한다. provider
+payload는 합성 데이터이며 provider 계정이나 사용자 SSH 설정을 변경하지 않는다.
+
+종료는 제품의 Quit 요청과 Enter 확인 입력을 거쳐 final checkpoint·AppKit 종료를 실행한다.
+확인 생략은 keep-alive 정책 확정까지 생략해 runtime을 끝내므로 성공 대조군으로 쓰지 않는다.
+앱이 없는 동안 정확한 runtime 하나가 controller 없이 유지되는지 실제 CLI inventory로 확인한다.
+복원 뒤 host/runtime nonce 전체와 원격 process owner가 같아야 하며, 초기 기록 2개와 오프라인
+v1/v2 기록 8개가 실제 reader에서 replay로 적용되고 알림 전달은 없어야 한다. 이어서 새 v1/v2
+기록 8개가 live로 적용되고 debounce를 지난 완료 알림이 실제 전달 큐에서 나와야 한다.
+배치별 nonce 카운터를 누적 이벤트 수로 사용하지 않는다. 이벤트 적용 관측을 별도로 센다.
+
+준비 완료 전에 실패하더라도 정확한 private namespace·실행 파일·UID·process birth가 일치하는
+host만 정리한다. 재사용 artifact 디렉터리는 거부한다. Metal frame은 로컬에만 저장한다.
+Notification Center 권한 조회와 전달 기록은 화면에 보이는 OS 배너의 증거가 아니다.
+현재 gate는 `os_banner_verified=false`로 그 경계를 명시한다. 실제 배너의 양성 대조군과 표시
+검증은 별도 후속 작업이며 이 gate의 통과나 UN authorization으로 완료 처리하지 않는다.

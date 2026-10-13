@@ -369,16 +369,26 @@ IC5 는 넷으로 나눴다 — 투영의 세그먼트 방출(IC5a, 순수 계�
 - `SegmentSink`: 투영은 OS 도 원장도 모른다 — 픽셀이 있는 이미지마다 `reserveFn(image, BatchKind)` 로 자리를 청하고(준비되면
   `segment_id`, 미루면 null — 미룸 조건과 스냅샷 예외는 sink 가 정한다), 배치의 `image_seg_hwm` 은 `hwmFn` 으로 받는다. 준비한
   세그먼트의 송신·취소 수명은 sink 가 진다. 0 B 이미지는 자리를 청하지 않고 `segment_id` 0 의 `image_ref` 다.
+- sink 의 답은 셋이다(`Reservation`): `segment`(id), `deferred`, `untransmittable`(계약 §4.4 — host 전체 상한보다 큰 한 장).
 - 미룸 표현(계약 §5): client 가 이전 판을 가진 이미지는 placement 를 남기고 base 에 **이전** generation 을 적는다(`DrawableImages`
   가 이미지마다 base 에 적을 판을 든다) — 다음 투영이 다시 후보로 본다. 처음 보내는 이미지는 placement 도 뺀다. 미룬 새 프레임뿐이면
-  delta 가 비어 배치가 나가지 않는다.
+  delta 가 비어 배치가 나가지 않는다. 「전송 불가」는 이전 판이 있어도 placement 를 빼고 base 에도 적지 않는다.
+- IC5b 가 질 의무(적대적 검증 1 회차):
+  - **투영이 어떤 오류로 끝나도** 그 투영이 청한 세그먼트를 전부 취소한다 — 배치가 생기지 않아 「배치 롤백 → 취소」에 걸리지 않는다
+    (attach 가 `SnapshotTooLarge` 로 끝나면 연결은 남고 원장만 찬다). 판정자: reserve 뒤 투영 실패 → 원장 0.
+  - hwm 은 같은 stream 의 아직 승인되지 않은 다른 배치가 준비한 id 를 넘지 않는다(stream 마다 준비 상태 배치가 하나면 지켜진다).
+  - `reserveFn` 의 `image.pixels` 는 그 호출 동안만 유효하다(core lock 아래) — 세그먼트 복사(최대 81 MB)가 core lock 안에서 일어나는
+    비용을 잰다.
+- **순서 제약: IC5c 는 IC5d(스위치 켜기)보다 먼저다.** 미룸으로 delta 가 비어도 server 는 그 화면 변화 토큰을 소비한다 — 정지 화면에서
+  처음 보내는 이미지가 미뤄지면 다음 화면 변화까지 다시 투영하지 않아 영영 안 뜬다. 그 재투영은 IC5c 의 용량 사건 깨우기가 맡는다.
 - `image_seg_hwm`: 세그먼트 모드의 snapshot 과 비어 있지 않은 delta 에 싣는다(0 이면 안 싣는다). base(host 의 다음 diff 기준)에는
   싣지 않는다. 주 스트림 예산은 `image_ref` 레코드 크기만 본다.
 - 판정자(`test-image-channel` 의 screen_snapshot 6):
   - snapshot 이 `image_blob` 대신 sink 의 id 로 `image_ref`·placement·hwm 을 싣고, 조립기가 그 세그먼트로 픽셀을 받는다;
   - 처음 보내는 이미지를 미루면 placement 도 빠지고 base 가 「가졌다」고 적지 않으며, 자리가 생기면 둘이 함께 나간다;
   - 미룬 새 프레임은 이전 판·placement 를 유지하고 base 가 이전 generation 을 적으며, 자리가 생기면 새 판이 나간다;
-  - 바뀐 것이 없는 delta 는 비고(hwm 없음) 이미 보낸 판은 다시 청하지 않으며, `blob` 경로는 sink 를 묻지 않는다;
+  - 「전송 불가」는 이전 판이 있어도 placement 를 빼고(앱의 placement 0) base 에 적지 않는다;
+  - 바뀐 것이 없는 delta 는 비고(hwm 없음) 이미 보낸 판은 다시 청하지 않으며, 기본 `blob` 경로에는 `image_ref`·hwm 이 없다;
   - 「attach 뒤 움직인 모든 축이 delta 로」 전수 판정자가 `image_ref`·`image_seg_hwm` 을 「producer 미방출」 목록에서 축 표로 옮겼다
     (세그먼트 축은 판정자용 sink 와 그 resolver 로 조립기까지 간다).
 

@@ -1516,6 +1516,11 @@ macOS의 `/usr/sbin/sshd` 실행이 가능한 환경에서 opt-in으로 실행�
 
 `mise exec -- zig build test-editor-local-save test-editor-save-pipeline test-editor-save-conflicts test-editor-project-replace-batch-ui -j4`와 `-Doptimize=ReleaseFast`는 요청 수명과 사용자 키 dispatch·code action/LSP·외부 format·기존 배치 저장 계약을 검증한다. `python3 tools/test-editor-save-command-adversarial.py`는 BOM 기준 혼동·동기 저장 순서 장벽 누락·오버레이 선점·닫힌 모델 완료 누락·조기 저장 성공 안내를 실제 테스트 실패와 정상/복원 대조군으로 검증한다. 헤드리스 판정은 실제 AppKit/물리 IME와 전체 batch 응답 개선을 대신하지 않는다. `zig build macos-editor-save-conflict-smoke`는 제품 ⌘S·충돌 선택·백업/복원 및 `quit-pending-save`의 미정산 요청 관측 직후 정상 종료와 최종 bytes/workspace/clean 백업을 검사한다.
 
+저장 결과 소비자 수명: `mise exec -- zig build test-editor-save-receipts`와
+`-Doptimize=ReleaseFast`. `python3 tools/test-editor-save-receipts-adversarial.py`는 완료 결과의
+조기 게시·참조 누락·실패 유실·잘못된 승인·중복 게시 변이를 정상/복원 대조군과 검사한다.
+범위와 후속 연결은 [로컬 비동기 저장 계획](plans/editor-local-save-async.md)을 따른다.
+
 원격 재접속 실패·종료: `zig build test-remote-agent-failure-paths`는 제품 AppSession의
 연속 EOF 예산·커서·반복 배지 복구와 전체 종료의 할당/소유 자식 회수를 검사한다.
 macOS 전용 CI에 포함한다. `zig build test-ssh-reconnect-failure-process`는 실제 CLI를

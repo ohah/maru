@@ -191,8 +191,10 @@ pub const editor = struct {
     pub const line_ops = @import("session/editor/ops/line_ops.zig");
     /// 복사·잘라내기의 순수 판정(§3.4 — 무엇을 담고 무엇을 지우는가. 이동 단계 3).
     pub const clipboard_ops = @import("session/editor/ops/clipboard_ops.zig");
-    /// 입력 조합의 순수 판정(§3.7 × §9.1 — 쌍 넣기·type-over·감싸기와 caret. IME 는 L4 에 남는다. 이동 단계 2).
+    /// 저장 요청과 결과 소비자의 메인 actor 완료 수명.
+    pub const save_receipt = @import("session/editor/ops/save_receipt.zig");
     pub const save_ops = @import("session/editor/ops/save_ops.zig");
+    /// 입력 조합의 순수 판정(§3.7 × §9.1 — 쌍 넣기·type-over·감싸기와 caret. IME 는 L4 에 남는다. 이동 단계 2).
     pub const typing_ops = @import("session/editor/ops/typing_ops.zig");
     /// 붙여넣기·단위 지우기·다시 읽기의 순수 판정(§3.2·§3.4·editor-surface §4 — 변경 목록과 caret. 이동 단계 5).
     pub const edit_ops = @import("session/editor/ops/edit_ops.zig");

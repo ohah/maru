@@ -4,9 +4,10 @@ const maru = @import("maru");
 const host = @import("../../../app_session.zig");
 const local = @import("../local_save.zig");
 const queue_mod = @import("queue.zig");
+pub const Receipt = maru.session.editor.save_receipt.Receipt;
 const registry = maru.session.editor.document_registry;
 pub const Origin = struct { window: u64, surface: u64 };
-pub const Reference = struct { id: u64, lease: registry.Lease, origin: Origin, success_notice: ?maru.editor_save_notice.Success = null };
+pub const Reference = struct { id: u64, lease: registry.Lease, origin: Origin, success_notice: ?maru.editor_save_notice.Success = null, receipt: ?*Receipt = null };
 
 pub const Owner = struct {
     queue: queue_mod.Queue,
@@ -19,6 +20,10 @@ pub const Owner = struct {
         return self.enqueueWithNotice(session, term, epoch, null);
     }
     pub fn enqueueWithNotice(self: *Owner, session: *host.AppSession, term: *host.Term, epoch: u64, success_notice: ?maru.editor_save_notice.Success) !queue_mod.Admission {
+        return self.enqueueObserved(session, term, epoch, success_notice, null);
+    }
+    pub fn enqueueObserved(self: *Owner, session: *host.AppSession, term: *host.Term, epoch: u64, success_notice: ?maru.editor_save_notice.Success, receipt: ?*Receipt) !queue_mod.Admission {
+        if (receipt) |value| try value.ensureUnused();
         if (term.kind != .editor or term.rt.editor_diff != null) return error.NotAnEditor;
         const state = term.rt.editorDocument();
         if (state.save_target_epoch == std.math.maxInt(u64)) return error.WriteFailed;
@@ -33,11 +38,13 @@ pub const Owner = struct {
         var prepared = try local.Prepared.initWithAllocator(self.queue.a, term, .cas);
         errdefer prepared.deinit(self.queue.a);
         const admitted = try self.queue.enqueue(&prepared, epoch);
+        if (receipt) |value| value.retain();
         self.references.appendAssumeCapacity(.{
             .id = admitted.id,
             .lease = lease,
             .origin = .{ .window = session.recovered_session_window_generation, .surface = term.surface.id },
             .success_notice = success_notice,
+            .receipt = receipt,
         });
         return admitted;
     }
@@ -57,7 +64,9 @@ pub const Owner = struct {
         } };
     }
     pub fn ack(self: *Owner, accepted: bool) !void {
-        const id = (self.queue.outcome orelse return error.NotReady).id;
+        const outcome = self.queue.outcome orelse return error.NotReady;
+        const id = outcome.id;
+        const failure: ?anyerror = outcome.failure orelse if (accepted) null else error.WriteFailed;
         try self.queue.ack(accepted);
         var i: usize = 0;
         while (i < self.references.items.len) {
@@ -66,6 +75,10 @@ pub const Owner = struct {
                 continue;
             }
             const entry = self.references.orderedRemove(i);
+            if (entry.receipt) |value| {
+                value.complete(failure);
+                value.release();
+            }
             _ = @constCast(entry.lease.owner).release(entry.lease) catch unreachable;
         }
     }
@@ -73,7 +86,13 @@ pub const Owner = struct {
     pub fn deinit(self: *Owner) void {
         const a = self.queue.a;
         self.queue.deinit();
-        for (self.references.items) |entry| _ = @constCast(entry.lease.owner).release(entry.lease) catch unreachable;
+        for (self.references.items) |entry| {
+            if (entry.receipt) |value| {
+                value.complete(error.WriteFailed);
+                value.release();
+            }
+            _ = @constCast(entry.lease.owner).release(entry.lease) catch unreachable;
+        }
         self.references.deinit(a);
         self.* = undefined;
     }

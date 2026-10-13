@@ -64956,3 +64956,134 @@ test "LSAVEA6 외부 포매터 진단과 시간 초과 안내는 결과 해제 �
         }
     }
 }
+
+test "save receipt 실제 쓰기 완료 전에는 성공을 게시하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "receipt.txt", "old");
+    const saves = @import("save/owner.zig");
+    const receipt = try saves.Receipt.create(testing.allocator);
+    defer receipt.release();
+    const dispatch = @import("save/dispatch.zig");
+    _ = (try dispatch.trySaveObserved(fx.session, term, null, receipt)).?;
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        dispatch.cleanupForTests();
+    }
+    const owner = dispatch.ownerForTest().?;
+    try owner.queue.startBlockedForTest(saves.Owner.liveTarget(owner.references.items[0]).?, &gate);
+    dispatch.poll();
+    try testing.expect(receipt.result == .pending);
+    try testing.expectEqual(@as(usize, 2), receipt.references);
+    gate.set();
+    try awaitDispatchedSavesForTest();
+    try testing.expect(receipt.result == .saved);
+    try testing.expectEqual(@as(usize, 1), receipt.references);
+}
+
+test "save receipt 합류한 소비자마다 실제 실패 이유를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "receipt.txt", "old");
+    const saves = @import("save/owner.zig");
+    const first = try saves.Receipt.create(testing.allocator);
+    defer first.release();
+    const second = try saves.Receipt.create(testing.allocator);
+    defer second.release();
+    var owner = saves.Owner.init(testing.allocator);
+    defer owner.deinit();
+    const a = try owner.enqueueObserved(fx.session, term, 1, null, first);
+    try testing.expectError(error.ReceiptInUse, owner.enqueueObserved(fx.session, term, 1, null, first));
+    const b = try owner.enqueueObserved(fx.session, term, 1, null, second);
+    try testing.expect(a.id == b.id and b.joined);
+    try owner.queue.failNext(error.ExternalConflict);
+    try owner.ack(false);
+    try testing.expect(first.result == .failed and first.result.failed == error.ExternalConflict);
+    try testing.expect(second.result == .failed and second.result.failed == error.ExternalConflict);
+    try testing.expectEqual(@as(usize, 1), first.references);
+    try testing.expectEqual(@as(usize, 1), second.references);
+}
+
+test "save receipt 소비자가 먼저 닫혀도 요청 참조가 실제 저장 완료까지 살아 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "receipt.txt", "old");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    const saves = @import("save/owner.zig");
+    const receipt = try saves.Receipt.create(testing.allocator);
+    var owner = saves.Owner.init(testing.allocator);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        owner.deinit();
+    }
+    _ = try owner.enqueueObserved(fx.session, term, 1, null, receipt);
+    const reference = owner.references.items[0];
+    try owner.queue.startBlockedForTest(saves.Owner.liveTarget(reference).?, &gate);
+    receipt.release();
+    try testing.expectEqual(@as(usize, 1), reference.receipt.?.references);
+    try testing.expect(owner.queue.poll() == null);
+    gate.set();
+    const outcome = try awaitSaveQueueForTest(&owner.queue);
+    try testing.expect(outcome.failure == null);
+    try testing.expect(owner.queue.apply(fx.session, term, saves.Owner.liveTarget(reference).?));
+    try owner.ack(true);
+    try testing.expectEqual(@as(usize, 0), owner.references.items.len);
+    const disk = try fx.dir.dir.readFileAlloc(testing.io, "receipt.txt", testing.allocator, .limited(100));
+    defer testing.allocator.free(disk);
+    try testing.expectEqualStrings("old!", disk);
+    try testing.expect(!isDirty(term));
+}
+
+test "save receipt 등록 할당 실패는 소비자의 참조와 pending을 소비하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "receipt.txt", "old");
+    const saves = @import("save/owner.zig");
+    var receipt_oom = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, saves.Receipt.create(receipt_oom.allocator()));
+    const receipt = try saves.Receipt.create(testing.allocator);
+    defer receipt.release();
+    for (0..4) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var owner = saves.Owner.init(failing.allocator());
+        defer owner.deinit();
+        try testing.expectError(if (fail_index == 1 or fail_index == 2) error.WriteFailed else error.OutOfMemory, owner.enqueueObserved(fx.session, term, 1, null, receipt));
+        try testing.expectEqual(@as(usize, 1), receipt.references);
+        try testing.expect(receipt.result == .pending);
+        try testing.expectEqualStrings("old", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+test "save receipt 잘못된 승인과 중복 완료는 결과를 바꾸지 않고 최종 정리는 실패로 결산한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try undoFixture(&fx, testing.allocator, "receipt.txt", "old");
+    const saves = @import("save/owner.zig");
+    const receipt = try saves.Receipt.create(testing.allocator);
+    defer receipt.release();
+    var owner = saves.Owner.init(testing.allocator);
+    _ = try owner.enqueueObserved(fx.session, term, 1, null, receipt);
+    try owner.queue.failNext(error.OutOfMemory);
+    try testing.expectError(error.UnappliedCompletion, owner.ack(true));
+    try testing.expect(receipt.result == .pending);
+    try owner.ack(false);
+    receipt.complete(null);
+    try testing.expect(receipt.result == .failed and receipt.result.failed == error.OutOfMemory);
+    try testing.expectError(error.CompletedReceipt, owner.enqueueObserved(fx.session, term, 1, null, receipt));
+    owner.deinit();
+    const pending = try saves.Receipt.create(testing.allocator);
+    defer pending.release();
+    var abandoned = saves.Owner.init(testing.allocator);
+    _ = try abandoned.enqueueObserved(fx.session, term, 1, null, pending);
+    abandoned.deinit();
+    try testing.expect(pending.result == .failed and pending.result.failed == error.WriteFailed);
+    try testing.expectEqual(@as(usize, 1), pending.references);
+}

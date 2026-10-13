@@ -35,7 +35,7 @@ worker 기반은 제품 큐·실패 안내·종료 정책을 결정하지 않는
 
 ### 실제 호출 경로에서 확인한 연결 조건
 
-- `format.saveNow`가 사용자 저장의 최종 동기 호출이다. `save_actions`와 포맷의 응답·시한 뒤에 snapshot을 준비하며, 큐 등록을 실제 저장 완료로 안내하지 않는다.
+- `format.saveNowWithNotice`가 사용자 저장의 최종 진입점이다. `save_actions`와 포맷의 응답·시한 뒤에 snapshot을 준비하고, 일반 로컬 문서는 큐에 등록하며 그 밖의 저장 계약은 동기 호출을 유지한다. 큐 등록을 실제 저장 완료로 안내하지 않는다.
 - 네이티브 편집기의 `AppSession.showConfirm`은 현재 닫기/취소 두 버튼이다. 기존 「저장 후 닫기」는 CM6 `file_panel_close`에만 있다. 네이티브의 저장 선택은 별도로 연결하고 CM6의 revision-pinned ACK와 섞지 않는다.
 - `search.preview`의 적용/재시도, `search.batch`, `workspace_edit`, `conflict.confirmOverwrite`는 동기 `saveDocument`의 완료를 전제로 한다. 반환을 큐 등록 성공으로 바꾸면 저장 성공·clean 결과가 거짓이 된다. 새 사용자 저장 진입점을 분리하고 같은 대상의 기존 writer와 순서를 조정한다.
 - 닫기 대기 중 포커스·탭 순서가 바뀌어도 원래 대상을 다시 확인한다. `PendingClose`의 활성 위치나 배열 인덱스만 장기간 들고 다른 문서를 닫지 않는다.
@@ -95,3 +95,25 @@ LSAVEQ1~6은 동적 큐의 64개 독립 요청·등록 OOM 보존과 실제 work
 AppKit은 `maru_macos_editor_save_pending_requests`로 main-actor 완료를 pump한다. 정상 종료는 저장을 먼저 정산한 뒤 final workspace checkpoint에 진입하고, checkpoint를 생략하는 종료 경로도 파일 저장과 프로젝트 검색 worker가 남았으면 `terminateLater`로 기다린다. 이 getter는 main actor 전용이며 파일 I/O가 영원히 멈추면 종료 대기도 끝난다는 보장은 없다. 강제 종료/전원 손실을 보장하지 않는다.
 
 검증은 `test-editor-local-save`의 LSAVEL1~5와 LSAVEA1~6이 요청 모델 수명·참조 정산·OOM 보존·대상 무효화·실제 사용자 키 dispatch·추가 편집·외부 충돌·동기 caller 순서·완료 전 성공 안내 거부·마지막 뷰 닫기를 검사한다. `test-editor-save-pipeline`은 기존 code action/LSP·외부 포매터/format/didSave 회귀다. `test-editor-save-conflicts`는 기존 충돌 확인·재진입·덮어쓰기·다시 읽기·비교의 완료 후 동작을 검사한다. 이 헤드리스 테스트는 물리 IME/AppKit 증거가 아니다. 제품 `macos-editor-save-conflict-smoke`는 NSEvent ⌘S·충돌 행동·백업/복원과 `quit-pending-save`의 미정산 요청 관측→정상 AppKit 종료→최종 원본 bytes·workspace·백업 정리를 검사한다. 강제로 지연한 OS 파일 쓰기의 대기/취소와 물리 IME는 별도다.
+
+## 배치 결과 소비자 수명 — 기반 연결
+
+`session.editor.save_receipt.Receipt`는 저장 중(`pending`)·실제 성공(`saved`)·실패 이유(`failed`)를
+메인 actor에서 한 번 게시하는 소유 자료다. 플랫폼과 UI를 참조하지 않는다. 결과 소비자는 최초 참조를,
+`save.Owner.enqueueObserved`는 큐 등록이 성공한 뒤 요청 참조를 각각 갖는다. 등록 실패는 소비자의
+참조·pending을 그대로 보존한다. 이미 사용 중이거나 완료된 자료는 재등록하지 않는다.
+
+합류한 요청도 소비자별 참조를 유지하며, 승인된 `Owner.ack`에서 각 소비자에 실제 결과를 게시한 뒤
+요청 참조를 해제한다. 잘못된 ack는 결과를 게시하지 않는다. 소비자가 먼저 해제되어도 요청이
+완료 자료를 보존한다. 최종 owner 정리는 writer join 뒤 미정산 소비자를 실패로 결산한다.
+`dispatch.trySaveObserved`는 기존 일반 로컬 저장 계약에만 이 결과를 연결하며 기존 `trySave`도
+같은 진입점을 쓴다. 완료 자료의 해제는 저장 취소나 파일 롤백이 아니다.
+
+이 단계는 배치 UI 연결에 필요한 기반이다. 아직 batch·파일 패널의 저장 호출을 바꾸거나
+저장 중 라벨을 추가하지 않았으며, main 응답 지연 개선을 완료한 것으로 보지 않는다.
+다음 단계는 native 파일 패널 계약을 확인하고 batch 결과 슬롯을 이 자료에 연결하는 작업이다.
+
+`zig build test-editor-save-receipts`는 실제 차단 writer·합류·소비자 선행 해제·등록의 네 할당 실패·
+잘못된 승인·중복 완료·최종 정리를 검사한다. `tools/test-editor-save-receipts-adversarial.py`는
+조기 성공·요청 참조 누락·실패 유실·거절된 승인 게시·중복 결과 덮어쓰기를 실제 실패로 검출하며
+정상/복원 대조군을 함께 실행한다. 실제 배치 UI·물리 IME 검증의 증거는 아니다.

@@ -5709,6 +5709,15 @@ pub fn build(b: *std.Build) void {
     run_batch_coordinator.setCwd(b.path("."));
     b.step("test-editor-project-replace-batch-coordinator", "Run mixed source atomic model commit publication and save judges").dependOn(&run_batch_coordinator.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_coordinator.step);
+    const save_receipt_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.save receipt"} });
+    const run_save_receipt = b.addRunArtifact(save_receipt_tests);
+    run_save_receipt.setCwd(b.path("."));
+    run_save_receipt.addArg("--maru-expect-tests=9");
+    b.step("test-editor-save-receipts", "Run save completion subscriber lifetime judges").dependOn(&run_save_receipt.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_save_receipt.addArg("--maru-expect-passed=9");
+        macos_only_test_step.dependOn(&run_save_receipt.step);
+    }
     const local_save_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.LSAVE"} });
     const run_local_save = b.addRunArtifact(local_save_tests);
     run_local_save.setCwd(b.path("."));

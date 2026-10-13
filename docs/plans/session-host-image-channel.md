@@ -248,8 +248,12 @@ IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단�
   없어도 매 frame `maru_macos_reconnect_product_tick` → `maintenanceEventTick` 을 부르고, 보류된 머리가 있으면
   `preflightPayloadOnlyDeinit` 가 `.busy` 라 `quietPumpProven` 이 거짓이다 — 그 owner 가 선택되는 frame 마다 다시 펌프한다(16 owner
   를 넘으면 round-robin 만큼 늦는다). host 출력이 더 없어도 멈추지 않는다.
-- 결정 — catch-up 의 `held → Busy` 분류: 그대로 둔다(닿지 않는다). catch-up 의 준비는 `.block` 이라(IC4b) 수신 잠금으로 실패하지
-  않고, slot 의 다른 attachment 연산·Client 울타리로 막히는 경우는 같은 조건의 `read_batch` 가 먼저 `AdminBusy` 로 막는다.
+- 결정 — catch-up 의 `held → Busy` 분류: 그대로 둔다(닿지 않는다). 전제 둘: catch-up 은 새 후보 payload 에서 돌아 시작할 때 큐
+  머리가 비어 있고, 루프 안에서 `held` 가 나면 곧바로 `Busy` 로 빠진다 — 그래서 준비는 늘 `read_batch` **뒤**(방금 읽은 머리)에서
+  불린다. 그 자리에서 준비만 실패하는 경우가 없다: catch-up 의 준비는 `.block` 이라(IC4b) 수신 잠금으로 실패하지 않고, adapter
+  (`borrowSlot(.live)`)·slot(`active_operation_generation`·drain 콜백 — 준비 쪽이 오히려 첫 snapshot permit 만큼 느슨하다)·Client
+  (`requireBlockingMode`) 울타리는 `read_batch` 와 같아 그것이 먼저 막는다(`AdminBusy`·`ConnectionClosed` 등). 두 호출 사이에는
+  큐에 붙이는 것뿐이다(적대적 검증 1 회차가 대조).
 - 결정 — 몸체가 망가진 `image_ref`: `MalformedRow` 로 접지 않는다(계약 §6) — 다른 레코드의 디코드 오류와 같은 규칙.
 - 판정자(`test-image-channel-app`, client 22): 협상한 Client(묶임·잃음)는 `ImageChannelNegotiated` 이고 플래그를 읽지 않는다, 협상하지
   않은 Client 는 이 규칙에 걸리지 않고 전환으로 간다(첫 플래그 읽기 실패 → `FlagFailed`).
@@ -354,6 +358,10 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
 - 이미지 채널 리더·세그먼트 표·resolver 를 설치하는 GUI 제품 호출자가 connect 함수에 `Request.advertise` 를 넘긴다(`client_kind`
   로 정하지 않는다 — `.gui` 로 붙지만 resolver 없이 조립기를 쓰는 소비자가 있다, 계약 §2). 그 호출 자리를 「public 진입점은
   광고하지 않는다」 판정자의 예외로 옮긴다.
+- external 소비자(`.cli_attach`·`.cli_probe` 프로필)는 광고하지 않는다는 것을 connect 단계에서 구조로 막는다 — 지금은 문서와
+  `enterExternalModeWithOps` 의 거부(IC3b-2c-1)뿐이라, 광고를 공용 connect 헬퍼에 넣으면 `maru attach` 가 협상하고 세그먼트까지
+  받은 **뒤**(`attachSnapshot` 다음의 전환)에야 `internal` 로 실패한다. 그 프로필에 `.advertise` 가 오면 connect 가 거부하거나
+  판정자로 고정하고, external 모드 거부는 2 차 방어선으로 둔다(IC3b-2c-1 적대적 검증 1 회차).
 - 실측 gate(2026-10-10 기준선과 같은 방법): terminal-browser 를 연 채 스크롤할 때
   - host 로그 `session host stream invalidated:` 0 줄, `resync sweep blocked` 의 반복 0,
   - xctrace `runloop-events` 로 16.7 ms 초과 반복이 브라우저를 닫은 상태(초당 0.3, 최대 19.9 ms)와 같은 수준,

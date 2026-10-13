@@ -527,8 +527,9 @@ pub const EnterExternalModeError = error{
     Busy,
     OutOfMemory,
     FlagFailed,
-    /// `image_shm` 을 협상한 연결(이미지 채널 §6) — external 모드에서는 이미지 채널을 펌프하지 않아 host 원장이 차므로 들어가지
-    /// 않는다. 채널을 잃은 연결(「이미지 채널 없음」)도 협상한 연결이라 같다.
+    /// `image_shm` 을 협상한 연결(이미지 채널 §6)이라 external 모드에 들어가지 않는다. 채널이 묶였으면 external 모드의 펌프가 채널을
+    /// 비우지 않아 release 가 끊기고 host 원장이 찬다. 채널을 잃었어도(「이미지 채널 없음」) host 는 그 연결에 `image_ref` 를 낼 수
+    /// 있는데 external 펌프는 그것을 해석하지 못한다(미협상 resolver 로 적용해 malformed 가 된다). 재시도로 풀리지 않는다.
     ImageChannelNegotiated,
 };
 
@@ -9393,11 +9394,11 @@ pub const Client = struct {
     ) EnterExternalModeError!void {
         if (self.unusable) return error.ConnectionClosed;
         if (self.io_mode == .external) return error.AlreadyExternal;
-        if (self.pending_outbound != null) return error.Busy;
-        // 불변식: 이미지 채널을 협상한 Client 는 external 모드에 들어가지 않는다(계획 IC3b-2c) — external 모드의 펌프는 채널을
-        // 비우지 않아(`pumpImageChannel` 이 external 모드에서 물러선다) release 가 끊기고 host 원장 32 칸이 찬다. GUI 는 이 길을
-        // 쓰지 않고, external 소비자(`maru attach` 등)는 `image_shm` 을 광고하지 않는다.
+        // 불변식: 이미지 채널을 협상한 Client 는 external 모드에 들어가지 않는다(계획 IC3b-2c-1) — 이유는 오류 선언에. GUI 는 이
+        // 길을 쓰지 않고, external 소비자(`maru attach` 등)는 `image_shm` 을 광고하지 않는다. 재시도로 풀리지 않는 거부라 `Busy`
+        // (재시도하라)보다 먼저 본다.
         if (self.imageShmNegotiated()) return error.ImageChannelNegotiated;
+        if (self.pending_outbound != null) return error.Busy;
 
         const outcome = client_external_mode.transition(
             self.allocator,
@@ -27134,6 +27135,12 @@ test "image channel pump: a Client that negotiated image_shm never enters extern
     try testing.expectError(error.ImageChannelNegotiated, fx.client.enterExternalModeWithOps(socket_ops.ops()));
     try testing.expectEqual(@as(usize, 0), socket_ops.get_flags_calls);
     try testing.expect(fx.client.io_mode == .blocking);
+    // 재시도로 풀리지 않는 거부라 보낼 프레임이 남은 연결(`Busy` — 재시도하라)보다 먼저다.
+    var unsent = [_]u8{0};
+    fx.client.pending_outbound = .{ .frame = &unsent, .stream_id = 1 };
+    const with_pending = fx.client.enterExternalModeWithOps(socket_ops.ops());
+    fx.client.pending_outbound = null;
+    try testing.expectError(error.ImageChannelNegotiated, with_pending);
     // 협상하지 않은 연결은 이 규칙에 걸리지 않고 전환 자체로 간다(첫 플래그 읽기를 실패시켜 전환 전에 멈춘다).
     fx.client.image_channel.state = .not_negotiated;
     try testing.expectError(error.FlagFailed, fx.client.enterExternalModeWithOps(socket_ops.ops()));

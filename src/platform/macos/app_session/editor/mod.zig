@@ -23325,7 +23325,12 @@ test "ASB3 보조 언어 서버의 code action (tooling §8.2u) — ⌘. 는 서
 
     // ⑴ ⌘. — 두 서버에 각자 묻는다(같은 seq 라도 서버로 가른다). 주 서버는 그 자리에 자기 진단이 없어 「fake: lazy」만, 보조 서버는 자기
     // 진단 A1 과 그 `data`(aux-1)를 문맥으로 받아 「aux: fix A1 (data aux-1)」. 주 서버 먼저. 주 서버가 보조 서버의 진단을 받았다면
-    // 「fake: fix A1」이 섞인다.
+    // 「fake: fix A1」이 섞인다. 시한을 재는 단계가 아니라 시한은 넉넉히 둔다 — `editor_lsp.pump` 는 응답을 읽기 **전에** 시한 tick 을
+    // 돌려, 보조 서버가 곧바로 답해도 판정자 프로세스가 첫 답 뒤 시한만큼 멈추면 받은 것만으로 메뉴가 열린다(⑵ AUXSLOW 가 그렇게 CI 에서
+    // 빨갰다, 2026-10-13). 모두 답하면 바로 끝나므로 기다림은 늘지 않는다.
+    const grace0 = code_action_client.aux_grace_ms;
+    defer code_action_client.aux_grace_ms = grace0;
+    code_action_client.aux_grace_ms = 3000;
     s.dismissMessageOverlays();
     term.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
     const ca0 = s.editor_lsp.sent_code_actions;
@@ -23347,9 +23352,7 @@ test "ASB3 보조 언어 서버의 code action (tooling §8.2u) — ⌘. 는 서
     try testing.expect(pumpLspUntil(&f.fx, 5000, term, Both.g)); // 편집 뒤 두 서버의 진단이 다시 온다
 
     // ⑵ 늦은 서버 — 보조 서버가 메뉴 요청에 답하지 않으면 주 서버의 답 뒤 시한까지만 기다리고 주 서버의 항목으로 연다.
-    const grace0 = code_action_client.aux_grace_ms;
     code_action_client.aux_grace_ms = 300;
-    defer code_action_client.aux_grace_ms = grace0;
     const end = content(term).len;
     term.rt.editor_selection = .{ .anchor_start = end, .anchor_end = end, .focus = end };
     try testing.expect(insertText(s, term, "AUXSTALL"));
@@ -23367,7 +23370,10 @@ test "ASB3 보조 언어 서버의 code action (tooling §8.2u) — ⌘. 는 서
     try testing.expectEqualStrings("fake: lazy", settings_ops.contextMenuItems(s)[0]);
     s.dismissMessageOverlays();
     try removeMarkerHover(s, term, "AUXSTALL");
-    // 늦지만 시한 안(150ms < 300ms)에 답한 서버의 항목은 든다 — 첫 답 바로 다음 tick 에 내면 빠진다.
+    // 늦지만 시한 안(150ms < 3000ms)에 답한 서버의 항목은 든다 — 첫 답 바로 다음 tick 에 내면 빠진다. 시한을 위 300ms 그대로 두면
+    // 여유가 150ms 뿐이라 부하 걸린 러너에서 늦은 답이 시한을 넘겨 빨갰다(2026-10-13 CI, `found 1`). 이 단계의 주제는 「시한 안의 늦은
+    // 답이 든다」라 시한 길이는 넉넉히 둔다 — 늦은 답이 오는 대로 끝나므로 기다림은 그대로 150ms 남짓이다. ⑸ 도 이 시한을 잇는다.
+    code_action_client.aux_grace_ms = 3000;
     try testing.expect(insertText(s, term, "AUXSLOW"));
     try testing.expect(pumpLspUntil(&f.fx, 5000, term, Both.g));
     {
@@ -23376,7 +23382,7 @@ test "ASB3 보조 언어 서버의 code action (tooling §8.2u) — ⌘. 는 서
     }
     term.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
     try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
-    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqual(@as(usize, 2), settings_ops.contextMenuItems(s).len);
     try testing.expectEqualStrings("aux: fix A1 (data aux-1)", settings_ops.contextMenuItems(s)[1]);
     s.dismissMessageOverlays();
@@ -23391,7 +23397,7 @@ test "ASB3 보조 언어 서버의 code action (tooling §8.2u) — ⌘. 는 서
     }
     term.rt.editor_selection = .{ .anchor_start = print_off, .anchor_end = print_off, .focus = print_off };
     try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
-    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     try testing.expectEqual(@as(usize, 3), settings_ops.contextMenuItems(s).len);
     try testing.expectEqualStrings("aux: lazy", settings_ops.contextMenuItems(s)[2]);
     try pressKey(&f.fx, .arrow_down, .{});
@@ -23584,13 +23590,17 @@ test "ASB4 보조 언어 서버 ESLint (tooling §8.2u) — 설정이 있으면 
     }
     s.dismissMessageOverlays();
     term.rt.editor_selection = .{ .anchor_start = 1, .anchor_end = 1, .focus = 1 };
+    // 두 서버의 답을 다 기다린다 — 시한(기본 500ms)은 판정자 프로세스가 멈춘 시간도 깎아 먹어 넉넉히 둔다(ASB3 ⑴ 과 같은 이유).
+    const grace0 = code_action_client.aux_grace_ms;
+    defer code_action_client.aux_grace_ms = grace0;
+    code_action_client.aux_grace_ms = 3000;
     try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
     const Settled = struct {
         fn g(ss: *AppSession) bool {
             return !ss.editor_code_action.waiting;
         }
     };
-    try testing.expect(pumpLspUntil(&f.fx, 3000, s, Settled.g));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, Settled.g));
     var found = false;
     for (settings_ops.contextMenuItems(s)) |t| if (std.mem.eql(u8, t, "eslint: fix no-var")) {
         found = true;
@@ -23751,10 +23761,14 @@ test "ASB6 보조 언어 서버 Biome·oxlint (tooling §8.2u) — 설정이 셋
     }.g;
     const line2 = std.mem.indexOf(u8, content(term), "let").? + 1;
     term.rt.editor_selection = .{ .anchor_start = line2, .anchor_end = line2, .focus = line2 };
+    // 네 서버의 답을 다 기다린다 — 시한(기본 500ms)은 판정자 프로세스가 멈춘 시간도 깎아 먹어 넉넉히 둔다(ASB3 ⑴ 과 같은 이유).
+    const grace0 = code_action_client.aux_grace_ms;
+    defer code_action_client.aux_grace_ms = grace0;
+    code_action_client.aux_grace_ms = 3000;
     const ca0 = s.editor_lsp.sent_code_actions;
     try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
     try testing.expectEqual(ca0 + 4, s.editor_lsp.sent_code_actions);
-    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
     {
         const titles = settings_ops.contextMenuItems(s);
         try testing.expectEqual(@as(usize, 3), titles.len);

@@ -16,12 +16,16 @@ fn allocator() std.mem.Allocator {
     return if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
 }
 pub fn trySave(session: *host.AppSession, term: *host.Term, success_notice: ?maru.editor_save_notice.Success) editor.SaveError!?u64 {
+    return trySaveObserved(session, term, success_notice, null);
+}
+/// 결과 소비자는 화면 밖에서도 완료를 보관한다. 지원하지 않는 저장 계약은 null로 구분한다.
+pub fn trySaveObserved(session: *host.AppSession, term: *host.Term, success_notice: ?notice.Success, receipt: ?*owner_mod.Receipt) editor.SaveError!?u64 {
     // 연결된 파일 패널·원격·이름 없는 문서의 별도 저장 계약은 기존 동기 진입점으로 보낸다.
     if (term.kind != .editor or term.rt.editor_diff != null or term.file_entry != null) return null;
     const document = term.rt.editorDocument();
     if (document.remote != null or document.untitled != null or document.opened == null or document.path == null) return null;
     if (active == null) active = owner_mod.Owner.init(allocator());
-    const admitted = active.?.enqueueWithNotice(session, term, document.save_target_epoch, success_notice) catch |failure| {
+    const admitted = active.?.enqueueObserved(session, term, document.save_target_epoch, success_notice, receipt) catch |failure| {
         if (active.?.queue.requestCount() == 0) {
             active.?.deinit();
             active = null;

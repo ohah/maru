@@ -422,6 +422,32 @@ IC5b 는 둘로 나눴다 — owner 층(`connection_turn.Client`, 채널·원장
   - 같은 이미지 미반환은 delta 만 미루고 스냅샷은 준비, host 상한 초과는 전송 불가, 「이미지 채널 없음」 연결은 미룸;
   - 앱이 채널을 닫은 뒤 발급하면 채널만 내리고 남은 준비분 fd 도 닫으며 주 연결은 산다.
 
+#### IC5b-2 — 투영 ↔ 세그먼트 배선 (PR 진행 중)
+
+- 층 사이 타입: 준비 세그먼트(`PreparedImageSegment`·`ImageSegmentPrepare`)는 원장 leaf(`image_segment_ledger.zig`)에 둔다 —
+  Connection 층(server)과 owner 층(connection_turn)이 함께 쓴다.
+- `ImageChannelOps` 에 선택 필드 넷(`prepare_segment`·`issue_segments`·`cancel_segments`·`issued_through`) — owner 층이 채운다.
+  `RuntimeOps` 에 선택 필드 둘(`snapshot_with_images`·`delta_with_images`) — runtime_manager 가 채운다(테스트 가짜 74 개는 그대로).
+- 형식 선택(`Connection.imageSegmentOps`): `image_shm` 을 **협상**했고 세그먼트 연산이 있으면 세그먼트 판으로 투영한다 — 채널 유무가
+  아니라 협상으로 고르므로 「이미지 채널 없음」 연결에도 `image_blob` 이 다시 나가지 않는다(owner 층이 미룸으로 답한다, 계약 §3.2).
+  협상하지 않은 연결·제품이 아닌 attach 는 지금의 `image_blob` 이다.
+- 준비분은 그 투영의 배치(`CollectedOutput.prepared_segments`)가 든다 — `commit`(배치가 큐에 승인된 같은 턴)이 발급하고 `rollback`
+  이 취소한다. collect·attach 의 모든 실패 길이 `rollback` 을 지나므로(오류는 `errdefer`) **투영이 자리를 청한 뒤 실패해도** 취소된다
+  (IC5a 적대적 검증 1 회차의 의무). 배치가 준비분을 들 수 없으면(OOM) 그 자리에서 취소한다.
+- hwm(`CollectSegmentSink.hwm`): 그 연결이 발급한 가장 큰 id 와 이 배치가 준비한 가장 큰 id 중 큰 쪽. owner 는 연결당 한 턴에 배치
+  하나를 만들고 바로 commit·rollback 하므로 같은 stream 의 승인 안 된 다른 배치가 없다 — hwm 이 남의 준비분을 넘지 않는다.
+- runtime_manager: `snapshotOp`·`deltaOp` 가 이미지 방식을 받고(`.blob` 판·세그먼트 판이 얇게 감싼다), 세그먼트 판은 연결 층 sink 를
+  투영 sink 로 잇는다(`ProjectionSegmentSink`). `deltaOp` 의 본문 글자(세대 판정 판정자)는 그대로다.
+- 판정자(`test-image-channel` 의 server 11 — hello·abandon 7 + 배선 4):
+  - 협상한 연결의 delta 는 세그먼트 판으로 투영되고(평 delta 는 안 부른다) 준비분은 commit 이 발급·rollback 이 취소한다, hwm 은
+    준비분을 보고(1) 발급분과 준비분 중 큰 쪽이며(2) 이번 배치가 아무것도 준비하지 않아도 발급분을 싣는다(1);
+  - 투영이 자리를 청한 뒤 실패하면 준비분이 취소되고, resync 스냅샷은 스냅샷으로 청한다;
+  - 미룸·전송 불가는 아무것도 준비하지 않고, 광고하지 않은 연결은 세그먼트 판도 owner 연산도 부르지 않는다;
+  - 제품 attach 의 첫 snapshot 이 세그먼트 판(스냅샷으로)이고 준비분을 attach 배치가 들며, 그 배치의 rollback 이 취소한다.
+  - 판정자가 실제 결함 하나를 잡았다 — 준비분 목록 해제가 `defer` 뒤 필드 재설정으로 새던 것.
+- 판정자 글자 닻 둘을 옮겼다(`session_host_screen_change_token_boundary`·`session_host_reconnect_observer_attach_boundary` — delta 투영이
+  연결 헬퍼 `projectDelta` 를 거친다, 의도는 「토큰을 읽은 뒤 다음 순번으로 투영」 그대로).
+
 #### IC5 전체 (처음 계획)
 
 - producer 가 `image_ref`·`image_seg_hwm` 을 내기 시작한다 — `screen_snapshot.zig` 의 전수 판정자(「attach 뒤 움직인 모든 축이

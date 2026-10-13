@@ -656,7 +656,7 @@ pub const RuntimeManager = struct {
 
     /// server.zig가 dispatch에 넘길 중립 vtable. `ctx`는 이 매니저다.
     pub fn runtimeOps(self: *RuntimeManager) server.RuntimeOps {
-        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .resize_with_cell = resizeWithCellOp, .snapshot = snapshotOp, .delta = deltaOp, .screen_change_token = screenChangeTokenOp, .metadata_change_token = metadataChangeTokenOp, .sample_metadata_sources = sampleMetadataSourcesOp, .advance_animations = advanceAnimationsOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
+        return .{ .ctx = self, .spawn = spawnOp, .terminate = terminateOp, .write_input = writeInputOp, .resize = resizeOp, .resize_with_cell = resizeWithCellOp, .snapshot = snapshotBlobOp, .delta = deltaBlobOp, .snapshot_with_images = snapshotImagesOp, .delta_with_images = deltaImagesOp, .screen_change_token = screenChangeTokenOp, .metadata_change_token = metadataChangeTokenOp, .sample_metadata_sources = sampleMetadataSourcesOp, .advance_animations = advanceAnimationsOp, .notification_peek = notificationPeekOp, .notification_commit = notificationCommitOp, .notification_config_update = notificationConfigUpdateOp, .core_command = coreCommandOp, .selected_text = selectedTextOp, .select_op = selectOpOp, .find = findOp, .observation = observationOp, .cached_observation = cachedObservationOp, .report_mouse = reportMouseOp, .link_at = linkAtOp, .clipboard_write = clipboardWriteOp, .observation_urgent = observationUrgentOp };
     }
 
     pub const OwnerDrainSummary = struct {
@@ -2537,7 +2537,73 @@ pub const RuntimeManager = struct {
     /// runtime의 현재 화면을 screen_stream 레코드 스트림으로 투영한다(§12, P3-e2d). reader 스레드가 core를 쓰므로
     /// **core_mutex를 잡은 채** 투영하고(투영이 grapheme·색을 소유 버퍼로 복사), 반환된 소유 바이트만 unlock 뒤 caller가
     /// snapshot_chunk로 나눠 보낸다(io-render-threading.md — snapshot 슬라이스는 core alias라 lock 밖으로 새면 안 됨).
-    fn snapshotOp(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!server.ProjectedSnapshot {
+    fn snapshotBlobOp(ctx: *anyopaque, runtime_id: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!server.ProjectedSnapshot {
+        return snapshotOp(ctx, runtime_id, sequence, allocator, .blob);
+    }
+
+    /// `image_shm` 을 협상한 연결의 스냅샷 — 이미지를 세그먼트(`image_ref`)로 낸다(이미지 채널 §5).
+    fn snapshotImagesOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        sequence: u64,
+        allocator: std.mem.Allocator,
+        images: server.ImageSegmentSink,
+    ) anyerror!server.ProjectedSnapshot {
+        var bridge: ProjectionSegmentSink = .{ .images = images };
+        return snapshotOp(ctx, runtime_id, sequence, allocator, .{ .segments = bridge.sink() });
+    }
+
+    fn deltaBlobOp(ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!server.StreamUpdate {
+        return deltaOp(ctx, runtime_id, base, sequence, allocator, .blob);
+    }
+
+    /// `image_shm` 을 협상한 연결의 delta — 이미지를 세그먼트(`image_ref`)로 낸다(이미지 채널 §5).
+    fn deltaImagesOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        base: []const u8,
+        sequence: u64,
+        allocator: std.mem.Allocator,
+        images: server.ImageSegmentSink,
+    ) anyerror!server.StreamUpdate {
+        var bridge: ProjectionSegmentSink = .{ .images = images };
+        return deltaOp(ctx, runtime_id, base, sequence, allocator, .{ .segments = bridge.sink() });
+    }
+
+    /// 연결 층의 세그먼트 sink 를 투영의 sink 로 잇는다 — 투영 동안만 산다(core lock 아래 빌린 픽셀을 그대로 넘긴다).
+    const ProjectionSegmentSink = struct {
+        images: server.ImageSegmentSink,
+
+        fn sink(self: *ProjectionSegmentSink) screen_snapshot.SegmentSink {
+            return .{ .ctx = self, .reserveFn = reserve, .hwmFn = hwm };
+        }
+
+        fn reserve(
+            ctx: *anyopaque,
+            image: terminal.KittyImageView,
+            kind: screen_snapshot.BatchKind,
+        ) error{OutOfMemory}!screen_snapshot.Reservation {
+            const self: *ProjectionSegmentSink = @ptrCast(@alignCast(ctx));
+            return switch (try self.images.reserve(self.images.ctx, image.image_id, image.generation, image.pixels, kind == .snapshot)) {
+                .segment => |id| .{ .segment = id },
+                .deferred => .deferred,
+                .untransmittable => .untransmittable,
+            };
+        }
+
+        fn hwm(ctx: *anyopaque) u64 {
+            const self: *ProjectionSegmentSink = @ptrCast(@alignCast(ctx));
+            return self.images.hwm(self.images.ctx);
+        }
+    };
+
+    fn snapshotOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        sequence: u64,
+        allocator: std.mem.Allocator,
+        images: screen_snapshot.ImageEmission,
+    ) anyerror!server.ProjectedSnapshot {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
@@ -2554,6 +2620,7 @@ pub const RuntimeManager = struct {
         // 빨개졌다). 리터럴은 그대로 두고 싱크만 뒤에 붙인다.
         var snapshot_opts: screen_snapshot.ProjectOptions = .{ .generation = generation, .sequence = sequence };
         snapshot_opts.image_bytes_out = &image_bytes;
+        snapshot_opts.images = images;
         var projection_diag: screen_snapshot.Diagnostics = .{};
         const bytes = screen_snapshot.projectSnapshotBoundedDiag(
             allocator,
@@ -2599,7 +2666,14 @@ pub const RuntimeManager = struct {
     /// `base`(client가 마지막으로 받은 full snapshot) 대비 현재 화면 변화를 계산한다(§9 delta). core lock 아래에서 현재
     /// full snapshot(다음 base)과 delta를 함께 만든다. grid/alt-screen 변화면 delta 대신 fresh snapshot을 보낸다(client가
     /// 화면 교체). `send`와 `new_base`는 항상 별개 버퍼다(caller가 둘 다 free해도 안전).
-    fn deltaOp(ctx: *anyopaque, runtime_id: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!server.StreamUpdate {
+    fn deltaOp(
+        ctx: *anyopaque,
+        runtime_id: u128,
+        base: []const u8,
+        sequence: u64,
+        allocator: std.mem.Allocator,
+        images: screen_snapshot.ImageEmission,
+    ) anyerror!server.StreamUpdate {
         const self: *RuntimeManager = @ptrCast(@alignCast(ctx));
         const handle = self.handleFor(runtime_id) orelse return error.RuntimeNotFound;
         const surface = self.backend_impl.surfaceFor(handle) orelse return error.RuntimeNotFound;
@@ -2608,6 +2682,7 @@ pub const RuntimeManager = struct {
         // 위 `snapshotOp` 과 같은 이유로 리터럴을 그대로 두고 싱크만 뒤에 붙인다(CR4a 경계 판정자).
         var opts = screen_snapshot.ProjectOptions{ .generation = generation, .sequence = sequence };
         opts.image_bytes_out = &image_bytes;
+        opts.images = images;
         if (self.screen_metrics_enabled) {
             self.screen_delta_calls +|= 1;
             self.screen_core_lock_acquisitions +|= 1;

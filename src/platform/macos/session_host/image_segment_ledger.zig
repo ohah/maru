@@ -35,6 +35,27 @@ comptime {
 }
 
 /// host 전체에서 미반환 세그먼트가 붙잡은 바이트. owner 스레드 하나가 모든 연결 원장과 함께 쓴다.
+/// 준비한 세그먼트 — 배치가 승인되면 발급(채널로 송신), 아니면 취소로 **정확히 한 번** 끝난다(이미지 채널 §4). owner 층
+/// (`connection_turn.Client`)이 만들고 Connection 층(`server.CollectedOutput`)이 배치와 함께 든다 — 두 층이 함께 쓰므로 여기 둔다.
+pub const PreparedImageSegment = struct {
+    segment_id: u64,
+    stream_id: u64,
+    image_id: u32,
+    generation: u64,
+    byte_len: u32,
+    /// 읽기 전용 공유 메모리 fd(CLOEXEC). 발급(송신 뒤)이나 취소가 닫는다.
+    fd: std.c.fd_t,
+};
+
+/// 투영이 이미지 하나에 대해 받는 owner 층의 답(§4·§5).
+pub const ImageSegmentPrepare = union(enum) {
+    segment: PreparedImageSegment,
+    /// 지금은 자리가 없다 — 원장 상한, 「이미지 채널 없음」, 같은 (stream, image) 의 미반환 세그먼트, 공유 메모리 자원 부족.
+    deferred,
+    /// 이 연결로는 보낼 수 없는 크기(host 전체 상한 초과·레코드 길이 초과).
+    untransmittable,
+};
+
 pub const HostBudget = struct {
     bytes: u64 = 0,
 };

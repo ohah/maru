@@ -53,7 +53,8 @@ test "P4 E3a product token and actual scale evidence stay on reviewed owners" {
 
     const token_read = std.mem.indexOf(u8, server, "// Read once before projection.") orelse
         return error.MissingTokenReadFence;
-    const delta_call = std.mem.indexOfPos(u8, server, token_read, "const update = ops.delta") orelse
+    // delta 투영은 연결 헬퍼(`projectDelta` — 이미지 채널 연결이면 세그먼트 판)를 거친다.
+    const delta_call = std.mem.indexOfPos(u8, server, token_read, "const update = self.projectDelta(ops,") orelse
         return error.MissingDeltaCall;
     try std.testing.expect(token_read < delta_call);
 

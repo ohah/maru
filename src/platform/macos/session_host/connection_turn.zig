@@ -125,24 +125,10 @@ pub const ImageChannelLoss = enum {
 };
 
 /// 투영이 이미지 하나에 대해 받는 답(이미지 채널 §4·§5). 준비한 세그먼트는 그 배치가 큐에 승인되면 `issueImageSegments`, 아니면
-/// (배치 롤백·투영 실패) `cancelImageSegments` 로 **정확히 한 번** 끝나야 한다 — 그 사이 원장에는 준비 상태로 남는다.
-pub const ImageSegmentPrepare = union(enum) {
-    segment: PreparedImageSegment,
-    /// 지금은 자리가 없다 — 원장 상한, 「이미지 채널 없음」, 같은 (stream, image) 의 미반환 세그먼트, 공유 메모리 자원 부족.
-    deferred,
-    /// 이 연결로는 보낼 수 없는 크기(host 전체 상한 초과·레코드 길이 초과).
-    untransmittable,
-};
-
-pub const PreparedImageSegment = struct {
-    segment_id: u64,
-    stream_id: u64,
-    image_id: u32,
-    generation: u64,
-    byte_len: u32,
-    /// 읽기 전용 공유 메모리 fd(CLOEXEC). 발급(송신 뒤)이나 취소가 닫는다.
-    fd: c.fd_t,
-};
+/// (배치 롤백·투영 실패) `cancelImageSegments` 로 **정확히 한 번** 끝나야 한다 — 그 사이 원장에는 준비 상태로 남는다. 타입은
+/// Connection 층과 함께 쓰므로 원장 leaf 에 있다.
+pub const ImageSegmentPrepare = image_segment_ledger.ImageSegmentPrepare;
+pub const PreparedImageSegment = image_segment_ledger.PreparedImageSegment;
 
 /// 이미지 fd 의 한 읽기 턴에서 받는 최대 바이트(release 256 개).
 pub const image_channel_read_bytes: usize = 256 * image_channel_wire.release_len;
@@ -477,6 +463,10 @@ pub const Client = struct {
             .ctx = self,
             .admit_hello = admitImageChannelHello,
             .issue_token = issueImageChannelToken,
+            .prepare_segment = prepareImageSegmentOp,
+            .issue_segments = issueImageSegmentsOp,
+            .cancel_segments = cancelImageSegmentsOp,
+            .issued_through = imageSegmentsIssuedThroughOp,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
@@ -2063,6 +2053,26 @@ fn closeReceivedFds(control: []const u8) void {
         }
         offset += std.mem.alignForward(usize, header.len, @sizeOf(u32));
     }
+}
+
+fn prepareImageSegmentOp(ctx: *anyopaque, stream_id: u64, image_id: u32, generation: u64, pixels: []const u8, snapshot: bool) ImageSegmentPrepare {
+    const client: *Client = @ptrCast(@alignCast(ctx));
+    return client.prepareImageSegment(stream_id, image_id, generation, pixels, snapshot);
+}
+
+fn issueImageSegmentsOp(ctx: *anyopaque, segments: []const PreparedImageSegment) void {
+    const client: *Client = @ptrCast(@alignCast(ctx));
+    client.issueImageSegments(segments);
+}
+
+fn cancelImageSegmentsOp(ctx: *anyopaque, segments: []const PreparedImageSegment) void {
+    const client: *Client = @ptrCast(@alignCast(ctx));
+    client.cancelImageSegments(segments);
+}
+
+fn imageSegmentsIssuedThroughOp(ctx: *anyopaque) u64 {
+    const client: *Client = @ptrCast(@alignCast(ctx));
+    return client.imageSegmentsIssuedThrough();
 }
 
 /// 세그먼트 메시지 하나를 fd 와 함께 보낸다(§3.3 — 메시지 첫 바이트와 함께 fd 정확히 하나). 전부 보냈으면 true.

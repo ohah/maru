@@ -686,17 +686,21 @@ pub fn notificationBadgeCol(bell_col: u16) u16 {
     return maru.cell_text.notificationBadgeCol(bell_col);
 }
 
-pub fn appendNotificationBadge(self: *AppSession) void {
-    if (self.notification_unread == 0 or self.sidebar_collapsed) return;
+pub const BadgeCircle = struct { cx: f32, cy: f32, d: f32 };
+
+/// 펼친 헤더 알림 배지의 **빨강 원**(backing px 중심·지름) — 그리기(`appendNotificationBadge`)와 눌림 판정
+/// (`sidebar.headerRegionAt` — 원 위는 ◧ zone 이라도 알림이다)의 단일 출처. 안 그리는 상태(안 읽음 0·접힘·좁은 폭)면 null.
+pub fn notificationBadgeCircle(self: *const AppSession) ?BadgeCircle {
+    if (self.notification_unread == 0 or self.sidebar_collapsed) return null;
     const cw = self.cell_width_px;
     const ch = self.cell_height_px;
-    if (cw == 0 or ch == 0 or self.tabs.items.len == 0) return;
-    if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return;
+    if (cw == 0 or ch == 0 or self.tabs.items.len == 0) return null;
+    if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return null;
     const cols = self.sidebar_width_px / cw;
-    if (cols < maru.cell_text.sidebar_header_min_cols) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList 와 같은 상수) — 배지도 생략
+    if (cols < maru.cell_text.sidebar_header_min_cols) return null; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList 와 같은 상수) — 배지도 생략
     const cw_f: f32 = @floatFromInt(cw);
     const ch_f: f32 = @floatFromInt(ch);
-    const badge_col = notificationBadgeCol(@intCast(cols - 12)); // 종(cols-12, 2칸) 우측 한 칸 = cols-10 (코너 크기 종의 우상단 모서리에 원 좌단이 ~0.2cw 겹침)
+    const badge_col = notificationBadgeCol(maru.cell_text.sidebarBellCol(@intCast(@min(cols, std.math.maxInt(u16))))); // 종(2칸) 우측 한 칸 (코너 크기 종의 우상단 모서리에 원 좌단이 ~0.2cw 겹침)
     // 배지 셀 중심(가로)·헤더 row 0 세로 중심(backing px). 흰 숫자가 원 가운데 오게 셀 중심에 맞춘다.
     // 세로 기준은 `sidebarHeaderIconRowTopPx` — 헤더 아이콘 줄은 y=0이 아니라 신호등 띠 안 세로 중앙에 놓인다.
     // 그 위에서 digit 글리프 시각 중심에 맞춰 notification_badge_center_in_cell을 더한다.
@@ -705,6 +709,14 @@ pub fn appendNotificationBadge(self: *AppSession) void {
     const row_top_f: f32 = @floatFromInt(sidebar_ops.sidebarHeaderIconRowTopPx(self));
     const center_y: f32 = row_top_f + ch_f * notification_badge_center_in_cell;
     const d: f32 = ch_f * 0.82; // 원 지름(또렷하면서 ◧ 아이콘과 안 닿게)
+    return .{ .cx = center_x, .cy = center_y, .d = d };
+}
+
+pub fn appendNotificationBadge(self: *AppSession) void {
+    const circle = notificationBadgeCircle(self) orelse return;
+    const center_x = circle.cx;
+    const center_y = circle.cy;
+    const d = circle.d;
     const red = packRgbAlpha(.{ .r = 0xE5, .g = 0x48, .b = 0x4D }, 0xFF); // 알림 배지 빨강(흰 숫자 대비). straight-alpha(셰이더 rgb*=a)
     self.gpu_quads.append(self.allocator, .{
         .x = center_x - d / 2.0,
@@ -734,10 +746,22 @@ pub fn collapsedBellCol(self: *const AppSession) u16 {
 }
 
 /// 접힘 시 알림 종(🔔)의 backing-px rect(클릭 hit-test) — collapsedBellCol()과 같은 col(단일 출처). 마우스 핸들러가 이
-/// rect 클릭이면 openNotificationPanel한다(◧ 토글과 별개 영역). 종 글리프 중심((bell_col+0.5)·cw, 렌더러 가로 −0.5칸
-/// nudge 반영)에 3칸 폭(배지+종)을 중앙 정렬. (3cw)/2 == cw + cw/2라 collapsedIconRect 중앙 정렬이 그대로 종 중심에 온다.
+/// rect 클릭이면 openNotificationPanel한다(◧ 토글과 별개 영역). (bell_col+0.5)·cw 에 3칸 폭을 중앙 정렬해 [bell_col-1,
+/// bell_col+2)·cw 다 — 2칸 종의 잉크(≈[bell_col+0.15, bell_col+1.85]·cw, 렌더러의 옛 −0.5칸 nudge 는 이제 없다 — `.m` 1377)와
+/// 종 바로 왼쪽 배지 한 칸을 담는다.
+///
+/// 종 **왼쪽 텍스트 배지**(안 읽음 1~9 는 한 칸, 10 이상은 「9+」 두 칸 — `cell_text.sidebarTextBadgeCols`)가 rect 왼쪽보다 더
+/// 나가면 왼쪽을 그 칸까지 넓힌다 — 예전엔 「9+」 의 「9」 가 rect 밖이라 그 글자를 누르면 창이 끌렸다(보이는 것 = 눌리는 것).
 pub fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
-    return self.collapsedIconRect(collapsedBellCol(self), 3 * self.cell_width_px);
+    const bell = collapsedBellCol(self);
+    var r = self.collapsedIconRect(bell, 3 * self.cell_width_px) orelse return null;
+    const badge_cols = maru.cell_text.sidebarTextBadgeCols(self.notification_unread);
+    const badge_left: i32 = (@as(i32, bell) - @as(i32, badge_cols)) * @as(i32, @intCast(self.cell_width_px));
+    if (badge_left < r.x) {
+        r.w += @intCast(r.x - badge_left);
+        r.x = badge_left;
+    }
+    return r;
 }
 
 /// 알림 센터 패널을 종(🔔) 아이콘 아래에 연다 — 종 클릭과 디버그 훅(MARU_OPEN_NOTIFICATIONS)의 단일 출처.
@@ -759,7 +783,7 @@ pub fn openNotificationPanel(self: *AppSession) void {
         // 접힘: 종은 타이틀바 띠 안 collapsedBellCol(). 패널 좌단을 종 묶음(배지) 좌단에, 보이는 상단을 띠 하단에 둔다.
         // (접힘은 사이드바 폭 0이라 말풍선 caret은 appendNotificationCaret의 cols<13 가드로 자동 생략 — 띠 아래 드롭다운.)
         // 배지/종 묶음 좌단: 안 읽음 개수별 배지 폭(10+ 2칸, 1~9 1칸, 0 없음)만큼 종 왼쪽이 묶음 좌단(collapsed_badge_max_cells 단일 출처).
-        const badge_cells: u16 = if (self.notification_unread > 9) collapsed_badge_max_cells else if (self.notification_unread > 0) 1 else 0;
+        const badge_cells: u16 = maru.cell_text.sidebarTextBadgeCols(self.notification_unread); // 그리기·종 클릭 rect 와 같은 함수
         anchor_x = @intCast(@as(u32, collapsedBellCol(self) -| badge_cells) * self.cell_width_px);
         anchor_y = @intCast(self.titlebar_strip_px + mp); // content_top − mp = titlebar_strip_px(띠 하단)
     } else {

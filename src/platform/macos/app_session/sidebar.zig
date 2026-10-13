@@ -184,11 +184,33 @@ pub fn headerRegionAt(self: *const AppSession, x_px: f64, y_px: f64) chrome.comp
     if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return zone;
     const icon_band_end: f64 = @floatFromInt(sb.headerSearchBandTop(self.sidebar_header_height_px, band, self.cell_height_px));
     if (!(y_px >= 0 and y_px < icon_band_end)) return zone; // 검색 줄 이하(·비유한)는 중립 판정 그대로
+    // 알림 배지 빨강 원이 zone·pill 보다 먼저다 — 오른쪽 끝이 ◧ zone 으로 넘어가 누르면 접히던 자리다. 그리는 순서는
+    // 원(layer 4 = header 버킷) → 헤더 글리프 → hover pill(layer 0 = under, 25% 반투명)이라, ◧ pill 이 원 끝에 겹쳐도 불투명
+    // 원이 비쳐 보인다. 다만 **◧ 글리프 잉크는 원 위에 그려진다** — 행간이 크면(ch/cw ≳ 2.8, `font.line_height` ≳ 1.4) 원이
+    // ◧ 잉크까지 덮으므로, 그 잉크 상자 안은 원이 빼앗지 않는다(보이는 것 = 눌리는 것).
+    if (notification_ops.notificationBadgeCircle(self)) |c| {
+        const dx: f64 = x_px - c.cx;
+        const dy: f64 = y_px - c.cy;
+        const r: f64 = c.d / 2.0;
+        if (dx * dx + dy * dy < r * r and !toggleInkContains(self, x_px, y_px)) return .notifications;
+    }
     if (plateContains(headerIconHoverPlateRect(self, zone), x_px, y_px)) return zone;
     for ([_]sb.HeaderRegion{ .notifications, .toggle_sidebar, .view_options, .new_workspace }) |r| {
         if (plateContains(headerIconHoverPlateRect(self, r), x_px, y_px)) return r;
     }
     return zone;
+}
+
+/// 펼친 헤더 ◧ 글리프의 **잉크 상자**(렌더러가 칠하는 `min(w,h)` 정사각 — `chrome.ui.icon.cellRasterIconInkPx`) 안인가.
+fn toggleInkContains(self: *const AppSession, x_px: f64, y_px: f64) bool {
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return false;
+    const cols: u32 = self.sidebar_width_px / self.cell_width_px;
+    if (cols < cell_text.sidebar_header_min_cols) return false;
+    const col = chrome.components.sidebar.headerIconCol(.toggle_sidebar, cols);
+    const cx: f64 = metal_frame.cellRasterIconCenterXPx(col * self.cell_width_px, self.cell_width_px, 1);
+    const cy: f64 = @as(f64, @floatFromInt(sidebarHeaderIconRowTopPx(self))) + @as(f64, @floatFromInt(self.cell_height_px)) / 2.0;
+    const half: f64 = @as(f64, @floatFromInt(chrome.ui.icon.cellRasterIconInkPx(self.cell_width_px, self.cell_height_px))) / 2.0;
+    return @abs(x_px - cx) < half and @abs(y_px - cy) < half;
 }
 
 fn plateContains(plate: ?HeaderPlateRect, x_px: f64, y_px: f64) bool {
@@ -2688,7 +2710,7 @@ pub fn fillSidebarGlyphPyTop(allocator: std.mem.Allocator, cells: []metal_frame.
 /// (buildCollapsedToggleDrawList)의 **단일 출처**라 글리프(U+1F514, EAW 2칸)·배지 색(coral)·"9+" 규칙이 두 곳에서
 /// 드리프트하지 않는다. 배지는 안 읽은 알림이 있을 때만 종 한 칸 왼쪽부터: 1~9는 숫자 1칸(`bell_col-1`), 10개 이상은
 /// "9+" 2칸(`bell_col-2`·`bell_col-1`). 종 색은 fg(sidebar_foreground), 배지는 coral. 호출처가 폭을 보장해
-/// (펼침 cols≥13 → bell_col=cols-11≥2, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
+/// (펼침 cols≥13 → bell_col=cols-12≥1 이고 펼침은 원형 배지라 왼쪽 칸을 안 쓴다, 접힘 bell_col≥5) `bell_col-2` saturating은 실제로 안 닿는다(방어).
 /// 종과 배지 — **정의는 공유 모듈이 소유한다**(`cell_text.appendSidebarBellAndBadge`). 여기는
 /// `AppSession` 에서 안 읽은 수를 꺼내 넘기는 껍질이다. 빨강 원 quad 는 `appendNotificationBadge` 가
 /// 따로 그린다(표면마다 경로가 다르다).

@@ -37,6 +37,18 @@ pub const Auxiliary = struct {
     pull_diagnostics: bool = false,
     /// `workspace/configuration` 에 이 서버의 고정 설정으로 답한다(ESLint — 설정 객체가 없으면 진단 요청이 실패한다). `settingsJson` 이 만든다.
     answers_configuration: bool = false,
+    /// 그 문법 안에서도 이 확장자의 파일에만 붙는다(빈 목록 = 그 문법의 파일 전부). Biome 의 CSS — 문법 `.css` 는 `scss`·`less` 도 덮지만
+    /// Biome 은 그 둘을 다루지 않는다(languageId 를 `scss`·`less` 로 보내면 진단이 없고 `css` 로 보내면 거짓 구문 오류 — 2026-10-13 실측).
+    extensions: []const []const u8 = &.{},
+
+    /// 그 경로의 문서에 붙나(`extensions` — 대소문자 무시).
+    pub fn appliesTo(self: Auxiliary, path: []const u8) bool {
+        if (self.extensions.len == 0) return true;
+        const ext = std.fs.path.extension(path);
+        if (ext.len < 2) return false;
+        for (self.extensions) |e| if (std.ascii.eqlIgnoreCase(ext[1..], e)) return true;
+        return false;
+    }
 };
 
 const ruff_args = [_][]const u8{"server"};
@@ -61,6 +73,8 @@ const biome: Auxiliary = .{
     .server = .{ .exe = "biome", .args = &biome_args, .language_id = "javascript", .install = "npm i -D @biomejs/biome" },
     .bin_dirs = &.{"node_modules/.bin"},
 };
+// 주 서버 표가 없는 문법(AS5) — Biome 은 JSON·CSS 도 린트한다. CSS 는 `.css` 파일만(위 `extensions`).
+const biome_css: Auxiliary = .{ .tool = .biome, .server = biome.server, .bin_dirs = biome.bin_dirs, .extensions = &.{"css"} };
 const oxlint_args = [_][]const u8{"--lsp"};
 const oxlint: Auxiliary = .{
     .tool = .oxlint,
@@ -74,6 +88,9 @@ pub fn forGrammar(g: language.Grammar) []const Auxiliary {
     return switch (g) {
         .python => &[_]Auxiliary{ruff},
         .javascript, .typescript, .tsx => &[_]Auxiliary{ eslint, biome, oxlint },
+        // 주 서버 표가 없다 — 보조 서버만 뜬다(AS5).
+        .json => &[_]Auxiliary{biome},
+        .css => &[_]Auxiliary{biome_css},
         else => &.{},
     };
 }
@@ -190,7 +207,7 @@ const FakeFs = struct {
     pub fn freeRead(_: FakeFs, _: []const u8) void {}
 };
 
-test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(pull·설정 답)·Biome·oxlint 순서, 그 밖의 문법은 없음, exe 로 되찾기 (tooling §8.2u)" {
+test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(pull·설정 답)·Biome·oxlint 순서, JSON·CSS 에 Biome(CSS 는 .css 만), 그 밖의 문법은 없음, exe 로 되찾기 (tooling §8.2u)" {
     const py = forGrammar(.python);
     try testing.expectEqual(@as(usize, 1), py.len);
     try testing.expectEqual(Tool.ruff, py[0].tool);
@@ -221,7 +238,19 @@ test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(
     try testing.expectEqual(Tool.eslint, byExe("vscode-eslint-language-server").?.tool);
     try testing.expectEqual(Tool.biome, byExe("biome").?.tool);
     try testing.expectEqual(Tool.oxlint, byExe("oxlint").?.tool);
-    for ([_]language.Grammar{ .zig, .rust, .go, .c, .json, .markdown, .css, .html, .none }) |g| try testing.expectEqual(@as(usize, 0), forGrammar(g).len);
+    for ([_]language.Grammar{ .zig, .rust, .go, .c, .markdown, .html, .none }) |g| try testing.expectEqual(@as(usize, 0), forGrammar(g).len);
+    // 주 서버 표가 없는 JSON·CSS 에는 Biome 하나(AS5). CSS 는 `.css` 파일만 — `scss`·`less` 는 Biome 이 다루지 않는다.
+    for ([_]language.Grammar{ .json, .css }) |g| {
+        const b = forGrammar(g);
+        try testing.expectEqual(@as(usize, 1), b.len);
+        try testing.expectEqual(Tool.biome, b[0].tool);
+        try testing.expectEqualStrings("lsp-proxy", b[0].server.args[0]);
+        try testing.expectEqual(@as(usize, 0), servers.candidatesFor(g).len);
+    }
+    try testing.expect(forGrammar(.json)[0].appliesTo("/r/a.json"));
+    try testing.expect(forGrammar(.css)[0].appliesTo("/r/s.css") and forGrammar(.css)[0].appliesTo("/r/S.CSS"));
+    for ([_][]const u8{ "/r/s.scss", "/r/s.less", "/r/css", "/r/s." }) |p| try testing.expect(!forGrammar(.css)[0].appliesTo(p));
+    for (forGrammar(.typescript)) |a| try testing.expect(a.appliesTo("/r/a.ts"));
     try testing.expectEqual(Tool.ruff, byExe("ruff").?.tool);
     try testing.expect(byExe("pyright-langserver") == null);
     // 주 서버 표와 이름이 겹치면 `(root, exe)` 열쇠가 두 역할을 한 클라이언트로 합친다.

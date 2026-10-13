@@ -67,10 +67,16 @@ pub fn resolve(g: language.Grammar, ctx: anytype, comptime installed: fn (@TypeO
 
 /// 그 문법의 LSP `languageId` — 문서마다 이것을 보낸다(`didOpen`). TS·TSX·JS 는 서버 하나(`(root, exe)` 열쇠)를 나눠 쓰므로 클라이언트를 세운
 /// 문서의 값(`Server.language_id`)을 그대로 쓰면 `.ts` 를 먼저 연 뒤의 `.tsx` 가 `typescript` 로 간다 — ESLint(보조 서버 tooling §8.2u)는
-/// 이 값으로 검사 여부를 가른다. 이름표가 없는 문법은 `null`(호출자가 서버의 값을 쓴다).
+/// 이 값으로 검사 여부를 가른다. 주 서버 표가 없어도 보조 서버가 붙는 JSON·CSS(Biome — §8.2u AS5)는 그 값을 낸다 — Biome 은 이 값으로
+/// 해석기를 고른다(CSS 를 `javascript` 로 보내면 JS 구문 오류, 2026-10-13 실측). 그 밖의 이름표 없는 문법은 `null`(호출자가 서버의 값을 쓴다).
 pub fn languageIdFor(g: language.Grammar) ?[]const u8 {
     const c = candidatesFor(g);
-    return if (c.len == 0) null else c[0].language_id;
+    if (c.len > 0) return c[0].language_id;
+    return switch (g) {
+        .json => "json",
+        .css => "css",
+        else => null,
+    };
 }
 
 /// 서버 하나를 **여러 언어가 나눠 쓰는가** — c 와 cpp 는 같은 clangd, ts·tsx·js 는 같은 tsserver. 프로세스는 `(root, exe)` 마다
@@ -137,5 +143,7 @@ test "LSS1 문서의 languageId 는 그 문법의 값이다 — 서버를 나눠
     try std.testing.expectEqualStrings("typescriptreact", languageIdFor(.tsx).?);
     try std.testing.expectEqualStrings("javascript", languageIdFor(.javascript).?);
     try std.testing.expectEqualStrings("python", languageIdFor(.python).?);
-    try std.testing.expect(languageIdFor(.json) == null);
+    try std.testing.expectEqualStrings("json", languageIdFor(.json).?); // 주 서버 표가 없어도 보조 서버(Biome)가 붙는다
+    try std.testing.expectEqualStrings("css", languageIdFor(.css).?);
+    try std.testing.expect(languageIdFor(.markdown) == null);
 }

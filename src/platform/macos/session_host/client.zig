@@ -7178,6 +7178,44 @@ pub const Client = struct {
         );
     }
 
+    /// GUI 제품의 화면 연결 — 이미지 채널을 광고한다(이미지 채널 §2). 채널 리더·세그먼트 표·resolver 를 설치하는 호출자
+    /// (`host_connect` 의 제품 경로: 새 탭·복원·재사용·새 host·업그레이드 뒤 재연결·재접속)만 부른다. 프로필은 `.gui` 로 고정이라 external 소비자
+    /// (`.cli_attach`·`.cli_probe`)는 이 길로 광고할 수 없다. 현재 major 가 아니면 광고하지 않는다 — 이전 host 는 제공하지 않고,
+    /// frozen N-1 host 에 모르는 기능 문자열을 보낼 이유가 없다.
+    pub fn connectGuiWithImageChannel(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        wire_major: u16,
+    ) ClientError!Client {
+        return connectMajorWithPolicy(
+            allocator,
+            socket_path,
+            .gui,
+            wire_major,
+            .strict,
+            if (wire_major == protocol.version_major) .advertise else .off,
+        );
+    }
+
+    /// `connectGuiWithImageChannel` 의 deadline 판 — 재접속 worker 의 제품 연결.
+    pub fn connectGuiWithImageChannelUntil(
+        allocator: std.mem.Allocator,
+        socket_path: [:0]const u8,
+        wire_major: u16,
+        deadline: client_deadline.AbsoluteDeadline,
+    ) DeadlineClientError!Client {
+        return connectMajorUntilWithOpsPolicy(
+            allocator,
+            socket_path,
+            .gui,
+            wire_major,
+            deadline,
+            client_deadline.posix_ops,
+            .strict,
+            if (wire_major == protocol.version_major) .advertise else .off,
+        );
+    }
+
     /// Exact manifest의 build SHA가 compatibility table의 frozen artifact와 먼저 일치한 GUI restore만
     /// historical hello의 fingerprint 부재를 허용한다. Hash 검증은 caller가 임의 bool로 대체할 수 없게
     /// 이 API에서도 다시 닫으며, current/CLI profile과 다른 previous image는 계속 거부한다.
@@ -7207,6 +7245,8 @@ pub const Client = struct {
         legacy_hello_policy: LegacyHelloPolicy,
         image_channel: client_image_channel.Request,
     ) ClientError!Client {
+        // GUI 가 아닌 소비자는 resolver 가 없다 — 협상하면 세그먼트를 받은 뒤에야 실패한다(IC3b-2c-1). 광고 전에 거부한다.
+        if (image_channel == .advertise and connection_profile != .gui) return error.ProtocolError;
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         // over-long path는 sun_path(104B)를 넘겨 slice-bounds panic이 되므로 syscall 전에 거부한다(bind의 socketPathFits 대칭).
         if (!socket_server.socketPathFits(socket_path.len)) return error.EndpointDenied;
@@ -7309,6 +7349,7 @@ pub const Client = struct {
         legacy_hello_policy: LegacyHelloPolicy,
         image_channel: client_image_channel.Request,
     ) DeadlineClientError!Client {
+        if (image_channel == .advertise and connection_profile != .gui) return error.ProtocolError;
         const profile = compatibility.profileForMajor(wire_major) orelse return error.IncompatibleVersion;
         const connected = client_deadline.connectUnixUntil(
             ops,
@@ -7381,6 +7422,10 @@ pub const Client = struct {
         };
         if (!offer.offered) return;
         self.image_channel.state = .unavailable;
+        // 협상했는데 채널 없이 끝나면 한 줄 남긴다 — 이 연결의 이미지는 placement 째 빠진다(§3.2). 탭 안내(IC6b) 전에는
+        // 「이미지가 왜 안 보이나」의 유일한 흔적이다.
+        defer if (self.image_channel.state == .unavailable and !builtin.is_test)
+            std.log.warn("session host image channel unavailable: host={x:0>32} — images are omitted on this connection until reconnect", .{self.host_id});
         // 자리 없음 — 버릴 token 도 없다.
         const token = offer.token orelse return;
         // abandon 몫을 남길 수 없으면 채널을 열지 않는다. token 은 host 의 만료로 풀린다.
@@ -7462,6 +7507,8 @@ pub const Client = struct {
         };
         if (!lost) return true;
         // 채널 상실 — host 는 채널 EOF 로 원장을 전부 반환하므로 표의 fd 와 못 보낸 release 를 함께 버린다.
+        if (!builtin.is_test)
+            std.log.warn("session host image channel lost: host={x:0>32} — images are omitted on this connection until reconnect", .{self.host_id});
         self.image_channel.deinit();
         self.image_channel.state = .unavailable;
         segments.dropSegments();
@@ -27608,10 +27655,47 @@ test "image channel connect: 채널 수립 실패는 connect 오류 집합에 �
     }
 }
 
+test "image channel connect: GUI 제품 진입점 둘은 광고해 협상하고, GUI 가 아닌 프로필의 광고 요청은 연결 전에 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..2) |entry| {
+        var host: FakeImageHost = .{ .mode = .no_seat };
+        try host.start();
+        var client_open = false;
+        var client: Client = undefined;
+        defer {
+            if (client_open) client.deinit();
+            host.finish();
+        }
+        const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 5 * std.time.ns_per_s);
+        client = switch (entry) {
+            0 => try Client.connectGuiWithImageChannel(testing.allocator, host.path, protocol.version_major),
+            else => try Client.connectGuiWithImageChannelUntil(testing.allocator, host.path, protocol.version_major, deadline),
+        };
+        client_open = true;
+        // 제공했지만 자리가 없다 — 협상은 됐다(「이미지 채널 없음」, 형식은 세그먼트).
+        try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+        try testing.expectEqual(ConnectionProfile.gui, client.connection_profile);
+        client.deinit();
+        client_open = false;
+        host.finish();
+        try testing.expect(host.saw_image_shm);
+    }
+    // GUI 가 아닌 프로필의 광고 요청은 소켓을 열기도 전에 거부한다 — external 소비자는 resolver 가 없어, 협상하면 세그먼트를
+    // 받은 뒤에야 실패한다(IC3b-2c-1). 없는 경로를 주어 거부가 연결보다 먼저인지 본다(먼저가 아니면 `EndpointAbsent`).
+    const missing: [:0]const u8 = "/tmp/maru-image-channel-no-such.sock";
+    const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 5 * std.time.ns_per_s);
+    inline for (.{ ConnectionProfile.cli_attach, ConnectionProfile.cli_probe, ConnectionProfile.admin }) |profile| {
+        try testing.expectError(error.ProtocolError, Client.connectMajorWithPolicy(testing.allocator, missing, profile, protocol.version_major, .strict, .advertise));
+        try testing.expectError(error.ProtocolError, Client.connectMajorUntilWithOpsPolicy(testing.allocator, missing, profile, protocol.version_major, deadline, client_deadline.posix_ops, .strict, .advertise));
+    }
+    try testing.expectError(error.EndpointAbsent, Client.connectMajorWithPolicy(testing.allocator, missing, .gui, protocol.version_major, .strict, .advertise));
+}
+
 test "image channel connect: gui·admin public connect 진입점은 광고하지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    // GUI 제품 호출자가 광고를 넘기는 것은 IC6 이다. 그 전에는 public 진입점이 `image_shm` 을 싣지 않는다 — 진입점을 실제로
-    // 태워 hello 바이트를 본다. frozen N-1 진입점 둘은 artifact 가 맞아야 열려 여기서 못 태운다(둘 다 `.off` 를 직접 넘긴다).
+    // 광고는 GUI 제품 진입점 둘(`connectGuiWithImageChannel*`, 아래 판정자)만 한다. 나머지 public 진입점은 `image_shm` 을 싣지
+    // 않는다 — `.gui` 로 붙지만 resolver 없이 조립기를 쓰는 소비자(inventory 등)가 이 길을 쓴다. 진입점을 실제로 태워 hello
+    // 바이트를 본다. frozen N-1 진입점 둘은 artifact 가 맞아야 열려 여기서 못 태운다(둘 다 `.off` 를 직접 넘긴다).
     for (0..5) |entry| {
         var host: FakeImageHost = .{ .mode = .not_offered };
         try host.start();

@@ -12,6 +12,7 @@ const posix = std.posix;
 const discovery = @import("discovery.zig");
 const launcher = @import("launcher.zig");
 const client_mod = @import("client.zig");
+const client_image_channel = @import("client_image_channel.zig");
 const framing = @import("framing.zig");
 const protocol = @import("protocol.zig");
 const registry_mod = @import("registry.zig");
@@ -559,7 +560,9 @@ fn tryUpgradeExistingHost(
             break;
         }
 
-        var client = switch (connectExistingHost(allocator, base_cache_dir, host_id)) {
+        // 이 연결은 `host.upgrade.prepare` 한 번만 보내고 닫는다(HostAdapter 로 가지 않는다) — 이미지 채널을 광고하지 않는다.
+        // 광고하면 바쁜 구 host 에 채널 왕복을 하나 더 얹고(최대 `blocking_budget_ns`) host 로그에 입양·상실 두 줄을 남긴다.
+        var client = switch (connectExistingHostWith(allocator, base_cache_dir, host_id, .off)) {
             .connected => |connected| connected,
             // OOM은 host에 대한 증거가 아니라 우리 쪽 사정이다. 삼키고 계속 스캔하면 메모리 압박 상황에서 host
             // 프로세스만 하나 더 늘린다 — 형제 스캔(`findCurrentManifestHost`)과 같은 규율로 즉시 올린다.
@@ -928,10 +931,20 @@ pub fn connectExistingMajor(
 /// Workspace의 exact `host_id`를 registry manifest로 resolve한다. Manifest가 있으면 그 endpoint/major만 사용하고
 /// hello identity·screen codec이 하나라도 다르면 다른 major socket을 추측하지 않는다. Manifest 도입 전 host에 한해
 /// current/N-1 legacy endpoint를 제한적으로 probe하고 hello host_id가 정확히 같은 연결만 반환한다.
+/// 제품 GUI 연결(복원·재사용·새 host·업그레이드 뒤 재연결) — 그 Client 는 HostAdapter 로 가므로 이미지 채널을 광고한다.
 pub fn connectExistingHost(
     allocator: std.mem.Allocator,
     base_cache_dir: []const u8,
     host_id: u128,
+) Outcome {
+    return connectExistingHostWith(allocator, base_cache_dir, host_id, .advertise);
+}
+
+fn connectExistingHostWith(
+    allocator: std.mem.Allocator,
+    base_cache_dir: []const u8,
+    host_id: u128,
+    image_channel: client_image_channel.Request,
 ) Outcome {
     if (builtin.os.tag != .macos or host_id == 0) return .{ .failed = .invalid_endpoint };
     var dir_buf: [512]u8 = undefined;
@@ -947,10 +960,12 @@ pub fn connectExistingHost(
     if (exact.lifecycle == .restoring) return .{ .failed = .startup_timeout };
     const endpoint = allocator.dupeZ(u8, exact.endpoint) catch return .{ .failed = .out_of_memory };
     defer allocator.free(endpoint);
-    const outcome = connectExactWithBackoff(
+    const outcome = connectExactWithBackoffKind(
         allocator,
         endpoint,
         exact.descriptor(),
+        .gui,
+        image_channel,
         .{ .connect_attempts = 10, .connect_delay_ms = 20 },
     );
     switch (outcome) {
@@ -1006,11 +1021,13 @@ pub fn connectExistingHostUntilObserved(
         return .{ .failed = .deadline_exceeded };
     if (manifest.lifecycle == .restoring)
         return .{ .failed = .startup_timeout };
+    // 재접속 worker 의 제품 연결 — 그 Client 는 HostAdapter 로 가 이미지 채널 리더·resolver 를 쓴다(이미지 채널 §2).
     const outcome = connectDiscoveredHostProfileUntilObserved(
         allocator,
         base_cache_dir,
         manifest.descriptor(),
         .gui,
+        .advertise,
         phase,
         observation,
     );
@@ -1047,6 +1064,7 @@ pub fn connectDiscoveredHostProfile(
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
 ) Outcome {
+    // inventory 는 화면을 적용하지 않고 CLI(`maru attach`)는 resolver 가 없다 — 광고하지 않는다.
     return connectDiscoveredHostProfileWith(
         allocator,
         base_cache_dir,
@@ -1068,6 +1086,7 @@ pub fn connectDiscoveredHostProfileUntil(
         base_cache_dir,
         expected,
         connection_profile,
+        .off,
         phase,
         null,
     );
@@ -1078,6 +1097,7 @@ fn connectDiscoveredHostProfileUntilObserved(
     base_cache_dir: []const u8,
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
+    image_channel: client_image_channel.Request,
     phase: attach_phase_deadline.PhaseDeadline,
     observation: ?*DeadlineConnectObservation,
 ) Outcome {
@@ -1090,6 +1110,7 @@ fn connectDiscoveredHostProfileUntilObserved(
         base_cache_dir,
         expected,
         connection_profile,
+        image_channel,
         .{ .deadline = phase.absolute },
         observation,
     );
@@ -1112,6 +1133,7 @@ fn connectDiscoveredHostProfileWith(
         base_cache_dir,
         expected,
         connection_profile,
+        .off,
         io,
         null,
     );
@@ -1122,6 +1144,7 @@ fn connectDiscoveredHostProfileWithObserved(
     base_cache_dir: []const u8,
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
+    image_channel: client_image_channel.Request,
     io: DiscoveredConnectIo,
     observation: ?*DeadlineConnectObservation,
 ) Outcome {
@@ -1146,6 +1169,7 @@ fn connectDiscoveredHostProfileWithObserved(
             endpoint,
             expected,
             connection_profile,
+            image_channel,
             .{ .connect_attempts = 10, .connect_delay_ms = 20 },
         ),
         .deadline => |deadline| connectExactWithBackoffKindUntil(
@@ -1154,6 +1178,7 @@ fn connectDiscoveredHostProfileWithObserved(
             expected.protocol_major,
             expected,
             connection_profile,
+            image_channel,
             .{ .connect_attempts = 10, .connect_delay_ms = 20 },
             deadline,
             deadline_attempt_ops,
@@ -1464,20 +1489,12 @@ fn logStaleClient(client: client_mod.Client, expected: host_manifest.Descriptor)
     logStaleManifest("hello", null);
 }
 
-fn connectExactWithBackoff(
-    allocator: std.mem.Allocator,
-    endpoint: [:0]const u8,
-    expected: host_manifest.Descriptor,
-    opts: Options,
-) Outcome {
-    return connectExactWithBackoffKind(allocator, endpoint, expected, .gui, opts);
-}
-
 fn connectExactWithBackoffKind(
     allocator: std.mem.Allocator,
     endpoint: [:0]const u8,
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
+    image_channel: client_image_channel.Request,
     opts: Options,
 ) Outcome {
     var attempts: usize = 0;
@@ -1488,6 +1505,7 @@ fn connectExactWithBackoffKind(
             endpoint,
             expected,
             connection_profile,
+            image_channel,
         )) {
             .connected => |client| return validateExactClient(client, expected),
             .absent => {},
@@ -1515,6 +1533,7 @@ fn connectExactWithBackoffKindUntil(
     major: u16,
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
+    image_channel: client_image_channel.Request,
     opts: Options,
     deadline: client_deadline.AbsoluteDeadline,
     attempt_ops: DeadlineAttemptOps,
@@ -1531,6 +1550,7 @@ fn connectExactWithBackoffKindUntil(
             allocator,
             endpoint,
             connection_profile,
+            image_channel,
             major,
             deadline,
         );
@@ -1580,6 +1600,7 @@ const DeadlineAttemptOps = struct {
         allocator: std.mem.Allocator,
         endpoint: [:0]const u8,
         connection_profile: client_mod.ConnectionProfile,
+        image_channel: client_image_channel.Request,
         major: u16,
         deadline: client_deadline.AbsoluteDeadline,
     ) DeadlineAttemptResult,
@@ -1595,16 +1616,16 @@ fn deadlineConnectAttempt(
     allocator: std.mem.Allocator,
     endpoint: [:0]const u8,
     connection_profile: client_mod.ConnectionProfile,
+    image_channel: client_image_channel.Request,
     major: u16,
     deadline: client_deadline.AbsoluteDeadline,
 ) DeadlineAttemptResult {
-    if (client_mod.Client.connectUntil(
-        allocator,
-        endpoint,
-        connection_profile,
-        major,
-        deadline,
-    )) |client| {
+    // GUI 가 아닌 프로필은 광고 요청이 와도 광고하지 않는다 — external 소비자에는 resolver 가 없다(IC3b-2c-1).
+    const connected = if (connection_profile == .gui and image_channel == .advertise)
+        client_mod.Client.connectGuiWithImageChannelUntil(allocator, endpoint, major, deadline)
+    else
+        client_mod.Client.connectUntil(allocator, endpoint, connection_profile, major, deadline);
+    if (connected) |client| {
         return .{ .connected = client };
     } else |err| return switch (err) {
         error.EndpointAbsent => .absent,
@@ -1639,6 +1660,7 @@ test "host_connect deadline retry shares one expiry and never sleeps after final
             _: std.mem.Allocator,
             _: [:0]const u8,
             _: client_mod.ConnectionProfile,
+            _: client_image_channel.Request,
             _: u16,
             deadline: client_deadline.AbsoluteDeadline,
         ) DeadlineAttemptResult {
@@ -1687,6 +1709,7 @@ test "host_connect deadline retry shares one expiry and never sleeps after final
         protocol.version_major,
         descriptor,
         .cli_probe,
+        .off,
         .{ .connect_attempts = 2, .connect_delay_ms = 20 },
         deadline,
         .{ .context = &fixture, .connect = Fixture.attempt },
@@ -1715,6 +1738,7 @@ test "host_connect deadline backoff expiry performs no later attempt" {
             _: std.mem.Allocator,
             _: [:0]const u8,
             _: client_mod.ConnectionProfile,
+            _: client_image_channel.Request,
             _: u16,
             deadline: client_deadline.AbsoluteDeadline,
         ) DeadlineAttemptResult {
@@ -1764,6 +1788,7 @@ test "host_connect deadline backoff expiry performs no later attempt" {
         protocol.version_major,
         descriptor,
         .cli_probe,
+        .off,
         .{ .connect_attempts = 3, .connect_delay_ms = 50 },
         deadline,
         .{ .context = &fixture, .connect = Fixture.attempt },
@@ -1973,8 +1998,9 @@ test "host_connect finds an existing frozen N-1 major without spawning and prese
 }
 
 /// 한 번 connect를 시도하되 endpoint 부재/권한/일시 오류와 wire 실패를 잃지 않는다.
+/// `connectOrLaunchDetailed` 의 새 탭 연결 — 그 Client 는 HostAdapter 로 가므로 이미지 채널을 광고한다(이미지 채널 §2).
 fn tryConnect(allocator: std.mem.Allocator, socket: [:0]const u8) TryConnectResult {
-    if (client_mod.Client.connect(allocator, socket, .gui)) |client| {
+    if (client_mod.Client.connectGuiWithImageChannel(allocator, socket, protocol.version_major)) |client| {
         return .{ .connected = client };
     } else |err| {
         return connectFailure(err);
@@ -1982,7 +2008,8 @@ fn tryConnect(allocator: std.mem.Allocator, socket: [:0]const u8) TryConnectResu
 }
 
 fn tryConnectMajor(allocator: std.mem.Allocator, socket: [:0]const u8, major: u16) TryConnectResult {
-    return tryConnectMajorKind(allocator, socket, major, .gui);
+    // legacy endpoint(manifest 없는 이전 host) — 이미지 채널을 제공하지 않는다.
+    return tryConnectMajorKind(allocator, socket, major, .gui, .off);
 }
 
 fn tryConnectMajorKind(
@@ -1990,13 +2017,14 @@ fn tryConnectMajorKind(
     socket: [:0]const u8,
     major: u16,
     connection_profile: client_mod.ConnectionProfile,
+    image_channel: client_image_channel.Request,
 ) TryConnectResult {
-    if (client_mod.Client.connectMajor(
-        allocator,
-        socket,
-        connection_profile,
-        major,
-    )) |client| {
+    // GUI 가 아닌 프로필은 광고 요청이 와도 광고하지 않는다 — external 소비자에는 resolver 가 없다(IC3b-2c-1).
+    const connected = if (connection_profile == .gui and image_channel == .advertise)
+        client_mod.Client.connectGuiWithImageChannel(allocator, socket, major)
+    else
+        client_mod.Client.connectMajor(allocator, socket, connection_profile, major);
+    if (connected) |client| {
         return .{ .connected = client };
     } else |err| {
         return connectFailure(err);
@@ -2010,7 +2038,9 @@ fn tryConnectExactKind(
     socket: [:0]const u8,
     expected: host_manifest.Descriptor,
     connection_profile: client_mod.ConnectionProfile,
+    image_channel: client_image_channel.Request,
 ) TryConnectResult {
+    // frozen N-1 host 는 이미지 채널을 모른다 — 광고하지 않는다.
     if (connection_profile == .gui) if (frozenGuiArtifactDigest(expected)) |digest| {
         if (client_mod.Client.connectFrozenGui(
             allocator,
@@ -2028,6 +2058,7 @@ fn tryConnectExactKind(
         socket,
         @intCast(expected.protocol_major),
         connection_profile,
+        image_channel,
     );
 }
 
@@ -2526,7 +2557,7 @@ test "host_connect: 복원 중 host 의 hello 실패는 재연결 예산을 소�
     const want: usize = 3;
     var accepted: usize = 0;
     var thread = try std.Thread.spawn(.{}, RestoringPeer.serve, .{ &server, &accepted, want });
-    const outcome = connectExactWithBackoffKind(allocator, socket, expected, .gui, .{
+    const outcome = connectExactWithBackoffKind(allocator, socket, expected, .gui, .off, .{
         .connect_attempts = want,
         .connect_delay_ms = 1,
     });
@@ -2747,5 +2778,133 @@ test "뿌리가 통째로 사라져도 lock 자리를 자력으로 되살린다"
         try testing.expect(c.fstatat(std.posix.AT.FDCWD, path.ptr, &st, std.posix.AT.SYMLINK_NOFOLLOW) == 0);
         try testing.expect(std.posix.S.ISDIR(st.mode));
         try testing.expectEqual(@as(u32, 0o700), st.mode & 0o777);
+    }
+}
+
+/// hello 만 읽고 닫는 peer — 들어온 hello 마다 `image_shm` 광고가 있었는지 센다. 호출이 끝나 `stop` 이 서면 backlog 에
+/// 남은 연결까지 비우고 끝난다 — 남기면 다음 경로의 기록에 섞인다.
+const ImageAdvertRecorder = struct {
+    advertised: usize = 0,
+    plain: usize = 0,
+    stop: std.atomic.Value(bool) = .init(false),
+
+    fn serve(self: *ImageAdvertRecorder, server: *socket_server.SocketServer) void {
+        while (true) {
+            var ready = c.pollfd{ .fd = server.listen_fd, .events = c.POLL.IN, .revents = 0 };
+            const rc = c.poll(@ptrCast(&ready), 1, 20);
+            if (rc < 0) {
+                if (posix.errno(rc) == .INTR) continue;
+                return;
+            }
+            if (rc == 0 or ready.revents & c.POLL.IN == 0) {
+                if (self.stop.load(.acquire)) return;
+                continue;
+            }
+            const fd = server.acceptOne() orelse continue;
+            defer _ = c.close(fd);
+            socket_server.setBlocking(fd) catch continue;
+            var header_bytes: [protocol.header_size]u8 = undefined;
+            if (!readExact(fd, &header_bytes)) continue;
+            const header = protocol.Header.decode(&header_bytes) catch continue;
+            if (header.kind != .hello) continue;
+            var payload: [4096]u8 = undefined;
+            if (header.payload_len > payload.len or !readExact(fd, payload[0..header.payload_len])) continue;
+            if (std.mem.indexOf(u8, payload[0..header.payload_len], "\"image_shm\"") != null)
+                self.advertised += 1
+            else
+                self.plain += 1;
+        }
+    }
+
+    fn record(server: *socket_server.SocketServer, comptime call: anytype, args: anytype) !ImageAdvertRecorder {
+        var recorder: ImageAdvertRecorder = .{};
+        const thread = try std.Thread.spawn(.{}, serve, .{ &recorder, server });
+        var outcome = @call(.auto, call, args);
+        recorder.stop.store(true, .release);
+        thread.join();
+        switch (@TypeOf(outcome)) {
+            Outcome => if (outcome == .connected) outcome.connected.deinit(),
+            TryConnectResult => if (outcome == .connected) outcome.connected.deinit(),
+            DeadlineAttemptResult => if (outcome == .connected) outcome.connected.deinit(),
+            else => @compileError("unexpected outcome"),
+        }
+        return recorder;
+    }
+
+    fn expectAdvertised(self: ImageAdvertRecorder) !void {
+        try testing.expect(self.advertised >= 1);
+        try testing.expectEqual(@as(usize, 0), self.plain);
+    }
+
+    fn expectPlain(self: ImageAdvertRecorder) !void {
+        try testing.expect(self.plain >= 1);
+        try testing.expectEqual(@as(usize, 0), self.advertised);
+    }
+};
+
+test "image channel host_connect: 제품 GUI 연결(새 탭·복원·재접속)만 image_shm 을 광고하고 inventory·CLI·legacy 는 광고하지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrintZ(&base_buf, "/tmp/maru-sh-advert-{d}", .{c.getpid()}) catch
+        return error.SkipZigTest;
+    _ = c.mkdir(base.ptr, 0o700);
+    var dir_buf: [256]u8 = undefined;
+    const dir = discovery.sessionHostDirPath(&dir_buf, base) catch return error.SkipZigTest;
+    _ = c.mkdir(dir.ptr, 0o700);
+    const host_id: u128 = 0xAD7E;
+    // 테스트 빌드의 short endpoint 뿌리는 프로세스별이다(`short_endpoint.currentUserRootPathIn`) — 사용자 host 와 섞이지 않는다.
+    try short_endpoint.prepareCurrentUserNamespace();
+    var endpoint_buf: [128]u8 = undefined;
+    const endpoint = try short_endpoint.currentSocketPathIn(&endpoint_buf, host_id);
+    var socket_dir_buf: [128]u8 = undefined;
+    const socket_dir = try short_endpoint.currentSocketDirPathIn(&socket_dir_buf);
+    var registry = registry_mod.TerminalRuntimeRegistry.init(allocator);
+    defer registry.deinit();
+    var server = try socket_server.SocketServer.bind(allocator, socket_dir, endpoint, host_id, &registry);
+    const descriptor: host_manifest.Descriptor = .{
+        .host_id = host_id,
+        .build_id = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        .protocol_major = protocol.version_major,
+        .screen_codec_version = screen_stream.codec_version,
+        .upgrade_epoch = 1,
+        .lifecycle = .ready,
+        .endpoint = endpoint,
+    };
+    var published = try host_manifest.publish(allocator, dir, descriptor);
+    defer {
+        published.deinit();
+        server.deinit();
+        host_manifest.removeEmptyHostDirectories(dir, host_id);
+        _ = c.rmdir(dir.ptr);
+        _ = c.rmdir(base.ptr);
+    }
+    const io = testing.io;
+
+    // 제품 GUI 경로 — 그 Client 는 HostAdapter 로 가 이미지 채널 리더·resolver 를 쓴다.
+    try (try ImageAdvertRecorder.record(&server, tryConnect, .{ allocator, endpoint })).expectAdvertised();
+    try (try ImageAdvertRecorder.record(&server, connectExistingHost, .{ allocator, base, host_id })).expectAdvertised();
+    {
+        const phase = try attach_phase_deadline.PhaseDeadline.start(io, .connect_hello);
+        try (try ImageAdvertRecorder.record(&server, connectExistingHostUntil, .{ allocator, base, host_id, phase })).expectAdvertised();
+    }
+
+    // inventory(복구 세션 목록)는 화면을 적용하지 않고, CLI(`maru attach` 의 probe·attach)는 resolver 가 없다.
+    try (try ImageAdvertRecorder.record(&server, connectDiscoveredHost, .{ allocator, base, descriptor })).expectPlain();
+    inline for (.{ client_mod.ConnectionProfile.cli_probe, client_mod.ConnectionProfile.cli_attach }) |profile| {
+        const phase = try attach_phase_deadline.PhaseDeadline.start(io, .connect_hello);
+        try (try ImageAdvertRecorder.record(
+            &server,
+            connectDiscoveredHostProfileUntil,
+            .{ allocator, base, descriptor, profile, phase },
+        )).expectPlain();
+    }
+    // legacy endpoint(이전 host)는 제공하지 않는다.
+    try (try ImageAdvertRecorder.record(&server, tryConnectMajor, .{ allocator, endpoint, protocol.version_major })).expectPlain();
+    // 말단도 GUI 가 아닌 프로필의 광고 요청을 광고로 바꾸지 않는다 — 실수로 넘겨도 external 소비자는 협상하지 않는다.
+    try (try ImageAdvertRecorder.record(&server, tryConnectMajorKind, .{ allocator, endpoint, protocol.version_major, client_mod.ConnectionProfile.cli_attach, client_image_channel.Request.advertise })).expectPlain();
+    {
+        const deadline = try client_deadline.AbsoluteDeadline.after(io, 2 * std.time.ns_per_s);
+        try (try ImageAdvertRecorder.record(&server, deadlineConnectAttempt, .{ @as(*anyopaque, @ptrFromInt(1)), allocator, endpoint, client_mod.ConnectionProfile.cli_probe, client_image_channel.Request.advertise, protocol.version_major, deadline })).expectPlain();
     }
 }

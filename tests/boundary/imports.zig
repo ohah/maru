@@ -1327,6 +1327,10 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 꼴을 지키며(울타리 판정자) 세고 값을 돌려주는 Client 를 읽지 않는 도우미 하나.
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "image_reconciliation" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "imageChannelRefused" },
+                // GUI 제품 연결의 광고(IC6a, 2026-10-14): 프로필을 `.gui` 로 고정한 진입점 둘(일반·deadline). 광고 여부를 인자로
+                // 여는 대신 진입점을 나눠 external 소비자가 광고할 길을 만들지 않는다.
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectGuiWithImageChannel" },
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectGuiWithImageChannelUntil" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.

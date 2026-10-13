@@ -1919,21 +1919,15 @@ pub fn reapplyForcedTabHover(self: *AppSession) void {
 /// **매 tick 다시 세운다.** 포인터가 헤더 밖에 있으면 `hoverCursor` 가 곧바로 지운다. 같은 값이면 재빌드하지 않는다.
 ///
 /// - `toggle` · `view_options` · `new_workspace` · `notifications` — 펼친 헤더의 ◧ · ⚙ · + · 종.
-/// - `collapsed` — 접힌 사이드바의 펼치기 토글(◧, 신호등 옆). 첫 tick 에 ◧ 클릭과 같은 길(`toggleSidebarCollapsed`)로
-///   **한 번** 접는다 — 그 뒤 사용자가 펼치면 다시 접지 않는다.
+/// - `collapsed` — 접힌 사이드바의 펼치기 토글(◧, 신호등 옆). 접는 것은 이 훅이 하지 않는다 — 기존 `MARU_COLLAPSE_SIDEBAR`
+///   (첫 frame 에 ◧ 클릭과 같은 길로 접는다)와 함께 준다. 실제 setter 처럼 접힘일 때만 선다.
 ///
 /// env 미설정이면 무동작.
-var header_hover_collapsed_once = false;
-
 pub fn reapplyForcedHeaderHover(self: *AppSession) void {
     const raw = std.c.getenv("MARU_FORCE_HEADER_HOVER") orelse return;
     if (!self.surface_initialized) return;
     const spec = std.mem.span(raw);
     if (std.mem.eql(u8, spec, "collapsed")) {
-        if (!header_hover_collapsed_once) {
-            header_hover_collapsed_once = true;
-            if (!self.sidebar_collapsed) sidebar_ops.toggleSidebarCollapsed(self);
-        }
         // 실제 경로와 같은 규칙 — 접힘이 아니면 세우지 않는다(`setHoveredCollapsedToggle`).
         const next = self.sidebar_collapsed;
         if (self.hovered_collapsed_toggle == next) return;

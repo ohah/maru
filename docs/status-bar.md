@@ -1026,7 +1026,8 @@ MARU_FORCE_SIDEBAR_CARDS=<n>   # 워크스페이스 카드 n개 — 사이드바
 MARU_FORCE_SIDEBAR_HOVER=edge  # 뷰포트 바닥에 걸친 카드에 호버 밴드(§5.3의 quad 클립을 겨냥)
 MARU_FORCE_SIDEBAR_SCROLL=max  # 사이드바를 끝까지 굴려 둔 상태(상단 클립 분기를 켠다)
 MARU_FORCE_HEADER_HOVER=<toggle|view_options|new_workspace|notifications|collapsed> # 사이드바 헤더 아이콘(◧·⚙·+·종) 또는
-                               # 접힌 사이드바의 ◧ 에 호버 판을 세운다 — 판이 그려진 아이콘 위에 서는지 화면으로 본다(collapsed 는 첫 tick 에 접는다)
+                               # 접힌 사이드바의 ◧ 에 호버 판을 세운다 — 판이 그려진 아이콘 위에 서는지 화면으로 본다
+                               # (collapsed 는 MARU_COLLAPSE_SIDEBAR 와 함께 — 접는 것은 그쪽이 한다)
 ```
 
 셋을 함께 주면 §5.3의 **두 방향**이 한 화면에 잡힌다 — 밴드가 상태바 띠를 넘지 않는가(아래), 그리고 스크롤

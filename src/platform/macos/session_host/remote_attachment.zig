@@ -1581,6 +1581,8 @@ const ImageTestTransport = struct {
     resolved_at_sweep: usize = 0,
     resolved: usize = 0,
     resolved_stream: u64 = 0,
+    /// 표에 세그먼트가 없다고 답한다(「이미지 채널 없음」 연결의 늦은 `image_ref`).
+    missing: bool = false,
     first_fail_reason: ?client_poison.ConnectionReason = null,
 
     fn read(context: *anyopaque, _: u64) client_mod.ClientError!?AttachmentBatchLease {
@@ -1628,6 +1630,7 @@ const ImageTestTransport = struct {
         const self: *ImageTestTransport = @ptrCast(@alignCast(context));
         self.resolved += 1;
         self.resolved_stream = stream_id;
+        if (self.missing) return null;
         const page = std.posix.mmap(
             null,
             std.heap.page_size_min,
@@ -1804,6 +1807,57 @@ test "image channel wiring: an image_ref batch that cannot drain the channel yet
     } };
     try std.testing.expectEqual(PumpScreenResult.applied, try attachment.pumpScreen(std.testing.io));
     try std.testing.expectEqual(@as(usize, 4), transport.prepared);
+}
+
+test "image channel wiring: a late image_ref on a connection with no image channel closes that connection as frame_malformed and surfaces MalformedRow, which the tab drain treats as recoverable" {
+    // 계약 §3.2·§6 — 「이미지 채널 없음」 연결(협상했지만 채널을 잃음)에 host 가 낸 `image_ref` 는 세그먼트가 없다. 그 연결은
+    // 재접속하고 탭은 살아야 한다. 사슬: 조립기 `MalformedRow` → attachment 가 연결을 `frame_malformed` 로 닫고 같은 오류를 올림
+    // → `drainRemoteNow` 가 `MalformedRow` 를 resync 로 다룸(탭 종료 아님). 앞 둘은 여기서 실제로, 마지막은 그 갈래의 모양으로 잰다.
+    const allocator = std.testing.allocator;
+    var transport = ImageTestTransport{
+        .batches = .{ try imageRefBatch(allocator, true), null },
+        .negotiated = true,
+        .missing = true,
+    };
+    var attachment = RemoteAttachment.init(allocator, .{
+        .runtime_id = 0xaa,
+        .stream_id = 7,
+        .role = .observer,
+        .controller_generation = 0,
+    });
+    defer attachment.deinit();
+    try attachment.bindTransport(transport.interface());
+    try attachment.initScreen(screen_stream.codec_version);
+    const counted = image_reconciliation.snapshot();
+    try std.testing.expectError(error.MalformedRow, attachment.pumpScreen(std.testing.io));
+    try std.testing.expectEqual(@as(usize, 1), transport.resolved);
+    try std.testing.expectEqual(@as(?client_poison.ConnectionReason, .frame_malformed), transport.first_fail_reason);
+    try std.testing.expectEqual(@as(u64, 1), image_reconciliation.snapshot().delta(counted).dropped_no_segment);
+
+    // 탭 쪽: `drainRemoteNow` 의 오류 갈래 중 `MalformedRow` 를 받는 갈래는 resync 를 요청하고 끝내지 않는다. 그 갈래(`=>` 부터
+    // 그 블록의 닫는 `}` 까지)를 문법 자리로 찾는다 — 다른 갈래의 종료 문장과 섞지 않는다.
+    const backend = @embedFile("remote_term_backend.zig");
+    const drain_at = std.mem.indexOf(u8, backend, "fn " ++ "drainRemoteNow(") orelse return error.TestUnexpectedResult;
+    const arm_head = "error.GenerationGap, error.MalformedRow => {";
+    const arm_at = std.mem.indexOfPos(u8, backend, drain_at, arm_head) orelse return error.TestUnexpectedResult;
+    var depth: usize = 1;
+    var cursor = arm_at + arm_head.len;
+    while (depth != 0) : (cursor += 1) {
+        if (cursor >= backend.len) return error.TestUnexpectedResult;
+        switch (backend[cursor]) {
+            '{' => depth += 1,
+            '}' => depth -= 1,
+            else => {},
+        }
+    }
+    const arm = backend[arm_at..cursor];
+    try std.testing.expect(std.mem.indexOf(u8, arm, "requestResync(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, arm, "markPumpEnded") == null);
+    try std.testing.expect(std.mem.indexOf(u8, arm, "process_state") == null);
+    try std.testing.expect(std.mem.indexOf(u8, arm, "summary.ended") == null);
+    // 그 갈래는 `drainRemoteNow` 안에 있다(다음 함수의 같은 글자를 잡지 않는다).
+    const next_fn = std.mem.indexOfPos(u8, backend, drain_at + 3, "\n    fn ") orelse backend.len;
+    try std.testing.expect(arm_at < next_fn);
 }
 
 test "image channel wiring: the first-snapshot resolver drains the channel waiting for the receive fence, never on an unnegotiated transport" {

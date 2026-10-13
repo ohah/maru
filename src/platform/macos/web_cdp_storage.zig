@@ -68,6 +68,10 @@ pub const Op = struct {
     delete_failed: usize = 0,
     /// 보냈는데 답을 잃은 지우기(시한·탭 닫힘·엔진 멈춤 — 지워졌을 수도 있다, 적대 리뷰 3 회차: 못 지운 것으로 하나 더 셌다).
     delete_unconfirmed: usize = 0,
+    /// 지우기 중 시한의 수 — 둘째에서 멈춘다(적대 리뷰 4 회차: 거듭 시한이면 512 × 30 초 동안 그 탭의 op 을 막았다).
+    delete_timeouts: u8 = 0,
+    /// 한 요청의 상한을 넘어 보내지 않은 쿠키 수(끝 글에 「다시 실행」 안내를 남긴다 — 4 회차).
+    over_cap: usize = 0,
     /// 지우기가 실패한 마지막 이유(소유 — 끝 글에 그대로, 적대 리뷰 2 회차: 대화상자인데 「DevTools refused」 라 했다).
     delete_why: ?[]u8 = null,
     /// 주소에 userinfo 가 있으면 뗀 사본(소유 — `doc_url` 이 이것을 가리킨다, 적대 리뷰 2 회차).
@@ -215,8 +219,16 @@ pub const Op = struct {
             .ok => |b| b,
             .cdp_error => |e| return self.failOrContinue(gpa, if (self.stage == .cookie_delete) refused_reason else cdpMessage(e), false),
             .failed => |why| return self.failOrContinue(gpa, why, true),
-            // 지우기 중의 시한도 세고 이어 간다(3 회차: 남은 것을 두고 「timeout」 만 답했다).
-            .timed_out => |why| return if (self.stage == .cookie_delete) self.failOrContinue(gpa, why, true) else done(gpa, .timeout, why),
+            // 지우기 중의 시한도 세고 이어 간다(3 회차: 남은 것을 두고 「timeout」 만 답했다) — 둘째 시한이면 엔진이 멈춘 것: 남은 것은 보내지 않는다
+            // (4 회차: 지우기 단계는 committed 라 요청 시한·철회로도 끝나지 않는다).
+            .timed_out => |why| {
+                if (self.stage != .cookie_delete) return done(gpa, .timeout, why);
+                self.delete_timeouts += 1;
+                if (self.delete_timeouts < 2) return self.failOrContinue(gpa, why, true);
+                self.delete_unconfirmed += 1;
+                self.delete_failed += self.pending.items.len;
+                return self.deleteSummary(gpa, why);
+            },
             .not_sent => |why| return self.failOrContinue(gpa, why, false),
         };
         switch (self.stage) {
@@ -433,6 +445,7 @@ pub const Op = struct {
         self.stage = .cookie_delete;
         self.delete_total = self.pending.items.len + over_cap;
         self.delete_failed = over_cap;
+        self.over_cap = over_cap;
         return self.nextDelete(gpa);
     }
 
@@ -441,12 +454,18 @@ pub const Op = struct {
         const f = self.delete_failed;
         const u = self.delete_unconfirmed;
         if (f == 0 and u == 0) return done(gpa, .success, "");
-        const msg = if (u == 0)
-            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted ({s})", .{ f, self.delete_total, why })
-        else if (f == 0)
-            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be confirmed deleted ({s})", .{ u, self.delete_total, why })
+        // 상한을 넘어 남긴 것이 있으면 다른 이유와 함께 「다시 실행」 안내도(4 회차: 마지막 오류 글에 가려졌다).
+        const why_all = if (self.over_cap > 0 and !std.mem.eql(u8, why, over_cap_reason))
+            try std.fmt.allocPrint(gpa, "{s}; {s}", .{ why, over_cap_reason })
         else
-            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted and {d} could not be confirmed ({s})", .{ f, self.delete_total, u, why });
+            try gpa.dupe(u8, why);
+        defer gpa.free(why_all);
+        const msg = if (u == 0)
+            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted ({s})", .{ f, self.delete_total, why_all })
+        else if (f == 0)
+            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be confirmed deleted ({s})", .{ u, self.delete_total, why_all })
+        else
+            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted and {d} could not be confirmed ({s})", .{ f, self.delete_total, u, why_all });
         return .{ .done = .{ .status = .failed, .result = msg } };
     }
 
@@ -974,4 +993,57 @@ test "W9a③ 적대 리뷰 3 회차 재현 F4: 지우기 하나가 시한이면 
     defer r1FreeStep(next);
     try testing.expect(next == .call and std.mem.eql(u8, next.call.method, "Network.deleteCookies"));
     try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .failed, "1 of 2 cookies could not be confirmed deleted (DevTools did not answer in time)");
+}
+
+test "W9a③ 적대 리뷰 4 회차 재현 F1: 지우기가 거듭 시한이면 두 번째에서 멈춘다 — 전에는 512 번 × 30 초 동안 그 탭의 op 을 막았다" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try aw.writer.writeAll("{\"cookies\":[");
+    for (0..10) |i| {
+        if (i > 0) try aw.writer.writeAll(",");
+        try aw.writer.print("{{\"name\":\"c{d}\",\"domain\":\"a.test\",\"path\":\"/\"}}", .{i});
+    }
+    try aw.writer.writeAll("]}");
+    var step = try op.feed(gpa, .{ .ok = aw.written() });
+    var sent: usize = 0;
+    while (step == .call) : (sent += 1) {
+        r1FreeStep(step);
+        step = try op.feed(gpa, .{ .timed_out = "DevTools did not answer in time" });
+    }
+    defer r1FreeStep(step);
+    try testing.expectEqual(@as(usize, 2), sent);
+    try testing.expectEqualStrings("8 of 10 cookies could not be deleted and 2 could not be confirmed (DevTools did not answer in time)", step.done.result);
+}
+
+test "W9a③ 적대 리뷰 4 회차 재현 F2: 상한(512)을 넘은 쿠키가 남으면 다른 실패가 있어도 「다시 실행」 안내를 남긴다" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try aw.writer.writeAll("{\"cookies\":[");
+    for (0..513) |i| {
+        if (i > 0) try aw.writer.writeAll(",");
+        try aw.writer.print("{{\"name\":\"c{d}\",\"domain\":\"a.test\",\"path\":\"/\"}}", .{i});
+    }
+    try aw.writer.writeAll("]}");
+    var step = try op.feed(gpa, .{ .ok = aw.written() });
+    var first = true;
+    while (step == .call) {
+        r1FreeStep(step);
+        step = try op.feed(gpa, if (first) .{ .cdp_error = "{\"message\":\"x\"}" } else .{ .ok = "{}" });
+        first = false;
+    }
+    defer r1FreeStep(step);
+    try testing.expect(std.mem.indexOf(u8, step.done.result, "run it again") != null);
+    try testing.expect(std.mem.indexOf(u8, step.done.result, "DevTools refused the delete") != null);
 }

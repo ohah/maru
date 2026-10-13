@@ -7777,6 +7777,7 @@ comptime {
     std.debug.assert(web_cdp_ops.web_cdp_page.max_url_bytes == session_mod.web_osr.max_url_bytes);
     // W9a②: exec 의 인자 상한은 sidecar 의 DevTools 인자 상한, 진단 payload 상한은 L2 의 것과 같다.
     std.debug.assert(web_cdp_ops.web_cdp_exec.max_params_bytes == session_mod.web_osr.ws_message.max_devtools_params_bytes);
+    std.debug.assert(web_cdp_ops.web_cdp_storage.max_params_bytes == session_mod.web_osr.ws_message.max_devtools_params_bytes);
     std.debug.assert(web_cdp_ops.web_cdp_exec.max_error_payload_bytes == control_browser.execute_script_error_payload_max_bytes);
 }
 
@@ -7828,6 +7829,7 @@ fn startCdpOpHost(async_id: u64, surface_id: u64, method: control_browser.Browse
             error.InvalidKey => "unknown key name (use names like Enter, Shift+Tab, Meta+a or a single character)",
             error.InvalidUrl => "a Chromium tab navigates only to http, https or about:blank addresses",
             error.ScriptTooLarge => web_cdp_ops.web_cdp_exec.script_too_large,
+            error.StorageValueTooLarge => web_cdp_ops.web_cdp_storage.storage_too_large,
             else => "invalid arguments",
         });
     };

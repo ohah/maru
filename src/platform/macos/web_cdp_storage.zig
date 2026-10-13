@@ -27,6 +27,9 @@ pub const not_http_reason = "this page has no web origin (about:blank, data: or 
 pub const origin_moved_reason = "the page moved to another origin while the request waited — try again";
 pub const cookie_domain_reason = "on a Chromium tab the cookie domain must be the page's own host";
 pub const set_cookie_failed = "setCookie failed (Chromium refused the cookie)";
+pub const storage_too_large = "the localStorage key and value are too large for a Chromium tab (64 KiB after JSON escaping)";
+/// DevTools 호출 인자 상한(sidecar — `app_host_abi` 가 컴파일 때 맞춘다).
+pub const max_params_bytes: usize = 64 * 1024;
 
 /// 격리 world 이름(요청마다 새로 만든다 — 이동 뒤 옛 context 를 쓰지 않게).
 const world_name = "maru-w9a-storage";
@@ -54,6 +57,9 @@ pub const Op = struct {
     pending: std.ArrayList(CookieKey) = .empty,
     frame_id: ?[]u8 = null,
     context_id: i64 = 0,
+    /// 지우기 — 보낸 수와 실패한 수(하나라도 실패하면 끝에 실패로 답한다 — 적대 리뷰 1 회차: 엔진이 다시 뜨는 사이 102 개가 남았는데 ok).
+    delete_total: usize = 0,
+    delete_failed: usize = 0,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         for ([_]?[]u8{ self.key, self.value, self.name, self.domain, self.path, self.frame_id }) |v| if (v) |b| gpa.free(b);
@@ -79,6 +85,12 @@ pub const Op = struct {
             .get_local_storage, .remove_local_storage, .set_local_storage => {
                 op.key = try dupeString(gpa, o.get("key") orelse return error.InvalidArg);
                 if (kind == .set_local_storage) op.value = try dupeString(gpa, o.get("value") orelse return error.InvalidArg);
+                // 평가 식은 키·값을 JSON 으로 두 번 이스케이프한 DevTools 인자에 싣는다 — 넘으면 엉뚱한 「selector」 글로 실패했다(적대 리뷰 1 회차).
+                op.context_id = std.math.maxInt(i64);
+                const probe = try op.storageStep(gpa);
+                defer gpa.free(probe.call.params);
+                op.context_id = 0;
+                if (probe.call.params.len > max_params_bytes) return error.StorageValueTooLarge;
             },
             .set_cookie, .delete_cookie => {
                 op.name = try dupeString(gpa, o.get("name") orelse return error.InvalidArg);
@@ -200,9 +212,17 @@ pub const Op = struct {
         }
     }
 
-    /// 지우기 중의 실패는 다음 쿠키로(하나를 못 지웠다고 나머지를 남기지 않는다), 그 밖은 곧 실패.
+    /// 지우기 중의 실패는 세고 다음 쿠키로(하나를 못 지웠다고 나머지를 남기지 않는다) — 엔진·탭이 사라졌으면 곧 실패(뒤도 다 실패한다).
+    /// 그 밖은 곧 실패.
     fn failOrContinue(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
-        if (self.stage == .cookie_delete) return self.nextDelete(gpa);
+        if (self.stage == .cookie_delete) {
+            self.delete_failed += 1;
+            if (std.mem.indexOf(u8, why, "not ready") != null or std.mem.indexOf(u8, why, "engine stopped") != null or std.mem.indexOf(u8, why, "tab closed") != null) {
+                self.delete_failed += self.pending.items.len;
+                return self.deleteSummary(gpa, why);
+            }
+            return self.nextDelete(gpa);
+        }
         if (self.stage == .storage) if (std.mem.indexOf(u8, why, "SecurityError") != null) return done(gpa, .failed, not_http_reason);
         return done(gpa, .failed, why);
     }
@@ -300,8 +320,11 @@ pub const Op = struct {
                     s.write(c.expires) catch return error.OutOfMemory;
                 }
                 if (c.sameSite) |ss| {
+                    // WebKit(`HTTPCookieStringPolicy`)처럼 소문자(적대 리뷰 1 회차).
+                    var lower: [16]u8 = undefined;
+                    const n = @min(ss.len, lower.len);
                     s.objectField("sameSite") catch return error.OutOfMemory;
-                    s.write(ss) catch return error.OutOfMemory;
+                    s.write(std.ascii.lowerString(lower[0..n], ss[0..n])) catch return error.OutOfMemory;
                 }
                 s.endObject() catch return error.OutOfMemory;
             }
@@ -316,15 +339,21 @@ pub const Op = struct {
             if (self.kind == .delete_cookie) {
                 if (!std.mem.eql(u8, c.name, self.name.?)) continue;
                 if (!std.mem.eql(u8, c.path, self.path orelse "/")) continue;
-                if (self.domain) |d| if (!std.ascii.eqlIgnoreCase(c.domain, d) and !(c.domain.len > 0 and c.domain[0] == '.' and std.ascii.eqlIgnoreCase(c.domain[1..], d)) and !(d.len > 0 and d[0] == '.' and std.ascii.eqlIgnoreCase(d[1..], c.domain))) continue;
+                // domain 을 주면 WebKit 처럼 그 글자 그대로나 앞에 점을 붙인 것만(`.a.test` 는 호스트 전용 `a.test` 쿠키를 지우지 않는다 — 적대 리뷰 1 회차).
+                if (self.domain) |d| if (!std.ascii.eqlIgnoreCase(c.domain, d) and !(c.domain.len > 0 and c.domain[0] == '.' and std.ascii.eqlIgnoreCase(c.domain[1..], d))) continue;
             }
-            // 같은 쿠키가 두 url 에서 겹쳐 보일 수 있다(clearStorage) — 한 번만.
+            const partition: ?[]u8 = if (c.partitionKey) |pk| try std.json.Stringify.valueAlloc(gpa, pk, .{}) else null;
+            // 같은 쿠키가 두 url 에서 겹쳐 보일 수 있다(clearStorage) — 한 번만. 분할(CHIPS)이 다르면 다른 쿠키다(적대 리뷰 1 회차: 하나만 지웠다).
             var dup = false;
-            for (self.pending.items) |p| if (std.mem.eql(u8, p.name, c.name) and std.mem.eql(u8, p.domain, c.domain) and std.mem.eql(u8, p.path, c.path)) {
+            for (self.pending.items) |p| if (std.mem.eql(u8, p.name, c.name) and std.mem.eql(u8, p.domain, c.domain) and std.mem.eql(u8, p.path, c.path) and
+                std.mem.eql(u8, p.partition orelse "", partition orelse ""))
+            {
                 dup = true;
             };
-            if (dup) continue;
-            const partition: ?[]u8 = if (c.partitionKey) |pk| try std.json.Stringify.valueAlloc(gpa, pk, .{}) else null;
+            if (dup) {
+                if (partition) |p| gpa.free(p);
+                continue;
+            }
             errdefer if (partition) |p| gpa.free(p);
             const key: CookieKey = .{ .name = try gpa.dupe(u8, c.name), .domain = try gpa.dupe(u8, c.domain), .path = try gpa.dupe(u8, c.path), .partition = partition };
             self.pending.append(gpa, key) catch |e| {
@@ -333,14 +362,19 @@ pub const Op = struct {
             };
         }
         self.stage = .cookie_delete;
+        self.delete_total = self.pending.items.len;
         return self.nextDelete(gpa);
     }
 
+    fn deleteSummary(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
+        self.stage = .done_stage;
+        if (self.delete_failed == 0) return done(gpa, .success, "");
+        const msg = try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted ({s})", .{ self.delete_failed, self.delete_total, why });
+        return .{ .done = .{ .status = .failed, .result = msg } };
+    }
+
     fn nextDelete(self: *Op, gpa: std.mem.Allocator) !Step {
-        const c = self.pending.pop() orelse {
-            self.stage = .done_stage;
-            return done(gpa, .success, "");
-        };
+        const c = self.pending.pop() orelse return self.deleteSummary(gpa, "DevTools refused the delete");
         defer freeKey(gpa, c);
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
@@ -530,7 +564,7 @@ test "W9a③ 쿠키 읽기: 문서 주소로만 묻고 WebKit 모양으로 — �
     const p = try expectCall(try op.start(gpa), "Network.getCookies");
     defer gpa.free(p);
     try testing.expectEqualStrings("{\"urls\":[\"http://a.test/p/q\"]}", p);
-    try expectDone(try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"s\",\"value\":\"1\",\"domain\":\"a.test\",\"path\":\"/\",\"expires\":-1,\"size\":2,\"httpOnly\":true,\"secure\":false,\"session\":true,\"sameSite\":\"Lax\",\"priority\":\"Medium\"},{\"name\":\"p\",\"value\":\"2\",\"domain\":\".a.test\",\"path\":\"/p\",\"expires\":1900000000.5,\"httpOnly\":false,\"secure\":true,\"session\":false}]}" }), .success, "[{\"name\":\"s\",\"value\":\"1\",\"domain\":\"a.test\",\"path\":\"/\",\"secure\":false,\"httpOnly\":true,\"sameSite\":\"Lax\"},{\"name\":\"p\",\"value\":\"2\",\"domain\":\".a.test\",\"path\":\"/p\",\"secure\":true,\"httpOnly\":false,\"expires\":1900000000.5}]");
+    try expectDone(try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"s\",\"value\":\"1\",\"domain\":\"a.test\",\"path\":\"/\",\"expires\":-1,\"size\":2,\"httpOnly\":true,\"secure\":false,\"session\":true,\"sameSite\":\"Lax\",\"priority\":\"Medium\"},{\"name\":\"p\",\"value\":\"2\",\"domain\":\".a.test\",\"path\":\"/p\",\"expires\":1900000000.5,\"httpOnly\":false,\"secure\":true,\"session\":false}]}" }), .success, "[{\"name\":\"s\",\"value\":\"1\",\"domain\":\"a.test\",\"path\":\"/\",\"secure\":false,\"httpOnly\":true,\"sameSite\":\"lax\"},{\"name\":\"p\",\"value\":\"2\",\"domain\":\".a.test\",\"path\":\"/p\",\"secure\":true,\"httpOnly\":false,\"expires\":1900000000.5}]");
     var blank = try Op.init(gpa, .get_cookies, "");
     defer blank.deinit(gpa);
     blank.doc_url = "about:blank";
@@ -565,7 +599,7 @@ test "W9a③ 쿠키 쓰기: domain 은 그 호스트 자신만, path 기본 /, s
     }
 }
 
-test "W9a③ 쿠키 지우기: 그 path 로 읽어 이름·path·호스트로 거른 뒤 받은 정확한 키로 하나씩 — 부모 도메인 쿠키는 두고, 하나를 못 지워도 나머지는 지운다" {
+test "W9a③ 쿠키 지우기: 그 path 로 읽어 이름·path·호스트로 거른 뒤 받은 정확한 키로 하나씩 — 부모 도메인 쿠키는 두고, 하나를 못 지워도 나머지는 지운 뒤 실패로 답한다" {
     const gpa = testing.allocator;
     var op = try Op.init(gpa, .delete_cookie, "{\"name\":\"s\",\"path\":\"/p\"}");
     defer op.deinit(gpa);
@@ -581,7 +615,8 @@ test "W9a③ 쿠키 지우기: 그 path 로 읽어 이름·path·호스트로 �
     const d2 = try expectCall(try op.feed(gpa, .{ .cdp_error = "{\"code\":-32000,\"message\":\"x\"}" }), "Network.deleteCookies");
     defer gpa.free(d2);
     try testing.expectEqualStrings("{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/p\"}", d2);
-    try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .success, "");
+    // 하나를 못 지웠다 — 나머지는 지우고 끝에 실패로(적대 리뷰 1 회차: 전에는 ok).
+    try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .failed, "1 of 2 cookies could not be deleted (DevTools refused the delete)");
     var parent = try Op.init(gpa, .delete_cookie, "{\"name\":\"s\",\"domain\":\"test\"}");
     defer parent.deinit(gpa);
     parent.doc_url = "https://a.test/";
@@ -608,4 +643,89 @@ test "W9a③ clearStorage: 그 출처의 저장소 전부 + 문서 주소·뿌�
     defer blank.deinit(gpa);
     blank.doc_url = "about:blank";
     try expectDone(try blank.start(gpa), .success, "");
+}
+
+fn r1FreeStep(s: Step) void {
+    switch (s) {
+        .call => |c| testing.allocator.free(c.params),
+        .done => |d| testing.allocator.free(d.result),
+        else => {},
+    }
+}
+
+test "W9a③ 적대 리뷰 1 회차 재현 R1-A: every deleteCookies fails (sidecar gone / tab busy) but deleteCookie answers success" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .delete_cookie, "{\"name\":\"s\"}");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    const cookies = "{\"cookies\":[{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"s\",\"domain\":\".a.test\",\"path\":\"/\"}]}";
+    var step = try op.feed(gpa, .{ .ok = cookies });
+    while (step == .call) {
+        r1FreeStep(step);
+        step = try op.feed(gpa, .{ .not_sent = "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)" });
+    }
+    defer r1FreeStep(step);
+    try testing.expectEqual(Status.failed, step.done.status); // expected: not success — nothing was deleted
+}
+
+test "W9a③ 적대 리뷰 1 회차 재현 R1-A2: clearStorage — every delete fails yet success" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
+    var step = try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"sid\",\"domain\":\".a.test\",\"path\":\"/\"}]}" });
+    while (step == .call) {
+        r1FreeStep(step);
+        step = try op.feed(gpa, .{ .failed = "the Chromium engine stopped" });
+    }
+    defer r1FreeStep(step);
+    try testing.expectEqual(Status.failed, step.done.status);
+}
+
+test "W9a③ 적대 리뷰 1 회차 재현 R1-B: same name/domain/path in two partitions — only one deleteCookies is sent" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .delete_cookie, "{\"name\":\"dup\"}");
+    defer op.deinit(gpa);
+    op.doc_url = "http://a.test/";
+    r1FreeStep(try op.start(gpa));
+    const cookies = "{\"cookies\":[{\"name\":\"dup\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"dup\",\"domain\":\"a.test\",\"path\":\"/\",\"partitionKey\":{\"topLevelSite\":\"http://a.test\",\"hasCrossSiteAncestor\":false}}]}";
+    var step = try op.feed(gpa, .{ .ok = cookies });
+    var n: usize = 0;
+    while (step == .call) {
+        n += 1;
+        r1FreeStep(step);
+        step = try op.feed(gpa, .{ .ok = "{}" });
+    }
+    r1FreeStep(step);
+    try testing.expectEqual(@as(usize, 2), n);
+}
+
+test "W9a③ 적대 리뷰 1 회차 재현 R1-C: deleteCookie domain \".a.test\" also deletes the host-only a.test cookie (WebKit keeps it)" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .delete_cookie, "{\"name\":\"s\",\"domain\":\".a.test\"}");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    const step = try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/\"}]}" });
+    defer r1FreeStep(step);
+    if (step == .call)
+        try testing.expect(step == .done); // WebKit: c.domain != rd && c.domain != "."+rd -> not matched
+}
+
+test "W9a③ 적대 리뷰 1 회차 재현: sameSite 는 WebKit 처럼 소문자, 긴 localStorage 값은 그것의 상한 글로" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .get_cookies, "");
+    defer op.deinit(gpa);
+    op.doc_url = "http://a.test/";
+    gpa.free((try op.start(gpa)).call.params);
+    try expectDone(try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"s\",\"value\":\"1\",\"domain\":\"a.test\",\"path\":\"/\",\"httpOnly\":false,\"secure\":false,\"session\":true,\"sameSite\":\"Strict\"}]}" }), .success, "[{\"name\":\"s\",\"value\":\"1\",\"domain\":\"a.test\",\"path\":\"/\",\"secure\":false,\"httpOnly\":false,\"sameSite\":\"strict\"}]");
+    const big = try gpa.alloc(u8, 70 * 1024);
+    defer gpa.free(big);
+    @memset(big, 'x');
+    const arg = try std.fmt.allocPrint(gpa, "{{\"key\":\"k\",\"value\":\"{s}\"}}", .{big});
+    defer gpa.free(arg);
+    try testing.expectError(error.StorageValueTooLarge, Op.init(gpa, .set_local_storage, arg));
 }

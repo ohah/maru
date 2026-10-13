@@ -5627,3 +5627,190 @@ test "image channel owner: 입양 순간의 남은 바이트 검사는 아직 �
     }
     try testing.expect(client.hasTrailingInbound());
 }
+
+// ─── 세그먼트 준비·발급·취소(이미지 채널 §4·§5, 계획 IC5b-1) ───
+
+/// 앱 쪽 채널 끝에서 세그먼트 메시지 하나를 받는다 — 메시지와 붙어 온 fd 들(받은 쪽 소유). 아무것도 없으면 null.
+fn recvTestSegment(fd: c.fd_t, fds_out: *[4]c.fd_t, fd_count: *usize) !?image_channel_wire.Segment {
+    var buf: [image_channel_wire.segment_len]u8 = undefined;
+    var control: [128]u8 align(@alignOf(c.cmsghdr)) = undefined;
+    var iov = [_]posix.iovec{.{ .base = &buf, .len = buf.len }};
+    var msg: c.msghdr = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = control.len,
+        .flags = 0,
+    };
+    const rc = c.recvmsg(fd, &msg, posix.MSG.DONTWAIT);
+    if (rc < 0) {
+        if (posix.errno(rc) == .AGAIN) return null;
+        return error.TestUnexpectedResult;
+    }
+    if (rc != buf.len) return error.TestUnexpectedResult;
+    fd_count.* = 0;
+    var offset: usize = 0;
+    const control_len: usize = @intCast(msg.controllen);
+    while (offset + @sizeOf(c.cmsghdr) <= control_len) {
+        var header: c.cmsghdr = undefined;
+        @memcpy(std.mem.asBytes(&header), control[offset..][0..@sizeOf(c.cmsghdr)]);
+        if (header.len < @sizeOf(c.cmsghdr)) break;
+        if (header.level == c.SOL.SOCKET and header.type == c.SCM.RIGHTS) {
+            const data_len = header.len - @sizeOf(c.cmsghdr);
+            var i: usize = 0;
+            while (i + @sizeOf(c.fd_t) <= data_len and fd_count.* < fds_out.len) : (i += @sizeOf(c.fd_t)) {
+                var value: c.fd_t = undefined;
+                @memcpy(std.mem.asBytes(&value), control[offset + @sizeOf(c.cmsghdr) + i ..][0..@sizeOf(c.fd_t)]);
+                fds_out[fd_count.*] = value;
+                fd_count.* += 1;
+            }
+        }
+        offset += std.mem.alignForward(usize, header.len, @sizeOf(u32));
+    }
+    return try image_channel_wire.decodeSegment(&buf);
+}
+
+fn fdIsClosed(fd: c.fd_t) bool {
+    return c.fcntl(fd, c.F.GETFD, @as(c_int, 0)) == -1;
+}
+
+test "image channel owner: 준비한 세그먼트를 발급하면 채널로 메시지와 fd 하나가 가고 그 fd 는 픽셀을 담으며 host 는 fd 를 닫는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-issue.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const client = fx.clientWithChannel().?;
+
+    const pixels = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const prepared = switch (client.prepareImageSegment(7, 3, 9, &pixels, false)) {
+        .segment => |segment| segment,
+        else => return error.TestUnexpectedResult,
+    };
+    // 준비 상태 — 앱은 아직 아무것도 받지 않았다.
+    try testing.expectEqual(@as(usize, 1), client.imageLedger().?.count());
+    try testing.expectEqual(image_segment_ledger.State.prepared, client.imageLedger().?.items()[0].state);
+    try testing.expectEqual(@as(u64, 0), client.imageSegmentsIssuedThrough());
+    var fds: [4]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    try testing.expect((try recvTestSegment(channel_fd, &fds, &fd_count)) == null);
+
+    client.issueImageSegments(&.{prepared});
+    try testing.expect(fdIsClosed(prepared.fd));
+    try testing.expectEqual(image_segment_ledger.State.issued, client.imageLedger().?.items()[0].state);
+    try testing.expectEqual(prepared.segment_id, client.imageSegmentsIssuedThrough());
+    const got = (try recvTestSegment(channel_fd, &fds, &fd_count)) orelse return error.TestUnexpectedResult;
+    defer for (fds[0..fd_count]) |fd| {
+        _ = c.close(fd);
+    };
+    try testing.expectEqual(@as(usize, 1), fd_count);
+    try testing.expectEqual(prepared.segment_id, got.segment_id);
+    try testing.expectEqual(@as(u64, 7), got.stream_id);
+    try testing.expectEqual(@as(u32, 3), got.image_id);
+    try testing.expectEqual(@as(u64, 9), got.generation);
+    try testing.expectEqual(@as(u32, pixels.len), got.byte_len);
+    const mapped = try posix.mmap(null, pixels.len, .{ .READ = true }, .{ .TYPE = .SHARED }, fds[0], 0);
+    defer posix.munmap(mapped);
+    try testing.expectEqualSlices(u8, &pixels, mapped[0..pixels.len]);
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+test "image channel owner: 취소한 세그먼트는 원장과 host 예산에서 빠지고 fd 가 닫히며 채널로 아무것도 안 간다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-cancel.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const client = fx.clientWithChannel().?;
+
+    const pixels = [_]u8{9} ** 64;
+    const prepared = switch (client.prepareImageSegment(7, 3, 9, &pixels, false)) {
+        .segment => |segment| segment,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(u64, pixels.len), fx.owner.image_host_budget.bytes);
+    client.cancelImageSegments(&.{prepared});
+    try testing.expect(fdIsClosed(prepared.fd));
+    try testing.expectEqual(@as(usize, 0), client.imageLedger().?.count());
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_host_budget.bytes);
+    try testing.expectEqual(@as(u64, 0), client.imageSegmentsIssuedThrough());
+    var fds: [4]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    try testing.expect((try recvTestSegment(channel_fd, &fds, &fd_count)) == null);
+    // 취소 뒤 발급은 아무것도 보내지 않는다(이미 닫은 fd 를 다시 쓰지 않게 판정자는 새 준비분으로 잰다).
+    try testing.expectEqual(@as(usize, 1), fx.channelCount());
+}
+
+test "image channel owner: 미룸·전송 불가 — 같은 이미지 미반환은 delta 만 미루고 스냅샷은 준비, 연결 상한은 미룸, host 상한 초과는 전송 불가" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-defer.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const client = fx.clientWithChannel().?;
+    const pixels = [_]u8{ 1, 2, 3, 4 };
+
+    var held: [2]connection_turn.PreparedImageSegment = undefined;
+    held[0] = switch (client.prepareImageSegment(7, 3, 1, &pixels, false)) {
+        .segment => |segment| segment,
+        else => return error.TestUnexpectedResult,
+    };
+    // 같은 (stream, image) 에 반환되지 않은 세그먼트가 있으면 delta 는 미룬다(latest-wins) — 다른 stream·이미지는 아니다.
+    try testing.expect(client.prepareImageSegment(7, 3, 2, &pixels, false) == .deferred);
+    // 스냅샷은 그 규칙에서 빠진다.
+    held[1] = switch (client.prepareImageSegment(7, 3, 2, &pixels, true)) {
+        .segment => |segment| segment,
+        else => return error.TestUnexpectedResult,
+    };
+    defer client.cancelImageSegments(&held);
+    // host 전체 상한보다 큰 한 장은 전송 불가다(픽셀을 실제로 만들지 않게 길이만 큰 조각을 빌려 준다 — 청구에서 걸러진다).
+    const huge_len: usize = image_segment_ledger.image_segment_bytes_per_host + 1;
+    const huge = @as([*]const u8, &pixels)[0..huge_len];
+    try testing.expect(client.prepareImageSegment(7, 4, 1, huge, true) == .untransmittable);
+    try testing.expectEqual(@as(usize, 2), client.imageLedger().?.count());
+
+    // 「이미지 채널 없음」 연결은 세그먼트를 만들지 않는다.
+    const other_fd = try fx.connect();
+    defer _ = c.close(other_fd);
+    _ = try fx.helloMain(other_fd, false);
+    for (fx.owner.clients) |maybe| {
+        const other = maybe orelse continue;
+        if (other.hasImageChannel()) continue;
+        try testing.expect(other.prepareImageSegment(7, 3, 1, &pixels, true) == .deferred);
+    }
+}
+
+test "image channel owner: 세그먼트를 보내지 못하면 채널만 내리고 남은 준비분의 fd 도 닫으며 주 연결은 산다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-send-fail.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    const client = fx.clientWithChannel().?;
+    const pixels = [_]u8{ 1, 2, 3, 4 };
+    var prepared: [2]connection_turn.PreparedImageSegment = undefined;
+    for (&prepared, 0..) |*slot, i| slot.* = switch (client.prepareImageSegment(7, @intCast(i + 1), 1, &pixels, false)) {
+        .segment => |segment| segment,
+        else => return error.TestUnexpectedResult,
+    };
+    // 앱이 채널을 닫았다 — 첫 송신이 실패하고(EPIPE, SIGPIPE 는 소켓 옵션이 막는다) 채널을 잃는다.
+    _ = c.close(channel_fd);
+    client.issueImageSegments(&prepared);
+    for (prepared) |segment| try testing.expect(fdIsClosed(segment.fd));
+    try testing.expectEqual(@as(usize, 0), fx.channelCount());
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_host_budget.bytes);
+    try fx.expectMainAlive(main_fd, 2);
+}

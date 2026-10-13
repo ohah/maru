@@ -22,6 +22,7 @@ const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const collect_failure = @import("collect_failure.zig");
 const image_channel_wire = @import("image_channel_wire.zig");
 const image_segment_ledger = @import("image_segment_ledger.zig");
+const image_segment = @import("image_segment.zig");
 
 pub const CloseReason = enum {
     eof,
@@ -118,6 +119,29 @@ pub const ImageChannelLoss = enum {
     protocol_error,
     /// `bind_ack` 를 다 쓰지 못했다. 빈 소켓에 8 B 라 앱이 살아 있으면 생기지 않는다 — 앱이 이미 채널을 닫은 경우다.
     bind_ack_send,
+    /// 세그먼트 메시지를 보내지 못했다. 원장 상한(≤ 32)이 커널의 fd 메시지 버퍼(64)보다 작아 정상은 막히지 않는다 — 앱이 채널을
+    /// 닫았거나 불변식이 깨진 경우다(§4.3).
+    segment_send,
+};
+
+/// 투영이 이미지 하나에 대해 받는 답(이미지 채널 §4·§5). 준비한 세그먼트는 그 배치가 큐에 승인되면 `issueImageSegments`, 아니면
+/// (배치 롤백·투영 실패) `cancelImageSegments` 로 **정확히 한 번** 끝나야 한다 — 그 사이 원장에는 준비 상태로 남는다.
+pub const ImageSegmentPrepare = union(enum) {
+    segment: PreparedImageSegment,
+    /// 지금은 자리가 없다 — 원장 상한, 「이미지 채널 없음」, 같은 (stream, image) 의 미반환 세그먼트, 공유 메모리 자원 부족.
+    deferred,
+    /// 이 연결로는 보낼 수 없는 크기(host 전체 상한 초과·레코드 길이 초과).
+    untransmittable,
+};
+
+pub const PreparedImageSegment = struct {
+    segment_id: u64,
+    stream_id: u64,
+    image_id: u32,
+    generation: u64,
+    byte_len: u32,
+    /// 읽기 전용 공유 메모리 fd(CLOEXEC). 발급(송신 뒤)이나 취소가 닫는다.
+    fd: c.fd_t,
 };
 
 /// 이미지 fd 의 한 읽기 턴에서 받는 최대 바이트(release 256 개).
@@ -693,6 +717,69 @@ pub const Client = struct {
         if (self.image_fd < 0) return;
         noteImageChannelLost(self.admission.index, reason, self.image_ledger.?);
         self.dropImageChannel();
+    }
+
+    /// 이미지 하나의 세그먼트를 준비한다(§4.1·§5) — 원장에 먼저 청구하고, 청구가 되면 픽셀을 새 공유 메모리에 담는다.
+    /// `snapshot` 은 「같은 이미지의 미반환 세그먼트가 있으면 미룬다」 규칙에서 빠진다(앱이 스냅샷 적용 때 이미지를 비운다).
+    /// `pixels` 는 이 호출 동안만 빌린 것이다(투영이 core lock 아래 넘긴다) — 복사는 여기서 끝난다.
+    pub fn prepareImageSegment(
+        self: *Client,
+        stream_id: u64,
+        image_id: u32,
+        generation: u64,
+        pixels: []const u8,
+        snapshot: bool,
+    ) ImageSegmentPrepare {
+        // 「이미지 채널 없음」(협상했지만 묶이지 않음·잃음) — 세그먼트를 만들지 않는다(§3.2).
+        const ledger = self.imageLedger() orelse return .deferred;
+        const byte_len = std.math.cast(u32, pixels.len) orelse return .untransmittable;
+        // 0 B 이미지는 세그먼트가 없다 — 투영은 청하지 않는다(메타만 `image_ref` 로 간다).
+        if (byte_len == 0) return .deferred;
+        if (!snapshot and ledger.hasOutstanding(stream_id, image_id)) return .deferred;
+        const segment_id = ledger.reserve(stream_id, image_id, generation, byte_len) catch |err| return switch (err) {
+            error.TooLargeForHost => .untransmittable,
+            error.EmptySegment, error.ConnectionCountFull, error.ConnectionBytesFull, error.HostBytesFull => .deferred,
+        };
+        // 공유 메모리를 못 만들면(fd·커널 자원 부족) 청구를 되돌리고 미룬다 — 다음 투영이 다시 청한다.
+        const created = image_segment.create(pixels) catch null;
+        const segment = created orelse {
+            _ = ledger.cancel(segment_id);
+            return .deferred;
+        };
+        return .{ .segment = .{
+            .segment_id = segment_id,
+            .stream_id = stream_id,
+            .image_id = image_id,
+            .generation = generation,
+            .byte_len = byte_len,
+            .fd = segment.fd,
+        } };
+    }
+
+    /// 배치가 큐에 승인된 같은 턴(§4.2): 준비한 세그먼트를 원장에서 발급하고 이미지 채널로 보낸다. 주 소켓의 그 배치 바이트는
+    /// 다음 `writeReady` 에 나가므로 「채널이 먼저」다(§3.4). host 는 보낸 fd 를 바로 닫는다. 보내지 못하면 채널 상실로 내린다 —
+    /// 그 배치의 `image_ref` 는 앱에서 「세그먼트 없음」이 되어 그 연결이 재접속한다.
+    pub fn issueImageSegments(self: *Client, segments: []const PreparedImageSegment) void {
+        for (segments) |segment| {
+            defer _ = c.close(segment.fd);
+            // 그 사이 채널을 잃었으면 `releaseAll` 이 이미 반환했다 — fd 만 닫는다.
+            const ledger = self.imageLedger() orelse continue;
+            if (!ledger.issue(segment.segment_id)) continue;
+            if (!sendImageSegment(self.image_fd, segment)) self.loseImageChannel(.segment_send);
+        }
+    }
+
+    /// 배치 롤백·투영 실패: 앱이 본 적 없는 세그먼트를 되돌리고 fd 를 닫는다(§4).
+    pub fn cancelImageSegments(self: *Client, segments: []const PreparedImageSegment) void {
+        for (segments) |segment| {
+            if (self.imageLedger()) |ledger| _ = ledger.cancel(segment.segment_id);
+            _ = c.close(segment.fd);
+        }
+    }
+
+    /// 이 연결에서 지금까지 발급한 가장 큰 세그먼트 id(0 = 없음·채널 없음) — 배치의 `image_seg_hwm` 의 바닥값이다.
+    pub fn imageSegmentsIssuedThrough(self: *const Client) u64 {
+        return if (self.image_ledger) |ledger| ledger.last_issued else 0;
     }
 
     /// 채널 fd 를 닫고 원장을 반환한다. 연결 종료와 채널 상실이 모두 여기를 지나고, 두 번째 호출은 아무것도 안 한다 —
@@ -1975,6 +2062,42 @@ fn closeReceivedFds(control: []const u8) void {
                 _ = c.close(std.mem.bytesToValue(c.fd_t, data[i..][0..@sizeOf(c.fd_t)]));
         }
         offset += std.mem.alignForward(usize, header.len, @sizeOf(u32));
+    }
+}
+
+/// 세그먼트 메시지 하나를 fd 와 함께 보낸다(§3.3 — 메시지 첫 바이트와 함께 fd 정확히 하나). 전부 보냈으면 true.
+fn sendImageSegment(channel_fd: c.fd_t, segment: PreparedImageSegment) bool {
+    if (channel_fd < 0) return false;
+    const payload = image_channel_wire.encodeSegment(.{
+        .segment_id = segment.segment_id,
+        .stream_id = segment.stream_id,
+        .image_id = segment.image_id,
+        .generation = segment.generation,
+        .byte_len = segment.byte_len,
+    }) catch return false;
+    var control: [@sizeOf(c.cmsghdr) + @sizeOf(c.fd_t) + 4]u8 align(@alignOf(c.cmsghdr)) = @splat(0);
+    const header: c.cmsghdr = .{
+        .len = @intCast(@sizeOf(c.cmsghdr) + @sizeOf(c.fd_t)),
+        .level = c.SOL.SOCKET,
+        .type = c.SCM.RIGHTS,
+    };
+    @memcpy(control[0..@sizeOf(c.cmsghdr)], std.mem.asBytes(&header));
+    @memcpy(control[@sizeOf(c.cmsghdr)..][0..@sizeOf(c.fd_t)], std.mem.asBytes(&segment.fd));
+    var iov = [_]posix.iovec_const{.{ .base = &payload, .len = payload.len }};
+    const msg: c.msghdr_const = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = @intCast(std.mem.alignForward(usize, @sizeOf(c.cmsghdr) + @sizeOf(c.fd_t), @sizeOf(u32))),
+        .flags = 0,
+    };
+    while (true) {
+        const rc = c.sendmsg(channel_fd, &msg, posix.MSG.DONTWAIT);
+        // 신호가 끼면 다시 보낸다 — 논블로킹이라 기다리는 일은 없다.
+        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        return rc == payload.len;
     }
 }
 

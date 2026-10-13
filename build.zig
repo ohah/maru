@@ -7088,8 +7088,9 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image channel owner:"},
         });
         const run_image_channel_host_tests = b.addRunArtifact(image_channel_host_tests);
-        run_image_channel_host_tests.addArg("--maru-expect-tests=12");
-        run_image_channel_host_tests.addArg("--maru-expect-passed=12");
+        // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4.
+        run_image_channel_host_tests.addArg("--maru-expect-tests=16");
+        run_image_channel_host_tests.addArg("--maru-expect-passed=16");
         image_channel_host_step.dependOn(&run_image_channel_host_tests.step);
         test_step.dependOn(&run_image_channel_host_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_host_tests.step);

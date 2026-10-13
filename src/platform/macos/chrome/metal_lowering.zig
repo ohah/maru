@@ -721,7 +721,7 @@ test "알림 패널: 걸친 카드의 강조 배경은 헤더·뷰포트 밖을 
     var hits_checked: usize = 0;
     var empty_rows_checked: usize = 0;
     // 기하를 바꿔 돈다 — 패널 y 가 0 이고 셀 높이·뷰포트가 한 가지면 «rect.y 를 빼먹은» 공식이나 바닥 경계 off-by-one 이
-    // 출력 바이트까지 같아 통과했다(적대적 검증). 제품 패널 y 는 `2ch + modal padding` 이라 행 배수가 아니다.
+    // 출력 바이트까지 같아 통과했다(적대적 검증). 제품 패널 y 는 종 잉크 아래 끝 + 4pt + 0.5ch + modal padding(`notification.expandedPanelVisibleTopPx`)이라 행 배수가 아니다.
     for ([_]u32{ 16, 17 }) |ch| for ([_]i32{ 0, 7 }) |anchor_y| for ([_]u32{ 300, 303, 305 }) |backing_h| for ([_]i32{ 0, 13 }) |anchor_x| {
         const p = chrome.props.ChromeProps{ .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = backing_h, .overlay_scroll_gutter_px = gutter_px } };
         const card_px: u32 = 2 * ch;

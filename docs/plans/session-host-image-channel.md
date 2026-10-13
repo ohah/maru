@@ -317,6 +317,10 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
   - generation adapter: tick 의 길(`currentPumpImageChannel`)은 다른 스레드가 쥔 동안 false. legacy tick 은 글자로(`.try_lock` 1·
     `pumpImageChannel(.block)` 0).
   - 잠금을 쥔 스레드는 2 초 상한으로 푼다 — 잘못 기다리는 변이가 판정자를 멈추지 않는다.
+- spawn 헬퍼가 자식의 신호를 기본값으로 시작한다(`POSIX_SPAWN_SETSIGMASK` 빈 마스크·`SETSIGDEF` 전부). exec 는 부르는 스레드의
+  신호 마스크와 무시 처분을 물려주어, SIGTERM 을 막은 스레드가 띄운 자식이 TERM 으로 끝나지 않았다 — 이 PR 의 CI 에서
+  `web_osr_install` 의 「TERM 으로 죽인 `sleep`」 판정자가 3 번 중 2 번 2 초 안에 끝나지 않았고, 같은 꼴을 로컬 판정자로
+  재현했다(같은 프로세스의 어느 판정자가 TERM 을 막거나 무시한 채 두는지는 찾지 못했다 — 판정자 순서가 샤드에서 바뀌며 드러났다).
 - IC3b 의 채널 리더는 IC4b 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
 
 ### IC5 — 흐름 제어와 delta 표현 (미착수)

@@ -18,6 +18,9 @@ pub const Stdio = enum {
 
 pub const SpawnError = error{SpawnFailed};
 
+extern "c" fn posix_spawnattr_setsigmask(attr: *c.posix_spawnattr_t, mask: *const c.sigset_t) c_int;
+extern "c" fn posix_spawnattr_setsigdefault(attr: *c.posix_spawnattr_t, signals: *const c.sigset_t) c_int;
+
 /// `path` 를 `argv`·`envp` 로 띄운다. fd 는 `stdio` 가 정한 0·1·2 만 넘긴다.
 pub fn spawn(
     path: [*:0]const u8,
@@ -28,7 +31,17 @@ pub fn spawn(
     var attr: c.posix_spawnattr_t = undefined;
     if (c.posix_spawnattr_init(&attr) != 0) return error.SpawnFailed;
     defer _ = c.posix_spawnattr_destroy(&attr);
-    if (c.posix_spawnattr_setflags(&attr, .{ .CLOEXEC_DEFAULT = true }) != 0) return error.SpawnFailed;
+    // 신호도 기본값으로 — exec 는 부르는 스레드의 신호 마스크와 무시(SIG_IGN) 처분을 물려준다. 그대로 두면 SIGTERM 을 막은
+    // 스레드가 띄운 자식은 TERM 으로 끝나지 않고, SIGPIPE 를 무시하는 앱의 셸은 파이프가 닫혀도 멈추지 않는다(`system()` 은
+    // INT·QUIT 을 기본으로 돌리고 마스크를 비운다). 마스크는 비우고 모든 신호를 기본 처리로 시작한다.
+    if (c.posix_spawnattr_setflags(&attr, .{ .CLOEXEC_DEFAULT = true, .SETSIGMASK = true, .SETSIGDEF = true }) != 0)
+        return error.SpawnFailed;
+    var empty_mask: c.sigset_t = undefined;
+    _ = c.sigemptyset(&empty_mask);
+    if (posix_spawnattr_setsigmask(&attr, &empty_mask) != 0) return error.SpawnFailed;
+    var all_signals: c.sigset_t = undefined;
+    _ = c.sigfillset(&all_signals);
+    if (posix_spawnattr_setsigdefault(&attr, &all_signals) != 0) return error.SpawnFailed;
     var actions: c.posix_spawn_file_actions_t = undefined;
     if (c.posix_spawn_file_actions_init(&actions) != 0) return error.SpawnFailed;
     defer _ = c.posix_spawn_file_actions_destroy(&actions);
@@ -113,4 +126,41 @@ test "macos spawn: dev_null stdio hands the child no parent fd at all, and a mis
     try testing.expectEqual(@as(u8, 4), c.W.EXITSTATUS(@bitCast(status)));
     const missing = [_:null]?[*:0]const u8{"/nonexistent/maru-spawn-probe"};
     try testing.expectError(error.SpawnFailed, spawn("/nonexistent/maru-spawn-probe", &missing, &envp, .dev_null));
+}
+
+test "macos spawn: the child starts with default signal handling — a blocked or ignored SIGTERM in the parent does not reach it" {
+    // `pty` 배럴에 걸려 모든 타깃에서 분석된다 — macOS 밖에서는 아래를 분석하지 않는다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 부모 스레드가 SIGTERM 을 막고(무시도 하고) 있어도 자식은 기본 처리로 시작해야 한다 — exec 는 신호 마스크와 무시 처분을
+    // 물려준다. 물려받으면 TERM 으로 끝내려던 자식(시간 초과한 codesign 등)이 살아남는다.
+    var blocked: c.sigset_t = undefined;
+    _ = c.sigemptyset(&blocked);
+    _ = c.sigaddset(&blocked, .TERM);
+    var previous_mask: c.sigset_t = undefined;
+    if (c.pthread_sigmask(c.SIG.BLOCK, &blocked, &previous_mask) != 0) return error.TestUnexpectedResult;
+    defer _ = c.pthread_sigmask(c.SIG.SETMASK, &previous_mask, &blocked);
+    var ignore: c.Sigaction = .{ .handler = .{ .handler = c.SIG.IGN }, .mask = blocked, .flags = 0 };
+    var previous_action: c.Sigaction = undefined;
+    if (c.sigaction(.TERM, &ignore, &previous_action) != 0) return error.TestUnexpectedResult;
+    defer _ = c.sigaction(.TERM, &previous_action, null);
+
+    const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "5" };
+    const envp = [_:null]?[*:0]const u8{};
+    const pid = try spawn("/bin/sleep", &argv, &envp, .dev_null);
+    _ = c.kill(pid, .TERM);
+    // 2 초 안에 TERM 으로 끝나야 한다. 못 끝나면 KILL 로 거두고 실패.
+    var waited_ms: usize = 0;
+    var status: c_int = 0;
+    const exited = while (waited_ms < 2000) : (waited_ms += 10) {
+        if (c.waitpid(pid, &status, std.posix.W.NOHANG) == pid) break true;
+        var ts: c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = c.nanosleep(&ts, null);
+    } else false;
+    if (!exited) {
+        _ = c.kill(pid, .KILL);
+        _ = c.waitpid(pid, &status, 0);
+    }
+    try testing.expect(exited);
+    try testing.expect(c.W.IFSIGNALED(@bitCast(status)));
+    try testing.expectEqual(c.SIG.TERM, c.W.TERMSIG(@bitCast(status)));
 }

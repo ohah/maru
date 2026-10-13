@@ -656,6 +656,28 @@ pub fn spawnAgentEventsMode(
     profile: @import("maru").session.remote_agent_stream.protocol.Profile,
     mixed: bool,
 ) !Stream {
+    return spawnAgentEventsReplayMode(allocator, ctl, dest, remote_maru, remote_dir_rel, resume_spec, profile, mixed, false, "");
+}
+
+pub fn spawnAgentEventsReplayMode(
+    allocator: std.mem.Allocator,
+    ctl: []const u8,
+    dest: []const u8,
+    remote_maru: []const u8,
+    /// **원격 홈 기준 상대 경로**다(`agent_hook_command.remote_log_dir_rel`). 절대 경로가 아니다 —
+    /// 저쪽 홈이 어디인지는 이쪽이 모르고, 안다고 가정하면 틀린다.
+    remote_dir_rel: []const u8,
+    /// 이어읽기 커서(`<이름>:<offset>` 을 `,` 로 이은 것, RA5-a). 비면 안 붙인다 = 처음부터.
+    ///
+    /// ⚠️ **이 값은 선을 타고 온 것에서 나왔다.** 아래 인용 주석이 「우리 상수 하나라서 안전하다」고
+    /// 적어 둔 전제가 여기서 깨지므로, **조립 직전에 다시 검증한다**(`resumeIsShellSafe`). 통과 못 하면
+    /// 잘못된 resume는 실패로 드러낸다. 세대를 버리고 전체 replay로 낮추지 않는다.
+    resume_spec: []const u8,
+    profile: @import("maru").session.remote_agent_stream.protocol.Profile,
+    mixed: bool,
+    replay: bool,
+    replay_state: []const u8,
+) !Stream {
     // `<maru> agent-events --stdio --dir="$HOME/<rel>"`.
     //
     // ⚠️ **작은따옴표가 아니라 큰따옴표다.** 처음엔 경로를 작은따옴표로 감싼 채 `$HOME/...` 을 넣었는데,
@@ -677,7 +699,10 @@ pub fn spawnAgentEventsMode(
     // 모르는 플래그로 보고 usage_error 로 나간다 — 첫 기동까지 그것을 요구하면 **원격을 안 올린
     // 사용자는 배지를 통째로 잃는다**. 첫 기동은 늘 커서가 비므로 옛 스크립트를 타고, 재접속(새 동작)
     // 에서만 새 플래그를 쓴다. 원격이 옛것이면 그 재접속만 실패해 백오프 뒤 notice 로 드러난다.
-    const cmd = if (mixed)
+    if (replay_state.len > @import("maru").session.agent_stream_mixed.replay_state_max or !@import("maru").session.agent_stream_mixed.validReplayState(replay_state)) return error.InvalidResume;
+    const cmd = if (mixed and replay)
+        try remote_shell.wrapAlloc(allocator, remote_shell.path_assign ++ "exec \"$1\" agent-events --stdio --dir=\"$HOME/$2\" --log-format=mixed --replay-boundary --resume=\"$3\" --replay-state=\"$4\"", &.{ remote_maru, remote_dir_rel, safe_resume, replay_state })
+    else if (mixed)
         try remote_shell.wrapAlloc(allocator, remote_shell.path_assign ++ "exec \"$1\" agent-events --stdio --dir=\"$HOME/$2\" --log-format=mixed --resume=\"$3\"", &.{ remote_maru, remote_dir_rel, safe_resume })
     else if (profile == .v2)
         try remote_shell.wrapAlloc(allocator, remote_shell.path_assign ++ "exec \"$1\" agent-events --stdio --dir=\"$HOME/$2\" --log-format=v2 --resume=\"$3\"", &.{ remote_maru, remote_dir_rel, safe_resume })

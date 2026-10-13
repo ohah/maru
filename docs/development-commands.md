@@ -1542,3 +1542,9 @@ macOS 전용 CI에 포함한다. `zig build test-ssh-reconnect-failure-process`�
 실제 macOS Terminal Ctrl+C 취소 검증(잠금 해제·손쉬운 사용 필요):
 `python3 tools/test-remote-agent-native.py --cli zig-out/bin/maru --terminal-cancel`.
 테스트 전용 창을 열므로 실행 중 다른 창으로 포커스를 옮기지 않는다.
+
+원격 앱 재시작 시 과거 기록 재생 경계와 새 이벤트의 정상 동작:
+`zig build test-remote-agent-restart-replay` (`-Doptimize=ReleaseFast`도 지원).
+소유 loopback SSH·private HOME에서 과거/새 이벤트를 수신해 새 제품 AppSession
+프로세스로 배지·알림 예약·턴 캡처를 판정한다. 실제 macOS 앱 창의 종료/재실행과
+workspace restore, OS 알림 배너를 검사하는 gate와는 구분한다.

@@ -210,8 +210,72 @@ def terminal_cancel_probe(cli, root, remote, sshconfig, alias, env, trace):
                 'keystroke "w" using command down', 'end if', 'end tell', 'end tell'])
             run(['/usr/bin/osascript', '-e', script])
 
+def replay_boundary_probe(peer, remote, sshconfig, alias):
+    """Independent event IDs distinguish startup records from appends across chunks."""
+    for index in range(100):
+        emit_offline_hooks(remote, f'boundary-old-{index}')
+    command = shlex.join([peer, 'agent-events', '--stdio', f'--dir={remote}/.cache/maru',
+                          '--log-format=mixed', '--replay-boundary', '--heartbeat-ms=200'])
+    first = subprocess.Popen(['/usr/bin/ssh', '-F', str(sshconfig), alias, command],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    initial = queue.Queue()
+    initial_reader = threading.Thread(target=lambda: [initial.put(line) for line in iter(first.stdout.readline, b'')], daemon=True)
+    initial_reader.start()
+    positions = {}; deadline = time.monotonic() + 10
+    try:
+        while len(positions) < 2:
+            row = json.loads(initial.get(timeout=max(.01, deadline - time.monotonic())))
+            frame = row.get('frame', {})
+            if frame.get('cur') == '4331_7': positions[row['format']] = frame
+            assert time.monotonic() < deadline
+    finally:
+        first.terminate(); first.wait(timeout=3)
+        first.stdout.close(); first.stderr.close(); initial_reader.join(timeout=1)
+    resumes = []; replay_states = []
+    for profile, frame in sorted(positions.items()):
+        assert frame['at'] == 0, frame
+        resume = f"{profile}:4331_7:0"
+        state = f"{profile}:4331_7:{frame['replay_at']}"
+        if profile == 2:
+            resume += ':' + frame['gen']; state += ':' + frame['replay_gen']
+        resumes.append(resume); replay_states.append(state + ':' + str(frame['replay_inode']))
+    command += ' ' + shlex.join(['--resume=' + ','.join(resumes), '--replay-state=' + ','.join(replay_states)])
+    proc = subprocess.Popen(['/usr/bin/ssh', '-F', str(sshconfig), alias, command],
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    q = queue.Queue()
+    reader = threading.Thread(target=lambda: [q.put(line) for line in iter(proc.stdout.readline, b'')], daemon=True)
+    reader.start()
+    seen = []; raw = []; live_written = False; deadline = time.monotonic() + 15
+    try:
+        while time.monotonic() < deadline:
+            line = q.get(timeout=max(.01, deadline - time.monotonic()))
+            raw.append(line)
+            row = json.loads(line)
+            if not live_written and row.get('hello'):
+                # The startup snapshot must precede hello: appending now cannot join it.
+                emit_offline_hooks(remote, 'boundary-live')
+                live_written = True
+            frame = row.get('frame', {})
+            if 'line' not in frame: continue
+            event = json.loads(frame['line'].split('\t', 1)[1])
+            sid = event.get('session_id', '')
+            if not sid.startswith('boundary-'): continue
+            seen.append((row['format'], sid, event['hook_event_name'], row.get('replay')))
+            if sum(sid.startswith('boundary-live') for _, sid, _, _ in seen) == 8 and len(seen) == 808: break
+        expected = {(profile, f'boundary-old-{index}-{profile}', event, True)
+                    for index in range(100) for profile in [1, 2]
+                    for event in ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop']}
+        expected.update((profile, f'boundary-live-{profile}', event, False)
+                        for profile in [1, 2] for event in ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'])
+        assert len(seen) == 808 and set(seen) == expected, (len(seen), list(set(seen) ^ expected)[:10])
+        print(json.dumps({'case': 'startup-boundary', 'old': 800, 'live': 8, 'duplicates': 0}), flush=True)
+        return b''.join(raw)
+    finally:
+        proc.terminate(); proc.wait(timeout=3)
+        proc.stdout.close(); proc.stderr.close(); reader.join(timeout=1)
+
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
     provider_paths=[shutil.which(name) or '' for name in ['claude','codex']] if args.providers else ['', '']
     if args.providers:assert all(provider_paths),'installed Claude/Codex required'
@@ -316,7 +380,7 @@ if (root/"automatic-hold").exists():
                     run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', next(iter(controls)),
                          '-M', '-N', '-f', '-o', 'ControlPersist=no', alias])
                 if peer==cli:
-                    command=f'"{peer}" agent-events --stdio --dir="{remote}/.cache/maru" --log-format=mixed --heartbeat-ms=200'
+                    command=f'"{peer}" agent-events --stdio --dir="{remote}/.cache/maru" --log-format=mixed --heartbeat-ms=200' + (' --replay-boundary' if args.restart_test and tag == 'allowed' else '')
                     proc=subprocess.Popen(['/usr/bin/ssh','-F',str(sshconfig),'-S',next(iter(controls)),alias,command],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
                     q=queue.Queue();reader=threading.Thread(target=lambda:[q.put(l) for l in iter(proc.stdout.readline,b'')],daemon=True);reader.start();frames=[];raw_frames=[];deadline=time.monotonic()+1
                     try:
@@ -340,15 +404,44 @@ if (root/"automatic-hold").exists():
                         else:
                             proc.terminate(); proc.wait(timeout=3)
                         proc.stdout.close();proc.stderr.close();reader.join(timeout=1)
-                    assert frames[0]=={'hello':'maru-agent-events-mixed','v':3},frames[:1]
+                    assert frames[0] == ({'hello': 'maru-agent-events-mixed-replay', 'v': 4} if args.restart_test and tag == 'allowed' else {'hello':'maru-agent-events-mixed','v':3}), frames[:1]
                     if args.frames_output and tag=='allowed':
                         target=Path(args.frames_output);target.write_bytes(b''.join(raw_frames));target.chmod(0o600)
                     profiles={f['format'] for f in frames[1:] if 'line' in f.get('frame',{}) and 'UserPromptSubmit' in f['frame']['line']}
                     assert profiles==({1,2} if tag=='allowed' else {1}),profiles
                     print(json.dumps({'case':tag,'actual_ssh_mixed_profiles':sorted(profiles)}),flush=True)
+                    if tag == 'allowed' and args.restart_test:
+                        events = [r for r in frames if 'line' in r.get('frame', {})]
+                        assert events and all(r.get('replay') is True for r in events), events
+                        frame_path = root / 'restart-wire.ndjson'
+                        frame_path.write_bytes(b''.join(raw_frames))
+                        childenv = dict(env, MARU_REMOTE_NATIVE_FRAMES=str(frame_path),
+                                        MARU_TEST_KEEP_ONLY_PREFIX='app_session.test.remote restart replay')
+                        run([str(Path(args.restart_test).resolve()), '--maru-expect-tests=6', '--maru-expect-passed=1'], env=childenv)
+                        # Negative control: a peer that labels all old records live must fail
+                        # the receiver oracle, rather than silently weakening its assertion.
+                        frame_path.write_bytes(b''.join(raw_frames).replace(b'"replay":true', b'"replay":false'))
+                        bad = subprocess.run([str(Path(args.restart_test).resolve()), '--maru-expect-tests=6', '--maru-expect-passed=1'], env=childenv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+                        assert bad.returncode != 0 and b'expected .none, found .done' in bad.stderr, bad.stderr[-1000:]
+                        frame_path.write_bytes(b''.join(raw_frames))
+                        print(json.dumps({'case': 'fresh-app-replay', 'profiles': [1, 2], 'old_notice': False}), flush=True)
                     if tag == 'allowed':
                         resumed_wire = reconnect_probe(peer, remote, sshconfig, alias, controls, frames)
                         controls.clear()
+                        if args.restart_test:
+                            live_wire = replay_boundary_probe(peer, remote, sshconfig, alias)
+                            frame_path.write_bytes(live_wire)
+                            childenv['MARU_REMOTE_REPLAY_LIVE'] = '1'
+                            run([str(Path(args.restart_test).resolve()), '--maru-expect-tests=6', '--maru-expect-passed=1'], env=childenv)
+                            print(json.dumps({'case': 'fresh-app-live-after-replay', 'new_notice': True, 'sealed_capture': True}), flush=True)
+                            records = [json.loads(line) for line in live_wire.splitlines()]
+                            live_prompt = next(row for row in records if row.get('format') == 1 and row.get('replay') is False and 'line' in row.get('frame', {}) and json.loads(row['frame']['line'].split('\t', 1)[1]).get('hook_event_name') == 'UserPromptSubmit')
+                            old_stop = next(row for row in records if row.get('format') == 2 and row.get('replay') is True and 'line' in row.get('frame', {}) and json.loads(row['frame']['line'].split('\t', 1)[1]).get('hook_event_name') == 'Stop')
+                            old_prompt = next(row for row in records if row.get('format') == 2 and row.get('replay') is True and 'line' in row.get('frame', {}) and json.loads(row['frame']['line'].split('\t', 1)[1]).get('hook_event_name') == 'UserPromptSubmit')
+                            frame_path.write_text('\n'.join(json.dumps(row, separators=(',', ':')) for row in [records[0], live_prompt, old_prompt, old_stop]) + '\n')
+                            childenv['MARU_REMOTE_REPLAY_ORDER'] = '1'
+                            run([str(Path(args.restart_test).resolve()), '--maru-expect-tests=6', '--maru-expect-passed=1'], env=childenv)
+                            print(json.dumps({'case': 'live-before-other-profile-history', 'state': 'running'}), flush=True)
                         if args.frames_output:
                             Path(args.frames_output + '.reconnect').write_bytes(resumed_wire)
                             Path(args.frames_output + '.reconnect').chmod(0o600)

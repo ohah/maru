@@ -54,6 +54,10 @@ pub const HookSlot = struct {
     /// 가 뜨면 거짓말이다. 첫 tick 만 막으면 안 된다: tick 상한은 이벤트 **개수**라 짧은 줄이 많은
     /// 파일은 여러 tick 에 걸쳐 따라잡고, 그 2번째 tick 부터 옛 알림이 새어 나간다.
     backlog_catchup: bool = false,
+    /// Initial replay from another profile can arrive after live work. Once live
+    /// is authoritative for this slot, older records must not replace its state.
+    remote_live_seen: bool = false,
+
     turn_seq: u64 = 0,
     /// lead 의 턴이 **열린 시각**(wall clock ns, 0=닫혀 있거나 모름). 훅 payload 에는 시각이 없어
     /// (provider 가 안 싣는다) 「이 턴이 얼마나 오래 열려 있었나」 를 답할 근거가 없었다 — 파일
@@ -82,6 +86,11 @@ pub const HookSlot = struct {
     /// 뿐이라 디렉터리를 다시 조립해야 하고, 그 조립이 과거에 «다른 세션의 대화를 붙이는» 사고를 냈다.
     /// 고정 크기라 destroyTerm 이 따로 해제하지 않는다.
     image_source: agent_image_index.Source = .{},
+    pub fn acceptRemoteStreamEvent(self: *HookSlot, replay: bool) bool {
+        if (replay) return !self.remote_live_seen;
+        self.remote_live_seen = true;
+        return true;
+    }
 };
 
 /// 세션 모델 생성자 — 런타임 부착 타입 `Rt`로 parametrize한다(platform=`TermRuntime`).
@@ -673,4 +682,16 @@ test "session model: paneInDirection 헤드리스 방향 탐색(반평면+정렬
     try std.testing.expectEqual(&c, M.paneInDirection(&grid, &a, .down).?); // a→하: c(같은 열)
     try std.testing.expectEqual(&d, M.paneInDirection(&grid, &b, .down).?); // b→하: d
     try std.testing.expectEqual(&c, M.paneInDirection(&grid, &d, .left).?); // d→좌: c(같은 행)
+}
+
+test "mixed replay live authority belongs to each pane slot and survives stream reconnect" {
+    const t = std.testing;
+    var live: HookSlot = .{};
+    var other: HookSlot = .{};
+    try t.expect(live.acceptRemoteStreamEvent(true));
+    try t.expect(live.acceptRemoteStreamEvent(false));
+    try t.expect(!live.acceptRemoteStreamEvent(true));
+    try t.expect(other.acceptRemoteStreamEvent(true));
+    live.remote_live_seen = false; // New owner or hooks off/on, not a transport retry.
+    try t.expect(live.acceptRemoteStreamEvent(true));
 }

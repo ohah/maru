@@ -69,7 +69,7 @@ pub const Frame = union(enum) {
     /// `pane` 은 원격 tmux 의 pane 식별자(`%27`)이고 **없으면 빈 슬라이스**다([계획](../../docs/plans/remote-agent-state.md)
     /// RA7). 한 tmux 세션에 pane 이 여럿이면 역조회가 셋을 같은 nonce 로 접기 때문에, 그 축을 따로 실어야
     /// 「각각 다른 에이전트」를 가를 수 있다. tmux 밖이면 원격이 이 키를 아예 안 보낸다.
-    event: struct { nonce: []const u8, line: []const u8, pane: []const u8 = "" },
+    event: struct { nonce: []const u8, line: []const u8, pane: []const u8 = "", replay: bool = false },
     /// 하트비트를 봤다(살아 있다).
     heartbeat,
     /// 이 이름의 로그를 여기까지 읽었다([계획](../../docs/plans/remote-agent-state.md) RA5-a).
@@ -97,7 +97,10 @@ pub fn parseFrame(line: []const u8) Frame {
 pub fn parseMixedFrame(line: []const u8) Frame {
     if (line.len > max_line_bytes) return .ignored;
     const envelope = @import("agent_stream_mixed.zig").unwrap(line) orelse return .ignored;
-    return parseFrameForProfile(envelope.frame, envelope.profile);
+    var frame = parseFrameForProfile(envelope.frame, envelope.profile);
+    if (frame == .cursor and envelope.explicit_replay and frame.cursor.replay_at == null) return .ignored;
+    if (frame == .event) frame.event.replay = envelope.replay;
+    return frame;
 }
 
 pub fn parseFrameForProfile(line: []const u8, profile: protocol.Profile) Frame {
@@ -226,6 +229,8 @@ pub const Channel = struct {
     required_profile: ?protocol.Profile = null,
     mixed: bool = false,
     required_mixed: bool = false,
+    replay_transport: bool = false,
+    required_replay: bool = false,
     closed_reason: ?Closed = null,
     opened_at_ms: u64 = 0,
     last_alive_ms: u64 = 0,
@@ -277,8 +282,9 @@ pub const Channel = struct {
             .closed => return .ignored,
             .waiting_hello => {
                 if (self.required_mixed) {
-                    if (@import("agent_stream_mixed.zig").isHello(line)) {
+                    if (@import("agent_stream_mixed.zig").isHello(line) and (!self.required_replay or @import("agent_stream_mixed.zig").isReplayHello(line))) {
                         self.mixed = true;
+                        self.replay_transport = @import("agent_stream_mixed.zig").isReplayHello(line);
                         self.state = .open;
                         self.last_alive_ms = now_ms;
                     } else {
@@ -299,7 +305,12 @@ pub const Channel = struct {
             },
             .open => {
                 if (self.mixed) {
+                    if (self.replay_transport) {
+                        const envelope = @import("agent_stream_mixed.zig").unwrap(line) orelse return .ignored;
+                        if (!envelope.explicit_replay) return .ignored;
+                    }
                     const frame = parseMixedFrame(line);
+                    if (frame == .event and frame.event.replay and !self.replay_transport) return .ignored;
                     if (frame != .ignored) self.last_alive_ms = now_ms;
                     return frame;
                 }
@@ -746,4 +757,23 @@ test "negotiated and late attached generation channels retain generation and rej
     try std.testing.expect(restarted.feed(cursor, 6) == .ignored);
     restarted.tick(4 + hello_deadline_ms);
     try std.testing.expect(restarted.isClosed());
+}
+
+test "mixed replay events require distinct negotiated hello" {
+    const t = std.testing;
+    const mixed_protocol = @import("agent_stream_mixed.zig");
+    const event = "{\"replay\":true,\"format\":1,\"frame\":{\"nonce\":\"a\",\"line\":\"claude\\t{}\"}}";
+    var old = Channel.initMixed(0, false);
+    _ = old.feed(mixed_protocol.hello_line, 1);
+    try t.expectEqual(Frame.ignored, old.feed(event, 2));
+    var required = Channel.initMixed(0, false);
+    required.required_replay = true;
+    _ = required.feed(mixed_protocol.hello_line, 1);
+    try t.expectEqual(State.waiting_hello, required.state);
+    var fresh = Channel.initMixed(0, false);
+    _ = fresh.feed(mixed_protocol.replay_hello_line, 1);
+    const frame = fresh.feed(event, 2);
+    try t.expect(frame == .event and frame.event.replay);
+    try t.expect(fresh.feed("{\"format\":1,\"frame\":{\"nonce\":\"a\",\"line\":\"claude\\t{}\"}}", 3) == .ignored);
+    try t.expect(parseMixedFrame("{\"replay\":false,\"format\":1,\"frame\":{\"cur\":\"a\",\"at\":1}}") == .ignored);
 }

@@ -2504,13 +2504,6 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                     .codex
                 else
                     .none;
-                if (kind != .none) term.agent_kind_from_hook = true; // 이제부터 훅이 이긴다
-                if (kind != .none and term.agent_kind != kind) {
-                    term.agent_kind = kind;
-                    self.metal_dirty = true;
-                    // 행 높이가 바뀐다(에이전트 행은 상태·대화 줄을 더 쓴다) — 재투영까지 해야 한다.
-                    sidebar_ops.rebuildSidebar(self) catch {};
-                }
                 // **로컬과 같은 턴 경계 규율**(AT3c — `TurnBatch` 주석). 예전엔 `applied` 를 버려 원격 Term 에는
                 // 봉인도 스냅샷도 없었다.
                 //
@@ -2535,7 +2528,22 @@ pub fn consumeRemoteAgentLines(self: *AppSession, term: *Term, lines: []const []
                         }
                     }
                 }
-                batches[bi].stepSlot(self, term, slot, ev);
+                if (ch.replay_transport and !slot.acceptRemoteStreamEvent(e.replay)) continue;
+                if (kind != .none) term.agent_kind_from_hook = true; // 이제부터 훅이 이긴다
+                if (kind != .none and term.agent_kind != kind) {
+                    term.agent_kind = kind;
+                    self.metal_dirty = true;
+                    // 행 높이가 바뀐다(에이전트 행은 상태·대화 줄을 더 쓴다) — 재투영까지 해야 한다.
+                    sidebar_ops.rebuildSidebar(self) catch {};
+                }
+                // Replay restores state, never samples today's file as an old before.
+                const was_backlog = slot.backlog_catchup;
+                slot.backlog_catchup = was_backlog or e.replay;
+                if (e.replay) {
+                    _ = applyHookEventTo(self, term, slot, ev);
+                } else batches[bi].stepSlot(self, term, slot, ev);
+                if (e.replay) slot.notice.clear();
+                slot.backlog_catchup = was_backlog;
             },
         }
     }

@@ -54,17 +54,22 @@ test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작�
     );
     defer allocator.free(body);
 
-    const start = std.mem.indexOf(u8, body, "pub fn spawnAgentEventsMode") orelse return error.SpawnMissing;
-    const tail = body[start..];
-    const end = std.mem.indexOfPos(u8, tail, 1, "\npub fn ") orelse tail.len;
-    const fn_body = tail[0..end];
+    const source = try allocator.dupeZ(u8, body);
+    defer allocator.free(source);
+    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    defer tree.deinit(allocator);
+    if (tree.errors.len != 0) return error.MalformedSource;
+    const wrapper = namedFunction(&tree, "spawnAgentEventsMode") orelse return error.SpawnMissing;
+    const implementation = namedFunction(&tree, "spawnAgentEventsReplayMode") orelse return error.SpawnMissing;
+    try std.testing.expect(hasTokens(&tree, wrapper, &.{ "spawnAgentEventsReplayMode", "(" }));
+    try std.testing.expect(hasTokens(&tree, implementation, &.{ "remote_shell", ".", "wrapAlloc", "(", "allocator", ",", "stream_script" }));
+    const fn_body = tree.getNodeSource(implementation);
 
     // 받는 값이 **상대 경로**임을 이름으로도 못박는다 — 절대 경로를 넘기면 `$HOME` 이 앞에 또 붙는다.
     try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_dir_rel") != null);
     // **명령 문자열을 직접 조립하지 않는다.** 로그인 셸이 POSIX 셸이 아닐 수 있어 껍데기가 필요하고,
     // 그 규율은 `session/remote_shell.zig` 하나가 소유한다(2026-09-01: 같은 처방이 세 곳에 따로
     // 적혀 있다가 **세 곳이 나란히 틀렸다**).
-    try std.testing.expect(std.mem.indexOf(u8, fn_body, "remote_shell.wrapAlloc(allocator, stream_script") != null);
     try std.testing.expect(std.mem.indexOf(u8, fn_body, "allocPrint") == null);
 
     // 스크립트 상수 쪽을 이어서 본다 — 큰따옴표 `$HOME/`, 작은따옴표 금지, PATH 가 **맨 앞**.
@@ -75,6 +80,13 @@ test "RA5 원격 이벤트 채널은 홈을 원격 셸이 펴게 둔다 — 작�
     // 스트리머가 안 뜨는» 상태가 되고, 증상은 앞의 실패와 구분되지 않는다(둘 다 「배지가 안 선다」).
     // 값은 설치와 **같은 자리**에서 온다 — 두 곳에 따로 적으면 한쪽만 고쳐진다.
     try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, script, " \n"), "remote_shell.path_assign ++"));
+    // Negative control: a comment that preserves the old needle must not stand
+    // in for a real shell wrapper call after the public shim was introduced.
+    var mutation = try std.zig.Ast.parse(allocator, "pub fn spawnAgentEventsReplayMode() void {\n// remote_shell.wrapAlloc(allocator, stream_script)\n}\n", .zig);
+    defer mutation.deinit(allocator);
+    const mutant = namedFunction(&mutation, "spawnAgentEventsReplayMode") orelse return error.SpawnMissing;
+    try std.testing.expect(!hasTokens(&mutation, mutant, &.{ "remote_shell", ".", "wrapAlloc", "(", "allocator", ",", "stream_script" }));
+    try std.testing.expect(namedFunction(&mutation, "spawnAgentEventsMode") == null);
 }
 
 /// `<name> = ` 로 시작하는 선언의 본문(세미콜론까지)을 돌려준다. 판정자가 **주석이 아니라 값**을
@@ -84,4 +96,29 @@ fn readDecl(src: []const u8, name: []const u8) ?[]const u8 {
     const eq = std.mem.indexOfScalarPos(u8, src, at, '=') orelse return null;
     const end = std.mem.indexOfScalarPos(u8, src, eq, ';') orelse return null;
     return src[eq + 1 .. end];
+}
+
+// Find declarations structurally: comments or a renamed neighbouring function
+// cannot satisfy the ownership check for the real transport implementation.
+fn namedFunction(tree: *const std.zig.Ast, name: []const u8) ?std.zig.Ast.Node.Index {
+    for (tree.rootDecls()) |node| {
+        var buffer: [1]std.zig.Ast.Node.Index = undefined;
+        const proto = tree.fullFnProto(&buffer, node) orelse continue;
+        const token = proto.name_token orelse continue;
+        if (std.mem.eql(u8, tree.tokenSlice(token), name)) return node;
+    }
+    return null;
+}
+fn hasTokens(tree: *const std.zig.Ast, node: std.zig.Ast.Node.Index, expected: []const []const u8) bool {
+    var start = tree.firstToken(node);
+    const end = tree.lastToken(node);
+    while (start + expected.len <= end + 1) : (start += 1) {
+        var matches = true;
+        for (expected, 0..) |token, index| if (!std.mem.eql(u8, tree.tokenSlice(start + @as(u32, @intCast(index))), token)) {
+            matches = false;
+            break;
+        };
+        if (matches) return true;
+    }
+    return false;
 }

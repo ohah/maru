@@ -14473,7 +14473,7 @@ fn runAgentHooks(
                     native_ready = false;
                 };
         }
-        try stdout.print("{{\"maru-agent-hooks\":1,\"provider\":\"{s}\",\"action\":\"{s}\",\"changed\":{s},\"transport\":3,\"native_ready\":{s},\"received_format\":{s}}}\n", .{
+        try stdout.print("{{\"maru-agent-hooks\":1,\"provider\":\"{s}\",\"action\":\"{s}\",\"changed\":{s},\"transport\":3,\"replay_boundary\":true,\"native_ready\":{s},\"received_format\":{s}}}\n", .{
             opts.provider.tag(),
             @tagName(opts.action),
             if (changed) "true" else "false",
@@ -14940,7 +14940,7 @@ fn runAgentEvents(
 
     var opts = switch (ae.parseArgs(rest.items)) {
         .help => {
-            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec] [--log-format=v1|v2|mixed]\nValue options may only be specified once. Each resume file name may only appear once.\n");
+            try stdout.writeAll("usage: maru agent-events --stdio --dir=<absolute path> [--heartbeat-ms=N] [--resume=spec] [--log-format=v1|v2|mixed] [--replay-boundary] [--replay-state=spec]\nValue options may only be specified once. Each resume file name may only appear once.\n");
             try stdout.flush();
             return;
         },
@@ -14985,8 +14985,21 @@ fn runAgentEvents(
             else => return err,
         };
     }
+    if (opts.replay_state.len != 0) {
+        var states = std.mem.splitScalar(u8, opts.replay_state, ',');
+        while (states.next()) |text| {
+            const state = mixed_protocol.decodeReplayState(text) orelse return error.UnknownCommand;
+            const map = &cursor_maps[if (state.entry.profile == .v1) @as(usize, 0) else 1];
+            // Every watermark must correspond to a resumed cursor, never a second identity.
+            const cursor = map.getPtr(state.entry.entry.name) orelse return error.UnknownCommand;
+            cursor.replay_end = state.entry.entry.cursor.offset;
+            cursor.replay_generation = state.entry.entry.cursor.generation;
+            cursor.replay_inode = @intCast(state.inode);
+        }
+    }
     var envelope_writer = mixed_protocol.Writer.init(original_stdout);
     if (mixed) stdout = &envelope_writer.writer;
+    envelope_writer.replay_mode = opts.replay_boundary;
     const generation_dir: ?std.Io.Dir = if (mixed or opts.log_format == .v2)
         maru.agent_log_record.openPrivateDirectoryIterable(io, paths[1]) catch |err| {
             try stderr.print("maru agent-events: {s}\n", .{@errorName(err)});
@@ -14996,9 +15009,11 @@ fn runAgentEvents(
         null;
     defer if (generation_dir) |dir| dir.close(io);
 
-    // hello 를 **가장 먼저** 보낸다 — 소비자가 제한 서버(`ForceCommand`)를 이것으로 가른다.
-    try original_stdout.print("{s}\n", .{if (mixed) mixed_protocol.hello_line else if (opts.log_format == .v2) ae.generation_hello_line else ae.hello_line});
-    try original_stdout.flush();
+    // Legacy peers still receive hello before directory cleanup, as before.
+    if (!opts.replay_boundary) {
+        try original_stdout.print("{s}\n", .{if (mixed) mixed_protocol.hello_line else if (opts.log_format == .v2) ae.generation_hello_line else ae.hello_line});
+        try original_stdout.flush();
+    }
 
     const ae_route = maru.session.remote_tmux_route;
     // tmux 역조회 결과 캐시(RA6). **옆 파일 내용이 키다** — 그 값이 그대로면 pane 이 안 옮겨 간
@@ -15085,6 +15100,56 @@ fn runAgentEvents(
             }
         } else |_| {}
     }
+    // Freeze every initial file before any event output. Later scans and stdout
+    // backpressure cannot turn an old record into a new notification.
+    if (opts.replay_boundary and opts.resume_spec.len == 0) {
+        for (indexes) |index| {
+            var sd = (if (index == 1) @as(anyerror!std.Io.Dir, generation_dir.?) else std.Io.Dir.cwd().openDir(io, paths[index], .{ .iterate = true })) catch continue;
+            defer if (index == 0) sd.close(io);
+            var sit = sd.iterate();
+            while (try sit.next(io)) |entry| {
+                const name = ae.nonceFromFileName(entry.name) orelse continue;
+                var initial: ae.Cursor = .{};
+                if (index == 1) {
+                    var empty: [0]u8 = .{};
+                    const snap = try maru.agent_log_writer.readSnapshot(io, sd, name, .{ .offset = 0 }, &empty);
+                    initial.replay_end = snap.payload_size;
+                    initial.replay_generation = snap.start.generation;
+                    initial.generation = snap.start.generation;
+                } else {
+                    const f = sd.openFile(io, entry.name, .{}) catch continue;
+                    defer f.close(io);
+                    const stat = f.stat(io) catch continue;
+                    initial.replay_end = stat.size;
+                    initial.replay_inode = @intCast(stat.inode);
+                }
+                const owned = try allocator.dupe(u8, name);
+                errdefer allocator.free(owned);
+                try cursor_maps[index].put(allocator, owned, initial);
+            }
+        }
+    }
+    // hello 를 **가장 먼저** 보낸다 — 소비자가 제한 서버(`ForceCommand`)를 이것으로 가른다.
+    if (opts.replay_boundary) {
+        try original_stdout.print("{s}\n", .{mixed_protocol.replay_hello_line});
+        try original_stdout.flush();
+    }
+
+    // Publish startup watermarks before events so EOF before the first data cursor
+    // cannot discard replay classification. Position zero is intentional, not an ACK.
+    if (opts.replay_boundary and opts.resume_spec.len == 0) for (&cursor_maps, 0..) |*map, index| {
+        var entries = map.iterator();
+        while (entries.next()) |entry| {
+            const nonce = entry.key_ptr.*;
+            envelope_writer.profile = if (index == 0) .v1 else .v2;
+            envelope_writer.replay_at = entry.value_ptr.replay_end;
+            envelope_writer.replay_inode = @intCast(entry.value_ptr.replay_inode);
+            envelope_writer.replay_generation = entry.value_ptr.replay_generation;
+            frame.clearRetainingCapacity();
+            if (index == 0) try ae.formatCursor(&frame, allocator, nonce, 0) else try ae.formatGenerationCursor(&frame, allocator, nonce, .{ .generation = entry.value_ptr.generation.?, .offset = 0 });
+            try stdout.writeAll(frame.items);
+        }
+    };
     var scan_starts: [2]usize = .{ 0, 0 };
     while (true) {
         for (indexes[0..if (mixed) @as(usize, 2) else 1]) |index| {
@@ -15151,6 +15216,8 @@ fn runAgentEvents(
                     defer file.close(io);
                     var rbuf: [4096]u8 = undefined;
                     var reader = file.reader(io, &rbuf);
+                    const stat = file.stat(io) catch continue;
+                    if (gop.value_ptr.replay_inode != stat.inode or stat.size < gop.value_ptr.replay_end) gop.value_ptr.replay_end = 0;
                     size = reader.getSize() catch continue;
                     cur = ae.advance(gop.value_ptr.*, size);
                     if (size <= cur.offset) {
@@ -15266,10 +15333,15 @@ fn runAgentEvents(
                     consumed += line.len + 1;
                     if (line.len == 0) continue;
                     frame.clearRetainingCapacity();
+                    const initial = gop.value_ptr.*;
+                    envelope_writer.replay = opts.replay_boundary and mixed_protocol.isReplayRecord(cur.offset + consumed, initial.replay_end, cur.generation, initial.replay_generation);
                     try ae.formatEvent(&frame, allocator, emit_nonce, line, emit_pane);
                     try stdout.writeAll(frame.items);
                 }
-                const next: ae.Cursor = .{ .generation = cur.generation, .offset = cur.offset + consumed, .seen_size = size };
+                envelope_writer.replay_at = gop.value_ptr.replay_end;
+                envelope_writer.replay_inode = @intCast(gop.value_ptr.replay_inode);
+                envelope_writer.replay_generation = gop.value_ptr.replay_generation;
+                const next: ae.Cursor = .{ .generation = cur.generation, .offset = cur.offset + consumed, .seen_size = size, .replay_end = gop.value_ptr.replay_end, .replay_generation = gop.value_ptr.replay_generation, .replay_inode = gop.value_ptr.replay_inode };
                 if (opts.log_format == .v1) gop.value_ptr.* = next;
                 // **어디까지 흘렸는지 함께 알린다**(RA5-a). 로컬이 이 값을 들고 있다가 재접속 때
                 // `--resume=` 으로 돌려준다. 나아갔을 때만 보낸다 — 안 그러면 조용한 회차마다 같은 값이

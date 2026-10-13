@@ -182,7 +182,7 @@ pub const install_output_max: usize = 64 * 1024;
 
 /// 원격이 돌려준 한 줄을 읽는다. **`changed` 까지 본다** — 로컬이 «설치가 끝났다» 를 그것으로 판정한다.
 pub const Outcome = union(enum) {
-    ok: struct { changed: bool, mixed_ready: bool = false, format_forwarded: bool = false },
+    ok: struct { changed: bool, mixed_ready: bool = false, replay_ready: bool = false, format_forwarded: bool = false },
     /// 원격에 `maru` 가 없다.
     no_maru,
     /// 우리 줄이 아니다(MOTD·rc 잡음, 또는 `ForceCommand` 가 갈아치운 결과).
@@ -194,6 +194,7 @@ pub fn parseOutcome(out: []const u8) Outcome {
     var lines = std.mem.splitScalar(u8, out, '\n');
     var result: Outcome = .unknown;
     var ready: u2 = 0;
+    var replay_ready: u2 = 0;
     var forwarded: u2 = 0;
     var seen_native: u2 = 0;
     while (lines.next()) |raw| {
@@ -238,6 +239,10 @@ pub fn parseOutcome(out: []const u8) Outcome {
             if (received != .null and (received != .number_string or (!std.mem.eql(u8, received.number_string, "1") and !std.mem.eql(u8, received.number_string, "2")))) return .unknown;
             if (std.mem.eql(u8, transport.number_string, "3") and native.bool and std.mem.eql(u8, action.string, "install")) {
                 ready |= bit;
+                if (object.get("replay_boundary")) |replay| {
+                    if (replay != .bool) return .unknown;
+                    if (replay.bool) replay_ready |= bit;
+                }
                 if (received == .number_string and std.mem.eql(u8, received.number_string, "2")) forwarded |= bit;
             }
         } else if (object.get("native_ready") != null or object.get("received_format") != null) return .unknown;
@@ -249,6 +254,7 @@ pub fn parseOutcome(out: []const u8) Outcome {
     }
     if (result == .ok) {
         result.ok.mixed_ready = ready == 3;
+        result.ok.replay_ready = replay_ready == 3;
         result.ok.format_forwarded = forwarded == 3;
     }
     return result;
@@ -466,4 +472,13 @@ test "native installation readiness requires both providers and forwarded format
     const no_env = "{\"maru-agent-hooks\":1,\"provider\":\"codex\",\"action\":\"install\",\"changed\":false,\"transport\":3,\"native_ready\":true,\"received_format\":null}\n";
     try testing.expect(parseOutcome(claude ++ no_env).ok.mixed_ready);
     try testing.expect(!parseOutcome(claude ++ no_env).ok.format_forwarded);
+}
+
+test "mixed replay capability requires both prepared providers and never guesses from v3" {
+    const t = std.testing;
+    const c = "{\"maru-agent-hooks\":1,\"provider\":\"claude\",\"action\":\"install\",\"changed\":false,\"transport\":3,\"native_ready\":true,\"received_format\":2,\"replay_boundary\":true}\n";
+    const x = "{\"maru-agent-hooks\":1,\"provider\":\"codex\",\"action\":\"install\",\"changed\":false,\"transport\":3,\"native_ready\":true,\"received_format\":2,\"replay_boundary\":true}\n";
+    try t.expect(parseOutcome(c ++ x).ok.replay_ready);
+    try t.expect(!parseOutcome(c).ok.replay_ready);
+    try t.expect(!parseOutcome("{\"maru-agent-hooks\":1,\"changed\":false}\n").ok.replay_ready);
 }

@@ -1026,7 +1026,7 @@ pub fn showServerInfo(self: *AppSession) void {
     if (self.tabs.items.len == 0) return self.showNoticeKey(.lsp_info_unavailable);
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return self.showNoticeKey(.lsp_info_unavailable);
-    const server = serverFor(self, term.rt.editor_grammar) orelse return self.showNoticeKey(.lsp_info_unavailable);
+    const server = serverFor(self, term.rt.editor_grammar) orelse return showAuxOnlyInfo(self, term);
     const view = statusFor(self, term) orelse return self.showNoticeKey(.lsp_info_unavailable);
     const root = rootFor(self, term);
     const c: ?*Client = if (root) |r| clientFor(self, r, server) else null;
@@ -1093,6 +1093,26 @@ pub fn showServerInfo(self: *AppSession) void {
         printLine(&w, e.path_line);
     } else printLine(&w, maru.i18n.t(if (running == null and !tool_env.settled()) .lsp_info_exe_pending else .lsp_info_exe_missing));
     self.showNotice(w.buffered());
+}
+
+/// 주 서버 표가 없는 문서(JSON·CSS — §8.2u AS5)의 정보 명령: 보조 서버 줄만. 보조 서버도 없으면 「없음」.
+fn showAuxOnlyInfo(self: *AppSession, term: *Term) void {
+    const root = rootFor(self, term) orelse return self.showNoticeKey(.lsp_info_unavailable);
+    if (auxiliariesFor(self, term, root).count() == 0) return self.showNoticeKey(.lsp_info_unavailable);
+    var out: [status_text_cap + 3 * std.fs.max_path_bytes + 1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&out);
+    printAuxLines(self, &w, term, root);
+    self.showNotice(std.mem.trimStart(u8, w.buffered(), "\n"));
+}
+
+/// 그 문서의 보조 서버 클라이언트 중 첫 것(표 순서) — 주 서버 표가 없는 문서의 신뢰 관리가 저장소의 결정을 찾는다(결정은 저장소 단위다).
+fn auxClientFor(self: *AppSession, term: *Term, root: []const u8) ?*Client {
+    const set = auxiliariesFor(self, term, root);
+    for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
+        if (!set.contains(aux.tool)) continue;
+        if (clientFor(self, root, aux.server)) |c| return c;
+    }
+    return null;
 }
 
 /// 정보 명령의 보조 서버 줄(§8.2u): 「보조 서버 ‹상태› — 설정 ‹루트 기준 경로› · ‹실행 파일›」. 떠 있으면 띄운 경로, 아니면 지금 찾아 낸 경로
@@ -1310,9 +1330,10 @@ pub fn manageCurrent(self: *AppSession, action: ManageAction) void {
     if (self.tabs.items.len == 0) return self.showNoticeKey(.lsp_trust_current_unavailable);
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return self.showNoticeKey(.lsp_trust_current_unavailable);
-    const server = serverFor(self, term.rt.editor_grammar) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
     const root = rootFor(self, term) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
-    const c = clientFor(self, root, server) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
+    // 주 서버 표가 없는 문서(JSON·CSS)는 보조 서버의 클라이언트로 — 신뢰는 저장소 단위라 어느 클라이언트의 열쇠든 같다(§8.2u AS5).
+    const c = (if (serverFor(self, term.rt.editor_grammar)) |server| clientFor(self, root, server) else auxClientFor(self, term, root)) orelse
+        return self.showNoticeKey(.lsp_trust_current_unavailable);
     const key = trustKey(self, c) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
     const decision = trustOf(self, key) orelse return self.showNoticeKey(.lsp_trust_current_none);
     if (action == .revoke and decision != .allow) return self.showNoticeKey(.lsp_trust_current_not_allowed);
@@ -1565,6 +1586,7 @@ fn auxiliariesFor(self: *AppSession, term: *Term, root: []const u8) std.EnumSet(
     const fs: external_formatter.RealFs = .{ .io = self.io };
     var buf: [std.fs.max_path_bytes]u8 = undefined;
     for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
+        if (!aux.appliesTo(path)) continue; // 그 문법 안에서도 다루지 않는 확장자(Biome 의 `scss`·`less`)
         if (lsp.auxiliary.detect(self.allocator, fs, aux.tool, std.fs.path.dirname(path) orelse root, root, &buf) != null) set.insert(aux.tool);
     }
     term.rt.editor_lsp_aux = set;
@@ -2174,13 +2196,15 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) continue;
-                // 보조 서버(§8.2u)가 있는 문법은 늘 주 서버 표도 있다 — 설치되지 않았어도 `serverFor` 는 첫 후보를 낸다(「없음」으로 선다).
-                const server = serverFor(self, term.rt.editor_grammar) orelse continue;
+                // 주 서버 — 설치되지 않았어도 `serverFor` 는 첫 후보를 낸다(「없음」으로 선다). 주 서버 표가 없는 문법(JSON·CSS)은 보조 서버만
+                // (§8.2u AS5 — Biome).
+                const server = serverFor(self, term.rt.editor_grammar);
+                if (server == null and lsp.auxiliary.forGrammar(term.rt.editor_grammar).len == 0) continue;
                 const root = rootFor(self, term) orelse continue;
-                if (ensureClient(self, root, server, term.rt.editor_grammar)) |c| {
+                if (server) |sv| if (ensureClient(self, root, sv, term.rt.editor_grammar)) |c| {
                     seen.put(self.allocator, term.surfaceId(), {}) catch return;
                     attachDocument(self, c, term);
-                }
+                };
                 // 보조 서버(§8.2u) — 저장소 설정을 찾은 것마다 같은 길. 주 서버가 설치되지 않아도(「없음」) 뜬다.
                 const aux_set = auxiliariesFor(self, term, root);
                 for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {

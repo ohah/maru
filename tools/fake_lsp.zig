@@ -2008,7 +2008,8 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             if (std.mem.indexOf(u8, text, "AUXSPOOF") != null and std.mem.eql(u8, method, "textDocument/didChange"))
                 sendJson(allocator, .{ .jsonrpc = "2.0", .id = @as(i64, 100_000_001), .result = .{ .contents = .{ .kind = "markdown", .value = "aux: spoofed hover" } } });
             const pp = persona().?;
-            const aux_msg = std.fmt.bufPrint(&msg_buf, "{s}: {d}", .{ pp.prefix, version }) catch "aux";
+            // Biome 꼴은 didOpen 의 languageId 도 붙인다 — 주 서버가 없는 JSON·CSS 에 그 문법의 값이 갔는지(AS5).
+            const aux_msg = (if (biome_mode) std.fmt.bufPrint(&msg_buf, "{s}: {d} {s}", .{ pp.prefix, version, docLang(uri) }) else std.fmt.bufPrint(&msg_buf, "{s}: {d}", .{ pp.prefix, version })) catch "aux";
             // `data`(LSP 3.16)를 싣는다 — 클라이언트가 code action 문맥으로 그대로 되돌려야 quickfix 제목에 `(data aux-1)` 이 붙는다.
             const AuxDiag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8, source: []const u8, data: struct { fix: []const u8 } };
             const one = [_]AuxDiag{.{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = aux_msg, .code = "A1", .source = pp.source, .data = .{ .fix = "aux-1" } }};

@@ -459,7 +459,7 @@ fn deadlineCallExit(
 fn transitionExit(err: client_mod.EnterExternalModeError) attach_cli.ExitCode {
     return switch (err) {
         error.Busy => .busy,
-        error.OutOfMemory, error.FlagFailed, error.AlreadyExternal => .internal,
+        error.OutOfMemory, error.FlagFailed, error.AlreadyExternal, error.ImageChannelNegotiated => .internal,
         error.ConnectionClosed => .protocol,
     };
 }

@@ -234,27 +234,38 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
   `image channel adapter:` 에 자기 stream 만 열고 정리·slot 이 바쁘면 정리 안 함, `image channel attachment:` 에 **실제 HostAdapter 의
   커밋이 그 stream 을 열고 실제 teardown 이 닫아 남은 세그먼트를 반환**, `image channel legacy:` 에 legacy 열기·정리.
 
-##### IC3b-2c — 남은 정리 (미착수)
+##### IC3b-2c — 남은 정리
+
+IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단·판정자(2c-2).
+
+###### IC3b-2c-1 — external 모드 불변식과 세 결정 (PR 진행 중)
+
+- 불변식: `image_shm` 을 협상한 Client(채널이 묶였든 잃었든 — `imageShmNegotiated`)는 external 모드에 들어가지 않는다.
+  `enterExternalModeWithOps` 가 플래그를 건드리기 전에 `error.ImageChannelNegotiated` 로 거부한다(`EnterExternalModeError` 에 더함,
+  `maru attach` 의 종료 코드는 `internal`). external 모드의 펌프는 채널을 비우지 않아 release 가 끊기고 원장이 찬다. GUI 는 이 길을
+  쓰지 않고 external 소비자는 광고하지 않는다. 「external 모드면 펌프가 물러선다」는 방어선 판정자는 불변식을 우회해 상태를 만든다.
+- 결정 — tick 의 `held` 를 다시 깨우는가: 깨운다(변경 없음). Swift 의 frame 타이머(`startFrameLoopTicks`, 반복 `Timer`)가 창이
+  없어도 매 frame `maru_macos_reconnect_product_tick` → `maintenanceEventTick` 을 부르고, 보류된 머리가 있으면
+  `preflightPayloadOnlyDeinit` 가 `.busy` 라 `quietPumpProven` 이 거짓이다 — 그 owner 가 선택되는 frame 마다 다시 펌프한다(16 owner
+  를 넘으면 round-robin 만큼 늦는다). host 출력이 더 없어도 멈추지 않는다.
+- 결정 — catch-up 의 `held → Busy` 분류: 그대로 둔다(닿지 않는다). catch-up 의 준비는 `.block` 이라(IC4b) 수신 잠금으로 실패하지
+  않고, slot 의 다른 attachment 연산·Client 울타리로 막히는 경우는 같은 조건의 `read_batch` 가 먼저 `AdminBusy` 로 막는다.
+- 결정 — 몸체가 망가진 `image_ref`: `MalformedRow` 로 접지 않는다(계약 §6) — 다른 레코드의 디코드 오류와 같은 규칙.
+- 판정자(`test-image-channel-app`, client 22): 협상한 Client(묶임·잃음)는 `ImageChannelNegotiated` 이고 플래그를 읽지 않는다, 협상하지
+  않은 Client 는 이 규칙에 걸리지 않고 전환으로 간다(첫 플래그 읽기 실패 → `FlagFailed`).
+
+###### IC3b-2c-2 — 진단·판정자 (미착수)
 
 - 스레드: 표는 재접속 worker 가 connect 할 때 할당되고(`build_id` 와 같은 꼴) 펌프·해석·적용·정리는 모두 소유 스레드에서 돈다 — 표에
   잠금이 없다는 전제를 배선이 지키는지(worker 스레드에서 펌프·해석을 부르지 않는지) 판정자로 잰다.
-- `enterExternalMode` 는 묶인 채널을 거부하지 않는다 — 협상한 Client 가 external 모드에 들어가면 펌프가 돌지 않아 원장이 찬다.
-  GUI 는 이 경로를 쓰지 않지만, 광고(IC6) 전에 불변식(채널을 협상한 Client 는 external 모드에 들어가지 않는다)으로 잠근다.
 - 「이미지 채널 없음」 탭 notice(계약 §3.2)는 아직 어느 단계에도 없다 — 호출자는 `image_channel.state` 로 상실을 본다. notice 를 이
   단계나 IC6 에서 단다.
 - 펌프·해석·열기·정리가 울타리에서 빠지는 일(prepared lease·실행 lease 의 AdminBusy)은 계수도 로그도 없다 — lease 가 오래 잡혀 host
   원장 32 칸이 차면 진단할 근거가 없으니 거부 계수를 단다(보류가 길어지는 것도 같은 계수로 본다).
 - attach 응답을 끝내 못 읽어 id 를 모르는 stream 의 세그먼트는 더 큰 id 를 알 때까지(다음 attach) 표에 남아 원장 자리를 쥔다 —
   id 를 모르니 닫지도 못한다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 본다.
-- 채널 resolver 를 넘기는 연결에서 몸체가 망가진 `image_ref` 는 `MalformedRecord`·`Truncated` 로 올라가 `drainRemoteNow` 복구 목록에
-  없다(연결은 재접속하는데 탭은 종료된다 — 다른 레코드의 디코드 오류도 지금 같다). `MalformedRow` 로 접을지 정해 계약 §6 에 적는다.
 - resolver 의 OOM·거부 경로에 이미지 대조 계수(`image_reconciliation`)를 붙이거나 붙이지 않는 이유를 적는다(`image_blob` 경로는
   OOM 에 `recordDroppedOom` 을 올린다).
-- catch-up 의 `held → Busy` 가 후보 준비 실패 분류에서 재시도가 아니라 `local_invariant_violation` 으로 봉인된다(IC3b-2b-1 — 지금은
-  닿지 않는다). 재시도로 분류할지 정한다.
-- tick 의 `held` 는 `.idle` 로 접힌다(`drainRemoteNow`). host 출력이 더 오지 않을 때 보류된 배치를 다음 프레임 루프가 다시 펌프하는지
-  — `hasImmediateFrameWork` 는 attachment 큐 머리를 세지 않는다 — 확인하고, 아니면 보류를 「즉시 할 일」로 센다(IC4b 로 보류 이유에
-  fork 와 겹친 순간이 더해졌다, 적대적 검증 2 회차).
 - 판정자: 연결 둘의 같은 segment_id 가 섞이지 않는다; 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
   종료 상태가 되지 않는다.
 

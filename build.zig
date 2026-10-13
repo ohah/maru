@@ -4400,6 +4400,22 @@ pub fn build(b: *std.Build) void {
         macos_agent_session_archive_smoke.step.dependOn(&macos_app_bundle.step);
         macos_agent_session_archive_smoke_step.dependOn(&macos_agent_session_archive_smoke.step);
 
+        // 사이드바 헤더·접힌 ◧·도크 토글 hover 판을 실제 앱으로 1x·2x 찍는다 — `test-header-hover-visual-golden` 이 비교한다.
+        // Chrome Lab 은 app_session 을 타지 않아 판의 자리 계산을 못 본다(tests/golden/header_hover_visual.zig 머리말).
+        const macos_header_hover_capture = b.addSystemCommand(&.{
+            "sh",
+            "tools/header-hover/capture.sh",
+            "./zig-out/Maru.app/Contents/MacOS/maru-macos-app",
+        });
+        macos_header_hover_capture.setCwd(b.path("."));
+        // AppKit 프로세스를 띄우고 캡처 디렉터리를 다시 쓴다 — 캐시된 성공을 재사용하면 낡은 그림이 남는다.
+        macos_header_hover_capture.has_side_effects = true;
+        macos_header_hover_capture.step.dependOn(&macos_app_bundle.step);
+        b.step(
+            "macos-header-hover-capture",
+            "Capture sidebar header, collapsed toggle, and dock toggle hover plates at 1x and 2x with the real app",
+        ).dependOn(&macos_header_hover_capture.step);
+
         // C0: 저장 충돌을 실제 AppKit 프로세스에서 확인한다. 헤드리스 판정자가 못 보는 두 조각
         // (`⌘S` 키가 `keyDown` 을 지나 디스패치에 닿는가 · 디스크가 안 덮이는가)만 잰다.
         const macos_editor_save_conflict_smoke_step = b.step(
@@ -5439,6 +5455,26 @@ pub fn build(b: *std.Build) void {
         "test-remote-scm-visual-golden",
         "Compare the remote SCM dock capture against committed golden images",
     ).dependOn(&run_remote_scm_visual_golden.step);
+
+    // ── 헤더 hover 판 시각 골든 ────────────────────────────────────────────────────────────
+    //
+    // 캡처는 `macos-header-hover-capture`(실제 앱)가 만들고 이 스텝은 **비교만** 한다(캡처가 없으면 건너뛴다).
+    const header_hover_visual_golden_tests = addProjectTest(b, .{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/golden/header_hover_visual.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "ppm", .module = ppm_mod }},
+        }),
+    });
+    const run_header_hover_visual_golden = b.addRunArtifact(header_hover_visual_golden_tests);
+    run_header_hover_visual_golden.setCwd(b.path("."));
+    run_header_hover_visual_golden.has_side_effects = true;
+    b.step(
+        "test-header-hover-visual-golden",
+        "Compare sidebar header and dock toggle hover captures against committed golden images",
+    ).dependOn(&run_header_hover_visual_golden.step);
 
     const chrome_ui_test_step = b.step("test-chrome-ui", "Run the focused typed Chrome UI tree, interaction, and paint tests");
     chrome_ui_test_step.dependOn(&run_chrome_ui_tests.step);

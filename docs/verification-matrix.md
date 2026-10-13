@@ -1014,6 +1014,8 @@ renderer capability의 현재 검증 계약은 `editor_epoch`를 포함한 `Rend
 > 축**이다(터미널 pane 과의 오프셋·레이어 순서) — Lab 의 텍스트 경로가 pane 원점을 못 받는다.
 > ⚠️ 한계: 캡처가 없으면 skip한다(스모크를 안 돌린 환경/플랫폼). 그리고 골든은 **관심 영역만** 보므로 그
 > 사각형 밖 회귀는 여전히 못 잡는다 — 새 시각 계약을 만들 때 case를 함께 추가해야 한다.
+>
+> **헤더 hover 판 골든(2026-10-13):** 사이드바 헤더·접힌 ◧·도크 토글 hover 판은 판의 자리를 app_session 이 정하는데 Chrome Lab 은 app_session 을 타지 않는다. 그래서 `tools/header-hover/capture.sh` 가 **실제 앱**으로 1x·2x(배율 주입)를 찍고 `test-header-hover-visual-golden` 이 띠 부분만 잘라 비교한다(`mise run macos-header-hover-visual-golden`, CI `AppKit smokes macOS`). 같은 날 이 판들의 결함 넷(#4408·#4410·#4421)이 숫자 판정자를 지나 캡처로만 보였던 것이 계기다.
 
 > **스크롤·클리핑 회귀(2026-08-05):** 사용자 보고(스크롤/새로고침 플리커, 글자가 카드 밖으로 샘, 액션이 빈 상자)의
 > 루트커즈는 layout이었다 — scroll-area가 `fill` container라 목록 아이템이 viewport에 맞춰 균등 축소되고 있었고,

@@ -4699,7 +4699,7 @@ pub fn filePanelDockControlRect(self: *const AppSession) ?maru.session.SplitRect
     const w = @min(2 * self.cell_width_px, self.backing_width_px);
     // 렌더러의 1.7× quad가 큰 글꼴에서 titlebar 띠 아래로 보일 수 있으므로 hit/hover rect도 실제
     // visual bottom까지 포함한다. 가로는 2셀 rect 안에 1.7셀 glyph를 중앙 배치해 이미 전부 포함한다.
-    const h = @min(@max(dockToggleVisualBottomPx(self.cell_height_px, self.titlebar_strip_px), self.titlebar_strip_px), self.backing_height_px);
+    const h = @min(@max(dockToggleVisualBottomPx(self.cell_width_px, self.cell_height_px, self.titlebar_strip_px), self.titlebar_strip_px), self.backing_height_px);
     if (w == 0 or h == 0) return null;
     // 창 우측 상단이 macOS 둥근 코너라, 토글을 코너에 flush로 두면 코너 마스크가 글리프를 자른다(신호등 옆 사이드바
     // ◧처럼 코너 클리어런스가 필요). 한 셀 여백으론 코너 반경(≈12px)을 못 벗어나 여전히 잘려(사용자 피드백) —
@@ -4966,13 +4966,17 @@ pub const FilePanelTestC = struct {
 
 pub const rename_swap: c_uint = 0x00000002;
 
-/// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 아래쪽 경계.
+/// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 **잉크의** 아래쪽 경계.
 /// filePanelDockControlRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
-pub fn dockToggleVisualBottomPx(cell_height_px: u32, titlebar_strip_px: u32) u32 {
+///
+/// 슬롯은 `ext(cw) × ext(ch)` 지만 등록 아이콘의 잉크는 그 안 `min(w, h)` 정사각을 가운데 둔 것이다
+/// (`icon_glyph.fillCoverage`). 예전에는 **슬롯 높이** `ext(ch)` 로 바닥을 셈해, 셀이 세로로 긴 보통 폰트에서 잉크는 띠
+/// 안인데 판·히트 사각형만 띠 아래(탭 바)로 새고(1x 1px · Retina 3px) 판 중심이 그려진 ◧ 보다 내려갔다(Retina 2px).
+pub fn dockToggleVisualBottomPx(cell_width_px: u32, cell_height_px: u32, titlebar_strip_px: u32) u32 {
     if (cell_height_px == 0) return titlebar_strip_px;
     const origin_y = if (titlebar_strip_px > cell_height_px) (titlebar_strip_px - cell_height_px) / 2 else 0;
-    const raster_height_px = headerIconRasterExtentPx(cell_height_px);
-    const bottom = @as(u64, origin_y) + (@as(u64, cell_height_px) + raster_height_px + 1) / 2;
+    const ink_px = @min(headerIconRasterExtentPx(cell_width_px), headerIconRasterExtentPx(cell_height_px));
+    const bottom = @as(u64, origin_y) + (@as(u64, cell_height_px) + ink_px + 1) / 2;
     return @intCast(@min(bottom, std.math.maxInt(u32)));
 }
 

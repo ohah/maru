@@ -121,6 +121,7 @@ pub const sticky_client = @import("sticky.zig");
 pub const brackets_client = @import("brackets.zig");
 /// 들여쓰기 안내선(visual-mapping §5.1c) — 간격 추정 캐시와 그려질 창.
 pub const guides_client = @import("guides.zig");
+const syntax_mod = @import("syntax");
 /// 접힘 범위를 낸 층(§4 의 세 소스).
 pub const FoldSource = enum { indent, syntax, lsp };
 pub const project_replace_batch = @import("search/batch.zig");
@@ -8488,7 +8489,9 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     };
     // **무엇을 넣을지는 L2 `typing_ops.planTyping` 이 정한다**(§3.7 타이핑 보조 × §9.1 — 쌍 넣기·type-over·감싸기,
     // 문서 순서, 커서마다 첫 변경의 인덱스). 보조는 재변환(IME)이 아닐 때만 본다.
-    var typing = typing_ops.planTyping(self.allocator, doc.file.content, edit_items, text, replacement == null) catch return false;
+    // 닫는 괄호 내어쓰기(계획 editor-typing-rules TR2) — 재변환(IME)이 아닐 때, 괄호를 아는 문법에서만.
+    const reindent: ?typing_ops.Reindent = if (replacement == null) (if (bracketsOf(term)) |b| .{ .lines = doc.file.lines, .brackets = b } else null) else null;
+    var typing = typing_ops.planTyping(self.allocator, doc.file.content, edit_items, text, replacement == null, reindent) catch return false;
     defer typing.deinit(self.allocator);
     const ranges = &typing.changes;
     // **type-over만 있었으면 문서는 안 바뀐다** — caret만 한 칸 넘기고 끝낸다(§3.7).
@@ -9272,10 +9275,31 @@ pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
     const doc = lineOpDoc(term) orelse return insertText(self, term, "\n");
     const snap = selectionsForEdit(self, term) orelse return insertText(self, term, "\n");
     defer self.allocator.free(snap.items);
-    var plan = (line_ops.planNewline(self.allocator, doc.file.content, doc.file.lines, snap.items) catch return false) orelse
+    var plan = (line_ops.planNewline(self.allocator, doc.file.content, doc.file.lines, snap.items, enterContext(term)) catch return false) orelse
         return insertText(self, term, "\n");
     defer plan.deinit(self.allocator);
     return applyLineEdit(self, term, plan.changes.items, plan.after);
+}
+
+/// 그 문서의 괄호 쌍 — **괄호 색칠의 규칙**(`bracketRuleFor().chars`)과 같은 집합이다(두 벌이면 한쪽만 낡는다 — 계획 editor-typing-rules
+/// TR2). 문법이 없으면(평문) `null` — 괄호 Enter·닫는 괄호 내어쓰기를 하지 않는다(VS Code 의 plaintext 도 괄호 설정이 없다).
+fn bracketsOf(term: *const Term) ?[]const u8 {
+    const g = term.rt.editor_grammar;
+    if (g == .none) return null;
+    return syntax_mod.bracketRuleFor(syntax_mod.languageFor(g)).chars;
+}
+
+/// Enter 의 언어 문맥(괄호 Enter — 계획 editor-typing-rules TR2). 문법이 없으면 `null`(앞 공백만 잇는다).
+fn enterContext(term: *Term) ?line_ops.EnterContext {
+    const brackets = bracketsOf(term) orelse return null;
+    const path = term.rt.editorDocument().path;
+    return .{
+        .brackets = brackets,
+        .quotes = term.rt.editor_grammar.stringQuotes(),
+        .line_comment = if (path) |p| maru.session.editor.language.forPath(p).lineComment() else null,
+        .unit = guides_client.editUnit(term),
+        .anywhere = term.rt.editor_grammar.bracketEnterAnywhere(),
+    };
 }
 
 /// 선택(없으면 caret 의 낱말)을 대문자/소문자로 바꾼다(§3.9b). 판정은 L2 `line_ops.planTransformCase`(낱말 규칙
@@ -41070,6 +41094,56 @@ test "INDT5 문서 포맷의 options 는 그 문서의 들여쓰기 단위다 �
         try testing.expect(pumpLspUntil(&f.fx, 3000, s, Settled.g));
         try testing.expect(std.mem.indexOf(u8, f.term.rt.editorDocument().opened.?.file.content, c.want) != null);
     }
+}
+
+test "INDB4 괄호 Enter·닫는 괄호 내어쓰기 — 실제 키로: 자동 닫기 뒤 Enter 가 가운데 줄, 여는 괄호 뒤 Enter 는 한 단계, `}` 는 짝 줄로, 문자열 안 괄호는 안 세고, 평문은 종전 (§3.9a, 계획 editor-typing-rules TR2)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    // ⑴ 공백 2 TS — `{` 를 치면 자동 닫기 `{|}`, Enter 면 가운데 줄이 한 단계(2 칸), 닫는 것은 원래 들여쓰기.
+    const t = try undoFixture(&fx, allocator, "indb4.ts", "  a();\nf() \n");
+    t.rt.editor_tab_width = 4;
+    t.rt.editor_selection = editor_selection.Selection.at(11); // "f() |"
+    try testing.expect(insertText(fx.session, t, "{"));
+    try testing.expectEqualStrings("  a();\nf() {}\n", content(t));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  a();\nf() {\n  \n}\n", content(t));
+    try testing.expectEqual(@as(usize, 15), t.rt.editor_selection.?.focus); // 가운데 줄 끝
+    // ⑵ 가운데 줄에서 `x();` 뒤 Enter — 짝 없는 여는 괄호가 그 줄에 없으니 들여쓰기만 잇는다.
+    for ("x();") |ch| try testing.expect(insertText(fx.session, t, &[_]u8{ch}));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  a();\nf() {\n  x();\n  \n}\n", content(t));
+    // ⑶ 공백뿐인 줄에서 `}` — 짝 `{` 줄(들여쓰기 없음)로 내어쓴다.
+    try testing.expect(insertText(fx.session, t, "}"));
+    try testing.expectEqualStrings("  a();\nf() {\n  x();\n}\n}\n", content(t));
+    // ⑷ 여는 괄호 뒤(짝이 뒤에 없다) Enter 는 한 단계.
+    const o = try undoFixture(&fx, allocator, "indb4o.ts", "  a();\nif (x) {\n");
+    o.rt.editor_tab_width = 4;
+    o.rt.editor_selection = editor_selection.Selection.at(15);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  a();\nif (x) {\n  \n", content(o));
+    // ⑸ 문자열 안의 `{` 는 세지 않는다 — 앞 공백만 잇는다(여기선 없다).
+    const q = try undoFixture(&fx, allocator, "indb4q.ts", "  a();\ns = \"{\";\n");
+    q.rt.editor_selection = editor_selection.Selection.at(15);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  a();\ns = \"{\";\n\n", content(q));
+    // ⑹ Python 대괄호 사이 — 같은 규칙(언어 공통).
+    const p = try undoFixture(&fx, allocator, "indb4.py", "    a = 1\nfoo = []\n");
+    p.rt.editor_tab_width = 4;
+    p.rt.editor_selection = editor_selection.Selection.at(17);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("    a = 1\nfoo = [\n    \n]\n", content(p));
+    // ⑺ 평문(문법 없음)은 괄호를 보지 않는다 — 종전대로 개행만.
+    const n = try undoFixture(&fx, allocator, "indb4.txt", "a {}\n");
+    n.rt.editor_selection = editor_selection.Selection.at(3);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("a {\n}\n", content(n));
 }
 
 test "CMT7 한 줄에 커서가 여럿이어도 표식은 하나다 (§3.7)" {

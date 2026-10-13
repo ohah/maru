@@ -164,6 +164,28 @@ pub const Grammar = enum {
             .html => "HTML",
         };
     }
+
+    /// 문자열 따옴표 — 괄호 Enter(계획 editor-typing-rules TR2)가 줄을 읽을 때 그 안의 괄호를 세지 않는다. 낱말 속 아포스트로피가 흔한
+    /// 문법(Markdown·HTML 본문·평문)은 비운다 — `don't (` 에서 따옴표를 열면 뒤 괄호를 놓친다. Rust 는 `"` 만이다(`'a` 수명 표기).
+    /// 괄호 Enter 가 **줄 어디든** 짝 없는 여는 괄호를 보는가(참), 아니면 **caret 바로 앞 끝**의 여는 괄호만 보는가(거짓). VS Code 의 언어 설정을
+    /// 따른다(계획 editor-typing-rules TR2 — 동작만): C 계열·Rust·Go·JSON·CSS·Zig 는 `increaseIndentPattern`·`onEnterRules` 가 「줄에 닫히지
+    /// 않은 여는 괄호」라 어디든이고, Python·Ruby·Bash·Markdown·HTML 은 괄호 규칙이 기본(여는 괄호가 끝에 있을 때)뿐이다 — Markdown 산문의
+    /// `see [the docs|]` 에서 Enter 가 링크를 들여쓰며 쪼개지 않게.
+    pub fn bracketEnterAnywhere(self: Grammar) bool {
+        return switch (self) {
+            .python, .ruby, .bash, .markdown, .html, .none => false,
+            else => true,
+        };
+    }
+
+    pub fn stringQuotes(self: Grammar) []const u8 {
+        return switch (self) {
+            .none, .markdown, .html => "",
+            .rust => "\"",
+            .javascript, .typescript, .tsx, .go => "\"'`",
+            else => "\"'",
+        };
+    }
 };
 
 /// 파일 경로 → grammar. `forPath`와 **같은 확장자 추출**을 쓴다(마지막 점 뒤 — `app.min.js`는 js다).
@@ -336,4 +358,15 @@ test "SBL1 문법 표시 이름은 언어별로 갈리고, 모르면 없다" {
     // 상태바에 「Shell」이라고 적으면 거짓이다 — 그래서 비어 있는 것이 맞다.
     try std.testing.expect(grammarForPath("x/Makefile").displayName() == null);
     try std.testing.expectEqualStrings("Shell", forPath("x/Makefile").displayName().?);
+}
+
+test "LANG8 문자열 따옴표 — 괄호 Enter 가 건너뛸 따옴표, 아포스트로피가 흔한 문법은 없음, Rust 는 큰따옴표만 (계획 editor-typing-rules TR2)" {
+    try std.testing.expectEqualStrings("\"'`", Grammar.typescript.stringQuotes());
+    try std.testing.expectEqualStrings("\"'`", Grammar.go.stringQuotes());
+    try std.testing.expectEqualStrings("\"", Grammar.rust.stringQuotes());
+    try std.testing.expectEqualStrings("\"'", Grammar.python.stringQuotes());
+    for ([_]Grammar{ .none, .markdown, .html }) |g| try std.testing.expectEqualStrings("", g.stringQuotes());
+    // 괄호 Enter 의 범위 — 산문·괄호 규칙이 기본뿐인 문법은 끝의 여는 괄호만.
+    for ([_]Grammar{ .typescript, .tsx, .javascript, .c, .cpp, .rust, .go, .java, .json, .css, .zig, .php, .kotlin }) |g| try std.testing.expect(g.bracketEnterAnywhere());
+    for ([_]Grammar{ .python, .ruby, .bash, .markdown, .html }) |g| try std.testing.expect(!g.bracketEnterAnywhere());
 }

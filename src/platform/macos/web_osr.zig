@@ -1542,6 +1542,12 @@ pub fn testApply(gpa: std.mem.Allocator, message: Message) void {
     apply(gpa, message, 0);
 }
 
+/// 시험 전용(W9a): `child` 를 `root` 의 팝업 가족으로 둔다.
+pub fn testSetPopupFamily(child: u64, root: u64) void {
+    if (!builtin.is_test) @compileError("test only");
+    if (surfaces.getPtr(child)) |s| s.popup_family = root;
+}
+
 /// 시험 전용(W9b③): 그 탭의 첫 대화상자 번호.
 pub fn testDialogToken(surface_id: u64) ?u64 {
     if (!builtin.is_test) @compileError("test only");
@@ -6099,6 +6105,24 @@ test "W9a 적대 리뷰 5 회차: 확정되지 않은 이동은 주 프레임 �
     testApply(gpa, .{ .main_frame_navigating = 44 });
     testApply(gpa, ns(44, false));
     try std.testing.expect(!navigationUncommitted(44));
+}
+
+test "W9a 변이 생존 재현: 다른 호스트 가족 탭의 대화상자 중에도 terminate 는 보낸다(다른 렌더러 — 스크립트가 돈다), 다른 호출과 같은 호스트면 거절" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    try devtoolsTestSurface(9, true);
+    applyD(gpa, .{ .url_changed = .{ .browser = 7, .url = "http://127.0.0.1:8000/a.html" } });
+    surfaces.getPtr(9).?.popup_family = 7;
+    var rec: DevtoolsRecorder = .{};
+    applyD(gpa, .{ .js_dialog = .{ .browser = 9, .request = 1, .kind = .alert, .origin = "http://localhost:8000", .message = "" } });
+    try std.testing.expect(jsDialogShowing(7));
+    _ = try devtoolsCall(gpa, 7, "Runtime.terminateExecution", "{}", rec.sink());
+    try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.evaluate", "{}", rec.sink()));
+    replyDialog(gpa, 9, testDialogToken(9) orelse return error.NoDialog, true, "", false);
+    applyD(gpa, .{ .js_dialog = .{ .browser = 9, .request = 2, .kind = .alert, .origin = "http://127.0.0.1:8000", .message = "" } });
+    try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.terminateExecution", "{}", rec.sink()));
 }
 
 test "W9a 적대 리뷰 5 회차: 가족 탭의 대화상자는 같은 호스트면 스크립트를 멈춘 것(같은 렌더러), 다른 호스트면 아니다 — 자기 대화상자는 늘 멈춘 것" {

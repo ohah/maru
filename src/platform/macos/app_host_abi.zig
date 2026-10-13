@@ -7757,6 +7757,9 @@ fn wakeCdpSleepers() void {
 }
 /// 보내려 한 DevTools 호출 수(시험에서만 센다 — 철회 뒤 보내지 않았는지).
 var cdp_calls_attempted: usize = 0;
+/// 마지막으로 보내려 한 메서드(시험에서만 — 대화상자로 끝난 exec 이 terminate 와 놓기 중 무엇을 보내려 했는지).
+var cdp_last_method_buf: [64]u8 = undefined;
+var cdp_last_method_len: usize = 0;
 
 comptime {
     // W9b③: 누르기 전 프레임은 kick 과 꼭 같은 호출이어야 sidecar 가 짧은 시한에 놓는다(적대 리뷰 1 회차).
@@ -8138,7 +8141,11 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                 const after = run.op.feed(allocator, r) catch return finishCdp(run, .failed, "out of memory");
                 return cdpAdvance(run, after);
             };
-            if (builtin.is_test) cdp_calls_attempted +%= 1;
+            if (builtin.is_test) {
+                cdp_calls_attempted +%= 1;
+                cdp_last_method_len = @min(next.method.len, cdp_last_method_buf.len);
+                @memcpy(cdp_last_method_buf[0..cdp_last_method_len], next.method[0..cdp_last_method_len]);
+            }
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             grantAgentNewTabCredit(run.surface_id, next.method, next.params);
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
@@ -12526,6 +12533,127 @@ test "W9a 적대 리뷰 4 회차: 확정되지 않은 이동 중인 탭에는 ev
     p.response = null;
     try std.testing.expect(std.mem.indexOf(u8, response, "loading a new page") != null);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+}
+
+test "W9a 변이 생존 재현: DevTools 가 결과를 16 MiB 상한으로 거절하면 -32005(너무 큼) — 보통 실패가 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 78, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":78,\"script\":\"1\",\"max_result_bytes\":1024}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const id = try w9aExecRequest(&p, req, 78, 1024);
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = 78, .op = try web_cdp_ops.Op.init(allocator, .execute_script, "{\"script\":\"1\",\"args\":[],\"max_result_bytes\":1024}", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    allocator.free((try run.op.start(allocator)).call.params);
+    allocator.free((try run.op.feed(allocator, cdpReply(.too_large, ""))).call.params); // → 놓기
+    const fin = try run.op.feed(allocator, .{ .ok = "{}" });
+    defer allocator.free(fin.done.result);
+    finishCdp(run, fin.done.status, fin.done.result);
+    try expectPendingErrorCode(&p, .result_too_large);
+}
+
+test "W9a 변이 생존 재현: 확정되지 않은 이동 중 — 결과 읽기는 보내지 않고 「돌았지만 읽지 못했다」, 스크린샷은 보내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 79);
+    defer {
+        session_mod.web_osr.destroy(ta, 79);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(79);
+    // 엔진 할당자 없음 — 보냈다면 「not running」 으로 끝난다(자리가 다음 시험까지 남지 않게).
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 79, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    // 결과 읽기(by-value): 스크립트가 객체를 돌려준 뒤 이동이 시작됐다.
+    {
+        const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":79,\"script\":\"1\"}}";
+        var p: control_server_mod.PendingRequest = undefined;
+        const id = try w9aExecRequest(&p, req, 79, 1024);
+        const run = try allocator.create(CdpRun);
+        run.* = .{ .async_id = id, .surface_id = 79, .op = try web_cdp_ops.Op.init(allocator, .execute_script, "{\"script\":\"1\",\"args\":[],\"max_result_bytes\":1024}", id), .started = true };
+        try cdp_runs.append(allocator, run);
+        allocator.free((try run.op.start(allocator)).call.params);
+        const value = try run.op.feed(allocator, .{ .ok = "{\"result\":{\"type\":\"object\",\"className\":\"Object\",\"objectId\":\"o-1\"}}" });
+        try std.testing.expect(run.op.exec.?.stage == .value);
+        session_mod.web_osr.testApply(ta, .{ .main_frame_navigating = 79 });
+        const before = cdp_calls_attempted;
+        cdpAdvance(run, value);
+        try std.testing.expectEqual(before, cdp_calls_attempted); // 결과 읽기도 놓기도 보내지 않았다
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+        const response = p.response orelse return error.ExpectedResponse;
+        defer allocator.free(response);
+        p.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, response, cdp_ran_then_navigated) != null);
+    }
+    // 스크린샷 — 보내면 Chromium 이 붙잡았다가 새 문서를 찍었다.
+    {
+        const req = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"browser.screenshot\",\"params\":{\"id\":79}}";
+        var p: control_server_mod.PendingRequest = undefined;
+        const before = cdp_calls_attempted;
+        startCdpOp(try w9aRequest(&p, req, 79, .screenshot), 79, .screenshot, "");
+        try std.testing.expectEqual(before, cdp_calls_attempted);
+        const response = p.response orelse return error.ExpectedResponse;
+        defer allocator.free(response);
+        p.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, response, "loading a new page") != null);
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    }
+}
+
+test "W9a 변이 생존 재현: evaluate 가 다른 호스트 가족 탭의 대화상자로 끝나면 terminate 를 보내려 한다 — 같은 호스트(같은 렌더러)면 멈춘 것이라 놓기로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 80);
+    try session_mod.web_osr.testHold(ta, 81);
+    defer {
+        session_mod.web_osr.destroy(ta, 80);
+        session_mod.web_osr.destroy(ta, 81);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(80);
+    session_mod.web_osr.testRunning(81);
+    session_mod.web_osr.testSetPopupFamily(81, 80);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 80, .url = "http://127.0.0.1:8000/a.html" } });
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 80, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const cases = [_]struct { origin: []const u8, want: []const u8 }{
+        .{ .origin = "http://localhost:8000", .want = "Runtime.terminateExecution" },
+        .{ .origin = "http://127.0.0.1:8000", .want = "Runtime.releaseObjectGroup" },
+    };
+    for (cases, 0..) |cs, n| {
+        session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = 81, .request = @intCast(n + 1), .kind = .alert, .origin = cs.origin, .message = "" } });
+        defer session_mod.web_osr.replyDialog(ta, 81, session_mod.web_osr.testDialogToken(81) orelse 0, true, "", false);
+        const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":80,\"script\":\"1\"}}";
+        var p: control_server_mod.PendingRequest = undefined;
+        const id = try w9aExecRequest(&p, req, 80, 1024);
+        const run = try allocator.create(CdpRun);
+        run.* = .{ .async_id = id, .surface_id = 80, .op = try web_cdp_ops.Op.init(allocator, .execute_script, "{\"script\":\"1\",\"args\":[],\"max_result_bytes\":1024}", id), .started = true };
+        try cdp_runs.append(allocator, run);
+        allocator.free((try run.op.start(allocator)).call.params);
+        cdp_last_method_len = 0;
+        cdpDone(run, 0, .dialog, "");
+        try std.testing.expectEqualStrings(cs.want, cdp_last_method_buf[0..cdp_last_method_len]);
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len); // 엔진 할당자가 없어 그 호출에서 끝났다
+        if (p.response) |r| allocator.free(r);
+        p.response = null;
+    }
 }
 
 test "W9a 적대 리뷰 4 회차 재현: 스크립트가 이동을 시작했으면(확정 전) 묶음 놓기를 보내지 않는다 — Chromium 이 확정까지 붙잡아 exec 이 이동만큼 매달렸다" {

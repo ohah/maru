@@ -6545,8 +6545,8 @@ pub const AppSession = struct {
     osr_cursor_pending: ?CursorKind = null,
     /// W4c: 지금 키 포커스를 준 Chromium 탭(0 = 없음). 바뀌면 `syncOsrKeyTarget` 이 포커스를 옮긴다.
     osr_key_target: u64 = 0,
-    /// 사용자의 마지막 누름·키(단조 ms, `monotonicMs`) — 키 대상이 바뀐 것이 사용자 탓인지 가른다(W9c② 적대 리뷰 3 회차, `web_ops.userMadeFocusChange`).
-    last_user_event_ms: u64 = 0,
+    /// maru 가 곧 키 대상을 옮긴다는 표시(단조 ms, `monotonicMs`) — 그 바뀜만 사용자 시각을 찍지 않는다(W9c② 적대 리뷰 4 회차, `web_ops.markFocusByApp`).
+    osr_focus_by_app_ms: u64 = 0,
     /// W10b: 이 세션이 다운로드 목록(앱 전역)에 마지막으로 알린 「매번 묻기」 — 이 세션의 값이 바뀔 때만 다시 알린다(관계없는 재적용·
     /// 외관 전환이 다른 창의 옛 값으로 되돌렸다 — 5 회차).
     download_ask_applied: ?bool = null,
@@ -13883,7 +13883,6 @@ pub const AppSession = struct {
     }
 
     pub fn handleKeyEvent(self: *AppSession, event: terminal.KeyEvent) !FrameSummary {
-        self.last_user_event_ms = monotonicMs(); // W9c② — 키 대상을 바꾼 키(⌘숫자·pane 이동)인지 가른다
         // 탭 전환과 다음 tick 사이에도 입력은 들어온다. 지난 비교 상자가 새 입력을 잡지 않게 한다.
         find_ops.syncDiffFind(self);
         // Swift/AppKit는 normalized key event만 전달한다. app-vs-terminal 판정과 PTY
@@ -15102,7 +15101,6 @@ pub const AppSession = struct {
     /// 없었으면 클릭으로 보고 해제), 4=더블클릭(단어 선택), 5=트리플클릭(논리 줄 선택). 좌표는
     /// backing 픽셀 — 셀 변환은 권위 있는 cell 메트릭을 가진 여기서 한다.
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
-        if (kind == 1 or kind == 4 or kind == 5) self.last_user_event_ms = monotonicMs(); // 누름(겹누름 포함) — W9c②
         if (sidebar_ops.activateRecoveredRowBeforeInitialSurface(self, kind, x_px, y_px, button)) return;
         if (!self.surface_initialized) return;
         find_ops.syncDiffFind(self);

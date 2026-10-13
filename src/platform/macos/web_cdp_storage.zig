@@ -287,9 +287,9 @@ pub const Op = struct {
             s.beginArray() catch return error.OutOfMemory;
             for (parsed.value.cookies) |c| {
                 s.beginObject() catch return error.OutOfMemory;
-                inline for (.{ "name", "value", "domain", "path" }) |f| {
+                for ([_][]const u8{ "name", "value", "domain", "path" }, [_][]const u8{ c.name, c.value, c.domain, c.path }) |f, v| {
                     s.objectField(f) catch return error.OutOfMemory;
-                    s.write(@field(c, f)) catch return error.OutOfMemory;
+                    s.write(v) catch return error.OutOfMemory;
                 }
                 s.objectField("secure") catch return error.OutOfMemory;
                 s.write(c.secure) catch return error.OutOfMemory;

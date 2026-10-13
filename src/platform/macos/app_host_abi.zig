@@ -12748,6 +12748,31 @@ test "W9a 적대 리뷰 4 회차 재현: 스크립트가 이동을 시작했으�
     try std.testing.expect(std.mem.indexOf(u8, response, "\"result\":1") != null);
 }
 
+test "W9a③ 변이 생존 재현: 이름·값이 4096 바이트를 넘는 setCookie 는 시작에 그 글(cookie_too_large)로 — 「invalid arguments」 가 아니다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 88, .scope = .browser_storage, .host = host });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.setCookie\",\"params\":{\"id\":88,\"name\":\"n\",\"value\":\"v\"}}";
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 88, .method = .set_cookie, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 88, .scope = .browser_storage, .host = host } } });
+    const big = try allocator.alloc(u8, 5000);
+    defer allocator.free(big);
+    @memset(big, 'x');
+    const arg = try std.fmt.allocPrint(allocator, "{{\"name\":\"n\",\"value\":\"{s}\"}}", .{big});
+    defer allocator.free(arg);
+    startCdpOpHost(id, 88, .set_cookie, arg, host);
+    const response = p.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    p.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, web_cdp_ops.web_cdp_storage.cookie_too_large) != null);
+}
+
 test "W9a③ 적대 리뷰 3 회차 재현 F1: 한 번도 보이지 않은 탭의 op 은 「not shown yet」 — 2 회차 수정이 「the tab closed」 로 답했다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();

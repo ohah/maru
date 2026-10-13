@@ -312,7 +312,6 @@ pub const Op = struct {
             }
             return self.nextDelete(gpa);
         }
-        if (self.stage == .storage) if (std.mem.indexOf(u8, why, "SecurityError") != null) return done(gpa, .failed, not_http_reason);
         return done(gpa, .failed, why);
     }
 

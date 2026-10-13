@@ -471,6 +471,7 @@ pub const Client = struct {
             .issue_segments = issueImageSegmentsOp,
             .cancel_segments = cancelImageSegmentsOp,
             .issued_through = imageSegmentsIssuedThroughOp,
+            .outstanding_segments = outstandingImageSegmentsOp,
         };
         self.connection.runtime_ops = options.runtime_ops;
         self.connection.upgrade_ops = options.upgrade_ops;
@@ -2104,6 +2105,11 @@ fn cancelImageSegmentsOp(ctx: *anyopaque, segments: []const PreparedImageSegment
 fn imageSegmentsIssuedThroughOp(ctx: *anyopaque) u64 {
     const client: *Client = @ptrCast(@alignCast(ctx));
     return client.imageSegmentsIssuedThrough();
+}
+
+fn outstandingImageSegmentsOp(ctx: *anyopaque) usize {
+    const client: *Client = @ptrCast(@alignCast(ctx));
+    return if (client.imageLedger()) |ledger| ledger.count() else 0;
 }
 
 /// 세그먼트 메시지 하나를 fd 와 함께 보낸다(§3.3 — 메시지 첫 바이트와 함께 fd 정확히 하나). 전부 보냈으면 true.

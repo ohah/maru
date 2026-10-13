@@ -14415,12 +14415,13 @@ pub const AppSession = struct {
                         else
                             .char),
                         .enter => editor_ops.insertNewlineKeepingIndent(self, active),
-                        // **선택이 여러 줄이면 들여쓰기/내어쓰기다**(§3.9a). 아니면 종전대로 탭 문자 —
+                        // **선택이 여러 줄이면 들여쓰기/내어쓰기다**(§3.9a). 아니면 그 파일의 들여쓰기 단위 —
+                        // 탭 파일이면 탭 문자, 공백 파일이면 다음 탭 스톱까지 공백(계획 editor-typing-rules TR1).
                         // 한 줄 안에서 Tab 이 줄을 들여쓰면 글자를 못 넣는다.
                         .tab => if (editor_ops.selectionSpansLines(active))
                             editor_ops.indentLines(self, active, m.shift)
                         else
-                            editor_ops.insertText(self, active, "\t"),
+                            editor_ops.insertTab(self, active),
                         else => false,
                     };
                     if (handled) {

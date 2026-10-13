@@ -64,9 +64,29 @@ fn offsideOf(term: *const Term) bool {
     };
 }
 
-/// 추정의 기본 모드 — VS Code `[go]` 는 `insertSpaces: false` 다(확장 `package.json` 의 `configurationDefaults`). 그 밖은 전역 기본(공백).
-fn defaultSpacesModeOf(grammar: maru.session.editor.language.Grammar) bool {
-    return grammar != .go;
+/// 추정의 기본 모드 — 언어 기본(Go·Makefile 은 탭 — `indent_guides.defaultSpacesMode`). 편집의 들여쓰기 단위(`editUnit`)와 같은 값이다.
+fn defaultSpacesModeOf(term: *const Term) bool {
+    return guides.defaultSpacesMode(term.rt.editor_grammar, term.rt.editorDocument().path);
+}
+
+/// 그 문서의 들여쓰기 추정 — 처음 묻는 쪽이 채우고 굳힌다(안내선이 먼저 그렸으면 그 값). 편집으로는 다시 추정하지 않는다(VS Code 도
+/// 열 때 한 번).
+fn ensureGuess(term: *Term) ?guides.Guess {
+    const doc = term.rt.editorDocument().opened orelse return null;
+    const st = &term.rt.editor_guides;
+    if (st.guess == null) {
+        const src: DocLines = .{ .lines = doc.file.lines, .content = doc.file.content };
+        st.guess = guides.guessWith(src, term.rt.editor_tab_width, defaultSpacesModeOf(term));
+        st.guessed += 1;
+    }
+    return st.guess;
+}
+
+/// 편집의 들여쓰기 단위(문서 모델 §3.9a — 계획 editor-typing-rules TR1): 안내선과 **같은 추정**. 문서가 없으면 탭(종전 동작).
+pub fn editUnit(term: *Term) guides.Unit {
+    const tab_width = term.rt.editor_tab_width;
+    const g = ensureGuess(term) orelse return .{ .tabs = true, .width = @intCast(@min(@max(tab_width, 1), guides.max_unit_width)) };
+    return g.editUnit(tab_width);
 }
 
 /// 설정의 탭 폭이 **바뀌었다** — 다음 프레임이 지금 내용으로 다시 추정한다(VS Code `_updateModelOptions`: `tabSize` 가 달라지면
@@ -75,10 +95,11 @@ pub fn onTabWidthSettingChanged(term: *Term) void {
     term.rt.editor_guides.guess = null;
 }
 
-/// 문서의 문법이 바뀌었다(`old` → 지금) — **언어별 기본이 달라질 때만** 다시 추정한다(VS Code `_onDidChangeLanguage` → `_setModelOptionsForModel`
-/// 은 두 언어의 옵션이 같으면 모델을 건드리지 않는다). offSide 는 추정이 아니라 프레임마다 읽으므로 여기서 할 것이 없다.
+/// 이름 없는 문서에 이름이 붙어 문법이 바뀌었다(`old` → 지금 — 옛 경로는 없었다) — **언어 기본이 달라질 때만** 다시 추정한다(VS Code
+/// `_onDidChangeLanguage` → `_setModelOptionsForModel` 은 두 언어의 옵션이 같으면 모델을 건드리지 않는다). 언어 기본은 경로도 본다(Makefile —
+/// 문법은 그대로 `none` 인데 기본이 탭이 된다). offSide 는 추정이 아니라 프레임마다 읽으므로 여기서 할 것이 없다.
 pub fn onGrammarChanged(term: *Term, old: maru.session.editor.language.Grammar) void {
-    if (defaultSpacesModeOf(old) != defaultSpacesModeOf(term.rt.editor_grammar)) term.rt.editor_guides.guess = null;
+    if (guides.defaultSpacesMode(old, null) != defaultSpacesModeOf(term)) term.rt.editor_guides.guess = null;
 }
 
 /// 한 프레임의 안내선 — 창과 간격(0 이면 그리지 않는다).
@@ -96,11 +117,7 @@ pub fn window(self: *AppSession, term: *Term) Window {
     const st = &term.rt.editor_guides;
     const src: DocLines = .{ .lines = doc.file.lines, .content = doc.file.content };
     const tab_width = term.rt.editor_tab_width;
-    if (st.guess == null) {
-        st.guess = guides.guessWith(src, tab_width, defaultSpacesModeOf(term.rt.editor_grammar));
-        st.guessed += 1;
-    }
-    const unit = st.guess.?.unit(tab_width);
+    const unit = (ensureGuess(term) orelse return none).unit(tab_width);
     const p: guides.Params = .{ .tab_width = tab_width, .unit = unit, .offside = offsideOf(term) };
 
     // 창 — 보이는 줄 축의 [first, first + n). 접혀 있으면 보이는 줄이 문서 줄과 1:1 이 아니다(번호 = 문서 줄 + 1).

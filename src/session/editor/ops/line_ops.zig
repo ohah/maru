@@ -14,6 +14,7 @@ const std = @import("std");
 const delta = @import("../delta.zig");
 const line_index = @import("../line_index.zig");
 const selection = @import("../selection.zig");
+const indent_guides = @import("../indent_guides.zig");
 const case = @import("../../../terminal/selection.zig");
 
 const Change = delta.Change;
@@ -292,15 +293,16 @@ pub fn planMove(allocator: std.mem.Allocator, content: []const u8, lines: LineIn
     return plan;
 }
 
-/// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a). **들여쓰기는 탭 문자 하나다** — `Tab` 키가 넣는 것과 같아야 한다.
-/// **빈 줄은 건드리지 않는다.** **내어쓰기는 있는 만큼만** 뺀다: 탭 하나, 없으면 공백을 최대 `tab_width` 개. 없는 줄이
-/// 섞여도 연산 전체가 실패하지 않는다. caret 은 매핑이 맞다(줄 머리에서만 바뀐다 — LNM8).
-pub fn planIndent(allocator: std.mem.Allocator, content: []const u8, lines: LineIndex, sels: []const Selection, outdent: bool, tab_width: usize) !?Plan {
+/// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a). **한 단계는 그 파일의 들여쓰기 단위다**(`unit` — 감지한 탭 또는 공백 폭, 계획
+/// editor-typing-rules TR1) — 한 줄 `Tab` 이 넣는 것과 같은 단위여야 한다. **빈 줄은 건드리지 않는다.** **내어쓰기는 있는 만큼만**
+/// 뺀다: 탭 하나, 없으면 공백을 최대 단위 폭만큼. 없는 줄이 섞여도 연산 전체가 실패하지 않는다. caret 은 매핑이 맞다(줄 머리에서만
+/// 바뀐다 — LNM8).
+pub fn planIndent(allocator: std.mem.Allocator, content: []const u8, lines: LineIndex, sels: []const Selection, outdent: bool, unit: indent_guides.Unit) !?Plan {
     var nums: std.ArrayList(usize) = .empty;
     defer nums.deinit(allocator);
     if (!try selectedLineNumbers(allocator, content, lines, sels, &nums)) return null;
 
-    const width: usize = @max(1, tab_width);
+    const width: usize = @max(1, unit.width);
     var plan: Plan = .{};
     errdefer plan.deinit(allocator);
     for (nums.items) |n| {
@@ -318,7 +320,7 @@ pub fn planIndent(allocator: std.mem.Allocator, content: []const u8, lines: Line
             try plan.changes.append(allocator, .{ .start = line.start, .end = line.start + take, .text = "" });
         } else {
             if (std.mem.trimStart(u8, text, " \t").len == 0) continue; // 빈 줄
-            try plan.changes.append(allocator, .{ .start = line.start, .end = line.start, .text = "\t" });
+            try plan.changes.append(allocator, .{ .start = line.start, .end = line.start, .text = unit.text() });
         }
     }
     if (plan.changes.items.len == 0) {
@@ -407,6 +409,27 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
     if (!any_indent) {
         plan.deinit(allocator);
         return null;
+    }
+    return plan;
+}
+
+/// 한 줄 안의 `Tab`(§3.9a — 계획 editor-typing-rules TR1) — 커서마다 **그 열에서** 단위만큼: 탭 파일이면 탭 하나, 공백 파일이면 다음 탭
+/// 스톱까지 공백(VS Code `insertSpaces`). 선택이 있으면 그 자리를 바꾼다(선택 머리의 열로 센다). `cols[i]` 는 커서 `i` 의 머리 열 —
+/// 글자 폭(한글 두 칸)과 탭 전개를 아는 것은 화면 층이라 호출자가 센다. caret 은 넣은 글자 뒤. **문서 순서다**(입력이 문서 순서).
+pub fn planTab(allocator: std.mem.Allocator, content: []const u8, sels: []const Selection, cols: []const u32, unit: indent_guides.Unit) !?Plan {
+    if (sels.len == 0 or cols.len != sels.len) return null;
+    var plan: Plan = .{};
+    errdefer plan.deinit(allocator);
+    const after = try allocator.dupe(Selection, sels);
+    plan.after = after;
+    var grown: i64 = 0;
+    for (after, cols) |*sel, col| {
+        const s_off = @min(sel.start(), content.len);
+        const e_off = @min(sel.end(), content.len);
+        const t = unit.toNextStop(col); // 정적 글자 — 소유하지 않는다
+        try plan.changes.append(allocator, .{ .start = s_off, .end = e_off, .text = t });
+        sel.* = Selection.at(@intCast(@as(i64, @intCast(s_off + t.len)) + grown));
+        grown += @as(i64, @intCast(t.len)) - @as(i64, @intCast(e_off - s_off));
     }
     return plan;
 }
@@ -560,4 +583,66 @@ test "대소문자 — 선택이 없으면 caret 의 낱말, 문서 순서로 �
     const out = try applyPlan(allocator, "ab cd", plan);
     defer allocator.free(out);
     try testing.expectEqualStrings("AB CD", out);
+}
+
+test "INDT1 planTab — 공백 단위는 커서의 열에서 다음 탭 스톱까지, 탭 단위는 탭 하나, 선택은 바꾸고 caret 은 넣은 뒤 (계획 editor-typing-rules TR1)" {
+    const allocator = testing.allocator;
+    const four: indent_guides.Unit = .{ .tabs = false, .width = 4 };
+    // 커서 둘 — 열 0 과 열 5. 넣는 칸이 커서마다 다르다(4·3).
+    const content = "ab\nhello x\n";
+    const sels = [_]Selection{ Selection.at(0), Selection.at(8) };
+    var plan = (try planTab(allocator, content, &sels, &.{ 0, 5 }, four)).?;
+    defer plan.deinit(allocator);
+    const text = try applyPlan(allocator, content, plan);
+    defer allocator.free(text);
+    try testing.expectEqualStrings("    ab\nhello    x\n", text);
+    try testing.expectEqual(@as(usize, 4), plan.after.?[0].focus);
+    try testing.expectEqual(@as(usize, 15), plan.after.?[1].focus); // 앞 커서가 넣은 4 칸만큼 밀린다
+    // 탭 단위 — 열과 무관하게 탭 하나, 선택이 있으면 그 자리를 바꾼다.
+    const tab: indent_guides.Unit = .{ .tabs = true, .width = 4 };
+    const sel2 = [_]Selection{Selection.fromPoints(1, 3)};
+    var p2 = (try planTab(allocator, "abcd\n", &sel2, &.{1}, tab)).?;
+    defer p2.deinit(allocator);
+    const t2 = try applyPlan(allocator, "abcd\n", p2);
+    defer allocator.free(t2);
+    try testing.expectEqualStrings("a\td\n", t2);
+    try testing.expectEqual(@as(usize, 2), p2.after.?[0].focus);
+    // 열 수가 커서 수와 다르면 거절한다(호출자 결함).
+    try testing.expect((try planTab(allocator, content, &sels, &.{0}, four)) == null);
+}
+
+test "INDT2 planIndent — 한 단계는 그 파일의 단위, 내어쓰기는 단위 폭까지 있는 만큼 (계획 editor-typing-rules TR1)" {
+    const allocator = testing.allocator;
+    const content = "a\n      b\n\tc\n\n";
+    var lines = try line_index.build(allocator, content);
+    defer lines.deinit();
+    const all = [_]Selection{Selection.fromPoints(0, content.len - 1)};
+    const two: indent_guides.Unit = .{ .tabs = false, .width = 2 };
+    {
+        var plan = (try planIndent(allocator, content, lines, &all, false, two)).?;
+        defer plan.deinit(allocator);
+        const t = try applyPlan(allocator, content, plan);
+        defer allocator.free(t);
+        try testing.expectEqualStrings("  a\n        b\n  \tc\n\n", t); // 빈 줄은 그대로
+    }
+    {
+        var plan = (try planIndent(allocator, content, lines, &all, true, two)).?;
+        defer plan.deinit(allocator);
+        const t = try applyPlan(allocator, content, plan);
+        defer allocator.free(t);
+        try testing.expectEqualStrings("a\n    b\nc\n\n", t); // 공백은 단위 폭(2)만큼, 탭은 하나
+    }
+    {
+        const tab: indent_guides.Unit = .{ .tabs = true, .width = 4 };
+        var plan = (try planIndent(allocator, content, lines, &all, false, tab)).?;
+        defer plan.deinit(allocator);
+        const t = try applyPlan(allocator, content, plan);
+        defer allocator.free(t);
+        try testing.expectEqualStrings("\ta\n\t      b\n\t\tc\n\n", t);
+        var out = (try planIndent(allocator, content, lines, &all, true, tab)).?;
+        defer out.deinit(allocator);
+        const t2 = try applyPlan(allocator, content, out);
+        defer allocator.free(t2);
+        try testing.expectEqualStrings("a\n  b\nc\n\n", t2); // 탭 단위의 폭은 탭 폭(4) — 공백 여섯에서 넷
+    }
 }

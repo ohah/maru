@@ -2505,7 +2505,10 @@ pub fn requestFormatting(self: *AppSession, term: *Term) ?u32 {
     flushDocument(self, c, term);
     const d = c.findDoc(term) orelse return null;
     c.formatting_seq = lsp.rpc.nextSeq(c.formatting_seq); // i32 칸 안에서 돈다(§8.2a id)
-    const msg = lsp.rpc.formattingRequest(self.allocator, c.formatting_seq, d.uri, @max(1, term.rt.editor_tab_width), false) catch return null;
+    // 들여쓰기는 그 문서의 단위(§8.2e ③ — 계획 editor-typing-rules TR1): 공백 파일이면 `insertSpaces` 참·그 폭, 탭 파일이면 거짓·탭 폭.
+    // VS Code 도 감지한 모델 옵션을 보낸다 — 거짓으로 고정하면 공백 파일을 서버가 탭으로 바꿔 포맷한다.
+    const unit = editor_ops.guides_client.editUnit(term);
+    const msg = lsp.rpc.formattingRequest(self.allocator, c.formatting_seq, d.uri, if (unit.tabs) @max(1, term.rt.editor_tab_width) else unit.width, !unit.tabs) catch return null;
     defer self.allocator.free(msg);
     if (!send(self, c, msg)) return null;
     self.editor_lsp.sent_formattings += 1;

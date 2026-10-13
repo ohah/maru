@@ -652,8 +652,10 @@ caret 앵커가 없을 수 있다(`refreshAfterEdit` 가 스냅숏을 버린다)
 `mapOffset`), 제품의 `applyEditAsOne` 이 그것을 되돌리기 하나·스크롤·caret 추종까지 묶는다. 새로 서는 것은 **LSP `TextEdit[]` → `Delta`
 변환**(줄·글자 → byte, 정렬, 겹침 거부)과 **revision 검증**뿐이다. ② 첫 소비자를 rename 이 아니라 **문서 포맷**으로 둔다 — rename 은 새 이름을
 받는 입력 UI 가 필요한데 그런 오버레이가 없다(`input_box` 는 설정의 숫자 위젯). 포맷은 UI 없이 §3.6 의 세 규칙을 전부 지난다(파일 전체가 바뀌고
-caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집기의 들여쓰기 단위는 **탭 문자**(`Tab` 키·`indent_lines` 가 넣는 것)라
-`insertSpaces = false`, `tabSize = editor.tab-width`. 서버가 프로젝트 설정(`.clang-format` 등)을 우선하면 그것이 이긴다. ④ 겹치는 edit 은
+caret 은 남아야 한다). ③ `FormattingOptions` — 그 문서의 **들여쓰기 단위**(`Tab` 키·`indent_lines` 가 넣는 것 — 파일에서 감지, [문서 모델](native-editor-document-model.md)
+§3.9a)를 보낸다: 공백 파일이면 `insertSpaces = true`·`tabSize` = 그 폭, 탭 파일이면 `insertSpaces = false`·`tabSize = editor.tab-width`(VS Code 도
+감지한 모델 옵션을 보낸다 — 처음엔 「탭 문자」로 고정해 공백 파일을 서버가 탭으로 바꿔 포맷할 수 있었다; 2026-10-13 고침). 서버가 프로젝트 설정
+(`.clang-format` 등)을 우선하면 그것이 이긴다. ④ 겹치는 edit 은
 명세가 금한다(「must not overlap」) — 거부하고 **아무것도 적용하지 않는다**(반만 적용된 문서를 만들지 않는다, §3.6 「실패하면 문서가 그대로다」).
 
 **레퍼런스(동작만).** VS Code `editor.action.formatDocument` = `⇧⌥F`, `editor.formatOnSave` 기본 false. 포맷 뒤 caret·스크롤은 남는다.
@@ -664,7 +666,7 @@ caret 은 남아야 한다). ③ `FormattingOptions.insertSpaces` — 이 편집
 | **revision** | 요청 때의 `document_state.State.notifications.lsp_version` 을 기억하고 응답 때 다르면 **버린다** + 알림 「문서가 바뀌어 포맷 결과를 버렸습니다」. 서버 응답에는 version 이 없으므로 클라이언트가 잰다 | §3.6 「revision 이 어긋나면 버린다」 |
 | **적용** | `applyEditAsOne` — 되돌리기 **하나**, selection 은 delta 가 민다(삭제 구간 안이면 시작으로), 스크롤 앵커 보존, caret 추종 | §3.6 세 규칙 · 「별도 경로를 만들지 않는다」 |
 | **트리거** | `format_document` — `⇧⌥F`(편집기 컨텍스트 ⑴ `⌘` 없는 `⌥`) · 팔레트 「Editor: Format Document」. 서버가 없거나 `documentFormattingProvider` 가 없으면 무동작. 응답이 빈 배열이면 무동작(이미 정리됨) | VS Code 키. 저장 시 포맷은 §8.2r(같은 요청·같은 적용 — `⌘S` 가 응답 뒤에 저장한다) |
-| **요청** | id `4e8+seq`, `options = {tabSize: editor.tab-width, insertSpaces: false}`. 보내기 전에 밀린 didChange 를 먼저 보낸다(`flushDocument`, §8.2d 와 같다). 나가 있는 요청이 있으면 **새 것이 대체**한다 — 앞 응답은 seq 가 달라 버려진다(구현이 되먹인 것: 「나가 있으면 무시」로 두면 답을 안 주는 서버(HANG) 뒤로 포맷이 영영 막힌다) | 위 ③ · 정의로 이동과 같은 seq 규율 |
+| **요청** | id `4e8+seq`, `options = {tabSize, insertSpaces}` — 그 문서의 들여쓰기 단위(위 ③: 공백 파일이면 참·그 폭, 탭 파일이면 거짓·`editor.tab-width`). 보내기 전에 밀린 didChange 를 먼저 보낸다(`flushDocument`, §8.2d 와 같다). 나가 있는 요청이 있으면 **새 것이 대체**한다 — 앞 응답은 seq 가 달라 버려진다(구현이 되먹인 것: 「나가 있으면 무시」로 두면 답을 안 주는 서버(HANG) 뒤로 포맷이 영영 막힌다) | 위 ③ · 정의로 이동과 같은 seq 규율 |
 | **거부** | `Overlap`·`Malformed` 는 **아무것도 적용하지 않고** 알림 「포맷 결과를 거부했습니다 — 겹치거나 모양이 틀립니다」. 응답이 오류(`error` 멤버)면 결과 없음과 같이 무동작 | 위 ④ |
 | **적용 대상** | 요청한 **문서**(surface) — 탭을 옮겨 안 보여도 문서가 살아 있으면 적용한다(포맷은 화면이 아니라 문서에 하는 것 — hover·시그니처의 「보이는 Term 에만」과 다르다). 닫혔으면 버린다 | §3.6 은 문서 모델의 규칙이다 |
 | **하지 않는 것** | 범위 포맷(`rangeFormatting`) · 타이핑 시 포맷 · rename(입력 UI 뒤) · `WorkspaceEdit`(여러 파일 — rename 과 함께) · 포맷 뒤 caret 을 「같은 글자」로 되돌리는 것 이상(줄바꿈이 재배치되면 근사) | 다음 조각 |

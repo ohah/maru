@@ -9219,12 +9219,36 @@ pub fn moveLines(self: *AppSession, term: *Term, down: bool) bool {
     return runLinePlan(self, term, line_ops.planMove(self.allocator, doc.file.content, doc.file.lines, snap.items, down));
 }
 
-/// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a — 탭 하나, 내어쓰기는 있는 만큼만). 판정은 L2 `line_ops.planIndent`.
+/// 걸친 줄들의 머리를 한 단계 넣거나 뺀다(§3.9a — 그 파일의 들여쓰기 단위, 내어쓰기는 있는 만큼만). 판정은 L2 `line_ops.planIndent`, 단위는
+/// 안내선과 같은 추정(`guides_client.editUnit` — 계획 editor-typing-rules TR1).
 pub fn indentLines(self: *AppSession, term: *Term, outdent: bool) bool {
     const doc = lineOpDoc(term) orelse return false;
     const snap = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(snap.items);
-    return runLinePlan(self, term, line_ops.planIndent(self.allocator, doc.file.content, doc.file.lines, snap.items, outdent, term.rt.editor_tab_width));
+    return runLinePlan(self, term, line_ops.planIndent(self.allocator, doc.file.content, doc.file.lines, snap.items, outdent, guides_client.editUnit(term)));
+}
+
+/// 한 줄 안의 `Tab`(§3.9a — 계획 editor-typing-rules TR1) — 그 파일의 들여쓰기 단위로: 탭 파일이면 탭 문자, 공백 파일이면 커서마다 **그 열에서
+/// 다음 탭 스톱까지** 공백(VS Code `insertSpaces`). 열은 화면 층의 규칙(`content.lineColumns` — 한글 두 칸·탭 전개)으로 센다. 넣는 글자가
+/// 커서마다 같으면 **타이핑과 같은 길**(`insertText` — undo 묶음·자동 닫기 표식 정리가 같다)이고, 커서들의 열이 갈려 다르면 줄 조작의 길이다.
+pub fn insertTab(self: *AppSession, term: *Term) bool {
+    const unit = guides_client.editUnit(term);
+    if (unit.tabs) return insertText(self, term, "\t");
+    const doc = lineOpDoc(term) orelse return insertText(self, term, "\t"); // 읽기 전용·비교 — 그 길이 거절한다
+    const snap = selectionsForEdit(self, term) orelse return false;
+    defer self.allocator.free(snap.items);
+    const cols = self.allocator.alloc(u32, snap.items.len) catch return false;
+    defer self.allocator.free(cols);
+    for (snap.items, cols) |sel, *col| {
+        const at = @min(sel.start(), doc.file.content.len);
+        const line = doc.file.lines.line(doc.file.lines.lineAt(at)) orelse return false;
+        col.* = chrome_editor.content.lineColumns(doc.file.content[line.start..at], term.rt.editor_tab_width);
+    }
+    const first = unit.toNextStop(cols[0]);
+    for (cols[1..]) |c| {
+        if (unit.toNextStop(c).len != first.len) return runLinePlan(self, term, line_ops.planTab(self.allocator, doc.file.content, snap.items, cols, unit));
+    }
+    return insertText(self, term, first);
 }
 
 /// 선택이 **여러 줄에 걸치는가** — `Tab` 이 글자를 넣을지 줄을 들여쓸지 가른다(§3.9a).
@@ -9336,7 +9360,9 @@ pub fn deleteBy(self: *AppSession, term: *Term, backward: bool, unit: DeleteUnit
     // 함께(§3.7), 겹치면 통째로 거절, 변경을 안 낸 커서는 caret 을 안 받는다(결함 13)).
     var sels = selectionsForEdit(self, term) orelse return false;
     defer self.allocator.free(sels.items);
-    var edit = (edit_ops.planDelete(self.allocator, doc.file.content, doc.file.lines, sels.items, backward, unit, term.rt.editor_auto_closed_at) catch return false) orelse return false;
+    // 들여쓰기 안의 Backspace 는 앞 탭 스톱까지(§3.9a — 계획 editor-typing-rules TR1, VS Code `useTabStops`). 단위는 안내선과 같은 추정.
+    const stops: edit_ops.TabStops = .{ .unit = guides_client.editUnit(term), .tab_width = term.rt.editor_tab_width };
+    var edit = (edit_ops.planDelete(self.allocator, doc.file.content, doc.file.lines, sels.items, backward, unit, term.rt.editor_auto_closed_at, stops) catch return false) orelse return false;
     defer edit.deinit(self.allocator);
     const ranges = &edit.changes;
 
@@ -40487,13 +40513,14 @@ test "LN4 줄 이동 — 맞바꾸고, 문서 끝에서는 무동작이다 (§3.
     try testing.expectEqualStrings("b\na\nc\n", term2.rt.editorDocument().opened.?.file.content);
 }
 
-test "LN5 들여쓰기는 탭 문자 — 빈 줄은 안 건드리고, 내어쓰기는 있는 만큼만 (§3.9a)" {
-    // 들여쓰기 문자가 `Tab` 키와 갈리면 **같은 키가 선택 여부에 따라 다른 문자를 넣는다**.
+test "LN5 들여쓰기는 그 파일의 단위(탭 파일이면 탭) — 빈 줄은 안 건드리고, 내어쓰기는 있는 만큼만 (§3.9a)" {
+    // 들여쓰기 문자가 `Tab` 키와 갈리면 **같은 키가 선택 여부에 따라 다른 문자를 넣는다**. 단위는 감지한 것이다(계획 editor-typing-rules
+    // TR1) — 들여쓴 줄이 없는 Go 파일은 언어 기본이 탭이라 탭이다(공백 파일은 `INDT4`).
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = try undoFixture(&fx, allocator, "ln5.zig", "a\n\nb\n");
+    const term = try undoFixture(&fx, allocator, "ln5.go", "a\n\nb\n");
     term.rt.editor_selection = editor_selection.Selection.fromPoints(0, 5); // 세 줄 전부
 
     try testing.expect(indentLines(fx.session, term, false));
@@ -40712,7 +40739,7 @@ test "LNM8 들여쓰기·주석 토글 — caret 은 제 글자를 따라간다 
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const t1 = try undoFixture(&fx, allocator, "lnm8a.zig", "ab\n");
+    const t1 = try undoFixture(&fx, allocator, "lnm8a.go", "ab\n"); // Go — 단위가 탭(언어 기본)
     t1.rt.editor_selection = editor_selection.Selection.at(1); // "a|b"
     try testing.expect(indentLines(fx.session, t1, false));
     try testing.expectEqualStrings("\tab\n", t1.rt.editorDocument().opened.?.file.content);
@@ -40929,7 +40956,8 @@ test "LN7 ⇧⌘K 와 Tab/⇧Tab 이 실제로 닿는다 — 키 경로 전체 (
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
-    const term = try undoFixture(&fx, allocator, "ln7.zig", "a\nb\n");
+    // Go 파일 — 들여쓰기 단위가 탭이라 「Tab 은 탭 문자」를 그대로 잰다(공백 파일의 키 경로는 `INDT4`).
+    const term = try undoFixture(&fx, allocator, "ln7.go", "a\nb\n");
 
     term.rt.editor_selection = editor_selection.Selection.at(0);
     try pressKey(&fx, .{ .char = 'k' }, .{ .command = true, .shift = true });
@@ -40944,18 +40972,104 @@ test "LN7 ⇧⌘K 와 Tab/⇧Tab 이 실제로 닿는다 — 키 경로 전체 (
 
     // **한 줄 안에서 여러 글자를 골라도 Tab 은 글자다** — offset 차이로 재면 긴 한 줄이 여러 줄로
     // 오인되어, 단어를 고르고 Tab 을 치면 **줄이 들여쓰기된다**(변이 L12).
-    const term3 = try undoFixture(&fx, allocator, "ln7c.zig", "abcd\n");
+    const term3 = try undoFixture(&fx, allocator, "ln7c.go", "abcd\n");
     term3.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
     try pressKey(&fx, .tab, .{});
     try testing.expectEqualStrings("\td\n", term3.rt.editorDocument().opened.?.file.content);
 
     // **여러 줄이면 들여쓰기다.**
-    const term2 = try undoFixture(&fx, allocator, "ln7b.zig", "a\nb\n");
+    const term2 = try undoFixture(&fx, allocator, "ln7b.go", "a\nb\n");
     term2.rt.editor_selection = editor_selection.Selection.fromPoints(0, 3);
     try pressKey(&fx, .tab, .{});
     try testing.expectEqualStrings("\ta\n\tb\n", term2.rt.editorDocument().opened.?.file.content);
     try pressKey(&fx, .tab, .{ .shift = true });
     try testing.expectEqualStrings("a\nb\n", term2.rt.editorDocument().opened.?.file.content);
+}
+
+test "INDT4 들여쓰기 단위 — 공백 파일의 Tab·⇧Tab·Backspace 가 그 폭으로, 커서마다 그 열에서, 새 파일은 언어 기본(Makefile 은 탭), 안내선과 같은 추정 하나 (§3.9a, 계획 editor-typing-rules TR1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    // ⑴ 공백 2 파일 — 한 줄 Tab 은 다음 탭 스톱까지(열 0 → 2 칸, 열 3 → 1 칸), 키 경로로.
+    const t = try undoFixture(&fx, allocator, "tu4.ts", "if (a) {\n  b();\n}\nxyz\n");
+    t.rt.editor_tab_width = 4;
+    t.rt.editor_selection = editor_selection.Selection.at(18); // "xyz" 머리
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("if (a) {\n  b();\n}\n  xyz\n", content(t));
+    t.rt.editor_selection = editor_selection.Selection.at(23); // "  xyz" 끝 — 열 5
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("if (a) {\n  b();\n}\n  xyz \n", content(t));
+    try testing.expectEqual(@as(u64, 1), t.rt.editor_guides.guessed); // 한 번 추정해 굳혔다
+    // ⑵ Backspace — 들여쓰기 안이면 앞 스톱까지(두 칸), 글자 뒤 공백은 한 칸.
+    t.rt.editor_selection = editor_selection.Selection.at(20); // "  |xyz"
+    try pressKey(&fx, .backspace, .{});
+    try testing.expectEqualStrings("if (a) {\n  b();\n}\nxyz \n", content(t));
+    t.rt.editor_selection = editor_selection.Selection.at(22); // "xyz |"
+    try pressKey(&fx, .backspace, .{});
+    try testing.expectEqualStrings("if (a) {\n  b();\n}\nxyz\n", content(t));
+    // ⑶ 여러 줄 Tab·⇧Tab — 한 단계는 두 칸.
+    t.rt.editor_selection = editor_selection.Selection.fromPoints(0, 17);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("  if (a) {\n    b();\n  }\nxyz\n", content(t));
+    try pressKey(&fx, .tab, .{ .shift = true });
+    try testing.expectEqualStrings("if (a) {\n  b();\n}\nxyz\n", content(t));
+    // ⑷ 커서마다 그 열에서 — 열 0 과 열 1 의 두 커서는 2 칸·1 칸(넣는 글자가 갈려 줄 조작의 길).
+    const m = try undoFixture(&fx, allocator, "tu4m.ts", "  a\nb\nc\n");
+    m.rt.editor_tab_width = 4;
+    m.rt.editor_selection = editor_selection.Selection.at(4); // "b" 머리 — 열 0
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(7); // "c" 뒤 — 열 1
+    fx.session.allocator.free(m.rt.editor_extra_selections);
+    m.rt.editor_extra_selections = extras;
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("  a\n  b\nc \n", content(m));
+    // ⑸ 한글 뒤 — 열은 화면 폭으로 센다(한 글자 두 칸 → 열 2 에서 2 칸).
+    const k = try undoFixture(&fx, allocator, "tu4k.ts", "  a\n가\n");
+    k.rt.editor_tab_width = 4;
+    k.rt.editor_selection = editor_selection.Selection.at(7); // "가" 뒤
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("  a\n가  \n", content(k));
+    // ⑹ 들여쓴 줄이 없는 새 파일 — 언어 기본: TS 는 공백 tab-width 칸, Makefile 은 탭(레시피가 탭이어야 한다).
+    const e = try undoFixture(&fx, allocator, "tu4e.ts", "x\n");
+    e.rt.editor_tab_width = 4;
+    e.rt.editor_selection = editor_selection.Selection.at(0);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("    x\n", content(e));
+    const mk = try undoFixture(&fx, allocator, "Makefile", "all:\n");
+    mk.rt.editor_selection = editor_selection.Selection.at(5);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("all:\n\t", content(mk));
+}
+
+test "INDT5 문서 포맷의 options 는 그 문서의 들여쓰기 단위다 — 공백 2 파일은 insertSpaces 참·2, 탭 파일은 거짓·탭 폭 (§8.2e ③, 계획 editor-typing-rules TR1)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    const Case = struct { name: []const u8, text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .name = "tu5s.c", .text = "int f() {\n  FMTOPTS;\n}\n", .want = "OPTS spaces=true size=2" },
+        .{ .name = "tu5t.c", .text = "int f() {\n\tFMTOPTS;\n}\n", .want = "OPTS spaces=false size=4" },
+    }) |c| {
+        var f = (try SmtFixture.open(allocator, c.name, c.text)) orelse return error.SkipZigTest;
+        defer f.close(allocator);
+        try testing.expect(f.ready());
+        const s = f.fx.session;
+        f.term.rt.editor_tab_width = 4;
+        try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
+        try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_formattings);
+        const Settled = struct {
+            fn g(ss: *AppSession) bool {
+                return !ss.editor_format.waiting;
+            }
+        };
+        try testing.expect(pumpLspUntil(&f.fx, 3000, s, Settled.g));
+        try testing.expect(std.mem.indexOf(u8, f.term.rt.editorDocument().opened.?.file.content, c.want) != null);
+    }
 }
 
 test "CMT7 한 줄에 커서가 여럿이어도 표식은 하나다 (§3.7)" {

@@ -5,7 +5,7 @@
 //! 보이는 자리와 눌리는 자리가 어긋난다).
 //!
 //! I/O도 상태도 없다. 셀 폭을 받아 슬롯 폭을 셀 단위로 올림하는 이유는 chrome이 GPU 셀 격자에 정렬돼 있어서다
-//! (sub-pixel quad는 셀 배경에 먹혀 사라진다 — docs 기준: tui 위젯은 셀 정렬).
+//! (sub-pixel quad는 셀 배경에 먹혀 사라진다 — docs 기준: 셀 격자 위젯은 셀 정렬).
 
 const std = @import("std");
 
@@ -18,7 +18,7 @@ pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
 /// 누를 수 없는 아이콘을 띄우지 않는다(§3.5).
 pub const slot_count: usize = 6;
 
-/// 슬롯 하나의 **기본** 셀 수(테마가 pt 토큰을 안 줄 때 = tui). **아이콘이 2셀**(사이드바 에이전트 아이콘과
+/// 슬롯 하나의 **기본** 셀 수(테마가 pt 토큰을 안 줄 때 = 기반 토큰 `base` — 제품은 늘 rich라 pt를 준다). **아이콘이 2셀**(사이드바 에이전트 아이콘과
 /// 같은 `width=2` — 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로 2칸이면 또렷하고 크다)이고 좌우 여백 1셀씩이라
 /// 4셀이다.
 ///
@@ -140,7 +140,7 @@ pub fn actionAtPoint(bar: Rect, grid: Grid, count: usize, x: u32, y: u32) ?usize
 
 const testing = std.testing;
 
-/// 테스트가 쓰는 셀 파생 격자(테마 토큰 없음 = tui 경로). 옛 `slot_cols` 상수와 같은 4칸이다.
+/// 테스트가 쓰는 셀 파생 격자(테마 토큰 없음 = 기반 토큰 `base` 경로). 옛 `slot_cols` 상수와 같은 4칸이다.
 fn cellGrid(cell_width_px: u32) Grid {
     return Grid.init(cell_width_px, 0);
 }
@@ -246,7 +246,7 @@ test "동작 슬롯은 **셀 격자**의 오른쪽 끝에 붙는다 — 바 픽�
 
 // --- 슬롯 폭을 터미널 폰트에서 떼어낸 계약(`tokens.Space.dock_view_slot_width_pt`) ---
 
-test "Grid: 토큰이 없으면 셀 파생 4칸 — tui 경로는 이 커밋 전과 같다" {
+test "Grid: 토큰이 없으면 셀 파생 4칸 — base 토큰 경로는 이 커밋 전과 같다" {
     try testing.expectEqual(default_slot_cols, cellGrid(8).slot_cols);
     try testing.expectEqual(default_slot_cols, cellGrid(29).slot_cols);
     // 셀이 0이면 아무것도 못 그린다(호출자가 null로 받는다).

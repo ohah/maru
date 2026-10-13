@@ -116,22 +116,22 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 > 핵심 리스크 2개: **color picker**(2차 HSV는 색공간 수학·2D 그리드 — 1차는 16색+hex로 우회) + **pointer
 > 이벤트가 host에 아직 없음**(§3 CS-4-0이 선결). 나머지는 기존 패턴 변형이라 낮음.
 
-### 6.1 위젯 렌더 — tui(셀 정렬 text) vs rich(GPU quad)
+### 6.1 위젯 렌더 — rich(GPU quad) vs 기반 토큰(셀 정렬 text)
 
-위젯 view는 `tokens.space.corner_radius_px`로 두 룩을 분기한다(테마는 위젯 불변, [chrome-strategy.md] §5.4):
+위젯 view는 `tokens.space.corner_radius_px`로 두 갈래를 분기한다(테마는 위젯 불변, [chrome-strategy.md] §5.4). 제품 토큰은 `Tokens.rich`(`corner_radius_px = 8`) 하나라 **제품 화면은 늘 rich 갈래**다. 0 갈래는 옛 tui 룩(2026-08-19 제거)의 것이고, 지금은 radius 0 토큰(기반 토큰 `Tokens.base`와 같은 모양)으로 셀 lowering을 보는 테스트에서만 닿는다:
 
 - **rich(>0)**: GPU `ChromeDraw.quad`(SDF) — 둥근 pill·원형 knob·얇은 트랙·그림자 등 sub-pixel.
-- **tui(0)**: **셀 정렬 text**(`Op.text`). 토글 `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌), **숫자 입력 박스=값 text만**(border 0이라 테두리 quad 생략), dropdown 축소=`값 ▾`. control 열 좌단 정렬.
+- **0(기반 토큰 — 테스트만)**: **셀 정렬 text**(`Op.text`). 토글 `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌), **숫자 입력 박스=값 text만**(border 0이라 테두리 quad 생략), dropdown 축소=`값 ▾`. control 열 좌단 정렬.
 
   **드롭다운 팝업의 불투명 렌더(중요)**: 팝업은 설정 폼과 **같은 modal 레이어**의 셀 그리드라, `context_menu`(다른 레이어=터미널 위)처럼 그냥 quad로 덮으면 안 된다 — 모달 셀 lowering은 `.fill`이 셀 **배경만** 칠하고 **글리프는 안 지우며**, rich는 배경이 `surface_bg`인 셀을 투명화한다. 그래서 뒤 폼 텍스트가 팝업 뒤로 비친다. 해결: 팝업 각 행을 (1) `surface_bg`가 **아닌** 배경(`tab_hover_bg`/선택=`tab_active_bg`)으로 칠해 투명화 pass를 피하고, (2) 항목 텍스트를 **박스 폭까지 공백 패딩**해 그 행 모든 셀에 글리프를 놓아 뒤 폼 글리프를 덮는다(`dropdown.viewPopup`).
 
-  **결정 근거**: tui lowering은 quad를 `paintRectBg`로 **셀 단위** 배경에 칠한다. 위젯을 quad로 두면 (1) 얇은 트랙(높이 h/4)이 `@divTrunc`로 r0==r1이 돼 사라지고, (2) 행 높이 채움이 셀 경계에서 위아래로 번지며, (3) 선택 하이라이트(셀 bg)와 같은 레이어라 서로 덮어 거칠게 겹쳤다(겹침·가림 회귀). text는 placeText가 셀 정렬로 놓고 **text 레이어**(셀 bg 위)라 선택 하이라이트 위에 또렷하다(dropdown·palette 행과 동형). `█`(U+2588)는 합성 글리프라 폰트 무관 렌더. 위젯 view에 `cw`(셀 폭)를 넘겨 tui text 칸/오프셋을 계산한다.
+  **결정 근거**(옛 tui 룩 때의 결정): 셀 lowering은 둥글지 않은 quad를 `paintRectBg`로 **셀 단위** 배경에 칠한다. 위젯을 quad로 두면 (1) 얇은 트랙(높이 h/4)이 `@divTrunc`로 r0==r1이 돼 사라지고, (2) 행 높이 채움이 셀 경계에서 위아래로 번지며, (3) 선택 하이라이트(셀 bg)와 같은 레이어라 서로 덮어 거칠게 겹쳤다(겹침·가림 회귀). text는 placeText가 셀 정렬로 놓고 **text 레이어**(셀 bg 위)라 선택 하이라이트 위에 또렷하다(dropdown·palette 행과 동형). `█`(U+2588)는 합성 글리프라 폰트 무관 렌더. 위젯 view에 `cw`(셀 폭)를 넘겨 0 갈래의 text 칸/오프셋을 계산한다.
 
 ### 6.2 text 위젯(인라인 편집) + color 위젯(스와치 + 16색 프리셋)
 
 **text(widget `.text` = 폰트 패밀리)**: 인라인 편집. 행을 클릭/Enter하면 편집 모드(현재값 시드) — 글자/Backspace로 고치고 Enter 커밋, Esc 취소. 편집 버퍼는 컴포넌트 State의 **고정 버퍼**(`edit_buf[128]`)라 별도 allocator가 없다. **그보다 긴 값은 편집에 들이지 않는다**(`editFits` — 상단 배너 「편집 칸(128 바이트)보다 깁니다 — 설정 파일에서 고치세요」; 들이면 잘린 채 저장된다 — Enter 만 눌러도) — 치다가 넘치면 넘친 글자를 버리고 같은 배너를 띄운다(계획 workspace-trust WT5b-1 — 환경 제외 목록이 잘리면 뒤쪽 이름이 서버로 간다). 폰트 「직접 입력…」도 같다. 상단 배너는 힌트 줄을 대체할 뿐 그 아래 드롭다운 팝업은 그대로 그리고(예전에는 배너가 떠 있으면 팝업이 안 보인 채 ↑↓ 가 값을 바꿨다), 새 편집(`enterEdit`)은 지난 배너를 지운다. 커밋 시 platform이 `editText()`를 **config arena에 dupe**해 `schema.setText`로 적용(라이브 재resolve + write-back, 검증 포함) — 라이브/직렬화가 슬라이스를 계속 읽으므로 config arena가 소유한다.
 
-**color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). **스와치 렌더는 `Swatch.corner_radii`로 분기**(C4b `Op.quad` 동형) — 컴포넌트가 `props.shape.corner_radius_px`(스와치 높이의 절반으로 cap)를 실어, lowering이 0이면 셀 bg(tui 직각), >0이면 **둥근 GPU quad 칩**(rich, layer 3 — 셀·선택 하이라이트 위, literal RGB)으로 그린다. 인터랙션 세 zone:
+**color(widget `.color` = `#RRGGBB`)**: **스와치 + hex**(`components/color.zig`). 스와치는 `Op.swatch`(literal RGB)로 실제 색을 보여준다 — 다른 op은 색을 `ColorRole`(테마 토큰)로 두지만 스와치는 "이 색이 무엇인지"를 보여주는 **값 미리보기**라 의도적 예외로 원색을 싣는다(**raw-RGB draw 프리미티브** — role 추상화의 명시적 확장, CS-4-2 결정). platform이 `parseHexColor`로 RGB를 만들어 주입한다(chrome은 config 무지 유지). **스와치 렌더는 `Swatch.corner_radii`로 분기**(C4b `Op.quad` 동형) — 컴포넌트가 `props.shape.corner_radius_px`(스와치 높이의 절반으로 cap)를 실어, lowering이 0이면 셀 bg(직각 — 기반 토큰), >0이면 **둥근 GPU quad 칩**(rich, layer 3 — 셀·선택 하이라이트 위, literal RGB)으로 그린다. 인터랙션 세 zone:
 - **스와치 클릭 / Enter** → **HSV picker 열기**(현재 색으로 시드 — §6.9). 임의 색을 그리드로 고른다(2차 색 선택, CS-4-6).
 - **hex 클릭** → 인라인 편집(text 위젯 재사용 — `editText`→`setText`, hex 검증).
 - (예전 `←→` 16색 프리셋 순환은 제거 — `←→`는 방향키 영역 포커스 이동(←=네비·→=폼, §4)에 쓰이지 색을 조절하지 않는다. 색은 HSV picker·hex로 고른다.)
@@ -156,13 +156,13 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 ### 6.5 ANSI 16색 팔레트 그리드(`theme.palette.0~15`) — 특수 행 (CS-4-5 첫 조각)
 
-테마 섹션 맨 아래 **"ANSI 팔레트"** 행 — 16색을 한 줄 스와치 그리드로 편집한다. `theme.palette.N`은 **schema 필드가 아니라 특수 키**(loader가 인덱스 파싱, `[16]?[]const u8`)라 자동 노출되지 않으므로 platform이 color 뒤에 **한 행**을 합성 주입한다(`SettingsSectionFields.has_palette` — theme 섹션일 때만). 16칸이라 공유 control 열에 안 들어가므로 폼 우측에 그리드 블록(`palette_grid` Kind)을 펼친다(control 열 비공유, [§6.1] tui 규율은 그대로 — 색은 `Op.swatch` 원색).
+테마 섹션 맨 아래 **"ANSI 팔레트"** 행 — 16색을 한 줄 스와치 그리드로 편집한다. `theme.palette.N`은 **schema 필드가 아니라 특수 키**(loader가 인덱스 파싱, `[16]?[]const u8`)라 자동 노출되지 않으므로 platform이 color 뒤에 **한 행**을 합성 주입한다(`SettingsSectionFields.has_palette` — theme 섹션일 때만). 16칸이라 공유 control 열에 안 들어가므로 폼 우측에 그리드 블록(`palette_grid` Kind)을 펼친다(control 열 비공유, [§6.1] 셀 정렬 규율은 그대로 — 색은 `Op.swatch` 원색).
 
 - **셀 색**: `cells[i].rgb` = config override(`theme.palette[i]`) 있으면 그 hex, 없으면 **표준 xterm256(i)**(ANSI 0~15 기본). 그래서 미override 칸도 실제 기본색을 보여준다. hex 시드도 같은 규칙(override는 그대로, 기본은 RGB→`#rrggbb`).
 - **선택·편집**: 폼 포커스로 이 행에 있을 때 `←→`로 16색 셀을 이동(`State.grid_cell`), `Enter`/스와치 클릭으로 선택, 선택 셀의 hex를 인라인 편집(text/color 위젯과 같은 고정 버퍼·Enter 커밋·Esc 취소). 커밋은 `schema.setPaletteColor`(파일 로드와 같은 `#RRGGBB` 검증)로 적용 + `theme.palette.N` 키 dirty. **←→ 셀 이동은 platform이 pre-intercept**한다(`settingsPaletteArrowIntercept` — 방향키 영역 모델에서 ←→는 기본이 영역 포커스 이동이라, 이 가로-스트립 행에서만 셀 이동으로 가로챈다). `←` 셀0·`→` 셀15(끝)에선 가로채지 않아 셀 밖으로 나가는 방향키가 영역 이동으로 살아난다(마우스 클릭은 그대로 셀 선택). **검색 중에도 팔레트 ←→는 동작한다** — `currentSectionFields`가 검색 필터를 적용해 `paletteRowIndex`와 `selected`가 같은 필터-인덱스라 정합하고, 검색의 ←→는 원래 소비만 되던 미사용 키다(↑↓·글자는 그대로 검색 나비·쿼리 편집).
-- **선택 표식 = 인덱스 텍스트**: 우측에 **`N  #rrggbb`**(선택 ANSI 인덱스 + hex)를 보여준다. 셀 위에 `Op.border`/`fill`을 얹으면 tui lowering(`paintRectBg`가 셀 단위)이 **1행 높이라 셀 전체를 그 색으로 칠해 스와치 색을 덮으므로** 안 쓴다. 인덱스는 색과 무관하게 어느 칸인지 분명히 보여준다.
+- **선택 표식 = 인덱스 텍스트**: 우측에 **`N  #rrggbb`**(선택 ANSI 인덱스 + hex)를 보여준다. 셀 위에 `Op.border`/`fill`을 얹으면 모달 셀 lowering(`paintRectBg`가 셀 단위)이 **1행 높이라 셀 전체를 그 색으로 칠해 스와치 색을 덮으므로** 안 쓴다. 인덱스는 색과 무관하게 어느 칸인지 분명히 보여준다.
 - **영속은 공짜**: write-back(`serialize.configKeyValues`)이 **이미 set된 `theme.palette.N`을 직렬화**한다(round-trip 테스트가 보장). 그래서 별도 write-경로 확장 없이 dirty만 찍으면 파일에 써진다 — `theme.preset`이 깐 팔레트도 이 그리드로 직접 칠하면 영속된다([§6.3] 한계의 직접 해소 경로).
-- **온-그리드 선택 마커**: 선택 스와치 위에 `▾` 글리프(accent text 레이어)를 얹어 어느 칸인지 보여준다 — `Op.border`/`fill`은 tui lowering(`paintRectBg` 셀 단위)이 셀 전체를 칠해 스와치 색을 덮으므로, 글리프(셀 bg=스와치 색은 거의 안 가림)로. 우측 `N  #hex` 인덱스 텍스트와 함께.
+- **온-그리드 선택 마커**: 선택 스와치 위에 `▾` 글리프(accent text 레이어)를 얹어 어느 칸인지 보여준다 — `Op.border`/`fill`은 모달 셀 lowering(`paintRectBg` 셀 단위)이 셀 전체를 칠해 스와치 색을 덮으므로, 글리프(셀 bg=스와치 색은 거의 안 가림)로. 우측 `N  #hex` 인덱스 텍스트와 함께.
 - **셀별 기본값 되돌리기(§6.11)**: 선택 셀이 override(config에 `theme.palette.N` 있음)면 그 palette 행 **맨 오른쪽 칸**(§6.11 다른 행과 같은 자리)에 ↺ 어포던스가 뜬다 — 클릭/Backspace로 `theme.palette[N]=null` + `markConfigKeyRemoved(paletteKey(N))`(override 줄 제거)로 표준 xterm256 기본색으로 되돌린다(옛 "null로 되돌리기(통합 리셋이 담당)" 한계 해소).
 - **한계(후속)**: 셀별 프리셋 순환(현재는 hex 입력만).
 
@@ -221,7 +221,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 16색 프리셋(§6.2)만으로 못 고르는 임의 색을 위해 **HSV picker**를 둔다. **새 ChromeHost 모달이 아니라 세팅 모달의 모드**(`State.picking`)다 — picker가 켜지면 `settings.view`가 폼 대신 picker를 그리고(early-return) 키/포인터가 picker로 라우팅된다(host 배선 추가 없이 기존 settings 경로 재사용).
 
 - **HSV↔RGB**: `src/color.zig`의 `hsvToRgb`/`rgbToHsv`(`Hsv{h:0~359, s:0~100, v:0~100}`). 표준 변환(round-trip ±3 — 단위 테스트가 못박음). 색공간 수학은 chrome이 아니라 `color.zig`(렌더러 계층 공유 유틸)에 둔다.
-- **레이아웃(셀-그리드 tui)**: ① **SV 그리드** — 채도(col 16칸) × 명도(row 8칸)의 원색 스와치(현재 hue 고정, 위가 명도 100). ② **hue 스트립** — 색상(col 16칸, 채도·명도 100). ③ **미리보기** — 현재 효과색 스와치 + `#rrggbb  H S V`. ④ 도움말. 셀-그리드라 **이산 샘플**(연속 해상도는 후속) — `svSatForCol`/`svValForRow`/`hueForCol` 등이 셀↔값을 정수 반올림으로 매핑(양 끝 0/100·0/360에 정확히 닿음). 선택 셀은 **▾ 마커 글리프**(text 레이어)로 표시 — palette 그리드와 같은 이유로 `Op.border`를 안 쓴다([§6.5]·[[tui-widgets-must-be-cell-text-not-quad]]: tui lowering의 `paintRectBg`가 1행 border를 셀 전체로 칠해 스와치 색을 덮음). picker 박스 기하는 `pickerLayout`이 단일 출처(렌더·hit-test 공유).
+- **레이아웃(셀-그리드)**: ① **SV 그리드** — 채도(col 16칸) × 명도(row 8칸)의 원색 스와치(현재 hue 고정, 위가 명도 100). ② **hue 스트립** — 색상(col 16칸, 채도·명도 100). ③ **미리보기** — 현재 효과색 스와치 + `#rrggbb  H S V`. ④ 도움말. 셀-그리드라 **이산 샘플**(연속 해상도는 후속) — `svSatForCol`/`svValForRow`/`hueForCol` 등이 셀↔값을 정수 반올림으로 매핑(양 끝 0/100·0/360에 정확히 닿음). 선택 셀은 **▾ 마커 글리프**(text 레이어)로 표시 — palette 그리드와 같은 이유로 `Op.border`를 안 쓴다([§6.5]·[[tui-widgets-must-be-cell-text-not-quad]]: 모달 셀 lowering의 `paintRectBg`가 1행 border를 셀 전체로 칠해 스와치 색을 덮음). picker 박스 기하는 `pickerLayout`이 단일 출처(렌더·hit-test 공유).
 - **조작**: `←→` 채도, `↑↓` 명도, `[`/`]` 색상(wrap), `Enter` 확정, `Esc` 취소(picker만 닫고 폼 복귀 — 모달 유지). 포인터: SV 그리드 클릭·드래그 → s/v, hue 스트립 클릭 → h, 박스 밖 클릭 → 취소(드래그는 폼 위젯 press-gate 규율과 같아 hover로는 안 바뀜).
 - **커밋**: 컴포넌트가 `Enter`에서 `color_picked` Action → host가 `settings_color_picked`로 정규화 → platform `commitPickerColor`가 `settings.pickerRgb()`를 `#rrggbb`로 직렬화해 선택 color 행 키에 `setText`(인라인 편집 커밋과 같은 인덱스 매핑·검증·write-back 예약) + picker 닫기. hex 문자열은 `loaded_config.arena` 소유.
 - **연속 해상도(키)**: pick_h/s/v는 full precision(0~359/0~100)으로 저장되므로, **Shift+화살표**(±1 채도/명도)·**`{`/`}`**(=Shift+[/], ±1° hue)로 그리드 셀 **사이** 임의 값에 도달한다. 평범한 화살표·`[`/`]`는 빠른 셀 점프(coarse) 그대로 — 이산 그리드는 표시·coarse용이고 값은 미세 조정으로 연속. 미리보기 `#rrggbb H S V`가 정확한 효과색을 실시간 표시. (picker 고급화 리뷰)

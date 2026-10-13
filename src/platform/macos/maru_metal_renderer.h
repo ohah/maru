@@ -85,7 +85,7 @@ bool maru_metal_renderer_draw(
     const MaruAppHostMetalCell *sidebar_cells,
     size_t sidebar_cell_count,
     /* chrome rich GPU quad 프리미티브(C4b — 둥근 사각형: per-corner radius+border+gradient, SDF AA).
-       NULL/0이면 안 그림(tui 테마는 셀 fill 유지). 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다. */
+       NULL/0이면 안 그림(그 프레임에 lowering이 모은 quad가 없을 때). 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads,
     size_t gpu_quad_count,
     /* C4b overlay 셀이 cells에서 시작하는 순수 인덱스. 존재 여부는 마지막 overlay_cells_present가 명시하며,

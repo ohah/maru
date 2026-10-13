@@ -378,18 +378,18 @@ pub fn paneTabWidth(cols: u16, tab_count: usize) u16 {
 
 /// 탭 바 레이아웃 단일 소스(§6) — barMetrics(hit-test)·buildPaneTabBarDrawList(렌더)가 공유해 보이는 탭/‹›/+ 와
 /// 클릭이 일치한다. base=paneTabAreaCols("+" zone 뺀 탭 영역). 전체 탭 폭(term*tab_w)이 base를 넘으면 우측에
-/// ‹›(왼/오 스크롤) 2칸을 예약해 tab_cols를 그만큼 줄인다(has_scroll). tab_w: rich 고정 or tui 균등. tab_w=0=분할 불가.
+/// ‹›(왼/오 스크롤) 2칸을 예약해 tab_cols를 그만큼 줄인다(has_scroll). tab_w: 고정 폭(rich 토큰 16) 하한 or 균등(fixed 0 — 기반 토큰 `Tokens.base`, 제품은 rich라 테스트만). tab_w=0=분할 불가.
 pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) struct { tab_cols: u16, tab_w: u16, has_scroll: bool, eff_scroll: u32 } {
     const base = paneTabAreaCols(bar_cols);
     // **고정 폭은 하한이다(2026-08-18 사용자 요청).** 탭이 적으면 남는 폭을 나눠 **바를 꽉 채운다** —
     // 소스 컨트롤·히스토리·에이전트 도크의 탭이 그렇게 보이는데 터미널 탭 바만 오른쪽이 비어 톤이
     // 갈렸다. 탭이 많아 균등 폭이 고정 폭보다 좁아지면 고정 폭이 이기고(그때 넘치면 아래 ‹› 스크롤),
-    // tui(fixed 0)는 예전처럼 항상 균등이다.
+    // fixed 0(기반 토큰 `Tokens.base` — 제품은 늘 rich라 닿지 않는다, 테스트만)은 항상 균등이다.
     const even = paneTabWidth(base, term_count);
     const tab_w = if (tab_width_fixed > 0) @max(tab_width_fixed, even) else even;
     if (tab_w == 0) return .{ .tab_cols = base, .tab_w = 0, .has_scroll = false, .eff_scroll = 0 };
     const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
-    // #4(리뷰): rich 고정폭(tab_width_fixed>0)만 스크롤한다 — tui 균등은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄움("tui 무변화" 유지).
+    // #4(리뷰): 고정폭(tab_width_fixed>0 — rich)만 스크롤한다 — fixed 0 균등(기반 토큰, 제품은 안 닿음)은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄운다(옛 tui 룩[2026-08-19 제거]의 무변화 계약).
     // ‹›(2칸) 둘 여유(base>2)도 필요.
     // ‹·› 는 각 `scroll_button_cols`(3칸: 좌여백·glyph·우여백) 이라 여섯을 예약한다 — 옛 1칸은 누르기
     // 어려웠고(사용자 보고 2026-08-18), 그때 늘린 2칸은 glyph 가 버튼 안에서 한쪽에 붙었다(2026-08-20).
@@ -828,7 +828,7 @@ pub fn buildPaneTabBarDrawList(
     close_all: bool, // true면 **모든 탭**에 닫기 ✕(호버 전용이 아니라 고정 표시 — 사용자 요청)
     active_tab: ?usize,
     active_fg: terminal.Color,
-    tab_width_fixed: u16, // 0=균등분할(tui — 바를 탭 수로 나눔), >0=탭 고정 폭(rich). barMetrics와 같은 값이라 보이는 탭=클릭 탭 정합(§6)
+    tab_width_fixed: u16, // 0=균등분할(기반 토큰 — 바를 탭 수로 나눔, 제품은 rich라 테스트만), >0=탭 고정 폭(rich). barMetrics와 같은 값이라 보이는 탭=클릭 탭 정합(§6)
     scroll_cols: u32, // Step 2: 가로 스크롤 offset(컬럼) — segCols에 전달해 보이는 탭 창을 왼쪽으로 민다. 0=기본. barMetrics와 같은 값(정합).
     editing_tab: ?usize, // rename 중인 Term 탭 인덱스(없으면 null). 그 탭 제목만 tail 앵커로 그려 caret(문자열 끝)를 세그먼트 안에 유지한다.
 ) !renderer.DrawList {
@@ -2030,7 +2030,7 @@ test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)
     try std.testing.expectEqual(@as(u16, 0), paneTabWidth(20, 0));
 }
 
-test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘침 무스크롤" {
+test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; base 토큰(fixed 0)·안넘침 무스크롤" {
     // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll.
     // ‹·› 는 **각 3칸**(좌여백·glyph·우여백)이라 여섯을 뗀다. tab_cols = 37 - 6 = 31.
     const ovf = tabLayout(40, 3, 16, 0);
@@ -2053,7 +2053,7 @@ test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; tui·안넘�
     const many = tabLayout(40, 5, 16, 0);
     try std.testing.expectEqual(@as(u16, 16), many.tab_w);
     try std.testing.expect(many.has_scroll);
-    // #4: tui(fixed 0)는 탭 많아 tab_w=1 collapse여도 has_scroll=false(균등, 스크롤 안 함 — tui 무변화).
+    // #4: base 토큰(fixed 0)은 탭 많아 tab_w=1 collapse여도 has_scroll=false(균등, 스크롤 안 함).
     try std.testing.expect(!tabLayout(40, 12, 0, 0).has_scroll);
 }
 

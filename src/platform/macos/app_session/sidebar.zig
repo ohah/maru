@@ -1651,8 +1651,8 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
                 .row_hover_bg => sidebarRowHoverBg(self), // 활성 밴드 위에서도 보이도록 활성보다 한 단계 밝게
                 else => sidebarHoverBg(self),
             };
-            // 이 슬롯 탭에 배경 tint가 있으면 밴드 색에 섞는다 — tui 활성/호버 슬롯은 불투명 밴드(셀)가 tint quad를
-            // 덮으므로, 밴드 색 자체를 tint로 당겨 활성/호버 슬롯에서도 색이 보이게 한다(idle 슬롯은 밴드가 없어 quad가 그대로).
+            // 이 슬롯 탭에 배경 tint가 있으면 밴드 색에 섞는다 — 활성/호버/드롭 슬롯은 불투명 밴드가 슬롯을 덮어 idle용
+            // tint quad를 따로 안 그리므로(이중 tint 방지 — 위 「① 배경 tint」), 밴드 색 자체를 tint로 당겨 활성/호버 슬롯에서도 색이 보이게 한다(idle 슬롯은 밴드가 없어 quad가 그대로).
             // 가변 높이(SG3c): 밴드 y는 rowTop 누적이라 고정 y/slot_h로 row를 못 역산한다 — sidebarBandRow가 누적으로 역산한다.
             if (sidebarBandRow(self, q.rect.y)) |ri| switch (rrows[ri]) { // 표시 슬롯 ri — 밴드가 카드/헤더냐로 tint 소스가 갈린다
                 .card => |c| {
@@ -1680,7 +1680,7 @@ pub fn lowerSidebar(self: *AppSession, ops: []const chrome.draw.Op) void {
                 const sr = sidebarScrollClipQuad(self, q.rect.y, @floatFromInt(q.rect.h)) orelse continue;
                 // 상단이 헤더에 걸려 잘리면 둥근 모서리를 죽인다(헤더 경계에 abut한 라운드 상단이 어색하지 않게).
                 const radii: [4]f32 = if (sr.clipped) .{ 0, 0, 0, 0 } else .{ @floatFromInt(q.corner_radii[0]), @floatFromInt(q.corner_radii[1]), @floatFromInt(q.corner_radii[2]), @floatFromInt(q.corner_radii[3]) };
-                // 드롭 타겟은 불투명 유지(tui 분기와 동일 이유), 나머지 밴드만 window.opacity(quad straight-alpha). 한 번만 계산해 두 fill에 공유.
+                // 드롭 타겟은 불투명 유지(드래그 중 「어디 떨어질지」 단서라 window.opacity 미적용 — focus 테두리·accent와 동급), 나머지 밴드만 window.opacity(quad straight-alpha). 한 번만 계산해 두 fill에 공유.
                 const band_bg = if (q.fill_role == .drop_zone) color else self.chromeQuadBg(color);
                 self.gpu_quads.append(self.allocator, .{
                     .x = @floatFromInt(q.rect.x),
@@ -2030,7 +2030,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
     if (cw == 0 or (self.tabs.items.len == 0 and self.sidebar_rows.items.len == 0)) return error.NoSidebar;
     // U2/B2: 제목 영역 = 슬롯 폭에서 좌측(카드 패딩 + accent 막대)·우측(카드 패딩)을 inset한 content rect(선언적
     // 패딩, Rect.inset). 그 좌단을 셀 col로 ceil 환산(indent_cols)해 제목을 좌측 막대 우측·카드 안에 둔다(rich).
-    // tui(0)면 left=right=0이라 전체 폭·indent 0(기존과 동일).
+    // 토큰이 0이면(기반 토큰 `Tokens.base` — 제품은 늘 rich라 닿지 않는다) left=right=0이라 전체 폭·indent 0.
     const sp = self.buildChromeTokens().space; // 아래 그룹 들여쓰기 등 다른 토큰 소비자가 계속 쓴다
     // 열 배치는 **chrome이 단일 출처**다(`sidebar.columns`). 예전에는 이 함수가 gutter·inset·indent를 직접
     // 유도하고 hit-test(`closeButton`)는 `w - 3cw`로 따로 유도해, gutter가 상시 예약된 뒤 ✕의 보이는 자리와
@@ -2549,7 +2549,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
         // 아이콘·스피너 모두 **솔리드 브랜드색**(running 펄스 폐기). 작업 중 애니메이션은 상태줄 파형이 담당, 아이콘은 종류/presence.
         c.style.foreground = .{ .rgb = brand };
     }
-    // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; tui indent=0 no-op).
+    // U2/B2: 제목·✕·+ 셀을 content rect 좌단(indent_cols)만큼 우측으로 민다 — 좌측 maru-accent 막대 + 카드 패딩 안 가리게(rich만; 토큰 0인 기반 토큰이면 indent=0 no-op — 제품은 안 닿음).
     if (indent_cols > 0) {
         for (draw_list.cells) |*c| c.col += indent_cols;
         // 시프트로 셀이 [indent_cols, sidebar_cols+indent_cols)로 가므로 surface 폭도 full_cols로 넓힌다 — 안 그러면
@@ -2976,7 +2976,7 @@ pub fn packStraightRgbU32(rgb: u32, alpha: u8) u32 {
 /// 실어 준다 — .m 렌더러가 옛 균일 `row*slot_h`/`slot_h` 대신 이 둘을 써 그룹 헤더(얇은 한 줄)와 정합한다(glyph 옵션2와
 /// 동형). height는 glyph 없는 sentinel 셀이라 미사용인 `atlas_height_px` 필드로 나른다(atlas 미참조라 안전). `row`는
 /// tint 역매핑·디버그용 표시 row(세로 위치는 origin_y가 단일 출처). 순수 함수라 OS와 무관하게 단위 테스트한다
-/// per-tab 배경색(우클릭 "배경: …") tint 세기 — rich gpu_quad·tui 밴드 두 경로 단일 출처. 0xB0 ≈ 69%
+/// per-tab 배경색(우클릭 "배경: …") tint 세기 — idle 슬롯 tint quad·활성/호버/드롭 밴드 색 blend 두 경로의 단일 출처. 0xB0 ≈ 69%
 /// (0x66 ≈ 40%에서 올림 — 옅어서 안 보인다는 라이브 요청). 0=투명, 0xFF=완전 불투명.
 pub const tab_bg_tint_alpha: u8 = 0xB0;
 

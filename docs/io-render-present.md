@@ -335,7 +335,7 @@ continuation·atlas slot 재사용)는 그대로이고 수치만 「글자 수�
 ### 11.5 트레이드오프 / 한계
 
 - **whole-frame 재present**: 사이드바 갱신마다 grid도 GPU re-draw된다(비용 있음). 단 grid는 재셰이프·atlas 재업로드가 없고(generation만 상승, Swift가 newFrame일 때만 atlas 처리) 스피너 cadence가 ~133ms라 sync hold(최대 1초) 중 최대 ~7회/초 재draw. **idle 셸에는 무영향**(`chrome_dirty`가 running 카드 있을 때만).
-- **범위**: 이 설계는 사이드바 스피너에 한정. 탭바 tui 셀·모달 caret은 메인 `cells` 버퍼에 인터리브돼 커서 suffix bookkeeping과 얽혀 있어 별도 레이어 추출이 필요(더 큰 작업, 후속).
+- **범위**: 이 설계는 사이드바 스피너에 한정. 탭바 셀(옛 tui 룩 — 2026-08-19 제거)·모달 caret은 메인 `cells` 버퍼에 인터리브돼 커서 suffix bookkeeping과 얽혀 있어 별도 레이어 추출이 필요(더 큰 작업, 후속).
 - **베이스/결정**: Ghostty·xterm.js는 GPU chrome이 없어 이 문제가 없다(선례 없음) — **Maru 독립 설계**. sync는 "리더가 완성한 grid 프레임 경계"의 문제이고 chrome은 그 대상이 아니라는 원칙에서 유도.
 
 ### 11.6 관측 (`.sync` 스코프 로거)

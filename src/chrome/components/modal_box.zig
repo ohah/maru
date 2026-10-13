@@ -43,7 +43,7 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
     const term_w_px = workspace.w;
     const term_cols = term_w_px / cw;
     if (term_cols == 0) return null;
-    // C4b 패딩: rich lowering이 배경 quad를 ±pad 확장하므로, 그만큼 줄인 가용 칸으로 clamp(tui=0이면 무변화).
+    // C4b 패딩: rich lowering이 배경 quad를 ±pad 확장하므로, 그만큼 줄인 가용 칸으로 clamp(base=0이면 무변화).
     const pad: u32 = p.shape.modal_padding_px;
     const avail_cols = (term_w_px -| 2 * pad) / cw;
     const margin = tk.space.modal_margin_cells;
@@ -65,13 +65,13 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
     };
 }
 
-/// 박스 배경 quad + focus 테두리를 emit한다(notice/confirm 공유). tui(corner/border=0)면 셀 배경 + Op.border 셀,
+/// 박스 배경 quad + focus 테두리를 emit한다(notice/confirm 공유). base(corner/border=0)면 셀 배경 + Op.border 셀,
 /// rich(>0)면 둥근 quad + quad 테두리. 콘텐츠(text/fillCells)는 호출자가 이 뒤에 emit해 그 위에 그려진다.
 pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
-    // 외곽선(별도 .border op)은 두지 않는다 — tui에서 박스보다 밝은 외곽선이 색이 튀어 어색했다(사용자 피드백).
-    // tui(bw=0)는 외곽선 없는 박스 배경(surface_bg)만이고 화면과는 배경 밝기 차이로 구분된다. rich(bw>0)는 quad가
+    // 외곽선(별도 .border op)은 두지 않는다 — 옛 tui 룩(2026-08-19 제거)에서 박스보다 밝은 외곽선이 색이 튀어 어색했다(사용자 피드백).
+    // base(bw=0)는 외곽선 없는 박스 배경(surface_bg)만이고 화면과는 배경 밝기 차이로 구분된다. rich(bw>0)는 quad가
     // 둥근 모서리 + 얇은 **focus_accent 테두리** + 그림자로 떠 보이게 한다(rich 외곽선은 quad의 border_widths가 그린다).
     // 테두리 role = focus_accent(모달 버튼 [확인]과 같은 톤 — 사용자 요청 "모달 테두리를 닫기 버튼 색 톤으로"). 중립 테마는
     // focus_accent가 옅은 중립이라 은은한 외곽선, accent를 준 테마(dark_pink 등)는 그 accent 톤 외곽선으로 버튼과 코히어런트.

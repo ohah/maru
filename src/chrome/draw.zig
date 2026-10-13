@@ -1,5 +1,6 @@
 //! Chrome semantic draw 어휘 — backend-neutral. 컴포넌트는 ChromeDraw만 뱉고, platform 백엔드가
-//! 이걸 그 플랫폼의 셀로 lowering한다(tui→NativeMetalCell, rich→GPU 프리미티브). 좌표는 **픽셀**
+//! 이걸 그 플랫폼의 셀로 lowering한다(모서리 0인 기반 토큰 `base`→NativeMetalCell, rich→GPU 프리미티브 — 제품은
+//! 늘 rich, base 갈래는 테스트가 셀 lowering을 볼 때 쓴다). 좌표는 **픽셀**
 //! (rich의 sub-cell 정밀도 대비). 컴포넌트는 NativeMetalCell·Metal·atlas를 모른다.
 //! 단일 출처: docs/chrome-strategy.md §5.2, docs/layering-and-portability.md.
 
@@ -102,10 +103,10 @@ pub const Op = union(enum) {
     pub const Fill = struct { rect: Rect, role: tokens.ColorRole, alpha: u8 = 0xFF };
     /// **literal RGB** 색 견본(color picker 스와치). 다른 op은 색을 ColorRole(테마 토큰)로 두지만, 스와치는 "이
     /// 색이 무엇인지"를 그대로 보여주는 값 미리보기라 role이 아니라 원색을 싣는다(의도적 예외 — config-gui §6.2 결정).
-    /// 백엔드가 셀 bg/quad에 이 RGB를 그대로 칠한다. corner_radii(Quad와 동형)가 0이면 셀 bg(tui), >0이면 둥근
-    /// GPU quad(rich) — 컴포넌트가 props.shape에서 읽어 채운다(tui=0 직각, rich>0 둥근 칩, C4b 분기 동형).
+    /// 백엔드가 셀 bg/quad에 이 RGB를 그대로 칠한다. corner_radii(Quad와 동형)가 0이면 셀 bg(base), >0이면 둥근
+    /// GPU quad(rich) — 컴포넌트가 props.shape에서 읽어 채운다(base=0 직각, rich>0 둥근 칩, C4b 분기 동형).
     pub const Swatch = struct { rect: Rect, rgb: Rgb, corner_radii: [4]u16 = .{ 0, 0, 0, 0 } };
-    /// 사각형의 일부 변에 선(focus 테두리). tui는 reserved-kind 띠, rich는 실제 테두리/radius로 lowering.
+    /// 사각형의 일부 변에 선(focus 테두리). 기반 토큰(base)은 reserved-kind 띠, rich는 실제 테두리/radius로 lowering.
     pub const Border = struct { rect: Rect, sides: Sides, role: tokens.ColorRole };
     /// 한 줄(divider). 수평/수직은 from/to로 결정.
     pub const Rule = struct { from: Px, to: Px, role: tokens.ColorRole };
@@ -183,9 +184,9 @@ pub const Op = union(enum) {
         clip: ?Rect = null,
     };
 
-    /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. tui 백엔드는 corner/border가 0이면
-    /// Fill처럼 셀로 lowering하고, rich 백엔드는 GPU quad 프리미티브로 lowering한다. 모양 파라미터는
-    /// 컴포넌트가 tokens.space에서 읽어 채운다(tui=0 → 직각, rich>0 → 둥근) — 컴포넌트 코드는 tui/rich
+    /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. 백엔드는 corner/border가 0이면(기반 토큰 base)
+    /// Fill처럼 셀로 lowering하고, >0이면(rich) GPU quad 프리미티브로 lowering한다. 모양 파라미터는
+    /// 컴포넌트가 tokens.space에서 읽어 채운다(base=0 → 직각, rich>0 → 둥근) — 컴포넌트 코드는 base/rich
     /// 분기 없이 같다(C4a 색 분리와 동형). corner_radii=[tl,tr,br,bl], border_widths=[top,right,bottom,left](px).
     pub const Quad = struct {
         rect: Rect,

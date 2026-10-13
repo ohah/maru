@@ -385,8 +385,8 @@ typedef struct MaruAppHostMetalRasterUpload {
 } MaruAppHostMetalRasterUpload;
 
 /* chrome rich 백엔드(C4b)의 GPU 둥근 사각형 프리미티브. Zig metal_frame.GpuQuad와 1:1. 셀 그리드와
-   별개 파이프라인으로 SDF anti-aliasing. tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 fill 유지), rich만
-   채운다(C4b-2~). 좌표 backing px. */
+   별개 파이프라인으로 SDF anti-aliasing. chrome lowering이 그 프레임에 모은 것이 없으면 빈 배열(NULL/0)이라
+   렌더 무동작(C4b-2~). 좌표 backing px. */
 typedef struct MaruAppHostGpuQuad {
     float x;
     float y;
@@ -521,8 +521,8 @@ typedef struct MaruAppHostMetalFrame {
        사이드바 셀 없음("surface→rect"의 두 번째 surface — split도 rect별 cell 배열로 확장). */
     const MaruAppHostMetalCell *sidebar_cells;
     size_t sidebar_cell_count;
-    /* chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(NULL/0)이라 렌더 무동작(셀 그리드 유지),
-       rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다. */
+    /* chrome rich GPU 프리미티브(C4b). chrome lowering이 채우고(C4b-2~), 그 프레임에 그릴 것이 없으면
+       빈 배열(NULL/0)이라 렌더 무동작. NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads;
     size_t gpu_quad_count;
     const MaruAppHostGpuShadow *gpu_shadows;

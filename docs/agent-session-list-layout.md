@@ -126,8 +126,8 @@ identity는 바꾸지 않으며, `SessionDock`의 같은 completed `UiRectTree`�
   남는데, 이는 §2.1.2가 금지한 상태다. disclosure는 도크가 소유하므로 선택·확장·닫기는 새 `Term`, tab, surface 또는
   pane body를 만들지 않는다. 따라서 archive detail 때문에 terminal focus·workspace persistence·PTY
   lifecycle에 별도 예외가 생기지 않는다.
-- rich Chrome은 radius/border/shadow token을 사용하고, tui legacy lowering은 같은 rect/spacing을
-  직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
+- rich Chrome은 radius/border/shadow token을 사용하고, radius 0 토큰(기반 토큰 `Tokens.base` — 옛 tui 룩,
+  2026-08-19 제거)의 셀 lowering은 같은 rect/spacing을 직각 fill로만 lower한다. component가 `if (rich)` 또는 font별 좌표 nudge를 두지 않는다.
 
 `ChromeTextRole`은 role별 line box와 final-pixel glyph placement를 전달한다. 기본 목록은 compact
 Chrome scale(`card title` 14pt, `summary`/`body` 13pt, `metadata` 12pt, `dock heading` 16pt)을 사용한다.

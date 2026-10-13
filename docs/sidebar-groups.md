@@ -248,13 +248,14 @@ row별 누적 y(또는 각 row 높이/누적 오프셋 배열)를 받도록 인�
 같은 누적 y를 쓴다. 헤더 glyph(삼각+이름)는 카드 제목과 같은 `buildSidebarDrawList` 경로에 row 종류만 분기한다.
 
 **밴드 셀도 같은 옵션2로(code-review #7·#8)**: 위 glyph 옵션2(`.m`이 Zig가 실은 `origin_y`만 씀)를 **tui 셀 밴드**(`slot_id==0`
-sentinel)에도 적용한다 — 옛 밴드 분기는 `sc.row*slot_h`·높이 `slot_h`로 균일을 가정해, 그룹 헤더(header_row_h<slot_h)가 앞서면
+sentinel — 옛 tui 룩의 갈래, 2026-08-19 `sidebarBandCell`과 함께 제거)에도 적용했다 — 옛 밴드 분기는 `sc.row*slot_h`·높이 `slot_h`로 균일을 가정해, 그룹 헤더(header_row_h<slot_h)가 앞서면
 밴드가 격자에서 어긋났다. 이제 `sidebarBandCell`이 chrome이 준 content-상대 rowTop(`q.rect.y`)을 `origin_y`로, 실제 row 높이
 (`q.rect.h` — 카드=slot_h·색 헤더=header_row_h)를 `atlas_height_px`(sentinel이라 미사용 필드 재활용)로 실어 주고, `.m`은
 `origin_y+header−scroll`·그 높이로 그린다(glyph와 단일 스크롤 소스). 또 **리스트 아래 새-워크스페이스 드롭 하이라이트**(drop_slot
 ==rows.len)는 bandFill이 `q.rect.y=contentHeight`로 내므로, 옛 `sidebarBandRow(y) orelse continue`(past-end null)가 삼키던 셀을
 이제 `q.rect.y`를 직접 origin_y로 써서 방출한다(#8). tui 밴드 정합은 `MARU_FORCE_GROUP_COLOR` + `chrome.theme=tui` 스크린샷으로
-확인(색 헤더 밴드=얇은 header_row_h·카드 밴드=slot_h가 각자 텍스트와 정렬).
+확인했다(색 헤더 밴드=얇은 header_row_h·카드 밴드=slot_h가 각자 텍스트와 정렬). 그 config 값과 셀 밴드 갈래가 지금은 없어
+이 스크린샷은 다시 찍을 수 없고, 밴드는 늘 rich quad다.
 
 ## 6. platform 오케스트레이션 — `src/platform/macos/app_session.zig`
 

@@ -1892,7 +1892,7 @@ fn premultipliedRgba(rgb: u32, alpha: u8) u32 {
 }
 
 /// base(0xAARRGGBB)의 RGB를 tint_rgb(0xRRGGBB) 쪽으로 alpha/255만큼 lerp한다(base의 알파 보존). 사이드바 밴드에
-/// per-tab 배경 tint를 섞어, tui 기본 테마의 불투명 활성/호버 밴드가 tint quad를 덮어도 활성 슬롯에서 색이 보이게 한다.
+/// per-tab 배경 tint를 섞어, 불투명 활성/호버 밴드가 슬롯을 덮어(그 슬롯엔 idle용 tint quad를 안 그린다) 활성 슬롯에서도 색이 보이게 한다.
 pub fn blendRgb(base: u32, tint_rgb: u32, alpha: u8) u32 {
     const a: u32 = alpha;
     const inv: u32 = 255 - a;
@@ -6672,8 +6672,8 @@ pub const AppSession = struct {
     // 채우고, metalFrame()이 이걸 가리키는 view를 사이드바 셀(origin 0 렌더)로 넘긴다. PR3b-1은 활성
     // 탭 하이라이트 밴드만 담고, PR3b-2가 탭 번호·제목 glyph를 더한다. 비싸지 않아(탭 수만큼) 변경
     // 이벤트마다 통째로 다시 만든다.
-    // C4b: chrome rich GPU quad 프리미티브(둥근 박스) — sidebar/모달/divider lowering이 모은다. tui/빈이면
-    // 길이 0(렌더 무동작). renderFrame이 replace로 metal_buffer에 넘겨 dupe 소유시킨다(self는 ArrayList 재사용).
+    // C4b: chrome rich GPU quad 프리미티브(둥근 박스) — sidebar/모달/divider lowering이 모은다. 그 프레임에
+    // 모은 것이 없으면 길이 0(렌더 무동작). renderFrame이 replace로 metal_buffer에 넘겨 dupe 소유시킨다(self는 ArrayList 재사용).
     gpu_quads: std.ArrayList(metal_frame.GpuQuad) = .empty,
     /// SV6b: 오버레이(모달·팔레트·세팅·알림)가 내는 over 버킷 quad를 **모아 두었다가 프레임 끝에 한 덩어리로**
     /// `gpu_quads`에 flush하는 대기 버퍼. 배경(layer 1)·말풍선 caret·스크롤바(layer 3)가 여기로 온다.
@@ -8677,8 +8677,9 @@ pub const AppSession = struct {
     /// `@max(pt, cell + 2*pad)`였는데 그러면 terminal 폰트가 도크 기하를 정하게 되어(layering-and-portability
     /// 금지) `font-scale-rects` fixture가 실제로 깨졌다(14pt↔24pt 도크 rect 12px 이동, 1x↔2x 비례 이탈).
     ///
-    /// 토큰이 0인 테마(tui)만 셀 파생으로 떨어진다. tui는 셀 격자 정렬이 정체성이고 탭 바 배경도 셀 한 행이라
-    /// 그 경로에서는 폰트 파생이 요구사항이다. 어느 쪽이든 두 바가 이 함수 하나를 쓰므로 정렬은 유지된다.
+    /// 토큰이 0이면(기반 토큰 `Tokens.base` — 제품은 늘 rich(40pt)라 닿지 않는다) 셀 파생으로 떨어진다. 옛 tui 룩
+    /// (2026-08-19 제거)이 그 갈래였다 — 셀 격자 정렬이 정체성이고 탭 바 배경도 셀 한 행이라 폰트 파생이 요구사항이었다.
+    /// 어느 쪽이든 두 바가 이 함수 하나를 쓰므로 정렬은 유지된다.
     ///
     /// cell 높이 미상이면 0(바 없음) — buildChromeTokens 읽기 전 가드.
     pub fn chromeBarHeightPx(self: *const AppSession) u32 {
@@ -8707,7 +8708,7 @@ pub const AppSession = struct {
     /// **`tab_bar_pad_y_px`를 그대로 쓰면 안 된다** — 바 높이가 chrome token(`bar_height_pt`)에서 나오는
     /// 테마에서는 `바 높이 = cell + 2*pad`가 성립하지 않는다. 그때 pad를 오프셋으로 쓰면 제목이 바 위쪽에
     /// 붙는다(폰트가 작을수록 심해진다). 상태바가 쓰는 `(h -| cell_height) / 2`와 같은 식으로 실제 바 높이에서
-    /// 파생한다 — token이 0이라 셀 파생으로 떨어지는 tui에서는 이 식이 pad_y와 같은 값을 낸다(동작 보존).
+    /// 파생한다 — token이 0이라 셀 파생으로 떨어지는 기반 토큰(`Tokens.base`, 제품은 안 닿음)에서는 이 식이 pad_y와 같은 값을 낸다.
     pub fn chromeBarTextOffsetY(self: *const AppSession, bar_h: u32) u32 {
         return (bar_h -| self.cell_height_px) / 2;
     }
@@ -21914,17 +21915,19 @@ pub const AppSession = struct {
             // (세로 분할 등에서 "활성 탭 UI가 안 바뀐다"는 제보 대응). 제목 glyph는 아래 pane_frames에(C2).
             var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
             defer pane_chrome.deinit(self.allocator);
-            // rich(corner>0)면 활성 탭을 VSCode식(평평 약한 배경 + 하단 테마 accent 언더바) layer 2 quad로, tui(0)면 셀 밴드로.
+            // rich(corner>0)면 활성 탭을 VSCode식(평평 약한 배경 + 하단 테마 accent 언더바) layer 2 quad로, 0이면 셀 밴드로
+            // (else 갈래 — 기반 토큰의 값이라 제품 토큰 rich[모서리 8]에서는 닿지 않는다).
             const tk = self.buildChromeTokens();
             const tk_space = tk.space;
-            const tab_corner = tk_space.corner_radius_px; // rich 판별 게이트(>0이면 quad, 0이면 tui 셀)
+            const tab_corner = tk_space.corner_radius_px; // quad/셀 게이트(>0이면 quad, 0이면 셀 — 제품은 rich라 늘 >0)
             const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(테마 accent — 포커스 surface 표시)
             for (leaf_rects.items) |lr| {
                 pane_ops.captureActivePaneGeometry(self, leaf_layout_complete, active_pane, lr, &active_pane_geometry);
                 const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
                 const bar = pb.full; // 바 배경·언더바는 전체 바(라벨 영역도 같은 chrome 배경)
-                // tui 밴드 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). rich는 아래에서
-                // 본문색 cutout(U-tab2)으로 override하고 포커스 구분을 언더바 색으로 옮긴다 — tui 보존(이 hl_bg는 tui 셀 밴드 전용).
+                // 탭 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). rich 갈래는 connected
+                // 스타일에서 본문색 cutout(U-tab2)으로 덮고 포커스 구분을 언더바 색으로 옮긴다 — hl_bg는 pill의 lifted fill과
+                // 아래 셀 밴드 else 갈래(제품은 안 닿음)가 쓴다.
                 const hl_bg = if (lr.leaf == active_pane) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self);
                 const m_opt = barMetrics(pb.tabs, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols, lr.leaf.tab_scroll_cols); // 활성 밴드·‹›는 라벨 뺀 탭 영역
                 if (tab_corner > 0) {
@@ -21984,7 +21987,8 @@ pub const AppSession = struct {
                         };
                     }
                 } else {
-                    // tui: 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
+                    // 모서리 0(기반 토큰 — 제품 토큰 rich에서는 닿지 않는다): 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append
+                    // 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
                     if (paneBarBgCell(bar, self.cell_width_px, self.chromeCellBg(sidebar_ops.sidebarBg(self)))) |cell| pane_chrome.append(self.allocator, cell) catch {};
                     if (m_opt) |m| {
                         if (tabbarHighlightCell(m, pane_ops.paneActiveTermIndex(self, lr.leaf), self.chromeCellBg(hl_bg))) |cell| pane_chrome.append(self.allocator, cell) catch {};
@@ -23500,7 +23504,7 @@ pub const AppSession = struct {
     }
 
     /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
-    /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). tui는 셀. 둘 다 part1 제목 셀 아래(layer 2).
+    /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). 모서리 0 갈래(제품은 안 닿음)는 셀. 둘 다 part1 제목 셀 아래(layer 2).
     fn appendBarBgQuad(self: *AppSession, bar: maru.session.SplitRect, bg: u32) void {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y), @floatFromInt(bar.w), @floatFromInt(bar.h), bg, 2);
     }
@@ -24244,7 +24248,7 @@ pub const AppSession = struct {
         const tk = self.buildChromeTokens();
         return .{
             .metrics = self.buildCellMetrics(),
-            // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). tui=0(직각·셀 밴드), rich>0(둥근 GPU quad).
+            // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). 제품은 rich>0(둥근 GPU quad) — 0(직각·셀 밴드)은 기반 토큰(테스트만).
             .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px },
             // 활성 pane rect(셀 그리드 영역) — find 오버레이가 활성 pane 우상단에 붙도록(findLayout 단일 출처).
             // palette는 안 쓴다(창 중앙 유지). active_pane_rect는 recomputeActivePaneRect가 포커스·resize마다 갱신.
@@ -24253,8 +24257,8 @@ pub const AppSession = struct {
     }
 
     /// ResolvedTheme(config) → chrome 토큰. chrome은 ResolvedTheme를 import하지 않으므로(경계) 여기서 resolved
-    /// Rgb만 뽑아 넘기고, **역할→색 매핑은 chrome.tokens.Tokens.tui가 단일 출처로 소유**한다(2nd 백엔드·rich도
-    /// 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
+    /// Rgb만 뽑아 넘기고, **역할→색 매핑은 chrome.tokens.Tokens(`base`가 바닥, 제품은 그 위에 얹는 `rich`)가 단일 출처로
+    /// 소유**한다(2nd 백엔드도 같은 매핑 재사용). 이 함수는 ResolvedTheme→ThemeColors 투영(필드 추림)만 한다.
     pub fn buildChromeTokens(self: *const AppSession) chrome.Tokens {
         // 투영은 **중립이 소유한다**(`maru.chrome_theme.tokensFor`) — Windows 크롬도 같은 것을 쓴다.
         // 두 곳에서 정하면 "어느 테마 색이 어느 역할로 가는가" 가 갈려 두 화면 색이 달라진다.
@@ -52928,7 +52932,7 @@ test "notice through the product overlay painter: a long NFD/emoji message wraps
     // Lab `notice-long-message` 캡처는 CoreText 측정 경로로 그린다 — 제품의 모달 painter(`rasterizeOverlayCells` →
     // `metal_lowering.placeText`, 코드포인트마다 max(1, EAW) 칸)를 지나는 것은 이 시험이다(적대 검증 4 차).
     // 격자는 박스 quad 크기라 격자 밖 글자는 painter 가 스스로 버린다 — 그래서 「모든 코드포인트가 그려짐」이 박스 밖
-    // 넘침을, 「좌우 여백 안」이 여백 침범을 잡는다(적대 검증 5 차). tui·rich(둥근 모서리·패딩 12px) 두 모양을 다 돈다.
+    // 넘침을, 「좌우 여백 안」이 여백 침범을 잡는다(적대 검증 5 차). base 토큰(직각·패딩 0)·rich(둥근 모서리·패딩 12px) 두 모양을 다 돈다.
     const allocator = std.testing.allocator;
     const theme: chrome.tokens.ThemeColors = .{
         .diff_added = .{ .r = 64, .g = 160, .b = 64 },
@@ -60321,7 +60325,7 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
     try std.testing.expect(geometry.grid.y + geometry.grid.h <= body_bottom);
 
     // rich는 token(40pt)이 셀과 **무관하게** 바 높이를 정하므로 더 두껍지만, 같은 보수 관계를 유지한다.
-    // 이 구간이 token 경로의 회귀 가드다 — tui(token 0 = 셀 파생)만 검증하면 token이 죽어도 green이 된다.
+    // 이 구간이 token 경로의 회귀 가드다 — token 0(셀 파생 — 옛 tui 룩·지금의 기반 토큰)만 검증하면 token이 죽어도 green이 된다.
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
     session.window_padding_px = .{};
     geometry = pane_ops.paneGeometry(&session, rect);
@@ -64356,9 +64360,9 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    // tui로 고정: 인라인 "+"(상단탭 Warp 폴리시)는 탭 폭에 의존하는데, tui(tab_width_cols=0)는 탭이 영역을 균등하게 꽉 채워
-    // 인라인 "+"가 tab_cols에 떨어진다(아래 barMetrics(…,0,0)와 실제 핸들러 tokens.tab_width_cols=0이 일치). rich(16 고정폭)면
-    // 탭이 영역을 안 채워 "+"가 마지막 탭 옆(far-left)이라 이 테스트의 tab_cols 기준 plus_x가 어긋난다.
+    // 토큰은 고정하지 않는다 — 실제 핸들러는 제품 토큰(rich, tokens.tab_width_cols=16)으로 barMetrics를 잰다. 아래
+    // barMetrics(…,0,0)(fixed 0 = 균등)로 잰 tab_cols가 그와 같은 이유: 고정 폭은 하한이라(tabLayout) 탭이 1개면 어느
+    // 쪽이든 그 탭이 탭 영역을 꽉 채워 "+" zone이 tab_cols에서 시작한다(바 800px라 넘침·‹› 없음).
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
@@ -70212,7 +70216,7 @@ test "sidebar scissor engages on the product path even when bands are quads (ric
     defer allocator.destroy(session);
     defer session.deinit();
 
-    // 기본이 rich다 — 밴드가 GPU quad라 `sidebar_cells`(tui 밴드 배열)가 빈다. 옛 게이트는 그것을 보고
+    // 기본이 rich다 — 밴드가 GPU quad라 `sidebar_cells`(옛 tui 룩의 밴드 배열)가 빈다. 옛 게이트는 그것을 보고
     // "자를 셀이 없다"고 판정했지만, 카드 **제목**은 별도 프레임으로 실려 실제로는 그려지고 있었다.
     try std.testing.expect(session.sidebar_width_px > 0);
     try std.testing.expect(session.sidebar_header_height_px > 0);

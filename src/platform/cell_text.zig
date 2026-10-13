@@ -1389,7 +1389,8 @@ test "좁으면 검색 줄도 안 낸다 — 아이콘 줄과 같은 문턱" {
 test "뷰 바는 슬롯 수만큼 아이콘을 내고, 갤러리 칸은 image 아이콘이다 (IG1)" {
     const allocator = std.testing.allocator;
     const c: terminal.Color = .{ .rgb = .{ .r = 1, .g = 1, .b = 1 } };
-    // 격자는 hit-test 와 같은 자리에서 온다. 여기서는 셀 파생(토큰 없음 = tui)으로 잡는다.
+    // 격자는 hit-test 와 같은 자리에서 온다. 여기서는 셀 파생(slot_width_px 0 = 기반 토큰 `Tokens.base` 의 값)으로
+    // 잡는다 — 제품은 rich(32pt 토큰)라 이 갈래에 안 닿고, 여기서는 슬롯 수 계약만 본다.
     const grid = dock_view_bar.Grid.init(8, 0);
     // 슬롯이 전부 들어가는 폭. 좁으면 아이콘을 안 그리므로 문턱을 넘겨 준다.
     const cols: u16 = @intCast(grid.slot_cols * dock_view_bar.slot_count);

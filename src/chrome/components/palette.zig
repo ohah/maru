@@ -177,7 +177,7 @@ pub fn view(
     const panel_h = (1 + @as(u32, @intCast(rows.len))) * ch;
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
-    // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
+    // C4b 모달: 배경을 quad로(둥근+테두리) — base(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
     try out.append(arena, .{ .quad = .{ .rect = .{ .x = x, .y = y, .w = panel_w, .h = panel_h }, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
 
     // 스크롤바 gutter는 **상시** 예약한다(SV5b) — 선택 밴드와 단축키가 함께 이만큼 비켜 준다. 밴드가

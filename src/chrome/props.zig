@@ -36,8 +36,8 @@ pub const CellMetrics = struct {
     chrome_minimal: bool = false,
 };
 
-/// C4b 박스 모양 토큰(seam) — host가 tokens.space에서 빌드해 넘긴다. tui=0(직각 → lowering이 셀 fill),
-/// rich>0(둥근 → GPU quad). 컴포넌트는 이 값을 Op.quad에 실어 같은 코드로 두 룩을 만든다(C4a 색 분리와 동형).
+/// C4b 박스 모양 토큰(seam) — host가 tokens.space에서 빌드해 넘긴다. 기본값 0 = 기반 토큰 base(직각 → lowering이
+/// 셀 fill — 제품은 늘 rich라 테스트 경로), rich>0(둥근 → GPU quad). 컴포넌트는 이 값을 Op.quad에 실어 같은 코드로 두 룩을 만든다(C4a 색 분리와 동형).
 pub const ShapeTokens = struct {
     corner_radius_px: u16 = 0,
     border_width_px: u16 = 0,
@@ -80,7 +80,7 @@ test "workspaceRect distinguishes an authoritative zero-size workspace from lega
 
 pub const ChromeProps = struct {
     metrics: CellMetrics,
-    /// C4b: 박스 모양(둥근 모서리·테두리). tui=0(직각·셀 fill), rich>0(둥근·GPU quad).
+    /// C4b: 박스 모양(둥근 모서리·테두리). base=0(직각·셀 fill), rich>0(둥근·GPU quad).
     shape: ShapeTokens = .{},
     /// 활성 pane rect(find 오버레이 위치 단일 출처). 기본 0 = 미초기화(findLayout이 창 전체로 폴백).
     active_pane: PaneRect = .{},

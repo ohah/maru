@@ -2,7 +2,7 @@
 //! 셸(settings.State)이 소유하고, 컴포넌트는 control rect + 표시 문자열 + 편집 여부만 받아 **테두리 박스 + 텍스트 +
 //! (편집 중) 끝 caret**을 그린다. 슬라이더(진행 막대)를 대체해 사용자가 수치를 직접 타이핑한다(사용자 요청 —
 //! 프로그레스바 대신 인풋박스). 커밋 시 파싱·범위 clamp는 platform이 한다(schema.setNumber). 테두리는 dropdown 팝업·
-//! color 위젯과 같은 quad 규율(border_width>0이면 quad 테두리; 0이면 텍스트만 — tui 셀 번짐 회피). caret은 표시폭 끝
+//! color 위젯과 같은 quad 규율(border_width>0이면 quad 테두리; 0이면 텍스트만 — 기반 토큰(base)의 셀 lowering 번짐 회피). caret은 표시폭 끝
 //! 셀에 cursor fill 1칸(인라인 편집·palette caret 패턴). 단일 출처: docs/config-gui.md §2·§6, docs/chrome-strategy.md §5.4.
 
 const std = @import("std");
@@ -51,7 +51,7 @@ pub fn viewCaretAt(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (rect.w == 0 or rect.h == 0) return;
-    // 테두리 박스(rich) — 편집 중이면 focus_accent로 강조해 "지금 입력 중"을 보인다. tui(border 0)는 텍스트만.
+    // 테두리 박스(rich) — 편집 중이면 focus_accent로 강조해 "지금 입력 중"을 보인다. base(border 0)는 텍스트만.
     if (border_width_px > 0) {
         const border_role: tokens.ColorRole = if (editing) .focus_accent else .muted_fg;
         try out.append(arena, .{ .quad = .{
@@ -139,7 +139,7 @@ test "input_box view: 빈 값 편집 = 박스 + caret만(텍스트 op 없음), b
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[1] == .fill); // caret
 
-    // border_width 0(tui) 비편집 = 텍스트 op 1개만(테두리 quad 없음).
+    // border_width 0(base) 비편집 = 텍스트 op 1개만(테두리 quad 없음).
     out.clearRetainingCapacity();
     try view(test_rect, "80", false, false, 8, 16, 0, 0, arena, &out);
     try std.testing.expectEqual(@as(usize, 1), out.items.len);

@@ -425,7 +425,7 @@ pub const PanelLayout = struct { x: i32, y: i32, panel_cols: u32, cw: u32, ch: u
 /// 함께 쓴다. 이 모듈의 존재 이유가 패널 레이아웃 복붙 제거(위 모듈 doc)이므로, 폭 규약(60·−4·2*pad)을 여기 한
 /// 곳에만 둔다. region_w(가용 가로 px)/cw==0이면 null(영역 0칸 — 호출자 무동작). C4b 패딩: 폭 상한을 2*pad만큼
 /// 줄인 가용 칸으로 panel_cols를 산출 — platform lowering이 배경 quad를 ±pad 확장한 뒤에도 박스가 영역에 들도록
-/// 텍스트 폭을 양보한다(pad=0(tui)이면 무변화). 단 avail_cols==0(region_w < 2*pad, 1~3칸의 비정상적으로 좁은
+/// 텍스트 폭을 양보한다(pad=0(base)이면 무변화). 단 avail_cols==0(region_w < 2*pad, 1~3칸의 비정상적으로 좁은
 /// 영역)이면 soft-lock 방지로 panel_cols=1을 강제하므로 ±pad 확장이 최대 pad만큼 경계를 침범할 수 있다 — bounded
 /// 이고 '안 보이는 열린 모달'보다 작은 박스가 낫다는 절충(panelLayout·findLayout 양쪽 동일).
 const PanelSize = struct { panel_cols: u32, panel_w: u32, cw: u32, ch: u32 };

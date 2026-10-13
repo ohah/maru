@@ -432,7 +432,7 @@ pub fn view(
 
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
-    // C4b 모달: 배경을 quad로(둥근+테두리) — tui(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
+    // C4b 모달: 배경을 quad로(둥근+테두리) — base(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
     try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
 
     // "Find: " + (…?) + query(창) + preedit(조합 중) (한 text op). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는

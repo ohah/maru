@@ -357,7 +357,8 @@ pub const theme_min_contrast_max: f32 = 21.0;
 /// 이름 붙은 컬러 테마(프리셋). 색 세트의 base를 한 번에 고른다. 기본 maru. loader가 `theme.preset` 키로
 /// 파싱해 presetColors()로 config.theme를 채우고, 개별 theme.* 키가 그 뒤에서 일부를 override한다(순차 적용 —
 /// 나중 줄 우선; 프리셋 줄이 개별 색 키보다 뒤면 앞 설정을 리셋 — Ghostty `theme` 시맨틱과 동일). 색(룩)만
-/// 정하며, chrome 디자인 룩(`chrome.theme` = tui|rich)과는 직교다(둘은 그대로 공존).
+/// 정하고 chrome 모양(모서리·패딩 등 토큰 space)은 건드리지 않는다 — 제품 토큰은 늘 rich 하나다(옛 `chrome.theme`
+/// 룩 축은 2026-08-19 제거).
 pub const ThemePreset = enum {
     maru, // maru 기본 테마 — ThemeConfig struct default와 동일.
     ghostty, // Ghostty 기본 테마 색(배경/전경 + ANSI 16색 팔레트).
@@ -1010,13 +1011,10 @@ pub const QuickTerminalChrome = enum {
     minimal,
 };
 
-/// chrome(탭바·사이드바·divider·focus 테두리) 디자인 테마. `tui`는 이미 저장된 config와 회귀 fixture를 위한
-/// 읽기 호환 값이고, 새 component/UI의 설정 진입점은 rich/Metal만 쓴다. rich는 분리 색 팔레트(C4a — tui가
-/// sidebar_active로 공유하던 role을 파생색으로 분리)를 쓴다. platform buildChromeTokens가 호환 config를 위해
-/// tui()/rich()로 분기한다. 제거·migration은 별도 정책이 확정된 뒤에만 한다.
-/// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). `chrome.theme`(룩)·`theme.preset`(색)과 직교.
+/// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). `theme.preset`(색)과 직교.
 /// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀), pill = lifted 회색으로 채운 둥근 캡슐(Warp식 떠 있는 pill).
-/// rich 경로에서만 의미(tui는 셀 밴드 유지). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
+/// 활성 탭 quad 갈래(`appendActiveTabHighlight`)가 읽는다 — 제품 토큰은 늘 rich라 그 갈래로 간다(모서리 0인 셀 밴드
+/// 갈래는 기반 토큰의 것이라 제품에서 닿지 않는다). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
 pub const ChromeTabStyle = enum {
     connected,
     underline,

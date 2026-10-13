@@ -634,7 +634,7 @@ pub fn fillTabDragSmokeProbe(self: *AppSession, probe: *DividerSmokeProbe) void 
 /// 경계 x에 셀 1개씩(reserved=30) 행마다, 가로선(from.y==to.y)은 경계 y에 bounds 폭 한 칸(reserved=31). **셀 origin을
 /// 경계(seam) 자체에 두고**, 렌더러(reserved 30/31)가 config 두께(divider_thickness_px)를 그 seam에 **중앙 정렬**하고
 /// 셀 크기로 clamp한다 — 옛 −1/+1−ch offset은 ~2px 고정 가정이라 두꺼운 값이 한쪽으로 쏠렸다(code-review). 색은
-/// `dividerColor()`(tui 토큰 .divider=sidebar_active). divider는 overlay가 아니라 pane chrome 셀이라 이 얇은-선 lowering을 platform이 갖는다.
+/// `dividerColor()`(중립 패널색 sidebar_background +24). divider는 overlay가 아니라 pane chrome 셀이라 이 얇은-선 lowering을 platform이 갖는다.
 pub fn lowerDividerRules(self: *AppSession, ops: []const chrome.draw.Op, out: *std.ArrayList(metal_frame.NativeMetalCell)) void {
     const color = dividerColor(self);
     for (ops) |op| switch (op) {

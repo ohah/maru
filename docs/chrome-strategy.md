@@ -22,13 +22,14 @@ chrome 축(밀도·모서리 등)이 생겨 다시 묶을 값이 있으면 enum 
 > `chrome.preset = capsule`(또는 `cutout`)을 쓰던 파일은 그 줄이 무시되면서 탭 스타일이 기본
 > `underline`으로 돌아간다 — `chrome.tab-style = pill`처럼 개별 축으로 한 줄 바꾸면 복구된다.
 
-**아직 남은 것 하나.** 렌더 경로의 셀 밴드 갈래(`sidebar.zig`의 `has_radius == false`)는 코드에 그대로
-있다. 그 분기는 `chrome.theme`이 아니라 **quad의 corner radius**로 갈리므로 config 축 제거와 독립이다.
+**남았던 것 하나 — 그 뒤 지웠다.** 렌더 경로의 사이드바 셀 밴드 갈래(`sidebar.zig`의 `has_radius == false`)는 이 제거 때
+남겨 뒀다. 그 분기는 `chrome.theme`이 아니라 **quad의 corner radius**로 갈리므로 config 축 제거와 독립이다.
 
 **실측(2026-08-19)**: 그 갈래 안에 런타임 프로브를 넣고 `test-macos-app-host-abi` 전 범위(3,600여 개)를
 돌리니 **도달 0회**였다 — `Tokens.rich`가 `corner_radius_px = 8`을 깔기 때문이다. 제거 후보이지만
 **테스트가 닿지 않는 상태**(특정 드롭 타깃·그룹 헤더 조합에서 radius 0인 quad가 나올 여지)가 남아 있어,
-제거는 그 경우를 먼저 훑은 뒤 별도 작업으로 한다. 여기서 지우지 않은 이유가 그것이다.
+제거는 그 경우를 먼저 훑은 뒤 별도 작업으로 했다 — 같은 날 후속 커밋(`d242dabab`)이 정적 radius 출처 하나 +
+실앱 기본·그룹 헤더 강제에서도 도달 0회를 확인하고 그 갈래와 `sidebarBandCell`·`sidebar_cells`를 지웠다.
 
 새 Metal UI의 component tree·typed flex layout·paint/Metal 경계는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)이 단일 출처다. 이 문서는 그 시스템이 소비하는 chrome token·semantic draw·host 구조를 소유한다.
 
@@ -70,7 +71,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 
 | 결정 | 베이스(기존 원칙) | 출처 |
 |---|---|---|
-| semantic chrome draw → {tui 백엔드, rich 백엔드, 후속 inspector} | "디버그·로그·스냅샷·리플레이·테스트·inspector가 **같은 도메인 데이터를 소비**" | project-rules §관측 가능성 |
+| semantic chrome draw → {셀 lowering 백엔드, rich 백엔드, 후속 inspector} | "디버그·로그·스냅샷·리플레이·테스트·inspector가 **같은 도메인 데이터를 소비**" | project-rules §관측 가능성 |
 | 순수 컴포넌트(State) 헤드리스 테스트 | "동작을 구현 전 표현 가능하면 TDD; 모든 기능 영역에 E2E" | project-rules §테스트 |
 | `src/chrome/` facade + check-boundaries | "터미널 코어 API는 Maru 내부 facade 뒤에" | project-rules §기본 규칙 |
 | Zig가 chrome 로직·draw 소유, platform은 백엔드/입력 어댑터 | ABI capabilities: `zig_owns_frame_loop` vs `swift_owns_focus_and_input` | app_host_abi |
@@ -115,7 +116,7 @@ flowchart TD
     boundary["check-boundaries: chrome는 tokens·props·ChromeDraw만 의존. session·platform·NSWindow·NativeMetalCell 모름"] -.-> comp
 ```
 
-**핵심: 컴포넌트는 `NativeMetalCell`조차 모른다.** 컴포넌트는 `ChromeDraw`(semantic)만 뱉고, **백엔드**가 그걸 `NativeMetalCell`(tui) 또는 GPU 프리미티브(rich)로 lowering한다. 이게 tui|rich를 컴포넌트 변경 0으로 만드는 단일 결정이다.
+**핵심: 컴포넌트는 `NativeMetalCell`조차 모른다.** 컴포넌트는 `ChromeDraw`(semantic)만 뱉고, **백엔드**가 그걸 `NativeMetalCell`(셀 lowering) 또는 GPU 프리미티브(rich)로 lowering한다. 이게 옛 tui|rich 룩 전환(tui는 2026-08-19 제거)을 컴포넌트 변경 0으로 만든 단일 결정이다.
 
 ## 5. 타입 계약 (concrete)
 
@@ -136,14 +137,14 @@ pub const ColorRole = enum {
 pub const Tokens = struct {
     palette: std.EnumArray(ColorRole, color.Rgb),  // 9+ role을 Rgb로
     space: Spacing,    // 사이드바 폭, 슬롯 높이비, 패널 margin — 지금 흩어진 픽셀 상수
-    border: Border,    // 선 두께(tui=2px strip kind), (rich) radius
-    // tui와 rich는 같은 struct의 두 값. 현재 파생(+24/+48/55-45/0x55)은 tui Tokens의 기본 생성에 박는다.
+    border: Border,    // 선 두께(셀 lowering=2px strip kind), (rich) radius
+    // base와 rich는 같은 struct의 두 값(rich = base 위에 덮은 값). 현재 파생(+24/+48/55-45/0x55)은 base Tokens의 기본 생성에 박는다.
     pub fn color(self: Tokens, role: ColorRole) color.Rgb { return self.palette.get(role); }
-    pub fn tui(resolved: appearance.ResolvedTheme) Tokens { ... }   // 현재 ResolvedTheme → tui 토큰
-    pub fn rich(resolved: appearance.ResolvedTheme) Tokens { ... }  // C4
+    pub fn base(theme: ThemeColors) Tokens { ... }  // 기반 토큰(모서리·패딩·탭 폭 0) — 직접 호출은 테스트뿐(옛 이름 tui)
+    pub fn rich(theme: ThemeColors) Tokens { ... }  // C4 — base 를 부른 뒤 rich 값으로 덮는다. 제품의 유일한 토큰셋
 };
 ```
-`appearance.ResolvedTheme`(9 색)는 유지하되, `Tokens.tui()`가 그걸 받아 role+derivation을 채운다. `ColorRole.divider`를
+`appearance.ResolvedTheme`(9 색)는 유지하되, `Tokens.base`가 그 chrome-중립 투영(`ThemeColors`)을 받아 role+derivation을 채운다. `ColorRole.divider`를
 소비하는 Chrome component는 `sidebar_active`에서 다시 파생하지 않고 panel background의 루미넌스 반대 방향으로만
 파생한다. divider의 channel delta는 ±24로 고정해 1px scope/search outline과 group/row rule이 PNG 축소에서도
 panel과 구별되게 한다. 따라서 rich 토큰도 그 divider의 출처를 바꾸지 않으며, active 색과 background의 우연한 조합이
@@ -229,7 +230,7 @@ pub const ChromeFrame = struct {                 // replace()가 먹을 번들(l
 // Metal cell lowerer: fill→sentinel-UV bg 셀, border/rule→reserved-kind 2px 띠 셀, text→기존 glyph RenderFrame 경로
 pub fn lower(allocator, draws: []const ChromeDraw, tokens: Tokens, metrics: CellMetrics) !ChromeFrame;
 ```
-Metal cell lowerer의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow`를 **이주**한 것. 즉 새 코드가 아니라 현재 수작업 셀 생성을 backend로 격상한다. 사용자 설정의 `tui` 선택지는 제공하지 않으며, 남은 `tui` 이름은 이 legacy cell 경로의 내부 호환성 표기일 뿐이다.
+Metal cell lowerer의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow`를 **이주**한 것. 즉 새 코드가 아니라 현재 수작업 셀 생성을 backend로 격상한다. 사용자 설정의 `tui` 선택지는 없다(옛 tui 룩 — 2026-08-19 제거). 토큰 함수는 `Tokens.base`로 개명됐고, src에 남은 `tui` 이름(일부 테스트 이름·주석)은 옛 룩의 흔적일 뿐이다.
 
 ### 5.4 Component 계약 — `chrome/components/*.zig`
 
@@ -286,7 +287,7 @@ pub fn handle(k: InputEvent.KeyEvent, state: *State) ?Action;                   
 - 라이프사이클(언제 열고/배타성)은 **host**가 소유(현 `toggle*` 패턴).
 - 동적 데이터(예: Find 매치)는 State에 슬롯으로 노출하고 채우기는 host(코어 단일 출처)에 위임 — State에 I/O·검색 안 넣음.
 - handle은 **intent(`?Action`) 반환** 표준(palette `selectedAction` 선례). 부수효과 필요 시 host가 호출 후 수행(find `scroll`/`recompute` 선례).
-- **레이아웃 단일 모델(view↔hitTest 공유) — 필수.** 마우스 컴포넌트(탭바·divider)는 `view`와 `hitTest`가 **하나의 픽셀-레이아웃 함수**(탭 advance·padding·icon slot·✕ 위치를 토큰에서 산출)를 공유한다. 그려진 위치와 클릭 영역이 같은 출처라야 한다. tui는 그 픽셀 레이아웃을 셀에 스냅하고, rich는 다른 레이아웃 토큰(둥근 탭·패딩·아이콘)만 준다 — 그래서 rich가 색뿐 아니라 *레이아웃*을 바꿔도 컴포넌트 코드는 불변이다. 현재 `BarMetrics`(hit-test)가 `paneTabWidth`(렌더)를 호출해 정렬을 맞추는 셀-열 결합을, 이 픽셀 모델로 일반화한 것. **이 공유가 깨지면 그려진 ✕와 클릭 ✕가 어긋난다(검증이 짚은 rich-layout seam).**
+- **레이아웃 단일 모델(view↔hitTest 공유) — 필수.** 마우스 컴포넌트(탭바·divider)는 `view`와 `hitTest`가 **하나의 픽셀-레이아웃 함수**(탭 advance·padding·icon slot·✕ 위치를 토큰에서 산출)를 공유한다. 그려진 위치와 클릭 영역이 같은 출처라야 한다. 셀 lowering은 그 픽셀 레이아웃을 셀에 스냅하고(옛 tui 룩의 경로), rich는 다른 레이아웃 토큰(둥근 탭·패딩·아이콘)만 준다 — 그래서 rich가 색뿐 아니라 *레이아웃*을 바꿔도 컴포넌트 코드는 불변이다. 현재 `BarMetrics`(hit-test)가 `paneTabWidth`(렌더)를 호출해 정렬을 맞추는 셀-열 결합을, 이 픽셀 모델로 일반화한 것. **이 공유가 깨지면 그려진 ✕와 클릭 ✕가 어긋난다(검증이 짚은 rich-layout seam).**
 - **draw 출력 모델은 둘이다 — 고정 슬라이스에 쓰는 컴포넌트는 몫을 방출 코드가 센다**(2026-09-24 사용자 결정).
   - **호출자 arena 의 목록에 덧붙이기**(`out.append(arena, …)`) — chrome 컴포넌트의 **다수**(context_menu·palette·sidebar·find·dropdown·modal_box·settings 등 20개)가 이렇다. 개수가 얼마든 목록이 늘어나므로 **셀 필요가 없다.** 새 컴포넌트는 이유가 없으면 이쪽을 쓴다.
   - **호출자가 준 고정 슬라이스에 쓰기** — 목록형 도크(`file_tree`·`scm_dock`·`session_dock`·`archive_detail`)와 편집기(`editor_view`). 이 모델에서만 아래 규칙이 필수다.
@@ -352,7 +353,7 @@ pub const ChromeHost = struct {
 | `appendActiveTabDividers`/`dividerAtPoint`/`dividerHit` | `chrome/components/divider.zig` |
 | `appendMinimalTabIndicator` | `chrome/components/pane_decor.zig` |
 | 15개 상호작용 필드 + `resetHoverState` | `chrome/state.zig` `ChromeState` |
-| `sidebarBg/sidebarActiveBg/.../mutedForeground` 파생 | `chrome/tokens.zig` `Tokens.tui()` |
+| `sidebarBg/sidebarActiveBg/.../mutedForeground` 파생 | `chrome/tokens.zig` `Tokens.base`(옛 `Tokens.tui()`) |
 | `handlePaletteKey`/`handleFindKey`/모달 라우팅/`toggle*` | `chrome/host.zig` `handleInput` |
 
 세션에 남는 것: PTY·frame loop·워크스페이스·resize·ABI·입력 전처리(US 배열 변환 등).
@@ -361,10 +362,10 @@ pub const ChromeHost = struct {
 
 - **C0 — 스켈레톤 + Notice (저위험 수직 슬라이스).** `chrome/{tokens,draw,backend,props,state,host}.zig` + `components/notice.zig` + `platform/macos/chrome/metal_lowering.zig`의 최초 lowering 범위. Notice는 인터랙티브 영역이 없어(hitTest 불필요) 가장 작은 슬라이스로 **전 파이프라인(토큰→view→ChromeDraw→Metal lowerer→replace)을 증명**. 단 Notice는 비-인터랙티브 정보 토스트(자동 닫힘 타이머 없음)라 **아무 입력으로나 닫힌다** — 키는 `notice.handle`(키 종류 무관), 클릭·휠은 platform `mouse()`/`scrollWheel`이 닫는다(닫는 입력은 소비; hitTest는 여전히 불필요). 안 그러면 토스트가 떠 있는 동안 입력이 영구히 막힌다(키/마우스/휠 전부). 손상 알림(`workspace_window_count < 0`)을 `notice.State.show(...)`로 연결. **`search_match*`·`sidebar_*` 5개 키는 설계상 preset 전용으로 둔다**(개별 config 키 없이 `theme.preset`으로만 설정 — theme.zig:285). 토큰화는 이 5색을 per-key config 파싱으로 "메우는" 게 아니라, preset이 채운 `ResolvedTheme`(→chrome-중립 `ThemeColors`)에서 내부 legacy cell mapping과 Chrome token mapping이 role을 파생할 뿐이다. check-boundaries에 `src/chrome` 경계 추가. (C0는 neutral 모델이라 동작 보존이 아닌 **신규 기능** — "동작 보존"으로 적지 않는다.)
 - **S1·S2 (chrome 큰 조각 전에 선결, 상위 문서 소유)** — S1: session-tree **구조-무효화 계약** 형식화(§5.5의 stale 포인터 UAF 선제거). S2: session core(L2) 추출. C2/C3가 이 둘에 의존한다.
-- **C1 — Palette·Find 이주.** 이미 순수 → 이동 + `view`가 ChromeDraw 뱉도록 + 렌더를 tui 백엔드로. 동작·테스트 보존.
+- **C1 — Palette·Find 이주.** 이미 순수 → 이동 + `view`가 ChromeDraw 뱉도록 + 렌더를 셀 lowering 백엔드로. 동작·테스트 보존.
 - **C2 — Divider·pane_decor.** hitTest 컴포넌트 첫 도입(`dividerHit` 승계). `divider_drag`/`tab_drag_pane`의 **세션-트리 포인터 수명**은 S1 계약으로 다룬다(props 핸들로 줄이거나, 호스트가 구조-무효화 콜백 소유). **스냅샷 가드는 UAF를 못 잡으니** 명시적 null화 계약 필수.
 - **C3 — TabBar·Sidebar(최대 추출).** `BarMetrics`/드래그/hit-test. 세션에서 chrome 코드가 떠나며 monolith가 얇아짐. **rich 픽셀-레이아웃 모델(§5.4)** 위에서 — view와 hitTest가 단일 레이아웃 소스를 공유해야 셀→픽셀 전환에서 클릭이 안 어긋난다. 가장 큰 위험 — UAF(S1) + 레이아웃 정합 둘 다 가드.
-- **C4 — rich 백엔드 + rich 토큰.** `chrome_rich_backend`(렌더러 프리미티브 확장: rounded rect/gradient/icon) + `Tokens.rich()`. **컴포넌트 0줄 변경**(단 §5.4 레이아웃 모델 전제 — rich가 색뿐 아니라 *레이아웃*을 바꾸면 모델이 그걸 흡수해야 컴포넌트 불변이 성립). config `chrome.theme = tui|rich` 분기.
+- **C4 — rich 백엔드 + rich 토큰.** `chrome_rich_backend`(렌더러 프리미티브 확장: rounded rect/gradient/icon) + `Tokens.rich()`. **컴포넌트 0줄 변경**(단 §5.4 레이아웃 모델 전제 — rich가 색뿐 아니라 *레이아웃*을 바꾸면 모델이 그걸 흡수해야 컴포넌트 불변이 성립). config `chrome.theme = tui|rich` 분기(옛 tui 룩과 함께 2026-08-19 제거 — 지금은 `Tokens.rich` 하나).
 
 ## 7. 탭 스타일 축 (`chrome.tab-style`)
 
@@ -398,7 +399,7 @@ pub const TabActiveStyle = enum(u8) { connected = 0, underline = 1, pill = 2 };
 tab_active_style: TabActiveStyle = .connected,
 ```
 
-platform `buildChromeTokens`가 `appearance.chrome_tab_style`(config)→이 토큰으로 매핑한다(tui/rich 색 분리와 같은 자리). 스타일은 **색이 아니라 레이아웃 선택**이라 `Spacing`에 둔다.
+platform `buildChromeTokens`(→ 중립 `chrome_theme.tokensFor`)가 `appearance.chrome_tab_style`(config)→이 토큰으로 매핑한다(`Tokens.rich`를 만드는 같은 자리). 스타일은 **색이 아니라 레이아웃 선택**이라 `Spacing`에 둔다.
 
 ### 7.3 렌더 — 세그먼트 기하 불변, fill만 분기 (핵심)
 
@@ -410,7 +411,7 @@ platform `buildChromeTokens`가 `appearance.chrome_tab_style`(config)→이 토�
 | **underline**(기본) | **없음**(strip 그대로) | 테마 accent(포커스)/muted | 가장 미니멀 — 박스 없이 언더바만(기본값, 사용자 요청) |
 | **pill** | 둥근 inset 캡슐(`corner_radii` + 세로 inset, **strip보다 밝은 lifted 회색 fill** + 옅은 밝은 hairline 테두리) | 없음 — **포커스=fill 밝기**(focus=sidebarActiveBg / 비포커스=sidebarHoverBg) | 떠 있는 pill — **실제 Warp 벤치마킹**(밝은 fill로 올림) |
 
-pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`border_color`)를 그대로 쓴다 — 세로 inset(`tab_pill_inset_px`)·반경(`corner_radius_px`)·테두리 두께(`line_thickness_px`) 토큰 재사용, 단일 quad라 언더바 overhang 없음. **실제 Warp는 어두운 외곽선이 아니라 strip보다 밝은 fill로 알약을 띄운다** — 그래서 fill = lifted 회색(focus=sidebarActiveBg / 비포커스=sidebarHoverBg), 테두리는 그 fill을 흰색으로 ~16% 블렌딩한 **옅은 밝은 hairline**(`blendRgb(lifted, white, 0x28)`). 포커스는 언더바·accent가 아니라 **fill 밝기**로(Warp는 단일 탭바라 색-dot이 상태용이고 fill 밝기가 활성 신호). tui는 스타일과 무관하게 **셀 밴드(`tabbarHighlightCell`) 유지**(cutout/pill은 rich quad 개념 — tui는 `connected`를 셀 밴드로 근사하거나 스타일을 무시). 즉 tab-style은 **rich 경로(`tab_corner > 0`)에서만** 의미를 갖는다.
+pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`border_color`)를 그대로 쓴다 — 세로 inset(`tab_pill_inset_px`)·반경(`corner_radius_px`)·테두리 두께(`line_thickness_px`) 토큰 재사용, 단일 quad라 언더바 overhang 없음. **실제 Warp는 어두운 외곽선이 아니라 strip보다 밝은 fill로 알약을 띄운다** — 그래서 fill = lifted 회색(focus=sidebarActiveBg / 비포커스=sidebarHoverBg), 테두리는 그 fill을 흰색으로 ~16% 블렌딩한 **옅은 밝은 hairline**(`blendRgb(lifted, white, 0x28)`). 포커스는 언더바·accent가 아니라 **fill 밝기**로(Warp는 단일 탭바라 색-dot이 상태용이고 fill 밝기가 활성 신호). 옛 tui 룩(2026-08-19 제거)은 스타일과 무관하게 **셀 밴드(`tabbarHighlightCell`)**였다 — 그 갈래(`tab_corner == 0`)는 코드에 남아 있지만 `buildChromeTokens`가 늘 `Tokens.rich`라 제품에서 닿지 않는다(`tabbarHighlightCell`은 단위 테스트가 직접 부른다). 즉 tab-style은 **rich 경로(`tab_corner > 0`)에서만** 의미를 갖고, 제품은 늘 그 경로다.
 
 ### 7.4 config & 세팅 GUI (거의 공짜)
 
@@ -430,15 +431,15 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 ## 8. 테스트 전략 (관측 가능성 우선)
 
 - **컴포넌트 단위(헤드리스)**: State 전이(현 palette/find 테스트 스타일) + `view(state,props,tokens)`가 내는 ChromeDraw를 단언(예: Notice open이면 modal layer에 text op) + `hitTest` 순수 함수(현 `sidebarBandCell`/`dividerHit`/`BarMetrics` 테스트 스타일).
-- **백엔드 단위**: tui 백엔드가 ChromeDraw→NativeMetalCell을 정확히 lowering(밴드 col/width, border reserved-kind, 텍스트 glyph 수).
+- **백엔드 단위**: 셀 lowering 백엔드가 ChromeDraw→NativeMetalCell을 정확히 lowering(밴드 col/width, border reserved-kind, 텍스트 glyph 수).
 - **E2E/스냅샷**: ChromeDraw(또는 lowering된 셀)를 **스냅샷**으로 — 터미널 snapshot과 같은 결(chrome의 E2E 경로). 각 마이그레이션 단계가 "동작 보존"을 스냅샷 회귀로 증명.
 - **게이트**: 기존 `check-boundaries`·`coretext/metal/app 스모크`로 통합 회귀.
 
 ## 9. 결정 & 트레이드오프 (해소)
 
-1. **ChromeDraw(semantic) 도입 O.** 셀 직출력보다 레이어 +1이지만, **이게 tui|rich를 컴포넌트 churn 0으로 만드는 핵심**이고 관측 가능성 원칙("한 데이터, 여러 소비자")과 정합. 도입.
-2. **ChromeDraw 범위 = tui가 쓰는 fill/border/rule/text부터.** icon/gradient/shadow는 rich(C4) 때 확장(YAGNI).
-3. **좌표 = 픽셀.** rich의 sub-cell 정밀도 위해. tui 백엔드가 셀로 스냅.
+1. **ChromeDraw(semantic) 도입 O.** 셀 직출력보다 레이어 +1이지만, **이게 tui|rich(옛 tui 룩은 2026-08-19 제거)를 컴포넌트 churn 0으로 만든 핵심**이고 관측 가능성 원칙("한 데이터, 여러 소비자")과 정합. 도입.
+2. **ChromeDraw 범위 = 셀 lowering이 쓰는 fill/border/rule/text부터.** icon/gradient/shadow는 rich(C4) 때 확장(YAGNI).
+3. **좌표 = 픽셀.** rich의 sub-cell 정밀도 위해. 셀 lowering 백엔드가 셀로 스냅.
 4. **컴포넌트 디스패치 = 컴파일타임 고정(vtable 없음).** 3rd-party 확장은 비목표(컴파일타임 라이브러리). host가 컴포넌트 집합을 명시 소유(현 패턴).
 5. **터미널 콘텐츠는 별도 경로 유지.** chrome만 이 시스템. 둘은 `replace()`에서 합성.
 6. **(§9.6) 헤더·git·Explorer chrome 아이콘 = 빌드타임 SVG→coverage 합성.** 폰트에 없는 단색 아이콘(설정·검색·알림·새 워크스페이스·접기·GitHub/폴더 카드와 Explorer semantic file/folder glyph)을 SVG→coverage 마스터로 만들고(개발 시 `tools/svg_to_coverage.py` + `rsvg-convert`[librsvg] → PIL alpha → `src/renderer/icon_coverage_data.zig`로 **커밋**), `renderer/icon_glyph.zig`가 `synthesizeGlyph` 경로(box/braille 합성과 동형)로 슬롯 크기에 area-average 다운스케일해 그린다. codepoint는 **Plane 15 PUA(0xF0000~)**이며 현재 generator registry는 `0xF0001~0xF002A` 안의 명시된 41개 자산(= semantic 이름 37종 + tight 변형 4개, §9.7)만 등록한다(0xF0010은 삭제된 자산 자리로 비어 있다). 방향키 4종(`arrow_*`, 0xF0027~0xF002A)은 **모바일 보조 키바**가 쓴다 — 폰트의 `↑↓←→`가 폰트마다 작게 디자인돼 44px 키캡에서 글자 라벨보다 작아 보였고, 합성 아이콘은 슬롯을 가장자리까지 채워 크기를 우리가 정한다([mobile-ux.md](mobile-ux.md) §5.4). 합성 게이트는 **등록된 codepoint만** 본다 — Zig `icon_glyph.isRegisteredIcon` 한 곳이고(CoreText 셰이퍼는 그 판정을 셀 비트로 받는다), 모든 `IconKind→codepoint`도 자동 테스트가 coverage 등록을 확인한다. 단색이라 셰이더가 coverage×전경색으로 칠해 테마색이 자동 적용되고 런타임 의존성은 0이다. **주의(Nerd Fonts v3 겹침)**: Nerd Fonts v3의 Plane-15 MDI 영역과 겹치므로 미등록 in-range는 반드시 폰트로 폴백한다. 정확한 SVG provenance/license와 Maru 자작 Explorer v1 목록은 [third-party-licenses.md](third-party-licenses.md#maru-자작-explorer-아이콘)가 소유한다. 기본 Zig test는 SVG SHA-256 manifest와 C 이름 매크로/Zig registry를 외부 도구 없이 검증하고, coverage 재생성 drift는 opt-in `mise run icons:check`가 맡는다. 컴포넌트가 직접 소유한 아이콘 text op만 `wide_icons=true`로 선언하면 component plan과 backend lowering이 같은 등록 predicate로 width-2를 쓰며, 사용자/세션 문자열은 false라 우연한 PUA가 폭을 바꾸지 않는다. Explorer glyph는 한 row에 한 셀만 쓴다.
@@ -478,11 +479,11 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
 - **(높음) chrome 추출은 necessary-not-sufficient**: chrome이 떠나도 `app_session.zig`에 ~2500줄 OS-중립 세션 로직(workspace·split/IME·scroll)이 남아 platform/macos에 갇힌다. 2차 추출([layering-and-portability.md §3](layering-and-portability.md#3-두-번의-추출))이 이를 `src/session`으로 마저 뺀다.
 - **(높음) rich-layout seam**: 현재 탭 분할(`paneTabWidth`)·hit-test(`BarMetrics`)가 셀-열에 고정 결합. rich가 레이아웃(둥근 탭·패딩·아이콘)을 바꾸면 view와 hitTest가 단일 픽셀-레이아웃 모델을 공유해야 한다(§5.4) — 안 그러면 그려진 ✕와 클릭 ✕가 어긋난다. C0 컴포넌트 계약에 이 모델을 처음부터 넣는다.
 - **frame-loop 라벨**: `zig_owns_frame_loop`는 tick **본문** 소유일 뿐, 클럭은 OS(macOS `NSTimer` `.common`)다 — chrome은 무관하나 이식 시 타깃별 클럭 필요(상위 문서 §7).
-- **텍스트 lowering 비용**: tui 백엔드의 text op이 glyph shaping(CoreText) 경로를 타므로, 컴포넌트별 RenderFrame 생성 빈도를 현재처럼 dirty-gated로 유지(여기에 ChromeDraw Op-slice라는 추가 transient tier가 얹히나 chrome 셀 수가 작아 무시 가능).
+- **텍스트 lowering 비용**: 셀 lowering 백엔드의 text op이 glyph shaping(CoreText) 경로를 타므로, 컴포넌트별 RenderFrame 생성 빈도를 현재처럼 dirty-gated로 유지(여기에 ChromeDraw Op-slice라는 추가 transient tier가 얹히나 chrome 셀 수가 작아 무시 가능).
 - **rich 범위 미정**: 어디까지 고급화(rounded/gradient/icon/shadow)는 C4 착수 전 별도 설계.
 - **atlas 소유권**: 멀티 윈도우 공유는 grid-per-size로 수렴([multi-window-atlas-ownership] 메모리) — chrome glyph도 그 모델 따를지 C3에서.
-- **theme key 5개는 preset 전용(설계 확정)**: `search_match*`·`sidebar_*`는 개별 config 키가 없고 `theme.preset`으로만 설정한다(theme.zig:285, loader에 per-key case 없음). rich 토큰은 이와 무관하게 동작한다 — `Tokens.rich`(와 `tui`)는 preset이 채운 `ResolvedTheme`/`ThemeColors`에서 role을 파생하므로, 이 5색이 per-key로 파싱되지 않아도 rich 토큰셋은 정상이다.
+- **theme key 5개는 preset 전용(설계 확정)**: `search_match*`·`sidebar_*`는 개별 config 키가 없고 `theme.preset`으로만 설정한다(theme.zig:285, loader에 per-key case 없음). rich 토큰은 이와 무관하게 동작한다 — `Tokens.rich`(와 그 바닥 `Tokens.base`)는 preset이 채운 `ResolvedTheme`/`ThemeColors`에서 role을 파생하므로, 이 5색이 per-key로 파싱되지 않아도 rich 토큰셋은 정상이다.
 
 ## 11. 다음
 
-C0 착수 전, 이 문서의 §5 타입 계약(특히 ChromeDraw 어휘·Props 형태)을 확정한다. 확정되면 C0(스켈레톤 + Notice + tui 백엔드 + 손상 알림 연결)부터 구현하며 각 단계 tests green을 유지한다.
+C0 착수 전, 이 문서의 §5 타입 계약(특히 ChromeDraw 어휘·Props 형태)을 확정한다. 확정되면 C0(스켈레톤 + Notice + 셀 lowering 백엔드 + 손상 알림 연결)부터 구현하며 각 단계 tests green을 유지한다.

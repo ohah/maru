@@ -116,7 +116,7 @@ pub fn sidebarHeaderIconRowCenterPx(self: *const AppSession) u32 {
 /// - **높이**는 디자인 높이 `1.7 × ch` 를, 중심에서 띠 위·아래 가까운 끝까지의 두 배로 줄인다 — 그래야 pill 이 띠 안에
 ///   든다. 예전에는 `1.7 × ch` 그대로라 띠보다 높은 pill 이 창 위 끝에서 평평하게 잘렸다(2x: 63px pill · 56px 띠 · 위
 ///   4px 잘림 — #4412 의 2x 캡처로 봤다). 그 높이의 근거였던 「글리프가 1.7줄 높이라 줄이면 삐져나간다」는 틀렸다 —
-///   등록 아이콘의 잉크는 슬롯 안 `min(w, h)` 정사각(`icon_glyph.fillCoverage`, 폭 기준)이다(#4410 과 같은 오해).
+///   등록 아이콘의 잉크는 슬롯 안 `min(w, h)` 정사각(폭 기준 — `chrome.ui.icon.cellRasterIconInkPx`)이다(#4410 과 같은 오해).
 /// - 다만 **잉크보다는 작아지지 않는다** — 아주 큰 글꼴에서 잉크가 띠를 넘으면 pill 도 잉크를 따라 넘는다(렌더러가 창
 ///   밖을 자른다).
 ///
@@ -132,10 +132,7 @@ const HoverPlateVertical = struct { y: f32, h: f32 };
 fn hoverPlateVerticalPx(row_top_px: u32, cell_width_px: u32, cell_height_px: u32, strip_px: u32) HoverPlateVertical {
     const ch: f32 = @floatFromInt(cell_height_px);
     const strip: f32 = @floatFromInt(strip_px);
-    const ink: f32 = @floatFromInt(@min(
-        app_session_mod.headerIconRasterExtentPx(cell_width_px),
-        app_session_mod.headerIconRasterExtentPx(cell_height_px),
-    ));
+    const ink: f32 = @floatFromInt(chrome.ui.icon.cellRasterIconInkPx(cell_width_px, cell_height_px));
     const center = @as(f32, @floatFromInt(row_top_px)) + ch / 2.0;
     const fit = 2.0 * @max(0.0, @min(center, strip - center));
     const h = @max(@min(ch * 1.7, fit), ink);

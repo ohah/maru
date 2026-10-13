@@ -1252,11 +1252,11 @@ const default_sidebar_width_pt: u32 = 180;
 // 사이드바 상단 헤더(검색바 + 사이드바 접기·view options·새 워크스페이스 아이콘) 높이 = cell 높이 × 3.0(아이콘 줄 +
 // 검색 줄 + 패딩). 0이면 헤더 없음(하위호환). slot_height와 같은 단일 출처(cell 메트릭)에서 파생한다.
 const sidebar_header_height_ratio_milli: u32 = 3000;
-// 헤더 아이콘을 셀보다 크게 굽는 배율은 chrome 크기 토큰(`chrome.ui.icon`)이 소유한다 — 같은 1.7이
-// 렌더러 quad(.m)에도 있어, 여기에 또 상수를 두면 세 곳이 어긋날 수 있다.
+// 헤더 아이콘을 셀보다 크게 굽는 배율은 chrome 크기 토큰(`chrome.ui.icon`)이 소유한다 — 렌더러(.m)는 그 값을 다시 적지 않고
+// atlas 크기 ÷ 셀 크기로 quad 를 키운다(ABI 222). 이 함수는 **슬롯** 크기다 — 잉크에 맞출 때는 `cellRasterIconInkPx`.
 const header_icon_scale = chrome.ui.icon;
 
-pub fn headerIconRasterExtentPx(cell_extent_px: u32) u32 {
+fn headerIconRasterExtentPx(cell_extent_px: u32) u32 {
     return header_icon_scale.cellRasterExtentPx(cell_extent_px);
 }
 // 사이드바 접힘 시 좌상단 펼치기 버튼이 신호등 오른쪽에서 비울 가로 여백(논리 pt). 신호등은 좌상단 ~70pt를 차지한다.
@@ -24097,8 +24097,8 @@ pub const AppSession = struct {
     /// 접힘 상태 좌상단 펼치기 버튼의 backing-px rect(클릭 hit-test) — render(collapsedToggleCol)와 같은 col. 펼침/접힘
     /// 아니거나 탭이 없으면(글리프 frame도 안 그려짐 — buildCollapsedToggleDrawList과 같은 전제) null. mouse 핸들러가 이
     /// rect 안 클릭이면 toggleSidebarCollapsed(펼치기)한다(사이드바가 없어 inSidebar=false라 별도 체크). 높이는
-    /// **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 30pt(폰트 독립 — `computeTitlebarStripPx`)라 1.7× 버튼이 cell_h 밖으로 삐져나가는데
-    /// cell_h로 잡으면 그 부분이 데드존(클릭·드래그 둘 다 안 됨)이 된다. 가로는 **글리프 중심에 맞춘다**: .m이 ◧를
+    /// **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 30pt(폰트 독립 — `computeTitlebarStripPx`)로 셀보다 높아, cell_h로
+    /// 잡으면 띠의 위아래가 데드존(클릭·드래그 둘 다 안 됨)이 된다(1.7× 글리프의 잉크 자체는 폭 기준이라 cell_h 안이다 — `cellRasterIconInkPx`). 가로는 **글리프 중심에 맞춘다**: .m이 ◧를
     /// 셀 중심((col+0.5)·cw) 기준 1.7×로 키우므로(maru_fill_cell_quad가 중심 기준 확대) 글리프는 ≈[(col-0.35),
     /// (col+1.35)]·cw에 그려진다. rect를 col·cw부터 잡으면 클릭 영역이 글리프보다 0.5칸 오른쪽으로 치우쳐 글리프
     /// 좌측 일부가 안 눌리므로(code-review), 셀 중심에 2칸 폭을 중앙 정렬한다([(col-0.5),(col+1.5)]·cw — 호버 quad·
@@ -24110,7 +24110,7 @@ pub const AppSession = struct {
     }
 
     /// 접힘 좌상단 띠 아이콘의 클릭 rect — 글리프 중심 (col+0.5)·cw에 width_px(backing) 폭을 중앙 정렬, 높이=타이틀바 띠
-    /// 전체(1.7× 글리프가 cell_h 밖으로 삐져나가는 데드존 방지). collapsedToggleRect(◧, 2cw)·collapsedNotificationRect(종, 3cw)
+    /// 전체(띠의 위아래 데드존 방지 — 글리프 잉크는 폭 기준이라 cell_h 안이지만 띠는 그보다 높다). collapsedToggleRect(◧, 2cw)·collapsedNotificationRect(종, 3cw)
     /// 단일 출처 — 접힘/cell/띠/탭 전제와 중앙-정렬 수학을 한 곳에 둬 둘이 드리프트하지 않는다.
     pub fn collapsedIconRect(self: *const AppSession, col: u16, width_px: u32) ?chrome.draw.Rect {
         if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.titlebar_strip_px == 0 or self.tabs.items.len == 0) return null;
@@ -53594,6 +53594,46 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     try std.testing.expect(std.mem.indexOf(u8, text, "maru.workspace.v1\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "tree-node split horizontal") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
+}
+
+// `chrome.ui.icon.cellRasterIconInkPx` 는 「렌더러가 정사각 마스터를 슬롯 안 min(w, h) 정사각 가운데에 둔다」는 렌더러 사실을
+// 숫자로 옮긴 것이다. chrome 은 renderer 를 import 하지 않으므로 둘을 함께 보는 이 자리에서 **실제 `fillCoverage`** 로 굽고
+// 칠해진 픽셀이 그 박스 안에만 있는지 본다 — 렌더러가 맞춤 방식을 바꾸면(예: 높이 기준) 잉크 소비자(도크 토글 바닥·헤더 pill
+// 높이)가 조용히 틀리기 전에 여기서 빨개진다. 셀이 세로로 길 때 칠해진 높이가 슬롯 높이보다 확실히 작다는 것도 본다.
+test "잉크 박스(cellRasterIconInkPx)는 렌더러 fillCoverage 가 실제로 칠하는 범위를 담는다 — 헤더 아이콘 넷 · 1x·2x·가로로 긴 셀" {
+    const cps = [_]u21{ icons.codepoint(.sidebar_collapse), icons.codepoint(.bell), icons.codepoint(.gear), icons.codepoint(.plus) };
+    const cells = [_][2]u32{ .{ 8, 18 }, .{ 17, 37 }, .{ 20, 10 } };
+    for (cells) |cell| {
+        const w = headerIconRasterExtentPx(cell[0]);
+        const h = headerIconRasterExtentPx(cell[1]);
+        const ink = chrome.ui.icon.cellRasterIconInkPx(cell[0], cell[1]);
+        const off_x = (w - ink) / 2;
+        const off_y = (h - ink) / 2;
+        const bpr: usize = @as(usize, w) * 4;
+        const pixels = try std.testing.allocator.alloc(u8, bpr * h);
+        defer std.testing.allocator.free(pixels);
+        for (cps) |cp| {
+            const painted = renderer.icon_glyph.fillCoverage(cp, w, h, bpr, pixels) orelse return error.TestUnexpectedResult; // 등록 아이콘
+            try std.testing.expect(painted > 0);
+            var x0: u32 = w;
+            var y0: u32 = h;
+            var x1: u32 = 0;
+            var y1: u32 = 0;
+            for (0..h) |y| for (0..w) |x| {
+                const px = pixels[y * bpr + x * 4 ..][0..4];
+                if (px[0] == 0 and px[1] == 0 and px[2] == 0 and px[3] == 0) continue;
+                x0 = @min(x0, @as(u32, @intCast(x)));
+                y0 = @min(y0, @as(u32, @intCast(y)));
+                x1 = @max(x1, @as(u32, @intCast(x)) + 1);
+                y1 = @max(y1, @as(u32, @intCast(y)) + 1);
+            };
+            // 칠해진 픽셀은 잉크 박스 [off, off + ink) 안이다.
+            try std.testing.expect(x0 >= off_x and x1 <= off_x + ink);
+            try std.testing.expect(y0 >= off_y and y1 <= off_y + ink);
+        }
+        // 셀이 세로로 길면 잉크 박스는 슬롯보다 확실히 낮다 — 「슬롯 높이 = 잉크 높이」 오해를 숫자로 막는다.
+        if (cell[0] < cell[1]) try std.testing.expect(ink * 2 <= h + 1);
+    }
 }
 
 test "dock toggle visual bottom covers the 1.7x glyph ink (min-side square) when titlebar is below equal or above cell height" {

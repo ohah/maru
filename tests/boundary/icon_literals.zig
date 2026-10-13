@@ -552,6 +552,81 @@ test "Windows 헤더의 크게 구운 아이콘 자리는 호스트가 다시 �
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, code, "metal_frame.cellRasterIconCenterXPx(hover_col *| cell_w, cell_w, span)"));
 }
 
+// 크게 구운 아이콘의 **슬롯**과 **잉크 박스**를 가른다(2026-10-13). 슬롯은 `ext(cw) × ext(ch)`(래스터를 선언하는 자리만 쓴다)이고,
+// 잉크 박스는 그 안 `min(w, h)` 정사각(`chrome.ui.icon.cellRasterIconInkPx` — 무언가를 아이콘에 맞추는 자리가 쓴다)이다.
+// 잉크에 맞추는 자리가 슬롯 크기로 셈한 것이 두 번 결함이 됐다(#4410 도크 토글 판 Retina 2px · #4421 헤더 pill 4px 잘림).
+//
+// 그래서 **슬롯 크기 함수·배율 상수를 쓰는 파일을 전수 허용 목록으로 묶는다**(Zig 토크나이저로 식별자를 센다 — 주석·문자열은
+// 안 센다, 별칭으로 불러도 이름은 남는다). 새 파일이 이 이름을 쓰면 여기서 빨개지고, 사람이 「슬롯인가 잉크인가」를 정한다.
+const slot_identifiers = [_][]const u8{ "cellRasterExtentPx", "headerIconRasterExtentPx", "cell_raster_scale_milli" };
+const slot_consumers = [_][]const u8{
+    "src/chrome/ui/icon.zig", // 소유자(정의·잉크 박스 함수·단위 테스트)
+    "src/platform/macos/app_session.zig", // macOS 래스터 선언(`collectShaped` 의 raster_*_px) · 렌더러 대조 판정자
+    "src/main.zig", // Windows 래스터 선언
+};
+const ink_consumers = [_][]const u8{
+    "src/platform/macos/app_session/file_panel.zig", // 도크 토글 히트·hover 사각형의 바닥
+    "src/platform/macos/app_session/sidebar.zig", // 헤더 hover pill 높이
+};
+
+fn countIdentifiers(allocator: std.mem.Allocator, source: []const u8, names: []const []const u8) !usize {
+    const z = try allocator.dupeZ(u8, source);
+    defer allocator.free(z);
+    var tokenizer = std.zig.Tokenizer.init(z);
+    var n: usize = 0;
+    while (true) {
+        const tok = tokenizer.next();
+        if (tok.tag == .eof) break;
+        if (tok.tag != .identifier) continue;
+        const text = z[tok.loc.start..tok.loc.end];
+        for (names) |name| {
+            if (std.mem.eql(u8, text, name)) n += 1;
+        }
+    }
+    return n;
+}
+
+fn isListed(list: []const []const u8, path: []const u8) bool {
+    for (list) |p| if (std.mem.eql(u8, p, path)) return true;
+    return false;
+}
+
+test "크게 구운 아이콘의 슬롯 크기는 허용된 파일만 쓰고, 잉크 소비자는 잉크 박스 함수 하나를 부른다 (단일 출처)" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    var violations: usize = 0;
+    var seen_consumers: usize = 0;
+    var scanned: usize = 0;
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const full = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(full);
+        const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, full, allocator, .limited(16 * 1024 * 1024));
+        defer allocator.free(source);
+        scanned += 1;
+        const slot_uses = try countIdentifiers(allocator, source, &slot_identifiers);
+        if (isListed(&slot_consumers, full)) {
+            if (slot_uses > 0) seen_consumers += 1;
+            continue;
+        }
+        if (slot_uses > 0) {
+            std.debug.print("\n{s} 가 슬롯 크기(`{s}` 등)를 씁니다 — 아이콘에 무언가를 맞추려면 `chrome.ui.icon.cellRasterIconInkPx`(잉크 박스)를,\n  래스터를 선언하는 자리라면 이 목록(slot_consumers)에 근거와 함께 더하세요.\n", .{ full, slot_identifiers[0] });
+            violations += 1;
+        }
+        if (isListed(&ink_consumers, full)) {
+            // 잉크 소비자는 잉크 박스 함수를 실제로 부른다 — 이름이 바뀌어 위 검사가 빈 것을 지키지 않게 개수로 본다.
+            const ink_names = [_][]const u8{"cellRasterIconInkPx"};
+            try std.testing.expectEqual(@as(usize, 1), try countIdentifiers(allocator, source, &ink_names));
+        }
+    }
+    try std.testing.expect(scanned > 100); // 걷기가 실제로 됐다
+    try std.testing.expectEqual(@as(usize, slot_consumers.len), seen_consumers); // 허용 목록이 낡지 않았다(쓰지 않는 파일이 남지 않게)
+    try std.testing.expectEqual(@as(usize, 0), violations);
+}
+
 // 래스터 배치 역할(cover-fit·ink 중앙)도 Objective-C 가 codepoint 로 다시 고르지 않는다(2026-10-12). 호출자(Zig
 // `coretext_raster.zig`)가 `width.rasterFitFor` 로 정해 `raster_fit` 인자로 넘긴다. 예전 `.m` 은 wide-render-symbol
 // 범위(U+2460~24FF)를 주석-동기로 미러했고 ◧·⚙ 를 codepoint 로 골랐다.

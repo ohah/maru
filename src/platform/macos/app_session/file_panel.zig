@@ -32,7 +32,6 @@ const FilePanelSaveCloseAction = app_session_mod.FilePanelSaveCloseAction;
 const FileTreeReloadAction = AppSession.FileTreeReloadAction;
 const FileTreeTrashOutcome = app_session_mod.FileTreeTrashOutcome;
 const PendingFileTreeRootValidation = app_session_mod.PendingFileTreeRootValidation;
-const headerIconRasterExtentPx = app_session_mod.headerIconRasterExtentPx;
 const agent_activity_ops = @import("agent_activity.zig"); // RAV5b: 원격 펼침 결말 드레인
 const term_ops = @import("term.zig");
 const web_ops = @import("web.zig");
@@ -4966,16 +4965,16 @@ pub const FilePanelTestC = struct {
 
 pub const rename_swap: c_uint = 0x00000002;
 
-/// titlebar 안에 중앙 배치한 한 셀 glyph를 header_icon_scale만큼 확대한 뒤 화면에 보이는 **잉크의** 아래쪽 경계.
+/// titlebar 안에 중앙 배치한 한 셀 glyph를 `chrome.ui.icon` 배율(1.7×)로 구웠을 때 화면에 보이는 **잉크 박스의** 아래쪽 경계.
 /// filePanelDockControlRect의 hit/hover 높이와 collectShaped raster 크기가 같은 scale 계약을 소비한다.
 ///
-/// 슬롯은 `ext(cw) × ext(ch)` 지만 등록 아이콘의 잉크는 그 안 `min(w, h)` 정사각을 가운데 둔 것이다
-/// (`icon_glyph.fillCoverage`). 예전에는 **슬롯 높이** `ext(ch)` 로 바닥을 셈해, 셀이 세로로 긴 보통 폰트에서 잉크는 띠
-/// 안인데 판·히트 사각형만 띠 아래(탭 바)로 새고(1x 1px · Retina 3px) 판 중심이 그려진 ◧ 보다 내려갔다(Retina 2px).
+/// 잉크 한 변은 `chrome.ui.icon.cellRasterIconInkPx` 가 셈한다(슬롯 높이가 아니다 — 그 함수 주석). 예전에는 **슬롯
+/// 높이** `ext(ch)` 로 바닥을 셈해, 셀이 세로로 긴 보통 폰트에서 잉크는 띠 안인데 판·히트 사각형만 띠 아래(탭 바)로
+/// 새고(1x 1px · Retina 3px) 판 중심이 그려진 ◧ 보다 내려갔다(Retina 2px, #4410).
 pub fn dockToggleVisualBottomPx(cell_width_px: u32, cell_height_px: u32, titlebar_strip_px: u32) u32 {
     if (cell_height_px == 0) return titlebar_strip_px;
     const origin_y = if (titlebar_strip_px > cell_height_px) (titlebar_strip_px - cell_height_px) / 2 else 0;
-    const ink_px = @min(headerIconRasterExtentPx(cell_width_px), headerIconRasterExtentPx(cell_height_px));
+    const ink_px = chrome.ui.icon.cellRasterIconInkPx(cell_width_px, cell_height_px);
     const bottom = @as(u64, origin_y) + (@as(u64, cell_height_px) + ink_px + 1) / 2;
     return @intCast(@min(bottom, std.math.maxInt(u32)));
 }

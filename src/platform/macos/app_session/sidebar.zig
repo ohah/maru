@@ -144,6 +144,15 @@ pub const HeaderPlateRect = struct { x: f32, y: f32, w: f32, h: f32 };
 /// 단일 출처. 가로 중심 = 그려진 글리프 중심(`metal_frame.cellRasterIconCenterXPx`), 폭 = `headerIconHoverPlateWidthPx`,
 /// 세로 = `headerIconHoverPlateVertical`. 아이콘이 안 그려지는 폭(`header_icon_min_cols` 미만)이거나 아이콘이 아니면 null.
 pub fn headerIconHoverPlateRect(self: *const AppSession, region: chrome.components.sidebar.HeaderRegion) ?HeaderPlateRect {
+    const center_x = headerIconCenterXPx(self, region) orelse return null;
+    const w: f32 = @floatFromInt(headerIconHoverPlateWidthPx(self.cell_width_px));
+    const plate = headerIconHoverPlateVertical(self);
+    return .{ .x = center_x - w / 2.0, .y = plate.y, .w = w, .h = plate.h };
+}
+
+/// 펼친 헤더 아이콘(종·◧·⚙·+)이 **그려지는 가로 중심**(backing px) — hover pill(`headerIconHoverPlateRect`)과 알림 패널
+/// 말풍선 꼬리(`notification.appendNotificationCaret`)가 함께 쓴다. 아이콘이 안 그려지는 폭이거나 아이콘이 아니면 null.
+pub fn headerIconCenterXPx(self: *const AppSession, region: chrome.components.sidebar.HeaderRegion) ?f32 {
     if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
     const cols: u32 = self.sidebar_width_px / self.cell_width_px;
     const sb = chrome.components.sidebar;
@@ -161,10 +170,7 @@ pub fn headerIconHoverPlateRect(self: *const AppSession, region: chrome.componen
     // (`metal_frame.cellRasterIconGlyphOffsetPx`)을 렌더러가 셀의 `glyph_offset_x_px` 로 받아 더하므로, 여기서도 같은 함수로
     // 중심을 낸다(1칸이면 셀 중심, 종(2칸)이면 반 칸 오른쪽). 예전에는 「종이면 +1.0칸」을 따로 들었다 — 어긋나면 좁아진
     // 종이 박스 한쪽으로 치우쳐 보인다(실제로 있었던 버그).
-    const center_x: f32 = metal_frame.cellRasterIconCenterXPx(icon_col * self.cell_width_px, self.cell_width_px, span);
-    const w: f32 = @floatFromInt(headerIconHoverPlateWidthPx(self.cell_width_px));
-    const plate = headerIconHoverPlateVertical(self);
-    return .{ .x = center_x - w / 2.0, .y = plate.y, .w = w, .h = plate.h };
+    return metal_frame.cellRasterIconCenterXPx(icon_col * self.cell_width_px, self.cell_width_px, span);
 }
 
 /// 펼친 헤더의 눌림 판정 — 중립 `chrome.components.sidebar.headerHit`(3칸 zone · 아이콘 줄 **셀 높이**) **∪ 그려진 hover pill**
@@ -2751,7 +2757,7 @@ pub fn buildSidebarHeaderDrawList(self: *AppSession, part: HeaderPart) !?rendere
     // 아이콘 색은 호버 여부와 무관하게 항상 sidebar_foreground다 — hover 강조는 아래 호버 배경 quad(밝은 반투명)가
     // 맡는다. 예전엔 호버 아이콘을 sidebar_active로 재색칠했는데, Ghostty 테마에선 sidebar_active가 밝은 전경색이
     // 아니라 어두운 밴드색이라 아이콘이 오히려 어두워졌다(사용자 피드백) — 재색칠을 제거한다.
-    // 알림 종(글리프 좌단 col cols-12, EAW 2칸이라 cols-12·cols-11 점유, 렌더 -0.5 nudge로 중심 (cols-11.5)*cw) + 종 우상단
+    // 알림 종(글리프 좌단 col cols-12, EAW 2칸이라 cols-12·cols-11 점유, 중심 = 두 칸 가운데 (cols-11)*cw — `headerIconCenterXPx`) + 종 우상단
     // 원형 배지(흰 숫자 cols-10 + 빨강 원 quad는 appendNotificationBadge). 종을 cols-12에 둬 배지(cols-10)와 ◧(cols-8)
     // 사이에 cols-9 한 칸 간격을 둔다 — ◧가 1.7×라 cols-9로 번져, 배지를 cols-9에 두면 ◧에 닿던 것을 떼기 위함(사용자 피드백).
     // headerHit의 notifications zone(cols-12..cols-9)이 종 글리프(cols-12·cols-11)와 배지(cols-10)를 모두 포함한다(클릭→패널).

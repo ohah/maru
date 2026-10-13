@@ -134,9 +134,9 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 - **사이드바 헤더 종 + 배지**: 헤더 우측 아이콘 줄에 종(🔔)·접기(◧)·view options(⚙)·새 워크스페이스(+)를 우측
   정렬한다 — ◧·⚙·+는 3칸 간격(`cols-8`·`cols-5`·`cols-2`)이고, 종은 우상단 배지(아래) 자리를 비우려 한 칸 더 왼쪽
   `cols-12`(EAW 2칸이라 `cols-12·cols-11` 점유)에 둔다(종↔◧ 4칸: 그 사이 `cols-10`=배지·`cols-9`=간격). 종은 2칸
-  글리프라 정수 col 슬롯 중심이 `(cols-11)*cw`로 1칸 아이콘(중심 `col+0.5`)과 반칸 어긋나므로, 렌더러
-  (`maru_metal_renderer.m`)가 종 글리프만 가로로 0.5칸 왼쪽으로 미는 px nudge를 줘 중심을 `(cols-11.5)*cw`
-  (hover quad 중앙·말풍선 caret과 동심)에 맞춘다(py_nudge와 동형 — 2칸 글리프는 정수 col로 반칸에 못 옴).
+  글리프라 두 칸 가운데 `(cols-11)*cw`가 중심이다(`metal_frame.cellRasterIconCenterXPx` — 렌더러가 셀의 `glyph_offset_x_px`로
+  받는다). hover pill·말풍선 caret 이 같은 중심을 쓴다(`app_session/sidebar.zig` 의 `headerIconCenterXPx`). 예전 렌더러는 종만
+  0.5칸 왼쪽으로 미는 nudge 로 `(cols-11.5)*cw`에 맞췄는데 그 nudge 는 없어졌고, caret 만 옛 값을 들고 있어 반 칸 치우쳤다.
 - **안 읽은 개수 배지(종 우상단 빨강 원형, 펼침)**: 종을 `cols-12`(점유 `cols-12·cols-11`)에 두고 **우측 한 칸**
   (`cols-10` = `notificationBadgeCol`)에 **빨강 원형 quad + 흰 숫자**를 겹쳐 그린다(iOS/macOS 배지식 — 예전 종 좌측 coral
   텍스트는 대비가 낮아 안 읽혔다). 종을 한 칸 왼쪽(`cols-12`)에 둬 배지(`cols-10`)와 ◧(`cols-8`) 사이에 `cols-9` 한 칸
@@ -196,11 +196,11 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 - **말풍선 팝오버(형태)**: `openNotificationPanel`이 content top을 `anchor_y = 2*cell_h + modal_padding_px`로 둔다(단일 출처).
   rich 모달 배경 quad는 lowering(`rasterizeOverlayCells`)이 content rect를 사방 `modal_padding_px`만큼 **outset**하므로
   **보이는** 패널 상단 = `anchor_y − mp` = 줄2(=2ch) — mp를 더해 보이는 상단을 줄2에 맞춘다(안 더하면 보이는 패널이
-  `2ch−12`로 종에 거의 붙어 caret 틈이 없다). 종 글리프는 py_nudge(0.30ch)로 줄0에서 ~1.30ch까지 내려오므로, 줄1(빈
-  버퍼 행)이 종↔패널 간격이자 **말풍선 caret**(위로 뾰족한 삼각형) 자리가 된다 — **팝업이 종을 안 가린다**(예전 `anchor_y=1ch`는
+  `2ch−12`로 종에 거의 붙어 caret 틈이 없다). 종은 띠 안 세로 중앙(`sidebarHeaderIconRowTopPx`)에 그려지고, 그 아래 틈
+  (기본 폰트 1x 약 6px · 2x 약 14px)이 종↔패널 간격이자 **말풍선 caret**(위로 뾰족한 삼각형) 자리가 된다 — **팝업이 종을 안 가린다**(예전 `anchor_y=1ch`는
   종 하단을 덮었다). caret은 chrome 모달 lowering이 셀 그리드(픽셀 정밀 도형은 둥근 quad뿐)라, platform `appendNotificationCaret`이
   `self.gpu_quads`에 `GpuQuad{gradient_kind=3}`(셰이더가 rect 내접 삼각형 + fwidth edge AA로 그림 — 별도 파이프라인/ABI 없이
-  quad 채널 재활용) **1개**(surface_bg 채움만)를 종 중심(`(cols-11.5)*cw`)·**보이는** 패널 상단(`panel.y − mp`)에
+  quad 채널 재활용) **1개**(surface_bg 채움만)를 그려진 종 중심(`headerIconCenterXPx(.notifications)`)·**보이는** 패널 상단(`panel.y − mp`)에
   append한다(예전 2개[focus_accent 외곽선 + 채움]는 채움 삼각형 빗변의 fwidth edge-AA가 내부까지 부분 커버리지를 줘
   외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다 — 단일 채움으로 패널과 같은 색). caret 채움(surface_bg)이 패널
   배경과 **픽셀값까지 같은** 건 rich quad 셰이더의 sRGB 역감마가 표준 2.4라 round-trip이 identity이기 때문(예전 3.0

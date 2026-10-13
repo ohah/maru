@@ -465,7 +465,7 @@ pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`
      - **그림 수준 검증이 없는 소비처**: 헤더 gear·plus·search·bell, 펼친 사이드바 ◧, archive detail의 `document`, 파일 탐색기 20종(등록 여부만 확인). 소비처가 `.gear` 대신 `.plus`를 부르도록 바뀌면 아무 테스트도 안 잡는다 — 생성물 3종 대응 가드는 registry 안쪽만 본다.
      - **스캔 범위**: 리터럴 가드는 `src`·`tests` 트리의 `.zig`와 `.m`/`.h`/`.c`/`.metal`을 본다. 남은 사각지대는 생성물 자신(exempt), `.swift`(`sourceKind` 미지원), 그리고 `scan_roots` 밖인 `build.zig`·`tools/`·`web/`이다.
      - **생성기 파이썬에 자동 테스트가 0이고** `mise run icons:check`는 `check` 밖(opt-in, rsvg 필요)이다. 매니페스트 검증(키워드·중복 cp·심볼 충돌)도 그 안에 있어 CI가 안 돈다.
-     - `.m`의 아이콘 세로 보정(`py_nudge` 0.30ch)은 토큰·미러 가드 밖이다(배율만 미러한다).
+     - 아이콘 세로 자리는 Zig 가 셀 `origin_y` 로 싣는다(`sidebarHeaderIconRowTopPx` — 예전 `.m` 의 `py_nudge` 0.30ch 는 없어졌다). 미러 가드는 배율만 본다.
      - `chrome/file_tree_icon.IconKind`가 `icons.Icon`과 **다른 어휘**를 유지한다(`code`↔`file_code`, `config`↔`file_config`, `git`↔`git_branch`). 두 번째 이름 체계라 언제 합칠지 결정이 필요하다.
      - 이름이 그림과 어긋나는 후보: `data`(=데이터베이스 실린더), `web`(=지구본). 개명은 생성물 3종 + 소비처 동시 변경이라 별도 슬라이스다.
    - **chrome draw-op 소비처를 위해 남은 것**: 아이콘 색을 라벨과 **따로** 줄 수단(`Op.Text.role`이 op당 하나라 "빨간 오류 아이콘 + 중립 라벨"을 한 group으로 못 낸다), 아이콘 슬롯 밀도 세 번째 단계(도크가 이미 20·24pt를 토큰 밖에서 쓴다), 그리고 **상태 변형 축**(활성/비활성/채움)을 `Fit`에 섞지 않는다는 결정 — 섞으면 IC3가 없앤 이름 폭발이 재발한다.

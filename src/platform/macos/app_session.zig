@@ -67169,6 +67169,54 @@ test "sidebar 헤더: 그려진 hover pill 의 가장자리도 그 아이콘으�
     try std.testing.expect(below_search > 0); // 검색 줄 쪽 음성 단언이 한 번은 실제로 돌았다
 }
 
+// 알림 패널 말풍선 꼬리(caret)의 꼭짓점은 **그려진 종** 위에 온다. 예전 caret 은 종 중심을 `(cols-11.5)·cw` 로 따로 셈했다 —
+// 렌더러가 2칸 종을 반 칸 왼쪽으로 밀던 옛 nudge 를 전제한 값인데, 그 nudge 는 없어졌고(`.m` 1377) 종은 두 칸 가운데
+// (`metal_frame.cellRasterIconCenterXPx`)에 그려져 꼬리가 반 칸 왼쪽으로 치우쳤다. 종 자리는 **그려진 셀에서** 읽는다.
+test "알림 패널: 말풍선 꼬리 꼭짓점이 그려진 종 글리프 중심 위에 온다 (1x·2x)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = notification_ops.pushNotificationHistory(session, "Maru", "빌드 알림 예시", 0);
+    var checked: usize = 0;
+    var prev_ch: u32 = 0;
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        _ = try session.resize(1200 * scale / 1000, 700 * scale / 1000, scale);
+        try std.testing.expect(session.cell_height_px > prev_ch);
+        prev_ch = session.cell_height_px;
+        session.chrome_host.notifications.hide();
+        notification_ops.openNotificationPanel(session);
+        try std.testing.expect(session.chrome_host.notifications.open);
+        session.metal_dirty = true;
+        for (0..4) |_| {
+            _ = try session.tick();
+            if (!session.metal_dirty) break;
+        }
+        var bell: ?[4]f32 = null;
+        var bells: usize = 0;
+        for (session.metal_buffer.cells) |c| {
+            if (c.codepoint != icons.codepoint(.bell) or c.row != 0 or c.origin_x != 0) continue;
+            if (c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
+            bell = metal_frame.cellRasterIconQuadPx(c, session.cell_width_px, session.cell_height_px);
+            bells += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), bells);
+        const g = bell orelse return error.TestUnexpectedResult;
+        var caret: ?metal_frame.GpuQuad = null;
+        var carets: usize = 0;
+        for (session.gpu_quads.items) |q| if (q.gradient_kind == 3) {
+            caret = q;
+            carets += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), carets); // 꼬리가 실제로 그려졌다(생략 갈래가 아니다)
+        const q = caret orelse return error.TestUnexpectedResult;
+        try std.testing.expectApproxEqAbs(g[0] + g[2] / 2.0, q.x + q.w / 2.0, 0.5);
+        checked += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), checked);
+}
+
 // 알림 배지도 **보이는 것 = 눌리는 것**이다(#4434 의 pill 과 같은 원칙). ⑴ 펼친 헤더: 빨강 원(불투명 — 반투명 hover pill 아래로
 // 비친다)의 오른쪽 끝이 ◧ zone(cols-9~)으로 넘어가, 그 자리를 누르면 알림 대신 사이드바가 접혔다. 다만 원 위에 그려지는 ◧
 // 글리프 잉크는 원이 빼앗지 않는다 — 행간을 키운 창(line_height 2.0)에서 원이 실제로 그 잉크에 닿는 것까지 본다. ⑵ 접힌 띠: 안 읽음 10 개 이상의
@@ -73976,7 +74024,8 @@ test "collapsed notification bell: hit-test rect is concentric with the glyph, c
     const r = notification_ops.collapsedNotificationRect(session).?;
     // rect 높이 = 타이틀바 띠 전체(데드존 방지 — collapsedToggleRect와 같은 규약).
     try std.testing.expectEqual(session.titlebar_strip_px, r.h);
-    // 클릭 rect 중심 == 종 글리프 시각 중심 (bell_col+0.5)·cw(렌더러 −0.5칸 px_nudge 반영; (3cw)/2 == cw + cw/2라 홀/짝 cw 무관).
+    // 클릭 rect 중심 == (bell_col+0.5)·cw — 종 글리프(두 칸 가운데 (bell_col+1)·cw)보다 반 칸 왼쪽이라 왼쪽 배지 한 칸까지 담는다
+    // (옛 렌더러 −0.5칸 nudge 는 없어졌다; (3cw)/2 == cw + cw/2라 홀/짝 cw 무관).
     const bell_center = @as(i32, notification_ops.collapsedBellCol(session)) * cw_i + @divTrunc(cw_i, 2);
     try std.testing.expectEqual(bell_center, r.x + @as(i32, @intCast(r.w / 2)));
     // 종 rect(왼쪽)와 ◧ 토글 rect(오른쪽)는 안 겹친다(클릭 모호성 없음) — 종 우단 ≤ 토글 좌단.

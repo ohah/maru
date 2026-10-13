@@ -27319,7 +27319,10 @@ test "image channel pump: a lost channel drops to no image channel and keeps the
     // 늦게 온 `image_ref`(「이미지 채널 없음」 연결)는 「세그먼트 없음」이다 — 조립기는 `MalformedRow` 로 그 연결을 재접속시키고
     // 탭은 살아 있다(계약 §3.2·§6). 버린 표의 fd 를 다시 쓰지 않는다.
     const late: screen_stream.ImageRef = .{ .image_id = 3, .generation = 4, .width = 1, .height = 1, .bpp = 4, .segment_id = 7, .byte_len = 4 };
+    const refused_before = image_reconciliation.snapshot();
     try std.testing.expect((try fx.client.resolveImageSegment(1, late)) == null);
+    // 울타리 거부가 아니라 표에 없어서다 — 거부 칸은 그대로.
+    try std.testing.expectEqual(@as(u64, 0), image_reconciliation.snapshot().delta(refused_before).channel_refused);
     try std.testing.expect(fx.client.imageShmNegotiated());
 }
 

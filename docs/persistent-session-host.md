@@ -7930,7 +7930,9 @@ L1 이 둘 다 쓰는데 L1 은 L2 를 import 하지 못한다).
 | --- | --- | --- |
 | 0 번 청크 없이 온 청크 → 스킵 | `screen_assembler.handleImageBlob` | `drop_no_head` |
 | 청크 순서·개수가 pending 과 어긋남 → 폐기 | 같은 곳 | `drop_order` |
-| 메모리 부족 | 같은 곳 | `drop_oom` |
+| 메모리 부족 | 같은 곳(`image_ref` 는 매핑의 ENOMEM) | `drop_oom` |
+| `image_ref` 의 세그먼트를 해석하지 못함(표에 없음·메타 불일치·ENOMEM 아닌 매핑 실패·크기 다름) → 그 연결 재접속 | `screen_assembler.handleImageRef` | `drop_no_segment` |
+| 이미지 채널 연산이 울타리에서 빠짐 / `image_ref` 배치 보류(지연, 손실 아님) | Client 이미지 메서드·`ClientSlot` 접근 규칙 / `RemoteAttachment` 큐 머리 | `channel_refused` / `held` |
 | placement 는 왔는데 그 `image_id` 의 blob 이 없음 → 안 그림 | `metal_frame.buildGpuImages` (일반·U=1 가상) | `placement_without_blob` |
 | 완성·업로드·캐시 적중(정상 흐름의 모양) | `putImage` / `planImageUploads` | `complete` `uploaded` `skip_same_gen` |
 
@@ -7948,8 +7950,11 @@ L1 이 둘 다 쓰는데 L1 은 L2 를 import 하지 못한다).
   (docs/session-host-image-channel.md §6)의 지연이다 — 울타리에서 빠진 채널 연산과 큐 머리에 보류된 `image_ref` 배치.
   손실이 아니라 경고줄을 울리지 않지만, 늘어나면 lease 가 오래 잡혀 host 원장이 차는 것을 가린다.
 - `warning: image reconciliation: complete=… drop_no_head=… drop_order=… drop_oom=… drop_no_segment=… placement_without_blob=… uploaded=… skip_same_gen=…` — **사라진 것이 있을 때만.**
-  `drop_no_segment` 는 `image_ref` 의 세그먼트를 해석하지 못해(표에 없음·크기 다름) 그 연결이 재접속한 이미지다.
-  `image_ref` 매핑 실패는 `image_blob` 과 같은 `drop_oom` 이다.
+  `drop_no_segment` 는 `image_ref` 의 세그먼트를 해석하지 못해 그 연결이 재접속한 이미지다(예산 초과·`putImage` OOM 의 재접속은
+  어느 칸에도 없다). `image_ref` 매핑의 메모리 부족(ENOMEM)만 `drop_oom` 이다.
+  **한 사건이 여러 칸에 찍힌다** — 칸은 사건이 아니라 연산을 센다. 예: slot 이 막힌 채 첫 snapshot 을 적용하면 준비(`channel_refused`
+  +1)·해석(+1)·`drop_no_segment`(+1), 울타리에 막혀 보류가 이어지면 tick 마다 `channel_refused` 와 `held` 가 함께 오른다. 협상하지
+  않은 연결은 tick 펌프를 하지 않아 이 두 칸에 나오지 않는다.
 
 비용은 실측 한 줄 410 ns(ReleaseFast)·951 ns(Debug), 5 초마다 1 회. 로그 양은 앱 `app.log` 의 4 MB 상한(넘으면
 비움) 안에서 `observation cost` 와 같은 급이다.

@@ -3770,7 +3770,10 @@ pub const RemoteRuntime = struct {
         pub fn pumpImageChannel(runtime: *RemoteRuntime) void {
             runtime.admitRuntimeOperation() catch return;
             switch (runtime.currentGeneration().connection) {
-                .legacy => |client| _ = client.pumpImageChannel(.try_lock),
+                // 협상하지 않은 연결은 비울 채널이 없다 — 울타리에 막힌 펌프를 `channel_refused` 로 매 frame 세지 않게 거른다.
+                .legacy => |client| if (client.imageShmNegotiated()) {
+                    _ = client.pumpImageChannel(.try_lock);
+                },
                 .generation => |adapter| _ = adapter.pumpImageChannel() catch false,
             }
         }
@@ -21856,7 +21859,8 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("remote_runtime.zig"), ".legacy => |*value| value." ++ "imageRefResolverAfterPump(ctx),"));
     // legacy tick 펌프는 fork 울타리의 수신 잠금을 기다리지 않는다(§7 — 메인이 fork 하는 BACKGROUND 스레드를 기다리면 수백 ms 를
     // 멈춘다). 기다리는 `.block` 은 tick 이 없는 첫 snapshot 자리(`imageRefResolverAfterPump`)만의 것이다.
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("remote_runtime.zig"), ".legacy => |client| _ = client." ++ "pumpImageChannel(.try_lock),"));
+    // 협상한 연결만 펌프한다 — 협상하지 않은 연결의 울타리 거부를 `channel_refused` 로 세지 않는다(IC3b-2c-2 적대적 검증 1 회차).
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, @embedFile("remote_runtime.zig"), ".legacy => |client| if (client.imageShmNegotiated()) {\n                    _ = client." ++ "pumpImageChannel(.try_lock);"));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, @embedFile("remote_runtime.zig"), "pumpImageChannel(" ++ ".block)"));
     const backend = @embedFile("remote_term_backend.zig");
     const dedup = "if (index != 0 and host_probes[index - 1].host_id == probe.host_id) continue;";

@@ -13405,6 +13405,9 @@ pub const ClientSlot = struct {
     ) client_mod.ClientError!bool {
         const Operation = struct {
             fn run(_: void, client: *client_mod.Client) client_mod.ClientError!bool {
+                // 협상하지 않은 연결은 비울 채널이 없다 — 울타리(poison·external 모드 등)에 막힌 펌프를 「채널 연산이 빠짐」
+                // (`channel_refused`)으로 매 frame 세지 않게 먼저 거른다. 협상 여부는 관측이라 울타리 밖에서 읽는다.
+                if (!client.imageShmNegotiated()) return true;
                 // 다음 tick 이 다시 온다 — 수신 잠금을 기다리지 않는다(§7).
                 return client.pumpImageChannel(.try_lock);
             }

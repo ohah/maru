@@ -529,6 +529,7 @@ fn tickOsrDialog(self: *AppSession) void {
         // 떠 있던(또는 띄우려던) 요청이 사라졌다 — Swift 가 가져가기 전이면 그냥 거두고, 띄웠으면 닫게 한다.
         self.osr_dialog = null;
         if (self.osr_dialog_ready) self.osr_dialog_ready = false else self.osr_dialog_dismiss = true;
+        markFocusByApp(self); // sheet 가 거두어지면 창이 키를 되찾는다 — maru 가 옮긴 것
         return;
     }
     // 키보드 초점을 가진 Chromium 탭만 띄운다 — 보이기만 하는 옆 pane 이 띄우면 sheet 가 곧바로 키를 가져가, 터미널에 치던
@@ -549,6 +550,7 @@ fn tickOsrDialog(self: *AppSession) void {
         self.markNotificationsReadBySurface(layout.surface_id); // 기다린다는 알림은 이제 읽었다
         self.osr_dialog = .{ .surface_id = layout.surface_id, .token = d.token };
         self.osr_dialog_ready = true;
+        markFocusByApp(self); // sheet 가 키를 가져간다 — maru 가 옮긴 것
         return;
     }
 }
@@ -1097,12 +1099,19 @@ pub fn osrKeyTarget(self: *AppSession) ?u64 {
 /// 키 대상이 바뀌었으면 포커스를 옮긴다(C5 모달 에지): 옛 탭은 조합을 그대로 확정하고(`ime_finish_composing`) 포커스를
 /// 놓는다, 새 탭은 포커스를 받는다. tick·키·편집 명령 **직전**과 탭을 활성으로 올리는 누름 **직전**에 부른다 — 키로 탭을
 /// 바꾼 직후의 키가 포커스 없는 브라우저로 가지 않게(적대 검증).
-/// 사용자의 누름·키(`AppSession.last_user_event_ms`) 뒤 이만큼 안에 키 대상이 바뀌면 사용자가 바꾼 것으로 본다 — 누름 뒤 다음 tick(약 16 ms)에
-/// 바뀐다(W9c② 적대 리뷰 3 회차 실측). maru 가 스스로 옮기는 때(sheet·팝업·닫기)는 그 근처에 사용자 입력이 없다.
-pub const user_focus_window_ms: u64 = 250;
+/// W9c② 적대 리뷰 4 회차: 키 대상이 바뀌면 **사용자가 바꾼 것으로 본다** — maru 가 스스로 옮기는 자리(대화상자 sheet 를 띄우고 거둘 때·앞
+/// 팝업을 놓을 때·에이전트의 닫기·페이지가 스스로 닫혔을 때)만 `markFocusByApp` 으로 표시하고, 표시는 다음 바뀜 한 번에 쓴다(이만큼 지나면
+/// 버린다). 3 회차의 「사용자 누름·키 뒤 250 ms」 는 메뉴 단축키(⌘⌥[ ])·웹 탭이 키를 쥔 동안의 ⌘숫자·⌘Tab·알림 누름을 놓쳐 사용자의 전환을
+/// maru 것으로 봤다 — 틀려도 거절 쪽이 되게 뒤집었다.
+pub const app_focus_mark_ms: u64 = 500;
 
-pub fn userMadeFocusChange(last_user_event_ms: u64, now_ms: u64) bool {
-    return last_user_event_ms != 0 and now_ms -| last_user_event_ms <= user_focus_window_ms;
+pub fn appMadeFocusChange(mark_ms: u64, now_ms: u64) bool {
+    return mark_ms != 0 and now_ms -| mark_ms <= app_focus_mark_ms;
+}
+
+/// maru 가 곧 키 대상을 옮긴다(위 자리들) — 그 바뀜은 사용자 시각을 찍지 않는다.
+pub fn markFocusByApp(self: *AppSession) void {
+    self.osr_focus_by_app_ms = app_session_mod.monotonicMs();
 }
 
 pub fn syncOsrKeyTarget(self: *AppSession) void {
@@ -1112,9 +1121,10 @@ pub fn syncOsrKeyTarget(self: *AppSession) void {
     // 영영 못 준다(W4c 실측 — 첫 동기화가 기록 전에 돌아 페이지가 포커스 없이 남았다).
     if (now != 0 and !web_osr.owns(now)) return;
     const window = @intFromPtr(self);
-    // W9c② 적대 리뷰 3 회차: 키 대상이 바뀐 것이 사용자의 누름·키 바로 뒤면(탭 막대·⌘숫자·다른 pane 누름) 옛 탭·새 탭 모두 사용자 시각을 찍는다 —
-    // 그 탭의 blur·focus·visibilitychange 처리기가 띄운 대화상자는 사용자 것이다. sheet·앞 팝업·에이전트의 닫기처럼 maru 가 옮긴 것은 찍지 않는다.
-    const user_made = userMadeFocusChange(self.last_user_event_ms, app_session_mod.monotonicMs());
+    // W9c② 적대 리뷰 3·4 회차: 사용자가 바꾼 키 대상(탭 막대·단축키·메뉴·⌘Tab·다른 pane)이면 옛 탭·새 탭 모두 사용자 시각을 찍는다 — 그 탭의
+    // blur·focus·visibilitychange 처리기가 띄운 대화상자는 사용자 것이다. maru 가 옮긴 것(`markFocusByApp`)만 찍지 않는다.
+    const user_made = !appMadeFocusChange(self.osr_focus_by_app_ms, app_session_mod.monotonicMs());
+    self.osr_focus_by_app_ms = 0;
     if (self.osr_key_target != 0) {
         const old = self.osr_key_target;
         if (web_osr.composing(old)) {
@@ -1296,6 +1306,7 @@ pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.Clo
         .close => return web_osr.markCloseAskClosed(surface_id),
         else => {},
     }
+    if (web_osr.closeAskedByAgent(surface_id)) markFocusByApp(self); // 에이전트의 닫기 — 이웃으로 옮기는 것은 maru 다(사용자의 ⌘W 는 사용자 것)
     for (self.tabs.items, 0..) |tab, tab_index| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items, 0..) |term, index| {
@@ -1345,6 +1356,7 @@ pub fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
         .close => |target| if (target != .window) return web_osr.markPageClosed(surface_id),
         else => {},
     }
+    markFocusByApp(self); // 페이지가 스스로 닫혔다 — 이웃으로 옮기는 것은 maru 다
     for (self.tabs.items, 0..) |tab, tab_index| {
         for (tab.panes.items) |pane| {
             for (pane.terms.items, 0..) |term, index| {
@@ -1478,6 +1490,7 @@ fn insertNewTab(self: *AppSession, pane: *app_session_mod.Pane, opener_index: us
     };
     if (plan.focus) {
         pane.active_term += @intFromBool(plan.at <= pane.active_term); // 끼운 자리만큼 민 뒤 옮긴다(focusTerm 은 같은 자리면 일찍 끝난다)
+        markFocusByApp(self); // 페이지가 연 앞 팝업으로 키가 옮겨 간다 — maru 가 옮긴 것(W9c② 적대 리뷰 4 회차)
         self.focusTerm(plan.at);
         self.osr_new_tab_run = null;
     } else {
@@ -3187,9 +3200,9 @@ test "permission sheet text lists each asked permission once and notes rememberi
     try std.testing.expect(cut.len <= small.len and std.unicode.utf8ValidateSlice(cut));
 }
 
-test "W9c② 적대 리뷰 3 회차: 키 대상이 바뀐 것은 사용자의 누름·키 뒤 250 ms 안일 때만 사용자 탓 — 누름이 없었거나 오래됐으면 maru 가 옮긴 것" {
-    try std.testing.expect(userMadeFocusChange(10_000, 10_016)); // 누름 다음 tick
-    try std.testing.expect(userMadeFocusChange(10_000, 10_250));
-    try std.testing.expect(!userMadeFocusChange(10_000, 10_251)); // sheet·팝업·닫기 — 근처에 사용자 입력이 없다
-    try std.testing.expect(!userMadeFocusChange(0, 10_000)); // 한 번도 누르지 않았다
+test "W9c② 적대 리뷰 4 회차: 키 대상의 바뀜은 사용자 것이 기본 — maru 가 옮긴다는 표시가 500 ms 안에 있을 때만 maru 것" {
+    try std.testing.expect(!appMadeFocusChange(0, 10_000)); // 표시 없음 — 메뉴 단축키·⌘Tab·알림 누름도 사용자 것
+    try std.testing.expect(appMadeFocusChange(10_000, 10_016)); // sheet·앞 팝업·에이전트의 닫기 — 다음 tick
+    try std.testing.expect(appMadeFocusChange(10_000, 10_500));
+    try std.testing.expect(!appMadeFocusChange(10_000, 10_501)); // 바뀌지 않고 남은 표시는 버린다
 }

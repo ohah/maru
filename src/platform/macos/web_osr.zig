@@ -6961,7 +6961,7 @@ fn w9c2R3Setup(gpa: std.mem.Allocator) !*Surface {
     return s7;
 }
 
-/// 창의 `syncOsrKeyTarget` 이 하는 일 — 키 대상이 옮겨 가고, 사용자의 누름·키 바로 뒤면(`user_made`) 두 탭 모두 사용자 시각을 찍는다.
+/// 창의 `syncOsrKeyTarget` 이 하는 일 — 키 대상이 옮겨 가고, maru 가 옮긴 것이 아니면(`user_made`) 두 탭 모두 사용자 시각을 찍는다.
 fn w9c2MoveKeyTarget(gpa: std.mem.Allocator, old: u64, now: u64, user_made: bool) void {
     if (old != 0) {
         if (composing(old)) _ = sendAppInput(gpa, .{ .ime_finish_composing = .{ .browser = old, .value = false } });
@@ -7038,4 +7038,29 @@ test "W9c② 적대 리뷰 3 회차 재현 E: 에이전트 누름이 연 앞 팝
     w9c2MoveKeyTarget(gpa, 7, 8, false); // maru 가 팝업으로 키를 옮긴다 — 조합 마침은 앱이 만든 것
     apply(gpa, .{ .js_dialog = .{ .browser = 8, .request = 1, .kind = .alert, .origin = "https://idp.test", .message = "Signed in" } }, monotonicNow());
     _ = try agentReplyDialog(gpa, 8, null, true, "", acc.access());
+}
+
+test "W9c② 적대 리뷰 4 회차 재현 A: 메뉴 단축키(⌘⌥[)로 옮겨 간 Chromium 탭의 focus confirm 은 에이전트가 답하지 못한다 — 사용자 바뀜이 기본" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    s7.agent_input_ms = monotonicNow() - 1_000;
+    w9c2MoveKeyTarget(gpa, 0, 8, true);
+    w9c2MoveKeyTarget(gpa, 8, 7, true); // maru 표시가 없는 바뀜 — 사용자 것
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "A new version is available. Reload?" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11);
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 4 회차 재현 B: ⌘Tab 으로 다른 앱에 가며 생긴 blur 의 confirm 은 에이전트가 답하지 못한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    w9c2MoveKeyTarget(gpa, 0, 7, false);
+    s7.agent_input_ms = monotonicNow() - 1_000;
+    w9c2MoveKeyTarget(gpa, 7, 0, true); // 창이 키를 잃었다 — maru 표시 없음
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://cms.test", .message = "Discard your edits?" } }, monotonicNow());
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
 }

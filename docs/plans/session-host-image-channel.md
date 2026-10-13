@@ -401,6 +401,27 @@ IC5 는 넷으로 나눴다 — 투영의 세그먼트 방출(IC5a, 순수 계�
   - 「attach 뒤 움직인 모든 축이 delta 로」 전수 판정자가 `image_ref`·`image_seg_hwm` 을 「producer 미방출」 목록에서 축 표로 옮겼다
     (세그먼트 축은 판정자용 sink 와 그 resolver 로 조립기까지 간다).
 
+#### IC5b-1 — owner 층의 세그먼트 준비·발급·취소 (PR 진행 중)
+
+IC5b 는 둘로 나눴다 — owner 층(`connection_turn.Client`, 채널·원장을 쥔 층)의 연산(IC5b-1)과 그것을 Connection 의 투영·배치 승인에
+잇는 배선(IC5b-2).
+
+- `Client.prepareImageSegment(stream, image_id, generation, pixels, snapshot)` → `ImageSegmentPrepare{segment, deferred,
+  untransmittable}`:
+  - 「이미지 채널 없음」(원장 없음)이면 미룸 — 세그먼트를 만들지 않는다(계약 §3.2);
+  - 같은 (stream, image) 의 미반환 세그먼트가 있으면 미룸 — 스냅샷은 이 규칙에서 빠진다(§5);
+  - 원장 청구(`reserve`)가 연결 개수·연결 바이트·host 바이트 상한에 걸리면 미룸, host 전체 상한 초과·레코드 길이 초과는 전송 불가;
+  - 청구한 뒤 공유 메모리(`image_segment.create`)를 못 만들면 청구를 되돌리고 미룸.
+- `issueImageSegments`(배치 승인 직후, §4.2): 원장 발급 → 세그먼트 메시지와 fd 하나를 `sendmsg`(SCM_RIGHTS) → host 는 fd 를 바로 닫는다.
+  보내지 못하면 채널 상실(`segment_send`). 그 사이 채널을 잃었으면 fd 만 닫는다.
+- `cancelImageSegments`(배치 롤백·투영 실패): 준비 상태 청구를 되돌리고 fd 를 닫는다.
+- `imageSegmentsIssuedThrough`: 발급한 가장 큰 id — 배치 hwm 의 바닥값(IC5b-2 가 이 배치의 준비분과 합친다).
+- 판정자(`test-image-channel-host`, 실제 리스너·채널 12 → 16):
+  - 발급하면 앱 끝에 메시지와 fd 하나가 오고 그 fd 를 매핑하면 픽셀이며 host 의 fd 는 닫혔다(준비 상태에선 아무것도 안 온다);
+  - 취소하면 원장·host 예산이 비고 fd 가 닫히며 채널로 아무것도 안 간다;
+  - 같은 이미지 미반환은 delta 만 미루고 스냅샷은 준비, host 상한 초과는 전송 불가, 「이미지 채널 없음」 연결은 미룸;
+  - 앱이 채널을 닫은 뒤 발급하면 채널만 내리고 남은 준비분 fd 도 닫으며 주 연결은 산다.
+
 #### IC5 전체 (처음 계획)
 
 - producer 가 `image_ref`·`image_seg_hwm` 을 내기 시작한다 — `screen_snapshot.zig` 의 전수 판정자(「attach 뒤 움직인 모든 축이

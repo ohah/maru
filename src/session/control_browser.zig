@@ -209,9 +209,9 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
-        // W9a: navigate·getUrl·screenshot.
+        // W9a①: navigate·getUrl·screenshot, W9a②: executeScript.
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot => true,
+            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script => true,
             else => false,
         },
     };
@@ -3477,7 +3477,7 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "screenshot", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "screenshot", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -3490,10 +3490,10 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
 
 test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant) 전에 unsupported_by_engine 으로 답한다" {
     var grants: cpg.PaneGrantStore = .{};
-    // W9a①부터 navigate 는 Chromium 도 받는다 — 아직 받지 않는 exec·subscribe 로 본다.
-    const exec12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":12,\"script\":\"1\"}}";
+    // W9a 부터 navigate·exec 은 Chromium 도 받는다 — 아직 받지 않는 console·subscribe 로 본다.
+    const console12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":12}}";
     const sub12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":12}}";
-    for ([_][]const u8{ exec12, sub12 }) |bytes| {
+    for ([_][]const u8{ console12, sub12 }) |bytes| {
         // pane 이 있어 WebKit 이었다면 확인 모달을 띄웠을 요청 — Chromium 탭이라 모달 없이 답한다.
         switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 6, &grants, 0)) {
             .err => |e| {

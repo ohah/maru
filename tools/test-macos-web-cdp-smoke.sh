@@ -250,6 +250,11 @@ class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/slow.html"):
             time.sleep(2)  # wait-load: 응답이 늦는 문서
+        if self.path.startswith("/csp.html"):
+            # W9a②: 엄격 CSP(script-src 'self') — exec 자체는 돌고 그 안의 new Function 은 EvalError(WebKit 과 같다).
+            body = b"<!doctype html><title>csp</title><p id=p>csp</p>"
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Security-Policy", "script-src 'self'"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/nocontent"):
             # W9a①: 문서가 없는 응답 — navigate 는 곧 loaded:false 로 끝나야 한다.
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
@@ -621,6 +626,26 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser screenshot --surface "\$nv" --rect 20,20,50,50 --out "\$out/nv-fx.png" > "\$out/nv-shot" 2>&1; echo "rc=\$?" >> "\$out/nv-shot"
 "\$cli" browser screenshot --surface "\$nv" --rect 20,20,50,50 --scale 2 --out "\$out/nv-fx2.png" > "\$out/nv-shot2" 2>&1; echo "rc=\$?" >> "\$out/nv-shot2"
 "\$cli" browser screenshot --surface "\$nv" --out "\$out/nv-full.png" > "\$out/nv-shot-full" 2>&1; echo "rc=\$?" >> "\$out/nv-shot-full"
+# W9a②: executeScript — 값·await·args(__proto__ 는 자기 속성)·던진 값·문법 오류·너무 큰 결과·식이 - 로 시작·엄격 CSP.
+"\$cli" browser exec --surface "\$nv" '1 + 1' > "\$out/ex-sum" 2>&1; echo "rc=\$?" >> "\$out/ex-sum"
+"\$cli" browser exec --surface "\$nv" 'Promise.resolve({a:[1,"한"],u:undefined,n:NaN,t:document.title})' > "\$out/ex-obj" 2>&1; echo "rc=\$?" >> "\$out/ex-obj"
+"\$cli" browser exec --surface "\$nv" --args '[{"__proto__":{"x":1},"k":2},"s"]' 'Object.prototype.hasOwnProperty.call(args[0],"__proto__") && args[0].x === undefined && args[0].k + args[1]' > "\$out/ex-args" 2>&1; echo "rc=\$?" >> "\$out/ex-args"
+"\$cli" browser exec --surface "\$nv" 'Promise.reject(new TypeError("boom"))' > "\$out/ex-throw" 2>&1; echo "rc=\$?" >> "\$out/ex-throw"
+"\$cli" browser exec --surface "\$nv" '1 +' > "\$out/ex-syntax" 2>&1; echo "rc=\$?" >> "\$out/ex-syntax"
+"\$cli" browser exec --surface "\$nv" --max-result-bytes 100 '"x".repeat(1000)' > "\$out/ex-big" 2>&1; echo "rc=\$?" >> "\$out/ex-big"
+"\$cli" browser exec --surface "\$nv" -- '-1' > "\$out/ex-neg" 2>&1; echo "rc=\$?" >> "\$out/ex-neg"
+"\$cli" browser exec --surface "\$nv" 'undefined' > "\$out/ex-undef" 2>&1; echo "rc=\$?" >> "\$out/ex-undef"
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/csp.html" > "\$out/nv-csp" 2>&1
+"\$cli" browser exec --surface "\$nv" 'document.getElementById("p").textContent' > "\$out/ex-csp-ok" 2>&1; echo "rc=\$?" >> "\$out/ex-csp-ok"
+"\$cli" browser exec --surface "\$nv" 'new Function("return 1")()' > "\$out/ex-csp-eval" 2>&1; echo "rc=\$?" >> "\$out/ex-csp-eval"
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/w9a.html?back2" > "\$out/nv-back2" 2>&1
+# 적대 리뷰 1 회차: 좁은 rect 에 큰 scale(1×400, 8000)이 엔진을 죽였다 — 접혀서 찍히고 엔진은 산다. wire 가 거절하는 주소(탭 문자)는 곧 invalid_params.
+"\$cli" browser screenshot --surface "\$nv" --rect 0,0,1,400 --scale 8000 --out "\$out/r1-tall.png" > "\$out/r1-tall" 2>&1; echo "rc=\$?" >> "\$out/r1-tall"
+"\$cli" browser get-url --surface "\$nv" > "\$out/r1-alive" 2>&1; echo "rc=\$?" >> "\$out/r1-alive"
+u0=\$(date +%s)
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/a.html?t=a	b" > "\$out/r1-tab" 2>&1; echo "rc=\$?" >> "\$out/r1-tab"
+u1=\$(date +%s)
+echo "\$((u1 - u0))" > "\$out/r1-tab-secs"
 # 글을 넣은 문서 — 떠나기 확인: navigate 는 곧 실패로 답한다(사용자가 그 탭에서 정한다).
 "\$cli" browser type --surface "\$nv" --selector '#t' --text 'draft' > "\$out/nv-type" 2>&1
 b0=\$(date +%s)
@@ -788,6 +813,23 @@ fx=$(pngred "$out/nv-fx.png" 2>&1) && fx2=$(pngred "$out/nv-fx2.png" 2>&1) && fu
 set -- $fx; fxw=$1; [ "$3" -ge 90 ] || fail "the rect screenshot of a scrolled page missed the fixed red box ($fx — view coordinates were not mapped to the scrolled document)"
 set -- $fx2; [ "$1" -eq $((fxw * 2)) ] && [ "$3" -ge 90 ] || fail "--scale 2 did not double the width of the rect screenshot ($fx2 vs $fx)"
 grep -q '^rc=1$' "$out/nv-bu" && grep -q 'asks before leaving' "$out/nv-bu" && [ "$(cat "$out/nv-bu-secs")" -le 5 ] || fail "navigate on a page that asks before leaving did not fail at once with that reason ($(cat "$out/nv-bu-secs")s · $(tr '\n' ' ' < "$out/nv-bu"))"
+# W9a②
+grep -q '^2$' "$out/ex-sum" && grep -q '^rc=0$' "$out/ex-sum" || fail "exec on a Chromium tab did not answer 2 ($(tr '\n' ' ' < "$out/ex-sum"))"
+grep -q '^{"a":\[1,"한"\],"n":null,"t":"w9a"}$' "$out/ex-obj" || fail "exec did not await the promise and return strict JSON (undefined key dropped, NaN null) ($(tr '\n' ' ' < "$out/ex-obj"))"
+grep -q '^"2s"$' "$out/ex-args" || fail "exec args did not reach the script with __proto__ as an own key ($(tr '\n' ' ' < "$out/ex-args"))"
+grep -q '(-32006)' "$out/ex-throw" && grep -q '^script error (execution): TypeError: boom$' "$out/ex-throw" && grep -q '^rc=1$' "$out/ex-throw" || fail "a rejected promise was not reported as a script error with its name and message ($(tr '\n' ' ' < "$out/ex-throw"))"
+grep -q '^script error (execution): SyntaxError: ' "$out/ex-syntax" || fail "a syntax error was not reported as SyntaxError ($(tr '\n' ' ' < "$out/ex-syntax"))"
+grep -q '(-32005)' "$out/ex-big" || fail "a result over --max-result-bytes was not refused as too large ($(tr '\n' ' ' < "$out/ex-big"))"
+grep -q '^-1$' "$out/ex-neg" || fail "the expression -1 after -- was not run ($(tr '\n' ' ' < "$out/ex-neg"))"
+grep -q '^null$' "$out/ex-undef" || fail "undefined did not come back as null like WebKit ($(tr '\n' ' ' < "$out/ex-undef"))"
+grep -q '^"csp"$' "$out/ex-csp-ok" || fail "exec on a strict-CSP page did not run ($(tr '\n' ' ' < "$out/ex-csp-ok") · $(tr '\n' ' ' < "$out/nv-csp"))"
+grep -q '^script error (execution): EvalError: ' "$out/ex-csp-eval" || fail "new Function inside exec on a strict-CSP page was not blocked like WebKit ($(tr '\n' ' ' < "$out/ex-csp-eval"))"
+# 적대 리뷰 1 회차
+grep -q '^rc=0$' "$out/r1-tall" && tall=$(pngred "$out/r1-tall.png" 2>&1) && grep -q '^rc=0$' "$out/r1-alive" && grep -q 'w9a.html' "$out/r1-alive" || fail "a 1x400 rect with scale 8000 did not come back folded with the engine alive ($(tr '\n' ' ' < "$out/r1-tall") · $(tr '\n' ' ' < "$out/r1-alive"))"
+set -- $tall; [ "$2" -le 8000 ] && [ "$1" -le 8000 ] || fail "the tall screenshot was not folded to 8000 px ($tall)"
+grep -q '^rc=1$' "$out/r1-tab" && grep -q 'http, https or about:blank' "$out/r1-tab" && [ "$(cat "$out/r1-tab-secs")" -le 3 ] || fail "a URL with a control character was not refused at once ($(cat "$out/r1-tab-secs")s · $(tr '\n' ' ' < "$out/r1-tab"))"
+echo "PASS w9a-r1: a narrow rect with a huge scale is folded ($tall) and the engine stays alive, a URL with a control character is refused at once"
+echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f
@@ -798,15 +840,15 @@ mcp_get() { sed -n "s/^$1=//p" "$out/mcp"; }
 mcp_get open | grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html$' || fail "browser_open from an MCP server in a new session did not open a tab ($(mcp_get open))"
 [ "$(mcp_get click)" = "ok False" ] && [ "$(cat "$out/mb-hit")" = yes ] || fail "browser_click through MCP did not click for real ($(mcp_get click))"
 [ "$(mcp_get type)" = "ok False" ] && [ "$(cat "$out/mt-hit")" = yes ] || fail "browser_type through MCP did not type the text --help as text ($(mcp_get type) · $(grep 'GET /hit?mt' "$root/http.log" | tr '\n' ' '))"
-# exec 는 Chromium 탭에서 아직 -32008(W9a) — 식 `-1` 이 옵션으로 읽히지 않고 엔진까지 갔는지만 본다(W9a 뒤에는 결과 -1).
-mcp_get exec | grep -q '^-1 False$\|(-32008)' || fail "browser_exec through MCP did not send an expression starting with - to the engine ($(mcp_get exec))"
+# W9a②: Chromium 탭의 exec 도 결과를 준다 — 식 `-1` 이 옵션으로 읽히지 않고 -1 로 답한다.
+[ "$(mcp_get exec)" = "-1 False" ] || fail "browser_exec through MCP did not run the expression -1 ($(mcp_get exec))"
 # W9a①: Chromium 탭의 screenshot 은 PNG 그림이다.
 mcp_get shot | grep -q '^png$' || fail "browser_screenshot through MCP did not return a PNG image ($(mcp_get shot))"
 [ "$(mcp_get pipelined)" = "p1,p2,listed" ] || fail "two MCP calls sent back to back did not get their own answers in order ($(mcp_get pipelined))"
 [ "$(mcp_get badarg)" = error ] || fail "a misspelled MCP tool argument was not refused"
 [ "$(mcp_get close)" = "closed False" ] || fail "browser_close through MCP did not close the tab ($(mcp_get close))"
 [ "$(mcp_get rest)" = empty ] && [ "$(mcp_get rc)" = 0 ] || fail "maru mcp wrote extra output or did not exit 0 at the end of input ($(tr '\n' ' ' < "$out/mcp"))"
-echo "PASS mcp: an MCP server started in a new session (no terminal) opens, clicks, types --help as text, sends the expression -1 to the engine, gets a PNG image for a screenshot, refuses a misspelled argument and closes, with only JSON-RPC on its output"
+echo "PASS mcp: an MCP server started in a new session (no terminal) opens, clicks, types --help as text, runs the expression -1, gets a PNG image for a screenshot, refuses a misspelled argument and closes, with only JSON-RPC on its output"
 # 첫 줄은 틀린 `use`(표준 오류) — 같은 파일로 받아도 줄이 서로 덮이지 않고(W9f 적대 리뷰 1 회차), 실패가 있었으니 종료 상태 1.
 grep -q '^(the picked tab was closed' "$out/repl" && grep -q '^hint: pick a tab with `use <id>`' "$out/repl" && grep -q '^error: use needs one tab id' "$out/repl" && grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html?repl$' "$out/repl" && grep -q '^ok$' "$out/repl" && grep -q '^closed$' "$out/repl" && grep -q '^rc=1$' "$out/repl" && [ "$(cat "$out/rb2-hit")" = yes ] || fail "repl did not open a tab, click it without --surface and close it, or its output lines overwrote each other ($(tr '\n' ' ' < "$out/repl"))"
 echo "PASS repl: open picked the new tab, click and close ran on it without --surface"

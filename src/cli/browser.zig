@@ -1153,6 +1153,8 @@ pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, 
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
+/// executeScript 의 스크립트 오류 — data 에 `{kind, name, message, stack, diagnostics_truncated}`.
+const script_error_code: i64 = -32006;
 const timeout_code: i64 = -32004;
 const unauthorized_hint =
     \\hint: browser requests are allowed from a command running in a maru pane's foreground job (an agent there,
@@ -1194,6 +1196,16 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             };
         };
         try w.writeAll("\n");
+        // W9a②: 스크립트 오류의 진단 한 줄 — 종류와 이름·메시지(페이지의 스크립트가 정한 글이라 걸러 낸다; stack 은 싣지 않는다).
+        if (e.code == script_error_code) if (e.data) |d| if (d == .object) {
+            try w.writeAll("script error (");
+            try writePageText(gpa, w, strField(d.object.get("kind")), false);
+            try w.writeAll("): ");
+            try writePageText(gpa, w, strField(d.object.get("name")), false);
+            try w.writeAll(": ");
+            try writePageText(gpa, w, strField(d.object.get("message")), false);
+            try w.writeAll("\n");
+        };
         // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
         // unauthorized 만 주므로(존재 oracle 금지) 이유를 묻지 않고 늘 같은 안내를 붙인다 — 서버 정보가 새지 않는다.
         // W9b③: close 의 거절은 그 pane 이 연 탭이 아니어서다 — 일반 안내(pane 의 foreground job)는 이유를 가린다(적대 리뷰 1 회차).
@@ -3228,4 +3240,11 @@ test "W9a: Chromium 탭의 navigate 가 불러온 문서 없이 끝나면 ok 뒤
         try testing.expect(try renderResponse(testing.allocator, resp, .navigate, &w));
         try testing.expectEqualStrings(c.want, w.buffered());
     }
+}
+
+test "W9a②: 스크립트 오류(-32006)는 종류·이름·메시지를 한 줄로 — 페이지가 정한 글은 걸러서" {
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32006,\"message\":\"Script error\",\"data\":{\"kind\":\"execution\",\"name\":\"TypeError\",\"message\":\"x is not\\u001b[2J a function\",\"stack\":\"TypeError: …\",\"diagnostics_truncated\":false}}}", .exec, &w));
+    try testing.expectEqualStrings("error: Script error (-32006)\nscript error (execution): TypeError: x is not[2J a function\n", w.buffered());
 }

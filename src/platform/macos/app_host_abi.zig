@@ -6910,6 +6910,8 @@ fn cancelBrowserWaitsForClosedSurface(server: *control_server_mod.ControlServer,
 }
 
 fn cancelActiveBrowserExecution(server: *control_server_mod.ControlServer, async_id: u64, status: control_browser.BrowserCompletionStatus) void {
+    // W9a②: 시한·철회 — 아직 도는 스크립트를 멈춘다(탭이 닫힌 것은 멈출 것이 없다).
+    if (status == .timeout or status == .unauthorized) cdpStopExecution(async_id);
     if (active_browser_transfers.indexOf(async_id)) |index| {
         cancelBrowserTransfer(server, index, status);
         return;
@@ -7715,6 +7717,7 @@ fn cdpNowMs() i64 {
 
 /// 시각이 된 잠든 op 이 있는가 — 없으면 drain 게이트를 열지 않는다(창이 있으면 wait 가 자는 동안 매 tick refs 를 할당했다 — 4 회차).
 fn cdpSleeperDue() bool {
+    if (cdp_terminates.items.len > 0) return true; // W9a②: 못 보낸 terminate 를 다시 보내야 한다
     if (cdp_sleepers.items.len == 0) return false;
     const now = cdpNowMs();
     for (cdp_sleepers.items) |e| if (e.wake_ms <= now) return true;
@@ -7723,6 +7726,7 @@ fn cdpSleeperDue() bool {
 
 /// 시각이 된 잠든 op 을 깨운다 — 깨운 op 이 다시 잠들 수 있어 먼저 꺼낸 뒤 깨운다.
 fn wakeCdpSleepers() void {
+    retryCdpTerminates();
     if (cdp_sleepers.items.len == 0) return;
     const now = cdpNowMs();
     var due: [16]*CdpRun = undefined;
@@ -7762,6 +7766,11 @@ comptime {
 comptime {
     // L2 의 press 키 이름 상한과 엔진의 상한은 같은 값이어야 한다(L2 가 지난 이름을 엔진이 길이로 거절하지 않게).
     std.debug.assert(control_browser.max_press_key_bytes == web_cdp_keys.max_spec_bytes);
+    // W9a 적대 리뷰 1 회차: navigate 가 받는 주소 상한은 wire 의 것과 같다(wire 가 거절하는 주소는 보내기 전에 거절한다 — 전에는 25 초 뒤 ok).
+    std.debug.assert(web_cdp_ops.web_cdp_page.max_url_bytes == session_mod.web_osr.max_url_bytes);
+    // W9a②: exec 의 인자 상한은 sidecar 의 DevTools 인자 상한, 진단 payload 상한은 L2 의 것과 같다.
+    std.debug.assert(web_cdp_ops.web_cdp_exec.max_params_bytes == session_mod.web_osr.ws_message.max_devtools_params_bytes);
+    std.debug.assert(web_cdp_ops.web_cdp_exec.max_error_payload_bytes == control_browser.execute_script_error_payload_max_bytes);
 }
 
 fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
@@ -7780,6 +7789,7 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
         .navigate => .navigate,
         .get_url => .get_url,
         .screenshot => .screenshot,
+        .execute_script => .execute_script,
         else => null,
     };
 }
@@ -7798,6 +7808,7 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
         return completeCdp(async_id, .invalid_params, switch (e) {
             error.InvalidKey => "unknown key name (use names like Enter, Shift+Tab, Meta+a or a single character)",
             error.InvalidUrl => "a Chromium tab navigates only to http, https or about:blank addresses",
+            error.ScriptTooLarge => web_cdp_ops.web_cdp_exec.script_too_large,
             else => "invalid arguments",
         });
     };
@@ -7814,7 +7825,9 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
 fn beginCdp(run: *CdpRun) void {
     // 페이지가 JS 대화상자를 띄우고 멈춰 있다 — 보내면 시한(30 초)까지 답이 없다. 사용자가 그 탭에서 답해야 한다.
     // navigate 도 — sidecar 는 이동 전에 그 탭의 대화상자를 「취소」 로 닫는다(사용자가 보던 것을 에이전트가 닫았다, W9a 계획 공격 3 회차).
-    if (session_mod.web_osr.jsDialogShowing(run.surface_id)) return finishCdp(run, .failed, web_cdp_ops.dialog_reason);
+    // getUrl 은 DevTools 를 부르지 않는다 — 대화상자 중에도 답한다(적대 리뷰 1 회차).
+    const needs_page = if (run.op.page) |*p| p.kind != .get_url else true;
+    if (needs_page and session_mod.web_osr.jsDialogShowing(run.surface_id)) return finishCdp(run, .failed, web_cdp_ops.dialog_reason);
     if (run.op.page) |*p| switch (p.kind) {
         .navigate => {
             switch (session_mod.web_osr.closeAskPhase(run.surface_id)) {
@@ -8104,6 +8117,12 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
             const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
+            // W9a②: evaluate 가 실제로 나갔다 — 시한·철회에 terminate 를 보낼 수 있다(보내지 않은 것에 보내면 페이지의 다음 스크립트를 죽인다).
+            if (sent) |_| {
+                if (run.op.exec) |*e| if (e.stage == .evaluate) {
+                    e.sent = true;
+                };
+            } else |_| {}
             _ = sent catch |e| return switch (e) {
                 // 보내지 못했다 — op 이 정한다(누른 뒤의 떼기면 잠깐 뒤 다시, 놓기면 동작의 결과로, 앞선 실패가 있으면 그 이유로 — 3·4 회차).
                 error.NotReady, error.Busy, error.DialogShowing => {
@@ -8156,6 +8175,9 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
     const surface_id = run.surface_id;
     const kind = run.op.kind;
     const started = run.started;
+    // W9a②: exec 의 끝은 넷 — 엄격 JSON 결과(inline/조각)·진단 payload(-32006)·너무 큼(-32005)·보통(실패·시한).
+    const exec_delivery: web_cdp_ops.web_cdp_exec.Delivery = if (run.op.exec) |*e| e.delivery else .plain;
+    const exec_max: usize = if (run.op.exec) |*e| e.max_result_bytes else 0;
     removeCdpRun(run);
     run.op.deinit(allocator);
     allocator.destroy(run);
@@ -8166,9 +8188,58 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
         .snapshot => completeCdpResult(async_id, result),
         // W9a: 스크린샷은 Swift 와 같은 PNG 조각 스트림(`browser.screenshotChunk`)으로.
         .screenshot => completeCdpScreenshot(async_id, result),
+        .execute_script => switch (exec_delivery) {
+            .result => completeCdpResult(async_id, result),
+            .script_error => maru_macos_control_complete_browser_script_error(async_id, result.ptr, result.len),
+            .too_large => maru_macos_control_complete_browser_result_too_large(async_id, exec_max + 1),
+            .plain => completeCdp(async_id, status, result),
+        },
         else => completeCdp(async_id, status, result),
     } else completeCdp(async_id, status, result);
     startNextCdp(surface_id);
+}
+
+// ── W9a②: 시한·철회 뒤의 executeScript 멈추기 ───────────────────────────────────────────────────────────────────
+// 요청의 시한(30 초)이 지나면 에이전트에게는 -32004 가 가지만 스크립트는 페이지에서 계속 돈다 — `Runtime.terminateExecution` 으로 멈춘다
+// (동기 루프는 곧 끝나고, promise 이어짐의 루프도 멈춘다 — 계획 공격 1 회차). **보낸 evaluate 가 아직 답하지 않았을 때만** 보낸다:
+// 아무것도 돌지 않을 때 보내면 페이지의 다음 스크립트가 죽는다. 대화상자 중에는 보내지 않는다(사용자가 답한 뒤 나머지 스크립트를 죽였다
+// — 3 회차). 자리가 없으면(시한이 지난 호출이 자리를 쥔다) tick 마다 다시, 5 초까지.
+
+const cdp_terminate_retry_ms: i64 = 5_000;
+var cdp_terminates: std.ArrayList(struct { async_id: u64, until_ms: i64 }) = .empty;
+
+fn cdpStopExecution(async_id: u64) void {
+    const run = for (cdp_runs.items) |r| {
+        if (r.async_id == async_id) break r;
+    } else return;
+    const e = &(run.op.exec orelse return);
+    if (e.stage != .evaluate or !e.sent or e.terminated) return;
+    e.terminated = true;
+    sendCdpTerminate(async_id, cdpNowMs() + cdp_terminate_retry_ms);
+}
+
+fn sendCdpTerminate(async_id: u64, until_ms: i64) void {
+    // 그 요청의 evaluate 가 아직 답을 기다리는가 — 끝났으면 보내지 않는다(다음 스크립트를 죽이지 않게).
+    const run = for (cdp_runs.items) |r| {
+        if (r.async_id == async_id) break r;
+    } else return;
+    const e = &(run.op.exec orelse return);
+    if (e.stage != .evaluate or !e.sent) return;
+    if (session_mod.web_osr.jsDialogShowing(run.surface_id)) return;
+    const gpa = session_mod.web_osr.gpaRef() orelse return;
+    session_mod.web_osr.devtoolsFireAndForget(gpa, run.surface_id, "Runtime.terminateExecution", "") catch |err| switch (err) {
+        error.Busy => cdp_terminates.append(allocator, .{ .async_id = async_id, .until_ms = until_ms }) catch {},
+        else => {},
+    };
+}
+
+/// 자리가 없어 못 보낸 terminate 를 다시(매 tick — `wakeCdpSleepers` 와 함께).
+fn retryCdpTerminates() void {
+    if (cdp_terminates.items.len == 0) return;
+    const now = cdpNowMs();
+    const pending = cdp_terminates.toOwnedSlice(allocator) catch return;
+    defer allocator.free(pending);
+    for (pending) |t| if (now < t.until_ms) sendCdpTerminate(t.async_id, t.until_ms);
 }
 
 /// 큰 결과의 바이트를 쥔다 — `maru_macos_control_complete_browser_result` 가 읽고(copy) 다 쓰면 놓는다(release).
@@ -10261,6 +10332,7 @@ test {
     // 못박은 단계들이 어긋났다(main 기준 rebase 적대 리뷰 4 회차).
     _ = web_cdp_ops;
     _ = web_cdp_ops.web_cdp_page; // W9a 페이지 op
+    _ = web_cdp_ops.web_cdp_exec; // W9a② executeScript
     // 전역 핫키 descriptor 매핑(a2의 Swift가 ABI로 소비)도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("global_hotkey.zig"));
     // 커맨드 카탈로그(메뉴바·팝업 공유) round-trip·chord 포맷 테스트도 테스트 빌드에 포함한다.
@@ -12120,6 +12192,21 @@ fn w9aRequest(pending: *control_server_mod.PendingRequest, request: []const u8, 
     return id;
 }
 
+/// W9a② 시험: 결과 예산(max_result_bytes)을 가진 executeScript 요청.
+fn w9aExecRequest(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64, reserved: usize) !u64 {
+    pending.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{
+        .async_id = id,
+        .surface_id = tab,
+        .method = .execute_script,
+        .reserved_bytes = reserved,
+        .provenance = .{ .pane_grant = .{ .pane = 5, .target = tab, .scope = .browser } },
+    });
+    try std.testing.expect(active_browser_executions.markRunning(id)); // beginCdp 가 하는 일 — 결과 전송은 running 이어야 받는다
+    return id;
+}
+
 /// 잠든 op 을 곧 깨운다(시각을 기다리지 않고).
 fn w9aWakeNow() void {
     for (cdp_sleepers.items) |*e| e.wake_ms = 0;
@@ -12254,4 +12341,94 @@ test "W9a: Chromium 탭의 스크린샷은 WebKit 과 같은 PNG 조각 스트�
     try std.testing.expect(std.mem.indexOf(u8, final_frame.bytes, "\"width\":3") != null);
     outbound.writeComplete(final_frame.bytes);
     allocator.free(final_frame.bytes);
+}
+
+test "W9a②: executeScript 의 끝은 결과(inline)·진단(-32006)·너무 큼(-32005)으로 갈리고, 시한에는 보낸 evaluate 에만 terminate 를 표시한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 75);
+    defer {
+        session_mod.web_osr.destroy(ta, 75);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(75);
+    // 엔진 할당자 없음 — terminate 를 실제로 보내지 않는다(보냈다면 자리가 다음 시험까지 남는다). 표시만 본다.
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    defer cdp_terminates.clearAndFree(allocator);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 75, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":75,\"script\":\"1+1\",\"max_result_bytes\":1024}}";
+    const arg = "{\"script\":\"1+1\",\"args\":[],\"max_result_bytes\":1024}";
+    const bodies = [_]struct { body: []const u8, code: ?control_plane.ErrorCode, want: []const u8 }{
+        .{ .body = "{\"result\":{\"type\":\"number\",\"value\":2}}", .code = null, .want = "\"transfer\":\"inline\",\"result\":2}" },
+        .{ .body = "{\"result\":{\"type\":\"string\",\"value\":\"x\"},\"exceptionDetails\":{\"exception\":{\"type\":\"string\",\"value\":\"boom\"}}}", .code = .script_error, .want = "\"message\":\"boom\"" },
+        .{ .body = "{\"result\":{\"type\":\"number\",\"unserializableValue\":\"NaN\"}}", .code = .script_error, .want = "\"kind\":\"serialization\"" },
+    };
+    for (bodies) |cs| {
+        var p: control_server_mod.PendingRequest = undefined;
+        const id = try w9aExecRequest(&p, req, 75, 1024);
+        const run = try allocator.create(CdpRun);
+        run.* = .{ .async_id = id, .surface_id = 75, .op = try web_cdp_ops.Op.init(allocator, .execute_script, arg, id), .started = true };
+        try cdp_runs.append(allocator, run);
+        allocator.free((try run.op.start(allocator)).call.params);
+        allocator.free((try run.op.feed(allocator, .{ .ok = cs.body })).call.params); // → 놓기
+        const fin = try run.op.feed(allocator, .{ .ok = "{}" });
+        defer allocator.free(fin.done.result);
+        finishCdp(run, fin.done.status, fin.done.result);
+        const response = p.response orelse return error.ExpectedResponse;
+        defer allocator.free(response);
+        p.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, response, cs.want) != null);
+        if (cs.code) |code| try std.testing.expect(std.mem.indexOf(u8, response, "\"code\":-32006") != null and code == .script_error);
+    }
+    // 너무 큼 — 결과(1025 바이트)가 요청의 max_result_bytes(1024)를 넘는다: -32005.
+    {
+        var p: control_server_mod.PendingRequest = undefined;
+        const id = try w9aExecRequest(&p, req, 75, 1024);
+        const run = try allocator.create(CdpRun);
+        run.* = .{ .async_id = id, .surface_id = 75, .op = try web_cdp_ops.Op.init(allocator, .execute_script, arg, id), .started = true };
+        try cdp_runs.append(allocator, run);
+        allocator.free((try run.op.start(allocator)).call.params);
+        var big: std.ArrayList(u8) = .empty;
+        defer big.deinit(allocator);
+        try big.appendSlice(allocator, "{\"result\":{\"type\":\"string\",\"value\":\"");
+        try big.appendNTimes(allocator, 'x', 1030);
+        try big.appendSlice(allocator, "\"}}");
+        allocator.free((try run.op.feed(allocator, .{ .ok = big.items })).call.params);
+        const fin = try run.op.feed(allocator, .{ .ok = "{}" });
+        defer allocator.free(fin.done.result);
+        finishCdp(run, fin.done.status, fin.done.result);
+        try expectPendingErrorCode(&p, .result_too_large);
+    }
+    // 시한 — 보낸 evaluate 가 답을 기다리는 exec 에만 terminate 를 표시한다(보내지 않은 것은 아니다 — 페이지의 다음 스크립트를 죽인다).
+    {
+        var p: control_server_mod.PendingRequest = undefined;
+        const id = try w9aRequest(&p, req, 75, .execute_script);
+        const run = try allocator.create(CdpRun);
+        run.* = .{ .async_id = id, .surface_id = 75, .op = try web_cdp_ops.Op.init(allocator, .execute_script, arg, id), .started = true };
+        try cdp_runs.append(allocator, run);
+        allocator.free((try run.op.start(allocator)).call.params);
+        cancelActiveBrowserExecution(&control_server_storage, id, .timeout);
+        try std.testing.expect(!run.op.exec.?.terminated); // 보내지 않았다
+        try expectPendingErrorCode(&p, .timeout);
+        run.op.exec.?.sent = true;
+        var p2: control_server_mod.PendingRequest = undefined;
+        const id2 = try w9aRequest(&p2, req, 75, .execute_script);
+        run.async_id = id2;
+        cancelActiveBrowserExecution(&control_server_storage, id2, .timeout);
+        try std.testing.expect(run.op.exec.?.terminated);
+        try expectPendingErrorCode(&p2, .timeout);
+        // 그 뒤 온 답은 시한이다 — 묶음은 놓는다.
+        allocator.free((try run.op.feed(allocator, .{ .ok = "{\"result\":{\"type\":\"number\",\"value\":2}}" })).call.params);
+        const fin = try run.op.feed(allocator, .{ .ok = "{}" });
+        defer allocator.free(fin.done.result);
+        try std.testing.expectEqual(web_cdp_ops.Status.timeout, fin.done.status);
+        finishCdp(run, fin.done.status, fin.done.result);
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    }
 }

@@ -1640,6 +1640,12 @@ var discard_ctx: u8 = 0;
 const discard_sink: DevtoolsSink = .{ .ctx = &discard_ctx, .done = &discardDone };
 fn discardDone(_: *anyopaque, _: u32, _: DevtoolsOutcome, _: []const u8) void {}
 
+/// W9a②: 답을 기다리지 않는 호출(`Runtime.terminateExecution` — 시한이 지난 executeScript 를 멈춘다). 대화상자 중에는 `DialogShowing`
+/// (보내지 않는다 — 답한 뒤 나머지 스크립트를 죽였다, 계획 공격 3 회차), 자리가 없으면 `Busy`(부른 쪽이 잠깐 뒤 다시).
+pub fn devtoolsFireAndForget(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8) DevtoolsCallError!void {
+    _ = try devtoolsCall(gpa, surface_id, method, params, discard_sink);
+}
+
 /// W9b③: DevTools 로 보내는 진짜 입력이 활성을 주는가(sidecar 와 같은 규칙 — `new_tab.devtoolsInputActivates`).
 pub const devtoolsInputActivates = ws.new_tab.devtoolsInputActivates;
 
@@ -1736,6 +1742,8 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
 /// 부르지 않는다 — 에이전트가 연 다운로드를 사용자의 것으로 치지 않는다). 모르는 탭(한 번도 배치되지 않았다)이면 거짓.
 pub fn agentNavigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
+    // 브라우저가 아직 없다(페이지가 스스로 닫았다·만들어지는 중) — 보낼 곳이 없어 25 초를 기다렸다(적대 리뷰 1 회차).
+    if (!s.created) return false;
     s.agent_nav = .{ .active = true, .saw_loading = s.loading };
     navigate(gpa, surface_id, url);
     return true;
@@ -3659,6 +3667,8 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
 /// 순서가 바뀌어 10–30 ms 넘게 먼저 가면 매달린다). Chromium 내부 동작에 기댄다 — 판정자(`devtools_check`)가 CEF 를 올릴 때 본다.
 /// wire 상수(kick 시한 — app_host_abi 의 재시도 상한 검사가 본다).
 pub const ws_message = ws.message;
+/// wire 의 주소 상한(`web_cdp_page.max_url_bytes` 와 같아야 한다 — `app_host_abi` 가 컴파일 때 본다).
+pub const max_url_bytes = ws.wire.max_url_bytes;
 pub const kick_method = ws.message.devtools_kick_method;
 pub const kick_params = ws.message.devtools_kick_params;
 
@@ -3679,6 +3689,8 @@ pub fn devtoolsCallKick(gpa: std.mem.Allocator, surface_id: u64, method: []const
         if (kick_kind.optional()) return devtoolsCall(gpa, surface_id, method, params, sink);
         return error.Busy;
     }
+    // W9a②: 둘째 자리는 비워 둔다(terminate 몫) — kick 없이 주 호출만.
+    if (kick_kind == .reserve) return devtoolsCall(gpa, surface_id, method, params, sink);
     const call = try devtoolsCall(gpa, surface_id, method, params, sink);
     // 자리는 위에서 셌다 — 이 둘째 자리는 남아 있다.
     const slot = for (&devtools_pending) |*p| {
@@ -5903,6 +5915,7 @@ test "W9a: 에이전트 이동의 끝 — 계획 공격 3 회차에 잰 sidecar 
         }
     };
     try testHold(gpa, 41);
+    try std.testing.expect(!agentNavigate(gpa, 41, "https://a.test/")); // 브라우저가 아직 없다(적대 리뷰 1 회차 — 보낼 곳이 없는데 25 초를 기다렸다)
     testRunning(41);
     try std.testing.expect(!agentNavigate(gpa, 99, "https://a.test/")); // 한 번도 배치되지 않은 탭
     // 보통의 불러오기 — 404 도 불러온 것이다.
@@ -5957,4 +5970,41 @@ test "W9a: 에이전트 이동의 끝 — 계획 공격 3 회차에 잰 sidecar 
     testApply(gpa, .{ .js_dialog = .{ .browser = 41, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
     try std.testing.expect(agentNavState(41).?.before_unload and !agentNavState(41).?.done);
     endAgentNav(41);
+}
+
+test "W9a 변이 생존: 보낸 뒤 「불러오는 중」 을 보기 전의 「아님」 은 끝이 아니다 · 만든 직후 about:blank 의 문서는 에이전트 이동의 문서가 아니다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    const ns = struct {
+        fn f(id: u64, loading: bool) Message {
+            return .{ .nav_state = .{ .browser = id, .can_go_back = false, .can_go_forward = false, .loading = loading } };
+        }
+    }.f;
+    try testHold(gpa, 42);
+    testRunning(42);
+    // 쉬던 탭에 보냈다 — 앞 문서의 「아님」 되풀이(뒤로 가기 가능 여부 바뀜 등)는 이 이동의 끝이 아니다.
+    try std.testing.expect(agentNavigate(gpa, 42, "https://a.test/"));
+    testApply(gpa, ns(42, false));
+    try std.testing.expect(!agentNavState(42).?.done);
+    testApply(gpa, ns(42, true));
+    testApply(gpa, ns(42, false));
+    try std.testing.expect(agentNavState(42).?.done and !agentNavState(42).?.loaded);
+    endAgentNav(42);
+    // 만든 직후(about:blank) — 그 문서의 page_started 뒤 실패한 이동(0, 주소는 about:blank 그대로)은 불러온 것이 아니다.
+    try testHold(gpa, 43);
+    testRunning(43);
+    try std.testing.expect(agentNavigate(gpa, 43, "http://127.0.0.1:1/"));
+    testApply(gpa, .{ .browser_created = 43 }); // 다시 만들어졌다 — 첫 about:blank 를 기다린다
+    testApply(gpa, .{ .page_started = 43 });
+    testApply(gpa, .{ .url_changed = .{ .browser = 43, .url = "about:blank" } });
+    testApply(gpa, .{ .load_finished = .{ .browser = 43, .http_status = 0 } }); // 첫 about:blank 의 끝(넘긴다)
+    try std.testing.expect(!agentNavState(43).?.done);
+    testApply(gpa, .{ .load_finished = .{ .browser = 43, .http_status = 0 } }); // 실패한 이동의 끝
+    try std.testing.expect(agentNavState(43).?.done and !agentNavState(43).?.loaded);
+    endAgentNav(43);
 }

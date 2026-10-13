@@ -60,6 +60,30 @@ pub const HostBudget = struct {
     bytes: u64 = 0,
 };
 
+/// 「전송 불가」 진단(§4.4)의 중복 거름 — 같은 (stream, image_id, generation) 은 한 줄만 적는다. 그 이미지는 base 에 적히지 않아
+/// 그 stream 을 투영할 때마다 다시 청하므로, 거르지 않으면 화면이 바뀔 때마다 한 줄이 쌓인다. 계약의 (image_id, generation) 을
+/// stream 으로 좁혔다(image id 는 runtime 마다 따로 센다). 최근 `capacity` 개만 기억한다 — 넘치면 가장 오래된 것을 잊고, 그 이미지가
+/// 다시 오면 한 줄을 더 적는다(host 전체 상한보다 큰 한 장이 동시에 다섯 개 보일 일은 드물고, 더 적혀도 무해하다).
+pub const UntransmittableMemo = struct {
+    pub const capacity = 4;
+    const Key = struct { stream_id: u64, image_id: u32, generation: u64 };
+    keys: [capacity]Key = undefined,
+    len: usize = 0,
+    next: usize = 0,
+
+    /// 처음 보는 (stream, image, generation) 이면 기억하고 true — 그때만 진단을 적는다.
+    pub fn firstSighting(self: *UntransmittableMemo, stream_id: u64, image_id: u32, generation: u64) bool {
+        const key: Key = .{ .stream_id = stream_id, .image_id = image_id, .generation = generation };
+        for (self.keys[0..self.len]) |seen| {
+            if (std.meta.eql(seen, key)) return false;
+        }
+        self.keys[self.next] = key;
+        self.next = (self.next + 1) % capacity;
+        self.len = @min(self.len + 1, capacity);
+        return true;
+    }
+};
+
 pub const State = enum { prepared, issued };
 
 pub const Entry = struct {
@@ -346,4 +370,19 @@ test "이미지 원장: 같은 stream 의 같은 이미지에 미반환 세그�
     try testing.expect(ledger.hasOutstanding(4, 9)); // 발급돼도 앱이 쥐고 있는 동안은 미반환이다
     try testing.expectEqual(ReleaseOutcome.returned, ledger.release(id));
     try testing.expect(!ledger.hasOutstanding(4, 9));
+}
+
+test "이미지 원장: 「전송 불가」 진단은 (stream, image, generation) 마다 한 번이고 넘치면 가장 오래된 것부터 잊는다" {
+    var memo: UntransmittableMemo = .{};
+    try testing.expect(memo.firstSighting(1, 7, 1));
+    try testing.expect(!memo.firstSighting(1, 7, 1)); // 같은 판을 다시 청해도 한 줄뿐
+    try testing.expect(memo.firstSighting(1, 7, 2)); // 새 판은 새 줄
+    try testing.expect(memo.firstSighting(2, 7, 2)); // 다른 stream 의 같은 image id
+    try testing.expect(memo.firstSighting(1, 8, 2));
+    try testing.expect(!memo.firstSighting(1, 7, 1)); // 넷까지는 모두 기억한다
+    try testing.expect(!memo.firstSighting(1, 8, 2));
+    try testing.expect(memo.firstSighting(3, 1, 1)); // 다섯째가 가장 오래된 (1, 7, 1) 을 밀어낸다
+    try testing.expect(!memo.firstSighting(1, 7, 2));
+    try testing.expect(!memo.firstSighting(3, 1, 1));
+    try testing.expect(memo.firstSighting(1, 7, 1));
 }

@@ -238,7 +238,7 @@ IC3b 도 나눴다 — Client 안에서 끝나는 표·리더·release(IC3b-1)�
 
 IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단·판정자(2c-2).
 
-###### IC3b-2c-1 — external 모드 불변식과 세 결정 (PR 진행 중)
+###### IC3b-2c-1 — external 모드 불변식과 세 결정 (완료)
 
 - 불변식: `image_shm` 을 협상한 Client(채널이 묶였든 잃었든 — `imageShmNegotiated`)는 external 모드에 들어가지 않는다.
   `enterExternalModeWithOps` 가 플래그를 건드리기 전에 `error.ImageChannelNegotiated` 로 거부한다(`EnterExternalModeError` 에 더함,
@@ -258,7 +258,7 @@ IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단�
 - 판정자(`test-image-channel-app`, client 22): 협상한 Client(묶임·잃음)는 `ImageChannelNegotiated` 이고 플래그를 읽지 않는다, 협상하지
   않은 Client 는 이 규칙에 걸리지 않고 전환으로 간다(첫 플래그 읽기 실패 → `FlagFailed`).
 
-###### IC3b-2c-2 — 진단 계수와 판정자 (PR 진행 중)
+###### IC3b-2c-2 — 진단 계수와 판정자 (완료)
 
 - 대조 계수(`src/image_reconciliation.zig`)에 이미지 채널 칸 셋:
   - 손실(경고줄 `image reconciliation:`): `drop_no_segment` — `image_ref` 를 해석하지 못함(표에 없음·메타 불일치·ENOMEM 이 아닌 매핑
@@ -281,7 +281,7 @@ IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단�
     복구)는 이 단계에서 재지 않았다 — IC3b-2c-3.
   - tick 의 길: 협상하지 않은 연결은 울타리에 막혀도 `channel_refused` 0, 협상한 연결은 1(앞 갈래).
 
-###### IC3b-2c-3 — 스레드 재고·탭 생존 판정자, id 모르는 stream 조사 (PR 진행 중)
+###### IC3b-2c-3 — 스레드 재고·탭 생존 판정자, id 모르는 stream 조사 (완료)
 
 - 스레드: 표에는 잠금이 없고, Client 의 울타리(`beginPublicMutation`)는 **공유** 진입이라 두 스레드의 겹친 진입을 막지 않는다 —
   전제는 배선이 지킨다. `tests/boundary/imports.zig` 의 「image channel table is reached only from reviewed call sites」가 표에 닿는
@@ -332,7 +332,7 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
 - fork 는 세지 않는다 — 울타리가 덮는다. 앱 안 fork 자리(폴백 PTY·host 띄우기·LSP·ssh 업로드 7·git 2·업데이트 확인·로그인 셸 환경·
   에디터 검색의 `std.process.spawn` — Zig 0.16 은 fork 로 띄운다)는 모두 atfork 를 지난다.
 
-#### IC4b — 채널 수신을 울타리로 감싸기 (PR 진행 중)
+#### IC4b — 채널 수신을 울타리로 감싸기 (완료)
 
 - `Client.pumpImageChannel(wait)` 가 「recvmsg + `F_SETFD`」(`Table.drain`)만 수신 잠금 안에서 한다(release 쓰기·poison 은 밖).
   `wait` 는 `fork_fd_fence.ReceiveWait` — tick 이 다시 오는 자리는 `.try_lock`(못 잡으면 false, fd 는 커널 큐에 남는다), tick 이 없는
@@ -369,9 +369,9 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
 ### IC5 — 흐름 제어와 delta 표현
 
 IC5 는 넷으로 나눴다 — 투영의 세그먼트 방출(IC5a, 순수 계층), 연결의 원장·채널을 투영에 잇고 승인 시점에 보내기(IC5b), 용량 사건·
-큰 한 장 우선권·「전송 불가」(IC5c), host 제공 스위치(IC5d). 아래 「IC5 전체」는 처음 계획이고, 각 조각이 들어오며 그 항목을 지운다.
+큰 한 장 우선권·「전송 불가」(IC5c), host 제공 스위치(IC5d).
 
-#### IC5a — 투영의 세그먼트 방출 (PR 진행 중)
+#### IC5a — 투영의 세그먼트 방출 (완료)
 
 - `screen_snapshot.ProjectOptions.images: ImageEmission` — `blob`(기본, 지금의 `image_blob`) 또는 `segments: SegmentSink`. 제품
   배선(`RuntimeOps.snapshot/delta`)은 아직 `blob` 이라 동작이 바뀌지 않는다(IC5b 가 협상한 연결에 sink 를 넘긴다).
@@ -401,7 +401,7 @@ IC5 는 넷으로 나눴다 — 투영의 세그먼트 방출(IC5a, 순수 계�
   - 「attach 뒤 움직인 모든 축이 delta 로」 전수 판정자가 `image_ref`·`image_seg_hwm` 을 「producer 미방출」 목록에서 축 표로 옮겼다
     (세그먼트 축은 판정자용 sink 와 그 resolver 로 조립기까지 간다).
 
-#### IC5b-1 — owner 층의 세그먼트 준비·발급·취소 (PR 진행 중)
+#### IC5b-1 — owner 층의 세그먼트 준비·발급·취소 (완료)
 
 IC5b 는 둘로 나눴다 — owner 층(`connection_turn.Client`, 채널·원장을 쥔 층)의 연산(IC5b-1)과 그것을 Connection 의 투영·배치 승인에
 잇는 배선(IC5b-2).
@@ -422,7 +422,7 @@ IC5b 는 둘로 나눴다 — owner 층(`connection_turn.Client`, 채널·원장
   - 같은 이미지 미반환은 delta 만 미루고 스냅샷은 준비, host 상한 초과는 전송 불가, 「이미지 채널 없음」 연결은 미룸;
   - 앱이 채널을 닫은 뒤 발급하면 채널만 내리고 남은 준비분 fd 도 닫으며 주 연결은 산다.
 
-#### IC5b-2 — 투영 ↔ 세그먼트 배선 (PR 진행 중)
+#### IC5b-2 — 투영 ↔ 세그먼트 배선 (완료)
 
 - 층 사이 타입: 준비 세그먼트(`PreparedImageSegment`·`ImageSegmentPrepare`)는 원장 leaf(`image_segment_ledger.zig`)에 둔다 —
   Connection 층(server)과 owner 층(connection_turn)이 함께 쓴다.
@@ -459,7 +459,7 @@ IC5b 는 둘로 나눴다 — owner 층(`connection_turn.Client`, 채널·원장
   멈추고, 같은 runtime 에 붙은 연결마다·미룸 뒤 재시도마다 다시 복사한다. lock 보유 시간을 재고 필요하면 복사를 lock 밖으로 빼거나
   (runtime, image, generation) 단위로 세그먼트를 재사용한다.
 
-#### IC5c-1 — 용량 사건이 미룬 stream 을 깨운다 (PR 진행 중)
+#### IC5c-1 — 용량 사건이 미룬 stream 을 깨운다 (완료)
 
 IC5c 는 둘로 나눴다 — 용량 사건 깨우기(IC5c-1, 정지 화면의 첫 이미지가 영영 안 뜨는 공백을 막는 핵심 — IC5d 앞에 필수)와 큰 한 장
 우선권·「전송 불가」 진단(IC5c-2).
@@ -478,20 +478,43 @@ IC5c 는 둘로 나눴다 — 용량 사건 깨우기(IC5c-1, 정지 화면의 �
   깨우지 않는다; owner(`test-image-channel-host` 18) — 채널 묶임이 깨우고 owner 가 그 깨움을 꺼내 예약하며, 모르는 id 의 release 는
   깨우지 않고 반환한 release 는 깨운다. 변이 7 RED.
 
-#### IC5 전체 (처음 계획)
+#### IC5c-2 — 큰 한 장 우선권·「전송 불가」 진단 (PR 진행 중)
 
-- producer 가 `image_ref`·`image_seg_hwm` 을 내기 시작한다 — `screen_snapshot.zig` 의 전수 판정자(「attach 뒤 움직인 모든 축이
-  delta 로 client 에 닿는다」)에서 두 종류를 「producer 미방출」 목록에서 축 표로 옮긴다(IC1 이 목록에 올려 뒀다).
-- 미룸 조건, 옛 generation 유지·첫 이미지 placement 빼기, 「보낸 표」 갱신 규칙, 스냅샷 예외, 용량 사건 깨우기 플래그, 큰 한 장 우선권,
-  「전송 불가」 진단. release 로 원장에 여유가 생기면 그 연결의 producer 를 바로 예약한다(계약 §3.5 — IC2a 는 release 를 읽어
-  원장만 바꾼다).
-- 형식 선택은 `Connection.image_shm_negotiated`(token·채널 유무와 무관, IC2a 가 기록)로 한다. 협상한 연결에 채널이 없으면 세그먼트를
-  만들지 않고 placement 를 뺀다(계약 §3.2) — token 이나 채널 유무로 고르면 그 연결에 `image_blob` 이 다시 나간다. producer 는
-  `server.Connection` 층이고 채널·원장은 `connection_turn.Client` 층이라, 채널 상태와 원장 reserve/cancel 을 `ImageChannelOps` 로
-  넘긴다. 판정자: 자리 없음·abandon·채널 상실 뒤에도 그 연결에 `image_blob` 이 나가지 않는다.
-- 이 단계에서 host 제공 스위치 `host_offers_image_channel` 를 켠다.
-- 판정자: 미룬 이미지가 있는 정지 화면이 release 뒤에 이미지를 받는다; 미룬 첫 이미지 때문에 앱이 malformed 로 resync 하지 않는다;
-  같은 이미지의 새 프레임이 미반환 동안 최신 하나로 모인다; 연결 바이트 상한보다 큰 한 장이 다른 이미지에 밀려 굶지 않는다.
+- 우선권(`Connection.image_priority`, 계약 §4.4)은 Connection 층이 든다 — stream·commit·detach 경계를 아는 층이다. owner 층의 원장은
+  그대로 「연결 상한보다 큰 한 장은 원장이 비었을 때만」을 지킨다(IC1).
+  - 쥐기: 연결 바이트 상한보다 큰 이미지가 미뤄지면(이유와 무관 — 원장이 안 비었음·같은 이미지 미반환·채널 없음) 그 (stream, image)
+    가 쥔다. 이미 다른 한 장이 쥐었으면 그 차례 뒤다.
+  - 막기: 쥔 동안 이 연결의 다른 이미지는 owner 에 청하지도 않고 미룬다 — 다른 stream·스냅샷도, 같은 투영에서 앞에 오는 이미지도
+    (「배치 안에서도 먼저 평가」가 이렇게 성립한다). host 전체 상한보다 큰 것은 그대로 「전송 불가」로 분류한다.
+  - 놓기: 그 stream 투영의 commit 이 그 한 장을 준비했으면 놓는다(곧 발급되어 원장이 연결 상한을 넘으니 그 반환이 다른 이미지를
+    깨운다). 청하지도 않았으면(사라졌다 — 지워짐·화면 밖) 놓고 깨운다. stream 이 떠나도(`removeAttachment` — detach·attach 롤백·
+    RuntimeNotFound) 놓고 깨운다. 롤백은 아무것도 바꾸지 않는다. stream id 는 연결 안에서 재사용하지 않는다.
+  - 놓으며 깨운 stream 은 다음 cadence(≤ 20 ms)가 투영한다 — Connection 층은 owner 의 즉시 예약에 닿지 않는다.
+  - 쥔 동안 release 는 원장이 빌 때만 깨운다 — 그 전엔 그 한 장도 못 들어가고 다른 이미지는 막혀, 깨워 봐야 투영만 헛돈다.
+- 「전송 불가」 진단(`session host image untransmittable:` — slot·stream·image·generation·bytes·host 상한): host 상한 초과와 레코드
+  길이(u32) 초과 두 자리 모두 `Client.imageUntransmittable` 을 지난다. 그 이미지는 base 에 적히지 않아 투영마다 다시 청하므로
+  최근 넷을 기억하는 거름(`UntransmittableMemo`, 원장 leaf)이 (stream, image, generation) 당 한 줄로 줄인다. 계약의 (image_id,
+  generation) 을 stream 으로 좁혔다 — image id 는 runtime 마다 따로 센다.
+- 판정자: server(`test-image-channel` 14) — 상한 안 이미지는 미뤄져도 쥐지 않고, 큰 한 장이 미뤄지면 쥐며 같은 stream 의 앞 이미지·
+  다른 stream 의 스냅샷이 owner 에 청하지 않고 미루고 host 상한 초과는 「전송 불가」로 남으며, 원장이 비면 그 한 장이 먼저 들어가고
+  롤백은 놓지 않으며 준비한 commit 이 놓되 깨우지 않는다; 사라진 한 장은 롤백이 놓지 않고 commit 이 놓으며 막혔던 stream(그 stream
+  자신 포함)을 깨우고, detach 도 놓고 깨운다. owner(`test-image-channel-host` 19) — 쥔 동안 원장이 남는 release 는 깨우지 않고 비우는
+  release 는 깨우며, 두 「전송 불가」 자리 모두 판마다 한 번 거른다. 원장 leaf(8) — 거름이 판마다 한 번이고 넘치면 가장 오래된 것부터
+  잊는다.
+- 한계: host 바이트 상한(`HostBytesFull`)으로 미룬 이미지는 **다른 연결**의 반환이 깨우지 않는다(IC5c-1 부터 그렇다 — 용량 사건은
+  그 연결의 것만 본다). 우선권을 쥔 한 장이 원장이 빈 채 host 상한에 걸리면 이 연결의 다른 이미지도 다음 화면 변화까지 함께
+  기다린다. 제품 GUI 는 host 당 광고하는 연결이 하나라 다른 연결이 host 예산을 쥘 일이 드물다 — 둘 이상이 되면 host 전체 반환을
+  용량 사건으로 넓힌다.
+
+#### IC5d — host 제공 스위치 (미착수)
+
+IC5a–c 가 처음 계획(producer 의 `image_ref`·`image_seg_hwm` 방출, 미룸 표현, 형식 선택, 용량 사건, 우선권, 「전송 불가」)을 층마다
+판정자로 덮었다. 남은 것:
+
+- host 제공 스위치 `host_offers_image_channel` 를 켜고 제공 스위치 판정자(`poll_owner` 「제품 owner 는 제공 스위치를 그대로 따른다」)를
+  갱신한다.
+- 제품 투영과 실제 owner 를 잇는 통합 판정자: 미룬 이미지가 있는 정지 화면이 release 뒤에 이미지를 받는다; 자리 없음·abandon·채널
+  상실 뒤에도 그 연결에 `image_blob` 이 나가지 않는다; 연결 바이트 상한보다 큰 한 장이 다른 이미지에 밀려 굶지 않는다.
 
 ### IC6 — 광고를 켜고 실측 (미착수)
 

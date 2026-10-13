@@ -261,20 +261,25 @@ IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단�
 ###### IC3b-2c-2 — 진단 계수와 판정자 (PR 진행 중)
 
 - 대조 계수(`src/image_reconciliation.zig`)에 이미지 채널 칸 셋:
-  - 손실(경고줄 `image reconciliation:`): `drop_no_segment` — `image_ref` 의 세그먼트가 표에 없거나 크기가 달라 해석하지 못함(그 연결은
-    `MalformedRow` 로 재접속). resolver 의 매핑 실패는 `image_blob` 과 같은 `drop_oom`.
+  - 손실(경고줄 `image reconciliation:`): `drop_no_segment` — `image_ref` 를 해석하지 못함(표에 없음·메타 불일치·ENOMEM 이 아닌 매핑
+    실패·크기 다름 — 그 연결은 `MalformedRow` 로 재접속). 매핑의 메모리 부족(ENOMEM)만 `image_blob` 과 같은 `drop_oom`.
   - 흐름(매 5 초 `image flow:`): `channel_refused` — 펌프·해석·stream 열기·hwm 정리가 Client 울타리(`requireBlockingMode`)나 slot 의
     접근 규칙(`attachmentImageAccessAllowed`)에서 빠짐. `held` — `image_ref` 배치가 큐 머리에 보류됨(펌프마다). 지연이지 손실이 아니라
     경고줄을 울리지 않는다 — 정상 운영에서 얼마나 나는지 실측(IC6) 전이라 경고로 두면 소음일 수 있다.
   - Client 의 네 자리는 `catch return imageChannelRefused(T, 값)` 꼴이다 — Client 울타리 판정자(B3b-S)가 `catch` 몸체에 블록이나
     Client 를 읽는 호출을 받지 않는다.
+  - tick 펌프(generation `currentPumpImageChannel`·legacy `backend_api.pumpImageChannel`)는 협상한 연결만 펌프한다 — 협상하지 않은
+    연결이 울타리(poison 등)에 막힐 때마다 `channel_refused` 가 오르면, 협상한 연결이 없는 지금 그 칸은 전부 소음이다(적대적 검증
+    1 회차).
 - 판정자:
   - 조립기: 세그먼트 없음·크기 다름은 `no_segment`(oom 아님), resolver OOM 은 `oom`(no_segment 아님).
   - 대조 계수: 거부·보류는 loss 가 아니다, 줄 길이 실측(경고 256 → 293, 흐름 106 → 169).
   - 펌프: external 모드에서 빠진 펌프는 `channel_refused` 1, 보류는 `held` 로 세고 적용은 세지 않는다, slot 이 바쁠 때 빠진 준비·해석은 2.
   - 연결 둘의 같은 segment_id 는 각 연결의 픽셀로 해석되고 한쪽 해석이 다른 쪽 표를 건드리지 않는다.
-  - 채널을 잃은 연결의 늦은 `image_ref` 는 「세그먼트 없음」이다(조립기가 `MalformedRow` 로 그 연결을 재접속시키고 탭은 산다 — 탭 쪽
-    복구는 `drainRemoteNow` 의 기존 `MalformedRow` 경로).
+  - 채널을 잃은 연결의 늦은 `image_ref` 는 울타리 거부가 아니라 「세그먼트 없음」이다(`channel_refused` 0). 조립기가 그것을
+    `MalformedRow` 로 올려 그 연결이 재접속하는 것은 IC3a·IC3b-2a 판정자가 잰다. **탭이 산다**(`drainRemoteNow` 의 `MalformedRow`
+    복구)는 이 단계에서 재지 않았다 — IC3b-2c-3.
+  - tick 의 길: 협상하지 않은 연결은 울타리에 막혀도 `channel_refused` 0, 협상한 연결은 1(앞 갈래).
 
 ###### IC3b-2c-3 — 남은 것 (미착수)
 
@@ -283,6 +288,8 @@ IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단�
   이어받는 정당한 순차 이관이 있을 수 있다. 동시 사용(겹친 진입)을 재는 꼴을 정한다.
 - attach 응답을 끝내 못 읽어 id 를 모르는 stream 의 세그먼트는 더 큰 id 를 알 때까지(다음 attach) 표에 남아 원장 자리를 쥔다 —
   id 를 모르니 닫지도 못한다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 본다.
+- 「이미지 채널 없음」 연결의 늦은 `image_ref` 가 그 연결의 재접속으로 끝나고 **탭은 종료 상태가 되지 않는다**는 판정자
+  (`drainRemoteNow` 수준 — IC3b-2c-2 는 Client·조립기 수준까지만 쟀다).
 - 「이미지 채널 없음」 탭 notice(계약 §3.2)는 광고(IC6)와 함께 단다 — 그 전에는 협상한 연결이 없다.
 
 ### IC4 — fd 상속 방지

@@ -7,8 +7,8 @@
 //!   - 0 번 청크 없이 온 청크 → 스킵 (`screen_assembler.handleImageBlob`)
 //!   - 청크 순서·개수가 어긋남 → 폐기 (같은 곳)
 //!   - placement 는 왔는데 그 `image_id` 의 blob 이 없음 → 안 그림 (`metal_frame.planImageUploads`)
-//!   - 이미지 채널(`image_ref`)의 세그먼트를 해석하지 못함 → 그 연결 재접속 (`screen_assembler.handleImageRef`,
-//!     docs/session-host-image-channel.md §6)
+//!   - 이미지 채널(`image_ref`)의 세그먼트를 해석하지 못함 → 그 연결 재접속 (`screen_assembler.handleImageRef` — 해석 규칙은
+//!     docs/session-host-image-channel.md §6, 계수의 읽는 법은 docs/persistent-session-host.md 의 이미지 대조)
 //!
 //! 그래서 칸마다 센다. host 는 `maru-metrics` 의 `imgs=` 로 내보낸 **개수**를 남기고, 앱은 5 초마다
 //! 이 계수를 델타로 한 줄 남긴다 — 단 **버려진 것이 하나라도 있을 때만**. 정상 흐름은 침묵이다(같은 규칙:
@@ -27,10 +27,12 @@ pub const Counters = struct {
     dropped_no_head: std.atomic.Value(u64) = .init(0),
     /// 청크 순서나 개수가 pending 과 어긋나 통째로 버린 이미지.
     dropped_order: std.atomic.Value(u64) = .init(0),
-    /// 메모리 부족으로 못 받은 이미지(`image_ref` 의 매핑 실패 포함).
+    /// 메모리 부족으로 못 받은 이미지(`image_ref` 는 매핑의 메모리 부족 — `mmap` 의 ENOMEM — 만).
     dropped_oom: std.atomic.Value(u64) = .init(0),
-    /// `image_ref` 가 가리키는 세그먼트가 표에 없거나(채널 상실·「이미지 채널 없음」·경합) 크기가 레코드와 달라 해석하지 못한 이미지.
-    /// 그 연결은 `MalformedRow` 로 재접속한다 — 이 칸이 늘면 「이미지 때문에 재접속했다」를 가린다.
+    /// `image_ref` 를 해석하지 못한 이미지 — 세그먼트가 표에 없음(채널 상실·「이미지 채널 없음」·경합·울타리에서 빠진 해석), stream·
+    /// 메타 불일치, ENOMEM 이 아닌 매핑 실패(`fstat`·크기 하한·EINVAL 등), 매핑 크기가 레코드와 다름. 그 연결은 `MalformedRow` 로
+    /// 재접속한다. `image_ref` 때문의 재접속을 **전부** 세지는 않는다 — 예산 초과(`preflightImageRef`)와 `putImage` 의 OOM 은 어느 칸에도
+    /// 없다.
     dropped_no_segment: std.atomic.Value(u64) = .init(0),
     /// placement 가 가리키는 image_id 의 blob 이 없어 안 그린 횟수. **프레임마다 배치마다** 센다 — 5 초 델타가
     /// 300 이면 이미지 300 개가 사라진 게 아니라, 배치 하나가 5 초 내내 매 프레임 못 그려졌다는 뜻일 수 있다.

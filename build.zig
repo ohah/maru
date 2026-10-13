@@ -7076,8 +7076,10 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
-            // 수립(IC2b) 9 와 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위·
-            // 울타리 든 해석·협상한 Client 는 external 모드 거부(IC3b-2c-1)·연결 둘의 표가 섞이지 않음(IC3b-2c-2)) 9, fork 울타리(IC4b — 소켓 생성이 수신 잠금 안(deadline·일반 연결 둘 다), tick 펌프는 물러서고 동기 적용 펌프는 기다린다) 4.
+            // `connect:` 11 — 수립(IC2b) 9 와 소켓 생성이 fork 울타리의 수신 잠금 안(IC4b — deadline·일반 연결) 2.
+            // `pump:` 12 — 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위·
+            // 울타리 든 해석) 8, tick 펌프는 물러서고 동기 적용 펌프는 기다린다(IC4b) 2, 협상한 Client 는 external 모드 거부(IC3b-2c-1) 1,
+            // 연결 둘의 표가 섞이지 않음(IC3b-2c-2) 1.
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);

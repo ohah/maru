@@ -655,6 +655,26 @@ test "image channel adapter: the generation adapter reads negotiation and resolv
     try std.testing.expectEqual(@as(usize, 1), len_while_held);
     try std.testing.expect(try slot.currentPumpImageChannel(slot.connectionGeneration()));
     try std.testing.expectEqual(@as(usize, 2), table.len);
+    // tick 의 길은 협상하지 않은 연결을 펌프하지 않는다 — 울타리에 막힌 Client(여기서는 옮겨 간 Client)라도
+    // `channel_refused` 를 올리지 않는다. 협상한 연결은 막히면 센다(앞 갈래 — 거르기가 셈 자체를 지우지 않았음).
+    {
+        const recon = @import("maru").image_reconciliation;
+        live.image_channel.state = .not_negotiated;
+        const ownership = live.ownership;
+        live.ownership = .moved;
+        const unnegotiated_before = recon.snapshot();
+        const unnegotiated_pumped = slot.currentPumpImageChannel(slot.connectionGeneration());
+        const unnegotiated_refused = recon.snapshot().delta(unnegotiated_before).channel_refused;
+        live.image_channel.state = .bound;
+        const negotiated_before = recon.snapshot();
+        const negotiated_pumped = slot.currentPumpImageChannel(slot.connectionGeneration());
+        const negotiated_refused = recon.snapshot().delta(negotiated_before).channel_refused;
+        live.ownership = ownership;
+        try std.testing.expect(try unnegotiated_pumped);
+        try std.testing.expectEqual(@as(u64, 0), unnegotiated_refused);
+        try std.testing.expect(!(try negotiated_pumped));
+        try std.testing.expectEqual(@as(u64, 1), negotiated_refused);
+    }
     var other = ref;
     other.segment_id = 2;
     try std.testing.expect((try transport.resolve_image(transport.context, 8, other)) == null);

@@ -15594,9 +15594,11 @@ pub const ClientSlot = struct {
         return self.current.client.imageShmNegotiated();
     }
 
-    /// 이 slot 의 연결이 「이미지 채널 없음」인가(이미지 채널 §3.2) — 앱의 안내(IC6b) 근거. 관측이다.
-    pub fn attachmentImageChannelUnavailable(self: *const ClientSlot) bool {
-        if (!self.valid()) return false;
+    /// 이 slot 의 연결이 「이미지 채널 없음」인가(이미지 채널 §3.2) — 앱의 안내(IC6b) 근거. 관측이다(메인 스레드의 유지보수 tick 이
+    /// 읽는다 — `attachmentImageShmNegotiated` 와 같다). slot 이 유효하지 않으면 모른다(null) — 「있음」으로 읽으면 안내가 다시 무장돼
+    /// 같은 연결에 토스트가 또 뜬다.
+    pub fn attachmentImageChannelUnavailable(self: *const ClientSlot) ?bool {
+        if (!self.valid()) return null;
         return self.current.client.imageChannelUnavailable();
     }
 

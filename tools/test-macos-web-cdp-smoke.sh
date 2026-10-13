@@ -645,6 +645,22 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser exec --surface "\$nv" 'document.getElementById("p").textContent' > "\$out/ex-csp-ok" 2>&1; echo "rc=\$?" >> "\$out/ex-csp-ok"
 "\$cli" browser exec --surface "\$nv" 'new Function("return 1")()' > "\$out/ex-csp-eval" 2>&1; echo "rc=\$?" >> "\$out/ex-csp-eval"
 "\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/w9a.html?back2" > "\$out/nv-back2" 2>&1
+# W9a③: localStorage(격리 world — 페이지가 getItem 을 거짓말하게 바꿔도 참값)·쿠키(그 호스트만)·clearStorage.
+"\$cli" browser set-local-storage --surface "\$nv" --key k1 --value 'v1 "한"' > "\$out/ls-set" 2>&1; echo "rc=\$?" >> "\$out/ls-set"
+"\$cli" browser exec --surface "\$nv" 'Storage.prototype.getItem=function(){return "LIE"}, 1' > "\$out/ls-lie" 2>&1
+"\$cli" browser get-local-storage --surface "\$nv" --key k1 > "\$out/ls-get" 2>&1; echo "rc=\$?" >> "\$out/ls-get"
+"\$cli" browser remove-local-storage --surface "\$nv" --key k1 > "\$out/ls-rm" 2>&1; echo "rc=\$?" >> "\$out/ls-rm"
+"\$cli" browser get-local-storage --surface "\$nv" --key k1 > "\$out/ls-get2" 2>&1; echo "rc=\$?" >> "\$out/ls-get2"
+"\$cli" browser set-cookie --surface "\$nv" --name ck1 --value cv1 > "\$out/ck-set" 2>&1; echo "rc=\$?" >> "\$out/ck-set"
+"\$cli" browser set-cookie --surface "\$nv" --name ck2 --value cv2 --domain example.com > "\$out/ck-set-other" 2>&1; echo "rc=\$?" >> "\$out/ck-set-other"
+"\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get" 2>&1; echo "rc=\$?" >> "\$out/ck-get"
+"\$cli" browser delete-cookie --surface "\$nv" --name ck1 > "\$out/ck-del" 2>&1; echo "rc=\$?" >> "\$out/ck-del"
+"\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get2" 2>&1; echo "rc=\$?" >> "\$out/ck-get2"
+"\$cli" browser set-cookie --surface "\$nv" --name ck3 --value cv3 > "\$out/cl-ck" 2>&1
+"\$cli" browser set-local-storage --surface "\$nv" --key k3 --value v3 > "\$out/cl-ls" 2>&1
+"\$cli" browser clear-storage --surface "\$nv" > "\$out/cl" 2>&1; echo "rc=\$?" >> "\$out/cl"
+"\$cli" browser get-cookies --surface "\$nv" > "\$out/cl-ck2" 2>&1
+"\$cli" browser get-local-storage --surface "\$nv" --key k3 > "\$out/cl-ls2" 2>&1
 # 적대 리뷰 2 회차: 멈추지 않는 스크립트는 시한(-32004) 뒤 멈춘다 — 같은 탭의 다음 exec 이 답한다(전에는 렌더러가 100 % 로 계속 돌아 뒤 요청이 모두 시한).
 # V8 이 값으로 옮기지 못하는 던진 값(자기를 가리키는 Error)도 이름·메시지, 여러 줄 긴 메시지도 그대로. 포트가 범위를 넘는 주소는 곧 거절.
 "\$cli" browser exec --surface "\$nv" '(()=>{while(true){}})()' > "\$out/r2-loop" 2>&1; echo "rc=\$?" >> "\$out/r2-loop"
@@ -876,6 +892,13 @@ grep -q '^1$' "$out/r4-go" && [ "$(cat "$out/r4-go-secs")" -le 3 ] || fail "an e
 grep -q 'loading a new page' "$out/r4-exec" && grep -q '^rc=1$' "$out/r4-exec" && [ "$(cat "$out/r4-exec-secs")" -le 3 ] && ! grep -q 'GET /hit?r4ran' "$root/http.log" || fail "an exec sent while the tab was loading a new page was not refused at once, or ran later ($(cat "$out/r4-exec-secs")s · $(tr '\n' ' ' < "$out/r4-exec") · $(grep 'r4ran' "$root/http.log" | tr '\n' ' '))"
 grep -q '^"ifr"$' "$out/r5-ifr" && [ "$(cat "$out/r5-ifr-secs")" -le 3 ] || fail "an exec while only a late iframe was loading was refused or slow ($(cat "$out/r5-ifr-secs")s · $(tr '\n' ' ' < "$out/r5-ifr"))"
 echo "PASS w9a-r2: a script that never ends (and a thrown value whose getter never ends) is stopped after its timeout and the tab answers the next exec, an Error V8 cannot copy keeps its name and message, a long multi-line message survives, an out-of-range port is refused, an exec whose script navigates answers at once, an exec while that new page is still loading is refused at once and never runs later, an exec while only a late iframe loads runs"
+# W9a③
+grep -q '^ok$' "$out/ls-set" && grep -q '^v1 "한"$' "$out/ls-get" && grep -q '^ok$' "$out/ls-rm" && grep -q '^$' "$out/ls-get2" && grep -q '^rc=0$' "$out/ls-get2" || fail "localStorage on a Chromium tab did not set, read past a lying getItem and remove ($(tr '\n' ' ' < "$out/ls-set") · $(tr '\n' ' ' < "$out/ls-get") · $(tr '\n' ' ' < "$out/ls-rm") · $(tr '\n' ' ' < "$out/ls-get2"))"
+grep -q '^ok$' "$out/ck-set" && grep -q '"name":"ck1"' "$out/ck-get" && grep -q '"value":"cv1"' "$out/ck-get" || fail "a cookie set on a Chromium tab was not read back ($(tr '\n' ' ' < "$out/ck-set") · $(tr '\n' ' ' < "$out/ck-get"))"
+grep -q '^rc=1$' "$out/ck-set-other" && grep -q "page's own host" "$out/ck-set-other" || fail "a cookie for another host was not refused ($(tr '\n' ' ' < "$out/ck-set-other"))"
+grep -q '^ok$' "$out/ck-del" && ! grep -q '"name":"ck1"' "$out/ck-get2" && grep -q '^rc=0$' "$out/ck-get2" || fail "delete-cookie did not remove the cookie ($(tr '\n' ' ' < "$out/ck-del") · $(tr '\n' ' ' < "$out/ck-get2"))"
+grep -q '^ok$' "$out/cl" && ! grep -q '"name":"ck3"' "$out/cl-ck2" && grep -q '^$' "$out/cl-ls2" || fail "clear-storage did not clear the page's cookies and localStorage ($(tr '\n' ' ' < "$out/cl") · $(tr '\n' ' ' < "$out/cl-ck2") · $(tr '\n' ' ' < "$out/cl-ls2"))"
+echo "PASS w9a-storage: localStorage sets, reads past a page that lies in getItem, and removes; a cookie is set, read and deleted, a cookie for another host is refused; clear-storage clears the page's cookies and localStorage"
 echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

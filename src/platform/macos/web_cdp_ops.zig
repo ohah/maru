@@ -27,6 +27,8 @@ const web_cdp_locate = @import("web_cdp_locate.zig");
 pub const web_cdp_page = @import("web_cdp_page.zig");
 /// W9a② 의 executeScript — 같이 넘긴다.
 pub const web_cdp_exec = @import("web_cdp_exec.zig");
+/// W9a③ 의 localStorage·쿠키·clearStorage — 같이 넘긴다.
+pub const web_cdp_storage = @import("web_cdp_storage.zig");
 /// text·label 로케이터의 격리 world 함수(W9b②-2 — 계획 공격 3 회차에 실측한 것).
 const finder_js = @embedFile("web_cdp_finder.js");
 
@@ -46,7 +48,7 @@ pub const frame_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\
 
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
-pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press, navigate, get_url, screenshot, execute_script };
+pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press, navigate, get_url, screenshot, execute_script, get_local_storage, set_local_storage, remove_local_storage, get_cookies, set_cookie, delete_cookie, clear_storage };
 
 /// kick 을 붙이는가(`web_cdp_kick.zig`).
 pub const Kick = @import("web_cdp_kick.zig").Kick;
@@ -215,10 +217,13 @@ pub const Op = struct {
     page: ?web_cdp_page.Op = null,
     /// W9a② 의 executeScript — 같다.
     exec: ?web_cdp_exec.Op = null,
+    /// W9a③ 의 localStorage·쿠키·clearStorage — 같다.
+    storage: ?web_cdp_storage.Op = null,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.page) |*p| p.deinit(gpa);
         if (self.exec) |*e| e.deinit(gpa);
+        if (self.storage) |*st| st.deinit(gpa);
         if (self.selector) |s| gpa.free(s);
         if (self.frame_id) |s| gpa.free(s);
         if (self.text) |s| gpa.free(s);
@@ -244,6 +249,18 @@ pub const Op = struct {
             .back, .forward, .reload => return op,
             .execute_script => {
                 op.exec = try web_cdp_exec.Op.init(gpa, arg, id);
+                return op;
+            },
+            .get_local_storage, .set_local_storage, .remove_local_storage, .get_cookies, .set_cookie, .delete_cookie, .clear_storage => {
+                op.storage = try web_cdp_storage.Op.init(gpa, switch (kind) {
+                    .get_local_storage => .get_local_storage,
+                    .set_local_storage => .set_local_storage,
+                    .remove_local_storage => .remove_local_storage,
+                    .get_cookies => .get_cookies,
+                    .set_cookie => .set_cookie,
+                    .delete_cookie => .delete_cookie,
+                    else => .clear_storage,
+                }, arg);
                 return op;
             },
             .navigate, .get_url, .screenshot => {
@@ -380,6 +397,7 @@ pub const Op = struct {
     pub fn committed(self: *const Op) bool {
         if (self.page) |*p| return p.committed();
         if (self.exec) |*e| return e.committed();
+        if (self.storage) |*st| return st.committed();
         return switch (self.stage) {
             // 누름·Delete 키 누름을 보냈다 — 뗌·놓기를 끝까지. 넣은 뒤의 다시 읽기도(읽기만 한다 — 놓기까지 가게).
             // 키를 눌렀다 — 떼기까지(눌린 채 두지 않는다).
@@ -394,6 +412,7 @@ pub const Op = struct {
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
         if (self.page != null) return null; // 쥔 원격 객체가 없다
         if (self.exec) |*e| return e.cancel(gpa);
+        if (self.storage != null) return null; // 쥔 원격 객체가 없다(격리 world 는 이동까지)
         // 덮임 검사·초점 검사·고르기용으로 잡은 그 요소의 원격 객체도(2 회차 — role 상태만 놓았다; 누름 앞이라 누른 것은 없다).
         const holds = switch (self.stage) {
             .frame, .hit_test, .focus_check, .hover_move, .mouse_down, .select, .insert, .delete_down => true,
@@ -411,6 +430,7 @@ pub const Op = struct {
             return p.wake(gpa);
         }
         if (self.exec) |*e| return e.wake(gpa);
+        if (self.storage) |*st| return st.wake(gpa);
         // 떼기를 다시 보낸다(못 보냈던 것 — 철회돼도 committed 라 보낸다).
         if (self.stage == .key_up) return self.keyStep(gpa, false);
         if (self.stage == .mouse_up) return self.mouse(gpa, "mouseReleased");
@@ -432,6 +452,7 @@ pub const Op = struct {
             return p.start(gpa);
         }
         if (self.exec) |*e| return e.start(gpa);
+        if (self.storage) |*st| return st.start(gpa);
         return switch (self.kind) {
             // 로케이터 — 먼저 페이지 크기를 보고(격리 world) 접근성 질의로 찾는다.
             .click, .type_text, .scroll, .hover, .press => if (self.locating) self.frameTreeStep(gpa) else switch (self.kind) {
@@ -453,7 +474,7 @@ pub const Op = struct {
                 break :blk self.frameTreeStep(gpa);
             },
             .snapshot => if (self.selector != null) call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{}) else self.axStep(gpa),
-            .navigate, .get_url, .screenshot, .execute_script => unreachable, // `page`·`exec` 가 맡는다
+            .navigate, .get_url, .screenshot, .execute_script, .get_local_storage, .set_local_storage, .remove_local_storage, .get_cookies, .set_cookie, .delete_cookie, .clear_storage => unreachable, // `page`·`exec`·`storage` 가 맡는다
         };
     }
 
@@ -604,6 +625,7 @@ pub const Op = struct {
             return p.feed(gpa, reply);
         }
         if (self.exec) |*e| return e.feed(gpa, reply);
+        if (self.storage) |*st| return st.feed(gpa, reply);
         // 누르기 전 프레임의 답(무엇이든 — 오류여도 그린 뒤다) — 덮임 검사·키·Delete 로. 못 보냈으면 아래에서 놓고 실패.
         if (self.stage == .frame and reply != .not_sent) return self.afterFrame(gpa);
         // 입력을 보낸 뒤 대화상자 이유 — 입력은 갔다(3 회차: 실패로 답해 다시 하면 두 번 제출됐다).

@@ -1167,6 +1167,12 @@ DevTools 자리 둘이 비어 있을 때만(`Kick.reserve` — 둘째는 termina
 남긴 한계: WebKit 의 `navigation` 메시지(Foundation 글)와 다르다, `flushDeferredReleases` 가 exec 중인 탭의 둘째 자리를 한 tick 쥘 수 있다
 (terminate 는 다음 tick 에 다시 보낸다).
 
+**W9a③ 구현**(localStorage·쿠키·clearStorage — `web_cdp_storage.zig`, 별도 PR): 시작에 확인한 문서 주소(maru 가 아는 그 탭의 주소)를 op 에 주고
+그 주소로만 한다. localStorage 는 `Page.getFrameTree` 로 주 프레임 출처를 본 뒤 격리 world(`Page.createIsolatedWorld`)의 `Storage.prototype.*`,
+쿠키 읽기는 `Network.getCookies {urls}`, 쓰기는 호스트 자신만(D6), 지우기·clearStorage 는 받은 정확한 키로 하나씩(D7 — 한 요청에 512 개까지),
+쿠키 저장소 op 은 확인 grant 의 호스트가 지금 문서를 덮는지 시작에 다시 본다. 확정 전 이동 중이면 localStorage 의 페이지 호출을 보내지 않는다.
+스모크 `w9a-storage`.
+
 **W9a 적대 리뷰**(구현 뒤 다섯 회차 — 1 회차는 W9a① 만, 2 회차부터 ①+②):
 - **1 회차**(실제 앱·CEF 탐침·변이 21(걸림 14 — 생존 넷은 시험을 더했다: 「불러오는 중」 전의 「아님」, 만든 직후 about:blank 의 문서, 묻는 닫기
   중 navigate, 기다리는 동안의 철회)): 상 — 좁은 rect 에 큰 scale(1×400, 8000)은 폭만 접혀 8000×3,200,000 px 를 청해 **Chromium 엔진 전체가 Skia

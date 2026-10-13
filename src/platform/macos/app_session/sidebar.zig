@@ -108,18 +108,38 @@ pub fn sidebarHeaderIconRowCenterPx(self: *const AppSession) u32 {
     return sidebarHeaderIconRowTopPx(self) + self.cell_height_px / 2;
 }
 
-/// 헤더 아이콘 **hover 판**의 위 y(backing px) — 판 중심을 그려진 아이콘 중심(아이콘 줄 상단 + 반 셀, 렌더러가
-/// role 셀을 키울 때 쓰는 `metal_frame.cellRasterIconQuadPx` 의 세로 중심과 같은 식)에 둔다. 펼친 헤더의 ◧⚙+종 판과
-/// 접힌 사이드바의 ◧ 판이 함께 쓴다.
+/// 헤더 아이콘 **hover pill** 의 세로 자리(backing px) — 펼친 헤더의 ◧⚙+종 pill 과 접힌 사이드바의 ◧ pill 이 함께 쓴다.
 ///
-/// 예전에는 둘이 따로 셈했다 — 펼친 판은 `y = 0`(「줄이 y 0 에서 시작한다」, 알림 배지 원이 2026-10-12 에 버린 가정과
-/// 같은 모양)이라 띠가 셀보다 높은 창에서 판이 아이콘보다 아래로 쳐졌고(1500×800 실측 2px), 접힌 판은 띠 중앙
-/// `strip / 2`(실수)라 셀 자리의 정수 나눗셈과 `strip − ch` 가 홀수일 때 0.5px 갈렸다. 판이 아이콘보다 높으면
-/// 위 y 가 음수가 된다 — 글리프도 띠 밖으로 나가므로 그대로 둔다(렌더러가 창 밖을 자른다).
-fn headerIconHoverPlateTopPx(self: *const AppSession, plate_h: f32) f32 {
-    const top: f32 = @floatFromInt(sidebarHeaderIconRowTopPx(self));
-    const ch: f32 = @floatFromInt(self.cell_height_px);
-    return top + ch / 2.0 - plate_h / 2.0;
+/// - **중심**은 그려진 아이콘 중심(아이콘 줄 상단 + 반 셀 — 렌더러가 role 셀을 키울 때 쓰는 `metal_frame.cellRasterIconQuadPx`
+///   의 세로 중심과 같은 식). 예전에는 둘이 따로 셈했다 — 펼친 판은 `y = 0`(아이콘보다 2px 아래), 접힌 판은 `strip / 2`
+///   (정수 셀 자리와 0.5px)(#4408).
+/// - **높이**는 디자인 높이 `1.7 × ch` 를, 중심에서 띠 위·아래 가까운 끝까지의 두 배로 줄인다 — 그래야 pill 이 띠 안에
+///   든다. 예전에는 `1.7 × ch` 그대로라 띠보다 높은 pill 이 창 위 끝에서 평평하게 잘렸다(2x: 63px pill · 56px 띠 · 위
+///   4px 잘림 — #4412 의 2x 캡처로 봤다). 그 높이의 근거였던 「글리프가 1.7줄 높이라 줄이면 삐져나간다」는 틀렸다 —
+///   등록 아이콘의 잉크는 슬롯 안 `min(w, h)` 정사각(`icon_glyph.fillCoverage`, 폭 기준)이다(#4410 과 같은 오해).
+/// - 다만 **잉크보다는 작아지지 않는다** — 아주 큰 글꼴에서 잉크가 띠를 넘으면 pill 도 잉크를 따라 넘는다(렌더러가 창
+///   밖을 자른다).
+///
+/// 띠는 폰트와 무관한 28pt(접힘 30pt)라 **기본 폰트에서는 띠가 높이를 정한다**(1x 28 · 2x 55, 접힘 30 · 59). 디자인 높이는
+/// 작은 폰트(1.7ch < 띠)에서, 잉크 하한은 띠보다 큰 폰트에서만 걸린다 — 세 갈래는 아래 단위 테스트가 숫자로 본다.
+fn headerIconHoverPlateVertical(self: *const AppSession) HoverPlateVertical {
+    return hoverPlateVerticalPx(sidebarHeaderIconRowTopPx(self), self.cell_width_px, self.cell_height_px, self.titlebar_strip_px);
+}
+
+const HoverPlateVertical = struct { y: f32, h: f32 };
+
+/// `headerIconHoverPlateVertical` 의 순수 식(세션 없이 세 갈래를 숫자로 재려고 뗐다).
+fn hoverPlateVerticalPx(row_top_px: u32, cell_width_px: u32, cell_height_px: u32, strip_px: u32) HoverPlateVertical {
+    const ch: f32 = @floatFromInt(cell_height_px);
+    const strip: f32 = @floatFromInt(strip_px);
+    const ink: f32 = @floatFromInt(@min(
+        app_session_mod.headerIconRasterExtentPx(cell_width_px),
+        app_session_mod.headerIconRasterExtentPx(cell_height_px),
+    ));
+    const center = @as(f32, @floatFromInt(row_top_px)) + ch / 2.0;
+    const fit = 2.0 * @max(0.0, @min(center, strip - center));
+    const h = @max(@min(ch * 1.7, fit), ink);
+    return .{ .y = center - h / 2.0, .h = h };
 }
 
 /// 검색 줄 glyph의 세로 origin — 상단 바 밴드 안 세로 중앙. `row = 0` frame과 짝이라 `py_top = origin_y`가 된다.
@@ -1002,7 +1022,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
     }
     // 헤더 아이콘 호버 배경(웹 버튼 hover) — hovered_header_region이 아이콘이면 그 아이콘 뒤에 둥근 quad(layer 0,
     // 아이콘 셀 아래). 아이콘 col은 헤더 셀을 내는 `cell_text.appendSidebarHeaderIcons` 와 같은 출처(`headerIconCol`·
-    // `sidebarBellCol`)에서 읽는다. 아이콘은 Zig 가 셀×1.7 로 굽고 그려진 글리프 중심에 quad 를 맞춰 약 2.6칸×1.7줄로
+    // `sidebarBellCol`)에서 읽는다. 아이콘은 Zig 가 셀×1.7 로 굽고 그려진 글리프 중심에 quad 를 맞춰 약 2.6칸 폭(높이는 `headerIconHoverPlateVertical` — 띠 안)으로
     // 덮는다. 색은 전경색 기반 반투명(아래).
     if (self.hovered_header_region) |hr| {
         if (self.cell_width_px > 0 and self.cell_height_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10) {
@@ -1018,14 +1038,14 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                 .search, .none => .{ cols, 1 }, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
             };
             const cw: f32 = @floatFromInt(self.cell_width_px);
-            const ch: f32 = @floatFromInt(self.cell_height_px);
             // hover quad 중심 = 그려진 글리프 중심. 크게 구운 아이콘은 **한 칸** quad 를 키워 차지한 칸들의 가운데에
             // 그린다 — 그 이동(`metal_frame.cellRasterIconGlyphOffsetPx`)을 렌더러가 셀의 `glyph_offset_x_px` 로 받아
             // 더하므로, 여기서도 같은 함수로 중심을 낸다(1칸이면 셀 중심, 종(2칸)이면 반 칸 오른쪽). 예전에는 「종이면
             // +1.0칸」을 여기서 따로 들었다 — 어긋나면 좁아진 종이 박스 한쪽으로 치우쳐 보인다(실제로 있었던 버그).
             const center_x: f32 = metal_frame.cellRasterIconCenterXPx(icon_col * self.cell_width_px, self.cell_width_px, span); // 그려진 글리프 중심
             const w: f32 = cw * 2.6; // 좌우 패딩을 더 줘 버튼처럼(아이콘 ~1.7칸 + 양옆 여백) — 사용자 피드백
-            const h: f32 = ch * 1.7;
+            const plate = headerIconHoverPlateVertical(self); // 아이콘과 같은 세로 중심 · 띠 안 높이(접힌 ◧ pill 과 같은 함수)
+            const h: f32 = plate.h;
             const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼
             // 호버 배경은 **전경색(밝음) 기반 반투명**으로 둔다. 헤더 아이콘 glyph는 터미널 셀 패스(draw 1b)에,
             // 이 호버 quad는 layer 0(under, draw 3)이라 아이콘 '뒤'가 아니라 '위'에 그려진다(그 사이에 끼울 패스가
@@ -1036,7 +1056,7 @@ pub fn rebuildSidebar(self: *AppSession) !void {
             const hover_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x40); // ≈25% 밝은 하이라이트
             self.gpu_quads.append(self.allocator, .{
                 .x = center_x - w / 2.0,
-                .y = headerIconHoverPlateTopPx(self, h), // 그려진 아이콘과 같은 세로 중심(접힌 ◧ 판과 같은 함수)
+                .y = plate.y,
                 .w = w,
                 .h = h,
                 .corner_radii = .{ radius, radius, radius, radius },
@@ -1258,18 +1278,18 @@ pub fn rebuildSidebar(self: *AppSession) !void {
     }
     // 접힘 펼치기 토글(◧) 호버 배경 — 접힘 시 위 헤더-아이콘 호버 경로(sidebar_width_px>0 가드)가 안 타므로 여기서
     // 별도로 그린다. 토글 글리프는 헤더 아이콘 줄(`sidebarHeaderIconRowTopPx` — Zig 가 셀 origin_y 로 싣는다)에 1.7×로
-    // 그려지므로 quad도 같은 중심에 맞춘다: 가로=셀 중심(col+0.5), 세로=`headerIconHoverPlateTopPx`, 폭≈2.6칸. 색·알파·둥글기는 헤더 아이콘 호버와
+    // 그려지므로 quad도 같은 중심에 맞춘다: 가로=셀 중심(col+0.5), 세로=`headerIconHoverPlateVertical`, 폭≈2.6칸. 색·알파·둥글기는 헤더 아이콘 호버와
     // 동일(밝은 fg 반투명 — straight-alpha packRgbAlpha; premultipliedRgba면 셰이더 이중 premultiply로 흐려짐).
     if (self.sidebar_collapsed and self.hovered_collapsed_toggle and self.cell_width_px > 0 and self.cell_height_px > 0 and self.titlebar_strip_px > 0) {
         const cw: f32 = @floatFromInt(self.cell_width_px);
-        const ch: f32 = @floatFromInt(self.cell_height_px);
         const w: f32 = cw * 2.6; // 아이콘(~1.7칸) + 좌우 여백 — 헤더 아이콘 호버와 같은 폭
-        const h: f32 = ch * 1.7; // 글리프(1.7× 셀)와 같은 높이 — 헤더 아이콘 호버와 동일. cap하면 큰 폰트(1.7ch>strip)서
-        const radius: f32 = @min(w, h) * 0.28; // 글리프가 pill 밖으로 삐져나가므로(code-review) 무cap으로 글리프와 정확히 일치
+        const plate = headerIconHoverPlateVertical(self); // 펼친 헤더 pill 과 같은 함수 — 아이콘과 동심 · 띠 안 · 잉크는 덮는다
+        const h: f32 = plate.h;
+        const radius: f32 = @min(w, h) * 0.28;
         const hover_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x40); // ≈25% 밝은 하이라이트
         self.gpu_quads.append(self.allocator, .{
             .x = (@as(f32, @floatFromInt(self.collapsedToggleCol())) + 0.5) * cw - w / 2.0, // 셀 중심 기준 중앙
-            .y = headerIconHoverPlateTopPx(self, h), // 그려진 글리프와 같은 세로 중심. 1.7ch>strip이면 y<0(글리프도 띠 밖으로 나가므로 일치) — 렌더러 clip
+            .y = plate.y,
             .w = w,
             .h = h,
             .corner_radii = .{ radius, radius, radius, radius },
@@ -3302,4 +3322,24 @@ test "사이드바 키보드 스크롤 게이트: 검색이 열렸을 때만 · 
     try std.testing.expectEqual(max_offset, session.sidebar_scroll_offset_px);
     _ = try session.handleKeyEvent(.{ .key = .home, .modifiers = .{} });
     try std.testing.expectEqual(@as(u32, 0), session.sidebar_scroll_offset_px);
+}
+
+test "헤더 hover pill 세로: 띠가 정하고 · 작은 폰트는 디자인 높이 · 큰 폰트는 잉크가 하한" {
+    const eq = std.testing.expectApproxEqAbs;
+    // 띠가 정한다 — 1x 기본(줄 상단 5 · cw 8 · ch 18 · 띠 28): 중심 14, 디자인 30.6 > 띠 맞춤 28. 창 위 끝에 붙되 안 잘린다.
+    var v = hoverPlateVerticalPx(5, 8, 18, 28);
+    try eq(@as(f32, 28), v.h, 0.001);
+    try eq(@as(f32, 0), v.y, 0.001);
+    // Retina 기본(줄 상단 9 · cw 17 · ch 37 · 띠 56): 중심 27.5 → 55. 예전 63 은 위 4px 가 잘렸다.
+    v = hoverPlateVerticalPx(9, 17, 37, 56);
+    try eq(@as(f32, 55), v.h, 0.001);
+    try eq(@as(f32, 0), v.y, 0.001);
+    // 디자인 높이가 정한다 — 작은 폰트(줄 상단 8 · cw 6 · ch 12 · 띠 28): 1.7 × 12 = 20.4 < 띠 맞춤 28, 위아래 여백 3.8.
+    v = hoverPlateVerticalPx(8, 6, 12, 28);
+    try eq(@as(f32, 20.4), v.h, 0.001);
+    try eq(@as(f32, 3.8), v.y, 0.001);
+    // 잉크가 하한 — 띠보다 큰 폰트(줄 상단 0 · cw 30 · ch 60 · 띠 28): 띠 맞춤 0, 잉크 min(51, 102) = 51 을 덮는다(띠 밖으로).
+    v = hoverPlateVerticalPx(0, 30, 60, 28);
+    try eq(@as(f32, 51), v.h, 0.001);
+    try eq(@as(f32, 4.5), v.y, 0.001);
 }

@@ -137,10 +137,13 @@ const Surface = struct {
     /// W9c②: 에이전트가 이 탭에 마지막으로 한 「움직이는」 일(누름·키·이동·스크립트·닫기·대화상자 답 — 단조 ms, `noteAgentInput`). 대화상자가
     /// 오면 가족의 이 값과 사용자 값으로 누가 띄웠는지 정한다(`dialog_cause`). 스냅숏·기다림·주소 읽기는 세지 않는다(페이지를 움직이지 않는다).
     agent_input_ms: i64 = std.math.minInt(i64) / 2,
-    /// W9c②: 사용자가 페이지 밖에서 이 탭을 움직인 때 — 주소창 이동·뒤로·앞으로·새로고침·대화상자 sheet 의 답(`noteUserAction`). 페이지
+    /// W9c②: 사용자가 이 탭을 움직인 때 — 페이지 입력 모두(같은 자리 hover·앱이 만든 leave 등은 빼고)·주소창 이동·뒤로·앞으로·새로고침·
+    /// 알림 누름·권한·대화상자 sheet 의 답·끌기·datalist 고르기(`noteUserAction`). 페이지
     /// 입력(`last_user_input_ms`)에 섞지 않는다: 그 값은 제안 목록(W6m②)·다운로드(W10a)의 「사용자가 손댔다」 이기도 해, 주소창 이동으로
     /// 세우면 손대지 않은 새 문서가 목록을 띄울 수 있게 된다(W6m② 적대 리뷰 4 회차가 그래서 둘을 갈랐다).
     user_action_ms: i64 = std.math.minInt(i64) / 2,
+    /// 마지막으로 보낸 포인터 이동 자리 — 같은 자리 hover(수식 키·다시 그리기)는 사용자 입력으로 찍지 않는다(W9c② 적대 리뷰 2 회차).
+    last_move_point: ?ws.message.Point = null,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
     /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
     drag_entered: bool = false,
@@ -1911,8 +1914,26 @@ pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
     if (!s.created or state != .running) return false;
     // W9c② 적대 리뷰 1 회차: 대화상자의 원인을 가르는 사용자 시각은 입력의 종류를 가리지 않는다 — 스크롤·포인터 이동·떼기도 페이지
     // 처리기(scroll·mouseover·mouseup)가 대화상자를 띄운다(전에는 에이전트 것으로 봐 에이전트가 답했다). `last_user_input_ms`(datalist·
-    // 다운로드의 몸짓 판정)는 그대로 둔다.
-    s.user_action_ms = monotonicNow();
+    // 다운로드의 몸짓 판정)는 그대로 둔다. 2 회차: 앱이 스스로 만든 입력은 찍지 않는다 — 수식 키를 누르면 같은 자리로 hover 를 다시
+    // 보내고(터미널에 대문자를 치는 사용자), 창이 키를 잃으면 leave 를, 끌기가 끝나면 capture_lost·조합 취소를 보낸다(그래서 에이전트 자신의
+    // 대화상자가 거절됐다). 포인터 이동은 자리가 바뀐 것만.
+    const user_made = switch (message) {
+        .mouse => |m| switch (m.kind) {
+            .move => blk: {
+                const moved = if (s.last_move_point) |p| p.x != m.point.x or p.y != m.point.y else true;
+                s.last_move_point = m.point;
+                break :blk moved;
+            },
+            .leave => blk: {
+                s.last_move_point = null;
+                break :blk false;
+            },
+            else => true,
+        },
+        .capture_lost, .ime_cancel_composition => false,
+        else => true,
+    };
+    if (user_made) s.user_action_ms = monotonicNow();
     switch (message) {
         .mouse => |m| if (m.kind == .down) {
             s.new_tab_credits.grant(monotonicNow());
@@ -1956,7 +1977,8 @@ pub fn composing(surface_id: u64) bool {
 /// `browser_created` 에서 되살린다(안 그러면 새 브라우저는 포커스 없이 키를 버린다).
 pub fn setFocus(gpa: std.mem.Allocator, surface_id: u64, value: bool, window: usize) void {
     const s = surfaces.getPtr(surface_id) orelse return;
-    s.user_action_ms = monotonicNow(); // focus·blur 처리기의 alert(W9c② 적대 리뷰 1 회차)
+    // 포커스 바뀜은 찍지 않는다 — sheet 가 키를 가져가고·팝업을 앞에 놓고·에이전트가 탭을 닫아도 바뀐다(W9c② 적대 리뷰 2 회차: 에이전트 자신의
+    // 후속 alert 가 거절됐다). 사용자가 다른 곳을 눌러 생긴 blur 의 alert 는 놓친다(문서 — 드물다).
     if (value) {
         s.focus_owner = window;
     } else {
@@ -3158,6 +3180,7 @@ pub fn endDragOut(gpa: std.mem.Allocator, surface_id: u64, drag: u32, point: ws.
     if (d.drag != drag or !d.ready) return false;
     const masked = operation & d.allowed & ws.message.drag_operation_mask;
     const one: u32 = if (masked == 0) 0 else masked & (~masked +% 1);
+    s.user_action_ms = monotonicNow(); // 사용자가 다른 앱에 놓았다 — dragend 처리기의 대화상자(W9c② 적대 리뷰 2 회차)
     dropDragOut(gpa, s);
     send(gpa, .{ .drag_source_end = .{ .browser = surface_id, .drag = drag, .point = point, .operation = one } });
     return true;
@@ -3167,7 +3190,11 @@ pub fn endDragOut(gpa: std.mem.Allocator, surface_id: u64, drag: u32, point: ws.
 fn expireDragOuts(gpa: std.mem.Allocator, now_ms: i64) void {
     for (surfaces.values()) |*s| {
         const d = s.drag_out orelse continue;
-        if (d.ready and !d.taken and now_ms - d.arrived_ms > drag_out_pickup_ms) _ = endDragOut(gpa, s.record.surface_id, d.drag, d.point, 0);
+        if (d.ready and !d.taken and now_ms - d.arrived_ms > drag_out_pickup_ms) {
+            const before = s.user_action_ms; // 아무 창도 가져가지 않아 maru 가 취소한다 — 사용자 동작이 아니다
+            _ = endDragOut(gpa, s.record.surface_id, d.drag, d.point, 0);
+            s.user_action_ms = before;
+        }
     }
 }
 
@@ -6613,8 +6640,8 @@ test "W9c②: agentReplyDialog — 사용자 것은 거절, 에이전트 것은 
     markDialogShown(7, testLastDialog(7).token, 0);
     _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
     // 모호 — 사용자에게 보이거나 도착 뒤 사용자가 손댔으면 거절.
-    s7.agent_input_ms = t + 1_000_000;
-    s7.last_user_input_ms = t + 1_000_001;
+    s7.agent_input_ms = t + 1_000_001; // 에이전트가 더 늦다(사용자가 더 늦으면 사용자 것 — 2 회차)
+    s7.last_user_input_ms = t + 1_000_000;
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .alert, .origin = "", .message = "" } }, t + 1_000_002);
     try std.testing.expectEqual(dialog_cause.Cause.ambiguous, testLastDialog(7).cause);
     s7.user_action_ms = t + 1_000_003;
@@ -6675,29 +6702,28 @@ test "W9c②: 떠나기 확인의 「떠나기」 — 사용자가 이 문서에
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
 }
 
-// ── REVIEW-W9c2-R1 (temporary, not to be committed) ──
-fn reviewSetup(gpa: std.mem.Allocator) !void {
+// ── W9c② 적대 리뷰 1·2 회차 재현 ─────────────────────────────────────────────────────────────────────────────
+fn w9c2ReviewSetup(gpa: std.mem.Allocator) !void {
     state = .running;
     test_record_sends = true;
     try testSurfaces(gpa, &.{7});
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 A: wheel: user scroll -> page confirm, agent hovered 1 s before -> must not be agent-answerable" {
+test "W9c② 적대 리뷰 1 회차 재현 A: 사용자가 스크롤한 뒤 페이지의 confirm 은 1 초 전 에이전트 hover 가 있어도 에이전트가 답하지 못한다" {
     const gpa = std.testing.allocator;
-    try reviewSetup(gpa);
+    try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
     var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
-    noteAgentInput(7); // agent's acting op (e.g. hover) on this tab
+    noteAgentInput(7); // 이 탭에 에이전트의 움직이는 op(hover 등)
     try std.testing.expect(sendInput(gpa, .{ .wheel = .{ .browser = 7, .point = .{ .x = 10, .y = 10 }, .delta_x = 0, .delta_y = -120 } }));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
-    markDialogShown(7, testLastDialog(7).token, 11); // the user sees the sheet
-    std.debug.print("REVIEWR1 A cause={s}\n", .{@tagName(testLastDialog(7).cause)});
+    markDialogShown(7, testLastDialog(7).token, 11); // 사용자가 sheet 를 보고 있다
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 B: notification click -> page confirm -> agent-answerable" {
+test "W9c② 적대 리뷰 1 회차 재현 B: 사용자가 maru 알림을 누른 뒤 페이지의 confirm 은 에이전트가 답하지 못한다" {
     const gpa = std.testing.allocator;
-    try reviewSetup(gpa);
+    try w9c2ReviewSetup(gpa);
     defer {
         shown_notes = [_]?ShownNote{null} ** shown_notes.len;
         testTeardown(gpa);
@@ -6707,51 +6733,201 @@ test "W9c② 적대 리뷰 1 회차 재현 B: notification click -> page confirm
     const note = takeWebNotification(7).?;
     defer note.free(gpa);
     noteAgentInput(7);
-    clickWebNotification(gpa, 7, note.token); // the USER clicks the maru notification
+    clickWebNotification(gpa, 7, note.token); // 사용자가 maru 알림을 누른다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://chat.example", .message = "Join call?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    std.debug.print("REVIEWR1 B cause={s}\n", .{@tagName(testLastDialog(7).cause)});
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 C: permission sheet answer -> page alert/confirm -> agent-answerable" {
+test "W9c② 적대 리뷰 1 회차 재현 C: 사용자가 권한 sheet 에 답한 뒤 페이지의 confirm 은 에이전트가 답하지 못한다" {
     const gpa = std.testing.allocator;
-    try reviewSetup(gpa);
+    try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
     var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
     apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 1, .origin = "https://meet.example", .kinds = ws.message.PermissionKind.notifications.bit() } }, 0);
     const ptoken = testLastDialog(7).token;
     noteAgentInput(7);
-    try std.testing.expect(replyPermission(gpa, 7, ptoken, .accept)); // the USER answers the permission sheet
+    try std.testing.expect(replyPermission(gpa, 7, ptoken, .accept)); // 사용자가 권한 sheet 에 답한다
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "https://meet.example", .message = "Share?" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    std.debug.print("REVIEWR1 C cause={s}\n", .{@tagName(testLastDialog(7).cause)});
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 D: mouse move (hover) -> page confirm -> agent-answerable" {
+test "W9c② 적대 리뷰 1 회차 재현 D: 사용자가 포인터를 옮긴 뒤 페이지의 confirm 은 에이전트가 답하지 못한다" {
     const gpa = std.testing.allocator;
-    try reviewSetup(gpa);
+    try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
     var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
     noteAgentInput(7);
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 5, .y = 5 } } }));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "", .message = "" } }, monotonicNow());
     markDialogShown(7, testLastDialog(7).token, 11);
-    std.debug.print("REVIEWR1 D cause={s}\n", .{@tagName(testLastDialog(7).cause)});
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
 }
 
-test "W9c② 적대 리뷰 1 회차 재현 E: user presses close while the agent's close question is up -> agent can still answer stay and cancel the user's close" {
+test "W9c② 적대 리뷰 1 회차 재현 E: 에이전트가 물은 닫기를 사용자가 ⌘W 로 이어받으면 에이전트는 「머무르기」 로 사용자의 닫기를 무르지 못한다" {
     const gpa = std.testing.allocator;
-    try reviewSetup(gpa);
+    try w9c2ReviewSetup(gpa);
     defer testTeardown(gpa);
     var acc: TestAccess = .{ .granted = 1 << 7, .agent = 1 << 7 };
     try std.testing.expect(askCloseByAgent(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
     try std.testing.expectEqual(CloseAskPhase.asked, closeAskPhase(7));
-    try std.testing.expect(askClose(gpa, 7, 0)); // the USER now chooses close (cmd-W) — "사람이 닫기를 골랐으면 사람의 닫기다"
+    try std.testing.expect(askClose(gpa, 7, 0)); // 이제 사용자가 닫기를 고른다(⌘W) — 사람이 닫기를 골랐으면 사람의 닫기다
     try std.testing.expect(!closeAskedByAgent(7));
-    std.debug.print("REVIEWR1 E cause={s}\n", .{@tagName(testLastDialog(7).cause)});
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
+}
+
+// 창 번호 11 = maru 창. AppKit 이 키를 옮길 때 `syncOsrKeyTarget` 이 부르는 차례 그대로 — 대화상자 sheet 가 붙으면 부모 창이 키를 잃어
+// setFocus(탭, false), sheet 가 끝나면 setFocus(탭, true).
+fn w9c2R2Setup(gpa: std.mem.Allocator) !*Surface {
+    state = .running;
+    test_record_sends = true;
+    try testSurfaces(gpa, &.{ 7, 8 });
+    const s7 = surfaces.getPtr(7).?;
+    setFocus(gpa, 7, true, 11); // 사용자는 1 분 전 이 탭을 눌렀고 에이전트를 지켜본다
+    s7.user_action_ms = monotonicNow() - 60_000;
+    s7.last_user_input_ms = monotonicNow() - 60_000;
+    return s7;
+}
+
+test "W9c② 적대 리뷰 2 회차 재현 A: 포커스 탭에서 에이전트 누름 → confirm 답 → sheet 가 닫혀 포커스가 돌아온 뒤의 후속 alert 는 에이전트가 답한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    _ = try w9c2R2Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    noteAgentInput(7); // 에이전트 click
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
+    markDialogShown(7, testLastDialog(7).token, 11); // tickOsrDialog 가 sheet 를 띄운다(키 대상)
+    setFocus(gpa, 7, false, 11); // sheet 가 키를 가져간다 → 창이 키를 잃는다 → blur(앱이 만든 것)
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access()); // 에이전트가 자기 confirm 에 답한다 — 된다
+    setFocus(gpa, 7, true, 11); // sheet 가 사라진다 → 창이 키를 되찾는다 → focus(앱이 만든 것)
+    // 페이지: if (confirm()) fetch('/delete').then(() => alert('Deleted')) — alert 는 약 100 ms 뒤
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .alert, .origin = "https://a.test", .message = "Deleted" } }, monotonicNow());
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+}
+
+test "W9c② 적대 리뷰 2 회차 재현 B: 같은 흐름에서 alert 가 포커스가 돌아오기 전에 와도(5 초 안에 답한 에이전트) 에이전트가 답한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    _ = try w9c2R2Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    noteAgentInput(7);
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11);
+    setFocus(gpa, 7, false, 11);
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .alert, .origin = "https://a.test", .message = "Deleted" } }, monotonicNow());
+    setFocus(gpa, 7, true, 11); // 포커스는 alert 뒤에 돌아온다
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+}
+
+test "W9c② 적대 리뷰 2 회차 대조 C: 5 초 넘어 답했고 alert 가 포커스보다 먼저 오면 에이전트 것" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R2Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    noteAgentInput(7);
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11);
+    setFocus(gpa, 7, false, 11);
+    s7.user_action_ms -= 6_000; // LLM 에이전트가 6 초 걸려 답했다
+    s7.agent_input_ms -= 6_000;
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .alert, .origin = "https://a.test", .message = "Deleted" } }, monotonicNow());
+    setFocus(gpa, 7, true, 11);
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+}
+
+test "W9c② 적대 리뷰 2 회차 재현 D: 에이전트 누름이 연 앞 팝업으로 maru 가 포커스를 옮겨도 팝업의 alert 는 에이전트가 답한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    _ = try w9c2R2Setup(gpa);
+    testSetPopupFamily(8, 7);
+    var acc: TestAccess = .{ .granted = (1 << 7) | (1 << 8), .agent = 0 };
+    noteAgentInput(7); // 에이전트가 「X 로 로그인」 을 누른다 → window.open
+    // insertNewTab(visible=true)이 팝업을 활성 탭으로 → syncOsrKeyTarget
+    setFocus(gpa, 7, false, 11);
+    setFocus(gpa, 8, true, 11);
+    apply(gpa, .{ .js_dialog = .{ .browser = 8, .request = 1, .kind = .alert, .origin = "https://idp.test", .message = "Signed in" } }, monotonicNow());
+    _ = try agentReplyDialog(gpa, 8, null, true, "", acc.access());
+}
+
+test "W9c② 적대 리뷰 2 회차 재현 E: 터미널에 대문자를 치는 동안의 같은 자리 hover 는 사용자 입력이 아니다 — 에이전트의 confirm 은 에이전트가 답한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R2Setup(gpa);
+    setFocus(gpa, 7, false, 11); // 키 대상은 터미널 pane 이다
+    s7.user_action_ms = monotonicNow() - 60_000;
+    s7.last_move_point = .{ .x = 40, .y = 40 }; // 포인터는 1 분 전 그 자리에 와서 멈춰 있다
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    noteAgentInput(7);
+    // 터미널에 치는 동안 Shift 누르고 뗌 — MaruAppHost.swift flagsChanged → handleModifierHover → osrHover → 같은 자리 move
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 40, .y = 40 } } }));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Proceed?" } }, monotonicNow());
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 40, .y = 40 } } }));
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+}
+
+test "W9c② 적대 리뷰 2 회차 재현 F: 사용자가 페이지 항목을 다른 앱에 놓은 뒤 dragend 의 confirm 은 에이전트가 답하지 못한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R2Setup(gpa);
+    setFocus(gpa, 7, false, 11);
+    s7.user_action_ms = monotonicNow() - 7_000; // 7 초 전 누르고 끌기 시작(OS 끌기 세션 전 마지막 sendInput)
+    s7.last_user_input_ms = monotonicNow() - 7_000;
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 3, .allowed = 1 | 16, .point = .{ .x = 4, .y = 5 } } }, monotonicNow());
+    _ = takeDragOut(7).?; // 창이 macOS 끌기 세션을 시작했다
+    noteAgentInput(7); // 놓기 1 초 전 에이전트의 움직이는 op(scroll 등)
+    try std.testing.expect(endDragOut(gpa, 7, 3, .{ .x = 900, .y = 5 }, 1)); // 사용자가 Finder 에 놓는다
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://files.test", .message = "Remove the original?" } }, monotonicNow());
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 2 회차: 사용자 시각은 사용자가 만든 것만 — 끌기·datalist 고르기·다른 앱에 놓기는 찍고, 포커스 바뀜·같은 자리 hover·leave·capture_lost·끌기 만료는 찍지 않는다" {
+    const gpa = std.testing.allocator;
+    try w9c2ReviewSetup(gpa);
+    defer testTeardown(gpa);
+    const s = surfaces.getPtr(7).?;
+    const unset: i64 = std.math.minInt(i64) / 2;
+    const at: ws.message.Point = .{ .x = 3, .y = 4 };
+    // 앱이 만드는 것 — 찍지 않는다.
+    s.user_action_ms = unset;
+    setFocus(gpa, 7, true, 11);
+    setFocus(gpa, 7, false, 11);
+    try std.testing.expectEqual(unset, s.user_action_ms);
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = at } }));
+    s.user_action_ms = unset;
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = at } })); // 수식 키의 같은 자리 hover
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .leave, .point = at } }));
+    try std.testing.expect(sendInput(gpa, .{ .capture_lost = 7 }));
+    try std.testing.expectEqual(unset, s.user_action_ms);
+    // 자리가 바뀐 이동은 사용자 것.
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 9, .y = 9 } } }));
+    try std.testing.expect(s.user_action_ms != unset);
+    // 끌어 들이기·끌며 지나기.
+    s.user_action_ms = unset;
+    try std.testing.expect(dragEnter(gpa, 7, .{ .paths = &.{"/a"} }, at, .{}, 1));
+    try std.testing.expect(s.user_action_ms != unset);
+    s.user_action_ms = unset;
+    dragOver(gpa, 7, at, .{}, 1);
+    try std.testing.expect(s.user_action_ms != unset);
+    // datalist 고르기.
+    s.last_user_input_ms = monotonicNow();
+    apply(gpa, .{ .datalist_show = .{ .browser = 7, .list = 2, .field = .{ .x = 0, .y = 0, .width = 300, .height = 40 }, .count = 1, .items = "\x00\x05apple\x00\x00" } }, 0);
+    s.user_action_ms = unset;
+    try std.testing.expect(datalistPick(gpa, 7, 2, 0));
+    try std.testing.expect(s.user_action_ms != unset);
+    // 다른 앱에 놓기는 찍고, 아무 창도 가져가지 않아 maru 가 끝낸 끌기는 찍지 않는다.
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 3, .allowed = 1, .point = .{ .x = 4, .y = 5 } } }, 100);
+    _ = takeDragOut(7);
+    s.user_action_ms = unset;
+    try std.testing.expect(endDragOut(gpa, 7, 3, .{ .x = 1, .y = 2 }, 1));
+    try std.testing.expect(s.user_action_ms != unset);
+    apply(gpa, .{ .drag_out = .{ .browser = 7, .drag = 4, .allowed = 1, .point = .{ .x = 9, .y = 8 } } }, 1_000);
+    s.user_action_ms = unset;
+    expireDragOuts(gpa, 1_000 + drag_out_pickup_ms + 1);
+    try std.testing.expectEqual(unset, s.user_action_ms);
 }

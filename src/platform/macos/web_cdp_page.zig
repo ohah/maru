@@ -22,6 +22,9 @@ pub const Kind = enum { navigate, get_url, screenshot };
 pub const navigate_wait_ms: i64 = 25_000;
 /// navigate 의 끝을 보는 간격.
 pub const navigate_poll_ms: u32 = 50;
+/// 보낸 이동이 이만큼 안에 불러오기를 시작하지 않으면 Chromium 이 버린 것이다(불러오는 중은 보낸 뒤 수 ms 에 온다 — 계획 공격 3 회차).
+pub const navigate_start_wait_ms: i64 = 3_000;
+pub const not_started_reason = "Chromium did not start loading the address (check the host and port)";
 
 /// 스크린샷 rect·출력 폭·높이의 상한(CSS px) — WebKit 의 `maxSnapshotPt`(8000 pt)와 같은 뜻(거대 rect·scale 이 픽셀 버퍼를 터뜨리지 않게).
 /// **높이도** 접는다(적대 리뷰 1 회차: 1×400 에 scale 8000 은 폭만 접혀 8000×3,200,000 px 를 청해 Chromium 엔진 전체가 Skia FATAL 로 죽었다 —
@@ -35,12 +38,14 @@ pub const max_url_bytes: usize = 32 * 1024;
 pub const leave_page_reason = "the page asks before leaving (unsaved input) — the user decides in that tab; the navigation continues if they agree";
 pub const outside_reason = "the rect is outside the visible part of the page";
 pub const too_large_reason = "the screenshot is too large — use a smaller rect or scale";
+pub const under_pixel_reason = "the screenshot would be smaller than one pixel — use a larger rect or scale";
 
 pub const Op = struct {
     kind: Kind,
     stage: enum { start, metrics, capture, waiting } = .start,
-    /// 부른 쪽이 넣는 지금 시각(start·wake 전에).
+    /// 부른 쪽이 넣는 지금 시각(start·wake 전에)과 시작한 시각.
     now_ms: i64 = 0,
+    start_ms: i64 = 0,
     /// navigate — 끝을 기다리는 시각(부른 쪽이 요청을 받은 때 + `navigate_wait_ms`)과 지금 상태(부른 쪽이 wake 전에 넣는다 — 탭이
     /// 사라졌으면 null).
     deadline_ms: i64 = 0,
@@ -52,7 +57,9 @@ pub const Op = struct {
     rect: ?[4]f64 = null,
     scale: ?f64 = null,
 
-    pub const NavState = struct { done: bool = false, loaded: bool = false, before_unload: bool = false };
+    /// `started` — 이 이동 뒤 불러오기가 시작됐다(불러오는 중·새 문서). Chromium 은 읽지 못하는 주소(포트 99999·`%zz` 호스트)를 말없이 버린다 —
+    /// 시작하지 않으면 `navigate_start_wait_ms` 뒤 실패(전에는 25 초 뒤 ok, 적대 리뷰 2 회차).
+    pub const NavState = struct { done: bool = false, loaded: bool = false, before_unload: bool = false, started: bool = true };
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.target) |t| gpa.free(t);
@@ -99,6 +106,7 @@ pub const Op = struct {
         switch (self.kind) {
             .navigate => {
                 self.stage = .waiting;
+                self.start_ms = self.now_ms;
                 return .{ .sleep = navigate_poll_ms };
             },
             .get_url => return done(gpa, .success, self.url),
@@ -113,6 +121,7 @@ pub const Op = struct {
         const st = self.nav orelse return done(gpa, .failed, "the tab closed");
         if (st.before_unload) return done(gpa, .failed, leave_page_reason);
         if (st.done) return done(gpa, .success, if (st.loaded) "true" else "false");
+        if (!st.started and self.now_ms - self.start_ms >= navigate_start_wait_ms) return done(gpa, .failed, not_started_reason);
         if (self.now_ms >= self.deadline_ms) return done(gpa, .success, "false");
         return .{ .sleep = navigate_poll_ms };
     }
@@ -127,10 +136,12 @@ pub const Op = struct {
         };
         switch (self.stage) {
             .metrics => {
-                const clip = self.clipFrom(gpa, body) catch |e| return done(gpa, .failed, switch (e) {
-                    error.Outside => outside_reason,
-                    else => "the page size could not be read",
-                });
+                const clip = self.clipFrom(gpa, body) catch |e| return switch (e) {
+                    error.Outside => done(gpa, .failed, outside_reason),
+                    // Chromium 은 1 px 아래의 clip 을 버리고 화면 전체를 찍었다(적대 리뷰 2 회차).
+                    error.UnderPixel => done(gpa, .invalid_params, under_pixel_reason),
+                    else => done(gpa, .failed, "the page size could not be read"),
+                };
                 self.stage = .capture;
                 const params = if (clip) |c|
                     try std.fmt.allocPrint(gpa, "{{\"format\":\"png\",\"clip\":{{\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},\"scale\":{d}}}}}", .{ c[0], c[1], c[2], c[3], c[4] })
@@ -169,6 +180,7 @@ pub const Op = struct {
         scale = @min(scale, max_snapshot_css / w, max_snapshot_css / h);
         const pixels = w * h * scale * scale * dpr * dpr;
         if (pixels > max_snapshot_pixels) scale *= @sqrt(max_snapshot_pixels / pixels);
+        if (w * scale * dpr < 1 or h * scale * dpr < 1) return error.UnderPixel;
         return .{ x0 + vp.pageX, y0 + vp.pageY, w, h, scale };
     }
 };
@@ -184,7 +196,19 @@ pub fn navigableUrl(url: []const u8) bool {
     const scheme = url[0..colon];
     if (!(std.ascii.eqlIgnoreCase(scheme, "http") or std.ascii.eqlIgnoreCase(scheme, "https"))) return false;
     // 호스트가 있어야 한다(`http:foo` 는 Chromium 이 고쳐 읽는다 — 받지 않는다).
-    return std.mem.startsWith(u8, url[colon..], "://") and url.len > colon + 3;
+    if (!(std.mem.startsWith(u8, url[colon..], "://") and url.len > colon + 3)) return false;
+    // 포트가 범위를 넘는 등 읽을 수 없는 주소 — Chromium 은 말없이 버렸다(적대 리뷰 2 회차: 25 초 뒤 ok). 빈 포트(`host:/`)는 Chromium 이
+    // 고쳐 읽는다 — 그것만 빼고 읽는다(적대 리뷰 3 회차).
+    var buf: [max_url_bytes]u8 = undefined;
+    const auth_start = colon + 3;
+    const auth_end = auth_start + (std.mem.indexOfAny(u8, url[auth_start..], "/?#") orelse url.len - auth_start);
+    const checked = if (auth_end > auth_start and url[auth_end - 1] == ':') blk: {
+        @memcpy(buf[0 .. auth_end - 1], url[0 .. auth_end - 1]);
+        @memcpy(buf[auth_end - 1 .. url.len - 1], url[auth_end..]);
+        break :blk buf[0 .. url.len - 1];
+    } else url;
+    const uri = std.Uri.parse(checked) catch return false;
+    return uri.host != null;
 }
 
 /// `{"data":"<base64>"}` → PNG 바이트.
@@ -381,4 +405,35 @@ test "W9a getUrl: 부른 쪽이 넣은 지금 주소" {
     defer op.deinit(gpa);
     op.url = "https://a.test/x";
     try expectDone(try op.start(gpa), .success, "https://a.test/x");
+}
+
+test "W9a 적대 리뷰 2 회차 재현: Chromium 이 읽지 못하는 주소(포트 99999)는 거절, 1 px 아래가 될 스크린샷은 invalid_params(전에는 화면 전체가 왔다)" {
+    try testing.expect(!navigableUrl("http://127.0.0.1:99999/"));
+    try testing.expect(navigableUrl("http://127.0.0.1:65535/"));
+    const gpa = testing.allocator;
+    const p = try shotParams("{\"rect\":{\"x\":10,\"y\":10,\"width\":5,\"height\":5},\"scale\":0.001}", metrics_scrolled);
+    defer gpa.free(p);
+    try testing.expectEqualStrings(under_pixel_reason, p);
+}
+
+test "W9a 적대 리뷰 2 회차: 보낸 이동이 3 초 안에 시작하지 않으면 실패(Chromium 이 버린 주소)" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .navigate, "http://a.test/");
+    defer op.deinit(gpa);
+    op.deadline_ms = 25_000;
+    op.now_ms = 100;
+    _ = try op.start(gpa);
+    op.nav = .{ .started = false };
+    op.now_ms = 100 + navigate_start_wait_ms - 1;
+    try testing.expect((try op.wake(gpa)) == .sleep);
+    op.now_ms = 100 + navigate_start_wait_ms;
+    try expectDone(try op.wake(gpa), .failed, not_started_reason);
+    op.nav = .{ .started = true };
+    try testing.expect((try op.wake(gpa)) == .sleep);
+}
+
+test "W9a 적대 리뷰 3 회차 재현: Chromium 이 고쳐 읽는 빈 포트 주소는 받는다" {
+    try testing.expect(navigableUrl("http://example.com:/"));
+    try testing.expect(navigableUrl("https://example.com:/a?b#c"));
+    try testing.expect(!navigableUrl("http://example.com:99999/"));
 }

@@ -1311,7 +1311,11 @@ pub fn serializeExecuteScriptScriptError(gpa: std.mem.Allocator, request_bytes: 
 
 fn escapedJsonStringBytes(value: []const u8) usize {
     var total: usize = 2; // surrounding quotes
-    for (value) |byte| total += if (byte < 0x20) 6 else if (byte == '"' or byte == '\\') 2 else 1;
+    // \b \t \n \f \r 는 2 바이트(WebKit `escapedDiagnostic`·Zig 쓰개와 같다 — 6 으로 세면 상한까지 자른 여러 줄 메시지가 폴백으로 바뀌었다, W9a 적대 리뷰 2 회차).
+    for (value) |byte| total += switch (byte) {
+        '"', '\\', 0x08, 0x09, 0x0a, 0x0c, 0x0d => 2,
+        else => if (byte < 0x20) 6 else 1,
+    };
     return total;
 }
 
@@ -4543,4 +4547,19 @@ test "W9a: Chromium 탭의 navigate 는 loaded 를 싣고, WebKit 의 빈 결과
     defer testing.allocator.free(resp);
     try testing.expectEqualStrings(cases[1].want, resp);
     try testing.expect(engineSupports(.chromium, .navigate) and engineSupports(.chromium, .get_url) and engineSupports(.chromium, .screenshot));
+}
+
+test "W9a 적대 리뷰 2 회차 재현: 진단 메시지의 \\n·\\t 는 2 바이트로 센다(WebKit escapedDiagnostic·Zig 쓰개와 같다) — 상한까지 자른 여러 줄 메시지가 폴백으로 바뀌었다" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":1,\"script\":\"x\"}}";
+    var msg: std.ArrayList(u8) = .empty;
+    defer msg.deinit(testing.allocator);
+    while (msg.items.len < 16 * 1024 - 2) try msg.appendSlice(testing.allocator, "\n");
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    try s.write(.{ .kind = "execution", .name = "Error", .message = msg.items[0 .. (16 * 1024) / 2 - 1], .stack = "", .diagnostics_truncated = true });
+    const wire = try serializeExecuteScriptScriptError(testing.allocator, req, aw.written());
+    defer testing.allocator.free(wire);
+    try testing.expect(std.mem.indexOf(u8, wire, "\"name\":\"Error\"") != null);
+    try testing.expect(std.mem.indexOf(u8, wire, "executeScript failed") == null);
 }

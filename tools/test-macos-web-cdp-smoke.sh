@@ -639,6 +639,16 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser exec --surface "\$nv" 'document.getElementById("p").textContent' > "\$out/ex-csp-ok" 2>&1; echo "rc=\$?" >> "\$out/ex-csp-ok"
 "\$cli" browser exec --surface "\$nv" 'new Function("return 1")()' > "\$out/ex-csp-eval" 2>&1; echo "rc=\$?" >> "\$out/ex-csp-eval"
 "\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/w9a.html?back2" > "\$out/nv-back2" 2>&1
+# 적대 리뷰 2 회차: 멈추지 않는 스크립트는 시한(-32004) 뒤 멈춘다 — 같은 탭의 다음 exec 이 답한다(전에는 렌더러가 100 % 로 계속 돌아 뒤 요청이 모두 시한).
+# V8 이 값으로 옮기지 못하는 던진 값(자기를 가리키는 Error)도 이름·메시지, 여러 줄 긴 메시지도 그대로. 포트가 범위를 넘는 주소는 곧 거절.
+"\$cli" browser exec --surface "\$nv" '(()=>{while(true){}})()' > "\$out/r2-loop" 2>&1; echo "rc=\$?" >> "\$out/r2-loop"
+"\$cli" browser exec --surface "\$nv" '6 * 7' > "\$out/r2-after" 2>&1; echo "rc=\$?" >> "\$out/r2-after"
+# 적대 리뷰 3 회차: 던진 값의 이름을 읽는 getter 가 멈추지 않는다 — 그것도 시한 뒤 멈추고 탭이 답한다.
+"\$cli" browser exec --surface "\$nv" '(()=>{throw {get name(){while(true){}}}})()' > "\$out/r3-getter" 2>&1; echo "rc=\$?" >> "\$out/r3-getter"
+"\$cli" browser exec --surface "\$nv" '6 * 7' > "\$out/r3-after" 2>&1; echo "rc=\$?" >> "\$out/r3-after"
+"\$cli" browser exec --surface "\$nv" '(()=>{const e=new Error("selfref"); e.self=e; e.w=window; throw e})()' > "\$out/r2-selfref" 2>&1; echo "rc=\$?" >> "\$out/r2-selfref"
+"\$cli" browser exec --surface "\$nv" '(()=>{throw new Error("line1\\n"+"x".repeat(20000))})()' > "\$out/r2-long" 2>&1; echo "rc=\$?" >> "\$out/r2-long"
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:99999/" > "\$out/r2-port" 2>&1; echo "rc=\$?" >> "\$out/r2-port"
 # 적대 리뷰 1 회차: 좁은 rect 에 큰 scale(1×400, 8000)이 엔진을 죽였다 — 접혀서 찍히고 엔진은 산다. wire 가 거절하는 주소(탭 문자)는 곧 invalid_params.
 "\$cli" browser screenshot --surface "\$nv" --rect 0,0,1,400 --scale 8000 --out "\$out/r1-tall.png" > "\$out/r1-tall" 2>&1; echo "rc=\$?" >> "\$out/r1-tall"
 "\$cli" browser get-url --surface "\$nv" > "\$out/r1-alive" 2>&1; echo "rc=\$?" >> "\$out/r1-alive"
@@ -829,6 +839,13 @@ grep -q '^rc=0$' "$out/r1-tall" && tall=$(pngred "$out/r1-tall.png" 2>&1) && gre
 set -- $tall; [ "$2" -le 8000 ] && [ "$1" -le 8000 ] || fail "the tall screenshot was not folded to 8000 px ($tall)"
 grep -q '^rc=1$' "$out/r1-tab" && grep -q 'http, https or about:blank' "$out/r1-tab" && [ "$(cat "$out/r1-tab-secs")" -le 3 ] || fail "a URL with a control character was not refused at once ($(cat "$out/r1-tab-secs")s · $(tr '\n' ' ' < "$out/r1-tab"))"
 echo "PASS w9a-r1: a narrow rect with a huge scale is folded ($tall) and the engine stays alive, a URL with a control character is refused at once"
+# 적대 리뷰 2 회차
+grep -q '(-32004)' "$out/r2-loop" && grep -q '^42$' "$out/r2-after" || fail "a script that never ends was not stopped after its timeout — the next exec on that tab did not answer ($(tr '\n' ' ' < "$out/r2-loop") · $(tr '\n' ' ' < "$out/r2-after"))"
+grep -q '^script error (execution): Error: selfref$' "$out/r2-selfref" || fail "an Error V8 cannot copy by value lost its name and message ($(tr '\n' ' ' < "$out/r2-selfref"))"
+grep -q '^script error (execution): Error: line1' "$out/r2-long" || fail "a long multi-line error message fell back to the fixed diagnostic ($(tr '\n' ' ' < "$out/r2-long" | cut -c1-300))"
+grep -q '^rc=1$' "$out/r2-port" && grep -q 'http, https or about:blank' "$out/r2-port" || fail "an address with an out-of-range port was not refused at once ($(tr '\n' ' ' < "$out/r2-port"))"
+grep -q '(-32004)' "$out/r3-getter" && grep -q '^42$' "$out/r3-after" || fail "a thrown value whose name getter never ends was not stopped — the next exec on that tab did not answer ($(tr '\n' ' ' < "$out/r3-getter") · $(tr '\n' ' ' < "$out/r3-after"))"
+echo "PASS w9a-r2: a script that never ends (and a thrown value whose getter never ends) is stopped after its timeout and the tab answers the next exec, an Error V8 cannot copy keeps its name and message, a long multi-line message survives, an out-of-range port is refused"
 echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

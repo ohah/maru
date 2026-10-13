@@ -109,6 +109,7 @@ pub const semantic_client = @import("semantic.zig");
 const line_ops = maru.session.editor.line_ops;
 const clipboard_ops = maru.session.editor.clipboard_ops;
 const typing_ops = maru.session.editor.typing_ops;
+const literals = maru.session.editor.literals;
 const edit_ops = maru.session.editor.edit_ops;
 const cursor_ops = maru.session.editor.cursor_ops;
 pub const fold_lsp_client = @import("fold_lsp.zig");
@@ -8489,15 +8490,26 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     };
     // **무엇을 넣을지는 L2 `typing_ops.planTyping` 이 정한다**(§3.7 타이핑 보조 × §9.1 — 쌍 넣기·type-over·감싸기,
     // 문서 순서, 커서마다 첫 변경의 인덱스). 보조는 재변환(IME)이 아닐 때만 본다.
-    // 닫는 괄호 내어쓰기(계획 editor-typing-rules TR2) — 재변환(IME)이 아닐 때, 괄호를 아는 문법에서만.
-    const reindent: ?typing_ops.Reindent = if (replacement == null) (if (bracketsOf(term)) |b| .{
+    // 언어 문맥(계획 editor-typing-rules TR2~TR4 — 닫는 괄호·낱말 내어쓰기, 따옴표 자동 닫기의 문자열·주석 판정) — 재변환(IME)이 아닐 때,
+    // 괄호를 아는 문법에서만. 트리 조각은 보조가 보는 한 글자 입력일 때만 뽑는다 — 첫 커서의 줄 머리부터(닫는 괄호면 짝 찾기 상한만큼 더 위).
+    const brackets = if (replacement == null) bracketsOf(term) else null;
+    const typing_spans: ?[]literals.Span = if (brackets != null and text.len == 1 and edit_items.len > 0) blk: {
+        const lines = doc.file.lines;
+        const first = @min(edit_items[0].start(), doc.file.content.len);
+        const head = if (lines.line(lines.lineAt(first))) |l| l.start else first;
+        const lo = if (isCloserIn(brackets.?, text[0])) head -| typing_ops.reindent_scan_limit else head;
+        break :blk treeLiterals(self, term, lo, edit_items[edit_items.len - 1].end() + 1);
+    } else null;
+    defer if (typing_spans) |s| self.allocator.free(s);
+    const typing_ctx: ?typing_ops.Context = if (brackets) |b| .{
         .lines = doc.file.lines,
         .brackets = b,
         .grammar = term.rt.editor_grammar,
         .unit = guides_client.editUnit(term),
         .tab_width = term.rt.editor_tab_width,
-    } else null) else null;
-    var typing = typing_ops.planTyping(self.allocator, doc.file.content, edit_items, text, replacement == null, reindent) catch return false;
+        .literal_spans = typing_spans,
+    } else null;
+    var typing = typing_ops.planTyping(self.allocator, doc.file.content, edit_items, text, replacement == null, typing_ctx) catch return false;
     defer typing.deinit(self.allocator);
     const ranges = &typing.changes;
     // **type-over만 있었으면 문서는 안 바뀐다** — caret만 한 칸 넘기고 끝낸다(§3.7).
@@ -9281,10 +9293,63 @@ pub fn insertNewlineKeepingIndent(self: *AppSession, term: *Term) bool {
     const doc = lineOpDoc(term) orelse return insertText(self, term, "\n");
     const snap = selectionsForEdit(self, term) orelse return insertText(self, term, "\n");
     defer self.allocator.free(snap.items);
-    var plan = (line_ops.planNewline(self.allocator, doc.file.content, doc.file.lines, snap.items, enterContext(term)) catch return false) orelse
+    // 구문 트리가 답한 문자열·주석 조각(계획 editor-typing-rules TR4) — 첫 커서의 줄 머리부터 마지막 커서까지.
+    var ctx = enterContext(term);
+    var spans: ?[]literals.Span = null;
+    defer if (spans) |s| self.allocator.free(s);
+    if (ctx) |*c| if (snap.items.len > 0) {
+        const lines = doc.file.lines;
+        const first = @min(snap.items[0].start(), doc.file.content.len);
+        const head = if (lines.line(lines.lineAt(first))) |l| l.start else first;
+        spans = treeLiterals(self, term, head, snap.items[snap.items.len - 1].end() + 1);
+        c.literal_spans = spans;
+    };
+    var plan = (line_ops.planNewline(self.allocator, doc.file.content, doc.file.lines, snap.items, ctx) catch return false) orelse
         return insertText(self, term, "\n");
     defer plan.deinit(self.allocator);
     return applyLineEdit(self, term, plan.changes.items, plan.after);
+}
+
+/// 닫는 괄호인가 — 괄호 쌍(`"()[]{}"` — 여는 것·닫는 것을 번갈아)의 홀수 자리.
+fn isCloserIn(brackets: []const u8, b: u8) bool {
+    var k: usize = 1;
+    while (k < brackets.len) : (k += 2) if (brackets[k] == b) return true;
+    return false;
+}
+
+/// 문자열·주석 조각을 뽑는 범위의 상한(계획 editor-typing-rules TR4) — 커서가 문서 곳곳에 흩어진 입력 한 번이 문서 전체를 쿼리하지 않게.
+/// 넘으면 트리 없이(줄 스캐너로) 간다.
+const literal_window_limit: usize = 1 << 20;
+
+/// 구문 트리가 **신선하면** `[lo, hi)` 에 닿는 문자열·주석 조각(계획 editor-typing-rules TR4 — 하이라이트 capture 를 `literals.flatten` 으로
+/// 편다, 호출자가 해제한다). 트리가 없거나 낡았으면(처음 여는 큰 문서의 예산 파싱이 안 끝났다 — 편집은 `onEditSpan` 이 끝까지 다시 파므로
+/// 그 뒤로는 늘 신선하다) `null` — 소비처는 줄 스캐너로 간다. 범위가 상한을 넘어도 `null`. 쿼리가 할당에 실패하면 거기까지의 조각이다(색과
+/// 같은 저하 — `spansForRange`).
+fn treeLiterals(self: *AppSession, term: *Term, lo: usize, hi: usize) ?[]literals.Span {
+    const st = &term.rt.editor_syntax;
+    if (st.pending) return null;
+    const p = if (st.provider) |*p| p else return null;
+    if (p.tree == null) return null;
+    const content = (term.rt.editorDocument().opened orelse return null).file.content;
+    const end = @min(hi, content.len);
+    if (end <= lo or end - lo > literal_window_limit) return null;
+    const lo32 = std.math.cast(u32, lo) orelse return null;
+    const end32 = std.math.cast(u32, end) orelse return null;
+    var found: std.ArrayList(syntax_mod.Span) = .empty;
+    defer found.deinit(self.allocator);
+    p.spansForRange(self.allocator, content, .{ .start = lo32, .end = end32 }, &found);
+    const caps = self.allocator.alloc(literals.Capture, found.items.len) catch return null;
+    defer self.allocator.free(caps);
+    for (found.items, caps) |sp, *c| c.* = .{ .start = sp.start, .end = sp.end, .name = sp.capture };
+    var out: std.ArrayList(literals.Span) = .empty;
+    literals.flatten(self.allocator, caps, &out) catch {
+        out.deinit(self.allocator);
+        return null;
+    };
+    return out.toOwnedSlice(self.allocator) catch {
+        out.deinit(self.allocator);
+        return null;
+    };
 }
 
 /// 그 문서의 괄호 쌍 — **괄호 색칠의 규칙**(`bracketRuleFor().chars`)과 같은 집합이다(두 벌이면 한쪽만 낡는다 — 계획 editor-typing-rules
@@ -41281,6 +41346,61 @@ test "INDB4 괄호 Enter·닫는 괄호 내어쓰기 — 실제 키로: 자동 �
     n.rt.editor_selection = editor_selection.Selection.at(3);
     try pressKey(&fx, .enter, .{});
     try testing.expectEqualStrings("a {\n}\n", content(n));
+}
+
+test "INDL1 구문 트리 문맥 — 실제 키로: 문자열·주석 안 따옴표는 안 닫고(주석 안 `\"` 는 닫는다), 정규식 안 `{` 뒤·여러 줄 문자열 안 Enter 는 들여쓰지 않고, 위 줄 문자열 안 `{` 를 건너 `}` 를 짝 줄로; 트리가 낡았으면 종전 (§3.7·§3.9a, 계획 editor-typing-rules TR4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    // 트리를 끝까지 판다(예산 없이 — 시간에 안 기댄다). `fresh` 가 거짓이면 「처음 여는 큰 문서의 파싱이 아직 안 끝났다」로 둔다 — 그 상태는
+    // 다음 편집(`onEditSpan`)이 푼다. 장면마다 새 문서다.
+    const open = struct {
+        fn f(fx_: *PaneFixture, a: std.mem.Allocator, name: []const u8, src: []const u8, fresh: bool) !*Term {
+            const t = try undoFixture(fx_, a, name, src);
+            t.rt.editor_tab_width = 4;
+            const d = t.rt.editorDocument().opened orelse return error.NoDoc;
+            t.rt.editor_syntax.deinit(a);
+            t.rt.editor_syntax = syntax_color.openParsedBudgeted(d.file.content, t.rt.editor_grammar, 0);
+            if (t.rt.editor_syntax.provider == null or t.rt.editor_syntax.pending) return error.NoTree;
+            if (!fresh) t.rt.editor_syntax.pending = true;
+            return t;
+        }
+    }.f;
+    for ([_]bool{ true, false }) |fresh| {
+        // ⑴ 문자열 안 `'` — 트리가 있으면 평범하게, 없으면 쌍.
+        const s = try open(&fx, allocator, if (fresh) "indl1s.ts" else "indl1s_.ts", "  a();\nconst s = \"x  y\";\n", fresh);
+        s.rt.editor_selection = editor_selection.Selection.at(20); // `"x |␣y"`
+        try testing.expect(insertText(fx.session, s, "'"));
+        try testing.expectEqualStrings(if (fresh) "  a();\nconst s = \"x ' y\";\n" else "  a();\nconst s = \"x '' y\";\n", content(s));
+        // ⑵ 정규식 `/\{/` 뒤 Enter — 트리가 있으면 그대로(종전 경로), 없으면 한 단계(스캐너가 `{` 를 센다).
+        const r = try open(&fx, allocator, if (fresh) "indl1r.ts" else "indl1r_.ts", "  a();\nconst re = /\\{/;\n", fresh);
+        r.rt.editor_selection = editor_selection.Selection.at(23);
+        try pressKey(&fx, .enter, .{});
+        try testing.expectEqualStrings(if (fresh) "  a();\nconst re = /\\{/;\n\n" else "  a();\nconst re = /\\{/;\n  \n", content(r));
+        // ⑶ 여러 줄 템플릿 문자열의 둘째 줄 `  b {|` 뒤 Enter — 트리가 있으면 앞 공백만, 없으면 한 단계 더.
+        const m = try open(&fx, allocator, if (fresh) "indl1m.ts" else "indl1m_.ts", "  a();\ns = `\n  b {\n`;\n", fresh);
+        m.rt.editor_selection = editor_selection.Selection.at(18);
+        try pressKey(&fx, .enter, .{});
+        try testing.expectEqualStrings(if (fresh) "  a();\ns = `\n  b {\n  \n`;\n" else "  a();\ns = `\n  b {\n    \n`;\n", content(m));
+        // ⑷ 위 줄 문자열 안 `{` — 트리가 있으면 건너 `f() {` 줄로 내어쓰고, 없으면 그 `{` 가 짝이라 그대로.
+        const c = try open(&fx, allocator, if (fresh) "indl1c.ts" else "indl1c_.ts", "f() {\n  s = \"{\";\n  \n}\n", fresh);
+        c.rt.editor_selection = editor_selection.Selection.at(19);
+        try testing.expect(insertText(fx.session, c, "}"));
+        try testing.expectEqualStrings(if (fresh) "f() {\n  s = \"{\";\n}\n}\n" else "f() {\n  s = \"{\";\n  }\n}\n", content(c));
+    }
+    // ⑸ 주석 안 — `'` 는 평범하게, `"` 는 쌍(VS Code 와 같다). 편집 뒤에도 트리는 신선하다(`onEditSpan` 이 끝까지 다시 판다).
+    const k = try open(&fx, allocator, "indl1k.ts", "  a();\n// say \n", true);
+    k.rt.editor_selection = editor_selection.Selection.at(14);
+    try testing.expect(insertText(fx.session, k, "'"));
+    try testing.expect(insertText(fx.session, k, " "));
+    try testing.expect(insertText(fx.session, k, "\""));
+    try testing.expectEqualStrings("  a();\n// say ' \"\"\n", content(k));
 }
 
 test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {

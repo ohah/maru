@@ -16,6 +16,7 @@ const line_index = @import("../line_index.zig");
 const selection = @import("../selection.zig");
 const indent_guides = @import("../indent_guides.zig");
 const enter_rules = @import("../enter_rules.zig");
+const literals = @import("../literals.zig");
 const case = @import("../../../terminal/selection.zig");
 
 const Change = delta.Change;
@@ -398,6 +399,9 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
     plan.after = after;
     var grown: i64 = 0;
     var any = false;
+    // 줄 머리의 코드 사본(TR4 — 트리가 답했을 때만) — 커서마다 다시 쓴다.
+    var scratch: std.ArrayList(u8) = .empty;
+    defer scratch.deinit(allocator);
     for (after, 0..) |*sel, idx| {
         const s_off = @min(sel.start(), content.len);
         var e_off = @min(sel.end(), content.len);
@@ -411,7 +415,12 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
         const line_end = @max(line.contentEnd(), e_off);
         const rest = content[e_off..line_end];
         const prev: ?[]const u8 = if (ln == 0) null else if (lines.line(ln - 1)) |pl| content[pl.start..pl.contentEnd()] else null;
-        const act: enter_rules.Action = if (ctx) |c| enter_rules.decide(c, head, rest, prev) else .{};
+        var tree: ?enter_rules.Tree = null;
+        if (ctx) |c| if (c.literal_spans) |ls| {
+            try scratch.resize(allocator, head.len);
+            tree = .{ .caret = literals.at(ls, content, s_off), .code = literals.blank(ls, line.start, head, scratch.items) };
+        };
+        const act: enter_rules.Action = if (ctx) |c| enter_rules.decideWith(c, head, rest, prev, tree) else .{};
         // 정렬 공백 빼기(블록 주석이 끝난 줄) — 들여쓰기 끝이 공백일 때만.
         var base = indent;
         if (act.remove > 0 and base.len >= act.remove and std.mem.allEqual(u8, base[base.len - act.remove ..], ' ')) base = base[0 .. base.len - act.remove];
@@ -804,5 +813,38 @@ test "INDB2 planNewline 괄호 Enter — 짝 사이는 가운데 줄을 들여�
         const t = try applyPlan(allocator, "\t{}\n", plan);
         defer allocator.free(t);
         try testing.expectEqualStrings("\t{\n\t\t\n\t}\n", t);
+    }
+}
+
+test "INDL3 planNewline × 구문 트리 문맥 — 정규식 안 괄호는 안 세고, 여러 줄 문자열 안은 들여쓰지 않으며, 줄 끝 주석을 지운 코드로 Python `:` 를 보고, 주석 안 블록 주석 이어쓰기는 그대로 (계획 editor-typing-rules TR4)" {
+    const allocator = testing.allocator;
+    const two: indent_guides.Unit = .{ .tabs = false, .width = 2 };
+    const ts: EnterContext = .{ .grammar = .typescript, .brackets = "()[]{}", .quotes = "\"'`", .line_comment = "//", .unit = two };
+    const py: EnterContext = .{ .grammar = .python, .brackets = "()[]{}", .quotes = "\"'", .line_comment = "#", .unit = .{ .tabs = false, .width = 4 } };
+    const Case = struct { ctx: EnterContext, src: []const u8, spans: []const literals.Span, caret: usize, with: ?[]const u8, without: ?[]const u8 };
+    const cases = [_]Case{
+        // 정규식 리터럴 `/\{/` 안 `{` — 트리가 있으면 이어 받을 것도 없어 종전 경로(`null`), 없으면 한 단계.
+        .{ .ctx = ts, .src = "const re = /\\{/;\n", .spans = &.{.{ .start = 11, .end = 15, .kind = .string }}, .caret = 16, .with = null, .without = "\n  " },
+        // 여러 줄 템플릿 문자열의 둘째 줄 `  a {|` — caret 이 문자열 안이라 앞 공백만 잇는다(없으면 한 단계 더).
+        .{ .ctx = ts, .src = "s = `\n  a {\n`;\n", .spans = &.{.{ .start = 4, .end = 13, .kind = .string }}, .caret = 11, .with = "\n  ", .without = "\n    " },
+        // 문자열 안 `#`·줄 끝 주석 — 지운 코드 `if x ==    :` 로 `:` 를 본다(스캐너와 같은 답).
+        .{ .ctx = py, .src = "if x == \"#\":  # c", .spans = &.{ .{ .start = 8, .end = 11, .kind = .string }, .{ .start = 14, .end = 17, .kind = .comment } }, .caret = 17, .with = "\n    ", .without = "\n    " },
+        // 닫히지 않은 블록 주석 끝 — 주석 규칙은 원래 글자로 읽는다.
+        .{ .ctx = ts, .src = "/** a", .spans = &.{.{ .start = 0, .end = 5, .kind = .comment }}, .caret = 5, .with = "\n * ", .without = "\n * " },
+    };
+    for (cases) |k| {
+        var lines = try line_index.build(allocator, k.src);
+        defer lines.deinit();
+        for ([_]?[]const literals.Span{ k.spans, null }, [_]?[]const u8{ k.with, k.without }) |spans, want| {
+            var c = k.ctx;
+            c.literal_spans = spans;
+            var plan = (try planNewline(allocator, k.src, lines, &.{Selection.at(@intCast(k.caret))}, c)) orelse {
+                try testing.expect(want == null);
+                continue;
+            };
+            defer plan.deinit(allocator);
+            try testing.expect(want != null);
+            try testing.expectEqualStrings(want.?, plan.changes.items[0].text);
+        }
     }
 }

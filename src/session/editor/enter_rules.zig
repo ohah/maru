@@ -9,6 +9,7 @@
 const std = @import("std");
 const language = @import("language.zig");
 const indent_guides = @import("indent_guides.zig");
+const literals = @import("literals.zig");
 
 /// Enter 의 언어 문맥. 없으면(평문) 호출자가 `decide` 를 부르지 않는다 — 앞 공백만 잇는다.
 pub const Context = struct {
@@ -23,7 +24,14 @@ pub const Context = struct {
     unit: indent_guides.Unit,
     /// 짝 없는 여는 괄호를 줄 어디서든 보는가(`Grammar.bracketEnterAnywhere`).
     anywhere: bool = true,
+    /// 구문 트리가 답한 문자열·주석 조각(TR4 — 문서 절대 byte). `line_ops.planNewline` 이 커서마다 `Tree` 로 바꿔 `decideWith` 에 준다.
+    /// `null` 이면 트리가 없거나 낡았다 — 줄 스캐너(`quotes`·`line_comment`)로 간다.
+    literal_spans: ?[]const literals.Span = null,
 };
+
+/// 트리가 답한 그 줄의 문맥(계획 editor-typing-rules TR4) — caret 의 문맥과 caret 앞 줄 조각의 **코드만 남긴 사본**(문자열·주석 byte 를
+/// 공백으로 — `literals.blank`, `before` 와 길이가 같다).
+pub const Tree = struct { caret: literals.Literal, code: []const u8 };
 
 pub const Indent = enum {
     /// 앞 공백을 그대로 잇는다.
@@ -45,13 +53,29 @@ pub const Action = struct {
     remove: u8 = 0,
 };
 
-/// 그 줄 뒤 Enter 의 갈래.
+/// 그 줄 뒤 Enter 의 갈래 — 트리 없이(줄 스캐너만).
 pub fn decide(ctx: Context, before: []const u8, after: []const u8, prev: ?[]const u8) Action {
+    return decideWith(ctx, before, after, prev, null);
+}
+
+/// 그 줄 뒤 Enter 의 갈래. 트리가 답했으면(TR4): caret 이 **문자열 안이면 아무 규칙도 타지 않는다**(글자 안에 들여쓰기·표식을 넣지
+/// 않는다 — 앞 공백만 잇는다). 주석 규칙(블록 주석·줄 주석 이어쓰기)은 원래 글자로, 괄호·언어 규칙은 **코드 사본**으로 읽는다 — 문자열·
+/// 주석·정규식 리터럴 안 괄호와 낱말을 세지 않는다(줄 스캐너는 여러 줄 문자열·블록 주석 안을 모르고 정규식을 문자열로 못 본다). 그때
+/// 스캐너의 따옴표·줄 주석 건너뛰기는 끈다 — 이미 지웠고, 여러 줄 문자열의 둘째 줄에서는 스캐너가 따옴표 짝을 거꾸로 읽는다.
+pub fn decideWith(ctx: Context, before: []const u8, after: []const u8, prev: ?[]const u8, tree: ?Tree) Action {
+    if (tree) |t| if (t.caret == .string) return .{};
     if (blockComment(ctx.grammar, before, after, prev)) |a| return a;
     if (lineCommentContinue(ctx, before, after)) |a| return a;
-    if (bracketAction(ctx, before, after)) |a| return a;
-    if (ctx.grammar == .html) if (htmlTag(before, after)) |a| return a;
-    if (indentRule(ctx, before, after)) return .{ .indent = .indent };
+    var c = ctx;
+    var code = before;
+    if (tree) |t| {
+        code = t.code;
+        c.quotes = "";
+        c.line_comment = null;
+    }
+    if (bracketAction(c, code, after)) |a| return a;
+    if (c.grammar == .html) if (htmlTag(code, after)) |a| return a;
+    if (indentRule(c, code, after)) return .{ .indent = .indent };
     return .{};
 }
 

@@ -5,13 +5,15 @@
 //!
 //! **grammar 없이 저하 동작한다.** §3.7이 *"필요한 문맥은 지금 문자열/주석 안인가 정도이고
 //! tree-sitter가 그것을 답한다"*고 적으면서도 *"grammar가 없어도 단순 쌍 매칭으로 동작한다 —
-//! 없는 것보다 낫고, grammar가 붙으면 정확해진다"*고 정했다. 토큰 층이 아직 없으므로 **지금은
-//! 그 저하 동작이 전부**이고, 이 모듈은 문맥을 묻지 않는다.
+//! 없는 것보다 낫고, grammar가 붙으면 정확해진다"*고 정했다. `decide` 가 그 저하 동작이고, 구문 트리가
+//! 답한 문맥(문자열·주석 안인가 — `literals`)을 받는 `decideIn` 이 그 위에 따옴표의 문맥 제외를 얹는다
+//! (계획 editor-typing-rules TR4). 트리가 없거나 낡았으면 `decideIn` 은 `decide` 와 같다.
 //!
 //! **L2다 — 문서도 화면도 모른다.** 입력은 "이 문자를 쳤다 + 주변 byte"이고 출력은 "무엇을
 //! 넣을까"다. 그래야 커서마다 같은 판단을 반복해도 상태가 안 생긴다.
 
 const std = @import("std");
+const literals = @import("literals.zig");
 
 /// 자동으로 닫는 쌍.
 ///
@@ -109,9 +111,50 @@ pub fn decide(typed: u8, has_selection: bool, before: ?u8, after: ?u8) Action {
     return .{ .insert_pair = pair };
 }
 
+/// **문맥을 아는 판정**(계획 editor-typing-rules TR4 — VS Code `autoClosingPairs.notIn` 의 자리). 따옴표는 **문자열 안이면 닫지 않고**,
+/// `'`·`` ` `` 는 **주석 안에서도** 닫지 않는다(주석은 산문이다 — `"` 는 닫는다). VS Code 내장 언어 설정 열셋의 공통분모다(따옴표는 전부
+/// `notIn: string`, `'` 는 C·C++·JS·TS·Go·Python·CSS 가 주석도 — Java·Ruby·셸은 주석 안 `'` 를 닫지만 따르지 않는다). 괄호는 문맥과 무관하다
+/// (JSON·CSS 만 문자열·주석 안 괄호를 안 닫는다 — 따르지 않는다). type-over·감싸기는 그대로다. `unknown`(트리가 답하지 못했다)이면 `decide` 와 같다.
+pub fn decideIn(typed: u8, has_selection: bool, before: ?u8, after: ?u8, literal: literals.Literal) Action {
+    const action = decide(typed, has_selection, before, after);
+    switch (action) {
+        .insert_pair => |p| if (p.open == p.close) switch (literal) {
+            .string => return .insert_plain,
+            .comment => if (p.open != '"') return .insert_plain,
+            .unknown, .code => {},
+        },
+        else => {},
+    }
+    return action;
+}
+
 // ── 판정자 ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "PAIR8: 문맥을 알면 — 문자열 안 따옴표는 안 닫고, 주석 안은 `'`·`` ` `` 만 안 닫는다; 괄호·type-over·감싸기는 그대로 (계획 editor-typing-rules TR4)" {
+    const dq: Pair = .{ .open = '"', .close = '"' };
+    const sq: Pair = .{ .open = '\'', .close = '\'' };
+    const bq: Pair = .{ .open = '`', .close = '`' };
+    const br: Pair = .{ .open = '(', .close = ')' };
+    // 문자열 안 — 따옴표 셋 다 평범하게.
+    for ([_]u8{ '"', '\'', '`' }) |q| try testing.expectEqual(Action.insert_plain, decideIn(q, false, ' ', ' ', .string));
+    // 주석 안 — `"` 만 닫는다.
+    try testing.expectEqual(Action{ .insert_pair = dq }, decideIn('"', false, ' ', null, .comment));
+    try testing.expectEqual(Action.insert_plain, decideIn('\'', false, ' ', null, .comment));
+    try testing.expectEqual(Action.insert_plain, decideIn('`', false, ' ', null, .comment));
+    // 코드·모름 — 종전(`decide`)과 같다.
+    for ([_]@import("literals.zig").Literal{ .code, .unknown }) |l| {
+        try testing.expectEqual(Action{ .insert_pair = sq }, decideIn('\'', false, ' ', null, l));
+        try testing.expectEqual(Action{ .insert_pair = bq }, decideIn('`', false, null, null, l));
+    }
+    // 괄호는 문자열·주석 안에서도 닫는다(VS Code TS·JS·Python …).
+    try testing.expectEqual(Action{ .insert_pair = br }, decideIn('(', false, ' ', null, .string));
+    try testing.expectEqual(Action{ .insert_pair = br }, decideIn('(', false, ' ', null, .comment));
+    // 문자열 끝 따옴표 앞 — 넘어간다(`"ab|"` 에서 `"`), 고른 것은 감싼다.
+    try testing.expectEqual(Action.skip_over, decideIn('"', false, 'b', '"', .string));
+    try testing.expectEqual(Action{ .surround = dq }, decideIn('"', true, null, null, .string));
+}
 
 test "PAIR1: 여는 괄호가 쌍을 넣는다 — 뒤가 비었거나 닫는 문자일 때" {
     // **없으면 매번 손으로 닫아야 한다** — §1.1의 "VSCode 무회귀"에서 즉시 체감되는 자리다.

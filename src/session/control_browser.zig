@@ -209,8 +209,9 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
+        // W9a: navigate·getUrl·screenshot.
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close => true,
+            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot => true,
             else => false,
         },
     };
@@ -1114,9 +1115,28 @@ pub fn serializeNavigateResult(gpa: std.mem.Allocator, id: cp.Id) std.mem.Alloca
 }
 
 fn writeNavigateResult(s: *std.json.Stringify, id: cp.Id) !void {
+    try writeNavigateLoadedResult(s, id, null);
+}
+
+/// `browser.navigate` 성공 — Chromium 탭은 첫 불러오기를 기다려 `loaded` 를 싣는다(W9a — 엔진이 결과 `"true"`/`"false"` 로 준다).
+/// WebKit 은 불러오기 시작에 답하고 빈 결과를 준다 — `{ok:true}` 그대로.
+pub fn serializeNavigateLoadedResult(gpa: std.mem.Allocator, id: cp.Id, result: []const u8) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    const loaded: ?bool = if (std.mem.eql(u8, result, "true")) true else if (std.mem.eql(u8, result, "false")) false else null;
+    (writeNavigateLoadedResult(&s, id, loaded)) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn writeNavigateLoadedResult(s: *std.json.Stringify, id: cp.Id, loaded: ?bool) !void {
     try beginResult(s, id);
     try s.objectField("ok");
     try s.write(true);
+    if (loaded) |l| {
+        try s.objectField("loaded");
+        try s.write(l);
+    }
     try endResult(s);
 }
 
@@ -1813,7 +1833,7 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         };
     }
     return switch (bmethod) {
-        .navigate => serializeNavigateResult(gpa, req.id),
+        .navigate => serializeNavigateLoadedResult(gpa, req.id, result),
         .get_url => serializeGetUrlResult(gpa, req.id, result),
         .execute_script => blk: {
             const params = parseExecuteScriptParams(req.params) catch return cp.serializeError(gpa, req.id, .internal_error, "invalid executeScript request state", null);
@@ -3456,8 +3476,8 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
     // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
-    // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다.
-    const want_chromium = [_][]const u8{ "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
+    // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "screenshot", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -3470,9 +3490,10 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
 
 test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant) 전에 unsupported_by_engine 으로 답한다" {
     var grants: cpg.PaneGrantStore = .{};
-    const nav12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":12,\"url\":\"https://x/\"}}";
+    // W9a①부터 navigate 는 Chromium 도 받는다 — 아직 받지 않는 exec·subscribe 로 본다.
+    const exec12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.executeScript\",\"params\":{\"id\":12,\"script\":\"1\"}}";
     const sub12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":12}}";
-    for ([_][]const u8{ nav12, sub12 }) |bytes| {
+    for ([_][]const u8{ exec12, sub12 }) |bytes| {
         // pane 이 있어 WebKit 이었다면 확인 모달을 띄웠을 요청 — Chromium 탭이라 모달 없이 답한다.
         switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 6, &grants, 0)) {
             .err => |e| {
@@ -3499,14 +3520,18 @@ test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant
             else => return error.TestUnexpectedResult,
         }
     }
-    // WebKit 탭은 그대로 확인 대기.
-    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{\"id\":11,\"url\":\"https://x/\"}}", fx_engine, &.{}, 6, &grants, 0)) {
-        .needs_grant => |g| try testing.expectEqual(@as(u64, 11), g.target),
-        .err => |e| {
-            testing.allocator.free(e);
-            return error.TestUnexpectedResult;
-        },
-        else => return error.TestUnexpectedResult,
+    // WebKit 탭은 그대로 확인 대기 — Chromium 탭의 navigate 도(W9a①).
+    for ([_]u64{ 11, 12 }) |target| {
+        const nav = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.navigate\",\"params\":{{\"id\":{d},\"url\":\"https://x/\"}}}}", .{target});
+        defer testing.allocator.free(nav);
+        switch (try dispatchBrowser(testing.allocator, nav, fx_engine, &.{}, 6, &grants, 0)) {
+            .needs_grant => |g| try testing.expectEqual(target, g.target),
+            .err => |e| {
+                testing.allocator.free(e);
+                return error.TestUnexpectedResult;
+            },
+            else => return error.TestUnexpectedResult,
+        }
     }
     // 없는 id·터미널은 지금처럼 균일 unauthorized(엔진 응답이 존재 oracle 이 되지 않게 — 엔진은 web 탭에만 답한다).
     const absent = [_][]const u8{
@@ -4500,4 +4525,22 @@ test "W9f 적대 리뷰 5 회차: WebKit snapshot 이 아주 깊어도 앱이 �
     try testing.expectEqual(@as(usize, max_snapshot_node_depth), std.mem.count(u8, out, "\"role\":\"group\""));
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
     parsed.deinit();
+}
+
+test "W9a: Chromium 탭의 navigate 는 loaded 를 싣고, WebKit 의 빈 결과는 {ok:true} 그대로" {
+    const cases = [_]struct { result: []const u8, want: []const u8 }{
+        .{ .result = "true", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true,\"loaded\":true}}" },
+        .{ .result = "false", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true,\"loaded\":false}}" },
+        .{ .result = "", .want = "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"ok\":true}}" },
+    };
+    for (cases) |c| {
+        const wire = try serializeNavigateLoadedResult(testing.allocator, .{ .number = 3 }, c.result);
+        defer testing.allocator.free(wire);
+        try testing.expectEqualStrings(c.want, wire);
+    }
+    const nav_req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.navigate\",\"params\":{\"id\":1,\"url\":\"https://a.test/\"}}";
+    const resp = try serializeBrowserResponseStatus(testing.allocator, nav_req, .success, "false");
+    defer testing.allocator.free(resp);
+    try testing.expectEqualStrings(cases[1].want, resp);
+    try testing.expect(engineSupports(.chromium, .navigate) and engineSupports(.chromium, .get_url) and engineSupports(.chromium, .screenshot));
 }

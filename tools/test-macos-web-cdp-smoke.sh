@@ -4,7 +4,7 @@
 # 자동 승인한다. 시험 페이지는 `MARU_WEB_OSR_TEST_URL`(시작 브라우저 탭 — `MARU_WEB_PANEL=1`).
 #
 #   click-trusted   `maru browser click --selector '#b'` → ok, 페이지는 사람 클릭(`isTrusted`)으로 받는다(페이지가 서버로 보내는 신호
-#                   요청 `/hit?b-true` — Chromium 탭의 `browser list` 제목은 아직 페이지 제목이 아니다(W9a), 이동은 주소 칸으로 본다)
+#                   요청 `/hit?b-true` — `browser list` 의 제목은 페이지 제목이 아니라 탭 이름이다(WebKit 과 같다 — W9a 작성자 선택), 이동은 주소 칸으로 본다)
 #   click-ref       모르는 ref(`n999999`)는 not ok(ref 로 실제 누르기는 snapshot 이 ref 를 주는 W9b①b 에서)
 #   click-far       화면 밖(1500 px 아래) 요소는 화면 안으로 스크롤해 누른다(누를 때 페이지가 스크롤돼 있었다 — 신호에 싣는다)
 #   click-covered   다른 요소가 덮은 버튼은 누르지 않고 「covered」 오류 — 덮은 요소도 눌리지 않는다
@@ -241,6 +241,8 @@ for k, (name, body) in enumerate(pages):
     nxt = '<a id=next href="%s.html">next</a>' % pages[k + 1][0] if k + 1 < len(pages) else '<a id=tofresh href="fresh.html">fresh</a>'
     open('%s/%s.html' % (d, name), 'w').write('<!doctype html><title>%s</title><button>B</button>%s%s' % (name, nxt, body))
 PY
+# W9a①: navigate·get-url·screenshot — 아래로 긴 문서, 화면에 고정된 빨간 네모(스크롤해도 보기 좌표 20,20), 글이 있으면 떠나기 확인.
+printf '<!doctype html><title>w9a</title><style>body{height:5000px;margin:0}#fx{position:fixed;left:20px;top:20px;width:50px;height:50px;background:#f00}</style><div id=fx></div><a id=low href="#" style="position:absolute;left:10px;top:3000px">low</a><input id=t aria-label=Note style="position:absolute;left:100px;top:3020px"><script>addEventListener("beforeunload",function(e){if(document.getElementById("t").value){e.preventDefault();e.returnValue=""}})</script>' > "$root/www/w9a.html"
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
 cat > "$root/server.py" <<'PY'
 import http.server, sys, functools, time
@@ -248,6 +250,10 @@ class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/slow.html"):
             time.sleep(2)  # wait-load: 응답이 늦는 문서
+        if self.path.startswith("/nocontent"):
+            # W9a①: 문서가 없는 응답 — navigate 는 곧 loaded:false 로 끝나야 한다.
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.send_response(204); self.end_headers(); return
         super().do_GET()
     def do_POST(self):
         # 3 회차: alert 바로 앞의 신호는 sendBeacon(POST) — 이미지 요청은 alert 가 렌더러를 멈춰 나가지 못한다.
@@ -479,7 +485,7 @@ touch "\$out/hide2-now"
 sleep 2
 # 3 회차: 스스로 계속 이동하는 숨은 탭(맨 끝에서 다시 숨긴다 — 문서를 옮기므로 앞의 ref 를 쓰는 사례 뒤에) — 이동하는 순간 보낸 스크린샷(kick)은 답이 오지 않을 수 있어 그 탭의 자리를 쥔다. 옛 sidecar 는
 # 35 초 쥐어 그동안 selector wait 이 확인을 못 보내 시한이었고(15/25), role 질의는 곧 「too many」 였다. 열 번 모두 곧 맞아야 한다.
-# Chromium 탭은 아직 `navigate` 를 받지 않는다(-32008) — 링크를 눌러 간다.
+# 링크를 눌러 간다(누르기 사례이기도 하다 — navigate 는 W9a① 사례가 본다).
 run fr-nav click --selector '#tofresh'
 sleep 2
 run fr-click click --selector '#fb'
@@ -596,6 +602,31 @@ f0=\$(date +%s)
 "\$cli" browser click --surface "\$sh" --selector '#ok' > "\$out/r3-fam" 2>&1; echo "rc=\$?" >> "\$out/r3-fam"
 f1=\$(date +%s)
 echo "\$((f1 - f0))" > "\$out/r3-fam-secs"
+# W9a①: navigate·get-url·screenshot(뒤쪽 에이전트 탭 — 숨김). 상한 탭 넷을 닫아 자리를 낸다.
+for k in 5 6 7 8; do
+    bid=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/ag-cap-\$k")
+    "\$cli" browser close --surface "\$bid" > /dev/null 2>&1 || true
+done
+"\$cli" browser open --url "http://127.0.0.1:$port/w9a.html" > "\$out/nv-open" 2>&1
+nv=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/nv-open")
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/a.html?nv" > "\$out/nv-a" 2>&1; echo "rc=\$?" >> "\$out/nv-a"
+"\$cli" browser get-url --surface "\$nv" > "\$out/nv-url" 2>&1; echo "rc=\$?" >> "\$out/nv-url"
+n0=\$(date +%s)
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/nocontent" > "\$out/nv-204" 2>&1; echo "rc=\$?" >> "\$out/nv-204"
+n1=\$(date +%s)
+echo "\$((n1 - n0))" > "\$out/nv-204-secs"
+"\$cli" browser navigate --surface "\$nv" "javascript:alert(1)" > "\$out/nv-js" 2>&1; echo "rc=\$?" >> "\$out/nv-js"
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/w9a.html?back" > "\$out/nv-back" 2>&1; echo "rc=\$?" >> "\$out/nv-back"
+"\$cli" browser scroll --surface "\$nv" --selector '#low' > "\$out/nv-scroll" 2>&1
+"\$cli" browser screenshot --surface "\$nv" --rect 20,20,50,50 --out "\$out/nv-fx.png" > "\$out/nv-shot" 2>&1; echo "rc=\$?" >> "\$out/nv-shot"
+"\$cli" browser screenshot --surface "\$nv" --rect 20,20,50,50 --scale 2 --out "\$out/nv-fx2.png" > "\$out/nv-shot2" 2>&1; echo "rc=\$?" >> "\$out/nv-shot2"
+"\$cli" browser screenshot --surface "\$nv" --out "\$out/nv-full.png" > "\$out/nv-shot-full" 2>&1; echo "rc=\$?" >> "\$out/nv-shot-full"
+# 글을 넣은 문서 — 떠나기 확인: navigate 는 곧 실패로 답한다(사용자가 그 탭에서 정한다).
+"\$cli" browser type --surface "\$nv" --selector '#t' --text 'draft' > "\$out/nv-type" 2>&1
+b0=\$(date +%s)
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/a.html?bu" > "\$out/nv-bu" 2>&1; echo "rc=\$?" >> "\$out/nv-bu"
+b1=\$(date +%s)
+echo "\$((b1 - b0))" > "\$out/nv-bu-secs"
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -719,6 +750,45 @@ grep -q 'already has 8 tabs' "$out/ag-cap-8" || fail "a ninth agent tab was not 
 [ "$(cat "$out/r3-p2-hit")" = yes ] && grep -q '^ok$' "$out/r3-p2" || fail "Enter where the focus is on a new hidden tab did not submit the form ($(tr '\n' ' ' < "$out/r3-p2") · $(tr '\n' ' ' < "$out/r3-p2-type"))"
 grep -q '^ok$' "$out/r3-da" && grep -q '^warning: the page opened a dialog' "$out/r3-da" && grep -q '^rc=0$' "$out/r3-da" && [ "$(cat "$out/r3-da-hit")" = yes ] || fail "a key whose submit opened an alert was not answered as delivered with a do-not-repeat warning ($(tr '\n' ' ' < "$out/r3-da") · hit $(cat "$out/r3-da-hit"))"
 grep -q 'showing a dialog' "$out/r3-fam" && [ "$(cat "$out/r3-fam-secs")" -le 5 ] || fail "an op on a tab whose same-origin popup showed an alert did not end at once with the dialog reason ($(cat "$out/r3-fam-secs")s · $(tr '\n' ' ' < "$out/r3-fam") · pop $(tr '\n' ' ' < "$out/r3-sh-pop"))"
+# W9a①
+pngred() { python3 - "$1" <<'PY'
+import struct, sys, zlib
+d = open(sys.argv[1], "rb").read()
+assert d[:8] == b"\x89PNG\r\n\x1a\n"
+w, h, depth, ctype = struct.unpack(">IIBB", d[16:26])
+idat = b""; i = 8
+while i < len(d):
+    n = struct.unpack(">I", d[i:i + 4])[0]; t = d[i + 4:i + 8]
+    if t == b"IDAT": idat += d[i + 8:i + 8 + n]
+    i += 12 + n
+bpp = {2: 3, 6: 4}[ctype]
+raw = zlib.decompress(idat); stride = w * bpp; prev = bytearray(stride); red = 0; p = 0
+for y in range(h):
+    f = raw[p]; line = bytearray(raw[p + 1:p + 1 + stride]); p += 1 + stride
+    for x in range(stride):
+        a = line[x - bpp] if x >= bpp else 0; b = prev[x]; c = prev[x - bpp] if x >= bpp else 0
+        if f == 1: line[x] = (line[x] + a) & 255
+        elif f == 2: line[x] = (line[x] + b) & 255
+        elif f == 3: line[x] = (line[x] + (a + b) // 2) & 255
+        elif f == 4:
+            pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+            line[x] = (line[x] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+    for x in range(0, stride, bpp):
+        if line[x] > 200 and line[x + 1] < 60 and line[x + 2] < 60: red += 1
+    prev = line
+print(w, h, round(100 * red / (w * h)))
+PY
+}
+grep -q '^ok$' "$out/nv-a" && ! grep -q '^warning' "$out/nv-a" && grep -q '^rc=0$' "$out/nv-a" && grep -q 'GET /a.html?nv' "$root/http.log" || fail "navigate on a Chromium tab did not load the page ($(tr '\n' ' ' < "$out/nv-a"))"
+grep -q '/a.html?nv$' "$out/nv-url" || fail "get-url did not print the address navigate loaded ($(tr '\n' ' ' < "$out/nv-url"))"
+grep -q '^ok$' "$out/nv-204" && grep -q '^warning: no page finished loading' "$out/nv-204" && [ "$(cat "$out/nv-204-secs")" -le 5 ] || fail "navigate to an empty (204) response did not answer soon with loaded:false ($(cat "$out/nv-204-secs")s · $(tr '\n' ' ' < "$out/nv-204"))"
+grep -q '^rc=1$' "$out/nv-js" && grep -q 'http, https or about:blank' "$out/nv-js" || fail "navigate to javascript: was not refused ($(tr '\n' ' ' < "$out/nv-js"))"
+fx=$(pngred "$out/nv-fx.png" 2>&1) && fx2=$(pngred "$out/nv-fx2.png" 2>&1) && full=$(pngred "$out/nv-full.png" 2>&1) || fail "a Chromium screenshot was not a PNG ($fx · $fx2 · $full · $(tr '\n' ' ' < "$out/nv-shot"))"
+# 고정된 빨간 네모(보기 좌표 20,20 50×50)를 스크롤한 뒤 찍었다 — 보기 좌표가 맞으면 거의 빨갛다. scale 2 는 두 배 폭.
+set -- $fx; fxw=$1; [ "$3" -ge 90 ] || fail "the rect screenshot of a scrolled page missed the fixed red box ($fx — view coordinates were not mapped to the scrolled document)"
+set -- $fx2; [ "$1" -eq $((fxw * 2)) ] && [ "$3" -ge 90 ] || fail "--scale 2 did not double the width of the rect screenshot ($fx2 vs $fx)"
+grep -q '^rc=1$' "$out/nv-bu" && grep -q 'asks before leaving' "$out/nv-bu" && [ "$(cat "$out/nv-bu-secs")" -le 5 ] || fail "navigate on a page that asks before leaving did not fail at once with that reason ($(cat "$out/nv-bu-secs")s · $(tr '\n' ' ' < "$out/nv-bu"))"
+echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f
 grep -q '^rc=0$' "$out/mcp-py" || fail "the MCP driver failed ($(tr '\n' ' ' < "$out/mcp-py" | cut -c1-600) · $(tail -3 "$out/mcp-log" 2>/dev/null | tr '\n' ' ' | cut -c1-600))"
@@ -730,13 +800,13 @@ mcp_get open | grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html$' || fai
 [ "$(mcp_get type)" = "ok False" ] && [ "$(cat "$out/mt-hit")" = yes ] || fail "browser_type through MCP did not type the text --help as text ($(mcp_get type) · $(grep 'GET /hit?mt' "$root/http.log" | tr '\n' ' '))"
 # exec 는 Chromium 탭에서 아직 -32008(W9a) — 식 `-1` 이 옵션으로 읽히지 않고 엔진까지 갔는지만 본다(W9a 뒤에는 결과 -1).
 mcp_get exec | grep -q '^-1 False$\|(-32008)' || fail "browser_exec through MCP did not send an expression starting with - to the engine ($(mcp_get exec))"
-# screenshot 도 Chromium 탭에서 아직 -32008(W9a) — W9a 에서 PNG 그림만 받게 조인다.
-mcp_get shot | grep -q '^png$\|(-32008)' || fail "browser_screenshot through MCP did not return a PNG image ($(mcp_get shot))"
+# W9a①: Chromium 탭의 screenshot 은 PNG 그림이다.
+mcp_get shot | grep -q '^png$' || fail "browser_screenshot through MCP did not return a PNG image ($(mcp_get shot))"
 [ "$(mcp_get pipelined)" = "p1,p2,listed" ] || fail "two MCP calls sent back to back did not get their own answers in order ($(mcp_get pipelined))"
 [ "$(mcp_get badarg)" = error ] || fail "a misspelled MCP tool argument was not refused"
 [ "$(mcp_get close)" = "closed False" ] || fail "browser_close through MCP did not close the tab ($(mcp_get close))"
 [ "$(mcp_get rest)" = empty ] && [ "$(mcp_get rc)" = 0 ] || fail "maru mcp wrote extra output or did not exit 0 at the end of input ($(tr '\n' ' ' < "$out/mcp"))"
-echo "PASS mcp: an MCP server started in a new session (no terminal) opens, clicks, types --help as text, sends the expression -1 to the engine, gets an image or the engine's refusal for a screenshot, refuses a misspelled argument and closes, with only JSON-RPC on its output"
+echo "PASS mcp: an MCP server started in a new session (no terminal) opens, clicks, types --help as text, sends the expression -1 to the engine, gets a PNG image for a screenshot, refuses a misspelled argument and closes, with only JSON-RPC on its output"
 # 첫 줄은 틀린 `use`(표준 오류) — 같은 파일로 받아도 줄이 서로 덮이지 않고(W9f 적대 리뷰 1 회차), 실패가 있었으니 종료 상태 1.
 grep -q '^(the picked tab was closed' "$out/repl" && grep -q '^hint: pick a tab with `use <id>`' "$out/repl" && grep -q '^error: use needs one tab id' "$out/repl" && grep -q '^opened [0-9]* http://127.0.0.1:[0-9]*/mcp.html?repl$' "$out/repl" && grep -q '^ok$' "$out/repl" && grep -q '^closed$' "$out/repl" && grep -q '^rc=1$' "$out/repl" && [ "$(cat "$out/rb2-hit")" = yes ] || fail "repl did not open a tab, click it without --surface and close it, or its output lines overwrote each other ($(tr '\n' ' ' < "$out/repl"))"
 echo "PASS repl: open picked the new tab, click and close ran on it without --surface"

@@ -205,6 +205,27 @@ const Surface = struct {
     initial_load_pending: bool = false,
     /// 그 물은 닫기는 에이전트가 했다(W9b③ — `browser.close`). 창의 마지막 탭이 됐어도 창·앱 닫기로 번지지 않는다.
     close_ask_agent: bool = false,
+    /// W9a: 에이전트의 `browser.navigate` 가 기다리는 이동(`agentNavigate`) — 끝을 이벤트로 가른다(`AgentNav`).
+    agent_nav: AgentNav = .{},
+};
+
+/// W9a: 에이전트가 보낸 이동의 끝(계획 공격 3 회차 실측 — sidecar 가 보내는 차례):
+/// - 보통의 불러오기: 불러오는 중 → `page_started` → `url_changed` → `load_finished`(200·404·500 …) → 불러오는 중 아님. 다른 호스트로의
+///   리다이렉트도 같다(마지막 주소만 온다).
+/// - 앞 문서를 불러오는 중에 보낸 이동: 새 `page_started` 뒤 앞 문서의 `load_finished` -3(끊김) 이 먼저 온다 — 음수는 넘긴다.
+/// - 실패한 이동(접속 거부·DNS): `load_finished` 0, `page_started`·`url_changed` 없음(주소는 앞 문서 그대로). about:blank 도 0 이지만
+///   `page_started` 가 온다 — 그것은 불러온 것이다.
+/// - 204·다운로드·같은 문서 안 이동(#·pushState)·떠나기 확인에 머묾: 문서 없이 불러오는 중 → 아님 — 불러오지 않은 끝.
+/// - 떠나기 확인(`before_unload`)이 뜨면 사용자가 답할 때까지 아무것도 오지 않는다 — op 이 곧 끝낸다.
+pub const AgentNav = struct {
+    active: bool = false,
+    /// 새 문서가 시작됐다(이 이동 뒤의 `page_started`).
+    saw_started: bool = false,
+    /// 이 이동 뒤 「불러오는 중」 을 봤다(보낼 때 이미 불러오는 중이었으면 참으로 시작한다).
+    saw_loading: bool = false,
+    done: bool = false,
+    loaded: bool = false,
+    before_unload: bool = false,
 };
 
 /// 페이지에 물은 닫기의 진행(W6j).
@@ -1709,6 +1730,27 @@ pub fn navigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) void {
         s.nav_pending = true;
         s.nav_saw_loading = false;
     }
+}
+
+/// W9a: 에이전트의 `browser.navigate` — 이동을 보내고 그 끝을 지켜본다(`agentNavState`). 사용자의 이동이 아니다(`noteUserNavigation` 을
+/// 부르지 않는다 — 에이전트가 연 다운로드를 사용자의 것으로 치지 않는다). 모르는 탭(한 번도 배치되지 않았다)이면 거짓.
+pub fn agentNavigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    s.agent_nav = .{ .active = true, .saw_loading = s.loading };
+    navigate(gpa, surface_id, url);
+    return true;
+}
+
+/// W9a: 지켜보는 이동의 지금 상태(모르는 탭은 null — 닫혔다).
+pub fn agentNavState(surface_id: u64) ?AgentNav {
+    const s = surfaces.getPtr(surface_id) orelse return null;
+    return s.agent_nav;
+}
+
+/// W9a: navigate op 이 끝났다 — 지켜보기를 멈춘다.
+pub fn endAgentNav(surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.agent_nav = .{};
 }
 
 /// 사용자가 주소창에서 이 탭을 이동시켰다(W10a) — 친 주소가 곧바로 파일이면(문서를 커밋하지 않는다) 사용자가 시작한 다운로드다. 복원·
@@ -4058,6 +4100,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         } else if (!parked.contains(id)) send(gpa, .{ .destroy_browser = id }),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
             s.last_nav_ms = monotonicNow();
+            // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
+            if (s.agent_nav.active and !s.agent_nav.done and !s.initial_load_pending) s.agent_nav.saw_started = true;
             // (아래 `else` — 주차한 브라우저의 새 문서는 `parkedDocument` 가 본다.)
             // W10c: 닫기 대신 보낸 about:blank 가 열렸다(떠나기 확인이 없었거나 떠나기) — 창이 그 탭을 닫는다.
             if (s.close_park and (s.close_ask == .asking or s.close_ask == .asked)) {
@@ -4069,6 +4113,14 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.can_go_back = v.can_go_back;
             s.can_go_forward = v.can_go_forward;
             if (v.loading and s.nav_pending) s.nav_saw_loading = true;
+            // W9a: 문서 없이 불러오기가 끝났다(204·다운로드·#·pushState·떠나기 확인에 머묾) — 불러오지 않은 끝. 불러온 이동은 이보다 먼저
+            // `load_finished` 로 끝났다.
+            if (s.agent_nav.active and !s.agent_nav.done) {
+                if (v.loading) s.agent_nav.saw_loading = true else if (s.agent_nav.saw_loading) {
+                    s.agent_nav.done = true;
+                    s.agent_nav.loaded = false;
+                }
+            }
             if (!v.loading) {
                 var counted = false;
                 if (s.url) |u| if (!std.mem.eql(u8, u, "about:blank")) {
@@ -4099,12 +4151,26 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         },
         // W9b③: 이동을 보낸 뒤의 주 프레임 불러오기 끝 — 실패한 이동(오류 페이지)도 온다. 만들어진 뒤 첫 about:blank 의 끝은 넘긴다.
         .load_finished => |v| if (surfaces.getPtr(v.browser)) |s| {
+            const absorbed = s.initial_load_pending;
             if (s.initial_load_pending) {
                 s.initial_load_pending = false;
             } else if (s.nav_pending) {
                 s.page_loads +%= 1;
                 s.nav_pending = false;
                 s.nav_saw_loading = false;
+            }
+            // W9a: 에이전트 이동의 끝(`AgentNav`) — 만들어진 직후 about:blank 의 끝(위에서 지웠다)은 아니다. 음수는 앞 문서가 끊긴 것,
+            // 양수는 새 문서가 시작된 뒤에만(앞 문서가 늦게 끝난 것을 넘긴다). 0 은 실패한 이동 — about:blank 만 불러온 것이다.
+            if (s.agent_nav.active and !s.agent_nav.done and !absorbed and v.http_status >= 0) {
+                if (v.http_status > 0) {
+                    if (s.agent_nav.saw_started) {
+                        s.agent_nav.done = true;
+                        s.agent_nav.loaded = true;
+                    }
+                } else {
+                    s.agent_nav.done = true;
+                    s.agent_nav.loaded = s.agent_nav.saw_started and if (s.url) |u| std.mem.eql(u8, u, "about:blank") else false;
+                }
             }
         },
         .title_changed => {},
@@ -4151,6 +4217,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 if (kind == .before_unload) if (surfaces.getPtr(v.browser)) |s| {
                     // 물은 닫기에 페이지가 떠나기 확인으로 답했다(W6j) — 사용자가 답할 때까지 시한 없이 기다린다.
                     if (s.close_ask == .asking) s.close_ask = .asked;
+                    // W9a: 에이전트의 이동에 페이지가 떠나기 확인으로 물었다 — op 이 곧 끝낸다(사용자가 그 탭에서 정한다).
+                    if (s.agent_nav.active and !s.agent_nav.done) s.agent_nav.before_unload = true;
                 };
             }
         },
@@ -5816,4 +5884,77 @@ test "W9b③ 적대 리뷰 5 회차: 미룬 놓기는 tick 마다 탭에 하나�
     for (0..3) |_| try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"g\"}", rec.sink()));
     replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 하나 보낸다
     try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(7).?.deferred_releases.items.len);
+}
+
+test "W9a: 에이전트 이동의 끝 — 계획 공격 3 회차에 잰 sidecar 의 차례대로(보통·앞 문서 끊김·실패·204·about:blank·떠나기 확인)" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    const T = struct {
+        fn ns(id: u64, loading: bool) Message {
+            return .{ .nav_state = .{ .browser = id, .can_go_back = false, .can_go_forward = false, .loading = loading } };
+        }
+        fn fin(id: u64, status: i32) Message {
+            return .{ .load_finished = .{ .browser = id, .http_status = status } };
+        }
+    };
+    try testHold(gpa, 41);
+    testRunning(41);
+    try std.testing.expect(!agentNavigate(gpa, 99, "https://a.test/")); // 한 번도 배치되지 않은 탭
+    // 보통의 불러오기 — 404 도 불러온 것이다.
+    try std.testing.expect(agentNavigate(gpa, 41, "https://a.test/"));
+    testApply(gpa, T.ns(41, true));
+    testApply(gpa, .{ .page_started = 41 });
+    testApply(gpa, .{ .url_changed = .{ .browser = 41, .url = "https://a.test/" } });
+    try std.testing.expect(!agentNavState(41).?.done);
+    testApply(gpa, T.fin(41, 404));
+    try std.testing.expect(agentNavState(41).?.done and agentNavState(41).?.loaded);
+    testApply(gpa, T.ns(41, false));
+    try std.testing.expect(agentNavState(41).?.loaded); // 끝난 뒤의 「아님」 이 바꾸지 않는다
+    endAgentNav(41);
+    try std.testing.expect(!agentNavState(41).?.active);
+    // 앞 문서를 불러오는 중에 보냈다 — 새 문서 전 앞 문서의 늦은 끝(200)·끊김(-3)은 넘긴다.
+    testApply(gpa, T.ns(41, true));
+    try std.testing.expect(agentNavigate(gpa, 41, "https://b.test/"));
+    testApply(gpa, T.fin(41, 200)); // 앞 문서가 늦게 끝났다 — 새 문서가 아직 시작되지 않았다
+    try std.testing.expect(!agentNavState(41).?.done);
+    testApply(gpa, .{ .page_started = 41 });
+    testApply(gpa, T.fin(41, -3));
+    try std.testing.expect(!agentNavState(41).?.done);
+    testApply(gpa, T.fin(41, 200));
+    try std.testing.expect(agentNavState(41).?.done and agentNavState(41).?.loaded);
+    testApply(gpa, T.ns(41, false));
+    endAgentNav(41);
+    // 실패한 이동(접속 거부) — 0, 새 문서 없음.
+    try std.testing.expect(agentNavigate(gpa, 41, "http://127.0.0.1:1/"));
+    testApply(gpa, T.ns(41, true));
+    testApply(gpa, T.fin(41, 0));
+    try std.testing.expect(agentNavState(41).?.done and !agentNavState(41).?.loaded);
+    testApply(gpa, T.ns(41, false));
+    endAgentNav(41);
+    // 204·다운로드·# — 문서 없이 불러오는 중 → 아님.
+    try std.testing.expect(agentNavigate(gpa, 41, "https://b.test/204"));
+    testApply(gpa, T.ns(41, true));
+    try std.testing.expect(!agentNavState(41).?.done);
+    testApply(gpa, T.ns(41, false));
+    try std.testing.expect(agentNavState(41).?.done and !agentNavState(41).?.loaded);
+    endAgentNav(41);
+    // about:blank — 0 이지만 새 문서가 시작됐다.
+    try std.testing.expect(agentNavigate(gpa, 41, "about:blank"));
+    testApply(gpa, T.ns(41, true));
+    testApply(gpa, .{ .page_started = 41 });
+    testApply(gpa, .{ .url_changed = .{ .browser = 41, .url = "about:blank" } });
+    testApply(gpa, T.fin(41, 0));
+    try std.testing.expect(agentNavState(41).?.done and agentNavState(41).?.loaded);
+    endAgentNav(41);
+    // 떠나기 확인 — 곧 알린다.
+    try std.testing.expect(agentNavigate(gpa, 41, "https://c.test/"));
+    testApply(gpa, T.ns(41, true));
+    testApply(gpa, .{ .js_dialog = .{ .browser = 41, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
+    try std.testing.expect(agentNavState(41).?.before_unload and !agentNavState(41).?.done);
+    endAgentNav(41);
 }

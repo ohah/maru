@@ -25,7 +25,7 @@ pub const browser_help =
     \\
     \\commands:
     \\  list                                   list open web panels (id, url, title, engine — for discovery)
-    \\  navigate    --surface <id> <url>       navigate to URL
+    \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load)
     \\  get-url     --surface <id>             print the current document URL
     \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
     \\  get-cookies --surface <id>             print cookies for the current document host as JSON
@@ -43,7 +43,7 @@ pub const browser_help =
     \\  (wait also takes --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>] [--visible]: wait until it is visible; Chromium tabs)
     \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
     \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
-    \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG (--rect region, --scale factor; omit for full page at device scale)
+    \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG of the visible view (--rect region in view coordinates, --scale factor; omit for the whole view at device scale)
     \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
     \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
     \\  reload  --surface <id>                     reload the page (Chromium tabs)
@@ -1257,6 +1257,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.writeAll("error: navigate not ok\n");
                 return false;
             }
+            // Chromium 탭은 첫 불러오기를 기다린다(W9a) — 불러온 문서가 없으면 경고 한 줄(이동 자체는 보냈다).
+            if (result.get("loaded")) |l| if (l == .bool and !l.bool) try w.writeAll("warning: no page finished loading (an empty response, a download, a same-page link, or the time ran out) — check with get-url\n");
         },
         .ok => { // set-cookie/delete-cookie/set·remove-local-storage/clear-storage 성공 = {ok:true}
             if (boolField(result.get("ok"))) try w.writeAll("ok\n") else {
@@ -2539,7 +2541,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\
         \\commands:
         \\  list                                   list open web panels (id, url, title, engine — for discovery)
-        \\  navigate    --surface <id> <url>       navigate to URL
+        \\  navigate    --surface <id> <url>       navigate to URL (Chromium tabs: http, https or about:blank; waits for the first load)
         \\  get-url     --surface <id>             print the current document URL
         \\  exec        --surface <id> [--args json-array] [--max-result-bytes n] [--out f] <expression>   run and await a JavaScript expression
         \\  get-cookies --surface <id>             print cookies for the current document host as JSON
@@ -2557,7 +2559,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  (wait also takes --role <role> [--name <n>] [--level <n>], --by-text <t> or --by-label <t>, with [--exact] [--nth <n>] [--visible]: wait until it is visible; Chromium tabs)
         \\  snapshot --surface <id> [--interactive] [--max-depth <n>] [--selector <css>]   print the page ARIA tree (role/name/ref)
         \\  console --surface <id> [--clear]                        print page console logs (level, text); --clear empties after reading
-        \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG (--rect region, --scale factor; omit for full page at device scale)
+        \\  screenshot  --surface <id> [--out f] [--rect x,y,w,h] [--scale s]   capture PNG of the visible view (--rect region in view coordinates, --scale factor; omit for the whole view at device scale)
         \\  back    --surface <id>                     go back in the tab's history (Chromium tabs; "not ok" when there is nothing to go back to)
         \\  forward --surface <id>                     go forward in the tab's history (Chromium tabs)
         \\  reload  --surface <id>                     reload the page (Chromium tabs)
@@ -3210,4 +3212,20 @@ test "W9f 적대 리뷰 5 회차: 아주 깊은 snapshot 트리는 정해진 깊
     try testing.expectEqual(@as(usize, max_snapshot_render_depth + 1), std.mem.count(u8, text, "\n"));
     try testing.expect(std.mem.indexOf(u8, text, "deeper levels omitted") != null);
     try testing.expect(text.len < 64 * 1024);
+}
+
+test "W9a: Chromium 탭의 navigate 가 불러온 문서 없이 끝나면 ok 뒤 경고 한 줄 — loaded 가 없거나 참이면 ok 만" {
+    var buf: [512]u8 = undefined;
+    const cases = [_]struct { body: []const u8, want: []const u8 }{
+        .{ .body = "{\"ok\":true}", .want = "ok\n" },
+        .{ .body = "{\"ok\":true,\"loaded\":true}", .want = "ok\n" },
+        .{ .body = "{\"ok\":true,\"loaded\":false}", .want = "ok\nwarning: no page finished loading (an empty response, a download, a same-page link, or the time ran out) — check with get-url\n" },
+    };
+    for (cases) |c| {
+        var w: std.Io.Writer = .fixed(&buf);
+        var resp_buf: [256]u8 = undefined;
+        const resp = try std.fmt.bufPrint(&resp_buf, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{s}}}", .{c.body});
+        try testing.expect(try renderResponse(testing.allocator, resp, .navigate, &w));
+        try testing.expectEqualStrings(c.want, w.buffered());
+    }
 }

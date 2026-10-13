@@ -417,6 +417,7 @@ pub fn clickWebNotification(gpa: std.mem.Allocator, surface_id: u64, token: u64)
         const note = slot orelse continue;
         if (note.token != token or note.surface_id != surface_id) continue;
         const s = surfaces.getPtr(surface_id) orelse return;
+        s.user_action_ms = monotonicNow(); // 페이지의 onclick 이 대화상자를 띄울 수 있다(W9c② 적대 리뷰 1 회차)
         if (s.created) send(gpa, .{ .web_notification_click = .{ .browser = surface_id, .notification = note.notification } });
         return;
     }
@@ -1908,6 +1909,10 @@ pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
     };
     const s = surfaces.getPtr(browser) orelse return false;
     if (!s.created or state != .running) return false;
+    // W9c② 적대 리뷰 1 회차: 대화상자의 원인을 가르는 사용자 시각은 입력의 종류를 가리지 않는다 — 스크롤·포인터 이동·떼기도 페이지
+    // 처리기(scroll·mouseover·mouseup)가 대화상자를 띄운다(전에는 에이전트 것으로 봐 에이전트가 답했다). `last_user_input_ms`(datalist·
+    // 다운로드의 몸짓 판정)는 그대로 둔다.
+    s.user_action_ms = monotonicNow();
     switch (message) {
         .mouse => |m| if (m.kind == .down) {
             s.new_tab_credits.grant(monotonicNow());
@@ -1951,6 +1956,7 @@ pub fn composing(surface_id: u64) bool {
 /// `browser_created` 에서 되살린다(안 그러면 새 브라우저는 포커스 없이 키를 버린다).
 pub fn setFocus(gpa: std.mem.Allocator, surface_id: u64, value: bool, window: usize) void {
     const s = surfaces.getPtr(surface_id) orelse return;
+    s.user_action_ms = monotonicNow(); // focus·blur 처리기의 alert(W9c② 적대 리뷰 1 회차)
     if (value) {
         s.focus_owner = window;
     } else {
@@ -2597,6 +2603,8 @@ pub const DialogEntry = struct {
     cause: dialog_cause.Cause,
     shown: bool,
     user_input_since_arrival: bool,
+    /// 새 문서가 열린 뒤 사용자가 페이지에 입력했다 — 떠나기 확인을 「떠나기」로 답하지 않는다(`dialog_cause.mayLeave`).
+    document_touched: bool,
 
     /// `dialog_cause.mayAnswer` 에 넣을 상태 — 그 탭이 묻는 에이전트가 연 탭인지(C13)는 앱이 안다.
     pub fn situation(self: DialogEntry, agent_tab: bool) dialog_cause.Situation {
@@ -2622,9 +2630,13 @@ fn entryOf(id: u64, s: *const Surface, d: *const Dialog) DialogEntry {
         .origin = if (d.origin.len > 0) d.origin else urlOrigin(s.url orelse ""),
         // 파일 선택의 기본 경로는 싣지 않는다 — 사용자가 마지막에 연 폴더가 샜다(계획 공격 1 회차).
         .default_text = if (d.kind == .prompt) d.default_text else "",
-        .cause = d.cause,
-        .shown = d.shown_by != 0,
+        // 에이전트가 물은 닫기를 사용자가 이어받았으면(⌘W) 그 떠나기 확인은 이제 사용자 것이다(W9c② 적대 리뷰 1 회차: 에이전트가 「머무르기」
+        // 로 사용자의 닫기를 무를 수 있었다).
+        .cause = if (d.kind == .before_unload and (s.close_ask == .asking or s.close_ask == .asked) and !s.close_ask_agent) .user else d.cause,
+        // 키 포커스가 그 탭에 있으면 사용자가 보고 있다 — sheet 가 다음 tick 에 뜬다(여러 창의 tick 사이 경쟁 — 1 회차).
+        .shown = d.shown_by != 0 or s.focus_owner != 0,
         .user_input_since_arrival = userInputSince(s, d.arrived_ms),
+        .document_touched = s.last_user_input_ms != never_ms and s.last_user_input_ms >= s.last_nav_ms,
     };
 }
 
@@ -2714,8 +2726,7 @@ pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, ac
     const leaving = kind == .before_unload and accept;
     if (leaving) {
         // 이 문서에 사용자가 손댔다(새 문서가 열린 뒤의 페이지 입력) — 떠나면 그 입력을 잃을 수 있다.
-        const touched = target.s.last_user_input_ms != never_ms and target.s.last_user_input_ms >= target.s.last_nav_ms;
-        if (!dialog_cause.mayLeave(situation, touched)) return error.LeaveRefused;
+        if (!dialog_cause.mayLeave(situation, entry.document_touched)) return error.LeaveRefused;
         target.s.agent_nav.before_unload = false; // 떠나기 — 이동은 이어진다(그 navigate op 은 이미 끝났다)
     }
     // 답이 부른 다음 대화상자(confirm 뒤 alert)도 에이전트 것이다.
@@ -2748,6 +2759,7 @@ pub fn replyPermission(gpa: std.mem.Allocator, surface_id: u64, token: u64, resu
     const s = surfaces.getPtr(surface_id) orelse return false;
     const d = dialogPending(surface_id, token) orelse return false;
     if (d.kind != .permission) return false;
+    s.user_action_ms = monotonicNow(); // 허용 뒤 페이지가 곧 alert 를 띄운다(W9c② 적대 리뷰 1 회차)
     const request = d.request;
     // 위치를 차단했다 — maru 의 기록에서도 빼고, 같은 출처의 기다리던 허용을 거둔다(Chromium 도 차단을 기억해 다시 묻지 않는다).
     if (result == .deny and d.permission_kinds & ws.message.PermissionKind.geolocation.bit() != 0) {
@@ -2872,6 +2884,7 @@ fn forgetDrag(s: *Surface) void {
 pub fn dragEnter(gpa: std.mem.Allocator, surface_id: u64, payload: DragPayload, point: ws.message.Point, modifiers: ws.message.Modifiers, allowed: u32) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     if (!s.created) return false;
+    s.user_action_ms = monotonicNow(); // dragenter 처리기의 대화상자(W9c② 적대 리뷰 1 회차)
     // maru 의 Chromium 탭에서 시작한 끌기 — 조각 대신 sidecar 가 쥔 그 끌기 데이터를 고른다(W6d②).
     if (payload.source != 0) {
         send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .enter, .point = point, .modifiers = modifiers, .allowed = allowed & ws.message.drag_operation_mask, .source = payload.source } });
@@ -2942,6 +2955,7 @@ fn cleanDragText(text: []const u8, buf: []u8) []const u8 {
 pub fn dragOver(gpa: std.mem.Allocator, surface_id: u64, point: ws.message.Point, modifiers: ws.message.Modifiers, allowed: u32) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     if (!s.drag_entered) return;
+    s.user_action_ms = monotonicNow();
     send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .over, .point = point, .modifiers = modifiers, .allowed = allowed & ws.message.drag_operation_mask } });
 }
 
@@ -3497,6 +3511,7 @@ pub fn datalistPick(gpa: std.mem.Allocator, surface_id: u64, list: u32, index: u
     const s = surfaces.getPtr(surface_id) orelse return false;
     const d = s.datalist orelse return false;
     if (d.list != list or index >= d.count or !s.created) return false;
+    s.user_action_ms = monotonicNow();
     send(gpa, .{ .datalist_pick = .{ .browser = surface_id, .list = list, .index = @intCast(index) } });
     dropDatalist(gpa, s);
     return true;
@@ -6657,5 +6672,86 @@ test "W9c②: 떠나기 확인의 「떠나기」 — 사용자가 이 문서에
     s7.close_ask = .none;
     try std.testing.expect(askClose(gpa, 7, 0));
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 4, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
+}
+
+// ── REVIEW-W9c2-R1 (temporary, not to be committed) ──
+fn reviewSetup(gpa: std.mem.Allocator) !void {
+    state = .running;
+    test_record_sends = true;
+    try testSurfaces(gpa, &.{7});
+}
+
+test "W9c② 적대 리뷰 1 회차 재현 A: wheel: user scroll -> page confirm, agent hovered 1 s before -> must not be agent-answerable" {
+    const gpa = std.testing.allocator;
+    try reviewSetup(gpa);
+    defer testTeardown(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    noteAgentInput(7); // agent's acting op (e.g. hover) on this tab
+    try std.testing.expect(sendInput(gpa, .{ .wheel = .{ .browser = 7, .point = .{ .x = 10, .y = 10 }, .delta_x = 0, .delta_y = -120 } }));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Delete?" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11); // the user sees the sheet
+    std.debug.print("REVIEWR1 A cause={s}\n", .{@tagName(testLastDialog(7).cause)});
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 1 회차 재현 B: notification click -> page confirm -> agent-answerable" {
+    const gpa = std.testing.allocator;
+    try reviewSetup(gpa);
+    defer {
+        shown_notes = [_]?ShownNote{null} ** shown_notes.len;
+        testTeardown(gpa);
+    }
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    apply(gpa, .{ .web_notification = .{ .browser = 7, .notification = 1, .origin = "https://chat.example", .title = "t", .body = "b" } }, 0);
+    const note = takeWebNotification(7).?;
+    defer note.free(gpa);
+    noteAgentInput(7);
+    clickWebNotification(gpa, 7, note.token); // the USER clicks the maru notification
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://chat.example", .message = "Join call?" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11);
+    std.debug.print("REVIEWR1 B cause={s}\n", .{@tagName(testLastDialog(7).cause)});
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 1 회차 재현 C: permission sheet answer -> page alert/confirm -> agent-answerable" {
+    const gpa = std.testing.allocator;
+    try reviewSetup(gpa);
+    defer testTeardown(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 1, .origin = "https://meet.example", .kinds = ws.message.PermissionKind.notifications.bit() } }, 0);
+    const ptoken = testLastDialog(7).token;
+    noteAgentInput(7);
+    try std.testing.expect(replyPermission(gpa, 7, ptoken, .accept)); // the USER answers the permission sheet
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "https://meet.example", .message = "Share?" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11);
+    std.debug.print("REVIEWR1 C cause={s}\n", .{@tagName(testLastDialog(7).cause)});
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 1 회차 재현 D: mouse move (hover) -> page confirm -> agent-answerable" {
+    const gpa = std.testing.allocator;
+    try reviewSetup(gpa);
+    defer testTeardown(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    noteAgentInput(7);
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 5, .y = 5 } } }));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "", .message = "" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11);
+    std.debug.print("REVIEWR1 D cause={s}\n", .{@tagName(testLastDialog(7).cause)});
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 1 회차 재현 E: user presses close while the agent's close question is up -> agent can still answer stay and cancel the user's close" {
+    const gpa = std.testing.allocator;
+    try reviewSetup(gpa);
+    defer testTeardown(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 1 << 7 };
+    try std.testing.expect(askCloseByAgent(gpa, 7, 0));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectEqual(CloseAskPhase.asked, closeAskPhase(7));
+    try std.testing.expect(askClose(gpa, 7, 0)); // the USER now chooses close (cmd-W) — "사람이 닫기를 골랐으면 사람의 닫기다"
+    try std.testing.expect(!closeAskedByAgent(7));
+    std.debug.print("REVIEWR1 E cause={s}\n", .{@tagName(testLastDialog(7).cause)});
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
 }

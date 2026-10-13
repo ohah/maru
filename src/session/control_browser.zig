@@ -2024,7 +2024,7 @@ fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, 
     return aw.toOwnedSlice();
 }
 
-/// W9c② 결과 — dialog `{"dialogs":[{tab,kind, token?,message?,origin?,default_text?,cause?,may_answer?}]}`(`tab`·`kind` 는 꼭,
+/// W9c② 결과 — dialog `{"dialogs":[{tab,kind, token?,message?,origin?,default_text?,cause?,may_answer?,may_leave?}]}`(`tab`·`kind` 는 꼭,
 /// 나머지는 grant 가 있는 탭에만 — 앱이 정한다), handleDialog `{"ok":true,"kind":<str>,"continues"?:<bool>}`. 모르는 키는 버리고 타입이
 /// 틀리면 거절(앱이 낸 것이라도 wire 로 나가는 모양은 여기서 고정한다).
 fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, payload: []const u8) (std.mem.Allocator.Error || error{InvalidDialogPayload})![]u8 {
@@ -2051,7 +2051,7 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
                 if (tab != .integer or tab.integer <= 0 or kind != .string) return error.InvalidDialogPayload;
                 for (int_keys) |k| if (item.object.get(k)) |v| if (v != .integer or v.integer <= 0) return error.InvalidDialogPayload;
                 for (str_keys) |k| if (item.object.get(k)) |v| if (v != .string) return error.InvalidDialogPayload;
-                if (item.object.get("may_answer")) |v| if (v != .bool) return error.InvalidDialogPayload;
+                for ([_][]const u8{ "may_answer", "may_leave" }) |k| if (item.object.get(k)) |v| if (v != .bool) return error.InvalidDialogPayload;
             }
             (blk: {
                 beginResult(&s, id) catch |e| break :blk e;
@@ -2059,8 +2059,8 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
                 s.beginArray() catch |e| break :blk e;
                 for (list.array.items) |item| {
                     s.beginObject() catch |e| break :blk e;
-                    // 순서를 고정한다(번호·탭·종류·글·출처·기본 글·원인·답해도 되는가).
-                    for ([_][]const u8{ "token", "tab", "kind", "message", "origin", "default_text", "cause", "may_answer" }) |k| if (item.object.get(k)) |v| {
+                    // 순서를 고정한다(번호·탭·종류·글·출처·기본 글·원인·답해도 되는가·떠나도 되는가).
+                    for ([_][]const u8{ "token", "tab", "kind", "message", "origin", "default_text", "cause", "may_answer", "may_leave" }) |k| if (item.object.get(k)) |v| {
                         s.objectField(k) catch |e| break :blk e;
                         s.write(v) catch |e| break :blk e;
                     };

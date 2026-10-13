@@ -7802,8 +7802,14 @@ fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const
             }
             try s.objectField("cause");
             try s.write(@tagName(e.cause));
+            const sit = e.situation(DialogCaller.agentTab(caller, e.tab));
             try s.objectField("may_answer");
-            try s.write(maru.session.web_osr_dialog_cause.mayAnswer(e.situation(DialogCaller.agentTab(caller, e.tab))));
+            try s.write(maru.session.web_osr_dialog_cause.mayAnswer(sit));
+            // 떠나기 확인은 「떠나기」 가 따로 막힐 수 있다 — 사용자가 이 문서에 입력했다(W9c② 적대 리뷰 1 회차: may_answer 만 보면 떠나기가 될 듯했다).
+            if (e.kind == .before_unload) {
+                try s.objectField("may_leave");
+                try s.write(maru.session.web_osr_dialog_cause.mayLeave(sit, e.document_touched));
+            }
         }
         try s.endObject();
     }

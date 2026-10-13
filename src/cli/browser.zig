@@ -1511,6 +1511,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try w.print(" token={d} cause=", .{token});
                 try writePageText(gpa, w, strField(o.get("cause")), false);
                 try w.print(" may_answer={s}", .{if (may) "yes" else "no"});
+                // 떠나기 확인은 「떠나기」 만 따로 막힐 수 있다(사용자가 그 문서에 입력했다 — 머무르기만).
+                if (o.get("may_leave")) |v| if (v == .bool and !v.bool and may) try w.writeAll(" (dismiss only — the user typed on this page)");
                 const origin = strField(o.get("origin"));
                 if (origin.len > 0) {
                     try w.writeAll(" origin=");
@@ -3623,6 +3625,12 @@ test "render: dialog(W9c②) 은 대화상자마다 종류·탭·번호·원인�
         var w: std.Io.Writer = .fixed(&buf);
         try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[{\"token\":3,\"tab\":5,\"kind\":\"before_unload\",\"message\":\"\",\"origin\":\"\",\"cause\":\"user\",\"may_answer\":false}]}}", .dialog, &w));
         try testing.expectEqualStrings("before_unload tab=5 token=3 cause=user may_answer=no\n  message: \"\"\nthe user answers these in the tab (maru may not)\n", w.buffered());
+    }
+    {
+        // 떠나기 확인 — 답할 수는 있지만 사용자가 그 문서에 입력해 「떠나기」 는 막혔다(W9c② 적대 리뷰 1 회차).
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[{\"token\":4,\"tab\":5,\"kind\":\"before_unload\",\"message\":\"\",\"origin\":\"\",\"cause\":\"agent\",\"may_answer\":true,\"may_leave\":false}]}}", .dialog, &w));
+        try testing.expect(std.mem.indexOf(u8, w.buffered(), "may_answer=yes (dismiss only — the user typed on this page)") != null);
     }
 }
 

@@ -21117,6 +21117,7 @@ pub const AppSession = struct {
         debug_fixtures.reapplyForcedAppearanceLater(self); // 캡처 전용: 지연된 시스템 외관 전환(2031 실기)
         debug_fixtures.applyForcedTabCount(self); // 캡처 전용: 탭 바를 넘치게 해 ‹› 를 띄운다(한 번만)
         debug_fixtures.reapplyForcedTabHover(self); // 캡처 전용: 탭 바 버튼 배경은 호버해야 얹힌다(같은 이유)
+        debug_fixtures.reapplyForcedHeaderHover(self); // 캡처 전용: 사이드바 헤더 아이콘 판도 호버해야 얹힌다(같은 이유)
         // 캡처 전용: 원격 pane 상태를 **유지**한다 — 진짜 로컬 셸이 OSC 7 로 되돌리기 때문이다.
         // 호버보다 **먼저** 둔다: 호버는 그 프레임의 목록 위에서 자리를 고르므로 대상이 먼저 서야 한다.
         debug_fixtures.reapplyForcedRemoteScm(self);

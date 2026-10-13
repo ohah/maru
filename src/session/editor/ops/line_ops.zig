@@ -15,6 +15,7 @@ const delta = @import("../delta.zig");
 const line_index = @import("../line_index.zig");
 const selection = @import("../selection.zig");
 const indent_guides = @import("../indent_guides.zig");
+const enter_rules = @import("../enter_rules.zig");
 const case = @import("../../../terminal/selection.zig");
 
 const Change = delta.Change;
@@ -376,77 +377,16 @@ pub fn planToggleComment(allocator: std.mem.Allocator, content: []const u8, line
     return plan;
 }
 
-/// Enter 의 언어 문맥(계획 editor-typing-rules TR2) — 괄호 Enter 가 쓴다. 없으면(`null`) 종전대로 앞 공백만 잇는다.
-pub const EnterContext = struct {
-    /// 그 문법의 괄호 쌍(여는 것·닫는 것을 번갈아 — `"()[]{}"`). 괄호 색칠의 규칙(`bracketRuleFor().chars`)과 같은 집합 — 호출자가 그것을 준다.
-    brackets: []const u8,
-    /// 문자열 따옴표(`language.Grammar.stringQuotes`) — 줄을 읽을 때 그 안의 괄호는 세지 않는다.
-    quotes: []const u8 = "",
-    /// 줄 주석 표식 — 그 뒤는 세지 않는다.
-    line_comment: ?[]const u8 = null,
-    /// 한 단계(감지한 들여쓰기 단위).
-    unit: indent_guides.Unit,
-    /// 짝 없는 여는 괄호를 줄 어디서든 보는가(`language.Grammar.bracketEnterAnywhere`). 거짓이면 caret 앞(뒤 공백 빼고)이 그 괄호로 끝날 때만.
-    anywhere: bool = true,
-};
-
-/// `head` 를 왼쪽부터 읽어 **짝 없이 남은 마지막 여는 괄호**를 낸다(없으면 `null`). 문자열(`quotes` — 같은 따옴표로 닫힌다, `\` 다음 글자는
-/// 건너뛴다)과 줄 주석 뒤는 세지 않는다. 닫는 괄호가 짝 없는 것을 닫으면 그 짝까지 걷는다(종류가 다르면 무시 — 잘못된 코드에서 들여쓰기가
-/// 튀지 않게). 스택은 상한이 있다(넘치면 오래된 것을 버린다 — 마지막 것이 답이라 충분하다).
-pub fn lastUnclosedOpener(head: []const u8, ctx: EnterContext) ?u8 {
-    var stack: [64]u8 = undefined;
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < head.len) : (i += 1) {
-        const b = head[i];
-        if (ctx.line_comment) |lc| if (lc.len > 0 and std.mem.startsWith(u8, head[i..], lc)) break;
-        if (std.mem.indexOfScalar(u8, ctx.quotes, b) != null) {
-            i += 1;
-            while (i < head.len and head[i] != b) : (i += 1) {
-                if (head[i] == '\\') i += 1;
-            }
-            continue;
-        }
-        if (openerIndex(ctx.brackets, b)) |_| {
-            if (n == stack.len) {
-                std.mem.copyForwards(u8, stack[0 .. n - 1], stack[1..n]);
-                n -= 1;
-            }
-            stack[n] = b;
-            n += 1;
-        } else if (closerOpen(ctx.brackets, b)) |open| {
-            if (n > 0 and stack[n - 1] == open) n -= 1;
-        }
-    }
-    return if (n > 0) stack[n - 1] else null;
-}
-
-fn openerIndex(brackets: []const u8, b: u8) ?usize {
-    var k: usize = 0;
-    while (k + 1 < brackets.len) : (k += 2) if (brackets[k] == b) return k;
-    return null;
-}
-
-/// 닫는 괄호면 그 짝(여는 것).
-fn closerOpen(brackets: []const u8, b: u8) ?u8 {
-    var k: usize = 0;
-    while (k + 1 < brackets.len) : (k += 2) if (brackets[k + 1] == b) return brackets[k];
-    return null;
-}
-
-/// 여는 괄호의 짝(닫는 것).
-pub fn closerOf(brackets: []const u8, open: u8) ?u8 {
-    const k = openerIndex(brackets, open) orelse return null;
-    return brackets[k + 1];
-}
+/// Enter 의 언어 문맥 — `enter_rules.Context`(계획 editor-typing-rules TR2·TR3).
+pub const EnterContext = enter_rules.Context;
 
 /// Enter — 개행을 넣고 **이전 줄의 들여쓰기를 잇는다**(§3.9a). 앞 공백을 글자 그대로 잇고, **caret 앞까지만** 보고,
 /// **커서마다 자기 줄을 본다**. 들여쓸 것이 하나도 없으면 `null` — 호출자는 종전 경로(`insertText("\n")`)로 간다(같은
 /// 결과를 두 자리에서 만들지 않는다).
 ///
-/// **괄호 Enter**(계획 editor-typing-rules TR2 — `ctx` 가 있을 때): caret 앞 줄 조각에 **짝 없는 여는 괄호**가 남으면 한 단계(`ctx.unit`) 더
-/// 들여쓴다. 그 괄호의 짝이 caret 뒤(공백 다음)에 바로 오면 가운데 줄을 들여쓰고 닫는 괄호는 원래 들여쓰기로 아래 줄에 둔다(VS Code
-/// `indentOutdent` — `{|}` → `{` ⏎ `→|` ⏎ `}`); caret 과 닫는 괄호 사이 공백은 먹는다.
+/// **언어 규칙**(`ctx` 가 있을 때 — 계획 editor-typing-rules TR2·TR3): 갈래는 `enter_rules.decide` 가 정한다 — 블록·줄 주석 이어쓰기, 괄호
+/// Enter(`{|}` → `{` ⏎ `→|` ⏎ `}` — caret 과 닫는 괄호 사이 공백은 먹는다), Python `:`·`case`·Ruby·HTML 태그. 여기는 그 답을 글자로 옮긴다:
+/// 새 줄 = 이어 받은 들여쓰기(`remove` 만큼 뺀다) + (`append` 또는 한 단계).
 ///
 /// **문서 순서로 쌓는다**(입력 `sels` 가 문서 순서다) — primary 먼저 순서로 쌓으면 primary 가 뒤일 때 거꾸로 쌓여
 /// `delta` 가 거절했다(결함 3). **caret 은 새 줄의 들여쓰기 뒤로 간다**(결함 8).
@@ -457,53 +397,49 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
     const after = try allocator.dupe(Selection, sels);
     plan.after = after;
     var grown: i64 = 0;
-    var any_indent = false;
+    var any = false;
     for (after, 0..) |*sel, idx| {
         const s_off = @min(sel.start(), content.len);
         var e_off = @min(sel.end(), content.len);
-        const line = lines.line(lines.lineAt(s_off)) orelse {
+        const ln = lines.lineAt(s_off);
+        const line = lines.line(ln) orelse {
             plan.deinit(allocator);
             return null;
         };
         const head = content[line.start..s_off];
         const indent = head[0 .. head.len - std.mem.trimStart(u8, head, " \t").len];
-        if (indent.len > 0) any_indent = true;
+        const line_end = @max(line.contentEnd(), e_off);
+        const rest = content[e_off..line_end];
+        const prev: ?[]const u8 = if (ln == 0) null else if (lines.line(ln - 1)) |pl| content[pl.start..pl.contentEnd()] else null;
+        const act: enter_rules.Action = if (ctx) |c| enter_rules.decide(c, head, rest, prev) else .{};
+        // 정렬 공백 빼기(블록 주석이 끝난 줄) — 들여쓰기 끝이 공백일 때만.
+        var base = indent;
+        if (act.remove > 0 and base.len >= act.remove and std.mem.allEqual(u8, base[base.len - act.remove ..], ' ')) base = base[0 .. base.len - act.remove];
+        const step: []const u8 = act.append orelse switch (act.indent) {
+            .keep => "",
+            .indent, .indent_outdent => if (ctx) |c| c.unit.text() else "",
+        };
         var t: []u8 = undefined;
         var caret_in_text: usize = undefined;
-        const opener: ?u8 = if (ctx) |c| blk: {
-            const o = lastUnclosedOpener(head, c) orelse break :blk null;
-            if (c.anywhere) break :blk o;
-            const trimmed = std.mem.trimEnd(u8, head, " \t");
-            break :blk if (trimmed.len > 0 and trimmed[trimmed.len - 1] == o) o else null;
-        } else null;
-        if (opener) |open| {
-            const c = ctx.?;
-            any_indent = true;
-            // 닫는 짝이 caret 뒤(공백 다음)에 바로 오는가 — 그 줄 안에서만 본다.
-            const line_end = @max(line.contentEnd(), e_off);
-            const rest = content[e_off..line_end];
+        if (act.indent == .indent_outdent) {
+            t = try std.fmt.allocPrint(allocator, "\n{s}{s}\n{s}", .{ base, step, base });
+            caret_in_text = 1 + base.len + step.len;
+            // caret 과 닫는 괄호 사이 공백은 먹는다 — 다음 커서가 그 사이에 있으면 안 먹는다(겹치면 `delta` 가 거절한다). **덧붙일 글자가 있는
+            // 갈래(블록 주석 `/** a| */`)는 안 먹는다** — ` */` 의 공백이 정렬이다(VS Code 도 그대로 둔다; 적대적 5회차에 `*/` 가 어긋나는 것을 찾았다).
             const ws = rest.len - std.mem.trimStart(u8, rest, " \t").len;
-            const outdent = ws < rest.len and closerOf(c.brackets, open) == rest[ws];
-            if (outdent) {
-                t = try std.fmt.allocPrint(allocator, "\n{s}{s}\n{s}", .{ indent, c.unit.text(), indent });
-                // caret 과 닫는 괄호 사이 공백은 먹는다 — 다음 커서가 그 사이에 있으면 안 먹는다(겹치면 `delta` 가 거절한다).
-                const next_start = if (idx + 1 < sels.len) @min(sels[idx + 1].start(), content.len) else content.len;
-                if (e_off + ws <= next_start) e_off += ws;
-                caret_in_text = 1 + indent.len + c.unit.text().len;
-            } else {
-                t = try std.fmt.allocPrint(allocator, "\n{s}{s}", .{ indent, c.unit.text() });
-                caret_in_text = t.len;
-            }
+            const next_start = if (idx + 1 < sels.len) @min(sels[idx + 1].start(), content.len) else content.len;
+            if (act.append == null and e_off + ws <= next_start) e_off += ws;
         } else {
-            t = try std.fmt.allocPrint(allocator, "\n{s}", .{indent});
+            t = try std.fmt.allocPrint(allocator, "\n{s}{s}", .{ base, step });
             caret_in_text = t.len;
         }
+        if (t.len > 1) any = true;
         try plan.own(allocator, t);
         try plan.changes.append(allocator, .{ .start = s_off, .end = e_off, .text = t });
         sel.* = Selection.at(@intCast(@as(i64, @intCast(s_off + caret_in_text)) + grown));
         grown += @as(i64, @intCast(t.len)) - @as(i64, @intCast(e_off - s_off));
     }
-    if (!any_indent) {
+    if (!any) {
         plan.deinit(allocator);
         return null;
     }
@@ -745,28 +681,28 @@ test "INDT2 planIndent — 한 단계는 그 파일의 단위, 내어쓰기는 �
 }
 
 test "INDB1 짝 없는 마지막 여는 괄호 — 문자열·줄 주석 안은 세지 않고, 닫힌 것·종류 다른 닫기는 무시 (계획 editor-typing-rules TR2)" {
-    const c: EnterContext = .{ .brackets = "()[]{}", .quotes = "\"'`", .line_comment = "//", .unit = .{ .tabs = false, .width = 2 } };
-    try testing.expectEqual(@as(?u8, '{'), lastUnclosedOpener("if (x) {", c));
-    try testing.expectEqual(@as(?u8, '('), lastUnclosedOpener("foo(a, ", c));
-    try testing.expectEqual(@as(?u8, '['), lastUnclosedOpener("x = [{a: 1}, ", c));
-    try testing.expectEqual(@as(?u8, null), lastUnclosedOpener("if (x) { foo(); }", c));
-    try testing.expectEqual(@as(?u8, null), lastUnclosedOpener("const s = \"{\";", c)); // 문자열 안
-    try testing.expectEqual(@as(?u8, null), lastUnclosedOpener("x = 'a\\'{';", c)); // 이스케이프한 따옴표 뒤도 문자열
-    try testing.expectEqual(@as(?u8, null), lastUnclosedOpener("// {", c)); // 줄 주석
-    try testing.expectEqual(@as(?u8, '{'), lastUnclosedOpener("{ // }", c)); // 주석 안 닫기는 안 센다
-    try testing.expectEqual(@as(?u8, '{'), lastUnclosedOpener("{ )", c)); // 종류 다른 닫기는 무시
-    try testing.expectEqual(@as(?u8, null), lastUnclosedOpener("", c));
+    const c: EnterContext = .{ .grammar = .typescript, .brackets = "()[]{}", .quotes = "\"'`", .line_comment = "//", .unit = .{ .tabs = false, .width = 2 } };
+    try testing.expectEqual(@as(?u8, '{'), enter_rules.lastUnclosedOpener("if (x) {", c));
+    try testing.expectEqual(@as(?u8, '('), enter_rules.lastUnclosedOpener("foo(a, ", c));
+    try testing.expectEqual(@as(?u8, '['), enter_rules.lastUnclosedOpener("x = [{a: 1}, ", c));
+    try testing.expectEqual(@as(?u8, null), enter_rules.lastUnclosedOpener("if (x) { foo(); }", c));
+    try testing.expectEqual(@as(?u8, null), enter_rules.lastUnclosedOpener("const s = \"{\";", c)); // 문자열 안
+    try testing.expectEqual(@as(?u8, null), enter_rules.lastUnclosedOpener("x = 'a\\'{';", c)); // 이스케이프한 따옴표 뒤도 문자열
+    try testing.expectEqual(@as(?u8, null), enter_rules.lastUnclosedOpener("// {", c)); // 줄 주석
+    try testing.expectEqual(@as(?u8, '{'), enter_rules.lastUnclosedOpener("{ // }", c)); // 주석 안 닫기는 안 센다
+    try testing.expectEqual(@as(?u8, '{'), enter_rules.lastUnclosedOpener("{ )", c)); // 종류 다른 닫기는 무시
+    try testing.expectEqual(@as(?u8, null), enter_rules.lastUnclosedOpener("", c));
     // 문자열을 모르는 문법(따옴표 없음)은 따옴표를 그냥 글자로 읽는다.
-    const plain: EnterContext = .{ .brackets = "()[]{}", .unit = c.unit };
-    try testing.expectEqual(@as(?u8, '('), lastUnclosedOpener("don't (", plain));
+    const plain: EnterContext = .{ .grammar = .none, .brackets = "()[]{}", .unit = c.unit };
+    try testing.expectEqual(@as(?u8, '('), enter_rules.lastUnclosedOpener("don't (", plain));
     // 깊게 열린 줄 — 스택 상한을 넘어도 마지막 것이 답이다.
-    try testing.expectEqual(@as(?u8, '['), lastUnclosedOpener("(" ** 100 ++ "[", c));
+    try testing.expectEqual(@as(?u8, '['), enter_rules.lastUnclosedOpener("(" ** 100 ++ "[", c));
 }
 
 test "INDB2 planNewline 괄호 Enter — 짝 사이는 가운데 줄을 들여쓰고 닫는 것은 아래(공백은 먹는다), 여는 괄호 뒤는 한 단계, 문맥 없으면 종전 (계획 editor-typing-rules TR2)" {
     const allocator = testing.allocator;
     const two: indent_guides.Unit = .{ .tabs = false, .width = 2 };
-    const c: EnterContext = .{ .brackets = "()[]{}", .quotes = "\"'`", .line_comment = "//", .unit = two };
+    const c: EnterContext = .{ .grammar = .typescript, .brackets = "()[]{}", .quotes = "\"'`", .line_comment = "//", .unit = two };
     const Case = struct { src: []const u8, caret: usize, want: []const u8, at: usize };
     const cases = [_]Case{
         .{ .src = "f() {}\n", .caret = 5, .want = "f() {\n  \n}\n", .at = 8 },
@@ -802,9 +738,33 @@ test "INDB2 planNewline 괄호 Enter — 짝 사이는 가운데 줄을 들여�
         const t = try applyPlan(allocator, src, plan); // 겹치면 여기서 실패한다(문서 순서·비겹침)
         defer allocator.free(t);
     }
+    // 블록 주석 `/** a| */` — 가운데 줄은 ` * `(덧붙일 글자가 한 단계를 **대신한다** — H17), ` */` 는 아래 줄에 그 공백 그대로.
+    {
+        const src = "/** a */\n";
+        var lines = try line_index.build(allocator, src);
+        defer lines.deinit();
+        var plan = (try planNewline(allocator, src, lines, &.{Selection.at(5)}, c)).?;
+        defer plan.deinit(allocator);
+        const t = try applyPlan(allocator, src, plan);
+        defer allocator.free(t);
+        try testing.expectEqualStrings("/** a\n * \n */\n", t);
+        try testing.expectEqual(@as(usize, 9), plan.after.?[0].focus);
+    }
+    // 들여쓴 블록 주석이 ` */` 로 끝난 줄 뒤 — 정렬 공백 하나를 빼 주석을 연 줄의 들여쓰기로 돌아간다(H16 — 0열 주석은 빼고 나면 들여쓸 것이 없어
+    // 종전 경로와 같은 답이라 이 장면이 가른다).
+    {
+        const src = "    /**\n     * a\n     */\n";
+        var lines = try line_index.build(allocator, src);
+        defer lines.deinit();
+        var plan = (try planNewline(allocator, src, lines, &.{Selection.at(src.len - 1)}, c)).?;
+        defer plan.deinit(allocator);
+        const t = try applyPlan(allocator, src, plan);
+        defer allocator.free(t);
+        try testing.expectEqualStrings("    /**\n     * a\n     */\n    \n", t);
+    }
     // 끝의 여는 괄호만 보는 문법(Python·Markdown…) — 줄 가운데의 짝 없는 괄호로는 들여쓰지 않는다(`see [the docs|]`), 끝이면 한다.
     {
-        const end_only: EnterContext = .{ .brackets = "()[]{}", .unit = two, .anywhere = false };
+        const end_only: EnterContext = .{ .grammar = .markdown, .brackets = "()[]{}", .unit = two, .anywhere = false };
         const src = "see [the docs]\nfoo = []\n";
         var lines = try line_index.build(allocator, src);
         defer lines.deinit();
@@ -836,7 +796,7 @@ test "INDB2 planNewline 괄호 Enter — 짝 사이는 가운데 줄을 들여�
     }
     // 탭 단위.
     {
-        const tc: EnterContext = .{ .brackets = "()[]{}", .unit = .{ .tabs = true, .width = 4 } };
+        const tc: EnterContext = .{ .grammar = .typescript, .brackets = "()[]{}", .unit = .{ .tabs = true, .width = 4 } };
         var lines = try line_index.build(allocator, "\t{}\n");
         defer lines.deinit();
         var plan = (try planNewline(allocator, "\t{}\n", lines, &.{Selection.at(2)}, tc)).?;

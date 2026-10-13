@@ -8490,7 +8490,13 @@ fn insertTextWithRange(self: *AppSession, term: *Term, text: []const u8, replace
     // **무엇을 넣을지는 L2 `typing_ops.planTyping` 이 정한다**(§3.7 타이핑 보조 × §9.1 — 쌍 넣기·type-over·감싸기,
     // 문서 순서, 커서마다 첫 변경의 인덱스). 보조는 재변환(IME)이 아닐 때만 본다.
     // 닫는 괄호 내어쓰기(계획 editor-typing-rules TR2) — 재변환(IME)이 아닐 때, 괄호를 아는 문법에서만.
-    const reindent: ?typing_ops.Reindent = if (replacement == null) (if (bracketsOf(term)) |b| .{ .lines = doc.file.lines, .brackets = b } else null) else null;
+    const reindent: ?typing_ops.Reindent = if (replacement == null) (if (bracketsOf(term)) |b| .{
+        .lines = doc.file.lines,
+        .brackets = b,
+        .grammar = term.rt.editor_grammar,
+        .unit = guides_client.editUnit(term),
+        .tab_width = term.rt.editor_tab_width,
+    } else null) else null;
     var typing = typing_ops.planTyping(self.allocator, doc.file.content, edit_items, text, replacement == null, reindent) catch return false;
     defer typing.deinit(self.allocator);
     const ranges = &typing.changes;
@@ -9294,6 +9300,7 @@ fn enterContext(term: *Term) ?line_ops.EnterContext {
     const brackets = bracketsOf(term) orelse return null;
     const path = term.rt.editorDocument().path;
     return .{
+        .grammar = term.rt.editor_grammar,
         .brackets = brackets,
         .quotes = term.rt.editor_grammar.stringQuotes(),
         .line_comment = if (path) |p| maru.session.editor.language.forPath(p).lineComment() else null,
@@ -41274,6 +41281,61 @@ test "INDB4 괄호 Enter·닫는 괄호 내어쓰기 — 실제 키로: 자동 �
     n.rt.editor_selection = editor_selection.Selection.at(3);
     try pressKey(&fx, .enter, .{});
     try testing.expectEqualStrings("a {\n}\n", content(n));
+}
+
+test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    const typeText = struct {
+        fn f(s: *AppSession, t: *Term, text: []const u8) !void {
+            for (text) |ch| try testing.expect(insertText(s, t, &[_]u8{ch}));
+        }
+    }.f;
+    // ⑴ Python — `if a:` 뒤 Enter 는 한 단계(공백 4 — 들여쓴 줄 없는 새 파일의 기본), 본문 뒤 Enter 는 그대로, `else:` 를 다 치면 내어쓴다.
+    const py = try undoFixture(&fx, allocator, "indr5.py", "if a:\n");
+    py.rt.editor_tab_width = 4;
+    py.rt.editor_selection = editor_selection.Selection.at(5);
+    try pressKey(&fx, .enter, .{});
+    try typeText(fx.session, py, "x = 1");
+    try pressKey(&fx, .enter, .{});
+    try typeText(fx.session, py, "else:");
+    try testing.expectEqualStrings("if a:\n    x = 1\nelse:\n", content(py));
+    // ⑵ TS — `/**` 뒤 Enter 는 ` * `, 그 줄 뒤 Enter 도 ` * `(정렬 공백은 이어 받는다), 줄 주석 가운데 Enter 는 `// `.
+    const ts = try undoFixture(&fx, allocator, "indr5.ts", "/**\n// note more\n");
+    ts.rt.editor_selection = editor_selection.Selection.at(3);
+    try pressKey(&fx, .enter, .{});
+    try typeText(fx.session, ts, "doc");
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/**\n * doc\n * \n// note more\n", content(ts));
+    const at = std.mem.indexOf(u8, content(ts), " more").?;
+    ts.rt.editor_selection = editor_selection.Selection.at(at);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/**\n * doc\n * \n// note\n//  more\n", content(ts));
+    // ⑶ Ruby — `def f` 뒤 Enter 는 한 단계(공백 2 파일), 본문 뒤 Enter 는 그대로, `end` 를 다 치면 내어쓴다.
+    const rb = try undoFixture(&fx, allocator, "indr5.rb", "class A\n  x\nend\ndef f\n");
+    rb.rt.editor_tab_width = 4;
+    rb.rt.editor_selection = editor_selection.Selection.at(content(rb).len - 1);
+    try pressKey(&fx, .enter, .{});
+    try typeText(fx.session, rb, "y");
+    try pressKey(&fx, .enter, .{});
+    try typeText(fx.session, rb, "end");
+    try testing.expectEqualStrings("class A\n  x\nend\ndef f\n  y\nend\n", content(rb));
+    // ⑷ HTML — `<div>|</div>` 의 Enter 는 가운데 줄, void 요소 뒤는 그대로.
+    const h = try undoFixture(&fx, allocator, "indr5.html", "  <p>a</p>\n<div></div>\n<br>\n");
+    h.rt.editor_tab_width = 4;
+    h.rt.editor_selection = editor_selection.Selection.at(std.mem.indexOf(u8, content(h), "</div>").?);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  <p>a</p>\n<div>\n  \n</div>\n<br>\n", content(h));
+    h.rt.editor_selection = editor_selection.Selection.at(content(h).len - 1);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  <p>a</p>\n<div>\n  \n</div>\n<br>\n\n", content(h));
 }
 
 test "CMT7 한 줄에 커서가 여럿이어도 표식은 하나다 (§3.7)" {

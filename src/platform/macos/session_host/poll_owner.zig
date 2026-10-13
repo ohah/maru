@@ -298,6 +298,7 @@ pub const Owner = struct {
                 client.imageReadReady()
             else if (pfd.revents & (c.POLL.ERR | c.POLL.HUP | c.POLL.NVAL) != 0)
                 client.imagePeerBroken();
+            self.scheduleImageCapacityWake(slot_index, now_ns);
             progressed = true;
         }
 
@@ -376,7 +377,7 @@ pub const Owner = struct {
         // 이미지 채널 hello 를 받은 보조 연결은 턴이 끝난 지금 입양한다(§3.1). dispatch 안에서 하면 진행 중인
         // dispatch 가 해제된 Slot 을 쓴다.
         if (client.takeImageChannelBind()) |token| {
-            self.adoptImageChannel(slot_index, token);
+            self.adoptImageChannel(slot_index, token, now_ns);
             return .progress;
         }
         if (client.isClosing()) {
@@ -551,7 +552,7 @@ pub const Owner = struct {
 
     /// 보조 연결의 fd 를 token 이 가리키는 주 연결로 옮기고 보조 연결을 지운다(이미지 채널 §3.1). 주 연결을 못 찾으면
     /// 보조 연결만 닫는다 — 주 연결은 어느 경우에도 건드리지 않는다(abandon 뒤 늦게 온 채널도 같다).
-    fn adoptImageChannel(self: *Owner, index: usize, token: u128) void {
+    fn adoptImageChannel(self: *Owner, index: usize, token: u128, now_ns: u64) void {
         const temp = self.clients[index] orelse return;
         const why: []const u8 = adopt: {
             const entry = self.image_tokens.take(token) orelse break :adopt "unknown_token";
@@ -567,6 +568,7 @@ pub const Owner = struct {
             // 입양 줄을 먼저 남긴다 — `bind_ack` 송신이 실패하면 그 뒤에 `lost:` 줄이 이어진다.
             noteImageChannel("adopted", index, entry.index, "-");
             _ = main.bindImageChannel(fd, self.image_host_budget);
+            self.scheduleImageCapacityWake(entry.index, now_ns);
             // 채널은 연결이 아니라 그 연결의 두 번째 fd 다 — admitted 수를 채널만큼 부풀리지 않는다.
             self.total_admitted -|= 1;
             self.retireClient(index);
@@ -644,6 +646,17 @@ pub const Owner = struct {
             if (self.producer_remaining[index] == 0)
                 self.producer_remaining[index] = client.beginProducerSweep(now_ns);
         }
+    }
+
+    /// 용량 사건(release·채널 묶임)이 이미지를 미룬 stream 을 깨웠으면 그 연결의 producer 를 바로 예약한다(이미지 채널 §3.5·§5) —
+    /// cadence 를 기다리면 정지 화면에서도 다음 20 ms 안에는 다시 투영되지만, 깨움이 없으면 「화면 변화 없음」 게이트가 영영 막는다.
+    fn scheduleImageCapacityWake(self: *Owner, index: usize, now_ns: u64) void {
+        const client = self.clients[index] orelse return;
+        if (!client.takeImageCapacityWake()) return;
+        const gate_open = if (self.server.admission_gate) |gate| gate.snapshot().open else true;
+        if (!gate_open and !client.isUpgradeDraining()) return;
+        if (self.producer_remaining[index] == 0)
+            self.producer_remaining[index] = client.beginProducerSweep(now_ns);
     }
 
     fn scheduleProducerNow(self: *Owner, now_ns: u64) void {
@@ -5866,5 +5879,50 @@ test "image channel owner: 세그먼트를 보내지 못하면 채널만 내리�
     for (prepared) |segment| try testing.expect(fdIsClosed(segment.fd));
     try testing.expectEqual(@as(usize, 0), fx.channelCount());
     try testing.expectEqual(@as(u64, 0), fx.owner.image_host_budget.bytes);
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+test "image channel owner: release 와 채널 묶임이 이미지를 미룬 stream 을 깨우고 그 연결의 producer 를 예약한다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-wake.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    // 채널이 묶이기 전에 붙어 이미지를 미룬 stream(「이미지 채널 없음」 동안의 attach).
+    var main_index: ?usize = null;
+    for (fx.owner.clients, 0..) |maybe, index| {
+        const client = maybe orelse continue;
+        try client.connection.attachments.put(client.connection.allocator, 1, .{
+            .runtime_id = 0xAA,
+            .subscription_id = .{ .value = 1 },
+            .image_deferred = true,
+        });
+        main_index = index;
+    }
+    const index = main_index orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const client = fx.owner.clients[index].?;
+    // 묶임이 깨웠고 owner 가 그 깨움을 꺼내 producer 를 예약했다.
+    try testing.expect(client.connection.attachments.getPtr(1).?.image_wake);
+    try testing.expect(!client.takeImageCapacityWake());
+
+    // release 가 원장에 자리를 내면 다시 깨운다 — 반환이 없는 release(모르는 id)는 깨우지 않는다.
+    client.connection.attachments.getPtr(1).?.image_wake = false;
+    fx.owner.producer_remaining[index] = 0;
+    const ledger = client.imageLedger().?;
+    const id = try ledger.reserve(1, 7, 1, 64);
+    try testing.expect(ledger.issue(id));
+    try sendAll(channel_fd, &(try image_channel_wire.encodeRelease(id + 100)));
+    for (0..50) |_| _ = try fx.owner.pollOnce(2);
+    try testing.expect(!client.connection.attachments.getPtr(1).?.image_wake);
+    try sendAll(channel_fd, &(try image_channel_wire.encodeRelease(id)));
+    for (0..200) |_| {
+        _ = try fx.owner.pollOnce(2);
+        if (ledger.count() == 0) break;
+    }
+    try testing.expectEqual(@as(usize, 0), ledger.count());
+    try testing.expect(client.connection.attachments.getPtr(1).?.image_wake);
     try fx.expectMainAlive(main_fd, 2);
 }

@@ -459,6 +459,25 @@ IC5b 는 둘로 나눴다 — owner 층(`connection_turn.Client`, 채널·원장
   멈추고, 같은 runtime 에 붙은 연결마다·미룸 뒤 재시도마다 다시 복사한다. lock 보유 시간을 재고 필요하면 복사를 lock 밖으로 빼거나
   (runtime, image, generation) 단위로 세그먼트를 재사용한다.
 
+#### IC5c-1 — 용량 사건이 미룬 stream 을 깨운다 (PR 진행 중)
+
+IC5c 는 둘로 나눴다 — 용량 사건 깨우기(IC5c-1, 정지 화면의 첫 이미지가 영영 안 뜨는 공백을 막는 핵심 — IC5d 앞에 필수)와 큰 한 장
+우선권·「전송 불가」 진단(IC5c-2).
+
+- 구독(`Connection.Subscription`)의 두 표시: `image_deferred`(마지막으로 commit 된 투영이 이미지를 미뤘다 — 「전송 불가」는 세지 않는다)
+  와 `image_wake`(용량 사건이 깨웠다). 세그먼트 판 투영의 commit 이 `image_deferred` 를 그 투영 결과로 바꾸고 `image_wake` 를 내린다.
+  롤백은 `image_wake` 를 남긴다(압력 롤백 뒤에도 다시 시도한다, 계약 §5).
+- 「화면 변화 없음」 게이트(`screen_changed`)는 `image_wake` 면 열린다 — 화면이 그대로여도 다시 투영해 미룬 이미지가 이번엔 자리를
+  얻는다.
+- 용량 사건 둘: release 가 원장에서 실제로 반환했을 때(`imageReadReady` — 모르는 id 는 깨우지 않는다), 채널이 묶였을 때
+  (`bindImageChannel` — 「이미지 채널 없음」 동안 attach 해 미룬 stream). `Connection.noteImageCapacity` 가 미룬 stream 을 깨우고, 깨운
+  것이 있으면 owner 가 그 연결의 producer 를 바로 예약한다(`scheduleImageCapacityWake` — admission 게이트가 닫혔으면 업그레이드 drain
+  중일 때만).
+- 판정자: server(`test-image-channel` 12) — 미룬 투영이 「미룸」을 남기고 화면이 그대로면 게이트가 막는다, 용량 사건이 깨우면 화면이
+  그대로여도 투영하고 롤백은 깨움을 남기며 보낸 commit 이 두 표시를 내린다, 깨울 것이 없으면 아무것도 예약하지 않고 「전송 불가」는
+  깨우지 않는다; owner(`test-image-channel-host` 18) — 채널 묶임이 깨우고 owner 가 그 깨움을 꺼내 예약하며, 모르는 id 의 release 는
+  깨우지 않고 반환한 release 는 깨운다. 변이 7 RED.
+
 #### IC5 전체 (처음 계획)
 
 - producer 가 `image_ref`·`image_seg_hwm` 을 내기 시작한다 — `screen_snapshot.zig` 의 전수 판정자(「attach 뒤 움직인 모든 축이

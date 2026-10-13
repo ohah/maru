@@ -7063,12 +7063,12 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
-        // hello·abandon 7, 투영 ↔ 세그먼트 배선(IC5b-2 — 발급·취소·투영 실패·resync·미룸·미협상·제품 attach) 4.
+        // hello·abandon 7, 투영 ↔ 세그먼트 배선(IC5b-2 — 발급·취소·투영 실패·resync·미룸·미협상·제품 attach) 4, 용량 사건 깨움(IC5c-1) 1.
         .filters = &.{ "image channel hello:", "image channel abandon:", "image segment wiring:" },
     });
     const run_image_channel_hello_tests = b.addRunArtifact(image_channel_hello_tests);
-    run_image_channel_hello_tests.addArg("--maru-expect-tests=11");
-    run_image_channel_hello_tests.addArg("--maru-expect-passed=11");
+    run_image_channel_hello_tests.addArg("--maru-expect-tests=12");
+    run_image_channel_hello_tests.addArg("--maru-expect-passed=12");
     image_channel_step.dependOn(&run_image_channel_hello_tests.step);
     boundary_step.dependOn(image_channel_step);
 
@@ -7089,9 +7089,9 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image channel owner:"},
         });
         const run_image_channel_host_tests = b.addRunArtifact(image_channel_host_tests);
-        // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4, Connection 에 건넨 연산(IC5b-2) 1.
-        run_image_channel_host_tests.addArg("--maru-expect-tests=17");
-        run_image_channel_host_tests.addArg("--maru-expect-passed=17");
+        // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4, Connection 에 건넨 연산(IC5b-2) 1, 용량 사건 깨움(IC5c-1) 1.
+        run_image_channel_host_tests.addArg("--maru-expect-tests=18");
+        run_image_channel_host_tests.addArg("--maru-expect-passed=18");
         image_channel_host_step.dependOn(&run_image_channel_host_tests.step);
         test_step.dependOn(&run_image_channel_host_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_host_tests.step);

@@ -1526,3 +1526,7 @@ macOS의 `/usr/sbin/sshd` 실행이 가능한 환경에서 opt-in으로 실행�
 macOS 전용 CI에 포함한다. `zig build test-ssh-reconnect-failure-process`는 실제 CLI를
 소유 장애 주입기와 실행해 3회 실패 상한과 backoff 중 SIGINT 취소를 검사한다.
 각 gate에 `-Doptimize=ReleaseFast`를 추가할 수 있다. 이는 실물 SSH 서버/PTY 검증과 구분한다.
+
+실제 macOS Terminal Ctrl+C 취소 검증(잠금 해제·손쉬운 사용 필요):
+`python3 tools/test-remote-agent-native.py --cli zig-out/bin/maru --terminal-cancel`.
+테스트 전용 창을 열므로 실행 중 다른 창으로 포커스를 옮기지 않는다.

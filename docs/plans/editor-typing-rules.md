@@ -1,6 +1,6 @@
 # 언어별 들여쓰기·자동 닫기 규칙 구현 계획
 
-상태: TR1(들여쓰기 단위)·TR2(괄호 Enter·닫는 괄호 내어쓰기) 완료, TR3·TR4 대기. 계약은 [문서 모델](../native-editor-document-model.md) §3.7(타이핑 보조)·§3.9a(줄 조작과 들여쓰기)가 소유하고, 이 문서는 결정·실측·설계·조각·검증을 소유한다.
+상태: TR1(들여쓰기 단위)·TR2(괄호 Enter·닫는 괄호 내어쓰기)·TR3(언어 규칙 표) 완료, TR4 대기. 계약은 [문서 모델](../native-editor-document-model.md) §3.7(타이핑 보조)·§3.9a(줄 조작과 들여쓰기)가 소유하고, 이 문서는 결정·실측·설계·조각·검증을 소유한다.
 
 ## 왜
 
@@ -75,12 +75,15 @@
 
 ### 언어 규칙 표 (TR3)
 
-- Python 제어문(`def`·`class`·`if`·`elif`·`else`·`for`·`while`·`try`·`except`·`finally`·`with`·`async`·`match`·`case`) 이 `:` 로 끝나면(줄 끝 주석은 떼고) 한 단계.
-- C 계열 블록 주석: `/**`·`/*` 뒤 Enter 는 ` * `, ` * ` 줄 뒤는 ` * `, `*/` 뒤는 한 칸 덜. 줄 주석 가운데 Enter 면 그 표식으로 잇는다.
-- `case X:`·`default:` 뒤 한 단계(C 계열 중 쓰는 문법).
-- Ruby `def`·`class`·`module`·`if`·`unless`·`while`·`until`·`case`·`begin`·`do` 줄 뒤 한 단계, `end`·`else`·`elsif`·`when`·`rescue`·`ensure` 로 시작하는 줄을 치면 한 단계 덜.
-- HTML 태그 사이 Enter(void 요소는 빼고).
-- **VS Code 규칙 대조 판정자**: VS Code 설정(핀 고정 커밋)을 JS `RegExp` 로 돌린 결과를 말뭉치로 저장해, 우리 표의 답이 의도한 차이(위 오답을 고친 것)만 남는지 잰다. 규칙 원문은 저장소에 두지 않는다(답만).
+- **한 함수**: `session/editor/enter_rules.zig` 의 `decide(ctx, before, after, prev) Action` 이 Enter 의 갈래를 정한다(TR2 의 괄호 판정도 여기로 옮겼다). `line_ops.planNewline` 은 그 답을 글자로 옮길 뿐이다. 순서는 VS Code 와 같다 — 언어 규칙(주석 이어쓰기) → 괄호 → 들여쓰기 규칙.
+- **답의 모양은 VS Code 와 같다**(`getEnterAction`): 새 줄 = 이어 받은 들여쓰기(`remove` 만큼 뺀다) + `append`. `append` 가 없으면 `indent`·`indent_outdent` 는 한 단계, 있으면 **그것이 한 단계를 대신한다**(VS Code 의 기본 `appendText` 가 탭이고 그것을 단위로 바꾸는 것과 같다 — `/** a| */` 의 가운데 줄은 ` * ` 이지 한 단계 + ` * ` 가 아니다; 처음엔 둘을 더해 갈렸다, 대조 판정자가 드러냈다).
+- Python 제어문(`def`·`class`·`if`·`elif`·`else`·`for`·`while`·`try`·`except`·`finally`·`with`·`async`·`match`·`case`)이 `:` 로 끝나면(줄 끝 주석은 떼고) 한 단계.
+- 블록 주석(C·C++·Java·JS·TS·TSX·Go·Rust·PHP·Kotlin·CSS): `/**`·`/*` 뒤 Enter 는 ` * `(caret 뒤가 `*/` 면 그것은 아래 줄로), 주석 안 ` * ` 줄 뒤는 `* `(앞 줄이 주석 안일 때만), ` */` 로 끝난 줄 뒤는 정렬 공백 하나 빼기. 줄 주석(`//`) 가운데 Enter 면 `// ` 로 잇는다(줄 끝이면 잇지 않는다).
+- `case X:`·`default:` 뒤 한 단계(switch 를 쓰는 C 계열).
+- Ruby: 블록을 여는 줄(첫 낱말이 `def`·`class`·`module`·`if`·`unless`·`while`·`until`·`case`·`begin`·`for`·`else`·`elsif`·`when`·`rescue`·`ensure`, `private`/`protected def`, `… do`·`… do |x|`, `= if`/`= case`) 뒤 한 단계. 한 줄로 닫힌 것(`… end`)·후위 조건(`return if x`)·문자열 안 `do` 는 아니다.
+- HTML: 마지막 태그가 여는 태그(void·자기 닫힘·닫는 태그·주석이 아니다)이고 그 뒤에 다른 태그가 없으면(`<li>a|` 도) 한 단계, 그 닫는 짝이 caret 뒤에 바로 오면 가운데 줄.
+- **낱말 내어쓰기**(타이핑 — `typing_ops.keywordOutdent`): Ruby `end`·`else`·`elsif`·`ensure`·`rescue`(낱말 끝 글자)·`when `(뒤 공백), Python `else:`·`elif …:`·`except …:`·`finally:`(`:`)를 줄 끝에서 다 치면 그 줄을 한 단계 내어쓴다 — 그 줄의 들여쓰기가 위쪽 내용 줄 이상일 때만(이미 맞췄으면 그대로). 같은 줄의 커서 여럿은 앞 것만.
+- **VS Code 규칙 대조 판정자**(`INDR1`): `tools/editor/vscode_enter_oracle.mjs` 가 VS Code 내장 언어 설정(핀 커밋 `faa67179693e`)을 원래 의미(JS `RegExp`)로 돌려 말뭉치(77 줄 — TS·JS·Java·C·Go·Rust·Python·Ruby·HTML·CSS·JSON)의 답을 `enter_rules_vscode.zig` 에 찍는다(규칙 원문은 없다 — 답만). 판정자는 우리 `decide` 와 대조하고, 갈리는 것은 **의도한 차이 목록**(열하나 — 문자열·템플릿·줄 주석 안 괄호, C·Go·Rust 의 블록 주석 이어쓰기와 C 의 `case`, Python 줄 끝 주석·`match`, Ruby 문자열 안 `do`·한 줄로 닫힌 블록)에만 있어야 한다. 목록의 차이가 같아지면(VS Code 가 바뀌었거나 목록이 낡았다) 판정자가 실패한다.
 
 ### 구문 트리 문맥 (TR4)
 
@@ -93,7 +96,7 @@
 | --- | --- | --- |
 | TR1 | 들여쓰기 단위 — 감지 결과를 `Tab`·여러 줄 들여쓰기·`Backspace` 탭 스톱·문서 포맷 options 에, Makefile 기본 탭 | 완료 |
 | TR2 | 괄호 Enter(`indentOutdent`)·여는 괄호 뒤 한 단계·닫는 괄호 내어쓰기 | 완료 |
-| TR3 | 언어 규칙 표(Python·블록/줄 주석·`case`·Ruby·HTML) + VS Code 규칙 대조 판정자 | 대기 |
+| TR3 | 언어 규칙 표(Python·블록/줄 주석·`case`·Ruby·HTML)·낱말 내어쓰기 + VS Code 규칙 대조 판정자 | 완료 |
 | TR4 | 구문 트리 문맥 — 문자열·주석 안 자동 닫기 제외, 괄호 짝 찾기 보정 | 대기 |
 
 ## 한계 (받아들일 것)
@@ -101,6 +104,8 @@
 - 감지는 Term 마다 한 번이다 — 빈 파일에 탭으로 쓰기 시작해도 단위는 열 때의 추정(언어 기본)이다(VS Code 도 같다).
 - 줄 스캐너(TR2·TR3)는 여러 줄 문자열·블록 주석 안을 모른다 — TR4 의 트리가 보정한다.
 - 사용자 정의 규칙은 없다(plugin 경계 결정 전).
+- 낱말 내어쓰기는 낱말을 다 친 순간이라 Ruby `endpoint` 를 치면 `end` 에서 한 번 내어쓴다(VS Code 의 `decreaseIndentPattern` 도 같다).
+- 중괄호 없는 `if (x)` 다음 한 줄만 들여쓰기(VS Code TS `indentNextLinePattern`)는 하지 않는다 — 다음 줄을 친 뒤 되돌려야 하는 상태가 생긴다.
 
 ## 적대적 검증 (TR1, 5회)
 
@@ -117,6 +122,14 @@
 3. 상호작용 — **처음엔 모든 문법이 「줄 어디든」이라 Markdown 산문 `see [the docs|]` 의 Enter 가 링크를 들여쓰며 쪼갰다** → VS Code 언어 설정의 갈래대로 끝의 여는 괄호만 보는 문법을 갈랐다(`bracketEnterAnywhere`). **같은 공백 줄에 커서가 둘이면 `}` 의 내어쓰기 범위가 겹쳐 입력 전체가 거절됐다** → 앞 커서만 맞춘다(`INDB5`). 자동 닫기 뒤 Enter·평문·문자열 안 괄호는 제품 키 경로로 쟀다(`INDB4`).
 4. 경계 — 짝 찾기는 거슬러 64 KiB 까지, 줄 읽기는 한 번(스택 64 — 넘치면 오래된 것을 버린다; 마지막 것이 답), 닫히지 않은 문자열은 줄 끝까지 건너뛴다.
 5. 변이 — 20개. 처음 하나(G17 — 앞 커서가 뒤 커서까지의 공백을 먹지 않게 하는 막음)가 살아남아 그 장면(`{|␣|␣}`)을 `INDB2` 에 더해 잡았다. 20개 모두 판정자 실패로 잡혔다.
+
+## 적대적 검증 (TR3, 5회)
+
+1. 계약 대조 — 문서 모델 §3.9a 의 「언어별 규칙은 이 절이 아니다」를 언어 규칙 계약(블록·줄 주석·Python·`case`·Ruby·HTML·낱말 내어쓰기·VS Code 대조)으로 바꿨다. TR2 의 괄호 판정을 `enter_rules` 로 옮겨 Enter 의 갈래가 한 함수다.
+2. VS Code 대조 — 대조 판정자를 만들면서 셋을 고쳤다: **`appendText` 의 뜻**(있으면 한 단계를 대신한다 — 더하던 것), **`/** a| */`**(`*/` 를 아래 줄로), **HTML `<li>a|`**(여는 태그 뒤 글자가 있어도 — 줄이 `>` 로 끝나야 한다고 했던 것). 말뭉치 77 줄 중 갈리는 것은 의도한 차이 열하나뿐이다.
+3. 상호작용 — **`/** a| */` 의 Enter 가 ` */` 앞 공백을 먹어 `*/` 가 어긋났다**(괄호 Enter 의 공백 먹기를 그대로 탔다) → 덧붙일 글자가 있는 갈래는 안 먹는다(VS Code 도 그대로 둔다). 같은 줄의 커서 둘에서 낱말 내어쓰기가 겹쳐 입력이 거절되지 않게 앞 커서만 맞춘다(`INDR6`). 재변환(IME)·평문·Markdown 은 낱말 내어쓰기를 타지 않는다.
+4. 경계 — 낱말 내어쓰기가 위쪽 내용 줄을 찾아 빈 줄을 끝없이 거슬러 갔다 → 4096 줄 상한. Ruby 문자열 걷어내기는 512 바이트 버퍼(넘치면 앞부분만 — 판정이 보수적으로 「아님」 쪽).
+5. 변이 — 22개. 처음 회차에서 다섯이 살아남았다 — 줄 끝에서 열린 Ruby 문자열 안 `do`(H11), `cases:` 라벨(H12), void 가 아닌 자기 닫힘 `<Foo />`(H14), `/** a| */` 의 가운데 줄(H17), 같은 줄 커서 둘의 낱말 내어쓰기(H21) — 장면을 더해 잡았다. 들여쓴 블록 주석의 ` */` 뒤 정렬 공백 빼기(H16)는 그 뒤에도 살아남아(0열 주석은 빼고 나면 종전 경로와 같은 답) 들여쓴 주석 장면을 더했다. 넷(H5·H6·H16·H18)은 처음에 매개변수를 안 쓰게 만들어 컴파일 오류로만 죽어 의미 변이로 다시 썼다. 22개 모두 판정자 실패로 잡혔다.
 
 ## 검증
 

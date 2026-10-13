@@ -12,6 +12,8 @@ const delta = @import("../delta.zig");
 const pairs = @import("../pairs.zig");
 const selection = @import("../selection.zig");
 const line_index = @import("../line_index.zig");
+const language = @import("../language.zig");
+const indent_guides = @import("../indent_guides.zig");
 
 const Change = delta.Change;
 const Selection = selection.Selection;
@@ -71,6 +73,10 @@ pub const Typing = struct {
 pub const Reindent = struct {
     lines: LineIndex,
     brackets: []const u8,
+    /// 낱말 내어쓰기(TR3 — Ruby `end`·Python `else:` …)가 쓴다. 단위가 없으면 그 갈래를 안 탄다.
+    grammar: language.Grammar = .none,
+    unit: ?indent_guides.Unit = null,
+    tab_width: u16 = 4,
 };
 
 /// 짝 여는 괄호를 거슬러 찾는 상한(byte) — 그 너머면 내어쓰지 않는다(적대 입력 §3.8: 한 줄짜리 거대 문서에서 타이핑마다 끝까지 걷지 않게).
@@ -110,6 +116,72 @@ pub fn closerReindent(content: []const u8, r: Reindent, lo: usize, typed: u8) ?s
     return .{ .line_start = line.start, .indent = indent };
 }
 
+/// 낱말 글자(ASCII 영숫자·`_`) — 이 폴더는 `std.ascii` 를 쓰지 않는다(sans-io 경계 `tests/boundary/editor_ops_sans_io.zig` 의 허용 목록 밖).
+fn isWordByte(b: u8) bool {
+    return (b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9') or b == '_';
+}
+
+/// 낱말 내어쓰기가 위쪽 내용 줄을 찾아 거슬러 가는 줄 수의 상한.
+pub const keyword_scan_lines: usize = 4096;
+
+/// 블록을 닫거나 잇는 낱말을 **다 쳤을 때** 그 줄을 한 단계 내어쓴다(계획 editor-typing-rules TR3) — Ruby `end`·`else`·`elsif`·`ensure`·
+/// `rescue`(낱말 끝 글자)·`when `(뒤 공백), Python `else:`·`elif …:`·`except …:`·`finally:`(`:`). caret 뒤가 그 줄의 끝이고, 그 줄의 들여쓰기가
+/// 위쪽 내용 줄의 들여쓰기 이상일 때만 — 이미 내어썼으면 그대로(VS Code Ruby `decreaseIndentPattern`·Python 언어 서버의 같은 동작).
+/// 새 줄 머리(들여쓰기 + 이미 친 글자 + 친 글자)를 낸다 — 바꿀 것이 없으면 `null`.
+pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Reindent, lo: usize, typed: u8) !?struct { line_start: usize, text: []u8 } {
+    const unit = r.unit orelse return null;
+    if (r.grammar != .ruby and r.grammar != .python) return null;
+    const line = r.lines.line(r.lines.lineAt(lo)) orelse return null;
+    if (std.mem.trim(u8, content[lo..line.contentEnd()], " \t").len != 0) return null; // caret 뒤에 글자가 있다
+    const head = content[line.start..lo];
+    const indent = head[0 .. head.len - std.mem.trimStart(u8, head, " \t").len];
+    if (indent.len == 0) return null;
+    const code = head[indent.len..];
+    const hit = switch (r.grammar) {
+        .ruby => blk: {
+            // 친 글자까지 붙인 낱말이 정확히 그것이다.
+            var buf: [8]u8 = undefined;
+            if (code.len + 1 > buf.len) break :blk false;
+            @memcpy(buf[0..code.len], code);
+            buf[code.len] = typed;
+            const w = buf[0 .. code.len + 1];
+            for ([_][]const u8{ "end", "else", "elsif", "ensure", "rescue", "when " }) |k| if (std.mem.eql(u8, w, k)) break :blk true;
+            break :blk false;
+        },
+        .python => typed == ':' and blk: {
+            var i: usize = 0;
+            while (i < code.len and isWordByte(code[i])) i += 1;
+            const w = code[0..i];
+            for ([_][]const u8{ "else", "elif", "except", "finally" }) |k| if (std.mem.eql(u8, w, k)) break :blk true;
+            break :blk false;
+        },
+        else => false,
+    };
+    if (!hit) return null;
+    // 위쪽 내용 줄(공백뿐인 줄은 건너뛴다)의 들여쓰기 — 지금 줄이 그보다 얕으면 이미 내어썼다. 거슬러 가는 줄 수에 상한을 둔다(빈 줄이
+    // 수십만인 적대 문서에서 낱말을 칠 때마다 끝까지 걷지 않게 — 넘으면 위 내용 줄이 없는 것으로 본다).
+    var n = r.lines.lineAt(lo);
+    const floor = n -| keyword_scan_lines;
+    const above: []const u8 = while (n > floor) {
+        n -= 1;
+        const pl = r.lines.line(n) orelse break "";
+        const pt = content[pl.start..pl.contentEnd()];
+        const pi = pt.len - std.mem.trimStart(u8, pt, " \t").len;
+        if (pi < pt.len) break pt[0..pi];
+    } else "";
+    if (indent_guides.visualColumn(indent, r.tab_width) < indent_guides.visualColumn(above, r.tab_width)) return null;
+    // 한 단계 빼기 — 탭이면 하나, 공백이면 단위 폭까지.
+    var keep = indent.len;
+    if (indent[keep - 1] == '\t') {
+        keep -= 1;
+    } else {
+        var k: usize = 0;
+        while (keep > 0 and indent[keep - 1] == ' ' and k < unit.width) : (k += 1) keep -= 1;
+    }
+    const text = try std.mem.concat(allocator, u8, &.{ indent[0..keep], code, &[_]u8{typed} });
+    return .{ .line_start = line.start, .text = text };
+}
+
 /// `sels` 는 문서 순서. **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7) — `assist` 가 거짓이면(IME 재변환 등) 보지
 /// 않는다. 붙여넣기·IME 확정은 여러 글자가 한 번에 오는데 그때 괄호를 닫으면 사용자가 넣지 않은 문자가 들어간다.
 pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []const Selection, text: []const u8, assist: bool, reindent: ?Reindent) !Typing {
@@ -126,15 +198,30 @@ pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []con
             const before: ?u8 = if (lo > 0) content[lo - 1] else null;
             const after: ?u8 = if (hi < content.len) content[hi] else null;
             switch (pairs.decide(typed, hi > lo, before, after)) {
-                .insert_plain => if (hi == lo) if (reindent) |r| if (closerReindent(content, r, lo, typed)) |ri| if (ri.line_start >= prev_end) {
-                    // **닫는 괄호를 짝 줄의 들여쓰기로**(계획 editor-typing-rules TR2) — 줄 머리부터 caret 까지(공백뿐)를 그 들여쓰기 + 괄호로.
-                    const joined = try std.mem.concat(allocator, u8, &.{ ri.indent, &[_]u8{typed} });
-                    t.owned.append(allocator, joined) catch |e| {
-                        allocator.free(joined);
-                        return e;
+                .insert_plain => if (hi == lo) if (reindent) |r| {
+                    if (closerReindent(content, r, lo, typed)) |ri| if (ri.line_start >= prev_end) {
+                        // **닫는 괄호를 짝 줄의 들여쓰기로**(계획 editor-typing-rules TR2) — 줄 머리부터 caret 까지(공백뿐)를 그 들여쓰기 + 괄호로.
+                        const joined = try std.mem.concat(allocator, u8, &.{ ri.indent, &[_]u8{typed} });
+                        t.owned.append(allocator, joined) catch |e| {
+                            allocator.free(joined);
+                            return e;
+                        };
+                        try t.changes.append(allocator, .{ .start = ri.line_start, .end = lo, .text = joined });
+                        continue;
                     };
-                    try t.changes.append(allocator, .{ .start = ri.line_start, .end = lo, .text = joined });
-                    continue;
+                    if (try keywordOutdent(allocator, content, r, lo, typed)) |ko| {
+                        // **낱말을 다 쳤다** — 그 줄을 한 단계 내어쓴다(TR3). 줄 머리부터 caret 까지를 새 머리 + 친 글자로. 앞 커서의 변경과 겹치면
+                        // 하지 않는다(같은 줄의 커서 둘).
+                        if (ko.line_start >= prev_end) {
+                            t.owned.append(allocator, ko.text) catch |e| {
+                                allocator.free(ko.text);
+                                return e;
+                            };
+                            try t.changes.append(allocator, .{ .start = ko.line_start, .end = lo, .text = ko.text });
+                            continue;
+                        }
+                        allocator.free(ko.text);
+                    }
                 },
                 .insert_pair => |pr| {
                     const owned = try t.own(allocator, &[_]u8{ pr.open, pr.close });
@@ -340,4 +427,49 @@ test "INDB5 닫는 괄호 내어쓰기 × 커서 여럿 — 같은 공백 줄의
         try std.testing.expectEqualStrings("  }", t.changes.items[0].text); // 안쪽 `{` 의 줄(두 칸)
         try std.testing.expectEqual(@as(usize, 6), t.changes.items[0].start);
     }
+}
+
+test "INDR4 낱말 내어쓰기 — Ruby end·else·when·…, Python else:·elif …:·except …:·finally: 를 다 치면 한 단계, 이미 얕으면·줄 뒤에 글자가 있으면·다른 문법은 그대로 (계획 editor-typing-rules TR3)" {
+    const a = std.testing.allocator;
+    const four: indent_guides.Unit = .{ .tabs = false, .width = 4 };
+    const Case = struct { g: language.Grammar, src: []const u8, caret: usize, typed: u8, want: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .g = .ruby, .src = "def f\n    x\n    en\n", .caret = 18, .typed = 'd', .want = "end" },
+        .{ .g = .ruby, .src = "if a\n    x\n    els\n", .caret = 18, .typed = 'e', .want = "else" },
+        .{ .g = .ruby, .src = "case a\n    when 1\n        x\n        when\n", .caret = 40, .typed = ' ', .want = "    when " },
+        .{ .g = .python, .src = "if a:\n    x\n    else\n", .caret = 20, .typed = ':', .want = "else:" },
+        .{ .g = .python, .src = "try:\n    x\n    except ValueError\n", .caret = 32, .typed = ':', .want = "except ValueError:" },
+        .{ .g = .python, .src = "if a:\n    x\nelse\n", .caret = 16, .typed = ':', .want = null }, // 이미 내어썼다(들여쓰기 없음)
+        .{ .g = .python, .src = "if a:\n        x\n    else\n", .caret = 24, .typed = ':', .want = null }, // 위 줄보다 얕다 — 이미 맞췄다
+        .{ .g = .ruby, .src = "def f\n    en x\n", .caret = 12, .typed = 'd', .want = null }, // caret 뒤에 글자
+        .{ .g = .ruby, .src = "def f\n    x\n    xen\n", .caret = 19, .typed = 'd', .want = null }, // 낱말이 아니다
+        .{ .g = .typescript, .src = "if (a) {\n    x\n    en\n", .caret = 21, .typed = 'd', .want = null }, // 다른 문법
+    };
+    for (cases) |k| {
+        var lines = try line_index.build(a, k.src);
+        defer lines.deinit();
+        const r: Reindent = .{ .lines = lines, .brackets = "()[]{}", .grammar = k.g, .unit = four, .tab_width = 4 };
+        const got = try keywordOutdent(a, k.src, r, k.caret, k.typed);
+        if (k.want) |w| {
+            try std.testing.expect(got != null);
+            defer a.free(got.?.text);
+            try std.testing.expectEqualStrings(w, got.?.text);
+        } else {
+            if (got) |g| a.free(g.text);
+            try std.testing.expect(got == null);
+        }
+    }
+}
+
+test "INDR6 낱말 내어쓰기 × 커서 여럿 — 같은 줄의 두 커서(들여쓰기 안·줄 끝)는 겹치지 않게 뒤 것을 그 자리에 넣는다 (계획 editor-typing-rules TR3, H21)" {
+    const a = std.testing.allocator;
+    const content = "def f\n    x\n    en\n";
+    var lines = try line_index.build(a, content);
+    defer lines.deinit();
+    const r: Reindent = .{ .lines = lines, .brackets = "()[]{}", .grammar = .ruby, .unit = .{ .tabs = false, .width = 4 }, .tab_width = 4 };
+    var t = try planTyping(a, content, &.{ Selection.at(14), Selection.at(18) }, "d", true, r);
+    defer t.deinit(a);
+    try std.testing.expect(t.wellFormed());
+    try std.testing.expectEqual(@as(usize, 2), t.changes.items.len);
+    try std.testing.expectEqual(@as(usize, 18), t.changes.items[1].start); // 뒤 커서는 그 자리에
 }

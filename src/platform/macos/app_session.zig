@@ -15685,7 +15685,7 @@ pub const AppSession = struct {
                 if (sidebar_ops.beginSidebarScrollbarGesture(self, x_px, y_px)) return;
                 // 상단 헤더: 새 워크스페이스 아이콘 → 새 탭(하단 "+"를 헤더로 이동), view options 아이콘 → 메뉴(P4),
                 // 검색 영역 → 검색 활성(P3). 헤더 밖(none)이면 카드 슬롯 hit-test(✕ 닫기 / 전환 + 드래그 재정렬).
-                const header_region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, sidebar_ops.sidebarSearchBandTopPx(self));
+                const header_region = sidebar_ops.headerRegionAt(self, x_px, y_px); // zone ∪ 그려진 hover pill
                 switch (header_region) {
                     .new_workspace => _ = tab_ops.newTab(self) catch {},
                     .toggle_sidebar => sidebar_ops.toggleSidebarCollapsed(self), // ◧ → 사이드바 접기(좌상단 펼치기 버튼만 남음)
@@ -18758,7 +18758,7 @@ pub const AppSession = struct {
         // 사이드바 영역 호버는 슬롯(또는 상단 헤더)을 추적한다(터미널 URL 호버 아님).
         if (sidebar_ops.inSidebar(self, x_px)) {
             // 상단 헤더(검색바·아이콘) 영역이면 슬롯 호버 해제 + 아이콘은 pointingHand·검색 영역은 I-beam.
-            const region = chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, sidebar_ops.sidebarSearchBandTopPx(self));
+            const region = sidebar_ops.headerRegionAt(self, x_px, y_px); // zone ∪ 그려진 hover pill — mouse down·창 드래그와 같은 판정
             self.setHoveredHeaderRegion(region); // 아이콘이면 뒤에 호버 배경(검색·none이면 지움)
             if (region != .none) {
                 self.setHoveredSlot(null);
@@ -67050,6 +67050,108 @@ test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘
     try std.testing.expectEqual(@as(usize, 8), fits);
     // 종의 반 칸 이동이 0 이 아닌 값으로 실제로 실렸다(1칸 아이콘만 보면 이동을 안 해도 통과한다).
     try std.testing.expect(metal_frame.cellRasterIconGlyphOffsetPx(session.cell_width_px, maru.cell_text.sidebar_bell_cols) > 0);
+}
+
+// 펼친 헤더: **보이는 hover pill 은 어디를 눌러도 그 아이콘이다** — hover·클릭·창 드래그 세 경로 모두. 예전 판정(`headerHit`)은
+// 아이콘 줄 **셀 높이**만 받아, 띠 높이로 그린 pill 의 위아래(1x 약 5px · 2x 약 9px)가 창 드래그였고 종 pill 왼쪽 끝도 종 zone
+// 밖이었다(접힌 ◧ 는 #4432 에서 같은 결함을 고쳤다). pill 은 **그려진 quad 에서** 읽는다 — 제품의 사각형 함수를 다시 부르면
+// 그리기와 판정이 함께 틀려도 통과한다.
+test "sidebar 헤더: 그려진 hover pill 의 가장자리도 그 아이콘으로 눌린다 (1x·2x — hover·클릭·창 드래그)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const HR = chrome.components.sidebar.HeaderRegion;
+    const regions = [_]HR{ .notifications, .toggle_sidebar, .view_options, .new_workspace };
+    var probed: usize = 0;
+    var missed_by_zone: usize = 0; // 예전 판정(zone 만)이 놓치는 점 — 0 이면 이 판정자는 아무것도 안 잰다
+    var below_search: usize = 0; // pill 바로 아래가 검색 줄이었던 횟수 — 음성 단언이 실제로 검색 경로를 탔다
+    var below_empty: usize = 0; // pill 바로 아래가 띠 안 빈 줄이었던 횟수
+    var prev_ch: u32 = 0;
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        _ = try session.resize(1200 * scale / 1000, 700 * scale / 1000, scale);
+        try std.testing.expect(session.cell_height_px > prev_ch); // 2x 는 실제로 다시 잰 셀이어야 한다
+        prev_ch = session.cell_height_px;
+        const hover_fill = packRgbAlpha(session.appearance.theme.sidebar_foreground, 0x40);
+        // 네 아이콘의 pill 을 먼저 다 모은다 — 이웃 pill 과 겹치지 않아야 「그 점은 그 아이콘」이 하나로 정해진다.
+        var plates: [regions.len]metal_frame.GpuQuad = undefined;
+        for (regions, 0..) |region, i| {
+            session.setHoveredHeaderRegion(.none);
+            session.setHoveredHeaderRegion(region);
+            for (0..4) |_| {
+                _ = try session.tick();
+                if (!session.metal_dirty) break;
+            }
+            var found: ?metal_frame.GpuQuad = null;
+            var n: usize = 0;
+            for (session.gpu_quads.items) |q| if (q.fill_color0 == hover_fill) {
+                found = q;
+                n += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 1), n);
+            plates[i] = found orelse return error.TestUnexpectedResult;
+        }
+        const inside = struct {
+            fn f(q: metal_frame.GpuQuad, x: f32, y: f32) bool {
+                return x >= q.x and x < q.x + q.w and y >= q.y and y < q.y + q.h;
+            }
+        }.f;
+        for (regions, 0..) |region, i| {
+            const q = plates[i];
+            // pill 안쪽 0.5px 의 네 모서리 + 위·아래 변 가운데(세로 데드존이 있던 자리).
+            const xs = [_]f32{ q.x + 0.5, q.x + q.w - 0.5, q.x + q.w / 2.0 };
+            const ys = [_]f32{ q.y + 0.5, q.y + q.h - 0.5 };
+            for (xs) |x| for (ys) |y| {
+                for (plates, 0..) |o, j| if (j != i) try std.testing.expect(!inside(o, x, y)); // 이웃 pill 과 안 겹친다
+                const px: f64 = x;
+                const py: f64 = y;
+                session.setHoveredHeaderRegion(.none);
+                try std.testing.expectEqual(CursorKind.link, session.hoverCursor(px, py, 0));
+                try std.testing.expectEqual(@as(?HR, region), session.hovered_header_region);
+                try std.testing.expect(!workspace_ops.isWindowDragRegion(session, px, py));
+                const zone = chrome.components.sidebar.headerHit(px, py, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px, sidebar_ops.sidebarSearchBandTopPx(session));
+                if (zone != region) missed_by_zone += 1;
+                probed += 1;
+            };
+            // 음성: pill 밖은 넓히지 않는다. 바로 아래는 그 아이콘이 아니다 — 검색 줄이면 검색(1x: pill 이 띠를 채운다), 띠 안에
+            // 남은 줄이면 빈 띠 = 창 드래그(2x: 띠 55 · pill 54).
+            const below_y: f64 = q.y + q.h + 0.5;
+            const mid_x: f64 = q.x + q.w / 2.0;
+            session.setHoveredHeaderRegion(.none);
+            const below_cursor = session.hoverCursor(mid_x, below_y, 0);
+            try std.testing.expect(session.hovered_header_region != region);
+            if (below_y >= @as(f64, @floatFromInt(sidebar_ops.sidebarSearchBandTopPx(session))) and below_y < @as(f64, @floatFromInt(session.sidebar_header_height_px))) {
+                try std.testing.expectEqual(CursorKind.text, below_cursor);
+                below_search += 1;
+            } else {
+                try std.testing.expectEqual(@as(?HR, null), session.hovered_header_region);
+                try std.testing.expect(workspace_ops.isWindowDragRegion(session, mid_x, below_y));
+                below_empty += 1;
+            }
+        }
+        // 음성: 종 pill 왼쪽 바깥(신호등 쪽 빈 띠)은 그대로 창 드래그다.
+        {
+            const b = plates[0];
+            const lx: f64 = b.x - 0.5;
+            const ly: f64 = b.y + b.h / 2.0;
+            try std.testing.expect(workspace_ops.isWindowDragRegion(session, lx, ly));
+            session.setHoveredHeaderRegion(.none);
+            _ = session.hoverCursor(lx, ly, 0);
+            try std.testing.expectEqual(@as(?HR, null), session.hovered_header_region);
+        }
+        // 클릭 경로: ◧ pill 의 위 끝(예전엔 창 드래그였던 줄)을 누르면 접힌다.
+        const t = plates[1];
+        session.setHoveredHeaderRegion(.none);
+        session.mouse(1, t.x + t.w / 2.0, t.y + 0.5, 0, 0);
+        try std.testing.expect(session.sidebar_collapsed);
+        sidebar_ops.toggleSidebarCollapsed(session); // 원복
+        try std.testing.expect(!session.sidebar_collapsed);
+    }
+    try std.testing.expectEqual(@as(usize, 48), probed); // 2 배율 × 4 아이콘 × 6 점
+    try std.testing.expect(missed_by_zone > 0);
+    try std.testing.expectEqual(@as(usize, 8), below_search + below_empty);
+    try std.testing.expect(below_search > 0); // 검색 줄 쪽 음성 단언이 한 번은 실제로 돌았다
 }
 
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS

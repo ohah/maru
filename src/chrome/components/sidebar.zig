@@ -386,6 +386,9 @@ pub fn headerSearchBandTop(header_height_px: u32, icon_band_px: u32, cell_height
 /// 폭/cell 0·비유한·cols<13(아이콘 4개가 안 들어감)은 none. 영역 경계는 buildSidebarHeaderFrame이 glyph를 그리는 cell
 /// row/col(floor cols)과 정확히 같게 잡는다 — 안 그리면 hit-test도 none(그려진 것=클릭되는 것 단일 출처).
 pub const HeaderRegion = enum { none, search, view_options, new_workspace, toggle_sidebar, notifications };
+/// 헤더 glyph 4개(종·◧·⚙·+)가 들어가는 최소 열 수 — 이보다 좁으면 아이콘을 안 그리고 hit-test 도 none(그려진 것 = 클릭되는 것).
+/// 호스트가 아이콘 판(hover pill)을 그리거나 그 판으로 판정을 넓힐 때도 이 값을 쓴다.
+pub const header_icon_min_cols: u16 = 13;
 pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32, cell_height_px: u32, header_height_px: u32, icon_band_px: u32) HeaderRegion {
     if (header_height_px == 0 or sidebar_width_px == 0 or cell_width_px == 0 or cell_height_px == 0) return .none;
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return .none;
@@ -395,14 +398,15 @@ pub fn headerHit(x_px: f64, y_px: f64, sidebar_width_px: u32, cell_width_px: u32
     const cw: f64 = @floatFromInt(cell_width_px);
     const ch: f64 = @floatFromInt(cell_height_px);
     const cols: u32 = sidebar_width_px / cell_width_px; // buildSidebarHeaderFrame과 같은 floor — 아이콘 col 정합
-    if (cols < 13) return .none; // 헤더 glyph 4개(종·◧·⚙·+)가 안 들어가는 폭 — 안 그리면 hit-test도 none(단일 출처)
+    if (cols < header_icon_min_cols) return .none; // 헤더 glyph 4개(종·◧·⚙·+)가 안 들어가는 폭 — 안 그리면 hit-test도 none(단일 출처)
     // 밴드 경계는 렌더(검색 frame origin)와 **같은 단일 출처**다 — 셀 row로 가르면 terminal 폰트에 묶여 오른쪽
     // 탭 바와 어긋난다(docs/file-explorer.md §3.5).
     const search_top: f64 = @floatFromInt(headerSearchBandTop(header_height_px, icon_band_px, cell_height_px));
     if (y_px >= search_top) return .search; // 상단 바 밴드 = 검색(그려진 🔍/입력 줄)
     // 아이콘 줄은 띠 밴드 **안에서 세로 중앙**에 한 셀 줄로 그려진다(렌더러가 `(띠 - 셀) / 2`만큼 내린다).
     // hit도 그 사각형이어야 "그려진 것 = 클릭되는 것"이 성립한다 — 예전처럼 `[0, ch)`로 두면 띠가 셀보다 높은
-    // 만큼 클릭 영역이 아이콘보다 위로 밀린다. 띠 위아래로 남는 부분은 빈 영역 = 창 드래그다.
+    // 만큼 클릭 영역이 아이콘보다 위로 밀린다. 띠 위아래로 남는 부분은 이 함수에선 빈 영역(= 창 드래그)이다 — 판을 띠
+    // 높이로 그리는 호스트(macOS)는 그 판을 판정에 더한다(`app_session/sidebar.zig` 의 `headerRegionAt`).
     const icon_top: f64 = if (search_top > ch) (search_top - ch) / 2 else 0;
     if (y_px < icon_top or y_px >= icon_top + ch) return .none;
     if (x_px >= @as(f64, @floatFromInt(cols - 3)) * cw) return .new_workspace; // 줄0 우측, 그려진 '+' col(cols-2) 포함 3칸 zone

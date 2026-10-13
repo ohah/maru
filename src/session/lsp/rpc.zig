@@ -550,7 +550,7 @@ fn markupText(v: ?std.json.Value) ?[]const u8 {
     };
 }
 
-/// `textDocument/formatting`(§8.2e). 들여쓰기 단위는 이 편집기의 탭 문자(`insertSpaces = false`), `tabSize = editor.tab-width`.
+/// `textDocument/formatting`(§8.2e). 들여쓰기는 그 문서의 단위(호출자가 감지한 값 — 공백이면 `insert_spaces` 참·그 폭, 탭이면 거짓·탭 폭).
 pub fn formattingRequest(allocator: std.mem.Allocator, seq: u32, uri: []const u8, tab_size: u32, insert_spaces: bool) error{OutOfMemory}![]u8 {
     return std.json.Stringify.valueAlloc(allocator, .{
         .jsonrpc = "2.0",
@@ -1480,13 +1480,16 @@ test "LSJ7 signatureHelp — 요청 id 3e8+seq·context, capability, 트리거 �
     try testing.expectEqual(@as(u32, 0), signatureView(r4.value, .utf8).?.index);
 }
 
-test "LSJ8 formatting — 요청 id 4e8+seq·options(tabSize·insertSpaces false), capability bool/object (§8.2e)" {
+test "LSJ8 formatting — 요청 id 4e8+seq·options(tabSize·insertSpaces 그대로), capability bool/object (§8.2e)" {
     const a = testing.allocator;
     const req = try formattingRequest(a, 2, "file:///a.c", 4, false);
     defer a.free(req);
     try testing.expect(std.mem.indexOf(u8, req, "\"id\":400000002") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"method\":\"textDocument/formatting\"") != null);
     try testing.expect(std.mem.indexOf(u8, req, "\"options\":{\"tabSize\":4,\"insertSpaces\":false}") != null);
+    const spaces = try formattingRequest(a, 3, "file:///a.c", 2, true); // 공백 파일의 단위(계획 editor-typing-rules TR1)
+    defer a.free(spaces);
+    try testing.expect(std.mem.indexOf(u8, spaces, "\"options\":{\"tabSize\":2,\"insertSpaces\":true}") != null);
     var p1 = try parse(a, "{\"jsonrpc\":\"2.0\",\"id\":400000002,\"result\":[]}");
     defer p1.deinit();
     const c1 = classify(p1.value);

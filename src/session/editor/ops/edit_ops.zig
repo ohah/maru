@@ -13,6 +13,7 @@ const find = @import("../find.zig");
 const line_index = @import("../line_index.zig");
 const motion = @import("../motion.zig");
 const selection = @import("../selection.zig");
+const indent_guides = @import("../indent_guides.zig");
 
 const Change = delta.Change;
 const LineIndex = line_index.LineIndex;
@@ -117,15 +118,43 @@ pub fn planPaste(allocator: std.mem.Allocator, content: []const u8, lines: LineI
 /// 자리"가 갈리고**, 사용자는 그 차이를 설명할 수 없다.
 pub const DeleteUnit = enum { char, word, line_edge };
 
+/// 들여쓰기 안 Backspace 의 탭 스톱(문서 모델 §3.9a — VS Code `editor.useTabStops` 기본 켬). `unit` 은 그 파일의 들여쓰기 단위,
+/// `tab_width` 는 탭의 화면 폭.
+pub const TabStops = struct { unit: indent_guides.Unit, tab_width: u16 };
+
+/// caret `at` 앞이 그 줄의 공백·탭뿐이면 **앞 탭 스톱의 자리**를 낸다 — 공백 네 칸 단위에서 열 8 의 Backspace 는 열 4 까지 지운다.
+/// 탭이 섞여도 같다: 그 줄 머리부터 열을 세어 **처음으로 스톱 열에 닿는 자리**까지 지운다(VS Code `deleteLeft` 의 `useTabStops` 갈래 —
+/// `prevIndentTabStop` 의 열을 다시 글자 자리로 옮긴다; `␣␣⇥|` 는 세 글자를 지운다). 한 글자보다 더 지울 것이 없으면(탭 하나·스톱 바로
+/// 뒤 한 칸) `null` — 호출자가 한 글자를 지운다.
+fn tabStopStart(content: []const u8, lines: LineIndex, at: usize, stops: ?TabStops) ?usize {
+    const st = stops orelse return null;
+    const line = lines.line(lines.lineAt(at)) orelse return null;
+    if (at <= line.start) return null;
+    const head = content[line.start..at];
+    for (head) |b| if (b != ' ' and b != '\t') return null; // 들여쓰기 안이 아니다
+    const target = st.unit.prevStop(indent_guides.visualColumn(head, st.tab_width));
+    // 머리부터 한 번만 걷는다(열이 늘기만 한다) — 자리마다 처음부터 세면 아주 긴 들여쓰기(§3.8 적대 입력)에서 제곱이 된다.
+    const tw: u32 = @max(st.tab_width, 1);
+    var col: u32 = 0;
+    var lo = line.start;
+    while (lo < at and col < target) : (lo += 1) col = if (content[lo] == '\t') (col / tw + 1) * tw else col + 1;
+    return if (at - lo > 1) lo else null;
+}
+
 /// **단위로 지운다**(§3.2). 선택이 있으면 단위와 무관하게 그 선택을 지운다 — 사용자가 이미 범위를 골랐는데 단위로 다시
 /// 정하면 고른 것이 무시된다. `auto_closed_at` 은 자동으로 넣은 닫는 문자의 자리(§3.7 — Backspace 가 그것을 함께
-/// 지운다). 변경이 겹치면 `null` 이다(호출자 결함 — 통째로 거절한다).
-pub fn planDelete(allocator: std.mem.Allocator, content: []const u8, lines: LineIndex, sels: []const Selection, backward: bool, unit: DeleteUnit, auto_closed_at: ?usize) !?Edit {
+/// 지운다). 변경이 겹치면 `null` 이다(호출자 결함 — 통째로 거절한다). `stops` 가 있으면 들여쓰기 안의 Backspace 가 앞 탭 스톱까지
+/// 지운다(아래 — 계획 editor-typing-rules TR1).
+pub fn planDelete(allocator: std.mem.Allocator, content: []const u8, lines: LineIndex, sels: []const Selection, backward: bool, unit: DeleteUnit, auto_closed_at: ?usize, stops: ?TabStops) !?Edit {
     var tagged: std.ArrayList(Tagged) = .empty;
     defer tagged.deinit(allocator);
+    // 앞 커서의 끝 — 탭 스톱까지 지우는 범위가 그 너머로 가지 않게 한다(같은 들여쓰기에 커서가 둘이면 두 범위가 겹쳐 통째로 거절되던 것 —
+    // 계획 editor-typing-rules TR1 적대적 3회차). 입력은 문서 순서다.
+    var floor: usize = 0;
     for (sels, 0..) |sel, i| {
         var lo = @min(sel.start(), content.len);
         var hi = @min(sel.end(), content.len);
+        defer floor = @max(floor, hi);
         if (lo == hi) {
             // caret뿐 — **단위만큼** 무른다. 경계는 `motion.zig`가 소유한다(이동과 같은 자리여야
             // "⌥←로 간 곳"과 "⌥⌫가 지운 곳"이 갈리지 않는다).
@@ -141,7 +170,10 @@ pub fn planDelete(allocator: std.mem.Allocator, content: []const u8, lines: Line
                     hi = nextCharBoundary(content, hi);
                 }
                 lo = switch (unit) {
-                    .char => prevCharBoundary(content, lo),
+                    .char => blk: {
+                        const stop = tabStopStart(content, lines, lo, stops) orelse break :blk prevCharBoundary(content, lo);
+                        break :blk if (stop >= floor) stop else if (floor < lo) floor else prevCharBoundary(content, lo);
+                    },
                     .word => motion.wordLeft(content, lo),
                     .line_edge => blk: {
                         // **줄 머리까지 — 들여쓰기도 함께 지운다**(§3.2, 2026-09-26).
@@ -419,7 +451,7 @@ test "planDelete — 문서 처음의 caret 은 변경을 안 내고 of_sel 이 
     var lines = try line_index.build(a, content);
     defer lines.deinit();
     const sels = [_]Selection{ Selection.at(0), Selection.at(4) };
-    var e = (try planDelete(a, content, lines, &sels, true, .char, null)).?;
+    var e = (try planDelete(a, content, lines, &sels, true, .char, null, null)).?;
     defer e.deinit(a);
     try testing.expectEqualSlices(?usize, &.{ null, 0 }, e.of_sel);
     try testing.expectEqual(@as(usize, 3), e.changes.items[0].start);
@@ -433,10 +465,10 @@ test "planDelete — 단위와 자동 닫기, 겹치면 거절한다 (§3.2·§3
         var lines = try line_index.build(a, content);
         defer lines.deinit();
         const sels = [_]Selection{Selection.at(9)};
-        var w = (try planDelete(a, content, lines, &sels, true, .word, null)).?;
+        var w = (try planDelete(a, content, lines, &sels, true, .word, null, null)).?;
         defer w.deinit(a);
         try testing.expectEqual(@as(usize, 6), w.changes.items[0].start);
-        var l = (try planDelete(a, content, lines, &sels, true, .line_edge, null)).?;
+        var l = (try planDelete(a, content, lines, &sels, true, .line_edge, null, null)).?;
         defer l.deinit(a);
         try testing.expectEqual(@as(usize, 0), l.changes.items[0].start); // 들여쓰기까지 0열
     }
@@ -445,7 +477,7 @@ test "planDelete — 단위와 자동 닫기, 겹치면 거절한다 (§3.2·§3
         var lines = try line_index.build(a, content);
         defer lines.deinit();
         const sels = [_]Selection{Selection.at(1)};
-        var e = (try planDelete(a, content, lines, &sels, true, .char, 1)).?;
+        var e = (try planDelete(a, content, lines, &sels, true, .char, 1, null)).?;
         defer e.deinit(a);
         try testing.expectEqual(@as(usize, 0), e.changes.items[0].start);
         try testing.expectEqual(@as(usize, 2), e.changes.items[0].end); // 닫는 것까지
@@ -455,7 +487,75 @@ test "planDelete — 단위와 자동 닫기, 겹치면 거절한다 (§3.2·§3
         var lines = try line_index.build(a, content);
         defer lines.deinit();
         const sels = [_]Selection{ Selection.fromPoints(0, 3), Selection.at(2) };
-        try testing.expect((try planDelete(a, content, lines, &sels, true, .char, null)) == null);
+        try testing.expect((try planDelete(a, content, lines, &sels, true, .char, null, null)) == null);
+    }
+}
+
+test "INDT3 planDelete 탭 스톱 — 들여쓰기 안의 Backspace 는 앞 스톱까지 공백을 지우고, 글자 뒤·탭·스톱 바로 뒤 한 칸은 한 글자 (계획 editor-typing-rules TR1)" {
+    const a = testing.allocator;
+    const four: TabStops = .{ .unit = .{ .tabs = false, .width = 4 }, .tab_width = 4 };
+    const Case = struct { content: []const u8, at: usize, start: usize };
+    const cases = [_]Case{
+        .{ .content = "        x\n", .at = 8, .start = 4 }, // 열 8 → 4
+        .{ .content = "      x\n", .at = 6, .start = 4 }, // 열 6 → 4(스톱 사이면 그 단계의 머리)
+        .{ .content = "    x\n", .at = 4, .start = 0 },
+        .{ .content = "     x\n", .at = 5, .start = 4 }, // 스톱 바로 뒤 한 칸 — 한 글자(같은 답)
+        .{ .content = "\t  x\n", .at = 3, .start = 1 }, // 탭 뒤 공백 둘(열 6 → 4) — 탭은 남는다
+        .{ .content = "  \tx\n", .at = 3, .start = 0 }, // 공백 둘 뒤 탭(열 4 → 0) — 세 글자(VS Code 와 같다)
+        .{ .content = "\t\tx\n", .at = 2, .start = 1 }, // 탭 둘(열 8 → 4) — 탭 하나
+        .{ .content = "\tx\n", .at = 1, .start = 0 }, // 탭 하나 — 한 글자
+        .{ .content = "ab    x\n", .at = 6, .start = 5 }, // 글자 뒤의 공백 — 들여쓰기 안이 아니다, 한 글자
+        .{ .content = "a\n    \n", .at = 6, .start = 2 }, // 둘째 줄 — 줄 머리부터 센다
+    };
+    for (cases) |c| {
+        var lines = try line_index.build(a, c.content);
+        defer lines.deinit();
+        const sels = [_]Selection{Selection.at(c.at)};
+        var e = (try planDelete(a, c.content, lines, &sels, true, .char, null, four)).?;
+        defer e.deinit(a);
+        try testing.expectEqual(c.start, e.changes.items[0].start);
+        try testing.expectEqual(c.at, e.changes.items[0].end);
+    }
+    // 같은 들여쓰기에 커서 둘(열 6·8) — 뒤 커서는 앞 커서의 끝에서 멈춘다(겹쳐 통째로 거절되지 않는다).
+    {
+        const content = "        x\n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        const sels = [_]Selection{ Selection.at(6), Selection.at(8) };
+        var e = (try planDelete(a, content, lines, &sels, true, .char, null, four)).?;
+        defer e.deinit(a);
+        try testing.expectEqual(@as(usize, 2), e.changes.items.len);
+        try testing.expectEqual(@as(usize, 4), e.changes.items[0].start);
+        try testing.expectEqual(@as(usize, 6), e.changes.items[0].end);
+        try testing.expectEqual(@as(usize, 6), e.changes.items[1].start);
+        try testing.expectEqual(@as(usize, 8), e.changes.items[1].end);
+    }
+    // 단위 2 — 열 6 에서 4 까지(두 칸).
+    {
+        const content = "      x\n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        const sels = [_]Selection{Selection.at(6)};
+        var e = (try planDelete(a, content, lines, &sels, true, .char, null, .{ .unit = .{ .tabs = false, .width = 2 }, .tab_width = 4 })).?;
+        defer e.deinit(a);
+        try testing.expectEqual(@as(usize, 4), e.changes.items[0].start);
+    }
+    // 스톱이 없으면(주지 않으면) 종전대로 한 글자 — 단어·줄 단위와 앞으로 지우기는 탭 스톱을 안 본다.
+    {
+        const content = "        x\n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        const sels = [_]Selection{Selection.at(8)};
+        var e = (try planDelete(a, content, lines, &sels, true, .char, null, null)).?;
+        defer e.deinit(a);
+        try testing.expectEqual(@as(usize, 7), e.changes.items[0].start);
+        var w = (try planDelete(a, content, lines, &sels, true, .line_edge, null, four)).?;
+        defer w.deinit(a);
+        try testing.expectEqual(@as(usize, 0), w.changes.items[0].start);
+        const fwd = [_]Selection{Selection.at(0)};
+        var f = (try planDelete(a, content, lines, &fwd, false, .char, null, four)).?;
+        defer f.deinit(a);
+        try testing.expectEqual(@as(usize, 1), f.changes.items[0].end);
     }
 }
 

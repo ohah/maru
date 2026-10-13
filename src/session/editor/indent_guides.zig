@@ -8,6 +8,7 @@
 //! 화면 축으로 옮기는 것은 호출자의 일이다.
 const std = @import("std");
 const fold = @import("fold.zig");
+const language = @import("language.zig");
 
 /// 간격 추정이 보는 줄 수의 상한 — VS Code `guessIndentation` 과 같다.
 pub const guess_line_limit: usize = 10_000;
@@ -23,7 +24,65 @@ pub const Guess = struct {
     pub fn unit(self: Guess, tab_width: u16) u32 {
         return if (self.tabs) @max(tab_width, 1) else self.spaces;
     }
+
+    /// 편집의 들여쓰기 한 단계(문서 모델 §3.9a — 계획 editor-typing-rules TR1). 안내선과 **같은 추정**이다 — 두 벌이면 선이 2 칸인데
+    /// `Tab` 은 4 칸을 넣는 파일이 생긴다.
+    pub fn editUnit(self: Guess, tab_width: u16) Unit {
+        return .{ .tabs = self.tabs, .width = @intCast(@min(@max(self.unit(tab_width), 1), max_unit_width)) };
+    }
 };
+
+/// 들여쓰기 한 단계의 폭 상한 — 설정 `editor.tab-width` 의 상한(16)과 같다.
+pub const max_unit_width: u8 = 16;
+
+/// 편집의 들여쓰기 단위 — 탭 하나, 또는 공백 `width` 칸. `width` 는 탭이면 탭 폭(내어쓰기·탭 스톱이 쓴다).
+pub const Unit = struct {
+    tabs: bool,
+    width: u8,
+
+    const spaces_buf = " " ** max_unit_width;
+
+    /// 한 단계의 글자(여러 줄 들여쓰기·Enter 의 한 단계).
+    pub fn text(self: Unit) []const u8 {
+        return if (self.tabs) "\t" else spaces_buf[0..@max(self.width, 1)];
+    }
+
+    /// 열 `col` 에서 `Tab` 이 넣는 글자 — 탭이면 탭 하나, 공백이면 **다음 탭 스톱까지**(VS Code `insertSpaces` — 열 5 에서 폭 4 면 공백 3).
+    pub fn toNextStop(self: Unit, col: u32) []const u8 {
+        if (self.tabs) return "\t";
+        const w: u32 = @max(self.width, 1);
+        return spaces_buf[0..@intCast(w - col % w)];
+    }
+
+    /// 열 `col` 바로 앞의 탭 스톱(Backspace 가 들여쓰기 안에서 지워 갈 자리 — VS Code `useTabStops`). `col` 이 0 이면 0.
+    pub fn prevStop(self: Unit, col: u32) u32 {
+        if (col == 0) return 0;
+        const w: u32 = @max(self.width, 1);
+        return ((col - 1) / w) * w;
+    }
+};
+
+/// 줄 머리부터 `head` 끝까지의 **화면 열** — 탭은 다음 탭 스톱(`tab_width`)으로, 그 밖의 byte 는 한 열로 센다(들여쓰기 안에서만 쓴다 —
+/// 들여쓰기는 공백·탭뿐이라 글자 폭을 몰라도 된다).
+pub fn visualColumn(head: []const u8, tab_width: u16) u32 {
+    const tw: u32 = @max(tab_width, 1);
+    var col: u32 = 0;
+    for (head) |b| col = if (b == '\t') (col / tw + 1) * tw else col + 1;
+    return col;
+}
+
+/// 추정의 **언어 기본**(동률·들여쓴 줄이 없을 때) — 공백이면 참. VS Code 는 몇 언어의 `insertSpaces` 기본을 바꾼다(`configurationDefaults` —
+/// 확장 `package.json` 원문): `[go]`·`[makefile]` 은 탭. Makefile 은 문법이 없어 경로(`Makefile`·`GNUmakefile`·`makefile`·`*.mk`)로 본다 —
+/// 레시피 줄은 탭이어야 하므로 공백을 넣으면 빌드가 깨진다(계획 editor-typing-rules TR1).
+pub fn defaultSpacesMode(grammar: language.Grammar, path: ?[]const u8) bool {
+    if (grammar == .go) return false;
+    if (path) |p| {
+        const name = std.fs.path.basename(p);
+        for ([_][]const u8{ "Makefile", "GNUmakefile", "makefile" }) |m| if (std.mem.eql(u8, name, m)) return false;
+        if (std.mem.endsWith(u8, name, ".mk") and name.len > 3) return false;
+    }
+    return true;
+}
 
 /// **파일의 들여쓰기를 추정한다** — VS Code `guessIndentation` 의 규칙 그대로(§5.1c). 앞 10,000 줄에서 탭으로 들여쓴 줄과 공백으로 들여쓴
 /// 줄 중 많은 쪽을 고르고, 공백이면 이웃한 내용 줄끼리의 들여쓰기 차이를 세어 {2, 4, 6, 8, 3, 5, 7} 중 가장 많은 것을 쓴다(2 가 4 의 2/3
@@ -684,4 +743,44 @@ test "IG10 창 단계(`levels`)도 긴 공백 구간을 줄마다 다시 훑지 
         _ = active(src, p, mid, mid - 100, mid + 155);
         try testing.expect(reads <= 3 * n);
     }
+}
+
+test "IG11 편집 단위 — 감지 결과를 그대로(탭·공백 폭), 다음 탭 스톱까지의 공백, 앞 스톱, 화면 열 (문서 모델 §3.9a, 계획 editor-typing-rules TR1)" {
+    // 공백 2 파일 — 한 단계는 두 칸, 열 0·1 에서 Tab 은 2·1 칸, 열 3 에서 1 칸.
+    const two = (Guess{ .tabs = false, .spaces = 2 }).editUnit(4);
+    try testing.expect(!two.tabs);
+    try testing.expectEqualStrings("  ", two.text());
+    try testing.expectEqualStrings("  ", two.toNextStop(0));
+    try testing.expectEqualStrings(" ", two.toNextStop(1));
+    try testing.expectEqualStrings(" ", two.toNextStop(3));
+    // 공백 4 — 열 5 에서 3 칸(VS Code 의 예).
+    const four = (Guess{ .tabs = false, .spaces = 4 }).editUnit(8);
+    try testing.expectEqualStrings("   ", four.toNextStop(5));
+    try testing.expectEqualStrings("    ", four.text());
+    // 탭 파일 — 글자는 늘 탭 하나, 폭은 탭 폭(내어쓰기·탭 스톱이 쓴다).
+    const tab = (Guess{ .tabs = true, .spaces = 4 }).editUnit(8);
+    try testing.expectEqualStrings("\t", tab.text());
+    try testing.expectEqualStrings("\t", tab.toNextStop(3));
+    try testing.expectEqual(@as(u8, 8), tab.width);
+    // 앞 스톱 — 스톱 위면 한 단계 앞, 사이면 그 단계의 머리, 0 이면 0.
+    try testing.expectEqual(@as(u32, 4), four.prevStop(8));
+    try testing.expectEqual(@as(u32, 4), four.prevStop(6));
+    try testing.expectEqual(@as(u32, 0), four.prevStop(1));
+    try testing.expectEqual(@as(u32, 0), four.prevStop(0));
+    // 화면 열 — 탭은 다음 스톱으로.
+    try testing.expectEqual(@as(u32, 0), visualColumn("", 4));
+    try testing.expectEqual(@as(u32, 4), visualColumn("\t", 4));
+    try testing.expectEqual(@as(u32, 4), visualColumn("  \t", 4));
+    try testing.expectEqual(@as(u32, 6), visualColumn("\t  ", 4));
+    // 폭은 1~16 으로 묶인다(설정 범위).
+    try testing.expectEqual(@as(u8, 16), (Guess{ .tabs = false, .spaces = 200 }).editUnit(4).width);
+    try testing.expectEqual(@as(u8, 1), (Guess{ .tabs = true, .spaces = 0 }).editUnit(0).width);
+}
+
+test "IG12 언어 기본 — Go·Makefile 은 탭, 그 밖은 공백 (VS Code `[go]`·`[makefile]` 의 insertSpaces, 계획 editor-typing-rules TR1)" {
+    try testing.expect(!defaultSpacesMode(.go, "/r/a.go"));
+    try testing.expect(!defaultSpacesMode(.go, null));
+    for ([_][]const u8{ "/r/Makefile", "/r/GNUmakefile", "/r/makefile", "/r/rules.mk" }) |p| try testing.expect(!defaultSpacesMode(.none, p));
+    for ([_][]const u8{ "/r/a.ts", "/r/a.py", "/r/notes.txt", "/r/.mk", "/r/Makefile.bak" }) |p| try testing.expect(defaultSpacesMode(language.grammarForPath(p), p));
+    try testing.expect(defaultSpacesMode(.none, null));
 }

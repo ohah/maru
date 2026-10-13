@@ -23,7 +23,9 @@
 //! - `textDocument/formatting` → 각 줄에서 **첫 두 칸 이상 공백 묶음**을 한 칸으로 줄이는 `TextEdit[]`(줄마다 하나, 줄 순서의 **역순**으로 보내
 //!   클라이언트가 정렬해야 한다; character = byte — ASCII 본문에서만 맞다). 본문에 `NOFMT` 면 `null`, `BADFMT` 면 겹치는 edit 둘(거부돼야 한다),
 //!   `FMTSTALL` 이면 답하지 않는다(저장 시 포맷의 시한).
-//!   `options` 가 계약(§8.2e ③)과 다르면 — `insertSpaces` 가 false 가 아니거나 `tabSize` 가 1 미만 — `null`(제품 경계에서 options 를 잰다).
+//!   `options` 가 계약(§8.2e ③)과 다르면 — `insertSpaces` 가 bool 이 아니거나 `tabSize` 가 1 미만 — `null`(제품 경계에서 options 를 잰다).
+//!   본문에 `FMTOPTS` 가 있으면 그 표식을 받은 options 로 바꾸는 edit 하나만 낸다(`OPTS spaces=<true|false> size=<n>` — 문서의 들여쓰기 단위를
+//!   보냈는지 잰다, 계획 editor-typing-rules TR1).
 //!   capability `documentFormattingProvider: true`(`MARU_FAKE_LSP_NOFMTCAP=1` 이면 false — 클라이언트가 요청을 안 보내야 한다).
 //! - `textDocument/rename` → 요청 자리의 식별자를 이 문서와 같은 디렉터리 `other.c`(**디스크에서** 읽는다 — 열려 있지 않은 파일의 관측점)에서
 //!   낱말 단위로 `newName` 으로 바꾸는 `WorkspaceEdit`(`changes` 맵; `MARU_FAKE_LSP_RENAME_DOCCHANGES=1` 이면 `documentChanges` + version).
@@ -1758,14 +1760,17 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
     if (std.mem.eql(u8, method, "textDocument/formatting")) {
         var req_uri: []const u8 = "";
         var options_ok = false;
+        var opt_spaces = false;
+        var opt_size: i64 = 0;
         if (obj.get("params")) |p| if (p == .object) {
             if (p.object.get("textDocument")) |td| if (td == .object) {
                 req_uri = str(td.object.get("uri")) orelse "";
             };
             if (p.object.get("options")) |o| if (o == .object) {
                 const insert_spaces = o.object.get("insertSpaces");
-                const tab_size = int(o.object.get("tabSize")) orelse 0;
-                options_ok = insert_spaces != null and insert_spaces.? == .bool and !insert_spaces.?.bool and tab_size >= 1;
+                opt_size = int(o.object.get("tabSize")) orelse 0;
+                options_ok = insert_spaces != null and insert_spaces.? == .bool and opt_size >= 1;
+                if (options_ok) opt_spaces = insert_spaces.?.bool;
             };
         };
         const text = docText(req_uri);
@@ -1777,6 +1782,15 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
         const Edit = struct { range: struct { start: Pos, end: Pos }, newText: []const u8 };
         // 저장 시 포맷의 시한(§8.2r) — `FMTSTALL` 이면 답하지 않는다(`…HANG` 이라 부르면 didChange 의 `HANG` 표식에 걸려 서버째 멈춘다).
         if (std.mem.indexOf(u8, text, "FMTSTALL") != null) return;
+        if (std.mem.indexOf(u8, text, "FMTOPTS")) |at| {
+            const line_start = if (std.mem.lastIndexOfScalar(u8, text[0..at], '\n')) |nl| nl + 1 else 0;
+            const line_no: u32 = @intCast(std.mem.count(u8, text[0..at], "\n"));
+            const col: u32 = @intCast(at - line_start);
+            var buf: [64]u8 = undefined;
+            const opts = std.fmt.bufPrint(&buf, "OPTS spaces={} size={d}", .{ opt_spaces, opt_size }) catch return;
+            sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = [_]Edit{.{ .range = .{ .start = .{ .line = line_no, .character = col }, .end = .{ .line = line_no, .character = col + 7 } }, .newText = opts }} });
+            return;
+        }
         if (std.mem.indexOf(u8, text, "NOFMT") != null) {
             sendJson(allocator, .{ .jsonrpc = "2.0", .id = id.?, .result = null });
             return;

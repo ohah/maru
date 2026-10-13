@@ -121,7 +121,7 @@ keybind = F4 = esc:[2J
   `quick_fix`(`⌘.` — caret/선택 자리의 진단을 문맥으로 언어 서버의 code action 을 메뉴로 낸다, §8.2h; 고르면 WorkspaceEdit 적용) — **줄 조작
   넷**(삭제·복제·이동·들여쓰기)은 [문서 모델](native-editor-document-model.md) §3.9a가 소유하고,
   대상은 **선택이 걸친 줄들**이며 전체가 undo 하나다. 들여쓰기·내어쓰기는 **선택이 여러 줄일 때의
-  `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 종전대로 탭 문자). 레벨은 중첩 **겹수**다(1이 문서
+  `Tab`·`⇧Tab`** 으로도 닿는다(선택이 한 줄 안이면 그 파일의 들여쓰기 단위 — 탭 파일이면 탭 문자, 공백 파일이면 다음 탭 스톱까지 공백). 레벨은 중첩 **겹수**다(1이 문서
   맨 바깥이고, 레벨끼리는 합치지 않고 갈아 끼운다 —
   [visual-mapping §4.1f](native-editor-visual-mapping.md)).
   `toggle_symbol_picker`는 **파일 안 심볼을 필터해 그 자리로 간다**(VSCode `⇧⌘O`. 찾기가 모든 글자에서

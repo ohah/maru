@@ -153,7 +153,8 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   부적합), 종 **좌측** coral 텍스트 배지를 유지한다 — 1~9 숫자 1칸(`cols-12`), 10+ "9+" 2칸(`cols-13·cols-12`).
 - **hit-test/최소 폭**: `HeaderRegion.notifications` zone은 `headerHit`(렌더 `buildSidebarHeaderFrame`과 같은 col)이 단일 출처 —
   펼침 종 글리프(`cols-12·cols-11`)+배지(`cols-10`)를 모두 포함하는 zone `[cols-12, cols-9)`(접힘은 `collapsedNotificationRect`가
-  따로 hit-test). 안 그리면 hit-test도 none(`cols < 13` 좁은
+  따로 hit-test). macOS 는 그 zone 에 **그려진 hover pill** 을 더한다(`app_session/sidebar.zig` 의 `headerRegionAt` — 띠 높이 pill 의
+  위아래·종 pill 왼쪽 끝도 종이다). 안 그리면 hit-test도 none(`cols < 13` 좁은
   사이드바). 사이드바 **최소 폭**(`sidebarMinPt`)은 신호등 클리어런스 + **13칸**으로 신호등과 안 겹치게 둔다.
 - **접힘에도 알림 종 유지**: 사이드바 접힘(`sidebar_collapsed`, 폭 0)이면 좌상단 타이틀바 띠에 ◧ 펼치기 토글만 떴는데,
   이제 종+배지를 ◧ **왼쪽**(가장 왼쪽; `collapsedToggleCol()` = `collapsedBellCol()+3`)에 그려 펼침 헤더와 같은 종→◧

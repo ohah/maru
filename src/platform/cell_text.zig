@@ -1116,8 +1116,8 @@ pub fn notificationBadgeCol(bell_col: u16) u16 {
 }
 
 /// 헤더가 아이콘 줄을 낼 수 있는 최소 폭(칸). 검색 줄 + 우측 아이콘 넷(종·◧·⚙·＋, 3칸 간격)이
-/// 들어가야 한다 — `sidebar.headerHit` 의 `cols < 13` 과 같은 값이다.
-pub const sidebar_header_min_cols: u16 = 13;
+/// 들어가야 한다 — 값은 hit-test(`sidebar.headerHit`)가 쓰는 `chrome.components.sidebar.header_icon_min_cols` 하나다.
+pub const sidebar_header_min_cols: u16 = chrome.components.sidebar.header_icon_min_cols;
 
 /// 종 글리프가 앉는 열. `headerIconCol` 이 안 가진 값이라 여기서 소유한다 — 종은 2칸 이모지고,
 /// 배지(`bell+2`)와 ◧(`cols-8`) 사이에 한 칸을 띄우려고 `cols-12` 다.

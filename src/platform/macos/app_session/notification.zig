@@ -693,7 +693,7 @@ pub fn appendNotificationBadge(self: *AppSession) void {
     if (cw == 0 or ch == 0 or self.tabs.items.len == 0) return;
     if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return;
     const cols = self.sidebar_width_px / cw;
-    if (cols < 13) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList cols<13과 정합) — 배지도 생략
+    if (cols < maru.cell_text.sidebar_header_min_cols) return; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList 와 같은 상수) — 배지도 생략
     const cw_f: f32 = @floatFromInt(cw);
     const ch_f: f32 = @floatFromInt(ch);
     const badge_col = notificationBadgeCol(@intCast(cols - 12)); // 종(cols-12, 2칸) 우측 한 칸 = cols-10 (코너 크기 종의 우상단 모서리에 원 좌단이 ~0.2cw 겹침)
@@ -788,7 +788,7 @@ pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.componen
     const ch = self.cell_height_px;
     if (cw == 0 or ch == 0) return;
     const cols = self.sidebar_width_px / cw;
-    if (cols < 13) return; // 벨이 안 그려지는 폭 — caret도 생략(buildSidebarHeaderDrawList cols<13과 정합)
+    if (cols < maru.cell_text.sidebar_header_min_cols) return; // 벨이 안 그려지는 폭 — caret도 생략(buildSidebarHeaderDrawList 와 같은 상수)
     const panel = chrome.components.notifications.panelRect(&self.chrome_host.notifications, items, props) orelse return;
     if (panel.y < self.chrome_host.notifications.anchor_y) return; // 세로 clamp로 위로 밀림 — 벨과 어긋나니 생략
     const cw_f: f32 = @floatFromInt(cw);

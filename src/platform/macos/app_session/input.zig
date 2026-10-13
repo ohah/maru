@@ -1280,7 +1280,7 @@ pub fn buildKeyHintBadges(self: *AppSession, props: chrome.ChromeProps, tokens: 
         // cols>=13에서만. 배지 rect 우단을 + 글리프 우단((cols-1)*cw, headerIconCol=cols-2의 셀 우단)에 맞춰 사이드바 밖으로 안 샌다.
         const cw = @max(self.cell_width_px, 1);
         const cols = self.sidebar_width_px / cw;
-        if (cols >= 13) {
+        if (cols >= maru.cell_text.sidebar_header_min_cols) {
             if (try Local.chordStr(resolver, Action.new_tab, arena)) |cs| {
                 try badges.append(arena, .{ .rect = .{ .x = 0, .y = 0, .w = (cols - 1) * cw, .h = self.cell_height_px }, .chord = cs });
             }

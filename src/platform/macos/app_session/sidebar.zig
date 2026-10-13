@@ -138,6 +138,66 @@ pub fn headerIconHoverPlateWidthPx(cell_width_px: u32) u32 {
     return cell_width_px + 2 * ((8 * cell_width_px + 5) / 10);
 }
 
+pub const HeaderPlateRect = struct { x: f32, y: f32, w: f32, h: f32 };
+
+/// 펼친 헤더 아이콘(종·◧·⚙·+)의 **hover pill 사각형**(backing px) — 그리기(아래 hover 판)와 눌림 판정(`headerRegionAt`)의
+/// 단일 출처. 가로 중심 = 그려진 글리프 중심(`metal_frame.cellRasterIconCenterXPx`), 폭 = `headerIconHoverPlateWidthPx`,
+/// 세로 = `headerIconHoverPlateVertical`. 아이콘이 안 그려지는 폭(`header_icon_min_cols` 미만)이거나 아이콘이 아니면 null.
+pub fn headerIconHoverPlateRect(self: *const AppSession, region: chrome.components.sidebar.HeaderRegion) ?HeaderPlateRect {
+    if (self.cell_width_px == 0 or self.cell_height_px == 0) return null;
+    const cols: u32 = self.sidebar_width_px / self.cell_width_px;
+    const sb = chrome.components.sidebar;
+    if (cols < cell_text.sidebar_header_min_cols) return null;
+    // 아이콘 열과 폭은 헤더 셀을 내는 쪽(`cell_text.appendSidebarHeaderIcons`)과 같은 출처에서 읽는다 — 예전에는
+    // 여기서 `cols -| 8` · `cols -| 12` 를 다시 적었다.
+    const icon_col: u32, const span: u16 = switch (region) {
+        .toggle_sidebar => .{ sb.headerIconCol(.toggle_sidebar, cols), 1 },
+        .view_options => .{ sb.headerIconCol(.view_options, cols), 1 },
+        .new_workspace => .{ sb.headerIconCol(.new_workspace, cols), 1 },
+        .notifications => .{ cell_text.sidebarBellCol(@intCast(@min(cols, std.math.maxInt(u16)))), cell_text.sidebar_bell_cols },
+        .search, .none => return null,
+    };
+    // 판 중심 = 그려진 글리프 중심. 크게 구운 아이콘은 **한 칸** quad 를 키워 차지한 칸들의 가운데에 그린다 — 그 이동
+    // (`metal_frame.cellRasterIconGlyphOffsetPx`)을 렌더러가 셀의 `glyph_offset_x_px` 로 받아 더하므로, 여기서도 같은 함수로
+    // 중심을 낸다(1칸이면 셀 중심, 종(2칸)이면 반 칸 오른쪽). 예전에는 「종이면 +1.0칸」을 따로 들었다 — 어긋나면 좁아진
+    // 종이 박스 한쪽으로 치우쳐 보인다(실제로 있었던 버그).
+    const center_x: f32 = metal_frame.cellRasterIconCenterXPx(icon_col * self.cell_width_px, self.cell_width_px, span);
+    const w: f32 = @floatFromInt(headerIconHoverPlateWidthPx(self.cell_width_px));
+    const plate = headerIconHoverPlateVertical(self);
+    return .{ .x = center_x - w / 2.0, .y = plate.y, .w = w, .h = plate.h };
+}
+
+/// 펼친 헤더의 눌림 판정 — 중립 `chrome.components.sidebar.headerHit`(3칸 zone · 아이콘 줄 **셀 높이**) **∪ 그려진 hover pill**
+/// (`headerIconHoverPlateRect`). hover 커서·mouse down·창 드래그(`workspace.isWindowDragRegion`)가 함께 쓴다.
+///
+/// macOS 의 pill 은 띠 높이 · ≈2.6칸으로 그려져 zone 보다 위아래로 크고(1x 약 5px · 2x 약 9px), 종 pill 은 왼쪽 끝이 종
+/// zone 밖이다 — 예전엔 그 자리가 창 드래그였다(보이는 버튼을 눌러도 창이 끌렸다). zone 은 줄이지 않는다(pill 사이 틈도
+/// 계속 그 아이콘). Windows 는 판을 zone 안(2칸 × 셀 높이)에 그려 `headerHit` 만으로 같은 성질이 선다.
+///
+/// pill 은 **아이콘 띠 안에서만** 판정을 넓힌다. 검색 줄 이하는 중립이 정한 그대로다 — 띠보다 큰 글꼴에서 pill 이 잉크
+/// 하한으로 띠를 넘으면(약 28pt 이상) 그 넘친 부분은 검색 줄·카드의 것이다(밴드 판정은 중립이 소유한다).
+/// 이웃 pill 끼리는 겹치지 않는다(중심 간격 ≥ 3칸 · 폭 ≈2.6칸) — 판정자가 그것도 본다.
+pub fn headerRegionAt(self: *const AppSession, x_px: f64, y_px: f64) chrome.components.sidebar.HeaderRegion {
+    const sb = chrome.components.sidebar;
+    const band = sidebarSearchBandTopPx(self);
+    const zone = sb.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, band);
+    if (self.sidebar_width_px == 0 or self.sidebar_header_height_px == 0) return zone;
+    const icon_band_end: f64 = @floatFromInt(sb.headerSearchBandTop(self.sidebar_header_height_px, band, self.cell_height_px));
+    if (!(y_px >= 0 and y_px < icon_band_end)) return zone; // 검색 줄 이하(·비유한)는 중립 판정 그대로
+    if (plateContains(headerIconHoverPlateRect(self, zone), x_px, y_px)) return zone;
+    for ([_]sb.HeaderRegion{ .notifications, .toggle_sidebar, .view_options, .new_workspace }) |r| {
+        if (plateContains(headerIconHoverPlateRect(self, r), x_px, y_px)) return r;
+    }
+    return zone;
+}
+
+fn plateContains(plate: ?HeaderPlateRect, x_px: f64, y_px: f64) bool {
+    const p = plate orelse return false;
+    const x0: f64 = p.x;
+    const y0: f64 = p.y;
+    return x_px >= x0 and x_px < x0 + p.w and y_px >= y0 and y_px < y0 + p.h;
+}
+
 /// `headerIconHoverPlateVertical` 의 순수 식(세션 없이 세 갈래를 숫자로 재려고 뗐다).
 fn hoverPlateVerticalPx(row_top_px: u32, cell_width_px: u32, cell_height_px: u32, strip_px: u32) HoverPlateVertical {
     const ch: f32 = @floatFromInt(cell_height_px);
@@ -1028,30 +1088,12 @@ pub fn rebuildSidebar(self: *AppSession) !void {
         self.appendSolidQuad(0, uy, @floatFromInt(self.sidebar_width_px), thickness, pane_ops.dividerColor(self), 0);
     }
     // 헤더 아이콘 호버 배경(웹 버튼 hover) — hovered_header_region이 아이콘이면 그 아이콘 뒤에 둥근 quad(layer 0,
-    // 아이콘 셀 아래). 아이콘 col은 헤더 셀을 내는 `cell_text.appendSidebarHeaderIcons` 와 같은 출처(`headerIconCol`·
-    // `sidebarBellCol`)에서 읽는다. 아이콘은 Zig 가 셀×1.7 로 굽고 그려진 글리프 중심에 quad 를 맞춰 약 2.6칸 폭(높이는 `headerIconHoverPlateVertical` — 띠 안)으로
-    // 덮는다. 색은 전경색 기반 반투명(아래).
+    // 아이콘 셀 아래). 사각형은 `headerIconHoverPlateRect` 가 낸다(그려진 글리프 중심 · ≈2.6칸 · 띠 안 높이) — 눌림 판정
+    // (`headerRegionAt`)과 같은 함수라 보이는 판 = 눌리는 자리다. 색은 전경색 기반 반투명(아래).
     if (self.hovered_header_region) |hr| {
-        if (self.cell_width_px > 0 and self.cell_height_px > 0 and self.sidebar_width_px / self.cell_width_px >= 10) {
-            const cols: u32 = self.sidebar_width_px / self.cell_width_px;
-            const sb = chrome.components.sidebar;
-            // 아이콘 열과 폭은 헤더 셀을 내는 쪽(`cell_text.appendSidebarHeaderIcons`)과 같은 출처에서 읽는다 — 예전에는
-            // 여기서 `cols -| 8` · `cols -| 12` 를 다시 적었다.
-            const icon_col: u32, const span: u16 = switch (hr) {
-                .toggle_sidebar => .{ sb.headerIconCol(.toggle_sidebar, cols), 1 },
-                .view_options => .{ sb.headerIconCol(.view_options, cols), 1 },
-                .new_workspace => .{ sb.headerIconCol(.new_workspace, cols), 1 },
-                .notifications => .{ cell_text.sidebarBellCol(@intCast(@min(cols, std.math.maxInt(u16)))), cell_text.sidebar_bell_cols },
-                .search, .none => .{ cols, 1 }, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
-            };
-            // hover quad 중심 = 그려진 글리프 중심. 크게 구운 아이콘은 **한 칸** quad 를 키워 차지한 칸들의 가운데에
-            // 그린다 — 그 이동(`metal_frame.cellRasterIconGlyphOffsetPx`)을 렌더러가 셀의 `glyph_offset_x_px` 로 받아
-            // 더하므로, 여기서도 같은 함수로 중심을 낸다(1칸이면 셀 중심, 종(2칸)이면 반 칸 오른쪽). 예전에는 「종이면
-            // +1.0칸」을 여기서 따로 들었다 — 어긋나면 좁아진 종이 박스 한쪽으로 치우쳐 보인다(실제로 있었던 버그).
-            const center_x: f32 = metal_frame.cellRasterIconCenterXPx(icon_col * self.cell_width_px, self.cell_width_px, span); // 그려진 글리프 중심
-            const w: f32 = @floatFromInt(headerIconHoverPlateWidthPx(self.cell_width_px)); // ≈2.6칸 — 접힌 ◧ pill · 클릭 rect 와 같은 함수
-            const plate = headerIconHoverPlateVertical(self); // 아이콘과 같은 세로 중심 · 띠 안 높이(접힌 ◧ pill 과 같은 함수)
-            const h: f32 = plate.h;
+        if (headerIconHoverPlateRect(self, hr)) |rect| {
+            const w: f32 = rect.w;
+            const h: f32 = rect.h;
             const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼
             // 호버 배경은 **전경색(밝음) 기반 반투명**으로 둔다. 헤더 아이콘 glyph는 터미널 셀 패스(draw 1b)에,
             // 이 호버 quad는 layer 0(under, draw 3)이라 아이콘 '뒤'가 아니라 '위'에 그려진다(그 사이에 끼울 패스가
@@ -1061,8 +1103,8 @@ pub fn rebuildSidebar(self: *AppSession) !void {
             // (스크롤바 quad와 같은 규약). premultipliedRgba를 쓰면 셰이더가 또 곱해 ~4배 흐려진다(코드리뷰 발견).
             const hover_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x40); // ≈25% 밝은 하이라이트
             self.gpu_quads.append(self.allocator, .{
-                .x = center_x - w / 2.0,
-                .y = plate.y,
+                .x = rect.x,
+                .y = rect.y,
                 .w = w,
                 .h = h,
                 .corner_radii = .{ radius, radius, radius, radius },
@@ -2670,7 +2712,7 @@ pub fn buildSidebarHeaderDrawList(self: *AppSession, part: HeaderPart) !?rendere
     if (self.sidebar_collapsed) return if (part == .icons) buildCollapsedToggleDrawList(self) else null;
     if (self.sidebar_header_height_px == 0) return null;
     const cols: u16 = @intCast(@min(self.sidebar_width_px / cw, @as(u32, std.math.maxInt(u16))));
-    if (cols < 13) return null; // 검색 줄 + 우측 아이콘 4개(종/◧/⚙/+, 각 3칸 간격)가 들어갈 최소 폭(headerHit cols<13과 정합)
+    if (cols < cell_text.sidebar_header_min_cols) return null; // 검색 줄 + 우측 아이콘 4개(종/◧/⚙/+, 각 3칸 간격)가 들어갈 최소 폭(headerHit 과 같은 상수)
 
     var cells: std.ArrayList(renderer.DrawCell) = .empty;
     errdefer cells.deinit(self.allocator);
@@ -2728,7 +2770,7 @@ pub fn sidebarSearchTextRect(self: *const AppSession) ?chrome.draw.Rect {
     const cw = self.cell_width_px;
     if (cw == 0 or self.sidebar_header_height_px == 0) return null;
     const cols = self.sidebar_width_px / cw;
-    if (cols < 13) return null; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList와 정합)
+    if (cols < cell_text.sidebar_header_min_cols) return null; // 헤더가 안 그려지는 폭(buildSidebarHeaderDrawList와 같은 상수)
     const max_col = cols -| 4; // 우측 아이콘 영역 침범 방지(셀 경로와 같은 여백 규칙)
     if (max_col <= sidebar_search_text_col) return null;
     const x = @as(u32, sidebar_search_text_col) * cw;

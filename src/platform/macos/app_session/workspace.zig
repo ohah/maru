@@ -972,7 +972,7 @@ pub fn windowOpacityByte(self: *const AppSession) u8 {
 /// (x,y backing px)가 창 chrome의 '빈' 영역(아이콘·검색·접힘 버튼이 아닌 곳)인가. Swift가 1이면 네이티브 타이틀바처럼
 /// 창 이동(performDrag)·더블클릭 확대(zoom)를 한다. MaruMetalTerminalView는 mouseDownCanMoveWindow=false라(터미널/
 /// 사이드바가 자체 마우스 사용) 콘텐츠 자동 드래그가 없고, 여기만 창 드래그 영역이다. 두 부분:
-///   ① 사이드바 헤더(펼침, 좌측)의 빈 영역 — headerHit==.none(아이콘·검색 제외, 신호등 옆 빈 공간 포함).
+///   ① 사이드바 헤더(펼침, 좌측)의 빈 영역 — `sidebar_ops.headerRegionAt`==.none(아이콘 zone·그려진 hover pill·검색 제외, 신호등 옆 빈 공간 포함).
 ///   ② 상단 타이틀바 띠(터미널 위·접힘 시 전체)의 빈 영역 — y<titlebar_strip_px, 접힘 ◧ 펼치기 버튼은 제외(클릭).
 /// quick terminal(chrome_minimal — 신호등 없는 borderless)이면 항상 false.
 pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
@@ -981,7 +981,7 @@ pub fn isWindowDragRegion(self: *const AppSession, x_px: f64, y_px: f64) bool {
     // ① 사이드바 헤더(펼침): 3줄 헤더의 빈 영역.
     if (self.sidebar_width_px > 0 and self.sidebar_header_height_px > 0 and sidebar_ops.inSidebar(self, x_px)) {
         if (y_px >= @as(f64, @floatFromInt(self.sidebar_header_height_px))) return false;
-        return chrome.components.sidebar.headerHit(x_px, y_px, self.sidebar_width_px, self.cell_width_px, self.cell_height_px, self.sidebar_header_height_px, sidebar_ops.sidebarSearchBandTopPx(self)) == .none;
+        return sidebar_ops.headerRegionAt(self, x_px, y_px) == .none; // 그려진 hover pill 위는 버튼이다(hover·mouse down 과 같은 판정)
     }
     // ② 상단 타이틀바 띠(터미널 위, 또는 접힘 시 전체 폭): 한 줄. 접힘 ◧ 펼치기 버튼·알림 종 위면 드래그 아님(클릭).
     if (self.titlebar_strip_px > 0 and y_px < @as(f64, @floatFromInt(self.titlebar_strip_px))) {

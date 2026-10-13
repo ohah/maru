@@ -313,7 +313,8 @@ CLOEXEC 에만 기대는 spawn 이 여럿 있다(LSP·git·ssh 업로드·업데
   잠금 안에서 만들고 CLOEXEC 까지 켠다. 채널 소켓을 자식이 물려받으면 앱이 닫아도 host 가 EOF 를 못 봐 원장이 붙잡힌다. 이 자리도
   블로킹 쓰기 잠금이다(메인의 connect 포함 — 연결은 tick 이 아니라 다시 올 기회가 없다).
 - host 는 이 울타리를 쓰지 않는다 — host 가 받는 fd 는 프로토콜 위반뿐이고 owner 스레드가 받은 자리에서 닫는다(계획 IC4b).
-- 구현(IC4a): 울타리 `session_host/fork_fd_fence.zig`(앱 세션 생성이 세션 전에 설치), CLOEXEC_DEFAULT 헬퍼 `maru.pty.macos_spawn`,
+- 구현(IC4a): 울타리 `session_host/fork_fd_fence.zig`(앱 세션 생성이 세션 전에 설치), CLOEXEC_DEFAULT 헬퍼 `maru.pty.macos_spawn`
+  (IC4b 부터 자식의 신호 마스크를 비우고 모든 신호를 기본 처리로 시작한다 — exec 가 물려주는 막힘·무시를 끊는다),
   헬퍼 밖 `posix_spawn`·`posix_spawnp`·`system` 을 막는 `tests/boundary/spawn_cloexec_axis.zig`.
 - 구현(IC4b): `Client.pumpImageChannel(wait)` 가 `drain` 을 수신 잠금 안에서 한다 — tick 의 펌프·큐 머리는 `.try_lock`, 첫
   snapshot 과 관찰자 재접속 후보의 catch-up 은 `.block`(`AttachmentTransport.prepare_image_apply` 가 `wait` 를 넘긴다). 소켓 생성은

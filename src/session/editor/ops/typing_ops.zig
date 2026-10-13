@@ -11,9 +11,11 @@ const std = @import("std");
 const delta = @import("../delta.zig");
 const pairs = @import("../pairs.zig");
 const selection = @import("../selection.zig");
+const line_index = @import("../line_index.zig");
 
 const Change = delta.Change;
 const Selection = selection.Selection;
+const LineIndex = line_index.LineIndex;
 
 /// 감싼 커서 — 감싼 글자를 고른 채 둔다(§3.7). 원래 선택이 거꾸로였는지도 함께 든다.
 pub const Surrounded = struct { sel: usize, reversed: bool };
@@ -65,21 +67,75 @@ pub const Typing = struct {
     }
 };
 
+/// 닫는 괄호 내어쓰기의 문맥(계획 editor-typing-rules TR2) — 호출자가 그 문법의 괄호(`bracketRuleFor().chars`)와 줄 색인을 준다.
+pub const Reindent = struct {
+    lines: LineIndex,
+    brackets: []const u8,
+};
+
+/// 짝 여는 괄호를 거슬러 찾는 상한(byte) — 그 너머면 내어쓰지 않는다(적대 입력 §3.8: 한 줄짜리 거대 문서에서 타이핑마다 끝까지 걷지 않게).
+pub const reindent_scan_limit: usize = 64 * 1024;
+
+/// 닫는 괄호를 쳤을 때 그 줄을 **짝 여는 괄호가 있는 줄의 들여쓰기**로 맞출 자리 — caret `lo` 앞이 그 줄의 공백뿐일 때만. 바꿀 것이 없으면
+/// (이미 같다·짝을 못 찾았다·괄호가 아니다) `null`. 짝은 거슬러 읽으며 같은 종류의 괄호 깊이로 찾는다(문자열 안 괄호도 센다 — 구문 트리
+/// 보정은 TR4).
+pub fn closerReindent(content: []const u8, r: Reindent, lo: usize, typed: u8) ?struct { line_start: usize, indent: []const u8 } {
+    var open: ?u8 = null;
+    var k: usize = 0;
+    while (k + 1 < r.brackets.len) : (k += 2) if (r.brackets[k + 1] == typed) {
+        open = r.brackets[k];
+    };
+    const o = open orelse return null;
+    const line = r.lines.line(r.lines.lineAt(lo)) orelse return null;
+    const head = content[line.start..lo];
+    for (head) |b| if (b != ' ' and b != '\t') return null;
+    // 짝을 거슬러 찾는다.
+    const floor = line.start -| reindent_scan_limit;
+    var depth: usize = 0;
+    var i = line.start;
+    const at: usize = while (i > floor) {
+        i -= 1;
+        const b = content[i];
+        if (b == typed) {
+            depth += 1;
+        } else if (b == o) {
+            if (depth == 0) break i;
+            depth -= 1;
+        }
+    } else return null;
+    const oline = r.lines.line(r.lines.lineAt(at)) orelse return null;
+    const otext = content[oline.start..oline.contentEnd()];
+    const indent = otext[0 .. otext.len - std.mem.trimStart(u8, otext, " \t").len];
+    if (std.mem.eql(u8, indent, head)) return null;
+    return .{ .line_start = line.start, .indent = indent };
+}
+
 /// `sels` 는 문서 순서. **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7) — `assist` 가 거짓이면(IME 재변환 등) 보지
 /// 않는다. 붙여넣기·IME 확정은 여러 글자가 한 번에 오는데 그때 괄호를 닫으면 사용자가 넣지 않은 문자가 들어간다.
-pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []const Selection, text: []const u8, assist: bool) !Typing {
+pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []const Selection, text: []const u8, assist: bool, reindent: ?Reindent) !Typing {
     const aid: ?u8 = if (text.len == 1 and assist) text[0] else null;
     var t: Typing = .{};
     errdefer t.deinit(allocator);
     for (sels, 0..) |sel, index| {
         try t.first_change.append(allocator, t.changes.items.len);
+        // 앞 커서의 변경 끝 — 닫는 괄호 내어쓰기가 그 앞까지 넓어지면 겹쳐 입력 전체가 거절된다(같은 공백 줄의 커서 둘 — TR2 적대적 3회차).
+        const prev_end: usize = if (t.changes.items.len > 0) t.changes.items[t.changes.items.len - 1].end else 0;
         const lo = @min(sel.start(), content.len);
         const hi = @min(sel.end(), content.len);
         if (aid) |typed| {
             const before: ?u8 = if (lo > 0) content[lo - 1] else null;
             const after: ?u8 = if (hi < content.len) content[hi] else null;
             switch (pairs.decide(typed, hi > lo, before, after)) {
-                .insert_plain => {},
+                .insert_plain => if (hi == lo) if (reindent) |r| if (closerReindent(content, r, lo, typed)) |ri| if (ri.line_start >= prev_end) {
+                    // **닫는 괄호를 짝 줄의 들여쓰기로**(계획 editor-typing-rules TR2) — 줄 머리부터 caret 까지(공백뿐)를 그 들여쓰기 + 괄호로.
+                    const joined = try std.mem.concat(allocator, u8, &.{ ri.indent, &[_]u8{typed} });
+                    t.owned.append(allocator, joined) catch |e| {
+                        allocator.free(joined);
+                        return e;
+                    };
+                    try t.changes.append(allocator, .{ .start = ri.line_start, .end = lo, .text = joined });
+                    continue;
+                },
                 .insert_pair => |pr| {
                     const owned = try t.own(allocator, &[_]u8{ pr.open, pr.close });
                     try t.changes.append(allocator, .{ .start = lo, .end = hi, .text = owned });
@@ -172,7 +228,7 @@ fn applyWithInverse(allocator: std.mem.Allocator, content: []const u8, changes: 
 
 fn typeInto(content: []const u8, sels: []const Selection, text: []const u8, out_sels: []Selection) ![]u8 {
     const a = testing.allocator;
-    var t = try planTyping(a, content, sels, text, true);
+    var t = try planTyping(a, content, sels, text, true, null);
     defer t.deinit(a);
     try testing.expect(t.wellFormed());
     var inverse: std.ArrayList(Change) = .empty;
@@ -208,7 +264,7 @@ test "결함 5 — 여러 커서 감싸기는 커서마다 감싼 글자를 고�
 
 test "자동으로 닫은 쌍은 caret 이 가운데이고 표식을 돌려준다" {
     const a = testing.allocator;
-    var t = try planTyping(a, "x\n", &.{Selection.at(1)}, "(", true);
+    var t = try planTyping(a, "x\n", &.{Selection.at(1)}, "(", true, null);
     defer t.deinit(a);
     var inverse: std.ArrayList(Change) = .empty;
     defer inverse.deinit(a);
@@ -223,15 +279,65 @@ test "자동으로 닫은 쌍은 caret 이 가운데이고 표식을 돌려준�
 
 test "type-over 만 있으면 문서는 안 바뀐다 · 여러 글자 입력은 보조를 타지 않는다" {
     const a = testing.allocator;
-    var t = try planTyping(a, "()\n", &.{Selection.at(1)}, ")", true);
+    var t = try planTyping(a, "()\n", &.{Selection.at(1)}, ")", true, null);
     defer t.deinit(a);
     try testing.expect(t.onlySkips());
-    var t2 = try planTyping(a, "\n", &.{Selection.at(0)}, "((", true);
+    var t2 = try planTyping(a, "\n", &.{Selection.at(0)}, "((", true, null);
     defer t2.deinit(a);
     try testing.expectEqual(@as(usize, 1), t2.changes.items.len);
     try testing.expectEqualStrings("((", t2.changes.items[0].text);
     // 보조를 끄면(IME 재변환) 한 글자도 그대로 넣는다.
-    var t3 = try planTyping(a, "\n", &.{Selection.at(0)}, "(", false);
+    var t3 = try planTyping(a, "\n", &.{Selection.at(0)}, "(", false, null);
     defer t3.deinit(a);
     try testing.expectEqualStrings("(", t3.changes.items[0].text);
+}
+
+test "INDB3 닫는 괄호 내어쓰기 — 앞이 공백뿐이면 짝 여는 괄호 줄의 들여쓰기로, 이미 같거나 글자 뒤·짝 없음·괄호 아님은 그대로 (계획 editor-typing-rules TR2)" {
+    const allocator = std.testing.allocator;
+    const Case = struct { src: []const u8, caret: usize, typed: u8, want: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .src = "if (x) {\n  foo();\n  \n", .caret = 20, .typed = '}', .want = "" }, // `  |` → `}`
+        .{ .src = "  a = [\n    1,\n    \n", .caret = 19, .typed = ']', .want = "  " },
+        .{ .src = "f(\n  a,\n      \n", .caret = 14, .typed = ')', .want = "" },
+        .{ .src = "{\n  {\n  }\n  \n", .caret = 12, .typed = '}', .want = "" }, // 안쪽 짝은 닫혔다 — 바깥 `{` 의 줄
+        .{ .src = "{\n\n", .caret = 2, .typed = '}', .want = null }, // 이미 같다(빈 들여쓰기)
+        .{ .src = "{\n  x\n", .caret = 5, .typed = '}', .want = null }, // 글자 뒤
+        .{ .src = "\n  \n", .caret = 3, .typed = '}', .want = null }, // 짝이 없다
+        .{ .src = "{\n  \n", .caret = 4, .typed = 'x', .want = null }, // 괄호가 아니다
+    };
+    for (cases) |k| {
+        var lines = try line_index.build(allocator, k.src);
+        defer lines.deinit();
+        const got = closerReindent(k.src, .{ .lines = lines, .brackets = "()[]{}" }, k.caret, k.typed);
+        if (k.want) |w| {
+            try std.testing.expect(got != null);
+            try std.testing.expectEqualStrings(w, got.?.indent);
+        } else try std.testing.expect(got == null);
+    }
+}
+
+test "INDB5 닫는 괄호 내어쓰기 × 커서 여럿 — 같은 공백 줄의 두 커서는 앞 것만 내어쓰고 뒤 것은 그 자리에 넣는다(겹쳐 거절되지 않는다), 다른 줄은 각자 (계획 editor-typing-rules TR2)" {
+    const a = std.testing.allocator;
+    {
+        const content = "{\n    \n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        var t = try planTyping(a, content, &.{ Selection.at(4), Selection.at(6) }, "}", true, .{ .lines = lines, .brackets = "()[]{}" });
+        defer t.deinit(a);
+        try std.testing.expect(t.wellFormed());
+        try std.testing.expectEqual(@as(usize, 2), t.changes.items.len);
+        try std.testing.expectEqual(@as(usize, 2), t.changes.items[0].start); // 앞 커서 — 줄 머리부터
+        try std.testing.expectEqualStrings("}", t.changes.items[0].text);
+        try std.testing.expectEqual(@as(usize, 6), t.changes.items[1].start); // 뒤 커서 — 그 자리에
+    }
+    {
+        const content = "{\n  {\n    \n  \n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        var t = try planTyping(a, content, &.{ Selection.at(10), Selection.at(14) }, "}", true, .{ .lines = lines, .brackets = "()[]{}" });
+        defer t.deinit(a);
+        try std.testing.expect(t.wellFormed());
+        try std.testing.expectEqualStrings("  }", t.changes.items[0].text); // 안쪽 `{` 의 줄(두 칸)
+        try std.testing.expectEqual(@as(usize, 6), t.changes.items[0].start);
+    }
 }

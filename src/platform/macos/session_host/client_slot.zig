@@ -15594,6 +15594,12 @@ pub const ClientSlot = struct {
         return self.current.client.imageShmNegotiated();
     }
 
+    /// 이 slot 의 연결이 「이미지 채널 없음」인가(이미지 채널 §3.2) — 앱의 안내(IC6b) 근거. 관측이다.
+    pub fn attachmentImageChannelUnavailable(self: *const ClientSlot) bool {
+        if (!self.valid()) return false;
+        return self.current.client.imageChannelUnavailable();
+    }
+
     /// 적용 중인 배치의 `image_ref` 하나를 이 slot 의 Client 세그먼트 표로 해석한다(§6). 다른 attachment 연산이 slot 을 쥐고
     /// 있으면 해석하지 않는다 — 「세그먼트 없음」(null). 첫 snapshot 은 그 owner 가 `.initial_snapshot` permit 을 쥔 채(owner
     /// deinit 까지) 같은 스레드에서 적용된다 — 그 permit 은 막지 않는다. 막으면 협상한 연결의 첫 snapshot 이 늘 malformed 로 닫혀

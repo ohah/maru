@@ -530,6 +530,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "hasAnyBufferedRuntimeWork", .receiver_type = immutable, .class = .observation },
         .{ .name = "quietPumpProven", .receiver_type = immutable, .class = .observation },
         .{ .name = "imageShmNegotiated", .receiver_type = immutable, .class = .observation },
+        .{ .name = "imageChannelUnavailable", .receiver_type = immutable, .class = .observation },
     };
     try expectClientReceiverManifest(allocator, source, &manifest);
     const guarded = [_]ClientGuardProof{
@@ -1331,6 +1332,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 여는 대신 진입점을 나눠 external 소비자가 광고할 길을 만들지 않는다.
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectGuiWithImageChannel" },
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "connectGuiWithImageChannelUntil" },
+                // 「이미지 채널 없음」 안내(IC6b, 2026-10-14): 협상했는데 채널이 없는지 읽는 관측 하나. 앱은 slot·adapter·runtime 을
+                // 거쳐 이것만 본다.
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "imageChannelUnavailable" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.
@@ -1691,6 +1695,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 쥐지 않을 때만 Client 의 울타리 든 해석에 닿는 하나.
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "screen_stream" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "attachmentImageShmNegotiated" },
+                // 「이미지 채널 없음」 안내(IC6b, 2026-10-14): 협상했는데 채널이 없는지 읽는 관측 하나 — HostAdapter 가 앱 안내에 넘긴다.
+                .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "attachmentImageChannelUnavailable" },
                 .{ .parent = "ClientSlot", .kind = "fn", .visibility = "pub", .modifier = "", .name = "resolveAttachmentImage" },
                 // 펌프 배선(IC3b-2b-1, 2026-10-12): 적용 직전 펌프·유지보수 tick 펌프, 그리고 해석·펌프가 함께 쓰는 접근 규칙 하나
                 // (다른 attachment 연산 중이면 거부 — 같은 스레드의 첫 snapshot permit 만 허용).

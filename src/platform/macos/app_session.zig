@@ -6016,6 +6016,8 @@ pub const AppSession = struct {
     /// attach가 controller를 못 얻고 observer로 강등된 Term이 있다(§9). 다음 tick에 한 번 알린다 — 알리지
     /// 않으면 사용자는 화면만 갱신되고 입력이 전부 무시되는 터미널을 이유도 모른 채 쓰게 된다.
     observer_attach_notice_pending: bool = false,
+    /// host 연결이 「이미지 채널 없음」이 됐다는 안내를 아직 못 띄웠다(이미지 채널 §3.2). backend 가 올린 것을 tick 이 옮겨 담는다.
+    image_channel_notice_pending: bool = false,
     notification_continuity: NotificationContinuityState = .{},
     /// codex `config.toml`에 적힌 신뢰 값이 우리 커맨드의 값과 **다른** 훅 수(계약 §2.1). 커맨드를 고치면
     /// 키는 그대로인데 값만 낡고, codex는 그 훅을 `modified`로 보고 **실행하지 않는다**. 우리는 남의 값을
@@ -9925,6 +9927,18 @@ pub const AppSession = struct {
         if (!self.observer_attach_notice_pending or self.anyModalOverlayOpen()) return;
         self.observer_attach_notice_pending = false;
         self.showNoticeKey(.app_attach_observer_mode);
+    }
+
+    /// host 연결이 이미지 채널을 협상했는데 채널이 없으면(자리 없음·거부·채널 상실 — 이미지 채널 §3.2) 한 번 알린다. 그 연결의
+    /// 이미지는 placement 째 빠져 화면에 없다 — 알리지 않으면 「왜 이미지가 안 뜨나」가 설명되지 않는다. observer 안내와 같은
+    /// 규율: 모달이 열려 있으면 띄우지 않고 다음 tick 에 다시 본다.
+    fn showPendingImageChannelNotice(self: *AppSession) void {
+        if (is_macos) if (app_remote_backend) |*remote| {
+            if (remote.takeImageChannelUnavailableNotice()) self.image_channel_notice_pending = true;
+        };
+        if (!self.image_channel_notice_pending or self.anyModalOverlayOpen()) return;
+        self.image_channel_notice_pending = false;
+        self.showNoticeKey(.app_image_channel_unavailable);
     }
 
     /// 새 셸에 주입할 통합 `ZDOTDIR`. **spawn 직전에 통합 파일이 아직 있는지 확인하고 없으면 다시 쓴다.**
@@ -20994,6 +21008,7 @@ pub const AppSession = struct {
         self.showPendingSessionHostUpgradeNotice(); // U5: old-host upgrade 결과를 modal-free frame에서 정확히 한 번 표시한다.
         self.showPendingAgentHookTrustNotice(); // 계약 §2.1: codex 신뢰 값이 낡아 훅이 안 도는 상태를 알린다.
         self.showPendingObserverAttachNotice(); // §9: controller를 못 얻고 observer로 붙었으면 입력이 안 되는 이유를 알린다.
+        self.showPendingImageChannelNotice(); // 이미지 채널 §3.2: 채널 없이 붙은 연결이면 이미지가 빠지는 이유를 알린다.
         self.showPendingEndedPlaceholderNotice(); // §7: 종료 placeholder로 복원한 자리가 있으면 첫 tick에 한 번 알린다.
         self.showPendingRebootRevivalNotice(); // RB1: 재부팅으로 새로 시작한 터미널이 있으면 앱에 한 번 알린다.
         scroll_ops.applyDragAutoscroll(self); // 드래그가 grid 밖에 머무는 동안 frame-loop tick마다 한 줄씩 스크롤+확장
@@ -48685,6 +48700,43 @@ test "right-click menu(F2-5): 터미널 컨텍스트 메뉴 복사/붙여넣기 
 
     // 기본 config는 paste(사용자 결정) — 트래킹 .none이면 우클릭이 paste 동작을 의도.
     try std.testing.expectEqual(config_mod.theme.RightClick.paste, session.loaded_config.config.input.right_click);
+}
+
+test "이미지 채널 없음: 이미지가 빠지는 이유를 notice로 한 번 알리고 모달 중엔 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    // 채널이 있으면 아무 notice도 안 뜬다.
+    session.showPendingImageChannelNotice();
+    try std.testing.expect(!session.chrome_host.notice.open);
+
+    // 협상했는데 채널이 없으면(자리 없음·거부·채널 상실 — 이미지 채널 §3.2) 그 연결의 이미지는 placement 째 빠진다.
+    session.image_channel_notice_pending = true;
+    session.showPendingImageChannelNotice();
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(!session.image_channel_notice_pending); // 1회성
+    session.chrome_host.notice.dismiss();
+
+    // 불청 이벤트라 모달이 열려 있으면 억제한다 — 신호는 보존하고 다음 tick 에 다시 시도한다.
+    session.chrome_host.settings.open = true;
+    session.image_channel_notice_pending = true;
+    session.showPendingImageChannelNotice();
+    try std.testing.expect(!session.chrome_host.notice.open);
+    try std.testing.expect(session.image_channel_notice_pending);
+    session.chrome_host.settings.open = false;
+    session.showPendingImageChannelNotice();
+    try std.testing.expect(session.chrome_host.notice.open);
+    try std.testing.expect(!session.image_channel_notice_pending);
 }
 
 test "observer 강등: 입력이 안 되는 이유를 notice로 알리고 모달 중엔 보존한다" {

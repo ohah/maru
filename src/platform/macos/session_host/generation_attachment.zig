@@ -3882,9 +3882,14 @@ test "image channel attachment: a committed generation attachment hands its tran
     try std.testing.expect(std.mem.indexOfScalar(u64, table.liveStreams(), 0x3B24) != null);
 
     // 협상하지 않은 연결은 미협상, 협상한 연결(이미지 채널 없음 포함)은 그 attachment 의 stream 으로 묶인 채널 resolver.
+    // 앱 안내(IC6b)의 근거 — HostAdapter 가 slot 의 현재 연결을 읽는다: 「이미지 채널 없음」만 참이다.
     logical_client.image_channel.state = .not_negotiated;
     try std.testing.expect(attachment.imageRefResolver(&ctx) == .unnegotiated);
+    try std.testing.expect(!adapter.imageChannelUnavailable());
+    logical_client.image_channel.state = .bound;
+    try std.testing.expect(!adapter.imageChannelUnavailable());
     logical_client.image_channel.state = .unavailable;
+    try std.testing.expect(adapter.imageChannelUnavailable());
     switch (attachment.imageRefResolver(&ctx)) {
         .unnegotiated => return error.TestUnexpectedResult,
         .channel => |resolver| try std.testing.expect(resolver.ctx == @as(*anyopaque, &ctx)),

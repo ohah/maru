@@ -7181,6 +7181,23 @@ pub fn build(b: *std.Build) void {
         image_channel_app_step.dependOn(&run_image_channel_host_connect_tests.step);
         test_step.dependOn(&run_image_channel_host_connect_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_host_connect_tests.step);
+        // 「이미지 채널 없음」 안내(IC6b) — backend 가 없다가 생길 때만 한 번 올리고 tick 이 host 마다 펌프 직후에 본다.
+        const image_channel_notice_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/remote_term_backend.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"image channel notice:"},
+        });
+        const run_image_channel_notice_tests = b.addRunArtifact(image_channel_notice_tests);
+        run_image_channel_notice_tests.addArg("--maru-expect-tests=1");
+        run_image_channel_notice_tests.addArg("--maru-expect-passed=1");
+        image_channel_app_step.dependOn(&run_image_channel_notice_tests.step);
+        test_step.dependOn(&run_image_channel_notice_tests.step);
+        macos_only_test_step.dependOn(&run_image_channel_notice_tests.step);
         // 적용 자리 배선(IC3b-2) — attachment 가 협상한 transport 의 resolver 를 snapshot·delta 에 넘기고, 협상하지 않은 transport
         // 는 resolver 를 부르지 않는다.
         const image_channel_wiring_tests = addProjectTest(b, .{

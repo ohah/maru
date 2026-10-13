@@ -584,10 +584,25 @@ IC6 는 셋으로 나눴다 — GUI 제품 연결의 광고와 external 차단(I
 - 돌연변이 9 개 모두 RED: 새 탭·복원·재접속 경로를 `.off`, inventory 를 `.advertise`, 말단 둘이 프로필을 무시, client 가드 둘 제거,
   GUI 진입점이 `.off`.
 
-#### IC6b — 「이미지 채널 없음」 탭 안내 (미착수)
+#### IC6b — 「이미지 채널 없음」 안내 (PR 진행 중)
 
-- 계약 §3.2: 협상했지만 채널이 없는 연결(자리 없음·abandon·채널 상실)의 탭에 notice(이미지를 표시할 수 없음, 재접속 때 다시
-  시도)를 띄운다. IC6a 이후 이 상태가 제품에서 처음 생긴다 — 그때까지는 이미지가 조용히 빠진다(placement 를 뺀다).
+- 계약 §3.2: 협상했지만 채널이 없는 연결(자리 없음·거부·시간 초과·채널 상실)이면 notice(이미지를 표시할 수 없음, 재접속 때 다시
+  시도)를 띄운다. IC6a 이후 이 상태가 제품에서 처음 생긴다.
+- 앱에는 탭 단위 안내 자리가 없다(모든 안내가 창 토스트 하나). 가장 가까운 선례 — observer 강등 안내(연결 상태에서 오는 비치명
+  안내) — 와 같은 꼴로 한다:
+  - 관측 사슬: `Client.imageChannelUnavailable`(`state == .unavailable`) → `ClientSlot.attachmentImageChannelUnavailable` →
+    `HostAdapter.imageChannelUnavailable` → `RemoteRuntime.backend_api.imageChannelUnavailable`(legacy·generation 둘 다);
+  - `RemoteTermBackend.maintenanceEventTick` 의 host 당 루프가 펌프 바로 다음에 그 연결을 보고, 루프 뒤 한 번 반영한다 —
+    「없음」이 없다가 생긴 순간에만 안내를 올리고(매 tick 토스트가 뜨지 않는다), 채널이 돌아오면 내려가 다시 무장한다;
+  - 앱 tick(`showPendingImageChannelNotice`)이 backend 의 안내를 AppSession 표시로 옮기고, 모달이 없을 때 i18n
+    `app_image_channel_unavailable` 토스트를 한 번 띄운다(observer 와 같은 규율).
+- 판정자: `test-image-channel-app` 의 `image channel notice:` 1(새 step — 없다가 생길 때만 한 번, 계속 없으면 안 올림, 꺼내기 전 여러
+  tick 에도 남음, 채널이 돌아오면 재무장, tick 배선 순서), `image channel attachment:` 에 실제 HostAdapter 가 세 상태 중 「없음」만
+  참, `image channel legacy:` 에 묶인 연결은 거짓·runtime 고리가 두 연결 모양 모두 위임, `image channel connect:` 에 자리 없음 → 참·
+  미협상 → 거짓. 앱 안내(`app_session` 「이미지 채널 없음:」)는 observer 판정자와 같은 전체 app_session 묶음에서 돈다.
+- 돌연변이 9 개 모두 RED.
+- 한계: 안내는 창 토스트라 어느 탭(host)인지 말하지 않는다 — host 는 보통 하나다. host 가 둘이고 둘이 차례로 「없음」이 되면
+  두 번째는 첫째가 회복되기 전엔 다시 알리지 않는다.
 
 #### IC6c — 실측 gate (미착수)
 

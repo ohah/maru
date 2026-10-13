@@ -3,7 +3,7 @@
 //!
 //! 부른 쪽이 시작 전에 **확인한 문서 주소**(`doc_url` — maru 가 아는 그 탭의 주소)를 넣는다. 이후 호출은 그 주소로만 한다 — 그사이 탭이
 //! 다른 사이트로 옮겨 가도 다른 사이트의 쿠키를 읽거나 지우지 않는다.
-//! - localStorage: `Page.getFrameTree` 로 주 프레임의 출처가 그 주소의 출처인지 본 뒤(about:blank·data: 는 거절), 격리 world 에서
+//! - localStorage: `Target.getTargetInfo` 로 그 탭(주 프레임 — id 가 같다)의 주소가 그 출처인지 본 뒤(about:blank·data: 는 거절), 격리 world 에서
 //!   `Storage.prototype.*.call(localStorage, …)` — 페이지가 덮어쓴 `localStorage`·`getItem` 을 타지 않는다(계획 공격 1 회차 실측).
 //! - 쿠키 읽기: `Network.getCookies {urls:[문서 주소]}` 만 — 그 문서에 가는 쿠키(RFC 6265, WebKit 의 `cookieVisibleToHost` 와 같다).
 //!   `getAllCookies`·urls 없는 getCookies 는 다른 사이트의 HttpOnly 쿠키까지 maru 로 건넸다. 다른 path 의 쿠키는 보이지 않는다(문서).
@@ -28,6 +28,7 @@ pub const origin_moved_reason = "the page moved to another origin while the requ
 pub const cookie_domain_reason = "on a Chromium tab the cookie domain must be the page's own host";
 pub const set_cookie_failed = "setCookie failed (Chromium refused the cookie)";
 pub const cookie_too_large = "the cookie name and value are too large (Chromium accepts 4096 bytes together)";
+pub const cookies_too_large_reason = "the cookie list is too large to return (over 1 MiB as JSON — the response frame limit)";
 pub const value_too_large_reason = "the localStorage value is too large to return (over 1 MiB as JSON — the response frame limit, on WebKit too)";
 pub const storage_too_large = "the localStorage key and value are too large for a Chromium tab (64 KiB after JSON escaping)";
 /// DevTools 호출 인자 상한(sidecar — `app_host_abi` 가 컴파일 때 맞춘다).
@@ -142,8 +143,9 @@ pub const Op = struct {
     }
 
     pub fn committed(self: *const Op) bool {
-        // 지우기를 시작했으면(하나라도 보냈으면) 끝까지 — 반쯤 지운 채 두지 않는다.
-        return self.stage == .cookie_delete;
+        // 지우기를 시작했으면(하나라도 보냈으면) 끝까지 — 반쯤 지운 채 두지 않는다. clearStorage 는 저장소를 지우러 보낸 때부터(적대 리뷰 6 회차:
+        // 그 뒤 철회·시한이 끼면 저장소만 지우고 쿠키를 남겼다).
+        return self.stage == .cookie_delete or (self.kind == .clear_storage and (self.stage == .clear_origin or self.stage == .cookies_read));
     }
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -165,7 +167,9 @@ pub const Op = struct {
             .get_local_storage, .set_local_storage, .remove_local_storage => {
                 if (origin == null) return done(gpa, .failed, not_http_reason);
                 self.stage = .frame_tree;
-                return call(gpa, "Page.getFrameTree", "{}");
+                // 주 프레임 id 만 쓴다 — 프레임 트리 전체는 페이지가 큰 data: iframe 을 붙이면 16 MiB 를 넘었다(적대 리뷰 6 회차). 페이지 target 의
+                // id 가 주 프레임 id 다(Chromium).
+                return call(gpa, "Target.getTargetInfo", "{}");
             },
             .get_cookies => {
                 // 웹 출처가 없는 문서(about:blank 등)는 보이는 쿠키가 없다 — WebKit 과 같이 빈 목록.
@@ -250,20 +254,23 @@ pub const Op = struct {
         };
         switch (self.stage) {
             .frame_tree => {
-                const Frame = struct { id: []const u8, securityOrigin: []const u8 = "" };
-                const parsed = std.json.parseFromSlice(struct { frameTree: struct { frame: Frame } }, gpa, body, .{ .ignore_unknown_fields = true }) catch
+                const Info = struct { targetId: []const u8, url: []const u8 = "" };
+                const parsed = std.json.parseFromSlice(struct { targetInfo: Info }, gpa, body, .{ .ignore_unknown_fields = true }) catch
                     return done(gpa, .failed, "the page frame could not be read");
                 defer parsed.deinit();
-                const f = parsed.value.frameTree.frame;
-                // 주 프레임의 출처가 확인한 주소의 출처인가 — 그사이 옮겨 갔으면 다른 출처의 저장소를 만지지 않는다. about:blank·data: 는
-                // "://"(실측).
+                const f = parsed.value.targetInfo;
+                // 그 탭의 주소가 확인한 주소의 출처인가 — 그사이 옮겨 갔으면 다른 출처의 저장소를 만지지 않는다(평가식이 `location.origin` 을 한 번
+                // 더 본다). about:blank·data: 는 출처가 없다.
                 const want = originOf(self.doc_url) orelse return done(gpa, .failed, not_http_reason);
-                if (!std.ascii.eqlIgnoreCase(stripDefaultPort(f.securityOrigin), stripDefaultPort(want))) return done(gpa, .failed, origin_moved_reason);
-                self.frame_id = try gpa.dupe(u8, f.id);
+                const now_url = (try stripUserinfo(gpa, f.url)) orelse try gpa.dupe(u8, f.url);
+                defer gpa.free(now_url);
+                const now_origin = originOf(now_url) orelse return done(gpa, .failed, origin_moved_reason);
+                if (!std.ascii.eqlIgnoreCase(stripDefaultPort(now_origin), stripDefaultPort(want))) return done(gpa, .failed, origin_moved_reason);
+                self.frame_id = try gpa.dupe(u8, f.targetId);
                 self.stage = .world;
                 var aw: std.Io.Writer.Allocating = .init(gpa);
                 defer aw.deinit();
-                std.json.Stringify.value(.{ .frameId = f.id, .worldName = world_name, .grantUniveralAccess = false }, .{}, &aw.writer) catch return error.OutOfMemory;
+                std.json.Stringify.value(.{ .frameId = f.targetId, .worldName = world_name, .grantUniveralAccess = false }, .{}, &aw.writer) catch return error.OutOfMemory;
                 return .{ .call = .{ .method = "Page.createIsolatedWorld", .params = try aw.toOwnedSlice() } };
             },
             .world => {
@@ -360,7 +367,7 @@ pub const Op = struct {
         return .{ .call = .{ .method = "Runtime.evaluate", .params = try aw.toOwnedSlice() } };
     }
 
-    /// 그 자리에서 출처를 다시 본다 — 출처 확인(`Page.getFrameTree`)과 world 만들기 사이에 다른 출처로 확정되면 그 출처의 저장소를 만지지 않게
+    /// 그 자리에서 출처를 다시 본다 — 출처 확인(`Target.getTargetInfo`)과 world 만들기 사이에 다른 출처로 확정되면 그 출처의 저장소를 만지지 않게
     /// (적대 리뷰 5 회차). `location.origin` 은 기본 포트를 적지 않는다.
     fn writeStorageExpr(self: *const Op, w: *std.Io.Writer) !void {
         try w.writeAll("(()=>{if(location.origin!==");
@@ -425,6 +432,8 @@ pub const Op = struct {
                 s.endObject() catch return error.OutOfMemory;
             }
             s.endArray() catch return error.OutOfMemory;
+            // 응답 frame(1 MiB)을 넘을 목록은 분명한 실패로(6 회차: 따옴표·백슬래시가 많은 쿠키 180 개에 연결이 답 없이 닫혔다).
+            if (aw.written().len > max_value_json_bytes) return done(gpa, .failed, cookies_too_large_reason);
             return .{ .done = .{ .status = .success, .result = try aw.toOwnedSlice() } };
         }
         // 지우기·clearStorage — 그 호스트(`host`·`.host`)의 쿠키만(부모 도메인 쿠키는 grant 의 호스트 밖이다 — 계획 공격 3 회차).
@@ -671,8 +680,8 @@ test "W9a③ localStorage: 출처를 본 뒤 격리 world 에서 Storage.prototy
         var op = try Op.init(gpa, .get_local_storage, "{\"key\":\"k\\\"q\"}");
         defer op.deinit(gpa);
         op.doc_url = "http://a.test:8080/p";
-        gpa.free(try expectCall(try op.start(gpa), "Page.getFrameTree"));
-        const w = try expectCall(try op.feed(gpa, .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F1\",\"securityOrigin\":\"http://a.test:8080\"}}}" }), "Page.createIsolatedWorld");
+        gpa.free(try expectCall(try op.start(gpa), "Target.getTargetInfo"));
+        const w = try expectCall(try op.feed(gpa, .{ .ok = "{\"targetInfo\":{\"targetId\":\"F1\",\"url\":\"http://a.test:8080/\"}}" }), "Page.createIsolatedWorld");
         defer gpa.free(w);
         try testing.expect(std.mem.indexOf(u8, w, "\"frameId\":\"F1\"") != null);
         const e = try expectCall(try op.feed(gpa, .{ .ok = "{\"executionContextId\":7}" }), "Runtime.evaluate");
@@ -686,7 +695,7 @@ test "W9a③ localStorage: 출처를 본 뒤 격리 world 에서 Storage.prototy
         defer op.deinit(gpa);
         op.doc_url = "https://a.test/";
         gpa.free((try op.start(gpa)).call.params);
-        gpa.free((try op.feed(gpa, .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F\",\"securityOrigin\":\"https://a.test\"}}}" })).call.params);
+        gpa.free((try op.feed(gpa, .{ .ok = "{\"targetInfo\":{\"targetId\":\"F\",\"url\":\"https://a.test/\"}}" })).call.params);
         gpa.free((try op.feed(gpa, .{ .ok = "{\"executionContextId\":1}" })).call.params);
         try expectDone(try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"subtype\":\"null\",\"value\":null}}" }), .success, "");
     }
@@ -696,7 +705,7 @@ test "W9a③ localStorage: 출처를 본 뒤 격리 world 에서 Storage.prototy
         op.doc_url = "https://a.test/";
         gpa.free((try op.start(gpa)).call.params);
         // 그사이 다른 출처로 옮겨 갔다.
-        try expectDone(try op.feed(gpa, .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F\",\"securityOrigin\":\"https://b.test\"}}}" }), .failed, origin_moved_reason);
+        try expectDone(try op.feed(gpa, .{ .ok = "{\"targetInfo\":{\"targetId\":\"F\",\"url\":\"https://b.test/\"}}" }), .failed, origin_moved_reason);
     }
     {
         var op = try Op.init(gpa, .remove_local_storage, "{\"key\":\"k\"}");
@@ -907,7 +916,7 @@ test "W9a③ 적대 리뷰 2 회차 재현 R2-B: 주소에 userinfo(`http://u:p@
     defer op.deinit(gpa);
     op.doc_url = "http://u:p@a.test/x";
     r1FreeStep(try op.start(gpa));
-    const w = try op.feed(gpa, .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F\",\"securityOrigin\":\"http://a.test\"}}}" });
+    const w = try op.feed(gpa, .{ .ok = "{\"targetInfo\":{\"targetId\":\"F\",\"url\":\"http://a.test/\"}}" });
     defer r1FreeStep(w);
     try testing.expect(w == .call and std.mem.eql(u8, w.call.method, "Page.createIsolatedWorld"));
 }
@@ -1154,9 +1163,50 @@ test "W9a③ 적대 리뷰 5 회차 F8: 평가식이 그 자리에서 출처를 
     defer op.deinit(gpa);
     op.doc_url = "http://a.test:80/x";
     r1FreeStep(try op.start(gpa));
-    r1FreeStep(try op.feed(gpa, .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F\",\"securityOrigin\":\"http://a.test\"}}}" }));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{\"targetInfo\":{\"targetId\":\"F\",\"url\":\"http://a.test/\"}}" }));
     const e = try op.feed(gpa, .{ .ok = "{\"executionContextId\":3}" });
     defer r1FreeStep(e);
     try testing.expect(std.mem.indexOf(u8, e.call.params, "location.origin!==\\\"http://a.test\\\"") != null);
     try expectDone(try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\"},\"exceptionDetails\":{\"exception\":{\"description\":\"Error: maru: origin moved\\n    at <anonymous>:1:1\"}}}" }), .failed, origin_moved_reason);
+}
+
+test "W9a③ 적대 리뷰 6 회차 재현 F1: 응답 frame(1 MiB)을 넘을 쿠키 목록은 분명한 실패 — 전에는 연결이 답 없이 닫혔다" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .get_cookies, "");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try aw.writer.writeAll("{\"cookies\":[");
+    for (0..180) |i| {
+        if (i > 0) try aw.writer.writeAll(",");
+        try aw.writer.print("{{\"name\":\"c{d}\",\"value\":\"", .{i});
+        for (0..4000) |_| try aw.writer.writeAll("\\\""); // 페이지가 넣은 따옴표(CDP JSON 안 `\"`) — 돌려줄 때도 두 배
+        try aw.writer.writeAll("\",\"domain\":\"a.test\",\"path\":\"/\"}");
+    }
+    try aw.writer.writeAll("]}");
+    try expectDone(try op.feed(gpa, .{ .ok = aw.written() }), .failed, cookies_too_large_reason);
+}
+
+test "W9a③ 적대 리뷰 6 회차 재현 F2: localStorage 는 프레임 트리 전체를 읽지 않는다 — 페이지가 큰 iframe 을 붙이면 16 MiB 를 넘었다" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .get_local_storage, "{\"key\":\"k\"}");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/x";
+    gpa.free(try expectCall(try op.start(gpa), "Target.getTargetInfo"));
+    const w = try expectCall(try op.feed(gpa, .{ .ok = "{\"targetInfo\":{\"targetId\":\"T1\",\"type\":\"page\",\"url\":\"https://a.test/y\"}}" }), "Page.createIsolatedWorld");
+    defer gpa.free(w);
+    try testing.expect(std.mem.indexOf(u8, w, "\"frameId\":\"T1\"") != null);
+}
+
+test "W9a③ 적대 리뷰 6 회차 재현 F4: clearStorage 는 저장소를 지운 뒤부터 끝까지 간다 — 전에는 철회·시한이 끼면 쿠키를 남기고 멈췄다" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    try testing.expect(op.committed()); // clearDataForOrigin 을 보냈다
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
+    try testing.expect(op.committed()); // 쿠키를 읽는 중
 }

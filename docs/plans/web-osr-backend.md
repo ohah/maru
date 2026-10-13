@@ -1198,6 +1198,13 @@ W9a③ 적대 리뷰(다섯 회차):
   응답 JSON 이 깨졌다(CLI 「malformed response」) → 코드 포인트 경계. 긴 쿠키 값 → 시작에 「too large」(이름·값 4096). 1 MiB 응답 frame 을 넘는
   localStorage 값은 연결이 답 없이 닫혔다(WebKit 도) → 분명한 실패 글. 메모리 부족이 「invalid arguments」 → 「out of memory」. 출처 확인과 world 사이의
   경쟁(추론) → 평가식이 `location.origin` 을 다시 본다. 문서 정정: 거절된 쿠키는 DevTools 오류, 오류 페이지에선 이전 주소.
+- **6 회차**(사용자 요청으로 다섯 회차 더 — 실제 앱·단위 재현): 하중 — 따옴표·백슬래시가 많은 쿠키 180 개면 `get-cookies` 결과가 이스케이프로 1 MiB
+  응답 frame 을 넘어 연결이 답 없이 닫혔다 → 분명한 실패 글(5 회차에 localStorage 만 막았다). 하 — 페이지가 1 MB data: iframe 을 붙이면
+  `Page.getFrameTree` 가 sidecar 의 16 MiB 를 넘어 localStorage 가 실패했다 → `Target.getTargetInfo`(페이지 target id = 주 프레임 id)로 주소만.
+  하 — clearStorage 가 저장소를 지운 뒤 철회·시한이 끼면 쿠키를 남기고 멈췄다 → 저장소를 지우러 보낸 때부터 끝까지(committed). 그대로 둔 것(문서):
+  페이지가 오래 바쁘면 setLocalStorage 의 평가가 요청 시한(-32004) 뒤에 돈다 — -32004 는 「쓰지 않았다」 가 아니다(WebKit 의 evaluateJavaScript 도 같다).
+  참고: `window.open('')` 뒤 `document.write` 로 채운 팝업은 maru 가 주소를 about:blank 로 알아 localStorage 가 「웹 출처 없음」. W9b 로케이터의
+  `frameTreeStep` 도 같은 프레임 트리 문제를 가진다(W9b 몫).
 
 **W9a 적대 리뷰**(구현 뒤 다섯 회차 — 1 회차는 W9a① 만, 2 회차부터 ①+②):
 - **1 회차**(실제 앱·CEF 탐침·변이 21(걸림 14 — 생존 넷은 시험을 더했다: 「불러오는 중」 전의 「아님」, 만든 직후 about:blank 의 문서, 묻는 닫기

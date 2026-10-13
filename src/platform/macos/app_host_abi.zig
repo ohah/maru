@@ -7918,7 +7918,8 @@ fn uncommittedReply(run: *CdpRun, method: []const u8) ?web_cdp_ops.Reply {
     if (run.op.page) |*p| if (p.kind == .screenshot) return .{ .not_sent = cdp_loading_reason };
     // W9a③: localStorage 의 페이지 호출(프레임 트리·격리 world·평가)도 붙잡힌다 — 확정 뒤 다시 하라고. 쿠키(Network·Storage)는 브라우저
     // 쪽이라 붙잡히지 않는다(확인한 주소로 한다).
-    if (run.op.storage != null and (std.mem.startsWith(u8, method, "Page.") or std.mem.startsWith(u8, method, "Runtime."))) return .{ .not_sent = cdp_loading_reason };
+    // localStorage 의 호출(주소 읽기·world·평가) — 확정 전엔 하나도 보내지 않는다(W9a③ 6 회차: 첫 호출이 `Target.getTargetInfo` 가 됐다).
+    if (run.op.storage != null and (std.mem.startsWith(u8, method, "Page.") or std.mem.startsWith(u8, method, "Runtime.") or std.mem.startsWith(u8, method, "Target."))) return .{ .not_sent = cdp_loading_reason };
     return null;
 }
 

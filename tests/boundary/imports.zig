@@ -13250,3 +13250,67 @@ test "저장 실패 문구 표는 «둘이고 그 이유가 적혀 있다»" {
     try std.testing.expect(std.mem.indexOf(u8, app_session, "네이티브 편집기의 것과 합치지 말 것") != null);
     try std.testing.expect(std.mem.indexOf(u8, editor, "일부러 둘이다") != null);
 }
+
+/// 이미지 채널의 세그먼트 표(`client_image_segments.Table`)는 잠금이 없다 — 펌프·해석·stream 열기·hwm 정리가 모두 그 연결의 소유
+/// 스레드에서 돈다는 전제다(계획 IC3b-2c-3). Client 의 울타리(`beginPublicMutation`)는 **공유** 진입이라 두 스레드의 겹친 진입을 막지
+/// 않으므로, 전제는 배선이 지킨다. 그 배선을 이 재고로 고정한다: 표에 닿는 메서드 이름이 나오는 자리를 파일마다 세어(최상위 test
+/// 밖, 선언 포함) 파일·개수·스레드를 적는다. 새 호출자가 생기면(개수가 늘거나 새 파일) 빨개진다 — 그 호출자가 어느 스레드에서
+/// 도는지 확인하고 재고에 이유와 함께 올린다. 「같은 스레드」를 런타임에 재지 않는 것은 첫 snapshot 을 다른 스레드가 적용한 뒤 소유
+/// 스레드가 이어받는 정당한 순차 이관이 있을 수 있어서다(겹침이 아니다).
+const image_table_entry_names = [_][]const u8{
+    "pumpImageChannel",          "resolveImageSegment",          "openImageStream",
+    "sweepImageSegments",        "pumpAttachmentImageChannel",   "resolveAttachmentImage",
+    "openAttachmentImageStream", "sweepAttachmentImageSegments", "currentPumpImageChannel",
+};
+
+const ImageTableSite = struct { path: []const u8, count: usize, thread: []const u8 };
+
+const image_table_sites = [_]ImageTableSite{
+    .{ .path = "src/platform/macos/session_host/client.zig", .count = 4, .thread = "선언 넷(펌프·해석·열기·정리) — 표를 직접 만지는 유일한 자리, 아래 호출자의 스레드를 따른다" },
+    .{ .path = "src/platform/macos/session_host/client_slot.zig", .count = 10, .thread = "slot 의 선언 다섯과 Client 호출 다섯 — tick 펌프는 `withCurrent` 가 slot 소유 스레드를 확인한다, 나머지는 attachment 적용(아래 adapter)의 스레드" },
+    .{ .path = "src/platform/macos/session_host/generation_batch_adapter.zig", .count = 8, .thread = "transport 콜백 넷의 선언과 slot 호출 — `RemoteAttachment` 가 적용할 때 부른다: 앱 메인 스레드의 tick 펌프·관찰자 재접속 단계, 탭을 열 때의 첫 attach" },
+    .{ .path = "src/platform/macos/session_host/host_adapter.zig", .count = 2, .thread = "tick 펌프(generation) 선언과 slot 호출 — `backend_api.pumpImageChannel` 에서만, 앱 메인 스레드" },
+    .{ .path = "src/platform/macos/session_host/remote_runtime.zig", .count = 7, .thread = "legacy transport 콜백 넷(generation adapter 와 같은 스레드)과 `backend_api.pumpImageChannel` 의 선언·호출 둘(유지보수 tick, 앱 메인 스레드)" },
+    .{ .path = "src/platform/macos/session_host/remote_term_backend.zig", .count = 1, .thread = "`maintenanceEventTick` — `tickReconnectProductCoordinator` 가 앱 소유 스레드인지 확인한 뒤에만 부른다" },
+};
+
+test "image channel table is reached only from reviewed call sites on the connection's owner thread" {
+    const allocator = std.testing.allocator;
+    var dir = try std.Io.Dir.cwd().openDir(std.testing.io, "src", .{ .iterate = true });
+    defer dir.close(std.testing.io);
+    var walker = try posixWalk(dir, allocator);
+    defer walker.deinit();
+    var failed = false;
+    var seen: [image_table_sites.len]bool = @splat(false);
+    while (try walker.next(std.testing.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".zig")) continue;
+        const path = try std.fmt.allocPrint(allocator, "src/{s}", .{entry.path});
+        defer allocator.free(path);
+        const source = try readZigFileZ(allocator, path);
+        defer allocator.free(source);
+        var count: usize = 0;
+        for (image_table_entry_names) |name| count += countIdentifierOutsideTopLevelTests(source, name);
+        var expected: usize = 0;
+        var thread: []const u8 = "";
+        for (image_table_sites, 0..) |site, i| if (std.mem.eql(u8, site.path, path)) {
+            seen[i] = true;
+            expected = site.count;
+            thread = site.thread;
+        };
+        if (count != expected) {
+            failed = true;
+            std.debug.print(
+                \\
+                \\[이미지 채널 표 스레드] {s}: 표에 닿는 메서드 이름이 {d} 곳(재고 {d}).
+                \\  세그먼트 표에는 잠금이 없다 — 새 호출자가 어느 스레드에서 도는지 확인하고, 그 연결의 소유 스레드라면 재고에
+                \\  **스레드와 함께** 개수를 올려라(계획 IC3b-2c-3). 재고의 스레드: {s}
+                \\
+            , .{ path, count, expected, thread });
+        }
+    }
+    for (image_table_sites, 0..) |site, i| if (!seen[i]) {
+        failed = true;
+        std.debug.print("\n[이미지 채널 표 스레드] 재고의 {s} 가 없다 — 재고를 고쳐라.\n", .{site.path});
+    };
+    try std.testing.expect(!failed);
+}

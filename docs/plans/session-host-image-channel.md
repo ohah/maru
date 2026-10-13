@@ -281,15 +281,24 @@ IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단�
     복구)는 이 단계에서 재지 않았다 — IC3b-2c-3.
   - tick 의 길: 협상하지 않은 연결은 울타리에 막혀도 `channel_refused` 0, 협상한 연결은 1(앞 갈래).
 
-###### IC3b-2c-3 — 남은 것 (미착수)
+###### IC3b-2c-3 — 스레드 재고·탭 생존 판정자, id 모르는 stream 조사 (PR 진행 중)
 
-- 스레드: 표는 재접속 worker 가 connect 할 때 할당되고(`build_id` 와 같은 꼴) 펌프·해석·적용·정리는 모두 소유 스레드에서 돈다 — 표에
-  잠금이 없다는 전제를 배선이 지키는지 판정자로 잰다. 「같은 스레드」로 재면 안 된다 — 첫 snapshot 을 worker 가 적용하고 그 뒤 메인이
-  이어받는 정당한 순차 이관이 있을 수 있다. 동시 사용(겹친 진입)을 재는 꼴을 정한다.
-- attach 응답을 끝내 못 읽어 id 를 모르는 stream 의 세그먼트는 더 큰 id 를 알 때까지(다음 attach) 표에 남아 원장 자리를 쥔다 —
-  id 를 모르니 닫지도 못한다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 본다.
-- 「이미지 채널 없음」 연결의 늦은 `image_ref` 가 그 연결의 재접속으로 끝나고 **탭은 종료 상태가 되지 않는다**는 판정자
-  (`drainRemoteNow` 수준 — IC3b-2c-2 는 Client·조립기 수준까지만 쟀다).
+- 스레드: 표에는 잠금이 없고, Client 의 울타리(`beginPublicMutation`)는 **공유** 진입이라 두 스레드의 겹친 진입을 막지 않는다 —
+  전제는 배선이 지킨다. `tests/boundary/imports.zig` 의 「image channel table is reached only from reviewed call sites」가 표에 닿는
+  메서드 이름(펌프·해석·열기·정리와 slot·adapter·tick 의 그 갈래 아홉)이 나오는 자리를 파일마다 세어(최상위 test 밖, 선언 포함)
+  파일·개수·스레드로 고정한다 — client 4, client_slot 10, generation_batch_adapter 8, host_adapter 2, remote_runtime 7,
+  remote_term_backend 1. 새 호출자가 생기면 빨갛다(어느 스레드인지 확인하고 올린다). 지금 자리는 모두 앱 메인(소유) 스레드다 — 유지보수
+  tick(`tickReconnectProductCoordinator` 가 소유 스레드를 확인), 그 tick 이 모는 화면 펌프·관찰자 재접속 단계
+  (`reconnect_product_coordinator` → `progressHostReconnectOne`), 탭을 열 때의 첫 attach. 「같은 스레드」를 런타임에 재지 않는다 — 첫
+  snapshot 을 다른 스레드가 적용한 뒤 소유 스레드가 이어받는 순차 이관은 겹침이 아니다.
+- 탭 생존: 「이미지 채널 없음」 연결의 늦은 `image_ref`(세그먼트 없음)는 attachment 가 그 연결을 `frame_malformed` 로 닫고
+  `MalformedRow` 를 올린다(실제 펌프로 잰다, `no_segment` 1). `drainRemoteNow` 의 `GenerationGap`·`MalformedRow` 갈래는 resync 를
+  요청하고 탭을 끝내지 않는다(그 갈래의 블록을 문법 자리로 찾아 `requestResync` 있음·`markPumpEnded`·`process_state`·`summary.ended`
+  없음을 잰다).
+- 조사 — attach 응답을 끝내 못 읽어 id 를 모르는 stream: Client 는 읽지 않은 응답을 남기면 다음 RPC 가 그 응답을 받아 상관 오류로
+  연결이 끝난다(IC2b 의 abandon 응답을 끝까지 읽는 이유와 같다). 그래서 그 stream 의 세그먼트는 **다음 RPC 까지만** 원장 자리를 쥐고,
+  연결이 끝나면 표가 통째로 버려진다. RPC 가 오가지 않는 유휴 연결이면 그 사이가 길 수 있다 — 원장 32 칸이 그 세그먼트로 차는지는
+  광고 뒤 실측(IC6, 흐름 줄의 `held`·원장 진단)에서 본다. 구조 변경은 하지 않았다.
 - 「이미지 채널 없음」 탭 notice(계약 §3.2)는 광고(IC6)와 함께 단다 — 그 전에는 협상한 연결이 없다.
 
 ### IC4 — fd 상속 방지

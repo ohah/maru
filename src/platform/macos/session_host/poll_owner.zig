@@ -5745,11 +5745,10 @@ test "image channel owner: 취소한 세그먼트는 원장과 host 예산에서
     var fds: [4]c.fd_t = undefined;
     var fd_count: usize = 0;
     try testing.expect((try recvTestSegment(channel_fd, &fds, &fd_count)) == null);
-    // 취소 뒤 발급은 아무것도 보내지 않는다(이미 닫은 fd 를 다시 쓰지 않게 판정자는 새 준비분으로 잰다).
     try testing.expectEqual(@as(usize, 1), fx.channelCount());
 }
 
-test "image channel owner: 미룸·전송 불가 — 같은 이미지 미반환은 delta 만 미루고 스냅샷은 준비, 연결 상한은 미룸, host 상한 초과는 전송 불가" {
+test "image channel owner: 미룸·전송 불가 — 같은 이미지 미반환은 delta 만 미루고 스냅샷은 준비, 연결 개수 상한은 미룸, host 상한 초과는 전송 불가" {
     var fx: ImageChannelFixture = .{};
     try fx.init("ic-defer.sock");
     defer fx.deinit();
@@ -5780,15 +5779,70 @@ test "image channel owner: 미룸·전송 불가 — 같은 이미지 미반환�
     try testing.expect(client.prepareImageSegment(7, 4, 1, huge, true) == .untransmittable);
     try testing.expectEqual(@as(usize, 2), client.imageLedger().?.count());
 
+    // 연결 개수 상한까지 채우면 다음 이미지는 미룬다(원장이 반환할 때까지).
+    var filled: [image_segment_ledger.image_segment_max_per_connection]connection_turn.PreparedImageSegment = undefined;
+    var filled_len: usize = 0;
+    defer client.cancelImageSegments(filled[0..filled_len]);
+    while (client.imageLedger().?.count() < image_segment_ledger.image_segment_max_per_connection) {
+        filled[filled_len] = switch (client.prepareImageSegment(8, @intCast(100 + filled_len), 1, &pixels, false)) {
+            .segment => |segment| segment,
+            else => return error.TestUnexpectedResult,
+        };
+        filled_len += 1;
+    }
+    try testing.expect(client.prepareImageSegment(8, 999, 1, &pixels, false) == .deferred);
+
     // 「이미지 채널 없음」 연결은 세그먼트를 만들지 않는다.
     const other_fd = try fx.connect();
     defer _ = c.close(other_fd);
     _ = try fx.helloMain(other_fd, false);
+    var without_channel: usize = 0;
     for (fx.owner.clients) |maybe| {
         const other = maybe orelse continue;
         if (other.hasImageChannel()) continue;
         try testing.expect(other.prepareImageSegment(7, 3, 1, &pixels, true) == .deferred);
+        without_channel += 1;
     }
+    try testing.expect(without_channel >= 1);
+}
+
+test "image channel owner: owner 층이 Connection 에 건넨 세그먼트 연산은 그 Client 의 원장과 채널에 닿는다" {
+    // 투영 배선(IC5b-2)은 Connection 의 `ImageChannelOps` 를 거친다 — 넷 중 하나라도 빠지면 세그먼트 판이 꺼져 협상한 연결에
+    // `image_blob` 이 다시 나간다(계약 §3.2). 그 넷이 실제 Client 에 닿는지 연결의 ops 로 잰다.
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-ops.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const client = fx.clientWithChannel().?;
+    const ops = client.connection.image_channel.?;
+    const pixels = [_]u8{ 4, 3, 2, 1 };
+
+    const first = switch (ops.prepare_segment.?(ops.ctx, 7, 3, 1, &pixels, true)) {
+        .segment => |segment| segment,
+        else => return error.TestUnexpectedResult,
+    };
+    try testing.expectEqual(@as(usize, 1), client.imageLedger().?.count());
+    ops.issue_segments.?(ops.ctx, &.{first});
+    try testing.expectEqual(first.segment_id, ops.issued_through.?(ops.ctx));
+    var fds: [4]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    const got = (try recvTestSegment(channel_fd, &fds, &fd_count)) orelse return error.TestUnexpectedResult;
+    for (fds[0..fd_count]) |fd| _ = c.close(fd);
+    try testing.expectEqual(first.segment_id, got.segment_id);
+
+    // 같은 이미지에 반환되지 않은 세그먼트가 있다 — delta 로 청하면 미루고 스냅샷으로 청하면 준비한다(인자가 그대로 닿는가).
+    try testing.expect(ops.prepare_segment.?(ops.ctx, 7, 3, 2, &pixels, false) == .deferred);
+    const second = switch (ops.prepare_segment.?(ops.ctx, 7, 3, 2, &pixels, true)) {
+        .segment => |segment| segment,
+        else => return error.TestUnexpectedResult,
+    };
+    ops.cancel_segments.?(ops.ctx, &.{second});
+    try testing.expect(fdIsClosed(second.fd));
+    try testing.expectEqual(@as(usize, 1), client.imageLedger().?.count());
 }
 
 test "image channel owner: 세그먼트를 보내지 못하면 채널만 내리고 남은 준비분의 fd 도 닫으며 주 연결은 산다" {

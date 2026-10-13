@@ -7089,12 +7089,29 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image channel owner:"},
         });
         const run_image_channel_host_tests = b.addRunArtifact(image_channel_host_tests);
-        // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4.
-        run_image_channel_host_tests.addArg("--maru-expect-tests=16");
-        run_image_channel_host_tests.addArg("--maru-expect-passed=16");
+        // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4, Connection 에 건넨 연산(IC5b-2) 1.
+        run_image_channel_host_tests.addArg("--maru-expect-tests=17");
+        run_image_channel_host_tests.addArg("--maru-expect-passed=17");
         image_channel_host_step.dependOn(&run_image_channel_host_tests.step);
         test_step.dependOn(&run_image_channel_host_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_host_tests.step);
+        // runtime 쪽 다리(IC5b-2) — 연결 층 sink 를 투영 sink 로 잇는 인자 대응과 제품 RuntimeOps 의 두 세그먼트 판.
+        const image_projection_bridge_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/runtime_manager.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{"image segment projection sink:"},
+        });
+        const run_image_projection_bridge_tests = b.addRunArtifact(image_projection_bridge_tests);
+        run_image_projection_bridge_tests.addArg("--maru-expect-tests=1");
+        run_image_projection_bridge_tests.addArg("--maru-expect-passed=1");
+        image_channel_host_step.dependOn(&run_image_projection_bridge_tests.step);
+        test_step.dependOn(&run_image_projection_bridge_tests.step);
+        macos_only_test_step.dependOn(&run_image_projection_bridge_tests.step);
     } else {
         image_channel_host_step.dependOn(&b.addSystemCommand(&.{ "echo", "image channel owner judges need macOS sockets; not executed on this target" }).step);
     }

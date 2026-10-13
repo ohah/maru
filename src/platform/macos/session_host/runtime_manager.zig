@@ -6087,3 +6087,45 @@ test "agent log format host spawn pins child environment and registry independen
     defer held.close(std.testing.io);
     try std.testing.expect(std.mem.indexOf(u8, dir, "/agent-turn-events-v2/") != null);
 }
+
+test "image segment projection sink: the bridge hands the connection sink the image's id, generation, pixels and batch kind, and maps every answer" {
+    const Recorder = struct {
+        image_id: u32 = 0,
+        generation: u64 = 0,
+        pixels: []const u8 = &.{},
+        snapshot: ?bool = null,
+        answer: server.ImageSegmentAnswer = .{ .segment = 9 },
+
+        fn reserve(ctx: *anyopaque, image_id: u32, generation: u64, pixels: []const u8, as_snapshot: bool) error{OutOfMemory}!server.ImageSegmentAnswer {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.image_id = image_id;
+            self.generation = generation;
+            self.pixels = pixels;
+            self.snapshot = as_snapshot;
+            return self.answer;
+        }
+
+        fn hwmAnswer(_: *anyopaque) u64 {
+            return 41;
+        }
+    };
+    var recorder: Recorder = .{};
+    var bridge: RuntimeManager.ProjectionSegmentSink = .{ .images = .{ .ctx = &recorder, .reserve = Recorder.reserve, .hwm = Recorder.hwmAnswer } };
+    const sink = bridge.sink();
+    const pixels = [_]u8{ 1, 2, 3, 4 };
+    const image: terminal.KittyImageView = .{ .image_id = 5, .generation = 6, .width = 1, .height = 1, .bpp = 4, .pixels = &pixels };
+    try std.testing.expectEqual(screen_snapshot.Reservation{ .segment = 9 }, try sink.reserveFn(sink.ctx, image, .snapshot));
+    try std.testing.expectEqual(@as(u32, 5), recorder.image_id);
+    try std.testing.expectEqual(@as(u64, 6), recorder.generation);
+    try std.testing.expectEqual(@as([*]const u8, &pixels), recorder.pixels.ptr);
+    try std.testing.expectEqual(@as(?bool, true), recorder.snapshot);
+    recorder.answer = .deferred;
+    try std.testing.expectEqual(screen_snapshot.Reservation.deferred, try sink.reserveFn(sink.ctx, image, .delta));
+    try std.testing.expectEqual(@as(?bool, false), recorder.snapshot);
+    recorder.answer = .untransmittable;
+    try std.testing.expectEqual(screen_snapshot.Reservation.untransmittable, try sink.reserveFn(sink.ctx, image, .delta));
+    try std.testing.expectEqual(@as(u64, 41), sink.hwmFn(sink.ctx));
+    // 제품 RuntimeOps 가 두 세그먼트 판을 건넨다 — 빠지면 협상한 연결이 `image_blob` 으로 돌아간다.
+    const source = @embedFile("runtime_manager.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, ".snapshot_with_images = " ++ "snapshotImagesOp, .delta_with_images = " ++ "deltaImagesOp,"));
+}

@@ -2103,10 +2103,14 @@ fn sendImageSegment(channel_fd: c.fd_t, segment: PreparedImageSegment) bool {
         .controllen = @intCast(std.mem.alignForward(usize, @sizeOf(c.cmsghdr) + @sizeOf(c.fd_t), @sizeOf(u32))),
         .flags = 0,
     };
+    var interruptions: u8 = 0;
     while (true) {
         const rc = c.sendmsg(channel_fd, &msg, posix.MSG.DONTWAIT);
-        // 신호가 끼면 다시 보낸다 — 논블로킹이라 기다리는 일은 없다.
-        if (rc < 0 and posix.errno(rc) == .INTR) continue;
+        // 신호가 끼면 다시 보낸다(주 연결의 `writeReady` 와 같은 상한) — 논블로킹이라 기다리는 일은 없다.
+        if (rc < 0 and posix.errno(rc) == .INTR and interruptions < 8) {
+            interruptions += 1;
+            continue;
+        }
         return rc == payload.len;
     }
 }

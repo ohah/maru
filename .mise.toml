@@ -316,6 +316,15 @@ depends = ["macos-chrome-lab-smoke"]
 env = { MARU_REQUIRE_GOLDEN = "1" }
 run = "zig build test-dock-visual-golden"
 
+[tasks.macos-header-hover-visual-golden]
+description = "Capture header/collapsed/dock-toggle hover plates with the real app at 1x and 2x and gate them against committed golden images"
+# 찍고 나서 잰다 — 캡처가 없으면 비교가 조용히 건너뛰므로 부재를 실패로 만든다(이웃 골든과 같은 이유).
+env = { MARU_REQUIRE_GOLDEN = "1" }
+run = [
+  "zig build macos-header-hover-capture",
+  "zig build test-header-hover-visual-golden",
+]
+
 [tasks.macos-remote-scm-visual-golden]
 description = "Capture the remote SCM dock on a live sshd and gate it against committed golden images"
 # 캡처가 없으면 비교가 조용히 건너뛰므로, 이 태스크는 **찍고 나서** 잰다. 캡처 실패를 skip 으로

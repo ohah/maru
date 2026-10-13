@@ -656,7 +656,8 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get" 2>&1; echo "rc=\$?" >> "\$out/ck-get"
 "\$cli" browser delete-cookie --surface "\$nv" --name ck1 > "\$out/ck-del" 2>&1; echo "rc=\$?" >> "\$out/ck-del"
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get2" 2>&1; echo "rc=\$?" >> "\$out/ck-get2"
-# 적대 리뷰 1 회차: sameSite 는 WebKit 처럼 소문자, `--domain .host` 는 호스트 전용 쿠키를 지우지 않는다(WebKit 과 같다), 긴 값은 상한 글로.
+# 적대 리뷰 1 회차: sameSite 는 WebKit 처럼 소문자, 긴 값은 상한 글로. 2 회차: IP 호스트엔 도메인 쿠키가 없다 — `--domain .127.0.0.1` 은 호스트 전용
+# 쿠키를 같은 글로 지운다(도메인 호스트에서 `.a.test` 가 호스트 전용을 남기는 WebKit 규칙은 단위 시험 R1-C).
 "\$cli" browser exec --surface "\$nv" 'document.cookie="ss=1; SameSite=Lax; path=/", 1' > "\$out/r1s-js" 2>&1
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/r1s-get" 2>&1; echo "rc=\$?" >> "\$out/r1s-get"
 "\$cli" browser delete-cookie --surface "\$nv" --name ss --domain .127.0.0.1 > "\$out/r1s-del-dot" 2>&1; echo "rc=\$?" >> "\$out/r1s-del-dot"
@@ -668,6 +669,13 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser clear-storage --surface "\$nv" > "\$out/cl" 2>&1; echo "rc=\$?" >> "\$out/cl"
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/cl-ck2" 2>&1
 "\$cli" browser get-local-storage --surface "\$nv" --key k3 > "\$out/cl-ls2" 2>&1
+# 적대 리뷰 2 회차: 주소에 userinfo 가 있어도 그 호스트로 — 전에는 지우기·clearStorage 가 아무것도 하지 않고 ok.
+"\$cli" browser navigate --surface "\$nv" "http://u:p@127.0.0.1:$port/w9a.html?ui" > "\$out/ui-nav" 2>&1
+"\$cli" browser exec --surface "\$nv" 'document.cookie="ui=1; path=/", 1' > "\$out/ui-js" 2>&1
+"\$cli" browser get-cookies --surface "\$nv" > "\$out/ui-get" 2>&1; echo "rc=\$?" >> "\$out/ui-get"
+"\$cli" browser clear-storage --surface "\$nv" > "\$out/ui-cl" 2>&1; echo "rc=\$?" >> "\$out/ui-cl"
+"\$cli" browser exec --surface "\$nv" 'document.cookie' > "\$out/ui-after" 2>&1
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/w9a.html?back3" > "\$out/nv-back3" 2>&1
 # 적대 리뷰 2 회차: 멈추지 않는 스크립트는 시한(-32004) 뒤 멈춘다 — 같은 탭의 다음 exec 이 답한다(전에는 렌더러가 100 % 로 계속 돌아 뒤 요청이 모두 시한).
 # V8 이 값으로 옮기지 못하는 던진 값(자기를 가리키는 Error)도 이름·메시지, 여러 줄 긴 메시지도 그대로. 포트가 범위를 넘는 주소는 곧 거절.
 "\$cli" browser exec --surface "\$nv" '(()=>{while(true){}})()' > "\$out/r2-loop" 2>&1; echo "rc=\$?" >> "\$out/r2-loop"
@@ -906,9 +914,10 @@ grep -q '^rc=1$' "$out/ck-set-other" && grep -q "page's own host" "$out/ck-set-o
 grep -q '^ok$' "$out/ck-del" && ! grep -q '"name":"ck1"' "$out/ck-get2" && grep -q '^rc=0$' "$out/ck-get2" || fail "delete-cookie did not remove the cookie ($(tr '\n' ' ' < "$out/ck-del") · $(tr '\n' ' ' < "$out/ck-get2"))"
 grep -q '^ok$' "$out/cl" && ! grep -q '"name":"ck3"' "$out/cl-ck2" && grep -q '^$' "$out/cl-ls2" || fail "clear-storage did not clear the page's cookies and localStorage ($(tr '\n' ' ' < "$out/cl") · $(tr '\n' ' ' < "$out/cl-ck2") · $(tr '\n' ' ' < "$out/cl-ls2"))"
 grep -q '"name":"ss"' "$out/r1s-get" && grep -q '"sameSite":"lax"' "$out/r1s-get" || fail "a SameSite=Lax cookie did not come back with sameSite \"lax\" like WebKit ($(tr '\n' ' ' < "$out/r1s-get"))"
-grep -q '^ok$' "$out/r1s-del-dot" && grep -q '"name":"ss"' "$out/r1s-get2" || fail "delete-cookie --domain .127.0.0.1 removed a host-only cookie (WebKit keeps it) ($(tr '\n' ' ' < "$out/r1s-del-dot") · $(tr '\n' ' ' < "$out/r1s-get2"))"
+grep -q '^ok$' "$out/r1s-del-dot" && ! grep -q '"name":"ss"' "$out/r1s-get2" || fail "delete-cookie --domain .127.0.0.1 did not remove the cookie on an IP host (Chromium keeps no domain cookies there) ($(tr '\n' ' ' < "$out/r1s-del-dot") · $(tr '\n' ' ' < "$out/r1s-get2"))"
 grep -q '^rc=1$' "$out/r1s-big" && grep -q 'localStorage key and value are too large' "$out/r1s-big" || fail "a 70000-character localStorage value did not fail with the size limit message ($(tr '\n' ' ' < "$out/r1s-big" | cut -c1-300))"
-echo "PASS w9a-storage: localStorage sets, reads past a page that lies in getItem, and removes; a cookie is set, read and deleted, a cookie for another host is refused; clear-storage clears the page's cookies and localStorage; sameSite comes back lowercase, --domain .host keeps a host-only cookie, a too-long value names the limit"
+grep -q '"name":"ui"' "$out/ui-get" && grep -q '^ok$' "$out/ui-cl" && ! grep -q 'ui=1' "$out/ui-after" || fail "on a page whose address has a username and password, get-cookies/clear-storage did not act on its host ($(tr '\n' ' ' < "$out/ui-nav") · $(tr '\n' ' ' < "$out/ui-get") · $(tr '\n' ' ' < "$out/ui-cl") · $(tr '\n' ' ' < "$out/ui-after"))"
+echo "PASS w9a-storage: localStorage sets, reads past a page that lies in getItem, and removes; a cookie is set, read and deleted, a cookie for another host is refused; clear-storage clears the page's cookies and localStorage; sameSite comes back lowercase, --domain .<IP> deletes the IP host's cookie, a too-long value names the limit, an address with a username and password still acts on its host"
 echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

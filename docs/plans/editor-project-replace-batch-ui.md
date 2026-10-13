@@ -102,19 +102,19 @@ Raw artifact: `maru-editor-project-search-app-_me5eijx/manifest.json`와
 
 ## 저장만 재시도 — 파일별 버튼
 
-`batch/ui.zig::retrySave`는 완료 결과의 `save_failed` 항목만 받는다.
+`batch/ui.zig::retrySave`는 편집 적용이 끝난 결과의 `save_failed` 항목만 받는다.
 배치가 보관한 owner/slot/generation과 살아 있는 Term을 대조하며 닫힌 문서를 경로로 다시 열지 않는다.
-IME 활성·확정 대기·같은 문서의 어느 분할 뷰에 남은 조합도 거절한다. `owner.documentCompositionStamp`는 기존 `composingView` 탐색을 재사용한다. 기존 `saveDocument`의 CAS·읽기 전용·Save As 경로를 사용하고
+IME 활성·확정 대기·같은 문서의 어느 분할 뷰에 남은 조합도 거절한다. `owner.documentCompositionStamp`는 기존 `composingView` 탐색을 재사용한다. native 로컬 CAS·읽기 전용 경로의 큐에 현재 본문을 등록하고
 과거 Plan을 적용하거나 Undo 기록을 추가하지 않는다. 후속 편집은 현재 본문 기준으로 저장한다.
-성공한 항목만 saved로 전환하고 오류를 비우며 saved/save_failed 집계를 갱신한다.
+등록하면 saving으로 전환하고 실제 성공 완료에서 saved와 집계를 갱신한다.
 재실패하면 기존 실패 상태를 유지하고 가장 최근 저장 오류를 기록한다.
 완료 결과의 살아 있는 저장 실패 문서에만 파일별 ‘저장 재시도’ 버튼을 표시한다.
 파일 열기와 별도 클릭 영역이며 IME·확정 대기·대상 문서 조합 때 버튼은 비활성이다.
 좁은 도크는 ‘재시도’와 파일 이름을 먼저 표시하고 접근성 이름은 ‘저장 재시도’로 유지한다.
-성공하면 버튼이 사라지고 완료 집계를 갱신한다. 실패하면 기존 저장 오류 알림을 표시한다.
+저장 중 버튼은 사라지며 실제 성공에서 완료 집계를 갱신한다. 재실패하면 파일별 실패 상태와 최근 오류를 보존한다. 결과 화면이 닫힌 뒤 실패하면 기존 알림을 표시한다.
 
 RPBU3은 외부 충돌 보존, IME·확정 대기·읽기 전용 거절, 후속 편집 저장, Undo·operation 보존,
-성공 집계·오류 제거, 성공 항목 반복 거절과 닫힌 문서 거절을 확인한다. 공유 분할의 첫 뷰는 조합이 없고 다른 뷰에만 조합이 남은 반례도 재현 후 고쳤다.
+실제 완료의 성공 집계·오류 제거, 저장 중/성공 항목 반복 거절과 닫힌 문서 거절을 확인한다. 공유 분할의 첫 뷰는 조합이 없고 다른 뷰에만 조합이 남은 반례도 재현 후 고쳤다.
 Chrome 판정은 160/240/800 device px와 1x/2x에서 파일 열기·버튼 영역 분리, 버튼 경계,
 세대·비활성 클릭을 확인한다. 실제 AppKit 클릭과 제품 Metal 경로는
 `python3 tools/editor-project-search-app/run.py --replace-batch-save-retry --disk-files 2 --count 20`으로 검증한다.
@@ -151,3 +151,10 @@ L2/Chrome 판정자는 접힌 파일·다른 root·일부 선택·전체 제외�
 
 파일 수·본문 크기·저장 지연을 분리한 ReleaseFast 반복 실측은 [성능 기록](editor-project-replace-performance.md)이 소유한다.
 이 기록의 작은 Debug 표본과 다른 binary/입력이므로 하나의 수치로 합치지 않는다.
+
+## 현재 비동기 연결
+
+위 실측 표는 이전 동기 적용/저장 이력이다. 현재 batch UI는 전체 본문 commit 뒤 파일별 저장을
+큐에 등록하고 완료 소비자로 saving·saved·save_failed를 반영한다. 기존 직접 coordinator API는
+동기 완료 계약을 유지한다. 결과를 닫아도 쓰기는 계속되며 저장 중 추가 편집은 dirty로 남는다.
+자세한 수명·실패 정책과 gate는 [로컬 비동기 저장 계획](editor-local-save-async.md#배치-ui의-비동기-저장)을 따른다.

@@ -10,11 +10,14 @@ const actor = @import("../batch.zig");
 const worker = @import("mixed_worker.zig");
 const collect = @import("collect.zig");
 const coordinator = @import("coordinator.zig");
+const Receipt = maru.session.editor.save_receipt.Receipt;
+const save_dispatch = @import("../../save/dispatch.zig");
 pub const State = struct {
     phase: enum { idle, building, ready, conflict, failed, completed } = .idle,
     job: ?*worker.Job = null,
     collector: ?collect.State = null,
     documents: ?[]?search.request.DocumentIdentity = null,
+    receipts: ?[]?*Receipt = null,
     ready: ?worker.Ready = null,
     ticket: ?actor.Ticket = null,
     files: usize = 0,
@@ -32,6 +35,7 @@ pub const State = struct {
         if (self.job) |job| job.deinit();
         if (self.ready) |*ready| ready.deinit(a);
         if (self.documents) |docs| a.free(docs);
+        if (self.receipts) |slots| freeReceipts(a, slots);
         self.* = .{};
     }
     pub fn invalidate(self: *State, a: std.mem.Allocator) void {
@@ -57,6 +61,42 @@ pub const State = struct {
         return owner.relativeToRoot(self.display_root, absolute) orelse absolute;
     }
 };
+fn freeReceipts(a: std.mem.Allocator, slots: []?*Receipt) void {
+    for (slots) |slot| if (slot) |receipt| receipt.release();
+    a.free(slots);
+}
+fn prepareReceipts(a: std.mem.Allocator, ready: *const worker.Ready) ![]?*Receipt {
+    const slots = try a.alloc(?*Receipt, ready.prepared.items.items.len);
+    @memset(slots, null);
+    errdefer freeReceipts(a, slots);
+    for (ready.prepared.items.items, 0..) |item, index| if (item.changes.len > 0) {
+        slots[index] = try Receipt.create(a);
+    };
+    return slots;
+}
+fn updateSaveCounts(st: *State) void {
+    const counts = search.batch.saveCounts(st.ready.?.specification.targets.items);
+    st.result.saved = counts.saved;
+    st.result.save_failed = counts.save_failed;
+    st.result.saving = counts.saving;
+}
+fn pollSaveResults(self: *host.AppSession) void {
+    const st = &self.editor_search.batch;
+    const slots = st.receipts orelse return;
+    var changed = false;
+    for (slots, st.ready.?.specification.targets.items) |*slot, *target| if (slot.*) |receipt| {
+        if (receipt.result == .pending) continue;
+        changed = search.batch.settleSave(target, receipt.result) or changed;
+        receipt.release();
+        slot.* = null;
+    };
+    if (changed) {
+        updateSaveCounts(st);
+        self.editor_search.invalidate();
+        self.editor_search.result.generation +%= 1;
+        self.metal_dirty = true;
+    }
+}
 fn displayRoot(targets: []const search.batch.Target) []const u8 {
     var common = std.fs.path.dirname(targets[0].absolute) orelse "/";
     for (targets) |target| while (common.len > 1 and owner.relativeToRoot(common, target.absolute) == null) {
@@ -122,6 +162,10 @@ pub fn start(self: *host.AppSession) !void {
 }
 pub fn poll(self: *host.AppSession) void {
     const st = &self.editor_search;
+    if (st.batch.phase == .completed) {
+        pollSaveResults(self);
+        return;
+    }
     if (st.batch.phase != .building and st.batch.phase != .ready) return;
     if (!current(self)) {
         st.batch.invalidate(self.allocator);
@@ -174,11 +218,14 @@ pub fn back(self: *host.AppSession) void {
 }
 pub fn apply(self: *host.AppSession) !void {
     if (!canApply(self)) return error.StaleRequest;
+    // 완료 소비자의 모든 할당은 본문 commit보다 먼저 끝낸다.
+    const slots = try prepareReceipts(self.allocator, &self.editor_search.batch.ready.?);
+    errdefer freeReceipts(self.allocator, slots);
     // 자기 commit의 changed 통지가 검색 결과를 해제해도 명세·Plan·결과 슬롯은 살아 있다.
     var transaction = self.editor_search.batch;
     self.editor_search.batch = .{};
     const ready = &transaction.ready.?;
-    const applied = coordinator.apply(self, &ready.specification, &ready.prepared, ready.ticket, ready.closed) catch |err| {
+    const applied = coordinator.applyObserved(self, &ready.specification, &ready.prepared, ready.ticket, ready.closed, slots) catch |err| {
         transaction.phase = .conflict;
         transaction.failure = err;
         self.editor_search.batch = transaction;
@@ -189,6 +236,7 @@ pub fn apply(self: *host.AppSession) !void {
     };
     transaction.result = applied.summary;
     transaction.documents = applied.documents;
+    transaction.receipts = slots;
     transaction.phase = .completed;
     self.editor_search.batch = transaction;
     self.editor_search.scroll.reset();
@@ -235,14 +283,22 @@ pub fn retrySave(self: *host.AppSession, index: usize) !void {
     const target = &st.ready.?.specification.targets.items[index];
     if (target.outcome != .save_failed) return error.StaleRequest;
     if (self.ime_active or self.ime_editor_commit_pending or owner.documentCompositionStamp(self, term) != 0) return error.InputTransactionPending;
-    @import("../../mod.zig").saveDocument(self, term) catch |err| {
+    const receipt = Receipt.create(self.allocator) catch |err| {
         target.save_failure = err;
         return err;
     };
-    target.outcome = .saved;
+    errdefer receipt.release();
+    const admitted = save_dispatch.trySaveForBatch(self, term, receipt) catch |err| {
+        target.save_failure = err;
+        return err;
+    };
+    _ = admitted orelse return error.NotAnEditor;
+    const slots = st.receipts orelse unreachable;
+    // 실패 완료의 소비자는 poll에서 이미 해제했다. 저장 중 재시도는 위 outcome 검사로 거절한다.
+    slots[index] = receipt;
+    target.outcome = .saving;
     target.save_failure = null;
-    st.result.save_failed -= 1;
-    st.result.saved += 1;
+    updateSaveCounts(st);
     self.editor_search.invalidate();
     self.editor_search.result.generation +%= 1;
     self.metal_dirty = true;

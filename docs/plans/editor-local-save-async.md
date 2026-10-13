@@ -4,10 +4,10 @@
 
 - worker 기반: 구현. 이름 있는 로컬 저장의 독립 bytes/path, 전용 I/O executor, 선할당 완료 슬롯, join 수명을 제공한다.
 - 요청 큐와 완료 승인 기반: 구현. 한 큐의 FIFO 실행·동일 요청 합류·성공 기준 인계·caller 예산·stale 대상 거부를 제공한다.
-- 사용자 저장 연결: 부분 구현. 파일 패널 Entry가 없는 이름 있는 일반 로컬 편집기의 code action→format 뒤 저장을 앱 전역 큐에 연결했다.
+- 사용자 저장 연결: 부분 구현. 이름 있는 일반 로컬 편집기와 native 파일 패널의 code action→format 뒤 저장을 앱 전역 큐에 연결했다. 웹 bridge·diff·원격·이름 없는 문서는 제외한다.
 - 정상 종료 연결: 구현. main-actor pump로 저장 완료를 정산한 뒤 마지막 workspace/백업 캡처를 시작한다. 실제 AppKit에서 미정산 저장 요청 직후 종료를 요청하고 최종 bytes·workspace·clean 백업을 검증한다. 느린 파일 I/O 동안 timer 대기와 취소 경합의 제품 실측은 별도다.
-- 닫기의 저장 선택·배치 worker·연결된 파일 패널·원격·Save As·rename: 별도 단계. 기존 경로를 유지한다.
-- 저장 응답 지연 개선: 실제 제품 지연은 아직 측정하지 않았다. 사용자 일반 로컬 저장은 비동기이며, 기존 동기 API와 batch는 계속 완료까지 main에서 기다린다.
+- 배치 적용/재시도 저장: 구현. 전체 본문 commit 뒤 파일별로 큐에 등록하고 실제 완료를 결과에 반영한다. 닫기의 저장 선택·웹 bridge·원격·Save As·rename coordination은 별도 단계다.
+- 저장 응답 지연 개선: 실제 AppKit의 배치 적용·메인 이벤트 지연을 측정한다. 등록 시간과 전체 쓰기 완료 시간은 구분한다. 기존 동기 API는 계속 완료까지 main에서 기다리며 모든 명령의 무중단을 보장하지 않는다.
 
 ## 기반의 책임
 
@@ -37,7 +37,7 @@ worker 기반은 제품 큐·실패 안내·종료 정책을 결정하지 않는
 
 - `format.saveNowWithNotice`가 사용자 저장의 최종 진입점이다. `save_actions`와 포맷의 응답·시한 뒤에 snapshot을 준비하고, 일반 로컬 문서는 큐에 등록하며 그 밖의 저장 계약은 동기 호출을 유지한다. 큐 등록을 실제 저장 완료로 안내하지 않는다.
 - 네이티브 편집기의 `AppSession.showConfirm`은 현재 닫기/취소 두 버튼이다. 기존 「저장 후 닫기」는 CM6 `file_panel_close`에만 있다. 네이티브의 저장 선택은 별도로 연결하고 CM6의 revision-pinned ACK와 섞지 않는다.
-- `search.preview`의 적용/재시도, `search.batch`, `workspace_edit`, `conflict.confirmOverwrite`는 동기 `saveDocument`의 완료를 전제로 한다. 반환을 큐 등록 성공으로 바꾸면 저장 성공·clean 결과가 거짓이 된다. 새 사용자 저장 진입점을 분리하고 같은 대상의 기존 writer와 순서를 조정한다.
+- `search.preview`의 적용/재시도, 배치의 기존 직접 coordinator API, `workspace_edit`, `conflict.confirmOverwrite`는 동기 `saveDocument`의 완료를 전제로 한다. 배치 UI는 별도 `applyObserved`와 저장 완료 자료를 사용한다. 반환을 큐 등록 성공으로 바꾸면 저장 성공·clean 결과가 거짓이 된다. 새 사용자 저장 진입점을 분리하고 같은 대상의 기존 writer와 순서를 조정한다.
 - 닫기 대기 중 포커스·탭 순서가 바뀌어도 원래 대상을 다시 확인한다. `PendingClose`의 활성 위치나 배열 인덱스만 장기간 들고 다른 문서를 닫지 않는다.
 - Swift의 `applicationShouldTerminate`는 이미 `terminateLater`와 완료 응답 경로를 갖는다. 파일 쓰기 drain은 마지막 workspace checkpoint와 성공/실패 정산보다 앞서며, 마지막 worker가 끝났다는 이유만으로 AppKit 종료 성공을 바로 응답하지 않는다.
 - 요청 수명을 창의 allocator·Term 주소에 묶지 않는다. 공유 문서·다른 창·마지막 뷰의 수명과 완료 수신 창을 별도로 검증한다.
@@ -84,13 +84,13 @@ LSAVEQ1~6은 동적 큐의 64개 독립 요청·등록 OOM 보존과 실제 work
 
 `editor/save/owner.zig::Owner`는 각 등록·합류 발신자의 origin과 registry request lease를 main actor에서 보존한다. bytes/path는 `Prepared.initWithAllocator`로 coordinator allocator에서 준비한다. worker에는 모델 참조를 넘기지 않는다. 준비/등록 실패에서는 임시 참조와 자료를 해제하며 본문·Undo·선택은 바꾸지 않는다. ack 승인 전에 참조를 풀지 않는다.
 
-`editor/save/dispatch.zig`는 이름 있는 일반 로컬 편집기의 사용자 저장을 앱 전역 단일 큐에 보낸다. 현재 연결은 `term.file_entry == null`인 일반 문서에 한정한다. 연결된 파일 패널·diff·원격·이름 없는 문서는 기존 저장 계약을 유지한다. 완료 시 origin window generation/surface와 실제 문서 신원으로 살아 있는 뷰를 다시 찾는다. 마지막 뷰가 사라져도 요청 모델은 남으며 `Queue.applyRetained`가 저장 기준을 반영한 뒤 같은 요청의 참조를 모두 해제한다. 같은 경로의 새 독립 문서에 완료를 적용하지 않는다.
+`editor/save/dispatch.zig`는 이름 있는 일반 로컬 편집기의 사용자 저장을 앱 전역 단일 큐에 보낸다. 일반 문서와 `native_editor`이고 웹 bridge를 사용하지 않는 파일 패널을 연결한다. 웹 bridge·diff·원격·이름 없는 문서는 기존 저장 계약을 유지한다. 완료 시 origin window generation/surface와 실제 문서 신원으로 살아 있는 뷰를 다시 찾는다. 마지막 뷰가 사라져도 요청 모델은 남으며 `Queue.applyRetained`가 저장 기준을 반영한 뒤 같은 요청의 참조를 모두 해제한다. 같은 경로의 새 독립 문서에 완료를 적용하지 않는다.
 
 `State.save_target_epoch`는 본문 개정과 별개다. 본체/대상을 해제하거나 이름 있는 대상으로 바인딩할 때 무효화하며, 상한에 이른 epoch의 새 등록은 거절한다. 뷰를 닫는 것만으로 살아 있는 요청 모델의 epoch를 바꾸지 않는다. ordinary typing과 Undo도 epoch를 바꾸지 않는다. 모델에 저장 기준을 반영하는 `save_ops.markSaved`를 기존 backup 완료와 공유한다.
 
 실제 성공만 logical saved hash와 raw disk hash를 옮긴다. 저장 중 추가 편집은 dirty로 남고 Undo를 유지한다. 완료 알림은 late response 경로를 사용한다. 외부 충돌 확인은 다른 오버레이를 닫지 않고, 해당 모델/epoch가 여전히 유효하고 오버레이가 비었을 때 표시한다. 기존 저장 충돌 상자만 열린 경우에는 기존 C1a 재진입 계약에 따라 마지막에 실패한 문서로 갱신하며, 다른 모달·토스트·이름 입력창은 선점하지 않는다. LSP·외부 포매터의 실패·시간 초과·낡은 결과 안내에 붙는 「저장됨」도 등록 시점이 아니라 실제 성공 뒤에 표시한다. 외부 포매터의 기존 64바이트 이름과 160바이트 진단을 요청 안에 복사해 결과 해제 뒤 빌린 메모리가 남지 않으며, 저장 실패 때는 성공 안내를 게시하지 않는다.
 
-기존 `saveDocumentGuarded` caller는 큐 등록을 완료로 오해하지 않는다. 동기 caller가 로컬 파일을 쓰기 전에 기존 앱 전역 큐를 정산하고 최신 disk 기준으로 준비한다. 이 동기 경로는 main을 기다리게 하며 batch 응답 개선의 완료 증거가 아니다. 전용 async batch 연결은 후속 단계다.
+기존 `saveDocumentGuarded` caller는 큐 등록을 완료로 오해하지 않는다. 동기 caller가 로컬 파일을 쓰기 전에 기존 앱 전역 큐를 정산하고 최신 disk 기준으로 준비한다. 이 동기 경로는 main을 기다리게 하며 batch 응답 개선의 완료 증거가 아니다. 배치 UI는 `applyObserved`로 본문을 commit한 뒤 별도의 async 저장을 등록한다. 기존 직접 API의 동기 완료 계약은 유지한다.
 
 AppKit은 `maru_macos_editor_save_pending_requests`로 main-actor 완료를 pump한다. 정상 종료는 저장을 먼저 정산한 뒤 final workspace checkpoint에 진입하고, checkpoint를 생략하는 종료 경로도 파일 저장과 프로젝트 검색 worker가 남았으면 `terminateLater`로 기다린다. 이 getter는 main actor 전용이며 파일 I/O가 영원히 멈추면 종료 대기도 끝난다는 보장은 없다. 강제 종료/전원 손실을 보장하지 않는다.
 
@@ -109,11 +109,60 @@ AppKit은 `maru_macos_editor_save_pending_requests`로 main-actor 완료를 pump
 `dispatch.trySaveObserved`는 기존 일반 로컬 저장 계약에만 이 결과를 연결하며 기존 `trySave`도
 같은 진입점을 쓴다. 완료 자료의 해제는 저장 취소나 파일 롤백이 아니다.
 
-이 단계는 배치 UI 연결에 필요한 기반이다. 아직 batch·파일 패널의 저장 호출을 바꾸거나
-저장 중 라벨을 추가하지 않았으며, main 응답 지연 개선을 완료한 것으로 보지 않는다.
-다음 단계는 native 파일 패널 계약을 확인하고 batch 결과 슬롯을 이 자료에 연결하는 작업이다.
+이 기반을 배치 UI에 연결했다. native 파일 패널도 모델의 CAS writer와 완료 계약을 쓴다.
+웹 bridge의 revision-pinned ACK와는 섞지 않는다. 전용 batch의 저장 중 라벨·결과 슬롯·재시도를
+연결했으며 아래 범위와 검증을 따른다.
 
 `zig build test-editor-save-receipts`는 실제 차단 writer·합류·소비자 선행 해제·등록의 네 할당 실패·
 잘못된 승인·중복 완료·최종 정리를 검사한다. `tools/test-editor-save-receipts-adversarial.py`는
 조기 성공·요청 참조 누락·실패 유실·거절된 승인 게시·중복 결과 덮어쓰기를 실제 실패로 검출하며
 정상/복원 대조군을 함께 실행한다. 실제 배치 UI·물리 IME 검증의 증거는 아니다.
+
+## 배치 UI의 비동기 저장
+
+`batch.ui.apply`는 변경할 대상별 완료 소비자를 본문 commit 전에 전부 확보한다. 할당 실패는
+미리보기와 본문·Undo를 그대로 보존한다. `coordinator.applyObserved`는 소비자 수·미사용 상태·
+중복 객체를 확인한 뒤 기존 전체 준비/검증/연결 Undo commit과 native 문서 게시를 수행한다.
+
+commit 뒤 파일별 snapshot을 앱 전역 큐에 등록한다. 이 단계의 실패는 해당 파일을 `save_failed`로
+남기고 뒤 파일 처리를 계속한다. 등록 성공은 `saving`이며 실제 완료 전 `saved`로 표시하지 않는다.
+`batch.settleSave`와 `saveCounts`가 실제 완료를 한 번 반영하고 현재 파일별 상태에서 집계를 재계산한다.
+본문·선택·Undo는 완료 시 변경하지 않으며 저장 중 추가 편집은 dirty로 남는다.
+
+결과 화면은 소비자 참조만 소유한다. 뒤로가기·검색 종료가 이를 해제해도 큐의 요청/문서 참조는
+남아 쓰기를 끝낸다. 결과가 살아 있을 때 오류는 파일별 결과로 표시한다. 결과가 사라진 뒤의
+실패는 기존 알림으로 남기며 배치 때문에 덮어쓰기 확인창을 자동으로 열지 않는다.
+순수 실패 표시 판정은 `editor_save_notice.failurePresentation`이 소유한다.
+
+재시도는 저장 실패한 살아 있는 문서의 현재 본문만 새 snapshot으로 등록한다. 과거 Plan을 다시
+적용하지 않는다. IME·확정 대기·공유 뷰의 조합을 거절하며 저장 중 중복 재시도도 거절한다.
+성공/실패는 실제 완료에서 반영하고 최근 실패 이유를 보존한다. 오른쪽·하단/좁은 도크는 기존
+버튼과 geometry를 사용해 저장 중·완료·실패를 표시한다. 닫힌 파일을 새 문서로 게시한 뒤에는
+사이드바 행과 retained 선택 밴드·accent 막대를 함께 재구성해 이전 높이가 남지 않도록 한다.
+
+`test-editor-batch-save-async`는 차단된 실제 writer·추가 편집·외부 CAS·뒤 파일 진행·현재 본문
+재시도·결과 선행 해제·native 패널·소비자 준비/등록 할당 실패·중복 소비자를 검사한다.
+`tools/test-editor-batch-save-adversarial.py`는 조기 성공·native 누락·요청 참조 누락·CAS 무시·
+과거 Plan 재적용·중복 소비자 선검사 누락·사이드바 선택 밴드 갱신 누락을 실제 단언 실패와 정상/복원 대조군으로 검증한다.
+
+AppKit fixture는 실제 mouse 적용/재시도와 Metal readback을 사용한다. `--batch-save-delay-ms`는
+격리 사본의 실제 CAS writer에 같은 지연을 넣어 동기/worker 경로를 비교하며 제품 코드를 바꾸지
+않는다. main 적용/다음 이벤트 지연과 전체 저장 완료 지연을 별도로 기록한다. 합성 NSEvent와
+제품 Metal 캡처는 물리 한글 HID·VoiceOver·OS 후보창 검증으로 확대하지 않는다.
+
+### 배치 저장 제품 실측
+
+동일 메인 `adbd7ee54`를 부모로 둔 동기/비동기 격리 ReleaseFast 빌드에서 34파일
+(열린 문서 32·디스크 2), 53일치, 입력 132,300바이트를 적용했다. 960×600·1배 배율이며
+아래 값은 조건별 단일 실행이다. 파일당 50ms는 실제 writer에 주입한 비교용 지연이다.
+
+| 조건 | 저장 경로 | 적용 호출 | 다음 메인 이벤트 | 전체 저장 완료 |
+|---|---|---:|---:|---:|
+| 지연 주입 없음 | 동기 | 23.90ms | 24.68ms | 23.90ms |
+| 지연 주입 없음 | 비동기 | 6.23ms | 7.03ms | 584.00ms |
+| 파일당 50ms | 동기 | 2,033.31ms | 2,036.16ms | 2,033.31ms |
+| 파일당 50ms | 비동기 | 5.08ms | 5.80ms | 2272.39ms |
+
+완료 시간은 동기는 적용 반환, 비동기는 마지막 실제 완료 정산에서 측정한다. GUI 관측기의
+대기 시간은 넣지 않는다. 비동기는 화면에 제어를 일찍 돌려주지만 단일 writer와 main 정산 때문에
+전체 완료가 늘 수 있다. 이 작은 fixture로 대용량 본문 준비 비용이나 프레임률을 보장하지 않는다.

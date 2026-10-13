@@ -45,3 +45,10 @@ pub const Success = struct {
 pub fn mayPresentConflict(quitting: bool, occupied: bool, own_conflict_only: bool) bool {
     return !quitting and (!occupied or own_conflict_only);
 }
+
+/// 결과 소비자가 살아 있으면 파일별 결과로 알린다. 사라진 소비자의 실패는 기존 알림으로 남긴다.
+pub const FailurePresentation = enum { result, interactive, orphan_notice };
+pub fn failurePresentation(interactive: bool, has_consumer: bool) FailurePresentation {
+    if (interactive) return .interactive;
+    return if (has_consumer) .result else .orphan_notice;
+}

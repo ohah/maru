@@ -1516,6 +1516,13 @@ macOS의 `/usr/sbin/sshd` 실행이 가능한 환경에서 opt-in으로 실행�
 
 `mise exec -- zig build test-editor-local-save test-editor-save-pipeline test-editor-save-conflicts test-editor-project-replace-batch-ui -j4`와 `-Doptimize=ReleaseFast`는 요청 수명과 사용자 키 dispatch·code action/LSP·외부 format·기존 배치 저장 계약을 검증한다. `python3 tools/test-editor-save-command-adversarial.py`는 BOM 기준 혼동·동기 저장 순서 장벽 누락·오버레이 선점·닫힌 모델 완료 누락·조기 저장 성공 안내를 실제 테스트 실패와 정상/복원 대조군으로 검증한다. 헤드리스 판정은 실제 AppKit/물리 IME와 전체 batch 응답 개선을 대신하지 않는다. `zig build macos-editor-save-conflict-smoke`는 제품 ⌘S·충돌 선택·백업/복원 및 `quit-pending-save`의 미정산 요청 관측 직후 정상 종료와 최종 bytes/workspace/clean 백업을 검사한다.
 
+배치 비동기 저장: `mise exec -- zig build test-editor-batch-save-async`와
+`-Doptimize=ReleaseFast`. `python3 tools/test-editor-batch-save-adversarial.py`는 실제 실패와
+정상/복원 대조군을 검사한다. 실제 앱 적용·저장 중 양쪽 도크·완료/Undo는
+`python3 tools/editor-project-search-app/run.py --replace-batch --disk-files 2 --count 20 --batch-open-files 32 --batch-save-delay-ms 50 --optimize ReleaseFast`,
+재시도는 `--replace-batch-save-retry`로 검사한다. 지연은 격리 사본의 writer에만 주입하며
+main 지연과 전체 완료 지연을 구분한다.
+
 저장 결과 소비자 수명: `mise exec -- zig build test-editor-save-receipts`와
 `-Doptimize=ReleaseFast`. `python3 tools/test-editor-save-receipts-adversarial.py`는 완료 결과의
 조기 게시·참조 누락·실패 유실·잘못된 승인·중복 게시 변이를 정상/복원 대조군과 검사한다.

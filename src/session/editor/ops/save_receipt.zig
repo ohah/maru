@@ -14,6 +14,9 @@ pub const Receipt = struct {
         if (self.result != .pending) return error.CompletedReceipt;
         if (self.references != 1) return error.ReceiptInUse;
     }
+    pub fn hasConsumer(self: *const Receipt) bool {
+        return self.references > 1;
+    }
     pub fn retain(self: *Receipt) void {
         if (self.references == 0 or self.references == std.math.maxInt(usize)) unreachable;
         self.references += 1;

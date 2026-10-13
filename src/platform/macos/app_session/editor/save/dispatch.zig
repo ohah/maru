@@ -20,12 +20,20 @@ pub fn trySave(session: *host.AppSession, term: *host.Term, success_notice: ?mar
 }
 /// 결과 소비자는 화면 밖에서도 완료를 보관한다. 지원하지 않는 저장 계약은 null로 구분한다.
 pub fn trySaveObserved(session: *host.AppSession, term: *host.Term, success_notice: ?notice.Success, receipt: ?*owner_mod.Receipt) editor.SaveError!?u64 {
-    // 연결된 파일 패널·원격·이름 없는 문서의 별도 저장 계약은 기존 동기 진입점으로 보낸다.
-    if (term.kind != .editor or term.rt.editor_diff != null or term.file_entry != null) return null;
+    if (term.file_entry) |entry| if (!entry.native_editor or entry.usesEditorBridge()) return null;
+    return enqueueNative(session, term, success_notice, receipt, true);
+}
+/// 배치 결과가 완료를 소비한다. native 패널은 모델 계약을 쓰고 웹 bridge는 이 큐에 넣지 않는다.
+pub fn trySaveForBatch(session: *host.AppSession, term: *host.Term, receipt: *owner_mod.Receipt) editor.SaveError!?u64 {
+    if (term.file_entry) |entry| if (!entry.native_editor or entry.usesEditorBridge()) return null;
+    return enqueueNative(session, term, null, receipt, false);
+}
+fn enqueueNative(session: *host.AppSession, term: *host.Term, success_notice: ?notice.Success, receipt: ?*owner_mod.Receipt, interactive: bool) editor.SaveError!?u64 {
+    if (term.kind != .editor or term.rt.editor_diff != null) return null;
     const document = term.rt.editorDocument();
     if (document.remote != null or document.untitled != null or document.opened == null or document.path == null) return null;
     if (active == null) active = owner_mod.Owner.init(allocator());
-    const admitted = active.?.enqueueObserved(session, term, document.save_target_epoch, success_notice, receipt) catch |failure| {
+    const admitted = active.?.enqueueNotified(session, term, document.save_target_epoch, success_notice, receipt, interactive) catch |failure| {
         if (active.?.queue.requestCount() == 0) {
             active.?.deinit();
             active = null;
@@ -65,9 +73,9 @@ fn canAskConflict(session: *host.AppSession) bool {
         !session.chrome_host.notice.open and session.rename == null;
     return notice.mayPresentConflict(host.appQuitting(), session.editorHelpersSuppressed(), own_conflict_only);
 }
-fn publishFailure(entry: owner_mod.Reference, failure: anyerror) void {
+fn publishFailure(entry: owner_mod.Reference, failure: anyerror, ask_conflict: bool) void {
     const live = owner_mod.Owner.liveTarget(entry);
-    if (failure == error.ExternalConflict and live != null) {
+    if (ask_conflict and failure == error.ExternalConflict and live != null) {
         const identity = live.?.token.identity.?;
         if (findView(identity, entry.origin)) |view| {
             if (canAskConflict(view.session)) {
@@ -125,7 +133,16 @@ pub fn poll() void {
         }
         for (owner.references.items) |subscriber| {
             if (subscriber.id != outcome.id) continue;
-            if (outcome.failure) |failure| publishFailure(subscriber, failure) else if (!accepted) publishFailure(subscriber, error.WriteFailed) else {
+            const failure: ?anyerror = outcome.failure orelse if (accepted) null else error.WriteFailed;
+            if (failure) |err| {
+                // 결과 화면이 사라졌으면 실패 이유를 잃지 않는다. 배치에서는 덮어쓰기 상자를 열지 않는다.
+                const presentation = notice.failurePresentation(subscriber.interactive, if (subscriber.receipt) |receipt| receipt.hasConsumer() else false);
+                switch (presentation) {
+                    .result => {},
+                    .interactive => publishFailure(subscriber, err, true),
+                    .orphan_notice => publishFailure(subscriber, err, false),
+                }
+            } else {
                 if (subscriber.success_notice) |message| if (originWindow(subscriber.origin)) |session| {
                     // 남은 충돌 표시의 경고가 포맷 결과 안내에 가려지지 않게 한다.
                     if (findView(live.?.token.identity.?, subscriber.origin)) |view| if (!maru.session.editor.conflict.hasUnresolved(view.term.rt.editor_lines)) {

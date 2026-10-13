@@ -10,7 +10,7 @@ pub const Selection = struct {
     source: request.Source,
     ranges: []const event.Range,
 };
-pub const Outcome = enum { pending, unchanged, applied, saved, save_failed };
+pub const Outcome = enum { pending, unchanged, applied, saving, saved, save_failed };
 pub const Target = struct {
     absolute: []u8,
     root_index: usize,
@@ -23,6 +23,41 @@ pub const Target = struct {
         self.ranges.deinit(a);
     }
 };
+/// 공개 coordinator의 소비자 배열도 검증한다. 같은 객체를 두 요청이 소비하면 선행 완료가 후행 결과를 오염시킨다.
+pub fn validateSaveReceipts(slots: []const ?*@import("../ops/save_receipt.zig").Receipt) !void {
+    for (slots, 0..) |slot, index| if (slot) |receipt| {
+        try receipt.ensureUnused();
+        for (slots[0..index]) |previous| if (previous == receipt) return error.DuplicateReceipt;
+    };
+}
+pub const SaveCounts = struct { saving: usize = 0, saved: usize = 0, save_failed: usize = 0 };
+/// 집계는 과거 결과에서 빼지 않고 현재 파일별 상태에서 재계산한다.
+pub fn saveCounts(targets: []const Target) SaveCounts {
+    var result: SaveCounts = .{};
+    for (targets) |target| switch (target.outcome) {
+        .saving => result.saving += 1,
+        .saved => result.saved += 1,
+        .save_failed => result.save_failed += 1,
+        else => {},
+    };
+    return result;
+}
+/// 저장 요청 등록과 실제 완료를 구분한다. 이미 결산된 결과를 재사용하지 않는다.
+pub fn settleSave(target: *Target, result: @import("../ops/save_receipt.zig").Result) bool {
+    if (target.outcome != .saving or result == .pending) return false;
+    switch (result) {
+        .pending => unreachable,
+        .saved => {
+            target.outcome = .saved;
+            target.save_failure = null;
+        },
+        .failed => |failure| {
+            target.outcome = .save_failed;
+            target.save_failure = failure;
+        },
+    }
+    return true;
+}
 pub const Specification = struct {
     identity: request.Identity,
     needle: []u8,

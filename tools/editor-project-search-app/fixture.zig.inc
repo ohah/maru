@@ -15,6 +15,9 @@ pub fn editorProjectSearchObserve(self: *AppSession) void {
 export fn maru_editor_project_search_probe(stage: u32) callconv(.c) i32 {
     if (stage < 100) editor_project_search_probe_stage = stage;
     const self = editor_project_search_session orelse return 0;
+    if (stage == 105) {
+        return if (@hasField(@TypeOf(self.editor_search.batch.result), "saving")) @intFromBool(self.editor_search.batch.result.saving > 0) else 0;
+    }
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editor_syntax.pending or !self.file_tree_initialized) return 0;
     if (!editor_project_search_root_ready) {

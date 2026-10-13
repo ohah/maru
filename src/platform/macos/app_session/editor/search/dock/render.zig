@@ -46,6 +46,7 @@ fn batchRow(self: *AppSession, a: std.mem.Allocator, index: usize) !component.ty
                 row.retry_enabled = search_dock.batch_ui.canRetrySave(self, index);
             }
             const outcome = switch (target.outcome) {
+                .saving => i18n.t(.project_batch_saving),
                 .saved => i18n.t(.project_batch_saved),
                 .save_failed => i18n.t(.project_batch_save_failed),
                 .unchanged => i18n.t(.project_batch_unchanged),
@@ -170,7 +171,7 @@ fn prepare(self: *AppSession, arena: std.mem.Allocator) !?Prepared {
         .ready => i18n.t(.project_batch_file_preview),
         .conflict => i18n.t(.project_replace_conflict),
         .failed => i18n.t(.project_replace_failed),
-        .completed => try batchFormat(arena, if (compact) .project_batch_result_compact else .project_batch_result, &.{ .{ .d = @intCast(state.batch.result.saved) }, .{ .d = @intCast(state.batch.result.save_failed) }, .{ .d = @intCast(state.batch.result.unchanged) } }),
+        .completed => if (state.batch.result.saving > 0) (if (compact) try batchFormat(arena, .project_batch_saving_compact, &.{ .{ .d = @intCast(state.batch.result.saving) }, .{ .d = @intCast(state.batch.result.save_failed) } }) else try batchFormat(arena, .project_batch_saving_result, &.{ .{ .d = @intCast(state.batch.result.saving) }, .{ .d = @intCast(state.batch.result.saved) }, .{ .d = @intCast(state.batch.result.save_failed) } })) else try batchFormat(arena, if (compact) .project_batch_result_compact else .project_batch_result, &.{ .{ .d = @intCast(state.batch.result.saved) }, .{ .d = @intCast(state.batch.result.save_failed) }, .{ .d = @intCast(state.batch.result.unchanged) } }),
         else => i18n.t(.project_search_running),
     } else if (state.apply_outcome == .saved) i18n.t(.project_replace_saved) else if (state.apply_outcome == .save_failed) i18n.t(.project_replace_save_failed) else if (previewing) switch (preview.phase) {
         .ready => i18n.t(.project_replace_preview),

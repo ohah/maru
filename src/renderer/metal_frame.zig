@@ -1711,16 +1711,24 @@ fn buildMergedUploadsN(
 
 /// 한 번의 투영이 함께 확정하는 chrome 기하. 셀과 이 값이 **같은 프레임에서 나와야** 렌더러가
 /// 셀을 옳은 자리에 놓는다(예: 사이드바 셀 py_top = origin_y + header − scroll).
+///
+/// 두 몫으로 나뉜다 — **어느 몫에 두느냐가 곧 「렌더러가 읽나」의 선언이다**(필드 이름 목록을 따로 들지 않는다).
+/// - `frame`: 렌더러로 나간다. `view()` 가 필드마다 같은 이름의 `MetalFrame` 필드로 싣는다.
+/// - `sidebar_placement`: frame 으로 **안 나간다**. 사이드바 셀 자리를 정한 입력이라 「이 투영이 어떤 기하로
+///   만들어졌나」의 일부일 뿐이다.
+///
+/// 사이드바 지문(`appendSidebarLayoutKey` — autoHash)과 부분 교체 판정(`chrome_geometry_moved` — meta.eql)은
+/// **두 몫을 통째로** 비교한다. 그래서 렌더러가 안 읽는 값도 여기서 빼면 안 된다(ABI 229 에서 처음엔 뺐다가
+/// SO8 이 「스크롤만 바뀐 사이드바가 옛 셀을 adopt 한다」로 잡았다).
 pub const ChromeGeometry = struct {
+    frame: ChromeFrameGeometry = .{},
+    sidebar_placement: SidebarPlacementGeometry = .{},
+};
+
+/// `ChromeGeometry` 중 렌더러로 나가는 몫. 필드마다 같은 이름의 `MetalFrame` 필드가 있어야 하고 `view()` 가 싣는다
+/// (comptime 커버리지 테스트가 강제한다).
+pub const ChromeFrameGeometry = struct {
     terminal_origin_x_px: u32 = 0,
-    /// **스탬프 전용**(frame 으로 안 나간다 — `stamp_only_fields`). 이 넷은 사이드바 셀 자리(헤더·스크롤 → 카드 origin_y,
-    /// 띠 → 헤더 줄 y)를 정한 입력이라 「이 투영이 어떤 기하로 만들어졌나」의 일부다 — 사이드바 지문(`appendSidebarLayoutKey`)과
-    /// 부분 교체 판정(`chrome_geometry_moved`)이 이 구조체를 통째로 비교한다. 렌더러는 안 읽어 ABI 229 에서 `MetalFrame` 에서만 뺐다
-    /// (처음엔 여기서도 뺐다가 SO8 이 「스크롤만 바뀐 사이드바가 옛 셀을 adopt 한다」로 잡았다).
-    sidebar_slot_height_px: u32 = 0,
-    sidebar_header_height_px: u32 = 0,
-    sidebar_scroll_offset_px: u32 = 0,
-    titlebar_strip_px: u32 = 0,
     divider_thickness_px: u32 = 0,
     /// SB1: 창 바닥 상태표시줄 높이. 사이드바 strip의 바닥을 정하므로 **셀과 같은 프레임**이어야 한다 —
     /// 상태바가 서는 프레임과 strip이 짧아지는 프레임이 갈리면 한 프레임 겹치거나 틈이 생긴다.
@@ -1729,6 +1737,16 @@ pub const ChromeGeometry = struct {
     /// `sidebarScissorPx`가 갖고 렌더러는 **그대로** 쓴다. `bottom <= top`이면 scissor 없음.
     sidebar_scissor_top_px: u32 = 0,
     sidebar_scissor_bottom_px: u32 = 0,
+};
+
+/// `ChromeGeometry` 중 frame 으로 **안 나가는** 몫 — 사이드바 셀 자리(헤더·스크롤 → 카드 origin_y, 띠 → 헤더 줄 y)를
+/// 정한 입력. 렌더러는 이 값을 안 읽는다(Zig 가 셀 `origin_y` 에 이미 반영했다 — ABI 224·225). 렌더러 인자는
+/// ABI 227, `MetalFrame` 필드는 ABI 229 에서 뺐다. 같은 이름이 `MetalFrame` 에 되살아나면 comptime 커버리지가 막는다.
+pub const SidebarPlacementGeometry = struct {
+    sidebar_slot_height_px: u32 = 0,
+    sidebar_header_height_px: u32 = 0,
+    sidebar_scroll_offset_px: u32 = 0,
+    titlebar_strip_px: u32 = 0,
 };
 
 /// RenderFrame을 투영해 retain하는 owned 버퍼. cells/sidebar_cells/uploads/pixels 배열의 소유권을
@@ -2178,11 +2196,11 @@ pub const MetalFrameBuffer = struct {
             .atlas_width_px = self.atlas_width_px,
             .atlas_height_px = self.atlas_height_px,
             // chrome 기하는 셀과 **같은 투영**에서 나온 스탬프를 쓴다(호출자의 live 값 덮어쓰기 금지).
-            .terminal_origin_x_px = self.chrome_geometry.terminal_origin_x_px,
-            .divider_thickness_px = self.chrome_geometry.divider_thickness_px,
-            .status_bar_height_px = self.chrome_geometry.status_bar_height_px,
-            .sidebar_scissor_top_px = self.chrome_geometry.sidebar_scissor_top_px,
-            .sidebar_scissor_bottom_px = self.chrome_geometry.sidebar_scissor_bottom_px,
+            .terminal_origin_x_px = self.chrome_geometry.frame.terminal_origin_x_px,
+            .divider_thickness_px = self.chrome_geometry.frame.divider_thickness_px,
+            .status_bar_height_px = self.chrome_geometry.frame.status_bar_height_px,
+            .sidebar_scissor_top_px = self.chrome_geometry.frame.sidebar_scissor_top_px,
+            .sidebar_scissor_bottom_px = self.chrome_geometry.frame.sidebar_scissor_bottom_px,
             .cell_width_px = self.cell_width_px,
             .cell_height_px = self.cell_height_px,
             .generation = self.generation,
@@ -3945,51 +3963,50 @@ test "SB1-S2a: status_bar_height_px는 스탬프를 타고 나가고, 0이면 �
     try std.testing.expectEqual(@as(u32, 0), buffer.view().status_bar_height_px);
 
     // 다른 chrome 기하만 찍고 상태바를 안 주면 여전히 0이다(기존 동작 보존).
-    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .divider_thickness_px = 3 });
+    buffer.stampChromeGeometry(.{ .frame = .{ .terminal_origin_x_px = 240, .divider_thickness_px = 3 } });
     try std.testing.expectEqual(@as(u32, 0), buffer.view().status_bar_height_px);
     try std.testing.expectEqual(@as(u32, 240), buffer.view().terminal_origin_x_px);
 
     // 값이 서면 그대로 실려 나간다 — 렌더러가 strip 바닥을 이만큼 올린다(S2b가 실제로 세운다).
-    buffer.stampChromeGeometry(.{ .terminal_origin_x_px = 240, .divider_thickness_px = 3, .status_bar_height_px = 24 });
+    buffer.stampChromeGeometry(.{ .frame = .{ .terminal_origin_x_px = 240, .divider_thickness_px = 3, .status_bar_height_px = 24 } });
     try std.testing.expectEqual(@as(u32, 24), buffer.view().status_bar_height_px);
     // 같은 스탬프의 다른 필드가 훼손되지 않는다(끝에 추가한 필드라 기존 의미 불변).
     try std.testing.expectEqual(@as(u32, 240), buffer.view().terminal_origin_x_px);
     try std.testing.expectEqual(@as(u32, 3), buffer.view().divider_thickness_px);
 }
 
-/// `ChromeGeometry` 중 frame 으로 **안 나가는** 스탬프 전용 필드(필드 주석 참조). 여기 없는 필드는 전부 `view()` 로 나가야 한다.
-const stamp_only_fields = [_][]const u8{ "sidebar_slot_height_px", "sidebar_header_height_px", "sidebar_scroll_offset_px", "titlebar_strip_px" };
-
-fn isStampOnly(comptime name: []const u8) bool {
-    inline for (stamp_only_fields) |s| if (comptime std.mem.eql(u8, s, name)) return true;
-    return false;
-}
-
-// **`ChromeGeometry`의 frame 필드는 모두 `view()`로 나가야 한다.** 매핑이 손-미러라(필드마다 한 줄) 새 필드를
+// **`ChromeGeometry.frame` 의 필드는 모두 `view()`로 나가야 한다.** 매핑이 손-미러라(필드마다 한 줄) 새 필드를
 // 더하면서 `view()`를 잊으면 컴파일러가 안 잡아 주고, 렌더러는 그 값을 **0으로 받는다** — 화면에서만
 // 드러나는 조용한 유실이다(이 스택이 방금 상태바 필드를 더하며 지나온 자리). comptime으로 필드를 세어
-// 강제한다: 이름이 다른 상대가 없으면 컴파일 에러, 값이 안 실리면 런타임 실패. 스탬프 전용 필드는 반대로
+// 강제한다: 이름이 다른 상대가 없으면 컴파일 에러, 값이 안 실리면 런타임 실패. `sidebar_placement` 몫은 반대로
 // frame 에 **없어야** 한다(렌더러가 안 읽는 값이 frame 에 되살아나지 않게 — tests/boundary/metal_frame_consumers.zig 와 짝).
-test "ChromeGeometry의 모든 필드가 view()로 나간다 (comptime 커버리지)" {
+test "ChromeGeometry.frame 의 모든 필드가 view()로 나가고, sidebar_placement 는 frame 에 없다 (comptime 커버리지)" {
     var buffer: MetalFrameBuffer = .{};
     defer buffer.deinit(std.testing.allocator);
 
-    // 필드마다 서로 다른 값을 넣어야 "옆 필드를 실었는데 우연히 통과"를 배제할 수 있다.
+    // 몫은 이 둘뿐이다 — 셋째 몫이 생기면 그것이 frame 으로 가는지 아닌지를 여기서 정해야 한다.
+    comptime std.debug.assert(@typeInfo(ChromeGeometry).@"struct".fields.len == 2);
+    inline for (@typeInfo(SidebarPlacementGeometry).@"struct".fields) |field| {
+        if (@hasField(MetalFrame, field.name)) @compileError("렌더러가 안 읽는 ChromeGeometry.sidebar_placement." ++ field.name ++ " 이 MetalFrame 에 되살아났다");
+    }
+
+    // 필드마다 서로 다른 값을 넣어야 "옆 필드를 실었는데 우연히 통과"를 배제할 수 있다. placement 몫에도 값을
+    // 넣어 그것이 frame 의 어느 필드로도 새지 않음을 함께 본다.
     var geometry: ChromeGeometry = .{};
-    inline for (@typeInfo(ChromeGeometry).@"struct".fields, 0..) |field, i| {
-        if (comptime isStampOnly(field.name)) {
-            if (@hasField(MetalFrame, field.name)) @compileError("스탬프 전용 ChromeGeometry." ++ field.name ++ " 이 MetalFrame 에 되살아났다");
-        } else if (!@hasField(MetalFrame, field.name)) {
-            @compileError("ChromeGeometry." ++ field.name ++ "에 대응하는 MetalFrame 필드가 없다 — view()가 실을 수 없다");
+    inline for (@typeInfo(ChromeFrameGeometry).@"struct".fields, 0..) |field, i| {
+        if (!@hasField(MetalFrame, field.name)) {
+            @compileError("ChromeGeometry.frame." ++ field.name ++ "에 대응하는 MetalFrame 필드가 없다 — view()가 실을 수 없다");
         }
-        @field(geometry, field.name) = @as(u32, @intCast((i + 1) * 7));
+        @field(geometry.frame, field.name) = @as(u32, @intCast((i + 1) * 7));
+    }
+    inline for (@typeInfo(SidebarPlacementGeometry).@"struct".fields, 0..) |field, i| {
+        @field(geometry.sidebar_placement, field.name) = @as(u32, @intCast(1000 + i));
     }
     buffer.stampChromeGeometry(geometry);
 
     const frame = buffer.view();
-    inline for (@typeInfo(ChromeGeometry).@"struct".fields) |field| {
-        if (comptime isStampOnly(field.name)) continue;
-        try std.testing.expectEqual(@field(geometry, field.name), @field(frame, field.name));
+    inline for (@typeInfo(ChromeFrameGeometry).@"struct".fields) |field| {
+        try std.testing.expectEqual(@field(geometry.frame, field.name), @field(frame, field.name));
     }
 }
 

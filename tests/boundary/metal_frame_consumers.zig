@@ -68,7 +68,7 @@ test "MetalFrame 의 모든 필드는 Swift host 가 frame.<필드> 로 읽는�
     var unread: usize = 0;
     for (fields.items) |name| {
         if (swiftReads(swift, name)) continue;
-        std.debug.print("\nMetalFrame.{s} 를 Swift host({s})가 읽지 않습니다 — 렌더러로 안 가는 죽은 필드입니다.\n  쓰는 곳이 없으면 frame·ChromeGeometry·app_host_abi.h 에서 함께 빼고 ABI 를 올리세요.\n", .{ name, swift_host });
+        std.debug.print("\nMetalFrame.{s} 를 Swift host({s})가 읽지 않습니다 — 렌더러로 안 가는 죽은 필드입니다.\n  쓰는 곳이 없으면 MetalFrame·app_host_abi.h 에서 빼고(스탬프에 남겨야 하면 ChromeGeometry.sidebar_placement 로 옮기고) ABI 를 올리세요.\n", .{ name, swift_host });
         unread += 1;
     }
     try std.testing.expectEqual(@as(usize, 0), unread);

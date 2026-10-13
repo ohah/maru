@@ -24617,20 +24617,24 @@ pub const AppSession = struct {
             dock_ops.dockGeometry(self).status_bar.h,
         );
         return .{
-            .terminal_origin_x_px = self.sidebar_width_px,
-            // 스탬프 전용(frame 으로 안 나간다) — 사이드바 셀 자리를 정한 입력이라 지문·부분 교체 판정이 본다.
-            .sidebar_slot_height_px = self.sidebar_slot_height_px,
-            .sidebar_header_height_px = self.sidebar_header_height_px,
-            .sidebar_scroll_offset_px = self.sidebar_scroll_offset_px,
-            .titlebar_strip_px = self.titlebar_strip_px,
-            .divider_thickness_px = pane_ops.dividerThicknessPx(self),
-            // 상태바 높이는 `dock_layout`이 유일 권위다(S1이 낸 seam) — 여기서 따로 계산하면 작업영역을
-            // 깎은 값과 strip을 자르는 값이 갈릴 수 있다. 지금은 입력이 0이라 항상 0이다(S2b가 뒤집는다).
-            .status_bar_height_px = dock_ops.dockGeometry(self).status_bar.h,
-            // scissor 구간도 여기서 정해 스탬프에 싣는다 — 셀과 같은 프레임이어야 자르는 자리와 그린 자리가
-            // 맞는다. 렌더러엔 산술이 남지 않는다.
-            .sidebar_scissor_top_px = scissor.top,
-            .sidebar_scissor_bottom_px = scissor.bottom,
+            .frame = .{
+                .terminal_origin_x_px = self.sidebar_width_px,
+                .divider_thickness_px = pane_ops.dividerThicknessPx(self),
+                // 상태바 높이는 `dock_layout`이 유일 권위다(S1이 낸 seam) — 여기서 따로 계산하면 작업영역을
+                // 깎은 값과 strip을 자르는 값이 갈릴 수 있다. 지금은 입력이 0이라 항상 0이다(S2b가 뒤집는다).
+                .status_bar_height_px = dock_ops.dockGeometry(self).status_bar.h,
+                // scissor 구간도 여기서 정해 스탬프에 싣는다 — 셀과 같은 프레임이어야 자르는 자리와 그린 자리가
+                // 맞는다. 렌더러엔 산술이 남지 않는다.
+                .sidebar_scissor_top_px = scissor.top,
+                .sidebar_scissor_bottom_px = scissor.bottom,
+            },
+            // frame 으로 안 나가는 몫 — 사이드바 셀 자리를 정한 입력이라 지문·부분 교체 판정이 본다.
+            .sidebar_placement = .{
+                .sidebar_slot_height_px = self.sidebar_slot_height_px,
+                .sidebar_header_height_px = self.sidebar_header_height_px,
+                .sidebar_scroll_offset_px = self.sidebar_scroll_offset_px,
+                .titlebar_strip_px = self.titlebar_strip_px,
+            },
         };
     }
 
@@ -24644,8 +24648,8 @@ pub const AppSession = struct {
         // tick 하나만 끼면 generation이 1이 되어 폴백이 조용히 꺼진다.
         if (!self.metal_buffer.chrome_geometry_stamped) {
             const live = self.chromeGeometrySnapshot();
-            frame.terminal_origin_x_px = live.terminal_origin_x_px;
-            frame.divider_thickness_px = live.divider_thickness_px;
+            frame.terminal_origin_x_px = live.frame.terminal_origin_x_px;
+            frame.divider_thickness_px = live.frame.divider_thickness_px;
         }
         // "surface→rect": 터미널을 사이드바 폭만큼 오른쪽에 그리고, 왼쪽 strip에 사이드바 배경을 칠한다.
         // 렌더러가 origin offset + 배경 quad를 처리한다. split(panel)도 같은 origin 방식을 확장한다.
@@ -69530,25 +69534,23 @@ test "metalFrame chrome 기하는 투영 스탬프다 — live 메트릭이 셀�
     try std.testing.expect(std.meta.eql(session.chromeGeometrySnapshot(), stamped)); // 첫 투영의 스탬프 = 그때의 live
 
     // 폰트를 키우면 live 메트릭이 즉시 바뀐다(헤더 높이 → scissor 구간 등). 아직 재투영 전이므로 frame은 **옛 값**을
-    // 유지해야 한다 — 그래야 그 프레임의 셀과 정합한다. 스탬프 기하 **전부**를 필드마다 본다(예전에는 슬롯·띠
-    // 둘만 봤는데, 그 둘은 렌더러가 안 읽어 ABI 229 에서 frame 에서 빠졌다).
+    // 유지해야 한다 — 그래야 그 프레임의 셀과 정합한다. frame 으로 나가는 몫(`ChromeGeometry.frame`)
+    // **전부**를 필드마다 본다(예전에는 슬롯·띠 둘만 봤는데, 그 둘은 렌더러가 안 읽어 ABI 229 에서 frame 에서 빠졌다).
     session.dispatchAppAction(.{ .increase_font_size = font_size_step });
     try std.testing.expect(!std.meta.eql(session.chromeGeometrySnapshot(), stamped)); // live 가 실제로 바뀌었다
     const held = session.metalFrame();
-    inline for (@typeInfo(metal_frame.ChromeGeometry).@"struct".fields) |f| {
-        if (comptime !@hasField(metal_frame.MetalFrame, f.name)) continue; // 스탬프 전용 필드는 frame 에 없다
-        try std.testing.expectEqual(@field(stamped, f.name), @field(held, f.name));
+    inline for (@typeInfo(metal_frame.ChromeFrameGeometry).@"struct".fields) |f| {
+        try std.testing.expectEqual(@field(stamped.frame, f.name), @field(held, f.name));
     }
 
     // 재투영되면 스탬프 기하가 모두 함께 새 값으로 간다.
     _ = try session.tick();
     const live_after = session.chromeGeometrySnapshot();
     const fresh = session.metalFrame();
-    inline for (@typeInfo(metal_frame.ChromeGeometry).@"struct".fields) |f| {
-        if (comptime !@hasField(metal_frame.MetalFrame, f.name)) continue;
-        try std.testing.expectEqual(@field(live_after, f.name), @field(fresh, f.name));
+    inline for (@typeInfo(metal_frame.ChromeFrameGeometry).@"struct".fields) |f| {
+        try std.testing.expectEqual(@field(live_after.frame, f.name), @field(fresh, f.name));
     }
-    try std.testing.expect(std.meta.eql(live_after, session.metal_buffer.chrome_geometry)); // 스탬프 전용까지 새 값
+    try std.testing.expect(std.meta.eql(live_after, session.metal_buffer.chrome_geometry)); // frame 으로 안 나가는 몫까지 새 값
 }
 
 // quad 수명·순서 계약(S0): `dropQuadsByLayer`는 **자기 레이어만** 지우고 **나머지 순서를 보존**해야 하며,
@@ -69684,20 +69686,20 @@ test "sidebar scissor engages on the product path even when bands are quads (ric
     session.sidebar_scroll_offset_px = 0;
     {
         const geo = session.chromeGeometrySnapshot();
-        try std.testing.expectEqual(@as(u32, 0), geo.sidebar_scissor_top_px);
+        try std.testing.expectEqual(@as(u32, 0), geo.frame.sidebar_scissor_top_px);
     }
 
     // 스크롤하면 **헤더 아래부터** 자른다. 옛 코드는 여기서 0을 내 렌더러가 scissor에 진입하지 못했다.
     session.sidebar_scroll_offset_px = 10;
     const geo = session.chromeGeometrySnapshot();
-    try std.testing.expectEqual(session.sidebar_header_height_px, geo.sidebar_scissor_top_px);
-    try std.testing.expect(geo.sidebar_scissor_bottom_px > geo.sidebar_scissor_top_px);
+    try std.testing.expectEqual(session.sidebar_header_height_px, geo.frame.sidebar_scissor_top_px);
+    try std.testing.expect(geo.frame.sidebar_scissor_bottom_px > geo.frame.sidebar_scissor_top_px);
 
     // 사이드바가 접히면(폭 0) 자를 대상이 없다 — 게이트를 넓히면서 이 축까지 잃으면 안 된다.
     session.sidebar_width_px = 0;
     const collapsed = session.chromeGeometrySnapshot();
-    try std.testing.expectEqual(@as(u32, 0), collapsed.sidebar_scissor_top_px);
-    try std.testing.expectEqual(@as(u32, 0), collapsed.sidebar_scissor_bottom_px);
+    try std.testing.expectEqual(@as(u32, 0), collapsed.frame.sidebar_scissor_top_px);
+    try std.testing.expectEqual(@as(u32, 0), collapsed.frame.sidebar_scissor_bottom_px);
 }
 
 test "SB1: 사이드바 scissor는 스크롤과 상태바 각각을 이유로 자르고, 아니면 안 자른다" {

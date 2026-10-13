@@ -21118,6 +21118,7 @@ pub const AppSession = struct {
         debug_fixtures.applyForcedTabCount(self); // 캡처 전용: 탭 바를 넘치게 해 ‹› 를 띄운다(한 번만)
         debug_fixtures.reapplyForcedTabHover(self); // 캡처 전용: 탭 바 버튼 배경은 호버해야 얹힌다(같은 이유)
         debug_fixtures.reapplyForcedHeaderHover(self); // 캡처 전용: 사이드바 헤더 아이콘 판도 호버해야 얹힌다(같은 이유)
+        debug_fixtures.reapplyForcedDockToggleHover(self); // 캡처 전용: 파일 도크 토글 판도 호버해야 얹힌다(같은 이유)
         // 캡처 전용: 원격 pane 상태를 **유지**한다 — 진짜 로컬 셸이 OSC 7 로 되돌리기 때문이다.
         // 호버보다 **먼저** 둔다: 호버는 그 프레임의 목록 위에서 자리를 고르므로 대상이 먼저 서야 한다.
         debug_fixtures.reapplyForcedRemoteScm(self);
@@ -24095,7 +24096,7 @@ pub const AppSession = struct {
     /// 접힘 상태 좌상단 펼치기 버튼의 backing-px rect(클릭 hit-test) — render(collapsedToggleCol)와 같은 col. 펼침/접힘
     /// 아니거나 탭이 없으면(글리프 frame도 안 그려짐 — buildCollapsedToggleDrawList과 같은 전제) null. mouse 핸들러가 이
     /// rect 안 클릭이면 toggleSidebarCollapsed(펼치기)한다(사이드바가 없어 inSidebar=false라 별도 체크). 높이는
-    /// **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 max(cell_h, 30pt)라 1.7× 버튼이 cell_h 밖으로 삐져나가는데
+    /// **타이틀바 띠 전체**(cell_h가 아님) — 접힘 띠는 30pt(폰트 독립 — `computeTitlebarStripPx`)라 1.7× 버튼이 cell_h 밖으로 삐져나가는데
     /// cell_h로 잡으면 그 부분이 데드존(클릭·드래그 둘 다 안 됨)이 된다. 가로는 **글리프 중심에 맞춘다**: .m이 ◧를
     /// 셀 중심((col+0.5)·cw) 기준 1.7×로 키우므로(maru_fill_cell_quad가 중심 기준 확대) 글리프는 ≈[(col-0.35),
     /// (col+1.35)]·cw에 그려진다. rect를 col·cw부터 잡으면 클릭 영역이 글리프보다 0.5칸 오른쪽으로 치우쳐 글리프
@@ -53594,15 +53595,109 @@ test "captureWorkspaceWindow: 라이브 탭/split/Term을 workspace 모델로 �
     try std.testing.expect(std.mem.indexOf(u8, text, "cwd=\"/tmp/proj\"") != null);
 }
 
-test "dock toggle visual bottom covers 1.7x glyph when titlebar is below equal or above cell height" {
+test "dock toggle visual bottom covers the 1.7x glyph ink (min-side square) when titlebar is below equal or above cell height" {
+    // 정사각 셀(cw == ch)이면 잉크 = 슬롯이라 옛 값과 같다.
     // strip < cell: renderer starts the cell at y=0, so visible bottom is 1.35ch.
-    try std.testing.expectEqual(@as(u32, 27), file_panel_ops.dockToggleVisualBottomPx(20, 10));
+    try std.testing.expectEqual(@as(u32, 27), file_panel_ops.dockToggleVisualBottomPx(20, 20, 10));
     // strip == cell: 같은 경계이며 큰 글꼴에서도 glyph 아래쪽까지 hit rect가 포함한다.
-    try std.testing.expectEqual(@as(u32, 27), file_panel_ops.dockToggleVisualBottomPx(20, 20));
+    try std.testing.expectEqual(@as(u32, 27), file_panel_ops.dockToggleVisualBottomPx(20, 20, 20));
     // strip > 1.7ch: glyph가 strip 안에 완전히 들어가므로 호출부의 max(strip, bottom)가 strip을 유지한다.
-    try std.testing.expectEqual(@as(u32, 37), file_panel_ops.dockToggleVisualBottomPx(20, 40));
-    // 제품 기본 근사(ch=18, strip=28)는 1.7x quad의 1px 남짓한 아래 돌출까지 포함한다.
-    try std.testing.expectEqual(@as(u32, 29), file_panel_ops.dockToggleVisualBottomPx(18, 28));
+    try std.testing.expectEqual(@as(u32, 37), file_panel_ops.dockToggleVisualBottomPx(20, 20, 40));
+    // **세로로 긴 보통 셀은 잉크가 셀 폭 기준이다**(슬롯 안 min(w, h) 정사각). 제품 기본(1x ch 18 · cw 8 · 띠 28)과
+    // Retina(ch 37 · cw 17 · 띠 56) 모두 잉크가 띠 안이라 판·히트 사각형이 띠 아래로 새지 않는다 — 예전 슬롯 높이 식은
+    // 각각 29(1px 돌출)·59(3px)를 냈다.
+    try std.testing.expectEqual(@as(u32, 21), file_panel_ops.dockToggleVisualBottomPx(8, 18, 28));
+    try std.testing.expectEqual(@as(u32, 42), file_panel_ops.dockToggleVisualBottomPx(17, 37, 56));
+    // 아주 큰 글꼴(띠보다 셀이 높다)에서도 잉크 바닥까지는 덮는다 — ch 40 · cw 20 · 띠 28: origin 0 + (40 + 34 + 1) / 2.
+    try std.testing.expectEqual(@as(u32, 37), file_panel_ops.dockToggleVisualBottomPx(20, 40, 28));
+}
+
+// 파일 도크 토글(◧, 타이틀바 띠 오른쪽 끝)의 hover 판은 **히트 사각형 그대로**(y 0 부터 — `filePanelDockControlRect`, render·hit·
+// drag-region 단일 출처)다. 판 높이는 띠와 「그려진 잉크의 바닥」 중 큰 쪽이다. 예전에는 그 바닥을 **atlas 슬롯 높이**
+// (셀 높이 × 1.7)로 셈했는데, 등록 아이콘의 잉크는 슬롯 안 `min(w, h)` 정사각(`icon_glyph.fillCoverage`)이라 셀 폭 기준이다 —
+// 그래서 Retina 기본 창(ch 37 · cw 17 · 띠 56)에서 판이 띠 아래로 3px 새고 위는 0 에 붙어, 판 중심이 그려진 ◧ 보다 **2px
+// 아래**였다(사이드바 헤더 판 #4408 과 같은 크기·같은 부류 — 적대적 검증이 1x 만 보던 이 판정자의 첫 판을 깨고 찾았다).
+// 1x·2x 두 배율 × 띠 홀짝 둘을 본다. 가로는 판이 2칸이라 셀 폭이 홀수면 정수 원점으로 0.5px 보다 못 맞춘다.
+test "dock toggle: hover plate (= hit rect) is concentric with the drawn toggle within 0.5px at 1x and 2x" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    test_config_text = keep_alive_off_config;
+    defer test_config_text = "";
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 40,
+        .rows = 10,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+
+    var checked: usize = 0;
+    var prev_ch: u32 = 0;
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        _ = try session.resize(1400 * scale / 1000, 900 * scale / 1000, scale);
+        // 판별력 가드: 셀이 **세로로 길어야** 잉크(min 변 = 폭 기준)와 슬롯 높이가 갈린다 — 메트릭이 정사각 폴백으로
+        // 떨어지면 옛 식과 새 식이 같은 값을 내 이 판정자는 아무것도 못 가른다. 2x 는 실제로 다시 잰 셀이어야 한다.
+        try std.testing.expect(session.cell_width_px < session.cell_height_px);
+        try std.testing.expect(session.cell_height_px > prev_ch);
+        prev_ch = session.cell_height_px;
+        dock_ops.setDockToggleHovered(session, true);
+        const strip0 = session.titlebar_strip_px;
+        defer session.titlebar_strip_px = strip0;
+        try std.testing.expect(strip0 > session.cell_height_px); // 띠가 셀보다 높아야 세로 자리가 뭔가를 잰다(아니면 둘 다 y 0)
+        for ([_]u32{ 0, 1 }) |bump| {
+            session.titlebar_strip_px = strip0 + bump;
+            session.metal_dirty = true;
+            for (0..4) |_| {
+                _ = try session.tick();
+                if (!session.metal_dirty) break;
+            }
+            try std.testing.expectEqual(strip0 + bump, session.titlebar_strip_px); // tick 이 띠를 되돌리면 홀짝 축은 아무것도 안 잰다
+            const r = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+
+            // 그려진 ◧ — control rect 안의 role 셀 **하나**. 이번 띠로 다시 투영됐는지(origin_y)도 본다.
+            var glyph: ?[4]f32 = null;
+            var glyphs: usize = 0;
+            for (session.metal_buffer.cells) |c| {
+                if (c.codepoint != icons.codepoint(.sidebar_collapse) or c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
+                if (c.origin_x < r.x or c.origin_x >= r.x + r.w) continue;
+                try std.testing.expectEqual(r.y + (session.titlebar_strip_px -| session.cell_height_px) / 2, c.origin_y);
+                glyph = metal_frame.cellRasterIconQuadPx(c, session.cell_width_px, session.cell_height_px);
+                glyphs += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), glyphs);
+            const g = glyph orelse return error.TestUnexpectedResult;
+            // 잉크 = 슬롯 안 min(w, h) 정사각(가운데) — 슬롯 중심이 곧 잉크 중심이고, 바닥은 잉크로 잰다.
+            const ink: f32 = @min(g[2], g[3]);
+            const g_cy = g[1] + g[3] / 2.0;
+
+            // hover 판 — control rect 와 네 변이 같은 layer 2 quad **하나**(`appendBarBgQuad`).
+            var plate: ?metal_frame.GpuQuad = null;
+            var plates: usize = 0;
+            for (session.gpu_quads.items) |q| {
+                if (q.layer != 2) continue;
+                if (q.x != @as(f32, @floatFromInt(r.x)) or q.y != @as(f32, @floatFromInt(r.y)) or q.w != @as(f32, @floatFromInt(r.w)) or q.h != @as(f32, @floatFromInt(r.h))) continue;
+                plate = q;
+                plates += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), plates);
+            const q = plate orelse return error.TestUnexpectedResult;
+
+            try std.testing.expectApproxEqAbs(g[0] + g[2] / 2.0, q.x + q.w / 2.0, 0.5); // 가로 — 홀수 셀 폭의 정수 원점
+            try std.testing.expect(g_cy + ink / 2.0 <= q.y + q.h + 0.01); // 보이는 잉크는 판 안
+            // 잉크가 띠 안이면 판은 띠에서 멈춘다 — 띠 아래(탭 바)로 새지 않는다. 그때 세로 차이는 정수 배치의 0.5px 안이다.
+            if (g_cy + ink / 2.0 <= @as(f32, @floatFromInt(session.titlebar_strip_px))) {
+                try std.testing.expectEqual(session.titlebar_strip_px, r.h);
+                try std.testing.expect(@abs(g_cy - (q.y + q.h / 2.0)) <= 0.5 + 0.01);
+                checked += 1;
+            }
+        }
+        dock_ops.setDockToggleHovered(session, false);
+    }
+    // 기본 폰트에서는 네 경우 모두 잉크가 띠 안이다 — 세로 축이 조용히 건너뛰어지지 않았음을 센다.
+    try std.testing.expectEqual(@as(usize, 4), checked);
 }
 
 test "empty file dock launcher presents explorer and empty content requests the shared file picker" {
@@ -73380,7 +73475,7 @@ test "collapsed toggle: hover emits a highlight quad centred on the drawn toggle
     sidebar_ops.toggleSidebarCollapsed(session);
     try std.testing.expect(session.sidebar_collapsed);
 
-    try std.testing.expect(session.titlebar_strip_px > 0); // 접힘 띠 = max(cell_h, 30pt) > 0
+    try std.testing.expect(session.titlebar_strip_px > 0); // 접힘 띠 = 30pt(폰트 독립) > 0
     _ = try session.tick();
 
     // 호버 quad를 식별하는 distinctive 색 — 헤더 아이콘 호버와 같은 밝은 fg 반투명(straight-alpha).

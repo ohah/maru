@@ -1953,6 +1953,19 @@ pub fn reapplyForcedHeaderHover(self: *AppSession) void {
     self.metal_dirty = true;
 }
 
+/// 파일 도크 토글(◧, 타이틀바 띠 오른쪽 끝)의 **hover 판**을 세운다(캡처 전용, `MARU_FORCE_DOCK_TOGGLE_HOVER=1`).
+///
+/// 판은 히트 사각형(`filePanelDockControlRect`) 그대로를 호버일 때만 칠한다. 그려진 ◧ 와의 관계(가로 동심 · 세로 0.5px 안)는
+/// 판정자 「dock toggle: hover plate …」가 숫자로 보지만, 화면은 포인터 없이는 못 봤다 — `MARU_FORCE_HEADER_HOVER` 와 같은 이유.
+///
+/// **매 tick 다시 세운다.** 포인터가 토글 밖이면 `hoverCursor` 가 곧바로 끈다. setter 가 같은 값이면 무동작이라 재렌더 churn 은 없다.
+/// env 미설정이면 무동작.
+pub fn reapplyForcedDockToggleHover(self: *AppSession) void {
+    if (std.c.getenv("MARU_FORCE_DOCK_TOGGLE_HOVER") == null) return;
+    if (!self.surface_initialized) return;
+    dock_ops.setDockToggleHovered(self, true);
+}
+
 /// 심볼 피커를 연다(캡처 전용 debug-gate — native-editor-ui.md §7.5).
 ///
 /// **파일 패널 훅과 따로 둔다.** 그쪽은 「이 실행에서 새로 열었을 때」만 끝까지 가는데(복원된 작업

@@ -1910,6 +1910,55 @@ pub fn reapplyForcedTabHover(self: *AppSession) void {
     }
 }
 
+/// 사이드바 **헤더 아이콘의 호버 판**을 세운다(캡처 전용, `MARU_FORCE_HEADER_HOVER=toggle|view_options|new_workspace|notifications|collapsed`).
+///
+/// 판 quad 는 호버일 때만 얹히고, 그 자리(가로 중심 = 그려진 글리프 중심)는 #4392·#4394 가 렌더러와 같은 함수로
+/// 맞췄다. 그런데 캡처 하네스에 포인터가 없어 **판이 아이콘 위에 실제로 서는지**를 화면으로 볼 방법이 없었다 —
+/// 판정자는 「hover 중심 = 렌더러가 그리는 아이콘 중심」이라는 숫자만 본다. `reapplyForcedTabHover` 와 같은 문제다.
+///
+/// **매 tick 다시 세운다.** 포인터가 헤더 밖에 있으면 `hoverCursor` 가 곧바로 지운다. 같은 값이면 재빌드하지 않는다.
+///
+/// - `toggle` · `view_options` · `new_workspace` · `notifications` — 펼친 헤더의 ◧ · ⚙ · + · 종.
+/// - `collapsed` — 접힌 사이드바의 펼치기 토글(◧, 신호등 옆). 첫 tick 에 ◧ 클릭과 같은 길(`toggleSidebarCollapsed`)로
+///   **한 번** 접는다 — 그 뒤 사용자가 펼치면 다시 접지 않는다.
+///
+/// env 미설정이면 무동작.
+var header_hover_collapsed_once = false;
+
+pub fn reapplyForcedHeaderHover(self: *AppSession) void {
+    const raw = std.c.getenv("MARU_FORCE_HEADER_HOVER") orelse return;
+    if (!self.surface_initialized) return;
+    const spec = std.mem.span(raw);
+    if (std.mem.eql(u8, spec, "collapsed")) {
+        if (!header_hover_collapsed_once) {
+            header_hover_collapsed_once = true;
+            if (!self.sidebar_collapsed) sidebar_ops.toggleSidebarCollapsed(self);
+        }
+        // 실제 경로와 같은 규칙 — 접힘이 아니면 세우지 않는다(`setHoveredCollapsedToggle`).
+        const next = self.sidebar_collapsed;
+        if (self.hovered_collapsed_toggle == next) return;
+        self.hovered_collapsed_toggle = next;
+        sidebar_ops.rebuildSidebar(self) catch {};
+        self.metal_dirty = true;
+        return;
+    }
+    const HeaderRegion = chrome.components.sidebar.HeaderRegion;
+    const want: HeaderRegion = if (std.mem.eql(u8, spec, "toggle"))
+        .toggle_sidebar
+    else if (std.mem.eql(u8, spec, "view_options"))
+        .view_options
+    else if (std.mem.eql(u8, spec, "new_workspace"))
+        .new_workspace
+    else if (std.mem.eql(u8, spec, "notifications"))
+        .notifications
+    else
+        return;
+    if (self.hovered_header_region == want) return;
+    self.hovered_header_region = want;
+    sidebar_ops.rebuildSidebar(self) catch {}; // 판 quad 는 재빌드가 발행한다(setHoveredHeaderRegion 과 같은 경로)
+    self.metal_dirty = true;
+}
+
 /// 심볼 피커를 연다(캡처 전용 debug-gate — native-editor-ui.md §7.5).
 ///
 /// **파일 패널 훅과 따로 둔다.** 그쪽은 「이 실행에서 새로 열었을 때」만 끝까지 가는데(복원된 작업

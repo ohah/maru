@@ -868,7 +868,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  18, 0, // v18, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  19, 0, // v19, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -954,7 +954,7 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 66; // 정의되지 않은 tag(sidecar → maru 는 W9-0b 의 `devtools_result` 65 까지)
+    bad[10] = 67; // 정의되지 않은 tag(sidecar → maru 는 W9a 의 `main_frame_navigating` 66 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     bad[10] = 134; // 둘째 구간(maru → sidecar)도 W9b③ 의 `new_tab_credit` 133 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));

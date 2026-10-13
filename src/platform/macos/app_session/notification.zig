@@ -765,9 +765,9 @@ pub fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
 }
 
 /// 알림 센터 패널을 종(🔔) 아이콘 아래에 연다 — 종 클릭과 디버그 훅(MARU_OPEN_NOTIFICATIONS)의 단일 출처.
-/// 패널 좌단을 알림 그룹 좌단(배지 col cols-12)에 맞추고, 상단(body)은 줄2(=2ch)부터 둔다: 벨 글리프가 py_nudge
-/// (0.30ch)로 줄0에서 [0.30ch, 1.30ch]에 그려지므로 줄1(빈 버퍼 행)을 벨↔팝업 간격으로 비워 벨을 안 가린다(말풍선
-/// caret이 들어갈 자리). 항목은 collect 시점에 히스토리에서 빌드(buildNotificationItems) — show엔 개수만 준다(키 nav clamp).
+/// 펼침: 패널 좌단을 종 열(`cell_text.sidebarBellCol` — 종이 앉는 첫 칸)에 맞추고, 보이는 상단은 2ch 에 둔다. 종은 띠
+/// 안 세로 중앙(`sidebarHeaderIconRowTopPx`)에 그려지고 그 아래 틈이 말풍선 caret 자리다(기본 폰트 1x 약 6px · 2x 약 14px —
+/// 상단이 폰트 비례 2ch 라 아주 작은/큰 폰트에선 그 틈이 좁아지거나 벌어진다). 항목은 collect 시점에 히스토리에서 빌드(buildNotificationItems) — show엔 개수만 준다(키 nav clamp).
 pub fn openNotificationPanel(self: *AppSession) void {
     if (self.cell_width_px == 0) return;
     // 단일-오버레이 불변식(`dismissMessageOverlays` 주석) — 포커스 없는 찾기 바·참조 피커는 모달이 아니라 종 클릭을 막지
@@ -787,10 +787,10 @@ pub fn openNotificationPanel(self: *AppSession) void {
         anchor_x = @intCast(@as(u32, collapsedBellCol(self) -| badge_cells) * self.cell_width_px);
         anchor_y = @intCast(self.titlebar_strip_px + mp); // content_top − mp = titlebar_strip_px(띠 하단)
     } else {
-        // 펼침: 패널 좌단을 알림 그룹 좌단(배지 col cols-12)에, 보이는 상단을 줄2에 둔다 — 벨(줄0, py_nudge로 ~1.30ch)을
-        // 한 줄 띄우고 그 사이(줄1)가 말풍선 caret 자리. mp를 빼먹으면 보이는 패널이 벨에 붙어(2ch−mp) caret 틈이 없다.
+        // 펼침: 패널 좌단을 종 열에, 보이는 상단을 2ch 에 둔다 — 종과 패널 사이 틈이 말풍선 caret 자리. mp를 빼먹으면
+        // 보이는 패널이 종에 붙어(2ch−mp) caret 틈이 없다.
         const hcols = self.sidebar_width_px / self.cell_width_px;
-        anchor_x = @intCast((hcols -| 12) * self.cell_width_px);
+        anchor_x = @intCast(@as(u32, maru.cell_text.sidebarBellCol(@intCast(@min(hcols, std.math.maxInt(u16))))) * self.cell_width_px);
         anchor_y = @intCast(self.cell_height_px * 2 + mp);
     }
     self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
@@ -803,8 +803,8 @@ pub fn openNotificationPanel(self: *AppSession) void {
 
 /// 알림 패널 말풍선 caret을 GPU 삼각형(gpu_quads gradient_kind=3) **1개**(채움 surface_bg, 패널 배경과 같은 색)로
 /// 그린다. 예전엔 focus_accent 외곽선 삼각형 위에 채움 삼각형을 얹었는데 채움 빗변의 fwidth edge-AA가 내부까지 부분
-/// 커버리지를 줘 외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다(사용자 피드백). 벨 글리프 중심(렌더러 가로 nudge 반영: col cols-12·width 2 슬롯이 0.5칸
-/// 왼쪽으로 밀려 중심 (cols-11.5)*cw)에 apex를 두고, 밑변을 패널 상단에 overlap만큼 겹쳐 상단 테두리를 caret
+/// 커버리지를 줘 외곽선과 블렌딩, 내부가 패널색 아닌 중간톤으로 떴다(사용자 피드백). **그려진** 벨 글리프 중심
+/// (`sidebar.headerIconCenterXPx(.notifications)` — hover pill 과 같은 함수)에 apex를 두고, 밑변을 패널 상단에 overlap만큼 겹쳐 상단 테두리를 caret
 /// 폭만큼 덮어 'bubble을 연다'. 패널이 세로 clamp로 anchor보다 위로 밀렸거나 벨이 패널 가로 밖이면 생략(벨과
 /// 어긋난 caret 방지). buildChromeOverlayPrep이 패널 배경 quad를 self.gpu_quads에 append한 '뒤'에 부른다(테두리 위로).
 pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.components.notifications.Item, props: chrome.ChromeProps, tk: *const chrome.Tokens) void {
@@ -817,7 +817,9 @@ pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.componen
     if (panel.y < self.chrome_host.notifications.anchor_y) return; // 세로 clamp로 위로 밀림 — 벨과 어긋나니 생략
     const cw_f: f32 = @floatFromInt(cw);
     const ch_f: f32 = @floatFromInt(ch);
-    const bell_cx: f32 = (@as(f32, @floatFromInt(cols)) - 11.5) * cw_f; // 벨 중심(cols-12, 2칸, 가로 -0.5 nudge 반영 → cols-11.5)
+    // 벨 중심 = 그려진 종 글리프 중심. 예전엔 `(cols-11.5)·cw` 로 따로 셈했다 — 렌더러가 2칸 종을 반 칸 왼쪽으로 밀던 옛
+    // nudge 를 전제한 값이라, nudge 가 없어진 뒤(`.m` 1377) 꼬리가 반 칸 왼쪽으로 치우쳤다.
+    const bell_cx: f32 = sidebar_ops.headerIconCenterXPx(self, .notifications) orelse return;
     // panelRect는 content rect(셀 격자)다. rich 모달 배경 quad는 lowering이 사방 modal_padding_px만큼 outset하므로
     // **보이는** 패널 경계는 content rect를 mp만큼 키운 것 — caret은 그 보이는 경계 기준으로 맞춰야 패널과 닿는다.
     const mp: f32 = @floatFromInt(tk.space.modal_padding_px);

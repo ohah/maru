@@ -427,7 +427,7 @@ emoji는 v1에서 "완벽한 typography"가 아니라 "grid를 깨지 않는 표
 
 여기서 "ink 중앙"은 **`CTFontGetBoundingRectsForGlyphs`가 주는 design bbox 중앙이 아니라, 실제로 색이 칠해진 픽셀(alpha>0)의 중앙**이다. 컬러 이모지(sbix/COLR — 예: 알림 종 🔔)는 폰트가 design bbox 안에 비대칭 여백을 두고 artwork를 얹어, design bbox 중앙과 보이는 artwork 중앙이 다르다. design bbox만 중앙에 맞추면 종이 위로 떠 보였고, 예전에는 렌더러가 종에만 별도 보정 상수(`py_nudge` 0.40ch vs 단색 0.30ch)를 손으로 맞춰야 했다 — 폰트/DPI마다 다시 틀어지는 근사다. 그래서 cover-fit으로 그린 **뒤** 실제 픽셀의 세로 범위를 측정해 슬롯 중앙으로 옮긴다(`maru_center_ink_vertically`, 정수-행 이동). 단색 윤곽 글리프(◧/⚙)는 design bbox가 곧 ink라 이동량이 0에 가까워 안전하다.
 
-이 ink-center 덕분에 렌더러(`maru_metal_renderer.m`)는 **모든 헤더 아이콘(◧/⚙/+/🔔)에 같은 `py_nudge`(0.30ch)만** 적용하면 자동으로 세로 정렬된다 — 글리프별 보정 상수가 없다. `py_nudge`는 줄0이 창 top에 붙어 위로 쏠리는 것을 신호등/타이틀바 중앙에 맞추는 **줄 단위 레이아웃 오프셋**일 뿐이고, 글리프 정렬은 atlas 래스터가 책임진다. 검증: 폰트 11/14/22pt(셀 높이 ~17→36px)에서 종의 세로 중심이 ⚙와 0.5px 이내로 유지됨을 화면 캡처로 확인했다(폰트-독립).
+이 ink-center 덕분에 **모든 헤더 아이콘(◧/⚙/+/🔔)은 같은 줄 원점만으로** 자동으로 세로 정렬된다 — 글리프별 보정 상수가 없다. 그 원점은 Zig 가 셀 `origin_y` 로 싣는 `sidebarHeaderIconRowTopPx`(띠 안 세로 중앙 — 예전 렌더러의 `py_nudge` 0.30ch 는 없어졌다)로, 줄을 신호등/타이틀바 중앙에 맞추는 **줄 단위 레이아웃 오프셋**일 뿐이고, 글리프 정렬은 atlas 래스터가 책임진다. 검증: 폰트 11/14/22pt(셀 높이 ~17→36px)에서 종의 세로 중심이 ⚙와 0.5px 이내로 유지됨을 화면 캡처로 확인했다(폰트-독립).
 
 ## Ligature와 Complex Script
 

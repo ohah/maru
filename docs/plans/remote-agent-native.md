@@ -222,3 +222,13 @@ CLI wrapper가 3회 빠른 255 실패 후 포기하고, 대기 중 소유 foregr
 다시 실행해 통과했다. PTY Ctrl-C 후보 검증은 현재 실행 환경에서 `/bin/sh` 대조군도
 같은 입력으로 종료되지 않고 PTY foreground group의 SIGINT가 EPERM으로 거부되어
 제품 결과로 사용하지 않았다. 기존 소유 프로세스 그룹 SIGINT 검증과 구분한다.
+
+실제 GUI Terminal 검증은 `--terminal-cancel` opt-in으로 실행한다. 소유 `.command` 창의
+제목과 foreground 및 화면 잠금을 확인한 뒤 GUI Control+C를 전송한다. 실제 SSH 연결을
+끊고 제품의 재접속 안내가 나온 뒤 exit 130, 추가 접속 없음, ssh/ssh-end 한 쌍을 검사한다.
+기존 Terminal 창은 종료하지 않는다. 실패 시 테스트 창은 조사용으로 남긴다.
+
+2026-10-13 실제 GUI Ctrl+C와 일반 셸 대조군을 확인했다. 제품은 exit 130으로
+끝났고 취소 뒤 추가 SSH 접속은 없었다. 하네스의 닫힌 master 재사용과 입력 전
+Swift 확인이 1초 backoff를 소비하는 문제를 수정했다. 실제 GUI 단독 및 자동
+재접속과 결합한 전체 loopback 검증 모두 통과했다.

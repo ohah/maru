@@ -151,8 +151,67 @@ def automatic_gui_probe(test_binary, root, remote, sshconfig, alias, env, trace)
         subprocess.run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
 
+def terminal_cancel_probe(cli, root, remote, sshconfig, alias, env, trace):
+    """Actual Terminal.app tty and guarded GUI Ctrl+C, never kill a user terminal."""
+    settings = Path(env['MARU_CONFIG'])
+    settings.write_text('sidebar.agent-hooks = true\nssh.reconnect = true\n')
+    hold = remote / 'automatic-hold'; hold.touch()
+    for name in ['automatic-count', 'release-1', 'release-2']:
+        (remote / name).unlink(missing_ok=True)
+    log = root / 'terminal.log'; result = root / 'terminal.exit'
+    runner = root / 'cancel.command'
+    childenv = dict(env, MARU_AGENT_REMOTE_PROTOCOL='3')
+    command = shlex.join(['/usr/bin/env', '-i'] + [k + '=' + v for k, v in childenv.items()] +
+                         [cli, 'ssh', '-F', str(sshconfig), '-T', alias])
+    runner.write_text('#!/bin/sh\ntrap ":" INT\n' + command + ' >' + shlex.quote(str(log)) +
+                      ' 2>&1\nrc=$?\nprintf "%s" "$rc" >' + shlex.quote(str(result)) + '\nexit "$rc"\n')
+    runner.chmod(0o700)
+    before = len(trace.read_text().splitlines())
+    def wait_for(predicate, label, seconds=15):
+        deadline = time.monotonic() + seconds
+        while not predicate():
+            if time.monotonic() >= deadline:
+                raise AssertionError(label + ': ' + (log.read_text(errors='replace')[-2000:] if log.exists() else 'no log'))
+            time.sleep(.02)
+    def wire():
+        return log.read_bytes() if log.exists() else b''
+    opened = False
+    try:
+        run(['/usr/bin/swift', '-e', 'import CoreGraphics; let s = CGSessionCopyCurrentDictionary() as? [String: Any]; if s == nil || s?["CGSSessionScreenIsLocked"] as? Int == 1 { exit(1) }'])
+        run(['/usr/bin/open', '-a', 'Terminal', str(runner)]); opened = True
+        wait_for(lambda: b'held:1' in wire(), 'GUI initial SSH')
+        entries = [json.loads(line) for line in trace.read_text().splitlines()[before:]]
+        control = next(e['control'] for e in reversed(entries) if e['control'] and not e['prepare'])
+        run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'exit', alias])
+        (remote / 'release-1').touch()
+        wait_for(lambda: b'reconnecting in' in wire(), 'GUI retry wait')
+        # AX window ownership plus foreground guard prevents input reaching another tab.
+        script = '\n'.join(['tell application "System Events"', 'tell process "Terminal"',
+            'if frontmost is false then error "Test terminal lost focus"',
+            'if name of front window does not contain ' + json.dumps(str(runner).replace('/private/tmp/', '/tmp/')) +
+                ' then error "Owned test window missing"',
+            'keystroke "c" using control down', 'end tell', 'end tell'])
+        run(['/usr/bin/osascript', '-e', script])
+        wait_for(result.exists, 'GUI Ctrl+C exit', 5)
+        assert result.read_text() == '130', (result.read_text(), wire())
+        time.sleep(1.1)
+        entries = [json.loads(line) for line in trace.read_text().splitlines()[before:]]
+        assert sum(not e['prepare'] for e in entries) == 1, entries
+        assert wire().count(b'\x1b]5379;ssh;') == 1 and wire().count(b'\x1b]5379;ssh-end') == 1, wire()
+        print(json.dumps({'case': 'terminal-ctrl-c', 'exit': 130, 'connections': 1,
+                          'input': 'GUI Control+C', 'retry_after_cancel': False}), flush=True)
+    finally:
+        (remote / 'release-1').touch(); hold.unlink(missing_ok=True)
+        settings.write_text('sidebar.agent-hooks = true\nssh.reconnect = false\n')
+        # Close only a completed owned window. On failure preserve it for inspection.
+        if opened and result.exists():
+            script = '\n'.join(['tell application "System Events"', 'tell process "Terminal"',
+                'if frontmost and name of front window contains ' + json.dumps(str(runner).replace('/private/tmp/', '/tmp/')) + ' then',
+                'keystroke "w" using command down', 'end if', 'end tell', 'end tell'])
+            run(['/usr/bin/osascript', '-e', script])
+
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
     provider_paths=[shutil.which(name) or '' for name in ['claude','codex']] if args.providers else ['', '']
     if args.providers:assert all(provider_paths),'installed Claude/Codex required'
@@ -252,6 +311,10 @@ if (root/"automatic-hold").exists():
                 else:assert not native.exists()
                 if args.automatic and tag == 'allowed':
                     automatic_wrapper_probe(cli, root, remote, sshconfig, alias, env, trace)
+                if args.terminal_cancel and tag == 'allowed':
+                    terminal_cancel_probe(cli, root, remote, sshconfig, alias, env, trace)
+                    run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', next(iter(controls)),
+                         '-M', '-N', '-f', '-o', 'ControlPersist=no', alias])
                 if peer==cli:
                     command=f'"{peer}" agent-events --stdio --dir="{remote}/.cache/maru" --log-format=mixed --heartbeat-ms=200'
                     proc=subprocess.Popen(['/usr/bin/ssh','-F',str(sshconfig),'-S',next(iter(controls)),alias,command],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)

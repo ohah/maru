@@ -50,7 +50,9 @@ pub const browser_help =
     \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
     \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
     \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane)
-    \\  close   --surface <id>                     close a tab this pane opened (asks the page; "not closed" if it asks before leaving)
+    \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
+    \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
+    \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -109,6 +111,10 @@ pub const Request = union(enum) {
     open: struct { url: ?[]const u8, timeout_ms: ?u32 },
     /// `browser close`(W9b③ — 그 pane 이 연 탭만). 응답 {closed, reason?}.
     close: struct { surface_id: u64 },
+    /// `browser dialog`(W9c② — Chromium). 그 탭·팝업 가족에 떠 있는 대화상자. 응답 {dialogs:[…]}.
+    dialog: struct { surface_id: u64 },
+    /// `browser handle-dialog`(W9c② — Chromium). `--accept`·`--dismiss` 중 하나, `--dialog` 는 `dialog` 가 준 번호. 응답 {ok, kind, continues?}.
+    handle_dialog: struct { surface_id: u64, accept: bool, text: ?[]const u8, dialog: ?u64 },
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -124,6 +130,8 @@ pub const Request = union(enum) {
             .console => .console,
             .open => .open,
             .close => .close,
+            .dialog => .dialog,
+            .handle_dialog => .handle_dialog,
         };
     }
 };
@@ -222,7 +230,13 @@ pub const ParseError = error{
     InvalidMaxDepth, // `--max-depth`가 비음수 정수(u32)가 아님
     UnknownOption, // 알 수 없는 옵션(`--bogus`)
     UnexpectedArgument, // 남는 위치 인자
+    MissingAnswer, // `handle-dialog` 에 `--accept`·`--dismiss` 가 없음
+    ConflictingAnswer, // `handle-dialog` 에 둘 다
+    InvalidDialogToken, // `--dialog` 가 1..2^53-1 정수가 아님
 };
+
+/// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
+pub const max_dialog_token: u64 = 9_007_199_254_740_991;
 
 /// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자, 양방향 제어 글자, 줄·문단 구분, interlinear, tag 글자를 뺀다(서버가 보낸 페이지
 /// 글을 터미널에 찍을 때). 쓴 바이트 수. `web_cdp_locate.displaySafe` 와 같다(둘을 함께 고친다).
@@ -390,6 +404,13 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         if (p.arg != null) return error.UnexpectedArgument;
         return .{ .request = .{ .close = .{ .surface_id = s } } };
     }
+    if (eq(sub, "dialog")) {
+        const p = try parseSurfaceArg(rest);
+        const s = p.surface orelse return error.MissingSurface;
+        if (p.arg != null) return error.UnexpectedArgument;
+        return .{ .request = .{ .dialog = .{ .surface_id = s } } };
+    }
+    if (eq(sub, "handle-dialog")) return .{ .request = .{ .handle_dialog = try parseHandleDialogArgs(rest) } };
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -721,6 +742,42 @@ fn parseSurfaceArg(rest: []const []const u8) ParseError!Parsed {
     return .{ .surface = surface, .arg = arg };
 }
 
+/// `handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]`(W9c②).
+fn parseHandleDialogArgs(rest: []const []const u8) ParseError!@FieldType(Request, "handle_dialog") {
+    var surface: ?u64 = null;
+    var accept: ?bool = null;
+    var text: ?[]const u8 = null;
+    var dialog: ?u64 = null;
+    var i: usize = 0;
+    while (i < rest.len) {
+        const a = rest[i];
+        if (eq(a, "--surface") or std.mem.startsWith(u8, a, "--surface=")) {
+            if (eq(a, "--surface")) {
+                if (i + 1 >= rest.len) return error.MissingSurfaceValue;
+                try assignSurface(&surface, rest[i + 1]);
+                i += 2;
+            } else {
+                try assignSurface(&surface, a["--surface=".len..]);
+                i += 1;
+            }
+        } else if (eq(a, "--accept") or eq(a, "--dismiss")) {
+            if (accept != null) return error.ConflictingAnswer;
+            accept = eq(a, "--accept");
+            i += 1;
+        } else if (matchOpt(a, "--text")) {
+            text = try optValue(rest, &i, "--text");
+        } else if (matchOpt(a, "--dialog")) {
+            const value = try optValue(rest, &i, "--dialog");
+            const t = std.fmt.parseInt(u64, value, 10) catch return error.InvalidDialogToken;
+            if (t == 0 or t > max_dialog_token) return error.InvalidDialogToken;
+            dialog = t;
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return error.UnknownOption;
+        } else return error.UnexpectedArgument;
+    }
+    return .{ .surface_id = surface orelse return error.MissingSurface, .accept = accept orelse return error.MissingAnswer, .text = text, .dialog = dialog };
+}
+
 const CookieArgs = struct { surface: ?u64, name: ?[]const u8, key: ?[]const u8, value: ?[]const u8, domain: ?[]const u8, path: ?[]const u8, selector: ?[]const u8, ref: ?[]const u8, text: ?[]const u8, secure: bool };
 
 /// act(click/type/scroll)의 locator를 옵션에서 만든다 — `--selector` xor `--ref`(§9.5.4). 둘 다=배타 위반,
@@ -954,7 +1011,7 @@ fn hasHelpFlag(args: []const []const u8) bool {
 /// 다음 토큰을 값으로 받는 옵션인가(`--opt=값` 꼴과 값 없는 플래그는 아니다).
 fn takesValue(opt: []const u8) bool {
     if (!std.mem.startsWith(u8, opt, "--") or std.mem.indexOfScalar(u8, opt, '=') != null) return false;
-    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure" }) |flag| if (eq(opt, flag)) return false;
+    for ([_][]const u8{ "--", "--help", "--interactive", "--clear", "--load", "--visible", "--exact", "--secure", "--accept", "--dismiss" }) |flag| if (eq(opt, flag)) return false;
     return true;
 }
 
@@ -1092,6 +1149,16 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
         .clear_storage => |g| return idOnlyRequest(gpa, id, "browser.clearStorage", g.surface_id),
         .back => |g| return idOnlyRequest(gpa, id, "browser.back", g.surface_id),
         .close => |g| return idOnlyRequest(gpa, id, "browser.close", g.surface_id),
+        .dialog => |g| return idOnlyRequest(gpa, id, "browser.dialog", g.surface_id),
+        .handle_dialog => |h| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            try obj.put(gpa, "id", .{ .integer = @intCast(h.surface_id) });
+            try obj.put(gpa, "accept", .{ .bool = h.accept });
+            if (h.text) |t| try obj.put(gpa, "text", .{ .string = t });
+            if (h.dialog) |d| try obj.put(gpa, "dialog", .{ .integer = @intCast(d) });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.handleDialog", .params = .{ .object = obj } } });
+        },
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -1235,7 +1302,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -1384,7 +1451,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             // wait 이 찾은 것이 여럿과 맞는다(W9b②-3) — 같은 로케이터로 누르면 「여럿」 으로 실패한다.
             if (boolField(result.get("ambiguous"))) try w.writeAll("warning: ambiguous — the locator matches several elements; act with the matched ref, --exact or --nth\n");
             // 입력 뒤 페이지가 대화상자를 띄웠다(W9b③ 적대 리뷰 3 회차) — 입력은 갔다: 다시 하면 두 번 간다.
-            if (boolField(result.get("dialog"))) try w.writeAll("warning: the page opened a dialog right after the input — the input reached the page, do not repeat it; answer the dialog in that tab\n");
+            if (boolField(result.get("dialog"))) try w.writeAll("warning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog if you may, otherwise the user answers it in that tab\n");
         },
         // get-local-storage → {value}. 값은 페이지가 쓴 글 — 걸러 낸다(W9f 적대 리뷰 5 회차: OSC 52·화면 지우기·줄바꿈이 그대로 나갔다).
         .value => {
@@ -1410,6 +1477,63 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         .get_url => {
             try writePageText(gpa, w, strField(result.get("url")), false);
             try w.writeAll("\n");
+        },
+        // W9c②: 대화상자마다 한 줄(종류·탭·번호·원인·답해도 되나·출처) + 글. 글은 페이지가 쓴 것이라 걸러 내고 줄바꿈은 보이는 표시로 —
+        // 줄을 바꿔 다음 대화상자를 흉내 내지 못하게.
+        .dialog => {
+            const list = switch (result.get("dialogs") orelse std.json.Value{ .null = {} }) {
+                .array => |a| a,
+                else => {
+                    try w.writeAll("error: malformed dialogs\n");
+                    return false;
+                },
+            };
+            if (list.items.len == 0) {
+                try w.writeAll("(no dialog)\n");
+                return true;
+            }
+            var answerable = false;
+            var any_full = false;
+            for (list.items) |item| {
+                const o = switch (item) {
+                    .object => |oo| oo,
+                    else => continue,
+                };
+                try writePageText(gpa, w, strField(o.get("kind")), false);
+                try w.print(" tab={d}", .{intField(o.get("tab")) orelse 0});
+                const token = intField(o.get("token")) orelse {
+                    try w.writeAll(" (no grant on that tab — not shown)\n");
+                    continue;
+                };
+                any_full = true;
+                const may = boolField(o.get("may_answer"));
+                answerable = answerable or may;
+                try w.print(" token={d} cause=", .{token});
+                try writePageText(gpa, w, strField(o.get("cause")), false);
+                try w.print(" may_answer={s}", .{if (may) "yes" else "no"});
+                const origin = strField(o.get("origin"));
+                if (origin.len > 0) {
+                    try w.writeAll(" origin=");
+                    try writePageText(gpa, w, origin, false);
+                }
+                try w.writeAll("\n  message: ");
+                try writeDialogText(gpa, w, strField(o.get("message")));
+                try w.writeAll("\n");
+                if (o.get("default_text")) |d| if (d == .string) {
+                    try w.writeAll("  default: ");
+                    try writeDialogText(gpa, w, d.string);
+                    try w.writeAll("\n");
+                };
+            }
+            if (answerable) {
+                try w.writeAll("answer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n");
+            } else if (any_full) try w.writeAll("the user answers these in the tab (maru may not)\n");
+        },
+        .handle_dialog => {
+            try w.writeAll("answered ");
+            try writePageText(gpa, w, strField(result.get("kind")), false);
+            try w.writeAll("\n");
+            if (boolField(result.get("continues"))) try w.writeAll("note: the page is leaving — its navigation or close continues; check with wait --load or get-url\n");
         },
         .exec => {
             try writeDisplaySafeJsonText(w, strField(result.get("result")));
@@ -1526,6 +1650,20 @@ fn writePageText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8, qu
     if (!quoted) return w.writeAll(safe);
     var js: std.json.Stringify = .{ .writer = w, .options = .{} };
     js.write(safe) catch return error.WriteFailed;
+}
+
+/// 대화상자 글(W9c②) — 줄바꿈을 ` ⏎ ` 로 보이게 바꾼 뒤 걸러 JSON 으로 인용한다(`displaySafe` 는 줄바꿈을 지운다 — 두 줄이 붙어 읽혔다).
+fn writeDialogText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) !void {
+    var lines: std.ArrayList(u8) = .empty;
+    defer lines.deinit(gpa);
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '\r' or text[i] == '\n') {
+            if (text[i] == '\r' and i + 1 < text.len and text[i + 1] == '\n') i += 1;
+            lines.appendSlice(gpa, " ⏎ ") catch return w.writeAll("…");
+        } else lines.append(gpa, text[i]) catch return w.writeAll("…");
+    }
+    try writePageText(gpa, w, lines.items, true);
 }
 
 fn boolField(v: ?std.json.Value) bool {
@@ -2666,7 +2804,9 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  hover   --surface <id> (--selector <css> | --ref <ref>)         move the pointer onto an element (real input; Chromium tabs)
         \\  press   --surface <id> --key <keys> [--selector <css> | --ref <ref>]   press a key like Enter, Shift+Tab or Meta+a (real input; on the element, or where the focus is; Chromium tabs)
         \\  open    [--url <url>] [--timeout <ms>]     open a tab behind the current one in this pane and print its id (waits for the first load; Chromium; from a maru pane)
-        \\  close   --surface <id>                     close a tab this pane opened (asks the page; "not closed" if it asks before leaving)
+        \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
+        \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
+        \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -3016,7 +3156,7 @@ test "W9b③ 적대 리뷰 3 회차: 누른 뒤 페이지가 대화상자를 띄
     var buf: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"dialog\":true}}", .ok, &w));
-    try testing.expectEqualStrings("ok\nwarning: the page opened a dialog right after the input — the input reached the page, do not repeat it; answer the dialog in that tab\n", w.buffered());
+    try testing.expectEqualStrings("ok\nwarning: the page opened a dialog right after the input — the input reached the page, do not repeat it; see it with maru browser dialog and answer it with maru browser handle-dialog if you may, otherwise the user answers it in that tab\n", w.buffered());
 }
 
 // ── W9f: repl ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -3403,5 +3543,98 @@ test "W9a③ 적대 리뷰 10 회차: exec 글 — 무작위 엄격 JSON 문자�
         try testing.expectEqualStrings(s.items, parsed.value);
         var it = (try std.unicode.Utf8View.init(out.written())).iterator();
         while (it.nextCodepoint()) |c| try testing.expect(!(c >= 0x7f and displayUnsafe(c)));
+    }
+}
+
+test "parse·build: dialog(W9c②) 은 --surface 만, handle-dialog 는 --accept·--dismiss 중 하나(꼭), --text·--dialog 는 선택" {
+    try testing.expectEqual(@as(u64, 9), (try parse(&.{ "dialog", "--surface", "9" })).request.dialog.surface_id);
+    try testing.expectError(error.MissingSurface, parse(&.{"dialog"}));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "dialog", "--surface", "9", "x" }));
+    const h = (try parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--text", "-이름-", "--dialog", "42" })).request.handle_dialog;
+    try testing.expect(h.accept);
+    try testing.expectEqualStrings("-이름-", h.text.?);
+    try testing.expectEqual(@as(u64, 42), h.dialog.?);
+    const d = (try parse(&.{ "handle-dialog", "--dismiss", "--surface=9" })).request.handle_dialog;
+    try testing.expect(!d.accept and d.text == null and d.dialog == null);
+    try testing.expectError(error.MissingAnswer, parse(&.{ "handle-dialog", "--surface", "9" }));
+    try testing.expectError(error.ConflictingAnswer, parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--dismiss" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "handle-dialog", "--accept" }));
+    try testing.expectError(error.InvalidDialogToken, parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--dialog", "0" }));
+    try testing.expectError(error.InvalidDialogToken, parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--dialog", "x" }));
+    try testing.expectError(error.InvalidDialogToken, parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--dialog", "9007199254740992" }));
+    _ = try parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--dialog", "9007199254740991" });
+    try testing.expectError(error.MissingOptionValue, parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--text" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--suppress" }));
+    try testing.expectError(error.UnexpectedArgument, parse(&.{ "handle-dialog", "--surface", "9", "--accept", "yes" }));
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "dialog", "--surface", "9" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.dialog", pm.message.request.method);
+        try testing.expectEqual(@as(usize, 1), pm.message.request.params.?.object.count());
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "handle-dialog", "--surface", "9", "--accept", "--text", "maru", "--dialog", "42" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        try testing.expectEqualStrings("browser.handleDialog", pm.message.request.method);
+        const p = pm.message.request.params.?.object;
+        try testing.expectEqual(@as(i64, 9), p.get("id").?.integer);
+        try testing.expect(p.get("accept").?.bool);
+        try testing.expectEqualStrings("maru", p.get("text").?.string);
+        try testing.expectEqual(@as(i64, 42), p.get("dialog").?.integer);
+    }
+    {
+        const b = try buildRequestBytes(testing.allocator, (try parse(&.{ "handle-dialog", "--surface", "9", "--dismiss" })).request, .{ .number = 1 });
+        defer testing.allocator.free(b);
+        var pm = try cp.parseMessage(testing.allocator, b);
+        defer pm.deinit();
+        const p = pm.message.request.params.?.object;
+        try testing.expect(!p.get("accept").?.bool);
+        try testing.expectEqual(@as(usize, 2), p.count()); // 엄격 키 — 없는 것은 싣지 않는다
+    }
+}
+
+test "render: dialog(W9c②) 은 대화상자마다 종류·탭·번호·원인·답해도 되나, 페이지 글은 걸러 줄바꿈을 보이는 표시로 — grant 없는 탭은 종류만, 답하는 법 한 줄" {
+    var buf: [2048]u8 = undefined;
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[]}}", .dialog, &w));
+        try testing.expectEqualStrings("(no dialog)\n", w.buffered());
+    }
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        const bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[" ++
+            "{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"line1\\nline2\\u001b[31m\\u202e\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\",\"may_answer\":true}," ++
+            "{\"tab\":13,\"kind\":\"alert\"}]}}";
+        try testing.expect(try renderResponse(testing.allocator, bytes, .dialog, &w));
+        try testing.expectEqualStrings(
+            "prompt tab=12 token=7 cause=agent may_answer=yes origin=https://a.test\n" ++
+                "  message: \"line1 ⏎ line2[31m\"\n" ++
+                "  default: \"d\"\n" ++
+                "alert tab=13 (no grant on that tab — not shown)\n" ++
+                "answer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n",
+            w.buffered(),
+        );
+    }
+    {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"dialogs\":[{\"token\":3,\"tab\":5,\"kind\":\"before_unload\",\"message\":\"\",\"origin\":\"\",\"cause\":\"user\",\"may_answer\":false}]}}", .dialog, &w));
+        try testing.expectEqualStrings("before_unload tab=5 token=3 cause=user may_answer=no\n  message: \"\"\nthe user answers these in the tab (maru may not)\n", w.buffered());
+    }
+}
+
+test "render: handle-dialog(W9c②) 은 답한 종류, 떠나기면 이동·닫기가 이어진다는 안내" {
+    var buf: [512]u8 = undefined;
+    const cases = [_]struct { bytes: []const u8, want: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"kind\":\"confirm\"}}", .want = "answered confirm\n" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true,\"kind\":\"before_unload\",\"continues\":true}}", .want = "answered before_unload\nnote: the page is leaving — its navigation or close continues; check with wait --load or get-url\n" },
+    };
+    for (cases) |c| {
+        var w: std.Io.Writer = .fixed(&buf);
+        try testing.expect(try renderResponse(testing.allocator, c.bytes, .handle_dialog, &w));
+        try testing.expectEqualStrings(c.want, w.buffered());
     }
 }

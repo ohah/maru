@@ -35,11 +35,13 @@ const finder_js = @embedFile("web_cdp_finder.js");
 /// 앱이 DevTools 결과 상한을 넘은 답에 싣는 글 — 로케이터 질의가 이것이면 「너무 많다」 로 바꿔 답한다.
 pub const result_too_large = "the DevTools result was too large";
 
-/// 페이지가 JS 대화상자(alert·confirm·prompt·떠나기 확인)를 띄워 멈췄다 — 사용자가 그 탭에서 답해야 한다(W9b③ 적대 리뷰 1·2 회차).
+/// 페이지가 JS 대화상자(alert·confirm·prompt·떠나기 확인)를 띄워 멈췄다 — 답하기 전에는 그 페이지로 가는 호출이 답하지 않는다(W9b③ 적대 리뷰
+/// 1·2 회차). W9c②: 에이전트가 답해도 되는 것이면 `handle-dialog` 로 답한다 — 아니면 사용자가 그 탭에서 답한다. 두 글은 표지로 그대로
+/// 비교된다(`std.mem.eql`) — 고치면 상수만 고친다.
 /// W9a 적대 리뷰 4 회차: 같은 팝업 가족의 **다른** 탭이 대화상자를 띄웠다 — 그 탭의 스크립트는 멈춘 것이 아니다(다른 렌더러에서 돈다).
-pub const family_dialog_reason = "a tab in the same popup family is showing a dialog (alert, confirm or prompt) — the script was stopped; answer the dialog in that tab, then run it again";
+pub const family_dialog_reason = "a tab in the same popup family is showing a dialog (alert, confirm or prompt) — the script was stopped; answer the dialog with maru browser handle-dialog if you may (otherwise the user answers it in that tab), then run it again";
 
-pub const dialog_reason = "the page, or a tab it opened or that opened it, is showing a dialog (alert, confirm or leave-page question) — it must be answered in that tab first";
+pub const dialog_reason = "the page, or a tab it opened or that opened it, is showing a dialog (alert, confirm, prompt or leave-page question) — answer it with maru browser handle-dialog if you may (see maru browser dialog), otherwise the user answers it in that tab";
 
 /// 누르기 전 프레임(W9b③)의 인자 — **kick 과 바이트까지 같아야 한다**(`app_host_abi` 가 컴파일 때 본다). sidecar 는 kick 과 꼭 같은
 /// 호출만 짧은 시한(3 초)에 놓는다 — 다르면 이동하는 순간 답을 잃은 프레임이 35 초 자리를 쥐어 click 이 30 초 시한이 됐다(적대 리뷰
@@ -49,6 +51,15 @@ pub const frame_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
 pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press, navigate, get_url, screenshot, execute_script, get_local_storage, set_local_storage, remove_local_storage, get_cookies, set_cookie, delete_cookie, clear_storage };
+
+/// W9c②: 이 op 이 페이지를 움직이는가 — 그 호출 뒤의 JS 대화상자를 에이전트 것으로 볼 근거(`web_osr.noteAgentInput`). 읽기만 하는 op
+/// (스냅숏·기다림·주소·스크린샷)과 저장소 op 은 아니다 — 대화상자를 부르지 않는다.
+pub fn acting(kind: Kind) bool {
+    return switch (kind) {
+        .click, .back, .forward, .reload, .type_text, .scroll, .hover, .press, .navigate, .execute_script => true,
+        .wait, .snapshot, .get_url, .screenshot, .get_local_storage, .set_local_storage, .remove_local_storage, .get_cookies, .set_cookie, .delete_cookie, .clear_storage => false,
+    };
+}
 
 /// kick 을 붙이는가(`web_cdp_kick.zig`).
 pub const Kick = @import("web_cdp_kick.zig").Kick;
@@ -3681,4 +3692,11 @@ fn w9b3r4RoleDialog(method: []const u8, params: []const u8) Reply {
     if (std.mem.indexOf(u8, params, "mousePressed") != null) return .{ .failed = dialog_reason };
     if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .not_sent = dialog_reason };
     return rolePage(method, params);
+}
+
+test "W9c②: 대화상자로 막힌 실패의 글은 maru browser handle-dialog 를 가리킨다 — 답해도 되면 에이전트가, 아니면 사용자가(표지 상수는 그대로 비교된다)" {
+    for ([_][]const u8{ dialog_reason, family_dialog_reason, web_cdp_page.leave_page_reason, web_cdp_exec.paused_at_dialog }) |r| {
+        try testing.expect(std.mem.indexOf(u8, r, "maru browser handle-dialog") != null);
+        try testing.expect(std.mem.indexOf(u8, r, "otherwise the user") != null);
+    }
 }

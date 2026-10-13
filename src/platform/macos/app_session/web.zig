@@ -726,6 +726,8 @@ fn clearShown(self: *AppSession, surface_id: u64, token: u64) void {
 }
 
 pub fn osrDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool, text: []const u8, suppress: bool) void {
+    // W9c②: 사용자가 sheet 로 답했다 — 그 답이 부른 다음 대화상자는 사용자 것이다(이미 사라진 요청이면 답이 아니다).
+    if (web_osr.dialogPending(surface_id, token) != null) web_osr.noteUserAction(surface_id);
     web_osr.replyDialog(self.allocator, surface_id, token, accept, text, suppress);
     clearShown(self, surface_id, token);
 }
@@ -735,6 +737,7 @@ pub fn osrFileDialogPath(self: *AppSession, surface_id: u64, token: u64, path: [
 }
 
 pub fn osrFileDialogReply(self: *AppSession, surface_id: u64, token: u64, accept: bool) void {
+    if (web_osr.dialogPending(surface_id, token) != null) web_osr.noteUserAction(surface_id); // W9c②: 위와 같다
     web_osr.replyFileDialog(self.allocator, surface_id, token, accept);
     clearShown(self, surface_id, token);
 }

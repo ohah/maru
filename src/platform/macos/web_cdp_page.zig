@@ -35,7 +35,7 @@ pub const max_snapshot_pixels: f64 = 64_000_000;
 /// navigate 가 받는 주소 상한(wire 의 `max_url_bytes` 와 같다).
 pub const max_url_bytes: usize = 32 * 1024;
 
-pub const leave_page_reason = "the page asks before leaving (unsaved input) — the user decides in that tab; the navigation continues if they agree";
+pub const leave_page_reason = "the page asks before leaving (unsaved input) — answer it with maru browser handle-dialog if you may (leaving lets the navigation continue), otherwise the user decides in that tab";
 pub const outside_reason = "the rect is outside the visible part of the page";
 pub const too_large_reason = "the screenshot is too large — use a smaller rect or scale";
 pub const under_pixel_reason = "the screenshot would be smaller than one pixel — use a larger rect or scale";

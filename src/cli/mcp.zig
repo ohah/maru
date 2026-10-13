@@ -28,6 +28,8 @@ pub const ArgKind = enum {
     json_array,
     /// 수(소수 가능) — `--flag <수>`
     number,
+    /// 참·거짓이 서로 다른 플래그로 — 참이면 `flag`, 거짓이면 `flag_false`(W9c② — `accept` → `--accept`·`--dismiss`). 스키마는 boolean.
+    bool_choice,
 };
 
 pub const Arg = struct {
@@ -35,6 +37,8 @@ pub const Arg = struct {
     kind: ArgKind,
     /// CLI 의 옵션 이름(`positional` 이면 빈 글).
     flag: []const u8 = "",
+    /// `bool_choice` 가 거짓일 때의 옵션 이름.
+    flag_false: []const u8 = "",
     description: []const u8,
     required: bool = false,
     /// 정수 인자의 최솟값·최댓값(스키마 `minimum`·`maximum` — 파서가 지키는 값과 같게, W9f 적대 리뷰 2 회차).
@@ -86,7 +90,13 @@ pub const tools = [_]Tool{
         .{ .key = "url", .kind = .string, .flag = "--url", .description = "http(s) address to load (omit for a blank tab)" },
         .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1, .max = 25000 },
     } },
-    .{ .name = "browser_close", .subcommand = "close", .description = "Close a tab this pane opened (asks the page; a page that asks before leaving is not closed).", .args = withSurface(&.{}) },
+    .{ .name = "browser_close", .subcommand = "close", .description = "Close a tab this pane opened (asks the page; a page that asks before leaving is not closed — answer its question with browser_handle_dialog).", .args = withSurface(&.{}) },
+    .{ .name = "browser_dialog", .subcommand = "dialog", .description = "Show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or a tab in its popup family, with a token, who caused it and whether you may answer it (Chromium tabs).", .args = withSurface(&.{}) },
+    .{ .name = "browser_handle_dialog", .subcommand = "handle-dialog", .description = "Accept or dismiss the tab's alert, confirm, prompt or leave-page question (Chromium tabs). Pass the token from browser_dialog. Dialogs the user opened are refused; file choosers can only be dismissed.", .args = withSurface(&.{
+        .{ .key = "accept", .kind = .bool_choice, .flag = "--accept", .flag_false = "--dismiss", .description = "true accepts (OK / leave), false dismisses (Cancel / stay)", .required = true },
+        .{ .key = "text", .kind = .string, .flag = "--text", .description = "answer text for a prompt" },
+        .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
+    }) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
     .{ .name = "browser_get_url", .subcommand = "get-url", .description = "Print the tab's current document address.", .args = withSurface(&.{}) },
     .{ .name = "browser_click", .subcommand = "click", .description = "Click an element with real mouse input (Chromium tabs). Give one locator: selector, ref, role (+name/level), by_text or by_label.", .args = withSurface(&locator_args) },
@@ -214,6 +224,10 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                 },
                 .flag => switch (v) {
                     .bool => |b| if (b) try out.append(arena, spec.flag),
+                    else => return error.WrongType,
+                },
+                .bool_choice => switch (v) {
+                    .bool => |b| try out.append(arena, if (b) spec.flag else spec.flag_false),
                     else => return error.WrongType,
                 },
                 .positional => switch (v) {
@@ -377,7 +391,7 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
             .string, .positional => "string",
             .int => "integer",
             .number => "number",
-            .flag => "boolean",
+            .flag, .bool_choice => "boolean",
             .json_array => "array",
         });
         if (a.kind == .int) {
@@ -706,6 +720,7 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
         var obj: std.json.ObjectMap = .empty;
         for (t.args) |a| if (a.required) try obj.put(arena, a.key, switch (a.kind) {
             .int => .{ .integer = 4 },
+            .bool_choice => .{ .bool = true },
             else => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
         });
         // 이 인자와 함께 써야 하는 짝(로케이터는 하나가 있어야, --name·--exact 는 role 과).
@@ -863,6 +878,7 @@ test "W9f 적대 리뷰 3 회차: 모든 정수 인자의 스키마 상한은 �
             var obj: std.json.ObjectMap = .empty;
             for (t.args) |a| if (a.required) try obj.put(arena, a.key, switch (a.kind) {
                 .int => .{ .integer = 4 },
+                .bool_choice => .{ .bool = true },
                 else => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
             });
             if (std.mem.eql(u8, arg.key, "level") or std.mem.eql(u8, arg.key, "nth")) try obj.put(arena, "role", .{ .string = "button" });
@@ -908,4 +924,33 @@ test "W9f 적대 리뷰 4 회차: 인자가 틀린 도구 호출은 isError 결�
             try testing.expect(arg.required);
         }
     }
+}
+
+test "W9c②: browser_dialog·browser_handle_dialog — accept(참·거짓)는 --accept·--dismiss 로, 스키마는 boolean·필수, text·dialog 는 선택이고 browser.parse 가 받는다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const list = findTool("browser_dialog").?;
+    try testing.expectEqual(@as(u64, 4), (try browser.parse(try argv(arena, list, try jsonOf(arena, "{\"surface\":4}")))).request.dialog.surface_id);
+    const handle = findTool("browser_handle_dialog").?;
+    const yes = try browser.parse(try argv(arena, handle, try jsonOf(arena, "{\"surface\":4,\"accept\":true,\"text\":\"-maru\",\"dialog\":9}")));
+    try testing.expect(yes.request.handle_dialog.accept);
+    try testing.expectEqualStrings("-maru", yes.request.handle_dialog.text.?);
+    try testing.expectEqual(@as(u64, 9), yes.request.handle_dialog.dialog.?);
+    const no = try browser.parse(try argv(arena, handle, try jsonOf(arena, "{\"surface\":4,\"accept\":false}")));
+    try testing.expect(!no.request.handle_dialog.accept);
+    try testing.expectError(error.MissingArgument, argv(arena, handle, try jsonOf(arena, "{\"surface\":4}")));
+    try testing.expectError(error.WrongType, argv(arena, handle, try jsonOf(arena, "{\"surface\":4,\"accept\":\"yes\"}")));
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(r);
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, r, .{});
+    defer parsed.deinit();
+    for (parsed.value.object.get("result").?.object.get("tools").?.array.items) |t| {
+        if (!std.mem.eql(u8, t.object.get("name").?.string, "browser_handle_dialog")) continue;
+        const schema = t.object.get("inputSchema").?.object;
+        try testing.expectEqualStrings("boolean", schema.get("properties").?.object.get("accept").?.object.get("type").?.string);
+        try testing.expectEqual(@as(usize, 2), schema.get("required").?.array.items.len); // surface·accept
+        return;
+    }
+    return error.TestUnexpectedResult;
 }

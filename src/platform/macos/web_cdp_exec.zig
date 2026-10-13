@@ -37,7 +37,7 @@ pub const busy_retry_ms: u32 = 100;
 pub const max_busy_retries: u8 = 45;
 
 pub const script_too_large = "the script is too large for a Chromium tab (64 KiB after JSON escaping, args included)";
-pub const paused_at_dialog = "the script is paused at a dialog (alert, confirm or prompt) in that tab or a tab in its popup family; it continues after the user answers — do not run it again";
+pub const paused_at_dialog = "the script is paused at a dialog (alert, confirm or prompt) in that tab or a tab in its popup family; it continues once the dialog is answered — answer it with maru browser handle-dialog if you may, otherwise the user answers it; do not run it again";
 pub const not_strict_json = "result is not strict JSON";
 pub const navigation_name = "Maru.Browser.Navigation(1)";
 pub const navigation_message = "the page navigated or closed before the script finished";

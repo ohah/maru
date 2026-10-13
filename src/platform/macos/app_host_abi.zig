@@ -6656,6 +6656,8 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         => true,
         // W9b③: open·close 는 따로 둔 탭 op 목록이 본다(대상이 부른 pane·닫히는 것이 성공 — `enqueueTabOp`).
         .subscribe, .wait, .open, .close => false,
+        // W9c②: 대화상자 보기·답하기는 `pushBrowserOp` 가 곧 답한다(실행 중인 것이 없다).
+        .dialog, .handle_dialog => false,
     };
 }
 
@@ -6696,6 +6698,8 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .press => "browser.press",
         .open => "browser.open",
         .close => "browser.close",
+        .dialog => "browser.dialog",
+        .handle_dialog => "browser.handleDialog",
     };
 }
 
@@ -7104,6 +7108,9 @@ const control_hello_caps = [_][]const u8{
     // W9b③: 에이전트가 탭을 열고 닫는다.
     "browser.open",
     "browser.close",
+    // W9c②: 에이전트가 JS 대화상자를 보고 답한다.
+    "browser.dialog",
+    "browser.handleDialog",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -7613,6 +7620,17 @@ fn pushBrowserOp(
     // markdown·파일 뷰는 L2 가 막았다). 한 번도 배치되지 않은 탭도 여기로 온다(레코드로 가르면 WebKit 으로 갔다).
     // Chromium 이 지원하지 않는 메서드는 L2 가 확인 모달 전에 거절했다 — 닿으면 같은 `-32008`.
     const chromium = session_mod.web_osr.enabled();
+    // W9c②: 대화상자 보기·답하기는 DevTools 를 부르지 않는다 — 여기서 곧 답한다. 대화상자로 멈춘 탭의 op 줄 뒤에 서면 안 되고(그 줄이
+    // 바로 막힌 것이다), 확인 모달 뒤 재처리(`resolveGrantPrompt`)도 이 함수로 오므로 한 자리에서 가른다(계획 공격 2 회차 — 전에는 재처리가
+    // Chromium op 줄로 가 「not supported」 였다).
+    if (op.method == .dialog or op.method == .handle_dialog) {
+        if (chromium) return answerDialogOp(server, async_id, op);
+        server.cross_gpa.free(op.arg);
+        const pending = server.inFlightPending(async_id) orelse return;
+        const resp = control_browser.serializeUnsupportedByEngine(server.cross_gpa, pending.request_bytes, .webkit) catch null;
+        _ = server.completeInFlight(async_id, resp);
+        return;
+    }
     if (chromium and !control_browser.engineSupports(.chromium, op.method)) {
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
@@ -7688,6 +7706,117 @@ fn pushBrowserOp(
         _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
     };
 }
+
+// ── W9c②: 에이전트가 JS 대화상자를 보고 답한다(`browser.dialog`·`browser.handleDialog`) ─────────────────────────────────────
+// 누가 볼 수 있나(C7·C8): pane 으로 인가된 연결은 그 pane 이 grant 를 가진 가족 탭의 대화상자를 다 보고 답한다 — 나머지 가족 탭은
+// `{tab, kind}` 만(무엇이 막는지는 알게). cap 으로 인가된 연결(pane 없음)은 자기 탭의 것만 보고 답한다. 답해도 되는지(원인·보임·C13)는
+// `web_osr.agentReplyDialog` 가 `dialog_cause` 로 정한다 — 여기는 grant 표와 에이전트 탭 표만 넘긴다.
+
+const DialogCaller = struct {
+    surface_id: u64,
+    /// 인가한 pane(cap 연결은 null).
+    pane: ?u64,
+
+    fn granted(ctx: ?*const anyopaque, tab: u64) bool {
+        const self: *const DialogCaller = @ptrCast(@alignCast(ctx.?));
+        if (tab == self.surface_id) return true; // 요청 대상 — L2 가 인가했다
+        const pane = self.pane orelse return false;
+        return control_pane_grant_store.authorizes(pane, tab, .browser, null);
+    }
+
+    /// 묻는 pane 이 `browser.open` 으로 연 탭인가(C13 — 다른 pane 이 연 탭은 아니다).
+    fn agentTab(ctx: ?*const anyopaque, tab: u64) bool {
+        const self: *const DialogCaller = @ptrCast(@alignCast(ctx.?));
+        const pane = self.pane orelse return false;
+        for (agent_tabs.items) |t| if (t.pane == pane and t.tab == tab) return true;
+        return false;
+    }
+
+    fn access(self: *const DialogCaller) session_mod.web_osr.DialogAccess {
+        return .{ .ctx = self, .granted = granted, .agent_tab = agentTab };
+    }
+};
+
+/// 가족에 동시에 떠 있을 수 있는 수(탭마다 `max_dialogs_per_surface`) — 넘치면 목록은 거기까지.
+const max_listed_dialogs = 32;
+
+fn answerDialogOp(server: *control_server_mod.ControlServer, async_id: u64, op: control_browser.BrowserOp) void {
+    defer server.cross_gpa.free(op.arg);
+    const caller: DialogCaller = .{ .surface_id = op.surface_id, .pane = if (op.pane_grant) |g| g.pane else null };
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    switch (op.method) {
+        .dialog => {
+            var buf: [max_listed_dialogs]session_mod.web_osr.DialogEntry = undefined;
+            writeDialogList(&aw.writer, &caller, session_mod.web_osr.dialogList(op.surface_id, &buf)) catch return completeTabStatus(async_id, .failed, "out of memory");
+            completeTabStatus(async_id, .success, aw.written());
+        },
+        .handle_dialog => {
+            const parsed = std.json.parseFromSlice(struct { accept: bool, text: ?[]const u8 = null, dialog: ?u64 = null }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
+            defer parsed.deinit();
+            const a = parsed.value;
+            const gpa = session_mod.web_osr.gpaRef() orelse return completeTabStatus(async_id, .failed, "the Chromium engine is not running");
+            const replied = session_mod.web_osr.agentReplyDialog(gpa, op.surface_id, a.dialog, a.accept, a.text orelse "", caller.access()) catch |e| return completeTabStatus(async_id, .failed, switch (e) {
+                error.NoDialog => if (a.dialog != null) dialog_unknown_reason else dialog_none_reason,
+                error.NotYours => dialog_not_yours_reason,
+                error.FileChooser => dialog_file_reason,
+                error.LeaveRefused => dialog_leave_refused_reason,
+            });
+            const ok = if (replied.continues)
+                std.json.Stringify.value(.{ .ok = true, .kind = replied.kind.wireName(), .continues = true }, .{}, &aw.writer)
+            else
+                std.json.Stringify.value(.{ .ok = true, .kind = replied.kind.wireName() }, .{}, &aw.writer);
+            ok catch return completeTabStatus(async_id, .failed, "out of memory");
+            completeTabStatus(async_id, .success, aw.written());
+        },
+        else => completeTabStatus(async_id, .failed, "not a dialog operation"),
+    }
+}
+
+/// `{"dialogs":[…]}` — 볼 수 있는 탭(grant)의 것은 전부, 나머지 가족 탭은 `{tab, kind}`(cap 연결에는 싣지 않는다).
+fn writeDialogList(w: *std.Io.Writer, caller: *const DialogCaller, list: []const session_mod.web_osr.DialogEntry) !void {
+    var s: std.json.Stringify = .{ .writer = w, .options = .{} };
+    try s.beginObject();
+    try s.objectField("dialogs");
+    try s.beginArray();
+    for (list) |e| {
+        const full = DialogCaller.granted(caller, e.tab);
+        if (!full and caller.pane == null) continue;
+        try s.beginObject();
+        if (full) {
+            try s.objectField("token");
+            try s.write(e.token);
+        }
+        try s.objectField("tab");
+        try s.write(e.tab);
+        try s.objectField("kind");
+        try s.write(e.kindName());
+        if (full) {
+            try s.objectField("message");
+            try s.write(e.message);
+            try s.objectField("origin");
+            try s.write(e.origin);
+            if (e.kind == .prompt) {
+                try s.objectField("default_text");
+                try s.write(e.default_text);
+            }
+            try s.objectField("cause");
+            try s.write(@tagName(e.cause));
+            try s.objectField("may_answer");
+            try s.write(maru.session.web_osr_dialog_cause.mayAnswer(e.situation(DialogCaller.agentTab(caller, e.tab))));
+        }
+        try s.endObject();
+    }
+    try s.endArray();
+    try s.endObject();
+}
+
+const dialog_none_reason = "no dialog is showing in this tab — a dialog in a tab it opened, or that opened it, is answered with its token (see maru browser dialog)";
+/// 번호가 없거나 grant 가 없는 탭의 번호 — 둘을 가르지 않는다(다른 탭의 대화상자를 떠보지 못하게).
+const dialog_unknown_reason = "no such dialog — it was answered already, or it is not in a tab this caller controls (see maru browser dialog)";
+const dialog_not_yours_reason = "the user is answering this dialog (it was not opened by the agent) — the user decides in that tab";
+const dialog_file_reason = "a file chooser can only be dismissed here (--dismiss) — choosing files is not supported";
+const dialog_leave_refused_reason = "the user has typed into this page (it may hold unsaved input) — only --dismiss (stay on the page) is allowed";
 
 // ── W9b①: Chromium 탭의 op 실행 — DevTools 호출 차례 ──────────────────────────────────────────────────────────────
 // 한 op = `web_cdp_ops.Op` 하나(호출 여러 번). 호출마다 `web_osr.devtoolsCall` 로 보내고, 답(`pump` 끝에서 온다)을 차례에
@@ -7888,6 +8017,8 @@ fn beginCdp(run: *CdpRun) void {
         };
     }
     run.started = true;
+    // W9c②: 페이지를 움직이는 op 이 시작했다 — 그 뒤의 대화상자는 에이전트 것(호출마다 `cdpAdvance` 도 적는다).
+    if (web_cdp_ops.acting(run.op.kind)) session_mod.web_osr.noteAgentInput(run.surface_id);
     run.op.now_ms = cdpNowMs();
     _ = active_browser_executions.markRunning(run.async_id);
     const step = run.op.start(allocator) catch return finishCdp(run, .failed, "out of memory");
@@ -7946,7 +8077,14 @@ comptime {
 /// pane 하나가 열어 둘 수 있는 에이전트 탭 수(사용자 결정 2026-10-12 — 숨긴 탭 하나 약 157 MB, 계획 공격 2 회차).
 const max_agent_tabs_per_pane: usize = 8;
 const agent_tab_close_wait_ms: i64 = 10_000;
+/// 물은 닫기에 페이지가 떠나기 확인으로 물었다. 에이전트의 닫기면 그 에이전트가 답할 수 있다(W9c② — 자기 이동의 떠나기 확인과 같다), 사람이
+/// 먼저 닫기를 고른 것이면 사람의 질문이다(`closeAskedByAgent` 거짓 — 사용자가 정한다).
 const agent_close_page_asks = "the page asks before leaving (unsaved input); the user decides in that tab";
+const agent_close_page_asks_answerable = "the page asks before leaving (unsaved input) — answer it with maru browser handle-dialog --accept if you may (the tab then closes), otherwise the user decides in that tab";
+
+fn agentClosePageAsks(tab: u64) []const u8 {
+    return if (session_mod.web_osr.closeAskedByAgent(tab)) agent_close_page_asks_answerable else agent_close_page_asks;
+}
 
 /// 에이전트 탭(그 pane 이 열었다 — `Term.agent_opener` 와 같은 짝). 상한을 세고, 에이전트가 그 탭에 보낸 누름이 새 탭 장을 주게 한다.
 /// 탭이 닫히면 `onAppSessionSurfaceClosed` 가 뺀다.
@@ -8101,7 +8239,7 @@ fn startAgentClose(refs: []const ControlSessionRef, async_id: u64, op: control_b
     if (!listed) return completeTabStatus(async_id, .failed, "this tab was not opened by this pane — only tabs opened with browser open can be closed");
     switch (session_mod.web_ops.agentCloseTab(app, op.surface_id, pane)) {
         .closed, .not_found => completeAgentClose(async_id, true, null),
-        .page_asks => completeAgentClose(async_id, false, agent_close_page_asks),
+        .page_asks => completeAgentClose(async_id, false, agentClosePageAsks(op.surface_id)),
         .not_owner => completeTabStatus(async_id, .failed, "this tab was not opened by this pane — only tabs opened with browser open can be closed"),
         .only_tab => completeTabStatus(async_id, .failed, "this is the only tab in its window — closing it would close the window, so it is left open"),
         .asking => tab_runs.append(allocator, .{ .async_id = async_id, .kind = .close, .tab = op.surface_id, .pane = pane, .deadline_ms = cdpNowMs() + agent_tab_close_wait_ms }) catch completeAgentClose(async_id, false, "out of memory"),
@@ -8124,6 +8262,9 @@ fn pollTabRuns(refs: []const ControlSessionRef) void {
 }
 
 fn pollAgentOpen(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
+    // W9c②: 에이전트가 연 탭이 첫 불러오기를 기다리는 동안은 에이전트가 움직이는 중이다 — 불러오며 뜬 대화상자는 에이전트 것. 탭 기록은
+    // 창이 처음 배치할 때 생긴다(여는 순간에는 없을 수 있다) — 기다리는 동안 매번 적는다.
+    session_mod.web_osr.noteAgentInput(r.tab);
     const st = session_mod.web_osr.pageState(r.tab) orelse {
         if (appSessionOwningSurface(refs, r.tab) == null) {
             completeTabStatus(r.async_id, .failed, "the tab was closed before it finished loading");
@@ -8145,7 +8286,7 @@ fn pollAgentClose(refs: []const ControlSessionRef, r: TabRun, now: i64) bool {
         return true;
     }
     switch (session_mod.web_osr.closeAskPhase(r.tab)) {
-        .asked => completeAgentClose(r.async_id, false, agent_close_page_asks),
+        .asked => completeAgentClose(r.async_id, false, agentClosePageAsks(r.tab)),
         // 창의 tick 이 꺼내 갔는데 탭이 남았다 — 머물렀거나(사람이 답했다), 묻는 사이 창의 유일한 탭이 돼 빈 탭으로 뒀다.
         .none, .stayed => completeAgentClose(r.async_id, false, "the tab was kept open"),
         .asking, .closed => {
@@ -8193,6 +8334,9 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                 cdp_last_method_len = @min(next.method.len, cdp_last_method_buf.len);
                 @memcpy(cdp_last_method_buf[0..cdp_last_method_len], next.method[0..cdp_last_method_len]);
             }
+            // W9c②: 움직이는 op 의 호출마다 에이전트 시각을 적는다(누름 뒤 떼기·놓기까지 — 그 사이 뜬 대화상자도 에이전트 것). kick·미룬
+            // 놓기·terminate 는 이 길로 오지 않는다(`web_osr.devtoolsCall` 이 직접).
+            if (web_cdp_ops.acting(run.op.kind)) session_mod.web_osr.noteAgentInput(run.surface_id);
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             grantAgentNewTabCredit(run.surface_id, next.method, next.params);
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
@@ -9482,6 +9626,10 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u8, 20), @as(u8, @intFromEnum(control_browser.BrowserMethod.reload)));
     try std.testing.expectEqual(@as(u8, 21), @as(u8, @intFromEnum(control_browser.BrowserMethod.hover)));
     try std.testing.expectEqual(@as(u8, 22), @as(u8, @intFromEnum(control_browser.BrowserMethod.press)));
+    try std.testing.expectEqual(@as(u8, 23), @as(u8, @intFromEnum(control_browser.BrowserMethod.open))); // W9b③
+    try std.testing.expectEqual(@as(u8, 24), @as(u8, @intFromEnum(control_browser.BrowserMethod.close)));
+    try std.testing.expectEqual(@as(u8, 25), @as(u8, @intFromEnum(control_browser.BrowserMethod.dialog))); // W9c②
+    try std.testing.expectEqual(@as(u8, 26), @as(u8, @intFromEnum(control_browser.BrowserMethod.handle_dialog)));
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
@@ -13087,4 +13235,278 @@ test "W9a③ 적대 리뷰 8 회차 회귀 T5: setLocalStorage 주소 읽기 답
     cdpAdvance(run, try run.op.feed(allocator, .{ .ok = "{\"targetInfo\":{\"targetId\":\"F\",\"url\":\"https://a.test/x\"}}" }));
     try std.testing.expectEqual(before, cdp_calls_attempted);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+}
+
+// ── W9c②: 에이전트가 JS 대화상자를 보고 답한다 ───────────────────────────────────────────────────────────────
+
+fn w9c2Hold(ta: std.mem.Allocator, ids: []const u64) !void {
+    for (ids) |id| {
+        try session_mod.web_osr.testHold(ta, id);
+        session_mod.web_osr.testRunning(id);
+    }
+}
+
+fn w9c2Forget(ta: std.mem.Allocator, ids: []const u64) void {
+    for (ids) |id| session_mod.web_osr.destroy(ta, id);
+    session_mod.web_osr.testForget(ta);
+    agent_tabs.clearAndFree(allocator);
+}
+
+/// op 하나를 붙잡고(deferRequest) `pushBrowserOp` 로 보낸다 — 앱의 진짜 경로(op 줄·확인 모달 뒤 재처리)가 모두 이 함수를 지난다.
+fn w9c2Push(pending: *control_server_mod.PendingRequest, op: control_browser.BrowserOp) !void {
+    const id = try control_server_storage.deferRequest(pending, std.math.maxInt(i128));
+    pushBrowserOp(&control_server_storage, id, op);
+}
+
+fn w9c2Grant(pane: u64, tab: u64) control_browser.GrantProvenance {
+    return .{ .pane = pane, .target = tab, .scope = .browser };
+}
+
+test "W9c②: dialog·handleDialog 는 DevTools op 줄을 거치지 않고 곧 답한다 — 목록에 번호·글·원인·may_answer, 답하면 사라지고 두 번째 답은 「없다」" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{71});
+    defer w9c2Forget(ta, &.{71});
+    session_mod.web_osr.noteAgentInput(71); // 에이전트가 방금 눌렀다
+    session_mod.web_osr.testApplyNow(ta, .{ .js_dialog = .{ .browser = 71, .request = 1, .kind = .prompt, .origin = "https://a.test", .message = "name?", .default_text = "d" } });
+    const token = session_mod.web_osr.testDialogToken(71).?;
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 71, .scope = .browser });
+    const before = cdp_calls_attempted;
+    var list: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.dialog\",\"params\":{\"id\":71}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&list, .{ .surface_id = 71, .method = .dialog, .arg = try allocator.dupe(u8, ""), .pane_grant = w9c2Grant(5, 71) });
+    {
+        const parsed = try w9b3Result(&list);
+        defer parsed.deinit();
+        const items = parsed.value.object.get("result").?.object.get("dialogs").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), items.len);
+        const d = items[0].object;
+        try std.testing.expectEqual(@as(i64, @intCast(token)), d.get("token").?.integer);
+        try std.testing.expectEqual(@as(i64, 71), d.get("tab").?.integer);
+        try std.testing.expectEqualStrings("prompt", d.get("kind").?.string);
+        try std.testing.expectEqualStrings("name?", d.get("message").?.string);
+        try std.testing.expectEqualStrings("https://a.test", d.get("origin").?.string);
+        try std.testing.expectEqualStrings("d", d.get("default_text").?.string);
+        try std.testing.expectEqualStrings("agent", d.get("cause").?.string);
+        try std.testing.expect(d.get("may_answer").?.bool);
+    }
+    var answer: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.handleDialog\",\"params\":{\"id\":71,\"accept\":true,\"text\":\"maru\"}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&answer, .{ .surface_id = 71, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true,\"text\":\"maru\"}"), .pane_grant = w9c2Grant(5, 71) });
+    {
+        const parsed = try w9b3Result(&answer);
+        defer parsed.deinit();
+        const r = parsed.value.object.get("result").?.object;
+        try std.testing.expect(r.get("ok").?.bool);
+        try std.testing.expectEqualStrings("prompt", r.get("kind").?.string);
+        try std.testing.expect(r.get("continues") == null);
+    }
+    try std.testing.expect(session_mod.web_osr.testDialogToken(71) == null);
+    try std.testing.expectEqual(before, cdp_calls_attempted); // DevTools 를 부르지 않았다
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    var again: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.handleDialog\",\"params\":{\"id\":71,\"accept\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&again, .{ .surface_id = 71, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true}"), .pane_grant = w9c2Grant(5, 71) });
+    try expectPendingErrorCode(&again, .internal_error);
+}
+
+test "W9c②: 가족 탭 — grant 가 없는 탭은 {tab, kind} 만, 그 번호로 답하면 모르는 번호와 같은 실패, grant 를 받으면 답한다; 사용자 것은 거절" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 73, 74 });
+    defer w9c2Forget(ta, &.{ 73, 74 });
+    session_mod.web_osr.testSetPopupFamily(74, 73); // 73 이 연 팝업
+    session_mod.web_osr.noteAgentInput(73);
+    session_mod.web_osr.testApplyNow(ta, .{ .js_dialog = .{ .browser = 74, .request = 1, .kind = .alert, .origin = "https://pop.test", .message = "secret" } });
+    const t74 = session_mod.web_osr.testDialogToken(74).?;
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 73, .scope = .browser });
+    var list: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.dialog\",\"params\":{\"id\":73}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&list, .{ .surface_id = 73, .method = .dialog, .arg = try allocator.dupe(u8, ""), .pane_grant = w9c2Grant(5, 73) });
+    {
+        const parsed = try w9b3Result(&list);
+        defer parsed.deinit();
+        const items = parsed.value.object.get("result").?.object.get("dialogs").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), items.len);
+        const d = items[0].object;
+        try std.testing.expectEqual(@as(i64, 74), d.get("tab").?.integer);
+        try std.testing.expectEqualStrings("alert", d.get("kind").?.string);
+        try std.testing.expectEqual(@as(usize, 2), d.count()); // 번호·글·출처는 싣지 않는다
+    }
+    const arg = try std.fmt.allocPrint(allocator, "{{\"accept\":true,\"dialog\":{d}}}", .{t74});
+    defer allocator.free(arg);
+    var foreign: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.handleDialog\",\"params\":{\"id\":73,\"accept\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&foreign, .{ .surface_id = 73, .method = .handle_dialog, .arg = try allocator.dupe(u8, arg), .pane_grant = w9c2Grant(5, 73) });
+    const foreign_msg = try pendingErrorMessage(&foreign);
+    defer allocator.free(foreign_msg);
+    const unknown_arg = try std.fmt.allocPrint(allocator, "{{\"accept\":true,\"dialog\":{d}}}", .{t74 + 1000});
+    defer allocator.free(unknown_arg);
+    var unknown: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.handleDialog\",\"params\":{\"id\":73,\"accept\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&unknown, .{ .surface_id = 73, .method = .handle_dialog, .arg = try allocator.dupe(u8, unknown_arg), .pane_grant = w9c2Grant(5, 73) });
+    const unknown_msg = try pendingErrorMessage(&unknown);
+    defer allocator.free(unknown_msg);
+    try std.testing.expectEqualStrings(unknown_msg, foreign_msg); // 같은 실패 — 다른 탭의 번호를 떠볼 수 없다
+    try std.testing.expect(session_mod.web_osr.testDialogToken(74) != null);
+    // grant 를 받은 뒤에는 번호로 답한다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 74, .scope = .browser });
+    var granted: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.handleDialog\",\"params\":{\"id\":73,\"accept\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&granted, .{ .surface_id = 73, .method = .handle_dialog, .arg = try allocator.dupe(u8, arg), .pane_grant = w9c2Grant(5, 73) });
+    {
+        const parsed = try w9b3Result(&granted);
+        parsed.deinit();
+    }
+    try std.testing.expect(session_mod.web_osr.testDialogToken(74) == null);
+    // 사용자가 띄운 것(에이전트가 손대지 않은 다른 탭 — 사용자의 탐색 단추 뒤 떠나기 확인) — 거절, 답은 가지 않는다.
+    try w9c2Hold(ta, &.{83});
+    defer session_mod.web_osr.destroy(ta, 83);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 83, .scope = .browser });
+    session_mod.web_osr.navAction(ta, 83, .reload);
+    session_mod.web_osr.testApplyNow(ta, .{ .js_dialog = .{ .browser = 83, .request = 2, .kind = .before_unload, .origin = "", .message = "" } });
+    var user: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.handleDialog\",\"params\":{\"id\":83,\"accept\":false}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&user, .{ .surface_id = 83, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":false}"), .pane_grant = w9c2Grant(5, 83) });
+    const user_msg = try pendingErrorMessage(&user);
+    defer allocator.free(user_msg);
+    try std.testing.expect(std.mem.indexOf(u8, user_msg, "the user is answering") != null);
+    try std.testing.expect(session_mod.web_osr.testDialogToken(83) != null);
+}
+
+test "W9c②: 누가 띄웠는지 모르는 대화상자는 이 pane 이 browser.open 으로 연 탭에서만 답한다(C13 — 오래된 grant 로 사람 탭에 답하지 않게)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{75});
+    defer w9c2Forget(ta, &.{75});
+    session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = 75, .request = 1, .kind = .alert, .origin = "", .message = "" } }); // 시각 0 — 누구 입력도 없다
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 75, .scope = .browser });
+    var human: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":75,\"accept\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&human, .{ .surface_id = 75, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true}"), .pane_grant = w9c2Grant(5, 75) });
+    try expectPendingErrorCode(&human, .internal_error);
+    // 다른 pane 이 연 탭이어도 아니다 — 묻는 pane 이 연 탭이어야 한다.
+    try agent_tabs.append(allocator, .{ .pane = 6, .tab = 75 });
+    var other: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.handleDialog\",\"params\":{\"id\":75,\"accept\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&other, .{ .surface_id = 75, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true}"), .pane_grant = w9c2Grant(5, 75) });
+    try expectPendingErrorCode(&other, .internal_error);
+    try agent_tabs.append(allocator, .{ .pane = 5, .tab = 75 });
+    var mine: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.handleDialog\",\"params\":{\"id\":75,\"accept\":true}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&mine, .{ .surface_id = 75, .method = .handle_dialog, .arg = try allocator.dupe(u8, "{\"accept\":true}"), .pane_grant = w9c2Grant(5, 75) });
+    {
+        const parsed = try w9b3Result(&mine);
+        parsed.deinit();
+    }
+}
+
+test "W9c②: 확인 모달 뒤 재처리(resolveGrantPrompt)도 곧 답한다 — 전에는 Chromium op 줄에서 「not supported」; cap 연결은 자기 탭의 것만 본다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 76, 77 });
+    defer w9c2Forget(ta, &.{ 76, 77 });
+    session_mod.web_osr.testSetPopupFamily(77, 76);
+    session_mod.web_osr.noteAgentInput(76);
+    session_mod.web_osr.testApplyNow(ta, .{ .js_dialog = .{ .browser = 76, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "ok?" } });
+    session_mod.web_osr.testApplyNow(ta, .{ .js_dialog = .{ .browser = 77, .request = 2, .kind = .alert, .origin = "https://a.test", .message = "pop" } });
+    // 재처리가 cap 으로 인가되게 한다(시험에는 foreground 출처가 없다 — 승인 뒤 pane 은 비워진다).
+    const saved_caps = control_cap_store;
+    control_cap_store = .{};
+    defer {
+        control_cap_store.deinit(allocator);
+        control_cap_store = saved_caps;
+    }
+    var nonce: control_capability.Nonce = undefined;
+    for (&nonce, 0..) |*b, i| b.* = @intCast((i * 13 + 7) & 0xff);
+    try control_cap_store.issueForFd(allocator, nonce, .{ .surface_id = 76, .generation = 0, .scope = .browser });
+    const nonces = [_]control_capability.Nonce{nonce};
+    const web: control_surface.WebMeta = .{ .url = "https://a.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true };
+    const fx = [_]control_surface.SurfaceDto{
+        .{ .surface_id = 76, .title = "a", .window = 1, .detail = .{ .web = web } },
+        .{ .surface_id = 77, .title = "pop", .window = 1, .detail = .{ .web = web } },
+    };
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &fx, .windows = &.{} };
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.dialog\",\"params\":{\"id\":76}}", .selector = null, .io = std.testing.io, .cap_nonces = &nonces };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    resolveGrantPrompt(&control_server_storage, .{ .async_id = id, .pane = 5, .target = 76, .scope = .browser }, true, snapshot, 0);
+    {
+        const parsed = try w9b3Result(&pending);
+        defer parsed.deinit();
+        const items = parsed.value.object.get("result").?.object.get("dialogs").?.array.items;
+        try std.testing.expectEqual(@as(usize, 1), items.len); // 팝업(77)의 것은 cap 연결에 보이지 않는다
+        try std.testing.expectEqual(@as(i64, 76), items[0].object.get("tab").?.integer);
+        try std.testing.expectEqualStrings("ok?", items[0].object.get("message").?.string);
+    }
+    var answer: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"browser.handleDialog\",\"params\":{\"id\":76,\"accept\":false}}", .selector = null, .io = std.testing.io, .cap_nonces = &nonces };
+    const answer_id = try control_server_storage.deferRequest(&answer, std.math.maxInt(i128));
+    resolveGrantPrompt(&control_server_storage, .{ .async_id = answer_id, .pane = 5, .target = 76, .scope = .browser }, true, snapshot, 0);
+    {
+        const parsed = try w9b3Result(&answer);
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings("confirm", parsed.value.object.get("result").?.object.get("kind").?.string);
+    }
+    try std.testing.expect(session_mod.web_osr.testDialogToken(76) == null);
+}
+
+test "W9c②: 움직이는 op(누름·키·이동·스크립트)만 에이전트 시각을 적는다 — 스냅숏·기다림·주소·스크린샷·저장소는 아니다, 연 탭은 첫 불러오기를 기다리는 동안 적는다" {
+    for (std.enums.values(web_cdp_ops.Kind)) |k| {
+        const want = switch (k) {
+            .click, .back, .forward, .reload, .type_text, .scroll, .hover, .press, .navigate, .execute_script => true,
+            .wait, .snapshot, .get_url, .screenshot, .get_local_storage, .set_local_storage, .remove_local_storage, .get_cookies, .set_cookie, .delete_cookie, .clear_storage => false,
+        };
+        try std.testing.expectEqual(want, web_cdp_ops.acting(k));
+    }
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 78, 79 });
+    defer w9c2Forget(ta, &.{ 78, 79 });
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null); // 보내려 하면 곧 끝난다 — 적었는지만 본다
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    const never = session_mod.web_osr.testAgentInputMs(78);
+    for ([_]struct { method: control_browser.BrowserMethod, arg: []const u8, tab: u64, stamps: bool }{
+        .{ .method = .snapshot, .arg = "{}", .tab = 78, .stamps = false },
+        .{ .method = .click, .arg = "{\"selector\":\"#b\"}", .tab = 79, .stamps = true },
+    }) |case| {
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.click\",\"params\":{\"id\":1}}", .selector = null, .io = std.testing.io };
+        const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+        try control_pane_grant_store.grant(.{ .pane = 5, .target = case.tab, .scope = .browser });
+        try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = case.tab, .method = case.method, .reserved_bytes = 0, .provenance = .{ .pane_grant = w9c2Grant(5, case.tab) } });
+        startCdpOp(id, case.tab, case.method, case.arg);
+        try std.testing.expectEqual(case.stamps, session_mod.web_osr.testAgentInputMs(case.tab) != never);
+        if (pending.response) |r| allocator.free(r);
+    }
+}
+
+/// 붙잡은 요청의 오류 메시지(소유 — 부른 쪽이 놓는다).
+fn pendingErrorMessage(pending: *control_server_mod.PendingRequest) ![]u8 {
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    var pm = try control_plane.parseMessage(std.testing.allocator, response);
+    defer pm.deinit();
+    const err = pm.message.response.err orelse return error.ExpectedError;
+    return allocator.dupe(u8, err.message);
+}
+
+test "W9c②: 에이전트가 물은 닫기의 떠나기 확인은 handle-dialog 로 답할 수 있다고 알린다 — 사람이 먼저 묻던 닫기면 사용자가 정한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 80, 81 });
+    defer w9c2Forget(ta, &.{ 80, 81 });
+    try std.testing.expect(session_mod.web_osr.askCloseByAgent(ta, 80, 0));
+    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(80), "maru browser handle-dialog") != null);
+    try std.testing.expect(session_mod.web_osr.askClose(ta, 81, 0)); // 사람이 먼저 닫기를 골랐다
+    try std.testing.expect(session_mod.web_osr.askCloseByAgent(ta, 81, 0));
+    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "handle-dialog") == null);
+    try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "the user decides") != null);
 }

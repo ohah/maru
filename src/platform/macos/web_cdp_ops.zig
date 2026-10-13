@@ -34,6 +34,9 @@ const finder_js = @embedFile("web_cdp_finder.js");
 pub const result_too_large = "the DevTools result was too large";
 
 /// 페이지가 JS 대화상자(alert·confirm·prompt·떠나기 확인)를 띄워 멈췄다 — 사용자가 그 탭에서 답해야 한다(W9b③ 적대 리뷰 1·2 회차).
+/// W9a 적대 리뷰 4 회차: 같은 팝업 가족의 **다른** 탭이 대화상자를 띄웠다 — 그 탭의 스크립트는 멈춘 것이 아니다(다른 렌더러에서 돈다).
+pub const family_dialog_reason = "a tab in the same popup family is showing a dialog (alert, confirm or prompt) — the script was stopped; answer the dialog in that tab, then run it again";
+
 pub const dialog_reason = "the page, or a tab it opened or that opened it, is showing a dialog (alert, confirm or leave-page question) — it must be answered in that tab first";
 
 /// 누르기 전 프레임(W9b③)의 인자 — **kick 과 바이트까지 같아야 한다**(`app_host_abi` 가 컴파일 때 본다). sidecar 는 kick 과 꼭 같은

@@ -79,6 +79,8 @@ pub const Op = struct {
     retries: u8 = 0,
     /// evaluate 를 보냈다(답을 기다린다) — 그 뒤의 철회에도 묶음은 놓는다.
     sent: bool = false,
+    /// 지금 호출 하나가 나가 답을 기다린다(부른 쪽이 보냈을 때 참, 답·못 보냄에 거짓 — 적대 리뷰 4 회차).
+    in_flight: bool = false,
     /// 부른 쪽이 시한에 terminate 를 보냈다 — 이제 오는 답은 결과가 아니다.
     terminated: bool = false,
     /// 놓은 뒤에 답할 것.
@@ -87,6 +89,8 @@ pub const Op = struct {
     delivery: Delivery = .plain,
     /// 객체 결과의 원격 객체(소유 — value 단계가 by-value 로 받는다).
     result_object: ?[]u8 = null,
+    /// 던진 값의 원격 객체(소유 — diagnose 를 다시 보낼 때).
+    diag_object: ?[]u8 = null,
 
     pub const Outcome = union(enum) {
         none,
@@ -103,6 +107,7 @@ pub const Op = struct {
         gpa.free(self.params);
         gpa.free(self.group);
         if (self.result_object) |o| gpa.free(o);
+        if (self.diag_object) |o| gpa.free(o);
         self.dropOutcome(gpa);
         self.* = undefined;
     }
@@ -135,7 +140,8 @@ pub const Op = struct {
     /// 페이지의 JS 가 돌 수 있는 호출(evaluate·by-value 의 getter)을 보내 놓고 답을 기다린다 — 시한·철회에 멈출 것이 있다.
     /// 던진 값의 이름·메시지를 읽는 diagnose 도 페이지의 getter 를 부른다(적대 리뷰 3 회차: `get name(){while(true){}}` 가 멈추지 않아 그 탭이 죽었다).
     pub fn running(self: *const Op) bool {
-        return self.sent and (self.stage == .evaluate or self.stage == .value or self.stage == .diagnose);
+        // 보낸 호출이 답을 기다릴 때만(다시 보내려 잠든 동안은 아니다 — 아무것도 돌지 않는데 terminate 를 보냈다, 적대 리뷰 4 회차).
+        return self.in_flight and (self.stage == .evaluate or self.stage == .value or self.stage == .diagnose);
     }
 
     /// 철회됐다 — evaluate 를 보냈으면 묶음을 놓은 뒤 끝낸다, 아니면 그냥 끝낸다(null).
@@ -154,6 +160,7 @@ pub const Op = struct {
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
         return switch (self.stage) {
             .value => self.valueStep(gpa),
+            .diagnose => self.diagnoseStep(gpa, null),
             .terminate => terminateStep(gpa),
             else => self.evaluateStep(gpa),
         };
@@ -191,8 +198,14 @@ pub const Op = struct {
         return .{ .call = .{ .method = "Runtime.releaseObjectGroup", .params = try std.fmt.allocPrint(gpa, "{{\"objectGroup\":\"{s}\"}}", .{self.group}) } };
     }
 
-    fn diagnoseStep(self: *Op, gpa: std.mem.Allocator, object_id: []const u8) !Step {
+    /// `new_object` 가 null 이면 앞서 둔 것으로 다시(자리가 없어 못 보냈다).
+    fn diagnoseStep(self: *Op, gpa: std.mem.Allocator, new_object: ?[]const u8) !Step {
         self.stage = .diagnose;
+        if (new_object) |o| {
+            if (self.diag_object) |old| gpa.free(old);
+            self.diag_object = try gpa.dupe(u8, o);
+        }
+        const object_id = self.diag_object.?;
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
@@ -238,6 +251,7 @@ pub const Op = struct {
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
+        self.in_flight = false; // 그 호출은 끝났다(답·못 보냄)
         switch (self.stage) {
             .release => return self.finish(gpa), // 놓기의 답은 무엇이든
             .terminate => {
@@ -263,6 +277,11 @@ pub const Op = struct {
                 if (self.terminated) {
                     self.setOutcome(gpa, .timeout);
                     return self.releaseStep(gpa);
+                }
+                // 자리가 없다 — 잠깐 뒤 다시(전에는 이름·메시지를 잃었다, 적대 리뷰 4 회차).
+                if (reply == .not_sent and std.mem.eql(u8, reply.not_sent, ops.busy_reason) and self.retries < max_busy_retries) {
+                    self.retries += 1;
+                    return .{ .sleep = busy_retry_ms };
                 }
                 const payload = switch (reply) {
                     .ok => |body| diagnosePayload(gpa, body),
@@ -291,6 +310,14 @@ pub const Op = struct {
                 self.sent = true;
                 if (self.terminated) {
                     self.setOutcome(gpa, .timeout);
+                } else if (std.mem.eql(u8, why, ops.family_dialog_reason)) {
+                    // 팝업 가족의 다른 탭의 대화상자 — 이 탭의 스크립트는 멈추지 않았다(다른 렌더러): 멈춘 뒤 놓는다(적대 리뷰 4 회차).
+                    self.setOutcome(gpa, .{ .failed = ops.family_dialog_reason });
+                    if (!self.terminated) {
+                        self.stage = .terminate;
+                        self.retries = 0;
+                        return terminateStep(gpa);
+                    }
                 } else if (std.mem.eql(u8, why, ops.dialog_reason)) {
                     // 스크립트가 대화상자를 띄웠다 — 호출은 사용자가 답할 때까지 막힌다(terminate 도 안 듣는다). 놓기는 web_osr 가 미룬다.
                     self.setOutcome(gpa, .{ .failed = paused_at_dialog });
@@ -355,7 +382,10 @@ pub const Op = struct {
                             self.setOutcome(gpa, .{ .script_error = try errorPayload(gpa, "serialization", "TypeError", not_strict_json, "") });
                             return self.releaseStep(gpa);
                         }
-                        if (an.exception_object_id) |oid| return self.diagnoseStep(gpa, oid);
+                        if (an.exception_object_id) |oid| {
+                            self.retries = 0;
+                            return self.diagnoseStep(gpa, oid);
+                        }
                         self.setOutcome(gpa, .{ .script_error = try primitiveExceptionPayload(gpa, an) });
                     },
                     .undefined_value => self.setOutcome(gpa, .{ .result = try gpa.dupe(u8, "null") }),
@@ -1090,6 +1120,7 @@ test "W9a 적대 리뷰 3 회차 재현: 던진 값을 읽는 단계(getter)도 
     const d = try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"o\"},\"exceptionDetails\":{\"exception\":{\"type\":\"object\",\"objectId\":\"o\"}}}" });
     defer gpa.free(d.call.params);
     try testing.expect(d.call.kick == .reserve);
+    op.in_flight = true; // 부른 쪽이 diagnose 를 보냈다
     try testing.expect(op.running());
     const t = try op.feed(gpa, .{ .timed_out = "x" });
     defer gpa.free(t.call.params);
@@ -1111,4 +1142,51 @@ test "W9a 적대 리뷰 3 회차 재현: 결과 객체를 쥔 뒤 by-value 호�
         defer gpa.free(fin.done.result);
         try testing.expectEqual(Status.failed, fin.done.status);
     }
+}
+
+test "W9a 적대 리뷰 4 회차 재현: 보내지 못한 호출을 다시 보내려 기다리는 동안은 돌고 있지 않다 — 시한에 terminate 를 표시하지 않는다" {
+    const gpa = testing.allocator;
+    const arg = try argJson("x", "[]");
+    defer gpa.free(arg);
+    var op = try Op.init(gpa, arg, 2);
+    defer op.deinit(gpa);
+    gpa.free(try evaluated(&op));
+    op.sent = true;
+    op.in_flight = true;
+    gpa.free((try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"o-1\"}}" })).call.params);
+    op.in_flight = true; // 부른 쪽이 value 호출을 보냈다
+    try testing.expect(op.running());
+    try testing.expect((try op.feed(gpa, .{ .not_sent = ops.busy_reason })) == .sleep);
+    try testing.expect(!op.running());
+}
+
+test "W9a 적대 리뷰 4 회차 재현: 던진 값을 읽는 호출도 자리가 없으면 잠깐 뒤 다시(전에는 이름·메시지를 잃었다)" {
+    const gpa = testing.allocator;
+    const arg = try argJson("x", "[]");
+    defer gpa.free(arg);
+    var op = try Op.init(gpa, arg, 2);
+    defer op.deinit(gpa);
+    gpa.free(try evaluated(&op));
+    gpa.free((try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"e\"},\"exceptionDetails\":{\"exception\":{\"type\":\"object\",\"objectId\":\"e\"}}}" })).call.params);
+    try testing.expectEqual(@as(u32, busy_retry_ms), (try op.feed(gpa, .{ .not_sent = ops.busy_reason })).sleep);
+    const again = try op.wake(gpa);
+    defer gpa.free(again.call.params);
+    try testing.expectEqualStrings("Runtime.callFunctionOn", again.call.method);
+    try testing.expect(std.mem.indexOf(u8, again.call.params, "\"objectId\":\"e\"") != null);
+}
+
+test "W9a 적대 리뷰 4 회차 재현: 팝업 가족의 다른 탭 대화상자로 끝난 evaluate 는 멈추지 않은 스크립트다 — terminate 한 뒤 놓는다" {
+    const gpa = testing.allocator;
+    const arg = try argJson("x", "[]");
+    defer gpa.free(arg);
+    var op = try Op.init(gpa, arg, 2);
+    defer op.deinit(gpa);
+    gpa.free(try evaluated(&op));
+    const t = try op.feed(gpa, .{ .failed = ops.family_dialog_reason });
+    defer gpa.free(t.call.params);
+    try testing.expectEqualStrings("Runtime.terminateExecution", t.call.method);
+    try expectRelease(try op.feed(gpa, .{ .ok = "{}" }));
+    const fin = try finishOp(&op);
+    defer gpa.free(fin.done.result);
+    try testing.expectEqualStrings(ops.family_dialog_reason, fin.done.result);
 }

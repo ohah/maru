@@ -25,7 +25,8 @@ const Status = ops.Status;
 
 /// DevTools 호출 인자 상한(sidecar 와 같다 — `app_host_abi` 가 컴파일 때 맞춘다). 식·args 를 JSON 으로 이스케이프한 뒤의 크기다.
 pub const max_params_bytes: usize = 64 * 1024;
-/// 결과 값의 깊이 상한(WebKit 의 `depthLimit` 과 같다 — 뿌리 컨테이너가 0).
+/// 결과의 컨테이너 중첩 상한 — 128 겹(CLI 의 결과 검사와 같다; WebKit 의 `depthLimit` 128 은 값의 깊이라 빈 컨테이너 하나만큼 더 받는다 — 적대 리뷰 2 회차:
+/// 129 겹은 지나가 CLI 가 「not strict JSON」 으로 거절했다).
 pub const max_result_depth: usize = 128;
 /// 오류 진단 payload 상한(WebKit 의 `maxScriptErrorPayloadBytes` 와 같다 — `app_host_abi` 가 컴파일 때 맞춘다).
 pub const max_error_payload_bytes: usize = 24 * 1024;
@@ -36,7 +37,7 @@ pub const busy_retry_ms: u32 = 100;
 pub const max_busy_retries: u8 = 45;
 
 pub const script_too_large = "the script is too large for a Chromium tab (64 KiB after JSON escaping, args included)";
-pub const paused_at_dialog = "the script is paused at a dialog (alert, confirm or prompt) in that tab; it continues after the user answers — do not run it again";
+pub const paused_at_dialog = "the script is paused at a dialog (alert, confirm or prompt) in that tab or a tab in its popup family; it continues after the user answers — do not run it again";
 pub const not_strict_json = "result is not strict JSON";
 pub const navigation_name = "Maru.Browser.Navigation(1)";
 pub const navigation_message = "the page navigated or closed before the script finished";
@@ -48,7 +49,11 @@ const group_prefix = "maru-exec-";
 /// 던진 값의 이름·메시지·stack 을 읽는 함수(WebKit `diagnostic()` 과 같은 규칙 — getter 가 던져도 멈추지 않는다).
 const diagnostic_fn = "function(){var n='<unavailable>',m='<unavailable>',s='';try{n=this&&this.name!==undefined?this.name:'Error'}catch(_){}try{m=this&&this.message!==undefined?this.message:this}catch(_){}try{s=this&&this.stack!==undefined?this.stack:''}catch(_){}function t(v){try{return typeof v==='string'?v:String(v)}catch(_){return '<unavailable>'}}return[t(n),t(m),t(s)]}";
 
-const Stage = enum { evaluate, diagnose, release };
+/// evaluate → (객체 결과면) value → release, 던진 값이면 diagnose → release, 시한이면 terminate → release.
+const Stage = enum { evaluate, value, diagnose, terminate, release };
+
+/// by-value 로 받는 함수(객체 결과 — evaluate 는 by-value 가 아니다: 던진 값을 V8 이 값으로 못 옮기면 호출 전체가 실패했다, 적대 리뷰 2 회차).
+const self_fn = "function(){return this}";
 
 /// 끝에서 어떻게 답하는가 — `app_host_abi.finishCdp` 가 본다.
 pub const Delivery = enum {
@@ -80,6 +85,8 @@ pub const Op = struct {
     outcome: Outcome = .none,
     /// 끝의 전달 방식(`done` 을 돌려줄 때 정한다).
     delivery: Delivery = .plain,
+    /// 객체 결과의 원격 객체(소유 — value 단계가 by-value 로 받는다).
+    result_object: ?[]u8 = null,
 
     pub const Outcome = union(enum) {
         none,
@@ -95,6 +102,7 @@ pub const Op = struct {
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         gpa.free(self.params);
         gpa.free(self.group);
+        if (self.result_object) |o| gpa.free(o);
         self.dropOutcome(gpa);
         self.* = undefined;
     }
@@ -119,8 +127,15 @@ pub const Op = struct {
         return .{ .id = id, .params = params, .group = group, .max_result_bytes = parsed.value.max_result_bytes };
     }
 
+    /// 철회돼도 보낼 호출 — 멈추기(terminate)·놓기.
     pub fn committed(self: *const Op) bool {
-        return self.stage == .release;
+        return self.stage == .release or self.stage == .terminate;
+    }
+
+    /// 페이지의 JS 가 돌 수 있는 호출(evaluate·by-value 의 getter)을 보내 놓고 답을 기다린다 — 시한·철회에 멈출 것이 있다.
+    /// 던진 값의 이름·메시지를 읽는 diagnose 도 페이지의 getter 를 부른다(적대 리뷰 3 회차: `get name(){while(true){}}` 가 멈추지 않아 그 탭이 죽었다).
+    pub fn running(self: *const Op) bool {
+        return self.sent and (self.stage == .evaluate or self.stage == .value or self.stage == .diagnose);
     }
 
     /// 철회됐다 — evaluate 를 보냈으면 묶음을 놓은 뒤 끝낸다, 아니면 그냥 끝낸다(null).
@@ -135,9 +150,34 @@ pub const Op = struct {
         return self.evaluateStep(gpa);
     }
 
-    /// 자리가 없어 못 보낸 evaluate 를 다시.
+    /// 자리가 없어 못 보낸 호출을 다시.
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
-        return self.evaluateStep(gpa);
+        return switch (self.stage) {
+            .value => self.valueStep(gpa),
+            .terminate => terminateStep(gpa),
+            else => self.evaluateStep(gpa),
+        };
+    }
+
+    fn valueStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .value;
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        s.beginObject() catch return error.OutOfMemory;
+        s.objectField("objectId") catch return error.OutOfMemory;
+        s.write(self.result_object.?) catch return error.OutOfMemory;
+        s.objectField("functionDeclaration") catch return error.OutOfMemory;
+        s.write(self_fn) catch return error.OutOfMemory;
+        s.objectField("returnByValue") catch return error.OutOfMemory;
+        s.write(true) catch return error.OutOfMemory;
+        s.endObject() catch return error.OutOfMemory;
+        // by-value 의 getter 도 페이지 JS 다 — terminate 몫 자리를 남긴다.
+        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice(), .kick = .reserve } };
+    }
+
+    fn terminateStep(gpa: std.mem.Allocator) !Step {
+        return .{ .call = .{ .method = "Runtime.terminateExecution", .params = try gpa.alloc(u8, 0) } };
     }
 
     fn evaluateStep(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -166,7 +206,8 @@ pub const Op = struct {
         s.objectField("objectGroup") catch return error.OutOfMemory;
         s.write(self.group) catch return error.OutOfMemory;
         s.endObject() catch return error.OutOfMemory;
-        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice() } };
+        // getter 가 돈다 — terminate 몫 자리를 남긴다(적대 리뷰 3 회차).
+        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice(), .kick = .reserve } };
     }
 
     fn finish(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -199,7 +240,30 @@ pub const Op = struct {
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
         switch (self.stage) {
             .release => return self.finish(gpa), // 놓기의 답은 무엇이든
+            .terminate => {
+                // 자리가 없으면 잠깐 뒤 다시(시한이 지난 호출이 sidecar 가 놓을 때까지 자리를 쥔다), 그 밖의 답은 무엇이든 놓기로.
+                if (reply == .not_sent and std.mem.eql(u8, reply.not_sent, ops.busy_reason) and self.retries < max_busy_retries) {
+                    self.retries += 1;
+                    return .{ .sleep = busy_retry_ms };
+                }
+                self.terminated = true;
+                return self.releaseStep(gpa);
+            },
             .diagnose => {
+                // getter 가 멈추지 않았다 — 놓기 전에 멈춘다(evaluate 와 같다, 적대 리뷰 3 회차).
+                if (reply == .timed_out) {
+                    self.setOutcome(gpa, .timeout);
+                    if (!self.terminated) {
+                        self.stage = .terminate;
+                        self.retries = 0;
+                        return terminateStep(gpa);
+                    }
+                    return self.releaseStep(gpa);
+                }
+                if (self.terminated) {
+                    self.setOutcome(gpa, .timeout);
+                    return self.releaseStep(gpa);
+                }
                 const payload = switch (reply) {
                     .ok => |body| diagnosePayload(gpa, body),
                     else => errorPayload(gpa, "execution", "<unavailable>", "<unavailable>", ""),
@@ -207,7 +271,7 @@ pub const Op = struct {
                 self.setOutcome(gpa, .{ .script_error = payload });
                 return self.releaseStep(gpa);
             },
-            .evaluate => {},
+            .evaluate, .value => {},
         }
         switch (reply) {
             .not_sent => |why| {
@@ -215,6 +279,11 @@ pub const Op = struct {
                 if (std.mem.eql(u8, why, ops.busy_reason) and self.retries < max_busy_retries) {
                     self.retries += 1;
                     return .{ .sleep = busy_retry_ms };
+                }
+                // 결과 객체를 이미 쥐었다(value 단계) — 묶음을 놓고 끝낸다(적대 리뷰 3 회차: 이동까지 남았다).
+                if (self.stage == .value) {
+                    self.setOutcome(gpa, .{ .failed = if (std.mem.eql(u8, why, ops.dialog_reason)) paused_at_dialog else why });
+                    return self.releaseStep(gpa);
                 }
                 return done(gpa, .failed, why);
             },
@@ -235,6 +304,13 @@ pub const Op = struct {
             .timed_out => {
                 self.sent = true;
                 self.setOutcome(gpa, .timeout);
+                // 페이지의 JS 가 아직 돈다(DevTools 호출 시한 = 요청 시한 — 같은 tick 에 이것이 먼저 오면 부른 쪽의 멈추기는 보지 못한다):
+                // 놓기 전에 멈춘다 — 놓기가 terminate 몫 자리를 쥐어 루프가 영영 돌았다(적대 리뷰 2 회차 실측).
+                if (!self.terminated) {
+                    self.stage = .terminate;
+                    self.retries = 0;
+                    return terminateStep(gpa);
+                }
                 return self.releaseStep(gpa);
             },
             .cdp_error => |e| {
@@ -266,8 +342,19 @@ pub const Op = struct {
                     },
                 };
                 defer an.deinit(gpa);
+                if (self.stage == .evaluate) if (an.object_id) |oid| if (an.kind != .exception) {
+                    // 객체 결과 — by-value 를 따로 받는다(값으로 못 옮기면 그때 serialization 오류).
+                    if (self.result_object) |o| gpa.free(o);
+                    self.result_object = try gpa.dupe(u8, oid);
+                    self.retries = 0;
+                    return self.valueStep(gpa);
+                };
                 switch (an.kind) {
                     .exception => {
+                        if (self.stage == .value) {
+                            self.setOutcome(gpa, .{ .script_error = try errorPayload(gpa, "serialization", "TypeError", not_strict_json, "") });
+                            return self.releaseStep(gpa);
+                        }
                         if (an.exception_object_id) |oid| return self.diagnoseStep(gpa, oid);
                         self.setOutcome(gpa, .{ .script_error = try primitiveExceptionPayload(gpa, an) });
                     },
@@ -312,8 +399,10 @@ fn buildParams(gpa: std.mem.Allocator, script: []const u8, args: []const std.jso
     s.write(expr.written()) catch return error.OutOfMemory;
     s.objectField("awaitPromise") catch return error.OutOfMemory;
     s.write(true) catch return error.OutOfMemory;
+    // by-value 로 받지 않는다 — 던진 값까지 by-value 라 V8 이 못 옮기는 Error(순환·window·BigInt 를 쥔 것)는 호출 전체가 실패해 이름·메시지를
+    // 잃었다(적대 리뷰 2 회차). 원시 값은 그대로 오고, 객체는 value 단계가 받는다.
     s.objectField("returnByValue") catch return error.OutOfMemory;
-    s.write(true) catch return error.OutOfMemory;
+    s.write(false) catch return error.OutOfMemory;
     // 엄격 CSP 에서 안쪽 eval 을 WebKit 처럼 막는다(기본값은 허락했다 — 계획 공격 1 회차).
     s.objectField("allowUnsafeEvalBlockedByCSP") catch return error.OutOfMemory;
     s.write(false) catch return error.OutOfMemory;
@@ -370,12 +459,15 @@ const Analysis = struct {
     kind: enum { value, undefined_value, unserializable, exception },
     /// `result.value` 의 바이트(body 를 빌린다 — V8 의 압축 JSON).
     value: []const u8 = "",
+    /// 결과가 객체면 그 objectId(소유 — evaluate 는 by-value 가 아니다).
+    object_id: ?[]u8 = null,
     /// 던진 값이 객체면 그 objectId(소유).
     exception_object_id: ?[]u8 = null,
     /// 던진 값이 원시 값이면 그 글(소유 — String(값)).
     exception_text: ?[]u8 = null,
 
     fn deinit(self: *Analysis, gpa: std.mem.Allocator) void {
+        if (self.object_id) |s| gpa.free(s);
         if (self.exception_object_id) |s| gpa.free(s);
         if (self.exception_text) |s| gpa.free(s);
     }
@@ -391,6 +483,8 @@ fn analyze(gpa: std.mem.Allocator, body: []const u8) !Analysis {
     var type_undefined = false;
     var unserializable = false;
     var exception_range: ?[]const u8 = null;
+    var object_id: ?[]u8 = null;
+    errdefer if (object_id) |o| gpa.free(o);
     while (true) {
         const tok = try sc.nextAlloc(gpa, .alloc_if_needed);
         switch (tok) {
@@ -414,6 +508,15 @@ fn analyze(gpa: std.mem.Allocator, body: []const u8) !Analysis {
                                         .string, .allocated_string => |t| type_undefined = std.mem.eql(u8, t, "undefined"),
                                         else => return error.Unexpected,
                                     }
+                                } else if (std.mem.eql(u8, rk, "objectId")) {
+                                    const ot = try sc.nextAlloc(gpa, .alloc_always);
+                                    switch (ot) {
+                                        .allocated_string => |o| {
+                                            if (object_id) |old| gpa.free(old);
+                                            object_id = o;
+                                        },
+                                        else => return error.Unexpected,
+                                    }
                                 } else if (std.mem.eql(u8, rk, "unserializableValue")) {
                                     unserializable = true;
                                     try sc.skipValue();
@@ -429,7 +532,15 @@ fn analyze(gpa: std.mem.Allocator, body: []const u8) !Analysis {
             else => return error.Unexpected,
         }
     }
-    if (exception_range) |ex| return exceptionAnalysis(gpa, ex);
+    if (exception_range) |ex| {
+        if (object_id) |o| gpa.free(o);
+        object_id = null;
+        return exceptionAnalysis(gpa, ex);
+    }
+    if (object_id) |o| {
+        object_id = null;
+        return .{ .kind = .value, .object_id = o };
+    }
     if (unserializable) return .{ .kind = .unserializable };
     if (type_undefined) return .{ .kind = .undefined_value };
     const v = value_range orelse return error.Unexpected;
@@ -554,13 +665,13 @@ pub fn rewriteValue(gpa: std.mem.Allocator, value: []const u8) ![]u8 {
         const tok = try sc.nextAlloc(gpa, .alloc_if_needed);
         switch (tok) {
             .object_begin => {
-                if (sc.stackHeight() > max_result_depth + 1) return error.TooDeep;
+                if (sc.stackHeight() > max_result_depth) return error.TooDeep;
                 s.beginObject() catch return error.OutOfMemory;
                 try objects.append(gpa, true);
                 key_next = true;
             },
             .array_begin => {
-                if (sc.stackHeight() > max_result_depth + 1) return error.TooDeep;
+                if (sc.stackHeight() > max_result_depth) return error.TooDeep;
                 s.beginArray() catch return error.OutOfMemory;
                 try objects.append(gpa, false);
                 key_next = false;
@@ -660,7 +771,7 @@ test "W9a② 인자: 식은 async 화살표에 싸이고 args 는 리터럴(__pr
         const parsed = try std.json.parseFromSlice(struct { expression: []const u8, awaitPromise: bool, returnByValue: bool, allowUnsafeEvalBlockedByCSP: bool, objectGroup: []const u8 }, gpa, p, .{});
         defer parsed.deinit();
         try testing.expectEqualStrings("(async (args) => (\n1 + args[0].a\n))([{\"a\":2,[\"__proto__\"]:{\"x\":1}},\"s\\\"q\",null,true,1.5])", parsed.value.expression);
-        try testing.expect(parsed.value.awaitPromise and parsed.value.returnByValue and !parsed.value.allowUnsafeEvalBlockedByCSP);
+        try testing.expect(parsed.value.awaitPromise and !parsed.value.returnByValue and !parsed.value.allowUnsafeEvalBlockedByCSP);
         try testing.expectEqualStrings("maru-exec-7", parsed.value.objectGroup);
         try testing.expectEqual(@as(usize, 1048576), op.max_result_bytes);
     }
@@ -736,12 +847,12 @@ test "W9a② 결과가 값이 아니다: unserializableValue·V8 의 by-value �
         try testing.expectEqual(Delivery.script_error, op.delivery);
         try testing.expectEqualStrings("{\"kind\":\"serialization\",\"name\":\"TypeError\",\"message\":\"result is not strict JSON\",\"stack\":\"\",\"diagnostics_truncated\":false}", fin.done.result);
     }
-    // 129 단(뿌리 0 … 128)은 된다.
+    // 128 겹은 된다.
     var ok_deep: std.ArrayList(u8) = .empty;
     defer ok_deep.deinit(gpa);
     try ok_deep.appendSlice(gpa, "{\"result\":{\"type\":\"object\",\"value\":");
-    for (0..129) |_| try ok_deep.appendSlice(gpa, "[");
-    for (0..129) |_| try ok_deep.appendSlice(gpa, "]");
+    for (0..128) |_| try ok_deep.appendSlice(gpa, "[");
+    for (0..128) |_| try ok_deep.appendSlice(gpa, "]");
     try ok_deep.appendSlice(gpa, "}}");
     var op = try Op.init(gpa, arg, 1);
     defer op.deinit(gpa);
@@ -750,7 +861,7 @@ test "W9a② 결과가 값이 아니다: unserializableValue·V8 의 by-value �
     const fin = try finishOp(&op);
     defer gpa.free(fin.done.result);
     try testing.expectEqual(Delivery.result, op.delivery);
-    try testing.expectEqual(@as(usize, 258), fin.done.result.len);
+    try testing.expectEqual(@as(usize, 256), fin.done.result.len);
 }
 
 test "W9a② 던진 값: 객체면 두 번째 호출로 이름·메시지·stack 을 읽고(getter 가 던져도), 원시 값이면 WebKit 처럼 name Error·message 는 그 값" {
@@ -841,7 +952,10 @@ test "W9a② 끝의 다른 길: 이동·시한·terminate 뒤의 답·대화상�
         var op = try Op.init(gpa, arg, 1);
         defer op.deinit(gpa);
         gpa.free(try evaluated(&op));
-        try expectRelease(try op.feed(gpa, .{ .timed_out = "x" }));
+        const t = try op.feed(gpa, .{ .timed_out = "x" }); // 멈춘 뒤 놓는다(적대 리뷰 2 회차)
+        gpa.free(t.call.params);
+        try testing.expectEqualStrings("Runtime.terminateExecution", t.call.method);
+        try expectRelease(try op.feed(gpa, .{ .ok = "{}" }));
         const fin = try finishOp(&op);
         defer gpa.free(fin.done.result);
         try testing.expectEqual(Status.timeout, fin.done.status);
@@ -911,5 +1025,90 @@ test "W9a② 끝의 다른 길: 이동·시한·terminate 뒤의 답·대화상�
         const fin = try finishOp(&op);
         defer gpa.free(fin.done.result);
         try testing.expectEqualStrings("the request was cancelled", fin.done.result);
+    }
+}
+
+test "W9a 적대 리뷰 2 회차 재현: evaluate 가 시한으로 끝나면 놓기 전에 terminate 를 보낸다(놓기가 terminate 몫 자리를 쥐어 루프가 영영 돌았다)" {
+    const gpa = testing.allocator;
+    const arg = try argJson("(()=>{while(true){}})()", "[]");
+    defer gpa.free(arg);
+    var op = try Op.init(gpa, arg, 1);
+    defer op.deinit(gpa);
+    gpa.free(try evaluated(&op));
+    op.sent = true;
+    const t = try op.feed(gpa, .{ .timed_out = "x" });
+    defer gpa.free(t.call.params);
+    try testing.expectEqualStrings("Runtime.terminateExecution", t.call.method);
+    try testing.expect(op.committed()); // 철회돼도 보낸다
+    try expectRelease(try op.feed(gpa, .{ .ok = "{}" }));
+    const fin = try finishOp(&op);
+    defer gpa.free(fin.done.result);
+    try testing.expectEqual(Status.timeout, fin.done.status);
+}
+
+test "W9a 적대 리뷰 2 회차 재현: 객체 결과는 by-value 를 따로 받는다 — 던진 값은 V8 이 값으로 못 옮겨도 이름·메시지를 읽는다" {
+    const gpa = testing.allocator;
+    const arg = try argJson("x", "[]");
+    defer gpa.free(arg);
+    var op = try Op.init(gpa, arg, 4);
+    defer op.deinit(gpa);
+    const p = try evaluated(&op);
+    defer gpa.free(p);
+    // evaluate 는 by-value 가 아니다 — 던진 값(순환·window 를 쥔 Error)도 objectId 로 온다.
+    try testing.expect(std.mem.indexOf(u8, p, "\"returnByValue\":false") != null);
+    const v = try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"className\":\"Object\",\"objectId\":\"o-1\"}}" });
+    defer gpa.free(v.call.params);
+    try testing.expectEqualStrings("Runtime.callFunctionOn", v.call.method);
+    try testing.expect(std.mem.indexOf(u8, v.call.params, "\"returnByValue\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, v.call.params, "\"objectId\":\"o-1\"") != null);
+    try expectRelease(try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"value\":{\"a\":1}}}" }));
+    const fin = try finishOp(&op);
+    defer gpa.free(fin.done.result);
+    try testing.expectEqualStrings("{\"a\":1}", fin.done.result);
+}
+
+test "W9a 적대 리뷰 2 회차 재현: 값이 129 단 깊이에 있으면 serialization 오류(CLI 는 128 을 넘는 결과를 받지 않는다)" {
+    const gpa = testing.allocator;
+    var deep: std.ArrayList(u8) = .empty;
+    defer deep.deinit(gpa);
+    for (0..129) |_| try deep.appendSlice(gpa, "[");
+    try deep.appendSlice(gpa, "1");
+    for (0..129) |_| try deep.appendSlice(gpa, "]");
+    try testing.expectError(error.TooDeep, rewriteValue(gpa, deep.items));
+    const ok = try rewriteValue(gpa, deep.items[1 .. deep.items.len - 1]);
+    defer gpa.free(ok);
+}
+
+test "W9a 적대 리뷰 3 회차 재현: 던진 값을 읽는 단계(getter)도 페이지 JS 다 — 시한이면 terminate, terminate 몫 자리를 남긴다" {
+    const gpa = testing.allocator;
+    const arg = try argJson("x", "[]");
+    defer gpa.free(arg);
+    var op = try Op.init(gpa, arg, 2);
+    defer op.deinit(gpa);
+    gpa.free(try evaluated(&op));
+    op.sent = true;
+    const d = try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"o\"},\"exceptionDetails\":{\"exception\":{\"type\":\"object\",\"objectId\":\"o\"}}}" });
+    defer gpa.free(d.call.params);
+    try testing.expect(d.call.kick == .reserve);
+    try testing.expect(op.running());
+    const t = try op.feed(gpa, .{ .timed_out = "x" });
+    defer gpa.free(t.call.params);
+    try testing.expectEqualStrings("Runtime.terminateExecution", t.call.method);
+}
+
+test "W9a 적대 리뷰 3 회차 재현: 결과 객체를 쥔 뒤 by-value 호출을 보내지 못해도 묶음은 놓는다" {
+    const gpa = testing.allocator;
+    const arg = try argJson("x", "[]");
+    defer gpa.free(arg);
+    for ([_][]const u8{ ops.dialog_reason, "DevTools request failed" }) |why| {
+        var op = try Op.init(gpa, arg, 2);
+        defer op.deinit(gpa);
+        gpa.free(try evaluated(&op));
+        op.sent = true;
+        gpa.free((try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"o-1\"}}" })).call.params);
+        try expectRelease(try op.feed(gpa, .{ .not_sent = why }));
+        const fin = try finishOp(&op);
+        defer gpa.free(fin.done.result);
+        try testing.expectEqual(Status.failed, fin.done.status);
     }
 }

@@ -1166,3 +1166,25 @@ DevTools 자리 둘이 비어 있을 때만(`Kick.reserve` — 둘째는 termina
 스모크의 exec 은 `-1` 결과를 요구한다. CLI 는 -32006 에 진단 한 줄(`script error (<kind>): <name>: <message>`).
 남긴 한계: WebKit 의 `navigation` 메시지(Foundation 글)와 다르다, `flushDeferredReleases` 가 exec 중인 탭의 둘째 자리를 한 tick 쥘 수 있다
 (terminate 는 다음 tick 에 다시 보낸다).
+
+**W9a 적대 리뷰**(구현 뒤 다섯 회차 — 1 회차는 W9a① 만, 2 회차부터 ①+②):
+- **1 회차**(실제 앱·CEF 탐침·변이 21(걸림 14 — 생존 넷은 시험을 더했다: 「불러오는 중」 전의 「아님」, 만든 직후 about:blank 의 문서, 묻는 닫기
+  중 navigate, 기다리는 동안의 철회)): 상 — 좁은 rect 에 큰 scale(1×400, 8000)은 폭만 접혀 8000×3,200,000 px 를 청해 **Chromium 엔진 전체가 Skia
+  FATAL 로 죽었다**(열린 Chromium 탭이 모두 다시 떴다 — CLI 한 줄) → 높이로도 접고 출력 픽셀 수(기기 배율 포함)를 64 M 으로. 중 — wire 가 거절하는
+  주소(제어 문자·32 KiB 넘음)는 보내기가 조용히 실패해 25 초 뒤 ok → 보내기 전에 invalid_params. 하 — 브라우저가 아직 없는 탭의 navigate 는 곧 실패,
+  getUrl 은 대화상자 중에도 답한다. 남긴 것: 401 인증 취소는 새 문서 없이 끝나 getUrl 이 앞 주소다(sidecar 가 알리지 않는다), PDF 는 끝난 뒤 불러오기가
+  한 번 더 온다.
+- **2 회차**(실제 앱 다섯 재현): 상 — **시한이 지난 exec 을 멈추지 않았다**(`while(true){}` 하나로 그 탭의 렌더러가 100 % 로 계속 돌고 뒤 요청이 모두
+  시한): DevTools 호출 시한(보낸 때부터 30 초)이 요청 시한과 같은 tick 에 먼저 와 op 이 놓기로 넘어갔고, 멈추기는 evaluate 단계에서만 보냈으며, 놓기가
+  terminate 몫 자리를 쥐었다 → 호출 시한이면 놓기 전에 terminate(철회돼도 보낸다), 그 뒤 놓기. 중 — evaluate 가 by-value 라 V8 이 값으로 못 옮기는
+  던진 값(자기를 가리키는 Error·window·BigInt 를 쥔 것)은 호출 전체가 실패해 이름·메시지를 잃었다 → evaluate 는 by-value 가 아니고, 객체 결과만
+  `callFunctionOn(function(){return this})` 로 by-value 를 따로 받는다. 중(WebKit 과 같은 L2 결함) — L2 가 진단의 `\n`·`\t` 를 6 바이트로 세어 상한까지
+  자른 여러 줄 메시지가 고정 폴백(「executeScript failed」)으로 바뀌었다 → 2 바이트. 하 — 129 겹 결과가 지나가 CLI 가 「not strict JSON」 으로
+  거절 → 128 겹. 하 — Chromium 이 읽지 못하는 주소(포트 99999·`%zz`)를 말없이 버려 25 초 뒤 ok → URI 로 읽고, 보낸 뒤 3 초 안에 불러오기가 시작하지
+  않으면 실패. 하 — 1 px 아래가 될 스크린샷은 Chromium 이 clip 을 버려 화면 전체가 왔다 → invalid_params. 대화상자 문구에 팝업 가족을 더했다.
+- **3 회차**(실제 앱 둘·단위 셋 재현): 상 — 던진 값의 이름·메시지를 읽는 호출(diagnose)도 페이지의 getter 를 부르는데 멈출 대상으로 보지 않아,
+  `throw {get name(){while(true){}}}` 가 시한 뒤에도 돌아 그 탭의 뒤 op 이 모두 시한이었다 → diagnose 도 terminate 대상, 호출 시한이면 놓기 전에 멈추고,
+  terminate 몫 자리를 남긴다. 하 — 결과 객체를 쥔 뒤 by-value 호출을 보내지 못하면(대화상자·자리 없음) 묶음을 놓지 않았다 → 놓고 끝낸다. 하 — 빈
+  포트(`host:/`)는 Chromium 이 고쳐 읽는데 거절했다 → 그것만 빼고 읽는다. 문서 — `toJSON` 을 부르지 않아 Date·DOMRect·URL 이 `{}`(WebKit 도 —
+  리뷰는 WebKit 이 다르다고 짐작했지만 WebKit 직렬화기도 자기 속성만 센다)를 계약 표에. 남긴 한계: 앞 문서를 불러오는 중에 보낸 이동은 「시작」 을 가를 수
+  없어 Chromium 이 버린 주소도 3 초 실패가 아니라 시한 뒤 `loaded:false`, 일곱 탭이 같은 순간 시한이면 terminate 재시도(5 초)가 전체 자리 8 에 밀릴 수 있다.

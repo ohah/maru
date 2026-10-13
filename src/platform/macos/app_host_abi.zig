@@ -7746,7 +7746,7 @@ fn wakeCdpSleepers() void {
                 finishCdp(run, .failed, "the request was cancelled");
                 continue;
             }
-            p.nav = if (session_mod.web_osr.agentNavState(run.surface_id)) |st| .{ .done = st.done, .loaded = st.loaded, .before_unload = st.before_unload } else null;
+            p.nav = if (session_mod.web_osr.agentNavState(run.surface_id)) |st| .{ .done = st.done, .loaded = st.loaded, .before_unload = st.before_unload, .started = st.saw_loading or st.saw_started } else null;
         };
         const step = run.op.wake(allocator) catch {
             finishCdp(run, .failed, "out of memory");
@@ -8119,7 +8119,7 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
             // W9a②: evaluate 가 실제로 나갔다 — 시한·철회에 terminate 를 보낼 수 있다(보내지 않은 것에 보내면 페이지의 다음 스크립트를 죽인다).
             if (sent) |_| {
-                if (run.op.exec) |*e| if (e.stage == .evaluate) {
+                if (run.op.exec) |*e| if (e.stage == .evaluate or e.stage == .value) {
                     e.sent = true;
                 };
             } else |_| {}
@@ -8213,7 +8213,7 @@ fn cdpStopExecution(async_id: u64) void {
         if (r.async_id == async_id) break r;
     } else return;
     const e = &(run.op.exec orelse return);
-    if (e.stage != .evaluate or !e.sent or e.terminated) return;
+    if (!e.running() or e.terminated) return;
     e.terminated = true;
     sendCdpTerminate(async_id, cdpNowMs() + cdp_terminate_retry_ms);
 }
@@ -8224,7 +8224,7 @@ fn sendCdpTerminate(async_id: u64, until_ms: i64) void {
         if (r.async_id == async_id) break r;
     } else return;
     const e = &(run.op.exec orelse return);
-    if (e.stage != .evaluate or !e.sent) return;
+    if (!e.running()) return;
     if (session_mod.web_osr.jsDialogShowing(run.surface_id)) return;
     const gpa = session_mod.web_osr.gpaRef() orelse return;
     session_mod.web_osr.devtoolsFireAndForget(gpa, run.surface_id, "Runtime.terminateExecution", "") catch |err| switch (err) {
@@ -12251,18 +12251,37 @@ test "W9a: navigate 는 이동을 보내고 첫 불러오기를 기다려 loaded
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
     try std.testing.expect(!session_mod.web_osr.agentNavState(71).?.active); // 지켜보기를 놓았다
 
+    // ①b 기다리는 동안 grant 가 철회됐다 — 더 기다리지 않고 끝낸다(지켜보기도 놓는다, 변이 생존 M16).
+    var p1b: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p1b, nav_req, 71, .navigate), 71, .navigate, "https://a.test/b");
+    try std.testing.expect(session_mod.web_osr.agentNavState(71).?.active);
+    control_pane_grant_store.clearAll();
+    w9aWakeNow();
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    try std.testing.expect(!session_mod.web_osr.agentNavState(71).?.active);
+    try expectPendingErrorCode(&p1b, .unauthorized);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 71, .scope = .browser });
+
     // ② 주소 — javascript: 는 invalid_params(보내지 않는다).
     var p2: control_server_mod.PendingRequest = undefined;
     startCdpOp(try w9aRequest(&p2, nav_req, 71, .navigate), 71, .navigate, "javascript:alert(1)");
     try expectPendingErrorCode(&p2, .invalid_params);
-    try std.testing.expectEqualStrings("https://a.test/", session_mod.web_osr.testLastUrl(71).?);
+    try std.testing.expectEqualStrings("https://a.test/b", session_mod.web_osr.testLastUrl(71).?);
+
+    // ②b 묻는 닫기 중(에이전트가 닫으려 해 페이지에 물었다) — 이동은 그 질문을 덮는다: 보내지 않고 곧 실패.
+    try std.testing.expect(session_mod.web_osr.askCloseByAgent(ta, 71, 0));
+    var p2b: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p2b, nav_req, 71, .navigate), 71, .navigate, "https://c.test/");
+    try expectPendingErrorCode(&p2b, .internal_error);
+    try std.testing.expectEqualStrings("https://a.test/b", session_mod.web_osr.testLastUrl(71).?);
+    _ = session_mod.web_osr.takeCloseAsk(71, 1_000_000); // 시한 — 질문을 거둔다
 
     // ③ 떠나기 확인이 떠 있다 — sidecar 가 이동 전에 그것을 「취소」 로 닫는다: 보내지 않고 곧 실패.
     session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = 71, .request = 1, .kind = .alert, .origin = "", .message = "" } });
     var p3: control_server_mod.PendingRequest = undefined;
     startCdpOp(try w9aRequest(&p3, nav_req, 71, .navigate), 71, .navigate, "https://b.test/");
     try expectPendingErrorCode(&p3, .internal_error);
-    try std.testing.expectEqualStrings("https://a.test/", session_mod.web_osr.testLastUrl(71).?);
+    try std.testing.expectEqualStrings("https://a.test/b", session_mod.web_osr.testLastUrl(71).?);
 }
 
 test "W9a: getUrl 은 maru 가 아는 주소, 한 번도 보이지 않은 탭은 실패 — 같은 탭의 앞선 op 뒤에 답한다" {

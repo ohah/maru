@@ -88,15 +88,31 @@ pub const ImageEmission = union(enum) {
 /// 규칙에서 빠진다, 계약 §5).
 pub const BatchKind = enum { snapshot, delta };
 
+/// 이미지 하나에 대한 sink 의 답(계약 §4.4·§5).
+pub const Reservation = union(enum) {
+    /// 세그먼트를 준비했다 — 이 id 로 `image_ref` 를 낸다.
+    segment: u64,
+    /// 지금은 자리가 없다(원장 상한, 큰 한 장 우선권, 이미지 채널 없음, 같은 이미지의 미반환 세그먼트) — client 가 이전 판을 가졌으면
+    /// 그 판을 유지하고, 처음 보내는 이미지는 placement 를 뺀다. 용량 사건이 다시 깨운다.
+    deferred,
+    /// 이 연결로는 보낼 수 없다(host 전체 상한보다 큰 한 장) — 이전 판이 있어도 placement 를 뺀다. 깨우지 않는다.
+    untransmittable,
+};
+
 /// 연결의 세그먼트 원장과 채널 상태를 쥔 쪽(host 연결)이 주는 sink. 투영은 OS 도 원장도 모른다 — 「이 이미지에 자리가 있나」만 묻는다.
+///
+/// 수명: 준비한 세그먼트는 배치가 큐에 승인될 때 채널로 보내고, 배치가 거절·롤백되면 취소한다. **투영 자체가 어떤 오류로 끝나도**
+/// (상한 초과·메모리 부족 등 — 배치가 생기지 않는다) 이 투영이 청한 것을 전부 취소하는 것은 caller 의 의무다 — 남기면 그 연결의 원장이
+/// 차서 이미지가 영구히 미뤄진다(IC5b 가 투영 범위를 열고 닫는다).
 pub const SegmentSink = struct {
     ctx: *anyopaque,
-    /// 픽셀이 있는 이미지 하나의 세그먼트를 청한다. 준비되면 그 `segment_id`, 미루면 null — 원장 상한, 큰 한 장 우선권, 이미지 채널
-    /// 없음, 같은 (연결, stream, image_id) 의 미반환 세그먼트(스냅샷은 이 규칙에서 빠진다). 준비한 세그먼트는 배치가 큐에 승인될 때
-    /// 채널로 보내고, 배치가 거절·롤백되면 취소한다 — 그 수명은 sink 가 진다(투영은 id 만 적는다).
-    reserveFn: *const fn (ctx: *anyopaque, image: terminal.KittyImageView, kind: BatchKind) error{OutOfMemory}!?u64,
-    /// 이 배치에 실을 `image_seg_hwm` — 이 배치가 준비한 것까지 그 연결에서 마지막으로 준비·발급한 세그먼트 id(0 = 싣지 않는다).
-    /// 앱은 그 stream 의 배치를 적용한 뒤 이 값 이하의 남은 세그먼트를 반환한다(계약 §5·§6).
+    /// 픽셀이 있는 이미지 하나의 세그먼트를 청한다(스냅샷은 「이미지당 하나」 규칙에서 빠진다 — `kind` 로 가른다). `image.pixels` 는 이
+    /// 호출 동안만 유효하다(core lock 아래 빌린 것) — 세그먼트로 복사하려면 이 안에서 한다.
+    reserveFn: *const fn (ctx: *anyopaque, image: terminal.KittyImageView, kind: BatchKind) error{OutOfMemory}!Reservation,
+    /// 이 배치에 실을 `image_seg_hwm`(0 = 싣지 않는다). 앱은 그 stream 의 배치를 적용한 뒤 이 값 이하의 남은 세그먼트를 반환한다
+    /// (계약 §5·§6). 계약의 뜻은 「승인될 때 마지막으로 발급한 id」다 — 준비했다 롤백된 id 는 앱이 본 적이 없어 포함해도 무해하지만,
+    /// **같은 stream 의 아직 승인되지 않은 다른 배치**가 준비한 id 를 넘으면 앱이 그 배치의 세그먼트를 먼저 반환해 버린다. sink 는 그런
+    /// id 를 넘지 않게 답한다(stream 마다 준비 상태 배치가 하나라면 저절로 지켜진다 — IC5b).
     hwmFn: *const fn (ctx: *anyopaque) u64,
 };
 
@@ -458,14 +474,21 @@ fn appendVisibleImages(
             .segments => |sink| {
                 // 레코드는 픽셀 크기와 무관하게 작다 — 주 스트림 예산은 레코드 하나만큼만 본다. 픽셀은 이미지 채널로 간다.
                 if (stream.items.len +| image_ref_record_bytes > ceiling) continue; // ② 예산 밖
-                const byte_len = std.math.cast(u32, img.pixels.len) orelse continue; // 레코드가 담을 수 없는 크기(「전송 불가」)
+                // 레코드가 담을 수 없는 크기는 「전송 불가」다(placement 를 뺀다). kitty 저장소 상한(320 MB)이 u32 아래라 지금은 닿지
+                // 않는다 — 상한이 바뀌어도 조용히 잘리지 않게 둔다.
+                const byte_len = std.math.cast(u32, img.pixels.len) orelse continue;
                 // 픽셀이 0 B 인 이미지는 세그먼트가 없다(메타만) — 자리를 청하지 않는다.
-                const segment_id: u64 = if (byte_len == 0) 0 else (try sink.reserveFn(sink.ctx, img, kind)) orelse {
+                const segment_id: u64 = if (byte_len == 0) 0 else switch (try sink.reserveFn(sink.ctx, img, kind)) {
+                    .segment => |id| id,
                     // **미룸**(계약 §5). client 가 이전 판을 가졌으면 그 판으로 그린다 — placement 를 남기고 base 에는 **이전**
                     // generation 을 적어, 다음 투영이 이 이미지를 다시 후보로 본다. 처음 보내는 이미지는 그릴 것이 없으므로 placement 를
                     // 뺀다(앱 조립기는 이미지 없는 placement 를 malformed 로 거부한다).
-                    if (sent_generation) |previous| try drawable.add(allocator, img.image_id, previous);
-                    continue;
+                    .deferred => {
+                        if (sent_generation) |previous| try drawable.add(allocator, img.image_id, previous);
+                        continue;
+                    },
+                    // **전송 불가**(계약 §4.4) — 이전 판이 있어도 placement 를 뺀다(그 판을 계속 그리면 영영 갱신되지 않는 화면이 남는다).
+                    .untransmittable => continue,
                 };
                 const rec = try screen_stream.encodeImageRef(allocator, .{ .kind = .image_ref, .generation = generation }, .{
                     .image_id = img.image_id,
@@ -485,8 +508,12 @@ fn appendVisibleImages(
     }
 }
 
-/// `image_ref` 레코드 하나의 상한(프레임 길이 + 헤더 + 고정 몸체) — 주 스트림 예산 검사용 어림이다.
+/// `image_ref` 레코드 하나의 상한(프레임 길이 + 헤더 + 고정 몸체) — 주 스트림 예산 검사용 어림이다. 실제는 길이 4 + 헤더 + 몸체
+/// 33(u32·u64·u32·u32·u8·u64·u32)이다.
 const image_ref_record_bytes: usize = 128;
+comptime {
+    std.debug.assert(image_ref_record_bytes >= 4 + screen_stream.record_header_size + 33);
+}
 
 /// 세그먼트로 나르는 배치에 `image_seg_hwm` 을 싣는다(계약 §5 — 배치마다). 아직 아무것도 준비·발급하지 않았으면(0) 싣지 않는다.
 fn appendSegmentHighWaterMark(
@@ -541,6 +568,7 @@ fn appendImageBlobRecords(
 /// image_id/generation만 읽어 dedup) client로 가지 않으며, resync는 projectSnapshot으로 core에서 재투영한다. 그러므로 base엔
 /// **픽셀을 싣지 않는다**(pixel_len=0) — 매 ~20ms tick마다 수 MiB 픽셀을 재인코딩하던 낭비를 없앤다. 픽셀 전달은 delta(변경분)와
 /// projectSnapshot(attach/resync)이 맡는다.
+/// `client_generation` 이 지금 판과 다를 때(미룬 이미지) 너비·높이는 지금 판의 값이다 — base 파서는 id 와 generation 만 읽는다.
 fn appendImageBaseMeta(allocator: std.mem.Allocator, stream: *std.ArrayListUnmanaged(u8), generation: u64, img: terminal.KittyImageView, client_generation: u64) ProjectError!void {
     const rec = try screen_stream.encodeImageBlob(allocator, .{ .kind = .image_blob, .generation = generation }, .{
         .image_id = img.image_id,
@@ -2294,7 +2322,8 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
         defer core.deinit();
         core.setCellMetrics(10, 20);
         // 이미지 채널 축은 세그먼트로 내고 앱은 그 세그먼트로 해석한다 — 나머지 축은 지금의 `image_blob` 경로다.
-        var sink = FakeSegmentSink{ .allocator = allocator };
+        // hwm 은 sink 의 답이다 — 마지막 id 와 다른 값을 답하게 해 투영이 그것을 그대로 싣는지 가른다.
+        var sink = FakeSegmentSink{ .allocator = allocator, .hwm_answer = if (axis == .segment_hwm) 77 else null };
         defer sink.deinit();
         const segmented = axis == .image_segment_pixels or axis == .segment_hwm;
         const resolver: screen_assembler.ImageRefResolver = if (segmented) sink.resolver() else .unnegotiated;
@@ -2369,7 +2398,7 @@ test "screen delta: attach 뒤 움직인 모든 축이 delta 로 client 에 닿�
             .image_pixels => try std.testing.expect(asm_.imageById(9) != null),
             .image_segment_pixels => try std.testing.expectEqualSlices(u8, &raw, asm_.imageById(9).?.pixels),
             // hwm 은 조립기가 아니라 앱 attachment 가 읽는다(적용 뒤 그 stream 의 남은 세그먼트 정리) — 값이 그 연결의 마지막 id 인가.
-            .segment_hwm => try std.testing.expectEqual(@as(?u64, sink.next_id), try segmentHighWaterMark(res.delta)),
+            .segment_hwm => try std.testing.expectEqual(@as(?u64, 77), try segmentHighWaterMark(res.delta)),
             .placement => try std.testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len),
             .virtual_placement => try std.testing.expectEqual(@as(usize, 1), asm_.imageVirtualPlacements().len),
             .prompt => {
@@ -2899,6 +2928,10 @@ test "TBPROBE 정합 ④: 한 번 보낸 이미지는 안 보이게 돼도 다�
 const FakeSegmentSink = struct {
     allocator: std.mem.Allocator,
     accept: bool = true,
+    /// 자리를 주지 않을 때 「전송 불가」로 답한다(아니면 「미룸」).
+    untransmittable: bool = false,
+    /// `hwmFn` 이 `next_id` 대신 답할 값 — hwm 이 sink 에서 오는지 가른다.
+    hwm_answer: ?u64 = null,
     next_id: u64 = 0,
     calls: usize = 0,
     last_kind: ?BatchKind = null,
@@ -2919,21 +2952,21 @@ const FakeSegmentSink = struct {
         return .{ .generation = generation, .sequence = sequence, .images = .{ .segments = self.sink() } };
     }
 
-    fn reserve(ctx: *anyopaque, image: terminal.KittyImageView, kind: BatchKind) error{OutOfMemory}!?u64 {
+    fn reserve(ctx: *anyopaque, image: terminal.KittyImageView, kind: BatchKind) error{OutOfMemory}!Reservation {
         const self: *FakeSegmentSink = @ptrCast(@alignCast(ctx));
         self.calls += 1;
         self.last_kind = kind;
-        if (!self.accept) return null;
+        if (!self.accept) return if (self.untransmittable) .untransmittable else .deferred;
         const pixels = try self.allocator.dupe(u8, image.pixels);
         errdefer self.allocator.free(pixels);
         self.next_id += 1;
         try self.reserved.append(self.allocator, .{ .id = self.next_id, .image_id = image.image_id, .generation = image.generation, .pixels = pixels });
-        return self.next_id;
+        return .{ .segment = self.next_id };
     }
 
     fn hwm(ctx: *anyopaque) u64 {
         const self: *FakeSegmentSink = @ptrCast(@alignCast(ctx));
-        return self.next_id;
+        return self.hwm_answer orelse self.next_id;
     }
 
     fn resolver(self: *FakeSegmentSink) screen_assembler.ImageRefResolver {
@@ -3094,9 +3127,20 @@ test "screen image segments: a new frame the sink defers keeps the client's prev
     try std.testing.expectEqual(@as(usize, 0), deferred.delta.len);
     // base 는 client 가 가진 **이전** 판을 적는다.
     try std.testing.expectEqual(@as(?u64, first.generation), try baseImageGeneration(deferred.snapshot, 1));
-    // 빈 delta 는 보내지 않는다 — 앱은 이전 판과 그 placement 를 그대로 그린다.
-    try std.testing.expectEqual(first.generation, asm_.imageById(1).?.generation);
-    try std.testing.expectEqual(@as(usize, 1), asm_.imagePlacements().len);
+
+    // 「전송 불가」는 미룸과 다르다 — 이전 판이 있어도 placement 를 빼고(full-set 교체), base 도 그 이미지를 적지 않는다.
+    sink.untransmittable = true;
+    var dropped = try computeDelta(allocator, base, &core, sink.options(1, 1));
+    defer dropped.deinit(allocator);
+    try std.testing.expect((try findImageRef(dropped.delta, 1)) == null);
+    try std.testing.expect(try deltaHasKind(dropped.delta, .image_place));
+    try std.testing.expect((try baseImageGeneration(dropped.snapshot, 1)) == null);
+    var dropped_asm = screen_assembler.ScreenAssembler.init(allocator);
+    defer dropped_asm.deinit();
+    try dropped_asm.applySnapshot(base, sink.resolver());
+    try dropped_asm.applyDelta(dropped.delta, sink.resolver());
+    try std.testing.expectEqual(@as(usize, 0), dropped_asm.imagePlacements().len);
+    sink.untransmittable = false;
 
     // 자리가 생기면 새 판이 나간다 — base 가 이전 판을 적었으므로 다시 후보가 된다. 앞 delta 는 나가지 않았으므로 순번은 1 이다.
     sink.accept = true;
@@ -3108,7 +3152,7 @@ test "screen image segments: a new frame the sink defers keeps the client's prev
     try std.testing.expectEqual(next.generation, asm_.imageById(1).?.generation);
 }
 
-test "screen image segments: an unchanged screen yields an empty delta without an hwm, and the blob path never asks the sink" {
+test "screen image segments: an unchanged screen yields an empty delta without an hwm, and the default blob path carries no image_ref or hwm" {
     const allocator = std.testing.allocator;
     var core = try terminal.TerminalCore.init(allocator, .{ .cols = 40, .rows = 8 });
     defer core.deinit();
@@ -3124,7 +3168,7 @@ test "screen image segments: an unchanged screen yields an empty delta without a
     try std.testing.expectEqual(@as(usize, 1), sink.calls);
     try std.testing.expectEqual(@as(usize, 0), idle.delta.len);
 
-    // 기본(`blob`)은 sink 와 무관하다 — 픽셀을 `image_blob` 으로 싣고 `image_ref`·hwm 은 없다.
+    // 기본(`blob`)은 픽셀을 `image_blob` 으로 싣고 `image_ref`·hwm 은 없다.
     const blob = try projectSnapshot(allocator, &core, .{ .generation = 1 });
     defer allocator.free(blob);
     try std.testing.expect(try deltaHasKind(blob, .image_blob));

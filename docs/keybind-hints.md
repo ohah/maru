@@ -91,7 +91,7 @@ flowchart TD
     E --> F["다음 frame: platform이 keyHintGroups(resolver)로 rows 빌드"]
     F --> G["host.collectKeyHintsDraws(rows) — 모달/IME 중이면 억제"]
     G --> H["shortcut_hints.view: 활성 pane 우상단 멀티행 박스 + 카테고리/chord/제목 ops"]
-    H --> I["tui 백엔드 lowering → metal_frame.replace 합성"]
+    H --> I["오버레이 셀 lowering → metal_frame.replace 합성"]
     CFG["config keyhint.enabled/delay/modifier (스키마)"] -.->|"resolve → platform"| B
     CAT["command_catalog: chordForAction + formatChord"] -.-> F
 ```
@@ -225,13 +225,13 @@ modifier·특수키 글리프는 Apple/macOS 표준 유니코드 기호를 쓴�
 - **글리프 중앙 정렬 + 좌우/상하 패딩** — 한 글자도 정사각에 가깝게(min-width).
 - (선택) **pressed 3D 효과** — 눌리면 가라앉음. 정적 힌트엔 불필요(상호작용 없음).
 
-### 3.6.3 maru 매핑 — 토큰-주도(tui|rich 분기 없음)
+### 3.6.3 maru 매핑 — 토큰-주도(룩 분기 없음)
 
 키캡 1개 = **셀 배경 `fill`(keycap_bg role) + 중앙 글리프 text** op 쌍이다. `fill`이라 글리프가 그 셀 배경 **위에** 그려져 키 배경색이 보인다(palette 선택행과 같은 합성). 컴포넌트는 `if(rich)`를 **절대 안 쓰고**([chrome-strategy.md §5.1]) `keycap_bg` role만 읽는다 — 테마=토큰셋 교체.
 
 - **per-key 분리**: `command_catalog`에 `chordKeycaps(chord, …)`를 추가해 chord를 **키별 글리프 배열**(`["⌘","T"]`)로 편다(formatChord의 단일 문자열 `⌘T`와 평행 — 키캡은 키마다 한 칸 필요). chrome `Row.binding`은 이 배열을 받는다.
 - **렌더**(`shortcut_hints.view`): 키캡마다 **셀 배경 `fill`**(`role` = `keycap_bg`) + 글리프 text(`surface_fg`, 셀 정렬)를 emit하고, 캡 사이 1칸 간격을 둔다.
-- **색(`keycap_bg` = 패널 대비, 명암 기준)**: `tokens.keycapBg(surface_bg)`가 패널이 **어두우면 밝게·밝으면 어둡게**(Rec.601 루미넌스)로 칠해 **tui·rich·light·dark 모두 또렷**하다. 단순 `lighten`은 light 테마에서 near-white로 saturate돼 밝은 패널에 묻히고 순백 패널에선 `surface_bg`와 같아져 사라진다(리뷰 #1) — 그래서 명암 분기로 대비를 보장한다. tui·rich가 같은 `keycap_bg`를 쓴다(별도 override 없음). 토큰 테스트가 light·dark 양쪽에서 `keycap_bg ≠ surface_bg` + 올바른 방향을 고정한다(회귀 가드).
+- **색(`keycap_bg` = 패널 대비, 명암 기준)**: `tokens.keycapBg(surface_bg)`가 패널이 **어두우면 밝게·밝으면 어둡게**(Rec.601 루미넌스)로 칠해 **light·dark 모두 또렷**하다. 단순 `lighten`은 light 테마에서 near-white로 saturate돼 밝은 패널에 묻히고 순백 패널에선 `surface_bg`와 같아져 사라진다(리뷰 #1) — 그래서 명암 분기로 대비를 보장한다. `Tokens.rich`는 기반 토큰 `Tokens.base`가 깐 `keycap_bg`를 그대로 물려받는다(별도 override 없음). 토큰 테스트가 light·dark 양쪽에서 `keycap_bg ≠ surface_bg` + 올바른 방향을 고정한다(회귀 가드).
 - **베이스/결정(KH-5 — 셀-그리드 제약)**: 둥근 GPU quad 키캡은 **불가능**하다 — rich quad는 ① layer-1(셀 아래)이면 글리프 셀의 불투명 배경에 가려지고 ② layer-3(셀 위)이면 글리프를 덮는다(`rasterizeOverlayCells`의 modal_bg_quad 분기). 그래서 셀-그리드 오버레이의 per-key 키캡은 **평탄 색 셀**(`fill`)이 한계다 — 웹 보편 규약(§3.6.2)의 둥근+테두리+depth는 셀 텍스트 모델 밖이라 채택 못 한다. 또렷함은 **색 대비**(keycapBg)로 낸다(테두리·둥근 모서리 없음). 키 분리는 캡 사이 1칸 간격이 보조한다. 진짜 둥근 키캡은 chrome 텍스트가 GPU 글리프 위에 합성되는 별도 경로가 필요(후속).
 
 **베이스/결정**: 기호=Apple HIG 표준(공개 명세 — 이미 준수), 키캡 외형=W3C `<kbd>`·웹 디자인 시스템 보편 규약(둥근+테두리+depth)을 **형태만** 따와 maru 렌더러 프리미티브(rich quad+shadow 토큰)로 독립 구현한다([document-basis-and-decision]·clean-room). 특정 라이브러리 코드/CSS를 옮기지 않는다.
@@ -308,7 +308,7 @@ pub const KeyHintConfig = struct {
 | **KH-2** ✅ | `command_catalog`에 `HintCategory`/`categoryOf`/`keyHintRows` + **`chordKeycaps`**(chord→키별 글리프 배열, `keyGlyph` 단일 출처, §3.6.3) + `app_session.buildChromeOverlayPrep`가 `key_hints.visible`일 때 rows 빌드해 collect 호출(아직 항상 false) | 내용 단위 ✅ |
 | **KH-3** ✅ | `KeyHintConfig`(enabled/delay/modifier) 스키마-주도(namespace `keyhint`, GUI 섹션 `.input`) + configuration.md 키 + full-config 파싱 테스트. platform 노출(ABI 게터)은 KH-4가 소비처와 함께 추가 | round-trip·범위 ✅ |
 | **KH-4** ✅ | macOS `flagsChanged` 홀드 상태머신(`handleModifierFlags`) + `NSTimer .common` + ABI v87 `set_key_hints`/`key_hints_config` + 렌더 게이트(`anyOverlayOpen or key_hints.visible`) + `keyDown`/`windowDidResignKey`서 취소 + `MARU_KEY_HINTS_FORCE`(Zig self-verify). delay/enabled/modifier를 config에서 읽음 | `zig build macos-app-build` green + `MARU_SCREENSHOT` HUD 캡처 ✅. **홀드 타이밍 실기 수동 확인은 사용자** |
-| **KH-5(키캡 대비)** ✅ | 키캡을 `quad`→`fill`(셀 배경)로 바꾸고 `keycap_bg` role = `keycapBg(surface_bg)`(패널이 어두우면 밝게·밝으면 어둡게, 명암 기준) — tui·rich·light·dark 모두 또렷. 회귀 가드(keycap_bg≠surface_bg) 테스트. 둥근 GPU 키캡은 셀-그리드 제약으로 불가(§3.6.3 결정) | 토큰 대비 테스트 + `MARU_SCREENSHOT` rich 캡처 ✅ |
+| **KH-5(키캡 대비)** ✅ | 키캡을 `quad`→`fill`(셀 배경)로 바꾸고 `keycap_bg` role = `keycapBg(surface_bg)`(패널이 어두우면 밝게·밝으면 어둡게, 명암 기준) — light·dark 모두 또렷. 회귀 가드(keycap_bg≠surface_bg) 테스트. 둥근 GPU 키캡은 셀-그리드 제약으로 불가(§3.6.3 결정) | 토큰 대비 테스트 + `MARU_SCREENSHOT` rich 캡처 ✅ |
 | **KH-6 재설계(B)** ✅ | **박스 HUD → 요소별 배지**(§3.0). `shortcut_hints`를 `Badge{rect,chord}` 모델로 재작성, `rasterizeOverlayCells`에 `transparent_default` 추가, `app_session.buildKeyHintBadges`(사이드바 카드 `⌘1~9`·새 워크스페이스 `⌘⇧T`·활성 pane `⌘D`). 요소 레이아웃 단일 출처 `sidebar.slotTop`/`headerIconCol`(인라인 중복 제거 — 리뷰 지적). KH-2 박스용 코드(`keyHintRows`/`chordKeycaps`/`categoryOf`) 데드코드 제거 | 컴포넌트 단위 + `MARU_SCREENSHOT` dark·light 배지 캡처 ✅ |
 | **KH-6 A** ✅ | 활성 pane 탭바 `+`(`⌘T` new_term)·활성 탭(`⌘W` close_focused의 workspace provenance) 배지 — `paneBarForLeaf`+`barMetrics`(render·hit-test와 같은 메트릭, plusZoneStart·segOf)로 위치 단일 출처 | `MARU_SCREENSHOT` 캡처 ✅(탭 ⌘W·탭바+ ⌘T) |
 | **KH-6 A 잔여(보류)** | pane 이동/포커스(`⌘]`·`⌘⌥←→↑↓`) — split일 때만 의미·대상 모호라 보류 | — |

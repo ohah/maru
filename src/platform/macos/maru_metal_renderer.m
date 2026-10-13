@@ -1212,7 +1212,7 @@ bool maru_metal_renderer_draw(
     uint32_t sidebar_bg,
     const MaruAppHostMetalCell *sidebar_cells,
     size_t sidebar_cell_count,
-    /* C4b: chrome rich GPU quad 프리미티브(둥근 사각형). NULL/0이면 안 그림(tui 테마). 셀 패스 아래
+    /* C4b: chrome rich GPU quad 프리미티브(둥근 사각형). NULL/0이면 안 그림(그릴 quad가 없는 프레임). 셀 패스 아래
        (배경 레이어)에 별개 파이프라인으로 그린다. */
     const MaruAppHostGpuQuad *gpu_quads,
     size_t gpu_quad_count,
@@ -1454,7 +1454,7 @@ bool maru_metal_renderer_draw(
     }
 
     // C4b: chrome rich quad 정점 버퍼(gpu_quads) — 셀 패스 아래(배경 레이어)에 별개 파이프라인으로 그린다.
-    // NULL/0(tui 테마)이면 생성 안 함. modal(팝업) 위 레이어 분리는 C4b-3에서.
+    // NULL/0(그릴 quad가 없는 프레임)이면 생성 안 함. modal(팝업) 위 레이어 분리는 C4b-3에서.
     id<MTLBuffer> quad_vertex_buffer = nil;
     size_t quad_vertex_total = 0;
     size_t bottom_quad_n = 0; // C4b-5: layer 2(bottom — 탭 밴드) quad 수. part1(터미널·탭 제목) '앞'에 그려 제목 아래로.

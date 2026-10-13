@@ -19,7 +19,7 @@ pub fn hexX(rect: draw.Rect, cw: u32) i32 {
 
 /// control rect에 스와치(2칸 literal RGB) + 텍스트(hex 또는 편집 버퍼)를 그린다. role=비편집 surface_fg/편집 accent.
 /// caret(편집 중)은 셸이 hexX + 표시폭에 그린다(text 위젯과 동형). 순수: rect·rgb·text만. out/op은 셸 arena 소유.
-/// corner_radius=props.shape.corner_radius_px(tui=0 직각 셀 bg, rich>0 둥근 칩) — 스와치 높이의 절반으로 cap해
+/// corner_radius=props.shape.corner_radius_px(base=0 직각 셀 bg, rich>0 둥근 칩) — 스와치 높이의 절반으로 cap해
 /// 과도한 라운딩(pill화)을 막는다. lowering(.swatch)이 0이면 셀 bg, >0이면 둥근 GPU quad로 분기한다(C4b 동형).
 pub fn view(
     rect: draw.Rect,
@@ -82,7 +82,7 @@ test "color view: 스와치(literal RGB, 2칸) + hex 텍스트(hexX에서)" {
     try std.testing.expectEqualStrings("#ff0000", out.items[1].text.runs[0].text);
     try std.testing.expectEqual(@as(i32, 100 + 24), out.items[1].text.origin.x); // hexX=(2+1)*8
 
-    // tui(corner_radius=0): 직각 → corner_radii 0(셀 bg lowering).
+    // base(corner_radius=0): 직각 → corner_radii 0(셀 bg lowering).
     out.clearRetainingCapacity();
     try view(test_rect, .{ .r = 1, .g = 2, .b = 3 }, "#010203", .surface_fg, cw, 0, arena, &out);
     try std.testing.expectEqual(@as(u16, 0), out.items[0].swatch.corner_radii[0]);

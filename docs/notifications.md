@@ -296,7 +296,7 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
 - **읽음/지우기 액션 버튼**: 마우스 hit-test는 `Hit` union(`card`/`close`/`mark_all_read`/`clear_all`/`background`)으로 가른다 —
   카드 우측 ✕(본문줄)=개별 삭제(`deleteNotification`), 키보드 Backspace=선택 카드 삭제. **상단 헤더 우측**의 "모두 읽음"
   (`markAllNotificationsRead` — 점/배지만 끄고 항목 유지) / "모두 지우기"(`clearNotifications` — 전체 삭제)를 **버튼**으로 그린다 —
-  `confirm` 다이얼로그와 같은 관용구(셀 fill 배경 + 라벨 좌우 패딩 `btn_pad`, 토큰 색; GPU quad 아닌 `.fill`이라 tui/rich 양립).
+  `confirm` 다이얼로그와 같은 관용구(셀 fill 배경 + 라벨 좌우 패딩 `btn_pad`, 토큰 색; GPU quad 아닌 `.fill`이라 모서리 토큰과 무관 — 옛 tui/rich 양립의 이유).
   **항목이 있으면 활성**(`tab_hover_bg` 배경 + `surface_fg` 라벨, 클릭 가능함이 드러남), **빈 상태면 비활성**(배경 없이 `muted_fg`).
   버튼 [x0,x1) 칸 범위는 `headerActions`가 view(배경 fill)·hitTest(클릭 zone) 단일 출처. 헤더 좌측 제목·버튼 사이 여백·빈 상태
   본문은 `background`(클릭해도 안 닫힘 — 박스 밖만 닫기). unread 캐시는 push/markRead/delete/markAll/clear 헬퍼에서만 증감(단일 출처).

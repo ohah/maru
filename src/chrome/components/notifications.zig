@@ -90,7 +90,7 @@ fn minPanelCols() u32 {
 
 /// 헤더 액션 버튼(모두 읽음/지우기) 치수 — confirm 다이얼로그 버튼과 같은 관용구(셀 fill 배경 + 라벨 패딩, 토큰 색).
 /// 라벨 좌우 btn_pad칸으로 배경이 라벨을 감싸 버튼처럼, 두 버튼 사이 btn_gap칸. 항목이 있을 때만 활성(tab_hover_bg 배경
-/// + surface_fg 라벨), 빈 상태는 비활성(배경 없이 muted_fg). GPU quad 아닌 셀 fill이라 tui/rich 양립(메모리: tui 위젯은 셀 정렬).
+/// + surface_fg 라벨), 빈 상태는 비활성(배경 없이 muted_fg). GPU quad 아닌 셀 fill이라 base/rich 양립(셀 격자 위젯은 셀 정렬).
 const btn_pad: u32 = 1; // 버튼 라벨 좌우 패딩(칸)
 const btn_gap: u32 = 1; // 두 버튼 사이 간격(칸)
 
@@ -509,7 +509,7 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
 
 /// 헤더 우측 액션 버튼(모두 읽음/지우기)을 그린다 — confirm 버튼 관용구(셀 fill 배경 + 라벨, 토큰 색). enabled면
 /// tab_hover_bg 배경 + surface_fg 라벨(클릭 가능 버튼), 빈 상태(!enabled)면 배경 없이 muted_fg 라벨(비활성). 배경은
-/// 헤더 행 안에 세로로 inset해 꽉 찬 바가 아니라 버튼처럼 보이게 한다. 셀 fill(.fill)이라 tui/rich 둘 다 안전. view·빈 상태 공유.
+/// 헤더 행 안에 세로로 inset해 꽉 찬 바가 아니라 버튼처럼 보이게 한다. 셀 fill(.fill)이라 base/rich 둘 다 안전. view·빈 상태 공유.
 fn appendHeaderActions(l: Layout, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op), enabled: bool) !void {
     const cw = l.cw;
     const ha = headerActions(l.panel_cols);

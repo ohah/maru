@@ -1,5 +1,6 @@
 //! Chrome 디자인 토큰(데이터). 컴포넌트는 `tokens.get(role)`만 읽고 `if (rich)` 분기를 절대 안 한다 —
-//! 테마 전환 = 토큰셋 교체(컴포넌트 코드 불변). tui와 rich는 같은 struct의 두 값. 현재 코드에 흩어진
+//! 테마 전환 = 토큰셋 교체(컴포넌트 코드 불변). 기반 토큰(`Tokens.base` — 모서리·패딩 0)과 rich는 같은 struct의
+//! 두 값이고, 제품은 늘 rich다(base는 테스트가 셀 lowering을 볼 때 쓴다). 현재 코드에 흩어진
 //! 색 파생(lighten +24/+48 등)·픽셀 상수(사이드바 폭·슬롯 높이)를 여기로 모은다.
 //! 단일 출처: docs/chrome-strategy.md §5.1, docs/layering-and-portability.md §6.
 
@@ -8,7 +9,7 @@ const color = @import("../color.zig");
 const Rgb = color.Rgb;
 
 /// rich 토큰 색 파생(neutral — config의 appearance.lighten을 chrome이 import 못 하므로 여기 둔다). 채널별 ±delta를
-/// [0,255]로 clamp. rich가 tui의 sidebar_active-공유 role을 분리할 때만 쓴다(tui는 안 씀 — 원본 테마 색 그대로).
+/// [0,255]로 clamp. rich가 base의 sidebar_active-공유 role을 분리할 때 쓴다(base는 그 role들에 원본 테마 색을 그대로 둔다).
 fn clampChannel(c: u8, delta: i16) u8 {
     return @intCast(std.math.clamp(@as(i16, c) + delta, 0, 255));
 }
@@ -72,7 +73,7 @@ pub fn statusBarBorder(sidebar: Rgb, terminal: Rgb) Rgb {
 /// Panel 경계선은 interactive active color에서 파생하지 않는다. active와 panel의 우연한 조합(예:
 /// panel=40, active=64, active-24=40)이 1px rule을 배경과 완전히 같게 만들어 목록 경계가 사라졌기
 /// 때문이다. 명암 반대 방향의 작은 이동은 dark/light panel 모두에서 semantic divider가 배경과 다름을
-/// 보장하며 tui/rich가 같은 content hierarchy를 유지하게 한다.
+/// 보장하며 base/rich가 같은 content hierarchy를 유지하게 한다.
 fn dividerBg(panel: Rgb) Rgb {
     const lum: u16 = (@as(u16, panel.r) * 77 + @as(u16, panel.g) * 150 + @as(u16, panel.b) * 29) >> 8;
     return if (lum < 128) lightenRgb(panel, 24) else darkenRgb(panel, 24);
@@ -145,8 +146,9 @@ pub const ColorRole = enum {
     /// 실제로 2026-08-17 에 role 만 바꾼 수정이 시각적으로 아무 효과가 없었고, 적대적 검증에서 그 사실이
     /// 드러났다. 세기 계단을 **색으로** 만들려면 그 사이에 값이 있는 role 이 필요하다.
     ///
-    /// rich 는 hover(-12)와 활성(0) 사이인 -6 을 쓴다: hover < pressed < 활성. tui 는 파생색을 쓰지 않는
-    /// 관례라 활성과 같은 값으로 남고, 그 대신 pressed 는 `focus_accent` 테두리로 구분된다.
+    /// rich 는 hover(-12)와 활성(0) 사이인 -6 을 쓴다: hover < pressed < 활성. 기반 토큰(`base`)은 파생색을 쓰지 않는
+    /// 관례라 활성과 같은 값으로 남고, 그 대신 pressed 는 `focus_accent` 테두리로 구분된다(제품은 늘 rich 라
+    /// 이 갈래에 닿지 않는다).
     control_press_bg,
     divider,
     focus_accent,
@@ -174,7 +176,7 @@ pub const ColorRole = enum {
     selection,
     cursor,
     accent_bar, // U1(C4b 이후): maru accent — **테마-구동**(ThemeColors.accent). 프리셋별 시그니처 색(null이면 브랜드 앰버 폴백). 탭/포커스 언더바·사이드바 활성 좌측 막대·세팅 강조가 소비(U2).
-    keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널 대비(명암 기준 밝게/어둡게)라 tui·rich·light·dark 모두 또렷(keycapBg).
+    keycap_bg, // KH-5: 단축키 힌트 키캡(키별 박스) 배경 — 패널 대비(명암 기준 밝게/어둡게)라 base·rich·light·dark 모두 또렷(keycapBg).
     /// 파괴적 action의 면. `ThemeColors`에 아직 semantic 오류 입력이 없어서, 컴포넌트로 literal RGB를
     /// 흘리는 대신 이 토큰 층이 보수적 폴백을 소유한다.
     danger_bg,
@@ -298,7 +300,7 @@ const syntax_roles = [_]ColorRole{
 /// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). chrome **중립** enum이라 platform이 config
 /// `ChromeTabStyle`을 이 값으로 매핑한다(chrome은 config를 import 안 함 — 색이 ThemeColors로 흐르는 것과 동형).
 /// 스타일은 활성 탭 *세그먼트 안의 fill*만 바꾸고 세그먼트 기하(`tabbar.segOf`)는 불변이라 hit-test/드래그/✕는 그대로(§5.4).
-/// pill은 TS2(둥근 inset quad). rich 경로에서만 의미(tui는 셀 밴드 유지).
+/// pill은 TS2(둥근 inset quad). rich 경로에서만 의미(기반 토큰 `base`는 셀 밴드 경로 — 제품은 늘 rich).
 pub const TabActiveStyle = enum(u8) {
     connected = 0, // U-tab2: 본문색 cutout(바 전체 높이) + 앰버/muted 언더바 — 아래 본문과 이어짐
     underline = 1, // 배경 fill 없음 + 앰버/muted 언더바만 — 가장 미니멀
@@ -308,39 +310,40 @@ pub const TabActiveStyle = enum(u8) {
 pub const Spacing = struct {
     modal_margin_cells: u32 = 2, // 모달 박스 좌우 안쪽 여백(셀) — Notice가 소비
     sidebar_slot_height_ratio_milli: u32 = 2500, // 사이드바 슬롯 높이 = 2.5×cell. C2/C3 사이드바 컴포넌트가 소비(계획)
-    // C4b: chrome 박스 모양(rich GPU quad). tui=0(직각·테두리 없음 → lowering이 셀 fill 유지), rich>0(둥근·테두리).
+    // C4b: chrome 박스 모양(rich GPU quad). 기본값 0 = 기반 토큰 `base`(직각·테두리 없음 → lowering이 셀 fill 유지 —
+    // 테스트가 이 경로로 셀 lowering을 본다), rich>0(둥근·테두리 — 제품은 늘 rich). 아래 필드의 `base=0`도 같은 뜻이다.
     // 컴포넌트 view가 이 값을 Op.quad.corner_radii/border_widths에 실어, 같은 코드가 두 룩을 만든다(C4a 색 분리와 동형).
     corner_radius_px: u16 = 0,
     border_width_px: u16 = 0,
-    // C4b 모달: 그림자(GpuShadow). tui=0(그림자 없음 — 모달이 rich quad 안 내므로 무관), rich>0(떠 보임).
+    // C4b 모달: 그림자(GpuShadow). base=0(그림자 없음 — 모달이 rich quad 안 내므로 무관), rich>0(떠 보임).
     shadow_blur_px: u16 = 0,
     shadow_offset_y_px: u16 = 0,
     shadow_alpha: u8 = 0, // 0xAARRGGBB의 A(RGB는 검정 0). 0이면 그림자 안 보임.
-    // C4b 모달: 배경 quad가 텍스트 영역보다 큰 안쪽 여백(px). tui=0(딱 맞는 셀 배경), rich>0(텍스트 주변 여백).
+    // C4b 모달: 배경 quad가 텍스트 영역보다 큰 안쪽 여백(px). base=0(딱 맞는 셀 배경), rich>0(텍스트 주변 여백).
     // platform lowering이 모달 quad/shadow rect를 이 값만큼 사방 확장(텍스트 셀은 그대로) — 텍스트가 박스 안쪽에 든다.
     modal_padding_px: u16 = 0,
-    // U1: 사이드바 카드 좌측 accent 막대 폭(px). tui=0(막대 없음), rich>0. 막대색은 카드별(우클릭 "바: …", tab.accent_color)
+    // U1: 사이드바 카드 좌측 accent 막대 폭(px). base=0(막대 없음), rich>0. 막대색은 카드별(우클릭 "바: …", tab.accent_color)
     // 이라 chrome이 아니라 platform(app_session rebuildSidebar per-tab accent 루프)이 이 폭으로 직접 GpuQuad를 그린다.
     // chrome은 이 값으로 카드 텍스트 좌측 여백만 예약한다(buildSidebarTitleDrawList indent — 막대 위 정합·단일 출처).
     accent_bar_width_px: u16 = 0,
     // U2: 사이드바 카드 **텍스트 좌측 여백**(px) — accent 막대 폭과 더해 텍스트 시작 col을 정한다. 밴드·막대 기하는
-    // 이제 행 전체라 이 값을 쓰지 않는다(docs/sidebar-agent-list.md §3.2 — 클릭 판정 정합). tui=0, rich>0.
+    // 이제 행 전체라 이 값을 쓰지 않는다(docs/sidebar-agent-list.md §3.2 — 클릭 판정 정합). base=0, rich>0.
     card_gap_px: u16 = 0,
     // SG3: 사이드바 그룹 안 카드(depth 1)의 좌측 들여쓰기(px) — 그룹 헤더 아래 카드가 소속을 시각적으로 보이게 살짝
     // 안으로. hit-test·view가 공유하는 단일 값(§5.4)이라 여기 한 곳에서만 정의한다. platform buildSidebarTitleDrawList가
-    // ceil(이 값/cw)만큼 grouped 카드 이름 앞에 공백을 넣어 들여쓴다. tui=0(들여쓰기 없음), rich≈1~2ch. docs/sidebar-groups.md §5.
+    // ceil(이 값/cw)만큼 grouped 카드 이름 앞에 공백을 넣어 들여쓴다. base=0(들여쓰기 없음), rich≈1~2ch. docs/sidebar-groups.md §5.
     group_indent_px: u16 = 0,
-    // U-tab: rich 탭 하나의 고정 폭(컬럼). 0이면 균등분할(tui — 바를 탭 수로 나눠 stretch). >0이면 고정폭 — 탭이
+    // U-tab: rich 탭 하나의 고정 폭(컬럼). 0이면 균등분할(base — 바를 탭 수로 나눠 stretch). >0이면 고정폭 — 탭이
     // 내용과 무관히 이 폭, 적으면 왼쪽정렬+빈 영역, 많으면 넘쳐(가로 스크롤 대상) 잘린다. 제목 ~N자 + ✕ 2칸 기준.
     tab_width_cols: u16 = 0,
     // U-tab: rich 탭 바 텍스트 위아래 세로 패딩(px). 바 높이 = cell_height + 2*이값, 제목은 가운데(탭 세로 여유).
-    // tui=0이면 바 = cell 1칸(기존).
-    tab_bar_pad_y_px: u16 = 3, // tui 기본도 세로 패딩 — grip 핸들·탭 제목이 바 세로 가운데에 오게(0이면 상단에 붙어 답답). rich는 6으로 override.
+    // 0이면 바 = cell 1칸(기존).
+    tab_bar_pad_y_px: u16 = 3, // 기반 토큰(base) 기본도 세로 패딩 — grip 핸들·탭 제목이 바 세로 가운데에 오게(0이면 상단에 붙어 답답). rich는 8로 override.
     // U-tab2: 활성 탭 하단 maru-앰버 언더바(active indicator) 두께(px). 탭바 하단 하이라인(line_thickness_px)과
-    // **분리**해 활성 신호를 더 굵고 또렷하게 한다. tui=0(셀 밴드 경로라 미사용), rich>0. appendActiveTabHighlight가 소비.
+    // **분리**해 활성 신호를 더 굵고 또렷하게 한다. base=0(셀 밴드 경로라 미사용), rich>0. appendActiveTabHighlight가 소비.
     tab_underbar_px: u16 = 0,
     // TS1: 활성 탭 룩(chrome.tab-style 직교 축 — §7). platform buildChromeTokens가 appearance.chrome_tab_style→이 값으로
-    // 매핑하고 appendActiveTabHighlight가 분기(connected=cutout+언더바 / underline=언더바만 / pill=둥근 inset+테두리). tui는 셀 밴드라 미사용.
+    // 매핑하고 appendActiveTabHighlight가 분기(connected=cutout+언더바 / underline=언더바만 / pill=둥근 inset+테두리). base는 셀 밴드라 미사용(제품은 늘 rich).
     tab_active_style: TabActiveStyle = .connected,
     // TS2: pill 스타일의 세로 inset(px) — 바 위아래에서 이만큼 들여 둥근 pill이 strip 위에 떠 보인다. radius는
     // corner_radius_px, 테두리 두께는 border.line_thickness_px 재사용. connected/underline은 미사용. rich>0.
@@ -362,9 +365,11 @@ pub const Spacing = struct {
     // 그리드로 렌더되기 때문이며, 진짜 해법은 그 텍스트를 chrome 폰트로 옮기는 것이지 chrome을 폰트에
     // 묶는 것이 아니다.
     //
-    // **tui=0(셀 파생)은 의도다.** tui는 "터미널 셀 격자에 정렬된 미니멀 chrome"이 정체성이고, 탭 바 배경도
+    // **base=0(셀 파생)은 의도다.** 기반 토큰 경로는 옛 tui 룩(2026-08-19 제거)의 "터미널 셀 격자에 정렬된
+    // 미니멀 chrome"을 이어받은 셀 lowering 경로이고, 탭 바 배경도
     // 셀 한 행(`paneBarBgCell`)이라 셀에서 떨어진 높이를 주면 배경이 위쪽만 칠해진다. 그 경로에서는 폰트
-    // 파생이 결함이 아니라 요구사항이다. 어느 쪽이든 **두 바가 같은 식을 쓰므로 정렬은 유지된다**.
+    // 파생이 결함이 아니라 요구사항이다. 제품은 늘 rich(40pt)라 이 갈래에 닿지 않고, 테스트가 base로 셀
+    // lowering을 본다. 어느 쪽이든 **두 바가 같은 식을 쓰므로 정렬은 유지된다**.
     bar_height_pt: u16 = 0,
 
     /// 도크 뷰 스위처 슬롯 하나의 **논리 폭**(pt). 0이면 셀 파생(`dock_view_bar.default_slot_cols` 칸).
@@ -378,18 +383,19 @@ pub const Spacing = struct {
     /// 슬롯도 셀 배수여야 그린 자리와 눌리는 자리가 안 갈린다. 그래서 이 pt를 **셀 수로 환산**해 쓴다 —
     /// 바뀌는 것은 "몇 칸인가"이고, 격자 계약은 그대로다.
     ///
-    /// **tui=0(셀 파생)은 의도다** — `bar_height_pt`와 같은 이유(셀 격자 정렬이 tui의 정체성).
+    /// **base=0(셀 파생)은 의도다** — `bar_height_pt`와 같은 이유(기반 토큰의 셀 lowering 경로는 셀 격자 정렬이
+    /// 요구사항이다. 제품은 늘 rich라 이 갈래에 닿지 않는다).
     dock_view_slot_width_pt: u16 = 0,
 };
 
-/// 테두리/선 토큰. tui는 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
+/// 테두리/선 토큰. 기반 토큰(base)은 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
 pub const Border = struct {
     line_thickness_px: u32 = 2,
 };
 
-/// `Tokens.tui`가 받는 resolved 테마 색(config.ResolvedTheme의 chrome-중립 투영). chrome은 config를 import하지
+/// `Tokens.base`가 받는 resolved 테마 색(config.ResolvedTheme의 chrome-중립 투영). chrome은 config를 import하지
 /// 않으므로(경계) 호출자(platform)가 ResolvedTheme에서 이 plain Rgb들만 뽑아 넘긴다. 역할→색 매핑 자체는
-/// tui()가 단일 출처로 소유한다. background는 현재 어떤 역할도 안 써서 제외(필요해지면 추가).
+/// base()가 단일 출처로 소유한다. background는 현재 어떤 역할도 안 써서 제외(필요해지면 추가).
 pub const ThemeColors = struct {
     foreground: Rgb,
     sidebar_background: Rgb,
@@ -485,7 +491,7 @@ pub const Tokens = struct {
         palette.set(.tab_active_bg, theme.sidebar_active);
         palette.set(.tab_hover_bg, theme.sidebar_active);
         palette.set(.row_hover_bg, rowHoverBg(theme.sidebar_background, theme.sidebar_active)); // 활성보다 한 단계 더(위 함수 주석 — platform과 같은 식)
-        // tui 는 파생색을 쓰지 않는다(위 role 주석) — 활성과 같은 값이고 pressed 구분은 테두리가 한다.
+        // 바닥(base)은 파생색을 쓰지 않는다(위 role 주석) — 활성과 같은 값이고 pressed 구분은 테두리가 한다.
         palette.set(.control_press_bg, theme.sidebar_active);
         palette.set(.divider, dividerBg(theme.sidebar_background));
         palette.set(.focus_accent, theme.sidebar_active);
@@ -506,7 +512,7 @@ pub const Tokens = struct {
         palette.set(.selection, theme.selection);
         palette.set(.cursor, theme.cursor);
         palette.set(.accent_bar, theme.accent); // maru accent(테마-구동) — 프리셋별 시그니처 색. config.accent null이면 resolve가 브랜드 앰버(#dda15e)로 폴백. rich가 상속.
-        palette.set(.keycap_bg, keycapBg(theme.sidebar_background)); // KH-5: 키캡 배경 = 패널 대비(명암 기준 밝게/어둡게) — tui·rich 공통으로 light·dark 모두 또렷.
+        palette.set(.keycap_bg, keycapBg(theme.sidebar_background)); // KH-5: 키캡 배경 = 패널 대비(명암 기준 밝게/어둡게) — base·rich 공통으로 light·dark 모두 또렷.
         // Error remains role-only at product call sites. A future ThemeColors.error field will
         // replace this mapping once, without changing Card variants or Metal lowering.
         palette.set(.danger_bg, .{ .r = 176, .g = 52, .b = 60 });
@@ -567,10 +573,10 @@ pub const Tokens = struct {
         return .{ .palette = palette };
     }
 
-    /// rich 토큰셋(C4a): tui 색에서 출발해 tui가 sidebar_active로 **공유**하던 role(focus_accent/drop_zone/
-    /// tab_hover_bg)을 분리된 파생색으로 채운다. divider는 panel 대비 semantic role이라 tui 값 그대로 유지하고,
+    /// rich 토큰셋(C4a): base 색에서 출발해 base가 sidebar_active로 **공유**하는 role(focus_accent/drop_zone/
+    /// tab_hover_bg)을 분리된 파생색으로 채운다. divider는 panel 대비 semantic role이라 base 값 그대로 유지하고,
     /// focus_accent 밝게, drop_zone 밝게, tab_hover 어둡게,
-    /// muted_fg 더 흐리게. 컴포넌트는 같은 role을 읽으므로 코드 불변(테마=토큰셋 교체). 둥근 모서리(C4b)는 space.corner_radius_px/border_width_px로 분리(tui=0 → 직각·셀 fill).
+    /// muted_fg 더 흐리게. 컴포넌트는 같은 role을 읽으므로 코드 불변(테마=토큰셋 교체). 둥근 모서리(C4b)는 space.corner_radius_px/border_width_px로 분리(base=0 → 직각·셀 fill).
     /// 그라데이션·shadow는 후속. 색 파생은 lightenRgb/darkenRgb(neutral, config import 없이).
     pub fn rich(theme: ThemeColors) Tokens {
         var tk = base(theme);
@@ -586,7 +592,7 @@ pub const Tokens = struct {
         tk.palette.set(.list_secondary_fg, blendRgb(theme.sidebar_foreground, theme.sidebar_background, 55));
         // 물러난 행은 한 단계 더 배경 쪽으로. 35%는 "읽을 수는 있지만 먼저 읽히지 않는" 자리다.
         tk.palette.set(.list_disabled_fg, blendRgb(theme.sidebar_foreground, theme.sidebar_background, 35));
-        // C4b: rich 박스 모양 — 둥근 모서리 + 얇은 테두리(tui는 0=직각·셀 fill 유지). 컴포넌트 view가
+        // C4b: rich 박스 모양 — 둥근 모서리 + 얇은 테두리(base는 0=직각·셀 fill 유지). 컴포넌트 view가
         // 이 값을 Op.quad에 실어 GPU quad 프리미티브로 lowering된다(같은 코드, 토큰만 다름).
         tk.space.corner_radius_px = 8;
         tk.space.border_width_px = 1;
@@ -597,7 +603,7 @@ pub const Tokens = struct {
         tk.space.shadow_alpha = 0x38;
         // C4b 모달 패딩: 배경 박스를 텍스트보다 사방 12px 크게 — 팝업 텍스트 주변에 여백(사용자 피드백 "여유").
         tk.space.modal_padding_px = 12;
-        // U1: 사이드바 카드 좌측 accent 막대 3px. tui=0(막대 없음). 막대색은 카드별(우클릭 "바: …")이라 platform이
+        // U1: 사이드바 카드 좌측 accent 막대 3px. base=0(막대 없음). 막대색은 카드별(우클릭 "바: …")이라 platform이
         // 이 폭으로 직접 그리고(활성=기본 앰버·지정 카드=지정색), chrome은 카드 텍스트 좌측 여백만 이 폭으로 예약한다.
         tk.space.accent_bar_width_px = 3;
         // U2: 카드 **텍스트 좌측 들여쓰기** 8px(accent 막대 폭과 함께 텍스트 시작 col을 정한다).
@@ -623,7 +629,7 @@ pub const Tokens = struct {
         // 1×·2× 모두 환산 결과가 4칸이라 이 커밋 전과 픽셀이 같다(실측). 큰 폰트에서만 칸 수가 줄어 스위처가
         // 살아난다: 24pt/1× 2칸(112px ≤ 180px), 24pt/2× 2칸(232px ≤ 360px).
         tk.space.dock_view_slot_width_pt = 32;
-        // KH-5: rich 키캡도 tui와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. tui()가 이미 keycap_bg를 그렇게 깔았으므로
+        // KH-5: rich 키캡도 base와 같은 keycapBg(패널 대비 — 명암 기준)를 쓴다. base()가 이미 keycap_bg를 그렇게 깔았으므로
         // rich는 override하지 않는다(별도 처리 불필요 — light·dark 모두 또렷). 셀-그리드라 키캡은 fill(셀 배경)이고 둥근
         // GPU quad는 글리프에 가려 못 쓴다(shortcut_hints.view 주석).
         return tk;
@@ -665,7 +671,7 @@ test "목록 전경은 surface > secondary > disabled 순으로 실제로 어두
     try std.testing.expect(secondary != tk.palette.get(.muted_fg).r);
 }
 
-test "Tokens.tui maps resolved theme colors to the semantic roles" {
+test "Tokens.base maps resolved theme colors to the semantic roles" {
     const c = struct {
         fn rgb(r: u8, g: u8, b: u8) Rgb {
             return .{ .r = r, .g = g, .b = b };
@@ -694,8 +700,8 @@ test "Tokens.tui maps resolved theme colors to the semantic roles" {
 }
 
 test "keycap_bg는 패널(surface_bg)과 항상 대비 — 어두우면 밝게·밝으면 어둡게 (리뷰 #1/#2 회귀 가드)" {
-    // 단축키 힌트 키캡이 패널색과 같아지면(이전 KH-5의 tui=surface_bg·light 테마 near-white saturate) 키 박스가 사라진다.
-    // keycapBg가 명암으로 갈라 light·dark 양쪽, tui·rich 양쪽에서 surface_bg와 다르고 올바른 방향으로 대비함을 고정한다.
+    // 단축키 힌트 키캡이 패널색과 같아지면(이전 KH-5의 옛 tui 토큰 keycap=surface_bg·light 테마 near-white saturate) 키 박스가 사라진다.
+    // keycapBg가 명암으로 갈라 light·dark 양쪽, base·rich 양쪽에서 surface_bg와 다르고 올바른 방향으로 대비함을 고정한다.
     const c = struct {
         fn rgb(r: u8, g: u8, b: u8) Rgb {
             return .{ .r = r, .g = g, .b = b };
@@ -772,7 +778,7 @@ test "inset_bg는 dark/light 테마에서 surface와 반대 방향으로 분리�
     }
 }
 
-test "Tokens.rich separates the sidebar_active-shared roles into derived colors (tui 불변)" {
+test "Tokens.rich separates the sidebar_active-shared roles into derived colors (base 불변)" {
     const c = struct {
         fn rgb(r: u8, g: u8, b: u8) Rgb {
             return .{ .r = r, .g = g, .b = b };
@@ -794,7 +800,7 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
     };
     const t = Tokens.base(theme);
     const r = Tokens.rich(theme);
-    // tui: focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유), divider = panel 대비 파생. rich: interactive role만 분리 파생.
+    // base: focus_accent/drop_zone/tab_hover_bg = sidebar_active(공유), divider = panel 대비 파생. rich: interactive role만 분리 파생.
     try std.testing.expectEqual(c.rgb(44, 44, 44), t.get(.divider)); // sidebar_background(20) 대비 파생 = 44
     try std.testing.expectEqual(c.rgb(44, 44, 44), r.get(.divider)); // rich도 panel 대비 규칙 유지
     try std.testing.expectEqual(c.rgb(140, 140, 140), r.get(.focus_accent)); // lighten 40
@@ -804,13 +810,13 @@ test "Tokens.rich separates the sidebar_active-shared roles into derived colors 
     // 분리됨: divider != focus_accent != tab_active_bg(=sidebar_active 그대로).
     try std.testing.expectEqual(c.rgb(100, 100, 100), r.get(.tab_active_bg)); // 활성은 원색 유지
     try std.testing.expect(!std.meta.eql(r.get(.divider), r.get(.focus_accent)));
-    // rich가 안 건드리는 role은 tui와 동일.
+    // rich가 안 건드리는 role은 base와 동일.
     try std.testing.expectEqual(t.get(.surface_bg), r.get(.surface_bg));
     try std.testing.expectEqual(t.get(.cursor), r.get(.cursor));
     try std.testing.expectEqual(t.get(.search_match), r.get(.search_match));
 }
 
-test "divider is always distinct from the panel in tui and rich, including the prior active collision" {
+test "divider is always distinct from the panel in base and rich, including the prior active collision" {
     const c = struct {
         fn rgb(value: u8) Rgb {
             return .{ .r = value, .g = value, .b = value };
@@ -833,11 +839,11 @@ test "divider is always distinct from the panel in tui and rich, including the p
         }
     };
     inline for ([_]ThemeColors{ c.theme(40, 64), c.theme(240, 180), c.theme(0, 255), c.theme(255, 0) }) |theme| {
-        const tui = Tokens.base(theme);
+        const base = Tokens.base(theme);
         const rich = Tokens.rich(theme);
-        try std.testing.expect(!std.meta.eql(tui.get(.divider), tui.get(.surface_bg)));
+        try std.testing.expect(!std.meta.eql(base.get(.divider), base.get(.surface_bg)));
         try std.testing.expect(!std.meta.eql(rich.get(.divider), rich.get(.surface_bg)));
-        try std.testing.expectEqual(tui.get(.divider), rich.get(.divider));
+        try std.testing.expectEqual(base.get(.divider), rich.get(.divider));
     }
 }
 
@@ -863,7 +869,7 @@ test "divider keeps the documented 24-channel separation away from gamut endpoin
     }
 }
 
-test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
+test "Tokens.rich sets box-shape tokens (radius/border) while base keeps 0" {
     const theme = ThemeColors{
         .foreground = .{ .r = 200, .g = 200, .b = 200 },
         .sidebar_background = .{ .r = 20, .g = 20, .b = 20 },
@@ -880,12 +886,12 @@ test "Tokens.rich sets box-shape tokens (radius/border) while tui keeps 0" {
     };
     const t = Tokens.base(theme);
     const r = Tokens.rich(theme);
-    // tui: 모양 토큰 0(직각·테두리 없음 → lowering이 셀 fill 유지). rich: >0(둥근·테두리 → GPU quad).
+    // base: 모양 토큰 0(직각·테두리 없음 → lowering이 셀 fill 유지). rich: >0(둥근·테두리 → GPU quad).
     try std.testing.expectEqual(@as(u16, 0), t.space.corner_radius_px);
     try std.testing.expectEqual(@as(u16, 0), t.space.border_width_px);
     try std.testing.expect(r.space.corner_radius_px > 0);
     try std.testing.expect(r.space.border_width_px > 0);
-    // 비-모양 space(슬롯 높이 비율)는 tui·rich 동일 — 모양만 분리한다.
+    // 비-모양 space(슬롯 높이 비율)는 base·rich 동일 — 모양만 분리한다.
     try std.testing.expectEqual(t.space.sidebar_slot_height_ratio_milli, r.space.sidebar_slot_height_ratio_milli);
 }
 

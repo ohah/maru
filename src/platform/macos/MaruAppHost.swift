@@ -6922,10 +6922,10 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             frame.sidebar_bg,           // 사이드바 배경색(0=안 그림)
             frame.sidebar_cells,        // 사이드바 셀(탭 엔트리) — origin 0에 그림
             frame.sidebar_cell_count,
-            frame.gpu_quads,              // C4b: chrome rich 둥근 사각형(tui면 NULL — Swift는 패스스루만)
+            frame.gpu_quads,              // C4b: chrome rich 둥근 사각형(그릴 quad가 없으면 NULL — Swift는 패스스루만)
             frame.gpu_quad_count,
             frame.modal_cells_start,      // C4b 모달: over quad를 모달 텍스트 앞에 끼우는 분할점(패스스루)
-            frame.gpu_shadows,            // C4b: chrome 그림자(tui/모달 닫힘이면 NULL — 패스스루만)
+            frame.gpu_shadows,            // C4b: chrome 그림자(그릴 그림자가 없으면 NULL — 모달 닫힘 등 — 패스스루만)
             frame.gpu_shadow_count,
             frame.gpu_images,             // kitty graphics(K2): 이미지 placement(없으면 NULL — 패스스루만)
             frame.gpu_image_count,

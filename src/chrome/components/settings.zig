@@ -79,7 +79,7 @@ const search_preedit_cap: usize = 32;
 /// 닫지 않고 폼 상단에 얹는다(단일-오버레이 불변식과 무관 — 세팅 자체 그리드 안 텍스트).
 const message_cap: usize = 256;
 
-// HSV 색 picker 기하 — SV 그리드(채도 col × 명도 row) + hue 스트립. 셀-그리드 tui라 이산 해상도(셀 단위 샘플).
+// HSV 색 picker 기하 — SV 그리드(채도 col × 명도 row) + hue 스트립. 셀-그리드라 이산 해상도(셀 단위 샘플).
 const pick_sv_cols: u32 = 16; // 채도 0~100
 const pick_sv_rows: u32 = 8; // 명도 100~0(위→아래)
 const pick_swatch_w: u32 = 2; // 셀당 2칸(가시성)
@@ -585,7 +585,7 @@ fn paletteHexX(grid: draw.Rect, cw: u32) i32 {
 
 /// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). 입력 박스(전체)·dropdown(좌단 text)과 같은 시작 x라
 /// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유. 폭은 그려지는 위젯
-/// 전체 — tui 트랙 `[  ]`(4*cw)이 pill(width(ch))보다 넓을 수 있어 둘 중 큰 쪽(클릭=보이는 위젯, 리뷰 #823).
+/// 전체 — 셀 갈래(base) 트랙 `[  ]`(4*cw)이 pill(width(ch))보다 넓을 수 있어 둘 중 큰 쪽(클릭=보이는 위젯, 리뷰 #823).
 fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
     return .{ .x = ctrl.x, .y = ctrl.y, .w = @max(toggle.width(ch), 4 * cw), .h = ch };
 }
@@ -788,7 +788,7 @@ pub fn view(
                     const sw = paletteSwatchRect(grid, ci, box.cw, box.ch);
                     try out.append(arena, .{ .swatch = .{ .rect = sw, .rgb = g.cells[ci].rgb } });
                 }
-                // 선택 표식: 셀 위에 Op.border/fill을 얹으면 tui lowering(paintRectBg)이 1행 높이라 셀 전체를 그 색으로 칠해
+                // 선택 표식: 셀 위에 Op.border/fill을 얹으면 셀 lowering(paintRectBg)이 1행 높이라 셀 전체를 그 색으로 칠해
                 // 스와치 색을 덮는다. 그래서 **마커 글리프 ▾**를 선택 스와치 위에 text 레이어로 얹는다 — 글리프라 셀 bg(스와치
                 // 색)는 거의 안 가리고 어느 칸인지 보여준다(우측 "N  #hex" 인덱스 텍스트와 함께). accent_bar 색.
                 const sel = @min(g.selected, palette_count - 1);
@@ -929,7 +929,7 @@ pub fn scrollView(state: *const State, sections: []const []const u8, rows: []con
     };
 }
 
-/// 선택 마커 ▾를 (x, row) 셀 위에 accent text로 얹는다(palette와 같은 이유 — Op.border는 tui lowering이 셀 전체를
+/// 선택 마커 ▾를 (x, row) 셀 위에 accent text로 얹는다(palette와 같은 이유 — Op.border는 셀 lowering이 셀 전체를
 /// 칠해 스와치 색을 덮으므로 마커 글리프를 text 레이어로). 스와치 bg는 거의 안 가린다.
 fn pickerMarker(box: modal_box.Box, x: i32, row: u32, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
     const marker = try arena.alloc(draw.Run, 1);
@@ -1584,7 +1584,7 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
         .{ .label = "Font size", .kind = .{ .number = .{ .value = 512, .min = 1, .max = 512 } } }, // 입력 박스 렌더
     };
     try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
-    // tui(border 0): 위젯이 모두 셀 정렬 text(quad 아님). frame(quad)=1, 제목=1, 검색힌트=1.
+    // base(border 0): 위젯이 모두 셀 정렬 text(quad 아님). frame(quad)=1, 제목=1, 검색힌트=1.
     // 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + 입력 박스 값 text)=2. 마지막=내비 힌트 1줄.
     try std.testing.expect(out.items[0] == .quad); // 박스 bg
     try std.testing.expect(out.items[1] == .text); // 제목
@@ -1595,7 +1595,7 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
     try std.testing.expect(out.items[5] == .text); // toggle 트랙(muted) — quad 아님
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[5].text.role);
     try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[6].text.role); // toggle knob on(앰버)
-    // 행1(number 입력 박스, tui=border 0 → 값 text만): 라벨 + 현재 값 "512"(surface_fg). 슬라이더 트랙/채움 없음.
+    // 행1(number 입력 박스, base=border 0 → 값 text만): 라벨 + 현재 값 "512"(surface_fg). 슬라이더 트랙/채움 없음.
     try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
     try std.testing.expectEqualStrings("512", out.items[8].text.runs[0].text); // 입력 박스 안 현재 값
     try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[8].text.role);

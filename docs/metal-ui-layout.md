@@ -293,7 +293,7 @@ anti-alias·corner·fill을 border 색으로 바꾸지 않는다. Metal lowerer�
   provider/process side effect는 항상 host dispatcher만 실행한다. hover는 action event가 아니라
   paint state다.
 - `resolveVisualStyle(Tokens, variant/tone, PaintStyle, InteractionState, UiAction)`은 ML3의 유일한
-  theme 경계다. component는 `Tokens.rich()`/`Tokens.tui()`나 light/dark를 분기하지 않고
+  theme 경계다. component는 `Tokens.rich`/`Tokens.base`나 light/dark를 분기하지 않고
   `ColorRole`만 반환한다. token 교체는 rect/identity/action을 바꾸지 않고 paint artifact만
   invalidation한다. Chrome Lab은 같은 scenario를 light/dark token으로 그려 role·alpha·geometry
   probe와 readback PNG가 모두 달라지는지, hit rect/action은 불변인지 검증한다.
@@ -342,10 +342,10 @@ flowchart TD
   scissor와 GPU shadow emission은 아직 없다. 따라서 새 tree가 rich/light/dark token을 실제 Metal
   output으로 소비한다고 주장하면 안 된다. ML3b Chrome Lab의 dark/light artifact로만 그 연결을 완료로
   판정한다.
-- 새 tree의 제품 token input은 **rich/Metal `Tokens` snapshot만**이다. legacy `Tokens.tui()`와
-  cell-grid lowering은 기존 config/read compatibility·회귀 fixture의 별도 경로이며, ML3
-  resolver에 fallback/조건문으로 넣지 않는다. `tokens.zig`가 두 값을 표현하는 것은 migration
-  호환성일 뿐 새 component contract가 두 renderer를 지원한다는 뜻이 아니다.
+- 새 tree의 제품 token input은 **rich/Metal `Tokens` snapshot만**이다. 기반 토큰 `Tokens.base`(옛
+  `Tokens.tui()` — tui 룩은 2026-08-19 제거)와 cell-grid lowering은 테스트·회귀 fixture의 별도 경로이며, ML3
+  resolver에 fallback/조건문으로 넣지 않는다. `tokens.zig`가 두 값을 표현하는 것은 `rich`가 `base`를
+  부른 뒤 덮는 구조일 뿐 새 component contract가 두 renderer를 지원한다는 뜻이 아니다.
 
 ### Text layout은 flex solver의 외부 입력이 아니라 frame artifact다
 

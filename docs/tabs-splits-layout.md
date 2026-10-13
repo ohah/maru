@@ -239,7 +239,7 @@ Node = leaf(Pane)
     분리한 전용 토큰 `tab_underbar_px`(rich 3px)로 더 굵게 그려 active/focus 신호를 또렷하게 한다(`appendActiveTabHighlight`
     단일 출처; cutout quad가 활성 탭 구간 하이라인을 덮어 연결이 끊기지 않음). **탭 제목엔 번호 prefix(`N `)를 붙이지 않는다**
     (브라우저/VSCode/Warp식 — Term 번호는 단축키 미매핑이라 군더더기였다; 사이드바 워크스페이스 라벨이 이미 번호를 안 붙이던
-    것과 일관). tui 룩은 기존 셀 밴드(`tabbarHighlightCell`). 단일 출처: [chrome-strategy.md](chrome-strategy.md) U-tab2.
+    것과 일관). 옛 tui 룩(2026-08-19 제거)은 셀 밴드(`tabbarHighlightCell`)였다. 단일 출처: [chrome-strategy.md](chrome-strategy.md) U-tab2.
   - **탭 스타일 축(`chrome.tab-style`, TS1·TS2)**: 위 connected(본문색 cutout + 앰버 언더바)를 강한 기본으로 두고, `chrome.tab-style
     = connected|underline|pill` 직교 축으로 활성 탭 룩을 고른다 — `underline`=언더바만(배경 박스 없음), `pill`=strip보다 밝은
     lifted 회색으로 채운 둥근 캡슐 + 옅은 밝은 테두리(실제 Warp 벤치마킹 — 밝은 fill로 띄움, 포커스=fill 밝기). 스타일은
@@ -320,7 +320,7 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   부적합 — 되돌렸다). **호버 시 커서는 openHand(`CursorKind.grab`)** 로 바뀐다. 바 세로 패딩(`tab_bar_pad_y_px`)은 rich에서
   8px이지만, **rich에서 바 높이는 `cell + 2*pad`가 아니다** — 도크 뷰 스위처와 경계선을 맞추려고 폰트 독립 token
   (`space.bar_height_pt`, rich 40pt)이 높이를 정하고 pad는 텍스트 여백 의미만 남기 때문이다(단일 출처 `chromeBarHeightPx`,
-  [file-explorer.md](file-explorer.md) §3.5). token이 0인 tui만 셀 파생(`cell + 2*pad`)으로 떨어진다. 그래서 바 안 텍스트의
+  [file-explorer.md](file-explorer.md) §3.5). token이 0일 때만(기반 토큰 `Tokens.base` — 옛 tui 룩. 제품 `buildChromeTokens`는 늘 rich라 닿지 않는다) 셀 파생(`cell + 2*pad`)으로 떨어진다. 그래서 바 안 텍스트의
   세로 오프셋도 pad가 아니라 실제 바 높이에서 파생한다(`chromeBarTextOffsetY`). **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
   0이라 잡을 자리가 없다 — `paneLabelCols`) → grip을 **이름 유무와 무관하게 항상 예약**해 모든 pane이 끌리게 한다(사용자
   결정). custom_name이 있으면 grip 뒤에 이름이 붙는다(`paneBar`가 `grip_cols`+`label_cols`로 탭 영역을 우측 offset). 같은

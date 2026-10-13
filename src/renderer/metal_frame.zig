@@ -996,7 +996,7 @@ pub fn nativeCellsHaveAtlasPlacement(cells: []const NativeMetalCell) bool {
 /// 배열을 가리키며, 그 버퍼의 다음 replace() 또는 deinit()까지만 유효하다.
 /// chrome rich 백엔드(C4b)의 GPU 렌더 프리미티브 — 둥근 사각형(모서리별 radius + 변별 테두리 + solid/
 /// gradient 채움). 셀 그리드(NativeMetalCell)와 **별개 파이프라인**으로 SDF anti-aliasing으로 그린다.
-/// tui 테마는 이 배열을 비워 두므로(셀 fill 유지) 시각이 안 바뀐다 — rich 테마만 lowering이 채운다(C4b-2~).
+/// chrome lowering(AppSession)이 이 배열을 채우고(C4b-2~), 그 프레임에 그릴 것이 없으면 빈 배열이라 렌더가 무동작이다.
 /// 좌표는 backing 픽셀(좌상단 기준). 설계 근거: docs/layering-and-portability.md §5(C4b).
 /// `GpuQuad.layer` 의 이름 있는 값 — 렌더러가 quad 를 어느 패스에 넣는가.
 ///
@@ -1483,8 +1483,8 @@ pub const MetalFrame = extern struct {
     sidebar_cell_count: usize = 0,
     // (예전 `sidebar_slot_height_px`·`sidebar_header_height_px` 자리. 렌더러가 사이드바 셀 세로 배치에 쓰던 값인데, 그 배치를
     // Zig 가 셀 origin_y 로 싣게 되며(ABI 224·225) 할 일을 잃어 ABI 229 에서 뺐다 — tests/boundary/metal_frame_consumers.zig.)
-    // chrome rich GPU 프리미티브(C4b). tui 테마는 빈 배열(null/0)이라 렌더가 무동작 — 셀 그리드 유지.
-    // rich 테마만 lowering이 채운다(C4b-2~). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다.
+    // chrome rich GPU 프리미티브(C4b). lowering이 채우고(C4b-2~), 그 프레임에 모은 것이 없으면 빈 배열(null/0)이라
+    // 렌더가 무동작이다(`view()`가 길이 0을 null로 낸다). NativeMetalCell과 별개 파이프라인으로 SDF AA로 그린다.
     // 설계: docs/layering-and-portability.md §5(C4b). 포인터 수명은 cells와 같은 계약(다음 갱신/해제까지).
     gpu_quads: ?[*]const GpuQuad = null,
     gpu_quad_count: usize = 0,
@@ -1766,7 +1766,7 @@ pub const MetalFrameBuffer = struct {
     sidebar_source: std.ArrayListUnmanaged(u8) = .empty,
     sidebar_source_valid: bool = false,
     // C4b: chrome rich GPU quad 프리미티브(둥근 박스). replace가 AppSession이 chrome lowering으로 모은 것을
-    // dupe 소유한다. tui 테마/빈이면 길이 0(렌더 무동작). 사이드바/모달/divider가 공유하는 통합 배열.
+    // dupe 소유한다. 그 프레임에 모은 것이 없으면 길이 0(렌더 무동작). 사이드바/모달/divider가 공유하는 통합 배열.
     gpu_quads: []GpuQuad = &.{},
     // C4b 모달: chrome 그림자(GpuShadow) — 모달 배경의 떠 보이는 blur. per-frame(모달만), gpu_quads와 동형 소유.
     gpu_shadows: []GpuShadow = &.{},
@@ -1869,7 +1869,7 @@ pub const MetalFrameBuffer = struct {
         // 빈이면 무동작. raster 불요(sentinel UV).
         drag_overlay_cells: []const NativeMetalCell,
         // C4b: chrome rich GPU quad 프리미티브(AppSession이 chrome lowering으로 모은 것). buffer가 dupe 소유한다.
-        // 셀 그리드와 별개 파이프라인으로 렌더된다(둥근 박스). 빈이면 0(tui — 무동작).
+        // 셀 그리드와 별개 파이프라인으로 렌더된다(둥근 박스). 빈이면 0(무동작).
         gpu_quads: []const GpuQuad,
         // C4b 모달: chrome 그림자(AppSession이 lowering으로 모은 것). buffer가 dupe 소유. 빈이면 0(무동작).
         gpu_shadows: []const GpuShadow,
@@ -2218,7 +2218,7 @@ pub const MetalFrameBuffer = struct {
             // 사이드바 셀(밴드 ++ 제목 glyph). 비면 null로 둬 렌더러가 사이드바 셀을 건너뛴다.
             .sidebar_cells = if (self.sidebar_cells.len > 0) self.sidebar_cells.ptr else null,
             .sidebar_cell_count = self.sidebar_cells.len,
-            // C4b: chrome rich GPU quad 프리미티브. 비면 null로 둬 렌더러가 quad 패스를 건너뛴다(tui).
+            // C4b: chrome rich GPU quad 프리미티브. 비면(그 프레임에 그릴 quad가 없으면) null로 둬 렌더러가 quad 패스를 건너뛴다.
             .gpu_quads = if (self.gpu_quads.len > 0) self.gpu_quads.ptr else null,
             .gpu_quad_count = self.gpu_quads.len,
             // C4b 모달: chrome 그림자. 비면 null로 둬 렌더러가 shadow 패스를 건너뛴다.

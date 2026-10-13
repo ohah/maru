@@ -1172,6 +1172,11 @@ DevTools 자리 둘이 비어 있을 때만(`Kick.reserve` — 둘째는 termina
 쿠키 읽기는 `Network.getCookies {urls}`, 쓰기는 호스트 자신만(D6), 지우기·clearStorage 는 받은 정확한 키로 하나씩(D7 — 한 요청에 512 개까지),
 쿠키 저장소 op 은 확인 grant 의 호스트가 지금 문서를 덮는지 시작에 다시 본다. 확정 전 이동 중이면 localStorage 의 페이지 호출을 보내지 않는다.
 스모크 `w9a-storage`.
+W9a③ 적대 리뷰(다섯 회차):
+- **1 회차**(실제 앱·단위 재현 다섯 — 쿠키 격리는 모든 공격에 버텼다): 중 — 지우기·clearStorage 가 중간에 실패해도 ok 였다(엔진을 죽이자 170 개 중
+  102 개가 남았는데 ok) → 실패를 세어 끝에 「N of M」, 엔진·탭이 사라지면 곧. 중하 — 이름·domain·path 가 같고 분할(CHIPS)만 다른 쿠키 둘 중 하나만
+  지웠다 → 분할도 열쇠에. 하 — `sameSite` 를 WebKit 처럼 소문자로, `--domain .a.test` 가 호스트 전용 쿠키까지 지웠다(WebKit 과 다름) → WebKit 규칙,
+  긴 localStorage 값이 「selector … too long」 으로 실패 → 그것의 상한 글(64 KiB, 문서에).
 
 **W9a 적대 리뷰**(구현 뒤 다섯 회차 — 1 회차는 W9a① 만, 2 회차부터 ①+②):
 - **1 회차**(실제 앱·CEF 탐침·변이 21(걸림 14 — 생존 넷은 시험을 더했다: 「불러오는 중」 전의 「아님」, 만든 직후 about:blank 의 문서, 묻는 닫기

@@ -14,6 +14,7 @@ const selection = @import("../selection.zig");
 const line_index = @import("../line_index.zig");
 const language = @import("../language.zig");
 const indent_guides = @import("../indent_guides.zig");
+const literals = @import("../literals.zig");
 
 const Change = delta.Change;
 const Selection = selection.Selection;
@@ -69,23 +70,27 @@ pub const Typing = struct {
     }
 };
 
-/// 닫는 괄호 내어쓰기의 문맥(계획 editor-typing-rules TR2) — 호출자가 그 문법의 괄호(`bracketRuleFor().chars`)와 줄 색인을 준다.
-pub const Reindent = struct {
+/// 타이핑의 언어 문맥(계획 editor-typing-rules TR2~TR4) — 호출자가 그 문법의 괄호(`bracketRuleFor().chars`)와 줄 색인, 구문 트리가 답한
+/// 문자열·주석 조각을 준다. 닫는 괄호 내어쓰기·낱말 내어쓰기·따옴표 자동 닫기가 본다.
+pub const Context = struct {
     lines: LineIndex,
     brackets: []const u8,
     /// 낱말 내어쓰기(TR3 — Ruby `end`·Python `else:` …)가 쓴다. 단위가 없으면 그 갈래를 안 탄다.
     grammar: language.Grammar = .none,
     unit: ?indent_guides.Unit = null,
     tab_width: u16 = 4,
+    /// 구문 트리가 답한 문자열·주석 조각(TR4 — `literals.flatten`, 문서 절대 byte, 입력 커서들을 덮는 범위). `null` 이면 트리가 없거나
+    /// 낡았다 — 문맥 없이(줄 스캐너로) 간다.
+    literal_spans: ?[]const literals.Span = null,
 };
 
 /// 짝 여는 괄호를 거슬러 찾는 상한(byte) — 그 너머면 내어쓰지 않는다(적대 입력 §3.8: 한 줄짜리 거대 문서에서 타이핑마다 끝까지 걷지 않게).
 pub const reindent_scan_limit: usize = 64 * 1024;
 
 /// 닫는 괄호를 쳤을 때 그 줄을 **짝 여는 괄호가 있는 줄의 들여쓰기**로 맞출 자리 — caret `lo` 앞이 그 줄의 공백뿐일 때만. 바꿀 것이 없으면
-/// (이미 같다·짝을 못 찾았다·괄호가 아니다) `null`. 짝은 거슬러 읽으며 같은 종류의 괄호 깊이로 찾는다(문자열 안 괄호도 센다 — 구문 트리
-/// 보정은 TR4).
-pub fn closerReindent(content: []const u8, r: Reindent, lo: usize, typed: u8) ?struct { line_start: usize, indent: []const u8 } {
+/// (이미 같다·짝을 못 찾았다·괄호가 아니다) `null`. 짝은 거슬러 읽으며 같은 종류의 괄호 깊이로 찾는다. 구문 트리가 답했으면(TR4) 문자열·
+/// 주석 안 괄호는 세지 않고, caret 이 문자열·주석 안이면(여러 줄 문자열·블록 주석의 공백 줄) 바꾸지 않는다 — 트리가 없으면 다 센다.
+pub fn closerReindent(content: []const u8, r: Context, lo: usize, typed: u8) ?struct { line_start: usize, indent: []const u8 } {
     var open: ?u8 = null;
     var k: usize = 0;
     while (k + 1 < r.brackets.len) : (k += 2) if (r.brackets[k + 1] == typed) {
@@ -95,12 +100,22 @@ pub fn closerReindent(content: []const u8, r: Reindent, lo: usize, typed: u8) ?s
     const line = r.lines.line(r.lines.lineAt(lo)) orelse return null;
     const head = content[line.start..lo];
     for (head) |b| if (b != ' ' and b != '\t') return null;
+    if (r.literal_spans) |ls| if (literals.at(ls, content, lo) != .code) return null;
     // 짝을 거슬러 찾는다.
     const floor = line.start -| reindent_scan_limit;
     var depth: usize = 0;
     var i = line.start;
+    var lk: usize = if (r.literal_spans) |ls| literals.countBefore(ls, line.start) else 0;
     const at: usize = while (i > floor) {
         i -= 1;
+        // 트리가 문자열·주석으로 본 byte 는 건너뛴다 — 그 조각의 머리로 단번에.
+        if (r.literal_spans) |ls| {
+            while (lk > 0 and ls[lk - 1].start > i) lk -= 1;
+            if (lk > 0 and i < ls[lk - 1].end) {
+                i = ls[lk - 1].start;
+                continue;
+            }
+        }
         const b = content[i];
         if (b == typed) {
             depth += 1;
@@ -128,7 +143,7 @@ pub const keyword_scan_lines: usize = 4096;
 /// `rescue`(낱말 끝 글자)·`when `(뒤 공백), Python `else:`·`elif …:`·`except …:`·`finally:`(`:`). caret 뒤가 그 줄의 끝이고, 그 줄의 들여쓰기가
 /// 위쪽 내용 줄의 들여쓰기 이상일 때만 — 이미 내어썼으면 그대로(VS Code Ruby `decreaseIndentPattern`·Python 언어 서버의 같은 동작).
 /// 새 줄 머리(들여쓰기 + 이미 친 글자 + 친 글자)를 낸다 — 바꿀 것이 없으면 `null`.
-pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Reindent, lo: usize, typed: u8) !?struct { line_start: usize, text: []u8 } {
+pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Context, lo: usize, typed: u8) !?struct { line_start: usize, text: []u8 } {
     const unit = r.unit orelse return null;
     if (r.grammar != .ruby and r.grammar != .python) return null;
     const line = r.lines.line(r.lines.lineAt(lo)) orelse return null;
@@ -158,6 +173,8 @@ pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Rein
         else => false,
     };
     if (!hit) return null;
+    // 문자열·주석 안에서 친 낱말(파이썬 독스트링의 `else:`)은 블록이 아니다(TR4 — 트리가 답했을 때만).
+    if (r.literal_spans) |ls| if (literals.at(ls, content, lo) != .code) return null;
     // 위쪽 내용 줄(공백뿐인 줄은 건너뛴다)의 들여쓰기 — 지금 줄이 그보다 얕으면 이미 내어썼다. 거슬러 가는 줄 수에 상한을 둔다(빈 줄이
     // 수십만인 적대 문서에서 낱말을 칠 때마다 끝까지 걷지 않게 — 넘으면 위 내용 줄이 없는 것으로 본다).
     var n = r.lines.lineAt(lo);
@@ -184,7 +201,7 @@ pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Rein
 
 /// `sels` 는 문서 순서. **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7) — `assist` 가 거짓이면(IME 재변환 등) 보지
 /// 않는다. 붙여넣기·IME 확정은 여러 글자가 한 번에 오는데 그때 괄호를 닫으면 사용자가 넣지 않은 문자가 들어간다.
-pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []const Selection, text: []const u8, assist: bool, reindent: ?Reindent) !Typing {
+pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []const Selection, text: []const u8, assist: bool, ctx: ?Context) !Typing {
     const aid: ?u8 = if (text.len == 1 and assist) text[0] else null;
     var t: Typing = .{};
     errdefer t.deinit(allocator);
@@ -197,8 +214,10 @@ pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []con
         if (aid) |typed| {
             const before: ?u8 = if (lo > 0) content[lo - 1] else null;
             const after: ?u8 = if (hi < content.len) content[hi] else null;
-            switch (pairs.decide(typed, hi > lo, before, after)) {
-                .insert_plain => if (hi == lo) if (reindent) |r| {
+            // 따옴표 자동 닫기는 caret 의 문맥을 본다(TR4 — 트리가 답하지 못하면 `unknown`, 종전대로).
+            const lit: literals.Literal = if (ctx) |c| (if (c.literal_spans) |ls| literals.at(ls, content, lo) else .unknown) else .unknown;
+            switch (pairs.decideIn(typed, hi > lo, before, after, lit)) {
+                .insert_plain => if (hi == lo) if (ctx) |r| {
                     if (closerReindent(content, r, lo, typed)) |ri| if (ri.line_start >= prev_end) {
                         // **닫는 괄호를 짝 줄의 들여쓰기로**(계획 editor-typing-rules TR2) — 줄 머리부터 caret 까지(공백뿐)를 그 들여쓰기 + 괄호로.
                         const joined = try std.mem.concat(allocator, u8, &.{ ri.indent, &[_]u8{typed} });
@@ -448,7 +467,7 @@ test "INDR4 낱말 내어쓰기 — Ruby end·else·when·…, Python else:·eli
     for (cases) |k| {
         var lines = try line_index.build(a, k.src);
         defer lines.deinit();
-        const r: Reindent = .{ .lines = lines, .brackets = "()[]{}", .grammar = k.g, .unit = four, .tab_width = 4 };
+        const r: Context = .{ .lines = lines, .brackets = "()[]{}", .grammar = k.g, .unit = four, .tab_width = 4 };
         const got = try keywordOutdent(a, k.src, r, k.caret, k.typed);
         if (k.want) |w| {
             try std.testing.expect(got != null);
@@ -466,10 +485,58 @@ test "INDR6 낱말 내어쓰기 × 커서 여럿 — 같은 줄의 두 커서(�
     const content = "def f\n    x\n    en\n";
     var lines = try line_index.build(a, content);
     defer lines.deinit();
-    const r: Reindent = .{ .lines = lines, .brackets = "()[]{}", .grammar = .ruby, .unit = .{ .tabs = false, .width = 4 }, .tab_width = 4 };
+    const r: Context = .{ .lines = lines, .brackets = "()[]{}", .grammar = .ruby, .unit = .{ .tabs = false, .width = 4 }, .tab_width = 4 };
     var t = try planTyping(a, content, &.{ Selection.at(14), Selection.at(18) }, "d", true, r);
     defer t.deinit(a);
     try std.testing.expect(t.wellFormed());
     try std.testing.expectEqual(@as(usize, 2), t.changes.items.len);
     try std.testing.expectEqual(@as(usize, 18), t.changes.items[1].start); // 뒤 커서는 그 자리에
+}
+
+test "INDL2 구문 트리 문맥 × 타이핑 — 문자열·주석 안 괄호는 짝 찾기에서 안 세고, 문자열·주석 안 caret 은 내어쓰지 않으며, 따옴표는 문자열 안에서 안 닫는다; 트리가 없으면 종전 (계획 editor-typing-rules TR4)" {
+    const a = std.testing.allocator;
+    const Case = struct { src: []const u8, spans: []const literals.Span, caret: usize, with: ?[]const u8, without: ?[]const u8 };
+    const cases = [_]Case{
+        // 위 줄 문자열 안 `{` 를 건너 바깥 `f() {` 줄로 — 트리가 없으면 그 `{` 가 짝이라(들여쓰기가 같다) 그대로.
+        .{ .src = "f() {\n  s = \"{\";\n  \n", .spans = &.{.{ .start = 12, .end = 15, .kind = .string }}, .caret = 19, .with = "", .without = null },
+        // 줄 주석 안 `{` 도 같다.
+        .{ .src = "f() {\n  x(); // {\n  \n", .spans = &.{.{ .start = 13, .end = 17, .kind = .comment }}, .caret = 20, .with = "", .without = null },
+        // caret 이 여러 줄 문자열 안 — 글자를 바꾸지 않는다(트리가 없으면 `f() {` 줄로 내어쓴다).
+        .{ .src = "f() {\n  s = `\n  \n", .spans = &.{.{ .start = 12, .end = 17, .kind = .string }}, .caret = 16, .with = null, .without = "" },
+    };
+    for (cases) |k| {
+        var lines = try line_index.build(a, k.src);
+        defer lines.deinit();
+        for ([_]?[]const literals.Span{ k.spans, null }, [_]?[]const u8{ k.with, k.without }) |spans, want| {
+            const got = closerReindent(k.src, .{ .lines = lines, .brackets = "()[]{}", .literal_spans = spans }, k.caret, '}');
+            if (want) |w| {
+                try std.testing.expect(got != null);
+                try std.testing.expectEqualStrings(w, got.?.indent);
+            } else try std.testing.expect(got == null);
+        }
+    }
+    // 파이썬 독스트링 안에서 친 `else:` 는 내어쓰지 않는다 — 트리가 없으면 내어쓴다.
+    {
+        const src = "if a:\n    x\n    \"\"\"\n    else\n    \"\"\"\n";
+        var lines = try line_index.build(a, src);
+        defer lines.deinit();
+        const spans = [_]literals.Span{.{ .start = 16, .end = 36, .kind = .string }};
+        const four: indent_guides.Unit = .{ .tabs = false, .width = 4 };
+        try std.testing.expect(try keywordOutdent(a, src, .{ .lines = lines, .brackets = "()[]{}", .grammar = .python, .unit = four, .literal_spans = &spans }, 28, ':') == null);
+        const plain = (try keywordOutdent(a, src, .{ .lines = lines, .brackets = "()[]{}", .grammar = .python, .unit = four }, 28, ':')) orelse return error.TestExpectedOutdent;
+        defer a.free(plain.text);
+        try std.testing.expectEqualStrings("else:", plain.text);
+    }
+    // 따옴표 — 문자열 안(`"a |␣b"`)에서는 평범하게, 트리가 없으면 쌍으로.
+    {
+        const src = "x = \"a  b\"\n";
+        var lines = try line_index.build(a, src);
+        defer lines.deinit();
+        const spans = [_]literals.Span{.{ .start = 4, .end = 10, .kind = .string }};
+        for ([_]?[]const literals.Span{ &spans, null }, [_][]const u8{ "'", "''" }) |ls, want| {
+            var t = try planTyping(a, src, &.{Selection.at(7)}, "'", true, .{ .lines = lines, .brackets = "()[]{}", .literal_spans = ls });
+            defer t.deinit(a);
+            try std.testing.expectEqualStrings(want, t.changes.items[0].text);
+        }
+    }
 }

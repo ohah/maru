@@ -10,7 +10,7 @@ def run(argv, **kw):
     if result.returncode: raise AssertionError((argv[0],result.returncode,result.stderr.decode(errors='replace')[-1000:]))
     return result
 
-def emit_offline_hooks(remote, identity="offline", nonce="4331_7"):
+def emit_offline_hooks(remote, identity="offline", nonce="4331_7", message=""):
     settings = json.loads((remote / '.claude/settings.json').read_text())
     for profile in [1, 2]:
         env = dict(os.environ, HOME=str(remote), XDG_CACHE_HOME=str(remote / '.cache'),
@@ -24,6 +24,7 @@ def emit_offline_hooks(remote, identity="offline", nonce="4331_7"):
                        'transcript_path': str(remote / f'{identity}-{profile}.jsonl'),
                        'tool_name': 'Bash', 'tool_use_id': f'{identity}-tool-{profile}',
                        'tool_input': {'command': 'pwd'}}
+            if message: payload['last_assistant_message'] = message
             run(['/bin/sh', '-c', command], input=json.dumps(payload).encode(), env=env)
 
 def reconnect_probe(peer, remote, sshconfig, alias, controls, frames):
@@ -275,7 +276,8 @@ def replay_boundary_probe(peer, remote, sshconfig, alias):
         proc.stdout.close(); proc.stderr.close(); reader.join(timeout=1)
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--gui-app');ap.add_argument('--gui-output');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
+    if bool(args.gui_app) != bool(args.gui_output): ap.error('--gui-app and --gui-output must be supplied together')
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
     provider_paths=[shutil.which(name) or '' for name in ['claude','codex']] if args.providers else ['', '']
     if args.providers:assert all(provider_paths),'installed Claude/Codex required'
@@ -317,6 +319,15 @@ if len(sys.argv)>4 and sys.argv[3] and env.get("LC_MARU_LOG_FORMAT")=="2":
    raise RuntimeError("installed provider failed: "+provider)
   version=subprocess.run([argv[0],"--version"],env=penv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5).stdout.decode().strip()
   print("provider:"+json.dumps({"name":provider,"version":version,"completed":True}),flush=True)
+if (root/"gui-hold").exists():
+ import time
+ owner=root/"gui-owner.json"
+ assert not owner.exists(),"GUI restore unexpectedly respawned the remote SSH process"
+ owner.write_text(json.dumps({"nonce":env.get("LC_MARU_PANE"),"format":env.get("LC_MARU_LOG_FORMAT")}))
+ deadline=time.monotonic()+180
+ while not (root/"gui-release").exists():
+  assert time.monotonic()<deadline,"GUI hold timed out"
+  time.sleep(.05)
 print("fixture:"+json.dumps({"received":env.get("LC_MARU_LOG_FORMAT"),"hooks":2}),flush=True)
 if (root/"automatic-hold").exists():
  import time
@@ -373,6 +384,13 @@ if (root/"automatic-hold").exists():
                 assert legacy.exists() and b'UserPromptSubmit' in legacy.read_bytes()
                 if tag=='allowed':assert native.read_bytes().startswith(b'MARU_AGENT_LOG_V2\t') and b'Stop' in native.read_bytes()
                 else:assert not native.exists()
+                if args.gui_app and tag == 'allowed':
+                    import importlib.util
+                    module_path = Path(__file__).with_name('remote-restart-app') / 'run.py'
+                    spec = importlib.util.spec_from_file_location('remote_restart_gui', module_path)
+                    gui = importlib.util.module_from_spec(spec); spec.loader.exec_module(gui)
+                    assert args.gui_output, '--gui-output required for GUI evidence'
+                    gui.probe(args.gui_app, cli, root, remote, sshconfig, alias, env, emit_offline_hooks, args.gui_output)
                 if args.automatic and tag == 'allowed':
                     automatic_wrapper_probe(cli, root, remote, sshconfig, alias, env, trace)
                 if args.terminal_cancel and tag == 'allowed':

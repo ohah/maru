@@ -11,19 +11,40 @@ import UniformTypeIdentifiers // NSOpenPanel.allowedContentTypes = [.png] (배�
 import UserNotifications
 import WebKit // Phase 4c: 빈 WKWebView를 pane 본문에 부착(터미널<웹뷰<오버레이 z-order). 콘텐츠·브리지·보안은 Phase 5.
 
-/// CI는 실제 `NSScreen.backingScaleFactor`를 고를 수 없으므로, font/scale fixture만 동일한
+/// CI는 실제 `NSScreen.backingScaleFactor`를 고를 수 없으므로, 캡처 fixture 둘만 동일한
 /// drawable·resize·pointer projection scale을 주입한다. 일반 제품 경로와 다른 scenario는 반드시
 /// 물리 window scale을 그대로 쓴다.
+///
+/// - 에이전트 세션 아카이브 smoke 의 `font-scale-rects` scenario(`MARU_AGENT_SESSION_ARCHIVE_SMOKE_RENDER_SCALE_MILLI`).
+/// - **헤드리스 스크린샷**(`MARU_SCREENSHOT` + `MARU_SCREENSHOT_RENDER_SCALE_MILLI`). Retina 가 없는 화면(1x 외장 모니터·CI)
+///   에서도 2x 화면을 찍으려고 둔다 — 2x 에서만 드러나는 기하 결함(도크 토글 hover 판 2px, #4410)을 판정자로만 볼 수
+///   있었다. drawable 이 2x 로 잡히므로 PPM 도 2x 로 나온다.
+///
+/// 이름은 처음 쓴 자리(아카이브 smoke)를 따른다 — `tools/*/driver.swift.inc` 드라이버들도 같은 이름을 부른다.
+///
+/// **매 tick·매 휠 이벤트가 부른다** — env 로 정해지는 주입값은 프로세스에서 한 번만 읽는다(`injectedRenderScale`,
+/// `screenshotDelayArmed` 와 같은 관례). 물리 배율만 호출마다 읽는다(창이 화면을 옮기면 바뀐다).
 private func archiveSmokeRenderScale(_ window: NSWindow?) -> CGFloat {
     let physical = window?.backingScaleFactor ?? 1.0
-    let environment = ProcessInfo.processInfo.environment
-    guard environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1",
-          environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"] == "font-scale-rects",
-          let raw = environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_RENDER_SCALE_MILLI"],
-          let milli = UInt32(raw), milli == 1_000 || milli == 2_000
-    else { return physical }
-    return CGFloat(milli) / 1_000.0
+    return injectedRenderScale ?? physical
 }
+
+/// env 로 주입한 렌더 배율(없으면 nil). 전역 `let` 이라 처음 쓸 때 한 번만 계산된다(스레드 안전 지연 초기화).
+private let injectedRenderScale: CGFloat? = {
+    let environment = ProcessInfo.processInfo.environment
+    let raw: String?
+    if environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE"] == "1",
+       environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_SCENARIO"] == "font-scale-rects"
+    {
+        raw = environment["MARU_AGENT_SESSION_ARCHIVE_SMOKE_RENDER_SCALE_MILLI"]
+    } else if let shot = environment["MARU_SCREENSHOT"], !shot.isEmpty {
+        raw = environment["MARU_SCREENSHOT_RENDER_SCALE_MILLI"]
+    } else {
+        raw = nil
+    }
+    guard let raw, let milli = UInt32(raw), milli == 1_000 || milli == 2_000 else { return nil }
+    return CGFloat(milli) / 1_000.0
+}()
 
 /// fixture 가 쓰는 **합성 정밀 휠 이벤트**를 만든다. `windowPoint` 는 창 좌표(원점 좌하단)다.
 ///
@@ -837,7 +858,7 @@ final class MaruMetalTerminalView: NSView, @preconcurrency NSTextInputClient {
             imeLog("! firstRect missing cursor rect; using view origin")
             return window.convertToScreen(convert(NSRect(x: 0, y: 0, width: 1, height: 16), to: nil))
         }
-        let scale = window.backingScaleFactor
+        let scale = archiveSmokeRenderScale(window) // drawable 과 같은 배율(스크린샷 배율 주입 포함)
         let viewW = w / scale
         let viewH = h / scale
         // backing px의 y는 위에서 아래로(좌상단 원점). view 좌표는 아래에서 위로 증가하므로
@@ -8446,7 +8467,9 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
 
         // backing scale이 런치 후 늦게 정착/변경되면 device_scale이 옛 값에 머문다. 변했을 때만 resize.
         if (!smokeMode || isSessionHostRecoverySmokeMode), let window {
-            let scale = window.backingScaleFactor
+            // resize 가 보내는 것과 **같은 배율**과 비교한다(`archiveSmokeRenderScale`). 물리 배율과 비교하면 스크린샷
+            // 배율 주입(2x) 중에 매 tick 「바뀌었다」로 읽어 resize 를 다시 보낸다.
+            let scale = archiveSmokeRenderScale(window)
             if scale != lastSentBackingScale {
                 resizeAppSessionFromWindow()
             }
@@ -8621,7 +8644,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         guard let session = appSession else { return }
         // 마우스 위치를 backing 픽셀(좌상단 원점)로 — Zig가 커서 아래 panel로 스크롤을 라우팅한다(split).
         let local = view.convert(event.locationInWindow, from: nil)
-        let scale = window?.backingScaleFactor ?? 1.0
+        let scale = archiveSmokeRenderScale(window) // drawable 과 같은 배율(스크린샷 배율 주입 포함)
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale)
         _ = maru_macos_app_session_scroll_wheel(
@@ -9346,7 +9369,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                 return
             }
         } else if let session = appSession, let view = window?.contentView {
-            let scale = Double(window?.backingScaleFactor ?? 2)
+            let scale = Double(archiveSmokeRenderScale(window)) // drawable 과 같은 배율(스크린샷 배율 주입 포함)
             func point(_ at: Int) -> (Double, Double) {
                 let fx = Double(line[at]) ?? 0, fy = Double(line[at + 1]) ?? 0
                 let dx = Double(line[at + 2]) ?? 0, dy = Double(line[at + 3]) ?? 0
@@ -9471,7 +9494,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
                     let left = abs(frame.minX - f.minX) < 0.5
                     // 창 왼쪽 위를 화면 → 창 → view 로 되돌려 backing px 로(앞으로 간 변환과 따로 — 판정이 스크린샷의 칸과 맞춘다).
                     let corner = terminal.convert(window.convertPoint(fromScreen: NSPoint(x: frame.minX, y: frame.maxY)), from: nil)
-                    let backing = Double(window.backingScaleFactor)
+                    let backing = Double(archiveSmokeRenderScale(window)) // 스크린샷의 칸과 같은 배율(배율 주입 포함)
                     let atY = terminal.isFlipped ? corner.y : terminal.bounds.height - corner.y
                     report += " win=shown rows=\(popup.items.count) sel=\(popup.tableSelectedRow) below=\(below) left=\(left)"
                         + " clip=\(popup.testClippedRows()) first=\(popup.items.first?.value ?? "")"
@@ -11310,7 +11333,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     func handleUrlClick(_ event: NSEvent, in view: NSView) -> Bool {
         guard let session = appSession else { return false }
         let local = view.convert(event.locationInWindow, from: nil)
-        let scale = window?.backingScaleFactor ?? 1.0
+        let scale = archiveSmokeRenderScale(window) // drawable 과 같은 배율(스크린샷 배율 주입 포함)
         let xPx = Double(local.x * scale)
         let yPx = Double((view.bounds.height - local.y) * scale)
         let mods = Self.urlModsBits(event.modifierFlags)

@@ -989,6 +989,8 @@ hover·클릭은 손으로 만들지 않는다. 배치가 정한 슬롯을 `stat
 MARU_SCREENSHOT_DELAY_MS=1500 MARU_SCREENSHOT=<path> ./zig-out/Maru.app/Contents/MacOS/maru-macos-app
 ```
 
+**`MARU_SCREENSHOT_RENDER_SCALE_MILLI=2000`이면 Retina(2x)로 찍는다** — 화면이 1x(외장 모니터·CI)여도 drawable·resize·포인터 투영을 2x 로 잡아 PPM 이 두 배 크기(1500×800 창 → 3000×1600)로 나온다. 값은 `1000`·`2000` 만 받고 그 밖이면 물리 배율을 쓴다. 2x 에서만 드러나는 기하 결함(도크 토글 hover 판 2px — #4410)을 화면으로 보려고 뒀다. 주입은 에이전트 세션 아카이브 smoke 의 `font-scale-rects` 와 같은 함수(`MaruAppHost.swift` `archiveSmokeRenderScale`)를 탄다.
+
 > 이 지연 경로는 **두 곳의 draw 게이트를 모두 열어야** 동작한다 — tick 루프의 "generation이 바뀌었을 때만 draw"와 `drawMetalFrame` 안의 같은 조기 반환. 캡처는 renderer의 draw **안에서** 일어나므로, 유휴 셸에서 draw가 끊기면 마감이 지나도 찍을 기회가 없다(둘 중 하나만 열었을 때 `metal_frames_drawn=1`로 멈추는 것을 실측했다).
 
 이 구멍 때문에 §5.1의 결함이 늦게 잡혔다(지연 캡처가 고쳐지기 전이다). 잘못된 레이어는 **배경만 있고 항목이 없던 조각**에서 골랐고(그땐 덮을 텍스트가 없어 증상이 없었다), **좌측 항목 두 조각이 글자가 안 보이는 채로 머지된 뒤에야** 드러났다 — 그 둘은 셸 관측에 의존해 헤드리스로 찍을 수 없었기 때문이다. 알림 항목은 셸과 무관해 첫 frame에 세울 수 있었고, 그때서야 잡혔다.

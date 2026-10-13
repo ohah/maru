@@ -64,6 +64,9 @@ pub fn flatten(allocator: std.mem.Allocator, captures: []const Capture, out: *st
         }
         if (stack.items.len > 0) {
             const top = stack.items[stack.items.len - 1];
+            // 부모와 같은 종류의 안쪽 capture(문자열 안 `string.escape`·주석 안 문서 주석)는 조각을 가르지 않는다 — 가르면 보간 바로 앞뒤의
+            // 이스케이프(`"a\n${x}"`)가 폭 0 조각을 만들어 «글자 안 경계» 표시를 잃었다(적대적 5회차 — 변이가 드러냈다).
+            if (top.class == it.class) continue;
             try emit(allocator, out, .{ .start = cur, .end = it.start, .class = top.class }, cur_inner, it.class == .code);
             it.end = @min(it.end, top.end);
         }
@@ -189,6 +192,32 @@ test "LIT1: capture 를 겹치지 않는 조각으로 편다 — 가장 안쪽�
         .{ .start = 16, .end = 18, .kind = .string, .inner_start = true },
         .{ .start = 19, .end = 23, .kind = .comment },
     }, out.items);
+}
+
+test "LIT6: 이스케이프가 보간에 맞닿아도 경계는 글자 안이고, 시작이 같으면 바깥이 먼저, 맞닿은 조각을 이으면 끝 표시도 잇는다 (적대적 5회차 — 변이 M2·M4)" {
+    // `"a\n${x}\nb"` — 문자열 [0,13), 이스케이프 [2,4)·[8,10), 보간 [4,8).
+    var esc = try flat(&.{
+        .{ .start = 0, .end = 13, .name = "string" },
+        .{ .start = 2, .end = 4, .name = "string.escape" },
+        .{ .start = 4, .end = 8, .name = "embedded" },
+        .{ .start = 8, .end = 10, .name = "string.escape" },
+    });
+    defer esc.deinit(testing.allocator);
+    const src = "\"a\\n${x}\\nb\"";
+    try testing.expectEqual(Literal.string, at(esc.items, src, 4)); // `\n|${`
+    try testing.expectEqual(Literal.code, at(esc.items, src, 6));
+    try testing.expectEqual(Literal.string, at(esc.items, src, 8)); // `}|\n`
+    // 시작이 같으면 긴 것(바깥)이 먼저 쌓인다 — 거꾸로면 바깥이 안쪽 끝에서 잘려 조각이 사라진다.
+    var same = try flat(&.{ .{ .start = 0, .end = 4, .name = "string" }, .{ .start = 0, .end = 10, .name = "embedded" } });
+    defer same.deinit(testing.allocator);
+    try testing.expectEqualSlices(Span, &.{.{ .start = 0, .end = 4, .kind = .string }}, same.items);
+    // 맞닿은 두 문자열 capture 를 이을 때 뒤 조각의 「보간 앞 끝」 표시가 따라온다.
+    var joined = try flat(&.{ .{ .start = 0, .end = 2, .name = "string" }, .{ .start = 2, .end = 8, .name = "string" }, .{ .start = 4, .end = 6, .name = "embedded" } });
+    defer joined.deinit(testing.allocator);
+    try testing.expectEqualSlices(Span, &.{
+        .{ .start = 0, .end = 4, .kind = .string, .inner_end = true },
+        .{ .start = 6, .end = 8, .kind = .string, .inner_start = true },
+    }, joined.items);
 }
 
 test "LIT5: 글자 안 코드(보간)의 경계는 글자 안이다 — `f\"a|{b}|c\"` 와 맞닿은 보간 사이 (적대적 1회차: 실제 Python·Ruby 트리에서 그 caret 을 코드로 봤다)" {

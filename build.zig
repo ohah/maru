@@ -2083,6 +2083,17 @@ pub fn build(b: *std.Build) void {
     remote_auto_carrier.setCwd(b.path("."));
     b.step("test-remote-agent-automatic-reconnect", "Owned SSH transport loss through product CLI and GUI retry scheduling").dependOn(&remote_auto_carrier.step);
 
+    const remote_restart_tests = addProjectTest(b, .{
+        .root_module = macos_app_host_abi_tests.root_module,
+        .filters = &.{"remote restart replay"},
+    });
+    const remote_restart_carrier = b.addSystemCommand(&.{ "python3", "tools/test-remote-agent-native.py", "--restart-test" });
+    remote_restart_carrier.addArtifactArg(remote_restart_tests);
+    remote_restart_carrier.addArg("--cli");
+    remote_restart_carrier.addArtifactArg(exe);
+    remote_restart_carrier.setCwd(b.path("."));
+    b.step("test-remote-agent-restart-replay", "Fresh app receiver of pre-existing actual mixed SSH frames").dependOn(&remote_restart_carrier.step);
+
     // One real AppSession fixture owns native generation selection, lock failure,
     // replacement and post-consumption rotation; the aggregate ABI suite also runs it.
     const local_agent_log_reader_tests = addProjectTest(b, .{

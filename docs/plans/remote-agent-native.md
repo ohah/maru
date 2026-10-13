@@ -232,3 +232,82 @@ CLI wrapper가 3회 빠른 255 실패 후 포기하고, 대기 중 소유 foregr
 끝났고 취소 뒤 추가 SSH 접속은 없었다. 하네스의 닫힌 master 재사용과 입력 전
 Swift 확인이 1초 backoff를 소비하는 문제를 수정했다. 실제 GUI 단독 및 자동
 재접속과 결합한 전체 loopback 검증 모두 통과했다.
+
+## 앱 재시작 복구 검증 계획
+
+기존 RA5 계약대로 앱의 커서는 메모리에만 두며 새 앱은 최근 원격 기록을 재생한다.
+채널 재접속의 resume와 앱 재시작의 상태 재구성을 구분한다. 실제 loopback SSH wire를
+새 AppSession에서 소비하여 배지 복원과 과거 완료 알림·턴 before 재캡처 여부를 검사한다.
+다음 단계는 앱을 종료한 사이 기록한 두 포맷과 복원된 pane 신원을 새 프로세스에 전달하는
+실물 restore 검증이다. 제품 receiver 재생만으로 실제 앱 재실행 완료를 주장하지 않는다.
+초기 과거 기록과 live 기록을 구분할 수 없는 경우 임의의 시간·batch 크기로 경계를 추측하지
+않고, wire 경계 계약을 먼저 설계하고 사용자와 논의한다.
+
+### 재현 결과와 초기 경계 계약 제안
+
+main `fcbd66ac5` 기반 실제 loopback SSH의 기존 v1/v2 wire를 새 AppSession에서
+소비하면 idle 배지는 복원되지만 `term.hook.notice.kind`는 `.done`으로 남았다.
+`test-remote-agent-restart-replay`가 `.none`을 기대해 실패한다. 이는 수신기와 알림
+예약의 재현이며 실제 workspace restore·GUI 재실행·OS 배너 실측을 뜻하지 않는다.
+로컬 수신기는 `backlog_catchup`으로 과거 기록의 알림·before 읽기를 억제하지만
+원격 경로에는 초기 따라잡기 경계가 없다.
+
+제안: 새 capability를 협상한 mixed reader가 초기 파일별 `(profile,name,generation,offset)`
+watermark를 고정하고 그 경계까지의 이벤트를 replay로 표시한다. receiver는 배지·대화·
+신원을 복원하되 과거 완료 알림과 현재 파일의 before 재캡처를 억제한다. 여러 tick·
+stdout 배압에도 분류를 유지하고 경계를 지난 이벤트는 live로 처리한다. 채널 재접속은
+기존 resume 계약을 유지한다. generation 교체·뒤늦은 파일 발견·rotation은 wire 설계에
+명시하고 독립 fixture로 검증한다. 기존 v3 hello를 새 경계 지원으로 오인하지 않는다.
+구 peer는 기존 동작을 유지하며 경계 지원이 없다는 진단을 남긴다.
+
+공격 항목: 초기 파일이 여러 배치에 걸침, 두 profile 교차 소비, 초기 읽기 중 새 Stop,
+rotation과 generation 교체, stdout 배압·EOF, resume와 fresh app 구분, 다른 pane,
+구 peer. 첫 heartbeat·시간 지연·첫 batch만으로 replay 종료를 추측하지 않는다.
+기존 wire 확장은 아래 사용자 승인과 확정 계약에 따라 구현한다.
+초기 실패 판정자는 아래 확정 계약과 실제 SSH 회귀 gate로 발전시켰다.
+
+### 확정한 초기 재생 경계 계약
+
+2026-10-14 사용자가 통신 계약 확장을 승인했다. 기존 `--log-format=mixed`와 v3 wire는
+유지한다. 두 provider의 준비 응답에 `replay_boundary:true`가 확인되면 GUI는
+`--log-format=mixed --replay-boundary`를 요청한다. 이 모드의 hello는
+`{"hello":"maru-agent-events-mixed-replay","v":4}`다. v3 hello는 이 기능의 증거가 아니다.
+구 peer는 기존 v3 동작을 유지하며 과거 기록 억제는 지원하지 않는다.
+
+초기 정리 후 두 namespace의 파일 크기·v2 generation·v1 inode를 **hello 전에** 고정한다.
+파일 목록은 같은 순간의 전역 원자 snapshot이 아니라 파일별 순차 snapshot이다. 초기
+snapshot 중 파일이 생기면 탐색에서 발견한 파일만 과거 경계를 갖는다. 실패한 v2 lock/read는
+과거 기록을 live로 오인해 전달하지 않고 시작 실패로 드러낸다. 초기 과거 기록을 모두 읽을
+때까지 UI를 기다리게 하지 않는다. 기존 파일/청크 읽기 예산과 번갈아 읽기를 유지한다.
+
+v4 envelope는 `{"replay":true|false,"format":1|2,"frame":<기존 frame>}`다. 완성된 이벤트의
+끝 offset이 고정한 경계 이하이고 파일 신원이 일치하면 replay다. 초기 부분 줄이 나중에
+완성되어 경계를 넘으면 live다. v2 세대가 바뀌면 이전 경계를 적용하지 않는다. v1은 inode
+교체와 크기 감소를 감지하지만 같은 inode를 truncate 후 다시 크게 쓴 경우는 기존 v1의
+세대 식별 한계가 남는다. 이 보장을 v2 수준으로 주장하지 않는다.
+
+커서 inner frame은 `replay_at`·`replay_inode`와 선택적 `replay_gen`을 함께 전달한다.
+이 메타데이터를 위치 0의 초기 커서로 이벤트 전에 전송하여 첫 청크 중 EOF에도 기억한다.
+GUI는 동일한 cursor 항목 안에 보관하고 재접속에서 `--replay-state=`로 되돌린다.
+문법은 기존 mixed cursor 문법의 offset을 초기 경계로 해석하고 마지막 `:<inode>`를 붙인다.
+예: `1:name:100:1234`, `2:name:200:<generation>:0`. 이름 중복·타입·상한을 검증하며
+watermark는 대응하는 resume 항목 없이 적용할 수 없다. 32개 cursor 상한은 유지하고
+replay-state 바이트 예산은 기존 mixed 예산 + 21×32로 별도 고정한다. 별도 SSH 채널이나
+영속 커서 파일은 만들지 않는다. 메모리 커서는 앱 종료와 함께 사라진다.
+
+replay 이벤트는 기존 상태 기계로 배지·대화·신원을 복원하되 완료/승인 알림, 현재 파일의
+before 읽기와 과거 턴 재봉인/스냅샷 생성은 억제한다. 이미 영속한 턴 기록의 복원은 기존
+복원 경로가 소유한다. 경계 뒤 live 이벤트는 정상 알림과 새 턴 캡처를 만든다.
+
+검증 게이트 `test-remote-agent-restart-replay`는 실제 loopback SSH wire를 **새 제품
+AppSession 프로세스**에서 소비한다. 과거 기록 억제, live 알림·캡처, 여러 청크의 과거
+800개/live 8개, 초기 커서 전송 뒤 자식 종료·새 transport resume를 검사한다. OS 창을
+종료/재실행하는 workspace restore E2E와 OS 배너 표시는 이 gate의 증거에 포함하지 않는다.
+EOF 중 ACK 없는 프레임의 exactly-once나 읽은 파일 전부의 무제한 cursor 보존도 주장하지 않는다.
+
+교차 profile 공격에서도 추가 결함을 재현했다. live Prompt 뒤 다른 profile의 과거
+Prompt/Stop이 도착하면 live 턴이 idle로 덮였다. 중립 `HookSlot`이 pane별 live 수신 여부를
+기억하고 그 뒤의 replay는 현재 상태·provider·알림을 변경하지 않도록 했다. 다른 pane의
+초기 복원은 독립적으로 진행한다. 이 표시는 transport 재접속에서는 보존하고, 훅 끄기·
+원격 이탈·다른 nonce owner로 전환할 때 초기화한다. v3의 기존 경로는 이 규칙을 쓰지 않는다.
+v4는 명시적 replay envelope와 커서의 경계 메타데이터를 요구하며 v3 hello로 낮추지 않는다.

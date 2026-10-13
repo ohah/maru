@@ -55,6 +55,8 @@ pub const Mode = union(enum) {
 pub const Options = struct {
     dir: []const u8,
     log_format: enum { v1, v2, mixed } = .v1,
+    replay_boundary: bool = false,
+    replay_state: []const u8 = "",
     /// 하트비트 주기(ms). **0 이면 안 보낸다** — 그러면 소비자가 사망을 침묵으로 재지 못한다는 뜻이라
     /// 시험용 외에는 쓰지 않는다.
     heartbeat_ms: u32 = 5_000,
@@ -76,6 +78,8 @@ pub fn parseArgs(args: []const []const u8) Mode {
     var resume_spec: []const u8 = "";
     var resume_seen = false;
     var saw_stdio = false;
+    var replay_boundary = false;
+    var replay_state: ?[]const u8 = null;
     var log_format: ?@FieldType(Options, "log_format") = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -100,11 +104,19 @@ pub fn parseArgs(args: []const []const u8) Mode {
         } else if (std.mem.startsWith(u8, a, "--log-format=")) {
             if (log_format != null) return .usage_error;
             log_format = std.meta.stringToEnum(@FieldType(Options, "log_format"), a["--log-format=".len..]) orelse return .usage_error;
+        } else if (std.mem.startsWith(u8, a, "--replay-state=")) {
+            if (replay_state != null) return .usage_error;
+            replay_state = a["--replay-state=".len..];
+        } else if (std.mem.eql(u8, a, "--replay-boundary")) {
+            if (replay_boundary) return .usage_error;
+            replay_boundary = true;
         } else return .usage_error;
     }
     if (!saw_stdio) return .usage_error;
     const d = dir orelse return .usage_error;
     if (d.len == 0 or !std.fs.path.isAbsolute(d)) return .usage_error; // 상대 경로는 cwd 에 끌려간다
+    if (replay_state) |state| if (!replay_boundary or !@import("../session/agent_stream_mixed.zig").validReplayState(state)) return .usage_error;
+    if (replay_boundary and log_format != .mixed) return .usage_error;
     if (log_format == .mixed) {
         if (!@import("../session/agent_stream_mixed.zig").validResume(resume_spec)) return .usage_error;
     } else if (log_format == .v2) {
@@ -113,7 +125,7 @@ pub fn parseArgs(args: []const []const u8) Mode {
             _ = generation.decodeResumeEntry(field) catch return .usage_error;
         };
     } else if (!resumeIsWellFormed(resume_spec)) return .usage_error;
-    return .{ .stdio = .{ .dir = d, .heartbeat_ms = hb, .resume_spec = resume_spec, .log_format = log_format orelse .v1 } };
+    return .{ .stdio = .{ .dir = d, .heartbeat_ms = hb, .resume_spec = resume_spec, .log_format = log_format orelse .v1, .replay_boundary = replay_boundary, .replay_state = replay_state orelse "" } };
 }
 
 /// 디렉터리 항목이 **우리 로그**인가. 맞으면 그 nonce 를 돌려준다.
@@ -305,6 +317,9 @@ pub fn resumeIsWellFormed(spec: []const u8) bool {
 /// (프로토타입에서 실제로 그 자리를 만났다).
 pub const Cursor = struct {
     generation: ?generation.Generation = null,
+    replay_end: u64 = 0,
+    replay_inode: u64 = 0,
+    replay_generation: ?generation.Generation = null,
     /// 이미 흘린 바이트 수.
     offset: u64 = 0,
     /// 그때 본 파일 크기. **줄어들면 회전·재생성이므로 커서를 0 으로 되돌린다** — 안 그러면 새 파일의

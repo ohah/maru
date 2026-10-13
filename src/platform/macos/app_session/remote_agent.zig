@@ -82,6 +82,7 @@ pub fn pumpRemoteAgentChannels(self: *AppSession) void {
                         // **원격 훅이 세운 종류 래치도 푼다.** 안 풀면 로컬 프로세스 판정이 영영 꺼진 채라(`remote_owns_kind`)
                         // 이 칸에서 띄운 로컬 에이전트가 배지도, 재부팅 뒤 이어가기(RB2)도 못 얻는다(코드 리뷰).
                         term.agent_kind_from_hook = false;
+                        resetReplayForTerm(self, term);
                     }
                     continue;
                 };
@@ -113,6 +114,12 @@ pub fn pumpRemoteAgentChannels(self: *AppSession) void {
     for (dead[0..dead_n]) |key| closeRemoteAgentHost(self, key);
 }
 
+fn resetReplayForTerm(self: *AppSession, term: *Term) void {
+    term.hook.remote_live_seen = false;
+    var entries = self.remote_agent_panes.forSurface(term.surfaceId());
+    while (entries.next()) |entry| entry.slot.remote_live_seen = false;
+}
+
 /// 이 Term 의 pane nonce 를 세우고, 그 목적지의 채널·파싱 상태를 보장한다.
 pub fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, now_ms: u64) void {
     const hc = maru.session.agent_hook_command;
@@ -128,6 +135,7 @@ pub fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, 
         if (agent_ops.remotePaneNonceFor(term, &buf)) |nonce| {
             const cur = term.agent_remote_nonce[0..term.agent_remote_nonce_len];
             if (!std.mem.eql(u8, cur, nonce)) {
+                if (!agent_ops.remoteEventIsOurs(cur, nonce)) resetReplayForTerm(self, term);
                 if (cur.len != 0) self.reportRemoteNonceRebind(ctx.dest, cur, nonce);
                 @memcpy(term.agent_remote_nonce[0..nonce.len], nonce);
                 term.agent_remote_nonce_len = @intCast(nonce.len);
@@ -187,6 +195,8 @@ pub fn ensureRemoteAgentTerm(self: *AppSession, term: *Term, ctx: RemoteUpload, 
             ras.Channel.initOpenProfile(now_ms, gop.value_ptr.stream_profile orelse .v1)
         else
             ras.Channel.initForProfile(now_ms, if (gop.value_ptr.stream_profile == .v2) .v2 else null);
+        term.agent_remote_channel.?.replay_transport = gop.value_ptr.replay_stream;
+        term.agent_remote_channel.?.required_replay = gop.value_ptr.replay_stream;
     }
 }
 
@@ -479,6 +489,7 @@ pub fn closeAllRemoteAgentHosts(self: *AppSession) void {
             for (pane.terms.items) |term| {
                 term.agent_remote_channel = null;
                 term.agent_remote_nonce_len = 0;
+                resetReplayForTerm(self, term);
             }
         }
     }

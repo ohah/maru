@@ -28,7 +28,7 @@ pub fn parseHello(line: []const u8, required: ?Profile) ?Profile {
     return profile;
 }
 
-pub const Cursor = struct { name: []const u8, offset: u64, generation: ?codec.Generation = null };
+pub const Cursor = struct { name: []const u8, offset: u64, generation: ?codec.Generation = null, replay_at: ?u64 = null, replay_inode: u64 = 0, replay_generation: ?codec.Generation = null };
 pub fn parseCursor(line: []const u8, profile: Profile) ?Cursor {
     if (line.len > 512) return null;
     var scratch: [4096]u8 = undefined;
@@ -53,7 +53,23 @@ pub fn parseCursor(line: []const u8, profile: Profile) ?Cursor {
         .v1 => if (field_gen == null) null else return null,
         .v2 => if (field_gen) |value| if (value == .string) codec.decodeGeneration(value.string) catch return null else return null else return null,
     };
-    return .{ .name = borrowed, .offset = offset, .generation = generation };
+    var replay_at: ?u64 = null;
+    var replay_inode: u64 = 0;
+    var replay_generation: ?codec.Generation = null;
+    if (parsed.value.object.get("replay_at")) |value| {
+        if (value != .number_string) return null;
+        for (value.number_string) |d| if (d < '0' or d > '9') return null;
+        replay_at = std.fmt.parseInt(u64, value.number_string, 10) catch return null;
+        const inode = parsed.value.object.get("replay_inode") orelse return null;
+        if (inode != .number_string) return null;
+        for (inode.number_string) |d| if (d < '0' or d > '9') return null;
+        replay_inode = std.fmt.parseInt(u64, inode.number_string, 10) catch return null;
+        if (parsed.value.object.get("replay_gen")) |g| {
+            if (g != .string or profile != .v2) return null;
+            replay_generation = codec.decodeGeneration(g.string) catch return null;
+        }
+    } else if (parsed.value.object.get("replay_inode") != null or parsed.value.object.get("replay_gen") != null) return null;
+    return .{ .name = borrowed, .offset = offset, .generation = generation, .replay_at = replay_at, .replay_inode = replay_inode, .replay_generation = replay_generation };
 }
 
 pub fn appendResume(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, name: []const u8, cursor: codec.Cursor, profile: Profile) !void {

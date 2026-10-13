@@ -6545,8 +6545,10 @@ pub const AppSession = struct {
     osr_cursor_pending: ?CursorKind = null,
     /// W4c: 지금 키 포커스를 준 Chromium 탭(0 = 없음). 바뀌면 `syncOsrKeyTarget` 이 포커스를 옮긴다.
     osr_key_target: u64 = 0,
-    /// maru 가 곧 키 대상을 옮긴다는 표시(단조 ms, `monotonicMs`) — 그 바뀜만 사용자 시각을 찍지 않는다(W9c② 적대 리뷰 4 회차, `web_ops.markFocusByApp`).
-    osr_focus_by_app_ms: u64 = 0,
+    /// maru 가 곧 키 대상을 옮긴다는 표시(그 이동·단조 ms) — 그 바뀜만 사용자 시각을 찍지 않는다(W9c② 적대 리뷰 4·5 회차, `web_ops.markFocusByApp`).
+    osr_focus_by_app: ?web_ops.AppFocusMark = null,
+    /// 권한 확인 모달이 키를 가져갈 때 키를 쥐고 있던 탭 — 모달이 닫히면 그리로 돌아가는 이동을 maru 것으로 표시한다(5 회차).
+    osr_grant_return: u64 = 0,
     /// W10b: 이 세션이 다운로드 목록(앱 전역)에 마지막으로 알린 「매번 묻기」 — 이 세션의 값이 바뀔 때만 다시 알린다(관계없는 재적용·
     /// 외관 전환이 다른 창의 옛 값으로 되돌렸다 — 5 회차).
     download_ask_applied: ?bool = null,
@@ -10774,7 +10776,11 @@ pub const AppSession = struct {
         if (self.pending_confirm == .editor_save_close) @import("app_session/editor/save/close.zig").cancel(self);
         switch (self.pending_confirm) {
             .quit => self.quit_decision = .cancelled,
-            .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = false },
+            .grant => |async_id| {
+                self.grant_confirm_decision = .{ .async_id = async_id, .approved = false };
+                if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return); // 모달이 닫혀 키가 돌아간다
+                self.osr_grant_return = 0;
+            },
             .paste => self.pending_paste_confirm.clearRetainingCapacity(),
             .file_panel_close => file_panel_ops.cancelFilePanelClose(self),
             .file_tree_delete => self.pending_file_tree_delete = null,
@@ -10874,6 +10880,9 @@ pub const AppSession = struct {
         // 다른 모달/오버레이 점유(닫기·종료·리셋·붙여넣기 확인 or 세팅/find/palette 등) → 안 뜸(비파괴). 다음 tick 재시도.
         if (self.anyOverlayOpen() or self.pending_confirm != .none) return false;
         self.showConfirmButtons(.{ .grant = async_id }, message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
+        // 모달이 키를 가져간다 — maru 가 옮긴 것(W9c② 적대 리뷰 5 회차: 허락 직후 에이전트 자신의 alert 가 거절됐다).
+        self.osr_grant_return = self.osr_key_target;
+        if (self.osr_key_target != 0) web_ops.markFocusByApp(self, self.osr_key_target, 0);
         // 에이전트 요청이 tick 에 꺼내져 **비동기로 뜬다**(요청 시점을 에이전트가 고른다) — 사용자가 치던 키가 허용이 되지 않게
         // (`guardAsync` — 거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더 묻는다, chrome-strategy §5.4).
         self.chrome_host.confirm.guardAsync(maru.i18n.t(.grant_recheck));
@@ -13457,7 +13466,11 @@ pub const AppSession = struct {
                     .remote_file_tree_delete => file_panel_ops.confirmRemoteFileTreeDelete(self),
                     .lsp_trust => editor_ops.lsp_client.answerTrust(self, true),
                     .lsp_trust_manage => editor_ops.lsp_client.answerManage(self, .primary),
-                    .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = true },
+                    .grant => |async_id| {
+                        self.grant_confirm_decision = .{ .async_id = async_id, .approved = true };
+                        if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return); // 모달이 닫혀 키가 돌아간다
+                        self.osr_grant_return = 0;
+                    },
                     .quit => {
                         self.quit_decision = .accepted;
                         app_quit_keep_alive = appKeepAlivePolicyValue();
@@ -100337,4 +100350,127 @@ test "remote reconnect failure repeated recovery advances both cursors and badge
         try std.testing.expectEqual(@as(u64, (cycle + 1) * 100), host.cursors.get(key_v1).?.offset);
         try std.testing.expectEqual(@as(u64, (cycle + 1) * 100), host.cursors.get(key_v2).?.offset);
     }
+}
+
+// W9c② 적대 리뷰 5 회차 — 실제 창의 키 대상 동기화(`syncOsrKeyTarget`)·닫기·sheet 를 지나는 원인 시험.
+const W9c2R5Access = struct {
+    fn yes(_: ?*const anyopaque, _: u64) bool {
+        return true;
+    }
+    fn no(_: ?*const anyopaque, _: u64) bool {
+        return false;
+    }
+    const access: web_osr.DialogAccess = .{ .granted = yes, .agent_tab = no };
+};
+
+fn w9c2R5Web(session: *AppSession, allocator: std.mem.Allocator) !u64 {
+    const sid = try web_ops.createAdoptedWebTermInActivePane(session);
+    try web_osr.testHold(allocator, sid);
+    web_osr.testRunning(sid);
+    return sid;
+}
+
+test "W9c② 적대 리뷰 5 회차 재현 A: 에이전트가 청한 권한 모달이 포커스 탭 위에 떴다 닫혀도 사용자 바뀜이 아니다 — 허락 뒤 다시 보낸 누름의 alert 는 에이전트가 답한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const tab = try w9c2R5Web(session, allocator); // 사용자의 탭 — 키를 쥐었다(사용자가 지켜본다)
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(tab, session.osr_key_target);
+    web_osr.testAgeStamps(tab, 60_000); // 사용자는 1 분 전 만졌다
+    // 에이전트가 그 탭에 browser.click → 권한 모달(drainGrantPrompts → showGrantConfirm)
+    try std.testing.expect(session.showGrantConfirm("Allow agent to control this tab?", 1));
+    web_ops.syncOsrKeyTarget(session); // tick
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_target);
+    // 사용자가 허용을 누른다 → 모달이 닫힌다 → tick → 키가 돌아온다
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept); // 실제 허락 경로(grant 결정·표시)
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(tab, session.osr_key_target);
+    // 다시 보낸 누름(에이전트 시각) → 페이지 onclick 의 alert("Saved")
+    web_osr.noteAgentInput(tab);
+    web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = tab, .request = 1, .kind = .alert, .origin = "https://app.test", .message = "Saved" } });
+    _ = try web_osr.agentReplyDialog(allocator, tab, null, true, "", W9c2R5Access.access);
+}
+
+test "W9c② 적대 리뷰 5 회차 재현 B: 뒤 탭을 에이전트가 닫은 표시가 남아 사용자의 탭 전환을 maru 것으로 보지 않는다 — 그 탭의 focus confirm 은 에이전트가 답하지 못한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const pane = pane_ops.activePane(session);
+    const shell = pane.activeTerm().surfaceId();
+    const y = try w9c2R5Web(session, allocator); // 사용자 탭 Y(grant 있음) — 에이전트가 1 초 전 움직였다
+    const v = try w9c2R5Web(session, allocator); // 사용자 탭 V — 활성
+    const bg = try web_ops.openAgentTab(session, shell, null); // 에이전트의 뒤 탭
+    try web_osr.testHold(allocator, bg);
+    web_osr.testRunning(bg);
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(v, session.osr_key_target);
+    web_osr.testAgeStamps(y, 60_000);
+    web_osr.testAgeStamps(v, 60_000);
+    web_osr.noteAgentInput(y);
+    // 에이전트가 뒤 탭을 닫는다(떠나기 확인 없음) → 창 tick 의 osrCloseAskedTab
+    try std.testing.expectEqual(web_ops.AgentCloseStart.asking, web_ops.agentCloseTab(session, bg, shell));
+    web_ops.osrCloseAskedTab(session, bg, .closed);
+    web_ops.syncOsrKeyTarget(session); // 같은 tick — 키 대상은 그대로(뒤 탭이었다)
+    try std.testing.expectEqual(v, session.osr_key_target);
+    // 사용자가 ⌘⌥[(메뉴 previous_term) → Y
+    try std.testing.expect(session.runAction("previous_term"));
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(y, session.osr_key_target);
+    // Y 의 focus 처리기: confirm("새 판이 있다. 다시 불러올까?")
+    web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = y, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "Reload?" } });
+    try std.testing.expectError(error.NotYours, web_osr.agentReplyDialog(allocator, y, null, true, "", W9c2R5Access.access));
+}
+
+test "W9c② 적대 리뷰 5 회차 대조 B: 닫기가 없어도 사용자의 탭 전환 뒤 focus confirm 은 에이전트가 답하지 못한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const y = try w9c2R5Web(session, allocator);
+    const v = try w9c2R5Web(session, allocator);
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(v, session.osr_key_target);
+    web_osr.testAgeStamps(y, 60_000);
+    web_osr.testAgeStamps(v, 60_000);
+    web_osr.noteAgentInput(y);
+    try std.testing.expect(session.runAction("previous_term"));
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(y, session.osr_key_target);
+    web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = y, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "Reload?" } });
+    try std.testing.expectError(error.NotYours, web_osr.agentReplyDialog(allocator, y, null, true, "", W9c2R5Access.access));
+}
+
+test "W9c② 적대 리뷰 5 회차 재현 C: 뒤 탭이 스스로 닫힌 표시가 남아 사용자의 탭 전환을 maru 것으로 보지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const y = try w9c2R5Web(session, allocator);
+    const popup = try w9c2R5Web(session, allocator);
+    const v = try w9c2R5Web(session, allocator);
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(v, session.osr_key_target);
+    web_osr.testAgeStamps(y, 60_000);
+    web_osr.testAgeStamps(v, 60_000);
+    web_osr.noteAgentInput(y);
+    web_ops.osrClosePageClosedTab(session, popup); // 뒤 탭이 스스로 닫혔다
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(v, session.osr_key_target);
+    session.focusTerm(1); // 사용자가 Y 탭을 누른다(팝업이 빠진 뒤 셸 0·Y 1·V 2)
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(y, session.osr_key_target);
+    web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = y, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "Reload?" } });
+    try std.testing.expectError(error.NotYours, web_osr.agentReplyDialog(allocator, y, null, true, "", W9c2R5Access.access));
 }

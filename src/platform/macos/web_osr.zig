@@ -1569,6 +1569,16 @@ pub fn testSetPopupFamily(child: u64, root: u64) void {
     if (surfaces.getPtr(child)) |s| s.popup_family = root;
 }
 
+/// 시험 전용(W9c②): 그 탭의 사용자·에이전트 시각을 모두 `ago_ms` 전으로(오래전에 만졌다).
+pub fn testAgeStamps(surface_id: u64, ago_ms: i64) void {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id) orelse return;
+    const t = monotonicNow() - ago_ms;
+    s.user_action_ms = t;
+    s.last_user_input_ms = t;
+    s.agent_input_ms = t;
+}
+
 /// 시험 전용(W9b③): 그 탭의 첫 대화상자 번호.
 pub fn testDialogToken(surface_id: u64) ?u64 {
     if (!builtin.is_test) @compileError("test only");

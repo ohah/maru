@@ -482,25 +482,38 @@ IC5c 는 둘로 나눴다 — 용량 사건 깨우기(IC5c-1, 정지 화면의 �
 
 - 우선권(`Connection.image_priority`, 계약 §4.4)은 Connection 층이 든다 — stream·commit·detach 경계를 아는 층이다. owner 층의 원장은
   그대로 「연결 상한보다 큰 한 장은 원장이 비었을 때만」을 지킨다(IC1).
-  - 쥐기: 연결 바이트 상한보다 큰 이미지가 미뤄지면(이유와 무관 — 원장이 안 비었음·같은 이미지 미반환·채널 없음) 그 (stream, image)
-    가 쥔다. 이미 다른 한 장이 쥐었으면 그 차례 뒤다.
+  - 쥐기: 연결 바이트 상한보다 큰 이미지가 **원장이 찬 채** 미뤄지면 그 (stream, image) 가 쥔다(owner 연산 `outstanding_segments`).
+    원장이 빈 채 미뤘으면(공유 메모리 생성 실패·host 상한·채널 없음) 쥐지 않는다 — 이 연결의 반환이 다시 오지 않아 쥐고 있으면
+    남을 다음 화면 변화까지 막는다. 이미 다른 한 장이 쥐었으면 그 차례 뒤다.
   - 막기: 쥔 동안 이 연결의 다른 이미지는 owner 에 청하지도 않고 미룬다 — 다른 stream·스냅샷도, 같은 투영에서 앞에 오는 이미지도
     (「배치 안에서도 먼저 평가」가 이렇게 성립한다). host 전체 상한보다 큰 것은 그대로 「전송 불가」로 분류한다.
   - 놓기: 그 stream 투영의 commit 이 그 한 장을 준비했으면 놓는다(곧 발급되어 원장이 연결 상한을 넘으니 그 반환이 다른 이미지를
-    깨운다). 청하지도 않았으면(사라졌다 — 지워짐·화면 밖) 놓고 깨운다. stream 이 떠나도(`removeAttachment` — detach·attach 롤백·
-    RuntimeNotFound) 놓고 깨운다. 롤백은 아무것도 바꾸지 않는다. stream id 는 연결 안에서 재사용하지 않는다.
+    깨운다). 더 다투지 않으면 놓고 깨운다 — 청하지 않음(사라졌다 — 지워짐·화면 밖·레코드 예산으로 건너뜀), 「전송 불가」가 됨(그
+    사이 host 상한보다 커졌다), 원장이 빈 채 또 미룸. stream 이 떠나도(`removeAttachment` — detach·attach 롤백·RuntimeNotFound) 놓고
+    깨운다. 롤백은 아무것도 바꾸지 않는다. stream id 는 연결 안에서 재사용하지 않는다.
   - 놓으며 깨운 stream 은 다음 cadence(≤ 20 ms)가 투영한다 — Connection 층은 owner 의 즉시 예약에 닿지 않는다.
   - 쥔 동안 release 는 원장이 빌 때만 깨운다 — 그 전엔 그 한 장도 못 들어가고 다른 이미지는 막혀, 깨워 봐야 투영만 헛돈다.
 - 「전송 불가」 진단(`session host image untransmittable:` — slot·stream·image·generation·bytes·host 상한): host 상한 초과와 레코드
-  길이(u32) 초과 두 자리 모두 `Client.imageUntransmittable` 을 지난다. 그 이미지는 base 에 적히지 않아 투영마다 다시 청하므로
+  길이(u32) 초과 두 자리 모두 `Client.imageUntransmittable` 을 지난다. u32 자리는 투영(`screen_snapshot`)이 먼저 그 이미지를
+  건너뛰어 제품에선 닿지 않는 방어선이다 — 투영 쪽 건너뜀은 진단을 남기지 않는다. 그 이미지는 base 에 적히지 않아 투영마다 다시 청하므로
   최근 넷을 기억하는 거름(`UntransmittableMemo`, 원장 leaf)이 (stream, image, generation) 당 한 줄로 줄인다. 계약의 (image_id,
   generation) 을 stream 으로 좁혔다 — image id 는 runtime 마다 따로 센다.
-- 판정자: server(`test-image-channel` 14) — 상한 안 이미지는 미뤄져도 쥐지 않고, 큰 한 장이 미뤄지면 쥐며 같은 stream 의 앞 이미지·
+- 판정자: server(`test-image-channel` 15) — 상한 안 이미지는 미뤄져도 쥐지 않고, 큰 한 장이 미뤄지면 쥐며 같은 stream 의 앞 이미지·
   다른 stream 의 스냅샷이 owner 에 청하지 않고 미루고 host 상한 초과는 「전송 불가」로 남으며, 원장이 비면 그 한 장이 먼저 들어가고
   롤백은 놓지 않으며 준비한 commit 이 놓되 깨우지 않는다; 사라진 한 장은 롤백이 놓지 않고 commit 이 놓으며 막혔던 stream(그 stream
-  자신 포함)을 깨우고, detach 도 놓고 깨운다. owner(`test-image-channel-host` 19) — 쥔 동안 원장이 남는 release 는 깨우지 않고 비우는
-  release 는 깨우며, 두 「전송 불가」 자리 모두 판마다 한 번 거른다. 원장 leaf(8) — 거름이 판마다 한 번이고 넘치면 가장 오래된 것부터
-  잊는다.
+  자신 포함)을 깨우고, detach 도 놓고 깨운다; 쥔 한 장이 「전송 불가」가 되거나 원장이 빈 채 또 미뤄지면 놓고 깨우며, 원장이 빈 채
+  미뤄진 한 장은 쥐지 않는다. owner(`test-image-channel-host` 19) — 쥔 동안 원장이 남는 release 는 깨우지 않고 비우는 release 는
+  깨우며, 두 「전송 불가」 자리 모두 판마다 한 번 거른다; Connection 에 건넨 `outstanding_segments` 가 원장 수를 답한다; IC5c-1 의
+  깨움 판정자가 producer 예약(sweep 목록)까지 잰다. 원장 leaf(8) — 거름이 판마다 한 번이고 넘치면 가장 오래된 것부터 잊는다.
+- 적대적 검증 1 회차(IC5c-1·2 함께): HIGH 1·MEDIUM 1 을 고쳤다.
+  - HIGH — 쥔 한 장이 그 사이 host 상한보다 커지면(「전송 불가」) 청하기는 계속해 「다툰다」로 남아 우선권을 영영 쥐었다 — 정지
+    pane 이면 그 연결의 모든 이미지가 굶는다 → 「전송 불가」는 사라짐과 같이 놓고 깨운다.
+  - MEDIUM — 원장이 빈 채 미뤄진 한 장(공유 메모리 생성 실패 등)이 쥐면 이 연결의 반환이 다시 오지 않아 풀어 줄 사건이 없었다 →
+    원장이 찬 채 미뤘을 때만 쥐고, 원장이 빈 채 또 미루면 놓는다.
+  - LOW — IC5c-1 owner 판정자가 producer 예약을 재지 않았다(예약 줄을 지워도 초록) → sweep 목록으로 잰다. u32 자리 진단이 제품에서
+    닿지 않음 → 문서에 적었다. 거름 4 칸이 다섯 개 넘는 「전송 불가」 이미지가 번갈아 오면 매번 적는다 → 각각 host 상한(256 MiB)보다
+    커 동시에 다섯이 보일 일이 없어 그대로 둔다. 레코드 예산으로 건너뛴 한 장이 「사라짐」으로 놓였다 다시 쥐는 반복 → 그 stream 의
+    프레임 수로 묶이는 비용이라 그대로 둔다.
 - 한계: host 바이트 상한(`HostBytesFull`)으로 미룬 이미지는 **다른 연결**의 반환이 깨우지 않는다(IC5c-1 부터 그렇다 — 용량 사건은
   그 연결의 것만 본다). 우선권을 쥔 한 장이 원장이 빈 채 host 상한에 걸리면 이 연결의 다른 이미지도 다음 화면 변화까지 함께
   기다린다. 제품 GUI 는 host 당 광고하는 연결이 하나라 다른 연결이 host 예산을 쥘 일이 드물다 — 둘 이상이 되면 host 전체 반환을

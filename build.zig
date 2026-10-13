@@ -7064,12 +7064,12 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
         // hello·abandon 7, 투영 ↔ 세그먼트 배선(IC5b-2 — 발급·취소·투영 실패·resync·미룸·미협상·제품 attach) 4, 용량 사건 깨움(IC5c-1) 1,
-        // 큰 한 장 우선권(IC5c-2 — 쥐기·막기·놓기, 사라짐·detach) 2.
+        // 큰 한 장 우선권(IC5c-2 — 쥐기·막기·놓기, 사라짐·detach, 전송 불가가 됨·원장이 빈 채 미룸) 3.
         .filters = &.{ "image channel hello:", "image channel abandon:", "image segment wiring:" },
     });
     const run_image_channel_hello_tests = b.addRunArtifact(image_channel_hello_tests);
-    run_image_channel_hello_tests.addArg("--maru-expect-tests=14");
-    run_image_channel_hello_tests.addArg("--maru-expect-passed=14");
+    run_image_channel_hello_tests.addArg("--maru-expect-tests=15");
+    run_image_channel_hello_tests.addArg("--maru-expect-passed=15");
     image_channel_step.dependOn(&run_image_channel_hello_tests.step);
     boundary_step.dependOn(image_channel_step);
 

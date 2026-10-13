@@ -764,6 +764,8 @@ pub const ImageChannelOps = struct {
     issue_segments: ?*const fn (ctx: *anyopaque, segments: []const image_segment_ledger.PreparedImageSegment) void = null,
     cancel_segments: ?*const fn (ctx: *anyopaque, segments: []const image_segment_ledger.PreparedImageSegment) void = null,
     issued_through: ?*const fn (ctx: *anyopaque) u64 = null,
+    /// 원장에 남은 세그먼트 수(준비·발급) — 큰 한 장 우선권(§4.4)은 원장이 차 있을 때만 지킬 것이 있다. null 이면 차 있다고 본다.
+    outstanding_segments: ?*const fn (ctx: *anyopaque) usize = null,
 };
 
 /// 투영 하나가 쓰는 세그먼트 sink — 준비분을 그 투영의 배치(`CollectedOutput`)에 붙인다. 투영 동안만 산다(배치는 값으로 옮겨도 된다).
@@ -781,7 +783,7 @@ const CollectSegmentSink = struct {
         const self: *CollectSegmentSink = @ptrCast(@alignCast(ctx));
         const priority = &self.connection.image_priority;
         const holds = if (priority.*) |claim| claim.stream == self.stream_id and claim.image_id == image_id else false;
-        if (holds) self.output.image_priority_seen = true;
+        if (holds) self.output.image_priority_live = true;
         // 큰 한 장이 우선권을 쥐었다 — 다른 이미지는 새 세그먼트를 청하지 않는다(§4.4, 스냅샷도). 원장이 비면 그 한 장이 먼저
         // 들어간다. host 전체 상한보다 큰 것은 미룸이 아니라 「전송 불가」로 그대로 분류한다(깨우지 않는다).
         if (priority.* != null and !holds and pixels.len <= image_segment_ledger.image_segment_bytes_per_host) {
@@ -801,15 +803,23 @@ const CollectSegmentSink = struct {
             },
             .deferred => {
                 self.output.image_deferred = true;
+                // 우선권은 원장이 차 있을 때만 지킬 것이 있다 — 원장이 빈 채 미뤘으면(공유 메모리 생성 실패·host 상한·채널 없음)
+                // 이 연결의 반환이 다시 오지 않아, 쥐고 있으면 남을 다음 화면 변화까지 막는다. 쥐지 않고, 쥐었으면 놓는다.
+                const ledger_busy = if (self.ops.outstanding_segments) |outstanding| outstanding(self.ops.ctx) != 0 else true;
+                if (holds and !ledger_busy) self.output.image_priority_live = false;
                 // 연결 바이트 상한보다 큰 한 장은 원장이 빌 때만 들어간다 — 그동안 작은 이미지가 원장을 다시 채우면 영영 못 나가므로
                 // 우선권을 쥔다(이미 다른 한 장이 쥐었으면 그 차례 뒤다).
-                if (priority.* == null and pixels.len > image_segment_ledger.image_segment_bytes_per_connection) {
+                if (priority.* == null and ledger_busy and pixels.len > image_segment_ledger.image_segment_bytes_per_connection) {
                     priority.* = .{ .stream = self.stream_id, .image_id = image_id };
-                    self.output.image_priority_seen = true;
+                    self.output.image_priority_live = true;
                 }
                 return .deferred;
             },
-            .untransmittable => return .untransmittable,
+            .untransmittable => {
+                // 우선권을 쥔 한 장이 그 사이 host 상한보다 커졌다 — 무엇이 반환돼도 못 나가니 사라진 것과 같다(놓고 깨운다).
+                if (holds) self.output.image_priority_live = false;
+                return .untransmittable;
+            },
         }
     }
 
@@ -845,8 +855,9 @@ pub const CollectedOutput = struct {
     image_projected: bool = false,
     /// 그 투영이 이미지를 하나라도 미뤘다(「전송 불가」는 세지 않는다 — 깨우지 않는다, §4.4).
     image_deferred: bool = false,
-    /// 우선권(§4.4)을 쥔 이미지를 이 투영이 청했다·준비했다 — commit 이 우선권을 놓을지 정한다.
-    image_priority_seen: bool = false,
+    /// 우선권(§4.4)을 쥔 이미지가 이 투영에서 아직 다툰다(청했고, 「전송 불가」가 아니고, 원장이 빈 채 미루지 않았다)·준비됐다 —
+    /// commit 이 우선권을 놓을지 정한다.
+    image_priority_live: bool = false,
     image_priority_prepared: bool = false,
     frames_taken: bool = true,
     finished: bool = false,
@@ -919,7 +930,7 @@ pub const CollectedOutput = struct {
             sub.image_deferred = self.image_deferred;
             sub.image_wake = false;
             // 구독 표시를 바꾼 **뒤** — 우선권을 놓으며 깨우는 대상에 이 stream 의 막혔던 이미지도 든다.
-            connection.settleImagePriority(self.stream, self.image_priority_seen, self.image_priority_prepared);
+            connection.settleImagePriority(self.stream, self.image_priority_live, self.image_priority_prepared);
         }
         // 배치가 큐에 승인된 같은 턴 — 세그먼트를 채널로 보낸다. 주 소켓의 배치 바이트는 다음 `writeReady` 라 「채널이 먼저」다.
         self.finishSegments(.issue);
@@ -2506,17 +2517,17 @@ pub const Connection = struct {
     }
 
     /// 우선권을 쥔 stream 의 투영이 commit 됐다(이미지 채널 §4.4). 그 한 장을 준비했으면 놓는다 — 곧 발급되고 원장이 연결 상한을
-    /// 넘으니 다른 이미지는 그 반환이 깨운다. 청하지도 않았으면 사라진 것이니 놓고 깨운다 — 원장이 이미 비었으면 반환이 다시 오지
-    /// 않아, 깨우지 않으면 우선권에 막혔던 이미지가 다음 화면 변화까지 못 나간다(깨운 stream 은 다음 cadence 가 투영한다). 청했는데
-    /// 또 미뤘으면 그대로 쥔다.
-    fn settleImagePriority(self: *Connection, stream: u64, seen: bool, prepared: bool) void {
+    /// 넘으니 다른 이미지는 그 반환이 깨운다. 더 다투지 않으면(청하지 않음 — 사라짐, 「전송 불가」가 됨, 원장이 빈 채 미룸) 놓고
+    /// 깨운다 — 원장이 이미 비었으면 반환이 다시 오지 않아, 깨우지 않으면 우선권에 막혔던 이미지가 다음 화면 변화까지 못 나간다(깨운
+    /// stream 은 다음 cadence 가 투영한다). 원장이 찬 채 또 미뤘으면 그대로 쥔다.
+    fn settleImagePriority(self: *Connection, stream: u64, live: bool, prepared: bool) void {
         const claim = self.image_priority orelse return;
         if (claim.stream != stream) return;
         if (prepared) {
             self.image_priority = null;
             return;
         }
-        if (seen) return;
+        if (live) return;
         self.image_priority = null;
         _ = self.noteImageCapacity();
     }
@@ -9587,6 +9598,8 @@ const FakeImageSegmentOwner = struct {
     answer: enum { segment, deferred, untransmittable } = .segment,
     /// 이 image id 는 `answer` 와 무관하게 미룬다(원장이 비지 않아 큰 한 장이 못 들어가는 자리).
     deferred_image: ?u32 = null,
+    /// 원장에 남은 세그먼트 수로 답할 값(우선권 판정 — 기본은 차 있다).
+    outstanding: usize = 1,
     prepares: usize = 0,
     last_snapshot: ?bool = null,
     issued: [8]u64 = @splat(0),
@@ -9647,6 +9660,11 @@ const FakeImageSegmentOwner = struct {
         return self.issued_through;
     }
 
+    fn outstandingSegments(ctx: *anyopaque) usize {
+        const self: *FakeImageSegmentOwner = @ptrCast(@alignCast(ctx));
+        return self.outstanding;
+    }
+
     fn ops(self: *FakeImageSegmentOwner) ImageChannelOps {
         return .{
             .ctx = self,
@@ -9656,6 +9674,7 @@ const FakeImageSegmentOwner = struct {
             .issue_segments = issue,
             .cancel_segments = cancel,
             .issued_through = issuedThrough,
+            .outstanding_segments = outstandingSegments,
         };
     }
 };
@@ -10054,6 +10073,50 @@ test "image segment wiring: the claim is released and blocked streams are woken 
     blocked_again.commit(&fx.conn);
     try testing.expect(!fx.conn.attachments.getPtr(2).?.image_wake);
     try testing.expect(fx.conn.removeAttachment(1));
+    try testing.expectEqual(@as(?Connection.ImagePriority, null), fx.conn.image_priority);
+    try testing.expect(fx.conn.attachments.getPtr(2).?.image_wake);
+}
+
+test "image segment wiring: a claim whose image turns untransmittable or is deferred with an empty ledger is released and wakes the blocked streams" {
+    var fx: SegmentWiringFixture = .{ .registry = undefined, .subscriptions = undefined };
+    try fx.init(true);
+    defer fx.deinit();
+    try claimLargeImagePriority(&fx);
+    segment_projection_probe.images = &.{.{ .id = 3, .len = 4 }};
+    var blocked = (try fx.conn.collectOutputForLocalStream(2)).?;
+    blocked.commit(&fx.conn);
+    try testing.expect(!fx.conn.attachments.getPtr(2).?.image_wake);
+
+    // 쥔 한 장이 host 상한보다 커졌다 — 청하긴 하지만 무엇이 반환돼도 못 나간다. 놓고 깨운다.
+    segment_projection_probe.images = &.{.{ .id = 9, .len = over_host_cap }};
+    var grown = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(?ImageSegmentAnswer, .untransmittable), segment_projection_probe.answers[0]);
+    grown.commit(&fx.conn);
+    try testing.expectEqual(@as(?Connection.ImagePriority, null), fx.conn.image_priority);
+    try testing.expect(fx.conn.attachments.getPtr(2).?.image_wake);
+
+    // 원장이 빈 채 미뤄진 큰 한 장(공유 메모리 생성 실패·host 상한)은 쥐지 않는다 — 이 연결의 반환이 다시 오지 않는다.
+    fx.owner.outstanding = 0;
+    segment_projection_probe.images = &.{.{ .id = 9, .len = over_connection_cap }};
+    var empty_defer = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(?ImageSegmentAnswer, .deferred), segment_projection_probe.answers[0]);
+    empty_defer.commit(&fx.conn);
+    try testing.expectEqual(@as(?Connection.ImagePriority, null), fx.conn.image_priority);
+
+    // 원장이 찬 채 쥐었다가, 다음 투영에서 원장이 빈 채 또 미뤄지면 놓고 깨운다.
+    fx.owner.outstanding = 1;
+    var reclaim = (try fx.conn.collectOutputForLocalStream(1)).?;
+    reclaim.commit(&fx.conn);
+    try testing.expectEqual(@as(?Connection.ImagePriority, .{ .stream = 1, .image_id = 9 }), fx.conn.image_priority);
+    segment_projection_probe.images = &.{.{ .id = 3, .len = 4 }};
+    var blocked_again = (try fx.conn.collectOutputForLocalStream(2)).?;
+    blocked_again.commit(&fx.conn);
+    try testing.expect(!fx.conn.attachments.getPtr(2).?.image_wake);
+    fx.owner.outstanding = 0;
+    segment_projection_probe.images = &.{.{ .id = 9, .len = over_connection_cap }};
+    var drained = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(?ImageSegmentAnswer, .deferred), segment_projection_probe.answers[0]);
+    drained.commit(&fx.conn);
     try testing.expectEqual(@as(?Connection.ImagePriority, null), fx.conn.image_priority);
     try testing.expect(fx.conn.attachments.getPtr(2).?.image_wake);
 }

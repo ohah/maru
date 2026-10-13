@@ -5839,6 +5839,7 @@ test "image channel owner: owner 층이 Connection 에 건넨 세그먼트 연�
         else => return error.TestUnexpectedResult,
     };
     try testing.expectEqual(@as(usize, 1), client.imageLedger().?.count());
+    try testing.expectEqual(@as(usize, 1), ops.outstanding_segments.?(ops.ctx));
     ops.issue_segments.?(ops.ctx, &.{first});
     try testing.expectEqual(first.segment_id, ops.issued_through.?(ops.ctx));
     var fds: [4]c.fd_t = undefined;
@@ -5901,16 +5902,25 @@ test "image channel owner: release 와 채널 묶임이 이미지를 미룬 stre
         main_index = index;
     }
     const index = main_index orelse return error.TestUnexpectedResult;
+    // 예약을 관측한다: cadence 를 멈추고 sweep 목록을 비운다 — 이후 목록이 차면 깨움의 예약(`beginProducerSweep`)이 채운 것이다
+    // (예약한 sweep 은 같은 poll 에서 tick 이 곧 소비해 `producer_remaining` 은 0 으로 돌아온다).
+    fx.owner.next_cadence_ns = std.math.maxInt(u64);
+    const main_client = fx.owner.clients[index].?;
+    main_client.allocator.free(main_client.producer_streams);
+    main_client.producer_streams = &.{};
     const channel_fd = try fx.openChannel(token);
     defer _ = c.close(channel_fd);
     const client = fx.owner.clients[index].?;
     // 묶임이 깨웠고 owner 가 그 깨움을 꺼내 producer 를 예약했다.
     try testing.expect(client.connection.attachments.getPtr(1).?.image_wake);
     try testing.expect(!client.takeImageCapacityWake());
+    try testing.expectEqual(@as(usize, 1), client.producer_streams.len);
 
     // release 가 원장에 자리를 내면 다시 깨운다 — 반환이 없는 release(모르는 id)는 깨우지 않는다.
     client.connection.attachments.getPtr(1).?.image_wake = false;
     fx.owner.producer_remaining[index] = 0;
+    client.allocator.free(client.producer_streams);
+    client.producer_streams = &.{};
     const ledger = client.imageLedger().?;
     const id = try ledger.reserve(1, 7, 1, 64);
     try testing.expect(ledger.issue(id));
@@ -5924,6 +5934,7 @@ test "image channel owner: release 와 채널 묶임이 이미지를 미룬 stre
     }
     try testing.expectEqual(@as(usize, 0), ledger.count());
     try testing.expect(client.connection.attachments.getPtr(1).?.image_wake);
+    try testing.expectEqual(@as(usize, 1), client.producer_streams.len);
     try fx.expectMainAlive(main_fd, 2);
 }
 

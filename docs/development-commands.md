@@ -1528,6 +1528,10 @@ macOS의 `/usr/sbin/sshd` 실행이 가능한 환경에서 opt-in으로 실행�
 재시도는 `--replace-batch-save-retry`로 검사한다. 지연은 격리 사본의 writer에만 주입하며
 main 지연과 전체 완료 지연을 구분한다.
 
+네이티브 문서 하나의 비동기 닫기 저장: `mise exec -- zig build test-editor-close-save-async test-editor-close-save-guards`
+(Debug/ReleaseFast). `python3 tools/test-editor-close-save-adversarial.py`는 완료·dirty·CAS·수명·대상 세대·후속 저장·pipeline 결함과 정상/복원 대조군을 실행한다.
+제품 화면은 `python3 tools/editor-project-search-app/run.py --native-close-save --optimize ReleaseFast --timeout-seconds 120`으로 확인한다.
+
 저장 결과 소비자 수명: `mise exec -- zig build test-editor-save-receipts`와
 `-Doptimize=ReleaseFast`. `python3 tools/test-editor-save-receipts-adversarial.py`는 완료 결과의
 조기 게시·참조 누락·실패 유실·잘못된 승인·중복 게시 변이를 정상/복원 대조군과 검사한다.

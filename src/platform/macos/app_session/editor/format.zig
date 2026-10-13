@@ -266,6 +266,14 @@ fn saveNow(self: *AppSession, term: *Term, late: bool) void {
     saveNowWithNotice(self, term, late, null);
 }
 fn saveNowWithNotice(self: *AppSession, term: *Term, late: bool, success_notice: ?maru.editor_save_notice.Success) void {
+    if (@import("save/close.zig").receiptFor(self, term)) |receipt| {
+        const admitted = @import("save/dispatch.zig").trySaveForClose(self, term, success_notice, receipt) catch |failure| {
+            receipt.complete(failure);
+            return;
+        };
+        if (admitted == null) receipt.complete(error.WriteFailed);
+        return;
+    }
     const queued = @import("save/dispatch.zig").trySave(self, term, success_notice) catch |failure| {
         reportSaveError(self, term, late, failure);
         return;

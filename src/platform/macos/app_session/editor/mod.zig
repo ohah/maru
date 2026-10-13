@@ -2921,6 +2921,8 @@ pub fn openPathInActivePane(self: *AppSession, path: []const u8) OpenFileError!*
     // 여기부터 실패 지점이 없다 — 소유가 Term으로 넘어간다.
     finishAttach(self, term, prepared);
     self.focusTerm(pane.terms.items.len - 1);
+    // 새 문서의 행 수와 retained 선택 도형을 함께 게시한다.
+    @import("../sidebar.zig").rebuildSidebar(self) catch {};
     self.metal_dirty = true;
     return term;
 }
@@ -40020,7 +40022,7 @@ test "DIRTY5 저장 안 한 편집기를 닫으면 확인을 묻는다 (file-pan
 
     // **문구가 dirty를 말한다** — `app_close_running`("명령이 돌고 있다")을 재사용하면 사용자가
     // 무엇을 잃는지 모른다(적대적 검증 2026-08-26 — 처음엔 그 문구를 쓰고 있었다).
-    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+    try testing.expectEqualStrings(maru.i18n.t(.fp_unsaved_confirm), fx.session.chrome_host.confirm.message);
 
     // **탭·창을 닫을 때도 같은 문이 선다.** Term 범위만 재면 `⌘W`는 막히는데 탭 닫기·창 닫기로
     // 같은 편집이 사라진다 — 범위마다 따로 배선돼 있어 하나만 재면 나머지는 판정 밖이다
@@ -49424,7 +49426,7 @@ test "U1h 이름 없는 문서만 dirty 면 닫기 확인이 «사라진다」�
     fx.session.pending_confirm = .none;
     fx.session.requestClose(.active_term);
     try testing.expect(fx.session.chrome_host.confirm.open);
-    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+    try testing.expectEqualStrings(maru.i18n.t(.fp_unsaved_confirm), fx.session.chrome_host.confirm.message);
 }
 
 test "U1i 이름 없는 문서가 clean 이면 닫기 확인이 아예 안 뜬다 — 공허한 참이 문구로 새지 않는다" {
@@ -50130,7 +50132,7 @@ test "U2k 저장 뒤 닫기 확인은 «공용» 문구다 — 더 이상 사라
     fx.session.requestClose(.active_term);
     try testing.expectEqual(before_n, pane_ops.activePane(fx.session).terms.items.len); // 안 닫혔다
     try testing.expect(fx.session.chrome_host.confirm.open);
-    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+    try testing.expectEqualStrings(maru.i18n.t(.fp_unsaved_confirm), fx.session.chrome_host.confirm.message);
     // 그리고 그 파이프라인이 도는 동안 **편집기 전용 확인은 안 뜬다**(두 길이 겹치면 확인이 둘이다).
     try testing.expect(!std.mem.eql(
         u8,
@@ -50171,7 +50173,7 @@ test "U2l 트리에서 연 네이티브 문서도 dirty 면 닫기를 묻는다 
     fx.session.requestClose(.active_term);
     try testing.expectEqual(before_n, pane_ops.activePane(fx.session).terms.items.len);
     try testing.expect(fx.session.chrome_host.confirm.open);
-    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), fx.session.chrome_host.confirm.message);
+    try testing.expectEqualStrings(maru.i18n.t(.fp_unsaved_confirm), fx.session.chrome_host.confirm.message);
 }
 
 test "U2m 저장을 여러 번·실패를 섞어도 새지 않는다" {
@@ -51430,7 +51432,7 @@ test "C1a-9 상자는 «⌘S 만의 것»이다 — 닫기와 일괄 저장은 �
     try testing.expectEqual(before_n, pane.terms.items.len); // 안 닫혔다(묻는 중)
     try testing.expect(s.chrome_host.confirm.open);
     try testing.expect(s.pending_confirm != .save_conflict);
-    try testing.expectEqualStrings(maru.i18n.t(.app_close_unsaved), s.chrome_host.confirm.message);
+    try testing.expectEqualStrings(maru.i18n.t(.fp_unsaved_confirm), s.chrome_host.confirm.message);
 }
 
 test "C1a-10 재진입: 두 문서가 잇달아 충돌해도 답은 «마지막에 물은 그 문서»에만 간다" {
@@ -63695,6 +63697,277 @@ test "RPA29 열린 모델 단일 적용도 같은 본문의 실제 root 교체�
     const bytes = try replacement.readFileAlloc(testing.io, "search.txt", testing.allocator, .limited(1024));
     defer testing.allocator.free(bytes);
     try testing.expectEqualStrings("foo", bytes);
+}
+
+fn nativeCloseFixture(fx: *PaneFixture) !*Term {
+    const term = try undoFixture(fx, testing.allocator, "close.txt", "foo");
+    term.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, term, "!"));
+    fx.session.requestClose(.active_term);
+    try testing.expect(fx.session.pending_confirm == .editor_save_close);
+    try testing.expectEqualStrings(maru.i18n.t(.btn_save), fx.session.chrome_host.confirm.confirm_label);
+    return term;
+}
+fn nativeCloseAccept(session: *AppSession) void {
+    session.chrome_host.confirm.dismiss();
+    session.dispatchChromeAction(.confirm_accept);
+}
+fn nativeCloseSurface(session: *AppSession, surface: u64) ?*Term {
+    for (session.tabs.items) |tab| for (tab.panes.items) |pane| for (pane.terms.items) |term| if (term.surface.id == surface) return term;
+    return null;
+}
+fn nativeCloseAwait(session: *AppSession) !void {
+    try awaitDispatchedSavesForTest();
+    @import("save/close.zig").poll(session);
+}
+
+test "native close save 차단 writer 동안 열린 채로 있다가 실제 성공 뒤에만 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |with_notice| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const term = try nativeCloseFixture(&fx);
+        const surface = term.surface.id;
+        nativeCloseAccept(fx.session);
+        const saves = @import("save/dispatch.zig");
+        var gate: @import("save/worker.zig").TestGate = .{};
+        defer {
+            gate.set();
+            saves.cleanupForTests();
+        }
+        const owner = saves.ownerForTest().?;
+        if (with_notice) owner.references.items[0].success_notice = .{ .key = .fmt_save_timeout };
+        try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+        saves.poll();
+        @import("save/close.zig").poll(fx.session);
+        try testing.expect(nativeCloseSurface(fx.session, surface) != null);
+        try testing.expect(fx.session.editor_save_close.?.receipt.?.result == .pending);
+        try batchApplyDisk(&fx, "close.txt", "foo");
+        gate.set();
+        try nativeCloseAwait(fx.session);
+        try testing.expect(nativeCloseSurface(fx.session, surface) == null);
+        try testing.expect(fx.session.editor_save_close == null);
+        try batchApplyDisk(&fx, "close.txt", "foo!");
+    }
+}
+
+test "native close save 저장 중 추가 편집과 Undo는 닫기로 버리지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try nativeCloseFixture(&fx);
+    const surface = term.surface.id;
+    nativeCloseAccept(fx.session);
+    const saves = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        saves.cleanupForTests();
+    }
+    const owner = saves.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    term.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(insertText(fx.session, term, "x"));
+    const history = term.rt.editorDocument().history.undo_len;
+    gate.set();
+    try nativeCloseAwait(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == term);
+    try testing.expectEqualStrings("foo!x", term.rt.editorDocument().opened.?.file.content);
+    try testing.expect(isDirty(term));
+    try testing.expectEqual(history, term.rt.editorDocument().history.undo_len);
+    try testing.expect(fx.session.editor_save_close == null);
+    try batchApplyDisk(&fx, "close.txt", "foo!");
+}
+
+test "native close save 외부 CAS 실패는 파일과 문서와 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try nativeCloseFixture(&fx);
+    const surface = term.surface.id;
+    const history = term.rt.editorDocument().history.undo_len;
+    nativeCloseAccept(fx.session);
+    const saves = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        saves.cleanupForTests();
+    }
+    const owner = saves.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "close.txt", .data = "outside" });
+    gate.set();
+    try nativeCloseAwait(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == term);
+    try testing.expect(isDirty(term));
+    try testing.expectEqual(history, term.rt.editorDocument().history.undo_len);
+    try testing.expect(fx.session.pending_confirm != .save_conflict);
+    try testing.expect(fx.session.editor_save_close == null);
+    try batchApplyDisk(&fx, "close.txt", "outside");
+}
+
+test "native close save 취소와 포커스 이동은 닫기 의도만 버리고 쓰기는 계속한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try nativeCloseFixture(&fx);
+    const surface = term.surface.id;
+    fx.session.dispatchChromeAction(.confirm_cancel);
+    fx.session.chrome_host.confirm.dismiss();
+    try testing.expect(fx.session.editor_save_close == null);
+    try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+    fx.session.requestClose(.active_term);
+    nativeCloseAccept(fx.session);
+    const saves = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        saves.cleanupForTests();
+    }
+    const owner = saves.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    fx.session.focusTerm(0);
+    try testing.expect(fx.session.editor_save_close == null);
+    try testing.expectEqual(@as(usize, 1), owner.references.items[0].receipt.?.references);
+    gate.set();
+    try nativeCloseAwait(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == term);
+    try batchApplyDisk(&fx, "close.txt", "foo!");
+    // 별도 버리기 선택은 원본 bytes를 쓰지 않고 선택한 문서만 닫는다.
+    var discarded = try PaneFixture.init(testing.allocator);
+    defer discarded.deinit(testing.allocator);
+    const discarded_term = try nativeCloseFixture(&discarded);
+    const discarded_surface = discarded_term.surface.id;
+    discarded.session.chrome_host.confirm.dismiss();
+    discarded.session.dispatchChromeAction(.confirm_alternate);
+    try testing.expect(nativeCloseSurface(discarded.session, discarded_surface) == null);
+    try testing.expectEqual(@as(usize, 0), saves.requestCount());
+    try batchApplyDisk(&discarded, "close.txt", "foo");
+}
+
+test "native close save 완료 소비자 OOM은 본문과 기존 이력을 그대로 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try nativeCloseFixture(&fx);
+    const history = term.rt.editorDocument().history.undo_len;
+    const original = fx.session.allocator;
+    var failing = testing.FailingAllocator.init(original, .{ .fail_index = 0 });
+    fx.session.allocator = failing.allocator();
+    nativeCloseAccept(fx.session);
+    fx.session.allocator = original;
+    try testing.expect(failing.has_induced_failure);
+    try testing.expect(fx.session.editor_save_close == null);
+    try testing.expect(nativeCloseSurface(fx.session, term.surface.id) == term);
+    try testing.expectEqual(history, term.rt.editorDocument().history.undo_len);
+    try testing.expectEqualStrings("foo!", term.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+    try batchApplyDisk(&fx, "close.txt", "foo");
+}
+
+test "native close save 공유 문서의 연결만 닫는 기존 동작을 유지한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const peer = try sharedViewFixturePeer(&fx);
+    fx.term.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, fx.term, "x"));
+    const surface = peer.surface.id;
+    for (pane_ops.activePane(fx.session).terms.items, 0..) |t, i| if (t == peer) fx.session.focusTerm(i);
+    fx.session.requestClose(.active_term);
+    try testing.expect(fx.session.editor_save_close == null);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == null);
+    try testing.expect(isDirty(fx.term));
+    try testing.expectEqual(@as(usize, 0), @import("save/dispatch.zig").requestCount());
+}
+
+test "native close save 늦은 완료는 저장 대상 epoch가 바뀐 문서를 닫지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try nativeCloseFixture(&fx);
+    const surface = term.surface.id;
+    nativeCloseAccept(fx.session);
+    const saves = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        saves.cleanupForTests();
+    }
+    const owner = saves.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    // Save As/다시 열기의 대상 세대 변경과 같은 경계다. 이미 시작한 쓰기는 끝나도 새 대상은 닫지 않는다.
+    term.rt.editorDocument().save_target_epoch += 1;
+    @import("save/close.zig").poll(fx.session);
+    try testing.expect(fx.session.editor_save_close == null);
+    gate.set();
+    try nativeCloseAwait(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == term);
+    try testing.expect(isDirty(term));
+}
+
+test "native close save 후속 저장도 정산한 뒤 dirty를 다시 검사한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try nativeCloseFixture(&fx);
+    const surface = term.surface.id;
+    nativeCloseAccept(fx.session);
+    const saves = @import("save/dispatch.zig");
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        saves.cleanupForTests();
+    }
+    const owner = saves.ownerForTest().?;
+    try owner.queue.startBlockedForTest(@import("save/owner.zig").Owner.liveTarget(owner.references.items[0]).?, &gate);
+    breakUndoGroup(term);
+    term.rt.editor_selection = editor_selection.Selection.at(4);
+    try testing.expect(insertText(fx.session, term, "x"));
+    @import("save_actions.zig").saveCommand(fx.session, term);
+    try testing.expect(undoEdit(fx.session, term));
+    try testing.expectEqualStrings("foo!", term.rt.editorDocument().opened.?.file.content);
+    gate.set();
+    const deadline = std.Io.Clock.awake.now(testing.io).nanoseconds + 10 * std.time.ns_per_s;
+    while (fx.session.editor_save_close.?.receipt.?.result == .pending) {
+        saves.poll();
+        if (std.Io.Clock.awake.now(testing.io).nanoseconds > deadline) return error.Timeout;
+        try std.Io.sleep(testing.io, .fromMilliseconds(1), .awake);
+    }
+    try testing.expect(!isDirty(term));
+    @import("save/close.zig").poll(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == term);
+    try testing.expect(fx.session.editor_save_close != null);
+    try nativeCloseAwait(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == term);
+    try testing.expect(isDirty(term));
+    try testing.expect(fx.session.editor_save_close == null);
+    try batchApplyDisk(&fx, "close.txt", "foo!x");
+}
+
+test "native close save 확인 Enter의 입력 해석이 끝난 뒤 snapshot을 준비한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const term = try nativeCloseFixture(&fx);
+    const surface = term.surface.id;
+    fx.session.ime_active = true;
+    nativeCloseAccept(fx.session);
+    const close = @import("save/close.zig");
+    const saves = @import("save/dispatch.zig");
+    close.poll(fx.session);
+    try testing.expect(fx.session.editor_save_close != null);
+    try testing.expect(!fx.session.editor_save_close.?.started);
+    try testing.expectEqual(@as(usize, 0), saves.requestCount());
+    try testing.expect(nativeCloseSurface(fx.session, surface) == term);
+    try batchApplyDisk(&fx, "close.txt", "foo");
+    fx.session.ime_active = false;
+    close.poll(fx.session);
+    try testing.expect(fx.session.editor_save_close.?.started);
+    try testing.expectEqual(@as(usize, 1), saves.requestCount());
+    try nativeCloseAwait(fx.session);
+    try testing.expect(nativeCloseSurface(fx.session, surface) == null);
+    try batchApplyDisk(&fx, "close.txt", "foo!");
 }
 
 fn waitBatchUI(session: *AppSession) !void {

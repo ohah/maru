@@ -3008,6 +3008,7 @@ const PendingConfirm = union(enum) {
     file_conflict_reload: u64,
     grant: u64,
     file_panel_close,
+    editor_save_close,
     file_tree_delete,
     /// 원격 삭제(RF6c) — **되돌릴 수 없다**. 로컬(휴지통)과 다른 종류로 두는 이유가 그것이다:
     /// 문구도 버튼도 달라야 하고, 한 종류로 합치면 그 차이가 호출자 규율이 되어 샌다(§2.3 ⑷).
@@ -6235,6 +6236,7 @@ pub const AppSession = struct {
     // 담고 확인 모달을 열며, confirm_accept가 executeClose로 실행하고 confirm_cancel이 버린다. 단일 출처: 어느 닫기
     // 경로였는지(cascade 정책이 경로마다 다름)를 기억해 확정 시 같은 함수를 다시 부른다.
     pending_confirm: PendingConfirm = .none,
+    editor_save_close: ?@import("app_session/editor/save/close.zig").State = null,
     /// 덮어쓰기 확인을 사이에 두고 **고른 이름을 들고 있는 자리**(U2 — 그 타입의 doc).
     pending_untitled_save: editor_untitled_save_ops.Pending = .{},
     /// LSP seam 1단(§8.2a) — 클라이언트·신뢰 캐시·프롬프트 주인.
@@ -10374,6 +10376,7 @@ pub const AppSession = struct {
                 else => .app_close_running,
             }, target);
         } else if (self.scopeHasUnsavedEditor(scope)) {
+            if (@import("app_session/editor/save/close.zig").ask(self, target, scope)) return;
             // 저장 안 한 편집 = 잃을 수 있는 상태. running job과 **병렬**로 자기 문구를 띄운다
             // (브라우저 탭 분기와 같은 모양 — 그쪽 주석이 근거를 든다).
             // **이름 없는 문서만이면 다른 문구다**(§3.11) — 되돌릴 파일이 없으므로 「닫을까요?」로는
@@ -10765,6 +10768,7 @@ pub const AppSession = struct {
     /// 지킨다(dismissMessageOverlays — confirm/보류는 caller가 소유). 버튼 라벨은 용도별로 host가 주입한다(confirm
     /// 컴포넌트는 범용). 다음 tick이 그린다. showConfirm(닫기)·requestResetAll(리셋)이 공유.
     fn cancelPendingConfirm(self: *AppSession) void {
+        if (self.pending_confirm == .editor_save_close) @import("app_session/editor/save/close.zig").cancel(self);
         switch (self.pending_confirm) {
             .quit => self.quit_decision = .cancelled,
             .grant => |async_id| self.grant_confirm_decision = .{ .async_id = async_id, .approved = false },
@@ -10780,7 +10784,7 @@ pub const AppSession = struct {
             .untitled_overwrite, .untitled_where, .untitled_remote_overwrite => self.pending_untitled_save = .{},
             // **저장 충돌의 취소는 아무 일도 안 한다**(§4) — 디스크도 버퍼도 그대로다. 들고 있는
             // 것이 surface id 하나라 비울 것도 없다.
-            .none, .close, .reset, .file_conflict_reload, .save_conflict, .linked_history => {},
+            .none, .close, .editor_save_close, .reset, .file_conflict_reload, .save_conflict, .linked_history => {},
         }
         self.pending_confirm = .none;
     }
@@ -10831,6 +10835,8 @@ pub const AppSession = struct {
     }
 
     fn showConfirmButtons(self: *AppSession, owner: PendingConfirm, message: []const u8, buttons: chrome.components.confirm.Buttons) void {
+        // 새 확인창은 저장 후 닫기 의도를 취소하지만, 저장 성공 안내는 취소하지 않는다.
+        @import("app_session/editor/save/close.zig").cancel(self);
         self.cancelPendingConfirm();
         if (owner != .file_panel_close and self.pending_file_panel_close != null) {
             file_panel_ops.cancelFilePanelClose(self);
@@ -10904,6 +10910,11 @@ pub const AppSession = struct {
     /// 전에 `pending_close`를 null로 비우므로(재진입 방지), 닫기 실행 중 포커스 이동이 이걸 다시 건드리지 않는다.
     /// (옛 `invalidatePendingCloseOnReap`/`invalidatePendingCloseOnFocusChange` byte-identical 중복을 통합 — code-review.)
     pub fn invalidatePositionalPendingClose(self: *AppSession) void {
+        @import("app_session/editor/save/close.zig").cancel(self);
+        if (self.pending_confirm == .editor_save_close) {
+            self.cancelPendingClose();
+            return;
+        }
         const p = switch (self.pending_confirm) {
             .close => |target| target,
             else => return,
@@ -13438,6 +13449,7 @@ pub const AppSession = struct {
                         },
                         .syncing, .saving => {},
                     },
+                    .editor_save_close => @import("app_session/editor/save/close.zig").accept(self),
                     .file_tree_delete => file_panel_ops.confirmFileTreeDelete(self),
                     .remote_file_tree_delete => file_panel_ops.confirmRemoteFileTreeDelete(self),
                     .lsp_trust => editor_ops.lsp_client.answerTrust(self, true),
@@ -13470,6 +13482,8 @@ pub const AppSession = struct {
                 if (owner == .quit) {
                     // P4 "종료 및 세션 끝내기"(§6 row 3): 기본 "종료"(detach·생존)와 달리 host-backed runtime도 다 terminate한다.
                     _ = self.requestAppQuitEndAll();
+                } else if (owner == .editor_save_close) {
+                    @import("app_session/editor/save/close.zig").discard(self);
                 } else if (owner == .file_panel_close) {
                     if (self.pending_file_panel_close) |pending| {
                         if (pending.phase == .confirm_dirty) {
@@ -21310,6 +21324,7 @@ pub const AppSession = struct {
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
         @import("app_session/editor/save/dispatch.zig").poll();
+        @import("app_session/editor/save/close.zig").poll(self);
         if (is_macos) {
             @import("app_session/editor/search/owner.zig").poll(self);
             project_search_ops.pump(self);
@@ -24718,6 +24733,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        @import("app_session/editor/save/close.zig").cancel(self);
         if (builtin.is_test and live_app_sessions == 1) @import("app_session/editor/save/dispatch.zig").cleanupForTests();
         // backend 에 맡긴 미룬 닫기를 **다른 무엇을 풀기 전에** 한 번 더 묻는다. 앱 quit 은 Session teardown 전에 재접속
         // job 을 취소하므로(`maru_macos_reconnect_product_shutdown`) 첫 창의 teardown 이 아래 앱 quit 의 routing

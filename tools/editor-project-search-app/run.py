@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--unicode-field", action="store_true")
     parser.add_argument("--physical-ime", action="store_true")
     parser.add_argument("--matrix", action="store_true")
+    parser.add_argument("--native-close-save", action="store_true")
     parser.add_argument("--replace-batch", action="store_true")
     parser.add_argument("--replace-batch-save-retry", action="store_true")
     parser.add_argument("--batch-open-files", type=int, default=2)
@@ -88,6 +89,8 @@ def main():
              "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/disk_apply.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
              "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
              "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h", "src/platform/macos/app_session/editor/search/batch.zig", "src/platform/macos/app_session/editor/search/batch/ui.zig", "src/platform/macos/app_session/editor/search/batch/worker.zig", "src/platform/macos/app_session/editor/search/batch/mixed_worker.zig", "src/platform/macos/app_session/editor/search/batch/collect.zig", "src/platform/macos/app_session/editor/search/batch/coordinator.zig", "src/platform/macos/app_session/editor/search/batch/load.zig", "src/platform/macos/app_session/editor/local_save.zig", "src/platform/macos/app_session/editor/save/dispatch.zig", "src/platform/macos/app_session/editor/save/owner.zig", "src/session/editor/ops/save_receipt.zig", "src/session/editor/search/batch.zig", "src/editor_save_notice.zig")
+    if args.native_close_save:
+        names += ("src/platform/macos/app_session/editor/save/close.zig", "src/platform/macos/app_session/editor/format.zig")
     print(root, flush=True)
     if args.app:
         app = args.app.resolve()
@@ -114,11 +117,16 @@ def main():
             '            @import("app_session/editor/search/owner.zig").poll(self);\n            project_search_ops.pump(self);',
             '            debug_fixtures.editorProjectSearchTick(self);'))
         observer = source / names[4]
-        observer.write_text(observer.read_text() + "\n" + (source / "tools/editor-project-search-app/fixture.zig.inc").read_text() + "\n" + (source / "tools/editor-project-search-app/batch.zig.inc").read_text())
+        observer.write_text(observer.read_text() + "\n" + (source / "tools/editor-project-search-app/fixture.zig.inc").read_text() + "\n" + (source / "tools/editor-project-search-app/batch.zig.inc").read_text() + ("\n" + (source / "tools/editor-project-search-app/native-close.zig.inc").read_text() if args.native_close_save else ""))
+        driver = (source / "tools/editor-project-search-app/driver.swift.inc").read_text()
+        if args.native_close_save:
+            driver = replace_once(driver, "        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next", "        if EditorProjectSearchRun.stage == 80 { maybeRunNativeCloseSave(); return }\n        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next")
+            driver = replace_once(driver, "            if !matrix { finish(true); return }", "            if ProcessInfo.processInfo.environment[\"MARU_EDITOR_NATIVE_CLOSE_SAVE\"] == \"1\" { EditorProjectSearchRun.stage = 80; return }\n            if !matrix { finish(true); return }")
+            driver += "\n" + (source / "tools/editor-project-search-app/native-close.swift.inc").read_text()
         host = source / names[3]
         host.write_text(replace_once(host.read_text(), "        maybeRunEditorIMESmoke()\n",
             "        maybeRunEditorIMESmoke()\n        maybeRunEditorProjectSearch()\n") + "\n" +
-            (source / "tools/editor-project-search-app/driver.swift.inc").read_text())
+            driver)
         host.write_text(replace_once(host.read_text(), "    let physical = window?.backingScaleFactor ?? 1.0",
             '    let physical = window?.backingScaleFactor ?? 1.0\n    if let raw = ProcessInfo.processInfo.environment["MARU_EDITOR_PROJECT_SEARCH_SCALE"], let value = UInt32(raw), value == 1000 || value == 2000 { return CGFloat(value) / 1000.0 }'))
         renderer = source / names[5]
@@ -146,7 +154,7 @@ def main():
         # 같은 지연을 실제 writer에 넣어 동기/worker 경로를 같은 조건으로 비교한다.
         local_source = source / "src/platform/macos/app_session/editor/local_save.zig"
         local_source.write_text(replace_once(local_source.read_text(), "    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {",
-            '    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {\n        const delay = std.fmt.parseInt(u32, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS") orelse "0"), 10) catch 0;\n        if (delay > 0) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(delay), .awake) catch {};'))
+            '    pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {\n        const delay = std.fmt.parseInt(u32, std.mem.span(std.c.getenv("MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS") orelse "0"), 10) catch 0;\n        if (delay > 0) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(delay), .awake) catch {};\n        if (std.c.getenv("MARU_EDITOR_NATIVE_CLOSE_SAVE") != null) std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1000), .awake) catch {};'))
         command = ["mise", "exec", "--", "zig", "build", "macos-app-bundle", "-j2", "-Doptimize=" + args.optimize]
         print(root, flush=True)
         with (root / "build.log").open("wb") as log:
@@ -194,6 +202,7 @@ def main():
     env["MARU_EDITOR_PROJECT_BATCH_OPEN_FILES"] = str(args.batch_open_files)
     env["MARU_EDITOR_PROJECT_BATCH_PEER_BYTES"] = str(args.batch_peer_bytes)
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS"] = str(args.batch_save_delay_ms)
+    if args.native_close_save: env["MARU_EDITOR_NATIVE_CLOSE_SAVE"] = "1"
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
     env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
     if args.physical_ime:
@@ -260,6 +269,11 @@ def main():
             expected += ("bottom-batch-saved", "right-batch-saved", "batch-undo", "batch-undo-saved")
     if args.matrix:
         expected += ("shared", "independent", "zero-override", "root-changed", "stale-release")
+    if args.native_close_save:
+        expected += ("native-close-confirm", "native-close-saving", "native-close-saved", "native-close-edit-kept", "native-close-conflict-kept")
+        for name, data in (("saved", b"foo!"), ("kept", b"foo!"), ("conflict", b"outside")):
+            if (project / ("native-close-" + name + ".txt")).read_bytes() != data:
+                raise RuntimeError("Native close disk bytes differ: " + name)
     for label in expected:
         ppm = artifacts / (label + ".ppm")
         if not ppm.exists() or ppm.stat().st_size < 1000:
@@ -285,7 +299,7 @@ def main():
         raise RuntimeError("Missing actual batch timing evidence")
     report = dict(scope="Real AppKit search input, result click, navigation, bottom dock scrolling, cancellation and Metal readback",
         limits="Physical Korean HID and Enter verified; no VoiceOver or OS candidate screenshot proof" if args.physical_ime else "No physical Korean HID or VoiceOver proof", source_sha256=hashes, binary_sha256=sha(app), command=command,
-        product_passed=True, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(source / "tools/editor-project-search-app" / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
+        product_passed=True, native_close_save=args.native_close_save, metrics=metrics, unicode_field=args.unicode_field, physical_ime=args.physical_ime, matrix=args.matrix, batch_open_files=args.batch_open_files, batch_peer_bytes=args.batch_peer_bytes, optimize=args.optimize, disk_padding_lines=args.disk_padding_lines, batch_save_delay_ms=args.batch_save_delay_ms, replace_batch_save_retry=args.replace_batch_save_retry, replace_batch=args.replace_batch, replace_preview=args.replace_preview, replace_apply=args.replace_apply, replace_disk_apply=args.replace_disk_apply, replace_ime_refuse=args.replace_ime_refuse, conflict_markers=args.conflict_markers, narrow_hidden=args.narrow_hidden, window_size=args.window_size, render_scale=args.render_scale, matches=1 if args.unicode_field or args.physical_ime else args.count + args.disk_files, harness_sha256={name: sha(source / "tools/editor-project-search-app" / name) for name in ("run.py", "fixture.zig.inc", "driver.swift.inc", "hid.swift.inc", "batch.zig.inc", "native-close.zig.inc", "native-close.swift.inc")}, artifacts={p.name: sha(p) for p in artifacts.glob("*.png")})
     (root / "manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     print(root / "manifest.json", flush=True)
 

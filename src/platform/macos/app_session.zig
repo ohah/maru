@@ -18719,7 +18719,7 @@ pub const AppSession = struct {
         // resize-edge가 x≈0을 잘못 잡을 수 있어 **먼저** 본다. 토글 위면 호버 배경을 켜고 pointingHand(클릭 가능).
         // 토글 밖이면 끄고 아래 일반 경로로 흐른다. mouse down hit-test(collapsedToggleRect)와 같은 rect로 일치.
         if (self.sidebar_collapsed) {
-            // 접힘 알림 종(◧ 오른쪽) 호버 — 클릭 가능(알림 패널). ◧보다 먼저(별개 영역, 클릭 우선순위와 일치).
+            // 접힘 알림 종(◧ 왼쪽) 호버 — 클릭 가능(알림 패널). ◧보다 먼저(별개 영역, 클릭 우선순위와 일치).
             if (notification_ops.collapsedNotificationRect(self)) |r| {
                 const rx: f64 = @floatFromInt(r.x);
                 if (x_px >= rx and x_px < rx + @as(f64, @floatFromInt(r.w)) and
@@ -24101,16 +24101,17 @@ pub const AppSession = struct {
     /// 잡으면 띠의 위아래가 데드존(클릭·드래그 둘 다 안 됨)이 된다(1.7× 글리프의 잉크 자체는 폭 기준이라 cell_h 안이다 — `cellRasterIconInkPx`). 가로는 **글리프 중심에 맞춘다**: .m이 ◧를
     /// 셀 중심((col+0.5)·cw) 기준 1.7×로 키우므로(maru_fill_cell_quad가 중심 기준 확대) 글리프는 ≈[(col-0.35),
     /// (col+1.35)]·cw에 그려진다. rect를 col·cw부터 잡으면 클릭 영역이 글리프보다 0.5칸 오른쪽으로 치우쳐 글리프
-    /// 좌측 일부가 안 눌리므로(code-review), 셀 중심에 2칸 폭을 중앙 정렬한다([(col-0.5),(col+1.5)]·cw — 호버 quad·
-    /// 글리프와 동심).
+    /// 좌측 일부가 안 눌리므로(code-review), 셀 중심에 중앙 정렬한다(≈[(col-0.8),(col+1.8)]·cw — 호버 quad·글리프와 동심).
+    /// 폭은 **hover pill 과 같다**(`sidebar_ops.headerIconHoverPlateWidthPx` ≈2.6칸 — 접힌 pill 은 이 rect 를 그대로 그린다).
+    /// 예전 2칸이면 보이는 pill 양옆 0.3칸이 hover 도 클릭도 안 됐다. 왼쪽 종 rect(3칸)와는 ≈0.2칸 떨어져 안 겹친다.
     pub fn collapsedToggleRect(self: *const AppSession) ?chrome.draw.Rect {
-        // 글리프 중심 (col+0.5)·cw에 2칸 폭 rect를 중앙 정렬(◧는 .m이 셀 중심 기준 1.7×로 키워 ≈[(col-0.35),(col+1.35)]·cw에
+        // 글리프 중심 (col+0.5)·cw에 pill 폭 rect를 중앙 정렬(◧는 .m이 셀 중심 기준 1.7×로 키워 ≈[(col-0.35),(col+1.35)]·cw에
         // 그려지므로, col·cw부터 잡으면 0.5칸 우측으로 치우쳐 글리프 좌측이 안 눌린다 — code-review). collapsedIconRect 단일 출처.
-        return self.collapsedIconRect(self.collapsedToggleCol(), 2 * self.cell_width_px);
+        return self.collapsedIconRect(self.collapsedToggleCol(), sidebar_ops.headerIconHoverPlateWidthPx(self.cell_width_px));
     }
 
     /// 접힘 좌상단 띠 아이콘의 클릭 rect — 글리프 중심 (col+0.5)·cw에 width_px(backing) 폭을 중앙 정렬, 높이=타이틀바 띠
-    /// 전체(띠의 위아래 데드존 방지 — 글리프 잉크는 폭 기준이라 cell_h 안이지만 띠는 그보다 높다). collapsedToggleRect(◧, 2cw)·collapsedNotificationRect(종, 3cw)
+    /// 전체(띠의 위아래 데드존 방지 — 글리프 잉크는 폭 기준이라 cell_h 안이지만 띠는 그보다 높다). collapsedToggleRect(◧, pill 폭 ≈2.6cw)·collapsedNotificationRect(종, 3cw)
     /// 단일 출처 — 접힘/cell/띠/탭 전제와 중앙-정렬 수학을 한 곳에 둬 둘이 드리프트하지 않는다.
     pub fn collapsedIconRect(self: *const AppSession, col: u16, width_px: u32) ?chrome.draw.Rect {
         if (!self.sidebar_collapsed or self.cell_width_px == 0 or self.titlebar_strip_px == 0 or self.tabs.items.len == 0) return null;
@@ -66991,7 +66992,6 @@ test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘
             .{ .region = .view_options, .cp = icons.codepoint(.gear), .span = 1 },
             .{ .region = .new_workspace, .cp = icons.codepoint(.plus), .span = 1 },
         };
-        const cw: f32 = @floatFromInt(session.cell_width_px);
         const ch: f32 = @floatFromInt(session.cell_height_px);
         const strip: f32 = @floatFromInt(session.titlebar_strip_px);
         // 판별력 가드: 셀이 세로로 길어야 「슬롯 높이」와 「잉크」가 갈린다(정사각 폴백이면 옛 높이도 우연히 맞을 수 있다).
@@ -67019,12 +67019,12 @@ test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘
             }
             try std.testing.expectEqual(@as(usize, 1), glyphs);
             const r = glyph_rect orelse return error.TestUnexpectedResult; // 아이콘 셀이 실제로 나갔다
-            // hover quad = 2.6칸 폭 · hover 색 둥근 quad. **자리로도 높이로도 찾지 않는다** — 예전 판정자는 `q.y == 0` 으로 찾아
+            // hover quad = pill 폭(`headerIconHoverPlateWidthPx` ≈2.6칸 — 폭은 그 단위 테스트가 숫자로 본다) · hover 색 둥근 quad. **자리로도 높이로도 찾지 않는다** — 예전 판정자는 `q.y == 0` 으로 찾아
             // 「판이 y 0」을 전제로 굳혔고(세로 치우침을 못 봤다), 그다음엔 `h == 1.7ch` 로 찾아 높이를 전제로 굳혔다.
             var hover: ?metal_frame.GpuQuad = null;
             var matches: usize = 0;
             for (session.gpu_quads.items) |q| {
-                if (@abs(q.w - cw * 2.6) > 0.01 or q.fill_color0 != hover_fill) continue;
+                if (@abs(q.w - @as(f32, @floatFromInt(sidebar_ops.headerIconHoverPlateWidthPx(session.cell_width_px)))) > 0.01 or q.fill_color0 != hover_fill) continue;
                 hover = q;
                 matches += 1;
             }
@@ -73613,6 +73613,10 @@ test "collapsed toggle: hover emits a highlight quad centred on the drawn toggle
         const q = plate orelse return error.TestUnexpectedResult;
         try std.testing.expectApproxEqAbs(g[0] + g[2] / 2.0, q.x + q.w / 2.0, 0.01);
         try std.testing.expectApproxEqAbs(g[1] + g[3] / 2.0, q.y + q.h / 2.0, 0.01);
+        // 판의 가로 = 클릭 rect(`collapsedToggleRect`) — 보이는 pill 의 가장자리를 눌러도 펼쳐진다. 예전엔 pill 2.6칸 · 클릭
+        // 2칸이라 pill 양옆 0.3칸씩이 hover 도 클릭도 안 됐다(보이는 버튼보다 눌리는 버튼이 작다).
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(r.x)), q.x, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(r.w)), q.w, 0.01);
         // 잉크를 덮고, 잉크가 띠 안이면 pill 도 띠 안이다(펼친 헤더 판정자와 같은 계약 — 같은 함수가 높이를 낸다).
         const g_cy = g[1] + g[3] / 2.0;
         const ink: f32 = @min(g[2], g[3]);
@@ -73695,7 +73699,7 @@ test "notification badge circle vertically contains the header icon row the rend
     try std.testing.expectApproxEqAbs(cell_center_x, c.x + c.w / 2.0, 0.01);
 }
 
-// 접힘에도 알림 종 유지: 좌상단 띠에 ◧ 오른쪽 종(collapsedBellCol=collapsedToggleCol+3)을 그리고, 그 클릭 rect는
+// 접힘에도 알림 종 유지: 좌상단 띠에 ◧ 왼쪽 종(collapsedToggleCol=collapsedBellCol+3)을 그리고, 그 클릭 rect는
 // 종 글리프와 동심·◧ rect와 비겹침이며, 클릭하면 알림 패널이 열린다(접힘 분기 anchor). 드러난-것=클릭되는-것 단일 출처.
 test "collapsed notification bell: hit-test rect is concentric with the glyph, clears the ◧ toggle, and opens the panel" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;

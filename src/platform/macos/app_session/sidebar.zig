@@ -128,6 +128,16 @@ fn headerIconHoverPlateVertical(self: *const AppSession) HoverPlateVertical {
 
 const HoverPlateVertical = struct { y: f32, h: f32 };
 
+/// 헤더 아이콘 **hover pill** 의 폭(backing px) — 펼친 헤더의 ◧⚙+종 pill · 접힌 ◧ pill · 접힌 ◧ **클릭 rect**
+/// (`AppSession.collapsedToggleRect`)가 함께 쓴다. 디자인 폭은 ≈2.6칸(아이콘 ~1.7칸 + 양옆 여백 — 사용자 피드백)이다.
+///
+/// 정수로 내고 **셀 폭과 홀짝을 맞춘다**(`cw + 2·round(0.8·cw)`). 그래야 셀 중심 (col+0.5)·cw 에 정수 rect 를 가운데 둘 때
+/// (`collapsedIconRect` 의 `center − w/2`) 홀수 셀 폭에서도 반 픽셀 안 갈리고, 접힌 pill 을 클릭 rect 그대로 그릴 수 있다.
+/// 예전엔 pill 이 `cw × 2.6`(실수), 접힌 클릭 rect 가 `2 × cw` 를 따로 들어 pill 양옆 0.3칸이 hover 도 클릭도 안 됐다.
+pub fn headerIconHoverPlateWidthPx(cell_width_px: u32) u32 {
+    return cell_width_px + 2 * ((8 * cell_width_px + 5) / 10);
+}
+
 /// `headerIconHoverPlateVertical` 의 순수 식(세션 없이 세 갈래를 숫자로 재려고 뗐다).
 fn hoverPlateVerticalPx(row_top_px: u32, cell_width_px: u32, cell_height_px: u32, strip_px: u32) HoverPlateVertical {
     const ch: f32 = @floatFromInt(cell_height_px);
@@ -1034,13 +1044,12 @@ pub fn rebuildSidebar(self: *AppSession) !void {
                 .notifications => .{ cell_text.sidebarBellCol(@intCast(@min(cols, std.math.maxInt(u16)))), cell_text.sidebar_bell_cols },
                 .search, .none => .{ cols, 1 }, // 도달 안 함(setHoveredHeaderRegion이 정규화) — 안전값
             };
-            const cw: f32 = @floatFromInt(self.cell_width_px);
             // hover quad 중심 = 그려진 글리프 중심. 크게 구운 아이콘은 **한 칸** quad 를 키워 차지한 칸들의 가운데에
             // 그린다 — 그 이동(`metal_frame.cellRasterIconGlyphOffsetPx`)을 렌더러가 셀의 `glyph_offset_x_px` 로 받아
             // 더하므로, 여기서도 같은 함수로 중심을 낸다(1칸이면 셀 중심, 종(2칸)이면 반 칸 오른쪽). 예전에는 「종이면
             // +1.0칸」을 여기서 따로 들었다 — 어긋나면 좁아진 종이 박스 한쪽으로 치우쳐 보인다(실제로 있었던 버그).
             const center_x: f32 = metal_frame.cellRasterIconCenterXPx(icon_col * self.cell_width_px, self.cell_width_px, span); // 그려진 글리프 중심
-            const w: f32 = cw * 2.6; // 좌우 패딩을 더 줘 버튼처럼(아이콘 ~1.7칸 + 양옆 여백) — 사용자 피드백
+            const w: f32 = @floatFromInt(headerIconHoverPlateWidthPx(self.cell_width_px)); // ≈2.6칸 — 접힌 ◧ pill · 클릭 rect 와 같은 함수
             const plate = headerIconHoverPlateVertical(self); // 아이콘과 같은 세로 중심 · 띠 안 높이(접힌 ◧ pill 과 같은 함수)
             const h: f32 = plate.h;
             const radius: f32 = @min(w, h) * 0.28; // 둥근 버튼
@@ -1275,17 +1284,18 @@ pub fn rebuildSidebar(self: *AppSession) !void {
     }
     // 접힘 펼치기 토글(◧) 호버 배경 — 접힘 시 위 헤더-아이콘 호버 경로(sidebar_width_px>0 가드)가 안 타므로 여기서
     // 별도로 그린다. 토글 글리프는 헤더 아이콘 줄(`sidebarHeaderIconRowTopPx` — Zig 가 셀 origin_y 로 싣는다)에 1.7×로
-    // 그려지므로 quad도 같은 중심에 맞춘다: 가로=셀 중심(col+0.5), 세로=`headerIconHoverPlateVertical`, 폭≈2.6칸. 색·알파·둥글기는 헤더 아이콘 호버와
+    // 그려지므로 quad도 같은 중심에 맞춘다: 가로=**클릭 rect 그대로**(`collapsedToggleRect` — 셀 중심 (col+0.5)·cw 에
+    // `headerIconHoverPlateWidthPx` 폭, 보이는 pill = 눌리는 자리), 세로=`headerIconHoverPlateVertical`. 색·알파·둥글기는 헤더 아이콘 호버와
     // 동일(밝은 fg 반투명 — straight-alpha packRgbAlpha; premultipliedRgba면 셰이더 이중 premultiply로 흐려짐).
-    if (self.sidebar_collapsed and self.hovered_collapsed_toggle and self.cell_width_px > 0 and self.cell_height_px > 0 and self.titlebar_strip_px > 0) {
-        const cw: f32 = @floatFromInt(self.cell_width_px);
-        const w: f32 = cw * 2.6; // 아이콘(~1.7칸) + 좌우 여백 — 헤더 아이콘 호버와 같은 폭
+    if (self.sidebar_collapsed and self.hovered_collapsed_toggle and self.cell_width_px > 0 and self.cell_height_px > 0 and self.titlebar_strip_px > 0) hover: {
+        const hit = self.collapsedToggleRect() orelse break :hover; // 탭이 없으면 버튼도 없다(글리프 frame 과 같은 전제)
+        const w: f32 = @floatFromInt(hit.w);
         const plate = headerIconHoverPlateVertical(self); // 펼친 헤더 pill 과 같은 함수 — 아이콘과 동심 · 띠 안 · 잉크는 덮는다
         const h: f32 = plate.h;
         const radius: f32 = @min(w, h) * 0.28;
         const hover_fill = packRgbAlpha(self.appearance.theme.sidebar_foreground, 0x40); // ≈25% 밝은 하이라이트
         self.gpu_quads.append(self.allocator, .{
-            .x = (@as(f32, @floatFromInt(self.collapsedToggleCol())) + 0.5) * cw - w / 2.0, // 셀 중심 기준 중앙
+            .x = @floatFromInt(hit.x), // 클릭 rect 와 같은 가로 — 셀 중심 기준 중앙
             .y = plate.y,
             .w = w,
             .h = h,
@@ -3319,6 +3329,20 @@ test "사이드바 키보드 스크롤 게이트: 검색이 열렸을 때만 · 
     try std.testing.expectEqual(max_offset, session.sidebar_scroll_offset_px);
     _ = try session.handleKeyEvent(.{ .key = .home, .modifiers = .{} });
     try std.testing.expectEqual(@as(u32, 0), session.sidebar_scroll_offset_px);
+}
+
+test "헤더 hover pill 폭: ≈2.6칸 · 셀 폭과 홀짝이 같다(셀 중심에 정수 rect 가 반 픽셀 없이 놓인다)" {
+    try std.testing.expectEqual(@as(u32, 20), headerIconHoverPlateWidthPx(8)); // 1x 기본 폰트 — 2.6·8 = 20.8
+    try std.testing.expectEqual(@as(u32, 23), headerIconHoverPlateWidthPx(9));
+    try std.testing.expectEqual(@as(u32, 42), headerIconHoverPlateWidthPx(16)); // 2x — 41.6
+    try std.testing.expectEqual(@as(u32, 45), headerIconHoverPlateWidthPx(17));
+    try std.testing.expectEqual(@as(u32, 0), headerIconHoverPlateWidthPx(0));
+    for (1..64) |i| {
+        const cw: u32 = @intCast(i);
+        const w = headerIconHoverPlateWidthPx(cw);
+        try std.testing.expectEqual(cw % 2, w % 2);
+        try std.testing.expect(@abs(@as(f32, @floatFromInt(w)) - 2.6 * @as(f32, @floatFromInt(cw))) <= 1.0);
+    }
 }
 
 test "헤더 hover pill 세로: 띠가 정하고 · 작은 폰트는 디자인 높이 · 큰 폰트는 잉크가 하한" {

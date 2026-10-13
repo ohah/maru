@@ -8209,11 +8209,12 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                 error.NotReady, error.Busy, error.DialogShowing => {
                     // 자리 없음은 ops 가 아는 그 글이어야 한다 — kick 을 실은 호출은 그때만 다시 보낸다(`web_cdp_ops.busy_reason`).
                     const why = switch (e) {
-                        // 탭이 닫혀 기록이 없으면 그렇게 말한다(W9a③ 적대 리뷰 2 회차: 지우기 도중 닫자 「not ready」 로 답했다).
-                        error.NotReady => if (session_mod.web_osr.owns(run.surface_id))
-                            "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)"
-                        else
-                            "the tab closed or its page crashed",
+                        // 왜 부를 수 없는지 그대로(W9a③ 적대 리뷰 2·3 회차: 닫힌 탭에 「not ready」, 보이지 않은 탭에 「closed」 로 답했다).
+                        error.NotReady => switch (session_mod.web_osr.unavailable(run.surface_id)) {
+                            .closed => "the tab closed or its page crashed",
+                            .not_shown => cdp_not_shown_reason,
+                            .not_ready => "the Chromium tab is not ready (its engine is restarting, or the page is still being created)",
+                        },
                         error.DialogShowing => web_cdp_ops.dialog_reason, // 확실히 보내지 않았다(W9b③ 적대 리뷰 2 회차)
                         else => web_cdp_ops.busy_reason,
                     };
@@ -12742,6 +12743,65 @@ test "W9a 적대 리뷰 4 회차 재현: 스크립트가 이동을 시작했으�
     try std.testing.expect(std.mem.indexOf(u8, response, "\"result\":1") != null);
 }
 
+test "W9a③ 적대 리뷰 3 회차 재현 F1: 한 번도 보이지 않은 탭의 op 은 「not shown yet」 — 2 회차 수정이 「the tab closed」 로 답했다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 84); // 엔진은 돈다 — 86 은 한 번도 배치되지 않아 기록이 없다
+    defer {
+        session_mod.web_osr.destroy(ta, 84);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(84);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 86, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":86,\"script\":\"1\"}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p, req, 86, .execute_script), 86, .execute_script, "{\"script\":\"1\",\"args\":[],\"max_result_bytes\":1024}");
+    const response = p.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    p.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, cdp_not_shown_reason) != null);
+}
+
+test "W9a③ 적대 리뷰 3 회차 재현 F2: 페이지·에이전트가 닫아 기록만 남은 탭(브라우저 없음)의 지우기도 「the tab closed」 — 2 회차 수정은 기록이 없을 때만 잡았다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 87);
+    defer {
+        session_mod.web_osr.destroy(ta, 87);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(87);
+    session_mod.web_osr.testApply(ta, .{ .browser_closed = 87 }); // 브라우저가 닫혔다 — 창이 Term 을 놓기 전
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 87, .scope = .browser_storage, .host = host });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.deleteCookie\",\"params\":{\"id\":87,\"name\":\"s\"}}";
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 87, .method = .delete_cookie, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 87, .scope = .browser_storage, .host = host } } });
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = 87, .op = try web_cdp_ops.Op.init(allocator, .delete_cookie, "{\"name\":\"s\"}", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    run.op.storage.?.doc_url = "https://a.test/";
+    allocator.free((try run.op.start(allocator)).call.params);
+    const del = try run.op.feed(allocator, .{ .ok = "{\"cookies\":[{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"s\",\"domain\":\".a.test\",\"path\":\"/\"}]}" });
+    cdpAdvance(run, del);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    const response = p.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    p.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "2 of 2 cookies could not be deleted (the tab closed") != null);
+}
+
 test "W9a③ 적대 리뷰 2 회차 재현: 지우기 도중 탭이 닫히면(OSR 기록이 없다) 「the tab closed」 로 곧 끝난다 — 전에는 「not ready … restarting」" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const globals = LifecycleTestGlobalsGuard.install();
@@ -12749,7 +12809,9 @@ test "W9a③ 적대 리뷰 2 회차 재현: 지우기 도중 탭이 닫히면(OS
     installTransferTestServer();
     defer uninstallTransferTestServer();
     const ta = std.testing.allocator;
-    try session_mod.web_osr.testHold(ta, 84); // 엔진은 돈다 — 85 는 닫혀 기록이 없다
+    try session_mod.web_osr.testHold(ta, 84); // 엔진은 돈다
+    try session_mod.web_osr.testHold(ta, 85);
+    session_mod.web_osr.destroy(ta, 85); // maru 가 닫았다 — 기록이 없다
     defer {
         session_mod.web_osr.destroy(ta, 84);
         session_mod.web_osr.testForget(ta);

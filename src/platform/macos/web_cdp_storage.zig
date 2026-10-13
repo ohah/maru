@@ -66,6 +66,8 @@ pub const Op = struct {
     /// 지우기 — 보낸 수와 실패한 수(하나라도 실패하면 끝에 실패로 답한다 — 적대 리뷰 1 회차: 엔진이 다시 뜨는 사이 102 개가 남았는데 ok).
     delete_total: usize = 0,
     delete_failed: usize = 0,
+    /// 보냈는데 답을 잃은 지우기(시한·탭 닫힘·엔진 멈춤 — 지워졌을 수도 있다, 적대 리뷰 3 회차: 못 지운 것으로 하나 더 셌다).
+    delete_unconfirmed: usize = 0,
     /// 지우기가 실패한 마지막 이유(소유 — 끝 글에 그대로, 적대 리뷰 2 회차: 대화상자인데 「DevTools refused」 라 했다).
     delete_why: ?[]u8 = null,
     /// 주소에 userinfo 가 있으면 뗀 사본(소유 — `doc_url` 이 이것을 가리킨다, 적대 리뷰 2 회차).
@@ -211,10 +213,11 @@ pub const Op = struct {
     fn feedInner(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
         const body = switch (reply) {
             .ok => |b| b,
-            .cdp_error => |e| return self.failOrContinue(gpa, if (self.stage == .cookie_delete) refused_reason else cdpMessage(e)),
-            .failed => |why| return self.failOrContinue(gpa, why),
-            .timed_out => |why| return done(gpa, .timeout, why),
-            .not_sent => |why| return self.failOrContinue(gpa, why),
+            .cdp_error => |e| return self.failOrContinue(gpa, if (self.stage == .cookie_delete) refused_reason else cdpMessage(e), false),
+            .failed => |why| return self.failOrContinue(gpa, why, true),
+            // 지우기 중의 시한도 세고 이어 간다(3 회차: 남은 것을 두고 「timeout」 만 답했다).
+            .timed_out => |why| return if (self.stage == .cookie_delete) self.failOrContinue(gpa, why, true) else done(gpa, .timeout, why),
+            .not_sent => |why| return self.failOrContinue(gpa, why, false),
         };
         switch (self.stage) {
             .frame_tree => {
@@ -265,13 +268,16 @@ pub const Op = struct {
 
     /// 지우기 중의 실패는 세고 다음 쿠키로(하나를 못 지웠다고 나머지를 남기지 않는다) — 엔진·탭이 사라졌으면 곧 실패(뒤도 다 실패한다).
     /// 그 밖은 곧 실패.
-    fn failOrContinue(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
+    /// `sent_unknown` — 보냈는데 답을 잃었다(지워졌는지 모른다): 못 지운 것이 아니라 확인하지 못한 것으로 센다.
+    fn failOrContinue(self: *Op, gpa: std.mem.Allocator, why: []const u8, sent_unknown: bool) !Step {
         if (self.stage == .cookie_delete) {
-            self.delete_failed += 1;
+            if (sent_unknown) self.delete_unconfirmed += 1 else self.delete_failed += 1;
             const copy = try gpa.dupe(u8, why);
             if (self.delete_why) |w| gpa.free(w);
             self.delete_why = copy;
-            if (std.mem.indexOf(u8, why, "not ready") != null or std.mem.indexOf(u8, why, "engine stopped") != null or std.mem.indexOf(u8, why, "tab closed") != null) {
+            if (std.mem.indexOf(u8, why, "not ready") != null or std.mem.indexOf(u8, why, "engine stopped") != null or std.mem.indexOf(u8, why, "tab closed") != null or
+                std.mem.indexOf(u8, why, "not been shown") != null)
+            {
                 self.delete_failed += self.pending.items.len;
                 return self.deleteSummary(gpa, why);
             }
@@ -432,8 +438,15 @@ pub const Op = struct {
 
     fn deleteSummary(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
         self.stage = .done_stage;
-        if (self.delete_failed == 0) return done(gpa, .success, "");
-        const msg = try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted ({s})", .{ self.delete_failed, self.delete_total, why });
+        const f = self.delete_failed;
+        const u = self.delete_unconfirmed;
+        if (f == 0 and u == 0) return done(gpa, .success, "");
+        const msg = if (u == 0)
+            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted ({s})", .{ f, self.delete_total, why })
+        else if (f == 0)
+            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be confirmed deleted ({s})", .{ u, self.delete_total, why })
+        else
+            try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted and {d} could not be confirmed ({s})", .{ f, self.delete_total, u, why });
         return .{ .done = .{ .status = .failed, .result = msg } };
     }
 
@@ -934,4 +947,31 @@ test "W9a③ 적대 리뷰 2 회차 R2-A: 한 요청의 상한(512)을 넘는 �
     try testing.expectEqual(max_cookie_deletes, n);
     try testing.expectEqual(Status.failed, step.done.status);
     try testing.expect(std.mem.indexOf(u8, step.done.result, "88 of 600") != null);
+}
+
+test "W9a③ 적대 리뷰 3 회차 재현 F3: 보낸 지우기의 답을 잃으면(탭이 닫혔다) 못 지운 것이 아니라 확인하지 못한 것 — 전에는 하나 더 셌다" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"a\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"b\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"c\",\"domain\":\"a.test\",\"path\":\"/\"}]}" }));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{}" })); // 하나는 지웠다
+    // 두 번째를 보냈는데 탭이 닫혀 답이 없다 — 지워졌을 수도 있다. 남은 하나는 보내지 못한다.
+    try expectDone(try op.feed(gpa, .{ .failed = "the tab closed or its page crashed" }), .failed, "1 of 3 cookies could not be deleted and 1 could not be confirmed (the tab closed or its page crashed)");
+}
+
+test "W9a③ 적대 리뷰 3 회차 재현 F4: 지우기 하나가 시한이면 세고 나머지를 이어 지운다 — 전에는 남은 것을 두고 「timeout」 만" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "https://a.test/";
+    r1FreeStep(try op.start(gpa));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"a\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"b\",\"domain\":\"a.test\",\"path\":\"/\"}]}" }));
+    const next = try op.feed(gpa, .{ .timed_out = "DevTools did not answer in time" });
+    defer r1FreeStep(next);
+    try testing.expect(next == .call and std.mem.eql(u8, next.call.method, "Network.deleteCookies"));
+    try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .failed, "1 of 2 cookies could not be confirmed deleted (DevTools did not answer in time)");
 }

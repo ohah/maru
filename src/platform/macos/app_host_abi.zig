@@ -12349,6 +12349,16 @@ test "W9a: getUrl 은 maru 가 아는 주소, 한 번도 보이지 않은 탭은
     var p2: control_server_mod.PendingRequest = undefined;
     startCdpOp(try w9aRequest(&p2, req, 73, .get_url), 73, .get_url, "");
     try expectPendingErrorCode(&p2, .internal_error);
+    // 대화상자가 떠 있어도 답한다 — DevTools 를 부르지 않는다(적대 리뷰 1 회차, 변이 생존 E19).
+    session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = 72, .request = 1, .kind = .alert, .origin = "", .message = "" } });
+    var p2b: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p2b, req, 72, .get_url), 72, .get_url, "");
+    {
+        const r = try w9b3Result(&p2b);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("https://a.test/x", r.value.object.get("result").?.object.get("url").?.string);
+    }
+    session_mod.web_osr.replyDialog(ta, 72, session_mod.web_osr.testDialogToken(72) orelse return error.NoDialog, true, "", false);
     // 앞선 op 이 있으면 기다린다(그 뒤에 답한다).
     const first = try allocator.create(CdpRun);
     first.* = .{ .async_id = 1, .surface_id = 72, .op = try web_cdp_ops.Op.init(allocator, .reload, "", 1), .started = true };

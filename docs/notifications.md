@@ -193,11 +193,13 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   겹친다(i18n 계약 §6.1, `plans/i18n.md` I3c에서 실물로 나온 자리). `min_panel_cols_floor`는 "카드가 답답하지 않은"
   하한으로만 남는다. cap을 넘는 제목/본문은 `overlay_input.truncateToCols`(EAW 폭 기준, 끝에 `…`)로 말줄임한다.
   빈 상태는 제목/부제 폭으로 폭을 잡되 같은 cap을 따른다.
-- **말풍선 팝오버(형태)**: `openNotificationPanel`이 content top을 `anchor_y = 2*cell_h + modal_padding_px`로 둔다(단일 출처).
-  rich 모달 배경 quad는 lowering(`rasterizeOverlayCells`)이 content rect를 사방 `modal_padding_px`만큼 **outset**하므로
-  **보이는** 패널 상단 = `anchor_y − mp` = 줄2(=2ch) — mp를 더해 보이는 상단을 줄2에 맞춘다(안 더하면 보이는 패널이
-  `2ch−12`로 종에 거의 붙어 caret 틈이 없다). 종은 띠 안 세로 중앙(`sidebarHeaderIconRowTopPx`)에 그려지고, 그 아래 틈
-  (기본 폰트 1x 약 6px · 2x 약 14px)이 종↔패널 간격이자 **말풍선 caret**(위로 뾰족한 삼각형) 자리가 된다 — **팝업이 종을 안 가린다**(예전 `anchor_y=1ch`는
+- **말풍선 팝오버(형태)**: `openNotificationPanel`이 펼침 content top을 `anchor_y = expandedPanelVisibleTopPx + modal_padding_px`로
+  둔다(단일 출처). **보이는** 패널 상단(`expandedPanelVisibleTopPx`) = 그려진 종 잉크 아래 끝(`sidebar.headerIconInkBottomPx`)
+  + `notification_caret_gap_pt`(4pt — **폰트와 무관**, 말풍선 caret 꼭짓점 자리) + caret 높이(0.5ch, `notificationCaretHeightPx` —
+  그리기와 같은 함수)다. rich 모달 배경 quad는 lowering(`rasterizeOverlayCells`)이 content rect를 사방 `modal_padding_px`만큼
+  **outset**하므로 content top 은 그 + mp 다(안 더하면 보이는 패널이 mp 만큼 올라가 caret 을 덮는다). 예전엔 보이는 상단을 2ch(폰트
+  비례)에 둬, 폰트와 무관한 띠 안 종과의 틈이 9pt 에서 0(caret 이 종에 닿음) · 24pt 2x 에서 약 36px 로 벌어졌다.
+  그 틈이 종↔패널 간격이자 **말풍선 caret**(위로 뾰족한 삼각형) 자리다 — **팝업이 종을 안 가린다**(예전 `anchor_y=1ch`는
   종 하단을 덮었다). caret은 chrome 모달 lowering이 셀 그리드(픽셀 정밀 도형은 둥근 quad뿐)라, platform `appendNotificationCaret`이
   `self.gpu_quads`에 `GpuQuad{gradient_kind=3}`(셰이더가 rect 내접 삼각형 + fwidth edge AA로 그림 — 별도 파이프라인/ABI 없이
   quad 채널 재활용) **1개**(surface_bg 채움만)를 그려진 종 중심(`headerIconCenterXPx(.notifications)`)·**보이는** 패널 상단(`panel.y − mp`)에

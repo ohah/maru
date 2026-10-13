@@ -150,6 +150,14 @@ pub fn headerIconHoverPlateRect(self: *const AppSession, region: chrome.componen
     return .{ .x = center_x - w / 2.0, .y = plate.y, .w = w, .h = plate.h };
 }
 
+/// 펼친 헤더 아이콘 줄의 **잉크 아래 끝**(backing px) — 렌더러가 아이콘 슬롯 안에 칠하는 `min(w,h)` 정사각(`chrome.ui.icon.cellRasterIconInkPx`)이
+/// 줄 세로 중심(`sidebarHeaderIconRowTopPx` + ch/2)에 서므로 그 아래 끝. 알림 패널 말풍선 꼬리가 이 아래에 일정 간격으로 붙는다.
+pub fn headerIconInkBottomPx(self: *const AppSession) f32 {
+    const ch: f32 = @floatFromInt(self.cell_height_px);
+    const ink: f32 = @floatFromInt(chrome.ui.icon.cellRasterIconInkPx(self.cell_width_px, self.cell_height_px));
+    return @as(f32, @floatFromInt(sidebarHeaderIconRowTopPx(self))) + ch / 2.0 + ink / 2.0;
+}
+
 /// 펼친 헤더 아이콘(종·◧·⚙·+)이 **그려지는 가로 중심**(backing px) — hover pill(`headerIconHoverPlateRect`)과 알림 패널
 /// 말풍선 꼬리(`notification.appendNotificationCaret`)가 함께 쓴다. 아이콘이 안 그려지는 폭이거나 아이콘이 아니면 null.
 pub fn headerIconCenterXPx(self: *const AppSession, region: chrome.components.sidebar.HeaderRegion) ?f32 {

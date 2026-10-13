@@ -67217,6 +67217,63 @@ test "알림 패널: 말풍선 꼬리 꼭짓점이 그려진 종 글리프 중�
     try std.testing.expectEqual(@as(usize, 2), checked);
 }
 
+// 말풍선 꼬리의 **세로**: 꼭짓점은 그려진 종 잉크 아래 `notification_caret_gap_pt` 에 온다 — 글꼴 크기와 무관하게. 예전엔 패널의
+// 보이는 상단을 `2ch`(폰트 비례)에 두었는데 종은 폰트와 무관한 띠(28pt) 가운데라, 작은 글꼴에선 꼬리가 종에 닿고 큰 글꼴
+// (2x 24pt)에선 약 36px 떠 있었다. 종 잉크는 **그려진 셀에서** 읽는다.
+test "알림 패널: 말풍선 꼬리 꼭짓점이 종 잉크 아래 일정한 간격에 온다 (1x·2x × 작은·기본·큰 글꼴)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    _ = notification_ops.pushNotificationHistory(session, "Maru", "빌드 알림 예시", 0);
+    const size0 = session.appearance.font.size;
+    defer session.appearance.font.size = size0;
+    var checked: usize = 0;
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        var prev_ch: u32 = 0;
+        for ([_]f32{ 9, size0, 24 }) |size| {
+            session.appearance.font.size = size;
+            _ = try session.resize(1200 * scale / 1000, 700 * scale / 1000, scale);
+            sidebar_ops.refreshCellMetrics(session, false);
+            try std.testing.expect(session.cell_height_px > prev_ch); // 세 크기가 실제로 다른 셀 높이를 냈다(같은 셀을 세 번 재지 않게)
+            prev_ch = session.cell_height_px;
+            session.chrome_host.notifications.hide();
+            notification_ops.openNotificationPanel(session);
+            try std.testing.expect(session.chrome_host.notifications.open);
+            sidebar_ops.rebuildSidebar(session) catch {};
+            session.metal_dirty = true;
+            for (0..4) |_| {
+                _ = try session.tick();
+                if (!session.metal_dirty) break;
+            }
+            var bell: ?[4]f32 = null;
+            var bells: usize = 0;
+            for (session.metal_buffer.cells) |c| {
+                if (c.codepoint != icons.codepoint(.bell) or c.row != 0 or c.origin_x != 0) continue;
+                if (c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
+                bell = metal_frame.cellRasterIconQuadPx(c, session.cell_width_px, session.cell_height_px);
+                bells += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), bells);
+            const g = bell orelse return error.TestUnexpectedResult;
+            const ink_bottom = g[1] + g[3] / 2.0 + @min(g[2], g[3]) / 2.0; // 렌더러가 칠하는 min(w,h) 정사각의 아래 끝
+            var caret: ?metal_frame.GpuQuad = null;
+            var carets: usize = 0;
+            for (session.gpu_quads.items) |q| if (q.gradient_kind == 3) {
+                caret = q;
+                carets += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 1), carets); // 꼬리가 실제로 그려졌다(생략 갈래가 아니다)
+            const q = caret orelse return error.TestUnexpectedResult;
+            const gap: f32 = @floatFromInt(layout_math.ptToPx(notification_ops.notification_caret_gap_pt, session.scale_milli));
+            try std.testing.expectApproxEqAbs(gap, q.y - ink_bottom, 1.0); // 꼭짓점(삼각형 위 끝) − 종 잉크 아래 끝
+            checked += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 6), checked);
+}
+
 // 알림 배지도 **보이는 것 = 눌리는 것**이다(#4434 의 pill 과 같은 원칙). ⑴ 펼친 헤더: 빨강 원(불투명 — 반투명 hover pill 아래로
 // 비친다)의 오른쪽 끝이 ◧ zone(cols-9~)으로 넘어가, 그 자리를 누르면 알림 대신 사이드바가 접혔다. 다만 원 위에 그려지는 ◧
 // 글리프 잉크는 원이 빼앗지 않는다 — 행간을 키운 창(line_height 2.0)에서 원이 실제로 그 잉크에 닿는 것까지 본다. ⑵ 접힌 띠: 안 읽음 10 개 이상의

@@ -765,9 +765,9 @@ pub fn collapsedNotificationRect(self: *const AppSession) ?chrome.draw.Rect {
 }
 
 /// 알림 센터 패널을 종(🔔) 아이콘 아래에 연다 — 종 클릭과 디버그 훅(MARU_OPEN_NOTIFICATIONS)의 단일 출처.
-/// 펼침: 패널 좌단을 종 열(`cell_text.sidebarBellCol` — 종이 앉는 첫 칸)에 맞추고, 보이는 상단은 2ch 에 둔다. 종은 띠
-/// 안 세로 중앙(`sidebarHeaderIconRowTopPx`)에 그려지고 그 아래 틈이 말풍선 caret 자리다(기본 폰트 1x 약 6px · 2x 약 14px —
-/// 상단이 폰트 비례 2ch 라 아주 작은/큰 폰트에선 그 틈이 좁아지거나 벌어진다). 항목은 collect 시점에 히스토리에서 빌드(buildNotificationItems) — show엔 개수만 준다(키 nav clamp).
+/// 펼침: 패널 좌단을 종 열(`cell_text.sidebarBellCol` — 종이 앉는 첫 칸)에 맞추고, 보이는 상단은 `expandedPanelVisibleTopPx`
+/// (그려진 종 잉크 아래 `notification_caret_gap_pt` 에 말풍선 꼬리 꼭짓점 → 그 아래 꼬리 높이)다. 예전엔 2ch(폰트 비례)라
+/// 폰트와 무관한 띠 안 종과의 틈이 작은 글꼴에선 0(꼬리가 종에 닿음), 큰 글꼴에선 수십 px 로 벌어졌다. 항목은 collect 시점에 히스토리에서 빌드(buildNotificationItems) — show엔 개수만 준다(키 nav clamp).
 pub fn openNotificationPanel(self: *AppSession) void {
     if (self.cell_width_px == 0) return;
     // 단일-오버레이 불변식(`dismissMessageOverlays` 주석) — 포커스 없는 찾기 바·참조 피커는 모달이 아니라 종 클릭을 막지
@@ -787,11 +787,11 @@ pub fn openNotificationPanel(self: *AppSession) void {
         anchor_x = @intCast(@as(u32, collapsedBellCol(self) -| badge_cells) * self.cell_width_px);
         anchor_y = @intCast(self.titlebar_strip_px + mp); // content_top − mp = titlebar_strip_px(띠 하단)
     } else {
-        // 펼침: 패널 좌단을 종 열에, 보이는 상단을 2ch 에 둔다 — 종과 패널 사이 틈이 말풍선 caret 자리. mp를 빼먹으면
-        // 보이는 패널이 종에 붙어(2ch−mp) caret 틈이 없다.
+        // 펼침: 패널 좌단을 종 열에, 보이는 상단을 종 잉크 + 간격 + 꼬리 높이에 둔다. content top 은 그 + mp(lowering 이
+        // 보이는 배경을 사방 mp 만큼 outset 한다 — 빼먹으면 보이는 패널이 mp 만큼 올라가 꼬리를 덮는다).
         const hcols = self.sidebar_width_px / self.cell_width_px;
         anchor_x = @intCast(@as(u32, maru.cell_text.sidebarBellCol(@intCast(@min(hcols, std.math.maxInt(u16))))) * self.cell_width_px);
-        anchor_y = @intCast(self.cell_height_px * 2 + mp);
+        anchor_y = @intCast(expandedPanelVisibleTopPx(self) + mp);
     }
     self.chrome_host.notifications.show(anchor_x, anchor_y, self.notification_history.items.len);
     // 모달을 여는 즉시 배경 호버 강조(탭 ✕·슬롯 밴드·스크롤바·URL)를 끈다 — hoverCursor는 다음 마우스 이동에야
@@ -816,7 +816,6 @@ pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.componen
     const panel = chrome.components.notifications.panelRect(&self.chrome_host.notifications, items, props) orelse return;
     if (panel.y < self.chrome_host.notifications.anchor_y) return; // 세로 clamp로 위로 밀림 — 벨과 어긋나니 생략
     const cw_f: f32 = @floatFromInt(cw);
-    const ch_f: f32 = @floatFromInt(ch);
     // 벨 중심 = 그려진 종 글리프 중심. 예전엔 `(cols-11.5)·cw` 로 따로 셈했다 — 렌더러가 2칸 종을 반 칸 왼쪽으로 밀던 옛
     // nudge 를 전제한 값이라, nudge 가 없어진 뒤(`.m` 1377) 꼬리가 반 칸 왼쪽으로 치우쳤다.
     const bell_cx: f32 = sidebar_ops.headerIconCenterXPx(self, .notifications) orelse return;
@@ -828,7 +827,7 @@ pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.componen
     if (bell_cx < px or bell_cx > px + pw) return; // 벨이 (보이는) 패널 가로 밖 — 생략
     const panel_top: f32 = @as(f32, @floatFromInt(panel.y)) - mp; // 보이는 패널 상단(content top − outset)
     const caret_w: f32 = cw_f * 1.6; // ~1.6칸 폭(말풍선 꼭지)
-    const caret_h: f32 = ch_f * 0.5; // ~반 줄 높이
+    const caret_h: f32 = notificationCaretHeightPx(ch); // ~반 줄 높이 — 패널 상단(expandedPanelVisibleTopPx)과 같은 함수
     const overlap: f32 = 2.0; // 밑변을 패널 안으로 — 상단 테두리 seam 덮기
     const fill = packRgbAlpha(tk.get(.surface_bg), 0xFF); // 채움=패널 배경색(텍스트 박스와 동일)
     const border_col = packRgbAlpha(tk.get(.focus_accent), 0xFF); // 빗변 테두리=패널과 같은 색(패널 border_role=.focus_accent)
@@ -857,6 +856,22 @@ pub const collapsed_toggle_gap_cells: u32 = 2;
 // "9+" 안 읽음 배지가 종 글리프 왼쪽으로 뻗는 최대 칸 수(10+면 2칸). collapsedBellCol이 이만큼을 신호등 클리어런스
 // 오른쪽에 예약해 배지가 신호등을 침범하지 않게 하고, openNotificationPanel 접힘 anchor가 배지 묶음 좌단을 잡는 단일 출처.
 pub const collapsed_badge_max_cells: u16 = 2;
+
+/// 펼친 헤더 알림 패널의 말풍선 꼬리 꼭짓점과 그려진 종 잉크 아래 끝 사이 간격(pt — 폰트와 무관). 패널의 보이는 상단은
+/// 그 꼭짓점에서 꼬리 높이만큼 아래다(`expandedPanelVisibleTopPx`).
+pub const notification_caret_gap_pt: u32 = 4;
+
+/// 말풍선 꼬리 높이(backing px, 반 줄) — 그리기(`appendNotificationCaret`)와 패널 상단(`expandedPanelVisibleTopPx`)의 단일 출처.
+fn notificationCaretHeightPx(cell_height_px: u32) f32 {
+    return @as(f32, @floatFromInt(cell_height_px)) * 0.5;
+}
+
+/// 펼친 헤더 알림 패널의 **보이는 상단**(backing px) = 그려진 종 잉크 아래 끝(`sidebar.headerIconInkBottomPx`) + 간격
+/// (`notification_caret_gap_pt` — 꼬리 꼭짓점) + 꼬리 높이. 정수로 올림해 꼭짓점이 간격보다 가까워지지 않게 한다.
+fn expandedPanelVisibleTopPx(self: *const AppSession) u32 {
+    const gap: f32 = @floatFromInt(layout_math.ptToPx(notification_caret_gap_pt, self.scale_milli));
+    return @intFromFloat(@ceil(sidebar_ops.headerIconInkBottomPx(self) + gap + notificationCaretHeightPx(self.cell_height_px)));
+}
 
 /// 알림 배지 원의 중심이 헤더 아이콘 줄 **셀 안에서** 얼마나 아래인가(셀 높이 비율). digit 글리프의 시각
 /// 중심은 셀 중앙(0.5)보다 약간 위라 0.46이다. 줄 자체의 원점은 `sidebarHeaderIconRowTopPx`가 따로 준다 —

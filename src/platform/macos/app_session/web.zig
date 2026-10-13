@@ -1097,6 +1097,14 @@ pub fn osrKeyTarget(self: *AppSession) ?u64 {
 /// 키 대상이 바뀌었으면 포커스를 옮긴다(C5 모달 에지): 옛 탭은 조합을 그대로 확정하고(`ime_finish_composing`) 포커스를
 /// 놓는다, 새 탭은 포커스를 받는다. tick·키·편집 명령 **직전**과 탭을 활성으로 올리는 누름 **직전**에 부른다 — 키로 탭을
 /// 바꾼 직후의 키가 포커스 없는 브라우저로 가지 않게(적대 검증).
+/// 사용자의 누름·키(`AppSession.last_user_event_ms`) 뒤 이만큼 안에 키 대상이 바뀌면 사용자가 바꾼 것으로 본다 — 누름 뒤 다음 tick(약 16 ms)에
+/// 바뀐다(W9c② 적대 리뷰 3 회차 실측). maru 가 스스로 옮기는 때(sheet·팝업·닫기)는 그 근처에 사용자 입력이 없다.
+pub const user_focus_window_ms: u64 = 250;
+
+pub fn userMadeFocusChange(last_user_event_ms: u64, now_ms: u64) bool {
+    return last_user_event_ms != 0 and now_ms -| last_user_event_ms <= user_focus_window_ms;
+}
+
 pub fn syncOsrKeyTarget(self: *AppSession) void {
     const now = osrKeyTarget(self) orelse 0;
     if (now == self.osr_key_target) return;
@@ -1104,17 +1112,24 @@ pub fn syncOsrKeyTarget(self: *AppSession) void {
     // 영영 못 준다(W4c 실측 — 첫 동기화가 기록 전에 돌아 페이지가 포커스 없이 남았다).
     if (now != 0 and !web_osr.owns(now)) return;
     const window = @intFromPtr(self);
+    // W9c② 적대 리뷰 3 회차: 키 대상이 바뀐 것이 사용자의 누름·키 바로 뒤면(탭 막대·⌘숫자·다른 pane 누름) 옛 탭·새 탭 모두 사용자 시각을 찍는다 —
+    // 그 탭의 blur·focus·visibilitychange 처리기가 띄운 대화상자는 사용자 것이다. sheet·앞 팝업·에이전트의 닫기처럼 maru 가 옮긴 것은 찍지 않는다.
+    const user_made = userMadeFocusChange(self.last_user_event_ms, app_session_mod.monotonicMs());
     if (self.osr_key_target != 0) {
         const old = self.osr_key_target;
         if (web_osr.composing(old)) {
-            _ = web_osr.sendInput(self.allocator, .{ .ime_finish_composing = .{ .browser = old, .value = false } });
+            _ = web_osr.sendAppInput(self.allocator, .{ .ime_finish_composing = .{ .browser = old, .value = false } });
             self.osr_discard_marked = true;
         }
         web_osr.setFocus(self.allocator, old, false, window);
+        if (user_made) web_osr.noteUserAction(old);
     }
     self.osr_down_sent = 0;
     self.osr_unmark_pending = false;
-    if (now != 0) web_osr.setFocus(self.allocator, now, true, window);
+    if (now != 0) {
+        web_osr.setFocus(self.allocator, now, true, window);
+        if (user_made) web_osr.noteUserAction(now);
+    }
     self.osr_key_target = now;
 }
 
@@ -1893,7 +1908,7 @@ pub fn osrDragOutTake(self: *AppSession) ?OsrDragOutInfo {
         const held = self.pointer_gesture_owner == .web_osr and self.pointer_gesture_owner.web_osr.surface_id == l.surface_id and
             self.pointer_gesture_owner.web_osr.held.has(.left);
         if (!held) {
-            _ = web_osr.endDragOut(self.allocator, l.surface_id, d.drag, d.point, 0);
+            _ = web_osr.cancelDragOutByApp(self.allocator, l.surface_id, d.drag, d.point);
             continue;
         }
         const info: OsrDragOutInfo = .{ .drag = d.drag, .allowed = d.allowed, .hotspot_x = d.hotspot.x, .hotspot_y = d.hotspot.y, .image_width = d.image_width, .image_height = d.image_height };
@@ -1901,7 +1916,7 @@ pub fn osrDragOutTake(self: *AppSession) ?OsrDragOutInfo {
         // 번호가 같아졌다 — W6d② 적대 검증 1 차).
         if (self.osr_drag_out) |old| if (!(old.surface == l.surface_id and old.drag == info.drag)) {
             const at = if (web_osr.dragOut(old.surface, old.drag)) |o| o.point else ws_point_zero;
-            _ = web_osr.endDragOut(self.allocator, old.surface, old.drag, at, 0);
+            _ = web_osr.cancelDragOutByApp(self.allocator, old.surface, old.drag, at);
         };
         self.osr_drag_out = .{ .surface = l.surface_id, .drag = info.drag };
         return info;
@@ -3170,4 +3185,11 @@ test "permission sheet text lists each asked permission once and notes rememberi
     var small: [24]u8 = undefined;
     const cut = permissionMessage(&small, kinds.notifications.bit() | kinds.midi_sysex.bit(), 0);
     try std.testing.expect(cut.len <= small.len and std.unicode.utf8ValidateSlice(cut));
+}
+
+test "W9c② 적대 리뷰 3 회차: 키 대상이 바뀐 것은 사용자의 누름·키 뒤 250 ms 안일 때만 사용자 탓 — 누름이 없었거나 오래됐으면 maru 가 옮긴 것" {
+    try std.testing.expect(userMadeFocusChange(10_000, 10_016)); // 누름 다음 tick
+    try std.testing.expect(userMadeFocusChange(10_000, 10_250));
+    try std.testing.expect(!userMadeFocusChange(10_000, 10_251)); // sheet·팝업·닫기 — 근처에 사용자 입력이 없다
+    try std.testing.expect(!userMadeFocusChange(0, 10_000)); // 한 번도 누르지 않았다
 }

@@ -5926,3 +5926,60 @@ test "image channel owner: release 와 채널 묶임이 이미지를 미룬 stre
     try testing.expect(client.connection.attachments.getPtr(1).?.image_wake);
     try fx.expectMainAlive(main_fd, 2);
 }
+
+test "image channel owner: 큰 한 장이 우선권을 쥔 동안 release 는 원장이 빌 때만 깨우고, 「전송 불가」 진단은 판마다 한 번 적는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-prio.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    defer _ = c.close(channel_fd);
+    const client = fx.clientWithChannel() orelse return error.TestUnexpectedResult;
+    try client.connection.attachments.put(client.connection.allocator, 1, .{
+        .runtime_id = 0xAA,
+        .subscription_id = .{ .value = 1 },
+        .image_deferred = true,
+    });
+    const ledger = client.imageLedger().?;
+    const first = try ledger.reserve(1, 7, 1, 64);
+    const second = try ledger.reserve(1, 8, 1, 64);
+    try testing.expect(ledger.issue(first));
+    try testing.expect(ledger.issue(second));
+    client.connection.image_priority = .{ .stream = 1, .image_id = 9 };
+
+    // 원장이 남는 release — 큰 한 장은 아직 못 들어가고 다른 이미지는 우선권에 막혔으니 깨우지 않는다.
+    try sendAll(channel_fd, &(try image_channel_wire.encodeRelease(first)));
+    for (0..200) |_| {
+        _ = try fx.owner.pollOnce(2);
+        if (ledger.count() == 1) break;
+    }
+    try testing.expectEqual(@as(usize, 1), ledger.count());
+    try testing.expect(!client.connection.attachments.getPtr(1).?.image_wake);
+    // 원장을 비우는 release — 깨운다(우선권을 쥔 한 장이 들어갈 차례다).
+    try sendAll(channel_fd, &(try image_channel_wire.encodeRelease(second)));
+    for (0..200) |_| {
+        _ = try fx.owner.pollOnce(2);
+        if (ledger.count() == 0) break;
+    }
+    try testing.expectEqual(@as(usize, 0), ledger.count());
+    try testing.expect(client.connection.attachments.getPtr(1).?.image_wake);
+
+    // 「전송 불가」 — host 상한 초과(원장 청구)와 레코드 길이 초과(u32) 두 자리 모두 (stream, image, generation) 당 한 줄이다.
+    // 픽셀을 실제로 만들지 않게 길이만 큰 조각을 빌려 준다 — 둘 다 복사 전에 걸러진다.
+    const pixels = [_]u8{ 1, 2, 3, 4 };
+    const over_host = @as([*]const u8, &pixels)[0 .. image_segment_ledger.image_segment_bytes_per_host + 1];
+    const over_record = @as([*]const u8, &pixels)[0 .. @as(usize, std.math.maxInt(u32)) + 1];
+    try testing.expectEqual(@as(usize, 0), client.untransmittable_memo.len);
+    try testing.expect(client.prepareImageSegment(1, 4, 1, over_host, false) == .untransmittable);
+    try testing.expect(client.prepareImageSegment(1, 4, 1, over_host, true) == .untransmittable);
+    try testing.expectEqual(@as(usize, 1), client.untransmittable_memo.len);
+    try testing.expect(client.prepareImageSegment(1, 4, 2, over_host, false) == .untransmittable);
+    try testing.expectEqual(@as(usize, 2), client.untransmittable_memo.len);
+    try testing.expect(client.prepareImageSegment(1, 5, 1, over_record, false) == .untransmittable);
+    try testing.expect(client.prepareImageSegment(1, 5, 1, over_record, false) == .untransmittable);
+    try testing.expectEqual(@as(usize, 3), client.untransmittable_memo.len);
+    try testing.expectEqual(@as(usize, 0), ledger.count());
+    try fx.expectMainAlive(main_fd, 2);
+}

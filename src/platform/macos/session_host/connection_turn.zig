@@ -417,6 +417,8 @@ pub const Client = struct {
     image_channel_bind: ?u128 = null,
     /// 용량 사건이 이미지를 미룬 stream 을 깨웠다 — owner 가 꺼내 이 연결의 producer 를 바로 예약한다(§3.5·§5).
     image_capacity_wake: bool = false,
+    /// 「전송 불가」 진단을 이미 적은 (stream, image, generation)(§4.4).
+    untransmittable_memo: image_segment_ledger.UntransmittableMemo = .{},
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -703,8 +705,9 @@ pub const Client = struct {
         const rest = split.rest();
         @memcpy(self.image_rx[0..rest.len], rest);
         self.image_rx_len = rest.len;
-        // 원장에 자리가 생겼다 — 미룬 이미지가 있는 stream 을 깨운다.
-        if (returned) self.noteImageCapacity();
+        // 원장에 자리가 생겼다 — 미룬 이미지가 있는 stream 을 깨운다. 큰 한 장이 우선권을 쥐었으면 원장이 빌 때만 깨운다(§4.4) —
+        // 그 전엔 그 이미지도 못 들어가고 다른 이미지는 우선권에 막혀, 깨워 봐야 투영만 헛돈다.
+        if (returned and (self.connection.image_priority == null or ledger.count() == 0)) self.noteImageCapacity();
     }
 
     /// 채널 HUP/ERR(§3.5 — 레벨 트리거라 미루면 계속 깨어난다).
@@ -732,12 +735,12 @@ pub const Client = struct {
     ) ImageSegmentPrepare {
         // 「이미지 채널 없음」(협상했지만 묶이지 않음·잃음) — 세그먼트를 만들지 않는다(§3.2).
         const ledger = self.imageLedger() orelse return .deferred;
-        const byte_len = std.math.cast(u32, pixels.len) orelse return .untransmittable;
+        const byte_len = std.math.cast(u32, pixels.len) orelse return self.imageUntransmittable(stream_id, image_id, generation, pixels.len);
         // 0 B 이미지는 세그먼트가 없다 — 투영은 청하지 않는다(메타만 `image_ref` 로 간다).
         if (byte_len == 0) return .deferred;
         if (!snapshot and ledger.hasOutstanding(stream_id, image_id)) return .deferred;
         const segment_id = ledger.reserve(stream_id, image_id, generation, byte_len) catch |err| return switch (err) {
-            error.TooLargeForHost => .untransmittable,
+            error.TooLargeForHost => self.imageUntransmittable(stream_id, image_id, generation, pixels.len),
             error.EmptySegment, error.ConnectionCountFull, error.ConnectionBytesFull, error.HostBytesFull => .deferred,
         };
         // 공유 메모리를 못 만들면(fd·커널 자원 부족) 청구를 되돌리고 미룬다 — 다음 투영이 다시 청한다.
@@ -754,6 +757,14 @@ pub const Client = struct {
             .byte_len = byte_len,
             .fd = segment.fd,
         } };
+    }
+
+    /// 「전송 불가」(§4.4) — host 전체 상한·레코드 길이보다 큰 한 장은 무엇이 반환돼도 못 보낸다. 투영은 placement 를 빼고 깨우지
+    /// 않는다. (stream, image, generation) 당 진단 한 줄을 남긴다 — 앱 화면에는 그 이미지가 그냥 없으므로 이 줄이 유일한 단서다.
+    fn imageUntransmittable(self: *Client, stream_id: u64, image_id: u32, generation: u64, bytes: usize) ImageSegmentPrepare {
+        if (self.untransmittable_memo.firstSighting(stream_id, image_id, generation))
+            noteImageUntransmittable(self.admission.index, stream_id, image_id, generation, bytes);
+        return .untransmittable;
     }
 
     /// 배치가 큐에 승인된 같은 턴(§4.2): 준비한 세그먼트를 원장에서 발급하고 이미지 채널로 보낸다. 주 소켓의 그 배치 바이트는
@@ -2133,6 +2144,14 @@ fn sendImageSegment(channel_fd: c.fd_t, segment: PreparedImageSegment) bool {
         }
         return rc == payload.len;
     }
+}
+
+fn noteImageUntransmittable(slot: usize, stream_id: u64, image_id: u32, generation: u64, bytes: usize) void {
+    if (builtin.is_test) return;
+    host_log.line(
+        "session host image untransmittable: slot={d} stream={d} image={d} generation={d} bytes={d} host_cap={d}",
+        .{ slot, stream_id, image_id, generation, bytes, image_segment_ledger.image_segment_bytes_per_host },
+    );
 }
 
 fn noteImageChannelLost(slot: usize, reason: ImageChannelLoss, ledger: image_segment_ledger.Ledger) void {

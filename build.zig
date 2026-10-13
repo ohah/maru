@@ -7014,8 +7014,8 @@ pub fn build(b: *std.Build) void {
             }),
         });
         const run_ledger_tests = b.addRunArtifact(ledger_tests);
-        run_ledger_tests.addArg("--maru-expect-tests=7");
-        run_ledger_tests.addArg("--maru-expect-passed=7");
+        run_ledger_tests.addArg("--maru-expect-tests=8");
+        run_ledger_tests.addArg("--maru-expect-passed=8");
         image_channel_step.dependOn(&run_ledger_tests.step);
         // 채널 메시지 코덱과 token 표(IC2) — 둘 다 std-only leaf.
         const wire_tests = addProjectTest(b, .{
@@ -7063,12 +7063,13 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
-        // hello·abandon 7, 투영 ↔ 세그먼트 배선(IC5b-2 — 발급·취소·투영 실패·resync·미룸·미협상·제품 attach) 4, 용량 사건 깨움(IC5c-1) 1.
+        // hello·abandon 7, 투영 ↔ 세그먼트 배선(IC5b-2 — 발급·취소·투영 실패·resync·미룸·미협상·제품 attach) 4, 용량 사건 깨움(IC5c-1) 1,
+        // 큰 한 장 우선권(IC5c-2 — 쥐기·막기·놓기, 사라짐·detach) 2.
         .filters = &.{ "image channel hello:", "image channel abandon:", "image segment wiring:" },
     });
     const run_image_channel_hello_tests = b.addRunArtifact(image_channel_hello_tests);
-    run_image_channel_hello_tests.addArg("--maru-expect-tests=12");
-    run_image_channel_hello_tests.addArg("--maru-expect-passed=12");
+    run_image_channel_hello_tests.addArg("--maru-expect-tests=14");
+    run_image_channel_hello_tests.addArg("--maru-expect-passed=14");
     image_channel_step.dependOn(&run_image_channel_hello_tests.step);
     boundary_step.dependOn(image_channel_step);
 
@@ -7089,9 +7090,10 @@ pub fn build(b: *std.Build) void {
             .filters = &.{"image channel owner:"},
         });
         const run_image_channel_host_tests = b.addRunArtifact(image_channel_host_tests);
-        // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4, Connection 에 건넨 연산(IC5b-2) 1, 용량 사건 깨움(IC5c-1) 1.
-        run_image_channel_host_tests.addArg("--maru-expect-tests=18");
-        run_image_channel_host_tests.addArg("--maru-expect-passed=18");
+        // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4, Connection 에 건넨 연산(IC5b-2) 1, 용량 사건 깨움(IC5c-1) 1,
+        // 우선권 동안의 깨움·「전송 불가」 진단(IC5c-2) 1.
+        run_image_channel_host_tests.addArg("--maru-expect-tests=19");
+        run_image_channel_host_tests.addArg("--maru-expect-passed=19");
         image_channel_host_step.dependOn(&run_image_channel_host_tests.step);
         test_step.dependOn(&run_image_channel_host_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_host_tests.step);

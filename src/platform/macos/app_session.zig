@@ -66928,59 +66928,86 @@ test "sidebar 헤더: 투영된 종 아이콘 셀이 알림 배지와 같은 줄
 // `origin_x + col × cw + glyph_offset_x_px` 에 그린다(ABI 228 — 그 이동은 Zig `cellRasterIconGlyphOffsetPx`). hover 는
 // 예전에 「종이면 +1.0칸」과 열 번호(`cols -| 12` 등)를 따로 들었다 — 둘 중 하나만 바뀌면 박스가 아이콘 한쪽으로 치우친다.
 // 여기서는 실제 셀 스트림의 role 셀에서 그 자리를 읽어 hover quad 중심과 맞춘다. 종(2칸)이 반 칸 이동을 실제로 받는지도 본다.
+// hover pill 은 그려진 아이콘과 동심이고, **잉크를 덮고, 잉크가 띠 안이면 pill 도 띠 안**이다. 예전 높이 `1.7 × ch` 는
+// 「글리프가 1.7줄 높이」라는 전제였는데 등록 아이콘의 잉크는 슬롯 안 `min(w, h)` 정사각(폭 기준)이라, 띠보다 높은
+// pill 이 창 위 끝에서 평평하게 잘렸다(2x: 63px pill · 56px 띠 · 위 4px 잘림 — #4412 의 2x 캡처로 처음 봤다). 1x·2x 둘을 본다.
 test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘 중심(cellRasterIconQuadPx — 가로·세로)과 같다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
     const allocator = std.testing.allocator;
     const session = try soTestSession(allocator);
     defer allocator.destroy(session);
     defer session.deinit();
-    const Case = struct { region: chrome.components.sidebar.HeaderRegion, cp: u21, span: u16 };
-    const cases = [_]Case{
-        .{ .region = .notifications, .cp = icons.codepoint(.bell), .span = maru.cell_text.sidebar_bell_cols },
-        .{ .region = .toggle_sidebar, .cp = maru.cell_text.sidebar_toggle_codepoint, .span = 1 },
-        .{ .region = .view_options, .cp = icons.codepoint(.gear), .span = 1 },
-        .{ .region = .new_workspace, .cp = icons.codepoint(.plus), .span = 1 },
-    };
-    const cw: f32 = @floatFromInt(session.cell_width_px);
-    const ch: f32 = @floatFromInt(session.cell_height_px);
-    // 아이콘 줄이 띠 안 세로 중앙에 서는 창이어야 세로 축이 뭔가를 잰다 — 줄이 y 0 이면 「판을 y 0 에 둔다」가 우연히 맞는다.
-    try std.testing.expect(sidebar_ops.sidebarHeaderIconRowTopPx(session) > 0);
-    var checked: usize = 0;
-    for (cases) |case| {
-        session.setHoveredHeaderRegion(case.region);
-        for (0..4) |_| {
-            _ = try session.tick();
-            if (!session.metal_dirty) break;
+    var fits: usize = 0;
+    var prev_ch: u32 = 0;
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        _ = try session.resize(1200 * scale / 1000, 700 * scale / 1000, scale);
+        try std.testing.expect(session.cell_height_px > prev_ch); // 2x 는 실제로 다시 잰 셀이어야 한다(1x 를 두 번 재지 않게)
+        prev_ch = session.cell_height_px;
+        session.setHoveredHeaderRegion(.none);
+        const Case = struct { region: chrome.components.sidebar.HeaderRegion, cp: u21, span: u16 };
+        const cases = [_]Case{
+            .{ .region = .notifications, .cp = icons.codepoint(.bell), .span = maru.cell_text.sidebar_bell_cols },
+            .{ .region = .toggle_sidebar, .cp = maru.cell_text.sidebar_toggle_codepoint, .span = 1 },
+            .{ .region = .view_options, .cp = icons.codepoint(.gear), .span = 1 },
+            .{ .region = .new_workspace, .cp = icons.codepoint(.plus), .span = 1 },
+        };
+        const cw: f32 = @floatFromInt(session.cell_width_px);
+        const ch: f32 = @floatFromInt(session.cell_height_px);
+        const strip: f32 = @floatFromInt(session.titlebar_strip_px);
+        // 판별력 가드: 셀이 세로로 길어야 「슬롯 높이」와 「잉크」가 갈린다(정사각 폴백이면 옛 높이도 우연히 맞을 수 있다).
+        try std.testing.expect(session.cell_width_px < session.cell_height_px);
+        // 아이콘 줄이 띠 안 세로 중앙에 서는 창이어야 세로 축이 뭔가를 잰다 — 줄이 y 0 이면 「판을 y 0 에 둔다」가 우연히 맞는다.
+        try std.testing.expect(sidebar_ops.sidebarHeaderIconRowTopPx(session) > 0);
+        const hover_fill = packRgbAlpha(session.appearance.theme.sidebar_foreground, 0x40);
+        var checked: usize = 0;
+        for (cases) |case| {
+            session.setHoveredHeaderRegion(case.region);
+            for (0..4) |_| {
+                _ = try session.tick();
+                if (!session.metal_dirty) break;
+            }
+            // 렌더러가 그 아이콘을 그리는 사각형 — 헤더 줄(row 0)의 role 셀을 atlas 크기 그대로 그 중심에 놓은 것.
+            var glyph_rect: ?[4]f32 = null;
+            var glyphs: usize = 0;
+            for (session.metal_buffer.cells) |c| {
+                if (c.codepoint != case.cp or c.row != 0 or c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
+                if (c.origin_x != 0) continue; // 사이드바 헤더 frame(origin_x 0) — 파일 도크 토글(◧)은 띠 오른쪽 끝이라 제외
+                try std.testing.expectEqual(case.span, c.width);
+                try std.testing.expectEqual(metal_frame.cellRasterIconGlyphOffsetPx(session.cell_width_px, case.span), c.glyph_offset_x_px);
+                glyph_rect = metal_frame.cellRasterIconQuadPx(c, session.cell_width_px, session.cell_height_px);
+                glyphs += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), glyphs);
+            const r = glyph_rect orelse return error.TestUnexpectedResult; // 아이콘 셀이 실제로 나갔다
+            // hover quad = 2.6칸 폭 · hover 색 둥근 quad. **자리로도 높이로도 찾지 않는다** — 예전 판정자는 `q.y == 0` 으로 찾아
+            // 「판이 y 0」을 전제로 굳혔고(세로 치우침을 못 봤다), 그다음엔 `h == 1.7ch` 로 찾아 높이를 전제로 굳혔다.
+            var hover: ?metal_frame.GpuQuad = null;
+            var matches: usize = 0;
+            for (session.gpu_quads.items) |q| {
+                if (@abs(q.w - cw * 2.6) > 0.01 or q.fill_color0 != hover_fill) continue;
+                hover = q;
+                matches += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), matches);
+            const q = hover orelse return error.TestUnexpectedResult;
+            const g_cy = r[1] + r[3] / 2.0;
+            const ink: f32 = @min(r[2], r[3]); // 슬롯 안 min(w, h) 정사각 — 중심은 슬롯 중심(정수 내림으로 ±0.5px)
+            try std.testing.expectApproxEqAbs(r[0] + r[2] / 2.0, q.x + q.w / 2.0, 0.01);
+            try std.testing.expectApproxEqAbs(g_cy, q.y + q.h / 2.0, 0.01);
+            try std.testing.expect(q.y <= g_cy - ink / 2.0 + 0.01 and q.y + q.h >= g_cy + ink / 2.0 - 0.01); // 잉크를 덮는다
+            if (g_cy - ink / 2.0 >= 0 and g_cy + ink / 2.0 <= strip) { // 잉크가 띠 안이면 pill 도 띠 안(위가 창 끝에서 안 잘린다)
+                try std.testing.expect(q.y >= -0.01 and q.y + q.h <= strip + 0.01);
+                // 그리고 **띠가 허락하는 만큼은 채운다**(디자인 높이 1.7ch 까지) — 「버튼처럼」 위아래 여백이 있는 모양을 고정한다.
+                // 이 단언이 없으면 pill = 잉크(여백 0)로 바꿔도 위 셋을 다 통과한다.
+                try std.testing.expectApproxEqAbs(@min(ch * 1.7, 2.0 * @min(g_cy, strip - g_cy)), q.h, 0.01);
+                fits += 1;
+            }
+            checked += 1;
         }
-        // 렌더러가 그 아이콘을 그리는 사각형 — 헤더 줄(row 0)의 role 셀을 atlas 크기 그대로 그 중심에 놓은 것.
-        var glyph_rect: ?[4]f32 = null;
-        var glyphs: usize = 0;
-        for (session.metal_buffer.cells) |c| {
-            if (c.codepoint != case.cp or c.row != 0 or c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
-            if (c.origin_x != 0) continue; // 사이드바 헤더 frame(origin_x 0) — 파일 도크 토글(◧)은 띠 오른쪽 끝이라 제외
-            try std.testing.expectEqual(case.span, c.width);
-            try std.testing.expectEqual(metal_frame.cellRasterIconGlyphOffsetPx(session.cell_width_px, case.span), c.glyph_offset_x_px);
-            glyph_rect = metal_frame.cellRasterIconQuadPx(c, session.cell_width_px, session.cell_height_px);
-            glyphs += 1;
-        }
-        try std.testing.expectEqual(@as(usize, 1), glyphs);
-        const r = glyph_rect orelse return error.TestUnexpectedResult; // 아이콘 셀이 실제로 나갔다
-        // hover quad = 2.6칸 × 1.7줄 둥근 quad. **자리로 찾지 않는다** — 예전 판정자는 `q.y == 0` 으로 찾아 「판이 y 0」을
-        // 전제로 굳혔고, 그래서 세로 치우침(판 y 0 · 아이콘 줄은 띠 중앙)을 못 봤다.
-        var hover: ?metal_frame.GpuQuad = null;
-        var matches: usize = 0;
-        for (session.gpu_quads.items) |q| {
-            if (@abs(q.w - cw * 2.6) > 0.01 or @abs(q.h - ch * 1.7) > 0.01) continue;
-            hover = q;
-            matches += 1;
-        }
-        try std.testing.expectEqual(@as(usize, 1), matches);
-        const q = hover orelse return error.TestUnexpectedResult;
-        try std.testing.expectApproxEqAbs(r[0] + r[2] / 2.0, q.x + q.w / 2.0, 0.01);
-        try std.testing.expectApproxEqAbs(r[1] + r[3] / 2.0, q.y + q.h / 2.0, 0.01);
-        checked += 1;
+        try std.testing.expectEqual(@as(usize, cases.len), checked);
     }
-    try std.testing.expectEqual(@as(usize, cases.len), checked);
+    // 기본 폰트에서는 두 배율 × 아이콘 넷 모두 잉크가 띠 안이다 — 「띠 안」 축이 조용히 건너뛰어지지 않았음을 센다.
+    try std.testing.expectEqual(@as(usize, 8), fits);
     // 종의 반 칸 이동이 0 이 아닌 값으로 실제로 실렸다(1칸 아이콘만 보면 이동을 안 해도 통과한다).
     try std.testing.expect(metal_frame.cellRasterIconGlyphOffsetPx(session.cell_width_px, maru.cell_text.sidebar_bell_cols) > 0);
 }
@@ -73546,6 +73573,15 @@ test "collapsed toggle: hover emits a highlight quad centred on the drawn toggle
         const q = plate orelse return error.TestUnexpectedResult;
         try std.testing.expectApproxEqAbs(g[0] + g[2] / 2.0, q.x + q.w / 2.0, 0.01);
         try std.testing.expectApproxEqAbs(g[1] + g[3] / 2.0, q.y + q.h / 2.0, 0.01);
+        // 잉크를 덮고, 잉크가 띠 안이면 pill 도 띠 안이다(펼친 헤더 판정자와 같은 계약 — 같은 함수가 높이를 낸다).
+        const g_cy = g[1] + g[3] / 2.0;
+        const ink: f32 = @min(g[2], g[3]);
+        const strip_f: f32 = @floatFromInt(session.titlebar_strip_px);
+        try std.testing.expect(q.y <= g_cy - ink / 2.0 + 0.01 and q.y + q.h >= g_cy + ink / 2.0 - 0.01);
+        try std.testing.expect(g_cy - ink / 2.0 >= 0 and g_cy + ink / 2.0 <= strip_f); // 이 창에서는 잉크가 띠 안이다
+        try std.testing.expect(q.y >= -0.01 and q.y + q.h <= strip_f + 0.01);
+        const ch_f: f32 = @floatFromInt(session.cell_height_px);
+        try std.testing.expectApproxEqAbs(@min(ch_f * 1.7, 2.0 * @min(g_cy, strip_f - g_cy)), q.h, 0.01); // 띠가 허락하는 만큼 채운다
     }
     session.titlebar_strip_px = strip0;
 

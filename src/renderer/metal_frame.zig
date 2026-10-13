@@ -1913,7 +1913,7 @@ pub const MetalFrameBuffer = struct {
         if (pane_overlay_cells.len > 0) {
             try cells_list.insertSlice(allocator, cells_list.items.len - cursor_cells, pane_overlay_cells);
         }
-        // 사이드바 헤더 glyph(검색·아이콘 / 접힘 시 좌상단 펼치기 버튼)를 origin(0,0) cells로 활성 커서 suffix '앞'에
+        // 사이드바 헤더 glyph(검색·아이콘 / 접힘 시 좌상단 펼치기 버튼)를 (0, sidebar_header_origin_y_px) cells로 활성 커서 suffix '앞'에
         // 끼운다 — 터미널 내용 '위'에 그려져, 접힘(사이드바 폭 0이라 헤더가 터미널 좌상단과 겹침)일 때 펼치기 버튼이
         // 터미널에 가려지지 않는다. 펼침일 땐 헤더(origin_x=0)와 터미널(origin_x≥사이드바폭)이 안 겹쳐 순서 무관(시각 동일).
         // cursor_cells(suffix)는 보존돼 blink rebuild가 안 깨진다(divider와 같은 삽입 규율). pane_chrome cells[0] 가정도 유지.

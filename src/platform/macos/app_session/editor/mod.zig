@@ -41511,6 +41511,17 @@ test "INDL4 한 글자 입력이 트리에 묻는 범위 — 커서마다 caret 
     ranges.clearRetainingCapacity();
     try typingLiteralRanges(fx.session, t, &.{Sel.at(30)}, ')', "()[]{}", &ranges);
     try testing.expectEqualSlices(LiteralRange, &.{.{ .start = 0, .end = 31 }}, ranges.items);
+    // caret 이 줄 머리 공백 바로 뒤의 `{` 앞(`  |{}`) — 그 `{` 의 노드는 caret 줄에서 시작하니 건너 바깥 `{`(4)부터(적대적 5회차 — 변이 M23).
+    {
+        const src2 = "f() {\n  {}\n}\n";
+        const t2 = try undoFixture(&fx, allocator, "indl4b.ts", src2);
+        t2.rt.editor_syntax.deinit(allocator);
+        t2.rt.editor_syntax = syntax_color.openParsedBudgeted(src2, t2.rt.editor_grammar, 0);
+        if (freshTree(t2) == null) return error.NoTree;
+        ranges.clearRetainingCapacity();
+        try typingLiteralRanges(fx.session, t2, &.{Sel.at(8)}, '}', "()[]{}", &ranges);
+        try testing.expectEqualSlices(LiteralRange, &.{.{ .start = 4, .end = 9 }}, ranges.items);
+    }
     // 물을 범위 다듬기 — 겹치거나 맞닿으면 합치고 문서 끝으로 자른다; 수천 커서는 하나로 묶고(적대적 4회차 — 쿼리 횟수가 커서 수에
     // 곱해졌다), 합이 상한을 넘으면 묻지 않는다.
     var few = [_]LiteralRange{ .{ .start = 8, .end = 12 }, .{ .start = 0, .end = 3 }, .{ .start = 3, .end = 5 }, .{ .start = 10, .end = 99 } };

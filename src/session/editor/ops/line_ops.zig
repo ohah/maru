@@ -829,6 +829,10 @@ test "INDL3 planNewline × 구문 트리 문맥 — 정규식 안 괄호는 안 
         .{ .ctx = ts, .src = "s = `\n  a {\n`;\n", .spans = &.{.{ .start = 4, .end = 13, .kind = .string }}, .caret = 11, .with = "\n  ", .without = "\n    " },
         // 문자열 안 `#`·줄 끝 주석 — 지운 코드 `if x ==    :` 로 `:` 를 본다(스캐너와 같은 답).
         .{ .ctx = py, .src = "if x == \"#\":  # c", .spans = &.{ .{ .start = 8, .end = 11, .kind = .string }, .{ .start = 14, .end = 17, .kind = .comment } }, .caret = 17, .with = "\n    ", .without = "\n    " },
+        // caret 이 문자열 안이면 같은 줄 앞의 짝 없는 괄호도 안 본다(`f(`a|` — 글자 안에 들여쓰기를 넣지 않는다; 없으면 한 단계).
+        .{ .ctx = ts, .src = "f(`a\n`)\n", .spans = &.{.{ .start = 2, .end = 6, .kind = .string }}, .caret = 4, .with = null, .without = "\n  " },
+        // 여러 줄 템플릿 안 `/* a|` — 주석 이어쓰기도 안 탄다(없으면 ` * `).
+        .{ .ctx = ts, .src = "s = `\n/* a\n`;\n", .spans = &.{.{ .start = 4, .end = 12, .kind = .string }}, .caret = 10, .with = null, .without = "\n * " },
         // 닫히지 않은 블록 주석 끝 — 주석 규칙은 원래 글자로 읽는다.
         .{ .ctx = ts, .src = "/** a", .spans = &.{.{ .start = 0, .end = 5, .kind = .comment }}, .caret = 5, .with = "\n * ", .without = "\n * " },
     };

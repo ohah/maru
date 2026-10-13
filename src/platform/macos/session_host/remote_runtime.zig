@@ -3778,6 +3778,15 @@ pub const RemoteRuntime = struct {
             }
         }
 
+        /// 이 runtime 의 host 연결이 「이미지 채널 없음」인가(이미지 채널 §3.2) — 펌프 직후 backend 가 앱 안내(IC6b)를 정한다.
+        pub fn imageChannelUnavailable(runtime: *RemoteRuntime) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            return switch (runtime.currentGeneration().connection) {
+                .legacy => |client| client.imageChannelUnavailable(),
+                .generation => |adapter| adapter.imageChannelUnavailable(),
+            };
+        }
+
         pub fn hasAnyBufferedFrameWork(runtime: *RemoteRuntime) client_mod.ClientError!bool {
             try runtime.admitRuntimeOperation();
             return switch (runtime.currentGeneration().connection) {
@@ -21805,6 +21814,8 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     const transport = attachmentTransport(&client);
     try std.testing.expect(!transport.image_shm_negotiated(transport.context));
     client.image_channel = .{ .fd = channel[0], .state = .bound };
+    // 채널이 묶인 연결은 「이미지 채널 없음」이 아니다 — 앱 안내(IC6b)가 뜨면 안 된다.
+    try std.testing.expect(!client.imageChannelUnavailable());
     const segments = @import("client_image_segments.zig");
     const table = try allocator.create(segments.Table);
     table.* = .{};
@@ -21848,6 +21859,12 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     try std.testing.expectEqual(@as(usize, 1), table.len);
     transport.sweep_image_segments(transport.context, 7, 1);
     try std.testing.expectEqual(@as(usize, 0), table.len);
+
+    // 앱 안내(IC6b)의 runtime 고리는 두 연결 모양 모두 그 연결의 관측으로 간다 — 한쪽이 상수면 그 모양의 연결은 안내가 안 뜬다.
+    const unavailable_at = std.mem.indexOf(u8, @embedFile("remote_runtime.zig"), "pub fn " ++ "imageChannelUnavailable(runtime: *RemoteRuntime) bool {") orelse
+        return error.TestUnexpectedResult;
+    const unavailable_body = @embedFile("remote_runtime.zig")[unavailable_at..][0..400];
+    try std.testing.expect(std.mem.indexOf(u8, unavailable_body, ".legacy => |client| client." ++ "imageChannelUnavailable(),\n                .generation => |adapter| adapter." ++ "imageChannelUnavailable(),\n            };") != null);
 
     // GUI 적용 자리(첫 attach 조립·관찰자 재접속 후보)는 attachment 의 resolver 를 넘긴다 — 미협상 resolver 를 이 파일에 적으면
     // 협상한 연결의 첫 snapshot 이 `image_ref` 에 malformed 로 닫힌다.

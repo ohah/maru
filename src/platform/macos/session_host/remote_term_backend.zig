@@ -1323,6 +1323,11 @@ pub const RemoteTermBackend = struct {
     not_live_skip_handle: RuntimeHandle = 0,
     not_live_skip_ticks: u32 = 0,
     not_live_skip_reported: bool = false,
+    /// 지난 유지보수 tick 에 「이미지 채널 없음」(이미지 채널 §3.2)인 host 연결이 있었는가. 없다가 생기는 순간에만 안내를
+    /// 올린다 — 매 tick 알리지 않는다. 채널이 돌아오면(재접속) 내려가 다음에 다시 없어지면 또 알린다.
+    image_channel_unavailable_seen: bool = false,
+    /// 앱이 아직 띄우지 않은 「이미지 채널 없음」 안내(IC6b). 앱 tick 이 모달이 없을 때 꺼낸다.
+    image_channel_notice_pending: bool = false,
     singleton_owner: RemoteBackendSingletonOwner = .{},
     host_reconnect_job: ?*HostReconnectJob = null,
     /// 사용자가 Term 을 닫았지만 진행 중인 재접속 job 이 runtime 을 붙들어 닫기·제거를 미룬 handle
@@ -3420,6 +3425,19 @@ pub const RemoteTermBackend = struct {
         return std.math.order(key, item);
     }
 
+    /// 이번 tick 의 「이미지 채널 없음」 관측을 반영한다 — 없다가 생긴 순간에만 안내를 올린다(이미지 채널 §3.2, IC6b).
+    fn noteImageChannelAvailability(self: *RemoteTermBackend, unavailable: bool) void {
+        if (unavailable and !self.image_channel_unavailable_seen) self.image_channel_notice_pending = true;
+        self.image_channel_unavailable_seen = unavailable;
+    }
+
+    /// 앱이 띄울 「이미지 채널 없음」 안내를 꺼낸다(한 번). 모달이 열려 있으면 앱은 꺼내지 않고 다음 tick 에 다시 본다.
+    pub fn takeImageChannelUnavailableNotice(self: *RemoteTermBackend) bool {
+        const pending = self.image_channel_notice_pending;
+        self.image_channel_notice_pending = false;
+        return pending;
+    }
+
     pub fn maintenanceEventTick(self: *RemoteTermBackend) void {
         // 프레임 도장을 올린다 — 이 tick 안에서 같은 host Client 에 두 번째 «비었나» 질문이 poll 을 건너뛴다(`client.zig`).
         client_mod.advanceUiFrameStamp();
@@ -3482,15 +3500,19 @@ pub const RemoteTermBackend = struct {
             host_probes[index] = .{ .host_id = entry.host_id, .runtime = entry.runtime };
         }
         std.mem.sort(HostProbe, host_probes[0..handle_count], {}, hostProbeLessThan);
+        var image_channel_unavailable = false;
         for (host_probes[0..handle_count], 0..) |probe, index| {
             if (index != 0 and host_probes[index - 1].host_id == probe.host_id) continue;
             // host 의 연결 하나에 이미지 채널 펌프 한 번(이미지 채널 §6) — 화면 배치가 없는 tick 에도 release 가 host 원장을 돌린다.
             RemoteRuntime.backend_api.pumpImageChannel(probe.runtime);
+            // 펌프가 채널을 잃었으면 바로 여기서 보인다 — 연결 때 이미 없던 것도 같다(§3.2).
+            if (RemoteRuntime.backend_api.imageChannelUnavailable(probe.runtime)) image_channel_unavailable = true;
             if (RemoteRuntime.backend_api.hasAnyBufferedFrameWork(probe.runtime) catch false) {
                 ready_hosts[ready_host_count] = probe.host_id;
                 ready_host_count += 1;
             }
         }
+        self.noteImageChannelAvailability(image_channel_unavailable);
         var priority = [_]bool{false} ** max_remote_backend_runtimes;
         for (handles[0..handle_count], 0..) |handle, index| {
             const entry = self.runtimes.get(handle) orelse
@@ -9586,4 +9608,39 @@ test "R2b3b1 notification continuity identity is exact current and indivisible" 
     );
     remote_runtime.testing_api.setContinuityObserver(&fixture.runtime);
     try testing.expect(backend_value.notificationContinuityIdentity(handle, host_id, runtime_id) == null);
+}
+
+test "image channel notice: 「이미지 채널 없음」은 없다가 생길 때만 한 번 안내하고, 채널이 돌아오면 다시 무장하며, tick 이 host 마다 펌프 직후에 본다" {
+    // 상태 둘만 쓰는 판정이라 나머지 칸은 건드리지 않는다.
+    var backend: RemoteTermBackend = undefined;
+    backend.image_channel_unavailable_seen = false;
+    backend.image_channel_notice_pending = false;
+
+    backend.noteImageChannelAvailability(false);
+    try std.testing.expect(!backend.takeImageChannelUnavailableNotice());
+    // 없다가 생긴 순간 — 한 번 올린다. 꺼내면 비고, 계속 없어도 다시 올리지 않는다(매 tick 토스트가 뜨지 않는다).
+    backend.noteImageChannelAvailability(true);
+    try std.testing.expect(backend.takeImageChannelUnavailableNotice());
+    try std.testing.expect(!backend.takeImageChannelUnavailableNotice());
+    backend.noteImageChannelAvailability(true);
+    try std.testing.expect(!backend.takeImageChannelUnavailableNotice());
+    // 앱이 꺼내기 전에 tick 이 여러 번 돌아도 안내는 남는다(모달이 열려 있던 동안).
+    backend.noteImageChannelAvailability(false);
+    backend.noteImageChannelAvailability(true);
+    backend.noteImageChannelAvailability(true);
+    try std.testing.expect(backend.takeImageChannelUnavailableNotice());
+    // 재접속으로 채널이 돌아오면 내려가고, 다시 없어지면 또 알린다.
+    backend.noteImageChannelAvailability(false);
+    backend.noteImageChannelAvailability(true);
+    try std.testing.expect(backend.takeImageChannelUnavailableNotice());
+
+    // 배선: 유지보수 tick 의 host 당 루프가 펌프 바로 다음에 그 host 연결을 보고, 루프가 끝난 뒤 한 번 반영한다.
+    const source = @embedFile("remote_term_backend.zig");
+    const tick_at = std.mem.indexOf(u8, source, "pub fn " ++ "maintenanceEventTick(") orelse return error.TestUnexpectedResult;
+    const body = source[tick_at..];
+    const pump_at = std.mem.indexOf(u8, body, "RemoteRuntime.backend_api." ++ "pumpImageChannel(probe.runtime);") orelse return error.TestUnexpectedResult;
+    const seen_at = std.mem.indexOf(u8, body, "if (RemoteRuntime.backend_api." ++ "imageChannelUnavailable(probe.runtime)) image_channel_unavailable = true;") orelse return error.TestUnexpectedResult;
+    const note_at = std.mem.indexOf(u8, body, "self." ++ "noteImageChannelAvailability(image_channel_unavailable);") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pump_at < seen_at and seen_at < note_at);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "self." ++ "noteImageChannelAvailability("));
 }

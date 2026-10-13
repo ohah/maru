@@ -7548,6 +7548,12 @@ pub const Client = struct {
         return self.image_channel.state != .not_negotiated;
     }
 
+    /// 협상했는데 채널이 없다 — 「이미지 채널 없음」(§3.2). 이 연결의 이미지는 placement 째 빠진다. 앱이 탭 안내(IC6b)를 띄우는
+    /// 근거다. 관측이라 울타리 밖에서 읽는다(`imageShmNegotiated` 와 같다).
+    pub fn imageChannelUnavailable(self: *const Client) bool {
+        return self.image_channel.state == .unavailable;
+    }
+
     /// `image_ref` 하나를 이 연결의 세그먼트 표로 해석해 매핑한 픽셀을 준다(§6) — null 은 「세그먼트 없음」. 표를 바꾸므로 다른
     /// 공개 변경 메서드와 같은 울타리를 든다: 들 수 없으면(allocator callback 안·poison·옮겨 간 Client·external 모드·prepared
     /// lease) 해석하지 않는다. 채널이 묶인 적 없는 연결은 표가 없어 빈 표처럼 null 이다.
@@ -27672,8 +27678,9 @@ test "image channel connect: GUI 제품 진입점 둘은 광고해 협상하고,
             else => try Client.connectGuiWithImageChannelUntil(testing.allocator, host.path, protocol.version_major, deadline),
         };
         client_open = true;
-        // 제공했지만 자리가 없다 — 협상은 됐다(「이미지 채널 없음」, 형식은 세그먼트).
+        // 제공했지만 자리가 없다 — 협상은 됐다(「이미지 채널 없음」, 형식은 세그먼트). 앱 안내(IC6b)가 이 관측을 본다.
         try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+        try testing.expect(client.imageChannelUnavailable());
         try testing.expectEqual(ConnectionProfile.gui, client.connection_profile);
         client.deinit();
         client_open = false;
@@ -27718,6 +27725,8 @@ test "image channel connect: gui·admin public connect 진입점은 광고하지
             client = opened;
             client_open = true;
             try testing.expectEqual(client_image_channel.State.not_negotiated, client.image_channel.state);
+            // 협상하지 않은 연결은 「이미지 채널 없음」이 아니다 — 안내가 뜨면 안 된다(형식은 `image_blob`).
+            try testing.expect(!client.imageChannelUnavailable());
             client.deinit();
             client_open = false;
         } else |err| if (entry < 3) return err;

@@ -39,10 +39,10 @@ pub const role = "image_channel";
 pub const capability = "image_shm";
 pub const token_hex_len: usize = 32;
 
-/// host 가 이미지 채널을 **제공**하는가 — hello_ack 의 `image_shm` 광고와 token 발급. producer 가 `image_ref` 를 내기
-/// 시작하는 단계(계획 IC5)에서 켠다. 그 전에 켜면 IC2~IC4 host 가 오래 살아남는 동안(업그레이드 side-by-side drain) IC6
-/// 앱이 채널을 묶고도 여전히 `image_blob` 을 받는다 — 원래 문제(8 MiB 배치 거부)가 그 host 에서 그대로 남는다.
-pub const host_offers_image_channel = false;
+/// host 가 이미지 채널을 **제공**하는가 — hello_ack 의 `image_shm` 광고와 token 발급. producer 가 협상한 연결에
+/// `image_ref` 를 내고(IC5a·b) 미룬 이미지를 용량 사건이 다시 투영하는(IC5c) host 만 켠다(계획 IC5d). 그보다 이른 host 가
+/// 켜면 IC6 앱이 채널을 묶고도 `image_blob` 을 받는다 — 원래 문제(8 MiB 배치 거부)가 그 host 에서 그대로 남는다.
+pub const host_offers_image_channel = true;
 
 pub const DecodeError = error{Malformed};
 

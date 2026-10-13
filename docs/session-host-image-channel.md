@@ -69,8 +69,9 @@ sequenceDiagram
   hex, 0 은 쓰지 않는다)이고, 없으면 필드째 빠진다. host 의 지원 여부는 hello_ack 기능 목록의 `image_shm` 이 말한다 — 기능은 있는데
   token 이 없으면 「자리 없음」, 기능이 없으면 이미지 채널을 모르거나 이 연결과 협상하지 않는 host 다(host 는 협상할 수 있는 연결
   — admin 이 아닌 제품 연결 — 에만 기능을 싣는다). host 쪽 token 만료는 10 초(`token_ttl_ns`)다.
-  host 는 producer 가 `image_ref` 를 내기 시작하는 단계(계획 IC5)부터 제공한다(`host_offers_image_channel`). 그 전에 광고하면 오래
-  살아남는 host(업그레이드 side-by-side drain)에 붙은 새 앱이 채널을 묶고도 여전히 `image_blob` 을 받는다.
+  host 는 producer 가 협상한 연결에 `image_ref` 를 내고 미룬 이미지를 용량 사건이 다시 투영하는 빌드(계획 IC5d)부터 제공한다
+  (`host_offers_image_channel`). 그보다 이른 host 가 제공하면 오래 살아남는 host(업그레이드 side-by-side drain)에 붙은 새 앱이
+  채널을 묶고도 여전히 `image_blob` 을 받는다.
 - 앱은 같은 리스너에 두 번째 연결을 열고 첫 프레임으로 `.hello` 의 변형 `hello{role:"image_channel", token}` 을 보낸다. 새 frame
   kind 로 두지 않는 이유: pre_hello 에서 첫 프레임이 `.hello` 가 아니면 연결이 닫힌다. 판정은 `Connection.handleHello` 안에서
   `role` 을 다른 필드보다 먼저 보고 Action `.image_channel_bind` 를 돌려준다 — major·JSON·범위 검사를 그대로 거치고, 잘못된 입력은

@@ -103,7 +103,7 @@ pub const Owner = struct {
     /// host 전체 미반환 세그먼트 바이트. 모든 연결 원장이 이 하나를 가리키므로 owner 가 옮겨져도 주소가 변하지 않게
     /// 따로 할당한다.
     image_host_budget: *image_segment_ledger.HostBudget,
-    /// 새 연결에 이미지 채널을 제공하는가(`image_channel_wire.host_offers_image_channel`). 판정자만 미리 켠다.
+    /// 새 연결에 이미지 채널을 제공하는가(`image_channel_wire.host_offers_image_channel`). 판정자는 스위치와 무관하게 고정한다.
     image_channel_offered: bool = image_channel_wire.host_offers_image_channel,
 
     pub fn init(
@@ -1219,6 +1219,9 @@ const registry = @import("registry.zig");
 const subscription_identity = @import("subscription_identity.zig");
 const upgrade = @import("upgrade_coordinator.zig");
 const upgrade_wire = @import("upgrade_wire.zig");
+const screen_snapshot = @import("screen_snapshot.zig");
+const maru_terminal = @import("maru").terminal;
+const screen_stream = @import("maru").session.screen_stream;
 
 extern "c" fn mkdtemp(template: [*:0]u8) ?[*:0]u8;
 
@@ -5032,7 +5035,7 @@ const ImageChannelFixture = struct {
         self.owner = try Owner.init(testing.allocator, testing.io, &self.server);
         // 판정자가 시계를 쥔다 — cadence 가 끼어들면 token 만료가 판정 도중에 일어날 수 있다.
         self.owner.next_cadence_ns = std.math.maxInt(u64);
-        // 제품은 producer 가 `image_ref` 를 낼 때(IC5)까지 제공하지 않는다. 수립 판정자는 미리 켠다.
+        // 수립 판정자는 스위치와 무관하게 제공하는 host 로 고정한다 — 스위치를 따르는지는 제공 스위치 판정자가 따로 잰다.
         if (offer) |value| self.owner.image_channel_offered = value;
     }
 
@@ -5558,8 +5561,10 @@ test "image channel owner: 제품 owner 는 제공 스위치를 그대로 따른
     try sendTestRequest(main_fd, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}");
     const payload = try pumpFramePayload(&fx.owner, main_fd, "host_id");
     defer testing.allocator.free(payload);
-    // producer 가 `image_ref` 를 내기 전(IC5 전)에는 광고도 token 도 없다 — 스위치와 배선이 같은 값을 말한다.
+    // 스위치와 배선이 같은 값을 말한다. IC5d 부터 제품 host 는 제공한다 — 끄면 IC6 앱이 「이미지 채널 없음」으로 남아
+    // terminal-browser 이미지가 다시 주 스트림(`image_blob`)으로 8 MiB 배치 상한에 걸린다.
     const offered = image_channel_wire.host_offers_image_channel;
+    try testing.expect(offered);
     try testing.expectEqual(offered, std.mem.indexOf(u8, payload, "\"image_shm\"") != null);
     try testing.expectEqual(offered, std.mem.indexOf(u8, payload, "image_channel_token") != null);
 }
@@ -5993,4 +5998,401 @@ test "image channel owner: 큰 한 장이 우선권을 쥔 동안 release 는 �
     try testing.expectEqual(@as(usize, 3), client.untransmittable_memo.len);
     try testing.expectEqual(@as(usize, 0), ledger.count());
     try fx.expectMainAlive(main_fd, 2);
+}
+
+/// 제품 투영(`screen_snapshot`)을 실제 TerminalCore 에 돌리는 RuntimeOps — 통합 판정자(IC5d)가 실제 owner·채널·원장과 잇는다.
+/// 나머지 연산은 `FakeRuntimeOps` 그대로다. 화면을 바꿀 때 제품 runtime 처럼 화면 변화 토큰을 올린다.
+const ProjectedTerminal = struct {
+    fake: server_mod.FakeRuntimeOps = .{},
+    core: maru_terminal.TerminalCore = undefined,
+    /// 기본(`image_blob`) 판 투영 횟수 — 협상한 연결은 이 길로 오면 안 된다.
+    blob_projections: usize = 0,
+    /// 세그먼트 판 투영 횟수 — 「화면 변화 없음」 게이트가 닫힌 동안 늘면 안 된다.
+    segment_projections: usize = 0,
+
+    fn init(self: *ProjectedTerminal) !void {
+        self.core = try maru_terminal.TerminalCore.init(testing.allocator, .{ .cols = 40, .rows = 8 });
+        self.core.setCellMetrics(10, 20);
+    }
+
+    fn deinit(self: *ProjectedTerminal) void {
+        self.core.deinit();
+    }
+
+    fn ops(self: *ProjectedTerminal) server_mod.RuntimeOps {
+        var result = self.fake.opsWithScreenChangeToken();
+        result.snapshot = snapshotBlob;
+        result.delta = deltaBlob;
+        result.snapshot_with_images = snapshotSegments;
+        result.delta_with_images = deltaSegments;
+        return result;
+    }
+
+    /// 2x2 RGBA 이미지를 커서 자리에 표시한다(`a=T`). 같은 id 를 다시 보내면 새 판이다.
+    fn showImage(self: *ProjectedTerminal, image_id: u32, comptime rgba: [4]u8) !void {
+        const raw = rgba ** 4;
+        var b64: [32]u8 = undefined;
+        var seq: [128]u8 = undefined;
+        const text = std.base64.standard.Encoder.encode(&b64, &raw);
+        try self.core.write(try std.fmt.bufPrint(&seq, "\x1b_Ga=T,f=32,s=2,v=2,i={d},c=1,r=1,q=2;{s}\x1b\\", .{ image_id, text }));
+        self.fake.screen_change_token.revision += 1;
+    }
+
+    fn from(ctx: *anyopaque) *ProjectedTerminal {
+        const fake: *server_mod.FakeRuntimeOps = @ptrCast(@alignCast(ctx));
+        return @fieldParentPtr("fake", fake);
+    }
+
+    fn project(ctx: *anyopaque, sequence: u64, allocator: std.mem.Allocator, images: screen_snapshot.ImageEmission) !server_mod.ProjectedSnapshot {
+        const self = from(ctx);
+        var opts: screen_snapshot.ProjectOptions = .{ .generation = 0, .sequence = sequence };
+        opts.images = images;
+        const bytes = try screen_snapshot.projectSnapshotBounded(allocator, &self.core, opts, protocol.max_viewport_snapshot);
+        return .{ .bytes = bytes, .frontier = .{ .generation = 0, .sequence = sequence } };
+    }
+
+    /// 제품 `deltaOp` 과 같은 모양 — 격자가 바뀌어 delta 로 못 이으면 스냅샷을 보낸다.
+    fn diff(ctx: *anyopaque, base: []const u8, sequence: u64, allocator: std.mem.Allocator, images: screen_snapshot.ImageEmission) !server_mod.StreamUpdate {
+        const self = from(ctx);
+        var opts: screen_snapshot.ProjectOptions = .{ .generation = 0, .sequence = sequence };
+        opts.images = images;
+        const result = screen_snapshot.computeDeltaBounded(allocator, base, &self.core, opts, protocol.max_viewport_snapshot) catch |err| switch (err) {
+            error.SnapshotRequired => {
+                const snap = try screen_snapshot.projectSnapshotBounded(allocator, &self.core, opts, protocol.max_viewport_snapshot);
+                errdefer allocator.free(snap);
+                return .{ .send = try allocator.dupe(u8, snap), .is_snapshot = true, .new_base = snap, .frontier = .{ .generation = 0, .sequence = sequence } };
+            },
+            else => return err,
+        };
+        return .{
+            .send = result.delta,
+            .is_snapshot = false,
+            .new_base = result.snapshot,
+            .frontier = .{ .generation = 0, .sequence = if (result.delta.len == 0) sequence - 1 else sequence },
+        };
+    }
+
+    fn snapshotBlob(ctx: *anyopaque, _: u128, sequence: u64, allocator: std.mem.Allocator) anyerror!server_mod.ProjectedSnapshot {
+        from(ctx).blob_projections += 1;
+        return project(ctx, sequence, allocator, .blob);
+    }
+
+    fn deltaBlob(ctx: *anyopaque, _: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator) anyerror!server_mod.StreamUpdate {
+        from(ctx).blob_projections += 1;
+        return diff(ctx, base, sequence, allocator, .blob);
+    }
+
+    fn snapshotSegments(ctx: *anyopaque, _: u128, sequence: u64, allocator: std.mem.Allocator, images: server_mod.ImageSegmentSink) anyerror!server_mod.ProjectedSnapshot {
+        from(ctx).segment_projections += 1;
+        var bridge: ProjectedSegmentBridge = .{ .images = images };
+        return project(ctx, sequence, allocator, .{ .segments = bridge.sink() });
+    }
+
+    fn deltaSegments(ctx: *anyopaque, _: u128, base: []const u8, sequence: u64, allocator: std.mem.Allocator, images: server_mod.ImageSegmentSink) anyerror!server_mod.StreamUpdate {
+        from(ctx).segment_projections += 1;
+        var bridge: ProjectedSegmentBridge = .{ .images = images };
+        return diff(ctx, base, sequence, allocator, .{ .segments = bridge.sink() });
+    }
+};
+
+/// 연결 층 sink 를 투영 sink 로 잇는다 — 제품 `RuntimeManager.ProjectionSegmentSink` 와 같은 대응(그 대응은 runtime_manager 의
+/// 「image segment projection sink:」 판정자가 잰다).
+const ProjectedSegmentBridge = struct {
+    images: server_mod.ImageSegmentSink,
+
+    fn sink(self: *ProjectedSegmentBridge) screen_snapshot.SegmentSink {
+        return .{ .ctx = self, .reserveFn = reserve, .hwmFn = hwm };
+    }
+
+    fn reserve(ctx: *anyopaque, image: maru_terminal.KittyImageView, kind: screen_snapshot.BatchKind) error{OutOfMemory}!screen_snapshot.Reservation {
+        const self: *ProjectedSegmentBridge = @ptrCast(@alignCast(ctx));
+        return switch (try self.images.reserve(self.images.ctx, image.image_id, image.generation, image.pixels, kind == .snapshot)) {
+            .segment => |id| .{ .segment = id },
+            .deferred => .deferred,
+            .untransmittable => .untransmittable,
+        };
+    }
+
+    fn hwm(ctx: *anyopaque) u64 {
+        const self: *ProjectedSegmentBridge = @ptrCast(@alignCast(ctx));
+        return self.images.hwm(self.images.ctx);
+    }
+};
+
+/// 앱 쪽 화면 수신 — stream 1 의 snapshot·delta chunk 를 `end_stream` 까지 이어 한 배치로 돌려준다.
+const ScreenBatchReader = struct {
+    parser: framing.FrameParser,
+    pending: std.ArrayListUnmanaged(u8) = .empty,
+
+    fn init() ScreenBatchReader {
+        return .{ .parser = framing.FrameParser.init(testing.allocator) };
+    }
+
+    fn deinit(self: *ScreenBatchReader) void {
+        self.parser.deinit();
+        self.pending.deinit(testing.allocator);
+    }
+
+    /// 다음 배치(호출자가 free). `polls` 번 돌려도 안 오면 null.
+    fn next(self: *ScreenBatchReader, owner: *Owner, fd: c.fd_t, polls: usize) !?[]u8 {
+        var buf: [4096]u8 = undefined;
+        for (0..polls) |_| {
+            if (try self.take()) |batch| return batch;
+            _ = try owner.pollOnce(2);
+            const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+            if (rc < 0) {
+                if (posix.errno(rc) == .AGAIN) continue;
+                return error.TestUnexpectedResult;
+            }
+            if (rc == 0) return error.TestUnexpectedResult;
+            try self.parser.push(buf[0..@intCast(rc)]);
+        }
+        return try self.take();
+    }
+
+    /// 주 연결이 아직 응답하는가 — 같은 parser 로 읽어 앞서 읽다 만 frame 과 어긋나지 않는다.
+    fn expectMainAlive(self: *ScreenBatchReader, owner: *Owner, fd: c.fd_t, request_id: u64) !void {
+        try sendTestRequest(fd, .request, request_id, "{\"method\":\"host.info\"}");
+        var buf: [4096]u8 = undefined;
+        for (0..1000) |_| {
+            while (try self.parser.next()) |frame| {
+                defer frame.deinit(testing.allocator);
+                if (frame.header.kind == .response and frame.header.request_id == request_id) {
+                    try testing.expect(std.mem.indexOf(u8, frame.payload, "\"result\"") != null);
+                    return;
+                }
+            }
+            _ = try owner.pollOnce(2);
+            const rc = c.recv(fd, &buf, buf.len, posix.MSG.DONTWAIT);
+            if (rc < 0) {
+                if (posix.errno(rc) == .AGAIN) continue;
+                return error.TestUnexpectedResult;
+            }
+            if (rc == 0) return error.TestUnexpectedResult;
+            try self.parser.push(buf[0..@intCast(rc)]);
+        }
+        return error.TestUnexpectedResult;
+    }
+
+    fn take(self: *ScreenBatchReader) !?[]u8 {
+        while (try self.parser.next()) |frame| {
+            defer frame.deinit(testing.allocator);
+            if (frame.header.stream_id != 1) continue;
+            if (frame.header.kind != .snapshot_chunk and frame.header.kind != .delta_chunk) continue;
+            try self.pending.appendSlice(testing.allocator, frame.payload);
+            if (protocol.Flags.hasEndStream(frame.header.flags)) return try self.pending.toOwnedSlice(testing.allocator);
+        }
+        return null;
+    }
+};
+
+/// 한 배치에서 이미지 레코드를 센다 — `image_blob`·`any_refs` 는 이미지와 무관하게 모두, `refs`·placement 는 `image_id` 의 것만.
+const BatchImages = struct {
+    blobs: usize = 0,
+    any_refs: usize = 0,
+    refs: usize = 0,
+    placements: usize = 0,
+    ref: ?screen_stream.ImageRef = null,
+
+    fn of(bytes: []const u8, image_id: u32) !BatchImages {
+        var out: BatchImages = .{};
+        var records = screen_stream.RecordStream{ .bytes = bytes };
+        while (try records.next()) |record| {
+            const split = try screen_stream.RecordStream.split(record);
+            switch (split.header.kind) {
+                .image_blob => out.blobs += 1,
+                .image_ref => {
+                    const ref = try screen_stream.decodeImageRef(split.body);
+                    out.any_refs += 1;
+                    if (ref.image_id != image_id) continue;
+                    out.refs += 1;
+                    out.ref = ref;
+                },
+                .image_placement, .image_place => {
+                    if ((try screen_stream.decodeImagePlacement(split.body)).image_id == image_id) out.placements += 1;
+                },
+                else => {},
+            }
+        }
+        return out;
+    }
+};
+
+/// 채널로 올 세그먼트 하나를 기다려 그 fd 의 픽셀이 `expected` 인지 보고 fd 를 닫는다.
+fn pumpTestSegmentPixels(owner: *Owner, channel_fd: c.fd_t, expected: []const u8) !image_channel_wire.Segment {
+    var fds: [4]c.fd_t = undefined;
+    var fd_count: usize = 0;
+    for (0..1000) |_| {
+        const got = (try recvTestSegment(channel_fd, &fds, &fd_count)) orelse {
+            _ = try owner.pollOnce(2);
+            continue;
+        };
+        defer for (fds[0..fd_count]) |fd| {
+            _ = c.close(fd);
+        };
+        try testing.expectEqual(@as(usize, 1), fd_count);
+        try testing.expectEqual(@as(u32, @intCast(expected.len)), got.byte_len);
+        // libc 를 직접 부른다 — `posix.mmap` 은 EINVAL 을 unreachable 로 둔다(host 결함이 판정자를 panic 시키지 않고 실패로 남게).
+        const raw = c.mmap(null, expected.len, .{ .READ = true }, .{ .TYPE = .SHARED }, fds[0], 0);
+        if (raw == c.MAP_FAILED) return error.TestUnexpectedResult;
+        const mapped: [*]align(std.heap.page_size_min) const u8 = @ptrCast(@alignCast(raw));
+        defer posix.munmap(mapped[0..expected.len]);
+        try testing.expectEqualSlices(u8, expected, mapped[0..expected.len]);
+        return got;
+    }
+    return error.TestUnexpectedResult;
+}
+
+/// `projected` 는 먼저 init 되어 있어야 한다 — 호출자가 `fx` 보다 먼저 만들고 나중에 해제한다(연결이 그 연산을 가리킨다).
+fn initProjectedFixture(fx: *ImageChannelFixture, projected: *ProjectedTerminal, leaf: []const u8) !void {
+    try fx.init(leaf);
+    errdefer fx.deinit();
+    _ = try fx.runtime_registry.register(0xAA, 40, 8);
+    // 연결은 생길 때 server 의 연산을 받는다 — connect 전에 건다.
+    fx.server.runtime_ops = projected.ops();
+}
+
+const attach_observer_request = "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}";
+
+test "image channel owner: 제품 투영 — 미룬 새 프레임이 있는 정지 화면은 release 뒤에 그 프레임을 받고, 채널을 잃으면 image_blob 없이 placement 를 뺀다" {
+    var projected: ProjectedTerminal = .{};
+    try projected.init();
+    defer projected.deinit();
+    var fx: ImageChannelFixture = .{};
+    try initProjectedFixture(&fx, &projected, "ic-e2e.sock");
+    defer fx.deinit();
+    try projected.showImage(9, .{ 3, 4, 5, 255 });
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    var channel_open = true;
+    defer if (channel_open) {
+        _ = c.close(channel_fd);
+    };
+    var reader = ScreenBatchReader.init();
+    defer reader.deinit();
+
+    // attach 스냅샷은 픽셀 대신 `image_ref` 를 싣고 그 세그먼트가 채널로 온다.
+    try sendTestRequest(main_fd, .request, 2, attach_observer_request);
+    const snapshot = (try reader.next(&fx.owner, main_fd, 1000)) orelse return error.TestUnexpectedResult;
+    const attached = BatchImages.of(snapshot, 9);
+    testing.allocator.free(snapshot);
+    const first_images = try attached;
+    try testing.expectEqual(@as(usize, 0), first_images.blobs);
+    try testing.expectEqual(@as(usize, 1), first_images.placements);
+    const first_ref = first_images.ref orelse return error.TestUnexpectedResult;
+    const first = try pumpTestSegmentPixels(&fx.owner, channel_fd, &([_]u8{ 3, 4, 5, 255 } ** 4));
+    try testing.expectEqual(first_ref.segment_id, first.segment_id);
+    const client = fx.clientWithChannel() orelse return error.TestUnexpectedResult;
+
+    // 앱이 첫 세그먼트를 아직 돌려주지 않았다 — 새 프레임은 delta 에서 미뤄진다(같은 이미지 미반환, 계약 §5).
+    fx.owner.next_cadence_ns = 0;
+    try projected.showImage(9, .{ 7, 8, 9, 255 });
+    var deferred = false;
+    for (0..1000) |_| {
+        if (try reader.next(&fx.owner, main_fd, 1)) |batch| {
+            defer testing.allocator.free(batch);
+            const seen = try BatchImages.of(batch, 9);
+            try testing.expectEqual(@as(usize, 0), seen.blobs);
+            try testing.expectEqual(@as(usize, 0), seen.refs);
+        }
+        if (client.connection.attachments.getPtr(1).?.image_deferred) {
+            deferred = true;
+            break;
+        }
+    }
+    try testing.expect(deferred);
+    // 화면은 더 바뀌지 않는다 — cadence 가 여러 번 돌아도(50 × 2 ms ≥ 20 ms 주기 넷) 다시 투영하지 않는다. 미룬 stream 을 매
+    // cadence 다시 투영하는 회귀는 빈 delta 만 내므로 배치로는 안 보인다 — 투영 횟수로 잰다.
+    const quiet_from = projected.segment_projections;
+    for (0..50) |_| if (try reader.next(&fx.owner, main_fd, 1)) |batch| {
+        defer testing.allocator.free(batch);
+        try testing.expectEqual(@as(usize, 0), (try BatchImages.of(batch, 9)).refs);
+    };
+    try testing.expectEqual(quiet_from, projected.segment_projections);
+    try testing.expect(client.connection.attachments.getPtr(1).?.image_deferred);
+    try testing.expectEqual(@as(usize, 1), client.imageLedger().?.count());
+
+    // release 가 자리를 내면 화면이 그대로여도 새 프레임이 나간다(IC5c-1 의 용량 사건 깨우기).
+    try sendAll(channel_fd, &(try image_channel_wire.encodeRelease(first.segment_id)));
+    var fresh_ref: ?screen_stream.ImageRef = null;
+    for (0..1000) |_| {
+        const batch = (try reader.next(&fx.owner, main_fd, 1)) orelse continue;
+        defer testing.allocator.free(batch);
+        const seen = try BatchImages.of(batch, 9);
+        try testing.expectEqual(@as(usize, 0), seen.blobs);
+        if (seen.ref) |ref| {
+            fresh_ref = ref;
+            break;
+        }
+    }
+    const second_ref = fresh_ref orelse return error.TestUnexpectedResult;
+    try testing.expect(second_ref.generation > first_ref.generation);
+    const second = try pumpTestSegmentPixels(&fx.owner, channel_fd, &([_]u8{ 7, 8, 9, 255 } ** 4));
+    try testing.expectEqual(second_ref.segment_id, second.segment_id);
+    try testing.expectEqual(second_ref.generation, second.generation);
+
+    // 채널을 잃었다 — 협상한 연결은 `image_blob` 으로 돌아가지 않고 새 이미지의 placement 를 뺀다(계약 §3.2).
+    _ = c.close(channel_fd);
+    channel_open = false;
+    try fx.pumpUntil(noChannel);
+    // 잃기 전에 나간 배치를 먼저 비운다 — 아래에서 세는 배치는 새 이미지를 그린 뒤의 것뿐이다.
+    for (0..50) |_| if (try reader.next(&fx.owner, main_fd, 1)) |batch| {
+        defer testing.allocator.free(batch);
+        try testing.expectEqual(@as(usize, 0), (try BatchImages.of(batch, 9)).blobs);
+    };
+    try projected.showImage(11, .{ 1, 2, 3, 255 });
+    var after_loss: usize = 0;
+    for (0..100) |_| if (try reader.next(&fx.owner, main_fd, 1)) |batch| {
+        defer testing.allocator.free(batch);
+        const seen = try BatchImages.of(batch, 11);
+        try testing.expectEqual(@as(usize, 0), seen.blobs);
+        // 어느 이미지의 `image_ref` 도 없다 — 죽은 채널을 가리키는 세그먼트를 내지 않는다.
+        try testing.expectEqual(@as(usize, 0), seen.any_refs);
+        try testing.expectEqual(@as(usize, 0), seen.placements);
+        after_loss += 1;
+    };
+    // 커서가 움직여 delta 는 나갔다 — 「아무것도 안 나가서」 통과한 것이 아니다.
+    try testing.expect(after_loss >= 1);
+    try testing.expectEqual(@as(usize, 0), projected.blob_projections);
+    try reader.expectMainAlive(&fx.owner, main_fd, 3);
+}
+
+test "image channel owner: 제품 투영 — abandon 한 연결의 attach 와 delta 는 image_blob 도 image_ref 도 placement 도 싣지 않는다" {
+    var projected: ProjectedTerminal = .{};
+    try projected.init();
+    defer projected.deinit();
+    var fx: ImageChannelFixture = .{};
+    try initProjectedFixture(&fx, &projected, "ic-e2e-abandon.sock");
+    defer fx.deinit();
+    try projected.showImage(9, .{ 3, 4, 5, 255 });
+
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    _ = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    try sendTestRequest(main_fd, .request, 2, "{\"method\":\"image_channel.abandon\"}");
+    try pumpUntilResponse(&fx.owner, main_fd, "\"result\"");
+
+    var reader = ScreenBatchReader.init();
+    defer reader.deinit();
+    try sendTestRequest(main_fd, .request, 3, attach_observer_request);
+    const snapshot = (try reader.next(&fx.owner, main_fd, 1000)) orelse return error.TestUnexpectedResult;
+    const attached = BatchImages.of(snapshot, 9);
+    testing.allocator.free(snapshot);
+    try testing.expectEqual(BatchImages{}, try attached);
+
+    fx.owner.next_cadence_ns = 0;
+    try projected.showImage(11, .{ 1, 2, 3, 255 });
+    var deltas: usize = 0;
+    for (0..100) |_| if (try reader.next(&fx.owner, main_fd, 1)) |batch| {
+        defer testing.allocator.free(batch);
+        try testing.expectEqual(BatchImages{}, try BatchImages.of(batch, 11));
+        try testing.expectEqual(@as(usize, 0), (try BatchImages.of(batch, 9)).blobs);
+        deltas += 1;
+    };
+    try testing.expect(deltas >= 1);
+    try testing.expectEqual(@as(usize, 0), projected.blob_projections);
+    try reader.expectMainAlive(&fx.owner, main_fd, 4);
 }

@@ -9323,6 +9323,10 @@ const LiteralRange = struct { start: usize, end: usize };
 /// 없이(줄 스캐너로) 간다.
 const literal_window_limit: usize = 1 << 20;
 
+/// 쿼리 횟수의 상한(TR4 — 적대적 4회차) — 커서가 수천이면 커서마다 묻는 값이 커서 수에 곱해진다. 넘으면 첫 범위 머리부터 마지막 범위 끝까지를
+/// 한 번에 묻는다(그 합도 `literal_window_limit` 안이어야 한다).
+const literal_query_limit: usize = 1024;
+
 /// 신선한 구문 트리(계획 editor-typing-rules TR4) — 처음 여는 큰 문서의 예산 파싱이 안 끝났으면 `null`. 편집은 `onEditSpan` 이 끝까지 다시
 /// 파므로 그 뒤로는 늘 신선하다.
 fn freshTree(term: *Term) ?*syntax_mod.Provider {
@@ -9373,22 +9377,17 @@ fn typingLiteralRanges(self: *AppSession, term: *Term, sels: []const editor_sele
     }
 }
 
-/// 구문 트리가 **신선하면** `ranges` 에 닿는 문자열·주석 조각(계획 editor-typing-rules TR4 — 하이라이트 capture 를 `literals.flatten` 으로
-/// 편다, 호출자가 해제한다). 트리가 없거나 낡았으면 `null` — 소비처는 줄 스캐너로 간다. 범위 합이 상한을 넘어도 `null`. 범위는 정렬해 겹친
-/// 것을 합친 뒤 묻는다. 쿼리가 할당에 실패하면 거기까지의 조각이다(색과 같은 저하 — `spansForRange`).
-fn treeLiterals(self: *AppSession, term: *Term, ranges: []LiteralRange) ?[]literals.Span {
-    const p = freshTree(term) orelse return null;
-    const content = (term.rt.editorDocument().opened orelse return null).file.content;
-    if (ranges.len == 0) return null;
+/// 실제로 물을 범위(제자리에서 다듬는다) — 문서 끝으로 자르고, 정렬해 겹치거나 맞닿은 것을 합치고, 그래도 `literal_query_limit` 개를 넘으면
+/// 하나로 묶는다. 합이 `literal_window_limit` 를 넘거나 물을 것이 없으면 `null`(트리 없이 간다).
+fn queryRanges(ranges: []LiteralRange, len: usize) ?[]LiteralRange {
     std.mem.sort(LiteralRange, ranges, {}, struct {
         fn less(_: void, x: LiteralRange, y: LiteralRange) bool {
             return x.start < y.start;
         }
     }.less);
     var merged: usize = 0;
-    var total: usize = 0;
     for (ranges) |r| {
-        const end = @min(r.end, content.len);
+        const end = @min(r.end, len);
         if (end <= r.start) continue;
         if (merged > 0 and r.start <= ranges[merged - 1].end) {
             ranges[merged - 1].end = @max(ranges[merged - 1].end, end);
@@ -9397,13 +9396,29 @@ fn treeLiterals(self: *AppSession, term: *Term, ranges: []LiteralRange) ?[]liter
             merged += 1;
         }
     }
+    if (merged == 0) return null;
+    if (merged > literal_query_limit) {
+        ranges[0].end = ranges[merged - 1].end;
+        merged = 1;
+    }
+    var total: usize = 0;
     for (ranges[0..merged]) |r| total += r.end - r.start;
     if (total > literal_window_limit) return null;
+    return ranges[0..merged];
+}
+
+/// 구문 트리가 **신선하면** `ranges` 에 닿는 문자열·주석 조각(계획 editor-typing-rules TR4 — 하이라이트 capture 를 `literals.flatten` 으로
+/// 편다, 호출자가 해제한다). 트리가 없거나 낡았으면 `null` — 소비처는 줄 스캐너로 간다. 범위 합이 상한을 넘어도 `null`. 범위는 정렬해 겹친
+/// 것을 합친 뒤 묻는다. 쿼리가 할당에 실패하면 거기까지의 조각이다(색과 같은 저하 — `spansForRange`).
+fn treeLiterals(self: *AppSession, term: *Term, ranges: []LiteralRange) ?[]literals.Span {
+    const p = freshTree(term) orelse return null;
+    const content = (term.rt.editorDocument().opened orelse return null).file.content;
+    const queries = queryRanges(ranges, content.len) orelse return null;
     var caps: std.ArrayList(literals.Capture) = .empty;
     defer caps.deinit(self.allocator);
     var found: std.ArrayList(syntax_mod.Span) = .empty;
     defer found.deinit(self.allocator);
-    for (ranges[0..merged]) |r| {
+    for (queries) |r| {
         const lo32 = std.math.cast(u32, r.start) orelse return null;
         const end32 = std.math.cast(u32, r.end) orelse return null;
         p.spansForRange(self.allocator, content, .{ .start = lo32, .end = end32 }, &found);
@@ -41496,6 +41511,22 @@ test "INDL4 한 글자 입력이 트리에 묻는 범위 — 커서마다 caret 
     ranges.clearRetainingCapacity();
     try typingLiteralRanges(fx.session, t, &.{Sel.at(30)}, ')', "()[]{}", &ranges);
     try testing.expectEqualSlices(LiteralRange, &.{.{ .start = 0, .end = 31 }}, ranges.items);
+    // 물을 범위 다듬기 — 겹치거나 맞닿으면 합치고 문서 끝으로 자른다; 수천 커서는 하나로 묶고(적대적 4회차 — 쿼리 횟수가 커서 수에
+    // 곱해졌다), 합이 상한을 넘으면 묻지 않는다.
+    var few = [_]LiteralRange{ .{ .start = 8, .end = 12 }, .{ .start = 0, .end = 3 }, .{ .start = 3, .end = 5 }, .{ .start = 10, .end = 99 } };
+    try testing.expectEqualSlices(LiteralRange, &.{ .{ .start = 0, .end = 5 }, .{ .start = 8, .end = 40 } }, queryRanges(&few, 40).?);
+    const many = try allocator.alloc(LiteralRange, literal_query_limit + 1);
+    defer allocator.free(many);
+    for (many, 0..) |*r, i| r.* = .{ .start = 4 * i, .end = 4 * i + 2 };
+    try testing.expectEqualSlices(LiteralRange, &.{.{ .start = 0, .end = 4 * literal_query_limit + 2 }}, queryRanges(many, 1 << 30).?);
+    for (many, 0..) |*r, i| r.* = .{ .start = 4 * i, .end = 4 * i + 2 };
+    try testing.expectEqual(@as(usize, literal_query_limit), queryRanges(many[0..literal_query_limit], 1 << 30).?.len);
+    var wide = [_]LiteralRange{ .{ .start = 0, .end = 2 }, .{ .start = literal_window_limit, .end = literal_window_limit + 2 } };
+    try testing.expect(queryRanges(&wide, 1 << 30) != null); // 합은 4 바이트 — 떨어져 있어도 묻는다
+    var huge = [_]LiteralRange{.{ .start = 0, .end = literal_window_limit + 1 }};
+    try testing.expect(queryRanges(&huge, 1 << 30) == null);
+    var none = [_]LiteralRange{.{ .start = 50, .end = 60 }};
+    try testing.expect(queryRanges(&none, 40) == null);
     // 트리가 낡았으면 묻지 않는다.
     t.rt.editor_syntax.pending = true;
     ranges.clearRetainingCapacity();

@@ -7077,12 +7077,12 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{.{ .name = "maru", .module = maru_mod }},
             }),
             // 수립(IC2b) 9 와 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위·
-            // 울타리 든 해석·협상한 Client 는 external 모드 거부(IC3b-2c)) 8, fork 울타리(IC4b — 소켓 생성이 수신 잠금 안(deadline·일반 연결 둘 다), tick 펌프는 물러서고 동기 적용 펌프는 기다린다) 4.
+            // 울타리 든 해석·협상한 Client 는 external 모드 거부(IC3b-2c-1)·연결 둘의 표가 섞이지 않음(IC3b-2c-2)) 9, fork 울타리(IC4b — 소켓 생성이 수신 잠금 안(deadline·일반 연결 둘 다), tick 펌프는 물러서고 동기 적용 펌프는 기다린다) 4.
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
-        run_image_channel_connect_tests.addArg("--maru-expect-tests=22");
-        run_image_channel_connect_tests.addArg("--maru-expect-passed=22");
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=23");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=23");
         // 적용 자리 배선(IC3b-2) — attachment 가 협상한 transport 의 resolver 를 snapshot·delta 에 넘기고, 협상하지 않은 transport
         // 는 resolver 를 부르지 않는다.
         const image_channel_wiring_tests = addProjectTest(b, .{

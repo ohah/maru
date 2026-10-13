@@ -258,20 +258,32 @@ IC3b-2c 는 둘로 나눴다 — 동작에 닿는 것과 결정(2c-1)과 진단�
 - 판정자(`test-image-channel-app`, client 22): 협상한 Client(묶임·잃음)는 `ImageChannelNegotiated` 이고 플래그를 읽지 않는다, 협상하지
   않은 Client 는 이 규칙에 걸리지 않고 전환으로 간다(첫 플래그 읽기 실패 → `FlagFailed`).
 
-###### IC3b-2c-2 — 진단·판정자 (미착수)
+###### IC3b-2c-2 — 진단 계수와 판정자 (PR 진행 중)
+
+- 대조 계수(`src/image_reconciliation.zig`)에 이미지 채널 칸 셋:
+  - 손실(경고줄 `image reconciliation:`): `drop_no_segment` — `image_ref` 의 세그먼트가 표에 없거나 크기가 달라 해석하지 못함(그 연결은
+    `MalformedRow` 로 재접속). resolver 의 매핑 실패는 `image_blob` 과 같은 `drop_oom`.
+  - 흐름(매 5 초 `image flow:`): `channel_refused` — 펌프·해석·stream 열기·hwm 정리가 Client 울타리(`requireBlockingMode`)나 slot 의
+    접근 규칙(`attachmentImageAccessAllowed`)에서 빠짐. `held` — `image_ref` 배치가 큐 머리에 보류됨(펌프마다). 지연이지 손실이 아니라
+    경고줄을 울리지 않는다 — 정상 운영에서 얼마나 나는지 실측(IC6) 전이라 경고로 두면 소음일 수 있다.
+  - Client 의 네 자리는 `catch return imageChannelRefused(T, 값)` 꼴이다 — Client 울타리 판정자(B3b-S)가 `catch` 몸체에 블록이나
+    Client 를 읽는 호출을 받지 않는다.
+- 판정자:
+  - 조립기: 세그먼트 없음·크기 다름은 `no_segment`(oom 아님), resolver OOM 은 `oom`(no_segment 아님).
+  - 대조 계수: 거부·보류는 loss 가 아니다, 줄 길이 실측(경고 256 → 293, 흐름 106 → 169).
+  - 펌프: external 모드에서 빠진 펌프는 `channel_refused` 1, 보류는 `held` 로 세고 적용은 세지 않는다, slot 이 바쁠 때 빠진 준비·해석은 2.
+  - 연결 둘의 같은 segment_id 는 각 연결의 픽셀로 해석되고 한쪽 해석이 다른 쪽 표를 건드리지 않는다.
+  - 채널을 잃은 연결의 늦은 `image_ref` 는 「세그먼트 없음」이다(조립기가 `MalformedRow` 로 그 연결을 재접속시키고 탭은 산다 — 탭 쪽
+    복구는 `drainRemoteNow` 의 기존 `MalformedRow` 경로).
+
+###### IC3b-2c-3 — 남은 것 (미착수)
 
 - 스레드: 표는 재접속 worker 가 connect 할 때 할당되고(`build_id` 와 같은 꼴) 펌프·해석·적용·정리는 모두 소유 스레드에서 돈다 — 표에
-  잠금이 없다는 전제를 배선이 지키는지(worker 스레드에서 펌프·해석을 부르지 않는지) 판정자로 잰다.
-- 「이미지 채널 없음」 탭 notice(계약 §3.2)는 아직 어느 단계에도 없다 — 호출자는 `image_channel.state` 로 상실을 본다. notice 를 이
-  단계나 IC6 에서 단다.
-- 펌프·해석·열기·정리가 울타리에서 빠지는 일(prepared lease·실행 lease 의 AdminBusy)은 계수도 로그도 없다 — lease 가 오래 잡혀 host
-  원장 32 칸이 차면 진단할 근거가 없으니 거부 계수를 단다(보류가 길어지는 것도 같은 계수로 본다).
+  잠금이 없다는 전제를 배선이 지키는지 판정자로 잰다. 「같은 스레드」로 재면 안 된다 — 첫 snapshot 을 worker 가 적용하고 그 뒤 메인이
+  이어받는 정당한 순차 이관이 있을 수 있다. 동시 사용(겹친 진입)을 재는 꼴을 정한다.
 - attach 응답을 끝내 못 읽어 id 를 모르는 stream 의 세그먼트는 더 큰 id 를 알 때까지(다음 attach) 표에 남아 원장 자리를 쥔다 —
   id 를 모르니 닫지도 못한다. 그 연결이 다음 attach 없이 오래 머무는 경로가 있는지 본다.
-- resolver 의 OOM·거부 경로에 이미지 대조 계수(`image_reconciliation`)를 붙이거나 붙이지 않는 이유를 적는다(`image_blob` 경로는
-  OOM 에 `recordDroppedOom` 을 올린다).
-- 판정자: 연결 둘의 같은 segment_id 가 섞이지 않는다; 「이미지 채널 없음」 연결의 늦은 `image_ref` 는 그 연결의 재접속으로 끝나고 탭은
-  종료 상태가 되지 않는다.
+- 「이미지 채널 없음」 탭 notice(계약 §3.2)는 광고(IC6)와 함께 단다 — 그 전에는 협상한 연결이 없다.
 
 ### IC4 — fd 상속 방지
 

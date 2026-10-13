@@ -224,9 +224,18 @@ pub const ScreenAssembler = struct {
         };
         // 픽셀이 0 B 인 이미지는 세그먼트가 없다(host 가 만들지 않는다) — 표를 찾지 않고 빈 이미지로 둔다.
         if (ref.segment_id == 0) return self.putImage(ref.image_id, ref.generation, ref.width, ref.height, ref.bpp, &.{}, null);
-        const resolved = (try resolver.resolveFn(resolver.ctx, ref)) orelse return error.MalformedRow;
+        // 사라짐은 `image_blob` 과 같은 계수기에 남긴다(어느 칸에서 사라졌는지) — 매핑 실패는 `oom`, 해석 못 함은 `no_segment`.
+        const maybe = resolver.resolveFn(resolver.ctx, ref) catch |err| {
+            image_reconciliation.recordDroppedOom();
+            return err;
+        };
+        const resolved = maybe orelse {
+            image_reconciliation.recordDroppedNoSegment();
+            return error.MalformedRow;
+        };
         if (resolved.pixels.len != ref.byte_len) {
             resolved.unmap(resolved.pixels);
+            image_reconciliation.recordDroppedNoSegment();
             return error.MalformedRow;
         }
         return self.putImage(ref.image_id, ref.generation, ref.width, ref.height, ref.bpp, resolved.pixels, resolved.unmap);
@@ -1230,11 +1239,14 @@ test "screen assembler image ref: a missing or mis-sized segment is MalformedRow
     var asm_ = ScreenAssembler.init(allocator);
     defer asm_.deinit();
 
-    // 채널을 비운 뒤에도 표에 없는 세그먼트.
+    // 채널을 비운 뒤에도 표에 없는 세그먼트. 사라짐은 대조 계수의 `no_segment` 칸에 남는다(oom 이 아니다).
+    const counted = image_reconciliation.snapshot();
     const missing = try buildImageRefSnapshot(allocator, refFor(9, 6, &a));
     defer allocator.free(missing);
     try testing.expectError(error.MalformedRow, asm_.applySnapshot(missing, segs.resolver()));
     try testing.expectEqual(@as(usize, 1), segs.resolved);
+    try testing.expectEqual(@as(u64, 1), image_reconciliation.snapshot().delta(counted).dropped_no_segment);
+    try testing.expectEqual(@as(u64, 0), image_reconciliation.snapshot().delta(counted).dropped_oom);
 
     // 매핑 크기가 레코드와 다르면 그 매핑을 풀고 거부한다(누수 없음).
     segs.pad = 1;
@@ -1242,6 +1254,7 @@ test "screen assembler image ref: a missing or mis-sized segment is MalformedRow
     defer allocator.free(sized);
     try testing.expectError(error.MalformedRow, asm_.applySnapshot(sized, segs.resolver()));
     try testing.expectEqual(@as(usize, 1), fake_unmapped);
+    try testing.expectEqual(@as(u64, 2), image_reconciliation.snapshot().delta(counted).dropped_no_segment);
     segs.pad = 0;
 
     // 0 B 이미지는 세그먼트가 없다 — 표를 찾지 않고 빈 이미지로 둔다.
@@ -1293,8 +1306,12 @@ test "screen assembler image ref: resolver OOM stays OutOfMemory and a mapping t
         var oom = FakeSegments{ .entries = segs.entries, .out_of_memory = true };
         var plain_asm = ScreenAssembler.init(testing.allocator);
         defer plain_asm.deinit();
+        const counted = image_reconciliation.snapshot();
         try testing.expectError(error.OutOfMemory, plain_asm.applySnapshot(snap, oom.resolver()));
         try testing.expectEqual(@as(usize, 1), oom.resolved);
+        // 사라짐은 `image_blob` 의 메모리 부족과 같은 칸이다 — 「세그먼트 없음」이 아니다.
+        try testing.expectEqual(@as(u64, 1), image_reconciliation.snapshot().delta(counted).dropped_oom);
+        try testing.expectEqual(@as(u64, 0), image_reconciliation.snapshot().delta(counted).dropped_no_segment);
     }
     // 할당 0 = 행 배열, 1 = image_store 확장. 확장이 실패하면 받은 매핑을 해제 함수로 푼다.
     var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 1 });

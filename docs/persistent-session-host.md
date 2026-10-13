@@ -7942,10 +7942,14 @@ L1 이 둘 다 쓰는데 L1 은 L2 를 import 하지 못한다).
 **어떻게 남기나.** 앱의 5 초 진단 틱(`app_session.logImageReconciliationDiag`, `observation cost` 와 같은 자리)이
 델타를 두 겹으로 찍는다.
 
-- `info: image flow: complete=… uploaded=… skip_same_gen=…` — **항상.** 「이 줄이 없다」가 곧 「계측이 안 돈다」로
-  읽히게. 적대적 검증에서 손실을 일으켰는데 경고줄이 0 이라 «손실 없음» 인 줄 알았더니 앱이 죽어 틱 자체가 안
-  돌고 있었다 — 침묵이 신호인 계측은 침묵의 원인을 따로 보여 줘야 한다.
-- `warning: image reconciliation: complete=… drop_no_head=… drop_order=… drop_oom=… placement_without_blob=… uploaded=… skip_same_gen=…` — **사라진 것이 있을 때만.**
+- `info: image flow: complete=… uploaded=… skip_same_gen=… channel_refused=… held=…` — **항상.** 「이 줄이 없다」가 곧
+  「계측이 안 돈다」로 읽히게. 적대적 검증에서 손실을 일으켰는데 경고줄이 0 이라 «손실 없음» 인 줄 알았더니 앱이 죽어
+  틱 자체가 안 돌고 있었다 — 침묵이 신호인 계측은 침묵의 원인을 따로 보여 줘야 한다. 끝의 두 칸은 이미지 채널
+  (docs/session-host-image-channel.md §6)의 지연이다 — 울타리에서 빠진 채널 연산과 큐 머리에 보류된 `image_ref` 배치.
+  손실이 아니라 경고줄을 울리지 않지만, 늘어나면 lease 가 오래 잡혀 host 원장이 차는 것을 가린다.
+- `warning: image reconciliation: complete=… drop_no_head=… drop_order=… drop_oom=… drop_no_segment=… placement_without_blob=… uploaded=… skip_same_gen=…` — **사라진 것이 있을 때만.**
+  `drop_no_segment` 는 `image_ref` 의 세그먼트를 해석하지 못해(표에 없음·크기 다름) 그 연결이 재접속한 이미지다.
+  `image_ref` 매핑 실패는 `image_blob` 과 같은 `drop_oom` 이다.
 
 비용은 실측 한 줄 410 ns(ReleaseFast)·951 ns(Debug), 5 초마다 1 회. 로그 양은 앱 `app.log` 의 4 MB 상한(넘으면
 비움) 안에서 `observation cost` 와 같은 급이다.

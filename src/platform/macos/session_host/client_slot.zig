@@ -14,6 +14,7 @@ const TerminalDrainRunnerChannel = if (builtin.is_test) struct {
 } else struct {};
 const client_mod = @import("client.zig");
 const fork_fd_fence = @import("fork_fd_fence.zig");
+const image_reconciliation = @import("maru").image_reconciliation;
 const screen_stream = @import("maru").session.screen_stream;
 const lease_mod = @import("connection_lease.zig");
 const cleanup_registry_mod = @import("attachment_cleanup_registry.zig");
@@ -15629,8 +15630,11 @@ pub const ClientSlot = struct {
         if (!self.valid()) return false;
         const own_initial_snapshot = self.current.active_operation_kind == .initial_snapshot and
             operationThreadMatches(self.current.active_operation_owner_thread_incarnation);
-        return (self.current.active_operation_generation == 0 or own_initial_snapshot) and
+        const allowed = (self.current.active_operation_generation == 0 or own_initial_snapshot) and
             terminal_drain_callback_binding.continuation_addr == 0;
+        // 빠진 일은 Client 울타리와 같은 흐름 칸(`channel_refused`)에 남는다(이미지 채널 §6).
+        if (!allowed) image_reconciliation.recordChannelRefused();
+        return allowed;
     }
 
     pub fn readAttachmentCatchupBarrierPlanUntil(

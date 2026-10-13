@@ -1899,6 +1899,16 @@ pub fn noteUserAction(surface_id: u64) void {
 /// 입력(W4b·W4c — 라우팅은 창이 정했다). 만들어졌고 sidecar 가 돌 때만 보낸다 — 입력은 쥐었다가 늦게 보낼 것이 아니다(첫
 /// 프레임 전 입력은 렌더러도 버린다 — W4a 실측). 보냈으면 true.
 pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
+    return sendInputAs(gpa, message, true);
+}
+
+/// 앱이 스스로 만든 입력(키 대상이 옮겨 갈 때의 조합 마침 등) — 사용자 시각을 찍지 않는다(W9c② 적대 리뷰 3 회차: 에이전트가 연 앞 팝업으로
+/// 키가 옮겨 갈 때 보낸 조합 마침이 사용자 입력이 되어 팝업의 alert 가 거절됐다).
+pub fn sendAppInput(gpa: std.mem.Allocator, message: Message) bool {
+    return sendInputAs(gpa, message, false);
+}
+
+fn sendInputAs(gpa: std.mem.Allocator, message: Message, from_user: bool) bool {
     const browser: u64 = switch (message) {
         .mouse => |m| m.browser,
         .wheel => |m| m.browser,
@@ -1924,16 +1934,19 @@ pub fn sendInput(gpa: std.mem.Allocator, message: Message) bool {
                 s.last_move_point = m.point;
                 break :blk moved;
             },
-            .leave => blk: {
-                s.last_move_point = null;
-                break :blk false;
-            },
+            // 자리는 지우지 않는다 — 창이 키를 잃어 보낸 leave 뒤 수식 키의 같은 자리 hover 를 「움직임」 으로 셌다(3 회차).
+            .leave => false,
             else => true,
         },
         .capture_lost, .ime_cancel_composition => false,
         else => true,
     };
-    if (user_made) s.user_action_ms = monotonicNow();
+    if (from_user and user_made) s.user_action_ms = monotonicNow();
+    // 앱이 만든 입력은 페이지 입력 시각도 건드리지 않는다 — 조합 마침의 글은 사용자가 칠 때 이미 찍혔다(3 회차).
+    const kept_input_ms = s.last_user_input_ms;
+    defer if (!from_user) {
+        s.last_user_input_ms = kept_input_ms;
+    };
     switch (message) {
         .mouse => |m| if (m.kind == .down) {
             s.new_tab_credits.grant(monotonicNow());
@@ -3186,15 +3199,21 @@ pub fn endDragOut(gpa: std.mem.Allocator, surface_id: u64, drag: u32, point: ws.
     return true;
 }
 
+/// maru 가 끌기를 취소로 끝낸다(아무 창도 가져가지 않았다·다른 끌기가 왔다) — 사용자 동작이 아니어서 사용자 시각을 찍지 않는다(W9c② 3 회차).
+pub fn cancelDragOutByApp(gpa: std.mem.Allocator, surface_id: u64, drag: u32, point: ws.message.Point) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    const before = s.user_action_ms;
+    defer if (surfaces.getPtr(surface_id)) |t| {
+        t.user_action_ms = before;
+    };
+    return endDragOut(gpa, surface_id, drag, point, 0);
+}
+
 /// 아무 창도 가져가지 않은 끌기를 취소로 끝낸다.
 fn expireDragOuts(gpa: std.mem.Allocator, now_ms: i64) void {
     for (surfaces.values()) |*s| {
         const d = s.drag_out orelse continue;
-        if (d.ready and !d.taken and now_ms - d.arrived_ms > drag_out_pickup_ms) {
-            const before = s.user_action_ms; // 아무 창도 가져가지 않아 maru 가 취소한다 — 사용자 동작이 아니다
-            _ = endDragOut(gpa, s.record.surface_id, d.drag, d.point, 0);
-            s.user_action_ms = before;
-        }
+        if (d.ready and !d.taken and now_ms - d.arrived_ms > drag_out_pickup_ms) _ = cancelDragOutByApp(gpa, s.record.surface_id, d.drag, d.point);
     }
 }
 
@@ -6930,4 +6949,93 @@ test "W9c② 적대 리뷰 2 회차: 사용자 시각은 사용자가 만든 것
     s.user_action_ms = unset;
     expireDragOuts(gpa, 1_000 + drag_out_pickup_ms + 1);
     try std.testing.expectEqual(unset, s.user_action_ms);
+}
+
+fn w9c2R3Setup(gpa: std.mem.Allocator) !*Surface {
+    state = .running;
+    test_record_sends = true;
+    try testSurfaces(gpa, &.{ 7, 8 });
+    const s7 = surfaces.getPtr(7).?;
+    s7.user_action_ms = monotonicNow() - 60_000; // 사용자는 1 분 전 페이지를 만졌다
+    s7.last_user_input_ms = monotonicNow() - 60_000;
+    return s7;
+}
+
+/// 창의 `syncOsrKeyTarget` 이 하는 일 — 키 대상이 옮겨 가고, 사용자의 누름·키 바로 뒤면(`user_made`) 두 탭 모두 사용자 시각을 찍는다.
+fn w9c2MoveKeyTarget(gpa: std.mem.Allocator, old: u64, now: u64, user_made: bool) void {
+    if (old != 0) {
+        if (composing(old)) _ = sendAppInput(gpa, .{ .ime_finish_composing = .{ .browser = old, .value = false } });
+        setFocus(gpa, old, false, 11);
+        if (user_made) noteUserAction(old);
+    }
+    if (now != 0) {
+        setFocus(gpa, now, true, 11);
+        if (user_made) noteUserAction(now);
+    }
+}
+
+test "W9c② 적대 리뷰 3 회차 재현 A: 사용자가 탭 막대·⌘숫자로 옮겨 간 탭의 focus·visibilitychange confirm 은 에이전트가 1 초 전 그 탭에서 움직였어도 답하지 못한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    s7.agent_input_ms = monotonicNow() - 1_000; // 에이전트가 1 초 전 이 뒤 탭의 칸을 채웠다
+    w9c2MoveKeyTarget(gpa, 8, 7, true); // 사용자가 탭 막대에서 7 을 누른다
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "A new version is available. Reload?" } }, monotonicNow());
+    markDialogShown(7, testLastDialog(7).token, 11);
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 3 회차 재현 B: 사용자가 터미널 pane 을 눌러 생긴 blur 의 confirm 은 에이전트가 답하지 못한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    w9c2MoveKeyTarget(gpa, 0, 7, false);
+    s7.agent_input_ms = monotonicNow() - 1_000; // 에이전트가 1 초 전 편집 칸에 썼다
+    w9c2MoveKeyTarget(gpa, 7, 0, true); // 사용자가 터미널 pane 을 누른다
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://cms.test", .message = "Discard your edits?" } }, monotonicNow());
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 3 회차 재현 C: 창이 키를 잃어 leave 를 보낸 뒤에도 수식 키의 같은 자리 hover 는 사용자 입력이 아니다 — 에이전트의 confirm 은 에이전트가 답한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 40, .y = 40 } } })); // 1 분 전 그 자리에 멈췄다
+    s7.user_action_ms = monotonicNow() - 60_000;
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .leave, .point = .{ .x = -1, .y = -1 } } })); // ⌘Tab 으로 나갔다 왔다
+    s7.agent_input_ms = monotonicNow() - 300; // 에이전트가 300 ms 전 「저장」 을 눌렀다
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 40, .y = 40 } } })); // 터미널의 대문자 — 같은 자리 hover
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "Overwrite?" } }, monotonicNow());
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+}
+
+test "W9c② 적대 리뷰 3 회차 D(설계 확인): 에이전트 누름 뒤 사용자 포인터가 pane 을 지나가면 늦은 alert 는 사용자 것 — 안전한 쪽으로 거절" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    s7.agent_input_ms = monotonicNow() - 800;
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 10, .y = 10 } } }));
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 7, .kind = .move, .point = .{ .x = 30, .y = 12 } } }));
+    s7.user_action_ms -= 600; // 지나간 것은 에이전트 누름 200 ms 뒤, alert 는 1 초 뒤
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "https://a.test", .message = "Saved" } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.user, testLastDialog(7).cause);
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 적대 리뷰 3 회차 재현 E: 에이전트 누름이 연 앞 팝업으로 키가 옮겨 갈 때 maru 가 보낸 조합 마침은 사용자 입력이 아니다 — 팝업의 alert 는 에이전트가 답한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    testSetPopupFamily(8, 7);
+    var acc: TestAccess = .{ .granted = (1 << 7) | (1 << 8), .agent = 0 };
+    w9c2MoveKeyTarget(gpa, 0, 7, false);
+    s7.composing = true; // 사용자가 한글 한 글자를 조합하다 멈췄다(10 초 전)
+    s7.agent_input_ms = monotonicNow(); // 에이전트가 「X 로 로그인」 을 누른다 → window.open
+    w9c2MoveKeyTarget(gpa, 7, 8, false); // maru 가 팝업으로 키를 옮긴다 — 조합 마침은 앱이 만든 것
+    apply(gpa, .{ .js_dialog = .{ .browser = 8, .request = 1, .kind = .alert, .origin = "https://idp.test", .message = "Signed in" } }, monotonicNow());
+    _ = try agentReplyDialog(gpa, 8, null, true, "", acc.access());
 }

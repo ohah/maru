@@ -366,7 +366,32 @@ IC4 는 둘로 나눴다 — 울타리·헬퍼·판정자(IC4a, main 위에서 I
   재현했다(같은 프로세스의 어느 판정자가 TERM 을 막거나 무시한 채 두는지는 찾지 못했다 — 판정자 순서가 샤드에서 바뀌며 드러났다).
 - IC3b 의 채널 리더는 IC4b 가 들어온 뒤에만 실제 fd 를 받는다(광고가 꺼져 있으므로 그 전엔 받을 일이 없다).
 
-### IC5 — 흐름 제어와 delta 표현 (미착수)
+### IC5 — 흐름 제어와 delta 표현
+
+IC5 는 넷으로 나눴다 — 투영의 세그먼트 방출(IC5a, 순수 계층), 연결의 원장·채널을 투영에 잇고 승인 시점에 보내기(IC5b), 용량 사건·
+큰 한 장 우선권·「전송 불가」(IC5c), host 제공 스위치(IC5d). 아래 「IC5 전체」는 처음 계획이고, 각 조각이 들어오며 그 항목을 지운다.
+
+#### IC5a — 투영의 세그먼트 방출 (PR 진행 중)
+
+- `screen_snapshot.ProjectOptions.images: ImageEmission` — `blob`(기본, 지금의 `image_blob`) 또는 `segments: SegmentSink`. 제품
+  배선(`RuntimeOps.snapshot/delta`)은 아직 `blob` 이라 동작이 바뀌지 않는다(IC5b 가 협상한 연결에 sink 를 넘긴다).
+- `SegmentSink`: 투영은 OS 도 원장도 모른다 — 픽셀이 있는 이미지마다 `reserveFn(image, BatchKind)` 로 자리를 청하고(준비되면
+  `segment_id`, 미루면 null — 미룸 조건과 스냅샷 예외는 sink 가 정한다), 배치의 `image_seg_hwm` 은 `hwmFn` 으로 받는다. 준비한
+  세그먼트의 송신·취소 수명은 sink 가 진다. 0 B 이미지는 자리를 청하지 않고 `segment_id` 0 의 `image_ref` 다.
+- 미룸 표현(계약 §5): client 가 이전 판을 가진 이미지는 placement 를 남기고 base 에 **이전** generation 을 적는다(`DrawableImages`
+  가 이미지마다 base 에 적을 판을 든다) — 다음 투영이 다시 후보로 본다. 처음 보내는 이미지는 placement 도 뺀다. 미룬 새 프레임뿐이면
+  delta 가 비어 배치가 나가지 않는다.
+- `image_seg_hwm`: 세그먼트 모드의 snapshot 과 비어 있지 않은 delta 에 싣는다(0 이면 안 싣는다). base(host 의 다음 diff 기준)에는
+  싣지 않는다. 주 스트림 예산은 `image_ref` 레코드 크기만 본다.
+- 판정자(`test-image-channel` 의 screen_snapshot 6):
+  - snapshot 이 `image_blob` 대신 sink 의 id 로 `image_ref`·placement·hwm 을 싣고, 조립기가 그 세그먼트로 픽셀을 받는다;
+  - 처음 보내는 이미지를 미루면 placement 도 빠지고 base 가 「가졌다」고 적지 않으며, 자리가 생기면 둘이 함께 나간다;
+  - 미룬 새 프레임은 이전 판·placement 를 유지하고 base 가 이전 generation 을 적으며, 자리가 생기면 새 판이 나간다;
+  - 바뀐 것이 없는 delta 는 비고(hwm 없음) 이미 보낸 판은 다시 청하지 않으며, `blob` 경로는 sink 를 묻지 않는다;
+  - 「attach 뒤 움직인 모든 축이 delta 로」 전수 판정자가 `image_ref`·`image_seg_hwm` 을 「producer 미방출」 목록에서 축 표로 옮겼다
+    (세그먼트 축은 판정자용 sink 와 그 resolver 로 조립기까지 간다).
+
+#### IC5 전체 (처음 계획)
 
 - producer 가 `image_ref`·`image_seg_hwm` 을 내기 시작한다 — `screen_snapshot.zig` 의 전수 판정자(「attach 뒤 움직인 모든 축이
   delta 로 client 에 닿는다」)에서 두 종류를 「producer 미방출」 목록에서 축 표로 옮긴다(IC1 이 목록에 올려 뒀다).

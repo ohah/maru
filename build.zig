@@ -6998,11 +6998,12 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
-        .filters = &.{"image_ref 를 담은 base"},
+        // base 파서 1, 생산자의 세그먼트 방출(IC5a — image_ref·미룸 표현·hwm) 4, 「attach 뒤 움직인 모든 축이 delta 로」 전수 1.
+        .filters = &.{ "image_ref 를 담은 base", "screen image segments:", "attach 뒤 움직인 모든 축이" },
     });
     const run_image_ref_base_tests = b.addRunArtifact(image_ref_base_tests);
-    run_image_ref_base_tests.addArg("--maru-expect-tests=1");
-    run_image_ref_base_tests.addArg("--maru-expect-passed=1");
+    run_image_ref_base_tests.addArg("--maru-expect-tests=6");
+    run_image_ref_base_tests.addArg("--maru-expect-passed=6");
     image_channel_step.dependOn(&run_image_ref_base_tests.step);
     for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |ledger_optimize| {
         const ledger_tests = addProjectTest(b, .{

@@ -207,7 +207,7 @@ const Surface = struct {
     close_ask_agent: bool = false,
     /// W9a: 에이전트의 `browser.navigate` 가 기다리는 이동(`agentNavigate`) — 끝을 이벤트로 가른다(`AgentNav`).
     agent_nav: AgentNav = .{},
-    /// W9a 적대 리뷰 4 회차: 불러오기가 시작됐는데 새 문서가 아직 시작되지 않았다(`navigationUncommitted`).
+    /// W9a 적대 리뷰 4·5 회차: 주 프레임 이동이 시작됐는데 새 문서·끝이 아직 없다(`navigationUncommitted`).
     nav_uncommitted: bool = false,
 };
 
@@ -1589,8 +1589,40 @@ pub fn ownDialogShowing(surface_id: u64) bool {
     return ownJsDialog(surface_id);
 }
 
-/// W9a 적대 리뷰 4 회차: 그 탭이 아직 확정되지 않은 이동 중인가(불러오는 중인데 새 문서가 아직 시작되지 않았다) — 그동안 보낸 Runtime.evaluate 는
-/// Chromium 이 붙잡아 두었다가 새 문서에서 돌렸다(에이전트는 시한으로 답을 받은 뒤).
+/// W9a 적대 리뷰 5 회차: 그 탭의 스크립트를 멈추는 terminate 를 보내면 안 되는가 — 그 탭 자신의 대화상자, 또는 **같은 호스트**(같은
+/// 렌더러로 본다 — Chromium 은 같은 사이트의 팝업 가족을 한 프로세스에 둔다)인 가족 탭의 대화상자: 그 렌더러는 대화상자에 멈췄다가 사용자가
+/// 답하면 스크립트를 이어 간다(5 회차 실측 — 「멈췄다, 다시 하라」 로 답하자 다시 하면 두 번 돌았다). 다른 호스트면 다른 렌더러다(돈다 — 멈춘다).
+/// 호스트는 정확히 같아야 같다고 본다(공개 접미사 목록이 없다 — a.example.com 과 b.example.com 은 다르게 본다).
+pub fn dialogPausesScript(surface_id: u64) bool {
+    if (ownJsDialog(surface_id)) return true;
+    if (!jsDialogShowing(surface_id)) return false;
+    const me = surfaces.getPtr(surface_id) orelse return true;
+    const my_host = hostOf(me.url orelse return true) orelse return true;
+    const family = popupFamily(surface_id);
+    for (surfaces.keys(), surfaces.values()) |id, *other| {
+        if (id == surface_id or popupFamily(id) != family) continue;
+        for (other.dialogs.items) |d| switch (d.kind) {
+            .alert, .confirm, .prompt, .before_unload => {
+                const host = hostOf(d.origin) orelse return true;
+                if (std.ascii.eqlIgnoreCase(host, my_host)) return true;
+            },
+            else => {},
+        };
+    }
+    return false;
+}
+
+fn hostOf(url: []const u8) ?[]const u8 {
+    const uri = std.Uri.parse(url) catch return null;
+    const host = uri.host orelse return null;
+    return switch (host) {
+        .raw => |r| r,
+        .percent_encoded => |p| p,
+    };
+}
+
+/// W9a 적대 리뷰 4·5 회차: 그 탭이 아직 확정되지 않은 이동 중인가(주 프레임 이동이 시작됐는데 새 문서·끝이 아직 없다 — `main_frame_navigating`)
+/// — 그동안 보낸 Runtime.evaluate·스크린샷은 Chromium 이 붙잡아 두었다가 새 문서에서 돌렸다(에이전트는 시한으로 답을 받은 뒤).
 pub fn navigationUncommitted(surface_id: u64) bool {
     const s = surfaces.getPtr(surface_id) orelse return false;
     return s.nav_uncommitted;
@@ -3641,7 +3673,7 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     // 페이지가 JS 대화상자로 멈췄다 — 보내면 답이 없다(사용자가 그 탭에서 답해야 한다, W9b③ 적대 리뷰 2 회차). 떼기는 보낸다(3 회차),
     // 묶음 놓기는 대화상자가 사라진 뒤로 미룬다(3 회차 — 버리면 묶음이 이동 전까지 남았다). 부른 쪽에는 그대로 DialogShowing.
     // W9a 적대 리뷰 4 회차: 팝업 가족의 **다른** 탭이 대화상자를 띄웠으면 이 탭의 스크립트는 다른 렌더러에서 돈다 — 멈추기는 보낸다.
-    const terminate_ok = std.mem.eql(u8, method, "Runtime.terminateExecution") and !ownJsDialog(surface_id);
+    const terminate_ok = std.mem.eql(u8, method, "Runtime.terminateExecution") and !dialogPausesScript(surface_id);
     if (jsDialogShowing(surface_id) and !terminate_ok and !sendsDuringDialog(gpa, method, params)) {
         if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) {
             if (s.deferred_releases.items.len >= max_deferred_releases) gpa.free(s.deferred_releases.orderedRemove(0));
@@ -3859,6 +3891,7 @@ fn expireDevtools(gpa: std.mem.Allocator, now_ms: i64) void {
 /// 않게 — 적대 검증).
 fn forgetSidecar(gpa: std.mem.Allocator) void {
     for (surfaces.values()) |*s| {
+        s.nav_uncommitted = false; // 그 이동은 새 sidecar 에서 다시 시작한다(그때 다시 알린다)
         dropDialogs(gpa, s);
         dropDeferredReleases(gpa, s); // 그 렌더러의 묶음은 함께 사라졌다
         dropNotes(gpa, s);
@@ -4142,8 +4175,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.can_go_back = v.can_go_back;
             s.can_go_forward = v.can_go_forward;
             if (v.loading and s.nav_pending) s.nav_saw_loading = true;
-            // W9a 적대 리뷰 4 회차: 불러오기가 막 시작됐다 — 새 문서(`page_started`)나 끝까지 확정되지 않은 이동.
-            if (v.loading and !s.loading) s.nav_uncommitted = true;
+            // W9a 적대 리뷰 5 회차: 시작은 주 프레임 이동(`main_frame_navigating`)으로만 — 탭 전체의 「불러오는 중」 은 iframe 도 세고 이미 불러오는
+            // 중에 시작된 이동을 놓쳤다. 불러오기가 다 끝나면(204·다운로드처럼 확정 없이 끝난 이동도) 푼다.
             if (!v.loading) s.nav_uncommitted = false;
             // W9a: 문서 없이 불러오기가 끝났다(204·다운로드·#·pushState·떠나기 확인에 머묾) — 불러오지 않은 끝. 불러온 이동은 이보다 먼저
             // `load_finished` 로 끝났다.
@@ -4191,6 +4224,8 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 s.nav_pending = false;
                 s.nav_saw_loading = false;
             }
+            // 주 프레임의 끝(오류 페이지 0 포함) — 확정되지 않은 이동이 아니다. 음수(앞 문서가 끊김)는 새 이동 중일 수 있어 두다.
+            if (v.http_status >= 0) s.nav_uncommitted = false;
             // W9a: 에이전트 이동의 끝(`AgentNav`) — 만들어진 직후 about:blank 의 끝(위에서 지웠다)은 아니다. 음수는 앞 문서가 끊긴 것,
             // 양수는 새 문서가 시작된 뒤에만(앞 문서가 늦게 끝난 것을 넘긴다). 0 은 실패한 이동 — about:blank 만 불러온 것이다.
             if (s.agent_nav.active and !s.agent_nav.done and !absorbed and v.http_status >= 0) {
@@ -4206,6 +4241,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             }
         },
         .title_changed => {},
+        // W9a 적대 리뷰 5 회차: 주 프레임 이동이 시작된다 — 확정·끝·불러오기 끝까지 「확정되지 않은 이동 중」.
+        .main_frame_navigating => |id| if (surfaces.getPtr(id)) |s| {
+            s.nav_uncommitted = true;
+        },
         // 렌더러가 죽으면 그 페이지의 툴팁도 끝났다(CEF 가 빈 글을 부르지 않을 수 있다).
         .renderer_gone => |v| if (surfaces.getPtr(v.browser)) |s| {
             setTooltip(gpa, s, ""); // 메뉴는 sidecar 가 닫음을 보낸다(W6c①)
@@ -6029,7 +6068,7 @@ test "W9a 변이 생존: 보낸 뒤 「불러오는 중」 을 보기 전의 「
     endAgentNav(43);
 }
 
-test "W9a 적대 리뷰 4 회차 재현: 불러오는 중 · 새 문서 전이면 확정되지 않은 이동, 새 문서가 시작되거나 불러오기가 끝나면 아니다" {
+test "W9a 적대 리뷰 5 회차: 확정되지 않은 이동은 주 프레임 이동 시작(on_before_browse)부터 확정·끝·불러오기 끝까지 — iframe 의 불러오기는 아니고, 이미 불러오는 중에 시작된 이동도 잡는다" {
     const gpa = std.testing.allocator;
     defer {
         for (surfaces.values()) |*s| freeSurface(gpa, s);
@@ -6045,13 +6084,47 @@ test "W9a 적대 리뷰 4 회차 재현: 불러오는 중 · 새 문서 전이�
     try testHold(gpa, 44);
     testRunning(44);
     try std.testing.expect(!navigationUncommitted(44));
+    // iframe 만 불러온다(주 프레임 이동 없음) — 확정되지 않은 이동이 아니다(5 회차: 늦게 붙는 iframe 동안 exec 을 거절했다).
     testApply(gpa, ns(44, true));
+    try std.testing.expect(!navigationUncommitted(44));
+    // 이미 불러오는 중에 주 프레임 이동이 시작된다(5 회차: 「불러오는 중」 변화가 없어 놓쳤다).
+    testApply(gpa, .{ .main_frame_navigating = 44 });
     try std.testing.expect(navigationUncommitted(44));
     testApply(gpa, .{ .page_started = 44 });
     try std.testing.expect(!navigationUncommitted(44));
-    testApply(gpa, ns(44, false));
-    testApply(gpa, ns(44, true));
-    try std.testing.expect(navigationUncommitted(44));
+    // 실패한 이동(오류 페이지 — load_finished 0)과 문서 없는 이동(204·다운로드 — 불러오기 끝)도 푼다.
+    testApply(gpa, .{ .main_frame_navigating = 44 });
+    testApply(gpa, .{ .load_finished = .{ .browser = 44, .http_status = 0 } });
+    try std.testing.expect(!navigationUncommitted(44));
+    testApply(gpa, .{ .main_frame_navigating = 44 });
     testApply(gpa, ns(44, false));
     try std.testing.expect(!navigationUncommitted(44));
+}
+
+test "W9a 적대 리뷰 5 회차: 가족 탭의 대화상자는 같은 호스트면 스크립트를 멈춘 것(같은 렌더러), 다른 호스트면 아니다 — 자기 대화상자는 늘 멈춘 것" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 51);
+    try testHold(gpa, 52);
+    testRunning(51);
+    testRunning(52);
+    testApply(gpa, .{ .url_changed = .{ .browser = 51, .url = "http://127.0.0.1:8000/a.html" } });
+    surfaces.getPtr(52).?.popup_family = 51;
+    try std.testing.expect(!dialogPausesScript(51));
+    // 다른 호스트(localhost — 다른 렌더러)의 alert — 51 의 스크립트는 돈다.
+    testApply(gpa, .{ .js_dialog = .{ .browser = 52, .request = 1, .kind = .alert, .origin = "http://localhost:8000", .message = "" } });
+    try std.testing.expect(jsDialogShowing(51) and !dialogPausesScript(51));
+    replyDialog(gpa, 52, testDialogToken(52) orelse return error.NoDialog, true, "", false);
+    // 같은 호스트(같은 렌더러)의 confirm — 51 의 스크립트도 멈췄다.
+    testApply(gpa, .{ .js_dialog = .{ .browser = 52, .request = 2, .kind = .confirm, .origin = "http://127.0.0.1:8000", .message = "" } });
+    try std.testing.expect(dialogPausesScript(51));
+    replyDialog(gpa, 52, testDialogToken(52) orelse return error.NoDialog, true, "", false);
+    // 자기 대화상자.
+    testApply(gpa, .{ .js_dialog = .{ .browser = 51, .request = 3, .kind = .alert, .origin = "http://127.0.0.1:8000", .message = "" } });
+    try std.testing.expect(dialogPausesScript(51));
 }

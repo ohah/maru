@@ -7840,9 +7840,6 @@ fn beginCdp(run: *CdpRun) void {
         .get_url => p.url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdp_not_shown_reason)).url,
         .screenshot => {},
     };
-    // W9a 적대 리뷰 4 회차: 확정되지 않은 이동 중의 evaluate 는 Chromium 이 붙잡아 두었다가 새 문서에서 돌렸다(에이전트는 시한으로 답을 받은 뒤)
-    // — 보내지 않는다.
-    if (run.op.exec != null and session_mod.web_osr.navigationUncommitted(run.surface_id)) return finishCdp(run, .failed, cdp_loading_reason);
     run.started = true;
     run.op.now_ms = cdpNowMs();
     _ = active_browser_executions.markRunning(run.async_id);
@@ -7852,7 +7849,28 @@ fn beginCdp(run: *CdpRun) void {
 
 /// 한 번도 보이지 않은 탭(OSR 레코드가 없다) — 몰래 만들지 않는다(W9a 작성자 선택).
 const cdp_not_shown_reason = "the Chromium tab has not been shown yet — show it once first";
-const cdp_loading_reason = "the tab is loading a new page — wait for it (wait --load), then run the script again";
+const cdp_loading_reason = "the tab is loading a new page — wait for it (wait --load), then try again";
+const cdp_ran_then_navigated = "the script ran, but the page started loading a new page before its result could be read";
+
+/// 확정되지 않은 이동 중에 보내려는 호출을 대신하는 답(null 이면 그대로 보낸다).
+/// - exec 의 evaluate·스크린샷의 호출: 보내지 않았다(not_sent — 곧 「loading a new page」, 스크립트는 돌지 않았다). 보내면 Chromium 이 붙잡았다가
+///   새 문서에서 돌렸다(에이전트는 시한으로 답을 받은 뒤 — 적대 리뷰 4 회차).
+/// - exec 의 결과 읽기·진단(스크립트가 이동을 걸었다): 이미 돌았다 — 결과를 읽을 수 없다는 실패로.
+/// - 묶음 놓기: 놓은 것으로 친다(확정되면 그 문서의 묶음은 함께 사라진다 — 붙잡혀 exec 이 이동만큼 매달렸다).
+/// - terminate 와 다른 op(클릭 등 — W9b)은 그대로.
+fn uncommittedReply(run: *CdpRun, method: []const u8) ?web_cdp_ops.Reply {
+    if (std.mem.eql(u8, method, "Runtime.terminateExecution")) return null;
+    if (run.op.exec) |*e| {
+        if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .ok = "{}" };
+        return switch (e.stage) {
+            .evaluate => .{ .not_sent = cdp_loading_reason },
+            .value, .diagnose => .{ .failed = cdp_ran_then_navigated },
+            else => null,
+        };
+    }
+    if (run.op.page) |*p| if (p.kind == .screenshot) return .{ .not_sent = cdp_loading_reason };
+    return null;
+}
 
 /// 그 요청이 아직 살아 있고 허가돼 있는가(취소·시한·철회·탭 닫힘·서버 멈춤이면 거짓). wait 는 실행 목록이 아니라 기다림 목록에
 /// 있다 — 닫힘·철회가 그 목록에서 빼고 답한다.
@@ -8114,12 +8132,12 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                 if (release) |r| return cdpAdvance(run, r);
                 return finishCdp(run, .failed, "the request was cancelled");
             }
-            // W9a 적대 리뷰 4 회차: 스크립트가 이동을 시작했다(확정 전) — 묶음 놓기는 Chromium 이 확정까지 붙잡아 exec 이 이동만큼(느린 서버면 30 초)
-            // 매달렸다. 확정되면 그 문서의 묶음은 함께 사라진다 — 보내지 않고 놓은 것으로 친다.
-            if (run.op.exec != null and std.mem.eql(u8, next.method, "Runtime.releaseObjectGroup") and session_mod.web_osr.navigationUncommitted(run.surface_id)) {
-                const after = run.op.feed(allocator, .{ .ok = "{}" }) catch return finishCdp(run, .failed, "out of memory");
+            // W9a 적대 리뷰 4·5 회차: 확정되지 않은 이동 중의 페이지 호출은 Chromium 이 확정까지 붙잡았다 — 보내기 **직전에** 본다(자리를 기다려 잠든
+            // 사이 이동이 시작될 수 있다).
+            if (session_mod.web_osr.navigationUncommitted(run.surface_id)) if (uncommittedReply(run, next.method)) |r| {
+                const after = run.op.feed(allocator, r) catch return finishCdp(run, .failed, "out of memory");
                 return cdpAdvance(run, after);
-            }
+            };
             if (builtin.is_test) cdp_calls_attempted +%= 1;
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             grantAgentNewTabCredit(run.surface_id, next.method, next.params);
@@ -8160,7 +8178,8 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
     run.op.now_ms = cdpNowMs();
     run.op.page_loading = session_mod.web_osr.isLoading(run.surface_id);
     // W9a 적대 리뷰 4 회차: 팝업 가족의 **다른** 탭의 대화상자로 끝난 exec 호출 — 그 스크립트는 멈춘 것이 아니다.
-    const reply: web_cdp_ops.Reply = if (outcome == .dialog and run.op.exec != null and !session_mod.web_osr.ownDialogShowing(run.surface_id))
+    // 같은 렌더러로 보는 가족 탭(같은 호스트)의 대화상자는 스크립트를 멈춘 것이다 — 그대로 「멈춤 — 다시 하지 말라」(적대 리뷰 5 회차).
+    const reply: web_cdp_ops.Reply = if (outcome == .dialog and run.op.exec != null and !session_mod.web_osr.dialogPausesScript(run.surface_id))
         .{ .failed = web_cdp_ops.family_dialog_reason }
     else
         cdpReply(outcome, result);
@@ -8241,8 +8260,9 @@ fn sendCdpTerminate(async_id: u64, until_ms: i64) void {
     } else return;
     const e = &(run.op.exec orelse return);
     if (!e.running()) return;
-    // 그 탭 자신의 대화상자면 보내지 않는다(답한 뒤 나머지를 죽였다). 가족의 다른 탭 것이면 이 스크립트는 돈다 — 보낸다(적대 리뷰 4 회차).
-    if (session_mod.web_osr.ownDialogShowing(run.surface_id)) return;
+    // 그 탭(이나 같은 렌더러로 보는 가족 탭)의 대화상자면 보내지 않는다(답한 뒤 나머지를 죽였다). 다른 렌더러의 가족 탭 것이면 이 스크립트는
+    // 돈다 — 보낸다(적대 리뷰 4·5 회차).
+    if (session_mod.web_osr.dialogPausesScript(run.surface_id)) return;
     const gpa = session_mod.web_osr.gpaRef() orelse return;
     session_mod.web_osr.devtoolsFireAndForget(gpa, run.surface_id, "Runtime.terminateExecution", "") catch |err| switch (err) {
         error.Busy => cdp_terminates.append(allocator, .{ .async_id = async_id, .until_ms = until_ms }) catch {},
@@ -12485,7 +12505,7 @@ test "W9a 적대 리뷰 4 회차: 확정되지 않은 이동 중인 탭에는 ev
     session_mod.web_osr.testRunning(76);
     try control_pane_grant_store.grant(.{ .pane = 5, .target = 76, .scope = .browser });
     defer control_pane_grant_store.clearAll();
-    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = 76, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    session_mod.web_osr.testApply(ta, .{ .main_frame_navigating = 76 }); // 주 프레임 이동이 시작됐다(확정 전)
     const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":76,\"script\":\"1\"}}";
     var p: control_server_mod.PendingRequest = undefined;
     const before = cdp_calls_attempted;
@@ -12521,7 +12541,7 @@ test "W9a 적대 리뷰 4 회차 재현: 스크립트가 이동을 시작했으�
     try cdp_runs.append(allocator, run);
     allocator.free((try run.op.start(allocator)).call.params);
     // 스크립트가 이동을 시작했다 — 불러오는 중, 새 문서 전.
-    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = 77, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    session_mod.web_osr.testApply(ta, .{ .main_frame_navigating = 77 });
     const before = cdp_calls_attempted;
     const release = try run.op.feed(allocator, .{ .ok = "{\"result\":{\"type\":\"number\",\"value\":1}}" });
     cdpAdvance(run, release);

@@ -656,6 +656,13 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get" 2>&1; echo "rc=\$?" >> "\$out/ck-get"
 "\$cli" browser delete-cookie --surface "\$nv" --name ck1 > "\$out/ck-del" 2>&1; echo "rc=\$?" >> "\$out/ck-del"
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get2" 2>&1; echo "rc=\$?" >> "\$out/ck-get2"
+# 적대 리뷰 1 회차: sameSite 는 WebKit 처럼 소문자, `--domain .host` 는 호스트 전용 쿠키를 지우지 않는다(WebKit 과 같다), 긴 값은 상한 글로.
+"\$cli" browser exec --surface "\$nv" 'document.cookie="ss=1; SameSite=Lax; path=/", 1' > "\$out/r1s-js" 2>&1
+"\$cli" browser get-cookies --surface "\$nv" > "\$out/r1s-get" 2>&1; echo "rc=\$?" >> "\$out/r1s-get"
+"\$cli" browser delete-cookie --surface "\$nv" --name ss --domain .127.0.0.1 > "\$out/r1s-del-dot" 2>&1; echo "rc=\$?" >> "\$out/r1s-del-dot"
+"\$cli" browser get-cookies --surface "\$nv" > "\$out/r1s-get2" 2>&1
+"\$cli" browser delete-cookie --surface "\$nv" --name ss > "\$out/r1s-del" 2>&1
+"\$cli" browser set-local-storage --surface "\$nv" --key big --value "\$(head -c 70000 /dev/zero | tr '\0' x)" > "\$out/r1s-big" 2>&1; echo "rc=\$?" >> "\$out/r1s-big"
 "\$cli" browser set-cookie --surface "\$nv" --name ck3 --value cv3 > "\$out/cl-ck" 2>&1
 "\$cli" browser set-local-storage --surface "\$nv" --key k3 --value v3 > "\$out/cl-ls" 2>&1
 "\$cli" browser clear-storage --surface "\$nv" > "\$out/cl" 2>&1; echo "rc=\$?" >> "\$out/cl"
@@ -898,7 +905,10 @@ grep -q '^ok$' "$out/ck-set" && grep -q '"name":"ck1"' "$out/ck-get" && grep -q 
 grep -q '^rc=1$' "$out/ck-set-other" && grep -q "page's own host" "$out/ck-set-other" || fail "a cookie for another host was not refused ($(tr '\n' ' ' < "$out/ck-set-other"))"
 grep -q '^ok$' "$out/ck-del" && ! grep -q '"name":"ck1"' "$out/ck-get2" && grep -q '^rc=0$' "$out/ck-get2" || fail "delete-cookie did not remove the cookie ($(tr '\n' ' ' < "$out/ck-del") · $(tr '\n' ' ' < "$out/ck-get2"))"
 grep -q '^ok$' "$out/cl" && ! grep -q '"name":"ck3"' "$out/cl-ck2" && grep -q '^$' "$out/cl-ls2" || fail "clear-storage did not clear the page's cookies and localStorage ($(tr '\n' ' ' < "$out/cl") · $(tr '\n' ' ' < "$out/cl-ck2") · $(tr '\n' ' ' < "$out/cl-ls2"))"
-echo "PASS w9a-storage: localStorage sets, reads past a page that lies in getItem, and removes; a cookie is set, read and deleted, a cookie for another host is refused; clear-storage clears the page's cookies and localStorage"
+grep -q '"name":"ss"' "$out/r1s-get" && grep -q '"sameSite":"lax"' "$out/r1s-get" || fail "a SameSite=Lax cookie did not come back with sameSite \"lax\" like WebKit ($(tr '\n' ' ' < "$out/r1s-get"))"
+grep -q '^ok$' "$out/r1s-del-dot" && grep -q '"name":"ss"' "$out/r1s-get2" || fail "delete-cookie --domain .127.0.0.1 removed a host-only cookie (WebKit keeps it) ($(tr '\n' ' ' < "$out/r1s-del-dot") · $(tr '\n' ' ' < "$out/r1s-get2"))"
+grep -q '^rc=1$' "$out/r1s-big" && grep -q 'localStorage key and value are too large' "$out/r1s-big" || fail "a 70000-character localStorage value did not fail with the size limit message ($(tr '\n' ' ' < "$out/r1s-big" | cut -c1-300))"
+echo "PASS w9a-storage: localStorage sets, reads past a page that lies in getItem, and removes; a cookie is set, read and deleted, a cookie for another host is refused; clear-storage clears the page's cookies and localStorage; sameSite comes back lowercase, --domain .host keeps a host-only cookie, a too-long value names the limit"
 echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

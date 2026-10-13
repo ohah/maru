@@ -8209,7 +8209,11 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                 error.NotReady, error.Busy, error.DialogShowing => {
                     // 자리 없음은 ops 가 아는 그 글이어야 한다 — kick 을 실은 호출은 그때만 다시 보낸다(`web_cdp_ops.busy_reason`).
                     const why = switch (e) {
-                        error.NotReady => "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)",
+                        // 탭이 닫혀 기록이 없으면 그렇게 말한다(W9a③ 적대 리뷰 2 회차: 지우기 도중 닫자 「not ready」 로 답했다).
+                        error.NotReady => if (session_mod.web_osr.owns(run.surface_id))
+                            "the Chromium tab is not ready (it has not been shown yet, or its engine is restarting)"
+                        else
+                            "the tab closed or its page crashed",
                         error.DialogShowing => web_cdp_ops.dialog_reason, // 확실히 보내지 않았다(W9b③ 적대 리뷰 2 회차)
                         else => web_cdp_ops.busy_reason,
                     };
@@ -12736,6 +12740,40 @@ test "W9a 적대 리뷰 4 회차 재현: 스크립트가 이동을 시작했으�
     defer allocator.free(response);
     p.response = null;
     try std.testing.expect(std.mem.indexOf(u8, response, "\"result\":1") != null);
+}
+
+test "W9a③ 적대 리뷰 2 회차 재현: 지우기 도중 탭이 닫히면(OSR 기록이 없다) 「the tab closed」 로 곧 끝난다 — 전에는 「not ready … restarting」" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 84); // 엔진은 돈다 — 85 는 닫혀 기록이 없다
+    defer {
+        session_mod.web_osr.destroy(ta, 84);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(84);
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 85, .scope = .browser_storage, .host = host });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.deleteCookie\",\"params\":{\"id\":85,\"name\":\"s\"}}";
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 85, .method = .delete_cookie, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 85, .scope = .browser_storage, .host = host } } });
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = 85, .op = try web_cdp_ops.Op.init(allocator, .delete_cookie, "{\"name\":\"s\"}", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    run.op.storage.?.doc_url = "https://a.test/";
+    allocator.free((try run.op.start(allocator)).call.params);
+    const del = try run.op.feed(allocator, .{ .ok = "{\"cookies\":[{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"s\",\"domain\":\".a.test\",\"path\":\"/\"}]}" });
+    cdpAdvance(run, del);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    const response = p.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    p.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "2 of 2 cookies could not be deleted (the tab closed") != null);
 }
 
 test "W9a③: 쿠키 저장소 op 은 시작에 grant 호스트가 지금 문서를 덮는지 본다(다른 사이트로 갔으면 unauthorized), localStorage 는 확정 전 이동 중에 보내지 않는다" {

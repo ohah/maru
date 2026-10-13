@@ -9930,12 +9930,14 @@ pub const AppSession = struct {
 
     /// host 연결이 이미지 채널을 협상했는데 채널이 없으면(자리 없음·거부·채널 상실 — 이미지 채널 §3.2) 한 번 알린다. 그 연결의
     /// 이미지는 placement 째 빠져 화면에 없다 — 알리지 않으면 「왜 이미지가 안 뜨나」가 설명되지 않는다. observer 안내와 같은
-    /// 규율: 모달이 열려 있으면 띄우지 않고 다음 tick 에 다시 본다.
+    /// 규율: 모달이 열려 있으면 띄우지 않고 다음 tick 에 다시 본다. backend 는 창들이 함께 쓰므로 모달이 열린 창은 안내를 꺼내지
+    /// 않는다 — 꺼내면 그 창이 쥔 채 다른 창이 띄우지 못한다.
     fn showPendingImageChannelNotice(self: *AppSession) void {
+        if (self.anyModalOverlayOpen()) return;
         if (is_macos) if (app_remote_backend) |*remote| {
             if (remote.takeImageChannelUnavailableNotice()) self.image_channel_notice_pending = true;
         };
-        if (!self.image_channel_notice_pending or self.anyModalOverlayOpen()) return;
+        if (!self.image_channel_notice_pending) return;
         self.image_channel_notice_pending = false;
         self.showNoticeKey(.app_image_channel_unavailable);
     }
@@ -48733,6 +48735,14 @@ test "이미지 채널 없음: 이미지가 빠지는 이유를 notice로 한 �
     session.showPendingImageChannelNotice();
     try std.testing.expect(session.chrome_host.notice.open);
     try std.testing.expect(!session.image_channel_notice_pending);
+
+    // 배선: 프레임 tick 이 이 안내를 부르고, 안내는 backend 가 올린 것을 꺼낸다 — 둘 중 하나가 빠지면 위 판정은 초록인 채 제품에서
+    // 안내가 영영 안 뜬다(테스트에는 backend 가 없다).
+    const source = @embedFile("app_session.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "        self." ++ "showPendingImageChannelNotice(); //"));
+    const notice_at = std.mem.indexOf(u8, source, "fn " ++ "showPendingImageChannelNotice(self: *AppSession) void {") orelse return error.TestUnexpectedResult;
+    const notice_end = std.mem.indexOf(u8, source[notice_at..], "\n    }\n") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, source[notice_at..][0..notice_end], "remote." ++ "takeImageChannelUnavailableNotice()") != null);
 }
 
 test "observer 강등: 입력이 안 되는 이유를 notice로 알리고 모달 중엔 보존한다" {

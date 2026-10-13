@@ -3779,8 +3779,9 @@ pub const RemoteRuntime = struct {
         }
 
         /// 이 runtime 의 host 연결이 「이미지 채널 없음」인가(이미지 채널 §3.2) — 펌프 직후 backend 가 앱 안내(IC6b)를 정한다.
-        pub fn imageChannelUnavailable(runtime: *RemoteRuntime) bool {
-            runtime.admitRuntimeOperation() catch return false;
+        /// runtime 이 바빠 들 수 없으면 모른다(null) — 「있음」으로 읽으면 안내가 다시 무장돼 같은 연결에 토스트가 또 뜬다.
+        pub fn imageChannelUnavailable(runtime: *RemoteRuntime) ?bool {
+            runtime.admitRuntimeOperation() catch return null;
             return switch (runtime.currentGeneration().connection) {
                 .legacy => |client| client.imageChannelUnavailable(),
                 .generation => |adapter| adapter.imageChannelUnavailable(),
@@ -21861,7 +21862,7 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     try std.testing.expectEqual(@as(usize, 0), table.len);
 
     // 앱 안내(IC6b)의 runtime 고리는 두 연결 모양 모두 그 연결의 관측으로 간다 — 한쪽이 상수면 그 모양의 연결은 안내가 안 뜬다.
-    const unavailable_at = std.mem.indexOf(u8, @embedFile("remote_runtime.zig"), "pub fn " ++ "imageChannelUnavailable(runtime: *RemoteRuntime) bool {") orelse
+    const unavailable_at = std.mem.indexOf(u8, @embedFile("remote_runtime.zig"), "pub fn " ++ "imageChannelUnavailable(runtime: *RemoteRuntime) ?bool {") orelse
         return error.TestUnexpectedResult;
     const unavailable_body = @embedFile("remote_runtime.zig")[unavailable_at..][0..400];
     try std.testing.expect(std.mem.indexOf(u8, unavailable_body, ".legacy => |client| client." ++ "imageChannelUnavailable(),\n                .generation => |adapter| adapter." ++ "imageChannelUnavailable(),\n            };") != null);

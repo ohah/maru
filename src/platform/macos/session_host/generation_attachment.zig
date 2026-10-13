@@ -3885,11 +3885,11 @@ test "image channel attachment: a committed generation attachment hands its tran
     // 앱 안내(IC6b)의 근거 — HostAdapter 가 slot 의 현재 연결을 읽는다: 「이미지 채널 없음」만 참이다.
     logical_client.image_channel.state = .not_negotiated;
     try std.testing.expect(attachment.imageRefResolver(&ctx) == .unnegotiated);
-    try std.testing.expect(!adapter.imageChannelUnavailable());
+    try std.testing.expectEqual(@as(?bool, false), adapter.imageChannelUnavailable());
     logical_client.image_channel.state = .bound;
-    try std.testing.expect(!adapter.imageChannelUnavailable());
+    try std.testing.expectEqual(@as(?bool, false), adapter.imageChannelUnavailable());
     logical_client.image_channel.state = .unavailable;
-    try std.testing.expect(adapter.imageChannelUnavailable());
+    try std.testing.expectEqual(@as(?bool, true), adapter.imageChannelUnavailable());
     switch (attachment.imageRefResolver(&ctx)) {
         .unnegotiated => return error.TestUnexpectedResult,
         .channel => |resolver| try std.testing.expect(resolver.ctx == @as(*anyopaque, &ctx)),

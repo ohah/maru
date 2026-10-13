@@ -7548,7 +7548,7 @@ pub const Client = struct {
         return self.image_channel.state != .not_negotiated;
     }
 
-    /// 협상했는데 채널이 없다 — 「이미지 채널 없음」(§3.2). 이 연결의 이미지는 placement 째 빠진다. 앱이 탭 안내(IC6b)를 띄우는
+    /// 협상했는데 채널이 없다 — 「이미지 채널 없음」(§3.2). 이 연결의 이미지는 placement 째 빠진다. 앱이 안내(IC6b)를 띄우는
     /// 근거다. 관측이라 울타리 밖에서 읽는다(`imageShmNegotiated` 와 같다).
     pub fn imageChannelUnavailable(self: *const Client) bool {
         return self.image_channel.state == .unavailable;

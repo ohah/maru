@@ -734,8 +734,8 @@ pub const HostAdapter = struct {
         return self.slot.currentPumpImageChannel(self.slot.connectionGeneration());
     }
 
-    /// 이 host 연결이 「이미지 채널 없음」인가(이미지 채널 §3.2) — 앱의 안내(IC6b) 근거.
-    pub fn imageChannelUnavailable(self: *HostAdapter) bool {
+    /// 이 host 연결이 「이미지 채널 없음」인가(이미지 채널 §3.2) — 앱의 안내(IC6b) 근거. null 은 모름.
+    pub fn imageChannelUnavailable(self: *HostAdapter) ?bool {
         return self.slot.attachmentImageChannelUnavailable();
     }
 

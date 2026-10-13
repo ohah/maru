@@ -557,7 +557,7 @@ IC5a–c 가 처음 계획(producer 의 `image_ref`·`image_seg_hwm` 방출, 미
 
 IC6 는 셋으로 나눴다 — GUI 제품 연결의 광고와 external 차단(IC6a), 「이미지 채널 없음」 탭 안내(IC6b), 실측 gate(IC6c).
 
-#### IC6a — GUI 제품 연결이 광고한다 (PR 진행 중)
+#### IC6a — GUI 제품 연결이 광고한다 (완료)
 
 - 제품 GUI 연결은 한 자리로 모이지 않는다 — `host_connect` 의 말단 셋(`tryConnect`·`tryConnectMajorKind`·`deadlineConnectAttempt`)
   을 새 탭·복원·재접속이 쓰고, 그중 둘은 inventory(`recovery_discovery`)·CLI(`attach_product_resolver`)와 함께 쓴다. 그래서
@@ -593,14 +593,17 @@ IC6 는 셋으로 나눴다 — GUI 제품 연결의 광고와 external 차단(I
   - 관측 사슬: `Client.imageChannelUnavailable`(`state == .unavailable`) → `ClientSlot.attachmentImageChannelUnavailable` →
     `HostAdapter.imageChannelUnavailable` → `RemoteRuntime.backend_api.imageChannelUnavailable`(legacy·generation 둘 다);
   - `RemoteTermBackend.maintenanceEventTick` 의 host 당 루프가 펌프 바로 다음에 그 연결을 보고, 루프 뒤 한 번 반영한다 —
-    「없음」이 없다가 생긴 순간에만 안내를 올리고(매 tick 토스트가 뜨지 않는다), 채널이 돌아오면 내려가 다시 무장한다;
-  - 앱 tick(`showPendingImageChannelNotice`)이 backend 의 안내를 AppSession 표시로 옮기고, 모달이 없을 때 i18n
-    `app_image_channel_unavailable` 토스트를 한 번 띄운다(observer 와 같은 규율).
+    「없음」이 없다가 생긴 순간에만 안내를 올리고(매 tick 토스트가 뜨지 않는다), 채널이 돌아오면 내려가 다시 무장하며 아직 못
+    띄운 안내도 거둔다. 관측은 셋이다 — runtime 이 바쁘거나 slot 이 유효하지 않으면 「모름」이라 아무것도 바꾸지 않는다(「있음」으로
+    읽으면 재무장해 같은 연결에 토스트가 또 뜬다);
+  - 앱 tick(`showPendingImageChannelNotice`)은 모달이 없을 때만 backend 의 안내를 꺼내 i18n `app_image_channel_unavailable`
+    토스트를 한 번 띄운다 — 창들이 backend 를 함께 쓰므로 모달이 열린 창이 꺼내 쥐지 않게 한다.
 - 판정자: `test-image-channel-app` 의 `image channel notice:` 1(새 step — 없다가 생길 때만 한 번, 계속 없으면 안 올림, 꺼내기 전 여러
   tick 에도 남음, 채널이 돌아오면 재무장, tick 배선 순서), `image channel attachment:` 에 실제 HostAdapter 가 세 상태 중 「없음」만
   참, `image channel legacy:` 에 묶인 연결은 거짓·runtime 고리가 두 연결 모양 모두 위임, `image channel connect:` 에 자리 없음 → 참·
   미협상 → 거짓. 앱 안내(`app_session` 「이미지 채널 없음:」)는 observer 판정자와 같은 전체 app_session 묶음에서 돈다.
-- 돌연변이 9 개 모두 RED.
+- 돌연변이 9 개 모두 RED, 적대적 검증 1 회차(HIGH 0, MEDIUM 2) 반영분 3 개도 RED — 「모름」을 「있음」으로 읽음, 채널이 돌아와도
+  안내를 거두지 않음, 프레임 tick 이 안내를 부르지 않음(배선 판정자).
 - 한계: 안내는 창 토스트라 어느 탭(host)인지 말하지 않는다 — host 는 보통 하나다. host 가 둘이고 둘이 차례로 「없음」이 되면
   두 번째는 첫째가 회복되기 전엔 다시 알리지 않는다.
 

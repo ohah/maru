@@ -7840,6 +7840,9 @@ fn beginCdp(run: *CdpRun) void {
         .get_url => p.url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdp_not_shown_reason)).url,
         .screenshot => {},
     };
+    // W9a 적대 리뷰 4 회차: 확정되지 않은 이동 중의 evaluate 는 Chromium 이 붙잡아 두었다가 새 문서에서 돌렸다(에이전트는 시한으로 답을 받은 뒤)
+    // — 보내지 않는다.
+    if (run.op.exec != null and session_mod.web_osr.navigationUncommitted(run.surface_id)) return finishCdp(run, .failed, cdp_loading_reason);
     run.started = true;
     run.op.now_ms = cdpNowMs();
     _ = active_browser_executions.markRunning(run.async_id);
@@ -7849,6 +7852,7 @@ fn beginCdp(run: *CdpRun) void {
 
 /// 한 번도 보이지 않은 탭(OSR 레코드가 없다) — 몰래 만들지 않는다(W9a 작성자 선택).
 const cdp_not_shown_reason = "the Chromium tab has not been shown yet — show it once first";
+const cdp_loading_reason = "the tab is loading a new page — wait for it (wait --load), then run the script again";
 
 /// 그 요청이 아직 살아 있고 허가돼 있는가(취소·시한·철회·탭 닫힘·서버 멈춤이면 거짓). wait 는 실행 목록이 아니라 기다림 목록에
 /// 있다 — 닫힘·철회가 그 목록에서 빼고 답한다.
@@ -8119,8 +8123,9 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
             // W9a②: evaluate 가 실제로 나갔다 — 시한·철회에 terminate 를 보낼 수 있다(보내지 않은 것에 보내면 페이지의 다음 스크립트를 죽인다).
             if (sent) |_| {
-                if (run.op.exec) |*e| if (e.stage == .evaluate or e.stage == .value) {
+                if (run.op.exec) |*e| if (e.stage == .evaluate or e.stage == .value or e.stage == .diagnose) {
                     e.sent = true;
+                    e.in_flight = true;
                 };
             } else |_| {}
             _ = sent catch |e| return switch (e) {
@@ -8148,7 +8153,12 @@ fn cdpDone(ctx: *anyopaque, _: u32, outcome: session_mod.web_osr.DevtoolsOutcome
     const run: *CdpRun = @ptrCast(@alignCast(ctx));
     run.op.now_ms = cdpNowMs();
     run.op.page_loading = session_mod.web_osr.isLoading(run.surface_id);
-    const step = run.op.feed(allocator, cdpReply(outcome, result)) catch return finishCdp(run, .failed, "out of memory");
+    // W9a 적대 리뷰 4 회차: 팝업 가족의 **다른** 탭의 대화상자로 끝난 exec 호출 — 그 스크립트는 멈춘 것이 아니다.
+    const reply: web_cdp_ops.Reply = if (outcome == .dialog and run.op.exec != null and !session_mod.web_osr.ownDialogShowing(run.surface_id))
+        .{ .failed = web_cdp_ops.family_dialog_reason }
+    else
+        cdpReply(outcome, result);
+    const step = run.op.feed(allocator, reply) catch return finishCdp(run, .failed, "out of memory");
     cdpAdvance(run, step);
 }
 
@@ -8225,7 +8235,8 @@ fn sendCdpTerminate(async_id: u64, until_ms: i64) void {
     } else return;
     const e = &(run.op.exec orelse return);
     if (!e.running()) return;
-    if (session_mod.web_osr.jsDialogShowing(run.surface_id)) return;
+    // 그 탭 자신의 대화상자면 보내지 않는다(답한 뒤 나머지를 죽였다). 가족의 다른 탭 것이면 이 스크립트는 돈다 — 보낸다(적대 리뷰 4 회차).
+    if (session_mod.web_osr.ownDialogShowing(run.surface_id)) return;
     const gpa = session_mod.web_osr.gpaRef() orelse return;
     session_mod.web_osr.devtoolsFireAndForget(gpa, run.surface_id, "Runtime.terminateExecution", "") catch |err| switch (err) {
         error.Busy => cdp_terminates.append(allocator, .{ .async_id = async_id, .until_ms = until_ms }) catch {},
@@ -12436,6 +12447,7 @@ test "W9a②: executeScript 의 끝은 결과(inline)·진단(-32006)·너무 �
         try std.testing.expect(!run.op.exec.?.terminated); // 보내지 않았다
         try expectPendingErrorCode(&p, .timeout);
         run.op.exec.?.sent = true;
+        run.op.exec.?.in_flight = true; // 부른 쪽이 evaluate 를 보냈다(cdpAdvance 가 하는 일)
         var p2: control_server_mod.PendingRequest = undefined;
         const id2 = try w9aRequest(&p2, req, 75, .execute_script);
         run.async_id = id2;
@@ -12450,4 +12462,32 @@ test "W9a②: executeScript 의 끝은 결과(inline)·진단(-32006)·너무 �
         finishCdp(run, fin.done.status, fin.done.result);
         try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
     }
+}
+
+test "W9a 적대 리뷰 4 회차: 확정되지 않은 이동 중인 탭에는 evaluate 를 보내지 않는다(Chromium 이 붙잡아 새 문서에서 돌렸다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 76);
+    defer {
+        session_mod.web_osr.destroy(ta, 76);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(76);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 76, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = 76, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.executeScript\",\"params\":{\"id\":76,\"script\":\"1\"}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const before = cdp_calls_attempted;
+    startCdpOp(try w9aRequest(&p, req, 76, .execute_script), 76, .execute_script, "{\"script\":\"1\",\"args\":[],\"max_result_bytes\":1024}");
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    const response = p.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    p.response = null;
+    try std.testing.expect(std.mem.indexOf(u8, response, "loading a new page") != null);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
 }

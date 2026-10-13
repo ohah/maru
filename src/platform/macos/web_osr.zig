@@ -207,6 +207,8 @@ const Surface = struct {
     close_ask_agent: bool = false,
     /// W9a: 에이전트의 `browser.navigate` 가 기다리는 이동(`agentNavigate`) — 끝을 이벤트로 가른다(`AgentNav`).
     agent_nav: AgentNav = .{},
+    /// W9a 적대 리뷰 4 회차: 불러오기가 시작됐는데 새 문서가 아직 시작되지 않았다(`navigationUncommitted`).
+    nav_uncommitted: bool = false,
 };
 
 /// W9a: 에이전트가 보낸 이동의 끝(계획 공격 3 회차 실측 — sidecar 가 보내는 차례):
@@ -1582,6 +1584,18 @@ pub fn isLoading(surface_id: u64) bool {
 /// 같은 팝업 가족(그 탭이 연 탭·그 탭을 연 탭, `popup_family`)의 대화상자도 친다 — 렌더러를 나눌 수 있어 연 탭의 호출도 멈췄다(W9b③ 적대 리뷰 3
 /// 회차 실측: 같은 출처 팝업의 alert 에 연 탭의 click·snapshot 이 30 초 시한). 다른 사이트 팝업은 따로 돌 수도 있지만(실측 0.3 초) 사이트를
 /// 가리는 판정은 어림이라 가족 전체를 막는다 — 이유 있는 거절이 30 초 매달림보다 낫다.
+/// W9a 적대 리뷰 4 회차: 그 탭 **자신**이 JS 대화상자를 띄웠는가(팝업 가족 말고).
+pub fn ownDialogShowing(surface_id: u64) bool {
+    return ownJsDialog(surface_id);
+}
+
+/// W9a 적대 리뷰 4 회차: 그 탭이 아직 확정되지 않은 이동 중인가(불러오는 중인데 새 문서가 아직 시작되지 않았다) — 그동안 보낸 Runtime.evaluate 는
+/// Chromium 이 붙잡아 두었다가 새 문서에서 돌렸다(에이전트는 시한으로 답을 받은 뒤).
+pub fn navigationUncommitted(surface_id: u64) bool {
+    const s = surfaces.getPtr(surface_id) orelse return false;
+    return s.nav_uncommitted;
+}
+
 pub fn jsDialogShowing(surface_id: u64) bool {
     if (!surfaces.contains(surface_id)) return false;
     if (ownJsDialog(surface_id)) return true;
@@ -3626,7 +3640,9 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     if (!s.created or state == .off or state == .failed) return error.NotReady;
     // 페이지가 JS 대화상자로 멈췄다 — 보내면 답이 없다(사용자가 그 탭에서 답해야 한다, W9b③ 적대 리뷰 2 회차). 떼기는 보낸다(3 회차),
     // 묶음 놓기는 대화상자가 사라진 뒤로 미룬다(3 회차 — 버리면 묶음이 이동 전까지 남았다). 부른 쪽에는 그대로 DialogShowing.
-    if (jsDialogShowing(surface_id) and !sendsDuringDialog(gpa, method, params)) {
+    // W9a 적대 리뷰 4 회차: 팝업 가족의 **다른** 탭이 대화상자를 띄웠으면 이 탭의 스크립트는 다른 렌더러에서 돈다 — 멈추기는 보낸다.
+    const terminate_ok = std.mem.eql(u8, method, "Runtime.terminateExecution") and !ownJsDialog(surface_id);
+    if (jsDialogShowing(surface_id) and !terminate_ok and !sendsDuringDialog(gpa, method, params)) {
         if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) {
             if (s.deferred_releases.items.len >= max_deferred_releases) gpa.free(s.deferred_releases.orderedRemove(0));
             const copy = gpa.dupe(u8, params) catch return error.DialogShowing;
@@ -4112,6 +4128,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         } else if (!parked.contains(id)) send(gpa, .{ .destroy_browser = id }),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
             s.last_nav_ms = monotonicNow();
+            s.nav_uncommitted = false;
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
             if (s.agent_nav.active and !s.agent_nav.done and !s.initial_load_pending) s.agent_nav.saw_started = true;
             // (아래 `else` — 주차한 브라우저의 새 문서는 `parkedDocument` 가 본다.)
@@ -4125,6 +4142,9 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             s.can_go_back = v.can_go_back;
             s.can_go_forward = v.can_go_forward;
             if (v.loading and s.nav_pending) s.nav_saw_loading = true;
+            // W9a 적대 리뷰 4 회차: 불러오기가 막 시작됐다 — 새 문서(`page_started`)나 끝까지 확정되지 않은 이동.
+            if (v.loading and !s.loading) s.nav_uncommitted = true;
+            if (!v.loading) s.nav_uncommitted = false;
             // W9a: 문서 없이 불러오기가 끝났다(204·다운로드·#·pushState·떠나기 확인에 머묾) — 불러오지 않은 끝. 불러온 이동은 이보다 먼저
             // `load_finished` 로 끝났다.
             if (s.agent_nav.active and !s.agent_nav.done) {
@@ -6007,4 +6027,31 @@ test "W9a 변이 생존: 보낸 뒤 「불러오는 중」 을 보기 전의 「
     testApply(gpa, .{ .load_finished = .{ .browser = 43, .http_status = 0 } }); // 실패한 이동의 끝
     try std.testing.expect(agentNavState(43).?.done and !agentNavState(43).?.loaded);
     endAgentNav(43);
+}
+
+test "W9a 적대 리뷰 4 회차 재현: 불러오는 중 · 새 문서 전이면 확정되지 않은 이동, 새 문서가 시작되거나 불러오기가 끝나면 아니다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    const ns = struct {
+        fn f(id: u64, loading: bool) Message {
+            return .{ .nav_state = .{ .browser = id, .can_go_back = false, .can_go_forward = false, .loading = loading } };
+        }
+    }.f;
+    try testHold(gpa, 44);
+    testRunning(44);
+    try std.testing.expect(!navigationUncommitted(44));
+    testApply(gpa, ns(44, true));
+    try std.testing.expect(navigationUncommitted(44));
+    testApply(gpa, .{ .page_started = 44 });
+    try std.testing.expect(!navigationUncommitted(44));
+    testApply(gpa, ns(44, false));
+    testApply(gpa, ns(44, true));
+    try std.testing.expect(navigationUncommitted(44));
+    testApply(gpa, ns(44, false));
+    try std.testing.expect(!navigationUncommitted(44));
 }

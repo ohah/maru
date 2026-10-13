@@ -250,6 +250,10 @@ class H(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/slow.html"):
             time.sleep(2)  # wait-load: 응답이 늦는 문서
+        if self.path.startswith("/hang"):
+            # W9a 적대 리뷰 4 회차: 6 초 뒤에 답하는 문서 — 그동안(확정되지 않은 이동) 보낸 exec 은 곧 거절돼야 한다.
+            time.sleep(6)
+            self.path = "/a.html"
         if self.path.startswith("/csp.html"):
             # W9a②: 엄격 CSP(script-src 'self') — exec 자체는 돌고 그 안의 new Function 은 EvalError(WebKit 과 같다).
             body = b"<!doctype html><title>csp</title><p id=p>csp</p>"
@@ -649,6 +653,17 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser exec --surface "\$nv" '(()=>{const e=new Error("selfref"); e.self=e; e.w=window; throw e})()' > "\$out/r2-selfref" 2>&1; echo "rc=\$?" >> "\$out/r2-selfref"
 "\$cli" browser exec --surface "\$nv" '(()=>{throw new Error("line1\\n"+"x".repeat(20000))})()' > "\$out/r2-long" 2>&1; echo "rc=\$?" >> "\$out/r2-long"
 "\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:99999/" > "\$out/r2-port" 2>&1; echo "rc=\$?" >> "\$out/r2-port"
+# 적대 리뷰 4 회차: 확정되지 않은 이동 중(6 초 늦는 문서)의 exec 은 곧 거절 — 전에는 Chromium 이 붙잡아 두었다가 시한 뒤 새 문서에서 돌렸다.
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/hang?r4" > "\$out/r4-nav" 2>&1 &
+r4nav=\$!
+sleep 1.5
+x0=\$(date +%s)
+"\$cli" browser exec --surface "\$nv" '(fetch("/hit?r4ran-"+location.pathname), 1)' > "\$out/r4-exec" 2>&1; echo "rc=\$?" >> "\$out/r4-exec"
+x1=\$(date +%s)
+echo "\$((x1 - x0))" > "\$out/r4-exec-secs"
+wait \$r4nav
+sleep 2
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/w9a.html?back3" > "\$out/nv-back3" 2>&1
 # 적대 리뷰 1 회차: 좁은 rect 에 큰 scale(1×400, 8000)이 엔진을 죽였다 — 접혀서 찍히고 엔진은 산다. wire 가 거절하는 주소(탭 문자)는 곧 invalid_params.
 "\$cli" browser screenshot --surface "\$nv" --rect 0,0,1,400 --scale 8000 --out "\$out/r1-tall.png" > "\$out/r1-tall" 2>&1; echo "rc=\$?" >> "\$out/r1-tall"
 "\$cli" browser get-url --surface "\$nv" > "\$out/r1-alive" 2>&1; echo "rc=\$?" >> "\$out/r1-alive"
@@ -845,7 +860,8 @@ grep -q '^script error (execution): Error: selfref$' "$out/r2-selfref" || fail "
 grep -q '^script error (execution): Error: line1' "$out/r2-long" || fail "a long multi-line error message fell back to the fixed diagnostic ($(tr '\n' ' ' < "$out/r2-long" | cut -c1-300))"
 grep -q '^rc=1$' "$out/r2-port" && grep -q 'http, https or about:blank' "$out/r2-port" || fail "an address with an out-of-range port was not refused at once ($(tr '\n' ' ' < "$out/r2-port"))"
 grep -q '(-32004)' "$out/r3-getter" && grep -q '^42$' "$out/r3-after" || fail "a thrown value whose name getter never ends was not stopped — the next exec on that tab did not answer ($(tr '\n' ' ' < "$out/r3-getter") · $(tr '\n' ' ' < "$out/r3-after"))"
-echo "PASS w9a-r2: a script that never ends (and a thrown value whose getter never ends) is stopped after its timeout and the tab answers the next exec, an Error V8 cannot copy keeps its name and message, a long multi-line message survives, an out-of-range port is refused"
+grep -q 'loading a new page' "$out/r4-exec" && grep -q '^rc=1$' "$out/r4-exec" && [ "$(cat "$out/r4-exec-secs")" -le 3 ] && ! grep -q 'GET /hit?r4ran' "$root/http.log" || fail "an exec sent while the tab was loading a new page was not refused at once, or ran later ($(cat "$out/r4-exec-secs")s · $(tr '\n' ' ' < "$out/r4-exec") · $(grep 'r4ran' "$root/http.log" | tr '\n' ' '))"
+echo "PASS w9a-r2: a script that never ends (and a thrown value whose getter never ends) is stopped after its timeout and the tab answers the next exec, an Error V8 cannot copy keeps its name and message, a long multi-line message survives, an out-of-range port is refused, an exec while a new page is still loading is refused at once and never runs later"
 echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

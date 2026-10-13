@@ -7063,11 +7063,12 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
-        .filters = &.{ "image channel hello:", "image channel abandon:" },
+        // hello·abandon 7, 투영 ↔ 세그먼트 배선(IC5b-2 — 발급·취소·투영 실패·resync·미룸·미협상·제품 attach) 4.
+        .filters = &.{ "image channel hello:", "image channel abandon:", "image segment wiring:" },
     });
     const run_image_channel_hello_tests = b.addRunArtifact(image_channel_hello_tests);
-    run_image_channel_hello_tests.addArg("--maru-expect-tests=7");
-    run_image_channel_hello_tests.addArg("--maru-expect-passed=7");
+    run_image_channel_hello_tests.addArg("--maru-expect-tests=11");
+    run_image_channel_hello_tests.addArg("--maru-expect-passed=11");
     image_channel_step.dependOn(&run_image_channel_hello_tests.step);
     boundary_step.dependOn(image_channel_step);
 

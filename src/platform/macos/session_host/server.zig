@@ -27,6 +27,7 @@ const catchup_barrier_contract = @import("catchup_barrier_contract.zig");
 const collect_failure = @import("collect_failure.zig");
 const runtime_metadata_wire = @import("runtime_metadata_wire.zig");
 const image_channel_wire = @import("image_channel_wire.zig");
+const image_segment_ledger = @import("image_segment_ledger.zig");
 
 pub const HostStatus = struct {
     manifest_capable: bool = false,
@@ -360,6 +361,23 @@ pub const RuntimeOps = struct {
     /// host가 정확히 아는 **이벤트**라 그 주기를 기다릴 이유가 없다. true면 다음 serve tick(약 20ms)에 바로
     /// 관측을 만들어 push한다 — 통로는 그대로 두고 트리거만 앞당긴다.
     observation_urgent: *const fn (ctx: *anyopaque, runtime_id: u128) bool,
+    /// `snapshot`·`delta` 와 같은 투영이되 이미지를 세그먼트(`image_ref`)로 낸다(이미지 채널 §5). `image_shm` 을 협상한 연결의 제품
+    /// 경로만 부른다 — null 이면 그 연결도 `image_blob` 으로 투영한다. `images` 는 이 투영 동안만 유효하다.
+    snapshot_with_images: ?*const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+        sequence: u64,
+        allocator: std.mem.Allocator,
+        images: ImageSegmentSink,
+    ) anyerror!ProjectedSnapshot = null,
+    delta_with_images: ?*const fn (
+        ctx: *anyopaque,
+        runtime_id: u128,
+        base: []const u8,
+        sequence: u64,
+        allocator: std.mem.Allocator,
+        images: ImageSegmentSink,
+    ) anyerror!StreamUpdate = null,
 
     /// 셀 픽셀이 있고 백엔드가 받을 수 있으면 함께, 아니면 격자만 resize 한다.
     pub fn resizeMaybeWithCell(self: RuntimeOps, runtime_id: u128, cols: u16, rows: u16, cell: ?CellPixels) anyerror!void {
@@ -703,6 +721,29 @@ pub const ProjectionBudgetOps = struct {
     ) void,
 };
 
+/// 투영이 이미지 하나의 세그먼트를 청할 때 받는 답(`screen_snapshot.Reservation` 의 연결 층 짝 — 이 층은 투영 모듈을 모른다).
+pub const ImageSegmentAnswer = union(enum) {
+    segment: u64,
+    deferred,
+    untransmittable,
+};
+
+/// Connection 이 투영에 건네는 세그먼트 sink(이미지 채널 §5). 준비한 세그먼트는 그 투영의 배치(`CollectedOutput`)가 들고, 배치가
+/// 승인되면 발급·아니면(롤백·투영 실패) 취소된다.
+pub const ImageSegmentSink = struct {
+    ctx: *anyopaque,
+    /// `pixels` 는 이 호출 동안만 유효하다(core lock 아래 빌린 것).
+    reserve: *const fn (
+        ctx: *anyopaque,
+        image_id: u32,
+        generation: u64,
+        pixels: []const u8,
+        snapshot: bool,
+    ) error{OutOfMemory}!ImageSegmentAnswer,
+    /// 이 배치의 `image_seg_hwm` — 이 연결이 발급한 가장 큰 id 와 이 배치가 준비한 가장 큰 id 중 큰 쪽(0 = 싣지 않는다).
+    hwm: *const fn (ctx: *anyopaque) u64,
+};
+
 /// 이미지 채널 자리 확보와 token 발급(이미지 채널 §3.1)은 owner 층이 정한다. Connection 은 hello 를 판정해 묻기만 한다.
 /// null 이면 이미지 채널이 없는 host(순수 프로토콜 테스트·legacy 자리)라 `image_shm` 을 광고하지 않는다.
 pub const ImageChannelOps = struct {
@@ -711,6 +752,51 @@ pub const ImageChannelOps = struct {
     admit_hello: *const fn (ctx: *anyopaque) bool,
     /// `image_shm` 을 광고한 hello 에 token 을 발급한다. 채널 자리가 없으면 null(앱은 「이미지 채널 없음」으로 간다).
     issue_token: *const fn (ctx: *anyopaque) ?u128,
+    /// 세그먼트 연산(이미지 채널 §4·§5 — owner 층이 원장·채널을 쥔다). 넷 중 하나라도 null 이면 이 연결은 세그먼트를 만들지 않는다.
+    prepare_segment: ?*const fn (
+        ctx: *anyopaque,
+        stream_id: u64,
+        image_id: u32,
+        generation: u64,
+        pixels: []const u8,
+        snapshot: bool,
+    ) image_segment_ledger.ImageSegmentPrepare = null,
+    issue_segments: ?*const fn (ctx: *anyopaque, segments: []const image_segment_ledger.PreparedImageSegment) void = null,
+    cancel_segments: ?*const fn (ctx: *anyopaque, segments: []const image_segment_ledger.PreparedImageSegment) void = null,
+    issued_through: ?*const fn (ctx: *anyopaque) u64 = null,
+};
+
+/// 투영 하나가 쓰는 세그먼트 sink — 준비분을 그 투영의 배치(`CollectedOutput`)에 붙인다. 투영 동안만 산다(배치는 값으로 옮겨도 된다).
+const CollectSegmentSink = struct {
+    output: *CollectedOutput,
+    ops: ImageChannelOps,
+    stream_id: u64,
+
+    fn sink(self: *CollectSegmentSink) ImageSegmentSink {
+        return .{ .ctx = self, .reserve = reserve, .hwm = hwm };
+    }
+
+    fn reserve(ctx: *anyopaque, image_id: u32, generation: u64, pixels: []const u8, snapshot: bool) error{OutOfMemory}!ImageSegmentAnswer {
+        const self: *CollectSegmentSink = @ptrCast(@alignCast(ctx));
+        switch (self.ops.prepare_segment.?(self.ops.ctx, self.stream_id, image_id, generation, pixels, snapshot)) {
+            .segment => |segment| {
+                self.output.prepared_segments.append(self.output.allocator, segment) catch {
+                    // 배치가 들 수 없으면 그 자리에서 되돌린다 — 아무도 끝내지 않는 준비분이 남으면 원장이 찬다.
+                    self.ops.cancel_segments.?(self.ops.ctx, &.{segment});
+                    return error.OutOfMemory;
+                };
+                self.output.prepared_segment_max = @max(self.output.prepared_segment_max, segment.segment_id);
+                return .{ .segment = segment.segment_id };
+            },
+            .deferred => return .deferred,
+            .untransmittable => return .untransmittable,
+        }
+    }
+
+    fn hwm(ctx: *anyopaque) u64 {
+        const self: *CollectSegmentSink = @ptrCast(@alignCast(ctx));
+        return @max(self.ops.issued_through.?(self.ops.ctx), self.output.prepared_segment_max);
+    }
 };
 
 pub const CollectedOutput = struct {
@@ -730,6 +816,11 @@ pub const CollectedOutput = struct {
     clear_observation_probe: bool = false,
     previous_observation_ticks: u8,
     base_reservation: ?connection_slot.BaseReservation = null,
+    /// 이 배치의 투영이 준비한 이미지 세그먼트(이미지 채널 §4.2) — `commit` 이 발급하고 `rollback` 이 취소한다. 비어 있지 않으면
+    /// `image_channel` 이 있다.
+    prepared_segments: std.ArrayListUnmanaged(image_segment_ledger.PreparedImageSegment) = .empty,
+    prepared_segment_max: u64 = 0,
+    image_channel: ?ImageChannelOps = null,
     frames_taken: bool = true,
     finished: bool = false,
 
@@ -794,8 +885,24 @@ pub const CollectedOutput = struct {
         if (self.next_metadata_change_token) |next|
             sub.metadata_change_token = next;
         if (self.clear_observation_probe) sub.observation_probe_nonce = null;
+        // 배치가 큐에 승인된 같은 턴 — 세그먼트를 채널로 보낸다. 주 소켓의 배치 바이트는 다음 `writeReady` 라 「채널이 먼저」다.
+        self.finishSegments(.issue);
         self.finishFrames();
         self.finished = true;
+    }
+
+    const SegmentEnd = enum { issue, cancel };
+
+    fn finishSegments(self: *CollectedOutput, end: SegmentEnd) void {
+        if (self.prepared_segments.items.len != 0) {
+            const ops = self.image_channel.?;
+            switch (end) {
+                .issue => ops.issue_segments.?(ops.ctx, self.prepared_segments.items),
+                .cancel => ops.cancel_segments.?(ops.ctx, self.prepared_segments.items),
+            }
+        }
+        self.prepared_segments.deinit(self.allocator);
+        self.prepared_segments = .empty;
     }
 
     pub fn rollback(self: *CollectedOutput, connection: *Connection) void {
@@ -815,6 +922,8 @@ pub const CollectedOutput = struct {
             self.base_reservation = null;
         }
         if (self.next_base) |owned| self.allocator.free(owned);
+        // 앱이 본 적 없는 세그먼트를 되돌린다 — 투영이 실패해 배치가 생기지 않은 경우도 여기를 지난다(collect·attach 의 rollback).
+        self.finishSegments(.cancel);
         self.finishFrames();
         self.finished = true;
     }
@@ -2205,7 +2314,11 @@ pub const Connection = struct {
             }
         else
             null;
-        const projected_snapshot = ops.snapshot(ops.ctx, id.?, 0, self.allocator) catch |err| {
+        var attach_segment_sink: CollectSegmentSink = undefined;
+        const projected_snapshot = (if (prepared_product)
+            self.projectSnapshot(ops, id.?, 0, &prepared_output, &attach_segment_sink, stream)
+        else
+            ops.snapshot(ops.ctx, id.?, 0, self.allocator)) catch |err| {
             if (prepared_product) {
                 prepared_output.rollback(self);
                 prepared_transferred = true;
@@ -2325,6 +2438,54 @@ pub const Connection = struct {
     /// record 바이트를 `kind` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에 `end_stream` flag를
     /// 세운다(§10 — 한 batch의 끝). 빈 바이트도 end_stream 한 frame으로 batch 종료를 알린다. 각 chunk는 `stream`을 싣는다.
     /// snapshot(snapshot_chunk)과 delta(delta_chunk)가 같은 chunk 규칙을 공유한다.
+    /// 이 연결이 이미지를 세그먼트로 낼 수 있는가(이미지 채널 §5) — `image_shm` 을 협상했고 owner 층이 세그먼트 연산을 건넸다.
+    /// 형식은 협상으로만 고른다: 채널이 없어도(「이미지 채널 없음」) 세그먼트 경로다 — owner 층이 「미룸」으로 답해 그 연결에
+    /// `image_blob` 이 다시 나가지 않는다(계약 §3.2).
+    fn imageSegmentOps(self: *const Connection) ?ImageChannelOps {
+        if (!self.image_shm_negotiated) return null;
+        const ops = self.image_channel orelse return null;
+        if (ops.prepare_segment == null or ops.issue_segments == null or ops.cancel_segments == null or ops.issued_through == null)
+            return null;
+        return ops;
+    }
+
+    /// 스냅샷 투영 — 세그먼트 경로면 준비분을 `output` 에 붙인다(그 배치의 commit·rollback 이 끝낸다).
+    fn projectSnapshot(
+        self: *Connection,
+        ops: RuntimeOps,
+        runtime_id: u128,
+        sequence: u64,
+        output: *CollectedOutput,
+        sink_storage: *CollectSegmentSink,
+        stream: u64,
+    ) anyerror!ProjectedSnapshot {
+        if (self.imageSegmentOps()) |image_ops| if (ops.snapshot_with_images) |project| {
+            output.image_channel = image_ops;
+            sink_storage.* = .{ .output = output, .ops = image_ops, .stream_id = stream };
+            return project(ops.ctx, runtime_id, sequence, self.allocator, sink_storage.sink());
+        };
+        return ops.snapshot(ops.ctx, runtime_id, sequence, self.allocator);
+    }
+
+    /// delta 투영 — `projectSnapshot` 과 같은 규칙.
+    fn projectDelta(
+        self: *Connection,
+        ops: RuntimeOps,
+        runtime_id: u128,
+        base: []const u8,
+        sequence: u64,
+        output: *CollectedOutput,
+        sink_storage: *CollectSegmentSink,
+        stream: u64,
+    ) anyerror!StreamUpdate {
+        if (self.imageSegmentOps()) |image_ops| if (ops.delta_with_images) |project| {
+            output.image_channel = image_ops;
+            sink_storage.* = .{ .output = output, .ops = image_ops, .stream_id = stream };
+            return project(ops.ctx, runtime_id, base, sequence, self.allocator, sink_storage.sink());
+        };
+        return ops.delta(ops.ctx, runtime_id, base, sequence, self.allocator);
+    }
+
     fn appendChunks(self: *Connection, list: *std.ArrayListUnmanaged([]u8), kind: protocol.Kind, stream: u64, bytes: []const u8) HandleError!void {
         const chunk_size = protocol.max_binary_chunk;
         var off: usize = 0;
@@ -3322,7 +3483,8 @@ pub const Connection = struct {
             }
             const next_sequence = std.math.add(u64, sub.screen_sequence, 1) catch
                 return collectFail("sequence_overflow");
-            const projected = ops.snapshot(ops.ctx, sub.runtime_id, next_sequence, self.allocator) catch |err| {
+            var snapshot_segment_sink: CollectSegmentSink = undefined;
+            const projected = self.projectSnapshot(ops, sub.runtime_id, next_sequence, &output, &snapshot_segment_sink, stream) catch |err| {
                 if (err == error.RuntimeNotFound) {
                     if (!self.runtimeMissing(stream)) return collectFail("snapshot");
                     self.discardPreparedOutput(&list, &output);
@@ -3366,7 +3528,8 @@ pub const Connection = struct {
             // old base. The adapter fail-closes this connection and revokes its leases.
             const next_sequence = std.math.add(u64, sub.screen_sequence, 1) catch
                 return collectFail("sequence_overflow_delta");
-            const update = ops.delta(ops.ctx, sub.runtime_id, base, next_sequence, self.allocator) catch |err|
+            var delta_segment_sink: CollectSegmentSink = undefined;
+            const update = self.projectDelta(ops, sub.runtime_id, base, next_sequence, &output, &delta_segment_sink, stream) catch |err|
                 switch (err) {
                     // Runtime teardown races are stream lifecycle, not transport corruption. The
                     // caller's existing ended/detach path must keep the shared connection usable.
@@ -9326,4 +9489,293 @@ test "agent log format server rejects old clients and confirms format on reattac
         try testing.expectEqual(@as(i64, 2), parsed.value.object.get("result").?.object.get("agent_log_format").?.integer);
         try testing.expectEqual(@import("runtime_metadata_types.zig").AgentLogFormat.v2, entry.agent_log_format);
     }
+}
+
+// ─── 투영 ↔ 세그먼트 배선(이미지 채널 §4.2·§5, 계획 IC5b-2) ───
+
+/// 판정자용 owner 층 — token 을 주고, 세그먼트 연산을 기록만 한다(fd 는 -1: 실제 공유 메모리는 IC5b-1 판정자가 잰다).
+const FakeImageSegmentOwner = struct {
+    next_id: u64 = 0,
+    issued_through: u64 = 0,
+    answer: enum { segment, deferred, untransmittable } = .segment,
+    prepares: usize = 0,
+    last_snapshot: ?bool = null,
+    issued: [8]u64 = @splat(0),
+    issued_len: usize = 0,
+    cancelled: [8]u64 = @splat(0),
+    cancelled_len: usize = 0,
+
+    fn admitHello(_: *anyopaque) bool {
+        return true;
+    }
+
+    fn issueToken(_: *anyopaque) ?u128 {
+        return 0x0123456789abcdef_fedcba9876543210;
+    }
+
+    fn prepare(ctx: *anyopaque, stream_id: u64, image_id: u32, generation: u64, pixels: []const u8, as_snapshot: bool) image_segment_ledger.ImageSegmentPrepare {
+        const self: *FakeImageSegmentOwner = @ptrCast(@alignCast(ctx));
+        self.prepares += 1;
+        self.last_snapshot = as_snapshot;
+        switch (self.answer) {
+            .deferred => return .deferred,
+            .untransmittable => return .untransmittable,
+            .segment => {},
+        }
+        self.next_id += 1;
+        return .{ .segment = .{
+            .segment_id = self.next_id,
+            .stream_id = stream_id,
+            .image_id = image_id,
+            .generation = generation,
+            .byte_len = @intCast(pixels.len),
+            .fd = -1,
+        } };
+    }
+
+    fn issue(ctx: *anyopaque, segments: []const image_segment_ledger.PreparedImageSegment) void {
+        const self: *FakeImageSegmentOwner = @ptrCast(@alignCast(ctx));
+        for (segments) |segment| {
+            self.issued[self.issued_len] = segment.segment_id;
+            self.issued_len += 1;
+            self.issued_through = @max(self.issued_through, segment.segment_id);
+        }
+    }
+
+    fn cancel(ctx: *anyopaque, segments: []const image_segment_ledger.PreparedImageSegment) void {
+        const self: *FakeImageSegmentOwner = @ptrCast(@alignCast(ctx));
+        for (segments) |segment| {
+            self.cancelled[self.cancelled_len] = segment.segment_id;
+            self.cancelled_len += 1;
+        }
+    }
+
+    fn issuedThrough(ctx: *anyopaque) u64 {
+        const self: *FakeImageSegmentOwner = @ptrCast(@alignCast(ctx));
+        return self.issued_through;
+    }
+
+    fn ops(self: *FakeImageSegmentOwner) ImageChannelOps {
+        return .{
+            .ctx = self,
+            .admit_hello = admitHello,
+            .issue_token = issueToken,
+            .prepare_segment = prepare,
+            .issue_segments = issue,
+            .cancel_segments = cancel,
+            .issued_through = issuedThrough,
+        };
+    }
+};
+
+/// 판정자용 투영 — 이미지 하나의 세그먼트를 청하고 그 답과 hwm 을 기록한다. 판정자가 하나씩 도므로 전역으로 둔다.
+const SegmentProjectionProbe = struct {
+    snapshot_calls: usize = 0,
+    delta_calls: usize = 0,
+    answer: ?ImageSegmentAnswer = null,
+    hwm_seen: u64 = 0,
+    fail_after_reserve: bool = false,
+
+    const pixels = [_]u8{ 1, 2, 3, 4 };
+
+    fn reserveOne(images: ImageSegmentSink, as_snapshot: bool) !void {
+        segment_projection_probe.answer = try images.reserve(images.ctx, 3, 1, &pixels, as_snapshot);
+        segment_projection_probe.hwm_seen = images.hwm(images.ctx);
+        if (segment_projection_probe.fail_after_reserve) return error.SnapshotTooLarge;
+    }
+
+    fn snapshot(_: *anyopaque, _: u128, sequence: u64, allocator: std.mem.Allocator, images: ImageSegmentSink) anyerror!ProjectedSnapshot {
+        segment_projection_probe.snapshot_calls += 1;
+        try reserveOne(images, true);
+        return .{ .bytes = try allocator.dupe(u8, "SNAPSHOT-BYTES"), .frontier = .{ .generation = 0, .sequence = sequence } };
+    }
+
+    fn delta(_: *anyopaque, _: u128, _: []const u8, sequence: u64, allocator: std.mem.Allocator, images: ImageSegmentSink) anyerror!StreamUpdate {
+        segment_projection_probe.delta_calls += 1;
+        try reserveOne(images, false);
+        const send = try allocator.dupe(u8, "DELTA-BYTES");
+        errdefer allocator.free(send);
+        return .{
+            .send = send,
+            .is_snapshot = false,
+            .new_base = try allocator.dupe(u8, "NEW-BASE"),
+            .frontier = .{ .generation = 0, .sequence = sequence },
+        };
+    }
+};
+
+var segment_projection_probe: SegmentProjectionProbe = .{};
+
+const SegmentWiringFixture = struct {
+    registry: reg.TerminalRuntimeRegistry,
+    subscriptions: subscription_identity.Table,
+    fake: FakeRuntimeOps = .{},
+    owner: FakeImageSegmentOwner = .{},
+    conn: Connection = undefined,
+
+    fn init(self: *SegmentWiringFixture, advertise: bool) !void {
+        segment_projection_probe = .{};
+        self.registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+        _ = try self.registry.register(0xAA, 80, 24);
+        self.subscriptions = subscription_identity.Table.init(testing.allocator);
+        self.conn = Connection.initProduct(testing.allocator, 0x1234, &self.registry, .{ .monotonic_id = 1, .slot_generation = 1 }, &self.subscriptions);
+        var ops = self.fake.ops();
+        ops.snapshot_with_images = SegmentProjectionProbe.snapshot;
+        ops.delta_with_images = SegmentProjectionProbe.delta;
+        self.conn.runtime_ops = ops;
+        self.conn.image_channel = self.owner.ops();
+        const hello = try feedJson(&self.conn, .hello, 1, if (advertise)
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}"
+        else
+            "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\"}");
+        if (hello.frame) |frame| frame.deinit(testing.allocator);
+        const attach = try feedExpectFrames(&self.conn, .request, 2, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+        for (attach) |frame| frame.deinit(testing.allocator);
+        testing.allocator.free(attach);
+    }
+
+    fn deinit(self: *SegmentWiringFixture) void {
+        self.conn.deinit();
+        self.subscriptions.deinit();
+        self.registry.deinit();
+    }
+};
+
+test "image segment wiring: a negotiated connection projects deltas through the segment sink, issues the prepared segment on commit and cancels it on rollback" {
+    var fx: SegmentWiringFixture = .{ .registry = undefined, .subscriptions = undefined };
+    try fx.init(true);
+    defer fx.deinit();
+    try testing.expect(fx.conn.image_shm_negotiated);
+
+    // 승인 → 발급. hwm 은 이 배치가 준비한 id 를 본다(아직 발급한 것이 없다).
+    var admitted = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 1), segment_projection_probe.delta_calls);
+    try testing.expectEqual(@as(usize, 0), fx.fake.delta_calls);
+    try testing.expectEqual(@as(?ImageSegmentAnswer, .{ .segment = 1 }), segment_projection_probe.answer);
+    try testing.expectEqual(@as(u64, 1), segment_projection_probe.hwm_seen);
+    try testing.expectEqual(@as(?bool, false), fx.owner.last_snapshot);
+    try testing.expectEqual(@as(usize, 0), fx.owner.issued_len);
+    admitted.commit(&fx.conn);
+    try testing.expectEqualSlices(u64, &.{1}, fx.owner.issued[0..fx.owner.issued_len]);
+    try testing.expectEqual(@as(usize, 0), fx.owner.cancelled_len);
+
+    // 거절 → 취소. hwm 은 발급한 것(1)과 이번 준비분(2) 중 큰 쪽이다.
+    var rejected = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(u64, 2), segment_projection_probe.hwm_seen);
+    rejected.rollback(&fx.conn);
+    try testing.expectEqualSlices(u64, &.{2}, fx.owner.cancelled[0..fx.owner.cancelled_len]);
+    try testing.expectEqual(@as(usize, 1), fx.owner.issued_len);
+
+    // 이번 배치가 아무것도 준비하지 않아도 hwm 은 그 연결이 발급한 것(1)을 싣는다.
+    fx.owner.answer = .deferred;
+    var deferred = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(u64, 1), segment_projection_probe.hwm_seen);
+    deferred.commit(&fx.conn);
+}
+
+test "image segment wiring: a product attach projects its first snapshot through the segment sink and the prepared attach output ends the segment" {
+    const AcceptBudget = struct {
+        fn prepare(_: *anyopaque, _: subscription_identity.LocalStreamId, _: usize) ?connection_slot.BaseReservation {
+            return std.mem.zeroes(connection_slot.BaseReservation);
+        }
+        fn commit(_: *anyopaque, _: connection_slot.BaseReservation, _: usize) void {}
+        fn rollback(_: *anyopaque, _: connection_slot.BaseReservation) void {}
+        fn release(_: *anyopaque, _: subscription_identity.LocalStreamId) void {}
+    };
+    segment_projection_probe = .{};
+    var registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
+    defer registry.deinit();
+    _ = try registry.register(0xAA, 80, 24);
+    var subscriptions = subscription_identity.Table.init(testing.allocator);
+    defer subscriptions.deinit();
+    var fake: FakeRuntimeOps = .{};
+    var owner: FakeImageSegmentOwner = .{};
+    var budget_ctx: u8 = 0;
+    var conn = Connection.initProduct(testing.allocator, 0x1234, &registry, .{ .monotonic_id = 1, .slot_generation = 1 }, &subscriptions);
+    defer conn.deinit();
+    var ops = fake.ops();
+    ops.snapshot_with_images = SegmentProjectionProbe.snapshot;
+    ops.delta_with_images = SegmentProjectionProbe.delta;
+    conn.runtime_ops = ops;
+    conn.image_channel = owner.ops();
+    conn.projection_budget = .{
+        .ctx = &budget_ctx,
+        .prepare = AcceptBudget.prepare,
+        .commit = AcceptBudget.commit,
+        .rollback = AcceptBudget.rollback,
+        .release = AcceptBudget.release,
+    };
+    {
+        const hello = try feedJson(&conn, .hello, 1, "{\"protocol_min\":2,\"protocol_max\":2,\"client_kind\":\"gui\",\"capabilities\":[\"image_shm\"]}");
+        if (hello.frame) |frame| frame.deinit(testing.allocator);
+    }
+    const wire = try framing.encodeFrame(testing.allocator, .{ .kind = .request, .request_id = 2 }, "{\"method\":\"runtime.attach\",\"params\":{\"runtime_id\":\"aa\",\"mode\":\"observer\"}}");
+    defer testing.allocator.free(wire);
+    var parser = framing.FrameParser.init(testing.allocator);
+    defer parser.deinit();
+    try parser.push(wire);
+    const frame = (try parser.next()).?;
+    defer frame.deinit(testing.allocator);
+    var prepared = switch (try conn.handleFrame(frame)) {
+        .prepared_attach => |value| value,
+        else => return error.TestUnexpectedResult,
+    };
+    defer testing.allocator.free(prepared.reply);
+    // 첫 snapshot 은 세그먼트 판으로, 스냅샷으로 청했다 — 준비분은 attach 의 배치가 든다.
+    try testing.expectEqual(@as(usize, 1), segment_projection_probe.snapshot_calls);
+    try testing.expectEqual(@as(usize, 0), fake.snapshot_calls);
+    try testing.expectEqual(@as(?bool, true), owner.last_snapshot);
+    try testing.expectEqual(@as(usize, 1), prepared.output.prepared_segments.items.len);
+    // owner 가 admission 에 실패해 그 배치를 되돌리면 세그먼트도 취소된다.
+    prepared.output.rollback(&conn);
+    conn.rollbackPreparedAttach(1);
+    try testing.expectEqualSlices(u64, &.{1}, owner.cancelled[0..owner.cancelled_len]);
+    try testing.expectEqual(@as(usize, 0), owner.issued_len);
+}
+
+test "image segment wiring: a projection that fails after reserving cancels what it prepared, and a resync snapshot asks as a snapshot" {
+    var fx: SegmentWiringFixture = .{ .registry = undefined, .subscriptions = undefined };
+    try fx.init(true);
+    defer fx.deinit();
+
+    // 투영이 자리를 청한 뒤 실패하면 배치가 생기지 않는다 — 준비분은 그래도 취소된다(원장이 차지 않는다).
+    segment_projection_probe.fail_after_reserve = true;
+    try testing.expectError(error.OutOfMemory, fx.conn.collectOutputForLocalStream(1));
+    try testing.expectEqualSlices(u64, &.{1}, fx.owner.cancelled[0..fx.owner.cancelled_len]);
+    try testing.expectEqual(@as(usize, 0), fx.owner.issued_len);
+
+    // resync 스냅샷은 「이미지당 하나」 규칙에서 빠지게 스냅샷으로 청한다.
+    segment_projection_probe.fail_after_reserve = false;
+    fx.conn.attachments.getPtr(1).?.resync_pending = true;
+    var resync = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 1), segment_projection_probe.snapshot_calls);
+    try testing.expectEqual(@as(?bool, true), fx.owner.last_snapshot);
+    resync.commit(&fx.conn);
+    try testing.expectEqualSlices(u64, &.{2}, fx.owner.issued[0..fx.owner.issued_len]);
+}
+
+test "image segment wiring: deferred and untransmittable answers prepare nothing, and an unnegotiated connection never asks the channel" {
+    var fx: SegmentWiringFixture = .{ .registry = undefined, .subscriptions = undefined };
+    try fx.init(true);
+    defer fx.deinit();
+    inline for (.{ .deferred, .untransmittable }) |answer| {
+        fx.owner.answer = answer;
+        var output = (try fx.conn.collectOutputForLocalStream(1)).?;
+        try testing.expectEqual(@as(?ImageSegmentAnswer, answer), segment_projection_probe.answer);
+        try testing.expectEqual(@as(usize, 0), output.prepared_segments.items.len);
+        output.commit(&fx.conn);
+    }
+    try testing.expectEqual(@as(usize, 0), fx.owner.issued_len);
+    try testing.expectEqual(@as(usize, 0), fx.owner.cancelled_len);
+
+    // 광고하지 않은 연결은 지금의 `image_blob` 투영이다 — 세그먼트 판도 owner 의 세그먼트 연산도 부르지 않는다.
+    var plain: SegmentWiringFixture = .{ .registry = undefined, .subscriptions = undefined };
+    try plain.init(false);
+    defer plain.deinit();
+    try testing.expect(!plain.conn.image_shm_negotiated);
+    var output = (try plain.conn.collectOutputForLocalStream(1)).?;
+    output.commit(&plain.conn);
+    try testing.expectEqual(@as(usize, 1), plain.fake.delta_calls);
+    try testing.expectEqual(@as(usize, 0), segment_projection_probe.delta_calls);
+    try testing.expectEqual(@as(usize, 0), plain.owner.prepares);
 }

@@ -299,7 +299,8 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(assembler, "admitted_sequence != expected_sequence"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_attachment, "prepared_screen.prepareRecoveryFrontierFrom(screen)"));
     try std.testing.expectEqual(@as(usize, 1), count(assembler, "pub fn prepareRecoveryFrontierFrom("));
-    try std.testing.expectEqual(@as(usize, 1), count(server, "base, next_sequence, self.allocator"));
+    // delta 는 다음 순번으로 투영한다 — 연결 헬퍼(`projectDelta`)가 이미지 채널 연결이면 세그먼트 판을 고른다.
+    try std.testing.expectEqual(@as(usize, 1), count(server, "base, next_sequence, &output,"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_product, "screenPtr().?.requireSequencedDeltas()"));
     try std.testing.expectEqual(@as(usize, 3), count(runtime_manager, ".{ .generation = generation, .sequence = sequence }"));
     try std.testing.expectEqual(@as(usize, 1), count(runtime_manager, "base: []const u8, sequence: u64,"));

@@ -7819,6 +7819,7 @@ fn startCdpOpHost(async_id: u64, surface_id: u64, method: control_browser.Browse
     const run = allocator.create(CdpRun) catch return completeCdp(async_id, .failed, "out of memory");
     const op = web_cdp_ops.Op.init(allocator, kind, arg, async_id) catch |e| {
         allocator.destroy(run);
+        if (e == error.OutOfMemory) return completeCdp(async_id, .failed, "out of memory"); // 인자 탓이 아니다(W9a③ 적대 리뷰 5 회차)
         if (e == error.UnknownRole) {
             // 모르는 역할 — 가까운 역할과 흔한 역할을 함께(W9b② — 틀린 역할이 조용히 0 개가 되지 않게).
             const msg = web_cdp_ops.Op.unknownRoleMessage(allocator, arg) catch return completeCdp(async_id, .invalid_params, "unknown role");
@@ -7830,6 +7831,7 @@ fn startCdpOpHost(async_id: u64, surface_id: u64, method: control_browser.Browse
             error.InvalidUrl => "a Chromium tab navigates only to http, https or about:blank addresses",
             error.ScriptTooLarge => web_cdp_ops.web_cdp_exec.script_too_large,
             error.StorageValueTooLarge => web_cdp_ops.web_cdp_storage.storage_too_large,
+            error.CookieTooLarge => web_cdp_ops.web_cdp_storage.cookie_too_large,
             else => "invalid arguments",
         });
     };
@@ -8222,7 +8224,10 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
                     return cdpAdvance(run, after);
                 },
                 // 인자는 이 모듈이 만든 JSON 이다 — 넘치는 것은 사용자의 selector 뿐이다(64 KiB).
-                error.InvalidParams => finishCdp(run, .invalid_params, "invalid DevTools parameters (the selector or text may be too long)"),
+                error.InvalidParams => finishCdp(run, .invalid_params, if (run.op.storage != null)
+                    "invalid DevTools parameters (the page address or the value is too long for a Chromium DevTools call)"
+                else
+                    "invalid DevTools parameters (the selector or text may be too long)"),
                 error.InvalidMethod => finishCdp(run, .failed, "internal DevTools request error"),
                 error.OutOfMemory => finishCdp(run, .failed, "out of memory"),
             };

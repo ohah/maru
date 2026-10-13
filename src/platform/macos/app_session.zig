@@ -67154,6 +67154,136 @@ test "sidebar 헤더: 그려진 hover pill 의 가장자리도 그 아이콘으�
     try std.testing.expect(below_search > 0); // 검색 줄 쪽 음성 단언이 한 번은 실제로 돌았다
 }
 
+// 알림 배지도 **보이는 것 = 눌리는 것**이다(#4434 의 pill 과 같은 원칙). ⑴ 펼친 헤더: 빨강 원(불투명 — 반투명 hover pill 아래로
+// 비친다)의 오른쪽 끝이 ◧ zone(cols-9~)으로 넘어가, 그 자리를 누르면 알림 대신 사이드바가 접혔다. 다만 원 위에 그려지는 ◧
+// 글리프 잉크는 원이 빼앗지 않는다 — 행간을 키운 창(line_height 2.0)에서 원이 실제로 그 잉크에 닿는 것까지 본다. ⑵ 접힌 띠: 안 읽음 10 개 이상의
+// 「9+」 텍스트 배지에서 「9」(종 왼쪽 두 칸째)가 종 클릭 rect 밖이라 창 드래그였다. 원·글자 자리는 **그려진 것에서** 읽는다.
+test "알림 배지: 그려진 빨강 원과 접힌 「9+」 를 누르면 알림 패널이다 (1x·2x — hover·클릭·창 드래그)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
+    const allocator = std.testing.allocator;
+    const session = try soTestSession(allocator);
+    defer allocator.destroy(session);
+    defer session.deinit();
+    const HR = chrome.components.sidebar.HeaderRegion;
+    const red = packRgbAlpha(.{ .r = 0xE5, .g = 0x48, .b = 0x4D }, 0xFF);
+    for (0..12) |_| _ = notification_ops.pushNotificationHistory(session, "t", "b", 0); // 안 읽음 12 → 펼침 원 「9」 · 접힘 「9+」
+    try std.testing.expect(session.notification_unread > 9);
+    var stolen_by_toggle: usize = 0; // 예전 판정(zone 만)이 ◧ 로 보내던 원 위 점 — 판별력
+    const Probe = struct {
+        /// 그려진 ◧ 셀(사이드바 헤더 frame, 줄 0)의 잉크 상자 — 렌더러가 칠하는 `min(w,h)` 정사각.
+        fn toggleInk(s2: *const AppSession) ![4]f32 {
+            var found: ?[4]f32 = null;
+            var n: usize = 0;
+            for (s2.metal_buffer.cells) |cell| {
+                if (cell.codepoint != maru.cell_text.sidebar_toggle_codepoint or cell.row != 0 or cell.origin_x != 0) continue;
+                if (cell.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
+                found = metal_frame.cellRasterIconQuadPx(cell, s2.cell_width_px, s2.cell_height_px);
+                n += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), n);
+            const g = found orelse return error.TestUnexpectedResult;
+            const ink = @min(g[2], g[3]);
+            return .{ g[0] + (g[2] - ink) / 2.0, g[1] + (g[3] - ink) / 2.0, ink, ink };
+        }
+        /// ◧ 잉크의 왼쪽 끝 안쪽·중심은 안 읽음이 있어도 ◧ 다(원이 빼앗지 않는다).
+        fn toggleKept(s2: *AppSession, ink: [4]f32) !void {
+            const cy: f64 = ink[1] + ink[3] / 2.0;
+            for ([_]f64{ ink[0] + 0.5, ink[0] + ink[2] / 2.0 }) |x| {
+                s2.setHoveredHeaderRegion(.none);
+                try std.testing.expectEqual(CursorKind.link, s2.hoverCursor(x, cy, 0));
+                try std.testing.expectEqual(@as(?chrome.components.sidebar.HeaderRegion, .toggle_sidebar), s2.hovered_header_region);
+            }
+        }
+    };
+    var prev_ch: u32 = 0;
+    for ([_]u32{ 1000, 2000 }) |scale| {
+        _ = try session.resize(1200 * scale / 1000, 700 * scale / 1000, scale);
+        try std.testing.expect(session.cell_height_px > prev_ch);
+        prev_ch = session.cell_height_px;
+        // ⑴ 펼친 헤더 — 그려진 빨강 원.
+        try std.testing.expect(!session.sidebar_collapsed);
+        session.setHoveredHeaderRegion(.none);
+        sidebar_ops.rebuildSidebar(session) catch {};
+        session.metal_dirty = true;
+        for (0..4) |_| {
+            _ = try session.tick();
+            if (!session.metal_dirty) break;
+        }
+        var circle: ?metal_frame.GpuQuad = null;
+        var circles: usize = 0;
+        for (session.gpu_quads.items) |q| if (q.fill_color0 == red) {
+            circle = q;
+            circles += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), circles);
+        const c = circle orelse return error.TestUnexpectedResult;
+        const cx: f32 = c.x + c.w / 2.0;
+        const cy: f32 = c.y + c.h / 2.0;
+        const r: f32 = c.w / 2.0;
+        // 원 안쪽 0.5px 의 오른쪽·왼쪽·위·아래 끝 + 중심.
+        const pts = [_][2]f32{ .{ cx + r - 0.5, cy }, .{ cx - r + 0.5, cy }, .{ cx, cy - r + 0.5 }, .{ cx, cy + r - 0.5 }, .{ cx, cy } };
+        for (pts) |pt| {
+            const px: f64 = pt[0];
+            const py: f64 = pt[1];
+            session.setHoveredHeaderRegion(.none);
+            try std.testing.expectEqual(CursorKind.link, session.hoverCursor(px, py, 0));
+            try std.testing.expectEqual(@as(?HR, .notifications), session.hovered_header_region);
+            try std.testing.expect(!workspace_ops.isWindowDragRegion(session, px, py));
+            const zone = chrome.components.sidebar.headerHit(px, py, session.sidebar_width_px, session.cell_width_px, session.cell_height_px, session.sidebar_header_height_px, sidebar_ops.sidebarSearchBandTopPx(session));
+            if (zone == .toggle_sidebar) stolen_by_toggle += 1;
+        }
+        try Probe.toggleKept(session, try Probe.toggleInk(session));
+        // 클릭: 원 오른쪽 끝 → 알림 패널(사이드바는 안 접힌다).
+        session.setHoveredHeaderRegion(.none);
+        session.mouse(1, cx + r - 0.5, cy, 0, 0);
+        try std.testing.expect(session.chrome_host.notifications.open);
+        try std.testing.expect(!session.sidebar_collapsed);
+        session.chrome_host.notifications.hide();
+        try std.testing.expect(!session.chrome_host.notifications.open);
+
+        // ⑵ 접힌 띠 — 「9+」 텍스트 배지의 두 글자.
+        sidebar_ops.toggleSidebarCollapsed(session);
+        try std.testing.expect(session.sidebar_collapsed);
+        for (0..4) |_| {
+            _ = try session.tick();
+            if (!session.metal_dirty) break;
+        }
+        const bell = notification_ops.collapsedBellCol(session);
+        var glyphs: usize = 0;
+        for (session.metal_buffer.cells) |cell| {
+            if (cell.origin_x != 0 or cell.row != 0) continue;
+            if (!((cell.codepoint == '9' and cell.col + 2 == bell) or (cell.codepoint == '+' and cell.col + 1 == bell))) continue;
+            glyphs += 1;
+            const cw_f: f32 = @floatFromInt(session.cell_width_px);
+            const gx: f64 = (@as(f32, @floatFromInt(cell.col)) + 0.5) * cw_f; // 그 글자 칸 가운데
+            const gy: f64 = @as(f64, @floatFromInt(session.titlebar_strip_px)) / 2.0;
+            try std.testing.expect(!workspace_ops.isWindowDragRegion(session, gx, gy));
+            session.mouse(1, gx, gy, 0, 0);
+            try std.testing.expect(session.chrome_host.notifications.open);
+            try std.testing.expect(session.sidebar_collapsed); // 종은 펼치지 않는다
+            session.chrome_host.notifications.hide();
+        }
+        try std.testing.expectEqual(@as(usize, 2), glyphs); // 「9」 와 「+」 가 실제로 그 칸에 나갔다
+        sidebar_ops.toggleSidebarCollapsed(session); // 원복
+        try std.testing.expect(!session.sidebar_collapsed);
+    }
+    try std.testing.expect(stolen_by_toggle > 0);
+
+    // ⑶ 행간 2.0 — 셀이 세로로 길어져(ch/cw ≳ 2.8) 원(0.82ch)이 ◧ 잉크까지 덮는다. 그래도 그 잉크는 ◧ 다.
+    session.appearance.font.line_height = 2.0;
+    sidebar_ops.refreshCellMetrics(session, false);
+    sidebar_ops.rebuildSidebar(session) catch {};
+    session.metal_dirty = true;
+    for (0..4) |_| {
+        _ = try session.tick();
+        if (!session.metal_dirty) break;
+    }
+    const ink = try Probe.toggleInk(session);
+    const c = notification_ops.notificationBadgeCircle(session) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(c.cx + c.d / 2.0 > ink[0] + 0.5); // 판별력: 원이 실제로 ◧ 잉크 안쪽까지 닿는다
+    try Probe.toggleKept(session, ink);
+}
+
 // 사이드바 탭을 드래그하면 tabs 순서가 바뀌고 활성이 드래그한 탭을 따라가는지 — 실 PTY라 macOS
 // 게이트. down(슬롯0)→drag(슬롯2)→up: tabs[0]을 끝으로 옮긴다(live 재정렬).
 test "dragging a sidebar tab reorders the list and active follows the dragged tab" {

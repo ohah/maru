@@ -617,9 +617,10 @@ test "크게 구운 아이콘의 슬롯 크기는 허용된 파일만 쓰고, �
             violations += 1;
         }
         if (isListed(&ink_consumers, full)) {
-            // 잉크 소비자는 잉크 박스 함수를 실제로 부른다 — 이름이 바뀌어 위 검사가 빈 것을 지키지 않게 개수로 본다.
+            // 잉크 소비자는 잉크 박스 함수를 실제로 부른다 — 이름이 바뀌어 위 검사가 빈 것을 지키지 않게 개수로 본다
+            // (한 번 이상: sidebar.zig 는 hover pill 높이와 배지 원이 ◧ 잉크를 안 빼앗는 판정 두 자리에서 쓴다).
             const ink_names = [_][]const u8{"cellRasterIconInkPx"};
-            try std.testing.expectEqual(@as(usize, 1), try countIdentifiers(allocator, source, &ink_names));
+            try std.testing.expect(try countIdentifiers(allocator, source, &ink_names) >= 1);
         }
     }
     try std.testing.expect(scanned > 100); // 걷기가 실제로 됐다

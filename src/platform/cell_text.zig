@@ -1125,6 +1125,13 @@ pub fn sidebarBellCol(cols: u16) u16 {
     return cols -| 12;
 }
 
+/// 종 **왼쪽 텍스트 배지**(`round_badge = false`)가 차지하는 칸 수 — 0(안 읽음 없음) · 1(1~9) · 2(10 이상 「9+」).
+/// 그리기(아래)와 접힘 종 클릭 rect(macOS `collapsedNotificationRect`)가 같은 값을 본다.
+pub fn sidebarTextBadgeCols(unread: usize) u16 {
+    if (unread == 0) return 0;
+    return if (unread > 9) 2 else 1;
+}
+
 /// 종과 배지를 셀로 낸다.
 ///
 /// **빨강 원은 여기서 안 그린다** — 그것은 GPU quad 라 표면마다 경로가 다르다. 여기서 내는 것은
@@ -1146,11 +1153,12 @@ pub fn appendSidebarBellAndBadge(
         try cells.append(allocator, .{ .row = 0, .col = notificationBadgeCol(bell_col), .codepoint = digit, .style = .{ .foreground = white } });
     } else {
         const badge_rgb: terminal.Color = .{ .rgb = .{ .r = 0xE0, .g = 0x5A, .b = 0x4A } };
+        const left = bell_col -| sidebarTextBadgeCols(unread); // 종 바로 왼쪽부터 그 칸 수만큼
         if (unread > 9) {
-            try cells.append(allocator, .{ .row = 0, .col = bell_col -| 2, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
-            try cells.append(allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
+            try cells.append(allocator, .{ .row = 0, .col = left, .codepoint = '9', .style = .{ .foreground = badge_rgb } });
+            try cells.append(allocator, .{ .row = 0, .col = left + 1, .codepoint = '+', .style = .{ .foreground = badge_rgb } });
         } else {
-            try cells.append(allocator, .{ .row = 0, .col = bell_col -| 1, .codepoint = '0' + @as(u21, @intCast(unread)), .style = .{ .foreground = badge_rgb } });
+            try cells.append(allocator, .{ .row = 0, .col = left, .codepoint = '0' + @as(u21, @intCast(unread)), .style = .{ .foreground = badge_rgb } });
         }
     }
 }

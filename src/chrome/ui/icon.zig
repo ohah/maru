@@ -56,6 +56,19 @@ pub fn cellRasterExtentPx(cell_extent_px: u32) u32 {
     return @intCast(@min(scaled, std.math.maxInt(u16)));
 }
 
+/// 셀 하나(`cw × ch`)에 위 배율을 선언해 구운 **등록 아이콘의 잉크 박스 한 변**(px) — 정사각 마스터가 놓이는 자리다(SVG
+/// viewBox 여백 때문에 실제로 칠해진 픽셀은 그 안쪽이다 — 소비처는 이 값을 상한으로 쓴다).
+///
+/// 슬롯은 `cellRasterExtentPx(cw) × cellRasterExtentPx(ch)` 지만, 합성 아이콘(`renderer/icon_glyph.fillCoverage`)은 정사각
+/// 마스터를 슬롯 안 최대 정사각(`min(w, h)`)으로 **가운데** 둔다. 그래서 셀이 세로로 긴 보통 폰트에서 잉크는 **폭 기준**이고,
+/// 잉크 중심은 슬롯 중심이다(정수 내림으로 ±0.5px). 잉크에 무언가를 맞추는 자리(hover pill 높이·히트 사각형 바닥)는 슬롯
+/// 높이가 아니라 이 값을 쓴다 — 슬롯 높이로 셈한 자리가 두 번 결함이 됐다(#4410 도크 토글 판 Retina 2px · #4421 헤더 pill
+/// 위 4px 잘림). `tests/boundary/icon_literals.zig` 가 슬롯 함수·배율을 쓰는 파일을 전수 허용 목록으로 묶고, app_session 판정자가
+/// 실제 `fillCoverage` 가 이 박스 안에만 칠하는지 본다(chrome 은 renderer 를 import 하지 않아 그 판정은 platform 쪽에 있다).
+pub fn cellRasterIconInkPx(cell_width_px: u32, cell_height_px: u32) u32 {
+    return @min(cellRasterExtentPx(cell_width_px), cellRasterExtentPx(cell_height_px));
+}
+
 /// 컴포넌트가 **자기 것으로 선언한** 아이콘 run이 차지하는 셀 수. EAW 파생이 아니라 선언이다 — 등록 아이콘은
 /// 셀에 꽉 차게 합성되므로 한 칸에 넣으면 옆 글자와 붙어 보인다(`wide_icons=true`인 run에만 적용되고,
 /// 사용자·세션 문자열에 우연히 섞인 PUA는 폭이 1이라 caret·말줄임이 어긋나지 않는다).
@@ -70,4 +83,12 @@ test "icon: 셀 래스터 배율은 셀보다 크고 u16 슬롯에서 saturate�
     try std.testing.expect(cellRasterExtentPx(20) > 20);
     try std.testing.expectEqual(@as(u32, 0), cellRasterExtentPx(0));
     try std.testing.expectEqual(@as(u32, std.math.maxInt(u16)), cellRasterExtentPx(std.math.maxInt(u32)));
+}
+
+test "icon: 잉크 한 변은 슬롯의 짧은 변이다 — 세로로 긴 셀은 폭 기준" {
+    try std.testing.expectEqual(@as(u32, 13), cellRasterIconInkPx(8, 18)); // 1x 기본: 슬롯 13 × 30 → 잉크 13
+    try std.testing.expectEqual(@as(u32, 28), cellRasterIconInkPx(17, 37)); // Retina: 슬롯 28 × 62 → 잉크 28
+    try std.testing.expectEqual(@as(u32, 34), cellRasterIconInkPx(20, 20)); // 정사각 셀은 슬롯 = 잉크
+    try std.testing.expectEqual(@as(u32, 17), cellRasterIconInkPx(20, 10)); // 가로로 긴 셀은 높이 기준
+    try std.testing.expectEqual(@as(u32, 0), cellRasterIconInkPx(0, 18));
 }

@@ -27,9 +27,19 @@ pub const not_http_reason = "this page has no web origin (about:blank, data: or 
 pub const origin_moved_reason = "the page moved to another origin while the request waited — try again";
 pub const cookie_domain_reason = "on a Chromium tab the cookie domain must be the page's own host";
 pub const set_cookie_failed = "setCookie failed (Chromium refused the cookie)";
+pub const cookie_too_large = "the cookie name and value are too large (Chromium accepts 4096 bytes together)";
+pub const value_too_large_reason = "the localStorage value is too large to return (over 1 MiB as JSON — the response frame limit, on WebKit too)";
 pub const storage_too_large = "the localStorage key and value are too large for a Chromium tab (64 KiB after JSON escaping)";
 /// DevTools 호출 인자 상한(sidecar — `app_host_abi` 가 컴파일 때 맞춘다).
 pub const max_params_bytes: usize = 64 * 1024;
+
+/// 평가식이 출처가 바뀐 것을 알리는 글(예외 설명에서 찾는다).
+const origin_moved_marker = "maru: origin moved";
+/// 시작 전 크기 검사에서 출처 확인 글의 몫(출처 ≤ 약 270 바이트, 두 번 이스케이프).
+const origin_check_room: usize = 1024;
+/// 돌려줄 localStorage 값의 상한(JSON 이스케이프 뒤) — 응답 frame(1 MiB, `cp.default_max_frame`)에 봉투 몫을 남긴다(5 회차: 넘으면 연결이 답
+/// 없이 닫혔다 — WebKit 도 같은 frame 이다).
+const max_value_json_bytes: usize = 1024 * 1024 - 4096;
 
 /// 격리 world 이름(요청마다 새로 만든다 — 이동 뒤 옛 context 를 쓰지 않게).
 const world_name = "maru-w9a-storage";
@@ -97,7 +107,8 @@ pub const Op = struct {
             .get_cookies, .clear_storage => return op,
             else => {},
         }
-        const parsed = std.json.parseFromSlice(std.json.Value, gpa, arg, .{}) catch return error.InvalidArg;
+        // 메모리가 모자란 것은 인자 탓이 아니다(적대 리뷰 5 회차: 「invalid arguments」 로 답했다).
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, arg, .{}) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else error.InvalidArg;
         defer parsed.deinit();
         if (parsed.value != .object) return error.InvalidArg;
         const o = parsed.value.object;
@@ -110,11 +121,14 @@ pub const Op = struct {
                 const probe = try op.storageStep(gpa);
                 defer gpa.free(probe.call.params);
                 op.context_id = 0;
-                if (probe.call.params.len > max_params_bytes) return error.StorageValueTooLarge;
+                // 시작 전이라 출처를 모른다 — 출처 확인 글(호스트 ≤ 253)의 몫을 남긴다(5 회차).
+                if (probe.call.params.len + origin_check_room > max_params_bytes) return error.StorageValueTooLarge;
             },
             .set_cookie, .delete_cookie => {
                 op.name = try dupeString(gpa, o.get("name") orelse return error.InvalidArg);
                 if (kind == .set_cookie) op.value = try dupeString(gpa, o.get("value") orelse return error.InvalidArg);
+                // Chromium 은 이름·값 합 4096 바이트까지 받는다 — 넘으면 시작에 그 글로(5 회차: 64 KiB 인자를 넘어 「selector」 글이었다).
+                if (kind == .set_cookie and op.name.?.len + op.value.?.len > 4096) return error.CookieTooLarge;
                 if (o.get("domain")) |d| op.domain = try dupeString(gpa, d);
                 if (o.get("path")) |p| op.path = try dupeString(gpa, p);
                 if (o.get("secure")) |v| {
@@ -139,6 +153,9 @@ pub const Op = struct {
             self.clean_url = u;
             self.doc_url = u;
         };
+        // query·fragment 는 쿠키 매칭(RFC 6265 — 호스트·path)에도 출처에도 쓰이지 않는다 — 뺀다. 페이지가 주소를 32 K 로 늘리면 JSON 이스케이프로
+        // 64 KiB 인자를 넘어 clearStorage·setCookie 가 실패했다(적대 리뷰 5 회차).
+        self.doc_url = self.doc_url[0 .. std.mem.indexOfAny(u8, self.doc_url, "?#") orelse self.doc_url.len];
         return self.remember(gpa, try self.startInner(gpa));
     }
 
@@ -337,7 +354,19 @@ pub const Op = struct {
         var expr: std.Io.Writer.Allocating = .init(gpa);
         defer expr.deinit();
         const w = &expr.writer;
-        try w.writeAll("(()=>{const k=");
+        self.writeStorageExpr(w) catch return error.OutOfMemory; // 쓰기 실패는 메모리 부족뿐이다(5 회차: 「invalid arguments」 로 답했다)
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        std.json.Stringify.value(.{ .expression = expr.written(), .contextId = self.context_id, .returnByValue = true }, .{}, &aw.writer) catch return error.OutOfMemory;
+        return .{ .call = .{ .method = "Runtime.evaluate", .params = try aw.toOwnedSlice() } };
+    }
+
+    /// 그 자리에서 출처를 다시 본다 — 출처 확인(`Page.getFrameTree`)과 world 만들기 사이에 다른 출처로 확정되면 그 출처의 저장소를 만지지 않게
+    /// (적대 리뷰 5 회차). `location.origin` 은 기본 포트를 적지 않는다.
+    fn writeStorageExpr(self: *const Op, w: *std.Io.Writer) !void {
+        try w.writeAll("(()=>{if(location.origin!==");
+        try std.json.Stringify.encodeJsonString(stripDefaultPort(originOf(self.doc_url) orelse ""), .{}, w);
+        try w.writeAll(")throw new Error(\"" ++ origin_moved_marker ++ "\");const k=");
         try std.json.Stringify.encodeJsonString(self.key.?, .{}, w);
         switch (self.kind) {
             .get_local_storage => try w.writeAll(";return Storage.prototype.getItem.call(localStorage,k)})()"),
@@ -349,10 +378,6 @@ pub const Op = struct {
             },
             else => unreachable,
         }
-        var aw: std.Io.Writer.Allocating = .init(gpa);
-        defer aw.deinit();
-        std.json.Stringify.value(.{ .expression = expr.written(), .contextId = self.context_id, .returnByValue = true }, .{}, &aw.writer) catch return error.OutOfMemory;
-        return .{ .call = .{ .method = "Runtime.evaluate", .params = try aw.toOwnedSlice() } };
     }
 
     fn afterRead(self: *Op, gpa: std.mem.Allocator, body: []const u8) !Step {
@@ -504,8 +529,12 @@ fn storageResult(gpa: std.mem.Allocator, kind: Kind, body: []const u8) !Step {
             break :blk "localStorage failed";
         };
         if (std.mem.indexOf(u8, text, "SecurityError") != null) return done(gpa, .failed, not_http_reason);
+        if (std.mem.indexOf(u8, text, origin_moved_marker) != null) return done(gpa, .failed, origin_moved_reason);
         const line = text[0 .. std.mem.indexOfScalar(u8, text, '\n') orelse text.len];
-        return done(gpa, .failed, line[0..@min(line.len, 512)]);
+        // 코드 포인트 경계에서 자른다(5 회차: 한글 글을 갈라 응답 JSON 이 깨졌다).
+        var cut = @min(line.len, 512);
+        while (cut > 0 and cut < line.len and (line[cut] & 0xC0) == 0x80) cut -= 1;
+        return done(gpa, .failed, line[0..cut]);
     }
     if (kind != .get_local_storage) return done(gpa, .success, "");
     const r = parsed.value.object.get("result") orelse return done(gpa, .success, "");
@@ -513,7 +542,7 @@ fn storageResult(gpa: std.mem.Allocator, kind: Kind, body: []const u8) !Step {
     // 없는 키(null)는 WebKit 과 같이 빈 글.
     const v = r.object.get("value") orelse return done(gpa, .success, "");
     return switch (v) {
-        .string => |str| done(gpa, .success, str),
+        .string => |str| if (jsonEscapedLen(str) > max_value_json_bytes) done(gpa, .failed, value_too_large_reason) else done(gpa, .success, str),
         else => done(gpa, .success, ""),
     };
 }
@@ -547,6 +576,17 @@ pub fn hostOf(url: []const u8) ?[]const u8 {
     }
     if (std.mem.lastIndexOfScalar(u8, h, ':')) |c| h = h[0..c];
     return if (h.len == 0) null else h;
+}
+
+/// JSON 문자열로 쓸 때의 바이트 수(따옴표 제외 — `"`·`\\`·\b\t\n\f\r 은 2, 그 밖의 제어 글자는 6).
+fn jsonEscapedLen(s: []const u8) usize {
+    var n: usize = 0;
+    for (s) |ch| n += switch (ch) {
+        '"', '\\', 0x08, '\t', '\n', 0x0c, '\r' => 2,
+        0...0x07, 0x0b, 0x0e...0x1f => 6,
+        else => 1,
+    };
+    return n;
 }
 
 /// 주소의 userinfo(`u:p@`)를 뗀 사본 — 없으면 null.
@@ -1046,4 +1086,78 @@ test "W9a③ 적대 리뷰 4 회차 재현 F2: 상한(512)을 넘은 쿠키가 �
     defer r1FreeStep(step);
     try testing.expect(std.mem.indexOf(u8, step.done.result, "run it again") != null);
     try testing.expect(std.mem.indexOf(u8, step.done.result, "DevTools refused the delete") != null);
+}
+
+test "W9a③ 적대 리뷰 5 회차 재현 F1: 쿠키 호출의 주소는 query·fragment 를 뺀다 — 페이지가 주소를 32 K 로 늘리면 64 KiB 인자를 넘었다" {
+    const gpa = testing.allocator;
+    inline for (.{ .get_cookies, .set_cookie, .clear_storage, .delete_cookie }) |k| {
+        const arg = switch (k) {
+            .set_cookie => "{\"name\":\"s\",\"value\":\"v\"}",
+            .delete_cookie => "{\"name\":\"s\"}",
+            else => "",
+        };
+        var op = try Op.init(gpa, k, arg);
+        defer op.deinit(gpa);
+        op.doc_url = "https://a.test/p/q?x=\\\\\\\\#frag";
+        var s = try op.start(gpa);
+        if (k == .clear_storage) {
+            r1FreeStep(s);
+            s = try op.feed(gpa, .{ .ok = "{}" });
+        }
+        defer r1FreeStep(s);
+        try testing.expect(s == .call);
+        try testing.expect(std.mem.indexOf(u8, s.call.params, "?") == null and std.mem.indexOf(u8, s.call.params, "#") == null);
+        if (k != .delete_cookie) try testing.expect(std.mem.indexOf(u8, s.call.params, "https://a.test/p/q") != null);
+    }
+}
+
+test "W9a③ 적대 리뷰 5 회차 재현 F2: localStorage 예외 글은 코드 포인트 경계에서 자른다 — UTF-8 을 갈라 응답이 깨졌다" {
+    const gpa = testing.allocator;
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    try body.writer.writeAll("{\"exceptionDetails\":{\"exception\":{\"description\":\"QuotaExceededError: x");
+    for (0..300) |_| try body.writer.writeAll("한");
+    try body.writer.writeAll("\"}}}");
+    const s = try storageResult(gpa, .set_local_storage, body.written());
+    defer r1FreeStep(s);
+    try testing.expect(std.unicode.utf8ValidateSlice(s.done.result));
+    try testing.expect(s.done.result.len <= 512);
+}
+
+test "W9a③ 적대 리뷰 5 회차 재현 F3: 쿠키 이름·값이 4096 바이트를 넘으면 시작에 그 글로 거절 — 전에는 「selector」 글" {
+    const gpa = testing.allocator;
+    const big = try gpa.alloc(u8, 5000);
+    defer gpa.free(big);
+    @memset(big, 'x');
+    const arg = try std.fmt.allocPrint(gpa, "{{\"name\":\"n\",\"value\":\"{s}\"}}", .{big});
+    defer gpa.free(arg);
+    try testing.expectError(error.CookieTooLarge, Op.init(gpa, .set_cookie, arg));
+}
+
+test "W9a③ 적대 리뷰 5 회차 재현 F4: 응답 프레임(1 MiB)을 넘을 localStorage 값은 분명한 실패 — 전에는 연결이 답 없이 닫혔다" {
+    const gpa = testing.allocator;
+    var body: std.Io.Writer.Allocating = .init(gpa);
+    defer body.deinit();
+    try body.writer.writeAll("{\"result\":{\"type\":\"string\",\"value\":\"");
+    try body.writer.splatByteAll('x', 1_100_000);
+    try body.writer.writeAll("\"}}");
+    try expectDone(try storageResult(gpa, .get_local_storage, body.written()), .failed, value_too_large_reason);
+}
+
+test "W9a③ 적대 리뷰 5 회차 재현 F6: 인자를 읽다 메모리가 모자라면 OutOfMemory — 전에는 「invalid arguments」" {
+    var fa = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, Op.init(fa.allocator(), .get_local_storage, "{\"key\":\"k\"}"));
+}
+
+test "W9a③ 적대 리뷰 5 회차 F8: 평가식이 그 자리에서 출처를 다시 본다 — 출처 확인과 world 만들기 사이에 옮겨 가면 「옮겼다」" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .get_local_storage, "{\"key\":\"k\"}");
+    defer op.deinit(gpa);
+    op.doc_url = "http://a.test:80/x";
+    r1FreeStep(try op.start(gpa));
+    r1FreeStep(try op.feed(gpa, .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F\",\"securityOrigin\":\"http://a.test\"}}}" }));
+    const e = try op.feed(gpa, .{ .ok = "{\"executionContextId\":3}" });
+    defer r1FreeStep(e);
+    try testing.expect(std.mem.indexOf(u8, e.call.params, "location.origin!==\\\"http://a.test\\\"") != null);
+    try expectDone(try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\"},\"exceptionDetails\":{\"exception\":{\"description\":\"Error: maru: origin moved\\n    at <anonymous>:1:1\"}}}" }), .failed, origin_moved_reason);
 }

@@ -102,6 +102,9 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.InvalidMaxDepth => "--max-depth must be a non-negative integer",
         error.UnknownOption => "unknown option",
         error.UnexpectedArgument => "too many arguments",
+        error.MissingAnswer => "handle-dialog needs --accept or --dismiss",
+        error.ConflictingAnswer => "give only one of --accept and --dismiss",
+        error.InvalidDialogToken => "--dialog must be a dialog token from `maru browser dialog` (a positive integer)",
     };
 }
 

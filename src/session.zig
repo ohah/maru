@@ -139,6 +139,7 @@ pub const web_osr_input = @import("session/web_osr_input.zig"); // W4b: OSR 포�
 pub const web_osr_context_menu = @import("session/web_osr_context_menu.zig"); // W6c②: Chromium 탭 우클릭 메뉴 항목·「찾기」 문구 — L2 순수
 pub const web_search = @import("session/web_search.zig"); // W6h①: 우클릭 메뉴 「…에서 '…' 검색」의 틀 검증·엔진 이름·주소 — L2 순수
 pub const web_osr_drag_file = @import("session/web_osr_drag_file.zig"); // W6d③: 끌어낸 이미지 파일 이름 — L2 순수
+pub const web_osr_dialog_cause = @import("session/web_osr_dialog_cause.zig"); // W9c②: JS 대화상자의 원인·에이전트가 답해도 되나 — L2 순수
 pub const file_tree = @import("session/file_tree.zig"); // FP7: OS-중립 파일 트리 snapshot·접힘·멀티루트·최근 파일 모델
 pub const file_tree_navigation = @import("session/file_tree_navigation.zig"); // 파일 트리 transient selection·키보드 탐색·scroll 순수 정책
 pub const file_tree_mutation = @import("session/file_tree_mutation.zig"); // 파일 트리 변경 이름·root·dirty 보호·path remap 순수 정책
@@ -331,6 +332,7 @@ test {
     @import("std").testing.refAllDecls(web_osr_context_menu);
     @import("std").testing.refAllDecls(web_search);
     @import("std").testing.refAllDecls(web_osr_drag_file);
+    @import("std").testing.refAllDecls(web_osr_dialog_cause);
     @import("std").testing.refAllDecls(editor.lsp);
 }
 

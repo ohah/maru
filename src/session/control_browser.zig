@@ -45,7 +45,8 @@ const capmod = @import("control_capability.zig");
 const cs = @import("control_surface.zig");
 const cev = @import("control_events.zig"); // 5f-0b-3b: browser.subscribe params의 events 필터(EventKind/EventFilter)
 const cpg = @import("control_pane_grant.zig");
-const new_tab = @import("web_sidecar/new_tab.zig"); // W9b③: browser.open 의 주소 규칙(페이지가 여는 새 탭과 같다) // 1e-confirm-1b: pane-bound confirm-grant 조회(§9.2 Model B — 세션 cap OR pane grant 가법)
+const new_tab = @import("web_sidecar/new_tab.zig");
+const ws_wire = @import("web_sidecar/wire.zig"); // W9c②: 대화상자 답 글 상한(sidecar 가 받는 것과 같다) // W9b③: browser.open 의 주소 규칙(페이지가 여는 새 탭과 같다) // 1e-confirm-1b: pane-bound confirm-grant 조회(§9.2 Model B — 세션 cap OR pane grant 가법)
 
 // ── ① browser.* wire 스키마(§9.1 ①) ──────────────────────────────────────────────────────────────────────
 
@@ -132,6 +133,14 @@ pub const BrowserMethod = enum {
     /// 여는 순간 넣은 `browser` grant 가 없으면 확인 모달 없이 `unauthorized`(남의 탭을 닫으려고 허락을 묻지 않는다). 페이지에 묻는
     /// 닫기 — 떠나기 확인으로 물으면 기다리지 않고 `closed:false`(사용자가 그 탭에서 정한다). op.arg 빈 것. **op_kind=24 고정**.
     close,
+    /// `browser.dialog {id}`(W9c② — Chromium 전용) → `{dialogs:[…]}` — 그 탭의 팝업 가족에 떠 있는 JS 대화상자·파일 선택(권한 요청은
+    /// 싣지 않는다). grant 가 있는 탭의 것만 전부(`token`·글·`cause`·`may_answer`), 나머지는 `{tab, kind}`. DevTools 를 부르지 않아 앱이
+    /// 곧 답한다(대화상자로 멈춘 탭의 op 줄 뒤에 서지 않는다). op.arg 빈 것. **op_kind=25 고정**.
+    dialog,
+    /// `browser.handleDialog {id, accept, text?, dialog?}`(W9c② — Chromium 전용) → `{ok:true, kind, continues?}`. `dialog`(번호)가 없으면
+    /// 그 탭 자신의 대화상자, 있으면 grant 가 있는 가족 탭의 그 대화상자. 답해도 되는지(`may_answer`)는 앱이 본다. 파일 선택은 닫기만.
+    /// op.arg=`{accept, text?, dialog?}`. **op_kind=26 고정**.
+    handle_dialog,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -163,6 +172,8 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "press")) return .press;
     if (eq(rest, "open")) return .open;
     if (eq(rest, "close")) return .close;
+    if (eq(rest, "dialog")) return .dialog;
+    if (eq(rest, "handleDialog")) return .handle_dialog;
     return null;
 }
 
@@ -194,6 +205,8 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .press => "press",
         .open => "open",
         .close => "close",
+        .dialog => "dialog",
+        .handle_dialog => "handleDialog",
     };
 }
 
@@ -204,14 +217,14 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
-        // W9a①: navigate·getUrl·screenshot, W9a②: executeScript, W9a③: localStorage·쿠키·clearStorage.
+        // W9a①: navigate·getUrl·screenshot, W9a②: executeScript, W9a③: localStorage·쿠키·clearStorage, W9c②: 대화상자 보기·답하기.
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage => true,
+            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog => true,
             else => false,
         },
     };
@@ -436,6 +449,10 @@ pub const OpenParams = struct { url: ?[]const u8, timeout_ms: u32 };
 pub const open_default_timeout_ms: u32 = 25_000;
 pub const open_max_timeout_ms: u32 = 25_000;
 pub const max_press_key_bytes = 64;
+/// `browser.handleDialog` params(W9c②). `dialog` 은 `browser.dialog` 가 준 번호(0 은 없다).
+pub const HandleDialogParams = struct { accept: bool, text: ?[]const u8, dialog: ?u64 };
+/// 답 글의 상한 — sidecar 가 대화상자 답에 받는 글 상한(`wire.max_text_bytes`)과 같다(넘는 글을 조용히 자르지 않고 거절한다).
+pub const handle_dialog_max_text_bytes = ws_wire.max_text_bytes;
 
 /// `browser.wait` 조건. 첫 슬라이스는 명시적 selector visible·현재 load 완료만 지원한다. URL/text/fn/network-idle과
 /// click/type auto-wait는 후속(§9.4 D3·§9.5).
@@ -698,6 +715,59 @@ pub fn serializeOpenArg(gpa: std.mem.Allocator, p: OpenParams) std.mem.Allocator
         }
         s.objectField("timeout_ms") catch |e| break :blk e;
         s.write(p.timeout_ms) catch |e| break :blk e;
+        s.endObject() catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// W9c②: 새 메서드라 키를 엄격히 본다(`open` 과 같다) — 모르는 키는 거절.
+fn onlyKeys(obj: std.json.ObjectMap, allowed: []const []const u8) ParamError!void {
+    var it = obj.iterator();
+    while (it.next()) |e| {
+        for (allowed) |k| {
+            if (eq(e.key_ptr.*, k)) break;
+        } else return error.InvalidParams;
+    }
+}
+
+pub fn parseDialogParams(params: ?std.json.Value) ParamError!void {
+    const obj = try paramsObject(params);
+    try onlyKeys(obj, &.{"id"});
+}
+
+pub fn parseHandleDialogParams(params: ?std.json.Value) ParamError!HandleDialogParams {
+    const obj = try paramsObject(params);
+    try onlyKeys(obj, &.{ "id", "accept", "text", "dialog" });
+    const accept = switch (obj.get("accept") orelse return error.InvalidParams) {
+        .bool => |b| b,
+        else => return error.InvalidParams,
+    };
+    const text = try optStrFromObj(obj, "text");
+    if (text) |t| if (t.len > handle_dialog_max_text_bytes) return error.InvalidParams;
+    const dialog: ?u64 = if (obj.get("dialog")) |v| switch (v) {
+        .integer => |i| if (i < 1) return error.InvalidParams else @intCast(i),
+        .null => null,
+        else => return error.InvalidParams,
+    } else null;
+    return .{ .accept = accept, .text = text, .dialog = dialog };
+}
+
+pub fn serializeHandleDialogArg(gpa: std.mem.Allocator, p: HandleDialogParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        s.objectField("accept") catch |e| break :blk e;
+        s.write(p.accept) catch |e| break :blk e;
+        if (p.text) |t| {
+            s.objectField("text") catch |e| break :blk e;
+            s.write(t) catch |e| break :blk e;
+        }
+        if (p.dialog) |d| {
+            s.objectField("dialog") catch |e| break :blk e;
+            s.write(d) catch |e| break :blk e;
+        }
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -1878,6 +1948,11 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid tab payload", null),
         },
+        // W9c②: 앱이 준 `{"dialogs":[…]}`·`{"ok","kind","continues"?}` 을 검사해 알려진 필드만 싣는다.
+        .dialog, .handle_dialog => serializeDialogResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
+        },
         // 로케이터로 기다렸으면 엔진이 `{"ok":true,"matched":{…},"ambiguous"?:true}` 를 준다(W9b②-3).
         .wait => if (result.len > 0 and result[0] == '{')
             serializeActMatchedResult(gpa, req.id, result) catch |e| switch (e) {
@@ -1945,6 +2020,76 @@ fn serializeTabResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, 
             }) catch return error.OutOfMemory;
         },
         else => return error.InvalidTabPayload,
+    }
+    return aw.toOwnedSlice();
+}
+
+/// W9c② 결과 — dialog `{"dialogs":[{tab,kind, token?,message?,origin?,default_text?,cause?,may_answer?}]}`(`tab`·`kind` 는 꼭,
+/// 나머지는 grant 가 있는 탭에만 — 앱이 정한다), handleDialog `{"ok":true,"kind":<str>,"continues"?:<bool>}`. 모르는 키는 버리고 타입이
+/// 틀리면 거절(앱이 낸 것이라도 wire 로 나가는 모양은 여기서 고정한다).
+fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMethod, payload: []const u8) (std.mem.Allocator.Error || error{InvalidDialogPayload})![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidDialogPayload,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidDialogPayload;
+    const o = parsed.value.object;
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    switch (method) {
+        .dialog => {
+            const list = o.get("dialogs") orelse return error.InvalidDialogPayload;
+            if (list != .array) return error.InvalidDialogPayload;
+            const int_keys = [_][]const u8{ "token", "tab" };
+            const str_keys = [_][]const u8{ "kind", "message", "origin", "default_text", "cause" };
+            for (list.array.items) |item| {
+                if (item != .object) return error.InvalidDialogPayload;
+                const tab = item.object.get("tab") orelse return error.InvalidDialogPayload;
+                const kind = item.object.get("kind") orelse return error.InvalidDialogPayload;
+                if (tab != .integer or tab.integer <= 0 or kind != .string) return error.InvalidDialogPayload;
+                for (int_keys) |k| if (item.object.get(k)) |v| if (v != .integer or v.integer <= 0) return error.InvalidDialogPayload;
+                for (str_keys) |k| if (item.object.get(k)) |v| if (v != .string) return error.InvalidDialogPayload;
+                if (item.object.get("may_answer")) |v| if (v != .bool) return error.InvalidDialogPayload;
+            }
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                s.objectField("dialogs") catch |e| break :blk e;
+                s.beginArray() catch |e| break :blk e;
+                for (list.array.items) |item| {
+                    s.beginObject() catch |e| break :blk e;
+                    // 순서를 고정한다(번호·탭·종류·글·출처·기본 글·원인·답해도 되는가).
+                    for ([_][]const u8{ "token", "tab", "kind", "message", "origin", "default_text", "cause", "may_answer" }) |k| if (item.object.get(k)) |v| {
+                        s.objectField(k) catch |e| break :blk e;
+                        s.write(v) catch |e| break :blk e;
+                    };
+                    s.endObject() catch |e| break :blk e;
+                }
+                s.endArray() catch |e| break :blk e;
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        .handle_dialog => {
+            const ok = o.get("ok") orelse return error.InvalidDialogPayload;
+            const kind = o.get("kind") orelse return error.InvalidDialogPayload;
+            if (ok != .bool or kind != .string) return error.InvalidDialogPayload;
+            const continues = o.get("continues");
+            if (continues) |c| if (c != .bool) return error.InvalidDialogPayload;
+            (blk: {
+                beginResult(&s, id) catch |e| break :blk e;
+                s.objectField("ok") catch |e| break :blk e;
+                s.write(ok.bool) catch |e| break :blk e;
+                s.objectField("kind") catch |e| break :blk e;
+                s.write(kind.string) catch |e| break :blk e;
+                if (continues) |c| {
+                    s.objectField("continues") catch |e| break :blk e;
+                    s.write(c.bool) catch |e| break :blk e;
+                }
+                endResult(&s) catch |e| break :blk e;
+            }) catch return error.OutOfMemory;
+        },
+        else => return error.InvalidDialogPayload,
     }
     return aw.toOwnedSlice();
 }
@@ -2331,6 +2476,12 @@ pub fn browserOpFromRequest(
         // console(§9.5.9): clear 플래그를 arg에 실어 Swift가 pull(서버 버퍼 반환 + clear면 비움). base browser scope.
         .console => try serializeConsoleArg(gpa, parseConsoleParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .back, .forward, .reload, .close => try gpa.dupe(u8, ""), // {id}만
+        // W9c②: 대화상자 — 보기는 {id}만, 답하기는 `{accept, text?, dialog?}`.
+        .dialog => blk: {
+            parseDialogParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) };
+            break :blk try gpa.dupe(u8, "");
+        },
+        .handle_dialog => try serializeHandleDialogArg(gpa, parseHandleDialogParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .subscribe => unreachable, // 위에서 이미 분기
         .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
@@ -3473,16 +3624,16 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const webkit = arr.items[0].object;
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
-    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 7), webkit.get("methods").?.array.items.len);
+    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog 는 Chromium 전용 — WebKit 은 걷어낼 예정).
+    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 9), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
     // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
-    // W9a③: 쿠키·localStorage·clearStorage.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close" };
+    // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기.
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -4563,4 +4714,122 @@ test "W9a 적대 리뷰 2 회차 재현: 진단 메시지의 \\n·\\t 는 2 바�
     defer testing.allocator.free(wire);
     try testing.expect(std.mem.indexOf(u8, wire, "\"name\":\"Error\"") != null);
     try testing.expect(std.mem.indexOf(u8, wire, "executeScript failed") == null);
+}
+
+// ── W9c②: 에이전트가 JS 대화상자에 답한다(browser.dialog·handleDialog) ─────────────────────────────────────────────
+
+test "W9c②: dialog·handleDialog 는 close 뒤 25·26 — wire 이름은 dialog·handleDialog, Chromium 만(WebKit 은 모달 전 -32008)" {
+    try testing.expectEqual(@as(u8, 25), @as(u8, @intFromEnum(BrowserMethod.dialog)));
+    try testing.expectEqual(@as(u8, 26), @as(u8, @intFromEnum(BrowserMethod.handle_dialog)));
+    try testing.expectEqual(BrowserMethod.dialog, parseBrowserMethod("dialog").?);
+    try testing.expectEqual(BrowserMethod.handle_dialog, parseBrowserMethod("handleDialog").?);
+    try testing.expect(engineSupports(.chromium, .dialog) and engineSupports(.chromium, .handle_dialog));
+    try testing.expect(!engineSupports(.webkit, .dialog) and !engineSupports(.webkit, .handle_dialog));
+    try testing.expectEqual(capmod.ScopeClass.browser, capmod.methodRequiredScope("browser.handleDialog").?);
+    var grants: cpg.PaneGrantStore = .{};
+    for ([_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.dialog\",\"params\":{\"id\":11}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":11,\"accept\":true}}",
+    }) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    // grant 없는 Chromium 탭 — 다른 메서드처럼 확인 모달(needs_grant)로 묻는다.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.dialog\",\"params\":{\"id\":12}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .needs_grant => |g| try testing.expectEqual(@as(u64, 12), g.target),
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "W9c②: handleDialog params — accept 는 꼭 bool, text·dialog(번호) 는 선택, 모르는 키·긴 글·0 번은 invalid_params" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    const ok_cases = [_]struct { bytes: []const u8, method: BrowserMethod, arg: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.dialog\",\"params\":{\"id\":12}}", .method = .dialog, .arg = "" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":false}}", .method = .handle_dialog, .arg = "{\"accept\":false}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":true,\"text\":\"이름\",\"dialog\":42}}", .method = .handle_dialog, .arg = "{\"accept\":true,\"text\":\"이름\",\"dialog\":42}" },
+    };
+    for (ok_cases) |c| switch (try dispatchBrowser(testing.allocator, c.bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(c.method, op.method);
+            try testing.expectEqual(@as(u64, 12), op.surface_id);
+            try testing.expectEqualStrings(c.arg, op.arg);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    var long: [handle_dialog_max_text_bytes + 1]u8 = undefined;
+    @memset(&long, 'a');
+    const long_req = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{{\"id\":12,\"accept\":true,\"text\":\"{s}\"}}}}", .{&long});
+    defer testing.allocator.free(long_req);
+    const bad = [_][]const u8{
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":\"yes\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":true,\"text\":5}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":true,\"dialog\":0}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":true,\"dialog\":\"7\"}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":true,\"suppress\":true}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.dialog\",\"params\":{\"id\":12,\"all\":true}}",
+        long_req,
+    };
+    for (bad) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+}
+
+test "W9c②: dialog·handleDialog 결과는 엔진이 준 알려진 필드만 — 모양이 틀리면 internal_error" {
+    const dialog_req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.dialog\",\"params\":{\"id\":12}}";
+    const handle_req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.handleDialog\",\"params\":{\"id\":12,\"accept\":true}}";
+    const cases = [_]struct { req: []const u8, payload: []const u8, want: []const u8 }{
+        .{ .req = dialog_req, .payload = "{\"dialogs\":[]}", .want = "\"result\":{\"dialogs\":[]}" },
+        .{
+            .req = dialog_req,
+            .payload = "{\"dialogs\":[{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"m\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\",\"may_answer\":true,\"x\":1},{\"tab\":13,\"kind\":\"alert\"}]}",
+            .want = "\"result\":{\"dialogs\":[{\"token\":7,\"tab\":12,\"kind\":\"prompt\",\"message\":\"m\",\"origin\":\"https://a.test\",\"default_text\":\"d\",\"cause\":\"agent\",\"may_answer\":true},{\"tab\":13,\"kind\":\"alert\"}]}",
+        },
+        .{ .req = handle_req, .payload = "{\"ok\":true,\"kind\":\"alert\"}", .want = "\"result\":{\"ok\":true,\"kind\":\"alert\"}" },
+        .{ .req = handle_req, .payload = "{\"ok\":true,\"kind\":\"before_unload\",\"continues\":true}", .want = "\"result\":{\"ok\":true,\"kind\":\"before_unload\",\"continues\":true}" },
+    };
+    for (cases) |c| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, c.want) != null);
+    }
+    const bad = [_]struct { req: []const u8, payload: []const u8 }{
+        .{ .req = dialog_req, .payload = "{}" },
+        .{ .req = dialog_req, .payload = "{\"dialogs\":[{\"kind\":\"alert\"}]}" },
+        .{ .req = dialog_req, .payload = "{\"dialogs\":[{\"tab\":12,\"kind\":\"alert\",\"token\":\"7\"}]}" },
+        .{ .req = dialog_req, .payload = "{\"dialogs\":[{\"tab\":12,\"kind\":\"alert\",\"may_answer\":1}]}" },
+        .{ .req = handle_req, .payload = "{\"ok\":true}" },
+        .{ .req = handle_req, .payload = "{\"ok\":\"y\",\"kind\":\"alert\"}" },
+        .{ .req = handle_req, .payload = "[" },
+    };
+    for (bad) |c| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+    }
 }

@@ -55,6 +55,13 @@
 #                   글 `--help` 를 글로 넣고(도움말이 아니라), `-1` 식을 엔진에 보내고, 스크린샷은 PNG 그림, 틀린 인자 이름은 거절, 닫는다.
 #                   표준 출력은 JSON-RPC 줄뿐이고 입력 끝에 0 으로 끝난다
 #   repl            (W9f) `maru browser repl` 에 open → click(--surface 없이) → close 를 파이프로 — open 이 고른 탭에 명령이 간다
+#   w9c-dialog      (W9c②) 에이전트가 JS 대화상자를 보고 답한다: 누름 뒤 alert — 다음 op 은 handle-dialog 를 가리키며 곧 실패, `dialog` 가
+#                   종류·원인(agent)·답해도 되나·줄바꿈을 보이고, 답하면 페이지가 이어 간다 · prompt 글이 페이지에 닿는다 · confirm 닫기는 false ·
+#                   confirm 뒤 alert(사슬)도 에이전트 것 · 누름 뒤 setTimeout 의 alert 도 에이전트 것 · 모르는 번호는 실패 · 같은 출처 팝업의
+#                   alert 는 연 탭에서 번호로 답한다(번호 없이는 「no dialog」) · 에이전트가 물은 닫기의 떠나기 확인에 떠나기로 답하면 탭이
+#                   닫힌다 · navigate 가 떠나기 확인으로 실패한 탭에 떠나기로 답하면 이동이 이어진다 · 사람 탭(이 pane 이 열지 않았다)의 누가
+#                   띄웠는지 모르는 alert(스크립트 6.5 초 뒤)는 거절한다(C13). 「사용자가 손댄 문서」 의 떠나기 거절은 사람 입력이 필요해 단위
+#                   시험(web_osr)이 본다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -158,6 +165,15 @@ printf '<!doctype html><title>frm</title><form onsubmit="new Image().src=&#39;/h
 printf '<!doctype html><title>frma</title><form onsubmit="navigator.sendBeacon(&#39;/hit?dsubmit-&#39;+location.search.slice(1));alert(&#39;sent&#39;);return false"><input id=q aria-label=Q style="position:absolute;left:30px;top:30px"></form>' > "$root/www/frma.html"
 printf '<!doctype html><title>shr</title><button id=pop style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="window.open(&#39;shr2.html&#39;,&#39;_blank&#39;)">Pop</button><button id=ok style="position:absolute;left:30px;top:100px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?okclick&#39;">OK</button>' > "$root/www/shr.html"
 printf '<!doctype html><title>shr2</title>shr2<script>new Image().src="/hit?shr2-load";setTimeout(function(){alert("popup")},800)</script>' > "$root/www/shr2.html"
+# W9c②: 에이전트가 답할 대화상자들 — 답한 뒤 페이지가 이어 가면 신호를 보낸다.
+cat > "$root/www/dlg.html" <<'HTML'
+<!doctype html><title>dlg</title><script>function hit(w){new Image().src='/hit?'+w}</script>
+<button id=al style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="alert('hello\nworld');hit('dal-done')">Alert</button>
+<button id=pr style="position:absolute;left:30px;top:80px;width:120px;height:40px" onclick="hit('dpr-'+encodeURIComponent(prompt('Name?','def')))">Prompt</button>
+<button id=cf style="position:absolute;left:30px;top:130px;width:120px;height:40px" onclick="hit('dcf-'+confirm('Sure?'))">Confirm</button>
+<button id=ch style="position:absolute;left:30px;top:180px;width:120px;height:40px" onclick="hit('dch1-'+confirm('one'));alert('two');hit('dch-done')">Chain</button>
+<button id=st style="position:absolute;left:30px;top:230px;width:120px;height:40px" onclick="setTimeout(function(){alert('timer');hit('dst-done')},1500)">Timer</button>
+HTML
 # W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
 printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
 # W9f: 에이전트가 MCP 서버를 띄우는 모양 — 새 세션(제어 터미널 없음)·파이프 입출력. 표준 출력의 줄은 모두 JSON-RPC 여야 한다.
@@ -541,7 +557,7 @@ hit_seen ag2vis-hidden && echo yes > "\$out/ag2-hidden" || echo no > "\$out/ag2-
 ag2=\$(awk '/^surface .*ag2\.html/{print \$2; exit}' "\$out/ag-list")
 # 사용자 탭(이 pane 이 열지 않았다 — 조작 허락은 받았다)은 닫지 못한다.
 "\$cli" browser close --surface "\$sid" > "\$out/ag-close-user" 2>&1; echo "rc=\$?" >> "\$out/ag-close-user"
-# 글을 넣은 탭 — 페이지가 떠나기 확인으로 묻는다: 닫지 않고 곧 답한다(사용자가 그 탭에서 정한다).
+# 글을 넣은 탭 — 페이지가 떠나기 확인으로 묻는다: 닫지 않고 곧 답한다(질문은 탭에 남는다 — 에이전트의 닫기라 W9c② 의 handle-dialog 로 답할 수 있다).
 "\$cli" browser type --surface "\$ag" --selector '#t' --text 'draft' > "\$out/ag-type" 2>&1; echo "rc=\$?" >> "\$out/ag-type"
 c0=\$(date +%s)
 "\$cli" browser close --surface "\$ag" > "\$out/ag-close-ask" 2>&1; echo "rc=\$?" >> "\$out/ag-close-ask"
@@ -714,12 +730,67 @@ u0=\$(date +%s)
 "\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/a.html?t=a	b" > "\$out/r1-tab" 2>&1; echo "rc=\$?" >> "\$out/r1-tab"
 u1=\$(date +%s)
 echo "\$((u1 - u0))" > "\$out/r1-tab-secs"
-# 글을 넣은 문서 — 떠나기 확인: navigate 는 곧 실패로 답한다(사용자가 그 탭에서 정한다).
+# 글을 넣은 문서 — 떠나기 확인: navigate 는 곧 실패로 답한다(에이전트의 이동이라 W9c② 의 handle-dialog 로 떠나기를 고를 수 있다 — 아래).
 "\$cli" browser type --surface "\$nv" --selector '#t' --text 'draft' > "\$out/nv-type" 2>&1
 b0=\$(date +%s)
 "\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/a.html?bu" > "\$out/nv-bu" 2>&1; echo "rc=\$?" >> "\$out/nv-bu"
 b1=\$(date +%s)
 echo "\$((b1 - b0))" > "\$out/nv-bu-secs"
+# W9c②: 에이전트가 JS 대화상자를 보고 답한다. 대화상자가 남은 에이전트 탭(capt·da·sh 의 팝업·ag·nv)을 먼저 답해 자리를 낸다.
+"\$cli" browser handle-dialog --surface "\$capt" --accept > "\$out/dg-capt" 2>&1; echo "rc=\$?" >> "\$out/dg-capt"
+"\$cli" browser handle-dialog --surface "\$da" --accept > "\$out/dg-da" 2>&1; echo "rc=\$?" >> "\$out/dg-da"
+# 같은 출처 팝업의 alert — 연 탭(sh)에는 대화상자가 없다(번호 없이는 실패), 목록이 팝업의 번호를 주고 그 번호로 답하면 연 탭이 다시 움직인다.
+"\$cli" browser handle-dialog --surface "\$sh" --accept > "\$out/dg-fam-none" 2>&1; echo "rc=\$?" >> "\$out/dg-fam-none"
+"\$cli" browser dialog --surface "\$sh" > "\$out/dg-fam-list" 2>&1; echo "rc=\$?" >> "\$out/dg-fam-list"
+ftok=\$(sed -n 's/^alert tab=[0-9]* token=\([0-9]*\) .*/\1/p' "\$out/dg-fam-list")
+"\$cli" browser handle-dialog --surface "\$sh" --accept --dialog "\$ftok" > "\$out/dg-fam" 2>&1; echo "rc=\$?" >> "\$out/dg-fam"
+"\$cli" browser click --surface "\$sh" --selector '#ok' > "\$out/dg-fam-ok" 2>&1; echo "rc=\$?" >> "\$out/dg-fam-ok"
+hit_seen okclick && echo yes > "\$out/dg-fam-hit" || echo no > "\$out/dg-fam-hit"
+# 에이전트가 물은 닫기의 떠나기 확인(ag — 위에서 「not closed」) — 떠나기로 답하면 탭이 닫힌다.
+"\$cli" browser dialog --surface "\$ag" > "\$out/dg-ag-list" 2>&1
+"\$cli" browser handle-dialog --surface "\$ag" --accept > "\$out/dg-ag" 2>&1; echo "rc=\$?" >> "\$out/dg-ag"
+n=0
+while [ \$n -lt 20 ]; do
+    "\$cli" browser list > "\$out/dg-ag-list2" 2>&1 || true
+    grep -q "^surface \$ag " "\$out/dg-ag-list2" || break
+    sleep 0.25; n=\$((n + 1))
+done
+# navigate 가 떠나기 확인으로 실패한 탭(nv) — 떠나기로 답하면 그 이동이 이어진다.
+"\$cli" browser handle-dialog --surface "\$nv" --accept > "\$out/dg-nv" 2>&1; echo "rc=\$?" >> "\$out/dg-nv"
+"\$cli" browser wait --surface "\$nv" --load > "\$out/dg-nv-wait" 2>&1
+"\$cli" browser get-url --surface "\$nv" > "\$out/dg-nv-url" 2>&1; echo "rc=\$?" >> "\$out/dg-nv-url"
+# 새 에이전트 탭의 alert·prompt·confirm·사슬·setTimeout.
+"\$cli" browser open --url "http://127.0.0.1:$port/dlg.html" > "\$out/dg-open" 2>&1
+dg=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/dg-open")
+"\$cli" browser dialog --surface "\$dg" > "\$out/dg-none" 2>&1; echo "rc=\$?" >> "\$out/dg-none"
+"\$cli" browser click --surface "\$dg" --selector '#al' > "\$out/dg-al-click" 2>&1; echo "rc=\$?" >> "\$out/dg-al-click"
+"\$cli" browser click --surface "\$dg" --selector '#pr' > "\$out/dg-al-blocked" 2>&1; echo "rc=\$?" >> "\$out/dg-al-blocked"
+"\$cli" browser dialog --surface "\$dg" > "\$out/dg-al-list" 2>&1; echo "rc=\$?" >> "\$out/dg-al-list"
+"\$cli" browser handle-dialog --surface "\$dg" --accept --dialog 999999 > "\$out/dg-badtok" 2>&1; echo "rc=\$?" >> "\$out/dg-badtok"
+"\$cli" browser handle-dialog --surface "\$dg" --accept > "\$out/dg-al" 2>&1; echo "rc=\$?" >> "\$out/dg-al"
+hit_seen dal-done && echo yes > "\$out/dg-al-hit" || echo no > "\$out/dg-al-hit"
+"\$cli" browser click --surface "\$dg" --selector '#pr' > "\$out/dg-pr-click" 2>&1
+"\$cli" browser handle-dialog --surface "\$dg" --accept --text 'maru 한' > "\$out/dg-pr" 2>&1; echo "rc=\$?" >> "\$out/dg-pr"
+hit_seen 'dpr-maru%20%ED%95%9C' && echo yes > "\$out/dg-pr-hit" || echo no > "\$out/dg-pr-hit"
+"\$cli" browser click --surface "\$dg" --selector '#cf' > "\$out/dg-cf-click" 2>&1
+"\$cli" browser handle-dialog --surface "\$dg" --dismiss > "\$out/dg-cf" 2>&1; echo "rc=\$?" >> "\$out/dg-cf"
+hit_seen dcf-false && echo yes > "\$out/dg-cf-hit" || echo no > "\$out/dg-cf-hit"
+"\$cli" browser click --surface "\$dg" --selector '#ch' > "\$out/dg-ch-click" 2>&1
+"\$cli" browser handle-dialog --surface "\$dg" --accept > "\$out/dg-ch1" 2>&1; echo "rc=\$?" >> "\$out/dg-ch1"
+n=0; while [ \$n -lt 20 ]; do "\$cli" browser dialog --surface "\$dg" > "\$out/dg-ch-list" 2>&1; grep -q '^alert ' "\$out/dg-ch-list" && break; sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser handle-dialog --surface "\$dg" --accept > "\$out/dg-ch2" 2>&1; echo "rc=\$?" >> "\$out/dg-ch2"
+hit_seen dch-done && echo yes > "\$out/dg-ch-hit" || echo no > "\$out/dg-ch-hit"
+"\$cli" browser click --surface "\$dg" --selector '#st' > "\$out/dg-st-click" 2>&1; echo "rc=\$?" >> "\$out/dg-st-click"
+n=0; while [ \$n -lt 32 ]; do "\$cli" browser dialog --surface "\$dg" > "\$out/dg-st-list" 2>&1; grep -q '^alert ' "\$out/dg-st-list" && break; sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser handle-dialog --surface "\$dg" --accept > "\$out/dg-st" 2>&1; echo "rc=\$?" >> "\$out/dg-st"
+hit_seen dst-done && echo yes > "\$out/dg-st-hit" || echo no > "\$out/dg-st-hit"
+"\$cli" browser close --surface "\$dg" > /dev/null 2>&1 || true
+# 사람의 탭(이 pane 이 열지 않았다 — 조작 허락만) — 누가 띄웠는지 모르는 alert(스크립트 뒤 6.5 초 — 창 5 초 밖)는 답하지 않는다(C13). 그 탭은 위에서
+# 스스로 새로고침하는 hop 문서에 있다 — 타이머가 돌 수 있게 가만히 있는 문서로 옮긴다.
+"\$cli" browser navigate --surface "\$sid" "http://127.0.0.1:$port/ag2.html?user" > "\$out/dg-user-nav" 2>&1
+"\$cli" browser exec --surface "\$sid" 'setTimeout(function(){alert("late user")},6500), 1' > "\$out/dg-user-exec" 2>&1
+n=0; while [ \$n -lt 48 ]; do "\$cli" browser dialog --surface "\$sid" > "\$out/dg-user-list" 2>&1; grep -q '^alert ' "\$out/dg-user-list" && break; sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser handle-dialog --surface "\$sid" --accept > "\$out/dg-user" 2>&1; echo "rc=\$?" >> "\$out/dg-user"
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -736,7 +807,7 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!
 i=0
-while [ ! -f "$out/done" ] && [ $i -lt 320 ]; do sleep 1; i=$((i + 1)); done
+while [ ! -f "$out/done" ] && [ $i -lt 420 ]; do sleep 1; i=$((i + 1)); done
 [ -f "$out/done" ] || { sed -n '1,40p' "$root/app.log" >&2; fail "the pane script did not finish ($(cat "$out/list" 2>/dev/null | tr '\n' ' '))"; }
 kill "$app_pid" 2>/dev/null || true
 wait "$app_pid" 2>/dev/null || true
@@ -920,6 +991,25 @@ grep -q '"name":"ui"' "$out/ui-get" && grep -q '^ok$' "$out/ui-cl" && ! grep -q 
 echo "PASS w9a-storage: localStorage sets, reads past a page that lies in getItem, and removes; a cookie is set, read and deleted, a cookie for another host is refused; clear-storage clears the page's cookies and localStorage; sameSite comes back lowercase, --domain .<IP> deletes the IP host's cookie, a too-long value names the limit, an address with a username and password still acts on its host"
 echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
+# W9c②
+grep -q '^rc=0$' "$out/dg-none" && grep -q '^(no dialog)$' "$out/dg-none" || fail "dialog on a tab without one did not say (no dialog) ($(tr '\n' ' ' < "$out/dg-none"))"
+grep -q '^warning: the page opened a dialog .*maru browser handle-dialog' "$out/dg-al-click" || fail "a click whose handler opened an alert did not warn with the handle-dialog hint ($(tr '\n' ' ' < "$out/dg-al-click"))"
+grep -q '^rc=1$' "$out/dg-al-blocked" && grep -q 'showing a dialog.*maru browser handle-dialog' "$out/dg-al-blocked" || fail "an op on a tab with an alert did not fail pointing at handle-dialog ($(tr '\n' ' ' < "$out/dg-al-blocked"))"
+grep -q '^alert tab=[0-9]* token=[0-9]* cause=agent may_answer=yes origin=http://127.0.0.1:[0-9]*$' "$out/dg-al-list" || fail "dialog did not list the agent's alert with its token, cause and origin ($(tr '\n' ' ' < "$out/dg-al-list"))"
+grep -q '^  message: "hello ⏎ world"$' "$out/dg-al-list" && grep -q '^answer with: maru browser handle-dialog' "$out/dg-al-list" || fail "dialog did not show the alert's line break as a visible mark, or the answer hint ($(tr '\n' ' ' < "$out/dg-al-list"))"
+grep -q '^rc=1$' "$out/dg-badtok" && grep -q 'no such dialog' "$out/dg-badtok" || fail "an unknown dialog token was not refused ($(tr '\n' ' ' < "$out/dg-badtok"))"
+grep -q '^answered alert$' "$out/dg-al" && grep -q '^rc=0$' "$out/dg-al" && [ "$(cat "$out/dg-al-hit")" = yes ] || fail "accepting the alert did not let the page go on ($(tr '\n' ' ' < "$out/dg-al") · hit $(cat "$out/dg-al-hit"))"
+grep -q '^answered prompt$' "$out/dg-pr" && [ "$(cat "$out/dg-pr-hit")" = yes ] || fail "the prompt answer text did not reach the page ($(tr '\n' ' ' < "$out/dg-pr") · $(grep 'GET /hit?dpr' "$root/http.log" | tr '\n' ' '))"
+grep -q '^answered confirm$' "$out/dg-cf" && [ "$(cat "$out/dg-cf-hit")" = yes ] || fail "dismissing the confirm did not give the page false ($(tr '\n' ' ' < "$out/dg-cf") · $(grep 'GET /hit?dcf' "$root/http.log" | tr '\n' ' '))"
+grep -q '^answered confirm$' "$out/dg-ch1" && grep -q 'cause=agent may_answer=yes' "$out/dg-ch-list" && grep -q '^answered alert$' "$out/dg-ch2" && [ "$(cat "$out/dg-ch-hit")" = yes ] || fail "the alert that came right after the agent answered a confirm was not the agent's to answer ($(tr '\n' ' ' < "$out/dg-ch-list") · $(tr '\n' ' ' < "$out/dg-ch2"))"
+grep -q 'cause=agent may_answer=yes' "$out/dg-st-list" && grep -q '^answered alert$' "$out/dg-st" && [ "$(cat "$out/dg-st-hit")" = yes ] || fail "an alert a click scheduled 1.5 s later was not the agent's to answer ($(tr '\n' ' ' < "$out/dg-st-list") · $(tr '\n' ' ' < "$out/dg-st"))"
+grep -q '^answered alert$' "$out/dg-capt" && grep -q '^answered alert$' "$out/dg-da" || fail "the alerts left on agent tabs (a delayed alert after a click, an alert after a submit) could not be answered ($(tr '\n' ' ' < "$out/dg-capt") · $(tr '\n' ' ' < "$out/dg-da"))"
+grep -q '^rc=1$' "$out/dg-fam-none" && grep -q 'no dialog is showing in this tab' "$out/dg-fam-none" || fail "answering without a token on the opener of a popup with an alert did not refuse ($(tr '\n' ' ' < "$out/dg-fam-none"))"
+grep -q '^alert tab=[0-9]* token=[0-9]* cause=[a-z]* may_answer=yes' "$out/dg-fam-list" && grep -q '^answered alert$' "$out/dg-fam" && grep -q '^ok$' "$out/dg-fam-ok" && [ "$(cat "$out/dg-fam-hit")" = yes ] || fail "the popup's alert was not listed from its opener and answered with its token, or the opener stayed blocked ($(tr '\n' ' ' < "$out/dg-fam-list") · $(tr '\n' ' ' < "$out/dg-fam") · $(tr '\n' ' ' < "$out/dg-fam-ok"))"
+grep -q 'maru browser handle-dialog --accept' "$out/ag-close-ask" && grep -q '^before_unload tab=[0-9]* token=[0-9]* cause=agent may_answer=yes' "$out/dg-ag-list" && grep -q '^answered before_unload$' "$out/dg-ag" && grep -q '^note: the page is leaving' "$out/dg-ag" && ! grep -q "^surface $(cat "$out/ag-id") " "$out/dg-ag-list2" || fail "the leave-page question of the agent's own close was not answerable, or leaving did not close the tab ($(tr '\n' ' ' < "$out/dg-ag-list") · $(tr '\n' ' ' < "$out/dg-ag") · $(grep -c '^surface ' "$out/dg-ag-list2") tabs)"
+grep -q '^answered before_unload$' "$out/dg-nv" && grep -q '/a.html?bu$' "$out/dg-nv-url" || fail "leaving after the agent's navigate asked before leaving did not let the navigation go on ($(tr '\n' ' ' < "$out/dg-nv") · $(tr '\n' ' ' < "$out/dg-nv-wait") · $(tr '\n' ' ' < "$out/dg-nv-url"))"
+grep -q '^alert tab=[0-9]* token=[0-9]* cause=unknown may_answer=no' "$out/dg-user-list" && grep -q '^rc=1$' "$out/dg-user" && grep -q 'the user is answering this dialog' "$out/dg-user" || fail "an alert nobody just caused on a user's tab was answerable ($(tr '\n' ' ' < "$out/dg-user-list") · $(tr '\n' ' ' < "$out/dg-user") · nav $(tr '\n' ' ' < "$out/dg-user-nav") · exec $(tr '\n' ' ' < "$out/dg-user-exec"))"
+echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f
 grep -q '^rc=0$' "$out/mcp-py" || fail "the MCP driver failed ($(tr '\n' ' ' < "$out/mcp-py" | cut -c1-600) · $(tail -3 "$out/mcp-log" 2>/dev/null | tr '\n' ' ' | cut -c1-600))"

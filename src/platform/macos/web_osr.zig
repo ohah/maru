@@ -26,6 +26,7 @@ pub const downloads = web_downloads;
 const plan = maru.session.web_osr_plan;
 const mailbox = ws.mailbox;
 const osr_input = maru.session.web_osr_input;
+const dialog_cause = maru.session.web_osr_dialog_cause;
 
 /// 링 하나(W3c): 받은 IOSurface 셋·제어 페이지와, View 가 보는 세대·mailbox 워드.
 pub const AppRing = struct {
@@ -133,6 +134,13 @@ const Surface = struct {
     /// 다운로드만의 사용자 동작(W10a) — 주소창 이동·연 탭에서 물려받은 누름. 페이지 입력(`last_user_input_ms`)과 따로 둔다: 그쪽은
     /// 제안 목록 막음(W6m②)도 쓰는데, 주소창으로 연 페이지·팝업이 손대지 않은 채 목록을 띄울 수 있게 됐다(적대 리뷰 4 회차).
     download_gesture_ms: i64 = std.math.minInt(i64) / 2,
+    /// W9c②: 에이전트가 이 탭에 마지막으로 한 「움직이는」 일(누름·키·이동·스크립트·닫기·대화상자 답 — 단조 ms, `noteAgentInput`). 대화상자가
+    /// 오면 가족의 이 값과 사용자 값으로 누가 띄웠는지 정한다(`dialog_cause`). 스냅숏·기다림·주소 읽기는 세지 않는다(페이지를 움직이지 않는다).
+    agent_input_ms: i64 = std.math.minInt(i64) / 2,
+    /// W9c②: 사용자가 페이지 밖에서 이 탭을 움직인 때 — 주소창 이동·뒤로·앞으로·새로고침·대화상자 sheet 의 답(`noteUserAction`). 페이지
+    /// 입력(`last_user_input_ms`)에 섞지 않는다: 그 값은 제안 목록(W6m②)·다운로드(W10a)의 「사용자가 손댔다」 이기도 해, 주소창 이동으로
+    /// 세우면 손대지 않은 새 문서가 목록을 띄울 수 있게 된다(W6m② 적대 리뷰 4 회차가 그래서 둘을 갈랐다).
+    user_action_ms: i64 = std.math.minInt(i64) / 2,
     /// 밖에서 끌어 온 것이 이 탭 본문에 들어와 sidecar 에 enter 를 보냈고 아직 leave·drop 하지 않았다(W6d①). sidecar 가 다시 뜨거나
     /// 브라우저가 닫히면 푼다 — 새 sidecar 는 그 끌기를 모른다.
     drag_entered: bool = false,
@@ -295,6 +303,11 @@ pub const DialogKind = enum(u32) {
     pub fn isFile(self: DialogKind) bool {
         return @intFromEnum(self) >= 10 and @intFromEnum(self) <= 13;
     }
+
+    /// W9c②: 컨트롤 플레인이 싣는 종류 이름 — 파일 선택은 모두 `file`(모드·경로는 싣지 않는다).
+    pub fn wireName(self: DialogKind) []const u8 {
+        return if (self.isFile()) "file" else @tagName(self);
+    }
 };
 
 pub const Dialog = struct {
@@ -320,6 +333,10 @@ pub const Dialog = struct {
     revoked: bool = false,
     /// 띄운 창(AppSession 주소) — 0 이면 아직 안 띄웠다.
     shown_by: usize = 0,
+    /// W9c②: 누가 띄웠나 — 도착할 때 한 번 정한다(`dialog_cause.classify`). 답할 때 다시 재지 않는다(시간이 지나며 판정이 바뀌지 않게).
+    cause: dialog_cause.Cause = .unknown,
+    /// W9c②: 도착한 단조 ms — 그 뒤 사용자가 그 탭에 손댔는지 본다.
+    arrived_ms: i64 = 0,
 
     fn free(self: Dialog, gpa: std.mem.Allocator) void {
         gpa.free(self.origin);
@@ -1556,6 +1573,13 @@ pub fn testDialogToken(surface_id: u64) ?u64 {
     return s.dialogs.items[0].token;
 }
 
+/// 시험 전용(W9c②): 그 탭의 마지막 에이전트 입력 시각.
+pub fn testAgentInputMs(surface_id: u64) i64 {
+    if (!builtin.is_test) @compileError("test only");
+    const s = surfaces.getPtr(surface_id) orelse return 0;
+    return s.agent_input_ms;
+}
+
 /// 시험 전용(W9b③): 지금 시각으로 적용한다(지금 받은 새 탭 장과 견준다).
 pub fn testApplyNow(gpa: std.mem.Allocator, message: Message) void {
     if (!builtin.is_test) @compileError("test only");
@@ -1751,6 +1775,7 @@ pub fn askCloseByAgent(gpa: std.mem.Allocator, surface_id: u64, now_ms: i64) boo
     if (s.close_ask == .asking or s.close_ask == .asked) return true;
     if (!askClose(gpa, surface_id, now_ms)) return false;
     s.close_ask_agent = true;
+    s.agent_input_ms = monotonicNow(); // W9c②: 이 닫기의 떠나기 확인은 에이전트 것이다(그 에이전트가 답할 수 있다)
     return true;
 }
 
@@ -1812,6 +1837,7 @@ pub fn agentNavigate(gpa: std.mem.Allocator, surface_id: u64, url: []const u8) b
     // 브라우저가 아직 없다(페이지가 스스로 닫았다·만들어지는 중) — 보낼 곳이 없어 25 초를 기다렸다(적대 리뷰 1 회차).
     if (!s.created) return false;
     s.agent_nav = .{ .active = true, .saw_loading = s.loading };
+    s.agent_input_ms = monotonicNow(); // W9c②: 이동이 부른 떠나기 확인은 에이전트 것이다
     navigate(gpa, surface_id, url);
     return true;
 }
@@ -1833,6 +1859,7 @@ pub fn endAgentNav(surface_id: u64) void {
 pub fn noteUserNavigation(surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.download_gesture_ms = monotonicNow();
+    s.user_action_ms = monotonicNow(); // W9c②: 이동이 부른 떠나기 확인은 사용자 것이다
     // W10c: 사용자가 이 탭을 쓴다 — 페이지가 연 빈 탭이어도 이제 사용자의 탭이다(주소창에 친 파일 주소에 그 탭이 닫혔다 — 적대
     // 리뷰 2 회차). 미뤄 둔 닫기도 거둔다(3 회차).
     s.page_opened = false;
@@ -1845,9 +1872,24 @@ fn downloadGestureMs(s: *const Surface) i64 {
     return if (t > s.last_nav_ms) t else std.math.minInt(i64) / 2;
 }
 
+/// 사용자의 뒤로·앞으로·새로고침(주소창 단추·⌘←/→/R·마우스 3·4 단추 — 부르는 곳은 모두 사용자 입력이다).
 pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.NavActionKind) void {
     const s = surfaces.getPtr(surface_id) orelse return;
+    s.user_action_ms = monotonicNow(); // W9c②: 이것이 부른 떠나기 확인은 사용자 것이다
     if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action } });
+}
+
+/// W9c②: 에이전트가 이 탭을 움직였다(앱의 DevTools op 이 누름·키·이동·스크립트를 보낼 때 — `app_host_abi`). 그 뒤 5 초 안의 대화상자는
+/// 에이전트 것으로 본다.
+pub fn noteAgentInput(surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.agent_input_ms = monotonicNow();
+}
+
+/// W9c②: 사용자가 페이지 밖에서 이 탭을 움직였다 — 대화상자 sheet 에 답했다 등(창이 부른다). 페이지 입력 시각은 건드리지 않는다.
+pub fn noteUserAction(surface_id: u64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    s.user_action_ms = monotonicNow();
 }
 
 /// 입력(W4b·W4c — 라우팅은 창이 정했다). 만들어졌고 sidecar 가 돌 때만 보낸다 — 입력은 쥐었다가 늦게 보낼 것이 아니다(첫
@@ -2498,6 +2540,188 @@ pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: 
     removeDialog(gpa, s, token);
     if (s.created) send(gpa, .{ .dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .text = buf[0..clamped.len], .suppress = suppress } });
     flushDeferredReleases(gpa); // 답 뒤에 — 페이지가 풀린 다음 놓는다(3 회차)
+}
+
+// ── W9c②: 에이전트가 대화상자를 보고 답한다 ────────────────────────────────────────────────────────────────────────
+
+const never_ms: i64 = std.math.minInt(i64) / 2;
+
+/// 도착한 대화상자의 원인(`dialog_cause.classify`) — 팝업 가족 전체의 마지막 에이전트 입력과 마지막 사용자 입력(페이지 입력·페이지 밖
+/// 동작 중 나중 것)으로. 가족 탭의 입력도 친다(연 탭의 누름이 팝업의 alert 를 부를 수 있다). 사용자가 고른 닫기를 묻는 중에 온 떠나기
+/// 확인은 시각과 무관하게 사용자 것이다(에이전트의 닫기·`closeAskedByAgent` 는 아니다).
+fn arrivalCause(surface_id: u64, kind: DialogKind, now_ms: i64) dialog_cause.Cause {
+    const me = surfaces.getPtr(surface_id) orelse return .unknown;
+    const user_close = kind == .before_unload and (me.close_ask == .asking or me.close_ask == .asked) and !me.close_ask_agent;
+    const family = popupFamily(surface_id);
+    var agent_ms: i64 = never_ms;
+    var user_ms: i64 = never_ms;
+    for (surfaces.keys(), surfaces.values()) |id, *s| {
+        if (popupFamily(id) != family) continue;
+        agent_ms = @max(agent_ms, s.agent_input_ms);
+        user_ms = @max(user_ms, @max(s.last_user_input_ms, s.user_action_ms));
+    }
+    return dialog_cause.classify(agent_ms, user_ms, now_ms, user_close);
+}
+
+/// 방금 넣은(마지막) 대화상자에 원인·도착 시각을 적는다.
+fn stampArrival(surface_id: u64, cause: dialog_cause.Cause, now_ms: i64) void {
+    const s = surfaces.getPtr(surface_id) orelse return;
+    if (s.dialogs.items.len == 0) return;
+    const d = &s.dialogs.items[s.dialogs.items.len - 1];
+    d.cause = cause;
+    d.arrived_ms = now_ms;
+}
+
+/// 주소의 출처(`scheme://host[:port]` — 주소의 앞 조각). 출처 규칙(`fields.checkOrigin` — 사용자 정보 `@` 등)을 못 지나면 빈 글.
+/// 떠나기 확인·파일 선택은 sidecar 가 출처를 싣지 않는다(실측 — 빈 글) — 탭 주소에서 낸다.
+pub fn urlOrigin(url: []const u8) []const u8 {
+    const sep = std.mem.indexOf(u8, url, "://") orelse return "";
+    var end = url.len;
+    for (url[sep + 3 ..], sep + 3..) |c, i| if (c == '/' or c == '?' or c == '#') {
+        end = i;
+        break;
+    };
+    const origin = url[0..end];
+    ws.fields.checkOrigin(origin) catch return "";
+    return origin;
+}
+
+/// `browser.dialog` 의 한 줄 — 빌린 글은 다음 `apply`·답까지만 유효하다(곧 JSON 으로 옮긴다).
+pub const DialogEntry = struct {
+    tab: u64,
+    token: u64,
+    kind: DialogKind,
+    message: []const u8,
+    origin: []const u8,
+    default_text: []const u8,
+    cause: dialog_cause.Cause,
+    shown: bool,
+    user_input_since_arrival: bool,
+
+    /// `dialog_cause.mayAnswer` 에 넣을 상태 — 그 탭이 묻는 에이전트가 연 탭인지(C13)는 앱이 안다.
+    pub fn situation(self: DialogEntry, agent_tab: bool) dialog_cause.Situation {
+        return .{ .cause = self.cause, .shown = self.shown, .user_input_since_arrival = self.user_input_since_arrival, .agent_tab = agent_tab };
+    }
+
+    pub fn kindName(self: DialogEntry) []const u8 {
+        return self.kind.wireName();
+    }
+};
+
+/// 도착 뒤 사용자가 그 탭에 손댔는가(페이지 입력·페이지 밖 동작).
+fn userInputSince(s: *const Surface, since_ms: i64) bool {
+    return @max(s.last_user_input_ms, s.user_action_ms) > since_ms;
+}
+
+fn entryOf(id: u64, s: *const Surface, d: *const Dialog) DialogEntry {
+    return .{
+        .tab = id,
+        .token = d.token,
+        .kind = d.kind,
+        .message = d.message,
+        .origin = if (d.origin.len > 0) d.origin else urlOrigin(s.url orelse ""),
+        // 파일 선택의 기본 경로는 싣지 않는다 — 사용자가 마지막에 연 폴더가 샜다(계획 공격 1 회차).
+        .default_text = if (d.kind == .prompt) d.default_text else "",
+        .cause = d.cause,
+        .shown = d.shown_by != 0,
+        .user_input_since_arrival = userInputSince(s, d.arrived_ms),
+    };
+}
+
+/// 그 탭의 팝업 가족에 떠 있는 JS 대화상자·파일 선택 — (탭 번호, 도착) 순으로 `out` 에 채운다(넘치면 거기까지). 권한 요청은 싣지 않는다
+/// (사용자가 정한다 — W5b).
+pub fn dialogList(surface_id: u64, out: []DialogEntry) []DialogEntry {
+    if (!surfaces.contains(surface_id)) return out[0..0];
+    const family = popupFamily(surface_id);
+    var n: usize = 0;
+    var last: u64 = 0; // 번호 순으로 — 탭 표의 순서는 넣은 차례다
+    while (n < out.len) {
+        var next: ?u64 = null;
+        for (surfaces.keys()) |id| {
+            if (id <= last or popupFamily(id) != family) continue;
+            if (next == null or id < next.?) next = id;
+        }
+        const id = next orelse break;
+        last = id;
+        const s = surfaces.getPtr(id).?;
+        for (s.dialogs.items) |*d| {
+            if (d.kind == .permission) continue;
+            if (n == out.len) break;
+            out[n] = entryOf(id, s, d);
+            n += 1;
+        }
+    }
+    return out[0..n];
+}
+
+/// 답하는 에이전트가 무엇을 볼 수 있나 — 앱(`app_host_abi`)이 grant 표·에이전트 탭 표로 답한다.
+pub const DialogAccess = struct {
+    ctx: ?*const anyopaque = null,
+    /// 그 탭의 대화상자를 보고 답할 수 있는가(그 탭의 grant — cap 연결은 자기 탭만).
+    granted: *const fn (?*const anyopaque, u64) bool,
+    /// 그 탭은 이 에이전트가 `browser.open` 으로 연 탭인가(C13).
+    agent_tab: *const fn (?*const anyopaque, u64) bool,
+};
+
+pub const AgentReplyError = error{
+    /// 답할 대화상자가 없다 — 번호를 줬으면 그 번호가 없거나 grant 가 없는 탭의 것이다(둘을 가르지 않는다).
+    NoDialog,
+    /// 사용자 것이다(또는 누구 것인지 모르는데 사람의 탭·보이는 중이다) — 사용자가 정한다.
+    NotYours,
+    /// 파일 선택은 닫기만 — 고르기는 이 메서드가 하지 않는다.
+    FileChooser,
+    /// 사용자가 이 문서에 손댔다 — 떠나기 확인은 머무르기만(저장하지 않은 입력을 지킨다).
+    LeaveRefused,
+};
+
+pub const AgentReplied = struct { kind: DialogKind, continues: bool };
+
+/// W9c②: 에이전트의 답(`browser.handleDialog`). `token` 이 없으면 그 탭 자신의 첫 JS 대화상자(없으면 첫 파일 선택), 있으면 가족에서 그
+/// 번호 — grant 가 있는 탭의 것만. 답해도 되는지는 `dialog_cause` 가 정한다. 답은 사용자의 답과 같은 길(`replyDialog` — 닫기 묻기·미룬
+/// 놓기)로 가고, 떠 있던 sheet 는 창의 다음 tick 이 거둔다(`tickOsrDialog`). 에이전트는 「더 띄우지 못하게」 를 고르지 않는다.
+pub fn agentReplyDialog(gpa: std.mem.Allocator, surface_id: u64, token: ?u64, accept: bool, text: []const u8, access: DialogAccess) AgentReplyError!AgentReplied {
+    const target: struct { id: u64, s: *Surface, d: *Dialog } = blk: {
+        const me = surfaces.getPtr(surface_id) orelse return error.NoDialog;
+        if (token) |t| {
+            const family = popupFamily(surface_id);
+            for (surfaces.keys(), surfaces.values()) |id, *s| {
+                if (popupFamily(id) != family) continue;
+                for (s.dialogs.items) |*d| if (d.token == t and d.kind != .permission) {
+                    if (!access.granted(access.ctx, id)) return error.NoDialog;
+                    break :blk .{ .id = id, .s = s, .d = d };
+                };
+            }
+            return error.NoDialog;
+        }
+        for (me.dialogs.items) |*d| switch (d.kind) {
+            .alert, .confirm, .prompt, .before_unload => break :blk .{ .id = surface_id, .s = me, .d = d },
+            else => {},
+        };
+        for (me.dialogs.items) |*d| if (d.kind.isFile()) break :blk .{ .id = surface_id, .s = me, .d = d };
+        return error.NoDialog;
+    };
+    const entry = entryOf(target.id, target.s, target.d);
+    const situation = entry.situation(access.agent_tab(access.ctx, target.id));
+    if (!dialog_cause.mayAnswer(situation)) return error.NotYours;
+    const kind = target.d.kind;
+    const tok = target.d.token;
+    if (kind.isFile()) {
+        if (accept) return error.FileChooser;
+        target.s.agent_input_ms = monotonicNow();
+        replyFileDialog(gpa, target.id, tok, false);
+        return .{ .kind = kind, .continues = false };
+    }
+    const leaving = kind == .before_unload and accept;
+    if (leaving) {
+        // 이 문서에 사용자가 손댔다(새 문서가 열린 뒤의 페이지 입력) — 떠나면 그 입력을 잃을 수 있다.
+        const touched = target.s.last_user_input_ms != never_ms and target.s.last_user_input_ms >= target.s.last_nav_ms;
+        if (!dialog_cause.mayLeave(situation, touched)) return error.LeaveRefused;
+        target.s.agent_nav.before_unload = false; // 떠나기 — 이동은 이어진다(그 navigate op 은 이미 끝났다)
+    }
+    // 답이 부른 다음 대화상자(confirm 뒤 alert)도 에이전트 것이다.
+    target.s.agent_input_ms = monotonicNow();
+    replyDialog(gpa, target.id, tok, accept, text, false);
+    return .{ .kind = kind, .continues = leaving };
 }
 
 /// 파일 선택의 경로 하나(여러 개면 여러 번). 경로 규칙을 못 지나면 버린다.
@@ -4300,9 +4524,12 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 .prompt => .prompt,
                 .before_unload => .before_unload,
             };
+            // W9c②: 누가 띄웠나 — 가족의 op 호출을 끝내기(아래 `failDevtools`) 전에, 도착한 이 순간의 시각으로 한 번.
+            const cause = arrivalCause(v.browser, kind, now_ms);
             if (!queueDialog(gpa, v.browser, v.request, kind, v.origin, v.message, v.default_text, "", v.offer_suppress)) {
                 send(gpa, .{ .dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = kind == .before_unload } });
             } else {
+                stampArrival(v.browser, cause, now_ms);
                 // 페이지가 멈췄다 — 그 탭의 DevTools 호출은 답하지 않는다: 곧 끝낸다(자리는 sidecar 의 답까지 쥔다). op 이 정한다 —
                 // 누름을 보냈으면 동작의 결과로, 아니면 실패로(W9b③ 적대 리뷰 2 회차: click 뒤 alert 면 30 초 뒤 답 없이 끊겼다).
                 // 같은 팝업 가족의 탭도 멈췄다 — 그 호출들도 곧 끝낸다(3 회차).
@@ -4323,8 +4550,10 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
                 .open_folder => .file_open_folder,
                 .save => .file_save,
             };
-            if (!queueDialog(gpa, v.browser, v.request, kind, "", v.title, v.default_path, v.accept, false))
+            const cause = arrivalCause(v.browser, kind, now_ms);
+            if (!queueDialog(gpa, v.browser, v.request, kind, "", v.title, v.default_path, v.accept, false)) {
                 send(gpa, .{ .file_dialog_reply = .{ .browser = v.browser, .request = v.request, .accept = false } });
+            } else stampArrival(v.browser, cause, now_ms);
         },
         // 받지 못하면(상한·모르는 탭) 「못 물음」으로 답한다 — 차단은 Chromium 이 기억하고 닫기는 embargo 를 쌓는다.
         // maru 가 허용을 기록한 기억된 위치 요청은 허용과 「없음」으로(되풀이된 못 물음이 embargo 를 만들지 않게) — sidecar 의
@@ -6168,4 +6397,265 @@ test "W9a 적대 리뷰 5 회차: 가족 탭의 대화상자는 같은 호스트
     // 자기 대화상자.
     testApply(gpa, .{ .js_dialog = .{ .browser = 51, .request = 3, .kind = .alert, .origin = "http://127.0.0.1:8000", .message = "" } });
     try std.testing.expect(dialogPausesScript(51));
+}
+
+// ── W9c②: 에이전트의 대화상자 답 ───────────────────────────────────────────────────────────────────────────────
+
+/// 시험의 grant·에이전트 탭 표(탭 번호 비트 — 0..63).
+const TestAccess = struct {
+    granted: u64 = 0,
+    agent: u64 = 0,
+    fn has(bits: u64, tab: u64) bool {
+        return tab < 64 and bits & (@as(u64, 1) << @intCast(tab)) != 0;
+    }
+    fn grantedFn(ctx: ?*const anyopaque, tab: u64) bool {
+        const self: *const TestAccess = @ptrCast(@alignCast(ctx.?));
+        return has(self.granted, tab);
+    }
+    fn agentFn(ctx: ?*const anyopaque, tab: u64) bool {
+        const self: *const TestAccess = @ptrCast(@alignCast(ctx.?));
+        return has(self.agent, tab);
+    }
+    fn access(self: *const TestAccess) DialogAccess {
+        return .{ .ctx = self, .granted = grantedFn, .agent_tab = agentFn };
+    }
+};
+
+fn testLastDialog(surface_id: u64) *Dialog {
+    const s = surfaces.getPtr(surface_id).?;
+    return &s.dialogs.items[s.dialogs.items.len - 1];
+}
+
+test "W9c②: 대화상자의 원인은 도착할 때 팝업 가족의 마지막 에이전트·사용자 시각으로 한 번 정한다 — 다른 가족은 세지 않고, 사용자가 묻는 닫기의 떠나기 확인은 사용자 것" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 7, 8, 9 });
+    surfaces.getPtr(8).?.popup_family = 7; // 7 이 연 팝업
+    const s7 = surfaces.getPtr(7).?;
+    // 에이전트 누름 뒤 2 초에 setTimeout alert — 에이전트 것.
+    s7.agent_input_ms = 1_000;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "https://a.test", .message = "" } }, 3_000);
+    try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
+    try std.testing.expectEqual(@as(i64, 3_000), testLastDialog(7).arrived_ms);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    // 사용자가 팝업(같은 가족)에서 눌렀다 — 다른 가족(9)의 에이전트 입력은 세지 않는다.
+    surfaces.getPtr(8).?.last_user_input_ms = 9_000;
+    surfaces.getPtr(9).?.agent_input_ms = 9_400;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .confirm, .origin = "https://a.test", .message = "" } }, 9_500);
+    try std.testing.expectEqual(dialog_cause.Cause.user, testLastDialog(7).cause);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    // 둘 다 창 안 — 모호.
+    s7.agent_input_ms = 9_500;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .alert, .origin = "", .message = "" } }, 9_700);
+    try std.testing.expectEqual(dialog_cause.Cause.ambiguous, testLastDialog(7).cause);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    // 둘 다 오래됐다 — 모름.
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 4, .kind = .alert, .origin = "", .message = "" } }, 100_000);
+    try std.testing.expectEqual(dialog_cause.Cause.unknown, testLastDialog(7).cause);
+    replyDialog(gpa, 7, testLastDialog(7).token, true, "", false);
+    // 사용자가 고른 닫기를 묻는 중의 떠나기 확인 — 에이전트가 방금 움직였어도 사용자 것.
+    try std.testing.expect(askClose(gpa, 7, 0));
+    s7.agent_input_ms = 200_000;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 5, .kind = .before_unload, .origin = "", .message = "" } }, 200_001);
+    try std.testing.expectEqual(dialog_cause.Cause.user, testLastDialog(7).cause);
+    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false);
+    _ = takeCloseAsk(7, 0); // 머물렀다 — 닫기 끝
+    // 에이전트가 묻는 닫기(`browser.close`) — 그 떠나기 확인은 에이전트 것이다(묻는 순간 에이전트 시각을 적는다).
+    try std.testing.expect(askCloseByAgent(gpa, 7, 0));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
+    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false);
+    // 파일 선택도 같은 규칙.
+    noteAgentInput(7);
+    apply(gpa, .{ .file_dialog = .{ .browser = 7, .request = 7, .mode = .open } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
+}
+
+test "W9c②: 사용자의 주소창·탐색 단추·sheet 답은 페이지 입력 시각을 건드리지 않고 따로 적는다(제안 목록·다운로드 판정 그대로), 에이전트의 이동은 에이전트 시각" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{7});
+    const s7 = surfaces.getPtr(7).?;
+    const before = monotonicNow();
+    noteUserNavigation(7);
+    try std.testing.expect(s7.user_action_ms >= before);
+    try std.testing.expectEqual(never_ms, s7.last_user_input_ms); // 페이지 입력은 그대로
+    s7.user_action_ms = never_ms;
+    navAction(gpa, 7, .reload);
+    try std.testing.expect(s7.user_action_ms >= before);
+    try std.testing.expectEqual(never_ms, s7.last_user_input_ms);
+    s7.user_action_ms = never_ms;
+    noteUserAction(7);
+    try std.testing.expect(s7.user_action_ms >= before);
+    try std.testing.expectEqual(never_ms, s7.agent_input_ms);
+    try std.testing.expect(agentNavigate(gpa, 7, "https://a.test/"));
+    try std.testing.expect(s7.agent_input_ms >= before);
+    // 사용자의 탐색 단추가 부른 떠나기 확인은 사용자 것이다(페이지 입력이 없어도).
+    s7.agent_input_ms = never_ms;
+    navAction(gpa, 7, .back);
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.user, testLastDialog(7).cause);
+}
+
+test "W9c②: dialogList — 가족의 대화상자를 (탭 번호, 도착) 순으로, 권한 요청·다른 가족은 빼고, 파일 선택은 file·경로 없이, 떠나기 확인·파일의 출처는 탭 주소에서" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 9, 8, 7 }); // 넣은 차례와 상관없이 번호 순
+    surfaces.getPtr(8).?.popup_family = 7;
+    surfaces.getPtr(7).?.url = try gpa.dupe(u8, "https://a.test:8443/p?q=1#h");
+    apply(gpa, .{ .js_dialog = .{ .browser = 8, .request = 1, .kind = .prompt, .origin = "https://b.test", .message = "이름?", .default_text = "기본" } }, 10);
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .before_unload, .origin = "", .message = "" } }, 20);
+    apply(gpa, .{ .file_dialog = .{ .browser = 7, .request = 3, .mode = .open_multiple, .title = "Select files", .default_path = "/Users/someone/secret" } }, 30);
+    apply(gpa, .{ .permission_request = .{ .browser = 7, .request = 4, .origin = "https://a.test", .kinds = ws.message.PermissionKind.geolocation.bit() } }, 40);
+    apply(gpa, .{ .js_dialog = .{ .browser = 9, .request = 5, .kind = .alert, .origin = "https://c.test", .message = "" } }, 50);
+    surfaces.getPtr(7).?.last_user_input_ms = 25; // 떠나기 확인 뒤, 파일 선택 전에 사용자가 7 을 눌렀다
+    var buf: [8]DialogEntry = undefined;
+    const list = dialogList(8, &buf);
+    try std.testing.expectEqual(@as(usize, 3), list.len);
+    try std.testing.expectEqual(@as(u64, 7), list[0].tab);
+    try std.testing.expectEqualStrings("before_unload", list[0].kindName());
+    try std.testing.expectEqualStrings("https://a.test:8443", list[0].origin);
+    try std.testing.expect(list[0].user_input_since_arrival);
+    try std.testing.expectEqualStrings("file", list[1].kindName());
+    try std.testing.expectEqualStrings("", list[1].default_text); // 사용자의 마지막 폴더가 새지 않게
+    try std.testing.expect(!list[1].user_input_since_arrival);
+    try std.testing.expectEqual(@as(u64, 8), list[2].tab);
+    try std.testing.expectEqualStrings("prompt", list[2].kindName());
+    try std.testing.expectEqualStrings("기본", list[2].default_text);
+    try std.testing.expectEqualStrings("https://b.test", list[2].origin);
+    try std.testing.expect(list[1].token < list[2].token or list[1].tab < list[2].tab);
+    // 다른 가족은 따로, 모르는 탭은 비었다, 넘치면 거기까지.
+    try std.testing.expectEqual(@as(usize, 1), dialogList(9, &buf).len);
+    try std.testing.expectEqual(@as(usize, 0), dialogList(99, &buf).len);
+    try std.testing.expectEqual(@as(usize, 2), dialogList(7, buf[0..2]).len);
+    // 출처 규칙을 못 지나는 주소(사용자 정보)는 빈 출처.
+    try std.testing.expectEqualStrings("", urlOrigin("https://u:p@a.test/"));
+    try std.testing.expectEqualStrings("http://127.0.0.1:8000", urlOrigin("http://127.0.0.1:8000"));
+    try std.testing.expectEqualStrings("", urlOrigin("about:blank"));
+}
+
+test "W9c②: agentReplyDialog — 사용자 것은 거절, 에이전트 것은 보여도 답한다(sheet 는 다음 tick 에 닫힌다), 번호는 grant 있는 가족 탭만(모르는 번호와 같은 실패), 모름은 에이전트 탭에서만" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 7, 8 });
+    surfaces.getPtr(8).?.popup_family = 7;
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    const s7 = surfaces.getPtr(7).?;
+    try std.testing.expectError(error.NoDialog, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    // 에이전트가 띄웠다 — 사용자에게 sheet 로 보이는 중이어도 답한다.
+    s7.agent_input_ms = 1_000;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .prompt, .origin = "", .message = "" } }, 2_000);
+    markDialogShown(7, testLastDialog(7).token, 11);
+    const r = try agentReplyDialog(gpa, 7, null, true, "maru", acc.access());
+    try std.testing.expectEqual(DialogKind.prompt, r.kind);
+    try std.testing.expect(!r.continues);
+    try std.testing.expectEqual(@as(usize, 0), s7.dialogs.items.len);
+    try std.testing.expect(s7.agent_input_ms > 1_000); // 답이 부른 다음 대화상자도 에이전트 것이다
+    var frames: [8]Message = undefined;
+    var n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expect(frames[0].dialog_reply.accept and !frames[0].dialog_reply.suppress);
+    try std.testing.expectEqualStrings("maru", frames[0].dialog_reply.text);
+    outbox_pending.clearRetainingCapacity();
+    // 그 답 뒤 곧 온 alert(사슬) — 에이전트 것.
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .alert, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    // 아래는 지금보다 한참 뒤의 시각으로 잰다 — 답이 적은 진짜 시각(지금)은 창 밖이 된다.
+    const t: i64 = monotonicNow() + 10_000_000;
+    // 사용자가 띄웠다 — 거절(보이지 않아도).
+    s7.agent_input_ms = never_ms;
+    s7.last_user_input_ms = t + 50_000;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .confirm, .origin = "", .message = "" } }, t + 50_100);
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
+    replyDialog(gpa, 7, testLastDialog(7).token, false, "", false);
+    // 가족 탭의 대화상자 — 번호로. grant 가 없으면 모르는 번호와 같은 실패.
+    surfaces.getPtr(8).?.agent_input_ms = t + 100_000;
+    apply(gpa, .{ .js_dialog = .{ .browser = 8, .request = 4, .kind = .alert, .origin = "", .message = "" } }, t + 100_001);
+    const t8 = testLastDialog(8).token;
+    try std.testing.expectError(error.NoDialog, agentReplyDialog(gpa, 7, t8, true, "", acc.access()));
+    try std.testing.expectError(error.NoDialog, agentReplyDialog(gpa, 7, t8 + 1000, true, "", acc.access()));
+    try std.testing.expectError(error.NoDialog, agentReplyDialog(gpa, 7, null, true, "", acc.access())); // 번호 없이는 그 탭 자신의 것만
+    acc.granted |= 1 << 8;
+    _ = try agentReplyDialog(gpa, 7, t8, true, "", acc.access());
+    try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(8).?.dialogs.items.len);
+    // 누가 띄웠는지 모른다 — 사람의 탭이면 거절, 에이전트가 연 탭이면 안 보일 때만.
+    s7.last_user_input_ms = never_ms;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 5, .kind = .alert, .origin = "", .message = "" } }, t + 900_000);
+    try std.testing.expectEqual(dialog_cause.Cause.unknown, testLastDialog(7).cause);
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    acc.agent = 1 << 7;
+    markDialogShown(7, testLastDialog(7).token, 11);
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    markDialogShown(7, testLastDialog(7).token, 0);
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    // 모호 — 사용자에게 보이거나 도착 뒤 사용자가 손댔으면 거절.
+    s7.agent_input_ms = t + 1_000_000;
+    s7.last_user_input_ms = t + 1_000_001;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 6, .kind = .alert, .origin = "", .message = "" } }, t + 1_000_002);
+    try std.testing.expectEqual(dialog_cause.Cause.ambiguous, testLastDialog(7).cause);
+    s7.user_action_ms = t + 1_000_003;
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    s7.user_action_ms = never_ms;
+    s7.last_user_input_ms = never_ms;
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    // 파일 선택 — 닫기만.
+    outbox_pending.clearRetainingCapacity();
+    noteAgentInput(7);
+    apply(gpa, .{ .file_dialog = .{ .browser = 7, .request = 7, .mode = .open } }, monotonicNow());
+    try std.testing.expectError(error.FileChooser, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    const f = try agentReplyDialog(gpa, 7, null, false, "", acc.access());
+    try std.testing.expect(f.kind.isFile());
+    n = sentFrames(&frames);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expect(!frames[0].file_dialog_reply.accept);
+}
+
+test "W9c②: 떠나기 확인의 「떠나기」 — 사용자가 이 문서에 손댔으면 거절(머무르기는 된다), 손대지 않았으면 이동이 이어진다고 답한다, 에이전트가 묻는 닫기는 닫힌다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{7});
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 1 << 7 };
+    const s7 = surfaces.getPtr(7).?;
+    // 사용자가 이 문서에 글을 쳤다(새 문서 뒤의 페이지 입력) — 에이전트의 이동이 부른 떠나기 확인이어도 떠나기는 거절.
+    s7.last_nav_ms = 100;
+    s7.last_user_input_ms = 200;
+    try std.testing.expect(agentNavigate(gpa, 7, "https://b.test/"));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.agent, testLastDialog(7).cause);
+    try std.testing.expect(s7.agent_nav.before_unload);
+    try std.testing.expectError(error.LeaveRefused, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    const stay = try agentReplyDialog(gpa, 7, null, false, "", acc.access());
+    try std.testing.expect(!stay.continues);
+    // 손대지 않은 문서 — 떠나기, 이동은 이어진다.
+    s7.last_nav_ms = 300;
+    try std.testing.expect(agentNavigate(gpa, 7, "https://b.test/"));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    const leave = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    try std.testing.expectEqual(DialogKind.before_unload, leave.kind);
+    try std.testing.expect(leave.continues);
+    try std.testing.expect(!s7.agent_nav.before_unload);
+    endAgentNav(7);
+    // 에이전트가 묻는 닫기의 떠나기 확인 — 그 에이전트가 떠나기로 답하면 닫힘을 기다린다.
+    try std.testing.expect(askCloseByAgent(gpa, 7, 0));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectEqual(CloseAskPhase.asked, closeAskPhase(7));
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
+    try std.testing.expectEqual(CloseAskPhase.asking, closeAskPhase(7));
+    try std.testing.expectEqual(CloseAskOutcome.waiting, takeCloseAsk(7, monotonicNow()));
+    // 사용자가 고른 닫기의 떠나기 확인은 에이전트 탭이어도 사용자 것 — 머무르기도 못 한다.
+    s7.close_ask = .none;
+    try std.testing.expect(askClose(gpa, 7, 0));
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 4, .kind = .before_unload, .origin = "", .message = "" } }, monotonicNow());
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, false, "", acc.access()));
 }

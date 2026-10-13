@@ -243,6 +243,8 @@ for k, (name, body) in enumerate(pages):
 PY
 # W9a①: navigate·get-url·screenshot — 아래로 긴 문서, 화면에 고정된 빨간 네모(스크롤해도 보기 좌표 20,20), 글이 있으면 떠나기 확인.
 printf '<!doctype html><title>w9a</title><style>body{height:5000px;margin:0}#fx{position:fixed;left:20px;top:20px;width:50px;height:50px;background:#f00}</style><div id=fx></div><a id=low href="#" style="position:absolute;left:10px;top:3000px">low</a><input id=t aria-label=Note style="position:absolute;left:100px;top:3020px"><script>addEventListener("beforeunload",function(e){if(document.getElementById("t").value){e.preventDefault();e.returnValue=""}})</script>' > "$root/www/w9a.html"
+# W9a 적대 리뷰 5 회차: 불러온 뒤 늦게 붙는 iframe(6 초 늦는 문서) — 그것이 불러오는 동안에도 exec 은 돈다(주 프레임 이동이 아니다).
+printf '<!doctype html><title>ifr</title>ifr<script>addEventListener("load",function(){setTimeout(function(){var f=document.createElement("iframe");f.src="/hang?ifr";document.body.appendChild(f)},300)})</script>' > "$root/www/ifr.html"
 # 받은 요청을 센다(새로고침이 문서를 다시 불렀는지).
 cat > "$root/server.py" <<'PY'
 import http.server, sys, functools, time
@@ -666,6 +668,13 @@ x0=\$(date +%s)
 x1=\$(date +%s)
 echo "\$((x1 - x0))" > "\$out/r4-exec-secs"
 sleep 7
+"\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/ifr.html" > "\$out/r5-ifr-nav" 2>&1
+sleep 1
+i0=\$(date +%s)
+"\$cli" browser exec --surface "\$nv" 'document.title' > "\$out/r5-ifr" 2>&1; echo "rc=\$?" >> "\$out/r5-ifr"
+i1=\$(date +%s)
+echo "\$((i1 - i0))" > "\$out/r5-ifr-secs"
+sleep 6
 "\$cli" browser navigate --surface "\$nv" "http://127.0.0.1:$port/w9a.html?back3" > "\$out/nv-back3" 2>&1
 # 적대 리뷰 1 회차: 좁은 rect 에 큰 scale(1×400, 8000)이 엔진을 죽였다 — 접혀서 찍히고 엔진은 산다. wire 가 거절하는 주소(탭 문자)는 곧 invalid_params.
 "\$cli" browser screenshot --surface "\$nv" --rect 0,0,1,400 --scale 8000 --out "\$out/r1-tall.png" > "\$out/r1-tall" 2>&1; echo "rc=\$?" >> "\$out/r1-tall"
@@ -865,7 +874,8 @@ grep -q '^rc=1$' "$out/r2-port" && grep -q 'http, https or about:blank' "$out/r2
 grep -q '(-32004)' "$out/r3-getter" && grep -q '^42$' "$out/r3-after" || fail "a thrown value whose name getter never ends was not stopped — the next exec on that tab did not answer ($(tr '\n' ' ' < "$out/r3-getter") · $(tr '\n' ' ' < "$out/r3-after"))"
 grep -q '^1$' "$out/r4-go" && [ "$(cat "$out/r4-go-secs")" -le 3 ] || fail "an exec whose script navigates did not answer at once ($(cat "$out/r4-go-secs")s · $(tr '\n' ' ' < "$out/r4-go"))"
 grep -q 'loading a new page' "$out/r4-exec" && grep -q '^rc=1$' "$out/r4-exec" && [ "$(cat "$out/r4-exec-secs")" -le 3 ] && ! grep -q 'GET /hit?r4ran' "$root/http.log" || fail "an exec sent while the tab was loading a new page was not refused at once, or ran later ($(cat "$out/r4-exec-secs")s · $(tr '\n' ' ' < "$out/r4-exec") · $(grep 'r4ran' "$root/http.log" | tr '\n' ' '))"
-echo "PASS w9a-r2: a script that never ends (and a thrown value whose getter never ends) is stopped after its timeout and the tab answers the next exec, an Error V8 cannot copy keeps its name and message, a long multi-line message survives, an out-of-range port is refused, an exec whose script navigates answers at once, an exec while that new page is still loading is refused at once and never runs later"
+grep -q '^"ifr"$' "$out/r5-ifr" && [ "$(cat "$out/r5-ifr-secs")" -le 3 ] || fail "an exec while only a late iframe was loading was refused or slow ($(cat "$out/r5-ifr-secs")s · $(tr '\n' ' ' < "$out/r5-ifr"))"
+echo "PASS w9a-r2: a script that never ends (and a thrown value whose getter never ends) is stopped after its timeout and the tab answers the next exec, an Error V8 cannot copy keeps its name and message, a long multi-line message survives, an out-of-range port is refused, an exec whose script navigates answers at once, an exec while that new page is still loading is refused at once and never runs later, an exec while only a late iframe loads runs"
 echo "PASS w9a-exec: exec on a Chromium tab returns strict JSON (await, undefined→null, NaN→null, args with __proto__ as an own key), reports thrown values and syntax errors with name and message, refuses results over the limit, runs -1 after --, and keeps strict CSP (eval blocked)"
 echo "PASS w9a-page: navigate waits for the load (an empty response ends at once with a warning, javascript: is refused, a page asking before leaving fails at once), get-url follows it, a rect screenshot of a scrolled hidden tab hits the fixed box ($fx, scale 2: $fx2), a full one is a PNG ($full)"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

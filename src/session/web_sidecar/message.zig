@@ -168,6 +168,11 @@ pub const Tag = enum(u8) {
     /// 만들어 그 페이지가 돌았다(maru 가 장이 없다며 닫기 전에 — 적대 리뷰 1 회차).
     new_tab_credit = 133,
 
+    /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
+    /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
+    /// 탭 전체의 「불러오는 중」(`nav_state`)은 iframe 도 세고, 이미 불러오는 중에 시작된 이동은 가르지 못했다.
+    main_frame_navigating = 66,
+
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
     /// `devtools_call` 의 끝(W9-0b) — 상태와 보낸 결과 크기. 결과가 있는 상태(`ok`·`cdp_error`)만 크기가 0 이 아닐 수 있다.
@@ -1182,6 +1187,7 @@ pub const Message = union(Tag) {
     devtools_call: DevtoolsCall,
     devtools_call_data: DevtoolsData,
     new_tab_credit: BrowserId,
+    main_frame_navigating: BrowserId,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

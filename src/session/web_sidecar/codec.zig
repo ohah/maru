@@ -82,7 +82,7 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeByte(@intFromBool(value.hidden));
             try writeUrl(&cursor, value.url);
         },
-        .destroy_browser, .close_asking, .new_tab_credit, .browser_created, .browser_closed, .page_started, .page_close_kept => |browser| try writeBrowser(&cursor, browser),
+        .destroy_browser, .close_asking, .new_tab_credit, .browser_created, .browser_closed, .page_started, .page_close_kept, .main_frame_navigating => |browser| try writeBrowser(&cursor, browser),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -445,6 +445,7 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .browser_closed => .{ .browser_closed = try readBrowser(&cursor) },
         .page_started => .{ .page_started = try readBrowser(&cursor) },
         .page_close_kept => .{ .page_close_kept = try readBrowser(&cursor) },
+        .main_frame_navigating => .{ .main_frame_navigating = try readBrowser(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
@@ -927,6 +928,7 @@ test "every message round trips" {
     try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .browser_closed = 9 })).browser_closed);
     try std.testing.expectEqual(@as(u64, 11), (try roundTrip(.{ .page_started = 11 })).page_started);
     try std.testing.expectEqual(@as(u64, 12), (try roundTrip(.{ .page_close_kept = 12 })).page_close_kept);
+    try std.testing.expectEqual(@as(u64, 13), (try roundTrip(.{ .main_frame_navigating = 13 })).main_frame_navigating);
     try std.testing.expectEqualStrings("", (try roundTrip(.{ .title_changed = .{ .browser = 9, .text = "" } })).title_changed.text);
     try std.testing.expectEqual(@as(i32, -1), (try roundTrip(.{ .load_finished = .{ .browser = 9, .http_status = -1 } })).load_finished.http_status);
     try std.testing.expectEqual(RendererGoneReason.out_of_memory, (try roundTrip(.{ .renderer_gone = .{ .browser = 9, .reason = .out_of_memory } })).renderer_gone.reason);
@@ -1533,6 +1535,7 @@ test "every single-byte corruption of input frames decodes to valid fields or er
     const samples = [_]Message{
         .{ .page_started = 3 },
         .{ .page_close_kept = 3 },
+        .{ .main_frame_navigating = 3 },
         .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
         .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
         .{ .key = .{ .browser = 3, .kind = .char, .character = 'a', .unmodified_character = 'a' } },

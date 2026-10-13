@@ -278,6 +278,16 @@ pub const Op = struct {
                     self.setOutcome(gpa, .timeout);
                     return self.releaseStep(gpa);
                 }
+                // 팝업 가족의 다른 렌더러 탭의 대화상자 — getter 는 멈추지 않았다: 멈춘 뒤 놓는다(evaluate 와 같다, 적대 리뷰 5 회차).
+                if (reply == .failed and std.mem.eql(u8, reply.failed, ops.family_dialog_reason)) {
+                    self.setOutcome(gpa, .{ .failed = ops.family_dialog_reason });
+                    if (!self.terminated) {
+                        self.stage = .terminate;
+                        self.retries = 0;
+                        return terminateStep(gpa);
+                    }
+                    return self.releaseStep(gpa);
+                }
                 // 자리가 없다 — 잠깐 뒤 다시(전에는 이름·메시지를 잃었다, 적대 리뷰 4 회차).
                 if (reply == .not_sent and std.mem.eql(u8, reply.not_sent, ops.busy_reason) and self.retries < max_busy_retries) {
                     self.retries += 1;
@@ -1189,4 +1199,17 @@ test "W9a 적대 리뷰 4 회차 재현: 팝업 가족의 다른 탭 대화상�
     const fin = try finishOp(&op);
     defer gpa.free(fin.done.result);
     try testing.expectEqualStrings(ops.family_dialog_reason, fin.done.result);
+}
+
+test "W9a 적대 리뷰 5 회차: 던진 값을 읽는 중(getter)에 다른 렌더러의 가족 탭이 대화상자를 띄우면 terminate 한 뒤 놓는다" {
+    const gpa = testing.allocator;
+    const arg = try argJson("x", "[]");
+    defer gpa.free(arg);
+    var op = try Op.init(gpa, arg, 2);
+    defer op.deinit(gpa);
+    gpa.free(try evaluated(&op));
+    gpa.free((try op.feed(gpa, .{ .ok = "{\"result\":{\"type\":\"object\",\"objectId\":\"e\"},\"exceptionDetails\":{\"exception\":{\"type\":\"object\",\"objectId\":\"e\"}}}" })).call.params);
+    const t = try op.feed(gpa, .{ .failed = ops.family_dialog_reason });
+    defer gpa.free(t.call.params);
+    try testing.expectEqualStrings("Runtime.terminateExecution", t.call.method);
 }

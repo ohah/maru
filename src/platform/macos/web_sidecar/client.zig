@@ -114,6 +114,7 @@ pub fn get() *c.cef_client_t {
         load.on_load_error = &dialogs.onLoadError;
         request.on_render_process_terminated = &onRenderProcessTerminated;
         request.on_open_urlfrom_tab = &new_tab.onOpenUrlFromTab;
+        request.on_before_browse = &onBeforeBrowse; // W9a 적대 리뷰 5 회차
         jsdialog.on_jsdialog = &dialogs.onJsDialog;
         jsdialog.on_before_unload_dialog = &dialogs.onBeforeUnloadDialog;
         jsdialog.on_reset_dialog_state = &dialogs.onResetDialogState;
@@ -328,6 +329,18 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
     const text = library.readString(browsers.state.api, url, &buf);
     if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다)
     browsers.state.writer.send(.{ .url_changed = .{ .browser = entry.id, .url = text } }) catch {};
+}
+
+/// `on_before_browse` — 주 프레임의 이동이 시작된다(리다이렉트마다도): maru 에 알리고(W9a 적대 리뷰 5 회차 — 확정 전 DevTools 호출을
+/// 가른다) 그대로 둔다(0 — 막지 않는다).
+fn onBeforeBrowse(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, req: [*c]c.cef_request_t, _: c_int, _: c_int) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(req);
+    if (frame == null or frame.*.is_main.?(frame) == 0) return 0;
+    const id = (entryOf(browser) orelse return 0).id;
+    browsers.state.writer.send(.{ .main_frame_navigating = id }) catch {};
+    return 0;
 }
 
 /// `on_load_start` — 새 문서면 툴팁 기억을 비우고(W6b — 옛 페이지 툴팁이 남지 않게, 새 문서의 같은 글이 다시 오게) 대화상자

@@ -1564,6 +1564,7 @@ pub fn testApplyNow(gpa: std.mem.Allocator, message: Message) void {
 
 pub fn testForget(gpa: std.mem.Allocator) void {
     if (!builtin.is_test) @compileError("test only");
+    destroyed_ids = @splat(0);
     decided = null;
     state = .off;
     parked.deinit(gpa); // W10c: 받는 중인 탭을 닫으면 주차한다
@@ -1577,6 +1578,20 @@ pub fn testForget(gpa: std.mem.Allocator) void {
 pub fn owns(surface_id: u64) bool {
     return surfaces.contains(surface_id);
 }
+
+/// W9a③ 적대 리뷰 3 회차: DevTools 를 부를 수 없는 탭이 왜 그런가 — 닫혔다(maru 가 닫아 기록이 지워졌거나, 페이지·에이전트가 닫아 브라우저만
+/// 사라졌다), 한 번도 보이지 않았다(기록이 생긴 적이 없다), 그 밖(엔진이 다시 뜨는 중·브라우저를 만드는 중). surface 번호는 다시 쓰지 않는다.
+pub const Unavailable = enum { closed, not_shown, not_ready };
+
+pub fn unavailable(surface_id: u64) Unavailable {
+    if (surfaces.getPtr(surface_id)) |s| return if (s.close_ask == .closed or s.page_closed) .closed else .not_ready;
+    for (destroyed_ids) |id| if (id == surface_id) return .closed;
+    return .not_shown;
+}
+
+/// 최근에 지운 surface 번호(고리) — 기록이 없는 탭이 닫힌 것인지 한 번도 보이지 않은 것인지 가른다.
+var destroyed_ids: [64]u64 = @splat(0);
+var destroyed_next: usize = 0;
 
 /// 그 탭을 불러오는 중인가(모르는 탭은 거짓) — control-plane 의 `wait --load`(W9b①b).
 pub fn isLoading(surface_id: u64) bool {
@@ -1977,6 +1992,8 @@ pub fn markCloseAskClosed(surface_id: u64) void {
 /// Term 이 사라졌다 — 브라우저를 파괴한다. 마지막이면 sidecar 도 내린다.
 pub fn destroy(gpa: std.mem.Allocator, surface_id: u64) void {
     var kv = surfaces.fetchSwapRemove(surface_id) orelse return;
+    destroyed_ids[destroyed_next] = surface_id;
+    destroyed_next = (destroyed_next + 1) % destroyed_ids.len;
     // W9-0b: 호출은 끝내되 sidecar 가 살아 있으면 그 답(닫힘의 `detached`·주차면 결과)까지 자리를 쥔다.
     failDevtools(gpa, surface_id, .closed, state == .running or state == .starting);
     // Term 이 사라졌다 — 다음 프레임부터 그리지 않는다. 이미 GPU 에 올라간 장은 renderer 캐시의 텍스처가 IOSurface 를

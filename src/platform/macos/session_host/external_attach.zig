@@ -577,6 +577,8 @@ test "external attach maps mode transition failures without ambiguity" {
     try std.testing.expectEqual(attach_cli.ExitCode.internal, transitionExit(error.OutOfMemory));
     try std.testing.expectEqual(attach_cli.ExitCode.internal, transitionExit(error.FlagFailed));
     try std.testing.expectEqual(attach_cli.ExitCode.internal, transitionExit(error.AlreadyExternal));
+    // 재시도로 풀리지 않는 거부 — `busy`(다시 해 보라)가 아니다.
+    try std.testing.expectEqual(attach_cli.ExitCode.internal, transitionExit(error.ImageChannelNegotiated));
     try std.testing.expectEqual(attach_cli.ExitCode.protocol, transitionExit(error.ConnectionClosed));
 }
 

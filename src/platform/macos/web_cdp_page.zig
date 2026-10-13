@@ -23,8 +23,14 @@ pub const navigate_wait_ms: i64 = 25_000;
 /// navigate 의 끝을 보는 간격.
 pub const navigate_poll_ms: u32 = 50;
 
-/// 스크린샷 rect·출력 폭의 상한(CSS px) — WebKit 의 `maxSnapshotPt`(8000 pt)와 같은 뜻(거대 rect·scale 이 픽셀 버퍼를 터뜨리지 않게).
+/// 스크린샷 rect·출력 폭·높이의 상한(CSS px) — WebKit 의 `maxSnapshotPt`(8000 pt)와 같은 뜻(거대 rect·scale 이 픽셀 버퍼를 터뜨리지 않게).
+/// **높이도** 접는다(적대 리뷰 1 회차: 1×400 에 scale 8000 은 폭만 접혀 8000×3,200,000 px 를 청해 Chromium 엔진 전체가 Skia FATAL 로 죽었다 —
+/// 모든 Chromium 탭이 다시 떴다).
 pub const max_snapshot_css: f64 = 8000;
+/// 출력 픽셀 수의 상한(폭 × 높이 × scale² × 기기 배율²) — 8000×8000 수준. 그 안의 최대(16000×15400)도 helper 가 1.1–2.6 GB 를 썼다(1 회차 실측).
+pub const max_snapshot_pixels: f64 = 64_000_000;
+/// navigate 가 받는 주소 상한(wire 의 `max_url_bytes` 와 같다).
+pub const max_url_bytes: usize = 32 * 1024;
 
 pub const leave_page_reason = "the page asks before leaving (unsaved input) — the user decides in that tab; the navigation continues if they agree";
 pub const outside_reason = "the rect is outside the visible part of the page";
@@ -141,10 +147,12 @@ pub const Op = struct {
     fn clipFrom(self: *const Op, gpa: std.mem.Allocator, metrics: []const u8) !?[5]f64 {
         if (self.rect == null and self.scale == null) return null;
         const Viewport = struct { pageX: f64, pageY: f64, clientWidth: f64, clientHeight: f64 };
-        const parsed = try std.json.parseFromSlice(struct { cssLayoutViewport: Viewport }, gpa, metrics, .{ .ignore_unknown_fields = true });
+        const parsed = try std.json.parseFromSlice(struct { cssLayoutViewport: Viewport, layoutViewport: ?Viewport = null }, gpa, metrics, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         const vp = parsed.value.cssLayoutViewport;
         if (!(vp.clientWidth > 0 and vp.clientHeight > 0)) return error.NoViewport;
+        // 기기 배율 — 기기 픽셀 viewport / CSS viewport(없으면 1 로 본다).
+        const dpr: f64 = if (parsed.value.layoutViewport) |lv| (if (lv.clientWidth > 0) @max(lv.clientWidth / vp.clientWidth, 1) else 1) else 1;
         const r = self.rect orelse [4]f64{ 0, 0, vp.clientWidth, vp.clientHeight };
         // WebKit 처럼 rect 를 먼저 상한으로 접고(그 폭이 출력 배율의 기준), 보이는 영역과 겹친 곳만 찍는다.
         const cw = @min(r[2], max_snapshot_css);
@@ -154,13 +162,23 @@ pub const Op = struct {
         const x1 = @min(r[0] + cw, vp.clientWidth);
         const y1 = @min(r[1] + ch, vp.clientHeight);
         if (!(x1 > x0 and y1 > y0)) return error.Outside;
-        const scale = if (self.scale) |s| @min(cw * s, max_snapshot_css) / cw else 1;
-        return .{ x0 + vp.pageX, y0 + vp.pageY, x1 - x0, y1 - y0, scale };
+        const w = x1 - x0;
+        const h = y1 - y0;
+        // 출력 배율 — WebKit 처럼 접기 전 rect 폭 기준으로 폭을 8000 에 접고, 찍는 폭·높이와 전체 픽셀 수(기기 배율 포함)로도 접는다.
+        var scale: f64 = if (self.scale) |s| @min(cw * s, max_snapshot_css) / cw else 1;
+        scale = @min(scale, max_snapshot_css / w, max_snapshot_css / h);
+        const pixels = w * h * scale * scale * dpr * dpr;
+        if (pixels > max_snapshot_pixels) scale *= @sqrt(max_snapshot_pixels / pixels);
+        return .{ x0 + vp.pageX, y0 + vp.pageY, w, h, scale };
     }
 };
 
 /// navigate 가 받는 주소 — http·https 와 about:blank 만(W9a 작성자 선택: `javascript:`·`file:`·`chrome:`·`data:` 는 페이지 밖의 힘이다).
+/// wire 가 거절하는 꼴(32 KiB 넘음·UTF-8 아님·제어 문자 — `web_sidecar/fields.checkUrl`)도 여기서 거절한다: 보내기가 조용히 실패해 25 초 뒤
+/// 「ok」 로 답했다(적대 리뷰 1 회차).
 pub fn navigableUrl(url: []const u8) bool {
+    if (url.len > max_url_bytes or !std.unicode.utf8ValidateSlice(url)) return false;
+    for (url) |b| if (b < 0x20 or b == 0x7f) return false;
     if (std.mem.eql(u8, url, "about:blank")) return true;
     const colon = std.mem.indexOfScalar(u8, url, ':') orelse return false;
     const scheme = url[0..colon];
@@ -218,7 +236,14 @@ fn expectDone(step: Step, status: Status, result: []const u8) !void {
 
 test "W9a navigate: http·https·about:blank 만 받는다" {
     for ([_][]const u8{ "https://example.com/", "http://127.0.0.1:8080/a?b", "HTTPS://x.test", "about:blank" }) |u| try testing.expect(navigableUrl(u));
-    for ([_][]const u8{ "javascript:alert(1)", "file:///etc/passwd", "chrome://settings", "data:text/html,x", "about:srcdoc", "http:foo", "https://", "ftp://x", "" }) |u| try testing.expect(!navigableUrl(u));
+    for ([_][]const u8{ "javascript:alert(1)", "file:///etc/passwd", "chrome://settings", "data:text/html,x", "about:srcdoc", "http:foo", "https://", "ftp://x", "", "http://a.test/x\ty", "http://a.test/\x7f", "http://a.test/\xff" }) |u| try testing.expect(!navigableUrl(u));
+    // wire 상한(32 KiB)을 넘는 주소 — 보내기가 조용히 실패해 25 초를 기다렸다(적대 리뷰 1 회차).
+    const long = try testing.allocator.alloc(u8, max_url_bytes + 1);
+    defer testing.allocator.free(long);
+    @memset(long, 'a');
+    @memcpy(long[0..7], "http://");
+    try testing.expect(!navigableUrl(long));
+    try testing.expect(navigableUrl(long[0..max_url_bytes]));
     try testing.expectError(error.InvalidUrl, Op.init(testing.allocator, .navigate, "javascript:1"));
 }
 
@@ -304,6 +329,36 @@ test "W9a screenshot: rect 는 보기 좌표 — 스크롤(세로·오른쪽에�
         const p = try shotParams("{\"rect\":{\"x\":700,\"y\":0,\"width\":10,\"height\":10}}", metrics_scrolled);
         defer gpa.free(p);
         try testing.expectEqualStrings(outside_reason, p);
+    }
+}
+
+test "W9a 적대 리뷰 1 회차: 좁은 rect 에 큰 scale 은 높이로도 접고, 전체 픽셀 수(기기 배율 포함)도 접는다 — 8000×3,200,000 px 가 엔진을 죽였다" {
+    const gpa = testing.allocator;
+    const metrics2x = "{\"layoutViewport\":{\"pageX\":0,\"pageY\":0,\"clientWidth\":1250,\"clientHeight\":770},\"cssLayoutViewport\":{\"pageX\":0,\"pageY\":0,\"clientWidth\":625,\"clientHeight\":385}}";
+    {
+        // 1×400 에 scale 8000: 폭은 1×8000 = 8000 으로 접히지 않았고 높이 385×8000 — 이제 높이가 8000 이 되게 scale ≈ 20.78.
+        const p = try shotParams("{\"rect\":{\"x\":0,\"y\":0,\"width\":1,\"height\":400},\"scale\":8000}", metrics_scrolled);
+        defer gpa.free(p);
+        const parsed = try std.json.parseFromSlice(struct { format: []const u8, clip: struct { x: f64, y: f64, width: f64, height: f64, scale: f64 } }, gpa, p, .{});
+        defer parsed.deinit();
+        try testing.expect(parsed.value.clip.height * parsed.value.clip.scale <= max_snapshot_css + 0.001);
+        try testing.expect(parsed.value.clip.width * parsed.value.clip.scale <= max_snapshot_css + 0.001);
+    }
+    {
+        // 화면 전체(625×385)에 scale 20, 기기 배율 2 → 12500×7700 = 96 M px — 64 M 로 접힌다.
+        const p = try shotParams("{\"scale\":20}", metrics2x);
+        defer gpa.free(p);
+        const parsed = try std.json.parseFromSlice(struct { format: []const u8, clip: struct { x: f64, y: f64, width: f64, height: f64, scale: f64 } }, gpa, p, .{});
+        defer parsed.deinit();
+        const c = parsed.value.clip;
+        const px = c.width * c.scale * 2 * c.height * c.scale * 2;
+        try testing.expect(px <= max_snapshot_pixels * 1.001 and px > max_snapshot_pixels * 0.99);
+    }
+    {
+        // 상한 안이면 그대로(기기 배율 2 에서 50×50 scale 2).
+        const p = try shotParams("{\"rect\":{\"x\":20,\"y\":20,\"width\":50,\"height\":50},\"scale\":2}", metrics2x);
+        defer gpa.free(p);
+        try testing.expectEqualStrings("{\"format\":\"png\",\"clip\":{\"x\":20,\"y\":20,\"width\":50,\"height\":50,\"scale\":2}}", p);
     }
 }
 

@@ -356,7 +356,7 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "Requests come from the maru pane this process runs in; controlling a tab you did not open asks the user once. " ++
             "While the user answers that confirmation a call can take up to about 150 seconds (2 minutes for the answer, then the action), " ++
             "so give this server a tool timeout of at least 150 seconds. Calls run one at a time. " ++
-            "On Chromium tabs (engine=chromium in browser_list) exec and console are not available yet and answer -32008.") catch |e| break :blk e;
+            "On Chromium tabs (engine=chromium in browser_list) console is not available yet and answers -32008.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;

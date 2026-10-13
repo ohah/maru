@@ -1150,3 +1150,19 @@ wire 계약은 WebKit 과 같은 모양이되, 실측으로 같게 할 수 없�
 아는 주소 — 같은 탭의 앞선 op 뒤에, screenshot 은 `Page.getLayoutMetrics` → `Page.captureScreenshot` PNG: rect 는 WebKit 과 같은 보기 좌표에
 `cssLayoutViewport.pageX/pageY` 를 더하고 보이는 영역으로 자른다, 출력 폭은 WebKit 처럼 rect 폭 × scale ≤ 8000), 결과는 Swift 와 같은 PNG 조각
 스트림(`browser.screenshotChunk`). 한 번도 보이지 않은 탭은 「아직 보이지 않았다」 로 실패(몰래 만들지 않는다). 스모크 `w9a-page`.
+
+**W9a② 구현**(executeScript — `web_cdp_exec.zig`): `Runtime.evaluate` 한 번(식 `(async (args) => (\n SRC \n))(ARGS)`, args 는 JS 리터럴 — `__proto__`
+키는 계산된 키로, `allowUnsafeEvalBlockedByCSP:false`, 묶음 `maru-exec-<id>`), 인자가 64 KiB 를 넘으면 `invalid_params`(D3), 문법 사전 검사
+없음(D4). 답은 나무로 풀지 않고 `std.json.Scanner` 로 걷는다(`result.value` 의 자리만 잡고 다시 쓴다 — `\u` 이스케이프는 UTF-8 로, 깊이 128,
+숫자 lexeme 그대로; `exceptionDetails` 만 작은 나무). 던진 값이 객체면 `Runtime.callFunctionOn` 으로 WebKit `diagnostic()` 과 같은 이름·메시지·
+stack 을 읽고(258·16 KiB·24 KiB 상한, `diagnostics_truncated`), 원시 값이면 name `Error`. `unserializableValue`·V8 의 by-value 실패(-32000·
+Internal error)·너무 깊은 값은 serialization 오류, 「navigated or closed」·「context was destroyed」 는 navigation 오류. 끝의 전달은 넷
+(`Delivery`): 엄격 JSON 은 snapshot 과 같은 `completeCdpResult`(≤512 KiB inline, 넘으면 조각; `max_result_bytes` 를 넘으면 기존 경로가 -32005),
+진단 payload 는 `complete_browser_script_error`, DevTools 16 MiB 를 넘은 것은 `complete_browser_result_too_large`, 그 밖은 보통. 시작은 그 탭의
+DevTools 자리 둘이 비어 있을 때만(`Kick.reserve` — 둘째는 terminate 몫, 없으면 100 ms × 45 다시). 시한·철회(`cancelActiveBrowserExecution`)에
+**보낸 evaluate 가 답을 기다릴 때만** `Runtime.terminateExecution`(아무것도 돌지 않을 때 보내면 페이지의 다음 스크립트가 죽는다), 대화상자
+중에는 보내지 않고, 자리가 없으면 tick 마다 5 초까지 다시(`cdp_terminates`); 그 뒤 온 답은 결과가 아니라 시한. 대화상자를 띄운 스크립트는 곧
+「paused at a dialog … do not run it again」. 스모크 `w9a-exec`(값·await·args·던진 값·문법 오류·너무 큼·`-- -1`·엄격 CSP 의 EvalError), MCP
+스모크의 exec 은 `-1` 결과를 요구한다. CLI 는 -32006 에 진단 한 줄(`script error (<kind>): <name>: <message>`).
+남긴 한계: WebKit 의 `navigation` 메시지(Foundation 글)와 다르다, `flushDeferredReleases` 가 exec 중인 탭의 둘째 자리를 한 tick 쥘 수 있다
+(terminate 는 다음 tick 에 다시 보낸다).

@@ -25,6 +25,8 @@ const web_cdp_keys = @import("web_cdp_keys.zig");
 const web_cdp_locate = @import("web_cdp_locate.zig");
 /// W9a 의 페이지 op(navigate·getUrl·screenshot) — 이 Op 이 그쪽으로 넘긴다.
 pub const web_cdp_page = @import("web_cdp_page.zig");
+/// W9a② 의 executeScript — 같이 넘긴다.
+pub const web_cdp_exec = @import("web_cdp_exec.zig");
 /// text·label 로케이터의 격리 world 함수(W9b②-2 — 계획 공격 3 회차에 실측한 것).
 const finder_js = @embedFile("web_cdp_finder.js");
 
@@ -41,7 +43,7 @@ pub const frame_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\
 
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
-pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press, navigate, get_url, screenshot };
+pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press, navigate, get_url, screenshot, execute_script };
 
 /// kick 을 붙이는가(`web_cdp_kick.zig`).
 pub const Kick = @import("web_cdp_kick.zig").Kick;
@@ -208,9 +210,12 @@ pub const Op = struct {
     then: Then = .sleep,
     /// W9a 의 페이지 op(navigate·screenshot) — 있으면 start·feed·wake 를 모두 넘긴다.
     page: ?web_cdp_page.Op = null,
+    /// W9a② 의 executeScript — 같다.
+    exec: ?web_cdp_exec.Op = null,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         if (self.page) |*p| p.deinit(gpa);
+        if (self.exec) |*e| e.deinit(gpa);
         if (self.selector) |s| gpa.free(s);
         if (self.frame_id) |s| gpa.free(s);
         if (self.text) |s| gpa.free(s);
@@ -234,6 +239,10 @@ pub const Op = struct {
         errdefer op.deinit(gpa);
         switch (kind) {
             .back, .forward, .reload => return op,
+            .execute_script => {
+                op.exec = try web_cdp_exec.Op.init(gpa, arg, id);
+                return op;
+            },
             .navigate, .get_url, .screenshot => {
                 op.page = try web_cdp_page.Op.init(gpa, switch (kind) {
                     .navigate => .navigate,
@@ -367,6 +376,7 @@ pub const Op = struct {
     /// 이미 페이지에 누름을 보냈다 — 남은 호출(떼기·놓기)은 그 요청이 철회돼도 보낸다(버튼을 눌린 채 두지 않는다).
     pub fn committed(self: *const Op) bool {
         if (self.page) |*p| return p.committed();
+        if (self.exec) |*e| return e.committed();
         return switch (self.stage) {
             // 누름·Delete 키 누름을 보냈다 — 뗌·놓기를 끝까지. 넣은 뒤의 다시 읽기도(읽기만 한다 — 놓기까지 가게).
             // 키를 눌렀다 — 떼기까지(눌린 채 두지 않는다).
@@ -380,6 +390,7 @@ pub const Op = struct {
     /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
         if (self.page != null) return null; // 쥔 원격 객체가 없다
+        if (self.exec) |*e| return e.cancel(gpa);
         // 덮임 검사·초점 검사·고르기용으로 잡은 그 요소의 원격 객체도(2 회차 — role 상태만 놓았다; 누름 앞이라 누른 것은 없다).
         const holds = switch (self.stage) {
             .frame, .hit_test, .focus_check, .hover_move, .mouse_down, .select, .insert, .delete_down => true,
@@ -396,6 +407,7 @@ pub const Op = struct {
             p.now_ms = self.now_ms;
             return p.wake(gpa);
         }
+        if (self.exec) |*e| return e.wake(gpa);
         // 떼기를 다시 보낸다(못 보냈던 것 — 철회돼도 committed 라 보낸다).
         if (self.stage == .key_up) return self.keyStep(gpa, false);
         if (self.stage == .mouse_up) return self.mouse(gpa, "mouseReleased");
@@ -416,6 +428,7 @@ pub const Op = struct {
             p.now_ms = self.now_ms;
             return p.start(gpa);
         }
+        if (self.exec) |*e| return e.start(gpa);
         return switch (self.kind) {
             // 로케이터 — 먼저 페이지 크기를 보고(격리 world) 접근성 질의로 찾는다.
             .click, .type_text, .scroll, .hover, .press => if (self.locating) self.frameTreeStep(gpa) else switch (self.kind) {
@@ -437,7 +450,7 @@ pub const Op = struct {
                 break :blk self.frameTreeStep(gpa);
             },
             .snapshot => if (self.selector != null) call(gpa, "DOM.getDocument", "{{\"depth\":0}}", .{}) else self.axStep(gpa),
-            .navigate, .get_url, .screenshot => unreachable, // `page` 가 맡는다
+            .navigate, .get_url, .screenshot, .execute_script => unreachable, // `page`·`exec` 가 맡는다
         };
     }
 
@@ -587,6 +600,7 @@ pub const Op = struct {
             p.now_ms = self.now_ms;
             return p.feed(gpa, reply);
         }
+        if (self.exec) |*e| return e.feed(gpa, reply);
         // 누르기 전 프레임의 답(무엇이든 — 오류여도 그린 뒤다) — 덮임 검사·키·Delete 로. 못 보냈으면 아래에서 놓고 실패.
         if (self.stage == .frame and reply != .not_sent) return self.afterFrame(gpa);
         // 입력을 보낸 뒤 대화상자 이유 — 입력은 갔다(3 회차: 실패로 답해 다시 하면 두 번 제출됐다).

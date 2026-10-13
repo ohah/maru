@@ -1356,9 +1356,7 @@ bool maru_metal_renderer_draw(
         //    순서라 사이드바 영역에 배경 위로 그려진다. 인덱스는 배경(quad_index) 다음부터.
         for (size_t i = 0; i < cell_count; i++) {
             const MaruAppHostMetalCell tc = cells[i];
-            // 사이드바 헤더 아이콘 확대/정렬. 헤더 frame은 origin(0,0)에 박힌다(setCellsPaneOrigin 0,0)라 origin_x==0 &&
-            // origin_y==0이 헤더 cell이다. 터미널/pane은 상단 타이틀바 띠로 origin_y≥띠>0(메인 창)이라 안 걸리고, 펼침이면
-            // 터미널 origin_x>0이라 더 확실하다. 그래서 펼침·접힘(터미널 origin_x=0이어도 origin_y>0) 모두 헤더만 잡는다.
+            // 사이드바 헤더 아이콘 확대. 헤더인지는 **위치로 짐작하지 않는다** — 셀이 든 role(아래)만 본다.
             //   **어느 아이콘을 몇 배로 그리는가는 Zig 가 정해 보낸다.** 셀보다 크게 구운 아이콘(헤더 줄0의 ◧⚙+🔔 —
             //   목록은 cell_text.isSidebarHeaderIcon — 과 자유 배치 파일 도크 토글)은 셀×1.7 목표 px로 atlas에 직접
             //   래스터되고(collectShaped가 raster_*_px 선언), metal_frame이 그 선언을 보고 reserved=32(cell-raster

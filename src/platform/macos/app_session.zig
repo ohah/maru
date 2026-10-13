@@ -21784,8 +21784,8 @@ pub const AppSession = struct {
                 } else |_| {}
             }
             // 사이드바 상단 헤더 glyph(검색 placeholder + view options ⚙·새 워크스페이스 + 아이콘) — 절대 좌표라
-            // 카드(sidebar_frame)와 별도 frame. replace가 origin(0,0) 기반 cells로 헤더 영역 [0,header)에 직접
-            // 박는다(카드·밴드만 .m이 header_h 시프트). 실패는 무시(헤더 없이 정상). 같은 atlas라 slot 비충돌.
+            // 카드(sidebar_frame)와 별도 frame. replace가 origin (0, `sidebar_header_origin_y_px`) cells로 헤더 영역
+            // [0,header)에 직접 박는다(카드 셀 y 도 Zig 가 정한다 — ABI 224). 실패는 무시(헤더 없이 정상). 같은 atlas라 slot 비충돌.
             // 상태표시줄 항목(SB1-S3b) — 같은 통합 수집에 합류시켜 한 atlas 세대를 쓴다(사이드바·도크와 동형).
             if (builtin.os.tag == .macos) {
                 const sb_colors: metal_frame.CellColors = .{ .default_fg = self.appearance.theme.foreground };
@@ -24080,7 +24080,7 @@ pub const AppSession = struct {
     /// 검색 줄은 렌더러의 헤더 특수 처리가 전부 `row == 0` 조건에 묶여 있어 원래도 아무것도 받지 않으므로, 자기
     /// origin을 갖는 별도 frame으로 내보내도 잃는 것이 없다.
     pub const HeaderPart = enum {
-        /// 신호등 띠 밴드에 놓이는 줄(🔔 ◧ ⚙ +). origin (0,0) 고정 — 렌더러가 띠 안 세로 중앙에 정렬한다.
+        /// 신호등 띠 밴드에 놓이는 줄(🔔 ◧ ⚙ +). 띠 안 세로 중앙 y(`sidebarHeaderIconRowTopPx`)는 Zig 가 셀 origin_y 로 싣는다.
         icons,
         /// 상단 바 밴드에 놓이는 줄(🔍 + 입력/placeholder/caret). `row = 0` + px origin으로 밴드 중앙에 온다.
         search,
@@ -66832,7 +66832,7 @@ test "sidebar 헤더: 투영된 종 아이콘 셀이 알림 배지와 같은 줄
 // `origin_x + col × cw + glyph_offset_x_px` 에 그린다(ABI 228 — 그 이동은 Zig `cellRasterIconGlyphOffsetPx`). hover 는
 // 예전에 「종이면 +1.0칸」과 열 번호(`cols -| 12` 등)를 따로 들었다 — 둘 중 하나만 바뀌면 박스가 아이콘 한쪽으로 치우친다.
 // 여기서는 실제 셀 스트림의 role 셀에서 그 자리를 읽어 hover quad 중심과 맞춘다. 종(2칸)이 반 칸 이동을 실제로 받는지도 본다.
-test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘 중심(origin_x + col×cw + glyph_offset_x_px + cw/2)과 같다" {
+test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘 중심(cellRasterIconQuadPx — 가로·세로)과 같다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 CoreText 투영
     const allocator = std.testing.allocator;
     const session = try soTestSession(allocator);
@@ -66846,6 +66846,9 @@ test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘
         .{ .region = .new_workspace, .cp = icons.codepoint(.plus), .span = 1 },
     };
     const cw: f32 = @floatFromInt(session.cell_width_px);
+    const ch: f32 = @floatFromInt(session.cell_height_px);
+    // 아이콘 줄이 띠 안 세로 중앙에 서는 창이어야 세로 축이 뭔가를 잰다 — 줄이 y 0 이면 「판을 y 0 에 둔다」가 우연히 맞는다.
+    try std.testing.expect(sidebar_ops.sidebarHeaderIconRowTopPx(session) > 0);
     var checked: usize = 0;
     for (cases) |case| {
         session.setHoveredHeaderRegion(case.region);
@@ -66853,24 +66856,32 @@ test "sidebar 헤더: hover 사각형 중심이 렌더러가 그리는 아이콘
             _ = try session.tick();
             if (!session.metal_dirty) break;
         }
-        // 렌더러가 그 아이콘을 그리는 가로 중심 — 헤더 줄(row 0)의 role 셀.
-        var glyph_center: ?f32 = null;
+        // 렌더러가 그 아이콘을 그리는 사각형 — 헤더 줄(row 0)의 role 셀을 atlas 크기 그대로 그 중심에 놓은 것.
+        var glyph_rect: ?[4]f32 = null;
+        var glyphs: usize = 0;
         for (session.metal_buffer.cells) |c| {
             if (c.codepoint != case.cp or c.row != 0 or c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
             if (c.origin_x != 0) continue; // 사이드바 헤더 frame(origin_x 0) — 파일 도크 토글(◧)은 띠 오른쪽 끝이라 제외
             try std.testing.expectEqual(case.span, c.width);
             try std.testing.expectEqual(metal_frame.cellRasterIconGlyphOffsetPx(session.cell_width_px, case.span), c.glyph_offset_x_px);
-            glyph_center = @as(f32, @floatFromInt(c.origin_x)) + @as(f32, @floatFromInt(c.col)) * cw + @as(f32, @floatFromInt(c.glyph_offset_x_px)) + cw / 2.0;
+            glyph_rect = metal_frame.cellRasterIconQuadPx(c, session.cell_width_px, session.cell_height_px);
+            glyphs += 1;
         }
-        const want = glyph_center orelse return error.TestUnexpectedResult; // 아이콘 셀이 실제로 나갔다
-        // hover quad = 헤더 띠 위쪽(y 0)의 2.6칸 폭 둥근 quad.
-        var hover_center: ?f32 = null;
+        try std.testing.expectEqual(@as(usize, 1), glyphs);
+        const r = glyph_rect orelse return error.TestUnexpectedResult; // 아이콘 셀이 실제로 나갔다
+        // hover quad = 2.6칸 × 1.7줄 둥근 quad. **자리로 찾지 않는다** — 예전 판정자는 `q.y == 0` 으로 찾아 「판이 y 0」을
+        // 전제로 굳혔고, 그래서 세로 치우침(판 y 0 · 아이콘 줄은 띠 중앙)을 못 봤다.
+        var hover: ?metal_frame.GpuQuad = null;
+        var matches: usize = 0;
         for (session.gpu_quads.items) |q| {
-            if (q.y != 0 or @abs(q.w - cw * 2.6) > 0.01) continue;
-            hover_center = q.x + q.w / 2.0;
+            if (@abs(q.w - cw * 2.6) > 0.01 or @abs(q.h - ch * 1.7) > 0.01) continue;
+            hover = q;
+            matches += 1;
         }
-        const got = hover_center orelse return error.TestUnexpectedResult;
-        try std.testing.expectApproxEqAbs(want, got, 0.01);
+        try std.testing.expectEqual(@as(usize, 1), matches);
+        const q = hover orelse return error.TestUnexpectedResult;
+        try std.testing.expectApproxEqAbs(r[0] + r[2] / 2.0, q.x + q.w / 2.0, 0.01);
+        try std.testing.expectApproxEqAbs(r[1] + r[3] / 2.0, q.y + q.h / 2.0, 0.01);
         checked += 1;
     }
     try std.testing.expectEqual(@as(usize, cases.len), checked);
@@ -73350,7 +73361,7 @@ test "placement_failed: 배치 진입에서 지워진다 — 부분 투영의 �
 // (예전에는 「metalFrame 이 titlebar_strip_px 를 실어 렌더러가 ◧ 를 띠 안 세로 중앙에 둔다」도 봤다 — 그 세로 자리는
 // 이제 Zig 가 셀 origin_y 로 싣고(ABI 226, 「투영된 종 아이콘 셀이 알림 배지와 같은 줄 y」 판정자), 렌더러가 안 읽는
 // frame 필드는 ABI 229 에서 뺐다.)
-test "collapsed toggle: hover emits a highlight quad" {
+test "collapsed toggle: hover emits a highlight quad centred on the drawn toggle" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const session = try allocator.create(AppSession);
@@ -73402,6 +73413,45 @@ test "collapsed toggle: hover emits a highlight quad" {
     try std.testing.expectEqual(CursorKind.link, session.hoverCursor(cx, cy, 0));
     try std.testing.expect(session.hovered_collapsed_toggle);
     try std.testing.expect(hasHoverQuad(session, hover_fill));
+
+    // 판은 **그려진 ◧ 와 동심**이어야 한다(가로·세로). 그려진 자리 = 투영된 role 셀을 atlas 크기 그대로 그 중심에 놓은
+    // 사각형(`cellRasterIconQuadPx` — 렌더러와 같은 식). 예전 판은 세로 중심을 띠 중앙(`strip / 2`, 실수)으로 따로 셈해,
+    // 셀 자리(`sidebarHeaderIconRowTopPx` — 정수 나눗셈)와 `strip − ch` 가 홀수인 창에서 0.5px 갈렸다. 그래서 띠를
+    // 1px 키운 창(홀짝이 바뀐다)에서도 한 번 더 본다 — 한쪽 홀짝만 보면 우연히 맞는다.
+    const strip0 = session.titlebar_strip_px;
+    for ([_]u32{ 0, 1 }) |bump| {
+        session.titlebar_strip_px = strip0 + bump;
+        sidebar_ops.rebuildSidebar(session) catch {};
+        session.metal_dirty = true;
+        for (0..4) |_| {
+            _ = try session.tick();
+            if (!session.metal_dirty) break;
+        }
+        try std.testing.expectEqual(strip0 + bump, session.titlebar_strip_px); // tick 이 띠를 되돌리면 이 축은 아무것도 안 잰다
+        var glyph: ?[4]f32 = null;
+        var glyphs: usize = 0;
+        for (session.metal_buffer.cells) |c| {
+            if (c.codepoint != maru.cell_text.sidebar_toggle_codepoint or c.reserved != metal_frame.native_cell_role_cell_raster_icon) continue;
+            if (c.origin_x != 0 or c.col != session.collapsedToggleCol()) continue; // 파일 도크 토글(같은 ◧, 띠 오른쪽 끝) 제외
+            // 셀이 **이번 띠로 다시 투영됐는가** — 아니면 홀짝 축은 옛 자리를 잰다.
+            try std.testing.expectEqual(sidebar_ops.sidebarHeaderIconRowTopPx(session), c.origin_y);
+            glyph = metal_frame.cellRasterIconQuadPx(c, session.cell_width_px, session.cell_height_px);
+            glyphs += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 1), glyphs);
+        const g = glyph orelse return error.TestUnexpectedResult; // 접힘 ◧ 셀이 실제로 나갔다
+        var plate: ?metal_frame.GpuQuad = null;
+        var plates: usize = 0;
+        for (session.gpu_quads.items) |q| if (q.fill_color0 == hover_fill) {
+            plate = q;
+            plates += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), plates);
+        const q = plate orelse return error.TestUnexpectedResult;
+        try std.testing.expectApproxEqAbs(g[0] + g[2] / 2.0, q.x + q.w / 2.0, 0.01);
+        try std.testing.expectApproxEqAbs(g[1] + g[3] / 2.0, q.y + q.h / 2.0, 0.01);
+    }
+    session.titlebar_strip_px = strip0;
 
     // 다시 밖으로 → 호버 off, quad 제거(rebuildSidebar가 다시 비움).
     _ = session.hoverCursor(far_x, 1, 0);

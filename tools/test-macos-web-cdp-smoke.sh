@@ -286,7 +286,7 @@ url="http://127.0.0.1:$port/a.html"
 cat > "$root/pane.sh" <<PANE
 #!/bin/sh
 [ -n "\${MARU_SMOKE_HOME:-}" ] && [ -n "\${MARU_SMOKE_OUT:-}" ] || exec sleep 600
-# 대본의 `action new_tab`(숨은 탭 경우)이 연 새 탭의 셸도 이 대본이다 — 한 번만 돈다.
+# 대본의 「action new_tab」(숨은 탭 경우)이 연 새 탭의 셸도 이 대본이다 — 한 번만 돈다.
 mkdir "\$MARU_SMOKE_OUT/pane-once" 2>/dev/null || exec sleep 600
 export HOME="\$MARU_SMOKE_HOME" XDG_CACHE_HOME="\$MARU_SMOKE_HOME/.cache"
 out="\$MARU_SMOKE_OUT"
@@ -656,8 +656,8 @@ echo "\$((n1 - n0))" > "\$out/nv-204-secs"
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get" 2>&1; echo "rc=\$?" >> "\$out/ck-get"
 "\$cli" browser delete-cookie --surface "\$nv" --name ck1 > "\$out/ck-del" 2>&1; echo "rc=\$?" >> "\$out/ck-del"
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/ck-get2" 2>&1; echo "rc=\$?" >> "\$out/ck-get2"
-# 적대 리뷰 1 회차: sameSite 는 WebKit 처럼 소문자, 긴 값은 상한 글로. 2 회차: IP 호스트엔 도메인 쿠키가 없다 — `--domain .127.0.0.1` 은 호스트 전용
-# 쿠키를 같은 글로 지운다(도메인 호스트에서 `.a.test` 가 호스트 전용을 남기는 WebKit 규칙은 단위 시험 R1-C).
+# 적대 리뷰 1 회차: sameSite 는 WebKit 처럼 소문자, 긴 값은 상한 글로. 2 회차: IP 호스트엔 도메인 쿠키가 없다 — 「--domain .127.0.0.1」 은 호스트 전용
+# 쿠키를 같은 글로 지운다(도메인 호스트에서 「.a.test」 가 호스트 전용을 남기는 WebKit 규칙은 단위 시험 R1-C).
 "\$cli" browser exec --surface "\$nv" 'document.cookie="ss=1; SameSite=Lax; path=/", 1' > "\$out/r1s-js" 2>&1
 "\$cli" browser get-cookies --surface "\$nv" > "\$out/r1s-get" 2>&1; echo "rc=\$?" >> "\$out/r1s-get"
 "\$cli" browser delete-cookie --surface "\$nv" --name ss --domain .127.0.0.1 > "\$out/r1s-del-dot" 2>&1; echo "rc=\$?" >> "\$out/r1s-del-dot"

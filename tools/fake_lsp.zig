@@ -62,6 +62,11 @@
 //!   답을 받은 뒤에 답한다 — 설정 객체(`validate: "on"`·`workingDirectory`·`experimental` 객체)가 아니면 실서버처럼 오류. 진단은 첫 줄 0..3 의 `eslint: <version> <didOpen 의 languageId>`(code `no-var`, source
 //!   `eslint`), `ESLQUIET` 면 빈 목록, didChange 본문에 `ESLREFRESH` 면 `workspace/diagnostic/refresh` 를 보낸다. code action 은 보조 역할과
 //!   같은 모양(`eslint: fix no-var`·`source.fixAll.eslint` 는 `ESLFIX` → `ESL_FIXED`).
+//! - **Biome·oxlint 역할**(tooling §8.2u, 계획 AS4): 실행 파일 이름이 `biome`·`oxlint` 면 보조 역할(push 진단·`initialized` 의 설정 요청)에
+//!   이름만 다르다 — 진단 `biome: <version>`(source `biome`)·`oxlint: <version>`(source `oxc` — 실서버의 값), fix kind
+//!   `source.fixAll.biome`(`BIOFIX` → `BIO_FIXED`)·`source.fixAll.oxc`(`OXFIX` → `OX_FIXED`). Biome 은 실서버처럼 quickfix 의 kind 가
+//!   `quickfix.biome` 이고 항목에 편집 없이 `data` 만 싣는다 — resolve 가 `data.edit` 를 돌려준다(다른 서버가 resolve 하면 `# aux lazy`).
+//!   oxlint 는 `source.fixAll` 도 알린다(실서버와 같다).
 //! 순수 판정 대상이 아니라(맞으면 되는 도구) 테스트는 없다 — 이 도구의 계약은 `LSPB*` 가 제품 경계에서 든다.
 
 const std = @import("std");
@@ -155,7 +160,12 @@ pub fn main(init: std.process.Init) void {
     if (init.minimal.args.toSlice(allocator)) |argv| {
         auxiliary = argv.len > 1 and std.mem.eql(u8, argv[1], "server");
         // ESLint 역할(보조 서버 표의 `vscode-eslint-language-server` — 판정자가 저장소 `node_modules/.bin` 에 사본으로 둔다).
-        eslint_mode = argv.len > 0 and std.mem.eql(u8, std.fs.path.basename(argv[0]), "vscode-eslint-language-server");
+        const base = if (argv.len > 0) std.fs.path.basename(argv[0]) else "";
+        eslint_mode = std.mem.eql(u8, base, "vscode-eslint-language-server");
+        // Biome·oxlint 역할(AS4) — 보조 역할에 이름만 다르다.
+        biome_mode = std.mem.eql(u8, base, "biome");
+        oxlint_mode = std.mem.eql(u8, base, "oxlint");
+        if (biome_mode or oxlint_mode) auxiliary = true;
     } else |_| {}
     const noise = "fake: stderr noise\n";
     _ = std.c.write(2, noise.ptr, noise.len);
@@ -192,6 +202,11 @@ var auxiliary = false;
 const primary_action_kinds = [_][]const u8{ "quickfix", "refactor", "source.organizeImports", "source.fixAll" };
 const aux_action_kinds = [_][]const u8{ "quickfix", "source.fixAll.ruff" };
 const eslint_action_kinds = [_][]const u8{ "quickfix", "source.fixAll.eslint" };
+const biome_action_kinds = [_][]const u8{ "quickfix.biome", "source.organizeImports.biome", "source.fixAll.biome" };
+const oxlint_action_kinds = [_][]const u8{ "quickfix", "source.fixAll.oxc", "source.fixAll" };
+/// Biome·oxlint 역할로 떴다(실행 파일 이름 — AS4).
+var biome_mode = false;
+var oxlint_mode = false;
 /// ESLint 역할로 떴다 — pull 진단만, `workspace/configuration` 에 설정 객체를 받아야 검사한다.
 var eslint_mode = false;
 /// 우리가 낸 설정 요청(`srv-c`)에 설정 객체(`validate: "on"`)로 답을 받았다 / 답을 기다리는 중이다.
@@ -204,9 +219,11 @@ var eslint_pending_uri: [1024]u8 = undefined;
 var eslint_pending_uri_len: usize = 0;
 
 /// 보조 역할들(ruff 꼴·ESLint 꼴)의 이름 — code action 의 모양은 같고 이름만 다르다.
-const Persona = struct { prefix: []const u8, source: []const u8, fix_kind: []const u8, marker: []const u8, fixed: []const u8 };
+const Persona = struct { prefix: []const u8, source: []const u8, fix_kind: []const u8, marker: []const u8, fixed: []const u8, quickfix_kind: []const u8 = "quickfix", lazy: bool = false };
 fn persona() ?Persona {
     if (eslint_mode) return .{ .prefix = "eslint", .source = "eslint", .fix_kind = "source.fixAll.eslint", .marker = "ESLFIX", .fixed = "ESL_FIXED" };
+    if (biome_mode) return .{ .prefix = "biome", .source = "biome", .fix_kind = "source.fixAll.biome", .marker = "BIOFIX", .fixed = "BIO_FIXED", .quickfix_kind = "quickfix.biome", .lazy = true };
+    if (oxlint_mode) return .{ .prefix = "oxlint", .source = "oxc", .fix_kind = "source.fixAll.oxc", .marker = "OXFIX", .fixed = "OX_FIXED" };
     if (auxiliary) return .{ .prefix = "aux", .source = "aux", .fix_kind = "source.fixAll.ruff", .marker = "AUXFIX", .fixed = "AUX_FIXED" };
     return null;
 }
@@ -695,7 +712,7 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         const who = if (persona()) |pp| pp.prefix else "fake";
         const title = if (data_fix) |df| std.fmt.allocPrint(arena, "{s}: fix {s} (data {s})", .{ who, code, df }) catch return else std.fmt.allocPrint(arena, "{s}: fix {s}", .{ who, code }) catch return;
         it.put(arena, "title", .{ .string = title }) catch return;
-        it.put(arena, "kind", .{ .string = "quickfix" }) catch return;
+        it.put(arena, "kind", .{ .string = if (persona()) |pp| pp.quickfix_kind else "quickfix" }) catch return;
         if (i == 0) it.put(arena, "isPreferred", .{ .bool = true }) catch return;
         var te: std.json.ObjectMap = .empty;
         te.put(arena, "range", range) catch return;
@@ -706,6 +723,11 @@ fn handleCodeAction(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: s
         changes.put(arena, arena.dupe(u8, req_uri) catch return, .{ .array = arr }) catch return;
         var edit: std.json.ObjectMap = .empty;
         edit.put(arena, "changes", .{ .object = changes }) catch return;
+        if (persona()) |pp| if (pp.lazy) {
+            lazyItem(arena, &it, req_uri, edit) catch return;
+            items.append(.{ .object = it }) catch return;
+            continue;
+        };
         it.put(arena, "edit", .{ .object = edit }) catch return;
         items.append(.{ .object = it }) catch return;
     };
@@ -798,7 +820,14 @@ fn handleSourceActions(allocator: std.mem.Allocator, only: []const std.json.Valu
             // 보조 서버: `source.fixAll`·그 도구의 fixAll kind 만 — 표식(`AUXFIX`·`ESLFIX`)을 바꾼다.
             if (std.mem.eql(u8, kind, "source.fixAll") or std.mem.eql(u8, kind, pp.fix_kind)) {
                 const t = std.fmt.allocPrint(arena, "{s}: fix all", .{pp.prefix}) catch return;
-                if (Mk.replaceItem(arena, t, pp.fix_kind, req_uri, text, pp.marker, pp.fixed)) |item| items.append(item) catch return;
+                if (Mk.replaceItem(arena, t, pp.fix_kind, req_uri, text, pp.marker, pp.fixed)) |item| {
+                    var it = item.object;
+                    if (pp.lazy) {
+                        const edit = it.fetchSwapRemove("edit").?.value.object;
+                        lazyItem(arena, &it, req_uri, edit) catch return;
+                    }
+                    items.append(.{ .object = it }) catch return;
+                }
             }
             continue;
         }
@@ -876,10 +905,25 @@ fn answerPull(allocator: std.mem.Allocator, id: std.json.Value, uri: []const u8)
     sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .kind = "full", .items = if (quiet) one[0..0] else one[0..] } });
 }
 
+/// Biome 꼴 — 편집을 빼고 `data` 에 싣는다(`uri`·`edit`). resolve 가 그 편집을 돌려준다.
+fn lazyItem(arena: std.mem.Allocator, it: *std.json.ObjectMap, uri: []const u8, edit: std.json.ObjectMap) !void {
+    var data: std.json.ObjectMap = .empty;
+    try data.put(arena, "uri", .{ .string = try arena.dupe(u8, uri) });
+    try data.put(arena, "edit", .{ .object = edit });
+    try it.put(arena, "data", .{ .object = data });
+}
+
 fn handleCodeActionResolve(allocator: std.mem.Allocator, obj: std.json.ObjectMap, id: std.json.Value) void {
     var uri: []const u8 = "";
+    var data_edit: ?std.json.Value = null;
     if (obj.get("params")) |p| if (p == .object) if (p.object.get("data")) |d| if (d == .object) {
         uri = str(d.object.get("uri")) orelse "";
+        data_edit = d.object.get("edit");
+    };
+    // Biome 꼴은 항목을 낼 때 미뤄 둔 편집을 돌려준다 — 다른 역할이 받으면 아래 제 글(`# aux lazy`)이라 어느 서버가 resolve 했는지 보인다.
+    if (biome_mode) if (data_edit) |e| {
+        sendJson(allocator, .{ .jsonrpc = "2.0", .id = id, .result = .{ .title = "biome: resolved", .edit = e } });
+        return;
     };
     const text = docText(uri);
     if (std.mem.indexOf(u8, text, "RESOLVEFAIL") != null or uri.len == 0) {
@@ -1630,7 +1674,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
                     .renameProvider = std.c.getenv("MARU_FAKE_LSP_NORENAMECAP") == null, // `MARU_FAKE_LSP_NORENAMECAP=1` 이면 false
                     .completionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOCOMPCAP") == null) .{ .triggerCharacters = [_][]const u8{"."}, .resolveProvider = true } else null,
                     // 내는 kind 를 실서버처럼 알린다 — 클라이언트는 알린 kind 만 저장 시 묻는다(tooling §8.2u). 보조 역할은 ruff 꼴.
-                    .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = if (eslint_mode) eslint_action_kinds[0..] else if (auxiliary) aux_action_kinds[0..] else primary_action_kinds[0..], .resolveProvider = true } else null,
+                    .codeActionProvider = if (std.c.getenv("MARU_FAKE_LSP_NOACTCAP") == null) .{ .codeActionKinds = if (eslint_mode) eslint_action_kinds[0..] else if (biome_mode) biome_action_kinds[0..] else if (oxlint_mode) oxlint_action_kinds[0..] else if (auxiliary) aux_action_kinds[0..] else primary_action_kinds[0..], .resolveProvider = true } else null,
                     // pull 진단(ESLint 꼴 — §8.2u). 다른 역할은 없다(push).
                     .diagnosticProvider = if (offer_pull) @as(?struct { identifier: []const u8, interFileDependencies: bool, workspaceDiagnostics: bool }, .{ .identifier = "eslint", .interFileDependencies = false, .workspaceDiagnostics = false }) else null,
                     // semantic tokens(§8.2i) — legend 다섯(하나는 클라이언트가 모르는 이름·`variable` 은 무색). `MARU_FAKE_LSP_SEMFULL=1` 이면 range 없이
@@ -1949,10 +1993,11 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             // 보조 서버(tooling §8.2u) — 둘째 줄 0..2 에 warning 하나(주 서버의 첫 줄 error 와 자리가 다르다). `AUXQUIET` 이면 빈 목록.
             if (std.mem.indexOf(u8, text, "AUXSPOOF") != null and std.mem.eql(u8, method, "textDocument/didChange"))
                 sendJson(allocator, .{ .jsonrpc = "2.0", .id = @as(i64, 100_000_001), .result = .{ .contents = .{ .kind = "markdown", .value = "aux: spoofed hover" } } });
-            const aux_msg = std.fmt.bufPrint(&msg_buf, "aux: {d}", .{version}) catch "aux";
+            const pp = persona().?;
+            const aux_msg = std.fmt.bufPrint(&msg_buf, "{s}: {d}", .{ pp.prefix, version }) catch "aux";
             // `data`(LSP 3.16)를 싣는다 — 클라이언트가 code action 문맥으로 그대로 되돌려야 quickfix 제목에 `(data aux-1)` 이 붙는다.
             const AuxDiag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8, source: []const u8, data: struct { fix: []const u8 } };
-            const one = [_]AuxDiag{.{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = aux_msg, .code = "A1", .source = "aux", .data = .{ .fix = "aux-1" } }};
+            const one = [_]AuxDiag{.{ .range = .{ .start = .{ .line = 1, .character = 0 }, .end = .{ .line = 1, .character = 2 } }, .severity = 2, .message = aux_msg, .code = "A1", .source = pp.source, .data = .{ .fix = "aux-1" } }};
             const quiet = std.mem.indexOf(u8, text, "AUXQUIET") != null;
             sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = if (quiet) one[0..0] else one[0..] } });
             return;

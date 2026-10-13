@@ -15,7 +15,7 @@ const LineIndex = maru.session.editor.line_index.LineIndex;
 pub const Diagnostic = diagnostic.Diagnostic;
 
 /// 한 문서에 붙는 보조 서버 칸 수(tooling §8.2u — 한 문법의 보조 서버 표 길이보다 크거나 같아야 한다).
-pub const max_aux: usize = 2;
+pub const max_aux: usize = 3;
 
 comptime {
     for (std.enums.values(maru.session.editor.language.Grammar)) |g| std.debug.assert(maru.session.editor.lsp.auxiliary.forGrammar(g).len <= max_aux);

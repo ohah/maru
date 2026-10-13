@@ -446,7 +446,18 @@ IC5b 는 둘로 나눴다 — owner 층(`connection_turn.Client`, 채널·원장
   - 제품 attach 의 첫 snapshot 이 세그먼트 판(스냅샷으로)이고 준비분을 attach 배치가 들며, 그 배치의 rollback 이 취소한다.
   - 판정자가 실제 결함 하나를 잡았다 — 준비분 목록 해제가 `defer` 뒤 필드 재설정으로 새던 것.
 - 판정자 글자 닻 둘을 옮겼다(`session_host_screen_change_token_boundary`·`session_host_reconnect_observer_attach_boundary` — delta 투영이
-  연결 헬퍼 `projectDelta` 를 거친다, 의도는 「토큰을 읽은 뒤 다음 순번으로 투영」 그대로).
+  연결 헬퍼 `projectDelta` 를 거친다, 의도는 「토큰을 읽은 뒤 다음 순번으로 투영」 그대로). 헬퍼가 그 순번을 두 판 모두에 그대로
+  넘기는지도 잰다.
+- 적대적 검증 1 회차(IC5b-1·2 함께, HIGH 0): 준비분이 모든 경로에서 정확히 한 번 끝나고 「채널이 먼저」가 지켜짐을 대조했다. 고친 것:
+  - 실제 배선 자리(owner 가 Connection 에 건넨 연산 넷, runtime 다리의 인자 대응·제품 RuntimeOps 의 두 판)를 재는 판정자가 없었다 —
+    owner 판정자가 연결의 ops 로 준비·발급·취소·발급 상한·delta/스냅샷 인자를 재고(`test-image-channel-host` 17), runtime 다리 판정자
+    (`runtime_manager` 루트, 같은 단계)를 더했다;
+  - `commit` 이 구독을 못 찾으면 세그먼트를 취소했다 — 배치는 이미 큐에 있으므로 발급한다(앱은 닫힌 stream 의 세그먼트를 바로 반환한다);
+  - `sendImageSegment` 의 EINTR 재시도에 상한(8);
+  - owner 판정자의 제목·주석이 재지 않는 것을 주장했다 — 연결 개수 상한 미룸을 실제로 재고, 「이미지 채널 없음」 루프가 공허하지 않게.
+- **IC6 에서 잴 것**: 세그먼트 생성(shm_open·ftruncate·mmap·memcpy)이 투영의 core lock 안에서 돈다 — 큰 이미지는 그동안 PTY reader 를
+  멈추고, 같은 runtime 에 붙은 연결마다·미룸 뒤 재시도마다 다시 복사한다. lock 보유 시간을 재고 필요하면 복사를 lock 밖으로 빼거나
+  (runtime, image, generation) 단위로 세그먼트를 재사용한다.
 
 #### IC5 전체 (처음 계획)
 

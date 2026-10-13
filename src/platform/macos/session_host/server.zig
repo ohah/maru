@@ -833,6 +833,9 @@ pub const CollectedOutput = struct {
     pub fn commit(self: *CollectedOutput, connection: *Connection) void {
         std.debug.assert(!self.finished);
         const sub = connection.attachments.getPtr(self.stream) orelse {
+            // 배치는 이미 큐에 들어갔다 — 그 `image_ref` 가 가리키는 세그먼트는 보낸다(앱은 닫힌 stream 의 세그먼트를 받는 즉시
+            // 반환한다). 취소하면 앱에서 「세그먼트 없음」이 되어 연결 전체가 재접속한다.
+            self.finishSegments(.issue);
             self.rollback(connection);
             return;
         };

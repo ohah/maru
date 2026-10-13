@@ -13,12 +13,16 @@ const external_format = @import("../editor/external_format.zig");
 pub const Tool = enum {
     ruff,
     eslint,
+    biome,
+    oxlint,
 
     /// 사람에게 보이는 이름(정보 명령).
     pub fn displayName(self: Tool) []const u8 {
         return switch (self) {
             .ruff => "ruff",
             .eslint => "ESLint",
+            .biome => "Biome",
+            .oxlint => "oxlint",
         };
     }
 };
@@ -50,19 +54,33 @@ const ruff: Auxiliary = .{
     .server = .{ .exe = "ruff", .args = &ruff_args, .language_id = "python", .install = "pip install ruff" },
     .bin_dirs = &.{ ".venv/bin", "venv/bin" },
 };
+// Biome·oxlint(AS4) — 둘 다 push 진단이고 `workspace/configuration` 을 거부해도 돈다(2026-10-13 실측, 계획 editor-auxiliary-servers).
+const biome_args = [_][]const u8{"lsp-proxy"};
+const biome: Auxiliary = .{
+    .tool = .biome,
+    .server = .{ .exe = "biome", .args = &biome_args, .language_id = "javascript", .install = "npm i -D @biomejs/biome" },
+    .bin_dirs = &.{"node_modules/.bin"},
+};
+const oxlint_args = [_][]const u8{"--lsp"};
+const oxlint: Auxiliary = .{
+    .tool = .oxlint,
+    .server = .{ .exe = "oxlint", .args = &oxlint_args, .language_id = "javascript", .install = "npm i -D oxlint" },
+    .bin_dirs = &.{"node_modules/.bin"},
+};
 
-/// 문법 → 보조 서버들(주 서버 다음에 붙는다). 없으면 빈 슬라이스.
+/// 문법 → 보조 서버들(주 서버 다음에 붙는다 — 이 순서로 `⌘.` 메뉴를 합치고 저장 시 묻는다). 없으면 빈 슬라이스. 설정을 찾은 것은
+/// 전부 뜬다(계획 AS4 결정 — 옮기는 중인 저장소는 ESLint 와 oxlint 를 함께 쓴다).
 pub fn forGrammar(g: language.Grammar) []const Auxiliary {
     return switch (g) {
         .python => &[_]Auxiliary{ruff},
-        .javascript, .typescript, .tsx => &[_]Auxiliary{eslint},
+        .javascript, .typescript, .tsx => &[_]Auxiliary{ eslint, biome, oxlint },
         else => &.{},
     };
 }
 
 /// 실행 파일 이름 → 그 보조 서버(클라이언트가 든 `server.exe` 에서 되찾는다). 주 서버면 `null`.
 pub fn byExe(exe: []const u8) ?Auxiliary {
-    inline for (.{ ruff, eslint }) |a| if (std.mem.eql(u8, a.server.exe, exe)) return a;
+    inline for (.{ ruff, eslint, biome, oxlint }) |a| if (std.mem.eql(u8, a.server.exe, exe)) return a;
     return null;
 }
 
@@ -70,14 +88,22 @@ pub fn byExe(exe: []const u8) ?Auxiliary {
 /// - ruff: `ruff.toml`·`.ruff.toml`(있으면 그것 — ruff 가 설정으로 읽는다), 또는 `pyproject.toml` 의 `[tool.ruff]`·`[tool.ruff.<무엇>]`.
 /// - ESLint: flat 설정 `eslint.config.{js,mjs,cjs,ts,mts,cts}`, 옛 설정 `.eslintrc`·`.eslintrc.{js,cjs,json,yaml,yml}`, 또는 `package.json` 의
 ///   최상위 `eslintConfig`(의존성은 설정이 아니다).
+/// - Biome: `biome.json`·`biome.jsonc`(외부 포매터의 목록 그대로 — 두 벌이면 한쪽만 낡는다).
+/// - oxlint: `.oxlintrc.json`·`.oxlintrc.jsonc`·`oxlint.config.ts`·`oxlint.config.mts`(oxlint 1.87 이 작업 폴더에서 찾는 목록).
 pub const eslint_config_names = [_][]const u8{
     "eslint.config.js", "eslint.config.mjs", "eslint.config.cjs", "eslint.config.ts", "eslint.config.mts", "eslint.config.cts",
     ".eslintrc",        ".eslintrc.js",      ".eslintrc.cjs",     ".eslintrc.json",   ".eslintrc.yaml",    ".eslintrc.yml",
 };
 
+pub const oxlint_config_names = [_][]const u8{ ".oxlintrc.json", ".oxlintrc.jsonc", "oxlint.config.ts", "oxlint.config.mts" };
+
 pub fn detect(allocator: std.mem.Allocator, fs: anytype, tool: Tool, doc_dir: []const u8, root: []const u8, out: *[std.fs.max_path_bytes]u8) ?[]const u8 {
     var dirs = external_format.DirsUp.init(doc_dir, root);
     while (dirs.next()) |dir| switch (tool) {
+        inline .biome, .oxlint => |t| for (if (t == .biome) &external_format.biome_config_names else &oxlint_config_names) |name| {
+            const p = join(out, dir, name) orelse continue;
+            if (fs.exists(p)) return p;
+        },
         .eslint => {
             for (eslint_config_names) |name| {
                 const p = join(out, dir, name) orelse continue;
@@ -113,7 +139,7 @@ pub fn settingsJson(allocator: std.mem.Allocator, tool: Tool, root_uri: []const 
     // 빈 객체 `{}` — 빈 익명 리터럴 `.{}` 는 튜플이라 `[]` 로 나간다.
     const Empty = struct {};
     return switch (tool) {
-        .ruff => null,
+        .ruff, .biome, .oxlint => null,
         .eslint => try std.json.Stringify.valueAlloc(allocator, .{
             .validate = "on",
             // 서버가 `settings.experimental.useFlatConfig` 를 읽는다 — 객체가 없으면 진단 요청이 `reading 'useFlatConfig'` 로 실패한다(진짜 서버
@@ -164,7 +190,7 @@ const FakeFs = struct {
     pub fn freeRead(_: FakeFs, _: []const u8) void {}
 };
 
-test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(pull·설정 답), 그 밖의 문법은 없음, exe 로 되찾기 (tooling §8.2u)" {
+test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(pull·설정 답)·Biome·oxlint 순서, 그 밖의 문법은 없음, exe 로 되찾기 (tooling §8.2u)" {
     const py = forGrammar(.python);
     try testing.expectEqual(@as(usize, 1), py.len);
     try testing.expectEqual(Tool.ruff, py[0].tool);
@@ -174,14 +200,27 @@ test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(
     try testing.expect(!py[0].pull_diagnostics and !py[0].answers_configuration);
     for ([_]language.Grammar{ .javascript, .typescript, .tsx }) |g| {
         const js = forGrammar(g);
-        try testing.expectEqual(@as(usize, 1), js.len);
+        try testing.expectEqual(@as(usize, 3), js.len);
         try testing.expectEqual(Tool.eslint, js[0].tool);
         try testing.expectEqualStrings("vscode-eslint-language-server", js[0].server.exe);
         try testing.expectEqualStrings("--stdio", js[0].server.args[0]);
         try testing.expect(js[0].pull_diagnostics and js[0].answers_configuration);
-        try testing.expectEqualStrings("node_modules/.bin", js[0].bin_dirs[0]);
+        // Biome·oxlint 는 push 진단이고 설정 요청은 거부한다(실측 — 거부해도 돈다).
+        try testing.expectEqual(Tool.biome, js[1].tool);
+        try testing.expectEqualStrings("biome", js[1].server.exe);
+        try testing.expectEqualStrings("lsp-proxy", js[1].server.args[0]);
+        try testing.expectEqual(Tool.oxlint, js[2].tool);
+        try testing.expectEqualStrings("oxlint", js[2].server.exe);
+        try testing.expectEqualStrings("--lsp", js[2].server.args[0]);
+        for (js) |a| {
+            try testing.expectEqual(@as(usize, 1), a.server.args.len);
+            try testing.expectEqualStrings("node_modules/.bin", a.bin_dirs[0]);
+            if (a.tool != .eslint) try testing.expect(!a.pull_diagnostics and !a.answers_configuration);
+        }
     }
     try testing.expectEqual(Tool.eslint, byExe("vscode-eslint-language-server").?.tool);
+    try testing.expectEqual(Tool.biome, byExe("biome").?.tool);
+    try testing.expectEqual(Tool.oxlint, byExe("oxlint").?.tool);
     for ([_]language.Grammar{ .zig, .rust, .go, .c, .json, .markdown, .css, .html, .none }) |g| try testing.expectEqual(@as(usize, 0), forGrammar(g).len);
     try testing.expectEqual(Tool.ruff, byExe("ruff").?.tool);
     try testing.expect(byExe("pyright-langserver") == null);
@@ -238,9 +277,9 @@ test "AUX3 ESLint 감지 — 가장 가까운 flat·옛 설정, package.json 의
     try testing.expect(detect(a, ruff_only, .eslint, "/r", "/r", &out) == null);
 }
 
-test "AUX4 ESLint 의 고정 설정 — validate·workingDirectory·작업 폴더가 있고 서버의 저장 시 고치기·포맷은 끈다; ruff 는 답하지 않는다 (tooling §8.2u)" {
+test "AUX4 ESLint 의 고정 설정 — validate·workingDirectory·작업 폴더가 있고 서버의 저장 시 고치기·포맷은 끈다; ruff·Biome·oxlint 는 답하지 않는다 (tooling §8.2u)" {
     const a = testing.allocator;
-    try testing.expect((try settingsJson(a, .ruff, "file:///r", "r")) == null);
+    for ([_]Tool{ .ruff, .biome, .oxlint }) |t| try testing.expect((try settingsJson(a, t, "file:///r", "r")) == null);
     const blob = (try settingsJson(a, .eslint, "file:///r", "r")).?;
     defer a.free(blob);
     var p = try std.json.parseFromSlice(std.json.Value, a, blob, .{});
@@ -256,4 +295,34 @@ test "AUX4 ESLint 의 고정 설정 — validate·workingDirectory·작업 폴�
     try testing.expect(o.get("experimental").? == .object); // 없으면 서버가 `useFlatConfig` 를 못 읽어 진단 요청이 실패한다
     try testing.expect(o.get("options").? == .object); // ESLint 생성자 옵션 — 배열이 아니다
     try testing.expect(o.get("useFlatConfig") == null and o.get("experimental").?.object.get("useFlatConfig") == null);
+}
+
+test "AUX5 Biome·oxlint 감지 — 설정 파일 이름마다, 가장 가까운 것, 도구마다 따로, 루트 밖은 안 봄 (tooling §8.2u)" {
+    var out: [std.fs.max_path_bytes]u8 = undefined;
+    const a = testing.allocator;
+    inline for (.{ .{ Tool.biome, &external_format.biome_config_names }, .{ Tool.oxlint, &oxlint_config_names } }) |row| {
+        for (row[1]) |name| {
+            var pbuf: [64]u8 = undefined;
+            const p = try std.fmt.bufPrint(&pbuf, "/r/{s}", .{name});
+            const fs: FakeFs = .{ .files = &.{.{ .path = p }} };
+            try testing.expectEqualStrings(p, detect(a, fs, row[0], "/r/x", "/r", &out).?);
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), external_format.biome_config_names.len);
+    try testing.expectEqual(@as(usize, 4), oxlint_config_names.len);
+    // 가장 가까운 것 — 하위 패키지의 설정이 루트의 것보다 먼저.
+    const nested: FakeFs = .{ .files = &.{ .{ .path = "/r/biome.json" }, .{ .path = "/r/pkg/biome.jsonc" }, .{ .path = "/r/.oxlintrc.json" }, .{ .path = "/r/pkg/oxlint.config.ts" } } };
+    try testing.expectEqualStrings("/r/pkg/biome.jsonc", detect(a, nested, .biome, "/r/pkg/src", "/r", &out).?);
+    try testing.expectEqualStrings("/r/biome.json", detect(a, nested, .biome, "/r/web", "/r", &out).?);
+    try testing.expectEqualStrings("/r/pkg/oxlint.config.ts", detect(a, nested, .oxlint, "/r/pkg/src", "/r", &out).?);
+    // 도구마다 따로 — ESLint 설정은 Biome·oxlint 가 아니고, Biome 설정은 oxlint 가 아니다.
+    const eslint_only: FakeFs = .{ .files = &.{.{ .path = "/r/eslint.config.js" }} };
+    try testing.expect(detect(a, eslint_only, .biome, "/r", "/r", &out) == null);
+    try testing.expect(detect(a, eslint_only, .oxlint, "/r", "/r", &out) == null);
+    const biome_only: FakeFs = .{ .files = &.{.{ .path = "/r/biome.json" }} };
+    try testing.expect(detect(a, biome_only, .oxlint, "/r", "/r", &out) == null);
+    try testing.expect(detect(a, biome_only, .eslint, "/r", "/r", &out) == null);
+    const outside: FakeFs = .{ .files = &.{ .{ .path = "/biome.json" }, .{ .path = "/.oxlintrc.json" } } };
+    try testing.expect(detect(a, outside, .biome, "/r/x", "/r", &out) == null);
+    try testing.expect(detect(a, outside, .oxlint, "/r/x", "/r", &out) == null);
 }

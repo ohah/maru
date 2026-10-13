@@ -23466,6 +23466,115 @@ test "ASB5 보조 언어 서버 ESLint (tooling §8.2u) — 서버가 diagnostic
     try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_pulls);
 }
 
+test "ASB6 보조 언어 서버 Biome·oxlint (tooling §8.2u) — 설정이 셋 다 있으면 ESLint·Biome·oxlint 가 함께 떠 진단이 서버마다 제 칸에(설정 요청은 ESLint 만 답한다), ⌘. 는 Biome 의 지연 항목을 Biome 에 resolve 하고, 저장 시 source.fixAll 은 셋 모두에" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "a.ts", "var a = 1;\nlet b = 2;\nESLFIX BIOFIX OXFIX\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    s.loaded_config.config.editor.format_on_save = false; // code action 만 잰다(biome.json 이 외부 포매터 감지에 걸리지 않게)
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "eslint.config.mjs", .data = "export default [];\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "biome.json", .data = "{}\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = ".oxlintrc.json", .data = "{}\n" });
+    for ([_][]const u8{ "vscode-eslint-language-server", "biome", "oxlint" }) |name| {
+        var pbuf: [64]u8 = undefined;
+        try installFakeLspCopy(&f.fx, try std.fmt.bufPrint(&pbuf, "node_modules/.bin/{s}", .{name}));
+    }
+    try testing.expect(f.ready());
+    const term = f.term;
+    const root = f.root_buf[0..f.root_len];
+    const lint = struct {
+        fn diag(t: *Term, prefix: []const u8) ?maru.session.editor.diagnostic.Diagnostic {
+            for (&t.rt.editor_diagnostics.aux) |*set| for (set.list.items) |d| if (std.mem.startsWith(u8, d.message, prefix)) return d;
+            return null;
+        }
+        fn client(ss: *AppSession, exe: []const u8) ?*lsp_client.Client {
+            for (ss.editor_lsp.clients.items) |*c| if (c.role == .auxiliary and std.mem.eql(u8, c.server.exe, exe)) return c;
+            return null;
+        }
+    };
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    // ⑴ 셋이 함께 떠 진단이 서버마다 제 칸에 — 주 서버 칸도 그대로. 칸이 모자라면(둘) 마지막 서버의 진단이 안 선다.
+    const All = struct {
+        fn g(t: *Term) bool {
+            return lint.diag(t, "eslint: ") != null and lint.diag(t, "biome: ") != null and lint.diag(t, "oxlint: ") != null and t.rt.editor_diagnostics.lsp.items.len > 0;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 8000, term, All.g));
+    var want_buf: [std.fs.max_path_bytes]u8 = undefined;
+    for ([_][]const u8{ "vscode-eslint-language-server", "biome", "oxlint" }, [_][]const u8{ "eslint.config.mjs", "biome.json", ".oxlintrc.json" }) |exe, cfg| {
+        const c = lint.client(s, exe) orelse return error.NoLintClient;
+        try testing.expect(c.findDoc(term) != null);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{s}/node_modules/.bin/{s}", .{ root, exe }), c.launched_path.?);
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "{s}/{s}", .{ root, cfg }), c.aux_config.?);
+    }
+    try testing.expectEqualStrings("biome", lint.diag(term, "biome: ").?.server);
+    try testing.expectEqualStrings("biome", lint.diag(term, "biome: ").?.source_text);
+    try testing.expectEqualStrings("oxlint", lint.diag(term, "oxlint: ").?.server);
+    try testing.expectEqualStrings("oxc", lint.diag(term, "oxlint: ").?.source_text);
+    // 설정 요청은 ESLint 의 것만 답한다 — Biome·oxlint(와 주 서버)의 `workspace/configuration` 은 거부(실서버도 거부로 돈다).
+    try testing.expectEqual(@as(u64, 1), s.editor_lsp.answered_configurations);
+    // 정보 명령 — 보조 서버 줄이 표 순서(ESLint·Biome·oxlint)로.
+    s.dismissMessageOverlays();
+    lsp_client.showServerInfo(s);
+    {
+        const msg = s.chrome_host.notice.message;
+        var at: usize = 0;
+        for ([_][]const u8{ "ESLint", "Biome", "oxlint" }, [_][]const u8{ "eslint.config.mjs", "biome.json", ".oxlintrc.json" }, [_][]const u8{ "vscode-eslint-language-server", "biome", "oxlint" }) |name, cfg, exe| {
+            var line_buf: [512]u8 = undefined;
+            var exe_buf: [128]u8 = undefined;
+            const want = maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_aux), &.{ .{ .s = name }, .{ .s = cfg }, .{ .s = try std.fmt.bufPrint(&exe_buf, "node_modules/.bin/{s}", .{exe}) } });
+            const i = std.mem.indexOfPos(u8, msg, at, want) orelse return error.NoAuxInfoLine;
+            at = i + want.len;
+        }
+    }
+    s.dismissMessageOverlays();
+    // ⑵ ⌘. — 둘째 줄(Biome·oxlint 의 진단 자리)에서. 주 서버 먼저, 보조 서버는 표 순서. Biome 의 항목은 편집 없이 data 만(실서버와 같다) —
+    // 고르면 Biome 에 resolve 한다(다른 서버가 받으면 `# aux lazy`).
+    {
+        var d = appendPaneFrame(s, f.leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+    }
+    const settled = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_code_action.waiting and !ss.editor_code_action.resolve_waiting;
+        }
+    }.g;
+    const line2 = std.mem.indexOf(u8, content(term), "let").? + 1;
+    term.rt.editor_selection = .{ .anchor_start = line2, .anchor_end = line2, .focus = line2 };
+    const ca0 = s.editor_lsp.sent_code_actions;
+    try pressKey(&f.fx, .{ .char = '.' }, .{ .command = true });
+    try testing.expectEqual(ca0 + 4, s.editor_lsp.sent_code_actions);
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    {
+        const titles = settings_ops.contextMenuItems(s);
+        try testing.expectEqual(@as(usize, 3), titles.len);
+        try testing.expectEqualStrings("fake: lazy", titles[0]);
+        try testing.expectEqualStrings("biome: fix A1 (data aux-1)", titles[1]);
+        try testing.expectEqualStrings("oxlint: fix A1 (data aux-1)", titles[2]);
+    }
+    try pressKey(&f.fx, .arrow_down, .{});
+    try pressKey(&f.fx, .enter, .{});
+    try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
+    try testing.expect(std.mem.indexOf(u8, content(term), "\nFIXEDt b = 2;\n") != null);
+    s.dismissMessageOverlays();
+    // ⑶ 저장 시 `source.fixAll` — 셋 모두 그 kind 를 덮는다(`source.fixAll.eslint`·`source.fixAll.biome`·`source.fixAll`). Biome 의 것은 resolve 를 거친다.
+    s.loaded_config.config.editor.code_actions_on_save = "source.fixAll";
+    defer s.loaded_config.config.editor.code_actions_on_save = "";
+    try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
+    const Saved = struct {
+        fn g(ss: *AppSession) bool {
+            return !ss.editor_save_actions.active and !ss.editor_format.waiting;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, s, Saved.g));
+    try testing.expect(std.mem.indexOf(u8, content(term), "ESL_FIXED BIO_FIXED OX_FIXED") != null);
+}
+
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

@@ -415,6 +415,8 @@ pub const Client = struct {
     image_rx_len: usize = 0,
     /// 이 연결 자신이 hello{role:"image_channel"} 을 보낸 보조 연결이면 그 token. 턴이 끝난 뒤 owner 가 꺼내 입양한다.
     image_channel_bind: ?u128 = null,
+    /// 용량 사건이 이미지를 미룬 stream 을 깨웠다 — owner 가 꺼내 이 연결의 producer 를 바로 예약한다(§3.5·§5).
+    image_capacity_wake: bool = false,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -644,7 +646,11 @@ pub const Client = struct {
             const rc = c.send(fd, &ack, ack.len, posix.MSG.DONTWAIT);
             // 신호가 끼면 다시 쓴다 — 논블로킹 송신이라 기다리는 일은 없고, 8 B 를 다음 턴으로 미룰 자리가 없다.
             if (rc < 0 and posix.errno(rc) == .INTR) continue;
-            if (rc == ack.len) return true;
+            if (rc == ack.len) {
+                // 채널이 묶였다 — 그 전에 붙어 「이미지 채널 없음」으로 미룬 stream 을 깨운다.
+                self.noteImageCapacity();
+                return true;
+            }
             self.loseImageChannel(.bind_ack_send);
             return false;
         }
@@ -690,11 +696,15 @@ pub const Client = struct {
         filled += @intCast(rc);
         var split: image_channel_wire.ReleaseSplit = .{ .bytes = buf[0..filled] };
         const ledger = &self.image_ledger.?;
-        while (split.next() catch return self.loseImageChannel(.protocol_error)) |segment_id|
-            _ = ledger.release(segment_id);
+        var returned = false;
+        while (split.next() catch return self.loseImageChannel(.protocol_error)) |segment_id| {
+            if (ledger.release(segment_id) == .returned) returned = true;
+        }
         const rest = split.rest();
         @memcpy(self.image_rx[0..rest.len], rest);
         self.image_rx_len = rest.len;
+        // 원장에 자리가 생겼다 — 미룬 이미지가 있는 stream 을 깨운다.
+        if (returned) self.noteImageCapacity();
     }
 
     /// 채널 HUP/ERR(§3.5 — 레벨 트리거라 미루면 계속 깨어난다).
@@ -765,6 +775,16 @@ pub const Client = struct {
             if (self.imageLedger()) |ledger| _ = ledger.cancel(segment.segment_id);
             _ = c.close(segment.fd);
         }
+    }
+
+    fn noteImageCapacity(self: *Client) void {
+        if (self.connection.noteImageCapacity()) self.image_capacity_wake = true;
+    }
+
+    /// 용량 사건의 깨움을 꺼낸다 — owner 가 이 연결의 producer 를 예약한다.
+    pub fn takeImageCapacityWake(self: *Client) bool {
+        defer self.image_capacity_wake = false;
+        return self.image_capacity_wake;
     }
 
     /// 이 연결에서 지금까지 발급한 가장 큰 세그먼트 id(0 = 없음·채널 없음) — 배치의 `image_seg_hwm` 의 바닥값이다.

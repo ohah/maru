@@ -788,7 +788,10 @@ const CollectSegmentSink = struct {
                 self.output.prepared_segment_max = @max(self.output.prepared_segment_max, segment.segment_id);
                 return .{ .segment = segment.segment_id };
             },
-            .deferred => return .deferred,
+            .deferred => {
+                self.output.image_deferred = true;
+                return .deferred;
+            },
             .untransmittable => return .untransmittable,
         }
     }
@@ -821,6 +824,10 @@ pub const CollectedOutput = struct {
     prepared_segments: std.ArrayListUnmanaged(image_segment_ledger.PreparedImageSegment) = .empty,
     prepared_segment_max: u64 = 0,
     image_channel: ?ImageChannelOps = null,
+    /// 세그먼트 판으로 화면을 투영했다 — commit 이 구독의 이미지 미룸 상태를 이 투영의 결과로 바꾼다.
+    image_projected: bool = false,
+    /// 그 투영이 이미지를 하나라도 미뤘다(「전송 불가」는 세지 않는다 — 깨우지 않는다, §4.4).
+    image_deferred: bool = false,
     frames_taken: bool = true,
     finished: bool = false,
 
@@ -888,6 +895,10 @@ pub const CollectedOutput = struct {
         if (self.next_metadata_change_token) |next|
             sub.metadata_change_token = next;
         if (self.clear_observation_probe) sub.observation_probe_nonce = null;
+        if (self.image_projected) {
+            sub.image_deferred = self.image_deferred;
+            sub.image_wake = false;
+        }
         // 배치가 큐에 승인된 같은 턴 — 세그먼트를 채널로 보낸다. 주 소켓의 배치 바이트는 다음 `writeReady` 라 「채널이 먼저」다.
         self.finishSegments(.issue);
         self.finishFrames();
@@ -1016,6 +1027,12 @@ pub const Connection = struct {
         screen_generation: u64 = 0,
         screen_change_token: ?ScreenChangeToken = null,
         catchup: catchup_barrier_contract.HostState = .idle,
+        /// 마지막으로 commit 된 투영이 이미지를 미뤘다(이미지 채널 §5 — 원장 상한·채널 없음·같은 이미지 미반환). 용량 사건이
+        /// 그 stream 을 깨운다.
+        image_deferred: bool = false,
+        /// 용량 사건이 깨웠다 — 「화면 변화 없음」 게이트를 우회해 다시 투영한다. 그 투영이 commit 될 때 내린다(롤백은 남긴다 —
+        /// 압력 롤백 뒤에도 다시 시도해야 한다).
+        image_wake: bool = false,
     };
 
     /// `image_channel`: hello{role:"image_channel"} 을 받은 보조 연결. 입양을 기다리며 이후 frame 을 모두 거부한다.
@@ -2441,6 +2458,19 @@ pub const Connection = struct {
     /// record 바이트를 `kind` frame(각 ≤ `max_binary_chunk`)으로 잘라 `list`에 덧붙인다. 마지막 chunk에 `end_stream` flag를
     /// 세운다(§10 — 한 batch의 끝). 빈 바이트도 end_stream 한 frame으로 batch 종료를 알린다. 각 chunk는 `stream`을 싣는다.
     /// snapshot(snapshot_chunk)과 delta(delta_chunk)가 같은 chunk 규칙을 공유한다.
+    /// 용량 사건(이미지 채널 §5 — release 수신·채널 묶임): 이미지를 미룬 stream 을 모두 깨운다. 깨운 것이 있으면 true — owner 가
+    /// 이 연결의 producer 를 바로 예약한다.
+    pub fn noteImageCapacity(self: *Connection) bool {
+        var woke = false;
+        var it = self.attachments.valueIterator();
+        while (it.next()) |sub| {
+            if (!sub.image_deferred) continue;
+            sub.image_wake = true;
+            woke = true;
+        }
+        return woke;
+    }
+
     /// 이 연결이 이미지를 세그먼트로 낼 수 있는가(이미지 채널 §5) — `image_shm` 을 협상했고 owner 층이 세그먼트 연산을 건넸다.
     /// 형식은 협상으로만 고른다: 채널이 없어도(「이미지 채널 없음」) 세그먼트 경로다 — owner 층이 「미룸」으로 답해 그 연결에
     /// `image_blob` 이 다시 나가지 않는다(계약 §3.2).
@@ -2464,6 +2494,7 @@ pub const Connection = struct {
     ) anyerror!ProjectedSnapshot {
         if (self.imageSegmentOps()) |image_ops| if (ops.snapshot_with_images) |project| {
             output.image_channel = image_ops;
+            output.image_projected = true;
             sink_storage.* = .{ .output = output, .ops = image_ops, .stream_id = stream };
             return project(ops.ctx, runtime_id, sequence, self.allocator, sink_storage.sink());
         };
@@ -2483,6 +2514,7 @@ pub const Connection = struct {
     ) anyerror!StreamUpdate {
         if (self.imageSegmentOps()) |image_ops| if (ops.delta_with_images) |project| {
             output.image_channel = image_ops;
+            output.image_projected = true;
             sink_storage.* = .{ .output = output, .ops = image_ops, .stream_id = stream };
             return project(ops.ctx, runtime_id, base, sequence, self.allocator, sink_storage.sink());
         };
@@ -3461,9 +3493,11 @@ pub const Connection = struct {
             }
         else
             null;
+        // 용량 사건이 깨운 stream 은 화면이 그대로여도 다시 투영한다 — 미룬 이미지가 이번엔 자리를 얻을 수 있다(이미지 채널 §5).
         const screen_changed = screen_change_token == null or
             sub.screen_change_token == null or
-            !std.meta.eql(screen_change_token.?, sub.screen_change_token.?);
+            !std.meta.eql(screen_change_token.?, sub.screen_change_token.?) or
+            sub.image_wake;
         const screen_incarnation_changed = if (screen_change_token) |current|
             if (sub.screen_change_token) |committed|
                 current.incarnation != committed.incarnation
@@ -9617,12 +9651,18 @@ const SegmentWiringFixture = struct {
     conn: Connection = undefined,
 
     fn init(self: *SegmentWiringFixture, advertise: bool) !void {
+        return self.initWith(advertise, false);
+    }
+
+    /// `screen_tokens` 면 화면 변화 토큰이 같은 동안 투영하지 않는다(제품의 「화면 변화 없음」 게이트).
+    fn initWith(self: *SegmentWiringFixture, advertise: bool, screen_tokens: bool) !void {
         segment_projection_probe = .{};
         self.registry = reg.TerminalRuntimeRegistry.init(testing.allocator);
         _ = try self.registry.register(0xAA, 80, 24);
         self.subscriptions = subscription_identity.Table.init(testing.allocator);
         self.conn = Connection.initProduct(testing.allocator, 0x1234, &self.registry, .{ .monotonic_id = 1, .slot_generation = 1 }, &self.subscriptions);
-        var ops = self.fake.ops();
+        if (screen_tokens) self.fake.screen_change_token = .{ .incarnation = 1, .revision = 1 };
+        var ops = if (screen_tokens) self.fake.opsWithScreenChangeToken() else self.fake.ops();
         ops.snapshot_with_images = SegmentProjectionProbe.snapshot;
         ops.delta_with_images = SegmentProjectionProbe.delta;
         self.conn.runtime_ops = ops;
@@ -9781,4 +9821,49 @@ test "image segment wiring: deferred and untransmittable answers prepare nothing
     try testing.expectEqual(@as(usize, 1), plain.fake.delta_calls);
     try testing.expectEqual(@as(usize, 0), segment_projection_probe.delta_calls);
     try testing.expectEqual(@as(usize, 0), plain.owner.prepares);
+}
+
+test "image segment wiring: a deferred image marks the stream, a capacity event wakes it past the unchanged-screen gate, and the projection that sends it clears both" {
+    var fx: SegmentWiringFixture = .{ .registry = undefined, .subscriptions = undefined };
+    try fx.initWith(true, true);
+    defer fx.deinit();
+    const sub = fx.conn.attachments.getPtr(1).?;
+
+    // 화면이 바뀌어 투영했는데 자리가 없다 — commit 이 그 stream 에 「미룸」을 남긴다(깨움은 없다).
+    fx.fake.screen_change_token.revision = 2;
+    fx.owner.answer = .deferred;
+    var deferred = (try fx.conn.collectOutputForLocalStream(1)).?;
+    deferred.commit(&fx.conn);
+    try testing.expect(sub.image_deferred);
+    try testing.expect(!sub.image_wake);
+    // 화면이 그대로면 게이트가 막는다 — 미룬 이미지는 그대로 미룬 채다.
+    try testing.expectEqual(@as(?CollectedOutput, null), try fx.conn.collectOutputForLocalStream(1));
+    try testing.expectEqual(@as(usize, 1), segment_projection_probe.delta_calls);
+
+    // 용량 사건이 깨운다. 롤백은 깨움을 남긴다(다시 시도해야 한다).
+    try testing.expect(fx.conn.noteImageCapacity());
+    try testing.expect(sub.image_wake);
+    var rolled = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 2), segment_projection_probe.delta_calls);
+    rolled.rollback(&fx.conn);
+    try testing.expect(sub.image_wake);
+
+    // 이번엔 자리가 있다 — 화면이 그대로여도 투영되고, 보낸 commit 이 두 표시를 내린다.
+    fx.owner.answer = .segment;
+    var sent = (try fx.conn.collectOutputForLocalStream(1)).?;
+    try testing.expectEqual(@as(usize, 3), segment_projection_probe.delta_calls);
+    sent.commit(&fx.conn);
+    try testing.expect(!sub.image_deferred);
+    try testing.expect(!sub.image_wake);
+    try testing.expectEqual(@as(?CollectedOutput, null), try fx.conn.collectOutputForLocalStream(1));
+    // 깨울 stream 이 없으면 용량 사건은 아무것도 예약하지 않는다.
+    try testing.expect(!fx.conn.noteImageCapacity());
+
+    // 「전송 불가」는 미룸이 아니다 — 깨우지 않는다(계약 §4.4).
+    fx.fake.screen_change_token.revision = 3;
+    fx.owner.answer = .untransmittable;
+    var dropped = (try fx.conn.collectOutputForLocalStream(1)).?;
+    dropped.commit(&fx.conn);
+    try testing.expect(!sub.image_deferred);
+    try testing.expect(!fx.conn.noteImageCapacity());
 }

@@ -26712,7 +26712,7 @@ test "generation allocator scope 무효 축은 하나씩 구별된다" {
 
 // ── 이미지 채널 수립(앱 쪽, docs/session-host-image-channel.md §3.1·§3.2) ───────────────────────────────────────────
 
-/// 판정자용 가짜 host. 실제 host 는 IC5 전까지 제공 스위치가 꺼져 있어 채널이 묶이는 경로를 낼 수 없다 — 프로토콜만 흉내 낸다.
+/// 판정자용 가짜 host — 거부·시간 초과·채널 닫기 같은 실패 모드를 마음대로 내도록 프로토콜만 흉내 낸다.
 /// 스레드 하나가 주 연결과 채널 연결을 차례로 받는다. 판정자가 실패해도 멈추지 않도록 `finish` 가 listen 소켓을 **닫아**
 /// accept 를 깨운다(macOS 에서 listen 소켓 shutdown 은 ENOTCONN 이고 막힌 accept 를 깨우지 않는다 — 실측).
 const FakeImageHost = struct {

@@ -7091,9 +7091,9 @@ pub fn build(b: *std.Build) void {
         });
         const run_image_channel_host_tests = b.addRunArtifact(image_channel_host_tests);
         // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4, Connection 에 건넨 연산(IC5b-2) 1, 용량 사건 깨움(IC5c-1) 1,
-        // 우선권 동안의 깨움·「전송 불가」 진단(IC5c-2) 1.
-        run_image_channel_host_tests.addArg("--maru-expect-tests=19");
-        run_image_channel_host_tests.addArg("--maru-expect-passed=19");
+        // 우선권 동안의 깨움·「전송 불가」 진단(IC5c-2) 1, 제품 투영과 잇는 통합(IC5d) 2.
+        run_image_channel_host_tests.addArg("--maru-expect-tests=21");
+        run_image_channel_host_tests.addArg("--maru-expect-passed=21");
         image_channel_host_step.dependOn(&run_image_channel_host_tests.step);
         test_step.dependOn(&run_image_channel_host_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_host_tests.step);
@@ -7120,7 +7120,7 @@ pub fn build(b: *std.Build) void {
 
     // 앱 쪽 수립(IC2b) — connect 함수가 채널을 묶거나, 거부면 abandon 을 응답까지 읽고 시간 초과·연결 단계 실패면 채널만 닫아
     // 「이미지 채널 없음」으로 돌아오는가.
-    // 실제 host 는 IC5 전까지 제공하지 않으므로 가짜 host 스레드와 왕복한다. macOS 소켓 경로라 macOS 잡에서 돈다.
+    // 실패 모드(거부·시간 초과·채널 닫기)를 마음대로 내도록 가짜 host 스레드와 왕복한다. macOS 소켓 경로라 macOS 잡에서 돈다.
     const image_channel_app_step = b.step(
         "test-image-channel-app",
         "The app binds the image channel or abandons it without failing the connection",

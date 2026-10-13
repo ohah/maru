@@ -7,7 +7,7 @@
 
 - 모든 단계는 `image_shm` 광고 플래그가 **꺼진 채** 머지할 수 있어야 한다. 앱이 광고를 켜는 것은 IC6 하나다 — 그 전까지 제품
   동작은 지금의 `image_blob` 그대로다. host 의 제공(hello_ack 의 `image_shm`·token, `host_offers_image_channel`)은 producer 가
-  `image_ref` 를 내기 시작하는 IC5 에서 켠다.
+  `image_ref` 를 내고 미룬 이미지를 다시 투영하는 IC5d 에서 켰다.
 - 주 MRSH 소켓에는 어떤 단계에서도 fd 를 붙이지 않는다. 주 파이프라인의 버림·복구 경로를 이미지 때문에 고치는 변경은 계약 위반이다.
 - 새 닫힘 자리는 모두 이름을 단다(`tests/close_site_name_boundary.zig`). 판정자를 더하면 `check-boundaries` 전체를 돌린다.
 - session host 순수 판정자는 PR CI 에서 안 도는 잡이 있으므로, 머지 전에 `gh workflow run ci.yml --ref <branch>` 로 main 전용 잡을 돌린다.
@@ -478,7 +478,7 @@ IC5c 는 둘로 나눴다 — 용량 사건 깨우기(IC5c-1, 정지 화면의 �
   깨우지 않는다; owner(`test-image-channel-host` 18) — 채널 묶임이 깨우고 owner 가 그 깨움을 꺼내 예약하며, 모르는 id 의 release 는
   깨우지 않고 반환한 release 는 깨운다. 변이 7 RED.
 
-#### IC5c-2 — 큰 한 장 우선권·「전송 불가」 진단 (PR 진행 중)
+#### IC5c-2 — 큰 한 장 우선권·「전송 불가」 진단 (완료)
 
 - 우선권(`Connection.image_priority`, 계약 §4.4)은 Connection 층이 든다 — stream·commit·detach 경계를 아는 층이다. owner 층의 원장은
   그대로 「연결 상한보다 큰 한 장은 원장이 비었을 때만」을 지킨다(IC1).
@@ -519,15 +519,39 @@ IC5c 는 둘로 나눴다 — 용량 사건 깨우기(IC5c-1, 정지 화면의 �
   기다린다. 제품 GUI 는 host 당 광고하는 연결이 하나라 다른 연결이 host 예산을 쥘 일이 드물다 — 둘 이상이 되면 host 전체 반환을
   용량 사건으로 넓힌다.
 
-#### IC5d — host 제공 스위치 (미착수)
+#### IC5d — host 제공 스위치 (PR 진행 중)
 
 IC5a–c 가 처음 계획(producer 의 `image_ref`·`image_seg_hwm` 방출, 미룸 표현, 형식 선택, 용량 사건, 우선권, 「전송 불가」)을 층마다
-판정자로 덮었다. 남은 것:
+판정자로 덮었다. IC5d 는 스위치를 켜고 층들을 한 줄로 잇는다.
 
-- host 제공 스위치 `host_offers_image_channel` 를 켜고 제공 스위치 판정자(`poll_owner` 「제품 owner 는 제공 스위치를 그대로 따른다」)를
-  갱신한다.
-- 제품 투영과 실제 owner 를 잇는 통합 판정자: 미룬 이미지가 있는 정지 화면이 release 뒤에 이미지를 받는다; 자리 없음·abandon·채널
-  상실 뒤에도 그 연결에 `image_blob` 이 나가지 않는다; 연결 바이트 상한보다 큰 한 장이 다른 이미지에 밀려 굶지 않는다.
+- `host_offers_image_channel = true`. 제품 앱은 아직 광고하지 않으므로(IC6) 이 변경만으로 제품 동작은 바뀌지 않는다 — 기능
+  목록의 `image_shm` 은 admin 이 아닌 제품 연결 모두에 실리지만, token 과 협상은 광고한 연결뿐이다. 제공 스위치 판정자(`poll_owner` 「제품 owner 는 제공 스위치를 그대로 따른다」)는 스위치가 켜져 있는 것까지 잰다
+  (끄면 IC6 앱이 「이미지 채널 없음」으로 남아 이미지가 다시 주 스트림의 8 MiB 배치 상한에 걸린다).
+- 통합 판정자(`test-image-channel-host`, 19 → 21): 실제 리스너·owner·채널·원장에 제품 투영(`screen_snapshot`)을 실제 TerminalCore
+  위에서 돌리는 RuntimeOps 를 건다(제품 `RuntimeManager` 의 sink 다리와 같은 대응 — 그 대응은 runtime_manager 판정자가 잰다).
+  앱 쪽은 stream chunk 를 배치로 잇고 채널 세그먼트를 매핑해 픽셀을 비교한다.
+  - attach 스냅샷은 `image_ref` 와 placement 를 싣고 그 세그먼트의 픽셀이 채널로 온다;
+  - 앱이 그 세그먼트를 돌려주기 전에 그린 새 프레임은 delta 에서 미뤄지고, 화면이 더 바뀌지 않으면 cadence 가 여러 번 돌아도
+    **다시 투영하지 않는다**(투영 횟수로 잰다 — 미룬 stream 을 매번 다시 투영하는 회귀는 빈 delta 만 내 배치로는 안 보인다). release
+    한 번에 새 판의 `image_ref` 와 그 픽셀이 온다;
+  - 채널을 잃은 뒤(그 전 배치를 비운 다음) 새 이미지는 `image_blob`·placement 없이 빠지고 어느 이미지의 `image_ref` 도 나가지 않으며
+    (delta 는 나간다), 주 연결은 산다;
+  - abandon 한 연결의 attach 스냅샷과 delta 도 같다. 두 판정자 모두 `image_blob` 판 투영이 한 번도 불리지 않는다.
+- 돌연변이 7 개 모두 RED: 스위치 끄기, release 깨움 제거, 「화면 변화 없음」 게이트가 깨움을 무시·미룬 stream 을 매번 연다,
+  채널 상실·abandon 이 협상을 푼다(→ `image_blob` 재등장), commit 이 미룸 표시를 저장하지 않음.
+- 적대적 검증 1 회차: HIGH 0. 제품 연결 경로(`connectMajor`·`connectFrozenGui`·`connectFrozenShutdownUntil`·`connectMajorUntilWithOps`)는
+  모두 광고하지 않는다. MEDIUM 1(정지 구간 판정이 공허 — 투영 횟수로 고침), LOW 넷 고침(채널 상실 뒤 검사 조임, 해제 순서·errdefer,
+  libc mmap, 주 연결 확인이 같은 parser 를 씀).
+- 남는 위험: 이 머지부터 IC6 실측 전에 host 가 제공한다. side-by-side drain 으로 오래 사는 host 도 그대로 제공하므로, IC6 가 host 쪽
+  결함을 찾으면 앱은 그 host 를 이름으로 가를 수 없다(기능 이름이 같다) — 그때는 기능 이름을 바꿔(예: `image_shm_v2`) 옛 host 와
+  협상하지 않는다.
+- 한계:
+  - 「자리 없음」(슬롯 경계에서 token 없음) 연결은 통합 판정자에 없다 — 협상 유지는 server 판정자(「자리가 없어도 협상은 됐다」)가,
+    세그먼트 판에서 채널 없는 연결의 미룸은 owner 판정자(「이미지 채널 없음」 연결은 미룸)가 잰다. 형식 선택은 셋이 같은 길이다
+    (협상 여부만 본다).
+  - 연결 바이트 상한(64 MiB)보다 큰 한 장의 굶음 방지는 통합 판정자에 없다 — 실제 core 에 64 MiB 넘는 이미지를 넣으려면 base64
+    85 MB 를 파싱해야 해 판정자로는 무겁다. 우선권 판정은 server 판정자(가짜 owner)와 owner 판정자(실제 원장의 release 깨움)가 나눠
+    잰다(IC5c-2).
 
 ### IC6 — 광고를 켜고 실측 (미착수)
 

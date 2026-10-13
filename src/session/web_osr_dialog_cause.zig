@@ -16,7 +16,7 @@ pub const Cause = enum {
     agent,
     /// 창 안에 사용자 입력만 있었다 — 또는 사용자가 묻는 닫기의 떠나기 확인이다.
     user,
-    /// 둘 다 창 안에 있었다.
+    /// 둘 다 창 안에 있었고 에이전트가 더 늦었다(사용자가 더 늦으면 `user` — W9c② 적대 리뷰 2 회차).
     ambiguous,
     /// 둘 다 없었다(오래된 타이머·서버가 늦게 보낸 응답 등).
     unknown,
@@ -38,7 +38,10 @@ pub fn classify(agent_ms: i64, user_ms: i64, now: i64, user_close: bool) Cause {
     if (user_close) return .user;
     const a = recent(agent_ms, now);
     const u = recent(user_ms, now);
-    if (a and u) return .ambiguous;
+    // 둘 다 창 안 — 마지막에 움직인 쪽이 띄웠을 공산이 크다. 사용자가 더 늦으면 사용자 것(2 회차: 에이전트 op 1 초 뒤 사용자가 다른 앱에
+    // 놓은 dragend 의 confirm 을 「모호」 로 봐 보이지 않는 탭이라 에이전트가 답했다). 에이전트가 더 늦으면 모호(사용자가 누른 직후의 에이전트
+    // 누름 — 사용자의 늦은 confirm 일 수 있다).
+    if (a and u) return if (user_ms >= agent_ms) .user else .ambiguous;
     if (a) return .agent;
     if (u) return .user;
     return .unknown;
@@ -87,8 +90,9 @@ test "W9c②: 원인은 도착 시각의 창(5 초) 안에 누구 입력이 있�
     try testing.expectEqual(Cause.agent, classify(now - window_ms, now - window_ms - 1, now, false)); // 경계: 정확히 5 초는 안
     try testing.expectEqual(Cause.user, classify(never, now - 10, now, false));
     try testing.expectEqual(Cause.user, classify(now - window_ms - 1, now - 1, now, false)); // 에이전트 입력은 5 초 밖
-    try testing.expectEqual(Cause.ambiguous, classify(now - 1, now - 2, now, false));
-    try testing.expectEqual(Cause.ambiguous, classify(now - 2, now - 1, now, false)); // 순서와 상관없이 둘 다면 모호
+    try testing.expectEqual(Cause.ambiguous, classify(now - 1, now - 2, now, false)); // 에이전트가 더 늦다 — 모호
+    try testing.expectEqual(Cause.user, classify(now - 2, now - 1, now, false)); // 사용자가 더 늦다 — 사용자 것(2 회차)
+    try testing.expectEqual(Cause.user, classify(now - 2, now - 2, now, false)); // 같은 때 — 사용자 쪽으로
     try testing.expectEqual(Cause.unknown, classify(never, never, now, false));
     try testing.expectEqual(Cause.unknown, classify(now - 8_000, now - 9_000, now, false)); // 8 초 fetch 뒤 alert
 }

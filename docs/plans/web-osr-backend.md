@@ -525,7 +525,7 @@ role/label/text) → W9b③(탭 만들기·닫기).
 프로세스 단위 `web_osr.enabled` = L2 의 탭 단위 판정과 같은 값, 호출마다 재허가, 끝은 Swift 와 같은 `complete_browser_op`). hello 광고에 빠져
 있던 `snapshot`·`console` 과 새 셋을 더하고 「모든 메서드를 광고」 시험. 실측 `mise run macos-web-cdp-smoke`(일반 모드 앱 + pane 대본):
 진짜 클릭(`isTrusted`)·덮인 요소 거절(덮은 것도 안 눌림)·없는 요소 not ok·링크 이동 뒤 뒤로·앞으로·기록 끝 not ok·새로고침이 문서를 다시
-받음. Chromium 탭의 `browser list` 제목이 아직 페이지 제목이 아니라(「Browser」 고정) 스모크는 주소 칸과 신호 요청으로 본다 — 목록 제목은 W9a.
+받음. Chromium 탭의 `browser list` 제목이 페이지 제목이 아니라(「Browser」 고정) 스모크는 주소 칸과 신호 요청으로 본다 — W9a 에서도 바꾸지 않았다(WebKit 도 탭 이름이다, 작성자 선택 D9).
 
 **W9b①a 적대 리뷰 1 회차** — 높음 2: ⑴ 덮임 검사가 페이지 world 의 `elementFromPoint`·`contains` 를 썼다 — 실측으로 악의적 페이지가
 검사를 속이고(덮인 버튼을 「맞음」으로) 검사 순간을 알아챘다 → **격리된 world**(`Page.createIsolatedWorld`, 3 ms)에서 검사(같은 페이지에서
@@ -1115,3 +1115,38 @@ Chromium 탭의 `exec`·`screenshot` 은 아직 -32008(W9a) — 스모크는 지
   거른다(값의 줄바꿈·탭도 빠진다 — 그대로가 필요하면 exec). 하 — Ctrl-D 뒤 줄바꿈이 버퍼에 남아 나가지 않았다(4 회차 고침이 비우지 않았다) → 끝에서 비운다.
   코드로만 찾은 것: Windows 빌드의 `std.c.read` 가 CRT fd 가 아닌 HANDLE 을 받는다 → 컨트롤 소켓이 없는 빌드에서는 `maru mcp`·repl 이 입력을 읽기 전에
   이유를 알리고 끝낸다(다른 소켓 명령과 같다 — Windows 실행은 재 보지 못했다).
+
+### W9a — 기존 `browser.*` 를 Chromium 탭으로(2026-10-13)
+
+WebKit 탭에만 있던 `navigate`·`getUrl`·`executeScript`·`screenshot`·localStorage 셋·쿠키 셋·`clearStorage` 를 Chromium(OSR) 탭에서 돌린다(프로세스 안
+DevTools — 원격 포트 없음). 크기 때문에 세 단계: **W9a①**(navigate·getUrl·screenshot) → **W9a②**(executeScript) → **W9a③**(localStorage·쿠키·clearStorage).
+wire 계약은 WebKit 과 같은 모양이되, 실측으로 같게 할 수 없던 것은 아래 「차이」 로 적는다.
+
+**계획 공격**(실측 — sidecar wire 를 maru 처럼 쓰는 탐침으로 CEF 154 에서):
+- 1 회차: `Runtime.compileScript` 는 `Runtime.enable` 이 있어야 한다(공유 세션 상태·자동화 탐지 — 버림). 페이지 world 에 옮긴 WebKit 직렬화기는 페이지가 바꾼
+  내장 함수(`Array.prototype.join`)를 탄다(V8 의 by-value 는 타지 않는다). `Network.getAllCookies` 는 다른 사이트의 HttpOnly 쿠키(`banksession`)와 다른 분할의
+  쿠키까지 maru 로 건넸다 — `Network.getCookies {urls:[문서 주소]}` 는 그 문서에 가는 쿠키만(RFC 6265 — WebKit 의 `cookieVisibleToHost` 와 같다). 스크린샷
+  clip 은 문서 좌표이고 화면 밖은 오류 없이 빈 그림. 엄격 CSP 에서 기본 evaluate 는 안쪽 eval 을 허락한다(`allowUnsafeEvalBlockedByCSP:false` 면 WebKit 처럼
+  막힌다). terminate 는 promise 이어짐의 루프를 멈추지만 그 호출은 35 초까지 답이 없다. exec 안의 alert 는 terminate 도 안 듣는다.
+- 2 회차: 스크립트 크기 — DevTools 인자는 64 KiB(sidecar)라 WebKit(1 MiB 프레임)과 같을 수 없다. WebKit 의 문법 검사(JSC)는 `a=1`·`x=>x`·`await 1` 을
+  거절한다. V8 by-value 의 값은 WebKit 과 다르다(NaN→null, `{a:undefined}`→`{}` 등). 16 MiB 결과를 Zig 의 값 나무로 풀면 0.15–0.37 초·0.45–1.5 GB.
+  `setCookie` 는 domain 을 주면 url 의 호스트를 보지 않는다(공개 접미사 검사 없음 — foo.github.io 로 github.io 에 심었다). `clearDataForOrigin "all"` 은
+  도메인 쿠키를 모두 남겼다. RTL 페이지에서 `cssVisualViewport.pageX` 는 음수라 하얀 그림 → `cssLayoutViewport`. 떠나기 확인이 있는 페이지는 이동이 대화상자에서 멈춘다.
+- 3 회차: 이동의 끝 — 앞 문서를 불러오는 중에 보낸 이동은 새 문서 뒤에 앞 문서의 `load_finished -3` 이 오고, about:blank 의 끝은 0, 204·다운로드·#·pushState
+  는 문서 없이 불러오는 중 → 아님이다(지금의 `page_loads` 는 이것을 가르지 못한다 — 이동마다 따로 지켜본다). **sidecar 는 이동 전에 그 탭의 대화상자를
+  「취소」 로 닫는다** — 사용자가 보던 것을 에이전트의 navigate 가 닫았다(대화상자 중에는 보내지 않는다). exec 의 던진 값은 objectGroup 없이 이동까지 남았다
+  (힙 0.6→288 MB). 결과의 비ASCII 는 `\uXXXX` 로 와 16 MiB 상한이 UTF-8 로 8 MiB 쯤에 걸린다.
+
+**결정(작성자 선택 — 목표 지시 「W8 빼고 끝까지」 아래 추천안으로 정하고 보고한다)**:
+- D1 navigate: Chromium 탭은 요청한 이동의 첫 불러오기를 기다린다(요청부터 25 초) → `{ok:true, loaded}`(WebKit 은 `{ok:true}` 그대로 — 시작에 답한다).
+  `loaded` 는 새 문서가 시작된 뒤의 끝(상태 > 0 — 404 도) 또는 about:blank. 문서 없는 끝(204·다운로드·#·pushState)과 실패한 이동(0)은 `loaded:false`, 떠나기
+  확인이 뜨면 곧 실패(「사용자가 그 탭에서 정한다 — 동의하면 이동은 이어진다」), 그 탭(과 팝업 가족)에 대화상자가 떠 있거나 묻는 닫기 중이면 보내지 않고 실패.
+- D2 navigate 주소: Chromium 탭은 http·https·about:blank 만(`invalid_params`).
+- D3 exec 입력: 이스케이프 뒤 64 KiB(W9a②). D4 문법 사전 검사 없음(W9a②). D5 결과 값은 V8 by-value(W9a② — 차이 표). D6 쿠키 쓰기의 domain 은 그 페이지의
+  호스트 자신만(W9a③). D7 clearStorage 는 origin 단위 + 그 주소에 보이는 쿠키를 하나씩(W9a③). D8 스크린샷 배경 투명(WebKit 은 흰색). D9 `browser list` 제목은
+  탭 이름 그대로(WebKit 도 — 페이지 제목은 목록을 흉내 낼 수 있다).
+
+**W9a① 구현**: `web_osr` 의 `AgentNav`(이동마다 끝을 지켜본다 — 위 차례), `web_cdp_page.zig`(navigate 는 지켜보기를 50 ms 마다 보고, getUrl 은 maru 가
+아는 주소 — 같은 탭의 앞선 op 뒤에, screenshot 은 `Page.getLayoutMetrics` → `Page.captureScreenshot` PNG: rect 는 WebKit 과 같은 보기 좌표에
+`cssLayoutViewport.pageX/pageY` 를 더하고 보이는 영역으로 자른다, 출력 폭은 WebKit 처럼 rect 폭 × scale ≤ 8000), 결과는 Swift 와 같은 PNG 조각
+스트림(`browser.screenshotChunk`). 한 번도 보이지 않은 탭은 「아직 보이지 않았다」 로 실패(몰래 만들지 않는다). 스모크 `w9a-page`.

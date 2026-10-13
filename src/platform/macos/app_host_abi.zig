@@ -7736,6 +7736,14 @@ fn wakeCdpSleepers() void {
     }
     for (due[0..n]) |run| {
         run.op.now_ms = now;
+        if (run.op.page) |*p| if (p.kind == .navigate) {
+            // 기다리는 동안 철회·취소됐으면 더 기다리지 않는다(보낼 호출이 없어 `cdpAdvance` 의 확인을 거치지 않는다).
+            if (!cdpStillAllowed(run.async_id)) {
+                finishCdp(run, .failed, "the request was cancelled");
+                continue;
+            }
+            p.nav = if (session_mod.web_osr.agentNavState(run.surface_id)) |st| .{ .done = st.done, .loaded = st.loaded, .before_unload = st.before_unload } else null;
+        };
         const step = run.op.wake(allocator) catch {
             finishCdp(run, .failed, "out of memory");
             continue;
@@ -7768,6 +7776,10 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
         .snapshot => .snapshot,
         .hover => .hover,
         .press => .press,
+        // W9a — WebKit 탭에 있던 메서드.
+        .navigate => .navigate,
+        .get_url => .get_url,
+        .screenshot => .screenshot,
         else => null,
     };
 }
@@ -7783,9 +7795,15 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
             defer allocator.free(msg);
             return completeCdp(async_id, .invalid_params, msg);
         }
-        return completeCdp(async_id, .invalid_params, if (e == error.InvalidKey) "unknown key name (use names like Enter, Shift+Tab, Meta+a or a single character)" else "invalid arguments");
+        return completeCdp(async_id, .invalid_params, switch (e) {
+            error.InvalidKey => "unknown key name (use names like Enter, Shift+Tab, Meta+a or a single character)",
+            error.InvalidUrl => "a Chromium tab navigates only to http, https or about:blank addresses",
+            else => "invalid arguments",
+        });
     };
     run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op };
+    // W9a: navigate 는 요청을 받은 때부터 잰다 — 같은 탭의 앞선 op 뒤에 시작해도 요청의 시한(30 초) 안에 `loaded:false` 로 답한다.
+    if (run.op.page) |*p| p.deadline_ms = cdpNowMs() + web_cdp_ops.web_cdp_page.navigate_wait_ms;
     const busy = for (cdp_runs.items) |other| {
         if (other.surface_id == surface_id) break true;
     } else false;
@@ -7795,13 +7813,29 @@ fn startCdpOp(async_id: u64, surface_id: u64, method: control_browser.BrowserMet
 
 fn beginCdp(run: *CdpRun) void {
     // 페이지가 JS 대화상자를 띄우고 멈춰 있다 — 보내면 시한(30 초)까지 답이 없다. 사용자가 그 탭에서 답해야 한다.
+    // navigate 도 — sidecar 는 이동 전에 그 탭의 대화상자를 「취소」 로 닫는다(사용자가 보던 것을 에이전트가 닫았다, W9a 계획 공격 3 회차).
     if (session_mod.web_osr.jsDialogShowing(run.surface_id)) return finishCdp(run, .failed, web_cdp_ops.dialog_reason);
+    if (run.op.page) |*p| switch (p.kind) {
+        .navigate => {
+            switch (session_mod.web_osr.closeAskPhase(run.surface_id)) {
+                .asking, .asked => return finishCdp(run, .failed, "the tab is being closed (its page was asked before leaving)"),
+                .none, .closed, .stayed => {},
+            }
+            const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
+            if (!session_mod.web_osr.agentNavigate(gpa, run.surface_id, p.target.?)) return finishCdp(run, .failed, cdp_not_shown_reason);
+        },
+        .get_url => p.url = (session_mod.web_osr.pageState(run.surface_id) orelse return finishCdp(run, .failed, cdp_not_shown_reason)).url,
+        .screenshot => {},
+    };
     run.started = true;
     run.op.now_ms = cdpNowMs();
     _ = active_browser_executions.markRunning(run.async_id);
     const step = run.op.start(allocator) catch return finishCdp(run, .failed, "out of memory");
     cdpAdvance(run, step);
 }
+
+/// 한 번도 보이지 않은 탭(OSR 레코드가 없다) — 몰래 만들지 않는다(W9a 작성자 선택).
+const cdp_not_shown_reason = "the Chromium tab has not been shown yet — show it once first";
 
 /// 그 요청이 아직 살아 있고 허가돼 있는가(취소·시한·철회·탭 닫힘·서버 멈춤이면 거짓). wait 는 실행 목록이 아니라 기다림 목록에
 /// 있다 — 닫힘·철회가 그 목록에서 빼고 답한다.
@@ -8120,12 +8154,20 @@ fn cdpReply(outcome: session_mod.web_osr.DevtoolsOutcome, result: []const u8) we
 fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void {
     const async_id = run.async_id;
     const surface_id = run.surface_id;
-    const big_result = run.op.kind == .snapshot and status == .success;
+    const kind = run.op.kind;
+    const started = run.started;
     removeCdpRun(run);
     run.op.deinit(allocator);
     allocator.destroy(run);
-    // snapshot 은 Swift 와 같은 큰 결과 전송(≤512 KiB inline, 넘으면 조각)으로 — 트리가 frame 상한을 넘을 수 있다.
-    if (big_result) completeCdpResult(async_id, result) else completeCdp(async_id, status, result);
+    // W9a: 지켜보던 이동을 놓는다(시작한 navigate 만 — 기다리던 것은 아직 보내지 않았다).
+    if (kind == .navigate and started) session_mod.web_osr.endAgentNav(surface_id);
+    if (status == .success) switch (kind) {
+        // snapshot 은 Swift 와 같은 큰 결과 전송(≤512 KiB inline, 넘으면 조각)으로 — 트리가 frame 상한을 넘을 수 있다.
+        .snapshot => completeCdpResult(async_id, result),
+        // W9a: 스크린샷은 Swift 와 같은 PNG 조각 스트림(`browser.screenshotChunk`)으로.
+        .screenshot => completeCdpScreenshot(async_id, result),
+        else => completeCdp(async_id, status, result),
+    } else completeCdp(async_id, status, result);
     startNextCdp(surface_id);
 }
 
@@ -8158,6 +8200,17 @@ fn completeCdpResult(async_id: u64, result: []const u8) void {
     cdp_next_transfer +%= 1;
     if (cdp_next_transfer == 0) cdp_next_transfer = 1;
     _ = maru_macos_control_complete_browser_result(async_id, cdp_next_transfer, holder.bytes.len, holder, &cdpResultCopy, &cdpResultRelease);
+}
+
+fn completeCdpScreenshot(async_id: u64, png: []const u8) void {
+    const holder = allocator.create(CdpResultHolder) catch return completeCdp(async_id, .failed, "out of memory");
+    holder.* = .{ .bytes = allocator.dupe(u8, png) catch {
+        allocator.destroy(holder);
+        return completeCdp(async_id, .failed, "out of memory");
+    } };
+    cdp_next_transfer +%= 1;
+    if (cdp_next_transfer == 0) cdp_next_transfer = 1;
+    _ = maru_macos_control_complete_browser_screenshot_result(async_id, cdp_next_transfer, holder.bytes.len, holder, &cdpResultCopy, &cdpResultRelease);
 }
 
 fn removeCdpRun(run: *CdpRun) void {
@@ -10207,6 +10260,7 @@ test {
     // W9b①a: Chromium 탭의 DevTools 차례(`web_cdp_ops`) 시험도 — 이름 없는 블록을 따로 두면 필터와 무관하게 하나 더 세져 시험 수를
     // 못박은 단계들이 어긋났다(main 기준 rebase 적대 리뷰 4 회차).
     _ = web_cdp_ops;
+    _ = web_cdp_ops.web_cdp_page; // W9a 페이지 op
     // 전역 핫키 descriptor 매핑(a2의 Swift가 ABI로 소비)도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("global_hotkey.zig"));
     // 커맨드 카탈로그(메뉴바·팝업 공유) round-trip·chord 포맷 테스트도 테스트 빌드에 포함한다.
@@ -12050,4 +12104,154 @@ test "W9b③ 적대 리뷰 5 회차: 모두 철회(사람의 탭이 됨) 뒤 다
     startAgentClose(&refs, try control_server_storage.deferRequest(&p, std.math.maxInt(i128)), .{ .surface_id = tab, .method = .close, .arg = "", .pane_grant = .{ .pane = shell, .target = tab, .scope = .browser } });
     try expectPendingErrorCode(&p, .internal_error); // 「이 pane 이 연 탭이 아니다」
     try std.testing.expectEqual(@as(usize, 0), tab_runs.items.len);
+}
+
+/// W9a 시험: 그 탭에 허가된 요청 하나를 만든다(응답은 `pending.response`).
+fn w9aRequest(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64, method: control_browser.BrowserMethod) !u64 {
+    pending.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{
+        .async_id = id,
+        .surface_id = tab,
+        .method = method,
+        .reserved_bytes = 0,
+        .provenance = .{ .pane_grant = .{ .pane = 5, .target = tab, .scope = .browser } },
+    });
+    return id;
+}
+
+/// 잠든 op 을 곧 깨운다(시각을 기다리지 않고).
+fn w9aWakeNow() void {
+    for (cdp_sleepers.items) |*e| e.wake_ms = 0;
+    wakeCdpSleepers();
+}
+
+test "W9a: navigate 는 이동을 보내고 첫 불러오기를 기다려 loaded 로 답한다 — 대화상자·닫는 중이면 보내지 않는다, 주소는 http·https·about:blank 만" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 71);
+    defer {
+        session_mod.web_osr.destroy(ta, 71);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(71);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 71, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const nav_req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.navigate\",\"params\":{\"id\":71,\"url\":\"https://a.test/\"}}";
+
+    // ① 보내고 기다린다 — 새 문서의 끝(404 도)에 loaded:true.
+    var p1: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p1, nav_req, 71, .navigate), 71, .navigate, "https://a.test/");
+    try std.testing.expectEqualStrings("https://a.test/", session_mod.web_osr.testLastUrl(71).?);
+    try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len);
+    w9aWakeNow();
+    try std.testing.expect(p1.response == null); // 아직 끝나지 않았다
+    session_mod.web_osr.testApply(ta, .{ .nav_state = .{ .browser = 71, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    session_mod.web_osr.testApply(ta, .{ .page_started = 71 });
+    session_mod.web_osr.testApply(ta, .{ .load_finished = .{ .browser = 71, .http_status = 404 } });
+    w9aWakeNow();
+    {
+        const r = try w9b3Result(&p1);
+        defer r.deinit();
+        try std.testing.expect(r.value.object.get("result").?.object.get("loaded").?.bool);
+    }
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    try std.testing.expect(!session_mod.web_osr.agentNavState(71).?.active); // 지켜보기를 놓았다
+
+    // ② 주소 — javascript: 는 invalid_params(보내지 않는다).
+    var p2: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p2, nav_req, 71, .navigate), 71, .navigate, "javascript:alert(1)");
+    try expectPendingErrorCode(&p2, .invalid_params);
+    try std.testing.expectEqualStrings("https://a.test/", session_mod.web_osr.testLastUrl(71).?);
+
+    // ③ 떠나기 확인이 떠 있다 — sidecar 가 이동 전에 그것을 「취소」 로 닫는다: 보내지 않고 곧 실패.
+    session_mod.web_osr.testApply(ta, .{ .js_dialog = .{ .browser = 71, .request = 1, .kind = .alert, .origin = "", .message = "" } });
+    var p3: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p3, nav_req, 71, .navigate), 71, .navigate, "https://b.test/");
+    try expectPendingErrorCode(&p3, .internal_error);
+    try std.testing.expectEqualStrings("https://a.test/", session_mod.web_osr.testLastUrl(71).?);
+}
+
+test "W9a: getUrl 은 maru 가 아는 주소, 한 번도 보이지 않은 탭은 실패 — 같은 탭의 앞선 op 뒤에 답한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try session_mod.web_osr.testHold(ta, 72);
+    defer {
+        session_mod.web_osr.destroy(ta, 72);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(72);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 72, .url = "https://a.test/x" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 72, .scope = .browser });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 73, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.getUrl\",\"params\":{\"id\":72}}";
+    var p1: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p1, req, 72, .get_url), 72, .get_url, "");
+    {
+        const r = try w9b3Result(&p1);
+        defer r.deinit();
+        try std.testing.expectEqualStrings("https://a.test/x", r.value.object.get("result").?.object.get("url").?.string);
+    }
+    var p2: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p2, req, 73, .get_url), 73, .get_url, "");
+    try expectPendingErrorCode(&p2, .internal_error);
+    // 앞선 op 이 있으면 기다린다(그 뒤에 답한다).
+    const first = try allocator.create(CdpRun);
+    first.* = .{ .async_id = 1, .surface_id = 72, .op = try web_cdp_ops.Op.init(allocator, .reload, "", 1), .started = true };
+    try cdp_runs.append(allocator, first);
+    var p3: control_server_mod.PendingRequest = undefined;
+    startCdpOp(try w9aRequest(&p3, req, 72, .get_url), 72, .get_url, "");
+    try std.testing.expect(p3.response == null);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 72, .url = "https://a.test/y" } });
+    removeCdpRun(first);
+    first.op.deinit(allocator);
+    allocator.destroy(first);
+    startNextCdp(72);
+    const r = try w9b3Result(&p3);
+    defer r.deinit();
+    try std.testing.expectEqualStrings("https://a.test/y", r.value.object.get("result").?.object.get("url").?.string);
+}
+
+test "W9a: Chromium 탭의 스크린샷은 WebKit 과 같은 PNG 조각 스트림(browser.screenshotChunk)으로 간다" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const png_header = [_]u8{ 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R', 0, 0, 0, 3, 0, 0, 0, 4 };
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":80,\"method\":\"browser.screenshot\",\"params\":{\"id\":11}}";
+    var process_budget = control_server_mod.ProcessOutboundBudget.init(std.testing.io, 32 * 1024 * 1024, 1024 * 1024);
+    var outbound = control_server_mod.OutboundChannel.initWithProcessBudget(std.testing.io, 8, &process_budget);
+    defer outbound.deinit(allocator);
+    var pending: control_server_mod.PendingRequest = .{ .connection_id = 42, .request_bytes = request, .selector = null, .outbound = &outbound, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 11, .reserved_bytes = control_browser.screenshot_max_result_bytes, .method = .screenshot, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 11, .scope = .browser } } });
+    try std.testing.expect(active_browser_executions.markRunning(id));
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = 11, .op = try web_cdp_ops.Op.init(allocator, .screenshot, "", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    finishCdp(run, .success, &png_header);
+    try std.testing.expect(pending.response == null); // 단일 응답이 아니다(「delivered out of band」 오류도 아니다)
+    var pumps: usize = 0;
+    while (pumps < 8 and active_browser_transfers.items.items.len > 0) : (pumps += 1) _ = maru_macos_control_pump_browser_result();
+    try std.testing.expectEqual(@as(usize, 0), active_browser_transfers.items.items.len);
+    const chunk = outbound.popWait() orelse return error.ExpectedFrame;
+    try std.testing.expect(std.mem.indexOf(u8, chunk.bytes, "browser.screenshotChunk") != null);
+    outbound.writeComplete(chunk.bytes);
+    allocator.free(chunk.bytes);
+    const final_frame = outbound.popWait() orelse return error.ExpectedFrame;
+    try std.testing.expect(std.mem.indexOf(u8, final_frame.bytes, "\"width\":3") != null);
+    outbound.writeComplete(final_frame.bytes);
+    allocator.free(final_frame.bytes);
 }

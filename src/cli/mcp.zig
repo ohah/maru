@@ -87,7 +87,7 @@ pub const tools = [_]Tool{
         .{ .key = "timeout_ms", .kind = .int, .flag = "--timeout", .description = "how long to wait for the first load (1-25000, default 25000)", .min = 1, .max = 25000 },
     } },
     .{ .name = "browser_close", .subcommand = "close", .description = "Close a tab this pane opened (asks the page; a page that asks before leaving is not closed).", .args = withSurface(&.{}) },
-    .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address.", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
+    .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
     .{ .name = "browser_get_url", .subcommand = "get-url", .description = "Print the tab's current document address.", .args = withSurface(&.{}) },
     .{ .name = "browser_click", .subcommand = "click", .description = "Click an element with real mouse input (Chromium tabs). Give one locator: selector, ref, role (+name/level), by_text or by_label.", .args = withSurface(&locator_args) },
     .{ .name = "browser_type", .subcommand = "type", .description = "Type text into an element (replaces its text; real input on Chromium tabs).", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "text", .kind = .string, .flag = "--text", .description = "text to type", .required = true }})) },
@@ -113,7 +113,7 @@ pub const tools = [_]Tool{
         .{ .key = "args", .kind = .json_array, .flag = "--args", .description = "JSON array passed to the expression as the variable `args` (up to 128 levels of nesting inside the array)" },
         .{ .key = "max_result_bytes", .kind = .int, .flag = "--max-result-bytes", .description = "result size limit in bytes (default and max 16777216)", .min = 1, .max = 16 * 1024 * 1024 },
     }) },
-    .{ .name = "browser_screenshot", .subcommand = "screenshot", .description = "Capture the tab as a PNG image (the whole page at device scale, or a region).", .args = withSurface(&.{
+    .{ .name = "browser_screenshot", .subcommand = "screenshot", .description = "Capture the visible part of the tab as a PNG image (at device scale, or a region of the view with an optional scale).", .args = withSurface(&.{
         .{ .key = "rect", .kind = .string, .flag = "--rect", .description = "region x,y,w,h in CSS pixels" },
         .{ .key = "scale", .kind = .number, .flag = "--scale", .description = "scale factor (for example 0.5 for a smaller image)", .positive = true },
     }) },
@@ -356,7 +356,7 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "Requests come from the maru pane this process runs in; controlling a tab you did not open asks the user once. " ++
             "While the user answers that confirmation a call can take up to about 150 seconds (2 minutes for the answer, then the action), " ++
             "so give this server a tool timeout of at least 150 seconds. Calls run one at a time. " ++
-            "On Chromium tabs (engine=chromium in browser_list) navigate, get_url, exec, console and screenshot are not available yet and answer -32008.") catch |e| break :blk e;
+            "On Chromium tabs (engine=chromium in browser_list) exec and console are not available yet and answer -32008.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;

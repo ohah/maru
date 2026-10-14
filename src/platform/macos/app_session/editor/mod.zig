@@ -9346,7 +9346,8 @@ fn freshTree(term: *Term) ?*syntax_mod.Provider {
 /// 한 글자 입력이 트리에 물을 범위(계획 editor-typing-rules TR4) — 커서마다 **caret 자리만**(`[lo-1, hi+1)` — 따옴표 자동 닫기는 caret 의
 /// 문맥만 본다). 닫는 괄호를 공백뿐인 줄 머리에서 쳤으면 짝 찾기가 거슬러 읽는 데까지 — caret 을 품은 트리 조상 중 **그 여는 괄호로 시작하는
 /// 가장 안쪽 것**의 머리부터(잘 짜인 코드면 짝 찾기가 거기서 멈춘다), 없으면 짝 찾기 상한(`typing_ops.reindent_scan_limit`)까지. 낱말
-/// 내어쓰기의 낱말을 다 쳤으면 기준이 될 위쪽 내용 줄의 머리부터(`typing_ops.keywordQueryStart` — 그 줄이 여러 줄 문자열 안인지 안다).
+/// 내어쓰기의 낱말을 다 쳤으면 기준이 될 위쪽 내용 줄의 첫 글자 한 byte 도(`typing_ops.keywordQueryStart` — 그 줄이 여러 줄 문자열 안인지
+/// 안다; capture 는 통째로 온다).
 /// 줄 머리부터 caret 까지를 통째로 쿼리했더니 긴 한 줄(압축한 JS)에서 키마다 수십 ms 가 들었다(적대적 2회차 실측, ReleaseFast: 쿼리 한 번이
 /// caret 자리 3 µs · 한 줄 15 µs · 64 KiB 5.4 ms). 트리가 없으면 아무것도 안 넣는다.
 fn typingLiteralRanges(self: *AppSession, term: *Term, sels: []const editor_selection.Selection, typed: u8, brackets: []const u8, out: *std.ArrayList(LiteralRange)) error{OutOfMemory}!void {
@@ -9381,10 +9382,10 @@ fn typingLiteralRanges(self: *AppSession, term: *Term, sels: []const editor_sele
                 }
             }
         };
-        if (hi == lo) if (typing_ops.keywordQueryStart(content, lines, term.rt.editor_grammar, lo, typed)) |k| {
-            start = @min(start, k);
-        };
         try out.append(self.allocator, .{ .start = start, .end = @min(hi + 1, content.len) });
+        if (hi == lo) if (typing_ops.keywordQueryStart(content, lines, term.rt.editor_grammar, lo, typed)) |k| {
+            try out.append(self.allocator, .{ .start = k, .end = k + 1 });
+        };
     }
 }
 

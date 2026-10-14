@@ -14,6 +14,7 @@ const connection_turn = @import("connection_turn.zig");
 const image_channel_tokens = @import("image_channel_tokens.zig");
 const image_channel_wire = @import("image_channel_wire.zig");
 const image_segment_ledger = @import("image_segment_ledger.zig");
+const image_segment = @import("image_segment.zig");
 const process_seal_service = @import("process_seal_service.zig");
 const server_mod = @import("server.zig");
 const socket_server = @import("socket_server.zig");
@@ -21,6 +22,10 @@ const socket_server = @import("socket_server.zig");
 extern "c" fn usleep(usec: c_uint) c_int;
 
 pub const max_clients: usize = connection_slot.max_connections;
+/// 공유 메모리 생성 실패 재시도 간격(이미지 채널 §4.1) — 실패가 이어지면 두 배씩, 상한까지.
+pub const image_create_retry_min_ns: u64 = 250 * std.time.ns_per_ms;
+pub const image_create_retry_max_ns: u64 = 8 * std.time.ns_per_s;
+
 pub const cadence_ns: u64 = @as(u64, @intCast(socket_server.SocketServer.delta_tick_ms)) *
     std.time.ns_per_ms;
 
@@ -105,6 +110,12 @@ pub const Owner = struct {
     image_host_budget: *image_segment_ledger.HostBudget,
     /// 새 연결에 이미지 채널을 제공하는가(`image_channel_wire.host_offers_image_channel`). 판정자는 스위치와 무관하게 고정한다.
     image_channel_offered: bool = image_channel_wire.host_offers_image_channel,
+    /// 공유 메모리 생성 실패 재시도(§4.1): 다음에 깨울 시각(0 = 걸려 있지 않음), 지금 간격, 마지막으로 깨운 시각.
+    image_create_retry_at_ns: u64 = 0,
+    image_create_retry_delay_ns: u64 = 0,
+    image_create_retry_fired_ns: u64 = 0,
+    /// 마지막으로 본 host 예산 반환 누적 — 늘었으면 어느 연결이 세그먼트를 돌려준 것이다(§4.3).
+    image_host_budget_returned_seen: u64 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -301,6 +312,8 @@ pub const Owner = struct {
             self.scheduleImageCapacityWake(slot_index, now_ns);
             progressed = true;
         }
+        // 반환이 있었으면(release·채널 상실·지난 반복의 연결 종료) host 상한에 막힌 연결을 깨운다 — 비교 하나라 매 반복 본다.
+        self.wakeImageHostBudgetWaiters(now_ns);
 
         var ready: [max_clients]bool = [_]bool{false} ** max_clients;
         var read_ready: [max_clients]bool = [_]bool{false} ** max_clients;
@@ -631,8 +644,9 @@ pub const Owner = struct {
     fn scheduleCadence(self: *Owner, now_ns: u64) void {
         if (now_ns < self.next_cadence_ns) return;
         self.next_cadence_ns = now_ns +| cadence_ns;
-        // 앱이 abandon 없이 사라진 token 의 바닥(이미지 채널 §3.1).
+        // 앱이 채널을 열지 못했거나 늦게 처리된 token 의 바닥(이미지 채널 §3.1).
         _ = self.image_tokens.expire(now_ns);
+        self.scheduleImageCreateRetry(now_ns);
         self.server.sampleMetadataSources(now_ns);
         // 애니메이션은 **여기**가 유일한 시계다. 출력 wake 갈래에 두면 셸이 조용한 세션에서 영영 안 돈다 —
         // 애니메이션은 스스로 PTY 출력을 만들지 않는다(뷰포트 조정이 같은 이유로 여기 있는 것과 같다).
@@ -657,6 +671,68 @@ pub const Owner = struct {
         if (!gate_open and !client.isUpgradeDraining()) return;
         if (self.producer_remaining[index] == 0)
             self.producer_remaining[index] = client.beginProducerSweep(now_ns);
+    }
+
+    /// 어느 연결이 세그먼트를 돌려줬으면(release·채널 상실·연결 종료 — 반환 누적이 늘었다) host 상한에 막혀 이미지를 미룬
+    /// 연결을 깨운다(§4.3). 타이머가 아니라 사건이다 — 반환이 없으면 아무도 깨우지 않는다.
+    fn wakeImageHostBudgetWaiters(self: *Owner, now_ns: u64) void {
+        const returned = self.image_host_budget.returned_bytes;
+        if (returned == self.image_host_budget_returned_seen) return;
+        self.image_host_budget_returned_seen = returned;
+        for (self.clients, 0..) |maybe_client, index| {
+            const client = maybe_client orelse continue;
+            client.wakeImageHostBudgetWait();
+            self.scheduleImageCapacityWake(index, now_ns);
+        }
+    }
+
+    /// 공유 메모리 생성 실패로 미룬 이미지를 백오프로 다시 투영한다(§4.1). 타이머는 host 에 하나다 — fd·커널 자원 부족은 host
+    /// 전체에 걸려 연결마다 따로 재시도하면 모든 연결이 같은 주기로 헛투영한다. 실패가 이어지면 간격이 두 배로 늘고(250 ms →
+    /// 8 s), 깨운 뒤 한 간격 동안 실패가 없을 때만 처음으로 돌아간다 — 「성공하면 처음으로」면 늘 실패하는 큰 한 장과 성공하는 다른
+    /// 이미지가 섞일 때 짧은 간격에 머문다. 걸 때 한 줄 남긴다 — 상한 간격에 머무는 동안은 다시 찍지 않는다(늘 실패하는 원인이
+    /// 하루 만 줄을 쌓지 않게). 울리기 전에 실패 표시가 사라지면(채널 상실·연결 종료) 타이머를 푼다. 게이트가 닫힌 연결도 깨운다 —
+    /// producer 예약은 `scheduleImageCapacityWake` 가 막고, 깨움(`image_wake`)은 남아 게이트가 열린 뒤 cadence 가 투영한다.
+    fn scheduleImageCreateRetry(self: *Owner, now_ns: u64) void {
+        var first_failure: ?image_segment.CreateError = null;
+        var failed: usize = 0;
+        for (self.clients) |maybe_client| {
+            const client = maybe_client orelse continue;
+            const err = client.imageCreateFailure() orelse continue;
+            failed += 1;
+            if (first_failure == null) first_failure = err;
+        }
+        if (failed == 0) {
+            // 울리기 전에 표시가 사라졌다 — 걸어 둔 타이머를 풀어, 다음 실패가 지난 시각에 곧바로 울리지 않고 다시 걸리게 한다.
+            if (self.image_create_retry_at_ns != 0) {
+                self.image_create_retry_at_ns = 0;
+                self.image_create_retry_fired_ns = now_ns;
+            }
+            if (now_ns -| self.image_create_retry_fired_ns >= self.image_create_retry_delay_ns)
+                self.image_create_retry_delay_ns = 0;
+            return;
+        }
+        if (self.image_create_retry_at_ns == 0) {
+            const at_cap = self.image_create_retry_delay_ns == image_create_retry_max_ns;
+            self.image_create_retry_delay_ns = if (self.image_create_retry_delay_ns == 0)
+                image_create_retry_min_ns
+            else
+                @min(self.image_create_retry_delay_ns *| 2, image_create_retry_max_ns);
+            self.image_create_retry_at_ns = now_ns +| self.image_create_retry_delay_ns;
+            if (!builtin.is_test and !at_cap) host_log.line(
+                "session host image segment create failed: error={s} connections={d} retry_in_ms={d}",
+                .{ @errorName(first_failure.?), failed, self.image_create_retry_delay_ns / std.time.ns_per_ms },
+            );
+            return;
+        }
+        if (now_ns < self.image_create_retry_at_ns) return;
+        self.image_create_retry_at_ns = 0;
+        self.image_create_retry_fired_ns = now_ns;
+        for (self.clients, 0..) |maybe_client, index| {
+            const client = maybe_client orelse continue;
+            if (client.imageCreateFailure() == null) continue;
+            client.retryImageCreate();
+            self.scheduleImageCapacityWake(index, now_ns);
+        }
     }
 
     fn scheduleProducerNow(self: *Owner, now_ns: u64) void {
@@ -5940,6 +6016,156 @@ test "image channel owner: release 와 채널 묶임이 이미지를 미룬 stre
     try testing.expectEqual(@as(usize, 0), ledger.count());
     try testing.expect(client.connection.attachments.getPtr(1).?.image_wake);
     try testing.expectEqual(@as(usize, 1), client.producer_streams.len);
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+/// 묶인 주 연결 하나와 이미지를 미룬 stream 하나(재시도·host 예산 판정자의 공통 무대). 깨움을 관측하려고 sweep 목록을 비워 둔다.
+fn bindDeferredMain(fx: *ImageChannelFixture, main_fd: c.fd_t) !struct { index: usize, channel_fd: c.fd_t } {
+    const token = (try fx.helloMain(main_fd, true)) orelse return error.TestUnexpectedResult;
+    var main_index: ?usize = null;
+    for (fx.owner.clients, 0..) |maybe, index| {
+        const client = maybe orelse continue;
+        try client.connection.attachments.put(client.connection.allocator, 1, .{
+            .runtime_id = 0xAA,
+            .subscription_id = .{ .value = 1 },
+            .image_deferred = true,
+        });
+        main_index = index;
+    }
+    const index = main_index orelse return error.TestUnexpectedResult;
+    const channel_fd = try fx.openChannel(token);
+    const client = fx.owner.clients[index].?;
+    client.connection.attachments.getPtr(1).?.image_wake = false;
+    fx.owner.producer_remaining[index] = 0;
+    client.allocator.free(client.producer_streams);
+    client.producer_streams = &.{};
+    return .{ .index = index, .channel_fd = channel_fd };
+}
+
+test "image channel owner: 공유 메모리 생성 실패는 host 하나의 백오프 타이머가 깨우고, 실패가 이어지면 간격이 늘며, 한 간격 조용해야 처음으로 돌아간다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-retry.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const stage = try bindDeferredMain(&fx, main_fd);
+    defer _ = c.close(stage.channel_fd);
+    const client = fx.owner.clients[stage.index].?;
+    const wake = &client.connection.attachments.getPtr(1).?.image_wake;
+    const ms = std.time.ns_per_ms;
+
+    // 실패가 없으면 타이머를 걸지 않는다.
+    fx.owner.scheduleImageCreateRetry(1_000 * ms);
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_create_retry_at_ns);
+    // 생성 실패 — 청구를 되돌리고 미루며 그 오류를 적는다. 원장이 빈 정지 화면이라 다른 무엇도 깨우지 않는다.
+    const pixels = [_]u8{1} ** 64;
+    connection_turn.test_image_segment_create_failure = error.OpenFailed;
+    defer connection_turn.test_image_segment_create_failure = null;
+    try testing.expect(client.prepareImageSegment(1, 7, 1, &pixels, false) == .deferred);
+    connection_turn.test_image_segment_create_failure = null;
+    try testing.expectEqual(@as(?image_segment.CreateError, error.OpenFailed), client.imageCreateFailure());
+    try testing.expectEqual(@as(usize, 0), client.imageLedger().?.count());
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_host_budget.bytes);
+    // 다음 cadence 가 첫 간격(250 ms)으로 건다.
+    fx.owner.scheduleImageCreateRetry(1_000 * ms);
+    try testing.expectEqual(@as(u64, 1_250 * ms), fx.owner.image_create_retry_at_ns);
+    fx.owner.scheduleImageCreateRetry(1_249 * ms);
+    try testing.expect(!wake.*);
+    // 시각이 되면 표시를 지우고 미룬 stream 을 깨워 producer 를 예약한다.
+    fx.owner.scheduleImageCreateRetry(1_250 * ms);
+    try testing.expect(client.imageCreateFailure() == null);
+    try testing.expect(wake.*);
+    try testing.expectEqual(@as(usize, 1), client.producer_streams.len);
+    // 다시 투영해도 실패하면 간격이 두 배다 — 상한 8 초에서 멈춘다.
+    var now: u64 = 1_260 * ms;
+    var expected: u64 = 500 * ms;
+    for (0..8) |_| {
+        client.image_create_failure = error.ResizeFailed;
+        fx.owner.scheduleImageCreateRetry(now);
+        try testing.expectEqual(now + expected, fx.owner.image_create_retry_at_ns);
+        now += expected;
+        fx.owner.scheduleImageCreateRetry(now);
+        try testing.expectEqual(@as(u64, 0), fx.owner.image_create_retry_at_ns);
+        now += 10 * ms;
+        expected = @min(expected * 2, image_create_retry_max_ns);
+    }
+    try testing.expectEqual(image_create_retry_max_ns, fx.owner.image_create_retry_delay_ns);
+    // 깨운 뒤 한 간격 동안 실패가 없어야 처음으로 돌아간다 — 그 전에 다시 실패하면 늘어난 간격 그대로다.
+    const fired = fx.owner.image_create_retry_fired_ns;
+    fx.owner.scheduleImageCreateRetry(fired + image_create_retry_max_ns - 1);
+    try testing.expectEqual(image_create_retry_max_ns, fx.owner.image_create_retry_delay_ns);
+    fx.owner.scheduleImageCreateRetry(fired + image_create_retry_max_ns);
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_create_retry_delay_ns);
+
+    // cadence 가 이 타이머를 돈다(배선).
+    client.image_create_failure = error.OpenFailed;
+    fx.owner.next_cadence_ns = 0;
+    _ = try fx.owner.pollOnce(0);
+    fx.owner.next_cadence_ns = std.math.maxInt(u64);
+    try testing.expect(fx.owner.image_create_retry_at_ns != 0);
+    // 채널을 잃으면 표시를 지운다 — 다시 투영해도 「이미지 채널 없음」으로 미룰 뿐이다.
+    client.loseImageChannel(.peer_closed);
+    try testing.expect(client.imageCreateFailure() == null);
+    // 울리기 전에 표시가 사라졌으니 타이머를 푼다 — 남겨 두면 다음 실패가 지난 시각에 곧바로 울리고(백오프 없음) 로그도 건너뛴다.
+    const later = fx.owner.image_create_retry_at_ns + 60 * std.time.ns_per_s;
+    fx.owner.scheduleImageCreateRetry(later);
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_create_retry_at_ns);
+    // 한 간격 조용하면 다음 실패는 처음 간격으로 다시 걸린다.
+    fx.owner.scheduleImageCreateRetry(later + image_create_retry_max_ns);
+    try testing.expectEqual(@as(u64, 0), fx.owner.image_create_retry_delay_ns);
+    try fx.expectMainAlive(main_fd, 2);
+}
+
+test "image channel owner: host 상한에 막혀 미룬 연결은 다른 연결이 세그먼트를 돌려줄 때만 깨어나고, 큰 한 장이 원장을 쥔 동안은 깨우지 않는다" {
+    var fx: ImageChannelFixture = .{};
+    try fx.init("ic-hostwait.sock");
+    defer fx.deinit();
+    const main_fd = try fx.connect();
+    defer _ = c.close(main_fd);
+    const stage = try bindDeferredMain(&fx, main_fd);
+    defer _ = c.close(stage.channel_fd);
+    const client = fx.owner.clients[stage.index].?;
+    const wake = &client.connection.attachments.getPtr(1).?.image_wake;
+    const pixels = [_]u8{1} ** 64;
+
+    // 다른 연결들이 host 예산을 다 쥐었다 — 미루고 기다린다고 적는다.
+    fx.owner.image_host_budget.bytes = image_segment_ledger.image_segment_bytes_per_host;
+    try testing.expect(client.prepareImageSegment(1, 7, 1, &pixels, false) == .deferred);
+    try testing.expect(client.image_host_budget_wait);
+    // 반환이 없으면 깨우지 않는다 — 타이머가 아니라 반환 사건이다. 바이트가 줄어도(자기 롤백) 반환이 아니면 깨우지 않는다.
+    fx.owner.wakeImageHostBudgetWaiters(0);
+    fx.owner.image_host_budget.bytes -= 4096;
+    fx.owner.wakeImageHostBudgetWaiters(0);
+    try testing.expect(!wake.*);
+    try testing.expect(client.image_host_budget_wait);
+    // 다른 연결이 돌려줬다(반환 누적이 는다) — 다음 poll 반복이 깨운다(연결 종료·채널 상실처럼 release 읽기 밖의 반환도 본다).
+    fx.owner.image_host_budget.returned_bytes += 4096;
+    _ = try fx.owner.pollOnce(0);
+    try testing.expect(wake.*);
+    try testing.expect(!client.image_host_budget_wait);
+    try testing.expectEqual(@as(usize, 1), client.producer_streams.len);
+
+    // 큰 한 장이 우선권을 쥐고 원장이 비지 않았으면 깨우지 않는다 — 그 반환이 깨운다.
+    wake.* = false;
+    const ledger = client.imageLedger().?;
+    const held = try ledger.reserve(1, 9, 1, 64);
+    try testing.expect(ledger.issue(held));
+    client.connection.image_priority = .{ .stream = 1, .image_id = 9 };
+    client.image_host_budget_wait = true;
+    fx.owner.image_host_budget.returned_bytes += 128;
+    fx.owner.wakeImageHostBudgetWaiters(0);
+    try testing.expect(!wake.*);
+    // 우선권이 없으면 같은 반환이 깨운다(위 단언이 우선권 때문에 깨우지 않은 것인지 가른다).
+    client.connection.image_priority = null;
+    client.image_host_budget_wait = true;
+    fx.owner.image_host_budget.returned_bytes += 128;
+    fx.owner.wakeImageHostBudgetWaiters(0);
+    try testing.expect(wake.*);
+    // 채널을 잃으면 대기를 지운다 — 다시 투영해도 「이미지 채널 없음」으로 미룰 뿐이다.
+    client.image_host_budget_wait = true;
+    client.loseImageChannel(.peer_closed);
+    try testing.expect(!client.image_host_budget_wait);
+    client.connection.image_priority = null;
     try fx.expectMainAlive(main_fd, 2);
 }
 

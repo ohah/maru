@@ -661,13 +661,19 @@ IC6 머지 뒤 적대적 재검증(4 명, HIGH 0)이 남긴 MEDIUM 넷을 고친
 - host 는 바꾸지 않았다 — 입양 전 이미지는 미루고, 묶는 순간 용량 사건이 미룬 stream 을 깨운다.
 - Client 지문(`Channel` 필드 5 개)과 계약 §3.1·§3.2 를 고쳤다.
 
-#### IC7c — 공유 메모리 생성 실패 재시도 (미착수)
+#### IC7c — 공유 메모리 생성 실패 재시도 (완료)
 
-- `prepareImageSegment` 의 생성 실패 갈래에서만 재시도를 건다(일반 「미룸」 갈래에 걸면 「이미지 채널 없음」 연결이 영원히 다시
-  투영한다). 남은 세그먼트 수와 무관하게 건다 — 버려진 배치의 세그먼트는 정지 화면에서 반환되지 않을 수 있다.
-- 백오프는 host(Owner) 하나 — 250 ms 에서 상한 5~10 초, 한 바퀴에 생성 실패가 0 건일 때만 리셋. 업그레이드 drain·admission 게이트가
-  닫혔을 때는 건너뛰고, 채널을 잃은 연결은 지운다. errno 를 남기려면 `image_segment.create` 의 오류에 errno 를 싣는다.
-- host 예산(HostBytesFull)은 타이머 대신 다른 연결의 반환 사건이 깨운다.
+- `prepareImageSegment` 의 생성 실패 갈래만 그 연결에 오류를 적는다(`image_create_failure`) — 남은 세그먼트 수와 무관하다(버려진
+  배치의 세그먼트는 정지 화면에서 안 돌아온다). 일반 미룸 갈래에는 걸지 않는다.
+- owner 의 cadence 가 host 하나의 백오프 타이머를 돈다(`scheduleImageCreateRetry`): 250 ms → 두 배 → 8 초, 깨운 뒤 한 간격 조용해야
+  처음으로. 걸 때 host 로그 한 줄(상한 간격에 머무는 동안은 생략). 울리기 전에 실패 표시가 모두 사라지면 타이머를 푼다. 채널
+  상실(`dropImageChannel`)이 표시를 지운다. 게이트가 닫힌 연결도 깨운다(예약은 기존 게이트가 막는다).
+- host 예산(HostBytesFull)은 그 연결에 대기를 적고(`image_host_budget_wait`), owner 가 poll 반복마다 host 예산의 반환 누적
+  (`HostBudget.returned_bytes` — release·releaseAll 만, 준비 취소는 아니다)이 늘었으면 깨운다(`wakeImageHostBudgetWaiters`) — 우선권
+  규칙을 지킨다.
+- errno 는 남기지 않는다 — `image_segment.create` 의 오류 이름(OpenFailed·ResizeFailed 등)이 단계를 말한다.
+- 판정자: `test-image-channel-host` 21 → 23(재시도 타이머·host 예산 깨움), 원장 판정자 셋에 반환 누적 단언. 실패 주입 칸
+  (`connection_turn.test_image_segment_create_failure`, 테스트 빌드 전용)으로 실제 생성 실패 갈래를 태운다.
 
 #### IC7d — 「이미지 채널 없음」 회복 (보류)
 

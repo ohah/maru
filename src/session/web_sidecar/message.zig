@@ -1112,13 +1112,16 @@ pub const ConsoleLevel = enum(u8) {
     debug = 4,
 };
 
-/// 콘솔 줄 하나(W9c①). 닫힌 필드: 버린 수만 싣는 frame(`has_entry` 거짓)은 수준 log·빈 글·앞 문서 아님·버린 수가 있다.
+/// 콘솔 줄 하나(W9c①). 닫힌 필드: 버린 수만 싣는 frame(`has_entry` 거짓)은 수준 log·빈 글·`docs_back` 0·버린 수가 있다.
 pub const ConsoleMessage = struct {
     browser: BrowserId,
     level: ConsoleLevel = .log,
-    /// 앞 문서가 새 문서의 시작(`page_started`) 뒤에 남긴 줄이다 — 다른 사이트로 옮길 때 앞 문서의 unload 줄은 시작 **뒤에** 온다(실측
-    /// 5/5). sidecar 가 줄의 `source` 출처를 방금 떠난 출처들과 견준다. maru 는 처음 읽는 쪽에게 이 줄을 보이지 않는다.
-    old_document: bool = false,
+    /// 줄이 몇 문서 앞의 것인가 — 0 은 지금 문서의 제 줄, 1 이상은 그만큼 앞의 주 프레임 문서(`page_started`·`error_page` 로 센다,
+    /// 255 에서 멈춘다)가 남긴 줄. 다른 사이트로 옮길 때 앞 문서의 unload 줄은 새 문서의 시작 **뒤에** 온다(실측 5/5). sidecar 가 줄의
+    /// `source` 출처를 방금 떠난 출처들과 견주고, 그 출처를 떠난 문서까지의 차를 단다. maru 는 처음 읽는 쪽에게 0 이 아닌 줄을 보이지
+    /// 않고, 묶인 쪽에게는 묶이기 전 문서에서 온 줄을 보이지 않는다(W9c① 적대 리뷰 2 회차 — 「앞 문서」 표시 하나로는 A → B → C 에서
+    /// C 에 온 A 의 줄을 B 의 것과 가르지 못했다).
+    docs_back: u8 = 0,
     /// 이 줄 앞에 sidecar 가 버린 줄 수(양동이 초과) — 오류·경고와 그 밖. 보낸 뒤 sidecar 는 0 으로 되돌린다.
     dropped_errors: u32 = 0,
     dropped_other: u32 = 0,

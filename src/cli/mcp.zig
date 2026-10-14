@@ -371,7 +371,9 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "While the user answers that confirmation a call can take up to about 150 seconds (2 minutes for the answer, then the action), " ++
             "so give this server a tool timeout of at least 150 seconds. Calls run one at a time. " ++
             "On Chromium tabs (engine=chromium in browser_list) browser_console also holds lines from iframes and workers, " ++
-            "and the first read after you are allowed a tab shows only the current page's lines.") catch |e| break :blk e;
+            "and the first read after you are allowed a tab shows only the current page's lines. " ++
+            "A read from another pane (another agent, or the user running maru browser console there) takes the console over: " ++
+            "your next read again shows only the current page's lines, and lines logged in between are gone for you.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -574,6 +576,8 @@ test "W9c①: initialize 의 안내는 Chromium 탭의 console 을 「아직 안
     try testing.expect(std.mem.indexOf(u8, r, "not available yet") == null);
     try testing.expect(std.mem.indexOf(u8, r, "browser_console") != null);
     try testing.expect(std.mem.indexOf(u8, r, "iframes and workers") != null);
+    // 다른 pane 의 읽기가 묶음을 가져간다는 것도(W9c① 적대 리뷰 2 회차 F3).
+    try testing.expect(std.mem.indexOf(u8, r, "A read from another pane") != null);
 }
 
 test "W9f: JSON-RPC — initialize 는 아는 판으로, tools/list·ping·모르는 메서드·알림, tools/call 은 CLI 인자로" {

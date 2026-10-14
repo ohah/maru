@@ -4591,7 +4591,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         // W9c①: 콘솔 줄 — 버린 수가 실려 오면 그 줄 앞에 표지(버림은 그 줄보다 먼저 일어났다).
         .console_message => |v| if (surfaces.getPtr(v.browser)) |s| {
             if (v.dropped_errors != 0 or v.dropped_other != 0) s.console.addDropped(gpa, v.dropped_errors, v.dropped_other) catch {};
-            if (v.has_entry) s.console.add(gpa, consoleLevel(v.level), v.text, v.old_document) catch {};
+            if (v.has_entry) s.console.add(gpa, consoleLevel(v.level), v.text, v.docs_back) catch {};
         },
         // W9c①: 실패한 이동이 오류 페이지로 옛 문서를 바꿨다(`page_started` 가 없다) — 콘솔의 문서 경계로만 쓴다. 다운로드의 몸짓(`last_nav_ms`)·
         // 에이전트 이동(`agent_nav`)은 건드리지 않는다 — 그쪽 판정은 `load_finished` 가 한다.
@@ -6551,7 +6551,7 @@ test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오
     }
     testApply(gpa, .{ .console_message = .{ .browser = 51, .level = .warn, .text = "site-a token=abc" } });
     testApply(gpa, .{ .page_started = 51 }); // 사용자가 다른 사이트로
-    testApply(gpa, .{ .console_message = .{ .browser = 51, .old_document = true, .text = "site-a unload" } });
+    testApply(gpa, .{ .console_message = .{ .browser = 51, .docs_back = 1, .text = "site-a unload" } });
     testApply(gpa, .{ .console_message = .{ .browser = 51, .level = .@"error", .dropped_other = 3, .text = "site-b boom" } });
     testApply(gpa, .{ .console_message = .{ .browser = 99, .text = "nobody" } }); // 모르는 탭
     {

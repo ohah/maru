@@ -39,16 +39,17 @@ pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_brows
     const now = nowMs();
     const level = gate.levelOf(@intCast(severity));
     const class = gate.classOf(level);
-    // 앞 문서의 줄인가 — 방금 떠난 출처가 창 안에 있을 때만 `source` 를 바꾼다(대부분의 줄은 바꾸지 않는다). 버퍼는 정적(UI
+    // 몇 문서 앞의 줄인가 — 방금 떠난 출처가 창 안에 있을 때만 `source` 를 바꾼다(대부분의 줄은 바꾸지 않는다). 버퍼는 정적(UI
     // 스레드에서만 부른다) — 스택이면 Debug 빌드가 메시지마다 6 KiB 를 채워(1.7 µs) 쏟아질 때 UI 스레드가 3 초 넘게 멈췄다(적대 리뷰 1 회차).
     const src_buf = &static_src_buf;
     var src: ?[]u8 = null;
-    var old_document = false;
+    var docs_back: u8 = 0;
     if (entry.console.recent.active(now)) {
         src = library.readPrefix(api, source, gate.max_source_units, src_buf).text;
         var origin: gate.Origin = .{};
-        old_document = gate.originOf(src.?, &origin) and entry.console.recent.isOld(origin.slice(), now);
+        if (gate.originOf(src.?, &origin)) docs_back = entry.console.recent.docsBack(origin.slice(), now);
     }
+    const old_document = docs_back != 0;
     if (!entry.console.admit(&global, class, old_document, now)) {
         postFlush();
         return 0;
@@ -61,7 +62,7 @@ pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_brows
     var out: [protocol.wire.max_console_text_bytes]u8 = undefined;
     const text = gate.finishText(msg.text, msg.truncated, if (uncaught) src orelse "" else "", line, &out);
     entry.console.charge(&global, class, old_document, text.len);
-    send(entry, .{ .browser = entry.id, .level = level, .old_document = old_document, .text = text });
+    send(entry, .{ .browser = entry.id, .level = level, .docs_back = docs_back, .text = text });
     return 0;
 }
 

@@ -60,8 +60,9 @@ sequenceDiagram
   L->>M: handleHello 가 Action image_channel_bind 반환
   M->>O: 턴이 끝난 뒤 입양 요청
   O->>O: token 표로 주 연결 확인, fd 이동
+  App->>App: bind_ack 를 기다리지 않고 Client 반환 (수립 중)
   O-->>App: bind_ack (이미지 채널로)
-  App->>App: 채널 상태가 정해진 뒤에만 Client 반환 (묶임 또는 §3.2)
+  App->>App: 채널 펌프가 bind_ack 를 읽어 묶음 (또는 §3.2)
 ```
 
 - host 는 hello 처리 때 이미지 채널 자리를 확보할 수 있을 때만 hello_ack 에 128-bit 랜덤 `image_channel_token` 을 싣는다.
@@ -90,30 +91,35 @@ sequenceDiagram
   한 번만 하는 destroy 변형으로 지운다. 로그는 「closed client connection」 대신 `session host image channel adopted:` 한 줄이다(거절은 `… rejected:`, 상실은
   `session host image channel lost:`). token 은 처음
   쓰일 때 표에서 지운다. NONBLOCK·CLOEXEC·NOSIGPIPE 는 fd 속성이라 옮겨도 유지된다(accept 경로의 `configureOwnedSocket`).
-- 앱의 connect 함수 둘(hello 를 만드는 두 자리)은 `finishHello` 뒤에 이미지 채널 수립을 **끝낸 뒤에야** Client 를 반환한다 —
-  `bind_ack` 를 받았거나(묶임) §3.2 의 실패 처리를 마쳤거나(「이미지 채널 없음」). 그래서 attach 는 언제나 채널 상태가 정해진 뒤에
-  온다(재접속 워커가 연결된 Client 를 attach 전에 넘기는 구조와 맞다).
+- 앱의 connect 함수 둘(hello 를 만드는 두 자리)은 `finishHello` 뒤에 채널을 connect 하고 채널 hello 를 보낸 뒤 **`bind_ack` 를
+  기다리지 않고** Client 를 반환한다 — 채널은 「수립 중」이다. 기다리면 새 탭·복원의 메인 스레드와 재접속 worker 의 예산이 밀린
+  host owner 를 그대로 기다린다(최대 수 초). `bind_ack` 는 그 연결의 채널 펌프(tick·배치 적용 직전·hwm 정리 — §6)가 남은
+  바이트만큼 읽는다 — 세그먼트 리더로 읽으면 fd 없는 첫 조각이라 계약 위반이 된다. 다 받으면 같은 펌프에서 이어 채널을 비운다.
+  그래서 attach 는 채널이 수립 중일 때 올 수 있다. 수립 중인 연결은 협상한 연결이라 적용 자리가 채널 resolver 를 넘기고, host 는
+  입양 전에는 그 연결의 이미지를 미뤘다가 묶는 순간 미룬 stream 을 다시 투영한다(§5 의 용량 사건). host 는 `bind_ack` 를 채널로 보낸 뒤에야
+  세그먼트를 만들고 `image_ref` 는 그보다 늦게 주 소켓으로 나가므로(§3.4), 앱이 `image_ref` 를 볼 때 `bind_ack` 와 세그먼트는 이미
+  채널 버퍼에 있다. 수립 마감은 host 의 token 만료(10 초)보다 조금 길다(`bind_wait_ns`) — 만료 뒤에 처리된 채널 hello 는 모르는
+  token 으로 닫히므로(거부) 그보다 오래 기다릴 까닭이 없다. 펌프는 먼저 읽고 그다음 마감을 본다(이미 와 있는 `bind_ack` 를
+  버리지 않게).
   이미지 채널 소켓은 `client_deadline.connectUnixUntil` 로 만든다 — 앱은 SIGPIPE 를 전역으로 잡지 않으므로 SO_NOSIGPIPE 가
   없으면 닫힌 소켓에 쓰는 순간 프로세스가 signal 13 으로 죽는다(실측). deadline 이 없는 블로킹 connect 경로는 기존 read
-  timeout 에 해당하는 절대 deadline 을 만들어 `bind_ack` 대기에 쓴다.
+  timeout 에 해당하는 절대 deadline 을 만들어 채널 connect·hello 송신에 쓴다.
 - hello_ack 의 기능 목록 고정 배열은 제품 host 에서 이미 가득 찼다 — 늘리고 최대 개수를 comptime 으로 잠근다.
 
 ### 3.2 수립 실패와 채널 상실
 
-- 채널을 못 연 경우 connect 함수는 수립 실패 오류 둘 — 거부 `ImageChannelUnavailable`, 시간 초과·연결 단계 실패
-  `ImageChannelTimedOut` — 을 **연결 실패로 올리지 않고** 주 연결을 「이미지 채널 없음」 표시와 함께 반환한다. 거부일 때는 반환
-  전에 주 소켓으로 요청 `image_channel.abandon` 을 보내 host 가 token 을 바로 버리게 한다(attach 보다 먼저 가므로 그 시점에
-  세그먼트는 없다). abandon 은 **응답(`{"result":{}}`)까지 읽는 동기 요청**이다 —
-  보내고 안 읽으면 첫 attach 가 그 응답을 받아 상관 오류로 주 연결이 죽는다. 그래서 `bind_ack` 대기는 connect deadline 전체가 아니라
-  abandon 왕복 몫을 남긴 하위 예산을 쓴다(그 몫밖에 안 남았으면 채널을 열지 않는다). abandon 은 **거부**(채널 hello 를 보낸 뒤의
-  EOF·`bind_ack` 형식 오류 — host 가 응답하고 있다)일 때만 보낸다. **시간 초과**(`bind_ack` 가 하위 예산 안에 안 옴)이거나
-  **연결 단계 실패**(listen backlog 가 차면 커널이 곧바로 ECONNREFUSED 를 준다 — host 의 응답이 아니다)면 host owner 가 밀려 있을
-  수 있으므로 abandon 없이 채널 소켓만 닫고 「이미지 채널 없음」으로 반환한다. 밀린 owner 에 왕복을 하나 더 얹으면 그 응답도 늦어 채널 때문에 연결이
-  실패한다. token 은 host 의 만료(10 초)로, 늦게 묶인 채널은 EOF(채널 상실)로 풀리고, 어느 쪽도 주 연결을 닫지 않는다. abandon
-  왕복 자체가 실패하거나 hello_ack 를 해석하지 못하면(JSON 아님·망가진 token) 그것은 주 연결의 실패라 connect 의 기존 오류
-  (`HandshakeFailed` 등)로 돌아간다. 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못 붙는다」로
-  읽고 host 를 하나 더 띄운다 — 수립 실패 오류 둘이 connect 오류 집합에 없어 spawn·업그레이드·unreachable·재접속 실패 판정
-  어디로도 흐르지 않음을 판정자가 comptime 으로 잰다.
+- 채널 수립 실패는 **연결 실패로 올리지 않는다** — 주 연결은 「이미지 채널 없음」으로 간다. 실패는 셋이다. 채널 connect 실패
+  (listen backlog 가 차면 커널이 곧바로 ECONNREFUSED 를 준다 — host 의 응답이 아니다)와 채널 hello 송신 실패는 connect 안에서,
+  거부(채널 EOF·`bind_ack` 형식 오류·fd 가 붙은 `bind_ack`)와 시간 초과(마감까지 `bind_ack` 없음)는 펌프에서 정해진다. 어느 쪽도
+  앱은 abandon 을 보내지 않고 채널 소켓만 닫는다 — token 은 늦게 처리된 채널 hello 의 EOF 나 host 의 만료(10 초)로 풀리고, 늦게
+  묶인 채널은 EOF(채널 상실)로 풀린다. 남은 token 은 그 사이 host 의 연결 자리 하나를 쥐지만(§3.1 확보) 만료가 상한이다.
+  (host 의 `image_channel.abandon` 처리는 이전 앱을 위해 남는다.) hello_ack 를 해석하지 못하면(JSON 아님·망가진 token) 그것은
+  주 연결의 실패라 connect 의 기존 오류(`HandshakeFailed` 등)로 돌아간다. 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못
+  붙는다」로 읽고 host 를 하나 더 띄운다 — 채널 시작 오류(`StartError`)가 connect 오류 집합에 없어 spawn·업그레이드·unreachable·
+  재접속 실패 판정 어디로도 흐르지 않음을 판정자가 comptime 으로 잰다.
+  한계: 수립 결과(거부·시간 초과)는 그 연결의 채널 펌프가 돌 때 정해진다 — tick 펌프는 host 의 연결을 그 tick 의 첫 runtime 으로
+  펌프하므로 그 runtime 이 계속 바빠 들 수 없고 이미지 배치도 없으면 수립 중으로 남는다(그동안 안내도 뜨지 않는다). host owner 가
+  token 만료(10 초)를 넘겨 밀리면 늦게 처리된 채널 hello 는 모르는 token 으로 닫혀 이유가 `timed_out` 이 아니라 `refused` 로 남는다.
 - 「이미지 채널 없음」 연결: 앱은 notice(이미지를 표시할 수 없음, 재접속 때 다시 시도)를 띄우고, host 는 그 연결에 세그먼트를
   만들지 않고 이미지 placement 를 빼고 보낸다. 앱에는 탭 단위 안내 자리가 없어 observer 강등 안내와 같은 창 토스트로 띄운다 —
   유지보수 tick 이 host 마다 채널을 펌프한 직후 그 연결을 보고, 「이미지 채널 없음」이 없다가 생긴 순간에만 한 번 올린다(재접속으로
@@ -122,8 +128,8 @@ sequenceDiagram
   돌아온 것을 보면 아직 띄우지 못한 안내를 거둔다. 모달이 열린 창은 안내를 꺼내지 않는다 — 여러 창이 backend 를 함께 쓰므로 꺼낸
   창이 쥔 채 다른 창이 띄우지 못하게 된다. 다음 tick 에 다시 본다. 한계: 관측은 host 의 연결 하나(그 tick 의 첫 runtime)만 본다.
   app.log 에는 「이미지 채널 없음」이 된 순간 이유와 함께 한 줄(`session host image channel unavailable: … reason=`)이 남는다 —
-  `no_seat`(자리 없음)·`no_budget`(abandon 몫밖에 안 남음)·`no_table`(표 할당 실패)·`refused`(거부)·`timed_out`(시간 초과·연결
-  단계 실패)·`lost`(묶인 채널 상실). 연결 자체가 실패한 출구(abandon 왕복 실패 등)는 남기지 않는다.
+  `no_seat`(자리 없음)·`connect_failed`(채널 connect 실패)·`no_table`(표 할당 실패)·`refused`(거부)·`timed_out`(수립 마감)·
+  `lost`(묶인 채널 상실). 연결 자체가 실패한 출구는 남기지 않는다. 수립 중인 연결은 「없음」이 아니다(안내가 이르게 뜨지 않는다).
 - 입양 뒤 채널이 죽으면(EOF·HUP·오류, 입양 뒤 늦게 온 abandon 포함) **주 연결은 닫지 않는다.** abandon 이 먼저 오면 token 이
   사라져 늦게 온 채널은 입양되지 않고 닫힌다. host 는 그 연결의 원장을 전부
   반환하고 「이미지 채널 없음」으로 내린다. 앱도 채널 EOF 를 보는 순간 같은 상태가 된다. 주 연결이 닫히면 채널도 닫는다 — 앱은
@@ -238,19 +244,19 @@ stream 이 떠나면 풀리며 깨운다 — 쥔 한 장이 그 연결의 다른
   값 안에 넣으면 seal·digest 의 손 나열이 그것을 빠뜨린다.
 - **표는 채널이 묶일 때 heap 에 잡는다**(`Client.image_segments` 는 포인터, Client 소멸이 푼다). 표(약 4 KiB)를 값으로 들면 Client 를
   값으로 든 external pump cleanup scratch 가 1 MiB 예산을 넘는다 — 같은 까닭으로 외부 입양 스냅샷도 표를 주소와 지문으로만 든다.
-  채널을 열기 전에 잡고(묶인 뒤에 못 잡으면 받은 fd 를 둘 곳이 없다) 묶이지 않으면 바로 푼다. 못 잡으면 채널을 열지 않는다 —
-  「이미지 채널 없음」이고 연결은 실패하지 않는다(token 은 host 의 만료로 풀린다). 그래서 채널이 묶인 적 없는 연결에는 표가 없다 —
-  그 연결의 resolver 는 빈 표와 같게 「세그먼트 없음」으로 답한다. 표는 Client 가 소멸 때 푸는 backing 이라 Client 소유 범위
+  채널을 열기 전에 잡고(묶인 뒤에 못 잡으면 받은 fd 를 둘 곳이 없다) 채널을 열지 못하면 바로 푼다. 못 잡으면 채널을 열지 않는다 —
+  「이미지 채널 없음」이고 연결은 실패하지 않는다(token 은 host 의 만료로 풀린다). 채널을 연 연결은 수립 중·수립 실패여도 표를
+  쥔다(비어 있다) — 펌프가 수립 결과를 정하기 전에 표가 있어야 `bind_ack` 뒤의 세그먼트를 같은 펌프에서 받는다. 표가 없거나 빈
+  연결의 resolver 는 「세그먼트 없음」으로 답한다. 표는 Client 가 소멸 때 푸는 backing 이라 Client 소유 범위
   그래프(generation 할당·R3 retirement·입양·ended purge 의 alias 증명)에 범위 하나로 들어간다.
 - 해석은 공유 메모리가 아닌 fd 도 견딘다 — host 결함으로 pipe·socket·디렉터리 fd 가 붙어 오면 mmap 이 EINVAL 을 내고, 그
   `image_ref` 는 「세그먼트 없음」이며 항목은 hwm 정리·stream 닫힘이 반환한다(앱을 죽이지 않는다). 일반 파일 fd 는 막지 못한다 —
   fstat·mmap 을 지난 뒤 보낸 쪽이 파일을 줄이면 픽셀을 읽을 때 SIGBUS 다. host 는 같은 사용자의 신뢰하는 프로세스이고 POSIX 공유
   메모리는 크기를 한 번만 정할 수 있어 정상 경로에는 이 틈이 없다 — 보낸 쪽이 일반 파일을 보내는 것은 신뢰 밖이다.
-- 「이미지 채널 없음」 연결의 resolver: host 는 그 연결에 `image_ref` 를 내지 않는다. 다만 앱이 시간 초과로 채널을 닫은 직후처럼
-  host 가 아직 묶인 것으로 아는 짧은 창에는 올 수 있다. 그 연결은 협상한 연결이라 `.unnegotiated` 가 아니라 **빈 표의 채널
-  resolver** 를 넘긴다 — 그 `image_ref` 는 「세그먼트 없음」(아래 resolver 결과 둘째)이 되어 연결이 재접속하고, 재접속이 채널을 다시
-  수립한다. host owner 가 계속 밀려 있으면 재접속마다 시간 초과가 되풀이될 수 있다 — 그 창은 host 가 채널 EOF 를 볼 때까지라
-  짧지만, 재접속 비용은 연결의 모든 탭이 낸다.
+- 「이미지 채널 없음」 연결의 resolver: host 는 그 연결에 `image_ref` 를 내지 않는다. 앱이 수립을 포기하는 마감은 token 만료보다
+  길어서, 그때 host 가 이미 묶었다면 `bind_ack` 는 이미 채널에 와 있고 펌프가 먼저 읽어 묶는다 — 「host 는 묶었는데 앱은 닫은」
+  창은 남지 않는다. 그래도 그런 `image_ref` 가 오면 그 연결은 협상한 연결이라 `.unnegotiated` 가 아니라 **빈 표의 채널 resolver**
+  를 넘긴다 — 그 `image_ref` 는 「세그먼트 없음」(아래 resolver 결과 둘째)이 되어 연결이 재접속하고, 재접속이 채널을 다시 수립한다.
 - 채널 리더는 매 tick 과 배치 적용 직전에 논블로킹 recvmsg 로 채널을 비운다. 한 번에 메시지 하나의 나머지까지만 읽는다 — fd 는
   메시지 첫 바이트와 함께 오므로 경계를 넘겨 읽으면 다음 메시지의 fd 를 이 메시지 몫으로 센다. 첫 조각에 fd 가 정확히 하나, 이어
   읽는 조각에는 없어야 한다. 아니면(fd 없음·둘 이상·이어지는 조각의 fd·제어 버퍼 잘림) 받은 fd 를 모두 닫고 연결을 poison 한다

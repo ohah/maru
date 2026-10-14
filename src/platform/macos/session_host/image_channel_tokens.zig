@@ -15,9 +15,9 @@
 
 const std = @import("std");
 
-/// token 을 발급한 뒤 앱이 채널을 열 때까지 기다리는 시간. 앱의 connect 함수는 이보다 짧은 deadline 으로 `bind_ack`
-/// 를 기다리고, 못 받으면 `image_channel.abandon` 으로 먼저 버린다. host 쪽 만료는 abandon 이 오지 않은 경우(앱이
-/// 죽었거나 연결이 끊긴 경우)를 위한 바닥이다.
+/// token 을 발급한 뒤 앱이 채널을 열 때까지 기다리는 시간. 앱은 `bind_ack` 를 기다리지 않고(펌프가 읽는다) 이보다 조금 긴
+/// 마감(`client_image_channel.bind_wait_ns`) 뒤에 수립을 포기한다 — abandon 은 보내지 않는다(이전 앱만 보낸다). 그래서 앱이 채널을
+/// 열지 못했거나 채널 hello 가 이 만료 뒤에 처리된 token 은 이 만료가 푼다.
 pub const token_ttl_ns: u64 = 10 * std.time.ns_per_s;
 
 /// 미사용 token 최대 개수. 주 연결 하나가 token 하나를 쥐고, token 하나가 자리 하나를 확보하므로 슬롯 상한의 절반을

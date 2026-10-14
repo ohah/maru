@@ -559,7 +559,7 @@ pub const Owner = struct {
             // 앱은 `bind_ack` 전에 아무것도 보내지 않는다. 같이 읽힌 바이트는 입양하면 조용히 버려지고, 소켓에 남은
             // 바이트는 release 로 읽혀 채널 상실이 된다 — 커널 분할 타이밍에 따라 갈리지 않게 여기서 거절한다.
             if (temp.hasTrailingInbound()) break :adopt "trailing_bytes";
-            // 앱이 deadline 으로 채널을 이미 닫았다(hello 와 HUP 이 같은 poll). abandon 이 곧 주 소켓으로 온다.
+            // 앱이 채널을 이미 닫았다(hello 와 HUP 이 같은 poll — 수립 마감·연결 실패). token 은 여기서 풀린다(위 `take`).
             if (temp.isClosing()) break :adopt "peer_closed";
             const main = self.clients[entry.index] orelse break :adopt "main_gone";
             if (main == temp or main.admission.key.monotonic_id != entry.monotonic_id) break :adopt "main_gone";

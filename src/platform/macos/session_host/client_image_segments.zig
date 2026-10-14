@@ -7,7 +7,7 @@
 //!
 //! - **크기는 고정이다.** host 는 연결당 미반환 세그먼트를 `image_segment_max_per_connection` 개까지만 둔다(원장). host 가 보기에
 //!   미반환인 것은 이 표의 항목 + 아직 못 보낸 release 라, 둘의 합이 상한을 넘으면 host 가 계약을 어긴 것이다.
-//! - **채널 리더(`drain`)**: 논블로킹 recvmsg 로 비운다. host → 앱 채널에는 세그먼트 메시지만 온다(`bind_ack` 는 수립 때 읽었다).
+//! - **채널 리더(`drain`)**: 논블로킹 recvmsg 로 비운다. host → 앱 채널에는 `bind_ack` 뒤로 세그먼트 메시지만 온다(`bind_ack` 는 수립 중인 펌프가 `readBindAck` 로 먼저 읽는다).
 //!   fd 는 메시지 첫 바이트와 함께 정확히 하나 온다 — 아니면 host 위반이다. 앱 fd 가 바닥나면(EMFILE) 커널은 재시도한 recvmsg
 //!   에서 fd 를 **조용히 버리므로**(§10) 재시도하지 않고 연결을 끊는다. 받은 fd 는 CLOEXEC 가 꺼져 있어 바로 켠다(§7 의 잠금은 IC4).
 //! - **닫힌 stream**: host 는 연결마다 stream id 를 1 씩 늘려 매기고 재사용하지 않는다(`Connection.next_stream_id`). 그래서 「본 적
@@ -86,6 +86,42 @@ const empty_entry: Entry = .{
 
 /// 해석이 실패한 이유 — 로그로만 나간다(조립기에서는 모두 `MalformedRow` 다).
 pub const Miss = enum { missing, stream_mismatch, metadata_mismatch, too_small, stat_failed, map_failed };
+
+pub const BindAckError = error{ ChannelLost, PeerContractViolation };
+
+/// 수립 중인 채널에서 `bind_ack` 의 남은 바이트(`buf`)만 읽는다(이미지 채널 §3.1) — 그 뒤의 세그먼트 메시지(fd 붙음)는 `drain` 이
+/// 받는다. 읽은 바이트 수를 돌려준다(아직 없으면 0). 호출자는 fork 울타리의 수신 잠금을 든다(§7). `bind_ack` 에는 fd 가 붙지
+/// 않는다 — 붙어 오면 받은 fd 를 닫고 계약 위반이다. EOF·오류는 채널 상실이다.
+pub fn readBindAck(fd: c.fd_t, buf: []u8) BindAckError!usize {
+    var control: [control_bytes]u8 align(@alignOf(c.cmsghdr)) = undefined;
+    var iov = [_]posix.iovec{.{ .base = buf.ptr, .len = buf.len }};
+    var msg: c.msghdr = .{
+        .name = null,
+        .namelen = 0,
+        .iov = &iov,
+        .iovlen = 1,
+        .control = &control,
+        .controllen = control.len,
+        .flags = 0,
+    };
+    const rc = while (true) {
+        const n = c.recvmsg(fd, &msg, posix.MSG.DONTWAIT);
+        if (n < 0 and posix.errno(n) == .INTR) continue;
+        break n;
+    };
+    if (rc < 0) return switch (posix.errno(rc)) {
+        .AGAIN => 0,
+        else => error.ChannelLost,
+    };
+    var received: [max_fds_per_message]c.fd_t = undefined;
+    const fd_count = collectReceivedFds(control[0..@min(msg.controllen, control.len)], &received);
+    if (fd_count != 0 or msg.flags & c.MSG.CTRUNC != 0) {
+        closeAll(received[0..fd_count]);
+        return error.PeerContractViolation;
+    }
+    if (rc == 0) return error.ChannelLost;
+    return @intCast(rc);
+}
 
 pub const Table = struct {
     entries: [capacity]Entry = @splat(empty_entry),

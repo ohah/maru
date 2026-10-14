@@ -373,7 +373,8 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "On Chromium tabs (engine=chromium in browser_list) browser_console also holds lines from iframes and workers, " ++
             "and the first read after you are allowed a tab shows only the current page's lines (earlier lines are deleted, " ++
             "including pages the tab went through after the permission but before that read), except tabs you opened with browser_open " ++
-            "(and tabs their pages opened), whose first read shows everything since the tab was created. " ++
+            "(and tabs their pages opened), whose first read shows everything since the tab was created " ++
+            "unless the user clicked, typed or navigated in that tab before it. " ++
             "A read from another pane (another agent, or the user running maru browser console there) takes the console over: " ++
             "your next read again shows only the current page's lines, and lines logged in between are gone for you.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
@@ -582,6 +583,8 @@ test "W9c①: initialize 의 안내는 Chromium 탭의 console 을 「아직 안
     try testing.expect(std.mem.indexOf(u8, r, "A read from another pane") != null);
     // 에이전트가 연 탭은 처음부터 다 본다는 것과 첫 읽기가 앞 줄을 지운다는 것도(3 회차 F1).
     try testing.expect(std.mem.indexOf(u8, r, "everything since the tab was created") != null);
+    // 첫 읽기 전에 사용자가 그 탭을 몰면 그 예외가 풀린다는 것도(4 회차 D).
+    try testing.expect(std.mem.indexOf(u8, r, "unless the user clicked, typed or navigated in that tab before it") != null);
     try testing.expect(std.mem.indexOf(u8, r, "earlier lines are deleted") != null);
 }
 

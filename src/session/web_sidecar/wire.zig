@@ -94,7 +94,8 @@ pub const Error = error{
     /// DevTools 호출(W9-0b)의 닫힌 필드 위반 — 호출 번호 0, 메서드 이름 모양(빈·상한 초과·허용 밖 글자), 인자·결과 크기 상한
     /// 초과, 빈 조각·조각 상한 초과, 결과가 없는 상태에 크기.
     InvalidDevtools,
-    /// 콘솔(W9c①)의 닫힌 필드 위반 — 모르는 수준, 버린 수만 싣는 frame 에 수준·글·`docs_back`, 버린 수 없는 빈 frame.
+    /// 콘솔(W9c①)의 닫힌 필드 위반 — 모르는 수준, 버린 수만 싣는 frame 에 수준·글·`docs_back`, 버린 수 없는 빈 frame, 앞 문서의 버린 수와
+    /// 그 `docs_back` 중 하나만 0.
     InvalidConsole,
     InvalidClickCount,
     InvalidRange,

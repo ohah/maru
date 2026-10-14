@@ -543,8 +543,9 @@ var parked_emptied = false;
 /// 페이지가 연 새 탭으로 만들 번호(W10c — `open_tab` 의 새 탭은 배치가 와야 기록이 생긴다. 생기면 `page_opened` 로 옮긴다).
 var page_opened_pending: [16]u64 = @splat(0);
 var page_opened_next: usize = 0;
-/// 에이전트가 연 탭의 콘솔을 묶을 읽는 쪽(W9c① 3 회차 F1 — `consoleBirthReader`). `browser.open` 의 탭은 배치가 와야 기록이 생긴다 — 생기면
-/// 그 링을 묶는다. 넘치면 가장 오래된 것을 잃는다(그 탭은 확인 모달로 허락한 탭처럼 첫 읽기부터 본다 — 더 숨기는 쪽).
+/// 에이전트가 연 탭의 콘솔을 묶을 읽는 쪽(W9c① 3 회차 F1 — `consoleBirthReader`). 기록이 아직 없는 탭 — 에이전트 탭의 페이지가 연 새 탭
+/// 중 이어 받은 팝업이 아닌 것(`open_tab` — noopener 등)은 배치가 와야 기록이 생긴다 — 생기면 그 링을 묶는다. 빈 자리부터 쓰고, 다 찼으면
+/// 돌아가며 덮는다(덮인 탭은 확인 모달로 허락한 탭처럼 첫 읽기부터 본다 — 더 숨기는 쪽).
 const ConsoleBirth = struct { surface_id: u64 = 0, who: u64 = 0 };
 var console_birth_pending: [16]ConsoleBirth = @splat(.{});
 var console_birth_next: usize = 0;
@@ -1890,6 +1891,7 @@ pub fn noteUserNavigation(surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.download_gesture_ms = monotonicNow();
     s.user_action_ms = monotonicNow(); // W9c②: 이동이 부른 떠나기 확인은 사용자 것이다
+    s.console.userDrove(); // W9c① 4 회차 D: 사용자가 이 탭으로 다른 곳에 간다 — 태어날 때의 콘솔 묶음을 푼다(첫 읽기 전이면)
     // W10c: 사용자가 이 탭을 쓴다 — 페이지가 연 빈 탭이어도 이제 사용자의 탭이다(주소창에 친 파일 주소에 그 탭이 닫혔다 — 적대
     // 리뷰 2 회차). 미뤄 둔 닫기도 거둔다(3 회차).
     s.page_opened = false;
@@ -1906,6 +1908,7 @@ fn downloadGestureMs(s: *const Surface) i64 {
 pub fn navAction(gpa: std.mem.Allocator, surface_id: u64, action: ws.message.NavActionKind) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.user_action_ms = monotonicNow(); // W9c②: 이것이 부른 떠나기 확인은 사용자 것이다
+    s.console.userDrove(); // W9c① 4 회차 D: 뒤로 가면 사용자가 그 탭으로 지나온 곳일 수 있다
     if (s.created) send(gpa, .{ .nav_action = .{ .browser = surface_id, .action = action } });
 }
 
@@ -1920,6 +1923,15 @@ pub fn noteAgentInput(surface_id: u64) void {
 pub fn noteUserAction(surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.user_action_ms = monotonicNow();
+}
+
+/// W9c① 4 회차 D: 이 입력으로 사용자가 페이지를 몰 수 있는가 — 누름·키·글·편집·조합. 포인터 이동·휠은 지켜보는 일이라 아니다.
+fn drivesPage(message: Message) bool {
+    return switch (message) {
+        .mouse => |m| m.kind != .move and m.kind != .leave,
+        .wheel => false,
+        else => true,
+    };
 }
 
 /// 입력(W4b·W4c — 라우팅은 창이 정했다). 만들어졌고 sidecar 가 돌 때만 보낸다 — 입력은 쥐었다가 늦게 보낼 것이 아니다(첫
@@ -1968,6 +1980,10 @@ fn sendInputAs(gpa: std.mem.Allocator, message: Message, from_user: bool) bool {
         else => true,
     };
     if (from_user and user_made) s.user_action_ms = monotonicNow();
+    // W9c① 4 회차 D: 사용자가 페이지를 누르거나 쳤다 — 에이전트가 연 탭이어도 이제 사용자가 몰 수 있다(링크·검색 칸으로 제 사이트에 간다).
+    // 첫 읽기 전이면 태어날 때의 콘솔 묶음을 푼다. 포인터 이동·휠은 빼다 — 에이전트가 하는 일을 지켜보는 사용자의 hover·스크롤로는 다른
+    // 사이트에 가지 않는데, 풀면 첫 읽기 전에 페이지가 스스로 옮겨 간 앞 문서의 오류가 사라진다(3 회차 F1).
+    if (from_user and user_made and drivesPage(message)) s.console.userDrove();
     // 앱이 만든 입력은 페이지 입력 시각도 건드리지 않는다 — 조합 마침의 글은 사용자가 칠 때 이미 찍혔다(3 회차).
     const kept_input_ms = s.last_user_input_ms;
     defer if (!from_user) {
@@ -2221,9 +2237,15 @@ pub fn notePageOpened(surface_id: u64) void {
 }
 
 /// W9c① 3 회차 F1: 에이전트가 이 탭을 열었다(grant 가 탭과 함께 생겼다) — 콘솔을 처음부터 `who`(그 grant 로 읽을 때의 읽는 쪽)에 묶는다.
-/// 기록이 아직 없으면(`browser.open` — 첫 배치 전) 기록이 생길 때 묶는다. 페이지가 연 탭은 기록이 이미 있다(`popup_created`).
+/// 기록은 보통 이미 있다 — `browser.open` 은 탭을 만들며 곧 `ensure` 하고, 이어 받은 팝업은 `popup_created` 에 생긴다. 없으면(에이전트 탭의
+/// 페이지가 연 `open_tab` 새 탭 — 첫 배치 전) 기록이 생길 때 묶는다.
 pub fn consoleBirthReader(surface_id: u64, who: u64) void {
     if (surfaces.getPtr(surface_id)) |s| return s.console.latchAtBirth(who);
+    // 빈 자리(또는 쓴 자리)부터 — 돌아가며 덮기만 하면 다른 자리가 비어 있어도 아직 배치 전인 탭의 묶음을 잃었다(4 회차).
+    for (&console_birth_pending) |*b| if (b.surface_id == 0) {
+        b.* = .{ .surface_id = surface_id, .who = who };
+        return;
+    };
     console_birth_pending[console_birth_next] = .{ .surface_id = surface_id, .who = who };
     console_birth_next = (console_birth_next + 1) % console_birth_pending.len;
 }
@@ -2980,6 +3002,7 @@ pub fn dragEnter(gpa: std.mem.Allocator, surface_id: u64, payload: DragPayload, 
     const s = surfaces.getPtr(surface_id) orelse return false;
     if (!s.created) return false;
     s.user_action_ms = monotonicNow(); // dragenter 처리기의 대화상자(W9c② 적대 리뷰 1 회차)
+    s.console.userDrove(); // W9c① 4 회차 D: 놓은 링크·파일로 사용자가 이 탭을 몰 수 있다
     // maru 의 Chromium 탭에서 시작한 끌기 — 조각 대신 sidecar 가 쥔 그 끌기 데이터를 고른다(W6d②).
     if (payload.source != 0) {
         send(gpa, .{ .drag_target = .{ .browser = surface_id, .kind = .enter, .point = point, .modifiers = modifiers, .allowed = allowed & ws.message.drag_operation_mask, .source = payload.source } });
@@ -3488,6 +3511,7 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.page_closed = false;
     s.popup_opener = 0; // 이제 보통 탭이다 — 나중에 닫혀도 옛 연 탭으로 가지 않는다
+    s.console.userDrove(); // W9c① 4 회차 D: 사용자가 쓰는 보통 탭이 된다 — 태어날 때의 콘솔 묶음을 푼다(첫 읽기 전이면)
     s.page_opened = false; // W10c: 빈 다운로드 탭으로 닫지 않는다(사용자가 쓰는 보통 탭이다 — 적대 리뷰 2 회차)
     s.download_blank = false;
     s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
@@ -4611,9 +4635,11 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             }
         },
         .title_changed => {},
-        // W9c①: 콘솔 줄 — 버린 수가 실려 오면 그 줄 앞에 표지(버림은 그 줄보다 먼저 일어났다).
+        // W9c①: 콘솔 줄 — 버린 수가 실려 오면 그 줄 앞에 표지(버림은 그 줄보다 먼저 일어났다). 앞 문서의 줄을 버린 수는 그 줄이 나온 문서의
+        // 표지로(4 회차 A — 처음 읽는 쪽에게는 보이지 않는다).
         .console_message => |v| if (surfaces.getPtr(v.browser)) |s| {
             if (v.dropped_errors != 0 or v.dropped_other != 0) s.console.addDropped(gpa, v.dropped_errors, v.dropped_other) catch {};
+            if (v.dropped_old != 0) s.console.addDroppedOld(gpa, v.dropped_old, v.dropped_old_back) catch {};
             if (v.has_entry) s.console.add(gpa, consoleLevel(v.level), v.text, v.docs_back) catch {};
         },
         // W9c①: 실패한 이동이 오류 페이지로 옛 문서를 바꿨다(`page_started` 가 없다) — 콘솔의 문서 경계로만 쓴다. 다운로드의 몸짓(`last_nav_ms`)·
@@ -6605,7 +6631,7 @@ test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오
     }
 }
 
-test "W9c① 3 회차 F1: 에이전트가 연 탭의 콘솔은 태어날 때 묶인다 — 기록이 아직 없으면 첫 배치가 기록을 만들 때, 있으면(페이지가 연 탭) 곧" {
+test "W9c① 3 회차 F1: 에이전트가 연 탭의 콘솔은 태어날 때 묶인다 — 기록이 있으면(`browser.open`·이어 받은 팝업) 곧, 없으면(에이전트 탭의 페이지가 연 `open_tab` 새 탭) 첫 배치가 기록을 만들 때" {
     const gpa = std.testing.allocator;
     gpa_ref = gpa;
     try std.testing.expectEqual(@as(usize, 0), surfaces.count());
@@ -6618,10 +6644,10 @@ test "W9c① 3 회차 F1: 에이전트가 연 탭의 콘솔은 태어날 때 묶
         latched = null;
         state = .off;
     }
-    // browser.open — 탭은 있는데 기록은 첫 배치에 생긴다.
+    // 에이전트 탭의 페이지가 연 `open_tab` 새 탭(noopener 등 — 이어 받은 팝업이 아니다) — 탭은 있는데 기록은 첫 배치에 생긴다.
     consoleBirthReader(61, 7);
     ensure(gpa, .{ .surface_id = 61, .width_px = 10, .height_px = 10, .visible = true }, 1000, 0);
-    // 페이지가 연 탭 — 기록이 먼저 있다.
+    // `browser.open`(탭을 만들며 곧 `ensure`)·이어 받은 팝업 — 기록이 먼저 있다.
     try surfaces.put(gpa, 62, .{ .record = .{ .surface_id = 62, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
     consoleBirthReader(62, 7);
     for ([_]u64{ 61, 62 }) |id| {
@@ -6634,6 +6660,92 @@ test "W9c① 3 회차 F1: 에이전트가 연 탭의 콘솔은 태어날 때 묶
     }
     // 묶음은 한 번 쓰고 지운다 — 같은 번호의 새 기록이 다시 묶이지 않는다.
     try std.testing.expectEqual(@as(u64, 0), takeConsoleBirth(61));
+    // 4 회차: 기다리는 자리는 빈 자리부터 — 돌아가며 덮기만 하면 다른 자리가 비어 있어도 아직 배치 전인 탭(100)의 묶음을 잃었다.
+    defer {
+        console_birth_pending = @splat(.{});
+        console_birth_next = 0;
+    }
+    for (0..console_birth_pending.len) |i| consoleBirthReader(100 + i, 7);
+    for (1..console_birth_pending.len) |i| try std.testing.expectEqual(@as(u64, 7), takeConsoleBirth(100 + i));
+    consoleBirthReader(200, 9);
+    try std.testing.expectEqual(@as(u64, 7), takeConsoleBirth(100));
+    try std.testing.expectEqual(@as(u64, 9), takeConsoleBirth(200));
+}
+
+test "W9c① 적대 리뷰 4 회차 재현 D: 에이전트가 연 탭을 첫 읽기 전에 사용자가 몰면(누름·키·주소창·뒤로·끌어 놓기·닫힌 팝업 되살리기) 태어날 때의 콘솔 묶음이 풀린다 — 에이전트의 입력·앱이 만든 입력·사용자의 hover·스크롤은 풀지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 71, 72, 73, 74, 75, 76, 77 });
+    const at: ws.message.Point = .{ .x = 3, .y = 4 };
+    for ([_]u64{ 71, 72, 73, 74, 75, 76, 77 }) |id| consoleBirthReader(id, 5);
+    // 71: 에이전트만 움직였다 — 에이전트의 op, 앱이 만든 입력, 사용자가 지켜보며 옮긴 포인터·휠.
+    noteAgentInput(71);
+    try std.testing.expect(sendAppInput(gpa, .{ .mouse = .{ .browser = 71, .kind = .down, .point = at, .click_count = 1 } }));
+    try std.testing.expect(sendAppInput(gpa, .{ .key = .{ .browser = 71, .kind = .char, .character = 'a', .unmodified_character = 'a' } }));
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 71, .kind = .move, .point = .{ .x = 9, .y = 9 } } }));
+    try std.testing.expect(sendInput(gpa, .{ .wheel = .{ .browser = 71, .point = at, .delta_x = 0, .delta_y = -120 } }));
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 71, .kind = .leave, .point = at } }));
+    apply(gpa, .{ .console_message = .{ .browser = 71, .level = .@"error", .text = "agent boom" } }, 0);
+    apply(gpa, .{ .page_started = 71 }, 0);
+    apply(gpa, .{ .console_message = .{ .browser = 71, .text = "login" } }, 0);
+    {
+        const got = try consoleRead(gpa, gpa, 71, 5, false);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings("[{\"level\":\"error\",\"text\":\"agent boom\"},{\"level\":\"log\",\"text\":\"login\"}]", got);
+    }
+    // 72: 사용자가 그 페이지를 눌러 제 은행에 갔다가 다른 곳으로 — 첫 읽기는 지금 문서의 제 줄만.
+    apply(gpa, .{ .console_message = .{ .browser = 72, .text = "agent page" } }, 0);
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 72, .kind = .down, .point = at, .click_count = 1 } }));
+    apply(gpa, .{ .page_started = 72 }, 0);
+    apply(gpa, .{ .console_message = .{ .browser = 72, .text = "bank: account 123-456 loaded" } }, 0);
+    apply(gpa, .{ .page_started = 72 }, 0);
+    apply(gpa, .{ .console_message = .{ .browser = 72, .text = "news" } }, 0);
+    {
+        const got = try consoleRead(gpa, gpa, 72, 5, false);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings("[{\"level\":\"log\",\"text\":\"news\"}]", got);
+    }
+    // 그 밖에 사용자가 모는 길 — 키, 주소창, 뒤로·새로고침, 끌어 놓기, 닫힌 팝업이 보통 탭으로 되살아남.
+    try std.testing.expect(sendInput(gpa, .{ .key = .{ .browser = 73, .kind = .char, .character = 'a', .unmodified_character = 'a' } }));
+    noteUserNavigation(74);
+    navAction(gpa, 75, .back);
+    try std.testing.expect(dragEnter(gpa, 76, .{ .paths = &.{"/a"} }, at, .{}, 1));
+    revivePageClosed(gpa, 77);
+    for ([_]u64{ 73, 74, 75, 76, 77 }) |id| {
+        const c = &surfaces.getPtr(id).?.console;
+        try std.testing.expectEqual(@as(u64, 0), c.latched);
+        try std.testing.expect(!c.birth);
+    }
+    // 첫 읽기 뒤에는 사용자가 몰아도 묶음은 그대로다(그 전부터의 규칙 — 묶인 쪽은 그 뒤의 이동을 이어 본다).
+    try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 71, .kind = .down, .point = at, .click_count = 1 } }));
+    try std.testing.expectEqual(@as(u64, 5), surfaces.getPtr(71).?.console.latched);
+}
+
+test "W9c① 적대 리뷰 4 회차 A: sidecar 가 실어 온 앞 문서의 버린 수는 그 문서의 표지로 — 태어날 때 묶인 쪽은 보고 처음 읽는 쪽은 보지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .running;
+    test_record_sends = true;
+    defer testTeardown(gpa);
+    try testSurfaces(gpa, &.{ 81, 82 });
+    consoleBirthReader(81, 5);
+    for ([_]u64{ 81, 82 }) |id| {
+        apply(gpa, .{ .page_started = id }, 0);
+        apply(gpa, .{ .console_message = .{ .browser = id, .docs_back = 1, .dropped_old = 12, .dropped_old_back = 1, .text = "widget boot" } }, 0);
+        apply(gpa, .{ .console_message = .{ .browser = id, .dropped_old = 3, .dropped_old_back = 1, .has_entry = false } }, 0);
+        apply(gpa, .{ .console_message = .{ .browser = id, .text = "page" } }, 0);
+    }
+    {
+        const got = try consoleRead(gpa, gpa, 81, 5, false);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings("[{\"level\":\"maru\",\"text\":\"15 console messages from the previous page were dropped (lines from origins the tab had just left): they came faster than maru keeps\"},{\"level\":\"log\",\"text\":\"widget boot\"},{\"level\":\"log\",\"text\":\"page\"}]", got);
+    }
+    {
+        const got = try consoleRead(gpa, gpa, 82, 5, false);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings("[{\"level\":\"log\",\"text\":\"page\"}]", got);
+    }
 }
 
 test "W9c②: 대화상자의 원인은 도착할 때 팝업 가족의 마지막 에이전트·사용자 시각으로 한 번 정한다 — 다른 가족은 세지 않고, 사용자가 묻는 닫기의 떠나기 확인은 사용자 것" {

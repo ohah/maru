@@ -849,8 +849,8 @@ comptime {
     const largest = prefix_len + common_len + 8 + 12 + 1 + 4 + max_url_bytes;
     std.debug.assert(largest <= max_frame_bytes);
     std.debug.assert(prefix_len + common_len + 8 + 1 + 4 + max_text_bytes <= max_frame_bytes);
-    // W9c①: 가장 긴 콘솔 줄(머리·수준·`docs_back`·버린 수 둘·항목 표시·길이 + 글 상한).
-    std.debug.assert(prefix_len + common_len + 8 + 1 + 1 + 4 + 4 + 1 + 4 + wire.max_console_text_bytes <= max_frame_bytes);
+    // W9c①: 가장 긴 콘솔 줄(머리·수준·`docs_back`·버린 수 둘·앞 문서의 버린 수와 그 `docs_back`·항목 표시·길이 + 글 상한).
+    std.debug.assert(prefix_len + common_len + 8 + 1 + 1 + 4 + 4 + 4 + 1 + 1 + 4 + wire.max_console_text_bytes <= max_frame_bytes);
 }
 
 const test_size: ViewSize = .{ .width = 760, .height = 486, .scale = 2.0 };
@@ -1541,8 +1541,9 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .page_started = 3 },
         .{ .page_close_kept = 3 },
         .{ .main_frame_navigating = 3 },
-        .{ .console_message = .{ .browser = 3, .level = .warn, .docs_back = 2, .dropped_errors = 2, .dropped_other = 1, .text = "a\tb\n한" } },
+        .{ .console_message = .{ .browser = 3, .level = .warn, .docs_back = 2, .dropped_errors = 2, .dropped_other = 1, .dropped_old = 5, .dropped_old_back = 2, .text = "a\tb\n한" } },
         .{ .console_message = .{ .browser = 3, .dropped_other = 4, .has_entry = false } },
+        .{ .console_message = .{ .browser = 3, .dropped_old = 6, .dropped_old_back = 1, .has_entry = false } },
         .{ .error_page = 3 },
         .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
         .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
@@ -1962,14 +1963,16 @@ test "download messages round trip, flow the right way, and fail closed (W10a)" 
 
 // ── 콘솔(W9c①) ─────────────────────────────────────────────────────────────────────────────────────────
 
-test "W9c①: console_message round-trips level, docs_back, both drop counts and multi-line text, and flows to maru" {
-    const got = (try roundTrip(.{ .console_message = .{ .browser = 7, .level = .@"error", .docs_back = 2, .dropped_errors = 3, .dropped_other = 40_000, .text = "Uncaught Error: 첫 줄\n\t둘째" } })).console_message;
+test "W9c①: console_message round-trips level, docs_back, the drop counts (old-document ones with their docs_back) and multi-line text, and flows to maru" {
+    const got = (try roundTrip(.{ .console_message = .{ .browser = 7, .level = .@"error", .docs_back = 2, .dropped_errors = 3, .dropped_other = 40_000, .dropped_old = 70_000, .dropped_old_back = 255, .text = "Uncaught Error: 첫 줄\n\t둘째" } })).console_message;
     try std.testing.expectEqual(@as(u64, 7), got.browser);
     try std.testing.expectEqual(message_mod.ConsoleLevel.@"error", got.level);
     try std.testing.expectEqual(@as(u8, 2), got.docs_back);
     try std.testing.expect(got.has_entry);
     try std.testing.expectEqual(@as(u32, 3), got.dropped_errors);
     try std.testing.expectEqual(@as(u32, 40_000), got.dropped_other);
+    try std.testing.expectEqual(@as(u32, 70_000), got.dropped_old);
+    try std.testing.expectEqual(@as(u8, 255), got.dropped_old_back);
     try std.testing.expectEqualStrings("Uncaught Error: 첫 줄\n\t둘째", got.text);
     // 255 까지 그대로(글은 위에서 본 뒤 — `roundTrip` 은 같은 버퍼를 쓴다).
     try std.testing.expectEqual(@as(u8, 255), (try roundTrip(.{ .console_message = .{ .browser = 7, .docs_back = 255, .text = "x" } })).console_message.docs_back);
@@ -2005,18 +2008,38 @@ test "W9c①: a drop-only console_message carries counts only — closed fields 
     const only = (try roundTrip(.{ .console_message = .{ .browser = 1, .dropped_errors = 5, .has_entry = false } })).console_message;
     try std.testing.expect(!only.has_entry);
     try std.testing.expectEqual(@as(u32, 5), only.dropped_errors);
-    // 항목이 없으면 수준은 log, 글은 비고, `docs_back` 은 0 이고, 버린 수가 있어야 한다.
+    // 앞 문서의 버린 수만 실은 frame 도 버린 수만 싣는 frame 이다(4 회차 A).
+    const old_only = (try roundTrip(.{ .console_message = .{ .browser = 1, .dropped_old = 2, .dropped_old_back = 3, .has_entry = false } })).console_message;
+    try std.testing.expectEqual(@as(u32, 2), old_only.dropped_old);
+    try std.testing.expectEqual(@as(u8, 3), old_only.dropped_old_back);
+    // 항목이 없으면 수준은 log, 글은 비고, `docs_back` 은 0 이고, 버린 수가 있어야 한다. 앞 문서의 버린 수와 그 `docs_back` 은 함께 0 이거나
+    // 함께 0 이 아니다(줄이 있어도).
     const bad_drop_only = [_]message_mod.ConsoleMessage{
         .{ .browser = 1, .dropped_errors = 1, .has_entry = false, .level = .warn },
         .{ .browser = 1, .dropped_errors = 1, .has_entry = false, .text = "x" },
         .{ .browser = 1, .dropped_errors = 1, .has_entry = false, .docs_back = 1 },
         .{ .browser = 1, .has_entry = false },
+        .{ .browser = 1, .dropped_old = 1, .has_entry = false },
+        .{ .browser = 1, .dropped_old_back = 1, .has_entry = false },
+        .{ .browser = 1, .dropped_errors = 1, .dropped_old_back = 1, .has_entry = false },
+        .{ .browser = 1, .dropped_old = 1, .text = "x" },
+        .{ .browser = 1, .dropped_old_back = 1, .text = "x" },
     };
     for (bad_drop_only) |m| try std.testing.expectError(error.InvalidConsole, encode(.{ .console_message = m }, &buf));
-    // decode 쪽: 항목 표시를 지운 frame 은 글이 남아 거절된다.
+    // decode 쪽: 앞 문서의 버린 수만 있고 그 `docs_back` 이 0 인 frame(또는 거꾸로)은 거절한다.
     var len = try encode(.{ .console_message = .{ .browser = 1, .dropped_other = 1, .text = "x" } }, &buf);
-    const has_entry_at = body + 8 + 1 + 1 + 4 + 4;
+    const old_at = body + 8 + 1 + 1 + 4 + 4;
+    const has_entry_at = old_at + 4 + 1;
     var bad = buf;
+    std.mem.writeInt(u32, bad[old_at..][0..4], 1, .big);
+    try std.testing.expectError(error.InvalidConsole, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[old_at + 4] = 1;
+    try std.testing.expectError(error.InvalidConsole, decodeExact(bad[0..len]));
+    bad[old_at + 3] = 9;
+    try std.testing.expectEqual(@as(u32, 9), (try decodeExact(bad[0..len])).console_message.dropped_old);
+    // 항목 표시를 지운 frame 은 글이 남아 거절된다.
+    bad = buf;
     bad[has_entry_at] = 0;
     try std.testing.expectError(error.InvalidConsole, decodeExact(bad[0..len]));
     bad = buf;
@@ -2042,8 +2065,9 @@ test "W9c① 적대 리뷰 1 회차: 콘솔 프레임을 무작위로 망가뜨�
     var prng = std.Random.DefaultPrng.init(0x9c1);
     const r = prng.random();
     const seeds = [_]Message{
-        .{ .console_message = .{ .browser = 3, .level = .warn, .docs_back = 3, .dropped_errors = 2, .dropped_other = 1, .text = "a\tb\n한 \xe2\x80\xae" } },
+        .{ .console_message = .{ .browser = 3, .level = .warn, .docs_back = 3, .dropped_errors = 2, .dropped_other = 1, .dropped_old = 7, .dropped_old_back = 3, .text = "a\tb\n한 \xe2\x80\xae" } },
         .{ .console_message = .{ .browser = 3, .dropped_other = 4, .has_entry = false } },
+        .{ .console_message = .{ .browser = 3, .dropped_old = 4, .dropped_old_back = 1, .has_entry = false } },
         .{ .error_page = 3 },
     };
     var buf: [max_frame_bytes]u8 = undefined;

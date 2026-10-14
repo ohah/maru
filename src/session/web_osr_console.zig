@@ -10,7 +10,8 @@
 //! 지금 문서의 제 줄만 본다 — 줄이 어느 문서에서 왔는지는 sidecar 가 단 `docs_back`(그 출처를 떠난 지 몇 문서인가 — 늦게 온
 //! unload 줄)으로 안다. 다른 쪽이 읽으면 그쪽이 묶이고 그에게 보이지 않던 줄은 버린다 — 남기면 묶인 뒤 다음 읽기에서 허락 전
 //! 기록이 보였다. 그래서 앞서 묶였던 쪽의 다음 읽기도 지금 문서의 제 줄만이다(문서에 적은 동작 — 2 회차 F3).
-//! 에이전트가 연 탭은 태어날 때 그 grant 에 묶인다(`latchAtBirth` — 3 회차 F1) — 첫 읽기가 탭이 생긴 뒤의 모든 줄을 본다.
+//! 에이전트가 연 탭은 태어날 때 그 grant 에 묶인다(`latchAtBirth` — 3 회차 F1) — 첫 읽기가 탭이 생긴 뒤의 모든 줄을 본다. 그 첫 읽기 전에
+//! 사용자가 그 탭을 몰면(`userDrove` — 4 회차 D) 그 묶음은 풀리고 첫 읽기는 다른 쪽처럼 지금 문서의 제 줄만 본다.
 
 const std = @import("std");
 
@@ -45,6 +46,8 @@ pub const Entry = struct {
     origin_doc: u32,
     /// `maru` 표지가 센 버린 수(오류·경고, 그 밖) — 같은 문서의 표지에 더한다(처음 버린 자리에).
     dropped: [2]u32 = .{ 0, 0 },
+    /// 앞 문서의 줄을 버린 수의 표지(`addDroppedOld`) — 0 이 아니면 그 표지다(`docs_back` 도 0 이 아니다).
+    dropped_old: u32 = 0,
 };
 
 pub const Ring = struct {
@@ -56,6 +59,8 @@ pub const Ring = struct {
     /// 리뷰 1 회차: 이동 직후 첫 읽기 뒤 앞 사이트의 늦은 unload 줄이 다음 읽기에 보였다. 2 회차: 「도착한 문서」 로 가르면 A → B(묶임)
     /// → C 에서 C 에 온 A 의 줄이 보였다 — 그래서 나온 문서로 가른다).
     latched_doc: u32 = 0,
+    /// 묶음이 태어날 때의 것이고(`latchAtBirth`) 아직 아무도 읽지 않았다 — 그동안 사용자가 탭을 몰면 풀린다(`userDrove`).
+    birth: bool = false,
 
     pub fn deinit(self: *Ring, gpa: std.mem.Allocator) void {
         self.clear(gpa);
@@ -69,6 +74,17 @@ pub const Ring = struct {
         if (who == 0 or self.latched != 0) return;
         self.latched = who;
         self.latched_doc = self.doc;
+        self.birth = true;
+    }
+
+    /// 사용자가 이 탭을 몰았다(페이지를 누르거나 쳤다, 주소창·뒤로·새로고침). 태어날 때의 묶음은 「사용자가 지나온 사이트가 없다」 가 전제라
+    /// 첫 읽기 전이면 푼다 — 그 읽기는 다른 쪽처럼 지금 문서의 제 줄만 본다(W9c① 적대 리뷰 4 회차 D: 에이전트가 연 뒤쪽 탭에서 사용자가
+    /// 제 은행에 갔다 오면 첫 읽기가 그 줄을 봤다). 한 번 읽힌 뒤의 묶음은 그대로다(묶인 쪽은 그 뒤의 이동을 이어 본다 — 그 전부터의 규칙).
+    pub fn userDrove(self: *Ring) void {
+        if (!self.birth) return;
+        self.birth = false;
+        self.latched = 0;
+        self.latched_doc = 0;
     }
 
     /// 주 프레임에 새 문서가 들어섰다(`page_started`, 오류 페이지 — `error_page`).
@@ -105,7 +121,7 @@ pub const Ring = struct {
                 i -= 1;
                 const e = &self.entries.items[i];
                 if (e.doc != self.doc) break;
-                if (e.level == .maru) break :blk e;
+                if (e.level == .maru and e.dropped_old == 0) break :blk e;
             }
             break :blk null;
         };
@@ -121,6 +137,35 @@ pub const Ring = struct {
         const text = try markerText(gpa, counts);
         errdefer gpa.free(text);
         try self.push(gpa, .{ .level = .maru, .text = text, .doc = self.doc, .origin_doc = self.doc, .dropped = counts });
+    }
+
+    /// sidecar 가 앞 문서의 줄로 가른 줄을 버린 수(4 회차 A — 전에는 세지 않아 묶인 쪽이 빠진 줄을 몰랐다). `docs_back` 은 그 가운데 가장
+    /// 앞 문서의 것이다 — 표지는 그 문서에서 **나온** 줄로 두어 보이는 규칙이 같이 가른다: 처음 읽는 쪽에게는 보이지 않고(앞 사이트의 양이
+    /// 드러나지 않게), 묶인 쪽에게는 그 문서가 묶인 문서 뒤일 때만 보인다. 같은 문서·같은 나온 문서의 표지에만 더한다.
+    pub fn addDroppedOld(self: *Ring, gpa: std.mem.Allocator, count: u32, docs_back: u8) std.mem.Allocator.Error!void {
+        if (count == 0 or docs_back == 0) return;
+        const origin_doc = self.doc -| docs_back;
+        var i = self.entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            const e = &self.entries.items[i];
+            if (e.doc != self.doc) break;
+            if (e.level != .maru or e.dropped_old == 0 or e.origin_doc != origin_doc) continue;
+            const total = e.dropped_old +| count;
+            const text = try oldMarkerText(gpa, total);
+            self.bytes = self.bytes - e.text.len + text.len;
+            gpa.free(e.text);
+            e.text = text;
+            e.dropped_old = total;
+            return;
+        }
+        const text = try oldMarkerText(gpa, count);
+        errdefer gpa.free(text);
+        try self.push(gpa, .{ .level = .maru, .text = text, .doc = self.doc, .docs_back = docs_back, .origin_doc = origin_doc, .dropped_old = count });
+    }
+
+    fn oldMarkerText(gpa: std.mem.Allocator, count: u32) std.mem.Allocator.Error![]u8 {
+        return std.fmt.allocPrint(gpa, "{d} console messages from the previous page were dropped (lines from origins the tab had just left): they came faster than maru keeps", .{count});
     }
 
     fn markerText(gpa: std.mem.Allocator, counts: [2]u32) std.mem.Allocator.Error![]u8 {
@@ -169,6 +214,8 @@ pub const Ring = struct {
             self.latched = who;
             self.latched_doc = self.doc;
         }
+        // 누가 읽었다 — 그 뒤의 묶음은 읽기로 생긴 것이다(사용자가 몰아도 풀지 않는다).
+        if (who != 0) self.birth = false;
         return json;
     }
 
@@ -394,4 +441,79 @@ test "W9c① 적대 리뷰 3 회차 재현 F1: 에이전트가 연 탭(태어날
     defer z.deinit(testing.allocator);
     z.latchAtBirth(0);
     try testing.expectEqual(@as(Authorizer, 0), z.latched);
+}
+
+test "W9c① 적대 리뷰 4 회차 재현 D: 에이전트가 연 탭을 첫 읽기 전에 사용자가 몰면 태어날 때의 묶음이 풀려 첫 읽기는 지금 문서의 제 줄만 — 전에는 사용자가 그 탭으로 지나온 은행 줄이 보였다" {
+    var r: Ring = .{};
+    defer r.deinit(testing.allocator);
+    r.latchAtBirth(7); // browser.open — grant 7 이 탭과 함께 생겼다
+    r.newDocument(); // 에이전트가 연 페이지
+    try r.add(testing.allocator, .log, "agent page", 0);
+    r.userDrove(); // 사용자가 그 (뒤쪽) 탭을 눌러 주소창으로
+    r.newDocument(); // 자기 은행에 갔다
+    try r.add(testing.allocator, .log, "bank: account 123-456 loaded", 0);
+    r.newDocument(); // 사용자가 다시 다른 곳으로
+    try r.add(testing.allocator, .log, "news", 0);
+    // 에이전트의 첫 읽기 — 확인 모달로 허락한 탭처럼 지금 문서의 제 줄만, 그리고 앞 줄은 지운다.
+    try expectTexts(&r, 7, &.{"news"});
+    for (r.entries.items) |e| try testing.expect(std.mem.indexOf(u8, e.text, "bank") == null);
+    // 한 번 읽힌 뒤의 묶음은 사용자가 몰아도 그대로다(그 뒤의 이동을 이어 본다 — 그 전부터의 규칙).
+    r.userDrove();
+    r.newDocument();
+    try r.add(testing.allocator, .log, "after", 0);
+    try expectTexts(&r, 7, &.{ "news", "after" });
+
+    // 사용자가 몰지 않았으면(에이전트만 움직였다) 태어날 때의 묶음이 남아 첫 읽기가 탭이 생긴 뒤를 다 본다.
+    var a: Ring = .{};
+    defer a.deinit(testing.allocator);
+    a.latchAtBirth(7);
+    a.newDocument();
+    try a.add(testing.allocator, .@"error", "agent boom", 0);
+    a.newDocument();
+    try a.add(testing.allocator, .log, "login", 0);
+    try expectTexts(&a, 7, &.{ "agent boom", "login" });
+    // 다른 쪽이 먼저 읽어도 태어날 때의 것이 아니게 된다 — 그 뒤 사용자가 몰아도 그 쪽의 묶음은 풀지 않는다.
+    var o: Ring = .{};
+    defer o.deinit(testing.allocator);
+    o.latchAtBirth(7);
+    try o.add(testing.allocator, .log, "x", 0);
+    try expectTexts(&o, 8, &.{"x"});
+    o.userDrove();
+    try testing.expectEqual(@as(Authorizer, 8), o.latched);
+}
+
+test "W9c① 적대 리뷰 4 회차 A: 앞 문서의 줄을 버린 수는 그 줄이 나온 문서의 표지로 — 묶인 쪽은 묶인 문서 뒤의 것만 보고 처음 읽는 쪽은 보지 않는다, 새 문서의 버림 표지와 섞이지 않는다" {
+    const old_text = "console messages from the previous page were dropped (lines from origins the tab had just left): they came faster than maru keeps";
+    var r: Ring = .{};
+    defer r.deinit(testing.allocator);
+    r.latchAtBirth(7); // 에이전트가 연 탭(문서 0)
+    r.newDocument(); // 문서 1 — 같은 사이트의 다음 페이지, 위젯 iframe 출처는 앞 문서의 것이라 그 줄은 앞 문서의 줄로 온다
+    try r.add(testing.allocator, .log, "widget boot", 1);
+    try r.addDroppedOld(testing.allocator, 5, 1);
+    try r.addDroppedOld(testing.allocator, 3, 1); // 같은 나온 문서 — 더한다
+    try r.addDropped(testing.allocator, 0, 2); // 새 문서의 버림은 제 표지(앞 문서 표지에 더하지 않는다)
+    try r.add(testing.allocator, .log, "page", 0);
+    try r.addDroppedOld(testing.allocator, 0, 1); // 0 은 표지를 만들지 않는다
+    try r.addDroppedOld(testing.allocator, 4, 0); // 앞 문서가 아니면 이 표지가 아니다
+    const normal = "2 console messages were dropped (0 error/warn, 2 other): the page logged faster than maru keeps";
+    // 처음 읽는 쪽(묶이지 않는다) — 지금 문서의 제 줄만: 앞 사이트의 양은 보이지 않는다.
+    try expectTexts(&r, 0, &.{ normal, "page" });
+    // 태어날 때 묶인 쪽 — 앞 문서(문서 0)도 묶인 문서라 버림이 보인다.
+    try expectTexts(&r, 7, &.{ "widget boot", "8 " ++ old_text, normal, "page" });
+
+    // 첫 읽기로 문서 1 에서 묶인 쪽 — 그보다 앞 문서(0)의 버림은 보이지 않고, 문서 1 의 것은 보인다(나온 문서가 다르면 따로).
+    var q: Ring = .{};
+    defer q.deinit(testing.allocator);
+    q.newDocument();
+    try q.add(testing.allocator, .log, "b", 0);
+    try expectTexts(&q, 7, &.{"b"});
+    q.newDocument(); // 문서 2
+    try q.addDroppedOld(testing.allocator, 4, 2); // 문서 0(묶이기 전 사이트)의 줄
+    try q.addDroppedOld(testing.allocator, 1, 1); // 문서 1 의 줄
+    try q.addDroppedOld(testing.allocator, 9, 200); // 0 에서 멈춘다 — 묶인 문서보다 앞
+    try expectTexts(&q, 7, &.{ "b", "1 " ++ old_text });
+    // 나온 문서가 다른 표지는 합치지 않고, 같은 것(문서 0 — 4 와 0 에서 멈춘 9)은 하나로 더했다.
+    try testing.expectEqual(@as(usize, 3), q.entries.items.len);
+    try testing.expectEqual(@as(u32, 13), q.entries.items[1].dropped_old);
+    try testing.expectEqual(@as(u32, 1), q.entries.items[2].dropped_old);
 }

@@ -165,8 +165,6 @@ pub const Grammar = enum {
         };
     }
 
-    /// 문자열 따옴표 — 괄호 Enter(계획 editor-typing-rules TR2)가 줄을 읽을 때 그 안의 괄호를 세지 않는다. 낱말 속 아포스트로피가 흔한
-    /// 문법(Markdown·HTML 본문·평문)은 비운다 — `don't (` 에서 따옴표를 열면 뒤 괄호를 놓친다. Rust 는 `"` 만이다(`'a` 수명 표기).
     /// 괄호 Enter 가 **줄 어디든** 짝 없는 여는 괄호를 보는가(참), 아니면 **caret 바로 앞 끝**의 여는 괄호만 보는가(거짓). VS Code 의 언어 설정을
     /// 따른다(계획 editor-typing-rules TR2 — 동작만): C 계열·Rust·Go·JSON·CSS·Zig 는 `increaseIndentPattern`·`onEnterRules` 가 「줄에 닫히지
     /// 않은 여는 괄호」라 어디든이고, Python·Ruby·Bash·Markdown·HTML 은 괄호 규칙이 기본(여는 괄호가 끝에 있을 때)뿐이다 — Markdown 산문의
@@ -178,12 +176,26 @@ pub const Grammar = enum {
         };
     }
 
+    /// 문자열 따옴표 — 괄호 Enter(계획 editor-typing-rules TR2)가 줄을 읽을 때 그 안의 괄호를 세지 않는다. **구문 트리가 없을 때(줄 스캐너)만
+    /// 쓴다** — 트리가 답하면 문자열·주석을 지운 사본을 읽는다(TR4). 낱말 속 아포스트로피가 흔한 문법(Markdown·HTML 본문·평문)은 비운다 —
+    /// `don't (` 에서 따옴표를 열면 뒤 괄호를 놓친다. Rust 는 `"` 만이다(`'a` 수명 표기).
     pub fn stringQuotes(self: Grammar) []const u8 {
         return switch (self) {
             .none, .markdown, .html => "",
             .rust => "\"",
             .javascript, .typescript, .tsx, .go => "\"'`",
             else => "\"'",
+        };
+    }
+
+    /// 줄 주석 표식 — Enter 의 줄 주석 이어쓰기와 줄 스캐너(그 뒤 괄호는 세지 않는다)가 쓴다(계획 editor-typing-rules TR2·TR3). **문법에서
+    /// 정한다** — 경로(`forPath`)로 정하면 이름 없는 문서에 문법을 골라 줘도 표식이 없다. 주석 토글의 `Language.lineComment` 와 이 문법들에서
+    /// 같은 답이다(LANG9). 줄 주석이 없는 문법(HTML·CSS·JSON·Markdown)과 평문은 `null`.
+    pub fn lineComment(self: Grammar) ?[]const u8 {
+        return switch (self) {
+            .python, .ruby, .bash => "#",
+            .html, .css, .json, .markdown, .none => null,
+            .zig, .javascript, .typescript, .tsx, .c, .cpp, .go, .rust, .java, .php, .kotlin => "//",
         };
     }
 };
@@ -369,4 +381,23 @@ test "LANG8 문자열 따옴표 — 괄호 Enter 가 건너뛸 따옴표, 아포
     // 괄호 Enter 의 범위 — 산문·괄호 규칙이 기본뿐인 문법은 끝의 여는 괄호만.
     for ([_]Grammar{ .typescript, .tsx, .javascript, .c, .cpp, .rust, .go, .java, .json, .css, .zig, .php, .kotlin }) |g| try std.testing.expect(g.bracketEnterAnywhere());
     for ([_]Grammar{ .python, .ruby, .bash, .markdown, .html }) |g| try std.testing.expect(!g.bracketEnterAnywhere());
+}
+
+test "LANG9 문법의 줄 주석 표식 — 경로로 정한 주석 토글의 표식과 같은 답, 이름 없는 문서도 문법만으로 (계획 editor-typing-rules 최종 검토)" {
+    const cases = [_]struct { path: []const u8, g: Grammar }{
+        .{ .path = "a.zig", .g = .zig },       .{ .path = "a.ts", .g = .typescript }, .{ .path = "a.tsx", .g = .tsx },
+        .{ .path = "a.js", .g = .javascript }, .{ .path = "a.c", .g = .c },           .{ .path = "a.cpp", .g = .cpp },
+        .{ .path = "a.go", .g = .go },         .{ .path = "a.rs", .g = .rust },       .{ .path = "a.java", .g = .java },
+        .{ .path = "a.php", .g = .php },       .{ .path = "a.kt", .g = .kotlin },     .{ .path = "a.py", .g = .python },
+        .{ .path = "a.rb", .g = .ruby },       .{ .path = "a.sh", .g = .bash },       .{ .path = "a.css", .g = .css },
+        .{ .path = "a.html", .g = .html },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c.g, grammarForPath(c.path));
+        const want = forPath(c.path).lineComment();
+        const got = c.g.lineComment();
+        try std.testing.expectEqual(want == null, got == null);
+        if (want) |w| try std.testing.expectEqualStrings(w, got.?);
+    }
+    for ([_]Grammar{ .json, .markdown, .none }) |g| try std.testing.expect(g.lineComment() == null);
 }

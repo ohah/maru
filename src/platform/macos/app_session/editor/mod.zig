@@ -2402,6 +2402,9 @@ const SharedSeed = struct {
     marks: []chrome_editor.gutter.Fold,
     marks_len: usize,
     syntax_folds_applied: bool,
+    /// 원래 뷰의 들여쓰기 추정(§3.9a) — 새 뷰가 지금 내용으로 다시 추정하면 같은 문서의 두 뷰가 `Tab`·Enter·Backspace·포맷 options 에서
+    /// 다른 단위를 쓴다(최종 검토: 빈 `.py` 에 탭 코드를 붙여 넣고 분할하면 한쪽은 공백 4, 한쪽은 탭). VS Code 는 그 옵션을 문서 모델에 둔다.
+    indent_guess: ?maru.session.editor.indent_guides.Guess,
 };
 
 /// 문서를 Term에 붙이기 직전까지 준비한 앱 전역 문서 참조와 뷰 줄 배열.
@@ -2682,6 +2685,7 @@ pub fn prepareSharedView(self: *AppSession, source: *Term) (OpenFileError || err
         .marks = marks,
         .marks_len = source.rt.editor_fold_marks_len,
         .syntax_folds_applied = source.rt.editor_syntax_folds_applied,
+        .indent_guess = source.rt.editor_guides.guess,
     } };
 }
 
@@ -2835,6 +2839,7 @@ pub fn finishAttach(self: *AppSession, term: *Term, prepared: Prepared) void {
         term.rt.editor_fold_marks = seed.marks;
         term.rt.editor_fold_marks_len = seed.marks_len;
         term.rt.editor_syntax_folds_applied = seed.syntax_folds_applied;
+        term.rt.editor_guides.guess = seed.indent_guess;
     }
 }
 
@@ -9338,9 +9343,10 @@ fn freshTree(term: *Term) ?*syntax_mod.Provider {
     return if (p.tree != null) p else null;
 }
 
-/// 한 글자 입력이 트리에 물을 범위(계획 editor-typing-rules TR4) — 커서마다 **caret 자리만**(`[lo-1, hi+1)` — 따옴표 자동 닫기·낱말
-/// 내어쓰기는 caret 의 문맥만 본다). 닫는 괄호를 공백뿐인 줄 머리에서 쳤으면 짝 찾기가 거슬러 읽는 데까지 — caret 을 품은 트리 조상 중
-/// **그 여는 괄호로 시작하는 가장 안쪽 것**의 머리부터(잘 짜인 코드면 짝 찾기가 거기서 멈춘다), 없으면 짝 찾기 상한(64 KiB)까지.
+/// 한 글자 입력이 트리에 물을 범위(계획 editor-typing-rules TR4) — 커서마다 **caret 자리만**(`[lo-1, hi+1)` — 따옴표 자동 닫기는 caret 의
+/// 문맥만 본다). 닫는 괄호를 공백뿐인 줄 머리에서 쳤으면 짝 찾기가 거슬러 읽는 데까지 — caret 을 품은 트리 조상 중 **그 여는 괄호로 시작하는
+/// 가장 안쪽 것**의 머리부터(잘 짜인 코드면 짝 찾기가 거기서 멈춘다), 없으면 짝 찾기 상한(`typing_ops.reindent_scan_limit`)까지. 낱말
+/// 내어쓰기의 낱말을 다 쳤으면 기준이 될 위쪽 내용 줄의 머리부터(`typing_ops.keywordQueryStart` — 그 줄이 여러 줄 문자열 안인지 안다).
 /// 줄 머리부터 caret 까지를 통째로 쿼리했더니 긴 한 줄(압축한 JS)에서 키마다 수십 ms 가 들었다(적대적 2회차 실측, ReleaseFast: 쿼리 한 번이
 /// caret 자리 3 µs · 한 줄 15 µs · 64 KiB 5.4 ms). 트리가 없으면 아무것도 안 넣는다.
 fn typingLiteralRanges(self: *AppSession, term: *Term, sels: []const editor_selection.Selection, typed: u8, brackets: []const u8, out: *std.ArrayList(LiteralRange)) error{OutOfMemory}!void {
@@ -9374,6 +9380,9 @@ fn typingLiteralRanges(self: *AppSession, term: *Term, sels: []const editor_sele
                     };
                 }
             }
+        };
+        if (hi == lo) if (typing_ops.keywordQueryStart(content, lines, term.rt.editor_grammar, lo, typed)) |k| {
+            start = @min(start, k);
         };
         try out.append(self.allocator, .{ .start = start, .end = @min(hi + 1, content.len) });
     }
@@ -9445,18 +9454,12 @@ fn bracketsOf(term: *const Term) ?[]const u8 {
     return syntax_mod.bracketRuleFor(syntax_mod.languageFor(g)).chars;
 }
 
-/// Enter 의 언어 문맥(괄호 Enter — 계획 editor-typing-rules TR2). 문법이 없으면 `null`(앞 공백만 잇는다).
+/// Enter 의 언어 문맥(계획 editor-typing-rules TR2·TR3 — 괄호·주석 이어쓰기·언어 규칙). 문법이 없으면 `null`(앞 공백만 잇는다). 따옴표·줄
+/// 주석·「어디든」은 L2 `enter_rules.contextFor` 가 문법에서 정한다 — VS Code 대조 판정자(INDR1)가 같은 함수를 부른다. 트리 조각은 호출자가
+/// 붙인다(TR4).
 fn enterContext(term: *Term) ?line_ops.EnterContext {
     const brackets = bracketsOf(term) orelse return null;
-    const path = term.rt.editorDocument().path;
-    return .{
-        .grammar = term.rt.editor_grammar,
-        .brackets = brackets,
-        .quotes = term.rt.editor_grammar.stringQuotes(),
-        .line_comment = if (path) |p| maru.session.editor.language.forPath(p).lineComment() else null,
-        .unit = guides_client.editUnit(term),
-        .anywhere = term.rt.editor_grammar.bracketEnterAnywhere(),
-    };
+    return maru.session.editor.enter_rules.contextFor(term.rt.editor_grammar, brackets, guides_client.editUnit(term), term.rt.editor_tab_width);
 }
 
 /// 선택(없으면 caret 의 낱말)을 대문자/소문자로 바꾼다(§3.9b). 판정은 L2 `line_ops.planTransformCase`(낱말 규칙
@@ -41559,6 +41562,119 @@ test "INDL4 한 글자 입력이 트리에 묻는 범위 — 커서마다 caret 
     ranges.clearRetainingCapacity();
     try typingLiteralRanges(fx.session, t, &.{Sel.at(30)}, '}', "()[]{}", &ranges);
     try testing.expectEqual(@as(usize, 0), ranges.items.len);
+}
+
+test "INDF2 호스트가 넘기는 문맥 — 실제 키로: 단위 폭(중첩 `else:`)·탭 폭(Tab 의 열)·선택 Tab·「어디든」·따옴표·줄 주석·괄호 집합(JSON)·커서 여럿의 트리 문맥·여러 줄 문자열 위의 낱말 내어쓰기·CRLF 줄바꿈 안 caret (계획 editor-typing-rules 최종 검토)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    // INDL1 과 같다 — 트리를 끝까지 판다(시간에 안 기댄다). `fresh` 가 거짓이면 줄 스캐너 경로(호스트가 넘긴 따옴표·줄 주석·괄호를 쓰는 자리).
+    const open = struct {
+        fn f(fx_: *PaneFixture, a: std.mem.Allocator, name: []const u8, src: []const u8, fresh: bool) !*Term {
+            const t = try undoFixture(fx_, a, name, src);
+            t.rt.editor_tab_width = 4;
+            const d = t.rt.editorDocument().opened orelse return error.NoDoc;
+            t.rt.editor_syntax.deinit(a);
+            t.rt.editor_syntax = syntax_color.openParsedBudgeted(d.file.content, t.rt.editor_grammar, 0);
+            if (t.rt.editor_syntax.provider == null or t.rt.editor_syntax.pending) return error.NoTree;
+            if (!fresh) t.rt.editor_syntax.pending = true;
+            return t;
+        }
+    }.f;
+    const at = struct {
+        fn f(t: *Term, needle: []const u8) usize {
+            return std.mem.indexOf(u8, t.rt.editorDocument().opened.?.file.content, needle).?;
+        }
+    }.f;
+    // ⑴ 중첩 블록의 `else:` — 한 단계(공백 4)만 내어쓴다(단위 폭이 낱말 내어쓰기에 닿는다: 넓으면 0 열로 간다).
+    const py = try open(&fx, allocator, "indf2a.py", "def f():\n    if a:\n        if b:\n            x\n            else\n", true);
+    py.rt.editor_selection = editor_selection.Selection.at(content(py).len - 1);
+    try testing.expect(insertText(fx.session, py, ":"));
+    try testing.expectEqualStrings("def f():\n    if a:\n        if b:\n            x\n        else:\n", content(py));
+    // ⑵ 위 줄이 여러 줄 문자열의 몸·닫는 `"""` 면 그 위의 코드 줄이 기준이다 — 트리가 있으면 `if a:` 와 같은 열에 그대로, 없으면(줄 스캐너)
+    // 0 열의 `"""` 를 기준으로 내어쓴다(종전 — 계획의 한계).
+    for ([_]bool{ true, false }) |fresh| {
+        const m = try open(&fx, allocator, if (fresh) "indf2m.py" else "indf2m_.py", "def f():\n    if a:\n        s = \"\"\"\ntext\n\"\"\"\n    else\n", fresh);
+        m.rt.editor_selection = editor_selection.Selection.at(content(m).len - 1);
+        try testing.expect(insertText(fx.session, m, ":"));
+        try testing.expectEqualStrings(if (fresh) "def f():\n    if a:\n        s = \"\"\"\ntext\n\"\"\"\n    else:\n" else "def f():\n    if a:\n        s = \"\"\"\ntext\n\"\"\"\nelse:\n", content(m));
+    }
+    // ⑶ 「어디든」 — TS 는 줄 가운데의 짝 없는 `{` 뒤도 한 단계, Markdown 은 끝의 여는 괄호만(`see [the docs|]` 를 쪼개 들여쓰지 않는다).
+    const ts = try open(&fx, allocator, "indf2b.ts", "  x;\nfoo({ a\n", true);
+    ts.rt.editor_selection = editor_selection.Selection.at(content(ts).len - 1);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  x;\nfoo({ a\n  \n", content(ts));
+    const md = try open(&fx, allocator, "indf2b.md", "see [the docs]\n", false);
+    md.rt.editor_selection = editor_selection.Selection.at(at(md, "]"));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("see [the docs\n]\n", content(md));
+    // ⑷ 줄 스캐너의 따옴표 — 문자열 안 `{` 뒤는 들여쓰지 않는다(트리가 낡았을 때).
+    const q = try open(&fx, allocator, "indf2q.ts", "  a;\ns = \"{\";\n", false);
+    q.rt.editor_selection = editor_selection.Selection.at(content(q).len - 1);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  a;\ns = \"{\";\n\n", content(q));
+    // ⑸ 줄 주석 표식은 그 문법의 것 — Python 의 `//`(나눗셈) 가운데 Enter 는 잇지 않고, TS 의 `//` 가운데는 잇는다(트리가 낡았을 때).
+    const pc = try open(&fx, allocator, "indf2c.py", "x = a // b + c\n", false);
+    pc.rt.editor_selection = editor_selection.Selection.at(at(pc, "+ c"));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("x = a // b \n+ c\n", content(pc));
+    const tc = try open(&fx, allocator, "indf2c.ts", "// note more\n", false);
+    tc.rt.editor_selection = editor_selection.Selection.at(at(tc, " more"));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("// note\n//  more\n", content(tc));
+    // ⑹ 괄호 집합은 괄호 색칠의 것 — JSON 의 `(` 는 괄호가 아니다(들여쓰기만 잇는다).
+    const js = try open(&fx, allocator, "indf2j.json", "[\n  (x)\n]\n", false);
+    js.rt.editor_selection = editor_selection.Selection.at(at(js, "x"));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("[\n  (\n  x)\n]\n", content(js));
+    // ⑺ 커서 여럿 × 트리 — 코드의 커서는 `''` 를 닫고, 문자열 안의 커서는 평범하게(커서마다 자기 문맥).
+    const mc = try open(&fx, allocator, "indf2k.ts", "a = ;\ns = \"x  y\";\n", true);
+    mc.rt.editor_selection = editor_selection.Selection.at(4);
+    const extras = try fx.session.allocator.alloc(editor_selection.Selection, 1);
+    extras[0] = editor_selection.Selection.at(at(mc, "  y") + 1);
+    fx.session.allocator.free(mc.rt.editor_extra_selections);
+    mc.rt.editor_extra_selections = extras;
+    try testing.expect(insertText(fx.session, mc, "'"));
+    try testing.expectEqualStrings("a = '';\ns = \"x ' y\";\n", content(mc));
+    // ⑻ 탭 폭은 설정의 것 — 공백 4 파일에서 탭 뒤(탭 폭 2 면 열 2) Tab 은 공백 2. 선택이 있으면 선택 머리의 열에서(열 5 → 공백 3).
+    const tw = try open(&fx, allocator, "indf2t.ts", "x\n    a;\n    c;\n\tb\n", false);
+    tw.rt.editor_tab_width = 2;
+    guides_client.onTabWidthSettingChanged(tw);
+    tw.rt.editor_selection = editor_selection.Selection.at(at(tw, "b"));
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("x\n    a;\n    c;\n\t  b\n", content(tw));
+    tw.rt.editor_selection = editor_selection.Selection.fromPoints(at(tw, ";"), at(tw, ";") + 1);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("x\n    a   \n    c;\n\t  b\n", content(tw));
+    // ⑼ CRLF 줄의 줄바꿈 안(`\r`·`\n` 사이 — → 로 줄 끝을 넘으면 닿는다)에서 친 글자 — 죽지 않고 그 자리에 들어간다(낱말 내어쓰기를 안 탄다).
+    const cr = try open(&fx, allocator, "indf2r.py", "if a:\r\n    x\r\n", false);
+    cr.rt.editor_selection = editor_selection.Selection.at(content(cr).len - 1);
+    try testing.expect(insertText(fx.session, cr, "e"));
+    try testing.expectEqualStrings("if a:\r\n    x\re\n", content(cr));
+}
+
+test "INDF3 같은 문서의 공유 뷰는 원래 뷰의 들여쓰기 추정을 잇는다 — 분할 전에 내용이 바뀌어도 두 뷰의 Tab 이 같다 (§3.9a, 계획 editor-typing-rules 최종 검토)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const t = try undoFixture(&fx, allocator, "indf3.py", "");
+    t.rt.editor_tab_width = 4;
+    guides_client.onTabWidthSettingChanged(t);
+    // 빈 파일은 언어 기본(공백 4)으로 굳는다 — 그 뒤 탭으로 들여쓴 코드를 붙여 넣는다(추정은 다시 하지 않는다).
+    const before = guides_client.editUnit(t);
+    try testing.expect(!before.tabs);
+    t.rt.editor_selection = editor_selection.Selection.at(0);
+    try testing.expect(insertText(fx.session, t, "def f():\n\tx\n\ty\n"));
+    const peer = try openSharedViewInActivePane(fx.session, t);
+    try testing.expectEqualDeep(before, guides_client.editUnit(peer));
+    try testing.expectEqualDeep(before, guides_client.editUnit(t));
 }
 
 test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {

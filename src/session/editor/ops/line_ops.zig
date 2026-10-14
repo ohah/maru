@@ -378,16 +378,19 @@ pub fn planToggleComment(allocator: std.mem.Allocator, content: []const u8, line
     return plan;
 }
 
-/// Enter 의 언어 문맥 — `enter_rules.Context`(계획 editor-typing-rules TR2·TR3).
+/// Enter 의 언어 문맥 — `enter_rules.Context`(계획 editor-typing-rules TR2~TR4).
 pub const EnterContext = enter_rules.Context;
 
 /// Enter — 개행을 넣고 **이전 줄의 들여쓰기를 잇는다**(§3.9a). 앞 공백을 글자 그대로 잇고, **caret 앞까지만** 보고,
 /// **커서마다 자기 줄을 본다**. 들여쓸 것이 하나도 없으면 `null` — 호출자는 종전 경로(`insertText("\n")`)로 간다(같은
 /// 결과를 두 자리에서 만들지 않는다).
 ///
-/// **언어 규칙**(`ctx` 가 있을 때 — 계획 editor-typing-rules TR2·TR3): 갈래는 `enter_rules.decide` 가 정한다 — 블록·줄 주석 이어쓰기, 괄호
-/// Enter(`{|}` → `{` ⏎ `→|` ⏎ `}` — caret 과 닫는 괄호 사이 공백은 먹는다), Python `:`·`case`·Ruby·HTML 태그. 여기는 그 답을 글자로 옮긴다:
-/// 새 줄 = 이어 받은 들여쓰기(`remove` 만큼 뺀다) + (`append` 또는 한 단계).
+/// **언어 규칙**(`ctx` 가 있을 때 — 계획 editor-typing-rules TR2~TR4): 갈래는 `enter_rules.decideWith` 가 정한다 — 블록·줄 주석 이어쓰기, 괄호
+/// Enter(`{|}` → `{` ⏎ `→|` ⏎ `}` — caret 과 닫는 괄호 사이 공백은 먹는다), Python `:`·`case`·Ruby·HTML 태그. 구문 트리가 답했으면(`literal_spans`)
+/// 커서마다 caret 의 문맥과 코드 사본을 준다. 여기는 그 답을 글자로 옮긴다: 새 줄 = 이어 받은 들여쓰기(`remove` 만큼 뺀다) + (`append` 또는
+/// 한 단계). **한 단계는 이어 받은 들여쓰기의 열에서 다음 탭 스톱까지**다(`Unit.toNextStop` — `Tab` 과 같다; VS Code 도 들여쓰기 + 탭을
+/// 정규화한다. 최종 검토: 정렬된 14 칸 줄 뒤가 18 칸이 돼 Backspace 한 번에 16 으로 갔다). 이어 받은 부분은 글자 그대로다. 선택이 여러 줄이면
+/// caret 뒤 조각은 **선택 끝 줄**의 나머지다(VS Code `getEnterAction` 의 afterText — `foo(|a,` ⏎ `b|)` 의 `)`).
 ///
 /// **문서 순서로 쌓는다**(입력 `sels` 가 문서 순서다) — primary 먼저 순서로 쌓으면 primary 가 뒤일 때 거꾸로 쌓여
 /// `delta` 가 거절했다(결함 3). **caret 은 새 줄의 들여쓰기 뒤로 간다**(결함 8).
@@ -412,13 +415,19 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
         };
         const head = content[line.start..s_off];
         const indent = head[0 .. head.len - std.mem.trimStart(u8, head, " \t").len];
-        const line_end = @max(line.contentEnd(), e_off);
+        const e_line = lines.line(lines.lineAt(e_off)) orelse line;
+        const line_end = @max(e_line.contentEnd(), e_off);
         const rest = content[e_off..line_end];
         const prev: ?[]const u8 = if (ln == 0) null else if (lines.line(ln - 1)) |pl| content[pl.start..pl.contentEnd()] else null;
         var tree: ?enter_rules.Tree = null;
         if (ctx) |c| if (c.literal_spans) |ls| {
             try scratch.resize(allocator, head.len);
-            tree = .{ .caret = literals.at(ls, content, s_off), .code = literals.blank(ls, line.start, head, scratch.items) };
+            const sp = literals.spanAt(ls, content, s_off);
+            tree = .{
+                .caret = if (sp) |x| (if (x.kind == .string) .string else .comment) else .code,
+                .code = literals.blank(ls, line.start, head, scratch.items),
+                .comment_at = if (sp) |x| (if (x.kind == .comment and x.start >= line.start) x.start - line.start else null) else null,
+            };
         };
         const act: enter_rules.Action = if (ctx) |c| enter_rules.decideWith(c, head, rest, prev, tree) else .{};
         // 정렬 공백 빼기(블록 주석이 끝난 줄) — 들여쓰기 끝이 공백일 때만.
@@ -426,7 +435,7 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
         if (act.remove > 0 and base.len >= act.remove and std.mem.allEqual(u8, base[base.len - act.remove ..], ' ')) base = base[0 .. base.len - act.remove];
         const step: []const u8 = act.append orelse switch (act.indent) {
             .keep => "",
-            .indent, .indent_outdent => if (ctx) |c| c.unit.text() else "",
+            .indent, .indent_outdent => if (ctx) |c| c.unit.toNextStop(indent_guides.visualColumn(base, c.tab_width)) else "",
         };
         var t: []u8 = undefined;
         var caret_in_text: usize = undefined;
@@ -850,5 +859,63 @@ test "INDL3 planNewline × 구문 트리 문맥 — 정규식 안 괄호는 안 
             try testing.expect(want != null);
             try testing.expectEqualStrings(want.?, plan.changes.items[0].text);
         }
+    }
+}
+
+test "INDF4 planNewline — 한 단계는 다음 탭 스톱까지(정렬된 14 칸 뒤는 16), 탭 단위는 이어 받은 공백 뒤에 탭, 여러 줄 선택의 caret 뒤는 선택 끝 줄, 트리가 답하면 줄 주석은 그 줄에서 시작한 주석만 (계획 editor-typing-rules 최종 검토)" {
+    const allocator = testing.allocator;
+    const Run = struct {
+        fn f(src: []const u8, sel: Selection, ctx: EnterContext) !?[]u8 {
+            var lines = try line_index.build(allocator, src);
+            defer lines.deinit();
+            var plan = (try planNewline(allocator, src, lines, &.{sel}, ctx)) orelse return null;
+            defer plan.deinit(allocator);
+            return try applyPlan(allocator, src, plan);
+        }
+    };
+    const four: EnterContext = enter_rules.contextFor(.typescript, "()[]{}", .{ .tabs = false, .width = 4 }, 4);
+    const tabs: EnterContext = enter_rules.contextFor(.typescript, "()[]{}", .{ .tabs = true, .width = 4 }, 4);
+    const Case = struct { src: []const u8, sel: Selection, ctx: EnterContext, want: ?[]const u8 };
+    const pad = "              "; // 14 칸 — 정렬
+    const cases = [_]Case{
+        .{ .src = pad ++ "b => {})\n", .sel = Selection.at(pad.len + 6), .ctx = four, .want = pad ++ "b => {\n" ++ pad ++ "  \n" ++ pad ++ "})\n" },
+        .{ .src = "    if (x) {}\n", .sel = Selection.at(12), .ctx = tabs, .want = "    if (x) {\n    \t\n    }\n" },
+        // 선택이 둘째 줄의 `)` 앞까지 — caret 뒤는 그 `)` 다(가운데 줄).
+        .{ .src = "foo(a,\nb)\n", .sel = Selection.fromPoints(4, 8), .ctx = four, .want = "foo(\n    \n)\n" },
+    };
+    for (cases) |k| {
+        const got = try Run.f(k.src, k.sel, k.ctx);
+        defer if (got) |g| allocator.free(g);
+        try testing.expectEqualStrings(k.want.?, got.?);
+    }
+    // 트리 조각 — 블록 주석 안의 `//`(URL)는 줄 주석이 아니고(들여쓸 것이 없어 종전 경로), 줄 주석 가운데는 잇고, 정규식·문자열 뒤 caret 은
+    // 코드라 괄호 규칙으로 간다.
+    {
+        const src = "x(); /* see http://x y */\n";
+        var c = four;
+        c.literal_spans = &.{.{ .start = 5, .end = 25, .kind = .comment }};
+        try testing.expect((try Run.f(src, Selection.at(std.mem.indexOf(u8, src, "y */").?), c)) == null);
+        // 트리가 없으면 줄 스캐너가 URL 의 `//` 를 줄 주석으로 읽는다(종전 — 그대로).
+        const old = (try Run.f(src, Selection.at(std.mem.indexOf(u8, src, "y */").?), four)).?;
+        defer allocator.free(old);
+        try testing.expectEqualStrings("x(); /* see http://x \n// y */\n", old);
+    }
+    {
+        const src = "a(); // note more\n";
+        var c = four;
+        c.literal_spans = &.{.{ .start = 5, .end = 17, .kind = .comment }};
+        const got = (try Run.f(src, Selection.at(std.mem.indexOf(u8, src, " more").?), c)).?;
+        defer allocator.free(got);
+        try testing.expectEqualStrings("a(); // note\n//  more\n", got);
+    }
+    {
+        const src = "p.replace(/\\/\\//g, \"/\")\n";
+        const re = std.mem.indexOf(u8, src, "/\\").?;
+        const q = std.mem.indexOf(u8, src, "\"/\"").?;
+        var c = four;
+        c.literal_spans = &.{ .{ .start = re, .end = re + 7, .kind = .string }, .{ .start = q, .end = q + 3, .kind = .string } };
+        const got = (try Run.f(src, Selection.at(q), c)).?;
+        defer allocator.free(got);
+        try testing.expectEqualStrings("p.replace(/\\/\\//g, \n    \"/\")\n", got);
     }
 }

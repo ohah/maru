@@ -88,15 +88,15 @@ pub fn defaultSpacesMode(grammar: language.Grammar, path: ?[]const u8) bool {
 /// 줄 중 많은 쪽을 고르고, 공백이면 이웃한 내용 줄끼리의 들여쓰기 차이를 세어 {2, 4, 6, 8, 3, 5, 7} 중 가장 많은 것을 쓴다(2 가 4 의 2/3
 /// 이상이면 2). 정렬처럼 보이는 차이는 세지 않는다.
 ///
-/// **기본값은 VS Code 의 것이다**(`insertSpaces` 참 · `tabSize` = 설정) — 동률일 때와 정렬 예외가 그 값을 읽는다. 우리 `Tab` 키는 탭 문자를
-/// 넣지만 이 추정은 안내선 간격에만 쓰므로(§5.1c 「다른 점」 ②) VS Code 와 같은 선을 긋는 쪽을 따른다.
+/// **기본값은 VS Code 의 것이다**(`insertSpaces` 참 · `tabSize` = 설정) — 동률일 때와 정렬 예외가 그 값을 읽는다. 이 추정은 안내선 간격이자
+/// 편집의 들여쓰기 단위(`Tab`·여러 줄 들여쓰기·Backspace 탭 스톱·Enter 의 한 단계·포맷 options — 문서 모델 §3.9a)라 VS Code 와 같은 값을 낸다.
 pub fn guess(src: anytype, default_tab: u16) Guess {
     return guessWith(src, default_tab, true);
 }
 
 /// `guess` 에 **언어별 기본**을 준다 — VS Code 는 몇 언어의 `insertSpaces` 기본을 바꾼다(`configurationDefaults`: `[go]` 거짓 · `[makefile]` 거짓 ·
 /// `[yaml]` 참·폭 2 — 확장 `package.json` 원문). 그 기본이 **동률**(탭 줄 = 공백 줄)과 **정렬 예외**를 가른다. 우리 번들 grammar 중 해당하는 것은
-/// Go 하나다(YAML·Makefile 은 grammar 없는 문서라 언어를 모른다 — §5.1c).
+/// Go 하나고, Makefile 은 grammar 가 없어 경로로 가른다(`defaultSpacesMode`). YAML 은 언어를 모른다(§5.1c).
 pub fn guessWith(src: anytype, default_tab: u16, default_spaces_mode: bool) Guess {
     const n = @min(src.count(), guess_line_limit);
     var tab_lines: usize = 0;

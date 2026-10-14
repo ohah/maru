@@ -17340,3 +17340,10 @@ Runtime 종료 tracker 정리에서 연결이 닫히는 경우는 기존 close �
 `ended_detach_stream`은 stream accounting 실패다. 첫 close 사유와 오류가 함께 보존되며
 `PartialFrame`은 기존대로 fail-close한다. 보존된 과거 로그의 이름 없는 purge 실패는
 이 계측으로 소급하여 `Stale` 또는 `PartialFrame`으로 확정하지 않는다.
+
+실제 daemon/PTY의 큰 초기 snapshot 수신 중 runtime 종료는
+`tools/test-runtime-end-pressure.py`로 재현한다. 수신을 마친 대조군은 공유 연결을 유지하지만,
+payload prefix를 받은 뒤 수신을 멈춘 상태에서 종료하면 `ended_purge_tracker/PartialFrame`으로
+공유 연결을 닫는다. 다른 runtime은 동일 PID로 유지되고 새 controller 연결에서 입력과
+화면 텍스트가 복구된다. 이는 현재 fail-close 동작의 재현이며 연결 유지 정책 변경이 아니다.
+CLI/socket 재attach와 GUI 자동 재접속은 구분한다. 과거 이름 없는 오류 값을 소급 확정하지 않는다.

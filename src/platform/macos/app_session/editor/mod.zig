@@ -9049,6 +9049,11 @@ pub fn refreshSendHelper(self: *AppSession) bool {
 /// 옮기기·새 선택)을 그대로 해야 한다. 보이는 상자의 패딩 띠는 `true`(삼키고 상자를 남긴다).
 pub fn sendHelperClick(self: *AppSession, x_px: f64, y_px: f64) bool {
     if (!self.chrome_host.send_helper.open) return false;
+    // 지난 프레임에 안 그려졌으면(다른 오버레이가 그릴 것이 있었다) 상자 밖과 같다 — 보이지 않는 상자 자리를 누른 클릭이 선택을 보내지 않게.
+    if (!self.editorHelperTakesPointer(.send_helper)) {
+        hideSendHelper(self);
+        return false;
+    }
     const items = sendHelperItems(self);
     const props = self.buildChromeProps();
     if (chrome.components.context_menu.itemAt(&self.chrome_host.send_helper, items, props, x_px, y_px) == null) {
@@ -48160,6 +48165,42 @@ test "NSH 보이는 상자의 패딩 띠를 누르면 소비하고 상자를 남
     try testing.expect(!h.fx.session.chrome_host.send_helper.open);
 }
 
+test "NSH 안 그려진 상자는 클릭을 받지 않는다 — 다른 오버레이가 그려진 프레임에서는 그 자리 클릭이 편집기로 간다" {
+    // 다른 오버레이가 그릴 것이 있으면 헬퍼는 그 프레임에 안 그려지는데 상태(`send_helper.open`)는 남는다(정책 — 오버레이가 닫히면 다시
+    // 떠야 한다). 클릭 판정은 그 상태만 봐서, **보이지 않는** 상자 자리를 누르면 선택이 에이전트로 보내졌다(2026-10-15 — #4471 적대적
+    // 검증). 자동완성·호버 상자의 `editorHelperTakesPointer` 와 같은 규율이다: 안 그려졌으면 상자 밖과 같다(내리고 흘려보낸다).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+    const on = helperHitPoint(h.fx.session) orelse return error.HelperNotOnScreen;
+    // 다른 오버레이(찾기 막대 — 포커스가 없어 모달이 아니다)가 그릴 것이 있는 프레임 — 헬퍼는 안 그려진다.
+    h.fx.session.chrome_host.find.show();
+    h.fx.session.chrome_host.find.input_focused = false;
+    if (try h.fx.session.buildChromeOverlayPrep()) |*prep| {
+        var pp = prep.*;
+        pp.deinit(allocator);
+    }
+    h.fx.session.last_agent_target = null;
+    try testing.expect(!sendHelperClick(h.fx.session, on.x, on.y)); // 흘려보낸다
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open); // 상자 밖과 같다 — 내린다
+    try testing.expect(h.fx.session.last_agent_target == null); // 보내지 않았다
+    // 대조: 다른 오버레이를 닫고 상자를 **그린** 프레임에서는 같은 자리 클릭이 상자의 것이다 — 보낸다(그렸다는 기록이 다시 선다).
+    h.fx.session.chrome_host.find.hide();
+    showSendHelper(h.fx.session, h.fx.term);
+    if (try h.fx.session.buildChromeOverlayPrep()) |*prep| {
+        var pp = prep.*;
+        pp.deinit(allocator);
+    }
+    try testing.expect(sendHelperClick(h.fx.session, on.x, on.y));
+    try testing.expect(h.fx.session.last_agent_target != null); // 보냈다
+}
+
 test "NSH 제품 경로 — 드래그로 고르고 떼면 뜨고, 그 상자를 누르면 보낸다" {
     // **여기가 「값은 맞는데 닿는 자리가 틀림」을 막는 판정자다.** 위 판정자들은 `showSendHelper` 와
     // `sendHelperClick` 을 직접 부르므로, 배선(선택 제스처의 뗌·`mouse` 의 라우팅 순서)이 통째로
@@ -62371,6 +62412,78 @@ test "FINDH5 확정 보류 중에 찾기를 열면(입력에 포커스) — 그 
     try testing.expect(!s.editor_completion.active);
     try testing.expectEqual(@as(u64, 1), s.editor_completion.accepted_on_timeout);
     try testing.expect(std.mem.indexOf(u8, h.content(), "  lazy_import\n") != null);
+}
+
+test "FINDH7 포커스 없는 찾기 막대를 누르면(패딩 띠 포함) — 클릭이 막대 뒤 편집기로 내려가지 않고 찾기 입력이 포커스를 받는다, 막대 밖은 편집기 것이다 (제품 경계)" {
+    // 2026-10-15(#4471 적대적 검증): 포커스 없는 찾기 막대는 모달이 아니라(`anyModalOpen`) 막대 위 클릭에 주인이 없었다 — 입력 줄을 눌러도 그 클릭이
+    // 막대 뒤 편집기로 내려가 캐럿이 가려진 글자로 옮겨졌다. 보이는 막대(`find.visibleContains` — 패딩 포함)는 막대의 것이다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h: HelperFx = .{ .fx = try PaneFixture.init(allocator) };
+    defer h.deinit(allocator);
+    const long = "int " ++ ("abcdefghij" ** 30) ++ ";\n"; // 긴 줄 — 막대(pane 오른쪽 위) 아래에도 글자가 있다
+    try h.init(allocator, long ++ long ++ long ++ long ++ long ++ long ++ "int y;\n");
+    const s = h.fx.session;
+    const find_at = try openUnfocusedFindBar(&h);
+    s.chrome_host.find.replace_open = true; // 두 줄 막대 — 아래 패딩 띠가 본문 글자 줄 위에 온다(FINDH6 과 같은 장면)
+    _ = try s.tick();
+    try h.frame();
+    const props = s.buildChromeProps();
+    const pad: i64 = props.shape.modal_padding_px;
+    try testing.expect(pad > 0 and s.chrome_host.find.replaceActive());
+    const band_x: f64 = @floatFromInt(find_at[0] + 4 * @as(i64, s.cell_width_px));
+    const band_y: f64 = @floatFromInt(find_at[1] + 2 * @as(i64, s.cell_height_px) + @divTrunc(pad, 2));
+    try testing.expect(chrome.components.find.visibleContains(&s.chrome_host.find, props, band_x, band_y));
+    try testing.expect(!chrome.components.find.contains(&s.chrome_host.find, props, band_x, band_y)); // 입력 줄이 아니라 패딩 띠
+    try testing.expect(hover_client.pointerOffset(h.term, band_x, band_y) != null); // 그 점은 본문 글자 위다(막대가 가린다)
+    const input_x: f64 = @floatFromInt(find_at[0]);
+    const input_y: f64 = @floatFromInt(find_at[1] + @divTrunc(@as(i64, s.cell_height_px), 2));
+    try testing.expect(chrome.components.find.contains(&s.chrome_host.find, props, input_x, input_y));
+    // 막대 밖 본문(첫 줄 왼쪽 끝 근처) — 편집기 것이다: 캐럿이 옮겨지고 찾기는 포커스를 안 받는다.
+    const caretOf = struct {
+        fn f(t: *Term) ?usize {
+            return if (t.rt.editor_selection) |sel| sel.focus else null;
+        }
+    }.f;
+    const caret_before = caretOf(h.term);
+    const body_x: f64 = @floatFromInt(h.leaf.x + 200);
+    const body_y: f64 = @floatFromInt(find_at[1] + 6 * @as(i64, s.cell_height_px));
+    try testing.expect(!chrome.components.find.visibleContains(&s.chrome_host.find, props, body_x, body_y));
+    s.mouse(1, body_x, body_y, 0, 0);
+    s.mouse(3, body_x, body_y, 0, 0);
+    try testing.expect(!s.chrome_host.find.input_focused);
+    const caret_body = caretOf(h.term);
+    try testing.expect(caret_body != null and !std.meta.eql(caret_body, caret_before)); // 판별력: 본문 클릭은 정말 캐럿을 옮긴다
+    // 패딩 띠·입력 줄 — 캐럿은 그대로, 찾기 입력이 포커스를 받는다.
+    // 띠 점은 바꾸기 줄 **아래** 패딩이라 가까운 줄(바꾸기)이, 검색어 줄은 검색어 입력이 포커스를 받는다(`find.focusAt`).
+    const Pt = struct { x: f64, y: f64, want: chrome.components.find.Focus };
+    for ([_]Pt{ .{ .x = band_x, .y = band_y, .want = .replace }, .{ .x = input_x, .y = input_y, .want = .find } }) |pt| {
+        s.chrome_host.find.input_focused = false;
+        s.mouse(1, pt.x, pt.y, 0, 0);
+        s.mouse(3, pt.x, pt.y, 0, 0);
+        try testing.expectEqual(caret_body, caretOf(h.term));
+        try testing.expect(s.chrome_host.find.input_focused);
+        try testing.expectEqual(pt.want, s.chrome_host.find.focus);
+    }
+    // 바꾸기 줄 — 바꾸기 입력이 포커스를 받는다.
+    s.chrome_host.find.input_focused = false;
+    const replace_y = input_y + @as(f64, @floatFromInt(s.cell_height_px));
+    try testing.expect(chrome.components.find.contains(&s.chrome_host.find, props, input_x, replace_y));
+    s.mouse(1, input_x, replace_y, 0, 0);
+    s.mouse(3, input_x, replace_y, 0, 0);
+    try testing.expect(s.chrome_host.find.input_focused);
+    try testing.expectEqual(chrome.components.find.Focus.replace, s.chrome_host.find.focus);
+    try testing.expectEqual(caret_body, caretOf(h.term));
+    // 본문에서 시작한 선택 드래그가 막대 위를 지나 거기서 놓이면 — 이동·뗌은 드래그 주인 것이다. 편집기 드래그는 제스처 주인이라
+    // `routeActivePointerGesture` 가 막대 판정보다 먼저 받는다(이 순서의 계약이다; 막대 쪽 가드 `gestureInProgress` 는 터미널 선택 드래그를
+    // 지킨다 — app_session 「포커스 없는 찾기 막대 위에서 터미널 선택 드래그를 놓아도 …」).
+    s.chrome_host.find.input_focused = false;
+    s.mouse(1, body_x, body_y, 0, 0);
+    try testing.expect(!s.pointerGestureIs(.none)); // 전제: 본문 누름이 드래그 제스처를 세운다
+    s.mouse(2, band_x, band_y, 0, 0);
+    s.mouse(3, band_x, band_y, 0, 0);
+    try testing.expect(s.pointerGestureIs(.none)); // 뗌이 드래그에 닿아 끝났다
+    try testing.expect(!s.chrome_host.find.input_focused); // 막대는 포커스를 가져가지 않았다
 }
 
 test "FINDH6 포커스 없는 찾기 막대가 가린 자리(아래 패딩)에 포인터가 머물면 — 그 아래 낱말의 호버를 묻지 않는다, 막대를 닫으면 같은 자리에서 묻는다 (제품 경계, §8.2b)" {

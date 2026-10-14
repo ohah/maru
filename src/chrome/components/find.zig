@@ -146,8 +146,16 @@ pub fn contains(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool 
         y >= @as(f64, @floatFromInt(lay.y)) and y < @as(f64, @floatFromInt(lay.y + @as(i32, @intCast(lay.ch * @as(u32, if (state.replaceActive()) 2 else 1)))));
 }
 
-/// **보이는 패널**(사방 `modal_padding_px` 만큼 키운 것 — rich lowering 이 그렇게 그린다) 안인가. 클릭 판정(`contains`)은 입력 줄만
-/// 보지만, 패널이 **가린 자리**를 묻는 쪽(그 아래 편집기 낱말의 호버)은 보이는 테두리까지 본다.
+/// 막대 위 한 점이 어느 입력 줄인가 — 바꾸기 줄이 살아 있고(`replaceActive`) 그 점이 둘째 줄 높이 이하면 `.replace`, 아니면 `.find`
+/// (위·옆 패딩 띠는 가까운 줄). 포커스 없는 막대를 눌러 포커스를 줄 때 쓴다.
+pub fn focusAt(state: *const State, p: props.ChromeProps, y: f64) Focus {
+    const lay = layout(state, p) orelse return .find;
+    if (!state.replaceActive()) return .find;
+    return if (y >= @as(f64, @floatFromInt(lay.y + @as(i32, @intCast(lay.ch))))) .replace else .find;
+}
+
+/// **보이는 패널**(사방 `modal_padding_px` 만큼 키운 것 — rich lowering 이 그렇게 그린다) 안인가. 막대 위 클릭의 주인 판정
+/// (`find_ops.diffFindPointer`·`unfocusedFindPointer`)과, 패널이 **가린 자리**를 묻는 쪽(그 아래 편집기 낱말의 호버)이 쓴다. 입력 줄만은 `contains`.
 pub fn visibleContains(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool {
     if (!state.open) return false;
     const lay = layout(state, p) orelse return false;

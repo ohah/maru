@@ -193,6 +193,7 @@ pub fn click(self: *AppSession, x: f64, y: f64) void {
             const start = @min(self.editor_trust_list.scroll.offset_y_px / layout.ch, total -| count);
             self.chrome_host.trust_picker.selected = start + row;
             accept(self);
+            self.swallow_multi_click = true; // 같은 겹클릭의 둘째 누름이 이동한 문서로 새지 않게
         },
     }
 }

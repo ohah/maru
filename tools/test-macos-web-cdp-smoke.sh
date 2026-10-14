@@ -67,7 +67,8 @@
 #                   잡히지 않은 예외는 (source:line) 을 단다. 사용자의 탭(확인 모달로 허락)을 다른 사이트 A → B(다른 출처 iframe 셋 — 적대
 #                   리뷰 2 회차 F2) 뒤 처음 읽으면 A 의 줄이 보이지 않고, 곧 C 로 옮긴 뒤(빠른 사슬 — 2 회차 F1) 다시 읽어도 C 에 늦게 온 A 의
 #                   unload 줄은 보이지 않는다 — 대조: 앞 사이트에서 먼저 읽은 탭은 그 unload 줄을 이동 뒤에도 본다(줄은 와 있었다). 에이전트가
-#                   연 탭은 태어날 때 묶인다(3 회차 F1): 오류를 남기고 곧 다른 사이트로 옮기는 페이지의 그 오류가 첫 읽기에 있다
+#                   연 탭은 태어날 때 묶인다(3 회차 F1): 오류를 남기고 곧 다른 사이트로 옮기는 페이지의 그 오류가 첫 읽기에 있다. 떠날 때 300 줄을
+#                   남기는 페이지를 떠나면 앞 문서 양동이를 넘은 줄은 「from the previous page」 표지로 남는다(4 회차 A)
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -198,6 +199,8 @@ printf '<!doctype html><title>redir</title><script>console.error("con-redir-erro
 # 아래에서 같은 서버를 포트 셋에 더 띄워 만든다 — 셋이면 전에는 앞 주 프레임 출처를 밀어냈다).
 printf '<!doctype html><title>late</title><script>console.log("con-late-token");addEventListener("pagehide",function(){console.log("con-late-pagehide")});addEventListener("unload",function(){var t=Date.now(),k=0;while(Date.now()-t<400){if(Date.now()-t>=k*100){console.log("con-late-unload-"+(k*100));k++}}console.log("con-late-unload-end")})</script>late' > "$root/www/late.html"
 printf '<!doctype html><title>f</title>f' > "$root/www/f.html"
+# W9c① 적대 리뷰 4 회차 A: 떠날 때(pagehide) 300 줄을 남기는 문서 — 앞 문서 양동이(버스트 80)를 넘는 줄은 버려지고 그 수가 표지로 남는다.
+printf '<!doctype html><title>unflood</title><script>console.log("con-unflood-head");addEventListener("pagehide",function(){for(var i=0;i<300;i++)console.log("con-unflood-"+i)})</script>unflood' > "$root/www/unflood.html"
 printf '<!doctype html><title>con3</title><script>console.log("con3-head")</script><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe>' "$((port + 1))" "$((port + 2))" "$((port + 3))" > "$root/www/con3.html"
 # W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
 printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
@@ -840,6 +843,14 @@ sleep 1
 sleep 1
 "\$cli" browser console --surface "\$ctl" > "\$out/cn-ctl-after" 2>&1; echo "rc=\$?" >> "\$out/cn-ctl-after"
 "\$cli" browser close --surface "\$ctl" > /dev/null 2>&1 || true
+# 적대 리뷰 4 회차 A: 에이전트가 연 탭(태어날 때 묶인다)에서 떠날 때 300 줄을 남기는 문서를 떠난다 — 넘친 앞 문서의 줄은 표지로 남는다(전에는 세지 않았다).
+"\$cli" browser open --url "http://localhost:$port/unflood.html" > "\$out/cn-uf-open" 2>&1
+uf=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-uf-open")
+sleep 1
+"\$cli" browser navigate --surface "\$uf" "http://127.0.0.1:$port/con.html?uf" > "\$out/cn-uf-nav" 2>&1
+sleep 1.5
+"\$cli" browser console --surface "\$uf" > "\$out/cn-uf" 2>&1; echo "rc=\$?" >> "\$out/cn-uf"
+"\$cli" browser close --surface "\$uf" > /dev/null 2>&1 || true
 # 적대 리뷰 3 회차 F1: 에이전트가 연 탭은 태어날 때 묶인다 — 오류를 남기고 곧 다른 사이트로 옮긴 페이지의 그 오류가 첫 읽기에 있다(전에는 첫 읽기가
 # 지금 문서의 줄만 보이고 앞 줄을 지웠다).
 "\$cli" browser open --url "http://localhost:$port/redir.html" > "\$out/cn-open" 2>&1
@@ -1090,6 +1101,8 @@ grep -q '^alert tab=[0-9]* token=[0-9]* cause=unknown may_answer=no' "$out/dg-us
 grep -q '^rc=0$' "$out/cn-ctl-first" && grep -q '^\[log\] con-secret-token$' "$out/cn-ctl-first" && grep -q 'con-secret-unload' "$out/cn-ctl-after" || fail "control: a tab read on the first site did not show its line, or after moving to another site did not show the old page's unload line — the leak check below would prove nothing ($(tr '\n' ' ' < "$out/cn-ctl-first") · $(tr '\n' ' ' < "$out/cn-ctl-after"))"
 for k in 1 2 3; do grep -q 'GET /f.html' "$root/http-f$k.log" || fail "the page with three cross-origin iframes did not load the iframe on port +$k — the check below would prove nothing ($(tr '\n' ' ' < "$out/cn-u-nav2"))"; done
 grep -q '^rc=0$' "$out/cn-u-first" && grep -qxF '[log] con3-head' "$out/cn-u-first" && grep -q '^rc=0$' "$out/cn-u-second" && grep -qxF '[log] con3-head' "$out/cn-u-second" && grep -qxF '[log] con-log-uc' "$out/cn-u-second" && ! grep -q 'con-late' "$out/cn-u-first" "$out/cn-u-second" || fail "on a user's tab, the first read after A, B with three cross-origin iframes, or the read after a fast move on to C, showed A's lines ($(tr '\n' ' ' < "$out/cn-u-first") / $(tr '\n' ' ' < "$out/cn-u-second") · nav $(tr '\n' ' ' < "$out/cn-u-nav") $(tr '\n' ' ' < "$out/cn-u-nav2") $(tr '\n' ' ' < "$out/cn-u-nav3"))"
+uf_lines=$(grep -c '^\[log\] con-unflood-[0-9]' "$out/cn-uf" || true)
+grep -q '^rc=0$' "$out/cn-uf" && grep -qxF '[log] con-unflood-head' "$out/cn-uf" && grep -qxF '[log] con-log-uf' "$out/cn-uf" && grep -q '^\[maru\] [0-9]* console messages from the previous page were dropped' "$out/cn-uf" && [ "$uf_lines" -ge 3 ] && [ "$uf_lines" -lt 300 ] || fail "on a tab the agent opened, 300 lines a page logged while leaving were not cut with a previous-page dropped marker ($uf_lines lines · $(grep -v '^\[log\] con-unflood-[0-9]' "$out/cn-uf" | tr '\n' ' ' | cut -c1-400))"
 grep -q '^rc=0$' "$out/cn-first" && grep -qxF '[error] con-redir-error' "$out/cn-first" || fail "on a tab the agent opened, the first read lost the error its first page logged before moving to another site ($(tr '\n' ' ' < "$out/cn-first"))"
 for want in '[log] con-log-a' '[log] con-info' '[warn] con-warn' '[error] con-error' '[debug] con-debug'; do
     grep -qxF "$want" "$out/cn-first" || fail "console did not list \"$want\" ($(tr '\n' ' ' < "$out/cn-first"))"
@@ -1100,7 +1113,7 @@ flood_lines=$(grep -c '^\[log\] con-flood-' "$out/cn-flood" || true)
 grep -q '^\[maru\] [0-9]* console messages were dropped' "$out/cn-flood" && [ "$flood_lines" -ge 100 ] && [ "$flood_lines" -lt 3000 ] || fail "a flood of 3000 lines was not cut with a maru dropped marker ($flood_lines flood lines · $(grep '^\[maru\]' "$out/cn-flood" | tr '\n' ' '))"
 grep -q '^\[error\] Uncaught Error: con-uncaught (http://127.0.0.1:[0-9]*/con.html?b:[0-9]*)$' "$out/cn-uncaught" || fail "an uncaught error did not come with its source and line ($(grep -i 'uncaught' "$out/cn-uncaught" | tr '\n' ' '))"
 grep -q '^rc=0$' "$out/cn-alert" && grep -qxF '[log] con-before-alert' "$out/cn-alert" && grep -q '^alert ' "$out/cn-al-list" || fail "console did not answer while the page showed an alert ($(tr '\n' ' ' < "$out/cn-alert" | cut -c1-300) · $(tr '\n' ' ' < "$out/cn-al-list"))"
-echo "PASS w9c-console: levels (info as log), a click's line is in the next read, lines are kept across navigation after the first read, --clear empties, a 3000-line flood keeps $flood_lines lines with a dropped marker, an uncaught error carries source:line, console answers during an alert, on a user's tab the first read after A, B with three cross-origin iframes shows none of A's lines, nor does a read after a fast move on to C (control: the old page's unload line did arrive), and on a tab the agent opened the first read keeps the error of a page that moved to another site"
+echo "PASS w9c-console: levels (info as log), a click's line is in the next read, lines are kept across navigation after the first read, --clear empties, a 3000-line flood keeps $flood_lines lines with a dropped marker, an uncaught error carries source:line, console answers during an alert, on a user's tab the first read after A, B with three cross-origin iframes shows none of A's lines, nor does a read after a fast move on to C (control: the old page's unload line did arrive), on a tab the agent opened the first read keeps the error of a page that moved to another site, and 300 lines a page logged while leaving keep $uf_lines lines with a previous-page dropped marker"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

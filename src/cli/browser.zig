@@ -1657,17 +1657,31 @@ fn writePageText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8, qu
 
 /// 여러 줄일 수 있는 페이지 글(대화상자 W9c②·콘솔 W9c①) — 줄바꿈을 ` ⏎ ` 로, 탭을 공백으로 보이게 바꾼 뒤 걸러 낸다(`displaySafe` 는 둘을
 /// 지운다 — 두 줄·두 낱말이 붙어 읽혔다, W9c① 적대 리뷰 3 회차 F2). 진짜 줄바꿈은 터미널에 가지 않는다(다음 항목을 흉내 내지 못하게).
+/// U+2028·U+2029·NEL(U+0085)도 줄바꿈이다 — sidecar·wire 를 지나 `displaySafe` 가 지워 낱말이 붙었다(4 회차 C).
 fn writeLinesText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8, quoted: bool) !void {
     var lines: std.ArrayList(u8) = .empty;
     defer lines.deinit(gpa);
     var i: usize = 0;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '\r' or text[i] == '\n') {
-            if (text[i] == '\r' and i + 1 < text.len and text[i + 1] == '\n') i += 1;
+    while (i < text.len) {
+        const n = lineBreakLen(text[i..]);
+        if (n != 0) {
             lines.appendSlice(gpa, " ⏎ ") catch return w.writeAll("…");
-        } else lines.append(gpa, if (text[i] == '\t') ' ' else text[i]) catch return w.writeAll("…");
+            i += n;
+            continue;
+        }
+        lines.append(gpa, if (text[i] == '\t') ' ' else text[i]) catch return w.writeAll("…");
+        i += 1;
     }
     try writePageText(gpa, w, lines.items, quoted);
+}
+
+/// `rest` 가 줄바꿈으로 시작하면 그 바이트 수(CRLF 2, CR·LF 1, U+2028·U+2029 3, NEL 2), 아니면 0.
+fn lineBreakLen(rest: []const u8) usize {
+    if (std.mem.startsWith(u8, rest, "\r\n")) return 2;
+    if (rest[0] == '\r' or rest[0] == '\n') return 1;
+    if (std.mem.startsWith(u8, rest, "\u{2028}") or std.mem.startsWith(u8, rest, "\u{2029}")) return 3;
+    if (std.mem.startsWith(u8, rest, "\u{85}")) return 2;
+    return 0;
 }
 
 /// 대화상자 글(W9c②) — 여러 줄을 보이게 바꿔 JSON 으로 인용한다.
@@ -3661,4 +3675,11 @@ test "W9c① 적대 리뷰 3 회차 재현 F2: 콘솔 줄의 줄바꿈·탭은 `
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "1Received") == null);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "2at") == null);
     try testing.expectEqualStrings("[error] Expected: 1 ⏎ Received: 2 at line 3\n[log] a ⏎ [error] fake[2J\n", w.buffered());
+}
+
+test "W9c① 적대 리뷰 4 회차 재현 C: U+2028·U+2029·NEL(U+0085) 도 ` ⏎ ` 로 보인다 — 전에는 `displaySafe` 가 지워 낱말이 붙었다(`[log] abcd`)" {
+    var buf: [512]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"log\",\"text\":\"a\\u2028b\\u2029c\\u0085d\"}]}}", .console, &w);
+    try testing.expectEqualStrings("[log] a ⏎ b ⏎ c ⏎ d\n", w.buffered());
 }

@@ -1112,7 +1112,8 @@ pub const ConsoleLevel = enum(u8) {
     debug = 4,
 };
 
-/// 콘솔 줄 하나(W9c①). 닫힌 필드: 버린 수만 싣는 frame(`has_entry` 거짓)은 수준 log·빈 글·`docs_back` 0·버린 수가 있다.
+/// 콘솔 줄 하나(W9c①). 닫힌 필드: 버린 수만 싣는 frame(`has_entry` 거짓)은 수준 log·빈 글·`docs_back` 0·버린 수(셋 중 하나)가 있다.
+/// `dropped_old_back` 은 `dropped_old` 가 0 이 아닐 때만, 그때는 반드시 0 이 아니다.
 pub const ConsoleMessage = struct {
     browser: BrowserId,
     level: ConsoleLevel = .log,
@@ -1125,6 +1126,11 @@ pub const ConsoleMessage = struct {
     /// 이 줄 앞에 sidecar 가 버린 줄 수(양동이 초과) — 오류·경고와 그 밖. 보낸 뒤 sidecar 는 0 으로 되돌린다.
     dropped_errors: u32 = 0,
     dropped_other: u32 = 0,
+    /// 앞 문서의 줄(`docs_back` ≥ 1)을 버린 수(두 갈래 함께 — 4 회차 A: 전에는 세지 않아 묶인 쪽이 빠진 줄을 몰랐다). 새 문서의 수와 따로다 —
+    /// 거기에 섞이면 처음 읽는 쪽에게 앞 사이트의 양이 드러난다(2 회차).
+    dropped_old: u32 = 0,
+    /// 그 버린 줄 가운데 가장 앞 문서의 `docs_back` — maru 는 표지를 그 문서에서 나온 줄로 둔다(보이는 규칙이 줄과 같게).
+    dropped_old_back: u8 = 0,
     has_entry: bool = true,
     /// 대화상자 글 규칙(탭·줄바꿈만 — `fields.checkConsoleText`)에 상한만 `max_console_text_bytes`.
     text: []const u8 = "",

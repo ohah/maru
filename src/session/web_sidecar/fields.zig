@@ -198,12 +198,14 @@ pub fn checkConsoleText(text: []const u8) Error!void {
     }
 }
 
-/// 콘솔 줄의 닫힌 필드(W9c①) — encode 와 decode 가 함께 지난다. 버린 수만 싣는 frame 은 수준 log·빈 글·`docs_back` 0·버린 수 있음.
+/// 콘솔 줄의 닫힌 필드(W9c①) — encode 와 decode 가 함께 지난다. 앞 문서의 버린 수와 그 `docs_back` 은 함께 0 이거나 함께 0 이 아니다
+/// (4 회차 A). 버린 수만 싣는 frame 은 수준 log·빈 글·`docs_back` 0·버린 수(셋 중 하나) 있음.
 pub fn checkConsoleMessage(value: message.ConsoleMessage) Error!void {
     try checkConsoleText(value.text);
+    if ((value.dropped_old == 0) != (value.dropped_old_back == 0)) return error.InvalidConsole;
     if (value.has_entry) return;
     if (value.level != .log or value.text.len != 0 or value.docs_back != 0) return error.InvalidConsole;
-    if (value.dropped_errors == 0 and value.dropped_other == 0) return error.InvalidConsole;
+    if (value.dropped_errors == 0 and value.dropped_other == 0 and value.dropped_old == 0) return error.InvalidConsole;
 }
 
 pub fn writeConsoleMessage(cursor: *Cursor, value: message.ConsoleMessage) Error!void {
@@ -213,6 +215,8 @@ pub fn writeConsoleMessage(cursor: *Cursor, value: message.ConsoleMessage) Error
     try cursor.writeByte(value.docs_back);
     try cursor.writeU32(value.dropped_errors);
     try cursor.writeU32(value.dropped_other);
+    try cursor.writeU32(value.dropped_old);
+    try cursor.writeByte(value.dropped_old_back);
     try cursor.writeByte(@intFromBool(value.has_entry));
     try cursor.writeU32(@intCast(value.text.len));
     try cursor.writeBytes(value.text);
@@ -224,6 +228,8 @@ pub fn readConsoleMessage(cursor: *ReadCursor) Error!message.ConsoleMessage {
     const docs_back = try cursor.readByte();
     const dropped_errors = try cursor.readU32();
     const dropped_other = try cursor.readU32();
+    const dropped_old = try cursor.readU32();
+    const dropped_old_back = try cursor.readByte();
     const has_entry = try readBool(cursor);
     const len = try cursor.readU32();
     // 상한은 본문을 읽기 전에 — 길이만으로 거절할 수 있다.
@@ -234,6 +240,8 @@ pub fn readConsoleMessage(cursor: *ReadCursor) Error!message.ConsoleMessage {
         .docs_back = docs_back,
         .dropped_errors = dropped_errors,
         .dropped_other = dropped_other,
+        .dropped_old = dropped_old,
+        .dropped_old_back = dropped_old_back,
         .has_entry = has_entry,
         .text = try cursor.readBytes(len),
     };

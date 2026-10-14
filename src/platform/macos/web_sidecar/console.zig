@@ -1,6 +1,7 @@
 //! 페이지 콘솔(W9c① — CEF `display.on_console_message`, docs/plans/web-osr-backend.md W9c). 줄마다 탭의 양동이(`console_gate`)를
-//! **글로 바꾸기 전에** 보고, 지나면 앞부분만 바꿔 다듬어 `console_message` 로 보낸다. 넘쳐 버린 줄은 수만 세어 다음 줄에 싣거나,
-//! 쏟아짐이 그치면 `flush_delay_ms` 뒤 버린 수만 실은 frame 으로 보낸다(task 하나 — 브라우저가 몇이든).
+//! **글로 바꾸기 전에** 보고, 지나면 앞부분만 바꿔 다듬어 `console_message` 로 보낸다. 넘쳐 버린 줄은 수만 세어(앞 문서의 줄은 따로 —
+//! 가장 앞 문서의 `docs_back` 과 함께) 다음 줄에 싣거나, 쏟아짐이 그치면 `flush_delay_ms` 뒤 버린 수만 실은 frame 으로 보낸다(task 하나 —
+//! 브라우저가 몇이든). 새 문서의 시작·오류 페이지 앞에도 먼저 보낸다 — 실린 `docs_back` 은 보낼 때의 문서에서 센 것이라 maru 의 링과 맞다.
 //!
 //! DevTools(`Runtime.enable`)를 쓰지 않는다 — 페이지가 알아챌 수 있는 봇 신호라 W9a·W5c 가 버렸다. CEF 는 줄의 프레임을 주지 않아
 //! iframe(다른 출처도)·worker 의 줄도 온다(WebKit 탭은 주 프레임만 — 작성자 선택, 문서에 적었다). 처리기는 0 을 돌려준다 — Chromium 의
@@ -50,7 +51,8 @@ pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_brows
         if (gate.originOf(src.?, &origin)) docs_back = entry.console.recent.docsBack(origin.slice(), now);
     }
     const old_document = docs_back != 0;
-    if (!entry.console.admit(&global, class, old_document, now)) {
+    const units: usize = if (message == null) 0 else message.*.length;
+    if (!entry.console.admit(&global, class, docs_back, gate.textBound(units), now)) {
         postFlush();
         return 0;
     }
@@ -72,9 +74,11 @@ fn send(entry: *registry_mod.Entry, template: protocol.message.ConsoleMessage) v
     var msg = template;
     msg.dropped_errors = entry.console.dropped[0];
     msg.dropped_other = entry.console.dropped[1];
+    msg.dropped_old = entry.console.dropped_old;
+    msg.dropped_old_back = entry.console.dropped_old_back;
     const t0 = nowMs();
     browsers.state.writer.send(.{ .console_message = msg }) catch return;
-    entry.console.dropped = .{ 0, 0 };
+    entry.console.clearDrops();
     const t1 = nowMs();
     if (t1 -| t0 >= gate.blocked_send_ms) {
         for (&browsers.state.registry.slots) |*slot| if (slot.*) |*e| e.console.recent.sendBlocked(t1);

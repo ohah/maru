@@ -7185,7 +7185,9 @@ pub fn build(b: *std.Build) void {
             // `pump:` 12 — 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위·
             // 울타리 든 해석) 8, tick 펌프는 물러서고 동기 적용 펌프는 기다린다(IC4b) 2, 협상한 Client 는 external 모드 거부(IC3b-2c-1) 1,
             // 연결 둘의 표가 섞이지 않음(IC3b-2c-2) 1. `connect:` 에 GUI 제품 진입점의 광고·GUI 가 아닌 프로필 거부(IC6a) 1.
-            // `pump:` 에 적용한 배치의 hwm 정리가 release 를 쓰고 채널을 비움(IC7a) 1.
+            // `pump:` 에 적용한 배치의 hwm 정리가 release 를 쓰고 채널을 비움(IC7a) 1. 수립이 비동기가 되며(IC7b) abandon 왕복
+            // 실패·abandon 몫 판정자 둘이 빠지고 「수립 중 펌프가 bind_ack 뒤 세그먼트를 받음」·「채널을 연 뒤 연결 실패에도 새지
+            // 않음」 2 가 들었다.
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);

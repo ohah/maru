@@ -649,13 +649,17 @@ IC6 머지 뒤 적대적 재검증(4 명, HIGH 0)이 남긴 MEDIUM 넷을 고친
   tick 정리 단계 안에서 부르는지 잰다.
 - 계약 §3.2(관측 모으기·거두기·모달·한계·이유)·§6(release 쓰는 자리)을 갱신했다.
 
-#### IC7b — 채널 수립을 비동기로 (미착수)
+#### IC7b — 채널 수립을 비동기로 (완료)
 
-- connect 가 `bind_ack` 를 기다리지 않는다(진입점 둘 다 — 재접속 worker 의 예산도 같은 대기를 쓴다). 「수립 중」 상태를 두고
-  `pumpImageChannel` 의 조기 반환 한 곳에서 `bind_ack` 를 전용 recvmsg 로 읽은 뒤 비운다 — 기존 drain 으로 읽으면 fd 없는 첫
-  메시지가 계약 위반으로 poison 된다. 먼저 읽고 마감을 본다. 마감은 단조 시계 정수 하나, 값은 token 만료(10 초)에 여유를 더한다.
-  비동기 경로에서는 abandon 을 보내지 않는다(token 은 늦은 hello 의 EOF 나 만료로 풀린다). host 는 바꾸지 않는다.
-- 계약 §3.1 「attach 는 언제나 채널 상태가 정해진 뒤에 온다」, Channel 필드 수 단언·다이제스트·enum 순서·글자 판정자를 함께 고친다.
+- connect 는 채널 connect·채널 hello 송신까지만 하고 `bind_ack` 를 기다리지 않는다 — 상태 `binding`(enum 끝에 붙였다). 진입점
+  둘 다다. 메인 스레드 경로(새 탭·복원)만 바꾸면 재접속 worker 의 예산이 같은 대기를 계속 쓰고 판정자가 두 갈래로 나뉜다.
+- 수립은 펌프 본문(`pumpFencedImageChannel`) 몫이다. 수신 잠금 안에서 `client_image_segments.readBindAck` 로 `bind_ack` 의 남은
+  바이트만 읽고(fd 가 붙어 오면 받은 fd 를 닫고 거부), 다 받으면 같은 잠금 안에서 이어 비운다. 기존 drain 으로 읽으면 fd 없는 첫
+  메시지가 계약 위반으로 poison 된다. 먼저 읽고 그다음 마감을 본다. 마감(`bind_wait_ns`)은 token 만료 + 2 초, 단조 시계 정수 하나다.
+- abandon 을 보내지 않는다 — 기다리지 않으니 abandon 응답과 첫 RPC 가 섞일 일도 없다. token 은 늦게 처리된 채널 hello 의 EOF 나
+  만료로 풀린다. abandon 몫 예산(`bindDeadline`)과 「이유 `no_budget`」이 사라지고 `connect_failed` 가 따로 섰다.
+- host 는 바꾸지 않았다 — 입양 전 이미지는 미루고, 묶는 순간 용량 사건이 미룬 stream 을 깨운다.
+- Client 지문(`Channel` 필드 5 개)과 계약 §3.1·§3.2 를 고쳤다.
 
 #### IC7c — 공유 메모리 생성 실패 재시도 (미착수)
 

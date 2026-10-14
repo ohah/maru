@@ -6,13 +6,16 @@
 //!   이미지 채널 리더·세그먼트 표·resolver 를 설치하는 GUI 제품 호출자만 넘긴다(IC6). 그 전에는 판정자만 넘긴다.
 //! - hello_ack 에 `image_shm` 이 없으면 host 가 이미지 채널을 모른다(또는 제공하지 않는다) — 미협상, 형식은 `image_blob`.
 //! - `image_shm` 은 있는데 token 이 없으면 「자리 없음」 — 협상은 됐고 채널은 없다(`unavailable`).
-//! - token 이 있으면 채널을 열어 `bind_ack` 를 기다린다. 실패는 **연결 실패로 올라가지 않는다** — 주 연결을 `unavailable` 로
-//!   돌려준다. 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못 붙는다」로 읽고 host 를 하나 더 띄운다.
-//!   - 거부(`ImageChannelUnavailable` — 채널 hello 를 보낸 뒤의 EOF·`bind_ack` 형식 오류): host 가 응답하고 있다는 뜻이라
-//!     abandon 을 응답까지 읽어 token 을 바로 돌려준다.
-//!   - 시간 초과·연결 단계 실패(`ImageChannelTimedOut`): host owner 가 밀려 있을 수 있다 — listen backlog 가 차면 커널이 곧바로
-//!     ECONNREFUSED 를 준다(실측). 같은 owner 가 abandon 에도 늦게 답해 그 왕복이 연결을 실패시킬 수 있으므로 abandon 없이 채널
-//!     소켓만 닫는다. token 은 host 의 만료로, 늦게 묶인 채널은 EOF 로 풀린다.
+//! - token 이 있으면 채널을 열어 채널 hello 를 보내고 **기다리지 않는다**(`start` — 상태 `binding`). `bind_ack` 는 연결의 채널
+//!   펌프가 남은 바이트만큼 읽는다(`advanceBind`). 펌프는 먼저 읽고 그다음 마감(`bind_wait_ns`)을 본다. 실패는 **연결 실패로
+//!   올라가지 않는다** — 주 연결은 `unavailable` 로 간다. 연결 실패로 올리면 앱 시작 경로가 「이 host 에 못 붙는다」로 읽고 host 를
+//!   하나 더 띄운다.
+//!   - 연결 단계 실패(`ConnectFailed`): listen backlog 가 차면 커널이 곧바로 ECONNREFUSED 를 준다(실측) — host owner 가 밀려 있을
+//!     수 있다.
+//!   - hello 송신 실패·채널 EOF·`bind_ack` 형식 오류: 거부.
+//!   - 마감까지 `bind_ack` 가 없음: 시간 초과 — 채널 소켓만 닫는다.
+//!   어느 쪽도 abandon 을 보내지 않는다 — token 은 늦게 처리된 채널 hello 의 EOF 나 host 의 만료(10 초)로 풀린다. 기다리지 않으니
+//!   abandon 응답과 첫 RPC 가 섞일 일도, 메인 스레드·재접속 예산이 `bind_ack` 를 기다릴 일도 없다.
 //!
 //! 채널 소켓은 `client_deadline.connectUnixUntil` 로 만든다 — CLOEXEC·NONBLOCK·SO_NOSIGPIPE 가 켜진다. 앱은 SIGPIPE 를 전역으로
 //! 잡지 않으므로 SO_NOSIGPIPE 가 없으면 host 가 닫은 채널에 release 를 쓰는 순간 프로세스가 signal 13 으로 죽는다. 판정자는 소켓
@@ -26,6 +29,8 @@ const posix = std.posix;
 const framing = @import("framing.zig");
 const client_deadline = @import("client_deadline.zig");
 const image_channel_wire = @import("image_channel_wire.zig");
+const image_channel_tokens = @import("image_channel_tokens.zig");
+const client_image_segments = @import("client_image_segments.zig");
 
 /// connect 함수에 넘기는 광고 여부. `client_kind` 로 정하지 않는다 — `.gui` 로 붙지만 resolver 없이 조립기를 쓰는 소비자가 있다.
 pub const Request = enum { off, advertise };
@@ -37,6 +42,9 @@ pub const State = enum(u8) {
     bound,
     /// 협상했지만 채널이 없다(자리 없음·수립 실패·채널 상실) — host 는 placement 를 빼고 보낸다(§3.2).
     unavailable,
+    /// 협상했고 채널 hello 를 보냈다 — `bind_ack` 를 기다린다(§3.1). host 는 입양 전에는 이 연결의 이미지를 미루고, 묶는 순간
+    /// 미룬 stream 을 다시 투영한다. 끝에 붙인다 — canonical 골든의 tag 가 밀리지 않게.
+    binding,
 };
 
 /// `Client` 가 쥐는 이미지 채널의 끝(fd)과 상태. 받은 세그먼트 fd 는 IC3b 의 세그먼트 표(따로 둔 Client 필드)가 쥔다(§6). `Client` 이동은 구조체째 옮기고 남은
@@ -44,6 +52,11 @@ pub const State = enum(u8) {
 pub const Channel = struct {
     fd: c.fd_t = -1,
     state: State = .not_negotiated,
+    /// 수립 중에 받은 `bind_ack` 바이트 수와 그 바이트 — 펌프마다 남은 만큼만 읽는다.
+    bind_ack_got: u8 = 0,
+    bind_ack: [image_channel_wire.bind_ack_len]u8 = @splat(0),
+    /// 수립 마감(단조 시계 ns). `binding` 에서만 뜻이 있다.
+    bind_expires_ns: i64 = 0,
 
     pub fn deinit(self: *Channel) void {
         if (self.fd >= 0) _ = c.close(self.fd);
@@ -56,13 +69,14 @@ pub const Channel = struct {
 pub const UnavailableReason = enum {
     /// hello_ack 에 token 이 없다 — host 의 연결·host 자리가 찼다.
     no_seat,
-    /// 바깥 deadline 이 abandon 몫밖에 안 남아 채널을 열지 않았다.
-    no_budget,
+    /// 채널 connect 가 실패했다(listen backlog 가 찼거나 경로가 없다).
+    connect_failed,
     /// 세그먼트 표를 잡지 못했다(할당 실패).
     no_table,
-    /// host 가 채널을 거부했다(채널 hello 뒤 EOF·`bind_ack` 형식 오류) — abandon 을 응답까지 읽었다.
+    /// host 가 채널을 거부했다(hello 송신 실패·채널 hello 뒤 EOF·`bind_ack` 형식 오류).
     refused,
-    /// `bind_ack` 시간 초과 또는 채널 연결 단계 실패 — host owner 가 밀려 있을 수 있다.
+    /// 마감(`bind_wait_ns`)까지 `bind_ack` 가 없었거나 채널 hello 송신이 시간을 넘겼다 — host owner 가 밀려 있을 수 있다. owner 가
+    /// token 만료(10 초)를 넘겨 밀리면 늦게 처리된 채널 hello 는 모르는 token 으로 닫혀 `refused` 로 보인다.
     timed_out,
     /// 묶인 채널을 펌프가 잃었다.
     lost,
@@ -81,12 +95,20 @@ pub fn noteUnavailable(host_id: u128, reason: UnavailableReason) void {
     std.log.warn("session host image channel unavailable: host={x:0>32} reason={s} — images are omitted on this connection until reconnect", .{ host_id, @tagName(reason) });
 }
 
-/// `bind_ack` 대기에서 abandon 왕복 몫으로 남겨 두는 예산(§3.2). 응답 한 frame 이라 짧다.
-pub const abandon_reserve_ns: i128 = 500 * std.time.ns_per_ms;
-/// deadline 이 없는 블로킹 connect 경로가 채널 수립에 쓰는 예산 — 그 경로의 read timeout(5 초)과 같다.
+/// deadline 이 없는 블로킹 connect 경로가 채널 connect·hello 송신에 쓰는 예산 — 그 경로의 read timeout(5 초)과 같다.
 pub const blocking_budget_ns: i128 = 5 * std.time.ns_per_s;
+/// `bind_ack` 를 기다리는 마감. 기다림이 펌프 몫이라 넉넉히 준다 — host 의 token 만료(10 초)를 넘기면 늦게 처리된 채널 hello 는
+/// 모르는 token 으로 닫히므로(거부) 그보다 조금 길면 충분하다.
+pub const bind_wait_ns: i64 = @as(i64, @intCast(image_channel_tokens.token_ttl_ns)) + 2 * std.time.ns_per_s;
 
-pub const OpenError = error{ ImageChannelUnavailable, ImageChannelTimedOut };
+pub const StartError = error{
+    /// 채널 connect 가 실패했다 — host 의 응답이 아니다.
+    ConnectFailed,
+    /// 채널 hello 를 보내지 못했다(EPIPE 등 — host 가 닫았다).
+    HelloFailed,
+    /// 채널 hello 송신이 deadline 안에 끝나지 않았다 — host owner 가 밀려 있다.
+    HelloTimedOut,
+};
 
 pub const OfferError = error{ OutOfMemory, MalformedHelloAck };
 
@@ -132,14 +154,6 @@ pub fn parseOffer(allocator: std.mem.Allocator, payload: []const u8) OfferError!
     return .{ .offered = true, .token = token };
 }
 
-/// `bind_ack` 대기 예산 — 바깥 deadline 에서 abandon 몫을 뺀 것. 남는 것이 없으면 null(채널을 열지 않는다).
-pub fn bindDeadline(outer: client_deadline.AbsoluteDeadline) ?client_deadline.AbsoluteDeadline {
-    const expires = std.math.sub(i128, outer.expires_at_ns, abandon_reserve_ns) catch return null;
-    var inner = outer;
-    inner.expires_at_ns = expires;
-    return if (inner.remainingNs() > 0) inner else null;
-}
-
 /// 채널 hello payload — `role` 을 맨 앞에 둔다(host 는 다른 필드보다 먼저 본다).
 pub fn helloPayload(buf: []u8, token: u128, wire_major: u16) error{NoSpaceLeft}![]u8 {
     const text = image_channel_wire.formatToken(token);
@@ -150,41 +164,53 @@ pub fn helloPayload(buf: []u8, token: u128, wire_major: u16) error{NoSpaceLeft}!
     );
 }
 
-/// 두 번째 연결을 열어 채널 hello 를 보내고 `bind_ack` 를 받는다. 성공하면 논블로킹 채널 fd 를 돌려준다(호출자 소유).
-pub fn open(
+/// 두 번째 연결을 열어 채널 hello 를 보낸다 — `bind_ack` 는 기다리지 않는다(펌프가 `advanceBind` 로 읽는다). 성공하면 논블로킹
+/// 채널 fd 를 돌려준다(호출자 소유). `deadline` 은 connect 와 hello 송신에만 쓴다.
+pub fn start(
     allocator: std.mem.Allocator,
     ops: client_deadline.Ops,
     socket_path: [:0]const u8,
     token: u128,
     wire_major: u16,
     deadline: client_deadline.AbsoluteDeadline,
-) OpenError!c.fd_t {
-    // 연결 단계의 실패는 host 의 응답이 아니다(backlog 가 차면 커널이 곧바로 거부한다) — abandon 하지 않는 쪽으로 분류한다.
-    const connected = client_deadline.connectUnixUntil(ops, socket_path, deadline) catch
-        return error.ImageChannelTimedOut;
+) StartError!c.fd_t {
+    const connected = client_deadline.connectUnixUntil(ops, socket_path, deadline) catch return error.ConnectFailed;
     errdefer ops.close(ops.context, connected.fd);
     var payload_buf: [160]u8 = undefined;
-    const payload = helloPayload(&payload_buf, token, wire_major) catch return error.ImageChannelUnavailable;
+    const payload = helloPayload(&payload_buf, token, wire_major) catch return error.HelloFailed;
     const frame = framing.encodeFrame(
         allocator,
         .{ .kind = .hello, .request_id = 0, .major = wire_major },
         payload,
-    ) catch return error.ImageChannelUnavailable;
+    ) catch return error.HelloFailed;
     defer allocator.free(frame);
-    client_deadline.writeAllUntil(ops, connected.fd, frame, deadline) catch |err| return classify(err);
-    var ack: [image_channel_wire.bind_ack_len]u8 = undefined;
-    var got: usize = 0;
-    while (got < ack.len) {
-        // 정확히 `bind_ack` 만큼만 읽는다 — 그 뒤의 세그먼트 메시지(fd 붙음)는 IC3b 리더가 recvmsg 로 받아야 한다.
-        got += client_deadline.readSomeUntil(ops, connected.fd, ack[got..], deadline) catch |err|
-            return classify(err);
-    }
-    image_channel_wire.decodeBindAck(&ack) catch return error.ImageChannelUnavailable;
+    client_deadline.writeAllUntil(ops, connected.fd, frame, deadline) catch |err|
+        return if (err == error.Timeout) error.HelloTimedOut else error.HelloFailed;
     return connected.fd;
 }
 
-fn classify(err: client_deadline.Error) OpenError {
-    return if (err == error.Timeout) error.ImageChannelTimedOut else error.ImageChannelUnavailable;
+/// 수립 중인 채널 상태로 만든다 — 마감은 지금부터 `bind_wait_ns`.
+pub fn bindingChannel(fd: c.fd_t) Channel {
+    return .{ .fd = fd, .state = .binding, .bind_expires_ns = @intCast(monotonicNowNs(@ptrFromInt(1)) + bind_wait_ns) };
+}
+
+pub const BindProgress = enum { pending, bound, refused };
+
+/// 수립 중인 채널에서 `bind_ack` 의 남은 바이트를 읽는다(§3.1). 다 받아 형식이 맞으면 `bound` 로 바꾼다. 호출자는 fork 울타리의
+/// 수신 잠금을 든다(§7). 채널 EOF·오류·형식 오류·fd 가 붙은 `bind_ack` 는 거부다. 마감은 호출자가 읽은 **뒤에** 본다
+/// (`bindExpired`) — 이미 와 있는 `bind_ack` 를 마감 때문에 버리지 않게.
+pub fn advanceBind(channel: *Channel) BindProgress {
+    const got = client_image_segments.readBindAck(channel.fd, channel.bind_ack[channel.bind_ack_got..]) catch return .refused;
+    channel.bind_ack_got += @intCast(got);
+    if (channel.bind_ack_got < channel.bind_ack.len) return .pending;
+    image_channel_wire.decodeBindAck(&channel.bind_ack) catch return .refused;
+    channel.state = .bound;
+    return .bound;
+}
+
+/// 수립 마감이 지났는가.
+pub fn bindExpired(channel: Channel) bool {
+    return monotonicNowNs(@ptrFromInt(1)) >= channel.bind_expires_ns;
 }
 
 /// deadline 이 없는 블로킹 connect 경로가 쓰는 단조 시계(`AbsoluteDeadline` 은 `std.Io` 나 주입 시계가 필요하다).
@@ -225,22 +251,97 @@ test "client image channel: hello_ack 이 제공·자리·미제공을 가른다
     try testing.expectError(error.OutOfMemory, parseOffer(testing.failing_allocator, "{\"capabilities\":[\"image_shm\"]}"));
 }
 
-test "client image channel: bind_ack 예산은 abandon 몫을 남기고 남는 것이 없으면 열지 않는다" {
-    const Clock = struct {
-        now: i128,
-        fn read(ctx: *anyopaque) i128 {
-            const self: *@This() = @ptrCast(@alignCast(ctx));
-            return self.now;
+test "client image channel: 수립 중 채널은 bind_ack 를 나눠 와도 남은 만큼만 읽어 묶고, 형식 오류·EOF·fd 붙은 ack 는 거부한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // 마감은 token 만료보다 길다 — 짧으면 host 가 아직 받아 줄 채널을 앱이 먼저 버린다.
+    try testing.expect(bind_wait_ns > image_channel_tokens.token_ttl_ns);
+    const Pair = struct {
+        fds: [2]c.fd_t,
+        fn init() !@This() {
+            var fds: [2]c.fd_t = undefined;
+            if (c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds) != 0) return error.TestUnexpectedResult;
+            _ = c.fcntl(fds[0], c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+            return .{ .fds = fds };
+        }
+        fn deinit(self: @This()) void {
+            for (self.fds) |fd| if (fd >= 0) {
+                _ = c.close(fd);
+            };
         }
     };
-    var clock: Clock = .{ .now = 1_000 };
-    const source: client_deadline.ClockSource = .{ .context = &clock, .now_ns = Clock.read };
-    const outer = client_deadline.AbsoluteDeadline.fromInjected(source, 1_000 + 2 * abandon_reserve_ns);
-    const inner = bindDeadline(outer) orelse return error.TestUnexpectedResult;
-    try testing.expectEqual(outer.expires_at_ns - abandon_reserve_ns, inner.expires_at_ns);
-    // abandon 몫만 남았으면 채널을 열지 않는다 — 열면 abandon 을 읽을 시간이 없다.
-    clock.now = 1_000 + abandon_reserve_ns;
-    try testing.expectEqual(@as(?client_deadline.AbsoluteDeadline, null), bindDeadline(outer));
+    const ack = image_channel_wire.encodeBindAck();
+
+    // 나눠 온 ack — 남은 바이트만 읽고, 뒤따르는 세그먼트 바이트는 건드리지 않는다(drain 이 fd 와 함께 받는다).
+    {
+        const pair = try Pair.init();
+        defer pair.deinit();
+        var channel = bindingChannel(pair.fds[0]);
+        try testing.expect(!bindExpired(channel));
+        try testing.expectEqual(BindProgress.pending, advanceBind(&channel));
+        _ = c.write(pair.fds[1], &ack, 3);
+        try testing.expectEqual(BindProgress.pending, advanceBind(&channel));
+        try testing.expectEqual(State.binding, channel.state);
+        const tail = [_]u8{0xEE} ** 4;
+        _ = c.write(pair.fds[1], ack[3..].ptr, ack.len - 3);
+        _ = c.write(pair.fds[1], &tail, tail.len);
+        try testing.expectEqual(BindProgress.bound, advanceBind(&channel));
+        try testing.expectEqual(State.bound, channel.state);
+        var rest: [8]u8 = undefined;
+        try testing.expectEqual(@as(isize, tail.len), c.read(pair.fds[0], &rest, rest.len));
+    }
+    // 형식 오류·EOF 는 거부다.
+    {
+        const pair = try Pair.init();
+        defer pair.deinit();
+        var channel = bindingChannel(pair.fds[0]);
+        var wrong = ack;
+        wrong[4] = @intFromEnum(image_channel_wire.Kind.release);
+        _ = c.write(pair.fds[1], &wrong, wrong.len);
+        try testing.expectEqual(BindProgress.refused, advanceBind(&channel));
+    }
+    {
+        var pair = try Pair.init();
+        defer pair.deinit();
+        var channel = bindingChannel(pair.fds[0]);
+        _ = c.close(pair.fds[1]);
+        pair.fds[1] = -1;
+        try testing.expectEqual(BindProgress.refused, advanceBind(&channel));
+    }
+    // fd 가 붙은 ack 는 거부하고 받은 fd 를 닫는다 — 수신 fd 를 쥔 채 두면 새고, 묶으면 그 fd 가 다음 세그먼트 몫으로 잘못 세인다.
+    {
+        const pair = try Pair.init();
+        defer pair.deinit();
+        var extra: [2]c.fd_t = undefined;
+        if (c.pipe(&extra) != 0) return error.TestUnexpectedResult;
+        defer _ = c.close(extra[1]);
+        var control: [32]u8 align(@alignOf(c.cmsghdr)) = @splat(0);
+        const header: c.cmsghdr = .{ .len = @intCast(@sizeOf(c.cmsghdr) + @sizeOf(c.fd_t)), .level = c.SOL.SOCKET, .type = c.SCM.RIGHTS };
+        @memcpy(control[0..@sizeOf(c.cmsghdr)], std.mem.asBytes(&header));
+        @memcpy(control[@sizeOf(c.cmsghdr)..][0..@sizeOf(c.fd_t)], std.mem.asBytes(&extra[0]));
+        var iov = [_]posix.iovec_const{.{ .base = &ack, .len = ack.len }};
+        const msg: c.msghdr_const = .{
+            .name = null,
+            .namelen = 0,
+            .iov = &iov,
+            .iovlen = 1,
+            .control = &control,
+            .controllen = @intCast(std.mem.alignForward(usize, @sizeOf(c.cmsghdr) + @sizeOf(c.fd_t), @sizeOf(u32))),
+            .flags = 0,
+        };
+        if (c.sendmsg(pair.fds[1], &msg, 0) != ack.len) return error.TestUnexpectedResult;
+        _ = c.close(extra[0]);
+        var channel = bindingChannel(pair.fds[0]);
+        try testing.expectEqual(BindProgress.refused, advanceBind(&channel));
+        // 받은 사본이 닫혔으면 쓰는 쪽이 EPIPE 다(읽는 끝이 하나도 안 남았다 — 테스트 러너는 SIGPIPE 를 무시한다).
+        var pipe_byte = [_]u8{1};
+        _ = c.fcntl(extra[1], c.F.SETFL, @as(c_int, @bitCast(c.O{ .NONBLOCK = true })));
+        const wrote = c.write(extra[1], &pipe_byte, 1);
+        try testing.expect(wrote < 0 and posix.errno(wrote) == .PIPE);
+    }
+    // 마감은 상태 칸 하나다 — 지난 마감은 지났다고 답한다.
+    var expired = bindingChannel(-1);
+    expired.bind_expires_ns = 0;
+    try testing.expect(bindExpired(expired));
 }
 
 test "client image channel: 블로킹 경로의 단조 deadline 은 예산만큼 남는다" {

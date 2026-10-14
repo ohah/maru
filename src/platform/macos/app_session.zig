@@ -15231,15 +15231,18 @@ pub const AppSession = struct {
         // 친 글자가 커밋 메시지로 들어간다. 상자 안 재클릭은 caret 재배치라 그대로 둔다(`…IfOutside`).
         // rename처럼 **확정하지 않고** 글자를 남긴다 — 커밋 메시지는 이어서 쓰는 것이다.
         if (kind == 1) scm_dock_ops.blurCommitIfOutside(self, x_px, y_px);
-        // 컨텍스트 메뉴가 열려 있으면 클릭(down)을 메뉴로 라우팅한다 — 항목 위면 그 항목 실행, 밖이면 닫는다(다른
-        // 마우스 이벤트도 메뉴 중엔 소비). 메뉴는 최상위 모달이라 뒤(터미널/탭)로 안 흘린다.
+        // 컨텍스트 메뉴가 열려 있으면 클릭(down)을 메뉴로 라우팅한다 — 항목 위면 그 항목 실행, 보이는 메뉴 밖이면 닫는다(다른
+        // 마우스 이벤트도 메뉴 중엔 소비). 보이는 메뉴 안의 항목 아닌 자리(패딩 띠·머리글)는 소비만 한다. 메뉴는 최상위 모달이라
+        // 뒤(터미널/탭)로 안 흘린다.
         if (self.chrome_host.context_menu.open) {
             if (kind == 1) {
-                if (chrome.components.context_menu.itemAt(&self.chrome_host.context_menu, settings_ops.contextMenuItems(self), self.buildChromeProps(), x_px, y_px)) |idx| {
+                const items = settings_ops.contextMenuItems(self);
+                const props = self.buildChromeProps();
+                if (chrome.components.context_menu.itemAt(&self.chrome_host.context_menu, items, props, x_px, y_px)) |idx| {
                     self.chrome_host.context_menu.selected = idx;
                     settings_ops.acceptContextMenu(self);
-                } else {
-                    settings_ops.closeContextMenu(self); // 항목 밖 클릭 → 닫기(대상·view_options 플래그 비움)
+                } else if (!chrome.components.context_menu.contains(&self.chrome_host.context_menu, items, props, x_px, y_px)) {
+                    settings_ops.closeContextMenu(self); // 보이는 메뉴 밖 클릭 → 닫기(대상·view_options 플래그 비움)
                 }
             }
             return;
@@ -15285,12 +15288,10 @@ pub const AppSession = struct {
         if (self.chrome_host.symbol_picker.open) {
             if (kind == 1 and button == 0) {
                 if (scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) return;
-                const lay = chrome.components.overlay_input.panelLayout(self.buildChromeProps());
-                const inside = if (lay) |v| x_px >= @as(f64, @floatFromInt(v.x)) and
-                    y_px >= @as(f64, @floatFromInt(v.y)) and
-                    x_px < @as(f64, @floatFromInt(v.x + @as(i32, @intCast(v.panel_cols * v.cw)))) and
-                    y_px < @as(f64, @floatFromInt(v.y + @as(i32, @intCast((1 + @min(self.symbol_picker_rows.rows.items.len, chrome.components.palette.max_visible)) * v.ch)))) else false;
-                if (!inside) editor_ops.closeSymbolPicker(self);
+                // 보이는 패널 밖만 닫는다 — 패딩 띠도 패널이다(`palette.panelHit`, 그리는 상자와 같은 출처).
+                const count = @min(self.symbol_picker_rows.rows.items.len, chrome.components.palette.max_visible);
+                const hit = chrome.components.palette.panelHit(self.buildChromeProps(), count, x_px, y_px) orelse .outside;
+                if (hit == .outside) editor_ops.closeSymbolPicker(self);
             }
             return;
         }
@@ -18690,7 +18691,8 @@ pub const AppSession = struct {
         if (self.chrome_host.notifications.open) {
             self.clearAllHover();
             // coarse 게이트: 직전 프레임 패널 rect 밖이면(대부분의 이동) 무거운 item 빌드 없이 바로 호버 해제. rect는
-            // hitTest의 bounds와 같은 content rect라 "밖 ⇒ hitTest=null ⇒ hovered=null/default"와 동치다. rect 미캐시
+            // hitTest의 content rect라 "밖 ⇒ hitTest=null(보이는 패널 밖) 또는 background(패딩 띠) ⇒ 어느 쪽이든
+            // hovered=null/default"와 동치다. rect 미캐시
             // (오픈 직후 첫 이동)면 게이트를 건너뛰고 아래 정확 판정으로 떨어진다(빌드).
             if (self.notif_panel_rect) |pr| {
                 const inside = x_px >= @as(f64, @floatFromInt(pr.x)) and x_px < @as(f64, @floatFromInt(pr.x + @as(i32, @intCast(pr.w)))) and
@@ -49480,6 +49482,86 @@ test "right-click opens context menu on a rename target; clicking Rename starts 
     // ③ 터미널 본문(바 아래) 우클릭 → 대상 없음 → 메뉴 안 열림.
     session.mouse(1, @floatFromInt(pb.full.x + 4), @floatFromInt(pb.full.y + pb.full.h + 5), 2, 0);
     try std.testing.expect(!session.chrome_host.context_menu.open);
+}
+
+// 보이는 패널의 패딩 띠(2026-10-15): rich lowering 은 메뉴·피커의 둥근 배경 quad 를 사방 modal_padding 만큼 키워 그린다.
+// 클릭 판정이 키우기 전 rect 를 보면 보이는 패널 안쪽 가장자리를 눌러도 「바깥」이 되어 닫혔다(확인 모달 #4465 와 같은 결함).
+// 제품 라우팅(`mouse`)을 그대로 태운다 — 컴포넌트 판정만 고치고 호출자가 null 을 「닫기」로 읽으면 이 판정자가 빨개진다.
+test "보이는 패널 안쪽 가장자리를 눌러도 우클릭 메뉴·심볼·신뢰·복구 피커가 닫히지 않는다 — 그 밖은 닫는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    const props = session.buildChromeProps();
+    const pad: f64 = @floatFromInt(props.shape.modal_padding_px);
+    try std.testing.expect(pad > 0 and props.shape.corner_radius_px > 0); // 전제: 제품 모양은 둥근 패널 + 패딩
+
+    // ① 우클릭 메뉴 — Term 탭을 우클릭해 연다(위 판정자와 같은 길).
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
+    session.mouse(1, @floatFromInt(pb.tabs.x + 4), @floatFromInt(pb.full.y + 1), 2, 0);
+    try std.testing.expect(session.chrome_host.context_menu.open);
+    const menu = chrome.components.context_menu.menuRect(&session.chrome_host.context_menu, settings_ops.contextMenuItems(session), props).?;
+    const mx0: f64 = @floatFromInt(menu.x);
+    const my0: f64 = @floatFromInt(menu.y);
+    const mx1 = mx0 + @as(f64, @floatFromInt(menu.w));
+    const my1 = my0 + @as(f64, @floatFromInt(menu.h));
+    const menu_band = [_][2]f64{
+        .{ mx0 - pad + 1, my0 + 1 },
+        .{ mx1 + pad - 1, my0 + 1 },
+        .{ (mx0 + mx1) / 2, my0 - pad + 1 },
+        .{ (mx0 + mx1) / 2, my1 + pad - 1 },
+    };
+    for (menu_band) |pt| {
+        session.mouse(1, pt[0], pt[1], 0, 0);
+        try std.testing.expect(session.chrome_host.context_menu.open);
+        try std.testing.expect(session.rename == null); // 띠는 항목이 아니다 — 첫 항목(Rename)이 눌리면 안 된다
+    }
+    session.mouse(1, mx0 - pad - 1, my0 + 1, 0, 0);
+    try std.testing.expect(!session.chrome_host.context_menu.open);
+
+    // ② 피커 셋 — 팔레트 패널(`palette.view`)을 그린다. 행이 없으면 프롬프트 한 줄 높이다.
+    const lay = chrome.components.overlay_input.panelLayout(props).?;
+    const px0: f64 = @floatFromInt(lay.x);
+    const py0: f64 = @floatFromInt(lay.y);
+    const px1 = px0 + @as(f64, @floatFromInt(lay.panel_cols * lay.cw));
+    const py1 = py0 + @as(f64, @floatFromInt(lay.ch));
+    const picker_band = [_][2]f64{
+        .{ px0 - pad + 1, (py0 + py1) / 2 },
+        .{ px1 + pad - 1, (py0 + py1) / 2 },
+        .{ (px0 + px1) / 2, py0 - pad + 1 },
+        .{ (px0 + px1) / 2, py1 + pad - 1 },
+    };
+    const Picker = enum { symbol, trust, recovery };
+    inline for (.{ Picker.symbol, Picker.trust, Picker.recovery }) |which| {
+        const st = switch (which) {
+            .symbol => &session.chrome_host.symbol_picker,
+            .trust => &session.chrome_host.trust_picker,
+            .recovery => &session.chrome_host.recovery_picker,
+        };
+        st.open = true;
+        for (picker_band) |pt| {
+            session.mouse(1, pt[0], pt[1], 0, 0);
+            std.testing.expect(st.open) catch |e| {
+                std.debug.print("picker {s} closed by band click at ({d},{d})\n", .{ @tagName(which), pt[0], pt[1] });
+                return e;
+            };
+        }
+        session.mouse(1, (px0 + px1) / 2, py1 + pad, 0, 0); // 띠 바로 아래 — 밖
+        try std.testing.expect(!st.open);
+    }
 }
 
 // rename caret 깜빡임(blink_visible로 '|'↔공백, 폭 고정)과 IME 후보창 caret rect(편집기 위치 추적)를 고정한다.

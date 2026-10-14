@@ -34,7 +34,7 @@ pub fn flatten(a: std.mem.Allocator, ops: []const draw.Op, tk: *const tokens.Tok
     };
 }
 
-/// 모달 draw(확인 모달 등)를 평탄화한다 — **첫 quad 가 둥글면 패널**이고 그것만 `panelRect` 로 키운다. 모달 컴포넌트는
+/// 모달 draw(확인 모달 등)를 평탄화한다 — **첫 quad 가 둥글면 패널**이고 그것만 보이는 사각형(`Quad.visibleRect`)으로 키운다. 모달 컴포넌트는
 /// 상자(`modal_box.frame`)를 첫 quad 로 낸다. macOS lowering 이 「첫 둥근 quad = 패널」로 고르는 것과 같은 규칙이다 —
 /// 모서리 0(기반 토큰)이면 macOS 도 키우지 않고 셀 배경으로 그린다.
 pub fn flattenModal(a: std.mem.Allocator, ops: []const draw.Op, tk: *const tokens.Tokens, out: *std.ArrayList(SolidRect)) !void {
@@ -43,8 +43,7 @@ pub fn flattenModal(a: std.mem.Allocator, ops: []const draw.Op, tk: *const token
         if (!panel_done and op == .quad) {
             panel_done = true;
             var q = op.quad;
-            const r = q.corner_radii;
-            if (r[0] != 0 or r[1] != 0 or r[2] != 0 or r[3] != 0) q.rect = q.panelRect(tk.space.modal_padding_px);
+            q.rect = q.visibleRect(tk.space.modal_padding_px);
             if (q.gradient == .solid) try flattenQuad(a, q, tk, out);
             continue;
         }

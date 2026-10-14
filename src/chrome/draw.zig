@@ -44,6 +44,13 @@ pub const Rect = struct {
             .h = self.h + @as(u32, e.top) + @as(u32, e.bottom),
         };
     }
+    /// 픽셀 점이 이 사각형 안인가(왼쪽·위 포함, 오른쪽·아래 제외). 비유한 좌표(NaN)는 비교가 모두 거짓이라 밖이다.
+    pub fn containsPx(self: Rect, x_px: f64, y_px: f64) bool {
+        const x0: f64 = @floatFromInt(self.x);
+        const y0: f64 = @floatFromInt(self.y);
+        return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(self.w)) and
+            y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(self.h));
+    }
 };
 
 /// 어느 변을 그릴지(focus 테두리·부분 선). 전부 false면 무동작.
@@ -225,6 +232,16 @@ pub const Op = union(enum) {
             const p = self.panel_padding_px orelse default_padding_px;
             return self.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
         }
+
+        /// 이 quad 가 (독립 패널이 아닌) draw 의 **첫 quad** 일 때 화면에 **보이는** 사각형 — 둥글면 패널이라 `panelRect`,
+        /// 모서리 0 이면 셀 배경으로 칠해져 `rect` 그대로다. macOS `metal_lowering`(첫 둥근 quad → `appendModalQuad`)·
+        /// Windows `solid_rects.flattenModal` 과 같은 규칙이다. **바깥 클릭 판정은 이것으로 한다** — `rect` 로 하면 보이는
+        /// 패널 안쪽 가장자리 띠(패딩)를 눌러도 「바깥」이 되어 패널이 닫혔다(2026-10-14·15 적대적 검증).
+        pub fn visibleRect(self: Quad, default_padding_px: u16) Rect {
+            const r = self.corner_radii;
+            if (r[0] == 0 and r[1] == 0 and r[2] == 0 and r[3] == 0) return self.rect;
+            return self.panelRect(default_padding_px);
+        }
     };
     pub const GradientKind = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
 };
@@ -245,4 +262,28 @@ test "Quad.panelRect: 패널 패딩이 있으면 그것, 없으면 토큰 패딩
     var tight = q;
     tight.panel_padding_px = 1; // 촘촘한 목록(자동완성)은 테두리 폭만 준다 — 토큰보다 우선한다
     try testing.expectEqual(Rect{ .x = 99, .y = 49, .w = 202, .h = 82 }, tight.panelRect(12));
+}
+
+test "Quad.visibleRect: 둥근 quad 는 패널 사각형, 모서리 0 은 rect 그대로" {
+    const testing = @import("std").testing;
+    const square: Op.Quad = .{ .rect = .{ .x = 100, .y = 50, .w = 200, .h = 80 }, .fill_role = .surface_bg };
+    try testing.expectEqual(square.rect, square.visibleRect(12));
+    var round = square;
+    round.corner_radii = .{ 0, 0, 8, 0 }; // 한 모서리만 둥글어도 패널이다(lowering 의 `rounded` 와 같다)
+    try testing.expectEqual(Rect{ .x = 88, .y = 38, .w = 224, .h = 104 }, round.visibleRect(12));
+    round.panel_padding_px = 1;
+    try testing.expectEqual(Rect{ .x = 99, .y = 49, .w = 202, .h = 82 }, round.visibleRect(12));
+}
+
+test "Rect.containsPx: 왼쪽·위는 안, 오른쪽·아래는 밖, NaN 은 밖" {
+    const testing = @import("std").testing;
+    const r: Rect = .{ .x = -4, .y = 10, .w = 20, .h = 5 };
+    try testing.expect(r.containsPx(-4, 10));
+    try testing.expect(r.containsPx(15.99, 14.99));
+    try testing.expect(!r.containsPx(16, 12));
+    try testing.expect(!r.containsPx(0, 15));
+    try testing.expect(!r.containsPx(-4.01, 12));
+    try testing.expect(!r.containsPx(0, 9.99));
+    try testing.expect(!r.containsPx(std.math.nan(f64), 12));
+    try testing.expect(!r.containsPx(0, std.math.nan(f64)));
 }

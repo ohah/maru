@@ -455,7 +455,14 @@ fn placedRow(l: Layout, line_idx: usize) ?u32 {
     return @intCast(@divTrunc(@as(i64, l.header_h) + y_rel, ch));
 }
 
-/// 마우스 px를 패널 안의 동작으로 해석한다(박스 밖이면 null → 호출자가 닫기). view와 같은 layout을 써서 "보이는 ==
+/// 패널 배경 quad — view 가 첫 op 로 내고 hitTest 가 그 보이는 사각형(`Quad.visibleRect`)을 잰다.
+fn panelQuad(rect: draw.Rect, p: props.ChromeProps) draw.Op.Quad {
+    const bg_r = p.shape.corner_radius_px;
+    const bw = p.shape.border_width_px;
+    return .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent };
+}
+
+/// 마우스 px를 패널 안의 동작으로 해석한다(보이는 패널 밖이면 null → 호출자가 닫기, 패딩 띠는 background). view와 같은 layout을 써서 "보이는 ==
 /// 클릭되는". 세로: 상단 헤더(액션)·그 아래 카드 영역(visible × 2행). 헤더 우측은 모두읽음/지우기, 헤더 좌측(제목)·
 /// 카드 영역 아래 빈 여백·빈 상태 본문·스크롤바 gutter 는 background(닫지 않음). 카드 안에서 본문줄(line 1) 우측의 ✕ 칸과
 /// 그 오른쪽 여백 1칸(카드 폭 끝까지)은 ✕(삭제) zone. 줄은 글자가 놓인 셀 행으로 가른다(`placedRow`).
@@ -463,10 +470,13 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     if (!state.open or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const l = layout(state, items, p) orelse return null;
     const rect = l.rect;
+    // 「밖」은 **보이는** 패널 밖이다(`Quad.visibleRect` — rich lowering 이 배경 quad 를 패딩만큼 키워 그린다). 그 안이지만
+    // 상자 밖인 패딩 띠는 패널 배경(background)이다 — 키우기 전 rect 로 재면 띠를 눌러도 패널이 닫혔다(2026-10-15).
+    if (!rect.containsPx(x_px, y_px)) {
+        return if (panelQuad(rect, p).visibleRect(p.shape.modal_padding_px).containsPx(x_px, y_px)) .background else null;
+    }
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);
-    if (x_px < x0 or x_px >= x0 + @as(f64, @floatFromInt(rect.w))) return null;
-    if (y_px < y0 or y_px >= y0 + @as(f64, @floatFromInt(rect.h))) return null;
     const cw: f64 = @floatFromInt(l.cw);
     const rel_y = y_px - y0;
     const col: u32 = @intFromFloat((x_px - x0) / cw);
@@ -564,10 +574,8 @@ pub fn view(
     // 배경·clip 폭도 텍스트와 **같은 칸 수**에서 뽑는다 — 픽셀 gutter를 따로 빼면 칸 올림과 어긋나
     // 마지막 칸이 막대와 반쯤 겹친다.
     const card_w: u32 = l.card_cols * l.cw;
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    // 패널 배경(둥근+테두리) — context_menu/palette와 동일.
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    // 패널 배경(둥근+테두리) — context_menu/palette와 동일. hitTest 가 같은 quad 로 보이는 사각형을 잰다.
+    try out.append(arena, .{ .quad = panelQuad(rect, p) });
 
     // 헤더 밴드: "알림" 제목(좌, surface_fg) + 우측 액션(muted_fg). 아래 1px 구분선으로 본문과 분리.
     const heading_runs = try arena.alloc(draw.Run, 1);
@@ -748,6 +756,46 @@ test "notifications handle: ↑↓=이동, Enter=accept, Backspace=delete, Esc·
     try std.testing.expect(s.open); // delete도 닫지 않는다(platform이 삭제 후 유지)
     try std.testing.expectEqual(Action.close, handle(.{ .key = .escape }, &s));
     try std.testing.expect(!s.open);
+}
+
+test "notifications hitTest: 보이는 패널의 패딩 띠는 background 다 — 닫지 않고 카드·버튼도 안 누른다, 그 밖은 null" {
+    // rich lowering 은 패널의 둥근 배경 quad 를 사방 modal_padding 만큼 키워 그린다. hitTest 가 키우기 전 rect 만 보면
+    // 보이는 패널 안쪽 가장자리를 눌러도 null(바깥)이 되어 패널이 닫혔다(2026-10-15 — 확인 모달 #4465 와 같은 결함).
+    const theme = std.mem.zeroes(tokens.ThemeColors);
+    const tk = tokens.Tokens.rich(theme);
+    const p = props.ChromeProps{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 },
+        .shape = .fromTokens(&tk),
+    };
+    const pad: f64 = @floatFromInt(p.shape.modal_padding_px);
+    try std.testing.expect(pad > 0); // 전제: rich 는 패딩이 있다
+    const items = [_]Item{
+        .{ .title = "maru", .body = "PR 머지 완료", .relative_time = "2분 전", .is_read = false, .is_alive = true },
+    };
+    var s: State = .{};
+    s.show(100, 50, items.len);
+    const r = panelRect(&s, &items, p) orelse return error.NoPanelRect;
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    const x1 = x0 + @as(f64, @floatFromInt(r.w));
+    const y1 = y0 + @as(f64, @floatFromInt(r.h));
+    const card_y = y0 + @as(f64, @floatFromInt(p.metrics.cell_height_px * header_rows)) + 2; // 카드 0 제목줄 높이
+    // 왼쪽·오른쪽 띠는 카드 높이에서, 위 띠는 헤더 버튼 열에서 누른다 — 띠가 행으로 새면 카드·버튼이 눌린다.
+    const acts = headerActions(r.w / p.metrics.cell_width_px);
+    const clear_x = x0 + @as(f64, @floatFromInt((acts.clear_x0 + 1) * p.metrics.cell_width_px));
+    const band = [_][2]f64{
+        .{ x0 - pad + 1, card_y },
+        .{ x1 + pad - 1, card_y },
+        .{ clear_x, y0 - pad + 1 },
+        .{ (x0 + x1) / 2, y1 + pad - 1 },
+    };
+    for (band) |pt| try std.testing.expectEqual(@as(?Hit, .background), hitTest(&s, &items, p, pt[0], pt[1]));
+    // 띠 바로 밖 — null(닫기).
+    try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &items, p, x0 - pad - 1, card_y));
+    try std.testing.expectEqual(@as(?Hit, null), hitTest(&s, &items, p, clear_x, y0 - pad - 1));
+    // 판별력: 안쪽 같은 높이는 정말 카드·버튼이다(띠가 행으로 새면 위 단언이 그것을 받는다).
+    try std.testing.expectEqual(@as(?Hit, .{ .card = 0 }), hitTest(&s, &items, p, x0 + 1, card_y));
+    try std.testing.expectEqual(@as(?Hit, .clear_all), hitTest(&s, &items, p, clear_x, y0 + 1));
 }
 
 test "notifications hitTest: 헤더 액션 버튼(모두읽음/지우기)·제목/버튼사이=background / 카드 본문=card / 본문줄 우측 ✕=close" {

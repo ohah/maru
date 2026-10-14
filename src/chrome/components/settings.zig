@@ -1218,19 +1218,19 @@ pub fn handle(k: input.InputEvent.KeyEvent, state: *State) Action {
     }
 }
 
-/// HSV picker 포인터 — down/move(드래그)로 SV 그리드 셀→s/v, hue 스트립 셀→h. 박스 밖 down=picker 취소(폼 복귀, 모달
-/// 유지). up·비-히트는 소비. 기하는 renderPicker와 같은 pickerLayout 출처.
+/// HSV picker 포인터 — down/move(드래그)로 SV 그리드 셀→s/v, hue 스트립 셀→h. 보이는 패널 밖 down=picker 취소(폼 복귀,
+/// 모달 유지) — 패딩 띠는 소비. up·비-히트는 소비. 기하는 renderPicker와 같은 pickerLayout 출처.
 fn pickerPointer(ev: input.PointerEvent, p: props.ChromeProps, tk: *const tokens.Tokens, state: *State) Action {
     if (ev.phase == .up) {
         state.dragging = false;
         return .consumed;
     }
     const box = pickerLayout(p, tk) orelse return .consumed;
-    const bx: f64 = @floatFromInt(box.rect.x);
-    const by: f64 = @floatFromInt(box.rect.y);
-    const inside = ev.x_px >= bx and ev.x_px < bx + @as(f64, @floatFromInt(box.rect.w)) and
-        ev.y_px >= by and ev.y_px < by + @as(f64, @floatFromInt(box.rect.h));
+    const inside = box.rect.containsPx(ev.x_px, ev.y_px);
     if (ev.phase == .down and !inside) {
+        // 보이는 패널의 패딩 띠(`modal_box.visibleRect` — rich 는 패딩만큼 크다)는 패널 배경이다: 선택기를 지키고 드래그도
+        // 시작하지 않는다. `inside`(그리드·스트립 추적)는 상자 그대로 둔다.
+        if (modal_box.visibleRect(box, p).containsPx(ev.x_px, ev.y_px)) return .consumed;
         state.closePicker();
         return .selection_changed; // 밖 클릭 → picker만 취소
     }
@@ -1265,7 +1265,7 @@ fn pickerPointer(ev: input.PointerEvent, p: props.ChromeProps, tk: *const tokens
     return .consumed;
 }
 
-/// 포인터 처리(열려 있을 때만). up=소비. down=박스 밖이면 닫기, 안이면 행 선택 후 위젯별: toggle 위→.toggle, number
+/// 포인터 처리(열려 있을 때만). up=소비. down=보이는 패널 밖이면 닫기(패딩 띠는 소비), 상자 안이면 행 선택 후 위젯별: toggle 위→.toggle, number
 /// (control)→.toggle(편집 진입), dropdown/font→.toggle(팝업 열기), text/color/keybind→.toggle/편집, 그 외(라벨)→
 /// .selection_changed. 드롭다운 팝업이 열려 있으면 항목 클릭=.dropdown_accept·밖 클릭=닫기. 우클릭=소비.
 /// dropdown_items=팝업 변형 라벨(itemAt hit-test용 — view와 같은 platform 주입).
@@ -1279,7 +1279,7 @@ pub fn handlePointer(
     state: *State,
 ) Action {
     if (ev.button != .left) return .consumed;
-    // HSV picker 모드 — SV 그리드/hue 스트립 클릭·드래그로 s/v·h 선택, 박스 밖 클릭은 picker 취소(폼 복귀). 폼 hit-test 안 함.
+    // HSV picker 모드 — SV 그리드/hue 스트립 클릭·드래그로 s/v·h 선택, 보이는 패널 밖 클릭은 picker 취소(폼 복귀). 폼 hit-test 안 함.
     if (state.picking) return pickerPointer(ev, p, tk, state);
     const l = computeLayout(sections, rows, scrollRows(state, p), p, tk) orelse return .consumed;
     const box = l.box;
@@ -1303,12 +1303,9 @@ pub fn handlePointer(
         return .consumed;
     }
     if (ev.phase == .move) return .consumed; // 슬라이더 드래그 제거 — 숫자는 클릭→입력 박스 편집이라 move는 무동작
-    // down.
-    const bx: f64 = @floatFromInt(box.rect.x);
-    const by: f64 = @floatFromInt(box.rect.y);
-    const inside = ev.x_px >= bx and ev.x_px < bx + @as(f64, @floatFromInt(box.rect.w)) and
-        ev.y_px >= by and ev.y_px < by + @as(f64, @floatFromInt(box.rect.h));
-    if (!inside) {
+    // down. 바깥 판정은 **보이는** 패널로 한다(`modal_box.visibleRect` — rich 는 패딩만큼 크다). 키우기 전 rect 로 재면 보이는
+    // 패널 안쪽 가장자리 띠를 눌러도 설정 창이 닫혔다(2026-10-15).
+    if (!modal_box.visibleRect(box, p).containsPx(ev.x_px, ev.y_px)) {
         state.hide();
         return .close;
     }
@@ -1316,6 +1313,9 @@ pub fn handlePointer(
     // 누르면 아래에서 .toggle → platform이 현재값으로 재시드한다(커밋은 Enter 전용).
     if (state.editing) state.cancelEdit();
     if (state.recording) state.recording = false; // 녹음 중 다른 곳 클릭 → 녹음 취소(아래에서 같은 keybind 재클릭 시 다시 켜짐)
+    // 패딩 띠는 패널 배경이다 — 상자 안 빈 곳처럼 편집·녹음만 끝내고(위) 행은 누르지 않는다. 아래 행 판정은 y·x 만 보므로
+    // 띠가 그리로 내려가면 제목 행 높이의 왼쪽 띠가 검색을, 네비 행 높이가 섹션 전환을 눌렀다.
+    if (!box.rect.containsPx(ev.x_px, ev.y_px)) return .consumed;
     // 제목 행(row 0) 클릭 → 검색 시작(클릭 진입점, 키 `/`와 같은 경로). 검색 중이면 그대로(제목=검색창이라 무동작).
     // 필드 행은 first_field_row(=title_rows=2)부터라 이 hit-test는 nav/form과 충돌하지 않는다. config-gui §6.8.
     if (!state.searching) {
@@ -1653,6 +1653,72 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, number(�
     const c0 = fieldControlRect(l, 0);
     try std.testing.expectEqual(Action.selection_changed, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(l.form_x + 2), .y_px = @floatFromInt(c0.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
+}
+
+test "settings handlePointer: 보이는 패널의 패딩 띠는 「안」이다 — 폼·색 선택기 모두 닫지 않고 아무 행도 안 누른다, 그 밖은 닫기" {
+    // rich lowering 은 상자(`modal_box.frame` 의 둥근 quad)를 사방 modal_padding 만큼 키워 그린다. 판정이 키우기 전 rect 를 보면
+    // 보이는 패널 안쪽 가장자리를 눌러도 「바깥」이 되어 설정 창이 닫혔다(2026-10-15 — 확인 모달 #4465 와 같은 결함).
+    // 띠는 행이 아니다: 왼쪽 띠를 제목 행·네비 행 높이에서 눌러도 검색·섹션 전환이 일어나면 안 된다(행은 상자 안에만 산다).
+    const theme = std.mem.zeroes(tokens.ThemeColors);
+    const tk = tokens.Tokens.rich(theme);
+    var rp = test_props;
+    rp.shape = .fromTokens(&tk);
+    const pad: f64 = @floatFromInt(rp.shape.modal_padding_px);
+    try std.testing.expect(pad > 0); // 전제: rich 는 패딩이 있다
+    const rows = [_]FieldRow{.{ .label = "A", .kind = .{ .toggle = false } }};
+    var s = State{};
+    s.show();
+    s.section = 1;
+    const l = computeLayout(&test_sections, &rows, scrollRows(&s, rp), rp, &tk).?;
+    const r = l.box.rect;
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    const x1 = x0 + @as(f64, @floatFromInt(r.w));
+    const y1 = y0 + @as(f64, @floatFromInt(r.h));
+    const title_y: f64 = @floatFromInt(modal_box.rowY(l.box, 0) + 2);
+    const nav0_y: f64 = @floatFromInt(modal_box.rowY(l.box, l.first_field_row) + 2); // 네비 0 번(Font) 행 높이
+    const band = [_][2]f64{
+        .{ x0 - pad + 1, title_y }, // 왼쪽 띠 — 제목 행 높이(새면 검색 시작)
+        .{ x0 - pad + 1, nav0_y }, // 왼쪽 띠 — 네비 행 높이(새면 섹션 0 으로 전환)
+        .{ x1 + pad - 1, (y0 + y1) / 2 },
+        .{ (x0 + x1) / 2, y0 - pad + 1 },
+        .{ (x0 + x1) / 2, y1 + pad - 1 },
+    };
+    for (band) |pt| {
+        s.recording = true; // 띠도 상자 안 빈 곳처럼 키 녹음을 끝낸다(편집·녹음 취소는 행 판정 앞이다)
+        try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .down, .x_px = pt[0], .y_px = pt[1] }, &test_sections, &rows, no_items, rp, &tk, &s));
+        try std.testing.expect(s.open);
+        try std.testing.expect(!s.searching);
+        try std.testing.expect(!s.recording);
+        try std.testing.expectEqual(@as(usize, 1), s.section);
+    }
+    // 띠 바로 밖 — 닫기.
+    try std.testing.expectEqual(Action.close, handlePointer(.{ .phase = .down, .x_px = x0 - pad - 1, .y_px = nav0_y }, &test_sections, &rows, no_items, rp, &tk, &s));
+    try std.testing.expect(!s.open);
+
+    // 색 선택기 — 같은 상자 프레임이다. 띠는 선택기를 지키고(폼으로 안 돌아간다) 드래그도 시작하지 않는다.
+    s.show();
+    s.openPicker(.{ .r = 255, .g = 0, .b = 0 });
+    const pb = pickerLayout(rp, &tk).?;
+    const px0: f64 = @floatFromInt(pb.rect.x);
+    const py0: f64 = @floatFromInt(pb.rect.y);
+    const px1 = px0 + @as(f64, @floatFromInt(pb.rect.w));
+    const py1 = py0 + @as(f64, @floatFromInt(pb.rect.h));
+    const pick_band = [_][2]f64{
+        .{ px0 - pad + 1, (py0 + py1) / 2 },
+        .{ px1 + pad - 1, (py0 + py1) / 2 },
+        .{ (px0 + px1) / 2, py0 - pad + 1 },
+        .{ (px0 + px1) / 2, py1 + pad - 1 },
+    };
+    for (pick_band) |pt| {
+        try std.testing.expectEqual(Action.consumed, handlePointer(.{ .phase = .down, .x_px = pt[0], .y_px = pt[1] }, &test_sections, &rows, no_items, rp, &tk, &s));
+        try std.testing.expect(s.picking);
+        try std.testing.expect(!s.dragging);
+    }
+    // 띠 바로 밖 — 선택기만 취소(폼 복귀, 모달 유지).
+    try std.testing.expectEqual(Action.selection_changed, handlePointer(.{ .phase = .down, .x_px = px1 + pad, .y_px = (py0 + py1) / 2 }, &test_sections, &rows, no_items, rp, &tk, &s));
+    try std.testing.expect(!s.picking);
+    try std.testing.expect(s.open);
 }
 
 test "settings handlePointer: 제목 행 클릭 → 검색 시작(.search_changed), 검색 중엔 무동작" {

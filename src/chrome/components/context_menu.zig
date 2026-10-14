@@ -204,7 +204,23 @@ fn labelCols(state: *const State, rect: draw.Rect, cw: u32) u32 {
     return (rect.w / @max(cw, 1)) -| (2 + state.markCols());
 }
 
-/// 마우스 px가 메뉴 박스 안의 어느 항목 행인지([0, item_count)). 박스 밖이면 null(호출자가 close). view와 같은
+/// 메뉴 배경 quad — view 가 첫 op 로 내고 `contains` 가 그 보이는 사각형(`Quad.visibleRect`)을 잰다.
+fn panelQuad(rect: draw.Rect, p: props.ChromeProps) draw.Op.Quad {
+    const bg_r = p.shape.corner_radius_px;
+    const bw = p.shape.border_width_px;
+    return .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent };
+}
+
+/// 포인터가 **보이는** 메뉴 안인가 — rich lowering 은 배경 quad 를 사방 패딩만큼 키워 그린다(`Quad.visibleRect`).
+/// 호출자는 `itemAt` 이 null 이어도 이것이 참이면(패딩 띠·머리글·꼬리 줄) **닫지 않고 소비만** 한다. `itemAt` 의 null 을
+/// 곧바로 「밖」으로 읽으면 보이는 메뉴 가장자리나 머리글을 눌러도 메뉴가 닫혔다(2026-10-15).
+pub fn contains(state: *const State, items: []const []const u8, p: props.ChromeProps, x_px: f64, y_px: f64) bool {
+    if (!state.open) return false;
+    const rect = menuRect(state, items, p) orelse return false;
+    return panelQuad(rect, p).visibleRect(p.shape.modal_padding_px).containsPx(x_px, y_px);
+}
+
+/// 마우스 px가 메뉴 박스 안의 어느 항목 행인지([0, item_count)). 박스 밖·머리글이면 null — 닫을지는 `contains` 로 가른다. view와 같은
 /// menuRect를 써서 "보이는 == 클릭되는". 비유한 좌표는 null.
 pub fn itemAt(state: *const State, items: []const []const u8, p: props.ChromeProps, x_px: f64, y_px: f64) ?usize {
     if (!state.open or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
@@ -236,9 +252,7 @@ pub fn view(
     const rect = menuRect(state, items, p) orelse return;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    try out.append(arena, .{ .quad = panelQuad(rect, p) });
     const label_cols = labelCols(state, rect, cw);
     for (items, 0..) |raw, i| {
         // **상자보다 긴 라벨은 가운데를 줄인다.** 끝을 자르면 브랜치 이름·`(브랜치)` 처럼 줄을 가르는
@@ -299,6 +313,57 @@ test "context_menu handle: ↑↓=이동, Enter=accept, Esc·글자=close" {
     s.show(0, 0, 2);
     try std.testing.expectEqual(Action.close, handle(.{ .key = .char, .codepoint = 'a' }, &s)); // 그 외 키도 닫기
     try std.testing.expect(!s.open);
+}
+
+test "context_menu contains: 보이는 메뉴(패딩 띠·머리글)는 안이다 — itemAt 이 null 이어도 닫지 않는다, 모서리 0 은 상자 그대로" {
+    // rich lowering 은 배경 quad 를 사방 modal_padding 만큼 키워 그린다. 호출자가 itemAt 의 null 을 곧바로 「밖」으로 읽어
+    // 보이는 메뉴 가장자리·머리글을 눌러도 메뉴가 닫혔다(2026-10-15).
+    const theme = std.mem.zeroes(tokens.ThemeColors);
+    const tk = tokens.Tokens.rich(theme);
+    const p = props.ChromeProps{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 },
+        .shape = .fromTokens(&tk),
+    };
+    const pad: f64 = @floatFromInt(p.shape.modal_padding_px);
+    try std.testing.expect(pad > 0); // 전제: rich 는 패딩이 있다
+    const items = [_][]const u8{ "보내기 대상", "Rename", "Close" };
+    var s: State = .{};
+    s.showWithHeaders(200, 100, items.len, 1);
+    const r = menuRect(&s, &items, p).?;
+    // 그린 패널 quad 의 상자가 판정 상자다(단일 출처).
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, &items, p, &tk, arena_state.allocator(), &out);
+    try std.testing.expectEqual(r, out.items[0].quad.rect);
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    const x1 = x0 + @as(f64, @floatFromInt(r.w));
+    const y1 = y0 + @as(f64, @floatFromInt(r.h));
+    const row1_y = y0 + 16 + 2;
+    // 머리글 줄 — 항목이 아니지만 보이는 메뉴 안이다.
+    try std.testing.expectEqual(@as(?usize, null), itemAt(&s, &items, p, x0 + 2, y0 + 2));
+    try std.testing.expect(contains(&s, &items, p, x0 + 2, y0 + 2));
+    // 네 변의 패딩 띠 — 항목 행 높이에서도 항목이 아니고(itemAt null), 메뉴 안이다.
+    const band = [_][2]f64{ .{ x0 - pad + 1, row1_y }, .{ x1 + pad - 1, row1_y }, .{ (x0 + x1) / 2, y0 - pad + 1 }, .{ (x0 + x1) / 2, y1 + pad - 1 } };
+    for (band) |pt| {
+        try std.testing.expectEqual(@as(?usize, null), itemAt(&s, &items, p, pt[0], pt[1]));
+        try std.testing.expect(contains(&s, &items, p, pt[0], pt[1]));
+    }
+    try std.testing.expectEqual(@as(?usize, 1), itemAt(&s, &items, p, x0 + 2, row1_y)); // 판별력: 안쪽 같은 높이는 항목이다
+    // 띠 밖 — 닫는다.
+    try std.testing.expect(!contains(&s, &items, p, x0 - pad - 1, row1_y));
+    try std.testing.expect(!contains(&s, &items, p, (x0 + x1) / 2, y1 + pad));
+    try std.testing.expect(!contains(&s, &items, p, std.math.nan(f64), row1_y));
+    // 모서리 0 이면 키우지 않는다(셀 배경) — 패딩은 두고 모서리만 0 으로 재야 분기를 잰다.
+    var flat = p;
+    flat.shape.corner_radius_px = 0;
+    const fr = menuRect(&s, &items, flat).?;
+    try std.testing.expect(contains(&s, &items, flat, @floatFromInt(fr.x), @floatFromInt(fr.y)));
+    try std.testing.expect(!contains(&s, &items, flat, @as(f64, @floatFromInt(fr.x)) - 1, @floatFromInt(fr.y)));
+    // 닫힌 메뉴는 아무 데도 아니다.
+    s.hide();
+    try std.testing.expect(!contains(&s, &items, p, x0 + 2, row1_y));
 }
 
 test "context_menu itemAt/view: anchor 박스 안 항목 행, 화면 밖이면 clamp, 박스 밖이면 null" {

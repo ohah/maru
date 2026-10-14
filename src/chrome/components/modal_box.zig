@@ -76,10 +76,7 @@ pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std
 /// 모서리 0(기반 토큰)이면 키우지 않는다. **바깥 클릭 판정은 이것으로 한다** — `rect` 로 하면 보이는 패널 안쪽
 /// 가장자리 띠(12px)를 눌러도 「바깥」이 되어 상자가 닫혔다(2026-10-14 적대적 검증).
 pub fn visibleRect(box: Box, p: props.ChromeProps) draw.Rect {
-    const q = frameQuad(box, p);
-    const r = q.corner_radii;
-    if (r[0] == 0 and r[1] == 0 and r[2] == 0 and r[3] == 0) return q.rect;
-    return q.panelRect(p.shape.modal_padding_px);
+    return frameQuad(box, p).visibleRect(p.shape.modal_padding_px);
 }
 
 fn frameQuad(box: Box, p: props.ChromeProps) draw.Op.Quad {

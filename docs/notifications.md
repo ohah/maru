@@ -172,7 +172,8 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   일러스트)으로 구성된다 — 헤더는 viewport
   상단 sticky, 카드는 그 아래에서 스크롤한다. 한 항목 = **2줄 카드**(제목 + 본문), 안읽음 점(●), 우측 상대시간
   ("N분 전"), 닫힌 surface는 회색(`muted_fg` role). `layout`(폭·높이·스크롤 윈도우·위치 clamp)을 view·hitTest·panelRect가
-  공유(보이는 카드 == 클릭되는 카드). 헤더 구분선·카드 구분선은 `.fill`(1px)로 — `.rule` op은 macOS lowering에서 no-op이라.
+  공유(보이는 카드 == 클릭되는 카드). 패널 밖 판정은 **보이는** 패널(rich 는 배경 quad 를 패딩만큼 키워 그린다 —
+  `Quad.visibleRect`)로 하고, 상자 밖·보이는 패널 안의 패딩 띠는 `background`(닫지 않음)다(2026-10-15). 헤더 구분선·카드 구분선은 `.fill`(1px)로 — `.rule` op은 macOS lowering에서 no-op이라.
   **카드 구분선은 보이는 카드마다 아래에** 긋는다(마지막 카드 포함) — 항목 경계를 분명히 보이게 한다. 안읽음 점(●, col 1)과
   텍스트(col 3) 사이엔 빈 칸(col 2)을 두어 점이 텍스트에 바짝 붙지 않게 한다(`text_indent_cols`).
   항목은 platform이 매 프레임 arena로 주입(palette `Row` 선례) — chrome은 중립(surface_id·라이브 포인터 모름).
@@ -227,7 +228,7 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   - 이 계약 밖: 마커 이미지 프리뷰의 실패 안내 글자(`collectMarkerPreviewDraws` — 액자는 프레임 조립의 GPU quad)는 이
     불변식에 들지 않아 패널과 함께 그려질 수 있다.
 - **최소 높이**: 항목이 적어도 팝업이 납작하지 않게 `min_panel_rows`(8, 헤더 포함) baseline을 보장한다 — 헤더+카드는
-  상단, 사이 여백은 패널 배경(클릭 무시 = `Hit.background`; 박스 '밖'만 닫기). 카드가 그보다 많으면 자연 높이(화면 cap)로
+  상단, 사이 여백은 패널 배경(클릭 무시 = `Hit.background`; **보이는** 패널 '밖'만 닫기 — 패딩 띠도 `background`). 카드가 그보다 많으면 자연 높이(화면 cap)로
   커지므로 무영향(`layout` 단일 출처 — view·hitTest 공유). `scrollWindow`는 상단 sticky 헤더(`header_rows`)를 늘 예약하고
   남은 높이로 보이는 카드 수를 정한다.
 - **스크롤(화면 넘으면)**: 카드가 화면 가용 높이를 넘으면 카드 영역이 **픽셀 offset**(`State.scroll.offset_y_px`,
@@ -299,7 +300,7 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
   `confirm` 다이얼로그와 같은 관용구(셀 fill 배경 + 라벨 좌우 패딩 `btn_pad`, 토큰 색; GPU quad 아닌 `.fill`이라 모서리 토큰과 무관 — 옛 tui/rich 양립의 이유).
   **항목이 있으면 활성**(`tab_hover_bg` 배경 + `surface_fg` 라벨, 클릭 가능함이 드러남), **빈 상태면 비활성**(배경 없이 `muted_fg`).
   버튼 [x0,x1) 칸 범위는 `headerActions`가 view(배경 fill)·hitTest(클릭 zone) 단일 출처. 헤더 좌측 제목·버튼 사이 여백·빈 상태
-  본문은 `background`(클릭해도 안 닫힘 — 박스 밖만 닫기). unread 캐시는 push/markRead/delete/markAll/clear 헬퍼에서만 증감(단일 출처).
+  본문은 `background`(클릭해도 안 닫힘 — 보이는 패널 밖만 닫기). unread 캐시는 push/markRead/delete/markAll/clear 헬퍼에서만 증감(단일 출처).
   > 후속: 세 번째 버튼 소비처(예: 세팅 액션)가 나오면 `modal_box`처럼 공유 `button` 프리미티브로 추출해 confirm·notifications·settings가 공유한다.
 
 ## 4. 경계 분담 (단일 출처)

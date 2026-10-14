@@ -4777,8 +4777,8 @@ fn sessionIndexById(sessions: []const *WinSession, id: ?u64) ?usize {
 /// **그리는 쪽과 히트테스트가 같은 값을 받아야 한다** — 중립 `confirm.view` 와 `buttonAtPoint` 가
 /// 둘 다 이것을 보고 상자를 놓는다(그 컴포넌트가 `modal_box` 프리미티브에 위임한다). 한쪽만
 /// 다른 값을 주면 "보이는 버튼 ≠ 눌리는 버튼" 이 된다 — 사이드바에서 이미 그 함정을 봤다(§2m.74).
-fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_w: u32) maru.chrome.props.ChromeProps {
-    return .{ .metrics = .{
+fn confirmProps(client_w: u32, client_h: u32, cell_w: u32, cell_h: u32, sidebar_w: u32, tk: *const maru.chrome.Tokens) maru.chrome.props.ChromeProps {
+    return .{ .shape = .fromTokens(tk), .metrics = .{
         .cell_width_px = cell_w,
         .cell_height_px = cell_h,
         .sidebar_width_px = sidebar_w,
@@ -10350,7 +10350,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                 // (적대적 검증 2회차 실측: `caption_alive=false`).
                 if (confirm_state.open) {
                     if (m.kind == .left_up) {
-                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
+                        if (maru.chrome.components.confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, @floatFromInt(m.x_px), @floatFromInt(m.y_px))) |action| switch (action) {
                             .confirmed => confirm_pending_click = .confirmed,
                             .cancelled => confirm_pending_click = .cancelled,
                             .alternate, .extra => {},
@@ -11750,7 +11750,7 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         // 곧 "무엇을 못 누르는가" 라, 입력 삼킴과 같은 자리에 있어야 한다.
         confirm_cells_drawn = 0;
         if (confirm_state.open) {
-            if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
+            if (appendConfirmCells(allocator, &cells, &confirm_state, confirmProps(client_w, client_h, cell_w, cell_h, sidebar_w, &chrome_tokens), &chrome_tokens, &renderer_state, builder, pipeline, &atlas_w, &atlas_h, &confirm_frame, &confirm_unpainted)) |n_drawn| {
                 confirm_cells_drawn = n_drawn;
                 // **그린 셀에서 상자의 가로 중앙을 도로 읽는다** — 내가 넘긴 값을 되읽으면 동어반복이다.
                 var minx: f32 = std.math.floatMax(f32);
@@ -16454,7 +16454,8 @@ const EditorBuilt = struct {
 /// 확인 모달을 셀로 낮춰 **맨 위에** 얹는다. 그린 셀 수를 돌려준다(0 이면 안 그렸다).
 ///
 /// **편집기와 같은 길을 쓴다** — `confirm.view` 가 내는 op 를 `buildTextDrawList` 로 글자로, 단색
-/// 사각은 `appendSolidOps` 로. 모달은 창 좌표에 그려지므로 원점이 (0,0)이다.
+/// 사각은 `appendConfirmSolids` 로(편집기의 `appendSolidOps` 와 같은 평탄화 + 패널 키우기). 모달은 창
+/// 좌표에 그려지므로 원점이 (0,0)이다.
 fn appendConfirmCells(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(d3d11_cells.Cell),
@@ -16490,17 +16491,17 @@ fn appendConfirmCells(
     try draw_host.syncAtlasTexture(pipeline, renderer_state, atlas_w, atlas_h);
     _ = draw_host.uploadFrameRegions(pipeline, frame);
 
-    // **버려지는 op 를 센다.** 이 셰이더에 그라디언트·테두리 계산이 없어 그런 quad 는 안 그려지는데,
+    // **버려지는 op 를 센다.** 이 셰이더에 그라디언트 계산이 없어 그런 quad 는 안 그려지는데(테두리는 단색 사각으로 그린다),
     // 조용히 넘기면 "패널 없이 글자만 뜨는" 화면이 그럴듯해 보인다(실측으로 그랬다).
     for (ops.items) |op| switch (op) {
-        // **그라디언트만 남았다.** 테두리는 이제 사각 넷으로 그린다(`appendSolidOps`).
+        // **그라디언트만 남았다.** 테두리는 단색 사각으로 그린다(`chrome.solid_rects` — 둥근 상자는 바깥판 + 들인 채움).
         .quad => |q| if (q.gradient != .solid) {
             confirm_unpainted_quads.* += 1;
         },
         else => {},
     };
     const before = out.items.len;
-    try appendSolidOps(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, 0, 0, out);
+    try appendConfirmSolids(allocator, ops.items, tk, p.metrics.backing_width_px, p.metrics.backing_height_px, out);
     const colors = maru.renderer.metal_frame.CellColors{
         .default_fg = blk: {
             const c = tk.get(.surface_fg);
@@ -16518,11 +16519,36 @@ fn appendConfirmCells(
     return out.items.len - before;
 }
 
+/// 확인 모달 ops 의 단색 몫(패널·버튼 배경). **패널은 패딩만큼 키운다** — 규칙은 중립 `chrome.solid_rects.flattenModal` 이
+/// 갖는다(macOS rich lowering 과 같은 그림: 모서리·테두리·패딩).
+fn appendConfirmSolids(
+    a: std.mem.Allocator,
+    ops: []const maru.chrome.draw.Op,
+    tk: *const maru.chrome.Tokens,
+    client_w: u32,
+    client_h: u32,
+    out: *std.ArrayList(d3d11_cells.Cell),
+) !void {
+    var rects: std.ArrayList(maru.chrome.solid_rects.SolidRect) = .empty;
+    defer rects.deinit(a);
+    try maru.chrome.solid_rects.flattenModal(a, ops, tk, &rects);
+    try appendSolidRects(a, rects.items, client_w, client_h, 0, 0, out);
+}
+
+test "확인 모달(Windows): props 가 제품 토큰의 모양을 싣는다 — 빠뜨리면 직각·테두리 0·패딩 0 으로 그린다" {
+    // `confirmProps` 는 그리기(`confirm.view`)와 판정(`buttonAtPoint`)이 함께 받는 단일 출처다. shape 를 안 실으면 기본값 0 이 돼
+    // macOS 확인 모달(rich: 모서리 8·테두리 1·패딩 12)과 다른 기반 모양이 된다 — 컴파일러는 모른다(2026-10-14).
+    const tk = maru.chrome.Tokens.rich(std.mem.zeroes(maru.chrome.tokens.ThemeColors));
+    const p = confirmProps(1200, 800, 8, 16, 200, &tk);
+    try std.testing.expectEqual(maru.chrome.props.ShapeTokens.fromTokens(&tk), p.shape);
+    try std.testing.expect(p.shape.modal_padding_px > 0); // 전제: rich 는 0 이 아니다
+}
+
 /// `draw.Op` 의 **단색 사각**(fill·solid quad)을 셀로 낮춘다. 글리프는 호출자가 따로 넣는다 —
 /// 그리는 순서가 곧 z 순서라 사각이 **먼저**여야 한다.
 ///
-/// **한 곳에 둔다.** 편집기와 확인 모달이 같은 op 스트림을 쓰는데, 이 루프를 각자 적으면 그라디언트·
-/// 테두리를 세는 규칙(아래)이 한쪽만 바뀌는 날 화면이 조용히 갈린다.
+/// **규칙은 한 곳에 둔다** — 중립 `chrome.solid_rects`. 편집기와 확인 모달이 같은 op 스트림을 쓰는데, 평탄화
+/// (채움·테두리 순서·둥근 테두리·그라디언트 제외)를 각자 적으면 한쪽만 바뀌는 날 화면이 조용히 갈린다.
 fn appendSolidOps(
     a: std.mem.Allocator,
     ops: []const maru.chrome.draw.Op,
@@ -16533,67 +16559,38 @@ fn appendSolidOps(
     origin_y: u32,
     out: *std.ArrayList(d3d11_cells.Cell),
 ) !void {
-    for (ops) |op| {
-        // **테두리는 사각 넷으로 그린다.** 이 셰이더에 테두리 계산은 없지만 `border_widths` 가
-        // 변마다 두께를 주므로 단색 사각으로 정확히 같은 그림이 된다 — 확인 모달의 패널 테두리가
-        // 통째로 빠져 글자만 떠 있던 것이 그래서였다(실측: 버려진 quad 4 개).
-        //
-        // **그라디언트는 여전히 안 그린다** — 그것은 단색으로 근사하면 화면이 틀린 채로 그럴듯해진다.
-        if (op == .quad) {
-            const q = op.quad;
-            if (q.gradient == .solid) {
-                if (q.border_role) |br| {
-                    const bc = tk.get(br);
-                    const bargb = (@as(u32, q.alpha) << 24) | (@as(u32, bc.r) << 16) | (@as(u32, bc.g) << 8) | bc.b;
-                    // 위·아래·왼쪽·오른쪽 순서(`border_widths` 의 규약).
-                    const edges = [4]maru.chrome.draw.Rect{
-                        .{ .x = q.rect.x, .y = q.rect.y, .w = q.rect.w, .h = q.border_widths[0] },
-                        .{ .x = q.rect.x, .y = q.rect.y + @as(i32, @intCast(q.rect.h -| q.border_widths[1])), .w = q.rect.w, .h = q.border_widths[1] },
-                        .{ .x = q.rect.x, .y = q.rect.y, .w = q.border_widths[2], .h = q.rect.h },
-                        .{ .x = q.rect.x + @as(i32, @intCast(q.rect.w -| q.border_widths[3])), .y = q.rect.y, .w = q.border_widths[3], .h = q.rect.h },
-                    };
-                    for (edges) |e| {
-                        if (e.w == 0 or e.h == 0) continue;
-                        const ex0 = @max(e.x, 0);
-                        const ey0 = @max(e.y, 0);
-                        const ex1 = @min(e.x + @as(i32, @intCast(e.w)), @as(i32, @intCast(clip_w)));
-                        const ey1 = @min(e.y + @as(i32, @intCast(e.h)), @as(i32, @intCast(clip_h)));
-                        if (ex1 <= ex0 or ey1 <= ey0) continue;
-                        try out.append(a, d3d11_cells.solidCell(
-                            @floatFromInt(ex0 + @as(i32, @intCast(origin_x))),
-                            @floatFromInt(ey0 + @as(i32, @intCast(origin_y))),
-                            @floatFromInt(ex1 - ex0),
-                            @floatFromInt(ey1 - ey0),
-                            d3d11_cells.colorFromArgb(bargb),
-                            .{ 0, 0, 0, 0 },
-                        ));
-                    }
-                }
-            }
-        }
-        const rect: maru.chrome.draw.Rect, const role: maru.chrome.tokens.ColorRole, const alpha: u8, const radii: [4]u16 = switch (op) {
-            .fill => |f| .{ f.rect, f.role, f.alpha, .{ 0, 0, 0, 0 } },
-            // **그라디언트는 아직 없다** — 단색으로 근사하면 화면이 틀린 채로 그럴듯해진다.
-            .quad => |q| if (q.gradient == .solid)
-                .{ q.rect, q.fill_role, q.alpha, q.corner_radii }
-            else
-                continue,
-            else => continue,
-        };
+    // 평탄화 규칙(채움 먼저·테두리 뒤·둥근 테두리는 바깥판 + 들인 채움·그라디언트 제외)은 중립이 갖는다 —
+    // `chrome.solid_rects`. 여기는 원점을 더하고 창 밖을 자르는 일만 한다.
+    var rects: std.ArrayList(maru.chrome.solid_rects.SolidRect) = .empty;
+    defer rects.deinit(a);
+    try maru.chrome.solid_rects.flatten(a, ops, tk, &rects);
+    try appendSolidRects(a, rects.items, clip_w, clip_h, origin_x, origin_y, out);
+}
+
+/// 단색 사각들을 셀로 — 창(`clip_w`×`clip_h`) 밖은 자르고, 비면 안 낸다.
+fn appendSolidRects(
+    a: std.mem.Allocator,
+    rects: []const maru.chrome.solid_rects.SolidRect,
+    clip_w: u32,
+    clip_h: u32,
+    origin_x: u32,
+    origin_y: u32,
+    out: *std.ArrayList(d3d11_cells.Cell),
+) !void {
+    for (rects) |sr| {
+        const rect = sr.rect;
         const x0 = @max(rect.x, 0);
         const y0 = @max(rect.y, 0);
         const x1 = @min(rect.x + @as(i32, @intCast(rect.w)), @as(i32, @intCast(clip_w)));
         const y1 = @min(rect.y + @as(i32, @intCast(rect.h)), @as(i32, @intCast(clip_h)));
         if (x1 <= x0 or y1 <= y0) continue;
-        const rgb = tk.get(role);
-        const argb = (@as(u32, alpha) << 24) | (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | rgb.b;
         try out.append(a, d3d11_cells.solidCell(
             @floatFromInt(x0 + @as(i32, @intCast(origin_x))),
             @floatFromInt(y0 + @as(i32, @intCast(origin_y))),
             @floatFromInt(x1 - x0),
             @floatFromInt(y1 - y0),
-            d3d11_cells.colorFromArgb(argb),
-            .{ @floatFromInt(radii[0]), @floatFromInt(radii[1]), @floatFromInt(radii[2]), @floatFromInt(radii[3]) },
+            d3d11_cells.colorFromArgb(sr.argb),
+            .{ @floatFromInt(sr.radii[0]), @floatFromInt(sr.radii[1]), @floatFromInt(sr.radii[2]), @floatFromInt(sr.radii[3]) },
         ));
     }
 }

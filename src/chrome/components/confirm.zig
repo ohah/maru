@@ -558,14 +558,15 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
 }
 
 /// 마우스 클릭(backing px) hit-test — 확인 버튼 위면 confirmed, 취소 버튼 위면 cancelled, **패널 밖이면 cancelled**
-/// (바깥 클릭 dismiss 관례), 패널 안 비-버튼이면 null(소비, 무동작). 닫혀 있거나 좌표 비유한이면 null. view와 같은
+/// (바깥 클릭 dismiss 관례), 패널 안 비-버튼이면 null(소비, 무동작). 「패널」은 **보이는** 사각형이다
+/// (`modal_box.visibleRect` — rich 는 패딩만큼 크다). 닫혀 있거나 좌표 비유한이면 null. view와 같은
 /// buttonGeom을 써 그려진 버튼과 클릭 영역이 항상 일치한다(view↔hitTest 단일 레이아웃). host가 반환 intent를
 /// confirm_accept/confirm_cancel로 디스패치한다(키보드 경로와 동일 후처리).
 pub fn buttonAtPoint(state: *const State, p: props.ChromeProps, tk: *const tokens.Tokens, x_px: f64, y_px: f64) ?Action {
     if (!state.open) return null;
     if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return null;
     const g = buttonGeom(state, p, tk) orelse return null;
-    const b = g.box.rect;
+    const b = modal_box.visibleRect(g.box, p);
     // 비교는 **f64 도메인**으로 한다 — x_px/y_px를 @intFromFloat(i32)로 바꾸면 isFinite여도 i32 범위를 넘는 값(거대
     // backing/스케일·합성 좌표)에서 안전 빌드 패닉(illegal behavior)이다. 형제 hit-test(app_session.collapsedToggleRect)도
     // 같은 이유로 f64로 비교한다(@floatFromInt(rect)). 폭도 f64로 곱해 u32 overflow까지 회피.
@@ -601,6 +602,43 @@ fn fitButtonCols(x: i32, cols: u32, cw: u32, right_px: i32) u32 {
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
 // 헤드리스로 (1) 상태 전이+라벨 주입 (2) 입력→intent 2-갈래 (3) view가 버튼 다이얼로그 구조를 내는지 증명한다.
+
+test "confirm buttonAtPoint: 보이는 패널의 패딩 띠는 「안」이다 — 누르면 소비되고 닫히지 않는다, 그 밖은 취소" {
+    // rich lowering 은 상자를 사방 modal_padding 만큼 키워 그린다. 판정이 키우기 전 rect 를 보면 패널 안쪽 가장자리를
+    // 눌러도 「바깥 클릭」이 되어 확인창이 닫혔다(macOS·Windows 공통 — 2026-10-14).
+    const theme = std.mem.zeroes(tokens.ThemeColors);
+    const tk = tokens.Tokens.rich(theme);
+    var s: State = .{};
+    s.show("실행 중인 명령이 있습니다. 닫을까요?", .{ .confirm = "닫기", .cancel = "취소" });
+    const p: props.ChromeProps = .{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 200, .backing_width_px = 1200, .backing_height_px = 800 },
+        .shape = .fromTokens(&tk),
+    };
+    const g = buttonGeom(&s, p, &tk) orelse return error.NoGeom;
+    const pad: f64 = @floatFromInt(p.shape.modal_padding_px);
+    try std.testing.expect(pad > 0); // 전제: rich 는 패딩이 있다
+    const r = g.box.rect;
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    const x1 = x0 + @as(f64, @floatFromInt(r.w));
+    const y1 = y0 + @as(f64, @floatFromInt(r.h));
+    const my = (y0 + y1) / 2;
+    const mx = (x0 + x1) / 2;
+    // 네 변의 패딩 띠 — 보이는 패널 안이다.
+    try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, x0 - pad + 1, my));
+    try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, x1 + pad - 1, my));
+    try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, mx, y0 - pad + 1));
+    try std.testing.expectEqual(@as(?Action, null), buttonAtPoint(&s, p, &tk, mx, y1 + pad - 1));
+    // 보이는 패널 밖 — 취소.
+    try std.testing.expectEqual(@as(?Action, .cancelled), buttonAtPoint(&s, p, &tk, x0 - pad - 1, my));
+    try std.testing.expectEqual(@as(?Action, .cancelled), buttonAtPoint(&s, p, &tk, mx, y1 + pad));
+    // 모서리 0 이면 키우지 않는다 — 그리는 쪽(셀 배경)과 같다. 패딩은 그대로 두고 모서리만 0 으로 재야 분기를 잰다
+    // (패딩까지 0 이면 키워도 같은 사각형이라 공회전한다 — 재검증에서 짚었다).
+    const flat: props.ChromeProps = .{ .metrics = p.metrics, .shape = .{ .corner_radius_px = 0, .border_width_px = p.shape.border_width_px, .modal_padding_px = p.shape.modal_padding_px } };
+    const gf = buttonGeom(&s, flat, &tk) orelse return error.NoGeom;
+    const fx0: f64 = @floatFromInt(gf.box.rect.x);
+    try std.testing.expectEqual(@as(?Action, .cancelled), buttonAtPoint(&s, flat, &tk, fx0 - 1, (@as(f64, @floatFromInt(gf.box.rect.y)) + @as(f64, @floatFromInt(gf.box.rect.y + @as(i32, @intCast(gf.box.rect.h))))) / 2));
+}
 
 test "confirm state: show가 메시지+버튼 라벨을 주입, dismiss로 닫힘(재사용 — 라벨 가변)" {
     var s = State{};

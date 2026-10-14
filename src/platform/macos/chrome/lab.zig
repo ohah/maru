@@ -1745,7 +1745,7 @@ const commit_fixture_caret: usize = 40;
 /// 사방 12px 패딩인데 Lab 캡처와 골든은 직각 셀 밴드였고, 그래서 선택 행 강조가 상자 끝까지 닿아 보였다
 /// (2026-10-07 골든 픽셀로 확인 — 행 y=12 가 x 8..127 을 테두리 없이 채웠다).
 fn overlayShape(tokens: *const chrome.Tokens) chrome.props.ShapeTokens {
-    return .{ .corner_radius_px = tokens.space.corner_radius_px, .border_width_px = tokens.space.border_width_px, .modal_padding_px = tokens.space.modal_padding_px };
+    return .fromTokens(tokens);
 }
 
 /// 체크 열이 있는 컨텍스트 메뉴 한 프레임. **제품과 같은 `context_menu.view` 를 부른다** — 조합을 Lab 이

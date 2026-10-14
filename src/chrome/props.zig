@@ -2,6 +2,7 @@
 //! 넘긴다. 컴포넌트는 session을 직접 모른다(raw *Pane/*Split를 노출하지 않는다). C0/Notice는 metrics만
 //! 필요하다. workspaces·active_tree(LeafRect/DividerSeg)·pane_tabs 같은 풀 필드는 tabbar/sidebar 이주
 //! (C2/C3)에서 추가한다. 단일 출처: docs/chrome-strategy.md §5.5, docs/layering-and-portability.md §3.
+const tokens = @import("tokens.zig");
 
 /// 그리드/픽셀 메트릭(전부 plain 값 — terminal 타입을 import하지 않는다).
 pub const CellMetrics = struct {
@@ -45,6 +46,17 @@ pub const ShapeTokens = struct {
     // C4b 모달: 배경 박스가 텍스트보다 큰 안쪽 여백(px). view가 폭 상한을 이 값의 2배만큼 줄여(텍스트 폭 양보)
     // platform lowering의 ±pad 확장 후에도 박스가 터미널 영역 안에 들도록 한다(box geometry 단일 출처=view).
     modal_padding_px: u16 = 0,
+
+    /// 토큰(`space`)에서 박스 모양을 뽑는다 — **모든 호스트가 이것 하나를 부른다**(macOS `buildChromeProps`·Windows
+    /// 확인 모달·Chrome Lab). 호스트마다 필드를 손으로 옮겨 적으면 한쪽이 빠뜨린 채 컴파일된다: 기본값이 0 이라
+    /// 빠뜨린 호스트는 조용히 기반 모양(직각·테두리 0·패딩 0)으로 그린다 — Windows 확인 모달이 그랬다(2026-10-14).
+    pub fn fromTokens(tk: *const tokens.Tokens) ShapeTokens {
+        return .{
+            .corner_radius_px = tk.space.corner_radius_px,
+            .border_width_px = tk.space.border_width_px,
+            .modal_padding_px = tk.space.modal_padding_px,
+        };
+    }
     // NOTE: `card_gap_px`는 여기 없다. 밴드 인셋이 폐기되면서(docs/sidebar-agent-list.md §3.2 — 밴드=클릭 행)
     // chrome 쪽 소비처가 0이 됐고, 남은 용도(카드 텍스트 좌측 들여쓰기)는 platform이 `tokens.space.card_gap_px`를
     // 직접 읽는다. 값을 props로 계속 실어 나르면 "여길 바꾸면 카드 간격이 바뀐다"는 거짓 seam이 남는다.
@@ -86,3 +98,16 @@ pub const ChromeProps = struct {
     /// 활성 pane rect(find 오버레이 위치 단일 출처). 기본 0 = 미초기화(findLayout이 창 전체로 폴백).
     active_pane: PaneRect = .{},
 };
+
+test "ShapeTokens.fromTokens: 제품 토큰(rich)의 모양을 그대로, 기반 토큰은 0 으로" {
+    const std = @import("std");
+    const theme = std.mem.zeroes(tokens.ThemeColors);
+    const rich = tokens.Tokens.rich(theme);
+    const s = ShapeTokens.fromTokens(&rich);
+    try std.testing.expectEqual(rich.space.corner_radius_px, s.corner_radius_px);
+    try std.testing.expectEqual(rich.space.border_width_px, s.border_width_px);
+    try std.testing.expectEqual(rich.space.modal_padding_px, s.modal_padding_px);
+    try std.testing.expect(s.corner_radius_px > 0 and s.border_width_px > 0 and s.modal_padding_px > 0); // 전제: rich 는 0 이 아니다
+    const base = tokens.Tokens.base(theme);
+    try std.testing.expectEqual(ShapeTokens{}, ShapeTokens.fromTokens(&base));
+}

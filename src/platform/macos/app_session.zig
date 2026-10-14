@@ -40674,8 +40674,8 @@ test "flagPrefixedLabel: running=●+이름, 아니면 이름만" {
 // agentDisplayVisible(pollAgentKinds/State의 metal_dirty 게이트)은 **화면에 running 표시가 보이는 탭**만 true —
 // 접힘/최소크롬 + 비활성 탭이면 진짜 안 보여 false(백그라운드 Term churn으로 헛 재렌더 방지). 여기선 단일 탭이라
 // (탭0=활성) 탭바(paneBarHeightPx>0)만으로도 true이고, 접힘+비활성으로 만들면 false가 되는 걸 고정한다.
-test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다" {
-    // 슬롯 위=클릭 가능(pointingHand), 바 안 여백=화살표. 렌더 강조와 커서가 같은 판정을 쓰는지 함께 본다.
+test "도크 뷰 스위처: slotAtPoint 는 슬롯 위에서만 슬롯을 낸다(바 안 여백은 null)" {
+    // 순수 기하 — 실제 hover 커서·강조 경로는 아래 「도크 뷰 스위처: 실제 hover 는 …」 가 세션으로 잰다.
     const bar = chrome.components.dock_view_bar.Rect{ .x = 100, .y = 40, .w = chrome.components.dock_view_bar.default_slot_cols * 10 * chrome.components.dock_view_bar.slot_count + 20, .h = 24 };
     const cw: u32 = 10;
     // 격자는 hit-test 와 렌더가 공유하는 자리에서 온다. 여기서는 칸 수를 고정한 격자(`fixedCols` 4칸)로 옛 값을 지킨다.
@@ -40693,6 +40693,51 @@ test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다
     );
     // 슬롯이 끝나면 그 뒤는 여백이라 null(커서도 default 가 된다).
     try std.testing.expect(bar_mod.slotAtPoint(bar, cg, bar.x + slots_px, 50) == null);
+}
+
+// 실제 hover 경로(`hoverCursor` → `dockViewSlotAt` → `setHoveredDockViewSlot`)를 세션으로 잰다 — 슬롯 위는 누를 수 있는
+// 자리(.link)이고 강조할 슬롯이 정해지며, 마지막 슬롯과 동작 버튼 사이 여백은 화살표(.default)·강조 없음이다. 위의 순수
+// 기하 테스트는 이 경로를 부르지 않아, 커서 분기나 강조 상태가 틀려도 통과했다.
+test "도크 뷰 스위처: 실제 hover 는 슬롯 위에서만 포인터를 바꾸고 그 슬롯을 강조한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 900, 600, session.scale_milli);
+    const launcher = file_panel_ops.filePanelDockControlRect(session) orelse return error.MissingDockLauncher;
+    session.mouse(1, @floatFromInt(launcher.x + 1), @floatFromInt(launcher.y + 1), 0, 0);
+    try std.testing.expect(dock_ops.dockVisible(session));
+    _ = session.takeFilePanelPickRequest();
+
+    const dg = dock_ops.dockGeometry(session);
+    try std.testing.expect(dg.view_bar.h > 0); // 이 창에서는 뷰 바가 선다(접힌 형상이면 아무것도 안 잰다)
+    const bar_mod = chrome.components.dock_view_bar;
+    const bar: bar_mod.Rect = .{ .x = dg.view_bar.x, .y = dg.view_bar.y, .w = dg.view_bar.w, .h = dg.view_bar.h };
+    const grid = session.dockViewBarGrid();
+    const y: f64 = @floatFromInt(dg.view_bar.y + dg.view_bar.h / 2);
+    // 슬롯마다 가운데 → .link + 그 슬롯이 강조 대상.
+    for (0..bar_mod.slot_count) |slot| {
+        const r = bar_mod.slotRect(bar, grid, slot) orelse return error.TestUnexpectedResult;
+        const x: f64 = @floatFromInt(r.x + r.w / 2);
+        try std.testing.expectEqual(CursorKind.link, session.hoverCursor(x, y, 0));
+        try std.testing.expectEqual(@as(?usize, slot), session.dock_view_hovered_slot);
+    }
+    // 마지막 슬롯 바로 뒤 여백 → .default + 강조 없음. 그 자리가 동작 버튼도 아닌지 먼저 본다(판별력).
+    const last = bar_mod.slotRect(bar, grid, bar_mod.slot_count - 1) orelse return error.TestUnexpectedResult;
+    const gap_x: f64 = @floatFromInt(last.x + last.w + 1);
+    try std.testing.expect(dock_ops.dockViewSlotAt(session, gap_x, y) == null);
+    try std.testing.expect(dock_ops.dockActionAt(session, gap_x, y) == null);
+    try std.testing.expectEqual(CursorKind.default, session.hoverCursor(gap_x, y, 0));
+    try std.testing.expectEqual(@as(?usize, null), session.dock_view_hovered_slot);
 }
 
 test "도크 뷰 스위처: 슬롯 index 대응과 포커스 되돌림" {
@@ -64400,9 +64445,8 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
         .command_kind = @intFromEnum(CommandKind.controlled_smoke),
     });
     defer session.deinit();
-    // 토큰은 고정하지 않는다 — 실제 핸들러는 제품 토큰(rich, tokens.tab_width_cols=16)으로 barMetrics를 잰다. 아래
-    // barMetrics(…,0,0)(fixed 0 = 균등)로 잰 tab_cols가 그와 같은 이유: 고정 폭은 하한이라(tabLayout) 탭이 1개면 어느
-    // 쪽이든 그 탭이 탭 영역을 꽉 채워 "+" zone이 tab_cols에서 시작한다(바 800px라 넘침·‹› 없음).
+    // 클릭 좌표는 실제 핸들러와 **같은 입력**(탭 영역 `pb.tabs` · 제품 토큰 `tab_width_cols`)으로 잰다. 예전엔
+    // `barMetrics(paneBarRect, …, 0, 0)`(fixed 0 균등)으로 쟀고, 탭 1개 · 바 800px 라 우연히 같은 자리였다.
     session.window_padding_px = .{}; // 레이아웃 기하만 격리 — window padding(기본 8/4) inset은 gridFromBacking·loader 전용 테스트가 커버
     _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).terms.items.len);
@@ -64411,12 +64455,12 @@ test "clicking the bar '+' button spawns a new Term in that pane" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
-    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 1, 0, 0).?;
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
+    const m = barMetrics(pb.tabs, session.cell_width_px, 1, session.buildChromeTokens().space.tab_width_cols, lr.items[0].leaf.tab_scroll_cols).?;
     try std.testing.expect(m.hasPlusZone()); // 바가 넓어 "+" zone이 존재
-    // "+" zone = col [tab_cols, cols). 첫 col 중앙을 클릭.
-    const plus_x: f64 = @floatFromInt(bar.x + m.tab_cols * session.cell_width_px + session.cell_width_px / 2);
-    const bar_y: f64 = @floatFromInt(bar.y + 1);
+    // "+" zone 가운데 칸을 클릭(✕·+ 호버 테스트와 같은 식).
+    const plus_x: f64 = @floatFromInt(pb.tabs.x + (m.plusZoneStart() + chrome.components.tabbar.Metrics.plus_button_cols / 2) * session.cell_width_px);
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
     try std.testing.expect(m.inPlusZone(plus_x)); // "+" zone 안
 
     // "+" 클릭 → 새 Term → 2개.
@@ -64447,18 +64491,19 @@ test "hovering the '+' button does not mark the last tab for close" {
     var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
     defer lr.deinit(allocator);
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
-    const bar = pane_ops.paneBarRect(session, lr.items[0].rect).?;
-    const m = barMetrics(bar, session.cell_width_px, 2, 0, 0).?;
-    const bar_y: f64 = @floatFromInt(bar.y + 1);
+    // 좌표는 실제 핸들러와 같은 입력(탭 영역 `pb.tabs` · 제품 토큰 `tab_width_cols`)으로 잰다 — 예전 fixed 0 균등은 우연히 같았다.
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
+    const m = barMetrics(pb.tabs, session.cell_width_px, 2, session.buildChromeTokens().space.tab_width_cols, lr.items[0].leaf.tab_scroll_cols).?;
+    const bar_y: f64 = @floatFromInt(pb.full.y + 1);
 
     // 마지막 탭(탭 1) 위 호버 → hovered_tab = 탭 1(정상).
-    const tab1_x: f64 = @floatFromInt(bar.x + (m.tab_cols - 1) * session.cell_width_px); // 탭 영역 우측 끝(탭 1)
+    const tab1_x: f64 = m.segOf(1).start_px + 1; // 탭 1 세그먼트 안
     _ = session.hoverCursor(tab1_x, bar_y, 0);
     try std.testing.expect(session.hovered_tab != null);
     try std.testing.expectEqual(@as(usize, 1), session.hovered_tab.?.tab);
 
     // "+" zone 위 호버 → hovered_tab 비워짐(마지막 탭로 clamp되지 않는다 — ✕ 오표시 방지).
-    const plus_x: f64 = @floatFromInt(bar.x + m.tab_cols * session.cell_width_px + session.cell_width_px / 2);
+    const plus_x: f64 = @floatFromInt(pb.tabs.x + (m.plusZoneStart() + chrome.components.tabbar.Metrics.plus_button_cols / 2) * session.cell_width_px);
     try std.testing.expect(m.inPlusZone(plus_x));
     _ = session.hoverCursor(plus_x, bar_y, 0);
     try std.testing.expect(session.hovered_tab == null);
@@ -65014,9 +65059,10 @@ test "dragging a Term tab reorders it within the pane" {
     defer lr.deinit(allocator);
     try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
     const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?; // 탭은 grip 뒤 pb.tabs부터
-    const m = barMetrics(pb.tabs, session.cell_width_px, 3, 0, 0).?;
-    const tab0_x: f64 = @floatFromInt(pb.tabs.x + (0 * m.tab_w + 1) * session.cell_width_px); // 탭 0 세그먼트(✕ 아님)
-    const tab2_x: f64 = @floatFromInt(pb.tabs.x + (2 * m.tab_w + 1) * session.cell_width_px); // 탭 2 세그먼트
+    // 좌표는 실제 핸들러와 같은 입력(제품 토큰 `tab_width_cols`)으로 잰다 — 예전 fixed 0 균등은 우연히 같았다.
+    const m = barMetrics(pb.tabs, session.cell_width_px, 3, session.buildChromeTokens().space.tab_width_cols, lr.items[0].leaf.tab_scroll_cols).?;
+    const tab0_x: f64 = m.segOf(0).start_px + @as(f64, @floatFromInt(session.cell_width_px)); // 탭 0 세그먼트 첫 칸 뒤(✕ 아님)
+    const tab2_x: f64 = m.segOf(2).start_px + @as(f64, @floatFromInt(session.cell_width_px)); // 탭 2 세그먼트
     const bar_y: f64 = @floatFromInt(pb.full.y + 1);
 
     // 탭 0 down → 드래그 arm. drag to 탭 2 → 재정렬. up → 종료.

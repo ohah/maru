@@ -295,7 +295,8 @@ pub fn writeDisplaySafeJsonText(w: *std.Io.Writer, text: []const u8) std.Io.Writ
     while (i < text.len) {
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
         if (len == 1 or i + len > text.len) {
-            try w.writeByte(text[i]);
+            // U+007F(DEL)도 보이지 않는 글자다(10 회차) — 한 바이트 글자 중 그것만.
+            if (text[i] == 0x7f) try w.writeAll("\\u007f") else try w.writeByte(text[i]);
             i += 1;
             continue;
         }
@@ -3360,4 +3361,47 @@ test "W9a③ 적대 리뷰 9 회차 재현: exec 결과(페이지가 정한 글)
     _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"result\":\"\\\"t\\u009b2J\\u202ex\\u2028y\\\"\"}}", .exec, &w);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "\xc2\x9b") == null);
     try testing.expect(std.mem.indexOf(u8, w.buffered(), "\xe2\x80\xae") == null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "\xe2\x80\xa8") == null); // U+2028
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "\\u2028") != null);
+    // 보충 평면의 태그 글자는 서로게이트 쌍으로(U+E0041 = \udb40\udc41).
+    w = .fixed(&buf);
+    try writeDisplaySafeJsonText(&w, "\"a\u{e0041}b\"");
+    try testing.expectEqualStrings("\"a\\udb40\\udc41b\"", w.buffered());
+}
+
+test "W9a③ 적대 리뷰 10 회차 재현 F3: exec 글의 U+007F(DEL)도 \\u 로 — 전에는 그대로 나갔다" {
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeDisplaySafeJsonText(&w, "\"a\x7fb\"");
+    try testing.expect(std.mem.indexOfScalar(u8, w.buffered(), 0x7f) == null);
+}
+
+test "W9a③ 적대 리뷰 10 회차: exec 글 — 무작위 엄격 JSON 문자열이 그대로 돌아오고 보이지 않는 글자는 남지 않는다" {
+    var prng = std.Random.DefaultPrng.init(0x5eed10);
+    const rnd = prng.random();
+    const pool = [_]u21{ 'a', '"', '\\', 0x7f, 0x80, 0x9b, 0x9f, 0xa0, 0x61c, 0x200e, 0x2028, 0x2029, 0x202e, 0x2066, 0x2069, 0xfff9, 0xfffb, 0xfffd, 0xac00, 0x1f600, 0xe0001, 0xe0041, 0xe007f, 0xe0080, 0x10ffff, 0x0a, 0x01 };
+    var i: usize = 0;
+    while (i < 3000) : (i += 1) {
+        var src: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer src.deinit();
+        var s: std.ArrayList(u8) = .empty;
+        defer s.deinit(testing.allocator);
+        const n = rnd.uintLessThan(usize, 12);
+        var k: usize = 0;
+        while (k < n) : (k += 1) {
+            var tmp: [4]u8 = undefined;
+            const cpt = pool[rnd.uintLessThan(usize, pool.len)];
+            const l = try std.unicode.utf8Encode(cpt, &tmp);
+            try s.appendSlice(testing.allocator, tmp[0..l]);
+        }
+        try std.json.Stringify.value(s.items, .{}, &src.writer);
+        var out: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer out.deinit();
+        try writeDisplaySafeJsonText(&out.writer, src.written());
+        const parsed = try std.json.parseFromSlice([]const u8, testing.allocator, out.written(), .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings(s.items, parsed.value);
+        var it = (try std.unicode.Utf8View.init(out.written())).iterator();
+        while (it.nextCodepoint()) |c| try testing.expect(!(c >= 0x7f and displayUnsafe(c)));
+    }
 }

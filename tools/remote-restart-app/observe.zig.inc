@@ -19,5 +19,9 @@ export fn maru_remote_restart_ready() callconv(.c) i32 {
         @tagName(term.agent_state), @tagName(term.hook.notice.kind), self.remote_nonce_matched,
         term.agent_remote_nonce[0..term.agent_remote_nonce_len], term.surfaceId(),
     });
+    if (std.c.getenv("MARU_REMOTE_PROVIDER_GUI") != null)
+        std.debug.print("PROVIDER_BADGE provider={s} state={s} session={s}\n", .{
+            @tagName(term.agent_kind), @tagName(term.agent_state), term.hook.transcript.identity(),
+        });
     return if (term.agent_state == .idle) 1 else 2;
 }

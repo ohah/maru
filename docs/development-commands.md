@@ -104,7 +104,7 @@ check에 포함되며 결과는 `tests/artifacts/agent-log-stream/`에만 남긴
 `python3 tools/test-remote-agent-native.py --cli <maru> [--old-cli <legacy maru>] [--providers] [--frames-output <private file>]`는 별도 키·HOME·
 sshd로 실제 SSH를 실행해 기존/새 프로세스, 환경 전달 차단, 훅 비활성화, 구 CLI와 설치된
 합성 provider 훅의 파일·혼합 wire를 대조한다. 사용자 설정·인증 정보는 수정하지 않는다.
-기본 하네스는 합성 payload를 사용한다. `--providers`는 설치된 Claude/Codex의 읽기 전용 모델 턴을 명시적으로 실행하고 버전을 기록한다. `--frames-output`은 실제 SSH wire를 로컬 전용 파일에 저장한다. `zig build test-remote-agent-log-profile -Dremote-native-frames=<private file>`은 그 wire를 제품 GUI의 배지·턴 캡처 경로에 재생한다.
+기본 하네스는 합성 payload를 사용한다. `--providers`는 설치된 Claude/Codex의 읽기 전용 모델 턴을 명시적으로 실행하고 버전을 기록한다. 실제 macOS 창에서는 `tools/remote-restart-app/prepare.py`로 만든 bundle의 CLI와 앱 실행 파일을 `--providers --gui-providers --gui-app <maru-macos-app> --gui-output <새 디렉터리>`에 전달한다. GUI 준비 뒤 실제 provider를 실행하고 원본 훅·session ID·실행 배지·원격 턴 봉인을 대조한다. `python3 tools/remote-restart-app/test_oracle.py --artifact <GUI artifact>`는 그 실제 trace에서 증거를 제거하거나 바꿔 false-positive를 검사한다. `--frames-output`은 실제 SSH wire를 로컬 전용 파일에 저장한다. `zig build test-remote-agent-log-profile -Dremote-native-frames=<private file>`은 그 wire를 제품 GUI의 배지·턴 캡처 경로에 재생한다.
 혼합 CLI는 `maru agent-events --stdio --dir=<home>/.cache/maru --log-format=mixed`다.
 profile별 resume는 `1:<name>:<offset>`·`2:<name>:<offset>:<generation>`이며 같은 이름을
 다른 profile에 사용할 수 있지만 같은 profile/name 중복은 거부한다. `agent-hooks check-native`

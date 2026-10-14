@@ -3,7 +3,21 @@
 import hashlib, json, os, re, shlex, signal, subprocess, sys, time, uuid
 from pathlib import Path
 
-def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts):
+def verify_provider_gui(text, provider):
+    """Require the same real session in live hooks, the product badge and the sealed store."""
+    sessions = re.findall(r'PROVIDER_APPLIED provider=' + provider + r' event=stop session=(\S+) replay=false', text)
+    # Startup fixtures can race the initial watermark; their identities are not provider proof.
+    sessions = [sid for sid in sessions if sid not in {'native-case', 'legacy-case'}]
+    if len(set(sessions)) != 1: raise RuntimeError(provider + ' requires one unambiguous live Stop session')
+    if not any(re.search(r'PROVIDER_APPLIED provider=' + provider + r' event=\w+ session=' + re.escape(sid) + r' replay=false state=running', text) for sid in sessions):
+        raise RuntimeError(provider + ' running badge was not observed')
+    if not any(re.search(r'PROVIDER_BADGE provider=' + provider + r' state=running session=' + re.escape(sid), text) for sid in sessions):
+        raise RuntimeError(provider + ' product badge was not observed running')
+    if not any(re.search(r'PROVIDER_CAPTURE session=' + re.escape(sid) + r' capture=[1-9]\d* remote=true shell_calls=[1-9]', text) for sid in sessions):
+        raise RuntimeError(provider + ' remote shell turn was not sealed')
+    return set(sessions)
+
+def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, providers=False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'shared-restore-app'))
     from gui_launch import GUIApp, process_identity
     app = Path(app).resolve()
@@ -31,10 +45,11 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts):
     childenv.update(HOME=str(home), CFFIXED_USER_HOME=str(home), XDG_CACHE_HOME=str(home / '.cache'),
                     MARU_CONFIG=str(config), MARU_SESSION_HOST_ROOT=str(host_root),
                     MARU_REMOTE_RESTART_NOTICE_ID=marker, MARU_REMOTE_RESTART_CAPTURE="1")
+    if providers: childenv["MARU_REMOTE_PROVIDER_GUI"] = "1"
     cache = home / '.cache/maru'; cache.mkdir(parents=True)
     (cache / 'ssh-terminfo-hosts').write_text(alias + '\n')
     (remote / 'gui-hold').touch()
-    children = []; owned_hosts = {}
+    children = []; owned_hosts = {}; replay_expected = 10
     def wait_for(predicate, label, seconds=45):
         deadline = time.monotonic() + seconds
         while not predicate():
@@ -46,7 +61,7 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts):
         child = GUIApp(app, phaseenv, output); children.append(child)
         wait_for(lambda: (output / 'ready').exists() and (output / 'frame.ppm').exists(), name + ' GUI/SSH did not become ready')
         # Every initial and offline event must traverse the actual reader before judging replay.
-        expected = 2 if name == 'seed' else 10
+        expected = 2 if name == 'seed' else replay_expected
         wait_for(lambda: (output / 'app.stderr.txt').read_text(errors='replace').count(
             'REMOTE_RESTART_APPLIED replay=' + ('true' if name == 'restore' else '')) == expected, name + ' missing replay events')
         text = (output / 'app.stderr.txt').read_text(errors='replace')
@@ -73,6 +88,49 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts):
         owner = json.loads((remote / 'gui-owner.json').read_text())
         if owner['nonce'] != first[3] or owner['format'] != '2':
             raise RuntimeError('remote process and GUI identity/profile disagree')
+        if providers:
+            (remote / 'provider-start').touch()
+            wait_for(lambda: (remote / 'provider-done').exists(), 'real providers did not complete', 140)
+            wait_for(lambda: all('PROVIDER_APPLIED provider=' + name + ' event=stop ' in
+                (seed_output / 'app.stderr.txt').read_text(errors='replace') for name in ['claude', 'codex']),
+                'provider exit preceded missing GUI Stop')
+            provider_text = (seed_output / 'app.stderr.txt').read_text(errors='replace')
+            provider_sessions = {}
+            for provider in ['claude', 'codex']:
+                record = json.loads((remote / ('provider-' + provider + '.json')).read_text())
+                (artifacts / ('provider-' + provider + '.json')).write_text(json.dumps(record) + '\n')
+                provider_sessions[provider] = verify_provider_gui(provider_text, provider)
+            # Read the provider-written files through an independent CLI reader. Synthetic
+            # startup IDs are excluded by matching each actual provider's GUI session IDs.
+            reader = subprocess.Popen([cli, 'agent-events', '--stdio', '--dir=' + str(remote / '.cache/maru'),
+                '--log-format=mixed', '--heartbeat-ms=200'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                try: raw, err = reader.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    reader.terminate(); raw, err = reader.communicate(timeout=5)
+            finally:
+                if reader.poll() is None: reader.kill(); reader.wait(timeout=5)
+            source_events = []
+            for line in raw.splitlines():
+                row = json.loads(line); frame = row.get('frame', {})
+                if frame.get('nonce') != owner['nonce'] or 'line' not in frame: continue
+                name, payload = frame['line'].split('\t', 1); event = json.loads(payload)
+                if name not in ['claude', 'codex']: continue
+                sid = event.get('session_id', '')
+                if sid in provider_sessions[name]:
+                    tool_input = event.get('tool_input') or {}
+                    command = tool_input.get('command', tool_input.get('cmd', '')) if isinstance(tool_input, dict) else ''
+                    source_events.append({'provider': name, 'session_id': sid, 'format': row['format'],
+                        'event': event['hook_event_name'], 'command': command})
+            for name in ['claude', 'codex']:
+                events = {e['event'] for e in source_events if e['provider'] == name and e['format'] == 2}
+                if not {'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'}.issubset(events):
+                    raise RuntimeError(name + ' actual provider file oracle lacks expected hooks: ' + repr(events))
+                commands = [e['command'] for e in source_events if e['provider'] == name and e['event'] == 'PreToolUse']
+                if commands != ['pwd']: raise RuntimeError(name + ' did not execute exactly one read-only pwd tool')
+            (artifacts / 'provider-hook-oracle.json').write_text(json.dumps(source_events, indent=2) + '\n')
+            replay_expected = provider_text.count('REMOTE_RESTART_APPLIED replay=') + 8
+            (artifacts / 'provider-gui.json').write_text(json.dumps({'actual_providers': ['claude', 'codex'], 'live_reader': True, 'remote_sealed_capture': True}) + '\n')
         quit_phase(seed, seed_output)
         if not all(process_identity(pid) == identity for pid, identity in owned_hosts.items()):
             raise RuntimeError('persistent host did not survive app quit')
@@ -95,12 +153,12 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts):
         wait_for(lambda: (restore_output / 'app.stderr.txt').read_text(errors='replace').count('REMOTE_RESTART_APPLIED replay=false') == 8, 'new live events were lost')
         quit_phase(restored, restore_output)
         (artifacts / 'result.json').write_text(json.dumps(dict(seed_pid=seed.pid, restore_pid=restored.pid,
-            restored_runtime=True, runtime_nonce=first[3], replay_events=10, live_events=8,
+            restored_runtime=True, runtime_nonce=first[3], replay_events=replay_expected, live_events=8,
             past_notice=False, live_notice=True, actual_windows=True, os_banner_verified=False), indent=2) + '\n')
     finally:
         discover_hosts() # Readiness failures must also settle their owned persistent host.
         # Keep bounded diagnostics after the private carrier removes its temporary root.
-        for path in [root / 'trace.jsonl', root / 'sshd.log', remote / 'gui-owner.json', home / 'Library/Application Support/maru/workspace.v1']:
+        for path in list((host_root / 'session-host').glob('*.log')) + [root / 'trace.jsonl', root / 'sshd.log', remote / 'gui-owner.json', home / 'Library/Application Support/maru/workspace.v1']:
             if path.exists(): (artifacts / path.name).write_bytes(path.read_bytes()[-131072:])
         (remote / 'gui-release').touch(); (remote / 'gui-hold').unlink(missing_ok=True)
         for child in children:

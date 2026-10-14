@@ -933,7 +933,7 @@ fn diagnosticViews(self: *AppSession, term: *Term, visible_len: usize) ?diagnost
     const doc = term.rt.editorDocument().opened orelse return null;
     const st = &term.rt.editor_diagnostics;
     const prov: ?*syntax_color.syntax.Provider = if (term.rt.editor_syntax.provider) |*p| p else null;
-    _ = diagnostics.refreshFromSyntax(st, self.allocator, prov);
+    _ = diagnostics.refreshFromSyntax(st, self.allocator, prov, term.rt.editor_grammar.syntaxDiagnostics());
     return diagnostics.buildViews(st, self.allocator, doc.file.lines, term.rt.editor_visible_numbers, visible_len);
 }
 
@@ -13468,6 +13468,40 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     _ = try fx.session.handleKeyEvent(.{ .key = .home });
     try testing.expectEqual(@as(u32, 5), term.rt.editor_first_col);
     term.rt.editor_wrap = false;
+}
+
+test "DGP2 SQL 은 구문 오류를 진단으로 안 낸다 — 방언을 못 가리는 grammar 의 거짓 오류(BL3 사용자 결정), 같은 프레임에서 Dart 의 구문 오류는 선다 (제품 경계, §5.4)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    var dir = testing.tmpDir(.{});
+    defer dir.cleanup();
+    // 둘 다 진짜로 깨진 원문이다 — SQL 은 SQLite 의 `AUTOINCREMENT`(grammar 가 모른다), Dart 는 닫는 괄호가 없다.
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "m.sql", .data = "CREATE TABLE t (\n    id INTEGER PRIMARY KEY AUTOINCREMENT\n);\n" });
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "m.dart", .data = "void f() {\n  g(1;\n}\n" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
+    fx.session.surface_initialized = true;
+    fx.session.backing_width_px = 1200;
+    fx.session.backing_height_px = 800;
+    inline for (.{ .{ "m.sql", false }, .{ "m.dart", true } }) |k| {
+        const path = try std.fs.path.join(allocator, &.{ root, k[0] });
+        defer allocator.free(path);
+        const term = try openPathInActivePane(fx.session, path);
+        var rounds: usize = 0;
+        while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
+        // 트리에는 오류가 있다 — 끄는 것은 진단 출처지 파싱이 아니다.
+        var raw: std.ArrayList(syntax_color.syntax.Provider.SyntaxError) = .empty;
+        defer raw.deinit(allocator);
+        try testing.expect(try term.rt.editor_syntax.provider.?.syntaxErrors(allocator, &raw));
+        try testing.expect(raw.items.len >= 1);
+        const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
+        fx.session.gpu_quads.clearRetainingCapacity();
+        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        d.dl.deinit(allocator);
+        try testing.expectEqual(k[1], term.rt.editor_diagnostics.list.items.len >= 1);
+    }
 }
 
 test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄·막대 마커·미니맵 행으로 서고, F8/⇧F8 이 감기며, 고치면 사라지고, 끄면 넷 다 없다 (제품 경계, §5.4)" {

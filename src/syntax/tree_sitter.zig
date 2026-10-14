@@ -54,6 +54,8 @@ extern fn tree_sitter_lua() *const c.TSLanguage;
 extern fn tree_sitter_dockerfile() *const c.TSLanguage;
 extern fn tree_sitter_make() *const c.TSLanguage;
 extern fn tree_sitter_swift() *const c.TSLanguage;
+extern fn tree_sitter_sql() *const c.TSLanguage;
+extern fn tree_sitter_dart() *const c.TSLanguage;
 
 /// 하이라이트 쿼리 — **grammar가 소유한다**(빌드가 익명 import로 꽂는다. `build.zig`의 grammar 표가
 /// 같은 이름을 쓴다 — 둘이 갈리면 컴파일이 죽는다).
@@ -83,6 +85,8 @@ const lua_highlights = @embedFile("lua_highlights_scm");
 const dockerfile_highlights = @embedFile("dockerfile_highlights_scm");
 const make_highlights = @embedFile("make_highlights_scm");
 const swift_highlights = @embedFile("swift_highlights_scm");
+const sql_highlights = @embedFile("sql_highlights_scm");
+const dart_highlights = @embedFile("dart_highlights_scm");
 
 /// **파싱 상한**(§5.3 — "파싱 대상 크기·시간 상한"). 이 크기를 넘는 문서는 무색이다.
 ///
@@ -104,7 +108,7 @@ pub const Span = struct {
 
 /// `session/editor/language.zig`의 열거와 **같은 축**을 쓰되, 이 모듈은 maru를 못 들여오므로
 /// (모듈이 다르다) 필요한 것만 다시 적는다. 그 열거를 이 축으로 옮기는 것은 아래 `languageFor` 하나다.
-pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, yaml, toml, xml, dtd, lua, dockerfile, make, swift, other };
+pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, yaml, toml, xml, dtd, lua, dockerfile, make, swift, sql, dart, other };
 
 /// 같은 이름의 태그(`session/editor/language.zig` 의 `Grammar`)를 이 축으로 옮긴다 — **호스트가 다시 적지 않는다**
 /// ([layering-and-portability.md](../../docs/layering-and-portability.md) §3.5). 예전에는 macOS(`app_session/editor/syntax.zig` 의
@@ -228,6 +232,11 @@ const grammar_table = [_]GrammarEntry{
     // BL2. 접힘은 grammar 저장소의 `folds.scm` 에서 형 자리(`type_parameters`·`tuple_type` …)와 `import` 묶음을 뺀 것이다 — 형은 한 줄이
     // 보통이고, 연속 `import` 를 하나로 묶는 것은 노드 하나의 범위가 아니다. Swift 의 `if`·`for` 는 중괄호 블록 노드가 따로 없어 문장째 접는다.
     .{ .lang = .swift, .get = tree_sitter_swift, .scm = swift_highlights, .fold_kinds = &.{ "class_body", "protocol_body", "enum_class_body", "function_body", "computed_property", "computed_getter", "computed_setter", "do_statement", "if_statement", "for_statement", "while_statement", "guard_statement", "switch_statement", "switch_entry", "call_expression", "tuple_expression", "array_literal", "dictionary_literal", "lambda_literal", "willset_didset_block", "willset_clause", "didset_clause" }, .symbol_kinds = &.{ "class_declaration", "protocol_declaration", "function_declaration", "init_declaration", "protocol_function_declaration" } },
+    // BL3. SQL 은 grammar 저장소에 `folds.scm` 이 없어 트리를 보고 골랐다 — 문장째, 열 정의·부분 질의·CTE·함수 본문·괄호 목록·`CASE`·`BEGIN` 블록.
+    // 심볼은 `CREATE …` 문이고 이름은 `object_reference`(스키마까지 — `symbolNameNode`)다.
+    .{ .lang = .sql, .get = tree_sitter_sql, .scm = sql_highlights, .fold_kinds = &.{ "statement", "column_definitions", "subquery", "cte", "function_body", "list", "case", "block", "transaction" }, .symbol_kinds = &.{ "create_table", "create_view", "create_materialized_view", "create_function", "create_index", "create_type", "create_trigger", "create_schema", "create_sequence" } },
+    // Dart 도 `folds.scm` 이 없다. 함수 본문(`function_body`)은 시그니처의 **다음 형제**라 심볼 범위는 `symbolEnd` 가 본문 끝까지 넓힌다.
+    .{ .lang = .dart, .get = tree_sitter_dart, .scm = dart_highlights, .fold_kinds = &.{ "class_body", "enum_body", "extension_body", "block", "switch_block", "switch_statement_case", "switch_statement_default", "switch_expression", "list_literal", "set_or_map_literal", "record_literal", "arguments", "formal_parameter_list" }, .symbol_kinds = &.{ "class_definition", "mixin_declaration", "extension_declaration", "enum_declaration", "function_signature", "getter_signature", "setter_signature", "constructor_signature", "factory_constructor_signature" } },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -759,23 +768,23 @@ pub const Provider = struct {
         while (true) {
             const node = c.ts_tree_cursor_current_node(&cursor);
             const sb = c.ts_node_start_byte(node);
-            const eb = c.ts_node_end_byte(node);
             while (depth > 0 and stack[depth - 1] <= sb) depth -= 1;
 
             if (hasKind(kinds, c.ts_node_type(node)) and isSymbolWorthy(node)) {
                 const name_node = symbolNameNode(node);
                 if (!c.ts_node_is_null(name_node)) {
+                    const end = symbolEnd(node);
                     try out.append(allocator, .{
                         .name_start = c.ts_node_start_byte(name_node),
                         .name_end = c.ts_node_end_byte(name_node),
                         .start = sb,
-                        .end = eb,
+                        .end = end,
                         .start_row = c.ts_node_start_point(node).row,
                         .depth = @intCast(@min(depth, std.math.maxInt(u16))),
                         .kind = std.mem.span(c.ts_node_type(node)),
                     });
                     if (depth < stack.len) {
-                        stack[depth] = eb;
+                        stack[depth] = end;
                         depth += 1;
                     }
                 }
@@ -797,6 +806,17 @@ pub const Provider = struct {
     /// 빼면 `pub const Widget = struct {...}` — zig 에서 **타입을 선언하는 유일한 형태** — 가 사라진다.
     ///
     /// 그래서 **값이 컨테이너일 때만** 심볼로 본다. 그것이 §7.5 의 "클래스" 에 해당하는 자리다.
+    /// 심볼의 끝. 대개 노드의 끝이지만, **본문이 시그니처의 다음 형제인 grammar**(Dart — `function_signature` 다음에 `function_body`, 메서드는
+    /// `method_signature` 로 한 겹 싸였다)는 본문 끝까지다. 안 그러면 심볼이 시그니처 한 줄로 끝나, 본문 안 커서가 그 함수 안이 아니게 된다(체인 조회).
+    fn symbolEnd(node: c.TSNode) u32 {
+        var sig = node;
+        const parent = c.ts_node_parent(node);
+        if (!c.ts_node_is_null(parent) and std.mem.eql(u8, std.mem.span(c.ts_node_type(parent)), "method_signature")) sig = parent;
+        const next = c.ts_node_next_named_sibling(sig);
+        if (!c.ts_node_is_null(next) and std.mem.eql(u8, std.mem.span(c.ts_node_type(next)), "function_body")) return c.ts_node_end_byte(next);
+        return c.ts_node_end_byte(node);
+    }
+
     fn isSymbolWorthy(node: c.TSNode) bool {
         const kind = std.mem.span(c.ts_node_type(node));
         if (!std.mem.eql(u8, kind, "variable_declaration")) return true;
@@ -841,6 +861,9 @@ pub const Provider = struct {
             const child = c.ts_node_named_child(node, i);
             const kind = std.mem.span(c.ts_node_type(child));
             if (std.mem.endsWith(u8, kind, "identifier")) return child;
+            // SQL(BL3)은 이름이 `object_reference`(`schema.table` — 스키마·이름 필드를 가진 노드)다. 통째로 이름이다 — 같은 이름의 표가
+            // 스키마마다 있을 수 있다.
+            if (std.mem.eql(u8, kind, "object_reference")) return child;
             // zig `test "이름"` 처럼 문자열이 이름인 판. **따옴표를 뺀 안쪽**을 쓴다 — 목록에 따옴표가
             // 보이면 그것은 이름이 아니라 리터럴이다.
             if (std.mem.eql(u8, kind, "string")) {
@@ -2374,6 +2397,8 @@ test "SYN18 번들한 grammar 가 전부 실제로 색을 낸다" {
         .{ .lang = .dockerfile, .src = "FROM node:20\n# c\nRUN echo \"hi\"\n" },
         .{ .lang = .make, .src = "a: b\n\techo $(X) # c\n" },
         .{ .lang = .swift, .src = "let x = \"a\" // c\n" },
+        .{ .lang = .sql, .src = "SELECT 'a' FROM t; -- c\n" },
+        .{ .lang = .dart, .src = "var x = 'a'; // c\n" },
     };
     // 표에 든 언어 수와 샘플 수가 같아야 한다 — grammar를 늘리고 샘플을 안 더하면 그 언어가 안 돈다.
     try std.testing.expectEqual(grammar_table.len, samples.len);
@@ -2568,6 +2593,8 @@ test "SYN21 언어마다 접을 것이 있는 표본에서 범위가 나온다 �
         .{ .lang = .dockerfile, .src = "FROM a\nRUN echo 1 && \\\n    echo 2\n" },
         .{ .lang = .make, .src = "a: b\n\techo 1\n\techo 2\n" },
         .{ .lang = .swift, .src = "func f() -> Int {\n    let a = 1\n    return a\n}\n" },
+        .{ .lang = .sql, .src = "CREATE TABLE t (\n    id INT,\n    name TEXT\n);\n" },
+        .{ .lang = .dart, .src = "int f() {\n  var a = 1;\n  return a;\n}\n" },
     };
     try std.testing.expectEqual(grammar_table.len, samples.len);
 
@@ -2761,6 +2788,8 @@ test "SYN25 심볼 종류 목록이 실재하는 노드 이름이다 — 언어�
         .{ .lang = .lua, .src = "function f() end\n", .want = "f" },
         .{ .lang = .make, .src = "define F\n\techo\nendef\n", .want = "F" },
         .{ .lang = .swift, .src = "struct S {\n    func f() {}\n}\n", .want = "S" },
+        .{ .lang = .sql, .src = "CREATE TABLE users (id INT);\n", .want = "users" },
+        .{ .lang = .dart, .src = "class A {\n  void f() {}\n}\n", .want = "A" },
     };
     // **표본이 없는 언어는 종류를 선언할 수 없다.** 이것이 없으면 "종류는 적어 뒀는데 목록은 늘
     // 비는" 상태가 조용히 산다 — markdown 의 `section` 이 정확히 그랬다(이름 노드가 없다). 뮤테이션에서
@@ -3328,6 +3357,26 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
             .{ .start = 21, .open = true, .close_kind = 0 },
             .{ .start = 23, .open = false, .close_kind = 0 },
         } },
+        // Dart(BL3) — 보간 `${…}` 과 그 안은 괄호이고 문자열 글자 속 `(`·`)` 와 제네릭 `<>` 는 아니다.
+        .{ .lang = .dart, .src = "var s = 'a (${f(b)}) $c';\nList<int> x = [1];\nMap<String, int> m = {};\n", .want = &.{
+            .{ .start = 13, .open = true, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 15, .open = true, .close_kind = 0 },
+            .{ .start = 17, .open = false, .close_kind = 0 },
+            .{ .start = 18, .open = false, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 40, .open = true, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 42, .open = false, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 66, .open = true, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 67, .open = false, .close_kind = 2, .open_kind = 2 },
+        } },
+        // SQL(BL3) — 문자열(`'('`)·달러 인용(`$$ ( $$`)·줄 주석 속은 글자다.
+        .{ .lang = .sql, .src = "SELECT f('(') FROM t WHERE a IN (1, 2) AND b[1] = $$ ( $$; -- (\n", .want = &.{
+            .{ .start = 8, .open = true, .close_kind = 0 },
+            .{ .start = 12, .open = false, .close_kind = 0 },
+            .{ .start = 32, .open = true, .close_kind = 0 },
+            .{ .start = 37, .open = false, .close_kind = 0 },
+            .{ .start = 44, .open = true, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 46, .open = false, .close_kind = 1, .open_kind = 1 },
+        } },
         .{ .lang = .c, .src = "#define M(x) (f(x) + \"(\") /* ( */\n", .want = &.{
             .{ .start = 9, .open = true, .close_kind = 0 },
             .{ .start = 11, .open = false, .close_kind = 0 },
@@ -3368,6 +3417,75 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
     try std.testing.expectEqual(@as(usize, 1), index.leaves.items.len);
     try std.testing.expectEqual(@as(u32, 5), index.leaves.items[0].start);
     try std.testing.expect(index.leaves.items[0].open);
+}
+
+test "SYN54 SQL·Dart 심볼 — SQL 은 `CREATE` 문의 스키마까지 이름, Dart 는 본문이 다음 형제여도 심볼 범위가 본문 끝까지다 (번들 언어 확대 BL3)" {
+    const allocator = std.testing.allocator;
+    var syms: std.ArrayList(Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    {
+        const src =
+            \\CREATE TABLE s.t (id INT);
+            \\CREATE VIEW v AS SELECT 1;
+            \\CREATE FUNCTION f(a integer) RETURNS integer AS $$ SELECT a $$ LANGUAGE sql;
+            \\CREATE INDEX idx ON t (id);
+            \\CREATE MATERIALIZED VIEW mv AS SELECT 1;
+            \\CREATE TYPE mood AS ENUM ('a');
+            \\CREATE SEQUENCE seq;
+            \\CREATE SCHEMA sc;
+            \\SELECT 1;
+            \\
+        ;
+        var prov = Provider.init(src, .sql, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        prov.symbols(allocator, &syms);
+        const want = [_][]const u8{ "s.t", "v", "f", "idx", "mv", "mood", "seq", "sc" };
+        errdefer for (syms.items) |sy| std.debug.print("SYN54 sql {s} '{s}'\n", .{ sy.kind, src[sy.name_start..sy.name_end] });
+        try std.testing.expectEqual(want.len, syms.items.len);
+        for (want, syms.items) |w, sy| {
+            try std.testing.expectEqualStrings(w, src[sy.name_start..sy.name_end]);
+            try std.testing.expectEqual(@as(u16, 0), sy.depth);
+        }
+    }
+    {
+        const src =
+            \\class A {
+            \\  int x = 0;
+            \\  A(this.x);
+            \\  int get g => x;
+            \\  void m() {
+            \\    print(x);
+            \\  }
+            \\}
+            \\int top() {
+            \\  return 1;
+            \\}
+            \\
+        ;
+        var prov = Provider.init(src, .dart, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        prov.symbols(allocator, &syms);
+        const Want = struct { name: []const u8, depth: u16 };
+        const want = [_]Want{ .{ .name = "A", .depth = 0 }, .{ .name = "A", .depth = 1 }, .{ .name = "g", .depth = 1 }, .{ .name = "m", .depth = 1 }, .{ .name = "top", .depth = 0 } };
+        errdefer for (syms.items) |sy| std.debug.print("SYN54 dart {s} '{s}' d={d} [{d},{d})\n", .{ sy.kind, src[sy.name_start..sy.name_end], sy.depth, sy.start, sy.end });
+        try std.testing.expectEqual(want.len, syms.items.len);
+        for (want, syms.items) |w, sy| {
+            try std.testing.expectEqualStrings(w.name, src[sy.name_start..sy.name_end]);
+            try std.testing.expectEqual(w.depth, sy.depth);
+        }
+        // 본문 안 커서는 그 함수 안이다 — 시그니처 노드는 `void m()` 에서 끝나지만 범위는 본문 `}` 까지.
+        var chain: [8]usize = undefined;
+        const in_m = @as(u32, @intCast(std.mem.indexOf(u8, src, "print").?));
+        const n = Provider.chainAt(syms.items, in_m, &chain);
+        try std.testing.expectEqual(@as(usize, 2), n);
+        try std.testing.expectEqualStrings("m", src[syms.items[chain[1]].name_start..syms.items[chain[1]].name_end]);
+        const in_top = @as(u32, @intCast(std.mem.indexOf(u8, src, "return").?));
+        try std.testing.expectEqual(@as(usize, 1), Provider.chainAt(syms.items, in_top, &chain));
+        try std.testing.expectEqualStrings("top", src[syms.items[chain[0]].name_start..syms.items[chain[0]].name_end]);
+        // 화살표 본문(`=> x`)도 같다.
+        const in_g = @as(u32, @intCast(std.mem.indexOf(u8, src, "=> x").? + 3));
+        try std.testing.expectEqual(@as(usize, 2), Provider.chainAt(syms.items, in_g, &chain));
+    }
 }
 
 test "SYN53 Swift grammar 의 한계 — 정상 Swift 가 구문 오류를 낸다(빈 튜플·본문 없는 함수·지역 `nonisolated(unsafe)`·` ; `·`$` 정규식), 쓰는 꼴은 깨끗하다" {
@@ -3434,6 +3552,15 @@ test "PRD3 술어를 평가한다 — Python·Ruby·Lua 의 소문자 식별자�
         // Swift(BL2) — 문서 주석(`///`·`/** */`)만 `comment.documentation` 이다(`#match? "^///[^/]"` 등).
         .{ .lang = .swift, .src = "/// doc\n// plain\n", .text = "/// doc", .cap = "comment.documentation", .want = true },
         .{ .lang = .swift, .src = "/// doc\n// plain\n", .text = "// plain", .cap = "comment.documentation", .want = false },
+        // Dart(BL3) — 대문자로 시작하고 소문자가 섞인 식별자만 형이고(`#match? "^_?[A-Z].*[a-z]"`), 내장 형 이름만 `type.builtin` 이다.
+        .{ .lang = .dart, .src = "var a = Foo(FOO);\n", .text = "Foo", .cap = "type", .want = true },
+        .{ .lang = .dart, .src = "var a = Foo(FOO);\n", .text = "FOO", .cap = "type", .want = false },
+        .{ .lang = .dart, .src = "int a = 1;\nFoo b;\n", .text = "int", .cap = "type.builtin", .want = true },
+        .{ .lang = .dart, .src = "int a = 1;\nFoo b;\n", .text = "Foo", .cap = "type.builtin", .want = false },
+        // SQL(BL3) — **쿼리의 한계를 박는다.** 숫자 패턴이 `#match?`(정규식)인데 Lua 식 `%d` 를 써서(`"^[-+]?%d+$"`) 어떤 정규식 엔진에서도
+        // 안 맞는다 — tree-sitter 의 Rust 하이라이터도 같다. 그래서 숫자 리터럴은 문자열 색이다(계획 「한계」). upstream 이 고치면 이 행이 깨진다.
+        .{ .lang = .sql, .src = "SELECT 1, 'a';\n", .text = "1", .cap = "number", .want = false },
+        .{ .lang = .sql, .src = "SELECT 1, 'a';\n", .text = "1", .cap = "string", .want = true },
         .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@import", .cap = "keyword.import", .want = true },
         .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@This", .cap = "keyword.import", .want = false },
         .{ .lang = .xml, .src = "<a>&amp;&foo;</a>\n", .text = "&amp;", .cap = "constant.builtin", .want = true },

@@ -142,6 +142,8 @@ pub const Grammar = enum {
     dockerfile,
     make,
     swift, // BL2
+    sql, // BL3
+    dart, // BL3
 
     /// 상태바에 적는 이름. `none`이면 **적지 않는다** — `"Plain Text"`라고 쓰면 강조가 없는 이유를
     /// 설명하는 대신 가린다(`status-bar.md` 「언어 항목」).
@@ -182,6 +184,8 @@ pub const Grammar = enum {
             .dockerfile => "Dockerfile",
             .make => "Makefile",
             .swift => "Swift",
+            .sql => "SQL",
+            .dart => "Dart",
         };
     }
 
@@ -190,10 +194,12 @@ pub const Grammar = enum {
     /// 않은 여는 괄호」라 어디든이고, Python·Ruby·Bash·Markdown·HTML 은 괄호 규칙이 기본(여는 괄호가 끝에 있을 때)뿐이다 — Markdown 산문의
     /// `see [the docs|]` 에서 Enter 가 링크를 들여쓰며 쪼개지 않게. 번들 언어 확대 BL1: YAML·Dockerfile·Make 는 VS Code 도 괄호 규칙이 기본뿐이고
     /// (Dockerfile 의 `increaseIndentPattern` 은 YAML 것을 베낀 꼴 — 「의도한 차이」), XML·DTD 는 HTML 과 같다. TOML·Lua 는 어디든이다. BL2: Swift 는 끝만이다
-    /// (VS Code swift 설정에 `indentationRules` 가 없고 `onEnterRules` 는 줄 주석 이어쓰기 하나뿐이다 — 괄호는 기본 규칙만 남는다).
+    /// (VS Code swift 설정에 `indentationRules` 가 없고 `onEnterRules` 는 줄 주석 이어쓰기 하나뿐이다 — 괄호는 기본 규칙만 남는다). BL3: SQL 도 같은
+    /// 까닭으로 끝만이다(VS Code sql 설정엔 들여쓰기 규칙도 `onEnterRules` 도 없다). Dart 는 VS Code 에 내장 설정이 없어 같은 C 계열인 Java·Kotlin 과
+    /// 같이 둔다(어디든).
     pub fn bracketEnterAnywhere(self: Grammar) bool {
         return switch (self) {
-            .python, .ruby, .bash, .markdown, .html, .none, .yaml, .xml, .dtd, .dockerfile, .make, .swift => false,
+            .python, .ruby, .bash, .markdown, .html, .none, .yaml, .xml, .dtd, .dockerfile, .make, .swift, .sql => false,
             else => true,
         };
     }
@@ -217,9 +223,9 @@ pub const Grammar = enum {
     pub fn lineComment(self: Grammar) ?[]const u8 {
         return switch (self) {
             .python, .ruby, .bash, .yaml, .toml, .dockerfile, .make => "#",
-            .lua => "--",
+            .lua, .sql => "--",
             .html, .css, .json, .markdown, .none, .xml, .dtd => null,
-            .zig, .javascript, .typescript, .tsx, .c, .cpp, .go, .rust, .java, .php, .kotlin, .swift => "//",
+            .zig, .javascript, .typescript, .tsx, .c, .cpp, .go, .rust, .java, .php, .kotlin, .swift, .dart => "//",
         };
     }
 };
@@ -263,6 +269,8 @@ pub fn grammarForPath(path: []const u8) Grammar {
     if (eqlIgnoreCase(ext, "dockerfile")) return .dockerfile;
     if (eqlIgnoreCase(ext, "mk")) return .make;
     if (eqlIgnoreCase(ext, "swift")) return .swift;
+    if (eqlIgnoreCase(ext, "sql")) return .sql;
+    if (eqlIgnoreCase(ext, "dart")) return .dart;
     return .none;
 }
 
@@ -384,6 +392,10 @@ test "LANG10 확장자가 grammar를 정한다 — 번들 목록과 1:1" {
     try testing.expectEqual(Grammar.make, grammarForPath("sub/makefile"));
     try testing.expectEqual(Grammar.swift, grammarForPath("Sources/App/main.swift")); // BL2
     try std.testing.expectEqualStrings("Swift", grammarForPath("a.swift").displayName().?);
+    try testing.expectEqual(Grammar.sql, grammarForPath("db/migrations/001_init.sql")); // BL3
+    try testing.expectEqual(Grammar.dart, grammarForPath("lib/main.dart")); // BL3
+    try std.testing.expectEqualStrings("SQL", grammarForPath("a.SQL").displayName().?);
+    try std.testing.expectEqualStrings("Dart", grammarForPath("a.dart").displayName().?);
     try testing.expectEqual(Grammar.make, grammarForPath("GNUmakefile"));
     try testing.expectEqual(Grammar.make, grammarForPath("rules.mk"));
     // 이름이 비슷할 뿐인 것은 아니다 — `Dockerfiles` 는 폴더 이름 같은 것이고 `MakefileX` 도 아니다.
@@ -394,8 +406,7 @@ test "LANG10 확장자가 grammar를 정한다 — 번들 목록과 1:1" {
     try testing.expectEqual(Grammar.zig, grammarForPath("MAIN.ZIG"));
 
     // 번들에 없는 것은 무색이다 — **`Language`는 이것들을 알아도** grammar 는 없다.
-    try testing.expectEqual(Grammar.none, grammarForPath("a.sql"));
-    try testing.expectEqual(Grammar.none, grammarForPath("a.pl")); // Perl — 번들 계획에도 없다(Swift 는 BL2 로 실었다)
+    try testing.expectEqual(Grammar.none, grammarForPath("a.pl")); // Perl — 번들 계획에도 없다(Swift 는 BL2, SQL 은 BL3 으로 실었다)
     try testing.expectEqual(Grammar.none, grammarForPath("README"));
     try testing.expectEqual(Grammar.none, grammarForPath("a."));
 
@@ -441,10 +452,10 @@ test "LANG8 문자열 따옴표 — 괄호 Enter 가 건너뛸 따옴표, 아포
     try std.testing.expectEqualStrings("\"", Grammar.swift.stringQuotes());
     try std.testing.expectEqualStrings("\"'", Grammar.python.stringQuotes());
     for ([_]Grammar{ .none, .markdown, .html, .xml, .dtd, .make }) |g| try std.testing.expectEqualStrings("", g.stringQuotes());
-    for ([_]Grammar{ .yaml, .toml, .lua, .dockerfile }) |g| try std.testing.expectEqualStrings("\"'", g.stringQuotes());
+    for ([_]Grammar{ .yaml, .toml, .lua, .dockerfile, .sql, .dart }) |g| try std.testing.expectEqualStrings("\"'", g.stringQuotes());
     // 괄호 Enter 의 범위 — 산문·괄호 규칙이 기본뿐인 문법은 끝의 여는 괄호만.
-    for ([_]Grammar{ .typescript, .tsx, .javascript, .c, .cpp, .rust, .go, .java, .json, .css, .zig, .php, .kotlin, .toml, .lua }) |g| try std.testing.expect(g.bracketEnterAnywhere());
-    for ([_]Grammar{ .python, .ruby, .bash, .markdown, .html, .yaml, .xml, .dtd, .dockerfile, .make, .swift }) |g| try std.testing.expect(!g.bracketEnterAnywhere());
+    for ([_]Grammar{ .typescript, .tsx, .javascript, .c, .cpp, .rust, .go, .java, .json, .css, .zig, .php, .kotlin, .toml, .lua, .dart }) |g| try std.testing.expect(g.bracketEnterAnywhere());
+    for ([_]Grammar{ .python, .ruby, .bash, .markdown, .html, .yaml, .xml, .dtd, .dockerfile, .make, .swift, .sql }) |g| try std.testing.expect(!g.bracketEnterAnywhere());
 }
 
 test "LANG9 문법의 줄 주석 표식 — 경로로 정한 주석 토글의 표식과 같은 답, 이름 없는 문서도 문법만으로 (계획 editor-typing-rules 최종 검토)" {
@@ -458,7 +469,8 @@ test "LANG9 문법의 줄 주석 표식 — 경로로 정한 주석 토글의 �
         .{ .path = "a.xml", .g = .xml },                .{ .path = "a.dtd", .g = .dtd },                 .{ .path = "a.lua", .g = .lua },
         .{ .path = "Dockerfile", .g = .dockerfile },    .{ .path = "Dockerfile.dev", .g = .dockerfile }, .{ .path = "a.dockerfile", .g = .dockerfile },
         .{ .path = "Containerfile", .g = .dockerfile }, .{ .path = "Makefile", .g = .make },             .{ .path = "GNUmakefile", .g = .make },
-        .{ .path = "a.mk", .g = .make },                .{ .path = "a.swift", .g = .swift },
+        .{ .path = "a.mk", .g = .make },                .{ .path = "a.swift", .g = .swift },             .{ .path = "a.sql", .g = .sql },
+        .{ .path = "a.dart", .g = .dart },
     };
     for (cases) |c| {
         try std.testing.expectEqual(c.g, grammarForPath(c.path));

@@ -623,9 +623,12 @@ primary/포커스 상실/겹친 선택의 확정과 undo/redo). 콜백을 직접
     | Dockerfile | `camdencheek/tree-sitter-dockerfile` | v0.2.0 | 107KB |
     | Make | `tree-sitter-grammars/tree-sitter-make` | v1.1.1 | 212KB |
     | Swift | `alex-pinkus/tree-sitter-swift` | 0.7.4-with-generated-files | 4393KB |
+    | SQL | `DerekStride/tree-sitter-sql` | v0.3.11(release asset) | 2576KB |
+    | Dart | `UserNobody14/tree-sitter-dart` | 커밋 `3f0c7a8309d8` | 1290KB |
 
-    **합계 약 27.4MB**(코어 896KB 별도) — 처음 열일곱의 22.2MB 에 번들 언어 확대 BL1(2026-10-14 — [계획](editor-bundled-languages.md))의
-    여섯이 0.9MB, BL2 의 Swift 가 4.3MB 를 더했다(Swift 는 기본 태그에 생성 파서가 없어 생성 파일이 든 태그로 고정한다). ~~합계 약 17.7MB~~ 는 Kotlin 행이 「0KB」로 잘못 적혀 있던 값이다(같은 방법으로 다시 재니 4108KB — 그 계획의
+    **합계 약 31.3MB**(코어 896KB 별도) — 처음 열일곱의 22.2MB 에 번들 언어 확대 BL1(2026-10-14 — [계획](editor-bundled-languages.md))의
+    여섯이 0.9MB, BL2 의 Swift 가 4.3MB, BL3 의 SQL·Dart 가 3.8MB 를 더했다(Swift 는 기본 태그에 생성 파서가 없어 생성 파일이 든 태그로, SQL 은
+    같은 까닭으로 release asset 으로, Dart 는 태그가 없어 커밋으로 고정한다). ~~합계 약 17.7MB~~ 는 Kotlin 행이 「0KB」로 잘못 적혀 있던 값이다(같은 방법으로 다시 재니 4108KB — 그 계획의
     실측 때 드러났다). ~~Zig 하나로 시작한다~~ — 2026-08-29 사용자 결정으로 **메이저
     언어를 한 번에 싣는다**. 크기 대비가 극단적으로 갈린다는 것을 실측으로 확인하고 그 위에서 정했다:
     JSON 19KB·HTML 63KB·Go 266KB는 거의 공짜인데 **C++ 3.5MB · TypeScript 3.0MB · PHP 2.3MB ·

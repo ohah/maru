@@ -41786,6 +41786,65 @@ test "BLX2 번들 언어 확대 BL2 — 실제 키로: Swift `case .a:` 뒤 Ente
     try testing.expectEqualStrings("/**\n * \n", content(doc));
 }
 
+test "BLX3 번들 언어 확대 BL3 — 실제 키로: SQL 은 줄 가운데 짝 없는 `(` 뒤 Enter 가 그대로(VS Code sql 은 괄호 규칙이 기본뿐)·줄 끝 `(` 는 한 단계·`--` 주석은 잇지 않는다, Dart 는 줄 가운데 `(` 도 한 단계(C 계열)·`case 1:` 뒤 한 단계·`//` 주석 가운데는 잇는다 (docs/plans/editor-bundled-languages.md)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    const open = struct {
+        fn f(fx_: *PaneFixture, a: std.mem.Allocator, name: []const u8, src: []const u8) !*Term {
+            const t = try undoFixture(fx_, a, name, src);
+            t.rt.editor_tab_width = 4;
+            const d = t.rt.editorDocument().opened orelse return error.NoDoc;
+            t.rt.editor_syntax.deinit(a);
+            t.rt.editor_syntax = syntax_color.openParsedBudgeted(d.file.content, t.rt.editor_grammar, 0);
+            if (t.rt.editor_syntax.provider == null or t.rt.editor_syntax.pending) return error.NoTree;
+            return t;
+        }
+    }.f;
+    const G = maru.session.editor.language.Grammar;
+    // ── SQL ──
+    // ⑴ 줄 가운데 짝 없는 `(` — 그대로(Dart·TS 라면 한 단계다 — 「어디든」).
+    const sq = try open(&fx, allocator, "q.sql", "SELECT f(a,\n");
+    try testing.expectEqual(G.sql, sq.rt.editor_grammar);
+    try testing.expectEqualStrings("SQL", sq.rt.editor_grammar.displayName().?);
+    sq.rt.editor_selection = editor_selection.Selection.at(11);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("SELECT f(a,\n\n", content(sq));
+    // ⑵ 줄 끝 `(` — 한 단계(괄호 기본 규칙).
+    const tbl = try open(&fx, allocator, "t.sql", "CREATE TABLE t (\n");
+    tbl.rt.editor_selection = editor_selection.Selection.at(16);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("CREATE TABLE t (\n    \n", content(tbl));
+    // ⑶ `--` 주석 가운데 Enter — 잇지 않는다(VS Code sql 에 `onEnterRules` 가 없다 — 줄 주석 이어쓰기는 `//` 문법만).
+    const cm = try open(&fx, allocator, "c.sql", "-- note more\n");
+    cm.rt.editor_selection = editor_selection.Selection.at(7);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("-- note\n more\n", content(cm));
+    // ── Dart ──
+    // ⑷ 줄 가운데 짝 없는 `(` — 한 단계(Java·Kotlin 과 같다).
+    const call = try open(&fx, allocator, "main.dart", "foo(a,\n");
+    try testing.expectEqual(G.dart, call.rt.editor_grammar);
+    call.rt.editor_selection = editor_selection.Selection.at(6);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("foo(a,\n    \n", content(call));
+    // ⑸ `case 1:` 뒤 — 한 단계.
+    const sw = try open(&fx, allocator, "sw.dart", "switch (x) {\ncase 1:\n}\n");
+    sw.rt.editor_selection = editor_selection.Selection.at(20);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("switch (x) {\ncase 1:\n    \n}\n", content(sw));
+    // ⑹ `//` 주석 가운데 Enter — `// ` 로 잇는다.
+    const dc = try open(&fx, allocator, "d.dart", "// note more\n");
+    dc.rt.editor_selection = editor_selection.Selection.at(7);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("// note\n//  more\n", content(dc)); // TS 와 같다(INDR5) — caret 뒤 공백은 그대로 남는다
+}
+
 test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -54128,6 +54187,9 @@ test "IGP4 Python 은 offSide — 블록 뒤 빈 줄이 아래 블록 쪽이다 
     // **YAML 도 offSide 다**(VS Code `yaml/language-configuration.json` — 번들 언어 확대 BL1 에서 grammar 가 왔다).
     const ym = try openBracketFixture(&fx, allocator, "o.yml", "x:\n    y: 1\n\nz: 2\n");
     try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, ym, &buf), 2));
+    // **SQL 도 offSide 다**(VS Code `sql/language-configuration.json` — 번들 언어 확대 BL3).
+    const sq = try openBracketFixture(&fx, allocator, "o.sql", "SELECT a\n    FROM t\n\nSELECT b;\n");
+    try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, sq, &buf), 2));
 }
 
 test "IGP6 Go 는 추정의 기본이 탭 — 탭·공백 동률 문서가 .go 면 탭 파일(간격 4), .txt 면 공백 2 칸 (제품 경계, §5.1c)" {

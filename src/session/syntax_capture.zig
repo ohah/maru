@@ -135,6 +135,12 @@ fn exact(name: []const u8) ?Mapping {
         .{ "field", Mapping{ .role = .property } },
         .{ "method", Mapping{ .role = .function } },
         .{ "preproc", Mapping{ .role = .keyword } },
+        // 옛 규약의 저장 수식 키워드(SQL `TEMPORARY`·`VOLATILE`·파일 형식 낱말 — 번들 언어 확대 BL3). 새 규약 `keyword.modifier` 와 같은 자리다.
+        .{ "storageclass", Mapping{ .role = .keyword } },
+        // Dart(BL3)의 `identifier.*` — enum 상수는 상수 색(위 `constant` 와 같은 자리), 매개변수는 `parameter` 처럼 본문색이다.
+        // 뿌리 `identifier` 를 무색으로 두어 grammar 가 다른 갈래를 늘려도 평범한 식별자처럼 남는다(`variable` 과 같은 판단).
+        .{ "identifier.constant", Mapping{ .role = .number } },
+        .{ "identifier", Mapping.uncolored },
 
         // ── 마크업(markdown) ────────────────────────────────────────────────────
         // 제목에 슬롯이 없다. **keyword 가 가장 눈에 띄는 자리**라 그것을 쓴다 — 제목이 본문색이면
@@ -413,4 +419,31 @@ test "HL19 번들 언어 확대 BL2 의 Swift 가 내는 캡처도 전부 표에
     try std.testing.expectEqual(Role.string, roleFor("string.regexp").?);
     try std.testing.expectEqual(Role.property, roleFor("variable.member").?);
     try std.testing.expect(roleFor("variable.parameter") == null); // 매개변수는 변수처럼 무색
+}
+
+test "HL20 번들 언어 확대 BL3 의 SQL·Dart 가 내는 캡처도 전부 표에 있고, 옛 규약·Dart 고유 갈래가 맞는 색을 받는다" {
+    // HL18 과 같은 방법으로 뽑았다(`queries/highlights.scm`, 따옴표 안·주석은 뺀다).
+    const bl3_captures = [_][]const u8{
+        // SQL
+        "attribute",           "boolean",               "comment",          "conditional",  "field",               "float",
+        "function.call",       "keyword",               "keyword.operator", "number",       "operator",            "parameter",
+        "punctuation.bracket", "punctuation.delimiter", "spell",            "storageclass", "string",              "type",
+        "type.builtin",        "type.qualifier",        "variable",
+        // Dart
+                "constant",     "constant.null",       "function",
+        "identifier.constant", "identifier.parameter",  "none",             "property",     "punctuation.special", "string.escape",
+        "variable.builtin",
+    };
+    for (bl3_captures) |cap| {
+        if (lookup(cap) == null) {
+            std.debug.print("표에 없는 grammar 캡처: {s}\n", .{cap});
+            return error.UnmappedCapture;
+        }
+    }
+    try std.testing.expectEqual(Role.keyword, roleFor("storageclass").?); // SQL `TEMPORARY` 등
+    try std.testing.expectEqual(Role.type_name, roleFor("type.qualifier").?);
+    try std.testing.expectEqual(Role.number, roleFor("identifier.constant").?); // Dart enum 상수
+    try std.testing.expectEqual(Role.number, roleFor("constant.null").?); // Dart `null`
+    try std.testing.expect(roleFor("identifier.parameter") == null and lookup("identifier.parameter") != null); // 매개변수는 무색
+    try std.testing.expect(roleFor("identifier") == null and lookup("identifier") != null);
 }

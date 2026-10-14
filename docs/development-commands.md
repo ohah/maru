@@ -1562,3 +1562,10 @@ macOS 전용 CI에 포함한다. `zig build test-ssh-reconnect-failure-process`�
 소유 loopback SSH·private HOME에서 과거/새 이벤트를 수신해 새 제품 AppSession
 프로세스로 배지·알림 예약·턴 캡처를 판정한다. 실제 macOS 앱 창의 종료/재실행과
 workspace restore, OS 알림 배너를 검사하는 gate와는 구분한다.
+
+### Save As 순서·취소 기반
+
+`mise exec -- zig build test-editor-save-as-policy`와 `-Doptimize=ReleaseFast`는
+OS/I/O 없는 상태 전이를 검사한다. `python3 tools/test-editor-save-as-policy.py`는
+격리 사본의 결함 주입과 정상/복원 대조군을 실행한다. 실제 파일 쓰기·UI는 미연결이며
+[계획](plans/editor-save-as.md)의 남은 경계를 따른다.

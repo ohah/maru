@@ -24450,7 +24450,7 @@ pub const AppSession = struct {
         if (self.chrome_host.context_menu.open) {
             try self.chrome_host.collectContextMenuDraws(settings_ops.contextMenuItems(self), props, &tokens, arena, &draws); // 항목 라벨 주입(platform 소유, 동적)
         }
-        // 마커 이미지 프리뷰의 테두리·안내(픽셀은 gpu_images가 따로 싣는다 — 갤러리 §5.4 분업).
+        // 마커 이미지 프리뷰의 실패 안내 글자(액자는 프레임 조립의 GPU quad, 픽셀은 gpu_images — 갤러리 §5.4 분업).
         try marker_view_ops.collectMarkerPreviewDraws(self, arena, &draws);
         // 심볼 이름 바꾸기 상자(tooling §8.2f) — 인라인 rename 의 심볼 대상일 때. 앵커는 프레임마다 다시 잰다(그 문서가 안 그려졌으면 이 프레임엔 없다).
         if (self.rename) |rt| if (rt == .symbol and editor_ops.rename_client.refreshAnchor(self, rt.symbol)) {
@@ -98911,6 +98911,110 @@ test "OVF2 마커 이미지 프리뷰가 「풀 수 없다」로 끝나면 — �
         found = true;
     };
     try std.testing.expect(found); // 안내 글자가 실렸다
+}
+
+test "MP: 「풀 수 없다」 프리뷰의 안내 셀이 액자 테두리를 덮지 않는다 — 오버레이 셀은 테두리 quad 뒤에 그려진다" {
+    // 액자(뒤판·테두리 넷)는 `appendMarkerPreviewFrameQuads` 가 매 프레임 낸다. 실패 안내를 싣는 chrome draws 가 상자 quad 를
+    // 한 번 더 내면, 직각 quad 는 lowering 일반 규칙대로 **셀 배경**이 되고 렌더러는 오버레이 셀을 over quad(테두리) **뒤에**
+    // 그린다(`maru_draw_overlay_layer`) — 불투명 surface_bg 칸이 위·왼쪽·아래 테두리를 덮어 오른쪽 변만 남았다(2026-10-14 측정:
+    // 상자 206×126 에 25×7 칸). 글자 줄도 같은 불투명 칸이라, 안내가 상자보다 넓으면 좌우 변을 덮는다 — 실제 실패는 원본 크기를
+    // 모른 채(0×0) 대체 폭으로 서고, 한국어 안내는 27칸이다. 그래서 셀이 **보이는** 픽셀(렌더러 clip 반영)이 네 변 띠와 겹치지 않는지
+    // 실제 실패 모양(0×0·한국어)·크기를 아는 모양·좁은 창에서 잰다.
+    if (builtin.os.tag != .macos) return error.SkipZigTest; // 실 PTY/CoreText
+    const lang_before = maru.i18n.lang();
+    defer maru.i18n.setLang(lang_before);
+    // `whole`: 안내가 잘리지 않고 다 보여야 한다 — 넓은 창에서는 상자가 안내를 담는다(대체 폭). 좁은 창은 좌우가 잘려도 되지만
+    // **위아래는 온전해야 한다** — 상자를 비율로 줄이면 높이까지 줄어 안내가 읽을 수 없는 띠가 됐다(같은 날 적대적 재검증).
+    const Case = struct { lang: maru.i18n.Lang, backing_w: u32, backing_h: u32, img_w: u32, img_h: u32, whole: bool };
+    const cases = [_]Case{
+        .{ .lang = .ko, .backing_w = 1400, .backing_h = 900, .img_w = 0, .img_h = 0, .whole = true }, // 실제 실패 — 디코드 결과가 크기를 안 준다
+        .{ .lang = .en, .backing_w = 1400, .backing_h = 900, .img_w = 200, .img_h = 120, .whole = true },
+        .{ .lang = .ko, .backing_w = 560, .backing_h = 400, .img_w = 0, .img_h = 0, .whole = false }, // 안내가 workspace 절반보다 넓다 — clip·왼쪽 정렬 경로
+    };
+    for (cases) |cs| {
+        const allocator = std.testing.allocator;
+        const session = try allocator.create(AppSession);
+        defer allocator.destroy(session);
+        try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+            .abi_version = abi_version,
+            .cols = 80,
+            .rows = 24,
+            .queue_capacity = 16,
+            .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+        });
+        defer session.deinit();
+        _ = try session.resize(cs.backing_w, cs.backing_h, 1000);
+        maru.i18n.setLang(cs.lang); // init 이 설정의 언어를 적용하므로 그 **뒤**에 고정한다(앞에 두면 ko 케이스가 영어로 돈다)
+        const term = pane_ops.activePane(session).activeTerm();
+        session.marker_preview_open = .{
+            .surface_id = term.surface.id,
+            .n = 1,
+            .row = 6,
+            .start_col = 4,
+            .end_col = 14,
+            .width = cs.img_w,
+            .height = cs.img_h,
+            .failed = true,
+        };
+        defer marker_view_ops.closeMarkerPreview(session);
+        const target = marker_view_ops.markerPreviewTarget(session) orelse return error.NoPreviewTarget;
+        const box = (marker_view_ops.markerPreviewPlacement(session, target, session.marker_preview_open.?) orelse return error.NoPlacement).box;
+        const b: i32 = @intCast(chrome.components.image_preview.border_px);
+        const bx0 = box.x;
+        const by0 = box.y;
+        const bx1 = box.x + @as(i32, @intCast(box.w));
+        const by1 = box.y + @as(i32, @intCast(box.h));
+        // 테두리 띠 넷(appendMarkerPreviewFrameQuads 와 같은 자리): 위·아래·왼쪽·오른쪽.
+        const strips = [_][4]i32{
+            .{ bx0, by0, bx1, by0 + b },
+            .{ bx0, by1 - b, bx1, by1 },
+            .{ bx0, by0, bx0 + b, by1 },
+            .{ bx1 - b, by0, bx1, by1 },
+        };
+        var prep = (try session.buildChromeOverlayPrep()) orelse return error.MarkerFailureNotDrawn;
+        defer prep.deinit(allocator);
+        const cw: i32 = @intCast(session.cell_width_px);
+        const ch: i32 = @intCast(session.cell_height_px);
+        const want = maru.i18n.t(.app_marker_preview_undecodable);
+        var it = (std.unicode.Utf8View.init(want) catch return error.BadText).iterator();
+        const first = it.nextCodepoint().?;
+        var found = false;
+        var parts: [1 + 8]struct { dl: *const renderer.DrawList, pl: AppSession.PanePlacement } = undefined;
+        parts[0] = .{ .dl = &prep.dl, .pl = prep.placement };
+        try std.testing.expect(prep.extra.len <= 8);
+        for (prep.extra, 0..) |*part, i| parts[1 + i] = .{ .dl = &part.dl, .pl = part.placement };
+        for (parts[0 .. 1 + prep.extra.len]) |part| for (part.dl.cells) |c| {
+            var x0: i32 = @as(i32, @intCast(part.pl.origin_x)) + @as(i32, c.col) * cw;
+            var y0: i32 = @as(i32, @intCast(part.pl.origin_y)) + @as(i32, c.row) * ch;
+            var x1 = x0 + @as(i32, c.width) * cw;
+            var y1 = y0 + ch;
+            // 안내 글자(공백 아닌 칸)는 상자 안쪽에 통째로 선다 — 잘린 안내는 「무엇이 안 됐나」를 못 전한다.
+            // 첫머리(왼쪽)는 어느 경우에도 잘리지 않는다 — 넘치면 끝이 잘리고 「이 이미지를…」은 남는다(가운데로 두면 양쪽이 잘렸다).
+            const cut_left = x0 < bx0 + b;
+            const cut_right = x1 > bx1 - b;
+            const cut_y = y0 < by0 + b or y1 > by1 - b;
+            if (c.codepoint != ' ' and (cut_y or cut_left or (cs.whole and cut_right))) {
+                std.debug.print("[{s} {d}x{d} img {d}x{d}] 안내 칸 r{d} c{d} cp={d} 이 상자 안쪽을 벗어난다 (box {any})\n", .{ @tagName(cs.lang), cs.backing_w, cs.backing_h, cs.img_w, cs.img_h, c.row, c.col, c.codepoint, box });
+                return error.NoticeCutOff;
+            }
+            // 렌더러가 이 묶음에 거는 scissor — 그 밖의 픽셀은 안 보인다.
+            if (part.pl.clip_rect) |clip| {
+                x0 = @max(x0, @as(i32, @intCast(clip.x)));
+                y0 = @max(y0, @as(i32, @intCast(clip.y)));
+                x1 = @min(x1, @as(i32, @intCast(clip.x + clip.w)));
+                y1 = @min(y1, @as(i32, @intCast(clip.y + clip.h)));
+                if (x0 >= x1 or y0 >= y1) continue;
+            }
+            if (c.codepoint == first) found = true; // 보이는 칸만 센다 — clip 이 숨긴 글자는 「실렸다」가 아니다
+            for (strips) |st| {
+                if (x0 < st[2] and st[0] < x1 and y0 < st[3] and st[1] < y1) {
+                    std.debug.print("[{s} {d}x{d} img {d}x{d}] 셀 r{d} c{d} cp={d} 이 테두리 띠 {any} 를 덮는다 (box {any})\n", .{ @tagName(cs.lang), cs.backing_w, cs.backing_h, cs.img_w, cs.img_h, c.row, c.col, c.codepoint, st, box });
+                    return error.CellCoversPreviewBorder;
+                }
+            }
+        };
+        try std.testing.expect(found); // 전제: 안내 첫 글자가 보인다(빈 프레임이면 위 검사가 공회전한다)
+    }
 }
 
 test "OVF3 찾기 막대가 열려 있고 입력에 포커스가 없을 때도 — 다른 오버레이 없이 관문이 서고 그 프레임에 찾기 막대가 실린다" {

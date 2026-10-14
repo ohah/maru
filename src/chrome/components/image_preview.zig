@@ -6,13 +6,12 @@
 //! 그래서 이 모듈은 pane rect를 **입력으로 받지 않는다**(받을 수 있게 두면 언젠가 누가 쓴다).
 //!
 //! 이 모듈은 **자리와 크기만** 정한다. 픽셀은 `MaruAppHostGpuImage`가 그리고(갤러리 §5.4 분업),
-//! 테두리·라벨은 호출자가 chrome `Op`로 그린다.
+//! 액자(뒤판·테두리)는 호출자가 그림과 같은 프레임 자리에서 그린다. 여기서 내는 op 는 실패 안내 글자뿐이다(`view`).
 
 const std = @import("std");
 const draw = @import("../draw.zig");
 const props = @import("../props.zig");
 const popup_box = @import("popup_box.zig"); // 앵커 팝업 기하 공유 프리미티브(§5.4)
-const tokens = @import("../tokens.zig");
 const overlay_input = @import("overlay_input.zig"); // displayCols(EAW 표시폭) 단일 출처
 
 /// 프리뷰가 차지할 자리. `image`는 그림이 들어갈 안쪽 사각형(테두리 제외)이다.
@@ -44,6 +43,21 @@ pub const padding_px: u32 = 0;
 /// 앵커(마커) 줄과 상자 사이 간격. 마커를 가리지 않도록 한 줄 띄운다.
 pub const anchor_gap_px: u32 = 2;
 
+/// 상자 안에 들어갈 수 있는 **최대 그림 크기**(테두리 제외). workspace의 절반에서 테두리를 뺀다 — 절반 규칙(§2.3)은
+/// **pane이 아니라 workspace 기준**이라, 좁은 pane에 있는 마커도 읽을 수 있는 프리뷰를 얻는다. 자리가 없으면 null.
+///
+/// `place` 가 이 한도로 그림을 줄인다. 원본 크기를 모르는 상자(디코드 전·실패 — 안내 한 줄)를 세우는 호출자는 폭을
+/// 먼저 이 한도로 자른다: 넘긴 채 `place` 에 주면 배율이 높이까지 줄여 안내 줄이 한 줄보다 낮아진다.
+pub fn maxImageSize(p: props.ChromeProps) ?struct { w: u32, h: u32 } {
+    const ws = props.workspaceRect(p.metrics);
+    if (ws.w == 0 or ws.h == 0) return null;
+    const chrome_px = 2 * (border_px + padding_px);
+    const w = (ws.w / 2) -| chrome_px;
+    const h = (ws.h / 2) -| chrome_px;
+    if (w == 0 or h == 0) return null;
+    return .{ .w = w, .h = h };
+}
+
 /// 프리뷰 자리를 정한다. `anchor`는 **마커 span의 화면 사각형**(셀 → px 변환은 호출자 몫)이고,
 /// `img_w`/`img_h`는 원본 픽셀 크기다. 그릴 수 없으면 null(원본이 0이거나 workspace가 너무 작다).
 ///
@@ -56,17 +70,11 @@ pub fn place(
     p: props.ChromeProps,
 ) ?Placement {
     if (img_w == 0 or img_h == 0) return null;
-    const m = p.metrics;
-    const ws = props.workspaceRect(m);
-    if (ws.w == 0 or ws.h == 0) return null;
-
+    const avail = maxImageSize(p) orelse return null;
+    const avail_w = avail.w;
+    const avail_h = avail.h;
     const chrome_w = 2 * (border_px + padding_px);
     const chrome_h = 2 * (border_px + padding_px);
-    // 쓸 수 있는 최대 그림 크기 — workspace의 절반에서 테두리를 뺀다. 절반 규칙(§2.3)은 **pane이 아니라
-    // workspace 기준**이라, 좁은 pane에 있는 마커도 읽을 수 있는 프리뷰를 얻는다.
-    const avail_w = (ws.w / 2) -| chrome_w;
-    const avail_h = (ws.h / 2) -| chrome_h;
-    if (avail_w == 0 or avail_h == 0) return null;
 
     // **1.0을 넘겨 늘리지 않는다.** 작은 이미지를 흐리게 키우면 「원본 확인」이 거짓말이 된다(갤러리 §2).
     var scale: f32 = 1.0;
@@ -102,38 +110,41 @@ pub fn place(
 /// hover가 아니라 명시 제스처를 고른 것과 같은 결: 프리뷰는 터미널을 잠그지 않는다).
 pub const layer = draw.Layer.pane_overlay;
 
-/// 프리뷰 상자의 **테두리와 배경**을 그린다. 그림 픽셀은 `gpu_images`가 따로 싣는다(갤러리 §5.4 분업) —
-/// 여기서 그리는 것은 그 픽셀이 놓일 자리의 테두리뿐이다.
-///
-/// `notice`가 있으면 그림 대신 그 문구를 가운데에 적는다(디코드 실패 — §2.3). 문구는 **호출자가 i18n에서
+/// 디코드에 실패한 프리뷰의 **안내 문구**를 상자 가운데에 적는다(§2.3). 문구는 **호출자가 i18n에서
 /// 골라 넘긴다**: 컴포넌트는 `ui.language`를 모르고, 그래야 번역이 두 군데로 흩어지지 않는다.
+///
+/// **상자는 그리지 않는다.** 액자(뒤판·테두리 넷)는 호출자가 그림과 같은 프레임 자리에서 낸다 — 그것이
+/// 매 프레임 있어야 하는 것이고, 여기서 상자 quad 를 한 번 더 내면 직각 quad 는 셀 배경으로 lowering 되어
+/// 오버레이 셀로 그려진다. 렌더러는 오버레이 셀을 테두리 quad **뒤에** 그리므로 그 칸들이 테두리를 덮었다
+/// (2026-10-14 — 실패한 프리뷰에 오른쪽 변만 남았다).
 pub fn view(
     pl: Placement,
-    notice: ?[]const u8,
+    notice: []const u8,
     p: props.ChromeProps,
-    tk: *const tokens.Tokens,
     arena: std.mem.Allocator,
     out: *std.ArrayList(draw.Op),
 ) !void {
-    _ = tk;
-    const r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    try out.append(arena, .{ .quad = .{
-        .rect = pl.box,
-        .fill_role = .surface_bg,
-        .corner_radii = .{ r, r, r, r },
-        .border_widths = .{ bw, bw, bw, bw },
-        .border_role = .focus_accent,
-    } });
-    const text = notice orelse return;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
-    const cols = overlay_input.displayCols(text);
+    const cols = overlay_input.displayCols(notice);
     const text_w = cols * cw;
-    const x = pl.box.x + @divTrunc(@as(i32, @intCast(pl.box.w)) - @as(i32, @intCast(text_w)), 2);
+    const inset = border_px + padding_px;
+    // 들어가면 가운데, 안 들어가면 **왼쪽 안쪽에서** 시작한다 — 가운데로 두면 넘친 몫이 양쪽으로 잘려 문장 첫머리가 사라진다.
+    const x = if (text_w + 2 * inset <= pl.box.w)
+        pl.box.x + @divTrunc(@as(i32, @intCast(pl.box.w)) - @as(i32, @intCast(text_w)), 2)
+    else
+        pl.box.x + @as(i32, @intCast(inset));
     const y = pl.box.y + @divTrunc(@as(i32, @intCast(pl.box.h)) - @as(i32, @intCast(ch)), 2);
+    // 글자는 **테두리 안쪽에서 잘린다.** 글자 줄도 불투명 칸이라 상자보다 넓으면 좌우 변을 덮는다 — 호출자가 대체 폭을
+    // 안내에 맞춰도, 좁은 창에서는 workspace 절반(`maxImageSize`)이 상자를 줄인다.
+    try out.append(arena, .{ .clip = .{
+        .x = pl.box.x + @as(i32, @intCast(inset)),
+        .y = pl.box.y + @as(i32, @intCast(inset)),
+        .w = pl.box.w -| 2 * inset,
+        .h = pl.box.h -| 2 * inset,
+    } });
     const runs = try arena.alloc(draw.Run, 1);
-    runs[0] = .{ .text = text };
+    runs[0] = .{ .text = notice };
     try out.append(arena, .{ .text = .{
         .origin = .{ .x = x, .y = y },
         .runs = runs,
@@ -313,21 +324,36 @@ test "MP1 배치: 그림 사각형이 상자 안에 있다 — 테두리·패딩
     try testing.expect(pl.image.y + @as(i32, @intCast(pl.image.h)) < pl.box.y + @as(i32, @intCast(pl.box.h)));
 }
 
-test "MP1 view: 테두리 상자를 그리고, 안내가 있으면 가운데에 적는다" {
+test "MP1 view: 상자보다 긴 안내는 왼쪽 안쪽에서 시작한다 — 가운데로 두면 첫머리가 잘린다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const p = metricsOf(1000, 800);
+    const pl = Placement{ .box = .{ .x = 100, .y = 100, .w = 80, .h = 30 }, .image = .{ .x = 103, .y = 103, .w = 74, .h = 24 }, .scale = 1, .flipped_up = false };
+    var ops: std.ArrayList(draw.Op) = .empty;
+    try view(pl, "이 이미지를 열 수 없습니다.", p, arena, &ops); // 27칸 × 8 = 216 > 80
+    try testing.expectEqual(@as(i32, 100 + @as(i32, @intCast(border_px + padding_px))), ops.items[1].text.origin.x);
+}
+
+test "MP1 view: 안내 문구만 상자 가운데에 적는다 — 상자 quad 는 내지 않는다(액자는 호출자 몫)" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const p = metricsOf(1000, 800);
     const pl = place(.{ .x = 100, .y = 100, .w = 80, .h = 16 }, 200, 150, p) orelse return error.TestUnexpectedResult;
-    const Rgb = @import("../../color.zig").Rgb;
-    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
 
     var ops: std.ArrayList(draw.Op) = .empty;
-    try view(pl, null, p, &tk, arena, &ops);
-    try testing.expectEqual(@as(usize, 1), ops.items.len); // 상자만
-
-    var ops2: std.ArrayList(draw.Op) = .empty;
-    try view(pl, "열 수 없습니다", p, &tk, arena, &ops2);
-    try testing.expectEqual(@as(usize, 2), ops2.items.len); // 상자 + 문구
-    try testing.expect(ops2.items[1].text.origin.x > pl.box.x);
+    try view(pl, "열 수 없습니다", p, arena, &ops);
+    try testing.expectEqual(@as(usize, 2), ops.items.len); // clip + 문구 — quad 가 없다
+    // clip 은 테두리 안쪽이다 — 상자보다 넓은 문구가 좌우 변을 덮지 않는다.
+    const inset: i32 = @intCast(border_px + padding_px);
+    try testing.expectEqual(draw.Rect{ .x = pl.box.x + inset, .y = pl.box.y + inset, .w = pl.box.w - 2 * (border_px + padding_px), .h = pl.box.h - 2 * (border_px + padding_px) }, ops.items[0].clip);
+    const t = ops.items[1].text;
+    try testing.expect(t.origin.x > pl.box.x);
+    try testing.expect(t.origin.y > pl.box.y);
+    // 가운데: 좌우 여백이 같다(EAW 표시폭 기준 — 한글 2칸).
+    const text_w: i32 = @intCast(overlay_input.displayCols("열 수 없습니다") * p.metrics.cell_width_px);
+    const left = t.origin.x - pl.box.x;
+    const right = (pl.box.x + @as(i32, @intCast(pl.box.w))) - (t.origin.x + text_w);
+    try testing.expect(@abs(left - right) <= 1);
 }

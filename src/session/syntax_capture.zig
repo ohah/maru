@@ -130,6 +130,11 @@ fn exact(name: []const u8) ?Mapping {
         .{ "include", Mapping{ .role = .keyword } },
         // `module` 과 같은 자리(패키지·이름공간).
         .{ "namespace", Mapping{ .role = .type_name } },
+        // 옛 규약의 필드·메서드·전처리(Lua — 번들 언어 확대 BL1). `field` 는 `property`(새 규약 `variable.member`)와 같은 자리,
+        // `method`(`.call` 포함)는 함수 색, `preproc` 은 Lua 의 `#!` 첫 줄이라 `include` 와 같은 keyword 다.
+        .{ "field", Mapping{ .role = .property } },
+        .{ "method", Mapping{ .role = .function } },
+        .{ "preproc", Mapping{ .role = .keyword } },
 
         // ── 마크업(markdown) ────────────────────────────────────────────────────
         // 제목에 슬롯이 없다. **keyword 가 가장 눈에 띄는 자리**라 그것을 쓴다 — 제목이 본문색이면
@@ -140,6 +145,17 @@ fn exact(name: []const u8) ?Mapping {
         // 링크 대상과 라벨. property(파랑)가 링크 관례에 가깝다.
         .{ "text.uri", Mapping{ .role = .property } },
         .{ "text.reference", Mapping{ .role = .property } },
+        // 새 규약의 마크업 이름(XML·DTD — 번들 언어 확대 BL1). 위 옛 이름과 같은 자리다: 제목(CDATA 경계)은 keyword, 그대로
+        // 읽는 글자(CDATA 안)는 string, 링크(시스템 식별자 URI)는 property. **`markup` 뿌리(본문 글자 `CharData`)는 본문색이다** —
+        // HTML 의 본문이 무색인 것과 같고, 색을 주면 문서가 통째로 칠해진다.
+        .{ "markup.heading", Mapping{ .role = .keyword } },
+        .{ "markup.raw", Mapping{ .role = .string } },
+        .{ "markup.link", Mapping{ .role = .property } },
+        .{ "markup", Mapping.uncolored },
+        // Make 가 `$(error …)`·`$(warning …)`·`$(info …)` 인자 글자에 붙인다. 진단 문구다 — 슬롯이 없어 주석 색(흐린 글자)으로 둔다.
+        .{ "text.danger", Mapping{ .role = .comment } },
+        .{ "text.warning", Mapping{ .role = .comment } },
+        .{ "text.note", Mapping{ .role = .comment } },
 
         // ── 기호 ────────────────────────────────────────────────────────────────
         .{ "punctuation", Mapping{ .role = .punctuation } }, // `.bracket`·`.delimiter`
@@ -167,6 +183,8 @@ fn exact(name: []const u8) ?Mapping {
         // 처럼 쓴다). 색이 아니라 검사용이므로 칠하지 않는다.
         .{ "_class", Mapping.uncolored },
         .{ "_function", Mapping.uncolored },
+        // Make 의 `#match?` 조건용 보조 캡처(`(word) @clean @string.regex (#match? @clean …)`). 위 `_class` 와 같은 부류인데 밑줄이 없다.
+        .{ "clean", Mapping.uncolored },
         // 블록·break 라벨(`outer:`). 팔레트에 마땅한 자리가 없고 빈도가 낮아 본문색으로 둔다 —
         // 겹쳐 보인다는 근거가 생기면 그때 슬롯을 논의한다.
         .{ "label", Mapping.uncolored },
@@ -337,4 +355,29 @@ test "HL5 색이 붙는 캡처와 일부러 무색인 캡처가 둘 다 있다 �
     try std.testing.expectEqual(Role.tag, roleFor("tag").?);
     try std.testing.expectEqual(Role.attribute, roleFor("attribute").?);
     try std.testing.expectEqual(Role.invalid, roleFor("error").?);
+}
+
+test "HL18 번들 언어 확대 BL1 의 grammar(YAML·TOML·XML·DTD·Lua·Dockerfile·Make)가 내는 캡처도 전부 표에 있다" {
+    // 목록은 grammar 의 `highlights.scm` 에서 뽑았다(따옴표 안·주석은 뺀다 — HL17 과 같은 방법). 표에 없으면 그 토큰은 무색이다.
+    const bl1_captures = [_][]const u8{
+        "attribute",             "boolean",          "clean",            "comment",       "conditional",         "constant",
+        "constant.builtin",      "constant.macro",   "constructor",      "embedded",      "error",               "exception",
+        "field",                 "function",         "function.builtin", "function.call", "include",             "keyword",
+        "keyword.function",      "keyword.operator", "keyword.return",   "label",         "markup",              "markup.heading",
+        "markup.link",           "markup.raw",       "method",           "method.call",   "none",                "number",
+        "operator",              "parameter",        "preproc",          "property",      "punctuation.bracket", "punctuation.delimiter",
+        "punctuation.special",   "repeat",           "string",           "string.escape", "string.regex",        "string.special",
+        "string.special.symbol", "tag",              "text.danger",      "text.note",     "text.warning",        "type",
+        "type.builtin",          "variable",         "variable.builtin",
+    };
+    for (bl1_captures) |cap| {
+        if (lookup(cap) == null) {
+            std.debug.print("표에 없는 grammar 캡처: {s}\n", .{cap});
+            return error.UnmappedCapture;
+        }
+    }
+    // 본문 글자(`markup` 뿌리)와 조건용 보조(`clean`)는 일부러 무색이다 — 색이 붙으면 문서가 통째로 칠해진다.
+    try std.testing.expect(roleFor("markup") == null and lookup("markup") != null);
+    try std.testing.expect(roleFor("clean") == null and lookup("clean") != null);
+    try std.testing.expectEqual(Role.function, roleFor("method.call").?);
 }

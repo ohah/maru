@@ -94,7 +94,8 @@ pub fn decideWith(ctx: Context, before: []const u8, after: []const u8, prev: ?[]
         c.line_comment = null;
     }
     if (bracketAction(c, code, after)) |a| return a;
-    if (c.grammar == .html) if (htmlTag(code, after)) |a| return a;
+    // XML 도 HTML 과 같은 태그 규칙이다(번들 언어 확대 BL1 — VS Code 의 xml 설정에는 태그 규칙이 없다: 「의도한 차이」).
+    if (c.grammar == .html or c.grammar == .xml) if (htmlTag(code, after)) |a| return a;
     if (indentRule(c, code, after)) return .{ .indent = .indent };
     return .{};
 }
@@ -233,8 +234,52 @@ fn indentRule(ctx: Context, before: []const u8, after: []const u8) bool {
         .python => pythonBlock(before, ctx.quotes),
         .ruby => rubyBlock(before),
         .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .php => caseLabel(before),
+        .yaml => yamlBlock(before, ctx.quotes),
+        .lua => luaBlock(before, ctx.quotes),
         else => false,
     };
+}
+
+/// YAML — 그 아래에 값이 올 줄(VS Code yaml `increaseIndentPattern` 의 동작 — 번들 언어 확대 BL1): `key:`, 목록 머리 `-`, 앵커만 붙은 `key: &a`,
+/// 블록 스칼라 머리 `key: |`·`key: >-`(VS Code 는 이것을 안 받는다 — 값이 다음 줄부터라 들여써야 한다: 「의도한 차이」). 줄 끝 주석(`#`)은 뗀다
+/// (VS Code 는 `# key:` 도 들여쓴다 — 「의도한 차이」). 원문 정규식의 `&amp;`(HTML 이스케이프 오타)는 따르지 않고 앵커 `&a` 를 받는다.
+fn yamlBlock(before: []const u8, quotes: []const u8) bool {
+    const code = codePart(before, quotes, "#");
+    if (code.len == 0) return false;
+    if (code[code.len - 1] == ':' or std.mem.eql(u8, code, "-")) return true;
+    // 꼬리가 `&anchor`·`|`·`>`(블록 스칼라 — 끝에 `-`/`+` 와 들여쓰기 숫자가 붙을 수 있다)이고 그 앞이 `: ` 또는 `- ` 다.
+    var i = code.len;
+    while (i > 0 and !std.ascii.isWhitespace(code[i - 1])) i -= 1;
+    const tail = code[i..];
+    const head = std.mem.trimEnd(u8, code[0..i], " \t");
+    if (head.len == 0 or (head[head.len - 1] != ':' and head[head.len - 1] != '-')) return false;
+    if (tail.len >= 2 and tail[0] == '&') return true;
+    if (tail[0] != '|' and tail[0] != '>') return false;
+    for (tail[1..]) |b| if (b != '-' and b != '+' and !std.ascii.isDigit(b)) return false;
+    return tail.len <= 3;
+}
+
+/// Lua — 블록을 여는 낱말(`function`·`then`·`do`·`repeat`·`else`)이 뒤에 닫는 낱말(`end`·`until`) 없이 남은 줄(VS Code lua `increaseIndentPattern` 의
+/// 동작 — 번들 언어 확대 BL1). 줄 끝 주석(`--`)은 떼고, 문자열 안 낱말(`"then"`)은 세지 않는다(VS Code 는 센다 — 「의도한 차이」). 줄 끝 `{` 는
+/// 괄호 규칙이 먼저 받는다.
+fn luaBlock(before: []const u8, quotes: []const u8) bool {
+    const code = codePart(before, quotes, "--");
+    var buf: [512]u8 = undefined;
+    const bare = stripStrings(code, quotes, &buf);
+    var open = false;
+    var i: usize = 0;
+    while (i < bare.len) {
+        if (!(std.ascii.isAlphanumeric(bare[i]) or bare[i] == '_')) {
+            i += 1;
+            continue;
+        }
+        const s = i;
+        while (i < bare.len and (std.ascii.isAlphanumeric(bare[i]) or bare[i] == '_')) i += 1;
+        const w = bare[s..i];
+        if (isOneOf(w, &.{ "function", "then", "do", "repeat", "else" })) open = true;
+        if (isOneOf(w, &.{ "end", "until" })) open = false;
+    }
+    return open;
 }
 
 /// 줄 끝 주석(`#` — 문자열 밖)을 떼고 뒤 공백을 지운 코드.
@@ -379,11 +424,19 @@ const intended = [_]Intended{
     .{ .grammar = .python, .before = "match x:" }, // 3.10 match·case
     .{ .grammar = .ruby, .before = "s = \"a do b\"" }, // 문자열 안 do
     .{ .grammar = .ruby, .before = "if a then b end" }, // 한 줄로 닫힌 블록
+    // 번들 언어 확대 BL1.
+    .{ .grammar = .yaml, .before = "key: &anchor" }, // VS Code 원문의 `&amp;` 는 HTML 이스케이프 오타 — 앵커를 받는다
+    .{ .grammar = .yaml, .before = "key: |" }, // 블록 스칼라 머리 — 값이 다음 줄부터라 들여쓴다
+    .{ .grammar = .yaml, .before = "# key:" }, // 주석 안
+    .{ .grammar = .lua, .before = "local s = \"then\"" }, // 문자열 안 낱말
+    .{ .grammar = .dockerfile, .before = "RUN echo a:" }, // VS Code 의 Dockerfile 설정은 YAML 규칙을 베낀 꼴이다
+    .{ .grammar = .xml, .before = "<a>" }, // XML 도 HTML 의 태그 규칙(VS Code 의 xml 설정에는 태그 규칙이 없다)
+    .{ .grammar = .xml, .before = "<a b=\"c\">" }, // 같은 이유
 };
 
-fn intendedDiff(g: language.Grammar, before: []const u8) bool {
-    for (intended) |d| if (d.grammar == g and std.mem.eql(u8, d.before, before)) return true;
-    return false;
+fn intendedDiff(g: language.Grammar, before: []const u8) ?usize {
+    for (intended, 0..) |d, i| if (d.grammar == g and std.mem.eql(u8, d.before, before)) return i;
+    return null;
 }
 
 /// VS Code 의 답을 우리 모양으로 옮긴다 — `none` 은 `keep`, 기본 appendText(`""`·탭)는 `null`(한 단계).
@@ -400,18 +453,19 @@ fn sameAction(a: Action, b: Action) bool {
 }
 
 test "INDR1 VS Code 규칙 대조 — 핀 커밋의 내장 언어 설정을 원래 의미로 돌린 말뭉치와 같은 갈래, 갈리는 것은 의도한 차이 목록에만 (계획 editor-typing-rules TR3)" {
-    var differ: usize = 0;
+    // 목록의 항목마다 말뭉치에서 한 번 이상 갈려야 한다 — 같은 `before` 가 뒤 조각만 달리해 여러 번 나올 수 있다(XML `<a>` ⏎ `</a>`·`<a>`).
+    var hit = [_]bool{false} ** intended.len;
     for (vscode.cases) |e| {
         const got = decide(ctxFor(e.grammar), e.before, e.after, if (e.prev.len > 0) e.prev else null);
         const want = fromVscode(e);
         const same = sameAction(got, want);
-        if (intendedDiff(e.grammar, e.before)) {
+        if (intendedDiff(e.grammar, e.before)) |k| {
             // 의도한 차이는 **실제로 갈려야** 한다 — 같아졌다면 목록이 낡았거나 VS Code 가 바뀌었다.
             if (same) {
                 std.debug.print("intended diff vanished: {s} {s}\n", .{ @tagName(e.grammar), e.before });
                 return error.IntendedDiffVanished;
             }
-            differ += 1;
+            hit[k] = true;
             continue;
         }
         if (!same) {
@@ -420,7 +474,10 @@ test "INDR1 VS Code 규칙 대조 — 핀 커밋의 내장 언어 설정을 원�
         }
     }
     // 목록의 차이가 전부 말뭉치에 있다(목록만 남은 낡은 항목이 없다).
-    try testing.expectEqual(intended.len, differ);
+    for (hit, intended) |h, d| if (!h) {
+        std.debug.print("intended diff not in corpus: {s} {s}\n", .{ @tagName(d.grammar), d.before });
+        return error.IntendedDiffNotInCorpus;
+    };
 }
 
 test "INDR2 블록·줄 주석 — 여는 줄은 ` * `, `*/` 앞이면 그것을 아래로, 가운데 줄은 `* `(앞 줄이 주석 안일 때만), 닫는 줄 뒤는 정렬 공백 하나 빼기, 줄 주석은 가운데서만 잇는다 (계획 editor-typing-rules TR3)" {

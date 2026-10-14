@@ -612,12 +612,20 @@ primary/포커스 상실/겹친 선택의 확정과 undo/redo). 콜백을 직접
     | Java | `tree-sitter/tree-sitter-java` | v0.23.5 | 476KB |
     | Ruby | `tree-sitter/tree-sitter-ruby` | v0.23.1 | 2162KB |
     | PHP | `tree-sitter/tree-sitter-php` | v0.24.2 | 2254KB |
-    | Kotlin | `fwcd/tree-sitter-kotlin` | 0.3.8 | 0KB |
+    | Kotlin | `fwcd/tree-sitter-kotlin` | 0.3.8 | 4108KB |
     | Bash | `tree-sitter/tree-sitter-bash` | v0.25.0 | 1543KB |
     | CSS | `tree-sitter/tree-sitter-css` | v0.23.2 | 179KB |
     | HTML | `tree-sitter/tree-sitter-html` | v0.23.2 | 63KB |
+    | YAML | `tree-sitter-grammars/tree-sitter-yaml` | v0.7.2 | 277KB |
+    | TOML | `tree-sitter-grammars/tree-sitter-toml` | v0.7.0 | 59KB |
+    | XML · DTD | `tree-sitter-grammars/tree-sitter-xml` | v0.7.0 | 110KB + 74KB |
+    | Lua | `tree-sitter-grammars/tree-sitter-lua` | v0.5.0 | 103KB |
+    | Dockerfile | `camdencheek/tree-sitter-dockerfile` | v0.2.0 | 107KB |
+    | Make | `tree-sitter-grammars/tree-sitter-make` | v1.1.1 | 212KB |
 
-    **합계 약 17.7MB**(코어 896KB 별도). ~~Zig 하나로 시작한다~~ — 2026-08-29 사용자 결정으로 **메이저
+    **합계 약 23.1MB**(코어 896KB 별도) — 처음 열일곱의 22.2MB 에 번들 언어 확대 BL1(2026-10-14 — [계획](editor-bundled-languages.md))의
+    여섯이 0.9MB 를 더했다. ~~합계 약 17.7MB~~ 는 Kotlin 행이 「0KB」로 잘못 적혀 있던 값이다(같은 방법으로 다시 재니 4108KB — 그 계획의
+    실측 때 드러났다). ~~Zig 하나로 시작한다~~ — 2026-08-29 사용자 결정으로 **메이저
     언어를 한 번에 싣는다**. 크기 대비가 극단적으로 갈린다는 것을 실측으로 확인하고 그 위에서 정했다:
     JSON 19KB·HTML 63KB·Go 266KB는 거의 공짜인데 **C++ 3.5MB · TypeScript 3.0MB · PHP 2.3MB ·
     Ruby 2.2MB 넷이 전체의 65%**를 먹는다. 코어는 언어 수와 무관한 고정 비용이다.

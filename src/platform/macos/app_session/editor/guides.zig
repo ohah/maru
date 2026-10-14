@@ -59,14 +59,15 @@ const DocLines = struct {
 /// 적대적 검증(2026-09-24)이 번들 18 개의 설정을 전부 열어 Markdown 을 찾았다.
 fn offsideOf(term: *const Term) bool {
     return switch (term.rt.editor_grammar) {
-        .python, .markdown => true,
+        // YAML 도 VS Code 가 `folding.offSide` 다(번들 언어 확대 BL1 — 원문 `extensions/yaml/language-configuration.json`).
+        .python, .markdown, .yaml => true,
         else => false,
     };
 }
 
-/// 추정의 기본 모드 — 언어 기본(Go·Makefile 은 탭 — `indent_guides.defaultSpacesMode`). 편집의 들여쓰기 단위(`editUnit`)와 같은 값이다.
-fn defaultSpacesModeOf(term: *const Term) bool {
-    return guides.defaultSpacesMode(term.rt.editor_grammar, term.rt.editorDocument().path);
+/// 추정의 언어 기본(Go·Makefile 은 탭, YAML 은 공백 2 — `indent_guides.languageDefault`). 편집의 들여쓰기 단위(`editUnit`)와 같은 값이다.
+fn languageDefaultOf(term: *const Term) guides.LanguageDefault {
+    return guides.languageDefault(term.rt.editor_grammar);
 }
 
 /// 그 문서의 들여쓰기 추정 — 처음 묻는 쪽이 채우고 굳힌다(안내선이 먼저 그렸으면 그 값). 편집으로는 다시 추정하지 않는다(VS Code 도
@@ -76,7 +77,8 @@ fn ensureGuess(term: *Term) ?guides.Guess {
     const st = &term.rt.editor_guides;
     if (st.guess == null) {
         const src: DocLines = .{ .lines = doc.file.lines, .content = doc.file.content };
-        st.guess = guides.guessWith(src, term.rt.editor_tab_width, defaultSpacesModeOf(term));
+        const d = languageDefaultOf(term);
+        st.guess = guides.guessWith(src, d.tab_size orelse term.rt.editor_tab_width, d.spaces);
         st.guessed += 1;
     }
     return st.guess;
@@ -96,10 +98,10 @@ pub fn onTabWidthSettingChanged(term: *Term) void {
 }
 
 /// 이름 없는 문서에 이름이 붙어 문법이 바뀌었다(`old` → 지금 — 옛 경로는 없었다) — **언어 기본이 달라질 때만** 다시 추정한다(VS Code
-/// `_onDidChangeLanguage` → `_setModelOptionsForModel` 은 두 언어의 옵션이 같으면 모델을 건드리지 않는다). 언어 기본은 경로도 본다(Makefile —
-/// 문법은 그대로 `none` 인데 기본이 탭이 된다). offSide 는 추정이 아니라 프레임마다 읽으므로 여기서 할 것이 없다.
+/// `_onDidChangeLanguage` → `_setModelOptionsForModel` 은 두 언어의 옵션이 같으면 모델을 건드리지 않는다). offSide 는 추정이 아니라 프레임마다
+/// 읽으므로 여기서 할 것이 없다.
 pub fn onGrammarChanged(term: *Term, old: maru.session.editor.language.Grammar) void {
-    if (guides.defaultSpacesMode(old, null) != defaultSpacesModeOf(term)) term.rt.editor_guides.guess = null;
+    if (!std.meta.eql(guides.languageDefault(old), languageDefaultOf(term))) term.rt.editor_guides.guess = null;
 }
 
 /// 한 프레임의 안내선 — 창과 간격(0 이면 그리지 않는다).

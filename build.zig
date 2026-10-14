@@ -399,6 +399,8 @@ pub fn build(b: *std.Build) void {
         scanner: ?[]const u8 = null,
         queries: []const u8 = "queries/highlights.scm",
         import: []const u8,
+        /// 라이선스 파일 — 저장소마다 이름이 다르다(Lua 는 `LICENSE.md`). 동봉 이름은 dep 에서 짓는다.
+        license: []const u8 = "LICENSE",
     };
     const grammars = [_]Grammar{
         .{ .dep = "tree_sitter_zig", .src = "src", .import = "zig_highlights_scm" },
@@ -423,6 +425,15 @@ pub fn build(b: *std.Build) void {
         .{ .dep = "tree_sitter_bash", .src = "src", .scanner = "scanner.c", .import = "bash_highlights_scm" },
         .{ .dep = "tree_sitter_css", .src = "src", .scanner = "scanner.c", .import = "css_highlights_scm" },
         .{ .dep = "tree_sitter_html", .src = "src", .scanner = "scanner.c", .import = "html_highlights_scm" },
+        // 번들 언어 확대 BL1(docs/plans/editor-bundled-languages.md). YAML 스캐너는 `schema.core.c` 를 include 한다(src 안).
+        .{ .dep = "tree_sitter_yaml", .src = "src", .scanner = "scanner.c", .import = "yaml_highlights_scm" },
+        .{ .dep = "tree_sitter_toml", .src = "src", .scanner = "scanner.c", .import = "toml_highlights_scm" },
+        // xml 은 XML·DTD 두 grammar 다(typescript/tsx 와 같다) — 쿼리도 갈래마다 폴더가 따로다.
+        .{ .dep = "tree_sitter_xml", .src = "xml/src", .scanner = "scanner.c", .queries = "queries/xml/highlights.scm", .import = "xml_highlights_scm" },
+        .{ .dep = "tree_sitter_xml", .src = "dtd/src", .scanner = "scanner.c", .queries = "queries/dtd/highlights.scm", .import = "dtd_highlights_scm" },
+        .{ .dep = "tree_sitter_lua", .src = "src", .scanner = "scanner.c", .import = "lua_highlights_scm", .license = "LICENSE.md" },
+        .{ .dep = "tree_sitter_dockerfile", .src = "src", .scanner = "scanner.c", .import = "dockerfile_highlights_scm" },
+        .{ .dep = "tree_sitter_make", .src = "src", .import = "make_highlights_scm" },
     };
     for (grammars) |g| {
         if (b.lazyDependency(g.dep, .{})) |dep| {
@@ -442,7 +453,7 @@ pub fn build(b: *std.Build) void {
                     .dep = g.dep,
                     // `tree_sitter_json` → `tree-sitter-json-LICENSE`
                     .file = b.fmt("tree-sitter-{s}-LICENSE", .{g.dep["tree_sitter_".len..]}),
-                    .path = dep.path("LICENSE"),
+                    .path = dep.path(g.license),
                 }) catch @panic("OOM");
             }
             // **지금 grammar 에는 이 경로가 없어도 되는 판이 많다** — `parser.c` 가 인용 형식으로

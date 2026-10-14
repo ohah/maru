@@ -41685,6 +41685,61 @@ test "INDF3 같은 문서의 공유 뷰는 원래 뷰의 들여쓰기 추정을 
     try testing.expectEqualDeep(before, guides_client.editUnit(t));
 }
 
+test "BLX1 번들 언어 확대 BL1 — 실제 키로: YAML `key:` 뒤 Enter 는 공백 2(언어 기본), Lua `function` 뒤 한 단계·`end` 내어쓰기, Makefile 의 Tab 은 탭(언어 기본), XML 태그 사이 Enter 는 가운데 줄, Dockerfile·Makefile 은 이름으로 문법이 선다 (docs/plans/editor-bundled-languages.md)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    const open = struct {
+        fn f(fx_: *PaneFixture, a: std.mem.Allocator, name: []const u8, src: []const u8) !*Term {
+            const t = try undoFixture(fx_, a, name, src);
+            t.rt.editor_tab_width = 4;
+            const d = t.rt.editorDocument().opened orelse return error.NoDoc;
+            t.rt.editor_syntax.deinit(a);
+            t.rt.editor_syntax = syntax_color.openParsedBudgeted(d.file.content, t.rt.editor_grammar, 0);
+            if (t.rt.editor_syntax.provider == null or t.rt.editor_syntax.pending) return error.NoTree;
+            return t;
+        }
+    }.f;
+    const G = maru.session.editor.language.Grammar;
+    // ⑴ YAML — 들여쓴 줄 없는 새 파일은 VS Code `[yaml]` 처럼 공백 2.
+    const y = try open(&fx, allocator, "ci.yml", "jobs:\n");
+    try testing.expectEqual(G.yaml, y.rt.editor_grammar);
+    y.rt.editor_selection = editor_selection.Selection.at(5);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("jobs:\n  \n", content(y));
+    // ⑵ Lua — `function` 뒤 Enter 는 한 단계(공백 4 — 설정 폭), 본문 줄 뒤 `end` 를 다 치면 내어쓴다.
+    const l = try open(&fx, allocator, "init.lua", "function f()\n");
+    try testing.expectEqual(G.lua, l.rt.editor_grammar);
+    l.rt.editor_selection = editor_selection.Selection.at(12);
+    try pressKey(&fx, .enter, .{});
+    for ("x = 1") |ch| try testing.expect(insertText(fx.session, l, &[_]u8{ch}));
+    try pressKey(&fx, .enter, .{});
+    for ("end") |ch| try testing.expect(insertText(fx.session, l, &[_]u8{ch}));
+    try testing.expectEqualStrings("function f()\n    x = 1\nend\n", content(l));
+    // ⑶ Makefile — 이름으로 문법이 서고, Tab 은 탭이다(레시피 줄은 탭이어야 한다 — VS Code `[makefile]`).
+    const mk = try open(&fx, allocator, "Makefile", "all:\n\n");
+    try testing.expectEqual(G.make, mk.rt.editor_grammar);
+    try testing.expectEqualStrings("Makefile", mk.rt.editor_grammar.displayName().?);
+    mk.rt.editor_selection = editor_selection.Selection.at(5);
+    try pressKey(&fx, .tab, .{});
+    try testing.expectEqualStrings("all:\n\t\n", content(mk));
+    // ⑷ XML — HTML 과 같은 태그 규칙(가운데 줄).
+    const x = try open(&fx, allocator, "a.xml", "<a></a>\n");
+    try testing.expectEqual(G.xml, x.rt.editor_grammar);
+    x.rt.editor_selection = editor_selection.Selection.at(3);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("<a>\n    \n</a>\n", content(x));
+    // ⑸ Dockerfile — 확장자가 없는 이름·갈래 이름도 문법이 선다(트리가 선다 — `open` 이 `NoTree` 가 아니다).
+    const dk = try open(&fx, allocator, "Dockerfile.dev", "FROM node:20\nRUN echo hi\n");
+    try testing.expectEqual(G.dockerfile, dk.rt.editor_grammar);
+}
+
 test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
@@ -43773,10 +43828,11 @@ test "SBL2 문법은 문서를 열 때 한 번 정해 Term 에 남고, 없으면
     try testing.expectEqual(maru.session.editor.language.Grammar.zig, zt.rt.editor_grammar);
     try testing.expectEqualStrings("Zig", zt.rt.editor_grammar.displayName().?);
 
-    // ⑵ **문법이 없는 파일은 `none`** — 상태바가 그때 비는 근거다. `Makefile` 은 `Language` 가
-    //    `shell` 로 묶지만 문법은 없다(그래서 「Shell」이라고 적지 않는다).
-    try fx.dir.dir.writeFile(io_, .{ .sub_path = "Makefile", .data = "all:\n\techo hi\n" });
-    const mp = try std.fs.path.join(allocator, &.{ root, "Makefile" });
+    // ⑵ **문법이 없는 파일은 `none`** — 상태바가 그때 비는 근거다. `Justfile` 은 `Language` 가
+    //    `shell` 로 묶지만 문법은 없다(그래서 「Shell」이라고 적지 않는다). 처음엔 `Makefile` 이 그 예였다 — 번들 언어 확대 BL1 이
+    //    Make 문법을 실었다.
+    try fx.dir.dir.writeFile(io_, .{ .sub_path = "Justfile", .data = "all:\n\techo hi\n" });
+    const mp = try std.fs.path.join(allocator, &.{ root, "Justfile" });
     defer allocator.free(mp);
     const mt = try openPathInActivePane(fx.session, mp);
     try testing.expectEqual(maru.session.editor.language.Grammar.none, mt.rt.editor_grammar);

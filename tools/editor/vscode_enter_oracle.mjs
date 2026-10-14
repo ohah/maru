@@ -75,6 +75,19 @@ const corpus = {
   ]],
   css: ['css', [['a {', '}', ''], ['a {', '', ''], ['a { color: red; }', '', '']]],
   json: ['json', [['{', '}', ''], ['"a": [', ']', ''], ['"a": 1,', '', '']]],
+  // 번들 언어 확대 BL1(docs/plans/editor-bundled-languages.md) — VS Code 에 내장 설정이 있는 다섯.
+  yaml: ['yaml', [
+    ['key:', '', ''], ['  nested:', '', ''], ['- ', '', ''], ['- item', '', ''], ['key: value', '', ''], ['key: &anchor', '', ''],
+    ['key: |', '', ''], ['url: http://x', '', ''], ['a: [', ']', ''], ['# key:', '', ''],
+  ]],
+  lua: ['lua', [
+    ['function f()', '', ''], ['if x then', '', ''], ['for i = 1, 3 do', '', ''], ['while x do', '', ''], ['repeat', '', ''], ['else', '', ''],
+    ['elseif y then', '', ''], ['local t = {', '}', ''], ['f(function() end)', '', ''], ['-- function f()', '', ''], ['x = 1', '', ''],
+    ['local s = "then"', '', ''],
+  ]],
+  dockerfile: ['docker', [['FROM node', '', ''], ['RUN echo a:', '', ''], ['RUN [', ']', ''], ['# c', '', '']]],
+  make: ['make', [['all: build', '', ''], ['all:', '', ''], ['$(foo', ')', ''], ['\techo $(X)', '', '']]],
+  xml: ['xml', [['<a>', '</a>', ''], ['<a>', '', ''], ['<a/>', '', ''], ['<?xml version="1.0"?>', '', ''], ['<!-- c -->', '', ''], ['<a b="c">', '</a>', '']]],
 };
 
 const zs = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\t/g, '\\t').replace(/\n/g, '\\n') + '"';

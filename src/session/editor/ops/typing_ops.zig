@@ -145,7 +145,7 @@ pub const keyword_scan_lines: usize = 4096;
 /// 새 줄 머리(들여쓰기 + 이미 친 글자 + 친 글자)를 낸다 — 바꿀 것이 없으면 `null`.
 pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Context, lo: usize, typed: u8) !?struct { line_start: usize, text: []u8 } {
     const unit = r.unit orelse return null;
-    if (r.grammar != .ruby and r.grammar != .python) return null;
+    if (r.grammar != .ruby and r.grammar != .python and r.grammar != .lua) return null;
     const line = r.lines.line(r.lines.lineAt(lo)) orelse return null;
     // caret 이 줄바꿈 안(CRLF 의 `\r`·`\n` 사이 — → 로 줄 끝을 넘으면 닿는다)이면 줄 끝 뒤다(최종 검토: 그 자리에서 낱말을 치면 거꾸로 된 slice 로
     // 죽었다).
@@ -200,6 +200,16 @@ fn keywordHit(grammar: language.Grammar, code: []const u8, typed: u8) bool {
             for ([_][]const u8{ "end", "else", "elsif", "ensure", "rescue", "when " }) |k| if (std.mem.eql(u8, w, k)) break :blk true;
             break :blk false;
         },
+        // Lua — `end`·`else`·`elseif`·`until`(VS Code lua `decreaseIndentPattern` — 번들 언어 확대 BL1). Ruby 와 같이 친 글자까지 붙인 낱말이 그것이다.
+        .lua => blk: {
+            var buf: [8]u8 = undefined;
+            if (code.len + 1 > buf.len) break :blk false;
+            @memcpy(buf[0..code.len], code);
+            buf[code.len] = typed;
+            const w = buf[0 .. code.len + 1];
+            for ([_][]const u8{ "end", "else", "elseif", "until" }) |k| if (std.mem.eql(u8, w, k)) break :blk true;
+            break :blk false;
+        },
         .python => typed == ':' and blk: {
             var i: usize = 0;
             while (i < code.len and isWordByte(code[i])) i += 1;
@@ -215,7 +225,7 @@ fn keywordHit(grammar: language.Grammar, code: []const u8, typed: u8) bool {
 /// 안다(최종 검토; capture 는 통째로 오므로 그 문자열의 위 줄들도 함께 덮인다). 줄 머리부터 caret 까지 물으면 위 줄이 압축한 한 줄일 때 키
 /// 하나에 그 줄 전체를 묻는다(4회차). caret 줄이 들여쓰기 + 다 친 낱말이 아니면(내어쓰기를 안 탄다) `null` — 더 묻지 않는다.
 pub fn keywordQueryStart(content: []const u8, lines: LineIndex, grammar: language.Grammar, lo: usize, typed: u8) ?usize {
-    if (grammar != .ruby and grammar != .python) return null;
+    if (grammar != .ruby and grammar != .python and grammar != .lua) return null;
     const line = lines.line(lines.lineAt(lo)) orelse return null;
     if (lo > line.contentEnd()) return null;
     const head = content[line.start..lo];

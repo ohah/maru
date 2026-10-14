@@ -1,6 +1,8 @@
 //! Chrome semantic draw 어휘 — backend-neutral. 컴포넌트는 ChromeDraw만 뱉고, platform 백엔드가
-//! 이걸 그 플랫폼의 셀로 lowering한다(모서리 0인 기반 토큰 `base`→NativeMetalCell, rich→GPU 프리미티브 — 제품은
-//! 늘 rich, base 갈래는 테스트가 셀 lowering을 볼 때 쓴다). 좌표는 **픽셀**
+//! 이걸 그 플랫폼의 셀·GPU 프리미티브로 lowering한다. 경로는 룩(base/rich)이 아니라 **op 모양**이 가른다 — macOS
+//! 오버레이 lowering(`platform/macos/chrome/metal_lowering.zig`)은 fill·text·모서리 0 swatch·모서리 0 quad 를 셀
+//! 격자로, 둥근 quad·독립 패널(`independent_panel`)의 첫 quad·셀보다 얇은 fill 을 GPU quad 로 낸다(제품 토큰은
+//! rich 하나, 모서리 0 기반 토큰 `base`는 테스트만). 좌표는 **픽셀**
 //! (rich의 sub-cell 정밀도 대비). 컴포넌트는 NativeMetalCell·Metal·atlas를 모른다.
 //! 단일 출처: docs/chrome-strategy.md §5.2, docs/layering-and-portability.md.
 
@@ -106,7 +108,8 @@ pub const Op = union(enum) {
     /// 백엔드가 셀 bg/quad에 이 RGB를 그대로 칠한다. corner_radii(Quad와 동형)가 0이면 셀 bg(base), >0이면 둥근
     /// GPU quad(rich) — 컴포넌트가 props.shape에서 읽어 채운다(base=0 직각, rich>0 둥근 칩, C4b 분기 동형).
     pub const Swatch = struct { rect: Rect, rgb: Rgb, corner_radii: [4]u16 = .{ 0, 0, 0, 0 } };
-    /// 사각형의 일부 변에 선(focus 테두리). 기반 토큰(base)은 reserved-kind 띠, rich는 실제 테두리/radius로 lowering.
+    /// 사각형의 일부 변에 선(focus 테두리). macOS lowering은 그 draw에 패널 배경 quad가 **아직 없을 때만** 변을 셀 배경으로
+    /// 칠하고, 이미 있으면 버린다(패널 quad가 자기 `border_widths`로 테두리를 그린다 — `metal_lowering.lower`의 `.border`).
     pub const Border = struct { rect: Rect, sides: Sides, role: tokens.ColorRole };
     /// 한 줄(divider). 수평/수직은 from/to로 결정.
     pub const Rule = struct { from: Px, to: Px, role: tokens.ColorRole };
@@ -184,8 +187,9 @@ pub const Op = union(enum) {
         clip: ?Rect = null,
     };
 
-    /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. 백엔드는 corner/border가 0이면(기반 토큰 base)
-    /// Fill처럼 셀로 lowering하고, >0이면(rich) GPU quad 프리미티브로 lowering한다. 모양 파라미터는
+    /// C4b rich 박스 — 둥근 모서리·변별 테두리·solid/gradient 채움. macOS lowering은 **모서리**가 0 이고 독립 패널
+    /// (`ChromeDraw.independent_panel`)의 첫 quad가 아니면 Fill처럼 셀로 칠하고(`border_widths`는 이 판정에 안 들어간다),
+    /// 아니면 GPU quad 프리미티브로 낸다 — draw의 첫 GPU quad는 패널 배경+그림자, 뒤의 것은 위젯. 모양 파라미터는
     /// 컴포넌트가 tokens.space에서 읽어 채운다(base=0 → 직각, rich>0 → 둥근) — 컴포넌트 코드는 base/rich
     /// 분기 없이 같다(C4a 색 분리와 동형). corner_radii=[tl,tr,br,bl], border_widths=[top,right,bottom,left](px).
     pub const Quad = struct {

@@ -326,12 +326,14 @@ pub fn paneTabAreaCols(bar_cols: u16) u16 {
     return if (bar_cols > pane_tab_plus_cols + 1) bar_cols - pane_tab_plus_cols else bar_cols;
 }
 
-/// 사이드바 카드 row 인코딩 — 한 슬롯(**압축 카드 서수**) 안에서 (line_index, line_count)를 row에 싣는다. **디코드는
-/// Zig**가 한다(SG3b-2-ii 옵션2): app_session.applySidebarGlyphPyTop이 slot=row/32, line_count=(row%32)/4,
-/// line_index=(row%32)%4로 풀어 **rowTop 기반 py_top**(가변 높이 — 그룹 헤더 반영)을 셀 origin_y에 싣고, .m은 그 origin_y로
-/// 세로 위치를 잡는다(옛 .m의 slot×slot_h 균일 기하 폐기 — code-review #1·#5·#6). 색칠 루프도 slot=row/32로 슬롯을 디코드한다.
-/// line_count=1이면 단일행 중앙. 최대 4줄(이름·브랜치·경로·상태) 지원(base 32 — slot≤2047). 밴드 셀(slot_id=0)은 이 인코딩과
-/// 무관하게 row=표시 row 인덱스 그대로(렌더러가 slot_id로 분기) — 여기를 인코딩 단일 출처로 고정한다. buildSidebarDrawList가
+/// 사이드바 카드 row 인코딩 — 한 슬롯(**표시 행 서수** — `sidebarRenderRows`의 index, 카드·그룹 헤더·에이전트 행을 다 센다)
+/// 안에서 (line_index, line_count)를 row에 싣는다. **디코드는 Zig**가 한다(SG3b-2-ii 옵션2): app_session.applySidebarGlyphPyTop이
+/// `sidebar_glyph_rows.fillScreenOriginY`로 slot=row/32, line_count=(row%32)/4, line_index=(row%32)%4를 풀어 **rowTop 기반**
+/// 줄 자리(가변 높이 — 그룹 헤더 반영)에 헤더·스크롤까지 더한 화면 y를 셀 origin_y에 싣고, .m은 그 origin_y를 그대로 그린다
+/// (옛 .m의 slot×slot_h 균일 기하 폐기 — code-review #1·#5·#6, ABI 224). 색칠 루프도 slot=row/32로 슬롯을 디코드한다.
+/// line_count=1이면 단일행 중앙. 최대 4줄(이름·브랜치·경로·상태) 지원(base 32 — slot≤2047). 글자 아닌 셀(slot_id=0 — 배경·
+/// 장식선)도 같은 인코딩이고 같은 식으로 놓인다(ABI 225 — 옛 tui 룩의 밴드 셀만 row=표시 row 그대로였고, 렌더러가 slot_id로
+/// 갈랐던 그 갈래는 지웠다). 여기를 인코딩 단일 출처로 고정한다. buildSidebarDrawList가
 /// 4줄(이름·브랜치·경로·상태, `lines: [4]`)까지 쓰고, 슬롯 높이도 4줄을 담게 키웠다
 /// (`app_session/sidebar.zig`의 `sidebar_slot_height_ratio_milli` — 값은 그쪽이 소유한다. 여기 숫자를 적어 두면
 /// 그 상수가 바뀔 때 같이 안 바뀐다. 실제로 4.6×에서 5.2×로 커진 뒤 이 주석만 4600으로 남아 있었다).
@@ -839,7 +841,7 @@ pub fn buildPaneTabBarDrawList(
 
     const style: terminal.Style = .{ .foreground = fg };
     // 탭은 "+" 버튼 zone을 뺀 영역(tab_cols)에만 깐다. 우측 [tab_cols, cols)는 "+"(새 Term) 버튼.
-    // 탭 레이아웃 단일 소스(§6) — barMetrics(hit-test)와 같은 tabLayout이라 보이는 탭/‹›/+ == 클릭. 넘치면 우측 ‹›(2칸) 예약·탭 영역 축소.
+    // 탭 레이아웃 단일 소스(§6) — barMetrics(hit-test)와 같은 tabLayout이라 보이는 탭/‹›/+ == 클릭. 넘치면 우측 ‹·›(각 3칸, 6칸) 예약·탭 영역 축소.
     const layout = tabLayout(cols, titles.len, tab_width_fixed, scroll_cols);
     const tab_cols = layout.tab_cols;
     const tab_w = layout.tab_w;
@@ -883,7 +885,7 @@ pub fn buildPaneTabBarDrawList(
         }
     }
 
-    // 우측 컨트롤: 넘치면(has_scroll) ‹›(왼/오 스크롤) 2칸을 tab_cols·tab_cols+1에, 그 오른쪽에 "+". 안 넘치면 "+"만.
+    // 우측 컨트롤: 넘치면(has_scroll) ‹·›(왼/오 스크롤) 각 3칸 버튼을 [tab_cols, tab_cols+6)에, 그 오른쪽에 "+". 안 넘치면 "+"만.
     if (layout.has_scroll) {
         // #3: ‹/›를 스크롤 여지가 있는 방향만 강조색(active_fg)·없는 방향은 muted(style=fg)로 그려, ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을
         // 알리는 단서로 쓴다(부분 탭 좌측 잘림 cue). eff_scroll은 [0, total-tab_cols]로 clamp돼 있어 경계 판정이 정확하다.
@@ -2056,6 +2058,10 @@ test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; 균등 분�
     // fixed 0 균등 분할이 넘치지 않으면 무스크롤: 12탭 → tab_w=37/12=3, total=36 <= 37 → has_scroll=false.
     // (fixed 0 이라도 넘치면[total > base] 이제 ‹›가 뜬다 — 옛 tui 룩의 #4 무스크롤 가드는 지웠다.)
     try std.testing.expect(!tabLayout(40, 12, 0, 0).has_scroll);
+    // 그 계약: 40탭 → 균등 1칸 × 40 = 40 > 37 → ‹›가 뜨고 탭 영역이 버튼 둘(6칸)만큼 준다(37 − 6 = 31).
+    const even_overflow = tabLayout(40, 40, 0, 0);
+    try std.testing.expect(even_overflow.has_scroll);
+    try std.testing.expectEqual(@as(u16, 31), even_overflow.tab_cols);
 }
 
 test "buildSidebarDrawList truncates to cols and advances wide glyphs by two columns" {
@@ -2295,9 +2301,6 @@ test "active tab/row title is drawn with active_fg and bold; others with fg and 
     }
 }
 
-// #3: 넘침 스크롤 시 ‹/›를 스크롤 여지 있는 방향만 active_fg(강조)·없는 방향(경계)은 fg(muted)로 그린다 —
-// ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을 알리는 단서(부분 탭 좌측 잘림 cue). cols=40·고정폭16·3탭 → total=48,
-// ‹·›가 각 2칸이라 tab_cols=33, max_scroll=15.
 test "탭바 버튼 glyph 는 각자 3칸 버튼의 가운데 칸에 놓인다(✕·‹·›·+)" {
     // 회귀 고정(사용자 보고 2026-08-20): 버튼 배경 안에서 glyph 가 한쪽에 붙어 있었다 — ‹ 는 왼쪽 패딩이,
     // › 는 오른쪽 패딩이 0 이었고, ✕ 는 클릭 zone(2칸)이 glyph 왼쪽 가장자리에 붙어 배경이 비대칭이었다.
@@ -2343,6 +2346,9 @@ test "탭바 버튼 glyph 는 각자 3칸 버튼의 가운데 칸에 놓인다(�
     }
 }
 
+// #3: 넘침 스크롤 시 ‹/›를 스크롤 여지 있는 방향만 active_fg(강조)·없는 방향(경계)은 fg(muted)로 그린다 —
+// ‹가 진하면 "왼쪽에 잘린 탭 더 있음"을 알리는 단서(부분 탭 좌측 잘림 cue). cols=40·고정폭16·3탭 → total=48,
+// base=37 에서 ‹·› 각 3칸(`scroll_button_cols`, 6칸)을 떼 tab_cols=31, max_scroll=17.
 test "scroll ‹/› highlight only the scrollable direction (boundary uses muted fg)" {
     const allocator = std.testing.allocator;
     const dim: terminal.Color = .{ .rgb = .{ .r = 0x70, .g = 0x70, .b = 0x70 } }; // fg(muted)

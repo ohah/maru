@@ -1626,8 +1626,16 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, number(�
     // 행0 toggle 중앙 클릭 → 선택=0 + .toggle.
     s.show();
     const tgl = toggleRectIn(fieldControlRect(l, 0), test_props.metrics.cell_height_px);
+    // 클릭 영역 = 보이는 pill — 폭이 pill 폭(`toggle.width(ch)`)이다. 옛 tui 셀 트랙 시절의 `@max(pill, 4·cw)`(여기선 32 > 28)로
+    // 돌아가면 이 단언과 아래 「pill 바로 오른쪽은 행 선택」이 빨개진다.
+    try std.testing.expectEqual(toggle.width(test_props.metrics.cell_height_px), tgl.w);
     try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl.x + 4), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
+    // pill 오른쪽 끝 안쪽은 토글, 바로 바깥(pill 과 `4·cw` 사이 — 옛 폭이면 토글이던 띠)은 행 선택만.
+    const tgl_right: i32 = tgl.x + @as(i32, @intCast(tgl.w));
+    try std.testing.expect(tgl.w < 4 * test_props.metrics.cell_width_px); // 판별력: 그 띠가 실제로 있다
+    try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl_right - 1), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s));
+    try std.testing.expectEqual(Action.selection_changed, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl_right + 1), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s));
 
     // 행1 숫자 입력 박스(control 열) 클릭 → 선택=1 + .toggle(platform이 현재값으로 편집 진입). 슬라이더 드래그 없음.
     const c1 = fieldControlRect(l, 1);

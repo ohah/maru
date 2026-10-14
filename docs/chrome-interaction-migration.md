@@ -26,9 +26,10 @@ JS callback 또는 component-local gesture state를 도입하지 않는다.
 - WebView, editor, terminal renderer를 일반 component renderer로 통합하지 않는다.
 - 모든 기존 component를 한 PR에서 tree로 재작성하지 않는다.
 - `onClick`/`onHover` closure나 `*Pane`/`*Tab` pointer를 public UI props에 넣지 않는다.
-- 새 Chrome component에 TUI fallback을 추가하지 않는다. 전환 정책의 조건(설정 UI 비노출, 기존
-  config 읽기 호환 유지, parser/lowering 제거는 별도 결정)은 [Chrome 전략](chrome-strategy.md)이
-  단일 출처이며 이 문서는 그것을 다시 진술하거나 강화하지 않는다.
+- 새 Chrome component에 TUI fallback을 추가하지 않는다. TUI 룩은 이미 제거됐다(2026-08-19 config 키 `chrome.theme` 삭제 —
+  남은 줄은 loader가 무시 diagnostic만 낸다 — 그리고 그 룩만 타던 셀 lowering 갈래도 d242dabab·#4445·#4447에서 지웠다).
+  그 경과와 기존 config 처리는 [Chrome 전략](chrome-strategy.md) 「Chrome 전용 전환 정책」이 단일 출처이며 이 문서는 그것을
+  다시 진술하거나 강화하지 않는다.
 
 ### 1.3 책임 분리
 

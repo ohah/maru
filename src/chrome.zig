@@ -2,8 +2,9 @@
 //! `props`로만 읽으며, NativeMetalCell·Metal·CoreText·atlas를 모른다. ChromeDraw → 플랫폼 셀 lowering은
 //! platform 어댑터가 소유한다(현재 `platform/macos/chrome/metal_lowering.zig` — AppSession은 호출·frame 합성만).
 //! 테마 = 토큰셋이며, 사용자 진입점은 Chrome만 제공한다. 제품 토큰은 `chrome_theme.tokensFor` → `Tokens.rich` 하나다
-//! (옛 tui 룩은 2026-08-19 제거). 모서리·패딩 0인 셀 lowering 갈래는 기반 토큰 `Tokens.base`의 것이고, 제품은 그
-//! 갈래에 닿지 않는다(테스트가 base로 셀 lowering을 본다).
+//! (옛 tui 룩은 2026-08-19 제거, 기반 토큰 `Tokens.base`는 테스트만 쓴다). 셀로 갈지 GPU 프리미티브로 갈지는 룩이 아니라
+//! lowering의 일반 규칙(op 모양)이 가른다 — 모서리 0 quad·fill·text는 셀, 둥근 quad·독립 패널의 첫 quad·셀보다 얇은
+//! fill은 GPU quad(`chrome/draw.zig` 머리 주석). 그래서 제품(rich)도 오버레이 글자·직각 fill은 셀 경로를 탄다.
 //!
 //! 의존: chrome → (session core를 props로) → renderer 중립 계약. chrome은 pty/platform/terminal/renderer를
 //! import하지 않는다(tests/boundary/imports.zig가 강제). 단일 출처: docs/layering-and-portability.md,

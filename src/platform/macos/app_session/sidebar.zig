@@ -2589,7 +2589,7 @@ pub fn buildSidebarTitleDrawList(self: *AppSession) !renderer.DrawList {
 /// `rowTop` 과 같은 식, ABI 224). 예전에는 목록 상대로 두고 .m 이 헤더−스크롤을 더했다 — 「스크롤만 바뀌면 재계산이
 /// 필요 없다」는 이유였지만 스크롤은 어차피 전체 투영을 일으켜 셀을 매번 다시 만들었으므로 얻는 것이 없었다.
 /// 스크롤은 사이드바 지문(`sidebarSourceKey` 의 chrome 기하)에 들어 있어, 바뀌면 셀도 다시 만들어진다.
-/// slot=압축 카드 서수(sidebarGlyphRow 인코딩과 동일 도메인). 글자 아닌 셀(slot_id==0 — 배경·장식선)도 같은 줄 자리에 놓는다.
+/// slot=표시 행 서수(`sidebarRenderRows` index — sidebarGlyphRow 인코딩과 동일 도메인). 글자 아닌 셀(slot_id==0 — 배경·장식선)도 같은 줄 자리에 놓는다.
 /// replace/replaceSidebar **성공** 직후 metal_buffer.sidebar_cells에 in-place 적용한다 — 실패한 교체 뒤에 부르면 옛
 /// 셀에 새 스크롤이 들어가 옛 밴드 quad 와 어긋난다.
 pub fn applySidebarGlyphPyTop(self: *AppSession) void {

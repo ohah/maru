@@ -53,6 +53,7 @@ pub const browser_help =
     \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
+    \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
 ;
@@ -115,6 +116,8 @@ pub const Request = union(enum) {
     dialog: struct { surface_id: u64 },
     /// `browser handle-dialog`(W9c② — Chromium). `--accept`·`--dismiss` 중 하나, `--dialog` 는 `dialog` 가 준 번호. 응답 {ok, kind, continues?}.
     handle_dialog: struct { surface_id: u64, accept: bool, text: ?[]const u8, dialog: ?u64 },
+    /// `browser upload`(W9c③ — Chromium). 대상(click 과 같은 로케이터)과 파일 1..10 개. 응답 {origin, files:[{name,size}]}.
+    upload: UploadCmd,
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
     pub fn kind(self: Request) ResponseKind {
@@ -132,7 +135,23 @@ pub const Request = union(enum) {
             .close => .close,
             .dialog => .dialog,
             .handle_dialog => .handle_dialog,
+            .upload => .upload,
         };
+    }
+};
+
+/// 한 번에 올리는 파일 수 상한 — 서버(`control_browser.max_upload_files`)와 같다(모달이 파일을 모두 보여야 한다).
+pub const max_upload_files = 10;
+
+/// `browser upload` — 경로는 인자를 빌린다(상대 경로는 러너가 이 프로세스의 현재 폴더로 붙인다 — `absolutizeUpload`).
+pub const UploadCmd = struct {
+    surface_id: u64,
+    locator: Locator,
+    files: [max_upload_files][]const u8 = undefined,
+    count: usize = 0,
+
+    pub fn paths(self: *const UploadCmd) []const []const u8 {
+        return self.files[0..self.count];
     }
 };
 
@@ -231,6 +250,8 @@ pub const ParseError = error{
     UnknownOption, // 알 수 없는 옵션(`--bogus`)
     UnexpectedArgument, // 남는 위치 인자
     MissingAnswer, // `handle-dialog` 에 `--accept`·`--dismiss` 가 없음
+    MissingFiles, // `upload` 에 파일이 없음
+    TooManyFiles, // `upload` 에 파일이 10 개 넘게
     ConflictingAnswer, // `handle-dialog` 에 둘 다
     InvalidDialogToken, // `--dialog` 가 1..2^53-1 정수가 아님
 };
@@ -411,6 +432,7 @@ pub fn parse(args: []const []const u8) ParseError!Command {
         return .{ .request = .{ .dialog = .{ .surface_id = s } } };
     }
     if (eq(sub, "handle-dialog")) return .{ .request = .{ .handle_dialog = try parseHandleDialogArgs(rest) } };
+    if (eq(sub, "upload")) return .{ .request = .{ .upload = try parseUploadArgs(rest) } };
     if (eq(sub, "navigate")) {
         const p = try parseSurfaceArg(rest);
         const s = p.surface orelse return error.MissingSurface;
@@ -923,6 +945,65 @@ const ActArgs = struct {
 };
 const ActExtras = struct { text: bool = false, key: bool = false };
 
+/// `upload --surface <id> <로케이터> [--] <file>...`(W9c③) — 로케이터 옵션은 click 과 같고, 위치 인자는 파일이다(`--` 뒤는 `-` 로 시작해도 파일).
+fn parseUploadArgs(rest: []const []const u8) ParseError!UploadCmd {
+    var opts: [64][]const u8 = undefined;
+    var n_opts: usize = 0;
+    var files: [max_upload_files][]const u8 = undefined;
+    var n_files: usize = 0;
+    var i: usize = 0;
+    var positional_only = false;
+    while (i < rest.len) : (i += 1) {
+        const a = rest[i];
+        if (!positional_only and eq(a, "--")) {
+            positional_only = true;
+            continue;
+        }
+        if (!positional_only and std.mem.startsWith(u8, a, "-")) {
+            // 값을 받는 옵션이면 다음 토큰도 옵션 쪽으로(`--by-label Resume`).
+            if (n_opts + 2 > opts.len) return error.UnexpectedArgument;
+            opts[n_opts] = a;
+            n_opts += 1;
+            if (takesValue(a) and i + 1 < rest.len) {
+                opts[n_opts] = rest[i + 1];
+                n_opts += 1;
+                i += 1;
+            }
+            continue;
+        }
+        if (n_files == max_upload_files) return error.TooManyFiles;
+        files[n_files] = a;
+        n_files += 1;
+    }
+    const aa = try parseActArgs(opts[0..n_opts], .{});
+    const s = aa.surface orelse return error.MissingSurface;
+    const loc = try actLocator(aa);
+    if (n_files == 0) return error.MissingFiles;
+    var cmd: UploadCmd = .{ .surface_id = s, .locator = loc, .count = n_files };
+    @memcpy(cmd.files[0..n_files], files[0..n_files]);
+    return cmd;
+}
+
+/// 상대 경로를 이 프로세스의 현재 폴더(`cwd` — 절대 경로)에 글자로 붙인다(`./`·`..` 는 그대로 — 앱이 `realpath` 로 푼다). 절대 경로는 그대로.
+/// 돌려준 경로는 모두 `gpa` 소유(원래 절대 경로도 복사한다 — 부른 쪽이 `freeUpload` 로 놓는다).
+pub fn absolutizeUpload(gpa: std.mem.Allocator, cmd: UploadCmd, cwd: []const u8) !UploadCmd {
+    var out = cmd;
+    var made: usize = 0;
+    errdefer for (out.files[0..made]) |p| gpa.free(p);
+    for (cmd.paths(), 0..) |p, i| {
+        out.files[i] = if (p.len > 0 and p[0] == '/') try gpa.dupe(u8, p) else if (cwd.len > 0 and cwd[cwd.len - 1] == '/')
+            try std.fmt.allocPrint(gpa, "{s}{s}", .{ cwd, p })
+        else
+            try std.fmt.allocPrint(gpa, "{s}/{s}", .{ cwd, p });
+        made += 1;
+    }
+    return out;
+}
+
+pub fn freeUpload(gpa: std.mem.Allocator, cmd: UploadCmd) void {
+    for (cmd.paths()) |p| gpa.free(p);
+}
+
 fn parseActArgs(rest: []const []const u8, extras: ActExtras) ParseError!ActArgs {
     var r: ActArgs = .{};
     var i: usize = 0;
@@ -1159,6 +1240,19 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
             if (h.dialog) |d| try obj.put(gpa, "dialog", .{ .integer = @intCast(d) });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.handleDialog", .params = .{ .object = obj } } });
         },
+        .upload => |u| {
+            var obj: std.json.ObjectMap = .empty;
+            defer obj.deinit(gpa);
+            var loc_obj: std.json.ObjectMap = .empty;
+            defer loc_obj.deinit(gpa);
+            var files: std.json.Array = .init(gpa);
+            defer files.deinit();
+            try obj.put(gpa, "id", .{ .integer = @intCast(u.surface_id) });
+            try putLocator(gpa, &obj, &loc_obj, u.locator);
+            for (u.paths()) |f| try files.append(.{ .string = f });
+            try obj.put(gpa, "files", .{ .array = files });
+            return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.upload", .params = .{ .object = obj } } });
+        },
         .open => |o| {
             var obj: std.json.ObjectMap = .empty;
             defer obj.deinit(gpa);
@@ -1302,7 +1396,7 @@ pub fn buildScreenshotRequestBytes(gpa: std.mem.Allocator, cmd: ScreenshotCmd, i
 // ══ 응답 렌더 ══════════════════════════════════════════════════════════════════════════════════════════════
 
 /// 어느 요청의 응답인지 — result 모양을 안다(navigate={ok}·get_url={url}·exec={result}·get_cookies={cookies}).
-pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog };
+pub const ResponseKind = enum { list, navigate, get_url, exec, get_cookies, ok, value, snapshot, console, open, close, dialog, handle_dialog, upload };
 
 const unauthorized_code: i64 = -32002;
 const unsupported_by_engine_code: i64 = -32008;
@@ -1362,7 +1456,9 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
         // 1g(control-plane-security §8.4): 확인 모달 없이 거절되는 가장 흔한 이유는 「pane 밖에서 불렀다」다. 서버는 균일
         // unauthorized 만 주므로(존재 oracle 금지) 이유를 묻지 않고 늘 같은 안내를 붙인다 — 서버 정보가 새지 않는다.
         // W9b③: close 의 거절은 그 pane 이 연 탭이 아니어서다 — 일반 안내(pane 의 foreground job)는 이유를 가린다(적대 리뷰 1 회차).
-        if (e.code == unauthorized_code) try w.writeAll(if (kind == .close) "hint: only tabs this pane opened with `browser open` can be closed\n" else unauthorized_hint);
+        // W9c③: 업로드 모달의 거부·물을 창 없음은 그 글이 이유다(「nothing was uploaded」) — 인가 안내를 붙이지 않는다.
+        if (e.code == unauthorized_code and !(kind == .upload and std.mem.indexOf(u8, e.message, "nothing was uploaded") != null))
+            try w.writeAll(if (kind == .close) "hint: only tabs this pane opened with `browser open` can be closed\n" else unauthorized_hint);
         // 로케이터 wait 의 시한 — 마지막 확인에 숨은 일치가 있었다(W9b②-3 적대 리뷰 1 회차 — data 에만 있어 보이지 않았다).
         if (e.code == timeout_code) if (e.data) |d| if (d == .object) if (d.object.get("hidden")) |h| if (h == .integer and h.integer > 0)
             try w.print("hint: {d} matching element(s) are hidden (not rendered, aria-hidden or off-page)\n", .{h.integer});
@@ -1530,6 +1626,28 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             if (answerable) {
                 try w.writeAll("answer with: maru browser handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] --dialog <token>\n");
             } else if (any_full) try w.writeAll("the user answers these in the tab (maru may not)\n");
+        },
+        .upload => {
+            // {origin, files:[{name,size}]} — 이름도 표시 안전하게(제어·양방향 글자를 뺀다).
+            const files = switch (result.get("files") orelse std.json.Value{ .null = {} }) {
+                .array => |a| a,
+                else => {
+                    try w.writeAll("error: malformed upload result\n");
+                    return false;
+                },
+            };
+            try w.print("uploaded {d} file{s} to ", .{ files.items.len, if (files.items.len == 1) "" else "s" });
+            try writePageText(gpa, w, strField(result.get("origin")), false);
+            try w.writeAll("\n");
+            for (files.items) |f| {
+                const o = switch (f) {
+                    .object => |oo| oo,
+                    else => continue,
+                };
+                try w.writeAll("  ");
+                try writePageText(gpa, w, strField(o.get("name")), true);
+                try w.print(" ({d} bytes)\n", .{intField(o.get("size")) orelse 0});
+            }
         },
         .handle_dialog => {
             try w.writeAll("answered ");
@@ -2830,6 +2948,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  close   --surface <id>                     close a tab this pane opened (asks the page; if it asks before leaving: "not closed" — answer it with handle-dialog)
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
+        \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
     ,
@@ -3688,4 +3807,70 @@ test "W9c① 적대 리뷰 4 회차 재현 C: U+2028·U+2029·NEL(U+0085) 도 ` 
     _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"log\\u001b[2J\\n[error\",\"text\":\"x\"}]}}", .console, &w2);
     try testing.expect(std.mem.indexOfScalar(u8, w2.buffered(), 0x1b) == null);
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, w2.buffered(), "\n"));
+}
+
+// ── W9c③: browser upload ──
+// CLI 의 몫: 인자(로케이터는 click 과 같다 — 위치 인자는 파일), 요청 모양, 상대 경로를 이 프로세스의 현재 폴더로(앱은 절대 경로만 받는다),
+// 결과·거부의 글. 모달·파일 열기는 앱의 몫이다.
+
+test "W9c③: upload 파서 — 로케이터는 click 과 같고 위치 인자는 파일 1..10 개, `--` 뒤는 `-` 로 시작해도 파일, 옵션 사이에 섞여도 된다" {
+    const a = (try parse(&.{ "upload", "--surface", "9", "--selector", "#f", "a.txt", "/tmp/b.txt" })).request.upload;
+    try testing.expectEqual(@as(u64, 9), a.surface_id);
+    try testing.expectEqualStrings("#f", a.locator.selector);
+    try testing.expectEqual(@as(usize, 2), a.count);
+    try testing.expectEqualStrings("a.txt", a.paths()[0]);
+    const b = (try parse(&.{ "upload", "x.txt", "--by-label", "Resume", "--surface=3", "--", "-h", "--weird" })).request.upload;
+    try testing.expectEqualStrings("Resume", b.locator.label.value);
+    try testing.expectEqual(@as(usize, 3), b.count);
+    try testing.expectEqualStrings("-h", b.paths()[1]);
+    try testing.expectEqualStrings("--weird", b.paths()[2]);
+    const ten = [_][]const u8{ "upload", "--surface", "1", "--ref", "n4", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10" };
+    try testing.expectEqual(@as(usize, 10), (try parse(&ten)).request.upload.count);
+    try testing.expectError(error.TooManyFiles, parse(&(ten ++ [_][]const u8{"11"})));
+    try testing.expectError(error.MissingFiles, parse(&.{ "upload", "--surface", "1", "--selector", "#f" }));
+    try testing.expectError(error.MissingLocator, parse(&.{ "upload", "--surface", "1", "a.txt" }));
+    try testing.expectError(error.ConflictingLocator, parse(&.{ "upload", "--surface", "1", "--selector", "#f", "--ref", "n1", "a.txt" }));
+    try testing.expectError(error.MissingSurface, parse(&.{ "upload", "--selector", "#f", "a.txt" }));
+    try testing.expectError(error.UnknownOption, parse(&.{ "upload", "--surface", "1", "--selector", "#f", "--remember", "a.txt" }));
+}
+
+test "W9c③: upload 요청은 browser.upload {id, 로케이터, files} — 상대 경로는 이 프로세스의 현재 폴더로 글자 그대로 붙인다(절대 경로는 그대로)" {
+    const cmd = (try parse(&.{ "upload", "--surface", "9", "--role", "button", "--name", "Attach", "a.txt", "../up/b.txt", "/abs/c.txt" })).request.upload;
+    const abs = try absolutizeUpload(testing.allocator, cmd, "/Users/me/work");
+    defer freeUpload(testing.allocator, abs);
+    try testing.expectEqualStrings("/Users/me/work/a.txt", abs.paths()[0]);
+    try testing.expectEqualStrings("/Users/me/work/../up/b.txt", abs.paths()[1]); // 정규화는 앱이(realpath)
+    try testing.expectEqualStrings("/abs/c.txt", abs.paths()[2]);
+    const root = try absolutizeUpload(testing.allocator, cmd, "/");
+    defer freeUpload(testing.allocator, root);
+    try testing.expectEqualStrings("/a.txt", root.paths()[0]);
+    const bytes = try buildRequestBytes(testing.allocator, .{ .upload = abs }, .{ .number = 1 });
+    defer testing.allocator.free(bytes);
+    var pm = try cp.parseMessage(testing.allocator, bytes);
+    defer pm.deinit();
+    const req = pm.message.request;
+    try testing.expectEqualStrings("browser.upload", req.method);
+    const params = req.params.?.object;
+    try testing.expectEqual(@as(i64, 9), params.get("id").?.integer);
+    try testing.expectEqualStrings("button", params.get("locator").?.object.get("role").?.string);
+    const files = params.get("files").?.array.items;
+    try testing.expectEqual(@as(usize, 3), files.len);
+    try testing.expectEqualStrings("/abs/c.txt", files[2].string);
+    try testing.expectEqual(ResponseKind.upload, (Request{ .upload = abs }).kind());
+}
+
+test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 표시 안전하게), 거부·물을 창 없음은 그 글만(인가 안내 없이), 다른 -32002 는 안내를 붙인다" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const ok = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"in\u{202e}voice.exe\",\"size\":5}]}}";
+    try testing.expect(try renderResponse(testing.allocator, ok, .upload, &out.writer));
+    try testing.expectEqualStrings("uploaded 2 files to https://a.test\n  \"a.txt\" (3 bytes)\n  \"invoice.exe\" (5 bytes)\n", out.written());
+    out.clearRetainingCapacity();
+    const declined = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"the user declined the upload — nothing was uploaded\"}}";
+    try testing.expect(!try renderResponse(testing.allocator, declined, .upload, &out.writer));
+    try testing.expectEqualStrings("error: the user declined the upload — nothing was uploaded (-32002)\n", out.written());
+    out.clearRetainingCapacity();
+    const plain = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}";
+    try testing.expect(!try renderResponse(testing.allocator, plain, .upload, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "hint: browser requests are allowed") != null);
 }

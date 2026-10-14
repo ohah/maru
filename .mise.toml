@@ -343,7 +343,7 @@ run = "zig build -Doptimize=ReleaseSafe macos-browser-bounded-smoke"
 
 [tasks.macos-web-cdp-smoke]
 description = "Run the W9b Chromium control smoke (live app — a pane agent clicks for real, covered/missing elements, back/forward/reload)"
-run = "zig build && zig build macos-app-build && mise run web-sidecar && sh tools/test-macos-web-cdp-smoke.sh"
+run = "zig build && zig build macos-app-build -Dweb-upload-test-decision=true && mise run web-sidecar && sh tools/test-macos-web-cdp-smoke.sh"
 
 [tasks.macos-control-self-origin-smoke]
 description = "Run the control-plane 1g self-origin smoke (live app — pane shell, setsid child, background job, outside caller)"

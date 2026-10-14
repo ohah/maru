@@ -24,6 +24,7 @@ const builtin = @import("builtin");
 const maru = @import("maru");
 const session_mod = @import("app_session.zig");
 const web_cdp_ops = @import("web_cdp_ops.zig");
+const web_upload_stage = @import("web_upload_stage.zig"); // W9c③: 업로드할 파일을 열고 사본을 만든다(작업 스레드)
 const web_cdp_keys = @import("web_cdp_keys.zig");
 const editor_ime_ops = @import("app_session/editor_ime.zig");
 /// 컨트롤 플레인 `lsp.trust.*`(계획 WT4b) — 언어 서버 신뢰 표는 편집기 LSP 모듈이 다룬다(ABI 는 표를 모른다 — LSPB23).
@@ -6653,6 +6654,8 @@ fn browserMethodHasTrackedLifecycle(method: control_browser.BrowserMethod) bool 
         .reload,
         .hover,
         .press,
+        // W9c③: 업로드도 실행 자리를 쥔다(인가 출처를 호출마다 다시 본다 — 모달 동안 철회·탭 닫힘이면 넣지 않는다).
+        .upload,
         => true,
         // W9b③: open·close 는 따로 둔 탭 op 목록이 본다(대상이 부른 pane·닫히는 것이 성공 — `enqueueTabOp`).
         .subscribe, .wait, .open, .close => false,
@@ -6700,6 +6703,7 @@ fn browserMethodWireName(method: control_browser.BrowserMethod) []const u8 {
         .close => "browser.close",
         .dialog => "browser.dialog",
         .handle_dialog => "browser.handleDialog",
+        .upload => "browser.upload",
     };
 }
 
@@ -6975,6 +6979,7 @@ fn onAppSessionSurfaceClosed(_: ?*anyopaque, surface_id: u64) void {
     _ = control_cap_store.revokeSurface(surface_id);
     control_pane_grant_store.removeSurface(surface_id);
     forgetAgentTab(surface_id);
+    uploadForgetTab(surface_id); // W9c③: 그 탭의 사본을 지운다(탭이 닫힐 때까지 둔다 — 뒤로가기가 되살린다)
 }
 
 fn cancelBrowserWaitsForGrant(server: *control_server_mod.ControlServer, pane: u64, target: u64, scope: control_capability.ScopeClass) void {
@@ -7111,6 +7116,8 @@ const control_hello_caps = [_][]const u8{
     // W9c②: 에이전트가 JS 대화상자를 보고 답한다.
     "browser.dialog",
     "browser.handleDialog",
+    // W9c③: 에이전트가 파일 입력칸에 파일을 넣는다(부를 때마다 확인 모달).
+    "browser.upload",
 };
 const control_hello_version = "0.1.0";
 /// 한 drain(tick)에서 처리할 요청 상한(§5 per-tick 예산). accept 스레드 1개·in-flight ≤1이라 실질 여유.
@@ -7631,6 +7638,14 @@ fn pushBrowserOp(
         _ = server.completeInFlight(async_id, resp);
         return;
     }
+    // W9c③: 업로드는 Chromium 만 — WebKit 프로세스(엔진이 꺼졌다)면 L2 가 모달 전에 막았다. 닿으면 같은 `-32008`(Swift 로 보내지 않는다).
+    if (op.method == .upload and !chromium) {
+        server.cross_gpa.free(op.arg);
+        const pending = server.inFlightPending(async_id) orelse return;
+        const resp = control_browser.serializeUnsupportedByEngine(server.cross_gpa, pending.request_bytes, .webkit) catch null;
+        _ = server.completeInFlight(async_id, resp);
+        return;
+    }
     if (chromium and !control_browser.engineSupports(.chromium, op.method)) {
         server.cross_gpa.free(op.arg);
         const pending = server.inFlightPending(async_id) orelse return;
@@ -7875,6 +7890,16 @@ const CdpRun = struct {
     required_host: control_pane_grant.GrantHost = .{},
     /// W9a③: 시작할 때 확인한 문서 주소(소유 — op 이 그 주소로만 한다).
     doc_url: ?[]u8 = null,
+    /// W9c③: 업로드할 파일을 여는·사본을 만드는 작업(시작할 때 연다 — 모달 전에 파일을 연다).
+    upload: ?*UploadJob = null,
+    /// W9c③: 모달 전 확인을 마치고 멈췄다(`Step.confirm`) — 모달이 보일 출처(소유).
+    upload_origin: ?[]u8 = null,
+    /// W9c③: 사용자가 승인했다(사본을 만드는 중).
+    upload_approved: bool = false,
+    /// W9c③: 사용자가 거부했다·물을 창이 없다 — `unauthorized`(-32002) 로 끝낸다.
+    upload_refused: bool = false,
+    /// W9c③(시험 빌드의 자동 승인만): 처음 결정할 수 있게 된 시각.
+    upload_ready_ms: i64 = 0,
 };
 
 /// 실행 중이거나 기다리는 Chromium op(도착 순).
@@ -7975,6 +8000,8 @@ fn cdpKind(method: control_browser.BrowserMethod) ?web_cdp_ops.Kind {
         .set_cookie => .set_cookie,
         .delete_cookie => .delete_cookie,
         .clear_storage => .clear_storage,
+        // W9c③.
+        .upload => .upload,
         else => null,
     };
 }
@@ -8005,6 +8032,14 @@ fn startCdpOpHost(async_id: u64, surface_id: u64, method: control_browser.Browse
         });
     };
     run.* = .{ .async_id = async_id, .surface_id = surface_id, .op = op, .required_host = required_host };
+    // W9c③: 업로드할 경로는 이 op.arg 에만 있다(엔진 차례는 수만 안다) — 지금 꺼내 둔다(시작할 때 연다).
+    if (kind == .upload) {
+        run.upload = UploadJob.fromArg(arg, surface_id, async_id) catch {
+            run.op.deinit(allocator);
+            allocator.destroy(run);
+            return completeCdp(async_id, .failed, "out of memory");
+        };
+    }
     // W9a: navigate 는 요청을 받은 때부터 잰다 — 같은 탭의 앞선 op 뒤에 시작해도 요청의 시한(30 초) 안에 `loaded:false` 로 답한다.
     if (run.op.page) |*p| p.deadline_ms = cdpNowMs() + web_cdp_ops.web_cdp_page.navigate_wait_ms;
     const busy = for (cdp_runs.items) |other| {
@@ -8056,6 +8091,10 @@ fn beginCdp(run: *CdpRun) void {
             else => {},
         };
     }
+    // W9c③: 업로드 — 파일을 지금 연다(작업 스레드 — 죽은 망 마운트가 앱을 멈추지 않게). 로케이터 확인과 함께 진행되고, 둘 다 끝나야 모달이 뜬다.
+    if (run.upload) |job| {
+        if (!uploadSpawn(job, .prepare)) return finishCdp(run, .failed, "could not start opening the files");
+    }
     run.started = true;
     // W9c②: 페이지를 움직이는 op 이 시작했다 — 그 뒤의 대화상자는 에이전트 것(호출마다 `cdpAdvance` 도 적는다).
     if (web_cdp_ops.acting(run.op.kind)) session_mod.web_osr.noteAgentInput(run.surface_id);
@@ -8087,6 +8126,11 @@ fn uncommittedReply(run: *CdpRun, method: []const u8) ?web_cdp_ops.Reply {
         };
     }
     if (run.op.page) |*p| if (p.kind == .screenshot) return .{ .not_sent = cdp_loading_reason };
+    // W9c③: 업로드의 호출(프레임 트리·world·노드·확인·넣기)은 확정 전엔 보내지 않는다 — 승인 뒤면 문서가 바뀌는 중이다(놓기는 놓은 것으로).
+    if (run.op.upload != null) {
+        if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .ok = "{}" };
+        return .{ .not_sent = cdp_loading_reason };
+    }
     // W9a③: localStorage 의 호출(주소 읽기 `Target.getTargetInfo`·격리 world·평가)은 확정 전엔 하나도 보내지 않는다 — 확정 뒤 다시 하라고(페이지
     // 호출은 붙잡힌다). 쿠키(Network·Storage)는 브라우저 쪽이라 붙잡히지 않는다(확인한 주소로 한다).
     if (run.op.storage != null and (std.mem.startsWith(u8, method, "Page.") or std.mem.startsWith(u8, method, "Runtime.") or std.mem.startsWith(u8, method, "Target."))) return .{ .not_sent = cdp_loading_reason };
@@ -8360,6 +8404,8 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             finishCdp(run, d.status, d.result);
         },
         .sleep => |ms| cdp_sleepers.append(allocator, .{ .run = run, .wake_ms = cdpNowMs() + ms }) catch finishCdp(run, .failed, "out of memory"),
+        // W9c③: 업로드가 모달 전 확인을 마쳤다 — 멈추고 모달을 기다린다(그 탭의 줄은 쥔 채). 답할 시간은 grant 모달과 같은 120 초.
+        .confirm => |cf| uploadPause(run, cf.origin),
         .call => |next| {
             defer allocator.free(next.params);
             if (!run.op.committed() and !cdpStillAllowed(run.async_id)) {
@@ -8381,7 +8427,9 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             }
             // W9c②: 움직이는 op 의 호출마다 에이전트 시각을 적는다(누름 뒤 떼기·놓기까지 — 그 사이 뜬 대화상자도 에이전트 것). kick·미룬
             // 놓기·terminate 는 이 길로 오지 않는다(`web_osr.devtoolsCall` 이 직접).
-            if (web_cdp_ops.acting(run.op.kind)) session_mod.web_osr.noteAgentInput(run.surface_id);
+            // W9c③: 업로드는 넣기(`DOM.setFileInputFiles`) 앞에서만 — 페이지의 change 처리기가 띄운 대화상자가 에이전트 것이 되게(모달 전 호출은 페이지를
+            // 움직이지 않는다).
+            if (web_cdp_ops.acting(run.op.kind) or run.op.uploadSetting()) session_mod.web_osr.noteAgentInput(run.surface_id);
             const gpa = session_mod.web_osr.gpaRef() orelse return finishCdp(run, .failed, "the Chromium engine is not running");
             grantAgentNewTabCredit(run.surface_id, next.method, next.params);
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
@@ -8461,6 +8509,18 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
     const surface_id = run.surface_id;
     const kind = run.op.kind;
     const started = run.started;
+    const refused = run.upload_refused;
+    // W9c③: 업로드의 끝 — 작업을 놓고(연 fd 를 닫는다), 사본이 페이지에 가지 않았으면 그 op 의 사본을 곧 지운다(갔으면 탭이 닫힐 때까지 둔다 —
+    // 뒤로가기가 그 파일을 새 문서에 되살린다).
+    if (run.upload) |job| {
+        const given = if (run.op.upload) |*u| u.given else false;
+        if (status != .success and !given) uploadRemoveOp(surface_id, async_id);
+        uploadRelease(job);
+        run.upload = null;
+    }
+    if (run.upload_origin) |o| allocator.free(o);
+    run.upload_origin = null;
+    uploadForgetRun(run);
     // W9a②: exec 의 끝은 넷 — 엄격 JSON 결과(inline/조각)·진단 payload(-32006)·너무 큼(-32005)·보통(실패·시한).
     const exec_delivery: web_cdp_ops.web_cdp_exec.Delivery = if (run.op.exec) |*e| e.delivery else .plain;
     const exec_max: usize = if (run.op.exec) |*e| e.max_result_bytes else 0;
@@ -8482,7 +8542,11 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
             .plain => completeCdp(async_id, status, result),
         },
         else => completeCdp(async_id, status, result),
-    } else completeCdp(async_id, status, result);
+    } else if (refused)
+        // W9c③: 사용자가 거부했다(또는 물을 창이 없다) — 인가 판정이 아니라 사용자의 답이라 그 글을 싣는다(L2 가 업로드만 글을 싣는다).
+        maru_macos_control_complete_browser_op(async_id, @intFromEnum(control_browser.BrowserCompletionStatus.unauthorized), result.ptr, result.len)
+    else
+        completeCdp(async_id, status, result);
     startNextCdp(surface_id);
 }
 
@@ -8590,6 +8654,7 @@ fn startNextCdp(surface_id: u64) void {
         if (cdpStillAllowed(next.async_id)) return beginCdp(next);
         const async_id = next.async_id;
         removeCdpRun(next);
+        if (next.upload) |job| uploadRelease(job); // 시작 전이라 연 파일이 없다
         next.op.deinit(allocator);
         allocator.destroy(next);
         completeCdp(async_id, .failed, "the request was cancelled");
@@ -8606,6 +8671,357 @@ comptime {
     std.debug.assert(@intFromEnum(web_cdp_ops.Status.failed) == @intFromEnum(control_browser.BrowserCompletionStatus.failed));
     std.debug.assert(@intFromEnum(web_cdp_ops.Status.timeout) == @intFromEnum(control_browser.BrowserCompletionStatus.timeout));
     std.debug.assert(@intFromEnum(web_cdp_ops.Status.invalid_params) == @intFromEnum(control_browser.BrowserCompletionStatus.invalid_params));
+}
+
+// ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 모달 전에 파일을 열고, 매번 확인 모달, 승인 뒤 사본을 넣는다 ─────────────────────────────
+// 차례(docs/plans/web-osr-backend.md 「W9c③ 결정」):
+//   시작 — 작업 스레드가 파일을 연다(`web_upload_stage.prepare` — 죽은 망 마운트·FIFO 가 앱을 멈추지 않게). 동시에 엔진 차례가 로케이터를
+//   풀고 그 칸을 확인한다. 둘 다 끝나면(`Step.confirm` 으로 멈춘 run) 매 drain 의 `pollUploadRuns` 가 그 탭을 가진 창에 모달을 띄운다 —
+//   **부를 때마다**, grant·cap 이 있어도(기억하지 않는다 — 사용자 결정 2026-10-15). 승인 → 작업 스레드가 쥔 fd 에서 사본 → 엔진 차례를 잇는다
+//   (`resumeUpload` — 로케이터를 다시 풀어 같은 요소·같은 문서인지 본 뒤 넣는다). 거부·물을 창 없음 → `-32002`, 답 없음(120 초) → `-32004`.
+// 시험 빌드의 자동 결정(`MARU_TEST_UPLOAD_DECISION`)은 `-Dweb-upload-test-decision=true` 로 만든 앱에만 있다(배포본은 그 환경변수를 읽지 않는다
+// — comptime 으로 빠진다).
+
+comptime {
+    std.debug.assert(web_cdp_ops.web_cdp_upload.max_files == control_browser.max_upload_files);
+}
+
+/// 모달에 답할 시간 — grant 모달과 같다(그동안 in-flight 시한을 늘린다).
+const upload_confirm_timeout_ns: i128 = grant_prompt_timeout_ns;
+const upload_declined_reason = "the user declined the upload — nothing was uploaded";
+const upload_no_window_reason = "no maru window is open to ask the user — nothing was uploaded";
+
+/// 업로드 하나의 파일 작업 — 메인과 작업 스레드가 나눠 쥔다. `state`: 0 = 작업 스레드가 쥐었다, 1 = 메인이 쥐었다(작업이 없다), 2 = 메인이
+/// 놓았다(작업이 끝나면 작업 스레드가 스스로 치운다 — 멈춘 망 마운트에 매달린 작업을 기다리지 않는다).
+const UploadJob = struct {
+    state: std.atomic.Value(u8) = .init(1),
+    phase: enum { prepare, stage } = .prepare,
+    /// 요청의 경로(소유).
+    paths: [][]u8,
+    tab: u64,
+    op: u64,
+    /// 사본의 뿌리(소유 — 승인 뒤에 정한다).
+    root: ?[]u8 = null,
+    /// 이 호출이 다른 볼륨에서 복사할 수 있는 바이트(호출 1 GiB·탭 4 GiB 의 남은 것).
+    budget: u64 = 0,
+    prepared: std.ArrayList(web_upload_stage.Prepared) = .empty,
+    refused: ?struct { index: usize, why: web_upload_stage.Refusal } = null,
+    /// 사본의 경로(소유, prepared 와 같은 차례).
+    staged: std.ArrayList([]u8) = .empty,
+    stage_failed: ?web_upload_stage.StageError = null,
+    /// 복사로 쓴 바이트(탭 예산에서 뺀다).
+    copied: u64 = 0,
+    out_of_memory: bool = false,
+
+    fn fromArg(arg: []const u8, tab: u64, op: u64) !*UploadJob {
+        const parsed = try std.json.parseFromSlice(struct { files: []const []const u8 }, allocator, arg, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const paths = try allocator.alloc([]u8, parsed.value.files.len);
+        var n: usize = 0;
+        errdefer {
+            for (paths[0..n]) |p| allocator.free(p);
+            allocator.free(paths);
+        }
+        for (parsed.value.files) |f| {
+            paths[n] = try allocator.dupe(u8, f);
+            n += 1;
+        }
+        const job = try allocator.create(UploadJob);
+        job.* = .{ .paths = paths, .tab = tab, .op = op };
+        return job;
+    }
+
+    fn destroy(self: *UploadJob) void {
+        for (self.paths) |p| allocator.free(p);
+        allocator.free(self.paths);
+        if (self.root) |r| allocator.free(r);
+        for (self.prepared.items) |*p| p.deinit(allocator);
+        self.prepared.deinit(allocator);
+        for (self.staged.items) |p| allocator.free(p);
+        self.staged.deinit(allocator);
+        allocator.destroy(self);
+    }
+
+    /// 이 op 의 사본 폴더를 지운다(`<뿌리>/<탭>/<op>`).
+    fn removeOpDir(self: *const UploadJob) void {
+        const root = self.root orelse return;
+        var tab_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const tab_dir = std.fmt.bufPrint(&tab_buf, "{s}/{d}", .{ root, self.tab }) catch return;
+        var op_buf: [24]u8 = undefined;
+        web_upload_stage.removeUnder(tab_dir, std.fmt.bufPrint(&op_buf, "{d}", .{self.op}) catch return);
+    }
+};
+
+fn uploadPrepareAll(job: *UploadJob) void {
+    for (job.paths, 0..) |path, i| {
+        const r = web_upload_stage.prepare(allocator, path) catch {
+            job.out_of_memory = true;
+            return;
+        };
+        switch (r) {
+            .ok => |p| job.prepared.append(allocator, p) catch {
+                var m = p;
+                m.deinit(allocator);
+                job.out_of_memory = true;
+                return;
+            },
+            .refused => |why| {
+                job.refused = .{ .index = i, .why = why };
+                return;
+            },
+        }
+        // 다른 경로가 같은 파일(링크) — 모달에 같은 파일이 둘 보인다.
+        if (web_upload_stage.sameFileBefore(job.prepared.items, i)) {
+            job.refused = .{ .index = i, .why = .duplicate };
+            return;
+        }
+    }
+}
+
+fn uploadStageAll(job: *UploadJob) void {
+    var budget = job.budget;
+    for (job.prepared.items, 0..) |*p, i| {
+        const r = web_upload_stage.stageFile(allocator, job.root.?, job.tab, job.op, i, p, &budget) catch {
+            job.out_of_memory = true;
+            break;
+        };
+        switch (r) {
+            .ok => |path| job.staged.append(allocator, path) catch {
+                allocator.free(path);
+                job.out_of_memory = true;
+                break;
+            },
+            .failed => |e| {
+                job.stage_failed = e;
+                break;
+            },
+        }
+    }
+    job.copied = job.budget - budget;
+    if (job.out_of_memory or job.stage_failed != null) job.removeOpDir(); // 반쯤 만든 사본은 남기지 않는다
+}
+
+fn uploadWorker(job: *UploadJob) void {
+    switch (job.phase) {
+        .prepare => uploadPrepareAll(job),
+        .stage => uploadStageAll(job),
+    }
+    // 메인이 이미 놓았다 — 스스로 치운다(사본도).
+    if (job.state.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) {
+        if (job.phase == .stage) job.removeOpDir();
+        job.destroy();
+    }
+}
+
+/// 작업 스레드를 띄운다(시험은 그 자리에서 — 결과가 곧 보이고 판정자보다 오래 사는 스레드가 없다).
+fn uploadSpawn(job: *UploadJob, phase: @TypeOf(@as(UploadJob, undefined).phase)) bool {
+    job.phase = phase;
+    job.state.store(0, .release);
+    if (builtin.is_test) {
+        uploadWorker(job);
+        return true;
+    }
+    const thread = std.Thread.spawn(.{}, uploadWorker, .{job}) catch {
+        job.state.store(1, .release);
+        return false;
+    };
+    thread.detach();
+    return true;
+}
+
+/// 메인이 작업을 놓는다 — 작업 중이면 작업 스레드가 끝나며 치우고, 아니면 곧 치운다.
+fn uploadRelease(job: *UploadJob) void {
+    if (job.state.cmpxchgStrong(0, 2, .acq_rel, .acquire) == null) return;
+    job.destroy();
+}
+
+/// 모달·파일 작업을 기다리는 업로드(멈춘 CdpRun — `cdp_runs` 에도 그대로 있다, 그 탭의 줄을 쥔다).
+var upload_runs: std.ArrayList(*CdpRun) = .empty;
+/// 탭마다 다른 볼륨에서 복사한 바이트(탭 4 GiB 상한) — 탭이 닫히면 뺀다.
+var upload_tab_copied: std.AutoHashMapUnmanaged(u64, u64) = .empty;
+/// 사본의 뿌리(정규 경로, 처음 쓸 때 정한다).
+var upload_root: ?[]u8 = null;
+/// 시험: 프로필 대신 쓸 폴더(시험은 실제 홈을 건드리지 않는다).
+var upload_base_for_test: ?[]const u8 = null;
+
+fn uploadRoot() ?[]const u8 {
+    if (upload_root) |r| return r;
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = if (builtin.is_test) (upload_base_for_test orelse return null) else (session_mod.web_osr.uploadStagingBase(&buf) orelse return null);
+    upload_root = web_upload_stage.ensureRoot(allocator, base) catch return null;
+    return upload_root;
+}
+
+fn uploadForgetRun(run: *CdpRun) void {
+    for (upload_runs.items, 0..) |r, i| if (r == run) {
+        _ = upload_runs.orderedRemove(i);
+        return;
+    };
+}
+
+/// 탭이 닫혔다 — 그 탭의 사본 폴더를 지우고 복사 예산을 뺀다.
+fn uploadForgetTab(surface_id: u64) void {
+    _ = upload_tab_copied.remove(surface_id);
+    const root = upload_root orelse return;
+    var buf: [24]u8 = undefined;
+    web_upload_stage.removeUnder(root, std.fmt.bufPrint(&buf, "{d}", .{surface_id}) catch return);
+}
+
+fn uploadRemoveOp(surface_id: u64, async_id: u64) void {
+    const root = upload_root orelse return;
+    var tab_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tab_dir = std.fmt.bufPrint(&tab_buf, "{s}/{d}", .{ root, surface_id }) catch return;
+    var op_buf: [24]u8 = undefined;
+    web_upload_stage.removeUnder(tab_dir, std.fmt.bufPrint(&op_buf, "{d}", .{async_id}) catch return);
+}
+
+/// 엔진 차례가 모달 전 확인을 마쳤다 — 멈추고(`pollUploadRuns` 가 모달을 띄운다), 답할 시간만큼 요청의 시한을 늘린다.
+fn uploadPause(run: *CdpRun, origin: []u8) void {
+    if (run.upload_origin) |o| allocator.free(o);
+    run.upload_origin = origin;
+    if (control_server_active) {
+        const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+        _ = control_server_storage.updateInFlightDeadline(run.async_id, now_ns + upload_confirm_timeout_ns);
+    }
+    upload_runs.append(allocator, run) catch return finishCdp(run, .failed, "out of memory");
+}
+
+/// 시험 빌드의 자동 결정(스모크) — `approve`·`deny`·`approve-after-ms:<ms>`(모달 동안 페이지를 옮기는 경우). 값이 `/` 로 시작하면 그 파일의
+/// 내용을 그때마다 읽는다(스모크가 호출마다 결정을 바꾼다 — 앱의 환경은 띄울 때 정해진다). 배포본은 comptime 으로 없다.
+const UploadTestDecision = union(enum) { approve: u32, deny };
+
+fn uploadTestDecision() ?UploadTestDecision {
+    if (comptime !build_options.web_upload_test_decision) return null;
+    const raw = std.c.getenv("MARU_TEST_UPLOAD_DECISION") orelse return null;
+    var v: []const u8 = std.mem.span(raw);
+    var file_buf: [64]u8 = undefined;
+    if (v.len > 0 and v[0] == '/') {
+        const fd = std.c.open(raw, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return null;
+        defer _ = std.c.close(fd);
+        const n = std.c.read(fd, &file_buf, file_buf.len);
+        if (n <= 0) return null;
+        v = std.mem.trim(u8, file_buf[0..@intCast(n)], " \n\r\t");
+    }
+    if (std.mem.eql(u8, v, "approve")) return .{ .approve = 0 };
+    if (std.mem.eql(u8, v, "deny")) return .deny;
+    const prefix = "approve-after-ms:";
+    if (std.mem.startsWith(u8, v, prefix)) return .{ .approve = std.fmt.parseInt(u32, v[prefix.len..], 10) catch return null };
+    return null;
+}
+
+/// 모달 문장 — 파일 수와 출처(그 프레임 트리의 `securityOrigin` — 페이지가 정한 글은 싣지 않는다). 출처는 grant 동의문처럼 등록 도메인이 남게 줄인다.
+fn uploadPromptMessage(buf: []u8, count: usize, origin: []const u8) []const u8 {
+    var count_buf: [64]u8 = undefined;
+    const count_text = if (count == 1) maru.i18n.t(.upload_count_one) else maru.i18n.format(&count_buf, maru.i18n.t(.upload_count_many), &.{.{ .d = @intCast(count) }});
+    var origin_buf: [256]u8 = undefined;
+    const shown = grantPromptUrl(&origin_buf, if (origin.len == 0) "null" else origin, grant_prompt_url_cols);
+    return maru.i18n.format(buf, maru.i18n.t(.upload_prompt), &.{ .{ .s = count_text }, .{ .s = shown } });
+}
+
+/// 승인 — 사본을 만든다(작업 스레드). 다른 볼륨의 복사는 이 호출 1 GiB·이 탭의 남은 4 GiB 안에서.
+fn uploadApprove(run: *CdpRun) void {
+    const job = run.upload.?;
+    const root = uploadRoot() orelse return finishCdp(run, .failed, web_upload_stage.StageError.io.text());
+    job.root = allocator.dupe(u8, root) catch return finishCdp(run, .failed, "out of memory");
+    const used = upload_tab_copied.get(run.surface_id) orelse 0;
+    job.budget = @min(web_upload_stage.copy_cap_per_call, web_upload_stage.copy_cap_per_tab -| used);
+    run.upload_approved = true;
+    if (!uploadSpawn(job, .stage)) return finishCdp(run, .failed, "could not start copying the files");
+}
+
+/// 사본이 다 됐다 — 시한을 보통 op 의 것으로 되돌리고 엔진 차례를 잇는다(로케이터 다시 풀기부터).
+fn uploadResume(run: *CdpRun) void {
+    const job = run.upload.?;
+    if (job.copied > 0) {
+        const used = upload_tab_copied.get(run.surface_id) orelse 0;
+        upload_tab_copied.put(allocator, run.surface_id, used + job.copied) catch {};
+    }
+    uploadForgetRun(run);
+    if (control_server_active) {
+        const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+        _ = control_server_storage.updateInFlightDeadline(run.async_id, now_ns + browser_op_timeout_ns);
+    }
+    var staged: [web_cdp_ops.web_cdp_upload.max_files]web_cdp_ops.web_cdp_upload.Staged = undefined;
+    for (job.staged.items, job.prepared.items, 0..) |path, *p, i| staged[i] = .{ .path = path, .name = p.name(), .size = p.size };
+    run.op.now_ms = cdpNowMs();
+    const step = run.op.resumeUpload(allocator, staged[0..job.staged.items.len]) catch return finishCdp(run, .failed, "out of memory");
+    cdpAdvance(run, step);
+}
+
+fn uploadDismiss(refs: []const ControlSessionRef, async_id: u64) void {
+    for (refs) |ref| if (ref.app_session) |app| app.dismissUploadConfirm(async_id);
+}
+
+/// 매 drain — 멈춘 업로드마다: 철회·시한·탭 닫힘이면 모달을 거두고 끝, 파일 작업이 끝났으면 거절 이유로 끝내거나 모달을 띄우고 답을 본다,
+/// 사본이 다 됐으면 잇는다. **메인 스레드 전용**.
+fn pollUploadRuns(refs: []const ControlSessionRef) void {
+    if (upload_runs.items.len == 0) return;
+    var batch: [16]*CdpRun = undefined;
+    const n = @min(upload_runs.items.len, batch.len);
+    @memcpy(batch[0..n], upload_runs.items[0..n]);
+    for (batch[0..n]) |run| pollUploadRun(refs, run);
+}
+
+fn pollUploadRun(refs: []const ControlSessionRef, run: *CdpRun) void {
+    if (!cdpStillAllowed(run.async_id)) {
+        uploadDismiss(refs, run.async_id);
+        return finishCdp(run, .failed, "the request was cancelled");
+    }
+    const job = run.upload.?;
+    if (job.state.load(.acquire) != 1) return; // 작업 스레드가 아직 쥐었다
+    if (job.out_of_memory) {
+        uploadDismiss(refs, run.async_id);
+        return finishCdp(run, .failed, "out of memory");
+    }
+    if (run.upload_approved) {
+        if (job.stage_failed) |e| return finishCdp(run, .failed, e.text());
+        return uploadResume(run);
+    }
+    if (job.refused) |r| {
+        var buf: [std.fs.max_path_bytes + 160]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "cannot upload {s}: {s}", .{ job.paths[r.index], r.why.text() }) catch r.why.text();
+        return finishCdp(run, .failed, msg);
+    }
+    if (uploadTestDecision()) |d| {
+        switch (d) {
+            .deny => {
+                run.upload_refused = true;
+                return finishCdp(run, .failed, upload_declined_reason);
+            },
+            .approve => |delay| {
+                const now = cdpNowMs();
+                if (run.upload_ready_ms == 0) run.upload_ready_ms = now;
+                if (now - run.upload_ready_ms < delay) return;
+                return uploadApprove(run);
+            },
+        }
+    }
+    // 답은 어느 창에서 왔든 받는다(모달이 뜬 뒤 탭이 다른 창으로 옮겨 갈 수 있다).
+    for (refs) |ref| if (ref.app_session) |a| if (a.takeUploadDecision(run.async_id)) |approved| {
+        if (approved) return uploadApprove(run);
+        run.upload_refused = true;
+        return finishCdp(run, .failed, upload_declined_reason);
+    };
+    // 그 탭을 가진 창에(없으면 첫 창). 창이 없으면 물을 수 없다 — 올리지 않는다.
+    const app = (appSessionOwningSurface(refs, run.surface_id) orelse firstAppSession(refs)) orelse {
+        run.upload_refused = true;
+        return finishCdp(run, .failed, upload_no_window_reason);
+    };
+    // 아직 답이 없다 — 띄운다(이미 보이는 중이면 그대로, 다른 모달이 열려 있으면 다음 tick).
+    var msg_buf: [768]u8 = undefined;
+    const message = uploadPromptMessage(&msg_buf, job.prepared.items.len, run.upload_origin orelse "");
+    var lines: [2 * web_cdp_ops.web_cdp_upload.max_files][]u8 = undefined;
+    var count: usize = 0;
+    defer for (lines[0..count]) |l| allocator.free(l);
+    const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
+    for (job.prepared.items, 0..) |*p, i| {
+        const two = maru.session.web_upload_display.fileLines(allocator, i, p.info(), home) catch return finishCdp(run, .failed, "out of memory");
+        lines[count] = two[0];
+        lines[count + 1] = two[1];
+        count += 2;
+    }
+    _ = app.showUploadConfirm(message, @ptrCast(lines[0..count]), run.async_id) catch return finishCdp(run, .failed, "out of memory");
 }
 
 pub export fn maru_macos_control_server_start() c_int {
@@ -8660,6 +9076,7 @@ pub export fn maru_macos_control_server_has_pending() u32 {
     if (cdpSleeperDue()) return 1;
     if (!control_server_active) return 0;
     if (tab_runs.items.len > 0) return 1; // W9b③: 연 탭의 첫 불러오기·물은 닫기를 매 drain 본다
+    if (upload_runs.items.len > 0) return 1; // W9c③: 모달·파일 작업을 기다리는 업로드를 매 drain 본다
     if (grant_prompt_queue.items.items.len > 0) return 1; // held grant 확인 대기 — server_drain(drainGrantPrompts) 계속 돌게
     return if (control_server_storage.hasPendingRequest()) 1 else 0;
 }
@@ -8682,6 +9099,7 @@ pub export fn maru_macos_control_server_drain(refs_ptr: ?[*]const ControlSession
     const now: u64 = @intCast(@max(@as(i128, 0), @divFloor(now_ns, std.time.ns_per_s)));
     drainGrantPrompts(server, refs, now);
     pollTabRuns(refs);
+    pollUploadRuns(refs);
 }
 
 fn expireActiveBrowserExecutions(server: *control_server_mod.ControlServer, now_ns: i128) void {
@@ -9675,6 +10093,7 @@ test "macOS app host ABI header and Zig declarations stay aligned" {
     try std.testing.expectEqual(@as(u8, 24), @as(u8, @intFromEnum(control_browser.BrowserMethod.close)));
     try std.testing.expectEqual(@as(u8, 25), @as(u8, @intFromEnum(control_browser.BrowserMethod.dialog))); // W9c②
     try std.testing.expectEqual(@as(u8, 26), @as(u8, @intFromEnum(control_browser.BrowserMethod.handle_dialog)));
+    try std.testing.expectEqual(@as(u8, 27), @as(u8, @intFromEnum(control_browser.BrowserMethod.upload))); // W9c③
 
     // workspace 헤더도 .h define과 Zig 단일 출처(session.workspace.header)가 갈라지면 저장/로드가 어긋나므로 고정.
     try std.testing.expectEqualStrings(c.MARU_WORKSPACE_HEADER, maru.session.workspace.header);
@@ -10627,6 +11046,8 @@ test {
     _ = web_cdp_ops.web_cdp_page; // W9a 페이지 op
     _ = web_cdp_ops.web_cdp_exec; // W9a② executeScript
     _ = web_cdp_ops.web_cdp_storage; // W9a③ localStorage·쿠키·clearStorage
+    _ = web_cdp_ops.web_cdp_upload; // W9c③ upload
+    _ = web_upload_stage; // W9c③ 파일 열기·사본
     // 전역 핫키 descriptor 매핑(a2의 Swift가 ABI로 소비)도 테스트 빌드에 포함한다.
     std.testing.refAllDecls(@import("global_hotkey.zig"));
     // 커맨드 카탈로그(메뉴바·팝업 공유) round-trip·chord 포맷 테스트도 테스트 빌드에 포함한다.
@@ -13504,6 +13925,8 @@ test "W9c②: 움직이는 op(누름·키·이동·스크립트)만 에이전트
         const want = switch (k) {
             .click, .back, .forward, .reload, .type_text, .scroll, .hover, .press, .navigate, .execute_script => true,
             .wait, .snapshot, .get_url, .screenshot, .get_local_storage, .set_local_storage, .remove_local_storage, .get_cookies, .set_cookie, .delete_cookie, .clear_storage => false,
+            // W9c③: 업로드는 넣기 앞에서만(`Op.uploadSetting`) — 모달 전·승인 뒤 확인은 페이지를 움직이지 않는다.
+            .upload => false,
         };
         try std.testing.expectEqual(want, web_cdp_ops.acting(k));
     }
@@ -13775,4 +14198,326 @@ test "W9c①: 닫힌 탭과 엔진이 돈 적 없는 탭의 console 은 오류�
     try control_pane_grant_store.grant(.{ .pane = 5, .target = 90, .scope = .browser });
     try w9c1Expect(try w9c1Console(90, w9c1Grant(5, 90), true), &.{});
     try std.testing.expectEqual(@as(usize, 0), active_browser_executions.items.items.len);
+}
+
+// ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 앱 쪽: 모달 전 파일 열기·매번 모달·결정·사본·이어가기·정리 ────────────────────────
+// 엔진 차례(로케이터·확인·넣기·읽기)는 `web_cdp_ops` 시험이 본다. 여기서는 그 차례가 모달 앞에서 멈춘 뒤(`Step.confirm`)의 앱 몫을 실제
+// `AppSession`(확인 모달)과 실제 파일 시스템(시험 폴더 — 실제 프로필은 건드리지 않는다)으로 본다. 엔진은 없다(DevTools 호출은 「engine is not
+// running」 으로 끝난다) — 그래서 승인 뒤 이어간 첫 호출이 무엇인지로 「다시 찾기부터 잇는다」 를 본다.
+
+/// 모달 전 차례의 흉내 답 — 파일 입력칸 하나(F1·L1·https://a.test).
+fn w9c3Answer(method: []const u8, params: []const u8) web_cdp_ops.Reply {
+    _ = params;
+    if (std.mem.eql(u8, method, "DOM.getDocument")) return .{ .ok = "{\"root\":{\"nodeId\":1}}" };
+    if (std.mem.eql(u8, method, "DOM.querySelector")) return .{ .ok = "{\"nodeId\":6}" };
+    if (std.mem.eql(u8, method, "DOM.describeNode")) return .{ .ok = "{\"node\":{\"backendNodeId\":9}}" };
+    if (std.mem.eql(u8, method, "Page.getFrameTree")) return .{ .ok = "{\"frameTree\":{\"frame\":{\"id\":\"F1\",\"loaderId\":\"L1\",\"securityOrigin\":\"https://a.test\"}}}" };
+    if (std.mem.eql(u8, method, "Page.createIsolatedWorld")) return .{ .ok = "{\"executionContextId\":7}" };
+    if (std.mem.eql(u8, method, "DOM.resolveNode")) return .{ .ok = "{\"object\":{\"objectId\":\"o-1\"}}" };
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" };
+    return .{ .ok = "{}" };
+}
+
+/// 업로드 요청 하나를 실행 자리에 넣고(그 탭의 grant 로) 모달 전 차례를 흉내 답으로 몰아 멈춘다 — 앱의 `beginCdp` 처럼 파일 작업도 띄운다.
+fn w9c3Start(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64, files_json: []const u8) !*CdpRun {
+    pending.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = tab, .method = .upload, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = tab, .scope = .browser } } });
+    _ = active_browser_executions.markRunning(id);
+    const arg = try std.fmt.allocPrint(allocator, "{{\"selector\":\"#f\",\"files\":{s}}}", .{files_json});
+    defer allocator.free(arg);
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, .upload, arg, id), .started = true };
+    run.upload = try UploadJob.fromArg(arg, tab, id);
+    try cdp_runs.append(allocator, run);
+    try std.testing.expect(uploadSpawn(run.upload.?, .prepare));
+    var step = try run.op.start(allocator);
+    while (step == .call) {
+        const cl = step.call;
+        defer allocator.free(cl.params);
+        step = try run.op.feed(allocator, w9c3Answer(cl.method, cl.params));
+    }
+    try std.testing.expect(step == .confirm);
+    cdpAdvance(run, step);
+    return run;
+}
+
+fn w9c3Message(pending: *control_server_mod.PendingRequest) ![]u8 {
+    const response = pending.response orelse return error.ExpectedResponse;
+    defer allocator.free(response);
+    pending.response = null;
+    var pm = try control_plane.parseMessage(std.testing.allocator, response);
+    defer pm.deinit();
+    const err = pm.message.response.err orelse return error.ExpectedError;
+    return std.fmt.allocPrint(std.testing.allocator, "{d} {s}", .{ err.code, err.message });
+}
+
+/// 사용자가 모달에 키로 답한다 — 실제 키 처리(`chrome_host.handleInput` — 비동기 상자의 보호: 거부 포커스, ← 로 허용에 가서 ⏎ 는 한 번 더 묻고
+/// ⌘⏎ 만 허용)를 지나 그 의도를 세션이 처리한다.
+fn w9c3Keys(session: *AppSession, accept: bool) void {
+    const keys: []const maru.chrome.input.InputEvent.KeyEvent = if (accept)
+        &.{ .{ .key = .left }, .{ .key = .enter }, .{ .key = .enter, .mods = .{ .command = true } } }
+    else
+        &.{.{ .key = .escape }};
+    for (keys) |k| {
+        const action = session.chrome_host.handleInput(allocator, .{ .key = k }) orelse continue;
+        if (action != .none) session.dispatchChromeAction(action);
+    }
+}
+
+fn w9c3Write(dir: std.Io.Dir, name: []const u8, data: []const u8) !void {
+    try dir.writeFile(std.testing.io, .{ .sub_path = name, .data = data });
+}
+
+test "W9c③: 업로드는 grant 가 있어도 부를 때마다 모달 — 파일 줄(경로·엿보기)과 출처, 거부는 -32002(그 글)·사본 없음, 다음 호출도 다시 묻는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    upload_base_for_test = base;
+    defer {
+        upload_base_for_test = null;
+        if (upload_root) |r| allocator.free(r);
+        upload_root = null;
+    }
+    try w9c3Write(tmp.dir, "a.txt", "hello upload\n");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 81, .scope = .browser });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const files = try std.fmt.bufPrint(&path_buf, "[\"{s}/a.txt\"]", .{base});
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"browser.upload\",\"params\":{\"id\":81,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
+    for (0..2) |round| {
+        var p: control_server_mod.PendingRequest = undefined;
+        const run = try w9c3Start(&p, req, 81, files);
+        // 답할 시간은 모달의 120 초(op 의 30 초가 아니다).
+        const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+        for (control_server_storage.in_flight.items) |e| if (e.id == run.async_id) try std.testing.expect(e.deadline_ns > now_ns + 100 * std.time.ns_per_s);
+        pollUploadRuns(&refs);
+        // grant 가 있는데도 — 그리고 두 번째 호출에도 — 모달이 뜬다(기억하지 않는다).
+        try std.testing.expect(session.pending_confirm == .upload and session.pending_confirm.upload == run.async_id);
+        try std.testing.expect(session.chrome_host.confirm.open and session.chrome_host.confirm.notes_must_fit);
+        try std.testing.expect(std.mem.indexOf(u8, session.chrome_host.confirm.message, "https://a.test") != null);
+        const notes = session.chrome_host.confirm.notes;
+        try std.testing.expectEqual(@as(usize, 2), notes.len);
+        // 시험 폴더는 `.zig-cache` 아래라 「숨은 폴더」 표지가 붙는다 — 경로가 줄에 있는지만 본다.
+        try std.testing.expect(std.mem.indexOf(u8, notes[0].text, "/a.txt") != null);
+        try std.testing.expect(std.mem.indexOf(u8, notes[1].text, "hello upload") != null);
+        try std.testing.expect(p.response == null); // 답이 올 때까지 붙잡는다
+        pollUploadRuns(&refs); // 다시 봐도 같은 모달(새로 띄우지 않는다)
+        try std.testing.expect(session.pending_confirm == .upload);
+        w9c3Keys(session, false);
+        pollUploadRuns(&refs);
+        const msg = try w9c3Message(&p);
+        defer ta.free(msg);
+        try std.testing.expectEqualStrings("-32002 " ++ upload_declined_reason, msg);
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+        try std.testing.expectEqual(@as(usize, 0), upload_runs.items.len);
+        _ = round;
+    }
+    // 거부하면 사본을 만들지 않는다 — 뿌리조차 정하지 않았다.
+    try std.testing.expect(upload_root == null);
+}
+
+test "W9c③: 모달 전에 연 파일이 폴더·없는 파일·같은 파일 둘이면 모달 없이 그 이유로 실패한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    try w9c3Write(tmp.dir, "a.txt", "a");
+    try tmp.dir.createDir(std.testing.io, "d", .default_dir);
+    var lb: [std.fs.max_path_bytes]u8 = undefined;
+    var tb: [std.fs.max_path_bytes]u8 = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink((try std.fmt.bufPrintZ(&tb, "{s}/a.txt", .{base})).ptr, (try std.fmt.bufPrintZ(&lb, "{s}/link.txt", .{base})).ptr));
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 82, .scope = .browser });
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"browser.upload\",\"params\":{\"id\":82,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
+    const Case = struct { files: []const u8, want: []const u8 };
+    var b1: [3 * std.fs.max_path_bytes]u8 = undefined;
+    var b2: [3 * std.fs.max_path_bytes]u8 = undefined;
+    var b3: [3 * std.fs.max_path_bytes]u8 = undefined;
+    for ([_]Case{
+        .{ .files = try std.fmt.bufPrint(&b1, "[\"{s}/d\"]", .{base}), .want = "it is a folder" },
+        .{ .files = try std.fmt.bufPrint(&b2, "[\"{s}/none.txt\"]", .{base}), .want = "no such file" },
+        .{ .files = try std.fmt.bufPrint(&b3, "[\"{s}/a.txt\",\"{s}/link.txt\"]", .{ base, base }), .want = "the same file is listed twice" },
+    }) |case| {
+        var p: control_server_mod.PendingRequest = undefined;
+        _ = try w9c3Start(&p, req, 82, case.files);
+        pollUploadRuns(&refs);
+        try std.testing.expect(session.pending_confirm == .none and !session.chrome_host.confirm.open); // 모달은 뜨지 않는다
+        const msg = try w9c3Message(&p);
+        defer ta.free(msg);
+        try std.testing.expect(std.mem.startsWith(u8, msg, "-32603 cannot upload "));
+        try std.testing.expect(std.mem.indexOf(u8, msg, case.want) != null);
+    }
+}
+
+test "W9c③: 승인 → 사본(<뿌리>/<탭>/<op>/<i>/<이름>, 0400)을 만들고 다시 찾기부터 잇는다 — 넣기 전에 끝나면 그 사본을 지운다, 탭이 닫히면 탭 폴더를 지운다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    upload_base_for_test = base;
+    defer {
+        upload_base_for_test = null;
+        if (upload_root) |r| allocator.free(r);
+        upload_root = null;
+    }
+    try w9c3Write(tmp.dir, "a.txt", "AAAA");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 83, .scope = .browser });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const files = try std.fmt.bufPrint(&path_buf, "[\"{s}/a.txt\"]", .{base});
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":83,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9c3Start(&p, req, 83, files);
+    const id = run.async_id;
+    pollUploadRuns(&refs);
+    try std.testing.expect(session.pending_confirm == .upload);
+    w9c3Keys(session, true);
+    try std.testing.expect(session.pending_confirm == .none); // 목록이 다 보여 허용됐다
+    pollUploadRuns(&refs); // 승인 → 사본(시험은 그 자리에서 만든다)
+    try std.testing.expectEqual(@as(usize, 1), run.upload.?.staged.items.len);
+    var want_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const want = try std.fmt.bufPrint(&want_buf, "{s}/upload-staging/83/{d}/0/a.txt", .{ base, id });
+    try std.testing.expectEqualStrings(want, run.upload.?.staged.items[0]);
+    {
+        var zb: [std.fs.max_path_bytes]u8 = undefined;
+        const fd = std.c.open((try std.fmt.bufPrintZ(&zb, "{s}", .{want})).ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        defer _ = std.c.close(fd);
+        var st: std.c.Stat = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.fstat(fd, &st));
+        try std.testing.expectEqual(@as(u16, 0o400), st.mode & 0o777);
+    }
+    cdp_last_method_len = 0;
+    pollUploadRuns(&refs); // 사본이 다 됐다 — 이어간다: 로케이터 다시 풀기부터(엔진이 없어 그 호출에서 끝난다)
+    try std.testing.expectEqualStrings("DOM.getDocument", cdp_last_method_buf[0..cdp_last_method_len]);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    try std.testing.expect(p.response != null);
+    allocator.free(p.response.?);
+    p.response = null;
+    // 넣기 전에 끝났다 — 그 op 의 사본은 곧 지웠다.
+    var gone_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const op_dir = try std.fmt.bufPrintZ(&gone_buf, "{s}/upload-staging/83/{d}", .{ base, id });
+    try std.testing.expect(std.c.open(op_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
+    // 탭이 닫히면 그 탭의 폴더(페이지에 갔던 사본 — 여기서는 흉내로 둔 것)를 지운다.
+    var keep_buf: [std.fs.max_path_bytes]u8 = undefined;
+    try tmp.dir.createDirPath(std.testing.io, "upload-staging/83/999/0");
+    try w9c3Write(tmp.dir, "upload-staging/83/999/0/kept.txt", "k");
+    onAppSessionSurfaceClosed(null, 83);
+    const tab_dir = try std.fmt.bufPrintZ(&keep_buf, "{s}/upload-staging/83", .{base});
+    try std.testing.expect(std.c.open(tab_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
+}
+
+test "W9c③: 모달이 떠 있는 동안 grant 가 철회되거나 답이 없어 시한(-32004)이면 모달을 결정 없이 거두고 끝낸다 — 사본은 만들지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    try w9c3Write(tmp.dir, "a.txt", "a");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const files = try std.fmt.bufPrint(&path_buf, "[\"{s}/a.txt\"]", .{base});
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"browser.upload\",\"params\":{\"id\":84,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
+    // ① 철회.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 84, .scope = .browser });
+    var p1: control_server_mod.PendingRequest = undefined;
+    _ = try w9c3Start(&p1, req, 84, files);
+    pollUploadRuns(&refs);
+    try std.testing.expect(session.pending_confirm == .upload);
+    control_pane_grant_store.clearAll();
+    pollUploadRuns(&refs);
+    try std.testing.expect(session.pending_confirm == .none and !session.chrome_host.confirm.open);
+    try std.testing.expect(session.takeUploadDecision(1) == null and session.upload_confirm_decision == null); // 결정을 남기지 않았다
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    if (p1.response) |r| allocator.free(r);
+    // ② 답 없음 — 요청의 시한이 지나면 -32004, 다음 drain 에 모달을 거둔다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 84, .scope = .browser });
+    var p2: control_server_mod.PendingRequest = undefined;
+    const run2 = try w9c3Start(&p2, req, 84, files);
+    pollUploadRuns(&refs);
+    try std.testing.expect(session.pending_confirm == .upload);
+    var deadline: i128 = 0;
+    for (control_server_storage.in_flight.items) |e| if (e.id == run2.async_id) {
+        deadline = e.deadline_ns;
+    };
+    expireActiveBrowserExecutions(&control_server_storage, deadline + 1);
+    try expectPendingErrorCode(&p2, .timeout);
+    pollUploadRuns(&refs);
+    try std.testing.expect(session.pending_confirm == .none and !session.chrome_host.confirm.open);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    try std.testing.expectEqual(@as(usize, 0), upload_runs.items.len);
+    try std.testing.expect(upload_root == null);
+}
+
+test "W9c③: 목록이 창에 다 들어가지 않으면 허용(⌘⏎ 포함)이 듣지 않는다 — 상자가 다시 열린 채 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const ta = std.testing.allocator;
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    _ = try session.resize(session.sidebar_width_px + 800, 140, session.scale_milli); // 낮은 창
+    var lines: [20][]const u8 = undefined;
+    for (&lines, 0..) |*l, i| l.* = if (i % 2 == 0) "1. ~/Downloads/a-very-long-folder-name/and-another-one/report.pdf" else "   binary, 1,234 bytes (PDF)";
+    try std.testing.expect(try session.showUploadConfirm("Upload?", &lines, 77));
+    w9c3Keys(session, true); // ← ⏎ ⌘⏎ — 넓은 창이면 허용됐을 키
+    try std.testing.expect(session.pending_confirm == .upload); // 허용되지 않았다
+    try std.testing.expect(session.chrome_host.confirm.open);
+    try std.testing.expect(session.takeUploadDecision(77) == null);
+    // 거부는 언제나 된다.
+    w9c3Keys(session, false);
+    try std.testing.expectEqual(@as(?bool, false), session.takeUploadDecision(77));
+    try std.testing.expect(!session.chrome_host.confirm.open);
+}
+
+test "W9c③: Chromium 이 아닌 프로세스(엔진이 꺼졌다)의 upload 는 Swift 로 보내지 않고 -32008 — 모달도 파일 열기도 없다" {
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    try std.testing.expect(!session_mod.web_osr.enabled());
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.upload\",\"params\":{\"id\":85,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}", .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    pushBrowserOp(&control_server_storage, id, .{ .surface_id = 85, .method = .upload, .arg = try allocator.dupe(u8, "{\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}"), .pane_grant = .{ .pane = 5, .target = 85, .scope = .browser } });
+    try expectPendingErrorCode(&p, .unsupported_by_engine);
+    try std.testing.expectEqual(@as(usize, 0), browser_op_queue.items.items.len);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
 }

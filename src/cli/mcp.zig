@@ -30,6 +30,9 @@ pub const ArgKind = enum {
     number,
     /// 참·거짓이 서로 다른 플래그로 — 참이면 `flag`, 거짓이면 `flag_false`(W9c② — `accept` → `--accept`·`--dismiss`). 스키마는 boolean.
     bool_choice,
+    /// 문자열 배열 — 위치 인자 여럿으로(`--` 뒤). W9c③ 업로드의 파일 경로: **절대 경로만**(이 서버의 현재 폴더는 에이전트가 모른다 — CLI 는
+    /// 자기 현재 폴더로 붙이지만 MCP 서버의 것은 에이전트의 것과 다를 수 있다). 스키마는 `minItems`·`maxItems`.
+    path_list,
 };
 
 pub const Arg = struct {
@@ -46,6 +49,8 @@ pub const Arg = struct {
     max: ?i64 = null,
     /// 수(소수) 인자가 0 보다 커야 하는가(스키마 `exclusiveMinimum: 0`).
     positive: bool = false,
+    /// `path_list` 의 개수 상한(스키마 `maxItems` — 파서의 상한과 같게).
+    max_items: usize = 0,
 };
 
 pub const Tool = struct {
@@ -97,6 +102,7 @@ pub const tools = [_]Tool{
         .{ .key = "text", .kind = .string, .flag = "--text", .description = "answer text for a prompt" },
         .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
+    .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — allow up to 2 minutes for the answer); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
     .{ .name = "browser_get_url", .subcommand = "get-url", .description = "Print the tab's current document address.", .args = withSurface(&.{}) },
     .{ .name = "browser_click", .subcommand = "click", .description = "Click an element with real mouse input (Chromium tabs). Give one locator: selector, ref, role (+name/level), by_text or by_label.", .args = withSurface(&locator_args) },
@@ -180,7 +186,7 @@ pub fn findTool(name: []const u8) ?*const Tool {
     return null;
 }
 
-pub const ArgError = error{ UnknownArgument, WrongType, MissingArgument, OutOfMemory };
+pub const ArgError = error{ UnknownArgument, WrongType, MissingArgument, RelativePath, OutOfMemory };
 
 /// 도구 인자(JSON 객체)를 `maru browser` CLI 인자로 옮긴다 — 하위 명령이 맨 앞, 위치 인자는 맨 뒤. 모르는 키·틀린 형은 거절한다
 /// (CLI 가 모르는 옵션을 거절하는 것과 같다 — 오타가 조용히 무시되지 않게). 값의 범위·배타는 `browser.parse` 가 본다. 돌려준 글은
@@ -189,6 +195,7 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
     var out: std.ArrayList([]const u8) = .empty;
     try out.append(arena, tool.subcommand);
     var positional: ?[]const u8 = null;
+    var positional_list: []const std.json.Value = &.{};
     const obj: ?std.json.ObjectMap = if (arguments) |a| switch (a) {
         .object => |o| o,
         .null => null,
@@ -234,6 +241,17 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
                     .string => |s| positional = s,
                     else => return error.WrongType,
                 },
+                .path_list => switch (v) {
+                    .array => |a| {
+                        if (a.items.len == 0 or a.items.len > spec.max_items) return error.WrongType;
+                        for (a.items) |item| switch (item) {
+                            .string => |p| if (p.len == 0 or p[0] != '/') return error.RelativePath,
+                            else => return error.WrongType,
+                        };
+                        positional_list = a.items;
+                    },
+                    else => return error.WrongType,
+                },
                 .json_array => switch (v) {
                     .array => {
                         // 깊게 중첩된 배열은 글로 펼 때 쓰개의 중첩 한도(256)에서 서버째 panic 했다(W9f 적대 리뷰 1 회차).
@@ -253,6 +271,10 @@ pub fn argv(arena: std.mem.Allocator, tool: *const Tool, arguments: ?std.json.Va
     };
     // 위치 인자는 `--` 뒤에 — `-` 로 시작해도(`-1`·`-h`) 옵션·도움말로 읽히지 않는다.
     if (positional) |p| try out.appendSlice(arena, &.{ "--", p });
+    if (positional_list.len > 0) {
+        try out.append(arena, "--");
+        for (positional_list) |p| try out.append(arena, p.string);
+    }
     return out.toOwnedSlice(arena);
 }
 
@@ -296,6 +318,7 @@ pub fn handleLine(gpa: std.mem.Allocator, arena: std.mem.Allocator, line: []cons
             error.UnknownArgument => "error: unknown argument for this tool (see its input schema)",
             error.WrongType => "error: an argument has the wrong type (see the tool's input schema)",
             error.MissingArgument => "error: a required argument is missing",
+            error.RelativePath => "error: file paths must be absolute (this server cannot know your working directory)",
             error.OutOfMemory => return error.OutOfMemory,
         }, true) };
         return .{ .call = .{ .id = id, .tool = tool, .argv = args } };
@@ -376,7 +399,9 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "(and tabs their pages opened), whose first read shows everything since the tab was created " ++
             "unless the user clicked, typed or navigated in that tab before it. " ++
             "A read from another pane (another agent, or the user running maru browser console there) takes the console over: " ++
-            "your next read again shows only the current page's lines, and lines logged in between are gone for you.") catch |e| break :blk e;
+            "your next read again shows only the current page's lines, and lines logged in between are gone for you. " ++
+            "browser_upload asks the user every time, listing each file with a peek of its content; pass absolute paths of files " ++
+            "(not folders) you mean to send, and expect it to wait for the user's answer.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -398,8 +423,19 @@ fn writeSchema(s: *std.json.Stringify, tool: *const Tool) !void {
             .int => "integer",
             .number => "number",
             .flag, .bool_choice => "boolean",
-            .json_array => "array",
+            .json_array, .path_list => "array",
         });
+        if (a.kind == .path_list) {
+            try s.objectField("items");
+            try s.beginObject();
+            try s.objectField("type");
+            try s.write("string");
+            try s.endObject();
+            try s.objectField("minItems");
+            try s.write(1);
+            try s.objectField("maxItems");
+            try s.write(a.max_items);
+        }
         if (a.kind == .int) {
             try s.objectField("minimum");
             try s.write(a.min);
@@ -557,9 +593,10 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
         for (t.args) |a| if (a.required) try obj.put(arena, a.key, switch (a.kind) {
             .int => .{ .integer = 4 },
             .string, .positional => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
+            .path_list => try jsonOf(arena, "[\"/tmp/a.txt\"]"),
             else => .{ .bool = true },
         });
-        const extra: ?[]const u8 = if (std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover"))
+        const extra: ?[]const u8 = if (std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "upload"))
             "selector"
         else if (std.mem.eql(u8, t.subcommand, "wait")) "selector" else null;
         if (extra) |k| try obj.put(arena, k, .{ .string = "#a" });
@@ -744,10 +781,11 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
         for (t.args) |a| if (a.required) try obj.put(arena, a.key, switch (a.kind) {
             .int => .{ .integer = 4 },
             .bool_choice => .{ .bool = true },
+            .path_list => try jsonOf(arena, "[\"/tmp/a.txt\"]"),
             else => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
         });
         // 이 인자와 함께 써야 하는 짝(로케이터는 하나가 있어야, --name·--exact 는 role 과).
-        const needs_locator = std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "wait");
+        const needs_locator = std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "wait") or std.mem.eql(u8, t.subcommand, "upload");
         const is_locator = std.mem.eql(u8, opt.key, "selector") or std.mem.eql(u8, opt.key, "ref") or std.mem.eql(u8, opt.key, "role") or std.mem.eql(u8, opt.key, "by_text") or std.mem.eql(u8, opt.key, "by_label");
         const with_role = std.mem.eql(u8, opt.key, "name") or std.mem.eql(u8, opt.key, "level") or std.mem.eql(u8, opt.key, "exact") or std.mem.eql(u8, opt.key, "nth");
         if (with_role) {
@@ -899,14 +937,17 @@ test "W9f 적대 리뷰 3 회차: 모든 정수 인자의 스키마 상한은 �
         };
         for ([_]i64{ max, max + 1 }) |value| {
             var obj: std.json.ObjectMap = .empty;
+            var one_path = std.json.Array.init(arena);
+            try one_path.append(.{ .string = "/tmp/a.txt" });
             for (t.args) |a| if (a.required) try obj.put(arena, a.key, switch (a.kind) {
                 .int => .{ .integer = 4 },
                 .bool_choice => .{ .bool = true },
+                .path_list => .{ .array = one_path },
                 else => .{ .string = if (std.mem.eql(u8, a.key, "key")) "Enter" else if (std.mem.eql(u8, a.key, "url")) "https://e.test/" else "x" },
             });
             if (std.mem.eql(u8, arg.key, "level") or std.mem.eql(u8, arg.key, "nth")) try obj.put(arena, "role", .{ .string = "button" });
             if (std.mem.eql(u8, t.subcommand, "wait") and std.mem.eql(u8, arg.key, "timeout_ms")) try obj.put(arena, "selector", .{ .string = "#a" });
-            if ((std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover")) and !obj.contains("role")) try obj.put(arena, "selector", .{ .string = "#a" });
+            if ((std.mem.eql(u8, t.subcommand, "click") or std.mem.eql(u8, t.subcommand, "type") or std.mem.eql(u8, t.subcommand, "scroll") or std.mem.eql(u8, t.subcommand, "hover") or std.mem.eql(u8, t.subcommand, "upload")) and !obj.contains("role")) try obj.put(arena, "selector", .{ .string = "#a" });
             try obj.put(arena, arg.key, .{ .integer = value });
             const a = try argv(arena, t, .{ .object = obj });
             const ok = if (browser.parse(a)) |_| true else |_| false;
@@ -973,6 +1014,45 @@ test "W9c②: browser_dialog·browser_handle_dialog — accept(참·거짓)는 -
         const schema = t.object.get("inputSchema").?.object;
         try testing.expectEqualStrings("boolean", schema.get("properties").?.object.get("accept").?.object.get("type").?.string);
         try testing.expectEqual(@as(usize, 2), schema.get("required").?.array.items.len); // surface·accept
+        return;
+    }
+    return error.TestUnexpectedResult;
+}
+
+test "W9c③: browser_upload — 파일은 절대 경로 배열(1..10)로 `--` 뒤 위치 인자가 되고 browser.parse 가 받는다, 상대 경로는 MCP 가 거절한다(isError)" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const tool = findTool("browser_upload").?;
+    const a = try argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"by_label\":\"Resume\",\"files\":[\"/tmp/a.txt\",\"/tmp/-h\"]}"));
+    const cmd = (try browser.parse(a)).request.upload;
+    try testing.expectEqual(@as(u64, 4), cmd.surface_id);
+    try testing.expectEqualStrings("Resume", cmd.locator.label.value);
+    try testing.expectEqual(@as(usize, 2), cmd.count);
+    try testing.expectEqualStrings("/tmp/-h", cmd.paths()[1]); // `--` 뒤라 도움말이 아니다
+    try testing.expectError(error.RelativePath, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":[\"a.txt\"]}")));
+    try testing.expectError(error.RelativePath, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":[\"~/a.txt\"]}")));
+    try testing.expectError(error.WrongType, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":[]}")));
+    try testing.expectError(error.WrongType, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":\"/tmp/a\"}")));
+    try testing.expectError(error.WrongType, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\",\"files\":[\"/1\",\"/2\",\"/3\",\"/4\",\"/5\",\"/6\",\"/7\",\"/8\",\"/9\",\"/10\",\"/11\"]}")));
+    try testing.expectError(error.MissingArgument, argv(arena, tool, try jsonOf(arena, "{\"surface\":4,\"selector\":\"#f\"}")));
+    // 상대 경로의 도구 호출은 JSON-RPC 오류가 아니라 isError 결과 — 왜인지 말한다.
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"browser_upload\",\"arguments\":{\"surface\":1,\"selector\":\"#f\",\"files\":[\"a.txt\"]}}}")).reply;
+    defer testing.allocator.free(r);
+    try testing.expect(std.mem.indexOf(u8, r, "must be absolute") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "\"isError\":true") != null);
+    // 스키마 — 문자열 배열, 1..10 개, 필수.
+    const l = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}")).reply;
+    defer testing.allocator.free(l);
+    const lp = try std.json.parseFromSlice(std.json.Value, testing.allocator, l, .{});
+    defer lp.deinit();
+    for (lp.value.object.get("result").?.object.get("tools").?.array.items) |t| {
+        if (!std.mem.eql(u8, t.object.get("name").?.string, "browser_upload")) continue;
+        const files = t.object.get("inputSchema").?.object.get("properties").?.object.get("files").?.object;
+        try testing.expectEqualStrings("array", files.get("type").?.string);
+        try testing.expectEqualStrings("string", files.get("items").?.object.get("type").?.string);
+        try testing.expectEqual(@as(i64, 1), files.get("minItems").?.integer);
+        try testing.expectEqual(@as(i64, browser.max_upload_files), files.get("maxItems").?.integer);
         return;
     }
     return error.TestUnexpectedResult;

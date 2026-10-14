@@ -144,14 +144,18 @@ test "macos spawn: the child starts with default signal handling — a blocked o
     if (c.sigaction(.TERM, &ignore, &previous_action) != 0) return error.TestUnexpectedResult;
     defer _ = c.sigaction(.TERM, &previous_action, null);
 
-    const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "5" };
+    // 자식이 exec 를 마친 뒤 **스스로** TERM 을 보낸다 — 부모가 곧바로 보내면 무거운 부하에서 아직 exec 중인 자식에게 도착한
+    // 신호가 늦게 처리돼 2 초 예산을 넘겼다(같은 모양의 `web_osr_install` 테스트가 8 중 병렬 + 바쁜 루프 16 에서 120 번 중 2~5 번,
+    // CI #4449). 물려받으면 잡는 것은 그대로다: 무시 처분을 물려받은 sh 는 그 신호를 되돌릴 수 없어(POSIX — 시작 때 무시된
+    // 신호) 살아남아 정상 종료하고, 막힌 마스크를 물려받으면 신호가 보류된 채 정상 종료한다 — 둘 다 아래 IFSIGNALED 에서 빨갛다.
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "kill -TERM $$" };
     const envp = [_:null]?[*:0]const u8{};
-    const pid = try spawn("/bin/sleep", &argv, &envp, .dev_null);
-    _ = c.kill(pid, .TERM);
-    // 2 초 안에 TERM 으로 끝나야 한다. 못 끝나면 KILL 로 거두고 실패.
+    const pid = try spawn("/bin/sh", &argv, &envp, .dev_null);
+    // 10 초 안에 TERM 으로 끝나야 한다(실제 자식을 띄우는 판정자의 부하 실측 ~3 초 — 시간은 이 테스트의 주제가 아니다).
+    // 못 끝나면 KILL 로 거두고 실패.
     var waited_ms: usize = 0;
     var status: c_int = 0;
-    const exited = while (waited_ms < 2000) : (waited_ms += 10) {
+    const exited = while (waited_ms < 10_000) : (waited_ms += 10) {
         if (c.waitpid(pid, &status, std.posix.W.NOHANG) == pid) break true;
         var ts: c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = c.nanosleep(&ts, null);

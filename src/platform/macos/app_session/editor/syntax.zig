@@ -773,10 +773,11 @@ test "ES6 겹침에서 마지막 캡처가 이긴다 — 값으로 잰다" {
     // **`ES3`은 이것을 못 잰다.** 그쪽은 "구간이 겹치지 않고 오름차순"만 보므로 어느 쪽이
     // 이기든 통과한다 — 적대적 검증에서 순서를 뒤집은 뮤턴트가 그대로 살아남았다.
     //
-    // grammar 는 `x` 하나에 캡처를 넷 낸다(실측): `variable`·`type`·`constant`·
-    // `variable.builtin`. 앞뒤 둘은 **일부러 무색**이라 안 쓰고, 남는 둘 중 **뒤엣것**인
-    // `constant`(→`number`)가 이겨야 한다. 처음이 이기면 `type_name`이 된다.
-    var doc = try openDoc("const x = 1;\n");
+    // grammar 는 `X_Y` 하나에 캡처를 셋 낸다(실측): `variable`·`type`(`#lua-match? "^[A-Z_]…"`)·`constant`
+    // (`"^[A-Z][A-Z_0-9]+$"`). 앞은 **일부러 무색**이라 안 쓰고, 남는 둘 중 **뒤엣것**인 `constant`(→`number`)가 이겨야
+    // 한다. 처음이 이기면 `type_name`이 된다. 처음엔 소문자 `x` 로 쟀다 — 쿼리 술어를 평가하기 전이라 조건이 안 걸러진 캡처가
+    // 붙어서였고, 평가(계획 editor-bundled-languages BLP) 뒤 `x` 에는 `variable` 하나뿐이다.
+    var doc = try openDoc("const X_Y = 1;\n");
     defer doc.deinit();
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
@@ -786,7 +787,7 @@ test "ES6 겹침에서 마지막 캡처가 이긴다 — 값으로 잰다" {
 
     var found: ?tokens.ColorRole = null;
     for (colors[0]) |cs| {
-        if (cs.start_col == 6 and cs.end_col == 7) found = cs.role;
+        if (cs.start_col == 6 and cs.end_col == 9) found = cs.role;
     }
     try testing.expect(found != null);
     try testing.expectEqual(tokens.ColorRole.syntax_number, found.?);
@@ -1291,22 +1292,22 @@ test "ES33 체인을 못 만들면 마디 경계도 비운다 — 지난 프레�
 }
 
 test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, 나머지 1층 색·창 밖 2층은 그대로; 2층이 비면 1층과 같다 (§8.2i)" {
-    // `x` 는 1층(zig 쿼리)에서 `constant` 라 number 색이고 `f` 는 함수. 2층이 `x` 를 `type_name` 으로, `f` 를 `keyword` 로 덮는다고 하면
-    // 그 두 자리만 바뀌고 `const`·`pub`·`fn` 은 1층 색 그대로다.
-    var doc = try openDoc("const x = 1;\npub fn f() void {}\n");
+    // `X_Y` 는 1층(zig 쿼리)에서 `constant` 라 number 색이고 `f` 는 함수. 2층이 `X_Y` 를 `type_name` 으로, `f` 를 `keyword` 로 덮는다고
+    // 하면 그 두 자리만 바뀌고 `const`·`pub`·`fn` 은 1층 색 그대로다(소문자 `x` 는 술어 평가 뒤 무색이라 대문자 상수로 잰다 — ES6).
+    var doc = try openDoc("const X_Y = 1;\npub fn f() void {}\n");
     defer doc.deinit();
     var st = openParsed(doc.content, .zig);
     defer st.deinit(testing.allocator);
     const Span = maru.session.editor.lsp.semantic.Span;
-    const x_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "x").?);
+    const x_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "X_Y").?);
     const f_at: u32 = @intCast(std.mem.indexOf(u8, doc.content, "f()").?);
-    const extra = [_]Span{ .{ .start = x_at, .end = x_at + 1, .role = .type_name }, .{ .start = f_at, .end = f_at + 1, .role = .keyword }, .{ .start = 100, .end = 101, .role = .string } }; // 셋째는 문서 밖(창 밖)
+    const extra = [_]Span{ .{ .start = x_at, .end = x_at + 3, .role = .type_name }, .{ .start = f_at, .end = f_at + 1, .role = .keyword }, .{ .start = 100, .end = 101, .role = .string } }; // 셋째는 문서 밖(창 밖)
     const colors = lineColorsWith(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit, &extra, &.{}, .{});
     try testing.expect(colors.len >= 2);
     var x_role: ?tokens.ColorRole = null;
     var const_role: ?tokens.ColorRole = null;
     for (colors[0]) |cs| {
-        if (cs.start_col == 6 and cs.end_col == 7) x_role = cs.role;
+        if (cs.start_col == 6 and cs.end_col == 9) x_role = cs.role;
         if (cs.start_col == 0 and cs.end_col == 5) const_role = cs.role;
     }
     try testing.expectEqual(tokens.ColorRole.syntax_type_name, x_role.?); // 2층이 이겼다
@@ -1328,7 +1329,7 @@ test "ES40 2층 병합 — semantic 스팬은 겹친 자리만 1층을 덮고, �
     // 2층이 비면 `lineColors` 와 같다 — `x` 는 1층 색(number)으로 돌아간다.
     const plain = lineColors(&st, testing.allocator, doc.content, doc.lines, 0, 2, 4, &.{}, .inherit);
     var x_plain: ?tokens.ColorRole = null;
-    for (plain[0]) |cs| if (cs.start_col == 6 and cs.end_col == 7) {
+    for (plain[0]) |cs| if (cs.start_col == 6 and cs.end_col == 9) {
         x_plain = cs.role;
     };
     try testing.expectEqual(tokens.ColorRole.syntax_number, x_plain.?);

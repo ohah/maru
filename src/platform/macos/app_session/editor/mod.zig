@@ -26102,16 +26102,18 @@ test "SMT1 semantic tokens — 서버가 ready 면 프레임의 색 만들기가
     const s = f.fx.session;
     const term = f.term;
     try testing.expect(f.ready());
-    // ⑴ 첫 색 만들기 — 요청이 나간다(range 0..(256+20)). 1층만 있는 동안 `a_ty` 는 무색·`int` 는 키워드.
+    // ⑴ 첫 색 만들기 — 요청이 나간다(range 0..(256+20)). 1층만 있는 동안 `a_ty` 는 무색·`int` 는 기본형.
     term.rt.editor_first_line = 0;
     const c0 = frameSyntaxColors(s, term);
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
     try testing.expect(term.rt.editor_semantic.waiting);
-    try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c0, 0, 14, 18).?); // `a_ty` — 1층(C 쿼리)의 색
+    // `a_ty` — 1층(C 쿼리)에서 무색이다. 쿼리 술어를 평가하기 전에는 `#match? "^[A-Z][A-Z\\d_]*$"`(대문자 상수) 조건이 안 걸러져 숫자 색이었고
+    // 이 줄이 그 결함을 그대로 박아 두고 있었다(계획 editor-bundled-languages BLP).
+    try testing.expect(roleAt(c0, 0, 14, 18) == null);
     try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c0, 0, 0, 3).?); // `int` — 1층 기본형
     _ = frameSyntaxColors(s, term); // 대기 중엔 한 번만
     try testing.expectEqual(@as(u64, 1), s.editor_lsp.sent_semantic);
-    // ⑵ 응답 — `a_ty`(type) 가 2층 색(number → type_name), `my_fn`(function) 은 1층과 같은 색, `int`(variable → 무색)은 1층 그대로.
+    // ⑵ 응답 — `a_ty`(type) 가 2층 색(무색 → type_name), `my_fn`(function) 은 1층과 같은 색, `int`(variable → 무색)은 1층 그대로.
     try testing.expect(f.applied(1));
     try testing.expectEqual(@as(usize, 3), term.rt.editor_semantic.spans.items.len); // my_fn·a_ty·a_ty — 범위 밖 `tail_fn` 과 무색 `int`·`return` 은 없다
     try testing.expectEqual(term.rt.editorDocument().notifications.lsp_version, term.rt.editor_semantic.version);
@@ -26221,7 +26223,7 @@ test "SMT2 semantic tokens — range 없는 서버는 full 로 묻고(스크롤�
         term.rt.editor_first_line = 0;
         const c = frameSyntaxColors(s, term);
         try testing.expectEqual(@as(u64, 0), s.editor_lsp.sent_semantic);
-        try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_number, roleAt(c, 0, 14, 18).?); // 1층 색 그대로
+        try testing.expect(roleAt(c, 0, 14, 18) == null); // 1층 그대로 — 소문자 매개변수 `a_ty` 는 무색(술어 평가 — SMT1)
         try testing.expectEqual(maru.chrome.tokens.ColorRole.syntax_type_name, roleAt(c, 0, 0, 3).?);
     }
     _ = unsetenv("MARU_FAKE_LSP_NOSEMCAP");

@@ -87,9 +87,9 @@ fn exact(name: []const u8) ?Mapping {
         .{ "constant", Mapping{ .role = .number } }, // `constant.builtin` 포함
 
         // ── 주석 ────────────────────────────────────────────────────────────────
-        // `comment.documentation`도 여기로 접힌다. **지금은 접히는 것이 옳다** —
-        // `src/syntax/tree_sitter.zig` 머리말이 적었듯 predicate를 평가하지 않아 모든 주석에
-        // 그 캡처가 조건 없이 붙는다. 평가기가 서면 그때 갈지 판단한다.
+        // `comment.documentation`도 여기로 접힌다. 처음엔 predicate를 평가하지 않아 모든 주석에 그 캡처가
+        // 조건 없이 붙어 접는 것이 유일한 답이었다. 평가기(`src/syntax/predicate.zig` — 계획 editor-bundled-languages
+        // BLP)가 선 뒤로는 문서 주석에만 붙지만, 팔레트에 슬롯이 없어 같은 색으로 둔다.
         .{ "comment", Mapping{ .role = .comment } },
 
         // ── 이름 ────────────────────────────────────────────────────────────────

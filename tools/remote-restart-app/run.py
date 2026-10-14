@@ -17,7 +17,25 @@ def verify_provider_gui(text, provider):
         raise RuntimeError(provider + ' remote shell turn was not sealed')
     return set(sessions)
 
-def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, providers=False):
+def verify_runtime_ended_gui(text, runtime_id):
+    if not re.fullmatch(r'[0-9a-f]{32}', runtime_id): raise RuntimeError('invalid runtime identity')
+    identity = re.search(r'^REMOTE_ENDED_DISCONNECTED host=([0-9a-f]{32}) runtime=' + re.escape(runtime_id) + r'$', text, re.M)
+    if not identity: raise RuntimeError('missing runtime-ended target identity')
+    host = identity.group(1)
+    markers = ['^' + re.escape(identity.group(0)) + '$',
+               r'^REMOTE_ENDED_JOB host=' + host + r' state=replacement_published$',
+               r'^REMOTE_ENDED_JOB host=' + host + r' state=candidate_rejected$',
+               r'^info: reconnect terminal: host=' + host + r' total=1 published_old=0 published_new=0 frozen=1 ended=0 retry_reserved=1$',
+               r'^REMOTE_ENDED_GUI visible=true$']
+    cursor = 0
+    for marker in markers:
+        match = re.search(marker, text[cursor:], re.M)
+        if not match: raise RuntimeError('missing or unordered runtime-ended evidence: ' + marker)
+        cursor += match.end()
+    if any(marker in text for marker in ['fatal integrity:', 'coordinator turn failed:', 'REMOTE_ENDED_FAULT_ERROR']):
+        raise RuntimeError('runtime-ended path reported a fatal or unhandled fault')
+
+def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, providers=False, runtime_ended=False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'shared-restore-app'))
     from gui_launch import GUIApp, process_identity
     app = Path(app).resolve()
@@ -46,6 +64,7 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
                     MARU_CONFIG=str(config), MARU_SESSION_HOST_ROOT=str(host_root),
                     MARU_REMOTE_RESTART_NOTICE_ID=marker, MARU_REMOTE_RESTART_CAPTURE="1")
     if providers: childenv["MARU_REMOTE_PROVIDER_GUI"] = "1"
+    if runtime_ended: childenv["MARU_REMOTE_ENDED_FAULT"] = "1"
     cache = home / '.cache/maru'; cache.mkdir(parents=True)
     (cache / 'ssh-terminfo-hosts').write_text(alias + '\n')
     (remote / 'gui-hold').touch()
@@ -88,6 +107,38 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
         owner = json.loads((remote / 'gui-owner.json').read_text())
         if owner['nonce'] != first[3] or owner['format'] != '2':
             raise RuntimeError('remote process and GUI identity/profile disagree')
+        if runtime_ended:
+            runtime_id = first[3].rsplit('_', 1)[-1]
+            inventory = subprocess.run([cli, 'runtime', 'list', '--json'], env=childenv,
+                                       capture_output=True, timeout=10, check=True)
+            rows = json.loads(inventory.stdout)['runtimes']
+            if len(rows) != 1 or rows[0]['runtime_id'] != runtime_id:
+                raise RuntimeError('runtime-ended target does not match the sole GUI runtime')
+            def wait_alive(predicate, label):
+                def observed():
+                    if seed.poll() is not None: raise RuntimeError(label + ': GUI exited ' + str(seed.poll()))
+                    return predicate()
+                wait_for(observed, label, 15)
+            (seed_output / 'disconnect').touch()
+            wait_alive(lambda: (seed_output / 'candidate-ready').exists(), 'observer scheduling barrier missing')
+            ended = subprocess.run([cli, 'runtime', 'end', runtime_id, '--yes'], env=childenv,
+                                   capture_output=True, timeout=10, check=True)
+            (artifacts / 'runtime-end.stdout').write_bytes(ended.stdout)
+            (artifacts / 'runtime-end.stderr').write_bytes(ended.stderr)
+            (seed_output / 'continue').touch()
+            wait_alive(lambda: 'reconnect terminal:' in (seed_output / 'app.stderr.txt').read_text(errors='replace'),
+                       'canonical runtime-ended settlement missing')
+            (seed_output / 'verify-after').touch()
+            wait_alive(lambda: (seed_output / 'after-ready').exists(), 'post-failure GUI frame missing')
+            text = (seed_output / 'app.stderr.txt').read_text(errors='replace')
+            verify_runtime_ended_gui(text, runtime_id)
+            time.sleep(2)
+            if seed.poll() is not None: raise RuntimeError('GUI exited after runtime-ended settlement')
+            quit_phase(seed, seed_output)
+            (artifacts / 'result.json').write_text(json.dumps(dict(runtime_id=runtime_id,
+                actual_windows=True, actual_terminate=True, observer_rejected=True,
+                canonical_settlement=True, normal_quit=True, partial_frame_cause_verified=False), indent=2) + '\n')
+            return
         if providers:
             (remote / 'provider-start').touch()
             wait_for(lambda: (remote / 'provider-done').exists(), 'real providers did not complete', 140)

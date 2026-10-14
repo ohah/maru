@@ -1,6 +1,8 @@
 // The copied app owns only its own visible window. Quit uses the real AppKit path.
 @_silgen_name("maru_remote_restart_ready")
 private func remoteRestartReady() -> Int32
+@_silgen_name("maru_remote_ended_disconnect")
+private func remoteEndedDisconnect() -> Int32
 @MainActor private enum RemoteRestartRun { static var started = false; static var captured = false }
 extension MaruAppHostController {
     private func maybeRunRemoteRestart() {
@@ -13,6 +15,24 @@ extension MaruAppHostController {
             MainActor.assumeIsolated {
                 guard let surface = self.primary, let window = surface.window, window.isVisible else { return }
                 let ready = remoteRestartReady()
+                if ProcessInfo.processInfo.environment["MARU_REMOTE_ENDED_FAULT"] != nil {
+                    if FileManager.default.fileExists(atPath: root + "/disconnect") {
+                        let result = remoteEndedDisconnect()
+                        if result != 1 { FileHandle.standardError.write(Data("REMOTE_ENDED_FAULT_ERROR result=\(result)\n".utf8)) }
+                    }
+                    if FileManager.default.fileExists(atPath: root + "/verify-after"),
+                       !FileManager.default.fileExists(atPath: root + "/after-ready"),
+                       let renderer = surface.metalRenderer {
+                        let capture = root + "/after.ppm"
+                        if maru_metal_renderer_request_test_capture(renderer, capture) {
+                            self.withSurface(surface) { self.metalNeedsRedraw = true; _ = self.renderTick() }
+                            if FileManager.default.fileExists(atPath: capture) {
+                                FileHandle.standardError.write(Data("REMOTE_ENDED_GUI visible=true\n".utf8))
+                                try? Data("ready\n".utf8).write(to: URL(fileURLWithPath: root + "/after-ready"))
+                            }
+                        }
+                    }
+                }
                 if ready > 0 {
                     if !RemoteRestartRun.captured, let renderer = surface.metalRenderer {
                         let capture = root + "/frame.ppm"

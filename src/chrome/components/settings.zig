@@ -584,11 +584,11 @@ fn paletteHexX(grid: draw.Rect, cw: u32) i32 {
 }
 
 /// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). 입력 박스(전체)·dropdown(좌단 text)과 같은 시작 x라
-/// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유. 폭 `@max(pill, 4*cw)`의
-/// 근거는 옛 tui 룩(2026-08-19 제거)의 셀 트랙 `[  ]`(4*cw)이 pill(width(ch))보다 넓었던 것이다(클릭=보이는 위젯, 리뷰 #823).
-/// 그 갈래는 지웠고, 지금은 늘 pill이 그려지므로 이 식은 클릭 영역(hitTest = rect)을 pill보다 몇 px 넓히는 효과만 남았다.
-fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
-    return .{ .x = ctrl.x, .y = ctrl.y, .w = @max(toggle.width(ch), 4 * cw), .h = ch };
+/// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유 — 폭은 pill
+/// (`toggle.width(ch)`) 그대로라 **클릭 영역 = 보이는 pill** 이다. 옛 tui 룩(2026-08-19 제거)은 셀 트랙 `[  ]`(4*cw)이 pill보다
+/// 넓어 `@max(pill, 4*cw)`였고(리뷰 #823), 그 갈래를 지운 뒤에는 클릭 영역만 pill보다 몇 px 넓히고 있었다.
+fn toggleRectIn(ctrl: draw.Rect, ch: u32) draw.Rect {
+    return .{ .x = ctrl.x, .y = ctrl.y, .w = toggle.width(ch), .h = ch };
 }
 
 const title_text = "Settings";
@@ -735,7 +735,7 @@ pub fn view(
         switch (r.kind) {
             .toggle => |v| {
                 var ts = toggle.State{ .value = v };
-                try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), arena, out);
+                try toggle.view(&ts, toggleRectIn(ctrl, box.ch), arena, out);
             },
             .number => |s| {
                 // 숫자 입력 박스(슬라이더/프로그레스바 대체 — 사용자 요청). 편집 중인 선택 행이면 편집 버퍼 + caret,
@@ -1362,7 +1362,7 @@ pub fn handlePointer(
                 if (ev.x_px >= rx and ev.x_px < rx + @as(f64, @floatFromInt(reset_icon_cols * box.cw))) return .reset_field;
             }
             switch (r.kind) {
-                .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch, box.cw), ev.x_px, ev.y_px)) .toggle else .selection_changed,
+                .toggle => return if (toggle.hitTest(toggleRectIn(ctrl, box.ch), ev.x_px, ev.y_px)) .toggle else .selection_changed,
                 .number => return if (input_box.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 입력 박스 클릭 → 편집 진입(.toggle=활성, platform이 현재값 시드), 라벨은 선택만
                 .dropdown => return if (dropdown.hitTest(ctrl, ev.x_px, ev.y_px)) .toggle else .selection_changed, // 축소 control 클릭 → 팝업 열기(.toggle=활성, platform이 openDropdown)
                 .text => return if (ev.x_px >= @as(f64, @floatFromInt(ctrl.x))) .toggle else .selection_changed, // control 영역 클릭 → 인라인 편집(.toggle=활성), 라벨은 선택만
@@ -1625,7 +1625,7 @@ test "settings handlePointer: 박스 밖=닫기, toggle 클릭=.toggle, number(�
 
     // 행0 toggle 중앙 클릭 → 선택=0 + .toggle.
     s.show();
-    const tgl = toggleRectIn(fieldControlRect(l, 0), test_props.metrics.cell_height_px, test_props.metrics.cell_width_px);
+    const tgl = toggleRectIn(fieldControlRect(l, 0), test_props.metrics.cell_height_px);
     try std.testing.expectEqual(Action.toggle, handlePointer(.{ .phase = .down, .x_px = @floatFromInt(tgl.x + 4), .y_px = @floatFromInt(tgl.y + 4) }, no_sections, &rows, no_items, test_props, &tk, &s));
     try std.testing.expectEqual(@as(usize, 0), s.selected);
 

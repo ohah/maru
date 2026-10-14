@@ -649,8 +649,8 @@ test "도크 뷰 바: 동작 glyph 는 오른쪽 끝 슬롯에 그려지고 좁�
     const muted: terminal.Color = .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } };
     const actions = [_]u21{ maru.icons.codepointFit(.reset, .tight), maru.icons.codepoint(.collapse_all) };
 
-    // 격자는 hit-test 와 같은 자리에서 온다. 여기서는 셀 파생(토큰 없음)이라 옛 4칸 그대로다.
-    const grid = dock_view_bar.Grid.init(8, 0);
+    // 격자는 hit-test 와 같은 자리에서 온다. 여기서는 칸 수를 고정한 격자(`fixedCols` 4칸)다.
+    const grid = dock_view_bar.Grid.fixedCols(8, dock_view_bar.default_slot_cols);
 
     // 뷰 수가 늘어나도 동작까지 들어가는 폭과 한 칸 모자란 폭을 각각 검사한다.
     const full_cols: u16 = @intCast(grid.slot_cols * (dock_view_bar.slot_count + actions.len));
@@ -688,7 +688,7 @@ test "도크 뷰 바: 동작 glyph 는 오른쪽 끝 슬롯에 그려지고 좁�
 }
 
 test "도크 뷰 바: 등록한 뷰 슬롯이 모두 그려진다" {
-    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, &.{}, dock_view_bar.Grid.init(8, 0));
+    var dl = try buildDockViewBarDrawList(std.testing.allocator, 24, 1, 0, .{ .rgb = .{ .r = 1, .g = 2, .b = 3 } }, .{ .rgb = .{ .r = 4, .g = 5, .b = 6 } }, &.{}, dock_view_bar.Grid.fixedCols(8, dock_view_bar.default_slot_cols));
     defer dl.deinit(std.testing.allocator);
     var count: usize = 0;
     for (dl.cells) |c| {

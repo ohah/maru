@@ -50,12 +50,12 @@ fn geom(rect: draw.Rect, value: bool) Geom {
     };
 }
 
-/// (x,y)가 toggle pill 안인가 — 클릭 hit-test. view와 같은 geom을 써 "보이는 pill == 눌리는 pill". 셀 0/비유한 가드.
+/// (x,y)가 toggle control rect 안인가 — 클릭 hit-test. rect 는 셸(`toggleRectIn`)이 pill 과 같은 폭·높이로 주므로
+/// "보이는 pill == 눌리는 자리"다(둥근 양끝 모서리 바깥 몇 px 만 더 눌린다). 셀 0/비유한 가드.
 pub fn hitTest(rect: draw.Rect, x_px: f64, y_px: f64) bool {
     if (rect.w == 0 or rect.h == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-    // 클릭 영역 = 주어진 control rect 전체(pill 기준이 아니다). 옛 tui 룩(2026-08-19 제거)의 셀 갈래는 4칸 트랙 `[  ]`이
-    // pill보다 넓어 pill 기준이면 닫는 `]` 우측이 안 눌렸다(리뷰 #823) — 그 갈래는 지웠고, 지금 rect는 셸의
-    // `toggleRectIn`이 준 폭(pill보다 몇 px 넓을 수 있다)이라 클릭 영역이 pill보다 살짝 넓다.
+    // 클릭 영역 = 주어진 control rect 전체. `geom` 의 pill 은 rect 를 꽉 채우므로(높이 = rect.h) 사각 판정이 pill 과 같다.
+    // 옛 tui 룩(2026-08-19 제거)의 셀 트랙 `[  ]`이 pill보다 넓던 시절의 `@max` 폭(리뷰 #823)은 그 갈래와 함께 지웠다.
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);
     return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(rect.w)) and

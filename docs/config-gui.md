@@ -120,7 +120,7 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 
 위젯은 GPU `ChromeDraw.quad`(SDF)로 그린다 — 둥근 pill·원형 knob·테두리 박스·그림자 등 sub-pixel(테마는 위젯 불변, [chrome-strategy.md] §5.4). 토글=pill quad + knob quad, **숫자 입력 박스=테두리 quad + 값 text**(호출자가 넘긴 `corner_radius_px`·`border_width_px`를 그대로 싣는다), dropdown 축소=`값 ▾` text. control 열 좌단 정렬.
 
-옛 tui 룩(2026-08-19 제거) 때는 `tokens.space.corner_radius_px`가 0인 토큰에서 **셀 정렬 text** 갈래(`Op.text`)를 썼다 — 토글 `[█ ]`/`[ █]`(knob=`█`), 숫자 입력 박스=값 text만(border 0이라 테두리 quad 생략). 제품 토큰은 `Tokens.rich` 하나라 그 갈래(토글의 text 스위치, 입력 박스의 `border_width_px > 0` 가드)와 `toggle.view`의 `cw`·`tk` 인자를 지웠다. 토글 rect 폭 `@max(pill, 4*cw)`(`toggleRectIn`)는 그 셀 트랙의 흔적으로 남아, 지금은 클릭 영역을 pill보다 몇 px 넓히는 효과만 낸다.
+옛 tui 룩(2026-08-19 제거) 때는 `tokens.space.corner_radius_px`가 0인 토큰에서 **셀 정렬 text** 갈래(`Op.text`)를 썼다 — 토글 `[█ ]`/`[ █]`(knob=`█`), 숫자 입력 박스=값 text만(border 0이라 테두리 quad 생략). 제품 토큰은 `Tokens.rich` 하나라 그 갈래(토글의 text 스위치, 입력 박스의 `border_width_px > 0` 가드)와 `toggle.view`의 `cw`·`tk` 인자를 지웠다. 토글 rect 폭(`toggleRectIn`)은 pill 폭(`toggle.width(ch)`) 그대로라 **클릭 영역 = 보이는 pill** 이다(셀 트랙 시절의 `@max(pill, 4*cw)`도 지웠다).
 
   **드롭다운 팝업의 불투명 렌더(중요)**: 팝업은 설정 폼과 **같은 modal 레이어**의 셀 그리드라, `context_menu`(다른 레이어=터미널 위)처럼 그냥 quad로 덮으면 안 된다 — 모달 셀 lowering은 `.fill`이 셀 **배경만** 칠하고 **글리프는 안 지우며**, rich는 배경이 `surface_bg`인 셀을 투명화한다. 그래서 뒤 폼 텍스트가 팝업 뒤로 비친다. 해결: 팝업 각 행을 (1) `surface_bg`가 **아닌** 배경(`tab_hover_bg`/선택=`tab_active_bg`)으로 칠해 투명화 pass를 피하고, (2) 항목 텍스트를 **박스 폭까지 공백 패딩**해 그 행 모든 셀에 글리프를 놓아 뒤 폼 글리프를 덮는다(`dropdown.viewPopup`).
 

@@ -18,7 +18,7 @@ pub const Rect = struct { x: u32, y: u32, w: u32, h: u32 };
 /// 누를 수 없는 아이콘을 띄우지 않는다(§3.5).
 pub const slot_count: usize = 6;
 
-/// 슬롯 하나의 **기본** 셀 수(테마가 pt 토큰을 안 줄 때 = 기반 토큰 `base` — 제품은 늘 rich라 pt를 준다). **아이콘이 2셀**(사이드바 에이전트 아이콘과
+/// 슬롯 하나의 **기준** 셀 수 — 칸 수를 고정하는 픽스처·테스트(`Grid.fixedCols`)가 쓴다(제품은 pt 토큰에서 환산한다). **아이콘이 2셀**(사이드바 에이전트 아이콘과
 /// 같은 `width=2` — 합성 아이콘은 슬롯 크기에 맞춰 스케일되므로 2칸이면 또렷하고 크다)이고 좌우 여백 1셀씩이라
 /// 4셀이다.
 ///
@@ -43,16 +43,24 @@ pub const Grid = struct {
     /// 슬롯 하나의 셀 수. `init`이 pt 목표폭에서 환산한다.
     slot_cols: u32,
 
-    /// `slot_width_px`는 테마 pt 토큰을 backing px로 환산한 값이다(0이면 셀 파생 = `default_slot_cols`).
+    /// `slot_width_px`는 테마 pt 토큰(`space.dock_view_slot_width_pt`, rich 32pt)을 backing px로 환산한 값이다. 옛 tui
+    /// 룩(2026-08-19 제거)의 토큰 0 → `default_slot_cols` 칸 센티널은 지웠다 — 칸 수를 고정하고 싶은 자리(픽스처·
+    /// 테스트)는 `fixedCols`를 쓴다.
     ///
     /// 반올림으로 환산한다 — 내림이면 목표폭 바로 아래에서 한 칸이 통째로 빠져 아이콘 여백이 갑자기
     /// 사라진다. 그리고 **`icon_cols` 아래로는 안 내려간다**: 슬롯이 아이콘보다 좁으면 아이콘이 이웃 슬롯을
     /// 침범해 "보이는 자리 = 눌리는 자리"가 깨진다.
     pub fn init(cell_width_px: u32, slot_width_px: u32) Grid {
         if (cell_width_px == 0) return .{ .cell_width_px = 0, .slot_cols = 0 };
-        const target = if (slot_width_px == 0) default_slot_cols * cell_width_px else slot_width_px;
-        const rounded = (target + cell_width_px / 2) / cell_width_px;
+        const rounded = (slot_width_px + cell_width_px / 2) / cell_width_px;
         return .{ .cell_width_px = cell_width_px, .slot_cols = @max(icon_cols, rounded) };
+    }
+
+    /// 슬롯 칸 수를 직접 정한 격자 — pt 토큰과 무관하게 열 수를 고정해야 하는 자리(격자 덤프 픽스처·슬롯 계약 테스트)용.
+    /// `icon_cols` 아래로는 안 내려간다(`init`과 같은 하한).
+    pub fn fixedCols(cell_width_px: u32, slot_cols: u32) Grid {
+        if (cell_width_px == 0) return .{ .cell_width_px = 0, .slot_cols = 0 };
+        return .{ .cell_width_px = cell_width_px, .slot_cols = @max(icon_cols, slot_cols) };
     }
 
     /// 슬롯 안에서 아이콘이 시작하는 셀 오프셋. **슬롯 폭에서 파생해 가운데에 놓는다** — 상수로 두면
@@ -140,9 +148,9 @@ pub fn actionAtPoint(bar: Rect, grid: Grid, count: usize, x: u32, y: u32) ?usize
 
 const testing = std.testing;
 
-/// 테스트가 쓰는 셀 파생 격자(테마 토큰 없음 = 기반 토큰 `base` 경로). 옛 `slot_cols` 상수와 같은 4칸이다.
+/// 테스트가 쓰는 고정 4칸 격자(`default_slot_cols`). 옛 `slot_cols` 상수와 같은 칸 수다.
 fn cellGrid(cell_width_px: u32) Grid {
-    return Grid.init(cell_width_px, 0);
+    return Grid.fixedCols(cell_width_px, default_slot_cols);
 }
 
 test "슬롯은 셀 정렬 폭으로 좌측부터 이어 붙는다" {
@@ -246,11 +254,13 @@ test "동작 슬롯은 **셀 격자**의 오른쪽 끝에 붙는다 — 바 픽�
 
 // --- 슬롯 폭을 터미널 폰트에서 떼어낸 계약(`tokens.Space.dock_view_slot_width_pt`) ---
 
-test "Grid: 토큰이 없으면 셀 파생 4칸 — base 토큰 경로는 이 커밋 전과 같다" {
+test "Grid.fixedCols: 칸 수를 그대로 쓰고 icon_cols 아래로는 안 내려간다" {
     try testing.expectEqual(default_slot_cols, cellGrid(8).slot_cols);
     try testing.expectEqual(default_slot_cols, cellGrid(29).slot_cols);
-    // 셀이 0이면 아무것도 못 그린다(호출자가 null로 받는다).
+    try testing.expectEqual(icon_cols, Grid.fixedCols(8, 1).slot_cols);
+    // 셀이 0이면 아무것도 못 그린다(호출자가 null로 받는다) — `init`과 같다.
     try testing.expectEqual(@as(u32, 0), cellGrid(0).slot_cols);
+    try testing.expectEqual(@as(u32, 0), Grid.init(0, 32).slot_cols);
 }
 
 test "Grid: 기본 폰트의 칸 수는 «안 바뀐다» — 골든이 지키는 외형" {

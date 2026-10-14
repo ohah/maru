@@ -7916,9 +7916,8 @@ fn uncommittedReply(run: *CdpRun, method: []const u8) ?web_cdp_ops.Reply {
         };
     }
     if (run.op.page) |*p| if (p.kind == .screenshot) return .{ .not_sent = cdp_loading_reason };
-    // W9a③: localStorage 의 페이지 호출(프레임 트리·격리 world·평가)도 붙잡힌다 — 확정 뒤 다시 하라고. 쿠키(Network·Storage)는 브라우저
-    // 쪽이라 붙잡히지 않는다(확인한 주소로 한다).
-    // localStorage 의 호출(주소 읽기·world·평가) — 확정 전엔 하나도 보내지 않는다(W9a③ 6 회차: 첫 호출이 `Target.getTargetInfo` 가 됐다).
+    // W9a③: localStorage 의 호출(주소 읽기 `Target.getTargetInfo`·격리 world·평가)은 확정 전엔 하나도 보내지 않는다 — 확정 뒤 다시 하라고(페이지
+    // 호출은 붙잡힌다). 쿠키(Network·Storage)는 브라우저 쪽이라 붙잡히지 않는다(확인한 주소로 한다).
     if (run.op.storage != null and (std.mem.startsWith(u8, method, "Page.") or std.mem.startsWith(u8, method, "Runtime.") or std.mem.startsWith(u8, method, "Target."))) return .{ .not_sent = cdp_loading_reason };
     return null;
 }
@@ -12918,4 +12917,57 @@ test "W9a③: 쿠키 저장소 op 은 시작에 grant 호스트가 지금 문서
     defer allocator.free(response);
     p3.response = null;
     try std.testing.expect(std.mem.indexOf(u8, response, "loading a new page") != null);
+}
+
+test "W9a③ 적대 리뷰 7 회차 재현 F1: deleteCookie 가 쿠키를 읽는 동안 grant 가 철회되면 지우기를 보내지 않아야 한다 — 첫 지우기는 보내기 전에 committed" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 92, .scope = .browser_storage, .host = host });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.deleteCookie\",\"params\":{\"id\":92,\"name\":\"s\"}}";
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    defer if (p.response) |r| allocator.free(r);
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 92, .method = .delete_cookie, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 92, .scope = .browser_storage, .host = host } } });
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = 92, .op = try web_cdp_ops.Op.init(allocator, .delete_cookie, "{\"name\":\"s\"}", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    run.op.storage.?.doc_url = "https://a.test/";
+    allocator.free((try run.op.start(allocator)).call.params); // Network.getCookies 를 보냈다(아직 아무것도 지우지 않았다)
+    control_pane_grant_store.clearAll(); // 답을 기다리는 동안 사용자가 철회했다
+    const before = cdp_calls_attempted;
+    const del = try run.op.feed(allocator, .{ .ok = "{\"cookies\":[{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/\"}]}" });
+    cdpAdvance(run, del);
+    try std.testing.expectEqual(before, cdp_calls_attempted); // 철회 뒤 첫 지우기를 보내지 않는다
+}
+
+test "W9a③ 적대 리뷰 7 회차 재현 F1b: clearStorage 의 첫 호출이 자리 없음(busy)으로 잠든 사이 철회되면 깨어나 보내지 않아야 한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 93, .scope = .browser_storage, .host = host });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.clearStorage\",\"params\":{\"id\":93}}";
+    var p: control_server_mod.PendingRequest = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(&p, std.math.maxInt(i128));
+    defer if (p.response) |r| allocator.free(r);
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = 93, .method = .clear_storage, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = 93, .scope = .browser_storage, .host = host } } });
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = 93, .op = try web_cdp_ops.Op.init(allocator, .clear_storage, "", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    run.op.storage.?.doc_url = "https://a.test/";
+    allocator.free((try run.op.start(allocator)).call.params); // Storage.clearDataForOrigin — 보내려 했는데
+    const slept = try run.op.feed(allocator, .{ .not_sent = web_cdp_ops.busy_reason }); // 자리가 없었다(보내지 않았다)
+    try std.testing.expect(slept == .sleep);
+    control_pane_grant_store.clearAll(); // 잠든 사이 철회
+    const before = cdp_calls_attempted;
+    cdpAdvance(run, try run.op.wake(allocator));
+    try std.testing.expectEqual(before, cdp_calls_attempted); // 아직 아무것도 지우지 않았다 — 보내지 않아야 한다
 }

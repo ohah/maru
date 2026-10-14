@@ -34,7 +34,7 @@ pub const browser_help =
     \\  get-local-storage    --surface <id> --key k             print a localStorage value
     \\  set-local-storage    --surface <id> --key k --value v   set a localStorage value
     \\  remove-local-storage --surface <id> --key k             remove a localStorage entry
-    \\  clear-storage        --surface <id>                     clear all cookies and storage for the target origin
+    \\  clear-storage        --surface <id>                     clear the target origin's storage and its host's cookies
     \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
     \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
     \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
@@ -284,6 +284,33 @@ fn writeDisplaySafeJson(w: *std.Io.Writer, value: std.json.Value) std.Io.Writer.
             var s: std.json.Stringify = .{ .writer = w, .options = .{} };
             s.write(value) catch return error.WriteFailed;
         },
+    }
+}
+
+/// 이미 유효한 JSON 글(exec 결과)의 `displayUnsafe` 글자(U+007F 이상 — 그 아래 제어 글자는 JSON 문자열 안에 그대로 올 수 없다)를 `\uXXXX` 로 —
+/// 값은 그대로, 터미널엔 보이지 않는 글자가 가지 않는다(W9a③ 적대 리뷰 9 회차: exec 가 페이지가 정한 C1 CSI·RLO 를 그대로 냈다). 그런 글자는
+/// 유효한 JSON 에서 문자열 안에만 올 수 있어 바꿔도 JSON 이다.
+pub fn writeDisplaySafeJsonText(w: *std.Io.Writer, text: []const u8) std.Io.Writer.Error!void {
+    var i: usize = 0;
+    while (i < text.len) {
+        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
+        if (len == 1 or i + len > text.len) {
+            try w.writeByte(text[i]);
+            i += 1;
+            continue;
+        }
+        const code = std.unicode.utf8Decode(text[i .. i + len]) catch {
+            try w.writeAll(text[i .. i + len]);
+            i += len;
+            continue;
+        };
+        if (code >= 0x7f and displayUnsafe(code)) {
+            if (code > 0xFFFF) {
+                const v = code - 0x10000;
+                try w.print("\\u{x:0>4}\\u{x:0>4}", .{ 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF) });
+            } else try w.print("\\u{x:0>4}", .{code});
+        } else try w.writeAll(text[i .. i + len]);
+        i += len;
     }
 }
 
@@ -1383,7 +1410,10 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             try writePageText(gpa, w, strField(result.get("url")), false);
             try w.writeAll("\n");
         },
-        .exec => try w.print("{s}\n", .{strField(result.get("result"))}),
+        .exec => {
+            try writeDisplaySafeJsonText(w, strField(result.get("result")));
+            try w.writeAll("\n");
+        },
         .get_cookies => {
             // cookies 배열을 JSON 한 줄로 재직렬화(에이전트가 파싱). 배열 아니면 에러.
             const cookies = switch (result.get("cookies") orelse std.json.Value{ .null = {} }) {
@@ -2619,7 +2649,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  get-local-storage    --surface <id> --key k             print a localStorage value
         \\  set-local-storage    --surface <id> --key k --value v   set a localStorage value
         \\  remove-local-storage --surface <id> --key k             remove a localStorage entry
-        \\  clear-storage        --surface <id>                     clear all cookies and storage for the target origin
+        \\  clear-storage        --surface <id>                     clear the target origin's storage and its host's cookies
         \\  click   --surface <id> (--selector <css> | --ref <ref>)         click an element (by selector or snapshot ref; real mouse input on Chromium tabs)
         \\  type    --surface <id> (--selector <css> | --ref <ref>) --text <t>  type text into an element (replaces its text; real input on Chromium tabs)
         \\  scroll  --surface <id> (--selector <css> | --ref <ref>)         scroll an element into view
@@ -3322,4 +3352,12 @@ test "W9a③ 적대 리뷰 8 회차 재현: get-cookies 는 페이지가 정한 
     w = .fixed(&buf);
     _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"cookies\":[{\"name\":\"한\",\"value\":\"\\\"q\"}]}}", .get_cookies, &w);
     try testing.expectEqualStrings("[{\"name\":\"한\",\"value\":\"\\\"q\"}]\n", w.buffered());
+}
+
+test "W9a③ 적대 리뷰 9 회차 재현: exec 결과(페이지가 정한 글)의 C1 CSI·RLO·U+2028 은 터미널로 내지 않고 \\u 로 — JSON 은 그대로 유효" {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"result\":\"\\\"t\\u009b2J\\u202ex\\u2028y\\\"\"}}", .exec, &w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "\xe2\x80\xae") == null);
 }

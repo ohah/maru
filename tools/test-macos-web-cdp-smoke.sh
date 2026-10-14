@@ -188,6 +188,8 @@ cat > "$root/www/con.html" <<'HTML'
 <button id=ue style="position:absolute;left:30px;top:180px;width:120px;height:40px" onclick="setTimeout(function(){throw new Error('con-uncaught')},0)">Throw</button>
 HTML
 printf '<!doctype html><title>secret</title><script>console.log("con-secret-token");addEventListener("pagehide",function(){console.log("con-secret-unload")});addEventListener("unload",function(){console.log("con-secret-unload2")})</script>secret' > "$root/www/secret.html"
+# W9c① 적대 리뷰 1 회차: 떠날 때 400 ms 동안 100 ms 마다 줄을 남기는 다른 사이트의 문서(늦은 unload 줄 — 이동 직후 처음 읽은 뒤의 다음 읽기에 보였다).
+printf '<!doctype html><title>slow</title><script>console.log("con-slow-token");addEventListener("pagehide",function(){var t=Date.now(),n=0;while(Date.now()-t<400){if(Date.now()-t>=n*100){console.log("con-slow-"+n);n++}}})</script>slow' > "$root/www/slow.html"
 # W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
 printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
 # W9f: 에이전트가 MCP 서버를 띄우는 모양 — 새 세션(제어 터미널 없음)·파이프 입출력. 표준 출력의 줄은 모두 JSON-RPC 여야 한다.
@@ -821,6 +823,15 @@ sleep 1
 "\$cli" browser navigate --surface "\$cn" "http://127.0.0.1:$port/con.html?a" > "\$out/cn-nav" 2>&1
 sleep 1
 "\$cli" browser console --surface "\$cn" > "\$out/cn-first" 2>&1; echo "rc=\$?" >> "\$out/cn-first"
+# 이동 직후 곧바로 처음 읽고, 앞 사이트의 늦은 unload 줄이 다 온 뒤 다시 읽어도 그 줄은 보이지 않는다(적대 리뷰 1 회차).
+"\$cli" browser open --url "http://localhost:$port/slow.html" > "\$out/cn-slow-open" 2>&1
+slow=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-slow-open")
+sleep 1
+"\$cli" browser navigate --surface "\$slow" "http://127.0.0.1:$port/con.html?slow" > "\$out/cn-slow-nav" 2>&1
+"\$cli" browser console --surface "\$slow" > "\$out/cn-slow-first" 2>&1; echo "rc=\$?" >> "\$out/cn-slow-first"
+sleep 1.5
+"\$cli" browser console --surface "\$slow" > "\$out/cn-slow-second" 2>&1; echo "rc=\$?" >> "\$out/cn-slow-second"
+"\$cli" browser close --surface "\$slow" > /dev/null 2>&1 || true
 # 누름의 동기 줄 — 곧 이은 console 에 있다.
 "\$cli" browser click --surface "\$cn" --selector '#cl' > "\$out/cn-click" 2>&1
 "\$cli" browser console --surface "\$cn" > "\$out/cn-sync" 2>&1; echo "rc=\$?" >> "\$out/cn-sync"
@@ -1063,6 +1074,7 @@ grep -q '^answered before_unload$' "$out/dg-nv" && grep -q '/a.html?bu$' "$out/d
 grep -q '^alert tab=[0-9]* token=[0-9]* cause=unknown may_answer=no' "$out/dg-user-list" && grep -q '^rc=1$' "$out/dg-user" && grep -q 'the user is answering this dialog' "$out/dg-user" || fail "an alert nobody just caused on a user's tab was answerable ($(tr '\n' ' ' < "$out/dg-user-list") · $(tr '\n' ' ' < "$out/dg-user") · nav $(tr '\n' ' ' < "$out/dg-user-nav") · exec $(tr '\n' ' ' < "$out/dg-user-exec"))"
 # W9c①
 grep -q '^rc=0$' "$out/cn-ctl-first" && grep -q '^\[log\] con-secret-token$' "$out/cn-ctl-first" && grep -q 'con-secret-unload' "$out/cn-ctl-after" || fail "control: a tab read on the first site did not show its line, or after moving to another site did not show the old page's unload line — the leak check below would prove nothing ($(tr '\n' ' ' < "$out/cn-ctl-first") · $(tr '\n' ' ' < "$out/cn-ctl-after"))"
+grep -q '^rc=0$' "$out/cn-slow-first" && grep -q '^rc=0$' "$out/cn-slow-second" && ! grep -q 'con-slow' "$out/cn-slow-first" "$out/cn-slow-second" || fail "after moving from another site, a later console read showed that site's late unload lines ($(tr '\n' ' ' < "$out/cn-slow-first") / $(tr '\n' ' ' < "$out/cn-slow-second"))"
 grep -q '^rc=0$' "$out/cn-first" && ! grep -q 'con-secret' "$out/cn-first" || fail "the first console read after moving from another site showed that site's lines ($(tr '\n' ' ' < "$out/cn-first"))"
 for want in '[log] con-log-a' '[log] con-info' '[warn] con-warn' '[error] con-error' '[debug] con-debug'; do
     grep -qxF "$want" "$out/cn-first" || fail "console did not list \"$want\" ($(tr '\n' ' ' < "$out/cn-first"))"

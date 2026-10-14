@@ -27,6 +27,9 @@ fn nowMs() u64 {
     return @import("client.zig").nowMs();
 }
 
+/// `onConsoleMessage` 의 `source` 버퍼(UI 스레드 전용).
+var static_src_buf: [gate.max_source_units * 3]u8 = undefined;
+
 pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t, severity: c.cef_log_severity_t, message: [*c]const c.cef_string_t, source: [*c]const c.cef_string_t, line: c_int) callconv(.c) c_int {
     defer object.releaseArg(browser);
     if (browser == null) return 0;
@@ -36,12 +39,13 @@ pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_brows
     const now = nowMs();
     const level = gate.levelOf(@intCast(severity));
     const class = gate.classOf(level);
-    // 앞 문서의 줄인가 — 방금 떠난 출처가 창 안에 있을 때만 `source` 를 바꾼다(대부분의 줄은 바꾸지 않는다).
-    var src_buf: [gate.max_source_units * 3]u8 = undefined;
+    // 앞 문서의 줄인가 — 방금 떠난 출처가 창 안에 있을 때만 `source` 를 바꾼다(대부분의 줄은 바꾸지 않는다). 버퍼는 정적(UI
+    // 스레드에서만 부른다) — 스택이면 Debug 빌드가 메시지마다 6 KiB 를 채워(1.7 µs) 쏟아질 때 UI 스레드가 3 초 넘게 멈췄다(적대 리뷰 1 회차).
+    const src_buf = &static_src_buf;
     var src: ?[]u8 = null;
     var old_document = false;
     if (entry.console.recent.active(now)) {
-        src = library.readPrefix(api, source, gate.max_source_units, &src_buf).text;
+        src = library.readPrefix(api, source, gate.max_source_units, src_buf).text;
         var origin: gate.Origin = .{};
         old_document = gate.originOf(src.?, &origin) and entry.console.recent.isOld(origin.slice(), now);
     }
@@ -51,10 +55,11 @@ pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_brows
     }
     var raw: [gate.max_message_units * 3]u8 = undefined;
     const msg = library.readPrefix(api, message, gate.max_message_units, &raw);
-    // 「Uncaught」 꼬리에만 부른 곳을 싣는다.
-    if (src == null and std.mem.startsWith(u8, msg.text, "Uncaught")) src = library.readPrefix(api, source, gate.max_source_units, &src_buf).text;
+    // 「Uncaught」 꼬리에만 부른 곳을 싣는다 — 오류 수준일 때만(1 회차: `console.log('Uncaught x')` 에도 붙었다).
+    const uncaught = level == .@"error" and std.mem.startsWith(u8, msg.text, "Uncaught");
+    if (uncaught and src == null) src = library.readPrefix(api, source, gate.max_source_units, src_buf).text;
     var out: [protocol.wire.max_console_text_bytes]u8 = undefined;
-    const text = gate.finishText(msg.text, msg.truncated, src orelse "", line, &out);
+    const text = gate.finishText(msg.text, msg.truncated, if (uncaught) src orelse "" else "", line, &out);
     entry.console.charge(&global, class, old_document, text.len);
     send(entry, .{ .browser = entry.id, .level = level, .old_document = old_document, .text = text });
     return 0;

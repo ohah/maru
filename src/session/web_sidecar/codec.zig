@@ -2029,3 +2029,41 @@ test "W9c①: a drop-only console_message carries counts only — closed fields 
     std.mem.writeInt(u64, buf[body..][0..8], 0, .big);
     try std.testing.expectError(error.InvalidBrowserId, decodeExact(buf[0..len]));
 }
+
+test "W9c① 적대 리뷰 1 회차: 콘솔 프레임을 무작위로 망가뜨려도 풀기는 무너지지 않고 풀린 값은 닫힌 칸 규칙을 지킨다" {
+    var prng = std.Random.DefaultPrng.init(0x9c1);
+    const r = prng.random();
+    const seeds = [_]Message{
+        .{ .console_message = .{ .browser = 3, .level = .warn, .old_document = true, .dropped_errors = 2, .dropped_other = 1, .text = "a\tb\n한 \xe2\x80\xae" } },
+        .{ .console_message = .{ .browser = 3, .dropped_other = 4, .has_entry = false } },
+        .{ .error_page = 3 },
+    };
+    var buf: [max_frame_bytes]u8 = undefined;
+    var ok: usize = 0;
+    for (0..300_000) |i| {
+        const seed = seeds[i % seeds.len];
+        const len = try encode(seed, &buf);
+        var frame = buf;
+        var n = len;
+        const muts = r.intRangeAtMost(usize, 1, 6);
+        for (0..muts) |_| {
+            switch (r.intRangeLessThan(u8, 0, 3)) {
+                0 => frame[r.intRangeLessThan(usize, 0, n)] = r.int(u8),
+                1 => n = r.intRangeAtMost(usize, 1, n),
+                else => if (n < 64) {
+                    frame[n] = r.int(u8);
+                    n += 1;
+                },
+            }
+        }
+        // 절반은 머리의 길이를 맞춰 둔다 — 몸통 풀기까지 닿게
+        if (r.boolean() and n >= 4) std.mem.writeInt(u32, frame[0..4], @intCast(n - 4), .big);
+        const m = decodeExact(frame[0..n]) catch continue;
+        ok += 1;
+        switch (m) {
+            .console_message => |v| try fields.checkConsoleMessage(v),
+            else => {},
+        }
+    }
+    try std.testing.expect(ok > 0); // 몸통 풀기까지 닿았다
+}

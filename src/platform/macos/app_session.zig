@@ -100450,6 +100450,52 @@ test "W9c② 적대 리뷰 5 회차 대조 B: 닫기가 없어도 사용자의 �
     try std.testing.expectError(error.NotYours, web_osr.agentReplyDialog(allocator, y, null, true, "", W9c2R5Access.access));
 }
 
+test "W9c② 변이 생존 재현(F4): 사용자가 다른 탭으로 옮기면 떠나는 탭도 사용자 시각 — 그 탭의 blur confirm 은 에이전트가 답하지 못한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const y = try w9c2R5Web(session, allocator);
+    const v = try w9c2R5Web(session, allocator);
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(v, session.osr_key_target);
+    web_osr.testAgeStamps(y, 60_000);
+    web_osr.testAgeStamps(v, 60_000);
+    web_osr.noteAgentInput(v); // 에이전트가 1 초 전 V 에서 움직였다
+    try std.testing.expect(session.runAction("previous_term")); // 사용자가 Y 로 옮긴다
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(y, session.osr_key_target);
+    // V 의 blur 처리기: confirm("저장하지 않은 글을 버릴까?")
+    web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = v, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "Discard?" } });
+    try std.testing.expectError(error.NotYours, web_osr.agentReplyDialog(allocator, v, null, true, "", W9c2R5Access.access));
+}
+
+test "W9c② 변이 생존 재현(F6): 창이 대화상자 sheet 를 띄워 키를 잃는 바뀜은 maru 것 — 그 탭의 사용자 시각을 찍지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try w6jSession(allocator);
+    defer allocator.destroy(session);
+    defer web_osr.testForget(allocator);
+    defer session.deinit();
+    const v = try w9c2R5Web(session, allocator);
+    web_ops.syncOsrKeyTarget(session);
+    try std.testing.expectEqual(v, session.osr_key_target);
+    web_osr.testAgeStamps(v, 60_000);
+    const before = web_osr.testUserActionMs(v);
+    web_osr.noteAgentInput(v); // 에이전트가 「지우기」 를 눌렀다
+    web_osr.testApplyNow(allocator, .{ .js_dialog = .{ .browser = v, .request = 1, .kind = .confirm, .origin = "https://app.test", .message = "Delete?" } });
+    try session.osr_layouts.append(allocator, .{ .surface_id = v, .rect = .{ .x = 0, .y = 0, .w = 100, .h = 100 } });
+    web_ops.tickWebOsr(session); // sheet 를 띄운다(표시)
+    try std.testing.expect(session.osr_dialog != null);
+    _ = web_ops.takeOsrDialog(session);
+    session.focusChanged(false); // sheet 가 키를 가져갔다
+    web_ops.tickWebOsr(session); // V → 0
+    try std.testing.expectEqual(@as(u64, 0), session.osr_key_target);
+    try std.testing.expectEqual(before, web_osr.testUserActionMs(v)); // maru 가 옮긴 것 — 찍지 않았다
+}
+
 test "W9c② 적대 리뷰 5 회차 재현 C: 뒤 탭이 스스로 닫힌 표시가 남아 사용자의 탭 전환을 maru 것으로 보지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = std.testing.allocator;

@@ -3220,4 +3220,5 @@ test "W9c② 적대 리뷰 4·5 회차: 키 대상의 바뀜은 사용자 것이
     const any: AppFocusMark = .{ .from = 7, .to = null, .ms = 10_000 };
     try std.testing.expect(appMadeFocusChange(any, 7, 9, 10_016)); // 닫힌 탭의 이웃 — 어디로든
     try std.testing.expect(!appMadeFocusChange(any, 9, 7, 10_016));
+    try std.testing.expect(!appMadeFocusChange(m, 7, 9, 10_016)); // 출발은 맞지만 도착이 다르다(sheet 대신 사용자가 다른 탭으로) — 사용자 것
 }

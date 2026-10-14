@@ -1579,6 +1579,12 @@ pub fn testAgeStamps(surface_id: u64, ago_ms: i64) void {
     s.agent_input_ms = t;
 }
 
+/// 시험 전용(W9c②): 그 탭의 사용자 시각.
+pub fn testUserActionMs(surface_id: u64) i64 {
+    if (!builtin.is_test) @compileError("test only");
+    return (surfaces.getPtr(surface_id) orelse return 0).user_action_ms;
+}
+
 /// 시험 전용(W9b③): 그 탭의 첫 대화상자 번호.
 pub fn testDialogToken(surface_id: u64) ?u64 {
     if (!builtin.is_test) @compileError("test only");
@@ -7073,4 +7079,22 @@ test "W9c② 적대 리뷰 4 회차 재현 B: ⌘Tab 으로 다른 앱에 가며
     w9c2MoveKeyTarget(gpa, 7, 0, true); // 창이 키를 잃었다 — maru 표시 없음
     apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://cms.test", .message = "Discard your edits?" } }, monotonicNow());
     try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+}
+
+test "W9c② 변이 생존 재현(W4): sheet 가 아직 없어도 키 포커스를 쥔 탭의 「모호」 대화상자는 보이는 중으로 거절 — 포커스가 없으면 답한다" {
+    const gpa = std.testing.allocator;
+    defer testTeardown(gpa);
+    const s7 = try w9c2R3Setup(gpa);
+    var acc: TestAccess = .{ .granted = 1 << 7, .agent = 0 };
+    // 사용자가 누른 직후 에이전트가 눌렀다 — 둘 다 창 안, 에이전트가 늦다(모호).
+    s7.user_action_ms = monotonicNow() - 200;
+    s7.agent_input_ms = monotonicNow() - 100;
+    w9c2MoveKeyTarget(gpa, 0, 7, false); // 그 탭이 키를 쥐었다(창의 다음 tick 에 sheet 가 뜬다)
+    s7.user_action_ms = monotonicNow() - 200;
+    apply(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .confirm, .origin = "https://a.test", .message = "" } }, monotonicNow());
+    try std.testing.expectEqual(dialog_cause.Cause.ambiguous, testLastDialog(7).cause);
+    try std.testing.expectError(error.NotYours, agentReplyDialog(gpa, 7, null, true, "", acc.access()));
+    // 포커스를 잃었다(다른 pane) — 보이지 않는다, 도착 뒤 사용자 입력도 없다.
+    w9c2MoveKeyTarget(gpa, 7, 0, false);
+    _ = try agentReplyDialog(gpa, 7, null, true, "", acc.access());
 }

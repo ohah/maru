@@ -3477,6 +3477,51 @@ test "PRD4 `not-` 접두는 결과를 뒤집는다 — 번들 쿼리엔 아직 �
     try std.testing.expectEqual(@as(usize, 4), n);
 }
 
+test "PRD5 번들 쿼리의 정규식은 전부 `PRD2` 표에 있고, 표의 정규식은 전부 번들 쿼리가 쓴다 — grammar 를 더하면 표를 다시 뽑게 한다" {
+    // 표를 다시 뽑는 일이 사람의 기억에만 있어 BL2(Swift)에서 빠질 뻔했다. 정규식은 tree-sitter 가 해석한 **뒤** 값으로 잰다
+    // (`ts_query_string_value_for_id` — 평가 자리 `predicatePasses` 와 같은 값). 다시 뽑기: `tools/editor/predicate_oracle.py`.
+    var used = [_]bool{false} ** predicate.oracle.len;
+    var missing: usize = 0;
+    inline for (grammar_table) |g| {
+        const query = queryFor(slotFor(g.lang).?).?;
+        var pattern: u32 = 0;
+        while (pattern < c.ts_query_pattern_count(query)) : (pattern += 1) {
+            var count: u32 = 0;
+            const steps_ptr = c.ts_query_predicates_for_pattern(query, pattern, &count);
+            if (count == 0) continue; // 술어 없는 패턴은 NULL 이 온다(`matchPasses` 와 같다)
+            const steps = steps_ptr[0..count];
+            var i: usize = 0;
+            while (i < steps.len) {
+                var j = i;
+                while (j < steps.len and steps[j].type != c.TSQueryPredicateStepTypeDone) j += 1;
+                const one = steps[i..j];
+                i = j + 1;
+                if (one.len != 3 or one[0].type != c.TSQueryPredicateStepTypeString or one[2].type != c.TSQueryPredicateStepTypeString) continue;
+                var name = queryString(query, one[0].value_id);
+                if (std.mem.startsWith(u8, name, "not-")) name = name["not-".len..];
+                if (std.mem.startsWith(u8, name, "any-")) name = name["any-".len..];
+                const lua = std.mem.eql(u8, name, "lua-match?");
+                if (!lua and !std.mem.eql(u8, name, "match?")) continue;
+                const re = queryString(query, one[2].value_id);
+                var found = false;
+                for (predicate.oracle, 0..) |o, k| if (o.lua == lua and std.mem.eql(u8, o.p, re)) {
+                    used[k] = true;
+                    found = true;
+                };
+                if (!found) {
+                    std.debug.print("PRD5 표에 없는 정규식({s}): {s}\n", .{ @tagName(g.lang), re });
+                    missing += 1;
+                }
+            }
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), missing);
+    for (predicate.oracle, used) |o, u| if (!u) {
+        std.debug.print("PRD5 번들 쿼리가 안 쓰는 표의 정규식: {s}\n", .{o.p});
+        return error.StaleOracleRow;
+    };
+}
+
 test {
     _ = predicate; // 술어 판정자(`PRD*`)도 이 모듈의 판정자 바이너리에서 돈다
 }

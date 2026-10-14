@@ -48,9 +48,13 @@ def main():
     agent.write_text(replace_once(agent.read_text(), '                if (e.replay) slot.notice.clear();\n',
         '                if (e.replay) slot.notice.clear();\n' +
         (repo / 'tools/remote-restart-app/match.zig.inc').read_text()))
+    agent.write_text(replace_once(agent.read_text(),
+        'pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts, capture_id: turn_capture.Id) void {\n',
+        'pub fn captureTurnSnapshot(self: *AppSession, surface_id: u64, facts: TurnFacts, capture_id: turn_capture.Id) void {\n' +
+        (repo / 'tools/remote-restart-app/capture.zig.inc').read_text()))
     subprocess.run(['mise', 'exec', '--', 'zig', 'build', 'macos-app-bundle'], cwd=snapshot, check=True)
     # Bind the result to the injected sources and the exact signed binaries, not just git HEAD.
-    names = ['observe.zig.inc', 'driver.swift.inc', 'notice.zig.inc', 'match.zig.inc']
+    names = ['observe.zig.inc', 'driver.swift.inc', 'notice.zig.inc', 'match.zig.inc', 'capture.zig.inc']
     binaries = ['maru', 'maru-macos-app']
     manifest = {
         'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),

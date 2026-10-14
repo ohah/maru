@@ -350,3 +350,35 @@ host만 정리한다. 재사용 artifact 디렉터리는 거부한다. Metal fra
 Notification Center 권한 조회와 전달 기록은 화면에 보이는 OS 배너의 증거가 아니다.
 현재 gate는 `os_banner_verified=false`로 그 경계를 명시한다. 실제 배너의 양성 대조군과 표시
 검증은 별도 후속 작업이며 이 gate의 통과나 UN authorization으로 완료 처리하지 않는다.
+
+## 실제 provider → GUI 검증 계획
+
+GUI reader 준비 후 설치된 Claude/Codex의 읽기 전용 `pwd` 턴을 시작한다. provider 설정은
+private HOME에서 생성하며 사용자 설정이나 인증 원문은 변경·출력·커밋하지 않는다.
+provider 버전과 실제 session ID를 GUI의 live 훅 적용, running/idle 배지, 원격 봉인 capture의
+session·shell 호출 증거에 대조한다. 합성 startup/offline 이벤트를 실제 provider 증거로 세지 않는다.
+실제 provider 종료 코드만으로 완료 처리하지 않고 두 provider 각각의 GUI 관측을 요구한다.
+기존 v1/v2 동시 기록과 정상 종료·재부착 gate도 유지한다. 원본 훅 누락, reader 시작 이전 실행,
+provider별 신원 오귀속, capture 없음, 인증 실패 및 cleanup 실패를 음성 경계로 검토한다.
+OS 배너의 실제 표시는 이번 provider GUI gate에서도 별도다.
+
+실행은 기존 앱 준비 도구로 만든 bundle을 `--providers --gui-providers --gui-app <앱 실행 파일>
+--gui-output <새 디렉터리>`에 전달한다. 각 provider를 GUI 준비 이후 같은 foreground SSH에서
+실행하며, 두 provider의 native v2 훅과 기존 합성 v1/v2 호환·종료/복원 검증을 구분해 기록한다.
+원본 훅 oracle은 별도 CLI reader로 provider 파일을 읽어 GUI에서 확인한 실제 session ID와
+`UserPromptSubmit/PreToolUse/PostToolUse/Stop`을 대조한다. 변경 파일이 없는 읽기 전용 턴이므로
+파일 편집 결과나 OS 배너 표시를 검증했다고 주장하지 않는다.
+
+### 실제 실행에서 확인한 실패
+
+Codex exec는 argv prompt가 있어도 pipe stdin을 추가 입력으로 읽는다. SSH `-T`의 열린
+stdin을 물려준 검증은 GUI 준비 뒤 EOF를 기다리다 timeout됐다. 비대화형 provider 실행은
+명시적 DEVNULL을 사용한다. provider 실행이 길어 preflight ControlMaster의 idle TTL이 끝난
+경우도 확인했으므로, 뒤따르는 transport 단절 검증은 정확한 소유 master를 먼저 확보한다.
+
+stdin timeout으로 foreground runtime이 끝난 실패에서는 host의 `removeEndedTracker`에서
+연결이 닫히고 GUI 재접속이 `ObserverAttachRejected` → incident_authority exit 86으로 이어졌다.
+이 실패의 host/app 로그를 보존했다. 정상 provider GUI 경로와 별개인 runtime-end 정리/재접속
+실패로 남긴다. 부분 전송 보호와 stream 계수·신원 불일치를 축소 재현에서 구분한다.
+기존 frame/incident 권한 계약을 대조하기 전에는
+integrity 보호를 끄거나 임의의 재접속 성공으로 처리하지 않는다.

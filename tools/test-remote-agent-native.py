@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Owned loopback SSH: old/new process formats, real installed hooks and mixed wire.
-No user SSH/provider settings or credentials are modified. Provider payloads are synthetic.
+No user SSH/provider settings or credentials are modified. Payloads are synthetic by default;
+--providers runs installed CLIs with private provider configuration.
 """
 import argparse,json,os,queue,re,shlex,shutil,socket,subprocess,sys,tempfile,threading,time
 from pathlib import Path
@@ -276,8 +277,9 @@ def replay_boundary_probe(peer, remote, sshconfig, alias):
         proc.stdout.close(); proc.stderr.close(); reader.join(timeout=1)
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--gui-app');ap.add_argument('--gui-output');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--gui-providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--gui-app');ap.add_argument('--gui-output');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
     if bool(args.gui_app) != bool(args.gui_output): ap.error('--gui-app and --gui-output must be supplied together')
+    if args.gui_providers and not (args.gui_app and args.providers): ap.error('--gui-providers requires --gui-app, --gui-output and --providers')
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
     provider_paths=[shutil.which(name) or '' for name in ['claude','codex']] if args.providers else ['', '']
     if args.providers:assert all(provider_paths),'installed Claude/Codex required'
@@ -290,6 +292,7 @@ def main():
             remote=root/'remote';local=root/'local';bindir=root/'bin'
             for path in [remote,local,bindir]:path.mkdir(mode=0o700)
             (remote/'.local/bin').mkdir(parents=True,mode=0o700);(remote/'.local/bin/maru').symlink_to(peer)
+            if args.gui_providers: (remote/'provider-gui-mode').touch()
             worker=root/'worker.py'
             worker.write_text(r'''import json,os,subprocess,sys
 from pathlib import Path
@@ -303,7 +306,7 @@ for event in ["UserPromptSubmit","Stop"]:
  payload={"hook_event_name":event,"session_id":"native-case" if env.get("LC_MARU_LOG_FORMAT")=="2" else "legacy-case","cwd":str(root),"prompt":"synthetic migration fixture","transcript_path":None}
  result=subprocess.run(["/bin/sh","-c",command],input=json.dumps(payload).encode(),env=env,timeout=3)
  assert result.returncode==0
-if len(sys.argv)>4 and sys.argv[3] and env.get("LC_MARU_LOG_FORMAT")=="2":
+def run_providers():
  import shutil
  source=Path(sys.argv[2]);project=root/"project";project.mkdir(exist_ok=True)
  prompt="Execute exactly pwd once, do not read or modify files, then answer OK."
@@ -313,12 +316,21 @@ if len(sys.argv)>4 and sys.argv[3] and env.get("LC_MARU_LOG_FORMAT")=="2":
  for provider,argv in commands:
   penv=dict(env,HOME=str(source)) if provider=="claude" else dict(env,CODEX_HOME=str(root/".codex"))
   penv["PATH"]=sys.argv[5]
-  result=subprocess.run(argv,cwd=project,env=penv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
+  # SSH -T leaves a pipe open. Codex appends piped stdin even with an argv prompt;
+  # this non-interactive fixture supplies its entire prompt in argv, so explicitly close stdin.
+  result=subprocess.run(argv,cwd=project,env=penv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
   if result.returncode:
    Path("/tmp/remote-native-provider-failure.log").write_bytes(result.stderr);Path("/tmp/remote-native-provider-failure.log").chmod(0o600)
    raise RuntimeError("installed provider failed: "+provider)
   version=subprocess.run([argv[0],"--version"],env=penv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5).stdout.decode().strip()
-  print("provider:"+json.dumps({"name":provider,"version":version,"completed":True}),flush=True)
+  record={"name":provider,"version":version,"completed":True}
+  (root/("provider-"+provider+".json")).write_text(json.dumps(record))
+  print("provider:"+json.dumps(record),flush=True)
+  if (root/"provider-gui-mode").exists():
+   import time
+   time.sleep(.7) # Allow the real idle badge to render before the next provider starts.
+if len(sys.argv)>4 and sys.argv[3] and env.get("LC_MARU_LOG_FORMAT")=="2" and not (root/"provider-gui-mode").exists():
+ run_providers()
 if (root/"gui-hold").exists():
  import time
  owner=root/"gui-owner.json"
@@ -327,6 +339,9 @@ if (root/"gui-hold").exists():
  deadline=time.monotonic()+180
  while not (root/"gui-release").exists():
   assert time.monotonic()<deadline,"GUI hold timed out"
+  if (root/"provider-start").exists() and not (root/"provider-done").exists():
+   run_providers()
+   (root/"provider-done").touch()
   time.sleep(.05)
 print("fixture:"+json.dumps({"received":env.get("LC_MARU_LOG_FORMAT"),"hooks":2}),flush=True)
 if (root/"automatic-hold").exists():
@@ -390,7 +405,7 @@ if (root/"automatic-hold").exists():
                     spec = importlib.util.spec_from_file_location('remote_restart_gui', module_path)
                     gui = importlib.util.module_from_spec(spec); spec.loader.exec_module(gui)
                     assert args.gui_output, '--gui-output required for GUI evidence'
-                    gui.probe(args.gui_app, cli, root, remote, sshconfig, alias, env, emit_offline_hooks, args.gui_output)
+                    gui.probe(args.gui_app, cli, root, remote, sshconfig, alias, env, emit_offline_hooks, args.gui_output, providers=args.gui_providers)
                 if args.automatic and tag == 'allowed':
                     automatic_wrapper_probe(cli, root, remote, sshconfig, alias, env, trace)
                 if args.terminal_cancel and tag == 'allowed':
@@ -398,6 +413,15 @@ if (root/"automatic-hold").exists():
                     run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', next(iter(controls)),
                          '-M', '-N', '-f', '-o', 'ControlPersist=no', alias])
                 if peer==cli:
+                    # Real provider turns may outlive the preflight master's idle TTL. Ensure
+                    # the exact owned transport exists before testing its forced disconnect.
+                    control = sorted(controls)[0]
+                    status = subprocess.run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-O', 'check', alias],
+                                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=3)
+                    if status.returncode:
+                        run(['/usr/bin/ssh', '-F', str(sshconfig), '-S', control, '-M', '-N', '-f',
+                             '-o', 'ControlPersist=no', alias])
+                    controls = {control}
                     command=f'"{peer}" agent-events --stdio --dir="{remote}/.cache/maru" --log-format=mixed --heartbeat-ms=200' + (' --replay-boundary' if args.restart_test and tag == 'allowed' else '')
                     proc=subprocess.Popen(['/usr/bin/ssh','-F',str(sshconfig),'-S',next(iter(controls)),alias,command],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
                     q=queue.Queue();reader=threading.Thread(target=lambda:[q.put(l) for l in iter(proc.stdout.readline,b'')],daemon=True);reader.start();frames=[];raw_frames=[];deadline=time.monotonic()+1

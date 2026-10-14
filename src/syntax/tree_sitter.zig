@@ -3369,12 +3369,48 @@ test "PRD3 술어를 평가한다 — Python·Ruby·Lua 의 소문자 식별자�
         .{ .lang = .make, .src = "%.o: %.c main.c\n\techo\n", .text = "main.c", .cap = "string.regex", .want = false },
         .{ .lang = .zig, .src = "const x = 1;\n", .text = "x", .cap = "constant", .want = false },
         .{ .lang = .zig, .src = "const X_Y = 1;\n", .text = "X_Y", .cap = "constant", .want = true },
+        // `#any-of?` — 목록 안 글자만 붙는다(목록 밖까지 붙으면 `@This` 가 import 색).
+        .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@import", .cap = "keyword.import", .want = true },
+        .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@This", .cap = "keyword.import", .want = false },
+        .{ .lang = .xml, .src = "<a>&amp;&foo;</a>\n", .text = "&amp;", .cap = "constant.builtin", .want = true },
+        .{ .lang = .xml, .src = "<a>&amp;&foo;</a>\n", .text = "&foo;", .cap = "constant.builtin", .want = false },
     };
     for (cases) |k| {
         errdefer std.debug.print("PRD3 {s} '{s}' @{s} want={}\n", .{ @tagName(k.lang), k.text, k.cap, k.want });
         highlights(allocator, k.lang, k.src, &spans);
         try std.testing.expectEqual(k.want, has(spans.items, k.src, k.text, k.cap));
     }
+}
+
+test "PRD4 `not-` 접두는 결과를 뒤집는다 — 번들 쿼리엔 아직 없어 손으로 만든 쿼리로 잰다 (계획 editor-bundled-languages BLP)" {
+    const allocator = std.testing.allocator;
+    const slot = slotFor(.zig).?;
+    const scm =
+        \\((identifier) @eq (#not-eq? @eq "x"))
+        \\((identifier) @any (#not-any-of? @any "x" "y"))
+        \\((identifier) @re (#not-match? @re "^[xy]$"))
+    ;
+    var err_offset: u32 = 0;
+    var err_type: c.TSQueryError = 0;
+    const query = c.ts_query_new(slot.language, scm.ptr, scm.len, &err_offset, &err_type).?;
+    defer c.ts_query_delete(query);
+    const parser = c.ts_parser_new().?;
+    defer c.ts_parser_delete(parser);
+    try std.testing.expect(c.ts_parser_set_language(parser, slot.language));
+    const src = "const x = y + z;\n";
+    const tree = c.ts_parser_parse_string(parser, null, src.ptr, src.len).?;
+    defer c.ts_tree_delete(tree);
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+    collect(allocator, tree, query, src, .{ .start = 0, .end = src.len }, &spans);
+    // 남는 것은 `z` 의 셋뿐이다 — `x` 는 셋 다, `y` 는 뒤 둘에서 떨어지고 `eq` 만 남는다.
+    var n: usize = 0;
+    for (spans.items) |sp| {
+        n += 1;
+        try std.testing.expect(!std.mem.eql(u8, src[sp.start..sp.end], "x"));
+        if (std.mem.eql(u8, src[sp.start..sp.end], "y")) try std.testing.expectEqualStrings("eq", sp.capture);
+    }
+    try std.testing.expectEqual(@as(usize, 4), n);
 }
 
 test {

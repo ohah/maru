@@ -342,6 +342,11 @@ test "PRD1 정규식 부분집합 — 번들 쿼리가 쓰는 꼴의 기본 동�
     try testing.expectEqual(@as(?bool, true), search("^_?[A-Z][A-Z\\d_]+$", false, "_AB"));
     try testing.expectEqual(@as(?bool, true), search("^_*[A-Z][A-Z\\d_]+$", false, "__AB"));
     try testing.expectEqual(@as(?bool, true), search("a.c", false, "xabcx"));
+    // `^` 가 맨 앞이 아닌 자리(갈래 안)에서도 0 에서만 맞는다 — 맨 앞 `^` 는 시작 위치 루프가 먼저 끊어 가린다.
+    try testing.expectEqual(@as(?bool, false), search("x|^b", false, "ab"));
+    try testing.expectEqual(@as(?bool, true), search("x|^b", false, "ba"));
+    try testing.expectEqual(@as(?bool, false), search("(^a|b)c", false, "xac"));
+    try testing.expectEqual(@as(?bool, true), search("(^a|b)c", false, "xbc"));
     try testing.expectEqual(@as(?bool, true), search("^[^a-z]+$", false, "ABC_1"));
     // Lua 패턴 — `%` 가 이스케이프.
     try testing.expectEqual(@as(?bool, true), search("^//!", true, "//! doc"));

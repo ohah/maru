@@ -59,7 +59,8 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
     // plus terminal-row shrink reuse this ledger owner.
     // 36 번째는 terminal summary 진단이 쓰는 타입 참조 하나다 — 원장을 **소유하지 않고** 이미 만들어진
     // 요약을 읽어 로그로 흘릴 뿐이라 이 경계가 지키려는 owner 집합은 그대로다.
-    try std.testing.expectEqual(@as(usize, 36), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    // The runtime-ended frame regression checks the canonical closed mutation state.
+    try std.testing.expectEqual(@as(usize, 37), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     inline for (.{ "validateCanonicalRows", "host_reconnect_runtime_ledger.zig" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),

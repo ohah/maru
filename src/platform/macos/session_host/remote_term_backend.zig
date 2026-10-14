@@ -1996,7 +1996,15 @@ pub const RemoteTermBackend = struct {
                     _ = try self.completeHostReconnectRuntimeTransactions();
                 }
             },
-            .replacement_published => _ = try self.prepareHostReconnectObserverStage(job.runtime_handle),
+            .replacement_published => _ = self.prepareHostReconnectObserverStage(job.runtime_handle) catch |err| {
+                // A sealed rejection/failure is progress: the next frame owns canonical settlement.
+                // Unsealed errors still reach the coordinator's integrity boundary.
+                if (job.valid(self) and
+                    (job.state_raw == @intFromEnum(HostReconnectJobState.candidate_rejected) or
+                        job.state_raw == @intFromEnum(HostReconnectJobState.candidate_failed)))
+                    return .advanced;
+                return err;
+            },
             .candidate_staged => _ = try self.sealHostReconnectMutations(job.runtime_handle),
             .mutation_sealed => _ = self.executeHostReconnectTakeover(job.runtime_handle) catch |err| {
                 if (job.valid(self) and job.state_raw != @intFromEnum(HostReconnectJobState.mutation_sealed))
@@ -7298,6 +7306,8 @@ const Cr4aActualIssuerCandidateCase = enum {
     controller_pre_failed_ledger,
     multi_runtime_success,
     driver_multi_runtime_success,
+    driver_runtime_ended,
+    driver_expired,
     coordinator_success,
     multi_runtime_conflict_1,
     multi_runtime_conflict_2,
@@ -7464,6 +7474,12 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     try testing.expect(job.valid(&backend_value));
     try testing.expectEqual(connected_seal, job.seal);
     try testing.expectEqual(initial_connection_generation, pool.get(host_id).?.connectionGeneration());
+    if (selected == .driver_runtime_ended or selected == .driver_expired) {
+        try backend_value.prepareHostReconnectRuntimeRetirements();
+        try backend_value.prepareHostReconnectSharedReplacement();
+        try backend_value.commitHostReconnectSharedReplacement();
+        try testing.expectEqual(@as(RuntimeHandle, 1), try backend_value.beginNextHostReconnectRuntimeTransaction());
+    }
     if (selected == .driver_multi_runtime_success) {
         var advanced: usize = 0;
         while (advanced < 64) : (advanced += 1) {
@@ -7714,6 +7730,44 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
             error.InvalidHostReconnectJob,
             backend_value.completeHostReconnectRuntimeTransactions(),
         );
+        return;
+    }
+    if (selected == .driver_runtime_ended or selected == .driver_expired) {
+        if (selected == .driver_runtime_ended) {
+            // End the actual daemon runtime without rewriting the backend's frozen identity.
+            const runtime = backend_value.runtimes.get(1).?.runtime;
+            var params_buf: [96]u8 = undefined;
+            const params = try std.fmt.bufPrint(&params_buf, "{{\"runtime_id\":\"{s}\"}}", .{runtime.runtime_id_hex});
+            const response = try host_adapter_mod.HostAdapter.testing.rawClient(
+                pool.get(host_id).?,
+            ).call("runtime.terminate", params);
+            defer allocator.free(response);
+            try testing.expect(std.mem.indexOf(u8, response, "terminated") != null);
+        } else {
+            deadline_clock.now_ns = deadline_expires_at_ns;
+        }
+        try testing.expectEqual(HostReconnectFrameProgress.advanced, try backend_value.progressHostReconnectOne());
+        const expected: HostReconnectJobState = if (selected == .driver_runtime_ended)
+            .candidate_rejected
+        else
+            .candidate_failed;
+        try testing.expectEqual(@intFromEnum(expected), job.state_raw);
+        try testing.expect(job.valid(&backend_value));
+        // A damaged receipt must not be mistaken for a recoverable sealed failure.
+        const sealed = job.seal;
+        job.seal[0] ^= 1;
+        try testing.expectError(error.InvalidHostReconnectJob, backend_value.progressHostReconnectOne());
+        job.seal = sealed;
+        try testing.expect(job.valid(&backend_value));
+        try testing.expectEqual(HostReconnectFrameProgress.advanced, try backend_value.progressHostReconnectOne());
+        try testing.expectEqual(HostReconnectFrameProgress.completed_ready, try backend_value.progressHostReconnectOne());
+        try testing.expectEqual(HostReconnectTerminalKind.completed, try backend_value.preflightHostReconnectTerminal());
+        const summary = job.terminal_summary.?;
+        try testing.expectEqual(@as(u32, 1), summary.frozen_unavailable);
+        try testing.expectEqual(@as(u32, 1), summary.retry_reserved);
+        try testing.expectEqual(@as(u32, 0), summary.published_new);
+        try testing.expectEqual(@as(u32, 0), summary.published_old);
+        try testing.expectEqual(@intFromEnum(host_reconnect_runtime_ledger.MutationState.closed), job.runtime_rows[0].mutation_raw);
         return;
     }
     try backend_value.publishHostReconnectReplacement(1);
@@ -9661,4 +9715,11 @@ test "image channel notice: 「이미지 채널 없음」은 없다가 생길 �
     const note_at = std.mem.indexOf(u8, body, "self." ++ "noteImageChannelAvailability(if (image_channel_unavailable) true else if (image_channel_unknown) null else false);") orelse return error.TestUnexpectedResult;
     try std.testing.expect(pump_at < seen_at and seen_at < note_at);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "self." ++ "noteImageChannelAvailability("));
+}
+
+test "CR4a actual issuer job은 종료된 runtime observer 거부를 frame driver에서 정산한다" {
+    try runCr4aActualIssuerReplacementStage(.driver_runtime_ended);
+}
+test "CR4a actual issuer job은 deadline 실패를 frame driver에서 정산한다" {
+    try runCr4aActualIssuerReplacementStage(.driver_expired);
 }

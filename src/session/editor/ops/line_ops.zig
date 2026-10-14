@@ -426,7 +426,7 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
             tree = .{
                 .caret = if (sp) |x| (if (x.kind == .string) .string else .comment) else .code,
                 .code = literals.blank(ls, line.start, head, scratch.items),
-                .comment_at = if (sp) |x| (if (x.kind == .comment and x.start >= line.start) x.start - line.start else null) else null,
+                .comment_at = if (sp) |x| commentMarker(content, line.start, head, x, c.line_comment) else null,
             };
         };
         const act: enter_rules.Action = if (ctx) |c| enter_rules.decideWith(c, head, rest, prev, tree) else .{};
@@ -462,6 +462,17 @@ pub fn planNewline(allocator: std.mem.Allocator, content: []const u8, lines: Lin
         return null;
     }
     return plan;
+}
+
+/// caret 을 품은 조각이 주석이면 그 줄의 표식 자리(`head` 안 byte — `enter_rules.Tree.comment_at`). 주석이 그 줄에서 시작했으면 그 머리,
+/// 위 줄부터 이어진 **줄 주석**이면 그 줄의 첫 글자 — 맞닿은 같은 종류 조각은 하나로 합쳐지고(`literals.flatten`) Rust `///` 는 개행까지 품어
+/// 이어진 문서 주석 줄들이 한 조각이다(2회차: 둘째 줄부터 잇지 않았다). 위에서 이어진 블록 주석·문자열이면 `null`.
+fn commentMarker(content: []const u8, line_start: usize, head: []const u8, sp: literals.Span, line_comment: ?[]const u8) ?usize {
+    if (sp.kind != .comment) return null;
+    if (sp.start >= line_start) return sp.start - line_start;
+    const lc = line_comment orelse return null;
+    if (!std.mem.startsWith(u8, content[sp.start..], lc)) return null;
+    return head.len - std.mem.trimStart(u8, head, " \t").len;
 }
 
 /// 한 줄 안의 `Tab`(§3.9a — 계획 editor-typing-rules TR1) — 커서마다 **그 열에서** 단위만큼: 탭 파일이면 탭 하나, 공백 파일이면 다음 탭
@@ -874,12 +885,15 @@ test "INDF4 planNewline — 한 단계는 다음 탭 스톱까지(정렬된 14 �
         }
     };
     const four: EnterContext = enter_rules.contextFor(.typescript, "()[]{}", .{ .tabs = false, .width = 4 }, 4);
+    const four_tw2: EnterContext = enter_rules.contextFor(.typescript, "()[]{}", .{ .tabs = false, .width = 4 }, 2);
     const tabs: EnterContext = enter_rules.contextFor(.typescript, "()[]{}", .{ .tabs = true, .width = 4 }, 4);
     const Case = struct { src: []const u8, sel: Selection, ctx: EnterContext, want: ?[]const u8 };
     const pad = "              "; // 14 칸 — 정렬
     const cases = [_]Case{
         .{ .src = pad ++ "b => {})\n", .sel = Selection.at(pad.len + 6), .ctx = four, .want = pad ++ "b => {\n" ++ pad ++ "  \n" ++ pad ++ "})\n" },
         .{ .src = "    if (x) {}\n", .sel = Selection.at(12), .ctx = tabs, .want = "    if (x) {\n    \t\n    }\n" },
+        // 공백 파일의 탭 들여쓴 줄 — 열은 설정의 탭 폭으로 센다(폭 2 면 열 2 → 공백 2).
+        .{ .src = "\tf() {}\n", .sel = Selection.at(6), .ctx = four_tw2, .want = "\tf() {\n\t  \n\t}\n" },
         // 선택이 둘째 줄의 `)` 앞까지 — caret 뒤는 그 `)` 다(가운데 줄).
         .{ .src = "foo(a,\nb)\n", .sel = Selection.fromPoints(4, 8), .ctx = four, .want = "foo(\n    \n)\n" },
     };
@@ -899,6 +913,21 @@ test "INDF4 planNewline — 한 단계는 다음 탭 스톱까지(정렬된 14 �
         const old = (try Run.f(src, Selection.at(std.mem.indexOf(u8, src, "y */").?), four)).?;
         defer allocator.free(old);
         try testing.expectEqualStrings("x(); /* see http://x \n// y */\n", old);
+    }
+    // 위 줄부터 이어진 블록 주석 안의 `//` 줄은 줄 주석이 아니고, 맞닿아 한 조각이 된 줄 주석(Rust `///` 는 개행까지 품는다)의 둘째 줄은 잇는다.
+    {
+        const src = "/*\n// x y\n*/\n";
+        var c = four;
+        c.literal_spans = &.{.{ .start = 0, .end = src.len - 1, .kind = .comment }};
+        try testing.expect((try Run.f(src, Selection.at(std.mem.indexOf(u8, src, " y").?), c)) == null);
+    }
+    {
+        const src = "/// a\n  /// b c\n";
+        var c = enter_rules.contextFor(.rust, "()[]{}", .{ .tabs = false, .width = 4 }, 4);
+        c.literal_spans = &.{.{ .start = 0, .end = src.len, .kind = .comment }};
+        const got = (try Run.f(src, Selection.at(std.mem.indexOf(u8, src, " c").?), c)).?;
+        defer allocator.free(got);
+        try testing.expectEqualStrings("/// a\n  /// b\n  //  c\n", got);
     }
     {
         const src = "a(); // note more\n";

@@ -41652,6 +41652,25 @@ test "INDF2 호스트가 넘기는 문맥 — 실제 키로: 단위 폭(중첩 `
     tw.rt.editor_selection = editor_selection.Selection.fromPoints(at(tw, ";"), at(tw, ";") + 1);
     try pressKey(&fx, .tab, .{});
     try testing.expectEqualStrings("x\n    a   \n    c;\n\t  b\n", content(tw));
+    // ⑻′ 탭 폭은 Enter 의 한 단계와 낱말 내어쓰기의 열 비교에도 닿는다 — 공백 4 파일의 탭 줄(탭 폭 2 면 열 2): `{|}` 의 가운데 줄은 공백 2 를
+    // 더하고, Python 의 탭 `else` 는 위 줄(공백 4)보다 얕아 내어쓰지 않는다.
+    const tb = try open(&fx, allocator, "indf2u.ts", "x\n    a;\n    c;\n\tf() {}\n", false);
+    tb.rt.editor_tab_width = 2;
+    guides_client.onTabWidthSettingChanged(tb);
+    tb.rt.editor_selection = editor_selection.Selection.at(at(tb, "}"));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("x\n    a;\n    c;\n\tf() {\n\t  \n\t}\n", content(tb));
+    const pt = try open(&fx, allocator, "indf2u.py", "if a:\n    x\n\telse\n", false);
+    pt.rt.editor_tab_width = 2;
+    guides_client.onTabWidthSettingChanged(pt);
+    pt.rt.editor_selection = editor_selection.Selection.at(content(pt).len - 1);
+    try testing.expect(insertText(fx.session, pt, ":"));
+    try testing.expectEqualStrings("if a:\n    x\n\telse:\n", content(pt));
+    // ⑻″ Rust 문서 주석 — 이어진 `///` 줄(트리에서 한 조각)의 둘째 줄 가운데 Enter 도 잇는다.
+    const rd = try open(&fx, allocator, "indf2d.rs", "/// a\n/// b c\nfn f() {}\n", true);
+    rd.rt.editor_selection = editor_selection.Selection.at(at(rd, " c"));
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/// a\n/// b\n//  c\nfn f() {}\n", content(rd));
     // ⑼ CRLF 줄의 줄바꿈 안(`\r`·`\n` 사이 — → 로 줄 끝을 넘으면 닿는다)에서 친 글자 — 죽지 않고 그 자리에 들어간다(낱말 내어쓰기를 안 탄다).
     const cr = try open(&fx, allocator, "indf2r.py", "if a:\r\n    x\r\n", false);
     cr.rt.editor_selection = editor_selection.Selection.at(content(cr).len - 1);

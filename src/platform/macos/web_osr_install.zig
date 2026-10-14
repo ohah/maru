@@ -735,13 +735,19 @@ test "a codesign exit status maps to intact, broken, or could not tell — never
     try std.testing.expectEqual(Signature.unknown, signatureFromStatus(11)); // SIGSEGV
     try std.testing.expectEqual(Signature.unknown, signatureFromStatus(9)); // SIGKILL
     try std.testing.expectEqual(Signature.unknown, signatureFromStatus(11 | 0x80)); // 코어 덤프
-    // 신호로 죽은 실제 종료 상태 — `sleep` 을 SIGTERM 으로 죽여 거둔 값(SEGV 면 코어 파일이 생길 수 있다).
-    const argv = [_:null]?[*:0]const u8{ "/bin/sleep", "5" };
+    // 신호로 죽은 실제 종료 상태 — 자식이 **스스로** SIGTERM 으로 죽은 값(SEGV 면 코어 파일이 생길 수 있다).
+    //
+    // 예전에는 `sleep 5` 를 띄우고 부모가 곧바로 TERM 을 보낸 뒤 2 초를 기다렸다. 무거운 부하(8 중 병렬 + 바쁜 루프 16)에서
+    // 120 번 중 2~5 번은 TERM 이 먹지 않고 5.8 초 뒤에야 끝나 `TimedOut` 이었다(CI #4449 도 같은 실패) — 자식이 아직 exec 중일
+    // 때 도착한 신호가 늦게 처리된 것으로 본다. 자식이 exec 를 마친 뒤 자기에게 보내면 그 경쟁이 없다. 예산도 실제 자식을
+    // 띄우는 판정자의 실측(부하에서 ~3 초)에 맞춰 넉넉히 둔다 — 이 테스트의 주제는 시간이 아니라 종료 상태 분류다.
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "kill -TERM $$" };
     const envp = [_:null]?[*:0]const u8{};
     var pid: std.c.pid_t = 0;
-    pid = try maru.pty.macos_spawn.spawn("/bin/sleep", &argv, &envp, .dev_null);
-    _ = std.c.kill(pid, .TERM);
-    const status = waitWithin(pid, 2_000) orelse return error.TimedOut;
+    pid = try maru.pty.macos_spawn.spawn("/bin/sh", &argv, &envp, .dev_null);
+    const status = waitWithin(pid, 10_000) orelse return error.TimedOut;
+    try std.testing.expect(std.c.W.IFSIGNALED(@bitCast(status))); // 판별력: 정말 신호로 죽은 상태다
+    try std.testing.expectEqual(std.c.SIG.TERM, std.c.W.TERMSIG(@bitCast(status)));
     try std.testing.expectEqual(Signature.unknown, signatureFromStatus(status));
 }
 

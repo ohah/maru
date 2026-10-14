@@ -3768,6 +3768,56 @@ test "DCOL10: 열 클릭은 검색 포커스를 분리하고 조합을 원래 �
     try testing.expectEqualStrings("오른쪽 한", fx.session.chrome_host.find.input.query.items);
 }
 
+test "DCOL10b: 검색 막대의 패딩 띠도 막대다 — 누르면 소비하고 그 열의 검색에 포커스, 뒤 본문으로 안 내려간다" {
+    // 2026-10-15(#4471 적대적 검증): `diffFindPointer` 는 입력 줄(`find.contains`)만 막대로 봐서, 보이는 막대의 패딩 띠를 누르면 `.body` 가
+    // 되어 포커스가 풀리고 클릭이 막대 뒤 본문으로 내려갔다. 보이는 막대(`find.visibleContains`)로 잰다.
+    if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
+    const find_ui = @import("maru").chrome.components.find;
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    var entry = testEntry("왼쪽\n", "오른쪽\n");
+    try findPairFixture(&fx, &entry);
+    // 두 막대를 연다 — 다른 열 본문을 누르고(DCOL10 과 같은 길) 그 열에서 찾기를 연다.
+    const g = fx.term.rt.editor_diff_hit_geom;
+    const bx: f64 = @floatFromInt(g.left_x + @as(i32, @intCast(g.content_left_px)) + 1);
+    const by: f64 = @floatFromInt(g.body_y + 1);
+    try testing.expectEqual(find_ops.DiffPointer.body, find_ops.diffFindPointer(fx.session, 1, 0, bx, by));
+    try testing.expect(editor_ops.beginDiffBodySelection(fx.session, pane_ops.activePane(fx.session), bx, by));
+    fx.session.clearPointerGesture();
+    find_ops.toggleFind(fx.session);
+    find_ops.syncDiffFind(fx.session);
+    const p = fx.session.buildChromeProps();
+    const h = &fx.session.chrome_host;
+    try testing.expect(h.find.open and h.find_secondary.open);
+    // 띠 점은 **컴포넌트에게 물어** 찾는다 — 보이는 막대 안이면서 입력 줄은 아닌 점(배치 규칙을 베끼지 않는다).
+    const Band = struct {
+        fn find(st: *const find_ui.State, props: anytype) ?[2]f64 {
+            const sc = st.scope orelse return null;
+            var y: f64 = @floatFromInt(sc.y);
+            while (y < @as(f64, @floatFromInt(sc.y + sc.h))) : (y += 1) {
+                var x: f64 = @floatFromInt(sc.x);
+                while (x < @as(f64, @floatFromInt(sc.x + sc.w))) : (x += 1) {
+                    if (find_ui.visibleContains(st, props, x, y) and !find_ui.contains(st, props, x, y)) return .{ x, y };
+                }
+            }
+            return null;
+        }
+    };
+    // ① 보조 막대(다른 열)의 띠 — 그 열로 바꾸고 포커스.
+    const other = h.find_secondary.diff_side.?;
+    try testing.expect(other != h.find.diff_side.?);
+    const sb = Band.find(&h.find_secondary, p) orelse return error.NoSecondaryBand;
+    try testing.expectEqual(find_ops.DiffPointer.consumed, find_ops.diffFindPointer(fx.session, 1, 0, sb[0], sb[1]));
+    try testing.expectEqual(other, h.find.diff_side.?);
+    try testing.expect(h.find.input_focused);
+    // ② 주 막대의 띠 — 포커스가 풀린 뒤 누르면 다시 받는다.
+    h.find.input_focused = false;
+    find_ops.syncDiffFind(fx.session);
+    const pb = Band.find(&h.find, p) orelse return error.NoPrimaryBand;
+    try testing.expectEqual(find_ops.DiffPointer.consumed, find_ops.diffFindPointer(fx.session, 1, 0, pb[0], pb[1]));
+    try testing.expect(h.find.input_focused);
+}
+
 test "DCOL11: 비교 재계산·빈 열·Term 전환에서도 검색 출처와 결과를 정산한다" {
     if (@import("builtin").os.tag != .macos) return error.SkipZigTest;
     var fx = try Fixture.init(testing.allocator);

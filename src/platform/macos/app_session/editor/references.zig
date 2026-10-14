@@ -16,6 +16,7 @@ const editor_lsp = @import("lsp.zig");
 const pane_ops = @import("../pane.zig");
 const reference_picker = @import("../../reference_picker.zig");
 const lsp = maru.session.editor.lsp;
+const chrome = maru.chrome;
 
 /// 「지금은 못 답한다」(content modified·server cancelled) 뒤 되묻기 — 간격과 횟수 상한(§8.2l). rust-analyzer 는 작업 공간을 읽는 동안
 /// `-32801` 을 낸다(캡처 실측 — 첫 답이 늘 그것이었다).
@@ -245,6 +246,29 @@ pub fn accept(self: *AppSession) void {
     }
     rows.clear(self.allocator);
     self.metal_dirty = true;
+}
+
+/// 피커 위 클릭(§8.2l) — 신뢰·복구 피커와 같은 규율이다. 결과 행이면 그 행을 골라 이동하고(Enter 와 같은 `accept`), 패딩 띠·프롬프트 줄은
+/// 소비만 하고, **보이는** 패널 밖이면 닫는다(`palette.panelHit` — 그리는 상자와 같은 출처). 예전에는 `mouse()` 에 이 피커의 분기가 없어
+/// 그려진 패널 위 클릭이 뒤 터미널·편집기로 내려갔다(2026-10-15).
+pub fn click(self: *AppSession, x: f64, y: f64) void {
+    const rows = &self.reference_picker_rows;
+    const total = rows.shown.items.len;
+    const count = @min(total, chrome.components.palette.max_visible);
+    switch (chrome.components.palette.panelHit(self.buildChromeProps(), count, x, y) orelse return) {
+        .outside => {
+            self.chrome_host.reference_picker.hide();
+            closed(self);
+        },
+        .panel => {},
+        .row => |row| {
+            // 창 시작은 그리는 쪽(`buildReferencePickerRows`)과 같은 식이다.
+            const start = @min(self.reference_picker_scroll.offset_y_px / @max(self.cell_height_px, 1), total -| count);
+            self.chrome_host.reference_picker.selected = start + row;
+            accept(self);
+            self.swallow_multi_click = true; // 같은 겹클릭의 둘째 누름이 이동한 문서로 새지 않게
+        },
+    }
 }
 
 /// 피커가 닫혔다(Esc·다른 오버레이) — 행을 놓는다.

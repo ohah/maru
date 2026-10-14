@@ -776,9 +776,14 @@ pub fn diffFindPointer(self: *AppSession, kind: i32, button: i32, x: f64, y: f64
     const term = activeEditorTerm(self) orelse return .none;
     if (term.surfaceId() != h.diff_find_source) return .none;
     syncDiffFind(self);
+    // 다른 곳에서 시작한 드래그의 이동·뗌은 그 주인 것이다(`gestureInProgress`) — 본문 몫(`.body`)으로 넘긴다. `.none` 이면 포커스 있는
+    // 찾기의 `handlePointer` 가 그 이동·뗌을 먹는다(예전에도 막대 밖 drag 는 `.body` 였다).
+    if (kind != 1 and gestureInProgress(self)) return .body;
     const p = self.buildChromeProps();
-    const secondary_hit = find_ui.contains(&h.find_secondary, p, x, y);
-    if (secondary_hit or find_ui.contains(&h.find, p, x, y)) {
+    // 막대는 **보이는** 막대다(`visibleContains` — rich 는 사방 패딩만큼 키워 그린다). 입력 줄(`contains`)만 보면 패딩 띠를 누른 클릭이
+    // `.body` 가 되어 포커스가 풀리고 막대 뒤 본문으로 내려갔다(2026-10-15).
+    const secondary_hit = find_ui.visibleContains(&h.find_secondary, p, x, y);
+    if (secondary_hit or find_ui.visibleContains(&h.find, p, x, y)) {
         if (kind == 1 and button == 0) {
             if (secondary_hit) activateDiffSide(self, term, h.find_secondary.diff_side.?);
             h.find.input_focused = true;
@@ -793,6 +798,29 @@ pub fn diffFindPointer(self: *AppSession, kind: i32, button: i32, x: f64, y: f64
         self.metal_dirty = true;
     }
     return .body;
+}
+
+/// 포커스 없는 찾기 막대(diff 아닌 것)를 눌렀는가 — 맞으면 클릭은 막대의 것이다(`true` — 호출자가 소비한다). 좌클릭이면 입력에 포커스를 준다.
+/// 포커스가 없는 막대는 모달이 아니라(`anyModalOpen`) 막대 위 클릭에 주인이 없었다 — 입력 줄을 눌러도 그 클릭이 막대 뒤 편집기·터미널로 내려가
+/// 가려진 글자에 캐럿이 옮겨졌다(2026-10-15). 판정은 보이는 막대(`visibleContains` — 패딩 포함)로 한다. 포커스가 있으면 `handlePointer` 가 이미
+/// 모든 클릭을 소비하고, diff 의 두 막대는 `diffFindPointer` 가 맡는다.
+pub fn unfocusedFindPointer(self: *AppSession, kind: i32, button: i32, x: f64, y: f64) bool {
+    const h = &self.chrome_host;
+    if (!h.find.open or h.find.input_focused or h.diff_find_source != 0) return false;
+    if (kind != 1 and gestureInProgress(self)) return false; // 다른 곳에서 시작한 드래그의 이동·뗌은 그 주인 것이다
+    if (!find_ui.visibleContains(&h.find, self.buildChromeProps(), x, y)) return false;
+    if (kind == 1 and button == 0) {
+        h.find.input_focused = true;
+        h.find.focus = find_ui.focusAt(&h.find, self.buildChromeProps(), y); // 바꾸기 줄을 눌렀으면 바꾸기 입력이
+        self.metal_dirty = true;
+    }
+    return true;
+}
+
+/// 다른 곳에서 시작한 포인터 제스처(탭·pane·사이드바·스크롤바 drag, divider capture, 터미널 선택 drag)가 진행 중인가. 찾기 막대는 그 이동·뗌을
+/// 가져가지 않는다 — 가져가면 막대 위를 지나는 선택 drag 가 멈추고, 막대 위에서 놓은 뗌이 먹혀 drag 가 latch 된 채 남는다.
+fn gestureInProgress(self: *const AppSession) bool {
+    return !self.pointerGestureIs(.none) or pane_ops.dividerCaptureActive(self) or self.mouse_drag_selecting;
 }
 
 /// Row arrays were replaced. Rebuild both owners before any navigation can use them.

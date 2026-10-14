@@ -6261,6 +6261,12 @@ pub const AppSession = struct {
     /// 지난 오버레이 프레임에 자동완성 목록·호버(시그니처) 상자를 **안 그렸나**(`editorHelperTakesPointer`). 기본 false — 예전 동작.
     editor_suggest_hidden: bool = false,
     editor_hover_box_hidden: bool = false,
+    /// 지난 오버레이 프레임에 보내기 헬퍼를 **안 그렸나**(`editorHelperTakesPointer(.send_helper)`) — 다른 오버레이가 그릴 것이 있으면 상태는 남고
+    /// 그림만 빠진다. 기본 false — 프레임을 안 짓는 테스트는 예전처럼 상자가 있다고 본다.
+    send_helper_hidden: bool = false,
+    /// 피커 행 클릭이 그 피커를 닫으며 이동했다 — 같은 겹클릭의 둘째·셋째 누름(kind 4·5)을 삼킨다(`mouse` 첫머리). 다음 첫 누름(kind 1)이 푼다.
+    /// 안 삼키면 더블클릭의 둘째 누름이 방금 이동한 문서의, 피커가 있던 화면 자리 낱말을 골랐다(2026-10-15 적대적 검증).
+    swallow_multi_click: bool = false,
     /// 늦게 온 LSP 응답의 알림 중 사용자가 그사이 연 오버레이 때문에 미룬 것(`showResponseNotice`) — 하나만 든다(새것이 이긴다).
     deferred_response_notice_buf: [deferred_response_notice_cap]u8 = undefined,
     deferred_response_notice_len: usize = 0,
@@ -14603,10 +14609,11 @@ pub const AppSession = struct {
     /// 받는다. 다른 오버레이(이름 상자·팔레트·설정·피커·알림 패널·보내기 헬퍼 …)가 있어 안 그려졌으면 받지도 삼키지도 않는다 —
     /// 사용자는 그 자리에 다른 것을 보고 있다(2026-10-09 재현: 숨은 완성 목록이 이름 상자·팔레트 클릭을 받아 문서에 완성을
     /// 넣었다). 값은 `buildChromeOverlayPrep` 이 프레임마다 세운다. 오버레이 프레임을 아직 안 그렸으면(기본값) 예전처럼 받는다.
-    pub fn editorHelperTakesPointer(self: *const AppSession, which: enum { suggest, hover_box }) bool {
+    pub fn editorHelperTakesPointer(self: *const AppSession, which: enum { suggest, hover_box, send_helper }) bool {
         return switch (which) {
             .suggest => !self.editor_suggest_hidden,
             .hover_box => !self.editor_hover_box_hidden,
+            .send_helper => !self.send_helper_hidden,
         };
     }
 
@@ -15116,6 +15123,8 @@ pub const AppSession = struct {
     pub fn mouse(self: *AppSession, kind: i32, x_px: f64, y_px: f64, button: i32, mods: i32) void {
         if (sidebar_ops.activateRecoveredRowBeforeInitialSurface(self, kind, x_px, y_px, button)) return;
         if (!self.surface_initialized) return;
+        // 피커 행을 눌러 이동한 겹클릭의 나머지 누름은 그 클릭의 것이다(`swallow_multi_click`).
+        if (kind == 1) self.swallow_multi_click = false else if ((kind == 4 or kind == 5) and self.swallow_multi_click) return;
         find_ops.syncDiffFind(self);
         // 호버 박스(tooling §8.2b): 상자 밖 눌림은 닫고 **흘려보낸다**, 상자 안은 삼킨다. 모달 게이트보다 앞이어도 무해하다 —
         // 모달이 열리는 순간 `refresh` 가 상자를 내리므로 둘이 함께 있는 프레임이 없다.
@@ -15284,6 +15293,14 @@ pub const AppSession = struct {
             }
             return;
         }
+        // 참조 피커(§8.2l) — 신뢰·복구 피커와 같다: 행은 이동, 패딩 띠·프롬프트는 소비, 보이는 패널 밖은 닫기. 모달 집합(`anyModalOpen`)
+        // 밖이라 이 분기가 없으면 그려진 패널 위 클릭이 뒤로 내려갔다(2026-10-15).
+        if (self.chrome_host.reference_picker.open) {
+            if (kind == 1 and button == 0) {
+                if (!scroll_ops.beginOverlayScrollbarGesture(self, x_px, y_px)) editor_ops.references_client.click(self, x_px, y_px);
+            }
+            return;
+        }
         // 미리보기 좌표는 정본 편집 화면의 hit 표와 다르다. 목록 밖 클릭은 취소하고 소비한다.
         if (self.chrome_host.symbol_picker.open) {
             if (kind == 1 and button == 0) {
@@ -15346,6 +15363,7 @@ pub const AppSession = struct {
             find_ops.toggleFindRegex(self);
             return;
         }
+        if (find_ops.unfocusedFindPointer(self, kind, button, x_px, y_px)) return; // 포커스 없는 찾기 막대 위 — 막대의 것(뒤로 안 내려간다)
         if (diff_find_pointer != .body and self.chrome_host.handlePointer(chromePointerFromMouse(kind, x_px, y_px, button, mods)) != null) return;
         // **편집기 선택 헬퍼**(NSH — docs/send-selection-to-agent.md §6.2). 모달 분기를 전부 지난
         // 자리다: 헬퍼는 모달이 아니므로 위 오버레이들이 먼저 가져가고, 여기부터가 본문 좌표다.
@@ -24406,6 +24424,10 @@ pub const AppSession = struct {
         const ch = self.cell_height_px;
         if (cw == 0 or ch == 0) return error.NoMetrics;
         const appearance = self.appearance;
+        // 오버레이 스크롤바 기하(`overlay_scroll_entries`)는 **이 프레임에 발행한 것만** 산다 — 막대는 이 함수 뒤에 다시 낸다
+        // (`appendPaletteScrollbar`·설정·알림). 예전에는 0 으로 되돌리는 자리가 없어, 넘치던 팔레트를 닫고 같은 자리에 뜬 피커(참조 피커는
+        // 막대를 안 낸다)의 오른쪽 거터 클릭이 **보이지 않는 낡은 막대**에 먹혀 행이 안 눌렸다(2026-10-15 적대적 검증).
+        self.overlay_scroll_entry_count = 0;
 
         // 컴포넌트 view 경로를 실제로 타서 열린 오버레이의 ChromeDraw를 모은다(arena가 ops·runs 소유, lower까지 유효).
         var arena_state = std.heap.ArenaAllocator.init(self.allocator);
@@ -24499,7 +24521,11 @@ pub const AppSession = struct {
         // 투명하게 하고, 칸 위상이 다르면 격자도 따로라(`metal_lowering.lower`, 2026-10-10) 그 근거는 더는 서지 않는다.
         // 그리지 못하는 프레임에는 상자가 "없는" 것이 맞지만 상태까지
         // 지우지는 않는다 — 모달이 닫히면 고른 것이 그대로 있으므로 다시 떠야 한다.
+        // **그렸는지를 남긴다**(2026-10-15) — 안 그린 프레임에 남은 상태로 클릭을 받으면 보이지 않는 상자 자리를 누른 클릭이 선택을 보냈다
+        // (`sendHelperClick` 이 이 값을 본다 — 아래 자동완성·호버와 같은 규율).
+        self.send_helper_hidden = true;
         if (draws.items.len == 0 and editor_ops.refreshSendHelper(self)) {
+            self.send_helper_hidden = false;
             try self.chrome_host.collectSendHelperDraws(editor_ops.sendHelperItems(self), props, &tokens, arena, &draws);
         }
         // 호버 박스(tooling §8.2b — 비모달). 다른 오버레이가 낼 것이 있으면 안 낸다(포커스 없는 찾기 막대뿐이면 함께 낸다 — 아래
@@ -49564,6 +49590,162 @@ test "보이는 패널 안쪽 가장자리를 눌러도 우클릭 메뉴·심볼
     }
 }
 
+// 참조 피커(§8.2l)는 `mouse()` 분기가 없어, 그려진 패널 위 클릭이 **뒤 터미널로 내려갔다**(2026-10-15 — #4471 적대적 검증).
+// 형제 피커(신뢰·복구)와 같게: 결과 행 = 그 참조로 이동(Enter 와 같은 `accept`), 패딩 띠·프롬프트 = 소비, 보이는 패널 밖 = 닫기.
+// 「뒤로 안 내려갔다」는 터미널 선택 드래그가 서지 않은 것으로 잰다 — 마지막 대조가 같은 점이 피커 없이는 정말 터미널이라는 것을 보인다.
+test "참조 피커 위 클릭은 뒤로 내려가지 않는다 — 행은 이동, 패딩 띠는 소비, 보이는 패널 밖은 닫기" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    const props = session.buildChromeProps();
+    const pad: f64 = @floatFromInt(props.shape.modal_padding_px);
+    try std.testing.expect(pad > 0 and props.shape.corner_radius_px > 0); // 전제: 제품 모양은 둥근 패널 + 패딩
+    const surface = term_ops.activeSurface(session);
+    // 화면을 **글자로 채운다** — 빈 칸을 겹클릭하면 낱말이 없어 선택이 안 서서, 「겹클릭이 새지 않았다」가 공회전한다(도크 겹클릭 판정자와 같다).
+    try surface.core.write(("abcdefghij" ** 30 ++ "\r\n") ** 40);
+
+    const Plant = struct {
+        // 행 둘 — 루트 밖(`outside`)이라 이동은 알림만 내고 파일을 열지 않는다(`goToRow`). 클릭이 `accept` 에 닿았는지만 본다.
+        fn open(sess: *AppSession) !void {
+            const a = sess.allocator;
+            for (0..2) |i| {
+                try sess.reference_picker_rows.all.append(a, .{
+                    .title = try a.dupe(u8, "ref"),
+                    .binding = try a.dupe(u8, "/x:1"),
+                    .path = try a.dupe(u8, "/x"),
+                    .line = @intCast(i),
+                    .character = 0,
+                    .outside = true,
+                });
+                try sess.reference_picker_rows.shown.append(a, i);
+            }
+            sess.chrome_host.reference_picker.show();
+            sess.chrome_host.reference_picker.selected = 0;
+            sess.chrome_host.reference_picker.setResultCount(2);
+        }
+    };
+    try Plant.open(session);
+    const r = chrome.components.palette.panelRect(props, 2).?; // 그리는 상자(`palette.view` 와 같은 출처)
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    const x1 = x0 + @as(f64, @floatFromInt(r.w));
+    const ch: f64 = @floatFromInt(props.metrics.cell_height_px);
+    const row2_y = y0 + 2 * ch + ch / 2; // 둘째 결과 행
+    const band_pt = [2]f64{ x0 - pad + 1, row2_y }; // 왼쪽 패딩 띠 — 결과 행 높이
+
+    // ① 띠 · 프롬프트 줄 — 소비, 열린 채, 뒤로 안 내려간다.
+    for ([_][2]f64{ band_pt, .{ x1 + pad - 1, row2_y }, .{ (x0 + x1) / 2, y0 + ch / 2 } }) |pt| {
+        session.mouse(1, pt[0], pt[1], 0, 0);
+        session.mouse(3, pt[0], pt[1], 0, 0);
+        try std.testing.expect(session.chrome_host.reference_picker.open);
+        try std.testing.expect(!session.mouse_drag_selecting);
+    }
+    // ② 둘째 결과 행 — 그 행을 골라 이동한다(닫고, 행을 놓는다). **오른쪽 거터**를 누른다: 넘치던 팔레트가 같은 자리에 남긴 낡은 막대
+    // 기하가 그 클릭을 먹으면 안 된다(참조 피커는 막대를 안 낸다 — 기하는 프레임마다 다시 매긴다, `buildChromeOverlayPrep`).
+    scroll_ops.appendOverlayScrollbar(session, .{ .x = r.x, .y = r.y + @as(i32, @intCast(props.metrics.cell_height_px)), .w = r.w, .h = 2 * props.metrics.cell_height_px }, .{
+        .offset_px = 0,
+        .content_h_px = 40 * props.metrics.cell_height_px,
+    }); // 넘치는 목록의 막대 — 앞 프레임(팔레트)의 것
+    const stale = scroll_ops.overlayScrollbarGeometry(session) orelse return error.NoStaleBar;
+    const gutter_x: f64 = @floatCast(stale.track_x + stale.track_w / 2);
+    try std.testing.expect(gutter_x > x0 and gutter_x < x1); // 전제: 낡은 막대가 행 안 거터에 있다
+    if (try session.buildChromeOverlayPrep()) |*prep| {
+        var pp = prep.*;
+        pp.deinit(allocator);
+    }
+    session.mouse(1, gutter_x, row2_y, 0, 0);
+    session.mouse(3, gutter_x, row2_y, 0, 0);
+    try std.testing.expect(!session.chrome_host.reference_picker.open);
+    try std.testing.expectEqual(@as(usize, 1), session.chrome_host.reference_picker.selected); // 누른 그 행(둘째)이다
+    try std.testing.expectEqual(@as(usize, 0), session.reference_picker_rows.all.items.len);
+    try std.testing.expect(!session.mouse_drag_selecting);
+    // 루트 밖 행이라 이동은 알림 「루트 밖이라 열지 않습니다」만 낸다 — 클릭이 `accept`→`goToRow` 까지 닿았다는 증거다. 다음 누름을 알림이
+    // 가져가지 않게 닫는다.
+    try std.testing.expect(session.chrome_host.notice.open);
+    session.chrome_host.notice.dismiss();
+    // 같은 겹클릭의 둘째 누름(kind 4) — 피커는 닫혔지만 그 클릭의 것이다: 뒤 터미널로 안 내려간다. 내려가면 터미널에 낱말 선택
+    // (`select_word`)이 선다 — 사용자가 보는 「블록」이다(도크 겹클릭 판정자와 같은 관측).
+    try std.testing.expect(surface.core.selection_anchor == null);
+    session.mouse(4, gutter_x, row2_y, 0, 0);
+    try std.testing.expect(surface.core.selection_anchor == null);
+    try std.testing.expect(!session.mouse_drag_selecting);
+    session.mouse(3, gutter_x, row2_y, 0, 0);
+    // ③ 보이는 패널 밖 — 닫고 행을 놓는다(Esc 와 같은 `closed`).
+    try Plant.open(session);
+    session.mouse(1, x0 - pad - 1, row2_y, 0, 0);
+    session.mouse(3, x0 - pad - 1, row2_y, 0, 0);
+    try std.testing.expect(!session.chrome_host.reference_picker.open);
+    try std.testing.expectEqual(@as(usize, 0), session.reference_picker_rows.all.items.len);
+    // 대조: 피커가 없으면 같은 띠 점은 터미널이다 — 누르면 선택 드래그가 서고(① 의 「안 내려갔다」가 공회전이 아니다), 새 첫 누름이
+    // 삼키기를 풀었으므로 이어진 둘째 누름은 터미널 낱말 선택이다(② 의 「kind 4 를 삼켰다」가 공회전이 아니다).
+    session.mouse(1, band_pt[0], band_pt[1], 0, 0);
+    try std.testing.expect(session.mouse_drag_selecting);
+    session.mouse(3, band_pt[0], band_pt[1], 0, 0);
+    session.mouse(4, band_pt[0], band_pt[1], 0, 0);
+    try std.testing.expect(surface.core.selection_anchor != null);
+    session.mouse(3, band_pt[0], band_pt[1], 0, 0);
+}
+
+// 포커스 없는 찾기 막대 위 누름은 막대의 것이지만(`find_ops.unfocusedFindPointer`), **다른 곳에서 시작한 드래그의 이동·뗌**은 그 주인
+// 것이다. 터미널 선택 드래그(`mouse_drag_selecting`)는 제스처 주인(`PointerGestureOwner`)이 아니라 `routeActivePointerGesture` 가 먼저
+// 받지 않는다 — 막대가 뗌을 먹으면 드래그가 latch 된 채 남는다(2026-10-15 적대적 검증).
+test "포커스 없는 찾기 막대 위에서 터미널 선택 드래그를 놓아도 드래그가 끝난다 — 막대는 남의 이동·뗌을 가져가지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const session = try allocator.create(AppSession);
+    defer allocator.destroy(session);
+    try session.init(std.Io.Threaded.global_single_threaded.io(), allocator, .{
+        .abi_version = abi_version,
+        .cols = 20,
+        .rows = 5,
+        .queue_capacity = 16,
+        .command_kind = @intFromEnum(CommandKind.controlled_smoke),
+    });
+    defer session.deinit();
+    session.window_padding_px = .{};
+    _ = try session.resize(session.sidebar_width_px + 800, 600, session.scale_milli);
+    session.dispatchAppAction(.toggle_find);
+    try std.testing.expect(session.chrome_host.find.open);
+    session.chrome_host.find.input_focused = false; // 포커스만 빠진 상태(프로젝트 검색 도크가 가져간 뒤 등) — 모달이 아니다
+    const props = session.buildChromeProps();
+    // 막대 위 한 점은 **컴포넌트에게 물어** 찾는다(배치 규칙을 베끼지 않는다).
+    const bar: [2]f64 = blk: {
+        var y: f64 = 0;
+        while (y < @as(f64, @floatFromInt(session.backing_height_px))) : (y += 2) {
+            var x: f64 = 0;
+            while (x < @as(f64, @floatFromInt(session.backing_width_px))) : (x += 2) {
+                if (chrome.components.find.contains(&session.chrome_host.find, props, x, y)) break :blk .{ x, y };
+            }
+        }
+        return error.FindBarNotPlaced;
+    };
+    const tr = session.termRect();
+    const body = [2]f64{ @as(f64, @floatFromInt(tr.x)) + 40, @as(f64, @floatFromInt(tr.y)) + @as(f64, @floatFromInt(tr.h)) / 2 };
+    try std.testing.expect(!chrome.components.find.visibleContains(&session.chrome_host.find, props, body[0], body[1]));
+    session.mouse(1, body[0], body[1], 0, 0);
+    try std.testing.expect(session.mouse_drag_selecting); // 전제: 본문 누름이 터미널 선택 드래그를 세운다
+    session.mouse(2, bar[0], bar[1], 0, 0);
+    session.mouse(3, bar[0], bar[1], 0, 0);
+    try std.testing.expect(!session.mouse_drag_selecting); // 뗌이 드래그에 닿아 끝났다
+    try std.testing.expect(!session.chrome_host.find.input_focused); // 막대는 포커스를 가져가지 않았다
+    // 대조: 드래그가 없을 때 같은 점 누름은 막대의 것이다 — 포커스를 받는다.
+    session.mouse(1, bar[0], bar[1], 0, 0);
+    session.mouse(3, bar[0], bar[1], 0, 0);
+    try std.testing.expect(session.chrome_host.find.input_focused);
+    try std.testing.expect(!session.mouse_drag_selecting);
+}
+
 // rename caret 깜빡임(blink_visible로 '|'↔공백, 폭 고정)과 IME 후보창 caret rect(편집기 위치 추적)를 고정한다.
 test "rename caret blinks (width-stable) and IME caret rect tracks the editor, not the terminal cursor" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
@@ -64377,7 +64559,8 @@ test "notice·confirm 이 떠 있는 프레임엔 알림 패널을 안 그리고
     try std.testing.expect(session.chrome_host.notifications.hovered == null);
 }
 
-// 포커스 없는 찾기 바·참조 피커는 모달이 아니라 종 클릭을 막지 않는다 — 그대로 두면 패널과 겹쳐 그려진다(예전에는 패널이 넘쳐
+// 포커스 없는 찾기 바·참조 피커는 모달 집합(`anyModalOpen`) 밖이다 — 패널을 여는 길(메뉴·단축키)이 그대로 두면 패널과 겹쳐 그려진다(참조 피커는
+// 2026-10-15 부터 밖 클릭을 「닫기」로 먼저 가져가므로 종 **클릭**은 피커를 닫을 뿐이다; 이 판정자는 `openNotificationPanel` 을 직접 부른다)(예전에는 패널이 넘쳐
 // 프레임 clip 을 내면 그것이 그리드 전체에 걸려 그 글자가 통째로 잘렸다 — 지금은 clip 이 패널 draw 의 셀에만 걸린다, docs/chrome-strategy.md
 // §5.3). 다른 오버레이를 여는
 // 경로와 같은 함수(`dismissMessageOverlays`)로 먼저 내린다.

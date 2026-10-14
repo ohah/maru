@@ -311,10 +311,12 @@ pub fn search(pattern: []const u8, lua: bool, text: []const u8) ?bool {
     prog.head = parser.alt();
     if (!prog.ok or parser.i != pattern.len) return null;
     if (prog.head == none) return true; // 빈 패턴은 늘 맞다
+    // 맨 위도 갈래다(`a|^b`) — 머리 노드 하나만 재면 둘째 갈래부터는 영영 안 잰다(BLP 4회차에 실측으로 잡았다).
+    const end: Cont = .{ .idx = none, .parent = null };
     var start: usize = 0;
     while (start <= text.len) : (start += 1) {
         var mt: Matcher = .{ .p = &prog, .text = text };
-        if (mt.m(prog.head, start, null)) return true;
+        if (mt.alts(prog.head, start, &end)) return true;
         if (mt.exhausted) return null;
         // `^` 로 시작하면 0 에서만 맞을 수 있다.
         if (prog.nodes[prog.head].kind == .bol and prog.nodes[prog.head].alt == none) break;
@@ -347,6 +349,10 @@ test "PRD1 정규식 부분집합 — 번들 쿼리가 쓰는 꼴의 기본 동�
     try testing.expectEqual(@as(?bool, true), search("x|^b", false, "ba"));
     try testing.expectEqual(@as(?bool, false), search("(^a|b)c", false, "xac"));
     try testing.expectEqual(@as(?bool, true), search("(^a|b)c", false, "xbc"));
+    // 묶음 없는 맨 위 갈래 — 둘째·셋째 갈래도 잰다.
+    try testing.expectEqual(@as(?bool, true), search("x|b", false, "ab"));
+    try testing.expectEqual(@as(?bool, true), search("x|y|^a", false, "ab"));
+    try testing.expectEqual(@as(?bool, false), search("x|y|z", false, "ab"));
     try testing.expectEqual(@as(?bool, true), search("^[^a-z]+$", false, "ABC_1"));
     // Lua 패턴 — `%` 가 이스케이프.
     try testing.expectEqual(@as(?bool, true), search("^//!", true, "//! doc"));

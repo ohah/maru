@@ -421,7 +421,7 @@ test "HL19 번들 언어 확대 BL2 의 Swift 가 내는 캡처도 전부 표에
     try std.testing.expect(roleFor("variable.parameter") == null); // 매개변수는 변수처럼 무색
 }
 
-test "HL20 번들 언어 확대 BL3 의 SQL·Dart 가 내는 캡처도 전부 표에 있고, 옛 규약·Dart 고유 갈래가 맞는 색을 받는다" {
+test "HL21 번들 언어 확대 BL3 의 SQL·Dart 가 내는 캡처도 전부 표에 있고, 옛 규약·Dart 고유 갈래가 맞는 색을 받는다" {
     // HL18 과 같은 방법으로 뽑았다(`queries/highlights.scm`, 따옴표 안·주석은 뺀다).
     const bl3_captures = [_][]const u8{
         // SQL

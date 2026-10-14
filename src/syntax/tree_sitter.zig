@@ -1615,6 +1615,9 @@ pub fn bracketRuleFor(lang: Language) BracketRule {
         // XML·DTD 는 HTML 과 같다 — 괄호 색을 안 칠하고(VS Code 의 xml 도 괄호 쌍 색이 없다), 본문 글자 속 괄호도 센다.
         .xml, .dtd => .{ .colorize = false, .text_kinds = &.{ "CharData", "AttValue" }, .chars = "(){}" },
         .json => .{ .chars = "[]{}" },
+        // Swift raw 문자열 보간 `\#(` 는 이름 있는 잎이다 — 일반 보간 `\(`(이름 없는 토큰)과 같은 괄호 쌍으로 세려면 글로 든다. 안 그러면 닫는 `)` 만
+        // 남아 짝 없는 괄호로 칠해진다(BL2 적대적 4회차). raw 속 `\(x)` 는 보간이 아니라 글자다 — grammar 가 문자열 내용으로 낸다.
+        .swift => .{ .text_kinds = &.{"raw_str_interpolation_start"} },
         .css => .{ .css_url_strings = true },
         .markdown => .{ .paint = false, .colorize = false },
         else => .{},
@@ -3319,6 +3322,11 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
             .{ .start = 42, .open = false, .close_kind = 0 },
             .{ .start = 44, .open = true, .close_kind = 2, .open_kind = 2 },
             .{ .start = 45, .open = false, .close_kind = 2, .open_kind = 2 },
+        } },
+        // raw 문자열 — `\#(y)` 는 보간이라 쌍이고(BL2 적대적 4회차: 여는 쪽이 빠져 `)` 만 남았다), `\(x)` 와 `(…)` 는 글자다.
+        .{ .lang = .swift, .src = "let r = #\"a (\\(x)) \\#(y)\"#\n", .want = &.{
+            .{ .start = 21, .open = true, .close_kind = 0 },
+            .{ .start = 23, .open = false, .close_kind = 0 },
         } },
         .{ .lang = .c, .src = "#define M(x) (f(x) + \"(\") /* ( */\n", .want = &.{
             .{ .start = 9, .open = true, .close_kind = 0 },

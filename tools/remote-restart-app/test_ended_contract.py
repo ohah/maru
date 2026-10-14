@@ -15,13 +15,13 @@ class JudgeTests(unittest.TestCase):
             f'REMOTE_ENDED_DISCONNECTED host={self.host} runtime={self.runtime}',
             f'REMOTE_ENDED_JOB host={self.host} state=replacement_published',
             f'REMOTE_ENDED_JOB host={self.host} state=candidate_rejected',
-            f'info: reconnect terminal: host={self.host} total=1 published_old=0 published_new=0 frozen=1 ended=0 retry_reserved=1',
+            f'REMOTE_ENDED_TERMINAL host={self.host} total=1 published_old=0 published_new=0 frozen=1 ended=0 retry_reserved=1',
             'REMOTE_ENDED_GUI visible=true', ''])
     def test_identity_and_order(self):
         text = self.trace()
         probe.verify_runtime_ended_gui(text, self.runtime)
         for changed in [text.replace('runtime=' + self.runtime, 'runtime=' + '3' * 32),
-                        text.replace('reconnect terminal: host=' + self.host, 'reconnect terminal: host=' + '3' * 32),
+                        text.replace('REMOTE_ENDED_TERMINAL host=' + self.host, 'REMOTE_ENDED_TERMINAL host=' + '3' * 32),
                         text.replace('state=candidate_rejected', 'state=candidate_staged'),
                         '\n'.join(reversed(text.splitlines()))]:
             with self.assertRaises(RuntimeError): probe.verify_runtime_ended_gui(changed, self.runtime)

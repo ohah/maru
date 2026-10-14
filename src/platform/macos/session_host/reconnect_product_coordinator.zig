@@ -531,6 +531,13 @@ pub const Coordinator = struct {
             };
             try self.settleProductShutdownCompletion(backend, budget);
         }
+        // A terminal failure has already consumed its logical completion, but still owns
+        // a retired Client. Transfer that cleanup before AppSession removes runtime readers.
+        if (backend.host_reconnect_job != null) {
+            if (try backend.preflightHostReconnectTerminal() != .retained_terminal)
+                return error.InvalidOutcome;
+            backend.cancelHostReconnectForProcessShutdownNoFail();
+        }
         try self.worker.deinit();
         try self.jobs.deinit();
         self.* = .{};

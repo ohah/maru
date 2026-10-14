@@ -39,7 +39,7 @@ def verify_runtime_ended_gui(text, runtime_id):
     markers = ['^' + re.escape(identity.group(0)) + '$',
                r'^REMOTE_ENDED_JOB host=' + host + r' state=replacement_published$',
                r'^REMOTE_ENDED_JOB host=' + host + r' state=candidate_rejected$',
-               r'^info: reconnect terminal: host=' + host + r' total=1 published_old=0 published_new=0 frozen=1 ended=0 retry_reserved=1$',
+               r'^REMOTE_ENDED_TERMINAL host=' + host + r' total=1 published_old=0 published_new=0 frozen=1 ended=0 retry_reserved=1$',
                r'^REMOTE_ENDED_GUI visible=true$']
     cursor = 0
     for marker in markers:
@@ -147,7 +147,7 @@ def probe(app, cli, root, remote, sshconfig, alias, env, emit_hooks, artifacts, 
             if inventory_after.returncode or json.loads(inventory_after.stdout)['runtimes']:
                 raise RuntimeError('runtime remained after the actual terminate command')
             (seed_output / 'continue').touch()
-            wait_alive(lambda: 'reconnect terminal:' in (seed_output / 'app.stderr.txt').read_text(errors='replace'),
+            wait_alive(lambda: 'REMOTE_ENDED_TERMINAL host=' in (seed_output / 'app.stderr.txt').read_text(errors='replace'),
                        'canonical runtime-ended settlement missing')
             (seed_output / 'verify-after').touch()
             wait_alive(lambda: (seed_output / 'after-ready').exists(), 'post-failure GUI frame missing')

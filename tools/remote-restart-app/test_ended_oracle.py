@@ -15,9 +15,9 @@ probe.verify_runtime_ended_gui(text, runtime)
 rejection = re.findall(r'^REMOTE_ENDED_JOB host=[0-9a-f]{32} state=candidate_rejected$', text, re.M)[0]
 mutations = {
     'foreign_runtime': text.replace('runtime=' + runtime, 'runtime=' + 'f' * 32),
-    'foreign_host': re.sub(r'(reconnect terminal: host=)[0-9a-f]{32}', r'\g<1>' + 'f' * 32, text),
+    'foreign_host': re.sub(r'(REMOTE_ENDED_TERMINAL host=)[0-9a-f]{32}', r'\g<1>' + 'f' * 32, text),
     'no_rejection': text.replace('state=candidate_rejected', 'state=candidate_staged'),
-    'no_terminal': text.replace('reconnect terminal:', 'unrelated terminal:'),
+    'no_terminal': text.replace('REMOTE_ENDED_TERMINAL', 'UNRELATED_TERMINAL'),
     'input_open': text.replace('published_new=0', 'published_new=1'),
     'no_retry': text.replace('retry_reserved=1', 'retry_reserved=0'),
     'no_gui_frame': text.replace('REMOTE_ENDED_GUI visible=true', 'REMOTE_ENDED_GUI visible=false'),

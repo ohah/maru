@@ -1862,16 +1862,6 @@ pub fn sentinelBgCell(col: u16, width: u16, bg: u32, origin_x: u32, origin_y: u3
     };
 }
 
-/// pane 탭 바 배경 셀 1개(sentinel-UV, 배경만). bar rect 좌상단 origin에서 폭(cols)만큼 채운다 — 터미널 셀
-/// 스트림에 넣으면 maru_fill_cell_quad가 origin_x + col*cw, origin_y + row*ch(row 0)에 그려 바를 칠한다. 폭이
-/// term 폭과 같은 cols(floor)라 아래 터미널과 가로 정렬된다. 셀 폭/바 폭·높이 0이면 null. 순수 함수.
-fn paneBarBgCell(bar: maru.session.SplitRect, cell_width_px: u32, bg: u32) ?metal_frame.NativeMetalCell {
-    if (cell_width_px == 0 or bar.w == 0 or bar.h == 0) return null;
-    const cols_u32 = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
-    if (cols_u32 == 0) return null;
-    return sentinelBgCell(0, @intCast(cols_u32), bg, bar.x, bar.y);
-}
-
 // putUtf8/appendPaletteRow(레거시 팝업 텍스트 레이아웃)는 제거했다 — 팝업이 chrome 컴포넌트로 이주(C1b)해
 // rasterizeOverlayCells의 placeText(EAW-폭)를 find와 공유한다. 코드포인트당 1칸 깔던 putUtf8이 한글을 자르던 원인.
 
@@ -2002,15 +1992,6 @@ pub fn barMetrics(bar: maru.session.SplitRect, cell_width_px: u32, term_count: u
     const layout = coretext_frame_builder.tabLayout(@intCast(cols), term_count, tab_width_fixed, scroll_cols);
     if (layout.tab_w == 0) return null;
     return .{ .bar_x = bar.x, .bar_y = bar.y, .bar_w = bar.w, .bar_h = bar.h, .cell_width_px = cell_width_px, .cols = cols, .tab_cols = layout.tab_cols, .tab_w = layout.tab_w, .scroll_cols = layout.eff_scroll, .has_scroll = layout.has_scroll, .tab_count = @intCast(term_count) };
-}
-
-/// 활성 Term 탭 세그먼트를 강조 배경 셀로 칠한다(옛 BarMetrics.highlightCell). chrome tabbar hit-test와 **같은
-/// tabbar.segOf 셀 경계**(start_col/end_col)라 활성 밴드가 제목 glyph·클릭·✕와 정확히 정렬된다(§6 단일 소스).
-/// overflow(탭 영역 밖, end_col<=start_col)면 null.
-fn tabbarHighlightCell(m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32) ?metal_frame.NativeMetalCell {
-    const seg = m.segOf(tab_index);
-    if (seg.end_col <= seg.start_col) return null; // overflow(탭 영역 밖, 안 보이는) 탭
-    return sentinelBgCell(@intCast(seg.start_col), @intCast(seg.end_col - seg.start_col), bg, m.bar_x, m.bar_y);
 }
 
 // (paneInDirection은 위 주석대로 session core로 이동 — Model.paneInDirection)
@@ -8679,16 +8660,13 @@ pub const AppSession = struct {
     /// `@max(pt, cell + 2*pad)`였는데 그러면 terminal 폰트가 도크 기하를 정하게 되어(layering-and-portability
     /// 금지) `font-scale-rects` fixture가 실제로 깨졌다(14pt↔24pt 도크 rect 12px 이동, 1x↔2x 비례 이탈).
     ///
-    /// 토큰이 0이면(기반 토큰 `Tokens.base` — 제품은 늘 rich(40pt)라 닿지 않는다) 셀 파생으로 떨어진다. 옛 tui 룩
-    /// (2026-08-19 제거)이 그 갈래였다 — 셀 격자 정렬이 정체성이고 탭 바 배경도 셀 한 행이라 폰트 파생이 요구사항이었다.
-    /// 어느 쪽이든 두 바가 이 함수 하나를 쓰므로 정렬은 유지된다.
+    /// 옛 tui 룩(2026-08-19 제거)은 토큰 0 → 셀 파생 높이(`cell + 2·pad`) 갈래를 썼다. 제품 토큰은 rich(40pt) 하나라
+    /// 그 갈래를 지웠다.
     ///
     /// cell 높이 미상이면 0(바 없음) — buildChromeTokens 읽기 전 가드.
     pub fn chromeBarHeightPx(self: *const AppSession) u32 {
         if (self.cell_height_px == 0) return 0;
-        const space = self.buildChromeTokens().space;
-        if (space.bar_height_pt > 0) return layout_math.ptToPx(space.bar_height_pt, self.scale_milli);
-        return self.cell_height_px +| (2 * @as(u32, space.tab_bar_pad_y_px));
+        return layout_math.ptToPx(self.buildChromeTokens().space.bar_height_pt, self.scale_milli);
     }
 
     /// 도크 뷰 바가 쓰는 셀 격자. **슬롯 칸 수의 단일 출처** — 렌더(열 번호)·hover·클릭·smoke probe가 모두
@@ -8697,20 +8675,15 @@ pub const AppSession = struct {
     /// 칸 수를 chrome 토큰(`space.dock_view_slot_width_pt`)에서 환산하는 이유는 `chromeBarHeightPx`와 같다 —
     /// 고정 칸 수는 슬롯의 물리적 폭을 **터미널 폰트에** 묶고, 폰트를 키우면 스위처가 통째로 사라졌다.
     pub fn dockViewBarGrid(self: *const AppSession) chrome.components.dock_view_bar.Grid {
-        const space = self.buildChromeTokens().space;
-        const slot_width_px = if (space.dock_view_slot_width_pt > 0)
-            layout_math.ptToPx(space.dock_view_slot_width_pt, self.scale_milli)
-        else
-            0;
+        const slot_width_px = layout_math.ptToPx(self.buildChromeTokens().space.dock_view_slot_width_pt, self.scale_milli);
         return chrome.components.dock_view_bar.Grid.init(self.cell_width_px, slot_width_px).fitWidth(dock_ops.dockGeometry(self).view_bar.w);
     }
 
     /// chrome 바(탭 바·파일 헤더 밴드·주소 밴드) 안에서 텍스트 한 줄이 시작하는 세로 오프셋(바 상단 기준).
     ///
-    /// **`tab_bar_pad_y_px`를 그대로 쓰면 안 된다** — 바 높이가 chrome token(`bar_height_pt`)에서 나오는
-    /// 테마에서는 `바 높이 = cell + 2*pad`가 성립하지 않는다. 그때 pad를 오프셋으로 쓰면 제목이 바 위쪽에
-    /// 붙는다(폰트가 작을수록 심해진다). 상태바가 쓰는 `(h -| cell_height) / 2`와 같은 식으로 실제 바 높이에서
-    /// 파생한다 — token이 0이라 셀 파생으로 떨어지는 기반 토큰(`Tokens.base`, 제품은 안 닿음)에서는 이 식이 pad_y와 같은 값을 낸다.
+    /// 바 높이는 chrome token(`bar_height_pt`)에서 나오므로 고정 패딩을 오프셋으로 쓰면 제목이 바 위쪽에 붙는다(폰트가
+    /// 작을수록 심해진다 — 옛 `tab_bar_pad_y_px` 가 그랬다). 상태바가 쓰는 `(h -| cell_height) / 2`와 같은 식으로 실제
+    /// 바 높이에서 파생한다.
     pub fn chromeBarTextOffsetY(self: *const AppSession, bar_h: u32) u32 {
         return (bar_h -| self.cell_height_px) / 2;
     }
@@ -21930,86 +21903,73 @@ pub const AppSession = struct {
             // 탭 강조색은 **포커스된 pane을 구분**한다: 활성 pane은 밝은 sidebarActiveBg, 비활성 pane은 dim
             // sidebarHoverBg(중간 톤) — split에서 pane 포커스를 옮기면 어느 bar가 활성인지 시각적으로 갱신된다
             // (세로 분할 등에서 "활성 탭 UI가 안 바뀐다"는 제보 대응). 제목 glyph는 아래 pane_frames에(C2).
-            var pane_chrome: std.ArrayList(metal_frame.NativeMetalCell) = .empty;
-            defer pane_chrome.deinit(self.allocator);
-            // rich(corner>0)면 활성 탭을 VSCode식(평평 약한 배경 + 하단 테마 accent 언더바) layer 2 quad로, 0이면 셀 밴드로
-            // (else 갈래 — 기반 토큰의 값이라 제품 토큰 rich[모서리 8]에서는 닿지 않는다).
+            // 바 배경·활성 탭(VSCode식 평평 배경 + 하단 테마 accent 언더바)은 layer 2 quad 다. 옛 tui 룩(2026-08-19 제거)은
+            // 모서리 0 토큰에서 셀 밴드(`paneBarBgCell`·`tabbarHighlightCell`)로 칠했다 — 제품 토큰은 rich 하나라 지웠다.
             const tk = self.buildChromeTokens();
             const tk_space = tk.space;
-            const tab_corner = tk_space.corner_radius_px; // quad/셀 게이트(>0이면 quad, 0이면 셀 — 제품은 rich라 늘 >0)
             const tab_accent = packOpaqueRgb(tk.palette.get(.accent_bar)); // 활성 탭 하단 언더바(테마 accent — 포커스 surface 표시)
             for (leaf_rects.items) |lr| {
                 pane_ops.captureActivePaneGeometry(self, leaf_layout_complete, active_pane, lr, &active_pane_geometry);
                 const pb = pane_ops.paneBar(self, lr.rect, lr.leaf) orelse continue;
                 const bar = pb.full; // 바 배경·언더바는 전체 바(라벨 영역도 같은 chrome 배경)
-                // 탭 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). rich 갈래는 connected
-                // 스타일에서 본문색 cutout(U-tab2)으로 덮고 포커스 구분을 언더바 색으로 옮긴다 — hl_bg는 pill의 lifted fill과
-                // 아래 셀 밴드 else 갈래(제품은 안 닿음)가 쓴다.
+                // 탭 강조색: 활성 pane=밝은 sidebarActiveBg, 비활성=dim sidebarHoverBg(포커스 구분). connected 스타일은
+                // 본문색 cutout(U-tab2)으로 덮고 포커스 구분을 언더바 색으로 옮긴다 — hl_bg는 pill의 lifted fill이 쓴다.
                 const hl_bg = if (lr.leaf == active_pane) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self);
                 const m_opt = barMetrics(pb.tabs, self.cell_width_px, lr.leaf.terms.items.len, tk_space.tab_width_cols, lr.leaf.tab_scroll_cols); // 활성 밴드·‹›는 라벨 뺀 탭 영역
-                if (tab_corner > 0) {
-                    // rich: 바 배경(직각)·활성 탭(본문색 cutout + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
-                    // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
-                    self.appendBarBgQuad(bar, self.chromeQuadBg(sidebar_ops.sidebarBg(self))); // window.opacity 반영(quad straight-alpha)
-                    tab_ops.appendTabBarUnderline(self, bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 활성 탭 세그먼트는 본문색 cutout+앰버 언더바가 덮어 "연결"된다
-                    // U-tab2 연결형: rich 활성 탭 = 터미널 본문색 cutout(strip에서 도려낸 듯 아래 본문과 이어짐). 포커스 구분은
-                    // 배경이 아니라 **언더바 색** — 포커스 pane=테마 accent(active indicator), 비포커스=muted(흐린 구분만).
-                    // cutout은 아래 터미널 본문색이라 window.opacity를 같이 걸어 반투명(데스크톱 비침)으로 둔다 — 불투명으로 두면
-                    // 반투명 본문 위에 솔리드 패치로 떠 "연결"이 더 깨진다. 단 이 cutout은 위 바 배경 quad(sidebarBg, 같은
-                    // window.opacity) '위에' 겹쳐 그려지므로(둘 다 premultiplied-over) 유효 알파가 op·(2−op)로 본문(단일 op
-                    // 레이어)보다 약간 더 불투명·sidebarBg틴트가 된다 — 픽셀-정확 "연결"은 활성 세그먼트 아래 바 배경을 도려내야
-                    // 하는 systemic 변경(사이드바 이중레이어 한계와 동류, 보류). 현 반투명 cutout이 두 근사 중 본문에 더 가깝다.
-                    const tab_cutout_bg = self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.background));
-                    const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg)); // 언더바=focus indicator(배경 아님) — 불투명 유지
-                    if (m_opt) |m| tab_ops.appendActiveTabHighlight(self, m, pane_ops.paneActiveTermIndex(self, lr.leaf), tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
-                    if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
-                        const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
-                        const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
-                        const sw = chrome.components.tabbar.Metrics.scroll_button_cols;
-                        // **배경은 버튼 폭 전체**(`scroll_button_cols`)를 덮는다 — glyph 는 그 가운데 칸이라
-                        // 좌우 여백이 대칭이 된다("+" 와 같은 규율). 옛 코드는 한 칸만 칠해 배경이 glyph 에
-                        // 딱 붙어 ‹ 는 왼쪽 패딩이, › 는 오른쪽 패딩이 없어 보였다(사용자 보고 2026-08-20).
-                        const l_bg = self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
-                        const r_bg = self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
-                        var sb_i: u32 = 0;
-                        while (sb_i < sw and m.tab_cols + sb_i < m.cols) : (sb_i += 1) {
-                            scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sb_i, l_bg);
-                        }
-                        sb_i = 0;
-                        while (sb_i < sw and m.tab_cols + sw + sb_i < m.cols) : (sb_i += 1) {
-                            scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sw + sb_i, r_bg);
+                // 바 배경(직각)·활성 탭(본문색 cutout + 하단 앰버 언더바) 모두 layer 2 quad. 바 배경 먼저(아래),
+                // 활성 탭이 위, 제목 셀(part1)은 그 위 — 불투명 바 배경 셀이 quad를 가리던 z-order 버그 해소(리뷰 #1).
+                self.appendBarBgQuad(bar, self.chromeQuadBg(sidebar_ops.sidebarBg(self))); // window.opacity 반영(quad straight-alpha)
+                tab_ops.appendTabBarUnderline(self, bar, tk.border.line_thickness_px); // 탭바 하단 구분선(터미널 콘텐츠와 경계) — 활성 탭 세그먼트는 본문색 cutout+앰버 언더바가 덮어 "연결"된다
+                // U-tab2 연결형: rich 활성 탭 = 터미널 본문색 cutout(strip에서 도려낸 듯 아래 본문과 이어짐). 포커스 구분은
+                // 배경이 아니라 **언더바 색** — 포커스 pane=테마 accent(active indicator), 비포커스=muted(흐린 구분만).
+                // cutout은 아래 터미널 본문색이라 window.opacity를 같이 걸어 반투명(데스크톱 비침)으로 둔다 — 불투명으로 두면
+                // 반투명 본문 위에 솔리드 패치로 떠 "연결"이 더 깨진다. 단 이 cutout은 위 바 배경 quad(sidebarBg, 같은
+                // window.opacity) '위에' 겹쳐 그려지므로(둘 다 premultiplied-over) 유효 알파가 op·(2−op)로 본문(단일 op
+                // 레이어)보다 약간 더 불투명·sidebarBg틴트가 된다 — 픽셀-정확 "연결"은 활성 세그먼트 아래 바 배경을 도려내야
+                // 하는 systemic 변경(사이드바 이중레이어 한계와 동류, 보류). 현 반투명 cutout이 두 근사 중 본문에 더 가깝다.
+                const tab_cutout_bg = self.chromeQuadBg(packOpaqueRgb(self.appearance.theme.background));
+                const ub_accent = if (lr.leaf == active_pane) tab_accent else packOpaqueRgb(tk.palette.get(.muted_fg)); // 언더바=focus indicator(배경 아님) — 불투명 유지
+                if (m_opt) |m| tab_ops.appendActiveTabHighlight(self, m, pane_ops.paneActiveTermIndex(self, lr.leaf), tab_cutout_bg, self.chromeQuadBg(hl_bg), ub_accent, tk_space, tk.border);
+                if (m_opt) |m| if (m.has_scroll) { // #5a/#5b: 우측 ‹·› 사각형 버튼 — hover면 밝게(sidebarActiveBg)로 클릭 가능 표시
+                    const lh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and !hs.right) else false;
+                    const rh = if (self.hovered_scroll) |hs| (hs.pane == lr.leaf and hs.right) else false;
+                    const sw = chrome.components.tabbar.Metrics.scroll_button_cols;
+                    // **배경은 버튼 폭 전체**(`scroll_button_cols`)를 덮는다 — glyph 는 그 가운데 칸이라
+                    // 좌우 여백이 대칭이 된다("+" 와 같은 규율). 옛 코드는 한 칸만 칠해 배경이 glyph 에
+                    // 딱 붙어 ‹ 는 왼쪽 패딩이, › 는 오른쪽 패딩이 없어 보였다(사용자 보고 2026-08-20).
+                    const l_bg = self.chromeQuadBg(if (lh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
+                    const r_bg = self.chromeQuadBg(if (rh) sidebar_ops.sidebarActiveBg(self) else sidebar_ops.sidebarHoverBg(self));
+                    var sb_i: u32 = 0;
+                    while (sb_i < sw and m.tab_cols + sb_i < m.cols) : (sb_i += 1) {
+                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sb_i, l_bg);
+                    }
+                    sb_i = 0;
+                    while (sb_i < sw and m.tab_cols + sw + sb_i < m.cols) : (sb_i += 1) {
+                        scroll_ops.appendScrollButtonQuad(self, m, m.tab_cols + sw + sb_i, r_bg);
+                    }
+                };
+                // ✕·"+" 호버 배경 — ‹/› 와 **같은 신호**다(사용자 요청 2026-08-18). 그 둘만 호버 표시가
+                // 없어서 작은 글리프를 조준하는 느낌이었다. 배경은 호버일 때만 얹는다: ‹/› 는 항상 버튼
+                // 자리를 차지하지만 ✕ 는 호버한 탭에만 나타나고 "+" 는 바 배경과 이어져 보이는 편이 낫다.
+                if (m_opt) |m| {
+                    if (self.hovered_plus) |hp| if (hp == lr.leaf and m.hasPlusZone()) {
+                        const ps = m.plusZoneStart();
+                        var i: u32 = 0;
+                        while (i < chrome.components.tabbar.Metrics.plus_button_cols and ps + i < m.cols) : (i += 1) {
+                            scroll_ops.appendScrollButtonQuad(self, m, ps + i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
                         }
                     };
-                    // ✕·"+" 호버 배경 — ‹/› 와 **같은 신호**다(사용자 요청 2026-08-18). 그 둘만 호버 표시가
-                    // 없어서 작은 글리프를 조준하는 느낌이었다. 배경은 호버일 때만 얹는다: ‹/› 는 항상 버튼
-                    // 자리를 차지하지만 ✕ 는 호버한 탭에만 나타나고 "+" 는 바 배경과 이어져 보이는 편이 낫다.
-                    if (m_opt) |m| {
-                        if (self.hovered_plus) |hp| if (hp == lr.leaf and m.hasPlusZone()) {
-                            const ps = m.plusZoneStart();
-                            var i: u32 = 0;
-                            while (i < chrome.components.tabbar.Metrics.plus_button_cols and ps + i < m.cols) : (i += 1) {
-                                scroll_ops.appendScrollButtonQuad(self, m, ps + i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
+                    if (self.hovered_tab_close) |hc| if (hc.pane == lr.leaf) {
+                        const seg = m.segOf(hc.tab);
+                        if (seg.has_close and seg.end_col > seg.start_col) {
+                            // 배경은 ✕ 의 클릭 zone(`close_button_cols`)과 **같은 칸들**을 덮는다 —
+                            // 하드코딩 2 는 zone(3칸)보다 좁아 배경이 ✕ 왼쪽에 붙었다(사용자 보고 2026-08-20).
+                            var i: u32 = seg.end_col -| chrome.components.tabbar.Metrics.close_button_cols;
+                            while (i < seg.end_col and i < m.cols) : (i += 1) {
+                                scroll_ops.appendScrollButtonQuad(self, m, i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
                             }
-                        };
-                        if (self.hovered_tab_close) |hc| if (hc.pane == lr.leaf) {
-                            const seg = m.segOf(hc.tab);
-                            if (seg.has_close and seg.end_col > seg.start_col) {
-                                // 배경은 ✕ 의 클릭 zone(`close_button_cols`)과 **같은 칸들**을 덮는다 —
-                                // 하드코딩 2 는 zone(3칸)보다 좁아 배경이 ✕ 왼쪽에 붙었다(사용자 보고 2026-08-20).
-                                var i: u32 = seg.end_col -| chrome.components.tabbar.Metrics.close_button_cols;
-                                while (i < seg.end_col and i < m.cols) : (i += 1) {
-                                    scroll_ops.appendScrollButtonQuad(self, m, i, self.chromeQuadBg(sidebar_ops.sidebarActiveBg(self)));
-                                }
-                            }
-                        };
-                    }
-                } else {
-                    // 모서리 0(기반 토큰 — 제품 토큰 rich에서는 닿지 않는다): 직각 셀 — 바 배경 후 활성 탭 밴드(셀-셀 append
-                    // 순서로 밴드가 위). window.opacity는 셀 경로라 premultiply.
-                    if (paneBarBgCell(bar, self.cell_width_px, self.chromeCellBg(sidebar_ops.sidebarBg(self)))) |cell| pane_chrome.append(self.allocator, cell) catch {};
-                    if (m_opt) |m| {
-                        if (tabbarHighlightCell(m, pane_ops.paneActiveTermIndex(self, lr.leaf), self.chromeCellBg(hl_bg))) |cell| pane_chrome.append(self.allocator, cell) catch {};
-                    }
+                        }
+                    };
                 }
                 // 활성 pane 강조는 활성 탭 하단 앰버 언더바(appendActiveTabHighlight)로 일원화한다(사용자 요청) — 옛
                 // 앰버 사각 ring은 제거했다. full/minimal 모두 아래 공용 FocusOwner body border 하나가 실제 입력 경계를 담당한다.
@@ -22827,7 +22787,7 @@ pub const AppSession = struct {
                 if (ft_on) ft_rep = std.Io.Clock.awake.now(self.io).nanoseconds; // 조립 끝 = replace(투영) 시작
                 // 헤더 아이콘 줄의 화면 y 는 알림 배지 원과 같은 값이다(`sidebarHeaderIconRowTopPx`) — 렌더러는 다시 셈하지 않는다.
                 self.metal_buffer.sidebar_header_origin_y_px = sidebar_ops.sidebarHeaderIconRowTopPx(self);
-                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_chrome.items, pane_overlay.items, overlay_frames.items, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
+                if (self.metal_buffer.replace(self.allocator, pane_frames.items, self.renderer_state.atlas.config, self.cell_width_px, self.cell_height_px, sidebar_frame, sidebar_header_frame, sidebar_colors, pane_overlay.items, overlay_frames.items, floating_pf, drag_overlay_cells.items, self.gpu_quads.items, self.gpu_shadows.items, self.gpu_glyphs.items, kg_images, kg_uploads, kg_pixels, kg_live_ids.items)) |_| {
                     self.glyph_placement.commit(); // 이번 배치의 업로드가 metal_buffer 로 넘어갔다
                     // **스탬프는 replace 성공과 한 트랜잭션이다.** 실패(OOM)면 버퍼가 옛 셀을 그대로 들고 있으므로
                     // 기하만 새 값으로 올리면 이 함수가 없애려는 바로 그 불일치(옛 pitch 셀 + 새 헤더 높이)를 만든다.
@@ -23081,7 +23041,6 @@ pub const AppSession = struct {
             sidebar_frame,
             header,
             colors,
-            &.{},
             &.{},
             &.{},
             null,
@@ -60249,30 +60208,11 @@ test "move_pane_to_workspace:N 액션: 활성 pane을 N번 워크스페이스에
 
 // paneAtPoint·paneInDirection 단위 테스트는 session core로 이동(Model 기반 헤드리스) — src/session/session_model.zig.
 
-// paneBarBgCell이 바 rect를 sentinel-UV 배경 셀(origin 박힌, 폭=cols)로 만들고, 너무 작으면 null인지 — pane
-// 탭 바 배경의 코어라 헤드리스 단위로 고정한다(순수 함수, OS 무관).
-test "paneBarBgCell builds a bar-width background cell at the bar origin" {
-    // 바 rect (x=180, y=0, w=96, h=12), cell 12 → 8칸. origin 박히고 sentinel UV(배경만), bg 지정색.
-    const cell = paneBarBgCell(.{ .x = 180, .y = 0, .w = 96, .h = 12 }, 12, 0xFF112233).?;
-    try std.testing.expectEqual(@as(u16, 8), cell.width); // 96/12 = 8칸(아래 터미널과 정렬)
-    try std.testing.expectEqual(@as(u32, 180), cell.origin_x);
-    try std.testing.expectEqual(@as(u32, 0), cell.origin_y);
-    try std.testing.expectEqual(@as(u16, 0), cell.row);
-    try std.testing.expectEqual(@as(u32, 0), cell.slot_id); // 배경 셀(밴드) — glyph 아님
-    try std.testing.expectEqual(@as(f32, -1.0), cell.u0); // sentinel UV = 배경만
-    try std.testing.expectEqual(@as(u32, 0xFF112233), cell.background);
-    // 폭/높이/cell 0이면 null.
-    try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 0, .h = 12 }, 12, 0xFF000000) == null);
-    try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 96, .h = 12 }, 0, 0xFF000000) == null);
-    try std.testing.expect(paneBarBgCell(.{ .x = 0, .y = 0, .w = 8, .h = 12 }, 12, 0xFF000000) == null); // 1칸 미만
-}
-
 // 탭 바 컬럼 분할 hit-test(tabIndex/inCloseZone/inPlusZone/hasPlusZone)는 chrome `tabbar.Metrics` 메서드로 이주(C3b) —
 // 단위 테스트는 src/chrome/components/tabbar.zig. 여기선 platform이 그 hit-test와 공유하는 pointInRect 경계만 고정한다.
-// barMetrics가 바를 [탭 영역 | "+" zone]으로 나누고 극단(셀·바·탭 0)에 null을 주는지, tabbarHighlightCell이 활성 탭
-// 세그먼트 강조 셀(col=start·width·origin=bar)을 만드는지 — 탭 바 hit-test/렌더의 platform 측(메서드는 chrome tabbar.zig가
-// 테스트). 옛 BarMetrics 단위 테스트의 init-null·highlightCell 케이스를 이리로 보존한다(C3b 리뷰 반영 — 이주로 빠졌던 커버리지).
-test "barMetrics splits bar + tabbarHighlightCell active-tab band" {
+// barMetrics가 바를 [탭 영역 | "+" zone]으로 나누고 극단(셀·바·탭 0)에 null을 주는지 — 탭 바 hit-test의 platform 측
+// (메서드는 chrome tabbar.zig가 테스트). 옛 BarMetrics 단위 테스트의 init-null 케이스를 이리로 보존한다(C3b 리뷰 반영).
+test "barMetrics splits bar into the tab area and the + zone" {
     const bar: maru.session.SplitRect = .{ .x = 180, .y = 0, .w = 240, .h = 12 }; // cell 12 → 20칸, "+" zone 3 제외 탭 영역 17, 2탭 → tab_w=8
     const m = barMetrics(bar, 12, 2, 0, 0).?;
     try std.testing.expectEqual(@as(u32, 20), m.cols);
@@ -60283,14 +60223,6 @@ test "barMetrics splits bar + tabbarHighlightCell active-tab band" {
     try std.testing.expect(barMetrics(bar, 0, 2, 0, 0) == null);
     try std.testing.expect(barMetrics(.{ .x = 0, .y = 0, .w = 0, .h = 12 }, 12, 2, 0, 0) == null);
     try std.testing.expect(barMetrics(bar, 12, 0, 0, 0) == null);
-    // tabbarHighlightCell: 탭 1 = col [8,16), origin=bar.x, sentinel-bg(slot_id 0).
-    const cell = tabbarHighlightCell(m, 1, 0xFF445566).?;
-    try std.testing.expectEqual(@as(u16, 8), cell.col); // 1*tab_w
-    try std.testing.expectEqual(@as(u16, 8), cell.width);
-    try std.testing.expectEqual(@as(u32, 180), cell.origin_x);
-    try std.testing.expectEqual(@as(u32, 0xFF445566), cell.background);
-    try std.testing.expectEqual(@as(u32, 0), cell.slot_id);
-    try std.testing.expect(tabbarHighlightCell(m, 3, 0xFF000000) == null); // start(24) >= tab_cols(17) → 세그먼트 없음
 }
 
 // pane 라벨 세그먼트(PR2)의 폭 산출·탭 영역 offset 단일 출처 — custom_name 유무·좁은 바·max cap을 헤드리스로 고정한다.

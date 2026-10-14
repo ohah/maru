@@ -1723,7 +1723,7 @@ pub fn updateHoveredTab(self: *AppSession, x_px: f64, y_px: f64) BarHover {
 /// 앰버 언더바만(bg fill 없음 — strip 그대로), **pill**=둥근 inset 캡슐을 **lifted 회색(`lifted_bg`)으로 채워** 띄우고 옅은 밝은
 /// 테두리만(실제 Warp 벤치마킹 — 밝은 fill로 올린다, 어두운 외곽선 아님). bg=본문색(connected cutout), lifted_bg=strip보다 밝은
 /// 색(pill fill·포커스 밝기), accent=포커스 앰버/비포커스 muted(connected·underline 언더바). 세 스타일 모두 **세그먼트 기하
-/// 불변**이라 hit-test/✕/드래그 공통(스타일은 세그먼트 안 fill만 바꿈, §5.4). 모두 layer 2(per-frame, dropQuadsByLayer(2)가 비움). 모서리 0 갈래(기반 토큰 — 제품 토큰 rich에서는 닿지 않는다)는 이 함수 대신 tabbarHighlightCell 셀 밴드.
+/// 불변**이라 hit-test/✕/드래그 공통(스타일은 세그먼트 안 fill만 바꿈, §5.4). 모두 layer 2(per-frame, dropQuadsByLayer(2)가 비움). 활성 탭은 늘 이 함수다 — 옛 tui 룩(2026-08-19 제거)의 모서리 0 셀 밴드 갈래(`tabbarHighlightCell`)는 지웠다.
 pub fn appendActiveTabHighlight(self: *AppSession, m: chrome.components.tabbar.Metrics, tab_index: usize, bg: u32, lifted_bg: u32, accent: u32, space: chrome.tokens.Spacing, border: chrome.tokens.Border) void {
     const seg = m.segOf(tab_index);
     if (seg.end_col <= seg.start_col) return; // overflow(탭 영역 밖, 안 보이는) 탭

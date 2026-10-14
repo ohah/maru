@@ -88,7 +88,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 |---|---|---|
 | 셀 프리미티브(입력) | `renderer/draw_list.zig` `DrawCell{row,col,codepoint,combining,width,style}` | 터미널 코어→렌더러 **입력 계약**. sentinel/kind/origin/packed-color 없음 |
 | 백엔드 출력 셀 | `metal_frame.zig` `NativeMetalCell`(extern) | 백엔드가 실제로 그리는 셀. `reserved`(0/2~5=부분사각형 kind), UV sentinel(-1=배경만, +2.0=컬러 글리프 — **u0·u1 둘 다**에 실어야 한다. 셰이더가 `uv.x >= 2.0`으로 판정하므로 한쪽만 실으면 정점 보간에서 컬러 분기가 왼쪽 일부에서만 성립해 글리프가 세로 조각으로 잘린다), `origin_x/y`, `foreground`(0x00RRGGBB)/`background`(0xAARRGGBB) |
-| 합성 seam | `MetalFrameBuffer.replace(pane_frames, sidebar_*, pane_chrome_cells, pane_overlay_cells, overlay_frames)` | N-pane + 사이드바 + chrome + 모달을 Z-순서 단일 스트림으로. **chrome가 백엔드를 거쳐 들어오는 자리** |
+| 합성 seam | `MetalFrameBuffer.replace(pane_frames, sidebar_*, pane_overlay_cells, overlay_frames, …)` | N-pane + 사이드바 + chrome + 모달을 Z-순서 단일 스트림으로. **chrome가 백엔드를 거쳐 들어오는 자리**(옛 탭 바 셀 인자 `pane_chrome_cells`는 지웠다 — 탭 바는 layer 2 quad) |
 | 오버레이 컴포넌트(순수) | `command_palette.zig`·`find_overlay.zig` | `PaletteState`/`FindState` 순수(std+타입만, 헤드리스 테스트). 물리적으로 platform/macos |
 | chrome 렌더·hit-test | `app_session.zig`(chrome fn 다수) | `NativeMetalCell`을 **손으로 직접 구성**(`sentinelBgCell`/`appendVerticalLine`/`BarMetrics`/`sidebarBandCell`). DrawList 안 거침 |
 | theme | `config/theme.zig`→`appearance.ResolvedTheme`(9 색 role, `color.Rgb`) | 파생(lighten +24/+48·hover 중점·muted 55/45·drop alpha 0x55)이 코드 리터럴로 흩어짐. **비-색 토큰(spacing/border/radius) 없음** |
@@ -411,7 +411,7 @@ platform `buildChromeTokens`(→ 중립 `chrome_theme.tokensFor`)가 `appearance
 | **underline**(기본) | **없음**(strip 그대로) | 테마 accent(포커스)/muted | 가장 미니멀 — 박스 없이 언더바만(기본값, 사용자 요청) |
 | **pill** | 둥근 inset 캡슐(`corner_radii` + 세로 inset, **strip보다 밝은 lifted 회색 fill** + 옅은 밝은 hairline 테두리) | 없음 — **포커스=fill 밝기**(focus=sidebarActiveBg / 비포커스=sidebarHoverBg) | 떠 있는 pill — **실제 Warp 벤치마킹**(밝은 fill로 올림) |
 
-pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`border_color`)를 그대로 쓴다 — 세로 inset(`tab_pill_inset_px`)·반경(`corner_radius_px`)·테두리 두께(`line_thickness_px`) 토큰 재사용, 단일 quad라 언더바 overhang 없음. **실제 Warp는 어두운 외곽선이 아니라 strip보다 밝은 fill로 알약을 띄운다** — 그래서 fill = lifted 회색(focus=sidebarActiveBg / 비포커스=sidebarHoverBg), 테두리는 그 fill을 흰색으로 ~16% 블렌딩한 **옅은 밝은 hairline**(`blendRgb(lifted, white, 0x28)`). 포커스는 언더바·accent가 아니라 **fill 밝기**로(Warp는 단일 탭바라 색-dot이 상태용이고 fill 밝기가 활성 신호). 옛 tui 룩(2026-08-19 제거)은 스타일과 무관하게 **셀 밴드(`tabbarHighlightCell`)**였다 — 그 갈래(`tab_corner == 0`)는 코드에 남아 있지만 `buildChromeTokens`가 늘 `Tokens.rich`라 제품에서 닿지 않는다(`tabbarHighlightCell`은 단위 테스트가 직접 부른다). 즉 tab-style은 **rich 경로(`tab_corner > 0`)에서만** 의미를 갖고, 제품은 늘 그 경로다.
+pill은 기존 GPU quad 프리미티브(`GpuQuad.corner_radii`+`border_widths`/`border_color`)를 그대로 쓴다 — 세로 inset(`tab_pill_inset_px`)·반경(`corner_radius_px`)·테두리 두께(`line_thickness_px`) 토큰 재사용, 단일 quad라 언더바 overhang 없음. **실제 Warp는 어두운 외곽선이 아니라 strip보다 밝은 fill로 알약을 띄운다** — 그래서 fill = lifted 회색(focus=sidebarActiveBg / 비포커스=sidebarHoverBg), 테두리는 그 fill을 흰색으로 ~16% 블렌딩한 **옅은 밝은 hairline**(`blendRgb(lifted, white, 0x28)`). 포커스는 언더바·accent가 아니라 **fill 밝기**로(Warp는 단일 탭바라 색-dot이 상태용이고 fill 밝기가 활성 신호). 옛 tui 룩(2026-08-19 제거)은 스타일과 무관하게 **셀 밴드(`tabbarHighlightCell`)**였다 — 그 갈래(`tab_corner == 0`)와 헬퍼는 지웠다. 지금 활성 탭은 늘 layer 2 quad(`appendActiveTabHighlight`)이고 tab-style은 그 안에서 분기한다.
 
 ### 7.4 config & 세팅 GUI (거의 공짜)
 

@@ -378,7 +378,7 @@ pub fn paneTabWidth(cols: u16, tab_count: usize) u16 {
 
 /// 탭 바 레이아웃 단일 소스(§6) — barMetrics(hit-test)·buildPaneTabBarDrawList(렌더)가 공유해 보이는 탭/‹›/+ 와
 /// 클릭이 일치한다. base=paneTabAreaCols("+" zone 뺀 탭 영역). 전체 탭 폭(term*tab_w)이 base를 넘으면 우측에
-/// ‹›(왼/오 스크롤) 2칸을 예약해 tab_cols를 그만큼 줄인다(has_scroll). tab_w: 고정 폭(rich 토큰 16) 하한 or 균등(fixed 0 — 기반 토큰 `Tokens.base`, 제품은 rich라 테스트만). tab_w=0=분할 불가.
+/// ‹›(왼/오 스크롤) 버튼 둘(각 `scroll_button_cols` 3칸 — 6칸)을 예약해 tab_cols를 그만큼 줄인다(has_scroll). tab_w: 고정 폭(rich 토큰 16) 하한 or 균등(fixed 0 — 기반 토큰 `Tokens.base`, 제품은 rich라 테스트만). tab_w=0=분할 불가.
 pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) struct { tab_cols: u16, tab_w: u16, has_scroll: bool, eff_scroll: u32 } {
     const base = paneTabAreaCols(bar_cols);
     // **고정 폭은 하한이다(2026-08-18 사용자 요청).** 탭이 적으면 남는 폭을 나눠 **바를 꽉 채운다** —
@@ -386,16 +386,16 @@ pub fn tabLayout(bar_cols: u16, term_count: usize, tab_width_fixed: u16, scroll_
     // 갈렸다. 탭이 많아 균등 폭이 고정 폭보다 좁아지면 고정 폭이 이기고(그때 넘치면 아래 ‹› 스크롤),
     // fixed 0(기반 토큰 `Tokens.base` — 제품은 늘 rich라 닿지 않는다, 테스트만)은 항상 균등이다.
     const even = paneTabWidth(base, term_count);
-    const tab_w = if (tab_width_fixed > 0) @max(tab_width_fixed, even) else even;
+    const tab_w = @max(tab_width_fixed, even); // fixed 0(테스트)이면 균등 그대로
     if (tab_w == 0) return .{ .tab_cols = base, .tab_w = 0, .has_scroll = false, .eff_scroll = 0 };
     const total = @as(u32, @intCast(term_count)) * @as(u32, tab_w);
-    // #4(리뷰): 고정폭(tab_width_fixed>0 — rich)만 스크롤한다 — fixed 0 균등(기반 토큰, 제품은 안 닿음)은 tab_w=1 collapse로 넘쳐도 ‹›를 안 띄운다(옛 tui 룩[2026-08-19 제거]의 무변화 계약).
-    // ‹›(2칸) 둘 여유(base>2)도 필요.
+    // 넘치면(total > base) ‹›를 띄운다 — ‹›(버튼 둘) 둘 여유도 필요. 옛 tui 룩(2026-08-19 제거)은 fixed 0 균등이 넘쳐도
+    // (탭이 base 칸보다 많아 1칸 collapse) ‹›를 안 띄우는 가드(`tab_width_fixed > 0 and`)를 들었다 — 제품은 늘 고정 폭이라 지웠다.
     // ‹·› 는 각 `scroll_button_cols`(3칸: 좌여백·glyph·우여백) 이라 여섯을 예약한다 — 옛 1칸은 누르기
     // 어려웠고(사용자 보고 2026-08-18), 그때 늘린 2칸은 glyph 가 버튼 안에서 한쪽에 붙었다(2026-08-20).
     // 폭은 hit-test 와 **같은 상수**에서 나온다(§5.4).
     const scroll_zone_cols: u16 = @intCast(tabbar.Metrics.scroll_button_cols * 2);
-    const has_scroll = tab_width_fixed > 0 and total > base and base > scroll_zone_cols; // 버튼 넷을 뗄 여유
+    const has_scroll = total > base and base > scroll_zone_cols; // 버튼 넷을 뗄 여유
     const tab_cols: u16 = if (has_scroll) base - scroll_zone_cols else base;
     // #1(리뷰): scroll를 [0, total-tab_cols]로 clamp + has_scroll 아니면 0 → 탭 닫기/리사이즈로 넘침이 사라지면 stale scroll가
     // 자동으로 0이 돼 빈 탭 바에 갇히지 않는다. 렌더·hit-test·클릭이 이 eff_scroll을 공유(§6).
@@ -2030,7 +2030,7 @@ test "paneTabWidth divides cols among tabs (min 1, clamps when tabs exceed cols)
     try std.testing.expectEqual(@as(u16, 0), paneTabWidth(20, 0));
 }
 
-test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; base 토큰(fixed 0)·안넘침 무스크롤" {
+test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; 균등 분할(fixed 0)·안넘침 무스크롤" {
     // cols=40, "+"zone 3 → base=paneTabAreaCols(40)=37. 고정폭 16, 3탭 → total=48 > 37 → has_scroll.
     // ‹·› 는 **각 3칸**(좌여백·glyph·우여백)이라 여섯을 뗀다. tab_cols = 37 - 6 = 31.
     const ovf = tabLayout(40, 3, 16, 0);
@@ -2053,7 +2053,8 @@ test "tabLayout: rich 넘침 ‹›·tab_cols 축소·scroll clamp; base 토큰(
     const many = tabLayout(40, 5, 16, 0);
     try std.testing.expectEqual(@as(u16, 16), many.tab_w);
     try std.testing.expect(many.has_scroll);
-    // #4: base 토큰(fixed 0)은 탭 많아 tab_w=1 collapse여도 has_scroll=false(균등, 스크롤 안 함).
+    // fixed 0 균등 분할이 넘치지 않으면 무스크롤: 12탭 → tab_w=37/12=3, total=36 <= 37 → has_scroll=false.
+    // (fixed 0 이라도 넘치면[total > base] 이제 ‹›가 뜬다 — 옛 tui 룩의 #4 무스크롤 가드는 지웠다.)
     try std.testing.expect(!tabLayout(40, 12, 0, 0).has_scroll);
 }
 

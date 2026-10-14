@@ -463,7 +463,8 @@ pub fn rebootRevivalSpawn(
 }
 
 /// per-pane 가로 탭 바의 backing 픽셀 높이. 높이 자체는 도크 뷰 스위처와 공유하는 `chromeBarHeightPx`가
-/// 정하고, 여기서는 **터미널 쪽 게이트만** 얹는다. 제목은 origin_y를 pad_y만큼 내려 바 가운데에 두고,
+/// 정하고, 여기서는 **터미널 쪽 게이트만** 얹는다. 바 안 텍스트는 바 높이에서 파생한 오프셋으로 세로 가운데에
+/// 온다 — 셀 텍스트(grip·라벨)는 `chromeBarTextOffsetY`, measured 탭 제목은 role line box 기준(`appendPaneTabTitles`).
 /// paneTermRect가 이 높이만큼 내려 터미널 영역을 잘라 바와 터미널 첫 줄이 안 겹친다.
 /// chrome_minimal(quick terminal minimal)이면 0 — 바를 안 예약해 paneTermRect/paneBarRect가 탭 바를 통째로 끈다.
 pub fn paneBarHeightPx(self: *const AppSession) u32 {

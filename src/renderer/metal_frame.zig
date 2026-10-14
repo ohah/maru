@@ -1845,11 +1845,9 @@ pub const MetalFrameBuffer = struct {
         // 슬롯 row 기반이라 .m이 header_h 시프트하지만, 헤더는 헤더 영역 [0,header)에 그대로 박는다. null이면 헤더 없음.
         sidebar_header_frame: ?renderer.RenderFrame,
         sidebar_colors: CellColors,
-        // per-pane 탭 바 chrome 셀(배경 밴드 등). 각 셀이 자기 origin_x/origin_y를 들어 터미널 셀과 같은 경로로
-        // 렌더된다(maru_fill_cell_quad). 터미널 셀 '앞'에 두어 활성 panel 커서가 합쳐진 cells의 끝(suffix)에
-        // 남게 한다 — 커서 blink 노출 길이가 그대로 동작한다. glyph가 없으면(sentinel UV) upload 없이 bg만.
-        pane_chrome_cells: []const NativeMetalCell,
-        // panel 사이 divider 등 '터미널 위' overlay 셀. pane_chrome(맨 아래)과 달리 터미널 frame들 '뒤'·활성
+        // (옛 `pane_chrome_cells` — per-pane 탭 바 배경 셀을 터미널 셀 '앞'에 넣던 인자 — 는 지웠다. 탭 바는 layer 2
+        // quad 로 그리고, 셀로 칠하던 옛 tui 룩[2026-08-19 제거] 갈래가 유일한 생산자였다.)
+        // panel 사이 divider 등 '터미널 위' overlay 셀. 터미널 frame들 '뒤'·활성
         // panel 커서 suffix '앞'에 끼워, 터미널 내용 위에 그리되 커서 blink 노출 길이(cursor suffix)를 깨지
         // 않게 한다. 각 셀은 origin_x/origin_y로 같은 maru_fill_cell_quad 경로(sentinel UV → bg만).
         pane_overlay_cells: []const NativeMetalCell,
@@ -1886,11 +1884,9 @@ pub const MetalFrameBuffer = struct {
         live_image_ids: []const u32,
     ) !void {
         self.sidebar_source_valid = false; // 쓰기 시도 = 지문 무효(성공한 호출자만 다시 adopt 한다)
-        // 1) 터미널 셀: pane 탭 바 chrome을 먼저(커서 suffix 보존), 그 뒤 각 panel frame을 투영해 origin 박아
-        //    이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
+        // 1) 터미널 셀: 각 panel frame을 투영해 origin 박아 이어 붙인다. 커서 suffix는 맨 뒤(활성) panel만.
         var cells_list: std.ArrayList(NativeMetalCell) = .empty;
         errdefer cells_list.deinit(allocator);
-        try cells_list.appendSlice(allocator, pane_chrome_cells);
         var cursor_cells: usize = 0;
         // 셀이 자기 clip을 들고 간다(ABI v169). 표는 이 프레임의 셀과 **함께** 만들어지므로 둘의 수명이
         // 갈라지지 않는다 — 옛 프레임 슬롯은 pane 구성에 묶여 있어 목록 pane이 없는 프레임이 그것을
@@ -1916,7 +1912,7 @@ pub const MetalFrameBuffer = struct {
         // 사이드바 헤더 glyph(검색·아이콘 / 접힘 시 좌상단 펼치기 버튼)를 (0, sidebar_header_origin_y_px) cells로 활성 커서 suffix '앞'에
         // 끼운다 — 터미널 내용 '위'에 그려져, 접힘(사이드바 폭 0이라 헤더가 터미널 좌상단과 겹침)일 때 펼치기 버튼이
         // 터미널에 가려지지 않는다. 펼침일 땐 헤더(origin_x=0)와 터미널(origin_x≥사이드바폭)이 안 겹쳐 순서 무관(시각 동일).
-        // cursor_cells(suffix)는 보존돼 blink rebuild가 안 깨진다(divider와 같은 삽입 규율). pane_chrome cells[0] 가정도 유지.
+        // cursor_cells(suffix)는 보존돼 blink rebuild가 안 깨진다(divider와 같은 삽입 규율).
         if (sidebar_header_frame) |hf| {
             const hcells = try buildNativeCellsFromGlyphQuads(allocator, hf.glyph_quad_frame, hf.draw_list.cells, sidebar_colors);
             defer allocator.free(hcells);
@@ -3681,7 +3677,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
         }
     }.make;
     const atlas_config: renderer.GlyphAtlasConfig = .{ .atlas_width_px = 1024, .atlas_height_px = 1024 };
-    // pane_chrome 1셀(탭 바 흉내)과 drag 하이라이트 2셀.
+    // 터미널 레이어 셀 1개(pane_overlay 로 넣는다 — 커서가 없어 터미널 레이어 끝에 붙는다)와 drag 하이라이트 2셀.
     const chrome = [_]NativeMetalCell{bgCell(0xFF112233)};
     const drag_cells = [_]NativeMetalCell{ bgCell(0x55445566), bgCell(0x55445566) };
 
@@ -3689,7 +3685,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, &.{}, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 1), buf.modal_cells_start); // has_modal=true → 오버레이 레이어
         try std.testing.expectEqual(@as(u32, 1), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 0), buf.cursor_cells); // 드래그=caret 없음(정적 커서)
@@ -3700,7 +3696,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), buf.modal_cells_start); // 오버레이 없음
         try std.testing.expectEqual(@as(u32, 0), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 1), buf.cells.len); // chrome만
@@ -3709,7 +3705,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &drag_cells, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         const frame = buf.view();
         try std.testing.expectEqual(@as(usize, 0), frame.modal_cells_start);
         try std.testing.expectEqual(@as(u32, 1), frame.overlay_cells_present);
@@ -3745,7 +3741,7 @@ test "replace [5]: 모달(caret)+드래그 고스트 공존 → modal caret이 �
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
     // 마우스 드래그 중 ⌘F: overlay_frames(모달)+drag_overlay_frame(고스트) 공존. replace가 [고스트][모달] 순으로 조립.
-    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{modal_pf}, ghost_pf, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{modal_pf}, ghost_pf, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     // cursor_cells는 **모달**의 caret만(고스트 caret은 overlay_cursor_cells에 안 실림). 그 suffix가 버퍼 맨 끝 = 모달
     // 셀이어야 blink chop이 맞다. 고스트를 모달 '뒤'에 append하는 리팩터([0] 재발)면 buf.cells 끝이 고스트(origin 500)라 실패.
@@ -3771,7 +3767,7 @@ test "replace: caret 없는 오버레이 셀이 뒤에 붙어도 터미널 커�
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &border, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &border, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     // ★ 커서 구간이 살아 있어야 한다(옛 코드는 0이라 blink가 죽었다).
     try std.testing.expect(buf.cursor_cells >= 1);
@@ -3805,7 +3801,7 @@ test "replace: 셀이 자기 clip index를 들고 가고 표가 그 사각형을
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     const v = buf.view();
     try std.testing.expectEqual(@as(usize, 1), v.cell_clip_count);
@@ -3846,17 +3842,17 @@ test "replace: 목록 pane이 없는 프레임을 지나도 다음 프레임의 
     defer buf.deinit(allocator);
 
     var with_list = [_]PaneFrame{listed};
-    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(usize, 1), buf.view().cell_clip_count);
 
     // 목록이 빠진 프레임 — 자를 셀이 없으니 표도 비어야 한다(그 프레임엔 목록 셀도 없다).
     var without_list = [_]PaneFrame{plain};
-    try buf.replace(allocator, &without_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &without_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
     try std.testing.expectEqual(@as(usize, 0), buf.view().cell_clip_count);
     for (buf.cells) |cell| try std.testing.expectEqual(@as(u16, 0), cell.clip_index);
 
     // 다시 목록이 있는 프레임 — clip이 온전히 돌아온다.
-    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &with_list, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
     const v = buf.view();
     try std.testing.expectEqual(@as(usize, 1), v.cell_clip_count);
     try std.testing.expectEqual(clip.y, v.cell_clips.?[0].y);
@@ -3881,7 +3877,7 @@ test "replace: 같은 clip을 쓰는 pane들이 표 항목 하나를 공유한�
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &panes, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     try std.testing.expectEqual(@as(usize, 1), buf.view().cell_clip_count);
     for (buf.cells) |cell| try std.testing.expectEqual(@as(u16, 1), cell.clip_index);
@@ -3910,7 +3906,7 @@ test "SO1 사이드바 입력 지문은 adopt 로만 살아나고, 사이드바�
     try std.testing.expect(buf.sidebarSourceIs(key_b));
 
     // ② 전체 교체 — 사이드바 셀도 새로 만들므로 지문이 죽는다.
-    try buf.replace(allocator, &.{}, .{}, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &.{}, .{}, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
     try std.testing.expect(!buf.sidebarSourceIs(key_b));
 
     // ③ 제자리 수정(py_top) 쪽의 명시적 무효화.
@@ -4263,23 +4259,23 @@ test "[적대] replace 이미지 버퍼 재사용: 길이가 요동쳐도 방을
         defer buf.deinit(allocator);
 
         // (1) 큰 이미지 → 방이 512 가 된다.
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &big, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &big, &.{});
         try std.testing.expectEqual(@as(usize, 512), buf.image_pixels.len);
         try std.testing.expectEqual(@as(u8, 0xEE), buf.image_pixels[511]);
 
         // (2) 작은 이미지 → 길이는 64. 재사용이 켜져 있으면 방은 512 그대로(줄지 않는다).
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &small, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &small, &.{});
         try std.testing.expectEqual(@as(usize, 64), buf.image_pixels.len);
         try std.testing.expectEqual(@as(u8, 0x77), buf.image_pixels[63]);
         try std.testing.expectEqual(@as(usize, 512), buf.image_pixels_cap);
 
         // (3) 이미지 없음(0바이트) → 길이 0. 방은 유지된다.
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), buf.image_pixels.len);
         try std.testing.expectEqual(@as(usize, 512), buf.image_pixels_cap);
 
         // (4) 다시 큰 이미지 → 방을 재사용하고 내용이 온전하다(옛 0x77 이 남으면 안 된다).
-        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &big, &.{});
+        try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &big, &.{});
         try std.testing.expectEqual(@as(usize, 512), buf.image_pixels.len);
         for (buf.image_pixels) |b| try std.testing.expectEqual(@as(u8, 0xEE), b);
         // deinit 이 cap 크기로 돌려주는지는 testing.allocator 가 판정한다(누수/잘못된 크기면 실패).
@@ -4297,11 +4293,11 @@ test "[적대] replace 이미지 버퍼 재사용: 방을 재사용해도 내용
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &first, &.{});
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &first, &.{});
     try std.testing.expectEqualSlices(u8, &first, buf.image_pixels);
 
     const ptr_before = buf.image_pixels.ptr;
-    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &second, &.{});
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &second, &.{});
     try std.testing.expectEqualSlices(u8, &second, buf.image_pixels); // 옛 바이트가 남으면 실패
     try std.testing.expect(buf.image_pixels.ptr == ptr_before); // 같은 방을 썼다
 }
@@ -4419,11 +4415,11 @@ test "[적대] replace 원자성: 재사용 경로에서 뒤 단계가 OOM 이�
         defer buf.deinit(std.testing.allocator); // 실패 시도와 무관하게 늘 온전히 돌려준다
 
         // 첫 프레임은 실패 없이 채운다(fail_index 가 아직 안 왔거나, 왔으면 이 회차는 건너뛴다).
-        buf.replace(alloc, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &first, &live) catch continue;
+        buf.replace(alloc, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &first, &live) catch continue;
         try std.testing.expectEqualSlices(u8, &first, buf.image_pixels);
 
         // 둘째 프레임: 어느 할당에서 실패하든 image_pixels 는 first 그대로여야 한다.
-        if (buf.replace(alloc, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &second, &live)) |_| {
+        if (buf.replace(alloc, &.{}, atlas_config, 8, 16, null, null, colors, &.{}, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &second, &live)) |_| {
             try std.testing.expectEqualSlices(u8, &second, buf.image_pixels); // 성공했으면 새 것
             if (saw_failure) break; // 실패 지점을 하나라도 지난 뒤 성공까지 봤으면 충분하다
         } else |err| {
@@ -4598,7 +4594,7 @@ test "replace: 오버레이 여러 장 — 장마다 자기 원점, 앞 장의 c
 
     var buf: MetalFrameBuffer = .{};
     defer buf.deinit(allocator);
-    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{}, &.{ first, second }, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
+    try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &.{}, &.{ first, second }, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
 
     try std.testing.expectEqual(@as(usize, 3), buf.cells.len); // 앞 장 본문 1 + 뒤 장 본문 1 + 앞 장 caret 1
     try std.testing.expectEqual(@as(u32, 100), buf.cells[0].origin_x); // painter 순서: 앞 장 본문이 먼저

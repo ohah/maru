@@ -2,9 +2,9 @@
 //! 같은 자기-중앙 모달과 달리, 세팅 셸(CS-4-4)이 각 행의 control rect에 배치해 쓰는 **leaf 컴포넌트**라 view/
 //! hitTest가 host props가 아니라 **주어진 rect**를 기준으로 그린다. 계약은 다른 컴포넌트와 동형: State(순수
 //! 데이터) + view(순수, rect+tokens→ops) + hitTest(순수) + handlePointer/handleKey(State mutate + intent).
-//! 모양은 tokens.space로 두 룩 분기: rich(>0)=GPU quad(둥근 pill+원형 knob), 기반 토큰 `base`(0, 기본값)=셀 정렬 text 스위치
-//! `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌, 트랙=muted_fg) — quad의 paintRectBg 셀 번짐·선택
-//! 하이라이트 가림 회피(§6.1 결정). 제품은 늘 rich라 셀 갈래에 닿지 않는다(테스트가 base로 셀 lowering을 본다). 색은 ColorRole이라 백엔드가 토큰으로 해석. 단일 출처: docs/config-gui.md §2·§6, chrome-strategy.md §5.4.
+//! 모양은 GPU quad(둥근 pill+원형 knob)다. 옛 tui 룩(2026-08-19 제거)은 모서리 0 토큰에서 셀 정렬 text 스위치
+//! `[█ ]`/`[ █]`로 그렸다 — 제품 토큰은 rich 하나라 그 갈래를 지웠다. 색은 ColorRole이라 백엔드가 토큰으로 해석.
+//! 단일 출처: docs/config-gui.md §2·§6, chrome-strategy.md §5.4.
 
 const std = @import("std");
 const draw = @import("../draw.zig");
@@ -53,8 +53,9 @@ fn geom(rect: draw.Rect, value: bool) Geom {
 /// (x,y)가 toggle pill 안인가 — 클릭 hit-test. view와 같은 geom을 써 "보이는 pill == 눌리는 pill". 셀 0/비유한 가드.
 pub fn hitTest(rect: draw.Rect, x_px: f64, y_px: f64) bool {
     if (rect.w == 0 or rect.h == 0 or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
-    // 클릭 영역 = 주어진 control rect 전체(셸이 그려지는 위젯 폭으로 rect를 준다 — 셀 갈래(base)는 4칸 트랙이 pill보다 넓어,
-    // pill 기준으로 잡으면 닫는 `]` 우측이 안 눌렸다(리뷰 #823). rect가 곧 보이는 위젯이라 rect == 클릭.
+    // 클릭 영역 = 주어진 control rect 전체(pill 기준이 아니다). 옛 tui 룩(2026-08-19 제거)의 셀 갈래는 4칸 트랙 `[  ]`이
+    // pill보다 넓어 pill 기준이면 닫는 `]` 우측이 안 눌렸다(리뷰 #823) — 그 갈래는 지웠고, 지금 rect는 셸의
+    // `toggleRectIn`이 준 폭(pill보다 몇 px 넓을 수 있다)이라 클릭 영역이 pill보다 살짝 넓다.
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);
     return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(rect.w)) and
@@ -78,47 +79,23 @@ pub fn handleKey(k: input.InputEvent.KeyEvent, state: *State) ?Action {
     return .changed;
 }
 
-/// 셀 갈래(base) 스위치 트랙(4칸: `[`·안쪽 2칸·`]`) — knob `█`이 꺼짐=안쪽 좌(셀1), 켜짐=안쪽 우(셀2)에 놓인다.
-const tui_track = "[  ]";
-const tui_knob = "\u{2588}"; // █ FULL BLOCK(합성 글리프 — 셀 꽉 채움, 폰트 무관 렌더)
-
-/// toggle을 control rect에 그린다. **두 룩 분기**(tokens.space.corner_radius_px):
-///  - rich(>0): GPU quad pill+knob(둥근 트랙/원형 knob) — sub-pixel.
-///  - base(0 — 제품은 늘 rich라 테스트 경로): 셀 정렬 **text 스위치** `[█ ]`(꺼짐)/`[ █]`(켜짐). 트랙=muted_fg, knob=켜짐 accent_bar(앰버)/꺼짐
-///    surface_fg. quad를 이 셀 갈래에서 쓰면 paintRectBg가 셀 단위라 sub-pixel pill/knob이 거칠게 겹치고 선택 하이라이트가
-///    덮었다 — dropdown처럼 text 레이어로 그려 셀 정렬·하이라이트 위 또렷(단일 출처: docs/config-gui.md §6 결정).
-/// 순수: state·rect·tokens만 읽는다. `cw`는 셀 갈래 knob 셀 오프셋용(rich는 무시). out/op은 호출자(셸) frame arena 소유.
+/// toggle을 control rect에 그린다 — GPU quad pill(둥근 트랙) + 원형 knob(sub-pixel). 켜짐=maru 앰버(accent_bar),
+/// 꺼짐=muted_fg 트랙이고 knob 은 surface_fg 다. 옛 tui 룩(2026-08-19 제거)은 모서리 0 토큰에서 셀 정렬 text 스위치
+/// `[█ ]`/`[ █]`를 그렸다 — 제품 토큰은 rich 하나라 그 갈래를 지웠다.
+/// 순수: state·rect만 읽는다. out/op은 호출자(셸) frame arena 소유.
 pub fn view(
     state: *const State,
     rect: draw.Rect,
-    cw: u32,
-    tk: *const tokens.Tokens,
     arena: std.mem.Allocator,
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (rect.w == 0 or rect.h == 0) return;
-    const round = tk.space.corner_radius_px > 0; // rich=둥근 quad, base=셀 text
-    if (round) {
-        const g = geom(rect, state.value);
-        const pill_r: u16 = @intCast(@min(g.pill.h / 2, @as(u32, std.math.maxInt(u16))));
-        const knob_r: u16 = @intCast(@min(g.knob.h / 2, @as(u32, std.math.maxInt(u16))));
-        // 켜짐=maru 앰버(accent_bar), 꺼짐=muted_fg. 상태는 트랙 색 + knob 위치로 읽는다.
-        try out.append(arena, .{ .quad = .{ .rect = g.pill, .fill_role = if (state.value) .accent_bar else .muted_fg, .corner_radii = .{ pill_r, pill_r, pill_r, pill_r } } });
-        try out.append(arena, .{ .quad = .{ .rect = g.knob, .fill_role = .surface_fg, .corner_radii = .{ knob_r, knob_r, knob_r, knob_r } } });
-        return;
-    }
-    // base(셀 갈래): 트랙(muted_fg) 먼저, 그 위에 knob `█`(셀 오프셋 cw). 두 번째 op이 첫 cp[]를 덮어 `[█ ]`/`[ █]`이 된다.
-    const trun = try arena.alloc(draw.Run, 1);
-    trun[0] = .{ .text = tui_track };
-    try out.append(arena, .{ .text = .{ .origin = .{ .x = rect.x, .y = rect.y }, .runs = trun, .role = .muted_fg } });
-    const knob_cell: i32 = if (state.value) 2 else 1; // `[`=셀0, 안쪽=셀1·2, `]`=셀3
-    const krun = try arena.alloc(draw.Run, 1);
-    krun[0] = .{ .text = tui_knob };
-    try out.append(arena, .{ .text = .{
-        .origin = .{ .x = rect.x + knob_cell * @as(i32, @intCast(cw)), .y = rect.y },
-        .runs = krun,
-        .role = if (state.value) .accent_bar else .surface_fg,
-    } });
+    const g = geom(rect, state.value);
+    const pill_r: u16 = @intCast(@min(g.pill.h / 2, @as(u32, std.math.maxInt(u16))));
+    const knob_r: u16 = @intCast(@min(g.knob.h / 2, @as(u32, std.math.maxInt(u16))));
+    // 켜짐=maru 앰버(accent_bar), 꺼짐=muted_fg. 상태는 트랙 색 + knob 위치로 읽는다.
+    try out.append(arena, .{ .quad = .{ .rect = g.pill, .fill_role = if (state.value) .accent_bar else .muted_fg, .corner_radii = .{ pill_r, pill_r, pill_r, pill_r } } });
+    try out.append(arena, .{ .quad = .{ .rect = g.knob, .fill_role = .surface_fg, .corner_radii = .{ knob_r, knob_r, knob_r, knob_r } } });
 }
 
 // ── 테스트 ──────────────────────────────────────────────────────────────────────
@@ -171,49 +148,15 @@ test "toggle handleKey: Space/Enter=토글, 그 외=null" {
     try std.testing.expect(!s.value);
 }
 
-test "toggle view base 토큰: 트랙 text(muted) + knob █(꺼짐=셀1·surface, 켜짐=셀2·accent)" {
-    const Rgb = @import("../../color.zig").Rgb;
+test "toggle view: pill+knob quad 2개(둥근), knob 꺼짐=좌·켜짐=우" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const cw: u32 = 8;
-
-    // 기반 토큰 모양(corner_radius_px=0 — `Tokens.base`와 같은 shape) — 셀 정렬 text.
-    const base = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
-    var out: std.ArrayList(draw.Op) = .empty;
-
-    // 꺼짐: 트랙 '[  ]'(muted) + knob █(좌, 셀1 → x=100+1*8=108, surface_fg).
-    var off = State{ .value = false };
-    try view(&off, test_rect, cw, &base, arena, &out);
-    try std.testing.expectEqual(@as(usize, 2), out.items.len);
-    try std.testing.expect(out.items[0] == .text and out.items[1] == .text);
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[0].text.role); // 트랙
-    try std.testing.expectEqualStrings(tui_track, out.items[0].text.runs[0].text);
-    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[1].text.role); // knob 꺼짐색
-    try std.testing.expectEqual(@as(i32, 108), out.items[1].text.origin.x); // 안쪽 좌(셀1)
-    try std.testing.expectEqualStrings(tui_knob, out.items[1].text.runs[0].text);
-
-    // 켜짐: knob █(우, 셀2 → x=100+2*8=116, accent_bar).
-    out.clearRetainingCapacity();
-    var on = State{ .value = true };
-    try view(&on, test_rect, cw, &base, arena, &out);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[1].text.role);
-    try std.testing.expectEqual(@as(i32, 116), out.items[1].text.origin.x); // 안쪽 우(셀2)
-}
-
-test "toggle view rich: pill+knob quad 2개(둥근), knob 꺼짐=좌·켜짐=우" {
-    const Rgb = @import("../../color.zig").Rgb;
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const cw: u32 = 8;
-    var rich = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
-    rich.space.corner_radius_px = 8;
     var out: std.ArrayList(draw.Op) = .empty;
 
     // 꺼짐: pill(muted_fg) + knob(좌, x=102), 둥근(pill h/2=10, knob kd/2=8).
     var off = State{ .value = false };
-    try view(&off, test_rect, cw, &rich, arena, &out);
+    try view(&off, test_rect, arena, &out);
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[0] == .quad and out.items[1] == .quad);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[0].quad.fill_role);
@@ -224,7 +167,7 @@ test "toggle view rich: pill+knob quad 2개(둥근), knob 꺼짐=좌·켜짐=우
     // 켜짐: 트랙 accent_bar + knob 우(x=100+36-2-16=118).
     out.clearRetainingCapacity();
     var on = State{ .value = true };
-    try view(&on, test_rect, cw, &rich, arena, &out);
+    try view(&on, test_rect, arena, &out);
     try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[0].quad.fill_role);
     try std.testing.expectEqual(@as(i32, 118), out.items[1].quad.rect.x); // 우측
 }

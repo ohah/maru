@@ -104,9 +104,10 @@ pub fn decideWith(ctx: Context, before: []const u8, after: []const u8, prev: ?[]
 
 /// `/* */` 블록 주석을 쓰는 문법(C 계열·CSS) — 이어쓰기(` * `)를 한다. VS Code 는 TS·JS·Java·PHP 에만 규칙을 두고 C·C++·Go·Rust 에는 두지 않는다 —
 /// 같은 주석 문법이라 우리는 함께 한다(계획의 「의도한 차이」). Swift(번들 언어 확대 BL2)도 같다 — VS Code swift 에는 블록 주석 규칙이 없다.
+/// BL3 의 SQL 도 같은 `/* */` 라 함께 한다(VS Code sql 에도 규칙이 없다), Dart 는 VS Code 내장 설정이 없어 C 계열과 같이 둔다.
 fn hasBlockComment(g: language.Grammar) bool {
     return switch (g) {
-        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .rust, .php, .kotlin, .css, .swift => true,
+        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .rust, .php, .kotlin, .css, .swift, .sql, .dart => true,
         else => false,
     };
 }
@@ -233,7 +234,7 @@ fn indentRule(ctx: Context, before: []const u8, after: []const u8) bool {
     return switch (ctx.grammar) {
         .python => pythonBlock(before, ctx.quotes),
         .ruby => rubyBlock(before),
-        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .php, .swift => caseLabel(before),
+        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .php, .swift, .dart => caseLabel(before),
         .yaml => yamlBlock(before, ctx.quotes),
         .lua => luaBlock(before, ctx.quotes),
         else => false,
@@ -437,6 +438,10 @@ const intended = [_]Intended{
     .{ .grammar = .swift, .before = "default:" }, // 같은 이유
     .{ .grammar = .swift, .before = "/**" }, // C 계열과 같은 블록 주석이라 이어 쓴다
     .{ .grammar = .swift, .before = " * a" }, // 같은 이유
+    // BL3 — SQL 은 같은 블록 주석이라 이어 쓴다(VS Code sql 설정엔 `onEnterRules` 가 없다). Dart 는 VS Code 내장이 없어 대조하지 않는다.
+    .{ .grammar = .sql, .before = "/**" }, // C 계열과 같은 블록 주석이라 이어 쓴다
+    .{ .grammar = .sql, .before = " * a" }, // 같은 이유
+    .{ .grammar = .sql, .before = "-- (" }, // 줄 주석 안 괄호(TypeScript `// {` 와 같다)
 };
 
 fn intendedDiff(g: language.Grammar, before: []const u8) ?usize {

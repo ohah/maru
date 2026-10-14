@@ -94,6 +94,11 @@ const corpus = {
     ['// note', 'more', ''], ['// note', '', ''], ['x = 1 // a', 'b', ''], ['case .a:', '', ''], ['default:', '', ''], ['/**', '', ''],
     [' * a', '', '/**'], ['guard let x = y else {', '}', ''], ['/// doc', 'more', ''], ['/// doc', '', ''],
   ]],
+  // BL3 — SQL. VS Code sql 설정엔 `indentationRules` 도 `onEnterRules` 도 없다 — 괄호 기본 규칙뿐이다. Dart 는 VS Code 내장이 없어 대조하지 않는다.
+  sql: ['sql', [
+    ['CREATE TABLE t (', ')', ''], ['CREATE TABLE t (', '', ''], ['SELECT f(a, ', '', ''], ['WHERE id IN (', ')', ''], ['SELECT a', '', ''],
+    ['-- note', 'more', ''], ['-- (', '', ''], ["SELECT '('", '', ''], ['BEGIN', '', ''], ['CASE', '', ''], ['/**', '', ''], [' * a', '', '/**'],
+  ]],
 };
 
 const zs = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\t/g, '\\t').replace(/\n/g, '\\n') + '"';

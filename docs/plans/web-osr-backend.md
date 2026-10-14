@@ -1168,11 +1168,11 @@ DevTools 자리 둘이 비어 있을 때만(`Kick.reserve` — 둘째는 termina
 (terminate 는 다음 tick 에 다시 보낸다).
 
 **W9a③ 구현**(localStorage·쿠키·clearStorage — `web_cdp_storage.zig`, 별도 PR): 시작에 확인한 문서 주소(maru 가 아는 그 탭의 주소)를 op 에 주고
-그 주소로만 한다. localStorage 는 `Page.getFrameTree` 로 주 프레임 출처를 본 뒤 격리 world(`Page.createIsolatedWorld`)의 `Storage.prototype.*`,
+그 주소로만 한다. localStorage 는 `Target.getTargetInfo` 로 그 탭의 주소(출처)를 본 뒤(6 회차 전엔 `Page.getFrameTree`) 격리 world(`Page.createIsolatedWorld`)의 `Storage.prototype.*`,
 쿠키 읽기는 `Network.getCookies {urls}`, 쓰기는 호스트 자신만(D6), 지우기·clearStorage 는 받은 정확한 키로 하나씩(D7 — 한 요청에 512 개까지),
 쿠키 저장소 op 은 확인 grant 의 호스트가 지금 문서를 덮는지 시작에 다시 본다. 확정 전 이동 중이면 localStorage 의 페이지 호출을 보내지 않는다.
 스모크 `w9a-storage`.
-W9a③ 적대 리뷰(다섯 회차):
+W9a③ 적대 리뷰(열 회차 — 다섯 뒤 사용자 요청으로 다섯 더):
 - **1 회차**(실제 앱·단위 재현 다섯 — 쿠키 격리는 모든 공격에 버텼다): 중 — 지우기·clearStorage 가 중간에 실패해도 ok 였다(엔진을 죽이자 170 개 중
   102 개가 남았는데 ok) → 실패를 세어 끝에 「N of M」, 엔진·탭이 사라지면 곧. 중하 — 이름·domain·path 가 같고 분할(CHIPS)만 다른 쿠키 둘 중 하나만
   지웠다 → 분할도 열쇠에. 하 — `sameSite` 를 WebKit 처럼 소문자로, `--domain .a.test` 가 호스트 전용 쿠키까지 지웠다(WebKit 과 다름) → WebKit 규칙,
@@ -1205,6 +1205,10 @@ W9a③ 적대 리뷰(다섯 회차):
   페이지가 오래 바쁘면 setLocalStorage 의 평가가 요청 시한(-32004) 뒤에 돈다 — -32004 는 「쓰지 않았다」 가 아니다(WebKit 의 evaluateJavaScript 도 같다).
   참고: `window.open('')` 뒤 `document.write` 로 채운 팝업은 maru 가 주소를 about:blank 로 알아 localStorage 가 「웹 출처 없음」. W9b 로케이터의
   `frameTreeStep` 도 같은 프레임 트리 문제를 가진다(W9b 몫).
+- **7 회차**(단위·실제 앱 재현): 하중 — 「끝까지 간다」(committed)를 단계로만 봐 첫 지우는 호출을 보내기 직전부터 참이라, 쿠키를 읽는 사이 grant 가
+  철회되거나 요청이 시한이면(-32004 를 받은 뒤) 첫 지우기·clearDataForOrigin 이 그래도 나갔다(실제 앱: 「timeout」 뒤 쿠키가 지워졌다) → 지우는 호출에
+  「보내지 못함」 이 아닌 답이 온 뒤부터 committed. 문서: 웹 출처가 없는 문서의 쿠키 op 은 확인 grant(호스트)로는 unauthorized(WebKit 과 같다 —
+  capability 로만 `[]`·ok).
 
 **W9a 적대 리뷰**(구현 뒤 다섯 회차 — 1 회차는 W9a① 만, 2 회차부터 ①+②):
 - **1 회차**(실제 앱·CEF 탐침·변이 21(걸림 14 — 생존 넷은 시험을 더했다: 「불러오는 중」 전의 「아님」, 만든 직후 about:blank 의 문서, 묻는 닫기

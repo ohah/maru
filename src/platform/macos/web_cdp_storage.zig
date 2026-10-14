@@ -91,6 +91,8 @@ pub const Op = struct {
     retry_method: []const u8 = "",
     retry_params: ?[]u8 = null,
     retries: u8 = 0,
+    /// 지우는 호출에 「보내지 못함」 이 아닌 답이 왔다(`committed`).
+    destructive_sent: bool = false,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
         for ([_]?[]u8{ self.key, self.value, self.name, self.domain, self.path, self.frame_id, self.delete_why, self.clean_url, self.retry_params }) |v| if (v) |b| gpa.free(b);
@@ -143,9 +145,9 @@ pub const Op = struct {
     }
 
     pub fn committed(self: *const Op) bool {
-        // 지우기를 시작했으면(하나라도 보냈으면) 끝까지 — 반쯤 지운 채 두지 않는다. clearStorage 는 저장소를 지우러 보낸 때부터(적대 리뷰 6 회차:
-        // 그 뒤 철회·시한이 끼면 저장소만 지우고 쿠키를 남겼다).
-        return self.stage == .cookie_delete or (self.kind == .clear_storage and (self.stage == .clear_origin or self.stage == .cookies_read));
+        // 지우는 호출(쿠키 지우기·저장소 지우기)이 실제로 나간 뒤부터 끝까지 — 반쯤 지운 채 두지 않는다(6 회차: 저장소만 지우고 쿠키를 남겼다).
+        // 나가기 전엔 아니다(7 회차: 단계만 보고 첫 지우기를 보내기 직전부터 참이라, 철회·시한 뒤에도 첫 지우기가 나갔다).
+        return self.destructive_sent;
     }
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -218,6 +220,7 @@ pub const Op = struct {
             return .{ .sleep = busy_retry_ms };
         }
         self.retries = 0;
+        if ((self.stage == .cookie_delete or self.stage == .clear_origin) and reply != .not_sent) self.destructive_sent = true;
         return self.remember(gpa, try self.feedInner(gpa, reply));
     }
 
@@ -770,10 +773,11 @@ test "W9a③ 쿠키 지우기: 그 path 로 읽어 이름·path·호스트로 �
     const cookies = "{\"cookies\":[{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/p\"},{\"name\":\"s\",\"domain\":\".a.test\",\"path\":\"/p\",\"partitionKey\":{\"topLevelSite\":\"https://a.test\",\"hasCrossSiteAncestor\":false}},{\"name\":\"s\",\"domain\":\".test\",\"path\":\"/p\"},{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"t\",\"domain\":\"a.test\",\"path\":\"/p\"}]}";
     const d1 = try expectCall(try op.feed(gpa, .{ .ok = cookies }), "Network.deleteCookies");
     defer gpa.free(d1);
-    try testing.expect(op.committed());
+    try testing.expect(!op.committed()); // 첫 지우기는 아직 나가지 않았다 — 철회·시한이면 보내지 않는다(7 회차)
     try testing.expectEqualStrings("{\"name\":\"s\",\"domain\":\".a.test\",\"path\":\"/p\",\"partitionKey\":{\"topLevelSite\":\"https://a.test\",\"hasCrossSiteAncestor\":false}}", d1);
     const d2 = try expectCall(try op.feed(gpa, .{ .cdp_error = "{\"code\":-32000,\"message\":\"x\"}" }), "Network.deleteCookies");
     defer gpa.free(d2);
+    try testing.expect(op.committed()); // 첫 지우기가 나갔다 — 이제 끝까지
     try testing.expectEqualStrings("{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/p\"}", d2);
     // 하나를 못 지웠다 — 나머지는 지우고 끝에 실패로(적대 리뷰 1 회차: 전에는 ok).
     try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .failed, "1 of 2 cookies could not be deleted (DevTools refused the delete)");
@@ -1206,7 +1210,7 @@ test "W9a③ 적대 리뷰 6 회차 재현 F4: clearStorage 는 저장소를 지
     defer op.deinit(gpa);
     op.doc_url = "https://a.test/";
     r1FreeStep(try op.start(gpa));
-    try testing.expect(op.committed()); // clearDataForOrigin 을 보냈다
+    try testing.expect(!op.committed()); // 아직 나가지 않았다 — 철회·시한이면 보내지 않는다(7 회차)
     r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
-    try testing.expect(op.committed()); // 쿠키를 읽는 중
+    try testing.expect(op.committed()); // 저장소를 지웠다 — 쿠키를 읽는 중도 끝까지
 }

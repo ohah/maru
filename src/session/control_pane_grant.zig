@@ -80,6 +80,9 @@ pub const PaneGrant = struct {
     scope: capmod.ScopeClass,
     /// `browser_storage` 가 묶인 호스트(모달이 보인 URL 의 호스트). `browser` 는 보지 않는다.
     host: GrantHost = .{},
+    /// 저장소가 새 자리를 기록할 때 매기는 번호(W9c① — 1 부터, 다시 쓰지 않는다). 같은 자리를 다시 허용하면 그대로이고, 철회 뒤 다시
+    /// 허용하면 새 번호다. 넘긴 값은 쓰지 않는다. 자리 비교(`eql`)·인가에는 쓰지 않는다.
+    id: u64 = 0,
 
     /// 같은 grant 자리인가(pane·target·scope) — 호스트는 자리의 값이다(다시 허용하면 바뀐다).
     pub fn eql(a: PaneGrant, b: PaneGrant) bool {
@@ -95,6 +98,9 @@ pub const max_grants: usize = 64;
 pub const PaneGrantStore = struct {
     grants: [max_grants]PaneGrant = undefined,
     len: usize = 0,
+    /// 다음 새 자리의 번호(W9c①) — `clearAll`·철회로도 되돌리지 않는다(같은 번호가 다른 허락에 다시 쓰이면 콘솔이 그 허락을 앞 허락의
+    /// 연속으로 봤다).
+    next_id: u64 = 1,
 
     fn find(self: *PaneGrantStore, g: PaneGrant) ?*PaneGrant {
         for (self.grants[0..self.len]) |*e| if (e.eql(g)) return e;
@@ -107,8 +113,8 @@ pub const PaneGrantStore = struct {
         return null;
     }
 
-    /// grant 기록. 같은 (pane, target, scope) 가 이미 있으면 호스트만 바꾼다(다시 허용한 사이트가 새 범위다). 신규가 용량
-    /// 초과면 `error.Full`.
+    /// grant 기록. 같은 (pane, target, scope) 가 이미 있으면 호스트만 바꾼다(다시 허용한 사이트가 새 범위다 — 번호는 그대로). 새 자리는
+    /// 새 번호를 받는다(`g.id` 는 쓰지 않는다). 신규가 용량 초과면 `error.Full`.
     pub fn grant(self: *PaneGrantStore, g: PaneGrant) error{Full}!void {
         if (self.find(g)) |existing| {
             existing.host = g.host;
@@ -116,6 +122,8 @@ pub const PaneGrantStore = struct {
         }
         if (self.len >= max_grants) return error.Full;
         self.grants[self.len] = g;
+        self.grants[self.len].id = self.next_id;
+        self.next_id += 1;
         self.len += 1;
     }
 
@@ -137,6 +145,12 @@ pub const PaneGrantStore = struct {
     pub fn stillGrants(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass, host: *const GrantHost) bool {
         const g = self.findConst(pane, target, scope) orelse return false;
         return scope != .browser_storage or g.host.eql(host);
+    }
+
+    /// (pane, target, scope) grant 의 번호(없으면 null) — W9c①: 콘솔이 「같은 허락으로 읽는 쪽인가」 를 가른다.
+    pub fn idOf(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass) ?u64 {
+        const g = self.findConst(pane, target, scope) orelse return null;
+        return g.id;
     }
 
     /// (pane, target, scope) grant 의 호스트(없으면 null).
@@ -323,6 +337,36 @@ test "hostOfUrl: http(s) 호스트만 — 다른 스킴과 호스트 없는 URL 
     try testing.expect(hostOfUrl("") == null);
     // 사용자 정보로 호스트를 속여도 진짜 호스트를 준다.
     try testing.expectEqualStrings("evil.io", hostOfUrl("https://github.com@evil.io/").?);
+}
+
+test "W9c①: grant 번호 — 새 자리마다 새 번호, 다시 허용은 그대로, 철회 뒤 다시 허용·전부 취소 뒤에도 겹치지 않는다" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try store.grant(.{ .pane = 5, .target = 12, .scope = .browser });
+    const a = store.idOf(5, 11, .browser).?;
+    const b = store.idOf(5, 12, .browser).?;
+    try testing.expect(a != 0 and b != 0 and a != b);
+    try testing.expect(store.idOf(5, 11, .browser_storage) == null);
+    // 같은 자리를 다시 허용(호스트만 바뀐다)하면 번호는 그대로 — 같은 허락이다.
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser, .host = GrantHost.init("x.test") });
+    try testing.expectEqual(a, store.idOf(5, 11, .browser).?);
+    // 철회하고 다시 허용하면 새 번호 — 철회 전의 읽기가 묶인 것을 이어받지 않는다.
+    store.revoke(5, 11, .browser);
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const c = store.idOf(5, 11, .browser).?;
+    try testing.expect(c != a and c != b);
+    // 전부 취소해도 번호는 처음으로 돌아가지 않는다.
+    store.clearAll();
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const d = store.idOf(5, 11, .browser).?;
+    try testing.expect(d != a and d != b and d != c);
+    // 탭이 닫혀 사라진 자리도 같다.
+    store.removeSurface(11);
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try testing.expect(store.idOf(5, 11, .browser).? != d);
+    // 넘긴 값의 번호는 쓰지 않는다 — 번호는 저장소가 매긴다.
+    try store.grant(.{ .pane = 9, .target = 9, .scope = .browser, .id = a });
+    try testing.expect(store.idOf(9, 9, .browser).? != a);
 }
 
 test "GrantHost: 상한을 넘거나 빈 호스트는 빈 값" {

@@ -188,6 +188,59 @@ pub fn readDialogText(cursor: *ReadCursor) Error![]const u8 {
     return text;
 }
 
+/// 콘솔 글(W9c①) — 대화상자 글 규칙(UTF-8, 탭·줄바꿈만)에 상한만 `max_console_text_bytes`.
+pub fn checkConsoleText(text: []const u8) Error!void {
+    if (text.len > wire.max_console_text_bytes) return error.TextTooLarge;
+    if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
+    for (text) |byte| {
+        if (byte == '\t' or byte == '\n' or byte == '\r') continue;
+        if (byte < 0x20 or byte == 0x7f) return error.ControlCharacter;
+    }
+}
+
+/// 콘솔 줄의 닫힌 필드(W9c①) — encode 와 decode 가 함께 지난다. 버린 수만 싣는 frame 은 수준 log·빈 글·앞 문서 아님·버린 수 있음.
+pub fn checkConsoleMessage(value: message.ConsoleMessage) Error!void {
+    try checkConsoleText(value.text);
+    if (value.has_entry) return;
+    if (value.level != .log or value.text.len != 0 or value.old_document) return error.InvalidConsole;
+    if (value.dropped_errors == 0 and value.dropped_other == 0) return error.InvalidConsole;
+}
+
+pub fn writeConsoleMessage(cursor: *Cursor, value: message.ConsoleMessage) Error!void {
+    try checkConsoleMessage(value);
+    try writeBrowser(cursor, value.browser);
+    try cursor.writeByte(@intFromEnum(value.level));
+    try cursor.writeByte(@intFromBool(value.old_document));
+    try cursor.writeU32(value.dropped_errors);
+    try cursor.writeU32(value.dropped_other);
+    try cursor.writeByte(@intFromBool(value.has_entry));
+    try cursor.writeU32(@intCast(value.text.len));
+    try cursor.writeBytes(value.text);
+}
+
+pub fn readConsoleMessage(cursor: *ReadCursor) Error!message.ConsoleMessage {
+    const browser = try readBrowser(cursor);
+    const level = std.enums.fromInt(message.ConsoleLevel, try cursor.readByte()) orelse return error.InvalidConsole;
+    const old_document = try readBool(cursor);
+    const dropped_errors = try cursor.readU32();
+    const dropped_other = try cursor.readU32();
+    const has_entry = try readBool(cursor);
+    const len = try cursor.readU32();
+    // 상한은 본문을 읽기 전에 — 길이만으로 거절할 수 있다.
+    if (len > wire.max_console_text_bytes) return error.TextTooLarge;
+    const value: message.ConsoleMessage = .{
+        .browser = browser,
+        .level = level,
+        .old_document = old_document,
+        .dropped_errors = dropped_errors,
+        .dropped_other = dropped_other,
+        .has_entry = has_entry,
+        .text = try cursor.readBytes(len),
+    };
+    try checkConsoleMessage(value);
+    return value;
+}
+
 /// 파일 경로(W5a): 비지 않고, 절대 경로이고, `max_text_bytes` 안이고, UTF-8 이며 제어 문자가 없다. 경로는 maru 가 열기
 /// 창에서 받은 것이라 sidecar 쪽은 이 규칙만 본다(파일이 있는지는 렌더러가 읽을 때 드러난다).
 pub fn checkPath(path: []const u8) Error!void {

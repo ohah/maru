@@ -27,6 +27,7 @@ const plan = maru.session.web_osr_plan;
 const mailbox = ws.mailbox;
 const osr_input = maru.session.web_osr_input;
 const dialog_cause = maru.session.web_osr_dialog_cause;
+const console_ring = maru.session.web_osr_console;
 
 /// 링 하나(W3c): 받은 IOSurface 셋·제어 페이지와, View 가 보는 세대·mailbox 워드.
 pub const AppRing = struct {
@@ -220,6 +221,9 @@ const Surface = struct {
     agent_nav: AgentNav = .{},
     /// W9a 적대 리뷰 4·5 회차: 주 프레임 이동이 시작됐는데 새 문서·끝이 아직 없다(`navigationUncommitted`).
     nav_uncommitted: bool = false,
+    /// W9c①: 페이지의 콘솔(sidecar 의 `console_message`) — 늘 켜 둔다. 탭과 함께 사라지고 sidecar 가 다시 떠도 남는다. 문서 경계는
+    /// `page_started`·`error_page`.
+    console: console_ring.Ring = .{},
 };
 
 /// W9a: 에이전트가 보낸 이동의 끝(계획 공격 3 회차 실측 — sidecar 가 보내는 차례):
@@ -2691,6 +2695,23 @@ fn entryOf(id: u64, s: *const Surface, d: *const Dialog) DialogEntry {
     };
 }
 
+/// W9c①: 그 탭의 콘솔을 `who`(읽는 쪽 — `web_osr_console.Authorizer`)가 볼 수 있는 만큼 `[{level,text}]` JSON 으로(`out` 이 소유).
+/// `gpa` 는 줄을 잡은 할당자(`gpaRef`) — `clear`·새로 묶일 때 줄을 놓는다. 한 번도 배치되지 않은 탭·엔진이 돈 적 없는 탭은 `[]`.
+pub fn consoleRead(gpa: std.mem.Allocator, out: std.mem.Allocator, surface_id: u64, who: u64, clear: bool) std.mem.Allocator.Error![]u8 {
+    const s = surfaces.getPtr(surface_id) orelse return out.dupe(u8, "[]");
+    return s.console.read(gpa, out, who, clear);
+}
+
+fn consoleLevel(level: ws.message.ConsoleLevel) console_ring.Level {
+    return switch (level) {
+        .log => .log,
+        .info => .info,
+        .warn => .warn,
+        .@"error" => .@"error",
+        .debug => .debug,
+    };
+}
+
 /// 그 탭의 팝업 가족에 떠 있는 JS 대화상자·파일 선택 — (탭 번호, 도착) 순으로 `out` 에 채운다(넘치면 거기까지). 권한 요청은 싣지 않는다
 /// (사용자가 정한다 — W5b).
 pub fn dialogList(surface_id: u64, out: []DialogEntry) []DialogEntry {
@@ -3605,6 +3626,7 @@ fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     s.dialogs.deinit(gpa);
     dropNotes(gpa, s);
     s.notes.deinit(gpa);
+    s.console.deinit(gpa);
 }
 
 /// 답을 기다리던 요청을 모두 버린다 — 답을 보내지 않는다(sidecar 가 죽었거나 브라우저가 사라져 콜백이 없다). 떠 있던
@@ -4485,6 +4507,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         } else if (!parked.contains(id)) send(gpa, .{ .destroy_browser = id }),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
             s.last_nav_ms = monotonicNow();
+            s.console.newDocument(); // W9c①: 묶이지 않은 쪽은 이 문서의 줄부터 본다
             s.nav_uncommitted = false;
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
             if (s.agent_nav.active and !s.agent_nav.done and !s.initial_load_pending) s.agent_nav.saw_started = true;
@@ -4565,6 +4588,14 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             }
         },
         .title_changed => {},
+        // W9c①: 콘솔 줄 — 버린 수가 실려 오면 그 줄 앞에 표지(버림은 그 줄보다 먼저 일어났다).
+        .console_message => |v| if (surfaces.getPtr(v.browser)) |s| {
+            if (v.dropped_errors != 0 or v.dropped_other != 0) s.console.addDropped(gpa, v.dropped_errors, v.dropped_other) catch {};
+            if (v.has_entry) s.console.add(gpa, consoleLevel(v.level), v.text, v.old_document) catch {};
+        },
+        // W9c①: 실패한 이동이 오류 페이지로 옛 문서를 바꿨다(`page_started` 가 없다) — 콘솔의 문서 경계로만 쓴다. 다운로드의 몸짓(`last_nav_ms`)·
+        // 에이전트 이동(`agent_nav`)은 건드리지 않는다 — 그쪽 판정은 `load_finished` 가 한다.
+        .error_page => |id| if (surfaces.getPtr(id)) |s| s.console.newDocument(),
         // W9a 적대 리뷰 5 회차: 주 프레임 이동이 시작된다 — 확정·끝·불러오기 끝까지 「확정되지 않은 이동 중」.
         .main_frame_navigating => |id| if (surfaces.getPtr(id)) |s| {
             s.nav_uncommitted = true;
@@ -6501,6 +6532,54 @@ const TestAccess = struct {
 fn testLastDialog(surface_id: u64) *Dialog {
     const s = surfaces.getPtr(surface_id).?;
     return &s.dialogs.items[s.dialogs.items.len - 1];
+}
+
+test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오류 페이지가 문서를 가르고, 버린 수는 표지로, 모르는 탭은 버린다" {
+    const gpa = std.testing.allocator;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        testForget(gpa);
+    }
+    try testHold(gpa, 51);
+    // 한 번도 배치되지 않은 탭·엔진이 돈 적 없는 탭은 빈 목록이다(오류가 아니다).
+    {
+        const none = try consoleRead(gpa, gpa, 99, 7, false);
+        defer gpa.free(none);
+        try std.testing.expectEqualStrings("[]", none);
+    }
+    testApply(gpa, .{ .console_message = .{ .browser = 51, .level = .warn, .text = "site-a token=abc" } });
+    testApply(gpa, .{ .page_started = 51 }); // 사용자가 다른 사이트로
+    testApply(gpa, .{ .console_message = .{ .browser = 51, .old_document = true, .text = "site-a unload" } });
+    testApply(gpa, .{ .console_message = .{ .browser = 51, .level = .@"error", .dropped_other = 3, .text = "site-b boom" } });
+    testApply(gpa, .{ .console_message = .{ .browser = 99, .text = "nobody" } }); // 모르는 탭
+    {
+        // 처음 읽는 쪽 — 지금 문서의 제 줄만(버린 수 표지가 그 앞에).
+        const first = try consoleRead(gpa, gpa, 51, 7, false);
+        defer gpa.free(first);
+        try std.testing.expectEqualStrings("[{\"level\":\"maru\",\"text\":\"3 console messages were dropped (0 error/warn, 3 other): the page logged faster than maru keeps\"},{\"level\":\"error\",\"text\":\"site-b boom\"}]", first);
+    }
+    // 실패한 이동은 `page_started` 없이 오류 페이지로 바뀐다 — 그것도 문서 경계다(묶이지 않은 다른 쪽에게).
+    testApply(gpa, .{ .console_message = .{ .browser = 51, .level = .debug, .text = "site-b more" } });
+    testApply(gpa, .{ .error_page = 51 });
+    testApply(gpa, .{ .console_message = .{ .browser = 51, .dropped_errors = 1, .has_entry = false } });
+    {
+        const other = try consoleRead(gpa, gpa, 51, 8, false);
+        defer gpa.free(other);
+        try std.testing.expectEqualStrings("[{\"level\":\"maru\",\"text\":\"1 console messages were dropped (1 error/warn, 0 other): the page logged faster than maru keeps\"}]", other);
+    }
+    {
+        // 묶인 쪽(8)은 이동을 넘어 쌓인다, clear 는 읽은 뒤 비운다.
+        testApply(gpa, .{ .page_started = 51 });
+        testApply(gpa, .{ .console_message = .{ .browser = 51, .text = "site-c" } });
+        const kept = try consoleRead(gpa, gpa, 51, 8, true);
+        defer gpa.free(kept);
+        try std.testing.expectEqualStrings("[{\"level\":\"maru\",\"text\":\"1 console messages were dropped (1 error/warn, 0 other): the page logged faster than maru keeps\"},{\"level\":\"log\",\"text\":\"site-c\"}]", kept);
+        const empty = try consoleRead(gpa, gpa, 51, 8, false);
+        defer gpa.free(empty);
+        try std.testing.expectEqualStrings("[]", empty);
+    }
 }
 
 test "W9c②: 대화상자의 원인은 도착할 때 팝업 가족의 마지막 에이전트·사용자 시각으로 한 번 정한다 — 다른 가족은 세지 않고, 사용자가 묻는 닫기의 떠나기 확인은 사용자 것" {

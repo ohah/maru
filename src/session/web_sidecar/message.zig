@@ -172,6 +172,12 @@ pub const Tag = enum(u8) {
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
     /// 탭 전체의 「불러오는 중」(`nav_state`)은 iframe 도 세고, 이미 불러오는 중에 시작된 이동은 가르지 못했다.
     main_frame_navigating = 66,
+    /// 페이지의 콘솔 줄 하나(W9c① — CEF `on_console_message`, iframe·worker 의 것도 온다 — CEF 는 프레임을 주지 않는다). sidecar 가 탭마다
+    /// 양동이로 조절해 버린 수를 함께 싣는다 — 버린 수만 실은 frame(`has_entry` 거짓)도 있다. 글은 `max_console_text_bytes`.
+    console_message = 67,
+    /// 주 프레임의 이동이 실패해 오류 페이지가 옛 문서를 바꿨다(W9c① — CEF `on_load_error`, ERR_ABORTED 는 빼고). 그 이동에는 `page_started` 가
+    /// 없다(실측) — maru 는 콘솔의 문서 경계로만 쓴다(다운로드의 몸짓 판정·에이전트 이동은 건드리지 않는다).
+    error_page = 68,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1096,6 +1102,31 @@ pub const DevtoolsResult = struct {
     size: u32,
 };
 
+/// 콘솔 수준(W9c① — 닫힌 enum). sidecar 가 CEF 의 심각도에서 고른다: VERBOSE → debug(`console.debug`·`count`·`timeEnd`), INFO → log
+/// (`console.info` 도 — CEF 는 둘을 가르지 않는다), WARNING → warn, ERROR 이상 → error. `info` 는 받기만 한다.
+pub const ConsoleLevel = enum(u8) {
+    log = 0,
+    info = 1,
+    warn = 2,
+    @"error" = 3,
+    debug = 4,
+};
+
+/// 콘솔 줄 하나(W9c①). 닫힌 필드: 버린 수만 싣는 frame(`has_entry` 거짓)은 수준 log·빈 글·앞 문서 아님·버린 수가 있다.
+pub const ConsoleMessage = struct {
+    browser: BrowserId,
+    level: ConsoleLevel = .log,
+    /// 앞 문서가 새 문서의 시작(`page_started`) 뒤에 남긴 줄이다 — 다른 사이트로 옮길 때 앞 문서의 unload 줄은 시작 **뒤에** 온다(실측
+    /// 5/5). sidecar 가 줄의 `source` 출처를 방금 떠난 출처들과 견준다. maru 는 처음 읽는 쪽에게 이 줄을 보이지 않는다.
+    old_document: bool = false,
+    /// 이 줄 앞에 sidecar 가 버린 줄 수(양동이 초과) — 오류·경고와 그 밖. 보낸 뒤 sidecar 는 0 으로 되돌린다.
+    dropped_errors: u32 = 0,
+    dropped_other: u32 = 0,
+    has_entry: bool = true,
+    /// 대화상자 글 규칙(탭·줄바꿈만 — `fields.checkConsoleText`)에 상한만 `max_console_text_bytes`.
+    text: []const u8 = "",
+};
+
 pub const DownloadAction = enum(u8) {
     cancel = 0,
     resume_download = 1,
@@ -1188,6 +1219,8 @@ pub const Message = union(Tag) {
     devtools_call_data: DevtoolsData,
     new_tab_credit: BrowserId,
     main_frame_navigating: BrowserId,
+    console_message: ConsoleMessage,
+    error_page: BrowserId,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

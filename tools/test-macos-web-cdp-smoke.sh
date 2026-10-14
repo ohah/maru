@@ -62,6 +62,10 @@
 #                   닫힌다 · navigate 가 떠나기 확인으로 실패한 탭에 떠나기로 답하면 이동이 이어진다 · 사람 탭(이 pane 이 열지 않았다)의 누가
 #                   띄웠는지 모르는 alert(스크립트 6.5 초 뒤)는 거절한다(C13). 「사용자가 손댄 문서」 의 떠나기 거절은 사람 입력이 필요해 단위
 #                   시험(web_osr)이 본다
+#   w9c-console     (W9c①) Chromium 탭의 콘솔: 수준(log·info → log·warn·error·debug), 누름의 동기 줄은 곧 이은 console 에 있다, 처음 읽은 뒤에는
+#                   이동을 넘어 남는다, --clear 는 비운다, 쏟아지면 maru 표지(버린 수)를 남기고 다 싣지 않는다, alert 가 떠 있어도 읽는다,
+#                   잡히지 않은 예외는 (source:line) 을 단다. 다른 사이트에서 옮겨 온 탭을 처음 읽으면 앞 사이트의 줄(불러올 때의 비밀 줄·
+#                   떠날 때의 unload 줄)이 보이지 않는다 — 대조: 앞 사이트에서 먼저 읽은 탭은 그 unload 줄을 이동 뒤에도 본다(줄은 와 있었다)
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -174,6 +178,16 @@ cat > "$root/www/dlg.html" <<'HTML'
 <button id=ch style="position:absolute;left:30px;top:180px;width:120px;height:40px" onclick="hit('dch1-'+confirm('one'));alert('two');hit('dch-done')">Chain</button>
 <button id=st style="position:absolute;left:30px;top:230px;width:120px;height:40px" onclick="setTimeout(function(){alert('timer');hit('dst-done')},1500)">Timer</button>
 HTML
+# W9c①: 콘솔 — 수준·누름의 동기 줄·쏟아짐·alert·잡히지 않은 예외. secret 은 다른 사이트(localhost)의 문서 — 불러올 때와 떠날 때 줄을 남긴다.
+cat > "$root/www/con.html" <<'HTML'
+<!doctype html><title>con</title>
+<script>console.log('con-log-'+location.search.slice(1));console.info('con-info');console.warn('con-warn');console.error('con-error');console.debug('con-debug')</script>
+<button id=cl style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="console.log('con-click-sync')">Log</button>
+<button id=fl style="position:absolute;left:30px;top:80px;width:120px;height:40px" onclick="for(var i=0;i<3000;i++)console.log('con-flood-'+i)">Flood</button>
+<button id=al style="position:absolute;left:30px;top:130px;width:120px;height:40px" onclick="console.log('con-before-alert');alert('wait')">Alert</button>
+<button id=ue style="position:absolute;left:30px;top:180px;width:120px;height:40px" onclick="setTimeout(function(){throw new Error('con-uncaught')},0)">Throw</button>
+HTML
+printf '<!doctype html><title>secret</title><script>console.log("con-secret-token");addEventListener("pagehide",function(){console.log("con-secret-unload")});addEventListener("unload",function(){console.log("con-secret-unload2")})</script>secret' > "$root/www/secret.html"
 # W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
 printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
 # W9f: 에이전트가 MCP 서버를 띄우는 모양 — 새 세션(제어 터미널 없음)·파이프 입출력. 표준 출력의 줄은 모두 JSON-RPC 여야 한다.
@@ -791,6 +805,44 @@ hit_seen dst-done && echo yes > "\$out/dg-st-hit" || echo no > "\$out/dg-st-hit"
 "\$cli" browser exec --surface "\$sid" 'setTimeout(function(){alert("late user")},6500), 1' > "\$out/dg-user-exec" 2>&1
 n=0; while [ \$n -lt 48 ]; do "\$cli" browser dialog --surface "\$sid" > "\$out/dg-user-list" 2>&1; grep -q '^alert ' "\$out/dg-user-list" && break; sleep 0.25; n=\$((n + 1)); done
 "\$cli" browser handle-dialog --surface "\$sid" --accept > "\$out/dg-user" 2>&1; echo "rc=\$?" >> "\$out/dg-user"
+# W9c①: 콘솔. 대조 탭 — 다른 사이트(localhost)에서 먼저 읽고 옮긴다(앞 문서의 떠날 때 줄이 와 있는지 — 묶인 쪽은 본다).
+"\$cli" browser open --url "http://localhost:$port/secret.html?ctl" > "\$out/cn-ctl-open" 2>&1
+ctl=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-ctl-open")
+sleep 1
+"\$cli" browser console --surface "\$ctl" > "\$out/cn-ctl-first" 2>&1; echo "rc=\$?" >> "\$out/cn-ctl-first"
+"\$cli" browser navigate --surface "\$ctl" "http://127.0.0.1:$port/con.html?ctl" > "\$out/cn-ctl-nav" 2>&1
+sleep 1
+"\$cli" browser console --surface "\$ctl" > "\$out/cn-ctl-after" 2>&1; echo "rc=\$?" >> "\$out/cn-ctl-after"
+"\$cli" browser close --surface "\$ctl" > /dev/null 2>&1 || true
+# 새는지 — 같은 길로 옮긴 탭을 옮긴 뒤 처음 읽는다.
+"\$cli" browser open --url "http://localhost:$port/secret.html?leak" > "\$out/cn-open" 2>&1
+cn=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-open")
+sleep 1
+"\$cli" browser navigate --surface "\$cn" "http://127.0.0.1:$port/con.html?a" > "\$out/cn-nav" 2>&1
+sleep 1
+"\$cli" browser console --surface "\$cn" > "\$out/cn-first" 2>&1; echo "rc=\$?" >> "\$out/cn-first"
+# 누름의 동기 줄 — 곧 이은 console 에 있다.
+"\$cli" browser click --surface "\$cn" --selector '#cl' > "\$out/cn-click" 2>&1
+"\$cli" browser console --surface "\$cn" > "\$out/cn-sync" 2>&1; echo "rc=\$?" >> "\$out/cn-sync"
+# 처음 읽은 뒤에는 이동을 넘어 남고, --clear 는 비운다.
+"\$cli" browser navigate --surface "\$cn" "http://127.0.0.1:$port/con.html?b" > "\$out/cn-nav2" 2>&1
+"\$cli" browser console --surface "\$cn" --clear > "\$out/cn-kept" 2>&1; echo "rc=\$?" >> "\$out/cn-kept"
+"\$cli" browser console --surface "\$cn" > "\$out/cn-empty" 2>&1; echo "rc=\$?" >> "\$out/cn-empty"
+# 쏟아짐 — 3000 줄 중 다 싣지 않고 버린 수를 표지로(쏟아짐이 그친 뒤 250 ms 에 버린 수만 실은 frame 도 온다).
+"\$cli" browser click --surface "\$cn" --selector '#fl' > "\$out/cn-fl-click" 2>&1
+sleep 1
+"\$cli" browser console --surface "\$cn" --clear > "\$out/cn-flood" 2>&1; echo "rc=\$?" >> "\$out/cn-flood"
+# 잡히지 않은 예외.
+sleep 2
+"\$cli" browser click --surface "\$cn" --selector '#ue' > "\$out/cn-ue-click" 2>&1
+sleep 1
+"\$cli" browser console --surface "\$cn" > "\$out/cn-uncaught" 2>&1; echo "rc=\$?" >> "\$out/cn-uncaught"
+# alert 가 떠 있어도 읽는다(op 줄에 서지 않는다).
+"\$cli" browser click --surface "\$cn" --selector '#al' > "\$out/cn-al-click" 2>&1
+"\$cli" browser console --surface "\$cn" > "\$out/cn-alert" 2>&1; echo "rc=\$?" >> "\$out/cn-alert"
+"\$cli" browser dialog --surface "\$cn" > "\$out/cn-al-list" 2>&1
+"\$cli" browser handle-dialog --surface "\$cn" --accept > /dev/null 2>&1 || true
+"\$cli" browser close --surface "\$cn" > /dev/null 2>&1 || true
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -807,7 +859,7 @@ env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/
     "$app" > "$root/app.log" 2>&1 &
 app_pid=$!
 i=0
-while [ ! -f "$out/done" ] && [ $i -lt 420 ]; do sleep 1; i=$((i + 1)); done
+while [ ! -f "$out/done" ] && [ $i -lt 480 ]; do sleep 1; i=$((i + 1)); done
 [ -f "$out/done" ] || { sed -n '1,40p' "$root/app.log" >&2; fail "the pane script did not finish ($(cat "$out/list" 2>/dev/null | tr '\n' ' '))"; }
 kill "$app_pid" 2>/dev/null || true
 wait "$app_pid" 2>/dev/null || true
@@ -1009,6 +1061,19 @@ grep -q '^alert tab=[0-9]* token=[0-9]* cause=[a-z]* may_answer=yes' "$out/dg-fa
 grep -q 'maru browser handle-dialog --accept' "$out/ag-close-ask" && grep -q '^before_unload tab=[0-9]* token=[0-9]* cause=agent may_answer=yes' "$out/dg-ag-list" && grep -q '^answered before_unload$' "$out/dg-ag" && grep -q '^note: the page is leaving' "$out/dg-ag" && ! grep -q "^surface $(cat "$out/ag-id") " "$out/dg-ag-list2" || fail "the leave-page question of the agent's own close was not answerable, or leaving did not close the tab ($(tr '\n' ' ' < "$out/dg-ag-list") · $(tr '\n' ' ' < "$out/dg-ag") · $(grep -c '^surface ' "$out/dg-ag-list2") tabs)"
 grep -q '^answered before_unload$' "$out/dg-nv" && grep -q '/a.html?bu$' "$out/dg-nv-url" || fail "leaving after the agent's navigate asked before leaving did not let the navigation go on ($(tr '\n' ' ' < "$out/dg-nv") · $(tr '\n' ' ' < "$out/dg-nv-wait") · $(tr '\n' ' ' < "$out/dg-nv-url"))"
 grep -q '^alert tab=[0-9]* token=[0-9]* cause=unknown may_answer=no' "$out/dg-user-list" && grep -q '^rc=1$' "$out/dg-user" && grep -q 'the user is answering this dialog' "$out/dg-user" || fail "an alert nobody just caused on a user's tab was answerable ($(tr '\n' ' ' < "$out/dg-user-list") · $(tr '\n' ' ' < "$out/dg-user") · nav $(tr '\n' ' ' < "$out/dg-user-nav") · exec $(tr '\n' ' ' < "$out/dg-user-exec"))"
+# W9c①
+grep -q '^rc=0$' "$out/cn-ctl-first" && grep -q '^\[log\] con-secret-token$' "$out/cn-ctl-first" && grep -q 'con-secret-unload' "$out/cn-ctl-after" || fail "control: a tab read on the first site did not show its line, or after moving to another site did not show the old page's unload line — the leak check below would prove nothing ($(tr '\n' ' ' < "$out/cn-ctl-first") · $(tr '\n' ' ' < "$out/cn-ctl-after"))"
+grep -q '^rc=0$' "$out/cn-first" && ! grep -q 'con-secret' "$out/cn-first" || fail "the first console read after moving from another site showed that site's lines ($(tr '\n' ' ' < "$out/cn-first"))"
+for want in '[log] con-log-a' '[log] con-info' '[warn] con-warn' '[error] con-error' '[debug] con-debug'; do
+    grep -qxF "$want" "$out/cn-first" || fail "console did not list \"$want\" ($(tr '\n' ' ' < "$out/cn-first"))"
+done
+grep -qxF '[log] con-click-sync' "$out/cn-sync" || fail "the line a click logged was not in the console read right after it ($(tr '\n' ' ' < "$out/cn-sync"))"
+grep -qxF '[log] con-log-a' "$out/cn-kept" && grep -qxF '[log] con-log-b' "$out/cn-kept" && grep -q '^(empty console)$' "$out/cn-empty" || fail "lines were not kept across a navigation after the first read, or --clear did not empty the console ($(tr '\n' ' ' < "$out/cn-kept" | cut -c1-300) · $(tr '\n' ' ' < "$out/cn-empty"))"
+flood_lines=$(grep -c '^\[log\] con-flood-' "$out/cn-flood" || true)
+grep -q '^\[maru\] [0-9]* console messages were dropped' "$out/cn-flood" && [ "$flood_lines" -ge 100 ] && [ "$flood_lines" -lt 3000 ] || fail "a flood of 3000 lines was not cut with a maru dropped marker ($flood_lines flood lines · $(grep '^\[maru\]' "$out/cn-flood" | tr '\n' ' '))"
+grep -q '^\[error\] Uncaught Error: con-uncaught (http://127.0.0.1:[0-9]*/con.html?b:[0-9]*)$' "$out/cn-uncaught" || fail "an uncaught error did not come with its source and line ($(grep -i 'uncaught' "$out/cn-uncaught" | tr '\n' ' '))"
+grep -q '^rc=0$' "$out/cn-alert" && grep -qxF '[log] con-before-alert' "$out/cn-alert" && grep -q '^alert ' "$out/cn-al-list" || fail "console did not answer while the page showed an alert ($(tr '\n' ' ' < "$out/cn-alert" | cut -c1-300) · $(tr '\n' ' ' < "$out/cn-al-list"))"
+echo "PASS w9c-console: levels (info as log), a click's line is in the next read, lines are kept across navigation after the first read, --clear empties, a 3000-line flood keeps $flood_lines lines with a dropped marker, an uncaught error carries source:line, console answers during an alert, and the first read after a cross-site move shows none of the old site's lines (control: the old page's unload line did arrive)"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

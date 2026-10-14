@@ -370,7 +370,8 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "Requests come from the maru pane this process runs in; controlling a tab you did not open asks the user once. " ++
             "While the user answers that confirmation a call can take up to about 150 seconds (2 minutes for the answer, then the action), " ++
             "so give this server a tool timeout of at least 150 seconds. Calls run one at a time. " ++
-            "On Chromium tabs (engine=chromium in browser_list) console is not available yet and answers -32008.") catch |e| break :blk e;
+            "On Chromium tabs (engine=chromium in browser_list) browser_console also holds lines from iframes and workers, " ++
+            "and the first read after you are allowed a tab shows only the current page's lines.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -563,6 +564,16 @@ test "W9f: 도구 표의 모든 도구는 CLI 하위 명령이고, 필수 인자
             return err;
         };
     }
+}
+
+test "W9c①: initialize 의 안내는 Chromium 탭의 console 을 「아직 안 됨」 이라 하지 않고, 무엇이 담기는지 알린다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const r = (try handleLine(testing.allocator, arena_state.allocator(), "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
+    defer testing.allocator.free(r);
+    try testing.expect(std.mem.indexOf(u8, r, "not available yet") == null);
+    try testing.expect(std.mem.indexOf(u8, r, "browser_console") != null);
+    try testing.expect(std.mem.indexOf(u8, r, "iframes and workers") != null);
 }
 
 test "W9f: JSON-RPC — initialize 는 아는 판으로, tools/list·ping·모르는 메서드·알림, tools/call 은 CLI 인자로" {

@@ -117,4 +117,22 @@ pub fn readDialogString(api: *const Api, value: [*c]const c.cef_string_t, out: [
     return out[0..clamped.len];
 }
 
+/// `readPrefix` 의 결과 — `truncated` 는 앞부분만 바꿨는가.
+pub const Prefix = struct { text: []u8, truncated: bool };
+
+/// CEF 문자열(UTF-16)의 앞 `max_units` 단위만 `out` 에 UTF-8 로 옮긴다(W9c① — 페이지가 고른 길이의 글을 통째로 바꾸지 않는다: 1e8 글자
+/// 콘솔 줄 하나가 UI 스레드에서 83 ms 였다, 실측). 대리 짝을 가르지 않는다. 제어 문자는 그대로 둔다 — 부른 쪽이 다듬는다.
+pub fn readPrefix(api: *const Api, value: [*c]const c.cef_string_t, max_units: usize, out: []u8) Prefix {
+    if (value == null or value.*.str == null) return .{ .text = out[0..0], .truncated = false };
+    const units: []const u16 = @ptrCast(value.*.str[0..value.*.length]);
+    const n = @import("console_gate.zig").prefixUnits(units, max_units);
+    var utf8: c.cef_string_utf8_t = std.mem.zeroes(c.cef_string_utf8_t);
+    _ = api.string_utf16_to_utf8(value.*.str, n, &utf8);
+    defer api.string_utf8_clear(&utf8);
+    if (utf8.str == null) return .{ .text = out[0..0], .truncated = units.len != 0 };
+    const clamped = protocol_text.clampUtf8(utf8.str[0..utf8.length], out.len);
+    @memcpy(out[0..clamped.len], clamped);
+    return .{ .text = out[0..clamped.len], .truncated = n < units.len or clamped.len < utf8.length };
+}
+
 const protocol_text = @import("web_sidecar_protocol").text;

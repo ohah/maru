@@ -116,7 +116,7 @@ pub const Request = union(enum) {
     dialog: struct { surface_id: u64 },
     /// `browser handle-dialog`(W9c② — Chromium). `--accept`·`--dismiss` 중 하나, `--dialog` 는 `dialog` 가 준 번호. 응답 {ok, kind, continues?}.
     handle_dialog: struct { surface_id: u64, accept: bool, text: ?[]const u8, dialog: ?u64 },
-    /// `browser upload`(W9c③ — Chromium). 대상(click 과 같은 로케이터)과 파일 1..10 개. 응답 {origin, files:[{name,size}]}.
+    /// `browser upload`(W9c③ — Chromium). 대상(click 과 같은 로케이터)과 파일 1..10 개. 응답 {origin, files:[{name,size}], kept, navigated}.
     upload: UploadCmd,
 
     /// 응답 렌더용 종류(어느 result 모양인지). renderResponse가 소비.
@@ -143,6 +143,9 @@ pub const Request = union(enum) {
 /// W9c③ 적대 리뷰 1 회차: 넣을 때 페이지가 파일을 받았지만(그때의 목록이 맞았다) 그 뒤 페이지 스스로 칸을 비우거나 바꿨다(`kept:false`) — 다시 올리면
 /// 두 번 올라간다.
 pub const upload_not_kept_note = "note: the page received the files, then its own handler cleared or replaced the file input (kept: false) — this is the page's behavior; do not upload again";
+/// W9c③ 적대 리뷰 2 회차: 파일을 넣자 페이지가 곧 새 문서로 옮겨 갔다(`navigated:true` — change 처리기의 `location.href=` 등). 처리기는 파일을 받고
+/// 돌았지만 maru 는 그 뒤 칸을 읽을 수 없었다 — 실패로 알리면 에이전트가 다시 올려 모달이 또 뜨고 두 번 올라갔다.
+pub const upload_navigated_note = "note: the files were set and the page started loading a new page right away (navigated: true) — its handler most likely received them, but maru could not read the file input afterwards; check the page, do not upload again";
 
 /// 한 번에 올리는 파일 수 상한 — 서버(`control_browser.max_upload_files`)와 같다(모달이 파일을 모두 보여야 한다).
 pub const max_upload_files = 10;
@@ -1632,7 +1635,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
             } else if (any_full) try w.writeAll("the user answers these in the tab (maru may not)\n");
         },
         .upload => {
-            // {origin, files:[{name,size}]} — 이름도 표시 안전하게(제어·양방향 글자를 뺀다).
+            // {origin, files:[{name,size}], kept, navigated} — 이름도 표시 안전하게(제어·양방향 글자를 뺀다).
             const files = switch (result.get("files") orelse std.json.Value{ .null = {} }) {
                 .array => |a| a,
                 else => {
@@ -1652,8 +1655,10 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try writePageText(gpa, w, strField(o.get("name")), true);
                 try w.print(" ({d} bytes)\n", .{intField(o.get("size")) orelse 0});
             }
-            // 받았지만 페이지가 그 뒤 칸을 비웠다 — 다시 올리지 말라고(두 번 올라간다).
-            if (result.get("kept")) |k| if (k == .bool and !k.bool) try w.writeAll(upload_not_kept_note ++ "\n");
+            // 받았지만 페이지가 그 뒤 칸을 비웠다·곧 옮겨 갔다 — 다시 올리지 말라고(두 번 올라간다). 옮겨 갔으면 그 안내만(kept 도 거짓이다).
+            if (boolField(result.get("navigated"))) {
+                try w.writeAll(upload_navigated_note ++ "\n");
+            } else if (result.get("kept")) |k| if (k == .bool and !k.bool) try w.writeAll(upload_not_kept_note ++ "\n");
         },
         .handle_dialog => {
             try w.writeAll("answered ");
@@ -3868,7 +3873,7 @@ test "W9c③: upload 요청은 browser.upload {id, 로케이터, files} — 상�
 test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 표시 안전하게), 거부·물을 창 없음은 그 글만(인가 안내 없이), 다른 -32002 는 안내를 붙인다" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    const ok = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"in\u{202e}voice.exe\",\"size\":5}],\"kept\":true}}";
+    const ok = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"in\u{202e}voice.exe\",\"size\":5}],\"kept\":true,\"navigated\":false}}";
     try testing.expect(try renderResponse(testing.allocator, ok, .upload, &out.writer));
     try testing.expectEqualStrings("uploaded 2 files to https://a.test\n  \"a.txt\" (3 bytes)\n  \"invoice.exe\" (5 bytes)\n", out.written());
     out.clearRetainingCapacity();
@@ -3884,11 +3889,20 @@ test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 
 test "W9c③ 적대 리뷰 1 회차 재현 R9c: upload 결과의 kept:false — 페이지가 받은 뒤 칸을 비웠다고 알리고 다시 올리지 말라고 한다" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    const dropped = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}}";
+    const dropped = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}}";
     try testing.expect(try renderResponse(testing.allocator, dropped, .upload, &out.writer));
     try testing.expectEqualStrings("uploaded 1 file to https://a.test\n  \"a.txt\" (3 bytes)\n" ++ upload_not_kept_note ++ "\n", out.written());
     out.clearRetainingCapacity();
-    const kept = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true}}";
+    const kept = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true,\"navigated\":false}}";
     try testing.expect(try renderResponse(testing.allocator, kept, .upload, &out.writer));
     try testing.expectEqualStrings("uploaded 1 file to https://a.test\n  \"a.txt\" (3 bytes)\n", out.written());
+}
+
+test "W9c③ 적대 리뷰 2 회차 재현 N1: upload 결과의 navigated:true — 넣자 페이지가 곧 옮겨 갔다고 알리고 다시 올리지 말라고 한다(「try again」 이 없다)" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const moved = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true}}";
+    try testing.expect(try renderResponse(testing.allocator, moved, .upload, &out.writer));
+    try testing.expectEqualStrings("uploaded 1 file to https://a.test\n  \"a.txt\" (3 bytes)\n" ++ upload_navigated_note ++ "\n", out.written());
+    try testing.expect(std.mem.indexOf(u8, out.written(), "try again") == null);
 }

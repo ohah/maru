@@ -316,6 +316,9 @@ pub fn view(
         try modal_box.text(box, box.inner_x, row, try overlay_input.truncateToCols(arena, shown, box.inner_cols), .surface_fg, arena, out);
     }
 
+    // (1.3) 목록이 다 보여야 하는 상자의 다시 묻는 문장 — 버튼 바로 위 빈 행에 한 행으로(넘치면 끝을 「…」 — 키(⌘⏎)는 문장 맨 앞이다).
+    if (g.lead_row) |row| try modal_box.text(box, box.inner_x, row, try overlay_input.truncateToCols(arena, g.lead_text, box.inner_cols), .surface_fg, arena, out);
+
     // (1.5) 본문 미리보기(있으면) — 메시지 아래 빈 줄 다음부터 좌측 정렬. 각 줄에 은은한 배경 fill(tab_hover_bg)을
     //       inner 폭만큼 깔아 인셋 패널처럼 보이게 하고, 그 위에 muted 텍스트를 놓는다(painter order: fill→text).
     //       Ghostty의 스크롤 텍스트 뷰를 셀-그리드로 근사한 것 — 붙여넣을 내용을 눈으로 확인하고 결정하게 한다.
@@ -390,9 +393,14 @@ const ButtonGeom = struct {
     msg_rows: u32,
     msg_truncated: bool,
     /// 메시지와 안내 줄이 **모두** 잘리지 않고 그려지는가(줄 상한·창 높이·한 줄의 줄바꿈 상한 어느 것에도 걸리지 않았다) — `notes_must_fit`.
-    /// 상자 안쪽 폭이 0 칸이면 거짓(나눌 수 없어 「한 줄」 로 세지만 읽을 수 있는 것이 없다 — 적대 리뷰 1 회차). 다시 묻는 중(⏎ 뒤)의 앞 문장은
-    /// 세지 않는다 — 다시 묻지 않을 때의 레이아웃으로 본다(목록이 딱 맞는 높이에서 그 문장이 자리를 차지해 ⌘⏎ 가 막혔다 — 적대 리뷰 1 회차).
+    /// 상자 안쪽 폭이 0 칸이면 거짓(나눌 수 없어 「한 줄」 로 세지만 읽을 수 있는 것이 없다 — 적대 리뷰 1 회차). **지금 그리는 레이아웃**으로 본다:
+    /// 그런 상자는 다시 묻는 문장을 안내 줄에 넣지 않고 버튼 위 빈 행에 그린다(`lead_row`) — 그래서 ⏎ 뒤에도 목록의 행 수가 그대로다.
     complete: bool,
+    /// `notes_must_fit` 상자가 다시 묻는 중이면 그 문장(`recheck`)을 그릴 행 — 버튼 바로 위의 빈 행(늘 있다). 안내 줄의 몫을 쓰지 않는다:
+    /// 1 회차 R3 는 목록이 딱 맞는 높이에서 그 문장 때문에 ⌘⏎ 가 막혀 「다 보임」 을 다시 묻지 않을 때의 레이아웃으로 쟀는데, 그러면 ⏎ 뒤 창
+    /// 높이를 바꿔 그 문장이 마지막 파일을 밀어낸 채로 ⌘⏎ 가 됐다(2 회차 C1 — 사용자는 목록 전체를 본 적이 없다). 빈 행에 그리면 둘 다 없다.
+    lead_row: ?u32,
+    lead_text: []const u8,
     confirm_x: i32,
     confirm_fit: u32,
     alternate_x: i32,
@@ -425,7 +433,10 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     for (state.body) |line| content_cols = @max(content_cols, overlay_input.displayCols(line)); // 미리보기 줄도 폭에 반영
     // 안내 줄도 폭에 반영 — 넓은 창에서는 한 줄씩 그대로 서게(좁으면 아래에서 줄바꿈한다).
     var lead_slot: [1]Note = undefined;
-    const note_groups = [2][]const Note{ state.leadNotes(&lead_slot), state.notes };
+    // 목록이 다 보여야 하는 상자는 다시 묻는 문장을 안내 줄에 넣지 않는다(폭에도 넣지 않는다 — ⏎ 앞뒤 레이아웃이 같다). 버튼 위 빈 행에 그린다.
+    const lead = state.leadNotes(&lead_slot);
+    const lead_apart = state.notes_must_fit and lead.len > 0;
+    const note_groups = [2][]const Note{ if (lead_apart) &.{} else lead, state.notes };
     for (note_groups) |group| for (group) |note| {
         content_cols = @max(content_cols, switch (note.fit) {
             .wrap => modal_box.widestLineCols(note.text),
@@ -560,11 +571,9 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         .msg_lines = msg_lines,
         .msg_rows = m,
         .msg_truncated = msg_truncated,
-        .complete = if (state.notes_must_fit and lead_rows > 0) blk: {
-            var plain = state.*;
-            plain.rechecking = false;
-            break :blk if (buttonGeom(&plain, p, tk)) |pg| pg.complete else false;
-        } else !msg_truncated and !notes_overflow and !notes_wrap_cut and k == notes_all and width_probe.inner_cols > 0 and box.inner_cols > 0,
+        .complete = !msg_truncated and !notes_overflow and !notes_wrap_cut and k == notes_all and width_probe.inner_cols > 0 and box.inner_cols > 0,
+        .lead_row = if (lead_apart) btn_row -| 1 else null,
+        .lead_text = if (lead_apart) lead[0].text else "",
         .confirm_x = group_x,
         .confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right),
         .alternate_x = alternate_x,
@@ -1924,4 +1933,65 @@ test "W9c③ 적대 리뷰 1 회차 재현 R4: 상자 안쪽 폭이 0 칸이면(
     s.notes_must_fit = true;
     const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 200, .backing_width_px = 230, .backing_height_px = 800 } };
     try std.testing.expect(!confirmAllowed(&s, p, &tk));
+}
+
+// ── W9c③ 적대 리뷰 2 회차 ──
+// 1 회차 R3 고침은 다시 묻는 중(⏎ 뒤)의 「다 보임」 을 다시 묻지 않을 때의 레이아웃으로 봤다 — 「그 높이에서 사용자는 목록을 다 보고 ⏎ 를
+// 눌렀다」 는 가정. 그러나 ⏎ 뒤에 창 높이가 바뀔 수 있다: 작은 창에서 ⏎ → 창을 키운다(앞 문장 때문에 마지막 파일이 「…」 로 잘린 채) →
+// 그 높이에서 ⌘⏎ 가 허용됐다(800 px 폭의 192–206 px — 6 행 가운데 5 행) — 사용자는 목록 전체를 한 번도 보지 못했다. 이제 그 문장은 버튼 위
+// 빈 행에 그려 안내 줄의 몫을 쓰지 않고, 허용은 지금 그리는 레이아웃으로 본다. 좁은 폭(문장이 두 줄 넘게 나뉘던 폭)까지 본다.
+test "W9c③ 적대 리뷰 2 회차 재현 C1: 다시 묻는 중 지금 그려진 안내가 목록 전부가 아니면(마지막이 잘림) ⌘⏎ 도 허용되지 않는다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const recheck = "Press ⌘⏎ to allow, or Esc to deny.";
+    var notes: [6]Note = undefined;
+    for (&notes, 0..) |*n, i| n.* = .{ .text = if (i % 2 == 0) "1. ~/Downloads/report-final.pdf" else "   binary, 1,234 bytes (PDF)" };
+    var s = State{};
+    s.show("Upload 3 files to https://a.test?", .{ .confirm = "Allow", .cancel = "Deny" });
+    s.notes = &notes;
+    s.notes_must_fit = true;
+    s.guardAsync(recheck);
+    s.rechecking = true;
+    var bad: u32 = 0;
+    var allowed: u32 = 0;
+    for ([_]u32{ 800, 400, 280, 200 }) |w| {
+        var h: u32 = 600;
+        while (h > 64) : (h -= 2) {
+            const p = testProps(w, h);
+            const g = buttonGeom(&s, p, &tk) orelse continue;
+            // 그려진 안내 행 가운데 목록의 것(다시 묻는 문장의 행이 아니고 「…」 로 잘리지 않은 것).
+            var shown: usize = 0;
+            for (g.note_lines[0..g.note_rows]) |nl| {
+                const in_lead = @intFromPtr(nl.text.ptr) >= @intFromPtr(recheck.ptr) and @intFromPtr(nl.text.ptr) < @intFromPtr(recheck.ptr) + recheck.len;
+                if (!in_lead and !nl.cut) shown += 1;
+            }
+            if (!confirmAllowed(&s, p, &tk)) continue;
+            allowed += 1;
+            if (shown < notes.len or g.msg_truncated) {
+                if (bad == 0) std.debug.print("C1: {d}x{d}: {d} of {d} note rows drawn while rechecking, yet ⌘⏎ is allowed\n", .{ w, h, shown, notes.len });
+                bad += 1;
+            }
+            // 다시 묻는 문장은 버튼 바로 위 빈 행에 그려진다 — 안내·버튼과 겹치지 않는다.
+            const lead_row = g.lead_row orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(g.btn_row - 1, lead_row);
+            try std.testing.expect(lead_row > g.note_row + g.note_rows - 1);
+            var out: std.ArrayList(draw.Op) = .empty;
+            try view(&s, p, &tk, arena_state.allocator(), &out);
+            var saw_lead = false;
+            for (out.items) |op| switch (op) {
+                .text => |t| if (std.mem.startsWith(u8, t.runs[0].text, "Press ⌘⏎")) {
+                    saw_lead = true;
+                },
+                else => {},
+            };
+            try std.testing.expect(saw_lead);
+        }
+    }
+    try std.testing.expectEqual(@as(u32, 0), bad);
+    try std.testing.expect(allowed > 0);
+    // 다시 묻지 않을 때는 그 행이 없다(빈 행 그대로).
+    s.rechecking = false;
+    try std.testing.expect(buttonGeom(&s, testProps(800, 600), &tk).?.lead_row == null);
 }

@@ -19,7 +19,14 @@
 //!   칸에 닿을 때의 목록(이름·크기)을 적어 둔다 — 격리 world 의 함수·프로토타입 getter 라 페이지가 그 기록을 고치거나 듣는 이를 흉내 낼 수 없고,
 //!   진짜 이벤트는 페이지가 만들 수 없다. 읽기는 그 기록으로 「받았다」 를, 지금 칸으로 「그대로 두었다」(`kept`)를 따로 답한다. 페이지가 더 앞의
 //!   캡처 듣는 이(창·조상)에서 이벤트를 멈추거나 먼저 비우면 기록이 없거나 다르다 — 그때는 예전처럼 지금 칸으로 판단한다(성공으로 속이지 않는다).
-//! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다.
+//! - **넣고 곧 옮겨 간 페이지**(적대 리뷰 2 회차): change 처리기가 `location.href=` 로 옮기면 넣기는 `{}` 로 끝나고(처리기는 파일을 받고 돌았다)
+//!   곧 보낸 읽기는 Chromium 이 확정까지 붙잡았다가 「Cannot find context with specified id」 였다(실측 CEF 154 — 같은 출처·다른 사이트 3/3).
+//!   앱이 이동을 먼저 보았으면 읽기를 보내지 않고 「…then try again」 이었다. 둘 다 실패로 답하면 에이전트가 다시 불러 모달이 또 뜨고 두 번
+//!   올라간다 — 넣기가 끝난 뒤 문서가 사라진 읽기는 성공에 `kept:false`·`navigated:true`(받았는지는 읽을 수 없다 — CLI·MCP 는 「페이지를 보라,
+//!   다시 올리지 마라」).
+//! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다. 승인 뒤 확인이 단 듣는 이는 읽기가 떼고, 읽기를 못 한 끝
+//!   (철회·넣기 오류·읽기를 못 보냄)은 놓기 앞에서 뗀다(적대 리뷰 2 회차 — 문서가 죽을 때까지 격리 world 에 남았다). 페이지가 답하지 않는 끝(시한)·
+//!   탭이 사라진 끝은 떼지 않는다(그 호출도 30 초를 붙잡힌다).
 //! - 남는 틈(문서로 받아들인 것): 확인과 넣기 사이에 페이지가 같은 문서 안에서 노드를 바꾸면 파일은 떨어진 노드로 간다 — 같은 출처(사용자가
 //!   승인한 그 문서)이고, 확인이 「removed」 로 실패를 알린다.
 
@@ -69,6 +76,11 @@ const check_js =
     "var A=EventTarget.prototype.addEventListener;A.call(t,'input',s.h,true);A.call(t,'change',s.h,true);globalThis[key]=s}" ++
     "return 'ok'}";
 
+/// 읽기를 못 하고 끝날 때 듣는 이를 뗀다(같은 objectId·같은 key — 없으면 아무것도 안 한다).
+const disarm_js =
+    "function(key){var s=globalThis[key];if(!s)return;var R=EventTarget.prototype.removeEventListener;" ++
+    "R.call(this,'input',s.h,true);R.call(this,'change',s.h,true);delete globalThis[key]}";
+
 /// 넣은 뒤 읽기(같은 objectId) — 듣는 이를 떼고, 넣을 때 적은 목록(받았나)과 지금 칸(그대로 두었나 — 붙어 있고 같은 목록)을 견준다:
 /// `ok`(지금 칸이 같다)·`dropped`(넣을 때 같았는데 지금은 아니다 — 페이지가 받은 뒤 비웠다)·`mismatch`(넣을 때 다른 목록)·`removed`(기록 없이
 /// 떨어졌다)·`unseen`(기록 없이 다른 목록).
@@ -82,7 +94,7 @@ const verify_js =
     "if(s&&s.seen.length){for(var j=0;j<s.seen.length;j++)if(same(s.seen[j]))return 'dropped';return 'mismatch'}" ++
     "return now===null?'removed':'unseen'}";
 
-const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify, release };
+const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify, disarm, release };
 
 pub const Phase = enum { pre, post };
 
@@ -109,6 +121,8 @@ pub const Op = struct {
     then: ?struct { status: Status, result: []u8 } = null,
     /// `setFileInputFiles` 를 보냈고 그 답이 「안 했다」(오류·못 보냄)가 아니었다 — 사본이 페이지에 갔을 수 있다(앱이 실패여도 사본을 남긴다).
     given: bool = false,
+    /// 승인 뒤 확인이 그 칸에 듣는 이를 달았고 아직 떼지 않았다 — 읽기를 못 하고 끝나면 놓기 앞에서 뗀다(`disarm_js`).
+    armed: bool = false,
 
     pub fn init(count: usize, id: u64) Op {
         return .{ .count = count, .id = id };
@@ -153,7 +167,7 @@ pub const Op = struct {
     /// 아니다 — 승인 뒤라도 그 사이 철회·탭 닫힘·시한이면 넣지 않는다(`cancel` 이 놓고 끝낸다).
     pub fn committed(self: *const Op) bool {
         return switch (self.stage) {
-            .release_pre, .verify, .release => true,
+            .release_pre, .verify, .disarm, .release => true,
             else => false,
         };
     }
@@ -187,9 +201,17 @@ pub const Op = struct {
         return call(gpa, "Page.getFrameTree", "", .{});
     }
 
+    /// 답을 정해 두고 놓는다 — 듣는 이가 달려 있으면 먼저 뗀다(그 답은 무엇이든 놓기로 간다).
     fn releaseThen(self: *Op, gpa: std.mem.Allocator, status: Status, msg: []const u8) !Step {
         if (self.then) |t| gpa.free(t.result);
         self.then = .{ .status = status, .result = try gpa.dupe(u8, msg) };
+        if (self.armed) {
+            self.armed = false;
+            self.stage = .disarm;
+            var key_buf: [snapshot_key.len + 20]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, snapshot_key ++ "{d}", .{self.id}) catch unreachable;
+            return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{f}}}]}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(disarm_js, .{}), std.json.fmt(key, .{}) });
+        }
         return self.releaseCall(gpa, .release);
     }
 
@@ -217,6 +239,7 @@ pub const Op = struct {
             return .{ .done = .{ .status = t.status, .result = t.result } };
         }
         if (self.stage == .release_pre) return self.confirmStep(gpa);
+        if (self.stage == .disarm) return self.releaseCall(gpa, .release); // 떼기는 best effort — 답이 무엇이든 놓는다
         const holds = switch (self.stage) {
             .check, .tree_again, .set, .verify => true,
             else => false,
@@ -226,13 +249,19 @@ pub const Op = struct {
             .cdp_error => |e| return self.cdpError(gpa, e, holds),
             .timed_out => |why| {
                 if (self.stage == .set) self.given = true; // 갔는지 모른다 — 사본을 남긴다
+                self.armed = false; // 페이지가 답하지 않는다 — 떼기도 붙잡힌다(놓기만)
                 return if (holds) self.releaseThen(gpa, .timeout, why) else done(gpa, .timeout, why);
             },
             .failed => |why| {
                 if (self.stage == .set) self.given = true;
+                self.armed = false; // 탭이 닫혔거나 엔진이 멈췄거나 대화상자가 떴다 — 뗄 곳이 없거나 거절된다
                 return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
             },
-            .not_sent => |why| return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why),
+            .not_sent => |why| {
+                // 넣은 뒤 읽기를 이동 중이라 보내지 않았다 — 넣기가 이동을 걸었다(2 회차: 「then try again」 이 다시 올리게 했다).
+                if (self.stage == .verify and std.mem.eql(u8, why, ops.loading_reason)) return self.navigated(gpa);
+                return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
+            },
         };
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch
             return if (holds) self.releaseThen(gpa, .failed, "malformed DevTools result") else done(gpa, .failed, "malformed DevTools result");
@@ -248,7 +277,8 @@ pub const Op = struct {
                     try replace(gpa, &self.loader, loader);
                     try replace(gpa, &self.origin, origin);
                 } else if (!std.mem.eql(u8, loader, self.loader.?) or !std.mem.eql(u8, frame, self.frame.?)) {
-                    // 승인한 문서가 아니다 — 아무것도 넣지 않는다.
+                    // 승인한 문서가 아니다 — 아무것도 넣지 않는다. 듣는 이를 단 문서는 사라졌다(떼지 않는다).
+                    self.armed = false;
                     return self.failHolding(gpa, page_changed_reason);
                 }
                 if (self.stage == .tree_again) return self.setStep(gpa);
@@ -273,6 +303,7 @@ pub const Op = struct {
                 if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .failed, check_failed_reason);
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse return self.releaseThen(gpa, .failed, check_failed_reason);
                 if (self.checkReason(verdict)) |why| return self.releaseThen(gpa, .failed, why);
+                if (self.phase == .post) self.armed = true; // 통과한 확인은 듣는 이를 달았다
                 // 모달 전: 놓고 멈춘다(모달). 승인 뒤: 확인과 넣기 사이의 이동을 한 번 더 본다.
                 if (self.phase == .pre) return self.releaseCall(gpa, .release_pre);
                 return self.treeStep(gpa, .tree_again);
@@ -282,6 +313,7 @@ pub const Op = struct {
                 return self.verifyStep(gpa);
             },
             .verify => {
+                self.armed = false; // 읽기가 돌았다 — 처음에 듣는 이를 뗐다
                 if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .failed, mismatch_reason);
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
                 if (std.mem.eql(u8, verdict, "removed")) return self.releaseThen(gpa, .failed, removed_after_reason);
@@ -289,11 +321,11 @@ pub const Op = struct {
                 // 넣을 때 받은 목록이 맞으면 성공 — 그 뒤 페이지가 비웠으면 kept:false(다시 올리면 두 번 올라간다).
                 const kept = std.mem.eql(u8, verdict, "ok");
                 if (!kept and !std.mem.eql(u8, verdict, "dropped")) return self.releaseThen(gpa, .failed, mismatch_reason);
-                const result = try self.successJson(gpa, kept);
+                const result = try self.successJson(gpa, kept, false);
                 defer gpa.free(result);
                 return self.releaseThen(gpa, .success, result);
             },
-            .release, .release_pre => unreachable, // 위에서
+            .release, .release_pre, .disarm => unreachable, // 위에서
         }
     }
 
@@ -364,9 +396,19 @@ pub const Op = struct {
         return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice() } };
     }
 
-    /// 성공 답 — `{"origin","files":[{"name","size"}],"kept"}`(L2 `serializeUploadResult` 가 검사한다). `kept` 거짓 = 넣을 때 받았지만 그 뒤
-    /// 페이지가 칸을 비우거나 바꿨다.
-    fn successJson(self: *const Op, gpa: std.mem.Allocator, kept: bool) ![]u8 {
+    /// 넣기가 `{}` 로 끝난 뒤 읽기 전에 문서가 사라졌다(이동이 시작됐거나 확정됐다) — 처리기는 파일을 받고 돌았다(넣기의 이벤트는 넣기가
+    /// 돌아오기 전에 났다 — 1 회차 실측). 받은 목록은 읽을 수 없다: 성공에 `kept:false`·`navigated:true`. 실패로 답하면 에이전트가 다시 올린다.
+    /// 듣는 이는 문서와 함께 사라졌다(떼지 않는다).
+    fn navigated(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.armed = false;
+        const result = try self.successJson(gpa, false, true);
+        defer gpa.free(result);
+        return self.releaseThen(gpa, .success, result);
+    }
+
+    /// 성공 답 — `{"origin","files":[{"name","size"}],"kept","navigated"}`(L2 `serializeUploadResult` 가 검사한다). `kept` 거짓 = 넣을 때
+    /// 받았지만 그 뒤 페이지가 칸을 비우거나 바꿨다, 또는 곧 옮겨 가 읽을 수 없었다(`navigated` 참 — 2 회차).
+    fn successJson(self: *const Op, gpa: std.mem.Allocator, kept: bool, moved: bool) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
@@ -387,12 +429,15 @@ pub const Op = struct {
             s.endArray() catch |e| break :blk e;
             s.objectField("kept") catch |e| break :blk e;
             s.write(kept) catch |e| break :blk e;
+            s.objectField("navigated") catch |e| break :blk e;
+            s.write(moved) catch |e| break :blk e;
             s.endObject() catch |e| break :blk e;
         }) catch return error.OutOfMemory;
         return aw.toOwnedSlice();
     }
 
-    /// CDP 오류 — 문서가 바뀌어 context·노드가 사라졌으면(승인 뒤) 「페이지가 바뀌었다」, 그 밖은 그 글로. 쥔 객체는 놓는다.
+    /// CDP 오류 — 문서가 바뀌어 context·노드가 사라졌으면(승인 뒤) 「페이지가 바뀌었다」, 그 밖은 그 글로. 쥔 객체는 놓는다. 넣은 뒤의 읽기에서
+    /// 문서가 사라졌으면 넣기가 이동을 걸었다 — 「넣고 곧 옮겨 갔다」(`navigated`, 2 회차).
     fn cdpError(self: *Op, gpa: std.mem.Allocator, err_json: []const u8, holds: bool) !Step {
         var owned: ?[]u8 = null;
         defer if (owned) |m| gpa.free(m);
@@ -401,8 +446,10 @@ pub const Op = struct {
             if (stringAt(parsed.value, &.{"message"})) |m| owned = try gpa.dupe(u8, m);
         } else |_| {}
         const message: []const u8 = owned orelse "DevTools error";
-        const gone = std.mem.indexOf(u8, message, "Cannot find context") != null or std.mem.indexOf(u8, message, "Could not find object") != null or
-            std.mem.indexOf(u8, message, "No node") != null or std.mem.indexOf(u8, message, "No frame") != null;
+        const context_gone = std.mem.indexOf(u8, message, "Cannot find context") != null or std.mem.indexOf(u8, message, "Could not find object") != null;
+        if (self.stage == .verify and context_gone) return self.navigated(gpa);
+        const gone = context_gone or std.mem.indexOf(u8, message, "No node") != null or std.mem.indexOf(u8, message, "No frame") != null;
+        if (context_gone) self.armed = false; // 문서가 사라졌다 — 듣는 이도 함께(노드만 떨어졌으면 문서는 살아 있다 — 뗀다)
         const why: []const u8 = switch (self.stage) {
             .set => if (gone) page_changed_reason else if (std.mem.indexOf(u8, message, "not a file input") != null) not_file_input_reason else message,
             .world, .resolve, .check, .tree, .tree_again => if (gone) (if (self.phase == .post) page_changed_reason else detached_reason) else message,

@@ -23,6 +23,11 @@ const display = @import("maru").session.web_upload_display;
 extern "c" fn fclonefileat(srcfd: c_int, dst_dirfd: c_int, dst: [*:0]const u8, flags: u32) c_int;
 extern "c" fn fchflags(fd: c_int, flags: c_uint) c_int;
 
+/// 사용자가 거는 잠금 플래그 — Finder 의 「잠금」(`uchg` = UF_IMMUTABLE)과 `uappnd`(UF_APPEND). 사본에서는 **이것만** 푼다: 플래그를 통째로
+/// 지우면 투명 압축(UF_COMPRESSED — decmpfs, `ditto --hfsCompression`·앱 번들·설치 프로그램이 깐 파일)도 지워져 데이터(리소스 포크 xattr)의
+/// 해석을 잃고 사본이 0 바이트가 된다(적대 리뷰 2 회차 실측 — 그러면 늘 「changed」).
+const uf_lock_flags: u32 = 0x2 | 0x4; // UF_IMMUTABLE | UF_APPEND
+
 /// macOS 의 EOPNOTSUPP(102) — 소켓을 `open` 하면 이것이다. zig 의 `E.OPNOTSUPP` 는 ENOTSUP(45)라 이름이 없다(적대 리뷰 1 회차 — 소켓이
 /// 「열 수 없다」 로 샜다).
 const darwin_eopnotsupp: c_int = 102;
@@ -76,6 +81,7 @@ pub const Refusal = enum {
     control_chars,
     duplicate,
     too_long,
+    unsteady,
 
     pub fn text(self: Refusal) []const u8 {
         return switch (self) {
@@ -87,6 +93,7 @@ pub const Refusal = enum {
             .control_chars => "its real path contains control characters",
             .duplicate => "the same file is listed twice",
             .too_long => "the path is too long",
+            .unsteady => "the file kept changing while it was being opened",
         };
     }
 };
@@ -131,42 +138,71 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8) !PrepareResult {
         var it = view.iterator();
         while (it.nextCodepoint()) |c| if (c >= 0x80 and c <= 0x9f) return .{ .refused = .control_chars };
     } else |_| {}
-    const size: u64 = @intCast(@max(st.size, 0));
-    const want = @min(size, display.head_bytes);
+    // 엿보기는 적은 상태보다 새것이면 안 된다 — stat 을 먼저 하고 읽은 뒤 다시 본다. 읽기가 파일을 바꿀 수 있다: 데이터가 내려와 있지 않은
+    // 파일(iCloud 「Mac 저장 공간 최적화」·Dropbox 온라인 전용 — dataless)은 읽는 순간 내려받아 채워지고 ctime 이 움직인다. 처음 적은 상태로는
+    // 승인 뒤 사본의 비교가 늘 「changed」 라 사용자가 모달을 두 번 보았다(적대 리뷰 2 회차 LOW-C). 그래서 읽기 뒤 상태가 다르면 한 번 더 읽고
+    // 두 번째 상태를 쓴다 — 그것도 다르면 계속 바뀌는 파일이니 거절(모달이 보일 것을 정할 수 없다).
+    var attempt: u8 = 0;
+    const snap: Snapshot = while (true) : (attempt += 1) {
+        const before = statOf(fd) orelse return .{ .refused = .unreadable };
+        const head = (try readHead(gpa, fd, @intCast(@max(before.size, 0)))) orelse return .{ .refused = .unreadable };
+        if (builtin.is_test) if (test_after_peek) |hook| hook(fd);
+        const after = statOf(fd) orelse {
+            gpa.free(head);
+            return .{ .refused = .unreadable };
+        };
+        if (sameState(before, after)) break .{ .st = before, .head = head };
+        gpa.free(head);
+        if (attempt >= 1) return .{ .refused = .unsteady };
+    };
+    errdefer gpa.free(snap.head);
+    const real_owned = try gpa.dupe(u8, got);
+    keep = true;
+    const st2 = snap.st;
+    return .{ .ok = .{
+        .fd = fd,
+        .real = real_owned,
+        .size = @intCast(@max(st2.size, 0)),
+        .dev = st2.dev,
+        .ino = st2.ino,
+        .nlink = st2.nlink,
+        .mtime_sec = st2.mtimespec.sec,
+        .mtime_nsec = st2.mtimespec.nsec,
+        .ctime_sec = st2.ctimespec.sec,
+        .ctime_nsec = st2.ctimespec.nsec,
+        .head = snap.head,
+    } };
+}
+
+const Snapshot = struct { st: std.c.Stat, head: []u8 };
+
+/// 시험만 — 엿보기를 읽은 뒤·다시 stat 하기 전에 부른다(그 사이에 파일이 바뀌는 것을 흉내 낸다).
+var test_after_peek: ?*const fn (fd: c_int) void = null;
+
+/// 두 stat 이 같은 파일의 같은 상태인가 — 사본 뒤 비교(`stageFileWith`)와 같은 항목(장치·inode·크기·mtime·ctime).
+fn sameState(a: std.c.Stat, b: std.c.Stat) bool {
+    return a.dev == b.dev and a.ino == b.ino and a.size == b.size and a.mtimespec.sec == b.mtimespec.sec and a.mtimespec.nsec == b.mtimespec.nsec and
+        a.ctimespec.sec == b.ctimespec.sec and a.ctimespec.nsec == b.ctimespec.nsec;
+}
+
+/// 앞부분(최대 `display.head_bytes`)을 읽는다(소유 — 파일이 짧아졌으면 읽은 만큼). 읽기 오류면 null.
+fn readHead(gpa: std.mem.Allocator, fd: c_int, size: u64) !?[]u8 {
+    const want: usize = @intCast(@min(size, display.head_bytes));
     const head = try gpa.alloc(u8, want);
-    errdefer gpa.free(head);
     var have: usize = 0;
     while (have < want) {
         const n = std.c.pread(fd, head.ptr + have, want - have, @intCast(have));
         if (n < 0) {
             if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
             gpa.free(head);
-            return .{ .refused = .unreadable };
+            return null;
         }
         if (n == 0) break;
         have += @intCast(n);
     }
-    const head_owned = if (have < want) blk: {
-        const shrunk = try gpa.dupe(u8, head[0..have]);
-        gpa.free(head);
-        break :blk shrunk;
-    } else head;
-    errdefer gpa.free(head_owned);
-    const real_owned = try gpa.dupe(u8, got);
-    keep = true;
-    return .{ .ok = .{
-        .fd = fd,
-        .real = real_owned,
-        .size = size,
-        .dev = st.dev,
-        .ino = st.ino,
-        .nlink = st.nlink,
-        .mtime_sec = st.mtimespec.sec,
-        .mtime_nsec = st.mtimespec.nsec,
-        .ctime_sec = st.ctimespec.sec,
-        .ctime_nsec = st.ctimespec.nsec,
-        .head = head_owned,
-    } };
+    if (have == want) return head;
+    defer gpa.free(head);
+    return try gpa.dupe(u8, head[0..have]);
 }
 
 /// 같은 파일을 두 번 적었는가(심링크·하드 링크로 다른 경로가 같은 파일 — 장치·inode). `files[i]` 와 앞의 것.
@@ -247,7 +283,8 @@ pub fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64
     if (out < 0) return .{ .failed = .io };
     defer _ = std.c.close(out);
     // 복제는 원본의 파일 플래그(`uchg` 등)를 옮긴다 — 풀지 않으면 0400 으로 못 바꾸고(EPERM) 지우지도 못한다(적대 리뷰 1 회차 실측: `cp -c` 의 사본이 `uchg`).
-    if (statOf(out)) |o| if (o.flags != 0 and fchflags(out, 0) != 0) return .{ .failed = .io };
+    // 잠금만 푼다 — 투명 압축(UF_COMPRESSED)은 그대로 둔다(지우면 사본이 0 바이트 — 2 회차 실측: `chflags nouchg` 는 압축을 지키고 `chflags 0` 은 비웠다).
+    if (statOf(out)) |o| if (o.flags & uf_lock_flags != 0 and fchflags(out, o.flags & ~uf_lock_flags) != 0) return .{ .failed = .io };
     if (std.c.fchmod(out, 0o400) != 0) return .{ .failed = .io };
     const copied = statOf(out) orelse return .{ .failed = .io };
     // 원본이 모달 때와 같은가(장치·inode·크기·mtime·ctime) — 승인 뒤 바뀌었으면 사본이 모달과 다른 내용일 수 있다. ctime 은 같은 길이로 바꿔 쓰고
@@ -267,13 +304,14 @@ fn unlinkUnlocked(path: [:0]const u8) void {
     if (clearFlagsAt(std.c.AT.FDCWD, path)) _ = std.c.unlink(path.ptr);
 }
 
-/// `dir` 아래 `name` 의 파일 플래그를 푼다(링크는 따라가지 않는다). 풀었으면 참 — 플래그가 없었거나 열 수 없으면 거짓.
+/// `dir` 아래 `name` 의 잠금 플래그(`uf_lock_flags`)를 푼다(링크는 따라가지 않는다 — 다른 플래그는 그대로). 풀었으면 참 — 잠금이 없었거나 열 수
+/// 없으면 거짓.
 fn clearFlagsAt(dir: c_int, name: [:0]const u8) bool {
     const fd = std.c.openat(dir, name.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
     if (fd < 0) return false;
     defer _ = std.c.close(fd);
     const st = statOf(fd) orelse return false;
-    return st.flags != 0 and fchflags(fd, 0) == 0;
+    return st.flags & uf_lock_flags != 0 and fchflags(fd, st.flags & ~uf_lock_flags) == 0;
 }
 
 fn copyFromFd(src: c_int, dest: [:0]const u8, size: u64) !bool {
@@ -674,4 +712,142 @@ test "W9c③ 적대 리뷰 1 회차 재현 R6: 유닉스 소켓은 「정규 파
     @memcpy(addr.path[0..path.len], path);
     try testing.expectEqual(@as(c_int, 0), std.c.bind(sock, @ptrCast(&addr), @sizeOf(std.c.sockaddr.un)));
     try expectRefused(try prepare(testing.allocator, path), .not_regular);
+}
+
+// ── W9c③ 적대 리뷰 2 회차 ──
+const uf_compressed: c_uint = 0x20; // UF_COMPRESSED — 투명 압축(decmpfs: `ditto --hfsCompression`, 앱 번들·설치 프로그램이 깐 파일)
+
+// 실측(셸): `ditto --hfsCompression` 한 46000 바이트 파일을 `cp -c`(복제) → 사본도 `compressed` → `chflags 0` 하면 사본이 **0 바이트**가 된다
+// (데이터는 리소스 포크 xattr 에 있고 UF_COMPRESSED 를 지우면 그 해석을 잃는다). 고치기 전 `stageFile` 은 복제 뒤 `fchflags(out, 0)` 로 플래그를
+// 다 풀었다(1 회차 uchg 고침) — 투명 압축된 원본은 사본 크기가 0 이 되어 늘 「the file changed after the user approved it — run upload again」
+// 이었다(다시 해도 같다). 잠금만 풀면 압축은 남는다 — 잠기고 압축된 원본(`uchg,compressed`)도 보고, 그 원본을 지우는 길(`clearFlagsAt`)도 본다.
+test "W9c③ 적대 리뷰 2 회차 재현 S1: 투명 압축(UF_COMPRESSED) 원본도 같은 볼륨 복제로 같은 바이트의 사본이 된다 — 잠겨 있어도, 잠금만 풀고 압축은 둔다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    // `ditto` 를 띄우는 것은 이 시험뿐이다 — 선언을 시험 안에 둔다(앱 코드의 spawn 축 판정자는 시험 몸을 세지 않는다).
+    const libc = struct {
+        extern "c" fn system(cmd: [*:0]const u8) c_int;
+    };
+    var t = try Tmp.init();
+    defer t.deinit();
+    var body: [46000]u8 = undefined;
+    for (&body, 0..) |*b, i| b.* = "hello compressed world\n"[i % 23];
+    try t.write("plain.txt", &body);
+    var cmd_buf: [3 * std.fs.max_path_bytes]u8 = undefined;
+    const cmd = try std.fmt.bufPrintZ(&cmd_buf, "/usr/bin/ditto --hfsCompression '{s}/plain.txt' '{s}/comp.txt'", .{ t.path, t.path });
+    try testing.expectEqual(@as(c_int, 0), libc.system(cmd.ptr));
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const src = t.join(&b1, "comp.txt");
+    const sst = statPath(src.ptr) orelse return error.TestUnexpectedResult;
+    if (@as(u32, sst.flags) & uf_compressed == 0) return error.SkipZigTest; // 이 볼륨이 압축하지 않았다
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    // 0: 압축만. 1: 압축에 Finder 잠금(`uchg`)까지.
+    for (0..2) |index| {
+        if (index == 1) {
+            const fd = std.c.open(src.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+            try testing.expect(fd >= 0);
+            defer _ = std.c.close(fd);
+            const st = statOf(fd) orelse return error.TestUnexpectedResult;
+            try testing.expectEqual(@as(c_int, 0), fchflags(fd, st.flags | 0x2)); // uchg(UF_IMMUTABLE) — 압축은 그대로
+        }
+        var p = (try prepare(testing.allocator, src)).ok;
+        defer p.deinit(testing.allocator);
+        var budget: u64 = copy_cap_per_call;
+        const r = try stageFile(testing.allocator, root, 3, 4, index, &p, &budget);
+        switch (r) {
+            .ok => |path| testing.allocator.free(path),
+            .failed => |e| {
+                std.debug.print("S1: stageFile failed: {s}\n", .{@tagName(e)});
+                return error.TestUnexpectedResult;
+            },
+        }
+        try testing.expectEqual(copy_cap_per_call, budget); // 복제였다(복사 예산을 쓰지 않았다)
+        var zb: [std.fs.max_path_bytes]u8 = undefined;
+        const staged_z = try std.fmt.bufPrintZ(&zb, "{s}/3/4/{d}/comp.txt", .{ root, index });
+        const st = statPath(staged_z.ptr) orelse return error.TestUnexpectedResult;
+        try testing.expectEqual(@as(i64, 46000), st.size);
+        try testing.expectEqual(@as(u32, 0), @as(u32, st.flags) & uf_lock_flags); // 잠금은 풀렸다
+        // 바이트가 원본과 같다(압축의 해석을 잃지 않았다).
+        const fd = std.c.open(staged_z.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+        try testing.expect(fd >= 0);
+        defer _ = std.c.close(fd);
+        var got: [46000]u8 = undefined;
+        try testing.expectEqual(@as(isize, got.len), std.c.pread(fd, &got, got.len, 0));
+        try testing.expectEqualSlices(u8, &body, &got);
+    }
+    // 잠긴 원본을 지우는 길 — 잠금만 풀고 지운다.
+    removeUnder(t.path, "comp.txt");
+    try testing.expect(statPath(src.ptr) == null);
+}
+
+/// 시험 P1 의 흉내 — 엿보기 뒤에 파일을 바꾼다(첫 바이트를 「b」 로, 끝에 한 바이트 — 크기가 늘어 ctime 도 반드시 움직인다). `changes_left` 번만.
+const PeekChanger = struct {
+    var path: [:0]const u8 = "";
+    var changes_left: usize = 0;
+    var calls: usize = 0;
+
+    fn hook(_: c_int) void {
+        calls += 1;
+        if (changes_left == 0) return;
+        changes_left -= 1;
+        const fd = std.c.open(path.ptr, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+        if (fd < 0) return;
+        defer _ = std.c.close(fd);
+        _ = std.c.pwrite(fd, "b", 1, 0);
+        const st = statOf(fd) orelse return;
+        _ = std.c.pwrite(fd, "z", 1, st.size);
+    }
+};
+
+// dataless 파일(iCloud 최적화·Dropbox 온라인 전용)은 엿보기 읽기가 내려받아 채우며 ctime 을 바꾼다 — 읽기 **앞의** stat 하나로 적으면 승인 뒤 사본의
+// 비교가 늘 「changed」 였다(사용자는 모달을 두 번 본다). 실제 dataless 파일은 계정이 있어야 만들 수 있어, 엿보기와 두 번째 stat 사이에 파일을
+// 바꾸는 것으로 흉내 낸다.
+test "W9c③ 적대 리뷰 2 회차 재현 P1: 엿보기 읽기 사이에 파일이 한 번 바뀌면(dataless 가 내려받아진다) 다시 읽어 두 번째 상태로 적는다 — 사본이 「changed」 가 아니다, 계속 바뀌면 거절" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    try t.write("cloud.txt", "aaaa");
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const src = t.join(&b1, "cloud.txt");
+    PeekChanger.path = src;
+    test_after_peek = &PeekChanger.hook;
+    defer test_after_peek = null;
+
+    // 한 번 바뀐다 → 두 번째 읽기의 상태와 엿보기(「baaaz」).
+    PeekChanger.changes_left = 1;
+    PeekChanger.calls = 0;
+    var p = switch (try prepare(testing.allocator, src)) {
+        .ok => |x| x,
+        .refused => |why| {
+            std.debug.print("P1: refused: {s}\n", .{@tagName(why)});
+            return error.TestUnexpectedResult;
+        },
+    };
+    defer p.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), PeekChanger.calls);
+    try testing.expectEqual(@as(u64, 5), p.size);
+    try testing.expectEqualStrings("baaaz", p.head);
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    var budget: u64 = copy_cap_per_call;
+    switch (try stageFile(testing.allocator, root, 1, 1, 0, &p, &budget)) {
+        .ok => |path| testing.allocator.free(path),
+        .failed => |e| {
+            std.debug.print("P1: stageFile failed: {s}\n", .{@tagName(e)});
+            return error.TestUnexpectedResult;
+        },
+    }
+
+    // 읽을 때마다 바뀐다 → 정할 수 없다(두 번까지만 읽는다).
+    PeekChanger.changes_left = 5;
+    PeekChanger.calls = 0;
+    try expectRefused(try prepare(testing.allocator, src), .unsteady);
+    try testing.expectEqual(@as(usize, 2), PeekChanger.calls);
+
+    // 바뀌지 않으면 한 번만 읽는다.
+    PeekChanger.changes_left = 0;
+    PeekChanger.calls = 0;
+    var q = (try prepare(testing.allocator, src)).ok;
+    q.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), PeekChanger.calls);
 }

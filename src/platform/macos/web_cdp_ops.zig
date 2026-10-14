@@ -73,6 +73,10 @@ pub const Kick = @import("web_cdp_kick.zig").Kick;
 /// 실은 호출은 이 이유일 때만 잠깐 뒤 다시 보낸다(4 회차 — 탭이 준비 안 됨·요청 실패에도 4.5 초 다시 보냈다).
 pub const busy_reason = "too many DevTools calls at once (on this tab, or across all tabs) — retry shortly";
 
+/// 확정되지 않은 이동 중이라 페이지 호출을 보내지 않았다 — 부른 쪽(`app_host_abi` `uncommittedReply`)이 `not_sent` 에 이 글을 그대로 싣는다.
+/// 업로드는 넣은 뒤의 읽기가 이 글이면 「넣고 곧 옮겨 갔다」 로 가른다(W9c③ 적대 리뷰 2 회차 — 「then try again」 이 다시 올리게 했다).
+pub const loading_reason = "the tab is loading a new page — wait for it (wait --load), then try again";
+
 /// 다음에 할 일 — CDP 호출 하나(`params` 는 소유 — 부른 쪽이 놓는다) 또는 끝(`result` 소유).
 pub const Step = union(enum) {
     /// `kick` — 바로 뒤에 작은 스크린샷을 함께 보낸다(`web_osr.devtoolsCallKick` 이 이 값을 그대로 받는다 — 숨은 탭의 접근성 질의·포인터 이동·rAF 가 그래야 돈다,
@@ -3857,6 +3861,9 @@ const UpPage = struct {
     var check: []const u8 = "ok";
     var set_error: ?[]const u8 = null;
     var verify: []const u8 = "ok";
+    /// 2 회차: 읽기(verify)·넣기의 답을 통째로 바꾼다(넣은 뒤 페이지가 옮겨 가 context 가 죽었다·시한 등).
+    var verify_reply: ?Reply = null;
+    var set_reply: ?Reply = null;
     var trees: usize = 0;
     /// 이 메서드를 한 번 「자리 없음」 으로 못 보낸 것으로 답한다(적대 리뷰 1 회차 R10).
     var busy_once: ?[]const u8 = null;
@@ -3870,6 +3877,8 @@ const UpPage = struct {
         check = "ok";
         set_error = null;
         verify = "ok";
+        verify_reply = null;
+        set_reply = null;
         trees = 0;
     }
 
@@ -3888,11 +3897,13 @@ const UpPage = struct {
                 "{\"frameTree\":{\"frame\":{\"id\":\"F1\",\"loaderId\":\"L2\",\"securityOrigin\":\"https://b.test\"}}}" };
         }
         if (std.mem.eql(u8, method, "DOM.setFileInputFiles")) {
+            if (set_reply) |r| return r;
             if (set_error) |e| return .{ .cdp_error = e };
             return .{ .ok = "{}" };
         }
         if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) {
             if (std.mem.indexOf(u8, params, "function(names") != null) {
+                if (verify_reply) |r| return r;
                 inline for (.{ "ok", "removed", "mismatch", "dropped", "unseen" }) |v|
                     if (std.mem.eql(u8, verify, v)) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"" ++ v ++ "\"}}" };
                 return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"mismatch\"}}" };
@@ -3939,7 +3950,7 @@ test "W9c③: 업로드 — 찾기 → 프레임 트리·격리 world·노드·�
     const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, &up_staged), &trail);
     defer testing.allocator.free(end.done.result);
     try testing.expectEqual(Status.success, end.done.status);
-    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5}],\"kept\":true}", end.done.result);
+    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5}],\"kept\":true,\"navigated\":false}", end.done.result);
     const post = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Page.getFrameTree", "DOM.setFileInputFiles", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(post.len, trail.methods.items.len);
     for (post, trail.methods.items) |w, g| try testing.expectEqualStrings(w, g);
@@ -4072,7 +4083,13 @@ test "W9c③: 철회 — 확인·두 번째 프레임 트리·넣기 앞이면 �
     try testing.expectEqualStrings("DOM.setFileInputFiles", step.call.method);
     try testing.expect(!op.committed()); // 넣기 자체는 철회되면 보내지 않는다
     testing.allocator.free(step.call.params);
-    const rel = (try op.cancel(testing.allocator)).?;
+    // 승인 뒤 확인이 단 듣는 이를 먼저 뗀다(적대 리뷰 2 회차) — 떼기·놓기는 committed.
+    const disarm = (try op.cancel(testing.allocator)).?;
+    try testing.expectEqualStrings("Runtime.callFunctionOn", disarm.call.method);
+    try testing.expect(std.mem.indexOf(u8, disarm.call.params, "removeEventListener") != null);
+    testing.allocator.free(disarm.call.params);
+    try testing.expect(op.committed());
+    const rel = try op.feed(testing.allocator, .{ .ok = "{\"result\":{\"type\":\"undefined\"}}" });
     try testing.expectEqualStrings("Runtime.releaseObjectGroup", rel.call.method);
     testing.allocator.free(rel.call.params);
     const end = try op.feed(testing.allocator, .{ .ok = "{}" });
@@ -4104,8 +4121,8 @@ fn driveUploadSleeping(op: *Op, first: Step, trail: *Trail, sleeps: *usize) !Ste
 test "W9c③ 적대 리뷰 1 회차 재현 R9: 페이지가 change 에서 칸을 비워도(받은 뒤 지운다) 넣을 때 본 목록이 맞으면 성공 — kept:false, 승인 뒤 확인은 maru 의 격리 world 에 듣는 이를 단다" {
     const Case = struct { verify: []const u8, status: Status, want: []const u8 };
     for ([_]Case{
-        .{ .verify = "dropped", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}" },
-        .{ .verify = "ok", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true}" },
+        .{ .verify = "dropped", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}" },
+        .{ .verify = "ok", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true,\"navigated\":false}" },
         .{ .verify = "unseen", .status = .failed, .want = web_cdp_upload.unseen_reason },
     }) |c| {
         UpPage.reset();
@@ -4153,5 +4170,99 @@ test "W9c③ 적대 리뷰 1 회차 재현 R10: 승인 뒤 DevTools 자리가 �
         try testing.expectEqual(@as(usize, 2), trail.count(busy_method)); // 못 보낸 것과 다시 보낸 것
         // 넣기는 한 번만 갔다(못 보낸 것은 가지 않았다) — 사본이 두 번 들어가지 않는다.
         try testing.expect(op.upload.?.given);
+    }
+}
+
+// ── W9c③ 적대 리뷰 2 회차 ──
+// 실제 CEF 154 실측(판정자 탐침 v2·v3, 3/3 씩): change 처리기가 `location.href=` 로 옮기는 칸에 `DOM.setFileInputFiles` → `{}`(그 처리기가 파일을
+// 받고 돌았다) → 곧 보낸 읽기(`Runtime.callFunctionOn`, 같은 objectId)는 Chromium 이 확정까지 붙잡았다가 「Cannot find context with specified id」.
+// 앱이 이동을 먼저 보았으면 읽기를 보내지 않고 `uncommittedReply` 의 「…then try again」. 고치기 전에는 둘 다 실패였다 — 에이전트는 「실패」 를
+// 보고 다시 불러 모달이 또 뜨고 두 번 올라갔다(1 회차 MED-2 와 같은 갈래). 넣기가 `{}` 로 끝난 뒤의 「문서가 사라졌다」 는 성공에
+// `kept:false`·`navigated:true` 다 — 다시 올리라고 하지 않는다. 듣는 이는 문서와 함께 사라졌다(떼는 호출을 보내지 않는다).
+test "W9c③ 적대 리뷰 2 회차 재현 V1: 넣은 뒤 페이지가 곧 옮겨 가 읽기가 「Cannot find context」·「loading a new page」 면 성공에 kept:false·navigated:true — 다시 올리라고 하지 않는다" {
+    const cases = [_]Reply{
+        .{ .cdp_error = "{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}" },
+        .{ .cdp_error = "{\"code\":-32000,\"message\":\"Could not find object with given id\"}" },
+        // 앱이 확정되지 않은 이동 중의 호출을 대신 답하는 글(app_host_abi.uncommittedReply — web_cdp_ops.loading_reason): 「then try again」.
+        .{ .not_sent = loading_reason },
+    };
+    for (cases) |reply| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        trail.reset();
+        UpPage.post = true;
+        UpPage.verify_reply = reply;
+        const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(@as(usize, 1), trail.count("DOM.setFileInputFiles"));
+        try testing.expect(op.upload.?.given); // 사본은 페이지에 갔다
+        try testing.expect(std.mem.indexOf(u8, end.done.result, "Cannot find context") == null);
+        try testing.expect(std.mem.indexOf(u8, end.done.result, "try again") == null);
+        try testing.expectEqual(Status.success, end.done.status);
+        try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true}", end.done.result);
+        // 승인 뒤 callFunctionOn 은 확인·읽기 둘뿐(떼는 호출 없음), 그리고 놓기.
+        try testing.expectEqual(@as(usize, 2), trail.count("Runtime.callFunctionOn"));
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+    // 넣기 앞(확인과 넣기 사이)의 「loading」 은 그대로 실패다 — 넣지 않았다(given 거짓).
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    UpPage.post = true;
+    UpPage.set_reply = .{ .not_sent = loading_reason };
+    const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.failed, end.done.status);
+    try testing.expect(!op.upload.?.given);
+}
+
+// 승인 뒤 확인이 그 칸에 단 듣는 이(격리 world)는 읽기만 뗐다 — 철회·넣기 오류·읽기를 못 보낸 끝에서는 문서가 죽을 때까지 남았다(nit-E).
+// 떼는 호출은 놓기 앞에 한 번, best effort. 페이지가 답하지 않는 끝(시한)·탭이 사라진 끝·문서가 바뀐 끝은 보내지 않는다.
+test "W9c③ 적대 리뷰 2 회차 재현 E1: 읽기를 못 한 끝(넣기 오류·읽기를 못 보냄)은 놓기 앞에서 듣는 이를 뗀다 — 시한·다른 문서·넣기 전 확인 실패는 떼지 않는다" {
+    const Case = struct { set_reply: ?Reply = null, verify_reply: ?Reply = null, loader_again: []const u8 = "L1", check: []const u8 = "ok", disarm: bool, status: Status };
+    for ([_]Case{
+        .{ .set_reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"boom\"}" }, .disarm = true, .status = .failed },
+        .{ .verify_reply = .{ .not_sent = dialog_reason }, .disarm = true, .status = .failed },
+        .{ .verify_reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"boom\"}" }, .disarm = true, .status = .failed },
+        .{ .set_reply = .{ .timed_out = "DevTools did not answer in time" }, .disarm = false, .status = .timeout },
+        .{ .set_reply = .{ .failed = "the tab closed or its page crashed" }, .disarm = false, .status = .failed },
+        .{ .loader_again = "L2", .disarm = false, .status = .failed },
+        .{ .check = "disabled", .disarm = false, .status = .failed },
+        .{ .disarm = false, .status = .success },
+    }) |c| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        trail.reset();
+        UpPage.post = true;
+        UpPage.set_reply = c.set_reply;
+        UpPage.verify_reply = c.verify_reply;
+        UpPage.loader_again = c.loader_again;
+        UpPage.check = c.check;
+        const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(c.status, end.done.status);
+        var disarms: usize = 0;
+        for (trail.methods.items, trail.params.items) |m, prm| if (std.mem.eql(u8, m, "Runtime.callFunctionOn") and std.mem.indexOf(u8, prm, "function(key)") != null) {
+            disarms += 1;
+            try testing.expect(std.mem.indexOf(u8, prm, "\"objectId\":\"o-1\"") != null);
+            try testing.expect(std.mem.indexOf(u8, prm, "\"value\":\"maru-w9c-upload-42\"") != null);
+        };
+        try testing.expectEqual(@as(usize, if (c.disarm) 1 else 0), disarms);
+        // 떼기 뒤에 놓는다 — 놓기가 마지막.
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
     }
 }

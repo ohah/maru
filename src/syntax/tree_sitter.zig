@@ -3253,6 +3253,8 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
     // 「짝을 칠하지 않음」과 「짝 없는 괄호까지 안 칠함」은 다르다. Markdown 의 안 닫힌 괄호도 목록에는 남고, 그리기만 억제한다.
     try std.testing.expect(!bracketRuleFor(.markdown).paint);
     try std.testing.expect(bracketRuleFor(.html).paint);
+    // XML·DTD 는 HTML 과 같다 — 괄호 쌍 색은 없고(VS Code 의 xml 도 없다) 짝 없는 괄호는 칠한다(번들 언어 확대 BL1).
+    for ([_]Language{ .html, .xml, .dtd }) |l| try std.testing.expect(!bracketRuleFor(l).colorize and bracketRuleFor(l).paint);
     const unclosed = "text (x\n";
     var markdown = Provider.init(unclosed, .markdown, 0) orelse return error.NoProvider;
     defer markdown.deinit();

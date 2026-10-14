@@ -54041,6 +54041,9 @@ test "IGP4 Python 은 offSide — 블록 뒤 빈 줄이 아래 블록 쪽이다 
     // **Markdown 도 offSide 다**(VS Code `markdown-basics/language-configuration.json` — 처음엔 Python 하나로 적었다, 적대적 검증 2026-09-24)
     const md = try openBracketFixture(&fx, allocator, "o.md", "x\n    y\n\nz\n");
     try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, md, &buf), 2));
+    // **YAML 도 offSide 다**(VS Code `yaml/language-configuration.json` — 번들 언어 확대 BL1 에서 grammar 가 왔다).
+    const ym = try openBracketFixture(&fx, allocator, "o.yml", "x:\n    y: 1\n\nz: 2\n");
+    try testing.expectEqual(@as(usize, 0), countHits(try guideHits(fx.session, ym, &buf), 2));
 }
 
 test "IGP6 Go 는 추정의 기본이 탭 — 탭·공백 동률 문서가 .go 면 탭 파일(간격 4), .txt 면 공백 2 칸 (제품 경계, §5.1c)" {

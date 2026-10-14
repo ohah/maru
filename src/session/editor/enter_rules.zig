@@ -542,3 +542,24 @@ test "INDF1 트리가 답하면 줄 주석 이어쓰기는 caret 이 그 줄의 
     // 표식 자리가 없다(위 줄부터 이어진 블록 주석 안) — 줄 주석 이어쓰기가 아니다.
     try testing.expect(sameAction(decideWith(ts, "a // b ", "c", null, .{ .caret = .comment, .code = "" }), .{}));
 }
+
+test "BLR1 YAML·Lua 언어 규칙의 경계 — 따옴표 속 `:`·주석 속 `#`·블록 스칼라 꼴·앵커, 한 줄로 닫힌 Lua 함수·주석·문자열 속 낱말 (번들 언어 확대 BL1)" {
+    const yaml = ctxFor(.yaml);
+    for ([_][]const u8{ "key:", "- key:", "-", "x: &a1", "a: |", "a: >-", "a: |2", "- |", "  nested:  # c" }) |l| {
+        errdefer std.debug.print("yaml indent? {s}\n", .{l});
+        try testing.expect(sameAction(decide(yaml, l, "", null), .{ .indent = .indent }));
+    }
+    for ([_][]const u8{ "key: \"a: b\"", "key: '#' # c:", "key: value", "--", "a: |+10", "url: \"http://x:\"", "# key:", "a > b", "" }) |l| {
+        errdefer std.debug.print("yaml keep? {s}\n", .{l});
+        try testing.expect(sameAction(decide(yaml, l, "", null), .{}));
+    }
+    const lua = ctxFor(.lua);
+    for ([_][]const u8{ "function f()", "local g = function(a)", "if x then", "for k, v in pairs(t) do", "repeat", "else", "elseif y then", "if a then b() end if c then" }) |l| {
+        errdefer std.debug.print("lua indent? {s}\n", .{l});
+        try testing.expect(sameAction(decide(lua, l, "", null), .{ .indent = .indent }));
+    }
+    for ([_][]const u8{ "f(function() end)", "if a then b() end", "-- function f()", "x = 1 -- then", "local s = 'do'", "until done", "endpoint = 1" }) |l| {
+        errdefer std.debug.print("lua keep? {s}\n", .{l});
+        try testing.expect(sameAction(decide(lua, l, "", null), .{}));
+    }
+}

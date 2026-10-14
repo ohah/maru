@@ -13594,7 +13594,7 @@ test "W9c①: Chromium 탭의 console 은 DevTools·op 줄 없이 곧 답한다 
     try control_pane_grant_store.grant(.{ .pane = 5, .target = 85, .scope = .browser });
     session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .text = "site-a secret" } });
     session_mod.web_osr.testApply(ta, .{ .page_started = 85 });
-    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .old_document = true, .text = "site-a unload" } });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .docs_back = 1, .text = "site-a unload" } });
     session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .level = .warn, .text = "site-b warn" } });
     // 페이지가 alert 로 멈췄다 — 그 탭의 op 줄은 막혔지만 콘솔은 읽는다.
     session_mod.web_osr.noteAgentInput(85);

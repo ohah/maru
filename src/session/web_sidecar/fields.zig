@@ -198,11 +198,11 @@ pub fn checkConsoleText(text: []const u8) Error!void {
     }
 }
 
-/// 콘솔 줄의 닫힌 필드(W9c①) — encode 와 decode 가 함께 지난다. 버린 수만 싣는 frame 은 수준 log·빈 글·앞 문서 아님·버린 수 있음.
+/// 콘솔 줄의 닫힌 필드(W9c①) — encode 와 decode 가 함께 지난다. 버린 수만 싣는 frame 은 수준 log·빈 글·`docs_back` 0·버린 수 있음.
 pub fn checkConsoleMessage(value: message.ConsoleMessage) Error!void {
     try checkConsoleText(value.text);
     if (value.has_entry) return;
-    if (value.level != .log or value.text.len != 0 or value.old_document) return error.InvalidConsole;
+    if (value.level != .log or value.text.len != 0 or value.docs_back != 0) return error.InvalidConsole;
     if (value.dropped_errors == 0 and value.dropped_other == 0) return error.InvalidConsole;
 }
 
@@ -210,7 +210,7 @@ pub fn writeConsoleMessage(cursor: *Cursor, value: message.ConsoleMessage) Error
     try checkConsoleMessage(value);
     try writeBrowser(cursor, value.browser);
     try cursor.writeByte(@intFromEnum(value.level));
-    try cursor.writeByte(@intFromBool(value.old_document));
+    try cursor.writeByte(value.docs_back);
     try cursor.writeU32(value.dropped_errors);
     try cursor.writeU32(value.dropped_other);
     try cursor.writeByte(@intFromBool(value.has_entry));
@@ -221,7 +221,7 @@ pub fn writeConsoleMessage(cursor: *Cursor, value: message.ConsoleMessage) Error
 pub fn readConsoleMessage(cursor: *ReadCursor) Error!message.ConsoleMessage {
     const browser = try readBrowser(cursor);
     const level = std.enums.fromInt(message.ConsoleLevel, try cursor.readByte()) orelse return error.InvalidConsole;
-    const old_document = try readBool(cursor);
+    const docs_back = try cursor.readByte();
     const dropped_errors = try cursor.readU32();
     const dropped_other = try cursor.readU32();
     const has_entry = try readBool(cursor);
@@ -231,7 +231,7 @@ pub fn readConsoleMessage(cursor: *ReadCursor) Error!message.ConsoleMessage {
     const value: message.ConsoleMessage = .{
         .browser = browser,
         .level = level,
-        .old_document = old_document,
+        .docs_back = docs_back,
         .dropped_errors = dropped_errors,
         .dropped_other = dropped_other,
         .has_entry = has_entry,

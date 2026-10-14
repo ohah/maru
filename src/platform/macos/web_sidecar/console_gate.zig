@@ -7,10 +7,11 @@
 //! 바꾼 뒤에는 실제 바이트를 빚으로 단다(바이트 양동이 — 큰 줄 하나가 그 갈래를 잠시 막는다). 넘친 줄은 버리고 수만 세어 다음 줄
 //! (또는 `flush_delay_ms` 뒤 버린 수만 실은 frame)에 싣는다.
 //!
-//! 앞 문서의 줄(`old_document`): 다른 사이트로 옮길 때 앞 문서의 unload 줄은 새 문서의 시작 **뒤에** 온다(실측 5/5, 늦게는 +492 ms).
+//! 앞 문서의 줄(`docs_back`): 다른 사이트로 옮길 때 앞 문서의 unload 줄은 새 문서의 시작 **뒤에** 온다(실측 5/5, 늦게는 +492 ms).
 //! 줄의 `source`(부른 스크립트 주소)의 출처가 방금 떠난 출처들(`Recent` — 떠난 주 프레임과 그 문서의 하위 프레임, 1 초) 중 하나이고 새
-//! 주 프레임 출처가 아니면 표시한다. 그 줄은 새 문서의 양동이를 쓰지 않는다(새 문서의 줄을 밀어내지 않게) — 다만 전체 양동이는 지난다
-//! (관이 막히는 길을 열지 않게).
+//! 주 프레임 출처가 아니면 그 출처를 떠난 지 몇 문서인지 단다 — maru 는 그 수로 줄이 **어느 문서에서 왔는지** 안다(2 회차: 「앞 문서」
+//! 표시 하나로는 A → B → C 에서 C 에 온 A 의 줄을 B 의 것과 가르지 못해 B 에서 묶인 쪽에게 보였다). 그 줄은 새 문서의 양동이를 쓰지
+//! 않는다(새 문서의 줄을 밀어내지 않게) — 다만 전체 양동이는 지난다(관이 막히는 길을 열지 않게). 거기서 버려도 세지 않는다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -124,7 +125,8 @@ pub const Gate = struct {
         // 앞 문서의 줄은 새 문서의 양동이를 보지 않는다 — 전체 양동이만.
         const tab_ok = old_document or (self.count[i].hasOne() and self.bytes[i].positive());
         if (!tab_ok or !global.count.hasOne() or !global.bytes.positive()) {
-            self.dropped[i] +|= 1;
+            // 앞 문서의 줄은 어디에도 세지 않는다 — 새 문서의 표지에 실리면 처음 읽는 쪽에게 앞 사이트의 양이 드러난다(2 회차).
+            if (!old_document) self.dropped[i] +|= 1;
             return false;
         }
         global.count.take(1);
@@ -164,21 +166,27 @@ pub fn originOf(url: []const u8, out: *Origin) bool {
     return true;
 }
 
-/// 방금 떠난 출처들(브라우저 하나).
+/// 방금 떠난 출처들과 문서 번호(브라우저 하나).
 pub const Recent = struct {
-    pub const slots_len = 4;
+    /// 떠난 주 프레임 출처의 자리와 하위 프레임 출처의 자리는 따로다 — 한 줄에 두면 떠난 문서의 다른 출처 iframe 셋이 그 앞 주
+    /// 프레임 출처를 밀어내, A → B(iframe 셋) → C 에서 A 의 늦은 줄이 지금 문서의 줄이 되었다(2 회차).
+    pub const main_slots = 3;
+    pub const subframe_slots = 3;
     pub const max_subframes = 3;
 
-    const Slot = struct { origin: Origin = .{}, until_ms: u64 = 0, main: bool = false };
+    /// `left_doc` — 그 출처를 떠난 문서의 번호.
+    const Slot = struct { origin: Origin = .{}, until_ms: u64 = 0, left_doc: u32 = 0 };
 
     /// 지금 문서의 주 프레임 출처(없으면 len 0).
     current: Origin = .{},
-    /// 지금 문서의 하위 프레임 출처 — 떠날 때 `slots` 로 간다.
+    /// 지금 문서의 하위 프레임 출처 — 떠날 때 `subframe_slot` 로 간다.
     subframes: [max_subframes]Origin = @splat(.{}),
     subframe_len: usize = 0,
-    slots: [slots_len]Slot = @splat(.{}),
-    /// 가장 최근에 떠난 주 프레임 출처의 자리 — 하위 프레임 출처가 밀어내지 않는다.
-    latest_main: ?usize = null,
+    main_slot: [main_slots]Slot = @splat(.{}),
+    subframe_slot: [subframe_slots]Slot = @splat(.{}),
+    /// 지금 문서의 번호 — 주 프레임의 새 문서(`mainStarted`·`errorPage`)마다 올린다. maru 의 링도 같은 경계(`page_started`·
+    /// `error_page`)로 세므로 차(`docsBack`)만 wire 로 간다 — 엔진이 다시 떠 0 부터 세어도 맞다.
+    doc: u32 = 0,
 
     /// 주 프레임에 새 문서가 시작됐다(`on_load_start`) — 앞 문서의 출처들을 기억하고 새 출처로.
     pub fn mainStarted(self: *Recent, url: []const u8, now: u64) void {
@@ -205,54 +213,59 @@ pub const Recent = struct {
 
     /// 창 안에 기억한 출처가 있는가 — 없으면 줄의 `source` 를 바꾸지도 않는다(대부분의 줄).
     pub fn active(self: *const Recent, now: u64) bool {
-        for (self.slots) |slot| if (slot.origin.len != 0 and slot.until_ms >= now) return true;
+        for (self.groups()) |slots| for (slots) |slot| if (slot.origin.len != 0 and slot.until_ms >= now) return true;
         return false;
     }
 
-    /// 출처 `origin` 의 줄이 앞 문서의 것인가.
-    pub fn isOld(self: *const Recent, origin: []const u8, now: u64) bool {
-        if (origin.len == 0 or std.mem.eql(u8, origin, self.current.slice())) return false;
-        for (self.slots) |slot| {
-            if (slot.origin.len != 0 and slot.until_ms >= now and std.mem.eql(u8, slot.origin.slice(), origin)) return true;
-        }
-        return false;
+    /// 출처 `origin` 의 줄이 몇 문서 앞의 것인가(0 — 지금 문서의 줄, 앞 문서의 줄이면 1 이상, 255 에서 멈춘다). 창 안의 여러 자리에
+    /// 있으면 가장 앞 문서로 — 어느 문서의 줄인지 모를 때는 앞의 것으로 보아 묶인 쪽에게도 숨긴다.
+    pub fn docsBack(self: *const Recent, origin: []const u8, now: u64) u8 {
+        if (origin.len == 0 or std.mem.eql(u8, origin, self.current.slice())) return 0;
+        var back: u32 = 0;
+        for (self.groups()) |slots| for (slots) |slot| {
+            if (slot.origin.len != 0 and slot.until_ms >= now and std.mem.eql(u8, slot.origin.slice(), origin))
+                back = @max(back, self.doc -% slot.left_doc);
+        };
+        return @intCast(@min(back, std.math.maxInt(u8)));
+    }
+
+    fn groups(self: *const Recent) [2][]const Slot {
+        return .{ &self.main_slot, &self.subframe_slot };
     }
 
     /// 보내기가 막혔다 — 창 안의 출처를 `blocked_extend_ms` 더 기억한다.
     pub fn sendBlocked(self: *Recent, now: u64) void {
-        for (&self.slots) |*slot| {
+        for ([_][]Slot{ &self.main_slot, &self.subframe_slot }) |slots| for (slots) |*slot| {
             if (slot.origin.len != 0 and slot.until_ms >= now) slot.until_ms = @max(slot.until_ms, now + blocked_extend_ms);
-        }
+        };
     }
 
-    /// 지금 문서를 떠난다 — 하위 프레임 출처, 그다음 주 프레임 출처(가장 최근의 주 프레임 출처는 하위 프레임이 밀어내지 않는다).
+    /// 지금 문서를 떠난다 — 하위 프레임 출처는 제 자리에, 주 프레임 출처는 제 자리에 기억하고 문서 번호를 올린다.
     fn leave(self: *Recent, now: u64) void {
         const until = now + recent_window_ms;
-        for (self.subframes[0..self.subframe_len]) |*f| self.remember(f, until, false);
+        for (self.subframes[0..self.subframe_len]) |*f| self.remember(&self.subframe_slot, f, until, now);
         self.subframe_len = 0;
-        if (self.current.len != 0) self.remember(&self.current, until, true);
+        if (self.current.len != 0) self.remember(&self.main_slot, &self.current, until, now);
+        self.doc +%= 1;
     }
 
-    fn remember(self: *Recent, origin: *const Origin, until: u64, main: bool) void {
-        const at = self.slotFor(origin, main);
-        const slot = &self.slots[at];
-        if (slot.origin.len != 0 and std.mem.eql(u8, slot.origin.slice(), origin.slice())) {
+    fn remember(self: *const Recent, slots: []Slot, origin: *const Origin, until: u64, now: u64) void {
+        const slot = &slots[slotFor(slots, origin, now)];
+        if (slot.origin.len != 0 and slot.until_ms >= now and std.mem.eql(u8, slot.origin.slice(), origin.slice())) {
+            // 창 안의 같은 출처 — 늦은 줄이 어느 문서의 것인지 모른다. 앞 문서의 번호를 지킨다(`docsBack`).
             slot.until_ms = @max(slot.until_ms, until);
-            slot.main = slot.main or main;
-        } else slot.* = .{ .origin = origin.*, .until_ms = until, .main = main };
-        if (main) self.latest_main = at;
+        } else slot.* = .{ .origin = origin.*, .until_ms = until, .left_doc = self.doc };
     }
 
-    /// 같은 출처의 자리, 빈 자리, 지난 자리, 그도 없으면 가장 먼저 끝나는 자리 — 하위 프레임은 가장 최근의 주 프레임 자리를 고르지 않는다.
-    fn slotFor(self: *const Recent, origin: *const Origin, main: bool) usize {
-        for (self.slots, 0..) |slot, i| if (slot.origin.len != 0 and std.mem.eql(u8, slot.origin.slice(), origin.slice())) return i;
-        for (self.slots, 0..) |slot, i| if (slot.origin.len == 0) return i;
-        var best: ?usize = null;
-        for (self.slots, 0..) |slot, i| {
-            if (!main and self.latest_main == i) continue;
-            if (best == null or slot.until_ms < self.slots[best.?].until_ms) best = i;
+    /// 같은 출처의 자리, 빈 자리, 창이 지난 자리, 그도 없으면 가장 먼저 끝나는 자리(같은 갈래 안에서만 — 다른 갈래를 밀어내지 않는다).
+    fn slotFor(slots: []const Slot, origin: *const Origin, now: u64) usize {
+        for (slots, 0..) |slot, i| if (slot.origin.len != 0 and std.mem.eql(u8, slot.origin.slice(), origin.slice())) return i;
+        for (slots, 0..) |slot, i| if (slot.origin.len == 0 or slot.until_ms < now) return i;
+        var best: usize = 0;
+        for (slots, 0..) |slot, i| {
+            if (slot.until_ms < slots[best].until_ms) best = i;
         }
-        return best.?;
+        return best;
     }
 };
 
@@ -361,7 +374,7 @@ test "W9c①: the byte budget is a debt — a big line passes while the balance 
     try testing.expect(error_passed);
 }
 
-test "W9c①: old-document lines skip the tab's budgets but still pass the global ones" {
+test "W9c①: old-document lines skip the tab's budgets but still pass the global ones, and their drops are counted nowhere" {
     var g: Gate = .{};
     var global: Global = .{};
     const t0: u64 = 9_000_000;
@@ -380,7 +393,9 @@ test "W9c①: old-document lines skip the tab's budgets but still pass the globa
         if (h.admit(&hg, .other, true, t0)) passed += 1;
     }
     try testing.expectEqual(@as(usize, 1000), passed);
-    try testing.expectEqual(@as(u32, 500), h.dropped[1]);
+    // 버린 앞 문서의 줄은 어디에도 세지 않는다 — 새 문서의 표지에 실리면 앞 사이트의 양이 드러난다(2 회차).
+    try testing.expectEqual(@as(u32, 0), h.dropped[1]);
+    try testing.expect(!h.hasDrops());
     // 전체 바이트도 — 48 KiB 빚을 지면 앞 문서의 줄도 막힌다.
     var k: Gate = .{};
     var kg: Global = .{};
@@ -412,7 +427,7 @@ test "W9c①: a source's origin is the http(s) scheme and authority, blob: unwra
         try testing.expect(!originOf(url, &o));
 }
 
-test "W9c①: recent origins — the main origin left at a new document and that document's subframe origins flag lines for 1 s, never the new main origin" {
+test "W9c①: recent origins — the main origin left at a new document and that document's subframe origins flag lines for 1 s with how many documents back, never the new main origin" {
     var r: Recent = .{};
     const t0: u64 = 100_000;
     r.mainStarted("http://a.test/", t0);
@@ -422,52 +437,85 @@ test "W9c①: recent origins — the main origin left at a new document and that
     r.mainStarted("http://b.test/", t0 + 10_000);
     const t1 = t0 + 10_000;
     try testing.expect(r.active(t1));
-    try testing.expect(r.isOld("http://a.test", t1));
-    try testing.expect(r.isOld("https://frame.test", t1 + 999));
-    try testing.expect(!r.isOld("http://b.test", t1)); // 새 주 프레임 출처
-    try testing.expect(!r.isOld("https://cdn.test", t1));
-    try testing.expect(!r.isOld("http://a.test", t1 + recent_window_ms + 1)); // 창이 지났다
+    try testing.expectEqual(@as(u8, 1), r.docsBack("http://a.test", t1));
+    try testing.expectEqual(@as(u8, 1), r.docsBack("https://frame.test", t1 + 999));
+    try testing.expectEqual(@as(u8, 0), r.docsBack("http://b.test", t1)); // 새 주 프레임 출처
+    try testing.expectEqual(@as(u8, 0), r.docsBack("https://cdn.test", t1));
+    try testing.expectEqual(@as(u8, 0), r.docsBack("http://a.test", t1 + recent_window_ms + 1)); // 창이 지났다
     try testing.expect(!r.active(t1 + recent_window_ms + 1));
     // 같은 출처 안의 이동 — 떠난 출처가 곧 새 출처라 표시하지 않는다.
     r.mainStarted("http://b.test/2", t1 + 5000);
-    try testing.expect(!r.isOld("http://b.test", t1 + 5001));
-    // 빠른 사슬 A → B → C(160 ms) — A 의 늦은 unload 도 표시한다(계획 공격 2 회차: 앞 출처 하나만 보면 샜다).
+    try testing.expectEqual(@as(u8, 0), r.docsBack("http://b.test", t1 + 5001));
+    // 빠른 사슬 A → B → C(160 ms) — A 의 늦은 unload 도 표시하고(계획 공격 2 회차: 앞 출처 하나만 보면 샜다), 두 문서 앞이라고 단다.
     var q: Recent = .{};
     q.mainStarted("http://a.test/", t0);
     q.mainStarted("http://b.test/", t0 + 100);
     q.mainStarted("http://c.test/", t0 + 260);
-    try testing.expect(q.isOld("http://a.test", t0 + 331));
-    try testing.expect(q.isOld("http://b.test", t0 + 331));
+    try testing.expectEqual(@as(u8, 2), q.docsBack("http://a.test", t0 + 331));
+    try testing.expectEqual(@as(u8, 1), q.docsBack("http://b.test", t0 + 331));
+    // 오류 페이지도 문서 하나로 센다(maru 의 링이 `error_page` 로 세는 것과 같게).
+    q.errorPage(t0 + 400);
+    try testing.expectEqual(@as(u8, 3), q.docsBack("http://a.test", t0 + 401));
+    try testing.expectEqual(@as(u8, 1), q.docsBack("http://c.test", t0 + 401));
 }
 
-test "W9c①: subframe origins cannot evict the previous main origin, an error page leaves the old origin too, and a blocked send extends the window" {
+test "W9c①: subframe origins cannot evict main origins, a main origin evicts only the earliest-ending main origin, an error page leaves the old origin too, and a blocked send extends the window" {
     var r: Recent = .{};
     const t0: u64 = 200_000;
     r.mainStarted("http://a.test/", t0);
     for ([_][]const u8{ "https://f1.test/", "https://f2.test/", "https://f3.test/", "https://f4.test/" }) |u| r.subframeStarted(u);
     r.mainStarted("http://b.test/", t0 + 100);
-    try testing.expect(r.isOld("http://a.test", t0 + 101)); // 주 프레임 출처는 자리를 지킨다
-    // 다음 문서의 하위 프레임이 많아도 앞 주 프레임 출처(b)를 밀어내지 않는다.
+    try testing.expectEqual(@as(u8, 1), r.docsBack("http://a.test", t0 + 101)); // 주 프레임 출처는 자리를 지킨다
+    try testing.expectEqual(@as(u8, 0), r.docsBack("https://f4.test", t0 + 101)); // 넷째 하위 프레임은 기억하지 않는다(문서마다 셋)
+    // 다음 문서의 하위 프레임이 많아도 앞 주 프레임 출처들(a, b)을 밀어내지 않는다.
     for ([_][]const u8{ "https://g1.test/", "https://g2.test/", "https://g3.test/" }) |u| r.subframeStarted(u);
     r.mainStarted("http://c.test/", t0 + 200);
-    try testing.expect(r.isOld("http://b.test", t0 + 201));
-    // 가장 최근의 주 프레임 출처가 가장 먼저 끝나는 자리여도 하위 프레임이 밀어내지 않는다(빈 문서를 거쳐 하위 프레임만 쌓인 뒤).
+    try testing.expectEqual(@as(u8, 1), r.docsBack("http://b.test", t0 + 201));
+    try testing.expectEqual(@as(u8, 2), r.docsBack("http://a.test", t0 + 201));
+    try testing.expectEqual(@as(u8, 1), r.docsBack("https://g3.test", t0 + 201));
+    // 주 프레임 출처의 자리가 차면 가장 먼저 끝나는 주 프레임 출처(a)만 나간다.
+    r.mainStarted("http://d.test/", t0 + 300); // c 를 떠났다 — a·b·c 로 찼다
+    r.mainStarted("http://e.test/", t0 + 400); // d 가 a 를 밀어낸다
+    try testing.expectEqual(@as(u8, 0), r.docsBack("http://a.test", t0 + 401));
+    try testing.expectEqual(@as(u8, 3), r.docsBack("http://b.test", t0 + 401));
+    try testing.expectEqual(@as(u8, 1), r.docsBack("http://d.test", t0 + 401));
+    // 하위 프레임만 쌓여도(빈 문서를 거쳐) 주 프레임 출처는 남는다.
     var e: Recent = .{};
     e.mainStarted("http://a.test/", t0);
     e.mainStarted("about:blank", t0 + 100); // a 를 떠났다(until t0+1100) — 새 출처는 없다
     for ([_][]const u8{ "https://x.test/", "https://y.test/", "https://z.test/" }) |u| e.subframeStarted(u);
-    e.mainStarted("about:blank", t0 + 150); // 하위 프레임 셋만 떠난다(until t0+1150) — 자리가 찼다
+    e.mainStarted("about:blank", t0 + 150); // 하위 프레임 셋만 떠난다(until t0+1150) — 하위 프레임 자리가 찼다
     e.subframeStarted("https://p.test/");
-    e.errorPage(t0 + 200); // p 하나 — 가장 먼저 끝나는 a 가 아니라 x 가 나간다
-    try testing.expect(e.isOld("http://a.test", t0 + 201));
-    try testing.expect(e.isOld("https://p.test", t0 + 201));
-    // 오류 페이지 — 앞 출처(c)는 기억하고 새 출처는 없다.
-    r.errorPage(t0 + 300);
-    try testing.expect(r.isOld("http://c.test", t0 + 301));
+    e.errorPage(t0 + 200); // p 하나 — 하위 프레임 자리에서 x 가 나간다
+    try testing.expectEqual(@as(u8, 3), e.docsBack("http://a.test", t0 + 201));
+    try testing.expectEqual(@as(u8, 1), e.docsBack("https://p.test", t0 + 201));
+    try testing.expectEqual(@as(u8, 0), e.docsBack("https://x.test", t0 + 201));
+    // 오류 페이지 — 앞 출처(e)는 기억하고 새 출처는 없다.
+    r.errorPage(t0 + 500);
+    try testing.expectEqual(@as(u8, 1), r.docsBack("http://e.test", t0 + 501));
     // 막힌 보내기는 창을 늘린다 — 창 안의 출처만.
-    r.sendBlocked(t0 + 1200);
-    try testing.expect(r.isOld("http://c.test", t0 + 1600));
-    try testing.expect(!r.isOld("http://c.test", t0 + 1800));
+    r.sendBlocked(t0 + 1400);
+    try testing.expect(r.docsBack("http://e.test", t0 + 1800) != 0);
+    try testing.expectEqual(@as(u8, 0), r.docsBack("http://e.test", t0 + 2000));
+}
+
+test "W9c①: the same origin left twice inside the window keeps the older document, and docs_back stops at 255" {
+    var r: Recent = .{};
+    const t0: u64 = 400_000;
+    r.mainStarted("http://a.test/1", t0);
+    r.mainStarted("http://b.test/", t0 + 100); // a 를 떠났다(문서 1)
+    r.mainStarted("http://a.test/2", t0 + 200);
+    r.mainStarted("http://c.test/", t0 + 300); // a 를 또 떠났다(문서 3) — 늦은 줄이 1 의 것인지 3 의 것인지 모른다
+    try testing.expectEqual(@as(u8, 3), r.docsBack("http://a.test", t0 + 301));
+    // 창이 지난 뒤 다시 떠나면 그 문서로.
+    r.mainStarted("http://a.test/3", t0 + 5000);
+    r.mainStarted("http://d.test/", t0 + 5100);
+    try testing.expectEqual(@as(u8, 1), r.docsBack("http://a.test", t0 + 5101));
+    var far: Recent = .{};
+    far.mainStarted("http://a.test/", t0);
+    far.mainStarted("http://b.test/", t0 + 1);
+    for (0..300) |_| far.errorPage(t0 + 2);
+    try testing.expectEqual(@as(u8, 255), far.docsBack("http://a.test", t0 + 3));
 }
 
 test "W9c①: the UTF-16 prefix stops at max units and never ends on a high surrogate" {
@@ -514,4 +562,15 @@ test "W9c①: text is cleaned (control characters blanked, CRLF and CR to LF), c
     try testing.expect(both.len <= max_text);
     try testing.expect(std.mem.endsWith(u8, both, "… (https://a.test/a.js:9)"));
     try protocol.fields.checkConsoleText(both);
+}
+
+test "W9c① 적대 리뷰 2 회차 재현 F2: A → B(다른 출처 iframe 셋) → C 에서 B 의 출처들이 A 의 주 프레임 출처를 밀어내지 않는다(두 문서 앞) — 전에는 A 의 늦은 줄이 지금 문서의 줄이 되었다" {
+    var q: Recent = .{};
+    const t0: u64 = 300_000;
+    q.mainStarted("http://localhost:1/secret.html", t0);
+    q.mainStarted("http://127.0.0.1:1/con3.html", t0 + 100); // A 를 떠난다
+    for ([_][]const u8{ "http://127.0.0.1:2/f.html", "http://127.0.0.1:3/f.html", "http://127.0.0.1:4/f.html" }) |u| q.subframeStarted(u);
+    q.mainStarted("http://127.0.0.1:1/con.html?c", t0 + 200); // B 와 그 iframe 출처 셋을 떠난다
+    try testing.expectEqual(@as(u8, 1), q.docsBack("http://127.0.0.1:2", t0 + 300));
+    try testing.expectEqual(@as(u8, 2), q.docsBack("http://localhost:1", t0 + 300)); // C 가 시작한 뒤 +100 ms 에 온 A 의 unload 줄
 }

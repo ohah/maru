@@ -265,6 +265,8 @@ pub fn onLoadError(_: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, fr
     // 위에 포인터를 둔 채 열면 옛 링크의 툴팁이 오류 페이지 위에 남았다).
     tooltip.reset(id);
     @import("datalist.zig").reset(id); // W6m①: 같은 까닭으로 제안 목록도
+    // W9c①: 콘솔의 문서 경계 — maru 에 알리고(`error_page`) 떠난 출처를 기억한다.
+    @import("console.zig").errorPage(id);
 }
 
 /// 렌더러가 죽었다 — 그 페이지의 JS 대화상자는 답할 곳이 없다(CEF 가 상태 비우기를 부르지 않을 수 있다 — 적대 검증). 콜백을

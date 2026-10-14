@@ -7677,6 +7677,9 @@ fn pushBrowserOp(
         };
         // executeScript arg는 L2가 이미 `{script,args,max_result_bytes}` owned JSON으로 직렬화했다. 여기서 다시
         // 감싸면 args를 잃거나 사용자 script를 이중 escape하므로 ABI queue가 그대로 인수한다.
+        // W9c①: Chromium 의 console 은 실행 자리(인가 출처·예약)를 거친 뒤 곧 답한다 — op 줄·DevTools 를 거치지 않는다. 확인 모달 뒤 재처리
+        // (`resolveGrantPrompt`)도 이 함수로 온다. WebKit 은 그대로 Swift 로.
+        if (chromium and op.method == .console) return answerConsoleOp(server, async_id, op, provenance);
     }
     if (op.method == .wait) {
         active_browser_waits.append(allocator, .{
@@ -7705,6 +7708,37 @@ fn pushBrowserOp(
         server.cross_gpa.free(backend_arg);
         _ = server.completeInFlight(async_id, null); // deferred pending 취소(응답 없이 연결 닫힘)
     };
+}
+
+// ── W9c①: Chromium 탭의 콘솔(`browser.console`) ─────────────────────────────────────────────────────────────────────────
+// sidecar 가 CEF `on_console_message` 로 보낸 줄을 web_osr 이 탭마다 쥔다 — DevTools 를 부르지 않으니 op 줄에 서지 않고(대화상자로 멈춘
+// 탭에서도 읽는다) 실행 자리를 거친 뒤 곧 답한다. 「누름 뒤 콘솔」 은 wire 차례가 지킨다(누름의 동기 줄은 그 DevTools 답보다 먼저 온다 —
+// 실측 15/15).
+
+/// cap 으로 읽는 쪽의 표지 — grant 번호(1 부터 오른다)와 겹치지 않게 맨 위 비트를 켠다.
+const console_cap_bit: u64 = 1 << 63;
+
+/// 콘솔을 읽는 쪽(`web_osr_console.Authorizer`) — 확인 grant 면 그 grant 의 번호(철회 뒤 다시 허락하면 새 번호), cap 이면 nonce 의 해시
+/// (다시 받은 cap 은 다른 쪽이다). 번호를 모르는 grant 는 0 — 늘 지금 문서만 본다.
+fn consoleAuthorizer(p: ExecutionProvenance) u64 {
+    return switch (p) {
+        .pane_grant => |g| g.id & ~console_cap_bit,
+        .capability => |cap| std.hash.Wyhash.hash(0, &cap.nonce) | console_cap_bit,
+    };
+}
+
+/// 실행 자리에 든 console op 을 곧 끝낸다 — 결과는 다른 op 처럼 `completeCdpResult`(512 KiB 넘으면 `browser.consoleChunk`). 그 경로는
+/// 실행 중(`running`)만 결과를 받는다.
+fn answerConsoleOp(server: *control_server_mod.ControlServer, async_id: u64, op: control_browser.BrowserOp, provenance: ExecutionProvenance) void {
+    defer server.cross_gpa.free(op.arg);
+    _ = active_browser_executions.markRunning(async_id);
+    const parsed = std.json.parseFromSlice(struct { clear: bool = false }, allocator, op.arg, .{}) catch return completeCdp(async_id, .invalid_params, "invalid arguments");
+    defer parsed.deinit();
+    // 줄은 web_osr 의 할당자로 잡혔다(엔진이 돈 적 없으면 줄도 없다).
+    const gpa = session_mod.web_osr.gpaRef() orelse allocator;
+    const json = session_mod.web_osr.consoleRead(gpa, allocator, op.surface_id, consoleAuthorizer(provenance), parsed.value.clear) catch return completeCdp(async_id, .failed, "out of memory");
+    defer allocator.free(json);
+    completeCdpResult(async_id, json);
 }
 
 // ── W9c②: 에이전트가 JS 대화상자를 보고 답한다(`browser.dialog`·`browser.handleDialog`) ─────────────────────────────────────
@@ -13515,4 +13549,203 @@ test "W9c②: 에이전트가 물은 닫기의 떠나기 확인은 handle-dialog
     try std.testing.expect(session_mod.web_osr.askCloseByAgent(ta, 81, 0));
     try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "handle-dialog") == null);
     try std.testing.expect(std.mem.indexOf(u8, agentClosePageAsks(81), "the user decides") != null);
+}
+
+// ── W9c①: Chromium 탭의 콘솔(`browser.console`) — sidecar 가 보낸 줄을 web_osr 이 쥐고, 여기서 곧 답한다 ─────────────────────────────
+
+fn w9c1Grant(pane: u64, tab: u64) control_browser.GrantProvenance {
+    return .{ .pane = pane, .target = tab, .scope = .browser, .id = control_pane_grant_store.idOf(pane, tab, .browser).? };
+}
+
+/// 콘솔 op 하나를 보내고 `{console:[…]}` 의 글들을 돌려준다(소유 — 부른 쪽이 놓는다).
+fn w9c1Console(tab: u64, grant: control_browser.GrantProvenance, clear: bool) ![][]u8 {
+    var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":1}}", .selector = null, .io = std.testing.io };
+    try w9c2Push(&pending, .{ .surface_id = tab, .method = .console, .arg = try allocator.dupe(u8, if (clear) "{\"clear\":true}" else "{\"clear\":false}"), .pane_grant = grant });
+    return w9c1Texts(&pending);
+}
+
+fn w9c1Texts(pending: *control_server_mod.PendingRequest) ![][]u8 {
+    const parsed = try w9b3Result(pending);
+    defer parsed.deinit();
+    const items = parsed.value.object.get("result").?.object.get("console").?.array.items;
+    const out = try allocator.alloc([]u8, items.len);
+    for (items, out) |item, *o| o.* = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ item.object.get("level").?.string, item.object.get("text").?.string });
+    return out;
+}
+
+fn w9c1Expect(got: [][]u8, want: []const []const u8) !void {
+    defer {
+        for (got) |g| allocator.free(g);
+        allocator.free(got);
+    }
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+}
+
+test "W9c①: Chromium 탭의 console 은 DevTools·op 줄 없이 곧 답한다 — 대화상자가 떠 있어도, 처음 읽는 grant 는 지금 문서만, clear 는 비운다, 한 번도 안 보인 탭은 []" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{85});
+    defer w9c2Forget(ta, &.{85});
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 85, .scope = .browser });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .text = "site-a secret" } });
+    session_mod.web_osr.testApply(ta, .{ .page_started = 85 });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .old_document = true, .text = "site-a unload" } });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .level = .warn, .text = "site-b warn" } });
+    // 페이지가 alert 로 멈췄다 — 그 탭의 op 줄은 막혔지만 콘솔은 읽는다.
+    session_mod.web_osr.noteAgentInput(85);
+    session_mod.web_osr.testApplyNow(ta, .{ .js_dialog = .{ .browser = 85, .request = 1, .kind = .alert, .origin = "", .message = "stop" } });
+    const blocker = try allocator.create(CdpRun);
+    blocker.* = .{ .async_id = 1, .surface_id = 85, .op = try web_cdp_ops.Op.init(allocator, .reload, "", 1), .started = true };
+    try cdp_runs.append(allocator, blocker);
+    defer {
+        removeCdpRun(blocker);
+        blocker.op.deinit(allocator);
+        allocator.destroy(blocker);
+    }
+    const before = cdp_calls_attempted;
+    try w9c1Expect(try w9c1Console(85, w9c1Grant(5, 85), false), &.{"warn:site-b warn"});
+    // 같은 grant 는 묶였다 — 다음 문서의 줄도 이어 본다.
+    session_mod.web_osr.testApply(ta, .{ .page_started = 85 });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .level = .@"error", .text = "site-c error" } });
+    try w9c1Expect(try w9c1Console(85, w9c1Grant(5, 85), true), &.{ "warn:site-b warn", "error:site-c error" });
+    try w9c1Expect(try w9c1Console(85, w9c1Grant(5, 85), false), &.{});
+    try std.testing.expectEqual(before, cdp_calls_attempted); // DevTools 를 부르지 않았다
+    try std.testing.expectEqual(@as(usize, 1), cdp_runs.items.len); // 막힌 op 뒤에 서지 않았다
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.items.items.len); // 실행 자리·예약을 돌려줬다
+    // 철회 뒤 다시 허락한 grant 는 새 읽는 쪽 — 지금 문서의 제 줄만.
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .text = "site-c more" } });
+    session_mod.web_osr.testApply(ta, .{ .page_started = 85 });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 85, .text = "site-d" } });
+    control_pane_grant_store.revoke(5, 85, .browser);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 85, .scope = .browser });
+    try w9c1Expect(try w9c1Console(85, w9c1Grant(5, 85), false), &.{"log:site-d"});
+    // 한 번도 배치되지 않은 탭 — 오류가 아니라 빈 목록.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 86, .scope = .browser });
+    try w9c1Expect(try w9c1Console(86, w9c1Grant(5, 86), false), &.{});
+}
+
+test "W9c①: 512 KiB 를 넘는 콘솔 결과는 browser.consoleChunk 조각으로 간다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{87});
+    defer w9c2Forget(ta, &.{87});
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 87, .scope = .browser });
+    // 따옴표는 JSON 에서 두 바이트 — 쥔 글은 512 KiB 안이어도 결과는 그 두 배쯤이다.
+    const line = "\"" ** 8000;
+    for (0..65) |_| session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 87, .text = line } });
+    const request = "{\"jsonrpc\":\"2.0\",\"id\":81,\"method\":\"browser.console\",\"params\":{\"id\":87}}";
+    var process_budget = control_server_mod.ProcessOutboundBudget.init(std.testing.io, 32 * 1024 * 1024, 1024 * 1024);
+    var outbound = control_server_mod.OutboundChannel.initWithProcessBudget(std.testing.io, 64, &process_budget);
+    defer outbound.deinit(allocator);
+    var pending: control_server_mod.PendingRequest = .{ .connection_id = 42, .request_bytes = request, .selector = null, .outbound = &outbound, .io = std.testing.io };
+    try w9c2Push(&pending, .{ .surface_id = 87, .method = .console, .arg = try allocator.dupe(u8, "{\"clear\":false}"), .pane_grant = w9c1Grant(5, 87) });
+    try std.testing.expect(pending.response == null); // 단일 응답이 아니다
+    try std.testing.expectEqual(@as(usize, 1), active_browser_transfers.items.items.len);
+    // 펌프와 보내기를 번갈아 — 연결의 바이트 예산이 차면 펌프가 기다린다.
+    var chunks: usize = 0;
+    var ended = false;
+    var pumps: usize = 0;
+    while (pumps < 256 and !ended) : (pumps += 1) {
+        _ = maru_macos_control_pump_browser_result();
+        while (outbound.q.len() > 0) {
+            const frame = outbound.popWait().?;
+            defer {
+                outbound.writeComplete(frame.bytes);
+                allocator.free(frame.bytes);
+            }
+            if (std.mem.indexOf(u8, frame.bytes, "browser.consoleChunk") != null) {
+                chunks += 1;
+            } else {
+                try std.testing.expect(std.mem.indexOf(u8, frame.bytes, "\"result_id\"") != null); // 끝 frame
+                ended = true;
+            }
+        }
+    }
+    try std.testing.expect(ended);
+    try std.testing.expect(chunks >= 2);
+    try std.testing.expectEqual(@as(usize, 0), active_browser_transfers.items.items.len);
+}
+
+test "W9c①: 확인 모달 뒤 재처리(resolveGrantPrompt)도 곧 답한다 — cap 으로 읽는 쪽은 nonce 로 알아본다(묶여서 이동을 넘어 이어 본다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{88});
+    defer w9c2Forget(ta, &.{88});
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 88, .text = "before grant" } });
+    session_mod.web_osr.testApply(ta, .{ .page_started = 88 });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 88, .text = "now" } });
+    const saved_caps = control_cap_store;
+    control_cap_store = .{};
+    defer {
+        control_cap_store.deinit(allocator);
+        control_cap_store = saved_caps;
+    }
+    var nonce: control_capability.Nonce = undefined;
+    for (&nonce, 0..) |*b, i| b.* = @intCast((i * 17 + 3) & 0xff);
+    try control_cap_store.issueForFd(allocator, nonce, .{ .surface_id = 88, .generation = 0, .scope = .browser });
+    const nonces = [_]control_capability.Nonce{nonce};
+    const web: control_surface.WebMeta = .{ .url = "https://a.test/", .panel_kind = .browser, .loading = false, .trust = .untrusted, .engine = .chromium, .controllable = true };
+    const fx = [_]control_surface.SurfaceDto{.{ .surface_id = 88, .title = "a", .window = 1, .detail = .{ .web = web } }};
+    const snapshot: control_surface.CollectorSnapshot = .{ .surfaces = &fx, .windows = &.{} };
+    const before = cdp_calls_attempted;
+    for ([_][]const []const u8{ &.{"log:now"}, &.{ "log:now", "log:next" } }, 0..) |want, round| {
+        if (round == 1) {
+            session_mod.web_osr.testApply(ta, .{ .page_started = 88 });
+            session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 88, .text = "next" } });
+        }
+        var pending: control_server_mod.PendingRequest = .{ .request_bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":88}}", .selector = null, .io = std.testing.io, .cap_nonces = &nonces };
+        const id = try control_server_storage.deferRequest(&pending, std.math.maxInt(i128));
+        resolveGrantPrompt(&control_server_storage, .{ .async_id = id, .pane = 5, .target = 88, .scope = .browser }, true, snapshot, 0);
+        try w9c1Expect(try w9c1Texts(&pending), want);
+    }
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+}
+
+test "W9c①: 읽는 쪽 — grant 는 그 번호, cap 은 nonce 의 해시(겹치지 않게 맨 위 비트), 번호를 모르는 grant 는 0(늘 지금 문서만)" {
+    var n1: control_capability.Nonce = @splat(1);
+    const n2: control_capability.Nonce = @splat(2);
+    const g: ExecutionProvenance = .{ .pane_grant = .{ .pane = 5, .target = 9, .scope = .browser, .id = 7 } };
+    try std.testing.expectEqual(@as(u64, 7), consoleAuthorizer(g));
+    try std.testing.expectEqual(@as(u64, 0), consoleAuthorizer(.{ .pane_grant = .{ .pane = 5, .target = 9, .scope = .browser } }));
+    const c1 = consoleAuthorizer(.{ .capability = .{ .nonce = n1, .generation = 0 } });
+    try std.testing.expect(c1 >> 63 == 1);
+    try std.testing.expectEqual(c1, consoleAuthorizer(.{ .capability = .{ .nonce = n1, .generation = 4 } })); // 같은 cap
+    try std.testing.expect(c1 != consoleAuthorizer(.{ .capability = .{ .nonce = n2, .generation = 0 } }));
+    n1[0] = 9;
+    try std.testing.expect(c1 != consoleAuthorizer(.{ .capability = .{ .nonce = n1, .generation = 0 } }));
+}
+
+test "W9c①: 닫힌 탭과 엔진이 돈 적 없는 탭의 console 은 오류가 아니라 [] — 줄은 탭과 함께 사라진다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 89, 91 }); // 91 은 엔진이 Chromium 으로 정해진 채 남게
+    defer w9c2Forget(ta, &.{91});
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 89, .scope = .browser });
+    session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = 89, .text = "gone with the tab" } });
+    try w9c1Expect(try w9c1Console(89, w9c1Grant(5, 89), false), &.{"log:gone with the tab"});
+    session_mod.web_osr.destroy(ta, 89); // 탭이 닫혔다 — 엔진의 기록도 줄도 없다
+    try w9c1Expect(try w9c1Console(89, w9c1Grant(5, 89), false), &.{});
+    // 엔진이 돈 적이 없다(할당자도 없다) — 한 번도 배치되지 않은 탭.
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 90, .scope = .browser });
+    try w9c1Expect(try w9c1Console(90, w9c1Grant(5, 90), true), &.{});
+    try std.testing.expectEqual(@as(usize, 0), active_browser_executions.items.items.len);
 }

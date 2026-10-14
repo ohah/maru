@@ -82,7 +82,8 @@ pub fn encode(message: Message, out: []u8) Error!usize {
             try cursor.writeByte(@intFromBool(value.hidden));
             try writeUrl(&cursor, value.url);
         },
-        .destroy_browser, .close_asking, .new_tab_credit, .browser_created, .browser_closed, .page_started, .page_close_kept, .main_frame_navigating => |browser| try writeBrowser(&cursor, browser),
+        .destroy_browser, .close_asking, .new_tab_credit, .browser_created, .browser_closed, .page_started, .page_close_kept, .main_frame_navigating, .error_page => |browser| try writeBrowser(&cursor, browser),
+        .console_message => |value| try fields.writeConsoleMessage(&cursor, value),
         .resize => |value| {
             try writeBrowser(&cursor, value.browser);
             try writeSize(&cursor, value.size);
@@ -446,6 +447,8 @@ pub fn decodeExact(frame: []const u8) Error!Message {
         .page_started => .{ .page_started = try readBrowser(&cursor) },
         .page_close_kept => .{ .page_close_kept = try readBrowser(&cursor) },
         .main_frame_navigating => .{ .main_frame_navigating = try readBrowser(&cursor) },
+        .error_page => .{ .error_page = try readBrowser(&cursor) },
+        .console_message => .{ .console_message = try fields.readConsoleMessage(&cursor) },
         .resize => .{ .resize = .{ .browser = try readBrowser(&cursor), .size = try readSize(&cursor) } },
         .set_hidden => .{ .set_hidden = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
         .set_focus => .{ .set_focus = .{ .browser = try readBrowser(&cursor), .value = try readBool(&cursor) } },
@@ -846,6 +849,8 @@ comptime {
     const largest = prefix_len + common_len + 8 + 12 + 1 + 4 + max_url_bytes;
     std.debug.assert(largest <= max_frame_bytes);
     std.debug.assert(prefix_len + common_len + 8 + 1 + 4 + max_text_bytes <= max_frame_bytes);
+    // W9c①: 가장 긴 콘솔 줄(머리·수준·표시·버린 수 둘·항목 표시·길이 + 글 상한).
+    std.debug.assert(prefix_len + common_len + 8 + 1 + 1 + 4 + 4 + 1 + 4 + wire.max_console_text_bytes <= max_frame_bytes);
 }
 
 const test_size: ViewSize = .{ .width = 760, .height = 486, .scale = 2.0 };
@@ -868,7 +873,7 @@ test "hello byte golden is big endian and round trips" {
     var encoded: [64]u8 = undefined;
     const len = try encode(.{ .hello = .{ .instance = 0x0102030405060708, .nonce = 0x1112131415161718 } }, &encoded);
     try std.testing.expectEqualSlices(u8, &.{
-        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  19, 0, // v19, tag hello
+        0,  0,  0,  23, 'M', 'W', 'E', 'B', 0,  20, 0, // v20, tag hello
         1,  2,  3,  4,  5,   6,   7,   8,   17, 18, 19,
         20, 21, 22, 23, 24,
     }, encoded[0..len]);
@@ -954,7 +959,7 @@ test "decoder rejects malformed header, trailing bytes and truncation" {
     std.mem.writeInt(u16, bad[8..10], version + 1, .big);
     try std.testing.expectError(error.UnsupportedVersion, decodeExact(bad[0..len]));
     bad = encoded;
-    bad[10] = 67; // 정의되지 않은 tag(sidecar → maru 는 W9a 의 `main_frame_navigating` 66 까지)
+    bad[10] = 69; // 정의되지 않은 tag(sidecar → maru 는 W9c① 의 `error_page` 68 까지)
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
     bad[10] = 134; // 둘째 구간(maru → sidecar)도 W9b③ 의 `new_tab_credit` 133 뒤는 비었다
     try std.testing.expectError(error.UnknownTag, decodeExact(bad[0..len]));
@@ -1536,6 +1541,9 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .page_started = 3 },
         .{ .page_close_kept = 3 },
         .{ .main_frame_navigating = 3 },
+        .{ .console_message = .{ .browser = 3, .level = .warn, .old_document = true, .dropped_errors = 2, .dropped_other = 1, .text = "a\tb\n한" } },
+        .{ .console_message = .{ .browser = 3, .dropped_other = 4, .has_entry = false } },
+        .{ .error_page = 3 },
         .{ .mouse = .{ .browser = 3, .kind = .down, .button = .middle, .point = .{ .x = 5, .y = -6 }, .modifiers = .{ .command = true }, .click_count = 1 } },
         .{ .wheel = .{ .browser = 3, .point = .{ .x = 5, .y = 6 }, .delta_x = 7, .delta_y = -8 } },
         .{ .key = .{ .browser = 3, .kind = .char, .character = 'a', .unmodified_character = 'a' } },
@@ -1950,4 +1958,74 @@ test "download messages round trip, flow the right way, and fail closed (W10a)" 
     const len = try encode(.{ .download_update = .{ .browser = 1, .download = 1, .state = .complete, .received = 0, .total = 0, .reason = 0 } }, &buf);
     buf[prefix_len + common_len + 8 + 4] = 9;
     try std.testing.expectError(error.InvalidDownload, decodeExact(buf[0..len]));
+}
+
+// ── 콘솔(W9c①) ─────────────────────────────────────────────────────────────────────────────────────────
+
+test "W9c①: console_message round-trips level, old-document flag, both drop counts and multi-line text, and flows to maru" {
+    const got = (try roundTrip(.{ .console_message = .{ .browser = 7, .level = .@"error", .old_document = true, .dropped_errors = 3, .dropped_other = 40_000, .text = "Uncaught Error: 첫 줄\n\t둘째" } })).console_message;
+    try std.testing.expectEqual(@as(u64, 7), got.browser);
+    try std.testing.expectEqual(message_mod.ConsoleLevel.@"error", got.level);
+    try std.testing.expect(got.old_document and got.has_entry);
+    try std.testing.expectEqual(@as(u32, 3), got.dropped_errors);
+    try std.testing.expectEqual(@as(u32, 40_000), got.dropped_other);
+    try std.testing.expectEqualStrings("Uncaught Error: 첫 줄\n\t둘째", got.text);
+    inline for (.{ message_mod.ConsoleLevel.log, .info, .warn, .debug }) |level|
+        try std.testing.expectEqual(level, (try roundTrip(.{ .console_message = .{ .browser = 7, .level = level, .text = "" } })).console_message.level);
+    try std.testing.expectEqual(@as(u64, 9), (try roundTrip(.{ .error_page = 9 })).error_page);
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.console_message.direction());
+    try std.testing.expectEqual(message_mod.Direction.to_maru, Tag.error_page.direction());
+}
+
+test "W9c①: console text has its own 8192-byte cap (not the 4 KiB title cap), must be UTF-8 and refuses control characters" {
+    var buf: [max_frame_bytes]u8 = undefined;
+    const full = "가" ** (wire.max_console_text_bytes / 3) ++ "ab"; // 정확히 8192 바이트
+    try std.testing.expectEqual(wire.max_console_text_bytes, full.len);
+    try std.testing.expect(full.len > max_text_bytes);
+    try std.testing.expectEqual(full.len, (try roundTrip(.{ .console_message = .{ .browser = 1, .text = full } })).console_message.text.len);
+    try std.testing.expectError(error.TextTooLarge, encode(.{ .console_message = .{ .browser = 1, .text = full ++ "c" } }, &buf));
+    try std.testing.expectError(error.ControlCharacter, encode(.{ .console_message = .{ .browser = 1, .text = "a\x1b[2Jb" } }, &buf));
+    try std.testing.expectError(error.InvalidUtf8, encode(.{ .console_message = .{ .browser = 1, .text = "a\xffb" } }, &buf));
+    // decode 도 같은 검사를 지난다 — 받은 쪽이 상한·제어 문자를 다시 거절한다.
+    const len = try encode(.{ .console_message = .{ .browser = 1, .text = "ab" } }, &buf);
+    var bad = buf;
+    bad[len - 1] = 0x07;
+    try std.testing.expectError(error.ControlCharacter, decodeExact(bad[0..len]));
+    bad = buf;
+    std.mem.writeInt(u32, bad[len - 6 ..][0..4], @intCast(wire.max_console_text_bytes + 1), .big);
+    try std.testing.expectError(error.TextTooLarge, decodeExact(bad[0..len]));
+}
+
+test "W9c①: a drop-only console_message carries counts only — closed fields both ways, and an unknown level is refused" {
+    var buf: [256]u8 = undefined;
+    const body = prefix_len + common_len;
+    const only = (try roundTrip(.{ .console_message = .{ .browser = 1, .dropped_errors = 5, .has_entry = false } })).console_message;
+    try std.testing.expect(!only.has_entry);
+    try std.testing.expectEqual(@as(u32, 5), only.dropped_errors);
+    // 항목이 없으면 수준은 log, 글은 비고, 앞 문서 표시는 없고, 버린 수가 있어야 한다.
+    const bad_drop_only = [_]message_mod.ConsoleMessage{
+        .{ .browser = 1, .dropped_errors = 1, .has_entry = false, .level = .warn },
+        .{ .browser = 1, .dropped_errors = 1, .has_entry = false, .text = "x" },
+        .{ .browser = 1, .dropped_errors = 1, .has_entry = false, .old_document = true },
+        .{ .browser = 1, .has_entry = false },
+    };
+    for (bad_drop_only) |m| try std.testing.expectError(error.InvalidConsole, encode(.{ .console_message = m }, &buf));
+    // decode 쪽: 항목 표시를 지운 frame 은 글이 남아 거절된다.
+    var len = try encode(.{ .console_message = .{ .browser = 1, .dropped_other = 1, .text = "x" } }, &buf);
+    const has_entry_at = body + 8 + 1 + 1 + 4 + 4;
+    var bad = buf;
+    bad[has_entry_at] = 0;
+    try std.testing.expectError(error.InvalidConsole, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[has_entry_at] = 2;
+    try std.testing.expectError(error.InvalidBool, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[body + 8] = 5; // 정의되지 않은 수준
+    try std.testing.expectError(error.InvalidConsole, decodeExact(bad[0..len]));
+    bad = buf;
+    bad[body + 9] = 2; // 앞 문서 표시도 bool
+    try std.testing.expectError(error.InvalidBool, decodeExact(bad[0..len]));
+    len = try encode(.{ .error_page = 1 }, &buf);
+    std.mem.writeInt(u64, buf[body..][0..8], 0, .big);
+    try std.testing.expectError(error.InvalidBrowserId, decodeExact(buf[0..len]));
 }

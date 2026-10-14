@@ -222,9 +222,10 @@ pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
-        // W9a①: navigate·getUrl·screenshot, W9a②: executeScript, W9a③: localStorage·쿠키·clearStorage, W9c②: 대화상자 보기·답하기.
+        // W9a①: navigate·getUrl·screenshot, W9a②: executeScript, W9a③: localStorage·쿠키·clearStorage, W9c②: 대화상자 보기·답하기,
+        // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog => true,
             else => false,
         },
     };
@@ -2237,6 +2238,8 @@ pub const GrantProvenance = struct {
     pane: u64,
     target: u64,
     scope: capmod.ScopeClass,
+    /// 인가한 grant 의 번호(`PaneGrant.id` — W9c①: Chromium 콘솔이 같은 허락으로 읽는 쪽을 알아본다). 0 은 모름.
+    id: u64 = 0,
     /// `browser_storage` grant 가 인가한 호스트. 실행 직전(L4)과 Swift 가 쿠키 저장소를 만지기 직전에 대상 문서가 아직 이
     /// 호스트(또는 하위 도메인)인지 다시 본다 — dispatch 와 실행 사이에 탭이 다른 사이트로 가는 경쟁을 막는다.
     host: cpg.GrantHost = .{},
@@ -2384,7 +2387,7 @@ pub fn browserOpFromRequest(
                 // 아래에서 needs_grant — 모달이 새 사이트를 묻는다.
                 if (grants.authorizes(pane, target_id, sc, targetHost(snapshot, target_id))) {
                     authorized = true;
-                    pane_grant = .{ .pane = pane, .target = target_id, .scope = sc, .host = grants.hostOf(pane, target_id, sc).? };
+                    pane_grant = .{ .pane = pane, .target = target_id, .scope = sc, .id = grants.idOf(pane, target_id, sc).?, .host = grants.hostOf(pane, target_id, sc).? };
                 }
             }
         }
@@ -2837,6 +2840,33 @@ fn expectNeedsGrant(bytes: []const u8, pane: ?u64, grants: *const cpg.PaneGrantS
             return error.ExpectedNeedsGrantGotOp;
         },
         .subscribe => return error.ExpectedNeedsGrantGotSubscribe,
+    }
+}
+
+test "W9c①: pane grant 로 인가된 op 은 그 grant 의 번호를 싣는다 — 철회 뒤 다시 허용하면 다른 번호" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 5, .target = 9, .scope = .browser }); // 번호가 1 이 아니게 앞에 하나
+    try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":11}}";
+    var first: u64 = 0;
+    for (0..2) |round| {
+        switch (try dispatchGrant(req, 5, &grants)) {
+            .op => |op| {
+                defer testing.allocator.free(op.arg);
+                try testing.expectEqual(BrowserMethod.console, op.method);
+                try testing.expectEqual(grants.idOf(5, 11, .browser).?, op.pane_grant.?.id);
+                try testing.expect(op.pane_grant.?.id != 0);
+                if (round == 0) first = op.pane_grant.?.id else try testing.expect(op.pane_grant.?.id != first);
+            },
+            .err => |e| {
+                testing.allocator.free(e);
+                return error.ExpectedOpGotErr;
+            },
+            .subscribe => return error.ExpectedOp,
+            .needs_grant => return error.ExpectedOpGotNeedsGrant,
+        }
+        grants.revoke(5, 11, .browser);
+        try grants.grant(.{ .pane = 5, .target = 11, .scope = .browser });
     }
 }
 
@@ -3632,8 +3662,8 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
-    // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog" };
+    // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console.
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -3646,10 +3676,9 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
 
 test "W9-0: 엔진이 지원하지 않는 메서드는 확인 모달(needs_grant) 전에 unsupported_by_engine 으로 답한다" {
     var grants: cpg.PaneGrantStore = .{};
-    // W9a 부터 navigate·exec 은 Chromium 도 받는다 — 아직 받지 않는 console·subscribe 로 본다.
-    const console12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.console\",\"params\":{\"id\":12}}";
+    // W9a 부터 navigate·exec, W9c① 부터 console 도 Chromium 이 받는다 — 아직 받지 않는 subscribe 로 본다.
     const sub12 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.subscribe\",\"params\":{\"id\":12}}";
-    for ([_][]const u8{ console12, sub12 }) |bytes| {
+    for ([_][]const u8{sub12}) |bytes| {
         // pane 이 있어 WebKit 이었다면 확인 모달을 띄웠을 요청 — Chromium 탭이라 모달 없이 답한다.
         switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 6, &grants, 0)) {
             .err => |e| {

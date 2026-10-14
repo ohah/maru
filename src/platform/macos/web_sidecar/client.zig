@@ -29,6 +29,7 @@ const context_menus = @import("context_menu.zig");
 const drag = @import("drag.zig");
 const notifications = @import("notifications.zig");
 const new_tab = @import("new_tab.zig");
+const console = @import("console.zig");
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -108,6 +109,7 @@ pub fn get() *c.cef_client_t {
         display.on_address_change = &onAddressChange;
         display.on_cursor_change = &input.onCursorChange;
         display.on_tooltip = &tooltip.onTooltip;
+        display.on_console_message = &console.onConsoleMessage; // W9c①
         load.on_loading_state_change = &onLoadingStateChange;
         load.on_load_end = &onLoadEnd;
         load.on_load_start = &onLoadStart;
@@ -350,11 +352,16 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
         if (entryOf(browser)) |entry| {
             tooltip.reset(entry.id);
             @import("datalist.zig").reset(entry.id); // W6m①: 옛 문서의 제안 목록
+            // W9c①: 앞 문서의 버린 수를 먼저 보내고 떠나는 출처를 기억한다(콘솔의 문서 경계 — maru 는 `page_started` 로 가른다).
+            console.mainFrameStarted(entry, frame);
             // W10a: 새 문서 — 그 전의 누름은 이 문서의 사용자 동작이 아니다(maru 가 다운로드의 「사용자가 시작함」을 가른다).
             browsers.state.writer.send(.{ .page_started = entry.id }) catch {};
         }
     } else if (frame != null) {
-        if (entryOf(browser)) |entry| @import("datalist.zig").closeFrame(entry.id, frame); // W6m③: iframe 의 옛 문서의 목록
+        if (entryOf(browser)) |entry| {
+            @import("datalist.zig").closeFrame(entry.id, frame); // W6m③: iframe 의 옛 문서의 목록
+            console.subframeStarted(entry, frame); // W9c①: 이 문서가 떠날 때 그 iframe 출처도 기억한다
+        }
     }
     dialogs.onLoadStart(handler, browser, frame, transition);
 }

@@ -3362,6 +3362,41 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
     try std.testing.expect(index.leaves.items[0].open);
 }
 
+test "SYN53 Swift grammar 의 한계 — 정상 Swift 가 구문 오류를 낸다(빈 튜플·본문 없는 함수·지역 `nonisolated(unsafe)`·` ; `·`$` 정규식), 쓰는 꼴은 깨끗하다" {
+    // 계획 editor-bundled-languages.md 「한계」와 짝이다. grammar 를 올려 하나라도 깨끗해지면 이 판정자가 깨진다 — 그때 한계 절을 고친다.
+    const allocator = std.testing.allocator;
+    var out: std.ArrayList(Provider.SyntaxError) = .empty;
+    defer out.deinit(allocator);
+    const limited = [_][]const u8{
+        "func f() {\n    c.yield(())\n}\n", // 빈 튜플 값 — upstream alex-pinkus/tree-sitter-swift#633
+        "func f() {\n    let x = ()\n}\n",
+        "@_silgen_name(\"X\")\nfunc X() -> Int\n\nclass A {\n    func g() {}\n}\n",
+        "func f() {\n    nonisolated(unsafe) var x = 0\n}\n",
+        "func f() {\n    guard a() else { b() ; return }\n}\n",
+        "let r = /^a$/\n",
+    };
+    for (limited) |src| {
+        var prov = Provider.init(src, .swift, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
+        try std.testing.expect(out.items.len >= 1);
+    }
+    // 대조군 — 이웃한 꼴은 깨끗하다(판정자가 「Swift 는 늘 오류」로 통과하지 않게).
+    const clean = [_][]const u8{
+        "func f() {\n    c.yield(1)\n}\n",
+        "nonisolated(unsafe) var x = 0\n",
+        "func f() {\n    guard a() else { b(); return }\n}\n",
+        "let r = /a+/\n",
+        "func f() {\n    guard let self else { return }\n}\n",
+    };
+    for (clean) |src| {
+        var prov = Provider.init(src, .swift, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
+        try std.testing.expectEqual(@as(usize, 0), out.items.len);
+    }
+}
+
 test "PRD3 술어를 평가한다 — Python·Ruby·Lua 의 소문자 식별자에는 상수 캡처가 안 붙고 대문자 상수에는 붙는다, Make 는 `%` 패턴만 `string.regex`, Python 내장 함수는 `function.builtin` (계획 editor-bundled-languages BLP)" {
     // 평가하기 전에는 조건 없이 걸려 식별자마다 마지막 캡처가 `constant`·`constant.builtin` 이었다 — 화면에서 모든 식별자가 숫자 색이었다.
     const allocator = std.testing.allocator;

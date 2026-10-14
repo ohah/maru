@@ -13161,7 +13161,7 @@ test "W9a③ 적대 리뷰 8 회차 회귀 T1: deleteCookie 첫 지우기가 bus
     try std.testing.expectEqual(before, cdp_calls_attempted);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
     const r = p.response orelse return error.ExpectedResponse;
-    std.debug.print("\nR8-T1 response: {s}\n", .{r});
+    try std.testing.expect(std.mem.indexOf(u8, r, "\"code\":-32002") != null);
 }
 
 test "W9a③ 적대 리뷰 8 회차 회귀 T2: deleteCookie 첫 지우기의 답(ok) 뒤 철회 — 나머지는 보낸다(설계), 끝 답은 unauthorized" {
@@ -13182,7 +13182,7 @@ test "W9a③ 적대 리뷰 8 회차 회귀 T2: deleteCookie 첫 지우기의 답
     try std.testing.expectEqual(before + 1, cdp_calls_attempted);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len); // 엔진이 없어 끝났다(시험)
     const r = p.response orelse return error.ExpectedResponse;
-    std.debug.print("\nR8-T2 response: {s}\n", .{r});
+    try std.testing.expect(std.mem.indexOf(u8, r, "\"code\":-32002") != null);
 }
 
 test "W9a③ 적대 리뷰 8 회차 회귀 T3: deleteCookie 첫 지우기가 보내지 못함(대화상자) 뒤 철회 — 다음 지우기를 보내지 않는다" {
@@ -13203,7 +13203,7 @@ test "W9a③ 적대 리뷰 8 회차 회귀 T3: deleteCookie 첫 지우기가 보
     try std.testing.expectEqual(before, cdp_calls_attempted);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
     const r = p.response orelse return error.ExpectedResponse;
-    std.debug.print("\nR8-T3 response: {s}\n", .{r});
+    try std.testing.expect(std.mem.indexOf(u8, r, "\"code\":-32002") != null);
 }
 
 test "W9a③ 적대 리뷰 8 회차 회귀 T4: clearStorage clearDataForOrigin 시한 — 곧 timeout, 더 보내지 않는다" {
@@ -13222,7 +13222,7 @@ test "W9a③ 적대 리뷰 8 회차 회귀 T4: clearStorage clearDataForOrigin �
     try std.testing.expectEqual(before, cdp_calls_attempted);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
     const r = p.response orelse return error.ExpectedResponse;
-    std.debug.print("\nR8-T4 response: {s}\n", .{r});
+    try std.testing.expect(std.mem.indexOf(u8, r, "\"code\":-32004") != null);
 }
 
 test "W9a③ 적대 리뷰 8 회차 회귀 T5: setLocalStorage 주소 읽기 답 뒤 철회 — world·평가를 보내지 않는다" {

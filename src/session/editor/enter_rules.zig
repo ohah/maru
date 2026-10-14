@@ -103,10 +103,10 @@ pub fn decideWith(ctx: Context, before: []const u8, after: []const u8, prev: ?[]
 // ── 블록 주석 ─────────────────────────────────────────────────────────────────────
 
 /// `/* */` 블록 주석을 쓰는 문법(C 계열·CSS) — 이어쓰기(` * `)를 한다. VS Code 는 TS·JS·Java·PHP 에만 규칙을 두고 C·C++·Go·Rust 에는 두지 않는다 —
-/// 같은 주석 문법이라 우리는 함께 한다(계획의 「의도한 차이」).
+/// 같은 주석 문법이라 우리는 함께 한다(계획의 「의도한 차이」). Swift(번들 언어 확대 BL2)도 같다 — VS Code swift 에는 블록 주석 규칙이 없다.
 fn hasBlockComment(g: language.Grammar) bool {
     return switch (g) {
-        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .rust, .php, .kotlin, .css => true,
+        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .rust, .php, .kotlin, .css, .swift => true,
         else => false,
     };
 }
@@ -233,7 +233,7 @@ fn indentRule(ctx: Context, before: []const u8, after: []const u8) bool {
     return switch (ctx.grammar) {
         .python => pythonBlock(before, ctx.quotes),
         .ruby => rubyBlock(before),
-        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .php => caseLabel(before),
+        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .php, .swift => caseLabel(before),
         .yaml => yamlBlock(before, ctx.quotes),
         .lua => luaBlock(before, ctx.quotes),
         else => false,
@@ -432,6 +432,11 @@ const intended = [_]Intended{
     .{ .grammar = .dockerfile, .before = "RUN echo a:" }, // VS Code 의 Dockerfile 설정은 YAML 규칙을 베낀 꼴이다
     .{ .grammar = .xml, .before = "<a>" }, // XML 도 HTML 의 태그 규칙(VS Code 의 xml 설정에는 태그 규칙이 없다)
     .{ .grammar = .xml, .before = "<a b=\"c\">" }, // 같은 이유
+    // BL2 — Swift 는 C 계열과 같은 판단이다(VS Code swift 설정엔 들여쓰기 규칙이 없다).
+    .{ .grammar = .swift, .before = "case .a:" }, // switch 를 쓰는 C 계열 전부와 같다
+    .{ .grammar = .swift, .before = "default:" }, // 같은 이유
+    .{ .grammar = .swift, .before = "/**" }, // C 계열과 같은 블록 주석이라 이어 쓴다
+    .{ .grammar = .swift, .before = " * a" }, // 같은 이유
 };
 
 fn intendedDiff(g: language.Grammar, before: []const u8) ?usize {

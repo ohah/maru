@@ -47,7 +47,7 @@ pub fn candidatesFor(g: language.Grammar) []const Server {
         .rust => &[_]Server{.{ .exe = "rust-analyzer", .args = &none, .language_id = "rust", .install = "rustup component add rust-analyzer" }},
         .python => &[_]Server{.{ .exe = "pyright-langserver", .args = &stdio, .language_id = "python", .install = "npm i -g pyright" }},
         .go => &[_]Server{.{ .exe = "gopls", .args = &none, .language_id = "go", .install = "go install golang.org/x/tools/gopls@latest" }},
-        .none, .json, .markdown, .java, .ruby, .php, .kotlin, .bash, .css, .html, .yaml, .toml, .xml, .dtd, .lua, .dockerfile, .make => &.{},
+        .none, .json, .markdown, .java, .ruby, .php, .kotlin, .bash, .css, .html, .yaml, .toml, .xml, .dtd, .lua, .dockerfile, .make, .swift => &.{},
     };
 }
 

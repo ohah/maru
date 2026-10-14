@@ -108,6 +108,11 @@
             .url = "https://github.com/tree-sitter-grammars/tree-sitter-make/archive/refs/tags/v1.1.1.tar.gz",
             .hash = "N-V-__8AAD6dEwA9hwePYcn8FdDAJEeYqCBBlYI2Oey6O5g2",
         },
+        // 기본 태그엔 생성 파서가 없다(저장소 방침) — 생성 파일이 든 태그로 고정한다(계획 editor-bundled-languages BL2).
+        .tree_sitter_swift = .{
+            .url = "https://github.com/alex-pinkus/tree-sitter-swift/archive/refs/tags/0.7.4-with-generated-files.tar.gz",
+            .hash = "N-V-__8AAH14NwT08iYBxIQwBx0pk5_0DlIXXqkTOHtgBGbh",
+        },
         .wuffs = .{
             .url = "https://github.com/google/wuffs/archive/refs/tags/v0.4.0-alpha.10.tar.gz",
             .hash = "N-V-__8AABIA4AF2JRGKJvP_rNz61IYJiWeHLsermvYzO6cR",

@@ -1440,7 +1440,8 @@ bool maru_metal_renderer_draw(
             // 않았다(layering §3.5 — 렌더러가 아이콘을 codepoint로 고르지 않는다). 키울 아이콘이 다시 생기면 헤더처럼
             // Zig가 목표 px로 굽고 cell-raster role을 싣는다(`metal_cell_policy.h`).
             // A(자간 분리): 사이드바 카드 글리프(slot_id≠0)도 투명 bg 일반 글자면 자연폭으로 — 터미널과 동일
-            // 이유(자간 squish 제거). 밴드(slot_id==0, sentinel UV)·불투명 bg는 combined 유지.
+            // 이유(자간 squish 제거). 글자 없는 배경·장식 셀(slot_id==0, sentinel UV)·불투명 bg는 combined 유지(옛 tui 룩의
+            // 셀 밴드는 지웠다 — 카드 밴드는 GPU quad).
             MaruRendererVertex *sp = &vertices[(quad_index + i) * vertices_per_cell];
             const bool sc_natural = (sc.slot_id != 0u && sc.u0 >= 0.0f && ((sc.background >> 24) & 0xffu) == 0u);
             if (sc_natural) {

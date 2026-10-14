@@ -1568,12 +1568,10 @@ pub const MetalFrame = extern struct {
     cell_clip_count: usize = 0,
 };
 
-/// 사이드바 셀 = 밴드(전달받은 sentinel-UV 하이라이트) ++ 탭 제목 glyph(사이드바 RenderFrame 투영).
-/// 제목 glyph는 atlas slot을 가리키므로 slot_id≠0이고, 밴드는 slot_id==0이라 렌더러가 둘을 구분해
-/// (밴드=슬롯 전체, glyph=슬롯 안 중앙) 그린다. 소유 슬라이스 반환(호출자가 free).
 /// 터미널 panel cell들에 그 panel의 픽셀 origin을 박는다 — 렌더러가 cell을 origin_x + col*cw,
 /// origin_y + row*ch에 둔다(per-cell origin이라 cursor suffix 길이 변화에도 각 cell이 자기 위치를
-/// 안다). 단일 panel이면 전체가 같은 origin. 사이드바 cell엔 안 쓴다(자체 위치 로직 origin 0/슬롯 높이).
+/// 안다). 단일 panel이면 전체가 같은 origin. 사이드바 cell엔 안 쓴다(그 자리는 platform이 화면 좌표로 굽는다 —
+/// `sidebar_glyph_rows.fillScreenOriginY`, ABI 224·225).
 /// 같은 사각형은 한 번만 표에 넣는다 — pane마다 새 항목을 만들면 표가 프레임마다 자라고, 렌더러가
 /// 쪼개는 draw 수도 함께 는다. 반환은 셀에 새길 **index + 1**(0은 "자르지 않음"이라 비워 둔다).
 fn clipIndexFor(allocator: std.mem.Allocator, table: *std.ArrayList(ClipPx), rect: ClipPx) !u16 {
@@ -2211,7 +2209,7 @@ pub const MetalFrameBuffer = struct {
             .raster_upload_count = self.uploads.len,
             .raster_pixels = if (self.pixels.len > 0) self.pixels.ptr else null,
             .raster_pixel_count = self.pixels.len,
-            // 사이드바 셀(밴드 ++ 제목 glyph). 비면 null로 둬 렌더러가 사이드바 셀을 건너뛴다.
+            // 사이드바 셀(카드 제목 glyph — 밴드는 GPU quad). 비면 null로 둬 렌더러가 사이드바 셀을 건너뛴다.
             .sidebar_cells = if (self.sidebar_cells.len > 0) self.sidebar_cells.ptr else null,
             .sidebar_cell_count = self.sidebar_cells.len,
             // C4b: chrome rich GPU quad 프리미티브. 비면(그 프레임에 그릴 quad가 없으면) null로 둬 렌더러가 quad 패스를 건너뛴다.
@@ -3681,7 +3679,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
     const chrome = [_]NativeMetalCell{bgCell(0xFF112233)};
     const drag_cells = [_]NativeMetalCell{ bgCell(0x55445566), bgCell(0x55445566) };
 
-    // (1) 드래그 하이라이트 있음 → 오버레이 영역이 chrome(1) 뒤에서 시작 → modal_cells_start==1, cursor_cells==0(caret 없음).
+    // (1) 드래그 하이라이트 있음 → 오버레이 영역이 터미널 레이어 셀(1) 뒤에서 시작 → modal_cells_start==1, cursor_cells==0(caret 없음).
     {
         var buf: MetalFrameBuffer = .{};
         defer buf.deinit(allocator);
@@ -3689,7 +3687,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
         try std.testing.expectEqual(@as(usize, 1), buf.modal_cells_start); // has_modal=true → 오버레이 레이어
         try std.testing.expectEqual(@as(u32, 1), buf.view().overlay_cells_present);
         try std.testing.expectEqual(@as(usize, 0), buf.cursor_cells); // 드래그=caret 없음(정적 커서)
-        try std.testing.expectEqual(@as(usize, 3), buf.cells.len); // chrome(1) + drag(2)
+        try std.testing.expectEqual(@as(usize, 3), buf.cells.len); // 터미널 레이어 셀(1) + drag(2)
         try std.testing.expectEqual(@as(u32, 0x55445566), buf.cells[1].background); // 오버레이 영역 첫 셀=하이라이트
     }
     // (2) 드래그 없음(대조) → 오버레이 영역 없음 → modal_cells_start==0(전부 터미널 레이어). 새 경로가 셀 없을 땐 무동작.
@@ -3699,7 +3697,7 @@ test "replace: 드래그 drop 하이라이트가 오버레이 영역(modal_cells
         try buf.replace(allocator, &.{}, atlas_config, 8, 16, null, null, .{ .default_fg = .{ .r = 0, .g = 0, .b = 0 } }, &chrome, &.{}, null, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{}, &.{});
         try std.testing.expectEqual(@as(usize, 0), buf.modal_cells_start); // 오버레이 없음
         try std.testing.expectEqual(@as(u32, 0), buf.view().overlay_cells_present);
-        try std.testing.expectEqual(@as(usize, 1), buf.cells.len); // chrome만
+        try std.testing.expectEqual(@as(usize, 1), buf.cells.len); // 터미널 레이어 셀만
     }
     // (3) base cell이 0개여도 overlay 시작 index 0과 "없음"을 명시 gate로 구분한다.
     {

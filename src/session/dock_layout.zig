@@ -310,8 +310,8 @@ pub const Input = struct {
     /// `size_pt == 0`일 때만 자동 기본 폭을 고르는 현재 view. 수동 폭은 계속 하나의 dock state가 소유한다.
     view: dock_panel.View = .explorer,
     /// 뷰 스위처 바 높이(px). 호출자가 **pane 탭 바와 같은 값**을 넘겨 두 바의 아래 경계선이 한 줄로 맞는다
-    /// (docs/file-explorer.md §3.5). 그 값은 chrome 행의 배수가 아니므로(폰트 독립 하한과 셀 파생 높이 중
-    /// 큰 쪽) 여기서 파생하지 않고 호출자가 공유 단일 출처(`chromeBarHeightPx`)를 그대로 넘긴다.
+    /// (docs/file-explorer.md §3.5). 그 값은 chrome 행의 배수가 아니므로(chrome 토큰 `bar_height_pt`를 `scale_milli`로
+    /// 환산한 px — 터미널 셀과 무관) 여기서 파생하지 않고 호출자가 공유 단일 출처(`chromeBarHeightPx`)를 그대로 넘긴다.
     ///
     /// 이 레이어는 그 값이 어디서 왔는지 알지 못하고 알 필요도 없다 — 높이 정책이 chrome token으로 옮겨간
     /// 뒤에도 이 필드의 계약은 "호출자가 정한 바 높이, 0이면 바 없음"으로 그대로다.

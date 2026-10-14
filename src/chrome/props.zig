@@ -36,8 +36,9 @@ pub const CellMetrics = struct {
     chrome_minimal: bool = false,
 };
 
-/// C4b 박스 모양 토큰(seam) — host가 tokens.space에서 빌드해 넘긴다. 기본값 0 = 기반 토큰 base(직각 → lowering이
-/// 셀 fill — 제품은 늘 rich라 테스트 경로), rich>0(둥근 → GPU quad). 컴포넌트는 이 값을 Op.quad에 실어 같은 코드로 두 룩을 만든다(C4a 색 분리와 동형).
+/// C4b 박스 모양 토큰(seam) — host가 tokens.space에서 빌드해 넘긴다. 제품 토큰은 rich(>0)이고 기본값 0 은 기반 토큰
+/// base(테스트만)다. 컴포넌트는 이 값을 Op.quad에 그대로 실을 뿐 분기하지 않고, 셀/GPU는 lowering 일반 규칙이 op 모양으로
+/// 가른다 — 모서리 >0 이면 둥근 GPU quad, 0 이면 직각 quad라 셀 fill(독립 패널의 첫 quad는 직각이어도 GPU, `draw.zig` 머리 주석).
 pub const ShapeTokens = struct {
     corner_radius_px: u16 = 0,
     border_width_px: u16 = 0,

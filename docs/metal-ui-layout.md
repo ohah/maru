@@ -52,9 +52,11 @@ flowchart TD
   `ChromeDraw`로 만들고 기존 Metal GPU path가 lower한다.
 - terminal grid·VT renderer·CoreText glyph atlas의 책임은 유지한다. 이 문서는
   terminal을 CSS box로 바꾸지 않는다.
-- 새 chrome layout은 기존 TUI의 cell row/column, ANSI escape, terminal text draw를
-  입력이나 fallback으로 읽지 않는다. 이들은 전환 기간에 남는 legacy product path이며,
-  새 tree의 backing-pixel rect·clip·hit-test와 섞이지 않는다.
+- 새 chrome layout은 cell row/column, ANSI escape, terminal text draw를 입력이나 fallback으로
+  읽지 않는다. 이 줄을 쓸 때(2026-08-02) 「legacy product path」는 옛 TUI chrome 룩(`chrome.theme = tui`)이었고,
+  그 룩은 2026-08-19 제거됐다. 지금 남은 셀 격자는 룩이 아니라 lowering의 일반 경로(오버레이 글자·직각 fill —
+  [chrome-strategy §5.3](chrome-strategy.md))와 사이드바·탭 바 제목 glyph이며, 새 tree는 그것을 backing-pixel
+  rect·clip·hit-test와 섞지 않는다.
 
 v1 비목표는 DOM, CSS parser, JavaScript/JSX runtime, stylesheet cascade,
 browser compatibility, Rust FFI runtime, full CSS Grid algorithm, transform,
@@ -343,8 +345,9 @@ flowchart TD
   output으로 소비한다고 주장하면 안 된다. ML3b Chrome Lab의 dark/light artifact로만 그 연결을 완료로
   판정한다.
 - 새 tree의 제품 token input은 **rich/Metal `Tokens` snapshot만**이다. 기반 토큰 `Tokens.base`(옛
-  `Tokens.tui()` — tui 룩은 2026-08-19 제거)와 cell-grid lowering은 테스트·회귀 fixture의 별도 경로이며, ML3
-  resolver에 fallback/조건문으로 넣지 않는다. `tokens.zig`가 두 값을 표현하는 것은 `rich`가 `base`를
+  `Tokens.tui()` — tui 룩은 2026-08-19 제거)는 테스트 전용이다. cell-grid lowering(`metal_lowering`의
+  `paintRectBg`·`placeText`)은 테스트 전용이 아니라 제품 오버레이 경로지만([chrome-strategy §5.3](chrome-strategy.md)),
+  둘 다 ML3 resolver에 fallback/조건문으로 넣지 않는다. `tokens.zig`가 두 값을 표현하는 것은 `rich`가 `base`를
   부른 뒤 덮는 구조일 뿐 새 component contract가 두 renderer를 지원한다는 뜻이 아니다.
 
 ### Text layout은 flex solver의 외부 입력이 아니라 frame artifact다

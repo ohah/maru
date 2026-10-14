@@ -76,14 +76,15 @@ self.tabs:  t0    t1          t2   t3          t4   t5    t6
 
 ### 2.2 표시 행(SidebarRow)을 1급 타입으로 승격 — slot=card 가정을 걷어낸다
 
-현재 사이드바 hit-test/렌더는 **"슬롯 인덱스 = 탭 인덱스 = 화면 행"을 1:1로** 가정한다:
+그룹 도입 전(이 절을 쓴 시점) 사이드바 hit-test/렌더는 **"슬롯 인덱스 = 탭 인덱스 = 화면 행"을 1:1로** 가정했다(아래 표는
+그때의 스냅샷 — 이름·줄 번호도 그때 것이다):
 
-| 가정을 박은 곳 | 현재 동작 |
+| 가정을 박은 곳 | 그때 동작 |
 |---|---|
 | `chrome/components/sidebar.zig` `slotAt`(42)/`slotTop`(55)/`dragTargetSlot`(118) | `y ↔ 슬롯 인덱스`를 `slot_height_px` 배수로 직접 환산. 슬롯은 곧 탭 |
 | `sidebar.zig` `view`(135)/`bandFill`(174) | `row * slot_h`로 밴드 y 산출 — 한 탭 = 한 슬롯 |
 | `coretext_frame_builder.zig` `sidebar_line_base = 32` | 세로 위치 `slot*32 + line_count*4 + line_index` 인코딩 — slot이 정수 탭 인덱스 |
-| `app_session.zig` `sidebarBandCell`(486)/`rebuildSidebar`(11773) | 밴드·per-tab tint/accent를 탭 인덱스 순회로 lower |
+| `app_session.zig` `sidebarBandCell`(486 — 옛 tui 셀 밴드, d242dabab에서 제거)/`rebuildSidebar`(11773 — 지금은 `app_session/sidebar.zig`) | 밴드·per-tab tint/accent를 탭 인덱스 순회로 lower |
 
 여기에 "그룹 헤더 행"(클릭하면 접기, 카드가 아님)과 "접힌 그룹의 숨은 카드"(있지만 화면 행 없음)를 끼우면
 **화면 행 ≠ 탭 인덱스**가 되어 위 1:1이 전부 깨진다. 여기에 하나씩 `if (is_header)` 분기를 뿌리면
@@ -249,11 +250,13 @@ row별 누적 y(또는 각 row 높이/누적 오프셋 배열)를 받도록 인�
 
 **밴드 셀도 같은 옵션2로(code-review #7·#8)**: 위 glyph 옵션2(`.m`이 Zig가 실은 `origin_y`만 씀)를 **tui 셀 밴드**(`slot_id==0`
 sentinel — 옛 tui 룩의 갈래, 2026-08-19 `sidebarBandCell`과 함께 제거)에도 적용했다 — 옛 밴드 분기는 `sc.row*slot_h`·높이 `slot_h`로 균일을 가정해, 그룹 헤더(header_row_h<slot_h)가 앞서면
-밴드가 격자에서 어긋났다. 이제 `sidebarBandCell`이 chrome이 준 content-상대 rowTop(`q.rect.y`)을 `origin_y`로, 실제 row 높이
-(`q.rect.h` — 카드=slot_h·색 헤더=header_row_h)를 `atlas_height_px`(sentinel이라 미사용 필드 재활용)로 실어 주고, `.m`은
-`origin_y+header−scroll`·그 높이로 그린다(glyph와 단일 스크롤 소스). 또 **리스트 아래 새-워크스페이스 드롭 하이라이트**(drop_slot
+밴드가 격자에서 어긋났다. 그래서 그때 `sidebarBandCell`이 chrome이 준 content-상대 rowTop(`q.rect.y`)을 `origin_y`로, 실제 row 높이
+(`q.rect.h` — 카드=slot_h·색 헤더=header_row_h)를 `atlas_height_px`(sentinel이라 미사용 필드 재활용)로 실어 줬고, `.m`은
+`origin_y+header−scroll`·그 높이로 그렸다(glyph와 단일 스크롤 소스). 또 **리스트 아래 새-워크스페이스 드롭 하이라이트**(drop_slot
 ==rows.len)는 bandFill이 `q.rect.y=contentHeight`로 내므로, 옛 `sidebarBandRow(y) orelse continue`(past-end null)가 삼키던 셀을
-이제 `q.rect.y`를 직접 origin_y로 써서 방출한다(#8). tui 밴드 정합은 `MARU_FORCE_GROUP_COLOR` + `chrome.theme=tui` 스크린샷으로
+`q.rect.y`를 직접 origin_y로 써서 방출하게 했다(#8). 지금은 그 셀 갈래가 없고 밴드는 늘 `lowerSidebar`의 GPU quad다 — y는
+`sidebarScrollClipQuad`가 글자와 같은 `listToScreenY`로 화면 좌표를 내고, `sidebarBandRow`가 null인 past-end 드롭 하이라이트도
+tint만 건너뛰고 quad는 낸다. tui 밴드 정합은 `MARU_FORCE_GROUP_COLOR` + `chrome.theme=tui` 스크린샷으로
 확인했다(색 헤더 밴드=얇은 header_row_h·카드 밴드=slot_h가 각자 텍스트와 정렬). 그 config 값과 셀 밴드 갈래가 지금은 없어
 이 스크린샷은 다시 찍을 수 없고, 밴드는 늘 rich quad다.
 

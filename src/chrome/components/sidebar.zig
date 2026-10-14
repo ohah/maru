@@ -665,8 +665,8 @@ fn listRowHoverBand(rows: []const Row, row: usize, w: u32, m: Metrics, role: tok
     return quadOp(band.inset(.{ .left = g, .right = g }), role, shape);
 }
 
-/// 밴드 rect + role → quad op(둥근 모서리는 shape 토큰). base(r=0)면 lowerSidebar가 셀 밴드로, rich(r>0)면 GPU
-/// quad(둥근)로 lower한다 — 같은 op, 토큰만 다름.
+/// 밴드 rect + role → quad op(둥근 모서리는 shape 토큰). platform `lowerSidebar`는 반경과 무관하게 늘 GPU quad(layer 0)로
+/// 낸다 — 제품(rich)은 r>0 이라 둥글고, 기반 토큰(base, 테스트)의 r=0 은 직각 quad일 뿐이다(옛 tui 룩의 r=0 → 셀 밴드 갈래는 지웠다).
 fn quadOp(rect: draw.Rect, role: tokens.ColorRole, shape: props.ShapeTokens) draw.Op {
     const r = shape.corner_radius_px;
     return .{ .quad = .{ .rect = rect, .fill_role = role, .corner_radii = .{ r, r, r, r } } };
@@ -802,7 +802,7 @@ test "sidebar view: 활성·호버·+ 밴드 fill(우선순위·좌표·role)" {
     try std.testing.expectEqual(pad_top + @as(i32, @intCast(card1_h)), out.items[0].quad.rect.y);
     try std.testing.expectEqual(@as(u32, 120), out.items[0].quad.rect.w);
     try std.testing.expectEqual(card1_h, out.items[0].quad.rect.h);
-    // p.shape 기본(base 모양) → corner_radii 0(직각 → lowering이 셀 밴드로).
+    // p.shape 기본(base 모양) → corner_radii 0(직각 quad — lowerSidebar는 이것도 GPU quad로 낸다).
     try std.testing.expectEqual(@as(u16, 0), out.items[0].quad.corner_radii[0]);
     // 호버: row 0 → y=0, tab_hover_bg.
     try std.testing.expect(out.items[1].quad.fill_role == .tab_hover_bg);

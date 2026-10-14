@@ -380,12 +380,13 @@ pub const Spacing = struct {
     /// 슬롯도 셀 배수여야 그린 자리와 눌리는 자리가 안 갈린다. 그래서 이 pt를 **셀 수로 환산**해 쓴다 —
     /// 바뀌는 것은 "몇 칸인가"이고, 격자 계약은 그대로다.
     ///
-    /// **base=0(셀 파생)은 의도다** — `bar_height_pt`와 같은 이유(기반 토큰의 셀 lowering 경로는 셀 격자 정렬이
-    /// 요구사항이다. 제품은 늘 rich라 이 갈래에 닿지 않는다).
+    /// 기반 토큰(base)의 0 에 셀 파생 갈래는 없다 — `Grid.init`이 0 을 `icon_cols` 하한으로 올릴 뿐이다(위 첫 줄).
+    /// 제품은 늘 rich(32pt)라 그 하한에도 닿지 않는다.
     dock_view_slot_width_pt: u16 = 0,
 };
 
-/// 테두리/선 토큰. 기반 토큰(base)은 ~2px 띠(reserved-kind). rich에서 radius 등을 추가한다.
+/// 테두리/선 토큰 — 선 두께(px) 하나다. base·rich 모두 2px이고, 탭 바 하단선·포커스 테두리·pill 테두리 같은 GPU quad
+/// 선 두께로 쓴다. 모서리 radius·박스 테두리 폭은 여기가 아니라 `Spacing.corner_radius_px`·`border_width_px`(rich>0)가 진다.
 pub const Border = struct {
     line_thickness_px: u32 = 2,
 };

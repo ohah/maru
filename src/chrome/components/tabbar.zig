@@ -34,7 +34,7 @@ pub const Metrics = struct {
     tab_cols: u32, // "+" zone을 뗀 탭 영역 컬럼 수(좁은 바면 == cols)
     tab_w: u32, // 탭 하나의 폭(컬럼)
     scroll_cols: u32 = 0, // Step 2: 가로 스크롤 offset(컬럼). segCols/segOf가 화면 좌표를 이만큼 왼쪽으로 민다. 0=기본(barMetrics가 Pane.tab_scroll_cols로 채움).
-    has_scroll: bool = false, // Step 2a-2: 탭이 넘쳐 우측 "+" 왼쪽에 ‹›(2칸) 스크롤 버튼 zone이 예약됐는가. barMetrics가 판정(tab_cols는 이미 2칸 축소됨).
+    has_scroll: bool = false, // Step 2a-2: 탭이 넘쳐 우측 "+" 왼쪽에 ‹·› 스크롤 버튼 zone(각 `scroll_button_cols` 3칸 — 6칸)이 예약됐는가. barMetrics가 판정(tab_cols는 이미 6칸 축소됨).
     tab_count: u32 = 0, // 상단탭 Warp 폴리시: Term 탭 수(인라인 "+" 위치 계산용 — 마지막 탭 바로 뒤). barMetrics가 채운다.
 
     /// 바 좌단 기준 col의 픽셀 경계. tab_index 세그먼트는 [col*cw, segEnd*cw).
@@ -48,12 +48,12 @@ pub const Metrics = struct {
     }
 
     /// 탭 하나의 **경계 단일 소스**(§6) — hit-test(tabIndex·inCloseZone)와 platform 활성 탭 강조
-    /// (`tab_ops.appendActiveTabHighlight` quad)가 이 한 함수를 공유한다. 제목·✕·+ glyph(buildPaneTabBarDrawList)는 아직 셀-열을 직접 계산하며 다음 단계에서
-    /// segOf로 옮겨 "보이는 탭/✕ == 클릭되는 것"을 완성한다(그 전까진 둘 다 셀-열이라 우연히 일치). 셀 경계
-    /// (start_col/end_col, 반열림)는 셀 밴드·제목 그리기용, 픽셀([start_px, end_px))는 hit-test용. close_*는 ✕(닫기)
-    /// zone(우측 2칸). tab_w<2면 ✕ 없음(has_close=false), end_col<=start_col이면 overflow(안 보이는) 탭. bar_x 기준 절대 px.
+    /// (`tab_ops.appendActiveTabHighlight` quad)가 이 한 함수를 공유한다. 제목·✕ glyph(buildPaneTabBarDrawList)는 segOf가 아니라
+    /// 같은 `segCols`로 셀-열을 계산해 "보이는 탭/✕ == 클릭되는 것"이 맞는다. 셀 경계(start_col/end_col, 반열림)는 제목·✕
+    /// glyph 셀 자리와 overflow 판정용, 픽셀([start_px, end_px))는 hit-test와 활성 탭 강조 quad용. close_*는 ✕(닫기)
+    /// zone(우측 `close_button_cols` 3칸). 보이는 폭이 5칸 미만이면 ✕ 없음(has_close=false), end_col<=start_col이면 overflow(안 보이는) 탭. bar_x 기준 절대 px.
     pub const TabSeg = struct {
-        start_col: u32, // 탭 좌단 컬럼(셀 밴드·제목 그리기용)
+        start_col: u32, // 탭 좌단 컬럼(제목·✕ glyph 셀 자리용)
         end_col: u32, // 탭 우단 컬럼(반열림, tab_cols clamp). end_col<=start_col이면 overflow(안 보이는) 탭
         start_px: f64,
         end_px: f64,
@@ -117,8 +117,8 @@ pub const Metrics = struct {
         return if (seen_visible) last_visible else 0;
     }
 
-    /// x_px가 tab_index 탭의 ✕(닫기) zone인가 — **segOf의 close zone**([close_start_px, end_px), 우측 2칸). 제목
-    /// glyph의 ✕ 위치와 같은 단일 소스라 보이는 ✕를 정확히 누른다. 세그먼트가 2칸 미만(tab_w<2)이면 ✕ 없음(false).
+    /// x_px가 tab_index 탭의 ✕(닫기) zone인가 — **segOf의 close zone**([close_start_px, end_px), 우측 `close_button_cols` 3칸). 제목
+    /// glyph의 ✕ 위치와 같은 단일 소스라 보이는 ✕를 정확히 누른다. 보이는 폭이 5칸 미만이면 ✕ 없음(false).
     pub fn inCloseZone(self: Metrics, tab_index: usize, x_px: f64) bool {
         if (!std.math.isFinite(x_px)) return false;
         const seg = self.segOf(tab_index);
@@ -138,9 +138,9 @@ pub const Metrics = struct {
     }
 
     /// "+"(새 Term) 버튼 시작 컬럼 — **상단탭 Warp 폴리시: 인라인**(마지막 탭 바로 뒤). 넘쳐서 ‹›가 있으면(has_scroll)
-    /// 옛대로 far-right(tab_cols + ‹·gap·› 3칸 뒤). "+" glyph는 plusZoneStart+1에 그린다(렌더 plus_start와 단일 정합).
+    /// 옛대로 far-right(tab_cols + ‹·› 각 3칸, 6칸 뒤). "+" glyph는 plusZoneStart+1에 그린다(렌더 plus_start와 단일 정합).
     pub fn plusZoneStart(self: Metrics) u32 {
-        // 오버플로우면 ‹(2칸)·›(2칸) 뒤, 아니면 인라인.
+        // 오버플로우면 ‹(3칸)·›(3칸) 뒤, 아니면 인라인.
         return if (self.has_scroll) self.tab_cols + scroll_button_cols * 2 else self.tabsEndCol();
     }
 
@@ -230,7 +230,7 @@ test "tabbar hit-test: tabIndex·inCloseZone·hasPlusZone·inPlusZone 경계" {
     degenerate.tab_cols = 0;
     try std.testing.expectEqual(@as(usize, 0), degenerate.tabIndex(4, 130));
     // ✕ zone: 탭0 segEnd=2 → [colPx(0), colPx(2))=[100,116).
-    // **2칸 탭엔 ✕가 없다**(제목 자리를 남겨야 하므로 tab_w>=4에서만) — 좁은 탭에서 close zone은 항상 false.
+    // **2칸 탭엔 ✕가 없다**(제목 자리를 남겨야 하므로 보이는 폭 5칸 이상에서만) — 좁은 탭에서 close zone은 항상 false.
     try std.testing.expect(!m.inCloseZone(0, 100));
     try std.testing.expect(!m.inCloseZone(0, 115));
     // 넉넉한 폭(보이는 폭 5칸 이상)에서만 ✕가 생긴다: tab_w=5 → 탭0=[100,140), ✕ zone은 우측
@@ -285,15 +285,15 @@ test "tabbar 인라인 +: 탭이 영역을 안 채우면 마지막 탭 바로 �
 test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-열 정렬, 패딩 0)" {
     const m = testMetrics();
     // 탭0=[100,116) 탭3=[148,164). **2칸 탭엔 ✕가 없다** — ✕는 좌우 한 칸씩 패딩을 두고 제목 자리를 최소 1칸
-    // 남겨야 하므로 tab_w>=4에서만 존재한다(렌더 buildPaneTabBarDrawList와 같은 조건).
+    // 남겨야 하므로 보이는 폭 5칸 이상에서만 존재한다(렌더 buildPaneTabBarDrawList와 같은 조건).
     const s0 = m.segOf(0);
-    try std.testing.expectEqual(@as(u32, 0), s0.start_col); // 셀 경계(view 밴드·제목용)
+    try std.testing.expectEqual(@as(u32, 0), s0.start_col); // 셀 경계(제목·✕ glyph용)
     try std.testing.expectEqual(@as(u32, 2), s0.end_col);
     try std.testing.expectEqual(@as(f64, 100), s0.start_px);
     try std.testing.expectEqual(@as(f64, 116), s0.end_px);
     try std.testing.expect(!s0.has_close); // 2칸 = ✕ 접힘
 
-    // 폭이 넉넉하면(보이는 폭 5칸) ✕가 생기고 zone은 우측 2칸 = [end-2cell, end).
+    // 폭이 넉넉하면(보이는 폭 5칸) ✕가 생기고 zone은 우측 `close_button_cols`(3)칸 = [end-3cell, end).
     var wide = m;
     wide.tab_w = 5;
     wide.tab_cols = 10;
@@ -304,7 +304,7 @@ test "tabbar segOf: 탭 픽셀 경계 단일 소스 — hit-test와 정합(셀-�
     const s3 = m.segOf(3);
     try std.testing.expectEqual(@as(f64, 148), s3.start_px);
     try std.testing.expectEqual(@as(f64, 164), s3.end_px);
-    // tab_w<2면 ✕ 없음(segOf 단일 소스 — inCloseZone과 같은 조건).
+    // 1칸 탭도 ✕ 없음(보이는 폭 5칸 미만 — segOf 단일 소스, inCloseZone과 같은 조건).
     var thin = m;
     thin.tab_w = 1;
     try std.testing.expect(!thin.segOf(0).has_close);
@@ -350,8 +350,8 @@ test "tabbar: 왼쪽으로 스크롤아웃된 탭이 있어도 보이는 탭을 
     try std.testing.expect(!m.inCloseZone(0, 100)); // 밀려난 탭은 닫기 영역이 없다
 }
 
-// ‹ / › 버튼은 **각 2칸**이다(옛 1칸은 누르기 어려웠다 — 사용자 보고 2026-08-18). glyph 는 자기 버튼의
-// 바깥쪽 칸에 놓여 둘 사이에 여백이 생기고, "+" 는 3칸 버튼의 가운데 칸이다.
+// ‹ / › 버튼은 **각 3칸**이다(`scroll_button_cols` — 옛 1칸은 누르기 어려웠고[사용자 보고 2026-08-18], 그 뒤의 2칸·바깥쪽
+// glyph 는 버튼 안에서 한쪽에 붙었다[2026-08-20]). glyph 는 "+" 와 같이 자기 3칸 버튼의 가운데 칸이다.
 test "tabbar: ‹›·+ 는 각 3칸 버튼이고 glyph 는 모두 가운데 칸" {
     var m = testMetrics();
     m.has_scroll = true;

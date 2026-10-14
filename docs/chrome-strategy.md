@@ -22,7 +22,7 @@ chrome 축(밀도·모서리 등)이 생겨 다시 묶을 값이 있으면 enum 
 > `chrome.preset = capsule`(또는 `cutout`)을 쓰던 파일은 그 줄이 무시되면서 탭 스타일이 기본
 > `underline`으로 돌아간다 — `chrome.tab-style = pill`처럼 개별 축으로 한 줄 바꾸면 복구된다.
 
-**남았던 것 하나 — 그 뒤 지웠다.** 렌더 경로의 사이드바 셀 밴드 갈래(`sidebar.zig`의 `has_radius == false`)는 이 제거 때
+**제거 때 남겼던 셀 갈래들 — 그 뒤 지웠다.** 렌더 경로의 사이드바 셀 밴드 갈래(`sidebar.zig`의 `has_radius == false`)는 이 제거 때
 남겨 뒀다. 그 분기는 `chrome.theme`이 아니라 **quad의 corner radius**로 갈리므로 config 축 제거와 독립이다.
 
 **실측(2026-08-19)**: 그 갈래 안에 런타임 프로브를 넣고 `test-macos-app-host-abi` 전 범위(3,600여 개)를
@@ -31,10 +31,16 @@ chrome 축(밀도·모서리 등)이 생겨 다시 묶을 값이 있으면 enum 
 제거는 그 경우를 먼저 훑은 뒤 별도 작업으로 했다 — 같은 날 후속 커밋(`d242dabab`)이 정적 radius 출처 하나 +
 실앱 기본·그룹 헤더 강제에서도 도달 0회를 확인하고 그 갈래와 `sidebarBandCell`·`sidebar_cells`를 지웠다.
 
+**나머지 «토큰 0 → 셀» 갈래도 지웠다(2026-10-14, #4445·#4447).** 제품 토큰이 `Tokens.rich` 하나라 닿지 않던 갈래들이다 — 탭 바 셀
+밴드(`paneBarBgCell`·`tabbarHighlightCell`)와 `MetalFrameBuffer.replace`의 `pane_chrome_cells` 인자, `chromeBarHeightPx`의 셀 파생
+높이와 `tab_bar_pad_y_px`, 도크 뷰 바 호출자의 slot 0 삼항, toggle 텍스트 스위치, input_box border 0 갈래, `tabLayout`의 fixed 0 스크롤 가드, 사이드바 accent 막대 폭
+0 가드(#4445), 도크 뷰 바 `Grid.init`의 slot 0 → 4칸 센티널(이제 0 이면 `icon_cols`, 칸 고정은 `Grid.fixedCols`)·`toggleRectIn`의
+`@max`(이제 클릭 폭 = pill 폭)·그림자 0 가드(#4447).
+
 새 Metal UI의 component tree·typed flex layout·paint/Metal 경계는 [Metal UI 레이아웃·컴포넌트 시스템](metal-ui-layout.md)이 단일 출처다. 이 문서는 그 시스템이 소비하는 chrome token·semantic draw·host 구조를 소유한다.
 
-이 문서의 기존 `components/*.zig`별 `view`/`hitTest` 컨벤션은 cell-grid 호환 경로와 이미 이주된
-legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복제하지 않고
+이 문서의 기존 `components/*.zig`별 `view`/`hitTest` 컨벤션은 아직 `UiNode` 트리로 옮기지 않은 legacy component(아래
+후자 갈래)의 계약이다 — 옛 cell-grid TUI 룩의 호환 경로는 아니다(그 룩과 그 룩만 타던 갈래는 위에서 보듯 지웠다). 새 `UiNode` tree component는 그것을 복제하지 않고
 `metal-ui-layout.md`의 `build → ui/paint_style → ui/paint → ui/interaction` 경계를 따른다.
 
 ⚠️ **이 컨벤션은 유지 대상이 아니라 전환기 형태다.** 지금 chrome 컴포넌트는 두 갈래로 나뉘어 있다 —
@@ -56,10 +62,10 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 ## 1. 목표
 
 - chrome 컴포넌트는 **플랫폼·세션·렌더 백엔드를 모른다.** 순수 로직(상태) + 순수 렌더(상태+토큰 → semantic draw) + 순수 hit-test로, macOS·PTY 없이 헤드리스 단위 테스트한다.
-- 새 Chrome 디자인 시스템은 **rich/Metal 경로만** 확장한다. TUI cell-grid 룩은 기존 config와 회귀 fixture를 위한
-  호환 경로로만 유지하며, 설정 UI의 선택지나 새 component의 fallback이 아니다. **TUI 룩은 최종적으로 제거한다**
-  (설정 노출은 이미 막았다) — 그때까지 남는 cell-grid 경로는 회귀 fixture 전용이며, 새 기능이 그 위에 쌓이면
-  제거 비용만 커진다.
+- 새 Chrome 디자인 시스템은 **rich/Metal 경로만** 확장한다. TUI cell-grid 룩은 **제거됐다**(2026-08-19 config 축,
+  그 룩만 타던 «토큰 0 → 셀» 코드 갈래는 d242dabab·#4445·#4447 — 위 「Chrome 전용 전환 정책」). 셀 격자 자체는 룩이 아니라
+  lowering의 일반 경로로 남는다(오버레이 글자·직각 fill 등 — §5.3). 기반 토큰 `Tokens.base`는 테스트만 쓰며, 새 component의
+  fallback이 아니다.
 - **모든 chrome 컴포넌트는 최종적으로 `chrome/ui/` 프리미티브 조합으로 구현한다.** 즉 컴포넌트가 rect를 직접
   계산해 ops를 내고 짝이 되는 `hitTest`를 따로 유지하는 지금의 방식은 **전환기 형태**이지 목표가 아니다. 목표
   형태와 남은 격차는 `plans/metal-ui-layout.md` §8 ML6이 소유한다.
@@ -76,7 +82,7 @@ legacy component의 계약이다. 새 `UiNode` tree component는 그것을 복�
 | `src/chrome/` facade + check-boundaries | "터미널 코어 API는 Maru 내부 facade 뒤에" | project-rules §기본 규칙 |
 | Zig가 chrome 로직·draw 소유, platform은 백엔드/입력 어댑터 | ABI capabilities: `zig_owns_frame_loop` vs `swift_owns_focus_and_input` | app_host_abi |
 | 네이티브 UI 프레임워크 없이 Zig draw + GPU | 런타임 의존성 0·native 최소(SwiftUI=Apple 전용) | project-rules §의존성 |
-| theme = 토큰(데이터), 새 UI는 rich/Metal만 | 기존 TUI는 설정 UI에서 숨긴 읽기 호환·회귀 fixture로만 유지하고 새 component는 rich/Metal만 소비 | 사용자 결정 |
+| theme = 토큰(데이터), 새 UI는 rich/Metal만 | TUI 룩은 제거했고(2026-08-19 — 남은 `chrome.theme` 줄은 무시 diagnostic만) 새 component는 rich/Metal만 소비 | 사용자 결정 |
 | props seam + 단일 ChromeState로 구조 분해 | "버그는 루트커즈. 구조가 원인이면 구조를 바꾼다" | project-rules §버그 수정 |
 | 컴포넌트·룩을 레퍼런스 코드 표현으로 안 옮김 | clean-room(renderer·platform interop에도 적용) | project-rules §기본 규칙 |
 
@@ -220,6 +226,11 @@ IME 위치(`caretRect`)가 한 레이아웃을 쓴다(§5.4). 오버레이 글�
   `SGD3`(문서 패널은 자기 draw) · 문서 패널 글자 픽셀(`editor/mod.zig` 문서 패널 제품 판정자) · `metal_frame` 「오버레이 여러 장」(장마다
   원점·clip, 장 순서, caret suffix, 래스터 병합).
 
+> 아래 코드 블록과 그 뒤 문단은 C 단계 착수 때의 **당시 설계 스케치**다 — 코드에 `ChromeFrame` 타입은 없다. 실제 `lower`는
+> `OverlayRaster`(cells·gpu_quads·gpu_shadows·extra_parts)를 내고, 스케치의 `pane_chrome_cells`(탭 바 셀)는 그 뒤 생긴 같은 이름의
+> `replace` 인자까지 #4445에서 지웠다(탭 바는 layer 2 quad). `border/rule → reserved-kind 띠` 줄도 당시 계획이다 — 지금 `.border`는
+> 그 draw에 패널 배경 quad가 없을 때만 셀 배경으로 칠하고, `.rule`은 lowering이 무시한다.
+
 ```zig
 pub const ChromeFrame = struct {                 // replace()가 먹을 번들(layer별)
     sidebar_cells: []NativeMetalCell,
@@ -230,7 +241,7 @@ pub const ChromeFrame = struct {                 // replace()가 먹을 번들(l
 // Metal cell lowerer: fill→sentinel-UV bg 셀, border/rule→reserved-kind 2px 띠 셀, text→기존 glyph RenderFrame 경로
 pub fn lower(allocator, draws: []const ChromeDraw, tokens: Tokens, metrics: CellMetrics) !ChromeFrame;
 ```
-Metal cell lowerer의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow`를 **이주**한 것. 즉 새 코드가 아니라 현재 수작업 셀 생성을 backend로 격상한다. 사용자 설정의 `tui` 선택지는 없다(옛 tui 룩 — 2026-08-19 제거). 토큰 함수는 `Tokens.base`로 개명됐고, src에 남은 `tui` 이름(일부 테스트 이름·주석)은 옛 룩의 흔적일 뿐이다.
+Metal cell lowerer의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalLine`/`appendHorizontalLine`/`buildSidebarDrawList`/`appendPaletteRow`를 **이주**한 것. 즉 새 코드가 아니라 현재 수작업 셀 생성을 backend로 격상한다. 사용자 설정의 `tui` 선택지는 없다(옛 tui 룩 — 2026-08-19 제거). 토큰 함수는 `Tokens.base`로 개명됐고, src에 남은 옛 룩의 `tui`는 주석과, 제거된 키를 무시하는지 보는 loader 테스트의 입력 줄(`chrome.theme = tui`)뿐이다(테스트 이름엔 없다 — 이름에 남은 `TUI`는 풀스크린 TUI 앱을 뜻한다).
 
 ### 5.4 Component 계약 — `chrome/components/*.zig`
 

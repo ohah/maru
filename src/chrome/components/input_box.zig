@@ -101,6 +101,10 @@ test "input_box view: 비편집 = 테두리 박스(muted) + 값(surface_fg), car
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[0].quad.border_role); // 비편집 테두리
+    // 박스 모양은 호출자가 준 shape 그대로다(테두리 1 · 모서리 4 · surface_bg 채움) — 0 으로 박아 넣는 회귀를 잡는다.
+    try std.testing.expectEqual(tokens.ColorRole.surface_bg, out.items[0].quad.fill_role);
+    try std.testing.expectEqual([4]u16{ 1, 1, 1, 1 }, out.items[0].quad.border_widths);
+    try std.testing.expectEqual([4]u16{ 4, 4, 4, 4 }, out.items[0].quad.corner_radii);
     try std.testing.expect(out.items[1] == .text);
     try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[1].text.role);
     try std.testing.expectEqual(@as(i32, 108), out.items[1].text.origin.x); // rect.x(100) + cw(8) 좌패딩

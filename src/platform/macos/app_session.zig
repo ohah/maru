@@ -1979,10 +1979,11 @@ pub fn notificationLocation(buf: []u8, tab: *Tab, term: *const Term) []const u8 
 }
 
 /// pane 탭 바 컬럼 분할 메트릭(중립 `tabbar.Metrics`)을 만든다(옛 BarMetrics.init). 렌더(buildPaneTabBarDrawList·활성
-/// 밴드)와 hit-test(chrome `tabbar.tabIndex/inCloseZone/inPlusZone`)가 같은 메트릭을 공유해 "보이는 탭/✕/+ == 클릭되는
+/// 탭 강조)와 hit-test(chrome `tabbar.tabIndex/inCloseZone/inPlusZone`)가 같은 메트릭을 공유해 "보이는 탭/✕/+ == 클릭되는
 /// 것". coretext의 paneTabAreaCols/paneTabWidth(렌더가 쓰는 같은 공식)로 바를 [탭 영역 | "+" zone]으로 나눈다. cell·바·
 /// 탭 폭이 0이면(초소형 바) null을 줘 호출자가 탭 처리를 건너뛴다. hit-test 수학은 chrome tabbar로 이전(C3b) — platform은
-/// 메트릭 빌드 + 활성 밴드 단일 셀(tabbarHighlightCell)만(밴드가 한 칸이라 chrome view→cell round-trip이 무의미; 리뷰 §3).
+/// 메트릭 빌드만 한다. 활성 탭 강조는 `tab_ops.appendActiveTabHighlight`가 이 메트릭의 `segOf`로 그리는 layer 2 quad다
+/// (옛 tui 룩의 단일 셀 밴드 `tabbarHighlightCell`은 지웠다).
 pub fn barMetrics(bar: maru.session.SplitRect, cell_width_px: u32, term_count: usize, tab_width_fixed: u16, scroll_cols: u32) ?chrome.components.tabbar.Metrics {
     if (cell_width_px == 0 or bar.w == 0 or term_count == 0) return null;
     const cols = @min(bar.w / cell_width_px, @as(u32, std.math.maxInt(u16)));
@@ -21913,8 +21914,8 @@ pub const AppSession = struct {
             const active_pane = pane_ops.activePane(self);
             var active_pane_geometry: ?PaneGeometry = null;
 
-            // per-pane 상단 탭 바 chrome: 바 배경(전체) + 활성 Term 탭 하이라이트. 각 panel rect 상단 바에 origin
-            // 박은 배경 셀로 만들어 터미널 셀 스트림에 prepend된다(C1). 바 base = chrome 색(sidebarBg). 활성 Term
+            // per-pane 상단 탭 바 chrome: 바 배경(전체) + 활성 Term 탭 하이라이트. 각 panel rect 상단 바에 그 rect
+            // 좌표로 박은 layer 2 quad다(옛 C1 은 배경 셀을 터미널 셀 스트림에 prepend했고 지웠다). 바 base = chrome 색(sidebarBg). 활성 Term
             // 탭 강조색은 **포커스된 pane을 구분**한다: 활성 pane은 밝은 sidebarActiveBg, 비활성 pane은 dim
             // sidebarHoverBg(중간 톤) — split에서 pane 포커스를 옮기면 어느 bar가 활성인지 시각적으로 갱신된다
             // (세로 분할 등에서 "활성 탭 UI가 안 바뀐다"는 제보 대응). 제목 glyph는 아래 pane_frames에(C2).
@@ -23494,8 +23495,9 @@ pub const AppSession = struct {
         };
     }
 
-    /// C4b-5: rich 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 밴드 quad(같은 layer, 뒤에 append되어 위로)가
-    /// 불투명 셀 배경(paneBarBgCell)에 가리지 않게(리뷰 z-order #1, #451과 동형). 모서리 0 갈래(제품은 안 닿음)는 셀. 둘 다 part1 제목 셀 아래(layer 2).
+    /// C4b-5: 탭 바 배경(직각)을 layer 2 GpuQuad로 그린다 — 활성 탭 강조 quad(같은 layer, 뒤에 append되어 위로)와 한 층이고
+    /// 둘 다 part1 제목 셀 아래다(리뷰 z-order #1, #451과 동형). 옛 tui 룩은 바 배경을 불투명 셀(`paneBarBgCell`)로 칠해 quad를
+    /// 가렸고, 그 셀 갈래는 지웠다 — 탭 바 배경은 늘 이 quad 다.
     fn appendBarBgQuad(self: *AppSession, bar: maru.session.SplitRect, bg: u32) void {
         self.appendSolidQuad(@floatFromInt(bar.x), @floatFromInt(bar.y), @floatFromInt(bar.w), @floatFromInt(bar.h), bg, 2);
     }
@@ -24239,7 +24241,8 @@ pub const AppSession = struct {
         const tk = self.buildChromeTokens();
         return .{
             .metrics = self.buildCellMetrics(),
-            // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). 제품은 rich>0(둥근 GPU quad) — 0(직각·셀 밴드)은 기반 토큰(테스트만).
+            // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). 제품 토큰은 rich 하나(radius>0 → 둥근 GPU quad)고, 0 은 기반 토큰
+            // (Tokens.base, 테스트만)이다 — 0 이면 lowering 일반 규칙대로 독립 패널이 아닌 직각 quad 가 셀 배경이 된다.
             .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px },
             // 활성 pane rect(셀 그리드 영역) — find 오버레이가 활성 pane 우상단에 붙도록(findLayout 단일 출처).
             // palette는 안 쓴다(창 중앙 유지). active_pane_rect는 recomputeActivePaneRect가 포커스·resize마다 갱신.
@@ -24688,19 +24691,15 @@ pub const AppSession = struct {
             const eff_fg = active_core.defaultFgOverride() orelse self.appearance.theme.foreground;
             break :blk packOpaqueRgb(if (active_core.reverseScreen()) eff_fg else eff_bg);
         } else packOpaqueRgb(self.appearance.theme.background);
-        // 사이드바 셀(밴드 ++ 제목 glyph)은 metal_buffer가 소유한다 — view()가 frame.sidebar_cells를
-        // 세팅한다(self.sidebar_cells는 밴드 source라 replace에만 넘긴다). 여기선 슬롯 높이만 더한다:
-        // 렌더러가 사이드바 셀을 cell 높이가 아니라 탭 슬롯 높이(≈2.5×)로 세로 배치하게.
-        // 상단 헤더(검색바 + view options·새 워크스페이스 아이콘) 높이 — 렌더러가 사이드바 셀(밴드·카드 glyph)을
-        // 이만큼 아래로 민다(밴드 view는 슬롯 상대 좌표라 .m이 시프트 단일 책임). 헤더 glyph는 절대 좌표 별도 frame.
-        // 사이드바 세로 스크롤량 — 렌더러가 사이드바 셀(밴드·카드 glyph) py_top에서 빼고, scroll>0이면 헤더 아래로
-        // scissor 클리핑한다(GPU quad 밴드·tint는 lowering이 이미 뺐다 — 같은 sidebar_scroll_offset_px 단일 출처).
-        // 상단 타이틀바 띠 높이 — 렌더러가 접힘 펼치기 토글(◧) 글리프를 이 띠 안에 세로 중앙 배치해 신호등과
-        // 정렬시키는 데만 쓴다(펼침 헤더 아이콘은 terminal_origin_x_px>0이라 0.3ch nudge 유지). hit-test
-        // (collapsedToggleRect)는 이미 이 띠 전체 높이를 클릭 영역으로 쓴다.
+        // 사이드바 셀은 카드 제목 glyph 뿐이고(밴드·tint 는 GPU quad 라 여기 없다 — 옛 tui 룩에서만 밴드가 셀이었다)
+        // metal_buffer가 소유해 view()가 frame.sidebar_cells로 싣는다. 자리는 전부 Zig가 셀에 구운 **화면 좌표**다 —
+        // `sidebar_ops.applySidebarGlyphPyTop`이 origin_y에 헤더·스크롤까지 반영한 화면 y(`sidebar_glyph_rows.fillScreenOriginY`,
+        // ABI 224·225), origin_x에 칸 미만 여백(`Columns.text_offset_px`, ABI 223)을 넣고, 렌더러(.m)는 그대로 그린다.
+        // 그래서 여기서 슬롯·헤더·스크롤·타이틀바 띠 높이를 frame에 더하지 않는다(draw 인자는 ABI 227, MetalFrame 필드는
+        // ABI 229에서 뺐다). 헤더 위로 샌 셀을 자르는 scissor 구간과 pane divider 두께는 `chromeGeometrySnapshot`이
+        // 스탬프한 값이 view()로 나간다(위 미스탬프 폴백 제외).
         // 창 배경 투명도 → clear color alpha(렌더러가 /1000). opacity는 loader가 0~1로 검증하므로 *1000은 0~1000.
         frame.window_opacity_milli = @intFromFloat(@round(self.appearance.window_opacity * 1000.0));
-        // pane divider(reserved 30/31) device px 두께 — config split.divider-thickness(논리 pt) 단일 출처.
         return frame;
     }
 
@@ -41236,7 +41235,7 @@ test "window padding insets only the cell grid, not chrome (termRect/paneBarRect
     defer session.deinit();
     // 결정적 padding(scale 1000 기본이라 appearance 8/4가 그대로 8/4px이지만 명시 고정).
     session.window_padding_px = .{ .left = 8, .right = 8, .top = 4, .bottom = 4 };
-    session.cell_height_px = 18; // 탭 바 높이 결정적(bar_h = cell_height + 2·tab_bar_pad_y)
+    session.cell_height_px = 18; // 0 이면 바가 없다(chromeBarHeightPx 가드). 바 높이 자체는 토큰 bar_height_pt 환산이라 셀과 무관
     session.titlebar_strip_px = 0; // 상단 타이틀바 띠는 별도 테스트 — 여기선 window padding/grid 수학만 격리
     session.backing_width_px = session.sidebar_width_px + 800;
     session.backing_height_px = 600;
@@ -59133,8 +59132,9 @@ test "dragging the sidebar scrollbar scrolls the sidebar and leaves the dock lis
     try std.testing.expect(!sidebar_ops.pointOnSidebarScrollbar(session, on_card_x, on_bar_y));
 }
 
-/// rich 사이드바 활성 밴드는 셀이 아니라 **GPU quad(layer 0)**로 나간다(`sidebar.zig`의 has_radius 분기).
-/// 옛 tui 셀 밴드(`sidebar_cells`)를 보던 테스트들이 같은 동작을 rich 자료구조에서 확인하도록 y를 뽑아 준다.
+/// 사이드바 활성 밴드는 셀이 아니라 **GPU quad(layer 0)**로 나간다(`sidebar_ops.lowerSidebar` — 갈래 없이 늘 quad다.
+/// 옛 tui 룩의 셀 밴드 갈래 `has_radius`·`sidebarBandCell`은 d242dabab 에서 지웠다).
+/// 옛 tui 셀 밴드(`sidebar_cells`)를 보던 테스트들이 같은 동작을 GPU quad 목록에서 확인하도록 y를 뽑아 준다.
 /// 사이드바 전폭에 걸친 layer 0 quad 중 **가장 위**의 y — 활성 밴드가 하나뿐인 상황을 전제한다.
 /// pane 탭 바 배경은 rich에서 셀이 아니라 GPU quad다(옛 tui 룩에서만 cells 맨 앞 prepend였다).
 /// 주어진 y에서 시작하는 불투명 quad가 있는지 — 바가 그 자리에 그려졌는지 확인용.
@@ -60335,7 +60335,8 @@ test "paneGeometry owns bar body and contained grid for normal tiny minimal and 
     try std.testing.expect(geometry.grid.y + geometry.grid.h <= body_bottom);
 
     // rich는 token(40pt)이 셀과 **무관하게** 바 높이를 정하므로 더 두껍지만, 같은 보수 관계를 유지한다.
-    // 이 구간이 token 경로의 회귀 가드다 — token 0(셀 파생 — 옛 tui 룩·지금의 기반 토큰)만 검증하면 token이 죽어도 green이 된다.
+    // 이 구간이 token 경로의 회귀 가드다 — 옛 tui 룩은 token 0 이면 셀 파생 높이로 갔고(그 갈래는 지웠다), 그때처럼 셀에서
+    // 나오는 값만 검증하면 token이 죽어도 green이 된다.
     session.appearance = config_mod.resolveAppearance(.{}) catch unreachable;
     session.window_padding_px = .{};
     geometry = pane_ops.paneGeometry(&session, rect);
@@ -61651,14 +61652,43 @@ test "pane tab bar draws Term-title tabs with an active-Term highlight" {
     try std.testing.expectEqual(@as(usize, 1), pane_ops.activePane(session).active_term);
 
     // tick이 크래시 없이 돌고, 탭 바가 자기 자리(상단 타이틀바 띠)에 그려진다.
-    //
-    // **활성 탭 하이라이트의 시각 계약은 여기서 보지 않는다** — rich에서는 셀이 아니라 layer-2 GPU quad이고,
-    // 바로 아래 "U-tab2 rich: active tab is a body-color cutout…" 테스트가 cutout·언더바 색까지 고정한다.
-    // (옛 tui 룩에서는 바 배경과 하이라이트가 cells 맨 앞 두 셀이라 여기서 col·width로 확인했다.)
     _ = try session.tick();
     const frame = session.metalFrame();
     try std.testing.expect(frame.cell_count >= 1);
     try std.testing.expect(hasQuadAtY(session, session.titlebar_strip_px));
+
+    // **활성 탭 강조는 그 탭의 `segOf` 경계에 그려진다**(layer 2 quad — 색 계약은 아래 U-tab2·TS1·TS2 가 본다). 옛 tui
+    // 룩의 셀 밴드(`tabbarHighlightCell`)를 지울 때 이 위치 단언도 같이 사라졌다 — 강조가 다른 탭·다른 폭에 그려져도 아무도
+    // 몰랐다. 기대 위치는 hit-test 와 같은 `barMetrics` 에서 낸다(그려진 자리 = 눌리는 자리).
+    var lr: std.ArrayList(PaneTree.LeafRect) = .empty;
+    defer lr.deinit(allocator);
+    try tab_ops.activeTabLeafRects(session, allocator, session.termRect(), &lr);
+    try std.testing.expectEqual(@as(usize, 1), lr.items.len);
+    const pb = pane_ops.paneBar(session, lr.items[0].rect, lr.items[0].leaf).?;
+    const tk = session.buildChromeTokens();
+    const m = barMetrics(pb.tabs, session.cell_width_px, 2, tk.space.tab_width_cols, lr.items[0].leaf.tab_scroll_cols).?;
+    const active_seg = m.segOf(1);
+    const other_seg = m.segOf(0);
+    try std.testing.expect(active_seg.end_px > active_seg.start_px and other_seg.end_px > other_seg.start_px);
+    try std.testing.expect(active_seg.start_px != other_seg.start_px); // 판별력: 두 탭이 다른 자리다
+    const amber = packOpaqueRgb(tk.palette.get(.accent_bar)); // 포커스 pane 의 언더바(active indicator)
+    const uw: f32 = @min(@as(f32, @floatFromInt(tk.space.tab_underbar_px)), @as(f32, @floatFromInt(m.bar_h)));
+    var underbars: usize = 0;
+    var bar_bg_full = false;
+    const bar_bg = session.chromeQuadBg(sidebar_ops.sidebarBg(session));
+    for (session.gpu_quads.items) |q| {
+        if (q.layer != 2) continue;
+        if (q.fill_color0 == amber) {
+            underbars += 1;
+            try std.testing.expectApproxEqAbs(@as(f32, @floatCast(active_seg.start_px)), q.x, 0.01);
+            try std.testing.expectApproxEqAbs(@as(f32, @floatCast(active_seg.end_px - active_seg.start_px)), q.w, 0.01);
+            try std.testing.expectApproxEqAbs(@as(f32, @floatFromInt(m.bar_y + m.bar_h)) - uw, q.y, 0.01);
+        }
+        // 바 배경은 바 전체(라벨 영역 포함 — `pb.full`) 한 장이다.
+        if (q.fill_color0 == bar_bg and q.x == @as(f32, @floatFromInt(pb.full.x)) and q.w == @as(f32, @floatFromInt(pb.full.w))) bar_bg_full = true;
+    }
+    try std.testing.expectEqual(@as(usize, 1), underbars); // 활성 탭 하나에만(비활성 탭 0 자리에는 없다)
+    try std.testing.expect(bar_bg_full);
 }
 
 // U-tab2 rich: 활성 탭이 **본문색 cutout**(strip에서 도려낸 듯)이고, 포커스 구분은 배경이 아니라 **언더바 색**
@@ -70226,7 +70256,7 @@ test "sidebar scissor engages on the product path even when bands are quads (ric
     defer allocator.destroy(session);
     defer session.deinit();
 
-    // 기본이 rich다 — 밴드가 GPU quad라 `sidebar_cells`(옛 tui 룩의 밴드 배열)가 빈다. 옛 게이트는 그것을 보고
+    // 기본이 rich다 — 밴드가 GPU quad라 옛 tui 룩의 밴드 배열(앱 세션이 따로 들던 `sidebar_cells`, 지금은 없다)은 늘 비었다. 옛 게이트는 그것을 보고
     // "자를 셀이 없다"고 판정했지만, 카드 **제목**은 별도 프레임으로 실려 실제로는 그려지고 있었다.
     try std.testing.expect(session.sidebar_width_px > 0);
     try std.testing.expect(session.sidebar_header_height_px > 0);

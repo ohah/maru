@@ -321,7 +321,9 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=3"));
     try std.testing.expectEqual(@as(usize, 0), count(build_cr4a, "--maru-expect-tests=4"));
     try std.testing.expectEqual(@as(usize, 0), count(build_cr4a, "--maru-expect-tests=5"));
-    try std.testing.expectEqual(@as(usize, 2), count(build_cr4a, "--maru-expect-tests=6"));
+    // The actual issuer now covers runtime-ended rejection and deadline frame settlement.
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=6"));
+    try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "--maru-expect-tests=8"));
     try std.testing.expectEqual(@as(usize, 13), count(build_cr4a, "--maru-expect-tests=1"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 snapshot zero"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a frontier는 output admission"));
@@ -342,7 +344,7 @@ test "CR4a 경계는 observer attach와 final candidate 준비만 연다" {
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual issuer는 bounded"));
     try std.testing.expectEqual(@as(usize, 1), count(build_cr4a, "CR4a actual issuer job은"));
     try std.testing.expectEqual(@as(usize, 1), count(host_connect, "pub fn connectExistingHostUntil("));
-    try std.testing.expectEqual(@as(usize, 6), count(remote_backend, "test \"CR4a actual issuer job은"));
+    try std.testing.expectEqual(@as(usize, 8), count(remote_backend, "test \"CR4a actual issuer job은"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "const HostReconnectJob = struct"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_reconnect_job: ?*HostReconnectJob = null"));
     try std.testing.expectEqual(@as(usize, 1), count(remote_backend, "host_reconnect_preparing: bool = false"));

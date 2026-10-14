@@ -17314,3 +17314,16 @@ tmux-CC layout driver 제거, Maru-owned session host, P4 종료 gate 뒤 `keep-
 resume/fork 비도입, quick persistent/restore/upgrade 제외, 기존 `maru.workspace.v1`의 additive runtime scalar,
 §10의 command/framing/stream 계약, host launch = detached helper는 이 문서의 확정 결정이다. v1 외부 attach는
 same-login-UID로 확정했다.
+
+### Runtime 종료 후 observer 재접속 거부 정산
+
+실제 GUI에서 runtime 종료 뒤 observer attach가 거부되면 backend는 유효한
+`candidate_rejected`를 봉인했지만 프레임 driver가 `ObserverAttachRejected`를
+coordinator까지 전파하여 exit 86으로 종료했다. 기존 CR5 계약대로 봉인된
+`candidate_rejected`와 `candidate_failed`는 다음 프레임에서 canonical failure
+정산으로 진행한다. 봉인이 없거나 유효하지 않은 오류는 그대로 전파한다.
+
+검증은 실제 daemon의 runtime을 종료한 뒤 observer RPC 거부를 받아 frame
+driver가 terminal 정산까지 진행하는 경우와 공유 deadline 만료를 포함한다.
+먼저 수정 전 실패를 확인하고 Debug/ReleaseFast에서 성공 경로 및 실패
+경로를 검증한다. PartialFrame 연결 종료 정책은 변경하지 않는다.

@@ -54,7 +54,8 @@ test "CR5b-2a 경계는 all-runtime prepare와 reverse abort만 열고 shared re
     }{
         // CR5b-2b and CR5b-2c actual shared-replacement fixtures each reuse the product entry.
         // CR6e-c3b2b adds the reviewed one-state frame driver caller.
-        .{ .identifier = "prepareHostReconnectRuntimeRetirements", .backend_count = 9 },
+        // Runtime-ended/deadline frame regressions use the full product cursor setup.
+        .{ .identifier = "prepareHostReconnectRuntimeRetirements", .backend_count = 10 },
         // CR5c reuses the same prepare/abort pair for already-published rows before its no-fail
         // host-wide unavailable suffix.
         .{ .identifier = "prepareHostWideRetirement", .backend_count = 2, .runtime_count = 3 },

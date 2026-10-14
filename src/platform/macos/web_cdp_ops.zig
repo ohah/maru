@@ -240,8 +240,14 @@ pub const Op = struct {
     storage: ?web_cdp_storage.Op = null,
     /// W9c③ 의 upload — 로케이터를 푼 뒤(`stage == .upload`)의 차례.
     upload: ?web_cdp_upload.Op = null,
+    /// W9c③ 적대 리뷰 1 회차: 업로드가 마지막으로 낸 호출(params 소유). 승인 뒤 그 호출을 자리 없음(`busy_reason`)으로 못 보냈으면 잠깐 뒤
+    /// 그대로 다시 보낸다 — 사용자가 승인한 업로드를 「retry shortly」 로 버리면 에이전트가 다시 불러 모달이 또 뜬다(click·type 의 kick 재시도와 같은 간격·횟수).
+    up_last: ?struct { method: []const u8, params: []u8, kick: Kick } = null,
+    up_resend: bool = false,
+    up_busy_retries: u8 = 0,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
+        if (self.up_last) |l| gpa.free(l.params);
         if (self.upload) |*u| u.deinit(gpa);
         if (self.page) |*p| p.deinit(gpa);
         if (self.exec) |*e| e.deinit(gpa);
@@ -439,7 +445,8 @@ pub const Op = struct {
     /// 철회됐다(부른 쪽이 다음 호출을 보내기 전에 본다) — 문서·후보 원격 객체를 쥐었으면 놓은 뒤 끝낸다(1 회차 — 그냥 끝내 페이지에 남았다).
     /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
-        if (self.stage == .upload) return self.upload.?.cancel(gpa);
+        self.up_resend = false;
+        if (self.stage == .upload) return if (try self.upload.?.cancel(gpa)) |st| try self.uploadRemember(gpa, st) else null;
         if (self.page != null) return null; // 쥔 원격 객체가 없다
         if (self.exec) |*e| return e.cancel(gpa);
         if (self.storage != null) return null; // 쥔 원격 객체가 없다(격리 world 는 이동까지)
@@ -455,7 +462,13 @@ pub const Op = struct {
 
     /// `sleep` 뒤에 다시 부른다(부른 쪽이 `now_ms` 를 넣은 뒤) — 시한이 지났으면 timeout, 아니면 다음 확인.
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
-        return self.uploadFix(gpa, try self.wakeInner(gpa));
+        // W9c③: 자리가 없어 못 보낸 업로드의 호출 — 그대로 다시(차례는 그 호출의 답을 기다리는 자리에 그대로 있다).
+        if (self.up_resend) {
+            self.up_resend = false;
+            const l = self.up_last.?;
+            return .{ .call = .{ .method = l.method, .params = try gpa.dupe(u8, l.params), .kick = l.kick } };
+        }
+        return self.uploadRemember(gpa, try self.uploadFix(gpa, try self.wakeInner(gpa)));
     }
 
     fn wakeInner(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -481,7 +494,39 @@ pub const Op = struct {
     }
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
-        return self.uploadFix(gpa, try self.startInner(gpa));
+        return self.uploadRemember(gpa, try self.uploadFix(gpa, try self.startInner(gpa)));
+    }
+
+    /// W9c③: 업로드의 호출을 적어 둔다(승인 뒤 자리 없음이면 그대로 다시 보낸다 — `uploadBusyRetry`). 다른 op 은 그대로.
+    fn uploadRemember(self: *Op, gpa: std.mem.Allocator, step: Step) !Step {
+        if (self.kind != .upload) return step;
+        switch (step) {
+            .call => |c| {
+                const copy = gpa.dupe(u8, c.params) catch |e| {
+                    gpa.free(c.params);
+                    return e;
+                };
+                if (self.up_last) |l| gpa.free(l.params);
+                self.up_last = .{ .method = c.method, .params = copy, .kick = c.kick };
+            },
+            else => {},
+        }
+        return step;
+    }
+
+    /// W9c③: 승인 뒤 호출을 자리 없음(`busy_reason` — 확실히 보내지 않았다)으로 못 보냈다 — 잠깐 뒤 그대로 다시 보낼까(횟수는 kick 재시도와 같다).
+    /// 모달 전에는 다시 하지 않는다(에이전트가 다시 부르면 된다 — 아직 아무도 승인하지 않았다).
+    fn uploadBusyRetry(self: *Op, reply: Reply) bool {
+        const u = if (self.upload) |*x| x else return false;
+        if (u.phase != .post) return false;
+        if (reply != .not_sent or !std.mem.eql(u8, reply.not_sent, busy_reason)) {
+            self.up_busy_retries = 0;
+            return false;
+        }
+        if (self.up_last == null or self.up_busy_retries >= max_kick_retries) return false;
+        self.up_busy_retries += 1;
+        self.up_resend = true;
+        return true;
     }
 
     /// W9c③: 업로드가 요소를 찾기 **전에** 끝났다(없는 요소 — click 의 계약은 `{ok:false}` 성공이지만 업로드는 넣을 곳이 없으면 실패다). 찾은
@@ -708,8 +753,9 @@ pub const Op = struct {
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
-        if (self.stage == .upload) return self.upload.?.feed(gpa, reply);
-        return self.uploadFix(gpa, try self.feedInner(gpa, reply));
+        if (self.uploadBusyRetry(reply)) return .{ .sleep = kick_retry_ms };
+        if (self.stage == .upload) return self.uploadRemember(gpa, try self.upload.?.feed(gpa, reply));
+        return self.uploadRemember(gpa, try self.uploadFix(gpa, try self.feedInner(gpa, reply)));
     }
 
     fn feedInner(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
@@ -3812,8 +3858,11 @@ const UpPage = struct {
     var set_error: ?[]const u8 = null;
     var verify: []const u8 = "ok";
     var trees: usize = 0;
+    /// 이 메서드를 한 번 「자리 없음」 으로 못 보낸 것으로 답한다(적대 리뷰 1 회차 R10).
+    var busy_once: ?[]const u8 = null;
 
     fn reset() void {
+        busy_once = null;
         post = false;
         loader_post = "L1";
         loader_again = "L1";
@@ -3825,6 +3874,10 @@ const UpPage = struct {
     }
 
     fn answer(method: []const u8, params: []const u8) Reply {
+        if (busy_once) |m| if (std.mem.eql(u8, m, method)) {
+            busy_once = null;
+            return .{ .not_sent = busy_reason };
+        };
         if (std.mem.eql(u8, method, "DOM.describeNode")) return .{ .ok = if (post and backend_post != 9) "{\"node\":{\"backendNodeId\":11}}" else "{\"node\":{\"backendNodeId\":9}}" };
         if (std.mem.eql(u8, method, "Page.getFrameTree")) {
             if (post) trees += 1;
@@ -3839,8 +3892,11 @@ const UpPage = struct {
             return .{ .ok = "{}" };
         }
         if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) {
-            if (std.mem.indexOf(u8, params, "function(names") != null)
-                return .{ .ok = if (std.mem.eql(u8, verify, "ok")) "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" else if (std.mem.eql(u8, verify, "removed")) "{\"result\":{\"type\":\"string\",\"value\":\"removed\"}}" else "{\"result\":{\"type\":\"string\",\"value\":\"mismatch\"}}" };
+            if (std.mem.indexOf(u8, params, "function(names") != null) {
+                inline for (.{ "ok", "removed", "mismatch", "dropped", "unseen" }) |v|
+                    if (std.mem.eql(u8, verify, v)) return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"" ++ v ++ "\"}}" };
+                return .{ .ok = "{\"result\":{\"type\":\"string\",\"value\":\"mismatch\"}}" };
+            }
             return .{ .ok = if (std.mem.eql(u8, check, "ok")) "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" else if (std.mem.eql(u8, check, "disabled")) "{\"result\":{\"type\":\"string\",\"value\":\"disabled\"}}" else if (std.mem.eql(u8, check, "directory")) "{\"result\":{\"type\":\"string\",\"value\":\"directory\"}}" else if (std.mem.eql(u8, check, "single")) "{\"result\":{\"type\":\"string\",\"value\":\"single\"}}" else if (std.mem.eql(u8, check, "frame")) "{\"result\":{\"type\":\"string\",\"value\":\"frame\"}}" else "{\"result\":{\"type\":\"string\",\"value\":\"not file\"}}" };
         }
         return happyPage(method, params);
@@ -3883,7 +3939,7 @@ test "W9c③: 업로드 — 찾기 → 프레임 트리·격리 world·노드·�
     const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, &up_staged), &trail);
     defer testing.allocator.free(end.done.result);
     try testing.expectEqual(Status.success, end.done.status);
-    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5}]}", end.done.result);
+    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5}],\"kept\":true}", end.done.result);
     const post = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Page.getFrameTree", "DOM.setFileInputFiles", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(post.len, trail.methods.items.len);
     for (post, trail.methods.items) |w, g| try testing.expectEqualStrings(w, g);
@@ -4023,4 +4079,79 @@ test "W9c③: 철회 — 확인·두 번째 프레임 트리·넣기 앞이면 �
     defer testing.allocator.free(end.done.result);
     try testing.expectEqualStrings("the request was cancelled", end.done.result);
     try testing.expect(!op.upload.?.given);
+}
+
+// ── W9c③ 적대 리뷰 1 회차 ──
+
+/// 업로드 차례를 끝까지 — 「잠깐 뒤」(sleep)면 깨워 잇는다(잔 횟수를 센다).
+fn driveUploadSleeping(op: *Op, first: Step, trail: *Trail, sleeps: *usize) !Step {
+    var step = first;
+    while (true) switch (step) {
+        .call => |c| {
+            try trail.methods.append(testing.allocator, c.method);
+            try trail.params.append(testing.allocator, c.params);
+            step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
+        },
+        .sleep => |ms| {
+            try testing.expectEqual(kick_retry_ms, ms);
+            sleeps.* += 1;
+            step = try op.wake(testing.allocator);
+        },
+        .done, .confirm => return step,
+    };
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R9: 페이지가 change 에서 칸을 비워도(받은 뒤 지운다) 넣을 때 본 목록이 맞으면 성공 — kept:false, 승인 뒤 확인은 maru 의 격리 world 에 듣는 이를 단다" {
+    const Case = struct { verify: []const u8, status: Status, want: []const u8 };
+    for ([_]Case{
+        .{ .verify = "dropped", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}" },
+        .{ .verify = "ok", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true}" },
+        .{ .verify = "unseen", .status = .failed, .want = web_cdp_upload.unseen_reason },
+    }) |c| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        // 모달 전 확인은 듣는 이를 달지 않는다(페이지에 아무것도 넣지 않는다).
+        try testing.expect(std.mem.indexOf(u8, trail.params.items[3], "\"arguments\":[{\"value\":1}]") != null);
+        trail.reset();
+        UpPage.post = true;
+        UpPage.verify = c.verify;
+        const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(c.status, end.done.status);
+        try testing.expectEqualStrings(c.want, end.done.result);
+        // 승인 뒤 확인(넣기 앞)은 듣는 이를 단다 — 두 번째 인자 true.
+        var armed = false;
+        for (trail.methods.items, trail.params.items) |m, prm| if (std.mem.eql(u8, m, "Runtime.callFunctionOn") and std.mem.indexOf(u8, prm, "\"arguments\":[{\"value\":1},{\"value\":true},") != null) {
+            armed = true;
+        };
+        try testing.expect(armed);
+    }
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R10: 승인 뒤 DevTools 자리가 다 차 못 보낸 호출(다시 찾기·넣기)은 잠깐 뒤 그대로 다시 보낸다 — 「retry shortly」 로 승인을 버리지 않는다" {
+    for ([_][]const u8{ "DOM.getDocument", "DOM.setFileInputFiles", "Page.createIsolatedWorld" }) |busy_method| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        trail.reset();
+        UpPage.post = true;
+        UpPage.busy_once = busy_method;
+        var sleeps: usize = 0;
+        const end = try driveUploadSleeping(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail, &sleeps);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(Status.success, end.done.status);
+        try testing.expectEqual(@as(usize, 1), sleeps);
+        try testing.expectEqual(@as(usize, 2), trail.count(busy_method)); // 못 보낸 것과 다시 보낸 것
+        // 넣기는 한 번만 갔다(못 보낸 것은 가지 않았다) — 사본이 두 번 들어가지 않는다.
+        try testing.expect(op.upload.?.given);
+    }
 }

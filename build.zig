@@ -2514,6 +2514,14 @@ pub fn build(b: *std.Build) void {
             "sh", "-eu", "-c", "if nm -gU \"$1\" | /usr/bin/grep -q 'maru_macos_mermaid_test_reset'; then echo 'error: smoke reset leaked into product ABI' >&2; exit 1; fi", "sh",
         });
         macos_mermaid_product_symbol_check.addFileArg(macos_app_host_abi_lib.getEmittedBin());
+        // W9c③(적대 리뷰 1 회차 — 약속한 배포본 판정자): 기본 빌드(`-Dweb-upload-test-decision` 없이)의 제품 라이브러리에는 업로드 모달을
+        // 환경변수로 대신 답하는 길이 없어야 한다 — 그 이름의 글자가 남아 있으면 comptime 으로 빠지지 않은 것이다. 모달이 업로드의 유일한 관문이다.
+        const macos_upload_decision_absent_check = b.addSystemCommand(&.{
+            "sh", "-eu", "-c",
+            "if /usr/bin/grep -a -q 'MARU_TEST_UPLOAD_DECISION' \"$1\"; then echo 'error: the upload test decision (MARU_TEST_UPLOAD_DECISION) leaked into the product ABI — build without -Dweb-upload-test-decision' >&2; exit 1; fi",
+            "sh",
+        });
+        macos_upload_decision_absent_check.addFileArg(macos_app_host_abi_lib.getEmittedBin());
 
         // Swift 제품 host는 Zig compiler가 직접 만들 수 없으므로 xcrun swiftc를 build graph의
         // system command로 둔다. 대신 입력은 C header와 Zig static library로 제한해서
@@ -2601,6 +2609,7 @@ pub fn build(b: *std.Build) void {
         macos_app_compile.setCwd(b.path("."));
         macos_app_compile.step.dependOn(&macos_app_mkdir.step);
         macos_app_compile.step.dependOn(&install_macos_app_host_abi_lib.step);
+        if (!web_upload_test_decision) macos_app_compile.step.dependOn(&macos_upload_decision_absent_check.step);
 
         // CR6d가 SIGKILL/timeout으로 AppKit teardown을 건너뛰어도 system-global input source를
         // 원래 값으로 되돌리는 최소 실행파일이다. 일반 앱에는 진입점이 없고 opt-in harness만 호출한다.

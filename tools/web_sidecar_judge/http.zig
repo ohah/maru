@@ -622,9 +622,15 @@ const keys_page =
     \\requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='keys-ready'})});</script>
 ;
 
-/// W9c③ `upload_check` 의 페이지 — 한 파일 칸(`one`·`two`), 폴더 칸(`dir`), 꺼진 칸(`dis`).
+/// W9c③ `upload_check` 의 페이지 — 한 파일 칸(`one`·`two`), 폴더 칸(`dir`), 꺼진 칸(`dis`), 받은 뒤 비우는 칸(`clr` — 적대 리뷰 1 회차: 창의 캡처
+/// 듣는 이와 칸의 보통 듣는 이가 `data-order` 에 차례를 적고, 보통 듣는 이가 `change` 에서 칸을 비운다).
 const upload_page =
-    \\<!doctype html><title>upload</title><input type=file id=one><input type=file id=two><input type=file id=dir webkitdirectory><input type=file id=dis disabled>
+    \\<!doctype html><title>upload</title><input type=file id=one><input type=file id=two><input type=file id=dir webkitdirectory><input type=file id=dis disabled><input type=file id=clr>
+    \\<script>var clr=document.getElementById('clr'),de=document.documentElement;de.dataset.order='';
+    \\addEventListener('change',function(e){if(e.target===clr)de.dataset.order+='P-window-capture:'+e.type+',';},true);
+    \\addEventListener('input',function(e){if(e.target===clr)de.dataset.order+='P-window-capture:'+e.type+',';},true);
+    \\clr.addEventListener('input',function(e){de.dataset.order+='P-input-bubble:'+clr.files.length+',';});
+    \\clr.addEventListener('change',function(e){de.dataset.order+='P-change-bubble:'+clr.files.length+',';clr.value='';});</script>
     \\<script>window.__log=[];window.__got=null;window.__dis='';var one=document.getElementById('one');
     \\one.addEventListener('input',function(e){__log.push('input:'+e.isTrusted)});
     \\one.addEventListener('change',function(e){__log.push('change:'+e.isTrusted);var f=one.files[0];if(f)f.text().then(function(t){window.__got='one:'+f.name+':'+f.size+':'+t.trim()})});

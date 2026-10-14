@@ -390,6 +390,8 @@ const ButtonGeom = struct {
     msg_rows: u32,
     msg_truncated: bool,
     /// 메시지와 안내 줄이 **모두** 잘리지 않고 그려지는가(줄 상한·창 높이·한 줄의 줄바꿈 상한 어느 것에도 걸리지 않았다) — `notes_must_fit`.
+    /// 상자 안쪽 폭이 0 칸이면 거짓(나눌 수 없어 「한 줄」 로 세지만 읽을 수 있는 것이 없다 — 적대 리뷰 1 회차). 다시 묻는 중(⏎ 뒤)의 앞 문장은
+    /// 세지 않는다 — 다시 묻지 않을 때의 레이아웃으로 본다(목록이 딱 맞는 높이에서 그 문장이 자리를 차지해 ⌘⏎ 가 막혔다 — 적대 리뷰 1 회차).
     complete: bool,
     confirm_x: i32,
     confirm_fit: u32,
@@ -558,7 +560,11 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         .msg_lines = msg_lines,
         .msg_rows = m,
         .msg_truncated = msg_truncated,
-        .complete = !msg_truncated and !notes_overflow and !notes_wrap_cut and k == notes_all,
+        .complete = if (state.notes_must_fit and lead_rows > 0) blk: {
+            var plain = state.*;
+            plain.rechecking = false;
+            break :blk if (buttonGeom(&plain, p, tk)) |pg| pg.complete else false;
+        } else !msg_truncated and !notes_overflow and !notes_wrap_cut and k == notes_all and width_probe.inner_cols > 0 and box.inner_cols > 0,
         .confirm_x = group_x,
         .confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right),
         .alternate_x = alternate_x,
@@ -1877,4 +1883,45 @@ test "confirm notes_must_fit: 막힌 확정 버튼은 흐린 글자(muted_fg)로
         else => {},
     };
     try std.testing.expect(saw);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R3: 다시 묻는 중(⏎ 뒤)의 앞 문장은 목록 다 보이기에 세지 않는다 — 목록이 딱 맞는 높이에서도 ⌘⏎ 가 된다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var notes: [6]Note = undefined;
+    for (&notes, 0..) |*n, i| n.* = .{ .text = if (i % 2 == 0) "1. ~/Downloads/report-final.pdf" else "   binary, 1,234 bytes (PDF)" };
+    var s = State{};
+    s.show("Upload 3 files to https://a.test?", .{ .confirm = "Allow", .cancel = "Deny" });
+    s.notes = &notes;
+    s.notes_must_fit = true;
+    s.guardAsync("Press ⌘⏎ to allow, or Esc to deny.");
+    var h: u32 = 600;
+    var saw_fit = false;
+    while (h > 64) : (h -= 4) {
+        const p = testProps(800, h);
+        s.rechecking = false;
+        const plain = confirmAllowed(&s, p, &tk);
+        s.rechecking = true;
+        const again = confirmAllowed(&s, p, &tk);
+        // 목록이 다 보이던 높이에서 ⏎ 를 눌러 다시 묻게 됐다 — 앞 문장이 자리를 차지해도 ⌘⏎ 를 막지 않는다.
+        if (plain) {
+            saw_fit = true;
+            try std.testing.expect(again);
+        }
+        // 다시 묻는 중이라고 해서 목록이 안 보이던 창에서 허용되지는 않는다.
+        if (!plain) try std.testing.expect(!again);
+    }
+    try std.testing.expect(saw_fit);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R4: 상자 안쪽 폭이 0 칸이면(좁은 창에 넓은 사이드바) 아무것도 읽을 수 없으니 허용하지 않는다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    const one = [_]Note{ .{ .text = "1. ~/.ssh/id_rsa" }, .{ .text = "   text, 3 bytes: “abc”" } };
+    var s = State{};
+    s.show("Upload 1 file?", .{ .confirm = "Allow", .cancel = "Deny" });
+    s.notes = &one;
+    s.notes_must_fit = true;
+    const p: props.ChromeProps = .{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 200, .backing_width_px = 230, .backing_height_px = 800 } };
+    try std.testing.expect(!confirmAllowed(&s, p, &tk));
 }

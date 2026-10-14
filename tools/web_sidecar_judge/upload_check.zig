@@ -11,6 +11,10 @@
 //!   up-stale-object   이동 뒤(같은 사이트)에는 옛 문서의 objectId(주 world·격리 world)로 넣지 못한다 — 「Cannot find context」(maru 가 넣기를
 //!                     objectId 로 하는 까닭: backendNodeId 는 다른 사이트로 옮기면 다시 쓰였다)
 //!   up-hidden         숨긴 탭에서도 곧 들어간다(깨우는 kick 이 필요 없다)
+//!   up-isolated-listener (적대 리뷰 1 회차) maru 의 격리 world 가 그 칸에 단 캡처 듣는 이가 넣기의 진짜 `input`·`change` 를 받고, 그때 목록은
+//!                     넣은 파일이다 — 페이지의 보통 듣는 이가 `change` 에서 칸을 비우기 전, 그 기록은 넣기의 답이 오기 **전에** 이미 있다(같은
+//!                     차례 안에서 낸다). 차례는 창의 캡처 → maru(칸의 캡처) → 칸의 보통 듣는 이 — 페이지가 창의 캡처에서 먼저 비우면 maru 는
+//!                     빈 목록을 본다(그때 maru 는 「받았다」 고 하지 않는다)
 //!   up-no-picker      위 어느 것도 파일 고르개(`file_dialog`)를 띄우지 않았다
 
 const std = @import("std");
@@ -155,6 +159,22 @@ const Run = struct {
         return std.fmt.bufPrint(out, "{s}", .{v.string}) catch "";
     }
 
+    /// 그 원격 객체에 함수를 불러 `returnByValue` 의 글 값을 `buf` 에(실패면 빈 글).
+    fn callOn(self: *Run, browser: u64, buf: []u8, object: []const u8, function: []const u8) ![]const u8 {
+        var pb: [2048]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&pb);
+        try w.writeAll("{\"returnByValue\":true,\"objectId\":");
+        try std.json.Stringify.value(object, .{}, &w);
+        try w.writeAll(",\"functionDeclaration\":");
+        try std.json.Stringify.value(function, .{}, &w);
+        try w.writeAll("}");
+        if ((try self.call(browser, "Runtime.callFunctionOn", w.buffered())) != .ok) return "";
+        const parsed = std.json.parseFromSlice(std.json.Value, self.gpa, self.result.items, .{}) catch return "";
+        defer parsed.deinit();
+        const v = (parsed.value.object.get("result") orelse return "").object.get("value") orelse return "";
+        return if (v == .string) std.fmt.bufPrint(buf, "{s}", .{v.string[0..@min(v.string.len, buf.len)]}) catch "" else "";
+    }
+
     /// `DOM.setFileInputFiles{files, objectId}` — 상태와 결과 글.
     fn setFiles(self: *Run, browser: u64, object: []const u8, files: []const []const u8) !?protocol.message.DevtoolsStatus {
         var pb: [4096]u8 = undefined;
@@ -253,6 +273,38 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8, f
         r.pump(300);
         const got = try r.eval(visible_id, &vb, "document.getElementById('dis').files.length+'|'+window.__dis");
         report(st == .ok and std.mem.eql(u8, got, "1|change:true"), "up-disabled", std.fmt.bufPrint(&detail, "상태 {s} · 「{s}」", .{ statusName(st), got }) catch "");
+    }
+    // up-isolated-listener — maru 처럼 격리 world 에서 그 칸의 objectId 를 잡아 캡처 듣는 이를 달고, 그 objectId 로 넣은 **바로 뒤**(펌프 없이) 기록을
+    // 읽는다. 페이지의 보통 `change` 듣는 이는 칸을 비운다(받은 뒤 지우는 위젯).
+    {
+        var iso_buf: [256]u8 = undefined;
+        var iso_obj: []const u8 = "";
+        if ((try r.call(visible_id, "Page.getFrameTree", "")) == .ok) {
+            var fb: [128]u8 = undefined;
+            const frame = r.objectIdOfResult(&fb, &.{ "frameTree", "frame", "id" });
+            var pb: [256]u8 = undefined;
+            if ((try r.call(visible_id, "Page.createIsolatedWorld", try std.fmt.bufPrint(&pb, "{{\"frameId\":\"{s}\",\"worldName\":\"judge-up-listen\"}}", .{frame}))) == .ok) {
+                const parsed = std.json.parseFromSlice(std.json.Value, gpa, r.result.items, .{}) catch null;
+                const ctx: i64 = if (parsed) |p| (if (p.value.object.get("executionContextId")) |v| v.integer else 0) else 0;
+                if (parsed) |p| p.deinit();
+                const ep = try std.fmt.bufPrint(&pb, "{{\"expression\":\"document.getElementById('clr')\",\"contextId\":{d}}}", .{ctx});
+                if ((try r.call(visible_id, "Runtime.evaluate", ep)) == .ok) iso_obj = r.objectIdOfResult(&iso_buf, &.{ "result", "objectId" });
+            }
+        }
+        var ib: [64]u8 = undefined;
+        const installed = try r.callOn(visible_id, &ib, iso_obj, "function(){var t=this,de=document.documentElement;globalThis.__rec=[];" ++
+            "var h=function(e){var f=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'files').get.call(t);" ++
+            "globalThis.__rec.push(e.type+':'+e.isTrusted+':'+(f?f.length:-1)+':'+(f&&f.length?f[0].name:''));de.dataset.order+='M:'+e.type+',';};" ++
+            "t.addEventListener('input',h,true);t.addEventListener('change',h,true);return 'ok'}");
+        const st = try r.setFiles(visible_id, iso_obj, &.{a});
+        var rb: [256]u8 = undefined;
+        const rec = try r.callOn(visible_id, &rb, iso_obj, "function(){return globalThis.__rec.join('|')}");
+        const order = try r.eval(visible_id, &vb, "document.documentElement.dataset.order+'|'+document.getElementById('clr').files.length");
+        const m_change = std.mem.indexOf(u8, order, "M:change") orelse std.math.maxInt(usize);
+        const p_change = std.mem.indexOf(u8, order, "P-change-bubble:1") orelse 0;
+        const ok = std.mem.eql(u8, installed, "ok") and st == .ok and std.mem.eql(u8, rec, "input:true:1:up-a.txt|change:true:1:up-a.txt") and
+            m_change < p_change and std.mem.endsWith(u8, order, "|0");
+        report(ok, "up-isolated-listener", std.fmt.bufPrint(&detail, "설치 {s} · 상태 {s} · 넣기 바로 뒤 maru 기록 「{s}」 · 차례 「{s}」", .{ installed, statusName(st), rec, order }) catch "");
     }
     // up-stale-object — 주 world 와 격리 world 의 objectId 를 잡고 같은 사이트의 다른 문서로 옮긴다.
     {

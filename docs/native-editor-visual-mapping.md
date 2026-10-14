@@ -2433,7 +2433,7 @@ Term 을 막는다. 그래서 `fileTermForPath` 의 «첫 번째»와 «가장 �
 
 **VS Code 와 다른 점(의도).** ① 다시 세기를 50 ms 미루지 않는다 — 동기로 세고 키가 같으면 건너뛴다. ② overview ruler 표식을 안 낸다(막대에 검색·진단
 마커만 선다, 후속). ③ 현재 줄의 **배경 모양**이 없다 — 테마 키가 없어 늘 VS Code 기본 테마의 모양(테두리)이다. ④ grammar 없는 문서에서도 **닿은 괄호는**
-강조한다 — VS Code 는 `plaintext` 에 괄호 설정이 없어 안 하지만, 우리가 grammar 를 안 싣는 언어(YAML·TOML·Swift 등)는 VS Code 에서 괄호가 선다.
+강조한다 — VS Code 는 `plaintext` 에 괄호 설정이 없어 안 하지만, 우리가 grammar 를 안 싣는 언어(번들 목록 밖 — [네이티브 계획](plans/native-editor.md)의 「번들 언어 목록」)도 VS Code 에선 제 언어 설정으로 괄호가 선다.
 점프(§3.9c)가 이미 그 문서들에서 도는 것과도 맞춘다. 언어별 제한은 이제 색·강조·점프가 공유하며 §5.1d가 소유한다.
 
 **공통 판정의 관측점(2026-09-26).** `BRI1`~`BRI5`가 같은 짝 위의 질의·깊이 가드·여러 byte 경계를, `SYN52`가 실제 언어별 추출을,
@@ -2593,6 +2593,8 @@ highlightActiveIndentation: true, bracketPairs: false }`.
 | PHP · Kotlin | 문자열 보간 속은 글자 | PHP `"$a[0]"` `"{$a}"` · heredoc · nowdoc · 백틱 명령과 Kotlin `"${x}"` 를 VS Code 가 문자열로 둔다 |
 | HTML | **`()` `{}`만**, 짝 없는 것만 칠한다 | `colorizedBracketPairs: []` — 짝이 맞으면 무색, 짝 없는 것은 빨강. `[]`는 HTML 괄호가 아니다. 본문 글·속성값·**속성 이름**이 대상(Angular `(click)` 점프·강조 유지). `<script>`·`<style>`의 `raw_text`는 내장 언어 주입이 없어 세 기능 모두 제외한다 |
 | JSON | `[]` `{}` | 설정에 `()` 가 없다 |
+| XML · DTD | HTML 과 같다 — **`()` `{}`만**, 짝 없는 것만 칠한다 | 번들 언어 확대 BL1. VS Code xml 설정도 `colorizedBracketPairs: []` 다. 본문 글(`CharData`)·속성값(`AttValue`)이 대상. **다른 점** — VS Code xml 은 `brackets` 에 `<>` 도 있어 태그 꺾쇠를 점프·강조하지만, 여기선 HTML 과 같이 세지 않는다 |
+| YAML · TOML · Lua · Dockerfile · Makefile · Swift | `()` `[]` `{}` | 번들 언어 확대 BL1·BL2 — 위 오라클 말뭉치 대조 **밖**이다. VS Code 언어 설정의 `brackets` 가 이 셋이다(TOML 은 내장 설정이 없어 기본). Swift 의 문자열 보간 `\(…)` 과 raw 문자열 보간 `\#(…)` 은 짝이고, raw 문자열 속 `\(x)` 는 글자다. 제네릭 `<>` 는 괄호가 아니다(`colorizedBracketPairs` 가 없다). 판정자 `SYN52` |
 | Markdown | **색 없음**, 점프·강조용 괄호는 인식 | 블록 grammar의 괄호 토큰을 공통 목록에 넣되 색 출력은 무효 괄호까지 전부 끈다. 기존 점프·강조를 보존한다(2026-09-26 사용자 결정). 아래 다른 점 ② |
 | grammar 없음 | 없음 | plaintext 와 같다(설정이 없다 — monaco 실측) |
 | 모든 언어 | **20,000 자(UTF-16) 이상인 줄은 없음** | VS Code는 그 줄을 토큰화하지 않는다(`editor.maxTokenizationLineLength` · `TokenizationSupportWithLineLimit`). 공통 목록에서 제외하므로 트리를 쓰는 점프·강조도 같은 제한을 따른다 |

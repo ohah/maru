@@ -17327,3 +17327,10 @@ coordinator까지 전파하여 exit 86으로 종료했다. 기존 CR5 계약대�
 driver가 terminal 정산까지 진행하는 경우와 공유 deadline 만료를 포함한다.
 먼저 수정 전 실패를 확인하고 Debug/ReleaseFast에서 성공 경로 및 실패
 경로를 검증한다. PartialFrame 연결 종료 정책은 변경하지 않는다.
+
+실제 GUI Quit에서 추가로 재현한 문제는 실패 summary에도 coordinator가 완료 job을
+파기해 retired Client의 회수 책임이 사라지는 것이다. `retry_reserved`가 남은 runtime
+transaction은 봉인된 보관 완료 상태로 전환하고 기존 retained-terminal 정산을 사용한다.
+모두 성공한 job만 즉시 파기하며, 실패 job은 Window close·process shutdown까지
+canonical rows와 replacement receipt를 유지하여 runtime-first로 회수한다. 실제 daemon
+driver의 보관 분류·정상 성공 파기·부분 성공 보존을 먼저 검사하고 GUI Quit을 재검증한다.

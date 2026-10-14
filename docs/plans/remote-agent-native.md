@@ -401,3 +401,9 @@ daemon의 실제 거부 응답, `candidate_rejected` 관측, canonical terminal 
 게시하지 않는다. 원본 빌드뿐 아니라 재사용된 staged bundle의 GUI·CLI 해시도 실행 전에
 대조한다. CLI 종료 응답 이후 실제 runtime 목록이 비었는지를 observer 거부의 독립 증거로
 확인한다. 순수 로그 판정과 실제 제어 프로세스의 정리 검사는 GUI 실행 증거와 구분한다.
+
+실제 GUI 실행에서 observer 거부 뒤 `runtime_transactions_complete`까지 진행했고 앱은
+살아 있었지만, 기존 제품 terminal 로그는 이 실패 정산 함수에서 출력되지 않아 하네스가
+timeout됐다. 따라서 소스 복사본의 읽기 전용 관측기가 유효한 job의 실제 terminal summary를
+직접 읽어 `REMOTE_ENDED_TERMINAL`로 기록한다. 기대한 summary 값을 만들거나 제품 로그의
+성공 경로 출력 여부를 실패 경로의 판정 근거로 삼지 않는다.

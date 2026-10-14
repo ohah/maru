@@ -75,7 +75,7 @@
 | Dockerfile | `Dockerfile` `Containerfile` `*.dockerfile` | `#` | — | `"'` | 아니오 | — (VS Code 설정은 YAML 것을 베낀 꼴이라 Dockerfile 에 맞지 않는다 — 「의도한 차이」) | — | — |
 | Make | `Makefile` `GNUmakefile` `makefile` `*.mk` | `#` | — | 없음 | 아니오 | — | — | 탭(지금처럼 — 경로 대신 문법으로) |
 | Swift | `swift` | `//` | 예 | `"` | 아니오(VS Code swift 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | `case …:`·`default:` 뒤(C 계열과 같은 「의도한 차이」) | — | — |
-| SQL | `sql` | `--`(이어 쓰지 않는다 — VS Code sql 엔 `onEnterRules` 가 없다) | 예(VS Code 엔 규칙이 없다 — C 계열과 같은 「의도한 차이」) | `'"` | 아니오(VS Code sql 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | — | — | offSide(VS Code `folding.offSide`) |
+| SQL(구문 오류 진단은 끈다 — 아래 「한계」) | `sql` | `--`(이어 쓰지 않는다 — VS Code sql 엔 `onEnterRules` 가 없다) | 예(VS Code 엔 규칙이 없다 — C 계열과 같은 「의도한 차이」) | `'"` | 아니오(VS Code sql 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | — | — | offSide(VS Code `folding.offSide`) |
 | Dart | `dart` | `//` | 예 | `"'` | 예(VS Code 내장 설정이 없어 Java·Kotlin 과 같이) | `case …:`·`default:` 뒤 | — | — |
 | C# | `cs` `csx` | `//`(+ `///` 문서 주석은 `/// ` 로 잇는다 — VS Code csharp `onEnterRules`) | 예 | `"'` | 예 | `case …:`·`default:` 뒤 | — | — |
 | Objective-C | `m` | `//` | 예 | `"'` | 예 | `case …:`·`default:` 뒤 | — | — |
@@ -150,6 +150,17 @@
 
   grammar 를 고치지 않고 받아들인다 — 쿼리·문법은 grammar 가 소유한다. `SYN53` 이 이 꼴들과 이웃한 깨끗한 대조군을 함께 박아,
   grammar 를 올려 하나라도 고쳐지면 깨진다(그때 이 절을 고친다).
+- SQL grammar(v0.3.11)는 일반 SQL(PostgreSQL 쪽)을 안다. 방언을 못 가린다:
+  - SQLite(`AUTOINCREMENT`·`PRAGMA`·`WITHOUT ROWID`·`INSERT OR REPLACE`·SQLite 식 `CREATE TRIGGER`), MySQL(`ENGINE=…`), Perfetto 방언에 구문 오류가 선다.
+    실측: 실제 SQL 57 개 중 12 개, Perfetto 488 개 중 466 개. 그래서 **SQL 은 구문 오류를 진단으로 내지 않는다**(2026-10-15 사용자 결정 —
+    `Grammar.syntaxDiagnostics`, [시각 매핑](../native-editor-visual-mapping.md) §5.4). 진짜 오류도 안 보이는 대가가 있다.
+  - 중첩 블록 주석(`/* a /* b */ c ( */` — PostgreSQL 은 받는다)을 모른다. 바깥 주석이 첫 `*/` 에서 끝나 뒤 글자가 코드가 되고, 그 안 괄호가 짝 없는
+    괄호로 칠해질 수 있다.
+  - **숫자가 문자열 색이다.** 쿼리의 숫자 패턴이 `#match?`(정규식)인데 Lua 식 `%d` 를 써서(`"^[-+]?%d+$"`) 어떤 정규식 엔진에서도 안 맞는다
+    (tree-sitter 의 Rust 하이라이터도 같다 — upstream main 도 그대로다). 고치려면 벤더 쿼리를 우리가 고쳐 싣는 방식이 필요해 받아들인다.
+    `PRD3` 이 박아 두었다 — upstream 이 고치면 깨진다.
+- Dart 는 커밋으로 고정했다(`3f0c7a8309d8`, 2026-10-14). 그 커밋은 CI 설정만 바꿨고, 문법 변경은 부모 커밋(Dart 3.12/3.13 문법 — 생성 파서·쿼리·
+  시험만, scanner·빌드 파일은 그대로)이다. 실제 Dart 1,849 개에서 구문 오류는 grammar 자신의 깨진 시험 파일 하나뿐이었다.
 
 ## 적대적 검증 (BL1, 5회)
 
@@ -198,6 +209,23 @@
    뽑는다」고 적은 일을 BL2 가 안 했다** — Swift 쿼리의 정규식 셋(`^///[^/]`·`^///$`·`^/[*][*][^*].*[*]/$`)이 표에 없었다(판정기는 셋 다
    아는 구문이라 제품 결함은 아니었다). 표를 다시 뽑고(Swift 주석 표본 열 개를 더해 28 × 61), 사람의 기억에 기대던 그 일을 `PRD5` 로
    기계에 넘겼다. 생성기는 저장소에 없어(세션 임시 파일이었다) `tools/editor/predicate_oracle.py` 로 두었다 — 지금 표를 그대로 다시 낸다.
+
+## 적대적 검증 (BL3, 5회)
+
+1. 변이 — 20개(블록 주석·`case`(Dart)·괄호 Enter·줄 주석·확장자·표시 이름·심볼 이름(`object_reference`)·Dart 심볼 범위 둘·캡처 넷·offSide·
+   접힘 종류 둘·심볼 종류·의도한 차이·포매터 칸). 둘이 살아남았다: Dart 블록 주석 이어쓰기(Dart 는 VS Code 대조 말뭉치에 없어 아무도 안 쟀다 →
+   `BLX3` 에 장면), SQL 의 `statement` 접힘(`SYN21` 표본 `CREATE TABLE (…)` 는 열 정의 목록이 대신 접혀 가렸다 → `SYN55`). 둘 다 잡았다. 새 캡처
+   판정자 이름이 편집기 뷰의 `HL20` 과 겹쳐 `HL21` 로 바꿨다.
+2. 실제 파일 — SQL 545 개(그중 Perfetto 488)·Dart 1,849 개(로컬 23 + BSD 라이선스 dart-lang 저장소 다섯). 죽거나 색이 비는 파일은 없다.
+   Dart 의 구문 오류는 grammar 자신의 깨진 시험 파일 하나, 「접힘 없음·심볼 없음」은 export 만 있는 라이브러리·맨 위 변수·화살표 함수였다.
+   **SQL 은 방언 때문에 거짓 오류가 흔했다**(위 「한계」) — 사용자 결정으로 SQL 구문 진단을 껐다(`LANG11`·`DGP2`, 배선 변이도 `DGP2` 가 잡는다).
+   가장 느린 것은 Dart 1.2 MB 의 331 ms, SQL 1.1 MB(합성)의 296 ms(파싱·색·접힘·심볼·오류 전부, `ReleaseFast`).
+3. 상호작용 — **파일 트리 아이콘에 `dart` 만 빠져** Dart 파일이 일반 파일 아이콘이었다(고쳤다). 문법 없는 파일의 주석 계열(`c_like`·`sql`)·
+   외부 포매터 칸·언어 서버(계획 밖)·offSide(SQL — 들여쓰기 안내선)는 맞다.
+4. 극단 입력 — SQL `CREATE OR REPLACE`·`IF NOT EXISTS`·따옴표 식별자·`TEMPORARY`·문자열 속 `--`·`E'…'`·달러 인용, Dart raw·삼중 따옴표 문자열·
+   중첩 보간·레코드·`case (…) when …:`·switch 식. **결함 둘** — Dart const·리다이렉트 생성자가 심볼에서 빠졌고(Flutter 위젯 생성자가 거의 다 그
+   꼴이다), 이름 붙은 생성자가 전부 클래스 이름으로 보였다(`W.named` → `W`). 고치고 `SYN54` 에 박았다. SQL 중첩 블록 주석은 grammar 한계다.
+5. 문서 — 진단 층(§5.4)·설정 문서에 SQL 끄기, 이 계획의 규칙 표·한계, 괄호 언어별 표·offSide·§3.9a 갈래를 지금 코드에 맞췄다.
 
 ## 검증
 

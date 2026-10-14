@@ -1776,16 +1776,22 @@ pub fn build(b: *std.Build) void {
     // @import("build_options").version으로 읽어 인앱 새 버전 안내에 쓴다(distribution.md). app host lib과
     // 그 계약 테스트 모듈 양쪽에 같은 모듈을 주입한다. core(VT)는 빌드 시스템 비결합 원칙이라 app host
     // 경로에만 쓴다(core.zig의 terminal_version 상수는 별개).
+    // W9c③: 에이전트 업로드의 확인 모달을 환경변수(`MARU_TEST_UPLOAD_DECISION`)로 대신 답하는 길 — **시험 빌드에만** 들어간다(cdp 스모크가
+    // `-Dweb-upload-test-decision=true` 로 앱을 만든다). 기본(배포본)은 거짓이라 그 환경변수를 읽는 코드가 comptime 으로 빠진다 — 모달이
+    // 업로드의 유일한 관문이다(docs/plans/web-osr-backend.md 「W9c③ 결정」).
+    const web_upload_test_decision = b.option(bool, "web-upload-test-decision", "Build the app so MARU_TEST_UPLOAD_DECISION answers the browser.upload confirmation (test builds only — never for distribution)") orelse false;
     const build_options_mod = blk: {
         const opts = b.addOptions();
         opts.addOption([]const u8, "version", build_zig_zon.version);
         opts.addOption(bool, "mermaid_test_api", false);
+        opts.addOption(bool, "web_upload_test_decision", web_upload_test_decision);
         break :blk opts.createModule();
     };
     const build_options_test_mod = blk: {
         const opts = b.addOptions();
         opts.addOption([]const u8, "version", build_zig_zon.version);
         opts.addOption(bool, "mermaid_test_api", true);
+        opts.addOption(bool, "web_upload_test_decision", true);
         break :blk opts.createModule();
     };
 

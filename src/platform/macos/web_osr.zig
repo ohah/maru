@@ -20,6 +20,7 @@ const iosurface = @import("web_sidecar/iosurface.zig");
 
 const ws = maru.session.web_sidecar;
 const web_downloads = @import("web_downloads.zig");
+const web_upload_stage = @import("web_upload_stage.zig"); // W9c③: 업로드 사본 — 이 실행이 처음 프로필을 잡을 때 지난 실행의 것을 지운다
 pub const Kick = @import("web_cdp_kick.zig").Kick;
 /// W10b: 세션(app_session/web.zig)이 다운로드 「매번 묻기」를 다룬다.
 pub const downloads = web_downloads;
@@ -3939,6 +3940,24 @@ fn sweepLeftoverParts() void {
     web_downloads.startSweep(); // 작업 스레드 — 기록에 망·외장 볼륨 경로가 있을 수 있다(W10d 리뷰 1 회차)
 }
 
+/// W9c③: 에이전트 업로드의 사본(`<프로필>/upload-staging` — `app_host_abi` 가 만든다)을 지운다 — 이 실행이 **처음** 프로필을 잡을 때 한 번
+/// (그 프로필을 잡은 maru 만 사본을 만든다 — Chromium 탭이 그 maru 에만 있다). sidecar 가 다시 떠도 지우지 않는다(그 사이 탭이 살아 있는 실행
+/// 중이다). 지난 실행이 남긴 사본은 그 탭과 함께 이미 쓸모가 없다.
+var upload_staging_swept = false;
+
+fn sweepUploadStaging() void {
+    if (builtin.is_test or upload_staging_swept) return;
+    upload_staging_swept = true;
+    var profile_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const profile = profileDir(&profile_buf) orelse return;
+    web_upload_stage.wipeRoot(profile);
+}
+
+/// W9c③: 업로드 사본의 뿌리를 둘 곳(프로필 — 0700, 백업에서 빠진다). 프로필을 정하지 못하면 null.
+pub fn uploadStagingBase(buf: []u8) ?[]const u8 {
+    return profileDir(buf);
+}
+
 fn clearDownloadStaging(held: bool) void {
     // 시험은 실제 홈의 프로필을 건드리지 않는다(5 회차). 끝난 sidecar 가 프로필을 잡지 않았으면(잠금에 막혔다 — 같은 프로필의 다른
     // maru 가 받아 두는 중일 수 있다) 비우지 않는다.
@@ -4476,6 +4495,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             // 초기화 전에도 답한다 — hello_ack 로 세우면 잠금에 막힌 sidecar 가 같은 프로필의 다른 maru 가 받아 둔 것을 비웠다(7 회차).
             profile_held = true;
             sweepLeftoverParts();
+            sweepUploadStaging();
             break :blk surfaces.getPtr(id);
         }) |s| {
             s.created = true;

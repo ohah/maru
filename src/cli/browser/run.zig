@@ -105,6 +105,8 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.MissingAnswer => "handle-dialog needs --accept or --dismiss",
         error.ConflictingAnswer => "give only one of --accept and --dismiss",
         error.InvalidDialogToken => "--dialog must be a dialog token from `maru browser dialog` (a positive integer)",
+        error.MissingFiles => "upload needs at least one file",
+        error.TooManyFiles => "upload takes at most 10 files per call",
     };
 }
 
@@ -129,6 +131,28 @@ fn runRequest(
     // §9.5.10 통일: inline이 method-특화 wrapper인 메서드(snapshot·console)는 bounded transfer라 chunk 재조립 러너로 간다.
     if (req == .snapshot) return runWrappedResult(io, allocator, req, cp.browser_snapshot_chunk_method, "snapshot", .snapshot, stdout, stderr);
     if (req == .console) return runWrappedResult(io, allocator, req, cp.browser_console_chunk_method, "console", .console, stdout, stderr);
+    // W9c③: 상대 경로는 이 프로세스의 현재 폴더로 붙인다(앱은 절대 경로만 받는다 — 상대 경로는 Chromium 이 렌더러를 죽였다).
+    if (req == .upload) {
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd: []const u8 = if (std.process.currentPath(io, &cwd_buf)) |n| cwd_buf[0..n] else |_| {
+            try stderr.writeAll("error: cannot read the current directory to resolve relative paths\n");
+            try stderr.flush();
+            return error.UnknownCommand;
+        };
+        const abs = try browser.absolutizeUpload(allocator, req.upload, cwd);
+        defer browser.freeUpload(allocator, abs);
+        return runPlainRequest(io, allocator, .{ .upload = abs }, stdout, stderr);
+    }
+    return runPlainRequest(io, allocator, req, stdout, stderr);
+}
+
+fn runPlainRequest(
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    req: browser.Request,
+    stdout: *std.Io.Writer,
+    stderr: *std.Io.Writer,
+) !void {
     const kind = req.kind();
     const request_bytes = try browser.buildRequestBytes(allocator, req, .{ .number = 1 });
     defer allocator.free(request_bytes);

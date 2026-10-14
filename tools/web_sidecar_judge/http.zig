@@ -326,6 +326,8 @@ fn page(path: []const u8, query: []const u8, buf: []u8) ![]const u8 {
     if (std.mem.eql(u8, path, "/static")) {
         return "<!doctype html><title>static</title><style>html,body{margin:0;height:100%;background:#20a060}</style><body>";
     }
+    // W9c③: 파일 입력칸들 — 넣은 파일의 이벤트(진짜인가)와 내용을 페이지가 읽어 둔다(`upload_check`).
+    if (std.mem.eql(u8, path, "/upload")) return upload_page;
     if (std.mem.eql(u8, path, "/input")) return input_page;
     if (std.mem.eql(u8, path, "/keys")) return keys_page;
     if (std.mem.eql(u8, path, "/sel")) return select_page;
@@ -618,4 +620,13 @@ const keys_page =
     \\<script>function st(){var a=document.activeElement;var v=a&&a.value!==undefined?a.value.split(String.fromCharCode(10)).join('NL'):'';document.title='focus='+(a&&a.id)+' val='+v+' caret='+(a&&a.selectionStart)}
     \\addEventListener('input',function(){setTimeout(st,0)});addEventListener('keyup',function(){setTimeout(st,0)});document.addEventListener('focusin',function(){setTimeout(st,0)});
     \\requestAnimationFrame(function(){requestAnimationFrame(function(){document.title='keys-ready'})});</script>
+;
+
+/// W9c③ `upload_check` 의 페이지 — 한 파일 칸(`one`·`two`), 폴더 칸(`dir`), 꺼진 칸(`dis`).
+const upload_page =
+    \\<!doctype html><title>upload</title><input type=file id=one><input type=file id=two><input type=file id=dir webkitdirectory><input type=file id=dis disabled>
+    \\<script>window.__log=[];window.__got=null;window.__dis='';var one=document.getElementById('one');
+    \\one.addEventListener('input',function(e){__log.push('input:'+e.isTrusted)});
+    \\one.addEventListener('change',function(e){__log.push('change:'+e.isTrusted);var f=one.files[0];if(f)f.text().then(function(t){window.__got='one:'+f.name+':'+f.size+':'+t.trim()})});
+    \\document.getElementById('dis').addEventListener('change',function(e){window.__dis='change:'+e.isTrusted});</script>
 ;

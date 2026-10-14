@@ -29,6 +29,8 @@ pub const web_cdp_page = @import("web_cdp_page.zig");
 pub const web_cdp_exec = @import("web_cdp_exec.zig");
 /// W9a③ 의 localStorage·쿠키·clearStorage — 같이 넘긴다.
 pub const web_cdp_storage = @import("web_cdp_storage.zig");
+/// W9c③ 의 upload — 로케이터는 이 Op 가 풀고, 요소를 찾으면 그쪽으로 넘긴다(`scrollStep` 자리).
+pub const web_cdp_upload = @import("web_cdp_upload.zig");
 /// text·label 로케이터의 격리 world 함수(W9b②-2 — 계획 공격 3 회차에 실측한 것).
 const finder_js = @embedFile("web_cdp_finder.js");
 
@@ -50,7 +52,7 @@ pub const frame_params = "{\"format\":\"jpeg\",\"quality\":1,\"clip\":{\"x\":0,\
 
 pub const Status = enum(u32) { success = 0, failed = 1, timeout = 2, invalid_params = 3 };
 
-pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press, navigate, get_url, screenshot, execute_script, get_local_storage, set_local_storage, remove_local_storage, get_cookies, set_cookie, delete_cookie, clear_storage };
+pub const Kind = enum { click, back, forward, reload, type_text, scroll, wait, snapshot, hover, press, navigate, get_url, screenshot, execute_script, get_local_storage, set_local_storage, remove_local_storage, get_cookies, set_cookie, delete_cookie, clear_storage, upload };
 
 /// W9c②: 이 op 이 페이지를 움직이는가 — 그 호출 뒤의 JS 대화상자를 에이전트 것으로 볼 근거(`web_osr.noteAgentInput`). 읽기만 하는 op
 /// (스냅숏·기다림·주소·스크린샷)과 저장소 op 은 아니다 — 대화상자를 부르지 않는다.
@@ -58,6 +60,9 @@ pub fn acting(kind: Kind) bool {
     return switch (kind) {
         .click, .back, .forward, .reload, .type_text, .scroll, .hover, .press, .navigate, .execute_script => true,
         .wait, .snapshot, .get_url, .screenshot, .get_local_storage, .set_local_storage, .remove_local_storage, .get_cookies, .set_cookie, .delete_cookie, .clear_storage => false,
+        // W9c③: 모달 전·승인 뒤의 확인 호출은 페이지를 움직이지 않는다 — 앱이 넣기(`DOM.setFileInputFiles`) 바로 앞에서만 적는다(`Op.uploadSetting`):
+        // 그래야 change 처리기가 띄운 대화상자가 에이전트 것이 되고(5 초 창), 모달 동안 사용자가 띄운 것은 에이전트 것이 되지 않는다.
+        .upload => false,
     };
 }
 
@@ -76,6 +81,9 @@ pub const Step = union(enum) {
     done: struct { status: Status, result: []u8 },
     /// 이만큼(ms) 뒤에 `wake` 로 다시 부른다(wait 의 확인 간격 — 페이지 타이머를 쓰지 않는다: 숨긴 탭은 그것을 늦춘다).
     sleep: u32,
+    /// W9c③: 업로드가 모달 전 확인을 마쳤다 — 앱이 확인 모달을 띄우고(출처 `origin` 만 — 소유), 승인되면 사본을 만들어 `resumeUpload` 로 잇는다.
+    /// 그동안 이 op 은 그 탭의 줄을 쥔다(한 탭에 업로드 모달은 하나).
+    confirm: struct { origin: []u8 },
 };
 
 /// 한 호출의 결과(`web_osr.DevtoolsOutcome` 을 이 모듈이 아는 셋으로 접는다).
@@ -107,7 +115,7 @@ pub const max_up_retries: u8 = 3;
 pub const kick_retry_ms: u32 = 100;
 pub const max_kick_retries: u8 = 45;
 
-const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, frame, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release, judge_resolve, judge, rel_then };
+const Stage = enum { document, query, describe, scroll, quads, metrics, frame_tree, world, resolve, frame, hit_test, mouse_down, mouse_up, release, history, navigate_entry, reload, focus, select, insert, delete_down, delete_up, verify, ax_tree, check, sleeping, hover_move, focus_check, key_down, key_up, size_check, loc_document, locate, loc_find, loc_release, judge_resolve, judge, rel_then, upload };
 
 /// 묶음을 놓은 뒤에 할 일(`rel_then`) — wait 의 다음 확인, act 의 화면 안으로, 또는 그 답(소유).
 const Then = union(enum) {
@@ -230,8 +238,11 @@ pub const Op = struct {
     exec: ?web_cdp_exec.Op = null,
     /// W9a③ 의 localStorage·쿠키·clearStorage — 같다.
     storage: ?web_cdp_storage.Op = null,
+    /// W9c③ 의 upload — 로케이터를 푼 뒤(`stage == .upload`)의 차례.
+    upload: ?web_cdp_upload.Op = null,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
+        if (self.upload) |*u| u.deinit(gpa);
         if (self.page) |*p| p.deinit(gpa);
         if (self.exec) |*e| e.deinit(gpa);
         if (self.storage) |*st| st.deinit(gpa);
@@ -289,6 +300,12 @@ pub const Op = struct {
         if (parsed.value != .object) return error.InvalidArg;
         const o = parsed.value.object;
         switch (kind) {
+            .upload => {
+                // 파일 경로는 앱이 다룬다(열기·사본) — 이 차례는 수만 안다(여러 개면 `multiple` 칸이어야 한다).
+                const files = o.get("files") orelse return error.InvalidArg;
+                if (files != .array or files.array.items.len == 0 or files.array.items.len > web_cdp_upload.max_files) return error.InvalidArg;
+                op.upload = web_cdp_upload.Op.init(files.array.items.len, id);
+            },
             .wait => {
                 const cond = o.get("condition") orelse return error.InvalidArg;
                 if (cond != .string) return error.InvalidArg;
@@ -340,7 +357,7 @@ pub const Op = struct {
         }
         if (o.get("locator") != null and (o.get("selector") != null or o.get("ref") != null)) return error.InvalidArg; // L2 가 막지만 엔진도
         if (o.get("locator")) |l| switch (kind) {
-            .click, .type_text, .scroll, .hover, .press => {
+            .click, .type_text, .scroll, .hover, .press, .upload => {
                 try op.parseLocator(gpa, l);
                 return op;
             },
@@ -406,6 +423,7 @@ pub const Op = struct {
 
     /// 이미 페이지에 누름을 보냈다 — 남은 호출(떼기·놓기)은 그 요청이 철회돼도 보낸다(버튼을 눌린 채 두지 않는다).
     pub fn committed(self: *const Op) bool {
+        if (self.stage == .upload) return self.upload.?.committed();
         if (self.page) |*p| return p.committed();
         if (self.exec) |*e| return e.committed();
         if (self.storage) |*st| return st.committed();
@@ -421,6 +439,7 @@ pub const Op = struct {
     /// 철회됐다(부른 쪽이 다음 호출을 보내기 전에 본다) — 문서·후보 원격 객체를 쥐었으면 놓은 뒤 끝낸다(1 회차 — 그냥 끝내 페이지에 남았다).
     /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
+        if (self.stage == .upload) return self.upload.?.cancel(gpa);
         if (self.page != null) return null; // 쥔 원격 객체가 없다
         if (self.exec) |*e| return e.cancel(gpa);
         if (self.storage != null) return null; // 쥔 원격 객체가 없다(격리 world 는 이동까지)
@@ -436,6 +455,10 @@ pub const Op = struct {
 
     /// `sleep` 뒤에 다시 부른다(부른 쪽이 `now_ms` 를 넣은 뒤) — 시한이 지났으면 timeout, 아니면 다음 확인.
     pub fn wake(self: *Op, gpa: std.mem.Allocator) !Step {
+        return self.uploadFix(gpa, try self.wakeInner(gpa));
+    }
+
+    fn wakeInner(self: *Op, gpa: std.mem.Allocator) !Step {
         if (self.page) |*p| {
             p.now_ms = self.now_ms;
             return p.wake(gpa);
@@ -458,6 +481,58 @@ pub const Op = struct {
     }
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
+        return self.uploadFix(gpa, try self.startInner(gpa));
+    }
+
+    /// W9c③: 업로드가 요소를 찾기 **전에** 끝났다(없는 요소 — click 의 계약은 `{ok:false}` 성공이지만 업로드는 넣을 곳이 없으면 실패다). 찾은
+    /// 뒤(`stage == .upload`)의 답은 업로드 차례의 것이라 그대로.
+    fn uploadFix(self: *Op, gpa: std.mem.Allocator, step: Step) !Step {
+        if (self.kind != .upload or self.stage == .upload) return step;
+        switch (step) {
+            .done => |d| if (d.status == .success) {
+                const hidden = d.result.len > 0 and d.result[0] == '{' and std.mem.indexOf(u8, d.result, "\"hint\"") != null;
+                gpa.free(d.result);
+                return done(gpa, .failed, if (hidden) web_cdp_upload.hidden_reason else web_cdp_upload.not_found_reason);
+            },
+            else => {},
+        }
+        return step;
+    }
+
+    /// W9c③: 승인 뒤 — 사본을 업로드 차례에 주고 로케이터를 **처음부터 다시** 푼다(같은 요소인지는 업로드 차례가 `located` 에서 본다).
+    /// 모달 동안 쥔 것은 없다(모달 전에 놓았다).
+    pub fn resumeUpload(self: *Op, gpa: std.mem.Allocator, staged: []const web_cdp_upload.Staged) !Step {
+        try self.upload.?.beginPost(gpa, staged);
+        if (self.matched_name) |m| gpa.free(m);
+        self.matched_name = null;
+        if (self.frame_id) |f| gpa.free(f);
+        self.frame_id = null;
+        if (self.loc_found) |*f| f.deinit(gpa);
+        self.loc_found = null;
+        self.dropRoleState(gpa);
+        if (self.then == .done) gpa.free(self.then.done.result);
+        self.then = .sleep;
+        self.context_id = 0;
+        self.hit_up = false;
+        self.miss = null;
+        self.kick_retries = 0;
+        if (self.selector != null) {
+            self.backend = 0;
+            self.stage = .document;
+        } else if (self.loc_role.len > 0 or self.loc_name != null) {
+            self.backend = 0;
+            self.locating = true;
+            self.stage = .document;
+        } else self.stage = .scroll; // ref — 같은 번호로(그 번호가 다른 문서에서 다시 쓰여도 loaderId·objectId 가 막는다)
+        return self.start(gpa);
+    }
+
+    /// W9c③: 곧 보낼 호출이 업로드의 넣기인가 — 앱이 그 앞에서 에이전트 시각을 적는다.
+    pub fn uploadSetting(self: *const Op) bool {
+        return self.stage == .upload and self.upload.?.setting();
+    }
+
+    fn startInner(self: *Op, gpa: std.mem.Allocator) !Step {
         if (self.page) |*p| {
             p.now_ms = self.now_ms;
             return p.start(gpa);
@@ -466,7 +541,7 @@ pub const Op = struct {
         if (self.storage) |*st| return st.start(gpa);
         return switch (self.kind) {
             // 로케이터 — 먼저 페이지 크기를 보고(격리 world) 접근성 질의로 찾는다.
-            .click, .type_text, .scroll, .hover, .press => if (self.locating) self.frameTreeStep(gpa) else switch (self.kind) {
+            .click, .type_text, .scroll, .hover, .press, .upload => if (self.locating) self.frameTreeStep(gpa) else switch (self.kind) {
                 .press => self.startPress(gpa),
                 else => self.startAct(gpa),
             },
@@ -529,6 +604,8 @@ pub const Op = struct {
             .type_text => "type",
             .press => "press",
             .wait => "wait",
+            // 업로드는 type 처럼 — 라벨이면 그 라벨의 칸(파일 입력칸)으로 옮긴다.
+            .upload => "type",
             else => "scroll",
         };
         var aw: std.Io.Writer.Allocating = .init(gpa);
@@ -631,6 +708,11 @@ pub const Op = struct {
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
+        if (self.stage == .upload) return self.upload.?.feed(gpa, reply);
+        return self.uploadFix(gpa, try self.feedInner(gpa, reply));
+    }
+
+    fn feedInner(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
         if (self.page) |*p| {
             p.now_ms = self.now_ms;
             return p.feed(gpa, reply);
@@ -1150,6 +1232,7 @@ pub const Op = struct {
                 return self.sleepOrTimeout(gpa);
             },
             .sleeping => unreachable, // 잠든 동안은 답이 오지 않는다(wake 로 깨운다)
+            .upload => unreachable, // feed 앞에서 업로드 차례로 넘겼다
         }
     }
 
@@ -1410,6 +1493,11 @@ pub const Op = struct {
     }
 
     fn scrollStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        // W9c③: 업로드는 찾은 요소를 스크롤하지 않는다(파일 입력칸은 숨어 있어도 된다 — 실측 d) — 업로드 차례로.
+        if (self.upload) |*u| {
+            self.stage = .upload;
+            return u.located(gpa, self.backend);
+        }
         self.stage = .scroll;
         return call(gpa, "DOM.scrollIntoViewIfNeeded", "{{\"backendNodeId\":{d}}}", .{self.backend});
     }
@@ -1656,6 +1744,7 @@ fn drive(op: *Op, answer: *const fn (method: []const u8, params: []const u8) Rep
     var step = try op.start(testing.allocator);
     var pressed = false;
     while (true) switch (step) {
+        .confirm => unreachable, // W9c③: 업로드만 멈춘다
         .done => |d| return .{ .status = d.status, .result = d.result },
         .sleep => |ms| {
             // 가짜 시계 — 잠든 만큼 흘려 깨운다.
@@ -2618,6 +2707,7 @@ test "떼기를 끝까지 못 보내도 앞선 실패 이유로 답한다(엔진
     var n: usize = 0;
     while (step != .done) : (n += 1) {
         switch (step) {
+            .confirm => unreachable, // W9c③: 업로드만 멈춘다
             .call => |c| {
                 testing.allocator.free(c.params);
                 step = try op.feed(testing.allocator, .{ .not_sent = "the Chromium tab is not ready" });
@@ -3294,6 +3384,7 @@ test "4 회차: 확인 시간은 그 확인의 질의·크기 세기·판정의 
     var step = try op.start(testing.allocator);
     var checks: usize = 0;
     while (true) switch (step) {
+        .confirm => unreachable, // W9c③: 업로드만 멈춘다
         .done => |d| {
             testing.allocator.free(d.result);
             break;
@@ -3341,6 +3432,7 @@ fn r5DriveClock(op: *Op, answer: *const fn (now: i64, method: []const u8, params
     var step = try op.start(testing.allocator);
     var n: usize = 0;
     while (n < cap) : (n += 1) switch (step) {
+        .confirm => unreachable, // W9c③: 업로드만 멈춘다
         .done => |d| return .{ .status = d.status, .result = d.result, .steps = n },
         .sleep => |ms| {
             trail.sleeps += 1;
@@ -3360,6 +3452,7 @@ fn r5DriveClock(op: *Op, answer: *const fn (now: i64, method: []const u8, params
     switch (step) {
         .call => |c| testing.allocator.free(c.params),
         .done => |d| testing.allocator.free(d.result),
+        .confirm => |cf| testing.allocator.free(cf.origin),
         .sleep => {},
     }
     return error.TestDidNotFinish;
@@ -3400,6 +3493,7 @@ test "5 회차: 포인터 이동을 기다리며 자는 동안 철회되면 묶�
     defer op.deinit(testing.allocator);
     var step = try op.start(testing.allocator);
     while (true) switch (step) {
+        .confirm => unreachable, // W9c③: 업로드만 멈춘다
         .call => |c| {
             defer testing.allocator.free(c.params);
             step = try op.feed(testing.allocator, r5AlwaysBusyMove(0, c.method, c.params));
@@ -3445,6 +3539,7 @@ test "5 회차: 재시도로 기다린 시간은 그 확인의 check_wait_ms 에
     defer op.deinit(testing.allocator);
     var step = try op.start(testing.allocator);
     while (true) switch (step) {
+        .confirm => unreachable, // W9c③: 업로드만 멈춘다
         .call => |c| {
             defer testing.allocator.free(c.params);
             const reply: Reply = if (std.mem.eql(u8, c.method, "Accessibility.queryAXTree")) .{ .not_sent = busy_reason } else rolePage(c.method, c.params);
@@ -3497,6 +3592,7 @@ test "5 회차: 질의 재시도도 마지막 무거운 확인으로 짐작한�
     step = try op.feed(testing.allocator, .{ .not_sent = busy_reason });
     try testing.expectEqual(@as(usize, 0), op.kick_retries);
     switch (step) {
+        .confirm => unreachable, // W9c③: 업로드만 멈춘다
         .sleep => return error.TestUnexpectedResult, // 옛 판: kick_retry_ms 뒤 다시
         .call => |c| testing.allocator.free(c.params),
         .done => |d| testing.allocator.free(d.result),
@@ -3699,4 +3795,232 @@ test "W9c②: 대화상자로 막힌 실패의 글은 maru browser handle-dialog
         try testing.expect(std.mem.indexOf(u8, r, "maru browser handle-dialog") != null);
         try testing.expect(std.mem.indexOf(u8, r, "otherwise the user") != null);
     }
+}
+
+// ── W9c③: 업로드(browser.upload) — 로케이터 → 모달 전 확인 → 멈춤(모달) → 승인 뒤 다시 찾기 → 같은 문서·같은 요소 → 넣기 → 같은 objectId 로 읽기 ──
+// 이 시험들은 DevTools 의 답을 흉내 내 차례만 본다(실제 CEF 의 성질 — objectId 가 문서와 함께 죽는다·조용한 실패 — 은 계획의 실측과 스모크
+// `w9c-upload` 가 본다). 모달·사본은 앱(app_host_abi)의 시험이 본다.
+
+/// 흉내 페이지의 상태 — 승인 뒤 다른 문서(loaderId)·다른 요소(backendNodeId)·넣기 오류·읽기 결과를 고른다.
+const UpPage = struct {
+    var post: bool = false;
+    var loader_post: []const u8 = "L1";
+    /// 승인 뒤 두 번째 프레임 트리(확인과 넣기 사이)의 loaderId.
+    var loader_again: []const u8 = "L1";
+    var backend_post: i64 = 9;
+    var check: []const u8 = "ok";
+    var set_error: ?[]const u8 = null;
+    var verify: []const u8 = "ok";
+    var trees: usize = 0;
+
+    fn reset() void {
+        post = false;
+        loader_post = "L1";
+        loader_again = "L1";
+        backend_post = 9;
+        check = "ok";
+        set_error = null;
+        verify = "ok";
+        trees = 0;
+    }
+
+    fn answer(method: []const u8, params: []const u8) Reply {
+        if (std.mem.eql(u8, method, "DOM.describeNode")) return .{ .ok = if (post and backend_post != 9) "{\"node\":{\"backendNodeId\":11}}" else "{\"node\":{\"backendNodeId\":9}}" };
+        if (std.mem.eql(u8, method, "Page.getFrameTree")) {
+            if (post) trees += 1;
+            const loader = if (!post) "L1" else if (trees == 1) loader_post else loader_again;
+            return .{ .ok = if (std.mem.eql(u8, loader, "L1"))
+                "{\"frameTree\":{\"frame\":{\"id\":\"F1\",\"loaderId\":\"L1\",\"securityOrigin\":\"https://a.test\"}}}"
+            else
+                "{\"frameTree\":{\"frame\":{\"id\":\"F1\",\"loaderId\":\"L2\",\"securityOrigin\":\"https://b.test\"}}}" };
+        }
+        if (std.mem.eql(u8, method, "DOM.setFileInputFiles")) {
+            if (set_error) |e| return .{ .cdp_error = e };
+            return .{ .ok = "{}" };
+        }
+        if (std.mem.eql(u8, method, "Runtime.callFunctionOn")) {
+            if (std.mem.indexOf(u8, params, "function(names") != null)
+                return .{ .ok = if (std.mem.eql(u8, verify, "ok")) "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" else if (std.mem.eql(u8, verify, "removed")) "{\"result\":{\"type\":\"string\",\"value\":\"removed\"}}" else "{\"result\":{\"type\":\"string\",\"value\":\"mismatch\"}}" };
+            return .{ .ok = if (std.mem.eql(u8, check, "ok")) "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}" else if (std.mem.eql(u8, check, "disabled")) "{\"result\":{\"type\":\"string\",\"value\":\"disabled\"}}" else if (std.mem.eql(u8, check, "directory")) "{\"result\":{\"type\":\"string\",\"value\":\"directory\"}}" else if (std.mem.eql(u8, check, "single")) "{\"result\":{\"type\":\"string\",\"value\":\"single\"}}" else if (std.mem.eql(u8, check, "frame")) "{\"result\":{\"type\":\"string\",\"value\":\"frame\"}}" else "{\"result\":{\"type\":\"string\",\"value\":\"not file\"}}" };
+        }
+        return happyPage(method, params);
+    }
+};
+
+/// 업로드 차례를 모달(`confirm`)이나 끝까지 돌린다.
+fn driveUpload(op: *Op, first: Step, trail: *Trail) !Step {
+    var step = first;
+    while (true) switch (step) {
+        .call => |c| {
+            try trail.methods.append(testing.allocator, c.method);
+            try trail.params.append(testing.allocator, c.params);
+            step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
+        },
+        .done, .confirm => return step,
+        .sleep => return error.TestUnexpectedResult,
+    };
+}
+
+const up_staged = [_]web_cdp_upload.Staged{ .{ .path = "/stage/7/42/0/a.txt", .name = "a.txt", .size = 3 }, .{ .path = "/stage/7/42/1/b.txt", .name = "b.txt", .size = 5 } };
+
+test "W9c③: 업로드 — 찾기 → 프레임 트리·격리 world·노드·확인 → 놓고 멈춤(출처만) → 승인 뒤 다시 찾아 같은 문서·요소 → 넣기 → 같은 objectId 로 읽기 → 놓기" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/a.txt\",\"/b.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    defer testing.allocator.free(paused.confirm.origin);
+    try testing.expectEqualStrings("https://a.test", paused.confirm.origin);
+    const pre = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(pre.len, trail.methods.items.len);
+    for (pre, trail.methods.items) |w, g| try testing.expectEqualStrings(w, g);
+    // 확인 함수는 넣을 파일 수(2 — multiple 이어야 한다)를 받는다. 페이지를 움직이는 호출은 없다(스크롤·입력).
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[6], "\"arguments\":[{\"value\":2}]") != null);
+    try testing.expect(!op.committed());
+    trail.reset();
+    UpPage.post = true;
+    const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, &up_staged), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.success, end.done.status);
+    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5}]}", end.done.result);
+    const post = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Page.getFrameTree", "DOM.setFileInputFiles", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
+    try testing.expectEqual(post.len, trail.methods.items.len);
+    for (post, trail.methods.items) |w, g| try testing.expectEqualStrings(w, g);
+    // 넣기는 사본의 경로를 objectId 로(backendNodeId 가 아니다 — 다른 문서에서 다시 쓰였다, 실측 g2).
+    try testing.expectEqualStrings("{\"files\":[\"/stage/7/42/0/a.txt\",\"/stage/7/42/1/b.txt\"],\"objectId\":\"o-1\"}", trail.params.items[8]);
+    // 읽기는 같은 objectId 로 이름·크기를.
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "\"objectId\":\"o-1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "[\"a.txt\",\"b.txt\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[9], "[3,5]") != null);
+    try testing.expect(op.upload.?.given);
+}
+
+test "W9c③: 승인 뒤 다른 문서(loaderId)·다른 요소(backendNodeId)·확인과 넣기 사이의 이동이면 넣지 않고 「page changed」 — 쥔 것은 놓는다" {
+    const Case = struct { loader_post: []const u8 = "L1", loader_again: []const u8 = "L1", backend_post: i64 = 9, released: bool };
+    for ([_]Case{
+        .{ .loader_post = "L2", .released = false }, // 승인한 문서가 아니다 — 아무것도 쥐기 전
+        .{ .backend_post = 11, .released = false }, // 로케이터가 다른 요소를 찾았다(노드를 바꿔 끼웠다 — loaderId 는 그대로, 실측 f)
+        .{ .loader_again = "L2", .released = true }, // 확인 뒤 넣기 전에 옮겼다 — 잡은 objectId 를 놓는다
+    }) |c| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        trail.reset();
+        UpPage.post = true;
+        UpPage.loader_post = c.loader_post;
+        UpPage.loader_again = c.loader_again;
+        UpPage.backend_post = c.backend_post;
+        const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(Status.failed, end.done.status);
+        try testing.expectEqualStrings(web_cdp_upload.page_changed_reason, end.done.result);
+        try testing.expectEqual(@as(usize, 0), trail.count("DOM.setFileInputFiles"));
+        try testing.expectEqual(@as(usize, if (c.released) 1 else 0), trail.count("Runtime.releaseObjectGroup"));
+        try testing.expect(!op.upload.?.given); // 사본은 페이지에 가지 않았다 — 앱이 곧 지운다
+    }
+}
+
+test "W9c③: 넣기가 「Cannot find context」(문서가 바뀌었다)면 page changed, 읽기가 떨어진 노드·다른 목록이면 그 이유 — 모두 놓는다" {
+    const Case = struct { set_error: ?[]const u8 = null, verify: []const u8 = "ok", want: []const u8, given: bool };
+    for ([_]Case{
+        .{ .set_error = "{\"code\":-32000,\"message\":\"Cannot find context with specified id\"}", .want = web_cdp_upload.page_changed_reason, .given = false },
+        .{ .verify = "removed", .want = web_cdp_upload.removed_after_reason, .given = true },
+        .{ .verify = "mismatch", .want = web_cdp_upload.mismatch_reason, .given = true },
+    }) |c| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        // ref 는 찾기를 건너뛴다 — 곧 프레임 트리부터.
+        try testing.expectEqualStrings("Page.getFrameTree", trail.methods.items[0]);
+        trail.reset();
+        UpPage.post = true;
+        UpPage.set_error = c.set_error;
+        UpPage.verify = c.verify;
+        const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(Status.failed, end.done.status);
+        try testing.expectEqualStrings(c.want, end.done.result);
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+        try testing.expectEqual(c.given, op.upload.?.given);
+    }
+}
+
+test "W9c③: 꺼진 칸·폴더 칸·한 파일 칸에 여럿·파일 칸이 아님·다른 frame 은 모달 전에 거절(놓고 끝 — 멈추지 않는다), 없는 요소는 실패" {
+    const Case = struct { check: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .check = "disabled", .want = web_cdp_upload.disabled_reason },
+        .{ .check = "directory", .want = web_cdp_upload.directory_reason },
+        .{ .check = "single", .want = web_cdp_upload.single_reason },
+        .{ .check = "not file", .want = web_cdp_upload.not_file_input_reason },
+        .{ .check = "frame", .want = web_cdp_upload.frame_reason },
+    }) |c| {
+        UpPage.reset();
+        UpPage.check = c.check;
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/a.txt\",\"/b.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const end = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(Status.failed, end.done.status);
+        try testing.expectEqualStrings(c.want, end.done.result);
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+    // 없는 요소 — click 은 {ok:false} 성공이지만 업로드는 넣을 곳이 없다: 실패.
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#none\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const end = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.failed, end.done.status);
+    try testing.expectEqualStrings(web_cdp_upload.not_found_reason, end.done.result);
+    // 모르는 ref 도.
+    var op2 = try Op.init(testing.allocator, .upload, "{\"ref\":\"zz\",\"files\":[\"/a.txt\"]}", 42);
+    defer op2.deinit(testing.allocator);
+    const end2 = try op2.start(testing.allocator);
+    defer testing.allocator.free(end2.done.result);
+    try testing.expectEqualStrings(web_cdp_upload.not_found_reason, end2.done.result);
+    // 파일 수가 틀린 인자(0 개·11 개·없음)는 시작하지 않는다(L2 가 막지만 엔진도).
+    for ([_][]const u8{ "{\"selector\":\"#f\",\"files\":[]}", "{\"selector\":\"#f\"}", "{\"selector\":\"#f\",\"files\":[1,2,3,4,5,6,7,8,9,10,11]}" }) |bad|
+        try testing.expectError(error.InvalidArg, Op.init(testing.allocator, .upload, bad, 1));
+}
+
+test "W9c③: 철회 — 확인·두 번째 프레임 트리·넣기 앞이면 놓고 「cancelled」(넣지 않는다), 넣은 뒤의 읽기·놓기는 committed, 넣기 앞에서만 에이전트 시각" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    UpPage.post = true;
+    var step = try op.resumeUpload(testing.allocator, up_staged[0..1]);
+    // 넣기 직전까지 몬다.
+    while (!op.uploadSetting()) {
+        try testing.expect(!op.committed());
+        const c = step.call;
+        defer testing.allocator.free(c.params);
+        step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
+    }
+    try testing.expectEqualStrings("DOM.setFileInputFiles", step.call.method);
+    try testing.expect(!op.committed()); // 넣기 자체는 철회되면 보내지 않는다
+    testing.allocator.free(step.call.params);
+    const rel = (try op.cancel(testing.allocator)).?;
+    try testing.expectEqualStrings("Runtime.releaseObjectGroup", rel.call.method);
+    testing.allocator.free(rel.call.params);
+    const end = try op.feed(testing.allocator, .{ .ok = "{}" });
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqualStrings("the request was cancelled", end.done.result);
+    try testing.expect(!op.upload.?.given);
 }

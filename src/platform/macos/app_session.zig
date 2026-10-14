@@ -3008,6 +3008,8 @@ const PendingConfirm = union(enum) {
     paste: u64,
     file_conflict_reload: u64,
     grant: u64,
+    /// W9c③: 에이전트의 파일 올리기 확인(`browser.upload` — 부를 때마다). 값은 그 요청의 async_id. 파일 줄은 `upload_notes` 가 든다.
+    upload: u64,
     file_panel_close,
     editor_save_close,
     file_tree_delete,
@@ -6329,6 +6331,11 @@ pub const AppSession = struct {
     // latch하면 app_host_abi.drainGrantPrompts가 takeGrantDecision으로 폴해 grant 기록+재구동 or unauthorized한다.
     // grant 확인 결정 latch: {async_id, approved}. app_host_abi가 takeGrantDecision으로 한 번 읽고 비운다(one-shot).
     grant_confirm_decision: ?GrantConfirmDecision = null,
+    /// W9c③: 업로드 확인 모달의 결정 latch({async_id, approved}) — app_host_abi 가 `takeUploadDecision` 으로 한 번 읽고 비운다.
+    upload_confirm_decision: ?GrantConfirmDecision = null,
+    /// W9c③: 업로드 확인 모달의 파일 줄(소유)과 그것을 빌린 안내 줄 — 모달이 열려 있는 동안 confirm 의 `notes` 가 빌린다.
+    upload_note_lines: std.ArrayList([]u8) = .empty,
+    upload_notes: std.ArrayList(chrome.components.confirm.Note) = .empty,
     // 마우스 이동마다 도는 hover hit-test(updateHoveredTab·dividerAtPoint)용 재사용 scratch 버퍼. 매 이동
     // 마다 leaf rect/divider seg 레이아웃을 새 ArrayList에 할당·해제하던 churn을 없앤다 — 레이아웃은 매번
     // 다시 계산하므로(작은 트리라 cheap) 결과는 항상 최신이라 stale 캐시 위험이 없고, 버퍼 capacity만 재사용한다.
@@ -10787,6 +10794,12 @@ pub const AppSession = struct {
                 if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return); // 모달이 닫혀 키가 돌아간다
                 self.osr_grant_return = 0;
             },
+            // W9c③: 다른 상자가 업로드 확인을 밀어내면(사용자가 닫기 등을 불렀다) 거부로 친다 — 묻지 않은 채 올리지 않는다.
+            .upload => |async_id| {
+                self.upload_confirm_decision = .{ .async_id = async_id, .approved = false };
+                if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
+                self.osr_grant_return = 0;
+            },
             .paste => self.pending_paste_confirm.clearRetainingCapacity(),
             .file_panel_close => file_panel_ops.cancelFilePanelClose(self),
             .file_tree_delete => self.pending_file_tree_delete = null,
@@ -10900,6 +10913,57 @@ pub const AppSession = struct {
         const d = self.grant_confirm_decision orelse return null;
         self.grant_confirm_decision = null;
         return d;
+    }
+
+    /// W9c③: 에이전트의 파일 올리기 확인 모달(라벨 「허용」/「거부」). `lines` 는 파일마다 두 줄(`session.web_upload_display.fileLines`) —
+    /// 복사해 둔다. grant 모달과 같은 규칙: 다른 오버레이·확인이 열려 있으면 띄우지 않고 false(app_host_abi 가 다음 tick 에 다시), 이미 이
+    /// async_id 를 보이는 중이면 true. 비동기로 뜨므로 `guardAsync`(거부 포커스·글자 단축키 없음·키보드 허용은 한 번 더), 모달이 키를 가져가는
+    /// 이동은 maru 것으로 표시(`markFocusByApp`). **목록이 다 보여야 허용된다**(`notes_must_fit` — 보이지 않는 파일에 동의시키지 않는다).
+    /// 부를 때마다 띄운다 — 결정은 기억하지 않는다(grant 처럼 접는 dedup 이 없다).
+    pub fn showUploadConfirm(self: *AppSession, message: []const u8, lines: []const []const u8, async_id: u64) error{OutOfMemory}!bool {
+        if (self.pending_confirm == .upload) return self.pending_confirm.upload == async_id;
+        if (self.anyOverlayOpen() or self.pending_confirm != .none) return false;
+        self.freeUploadNotes();
+        for (lines) |l| {
+            const owned = try self.allocator.dupe(u8, l);
+            self.upload_note_lines.append(self.allocator, owned) catch |e| {
+                self.allocator.free(owned);
+                return e;
+            };
+        }
+        for (self.upload_note_lines.items) |l| try self.upload_notes.append(self.allocator, .{ .text = l, .fit = .wrap });
+        self.showConfirmButtons(.{ .upload = async_id }, message, .{ .confirm = maru.i18n.t(.btn_allow), .cancel = maru.i18n.t(.btn_deny) });
+        self.chrome_host.confirm.notes = self.upload_notes.items;
+        self.chrome_host.confirm.notes_must_fit = true;
+        self.osr_grant_return = self.osr_key_target;
+        if (self.osr_key_target != 0) web_ops.markFocusByApp(self, self.osr_key_target, 0);
+        self.chrome_host.confirm.guardAsync(maru.i18n.t(.grant_recheck));
+        return true;
+    }
+
+    /// W9c③: 그 요청(async_id)의 결정이 래치돼 있으면 한 번 읽고 비운다(승인이면 true). 다른 요청의 결정은 건드리지 않는다 — 여러 탭의 업로드가
+    /// 같은 창을 본다(먼저 읽은 쪽이 남의 답을 지우지 않게).
+    pub fn takeUploadDecision(self: *AppSession, async_id: u64) ?bool {
+        const d = self.upload_confirm_decision orelse return null;
+        if (d.async_id != async_id) return null;
+        self.upload_confirm_decision = null;
+        return d.approved;
+    }
+
+    /// W9c③: 답을 기다리던 요청이 끝났다(시한·철회·탭 닫힘) — 그 모달을 결정 없이 거둔다(다른 모달이면 그대로).
+    pub fn dismissUploadConfirm(self: *AppSession, async_id: u64) void {
+        if (self.pending_confirm != .upload or self.pending_confirm.upload != async_id) return;
+        self.pending_confirm = .none;
+        self.chrome_host.confirm.dismiss();
+        if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
+        self.osr_grant_return = 0;
+        self.metal_dirty = true;
+    }
+
+    fn freeUploadNotes(self: *AppSession) void {
+        for (self.upload_note_lines.items) |l| self.allocator.free(l);
+        self.upload_note_lines.clearRetainingCapacity();
+        self.upload_notes.clearRetainingCapacity();
     }
 
     /// "Reset All Settings to Defaults"(메뉴 reset_defaults·팝업 reset_settings) 확인 모달을 연다. config 파일을 기본
@@ -13476,6 +13540,20 @@ pub const AppSession = struct {
                         self.grant_confirm_decision = .{ .async_id = async_id, .approved = true };
                         if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return); // 모달이 닫혀 키가 돌아간다
                         self.osr_grant_return = 0;
+                    },
+                    .upload => |async_id| {
+                        // 목록이 다 보이지 않으면 허용하지 않는다 — 키보드 확정도(⌘⏎). 상자를 다시 열어 둔다(창을 넓히거나 거부).
+                        const tk = self.buildChromeTokens();
+                        if (!chrome.components.confirm.confirmAllowed(&self.chrome_host.confirm, self.buildChromeProps(), &tk)) {
+                            self.pending_confirm = owner;
+                            self.chrome_host.confirm.open = true;
+                            self.chrome_host.confirm.focused = .cancel;
+                            self.chrome_host.confirm.rechecking = false;
+                        } else {
+                            self.upload_confirm_decision = .{ .async_id = async_id, .approved = true };
+                            if (self.osr_grant_return != 0) web_ops.markFocusByApp(self, 0, self.osr_grant_return);
+                            self.osr_grant_return = 0;
+                        }
                     },
                     .quit => {
                         self.quit_decision = .accepted;
@@ -24914,6 +24992,9 @@ pub const AppSession = struct {
             self.pending_pastes.deinit(self.allocator);
         }
         self.pending_paste_confirm.deinit(self.allocator);
+        self.freeUploadNotes();
+        self.upload_note_lines.deinit(self.allocator);
+        self.upload_notes.deinit(self.allocator);
         self.user_action_queue.close();
         for (&self.user_actions) |*slot| {
             if (slot.*) |*action| action.deinit(self.allocator);

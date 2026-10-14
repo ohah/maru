@@ -1,0 +1,415 @@
+//! Chromium 탭의 `browser.upload`(W9c③) — 로케이터가 찾은 `<input type=file>` 에 앱이 만든 사본을 넣는 DevTools 차례. 로케이터 풀기는
+//! `web_cdp_ops.Op` 가 click 과 같은 길로 하고(selector·ref·role·text·label), 요소를 찾으면 이 차례로 넘긴다(`located`). 확인 모달은 앱이
+//! 띄운다 — 이 차례는 모달 전 확인을 마치면 `Step.confirm` 으로 멈추고, 앱이 승인 뒤 사본을 만들어 `beginPost` 하면 로케이터를 **다시**
+//! 풀어 같은 요소인지 본 뒤 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」, 실제 CEF 154 실측):
+//!
+//! - **모달 전**: `Page.getFrameTree`(주 프레임 id·`loaderId`·`securityOrigin` — 모달은 이 출처만 보인다, 페이지가 정한 글은 싣지 않는다)
+//!   → 격리 world → `DOM.resolveNode` → 확인 함수(파일 입력칸인가·꺼지지 않았나(`:disabled` — fieldset 도)·폴더 칸이 아닌가·여러 파일이면
+//!   `multiple` 인가·문서에 붙어 있나·주 프레임인가). `setFileInputFiles` 는 꺼진 칸에도 넣고 이벤트까지 냈다(실측 d2 — 사람은 못 한다),
+//!   폴더 칸에는 조용히 아무것도 안 넣었고(i), 한 파일 칸에 둘을 주면 조용히 첫 것만 넣었다(b2) — 그래서 모달 **전에** 거절한다.
+//! - **승인 뒤**: 로케이터를 다시 풀어 같은 `backendNodeId` 인가 → 프레임 트리의 `loaderId` 가 같은가 → **새** 격리 world 에서 objectId 를
+//!   잡아 다시 확인 → 프레임 트리를 한 번 더(확인과 넣기 사이의 이동) → `DOM.setFileInputFiles{objectId}` → **같은 objectId** 로 읽어
+//!   확인(붙어 있나·수·이름·크기). objectId 는 문서와 함께 죽는다(실측 g4 — 「Cannot find context」) — `backendNodeId` 는 다른 사이트로
+//!   옮기면 새 프로세스에서 다시 쓰였고(g2) 같은 문서에서 노드를 바꿔 끼워도 `loaderId` 는 그대로였다(f). `setFileInputFiles` 는 조용히
+//!   실패해도 `{}` 라(떨어진 노드·없는 경로 등 여섯 경우 — `files.length` 만으로는 못 잡는다) 넣은 뒤 이름·크기까지 읽는다.
+//! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다.
+//! - 남는 틈(문서로 받아들인 것): 확인과 넣기 사이에 페이지가 같은 문서 안에서 노드를 바꾸면 파일은 떨어진 노드로 간다 — 같은 출처(사용자가
+//!   승인한 그 문서)이고, 확인이 「removed」 로 실패를 알린다.
+
+const std = @import("std");
+const ops = @import("web_cdp_ops.zig");
+
+const Step = ops.Step;
+const Reply = ops.Reply;
+const Status = ops.Status;
+
+/// 한 번에 넣는 파일 수 상한 — L2(`control_browser.max_upload_files`)와 같다(앱이 컴파일 때 맞춘다).
+pub const max_files = 10;
+
+pub const not_found_reason = "no element matches the locator";
+pub const hidden_reason = "no visible element matches the locator (matching elements are hidden) — a hidden file input can be given with --selector or --ref";
+pub const not_file_input_reason = "the element is not a file input (<input type=file>)";
+pub const disabled_reason = "the file input is disabled — a user could not choose files there";
+pub const directory_reason = "the file input takes a folder (webkitdirectory) — upload passes files, not folders";
+pub const single_reason = "the file input takes one file — give one file, or use an input that allows several (multiple)";
+pub const frame_reason = "elements inside frames are not supported yet";
+pub const detached_reason = "the file input is not in the page";
+pub const page_changed_reason = "the page changed while waiting for approval — no file was set; run upload again";
+pub const removed_after_reason = "the file input was removed from the page when the files were set — the page did not keep them";
+pub const mismatch_reason = "the page did not get the files as approved (the input kept a different list) — check the page before trying again";
+pub const check_failed_reason = "could not check the file input";
+
+/// 격리 world 이름 — 확인마다 새로 만든다(옛 문서의 context 를 쓰지 않게).
+const world_name = "maru-w9c-upload";
+
+/// 확인 함수(격리 world — 프로토타입 getter 로 읽는다: DOM clobbering). 인자 n = 넣을 파일 수.
+const check_js =
+    "function(n){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;" ++
+    "if(!(t instanceof Element))return 'not file';" ++
+    "if(G(Node.prototype,'ownerDocument').call(t)!==document)return 'frame';" ++
+    "if(!G(Node.prototype,'isConnected').call(t))return 'detached';" ++
+    "if(!(t instanceof HTMLInputElement)||G(HTMLInputElement.prototype,'type').call(t)!=='file')return 'not file';" ++
+    "if(G(HTMLInputElement.prototype,'disabled').call(t)||Element.prototype.matches.call(t,':disabled'))return 'disabled';" ++
+    "if(G(HTMLInputElement.prototype,'webkitdirectory').call(t))return 'directory';" ++
+    "if(n>1&&!G(HTMLInputElement.prototype,'multiple').call(t))return 'single';" ++
+    "return 'ok'}";
+
+/// 넣은 뒤 읽기(같은 objectId) — 붙어 있나·수·이름·크기.
+const verify_js =
+    "function(names,sizes){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;" ++
+    "if(!G(Node.prototype,'isConnected').call(t))return 'removed';" ++
+    "var f=G(HTMLInputElement.prototype,'files').call(t);if(!f)return 'mismatch';" ++
+    "if(G(FileList.prototype,'length').call(f)!==names.length)return 'mismatch';" ++
+    "for(var i=0;i<names.length;i++){var x=FileList.prototype.item.call(f,i);" ++
+    "if(G(File.prototype,'name').call(x)!==names[i]||G(Blob.prototype,'size').call(x)!==sizes[i])return 'mismatch'}" ++
+    "return 'ok'}";
+
+const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify, release };
+
+pub const Phase = enum { pre, post };
+
+/// 승인 뒤 넣을 사본 하나(앱이 준다).
+pub const Staged = struct { path: []const u8, name: []const u8, size: u64 };
+
+const OwnedStaged = struct { path: []u8, name: []u8, size: u64 };
+
+pub const Op = struct {
+    id: u64,
+    /// 넣을 파일 수(L2 가 1..10 을 봤다).
+    count: usize,
+    phase: Phase = .pre,
+    stage: Stage = .tree,
+    /// 모달 전에 찾은 요소 — 승인 뒤 다시 찾은 것과 같아야 한다.
+    backend: i64 = 0,
+    loader: ?[]u8 = null,
+    origin: ?[]u8 = null,
+    frame: ?[]u8 = null,
+    context: i64 = 0,
+    object: ?[]u8 = null,
+    staged: std.ArrayList(OwnedStaged) = .empty,
+    /// 놓은 뒤에 낼 답(소유).
+    then: ?struct { status: Status, result: []u8 } = null,
+    /// `setFileInputFiles` 를 보냈고 그 답이 「안 했다」(오류·못 보냄)가 아니었다 — 사본이 페이지에 갔을 수 있다(앱이 실패여도 사본을 남긴다).
+    given: bool = false,
+
+    pub fn init(count: usize, id: u64) Op {
+        return .{ .count = count, .id = id };
+    }
+
+    pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
+        if (self.loader) |s| gpa.free(s);
+        if (self.origin) |s| gpa.free(s);
+        if (self.frame) |s| gpa.free(s);
+        if (self.object) |s| gpa.free(s);
+        self.freeStaged(gpa);
+        self.staged.deinit(gpa);
+        if (self.then) |t| gpa.free(t.result);
+        self.* = undefined;
+    }
+
+    fn freeStaged(self: *Op, gpa: std.mem.Allocator) void {
+        for (self.staged.items) |s| {
+            gpa.free(s.path);
+            gpa.free(s.name);
+        }
+        self.staged.clearRetainingCapacity();
+    }
+
+    /// 승인 뒤 — 사본을 받고(복사한다) 차례를 처음부터(로케이터 다시 풀기는 `web_cdp_ops.Op.resumeUpload` 가).
+    pub fn beginPost(self: *Op, gpa: std.mem.Allocator, staged: []const Staged) !void {
+        self.freeStaged(gpa);
+        for (staged) |s| {
+            const path = try gpa.dupe(u8, s.path);
+            errdefer gpa.free(path);
+            const name = try gpa.dupe(u8, s.name);
+            errdefer gpa.free(name);
+            try self.staged.append(gpa, .{ .path = path, .name = name, .size = s.size });
+        }
+        self.phase = .post;
+        self.stage = .tree;
+        if (self.object) |o| gpa.free(o);
+        self.object = null;
+    }
+
+    /// 철회돼도 보낼 호출인가 — `stage` 는 **곧 보낼** 호출이다. 넣기를 보낸 뒤의 확인(`verify`)과 놓기는 끝까지 보낸다. 넣기(`set`) 자체는
+    /// 아니다 — 승인 뒤라도 그 사이 철회·탭 닫힘·시한이면 넣지 않는다(`cancel` 이 놓고 끝낸다).
+    pub fn committed(self: *const Op) bool {
+        return switch (self.stage) {
+            .release_pre, .verify, .release => true,
+            else => false,
+        };
+    }
+
+    /// `setFileInputFiles` 를 보내기 직전인가 — 앱이 그 호출 앞에서 에이전트 시각을 적는다(페이지의 change 처리기가 띄운 대화상자가 에이전트 것이
+    /// 되게 — 모달 전의 호출은 페이지를 움직이지 않는다).
+    pub fn setting(self: *const Op) bool {
+        return self.stage == .set;
+    }
+
+    /// 철회 — 원격 객체를 쥐었으면 놓은 뒤 끝낸다. 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
+    pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
+        return switch (self.stage) {
+            .check, .tree_again, .set => try self.releaseThen(gpa, .failed, "the request was cancelled"),
+            else => null,
+        };
+    }
+
+    /// 로케이터가 요소를 찾았다(`web_cdp_ops.Op.scrollStep` 자리). 모달 전이면 그 요소를 쥐고, 승인 뒤면 같은 요소인지 본다.
+    pub fn located(self: *Op, gpa: std.mem.Allocator, backend: i64) !Step {
+        if (self.phase == .pre) {
+            self.backend = backend;
+        } else if (backend != self.backend) {
+            return done(gpa, .failed, page_changed_reason);
+        }
+        return self.treeStep(gpa, .tree);
+    }
+
+    fn treeStep(self: *Op, gpa: std.mem.Allocator, stage: Stage) !Step {
+        self.stage = stage;
+        return call(gpa, "Page.getFrameTree", "", .{});
+    }
+
+    fn releaseThen(self: *Op, gpa: std.mem.Allocator, status: Status, msg: []const u8) !Step {
+        if (self.then) |t| gpa.free(t.result);
+        self.then = .{ .status = status, .result = try gpa.dupe(u8, msg) };
+        return self.releaseCall(gpa, .release);
+    }
+
+    fn releaseCall(self: *Op, gpa: std.mem.Allocator, stage: Stage) !Step {
+        self.stage = stage;
+        return call(gpa, "Runtime.releaseObjectGroup", "{{\"objectGroup\":\"maru-w9b-{d}\"}}", .{self.id});
+    }
+
+    /// 확인의 답(`check_js` 의 글) → 실패 이유(null 이면 통과).
+    fn checkReason(self: *const Op, verdict: []const u8) ?[]const u8 {
+        if (std.mem.eql(u8, verdict, "ok")) return null;
+        if (std.mem.eql(u8, verdict, "frame")) return frame_reason;
+        if (std.mem.eql(u8, verdict, "disabled")) return disabled_reason;
+        if (std.mem.eql(u8, verdict, "directory")) return directory_reason;
+        if (std.mem.eql(u8, verdict, "single")) return single_reason;
+        if (std.mem.eql(u8, verdict, "detached")) return if (self.phase == .post) page_changed_reason else detached_reason;
+        return not_file_input_reason;
+    }
+
+    pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
+        // 놓기의 답(무엇이든) — 정해 둔 답으로.
+        if (self.stage == .release) {
+            const t = self.then orelse return done(gpa, .failed, "internal upload state");
+            self.then = null;
+            return .{ .done = .{ .status = t.status, .result = t.result } };
+        }
+        if (self.stage == .release_pre) return self.confirmStep(gpa);
+        const holds = switch (self.stage) {
+            .check, .tree_again, .set, .verify => true,
+            else => false,
+        };
+        const bytes = switch (reply) {
+            .ok => |b| b,
+            .cdp_error => |e| return self.cdpError(gpa, e, holds),
+            .timed_out => |why| {
+                if (self.stage == .set) self.given = true; // 갔는지 모른다 — 사본을 남긴다
+                return if (holds) self.releaseThen(gpa, .timeout, why) else done(gpa, .timeout, why);
+            },
+            .failed => |why| {
+                if (self.stage == .set) self.given = true;
+                return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
+            },
+            .not_sent => |why| return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why),
+        };
+        const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch
+            return if (holds) self.releaseThen(gpa, .failed, "malformed DevTools result") else done(gpa, .failed, "malformed DevTools result");
+        defer parsed.deinit();
+        const v = parsed.value;
+        switch (self.stage) {
+            .tree, .tree_again => {
+                const frame = stringAt(v, &.{ "frameTree", "frame", "id" }) orelse return self.failHolding(gpa, "no main frame");
+                const loader = stringAt(v, &.{ "frameTree", "frame", "loaderId" }) orelse return self.failHolding(gpa, "no main frame");
+                if (self.phase == .pre and self.stage == .tree) {
+                    const origin = stringAt(v, &.{ "frameTree", "frame", "securityOrigin" }) orelse "";
+                    try replace(gpa, &self.frame, frame);
+                    try replace(gpa, &self.loader, loader);
+                    try replace(gpa, &self.origin, origin);
+                } else if (!std.mem.eql(u8, loader, self.loader.?) or !std.mem.eql(u8, frame, self.frame.?)) {
+                    // 승인한 문서가 아니다 — 아무것도 넣지 않는다.
+                    return self.failHolding(gpa, page_changed_reason);
+                }
+                if (self.stage == .tree_again) return self.setStep(gpa);
+                self.stage = .world;
+                return call(gpa, "Page.createIsolatedWorld", "{{\"frameId\":{f},\"worldName\":\"" ++ world_name ++ "\"}}", .{std.json.fmt(self.frame.?, .{})});
+            },
+            .world => {
+                self.context = intAt(v, &.{"executionContextId"}) orelse return done(gpa, .failed, "no isolated world");
+                self.stage = .resolve;
+                return call(gpa, "DOM.resolveNode", "{{\"backendNodeId\":{d},\"executionContextId\":{d},\"objectGroup\":\"maru-w9b-{d}\"}}", .{ self.backend, self.context, self.id });
+            },
+            .resolve => {
+                const oid = stringAt(v, &.{ "object", "objectId" }) orelse return done(gpa, .failed, if (self.phase == .post) page_changed_reason else detached_reason);
+                try replace(gpa, &self.object, oid);
+                self.stage = .check;
+                return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}), self.count });
+            },
+            .check => {
+                if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .failed, check_failed_reason);
+                const verdict = stringAt(v, &.{ "result", "value" }) orelse return self.releaseThen(gpa, .failed, check_failed_reason);
+                if (self.checkReason(verdict)) |why| return self.releaseThen(gpa, .failed, why);
+                // 모달 전: 놓고 멈춘다(모달). 승인 뒤: 확인과 넣기 사이의 이동을 한 번 더 본다.
+                if (self.phase == .pre) return self.releaseCall(gpa, .release_pre);
+                return self.treeStep(gpa, .tree_again);
+            },
+            .set => {
+                self.given = true;
+                return self.verifyStep(gpa);
+            },
+            .verify => {
+                if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .failed, mismatch_reason);
+                const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
+                if (std.mem.eql(u8, verdict, "removed")) return self.releaseThen(gpa, .failed, removed_after_reason);
+                if (!std.mem.eql(u8, verdict, "ok")) return self.releaseThen(gpa, .failed, mismatch_reason);
+                const result = try self.successJson(gpa);
+                defer gpa.free(result);
+                return self.releaseThen(gpa, .success, result);
+            },
+            .release, .release_pre => unreachable, // 위에서
+        }
+    }
+
+    /// 쥔 객체가 있으면 놓고, 없으면 곧 실패.
+    fn failHolding(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
+        if (self.stage == .tree_again) return self.releaseThen(gpa, .failed, why);
+        return done(gpa, .failed, why);
+    }
+
+    fn confirmStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .tree; // 승인 뒤에는 `beginPost` 가 다시 세운다
+        return .{ .confirm = .{ .origin = try gpa.dupe(u8, self.origin orelse "") } };
+    }
+
+    fn setStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .set;
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        (blk: {
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("files") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            for (self.staged.items) |f| s.write(f.path) catch |e| break :blk e;
+            s.endArray() catch |e| break :blk e;
+            s.objectField("objectId") catch |e| break :blk e;
+            s.write(self.object.?) catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
+        }) catch return error.OutOfMemory;
+        return .{ .call = .{ .method = "DOM.setFileInputFiles", .params = try aw.toOwnedSlice() } };
+    }
+
+    fn verifyStep(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.stage = .verify;
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        (blk: {
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("objectId") catch |e| break :blk e;
+            s.write(self.object.?) catch |e| break :blk e;
+            s.objectField("functionDeclaration") catch |e| break :blk e;
+            s.write(verify_js) catch |e| break :blk e;
+            s.objectField("arguments") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("value") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            for (self.staged.items) |f| s.write(f.name) catch |e| break :blk e;
+            s.endArray() catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("value") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            for (self.staged.items) |f| s.write(f.size) catch |e| break :blk e;
+            s.endArray() catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
+            s.endArray() catch |e| break :blk e;
+            s.objectField("returnByValue") catch |e| break :blk e;
+            s.write(true) catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
+        }) catch return error.OutOfMemory;
+        return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice() } };
+    }
+
+    /// 성공 답 — `{"origin","files":[{"name","size"}]}`(L2 `serializeUploadResult` 가 검사한다).
+    fn successJson(self: *const Op, gpa: std.mem.Allocator) ![]u8 {
+        var aw: std.Io.Writer.Allocating = .init(gpa);
+        defer aw.deinit();
+        var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+        (blk: {
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("origin") catch |e| break :blk e;
+            s.write(self.origin orelse "") catch |e| break :blk e;
+            s.objectField("files") catch |e| break :blk e;
+            s.beginArray() catch |e| break :blk e;
+            for (self.staged.items) |f| {
+                s.beginObject() catch |e| break :blk e;
+                s.objectField("name") catch |e| break :blk e;
+                s.write(f.name) catch |e| break :blk e;
+                s.objectField("size") catch |e| break :blk e;
+                s.write(f.size) catch |e| break :blk e;
+                s.endObject() catch |e| break :blk e;
+            }
+            s.endArray() catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
+        }) catch return error.OutOfMemory;
+        return aw.toOwnedSlice();
+    }
+
+    /// CDP 오류 — 문서가 바뀌어 context·노드가 사라졌으면(승인 뒤) 「페이지가 바뀌었다」, 그 밖은 그 글로. 쥔 객체는 놓는다.
+    fn cdpError(self: *Op, gpa: std.mem.Allocator, err_json: []const u8, holds: bool) !Step {
+        var owned: ?[]u8 = null;
+        defer if (owned) |m| gpa.free(m);
+        if (std.json.parseFromSlice(std.json.Value, gpa, err_json, .{})) |parsed| {
+            defer parsed.deinit();
+            if (stringAt(parsed.value, &.{"message"})) |m| owned = try gpa.dupe(u8, m);
+        } else |_| {}
+        const message: []const u8 = owned orelse "DevTools error";
+        const gone = std.mem.indexOf(u8, message, "Cannot find context") != null or std.mem.indexOf(u8, message, "Could not find object") != null or
+            std.mem.indexOf(u8, message, "No node") != null or std.mem.indexOf(u8, message, "No frame") != null;
+        const why: []const u8 = switch (self.stage) {
+            .set => if (gone) page_changed_reason else if (std.mem.indexOf(u8, message, "not a file input") != null) not_file_input_reason else message,
+            .world, .resolve, .check, .tree, .tree_again => if (gone) (if (self.phase == .post) page_changed_reason else detached_reason) else message,
+            else => message,
+        };
+        return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
+    }
+};
+
+fn replace(gpa: std.mem.Allocator, slot: *?[]u8, value: []const u8) !void {
+    const copy = try gpa.dupe(u8, value);
+    if (slot.*) |old| gpa.free(old);
+    slot.* = copy;
+}
+
+fn call(gpa: std.mem.Allocator, method: []const u8, comptime fmt: []const u8, args: anytype) !Step {
+    const params = if (fmt.len == 0) try gpa.alloc(u8, 0) else try std.fmt.allocPrint(gpa, fmt, args);
+    return .{ .call = .{ .method = method, .params = params } };
+}
+
+fn done(gpa: std.mem.Allocator, status: Status, result: []const u8) !Step {
+    return .{ .done = .{ .status = status, .result = try gpa.dupe(u8, result) } };
+}
+
+fn at(v: std.json.Value, path: []const []const u8) ?std.json.Value {
+    var cur = v;
+    for (path) |k| {
+        if (cur != .object) return null;
+        cur = cur.object.get(k) orelse return null;
+    }
+    return cur;
+}
+
+fn stringAt(v: std.json.Value, path: []const []const u8) ?[]const u8 {
+    const x = at(v, path) orelse return null;
+    return if (x == .string) x.string else null;
+}
+
+fn intAt(v: std.json.Value, path: []const []const u8) ?i64 {
+    const x = at(v, path) orelse return null;
+    return if (x == .integer) x.integer else null;
+}

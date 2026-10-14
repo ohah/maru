@@ -12,7 +12,7 @@
 //! W1c 판정은 `browsers_check.zig`, W2 판정은 `frames_check.zig`, W4 입력 판정은 `input_check.zig`, W5a 대화상자·파일 선택
 //! 판정은 `dialogs_check.zig`, W5b 권한 판정은 `permissions_check.zig` 가 든다. 하나라도 틀리면 exit 1.
 //! `maru-web-judge --input <설치 디렉터리> <프로필 뿌리>` 는 입력 판정만, `--dialogs` 는 대화상자 판정만, `--permissions` 는 권한
-//! 판정만 돈다.
+//! 판정만 돈다. `--upload` 는 W9c③ 업로드가 기대는 Chromium 의 성질(`upload_check.zig`)만 본다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -36,6 +36,7 @@ const close_check = @import("close_check.zig");
 const datalist_check = @import("datalist_check.zig");
 const download_check = @import("download_check.zig");
 const devtools_check = @import("devtools_check.zig");
+const upload_check = @import("upload_check.zig"); // W9c③
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -116,6 +117,14 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         devtoolsChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--upload")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintZ(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        uploadChecks(host, std.mem.span(argv[3]));
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--closeask")) {
@@ -449,6 +458,14 @@ fn devtoolsChecks(host_path: [:0]const u8, profile_root: []const u8) void {
     var expired_buf: [1024]u8 = undefined;
     const expired_profile = std.fmt.bufPrintZ(&expired_buf, "--profile-dir={s}/u", .{profile_root}) catch return report(false, "devtools", "프로필 경로가 길다", .{});
     devtools_check.run(&reportText, host_path, profile, expired_profile, server.port) catch |err| report(false, "devtools", "{s}", .{@errorName(err)});
+}
+
+/// 업로드 판정(W9c③) — 프로필은 `<뿌리>/w`, 넣을 파일은 `<뿌리>` 에 만든다.
+fn uploadChecks(host_path: [:0]const u8, profile_root: []const u8) void {
+    const server = http.Server.start() catch |err| return report(false, "upload", "HTTP 서버: {s}", .{@errorName(err)});
+    var profile_buf: [1024]u8 = undefined;
+    const profile = std.fmt.bufPrintZ(&profile_buf, "--profile-dir={s}/w", .{profile_root}) catch return report(false, "upload", "프로필 경로가 길다", .{});
+    upload_check.run(&reportText, host_path, profile, profile_root, server.port) catch |err| report(false, "upload", "{s}", .{@errorName(err)});
 }
 
 /// 팝업 이어 받기 판정(W6f①) — 프로필은 `<뿌리>/o`.

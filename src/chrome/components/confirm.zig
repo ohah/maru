@@ -106,6 +106,10 @@ pub const State = struct {
     /// 클릭은 의도가 분명해 바로 확정한다.
     recheck: ?[]const u8 = null,
     rechecking: bool = false,
+    /// **목록이 다 보여야 확정할 수 있는 상자**(W9c③ 업로드 확인 — 파일을 모두 보인다는 것이 동의의 조건이다). 메시지·안내 줄이 상자에 다
+    /// 들어가지 않으면(줄 상한·창 높이로 잘리면) 확정 버튼이 흐리게 그려지고 눌리지 않는다 — 키보드 확정은 host 가 `confirmAllowed` 로
+    /// 다시 본다(`handle` 은 레이아웃을 모른다). `show` 가 끈다.
+    notes_must_fit: bool = false,
 
     pub fn show(self: *State, message: []const u8, buttons: Buttons) void {
         self.message = message;
@@ -121,6 +125,7 @@ pub const State = struct {
         self.letter_keys = true; // 앞 상자의 보호(`guardAsync`)가 새 상자에 새지 않게
         self.recheck = null;
         self.rechecking = false;
+        self.notes_must_fit = false;
         self.open = true;
     }
 
@@ -138,6 +143,7 @@ pub const State = struct {
         self.letter_keys = true;
         self.recheck = null;
         self.rechecking = false;
+        self.notes_must_fit = false;
         self.open = true;
     }
 
@@ -325,10 +331,12 @@ pub fn view(
     //     보임). 둘 다 배경 fill로 버튼처럼(painter order: bg→glyph). 위치/폭은 buttonGeom 단일 출처(클릭 hit-test와 공유).
     //     라벨은 버튼 패딩만큼 우측에서 시작. arena에 만든 라벨 슬라이스는 view 동안(=lower까지) 유효.
     const confirm_focused = state.focused == .confirm;
+    // 목록이 다 보여야 하는 상자에서 다 보이지 않으면 확정 버튼은 흐리게(눌리지 않는다 — `buttonAtPoint`·host 의 `confirmAllowed`).
+    const confirm_blocked = state.notes_must_fit and !g.complete;
     if (g.confirm_fit > 0) {
-        try modal_box.fillCells(box, g.confirm_x, g.confirm_row, g.confirm_fit, if (confirm_focused) .focus_accent else .tab_hover_bg, arena, out);
+        try modal_box.fillCells(box, g.confirm_x, g.confirm_row, g.confirm_fit, if (confirm_focused and !confirm_blocked) .focus_accent else .tab_hover_bg, arena, out);
         const t = try buttonLabel(arena, state.letter_keys, key_confirm, state.confirm_label, g.confirm_fit);
-        try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.confirm_row, t, if (confirm_focused) .surface_bg else .surface_fg, arena, out);
+        try modal_box.text(box, g.confirm_x + @as(i32, @intCast(btn_pad * box.cw)), g.confirm_row, t, if (confirm_blocked) .muted_fg else if (confirm_focused) .surface_bg else .surface_fg, arena, out);
     }
     if (state.has_alternate and g.alternate_fit > 0) {
         const focused = state.focused == .alternate;
@@ -381,6 +389,8 @@ const ButtonGeom = struct {
     msg_lines: [modal_box.max_wrap_rows][]const u8,
     msg_rows: u32,
     msg_truncated: bool,
+    /// 메시지와 안내 줄이 **모두** 잘리지 않고 그려지는가(줄 상한·창 높이·한 줄의 줄바꿈 상한 어느 것에도 걸리지 않았다) — `notes_must_fit`.
+    complete: bool,
     confirm_x: i32,
     confirm_fit: u32,
     alternate_x: i32,
@@ -431,6 +441,7 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
     var note_lines: [max_note_rows]NoteLine = undefined;
     var notes_all: u32 = 0;
     var notes_overflow = false;
+    var notes_wrap_cut = false; // 안내 한 줄이 줄바꿈 상한(`max_wrap_rows`)에서 잘렸다
     var lead_rows: u32 = 0; // 재확인 문장(`leadNotes`)이 차지한 행 수 — 줄일 때 끝까지 남긴다
     note_loop: for (note_groups, 0..) |group, gi| {
         defer if (gi == 0) {
@@ -448,6 +459,7 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
             .wrap => {
                 var parts: [modal_box.max_wrap_rows][]const u8 = undefined;
                 const w = modal_box.wrapLine(note.text, width_probe.inner_cols, &parts);
+                if (w.truncated) notes_wrap_cut = true;
                 for (parts[0..w.rows], 0..) |line, i| {
                     if (notes_all == max_note_rows) {
                         notes_overflow = true;
@@ -546,6 +558,7 @@ fn buttonGeom(state: *const State, p: props.ChromeProps, tk: *const tokens.Token
         .msg_lines = msg_lines,
         .msg_rows = m,
         .msg_truncated = msg_truncated,
+        .complete = !msg_truncated and !notes_overflow and !notes_wrap_cut and k == notes_all,
         .confirm_x = group_x,
         .confirm_fit = fitButtonCols(group_x, default_btn_cols, box.cw, inner_right),
         .alternate_x = alternate_x,
@@ -585,11 +598,20 @@ pub fn buttonAtPoint(state: *const State, p: props.ChromeProps, tk: *const token
             return py >= ry and py < ry + ch and px >= bx and px < bx + @as(f64, @floatFromInt(fit)) * cw;
         }
     };
-    if (Hit.at(g.box, g.confirm_row, g.confirm_x, g.confirm_fit, cw_f, ch_f, x_px, y_px)) return .confirmed;
+    // 목록이 다 보이지 않는 상자의 확정 버튼은 누름을 삼킨다(무동작 — 상자는 열린 채).
+    if (Hit.at(g.box, g.confirm_row, g.confirm_x, g.confirm_fit, cw_f, ch_f, x_px, y_px)) return if (state.notes_must_fit and !g.complete) null else .confirmed;
     if (state.has_alternate and Hit.at(g.box, g.alternate_row, g.alternate_x, g.alternate_fit, cw_f, ch_f, x_px, y_px)) return .alternate;
     if (state.has_extra and Hit.at(g.box, g.extra_row, g.extra_x, g.extra_fit, cw_f, ch_f, x_px, y_px)) return .extra;
     if (Hit.at(g.box, g.cancel_row, g.cancel_x, g.cancel_fit, cw_f, ch_f, x_px, y_px)) return .cancelled;
     return null; // 패널 안, 버튼 아님 → 소비(무동작)
+}
+
+/// 확정해도 되는가 — `notes_must_fit` 상자는 메시지·안내 줄이 지금 레이아웃에 **모두** 잘리지 않고 들어갈 때만(W9c③). 키보드 확정은 `handle`
+/// 이 레이아웃을 모르므로 host 가 이것으로 다시 본다. 그 밖의 상자는 늘 참.
+pub fn confirmAllowed(state: *const State, p: props.ChromeProps, tk: *const tokens.Tokens) bool {
+    if (!state.notes_must_fit) return true;
+    const g = buttonGeom(state, p, tk) orelse return false;
+    return g.complete;
 }
 
 /// 버튼 배경 fill 폭(칸)을 박스 안쪽 우측 끝(right_px)까지로 줄인다 — x 위치에서 cols칸이 안쪽을 넘으면 안 넘게.
@@ -1774,4 +1796,85 @@ test "confirm 안내 줄: 경로 줄은 줄바꿈하지 않고 가운데를 줄�
     try std.testing.expect(found);
     s.show("Again?", .{ .confirm = "Y", .cancel = "N" });
     try std.testing.expectEqual(@as(usize, 0), s.notes.len);
+}
+
+// W9c③: 업로드 확인은 파일을 **모두** 보인다는 것이 동의의 조건이다 — 목록이 상자에 다 들어가지 않으면(줄 상한·창 높이·한 줄의 줄바꿈 상한)
+// 확정 버튼이 눌리지 않아야 한다(보이지 않는 파일에 동의시키지 않는다). 다른 상자는 예전 그대로(잘려도 확정된다).
+test "confirm notes_must_fit: 안내 줄이 다 보이면 확정되고, 낮은 창·줄 상한·긴 한 줄로 잘리면 확정 버튼이 누름을 삼킨다 — show 가 끈다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var notes: [10]Note = undefined;
+    for (&notes, 0..) |*n, i| n.* = .{ .text = if (i % 2 == 0) "1. ~/Downloads/report-final.pdf" else "   binary, 1,234 bytes (PDF)" };
+    var s = State{};
+    s.show("Upload?", .{ .confirm = "Allow", .cancel = "Deny" });
+    s.notes = &notes;
+    s.notes_must_fit = true;
+    // 넉넉하면 다 보이고 확정할 수 있다 — 버튼을 누르면 confirmed.
+    const roomy = testProps(800, 600);
+    try std.testing.expect(confirmAllowed(&s, roomy, &tk));
+    const g = buttonGeom(&s, roomy, &tk).?;
+    try std.testing.expect(g.complete);
+    const cx = @as(f64, @floatFromInt(g.confirm_x)) + 1;
+    const cy = @as(f64, @floatFromInt(modal_box.rowY(g.box, g.confirm_row))) + 1;
+    try std.testing.expectEqual(Action.confirmed, buttonAtPoint(&s, roomy, &tk, cx, cy).?);
+    // 낮은 창 — 안내가 끝부터 줄어 다 보이지 않는다: 확정 버튼의 누름은 삼킨다(null), 취소는 그대로.
+    var h: u32 = 600;
+    var saw_blocked = false;
+    while (h > 96) : (h -= 16) {
+        const p = testProps(800, h);
+        const gg = buttonGeom(&s, p, &tk) orelse break;
+        if (gg.note_rows < notes.len) {
+            saw_blocked = true;
+            try std.testing.expect(!gg.complete and !confirmAllowed(&s, p, &tk));
+            if (gg.confirm_fit > 0) {
+                const x = @as(f64, @floatFromInt(gg.confirm_x)) + 1;
+                const y = @as(f64, @floatFromInt(modal_box.rowY(gg.box, gg.confirm_row))) + 1;
+                try std.testing.expect(buttonAtPoint(&s, p, &tk, x, y) == null);
+            }
+            if (gg.cancel_fit > 0) {
+                const x = @as(f64, @floatFromInt(gg.cancel_x)) + 1;
+                const y = @as(f64, @floatFromInt(modal_box.rowY(gg.box, gg.cancel_row))) + 1;
+                try std.testing.expectEqual(Action.cancelled, buttonAtPoint(&s, p, &tk, x, y).?);
+            }
+        }
+    }
+    try std.testing.expect(saw_blocked);
+    // 같은 낮은 창이어도 목록을 요구하지 않는 상자는 예전 그대로 확정된다.
+    s.notes_must_fit = false;
+    try std.testing.expect(confirmAllowed(&s, testProps(800, 128), &tk));
+    // 한 줄이 줄바꿈 상한을 넘는다(아주 긴 경로) — 줄 수가 남아도 그 줄이 잘렸다.
+    const long_path = "1. /" ++ "a" ** 4000;
+    const one = [_]Note{.{ .text = long_path }};
+    s.show("Upload?", .{ .confirm = "Allow", .cancel = "Deny" });
+    try std.testing.expect(!s.notes_must_fit); // show 가 끈다(앞 상자의 요구가 새 상자에 새지 않게)
+    s.notes = &one;
+    s.notes_must_fit = true;
+    try std.testing.expect(!confirmAllowed(&s, testProps(800, 600), &tk));
+}
+
+test "confirm notes_must_fit: 막힌 확정 버튼은 흐린 글자(muted_fg)로 그린다 — 포커스가 있어도 강조하지 않는다" {
+    const Rgb = @import("../../color.zig").Rgb;
+    const tk = tokens.Tokens{ .palette = std.EnumArray(tokens.ColorRole, Rgb).initFill(.{ .r = 0, .g = 0, .b = 0 }) };
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const long_path = "1. /" ++ "a" ** 4000;
+    const one = [_]Note{.{ .text = long_path }};
+    var s = State{};
+    s.show("Upload?", .{ .confirm = "Allow", .cancel = "Deny" });
+    s.notes = &one;
+    s.notes_must_fit = true;
+    s.focused = .confirm;
+    var out: std.ArrayList(draw.Op) = .empty;
+    try view(&s, testProps(800, 600), &tk, arena, &out);
+    var saw = false;
+    for (out.items) |op| switch (op) {
+        .text => |t| if (std.mem.indexOf(u8, t.runs[0].text, "Allow") != null) {
+            saw = true;
+            try std.testing.expectEqual(tokens.ColorRole.muted_fg, t.role);
+        },
+        .fill => |f| try std.testing.expect(f.role != .focus_accent),
+        else => {},
+    };
+    try std.testing.expect(saw);
 }

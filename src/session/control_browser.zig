@@ -141,6 +141,10 @@ pub const BrowserMethod = enum {
     /// 그 탭 자신의 대화상자, 있으면 grant 가 있는 가족 탭의 그 대화상자. 답해도 되는지(`may_answer`)는 앱이 본다. 파일 선택은 닫기만.
     /// op.arg=`{accept, text?, dialog?}`. **op_kind=26 고정**.
     handle_dialog,
+    /// `browser.upload {id, selector|ref|locator, files:[절대 경로]}`(W9c③ — Chromium 전용) → `{origin, files:[{name,size}]}`. 로케이터가 가리킨
+    /// `<input type=file>` 에 파일을 넣는다. **부를 때마다 확인 모달**(grant·cap 이 있어도 — 기억하지 않는다)이 파일을 모두 보이고, 앱이 파일을 열어
+    /// 승인 뒤에 사본을 만들어 그 사본을 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」). op.arg=`{선택자 필드, files:[…]}`. **op_kind=27 고정**.
+    upload,
 };
 
 /// `parseMethod("browser.navigate").rest`(= "navigate")를 `BrowserMethod`로 매핑한다(순수, 할당 없음). wire 이름은
@@ -174,6 +178,7 @@ pub fn parseBrowserMethod(rest: []const u8) ?BrowserMethod {
     if (eq(rest, "close")) return .close;
     if (eq(rest, "dialog")) return .dialog;
     if (eq(rest, "handleDialog")) return .handle_dialog;
+    if (eq(rest, "upload")) return .upload;
     return null;
 }
 
@@ -207,6 +212,7 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
         .close => "close",
         .dialog => "dialog",
         .handle_dialog => "handleDialog",
+        .upload => "upload",
     };
 }
 
@@ -217,15 +223,15 @@ pub fn browserMethodWireName(m: BrowserMethod) []const u8 {
 pub fn engineSupports(engine: cs.WebEngine, m: BrowserMethod) bool {
     return switch (engine) {
         .webkit => switch (m) {
-            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog => false,
+            .back, .forward, .reload, .hover, .press, .open, .close, .dialog, .handle_dialog, .upload => false,
             else => true,
         },
         // W9 단계마다 여기에 메서드를 더한다 — W9b①a: 진짜 클릭(DevTools 입력)·방문 기록, W9b①b: snapshot·type·scroll·wait·
         // hover·press.
         // W9a①: navigate·getUrl·screenshot, W9a②: executeScript, W9a③: localStorage·쿠키·clearStorage, W9c②: 대화상자 보기·답하기,
-        // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다).
+        // W9c①: console(CEF `on_console_message` — DevTools 를 부르지 않는다). W9c③: 업로드(`DOM.setFileInputFiles` — 매번 확인 모달).
         .chromium => switch (m) {
-            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog => true,
+            .click, .back, .forward, .reload, .snapshot, .console, .type_text, .scroll, .wait, .hover, .press, .open, .close, .navigate, .get_url, .screenshot, .execute_script, .get_cookies, .set_cookie, .delete_cookie, .get_local_storage, .set_local_storage, .remove_local_storage, .clear_storage, .dialog, .handle_dialog, .upload => true,
             else => false,
         },
     };
@@ -769,6 +775,101 @@ pub fn serializeHandleDialogArg(gpa: std.mem.Allocator, p: HandleDialogParams) s
             s.objectField("dialog") catch |e| break :blk e;
             s.write(d) catch |e| break :blk e;
         }
+        s.endObject() catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+/// W9c③: 한 번에 넣는 파일 수 상한(작성자 선택 — 확인 모달이 파일을 모두 보여야 하고, 다 보이지 않으면 허용을 막는다).
+pub const max_upload_files = 10;
+/// 경로 하나의 바이트 상한 — macOS 의 PATH_MAX(1024). 앱이 `realpath` 에 넘길 수 있는 길이다.
+pub const max_upload_path_bytes = 1024;
+
+/// `browser.upload` params(W9c③) — 대상(`selector`·`ref`·`locator` 가운데 하나)과 파일 경로들. 경로는 요청 arena 를 빌린다.
+pub const UploadParams = struct {
+    id: u64,
+    locator: Locator,
+    files: [max_upload_files][]const u8 = undefined,
+    count: usize = 0,
+
+    pub fn paths(self: *const UploadParams) []const []const u8 {
+        return self.files[0..self.count];
+    }
+};
+
+/// 앱에 넘겨도 되는 경로인가 — 절대 경로(`/` 로 시작 — 상대 경로는 Chromium 이 다음 이동에서 렌더러를 죽였다, 계획 실측 k3), PATH_MAX 안,
+/// 올바른 UTF-8, 제어 문자(C0·DEL·C1) 없음(확인 모달에 줄바꿈 같은 글자로 다른 파일처럼 보이게 하지 못하게 — `file_dialog_path` 와 같은 규칙).
+/// 양방향·폭 없는 글자는 받되 모달이 코드로 보인다(`web_upload_display`).
+pub fn uploadPathOk(path: []const u8) bool {
+    if (path.len == 0 or path.len > max_upload_path_bytes or path[0] != '/') return false;
+    const view = std.unicode.Utf8View.init(path) catch return false;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (c < 0x20 or (c >= 0x7f and c <= 0x9f)) return false;
+    return true;
+}
+
+/// 글자만 보고 정규화한 경로(`//`·`.` 를 지우고 `..` 를 앞 이름과 지운다) — 같은 파일을 두 번 적은 것을 L2 에서 거른다(심볼릭 링크로 같은 파일이
+/// 되는 것은 앱이 연 파일의 장치·inode 로 다시 본다). `out` 은 `max_upload_path_bytes` 이상.
+fn lexicalPath(path: []const u8, out: []u8) []const u8 {
+    var n: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, path, '/');
+    while (it.next()) |part| {
+        if (eq(part, ".")) continue;
+        if (eq(part, "..")) {
+            while (n > 0 and out[n - 1] != '/') n -= 1;
+            if (n > 0) n -= 1;
+            continue;
+        }
+        out[n] = '/';
+        @memcpy(out[n + 1 .. n + 1 + part.len], part);
+        n += 1 + part.len;
+    }
+    if (n == 0) {
+        out[0] = '/';
+        n = 1;
+    }
+    return out[0..n];
+}
+
+/// 새 메서드라 키를 엄격히 본다(`open`·`handleDialog` 와 같다). `files` 는 1..10 개의 절대 경로(`uploadPathOk`), 글자로 같은 경로가 둘이면
+/// 거절한다. 대상은 click 과 같은 셋 가운데 하나.
+pub fn parseUploadParams(params: ?std.json.Value) ParamError!UploadParams {
+    const obj = try paramsObject(params);
+    try onlyKeys(obj, &.{ "id", "selector", "ref", "locator", "files" });
+    var r: UploadParams = .{ .id = try idFromObj(obj), .locator = try parseLocator(obj) };
+    const list = switch (obj.get("files") orelse return error.InvalidParams) {
+        .array => |a| a.items,
+        else => return error.InvalidParams,
+    };
+    if (list.len == 0 or list.len > max_upload_files) return error.InvalidParams;
+    var norm: [max_upload_files][max_upload_path_bytes]u8 = undefined;
+    var norms: [max_upload_files][]const u8 = undefined;
+    for (list, 0..) |v, i| {
+        const path = switch (v) {
+            .string => |s| s,
+            else => return error.InvalidParams,
+        };
+        if (!uploadPathOk(path)) return error.InvalidParams;
+        norms[i] = lexicalPath(path, &norm[i]);
+        for (norms[0..i]) |prev| if (eq(prev, norms[i])) return error.InvalidParams;
+        r.files[i] = path;
+    }
+    r.count = list.len;
+    return r;
+}
+
+/// upload op.arg — `{선택자 필드, files:[…]}`(id 는 실행 계층이 op 의 surface_id 로 안다).
+pub fn serializeUploadArg(gpa: std.mem.Allocator, p: UploadParams) std.mem.Allocator.Error![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        s.beginObject() catch |e| break :blk e;
+        writeLocatorFields(&s, p.locator) catch |e| break :blk e;
+        s.objectField("files") catch |e| break :blk e;
+        s.beginArray() catch |e| break :blk e;
+        for (p.paths()) |f| s.write(f) catch |e| break :blk e;
+        s.endArray() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -1902,7 +2003,9 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
                 cp.serializeError(gpa, req.id, .timeout, cp.ErrorCode.timeout.defaultMessage(), null),
             .invalid_params => cp.serializeError(gpa, req.id, .invalid_params, if (result.len > 0) result else "Invalid selector", null),
             .process_exited => cp.serializeError(gpa, req.id, .process_exited, cp.ErrorCode.process_exited.defaultMessage(), null),
-            .unauthorized => cp.serializeError(gpa, req.id, .unauthorized, cp.ErrorCode.unauthorized.defaultMessage(), null),
+            // W9c③: 업로드 확인 모달의 「거부」 는 인가 판정이 아니라 사용자의 답이다 — 무엇을 거절했는지 그대로 싣는다(인가의 균일 글은 존재·이유를
+            // 숨기려는 것이라 여기에는 숨길 것이 없다). 철회·닫힘의 unauthorized 는 글 없이 오므로 균일 글 그대로다.
+            .unauthorized => cp.serializeError(gpa, req.id, .unauthorized, if (bmethod == .upload and result.len > 0) result else cp.ErrorCode.unauthorized.defaultMessage(), null),
             .success => unreachable,
             .failed => cp.serializeError(gpa, req.id, .internal_error, if (result.len > 0) result else if (bmethod == .wait) "browser wait failed" else "browser op failed", null),
         };
@@ -1953,6 +2056,11 @@ pub fn serializeBrowserResponseStatus(gpa: std.mem.Allocator, request_bytes: []c
         .dialog, .handle_dialog => serializeDialogResult(gpa, req.id, bmethod, result) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return cp.serializeError(gpa, req.id, .internal_error, "invalid dialog payload", null),
+        },
+        // W9c③: 앱이 준 `{"origin","files":[{"name","size"}]}` 을 검사해 그 필드만 싣는다.
+        .upload => serializeUploadResult(gpa, req.id, result) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return cp.serializeError(gpa, req.id, .internal_error, "invalid upload payload", null),
         },
         // 로케이터로 기다렸으면 엔진이 `{"ok":true,"matched":{…},"ambiguous"?:true}` 를 준다(W9b②-3).
         .wait => if (result.len > 0 and result[0] == '{')
@@ -2092,6 +2200,47 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
         },
         else => return error.InvalidDialogPayload,
     }
+    return aw.toOwnedSlice();
+}
+
+/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …]}`(파일 1..10 개). 다른 키는 버리고, 모양이 틀리면 거절.
+fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) (std.mem.Allocator.Error || error{InvalidUploadPayload})![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        else => error.InvalidUploadPayload,
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.InvalidUploadPayload;
+    const origin = parsed.value.object.get("origin") orelse return error.InvalidUploadPayload;
+    const files = parsed.value.object.get("files") orelse return error.InvalidUploadPayload;
+    if (origin != .string or files != .array) return error.InvalidUploadPayload;
+    if (files.array.items.len == 0 or files.array.items.len > max_upload_files) return error.InvalidUploadPayload;
+    for (files.array.items) |f| {
+        if (f != .object) return error.InvalidUploadPayload;
+        const name = f.object.get("name") orelse return error.InvalidUploadPayload;
+        const size = f.object.get("size") orelse return error.InvalidUploadPayload;
+        if (name != .string or size != .integer or size.integer < 0) return error.InvalidUploadPayload;
+    }
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
+    (blk: {
+        beginResult(&s, id) catch |e| break :blk e;
+        s.objectField("origin") catch |e| break :blk e;
+        s.write(origin.string) catch |e| break :blk e;
+        s.objectField("files") catch |e| break :blk e;
+        s.beginArray() catch |e| break :blk e;
+        for (files.array.items) |f| {
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("name") catch |e| break :blk e;
+            s.write(f.object.get("name").?.string) catch |e| break :blk e;
+            s.objectField("size") catch |e| break :blk e;
+            s.write(f.object.get("size").?.integer) catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
+        }
+        s.endArray() catch |e| break :blk e;
+        endResult(&s) catch |e| break :blk e;
+    }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
 }
 
@@ -2485,6 +2634,8 @@ pub fn browserOpFromRequest(
             break :blk try gpa.dupe(u8, "");
         },
         .handle_dialog => try serializeHandleDialogArg(gpa, parseHandleDialogParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        // W9c③: 업로드 — `{선택자 필드, files}`. 확인 모달은 실행 계층이 매번 띄운다(여기서 인가된 것은 「그 탭을 다뤄도 된다」 뿐이다).
+        .upload => try serializeUploadArg(gpa, parseUploadParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         .subscribe => unreachable, // 위에서 이미 분기
         .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
@@ -3654,16 +3805,16 @@ test "W9-0: browser.list 는 탭마다 엔진과 그 엔진이 지원하는 메�
     const webkit = arr.items[0].object;
     try testing.expect(webkit.get("controllable").?.bool);
     try testing.expectEqualStrings("webkit", webkit.get("engine").?.string);
-    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog 는 Chromium 전용 — WebKit 은 걷어낼 예정).
-    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 9), webkit.get("methods").?.array.items.len);
+    // WebKit 은 W9 전의 것만(back·forward·reload·hover·press·open·close·dialog·handleDialog·upload 는 Chromium 전용 — WebKit 은 걷어낼 예정).
+    try testing.expectEqual(@as(usize, std.meta.fields(BrowserMethod).len - 10), webkit.get("methods").?.array.items.len);
     try testing.expectEqualStrings("navigate", webkit.get("methods").?.array.items[0].string);
     const chromium = arr.items[1].object;
     try testing.expectEqualStrings("chromium", chromium.get("engine").?.string);
     // W9 단계마다 늘어난다 — W9b①a: 진짜 클릭·방문 기록, W9b①b: snapshot·type·scroll·wait·hover·press(enum 순서).
     const chromium_methods = chromium.get("methods").?.array.items;
     // W9b③: close 는 탭에(그 pane 이 연 탭), open 은 탭에 쓰지 않아 싣지 않는다. W9a①: navigate·getUrl·screenshot.
-    // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console.
-    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog" };
+    // W9a③: 쿠키·localStorage·clearStorage. W9c②: 대화상자 보기·답하기. W9c①: console. W9c③: upload.
+    const want_chromium = [_][]const u8{ "navigate", "getUrl", "executeScript", "getCookies", "screenshot", "setCookie", "deleteCookie", "getLocalStorage", "setLocalStorage", "removeLocalStorage", "clearStorage", "click", "type", "scroll", "wait", "snapshot", "console", "back", "forward", "reload", "hover", "press", "close", "dialog", "handleDialog", "upload" };
     try testing.expectEqual(want_chromium.len, chromium_methods.len);
     for (want_chromium, chromium_methods) |want, got| try testing.expectEqualStrings(want, got.string);
     // 브라우저 탭이 아닌 web 패널은 엔진이 webkit 이어도 메서드가 없다(예전엔 18개를 싣고 승인 뒤 실패했다).
@@ -4860,5 +5011,171 @@ test "W9c②: dialog·handleDialog 결과는 엔진이 준 알려진 필드만 �
         const w = try serializeBrowserResponseStatus(testing.allocator, c.req, .success, c.payload);
         defer testing.allocator.free(w);
         try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+    }
+}
+
+// ── W9c③: 에이전트가 Chromium 탭의 파일 입력칸에 파일을 넣는다(browser.upload) ─────────────────────────────────────────────
+// 이 시험들은 L2 의 몫만 본다 — 메서드 번호(op_kind wire)·엔진 게이트가 확인 모달 **전**에 답하는가·인자 모양·결과 모양. 모달이 매번 뜨는가는
+// 실행 계층(app_host_abi)의 시험이 본다(여기서 인가된 것은 「그 탭을 다뤄도 된다」 뿐이다).
+
+test "W9c③: upload 는 handleDialog 뒤 27 — wire 이름 upload, Chromium 만, browser scope, WebKit·파일 뷰·markdown 은 확인 모달 전에 -32008" {
+    try testing.expectEqual(@as(u8, 27), @as(u8, @intFromEnum(BrowserMethod.upload)));
+    try testing.expectEqual(BrowserMethod.upload, parseBrowserMethod("upload").?);
+    try testing.expectEqualStrings("upload", browserMethodWireName(.upload));
+    try testing.expect(engineSupports(.chromium, .upload));
+    try testing.expect(!engineSupports(.webkit, .upload));
+    try testing.expectEqual(capmod.ScopeClass.browser, capmod.methodRequiredScope("browser.upload").?);
+    var grants: cpg.PaneGrantStore = .{};
+    // pane 이 있고 grant 가 없다 — 지원하는 탭이었다면 확인 모달(needs_grant)을 띄웠을 요청. 인자가 틀려도(파일 없음) 인자를 보기 전에 답한다.
+    for ([_]u64{ 11, 13, 14 }) |tab| for ([_][]const u8{ "\"files\":[\"/tmp/a\"]", "\"files\":[]" }) |files| {
+        const bytes = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{{\"id\":{d},\"selector\":\"#f\",{s}}}}}", .{ tab, files });
+        defer testing.allocator.free(bytes);
+        switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+            .err => |e| {
+                defer testing.allocator.free(e);
+                try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unsupported_by_engine)), try errCode(e));
+            },
+            .op => |op| {
+                testing.allocator.free(op.arg);
+                return error.TestUnexpectedResult;
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    };
+    // grant 없는 Chromium 탭 — 다른 메서드처럼 먼저 탭 권한을 묻는다(그 뒤 업로드 모달이 따로 — 두 모달, 작성자 선택 Q3).
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .needs_grant => |g| {
+            try testing.expectEqual(@as(u64, 12), g.target);
+            try testing.expectEqual(capmod.ScopeClass.browser, g.scope);
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        .err => |e| {
+            testing.allocator.free(e);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "W9c③: upload params — 대상 하나와 1..10 개의 절대 경로, 상대·빈·제어 문자·C1·긴 경로·같은 경로 둘·모르는 키는 invalid_params" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    const ok_cases = [_]struct { bytes: []const u8, arg: []const u8 }{
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a.txt\"]}}", .arg = "{\"selector\":\"#f\",\"files\":[\"/tmp/a.txt\"]}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"ref\":\"n7\",\"files\":[\"/tmp/한.txt\",\"/tmp/invoice\\u202efdp.exe\"]}}", .arg = "{\"ref\":\"n7\",\"files\":[\"/tmp/한.txt\",\"/tmp/invoice\u{202e}fdp.exe\"]}" },
+        .{ .bytes = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"locator\":{\"label\":\"Resume\"},\"files\":[\"/a\",\"/b\"]}}", .arg = "{\"locator\":{\"label\":\"Resume\"},\"files\":[\"/a\",\"/b\"]}" },
+    };
+    for (ok_cases) |c| switch (try dispatchBrowser(testing.allocator, c.bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| {
+            defer testing.allocator.free(op.arg);
+            try testing.expectEqual(BrowserMethod.upload, op.method);
+            try testing.expectEqual(@as(u64, 12), op.surface_id);
+            try testing.expectEqualStrings(c.arg, op.arg);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    // 10 개는 받고 11 개는 거절한다(상한).
+    var ten: std.ArrayList(u8) = .empty;
+    defer ten.deinit(testing.allocator);
+    try ten.appendSlice(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[");
+    for (0..10) |i| try ten.print(testing.allocator, "{s}\"/tmp/f{d}\"", .{ if (i == 0) "" else ",", i });
+    const eleven = try std.fmt.allocPrint(testing.allocator, "{s},\"/tmp/f10\"]}}}}", .{ten.items});
+    defer testing.allocator.free(eleven);
+    try ten.appendSlice(testing.allocator, "]}}");
+    switch (try dispatchBrowser(testing.allocator, ten.items, fx_engine, &.{}, 10, &grants, 0)) {
+        .op => |op| testing.allocator.free(op.arg),
+        else => return error.TestUnexpectedResult,
+    }
+    const long_path = try std.fmt.allocPrint(testing.allocator, "/{s}", .{"a" ** max_upload_path_bytes});
+    defer testing.allocator.free(long_path);
+    const long_req = try std.fmt.allocPrint(testing.allocator, "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{{\"id\":12,\"selector\":\"#f\",\"files\":[\"{s}\"]}}}}", .{long_path});
+    defer testing.allocator.free(long_req);
+    const pre = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,";
+    const bad = [_][]const u8{
+        pre ++ "\"selector\":\"#f\",\"files\":[\"a.txt\"]}}", // 상대 경로 — Chromium 이 렌더러를 죽였다(실측 k3)
+        pre ++ "\"selector\":\"#f\",\"files\":[\"~/a.txt\"]}}",
+        pre ++ "\"selector\":\"#f\",\"files\":[\"file:///tmp/a\"]}}",
+        pre ++ "\"selector\":\"#f\",\"files\":[]}}",
+        pre ++ "\"selector\":\"#f\",\"files\":\"/tmp/a\"}}",
+        pre ++ "\"selector\":\"#f\",\"files\":[\"\"]}}",
+        pre ++ "\"selector\":\"#f\",\"files\":[\"/tmp/a\\nb\"]}}", // 줄바꿈 — 모달에서 다른 파일처럼 보인다
+        pre ++ "\"selector\":\"#f\",\"files\":[\"/tmp/a\\u0085b\"]}}", // C1(NEL)
+        pre ++ "\"selector\":\"#f\",\"files\":[\"/tmp/a\\u007fb\"]}}", // DEL
+        pre ++ "\"selector\":\"#f\",\"files\":[5]}}",
+        pre ++ "\"selector\":\"#f\",\"files\":[\"/tmp/a\",\"/tmp/./a\"]}}", // 같은 경로 둘(글자로 정규화)
+        pre ++ "\"selector\":\"#f\",\"files\":[\"/tmp/x/../a\",\"//tmp/a\"]}}",
+        pre ++ "\"files\":[\"/tmp/a\"]}}", // 대상 없음
+        pre ++ "\"selector\":\"#f\",\"ref\":\"n1\",\"files\":[\"/tmp/a\"]}}", // 대상 둘
+        pre ++ "\"selector\":\"#f\"}}", // 파일 없음
+        pre ++ "\"selector\":\"#f\",\"files\":[\"/tmp/a\"],\"remember\":true}}", // 모르는 키(「기억하기」 같은 것은 없다)
+        eleven,
+        long_req,
+    };
+    for (bad) |bytes| switch (try dispatchBrowser(testing.allocator, bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            std.debug.print("accepted: {s}\n", .{bytes});
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+}
+
+test "W9c③: uploadPathOk·lexicalPath — 절대·UTF-8·제어 문자 없음, 정규화는 // · . · .. 만 글자로" {
+    try testing.expect(uploadPathOk("/a"));
+    try testing.expect(uploadPathOk("/tmp/한 글.txt"));
+    try testing.expect(uploadPathOk("/tmp/a\u{202e}b")); // 양방향 제어는 받는다 — 모달이 코드로 보인다
+    try testing.expect(!uploadPathOk("a"));
+    try testing.expect(!uploadPathOk(""));
+    try testing.expect(!uploadPathOk("/tmp/\x00"));
+    try testing.expect(!uploadPathOk("/tmp/\t"));
+    try testing.expect(!uploadPathOk("/tmp/\xff")); // 깨진 UTF-8
+    try testing.expect(!uploadPathOk("/tmp/\u{9b}x")); // C1 CSI
+    var buf: [max_upload_path_bytes]u8 = undefined;
+    try testing.expectEqualStrings("/tmp/a", lexicalPath("//tmp/./x/../a/", &buf));
+    try testing.expectEqualStrings("/", lexicalPath("/..", &buf));
+    try testing.expectEqualStrings("/a", lexicalPath("/../a", &buf));
+}
+
+test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀리면 internal_error, 거부는 -32002 와 그 글(철회의 unauthorized 는 균일 글)" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}";
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3,\"x\":1}],\"y\":2}");
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}]}") != null);
+    }
+    for ([_][]const u8{
+        "{}",
+        "{\"origin\":\"https://a.test\",\"files\":[]}",
+        "{\"origin\":1,\"files\":[{\"name\":\"a\",\"size\":1}]}",
+        "{\"origin\":\"o\",\"files\":[{\"name\":\"a\",\"size\":-1}]}",
+        "{\"origin\":\"o\",\"files\":[{\"name\":\"a\"}]}",
+        "[",
+    }) |payload| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
+    }
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .unauthorized, "the user declined the upload");
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.unauthorized)), try errCode(w));
+        const m = try errMessage(w);
+        defer testing.allocator.free(m);
+        try testing.expectEqualStrings("the user declined the upload", m);
+    }
+    {
+        // 다른 메서드의 unauthorized 는 글을 받아도 균일 글이다(이유를 흘리지 않는다).
+        const click = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.click\",\"params\":{\"id\":12,\"selector\":\"#b\"}}";
+        const w = try serializeBrowserResponseStatus(testing.allocator, click, .unauthorized, "secret reason");
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "secret reason") == null);
     }
 }

@@ -30,9 +30,16 @@ def main():
     (snapshot / 'web/node_modules').symlink_to(dependency_root / 'web/node_modules', target_is_directory=True)
     debug = snapshot / 'src/platform/macos/app_session/debug_fixtures.zig'
     debug.write_text(debug.read_text() + '\n' + (repo / 'tools/remote-restart-app/observe.zig.inc').read_text())
+    debug.write_text(debug.read_text() + '\n' + (repo / 'tools/remote-restart-app/ended.zig.inc').read_text())
+    backend = snapshot / 'src/platform/macos/session_host/remote_term_backend.zig'
+    backend.write_text(backend.read_text() + '\n' + (repo / 'tools/remote-restart-app/ended_backend.zig.inc').read_text())
     session = snapshot / 'src/platform/macos/app_session.zig'
     session.write_text(replace_once(session.read_text(), '        debug_fixtures.maybeDebugOpenNativeEditor(self);',
         '        debug_fixtures.maybeDebugOpenNativeEditor(self);\n        debug_fixtures.remoteRestartObserve(self);'))
+    session.write_text(replace_once(session.read_text(),
+        '    defer backend.maintenanceEventTick();',
+        '    if (debug_fixtures.remoteEndedBeforeCoordinator(backend)) return .idle;\n'
+        '    defer backend.maintenanceEventTick();'))
     host = snapshot / 'src/platform/macos/MaruAppHost.swift'
     host.write_text(replace_once(host.read_text(), '        maybeRunEditorIMESmoke()\n',
         '        maybeRunEditorIMESmoke()\n        maybeRunRemoteRestart()\n') + '\n' +
@@ -54,7 +61,7 @@ def main():
         (repo / 'tools/remote-restart-app/capture.zig.inc').read_text()))
     subprocess.run(['mise', 'exec', '--', 'zig', 'build', 'macos-app-bundle'], cwd=snapshot, check=True)
     # Bind the result to the injected sources and the exact signed binaries, not just git HEAD.
-    names = ['observe.zig.inc', 'driver.swift.inc', 'notice.zig.inc', 'match.zig.inc', 'capture.zig.inc']
+    names = ['observe.zig.inc', 'driver.swift.inc', 'notice.zig.inc', 'match.zig.inc', 'capture.zig.inc', 'ended.zig.inc', 'ended_backend.zig.inc']
     binaries = ['maru', 'maru-macos-app']
     manifest = {
         'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip(),

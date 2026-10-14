@@ -277,9 +277,10 @@ def replay_boundary_probe(peer, remote, sshconfig, alias):
         proc.stdout.close(); proc.stderr.close(); reader.join(timeout=1)
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--gui-providers',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--gui-app');ap.add_argument('--gui-output');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--gui-providers',action='store_true');ap.add_argument('--gui-runtime-ended',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--gui-app');ap.add_argument('--gui-output');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
     if bool(args.gui_app) != bool(args.gui_output): ap.error('--gui-app and --gui-output must be supplied together')
     if args.gui_providers and not (args.gui_app and args.providers): ap.error('--gui-providers requires --gui-app, --gui-output and --providers')
+    if args.gui_runtime_ended and (not args.gui_app or args.gui_providers): ap.error('--gui-runtime-ended requires --gui-app/--gui-output and excludes --gui-providers')
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
     provider_paths=[shutil.which(name) or '' for name in ['claude','codex']] if args.providers else ['', '']
     if args.providers:assert all(provider_paths),'installed Claude/Codex required'
@@ -405,7 +406,7 @@ if (root/"automatic-hold").exists():
                     spec = importlib.util.spec_from_file_location('remote_restart_gui', module_path)
                     gui = importlib.util.module_from_spec(spec); spec.loader.exec_module(gui)
                     assert args.gui_output, '--gui-output required for GUI evidence'
-                    gui.probe(args.gui_app, cli, root, remote, sshconfig, alias, env, emit_offline_hooks, args.gui_output, providers=args.gui_providers)
+                    gui.probe(args.gui_app, cli, root, remote, sshconfig, alias, env, emit_offline_hooks, args.gui_output, providers=args.gui_providers, runtime_ended=args.gui_runtime_ended)
                 if args.automatic and tag == 'allowed':
                     automatic_wrapper_probe(cli, root, remote, sshconfig, alias, env, trace)
                 if args.terminal_cancel and tag == 'allowed':

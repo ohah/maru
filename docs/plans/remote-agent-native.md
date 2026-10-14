@@ -382,3 +382,16 @@ stdin timeout으로 foreground runtime이 끝난 실패에서는 host의 `remove
 실패로 남긴다. 부분 전송 보호와 stream 계수·신원 불일치를 축소 재현에서 구분한다.
 기존 frame/incident 권한 계약을 대조하기 전에는
 integrity 보호를 끄거나 임의의 재접속 성공으로 처리하지 않는다.
+
+### Runtime 종료·observer 거부 GUI 회귀 검증
+
+제품 수정 #4448의 다음 검증은 실제 GUI coordinator를 통과한다. 별도 소스 복사본에서만
+테스트 소유 연결에 실제 `shutdown`을 실행하고, replacement 게시 후 observer 준비 직전에
+짧게 대기한다. 외부 CLI `runtime end --yes`로 동일 runtime을 종료한 뒤 대기를 해제한다.
+daemon의 실제 거부 응답, `candidate_rejected` 관측, canonical terminal 로그, 앱 생존과
+정상 Quit을 요구한다. job·seal·응답을 직접 바꾸거나 제품의 integrity 보호를 끄지 않는다.
+이 fault injection은 연결 종료의 원인 자체나 PartialFrame 정책을 재현했다는 증거는 아니다.
+
+`--gui-runtime-ended`는 provider 턴·정상 복원과 독립된 opt-in 시나리오다. marker 순서,
+다른 host/runtime, 거부 누락, terminal summary 누락, exit 86, 미처리 fault를 음성 판정으로
+검증한다. GUI·host·SSH namespace는 기존 검증과 같이 격리하고 이미지·로그는 커밋하지 않는다.

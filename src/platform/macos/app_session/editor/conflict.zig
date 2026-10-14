@@ -237,5 +237,6 @@ pub fn reloadFailureNoticeKey(e: editor_ops.OpenFileError) maru.i18n.Key {
         error.NotUtf8 => .editor_reload_not_text,
         error.TooLarge => .editor_reload_too_large,
         error.OutOfMemory => .editor_reload_failed,
+        error.MutationPending => .fp_root_busy_retry,
     };
 }

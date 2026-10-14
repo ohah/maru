@@ -13,6 +13,10 @@ const Request = struct {
     id: u64,
     epoch: u64,
     prepared: local.Prepared,
+    hold: ?u64 = null,
+    destination: ?[]u8 = null,
+    destination_parent: ?maru.session.editor.save_as_reservation.FileIdentity = null,
+    forced_failure: ?anyerror = null,
     fn target(self: *const Request) ops.Target {
         return targetOf(&self.prepared, self.epoch);
     }
@@ -43,7 +47,7 @@ pub const Queue = struct {
     pub fn requestCount(self: *const Queue) usize {
         return self.waiting.items.len + @intFromBool(self.running != null);
     }
-    fn duplicate(self: *const Queue, prepared: *const local.Prepared, epoch: u64) ?u64 {
+    fn duplicate(self: *const Queue, prepared: *const local.Prepared, epoch: u64, hold: ?u64) ?u64 {
         const target = targetOf(prepared, epoch);
         var i = self.waiting.items.len;
         while (i > 0) {
@@ -51,37 +55,87 @@ pub const Queue = struct {
             const entry = &self.waiting.items[i];
             if (ops.sameDocument(target.token, entry.target().token)) {
                 // A→B→A는 마지막 A를 첫 A에 합치면 안 된다. 같은 대상의 가장 최근 요청만 본다.
-                return if (ops.sameRequest(target, prepared.bytes, prepared.expected_disk, entry.target(), entry.prepared.bytes, entry.prepared.expected_disk)) entry.id else null;
+                return if (entry.hold == hold and ops.sameRequest(target, prepared.bytes, prepared.expected_disk, entry.target(), entry.prepared.bytes, entry.prepared.expected_disk)) entry.id else null;
             }
         }
-        if (self.running) |running| if (ops.sameRequest(target, prepared.bytes, prepared.expected_disk, running.target, running.raw, running.before)) return running.id;
+        if (hold == null) if (self.running) |running| if (ops.sameRequest(target, prepared.bytes, prepared.expected_disk, running.target, running.raw, running.before)) return running.id;
         return null;
     }
     /// 성공(합류 포함) 때만 자료를 소비한다. 한도/OOM/ID 실패에서는 caller가 그대로 소유한다.
     /// 자료는 이 큐와 같은 allocator로 준비한다. 한도 값은 상위 actor가 정하며 제품 기본값은 없다.
     pub fn enqueue(self: *Queue, prepared: *local.Prepared, epoch: u64) !Admission {
+        return self.enqueueImpl(prepared, epoch, null, null);
+    }
+    /// 접수한 snapshot/receipt는 실제 큐에 남긴다. Save As 결과 전에는 실행하지 않는다.
+    pub fn enqueueHeld(self: *Queue, prepared: *local.Prepared, epoch: u64, hold: u64, destination: []const u8) !Admission {
+        return self.enqueueImpl(prepared, epoch, hold, destination);
+    }
+    fn enqueueImpl(self: *Queue, prepared: *local.Prepared, epoch: u64, hold: ?u64, destination: ?[]const u8) !Admission {
         if (!ops.writable(prepared.written, prepared.finished)) return error.InvalidPhase;
         if (prepared.identity == null) return error.MissingIdentity;
-        if (prepared.expected_disk == null) return error.MissingBaseline;
-        if (self.duplicate(prepared, epoch)) |id| {
+        if (prepared.expected_disk == null and hold == null) return error.MissingBaseline;
+        if (self.duplicate(prepared, epoch, hold)) |id| {
             prepared.deinit(self.a);
             return .{ .id = id, .joined = true };
         }
-        const cost = std.math.add(usize, prepared.bytes.len, prepared.path.len) catch return error.TooLarge;
+        const base_cost = std.math.add(usize, prepared.bytes.len, prepared.path.len) catch return error.TooLarge;
+        const cost = std.math.add(usize, base_cost, if (destination) |path| path.len else 0) catch return error.TooLarge;
         if (self.requestCount() >= self.limits.requests) return error.QueueFull;
         if (cost > self.limits.bytes -| self.charged_bytes) return error.TooLarge;
         if (self.next_id == std.math.maxInt(u64)) return error.IdExhausted;
         try self.waiting.ensureUnusedCapacity(self.a, 1);
+        const next_path = if (destination) |path| try self.a.dupe(u8, path) else null;
         const id = self.next_id;
-        self.waiting.appendAssumeCapacity(.{ .id = id, .epoch = epoch, .prepared = prepared.* });
+        self.waiting.appendAssumeCapacity(.{ .id = id, .epoch = epoch, .prepared = prepared.*, .hold = hold, .destination = next_path });
         prepared.* = undefined;
         self.next_id += 1;
         self.charged_bytes += cost;
         return .{ .id = id, .joined = false };
     }
+    fn runnable(self: *const Queue) ?usize {
+        for (self.waiting.items, 0..) |entry, i| if (entry.hold == null) return i;
+        return null;
+    }
     pub fn nextTarget(self: *const Queue) ?ops.Target {
-        if (self.waiting.items.len == 0) return null;
-        return self.waiting.items[0].target();
+        const i = self.runnable() orelse return null;
+        return self.waiting.items[i].target();
+    }
+    pub fn nextRequestId(self: *const Queue) ?u64 {
+        const i = self.runnable() orelse return null;
+        return self.waiting.items[i].id;
+    }
+    pub fn isHeld(self: *const Queue, id: u64) bool {
+        for (self.waiting.items) |entry| if (entry.id == id) return entry.hold != null;
+        return false;
+    }
+    /// 필수 경로 복사는 등록 때 확보한다. 정산 중에는 할당하지 않는다.
+    pub fn releaseHeld(self: *Queue, hold: u64, live: ?ops.Target, success: bool, disk_hash: ?u64) void {
+        for (self.waiting.items) |*entry| {
+            if (entry.hold != hold) continue;
+            const destination = entry.destination.?;
+            const valid = if (live) |target| blk: {
+                if (success) break :blk ops.sameDocument(entry.target().token, target.token) and
+                    target.epoch == entry.epoch +| 1 and std.mem.eql(u8, destination, target.token.path);
+                break :blk entry.target().matches(target);
+            } else false;
+            if (valid and disk_hash != null) {
+                entry.prepared.expected_disk = disk_hash;
+                entry.prepared.expected_parent = if (success) entry.destination_parent else null;
+                if (success) {
+                    self.charged_bytes -= entry.prepared.path.len;
+                    self.a.free(entry.prepared.path);
+                    entry.prepared.path = destination;
+                    entry.epoch = live.?.epoch;
+                    entry.destination = null;
+                }
+            } else entry.forced_failure = error.WriteFailed;
+            if (entry.destination) |path| {
+                self.charged_bytes -= path.len;
+                self.a.free(path);
+                entry.destination = null;
+            }
+            entry.hold = null;
+        }
     }
     fn descriptor(entry: *const Request) Running {
         return .{ .id = entry.id, .target = entry.target(), .raw = entry.prepared.bytes, .before = entry.prepared.expected_disk, .cost = entry.prepared.bytes.len + entry.prepared.path.len };
@@ -92,14 +146,18 @@ pub const Queue = struct {
     }
     fn startImpl(self: *Queue, live: ops.Target, gate: if (builtin.is_test) ?*worker.TestGate else void) !void {
         if (self.running != null) return error.Busy;
-        if (self.waiting.items.len == 0) return error.Empty;
-        const first = &self.waiting.items[0];
+        const i = self.runnable() orelse return error.Empty;
+        const first = &self.waiting.items[i];
+        if (first.forced_failure) |failure| {
+            try self.failNext(failure);
+            return;
+        }
         if (!first.target().matches(live)) return error.StaleTarget;
         const running = descriptor(first);
         if (builtin.is_test) {
             if (gate) |g| try self.service.startBlockedForTest(&first.prepared, g) else try self.service.start(&first.prepared);
         } else try self.service.start(&first.prepared);
-        _ = self.waiting.orderedRemove(0);
+        _ = self.waiting.orderedRemove(i);
         self.running = running;
     }
     pub fn startBlockedForTest(self: *Queue, live: ops.Target, gate: *worker.TestGate) !void {
@@ -114,8 +172,8 @@ pub const Queue = struct {
     /// 이미 시작된 쓰기는 이 함수로 취소하지 않는다.
     pub fn failNext(self: *Queue, failure: anyerror) !void {
         if (self.running != null) return error.Busy;
-        if (self.waiting.items.len == 0) return error.Empty;
-        const first = self.waiting.orderedRemove(0);
+        const i = self.runnable() orelse return error.Empty;
+        const first = self.waiting.orderedRemove(i);
         self.running = descriptor(&first);
         self.outcome = .{ .id = first.id, .epoch = first.epoch, .prepared = first.prepared, .failure = failure };
     }
@@ -168,7 +226,10 @@ pub const Queue = struct {
     pub fn deinit(self: *Queue) void {
         self.service.deinit(self.a);
         if (self.outcome) |*outcome| outcome.prepared.deinit(self.a);
-        for (self.waiting.items) |*entry| entry.prepared.deinit(self.a);
+        for (self.waiting.items) |*entry| {
+            entry.prepared.deinit(self.a);
+            if (entry.destination) |path| self.a.free(path);
+        }
         self.waiting.deinit(self.a);
         self.* = undefined;
     }

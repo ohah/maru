@@ -69,6 +69,7 @@ pub const State = struct {
 /// (`format.saveCommand` — 그쪽이 포맷 여부와 저장을 정한다). 같은 문서가 이미 이 단계면 무동작(시한 안에 끝난다); 다른 문서가 이
 /// 단계면 그 문서의 남은 kind 를 건너뛰고 포맷·저장으로 먼저 보낸다(자리가 하나다 — 누른 저장을 잃지 않는다).
 pub fn saveCommand(self: *AppSession, term: *Term) void {
+    if (@import("save/as.zig").deferCommand(self, term)) return;
     const st = &self.editor_save_actions;
     if (st.active) {
         if (st.surface == term.surface.id) return;

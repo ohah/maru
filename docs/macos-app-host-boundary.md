@@ -211,3 +211,13 @@ GUI 실행(Dock·Finder)의 stderr 는 `/dev/null` 이라 진단이 통째로 �
 ## 남은 한계
 
 app shell은 제품 앱 loop와 Zig shell surface/frame loop를 함께 실행하고, `MaruMetalTerminalView`가 AppKit/Metal UI를 그리며 key/resize/close event를 Zig app session ABI로 내려보낸다. `zig build macos-app-bundle`은 표준 메뉴바와 `.app` bundle에 Info.plist·CLI·web/font resources를 패키징하며 Developer ID 배포는 [distribution.md]의 서명·공증 경로를 쓴다. `install_cli`는 command catalog·팔릿에서 `~/.local/bin/maru` symlink를 설치한다. 자동 smoke가 보장하는 범위와 실제 사용자 조작·firstResponder·Gatekeeper gate는 [검증 매트릭스](verification-matrix.md)가 소유한다.
+
+### 편집기 Save As 대화상자 요청
+
+`maru_macos_app_session_editor_save_as_take`는 caller가 소유하는 path 버퍼와 요청 ID
+출력을 받는다. 복사 성공 시 반환 길이만큼 UTF-8 경로가 유효하며 NUL은 추가하지 않는다.
+버퍼가 작거나 입력이 조합 중이면 0을 반환하고 요청을 소비하지 않는다.
+`maru_macos_app_session_editor_save_as_reply`는 같은 session과 요청 ID, UTF-8 경로
+bytes를 받는다. 길이 0은 패널 취소다. Zig가 borrowed 버퍼를 보관하지 않는다.
+늦은/중복 callback과 다른 창, 닫힌 문서, 달라진 대상 epoch는 경로 전환에 적용하지 않는다.
+Swift는 현재 창의 NSSavePanel만 소유하고, 실제 저장/문서 바인딩은 Zig actor가 소유한다.

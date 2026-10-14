@@ -8336,19 +8336,7 @@ pub fn saveFailureNoticeKey(e: AppSession.FilePanelWriteError) maru.i18n.Key {
 /// 사용자가 못 본 파일이 사라진다 — 그 틈을 커널이 막게 한다(`O_EXCL`). 이미 있으면 거짓이고,
 /// 호출자는 그것을 「그 사이에 생겼다」로 읽는다.
 pub fn createDocumentBytes(self: *AppSession, path: []const u8, bytes: []const u8) AppSession.FilePanelWriteError!void {
-    var pinned = file_panel_ops.openPinnedFilePanelParent(self.io, path) catch return error.NotFound;
-    defer pinned.dir.close(self.io);
-    // **배타 생성이 실패하면 「그 사이에 생겼다」다** — 그 사실을 `ExternalConflict` 로 올린다(그 낱말이
-    // 뜻하는 것이 바로 「내가 보지 않은 변화가 디스크에 있다」이고, 덮어쓰기 CAS 가 같은 이름을 쓴다).
-    var file = pinned.dir.createFile(self.io, pinned.basename, .{ .exclusive = true }) catch |e| switch (e) {
-        error.PathAlreadyExists => return error.ExternalConflict,
-        else => return error.WriteFailed,
-    };
-    defer file.close(self.io);
-    var write_buf: [64 * 1024]u8 = undefined;
-    var w = file.writer(self.io, &write_buf);
-    w.interface.writeAll(bytes) catch return error.WriteFailed;
-    w.interface.flush() catch return error.WriteFailed;
+    return @import("local_save.zig").createBytes(self.io, path, bytes);
 }
 
 /// `expect_disk` 는 **「연 뒤(또는 마지막 저장 뒤) 파일이 그대로인가」**를 묻는 지문이다(§3.9d).
@@ -66487,4 +66475,132 @@ test "save receipt 잘못된 승인과 중복 완료는 결과를 바꾸지 않�
     abandoned.deinit();
     try testing.expect(pending.result == .failed and pending.result.failed == error.WriteFailed);
     try testing.expectEqual(@as(usize, 1), pending.references);
+}
+
+// Save As 전용 준비 자료는 실제 디스크와 모델 경계로 대조한다. UI 연결의 증거는 아니다.
+test "SASWRITE 새 파일 worker는 추가 편집과 Undo를 보존하고 실제 성공 뒤 경로를 바꾼다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "foo");
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    var request = try @import("save/destination.zig").Prepared.init(testing.allocator, t, path, .absent);
+    defer request.deinit(testing.allocator);
+    try testing.expect(!request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+    var service = @import("save/worker.zig").Service.init(testing.allocator);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer {
+        gate.set();
+        service.deinit(testing.allocator);
+    }
+    try service.startBlockedForTest(&request.work.?, &gate);
+    request.work = null;
+    t.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, t, "x"));
+    const undo_count = t.rt.editorDocument().history.undo_len;
+    try testing.expect(!request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+    gate.set();
+    const result = try awaitLocalSaveForTest(&service);
+    request.work = result.prepared;
+    try testing.expect(result.failure == null);
+    try testing.expect(request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+    try testing.expect(!request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+    try testing.expectEqualStrings(path, t.rt.editorDocument().path.?);
+    try testing.expectEqualStrings("foox", t.rt.editorDocument().opened.?.file.content);
+    try testing.expectEqual(undo_count, t.rt.editorDocument().history.undo_len);
+    try testing.expect(isDirty(t));
+    try batchApplyDisk(&fx, "source.txt", "foo");
+    try batchApplyDisk(&fx, "destination.txt", "foo");
+}
+
+test "SASWRITE 새 파일 생성 경쟁과 기존 대상 CAS 실패는 원본 모델을 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |existing| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        const t = try undoFixture(&fx, testing.allocator, "source.txt", "foo");
+        const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+        defer testing.allocator.free(path);
+        var request = try @import("save/destination.zig").Prepared.init(testing.allocator, t, path, if (existing) .{ .existing = contentHash("old") } else .absent);
+        defer request.deinit(testing.allocator);
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "destination.txt", .data = "external" });
+        try testing.expectError(error.ExternalConflict, request.work.?.write(testing.io));
+        try testing.expect(!request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+        try testing.expectEqualStrings("foo", t.rt.editorDocument().opened.?.file.content);
+        try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "source.txt"));
+        try batchApplyDisk(&fx, "destination.txt", "external");
+    }
+}
+
+test "SASWRITE 대상 epoch 변경은 실제 쓰기 뒤에도 낡은 경로 전환을 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "foo");
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    var request = try @import("save/destination.zig").Prepared.init(testing.allocator, t, path, .absent);
+    defer request.deinit(testing.allocator);
+    try request.work.?.write(testing.io);
+    t.rt.editorDocument().invalidateSaveTarget();
+    try testing.expect(!request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+    try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "source.txt"));
+    try batchApplyDisk(&fx, "destination.txt", "foo");
+}
+
+test "SASWRITE 기존 대상 성공은 BOM과 원본 파일을 보존하며 논리 저장 기준을 갱신한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "foo\r\n");
+    t.rt.editorDocument().opened.?.file.format.has_bom = true;
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "destination.txt", .data = "old" });
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    var request = try @import("save/destination.zig").Prepared.init(testing.allocator, t, path, .{ .existing = contentHash("old") });
+    defer request.deinit(testing.allocator);
+    try request.work.?.write(testing.io);
+    try testing.expect(request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+    try testing.expect(!isDirty(t));
+    try batchApplyDisk(&fx, "source.txt", "foo\r\n");
+    try batchApplyDisk(&fx, "destination.txt", "\xef\xbb\xbffoo\r\n");
+}
+
+test "SASWRITE 모든 준비 할당 실패는 경로 본문 Undo와 디스크를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "foo");
+    t.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, t, "!"));
+    const history = t.rt.editorDocument().history.undo_len;
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    for (0..5) |index| {
+        var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = index });
+        try testing.expectError(if (index < 2) error.WriteFailed else error.OutOfMemory, @import("save/destination.zig").Prepared.init(failing.allocator(), t, path, .absent));
+        try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "source.txt"));
+        try testing.expectEqualStrings("foo!", t.rt.editorDocument().opened.?.file.content);
+        try testing.expectEqual(history, t.rt.editorDocument().history.undo_len);
+    }
+    try batchApplyDisk(&fx, "source.txt", "foo");
+    try testing.expectError(error.FileNotFound, fx.dir.dir.openFile(testing.io, "destination.txt", .{}));
+}
+
+test "SASWRITE 다른 문서의 lease와 같은 경로 등록을 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "foo");
+    const other = try undoFixture(&fx, testing.allocator, "other.txt", "other");
+    try testing.expectError(error.SamePath, @import("save/destination.zig").Prepared.init(testing.allocator, t, t.rt.editorDocument().path.?, .absent));
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    var request = try @import("save/destination.zig").Prepared.init(testing.allocator, t, path, .absent);
+    defer request.deinit(testing.allocator);
+    try request.work.?.write(testing.io);
+    try testing.expect(!request.adopt(testing.allocator, other.rt.editor_document_lease.?));
+    try testing.expectEqualStrings("other", other.rt.editorDocument().opened.?.file.content);
+    try testing.expect(request.adopt(testing.allocator, t.rt.editor_document_lease.?));
 }

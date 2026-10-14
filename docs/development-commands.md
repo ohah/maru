@@ -1569,3 +1569,7 @@ workspace restore, OS 알림 배너를 검사하는 gate와는 구분한다.
 OS/I/O 없는 상태 전이를 검사한다. `python3 tools/test-editor-save-as-policy.py`는
 격리 사본의 결함 주입과 정상/복원 대조군을 실행한다. 실제 파일 쓰기·UI는 미연결이며
 [계획](plans/editor-save-as.md)의 남은 경계를 따른다.
+
+`mise exec -- zig build test-editor-save-as-write test-editor-local-save test-editor-untitled`
+(Debug/ReleaseFast)는 새 대상 writer·모델 전환 기반과 기존 쓰기 경로를 검사한다.
+`python3 tools/test-editor-save-as-write-adversarial.py`는 격리 사본의 실제 쓰기·전환 결함과 정상/복원 대조군을 대조한다. 제품 UI 연결의 검증은 아니다.

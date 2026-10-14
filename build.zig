@@ -5777,6 +5777,15 @@ pub fn build(b: *std.Build) void {
     const run_local_save = b.addRunArtifact(local_save_tests);
     run_local_save.setCwd(b.path("."));
     run_local_save.addArg("--maru-expect-tests=28");
+    const destination_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.SASWRITE "} });
+    const run_destination = b.addRunArtifact(destination_tests);
+    run_destination.setCwd(b.path("."));
+    run_destination.addArg("--maru-expect-tests=10");
+    b.step("test-editor-save-as-write", "Run Save As destination writer and model transition tests").dependOn(&run_destination.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_destination.addArg("--maru-expect-passed=10");
+        macos_only_test_step.dependOn(&run_destination.step);
+    }
     const local_save_step = b.step("test-editor-local-save", "Run local save preparation and completion judges");
     local_save_step.dependOn(&run_local_save.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) {

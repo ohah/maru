@@ -66,7 +66,7 @@ fn classifyFile(name: []const u8) IconKind {
     if (anyName(name, &.{ "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "cargo.toml", "cargo.lock", "build.zig.zon", "composer.json", "gemfile" })) return .package;
     if (anyName(name, &.{ "dockerfile", "makefile", "justfile", "cmakelists.txt", ".editorconfig" })) return .config;
     const ext = extension(name) orelse return .file;
-    if (anyName(ext, &.{ "zig", "c", "h", "cc", "cpp", "cxx", "hpp", "m", "mm", "swift", "rs", "go", "java", "kt", "kts", "py", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "ps1", "sql" })) return .code;
+    if (anyName(ext, &.{ "zig", "c", "h", "cc", "cpp", "cxx", "hpp", "m", "mm", "swift", "rs", "go", "java", "kt", "kts", "py", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "ps1", "sql", "dart" })) return .code;
     if (anyName(ext, &.{ "js", "jsx", "mjs", "cjs" })) return .js;
     if (anyName(ext, &.{ "ts", "tsx", "mts", "cts" })) return .ts;
     if (anyName(ext, &.{ "html", "htm", "vue", "svelte", "astro" })) return .markup;
@@ -162,6 +162,9 @@ test "file tree icon: directory semantic groups and open fallback" {
 
 test "file tree icon: extension groups are ASCII-insensitive with generic fallback" {
     try std.testing.expectEqual(IconKind.code, classify(.file, "main.ZIG", false));
+    // 편집기가 문법을 싣는 언어는 코드 아이콘이다 — Dart 만 빠져 일반 파일 아이콘이었다(번들 언어 확대 BL3 적대적 3회차).
+    try std.testing.expectEqual(IconKind.code, classify(.file, "main.dart", false));
+    try std.testing.expectEqual(IconKind.code, classify(.file, "schema.sql", false));
     try std.testing.expectEqual(IconKind.ts, classify(.file, "view.TSX", false));
     try std.testing.expectEqual(IconKind.document, classify(.file, "README.md", false));
     try std.testing.expectEqual(IconKind.image, classify(.file, "logo.SVG", false));

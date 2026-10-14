@@ -395,3 +395,9 @@ daemon의 실제 거부 응답, `candidate_rejected` 관측, canonical terminal 
 `--gui-runtime-ended`는 provider 턴·정상 복원과 독립된 opt-in 시나리오다. marker 순서,
 다른 host/runtime, 거부 누락, terminal summary 누락, exit 86, 미처리 fault를 음성 판정으로
 검증한다. GUI·host·SSH namespace는 기존 검증과 같이 격리하고 이미지·로그는 커밋하지 않는다.
+
+검증 결과는 정상 Quit 뒤 최종 로그를 다시 확인하고 모든 소유 자원을 정리한 뒤에만 쓴다.
+진단 저장·한 소유자의 정리 실패도 나머지 정리를 생략하지 않으며 실패하면 성공 결과를
+게시하지 않는다. 원본 빌드뿐 아니라 재사용된 staged bundle의 GUI·CLI 해시도 실행 전에
+대조한다. CLI 종료 응답 이후 실제 runtime 목록이 비었는지를 observer 거부의 독립 증거로
+확인한다. 순수 로그 판정과 실제 제어 프로세스의 정리 검사는 GUI 실행 증거와 구분한다.

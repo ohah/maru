@@ -1,5 +1,6 @@
 """Exercise ownership fences on actual controlled process identities, without a GUI job."""
 import os
+import hashlib
 from pathlib import Path
 import subprocess
 import sys
@@ -89,6 +90,17 @@ class OwnershipTests(unittest.TestCase):
         self.app.pid
         self.app.kill()
         self.assertEqual(self.process.wait(timeout=5),-9)
+
+    def test_staged_cli_drift_is_rejected_before_gui_launch(self):
+        staged = self.output / 'maru-macos-app'
+        staged.write_bytes(b'expected-gui')
+        (self.output / 'maru').write_bytes(b'foreign-cli')
+        expected = { 'maru-macos-app': hashlib.sha256(b'expected-gui').hexdigest(),
+                     'maru': hashlib.sha256(b'expected-cli').hexdigest() }
+        with patch('gui_launch.stage_app', return_value=staged), patch('gui_launch.subprocess.run') as launch:
+            with self.assertRaisesRegex(RuntimeError, 'staged GUI binary differs.*maru'):
+                GUIApp(staged, {}, self.output, expected_binaries=expected)
+            launch.assert_not_called()
 
 
 if __name__ == '__main__': unittest.main()

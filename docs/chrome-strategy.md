@@ -252,6 +252,11 @@ Metal cell lowerer의 lowering 로직 = 현재 `sentinelBgCell`/`appendVerticalL
 **패널마다 패딩**(2026-10-10). 패널(draw 의 첫 둥근 quad)이 rich lowering 에서 사방으로 커지는 폭은 기본이 토큰 `modal_padding_px`(12 — 메뉴·확인창·호버)이고,
 컴포넌트가 `Quad.panel_padding_px` 로 정하면 그 값이다(그림·그림자·앞 오버레이 가림이 함께 쓴다 — 보이는 사각형은 `draw.Op.Quad.panelRect` 하나이고 macOS `metal_lowering` 과 Windows 확인 모달(`chrome.solid_rects.flattenModal`)이 같이 부른다). 촘촘한 목록(자동완성)은
 테두리 폭만 준다(VS Code 처럼 행이 테두리에 붙는다). **배치(`visible_outset_px`)·포인터 판정에도 같은 값**을 줘야 보이는 패널과 판정이 한 레이아웃이다.
+포인터 판정은 그 패널 quad 의 `draw.Op.Quad.visibleRect`(둥글면 `panelRect`, 모서리 0 이면 셀 배경이라 `rect` 그대로)로 **안·패딩 띠·밖** 셋을 가른다 —
+「밖」만 닫고, 띠는 패널 배경이라 소비만 한다(행·버튼으로 새지 않는다). 키우기 전 상자로 「밖」을 재면 보이는 패널 안쪽 가장자리를 눌러도 닫혔다
+(2026-10-14·15 — 확인 모달 `modal_box.visibleRect` · 설정 창 · 알림 `hitTest` 의 `.background` · 우클릭 메뉴와 보내기 도우미 `context_menu.contains` ·
+팔레트를 빌려 그리는 심볼·신뢰·복구 피커 `palette.panelHit`). 그리는 quad 와 판정이 같은 함수(`panelQuad`·`frameQuad`)에서 나온다.
+판정자: 각 컴포넌트의 「패딩 띠」 테스트 · `app_session` 「보이는 패널 안쪽 가장자리를 눌러도 …닫히지 않는다」 · `NSH 보이는 상자의 패딩 띠`.
 판정자: `ML6`(목록 1 · 찾기 막대 12 가 한 프레임에) · `SGB4`.
 Zig엔 trait가 없으니 **계약은 컨벤션**(각 컴포넌트 모듈이 같은 4개를 노출)이고 `ChromeHost`가 명시 호출한다(vtable 없음 — 컴파일타임 고정 집합, 기존 `self.palette`/`self.find` 패턴 그대로). 선례 = `FindState`/`PaletteState`.
 

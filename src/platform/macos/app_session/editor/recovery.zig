@@ -112,22 +112,20 @@ pub fn accept(self: *AppSession) void {
 
 /// 렌더와 같은 창 시작·셀 크기로 행을 선택한다. 바깥 클릭은 원본을 소비하지 않고 닫는다.
 pub fn click(self: *AppSession, x: f64, y: f64) void {
-    const layout = chrome.components.overlay_input.panelLayout(self.buildChromeProps()) orelse return;
+    const props = self.buildChromeProps();
+    const layout = chrome.components.overlay_input.panelLayout(props) orelse return;
     const total = self.editor_recovery.shown.items.len;
     const count = @min(total, chrome.components.palette.max_visible);
-    const left: f64 = @floatFromInt(layout.x);
-    const top: f64 = @floatFromInt(layout.y);
-    if (x < left or x >= left + @as(f64, @floatFromInt(layout.panel_cols * layout.cw)) or
-        y < top or y >= top + @as(f64, @floatFromInt((count + 1) * layout.ch)))
-    {
-        closed(self);
-        return;
+    // 보이는 패널 밖이면 닫고, 패딩 띠·프롬프트 줄은 소비만 한다(`palette.panelHit` — 그리는 상자와 같은 출처).
+    switch (chrome.components.palette.panelHit(props, count, x, y) orelse return) {
+        .outside => closed(self),
+        .panel => {},
+        .row => |row| {
+            const start = @min(self.editor_recovery.scroll.offset_y_px / layout.ch, total -| count);
+            self.chrome_host.recovery_picker.selected = start + row;
+            accept(self);
+        },
     }
-    const row: usize = @intFromFloat((y - top) / @as(f64, @floatFromInt(layout.ch)));
-    if (row == 0) return;
-    const start = @min(self.editor_recovery.scroll.offset_y_px / layout.ch, total -| count);
-    self.chrome_host.recovery_picker.selected = start + row - 1;
-    accept(self);
 }
 
 pub fn rows(self: *AppSession, arena: std.mem.Allocator) ![]chrome.components.palette.Row {

@@ -152,6 +152,44 @@ pub fn caretRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
     return .{ .x = lay.x + @as(i32, @intCast(line.caret_col * lay.cw)), .y = lay.y, .w = lay.cw, .h = lay.ch };
 }
 
+/// 패널 상자(px) — row0(프롬프트) + 결과 행 `row_count` 개. `view` 와 포인터 판정(`panelHit`)의 단일 출처다.
+/// 터미널 0칸이면 null.
+pub fn panelRect(p: props.ChromeProps, row_count: usize) ?draw.Rect {
+    const lay = overlay_input.panelLayout(p) orelse return null;
+    return .{ .x = lay.x, .y = lay.y, .w = lay.panel_cols * lay.cw, .h = (1 + @as(u32, @intCast(row_count))) * lay.ch };
+}
+
+/// 패널 배경 quad — view 가 첫 op 로 내고 `panelHit` 이 그 보이는 사각형(`Quad.visibleRect`)을 잰다.
+fn panelQuad(rect: draw.Rect, p: props.ChromeProps) draw.Op.Quad {
+    const bg_r = p.shape.corner_radius_px;
+    const bw = p.shape.border_width_px;
+    return .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent };
+}
+
+/// 포인터가 패널의 어디인가 — 팔레트 패널을 빌려 그리는 피커(심볼·신뢰·복구)의 클릭 판정이 쓴다.
+pub const PanelHit = union(enum) {
+    /// 보이는 패널 밖 — 호출자가 닫는다.
+    outside,
+    /// 보이는 패널 안이지만 결과 행이 아니다(패딩 띠·프롬프트 줄) — 소비만 한다.
+    panel,
+    /// 결과 행(0 = 첫 **보이는** 결과 행 — 스크롤 창 시작은 호출자가 더한다).
+    row: usize,
+};
+
+/// `row_count` 개 결과 행을 그린 패널 위에서 포인터를 가른다. 「밖」은 **보이는** 패널 밖이다 — rich lowering 이 배경 quad 를
+/// 패딩만큼 키워 그리므로, 키우기 전 상자로 재면 보이는 패널 안쪽 가장자리를 눌러도 피커가 닫혔다(2026-10-15). 피커 셋이
+/// 같은 상자 계산을 각자 들고 있던 것을 여기로 모았다. 터미널 0칸이면 null.
+pub fn panelHit(p: props.ChromeProps, row_count: usize, x_px: f64, y_px: f64) ?PanelHit {
+    const rect = panelRect(p, row_count) orelse return null;
+    if (!rect.containsPx(x_px, y_px)) {
+        return if (panelQuad(rect, p).visibleRect(p.shape.modal_padding_px).containsPx(x_px, y_px)) .panel else .outside;
+    }
+    const ch: f64 = @floatFromInt(@max(p.metrics.cell_height_px, 1));
+    const row: usize = @intFromFloat((y_px - @as(f64, @floatFromInt(rect.y))) / ch);
+    if (row == 0) return .panel; // 프롬프트 줄
+    return .{ .row = @min(row, row_count) - 1 };
+}
+
 /// 상단-중앙 패널을 `out`에 append한다: 배경 fill + row0 프롬프트("> <query><조합중>" + 커서) + 결과 행 N개(선택행
 /// 강조 bg + 제목 + 우측 정렬 바인딩). `rows`는 host가 필터·윈도우잉해 넘긴 가시 행(≤ max_visible). 안 열렸거나 터미널
 /// 0칸이면 무동작. 순수: state·rows·props·tokens만 읽는다. ops·runs는 호출자 frame arena 소유. 색은 surface_bg(패널)·
@@ -169,16 +207,12 @@ pub fn view(
     const lay = overlay_input.panelLayout(p) orelse return;
     const cw = lay.cw;
     const ch = lay.ch;
-    const panel_w = lay.panel_cols * cw;
     const x = lay.x;
     const y = lay.y;
 
-    // 패널 배경: row0(프롬프트) + 결과 행 N개를 덮는 단일 fill.
-    const panel_h = (1 + @as(u32, @intCast(rows.len))) * ch;
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
+    // 패널 배경: row0(프롬프트) + 결과 행 N개를 덮는 단일 fill(`panelRect` — 포인터 판정과 같은 상자).
     // C4b 모달: 배경을 quad로(둥근+테두리) — base(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
-    try out.append(arena, .{ .quad = .{ .rect = .{ .x = x, .y = y, .w = panel_w, .h = panel_h }, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    try out.append(arena, .{ .quad = panelQuad(panelRect(p, rows.len) orelse return, p) });
 
     // 스크롤바 gutter는 **상시** 예약한다(SV5b) — 선택 밴드와 단축키가 함께 이만큼 비켜 준다. 밴드가
     // 패널 폭을 다 먹으면 막대를 덮어 첫 행에서만 막대가 사라지는 그림이 된다(실측). 탐색기(SV2b)가
@@ -284,6 +318,49 @@ test "palette handle: Enter=accept·글자=query_changed·↑↓=selection_chang
     s.show();
     try std.testing.expectEqual(Action.close, handle(allocator, .{ .key = .escape }, &s));
     try std.testing.expect(!s.open);
+}
+
+test "palette panelHit: 그린 상자와 같은 판정 — 결과 행·프롬프트·패딩 띠·밖, 모서리 0 이면 띠가 없다" {
+    const theme = std.mem.zeroes(tokens.ThemeColors);
+    const tk = tokens.Tokens.rich(theme);
+    const p = props.ChromeProps{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 40, .backing_width_px = 800, .backing_height_px = 600 },
+        .shape = .fromTokens(&tk),
+    };
+    const pad: f64 = @floatFromInt(p.shape.modal_padding_px);
+    try std.testing.expect(pad > 0); // 전제: rich 는 패딩이 있다
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    var out: std.ArrayList(draw.Op) = .empty;
+    var s: State = .{};
+    defer s.deinit(std.testing.allocator);
+    s.show();
+    const rows = [_]Row{ .{ .title = "a", .binding = "", .selected = false }, .{ .title = "b", .binding = "", .selected = false }, .{ .title = "c", .binding = "", .selected = false } };
+    try view(&s, &rows, p, &tk, arena_state.allocator(), &out);
+    // 판정 상자 = 그린 패널 quad 의 상자(단일 출처).
+    const r = panelRect(p, rows.len).?;
+    try std.testing.expectEqual(r, out.items[0].quad.rect);
+    const x0: f64 = @floatFromInt(r.x);
+    const y0: f64 = @floatFromInt(r.y);
+    const x1 = x0 + @as(f64, @floatFromInt(r.w));
+    const y1 = y0 + @as(f64, @floatFromInt(r.h));
+    const mx = (x0 + x1) / 2;
+    try std.testing.expectEqual(PanelHit.panel, panelHit(p, rows.len, mx, y0 + 2).?); // 프롬프트 줄
+    try std.testing.expectEqual(PanelHit{ .row = 0 }, panelHit(p, rows.len, mx, y0 + 16 + 2).?);
+    try std.testing.expectEqual(PanelHit{ .row = 2 }, panelHit(p, rows.len, mx, y1 - 1).?);
+    // 네 변의 패딩 띠 — 보이는 패널 안이다(닫지 않는다). 왼쪽·오른쪽 띠는 결과 행 높이에서도 행이 아니다.
+    try std.testing.expectEqual(PanelHit.panel, panelHit(p, rows.len, x0 - pad + 1, y0 + 16 + 2).?);
+    try std.testing.expectEqual(PanelHit.panel, panelHit(p, rows.len, x1 + pad - 1, y0 + 16 + 2).?);
+    try std.testing.expectEqual(PanelHit.panel, panelHit(p, rows.len, mx, y0 - pad + 1).?);
+    try std.testing.expectEqual(PanelHit.panel, panelHit(p, rows.len, mx, y1 + pad - 1).?);
+    // 띠 밖 — 닫는다.
+    try std.testing.expectEqual(PanelHit.outside, panelHit(p, rows.len, x0 - pad - 1, y0 + 16 + 2).?);
+    try std.testing.expectEqual(PanelHit.outside, panelHit(p, rows.len, mx, y1 + pad).?);
+    try std.testing.expectEqual(PanelHit.outside, panelHit(p, rows.len, std.math.nan(f64), y0 + 2).?);
+    // 모서리 0 이면 lowering 이 셀 배경으로 칠해 키우지 않는다 — 패딩은 두고 모서리만 0 으로 재야 분기를 잰다.
+    var flat = p;
+    flat.shape.corner_radius_px = 0;
+    try std.testing.expectEqual(PanelHit.outside, panelHit(flat, rows.len, x0 - 1, y0 + 16 + 2).?);
 }
 
 test "palette view: 닫힘이면 ops 0, 열림이면 패널+프롬프트+행+caret" {

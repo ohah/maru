@@ -9045,13 +9045,16 @@ pub fn refreshSendHelper(self: *AppSession) bool {
 }
 
 /// 헬퍼 위 클릭인가. 맞으면 보내기를 실행(또는 대상 메뉴를 열고) `true` — 그 클릭은 편집기로
-/// 안 내려간다. 상자 **밖**이면 헬퍼를 내리고 `false` 를 준다: 그 클릭은 원래 하려던 일(캐럿
-/// 옮기기·새 선택)을 그대로 해야 한다.
+/// 안 내려간다. **보이는** 상자 **밖**이면 헬퍼를 내리고 `false` 를 준다: 그 클릭은 원래 하려던 일(캐럿
+/// 옮기기·새 선택)을 그대로 해야 한다. 보이는 상자의 패딩 띠는 `true`(삼키고 상자를 남긴다).
 pub fn sendHelperClick(self: *AppSession, x_px: f64, y_px: f64) bool {
     if (!self.chrome_host.send_helper.open) return false;
     const items = sendHelperItems(self);
     const props = self.buildChromeProps();
     if (chrome.components.context_menu.itemAt(&self.chrome_host.send_helper, items, props, x_px, y_px) == null) {
+        // 보이는 상자의 패딩 띠(`context_menu.contains`)는 상자의 것이다 — 삼키고 상자를 남긴다. 흘려보내면 그 클릭이
+        // 상자 뒤 편집기로 내려가 캐럿이 옮겨진다.
+        if (chrome.components.context_menu.contains(&self.chrome_host.send_helper, items, props, x_px, y_px)) return true;
         hideSendHelper(self);
         return false;
     }
@@ -48119,6 +48122,44 @@ test "NSH 상자 밖 클릭은 내리고 **흘려보낸다**, 상자 위 클릭�
     try testing.expectEqual(collected.items[0].surface_id, h.fx.session.last_agent_target.?);
 }
 
+test "NSH 보이는 상자의 패딩 띠를 누르면 소비하고 상자를 남긴다 — 보내지도 흘려보내지도 않는다" {
+    // rich lowering 은 상자(우클릭 메뉴와 같은 `context_menu.view`)를 사방 modal_padding 만큼 키워 그린다. 판정이 키우기 전
+    // rect 만 보면 보이는 상자 가장자리를 누른 클릭이 「밖」이 되어 상자가 내려가고, 그 클릭이 **상자 뒤 편집기로 내려가**
+    // 캐럿이 옮겨졌다(2026-10-15).
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var h = try helperFixture(allocator);
+    defer h.fx.deinit(allocator);
+    defer h.drawn.dl.deinit(allocator);
+
+    h.fx.term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = 5 };
+    showSendHelper(h.fx.session, h.fx.term);
+    try testing.expect(h.fx.session.chrome_host.send_helper.open);
+    const props = h.fx.session.buildChromeProps();
+    const pad: f64 = @floatFromInt(props.shape.modal_padding_px);
+    try testing.expect(pad > 0 and props.shape.corner_radius_px > 0); // 전제: 제품 모양은 둥근 패널 + 패딩(모서리 0 이면 키우지 않는다)
+    const menu = chrome.components.context_menu.menuRect(&h.fx.session.chrome_host.send_helper, sendHelperItems(h.fx.session), props).?;
+    const x0: f64 = @floatFromInt(menu.x);
+    const y0: f64 = @floatFromInt(menu.y);
+    const x1 = x0 + @as(f64, @floatFromInt(menu.w));
+    const y1 = y0 + @as(f64, @floatFromInt(menu.h));
+    h.fx.session.last_agent_target = null;
+    const band = [_][2]f64{
+        .{ x0 - pad + 1, (y0 + y1) / 2 },
+        .{ x1 + pad - 1, (y0 + y1) / 2 },
+        .{ (x0 + x1) / 2, y0 - pad + 1 },
+        .{ (x0 + x1) / 2, y1 + pad - 1 },
+    };
+    for (band) |pt| {
+        try testing.expect(sendHelperClick(h.fx.session, pt[0], pt[1])); // 소비 — 편집기로 안 내려간다
+        try testing.expect(h.fx.session.chrome_host.send_helper.open); // 상자는 남는다
+        try testing.expect(h.fx.session.last_agent_target == null); // 보내지 않았다
+    }
+    // 띠 바로 밖 — 내리고 흘려보낸다(기존 계약).
+    try testing.expect(!sendHelperClick(h.fx.session, x0 - pad - 1, (y0 + y1) / 2));
+    try testing.expect(!h.fx.session.chrome_host.send_helper.open);
+}
+
 test "NSH 제품 경로 — 드래그로 고르고 떼면 뜨고, 그 상자를 누르면 보낸다" {
     // **여기가 「값은 맞는데 닿는 자리가 틀림」을 막는 판정자다.** 위 판정자들은 `showSendHelper` 와
     // `sendHelperClick` 을 직접 부르므로, 배선(선택 제스처의 뗌·`mouse` 의 라우팅 순서)이 통째로
@@ -59120,7 +59161,13 @@ test "editor backup discovery 스크롤된 마지막 행 클릭과 취소는 화
     fx.session.mouse(1, x, @as(f64, @floatFromInt(layout.y)) + 1, 0, 0);
     fx.session.mouse(1, x, y, 2, 0);
     try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len);
+    // 바깥은 **보이는** 패널 밖이다 — rich 는 패널을 사방 패딩만큼 키워 그리므로 상자 1px 왼쪽은 아직 패널(패딩 띠)이다
+    // (`palette.panelHit`, 2026-10-15). 띠는 닫지 않는다.
+    const pad: i32 = fx.session.buildChromeProps().shape.modal_padding_px;
     fx.session.mouse(1, @as(f64, @floatFromInt(layout.x)) - 1, y, 0, 0);
+    try testing.expect(fx.session.chrome_host.recovery_picker.open);
+    try testing.expectEqual(before, pane_ops.activePane(fx.session).terms.items.len); // 행 높이의 띠도 행이 아니다 — 복구를 열지 않는다
+    fx.session.mouse(1, @as(f64, @floatFromInt(layout.x - pad)) - 1, y, 0, 0);
     try testing.expect(!fx.session.chrome_host.recovery_picker.open);
     try testing.expect(fx.session.editor_recovery.catalog == null);
     fx.session.dispatchAppAction(.recover_editor_backups);

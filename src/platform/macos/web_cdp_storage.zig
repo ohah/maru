@@ -83,6 +83,12 @@ pub const Op = struct {
     delete_timeouts: u8 = 0,
     /// 한 요청의 상한을 넘어 보내지 않은 쿠키 수(끝 글에 「다시 실행」 안내를 남긴다 — 4 회차).
     over_cap: usize = 0,
+    /// 페이지에 보이고 보내지는 부모 도메인 쿠키 중 남긴 것(그 호스트 밖 — grant 의 호스트가 아니다). 끝 글에 알린다(9 회차: 그냥 ok 라 에이전트가
+    /// 「로그아웃했다」 로 읽었는데 세션 쿠키가 남았다). 같은 쿠키가 두 주소에서 보이면 한 번만(`parent_seen`).
+    parent_left: usize = 0,
+    parent_domain: ?[]u8 = null,
+    parent_many_domains: bool = false,
+    parent_seen: std.ArrayList([]u8) = .empty,
     /// 지우기가 실패한 마지막 이유(소유 — 끝 글에 그대로, 적대 리뷰 2 회차: 대화상자인데 「DevTools refused」 라 했다).
     delete_why: ?[]u8 = null,
     /// 주소에 userinfo 가 있으면 뗀 사본(소유 — `doc_url` 이 이것을 가리킨다, 적대 리뷰 2 회차).
@@ -95,7 +101,9 @@ pub const Op = struct {
     destructive_sent: bool = false,
 
     pub fn deinit(self: *Op, gpa: std.mem.Allocator) void {
-        for ([_]?[]u8{ self.key, self.value, self.name, self.domain, self.path, self.frame_id, self.delete_why, self.clean_url, self.retry_params }) |v| if (v) |b| gpa.free(b);
+        for ([_]?[]u8{ self.key, self.value, self.name, self.domain, self.path, self.frame_id, self.delete_why, self.clean_url, self.retry_params, self.parent_domain }) |v| if (v) |b| gpa.free(b);
+        for (self.parent_seen.items) |k| gpa.free(k);
+        self.parent_seen.deinit(gpa);
         for (self.pending.items) |c| freeKey(gpa, c);
         self.pending.deinit(gpa);
         self.* = undefined;
@@ -324,6 +332,11 @@ pub const Op = struct {
             }
             return self.nextDelete(gpa);
         }
+        // 저장소는 이미 지웠다 — 쿠키 단계가 실패했으면 그렇게 말한다(9 회차: 「대화상자」 뿐이라 아무 일도 없던 것으로 읽혔다).
+        if (self.kind == .clear_storage and self.destructive_sent) {
+            const msg = try std.fmt.allocPrint(gpa, "storage was cleared but its cookies were not: {s}", .{why});
+            return .{ .done = .{ .status = .failed, .result = msg } };
+        }
         return done(gpa, .failed, why);
     }
 
@@ -445,10 +458,16 @@ pub const Op = struct {
         const host = hostOf(self.doc_url).?;
         var over_cap: usize = 0;
         for (parsed.value.cookies) |c| {
-            if (!sameHost(c.domain, host)) continue;
             if (self.kind == .delete_cookie) {
                 if (!std.mem.eql(u8, c.name, self.name.?)) continue;
                 if (!std.mem.eql(u8, c.path, self.path orelse "/")) continue;
+            }
+            if (!sameHost(c.domain, host)) {
+                // 부모 도메인 쿠키 — 지우지 않지만 세어 알린다(`--domain` 을 줬으면 그 호스트만 묻는 것이라 세지 않는다).
+                if (self.domain == null and coversHost(c.domain, host)) try self.noteParent(gpa, c.name, c.domain, c.path);
+                continue;
+            }
+            if (self.kind == .delete_cookie) {
                 // domain 을 주면 WebKit 처럼 그 글자 그대로나 앞에 점을 붙인 것만(`.a.test` 는 호스트 전용 `a.test` 쿠키를 지우지 않는다 — 적대 리뷰 1 회차).
                 // IP 호스트엔 도메인 쿠키가 없다 — Chromium 은 `.127.0.0.1` 로 심은 것을 호스트 전용 `127.0.0.1` 로 둔다: 앞 점을 떼고 맞춘다(2 회차).
                 if (self.domain) |d0| {
@@ -487,11 +506,44 @@ pub const Op = struct {
         return self.nextDelete(gpa);
     }
 
+    fn noteParent(self: *Op, gpa: std.mem.Allocator, name: []const u8, domain: []const u8, path: []const u8) !void {
+        const key = try std.fmt.allocPrint(gpa, "{s}\x00{s}\x00{s}", .{ name, domain, path });
+        for (self.parent_seen.items) |k| if (std.mem.eql(u8, k, key)) {
+            gpa.free(key);
+            return;
+        };
+        self.parent_seen.append(gpa, key) catch |e| {
+            gpa.free(key);
+            return e;
+        };
+        self.parent_left += 1;
+        if (self.parent_domain) |d| {
+            if (!std.ascii.eqlIgnoreCase(d, domain)) self.parent_many_domains = true;
+        } else self.parent_domain = try gpa.dupe(u8, domain);
+    }
+
+    /// 남긴 부모 도메인 쿠키의 글(없으면 빈 글).
+    fn parentNote(self: *const Op, gpa: std.mem.Allocator) ![]u8 {
+        if (self.parent_left == 0) return gpa.dupe(u8, "");
+        return std.fmt.allocPrint(gpa, "{d} cookie(s) on {s} {s} were left — a Chromium tab deletes only its own host's cookies", .{
+            self.parent_left,
+            if (self.parent_many_domains) "parent domains such as" else "the parent domain",
+            self.parent_domain.?,
+        });
+    }
+
     fn deleteSummary(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
         self.stage = .done_stage;
         const f = self.delete_failed;
         const u = self.delete_unconfirmed;
-        if (f == 0 and u == 0) return done(gpa, .success, "");
+        const parent = try self.parentNote(gpa);
+        defer gpa.free(parent);
+        if (f == 0 and u == 0) {
+            if (parent.len == 0) return done(gpa, .success, "");
+            if (self.kind == .delete_cookie) return done(gpa, .failed, parent);
+            const msg = try std.fmt.allocPrint(gpa, "storage and {d} host cookie(s) were cleared, but {s}", .{ self.delete_total, parent });
+            return .{ .done = .{ .status = .failed, .result = msg } };
+        }
         // 상한을 넘어 남긴 것이 있으면 다른 이유와 함께 「다시 실행」 안내도(4 회차: 마지막 오류 글에 가려졌다).
         const why_all = if (self.over_cap > 0 and !std.mem.eql(u8, why, over_cap_reason))
             try std.fmt.allocPrint(gpa, "{s}; {s}", .{ why, over_cap_reason })
@@ -504,7 +556,9 @@ pub const Op = struct {
             try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be confirmed deleted ({s})", .{ u, self.delete_total, why_all })
         else
             try std.fmt.allocPrint(gpa, "{d} of {d} cookies could not be deleted and {d} could not be confirmed ({s})", .{ f, self.delete_total, u, why_all });
-        return .{ .done = .{ .status = .failed, .result = msg } };
+        if (parent.len == 0) return .{ .done = .{ .status = .failed, .result = msg } };
+        defer gpa.free(msg);
+        return .{ .done = .{ .status = .failed, .result = try std.fmt.allocPrint(gpa, "{s}; {s}", .{ msg, parent }) } };
     }
 
     fn nextDelete(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -621,6 +675,13 @@ fn isIpHost(host: []const u8) bool {
     if (host.len > 0 and host[0] == '[') return true;
     for (host) |ch| if (!(std.ascii.isDigit(ch) or ch == '.')) return false;
     return host.len > 0;
+}
+
+/// 쿠키 domain 이 그 호스트의 부모 도메인인가(`.a.test` 는 `b.a.test` 를 덮는다 — 페이지에 보이고 보내진다).
+fn coversHost(domain: []const u8, host: []const u8) bool {
+    const d = if (domain.len > 0 and domain[0] == '.') domain[1..] else domain;
+    if (d.len == 0 or host.len <= d.len + 1 or isIpHost(host)) return false;
+    return host[host.len - d.len - 1] == '.' and std.ascii.eqlIgnoreCase(host[host.len - d.len ..], d);
 }
 
 /// 쿠키 domain 이 그 호스트 자신인가(`host`·`.host` — 대소문자 무시).
@@ -787,7 +848,7 @@ test "W9a③ 쿠키 지우기: 그 path 로 읽어 이름·path·호스트로 �
     try testing.expect(op.committed()); // 첫 지우기가 나갔다 — 이제 끝까지
     try testing.expectEqualStrings("{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/p\"}", d2);
     // 하나를 못 지웠다 — 나머지는 지우고 끝에 실패로(적대 리뷰 1 회차: 전에는 ok).
-    try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .failed, "1 of 2 cookies could not be deleted (DevTools refused the delete)");
+    try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .failed, "1 of 2 cookies could not be deleted (DevTools refused the delete); 1 cookie(s) on the parent domain .test were left — a Chromium tab deletes only its own host's cookies");
     var parent = try Op.init(gpa, .delete_cookie, "{\"name\":\"s\",\"domain\":\"test\"}");
     defer parent.deinit(gpa);
     parent.doc_url = "https://a.test/";
@@ -809,7 +870,8 @@ test "W9a③ clearStorage: 그 출처의 저장소 전부 + 문서 주소·뿌�
     gpa.free(d1);
     const d2 = try expectCall(try op.feed(gpa, .{ .ok = "{}" }), "Network.deleteCookies");
     gpa.free(d2);
-    try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .success, "");
+    // 부모 도메인(.test) 쿠키는 지우지 않고 그렇다고 알린다(9 회차 — 전에는 그냥 ok).
+    try expectDone(try op.feed(gpa, .{ .ok = "{}" }), .failed, "storage and 2 host cookie(s) were cleared, but 1 cookie(s) on the parent domain .test were left — a Chromium tab deletes only its own host's cookies");
     var blank = try Op.init(gpa, .clear_storage, "");
     defer blank.deinit(gpa);
     blank.doc_url = "about:blank";
@@ -1233,4 +1295,43 @@ test "W9a③ 적대 리뷰 8 회차 재현 F2: blob:http(s) 문서의 localStora
     const e = try expectCall(try op.feed(gpa, .{ .ok = "{\"executionContextId\":4}" }), "Runtime.evaluate");
     defer gpa.free(e);
     try testing.expect(std.mem.indexOf(u8, e, "location.origin!==\\\"http://a.test\\\"") != null);
+}
+
+test "W9a③ 적대 리뷰 9 회차 재현 F1: deleteCookie — 그 이름의 부모 도메인 쿠키(페이지에 보이고 보내진다)는 지우지 않고 그렇다고 실패로 답한다 — 전에는 그냥 ok" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .delete_cookie, "{\"name\":\"pd\"}");
+    defer op.deinit(gpa);
+    op.doc_url = "http://b.a.test/";
+    gpa.free(try expectCall(try op.start(gpa), "Network.getCookies"));
+    const step = try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"pd\",\"domain\":\".a.test\",\"path\":\"/\"}]}" });
+    defer r1FreeStep(step);
+    // 에이전트는 「ok」 를 「지웠다」 로 읽는다 — 남긴 것을 알려야 한다.
+    try testing.expect(step == .done and step.done.status == .failed);
+    try testing.expectEqualStrings("1 cookie(s) on the parent domain .a.test were left — a Chromium tab deletes only its own host's cookies", step.done.result);
+}
+
+test "W9a③ 적대 리뷰 9 회차 재현 F1b: clearStorage — 페이지에 보이는 부모 도메인 쿠키를 남겼으면 지운 것과 남긴 것을 실패로 답한다 — 전에는 그냥 ok" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "http://b.a.test/";
+    gpa.free(try expectCall(try op.start(gpa), "Storage.clearDataForOrigin"));
+    gpa.free(try expectCall(try op.feed(gpa, .{ .ok = "{}" }), "Network.getCookies"));
+    const step = try op.feed(gpa, .{ .ok = "{\"cookies\":[{\"name\":\"session\",\"domain\":\".a.test\",\"path\":\"/\"}]}" });
+    defer r1FreeStep(step);
+    try testing.expect(step == .done and step.done.status == .failed);
+    try testing.expectEqualStrings("storage and 0 host cookie(s) were cleared, but 1 cookie(s) on the parent domain .a.test were left — a Chromium tab deletes only its own host's cookies", step.done.result);
+}
+
+test "W9a③ 적대 리뷰 9 회차 재현 F2: clearStorage — 저장소를 지운 뒤 쿠키 단계가 실패하면 저장소는 이미 지웠다고 말한다 — 전에는 「대화상자」 뿐" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .clear_storage, "");
+    defer op.deinit(gpa);
+    op.doc_url = "http://a.test/";
+    gpa.free(try expectCall(try op.start(gpa), "Storage.clearDataForOrigin"));
+    gpa.free(try expectCall(try op.feed(gpa, .{ .ok = "{}" }), "Network.getCookies"));
+    const step = try op.feed(gpa, .{ .not_sent = ops.dialog_reason });
+    defer r1FreeStep(step);
+    try testing.expect(step == .done and step.done.status == .failed);
+    try testing.expect(std.mem.startsWith(u8, step.done.result, "storage was cleared but its cookies were not: ")); // 이미 지운 것을 알린다
 }

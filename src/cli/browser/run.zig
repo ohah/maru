@@ -197,7 +197,7 @@ fn runExecuteScript(
             return executeError(stderr, "cannot publish the output file atomically");
         try stdout.print("executeScript: {d} bytes → {s}\n", .{ result.items.len, path });
     } else {
-        try stdout.writeAll(result.items);
+        try browser.writeDisplaySafeJsonText(stdout, result.items); // 터미널에 보이지 않는 글자를 내지 않는다(W9a③ 9 회차)
         try stdout.writeAll("\n");
     }
     try stdout.flush();

@@ -41848,6 +41848,11 @@ test "BLX3 번들 언어 확대 BL3 — 실제 키로: SQL 은 줄 가운데 짝
     dc.rt.editor_selection = editor_selection.Selection.at(7);
     try pressKey(&fx, .enter, .{});
     try testing.expectEqualStrings("// note\n//  more\n", content(dc)); // TS 와 같다(INDR5) — caret 뒤 공백은 그대로 남는다
+    // ⑺ 블록 주석 `/**` 뒤 — ` * ` 로 잇는다(Dart 는 VS Code 대조 말뭉치에 없어 여기서만 잰다 — BL3 변이 B2 가 드러냈다).
+    const doc = try open(&fx, allocator, "doc.dart", "/**\n");
+    doc.rt.editor_selection = editor_selection.Selection.at(3);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/**\n * \n", content(doc));
 }
 
 test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {

@@ -10,6 +10,7 @@
 //! 지금 문서의 제 줄만 본다 — 줄이 어느 문서에서 왔는지는 sidecar 가 단 `docs_back`(그 출처를 떠난 지 몇 문서인가 — 늦게 온
 //! unload 줄)으로 안다. 다른 쪽이 읽으면 그쪽이 묶이고 그에게 보이지 않던 줄은 버린다 — 남기면 묶인 뒤 다음 읽기에서 허락 전
 //! 기록이 보였다. 그래서 앞서 묶였던 쪽의 다음 읽기도 지금 문서의 제 줄만이다(문서에 적은 동작 — 2 회차 F3).
+//! 에이전트가 연 탭은 태어날 때 그 grant 에 묶인다(`latchAtBirth` — 3 회차 F1) — 첫 읽기가 탭이 생긴 뒤의 모든 줄을 본다.
 
 const std = @import("std");
 
@@ -59,6 +60,15 @@ pub const Ring = struct {
     pub fn deinit(self: *Ring, gpa: std.mem.Allocator) void {
         self.clear(gpa);
         self.entries.deinit(gpa);
+    }
+
+    /// 탭이 그 grant 와 함께 태어났다(에이전트가 `browser.open` 으로 열었거나 그 탭의 페이지가 열었다) — 처음부터 `who` 에 묶는다. 앞에
+    /// 사용자가 지나온 사이트가 없으니 숨길 것이 없고, 첫 읽기 전에 페이지가 스스로 옮겨 가도 그 앞 문서의 오류가 남는다(W9c① 적대 리뷰
+    /// 3 회차 F1 — 작성자 선택). 이미 누가 읽은 링은 그대로 둔다(그 쪽에게 숨긴 줄이 이 쪽에게 열리지 않게).
+    pub fn latchAtBirth(self: *Ring, who: Authorizer) void {
+        if (who == 0 or self.latched != 0) return;
+        self.latched = who;
+        self.latched_doc = self.doc;
     }
 
     /// 주 프레임에 새 문서가 들어섰다(`page_started`, 오류 페이지 — `error_page`).
@@ -354,4 +364,34 @@ test "W9c① 적대 리뷰 2 회차 재현 F3: 다른 쪽이 읽으면 그쪽에
     try expectTexts(&r, 8, &.{"c-1"}); // 다른 pane P2(grant 8) — b-1·b-2 를 버린다
     // P1 이 다시 읽는다 — 묶였던 적이 있어도 이제 다른 쪽이라 지금 문서의 제 줄만(보던 문서의 오류는 다시 오지 않는다).
     try expectTexts(&r, 7, &.{"c-1"});
+}
+
+test "W9c① 적대 리뷰 3 회차 재현 F1: 에이전트가 연 탭(태어날 때 묶인다)은 첫 읽기 전에 페이지가 스스로 옮겨 가도 앞 문서의 오류가 남는다 — 확인 모달로 허락한 기존 탭은 여전히 앞 사이트를 숨긴다" {
+    var r: Ring = .{};
+    defer r.deinit(testing.allocator);
+    r.latchAtBirth(7); // 에이전트가 browser.open 으로 열었다 — grant 7 이 탭과 함께 생겼다
+    try r.add(testing.allocator, .warn, "first document", 0); // 문서 0: 탭이 처음 든 문서(첫 page_started 전)도 묶인 문서다
+    r.newDocument(); // 문서 1: 에이전트가 연 페이지
+    try r.add(testing.allocator, .@"error", "Uncaught TypeError: x is undefined (https://app.test/main.js:10)", 0);
+    r.newDocument(); // 문서 2: 페이지가 스스로 옮겨 갔다(location.href = '/login')
+    try r.add(testing.allocator, .log, "login head", 1); // 앞 문서가 떠나며 남긴 줄도 이 탭의 것이다
+    try r.add(testing.allocator, .log, "login body", 0);
+    try expectTexts(&r, 7, &.{ "first document", "Uncaught TypeError: x is undefined (https://app.test/main.js:10)", "login head", "login body" });
+    // 다른 쪽(다른 pane 의 grant 8)은 여전히 지금 문서의 제 줄만.
+    try expectTexts(&r, 8, &.{"login body"});
+
+    // 확인 모달로 허락한 기존 탭 — 사용자가 먼저 지나온 사이트는 첫 읽기에 보이지 않는다(묶이지 않은 채 태어났다).
+    var u: Ring = .{};
+    defer u.deinit(testing.allocator);
+    try u.add(testing.allocator, .log, "site-a token=abc", 0);
+    u.newDocument();
+    try u.add(testing.allocator, .log, "site-b head", 0);
+    try expectTexts(&u, 7, &.{"site-b head"});
+    // 이미 읽힌 링은 태어날 때의 묶음으로 바꾸지 않는다(0 도 묶지 않는다).
+    u.latchAtBirth(9);
+    try testing.expectEqual(@as(Authorizer, 7), u.latched);
+    var z: Ring = .{};
+    defer z.deinit(testing.allocator);
+    z.latchAtBirth(0);
+    try testing.expectEqual(@as(Authorizer, 0), z.latched);
 }

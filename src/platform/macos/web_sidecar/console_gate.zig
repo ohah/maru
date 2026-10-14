@@ -11,7 +11,9 @@
 //! 줄의 `source`(부른 스크립트 주소)의 출처가 방금 떠난 출처들(`Recent` — 떠난 주 프레임과 그 문서의 하위 프레임, 1 초) 중 하나이고 새
 //! 주 프레임 출처가 아니면 그 출처를 떠난 지 몇 문서인지 단다 — maru 는 그 수로 줄이 **어느 문서에서 왔는지** 안다(2 회차: 「앞 문서」
 //! 표시 하나로는 A → B → C 에서 C 에 온 A 의 줄을 B 의 것과 가르지 못해 B 에서 묶인 쪽에게 보였다). 그 줄은 새 문서의 양동이를 쓰지
-//! 않는다(새 문서의 줄을 밀어내지 않게) — 다만 전체 양동이는 지난다(관이 막히는 길을 열지 않게). 거기서 버려도 세지 않는다.
+//! 않는다(새 문서의 줄을 밀어내지 않게) — 대신 탭마다 따로 둔 작은 앞 문서 양동이와 전체 양동이를 지난다(관이 막히는 길을 열지 않게,
+//! 3 회차: 두 출처를 오가는 페이지가 제 줄을 앞 문서의 줄로 만들어 탭의 상한을 넘고 전체 양동이로 다른 탭의 오류를 굶겼다). 거기서 버려도
+//! 세지 않는다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -102,6 +104,16 @@ fn tabBytes() [2]Bucket {
     return .{ Bucket.init(16 * 1024, 24 * 1024), Bucket.init(32 * 1024, 24 * 1024) };
 }
 
+/// 탭마다의 앞 문서 양동이(두 갈래 함께) — 줄 5/s(버스트 80)·8 KiB/s(버스트 32 KiB). 떠나며 남기는 줄은 실측으로 이동마다 몇 줄이다(unload·
+/// pagehide 3–7 줄, 400 ms 바쁜 꼬리 5 줄 — 계획 공격 2 회차·적대 리뷰 1·2 회차) — 버스트가 그것을 넉넉히 지키고, 채우기는 느려 이동을
+/// 거듭해도 탭 하나가 내는 양은 앞 문서 몫을 더해도 전체 양동이 아래다(줄 20 + 50 + 5 /s ≪ 1000, 16 + 32 + 8 KiB/s < 64 KiB) — 3 회차.
+fn oldCount() Bucket {
+    return Bucket.init(5, 80);
+}
+fn oldBytes() Bucket {
+    return Bucket.init(8 * 1024, 32 * 1024);
+}
+
 /// 모든 탭이 함께 쓰는 양동이 — 1000 줄/s, 64 KiB/s(버스트 48 KiB — maru 가 한 tick 에 관 하나(64 KiB)만 비워도 막히지 않게).
 pub const Global = struct {
     count: Bucket = Bucket.init(1000, 1000),
@@ -111,6 +123,9 @@ pub const Global = struct {
 pub const Gate = struct {
     count: [2]Bucket = tabCount(),
     bytes: [2]Bucket = tabBytes(),
+    /// 앞 문서의 줄(`old_document`)만 쓰는 양동이 — 새 문서의 양동이와 따로다(새 문서의 줄을 밀어내지 않게).
+    old_count: Bucket = oldCount(),
+    old_bytes: Bucket = oldBytes(),
     /// 아직 알리지 않은 버린 수(오류·경고, 그 밖).
     dropped: [2]u32 = .{ 0, 0 },
     recent: Recent = .{},
@@ -122,22 +137,27 @@ pub const Gate = struct {
         global.bytes.refill(now);
         self.count[i].refill(now);
         self.bytes[i].refill(now);
-        // 앞 문서의 줄은 새 문서의 양동이를 보지 않는다 — 전체 양동이만.
-        const tab_ok = old_document or (self.count[i].hasOne() and self.bytes[i].positive());
+        self.old_count.refill(now);
+        self.old_bytes.refill(now);
+        // 앞 문서의 줄은 새 문서의 양동이를 보지 않는다 — 제 양동이(앞 문서)와 전체 양동이.
+        const tab_ok = if (old_document)
+            self.old_count.hasOne() and self.old_bytes.positive()
+        else
+            self.count[i].hasOne() and self.bytes[i].positive();
         if (!tab_ok or !global.count.hasOne() or !global.bytes.positive()) {
             // 앞 문서의 줄은 어디에도 세지 않는다 — 새 문서의 표지에 실리면 처음 읽는 쪽에게 앞 사이트의 양이 드러난다(2 회차).
             if (!old_document) self.dropped[i] +|= 1;
             return false;
         }
         global.count.take(1);
-        if (!old_document) self.count[i].take(1);
+        if (old_document) self.old_count.take(1) else self.count[i].take(1);
         return true;
     }
 
     /// 바꾼 글의 실제 바이트를 빚으로 단다.
     pub fn charge(self: *Gate, global: *Global, class: Class, old_document: bool, bytes: usize) void {
         global.bytes.take(bytes);
-        if (!old_document) self.bytes[@intFromEnum(class)].take(bytes);
+        if (old_document) self.old_bytes.take(bytes) else self.bytes[@intFromEnum(class)].take(bytes);
     }
 
     pub fn hasDrops(self: *const Gate) bool {
@@ -374,34 +394,59 @@ test "W9c①: the byte budget is a debt — a big line passes while the balance 
     try testing.expect(error_passed);
 }
 
-test "W9c①: old-document lines skip the tab's budgets but still pass the global ones, and their drops are counted nowhere" {
+test "W9c①: old-document lines skip the new document's budgets for a small budget of their own, still pass the global ones, and their drops are counted nowhere" {
     var g: Gate = .{};
     var global: Global = .{};
     const t0: u64 = 9_000_000;
     // 새 문서의 그 밖 갈래를 다 썼다.
     for (0..1000) |_| if (!g.admit(&global, .other, false, t0)) break;
-    // 앞 문서의 줄은 탭 양동이를 보지 않는다 — 지나고, 탭의 잔고를 쓰지 않는다.
+    // 앞 문서의 줄은 새 문서의 양동이를 보지 않는다 — 지나고, 새 문서의 잔고를 쓰지 않는다.
     try testing.expect(g.admit(&global, .other, true, t0));
     g.charge(&global, .other, true, 100);
-    const tab_balance = g.bytes[1].balance;
-    try testing.expectEqual(Bucket.init(32 * 1024, 24 * 1024).balance, tab_balance);
-    // 전체 양동이는 지난다 — 1000 줄을 넘으면 앞 문서의 줄도 버린다.
+    try testing.expectEqual(Bucket.init(32 * 1024, 24 * 1024).balance, g.bytes[1].balance);
+    // 거꾸로 앞 문서의 줄이 쏟아져도 새 문서의 오류는 제 양동이로 지난다.
+    var n: Gate = .{};
+    var ng: Global = .{};
+    for (0..500) |_| _ = n.admit(&ng, .important, true, t0);
+    try testing.expect(n.admit(&ng, .important, false, t0));
+    // 앞 문서의 줄은 탭마다 버스트 80 줄, 그 뒤 5/s(3 회차) — 실측한 이동마다의 unload 줄(3–7)은 넉넉히 지난다.
     var h: Gate = .{};
     var hg: Global = .{};
     var passed: usize = 0;
     for (0..1500) |_| {
         if (h.admit(&hg, .other, true, t0)) passed += 1;
     }
-    try testing.expectEqual(@as(usize, 1000), passed);
+    try testing.expectEqual(@as(usize, 80), passed);
+    passed = 0;
+    for (0..100) |_| {
+        if (h.admit(&hg, .important, true, t0 + 1000)) passed += 1;
+    }
+    try testing.expectEqual(@as(usize, 5), passed); // 두 갈래가 함께 쓴다
     // 버린 앞 문서의 줄은 어디에도 세지 않는다 — 새 문서의 표지에 실리면 앞 사이트의 양이 드러난다(2 회차).
     try testing.expectEqual(@as(u32, 0), h.dropped[1]);
     try testing.expect(!h.hasDrops());
-    // 전체 바이트도 — 48 KiB 빚을 지면 앞 문서의 줄도 막힌다.
+    // 앞 문서 바이트도 빚이다 — 32 KiB 를 넘게 지면 그 탭의 앞 문서 줄이 막힌다.
+    var b: Gate = .{};
+    var bg: Global = .{};
+    try testing.expect(b.admit(&bg, .other, true, t0));
+    b.charge(&bg, .other, true, 40 * 1024);
+    bg = .{}; // 전체는 막히지 않았다고 친다
+    try testing.expect(!b.admit(&bg, .other, true, t0 + 1));
+    try testing.expect(b.admit(&bg, .other, false, t0 + 1)); // 새 문서의 줄은 아니다
+    // 전체 양동이도 지난다 — 여러 탭의 앞 문서 줄도 합해 1000 줄에서, 48 KiB 빚을 지면 다른 탭의 앞 문서 줄도 막힌다.
+    var tabs: [20]Gate = @splat(.{});
+    var tg: Global = .{};
+    passed = 0;
+    for (&tabs) |*t| for (0..80) |_| {
+        if (t.admit(&tg, .other, true, t0)) passed += 1;
+    };
+    try testing.expectEqual(@as(usize, 1000), passed);
     var k: Gate = .{};
+    var k2: Gate = .{};
     var kg: Global = .{};
     try testing.expect(k.admit(&kg, .other, true, t0));
     k.charge(&kg, .other, true, 64 * 1024);
-    try testing.expect(!k.admit(&kg, .other, true, t0));
+    try testing.expect(!k2.admit(&kg, .other, true, t0));
 }
 
 test "W9c①: the global buckets cap all tabs together" {
@@ -573,4 +618,43 @@ test "W9c① 적대 리뷰 2 회차 재현 F2: A → B(다른 출처 iframe 셋)
     q.mainStarted("http://127.0.0.1:1/con.html?c", t0 + 200); // B 와 그 iframe 출처 셋을 떠난다
     try testing.expectEqual(@as(u8, 1), q.docsBack("http://127.0.0.1:2", t0 + 300));
     try testing.expectEqual(@as(u8, 2), q.docsBack("http://localhost:1", t0 + 300)); // C 가 시작한 뒤 +100 ms 에 온 A 의 unload 줄
+}
+
+test "W9c① 적대 리뷰 3 회차 재현 F3: 두 출처를 오가며 방금 떠난 출처에서 로거를 부르는 페이지도 탭 상한 안이고 다른 탭의 오류는 다 지난다 — 전에는 제 줄이 앞 문서의 줄이 되어 탭 양동이를 건너뛰고(3 초에 3159 줄) 전체 양동이로 다른 탭의 오류를 굶겼다(24/60)" {
+    var attacker: Gate = .{};
+    var victim: Gate = .{};
+    var global: Global = .{};
+    const t0: u64 = 20_000_000;
+    attacker.recent.mainStarted("http://x.test/pp.html", t0);
+    var attacker_passed: usize = 0;
+    var victim_errors: usize = 0;
+    var victim_passed: usize = 0;
+    var t: u64 = t0;
+    var here_x = true;
+    // 3 초: 페이지는 900 ms 마다 출처를 바꾸고, 그 사이 ms 마다 64 바이트 줄 넷을 **다른** 출처(1 초 안에 떠난 주 프레임 출처)의 스크립트로
+    // 남긴다. 다른 탭은 50 ms 마다 오류 하나(20/s — 제 오류 양동이 몫).
+    while (t < t0 + 3000) : (t += 1) {
+        if ((t - t0) % 900 == 899) {
+            attacker.recent.mainStarted(if (here_x) "http://y.test/pp.html" else "http://x.test/pp.html", t);
+            here_x = !here_x;
+        }
+        const src_origin: []const u8 = if (here_x) "http://y.test" else "http://x.test";
+        const back = attacker.recent.docsBack(src_origin, t);
+        for (0..4) |_| {
+            if (attacker.admit(&global, .other, back != 0, t)) {
+                attacker.charge(&global, .other, back != 0, 64);
+                attacker_passed += 1;
+            }
+        }
+        if ((t - t0) % 50 == 0) {
+            victim_errors += 1;
+            if (victim.admit(&global, .important, false, t)) {
+                victim.charge(&global, .important, false, 40);
+                victim_passed += 1;
+            }
+        }
+    }
+    // 첫 900 ms 는 새 문서의 그 밖 갈래(버스트 200 + 50/s)를, 그 뒤는 앞 문서 양동이(버스트 80 + 5/s)만 쓴다 — 탭 상한(200 + 3 × 50) 안이다.
+    try testing.expect(attacker_passed <= 350);
+    try testing.expectEqual(victim_errors, victim_passed);
 }

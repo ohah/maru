@@ -543,6 +543,11 @@ var parked_emptied = false;
 /// 페이지가 연 새 탭으로 만들 번호(W10c — `open_tab` 의 새 탭은 배치가 와야 기록이 생긴다. 생기면 `page_opened` 로 옮긴다).
 var page_opened_pending: [16]u64 = @splat(0);
 var page_opened_next: usize = 0;
+/// 에이전트가 연 탭의 콘솔을 묶을 읽는 쪽(W9c① 3 회차 F1 — `consoleBirthReader`). `browser.open` 의 탭은 배치가 와야 기록이 생긴다 — 생기면
+/// 그 링을 묶는다. 넘치면 가장 오래된 것을 잃는다(그 탭은 확인 모달로 허락한 탭처럼 첫 읽기부터 본다 — 더 숨기는 쪽).
+const ConsoleBirth = struct { surface_id: u64 = 0, who: u64 = 0 };
+var console_birth_pending: [16]ConsoleBirth = @splat(.{});
+var console_birth_next: usize = 0;
 var hello_nonce: u64 = 0;
 var started_ms: i64 = 0;
 var failures: [restart_budget]?i64 = @splat(null);
@@ -1818,6 +1823,7 @@ pub fn ensure(gpa: std.mem.Allocator, layout: plan.Layout, scale_milli: u32, now
     const fresh = (plan.reconcile(if (existing) |s| &s.record else null, layout, scale_milli, &commands, gpa) catch return) orelse null;
     if (fresh) |record| {
         surfaces.put(gpa, layout.surface_id, .{ .record = record, .stopped_notice_pending = latched != null, .page_opened = takePageOpened(layout.surface_id) }) catch return;
+        surfaces.getPtr(layout.surface_id).?.console.latchAtBirth(takeConsoleBirth(layout.surface_id)); // W9c① 3 회차 F1
         // 판정자 전용(`MARU_WEB_OSR_TEST_URL`): 새 탭을 이 주소로 연다 — 스모크가 sidecar 까지의 경로(띄우기·handshake·
         // 생성·이동)를 시험 서버가 받은 요청으로 확인한다. 제품 사용자가 켤 이유는 없다.
         if (std.c.getenv("MARU_WEB_OSR_TEST_URL")) |test_url| navigate(gpa, layout.surface_id, std.mem.span(test_url));
@@ -2212,6 +2218,23 @@ pub fn parkedCount() usize {
 pub fn notePageOpened(surface_id: u64) void {
     page_opened_pending[page_opened_next] = surface_id;
     page_opened_next = (page_opened_next + 1) % page_opened_pending.len;
+}
+
+/// W9c① 3 회차 F1: 에이전트가 이 탭을 열었다(grant 가 탭과 함께 생겼다) — 콘솔을 처음부터 `who`(그 grant 로 읽을 때의 읽는 쪽)에 묶는다.
+/// 기록이 아직 없으면(`browser.open` — 첫 배치 전) 기록이 생길 때 묶는다. 페이지가 연 탭은 기록이 이미 있다(`popup_created`).
+pub fn consoleBirthReader(surface_id: u64, who: u64) void {
+    if (surfaces.getPtr(surface_id)) |s| return s.console.latchAtBirth(who);
+    console_birth_pending[console_birth_next] = .{ .surface_id = surface_id, .who = who };
+    console_birth_next = (console_birth_next + 1) % console_birth_pending.len;
+}
+
+fn takeConsoleBirth(surface_id: u64) u64 {
+    for (&console_birth_pending) |*b| if (b.surface_id == surface_id) {
+        const who = b.who;
+        b.* = .{};
+        return who;
+    };
+    return 0;
 }
 
 fn takePageOpened(surface_id: u64) bool {
@@ -6580,6 +6603,37 @@ test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오
         defer gpa.free(empty);
         try std.testing.expectEqualStrings("[]", empty);
     }
+}
+
+test "W9c① 3 회차 F1: 에이전트가 연 탭의 콘솔은 태어날 때 묶인다 — 기록이 아직 없으면 첫 배치가 기록을 만들 때, 있으면(페이지가 연 탭) 곧" {
+    const gpa = std.testing.allocator;
+    gpa_ref = gpa;
+    try std.testing.expectEqual(@as(usize, 0), surfaces.count());
+    // 멈춘 엔진 — 배치가 기록만 만들고 sidecar 를 띄우지 않는다.
+    latched = .version_mismatch;
+    defer {
+        for (surfaces.values()) |*s| freeSurface(gpa, s);
+        surfaces.deinit(gpa);
+        surfaces = .empty;
+        latched = null;
+        state = .off;
+    }
+    // browser.open — 탭은 있는데 기록은 첫 배치에 생긴다.
+    consoleBirthReader(61, 7);
+    ensure(gpa, .{ .surface_id = 61, .width_px = 10, .height_px = 10, .visible = true }, 1000, 0);
+    // 페이지가 연 탭 — 기록이 먼저 있다.
+    try surfaces.put(gpa, 62, .{ .record = .{ .surface_id = 62, .size = .{ .width = 10, .height = 10, .scale = 1 }, .hidden = false }, .created = true });
+    consoleBirthReader(62, 7);
+    for ([_]u64{ 61, 62 }) |id| {
+        apply(gpa, .{ .console_message = .{ .browser = id, .level = .@"error", .text = "boom" } }, 0);
+        apply(gpa, .{ .page_started = id }, 0); // 첫 읽기 전에 페이지가 스스로 옮겨 갔다
+        apply(gpa, .{ .console_message = .{ .browser = id, .text = "login" } }, 0);
+        const got = try consoleRead(gpa, gpa, id, 7, false);
+        defer gpa.free(got);
+        try std.testing.expectEqualStrings("[{\"level\":\"error\",\"text\":\"boom\"},{\"level\":\"log\",\"text\":\"login\"}]", got);
+    }
+    // 묶음은 한 번 쓰고 지운다 — 같은 번호의 새 기록이 다시 묶이지 않는다.
+    try std.testing.expectEqual(@as(u64, 0), takeConsoleBirth(61));
 }
 
 test "W9c②: 대화상자의 원인은 도착할 때 팝업 가족의 마지막 에이전트·사용자 시각으로 한 번 정한다 — 다른 가족은 세지 않고, 사용자가 묻는 닫기의 떠나기 확인은 사용자 것" {

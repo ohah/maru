@@ -8174,6 +8174,11 @@ fn adoptAgentTab(pane: u64, tab: u64) bool {
         control_pane_grant_store.removeSurface(tab);
         return false;
     };
+    // W9c① 3 회차 F1: grant 가 탭과 함께 생겼다(앞에 사용자가 지나온 사이트가 없다) — 콘솔을 처음부터 그 grant 에 묶는다. 묶는 값은 뒤의
+    // 읽기가 쓸 값과 같아야 한다 — 그 pane 의 연결은 이 grant 로 인가되고(cap 은 탭을 열 수 없다 — `browser.open` 은 pane 이 있어야 한다),
+    // 읽는 쪽은 `consoleAuthorizer` 가 정한다.
+    const id = control_pane_grant_store.idOf(pane, tab, .browser).?;
+    session_mod.web_osr.consoleBirthReader(tab, consoleAuthorizer(.{ .pane_grant = .{ .pane = pane, .target = tab, .scope = .browser, .id = id } }));
     return true;
 }
 
@@ -13627,6 +13632,26 @@ test "W9c①: Chromium 탭의 console 은 DevTools·op 줄 없이 곧 답한다 
     // 한 번도 배치되지 않은 탭 — 오류가 아니라 빈 목록.
     try control_pane_grant_store.grant(.{ .pane = 5, .target = 86, .scope = .browser });
     try w9c1Expect(try w9c1Console(86, w9c1Grant(5, 86), false), &.{});
+}
+
+test "W9c① 3 회차 F1: 에이전트가 연 탭(adoptAgentTab)은 그 grant 로 읽는 첫 읽기가 탭이 생긴 뒤의 줄을 다 본다 — 확인 모달로 허락한 기존 탭은 여전히 지금 문서만" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 89, 90 });
+    defer w9c2Forget(ta, &.{ 89, 90 });
+    try std.testing.expect(adoptAgentTab(5, 89)); // 에이전트가 연 탭(페이지가 연 팝업도 같은 자리)
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 90, .scope = .browser }); // 확인 모달로 허락한 사용자의 탭
+    for ([_]u64{ 89, 90 }) |tab| {
+        session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = tab, .level = .@"error", .text = "Uncaught TypeError: boom" } });
+        session_mod.web_osr.testApply(ta, .{ .page_started = tab }); // 첫 읽기 전에 페이지가 스스로 옮겨 갔다
+        session_mod.web_osr.testApply(ta, .{ .console_message = .{ .browser = tab, .text = "login" } });
+    }
+    try w9c1Expect(try w9c1Console(89, w9c1Grant(5, 89), false), &.{ "error:Uncaught TypeError: boom", "log:login" });
+    try w9c1Expect(try w9c1Console(90, w9c1Grant(5, 90), false), &.{"log:login"});
 }
 
 test "W9c①: 512 KiB 를 넘는 콘솔 결과는 browser.consoleChunk 조각으로 간다" {

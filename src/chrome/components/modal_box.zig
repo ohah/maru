@@ -65,9 +65,24 @@ pub fn layout(content_cols: u32, content_rows: u32, p: props.ChromeProps, tk: *c
     };
 }
 
-/// 박스 배경 quad + focus 테두리를 emit한다(notice/confirm 공유). base(corner/border=0)면 셀 배경 + Op.border 셀,
-/// rich(>0)면 둥근 quad + quad 테두리. 콘텐츠(text/fillCells)는 호출자가 이 뒤에 emit해 그 위에 그려진다.
+/// 박스 배경 quad + focus 테두리를 emit한다(notice/confirm 공유). base(corner/border=0)면 셀 배경(외곽선 없음),
+/// rich(>0)면 둥근 quad + quad 테두리 — lowering 이 패딩만큼 키워 그린다(`visibleRect`). 콘텐츠(text/fillCells)는 호출자가 이 뒤에 emit해 그 위에 그려진다.
 pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
+    try out.append(arena, .{ .quad = frameQuad(box, p) });
+}
+
+/// 상자가 **보이는** 사각형. rich lowering 은 패널(draw 의 첫 둥근 quad — 여기서는 `frame` 의 quad)을 사방
+/// `modal_padding_px` 만큼 키워 그린다(`draw.Op.Quad.panelRect` — macOS `metal_lowering`, Windows `solid_rects.flattenModal`).
+/// 모서리 0(기반 토큰)이면 키우지 않는다. **바깥 클릭 판정은 이것으로 한다** — `rect` 로 하면 보이는 패널 안쪽
+/// 가장자리 띠(12px)를 눌러도 「바깥」이 되어 상자가 닫혔다(2026-10-14 적대적 검증).
+pub fn visibleRect(box: Box, p: props.ChromeProps) draw.Rect {
+    const q = frameQuad(box, p);
+    const r = q.corner_radii;
+    if (r[0] == 0 and r[1] == 0 and r[2] == 0 and r[3] == 0) return q.rect;
+    return q.panelRect(p.shape.modal_padding_px);
+}
+
+fn frameQuad(box: Box, p: props.ChromeProps) draw.Op.Quad {
     const bg_r = p.shape.corner_radius_px;
     const bw = p.shape.border_width_px;
     // 외곽선(별도 .border op)은 두지 않는다 — 옛 tui 룩(2026-08-19 제거)에서 박스보다 밝은 외곽선이 색이 튀어 어색했다(사용자 피드백).
@@ -75,7 +90,7 @@ pub fn frame(box: Box, p: props.ChromeProps, arena: std.mem.Allocator, out: *std
     // 둥근 모서리 + 얇은 **focus_accent 테두리** + 그림자로 떠 보이게 한다(rich 외곽선은 quad의 border_widths가 그린다).
     // 테두리 role = focus_accent(모달 버튼 [확인]과 같은 톤 — 사용자 요청 "모달 테두리를 닫기 버튼 색 톤으로"). 중립 테마는
     // focus_accent가 옅은 중립이라 은은한 외곽선, accent를 준 테마(dark_pink 등)는 그 accent 톤 외곽선으로 버튼과 코히어런트.
-    try out.append(arena, .{ .quad = .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    return .{ .rect = box.rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent };
 }
 
 /// 콘텐츠 row(0-based) 상단 y(px). 콘텐츠 영역 inner_y에서 row행 아래.

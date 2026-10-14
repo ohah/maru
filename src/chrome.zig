@@ -13,6 +13,7 @@
 pub const draw = @import("chrome/draw.zig");
 pub const tokens = @import("chrome/tokens.zig");
 pub const props = @import("chrome/props.zig");
+pub const solid_rects = @import("chrome/solid_rects.zig"); // 테두리 계산 없는 단색 백엔드(Windows D3D11)용 fill·quad 평탄화
 pub const input = @import("chrome/input.zig");
 pub const ui = struct {
     /// 논리 줄 하나를 시각 행으로 나누는 랩 계산(CJK 정확). 편집기와 커밋 메시지 상자가 함께 쓴다.

@@ -309,8 +309,7 @@ pub fn lower(
                     // 뚫고 보였다(실제 앱 1배율 캡처로 재현). 셀이 패널 순서를 따르게, 보이는 패널(패딩 포함) 안에 중심이 든
                     // 앞 draw 의 셀을 비운다 — 패널은 그 draw 의 첫 op 이라 이 draw 의 셀은 아직 없다. **앞 묶음의 격자도 본다**
                     // (2026-10-10) — 위상이 다른 앞 오버레이는 다른 격자에 있고, 판정은 셀마다 자기 격자 원점으로 픽셀 중심을 잰다.
-                    const p = panelPadding(q, tk);
-                    const box = q.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
+                    const box = q.panelRect(tk.space.modal_padding_px);
                     for (grids[0 .. part_of[draw_index] + 1]) |*hg| hideCellsUnder(hg, who, cw, ch, box, surface_bg, surface_fg);
                     if (cursor) |c| {
                         const cg = &grids[cursor_part];
@@ -387,15 +386,11 @@ fn appendWidgetQuad(quads: *std.ArrayList(metal_frame.GpuQuad), allocator: std.m
     appendQuad(quads, allocator, q.rect, q.corner_radii, q.border_widths, q.fill_role, q.border_role, tk, 3, q.clip);
 }
 
-/// 패널이 사방으로 커지는 폭 — 컴포넌트가 정했으면 그것(`Quad.panel_padding_px`), 아니면 토큰. 그림·가림(`hideCellsUnder`)이 같은 값을 쓴다.
-fn panelPadding(q: chrome.draw.Op.Quad, tk: *const chrome.Tokens) u16 {
-    return q.panel_padding_px orelse tk.space.modal_padding_px;
-}
-
+/// 패널 quad 를 보이는 사각형(`Quad.panelRect` — 컴포넌트의 `panel_padding_px`, 없으면 토큰)으로 키워 그림자와 함께 낸다.
+/// 앞 오버레이 가림(`hideCellsUnder`)과 Windows 확인 모달(`chrome.solid_rects.flattenModal`)이 같은 사각형을 쓴다.
 fn appendModalQuad(quads: *std.ArrayList(metal_frame.GpuQuad), shadows: *std.ArrayList(metal_frame.GpuShadow), allocator: std.mem.Allocator, q: chrome.draw.Op.Quad, tk: *const chrome.Tokens) void {
     // content rect와 box shadow가 같은 outset box를 공유해야 padding·border·shadow의 가장자리가 어긋나지 않는다.
-    const p = panelPadding(q, tk);
-    const box = q.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
+    const box = q.panelRect(tk.space.modal_padding_px);
     // **여기만 clip을 전달하지 않는다.** 위에서 rect를 padding만큼 **키웠으므로** component가 실은 clip
     // (키우기 전 rect 기준)과 좌표계가 어긋난다. 그대로 적용하면 방금 더한 padding과 그 그림자가 잘린다.
     // clip을 함께 키우는 것도 답이 아니다 — clip은 "여기까지만 그린다"는 약속이라 넓히면 그 약속이 깨진다

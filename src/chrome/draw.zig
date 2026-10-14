@@ -217,6 +217,14 @@ pub const Op = union(enum) {
         /// 결과를 캐시하므로 rect를 실으면 스크롤 1px마다 캐시 키가 바뀐다. quad는 매 프레임 새로 만들어
         /// 캐시가 없으므로 rect를 직접 실는 쪽이 단순하다.
         clip: ?Rect = null,
+
+        /// 이 quad 가 draw 의 **패널**일 때 보이는 사각형 — `rect` 를 사방 `panel_padding_px`(없으면 토큰의 `modal_padding_px`)만큼
+        /// 키운다. rich lowering 이 패널을 이 사각형으로 그리고(macOS `metal_lowering` 의 패널·그림자·가림 셀, Windows 확인 모달),
+        /// 배치(`popup_box.Placement.visible_outset_px`)가 같은 폭을 센다. 호스트마다 패딩과 outset 을 따로 적으면 한쪽만 키운다.
+        pub fn panelRect(self: Quad, default_padding_px: u16) Rect {
+            const p = self.panel_padding_px orelse default_padding_px;
+            return self.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
+        }
     };
     pub const GradientKind = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
 };
@@ -229,3 +237,12 @@ pub const ChromeDraw = struct {
     /// 각 열의 찾기·직각 완성 목록처럼 독립된 최상위 패널은 자신의 배경·그림자를 가진다 — 모서리 0 인 첫 quad 도 GPU 패널로 친다.
     independent_panel: bool = false,
 };
+
+test "Quad.panelRect: 패널 패딩이 있으면 그것, 없으면 토큰 패딩만큼 사방으로 키운다" {
+    const testing = @import("std").testing;
+    const q: Op.Quad = .{ .rect = .{ .x = 100, .y = 50, .w = 200, .h = 80 }, .fill_role = .surface_bg };
+    try testing.expectEqual(Rect{ .x = 88, .y = 38, .w = 224, .h = 104 }, q.panelRect(12));
+    var tight = q;
+    tight.panel_padding_px = 1; // 촘촘한 목록(자동완성)은 테두리 폭만 준다 — 토큰보다 우선한다
+    try testing.expectEqual(Rect{ .x = 99, .y = 49, .w = 202, .h = 82 }, tight.panelRect(12));
+}

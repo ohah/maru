@@ -24258,7 +24258,7 @@ pub const AppSession = struct {
             .metrics = self.buildCellMetrics(),
             // C4b: 박스 모양 토큰을 tokens.space에서(단일 출처). 제품 토큰은 rich 하나(radius>0 → 둥근 GPU quad)고, 0 은 기반 토큰
             // (Tokens.base, 테스트만)이다 — 0 이면 lowering 일반 규칙대로 독립 패널이 아닌 직각 quad 가 셀 배경이 된다.
-            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px },
+            .shape = .fromTokens(&tk),
             // 활성 pane rect(셀 그리드 영역) — find 오버레이가 활성 pane 우상단에 붙도록(findLayout 단일 출처).
             // palette는 안 쓴다(창 중앙 유지). active_pane_rect는 recomputeActivePaneRect가 포커스·resize마다 갱신.
             .active_pane = .{ .x = self.active_pane_rect.x, .y = self.active_pane_rect.y, .w = self.active_pane_rect.w, .h = self.active_pane_rect.h },
@@ -53074,7 +53074,7 @@ test "notice through the product overlay painter: a long NFD/emoji message wraps
     for ([_]chrome.tokens.Tokens{ chrome.tokens.Tokens.base(theme), chrome.tokens.Tokens.rich(theme) }) |tk| {
         const p = chrome.props.ChromeProps{
             .metrics = .{ .cell_width_px = cw, .cell_height_px = ch, .sidebar_width_px = 0, .backing_width_px = 480, .backing_height_px = 400 },
-            .shape = .{ .corner_radius_px = tk.space.corner_radius_px, .border_width_px = tk.space.border_width_px, .modal_padding_px = tk.space.modal_padding_px },
+            .shape = .fromTokens(&tk),
         };
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();

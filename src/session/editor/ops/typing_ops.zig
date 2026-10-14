@@ -211,8 +211,9 @@ fn keywordHit(grammar: language.Grammar, code: []const u8, typed: u8) bool {
     };
 }
 
-/// 낱말 내어쓰기가 기준으로 삼을 **위쪽 내용 줄의 머리**(문서 byte) — 그 줄부터 caret 까지를 트리에 물어야 그 줄이 여러 줄 문자열 안인지 안다
-/// (최종 검토). caret 줄이 들여쓰기 + 다 친 낱말이 아니면(내어쓰기를 안 탄다) `null` — 묻는 범위를 넓히지 않는다.
+/// 낱말 내어쓰기가 기준으로 삼을 **위쪽 내용 줄의 첫 글자**(문서 byte) — 호스트가 그 한 byte 를 트리에 물어야 그 줄이 여러 줄 문자열 안인지
+/// 안다(최종 검토; capture 는 통째로 오므로 그 문자열의 위 줄들도 함께 덮인다). 줄 머리부터 caret 까지 물으면 위 줄이 압축한 한 줄일 때 키
+/// 하나에 그 줄 전체를 묻는다(4회차). caret 줄이 들여쓰기 + 다 친 낱말이 아니면(내어쓰기를 안 탄다) `null` — 더 묻지 않는다.
 pub fn keywordQueryStart(content: []const u8, lines: LineIndex, grammar: language.Grammar, lo: usize, typed: u8) ?usize {
     if (grammar != .ruby and grammar != .python) return null;
     const line = lines.line(lines.lineAt(lo)) orelse return null;
@@ -225,7 +226,9 @@ pub fn keywordQueryStart(content: []const u8, lines: LineIndex, grammar: languag
     while (n > floor) {
         n -= 1;
         const pl = lines.line(n) orelse return null;
-        if (std.mem.trimStart(u8, content[pl.start..pl.contentEnd()], " \t").len > 0) return pl.start;
+        const pt = content[pl.start..pl.contentEnd()];
+        const rest = std.mem.trimStart(u8, pt, " \t");
+        if (rest.len > 0) return pl.start + (pt.len - rest.len);
     }
     return null;
 }
@@ -622,6 +625,11 @@ test "INDF5 커서 여럿의 겹침 가드는 줄 머리에 닿은 앞 커서도
         const s1 = std.mem.lastIndexOf(u8, content, "\"\"\"").? + 3;
         const lo = content.len - 1;
         try std.testing.expectEqual(std.mem.lastIndexOf(u8, content, "\"\"\"").?, keywordQueryStart(content, lines, .python, lo, ':').?);
+        // 들여쓴 위 줄이면 그 줄의 첫 글자(줄 머리가 아니다 — 묻는 것은 그 한 byte).
+        const nested = "if a:\n        x = 1\n    else\n";
+        var nl = try line_index.build(a, nested);
+        defer nl.deinit();
+        try std.testing.expectEqual(std.mem.indexOf(u8, nested, "x = 1").?, keywordQueryStart(nested, nl, .python, nested.len - 1, ':').?);
         try std.testing.expect(keywordQueryStart(content, lines, .python, lo, 'x') == null); // 낱말을 다 치지 않았다
         const spans = [_]literals.Span{.{ .start = s0, .end = s1, .kind = .string }};
         var with = try planTyping(a, content, &.{Selection.at(lo)}, ":", true, .{ .lines = lines, .brackets = "()[]{}", .grammar = .python, .unit = four, .literal_spans = &spans });

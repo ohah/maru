@@ -103,7 +103,8 @@
 - **묻는 범위는 필요한 데까지만**(키 입력 하나의 값 — 쿼리 한 번이 caret 자리 3 µs · 한 줄 15 µs · 64 KiB 5.4 ms, ReleaseFast 실측). 한
   글자 입력은 커서마다 caret 자리(`[lo-1, hi+1)`)만. 공백뿐인 줄의 닫는 괄호는 caret 을 품은 트리 조상 중 그 여는 괄호로 시작하는 가장
   안쪽 것의 머리부터(잘 짜인 코드면 짝 찾기가 거기서 멈춘다 — 없으면 상한 `reindent_scan_limit`). 낱말 내어쓰기의 낱말을 다 쳤으면 기준이 될
-  위쪽 내용 줄의 머리부터(`typing_ops.keywordQueryStart`). Enter 는 커서마다 그 줄 머리부터 caret 까지. 범위는 정렬해 합치고,
+  위쪽 내용 줄의 첫 글자 한 byte 도(`typing_ops.keywordQueryStart` — capture 는 통째로 오므로 그 문자열이 덮는 위 줄들도 안다; 줄 머리부터
+  caret 까지 물으면 위 줄이 압축한 한 줄일 때 키 하나에 그 줄을 다 묻는다, 최종 검토 4회차). Enter 는 커서마다 그 줄 머리부터 caret 까지. 범위는 정렬해 합치고,
   `literal_query_limit`(1024) 개를 넘으면 하나로 묶고, 합이 `literal_window_limit`(1 MiB)를 넘으면 트리 없이 간다(호스트
   `app_session/editor/mod.zig`).
 - **자동 닫기**(VS Code `notIn` 의 자리): 따옴표는 문자열 안이면 닫지 않고, `'`·`` ` `` 는 주석 안에서도 닫지 않는다(`"` 는 닫는다). VS Code

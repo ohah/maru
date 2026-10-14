@@ -48,9 +48,15 @@ def stage_app(app):
 
 class GUIApp:
     """Expose waiter status separately from the actual application's PID and lifetime."""
-    def __init__(self, app, env, output):
+    def __init__(self, app, env, output, expected_binaries=None):
         self.output = output
         self.executable = stage_app(app)
+        if expected_binaries is not None:
+            # Validate the reused staged bundle as well as the original build artifact.
+            for name, expected in expected_binaries.items():
+                actual = self.executable.parent / name
+                if hashlib.sha256(actual.read_bytes()).hexdigest() != expected:
+                    raise RuntimeError('staged GUI binary differs from manifest: ' + name)
         self.label = 'dev.maru.test.candidate.'+uuid.uuid4().hex
         self.domain = f'gui/{os.getuid()}/{self.label}'
         self.returncode = None

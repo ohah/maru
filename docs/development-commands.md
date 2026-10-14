@@ -112,6 +112,10 @@ sshd로 실제 SSH를 실행해 기존/새 프로세스, 환경 전달 차단, �
 `python3 tools/remote-restart-app/test_ended_oracle.py --artifact <GUI artifact>`는 실제
 로그의 host/runtime·거부·terminal·입력 닫힘·GUI 표시 증거를 변조해 판정을 검사한다.
 이 시나리오는 원래 host가 연결을 닫은 원인이나 PartialFrame 정책의 검증은 아니다.
+`python3 tools/remote-restart-app/test_ended_contract.py`와
+`python3 tools/shared-restore-app/test_gui_launch.py`는 화면 없이 판정의 신원·순서·늦은
+오류, 성공 결과 게시 시점, 실제 제어 프로세스 정리·보존 및 staged 바이너리 변경 거부를
+검사한다. 이 검사들의 통과를 실제 GUI 실행의 통과로 세지 않는다.
 profile별 resume는 `1:<name>:<offset>`·`2:<name>:<offset>:<generation>`이며 같은 이름을
 다른 profile에 사용할 수 있지만 같은 profile/name 중복은 거부한다. `agent-hooks check-native`
 는 두 provider의 준비 응답과 완료 표식을 bounded stdin에서 검증하는 준비 단계 helper다.

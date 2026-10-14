@@ -1573,3 +1573,7 @@ OS/I/O 없는 상태 전이를 검사한다. `python3 tools/test-editor-save-as-
 `mise exec -- zig build test-editor-save-as-write test-editor-local-save test-editor-untitled`
 (Debug/ReleaseFast)는 새 대상 writer·모델 전환 기반과 기존 쓰기 경로를 검사한다.
 `python3 tools/test-editor-save-as-write-adversarial.py`는 격리 사본의 실제 쓰기·전환 결함과 정상/복원 대조군을 대조한다. 제품 UI 연결의 검증은 아니다.
+
+`mise exec -- zig build test-editor-save-as-reservation`(Debug/ReleaseFast)과
+`python3 tools/test-editor-save-as-reservation.py`는 문서/목적지 예약·늦은 콜백 신원·
+OOM·접수 뒤 취소 판정을 검증한다. NSSavePanel과 실제 저장 진입점은 아직 미연결이다.

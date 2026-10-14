@@ -5756,6 +5756,14 @@ pub fn build(b: *std.Build) void {
     run_batch_coordinator.setCwd(b.path("."));
     b.step("test-editor-project-replace-batch-coordinator", "Run mixed source atomic model commit publication and save judges").dependOn(&run_batch_coordinator.step);
     if (builtin.os.tag == .macos and target.result.os.tag == .macos) macos_only_test_step.dependOn(&run_batch_coordinator.step);
+    const reservation_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/session/editor/ops/save_as_reservation.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    const run_reservation = b.addRunArtifact(reservation_tests);
+    b.step("test-editor-save-as-reservation", "Run Save As document and destination reservation tests").dependOn(&run_reservation.step);
+    test_step.dependOn(&run_reservation.step);
     const save_as_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/session/editor/ops/save_as.zig"),
         .target = target,

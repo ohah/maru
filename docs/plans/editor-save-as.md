@@ -140,3 +140,44 @@ BOM/CRLF 보존, epoch 변경, 다른 문서 lease, 준비 할당 실패를 검�
 격리 사본의 결함 주입 검증은 조기 전환·원본 Target/epoch 무시·목적지 CAS 무시·
 배타 생성 무시·현재 본문을 잘못 clean으로 게시하는 변이를 실제 실행 단언으로 검출한다.
 정상·복원 대조군은 10개(의미 테스트 6개와 공용 모듈 테스트 4개)를 모두 실행한다.
+
+## 제품 연결 전 문서·목적지 예약 기반
+
+2026-10-14 사용자가 권장한 macOS 저장 대화상자로 다음 작업을 진행하도록 지시했다.
+진입점은 명령 팔레트와 ⌘⇧S, 기본 위치는 현재 파일명/부모 디렉터리이며 workspace
+밖도 선택하는 계약으로 연결한다. 저장 순서·접수 전 취소 계약은 이미 승인한 내용을 유지한다.
+아직 이 명령이나 NSSavePanel을 제품에 연결한 상태는 아니다.
+
+`ops/save_as_reservation.zig::Store(Identity)`는 실제 document_registry.DocumentIdentity를
+키로 받는 main-actor 예약 기반이다. 같은 문서의 두 요청은 거절하고 독립 문서는
+동적 배열에 보존한다. 단조 증가 요청 ID와 발신 창 generation/surface를 함께
+대조하여 취소된 패널의 늦은 콜백이 새 요청에 붙지 않도록 한다. ID 고갈은 되감지 않는다.
+
+caller가 실제 부모 디렉터리 신원·volume의 이름 비교 규칙으로 만든 namespace key와,
+기존 파일의 device/inode를 전달한다. 같은 이름은 inode가 바뀌어도 겹치지 않고,
+다른 이름의 같은 실제 파일도 동시 예약하지 않는다. 이 모듈이 경로 canonicalization을
+수행하거나 앱에서 이미 열린 독립 문서를 검사한 것으로 보고하지 않는다.
+
+예약 키는 소유 복사한다. 등록/키 복사 OOM은 아직 접수하지 않은 상태와 다음 요청
+번호를 보존한다. 접수 뒤 취소나 조기 성공으로 예약을 풀지 않는다. 실제 실패나
+쓰기·경로 전환 성공을 정산한 뒤 키를 해제하고 후속 저장 경로를 caller에 반환한다.
+성공 뒤 일반 저장은 caller가 전환한 현재 문서 경로를 사용해야 한다. 예약은 문서
+lease를 보존하지 않으므로 host actor가 request lease를 별도로 유지해야 한다.
+
+남은 연결: NSSavePanel·ABI request/result 배선, 실제 경로 canonicalization/열린 대상
+검사, 접수 경로 전체의 문서 예약 조회와 후속 snapshot/receipt 보존, 공유 뷰 표시
+경로·백업·syntax/LSP 전환, 닫기·정상 종료 정산이다. 예약 모듈 테스트를 실제 OS
+대화상자나 제품 저장 순서의 실행 증거로 대신하지 않는다.
+
+검증 명령: `zig build test-editor-save-as-reservation`(Debug/ReleaseFast).
+`python3 tools/test-editor-save-as-reservation.py`는 요청 번호 재사용·발신 신원 무시·
+문서/이름/실제 파일 충돌 무시·접수 뒤 취소 해제 변이와 정상/복원 대조군을 검사한다.
+
+콜백 Token 일치는 살아 있는 창/문서의 권한 확인을 대신하지 않는다. 창이 닫히면
+미접수 요청을 취소하고, callback을 accept하기 전에 host가 실제 창 generation과
+문서 lease·저장 대상 epoch를 다시 확인해야 한다. 접수된 요청은 UI가 없어져도
+request lease와 writer 결과를 정산한다.
+
+순수 판정의 std.meta.eql 값 비교는 sans-io 허용 목록에 이유와 함께 등록했다.
+경계 판정자의 OS namespace 허용 결함과 순수 비교 오탐 결함을 각각 주입해
+기존 금지 호출 단언·실제 ops 폴더 검사에서 검출하고 정상/복원 대조군을 확인했다.

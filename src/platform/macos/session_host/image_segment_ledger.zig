@@ -58,6 +58,9 @@ pub const ImageSegmentPrepare = union(enum) {
 
 pub const HostBudget = struct {
     bytes: u64 = 0,
+    /// 반환(release·연결 종료·채널 상실)으로 풀린 바이트의 누적 — 단조 증가한다. host 상한에 막힌 연결을 깨우는 신호다(§4.3).
+    /// `bytes` 의 증감으로 보면 같은 반복의 다른 청구가 반환을 가리고, 자기 롤백(`cancel`)도 반환처럼 보인다.
+    returned_bytes: u64 = 0,
 };
 
 /// 「전송 불가」 진단(§4.4)의 중복 거름 — 같은 (stream, image_id, generation) 은 한 줄만 적는다. 그 이미지는 base 에 적히지 않아
@@ -186,12 +189,14 @@ pub const Ledger = struct {
             self.ignored_releases +|= 1;
             return .ignored;
         }
+        self.host.returned_bytes +%= self.entries[index].bytes;
         self.removeAt(index);
         return .returned;
     }
 
     /// 연결 종료·이미지 채널 상실: 상태와 무관하게 전부 반환한다. 이후 그 id 들의 `cancel`·`release` 는 아무것도 안 한다.
     pub fn releaseAll(self: *Ledger) void {
+        self.host.returned_bytes +%= self.bytes;
         self.host.bytes -= self.bytes;
         self.bytes = 0;
         self.len = 0;
@@ -242,10 +247,13 @@ test "이미지 원장: 발급한 세그먼트는 release 한 번으로 연결�
     try testing.expectEqual(@as(u64, 0), ledger.bytes);
     try testing.expectEqual(@as(u64, 0), host.bytes);
     try testing.expectEqual(@as(u64, 0), ledger.ignored_releases);
+    // 반환 누적은 host 상한에 막힌 다른 연결을 깨우는 신호다.
+    try testing.expectEqual(@as(u64, 8 * mib), host.returned_bytes);
 
     // 두 번째 release 는 아무것도 안 돌려준다 — 예산이 음수 쪽으로 새지 않는다.
     try testing.expectEqual(ReleaseOutcome.ignored, ledger.release(id));
     try testing.expectEqual(@as(u64, 0), host.bytes);
+    try testing.expectEqual(@as(u64, 8 * mib), host.returned_bytes);
     try testing.expectEqual(@as(u64, 1), ledger.ignored_releases);
 }
 
@@ -275,6 +283,8 @@ test "이미지 원장: 준비 취소는 준비 상태에서 한 번만 반환�
     try testing.expect(!ledger.cancel(kept));
     try testing.expectEqual(@as(u64, 2 * mib), host.bytes);
     try testing.expectEqual(@as(usize, 1), ledger.count());
+    // 롤백은 반환 누적에 들지 않는다 — 자기 청구를 되돌린 것이지 다른 연결이 기다리는 예산이 풀린 것이 아니다.
+    try testing.expectEqual(@as(u64, 0), host.returned_bytes);
     // 반환된 id 는 다시 발급할 수 없다.
     try testing.expect(!ledger.issue(rolled_back));
     try testing.expect(!ledger.issue(kept));
@@ -295,6 +305,7 @@ test "이미지 원장: 연결 종료·채널 상실은 준비와 발급을 모�
     try testing.expectEqual(@as(u64, 0), ledger.bytes);
     // 다른 연결의 몫은 그대로다.
     try testing.expectEqual(@as(u64, 5 * mib), host.bytes);
+    try testing.expectEqual(@as(u64, 13 * mib), host.returned_bytes);
 
     // 롤백 중이던 배치 준비물과 늦게 온 release 가 다시 반환하지 않는다.
     try testing.expect(!ledger.cancel(prepared));

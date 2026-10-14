@@ -130,6 +130,9 @@ pub const ImageChannelLoss = enum {
 pub const ImageSegmentPrepare = image_segment_ledger.ImageSegmentPrepare;
 pub const PreparedImageSegment = image_segment_ledger.PreparedImageSegment;
 
+/// 판정자 전용 — 공유 메모리 생성을 이 오류로 실패시킨다(fd·커널 자원 고갈을 판정자에서 만들 수 없다). 제품 빌드에서는 칸이 없다.
+pub var test_image_segment_create_failure: if (builtin.is_test) ?image_segment.CreateError else void = if (builtin.is_test) null else {};
+
 /// 이미지 fd 의 한 읽기 턴에서 받는 최대 바이트(release 256 개).
 pub const image_channel_read_bytes: usize = 256 * image_channel_wire.release_len;
 
@@ -419,6 +422,12 @@ pub const Client = struct {
     image_capacity_wake: bool = false,
     /// 「전송 불가」 진단을 이미 적은 (stream, image, generation)(§4.4).
     untransmittable_memo: image_segment_ledger.UntransmittableMemo = .{},
+    /// 공유 메모리를 못 만들어 미룬 이미지가 있다(그 오류) — owner 의 재시도 타이머가 깨운다(§4.1). 원장이 빈 정지 화면에서는 반환이
+    /// 오지 않아 다른 무엇도 깨우지 않는다. 채널을 잃으면 지운다.
+    image_create_failure: ?image_segment.CreateError = null,
+    /// host 전체 상한(HostBytesFull)에 막혀 미룬 이미지가 있다 — 다른 연결이 세그먼트를 돌려주면 owner 가 깨운다(§4.3). 이 연결의
+    /// 반환은 자기 원장 사건이라 이미 깨운다. 채널을 잃으면 지운다.
+    image_host_budget_wait: bool = false,
 
     pub fn create(
         allocator: std.mem.Allocator,
@@ -742,10 +751,24 @@ pub const Client = struct {
         if (!snapshot and ledger.hasOutstanding(stream_id, image_id)) return .deferred;
         const segment_id = ledger.reserve(stream_id, image_id, generation, byte_len) catch |err| return switch (err) {
             error.TooLargeForHost => self.imageUntransmittable(stream_id, image_id, generation, pixels.len),
-            error.EmptySegment, error.ConnectionCountFull, error.ConnectionBytesFull, error.HostBytesFull => .deferred,
+            error.HostBytesFull => {
+                self.image_host_budget_wait = true;
+                return .deferred;
+            },
+            error.EmptySegment, error.ConnectionCountFull, error.ConnectionBytesFull => .deferred,
         };
-        // 공유 메모리를 못 만들면(fd·커널 자원 부족) 청구를 되돌리고 미룬다 — 다음 투영이 다시 청한다.
-        const created = image_segment.create(pixels) catch null;
+        // 공유 메모리를 못 만들면(fd·커널 자원 부족) 청구를 되돌리고 미룬다. 원장이 비어 있으면 반환이 오지 않으므로 owner 의
+        // 재시도 타이머가 다시 투영한다 — 원장에 다른 세그먼트가 있어도 건다(버려진 배치의 세그먼트는 정지 화면에서 안 돌아온다).
+        const attempt = if (builtin.is_test and test_image_segment_create_failure != null)
+            @as(image_segment.CreateError!?image_segment.Segment, test_image_segment_create_failure.?)
+        else
+            image_segment.create(pixels);
+        const created = attempt catch |err| {
+            _ = ledger.cancel(segment_id);
+            self.image_create_failure = err;
+            return .deferred;
+        };
+        // 0 B 는 위에서 걸렀다 — 세그먼트가 없을 수 없다.
         const segment = created orelse {
             _ = ledger.cancel(segment_id);
             return .deferred;
@@ -793,6 +816,27 @@ pub const Client = struct {
         if (self.connection.noteImageCapacity()) self.image_capacity_wake = true;
     }
 
+    /// 공유 메모리 생성이 실패해 미룬 이미지가 있으면 그 오류(§4.1) — owner 의 재시도 타이머가 본다.
+    pub fn imageCreateFailure(self: *const Client) ?image_segment.CreateError {
+        return self.image_create_failure;
+    }
+
+    /// 재시도 타이머가 울렸다 — 표시를 지우고 미룬 stream 을 깨운다. 다시 실패하면 투영이 표시를 다시 건다.
+    pub fn retryImageCreate(self: *Client) void {
+        self.image_create_failure = null;
+        self.noteImageCapacity();
+    }
+
+    /// 다른 연결이 host 예산에 세그먼트를 돌려줬다(§4.3) — host 상한에 막혀 미룬 이미지가 있으면 깨운다. 큰 한 장이 우선권을
+    /// 쥐었고 원장이 비지 않았으면 깨우지 않는다(그 반환이 깨운다 — `imageReadReady` 와 같은 규칙).
+    pub fn wakeImageHostBudgetWait(self: *Client) void {
+        if (!self.image_host_budget_wait) return;
+        self.image_host_budget_wait = false;
+        const ledger = self.imageLedger() orelse return;
+        if (self.connection.image_priority != null and ledger.count() != 0) return;
+        self.noteImageCapacity();
+    }
+
     /// 용량 사건의 깨움을 꺼낸다 — owner 가 이 연결의 producer 를 예약한다.
     pub fn takeImageCapacityWake(self: *Client) bool {
         defer self.image_capacity_wake = false;
@@ -809,6 +853,9 @@ pub const Client = struct {
     fn dropImageChannel(self: *Client) void {
         if (self.image_ledger) |*ledger| ledger.releaseAll();
         self.image_ledger = null;
+        // 채널이 없으면 재시도·host 예산 대기가 다시 투영해도 「이미지 채널 없음」으로 미룰 뿐이다.
+        self.image_create_failure = null;
+        self.image_host_budget_wait = false;
         if (self.image_fd >= 0) _ = c.close(self.image_fd);
         self.image_fd = -1;
         self.image_rx_len = 0;

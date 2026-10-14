@@ -7166,9 +7166,9 @@ pub fn build(b: *std.Build) void {
         });
         const run_image_channel_host_tests = b.addRunArtifact(image_channel_host_tests);
         // 입양·상실·원장(IC2) 12, 세그먼트 준비·발급·취소·미룸(IC5b-1) 4, Connection 에 건넨 연산(IC5b-2) 1, 용량 사건 깨움(IC5c-1) 1,
-        // 우선권 동안의 깨움·「전송 불가」 진단(IC5c-2) 1, 제품 투영과 잇는 통합(IC5d) 2.
-        run_image_channel_host_tests.addArg("--maru-expect-tests=21");
-        run_image_channel_host_tests.addArg("--maru-expect-passed=21");
+        // 우선권 동안의 깨움·「전송 불가」 진단(IC5c-2) 1, 제품 투영과 잇는 통합(IC5d) 2, 생성 실패 재시도·host 예산 깨움(IC7c) 2.
+        run_image_channel_host_tests.addArg("--maru-expect-tests=23");
+        run_image_channel_host_tests.addArg("--maru-expect-passed=23");
         image_channel_host_step.dependOn(&run_image_channel_host_tests.step);
         test_step.dependOn(&run_image_channel_host_tests.step);
         macos_only_test_step.dependOn(&run_image_channel_host_tests.step);

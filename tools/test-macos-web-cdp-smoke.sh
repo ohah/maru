@@ -64,10 +64,10 @@
 #                   시험(web_osr)이 본다
 #   w9c-console     (W9c①) Chromium 탭의 콘솔: 수준(log·info → log·warn·error·debug), 누름의 동기 줄은 곧 이은 console 에 있다, 처음 읽은 뒤에는
 #                   이동을 넘어 남는다, --clear 는 비운다, 쏟아지면 maru 표지(버린 수)를 남기고 다 싣지 않는다, alert 가 떠 있어도 읽는다,
-#                   잡히지 않은 예외는 (source:line) 을 단다. 다른 사이트에서 옮겨 온 탭을 처음 읽으면 앞 사이트의 줄(불러올 때의 비밀 줄·
-#                   떠날 때의 unload 줄)이 보이지 않는다 — 대조: 앞 사이트에서 먼저 읽은 탭은 그 unload 줄을 이동 뒤에도 본다(줄은 와 있었다).
-#                   적대 리뷰 2 회차: 빠른 사슬 A → B(첫 읽기로 묶인다) → C 에서 C 에 늦게 온 A 의 unload 줄은 묶인 쪽에게도, A → B(다른 출처
-#                   iframe 셋) → C 를 처음 읽는 쪽에게도 보이지 않는다
+#                   잡히지 않은 예외는 (source:line) 을 단다. 사용자의 탭(확인 모달로 허락)을 다른 사이트 A → B(다른 출처 iframe 셋 — 적대
+#                   리뷰 2 회차 F2) 뒤 처음 읽으면 A 의 줄이 보이지 않고, 곧 C 로 옮긴 뒤(빠른 사슬 — 2 회차 F1) 다시 읽어도 C 에 늦게 온 A 의
+#                   unload 줄은 보이지 않는다 — 대조: 앞 사이트에서 먼저 읽은 탭은 그 unload 줄을 이동 뒤에도 본다(줄은 와 있었다). 에이전트가
+#                   연 탭은 태어날 때 묶인다(3 회차 F1): 오류를 남기고 곧 다른 사이트로 옮기는 페이지의 그 오류가 첫 읽기에 있다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -192,8 +192,8 @@ cat > "$root/www/con.html" <<'HTML'
 <button id=ue style="position:absolute;left:30px;top:180px;width:120px;height:40px" onclick="setTimeout(function(){throw new Error('con-uncaught')},0)">Throw</button>
 HTML
 printf '<!doctype html><title>secret</title><script>console.log("con-secret-token");addEventListener("pagehide",function(){console.log("con-secret-unload")});addEventListener("unload",function(){console.log("con-secret-unload2")})</script>secret' > "$root/www/secret.html"
-# W9c① 적대 리뷰 1 회차: 떠날 때 400 ms 동안 100 ms 마다 줄을 남기는 다른 사이트의 문서(늦은 unload 줄 — 이동 직후 처음 읽은 뒤의 다음 읽기에 보였다).
-printf '<!doctype html><title>slow</title><script>console.log("con-slow-token");addEventListener("pagehide",function(){var t=Date.now(),n=0;while(Date.now()-t<400){if(Date.now()-t>=n*100){console.log("con-slow-"+n);n++}}})</script>slow' > "$root/www/slow.html"
+# W9c① 적대 리뷰 3 회차 F1: 오류를 남기고 곧 다른 사이트(127.0.0.1)로 옮기는 문서 — 에이전트가 연 탭이면 첫 읽기에 그 오류가 있어야 한다.
+printf '<!doctype html><title>redir</title><script>console.error("con-redir-error");location.replace("http://127.0.0.1:%s/con.html?a")</script>redir' "$port" > "$root/www/redir.html"
 # W9c① 적대 리뷰 2 회차: 떠날 때(unload) 400 ms 동안 100 ms 마다 줄을 남기는 다른 사이트의 문서, 다른 출처 iframe 셋을 담는 문서(그 출처는
 # 아래에서 같은 서버를 포트 셋에 더 띄워 만든다 — 셋이면 전에는 앞 주 프레임 출처를 밀어냈다).
 printf '<!doctype html><title>late</title><script>console.log("con-late-token");addEventListener("pagehide",function(){console.log("con-late-pagehide")});addEventListener("unload",function(){var t=Date.now(),k=0;while(Date.now()-t<400){if(Date.now()-t>=k*100){console.log("con-late-unload-"+(k*100));k++}}console.log("con-late-unload-end")})</script>late' > "$root/www/late.html"
@@ -814,8 +814,19 @@ n=0; while [ \$n -lt 32 ]; do "\$cli" browser dialog --surface "\$dg" > "\$out/d
 "\$cli" browser handle-dialog --surface "\$dg" --accept > "\$out/dg-st" 2>&1; echo "rc=\$?" >> "\$out/dg-st"
 hit_seen dst-done && echo yes > "\$out/dg-st-hit" || echo no > "\$out/dg-st-hit"
 "\$cli" browser close --surface "\$dg" > /dev/null 2>&1 || true
-# 사람의 탭(이 pane 이 열지 않았다 — 조작 허락만) — 누가 띄웠는지 모르는 alert(스크립트 뒤 6.5 초 — 창 5 초 밖)는 답하지 않는다(C13). 그 탭은 위에서
-# 스스로 새로고침하는 hop 문서에 있다 — 타이머가 돌 수 있게 가만히 있는 문서로 옮긴다.
+# W9c①: 사용자의 탭(이 pane 이 열지 않았다 — 확인 모달로 허락해 태어날 때 묶이지 않는다)을 처음 읽는다. 다른 사이트 A(떠날 때 400 ms 동안 줄을
+# 남긴다) → B(다른 출처 iframe 셋 — 적대 리뷰 2 회차 F2: B 의 출처들이 A 의 출처를 밀어내 A 의 늦은 줄이 지금 문서의 줄이 되었다) → 이동 직후 처음
+# 읽어 묶는다 → 곧 C(빠른 사슬 — 2 회차 F1: C 가 시작한 뒤 온 A 의 unload 줄이 B 에서 묶인 쪽에게 보였다) → 늦은 줄이 다 온 뒤 다시 읽는다. 첫 읽기는
+# 이 탭에 한 번뿐이라(같은 grant) 한 사슬에 담는다. 그 탭은 위에서 스스로 새로고침하는 hop 문서에 있다.
+"\$cli" browser navigate --surface "\$sid" "http://localhost:$port/late.html?u" > "\$out/cn-u-nav" 2>&1
+sleep 1.5
+"\$cli" browser navigate --surface "\$sid" "http://127.0.0.1:$port/con3.html?ub" > "\$out/cn-u-nav2" 2>&1
+"\$cli" browser console --surface "\$sid" > "\$out/cn-u-first" 2>&1; echo "rc=\$?" >> "\$out/cn-u-first"
+"\$cli" browser navigate --surface "\$sid" "http://127.0.0.1:$port/con.html?uc" > "\$out/cn-u-nav3" 2>&1
+sleep 1.5
+"\$cli" browser console --surface "\$sid" > "\$out/cn-u-second" 2>&1; echo "rc=\$?" >> "\$out/cn-u-second"
+# 사람의 탭(이 pane 이 열지 않았다 — 조작 허락만) — 누가 띄웠는지 모르는 alert(스크립트 뒤 6.5 초 — 창 5 초 밖)는 답하지 않는다(C13). 타이머가 돌 수
+# 있게 가만히 있는 문서로 옮긴다.
 "\$cli" browser navigate --surface "\$sid" "http://127.0.0.1:$port/ag2.html?user" > "\$out/dg-user-nav" 2>&1
 "\$cli" browser exec --surface "\$sid" 'setTimeout(function(){alert("late user")},6500), 1' > "\$out/dg-user-exec" 2>&1
 n=0; while [ \$n -lt 48 ]; do "\$cli" browser dialog --surface "\$sid" > "\$out/dg-user-list" 2>&1; grep -q '^alert ' "\$out/dg-user-list" && break; sleep 0.25; n=\$((n + 1)); done
@@ -829,41 +840,12 @@ sleep 1
 sleep 1
 "\$cli" browser console --surface "\$ctl" > "\$out/cn-ctl-after" 2>&1; echo "rc=\$?" >> "\$out/cn-ctl-after"
 "\$cli" browser close --surface "\$ctl" > /dev/null 2>&1 || true
-# 새는지 — 같은 길로 옮긴 탭을 옮긴 뒤 처음 읽는다.
-"\$cli" browser open --url "http://localhost:$port/secret.html?leak" > "\$out/cn-open" 2>&1
+# 적대 리뷰 3 회차 F1: 에이전트가 연 탭은 태어날 때 묶인다 — 오류를 남기고 곧 다른 사이트로 옮긴 페이지의 그 오류가 첫 읽기에 있다(전에는 첫 읽기가
+# 지금 문서의 줄만 보이고 앞 줄을 지웠다).
+"\$cli" browser open --url "http://localhost:$port/redir.html" > "\$out/cn-open" 2>&1
 cn=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-open")
 sleep 1
-"\$cli" browser navigate --surface "\$cn" "http://127.0.0.1:$port/con.html?a" > "\$out/cn-nav" 2>&1
-sleep 1
 "\$cli" browser console --surface "\$cn" > "\$out/cn-first" 2>&1; echo "rc=\$?" >> "\$out/cn-first"
-# 이동 직후 곧바로 처음 읽고, 앞 사이트의 늦은 unload 줄이 다 온 뒤 다시 읽어도 그 줄은 보이지 않는다(적대 리뷰 1 회차).
-"\$cli" browser open --url "http://localhost:$port/slow.html" > "\$out/cn-slow-open" 2>&1
-slow=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-slow-open")
-sleep 1
-"\$cli" browser navigate --surface "\$slow" "http://127.0.0.1:$port/con.html?slow" > "\$out/cn-slow-nav" 2>&1
-"\$cli" browser console --surface "\$slow" > "\$out/cn-slow-first" 2>&1; echo "rc=\$?" >> "\$out/cn-slow-first"
-sleep 1.5
-"\$cli" browser console --surface "\$slow" > "\$out/cn-slow-second" 2>&1; echo "rc=\$?" >> "\$out/cn-slow-second"
-"\$cli" browser close --surface "\$slow" > /dev/null 2>&1 || true
-# 적대 리뷰 2 회차 F1: 빠른 사슬 A, B(이동 직후 처음 읽어 묶인다), C. C 가 시작한 뒤 온 A 의 unload 줄은 B 에서 묶인 쪽에게도 보이지 않는다.
-"\$cli" browser open --url "http://localhost:$port/late.html?f1" > "\$out/cn-f1-open" 2>&1
-f1=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-f1-open")
-sleep 1.5
-"\$cli" browser navigate --surface "\$f1" "http://127.0.0.1:$port/con.html?f1b" > "\$out/cn-f1-nav" 2>&1
-"\$cli" browser console --surface "\$f1" > "\$out/cn-f1-first" 2>&1; echo "rc=\$?" >> "\$out/cn-f1-first"
-"\$cli" browser navigate --surface "\$f1" "http://127.0.0.1:$port/con.html?f1c" > "\$out/cn-f1-nav2" 2>&1
-sleep 1.5
-"\$cli" browser console --surface "\$f1" > "\$out/cn-f1-second" 2>&1; echo "rc=\$?" >> "\$out/cn-f1-second"
-"\$cli" browser close --surface "\$f1" > /dev/null 2>&1 || true
-# 적대 리뷰 2 회차 F2: A, B(다른 출처 iframe 셋), C 를 처음 읽는다. B 의 출처들이 A 의 출처를 밀어내면 A 의 늦은 줄이 C 의 줄이 되었다.
-"\$cli" browser open --url "http://localhost:$port/late.html?f2" > "\$out/cn-f2-open" 2>&1
-f2=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-f2-open")
-sleep 1.5
-"\$cli" browser navigate --surface "\$f2" "http://127.0.0.1:$port/con3.html?f2b" > "\$out/cn-f2-nav" 2>&1
-"\$cli" browser navigate --surface "\$f2" "http://127.0.0.1:$port/con.html?f2c" > "\$out/cn-f2-nav2" 2>&1
-sleep 1.5
-"\$cli" browser console --surface "\$f2" > "\$out/cn-f2-first" 2>&1; echo "rc=\$?" >> "\$out/cn-f2-first"
-"\$cli" browser close --surface "\$f2" > /dev/null 2>&1 || true
 # 누름의 동기 줄 — 곧 이은 console 에 있다.
 "\$cli" browser click --surface "\$cn" --selector '#cl' > "\$out/cn-click" 2>&1
 "\$cli" browser console --surface "\$cn" > "\$out/cn-sync" 2>&1; echo "rc=\$?" >> "\$out/cn-sync"
@@ -1106,11 +1088,9 @@ grep -q '^answered before_unload$' "$out/dg-nv" && grep -q '/a.html?bu$' "$out/d
 grep -q '^alert tab=[0-9]* token=[0-9]* cause=unknown may_answer=no' "$out/dg-user-list" && grep -q '^rc=1$' "$out/dg-user" && grep -q 'the user is answering this dialog' "$out/dg-user" || fail "an alert nobody just caused on a user's tab was answerable ($(tr '\n' ' ' < "$out/dg-user-list") · $(tr '\n' ' ' < "$out/dg-user") · nav $(tr '\n' ' ' < "$out/dg-user-nav") · exec $(tr '\n' ' ' < "$out/dg-user-exec"))"
 # W9c①
 grep -q '^rc=0$' "$out/cn-ctl-first" && grep -q '^\[log\] con-secret-token$' "$out/cn-ctl-first" && grep -q 'con-secret-unload' "$out/cn-ctl-after" || fail "control: a tab read on the first site did not show its line, or after moving to another site did not show the old page's unload line — the leak check below would prove nothing ($(tr '\n' ' ' < "$out/cn-ctl-first") · $(tr '\n' ' ' < "$out/cn-ctl-after"))"
-grep -q '^rc=0$' "$out/cn-slow-first" && grep -q '^rc=0$' "$out/cn-slow-second" && ! grep -q 'con-slow' "$out/cn-slow-first" "$out/cn-slow-second" || fail "after moving from another site, a later console read showed that site's late unload lines ($(tr '\n' ' ' < "$out/cn-slow-first") / $(tr '\n' ' ' < "$out/cn-slow-second"))"
-grep -q '^rc=0$' "$out/cn-f1-first" && grep -q '^rc=0$' "$out/cn-f1-second" && grep -qxF '[log] con-log-f1c' "$out/cn-f1-second" && ! grep -q 'con-late' "$out/cn-f1-first" "$out/cn-f1-second" || fail "in a fast chain A, B (first read), C the reader latched in B saw A's late unload lines ($(tr '\n' ' ' < "$out/cn-f1-first") / $(tr '\n' ' ' < "$out/cn-f1-second"))"
-for k in 1 2 3; do grep -q 'GET /f.html' "$root/http-f$k.log" || fail "the page with three cross-origin iframes did not load the iframe on port +$k — the check below would prove nothing ($(tr '\n' ' ' < "$out/cn-f2-nav"))"; done
-grep -q '^rc=0$' "$out/cn-f2-first" && grep -qxF '[log] con-log-f2c' "$out/cn-f2-first" && ! grep -q 'con-late' "$out/cn-f2-first" || fail "after A, B with three cross-origin iframes, C, the first read showed A's late unload lines ($(tr '\n' ' ' < "$out/cn-f2-first") · nav $(tr '\n' ' ' < "$out/cn-f2-nav"))"
-grep -q '^rc=0$' "$out/cn-first" && ! grep -q 'con-secret' "$out/cn-first" || fail "the first console read after moving from another site showed that site's lines ($(tr '\n' ' ' < "$out/cn-first"))"
+for k in 1 2 3; do grep -q 'GET /f.html' "$root/http-f$k.log" || fail "the page with three cross-origin iframes did not load the iframe on port +$k — the check below would prove nothing ($(tr '\n' ' ' < "$out/cn-u-nav2"))"; done
+grep -q '^rc=0$' "$out/cn-u-first" && grep -qxF '[log] con3-head' "$out/cn-u-first" && grep -q '^rc=0$' "$out/cn-u-second" && grep -qxF '[log] con3-head' "$out/cn-u-second" && grep -qxF '[log] con-log-uc' "$out/cn-u-second" && ! grep -q 'con-late' "$out/cn-u-first" "$out/cn-u-second" || fail "on a user's tab, the first read after A, B with three cross-origin iframes, or the read after a fast move on to C, showed A's lines ($(tr '\n' ' ' < "$out/cn-u-first") / $(tr '\n' ' ' < "$out/cn-u-second") · nav $(tr '\n' ' ' < "$out/cn-u-nav") $(tr '\n' ' ' < "$out/cn-u-nav2") $(tr '\n' ' ' < "$out/cn-u-nav3"))"
+grep -q '^rc=0$' "$out/cn-first" && grep -qxF '[error] con-redir-error' "$out/cn-first" || fail "on a tab the agent opened, the first read lost the error its first page logged before moving to another site ($(tr '\n' ' ' < "$out/cn-first"))"
 for want in '[log] con-log-a' '[log] con-info' '[warn] con-warn' '[error] con-error' '[debug] con-debug'; do
     grep -qxF "$want" "$out/cn-first" || fail "console did not list \"$want\" ($(tr '\n' ' ' < "$out/cn-first"))"
 done
@@ -1120,7 +1100,7 @@ flood_lines=$(grep -c '^\[log\] con-flood-' "$out/cn-flood" || true)
 grep -q '^\[maru\] [0-9]* console messages were dropped' "$out/cn-flood" && [ "$flood_lines" -ge 100 ] && [ "$flood_lines" -lt 3000 ] || fail "a flood of 3000 lines was not cut with a maru dropped marker ($flood_lines flood lines · $(grep '^\[maru\]' "$out/cn-flood" | tr '\n' ' '))"
 grep -q '^\[error\] Uncaught Error: con-uncaught (http://127.0.0.1:[0-9]*/con.html?b:[0-9]*)$' "$out/cn-uncaught" || fail "an uncaught error did not come with its source and line ($(grep -i 'uncaught' "$out/cn-uncaught" | tr '\n' ' '))"
 grep -q '^rc=0$' "$out/cn-alert" && grep -qxF '[log] con-before-alert' "$out/cn-alert" && grep -q '^alert ' "$out/cn-al-list" || fail "console did not answer while the page showed an alert ($(tr '\n' ' ' < "$out/cn-alert" | cut -c1-300) · $(tr '\n' ' ' < "$out/cn-al-list"))"
-echo "PASS w9c-console: levels (info as log), a click's line is in the next read, lines are kept across navigation after the first read, --clear empties, a 3000-line flood keeps $flood_lines lines with a dropped marker, an uncaught error carries source:line, console answers during an alert, and the first read after a cross-site move shows none of the old site's lines (control: the old page's unload line did arrive), nor does a fast chain A, B (read), C to the reader latched in B, nor a first read after A, B with three cross-origin iframes, C"
+echo "PASS w9c-console: levels (info as log), a click's line is in the next read, lines are kept across navigation after the first read, --clear empties, a 3000-line flood keeps $flood_lines lines with a dropped marker, an uncaught error carries source:line, console answers during an alert, on a user's tab the first read after A, B with three cross-origin iframes shows none of A's lines, nor does a read after a fast move on to C (control: the old page's unload line did arrive), and on a tab the agent opened the first read keeps the error of a page that moved to another site"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

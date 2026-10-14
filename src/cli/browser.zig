@@ -1593,11 +1593,12 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     .object => |oo| oo,
                     else => continue,
                 };
-                // 콘솔 글은 페이지가 쓴 것 — 걸러 낸다(줄바꿈으로 다음 항목을 흉내 내지 못하게, W9f 적대 리뷰 4 회차).
+                // 콘솔 글은 페이지가 쓴 것 — 걸러 낸다(줄바꿈으로 다음 항목을 흉내 내지 못하게, W9f 적대 리뷰 4 회차). Chromium 의 줄은 줄바꿈·탭을
+                // 남기므로(W9c①) 지우지 않고 ` ⏎ `·공백으로 보인다(3 회차 F2 — 여러 줄 메시지의 낱말이 붙었다).
                 try w.writeAll("[");
                 try writePageText(gpa, w, strField(o.get("level")), false);
                 try w.writeAll("] ");
-                try writePageText(gpa, w, strField(o.get("text")), false);
+                try writeLinesText(gpa, w, strField(o.get("text")), false);
                 try w.writeAll("\n");
             }
         },
@@ -1654,8 +1655,9 @@ fn writePageText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8, qu
     js.write(safe) catch return error.WriteFailed;
 }
 
-/// 대화상자 글(W9c②) — 줄바꿈을 ` ⏎ ` 로 보이게 바꾼 뒤 걸러 JSON 으로 인용한다(`displaySafe` 는 줄바꿈을 지운다 — 두 줄이 붙어 읽혔다).
-fn writeDialogText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) !void {
+/// 여러 줄일 수 있는 페이지 글(대화상자 W9c②·콘솔 W9c①) — 줄바꿈을 ` ⏎ ` 로, 탭을 공백으로 보이게 바꾼 뒤 걸러 낸다(`displaySafe` 는 둘을
+/// 지운다 — 두 줄·두 낱말이 붙어 읽혔다, W9c① 적대 리뷰 3 회차 F2). 진짜 줄바꿈은 터미널에 가지 않는다(다음 항목을 흉내 내지 못하게).
+fn writeLinesText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8, quoted: bool) !void {
     var lines: std.ArrayList(u8) = .empty;
     defer lines.deinit(gpa);
     var i: usize = 0;
@@ -1663,9 +1665,14 @@ fn writeDialogText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) 
         if (text[i] == '\r' or text[i] == '\n') {
             if (text[i] == '\r' and i + 1 < text.len and text[i + 1] == '\n') i += 1;
             lines.appendSlice(gpa, " ⏎ ") catch return w.writeAll("…");
-        } else lines.append(gpa, text[i]) catch return w.writeAll("…");
+        } else lines.append(gpa, if (text[i] == '\t') ' ' else text[i]) catch return w.writeAll("…");
     }
-    try writePageText(gpa, w, lines.items, true);
+    try writePageText(gpa, w, lines.items, quoted);
+}
+
+/// 대화상자 글(W9c②) — 여러 줄을 보이게 바꿔 JSON 으로 인용한다.
+fn writeDialogText(gpa: std.mem.Allocator, w: *std.Io.Writer, text: []const u8) !void {
+    try writeLinesText(gpa, w, text, true);
 }
 
 fn boolField(v: ?std.json.Value) bool {
@@ -3645,4 +3652,13 @@ test "render: handle-dialog(W9c②) 은 답한 종류, 떠나기면 이동·닫�
         try testing.expect(try renderResponse(testing.allocator, c.bytes, .handle_dialog, &w));
         try testing.expectEqualStrings(c.want, w.buffered());
     }
+}
+
+test "W9c① 적대 리뷰 3 회차 재현 F2: 콘솔 줄의 줄바꿈·탭은 ` ⏎ `·공백으로 보인다 — 전에는 지워져 여러 줄 메시지의 낱말이 붙었다(진짜 줄바꿈·제어 글자는 여전히 터미널에 가지 않는다)" {
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"error\",\"text\":\"Expected: 1\\nReceived: 2\\tat line 3\"},{\"level\":\"log\",\"text\":\"a\\r\\n[error] fake\\u001b[2J\"}]}}", .console, &w);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "1Received") == null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "2at") == null);
+    try testing.expectEqualStrings("[error] Expected: 1 ⏎ Received: 2 at line 3\n[log] a ⏎ [error] fake[2J\n", w.buffered());
 }

@@ -7306,7 +7306,7 @@ pub const Client = struct {
         defer ack.deinit(allocator);
         try self.finishHelloWithPolicy(connection_profile, profile, ack, legacy_hello_policy);
         // deadline 이 없는 경로라 read timeout 과 같은 길이의 절대 deadline 을 만들어 채널 수립에 쓴다(이미지 채널 §3.1).
-        self.negotiateImageChannel(
+        const unavailable = self.negotiateImageChannel(
             image_channel,
             ack.payload,
             socket_path,
@@ -7316,6 +7316,7 @@ pub const Client = struct {
             error.DeadlineExceeded => error.HandshakeFailed,
             else => |typed| typed,
         };
+        if (unavailable) |reason| client_image_channel.noteUnavailable(self.host_id, reason);
         return self;
     }
 
@@ -7398,15 +7399,18 @@ pub const Client = struct {
         defer ack.deinit(allocator);
         try self.finishHelloWithPolicy(connection_profile, profile, ack, legacy_hello_policy);
         // 주 소켓이 아직 논블로킹일 때 한다 — abandon 응답을 같은 deadline 안에서 읽어야 한다(이미지 채널 §3.2).
-        try self.negotiateImageChannel(image_channel, ack.payload, socket_path, deadline, ops);
+        const unavailable = try self.negotiateImageChannel(image_channel, ack.payload, socket_path, deadline, ops);
         connected.restoreBlocking(ops) catch return error.ConnectionClosed;
         if (deadline.remainingNs() <= 0) return error.DeadlineExceeded;
+        // 「이미지 채널 없음」 줄은 연결이 성립한 뒤에만 남긴다 — 실패한 연결을 「이미지 없이 가는 연결」로 세지 않는다.
+        if (unavailable) |reason| client_image_channel.noteUnavailable(self.host_id, reason);
         return self;
     }
 
     /// hello_ack 뒤 이미지 채널을 연다(이미지 채널 §3.1·§3.2). 채널을 못 열어도 **연결 실패로 올리지 않는다** — 거부면 abandon
     /// 을 응답까지 읽고, 시간 초과·연결 단계 실패면 채널만 닫고 「이미지 채널 없음」으로 돌려준다. 여기서 나가는 오류는 주 소켓의
-    /// abandon 왕복 실패와 hello_ack 해석 실패뿐이다.
+    /// abandon 왕복 실패와 hello_ack 해석 실패뿐이다. 「이미지 채널 없음」이면 그 이유를 돌려준다 — 호출자가 연결이 성립한 뒤에
+    /// app.log 에 남긴다(`noteUnavailable`).
     fn negotiateImageChannel(
         self: *Client,
         request: client_image_channel.Request,
@@ -7414,27 +7418,24 @@ pub const Client = struct {
         socket_path: [:0]const u8,
         deadline: client_deadline.AbsoluteDeadline,
         ops: client_deadline.Ops,
-    ) DeadlineClientError!void {
-        if (request == .off) return;
+    ) DeadlineClientError!?client_image_channel.UnavailableReason {
+        if (request == .off) return null;
         const offer = client_image_channel.parseOffer(self.allocator, ack_payload) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.MalformedHelloAck => error.HandshakeFailed,
         };
-        if (!offer.offered) return;
+        if (!offer.offered) return null;
         self.image_channel.state = .unavailable;
-        // 협상했는데 채널 없이 끝나면 한 줄 남긴다 — 이 연결의 이미지는 placement 째 빠진다(§3.2). 탭 안내(IC6b) 전에는
-        // 「이미지가 왜 안 보이나」의 유일한 흔적이다.
-        defer if (self.image_channel.state == .unavailable and !builtin.is_test)
-            std.log.warn("session host image channel unavailable: host={x:0>32} — images are omitted on this connection until reconnect", .{self.host_id});
+        // 채널 없이 끝나는 출구마다 이유를 돌려준다 — 이 연결의 이미지는 placement 째 빠진다(§3.2).
         // 자리 없음 — 버릴 token 도 없다.
-        const token = offer.token orelse return;
+        const token = offer.token orelse return .no_seat;
         // abandon 몫을 남길 수 없으면 채널을 열지 않는다. token 은 host 의 만료로 풀린다.
-        const bind_deadline = client_image_channel.bindDeadline(deadline) orelse return;
+        const bind_deadline = client_image_channel.bindDeadline(deadline) orelse return .no_budget;
         // 표는 채널을 열기 전에 잡는다 — 묶인 뒤에 못 잡으면 받은 fd 를 둘 곳이 없다. 여기서 잡은 표는 묶이지 않으면 바로 푼다.
         // 못 잡으면 채널을 열지 않는다(「이미지 채널 없음」 — 연결 실패로 올리지 않는다). token 은 host 의 만료로 풀린다.
         const fresh_table = self.image_segments == null;
         const table = self.image_segments orelse table: {
-            const created = self.allocator.create(client_image_segments.Table) catch return;
+            const created = self.allocator.create(client_image_segments.Table) catch return .no_table;
             created.* = .{};
             break :table created;
         };
@@ -7444,13 +7445,13 @@ pub const Client = struct {
             self.image_channel = .{ .fd = fd, .state = .bound };
             self.image_segments = table;
             bound = true;
-            return;
+            return null;
         } else |err| switch (err) {
             // 거부 — host 가 응답하고 있다. 아래에서 abandon 을 응답까지 읽어 token 을 바로 돌려준다.
             error.ImageChannelUnavailable => {},
             // 시간 초과 — host owner 가 밀려 있다. 같은 owner 가 abandon 에도 늦게 답하면 그 왕복이 연결을 실패시킨다.
             // 채널 소켓은 `open` 이 이미 닫았다. token 은 host 의 만료로, 늦게 묶인 채널은 EOF 로 풀린다(이미지 채널 §3.2).
-            error.ImageChannelTimedOut => return,
+            error.ImageChannelTimedOut => return .timed_out,
         }
         // 보내고 안 읽으면 첫 attach 가 이 응답을 받아 상관 오류로 주 연결이 죽는다 — 응답까지 읽는다.
         const request_id = self.next_request_id;
@@ -7469,13 +7470,15 @@ pub const Client = struct {
             return error.HandshakeFailed;
         // 성공한 왕복이다 — 남기지 않으면 첫 RPC 전의 EOF 진단이 abandon 을 「진행 중」으로 센다.
         self.last_success_request_id = request_id;
+        return .refused;
     }
 
-    /// 이미지 채널을 논블로킹으로 비우고 쌓인 release 를 쓴다(이미지 채널 §6 — 매 tick 과 `image_ref` 배치를 적용하기 직전).
+    /// 이미지 채널을 논블로킹으로 비우고 쌓인 release 를 쓴다(이미지 채널 §6 — 매 tick 과 `image_ref` 배치를 적용하기 직전. 적용한
+    /// 배치의 hwm 정리(`sweepImageSegments`)도 같은 본문을 지난다).
     /// 채널 상실은 「이미지 채널 없음」으로 내리고 주 연결은 그대로 둔다(§3.2). host 의 「메시지당 fd 하나」·미반환 상한
     /// 위반과 앱 fd 고갈은 연결을 poison 한다 — fd 를 잃었을 수 있어 그 연결의 이미지 상태를 더 믿을 수 없다.
-    /// false 는 울타리를 못 잡아 비우지 못했다는 뜻이다 — 적용 직전 호출자는 그 배치를 보류한다(§6). 채널이 없거나 이미 비운
-    /// 연결은 true 다(비울 것이 없다).
+    /// false 는 울타리를 못 잡아 비우지 못했다는 뜻이다 — 적용 직전 호출자는 그 배치를 보류한다(§6). 쌓인 release 는 그때도
+    /// 쓴다(쓰기는 fd 를 받지 않아 수신 잠금이 필요 없다). 채널이 없거나 이미 비운 연결은 true 다(비울 것이 없다).
     /// 「recvmsg + `F_SETFD`」(`drain`)는 fork 울타리의 수신 잠금 안에서 한다(§7 — 그 틈에 다른 스레드가 fork 하면 자식이 받은
     /// fd 를 물려받는다). `wait` 는 tick 이 다시 오는 자리면 `.try_lock`(못 잡으면 false — fd 는 recvmsg 전까지 커널 큐에 있다),
     /// tick 이 없는 동기 적용 자리면 `.block` 이다.
@@ -7485,30 +7488,43 @@ pub const Client = struct {
         // 빠진 일은 대조 계수의 흐름 칸(`channel_refused`)에 남는다 — lease 가 오래 잡혀 원장이 차는 것을 가린다.
         const operation_fence_held = self.requireBlockingMode() catch return imageChannelRefused(bool, false);
         defer if (operation_fence_held) self.endPublicMutation();
-        if (self.image_channel.state != .bound or self.image_channel.fd < 0) return true;
-        // 묶인 채널에는 늘 표가 있다(`negotiateImageChannel` 이 먼저 잡는다).
+        return self.pumpFencedImageChannel(wait, null);
+    }
+
+    /// 펌프 본문 — 울타리는 호출자(`pumpImageChannel`·`sweepImageSegments`)가 든다. 순서는 채널 비우기 → hwm 정리(`sweep` 이
+    /// 있으면) → release 쓰기다. 정리를 비우기 앞에 두면 이번에 받은 버려진 배치의 세그먼트(id ≤ hwm)가 다음 배치까지 원장을 묶는다.
+    /// 채널 상실을 「이미지 채널 없음」으로 내리는 자리는 여기 하나다.
+    fn pumpFencedImageChannel(self: *Client, wait: fork_fd_fence.ReceiveWait, sweep: ?struct { stream_id: u64, hwm: u64 }) bool {
         const segments = self.image_segments orelse return true;
+        // 채널이 없어도 표의 정리는 한다(돌려줄 곳이 없어 항목만 닫는다).
+        if (self.image_channel.state != .bound or self.image_channel.fd < 0) {
+            if (sweep) |hwm_sweep| segments.sweep(hwm_sweep.stream_id, hwm_sweep.hwm);
+            return true;
+        }
+        var drained_all = true;
         const lost = lost: {
-            if (!fork_fd_fence.acquireReceive(wait)) return false;
-            const drained = segments.drain(self.image_channel.fd);
-            // poison 은 잠금 밖에서 — 잠금은 recvmsg 와 `F_SETFD` 만 덮는다(fork 를 그만큼만 막는다).
-            fork_fd_fence.unlockReceive();
-            drained catch |err| {
-                // 공유 울타리는 겹쳐 잡힌다(개수만 센다) — poison 이 자기 울타리를 다시 잡아도 된다. 표의 fd 는 Client 소멸이 닫는다.
-                switch (err) {
-                    error.ChannelLost => break :lost true,
-                    error.PeerContractViolation => self.poison(.peer_contract_violation),
-                    error.LocalResourceExhausted => self.poison(.local_resource_exhausted),
-                }
-                return true;
-            };
+            if (fork_fd_fence.acquireReceive(wait)) {
+                const drained = segments.drain(self.image_channel.fd);
+                // poison 은 잠금 밖에서 — 잠금은 recvmsg 와 `F_SETFD` 만 덮는다(fork 를 그만큼만 막는다).
+                fork_fd_fence.unlockReceive();
+                drained catch |err| {
+                    // 공유 울타리는 겹쳐 잡힌다(개수만 센다) — poison 이 자기 울타리를 다시 잡아도 된다. 표의 fd 는 Client 소멸이 닫는다.
+                    switch (err) {
+                        error.ChannelLost => break :lost true,
+                        error.PeerContractViolation => self.poison(.peer_contract_violation),
+                        error.LocalResourceExhausted => self.poison(.local_resource_exhausted),
+                    }
+                    if (sweep) |hwm_sweep| segments.sweep(hwm_sweep.stream_id, hwm_sweep.hwm);
+                    return true;
+                };
+            } else drained_all = false;
+            if (sweep) |hwm_sweep| segments.sweep(hwm_sweep.stream_id, hwm_sweep.hwm);
             segments.flush(self.image_channel.fd) catch break :lost true;
             break :lost false;
         };
-        if (!lost) return true;
+        if (!lost) return drained_all;
         // 채널 상실 — host 는 채널 EOF 로 원장을 전부 반환하므로 표의 fd 와 못 보낸 release 를 함께 버린다.
-        if (!builtin.is_test)
-            std.log.warn("session host image channel lost: host={x:0>32} — images are omitted on this connection until reconnect", .{self.host_id});
+        client_image_channel.noteUnavailable(self.host_id, .lost);
         self.image_channel.deinit();
         self.image_channel.state = .unavailable;
         segments.dropSegments();
@@ -7528,11 +7544,14 @@ pub const Client = struct {
     }
 
     /// 적용한 배치의 `image_seg_hwm` 이하로 그 stream 에 남은 세그먼트를 반환한다(§6). 울타리를 못 들면 다음 배치의 hwm 이 치운다.
+    /// 펌프 본문을 지나 정리 앞에 채널을 비우고 정리 뒤에 release 를 쓴다 — 적용하며 해석한 세그먼트의 release 도 함께다. 마지막
+    /// 이미지 배치 뒤에는 다음 배치의 적용 전 펌프가 없고, tick 펌프는 host 의 첫 runtime 몫이라 그 runtime 이 막혀 있으면 release
+    /// 가 host 원장을 묶은 채 남는다. 비우기는 커널 큐에 있던 버려진 배치·닫힌 stream 의 세그먼트를 이번 정리에 넣는다. 수신 잠금은
+    /// 기다리지 않는다(못 잡으면 비우기만 다음 펌프로 미루고 정리·쓰기는 한다).
     pub fn sweepImageSegments(self: *Client, stream_id: u64, hwm: u64) void {
         const operation_fence_held = self.requireBlockingMode() catch return imageChannelRefused(void, {});
         defer if (operation_fence_held) self.endPublicMutation();
-        const segments = self.image_segments orelse return;
-        segments.sweep(stream_id, hwm);
+        _ = self.pumpFencedImageChannel(.try_lock, .{ .stream_id = stream_id, .hwm = hwm });
     }
 
     /// 이미지 채널 연산이 울타리에서 빠졌다 — 대조 계수의 흐름 칸(`channel_refused`)에 남기고 `value` 를 돌려준다. Client 를 읽지
@@ -27359,9 +27378,11 @@ test "image channel pump: a lost channel drops to no image channel and keeps the
     try fx.sendSegment(7, 1, 1);
     _ = c.close(fx.channel_host);
     fx.channel_host = -1;
+    client_image_channel.last_unavailable_reason = null;
     // 채널을 잃어도 펌프는 돌았다(true) — 보류할 이유가 아니다.
     try std.testing.expect(fx.client.pumpImageChannel(.try_lock));
     try std.testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
+    try std.testing.expectEqual(@as(?client_image_channel.UnavailableReason, .lost), client_image_channel.last_unavailable_reason);
     try std.testing.expectEqual(@as(c.fd_t, -1), fx.client.image_channel.fd);
     try std.testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.outstanding());
     try std.testing.expect(fx.client.fd >= 0);
@@ -27377,6 +27398,64 @@ test "image channel pump: a lost channel drops to no image channel and keeps the
     // 울타리 거부가 아니라 표에 없어서다 — 거부 칸은 그대로.
     try std.testing.expectEqual(@as(u64, 0), image_reconciliation.snapshot().delta(refused_before).channel_refused);
     try std.testing.expect(fx.client.imageShmNegotiated());
+}
+
+test "image channel pump: an applied batch's hwm sweep writes its releases and drains the channel at once, without the tick pump" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const wire = @import("image_channel_wire.zig");
+    var fx = try ImageChannelPumpFixture.init();
+    defer fx.deinit();
+    fx.client.openImageStream(3);
+    try fx.sendSegment(1, 3, 1);
+    try testing.expect(fx.client.pumpImageChannel(.try_lock));
+    // 마지막 이미지 배치를 적용한 뒤다 — 다음 배치의 적용 전 펌프가 없고, tick 펌프는 host 의 첫 runtime 몫이다. sweep 이 반환한
+    // 세그먼트는 그 자리에서 host 원장으로 돌아간다.
+    fx.client.sweepImageSegments(3, 1);
+    var buf: [64]u8 = undefined;
+    var n = c.read(fx.channel_host, &buf, buf.len);
+    try testing.expectEqual(@as(isize, wire.release_len), n);
+    try testing.expectEqual(@as(u64, 1), try wire.decodeRelease(buf[0..@intCast(n)]));
+    // 닫힌 stream(2 — 본 가장 큰 id 3 이하이고 붙어 있지 않다)의 세그먼트는 받아야 반환된다 — sweep 이 채널도 비운다.
+    try fx.sendSegment(2, 2, 1);
+    fx.client.sweepImageSegments(3, 1);
+    n = c.read(fx.channel_host, &buf, buf.len);
+    try testing.expectEqual(@as(isize, wire.release_len), n);
+    try testing.expectEqual(@as(u64, 2), try wire.decodeRelease(buf[0..@intCast(n)]));
+    // 버려진 배치의 세그먼트(같은 stream, id ≤ 이번 hwm)가 아직 커널 큐에 있다 — 비우기가 정리보다 먼저라 이번 정리가 돌려준다.
+    // 정리를 먼저 하면 표에 남아 다음 배치까지 원장을 묶는다.
+    try fx.sendSegment(3, 3, 1);
+    fx.client.sweepImageSegments(3, 3);
+    n = c.read(fx.channel_host, &buf, buf.len);
+    try testing.expectEqual(@as(isize, wire.release_len), n);
+    try testing.expectEqual(@as(u64, 3), try wire.decodeRelease(buf[0..@intCast(n)]));
+    try testing.expectEqual(@as(usize, 0), fx.client.image_segments.?.len);
+    // 수신 잠금을 다른 스레드가 쥐어도 정리와 쓰기는 한다 — 쓰기는 fd 를 받지 않는다. 비우기만 다음 펌프로 미룬다.
+    try fx.sendSegment(4, 3, 1);
+    try testing.expect(fx.client.pumpImageChannel(.try_lock));
+    try fx.sendSegment(5, 3, 1);
+    var holder: ReceiveFenceHolder = .{};
+    const thread = try std.Thread.spawn(.{}, ReceiveFenceHolder.run, .{&holder});
+    holder.waitHeld();
+    fx.client.sweepImageSegments(3, 4);
+    const len_while_held = fx.client.image_segments.?.len;
+    holder.release.store(true, .release);
+    thread.join();
+    try testing.expectEqual(@as(usize, 0), len_while_held);
+    n = c.read(fx.channel_host, &buf, buf.len);
+    try testing.expectEqual(@as(isize, wire.release_len), n);
+    try testing.expectEqual(@as(u64, 4), try wire.decodeRelease(buf[0..@intCast(n)]));
+    try testing.expect(fx.client.pumpImageChannel(.try_lock));
+    try testing.expectEqual(@as(usize, 1), fx.client.image_segments.?.len);
+    fx.client.sweepImageSegments(3, 5);
+    try testing.expectEqual(client_image_channel.State.bound, fx.client.image_channel.state);
+    // sweep 이 채널을 잃으면 tick 펌프와 같은 자리로 내린다 — 「이미지 채널 없음」, 주 연결은 그대로.
+    _ = c.close(fx.channel_host);
+    fx.channel_host = -1;
+    client_image_channel.last_unavailable_reason = null;
+    fx.client.sweepImageSegments(3, 1);
+    try testing.expectEqual(client_image_channel.State.unavailable, fx.client.image_channel.state);
+    try testing.expectEqual(@as(?client_image_channel.UnavailableReason, .lost), client_image_channel.last_unavailable_reason);
+    try testing.expect(fx.client.firstPoisonReason() == null);
 }
 
 test "image channel pump: two connections' tables never mix — the same segment id resolves to each connection's own pixels" {
@@ -27435,10 +27514,13 @@ test "image channel connect: 묶이면 채널 fd 를 쥐고 host 가 닫은 채�
             if (client_open) client.deinit();
             host.finish();
         }
+        client_image_channel.last_unavailable_reason = null;
         client = try FakeImageHost.connect(&host, deadline_path, .advertise);
         client_open = true;
         try testing.expect(host.saw_image_shm);
         try testing.expectEqual(client_image_channel.State.bound, client.image_channel.state);
+        // 묶인 연결은 「이미지 채널 없음」 줄을 남기지 않는다.
+        try testing.expectEqual(@as(?client_image_channel.UnavailableReason, null), client_image_channel.last_unavailable_reason);
         // 묶인 채널에는 표가 있다 — 펌프가 받은 fd 를 둘 곳(Client 소멸이 푼다).
         try testing.expect(client.image_segments != null);
         const fd = client.image_channel.fd;
@@ -27488,9 +27570,11 @@ test "image channel connect: 채널이 거부되면 abandon 을 응답까지 읽
             if (client_open) client.deinit();
             host.finish();
         }
+        client_image_channel.last_unavailable_reason = null;
         client = try FakeImageHost.connect(&host, deadline_path, .advertise);
         client_open = true;
         try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+        try testing.expectEqual(@as(?client_image_channel.UnavailableReason, .refused), client_image_channel.last_unavailable_reason);
         try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
         // 채널을 열기 전에 잡은 표는 묶이지 않았으니 바로 풀렸다.
         try testing.expectEqual(@as(?*client_image_segments.Table, null), client.image_segments);
@@ -27523,6 +27607,7 @@ test "image channel connect: bind_ack 가 늦으면 abandon 없이 채널만 닫
     // 바깥 1.5 초 — `bind_ack` 대기는 abandon 몫(0.5 초)을 남긴 1 초다. 바깥 deadline 을 그대로 넘기면 connect 가 deadline 을
     // 다 써서 실패한다.
     const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 3 * std.time.ns_per_s / 2);
+    client_image_channel.last_unavailable_reason = null;
     client = try Client.connectMajorUntilWithOpsPolicy(
         testing.allocator,
         host.path,
@@ -27535,6 +27620,7 @@ test "image channel connect: bind_ack 가 늦으면 abandon 없이 채널만 닫
     );
     client_open = true;
     try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+    try testing.expectEqual(@as(?client_image_channel.UnavailableReason, .timed_out), client_image_channel.last_unavailable_reason);
     try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
     try testing.expect(deadline.remainingNs() > 0);
     client.deinit();
@@ -27557,9 +27643,11 @@ test "image channel connect: 채널 연결 단계가 실패하면 abandon 없이
             if (client_open) client.deinit();
             host.finish();
         }
+        client_image_channel.last_unavailable_reason = null;
         client = try FakeImageHost.connect(&host, deadline_path, .advertise);
         client_open = true;
         try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+        try testing.expectEqual(@as(?client_image_channel.UnavailableReason, .timed_out), client_image_channel.last_unavailable_reason);
         try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
         client.deinit();
         client_open = false;
@@ -27579,6 +27667,7 @@ test "image channel connect: abandon 왕복이 실패하면 주 소켓의 실패
         try host.start();
         defer host.finish();
         // testing.allocator 가 hello 뒤에 붙은 build_id·lifecycle 같은 할당의 누수를 잡는다.
+        client_image_channel.last_unavailable_reason = null;
         if (FakeImageHost.connect(&host, deadline_path, .advertise)) |connected| {
             var unexpected = connected;
             unexpected.deinit();
@@ -27587,6 +27676,8 @@ test "image channel connect: abandon 왕복이 실패하면 주 소켓의 실패
             error.HandshakeFailed, error.ConnectionClosed, error.ReadFailed, error.DeadlineExceeded => {},
             else => return err,
         }
+        // 연결이 실패한 출구다 — 「이 연결은 이미지 없이 간다」는 줄을 남기면 없는 연결을 센다.
+        try testing.expectEqual(@as(?client_image_channel.UnavailableReason, null), client_image_channel.last_unavailable_reason);
     };
 }
 
@@ -27603,6 +27694,7 @@ test "image channel connect: abandon 몫밖에 안 남았으면 채널을 열지
     // 바깥 deadline 이 abandon 몫(0.5 초)보다 짧다 — 채널을 열면 abandon 을 읽을 시간이 없으므로 열지 않는다. 그래도 host 는
     // 협상한 것으로 보므로 앱도 미협상이 아니라 「이미지 채널 없음」이어야 형식이 갈리지 않는다.
     const deadline = try client_deadline.AbsoluteDeadline.after(testing.io, 400 * std.time.ns_per_ms);
+    client_image_channel.last_unavailable_reason = null;
     client = try Client.connectMajorUntilWithOpsPolicy(
         testing.allocator,
         host.path,
@@ -27615,17 +27707,24 @@ test "image channel connect: abandon 몫밖에 안 남았으면 채널을 열지
     );
     client_open = true;
     try testing.expectEqual(client_image_channel.State.unavailable, client.image_channel.state);
+    try testing.expectEqual(@as(?client_image_channel.UnavailableReason, .no_budget), client_image_channel.last_unavailable_reason);
     try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
 }
 
 test "image channel connect: 자리 없음은 「이미지 채널 없음」, 미제공·미광고는 미협상이고 둘 다 채널을 열지 않는다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const Case = struct { mode: FakeImageHost.Mode, request: client_image_channel.Request, state: client_image_channel.State };
+    const Case = struct {
+        mode: FakeImageHost.Mode,
+        request: client_image_channel.Request,
+        state: client_image_channel.State,
+        reason: ?client_image_channel.UnavailableReason,
+    };
     for ([_]Case{
-        .{ .mode = .no_seat, .request = .advertise, .state = .unavailable },
-        .{ .mode = .not_offered, .request = .advertise, .state = .not_negotiated },
+        .{ .mode = .no_seat, .request = .advertise, .state = .unavailable, .reason = .no_seat },
+        // 미협상은 「이미지 채널 없음」이 아니다 — 그 줄을 남기지 않는다.
+        .{ .mode = .not_offered, .request = .advertise, .state = .not_negotiated, .reason = null },
         // 광고하지 않은 연결은 host 가 제공해도 채널을 열지 않는다.
-        .{ .mode = .no_seat, .request = .off, .state = .not_negotiated },
+        .{ .mode = .no_seat, .request = .off, .state = .not_negotiated, .reason = null },
     }) |case| {
         for ([_]bool{ true, false }) |deadline_path| {
             var host: FakeImageHost = .{ .mode = case.mode };
@@ -27636,9 +27735,11 @@ test "image channel connect: 자리 없음은 「이미지 채널 없음」, 미
                 if (client_open) client.deinit();
                 host.finish();
             }
+            client_image_channel.last_unavailable_reason = null;
             client = try FakeImageHost.connect(&host, deadline_path, case.request);
             client_open = true;
             try testing.expectEqual(case.state, client.image_channel.state);
+            try testing.expectEqual(case.reason, client_image_channel.last_unavailable_reason);
             try testing.expectEqual(@as(c.fd_t, -1), client.image_channel.fd);
             try testing.expectEqual(case.request == .advertise, host.saw_image_shm);
             client.deinit();

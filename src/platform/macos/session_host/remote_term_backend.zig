@@ -1253,6 +1253,27 @@ pub const RemoteTermBackend = struct {
         runtime: *RemoteRuntime,
     };
 
+    /// tick 이 host 마다 본 「이미지 채널 없음」 관측을 하나로 모은다(이미지 채널 §3.2, IC6b). 하나라도 없으면 없음이다. 없음을
+    /// 못 봤는데 모르는(바쁜) host 가 있으면 모름(null)이다 — 「있음」으로 읽으면 안내가 다시 무장된다. 모두 있으면 있음이다.
+    const ImageChannelTally = struct {
+        unavailable: bool = false,
+        unknown: bool = false,
+
+        fn add(self: *ImageChannelTally, observed: ?bool) void {
+            const unavailable = observed orelse {
+                self.unknown = true;
+                return;
+            };
+            if (unavailable) self.unavailable = true;
+        }
+
+        fn verdict(self: ImageChannelTally) ?bool {
+            if (self.unavailable) return true;
+            if (self.unknown) return null;
+            return false;
+        }
+    };
+
     fn hostProbeLessThan(_: void, lhs: HostProbe, rhs: HostProbe) bool {
         return lhs.host_id < rhs.host_id;
     }
@@ -3512,22 +3533,19 @@ pub const RemoteTermBackend = struct {
             host_probes[index] = .{ .host_id = entry.host_id, .runtime = entry.runtime };
         }
         std.mem.sort(HostProbe, host_probes[0..handle_count], {}, hostProbeLessThan);
-        var image_channel_unavailable = false;
-        var image_channel_unknown = false;
+        var image_channel: ImageChannelTally = .{};
         for (host_probes[0..handle_count], 0..) |probe, index| {
             if (index != 0 and host_probes[index - 1].host_id == probe.host_id) continue;
             // host 의 연결 하나에 이미지 채널 펌프 한 번(이미지 채널 §6) — 화면 배치가 없는 tick 에도 release 가 host 원장을 돌린다.
             RemoteRuntime.backend_api.pumpImageChannel(probe.runtime);
             // 펌프가 채널을 잃었으면 바로 여기서 보인다 — 연결 때 이미 없던 것도 같다(§3.2).
-            if (RemoteRuntime.backend_api.imageChannelUnavailable(probe.runtime)) |unavailable| {
-                if (unavailable) image_channel_unavailable = true;
-            } else image_channel_unknown = true;
+            image_channel.add(RemoteRuntime.backend_api.imageChannelUnavailable(probe.runtime));
             if (RemoteRuntime.backend_api.hasAnyBufferedFrameWork(probe.runtime) catch false) {
                 ready_hosts[ready_host_count] = probe.host_id;
                 ready_host_count += 1;
             }
         }
-        self.noteImageChannelAvailability(if (image_channel_unavailable) true else if (image_channel_unknown) null else false);
+        self.noteImageChannelAvailability(image_channel.verdict());
         var priority = [_]bool{false} ** max_remote_backend_runtimes;
         for (handles[0..handle_count], 0..) |handle, index| {
             const entry = self.runtimes.get(handle) orelse
@@ -9704,16 +9722,33 @@ test "image channel notice: 「이미지 채널 없음」은 없다가 생길 �
     backend.noteImageChannelAvailability(false);
     try std.testing.expect(!backend.takeImageChannelUnavailableNotice());
 
-    // 배선: 유지보수 tick 의 host 당 루프가 펌프 바로 다음에 그 host 연결을 보고, 루프가 끝난 뒤 한 번 반영한다.
+    // host 들의 관측을 모으는 규칙: 하나라도 없으면 없음, 없음 없이 모르는 host 가 있으면 모름, 모두 있으면 있음.
+    const Case = struct { observed: []const ?bool, verdict: ?bool };
+    for ([_]Case{
+        .{ .observed = &.{}, .verdict = false },
+        .{ .observed = &.{ false, false }, .verdict = false },
+        .{ .observed = &.{ false, true }, .verdict = true },
+        .{ .observed = &.{ null, false }, .verdict = null },
+        .{ .observed = &.{ null, true, false }, .verdict = true },
+    }) |case| {
+        var tally: RemoteTermBackend.ImageChannelTally = .{};
+        for (case.observed) |observed| tally.add(observed);
+        try std.testing.expectEqual(case.verdict, tally.verdict());
+    }
+
+    // 배선: 유지보수 tick 의 host 당 루프가 펌프 다음에 그 host 연결의 관측을 모으고, 루프가 끝난 뒤 모은 판정을 한 번 반영한다.
+    // 함수 몸체는 다음 ` fn ` 앞까지다 — 다음 함수로 옮기면 빨개진다.
     const source = @embedFile("remote_term_backend.zig");
-    const tick_at = std.mem.indexOf(u8, source, "pub fn " ++ "maintenanceEventTick(") orelse return error.TestUnexpectedResult;
-    // 그 함수 안만 본다 — 다음 함수로 옮겨도 통과하면 안 된다.
-    const tick_end = std.mem.indexOf(u8, source[tick_at + 1 ..], "\n    }\n") orelse return error.TestUnexpectedResult;
-    const body = source[tick_at..][0 .. tick_end + 1];
-    const pump_at = std.mem.indexOf(u8, body, "RemoteRuntime.backend_api." ++ "pumpImageChannel(probe.runtime);") orelse return error.TestUnexpectedResult;
-    const seen_at = std.mem.indexOf(u8, body, "if (RemoteRuntime.backend_api." ++ "imageChannelUnavailable(probe.runtime)) |unavailable| {") orelse return error.TestUnexpectedResult;
-    const note_at = std.mem.indexOf(u8, body, "self." ++ "noteImageChannelAvailability(if (image_channel_unavailable) true else if (image_channel_unknown) null else false);") orelse return error.TestUnexpectedResult;
+    const tick_at = std.mem.indexOf(u8, source, "fn " ++ "maintenanceEventTick(") orelse return error.TestUnexpectedResult;
+    const tick_end = std.mem.indexOfPos(u8, source, tick_at + 3, " fn ") orelse return error.TestUnexpectedResult;
+    const body = source[tick_at..tick_end];
+    const pump_at = std.mem.indexOf(u8, body, "backend_api." ++ "pumpImageChannel(probe.runtime)") orelse return error.TestUnexpectedResult;
+    const seen_at = std.mem.indexOf(u8, body, ".add(RemoteRuntime.backend_api." ++ "imageChannelUnavailable(probe.runtime))") orelse return error.TestUnexpectedResult;
+    const note_at = std.mem.indexOf(u8, body, "noteImageChannelAvailability(") orelse return error.TestUnexpectedResult;
     try std.testing.expect(pump_at < seen_at and seen_at < note_at);
+    // 반영하는 값은 모은 판정이다 — 상수나 마지막 host 하나의 관측이 아니다.
+    const note_end = std.mem.indexOfScalarPos(u8, body, note_at, ';') orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.endsWith(u8, body[note_at..note_end], ".verdict())"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "self." ++ "noteImageChannelAvailability("));
 }
 

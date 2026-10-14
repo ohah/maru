@@ -7177,11 +7177,12 @@ pub fn build(b: *std.Build) void {
             // `pump:` 12 — 채널 펌프(IC3b — 표에 넣기·release·채널 상실·fd 개수 위반 poison·external 모드 안 읽음·입양 스냅샷·소유 범위·
             // 울타리 든 해석) 8, tick 펌프는 물러서고 동기 적용 펌프는 기다린다(IC4b) 2, 협상한 Client 는 external 모드 거부(IC3b-2c-1) 1,
             // 연결 둘의 표가 섞이지 않음(IC3b-2c-2) 1. `connect:` 에 GUI 제품 진입점의 광고·GUI 가 아닌 프로필 거부(IC6a) 1.
+            // `pump:` 에 적용한 배치의 hwm 정리가 release 를 쓰고 채널을 비움(IC7a) 1.
             .filters = &.{ "image channel connect:", "image channel pump:" },
         });
         const run_image_channel_connect_tests = b.addRunArtifact(image_channel_connect_tests);
-        run_image_channel_connect_tests.addArg("--maru-expect-tests=24");
-        run_image_channel_connect_tests.addArg("--maru-expect-passed=24");
+        run_image_channel_connect_tests.addArg("--maru-expect-tests=25");
+        run_image_channel_connect_tests.addArg("--maru-expect-passed=25");
         // 제품 연결 경로(IC6a) — 새 탭·복원·재접속만 광고하고 inventory·CLI·legacy 는 광고하지 않는다(hello 바이트로 잰다).
         const image_channel_host_connect_tests = addProjectTest(b, .{
             .root_module = b.createModule(.{

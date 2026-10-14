@@ -20,6 +20,7 @@
 //! 소켓은 논블로킹으로 남긴다 — IC3b 의 채널 리더와 release 송신은 논블로킹이다.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const c = std.c;
 const posix = std.posix;
 const framing = @import("framing.zig");
@@ -49,6 +50,36 @@ pub const Channel = struct {
         self.fd = -1;
     }
 };
+
+/// 협상했는데 채널 없이 끝난 이유(§3.2). app.log 한 줄에 싣는다 — 「이미지 채널 없음」이 실제로 어느 원인에서 얼마나 나는지가
+/// 회복 경로를 만들지 정하는 근거다.
+pub const UnavailableReason = enum {
+    /// hello_ack 에 token 이 없다 — host 의 연결·host 자리가 찼다.
+    no_seat,
+    /// 바깥 deadline 이 abandon 몫밖에 안 남아 채널을 열지 않았다.
+    no_budget,
+    /// 세그먼트 표를 잡지 못했다(할당 실패).
+    no_table,
+    /// host 가 채널을 거부했다(채널 hello 뒤 EOF·`bind_ack` 형식 오류) — abandon 을 응답까지 읽었다.
+    refused,
+    /// `bind_ack` 시간 초과 또는 채널 연결 단계 실패 — host owner 가 밀려 있을 수 있다.
+    timed_out,
+    /// 묶인 채널을 펌프가 잃었다.
+    lost,
+};
+
+/// 판정자 전용 — 마지막으로 남긴 이유. 제품 빌드에서는 칸이 없다(void).
+pub var last_unavailable_reason: if (builtin.is_test) ?UnavailableReason else void = if (builtin.is_test) null else {};
+
+/// 연결이 「이미지 채널 없음」이 된 순간에 한 번 부른다 — 연결이 실패한 출구(오류 반환)에서는 부르지 않는다. 그 연결의 이미지는
+/// placement 째 빠진다(§3.2).
+pub fn noteUnavailable(host_id: u128, reason: UnavailableReason) void {
+    if (builtin.is_test) {
+        last_unavailable_reason = reason;
+        return;
+    }
+    std.log.warn("session host image channel unavailable: host={x:0>32} reason={s} — images are omitted on this connection until reconnect", .{ host_id, @tagName(reason) });
+}
 
 /// `bind_ack` 대기에서 abandon 왕복 몫으로 남겨 두는 예산(§3.2). 응답 한 frame 이라 짧다.
 pub const abandon_reserve_ns: i128 = 500 * std.time.ns_per_ms;

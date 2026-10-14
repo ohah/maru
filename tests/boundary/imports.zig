@@ -1335,6 +1335,9 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
                 // 「이미지 채널 없음」 안내(IC6b, 2026-10-14): 협상했는데 채널이 없는지 읽는 관측 하나. 앱은 slot·adapter·runtime 을
                 // 거쳐 이것만 본다.
                 .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "imageChannelUnavailable" },
+                // 적용한 배치의 정리가 release 를 쓴다(IC7a, 2026-10-14): 펌프와 정리가 함께 지나는 펌프 본문 하나. 울타리는 호출자
+                // 둘(`pumpImageChannel`·`sweepImageSegments`)이 든 뒤에 부르고, 채널 상실 처리는 이 본문 한 곳에만 있다.
+                .{ .parent = "Client", .kind = "fn", .visibility = "private", .modifier = "", .name = "pumpFencedImageChannel" },
                 // UI 프레임 도장을 **그것을 올린 판정자 안에서만** 유효하게 하는 셋(2026-10-01). 판정자 빌드에서만 의미가 있고
                 // (제품 빌드는 `void`·0), 앞선 판정자가 남긴 도장이 선언 순서에 따라 뒤 판정자의 되풀이 읽기를 막던 결함을
                 // 순서와 무관하게 닫는다. 읽는 자리 셋은 `effectiveUiFrameStamp` 하나로 모였다.
@@ -13271,12 +13274,13 @@ const image_table_entry_names = [_][]const u8{
     "pumpImageChannel",          "resolveImageSegment",          "openImageStream",
     "sweepImageSegments",        "pumpAttachmentImageChannel",   "resolveAttachmentImage",
     "openAttachmentImageStream", "sweepAttachmentImageSegments", "currentPumpImageChannel",
+    "pumpFencedImageChannel",
 };
 
 const ImageTableSite = struct { path: []const u8, count: usize, thread: []const u8 };
 
 const image_table_sites = [_]ImageTableSite{
-    .{ .path = "src/platform/macos/session_host/client.zig", .count = 4, .thread = "선언 넷(펌프·해석·열기·정리) — 표를 직접 만지는 유일한 자리, 아래 호출자의 스레드를 따른다" },
+    .{ .path = "src/platform/macos/session_host/client.zig", .count = 7, .thread = "선언 넷(펌프·해석·열기·정리)과 펌프 본문의 선언·호출 셋(펌프·정리가 울타리를 든 뒤 부른다) — 표를 직접 만지는 유일한 자리, 아래 호출자의 스레드를 따른다" },
     .{ .path = "src/platform/macos/session_host/client_slot.zig", .count = 10, .thread = "slot 의 선언 다섯과 Client 호출 다섯 — tick 펌프는 `withCurrent` 가 slot 소유 스레드를 확인한다, 나머지는 attachment 적용(아래 adapter)의 스레드" },
     .{ .path = "src/platform/macos/session_host/generation_batch_adapter.zig", .count = 8, .thread = "transport 콜백 넷의 선언과 slot 호출 — `RemoteAttachment` 가 적용할 때 부른다: 앱 메인 스레드의 tick 펌프·관찰자 재접속 단계, 탭을 열 때의 첫 attach" },
     .{ .path = "src/platform/macos/session_host/host_adapter.zig", .count = 2, .thread = "tick 펌프(generation) 선언과 slot 호출 — `backend_api.pumpImageChannel` 에서만, 앱 메인 스레드" },

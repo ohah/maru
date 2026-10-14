@@ -21862,10 +21862,14 @@ test "image channel legacy: the legacy transport reads negotiation and resolves 
     try std.testing.expectEqual(@as(usize, 0), table.len);
 
     // 앱 안내(IC6b)의 runtime 고리는 두 연결 모양 모두 그 연결의 관측으로 간다 — 한쪽이 상수면 그 모양의 연결은 안내가 안 뜬다.
-    const unavailable_at = std.mem.indexOf(u8, @embedFile("remote_runtime.zig"), "pub fn " ++ "imageChannelUnavailable(runtime: *RemoteRuntime) ?bool {") orelse
+    // 몸체는 다음 ` fn ` 앞까지다(다음 함수 선언 — 몸체 안의 `fn` 타입에서 멈추면 빨개지는 쪽이라 공허해지지 않는다).
+    const runtime_source = @embedFile("remote_runtime.zig");
+    const unavailable_at = std.mem.indexOf(u8, runtime_source, "fn " ++ "imageChannelUnavailable(runtime: *RemoteRuntime)") orelse
         return error.TestUnexpectedResult;
-    const unavailable_body = @embedFile("remote_runtime.zig")[unavailable_at..][0..400];
-    try std.testing.expect(std.mem.indexOf(u8, unavailable_body, ".legacy => |client| client." ++ "imageChannelUnavailable(),\n                .generation => |adapter| adapter." ++ "imageChannelUnavailable(),\n            };") != null);
+    const unavailable_end = std.mem.indexOfPos(u8, runtime_source, unavailable_at + 3, " fn ") orelse return error.TestUnexpectedResult;
+    const unavailable_body = runtime_source[unavailable_at..unavailable_end];
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, unavailable_body, "client." ++ "imageChannelUnavailable()"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, unavailable_body, "adapter." ++ "imageChannelUnavailable()"));
 
     // GUI 적용 자리(첫 attach 조립·관찰자 재접속 후보)는 attachment 의 resolver 를 넘긴다 — 미협상 resolver 를 이 파일에 적으면
     // 협상한 연결의 첫 snapshot 이 `image_ref` 에 malformed 로 닫힌다.

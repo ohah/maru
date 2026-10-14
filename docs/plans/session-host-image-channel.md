@@ -572,9 +572,9 @@ IC6 는 셋으로 나눴다 — GUI 제품 연결의 광고와 external 차단(I
 - external 차단은 두 겹이다: `host_connect` 말단은 GUI 가 아닌 프로필이면 광고 요청을 무시하고, client 의 두 정책 함수는
   GUI 가 아닌 프로필의 `.advertise` 를 소켓을 열기 전에 `ProtocolError` 로 거부한다. external 모드 거부(IC3b-2c-1)는 3 차 방어선.
 - 옛 host 는 기능 목록을 「포함」으로만 본다 — 모르는 `image_shm` 은 무시되어 연결이 깨지지 않는다.
-- 협상했는데 채널 없이 끝난 연결(자리 없음·거부·시간 초과·표 할당 실패)은 app.log 에 `session host image channel unavailable:`
-  한 줄을, 펌프가 채널을 잃으면 `session host image channel lost:` 한 줄을 남긴다 — IC6b 의 탭 안내 전에는 이미지가 빠진 이유의
-  유일한 앱 쪽 흔적이다.
+- 협상했는데 채널 없이 끝난 연결(자리 없음·거부·시간 초과·표 할당 실패)과 펌프가 잃은 채널은 app.log 에
+  `session host image channel unavailable:` 한 줄을 남긴다 — IC6b 의 탭 안내 전에는 이미지가 빠진 이유의 유일한 앱 쪽 흔적이다.
+  이유 칸(`reason=`)은 IC7a 에서 더했다(계약 §3.2).
 - 판정자(`test-image-channel-app`):
   - `image channel host_connect:` 1(새 판정자 step) — 한 isolated manifest·endpoint 에 hello 만 읽는 peer 를 세우고, 경로마다 실제
     hello 바이트에 `image_shm` 이 있는지 센다: 새 탭·복원·재접속은 광고, inventory·CLI 둘·legacy 는 광고하지 않음, 말단에 GUI 가
@@ -607,7 +607,7 @@ IC6 는 셋으로 나눴다 — GUI 제품 연결의 광고와 external 차단(I
 - 한계: 안내는 창 토스트라 어느 탭(host)인지 말하지 않는다 — host 는 보통 하나다. host 가 둘이고 둘이 차례로 「없음」이 되면
   두 번째는 첫째가 회복되기 전엔 다시 알리지 않는다.
 
-#### IC6c — 실측 gate (통과, 2026-10-14)
+#### IC6c — 실측 gate (완료 — 실측 2026-10-14)
 
 - 실측 gate(2026-10-10 기준선과 같은 방법): terminal-browser 를 연 채 스크롤할 때
   - host 로그 `session host stream invalidated:` 0 줄, `resync sweep blocked` 의 반복 0,
@@ -627,3 +627,46 @@ IC6 는 셋으로 나눴다 — GUI 제품 연결의 광고와 external 차단(I
     앱의 「이미지 채널 없음」·세그먼트 해석 실패는 0 이었다. 앱의 `image flow` 줄이 그 구간에 채널로 받은 이미지를 센다.
   - 남은 긴 반복 하나(17.4 ms)의 샘플은 상태바 자원 조회·그리기 목록이었다 — 이미지 경로가 아니다.
   - 한계: 측정은 한 창·한 브라우저 탭·20 초 한 번이다. 기록 구간 내내 스크롤이 이어졌는지는 이미지 수신 줄로만 간접 확인했다.
+
+### IC7 — 재검증 후속
+
+IC6 머지 뒤 적대적 재검증(4 명, HIGH 0)이 남긴 MEDIUM 넷을 고친다. 수정안을 다시 적대적으로 검증해 순서를 정했다.
+
+#### IC7a — 정리 뒤 release·「없음」 이유·판정자 정리 (완료)
+
+- 적용한 배치의 hwm 정리(`Client.sweepImageSegments`)가 울타리 안에서 펌프 본문(`pumpFencedImageChannel`)을 `.try_lock` 으로
+  지난다 — 채널 비우기 → 정리 → release 쓰기·채널 상실 처리. 그 전에는 release 가 tick 펌프(host 의 첫 runtime 몫)와 다음
+  배치의 적용 전 펌프에서만 나가 마지막 이미지 배치 뒤 그 runtime 이 막히면 host 원장이 묶였다. 비우기를 정리 앞에 둔 것은
+  적대적 검증(MEDIUM) 반영이다 — 반대 순서면 커널 큐에 있던 버려진 배치의 세그먼트가 이번 정리를 비켜 간다. 수신 잠금을 못
+  잡아도 쓰기는 한다(펌프도 같다). 상실 처리는 펌프 본문 한 곳에만 있다.
+- 「이미지 채널 없음」 app.log 줄에 이유(`no_seat`·`no_budget`·`no_table`·`refused`·`timed_out`·`lost`)를 싣는다. 수립이 이유를
+  돌려주고 connect 가 연결이 성립한 뒤(블로킹 복귀·deadline 확인 뒤)에 남긴다 — 전에는 `defer` 라 abandon 왕복 실패 같은 오류
+  출구에서도 찍혔다. 상실도 같은 줄로 모았다. 회복 경로
+  (IC7d)를 만들지 이 이유별 빈도로 정한다.
+- backend tick 의 host 관측 집계를 값 판정자로 잴 수 있게 `ImageChannelTally` 로 뺐다(「모름」 갈래가 판정자 없이 바뀔 수 있었다).
+- 판정자 정리: 고정 길이 창·여러 줄 들여쓰기·`"\n    }\n"` 로 함수 끝을 찾던 글자 판정자 셋을 「다음 선언 앞까지」 몸체와 가장
+  짧은 조각으로 바꿨다. 앱 판정자는 실제 backend 를 세워 「모달이 열린 창은 꺼내지 않는다」 순서와 꺼내는 경로를 재고, 프레임
+  tick 정리 단계 안에서 부르는지 잰다.
+- 계약 §3.2(관측 모으기·거두기·모달·한계·이유)·§6(release 쓰는 자리)을 갱신했다.
+
+#### IC7b — 채널 수립을 비동기로 (미착수)
+
+- connect 가 `bind_ack` 를 기다리지 않는다(진입점 둘 다 — 재접속 worker 의 예산도 같은 대기를 쓴다). 「수립 중」 상태를 두고
+  `pumpImageChannel` 의 조기 반환 한 곳에서 `bind_ack` 를 전용 recvmsg 로 읽은 뒤 비운다 — 기존 drain 으로 읽으면 fd 없는 첫
+  메시지가 계약 위반으로 poison 된다. 먼저 읽고 마감을 본다. 마감은 단조 시계 정수 하나, 값은 token 만료(10 초)에 여유를 더한다.
+  비동기 경로에서는 abandon 을 보내지 않는다(token 은 늦은 hello 의 EOF 나 만료로 풀린다). host 는 바꾸지 않는다.
+- 계약 §3.1 「attach 는 언제나 채널 상태가 정해진 뒤에 온다」, Channel 필드 수 단언·다이제스트·enum 순서·글자 판정자를 함께 고친다.
+
+#### IC7c — 공유 메모리 생성 실패 재시도 (미착수)
+
+- `prepareImageSegment` 의 생성 실패 갈래에서만 재시도를 건다(일반 「미룸」 갈래에 걸면 「이미지 채널 없음」 연결이 영원히 다시
+  투영한다). 남은 세그먼트 수와 무관하게 건다 — 버려진 배치의 세그먼트는 정지 화면에서 반환되지 않을 수 있다.
+- 백오프는 host(Owner) 하나 — 250 ms 에서 상한 5~10 초, 한 바퀴에 생성 실패가 0 건일 때만 리셋. 업그레이드 drain·admission 게이트가
+  닫혔을 때는 건너뛰고, 채널을 잃은 연결은 지운다. errno 를 남기려면 `image_segment.create` 의 오류에 errno 를 싣는다.
+- host 예산(HostBytesFull)은 타이머 대신 다른 연결의 반환 사건이 깨운다.
+
+#### IC7d — 「이미지 채널 없음」 회복 (보류)
+
+- IC7a 의 이유별 로그로 빈도를 본 뒤 정한다. 한다면 새 RPC 대신 token 재사용(입양 뒤에도 token 을 그 연결의 재수립 자격으로 남기고
+  같은 채널 hello 를 다시 보낸다)이 첫 후보다. 전제: 세그먼트 id 연속(다시 묶을 때 원장의 id 를 1 로 되돌리지 않는다), `releaseAll`
+  「연결당 한 번」 불변식 갱신, 상실과 입양 거부의 경합, 시도 상한과 안내 문구.

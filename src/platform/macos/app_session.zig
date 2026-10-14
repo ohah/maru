@@ -40679,8 +40679,8 @@ test "도크 뷰 스위처: 호버는 슬롯 위에서만 포인터가 바뀐다
     // 슬롯 위=클릭 가능(pointingHand), 바 안 여백=화살표. 렌더 강조와 커서가 같은 판정을 쓰는지 함께 본다.
     const bar = chrome.components.dock_view_bar.Rect{ .x = 100, .y = 40, .w = chrome.components.dock_view_bar.default_slot_cols * 10 * chrome.components.dock_view_bar.slot_count + 20, .h = 24 };
     const cw: u32 = 10;
-    // 격자는 hit-test 와 렌더가 공유하는 자리에서 온다. 여기서는 셀 파생(토큰 없음)으로 잡아 옛 값을 지킨다.
-    const cg = chrome.components.dock_view_bar.Grid.init(cw, 0);
+    // 격자는 hit-test 와 렌더가 공유하는 자리에서 온다. 여기서는 칸 수를 고정한 격자(`fixedCols` 4칸)로 옛 값을 지킨다.
+    const cg = chrome.components.dock_view_bar.Grid.fixedCols(cw, chrome.components.dock_view_bar.default_slot_cols);
     try std.testing.expectEqual(@as(usize, 0), chrome.components.dock_view_bar.slotAtPoint(bar, cg, 110, 50).?);
     try std.testing.expectEqual(@as(usize, 2), chrome.components.dock_view_bar.slotAtPoint(bar, cg, 190, 50).?);
     // **폭을 `slot_count` 에서 유도한다.** 여기 숫자를 적어 두면 뷰를 하나 더할 때 이 test 가 계약이 아니라

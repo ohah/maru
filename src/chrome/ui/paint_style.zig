@@ -10,6 +10,8 @@ const ui_tree = @import("tree.zig");
 
 /// ML3a가 아직 shadow를 Metal로 내리지 않지만 이름 붙은 shadow 메트릭은 여기서 해석한다. 이 값을
 /// resolved style에 두어야 나중에 올 backend가 두 번째 매핑을 만들어 내지 않는다.
+/// `.raised` 면 늘 값이 있다 — 제품 토큰(rich)의 그림자다. 기반 토큰(base, 테스트)이면 0·0·0 이 들어 「값이 있다 = 보인다」가
+/// 아니므로, 이 값을 GPU 로 내리는 backend 가 생기면 alpha·blur 0 은 그쪽에서 건너뛴다.
 pub const ResolvedShadow = struct {
     blur_px: u16,
     offset_y_px: u16,
@@ -244,8 +246,8 @@ fn applyPaintOverride(result: *ResolvedCardStyle, paint_style: ui_style.PaintSty
     }
 }
 
-fn shadowFromTokens(tk: *const tokens.Tokens) ?ResolvedShadow {
-    if (tk.space.shadow_alpha == 0 or tk.space.shadow_blur_px == 0) return null;
+/// `.raised` 의 그림자 — 제품 토큰(rich)의 값이다. 옛 tui 룩(2026-08-19 제거)은 shadow 0 토큰이라 null 로 접었다.
+fn shadowFromTokens(tk: *const tokens.Tokens) ResolvedShadow {
     return .{
         .blur_px = tk.space.shadow_blur_px,
         .offset_y_px = tk.space.shadow_offset_y_px,

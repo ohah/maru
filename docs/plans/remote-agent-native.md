@@ -385,6 +385,18 @@ integrity 보호를 끄거나 임의의 재접속 성공으로 처리하지 않�
 
 ### Runtime 종료·observer 거부 GUI 회귀 검증
 
+`tools/test-runtime-end-pressure.py`는 격리된 실제 daemon과 PTY 두 개를 사용한다. 같은 MRSH connection에 종료 대상과
+유지할 sibling을 attach하고 출력 수신을 늦춘 뒤 별도 admin connection으로 대상만 종료한다.
+정상 수신 대조군과 느린 수신군을 비교하여 실제 close 로그의 site/err, sibling PID 유지,
+새 connection에서 sibling 재attach와 입력·화면 복구를 확인한다. 송신 queue나 close state를
+직접 수정하지 않으며 PartialFrame 보호 정책은 유지한다. 수신이 느렸다는 사실만으로 부분
+전송 재현을 주장하지 않고, 부분 전송/오류가 관측되지 않은 회차는 미재현으로 기록한다.
+실제 실행에서 초기 snapshot 부분 수신 중 종료는 `ended_purge_tracker/PartialFrame`과 잘린
+payload로 재현됐고 sibling의 동일 PID·새 controller 권한·입력에 따른 화면 텍스트 복구가
+확인됐다. 수신 완료 대조군은 공유 연결을 유지한다. 화면 판정은 raw marker 검색 대신
+완전한 row/set_runs record의 viewport 안 text run을 읽고, 잘림·잘못된 UTF-8·보이지 않는
+width-0 marker·viewport 밖/초과/미달 row를 거부한다. GUI 자동 재접속은 별도 검증 경계다.
+
 후속 원인 진단은 `removeEndedTracker`의 slot 조회·tracker purge·stream accounting
 실패에 기존 close 진단의 site와 실제 오류 이름을 남긴다. 보존된 실행 파일의 반환 주소는
 purge 실패 갈래까지 특정했지만 당시 `Stale`과 `PartialFrame`은 구분하지 못했다.

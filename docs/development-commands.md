@@ -1,5 +1,11 @@
 # 개발 명령
 
+- `python3 tools/test-runtime-end-pressure.py --cli zig-out/bin/maru --output <새 디렉터리>`:
+  격리된 실제 daemon·PTY 두 개에서 큰 초기 snapshot의 수신 완료 대조군과 부분 수신 중 runtime 종료를 비교한다.
+  실제 `ended_purge_tracker/PartialFrame` 로그·잘린 payload, sibling PID 유지와 새 controller의 입력·화면 복구,
+  runtime 정리를 검사한다. GUI 자동 재접속 검증은 별도다. 실행 전 `zig build`로 CLI를 빌드한다.
+- `python3 tools/test-runtime-end-pressure-oracle.py`: 위 검사의 독립 화면 텍스트 판정자 음성 대조군.
+
 - Runtime 종료 tracker close 진단과 정상 cleanup 회귀: `zig build test-session-host-ended-tracker-diagnostics`.
   실제 Client/Slot의 slot identity·tracker identity·부분 전송·stream accounting 오류와 첫 close 보존,
   정상 runtime 종료 cleanup을 Debug·ReleaseFast에서 검증한다. 실제 GUI/원래 장애의 오류 원인 확인은 별도다.

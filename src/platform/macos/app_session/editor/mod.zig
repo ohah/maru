@@ -68,6 +68,7 @@ pub const OpenFileError = error{
     /// UTF-8이 아니다. 다른 인코딩을 추측하지 않는다(§3.5).
     NotUtf8,
     OutOfMemory,
+    MutationPending,
 };
 
 /// 문서 내용의 해시 — dirty 판정 전용.
@@ -2603,6 +2604,7 @@ pub fn prepareVerifiedText(self: *AppSession, path: []const u8, bytes: []const u
 
 // opened의 소유권은 성공할 때만 registry로 넘긴다. 실패 시 caller가 회수한다.
 fn prepareOpened(self: *AppSession, path: []const u8, opened: Opened, restored: ?recovery_store.Id) OpenFileError!Prepared {
+    if (@import("save/as.zig").reservedPath(self, path, null)) return error.MutationPending;
     // **줄 슬라이스를 미리 만든다.** `frame.build`는 문서 전체를 받아야 스크롤바 길이가 맞는데(§4.1a),
     // 매 프레임 다시 만들면 프레임마다 할당이 생긴다. 줄들은 문서 버퍼를 빌리므로 문서보다 오래 살면 안 된다.
     const n = opened.file.lineCount();
@@ -8397,6 +8399,8 @@ fn saveDocumentGuarded(self: *AppSession, term: *Term, guard: SaveGuard) SaveErr
         _ = app_session_mod.editor_untitled_save_ops.begin(self, term);
         return error.AskName;
     }
+    // 새 경로 전환 중인 같은 문서는 비동기 coordinator를 통해서만 저장한다.
+    if (@import("save/as.zig").holdFor(term) != null) return error.WriteFailed;
     @import("save/dispatch.zig").drainForSynchronousCaller();
     var prepared = try @import("local_save.zig").Prepared.init(self, term, guard);
     defer prepared.deinit(self.allocator);
@@ -22950,7 +22954,10 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     var f = (try SmtFixture.openRepo(allocator, "c.ts", "const a=1\n")) orelse return error.SkipZigTest;
     defer f.close(allocator);
     const s = f.fx.session;
-    try testing.expect(f.ready());
+    if (!f.ready()) {
+        std.debug.print("EXFB3_WAIT stage=server-ready\n", .{});
+        return error.TestUnexpectedResult;
+    }
     const root = f.root_buf[0..f.root_len];
     const ext = @import("external_formatter.zig");
     ext.timeout_ms = test_formatter_timeout_ms; // 부하가 큰 기계에서 흔들리지 않게(EXFB1 주석)
@@ -22960,7 +22967,14 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
         fn g(ss: *AppSession) bool {
             return !ss.editor_format.waiting and @import("save/dispatch.zig").requestCount() == 0;
         }
-    }.g;
+        fn wait(fx: *PaneFixture, stage: []const u8) !void {
+            // 실행기에 허용한 20초보다 먼저 정상 작업을 실패로 판정하지 않는다.
+            if (pumpLspUntil(fx, @as(u64, test_formatter_timeout_ms) + 2_000, fx.session, g)) return;
+            const ss = fx.session;
+            std.debug.print("EXFB3_WAIT stage={s} waiting={any} preparing={any} external_id={d} saves={d}\n", .{ stage, ss.editor_format.waiting, ss.editor_format.preparing, ss.editor_format.external_id, @import("save/dispatch.zig").requestCount() });
+            return error.TestUnexpectedResult;
+        }
+    };
     const notice = struct {
         fn g(ss: *AppSession) []const u8 {
             return ss.chrome_host.notice.message;
@@ -23001,7 +23015,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     defer s.loaded_config.config.editor.formatter[idx("typescript")] = .{};
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 's' }, .{ .command = true });
-    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try settled.wait(&f.fx, "biome");
     try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("const a = 1\n", try f.fx.dir.dir.readFile(testing.io, "c.ts", &disk_buf));
     try awaitDispatchedSavesForTest();
@@ -23017,7 +23031,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     py.rt.editor_selection = editor_selection.Selection.at(0);
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
-    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try settled.wait(&f.fx, "ruff");
     try testing.expectEqualStrings("x = 1\n", py.rt.editorDocument().opened.?.file.content);
     try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "format|--stdin-filename|{s}|-|\n", .{py_path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
@@ -23044,7 +23058,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     }
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
-    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try settled.wait(&f.fx, "zig");
     try testing.expectEqualStrings("const a = 1;\n", zt.rt.editorDocument().opened.?.file.content);
     try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("fmt|--stdin|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
@@ -23055,7 +23069,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     rt.rt.editor_selection = editor_selection.Selection.at(0);
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
-    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try settled.wait(&f.fx, "rustfmt");
     try testing.expectEqualStrings("let a = 1;\n", rt.rt.editorDocument().opened.?.file.content);
     try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("--emit|stdout|--edition|2021|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
@@ -23077,7 +23091,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     }
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
-    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try settled.wait(&f.fx, "command");
     try testing.expectEqualStrings("a = 1\n", gt.rt.editorDocument().opened.?.file.content);
     try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "-extra|--file={s}|\n", .{go_path}), try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
@@ -23098,7 +23112,7 @@ test "EXFB3 외부 포매터 EF2 (tooling §8.2t) — JS 도구 설정이 둘이
     s.loaded_config.config.editor.formatter[idx("go")] = .{ .choice = .command, .command = try std.fmt.bufPrint(&abs_cmd_buf, "{s}/fakebin/gofumpt -abs", .{root}) };
     s.dismissMessageOverlays();
     try pressKey(&f.fx, .{ .char = 'F' }, .{ .option = true, .shift = true });
-    try testing.expect(pumpLspUntil(&f.fx, 5000, s, settled));
+    try settled.wait(&f.fx, "absolute-command");
     try awaitDispatchedSavesForTest();
     try testing.expectEqualStrings("-abs|\n", try f.fx.dir.dir.readFile(testing.io, ".fmt_args", &args_buf));
     // 따옴표가 닫히지 않은 명령은 실행하지 않고 알린다.
@@ -67023,4 +67037,340 @@ test "SASWRITE 다른 문서의 lease와 같은 경로 등록을 거절한다" {
     try testing.expect(!request.adopt(testing.allocator, other.rt.editor_document_lease.?));
     try testing.expectEqualStrings("other", other.rt.editorDocument().opened.?.file.content);
     try testing.expect(request.adopt(testing.allocator, t.rt.editor_document_lease.?));
+}
+
+// 실제 명령 actor의 경로 전환과 실패를 디스크 bytes로 대조한다. NSSavePanel 자체는 제품 검증 대상이다.
+fn saveAsSelectForTest(fx: *PaneFixture, term: *Term, path: []const u8) !u64 {
+    const actor = @import("save/as.zig");
+    actor.begin(fx.session, term);
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var id: u64 = 0;
+    const len = actor.take(fx.session, &id, &buffer);
+    try testing.expectEqualStrings(term.rt.editorDocument().path.?, buffer[0..len]);
+    actor.reply(fx.session, id, path);
+    return id;
+}
+fn awaitSaveAsForTest() !void {
+    const actor = @import("save/as.zig");
+    const dispatch = @import("save/dispatch.zig");
+    const end = std.Io.Clock.awake.now(testing.io).nanoseconds + 5 * std.time.ns_per_s;
+    while ((actor.pending() != 0 or dispatch.requestCount() != 0) and std.Io.Clock.awake.now(testing.io).nanoseconds < end) {
+        dispatch.poll();
+        actor.poll();
+        _ = usleep(2_000);
+    }
+    try testing.expectEqual(@as(usize, 0), actor.pending());
+    try testing.expectEqual(@as(usize, 0), dispatch.requestCount());
+}
+fn saveAsCleanupForTest() void {
+    @import("save/as.zig").cleanupForTests();
+    @import("save/as.zig").setGateForTests(null);
+    @import("save/dispatch.zig").cleanupForTests();
+}
+
+test "SASCMD 새 경로 실제 완료는 원본과 Undo를 보존하고 후속 CmdS를 새 경로에 쓴다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    fx.session.loaded_config.config.editor.format_on_save = false;
+    t.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, t, "!"));
+    const undo_count = t.rt.editorDocument().history.undo_len;
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    _ = try saveAsSelectForTest(&fx, t, path);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    @import("save/as.zig").setGateForTests(&gate);
+    @import("save/as.zig").poll();
+    try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "source.txt"));
+    try testing.expect(insertText(fx.session, t, "?"));
+    @import("save_actions.zig").saveCommand(fx.session, t);
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expectEqualStrings(path, t.rt.editorDocument().path.?);
+    try testing.expectEqual(undo_count + 1, t.rt.editorDocument().history.undo_len);
+    try batchApplyDisk(&fx, "source.txt", "old");
+    try batchApplyDisk(&fx, "destination.txt", "old!?");
+    try testing.expect(!isDirty(t));
+}
+
+test "SASCMD 목적지 외부 변경은 원본 경로와 편집을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    _ = try saveAsSelectForTest(&fx, t, path);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "destination.txt", .data = "external" });
+    try awaitSaveAsForTest();
+    try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "source.txt"));
+    try batchApplyDisk(&fx, "destination.txt", "external");
+    try batchApplyDisk(&fx, "source.txt", "old");
+}
+
+test "SASCMD 패널 취소와 늦은 콜백은 새 요청과 문서를 바꾸지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    const actor = @import("save/as.zig");
+    const cancelled = try saveAsSelectForTest(&fx, t, "");
+    actor.begin(fx.session, t);
+    var buffer: [std.fs.max_path_bytes]u8 = undefined;
+    var fresh: u64 = 0;
+    try testing.expect(actor.take(fx.session, &fresh, &buffer) > 0);
+    try testing.expect(fresh != cancelled);
+    const unwanted = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "unwanted.txt" });
+    defer testing.allocator.free(unwanted);
+    actor.reply(fx.session, cancelled, unwanted);
+    try testing.expectEqual(@as(usize, 0), actor.pending());
+    actor.reply(fx.session, fresh, "");
+    try testing.expectEqual(@as(usize, 0), actor.pending());
+    try batchApplyDisk(&fx, "source.txt", "old");
+}
+
+test "SASCMD 열린 독립 목적지와 예약 목적지를 다시 열려는 요청은 거절한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    fx.session.native_text = true;
+    fx.session.dock_initialized = true;
+    const tree_initialized = fx.session.file_tree_initialized;
+    fx.session.file_tree_initialized = false;
+    defer fx.session.file_tree_initialized = tree_initialized;
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    const other = try undoFixture(&fx, testing.allocator, "other.txt", "other");
+    _ = try saveAsSelectForTest(&fx, t, other.rt.editorDocument().path.?);
+    try testing.expectEqual(@as(usize, 0), @import("save/as.zig").pending());
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.md" });
+    defer testing.allocator.free(path);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "destination.md", .data = "target" });
+    _ = try saveAsSelectForTest(&fx, t, path);
+    try testing.expect(@import("save/as.zig").reservedPath(fx.session, path, null));
+    try testing.expectEqual(AppSession.FilePanelOpenPathResult.failed, file_panel_ops.openFilePanelPathAfterValidation(fx.session, path, .text, null));
+    try awaitSaveAsForTest();
+    fx.session.file_tree_initialized = false;
+    try testing.expectEqual(AppSession.FilePanelOpenPathResult.opened, file_panel_ops.openFilePanelPathAfterValidation(fx.session, path, .text, null));
+    try batchApplyDisk(&fx, "other.txt", "other");
+}
+
+test "SASCMD 배치 snapshot은 실제 receipt를 유지하고 전환 뒤 새 경로에 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    _ = try saveAsSelectForTest(&fx, t, path);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    @import("save/as.zig").setGateForTests(&gate);
+    @import("save/as.zig").poll();
+    t.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, t, "B"));
+    const receipt = try @import("save/owner.zig").Receipt.create(testing.allocator);
+    defer receipt.release();
+    const id = (try @import("save/dispatch.zig").trySaveForBatch(fx.session, t, receipt)).?;
+    try testing.expect(@import("save/dispatch.zig").ownerForTest().?.queue.isHeld(id));
+    @import("save/dispatch.zig").poll();
+    try testing.expect(receipt.result == .pending);
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expect(receipt.result == .saved);
+    try batchApplyDisk(&fx, "source.txt", "old");
+    try batchApplyDisk(&fx, "destination.txt", "oldB");
+}
+
+test "SASCMD 실패한 새 경로 뒤 배치 receipt는 원본 경로에 snapshot을 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    _ = try saveAsSelectForTest(&fx, t, path);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    @import("save/as.zig").setGateForTests(&gate);
+    @import("save/as.zig").poll();
+    t.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, t, "B"));
+    const receipt = try @import("save/owner.zig").Receipt.create(testing.allocator);
+    defer receipt.release();
+    _ = try @import("save/dispatch.zig").trySaveForBatch(fx.session, t, receipt);
+    try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "destination.txt", .data = "external" });
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expect(receipt.result == .saved);
+    try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "source.txt"));
+    try batchApplyDisk(&fx, "source.txt", "oldB");
+    try batchApplyDisk(&fx, "destination.txt", "external");
+}
+
+test "SASCMD 쓰기 중 추가한 공유 뷰는 함께 전환하고 추가 편집은 dirty로 남는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.zig" });
+    defer testing.allocator.free(path);
+    _ = try saveAsSelectForTest(&fx, t, path);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    @import("save/as.zig").setGateForTests(&gate);
+    @import("save/as.zig").poll();
+    const peer = try openSharedViewInActivePane(fx.session, t);
+    peer.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, peer, "B"));
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expectEqualStrings(path, t.rt.editorDocument().path.?);
+    try testing.expectEqualStrings(path, peer.rt.editorDocument().path.?);
+    try testing.expect(isDirty(t) and isDirty(peer));
+    try testing.expectEqual(maru.session.editor.language.grammarForPath(path), peer.rt.editor_grammar);
+    try batchApplyDisk(&fx, "source.txt", "old");
+    try batchApplyDisk(&fx, "destination.zig", "old");
+}
+
+test "SASCMD 준비 뒤 부모 디렉터리 교체는 새 디렉터리에 쓰지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    try fx.dir.dir.createDir(testing.io, "target", .default_dir);
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "target", "destination.txt" });
+    defer testing.allocator.free(path);
+    _ = try saveAsSelectForTest(&fx, t, path);
+    var gate: @import("save/worker.zig").TestGate = .{};
+    defer gate.set();
+    @import("save/as.zig").setGateForTests(&gate);
+    @import("save/as.zig").poll();
+    try fx.dir.dir.rename("target", fx.dir.dir, "old-target", testing.io);
+    try fx.dir.dir.createDir(testing.io, "target", .default_dir);
+    gate.set();
+    try awaitSaveAsForTest();
+    try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, "source.txt"));
+    try testing.expectError(error.FileNotFound, fx.dir.dir.openFile(testing.io, "target/destination.txt", .{}));
+    try testing.expectError(error.FileNotFound, fx.dir.dir.openFile(testing.io, "old-target/destination.txt", .{}));
+}
+
+test "SASCMD 확정 전 포맷 저장은 held 배치 뒤에 접수되어도 원본을 먼저 저장한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var fx = try PaneFixture.init(testing.allocator);
+    defer fx.deinit(testing.allocator);
+    defer saveAsCleanupForTest();
+    const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+    t.rt.editor_selection = editor_selection.Selection.at(3);
+    try testing.expect(insertText(fx.session, t, "F"));
+    fx.session.editor_format.waiting = true;
+    fx.session.editor_format.then_save = true;
+    fx.session.editor_format.waiting_surface = t.surface.id;
+    const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+    defer testing.allocator.free(path);
+    _ = try saveAsSelectForTest(&fx, t, path);
+    const dispatch = @import("save/dispatch.zig");
+    const receipt = try @import("save/owner.zig").Receipt.create(testing.allocator);
+    defer receipt.release();
+    const held = (try dispatch.trySaveForBatch(fx.session, t, receipt)).?;
+    fx.session.editor_format.waiting = false;
+    fx.session.editor_format.then_save = false;
+    const original = (try dispatch.trySave(fx.session, t, null)).?;
+    try testing.expect(held != original);
+    try testing.expect(dispatch.ownerForTest().?.queue.isHeld(held));
+    try testing.expect(!dispatch.ownerForTest().?.queue.isHeld(original));
+    try awaitSaveAsForTest();
+    try testing.expect(receipt.result == .saved);
+    try batchApplyDisk(&fx, "source.txt", "oldF");
+    try batchApplyDisk(&fx, "destination.txt", "oldF");
+}
+
+// 서로 다른 디렉터리 항목인 hardlink를 고른 저장이 원본 파일을 몰래 바꾸지 않아야 한다.
+test "SASCMD 다른 hardlink 이름의 저장은 원본 파일과 Undo를 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_][]const u8{ "destination.txt", "target/destination.txt" }) |name| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        defer saveAsCleanupForTest();
+        const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+        fx.session.loaded_config.config.editor.format_on_save = false;
+        try fx.dir.dir.createDir(testing.io, "target", .default_dir);
+        try fx.dir.dir.hardLink("source.txt", fx.dir.dir, name, testing.io, .{});
+        t.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, t, "!"));
+        const history = t.rt.editorDocument().history.undo_len;
+        const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, name });
+        defer testing.allocator.free(path);
+        _ = try saveAsSelectForTest(&fx, t, path);
+        try awaitSaveAsForTest();
+        // 이 단언은 새 경로 저장 또는 안전한 거절 중 어느 정책에서도 성립한다.
+        try batchApplyDisk(&fx, "source.txt", "old");
+        try batchApplyDisk(&fx, name, "old!");
+        try testing.expectEqualStrings(path, t.rt.editorDocument().path.?);
+        try testing.expectEqual(history, t.rt.editorDocument().history.undo_len);
+        try testing.expect(!isDirty(t));
+    }
+}
+
+test "SASCMD 대소문자 별칭과 대소문자만 다른 실제 hardlink를 구분한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |extra_link| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        defer saveAsCleanupForTest();
+        const t = try undoFixture(&fx, testing.allocator, "source.txt", "old");
+        fx.session.loaded_config.config.editor.format_on_save = false;
+        if (extra_link) try fx.dir.dir.hardLink("source.txt", fx.dir.dir, "peer.txt", testing.io, .{});
+        const existing = fx.dir.dir.openFile(testing.io, "SOURCE.TXT", .{}) catch null;
+        const same_entry = existing != null;
+        std.debug.print("SAVE_AS_ALIAS same_entry={any} extra_link={any}\n", .{ same_entry, extra_link });
+        if (existing) |file| file.close(testing.io) else try fx.dir.dir.hardLink("source.txt", fx.dir.dir, "SOURCE.TXT", testing.io, .{});
+        t.rt.editor_selection = editor_selection.Selection.at(3);
+        try testing.expect(insertText(fx.session, t, "!"));
+        const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "SOURCE.TXT" });
+        defer testing.allocator.free(path);
+        _ = try saveAsSelectForTest(&fx, t, path);
+        try awaitSaveAsForTest();
+        try batchApplyDisk(&fx, "source.txt", if (same_entry) "old!" else "old");
+        try batchApplyDisk(&fx, "SOURCE.TXT", "old!");
+        if (extra_link) try batchApplyDisk(&fx, "peer.txt", "old");
+        try testing.expect(std.mem.endsWith(u8, t.rt.editorDocument().path.?, if (same_entry) "source.txt" else "SOURCE.TXT"));
+        try testing.expect(!isDirty(t));
+    }
+}
+
+// 본문 준비와 기존 목적지 재검증은 main actor에서 하므로 제품과 같은 호출로 실측한다.
+test "SASCMD 8MiB 본문과 기존 목적지의 main actor 시간을 실측한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    for (0..3) |_| {
+        var fx = try PaneFixture.init(testing.allocator);
+        defer fx.deinit(testing.allocator);
+        defer saveAsCleanupForTest();
+        const bytes = try testing.allocator.alloc(u8, 8 * 1024 * 1024);
+        defer testing.allocator.free(bytes);
+        @memset(bytes, 'a');
+        const t = try undoFixture(&fx, testing.allocator, "source.txt", bytes);
+        try fx.dir.dir.writeFile(testing.io, .{ .sub_path = "destination.txt", .data = bytes });
+        const path = try std.fs.path.join(testing.allocator, &.{ std.fs.path.dirname(t.rt.editorDocument().path.?).?, "destination.txt" });
+        defer testing.allocator.free(path);
+        const start = std.Io.Clock.awake.now(testing.io).nanoseconds;
+        _ = try saveAsSelectForTest(&fx, t, path);
+        const inspected = std.Io.Clock.awake.now(testing.io).nanoseconds;
+        @import("save/as.zig").poll();
+        const prepared = std.Io.Clock.awake.now(testing.io).nanoseconds;
+        std.debug.print("SAVE_AS_MAIN_ACTOR bytes={d} inspect_ns={d} prepare_ns={d}\n", .{ bytes.len, inspected - start, prepared - inspected });
+        try awaitSaveAsForTest();
+        try testing.expectEqualStrings(path, t.rt.editorDocument().path.?);
+        try testing.expect(!isDirty(t));
+    }
 }

@@ -333,6 +333,7 @@ pub const default_app_bindings = [_]AppBinding{
     // ⌘C 처럼 「컨텍스트가 서야 양보할 수 있는」 부류가 아니다(§9.1 이 ⌘C 에만 그 조건을 건 이유).
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'Z' } }, .action = .editor_undo }, // Cmd+Z
     .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'Z' } }, .action = .editor_redo }, // Cmd+Shift+Z
+    .{ .chord = .{ .modifiers = .{ .command = true, .shift = true }, .key = .{ .char = 'S' } }, .action = .editor_save_as },
     .{ .chord = .{ .modifiers = .{ .command = true }, .key = .{ .char = 'S' } }, .action = .editor_save }, // Cmd+S
     // ⇧⌘O: 파일 안 심볼로 이동(VSCode 와 같다). 위 셋과 **같은 부류다** — 기본 표 어디에도 없어
     // fallthrough 에서 `.ignored` 였고(누르면 아무 일도 안 일어남), 컨텍스트 게이트는 액션 쪽이

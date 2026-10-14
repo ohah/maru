@@ -30,8 +30,8 @@ with tempfile.TemporaryDirectory(prefix="maru-save-as-reservation-") as director
     fixture = pathlib.Path(directory) / "save_as_reservation.zig"
     fixture.write_text(source)
     control = run(fixture)
-    assert control.returncode == 0 and "All 11 tests passed" in control.stderr, control.stderr
-    print("정상 대조군: 11개 통과")
+    assert control.returncode == 0 and "All 12 tests passed" in control.stderr, control.stderr
+    print("정상 대조군: 12개 통과")
     for label, (before, after) in mutations.items():
         assert source.count(before) == 1, label
         mutant = source.replace(before, after)
@@ -42,8 +42,8 @@ with tempfile.TemporaryDirectory(prefix="maru-save-as-reservation-") as director
         print(label + ": 실행 단언에서 검출")
     fixture.write_text(source)
     restored = run(fixture)
-    assert restored.returncode == 0 and "All 11 tests passed" in restored.stderr, restored.stderr
-    print("복원 대조군: 11개 통과")
+    assert restored.returncode == 0 and "All 12 tests passed" in restored.stderr, restored.stderr
+    print("복원 대조군: 12개 통과")
 
 # 허용 목록 변경이 OS 호출까지 허용하지 않는지 실제 경계 판정자의 변이로 대조한다.
 with tempfile.TemporaryDirectory(prefix="maru-save-as-sans-io-") as directory:

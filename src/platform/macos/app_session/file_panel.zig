@@ -2232,8 +2232,12 @@ pub fn finishOpenFilePanel(self: *AppSession, opened: FileOpenResult) FilePanelO
     if (opened.previous_active_term) |prev| if (prev != opened.term) {
         if (prev.file_entry) |prev_entry| _ = markFilePanelDirtySyncPending(self, prev_entry);
     };
-    const active_entry = opened.term.file_entry orelse return .failed;
-    dock_ops.requestDockEntryFocus(self, active_entry);
+    if (opened.term.file_entry) |active_entry| {
+        dock_ops.requestDockEntryFocus(self, active_entry);
+    } else if (opened.term.kind == .editor) {
+        // 경로가 있는 MRU/공유 편집 뷰는 entry 없이도 이미 정상적으로 열린 뷰다.
+        self.focusWorkspaceInput();
+    } else return .failed;
     self.dock.collapsed = false;
     if (self.surface_initialized) {
         for (self.tabs.items) |tab| pane_ops.resizeTabPanes(self, tab);
@@ -2626,6 +2630,12 @@ pub fn openFilePanelPathAfterValidation(
     open_kind: file_panel_bridge.OpenKind,
     initial_identity: ?file_tree.Identity,
 ) FilePanelOpenPathResult {
+    // 원본 저장과 목적지 쓰기가 진행 중이면 웹/네이티브 패널도 새 목적지를 점유하지 않는다.
+    if (@import("editor/save/as.zig").reservedPath(self, path, null)) {
+        self.showNoticeKey(.fp_root_busy_retry);
+        return .failed;
+    }
+
     if (self.file_tree_initialized) {
         const root = file_tree_backend.projectRootForFile(self.allocator, self.io, path) catch return .failed;
         defer self.allocator.free(root);

@@ -298,6 +298,8 @@ pub const Action = union(enum) {
     // 메뉴/팝업엔 안 넣는다(어느 크기인지 고정 못 함). dispatchAppAction이 setFontSize로 넘겨 [6,72]pt로 클램프.
     // 키 프리셋(예: ⌘⌥1=14, ⌘⌥2=18)을 사용자가 직접 묶을 수 있다.
     set_font_size: f32,
+    /// 이름 있는 로컬 문서를 다른 경로에 저장한다. 기존 action tag는 바꾸지 않는다.
+    editor_save_as,
 };
 
 pub fn parseAction(value: []const u8) ?Action {
@@ -410,6 +412,7 @@ pub fn parseAction(value: []const u8) ?Action {
     if (std.mem.eql(u8, value, "editor_undo")) return .editor_undo;
     if (std.mem.eql(u8, value, "editor_redo")) return .editor_redo;
     if (std.mem.eql(u8, value, "editor_save")) return .editor_save;
+    if (std.mem.eql(u8, value, "editor_save_as")) return .editor_save_as;
     if (std.mem.eql(u8, value, "fold_all")) return .fold_all;
     if (std.mem.eql(u8, value, "unfold_all")) return .unfold_all;
     if (std.mem.eql(u8, value, "fold_level_1")) return .fold_level_1;

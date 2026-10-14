@@ -40,7 +40,14 @@ pub const Owner = struct {
         errdefer _ = owner.release(lease) catch unreachable;
         var prepared = try local.Prepared.initWithAllocator(self.queue.a, term, .cas);
         errdefer prepared.deinit(self.queue.a);
-        const admitted = try self.queue.enqueue(&prepared, epoch);
+        const held = @import("as.zig").holdForAdmission(session, term, interactive);
+        const admitted = if (held) |hold|
+            try self.queue.enqueueHeld(&prepared, epoch, hold.id, hold.path)
+        else
+            try self.queue.enqueue(&prepared, epoch);
+        if (held) |hold| for (self.queue.waiting.items) |*request| {
+            if (request.id == admitted.id) request.destination_parent = hold.parent;
+        };
         if (receipt) |value| value.retain();
         self.references.appendAssumeCapacity(.{
             .id = admitted.id,

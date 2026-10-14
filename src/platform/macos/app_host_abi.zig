@@ -15764,3 +15764,16 @@ test "W9c③ 적대 리뷰 5 회차 변이 APPpercaller·APPtotal: 기다리는 
     for (501..505) |id| _ = active_browser_executions.finish(id);
     try std.testing.expectEqual(UploadAdmission.admit, uploadAdmission(pane.of(9)));
 }
+
+pub export fn maru_macos_app_session_editor_save_as_take(session: ?*AppSession, token: ?*u64, path: ?[*]u8, capacity: usize) usize {
+    const caller = session orelse return 0;
+    const output = path orelse return 0;
+    return @import("app_session/editor/save/as.zig").take(caller, token orelse return 0, output[0..capacity]);
+}
+pub export fn maru_macos_app_session_editor_save_as_reply(session: ?*AppSession, token: u64, path: ?[*]const u8, length: usize) void {
+    const caller = session orelse return;
+    if (length > std.fs.max_path_bytes) return;
+    const selected = if (length == 0) "" else (path orelse return)[0..length];
+    if (!std.unicode.utf8ValidateSlice(selected)) return;
+    @import("app_session/editor/save/as.zig").reply(caller, token, selected);
+}

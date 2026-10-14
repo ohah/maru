@@ -187,3 +187,31 @@ test "Save As reservation 실패는 원본 경로로 보내고 키를 소유하�
     s.next_id = std.math.maxInt(u64);
     try std.testing.expectError(error.IdExhausted, s.begin(3, test_origin));
 }
+
+/// 같은 실제 파일임이 확인된 뒤, 관측한 디렉터리 항목의 증거만으로 이름을 판정한다.
+/// 모호한 이름을 원본 저장으로 돌리면 다른 hardlink의 원본을 덮어쓸 수 있다.
+pub const NamespaceRelation = enum { same, different, unknown };
+pub const NamespaceEvidence = struct {
+    same_parent: bool,
+    same_spelling: bool,
+    link_count: u64,
+    source_entry_exact: bool = false,
+    destination_entry_exact: bool = false,
+    ascii_case_alias: bool = false,
+};
+pub fn namespaceRelation(e: NamespaceEvidence) NamespaceRelation {
+    if (!e.same_parent) return .different;
+    if (e.same_spelling or e.link_count == 1) return .same;
+    if (e.source_entry_exact and e.destination_entry_exact) return .different;
+    if (e.ascii_case_alias) return .same;
+    return .unknown;
+}
+
+test "save-as alias evidence distinguishes entries and preserves ambiguity" {
+    const t = std.testing;
+    try t.expectEqual(NamespaceRelation.different, namespaceRelation(.{ .same_parent = false, .same_spelling = true, .link_count = 2 }));
+    try t.expectEqual(NamespaceRelation.same, namespaceRelation(.{ .same_parent = true, .same_spelling = false, .link_count = 1 }));
+    try t.expectEqual(NamespaceRelation.different, namespaceRelation(.{ .same_parent = true, .same_spelling = false, .link_count = 2, .source_entry_exact = true, .destination_entry_exact = true, .ascii_case_alias = true }));
+    try t.expectEqual(NamespaceRelation.same, namespaceRelation(.{ .same_parent = true, .same_spelling = false, .link_count = 2, .source_entry_exact = true, .ascii_case_alias = true }));
+    try t.expectEqual(NamespaceRelation.unknown, namespaceRelation(.{ .same_parent = true, .same_spelling = false, .link_count = 2, .source_entry_exact = true }));
+}

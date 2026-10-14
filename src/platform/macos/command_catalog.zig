@@ -150,6 +150,7 @@ pub const entries = [_]Entry{
     .{ .action = .add_cursor_below, .key = "add_cursor_below", .title = "Editor: Add Cursor Below", .search_ko = "편집기 아래에 커서 추가" },
     .{ .action = .editor_undo, .key = "editor_undo", .title = "Editor: Undo", .search_ko = "편집기 실행 취소" },
     .{ .action = .editor_redo, .key = "editor_redo", .title = "Editor: Redo", .search_ko = "편집기 다시 실행" },
+    .{ .action = .editor_save_as, .key = "editor_save_as", .title = "Editor: Save As…", .search_ko = "편집기 다른 이름으로 저장" },
     .{ .action = .editor_save, .key = "editor_save", .title = "Editor: Save", .search_ko = "편집기 저장" },
     .{ .action = .fold_all, .key = "fold_all", .title = "Editor: Fold All", .search_ko = "편집기 모두 접기" },
     .{ .action = .unfold_all, .key = "unfold_all", .title = "Editor: Unfold All", .search_ko = "편집기 모두 펼치기" },

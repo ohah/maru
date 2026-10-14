@@ -97,6 +97,7 @@ comptime {
 
 const OpenDoc = struct {
     surface_id: u64,
+    retiring: bool = false,
     /// 등록된 문서는 서버 연결 동안 read pin으로 살린다. 대표 뷰는 바뀔 수 있다.
     document: ?maru.session.editor.document_registry.Lease = null,
     uri: []u8,
@@ -108,6 +109,7 @@ const OpenDoc = struct {
     pull_dirty: bool = false,
 
     fn matches(self: OpenDoc, term: *Term) bool {
+        if (self.retiring) return false;
         if (term.kind != .editor or term.rt.editor_diff != null) return false;
         if (self.document) |pin| {
             const lease = term.rt.editor_document_lease orelse return false;
@@ -2223,7 +2225,7 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
         var i: usize = 0;
         while (i < c.docs.items.len) {
             const d = c.docs.items[i];
-            if (seen.contains(d.surface_id)) {
+            if (!d.retiring and seen.contains(d.surface_id)) {
                 i += 1;
                 continue;
             }
@@ -3116,4 +3118,15 @@ fn stopAll(self: *AppSession) void {
     // 묻던 모달도 내린다 — 답할 서버가 없다. 기억하지 않는다(다시 켜면 다시 묻는다). **SCM 이 연 시트는 남긴다** — 그 답은 언어 서버가
     // 아니라 git 읽기의 것이다(언어 서버를 끈다고 그 질문이 없어지지 않는다 — 적대적 검증 2회차).
     if (!st.asking_scm) dropTrustPrompt(self);
+}
+
+/// 경로가 바뀌는 문서만 옛 URI에서 퇴역시킨다. 공유 뷰의 대표 surface만으로 판정하지 않는다.
+pub fn notePathChanging(self: *AppSession, source: maru.session.editor.document_registry.Lease) void {
+    for (self.editor_lsp.clients.items) |*client| for (client.docs.items) |*doc| {
+        const pin = doc.document orelse continue;
+        if (pin.owner == source.owner and std.meta.eql(pin.document, source.document)) {
+            doc.retiring = true;
+            doc.pull_seq = 0;
+        }
+    };
 }

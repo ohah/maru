@@ -12,7 +12,7 @@ const DeferredConflict = struct { identity: RegistryIdentity, epoch: u64, origin
 var active: ?owner_mod.Owner = null;
 var conflicts: std.ArrayList(DeferredConflict) = .empty;
 extern "c" fn usleep(microseconds: c_uint) c_int;
-fn allocator() std.mem.Allocator {
+pub fn allocator() std.mem.Allocator {
     return if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
 }
 pub fn trySave(session: *host.AppSession, term: *host.Term, success_notice: ?maru.editor_save_notice.Success) editor.SaveError!?u64 {
@@ -37,7 +37,7 @@ pub fn hasPendingDocument(identity: RegistryIdentity) bool {
     const owner = if (active) |*value| value else return false;
     for (owner.references.items) |entry| {
         const lease = entry.lease;
-        if (@intFromPtr(lease.owner) == identity.owner and lease.document.slot == identity.slot and lease.document.generation == identity.generation) return true;
+        if (!owner.queue.isHeld(entry.id) and @intFromPtr(lease.owner) == identity.owner and lease.document.slot == identity.slot and lease.document.generation == identity.generation) return true;
     }
     return false;
 }
@@ -172,8 +172,8 @@ pub fn poll() void {
         };
         owner.ack(accepted) catch unreachable;
     }
-    if (owner.queue.running == null) if (owner.queue.nextTarget()) |_| {
-        const id = owner.queue.waiting.items[0].id;
+    if (owner.queue.running == null and !@import("as.zig").claimsWriter()) if (owner.queue.nextTarget()) |_| {
+        const id = owner.queue.nextRequestId().?;
         const entry = owner.reference(id) orelse unreachable;
         if (owner_mod.Owner.liveTarget(entry)) |live| {
             owner.queue.startNext(live) catch |failure| owner.queue.failNext(failure) catch unreachable;
@@ -182,6 +182,16 @@ pub fn poll() void {
     if (owner.queue.requestCount() == 0) {
         owner.deinit();
         active = null;
+    }
+}
+pub fn writerBusy() bool {
+    return if (active) |*owner| owner.queue.running != null else false;
+}
+pub fn releaseHeld(id: u64, lease: maru.session.editor.document_registry.Lease, success: bool) void {
+    if (active) |*owner| {
+        const live = owner_mod.Owner.liveTarget(.{ .id = 0, .lease = lease, .origin = .{ .window = 0, .surface = 0 } });
+        const state = lease.owner.get(lease);
+        owner.queue.releaseHeld(id, live, success, if (state) |doc| if (doc.opened) |opened| opened.disk_hash else null else null);
     }
 }
 pub fn requestCount() usize {
@@ -194,6 +204,9 @@ pub fn ownerForTest() ?*owner_mod.Owner {
 /// 기존 동기 caller는 실제 저장 완료를 반환해야 한다. 이 경로의 UI 응답 개선은 별도 단계다.
 pub fn drainForSynchronousCaller() void {
     while (requestCount() != 0) {
+        // 새 경로 결과를 기다리는 요청은 동기 caller가 drain하지 않는다.
+        // 이 caller가 이벤트 루프를 막으면 경로 전환도 진행할 수 없기 때문이다.
+        if (active) |*owner| if (owner.queue.nextRequestId() == null and !writerBusy()) return;
         poll();
         if (requestCount() != 0) _ = usleep(1_000);
     }

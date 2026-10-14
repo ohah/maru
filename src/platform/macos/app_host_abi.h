@@ -2533,4 +2533,9 @@ uint32_t maru_macos_control_browser_grant_count(void);
 uint32_t maru_macos_control_browser_grant_at(uint32_t index, uint64_t *out_pane, uint64_t *out_target, uint8_t *out_scope);
 uint32_t maru_macos_control_revoke_browser_grant(uint64_t pane, uint64_t target, uint8_t scope);
 
+/* Save As 요청/결과: 버퍼는 호출자가 소유하며 이 호출 동안만 빌린다. */
+size_t maru_macos_app_session_editor_save_as_take(MaruAppHostSession *session, uint64_t *token, uint8_t *path, size_t capacity);
+void maru_macos_app_session_editor_save_as_reply(MaruAppHostSession *session, uint64_t token, const uint8_t *path, size_t length);
+
+
 #endif

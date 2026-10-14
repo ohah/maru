@@ -109,6 +109,7 @@ pub fn poll(session: *host.AppSession) void {
         return;
     };
     const value = state.receipt orelse return;
+    if (@import("as.zig").holdFor(term) != null) return;
     if (!state.started) {
         startAfterInput(session);
         return;

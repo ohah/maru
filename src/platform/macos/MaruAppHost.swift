@@ -8504,6 +8504,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             drainWebSurfaceTransition() // Phase 4e-3: 이번 tick의 웹 surface 전이 batch(생성/파괴/reframe/hide/show)를 컨테이너 NSView에 적용.
             reconcileWebFocus() // Phase 4g-1: 웹↔터미널 포커스 동기 불변식(firstResponder ⟺ Zig 활성 pane). 웹 패널 없으면 무동작.
             drainOsc52Clipboard() // OSC 52: 이번 tick에 셸이 보낸 클립보드 쓰기를 NSPasteboard에 반영(정책 gate는 Zig).
+            drainEditorSaveAsPanel()
             drainNotificationAuthorizationRequest() // 세팅에서 데스크톱 알림 토글을 켰으면 macOS 알림 권한을 요청한다.
             drainNotification() // OSC 9/777: 이번 tick에 셸이 보낸 데스크톱 알림을 네이티브 알림으로 띄운다.
             drainBell() // G12 BEL: 이번 tick에 셸이 보낸 벨(0x07)을 시스템 벨로 울린다.
@@ -10300,6 +10301,36 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
             case .location: "Privacy_LocationServices"
             }
             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(pane)") { NSWorkspace.shared.open(url) }
+        }
+    }
+
+    // 패널과 callback은 발신 surface를 유지하고, 소유 세션이 바뀌면 raw 포인터를 사용하지 않는다.
+    private var editorSaveAsPanels: [UInt64: NSSavePanel] = [:]
+    private func drainEditorSaveAsPanel() {
+        guard let surface = activeSurface, let session = surface.appSession, let window = surface.window else { return }
+        guard window.attachedSheet == nil else { return }
+        var token: UInt64 = 0
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        let length = bytes.withUnsafeMutableBufferPointer {
+            maru_macos_app_session_editor_save_as_take(session, &token, $0.baseAddress, $0.count)
+        }
+        guard length > 0, length <= bytes.count else { return }
+        let path = String(decoding: bytes.prefix(Int(length)), as: UTF8.self)
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = (path as NSString).lastPathComponent
+        panel.directoryURL = URL(fileURLWithPath: path).deletingLastPathComponent()
+        panel.canCreateDirectories = true
+        editorSaveAsPanels[token] = panel
+        panel.beginSheetModal(for: window) { [weak self, weak surface] response in
+            self?.editorSaveAsPanels[token] = nil
+            guard let self, let surface, surface.appSession == session else { return }
+            let chosen = response == .OK ? panel.url?.path : nil
+            let selected = Array((chosen ?? "").utf8)
+            self.withSurface(surface) {
+                selected.withUnsafeBufferPointer {
+                    maru_macos_app_session_editor_save_as_reply(session, token, $0.baseAddress, $0.count)
+                }
+            }
         }
     }
 

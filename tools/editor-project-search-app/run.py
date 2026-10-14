@@ -28,6 +28,7 @@ def main():
     parser.add_argument("--physical-ime", action="store_true")
     parser.add_argument("--matrix", action="store_true")
     parser.add_argument("--native-close-save", action="store_true")
+    parser.add_argument("--save-as-command", action="store_true")
     parser.add_argument("--replace-batch", action="store_true")
     parser.add_argument("--replace-batch-save-retry", action="store_true")
     parser.add_argument("--batch-open-files", type=int, default=2)
@@ -89,6 +90,8 @@ def main():
              "src/platform/macos/app_session/editor/search/verify.zig", "src/platform/macos/app_session/editor/search/disk_apply.zig", "src/platform/macos/app_session/editor/search/preview.zig", "src/session/editor/search/preview.zig", "src/platform/macos/app_session/editor/search/coordinator.zig",
              "src/platform/macos/app_session/editor/search/backend.zig", "src/session/editor/search/query.zig",
              "src/platform/macos/app_session/editor/search/report.zig", "src/platform/macos/app_session/editor/search/owner.zig", "src/platform/macos/app_session/tab.zig", "src/i18n.zig", "src/icons.zig", "src/renderer/icon_coverage_data.zig", "src/platform/macos/icon_codepoints.h", "src/platform/macos/app_session/editor/search/batch.zig", "src/platform/macos/app_session/editor/search/batch/ui.zig", "src/platform/macos/app_session/editor/search/batch/worker.zig", "src/platform/macos/app_session/editor/search/batch/mixed_worker.zig", "src/platform/macos/app_session/editor/search/batch/collect.zig", "src/platform/macos/app_session/editor/search/batch/coordinator.zig", "src/platform/macos/app_session/editor/search/batch/load.zig", "src/platform/macos/app_session/editor/local_save.zig", "src/platform/macos/app_session/editor/save/dispatch.zig", "src/platform/macos/app_session/editor/save/owner.zig", "src/session/editor/ops/save_receipt.zig", "src/session/editor/search/batch.zig", "src/editor_save_notice.zig")
+    if args.save_as_command:
+        names += ("src/platform/macos/app_session/editor/save/as.zig", "src/platform/macos/app_session/editor/save/queue.zig", "src/platform/macos/app_session/editor/save/destination.zig", "src/platform/macos/app_session/editor/lsp.zig", "src/config/action.zig", "src/config/keybinding.zig", "src/platform/macos/app_host_abi.h", "src/platform/macos/app_host_abi.zig", "tools/editor-project-search-app/save-as.swift.inc", "tools/editor-project-search-app/save-as.zig.inc")
     if args.native_close_save:
         names += ("src/platform/macos/app_session/editor/save/close.zig", "src/platform/macos/app_session/editor/format.zig")
     print(root, flush=True)
@@ -123,6 +126,11 @@ def main():
             driver = replace_once(driver, "        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next", "        if EditorProjectSearchRun.stage == 80 { maybeRunNativeCloseSave(); return }\n        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next")
             driver = replace_once(driver, "            if !matrix { finish(true); return }", "            if ProcessInfo.processInfo.environment[\"MARU_EDITOR_NATIVE_CLOSE_SAVE\"] == \"1\" { EditorProjectSearchRun.stage = 80; return }\n            if !matrix { finish(true); return }")
             driver += "\n" + (source / "tools/editor-project-search-app/native-close.swift.inc").read_text()
+        if args.save_as_command:
+            observer.write_text(observer.read_text() + "\n" + (source / "tools/editor-project-search-app/save-as.zig.inc").read_text())
+            driver = replace_once(driver, "        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next", "        if EditorProjectSearchRun.stage == 81 { maybeRunSaveAsCommand(); return }\n        let now = ProcessInfo.processInfo.systemUptime\n        guard now >= EditorProjectSearchRun.next")
+            driver = replace_once(driver, "            if !matrix { finish(true); return }", "            if ProcessInfo.processInfo.environment[\"MARU_EDITOR_SAVE_AS_COMMAND\"] == \"1\" { EditorProjectSearchRun.stage = 81; return }\n            if !matrix { finish(true); return }")
+            driver += "\n" + (source / "tools/editor-project-search-app/save-as.swift.inc").read_text()
         host = source / names[3]
         host.write_text(replace_once(host.read_text(), "        maybeRunEditorIMESmoke()\n",
             "        maybeRunEditorIMESmoke()\n        maybeRunEditorProjectSearch()\n") + "\n" +
@@ -203,6 +211,7 @@ def main():
     env["MARU_EDITOR_PROJECT_BATCH_PEER_BYTES"] = str(args.batch_peer_bytes)
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_DELAY_MS"] = str(args.batch_save_delay_ms)
     if args.native_close_save: env["MARU_EDITOR_NATIVE_CLOSE_SAVE"] = "1"
+    if args.save_as_command: env["MARU_EDITOR_SAVE_AS_COMMAND"] = "1"
     env["MARU_EDITOR_PROJECT_BATCH_SAVE_RETRY"] = "1" if args.replace_batch_save_retry else "0"
     env["MARU_EDITOR_PROJECT_REPLACE_BATCH"] = "1" if args.replace_batch else "0"
     if args.physical_ime:
@@ -274,6 +283,13 @@ def main():
         for name, data in (("saved", b"foo!"), ("kept", b"foo!"), ("conflict", b"outside")):
             if (project / ("native-close-" + name + ".txt")).read_bytes() != data:
                 raise RuntimeError("Native close disk bytes differ: " + name)
+    if args.save_as_command:
+        expected += ("save-as-before", "save-as-after")
+        for name, data in (("source", b"foo"), ("destination", b"foo!")):
+            if (project / ("save-as-" + name + ".txt")).read_bytes() != data:
+                raise RuntimeError("Save As disk bytes differ: " + name)
+        if not (artifacts / "save-as-panel.png").exists():
+            raise RuntimeError("Missing native NSSavePanel capture")
     for label in expected:
         ppm = artifacts / (label + ".ppm")
         if not ppm.exists() or ppm.stat().st_size < 1000:

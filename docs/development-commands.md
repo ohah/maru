@@ -1594,4 +1594,19 @@ OS/I/O 없는 상태 전이를 검사한다. `python3 tools/test-editor-save-as-
 
 `mise exec -- zig build test-editor-save-as-reservation`(Debug/ReleaseFast)과
 `python3 tools/test-editor-save-as-reservation.py`는 문서/목적지 예약·늦은 콜백 신원·
-OOM·접수 뒤 취소 판정을 검증한다. NSSavePanel과 실제 저장 진입점은 아직 미연결이다.
+OOM·접수 뒤 취소 판정을 검증한다. NSSavePanel과 실제 저장 진입점 연결은 아래 명령 검사에서 다룬다.
+
+### 이름 있는 문서의 다른 이름으로 저장 연결
+
+`mise exec -- zig build test-editor-save-as-command`와 `-Doptimize=ReleaseFast`는
+실제 명령 actor·저장 큐·디스크 경계의 회귀를 실행한다.
+`python3 tools/test-editor-save-as-command-adversarial.py`는 격리 사본에서 결함 주입과
+정상/복원 대조군을 검사한다.
+`python3 tools/editor-project-search-app/run.py --save-as-command --count 3`는 격리 앱에서
+실제 NSEvent로 ⌘⇧S를 보내 제품 NSSavePanel의 기본 이름·sheet 연결과 새 경로 저장을
+검사한다. 저장 전후는 Metal capture이고, 패널은 AppKit content view capture다.
+Mac 화면 잠금·검은 캡처는 통과로 취급하지 않는다. 물리 한글 IME 검증은 별도다.
+현재 남은 정책/검증은 [Save As 계획](plans/editor-save-as.md)을 따른다.
+
+`python3 tools/test-editor-formatter-wait.py`는 격리 저장소에서 EXFB3의 정상·6초 지연·
+5초 조기 실패·복원 대조군을 실행한다. 제품 포매터의 20초 timeout은 바꾸지 않는다.

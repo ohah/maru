@@ -10347,6 +10347,7 @@ pub const AppSession = struct {
     /// 창 닫기(빨간 버튼)는 Swift 핸드셰이크가 달라 requestWindowClose가 따로 맡는다.
     pub fn requestClose(self: *AppSession, target: PendingClose) void {
         const scope = self.resolveCloseScope(target); // cascade 단일 출처(판정·실행 공유). 아래 두 분기가 이 범위를 함께 쓴다.
+        if (scope == .term and target != .agent_term and @import("app_session/editor/save/as.zig").deferClose(self, pane_ops.activePane(self).activeTerm(), target)) return;
         if (scope == .session and file_panel_ops.blockSessionExitForFilePanels(self)) return;
         // FP16: 파일이 pane 탭이 되면서 term/pane/tab scope도 파일 Term을 파괴할 수 있다. 보호 상태 파일이 있으면
         // 여기서 막고 사용자가 저장·닫기를 먼저 하게 한다 — 옛 session 전용 게이트만으로는 ⌘W 한 번에 미저장
@@ -11829,6 +11830,7 @@ pub const AppSession = struct {
             // **저장 실패는 이유별로 말한다**(§3.9d) — 예전에는 `_ =` 로 결과를 통째로 버려 사용자가
             // `⌘S` 를 누르고 아무 일도 없는 것을 봤다. `AskName` 은 실패가 아니라 「이름을 물었다」다.
             // 저장 시 code action(§8.2s) → 저장 시 포맷(§8.2r) → 저장. 각 단계는 응답(또는 시한) 뒤에 다음으로 넘긴다 — 실패 알림·충돌 묻기는 포맷 단계의 `saveNow` 가 한다.
+            .editor_save_as => @import("app_session/editor/save/as.zig").begin(self, pane_ops.activePane(self).activeTerm()),
             .editor_save => editor_ops.save_actions.saveCommand(self, pane_ops.activePane(self).activeTerm()),
             .fold_all => _ = editor_ops.foldAll(self),
             .unfold_all => _ = editor_ops.unfoldAll(self),
@@ -21442,6 +21444,7 @@ pub const AppSession = struct {
         // 마크는 아래 각 단계 경계에서 세팅한다(ft_on 아니면 clock read 자체를 안 함 = release 비용 0).
         self.settleDeferredPointerInput();
         @import("app_session/editor/save/dispatch.zig").poll();
+        @import("app_session/editor/save/as.zig").poll();
         @import("app_session/editor/save/close.zig").poll(self);
         if (is_macos) {
             @import("app_session/editor/search/owner.zig").poll(self);
@@ -24857,6 +24860,7 @@ pub const AppSession = struct {
     }
 
     pub fn deinit(self: *AppSession) void {
+        @import("app_session/editor/save/as.zig").windowClosing(self);
         @import("app_session/editor/save/close.zig").cancel(self);
         if (builtin.is_test and live_app_sessions == 1) @import("app_session/editor/save/dispatch.zig").cleanupForTests();
         // backend 에 맡긴 미룬 닫기를 **다른 무엇을 풀기 전에** 한 번 더 묻는다. 앱 quit 은 Session teardown 전에 재접속

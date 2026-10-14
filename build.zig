@@ -5820,6 +5820,15 @@ pub fn build(b: *std.Build) void {
     const run_local_save = b.addRunArtifact(local_save_tests);
     run_local_save.setCwd(b.path("."));
     run_local_save.addArg("--maru-expect-tests=28");
+    const command_save_as_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.SASCMD "} });
+    const run_command_save_as = b.addRunArtifact(command_save_as_tests);
+    run_command_save_as.setCwd(b.path("."));
+    run_command_save_as.addArg("--maru-expect-tests=16");
+    b.step("test-editor-save-as-command", "Run Save As command actor and disk coordination tests").dependOn(&run_command_save_as.step);
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) {
+        run_command_save_as.addArg("--maru-expect-passed=16");
+        macos_only_test_step.dependOn(&run_command_save_as.step);
+    }
     const destination_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{".test.SASWRITE "} });
     const run_destination = b.addRunArtifact(destination_tests);
     run_destination.setCwd(b.path("."));

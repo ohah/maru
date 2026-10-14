@@ -1202,7 +1202,7 @@ pub fn maybeDebugOpenNativeEditor(self: *AppSession) void {
         self.showNoticeKey(switch (e) {
             error.NotUtf8 => .dbg_editor_not_utf8,
             error.TooLarge => .dbg_editor_too_large,
-            error.Unreadable => .dbg_editor_unreadable,
+            error.Unreadable, error.MutationPending => .dbg_editor_unreadable,
             error.OutOfMemory => .dbg_editor_oom,
         });
         return;

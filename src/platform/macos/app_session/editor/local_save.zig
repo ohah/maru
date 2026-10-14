@@ -14,6 +14,7 @@ pub const Prepared = struct {
     expected_disk: ?u64,
     /// 새 대상의 배타 생성은 기존 파일 CAS와 구분한다. 일반 저장은 항상 false다.
     create_new: bool = false,
+    expected_parent: ?maru.session.editor.save_as_reservation.FileIdentity = null,
     written: bool = false,
     finished: bool = false,
     pub fn init(session: *host.AppSession, term: *host.Term, guard: editor.SaveGuard) editor.SaveError!Prepared {
@@ -44,7 +45,7 @@ pub const Prepared = struct {
     }
     pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {
         if (!maru.session.editor.save_ops.writable(self.written, self.finished)) return error.WriteFailed;
-        if (self.create_new) try createBytes(io, self.path, self.bytes) else try writeBytes(io, self.path, self.bytes, self.expected_disk);
+        if (self.create_new) try createBytesPinned(io, self.path, self.bytes, self.expected_parent) else try writeBytesPinned(io, self.path, self.bytes, self.expected_disk, self.expected_parent);
         self.written = true;
     }
     pub fn matches(self: *const Prepared, term: *host.Term) bool {
@@ -94,11 +95,15 @@ fn identity(term: *host.Term) ?Identity {
 
 /// 파일 쓰기는 문서·UI를 읽지 않는다. I/O executor 수명은 호출자가 보장한다.
 pub fn writeBytes(io: std.Io, path: []const u8, bytes: []const u8, expect_disk: ?u64) host.AppSession.FilePanelWriteError!void {
+    return writeBytesPinned(io, path, bytes, expect_disk, null);
+}
+fn writeBytesPinned(io: std.Io, path: []const u8, bytes: []const u8, expect_disk: ?u64, expected_parent: ?maru.session.editor.save_as_reservation.FileIdentity) host.AppSession.FilePanelWriteError!void {
     // **이유를 지우지 않는다**(§3.9d). 예전에는 다섯 자리가 전부 `catch return false` 였고, 그래서
     // 읽기 실패·외부 변경·쓰기 실패가 한 개의 `false` 로 뭉개져 사용자는 `⌘S` 를 누르고 아무 일도
     // 없는 것을 봤다. 아래 층이 이미 `FilePanelWriteError` 를 내므로 **새 어휘를 짓지 않고 올린다**.
     var pinned = @import("../file_panel.zig").openPinnedFilePanelParent(io, path) catch return error.NotFound;
     defer pinned.dir.close(io);
+    try checkParent(pinned.dir, expected_parent);
 
     var original = pinned.dir.openFile(io, pinned.basename, .{ .mode = .read_only }) catch return error.NotFound;
     defer original.close(io);
@@ -127,8 +132,12 @@ pub fn writeBytes(io: std.Io, path: []const u8, bytes: []const u8, expect_disk: 
 
 /// 이름 없는 첫 저장과 Save As worker가 같은 배타 생성 계약을 사용한다.
 pub fn createBytes(io: std.Io, path: []const u8, bytes: []const u8) host.AppSession.FilePanelWriteError!void {
+    return createBytesPinned(io, path, bytes, null);
+}
+fn createBytesPinned(io: std.Io, path: []const u8, bytes: []const u8, expected_parent: ?maru.session.editor.save_as_reservation.FileIdentity) host.AppSession.FilePanelWriteError!void {
     var pinned = @import("../file_panel.zig").openPinnedFilePanelParent(io, path) catch return error.NotFound;
     defer pinned.dir.close(io);
+    try checkParent(pinned.dir, expected_parent);
     // **배타 생성이 실패하면 「그 사이에 생겼다」다** — 그 사실을 `ExternalConflict` 로 올린다(그 낱말이
     // 뜻하는 것이 바로 「내가 보지 않은 변화가 디스크에 있다」이고, 덮어쓰기 CAS 가 같은 이름을 쓴다).
     var file = pinned.dir.createFile(io, pinned.basename, .{ .exclusive = true }) catch |e| switch (e) {
@@ -140,4 +149,14 @@ pub fn createBytes(io: std.Io, path: []const u8, bytes: []const u8) host.AppSess
     var w = file.writer(io, &write_buf);
     w.interface.writeAll(bytes) catch return error.WriteFailed;
     w.interface.flush() catch return error.WriteFailed;
+}
+
+// 패널 선택 뒤 부모 이름이 다른 디렉터리로 바뀌어도 그쪽에 쓰지 않는다. worker의 실제 fd를 확인한다.
+fn checkParent(dir: std.Io.Dir, expected: ?maru.session.editor.save_as_reservation.FileIdentity) host.AppSession.FilePanelWriteError!void {
+    const wanted = expected orelse return;
+    if (comptime @import("builtin").os.tag == .macos) {
+        var stat: std.posix.Stat = undefined;
+        if (std.c.fstat(dir.handle, &stat) != 0) return error.ExternalConflict;
+        if (wanted.device != @as(u64, @intCast(stat.dev)) or wanted.inode != @as(u64, @intCast(stat.ino))) return error.ExternalConflict;
+    } else return error.ExternalConflict;
 }

@@ -3488,6 +3488,19 @@ test "SYN54 SQL·Dart 심볼 — SQL 은 `CREATE` 문의 스키마까지 이름,
     }
 }
 
+test "SYN55 SQL 은 괄호 없는 여러 줄 문장도 문장째 접힌다 — `CREATE TABLE (…)` 표본은 열 정의 목록이 대신 접혀 `statement` 를 가렸다 (BL3 변이 B14)" {
+    const allocator = std.testing.allocator;
+    var folds: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer folds.deinit(allocator);
+    const src = "SELECT a\nFROM t\nWHERE x = 1;\nSELECT 1;\n";
+    var prov = Provider.init(src, .sql, 0) orelse return error.NoProvider;
+    defer prov.deinit();
+    try prov.foldSpans(allocator, &folds);
+    // 첫 문장(0~2 줄)만 접힌다 — 한 줄짜리 둘째 문장은 접을 것이 없다.
+    try std.testing.expectEqual(@as(usize, 1), folds.items.len);
+    try std.testing.expectEqual(Provider.FoldSpan{ .start_row = 0, .end_row = 2 }, folds.items[0]);
+}
+
 test "SYN53 Swift grammar 의 한계 — 정상 Swift 가 구문 오류를 낸다(빈 튜플·본문 없는 함수·지역 `nonisolated(unsafe)`·` ; `·`$` 정규식), 쓰는 꼴은 깨끗하다" {
     // 계획 editor-bundled-languages.md 「한계」와 짝이다. grammar 를 올려 하나라도 깨끗해지면 이 판정자가 깨진다 — 그때 한계 절을 고친다.
     const allocator = std.testing.allocator;

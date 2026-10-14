@@ -8117,7 +8117,7 @@ fn beginCdp(run: *CdpRun) void {
 
 /// 한 번도 보이지 않은 탭(OSR 레코드가 없다) — 몰래 만들지 않는다(W9a 작성자 선택).
 const cdp_not_shown_reason = "the Chromium tab has not been shown yet — show it once first";
-const cdp_loading_reason = "the tab is loading a new page — wait for it (wait --load), then try again";
+const cdp_loading_reason = web_cdp_ops.loading_reason;
 const cdp_ran_then_navigated = "the script ran, but the page started loading a new page before its result could be read";
 
 /// 확정되지 않은 이동 중에 보내려는 호출을 대신하는 답(null 이면 그대로 보낸다).
@@ -8138,6 +8138,7 @@ fn uncommittedReply(run: *CdpRun, method: []const u8) ?web_cdp_ops.Reply {
     }
     if (run.op.page) |*p| if (p.kind == .screenshot) return .{ .not_sent = cdp_loading_reason };
     // W9c③: 업로드의 호출(프레임 트리·world·노드·확인·넣기)은 확정 전엔 보내지 않는다 — 승인 뒤면 문서가 바뀌는 중이다(놓기는 놓은 것으로).
+    // 넣은 뒤의 읽기가 이 답을 받으면 업로드 차례가 「넣고 곧 옮겨 갔다」(성공에 navigated)로 가른다(`web_cdp_ops.loading_reason` — 적대 리뷰 2 회차).
     if (run.op.upload != null) {
         if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) return .{ .ok = "{}" };
         return .{ .not_sent = cdp_loading_reason };

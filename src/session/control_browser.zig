@@ -141,7 +141,7 @@ pub const BrowserMethod = enum {
     /// 그 탭 자신의 대화상자, 있으면 grant 가 있는 가족 탭의 그 대화상자. 답해도 되는지(`may_answer`)는 앱이 본다. 파일 선택은 닫기만.
     /// op.arg=`{accept, text?, dialog?}`. **op_kind=26 고정**.
     handle_dialog,
-    /// `browser.upload {id, selector|ref|locator, files:[절대 경로]}`(W9c③ — Chromium 전용) → `{origin, files:[{name,size}]}`. 로케이터가 가리킨
+    /// `browser.upload {id, selector|ref|locator, files:[절대 경로]}`(W9c③ — Chromium 전용) → `{origin, files:[{name,size}], kept, navigated}`. 로케이터가 가리킨
     /// `<input type=file>` 에 파일을 넣는다. **부를 때마다 확인 모달**(grant·cap 이 있어도 — 기억하지 않는다)이 파일을 모두 보이고, 앱이 파일을 열어
     /// 승인 뒤에 사본을 만들어 그 사본을 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」). op.arg=`{선택자 필드, files:[…]}`. **op_kind=27 고정**.
     upload,
@@ -801,12 +801,37 @@ pub const UploadParams = struct {
 /// 올바른 UTF-8, 제어 문자(C0·DEL·C1) 없음(확인 모달에 줄바꿈 같은 글자로 다른 파일처럼 보이게 하지 못하게 — `file_dialog_path` 와 같은 규칙).
 /// 양방향·폭 없는 글자는 받되 모달이 코드로 보인다(`web_upload_display`).
 pub fn uploadPathOk(path: []const u8) bool {
-    if (path.len == 0 or path.len > max_upload_path_bytes or path[0] != '/') return false;
-    const view = std.unicode.Utf8View.init(path) catch return false;
-    var it = view.iterator();
-    while (it.nextCodepoint()) |c| if (c < 0x20 or (c >= 0x7f and c <= 0x9f)) return false;
-    return true;
+    return uploadPathProblem(path) == null;
 }
+
+/// `uploadPathOk` 가 거절한 까닭 — -32602 의 글이 어느 파일·왜를 말하게(적대 리뷰 2 회차 nit-F: 맨 「Invalid params」 라 CLI 가 사용자에게
+/// 알려 줄 수 없었다). 글자만 본 것이라 파일 시스템의 사실(있나·폴더인가)은 아니다 — 그것은 모달 전 한 글로 감춘다.
+const UploadPathProblem = enum { not_absolute, too_long, bad_chars };
+
+fn uploadPathProblem(path: []const u8) ?UploadPathProblem {
+    if (path.len == 0 or path[0] != '/') return .not_absolute;
+    if (path.len > max_upload_path_bytes) return .too_long;
+    const view = std.unicode.Utf8View.init(path) catch return .bad_chars;
+    var it = view.iterator();
+    while (it.nextCodepoint()) |c| if (c < 0x20 or (c >= 0x7f and c <= 0x9f)) return .bad_chars;
+    return null;
+}
+
+/// 파일 목록이 틀린 까닭(-32602 의 글, 영어 — 몇 번째 파일·왜). 경로 자체는 싣지 않는다(제어 문자를 그대로 되돌리지 않게 — 부른 쪽이 안다).
+pub const UploadParamsWhy = struct {
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+
+    pub fn text(self: *const UploadParamsWhy) ?[]const u8 {
+        return if (self.len == 0) null else self.buf[0..self.len];
+    }
+
+    fn set(self: *UploadParamsWhy, comptime fmt: []const u8, args: anytype) ParamError {
+        const written: []const u8 = std.fmt.bufPrint(&self.buf, fmt, args) catch self.buf[0..0];
+        self.len = written.len;
+        return error.InvalidParams;
+    }
+};
 
 /// 글자만 보고 정규화한 경로(`//`·`.` 를 지우고 `..` 를 앞 이름과 지운다) — 같은 파일을 두 번 적은 것을 L2 에서 거른다(심볼릭 링크로 같은 파일이
 /// 되는 것은 앱이 연 파일의 장치·inode 로 다시 본다). `out` 은 `max_upload_path_bytes` 이상.
@@ -832,26 +857,31 @@ fn lexicalPath(path: []const u8, out: []u8) []const u8 {
 }
 
 /// 새 메서드라 키를 엄격히 본다(`open`·`handleDialog` 와 같다). `files` 는 1..10 개의 절대 경로(`uploadPathOk`), 글자로 같은 경로가 둘이면
-/// 거절한다. 대상은 click 과 같은 셋 가운데 하나.
-pub fn parseUploadParams(params: ?std.json.Value) ParamError!UploadParams {
+/// 거절한다. 대상은 click 과 같은 셋 가운데 하나. 파일 목록이 틀리면 `why` 에 몇 번째 파일·왜를 적는다(그 밖은 기본 글).
+pub fn parseUploadParams(params: ?std.json.Value, why: *UploadParamsWhy) ParamError!UploadParams {
     const obj = try paramsObject(params);
     try onlyKeys(obj, &.{ "id", "selector", "ref", "locator", "files" });
     var r: UploadParams = .{ .id = try idFromObj(obj), .locator = try parseLocator(obj) };
-    const list = switch (obj.get("files") orelse return error.InvalidParams) {
+    const list = switch (obj.get("files") orelse return why.set("files is missing — give 1 to {d} absolute paths", .{max_upload_files})) {
         .array => |a| a.items,
-        else => return error.InvalidParams,
+        else => return why.set("files must be an array of 1 to {d} absolute paths", .{max_upload_files}),
     };
-    if (list.len == 0 or list.len > max_upload_files) return error.InvalidParams;
+    if (list.len == 0 or list.len > max_upload_files) return why.set("files must list 1 to {d} paths (got {d})", .{ max_upload_files, list.len });
     var norm: [max_upload_files][max_upload_path_bytes]u8 = undefined;
     var norms: [max_upload_files][]const u8 = undefined;
     for (list, 0..) |v, i| {
         const path = switch (v) {
             .string => |s| s,
-            else => return error.InvalidParams,
+            else => return why.set("file {d} is not a string", .{i + 1}),
         };
-        if (!uploadPathOk(path)) return error.InvalidParams;
+        // 상대 경로는 CLI 가 자기 현재 폴더에 붙여 보낸다 — 길이·글자가 틀린 것이 그 폴더 때문일 수 있다고 함께 말한다.
+        if (uploadPathProblem(path)) |problem| return switch (problem) {
+            .not_absolute => why.set("file {d} is not an absolute path (it must start with /)", .{i + 1}),
+            .too_long => why.set("file {d} is longer than {d} bytes (a relative path is counted after it is joined to the current folder)", .{ i + 1, max_upload_path_bytes }),
+            .bad_chars => why.set("file {d} is not valid UTF-8 or contains control characters (a relative path is checked after it is joined to the current folder)", .{i + 1}),
+        };
         norms[i] = lexicalPath(path, &norm[i]);
-        for (norms[0..i]) |prev| if (eq(prev, norms[i])) return error.InvalidParams;
+        for (norms[0..i], 0..) |prev, j| if (eq(prev, norms[i])) return why.set("file {d} is the same path as file {d} (after removing . and ..) — list each file once", .{ i + 1, j + 1 });
         r.files[i] = path;
     }
     r.count = list.len;
@@ -2203,9 +2233,12 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
     return aw.toOwnedSlice();
 }
 
-/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …],"kept":<bool>}`(파일 1..10 개). 다른 키는 버리고, 모양이 틀리면 거절.
+/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …],"kept":<bool>,"navigated":<bool>}`(파일 1..10 개). 다른 키는 버리고,
+/// 모양이 틀리면 거절.
 /// `kept`(적대 리뷰 1 회차): 넣을 때 페이지가 그 목록을 받았고(성공의 조건), 그 뒤에도 칸이 그 목록을 쥐고 있나 — 거짓이면 페이지 스스로 비우거나
 /// 다시 그렸다(다시 올리면 두 번 올라간다).
+/// `navigated`(적대 리뷰 2 회차): 넣은 뒤 읽기 전에 페이지가 새 문서로 옮겨 갔다(change 처리기의 `location.href=` 등) — 처리기는 파일을 받고
+/// 돌았지만 받은 목록은 읽을 수 없다. 이때 `kept` 는 거짓이다. 다시 올리면 모달이 또 뜨고 두 번 올라간다.
 fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) (std.mem.Allocator.Error || error{InvalidUploadPayload})![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -2216,7 +2249,8 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
     const origin = parsed.value.object.get("origin") orelse return error.InvalidUploadPayload;
     const files = parsed.value.object.get("files") orelse return error.InvalidUploadPayload;
     const kept = parsed.value.object.get("kept") orelse return error.InvalidUploadPayload;
-    if (origin != .string or files != .array or kept != .bool) return error.InvalidUploadPayload;
+    const navigated = parsed.value.object.get("navigated") orelse return error.InvalidUploadPayload;
+    if (origin != .string or files != .array or kept != .bool or navigated != .bool) return error.InvalidUploadPayload;
     if (files.array.items.len == 0 or files.array.items.len > max_upload_files) return error.InvalidUploadPayload;
     for (files.array.items) |f| {
         if (f != .object) return error.InvalidUploadPayload;
@@ -2244,6 +2278,8 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
         s.endArray() catch |e| break :blk e;
         s.objectField("kept") catch |e| break :blk e;
         s.write(kept.bool) catch |e| break :blk e;
+        s.objectField("navigated") catch |e| break :blk e;
+        s.write(navigated.bool) catch |e| break :blk e;
         endResult(&s) catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -2640,7 +2676,11 @@ pub fn browserOpFromRequest(
         },
         .handle_dialog => try serializeHandleDialogArg(gpa, parseHandleDialogParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
         // W9c③: 업로드 — `{선택자 필드, files}`. 확인 모달은 실행 계층이 매번 띄운다(여기서 인가된 것은 「그 탭을 다뤄도 된다」 뿐이다).
-        .upload => try serializeUploadArg(gpa, parseUploadParams(req.params) catch return .{ .err = try errorResponse(gpa, req.id, .invalid_params) }),
+        .upload => blk: {
+            var why: UploadParamsWhy = .{};
+            const p = parseUploadParams(req.params, &why) catch return .{ .err = try cp.serializeError(gpa, req.id, .invalid_params, why.text() orelse cp.ErrorCode.invalid_params.defaultMessage(), null) };
+            break :blk try serializeUploadArg(gpa, p);
+        },
         .subscribe => unreachable, // 위에서 이미 분기
         .open => unreachable, // 위(id 파싱 앞)에서 이미 분기
     };
@@ -5133,6 +5173,51 @@ test "W9c③: upload params — 대상 하나와 1..10 개의 절대 경로, 상
     };
 }
 
+// 적대 리뷰 2 회차 nit-F: 같은 경로 둘·1024 바이트를 넘는 경로·CLI 가 붙인 뒤 틀린 상대 경로가 맨 「Invalid params」 였다 — CLI 가 사용자에게 몇 번째
+// 파일이 왜 틀렸는지 말할 수 없었다. 글자만 본 까닭이라 말해도 파일 시스템의 사실은 새지 않는다(경로 자체도 되돌리지 않는다).
+test "W9c③ 적대 리뷰 2 회차 재현 F1: upload 의 파일 목록 -32602 는 몇 번째 파일·왜를 말한다 — 같은 경로 둘·너무 긴 경로·제어 문자·상대 경로, 경로는 싣지 않는다" {
+    var grants: cpg.PaneGrantStore = .{};
+    try grants.grant(.{ .pane = 10, .target = 12, .scope = .browser });
+    const pre = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":";
+    const long_path = try std.fmt.allocPrint(testing.allocator, "/{s}", .{"q" ** max_upload_path_bytes});
+    defer testing.allocator.free(long_path);
+    const long_req = try std.fmt.allocPrint(testing.allocator, "{s}[\"/tmp/a\",\"{s}\"]}}}}", .{ pre, long_path });
+    defer testing.allocator.free(long_req);
+    const Case = struct { bytes: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .bytes = pre ++ "[\"/tmp/a\",\"/tmp/b\",\"/tmp/./a\"]}}", .want = "file 3 is the same path as file 1 (after removing . and ..) — list each file once" },
+        .{ .bytes = long_req, .want = "file 2 is longer than 1024 bytes (a relative path is counted after it is joined to the current folder)" },
+        .{ .bytes = pre ++ "[\"/tmp/a\\nb\"]}}", .want = "file 1 is not valid UTF-8 or contains control characters (a relative path is checked after it is joined to the current folder)" },
+        .{ .bytes = pre ++ "[\"/tmp/a\",\"b.txt\"]}}", .want = "file 2 is not an absolute path (it must start with /)" },
+        .{ .bytes = pre ++ "[\"/tmp/a\",7]}}", .want = "file 2 is not a string" },
+        .{ .bytes = pre ++ "[]}}", .want = "files must list 1 to 10 paths (got 0)" },
+    }) |c| switch (try dispatchBrowser(testing.allocator, c.bytes, fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.invalid_params)), try errCode(e));
+            const m = try errMessage(e);
+            defer testing.allocator.free(m);
+            try testing.expectEqualStrings(c.want, m);
+            try testing.expect(std.mem.indexOf(u8, m, "/tmp") == null);
+        },
+        .op => |op| {
+            testing.allocator.free(op.arg);
+            return error.TestUnexpectedResult;
+        },
+        else => return error.TestUnexpectedResult,
+    };
+    // 파일 목록이 아닌 틀림(대상 없음)은 기본 글 그대로.
+    switch (try dispatchBrowser(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"files\":[\"/tmp/a\"]}}", fx_engine, &.{}, 10, &grants, 0)) {
+        .err => |e| {
+            defer testing.allocator.free(e);
+            const m = try errMessage(e);
+            defer testing.allocator.free(m);
+            try testing.expectEqualStrings(cp.ErrorCode.invalid_params.defaultMessage(), m);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "W9c③: uploadPathOk·lexicalPath — 절대·UTF-8·제어 문자 없음, 정규화는 // · . · .. 만 글자로" {
     try testing.expect(uploadPathOk("/a"));
     try testing.expect(uploadPathOk("/tmp/한 글.txt"));
@@ -5152,9 +5237,9 @@ test "W9c③: uploadPathOk·lexicalPath — 절대·UTF-8·제어 문자 없음,
 test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀리면 internal_error, 거부는 -32002 와 그 글(철회의 unauthorized 는 균일 글)" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}";
     {
-        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3,\"x\":1}],\"kept\":true,\"y\":2}");
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3,\"x\":1}],\"kept\":true,\"navigated\":false,\"y\":2}");
         defer testing.allocator.free(w);
-        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true}") != null);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true,\"navigated\":false}") != null);
     }
     for ([_][]const u8{
         "{}",
@@ -5185,16 +5270,24 @@ test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀�
     }
 }
 
-test "W9c③ 적대 리뷰 1 회차 재현 R9b: upload 결과는 kept(페이지가 넣은 목록을 그대로 두었나)를 싣는다 — 빠지거나 bool 이 아니면 internal_error" {
+test "W9c③ 적대 리뷰 1 회차 재현 R9b: upload 결과는 kept(페이지가 넣은 목록을 그대로 두었나)·navigated(2 회차 — 넣고 곧 옮겨 갔다)를 싣는다 — 빠지거나 bool 이 아니면 internal_error" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}";
     {
-        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}");
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}");
         defer testing.allocator.free(w);
-        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}") != null);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}") != null);
+    }
+    {
+        // 2 회차: 넣은 뒤 곧 옮겨 갔다 — navigated 를 그대로 싣는다.
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true}");
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true}") != null);
     }
     for ([_][]const u8{
         "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}]}",
-        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":1}",
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":1,\"navigated\":false}",
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}",
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":\"yes\"}",
     }) |payload| {
         const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
         defer testing.allocator.free(w);

@@ -78,7 +78,8 @@
 #                   페이지가 진짜 change(isTrusted)로 받아 내용을 읽어 보낸다 · 상대 경로 둘을 multiple 칸에(CLI 의 현재 폴더로 붙인다) ·
 #                   받은 뒤 change 에서 칸을 비우는 칸·칸을 새 것으로 바꿔 끼우는 칸은 성공에 kept:false(다시 올리지 말라는 안내 — 적대 리뷰 1 회차) ·
 #                   꺼진 칸·한 파일 칸에 둘은 모달 전에 거절 · 거부는 -32002 · 사본은 프로필의 upload-staging/<탭>/ 아래 0400 ·
-#                   모달 동안 페이지가 옮겨 가면 「page changed」 이고 새 문서는 아무것도 받지 않는다 · 탭을 닫으면 그 탭의 사본 폴더가 사라진다
+#                   모달 동안 페이지가 옮겨 가면 「page changed」 이고 새 문서는 아무것도 받지 않는다 · change 처리기가 곧 같은 출처로 옮기는 칸은
+#                   성공에 navigated:true(「try again」 없음 — 적대 리뷰 2 회차) · 탭을 닫으면 그 탭의 사본 폴더가 사라진다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -235,9 +236,12 @@ for(var i=0;i<n;i++)(function(f){var r=new FileReader();r.onload=function(){part
 <input type=file id=dis disabled onchange="rep(this,event)">
 <input type=file id=clr onchange="rep(this,event);this.value=''">
 <input type=file id=rr onchange="rep(this,event);this.replaceWith(this.cloneNode())">
+<input type=file id=nav onchange="var f=this.files[0];location.href='/up3.html?nav-'+this.files.length+'-'+event.isTrusted+'-'+encodeURIComponent(f.name+':'+f.size)">
 <button id=later style="position:absolute;left:30px;top:200px;width:120px;height:40px" onclick="setTimeout(function(){location='up2.html'},1200)">Later</button>
 HTML
 done
+# 적대 리뷰 2 회차: change 처리기가 곧 옮겨 가는 칸(nav)의 도착지 — 주소에 받은 파일의 이름·크기를 싣는다(옮겨 가면 이미지 신호는 끊긴다).
+printf '<!doctype html><title>up3</title>up3' > "$root/www/up3.html"
 mkdir -p "$root/files"
 printf 'alpha\n' > "$root/files/a.txt"
 printf 'bravo\n' > "$root/files/b.txt"
@@ -996,6 +1000,11 @@ echo approve-after-ms:3000 > "$root/updecision"
 "\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/b.txt" > "\$out/up-moved" 2>&1; echo "rc=\$?" >> "\$out/up-moved"
 sleep 1
 grep -c 'GET /hit?up2-' "$root/http.log" > "\$out/up2-hits" || true
+# 적대 리뷰 2 회차: 넣자 change 처리기가 같은 출처로 옮겨 간다 — 넣은 뒤 읽기는 문서가 사라져 못 한다. 받았다는 성공(navigated:true)이어야 한다
+# (실패·「then try again」 이면 에이전트가 다시 불러 모달이 또 뜨고 두 번 올라간다). 이 호출 하나뿐이다 — 옮겨 간 문서의 요청 수로 두 번 넣지 않았음을 본다.
+"\$cli" browser upload --surface "\$up" --selector '#nav' "$root/files/a.txt" > "\$out/up-nav" 2>&1; echo "rc=\$?" >> "\$out/up-nav"
+sleep 1
+grep -c 'GET /up3.html?nav-1-true-a.txt%3A6' "$root/http.log" > "\$out/up-nav-loads" || true
 echo approve > "$root/updecision"
 "\$cli" browser close --surface "\$up" > "\$out/up-close" 2>&1
 sleep 0.5
@@ -1271,8 +1280,11 @@ grep -q '^rc=1$' "$out/up-deny" && grep -q 'declined.*(-32002)' "$out/up-deny" |
 ! grep -q 'GET /hit?up-one-1-true-b.txt' "$root/http.log" || fail "a declined or moved upload still reached the page ($(grep 'GET /hit?up' "$root/http.log" | tr '\n' ' '))"
 grep -q '^rc=1$' "$out/up-moved" && grep -q 'page changed' "$out/up-moved" || fail "an upload whose page moved during the dialog did not fail with page changed ($(tr '\n' ' ' < "$out/up-moved"))"
 [ "$(cat "$out/up2-hits")" = 0 ] || fail "the page the tab moved to during the dialog received files ($(grep 'GET /hit?up2' "$root/http.log" | tr '\n' ' '))"
+grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-nav" && grep -q '^rc=0$' "$out/up-nav" && grep -q 'navigated: true' "$out/up-nav" && ! grep -q 'try again' "$out/up-nav" \
+    && [ "$(cat "$out/up-nav-loads")" = 1 ] \
+    || fail "an input whose change handler navigated right away was not reported as received with navigated:true, or the agent was told to try again ($(tr '\n' ' ' < "$out/up-nav") · loads $(cat "$out/up-nav-loads") · $(grep 'GET /up3' "$root/http.log" | tr '\n' ' '))"
 [ ! -s "$out/up-after-close" ] || fail "closing the tab did not remove its upload-staging folder ($(tr '\n' ' ' < "$out/up-after-close"))"
-echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input and two files into a single-file input are refused before the dialog, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), closing the tab removes its copies"
+echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input and two files into a single-file input are refused before the dialog, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), closing the tab removes its copies"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

@@ -114,14 +114,19 @@ pub fn countBefore(spans: []const Span, pos: usize) usize {
 /// caret `pos` 의 문맥. 조각이 caret 을 **안쪽에** 품어야 한다 — `|"ab"` 와 `"ab"|` 는 밖이다. 글자 안 코드의 경계(`f"a|{b}"`·`f"{b}|c"`)는
 /// 안이다. 줄 주석은 줄 끝까지라 그 끝(`// a|`)도 안이다: 끝이 줄 끝(또는 문서 끝)이고 닫는 표식(`*/`·`-->`)으로 끝나지 않으면.
 pub fn at(spans: []const Span, content: []const u8, pos: usize) Literal {
+    return if (spanAt(spans, content, pos)) |s| literalOf(s.kind) else .code;
+}
+
+/// caret `pos` 를 품은 조각(`at` 과 같은 규칙 — 코드면 `null`). Enter 의 줄 주석 이어쓰기가 그 주석이 어디서 시작했는지 본다.
+pub fn spanAt(spans: []const Span, content: []const u8, pos: usize) ?Span {
     const n = countBefore(spans, pos);
     if (n > 0) {
         const s = spans[n - 1];
-        if (pos < s.end or (pos == s.end and s.inner_end)) return literalOf(s.kind);
-        if (pos == s.end and s.kind == .comment and openEnded(content, s)) return .comment;
+        if (pos < s.end or (pos == s.end and s.inner_end)) return s;
+        if (pos == s.end and s.kind == .comment and openEnded(content, s)) return s;
     }
-    if (n < spans.len and spans[n].start == pos and spans[n].inner_start) return literalOf(spans[n].kind);
-    return .code;
+    if (n < spans.len and spans[n].start == pos and spans[n].inner_start) return spans[n];
+    return null;
 }
 
 fn literalOf(kind: Kind) Literal {

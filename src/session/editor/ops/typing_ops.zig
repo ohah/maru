@@ -147,12 +147,49 @@ pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Cont
     const unit = r.unit orelse return null;
     if (r.grammar != .ruby and r.grammar != .python) return null;
     const line = r.lines.line(r.lines.lineAt(lo)) orelse return null;
+    // caret 이 줄바꿈 안(CRLF 의 `\r`·`\n` 사이 — → 로 줄 끝을 넘으면 닿는다)이면 줄 끝 뒤다(최종 검토: 그 자리에서 낱말을 치면 거꾸로 된 slice 로
+    // 죽었다).
+    if (lo > line.contentEnd()) return null;
     if (std.mem.trim(u8, content[lo..line.contentEnd()], " \t").len != 0) return null; // caret 뒤에 글자가 있다
     const head = content[line.start..lo];
     const indent = head[0 .. head.len - std.mem.trimStart(u8, head, " \t").len];
     if (indent.len == 0) return null;
     const code = head[indent.len..];
-    const hit = switch (r.grammar) {
+    if (!keywordHit(r.grammar, code, typed)) return null;
+    // 문자열·주석 안에서 친 낱말(파이썬 독스트링의 `else:`)은 블록이 아니다(TR4 — 트리가 답했을 때만).
+    if (r.literal_spans) |ls| if (literals.at(ls, content, lo) != .code) return null;
+    // 위쪽 내용 줄(공백뿐인 줄은 건너뛴다)의 들여쓰기 — 지금 줄이 그보다 얕으면 이미 내어썼다. 거슬러 가는 줄 수에 상한을 둔다(빈 줄이
+    // 수십만인 적대 문서에서 낱말을 칠 때마다 끝까지 걷지 않게 — 넘으면 위 내용 줄이 없는 것으로 본다). 트리가 답했으면 **머리가 문자열 안인
+    // 줄**(여러 줄 문자열의 몸·닫는 `"""`)도 건너뛴다(최종 검토: 그 줄을 기준으로 삼아 `if` 블록의 `else:` 를 0 열로 내렸다) — 호스트가 그 줄까지
+    // 트리에 묻는다(`keywordQueryStart`).
+    var n = r.lines.lineAt(lo);
+    const floor = n -| keyword_scan_lines;
+    const above: []const u8 = while (n > floor) {
+        n -= 1;
+        const pl = r.lines.line(n) orelse break "";
+        const pt = content[pl.start..pl.contentEnd()];
+        const pi = pt.len - std.mem.trimStart(u8, pt, " \t").len;
+        if (pi == pt.len) continue;
+        if (r.literal_spans) |ls| if (literals.covers(ls, pl.start + pi)) continue;
+        break pt[0..pi];
+    } else "";
+    if (indent_guides.visualColumn(indent, r.tab_width) < indent_guides.visualColumn(above, r.tab_width)) return null;
+    // 한 단계 빼기 — 탭이면 하나, 공백이면 단위 폭까지.
+    var keep = indent.len;
+    if (indent[keep - 1] == '\t') {
+        keep -= 1;
+    } else {
+        var k: usize = 0;
+        while (keep > 0 and indent[keep - 1] == ' ' and k < unit.width) : (k += 1) keep -= 1;
+    }
+    const text = try std.mem.concat(allocator, u8, &.{ indent[0..keep], code, &[_]u8{typed} });
+    return .{ .line_start = line.start, .text = text };
+}
+
+/// 낱말 내어쓰기의 낱말을 **다 쳤는가** — `code` 는 들여쓰기 뒤 caret 앞까지, `typed` 는 지금 친 글자(Ruby 는 친 글자까지 붙인 낱말이 정확히
+/// 그것, Python 은 `:` 를 쳤고 첫 낱말이 그것).
+fn keywordHit(grammar: language.Grammar, code: []const u8, typed: u8) bool {
+    return switch (grammar) {
         .ruby => blk: {
             // 친 글자까지 붙인 낱말이 정확히 그것이다.
             var buf: [8]u8 = undefined;
@@ -172,31 +209,25 @@ pub fn keywordOutdent(allocator: std.mem.Allocator, content: []const u8, r: Cont
         },
         else => false,
     };
-    if (!hit) return null;
-    // 문자열·주석 안에서 친 낱말(파이썬 독스트링의 `else:`)은 블록이 아니다(TR4 — 트리가 답했을 때만).
-    if (r.literal_spans) |ls| if (literals.at(ls, content, lo) != .code) return null;
-    // 위쪽 내용 줄(공백뿐인 줄은 건너뛴다)의 들여쓰기 — 지금 줄이 그보다 얕으면 이미 내어썼다. 거슬러 가는 줄 수에 상한을 둔다(빈 줄이
-    // 수십만인 적대 문서에서 낱말을 칠 때마다 끝까지 걷지 않게 — 넘으면 위 내용 줄이 없는 것으로 본다).
-    var n = r.lines.lineAt(lo);
+}
+
+/// 낱말 내어쓰기가 기준으로 삼을 **위쪽 내용 줄의 머리**(문서 byte) — 그 줄부터 caret 까지를 트리에 물어야 그 줄이 여러 줄 문자열 안인지 안다
+/// (최종 검토). caret 줄이 들여쓰기 + 다 친 낱말이 아니면(내어쓰기를 안 탄다) `null` — 묻는 범위를 넓히지 않는다.
+pub fn keywordQueryStart(content: []const u8, lines: LineIndex, grammar: language.Grammar, lo: usize, typed: u8) ?usize {
+    if (grammar != .ruby and grammar != .python) return null;
+    const line = lines.line(lines.lineAt(lo)) orelse return null;
+    if (lo > line.contentEnd()) return null;
+    const head = content[line.start..lo];
+    const code = std.mem.trimStart(u8, head, " \t");
+    if (code.len == head.len or !keywordHit(grammar, code, typed)) return null;
+    var n = lines.lineAt(lo);
     const floor = n -| keyword_scan_lines;
-    const above: []const u8 = while (n > floor) {
+    while (n > floor) {
         n -= 1;
-        const pl = r.lines.line(n) orelse break "";
-        const pt = content[pl.start..pl.contentEnd()];
-        const pi = pt.len - std.mem.trimStart(u8, pt, " \t").len;
-        if (pi < pt.len) break pt[0..pi];
-    } else "";
-    if (indent_guides.visualColumn(indent, r.tab_width) < indent_guides.visualColumn(above, r.tab_width)) return null;
-    // 한 단계 빼기 — 탭이면 하나, 공백이면 단위 폭까지.
-    var keep = indent.len;
-    if (indent[keep - 1] == '\t') {
-        keep -= 1;
-    } else {
-        var k: usize = 0;
-        while (keep > 0 and indent[keep - 1] == ' ' and k < unit.width) : (k += 1) keep -= 1;
+        const pl = lines.line(n) orelse return null;
+        if (std.mem.trimStart(u8, content[pl.start..pl.contentEnd()], " \t").len > 0) return pl.start;
     }
-    const text = try std.mem.concat(allocator, u8, &.{ indent[0..keep], code, &[_]u8{typed} });
-    return .{ .line_start = line.start, .text = text };
+    return null;
 }
 
 /// `sels` 는 문서 순서. **타이핑 보조는 한 글자 입력일 때만 본다**(§3.7) — `assist` 가 거짓이면(IME 재변환 등) 보지
@@ -208,7 +239,9 @@ pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []con
     for (sels, 0..) |sel, index| {
         try t.first_change.append(allocator, t.changes.items.len);
         // 앞 커서의 변경 끝 — 닫는 괄호 내어쓰기가 그 앞까지 넓어지면 겹쳐 입력 전체가 거절된다(같은 공백 줄의 커서 둘 — TR2 적대적 3회차).
-        const prev_end: usize = if (t.changes.items.len > 0) t.changes.items[t.changes.items.len - 1].end else 0;
+        // 앞 커서가 **그 줄 머리에** 닿았으면(`ri.line_start == prev_end` — 0 열의 커서) 넓히지 않는다: 넓히면 앞 커서의 입력 뒤 공백을 지운다
+        // (최종 검토: `{` ⏎ `|····|` 에서 `}` 가 둘 사이 공백을 먹어 `}}`). 앞 변경이 없으면 `null`.
+        const prev_end: ?usize = if (t.changes.items.len > 0) t.changes.items[t.changes.items.len - 1].end else null;
         const lo = @min(sel.start(), content.len);
         const hi = @min(sel.end(), content.len);
         if (aid) |typed| {
@@ -218,7 +251,7 @@ pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []con
             const lit: literals.Literal = if (ctx) |c| (if (c.literal_spans) |ls| literals.at(ls, content, lo) else .unknown) else .unknown;
             switch (pairs.decideIn(typed, hi > lo, before, after, lit)) {
                 .insert_plain => if (hi == lo) if (ctx) |r| {
-                    if (closerReindent(content, r, lo, typed)) |ri| if (ri.line_start >= prev_end) {
+                    if (closerReindent(content, r, lo, typed)) |ri| if (prev_end == null or ri.line_start > prev_end.?) {
                         // **닫는 괄호를 짝 줄의 들여쓰기로**(계획 editor-typing-rules TR2) — 줄 머리부터 caret 까지(공백뿐)를 그 들여쓰기 + 괄호로.
                         const joined = try std.mem.concat(allocator, u8, &.{ ri.indent, &[_]u8{typed} });
                         t.owned.append(allocator, joined) catch |e| {
@@ -231,7 +264,7 @@ pub fn planTyping(allocator: std.mem.Allocator, content: []const u8, sels: []con
                     if (try keywordOutdent(allocator, content, r, lo, typed)) |ko| {
                         // **낱말을 다 쳤다** — 그 줄을 한 단계 내어쓴다(TR3). 줄 머리부터 caret 까지를 새 머리 + 친 글자로. 앞 커서의 변경과 겹치면
                         // 하지 않는다(같은 줄의 커서 둘).
-                        if (ko.line_start >= prev_end) {
+                        if (prev_end == null or ko.line_start > prev_end.?) {
                             t.owned.append(allocator, ko.text) catch |e| {
                                 allocator.free(ko.text);
                                 return e;
@@ -538,5 +571,64 @@ test "INDL2 구문 트리 문맥 × 타이핑 — 문자열·주석 안 괄호�
             defer t.deinit(a);
             try std.testing.expectEqualStrings(want, t.changes.items[0].text);
         }
+    }
+}
+
+test "INDF5 커서 여럿의 겹침 가드는 줄 머리에 닿은 앞 커서도 지키고, CRLF 줄바꿈 안 caret 은 낱말 내어쓰기를 안 타며, 위 줄이 여러 줄 문자열이면 그 위 코드 줄이 기준 (계획 editor-typing-rules 최종 검토)" {
+    const a = std.testing.allocator;
+    const four: indent_guides.Unit = .{ .tabs = false, .width = 4 };
+    // ⑴ 0 열의 커서와 공백 줄 끝의 커서 — 뒤 커서의 `}` 는 그 자리에(줄 머리부터 바꾸면 앞 커서의 `}` 뒤 공백을 지운다).
+    {
+        const content = "{\n    \n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        var t = try planTyping(a, content, &.{ Selection.at(2), Selection.at(6) }, "}", true, .{ .lines = lines, .brackets = "()[]{}" });
+        defer t.deinit(a);
+        try std.testing.expect(t.wellFormed());
+        try std.testing.expectEqual(@as(usize, 2), t.changes.items[0].start);
+        try std.testing.expectEqual(@as(usize, 6), t.changes.items[1].start);
+        try std.testing.expectEqual(@as(usize, 6), t.changes.items[1].end);
+    }
+    // ⑵ 같은 모양의 Ruby `end` — 0 열 커서 뒤의 줄 끝 커서는 내어쓰지 않는다.
+    {
+        const content = "def f\n    x\n    en\n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        const head = std.mem.lastIndexOf(u8, content, "    en").?;
+        var t = try planTyping(a, content, &.{ Selection.at(head), Selection.at(content.len - 1) }, "d", true, .{ .lines = lines, .brackets = "()[]{}", .grammar = .ruby, .unit = four });
+        defer t.deinit(a);
+        try std.testing.expect(t.wellFormed());
+        try std.testing.expectEqual(content.len - 1, t.changes.items[1].start);
+    }
+    // ⑶ CRLF — `\r`·`\n` 사이 caret 에서 `else` 뒤 `:` 는 평범하게 들어간다(거꾸로 된 slice 로 죽었다).
+    {
+        const content = "if a:\r\n    x\r\n    else\r\n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        var t = try planTyping(a, content, &.{Selection.at(content.len - 1)}, ":", true, .{ .lines = lines, .brackets = "()[]{}", .grammar = .python, .unit = four });
+        defer t.deinit(a);
+        try std.testing.expectEqual(@as(usize, 1), t.changes.items.len);
+        try std.testing.expectEqual(content.len - 1, t.changes.items[0].start);
+        try std.testing.expectEqualStrings(":", t.changes.items[0].text);
+        try std.testing.expect(keywordQueryStart(content, lines, .python, content.len - 1, ':') == null);
+    }
+    // ⑷ 위 줄이 여러 줄 문자열 — 트리가 답하면 그 위의 코드 줄(`s = """` 의 8 칸)이 기준이라 4 칸의 `else:` 는 그대로, 없으면 0 열의 `"""` 가
+    // 기준이라 내어쓴다(종전). 호스트는 그 `"""` 줄부터 트리에 묻는다.
+    {
+        const content = "def f():\n    if a:\n        s = \"\"\"\ntext\n\"\"\"\n    else\n";
+        var lines = try line_index.build(a, content);
+        defer lines.deinit();
+        const s0 = std.mem.indexOf(u8, content, "\"\"\"").?;
+        const s1 = std.mem.lastIndexOf(u8, content, "\"\"\"").? + 3;
+        const lo = content.len - 1;
+        try std.testing.expectEqual(std.mem.lastIndexOf(u8, content, "\"\"\"").?, keywordQueryStart(content, lines, .python, lo, ':').?);
+        try std.testing.expect(keywordQueryStart(content, lines, .python, lo, 'x') == null); // 낱말을 다 치지 않았다
+        const spans = [_]literals.Span{.{ .start = s0, .end = s1, .kind = .string }};
+        var with = try planTyping(a, content, &.{Selection.at(lo)}, ":", true, .{ .lines = lines, .brackets = "()[]{}", .grammar = .python, .unit = four, .literal_spans = &spans });
+        defer with.deinit(a);
+        try std.testing.expectEqual(lo, with.changes.items[0].start);
+        var without = try planTyping(a, content, &.{Selection.at(lo)}, ":", true, .{ .lines = lines, .brackets = "()[]{}", .grammar = .python, .unit = four });
+        defer without.deinit(a);
+        try std.testing.expectEqualStrings("else:", without.changes.items[0].text);
     }
 }

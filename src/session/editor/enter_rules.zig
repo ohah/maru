@@ -1,4 +1,4 @@
-//! Enter 의 언어 규칙 — 「이 줄 뒤 Enter 는 무엇을 하나」를 정하는 **한 함수**(`decide` — 계획 editor-typing-rules TR2·TR3,
+//! Enter 의 언어 규칙 — 「이 줄 뒤 Enter 는 무엇을 하나」를 정하는 **한 함수**(`decide` — 계획 editor-typing-rules TR2~TR4,
 //! 문서 모델 §3.9a). 정규식 엔진 없이 문법마다 Zig 로 적는다(2026-10-13 사용자 결정). 순서는 VS Code 와 같다 — 언어 규칙(주석
 //! 이어쓰기)이 먼저, 그다음 괄호, 그다음 들여쓰기 규칙(Python `:`·`case`·Ruby·HTML 태그).
 //!
@@ -18,10 +18,12 @@ pub const Context = struct {
     brackets: []const u8,
     /// 문자열 따옴표(`Grammar.stringQuotes`) — 그 안의 괄호·주석 표식은 세지 않는다.
     quotes: []const u8 = "",
-    /// 줄 주석 표식(`Language.lineComment`) — 그 뒤의 괄호는 세지 않는다.
+    /// 줄 주석 표식(`Grammar.lineComment`) — 그 뒤의 괄호는 세지 않는다.
     line_comment: ?[]const u8 = null,
     /// 한 단계(감지한 들여쓰기 단위).
     unit: indent_guides.Unit,
+    /// 설정의 탭 폭 — 이어 받은 들여쓰기의 화면 열을 센다(한 단계는 그 열에서 **다음 탭 스톱까지** — `Unit.toNextStop`).
+    tab_width: u16 = 4,
     /// 짝 없는 여는 괄호를 줄 어디서든 보는가(`Grammar.bracketEnterAnywhere`).
     anywhere: bool = true,
     /// 구문 트리가 답한 문자열·주석 조각(TR4 — 문서 절대 byte). `line_ops.planNewline` 이 커서마다 `Tree` 로 바꿔 `decideWith` 에 준다.
@@ -29,9 +31,23 @@ pub const Context = struct {
     literal_spans: ?[]const literals.Span = null,
 };
 
+/// 그 문법의 Enter 문맥 — **호스트와 VS Code 대조 판정자(INDR1)가 같이 부르는 한 자리**다(최종 검토: 판정자가 손으로 베낀 문맥을 대조해
+/// 호스트가 넘기는 따옴표·줄 주석·「어디든」을 잴 수 없었다). 괄호 쌍은 호출자가 준다(괄호 색칠의 규칙 — 구문 모듈은 L4 만 들여온다).
+pub fn contextFor(grammar: language.Grammar, brackets: []const u8, unit: indent_guides.Unit, tab_width: u16) Context {
+    return .{
+        .grammar = grammar,
+        .brackets = brackets,
+        .quotes = grammar.stringQuotes(),
+        .line_comment = grammar.lineComment(),
+        .unit = unit,
+        .tab_width = tab_width,
+        .anywhere = grammar.bracketEnterAnywhere(),
+    };
+}
+
 /// 트리가 답한 그 줄의 문맥(계획 editor-typing-rules TR4) — caret 의 문맥과 caret 앞 줄 조각의 **코드만 남긴 사본**(문자열·주석 byte 를
-/// 공백으로 — `literals.blank`, `before` 와 길이가 같다).
-pub const Tree = struct { caret: literals.Literal, code: []const u8 };
+/// 공백으로 — `literals.blank`, `before` 와 길이가 같다), caret 을 품은 주석이 **그 줄에서** 시작했으면 그 자리(`before` 안 byte).
+pub const Tree = struct { caret: literals.Literal, code: []const u8, comment_at: ?usize = null };
 
 pub const Indent = enum {
     /// 앞 공백을 그대로 잇는다.
@@ -59,13 +75,16 @@ pub fn decide(ctx: Context, before: []const u8, after: []const u8, prev: ?[]cons
 }
 
 /// 그 줄 뒤 Enter 의 갈래. 트리가 답했으면(TR4): caret 이 **문자열 안이면 아무 규칙도 타지 않는다**(글자 안에 들여쓰기·표식을 넣지
-/// 않는다 — 앞 공백만 잇는다). 주석 규칙(블록 주석·줄 주석 이어쓰기)은 원래 글자로, 괄호·언어 규칙은 **코드 사본**으로 읽는다 — 문자열·
+/// 않는다 — 앞 공백만 잇는다). 주석 규칙(블록 주석·줄 주석 이어쓰기)은 원래 글자로 읽되 줄 주석 이어쓰기는 **caret 이 그 줄에서 시작한 `//`
+/// 주석 안일 때만**이다(최종 검토: 정규식 `/\/\//`·템플릿 꼬리의 `http://`·블록 주석 안 URL 의 `//` 를 주석으로 읽어 코드에 `// ` 를 넣었다).
+/// 블록 주석 규칙은 트리를 보지 않는다 — 닫히지 않은 `/**`(새 문서 주석을 쓰는 중)는 트리에서 오류 노드라 caret 이 코드로 나온다(VS Code 의
+/// 규칙도 줄 글자만 본다). 괄호·언어 규칙은 **코드 사본**으로 읽는다 — 문자열·
 /// 주석·정규식 리터럴 안 괄호와 낱말을 세지 않는다(줄 스캐너는 여러 줄 문자열·블록 주석 안을 모르고 정규식을 문자열로 못 본다). 그때
 /// 스캐너의 따옴표·줄 주석 건너뛰기는 끈다 — 이미 지웠고, 여러 줄 문자열의 둘째 줄에서는 스캐너가 따옴표 짝을 거꾸로 읽는다.
 pub fn decideWith(ctx: Context, before: []const u8, after: []const u8, prev: ?[]const u8, tree: ?Tree) Action {
     if (tree) |t| if (t.caret == .string) return .{};
     if (blockComment(ctx.grammar, before, after, prev)) |a| return a;
-    if (lineCommentContinue(ctx, before, after)) |a| return a;
+    if (lineCommentContinue(ctx, before, after, tree)) |a| return a;
     var c = ctx;
     var code = before;
     if (tree) |t| {
@@ -112,11 +131,17 @@ fn blockComment(g: language.Grammar, before: []const u8, after: []const u8, prev
 // ── 줄 주석 ─────────────────────────────────────────────────────────────────────
 
 /// 줄 주석 **가운데**에서 Enter 면 그 표식으로 잇는다(VS Code: `// …|…` → `// ` — 줄 끝이면 잇지 않는다). `//` 를 쓰는 문법만.
-fn lineCommentContinue(ctx: Context, before: []const u8, after: []const u8) ?Action {
+fn lineCommentContinue(ctx: Context, before: []const u8, after: []const u8, tree: ?Tree) ?Action {
     const lc = ctx.line_comment orelse return null;
     if (!std.mem.eql(u8, lc, "//")) return null;
     if (std.mem.trim(u8, after, " \t").len == 0) return null; // 줄 끝 — 잇지 않는다
-    const at = commentStart(before, ctx.quotes, lc) orelse return null;
+    // 트리가 답했으면 그 줄에서 시작한 줄 주석 안이어야 한다(표식 자리는 트리의 것 — 줄 스캐너는 정규식·`'"'` 를 모른다). 없으면 줄 스캐너.
+    const at = if (tree) |tr| blk: {
+        if (tr.caret != .comment) return null;
+        const a = tr.comment_at orelse return null;
+        if (!std.mem.startsWith(u8, before[a..], lc)) return null; // 블록 주석 안(`/* see http://x | y */`)
+        break :blk a;
+    } else commentStart(before, ctx.quotes, lc) orelse return null;
     // 표식 뒤에 글자가 있어야 한다(빈 `//` 는 잇지 않는다 — VS Code `//\s*\S`).
     if (std.mem.trim(u8, before[at + lc.len ..], " \t").len == 0) return null;
     // 줄 머리의 주석만(`  // …`) — 코드 뒤 주석(`x = 1; // …`)도 VS Code 는 잇는다(`\s//\s+\S`). 같게 한다.
@@ -329,18 +354,15 @@ fn htmlTag(before: []const u8, after: []const u8) ?Action {
 const testing = std.testing;
 const vscode = @import("enter_rules_vscode.zig");
 
+/// 판정자의 문맥 — 호스트와 같은 `contextFor`. 괄호 쌍만 여기서 준다(호스트는 괄호 색칠의 규칙에서 받는다 — 그 배선은 실제 키 판정자
+/// INDF2 가 HTML·JSON 으로 잰다).
 fn ctxFor(g: language.Grammar) Context {
     const brackets: []const u8 = switch (g) {
         .json => "[]{}",
         .html => "(){}",
         else => "()[]{}",
     };
-    const lc: ?[]const u8 = switch (g) {
-        .python, .ruby, .bash => "#",
-        .html, .css, .json, .markdown, .none => null,
-        else => "//",
-    };
-    return .{ .grammar = g, .brackets = brackets, .quotes = g.stringQuotes(), .line_comment = lc, .unit = .{ .tabs = false, .width = 4 }, .anywhere = g.bracketEnterAnywhere() };
+    return contextFor(g, brackets, .{ .tabs = false, .width = 4 }, 4);
 }
 
 /// 의도한 차이 — VS Code 규칙과 일부러 다르게 답하는 입력과 그 이유(계획 editor-typing-rules 「실측」 표·TR3 설계).
@@ -439,4 +461,27 @@ test "INDR3 언어 규칙 — Python 제어문 `:`(주석 떼고·match/case), `
     try testing.expect(sameAction(decide(html, "<li>a", "", null), .{ .indent = .indent }));
     // 자기 닫힘은 void 가 아닌 요소로도 잰다(`<br/>` 는 void 목록이 먼저 걸러 자기 닫힘 판정을 못 잰다 — H14).
     for ([_][]const u8{ "<br>", "<img src=\"x\">", "</div>", "<br/>", "<!-- a -->", "a < b", "<Foo />", "<div/>" }) |l| try testing.expect(sameAction(decide(html, l, "", null), .{}));
+}
+
+test "INDF1 트리가 답하면 줄 주석 이어쓰기는 caret 이 그 줄의 `//` 주석 안일 때만 — 정규식 `\\//`·템플릿 꼬리의 URL 은 코드, 블록 주석 안 `//` 는 줄 주석이 아니다; 블록 주석 규칙은 트리를 안 본다 (계획 editor-typing-rules 최종 검토)" {
+    const ts = ctxFor(.typescript);
+    // 줄 스캐너는 정규식 `/\\/\\//` 의 `\\//` 를 주석 표식으로 읽는다(트리 없을 때의 종전 동작 — 그대로 둔다). 트리가 코드라 하면 잇지 않고
+    // 괄호 규칙(코드 사본)으로 간다.
+    try testing.expect(sameAction(decide(ts, "p.replace(/\\/\\//g, ", "\"/\")", null), .{ .append = "// " }));
+    try testing.expect(sameAction(decideWith(ts, "p.replace(/\\/\\//g, ", "\"/\")", null, .{ .caret = .code, .code = "p.replace(       , " }), .{ .indent = .indent }));
+    // 여러 줄 템플릿의 꼬리 줄 — 줄 스캐너에는 따옴표 밖 `//` 다.
+    try testing.expect(sameAction(decide(ts, "  http://x` + f(", "a)", null), .{ .append = "// " }));
+    try testing.expect(sameAction(decideWith(ts, "  http://x` + f(", "a)", null, .{ .caret = .code, .code = "            + f(" }), .{ .indent = .indent }));
+    // 블록 주석 규칙은 트리를 안 본다 — 닫히지 않은 `/**` 의 둘째 줄(트리에선 오류 노드라 caret 이 코드)도 ` * ` 를 잇는다.
+    try testing.expect(sameAction(decideWith(ts, " * doc", "", "/**", .{ .caret = .code, .code = " * doc" }), .{ .append = "* " }));
+    try testing.expect(sameAction(decideWith(ts, "/**", "", null, .{ .caret = .code, .code = "/**" }), .{ .append = " * " }));
+    // 주석 안이면 잇는다 — 표식 자리는 트리의 것(Rust `'"'` 뒤 주석: 줄 스캐너는 `"` 를 문자열 시작으로 읽어 놓친다).
+    const rs = ctxFor(.rust);
+    try testing.expect(sameAction(decide(rs, "let q = '\"'; x(); // a", "b", null), .{}));
+    try testing.expect(sameAction(decideWith(rs, "let q = '\"'; x(); // a", "b", null, .{ .caret = .comment, .code = "", .comment_at = 18 }), .{ .append = "// " }));
+    // 블록 주석 안의 `//`(URL)는 줄 주석이 아니다 — 줄 스캐너는 잇는다.
+    try testing.expect(sameAction(decide(ts, "x(); /* see http://x ", "y */", null), .{ .append = "// " }));
+    try testing.expect(sameAction(decideWith(ts, "x(); /* see http://x ", "y */", null, .{ .caret = .comment, .code = "x();                 ", .comment_at = 5 }), .{}));
+    // 주석이 그 줄에서 시작하지 않았다(위 줄부터 이어진 블록 주석 안) — 줄 주석 이어쓰기가 아니다.
+    try testing.expect(sameAction(decideWith(ts, "a // b ", "c", null, .{ .caret = .comment, .code = "" }), .{}));
 }

@@ -436,18 +436,23 @@ pub fn markerPreviewPlacement(
     open: marker_preview_ops.Open,
 ) ?chrome.components.image_preview.Placement {
     const anchor_rect = markerAnchorRect(self, owner, open);
-    const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
+    const p = self.buildChromeProps();
     // 아직 못 푼 동안에도 **자리는 잡아 둔다** — 클릭했는데 아무것도 안 뜨면 「먹혔나」로 읽힌다.
-    const w: u32 = if (open.width > 0) open.width else 24 * @max(p.metrics.cell_width_px, 1);
+    // 대체 폭은 **실패 안내가 들어가는 폭**보다 좁지 않다 — 실패는 원본 크기를 모른 채 이 폭으로 서고(0×0), 한국어
+    // 안내는 27칸이라 24칸 상자를 넘쳐 좌우 테두리를 덮었다(2026-10-14 적대적 검증). 좌우 한 칸씩 띄운다.
+    // 폭은 그림 한도(`maxImageSize`)로 먼저 자른다 — 넘긴 채 주면 `place` 의 배율이 높이까지 줄여 안내 줄이 위아래로
+    // 잘린다(좁은 창, 같은 검증). 넘치는 글자는 `image_preview.view` 의 clip 이 테두리 안쪽에서 자른다.
+    const notice_cols = chrome.components.overlay_input.displayCols(maru.i18n.t(.app_marker_preview_undecodable));
+    const fallback_w = @max(24, notice_cols + 2) * @max(p.metrics.cell_width_px, 1);
+    const w: u32 = if (open.width > 0) open.width else if (chrome.components.image_preview.maxImageSize(p)) |avail| @min(fallback_w, avail.w) else fallback_w;
     const h: u32 = if (open.height > 0) open.height else @max(p.metrics.cell_height_px, 1);
     return chrome.components.image_preview.place(anchor_rect, w, h, p);
 }
 
-/// 열린 프리뷰의 **테두리와 실패 안내**를 chrome ops에 싣는다. 픽셀은 `gpu_images`가 따로 싣는다
-/// (갤러리 §5.4 분업). 문구는 여기서 i18n에서 고른다 — 컴포넌트는 `ui.language`를 모른다.
-/// 열린 프리뷰의 **실패 안내 글자**만 chrome ops 에 싣는다. 배경·테두리는 `appendMarkerPreviewFrameQuads`
-/// 가 프레임 조립에서 그린다 — 이 조립부는 **매 프레임 돌지 않아** quad 를 넣으면 유지되지 않는다
-/// (위 주석의 사고). 글자는 chrome draws 의 생명주기를 따르므로 여기 남는다.
+/// 열린 프리뷰의 **실패 안내 글자**만 chrome ops 에 싣는다. 문구는 여기서 i18n에서 고른다 — 컴포넌트는
+/// `ui.language`를 모른다. 배경·테두리는 `appendMarkerPreviewFrameQuads` 가 프레임 조립에서 그린다 — 이
+/// 조립부는 **매 프레임 돌지 않아** quad 를 넣으면 유지되지 않는다(위 주석의 사고). 글자는 chrome draws 의
+/// 생명주기를 따르므로 여기 남는다. 이 ops 에 상자를 다시 넣으면 그 칸들이 테두리를 덮는다(`image_preview.view`).
 pub fn collectMarkerPreviewDraws(
     self: *AppSession,
     arena: std.mem.Allocator,
@@ -457,14 +462,11 @@ pub fn collectMarkerPreviewDraws(
     if (!open.failed) return; // 안내가 필요한 경우는 「못 풀었다」 하나뿐이다
     const target = markerPreviewTarget(self) orelse return;
     const place = markerPreviewPlacement(self, target, open) orelse return;
-    const p = chrome.props.ChromeProps{ .metrics = self.buildCellMetrics() };
-    const tk = self.buildChromeTokens();
     var ops: std.ArrayList(chrome.draw.Op) = .empty;
     try chrome.components.image_preview.view(
         place,
         maru.i18n.t(.app_marker_preview_undecodable),
-        p,
-        &tk,
+        self.buildChromeProps(),
         arena,
         &ops,
     );

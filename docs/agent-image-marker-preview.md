@@ -47,7 +47,12 @@ provider는 갤러리와 같은 **Codex와 Claude Code 둘**이다. 둘 다 입�
 
 그래서 프리뷰는 **갤러리와 같은 이미지 채널**로 그린다. `MaruAppHostGpuImage`는 셀이 아니라 픽셀 사각형 +
 UV 크롭 + z이므로(갤러리 §5.4) 터미널 위에 떠 있는 그림이 자연스럽게 표현된다. `chrome/draw.zig`의 `Op`에
-image를 **추가하지 않는다** — 갤러리가 정한 "chrome이 테두리·라벨, `gpu_images`가 픽셀" 분업을 따른다.
+image를 **추가하지 않는다** — 갤러리가 정한 "테두리·라벨은 따로, `gpu_images`가 픽셀" 분업을 따른다. 프리뷰의 액자(뒤판·테두리
+넷)는 그림과 같은 프레임 자리에서 GPU quad 로 내고(`marker_preview_view.appendMarkerPreviewFrameQuads`), chrome `Op` 는
+디코드 실패 안내 글자만이다(`image_preview.view`). 안내 ops 에 상자를 다시 넣으면 그 직각 quad 가 오버레이 셀 배경이 되고,
+렌더러는 오버레이 셀을 테두리 quad **뒤에** 그리므로 칸들이 테두리를 덮는다(2026-10-14 — 실패한 프리뷰에 오른쪽 변만
+남았다). 같은 이유로 안내 글자는 테두리 안쪽에서 잘리고(`.clip`), 크기를 모르는 상자의 대체 폭은 안내가 들어가는 폭보다
+좁지 않다(한국어 안내 27칸 > 옛 24칸).
 
 z는 **셀 패스 뒤**(`z ≥ 0`)다. 텍스트 앞에 떠야 가리는 것이 보인다.
 
@@ -682,9 +687,10 @@ P1이 독립적인 것이 이 순서의 요점이다 — 트랜스크립트·훅
 | 화면 마커 스캔(셀 열까지) | `session/agent_image_markers.zig` |
 | **전송 후 매핑**(`Hit.marker_n` — 이미지를 찾은 줄에서만 긁는다) | `session/agent_image_index.zig` |
 | 앵커 팝업 기하 **공유 프리미티브** | `chrome/components/popup_box.zig` |
-| 팝오버 자리·크기·테두리 | `chrome/components/image_preview.zig` |
+| 팝오버 자리·크기·테두리 두께·실패 안내 글자 | `chrome/components/image_preview.zig` |
 | surface별 스테이징·관찰·토글 | `platform/macos/app_session/marker_preview.zig` |
-| 붙여넣기·드롭 훅·클릭 토글·디코드 펌프·GPU 이미지·테두리 quad | `platform/macos/app_session.zig` |
+| 붙여넣기·드롭 훅·클릭 토글·디코드 펌프 | `platform/macos/app_session.zig` |
+| GPU 이미지·액자 quad(뒤판·테두리)·실패 안내 조립 | `platform/macos/app_session/marker_preview_view.zig` |
 | raw 파일 디코드 잡 | `platform/macos/agent_image_decode_backend.zig` (`submitRawFile`) |
 
 | 축 | 상태 |

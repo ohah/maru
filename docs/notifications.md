@@ -224,8 +224,8 @@ OSC 알림 제목에는 **발신 위치**(워크스페이스=탭, Term=surface/p
     ⌘G 로 이어 가던 검색도 함께 끝난다. 모달(메뉴·팔레트·세팅·메시지)은 열려 있으면 클릭을 먼저 가져가 종에 닿지 않고,
     메뉴 경로 액션은 `runAction` 의 `anyOverlayOpen` 가드가 막는다. 판정자 「알림 패널을 열면 모달이 아닌 다른 오버레이
     (찾기 바·참조 피커)를 내린다 …」.
-  - 이 계약 밖: 마커 이미지 프리뷰의 테두리·안내 상자(`collectMarkerPreviewDraws`)는 이 불변식에 들지 않아 패널과 함께
-    그려질 수 있다.
+  - 이 계약 밖: 마커 이미지 프리뷰의 실패 안내 글자(`collectMarkerPreviewDraws` — 액자는 프레임 조립의 GPU quad)는 이
+    불변식에 들지 않아 패널과 함께 그려질 수 있다.
 - **최소 높이**: 항목이 적어도 팝업이 납작하지 않게 `min_panel_rows`(8, 헤더 포함) baseline을 보장한다 — 헤더+카드는
   상단, 사이 여백은 패널 배경(클릭 무시 = `Hit.background`; 박스 '밖'만 닫기). 카드가 그보다 많으면 자연 높이(화면 cap)로
   커지므로 무영향(`layout` 단일 출처 — view·hitTest 공유). `scrollWindow`는 상단 sticky 헤더(`header_rows`)를 늘 예약하고

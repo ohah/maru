@@ -545,10 +545,10 @@ var page_opened_pending: [16]u64 = @splat(0);
 var page_opened_next: usize = 0;
 /// 에이전트가 연 탭의 콘솔을 묶을 읽는 쪽(W9c① 3 회차 F1 — `consoleBirthReader`). 기록이 아직 없는 탭 — 에이전트 탭의 페이지가 연 새 탭
 /// 중 이어 받은 팝업이 아닌 것(`open_tab` — noopener 등)은 배치가 와야 기록이 생긴다 — 생기면 그 링을 묶는다. 빈 자리부터 쓰고, 다 찼으면
-/// 돌아가며 덮는다(덮인 탭은 확인 모달로 허락한 탭처럼 첫 읽기부터 본다 — 더 숨기는 쪽).
-const ConsoleBirth = struct { surface_id: u64 = 0, who: u64 = 0 };
+/// 가장 먼저 넣은 자리를 덮는다(덮인 탭은 확인 모달로 허락한 탭처럼 첫 읽기부터 본다 — 더 숨기는 쪽). `seq` 는 넣은 차례.
+const ConsoleBirth = struct { surface_id: u64 = 0, who: u64 = 0, seq: u64 = 0 };
 var console_birth_pending: [16]ConsoleBirth = @splat(.{});
-var console_birth_next: usize = 0;
+var console_birth_seq: u64 = 0;
 var hello_nonce: u64 = 0;
 var started_ms: i64 = 0;
 var failures: [restart_budget]?i64 = @splat(null);
@@ -2241,13 +2241,18 @@ pub fn notePageOpened(surface_id: u64) void {
 /// 페이지가 연 `open_tab` 새 탭 — 첫 배치 전) 기록이 생길 때 묶는다.
 pub fn consoleBirthReader(surface_id: u64, who: u64) void {
     if (surfaces.getPtr(surface_id)) |s| return s.console.latchAtBirth(who);
-    // 빈 자리(또는 쓴 자리)부터 — 돌아가며 덮기만 하면 다른 자리가 비어 있어도 아직 배치 전인 탭의 묶음을 잃었다(4 회차).
-    for (&console_birth_pending) |*b| if (b.surface_id == 0) {
-        b.* = .{ .surface_id = surface_id, .who = who };
-        return;
-    };
-    console_birth_pending[console_birth_next] = .{ .surface_id = surface_id, .who = who };
-    console_birth_next = (console_birth_next + 1) % console_birth_pending.len;
+    // 빈 자리(또는 쓴 자리)부터 — 돌아가며 덮기만 하면 다른 자리가 비어 있어도 아직 배치 전인 탭의 묶음을 잃었다(4 회차). 다 찼으면 가장
+    // 먼저 넣은 자리 — 빈 자리를 채울 때 돌림 차례를 옮기지 않아 가장 최근의 것을 덮을 수 있었다(5 회차 n3).
+    console_birth_seq += 1;
+    var slot = &console_birth_pending[0];
+    for (&console_birth_pending) |*b| {
+        if (b.surface_id == 0) {
+            slot = b;
+            break;
+        }
+        if (b.seq < slot.seq) slot = b;
+    }
+    slot.* = .{ .surface_id = surface_id, .who = who, .seq = console_birth_seq };
 }
 
 fn takeConsoleBirth(surface_id: u64) u64 {
@@ -3506,12 +3511,15 @@ fn dropPendingAdopt(gpa: std.mem.Allocator, id: u64) bool {
 
 /// 페이지가 닫은 팝업인데 그 탭을 닫지 않는다(그 pane 의 유일한 탭 — W6f②). 브라우저는 이미 없다 — 그 번호로 빈 보통 탭을 새로
 /// 만든다(`about:blank`). 그대로 두면 입력·크기·이동이 죽은 번호로 가고, sidecar 를 내리지 못하고, sidecar 가 다시 뜨면 닫힌 팝업이 처음
-/// 주소로 되살아났다(로그인 흐름의 첫 주소 — W6f② 적대 검증 2 차).
-pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64) void {
+/// 주소로 되살아났다(로그인 흐름의 첫 주소 — W6f② 적대 검증 2 차). `by_user` — 사용자가 고른 닫기의 끝이다(아니면 에이전트가 물은
+/// 닫기·페이지의 `window.close`).
+pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64, by_user: bool) void {
     const s = surfaces.getPtr(surface_id) orelse return;
     s.page_closed = false;
     s.popup_opener = 0; // 이제 보통 탭이다 — 나중에 닫혀도 옛 연 탭으로 가지 않는다
-    s.console.userDrove(); // W9c① 4 회차 D: 사용자가 쓰는 보통 탭이 된다 — 태어날 때의 콘솔 묶음을 푼다(첫 읽기 전이면)
+    // W9c① 4 회차 D: 사용자가 쓰는 보통 탭이 된다 — 태어날 때의 콘솔 묶음을 푼다(첫 읽기 전이면). 사용자가 고른 닫기일 때만(5 회차 n2) —
+    // 에이전트의 닫기·페이지 스스로의 닫기는 사용자가 몬 것이 아니다. 빈 탭을 사용자가 쓰기 시작하면(주소창 등) 그때 풀린다.
+    if (by_user) s.console.userDrove();
     s.page_opened = false; // W10c: 빈 다운로드 탭으로 닫지 않는다(사용자가 쓰는 보통 탭이다 — 적대 리뷰 2 회차)
     s.download_blank = false;
     s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
@@ -5473,7 +5481,7 @@ test "popups the sidecar made with a reserved id are adopted as tabs of their op
     state = .starting;
     try std.testing.expect(takePageClosed(101) and !takePageClosed(101));
     // 유일한 탭이라 남기면 그 번호로 빈 보통 탭을 새로 만든다 — 처음 주소로 되살아나지 않고, 옛 연 탭을 잊는다.
-    revivePageClosed(gpa, 101);
+    revivePageClosed(gpa, 101, false);
     const r = surfaces.getPtr(101).?;
     try std.testing.expect(!r.created and r.popup_opener == 0 and !r.page_closed);
     try std.testing.expectEqualStrings("about:blank", r.last_url.?);
@@ -6629,6 +6637,13 @@ test "W9c①: sidecar 의 콘솔 줄은 그 탭에 쌓인다 — 새 문서·오
         defer gpa.free(empty);
         try std.testing.expectEqualStrings("[]", empty);
     }
+    // 수준은 그대로 옮긴다 — info 는 info 다(CLI 가 `[info]` 로 보인다).
+    testApply(gpa, .{ .console_message = .{ .browser = 51, .level = .info, .text = "site-c info" } });
+    {
+        const info = try consoleRead(gpa, gpa, 51, 8, false);
+        defer gpa.free(info);
+        try std.testing.expectEqualStrings("[{\"level\":\"info\",\"text\":\"site-c info\"}]", info);
+    }
 }
 
 test "W9c① 3 회차 F1: 에이전트가 연 탭의 콘솔은 태어날 때 묶인다 — 기록이 있으면(`browser.open`·이어 받은 팝업) 곧, 없으면(에이전트 탭의 페이지가 연 `open_tab` 새 탭) 첫 배치가 기록을 만들 때" {
@@ -6663,23 +6678,32 @@ test "W9c① 3 회차 F1: 에이전트가 연 탭의 콘솔은 태어날 때 묶
     // 4 회차: 기다리는 자리는 빈 자리부터 — 돌아가며 덮기만 하면 다른 자리가 비어 있어도 아직 배치 전인 탭(100)의 묶음을 잃었다.
     defer {
         console_birth_pending = @splat(.{});
-        console_birth_next = 0;
+        console_birth_seq = 0;
     }
     for (0..console_birth_pending.len) |i| consoleBirthReader(100 + i, 7);
     for (1..console_birth_pending.len) |i| try std.testing.expectEqual(@as(u64, 7), takeConsoleBirth(100 + i));
     consoleBirthReader(200, 9);
     try std.testing.expectEqual(@as(u64, 7), takeConsoleBirth(100));
     try std.testing.expectEqual(@as(u64, 9), takeConsoleBirth(200));
+    // 5 회차 n3: 다 찼으면 가장 먼저 넣은 것을 덮는다 — 빈 자리를 채울 때 돌림 차례가 그대로라 방금 넣은 것(300)을 덮었다.
+    for (0..console_birth_pending.len) |i| consoleBirthReader(100 + i, 7);
+    try std.testing.expectEqual(@as(u64, 7), takeConsoleBirth(100));
+    consoleBirthReader(300, 8); // 빈 자리(100 의 것)에
+    consoleBirthReader(301, 9); // 다 찼다 — 가장 먼저 넣은 101 을 덮는다
+    try std.testing.expectEqual(@as(u64, 8), takeConsoleBirth(300));
+    try std.testing.expectEqual(@as(u64, 9), takeConsoleBirth(301));
+    try std.testing.expectEqual(@as(u64, 0), takeConsoleBirth(101));
+    for (2..console_birth_pending.len) |i| try std.testing.expectEqual(@as(u64, 7), takeConsoleBirth(100 + i));
 }
 
-test "W9c① 적대 리뷰 4 회차 재현 D: 에이전트가 연 탭을 첫 읽기 전에 사용자가 몰면(누름·키·주소창·뒤로·끌어 놓기·닫힌 팝업 되살리기) 태어날 때의 콘솔 묶음이 풀린다 — 에이전트의 입력·앱이 만든 입력·사용자의 hover·스크롤은 풀지 않는다" {
+test "W9c① 적대 리뷰 4 회차 재현 D: 에이전트가 연 탭을 첫 읽기 전에 사용자가 몰면(누름·키·주소창·뒤로·끌어 놓기·사용자가 고른 닫기 끝의 되살리기) 태어날 때의 콘솔 묶음이 풀린다 — 에이전트의 입력·앱이 만든 입력·사용자의 hover·스크롤·에이전트나 페이지의 닫기 끝의 되살리기는 풀지 않는다" {
     const gpa = std.testing.allocator;
     state = .running;
     test_record_sends = true;
     defer testTeardown(gpa);
-    try testSurfaces(gpa, &.{ 71, 72, 73, 74, 75, 76, 77 });
+    try testSurfaces(gpa, &.{ 71, 72, 73, 74, 75, 76, 77, 78 });
     const at: ws.message.Point = .{ .x = 3, .y = 4 };
-    for ([_]u64{ 71, 72, 73, 74, 75, 76, 77 }) |id| consoleBirthReader(id, 5);
+    for ([_]u64{ 71, 72, 73, 74, 75, 76, 77, 78 }) |id| consoleBirthReader(id, 5);
     // 71: 에이전트만 움직였다 — 에이전트의 op, 앱이 만든 입력, 사용자가 지켜보며 옮긴 포인터·휠.
     noteAgentInput(71);
     try std.testing.expect(sendAppInput(gpa, .{ .mouse = .{ .browser = 71, .kind = .down, .point = at, .click_count = 1 } }));
@@ -6707,17 +6731,21 @@ test "W9c① 적대 리뷰 4 회차 재현 D: 에이전트가 연 탭을 첫 읽
         defer gpa.free(got);
         try std.testing.expectEqualStrings("[{\"level\":\"log\",\"text\":\"news\"}]", got);
     }
-    // 그 밖에 사용자가 모는 길 — 키, 주소창, 뒤로·새로고침, 끌어 놓기, 닫힌 팝업이 보통 탭으로 되살아남.
+    // 그 밖에 사용자가 모는 길 — 키, 주소창, 뒤로·새로고침, 끌어 놓기, 사용자가 고른 닫기 끝에 보통 탭으로 되살아남.
     try std.testing.expect(sendInput(gpa, .{ .key = .{ .browser = 73, .kind = .char, .character = 'a', .unmodified_character = 'a' } }));
     noteUserNavigation(74);
     navAction(gpa, 75, .back);
     try std.testing.expect(dragEnter(gpa, 76, .{ .paths = &.{"/a"} }, at, .{}, 1));
-    revivePageClosed(gpa, 77);
+    revivePageClosed(gpa, 77, true);
     for ([_]u64{ 73, 74, 75, 76, 77 }) |id| {
         const c = &surfaces.getPtr(id).?.console;
         try std.testing.expectEqual(@as(u64, 0), c.latched);
         try std.testing.expect(!c.birth);
     }
+    // 5 회차 n2: 에이전트가 물은 닫기·페이지 스스로의 `window.close` 끝에 되살아난 빈 탭은 사용자가 몬 것이 아니다 — 묶음은 그대로.
+    revivePageClosed(gpa, 78, false);
+    try std.testing.expectEqual(@as(u64, 5), surfaces.getPtr(78).?.console.latched);
+    try std.testing.expect(surfaces.getPtr(78).?.console.birth);
     // 첫 읽기 뒤에는 사용자가 몰아도 묶음은 그대로다(그 전부터의 규칙 — 묶인 쪽은 그 뒤의 이동을 이어 본다).
     try std.testing.expect(sendInput(gpa, .{ .mouse = .{ .browser = 71, .kind = .down, .point = at, .click_count = 1 } }));
     try std.testing.expectEqual(@as(u64, 5), surfaces.getPtr(71).?.console.latched);
@@ -6739,7 +6767,7 @@ test "W9c① 적대 리뷰 4 회차 A: sidecar 가 실어 온 앞 문서의 버�
     {
         const got = try consoleRead(gpa, gpa, 81, 5, false);
         defer gpa.free(got);
-        try std.testing.expectEqualStrings("[{\"level\":\"maru\",\"text\":\"15 console messages from the previous page were dropped (lines from origins the tab had just left): they came faster than maru keeps\"},{\"level\":\"log\",\"text\":\"widget boot\"},{\"level\":\"log\",\"text\":\"page\"}]", got);
+        try std.testing.expectEqualStrings("[{\"level\":\"maru\",\"text\":\"15 console messages from pages or origins this tab had just left were dropped: they came faster than maru keeps\"},{\"level\":\"log\",\"text\":\"widget boot\"},{\"level\":\"log\",\"text\":\"page\"}]", got);
     }
     {
         const got = try consoleRead(gpa, gpa, 82, 5, false);

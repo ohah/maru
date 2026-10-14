@@ -13745,6 +13745,8 @@ test "W9c①: 읽는 쪽 — grant 는 그 번호, cap 은 nonce 의 해시(겹�
     const g: ExecutionProvenance = .{ .pane_grant = .{ .pane = 5, .target = 9, .scope = .browser, .id = 7 } };
     try std.testing.expectEqual(@as(u64, 7), consoleAuthorizer(g));
     try std.testing.expectEqual(@as(u64, 0), consoleAuthorizer(.{ .pane_grant = .{ .pane = 5, .target = 9, .scope = .browser } }));
+    // 맨 위 비트는 cap 의 것이다 — grant 번호에 그 비트가 서도(실제로는 1 부터 하나씩이라 닿지 않는다) cap 읽는 쪽과 겹치지 않게 지운다.
+    try std.testing.expectEqual(@as(u64, 7), consoleAuthorizer(.{ .pane_grant = .{ .pane = 5, .target = 9, .scope = .browser, .id = console_cap_bit | 7 } }));
     const c1 = consoleAuthorizer(.{ .capability = .{ .nonce = n1, .generation = 0 } });
     try std.testing.expect(c1 >> 63 == 1);
     try std.testing.expectEqual(c1, consoleAuthorizer(.{ .capability = .{ .nonce = n1, .generation = 4 } })); // 같은 cap

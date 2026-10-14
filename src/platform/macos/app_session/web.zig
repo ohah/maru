@@ -1329,7 +1329,7 @@ pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.Clo
                     // W9b③: 에이전트가 물은 닫기는 창·앱 닫기로 번지지 않는다(묻는 사이 창의 유일한 탭이 됐다) — 빈 탭으로 둔다.
                     if (web_osr.closeAskedByAgent(surface_id)) {
                         if (outcome == .closed and !web_osr.browserLive(surface_id)) {
-                            web_osr.revivePageClosed(self.allocator, surface_id);
+                            web_osr.revivePageClosed(self.allocator, surface_id, false); // 에이전트의 닫기 — 콘솔 묶음을 풀지 않는다(W9c① 5 회차 n2)
                         } else if (outcome == .closed) web_osr.settleClosedPark(self.allocator, surface_id);
                         setWebNavState(self, surface_id, false, false, "");
                         return;
@@ -1340,7 +1340,7 @@ pub fn osrCloseAskedTab(self: *AppSession, surface_id: u64, outcome: web_osr.Clo
                         // 1 회차). 그 탭은 이미 빈 페이지다 — 보이는 주소·뒤로 상태를 지운다(뒤따르는 `url_changed`·`nav_state` 가 다시
                         // 채울 수 있다 — Chromium 기록에는 앞 페이지가 남는다).
                         if (outcome == .closed and !web_osr.browserLive(surface_id)) {
-                            web_osr.revivePageClosed(self.allocator, surface_id);
+                            web_osr.revivePageClosed(self.allocator, surface_id, true); // 사용자가 고른 닫기
                             setWebNavState(self, surface_id, false, false, "");
                         } else if (outcome == .closed) {
                             web_osr.settleClosedPark(self.allocator, surface_id);
@@ -1387,7 +1387,7 @@ pub fn osrClosePageClosedTab(self: *AppSession, surface_id: u64) void {
                         replaceKeptTab(self, tab_index, pane, index);
                         return;
                     }
-                    web_osr.revivePageClosed(self.allocator, surface_id);
+                    web_osr.revivePageClosed(self.allocator, surface_id, false); // 페이지 스스로의 닫기 — 콘솔 묶음을 풀지 않는다(W9c① 5 회차 n2)
                     setWebNavState(self, surface_id, false, false, ""); // 팝업의 주소·뒤로 상태를 지운다(새 빈 탭)
                     if (std.c.getenv("MARU_WEB_OSR_TEST_INPUT") != null) std.debug.print("osr-test newtab page-closed revived\n", .{});
                     return;

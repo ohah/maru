@@ -584,8 +584,9 @@ fn paletteHexX(grid: draw.Rect, cw: u32) i32 {
 }
 
 /// control 열 안의 toggle rect — **좌측정렬**(ctrl 좌단). 입력 박스(전체)·dropdown(좌단 text)과 같은 시작 x라
-/// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유. 폭은 그려지는 위젯
-/// 전체 — 셀 갈래(base) 트랙 `[  ]`(4*cw)이 pill(width(ch))보다 넓을 수 있어 둘 중 큰 쪽(클릭=보이는 위젯, 리뷰 #823).
+/// 세 위젯의 control 열 left edge가 일관된다(text 위젯 전환 후 정렬 통일). hit-test/view 공유. 폭 `@max(pill, 4*cw)`의
+/// 근거는 옛 tui 룩(2026-08-19 제거)의 셀 트랙 `[  ]`(4*cw)이 pill(width(ch))보다 넓었던 것이다(클릭=보이는 위젯, 리뷰 #823).
+/// 그 갈래는 지웠고, 지금은 늘 pill이 그려지므로 이 식은 클릭 영역(hitTest = rect)을 pill보다 몇 px 넓히는 효과만 남았다.
 fn toggleRectIn(ctrl: draw.Rect, ch: u32, cw: u32) draw.Rect {
     return .{ .x = ctrl.x, .y = ctrl.y, .w = @max(toggle.width(ch), 4 * cw), .h = ch };
 }
@@ -734,7 +735,7 @@ pub fn view(
         switch (r.kind) {
             .toggle => |v| {
                 var ts = toggle.State{ .value = v };
-                try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), box.cw, tk, arena, out);
+                try toggle.view(&ts, toggleRectIn(ctrl, box.ch, box.cw), arena, out);
             },
             .number => |s| {
                 // 숫자 입력 박스(슬라이더/프로그레스바 대체 — 사용자 요청). 편집 중인 선택 행이면 편집 버퍼 + caret,
@@ -1567,7 +1568,7 @@ test "settings handle: 검색 중 열린 드롭다운이 ↑↓를 먼저 잡는
     try std.testing.expect(s.searching); // 검색 유지(드롭다운만 닫힘)
 }
 
-test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob text)+number 행(입력 박스 값 text)" {
+test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(pill+knob quad)+number 행(입력 박스 quad + 값 text)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1584,21 +1585,23 @@ test "settings view: 닫힘=0 ops, 열림=frame+제목+toggle 행(트랙+knob te
         .{ .label = "Font size", .kind = .{ .number = .{ .value = 512, .min = 1, .max = 512 } } }, // 입력 박스 렌더
     };
     try view(&s, no_sections, &rows, no_items, test_props, &tk, arena, &out);
-    // base(border 0): 위젯이 모두 셀 정렬 text(quad 아님). frame(quad)=1, 제목=1, 검색힌트=1.
-    // 행0(선택 fill + label + toggle 트랙 text + knob text)=4. 행1(label + 입력 박스 값 text)=2. 마지막=내비 힌트 1줄.
+    // frame(quad)=1, 제목=1, 검색힌트=1. 행0(선택 fill + label + toggle pill quad + knob quad)=4.
+    // 행1(label + 입력 박스 quad + 값 text)=3. 마지막=내비 힌트 1줄.
     try std.testing.expect(out.items[0] == .quad); // 박스 bg
     try std.testing.expect(out.items[1] == .text); // 제목
     // 문구를 박지 않는다 — 힌트가 이제 키를 거치므로 언어가 바뀌면 이 단언만 옛 것을 잰다.
     try std.testing.expectEqualStrings(i18n.t(.set_search_hint), out.items[2].text.runs[0].text);
     try std.testing.expect(out.items[3] == .fill); // 행0 선택 하이라이트(셀 bg)
     try std.testing.expectEqualStrings("Cursor blink", out.items[4].text.runs[0].text);
-    try std.testing.expect(out.items[5] == .text); // toggle 트랙(muted) — quad 아님
-    try std.testing.expectEqual(tokens.ColorRole.muted_fg, out.items[5].text.role);
-    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[6].text.role); // toggle knob on(앰버)
-    // 행1(number 입력 박스, base=border 0 → 값 text만): 라벨 + 현재 값 "512"(surface_fg). 슬라이더 트랙/채움 없음.
+    try std.testing.expect(out.items[5] == .quad); // toggle pill — on 이라 앰버
+    try std.testing.expectEqual(tokens.ColorRole.accent_bar, out.items[5].quad.fill_role);
+    try std.testing.expect(out.items[6] == .quad); // toggle knob
+    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[6].quad.fill_role);
+    // 행1(number 입력 박스): 라벨 + 박스 quad + 현재 값 "512"(surface_fg). 슬라이더 트랙/채움 없음.
     try std.testing.expectEqualStrings("Font size", out.items[7].text.runs[0].text);
-    try std.testing.expectEqualStrings("512", out.items[8].text.runs[0].text); // 입력 박스 안 현재 값
-    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[8].text.role);
+    try std.testing.expect(out.items[8] == .quad); // 입력 박스(편집 아님 → 테두리 muted_fg)
+    try std.testing.expectEqualStrings("512", out.items[9].text.runs[0].text); // 입력 박스 안 현재 값
+    try std.testing.expectEqual(tokens.ColorRole.surface_fg, out.items[9].text.role);
     // 마지막: 화살표 내비 힌트 한 줄(muted) — 옛 "⇥ 섹션 ⇄ 설정" Tab 힌트 대체.
     const hint = out.items[out.items.len - 1];
     try std.testing.expect(hint == .text);

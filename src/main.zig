@@ -4903,8 +4903,7 @@ const ScmDockInputs = struct {
 /// Windows 경로의 도크 뷰 바 격자. **scale 은 이 파일의 `dock_layout.compute` 와 같은 1000 고정**이다 —
 /// 여기만 다른 값을 쓰면 그린 자리와 기하가 갈린다. 이 경로가 DPI 를 다루게 되면 두 자리를 함께 옮긴다.
 fn winDockViewBarGrid(tk: *const maru.chrome.Tokens, cell_w: u32) maru.chrome.components.dock_view_bar.Grid {
-    const pt = tk.space.dock_view_slot_width_pt;
-    const slot_px = if (pt > 0) maru.session.layout_math.ptToPx(pt, 1000) else 0;
+    const slot_px = maru.session.layout_math.ptToPx(tk.space.dock_view_slot_width_pt, 1000);
     return maru.chrome.components.dock_view_bar.Grid.init(cell_w, slot_px);
 }
 

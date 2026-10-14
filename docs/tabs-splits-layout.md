@@ -227,10 +227,12 @@ Node = leaf(Pane)
   죽으면** 마지막은 reap하지 않고 세션 종료(창 닫힘) latch가 맡는다(빈 세션을 만들지 않음). **이 reap은 검증된
   자식 종료(`.exited`)에만 일어난다** — `.read_error`(자식 생존 미검증 PTY I/O 오류)는 이 cascade를 타지 않아 산 셸이
   달린 탭이 유지된다(`terminationClosesWorkspace` 게이트; 단일 출처: `pty-operating-model.md` "read_error vs 검증된 exit").
-- **per-pane 탭 바 렌더(PR-C)**: 각 pane(leaf rect) 상단에 가로 탭 바 strip(높이 = cell 1칸)을 예약하고 그
-  아래를 `PaneGeometry.body`로 쓰고 window padding을 inset한 `.grid`를 셀 그리드 영역으로 쓴다(`paneGeometry`가
-  단일 출처이고 `paneBarRect`/`paneTermRect`는 accessor — 좌표·resize·split·렌더가 공유). 바는
-  터미널 셀 스트림에 origin 박힌 셀로 그려진다(`metal_frame.replace`의 `pane_chrome_cells`, 렌더러·ABI 무변경).
+- **per-pane 탭 바 렌더(PR-C)**: 각 pane(leaf rect) 상단에 가로 탭 바 strip(높이 = `chromeBarHeightPx` — 폰트 독립
+  token `space.bar_height_pt`, rich 40pt)을 예약하고 그 아래를 `PaneGeometry.body`로 쓰고 window padding을 inset한
+  `.grid`를 셀 그리드 영역으로 쓴다(`paneGeometry`가 단일 출처이고 `paneBarRect`/`paneTermRect`는 accessor —
+  좌표·resize·split·렌더가 공유). 바 배경·활성 탭은 layer 2 GpuQuad다(`appendBarBgQuad`·`tab_ops.appendActiveTabHighlight`).
+  PR-C 당시(높이 = cell 1칸)와 옛 tui 룩(2026-08-19 제거)은 바를 터미널 셀 스트림에 origin 박힌 셀로 그렸다
+  (`metal_frame.replace`의 `pane_chrome_cells` — `paneBarBgCell`·`tabbarHighlightCell`); 그 경로는 지웠다.
   **PR-C1**: 바 배경만(활성 강조색·비활성 chrome 색). **PR-C2**: Term 제목 glyph를 탭으로. **PR-D**: 호버 ✕·활성
   하이라이트·클릭. **PR-E**: 탭 드래그(pane 내/간). **PR-F**: "+" 버튼.
   - **활성 탭 룩(rich, U-tab2 — 연결형 cutout)**: 활성 Term 탭은 **터미널 본문색(`theme.background`)** 으로 채워 strip
@@ -317,11 +319,11 @@ Term(가로 탭)뿐 아니라 **Pane 통째**를 사이드바(워크스페이스
   글리프 중앙(`cols/2`) + 우패딩으로 글리프가 좌단·divider에 안 붙게)을 잡으면 Pane 통째 드래그, **Term 탭**을 잡으면 기존대로
   Term 1개 드래그(④)로 갈린다. ⠿를 **항상 표시**하는 이유(사용자 피드백): pane→워크스페이스 분리 드래그는 **Warp에 없는 maru
   기능**이라 손잡이를 늘 보여야 발견성이 유지된다(한때 Warp 벤치마킹으로 hover-only로 숨겼으나 — Warp는 grip 없는 모델이라
-  부적합 — 되돌렸다). **호버 시 커서는 openHand(`CursorKind.grab`)** 로 바뀐다. 바 세로 패딩(`tab_bar_pad_y_px`)은 rich에서
-  8px이지만, **rich에서 바 높이는 `cell + 2*pad`가 아니다** — 도크 뷰 스위처와 경계선을 맞추려고 폰트 독립 token
-  (`space.bar_height_pt`, rich 40pt)이 높이를 정하고 pad는 텍스트 여백 의미만 남기 때문이다(단일 출처 `chromeBarHeightPx`,
-  [file-explorer.md](file-explorer.md) §3.5). token이 0일 때만(기반 토큰 `Tokens.base` — 옛 tui 룩. 제품 `buildChromeTokens`는 늘 rich라 닿지 않는다) 셀 파생(`cell + 2*pad`)으로 떨어진다. 그래서 바 안 텍스트의
-  세로 오프셋도 pad가 아니라 실제 바 높이에서 파생한다(`chromeBarTextOffsetY`). **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
+  부적합 — 되돌렸다). **호버 시 커서는 openHand(`CursorKind.grab`)** 로 바뀐다. 바 높이는 도크 뷰 스위처와 경계선을 맞추려고
+  폰트 독립 token(`space.bar_height_pt`, rich 40pt)이 정한다(단일 출처 `chromeBarHeightPx` = `ptToPx(bar_height_pt)`, 0이면
+  바 없음 — [file-explorer.md](file-explorer.md) §3.5). 옛 tui 룩(2026-08-19 제거)은 token 0을 셀 파생(`cell + 2*tab_bar_pad_y_px`)
+  으로 읽었다 — 그 갈래와 세로 패딩 토큰 `tab_bar_pad_y_px`는 지웠다. 바 안 텍스트의 세로 오프셋은 실제 바 높이에서
+  파생한다(`chromeBarTextOffsetY`). **라벨 세그먼트만으로는 부족**하다(custom_name 없는 pane은 라벨 폭이
   0이라 잡을 자리가 없다 — `paneLabelCols`) → grip을 **이름 유무와 무관하게 항상 예약**해 모든 pane이 끌리게 한다(사용자
   결정). custom_name이 있으면 grip 뒤에 이름이 붙는다(`paneBar`가 `grip_cols`+`label_cols`로 탭 영역을 우측 offset). 같은
   탭바에서 "잡는 자리"로만 단위를 구분하므로 새 chrome가 필요 없다(`tab_drag_*`와 분리된 `pane_drag_*` arm; 좁은 바는 탭

@@ -2,7 +2,7 @@
 //! 셸(settings.State)이 소유하고, 컴포넌트는 control rect + 표시 문자열 + 편집 여부만 받아 **테두리 박스 + 텍스트 +
 //! (편집 중) 끝 caret**을 그린다. 슬라이더(진행 막대)를 대체해 사용자가 수치를 직접 타이핑한다(사용자 요청 —
 //! 프로그레스바 대신 인풋박스). 커밋 시 파싱·범위 clamp는 platform이 한다(schema.setNumber). 테두리는 dropdown 팝업·
-//! color 위젯과 같은 quad 규율(border_width>0이면 quad 테두리; 0이면 텍스트만 — 기반 토큰(base)의 셀 lowering 번짐 회피). caret은 표시폭 끝
+//! color 위젯과 같은 quad 규율(늘 quad 박스 — 옛 tui 룩[2026-08-19 제거]의 border 0 → 텍스트만 갈래는 지웠다). caret은 표시폭 끝
 //! 셀에 cursor fill 1칸(인라인 편집·palette caret 패턴). 단일 출처: docs/config-gui.md §2·§6, docs/chrome-strategy.md §5.4.
 
 const std = @import("std");
@@ -17,8 +17,8 @@ pub fn width(row_height_px: u32) u32 {
 }
 
 /// 입력 박스를 그린다. rect=control 열(박스 경계), text=표시 문자열(비편집=현재값, 편집=편집 버퍼), editing=편집 중,
-/// disabled=회색(프리셋 잠금 등). cw/ch=셀 픽셀(caret 크기·좌패딩). corner_radius/border_width>0이면 quad 테두리
-/// (편집 중=focus_accent, 아니면 muted_fg). 텍스트는 좌패딩 1칸 좌측정렬. 순수: 인자만 읽는다. ops/runs는 호출자
+/// disabled=회색(프리셋 잠금 등). cw/ch=셀 픽셀(caret 크기·좌패딩). 박스는 늘 quad(corner_radius/border_width를 그대로
+/// 싣는다 — 테두리 편집 중=focus_accent, 아니면 muted_fg). 텍스트는 좌패딩 1칸 좌측정렬. 순수: 인자만 읽는다. ops/runs는 호출자
 /// frame arena 소유. 0폭/0높이면 무동작.
 pub fn view(
     rect: draw.Rect,
@@ -51,17 +51,16 @@ pub fn viewCaretAt(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (rect.w == 0 or rect.h == 0) return;
-    // 테두리 박스(rich) — 편집 중이면 focus_accent로 강조해 "지금 입력 중"을 보인다. base(border 0)는 텍스트만.
-    if (border_width_px > 0) {
-        const border_role: tokens.ColorRole = if (editing) .focus_accent else .muted_fg;
-        try out.append(arena, .{ .quad = .{
-            .rect = rect,
-            .fill_role = .surface_bg,
-            .corner_radii = .{ corner_radius_px, corner_radius_px, corner_radius_px, corner_radius_px },
-            .border_widths = .{ border_width_px, border_width_px, border_width_px, border_width_px },
-            .border_role = border_role,
-        } });
-    }
+    // 테두리 박스 — 편집 중이면 focus_accent로 강조해 "지금 입력 중"을 보인다(옛 tui 룩[2026-08-19 제거]의 border 0 →
+    // 텍스트만 갈래는 지웠다 — 제품 호출자는 rich shape[border 1]를 넘긴다).
+    const border_role: tokens.ColorRole = if (editing) .focus_accent else .muted_fg;
+    try out.append(arena, .{ .quad = .{
+        .rect = rect,
+        .fill_role = .surface_bg,
+        .corner_radii = .{ corner_radius_px, corner_radius_px, corner_radius_px, corner_radius_px },
+        .border_widths = .{ border_width_px, border_width_px, border_width_px, border_width_px },
+        .border_role = border_role,
+    } });
     const tx = rect.x + @as(i32, @intCast(cw)); // 좌패딩 1칸
     if (text.len > 0) {
         const role: tokens.ColorRole = if (editing) .accent_bar else if (disabled) .muted_fg else .surface_fg;
@@ -127,7 +126,7 @@ test "input_box view: 편집 = focus 테두리 + accent 텍스트 + 끝 caret(cu
     try std.testing.expectEqual(@as(i32, 132), out.items[2].fill.rect.x);
 }
 
-test "input_box view: 빈 값 편집 = 박스 + caret만(텍스트 op 없음), border 0=텍스트만" {
+test "input_box view: 빈 값 편집 = 박스 + caret만(텍스트 op 없음)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -138,12 +137,6 @@ test "input_box view: 빈 값 편집 = 박스 + caret만(텍스트 op 없음), b
     try std.testing.expectEqual(@as(usize, 2), out.items.len);
     try std.testing.expect(out.items[0] == .quad);
     try std.testing.expect(out.items[1] == .fill); // caret
-
-    // border_width 0(base) 비편집 = 텍스트 op 1개만(테두리 quad 없음).
-    out.clearRetainingCapacity();
-    try view(test_rect, "80", false, false, 8, 16, 0, 0, arena, &out);
-    try std.testing.expectEqual(@as(usize, 1), out.items.len);
-    try std.testing.expect(out.items[0] == .text);
 
     // 0폭 → 무동작.
     out.clearRetainingCapacity();

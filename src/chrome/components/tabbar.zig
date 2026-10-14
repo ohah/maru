@@ -1,9 +1,9 @@
 //! Tabbar — pane 탭 바의 컬럼 분할 hit-test. chrome **마우스 hit-test 컴포넌트**(divider/sidebar 동형 — State 없는
 //! 순수 함수). 바를 [탭 영역(tab_cols) | "+" zone]으로 나눠 탭 인덱스·✕(닫기)·"+"(새 Term) zone을 판정한다(옛
 //! app_session BarMetrics 수학 이전 — 호출처가 `m.tabIndex(...)`를 그대로 쓰도록 Metrics **메서드**로 둔다). 탭
-//! 전환/닫기/새 Term/드래그·드롭·제목 glyph·라이브 `*Pane`은 platform이 든다(§6). 활성 탭 강조 **밴드는 platform이
-//! 단일 셀로 직접** 그린다(`tabbarHighlightCell`) — 밴드가 한 칸이라 chrome ChromeDraw→cell round-trip이 무의미하기
-//! 때문(C3a 리뷰 §3 반영; divider/sidebar의 다중 op view와 달리 tabbar는 hit-test만 chrome). host가 `Metrics`를
+//! 전환/닫기/새 Term/드래그·드롭·제목 glyph·라이브 `*Pane`은 platform이 든다(§6). 활성 탭 강조는 **platform이 layer 2
+//! quad로 직접** 그린다(`tab_ops.appendActiveTabHighlight`, `segOf` 픽셀 경계) — divider/sidebar의 다중 op view와 달리
+//! tabbar는 hit-test만 chrome이다(C3a 리뷰 §3; 옛 tui 룩[2026-08-19 제거]의 단일 셀 밴드 `tabbarHighlightCell`은 지웠다). host가 `Metrics`를
 //! platform에서 변환 주입하고, 제목/✕/+ glyph·활성 밴드는 platform이 같은 분할로 그려 "보이는 탭/✕/+ == 클릭되는 것".
 //! 단일 출처: docs/chrome-strategy.md §5.4, docs/layering-and-portability.md §5(C3b).
 
@@ -47,8 +47,8 @@ pub const Metrics = struct {
         return segCols(tab_index, self.tab_w, self.tab_cols, self.scroll_cols).end;
     }
 
-    /// 탭 하나의 **경계 단일 소스**(§6) — hit-test(tabIndex·inCloseZone)와 platform 활성 밴드(tabbarHighlightCell)가
-    /// 이 한 함수를 공유한다. 제목·✕·+ glyph(buildPaneTabBarDrawList)는 아직 셀-열을 직접 계산하며 다음 단계에서
+    /// 탭 하나의 **경계 단일 소스**(§6) — hit-test(tabIndex·inCloseZone)와 platform 활성 탭 강조
+    /// (`tab_ops.appendActiveTabHighlight` quad)가 이 한 함수를 공유한다. 제목·✕·+ glyph(buildPaneTabBarDrawList)는 아직 셀-열을 직접 계산하며 다음 단계에서
     /// segOf로 옮겨 "보이는 탭/✕ == 클릭되는 것"을 완성한다(그 전까진 둘 다 셀-열이라 우연히 일치). 셀 경계
     /// (start_col/end_col, 반열림)는 셀 밴드·제목 그리기용, 픽셀([start_px, end_px))는 hit-test용. close_*는 ✕(닫기)
     /// zone(우측 2칸). tab_w<2면 ✕ 없음(has_close=false), end_col<=start_col이면 overflow(안 보이는) 탭. bar_x 기준 절대 px.

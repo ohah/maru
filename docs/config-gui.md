@@ -116,16 +116,15 @@ neutral chrome 위젯이 그걸 그린다. 위젯 종류는 **타입 + `Meta.wid
 > 핵심 리스크 2개: **color picker**(2차 HSV는 색공간 수학·2D 그리드 — 1차는 16색+hex로 우회) + **pointer
 > 이벤트가 host에 아직 없음**(§3 CS-4-0이 선결). 나머지는 기존 패턴 변형이라 낮음.
 
-### 6.1 위젯 렌더 — rich(GPU quad) vs 기반 토큰(셀 정렬 text)
+### 6.1 위젯 렌더 — GPU quad(옛 셀 정렬 text 갈래는 제거)
 
-위젯 view는 `tokens.space.corner_radius_px`로 두 갈래를 분기한다(테마는 위젯 불변, [chrome-strategy.md] §5.4). 제품 토큰은 `Tokens.rich`(`corner_radius_px = 8`) 하나라 **제품 화면은 늘 rich 갈래**다. 0 갈래는 옛 tui 룩(2026-08-19 제거)의 것이고, 지금은 radius 0 토큰(기반 토큰 `Tokens.base`와 같은 모양)으로 셀 lowering을 보는 테스트에서만 닿는다:
+위젯은 GPU `ChromeDraw.quad`(SDF)로 그린다 — 둥근 pill·원형 knob·테두리 박스·그림자 등 sub-pixel(테마는 위젯 불변, [chrome-strategy.md] §5.4). 토글=pill quad + knob quad, **숫자 입력 박스=테두리 quad + 값 text**(호출자가 넘긴 `corner_radius_px`·`border_width_px`를 그대로 싣는다), dropdown 축소=`값 ▾` text. control 열 좌단 정렬.
 
-- **rich(>0)**: GPU `ChromeDraw.quad`(SDF) — 둥근 pill·원형 knob·얇은 트랙·그림자 등 sub-pixel.
-- **0(기반 토큰 — 테스트만)**: **셀 정렬 text**(`Op.text`). 토글 `[█ ]`/`[ █]`(knob=`█`, 켜짐=accent_bar 우/꺼짐=surface_fg 좌), **숫자 입력 박스=값 text만**(border 0이라 테두리 quad 생략), dropdown 축소=`값 ▾`. control 열 좌단 정렬.
+옛 tui 룩(2026-08-19 제거) 때는 `tokens.space.corner_radius_px`가 0인 토큰에서 **셀 정렬 text** 갈래(`Op.text`)를 썼다 — 토글 `[█ ]`/`[ █]`(knob=`█`), 숫자 입력 박스=값 text만(border 0이라 테두리 quad 생략). 제품 토큰은 `Tokens.rich` 하나라 그 갈래(토글의 text 스위치, 입력 박스의 `border_width_px > 0` 가드)와 `toggle.view`의 `cw`·`tk` 인자를 지웠다. 토글 rect 폭 `@max(pill, 4*cw)`(`toggleRectIn`)는 그 셀 트랙의 흔적으로 남아, 지금은 클릭 영역을 pill보다 몇 px 넓히는 효과만 낸다.
 
   **드롭다운 팝업의 불투명 렌더(중요)**: 팝업은 설정 폼과 **같은 modal 레이어**의 셀 그리드라, `context_menu`(다른 레이어=터미널 위)처럼 그냥 quad로 덮으면 안 된다 — 모달 셀 lowering은 `.fill`이 셀 **배경만** 칠하고 **글리프는 안 지우며**, rich는 배경이 `surface_bg`인 셀을 투명화한다. 그래서 뒤 폼 텍스트가 팝업 뒤로 비친다. 해결: 팝업 각 행을 (1) `surface_bg`가 **아닌** 배경(`tab_hover_bg`/선택=`tab_active_bg`)으로 칠해 투명화 pass를 피하고, (2) 항목 텍스트를 **박스 폭까지 공백 패딩**해 그 행 모든 셀에 글리프를 놓아 뒤 폼 글리프를 덮는다(`dropdown.viewPopup`).
 
-  **결정 근거**(옛 tui 룩 때의 결정): 셀 lowering은 둥글지 않은 quad를 `paintRectBg`로 **셀 단위** 배경에 칠한다. 위젯을 quad로 두면 (1) 얇은 트랙(높이 h/4)이 `@divTrunc`로 r0==r1이 돼 사라지고, (2) 행 높이 채움이 셀 경계에서 위아래로 번지며, (3) 선택 하이라이트(셀 bg)와 같은 레이어라 서로 덮어 거칠게 겹쳤다(겹침·가림 회귀). text는 placeText가 셀 정렬로 놓고 **text 레이어**(셀 bg 위)라 선택 하이라이트 위에 또렷하다(dropdown·palette 행과 동형). `█`(U+2588)는 합성 글리프라 폰트 무관 렌더. 위젯 view에 `cw`(셀 폭)를 넘겨 0 갈래의 text 칸/오프셋을 계산한다.
+  **옛 셀 text 갈래의 결정 근거**(옛 tui 룩 때의 결정 — 갈래는 지웠다): 셀 lowering은 둥글지 않은 quad를 `paintRectBg`로 **셀 단위** 배경에 칠했다. 위젯을 quad로 두면 (1) 얇은 트랙(높이 h/4)이 `@divTrunc`로 r0==r1이 돼 사라지고, (2) 행 높이 채움이 셀 경계에서 위아래로 번지며, (3) 선택 하이라이트(셀 bg)와 같은 레이어라 서로 덮어 거칠게 겹쳤다(겹침·가림 회귀). text는 placeText가 셀 정렬로 놓고 **text 레이어**(셀 bg 위)라 선택 하이라이트 위에 또렷했다(dropdown·palette 행과 동형). `█`(U+2588)는 합성 글리프라 폰트 무관 렌더였고, 위젯 view에 `cw`(셀 폭)를 넘겨 그 text 칸/오프셋을 계산했다.
 
 ### 6.2 text 위젯(인라인 편집) + color 위젯(스와치 + 16색 프리셋)
 

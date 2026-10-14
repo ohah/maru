@@ -1252,15 +1252,13 @@ pub fn rebuildSidebar(self: *AppSession) !void {
         // (current_group_color, SG5-2 — 소속 카드 공통 막대, 브라우저 탭 그룹식으로 활성·비활성 모두) > 활성만 기본
         // accent(테마-구동) > 없음(비활성 무색 카드는 막대 없음). 개별 accent가 그룹 색보다 위 = 개별 지정이 더 명시적
         // (design 지침). 막대는 카드 좌단(x=0 — 밴드가 행 전체라 행 왼쪽 끝)·카드 높이. solid 직각 quad라 appendSolidQuad 재사용(divider 등과 동일 헬퍼).
-        if (bar_w > 0) {
-            const word: u32 = if (tab.accent_color != 0)
-                packStraightRgbU32(tab.accent_color, 0xFF)
-            else if (current_group_color != 0)
-                packStraightRgbU32(current_group_color, 0xFF)
-            else if (orig == self.app_window.active_tab) default_accent else continue;
-            if (sidebarScrollClipQuad(self, card_top, card_h)) |sr| {
-                self.appendSolidQuad(@floatFromInt(card_rect.x), sr.y, @floatFromInt(bar_w), sr.h, word, 0);
-            }
+        const word: u32 = if (tab.accent_color != 0)
+            packStraightRgbU32(tab.accent_color, 0xFF)
+        else if (current_group_color != 0)
+            packStraightRgbU32(current_group_color, 0xFF)
+        else if (orig == self.app_window.active_tab) default_accent else continue;
+        if (sidebarScrollClipQuad(self, card_top, card_h)) |sr| {
+            self.appendSolidQuad(@floatFromInt(card_rect.x), sr.y, @floatFromInt(bar_w), sr.h, word, 0);
         }
     };
     // 드래그 고스트 — preview_rows[ghost_lo,hi) 구간에 드롭 피드백을 얹는다. plan에 따라 시각이 갈린다(사용자 확정 정책):

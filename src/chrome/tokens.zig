@@ -300,7 +300,8 @@ const syntax_roles = [_]ColorRole{
 /// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). chrome **중립** enum이라 platform이 config
 /// `ChromeTabStyle`을 이 값으로 매핑한다(chrome은 config를 import 안 함 — 색이 ThemeColors로 흐르는 것과 동형).
 /// 스타일은 활성 탭 *세그먼트 안의 fill*만 바꾸고 세그먼트 기하(`tabbar.segOf`)는 불변이라 hit-test/드래그/✕는 그대로(§5.4).
-/// pill은 TS2(둥근 inset quad). rich 경로에서만 의미(기반 토큰 `base`는 셀 밴드 경로 — 제품은 늘 rich).
+/// pill은 TS2(둥근 inset quad). 활성 탭은 늘 layer 2 quad(`appendActiveTabHighlight`)다 — 기반 토큰 `base`는
+/// `bar_height_pt` 0이라 탭 바 자체가 없다(옛 tui 룩[2026-08-19 제거]의 셀 밴드 경로는 지웠다).
 pub const TabActiveStyle = enum(u8) {
     connected = 0, // U-tab2: 본문색 cutout(바 전체 높이) + 앰버/muted 언더바 — 아래 본문과 이어짐
     underline = 1, // 배경 fill 없음 + 앰버/muted 언더바만 — 가장 미니멀
@@ -336,21 +337,18 @@ pub const Spacing = struct {
     // U-tab: rich 탭 하나의 고정 폭(컬럼). 0이면 균등분할(base — 바를 탭 수로 나눠 stretch). >0이면 고정폭 — 탭이
     // 내용과 무관히 이 폭, 적으면 왼쪽정렬+빈 영역, 많으면 넘쳐(가로 스크롤 대상) 잘린다. 제목 ~N자 + ✕ 2칸 기준.
     tab_width_cols: u16 = 0,
-    // U-tab: rich 탭 바 텍스트 위아래 세로 패딩(px). 바 높이 = cell_height + 2*이값, 제목은 가운데(탭 세로 여유).
-    // 0이면 바 = cell 1칸(기존).
-    tab_bar_pad_y_px: u16 = 3, // 기반 토큰(base) 기본도 세로 패딩 — grip 핸들·탭 제목이 바 세로 가운데에 오게(0이면 상단에 붙어 답답). rich는 8로 override.
     // U-tab2: 활성 탭 하단 maru-앰버 언더바(active indicator) 두께(px). 탭바 하단 하이라인(line_thickness_px)과
-    // **분리**해 활성 신호를 더 굵고 또렷하게 한다. base=0(셀 밴드 경로라 미사용), rich>0. appendActiveTabHighlight가 소비.
+    // **분리**해 활성 신호를 더 굵고 또렷하게 한다. base=0(base는 바 높이 0이라 탭 바가 없다), rich>0. appendActiveTabHighlight가 소비.
     tab_underbar_px: u16 = 0,
     // TS1: 활성 탭 룩(chrome.tab-style 직교 축 — §7). platform buildChromeTokens가 appearance.chrome_tab_style→이 값으로
-    // 매핑하고 appendActiveTabHighlight가 분기(connected=cutout+언더바 / underline=언더바만 / pill=둥근 inset+테두리). base는 셀 밴드라 미사용(제품은 늘 rich).
+    // 매핑하고 appendActiveTabHighlight가 분기(connected=cutout+언더바 / underline=언더바만 / pill=둥근 inset+테두리). base는 바 높이 0이라 탭 바가 없어 미사용.
     tab_active_style: TabActiveStyle = .connected,
     // TS2: pill 스타일의 세로 inset(px) — 바 위아래에서 이만큼 들여 둥근 pill이 strip 위에 떠 보인다. radius는
     // corner_radius_px, 테두리 두께는 border.line_thickness_px 재사용. connected/underline은 미사용. rich>0.
     tab_pill_inset_px: u16 = 0,
     // BAR-H: 창 상단 chrome 바(터미널 pane 탭 바·도크 뷰 스위처)가 **함께 쓰는** 높이(pt, 폰트 독립).
-    // >0이면 그 값이 곧 바 높이다 — terminal cell이 식에 들어가지 않는다. 0이면 셀 파생
-    // (`cell_height + 2*tab_bar_pad_y_px`)으로 떨어진다.
+    // 그 값이 곧 바 높이다 — terminal cell이 식에 들어가지 않는다. 옛 tui 룩(2026-08-19 제거)은 0 → 셀 파생
+    // (`cell_height + 2*tab_bar_pad_y_px` — 그 필드도 함께 지웠다) 갈래를 썼다.
     //
     // **여기 있는 이유**: 이 값은 두 chrome이 공유하는 정렬 계약이다. 도크 뷰 스위처는 예전에
     // `DockMetrics.view_switcher_h`(40pt)를, 터미널 탭 바는 셀 파생 높이를 따로 써서 두 바의 아래 경계선이
@@ -365,11 +363,10 @@ pub const Spacing = struct {
     // 그리드로 렌더되기 때문이며, 진짜 해법은 그 텍스트를 chrome 폰트로 옮기는 것이지 chrome을 폰트에
     // 묶는 것이 아니다.
     //
-    // **base=0(셀 파생)은 의도다.** 기반 토큰 경로는 옛 tui 룩(2026-08-19 제거)의 "터미널 셀 격자에 정렬된
-    // 미니멀 chrome"을 이어받은 셀 lowering 경로이고, 탭 바 배경도
-    // 셀 한 행(`paneBarBgCell`)이라 셀에서 떨어진 높이를 주면 배경이 위쪽만 칠해진다. 그 경로에서는 폰트
-    // 파생이 결함이 아니라 요구사항이다. 제품은 늘 rich(40pt)라 이 갈래에 닿지 않고, 테스트가 base로 셀
-    // lowering을 본다. 어느 쪽이든 **두 바가 같은 식을 쓰므로 정렬은 유지된다**.
+    // **base=0이면 바 높이 0(바 없음)이다.** 옛 tui 룩(2026-08-19 제거)은 0을 셀 파생 높이로 읽었다 — 탭 바
+    // 배경도 셀 한 행(`paneBarBgCell`)이라 폰트 파생이 요구사항이었다. 제품 토큰은 rich(40pt) 하나라 그 갈래와
+    // 셀 밴드 헬퍼를 함께 지웠고, `chromeBarHeightPx`는 이제 `ptToPx(bar_height_pt)` 하나다. 두 바(탭 바·도크
+    // 뷰 스위처)가 그 함수 하나를 쓰므로 **정렬은 값과 무관하게 유지된다**.
     bar_height_pt: u16 = 0,
 
     /// 도크 뷰 스위처 슬롯 하나의 **논리 폭**(pt). 0이면 셀 파생(`dock_view_bar.default_slot_cols` 칸).
@@ -615,8 +612,6 @@ pub const Tokens = struct {
         tk.space.group_indent_px = 16;
         // U-tab: rich 탭 고정 폭 16칸(제목 ~14 + ✕ 2) — 균등 stretch 대신(적으면 빈 영역, 넘치면 가로 스크롤 대상).
         tk.space.tab_width_cols = 16;
-        // U-tab: 탭 바 세로 패딩 8px(텍스트 위아래) — 바 높이 = cell + 16, 제목 가운데. Warp식 넉넉한 탭 바(상단 탭바 폴리시).
-        tk.space.tab_bar_pad_y_px = 8;
         // U-tab2: 활성 탭 앰버 언더바 3px(하단 하이라인 1~2px보다 굵게) — "활성/포커스 탭" 신호를 또렷하게.
         tk.space.tab_underbar_px = 3;
         // TS2: pill 스타일 세로 inset 4px(바 위아래) — lifted 회색으로 채운 둥근 캡슐이 strip 위에 떠 보이게(Warp식).

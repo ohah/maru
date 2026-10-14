@@ -1013,8 +1013,8 @@ pub const QuickTerminalChrome = enum {
 
 /// 활성 탭 룩(`chrome.tab-style` 직교 축 — chrome-strategy.md §7). `theme.preset`(색)과 직교.
 /// connected = U-tab2 본문색 cutout + 앰버 언더바(기본), underline = 언더바만(미니멀), pill = lifted 회색으로 채운 둥근 캡슐(Warp식 떠 있는 pill).
-/// 활성 탭 quad 갈래(`appendActiveTabHighlight`)가 읽는다 — 제품 토큰은 늘 rich라 그 갈래로 간다(모서리 0인 셀 밴드
-/// 갈래는 기반 토큰의 것이라 제품에서 닿지 않는다). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
+/// 활성 탭 quad(`appendActiveTabHighlight`)가 읽는다 — 활성 탭은 늘 그 quad다(옛 tui 룩[2026-08-19 제거]의 모서리 0
+/// 셀 밴드 갈래는 지웠다). platform이 chrome 중립 `tokens.TabActiveStyle`로 매핑한다.
 pub const ChromeTabStyle = enum {
     connected,
     underline,

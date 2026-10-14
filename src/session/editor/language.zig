@@ -220,6 +220,14 @@ pub const Grammar = enum {
     /// 줄 주석 표식 — Enter 의 줄 주석 이어쓰기와 줄 스캐너(그 뒤 괄호는 세지 않는다)가 쓴다(계획 editor-typing-rules TR2·TR3). **문법에서
     /// 정한다** — 경로(`forPath`)로 정하면 이름 없는 문서에 문법을 골라 줘도 표식이 없다. 주석 토글의 `Language.lineComment` 와 이 문법들에서
     /// 같은 답이다(LANG9). 줄 주석이 없는 문법(HTML·CSS·JSON·Markdown)과 평문은 `null`.
+    /// 트리의 구문 오류(`ERROR`·`MISSING`)를 진단(§5.4 — 물결 밑줄·막대 마커·`F8`)으로 내는가. **SQL 은 아니다** — grammar 가 방언을 못
+    /// 가려(SQLite `AUTOINCREMENT`·`PRAGMA`·`WITHOUT ROWID`, MySQL `ENGINE=…`, Perfetto 방언) 정상 파일에 거짓 오류가 흔하다(실측: 실제 SQL
+    /// 57 개 중 12 개, Perfetto 488 개 중 466 개 — 계획 editor-bundled-languages BL3, 2026-10-15 사용자 결정). VS Code 도 SQL 구문 오류를 내지
+    /// 않는다. 색·접힘·심볼·괄호는 트리를 그대로 쓴다 — 끄는 것은 진단 출처 하나다.
+    pub fn syntaxDiagnostics(self: Grammar) bool {
+        return self != .sql;
+    }
+
     pub fn lineComment(self: Grammar) ?[]const u8 {
         return switch (self) {
             .python, .ruby, .bash, .yaml, .toml, .dockerfile, .make => "#",
@@ -456,6 +464,14 @@ test "LANG8 문자열 따옴표 — 괄호 Enter 가 건너뛸 따옴표, 아포
     // 괄호 Enter 의 범위 — 산문·괄호 규칙이 기본뿐인 문법은 끝의 여는 괄호만.
     for ([_]Grammar{ .typescript, .tsx, .javascript, .c, .cpp, .rust, .go, .java, .json, .css, .zig, .php, .kotlin, .toml, .lua, .dart }) |g| try std.testing.expect(g.bracketEnterAnywhere());
     for ([_]Grammar{ .python, .ruby, .bash, .markdown, .html, .yaml, .xml, .dtd, .dockerfile, .make, .swift, .sql }) |g| try std.testing.expect(!g.bracketEnterAnywhere());
+}
+
+test "LANG11 구문 오류 진단은 SQL 만 끈다 — 방언을 못 가리는 grammar 의 거짓 오류(계획 editor-bundled-languages BL3)" {
+    try std.testing.expect(!Grammar.sql.syntaxDiagnostics());
+    inline for (@typeInfo(Grammar).@"enum".fields) |f| {
+        const g: Grammar = @enumFromInt(f.value);
+        if (g != .sql) try std.testing.expect(g.syntaxDiagnostics());
+    }
 }
 
 test "LANG9 문법의 줄 주석 표식 — 경로로 정한 주석 토글의 표식과 같은 답, 이름 없는 문서도 문법만으로 (계획 editor-typing-rules 최종 검토)" {

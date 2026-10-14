@@ -79,9 +79,16 @@ pub const State = struct {
 // 한국어를 박으면 영어 화면에 한국어가 섞인다(i18n 계약 §7).
 
 /// **트리에서 목록을 다시 채운다**(§5.4 갱신 시점: 트리가 있을 때마다). 트리가 없으면(파싱이 끊긴 프레임) 직전 목록을 유지하고
-/// `false`. 다른 출처(LSP·린트)가 생기면 여기서 `.syntax` 항목만 갈아 끼운다 — 지금은 목록이 곧 구문 오류다.
-pub fn refreshFromSyntax(self: *State, allocator: std.mem.Allocator, provider: ?*syntax.Provider) bool {
-    const had_tree = if (provider) |prov| (prov.syntaxErrors(allocator, &self.raw) catch false) else false;
+/// `false`. 다른 출처(LSP·린트)가 생기면 여기서 `.syntax` 항목만 갈아 끼운다 — 지금은 목록이 곧 구문 오류다. `syntax_errors` 가 거짓이면
+/// (문법이 구문 오류를 진단으로 안 낸다 — `Grammar.syntaxDiagnostics`, SQL) 구문 출처를 비우고 다른 출처만 합친다.
+pub fn refreshFromSyntax(self: *State, allocator: std.mem.Allocator, provider: ?*syntax.Provider, syntax_errors: bool) bool {
+    const had_tree = if (provider) |prov| blk: {
+        if (!syntax_errors) {
+            self.raw.clearRetainingCapacity();
+            break :blk true;
+        }
+        break :blk prov.syntaxErrors(allocator, &self.raw) catch false;
+    } else false;
     // 트리가 없어도 서버 목록이 바뀌었으면 합친다(§8.2a — 두 출처가 한 목록).
     if (!had_tree and !self.lsp_dirty) return false;
     self.lsp_dirty = false;

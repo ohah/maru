@@ -3682,4 +3682,10 @@ test "W9c① 적대 리뷰 4 회차 재현 C: U+2028·U+2029·NEL(U+0085) 도 ` 
     var w = std.Io.Writer.fixed(&buf);
     _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"log\",\"text\":\"a\\u2028b\\u2029c\\u0085d\"}]}}", .console, &w);
     try testing.expectEqualStrings("[log] a ⏎ b ⏎ c ⏎ d\n", w.buffered());
+    // 수준 글도 걸러 낸다 — 응답이 수준 자리에 제어 글자를 실어도 터미널에 가지 않는다(5 회차 변이).
+    var buf2: [256]u8 = undefined;
+    var w2 = std.Io.Writer.fixed(&buf2);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"console\":[{\"level\":\"log\\u001b[2J\\n[error\",\"text\":\"x\"}]}}", .console, &w2);
+    try testing.expect(std.mem.indexOfScalar(u8, w2.buffered(), 0x1b) == null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, w2.buffered(), "\n"));
 }

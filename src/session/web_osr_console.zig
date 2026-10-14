@@ -115,23 +115,21 @@ pub const Ring = struct {
     pub fn addDropped(self: *Ring, gpa: std.mem.Allocator, errors: u32, other: u32) std.mem.Allocator.Error!void {
         if (errors == 0 and other == 0) return;
         var counts: [2]u32 = .{ errors, other };
-        const last: ?*Entry = blk: {
+        const last: ?usize = blk: {
             var i = self.entries.items.len;
             while (i > 0) {
                 i -= 1;
                 const e = &self.entries.items[i];
                 if (e.doc != self.doc) break;
-                if (e.level == .maru and e.dropped_old == 0) break :blk e;
+                if (e.level == .maru and e.dropped_old == 0) break :blk i;
             }
             break :blk null;
         };
-        if (last) |e| {
+        if (last) |at| {
+            const e = &self.entries.items[at];
             counts = .{ e.dropped[0] +| errors, e.dropped[1] +| other };
-            const text = try markerText(gpa, counts);
-            self.bytes = self.bytes - e.text.len + text.len;
-            gpa.free(e.text);
-            e.text = text;
             e.dropped = counts;
+            self.rewriteMarker(gpa, at, try markerText(gpa, counts));
             return;
         }
         const text = try markerText(gpa, counts);
@@ -151,12 +149,9 @@ pub const Ring = struct {
             const e = &self.entries.items[i];
             if (e.doc != self.doc) break;
             if (e.level != .maru or e.dropped_old == 0 or e.origin_doc != origin_doc) continue;
-            const total = e.dropped_old +| count;
-            const text = try oldMarkerText(gpa, total);
-            self.bytes = self.bytes - e.text.len + text.len;
-            gpa.free(e.text);
-            e.text = text;
-            e.dropped_old = total;
+            const text = try oldMarkerText(gpa, e.dropped_old +| count);
+            e.dropped_old +|= count;
+            self.rewriteMarker(gpa, i, text);
             return;
         }
         const text = try oldMarkerText(gpa, count);
@@ -164,8 +159,27 @@ pub const Ring = struct {
         try self.push(gpa, .{ .level = .maru, .text = text, .doc = self.doc, .docs_back = docs_back, .origin_doc = origin_doc, .dropped_old = count });
     }
 
+    /// 표지의 글을 더한 수의 글로 바꾼다 — 글이 길어지면 `push` 처럼 오래된 줄부터 버려 `max_bytes` 안에 둔다(5 회차 n4 — 전에는 다음 줄이
+    /// 올 때까지 상한을 넘었다). 바꾼 표지 자신은 버리지 않는다(방금 더한 수를 잃지 않게).
+    fn rewriteMarker(self: *Ring, gpa: std.mem.Allocator, index: usize, text: []u8) void {
+        var at = index;
+        const e = &self.entries.items[at];
+        self.bytes = self.bytes - e.text.len + text.len;
+        gpa.free(e.text);
+        e.text = text;
+        while (self.bytes > max_bytes and self.entries.items.len > 1) {
+            const victim: usize = if (at == 0) 1 else 0;
+            const gone = self.entries.orderedRemove(victim);
+            self.bytes -= gone.text.len;
+            gpa.free(gone.text);
+            if (victim < at) at -= 1;
+        }
+    }
+
+    /// 앞 문서 표지의 글 — 버린 줄은 바로 앞 문서만이 아니라 두 문서 앞이거나, 앞 문서와 출처가 같은 지금 문서의 위젯 iframe 의 것일 수
+    /// 있다(4 회차 A) — 그래서 「앞 페이지」 가 아니라 「방금 떠난 페이지·출처」 로 적는다(5 회차 n1).
     fn oldMarkerText(gpa: std.mem.Allocator, count: u32) std.mem.Allocator.Error![]u8 {
-        return std.fmt.allocPrint(gpa, "{d} console messages from the previous page were dropped (lines from origins the tab had just left): they came faster than maru keeps", .{count});
+        return std.fmt.allocPrint(gpa, "{d} console messages from pages or origins this tab had just left were dropped: they came faster than maru keeps", .{count});
     }
 
     fn markerText(gpa: std.mem.Allocator, counts: [2]u32) std.mem.Allocator.Error![]u8 {
@@ -483,7 +497,7 @@ test "W9c① 적대 리뷰 4 회차 재현 D: 에이전트가 연 탭을 첫 읽
 }
 
 test "W9c① 적대 리뷰 4 회차 A: 앞 문서의 줄을 버린 수는 그 줄이 나온 문서의 표지로 — 묶인 쪽은 묶인 문서 뒤의 것만 보고 처음 읽는 쪽은 보지 않는다, 새 문서의 버림 표지와 섞이지 않는다" {
-    const old_text = "console messages from the previous page were dropped (lines from origins the tab had just left): they came faster than maru keeps";
+    const old_text = "console messages from pages or origins this tab had just left were dropped: they came faster than maru keeps";
     var r: Ring = .{};
     defer r.deinit(testing.allocator);
     r.latchAtBirth(7); // 에이전트가 연 탭(문서 0)
@@ -516,4 +530,55 @@ test "W9c① 적대 리뷰 4 회차 A: 앞 문서의 줄을 버린 수는 그 �
     try testing.expectEqual(@as(usize, 3), q.entries.items.len);
     try testing.expectEqual(@as(u32, 13), q.entries.items[1].dropped_old);
     try testing.expectEqual(@as(u32, 1), q.entries.items[2].dropped_old);
+}
+
+test "W9c① 적대 리뷰 5 회차 재현 A(링): sidecar 가 문서마다 따로 보낸 앞 문서의 버린 수는 문서마다 제 표지 — B 에 묶인 쪽은 B 의 버림을 보고 A 의 것은 보지 않는다, 전에는 다섯이 A 의 표지 하나로 와 B 에 묶인 쪽에게 표지가 없었다" {
+    const old_text = " console messages from pages or origins this tab had just left were dropped: they came faster than maru keeps";
+    var r: Ring = .{};
+    defer r.deinit(testing.allocator);
+    r.newDocument(); // 문서 1 — A
+    try r.add(testing.allocator, .log, "a", 0);
+    r.newDocument(); // 문서 2 — B
+    try r.add(testing.allocator, .log, "b head", 0);
+    try expectTexts(&r, 7, &.{"b head"}); // 에이전트가 B 에서 읽는다 — 묶인 문서 2
+    r.newDocument(); // 문서 3 — C(A 와 B 의 1 초 창 안)
+    // console_gate 「5 회차 재현 A」 의 sidecar 가 보내는 차례 — A 의 하나(두 문서 앞)를 먼저, 그 뒤 B 의 넷(한 문서 앞).
+    try r.addDroppedOld(testing.allocator, 1, 2);
+    try r.addDroppedOld(testing.allocator, 4, 1);
+    try r.add(testing.allocator, .log, "c head", 0);
+    try expectTexts(&r, 7, &.{ "b head", "4" ++ old_text, "c head" });
+    // 처음 읽는 쪽에게는 어느 표지도 보이지 않는다.
+    try expectTexts(&r, 0, &.{"c head"});
+}
+
+test "W9c① 적대 리뷰 5 회차 n4: 표지에 수를 더해 글이 길어져도 링은 512 KiB 안 — 오래된 줄부터 버리고 표지는 남는다" {
+    var r: Ring = .{};
+    defer r.deinit(testing.allocator);
+    r.newDocument();
+    try r.add(testing.allocator, .log, "x" ** 8192, 0); // 가장 오래된 줄
+    try r.addDropped(testing.allocator, 1, 0);
+    try r.addDroppedOld(testing.allocator, 1, 1);
+    // 상한까지 채운다.
+    while (r.bytes + 8192 <= max_bytes) try r.add(testing.allocator, .log, "y" ** 8192, 0);
+    try r.add(testing.allocator, .log, ("z" ** 8192)[0 .. max_bytes - r.bytes], 0);
+    try testing.expectEqual(max_bytes, r.bytes);
+    try testing.expectEqualStrings("x" ** 8192, r.entries.items[0].text);
+    try r.addDropped(testing.allocator, 1_000_000_000, 0); // 표지의 글이 길어진다
+    try testing.expect(r.bytes <= max_bytes);
+    try testing.expect(std.mem.startsWith(u8, r.entries.items[0].text, "1000000001 console messages were dropped"));
+    try r.addDroppedOld(testing.allocator, 1_000_000_000, 1);
+    try testing.expect(r.bytes <= max_bytes);
+    try testing.expectEqual(@as(u32, 1_000_000_001), r.entries.items[1].dropped_old);
+    var sum: usize = 0;
+    for (r.entries.items) |e| sum += e.text.len;
+    try testing.expectEqual(sum, r.bytes);
+    // 표지가 가장 오래된 줄이어도 버리는 것은 그 뒤의 줄이다(방금 더한 수를 잃지 않게).
+    var o: Ring = .{};
+    defer o.deinit(testing.allocator);
+    try o.addDropped(testing.allocator, 1, 0);
+    while (o.bytes + 8192 <= max_bytes) try o.add(testing.allocator, .log, "y" ** 8192, 0);
+    try o.add(testing.allocator, .log, ("z" ** 8192)[0 .. max_bytes - o.bytes], 0);
+    try o.addDropped(testing.allocator, 1_000_000_000, 0);
+    try testing.expect(o.bytes <= max_bytes);
+    try testing.expect(std.mem.startsWith(u8, o.entries.items[0].text, "1000000001 console messages were dropped"));
 }

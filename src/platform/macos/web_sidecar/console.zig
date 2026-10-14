@@ -2,6 +2,7 @@
 //! **글로 바꾸기 전에** 보고, 지나면 앞부분만 바꿔 다듬어 `console_message` 로 보낸다. 넘쳐 버린 줄은 수만 세어(앞 문서의 줄은 따로 —
 //! 가장 앞 문서의 `docs_back` 과 함께) 다음 줄에 싣거나, 쏟아짐이 그치면 `flush_delay_ms` 뒤 버린 수만 실은 frame 으로 보낸다(task 하나 —
 //! 브라우저가 몇이든). 새 문서의 시작·오류 페이지 앞에도 먼저 보낸다 — 실린 `docs_back` 은 보낼 때의 문서에서 센 것이라 maru 의 링과 맞다.
+//! 다른 문서의 앞 문서 줄을 버리기 전에도 쌓인 앞 문서의 수를 먼저 보낸다(`splitOld` — 5 회차 A).
 //!
 //! DevTools(`Runtime.enable`)를 쓰지 않는다 — 페이지가 알아챌 수 있는 봇 신호라 W9a·W5c 가 버렸다. CEF 는 줄의 프레임을 주지 않아
 //! iframe(다른 출처도)·worker 의 줄도 온다(WebKit 탭은 주 프레임만 — 작성자 선택, 문서에 적었다). 처리기는 0 을 돌려준다 — Chromium 의
@@ -52,6 +53,8 @@ pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_brows
     }
     const old_document = docs_back != 0;
     const units: usize = if (message == null) 0 else message.*.length;
+    // 쌓인 앞 문서의 버린 수가 다른 문서의 것이면 먼저 보낸다 — 표지마다 제 문서의 `docs_back` 을 단다(5 회차 A).
+    if (entry.console.splitOld(&global, docs_back, now)) sendDrops(entry);
     if (!entry.console.admit(&global, class, docs_back, gate.textBound(units), now)) {
         postFlush();
         return 0;
@@ -59,7 +62,7 @@ pub fn onConsoleMessage(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_brows
     var raw: [gate.max_message_units * 3]u8 = undefined;
     const msg = library.readPrefix(api, message, gate.max_message_units, &raw);
     // 「Uncaught」 꼬리에만 부른 곳을 싣는다 — 오류 수준일 때만(1 회차: `console.log('Uncaught x')` 에도 붙었다).
-    const uncaught = level == .@"error" and std.mem.startsWith(u8, msg.text, "Uncaught");
+    const uncaught = gate.uncaughtError(level, msg.text);
     if (uncaught and src == null) src = library.readPrefix(api, source, gate.max_source_units, src_buf).text;
     var out: [protocol.wire.max_console_text_bytes]u8 = undefined;
     const text = gate.finishText(msg.text, msg.truncated, if (uncaught) src orelse "" else "", line, &out);

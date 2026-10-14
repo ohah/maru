@@ -2203,7 +2203,9 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
     return aw.toOwnedSlice();
 }
 
-/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …]}`(파일 1..10 개). 다른 키는 버리고, 모양이 틀리면 거절.
+/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …],"kept":<bool>}`(파일 1..10 개). 다른 키는 버리고, 모양이 틀리면 거절.
+/// `kept`(적대 리뷰 1 회차): 넣을 때 페이지가 그 목록을 받았고(성공의 조건), 그 뒤에도 칸이 그 목록을 쥐고 있나 — 거짓이면 페이지 스스로 비우거나
+/// 다시 그렸다(다시 올리면 두 번 올라간다).
 fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) (std.mem.Allocator.Error || error{InvalidUploadPayload})![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -2213,7 +2215,8 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
     if (parsed.value != .object) return error.InvalidUploadPayload;
     const origin = parsed.value.object.get("origin") orelse return error.InvalidUploadPayload;
     const files = parsed.value.object.get("files") orelse return error.InvalidUploadPayload;
-    if (origin != .string or files != .array) return error.InvalidUploadPayload;
+    const kept = parsed.value.object.get("kept") orelse return error.InvalidUploadPayload;
+    if (origin != .string or files != .array or kept != .bool) return error.InvalidUploadPayload;
     if (files.array.items.len == 0 or files.array.items.len > max_upload_files) return error.InvalidUploadPayload;
     for (files.array.items) |f| {
         if (f != .object) return error.InvalidUploadPayload;
@@ -2239,6 +2242,8 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
             s.endObject() catch |e| break :blk e;
         }
         s.endArray() catch |e| break :blk e;
+        s.objectField("kept") catch |e| break :blk e;
+        s.write(kept.bool) catch |e| break :blk e;
         endResult(&s) catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -5147,9 +5152,9 @@ test "W9c③: uploadPathOk·lexicalPath — 절대·UTF-8·제어 문자 없음,
 test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀리면 internal_error, 거부는 -32002 와 그 글(철회의 unauthorized 는 균일 글)" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}";
     {
-        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3,\"x\":1}],\"y\":2}");
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3,\"x\":1}],\"kept\":true,\"y\":2}");
         defer testing.allocator.free(w);
-        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}]}") != null);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true}") != null);
     }
     for ([_][]const u8{
         "{}",
@@ -5177,5 +5182,22 @@ test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀�
         const w = try serializeBrowserResponseStatus(testing.allocator, click, .unauthorized, "secret reason");
         defer testing.allocator.free(w);
         try testing.expect(std.mem.indexOf(u8, w, "secret reason") == null);
+    }
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R9b: upload 결과는 kept(페이지가 넣은 목록을 그대로 두었나)를 싣는다 — 빠지거나 bool 이 아니면 internal_error" {
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}";
+    {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}");
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}") != null);
+    }
+    for ([_][]const u8{
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}]}",
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":1}",
+    }) |payload| {
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
+        defer testing.allocator.free(w);
+        try testing.expectEqual(@as(i64, @intFromEnum(cp.ErrorCode.internal_error)), try errCode(w));
     }
 }

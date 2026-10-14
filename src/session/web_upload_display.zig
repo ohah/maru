@@ -5,6 +5,9 @@
 //! - **보이지 않는 글자는 코드로**: 양방향 제어(RLO 로 `invoice‮fdp.exe` 가 `invoiceexe.pdf` 로 읽힌다)·폭 없는 글자·태그 글자는 `⟨U+202E⟩`
 //!   처럼 보인다. 제어 문자(C0·DEL·C1)는 L2 가 요청 경로에서, 앱이 실제 경로에서 거절한다 — 여기 오면 같은 코드로 보인다(두 겹).
 //! - **홈은 `~`**: 줄이 짧아져 뒤쪽 이름이 덜 밀린다. 경로는 모달이 **줄바꿈**한다(가운데를 줄이면 `.ssh` 가 사라진다 — 계획 공격 B2).
+//! - **경로의 공백**: 이름 안의 공백 하나는 그대로(「My Documents」), 공백 여럿은 `⟨U+0020×N⟩`, 이름 앞뒤의 공백과 빈칸처럼 보이는 글자(NBSP·전각
+//!   공백 등)는 코드로 — 모달은 공백에서 줄을 나누고 다음 줄 앞의 공백을 버리므로, 공백 덩어리 뒤에 `2. ~/Downloads/cat.jpg` 를 둔 이름이 다른
+//!   파일 줄처럼 보였다(적대 리뷰 1 회차).
 //! - **표지**: 이름이 `.` 으로 시작하는 폴더·파일을 지나면 「숨은 폴더·파일」, 하드 링크(이름이 둘 이상)면 그 수.
 //! - **내용 엿보기**(사용자 결정 Q2): 글 파일이면 보이는 첫 줄(잘라서), 아니면 「바이너리, N 바이트(형식)」. 경로만으로는 `cp ~/.ssh/id_rsa
 //!   ~/Downloads/cat.jpg` 를 알아볼 수 없다 — 첫 줄 `-----BEGIN OPENSSH PRIVATE KEY-----` 는 알아본다.
@@ -72,13 +75,39 @@ fn validPrefix(head: []const u8) usize {
     return head.len;
 }
 
-/// 빈 줄(공백뿐인 줄 포함)을 건너뛴 첫 줄 — 앞에 빈 줄을 두어 첫 줄을 감추지 못하게. 없으면 null.
+/// 빈 줄(공백뿐인 줄 포함 — 빈칸처럼 보이는 글자도)을 건너뛴 첫 줄의 보이는 글이 시작하는 곳부터 — 앞에 빈 줄이나 공백을 두어 첫 줄을
+/// 감추지 못하게(적대 리뷰 1 회차 — 앞의 공백 48 칸이 엿보기를 다 채웠다). 없으면 null.
 fn firstLine(text: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeAny(u8, text, "\r\n");
     while (it.next()) |line| {
-        if (std.mem.trim(u8, line, " \t\x0c").len > 0) return line;
+        const start = blankPrefix(line);
+        if (start < line.len) return line[start..];
     }
     return null;
+}
+
+/// 빈칸처럼 보이는(폭은 있는데 글자가 없는) 글자 — 공백·탭·VT·FF 와 NBSP·전각 공백 등. 엿보기에서는 공백으로 다루고, 경로에서는 코드로 보인다.
+fn blankLike(c: u21) bool {
+    return c == ' ' or c == '\t' or c == 0x0b or c == 0x0c or c == 0x00A0 or c == 0x1680 or (c >= 0x2000 and c <= 0x200A) or c == 0x202F or
+        c == 0x205F or c == 0x3000;
+}
+
+/// 다음 글자(UTF-8 이 깨졌으면 null — 그 바이트는 글로 친다)와 길이.
+fn decodeAt(s: []const u8, i: usize) struct { c: ?u21, len: usize } {
+    const len = std.unicode.utf8ByteSequenceLength(s[i]) catch return .{ .c = null, .len = 1 };
+    if (i + len > s.len) return .{ .c = null, .len = 1 };
+    return .{ .c = std.unicode.utf8Decode(s[i .. i + len]) catch null, .len = len };
+}
+
+/// 앞의 빈칸처럼 보이는 글자가 차지하는 바이트 수.
+fn blankPrefix(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len) {
+        const d = decodeAt(s, i);
+        if (d.c == null or !blankLike(d.c.?)) break;
+        i += d.len;
+    }
+    return i;
 }
 
 fn magic(head: []const u8) ?Kind {
@@ -134,19 +163,68 @@ pub fn invisible(c: u21) bool {
         (c >= 0xFFF0 and c <= 0xFFFB) or (c >= 0x1D173 and c <= 0x1D17A) or (c >= 0xE0000 and c <= 0xE0FFF);
 }
 
+/// 공백을 어떻게 보이나 — 경로(`path`: 이름 안의 공백 하나만 그대로, 나머지는 코드), 엿보기(`peek`: 빈칸 덩어리를 공백 하나로).
+const Spaces = enum { path, peek };
+
 /// 글을 보이는 글자로 쓴다 — `invisible` 은 `⟨U+XXXX⟩`, 깨진 바이트는 `⟨0xNN⟩`. 쓴 칸 수(EAW)를 돌려준다. `max_cols` 를 넘으면 그 앞에서
 /// 멈추고 「…」 를 붙인다(null 이면 끝까지).
-fn writeVisible(w: *std.Io.Writer, s: []const u8, max_cols: ?usize) std.Io.Writer.Error!void {
+fn writeVisible(w: *std.Io.Writer, s: []const u8, max_cols: ?usize, spaces: Spaces) std.Io.Writer.Error!void {
     var cols: usize = 0;
     var i: usize = 0;
     while (i < s.len) {
+        // 빈칸처럼 보이는 글자 — 줄바꿈이 공백에서 끊기고 다음 줄 앞의 공백은 버려지므로 덩어리·이름 끝의 공백은 눈에 보이게(경로), 엿보기는 하나로.
+        if (decodeAt(s, i).c) |c0| if ((blankLike(c0) and c0 != '\t') or (c0 == '\t' and spaces == .peek)) {
+            var j = i;
+            var run: usize = 0;
+            var only_spaces = true;
+            while (j < s.len) {
+                const d = decodeAt(s, j);
+                const c = d.c orelse break;
+                if (!blankLike(c) or (c == '\t' and spaces == .path)) break;
+                if (c != ' ') only_spaces = false;
+                run += 1;
+                j += d.len;
+            }
+            var piece_buf: [32]u8 = undefined;
+            const piece: []const u8 = switch (spaces) {
+                .peek => if (j >= s.len) "" else " ", // 끝의 공백은 버린다
+                .path => blk: {
+                    const at_edge = i == 0 or s[i - 1] == '/' or j >= s.len or s[j] == '/';
+                    if (only_spaces and run == 1 and !at_edge) break :blk " ";
+                    if (only_spaces and run > 1) break :blk std.fmt.bufPrint(&piece_buf, "⟨U+0020×{d}⟩", .{run}) catch unreachable;
+                    // 빈칸처럼 보이는 다른 글자가 섞였거나 이름 끝의 공백 하나 — 글자마다 코드로.
+                    var k = i;
+                    while (k < j) {
+                        const d = decodeAt(s, k);
+                        var code_buf: [16]u8 = undefined;
+                        const code = std.fmt.bufPrint(&code_buf, "⟨U+{X:0>4}⟩", .{d.c.?}) catch unreachable;
+                        if (max_cols) |m| if (cols + 8 > m) {
+                            try w.writeAll("…");
+                            return;
+                        };
+                        try w.writeAll(code);
+                        cols += 8;
+                        k += d.len;
+                    }
+                    break :blk "";
+                },
+            };
+            const piece_cols = std.unicode.utf8CountCodepoints(piece) catch piece.len;
+            if (max_cols) |m| if (cols + piece_cols > m) {
+                try w.writeAll("…");
+                return;
+            };
+            try w.writeAll(piece);
+            cols += piece_cols;
+            i = j;
+            continue;
+        };
         // 첫 바이트가 글자의 시작이 아니면(0x80–0xBF·0xF8 이상) 깨진 바이트다 — 길이 1 로 읽으면 그 바이트가 글자로 새었다.
         const lead = std.unicode.utf8ByteSequenceLength(s[i]) catch null;
         const len: usize = lead orelse 1;
         const code: ?u21 = if (lead != null and i + len <= s.len) std.unicode.utf8Decode(s[i .. i + len]) catch null else null;
         var piece_buf: [16]u8 = undefined;
         const piece: []const u8, const step: usize, const piece_cols: usize = if (code) |c| blk: {
-            if (c == '\t') break :blk .{ " ", len, 1 };
             if (invisible(c)) {
                 const p = std.fmt.bufPrint(&piece_buf, "⟨U+{X:0>4}⟩", .{c}) catch unreachable;
                 break :blk .{ p, len, 8 + @as(usize, if (c > 0xFFFF) 1 else 0) };
@@ -173,7 +251,7 @@ pub fn writePath(w: *std.Io.Writer, path: []const u8, home: []const u8) std.Io.W
         try w.writeAll("~");
         rest = path[home.len..];
     }
-    try writeVisible(w, rest, null);
+    try writeVisible(w, rest, null, .path);
 }
 
 /// 경로의 어느 이름이 `.` 으로 시작하는가(`.ssh`·`.env` — 숨은 폴더·파일을 지난다).
@@ -230,7 +308,7 @@ pub fn fileLines(gpa: std.mem.Allocator, index: usize, f: FileInfo, home: []cons
                 var shown: std.Io.Writer.Allocating = .init(gpa);
                 defer shown.deinit();
                 shown.writer.writeAll("“") catch |e| break :blk e;
-                writeVisible(&shown.writer, l, peek_cols) catch |e| break :blk e;
+                writeVisible(&shown.writer, l, peek_cols, .peek) catch |e| break :blk e;
                 shown.writer.writeAll("”") catch |e| break :blk e;
                 var tmp: [512]u8 = undefined;
                 b.writer.writeAll(i18n.format(&tmp, i18n.t(.upload_peek_text), &.{ .{ .s = size_w.written() }, .{ .s = shown.written() } })) catch |e| break :blk e;
@@ -348,4 +426,50 @@ test "W9c③ 엿보기 가르기: 앞부분 끝에서 잘린 UTF-8 글자는 봐
     try testing.expect(classify("xxxx\x00\x00\x00\x00WEBP", 100).binary == .unknown); // RIFF 없는 WEBP 글자
     try testing.expectEqual(Kind.sqlite, classify("SQLite format 3\x00", 100).binary);
     try testing.expectEqualStrings("hello", classify("hello\r\nworld", 12).text.?);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R7: 경로의 공백 여럿·이름 앞뒤 공백·빈칸처럼 보이는 글자는 코드로 — 모달이 공백 덩어리에서 줄을 나눠 「2. ~/…」 같은 가짜 줄을 만들지 못한다" {
+    const prev = i18n.lang();
+    defer i18n.setLang(prev);
+    i18n.setLang(.en);
+    const fake = try lines(.{ .path = "/Users/me/Downloads/x" ++ " " ** 40 ++ "2. ~/Downloads/cat.jpg", .size = 1, .nlink = 1, .peek = .empty }, "/Users/me");
+    defer freeLines(fake);
+    try testing.expectEqualStrings("1. ~/Downloads/x⟨U+0020×40⟩2. ~/Downloads/cat.jpg", fake[0]);
+    try testing.expect(std.mem.indexOf(u8, fake[0], "  ") == null);
+    // 이름 앞뒤의 공백 하나도 — 보이지 않는다.
+    const edge = try lines(.{ .path = "/a/ b/c ", .size = 1, .nlink = 1, .peek = .empty }, "");
+    defer freeLines(edge);
+    try testing.expectEqualStrings("1. /a/⟨U+0020⟩b/c⟨U+0020⟩", edge[0]);
+    // 이름 안의 공백 하나는 그대로(흔한 이름 — 「My Documents」).
+    const plain = try lines(.{ .path = "/a/My Documents/b c.txt", .size = 1, .nlink = 1, .peek = .empty }, "");
+    defer freeLines(plain);
+    try testing.expectEqualStrings("1. /a/My Documents/b c.txt", plain[0]);
+    // 빈칸처럼 보이는 글자(전각 공백·NBSP·좁은 공백)는 코드로.
+    const wide = try lines(.{ .path = "/a/x\u{3000}\u{00a0}\u{2009}y", .size = 1, .nlink = 1, .peek = .empty }, "");
+    defer freeLines(wide);
+    try testing.expectEqualStrings("1. /a/x⟨U+3000⟩⟨U+00A0⟩⟨U+2009⟩y", wide[0]);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R8: 엿보기는 첫 줄 앞의 공백(빈칸처럼 보이는 글자 포함)을 건너뛰고 공백 덩어리를 하나로 — 48 칸을 빈칸으로 채워 내용을 숨기지 못한다" {
+    const prev = i18n.lang();
+    defer i18n.setLang(prev);
+    i18n.setLang(.en);
+    const key = " " ** 60 ++ "-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    const k = try lines(.{ .path = "/d/cat.jpg", .size = key.len, .nlink = 1, .peek = classify(key, key.len) }, "");
+    defer freeLines(k);
+    try testing.expect(std.mem.indexOf(u8, k[1], "“-----BEGIN OPENSSH PRIVATE KEY-----”") != null);
+    const wide = "\u{3000}" ** 20 ++ "\t\u{00a0}-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    const w = try lines(.{ .path = "/d/cat.jpg", .size = wide.len, .nlink = 1, .peek = classify(wide, wide.len) }, "");
+    defer freeLines(w);
+    try testing.expect(std.mem.indexOf(u8, w[1], "“-----BEGIN OPENSSH PRIVATE KEY-----”") != null);
+    // 줄 안의 공백 덩어리는 하나로 — 뒤의 글이 48 칸 밖으로 밀리지 않는다.
+    const mid = "abc" ++ " " ** 60 ++ "SECRET\n";
+    const m = try lines(.{ .path = "/d/a", .size = mid.len, .nlink = 1, .peek = classify(mid, mid.len) }, "");
+    defer freeLines(m);
+    try testing.expect(std.mem.indexOf(u8, m[1], "“abc SECRET”") != null);
+    // 빈칸처럼 보이는 글자뿐인 줄은 빈 줄이다 — 다음 줄을 보인다, 없으면 「보이는 글이 없음」.
+    const blank_wide = "\u{3000}\u{00a0}\n\u{2003}\n";
+    const bw = try lines(.{ .path = "/d/b", .size = blank_wide.len, .nlink = 1, .peek = classify(blank_wide, blank_wide.len) }, "");
+    defer freeLines(bw);
+    try testing.expect(std.mem.indexOf(u8, bw[1], "no visible text at the start") != null);
 }

@@ -8,10 +8,17 @@
 //!   `multiple` 인가·문서에 붙어 있나·주 프레임인가). `setFileInputFiles` 는 꺼진 칸에도 넣고 이벤트까지 냈다(실측 d2 — 사람은 못 한다),
 //!   폴더 칸에는 조용히 아무것도 안 넣었고(i), 한 파일 칸에 둘을 주면 조용히 첫 것만 넣었다(b2) — 그래서 모달 **전에** 거절한다.
 //! - **승인 뒤**: 로케이터를 다시 풀어 같은 `backendNodeId` 인가 → 프레임 트리의 `loaderId` 가 같은가 → **새** 격리 world 에서 objectId 를
-//!   잡아 다시 확인 → 프레임 트리를 한 번 더(확인과 넣기 사이의 이동) → `DOM.setFileInputFiles{objectId}` → **같은 objectId** 로 읽어
-//!   확인(붙어 있나·수·이름·크기). objectId 는 문서와 함께 죽는다(실측 g4 — 「Cannot find context」) — `backendNodeId` 는 다른 사이트로
-//!   옮기면 새 프로세스에서 다시 쓰였고(g2) 같은 문서에서 노드를 바꿔 끼워도 `loaderId` 는 그대로였다(f). `setFileInputFiles` 는 조용히
-//!   실패해도 `{}` 라(떨어진 노드·없는 경로 등 여섯 경우 — `files.length` 만으로는 못 잡는다) 넣은 뒤 이름·크기까지 읽는다.
+//!   잡아 다시 확인(그때 그 칸에 maru 의 듣는 이를 단다 — 아래) → 프레임 트리를 한 번 더(확인과 넣기 사이의 이동) →
+//!   `DOM.setFileInputFiles{objectId}` → **같은 objectId** 로 읽어 확인(붙어 있나·수·이름·크기). objectId 는 문서와 함께 죽는다(실측 g4 —
+//!   「Cannot find context」) — `backendNodeId` 는 다른 사이트로 옮기면 새 프로세스에서 다시 쓰였고(g2) 같은 문서에서 노드를 바꿔 끼워도
+//!   `loaderId` 는 그대로였다(f). `setFileInputFiles` 는 조용히 실패해도 `{}` 라(떨어진 노드·없는 경로 등 여섯 경우 — `files.length`
+//!   만으로는 못 잡는다) 넣은 뒤 이름·크기까지 읽는다.
+//! - **넣을 때 받은 목록**(적대 리뷰 1 회차): `setFileInputFiles` 는 진짜 `input`·`change` 를 낸다 — 그 처리기에서 칸을 비우거나(`value=''`)
+//!   다시 그리는 페이지는 파일을 받고 나서 지운다. 넣은 **뒤** 칸만 읽으면 「다른 목록」 으로 실패해 에이전트가 다시 올리고(모달 둘째·두 번
+//!   올라감) 말았다. 그래서 넣기 앞의 확인이 격리 world 에서 그 칸에 캡처 단계의 `input`·`change` 듣는 이를 달아, 진짜(`isTrusted`) 이벤트가 그
+//!   칸에 닿을 때의 목록(이름·크기)을 적어 둔다 — 격리 world 의 함수·프로토타입 getter 라 페이지가 그 기록을 고치거나 듣는 이를 흉내 낼 수 없고,
+//!   진짜 이벤트는 페이지가 만들 수 없다. 읽기는 그 기록으로 「받았다」 를, 지금 칸으로 「그대로 두었다」(`kept`)를 따로 답한다. 페이지가 더 앞의
+//!   캡처 듣는 이(창·조상)에서 이벤트를 멈추거나 먼저 비우면 기록이 없거나 다르다 — 그때는 예전처럼 지금 칸으로 판단한다(성공으로 속이지 않는다).
 //! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다.
 //! - 남는 틈(문서로 받아들인 것): 확인과 넣기 사이에 페이지가 같은 문서 안에서 노드를 바꾸면 파일은 떨어진 노드로 간다 — 같은 출처(사용자가
 //!   승인한 그 문서)이고, 확인이 「removed」 로 실패를 알린다.
@@ -35,16 +42,20 @@ pub const single_reason = "the file input takes one file — give one file, or u
 pub const frame_reason = "elements inside frames are not supported yet";
 pub const detached_reason = "the file input is not in the page";
 pub const page_changed_reason = "the page changed while waiting for approval — no file was set; run upload again";
-pub const removed_after_reason = "the file input was removed from the page when the files were set — the page did not keep them";
-pub const mismatch_reason = "the page did not get the files as approved (the input kept a different list) — check the page before trying again";
+pub const removed_after_reason = "the file input was removed from the page before maru saw the files arrive — the page may not have them; check the page before trying again";
+pub const mismatch_reason = "the page did not get the files as approved (the file input held a different list when they were set) — check the page before trying again";
 pub const check_failed_reason = "could not check the file input";
+pub const unseen_reason = "maru did not see the page receive the files (no input or change event reached the file input) and the input does not hold them now — check the page before trying again";
 
 /// 격리 world 이름 — 확인마다 새로 만든다(옛 문서의 context 를 쓰지 않게).
 const world_name = "maru-w9c-upload";
+/// 넣을 때의 목록을 적는 자리(격리 world 의 `globalThis` — 페이지는 보지 못한다) — 뒤에 요청 번호.
+const snapshot_key = "maru-w9c-upload-";
 
-/// 확인 함수(격리 world — 프로토타입 getter 로 읽는다: DOM clobbering). 인자 n = 넣을 파일 수.
+/// 확인 함수(격리 world — 프로토타입 getter 로 읽는다: DOM clobbering). 인자 n = 넣을 파일 수. 승인 뒤(arm 참)에는 통과하면 그 칸에 캡처
+/// 단계의 `input`·`change` 듣는 이를 달아, 그 칸에 닿은 진짜 이벤트마다(둘까지) 그때의 목록(이름·크기)을 격리 world 의 `globalThis[key]` 에 적는다.
 const check_js =
-    "function(n){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;" ++
+    "function(n,arm,key){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;" ++
     "if(!(t instanceof Element))return 'not file';" ++
     "if(G(Node.prototype,'ownerDocument').call(t)!==document)return 'frame';" ++
     "if(!G(Node.prototype,'isConnected').call(t))return 'detached';" ++
@@ -52,17 +63,24 @@ const check_js =
     "if(G(HTMLInputElement.prototype,'disabled').call(t)||Element.prototype.matches.call(t,':disabled'))return 'disabled';" ++
     "if(G(HTMLInputElement.prototype,'webkitdirectory').call(t))return 'directory';" ++
     "if(n>1&&!G(HTMLInputElement.prototype,'multiple').call(t))return 'single';" ++
+    "if(arm){var D=G(HTMLInputElement.prototype,'files'),L=G(FileList.prototype,'length'),I=FileList.prototype.item,N=G(File.prototype,'name'),Z=G(Blob.prototype,'size');" ++
+    "var s={seen:[]};s.h=function(e){if(e.isTrusted!==true||e.target!==t||s.seen.length>=2)return;var f=D.call(t),l=[];" ++
+    "if(f)for(var i=0,c=L.call(f);i<c;i++){var x=I.call(f,i);l.push([N.call(x),Z.call(x)])}s.seen.push(l)};" ++
+    "var A=EventTarget.prototype.addEventListener;A.call(t,'input',s.h,true);A.call(t,'change',s.h,true);globalThis[key]=s}" ++
     "return 'ok'}";
 
-/// 넣은 뒤 읽기(같은 objectId) — 붙어 있나·수·이름·크기.
+/// 넣은 뒤 읽기(같은 objectId) — 듣는 이를 떼고, 넣을 때 적은 목록(받았나)과 지금 칸(그대로 두었나 — 붙어 있고 같은 목록)을 견준다:
+/// `ok`(지금 칸이 같다)·`dropped`(넣을 때 같았는데 지금은 아니다 — 페이지가 받은 뒤 비웠다)·`mismatch`(넣을 때 다른 목록)·`removed`(기록 없이
+/// 떨어졌다)·`unseen`(기록 없이 다른 목록).
 const verify_js =
-    "function(names,sizes){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;" ++
-    "if(!G(Node.prototype,'isConnected').call(t))return 'removed';" ++
-    "var f=G(HTMLInputElement.prototype,'files').call(t);if(!f)return 'mismatch';" ++
-    "if(G(FileList.prototype,'length').call(f)!==names.length)return 'mismatch';" ++
-    "for(var i=0;i<names.length;i++){var x=FileList.prototype.item.call(f,i);" ++
-    "if(G(File.prototype,'name').call(x)!==names[i]||G(Blob.prototype,'size').call(x)!==sizes[i])return 'mismatch'}" ++
-    "return 'ok'}";
+    "function(names,sizes,key){var G=function(p,k){return Object.getOwnPropertyDescriptor(p,k).get};var t=this;var s=globalThis[key];" ++
+    "var D=G(HTMLInputElement.prototype,'files'),L=G(FileList.prototype,'length'),I=FileList.prototype.item,N=G(File.prototype,'name'),Z=G(Blob.prototype,'size');" ++
+    "if(s){var R=EventTarget.prototype.removeEventListener;R.call(t,'input',s.h,true);R.call(t,'change',s.h,true);delete globalThis[key]}" ++
+    "var same=function(l){if(!l||l.length!==names.length)return false;for(var i=0;i<l.length;i++)if(l[i][0]!==names[i]||l[i][1]!==sizes[i])return false;return true};" ++
+    "var now=null;if(G(Node.prototype,'isConnected').call(t)){var f=D.call(t);now=[];if(f)for(var i=0,c=L.call(f);i<c;i++){var x=I.call(f,i);now.push([N.call(x),Z.call(x)])}}" ++
+    "if(same(now))return 'ok';" ++
+    "if(s&&s.seen.length){for(var j=0;j<s.seen.length;j++)if(same(s.seen[j]))return 'dropped';return 'mismatch'}" ++
+    "return now===null?'removed':'unseen'}";
 
 const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify, release };
 
@@ -246,6 +264,9 @@ pub const Op = struct {
                 const oid = stringAt(v, &.{ "object", "objectId" }) orelse return done(gpa, .failed, if (self.phase == .post) page_changed_reason else detached_reason);
                 try replace(gpa, &self.object, oid);
                 self.stage = .check;
+                // 승인 뒤에는 듣는 이를 단다(넣을 때 받은 목록을 적는다) — 모달 전에는 페이지에 아무것도 달지 않는다.
+                if (self.phase == .post)
+                    return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{d}}},{{\"value\":true}},{{\"value\":\"" ++ snapshot_key ++ "{d}\"}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}), self.count, self.id });
                 return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}), self.count });
             },
             .check => {
@@ -264,8 +285,11 @@ pub const Op = struct {
                 if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .failed, mismatch_reason);
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
                 if (std.mem.eql(u8, verdict, "removed")) return self.releaseThen(gpa, .failed, removed_after_reason);
-                if (!std.mem.eql(u8, verdict, "ok")) return self.releaseThen(gpa, .failed, mismatch_reason);
-                const result = try self.successJson(gpa);
+                if (std.mem.eql(u8, verdict, "unseen")) return self.releaseThen(gpa, .failed, unseen_reason);
+                // 넣을 때 받은 목록이 맞으면 성공 — 그 뒤 페이지가 비웠으면 kept:false(다시 올리면 두 번 올라간다).
+                const kept = std.mem.eql(u8, verdict, "ok");
+                if (!kept and !std.mem.eql(u8, verdict, "dropped")) return self.releaseThen(gpa, .failed, mismatch_reason);
+                const result = try self.successJson(gpa, kept);
                 defer gpa.free(result);
                 return self.releaseThen(gpa, .success, result);
             },
@@ -304,6 +328,7 @@ pub const Op = struct {
 
     fn verifyStep(self: *Op, gpa: std.mem.Allocator) !Step {
         self.stage = .verify;
+        var key_buf: [snapshot_key.len + 20]u8 = undefined;
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
@@ -327,6 +352,10 @@ pub const Op = struct {
             for (self.staged.items) |f| s.write(f.size) catch |e| break :blk e;
             s.endArray() catch |e| break :blk e;
             s.endObject() catch |e| break :blk e;
+            s.beginObject() catch |e| break :blk e;
+            s.objectField("value") catch |e| break :blk e;
+            s.write(std.fmt.bufPrint(&key_buf, snapshot_key ++ "{d}", .{self.id}) catch unreachable) catch |e| break :blk e;
+            s.endObject() catch |e| break :blk e;
             s.endArray() catch |e| break :blk e;
             s.objectField("returnByValue") catch |e| break :blk e;
             s.write(true) catch |e| break :blk e;
@@ -335,8 +364,9 @@ pub const Op = struct {
         return .{ .call = .{ .method = "Runtime.callFunctionOn", .params = try aw.toOwnedSlice() } };
     }
 
-    /// 성공 답 — `{"origin","files":[{"name","size"}]}`(L2 `serializeUploadResult` 가 검사한다).
-    fn successJson(self: *const Op, gpa: std.mem.Allocator) ![]u8 {
+    /// 성공 답 — `{"origin","files":[{"name","size"}],"kept"}`(L2 `serializeUploadResult` 가 검사한다). `kept` 거짓 = 넣을 때 받았지만 그 뒤
+    /// 페이지가 칸을 비우거나 바꿨다.
+    fn successJson(self: *const Op, gpa: std.mem.Allocator, kept: bool) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
@@ -355,6 +385,8 @@ pub const Op = struct {
                 s.endObject() catch |e| break :blk e;
             }
             s.endArray() catch |e| break :blk e;
+            s.objectField("kept") catch |e| break :blk e;
+            s.write(kept) catch |e| break :blk e;
             s.endObject() catch |e| break :blk e;
         }) catch return error.OutOfMemory;
         return aw.toOwnedSlice();

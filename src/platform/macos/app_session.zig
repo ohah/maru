@@ -10950,8 +10950,12 @@ pub const AppSession = struct {
         return d.approved;
     }
 
-    /// W9c③: 답을 기다리던 요청이 끝났다(시한·철회·탭 닫힘) — 그 모달을 결정 없이 거둔다(다른 모달이면 그대로).
+    /// W9c③: 답을 기다리던 요청이 끝났거나(시한·철회·탭 닫힘) 다른 창에서 답이 났다 — 그 모달을 결정 없이 거둔다(다른 모달이면 그대로). 이 창에
+    /// 래치된 그 요청의 답도 버린다(두 창에서 답했으면 남은 쪽이 쓰이지 않고 남았다 — 적대 리뷰 1 회차).
     pub fn dismissUploadConfirm(self: *AppSession, async_id: u64) void {
+        if (self.upload_confirm_decision) |d| if (d.async_id == async_id) {
+            self.upload_confirm_decision = null;
+        };
         if (self.pending_confirm != .upload or self.pending_confirm.upload != async_id) return;
         self.pending_confirm = .none;
         self.chrome_host.confirm.dismiss();

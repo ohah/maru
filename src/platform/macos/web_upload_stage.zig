@@ -5,8 +5,10 @@
 //!   거절, `O_NONBLOCK` 이라 FIFO 를 열다 멈추지 않는다) → `F_GETPATH`(모달이 보일 실제 경로 — 연 fd 의 것) → 앞부분 4 KiB. fd 를 쥔 채로
 //!   둔다. realpath 뒤 마지막 이름이 링크로 바뀌면 `O_NOFOLLOW` 가 막는다(ELOOP).
 //! - **승인 뒤에 쥔 fd 에서 사본**(`stageFile`): `fclonefileat`(같은 볼륨 — 2 ms, 원본이 갈라질 때까지 공간을 쓰지 않는다), 안 되면 fd 에서
-//!   복사(다른 볼륨 — 상한 안에서만). 사본 뒤 fd 를 다시 `fstat` 해 (장치·inode·크기·mtime) 가 모달 때와 다르면 실패 — 「승인 뒤 파일이
-//!   바뀌었다」. 페이지는 사본만 본다: 승인 뒤 원본을 바꾸거나 링크를 바꿔도 닿지 않는다(실측 k9c — 원본 경로를 넘기면 바뀐 대상을 읽었다).
+//!   복사(다른 볼륨 — 상한 안에서만). 사본 뒤 fd 를 다시 `fstat` 해 (장치·inode·크기·mtime·ctime) 가 모달 때와 다르면 실패 — 「승인 뒤
+//!   파일이 바뀌었다」. ctime 은 사용자가 되돌릴 수 없다(적대 리뷰 1 회차 — 같은 길이로 제자리에서 바꿔 쓰고 `futimens` 로 mtime 을 되돌리면
+//!   mtime 만으로는 몰랐다). 복제는 원본의 파일 플래그(Finder 의 「잠금」 `uchg`)도 옮긴다 — 사본에서 푼다(못 풀면 0400 도, 지우기도 막혔다).
+//!   페이지는 사본만 본다: 승인 뒤 원본을 바꾸거나 링크를 바꿔도 닿지 않는다(실측 k9c — 원본 경로를 넘기면 바뀐 대상을 읽었다).
 //! - **사본 자리**: `<프로필>/upload-staging/<탭>/<op>/<i>/<이름>` — 폴더 0700, 파일 0400. 탭이 닫힐 때 그 탭의 폴더를 지우고(방문 기록
 //!   뒤로가기가 그 파일을 새 문서에 되살린다 — 실측 l), 이 실행이 처음 프로필을 잡을 때 전부 지운다. 뿌리는 한 번 `realpath` 한
 //!   정규 경로다(정규가 아닌 경로는 읽기가 깨지거나 렌더러가 죽었다 — 실측 k3·k4).
@@ -19,6 +21,11 @@ const builtin = @import("builtin");
 const display = @import("maru").session.web_upload_display;
 
 extern "c" fn fclonefileat(srcfd: c_int, dst_dirfd: c_int, dst: [*:0]const u8, flags: u32) c_int;
+extern "c" fn fchflags(fd: c_int, flags: c_uint) c_int;
+
+/// macOS 의 EOPNOTSUPP(102) — 소켓을 `open` 하면 이것이다. zig 의 `E.OPNOTSUPP` 는 ENOTSUP(45)라 이름이 없다(적대 리뷰 1 회차 — 소켓이
+/// 「열 수 없다」 로 샜다).
+const darwin_eopnotsupp: c_int = 102;
 
 /// 다른 볼륨에서 복사할 때 한 번의 호출이 쓸 수 있는 바이트(작성자 선택 1 GiB)와 한 탭이 쓸 수 있는 바이트(4 GiB) — 같은 볼륨의 복제는 세지 않는다.
 pub const copy_cap_per_call: u64 = 1 << 30;
@@ -35,6 +42,9 @@ pub const Prepared = struct {
     nlink: u64,
     mtime_sec: i64,
     mtime_nsec: i64,
+    /// 상태가 바뀐 시각 — 내용·mtime 을 바꾸면 움직이고 사용자가 되돌릴 수 없다(`futimens` 도 이것을 지금으로 바꾼다).
+    ctime_sec: i64,
+    ctime_nsec: i64,
     /// 앞부분(최대 `display.head_bytes`, 소유) — 엿보기.
     head: []u8,
 
@@ -101,7 +111,7 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8) !PrepareResult {
     const fd = std.c.open(real, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
     if (fd < 0) {
         const e = std.c._errno().*;
-        return .{ .refused = if (e == @intFromEnum(std.c.E.LOOP)) .swapped else if (e == @intFromEnum(std.c.E.NOENT)) .not_found else if (e == @intFromEnum(std.c.E.OPNOTSUPP) or e == @intFromEnum(std.c.E.NXIO)) .not_regular else .unreadable };
+        return .{ .refused = if (e == @intFromEnum(std.c.E.LOOP)) .swapped else if (e == @intFromEnum(std.c.E.NOENT)) .not_found else if (e == darwin_eopnotsupp or e == @intFromEnum(std.c.E.OPNOTSUPP) or e == @intFromEnum(std.c.E.NXIO)) .not_regular else .unreadable };
     }
     var keep = false;
     defer if (!keep) {
@@ -153,6 +163,8 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8) !PrepareResult {
         .nlink = st.nlink,
         .mtime_sec = st.mtimespec.sec,
         .mtime_nsec = st.mtimespec.nsec,
+        .ctime_sec = st.ctimespec.sec,
+        .ctime_nsec = st.ctimespec.nsec,
         .head = head_owned,
     } };
 }
@@ -206,8 +218,8 @@ pub fn stageFile(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, in
     return stageFileWith(gpa, root, tab, op, index, p, copy_budget, true);
 }
 
-/// `try_clone` 거짓 — 복제를 건너뛰고 복사한다(시험이 다른 볼륨의 길을 같은 볼륨에서 본다).
-fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, index: usize, p: *const Prepared, copy_budget: *u64, try_clone: bool) !StageResult {
+/// `try_clone` 거짓 — 복제를 건너뛰고 복사한다(시험이 다른 볼륨의 길을 같은 볼륨에서 본다 — 앱 시험도 복사 예산을 보려고 부른다).
+pub fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, index: usize, p: *const Prepared, copy_budget: *u64, try_clone: bool) !StageResult {
     var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     inline for (.{ "{s}/{d}", "{s}/{d}/{d}", "{s}/{d}/{d}/{d}" }, 0..) |fmt, depth| {
         const args = switch (depth) {
@@ -221,9 +233,7 @@ fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, in
     var dest_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dest = std.fmt.bufPrintZ(&dest_buf, "{s}/{d}/{d}/{d}/{s}", .{ root, tab, op, index, p.name() }) catch return .{ .failed = .io };
     var made = false;
-    defer if (!made) {
-        _ = std.c.unlink(dest.ptr);
-    };
+    defer if (!made) unlinkUnlocked(dest);
     if (!try_clone or fclonefileat(p.fd, std.c.AT.FDCWD, dest.ptr, 0) != 0) {
         const e = std.c._errno().*;
         // 같은 볼륨이 아니거나(EXDEV) 복제를 모르는 파일 시스템(ENOTSUP) — 복사한다. 그 밖의 실패는 그대로.
@@ -236,15 +246,34 @@ fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64, in
     const out = std.c.open(dest.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
     if (out < 0) return .{ .failed = .io };
     defer _ = std.c.close(out);
+    // 복제는 원본의 파일 플래그(`uchg` 등)를 옮긴다 — 풀지 않으면 0400 으로 못 바꾸고(EPERM) 지우지도 못한다(적대 리뷰 1 회차 실측: `cp -c` 의 사본이 `uchg`).
+    if (statOf(out)) |o| if (o.flags != 0 and fchflags(out, 0) != 0) return .{ .failed = .io };
     if (std.c.fchmod(out, 0o400) != 0) return .{ .failed = .io };
     const copied = statOf(out) orelse return .{ .failed = .io };
-    // 원본이 모달 때와 같은가(장치·inode·크기·mtime) — 승인 뒤 바뀌었으면 사본이 모달과 다른 내용일 수 있다.
+    // 원본이 모달 때와 같은가(장치·inode·크기·mtime·ctime) — 승인 뒤 바뀌었으면 사본이 모달과 다른 내용일 수 있다. ctime 은 같은 길이로 바꿔 쓰고
+    // mtime 을 되돌려도 움직인다(사용자가 정할 수 없다). 읽기(atime)는 ctime 을 움직이지 않는다.
     const now = statOf(p.fd) orelse return .{ .failed = .io };
-    if (now.dev != p.dev or now.ino != p.ino or now.size != @as(i64, @intCast(p.size)) or now.mtimespec.sec != p.mtime_sec or now.mtimespec.nsec != p.mtime_nsec)
+    if (now.dev != p.dev or now.ino != p.ino or now.size != @as(i64, @intCast(p.size)) or now.mtimespec.sec != p.mtime_sec or now.mtimespec.nsec != p.mtime_nsec or
+        now.ctimespec.sec != p.ctime_sec or now.ctimespec.nsec != p.ctime_nsec)
         return .{ .failed = .changed };
     if (copied.size != @as(i64, @intCast(p.size))) return .{ .failed = .changed };
     made = true;
     return .{ .ok = try gpa.dupe(u8, dest) };
+}
+
+/// 지운다 — 잠금(`uchg`)이 걸려 EPERM 이면 풀고 다시(링크는 따라가지 않는다).
+fn unlinkUnlocked(path: [:0]const u8) void {
+    if (std.c.unlink(path.ptr) == 0) return;
+    if (clearFlagsAt(std.c.AT.FDCWD, path)) _ = std.c.unlink(path.ptr);
+}
+
+/// `dir` 아래 `name` 의 파일 플래그를 푼다(링크는 따라가지 않는다). 풀었으면 참 — 플래그가 없었거나 열 수 없으면 거짓.
+fn clearFlagsAt(dir: c_int, name: [:0]const u8) bool {
+    const fd = std.c.openat(dir, name.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
+    if (fd < 0) return false;
+    defer _ = std.c.close(fd);
+    const st = statOf(fd) orelse return false;
+    return st.flags != 0 and fchflags(fd, 0) == 0;
 }
 
 fn copyFromFd(src: c_int, dest: [:0]const u8, size: u64) !bool {
@@ -295,6 +324,8 @@ pub fn wipeRoot(base: []const u8) void {
 
 fn removeAt(dir: c_int, name: [:0]const u8, depth: u8) void {
     if (std.c.unlinkat(dir, name.ptr, 0) == 0) return;
+    // 잠긴(`uchg`) 항목 — 풀고 다시(폴더면 플래그만 풀리고 아래에서 비운 뒤 지운다). 복제가 원본의 잠금을 옮겨 왔을 수 있다(적대 리뷰 1 회차).
+    if (clearFlagsAt(dir, name) and std.c.unlinkat(dir, name.ptr, 0) == 0) return;
     if (depth >= 8) return; // 우리가 만드는 깊이는 넷이다 — 남이 만든 깊은 나무를 끝없이 내려가지 않는다
     const sub = std.c.openat(dir, name.ptr, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
     if (sub < 0) return;
@@ -547,4 +578,100 @@ test "W9c③ 지우기: wipeRoot 는 upload-staging 전체를 지우고, 링크�
     const rz = try std.fmt.bufPrintZ(&rb, "{s}", .{root});
     try testing.expect(statPath(rz.ptr) == null);
     try testing.expect(statPath(t.join(&b1, "outside.txt").ptr) != null);
+}
+
+// ── W9c③ 적대 리뷰 1 회차 ─────────────────────────────────────────────────────────────────────────────────────
+
+extern "c" fn futimens(fd: c_int, times: *const [2]std.c.timespec) c_int;
+extern "c" fn chflags(path: [*:0]const u8, flags: c_uint) c_int;
+const uf_immutable: c_uint = 0x2; // UF_IMMUTABLE — Finder 의 「잠금」(`chflags uchg`)
+
+test "W9c③ 적대 리뷰 1 회차 재현 R1: 모달 동안 같은 길이로 제자리에서 바꿔 쓰고 mtime 을 되돌려도(futimens) 사본은 changed 로 실패한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    try t.write("a.txt", "meow meow meow\n");
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    var p = (try prepare(testing.allocator, t.join(&b1, "a.txt"))).ok;
+    defer p.deinit(testing.allocator);
+    // 에이전트가 같은 inode·같은 길이로 비밀을 써 넣고 mtime(과 atime)을 모달 때의 값으로 되돌린다 — 사용자는 바꿀 수 없는 ctime 만 움직인다.
+    const fd = std.c.open(t.join(&b1, "a.txt").ptr, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    try testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    try testing.expectEqual(@as(isize, 15), std.c.pwrite(fd, "SECRET-KEY-DATA", 15, 0));
+    const times = [2]std.c.timespec{ .{ .sec = p.mtime_sec, .nsec = p.mtime_nsec }, .{ .sec = p.mtime_sec, .nsec = p.mtime_nsec } };
+    try testing.expectEqual(@as(c_int, 0), futimens(fd, &times));
+    var budget: u64 = copy_cap_per_call;
+    const r = try stageFile(testing.allocator, root, 1, 2, 0, &p, &budget);
+    if (r == .ok) testing.allocator.free(r.ok);
+    try testing.expect(r == .failed and r.failed == .changed);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R2: Finder 로 잠근(uchg) 원본도 사본이 되고(복제가 잠금을 옮겨도 사본에서 푼다), 사본은 지울 수 있다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    try t.write("locked.txt", "LOCK");
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const src = t.join(&b1, "locked.txt");
+    try testing.expectEqual(@as(c_int, 0), chflags(src.ptr, uf_immutable));
+    defer _ = chflags(src.ptr, 0); // 시험 폴더를 지울 수 있게
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    var p = (try prepare(testing.allocator, src)).ok;
+    defer p.deinit(testing.allocator);
+    var budget: u64 = copy_cap_per_call;
+    const r = try stageFile(testing.allocator, root, 7, 8, 0, &p, &budget);
+    var zb: [std.fs.max_path_bytes]u8 = undefined;
+    const staged_z = try std.fmt.bufPrintZ(&zb, "{s}/7/8/0/locked.txt", .{root});
+    // 실패했어도 남은 것을 풀어 시험 폴더를 지울 수 있게 한다(고치기 전 — 잠긴 사본이 남았다).
+    defer _ = chflags(staged_z.ptr, 0);
+    switch (r) {
+        .ok => |path| testing.allocator.free(path),
+        .failed => return error.TestUnexpectedResult,
+    }
+    const st = statPath(staged_z.ptr) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u32, 0), @as(u32, st.flags) & uf_immutable);
+    try testing.expectEqual(@as(u16, 0o400), st.mode & 0o777);
+    // 탭이 닫히면 지운다 — 잠긴 것이 남으면 안 된다.
+    removeUnder(root, "7");
+    try testing.expect(statPath(staged_z.ptr) == null);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R2b: 지우기는 잠금(uchg)이 걸린 항목도 풀고 지운다(남이 놓은 잠긴 사본이 탭 폴더를 못 지우게 하지 않는다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    var db: [std.fs.max_path_bytes]u8 = undefined;
+    try testing.expectEqual(@as(c_int, 0), std.c.mkdir((try std.fmt.bufPrintZ(&db, "{s}/5", .{root})).ptr, 0o700));
+    var fb: [std.fs.max_path_bytes]u8 = undefined;
+    const f = try std.fmt.bufPrintZ(&fb, "{s}/5/x.txt", .{root});
+    const fd = std.c.open(f.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o400));
+    try testing.expect(fd >= 0);
+    _ = std.c.close(fd);
+    try testing.expectEqual(@as(c_int, 0), chflags(f.ptr, uf_immutable));
+    defer _ = chflags(f.ptr, 0);
+    removeUnder(root, "5");
+    try testing.expect(statPath(f.ptr) == null);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R6: 유닉스 소켓은 「정규 파일이 아니다」(EOPNOTSUPP 102 — zig 의 E.OPNOTSUPP 는 45 라 「열 수 없다」 로 샜다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const path = t.join(&b1, "s.sock");
+    const sock = std.c.socket(std.c.AF.UNIX, std.c.SOCK.STREAM, 0);
+    try testing.expect(sock >= 0);
+    defer _ = std.c.close(sock);
+    var addr: std.c.sockaddr.un = .{ .path = undefined };
+    @memset(&addr.path, 0);
+    if (path.len >= addr.path.len) return error.SkipZigTest; // 임시 폴더 경로가 너무 길다
+    @memcpy(addr.path[0..path.len], path);
+    try testing.expectEqual(@as(c_int, 0), std.c.bind(sock, @ptrCast(&addr), @sizeOf(std.c.sockaddr.un)));
+    try expectRefused(try prepare(testing.allocator, path), .not_regular);
 }

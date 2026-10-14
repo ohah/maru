@@ -140,6 +140,10 @@ pub const Request = union(enum) {
     }
 };
 
+/// W9c③ 적대 리뷰 1 회차: 넣을 때 페이지가 파일을 받았지만(그때의 목록이 맞았다) 그 뒤 페이지 스스로 칸을 비우거나 바꿨다(`kept:false`) — 다시 올리면
+/// 두 번 올라간다.
+pub const upload_not_kept_note = "note: the page received the files, then its own handler cleared or replaced the file input (kept: false) — this is the page's behavior; do not upload again";
+
 /// 한 번에 올리는 파일 수 상한 — 서버(`control_browser.max_upload_files`)와 같다(모달이 파일을 모두 보여야 한다).
 pub const max_upload_files = 10;
 
@@ -1648,6 +1652,8 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                 try writePageText(gpa, w, strField(o.get("name")), true);
                 try w.print(" ({d} bytes)\n", .{intField(o.get("size")) orelse 0});
             }
+            // 받았지만 페이지가 그 뒤 칸을 비웠다 — 다시 올리지 말라고(두 번 올라간다).
+            if (result.get("kept")) |k| if (k == .bool and !k.bool) try w.writeAll(upload_not_kept_note ++ "\n");
         },
         .handle_dialog => {
             try w.writeAll("answered ");
@@ -3862,7 +3868,7 @@ test "W9c③: upload 요청은 browser.upload {id, 로케이터, files} — 상�
 test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 표시 안전하게), 거부·물을 창 없음은 그 글만(인가 안내 없이), 다른 -32002 는 안내를 붙인다" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    const ok = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"in\u{202e}voice.exe\",\"size\":5}]}}";
+    const ok = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"in\u{202e}voice.exe\",\"size\":5}],\"kept\":true}}";
     try testing.expect(try renderResponse(testing.allocator, ok, .upload, &out.writer));
     try testing.expectEqualStrings("uploaded 2 files to https://a.test\n  \"a.txt\" (3 bytes)\n  \"invoice.exe\" (5 bytes)\n", out.written());
     out.clearRetainingCapacity();
@@ -3873,4 +3879,16 @@ test "W9c③: upload 결과 — 출처와 파일마다 이름·크기(이름은 
     const plain = "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32002,\"message\":\"Unauthorized\"}}";
     try testing.expect(!try renderResponse(testing.allocator, plain, .upload, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "hint: browser requests are allowed") != null);
+}
+
+test "W9c③ 적대 리뷰 1 회차 재현 R9c: upload 결과의 kept:false — 페이지가 받은 뒤 칸을 비웠다고 알리고 다시 올리지 말라고 한다" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const dropped = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}}";
+    try testing.expect(try renderResponse(testing.allocator, dropped, .upload, &out.writer));
+    try testing.expectEqualStrings("uploaded 1 file to https://a.test\n  \"a.txt\" (3 bytes)\n" ++ upload_not_kept_note ++ "\n", out.written());
+    out.clearRetainingCapacity();
+    const kept = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true}}";
+    try testing.expect(try renderResponse(testing.allocator, kept, .upload, &out.writer));
+    try testing.expectEqualStrings("uploaded 1 file to https://a.test\n  \"a.txt\" (3 bytes)\n", out.written());
 }

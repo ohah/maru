@@ -13,14 +13,15 @@
 //! 있다(§3.8) — 크기 상한을 두고, 실패는 **무색**으로 떨어진다(§5: *"grammar가 없으면 무색"*).
 //! 그래서 이 모듈의 모든 진입점은 실패를 오류가 아니라 **빈 결과**로 돌려준다.
 //!
-//! **쿼리 predicate는 평가하지 않는다 — 한 범위에 캡처가 여럿 붙는다.** grammar의 `highlights.scm`은
-//! Neovim 관례를 따라 `#lua-match?` 같은 **호스트가 평가하는** 서술을 쓰는데(tree-sitter는 그것을
-//! 검사하지 않고 그대로 넘긴다), 우리는 평가기를 두지 않으므로 그 패턴이 **조건 없이** 걸린다.
-//! 실측: `// hello` 한 줄에 `comment`·`spell`·`comment.documentation` 셋이 붙는다(`comment.documentation`
-//! 패턴의 `^//!` 조건이 안 걸러진 결과다). 소비처가 캡처→색을 **다대일**로 사상하므로(§5.3) 셋이
-//! 같은 `comment`로 접히면 화면은 옳다 — 구분이 필요해지면 그때 평가기를 세운다.
+//! **쿼리 predicate는 우리가 평가한다**(`predicate.zig` — 계획 editor-bundled-languages BLP). grammar의 `highlights.scm`은
+//! Neovim 관례를 따라 `#match?`·`#eq?`·`#any-of?`·`#lua-match?` 같은 **호스트가 평가하는** 서술을 쓰고, tree-sitter는 그것을
+//! 검사하지 않고 그대로 넘긴다. 처음에는 평가기를 두지 않아 그 패턴이 **조건 없이** 걸렸고, 겹친 캡처는 마지막이 이겨(§5.3)
+//! Python·Ruby 의 식별자가 전부 숫자 색이었다(2026-10-14 실측 — 「대문자로 시작하면 상수」가 안 걸러졌다). 조건이 안 맞는 매치는
+//! 통째로 버린다(`ts_query_cursor_remove_match`). 모르는 술어(`#set!`·`#is-not?` …)와 모르는 정규식 구문은 통과다 — 종전과 같다.
+//! 한 범위에 캡처가 여럿 붙는 것은 여전하다(조건이 맞는 패턴끼리) — 마지막이 이긴다.
 
 const std = @import("std");
+const predicate = @import("predicate.zig");
 
 const c = @cImport({
     @cInclude("tree_sitter/api.h");
@@ -340,7 +341,23 @@ fn collect(
 
     var match: c.TSQueryMatch = undefined;
     var capture_index: u32 = 0;
+    // 술어를 통과한 매치 — 한 매치의 캡처가 여럿이면(`@a @b`) 다시 재지 않는다. 떨어진 매치는 커서에서 지운다.
+    var passed: [16]u32 = undefined;
+    var n_passed: usize = 0;
+    var ring: usize = 0;
     while (c.ts_query_cursor_next_capture(cursor, &match, &capture_index)) {
+        const known = for (passed[0..n_passed]) |id| {
+            if (id == match.id) break true;
+        } else false;
+        if (!known) {
+            if (!matchPasses(query, match, source)) {
+                c.ts_query_cursor_remove_match(cursor, match.id);
+                continue;
+            }
+            passed[ring] = match.id;
+            ring = (ring + 1) % passed.len;
+            n_passed = @min(n_passed + 1, passed.len);
+        }
         // `capture_index`의 범위를 검사하지 않는다 — `api.h`가 *"its index within the match's
         // capture list"*라고 **계약으로** 못박는다. 검사를 넣어 뒀다가 적대적 검증에서 지웠다:
         // 지워도 어떤 판정자도 달라지지 않는 **죽은 가드**였고, 죽은 가드는 "여기서 뭔가 어긋날
@@ -363,6 +380,71 @@ fn collect(
             .capture = name_ptr[0..name_len],
         }) catch return; // OOM이면 여기까지가 색이다 — 그린 것은 맞는 색이다
     }
+}
+
+/// 매치가 그 패턴의 술어를 다 만족하는가(`predicate.zig`). 술어가 없으면 참.
+fn matchPasses(query: *c.TSQuery, match: c.TSQueryMatch, source: []const u8) bool {
+    var count: u32 = 0;
+    const steps_ptr = c.ts_query_predicates_for_pattern(query, match.pattern_index, &count);
+    if (count == 0) return true;
+    const steps = steps_ptr[0..count];
+    var i: usize = 0;
+    while (i < steps.len) {
+        var j = i;
+        while (j < steps.len and steps[j].type != c.TSQueryPredicateStepTypeDone) j += 1;
+        if (!predicatePasses(query, steps[i..j], match, source)) return false;
+        i = j + 1;
+    }
+    return true;
+}
+
+fn queryString(query: *c.TSQuery, id: u32) []const u8 {
+    var len: u32 = 0;
+    const ptr = c.ts_query_string_value_for_id(query, id, &len) orelse return "";
+    return ptr[0..len];
+}
+
+/// 매치 안의 그 캡처의 글자(첫 노드). 매치에 없으면(선택적 캡처) `null`.
+fn captureText(match: c.TSQueryMatch, capture_id: u32, source: []const u8) ?[]const u8 {
+    for (match.captures[0..match.capture_count]) |cap| {
+        if (cap.index != capture_id) continue;
+        const start = c.ts_node_start_byte(cap.node);
+        const end = @min(c.ts_node_end_byte(cap.node), @as(u32, @intCast(source.len)));
+        if (end < start) return null;
+        return source[start..end];
+    }
+    return null;
+}
+
+/// 술어 하나. 이름이 `not-` 로 시작하면 뒤집는다(`any-` 접두는 캡처 묶음용이라 첫 노드로 같게 본다). 모르는 이름·모양·캡처가 없는 것은
+/// 통과다 — 평가를 못 하면 종전(조건 없이 걸림)과 같게.
+fn predicatePasses(query: *c.TSQuery, steps: []const c.TSQueryPredicateStep, match: c.TSQueryMatch, source: []const u8) bool {
+    if (steps.len < 2 or steps[0].type != c.TSQueryPredicateStepTypeString) return true;
+    var name = queryString(query, steps[0].value_id);
+    const negate = std.mem.startsWith(u8, name, "not-");
+    if (negate) name = name["not-".len..];
+    if (std.mem.startsWith(u8, name, "any-") and !std.mem.eql(u8, name, "any-of?")) name = name["any-".len..];
+    if (steps[1].type != c.TSQueryPredicateStepTypeCapture) return true;
+    const text = captureText(match, steps[1].value_id, source) orelse return true;
+    const result: bool = if (std.mem.eql(u8, name, "eq?")) blk: {
+        if (steps.len != 3) return true;
+        const other: []const u8 = switch (steps[2].type) {
+            c.TSQueryPredicateStepTypeString => queryString(query, steps[2].value_id),
+            c.TSQueryPredicateStepTypeCapture => captureText(match, steps[2].value_id, source) orelse return true,
+            else => return true,
+        };
+        break :blk std.mem.eql(u8, text, other);
+    } else if (std.mem.eql(u8, name, "any-of?")) blk: {
+        for (steps[2..]) |st| {
+            if (st.type != c.TSQueryPredicateStepTypeString) return true;
+            if (std.mem.eql(u8, text, queryString(query, st.value_id))) break :blk true;
+        }
+        break :blk false;
+    } else if (std.mem.eql(u8, name, "match?") or std.mem.eql(u8, name, "lua-match?")) blk: {
+        if (steps.len != 3 or steps[2].type != c.TSQueryPredicateStepTypeString) return true;
+        break :blk predicate.search(queryString(query, steps[2].value_id), std.mem.eql(u8, name, "lua-match?"), text) orelse return true;
+    } else return true;
+    return result != negate;
 }
 
 // ── provider(§5.3) ─────────────────────────────────────────────────────────────
@@ -1770,8 +1852,8 @@ test "SYN9 캡처 목록이 정확히 이것이다 — 순서·범위·이름까
     // 있으므로 이 목록이 흔들리는 것은 **grammar를 올렸다는 뜻**이고, 그때는 색 사상을 다시 봐야
     // 한다 — 깨지는 것이 이 판정자의 일이다.
     //
-    // `x` 하나에 넷이 붙는 것은 **머리말이 적어 둔 predicate 미평가**의 귀결이다. 그것이 여기
-    // 박혀 있으므로, 나중에 평가기를 세우면 이 목록이 줄면서 그 변화가 눈에 띈다.
+    // `x` 에는 `variable` 하나다. 술어를 평가하기 전에는 넷이 붙었다 — `type`(`#lua-match? "^[A-Z_]…"`)·`constant`
+    // (`"^[A-Z][A-Z_0-9]+$"`)·`variable.builtin`(`#eq? "_"`)이 조건 없이 걸렸다. 평가기(BLP)가 서면서 이 목록이 줄었다.
     const allocator = std.testing.allocator;
     var spans: std.ArrayList(Span) = .empty;
     defer spans.deinit(allocator);
@@ -1782,9 +1864,6 @@ test "SYN9 캡처 목록이 정확히 이것이다 — 순서·범위·이름까
     const expected = [_]Span{
         .{ .start = 0, .end = 5, .capture = "keyword" },
         .{ .start = 6, .end = 7, .capture = "variable" },
-        .{ .start = 6, .end = 7, .capture = "type" },
-        .{ .start = 6, .end = 7, .capture = "constant" },
-        .{ .start = 6, .end = 7, .capture = "variable.builtin" },
         .{ .start = 8, .end = 9, .capture = "operator" },
         .{ .start = 10, .end = 11, .capture = "number" },
         .{ .start = 11, .end = 12, .capture = "punctuation.delimiter" },
@@ -3263,4 +3342,41 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
     try std.testing.expectEqual(@as(usize, 1), index.leaves.items.len);
     try std.testing.expectEqual(@as(u32, 5), index.leaves.items[0].start);
     try std.testing.expect(index.leaves.items[0].open);
+}
+
+test "PRD3 술어를 평가한다 — Python·Ruby·Lua 의 소문자 식별자에는 상수 캡처가 안 붙고 대문자 상수에는 붙는다, Make 는 `%` 패턴만 `string.regex`, Python 내장 함수는 `function.builtin` (계획 editor-bundled-languages BLP)" {
+    // 평가하기 전에는 조건 없이 걸려 식별자마다 마지막 캡처가 `constant`·`constant.builtin` 이었다 — 화면에서 모든 식별자가 숫자 색이었다.
+    const allocator = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+    const has = struct {
+        fn f(list: []const Span, src: []const u8, text: []const u8, cap: []const u8) bool {
+            for (list) |sp| if (std.mem.eql(u8, src[sp.start..sp.end], text) and std.mem.eql(u8, sp.capture, cap)) return true;
+            return false;
+        }
+    }.f;
+    const Case = struct { lang: Language, src: []const u8, text: []const u8, cap: []const u8, want: bool };
+    const cases = [_]Case{
+        .{ .lang = .python, .src = "x = MAX + len(y)\n", .text = "x", .cap = "constant", .want = false },
+        .{ .lang = .python, .src = "x = MAX + len(y)\n", .text = "x", .cap = "constructor", .want = false },
+        .{ .lang = .python, .src = "x = MAX + len(y)\n", .text = "MAX", .cap = "constant", .want = true },
+        .{ .lang = .python, .src = "x = MAX + len(y)\n", .text = "len", .cap = "function.builtin", .want = true },
+        .{ .lang = .python, .src = "x = MAX + foo(y)\n", .text = "foo", .cap = "function.builtin", .want = false },
+        .{ .lang = .ruby, .src = "x = y + Z\n", .text = "y", .cap = "constant.builtin", .want = false },
+        .{ .lang = .lua, .src = "local a = b + C_D\n", .text = "b", .cap = "constant", .want = false },
+        .{ .lang = .lua, .src = "local a = b + C_D\n", .text = "C_D", .cap = "constant", .want = true },
+        .{ .lang = .make, .src = "%.o: %.c main.c\n\techo\n", .text = "%.o", .cap = "string.regex", .want = true },
+        .{ .lang = .make, .src = "%.o: %.c main.c\n\techo\n", .text = "main.c", .cap = "string.regex", .want = false },
+        .{ .lang = .zig, .src = "const x = 1;\n", .text = "x", .cap = "constant", .want = false },
+        .{ .lang = .zig, .src = "const X_Y = 1;\n", .text = "X_Y", .cap = "constant", .want = true },
+    };
+    for (cases) |k| {
+        errdefer std.debug.print("PRD3 {s} '{s}' @{s} want={}\n", .{ @tagName(k.lang), k.text, k.cap, k.want });
+        highlights(allocator, k.lang, k.src, &spans);
+        try std.testing.expectEqual(k.want, has(spans.items, k.src, k.text, k.cap));
+    }
+}
+
+test {
+    _ = predicate; // 술어 판정자(`PRD*`)도 이 모듈의 판정자 바이너리에서 돈다
 }

@@ -1,5 +1,9 @@
 # 개발 명령
 
+- Runtime 종료 tracker close 진단과 정상 cleanup 회귀: `zig build test-session-host-ended-tracker-diagnostics`.
+  실제 Client/Slot의 slot identity·tracker identity·부분 전송·stream accounting 오류와 첫 close 보존,
+  정상 runtime 종료 cleanup을 Debug·ReleaseFast에서 검증한다. 실제 GUI/원래 장애의 오류 원인 확인은 별도다.
+
 ## 에디터 CLI
 
 `maru editor open 'src/file 한글.zig' -l 42 -c 7`은 macOS 기본 Maru 앱에 파일을

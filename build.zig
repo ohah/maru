@@ -10651,6 +10651,25 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "maru", .module = maru_mod }},
         }),
     });
+    const ended_tracker_diagnostics_step = b.step(
+        "test-session-host-ended-tracker-diagnostics",
+        "Verify ended tracker close diagnostics and healthy cleanup in Debug and ReleaseFast",
+    );
+    for ([_]std.builtin.OptimizeMode{ .Debug, .ReleaseFast }) |diagnostics_optimize| {
+        const diagnostics_tests = addProjectTest(b, .{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/platform/macos/session_host/connection_turn.zig"),
+                .target = target,
+                .optimize = diagnostics_optimize,
+                .link_libc = true,
+                .imports = &.{.{ .name = "maru", .module = maru_mod }},
+            }),
+            .filters = &.{ "ended tracker cleanup retains exact close site and error", "missing runtime converges attachment identity tracker and queued screen in one turn" },
+        });
+        const run_diagnostics_tests = b.addRunArtifact(diagnostics_tests);
+        run_diagnostics_tests.addArg("--maru-expect-tests=2");
+        ended_tracker_diagnostics_step.dependOn(&run_diagnostics_tests.step);
+    }
     const session_host_p5b2b3_step = b.step(
         "test-session-host-p5b2b3",
         "Verify same-connection partial screen-batch pressure isolation",

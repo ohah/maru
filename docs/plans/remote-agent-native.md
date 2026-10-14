@@ -385,6 +385,13 @@ integrity 보호를 끄거나 임의의 재접속 성공으로 처리하지 않�
 
 ### Runtime 종료·observer 거부 GUI 회귀 검증
 
+후속 원인 진단은 `removeEndedTracker`의 slot 조회·tracker purge·stream accounting
+실패에 기존 close 진단의 site와 실제 오류 이름을 남긴다. 보존된 실행 파일의 반환 주소는
+purge 실패 갈래까지 특정했지만 당시 `Stale`과 `PartialFrame`은 구분하지 못했다.
+실제 Client/Slot 회귀 검사는 두 purge 오류와 accounting 오류를 발생시켜 진단을 확인하고,
+첫 close 사유 보존 및 `PartialFrame` fail-close를 유지한다. GUI 재실행과 원래 장애의
+오류 이름 확인은 별도 증거로 남기며, 화면 잠금 동안의 단위 검사를 GUI 검증으로 세지 않는다.
+
 제품 수정 #4448의 다음 검증은 실제 GUI coordinator를 통과한다. 별도 소스 복사본에서만
 테스트 소유 연결에 실제 `shutdown`을 실행하고, replacement 게시 후 observer 준비 직전에
 짧게 대기한다. 외부 CLI `runtime end --yes`로 동일 runtime을 종료한 뒤 대기를 해제한다.

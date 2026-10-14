@@ -226,6 +226,67 @@ pub const ParseError = error{
 
 /// 표시해도 안전한 글만 `out` 에 — C0·DEL·C1 제어 문자, 양방향 제어 글자, 줄·문단 구분, interlinear, tag 글자를 뺀다(서버가 보낸 페이지
 /// 글을 터미널에 찍을 때). 쓴 바이트 수. `web_cdp_locate.displaySafe` 와 같다(둘을 함께 고친다).
+/// 터미널에 그대로 내면 안 되는 코드 포인트(제어·양방향·줄 구분·태그 — 페이지 글이 화면을 속이지 못하게).
+fn displayUnsafe(code: u21) bool {
+    return code < 0x20 or (code >= 0x7f and code <= 0x9f) or code == 0x061C or code == 0x200E or code == 0x200F or
+        (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069) or code == 0x2028 or code == 0x2029 or
+        (code >= 0xFFF9 and code <= 0xFFFB) or (code >= 0xE0000 and code <= 0xE007F);
+}
+
+/// JSON 값을 한 줄로 — 문자열의 `displayUnsafe` 글자는 `\uXXXX` 로 쓴다(값은 그대로, 터미널엔 보이지 않는 글자가 가지 않는다 — W9a③ 적대
+/// 리뷰 8 회차: get-cookies 가 페이지가 정한 C1 CSI·RLO 를 그대로 냈다). 깨진 UTF-8 바이트는 U+FFFD.
+fn writeDisplaySafeJson(w: *std.Io.Writer, value: std.json.Value) std.Io.Writer.Error!void {
+    switch (value) {
+        .string => |str| {
+            try w.writeByte('"');
+            var i: usize = 0;
+            while (i < str.len) {
+                const len = std.unicode.utf8ByteSequenceLength(str[i]) catch 1;
+                const code: u21 = if (i + len <= str.len) std.unicode.utf8Decode(str[i .. i + len]) catch 0xFFFD else 0xFFFD;
+                const n = if (i + len <= str.len) len else str.len - i;
+                if (code == '"' or code == '\\') {
+                    try w.writeByte('\\');
+                    try w.writeByte(@intCast(code));
+                } else if (displayUnsafe(code)) {
+                    if (code > 0xFFFF) {
+                        const v = code - 0x10000;
+                        try w.print("\\u{x:0>4}\\u{x:0>4}", .{ 0xD800 + (v >> 10), 0xDC00 + (v & 0x3FF) });
+                    } else try w.print("\\u{x:0>4}", .{code});
+                } else if (code == 0xFFFD and !(n == 3 and std.mem.eql(u8, str[i .. i + 3], "\xef\xbf\xbd"))) {
+                    try w.writeAll("\xef\xbf\xbd");
+                } else try w.writeAll(str[i .. i + n]);
+                i += n;
+            }
+            try w.writeByte('"');
+        },
+        .array => |a| {
+            try w.writeByte('[');
+            for (a.items, 0..) |item, k| {
+                if (k > 0) try w.writeByte(',');
+                try writeDisplaySafeJson(w, item);
+            }
+            try w.writeByte(']');
+        },
+        .object => |o| {
+            try w.writeByte('{');
+            var it = o.iterator();
+            var first = true;
+            while (it.next()) |e| {
+                if (!first) try w.writeByte(',');
+                first = false;
+                try writeDisplaySafeJson(w, .{ .string = e.key_ptr.* });
+                try w.writeByte(':');
+                try writeDisplaySafeJson(w, e.value_ptr.*);
+            }
+            try w.writeByte('}');
+        },
+        else => {
+            var s: std.json.Stringify = .{ .writer = w, .options = .{} };
+            s.write(value) catch return error.WriteFailed;
+        },
+    }
+}
+
 fn displaySafe(s: []const u8, out: []u8) usize {
     var n: usize = 0;
     var i: usize = 0;
@@ -239,10 +300,7 @@ fn displaySafe(s: []const u8, out: []u8) usize {
             i += len;
             continue;
         };
-        const unsafe = code < 0x20 or (code >= 0x7f and code <= 0x9f) or code == 0x061C or code == 0x200E or code == 0x200F or
-            (code >= 0x202A and code <= 0x202E) or (code >= 0x2066 and code <= 0x2069) or code == 0x2028 or code == 0x2029 or
-            (code >= 0xFFF9 and code <= 0xFFFB) or (code >= 0xE0000 and code <= 0xE007F);
-        if (!unsafe and n + len <= out.len) {
+        if (!displayUnsafe(code) and n + len <= out.len) {
             @memcpy(out[n .. n + len], s[i .. i + len]);
             n += len;
         }
@@ -1335,8 +1393,7 @@ pub fn renderResponse(gpa: std.mem.Allocator, response_bytes: []const u8, kind: 
                     return false;
                 },
             };
-            var s: std.json.Stringify = .{ .writer = w, .options = .{} };
-            s.write(std.json.Value{ .array = cookies }) catch return error.WriteFailed;
+            try writeDisplaySafeJson(w, .{ .array = cookies });
             try w.writeAll("\n");
         },
         .snapshot => {
@@ -3247,4 +3304,22 @@ test "W9a②: 스크립트 오류(-32006)는 종류·이름·메시지를 한 �
     var w: std.Io.Writer = .fixed(&buf);
     try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32006,\"message\":\"Script error\",\"data\":{\"kind\":\"execution\",\"name\":\"TypeError\",\"message\":\"x is not\\u001b[2J a function\",\"stack\":\"TypeError: …\",\"diagnostics_truncated\":false}}}", .exec, &w));
     try testing.expectEqualStrings("error: Script error (-32006)\nscript error (execution): TypeError: x is not[2J a function\n", w.buffered());
+}
+
+test "W9a③ 적대 리뷰 8 회차 재현: get-cookies 는 페이지가 정한 쿠키 이름·값의 C1 CSI(U+009B)·RLO(U+202E)를 터미널로 내지 않고 \\u 로 쓴다 — 값은 그대로, JSON 은 유효" {
+    var buf: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"cookies\":[{\"name\":\"n\\u202em\",\"value\":\"a\\u009b2Jb\"}]}}", .get_cookies, &w);
+    // get-local-storage·get-url 은 이것들을 뺀다(W9f 5 회차) — get-cookies 도 빼거나 \u 로 써야 한다.
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "\xe2\x80\xae") == null);
+    // 값은 잃지 않는다 — 파싱하면 원래 글자다, 한글은 그대로.
+    const line = std.mem.trimEnd(u8, w.buffered(), "\n");
+    const parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, line, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("n\u{202e}m", parsed.value.array.items[0].object.get("name").?.string);
+    try testing.expectEqualStrings("a\u{009b}2Jb", parsed.value.array.items[0].object.get("value").?.string);
+    w = .fixed(&buf);
+    _ = try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"cookies\":[{\"name\":\"한\",\"value\":\"\\\"q\"}]}}", .get_cookies, &w);
+    try testing.expectEqualStrings("[{\"name\":\"한\",\"value\":\"\\\"q\"}]\n", w.buffered());
 }

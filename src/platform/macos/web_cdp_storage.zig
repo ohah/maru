@@ -151,6 +151,8 @@ pub const Op = struct {
     }
 
     pub fn start(self: *Op, gpa: std.mem.Allocator) !Step {
+        // `blob:http(s)://…` 문서의 출처는 안쪽 주소의 출처다(적대 리뷰 8 회차: 「웹 출처 없음」 이라는 거짓 이유로 실패했다).
+        self.doc_url = innerOfBlob(self.doc_url);
         // userinfo(`http://u:p@host/`)는 출처가 아니다 — 떼고 그 호스트로 한다(WebKit 의 `url.host` 와 같다). 전에는 출처가 없다며 지우기·clearStorage 가
         // 아무것도 하지 않고 ok 였다(grant 는 그 호스트로 허가했다 — 적대 리뷰 2 회차). 자격 증명은 DevTools 로 넘기지 않는다.
         if (self.clean_url == null) if (try stripUserinfo(gpa, self.doc_url)) |u| {
@@ -265,7 +267,7 @@ pub const Op = struct {
                 // 그 탭의 주소가 확인한 주소의 출처인가 — 그사이 옮겨 갔으면 다른 출처의 저장소를 만지지 않는다(평가식이 `location.origin` 을 한 번
                 // 더 본다). about:blank·data: 는 출처가 없다.
                 const want = originOf(self.doc_url) orelse return done(gpa, .failed, not_http_reason);
-                const now_url = (try stripUserinfo(gpa, f.url)) orelse try gpa.dupe(u8, f.url);
+                const now_url = (try stripUserinfo(gpa, innerOfBlob(f.url))) orelse try gpa.dupe(u8, innerOfBlob(f.url));
                 defer gpa.free(now_url);
                 const now_origin = originOf(now_url) orelse return done(gpa, .failed, origin_moved_reason);
                 if (!std.ascii.eqlIgnoreCase(stripDefaultPort(now_origin), stripDefaultPort(want))) return done(gpa, .failed, origin_moved_reason);
@@ -598,6 +600,11 @@ fn jsonEscapedLen(s: []const u8) usize {
         else => 1,
     };
     return n;
+}
+
+/// `blob:<주소>` 면 안쪽 주소(그 문서의 출처를 가진다), 아니면 그대로.
+fn innerOfBlob(url: []const u8) []const u8 {
+    return if (std.ascii.startsWithIgnoreCase(url, "blob:")) url[5..] else url;
 }
 
 /// 주소의 userinfo(`u:p@`)를 뗀 사본 — 없으면 null.
@@ -1213,4 +1220,17 @@ test "W9a③ 적대 리뷰 6 회차 재현 F4: clearStorage 는 저장소를 지
     try testing.expect(!op.committed()); // 아직 나가지 않았다 — 철회·시한이면 보내지 않는다(7 회차)
     r1FreeStep(try op.feed(gpa, .{ .ok = "{}" }));
     try testing.expect(op.committed()); // 저장소를 지웠다 — 쿠키를 읽는 중도 끝까지
+}
+
+test "W9a③ 적대 리뷰 8 회차 재현 F2: blob:http(s) 문서의 localStorage 는 그 안쪽 출처로 — 전에는 「웹 출처 없음」(거짓)" {
+    const gpa = testing.allocator;
+    var op = try Op.init(gpa, .get_local_storage, "{\"key\":\"k\"}");
+    defer op.deinit(gpa);
+    op.doc_url = "blob:http://a.test/0f3c-uuid";
+    gpa.free(try expectCall(try op.start(gpa), "Target.getTargetInfo"));
+    const w = try expectCall(try op.feed(gpa, .{ .ok = "{\"targetInfo\":{\"targetId\":\"T\",\"url\":\"blob:http://a.test/0f3c-uuid\"}}" }), "Page.createIsolatedWorld");
+    gpa.free(w);
+    const e = try expectCall(try op.feed(gpa, .{ .ok = "{\"executionContextId\":4}" }), "Runtime.evaluate");
+    defer gpa.free(e);
+    try testing.expect(std.mem.indexOf(u8, e, "location.origin!==\\\"http://a.test\\\"") != null);
 }

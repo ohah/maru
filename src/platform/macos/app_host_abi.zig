@@ -12971,3 +12971,120 @@ test "W9a③ 적대 리뷰 7 회차 재현 F1b: clearStorage 의 첫 호출이 �
     cdpAdvance(run, try run.op.wake(allocator));
     try std.testing.expectEqual(before, cdp_calls_attempted); // 아직 아무것도 지우지 않았다 — 보내지 않아야 한다
 }
+
+fn w9a3R8Setup(target: u64, method: control_browser.BrowserMethod, req: []const u8, arg: []const u8, kind: web_cdp_ops.Kind, p: *control_server_mod.PendingRequest) !*CdpRun {
+    const host = control_pane_grant.GrantHost.init("a.test");
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = target, .scope = .browser_storage, .host = host });
+    p.* = .{ .request_bytes = req, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(p, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = target, .method = method, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = target, .scope = .browser_storage, .host = host } } });
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = target, .op = try web_cdp_ops.Op.init(allocator, kind, arg, id), .started = true };
+    try cdp_runs.append(allocator, run);
+    run.op.storage.?.doc_url = "https://a.test/";
+    return run;
+}
+
+const r8_two = "{\"cookies\":[{\"name\":\"s\",\"domain\":\"a.test\",\"path\":\"/\"},{\"name\":\"s\",\"domain\":\".a.test\",\"path\":\"/\"}]}";
+
+test "W9a③ 적대 리뷰 8 회차 회귀 T1: deleteCookie 첫 지우기가 busy 로 잠든 사이 철회 — 깨어나 보내지 않는다, 요청은 답한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer control_pane_grant_store.clearAll();
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9a3R8Setup(94, .delete_cookie, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.deleteCookie\",\"params\":{\"id\":94,\"name\":\"s\"}}", "{\"name\":\"s\"}", .delete_cookie, &p);
+    defer if (p.response) |r| allocator.free(r);
+    allocator.free((try run.op.start(allocator)).call.params);
+    allocator.free((try run.op.feed(allocator, .{ .ok = r8_two })).call.params); // 첫 지우기
+    const slept = try run.op.feed(allocator, .{ .not_sent = web_cdp_ops.busy_reason });
+    try std.testing.expect(slept == .sleep);
+    control_pane_grant_store.clearAll();
+    const before = cdp_calls_attempted;
+    cdpAdvance(run, try run.op.wake(allocator));
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    const r = p.response orelse return error.ExpectedResponse;
+    std.debug.print("\nR8-T1 response: {s}\n", .{r});
+}
+
+test "W9a③ 적대 리뷰 8 회차 회귀 T2: deleteCookie 첫 지우기의 답(ok) 뒤 철회 — 나머지는 보낸다(설계), 끝 답은 unauthorized" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer control_pane_grant_store.clearAll();
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9a3R8Setup(95, .delete_cookie, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.deleteCookie\",\"params\":{\"id\":95,\"name\":\"s\"}}", "{\"name\":\"s\"}", .delete_cookie, &p);
+    defer if (p.response) |r| allocator.free(r);
+    allocator.free((try run.op.start(allocator)).call.params);
+    allocator.free((try run.op.feed(allocator, .{ .ok = r8_two })).call.params);
+    control_pane_grant_store.clearAll();
+    const before = cdp_calls_attempted;
+    cdpAdvance(run, try run.op.feed(allocator, .{ .ok = "{}" }));
+    try std.testing.expectEqual(before + 1, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len); // 엔진이 없어 끝났다(시험)
+    const r = p.response orelse return error.ExpectedResponse;
+    std.debug.print("\nR8-T2 response: {s}\n", .{r});
+}
+
+test "W9a③ 적대 리뷰 8 회차 회귀 T3: deleteCookie 첫 지우기가 보내지 못함(대화상자) 뒤 철회 — 다음 지우기를 보내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer control_pane_grant_store.clearAll();
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9a3R8Setup(96, .delete_cookie, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.deleteCookie\",\"params\":{\"id\":96,\"name\":\"s\"}}", "{\"name\":\"s\"}", .delete_cookie, &p);
+    defer if (p.response) |r| allocator.free(r);
+    allocator.free((try run.op.start(allocator)).call.params);
+    allocator.free((try run.op.feed(allocator, .{ .ok = r8_two })).call.params);
+    control_pane_grant_store.clearAll();
+    const before = cdp_calls_attempted;
+    cdpAdvance(run, try run.op.feed(allocator, .{ .not_sent = web_cdp_ops.dialog_reason }));
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    const r = p.response orelse return error.ExpectedResponse;
+    std.debug.print("\nR8-T3 response: {s}\n", .{r});
+}
+
+test "W9a③ 적대 리뷰 8 회차 회귀 T4: clearStorage clearDataForOrigin 시한 — 곧 timeout, 더 보내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer control_pane_grant_store.clearAll();
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9a3R8Setup(97, .clear_storage, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.clearStorage\",\"params\":{\"id\":97}}", "", .clear_storage, &p);
+    defer if (p.response) |r| allocator.free(r);
+    allocator.free((try run.op.start(allocator)).call.params);
+    const before = cdp_calls_attempted;
+    cdpAdvance(run, try run.op.feed(allocator, .{ .timed_out = "DevTools did not answer in time" }));
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    const r = p.response orelse return error.ExpectedResponse;
+    std.debug.print("\nR8-T4 response: {s}\n", .{r});
+}
+
+test "W9a③ 적대 리뷰 8 회차 회귀 T5: setLocalStorage 주소 읽기 답 뒤 철회 — world·평가를 보내지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    defer control_pane_grant_store.clearAll();
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9a3R8Setup(98, .set_local_storage, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.setLocalStorage\",\"params\":{\"id\":98,\"key\":\"k\",\"value\":\"v\"}}", "{\"key\":\"k\",\"value\":\"v\"}", .set_local_storage, &p);
+    defer if (p.response) |r| allocator.free(r);
+    allocator.free((try run.op.start(allocator)).call.params);
+    control_pane_grant_store.clearAll();
+    const before = cdp_calls_attempted;
+    cdpAdvance(run, try run.op.feed(allocator, .{ .ok = "{\"targetInfo\":{\"targetId\":\"F\",\"url\":\"https://a.test/x\"}}" }));
+    try std.testing.expectEqual(before, cdp_calls_attempted);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+}

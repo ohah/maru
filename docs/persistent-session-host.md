@@ -17334,3 +17334,9 @@ transaction은 봉인된 보관 완료 상태로 전환하고 기존 retained-te
 모두 성공한 job만 즉시 파기하며, 실패 job은 Window close·process shutdown까지
 canonical rows와 replacement receipt를 유지하여 runtime-first로 회수한다. 실제 daemon
 driver의 보관 분류·정상 성공 파기·부분 성공 보존을 먼저 검사하고 GUI Quit을 재검증한다.
+
+Runtime 종료 tracker 정리에서 연결이 닫히는 경우는 기존 close 로그에 실제 오류 이름을
+남긴다. `ended_slot_lookup`은 admission 조회, `ended_purge_tracker`는 tracker purge,
+`ended_detach_stream`은 stream accounting 실패다. 첫 close 사유와 오류가 함께 보존되며
+`PartialFrame`은 기존대로 fail-close한다. 보존된 과거 로그의 이름 없는 purge 실패는
+이 계측으로 소급하여 `Stale` 또는 `PartialFrame`으로 확정하지 않는다.

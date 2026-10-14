@@ -1315,11 +1315,12 @@ pub const Client = struct {
     /// prefix and accounting without allocating, while preserving the shared client connection.
     fn removeEndedTracker(self: *Client, stream: u64) void {
         const tracker = self.trackers.fetchRemove(stream) orelse return;
-        const slot = self.reactor.get(self.admission) catch
-            return self.beginClose(.socket_error);
-        slot.purgeAndDestroyScreenTracker(tracker.value) catch
-            return self.beginClose(.socket_error);
-        slot.detachStream() catch return self.beginClose(.socket_error);
+        const slot = self.reactor.get(self.admission) catch |err|
+            return self.beginCloseAtErr("ended_slot_lookup", @errorName(err), .socket_error);
+        slot.purgeAndDestroyScreenTracker(tracker.value) catch |err|
+            return self.beginCloseAtErr("ended_purge_tracker", @errorName(err), .socket_error);
+        slot.detachStream() catch |err|
+            return self.beginCloseAtErr("ended_detach_stream", @errorName(err), .socket_error);
     }
 
     fn tryAdoptSubscriptionTurn(
@@ -4738,6 +4739,71 @@ test "tick tells its four partial_timeout sites apart by name" {
         try testing.expect(fx.client.isClosing());
         try testing.expectEqual(CloseReason.partial_timeout, fx.client.closeReason().?);
         try testing.expectEqualStrings("tick_partial_read_stalled", fx.client.closeSite());
+    }
+}
+
+// Exercise the real ended-stream cleanup failures: diagnostics must distinguish identity,
+// a prefix already written to the peer, and accounting without weakening fail-close.
+test "ended tracker cleanup retains exact close site and error" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const testing = std.testing;
+    for (0..4) |scenario| {
+        var fds: [2]c_int = undefined;
+        try testing.expectEqual(@as(c_int, 0), c.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &fds));
+        defer _ = c.close(fds[1]);
+        var registry_value = registry.TerminalRuntimeRegistry.init(testing.allocator);
+        defer registry_value.deinit();
+        var subscriptions = subscription_identity.Table.init(testing.allocator);
+        defer subscriptions.deinit();
+        const reactor = try slot_mod.ReactorCore.create(testing.allocator);
+        defer reactor.destroy();
+        const client = try Client.create(testing.allocator, fds[0], reactor, 916, &registry_value, &subscriptions, .{ .now_ns = 100 });
+        defer client.destroy();
+        const slot = try reactor.get(client.admission);
+        const tracker = try slot.createScreenTracker();
+        try client.trackers.put(testing.allocator, 7, tracker);
+        if (scenario != 2) try slot.attachStream();
+        switch (scenario) {
+            0 => try slot.purgeAndDestroyScreenTracker(tracker),
+            1 => {
+                try slot.enqueueScreen(tracker, "frame");
+                try slot.consumeWritten(1);
+            },
+            2, 3 => {},
+            else => unreachable,
+        }
+        const original_admission = client.admission;
+        if (scenario == 3) client.admission.key.slot_generation += 1;
+        client.removeEndedTracker(7);
+        client.admission = original_admission;
+        try testing.expect(client.isClosing());
+        try testing.expectEqual(CloseReason.socket_error, client.closeReason().?);
+        try testing.expectEqualStrings(switch (scenario) {
+            2 => "ended_detach_stream",
+            3 => "ended_slot_lookup",
+            else => "ended_purge_tracker",
+        }, client.closeSite());
+        try testing.expectEqualStrings(switch (scenario) {
+            0, 3 => "Stale",
+            1 => "PartialFrame",
+            2 => "CounterUnderflow",
+            else => unreachable,
+        }, client.closeError());
+        try testing.expect(!client.trackers.contains(7));
+        if (scenario == 1) try testing.expectEqualStrings("rame", slot.firstPending().?.bytes);
+        client.beginCloseAtErr("later_failure", "later_error", .resource_exhausted);
+        try testing.expectEqual(CloseReason.socket_error, client.closeReason().?);
+        try testing.expectEqualStrings(switch (scenario) {
+            2 => "ended_detach_stream",
+            3 => "ended_slot_lookup",
+            else => "ended_purge_tracker",
+        }, client.closeSite());
+        try testing.expectEqualStrings(switch (scenario) {
+            0, 3 => "Stale",
+            1 => "PartialFrame",
+            2 => "CounterUnderflow",
+            else => unreachable,
+        }, client.closeError());
     }
 }
 

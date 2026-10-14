@@ -380,4 +380,11 @@ test "HL18 번들 언어 확대 BL1 의 grammar(YAML·TOML·XML·DTD·Lua·Docke
     try std.testing.expect(roleFor("markup") == null and lookup("markup") != null);
     try std.testing.expect(roleFor("clean") == null and lookup("clean") != null);
     try std.testing.expectEqual(Role.function, roleFor("method.call").?);
+    // 색 역할도 잰다 — 이름이 표에 있는 것만으로는 옛 규약 이름이 엉뚱한 색이 돼도 모른다.
+    try std.testing.expectEqual(Role.property, roleFor("field").?);
+    try std.testing.expectEqual(Role.keyword, roleFor("preproc").?);
+    try std.testing.expectEqual(Role.keyword, roleFor("markup.heading").?);
+    try std.testing.expectEqual(Role.string, roleFor("markup.raw").?);
+    try std.testing.expectEqual(Role.property, roleFor("markup.link").?);
+    for ([_][]const u8{ "text.danger", "text.warning", "text.note" }) |n| try std.testing.expectEqual(Role.comment, roleFor(n).?);
 }

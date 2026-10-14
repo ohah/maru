@@ -54,9 +54,9 @@ const DocLines = struct {
     }
 };
 
-/// 공백만인 줄이 아래 블록 쪽인가 — VS Code 가 언어 설정에 `folding.offSide: true` 로 둔 언어 중 우리 번들 grammar 는 **Python · Markdown**
-/// 이다(원문 `extensions/{python,markdown-basics}/language-configuration.json`; YAML 도 그렇지만 grammar 가 없다). 처음엔 Python 하나로 적었다가
-/// 적대적 검증(2026-09-24)이 번들 18 개의 설정을 전부 열어 Markdown 을 찾았다.
+/// 공백만인 줄이 아래 블록 쪽인가 — VS Code 가 언어 설정에 `folding.offSide: true` 로 둔 언어 중 우리 번들 grammar 는 **Python · Markdown · YAML**
+/// 이다(원문 `extensions/{python,markdown-basics,yaml}/language-configuration.json` — YAML 은 번들 언어 확대 BL1 에서 grammar 가 왔다). 처음엔
+/// Python 하나로 적었다가 적대적 검증(2026-09-24)이 번들 18 개의 설정을 전부 열어 Markdown 을 찾았다.
 fn offsideOf(term: *const Term) bool {
     return switch (term.rt.editor_grammar) {
         // YAML 도 VS Code 가 `folding.offSide` 다(번들 언어 확대 BL1 — 원문 `extensions/yaml/language-configuration.json`).

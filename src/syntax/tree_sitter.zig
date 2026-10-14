@@ -236,7 +236,7 @@ const grammar_table = [_]GrammarEntry{
     // 심볼은 `CREATE …` 문이고 이름은 `object_reference`(스키마까지 — `symbolNameNode`)다.
     .{ .lang = .sql, .get = tree_sitter_sql, .scm = sql_highlights, .fold_kinds = &.{ "statement", "column_definitions", "subquery", "cte", "function_body", "list", "case", "block", "transaction" }, .symbol_kinds = &.{ "create_table", "create_view", "create_materialized_view", "create_function", "create_index", "create_type", "create_trigger", "create_schema", "create_sequence" } },
     // Dart 도 `folds.scm` 이 없다. 함수 본문(`function_body`)은 시그니처의 **다음 형제**라 심볼 범위는 `symbolEnd` 가 본문 끝까지 넓힌다.
-    .{ .lang = .dart, .get = tree_sitter_dart, .scm = dart_highlights, .fold_kinds = &.{ "class_body", "enum_body", "extension_body", "block", "switch_block", "switch_statement_case", "switch_statement_default", "switch_expression", "list_literal", "set_or_map_literal", "record_literal", "arguments", "formal_parameter_list" }, .symbol_kinds = &.{ "class_definition", "mixin_declaration", "extension_declaration", "enum_declaration", "function_signature", "getter_signature", "setter_signature", "constructor_signature", "factory_constructor_signature" } },
+    .{ .lang = .dart, .get = tree_sitter_dart, .scm = dart_highlights, .fold_kinds = &.{ "class_body", "enum_body", "extension_body", "block", "switch_block", "switch_statement_case", "switch_statement_default", "switch_expression", "list_literal", "set_or_map_literal", "record_literal", "arguments", "formal_parameter_list" }, .symbol_kinds = &.{ "class_definition", "mixin_declaration", "extension_declaration", "enum_declaration", "function_signature", "getter_signature", "setter_signature", "constructor_signature", "factory_constructor_signature", "constant_constructor_signature", "redirecting_factory_constructor_signature" } },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -776,7 +776,7 @@ pub const Provider = struct {
                     const end = symbolEnd(node);
                     try out.append(allocator, .{
                         .name_start = c.ts_node_start_byte(name_node),
-                        .name_end = c.ts_node_end_byte(name_node),
+                        .name_end = qualifiedNameEnd(name_node),
                         .start = sb,
                         .end = end,
                         .start_row = c.ts_node_start_point(node).row,
@@ -806,6 +806,22 @@ pub const Provider = struct {
     /// 빼면 `pub const Widget = struct {...}` — zig 에서 **타입을 선언하는 유일한 형태** — 가 사라진다.
     ///
     /// 그래서 **값이 컨테이너일 때만** 심볼로 본다. 그것이 §7.5 의 "클래스" 에 해당하는 자리다.
+    /// 이름의 끝. 이름 뒤에 `.` 과 식별자가 이어지면 거기까지다 — Dart 의 이름 붙은 생성자(`Point.origin`·`W.named`)는 이름이 둘로 갈려 있어
+    /// 첫 것만 쓰면 생성자가 전부 클래스 이름(`Point`)으로 보여 목록에서 못 가른다(번들 언어 확대 BL3 적대적 4회차).
+    fn qualifiedNameEnd(name_node: c.TSNode) u32 {
+        var end = c.ts_node_end_byte(name_node);
+        var cur = name_node;
+        while (true) {
+            const dot = c.ts_node_next_sibling(cur);
+            if (c.ts_node_is_null(dot) or !std.mem.eql(u8, std.mem.span(c.ts_node_type(dot)), ".")) break;
+            const part = c.ts_node_next_sibling(dot);
+            if (c.ts_node_is_null(part) or !std.mem.endsWith(u8, std.mem.span(c.ts_node_type(part)), "identifier")) break;
+            end = c.ts_node_end_byte(part);
+            cur = part;
+        }
+        return end;
+    }
+
     /// 심볼의 끝. 대개 노드의 끝이지만, **본문이 시그니처의 다음 형제인 grammar**(Dart — `function_signature` 다음에 `function_body`, 메서드는
     /// `method_signature` 로 한 겹 싸였다)는 본문 끝까지다. 안 그러면 심볼이 시그니처 한 줄로 끝나, 본문 안 커서가 그 함수 안이 아니게 된다(체인 조회).
     fn symbolEnd(node: c.TSNode) u32 {
@@ -3419,7 +3435,7 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
     try std.testing.expect(index.leaves.items[0].open);
 }
 
-test "SYN54 SQL·Dart 심볼 — SQL 은 `CREATE` 문의 스키마까지 이름, Dart 는 본문이 다음 형제여도 심볼 범위가 본문 끝까지다 (번들 언어 확대 BL3)" {
+test "SYN54 SQL·Dart 심볼 — SQL 은 `CREATE` 문의 스키마까지 이름, Dart 는 본문이 다음 형제여도 심볼 범위가 본문 끝까지고 const·이름 붙은 생성자(`A.c`)도 선다 (번들 언어 확대 BL3)" {
     const allocator = std.testing.allocator;
     var syms: std.ArrayList(Provider.Symbol) = .empty;
     defer syms.deinit(allocator);
@@ -3452,6 +3468,7 @@ test "SYN54 SQL·Dart 심볼 — SQL 은 `CREATE` 문의 스키마까지 이름,
             \\class A {
             \\  int x = 0;
             \\  A(this.x);
+            \\  const A.c(this.x);
             \\  int get g => x;
             \\  void m() {
             \\    print(x);
@@ -3466,7 +3483,7 @@ test "SYN54 SQL·Dart 심볼 — SQL 은 `CREATE` 문의 스키마까지 이름,
         defer prov.deinit();
         prov.symbols(allocator, &syms);
         const Want = struct { name: []const u8, depth: u16 };
-        const want = [_]Want{ .{ .name = "A", .depth = 0 }, .{ .name = "A", .depth = 1 }, .{ .name = "g", .depth = 1 }, .{ .name = "m", .depth = 1 }, .{ .name = "top", .depth = 0 } };
+        const want = [_]Want{ .{ .name = "A", .depth = 0 }, .{ .name = "A", .depth = 1 }, .{ .name = "A.c", .depth = 1 }, .{ .name = "g", .depth = 1 }, .{ .name = "m", .depth = 1 }, .{ .name = "top", .depth = 0 } };
         errdefer for (syms.items) |sy| std.debug.print("SYN54 dart {s} '{s}' d={d} [{d},{d})\n", .{ sy.kind, src[sy.name_start..sy.name_end], sy.depth, sy.start, sy.end });
         try std.testing.expectEqual(want.len, syms.items.len);
         for (want, syms.items) |w, sy| {

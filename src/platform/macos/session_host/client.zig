@@ -26829,6 +26829,9 @@ const FakeImageHost = struct {
     channel_closed_by_app: bool = false,
     /// bind_hold: `bind_ack` 와 세그먼트를 채널에 다 넣었다 — 판정자는 이것을 본 뒤 펌프를 **한 번만** 부른다.
     segment_sent: std.atomic.Value(bool) = .init(false),
+    /// 채널을 accept 하고 채널 hello 를 읽었다. 앱은 수립을 기다리지 않으므로, 판정자가 앱 쪽에서 채널을 닫기 전에 이것을 기다려야
+    /// host 의 accept 가 닫힌 연결을 만나지 않는다(그 경합은 스케줄링에 달린다 — CI 에서 실측).
+    channel_accepted: std.atomic.Value(bool) = .init(false),
     frames_after_hello: usize = 0,
     failed: bool = false,
 
@@ -26922,6 +26925,7 @@ const FakeImageHost = struct {
                 self.channel_hello_ok = std.mem.indexOf(u8, channel_hello.payload, "\"role\":\"image_channel\"") != null and
                     std.mem.indexOf(u8, channel_hello.payload, &token_text) != null;
                 channel_hello.deinit(testing.allocator);
+                self.channel_accepted.store(true, .release);
                 switch (self.mode) {
                     .bind => try socket_server.writeAll(channel, &wire.encodeBindAck()),
                     .bind_hold => {
@@ -27638,6 +27642,12 @@ test "image channel connect: connect 는 bind_ack 를 기다리지 않고, 마�
     client_open = true;
     try testing.expect(deadline.remainingNs() > std.time.ns_per_s);
     try testing.expectEqual(client_image_channel.State.binding, client.image_channel.state);
+    // host 가 채널을 받아 쥘 때까지 기다린다 — 그 전에 앱이 채널을 닫으면 판정이 host 의 accept 경합에 달린다.
+    for (0..400) |_| {
+        if (host.channel_accepted.load(.acquire)) break;
+        _ = usleepMs(5);
+    }
+    try testing.expect(host.channel_accepted.load(.acquire));
     // 마감 전에는 펌프가 기다릴 뿐이다.
     try testing.expect(client.pumpImageChannel(.try_lock));
     try testing.expectEqual(client_image_channel.State.binding, client.image_channel.state);

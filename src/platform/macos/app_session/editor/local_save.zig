@@ -12,6 +12,8 @@ pub const Prepared = struct {
     document: usize,
     identity: ?Identity,
     expected_disk: ?u64,
+    /// 새 대상의 배타 생성은 기존 파일 CAS와 구분한다. 일반 저장은 항상 false다.
+    create_new: bool = false,
     written: bool = false,
     finished: bool = false,
     pub fn init(session: *host.AppSession, term: *host.Term, guard: editor.SaveGuard) editor.SaveError!Prepared {
@@ -42,7 +44,7 @@ pub const Prepared = struct {
     }
     pub fn write(self: *Prepared, io: std.Io) editor.SaveError!void {
         if (!maru.session.editor.save_ops.writable(self.written, self.finished)) return error.WriteFailed;
-        try writeBytes(io, self.path, self.bytes, self.expected_disk);
+        if (self.create_new) try createBytes(io, self.path, self.bytes) else try writeBytes(io, self.path, self.bytes, self.expected_disk);
         self.written = true;
     }
     pub fn matches(self: *const Prepared, term: *host.Term) bool {
@@ -121,4 +123,21 @@ pub fn writeBytes(io: std.Io, path: []const u8, bytes: []const u8, expect_disk: 
         expected,
         bytes,
     );
+}
+
+/// 이름 없는 첫 저장과 Save As worker가 같은 배타 생성 계약을 사용한다.
+pub fn createBytes(io: std.Io, path: []const u8, bytes: []const u8) host.AppSession.FilePanelWriteError!void {
+    var pinned = @import("../file_panel.zig").openPinnedFilePanelParent(io, path) catch return error.NotFound;
+    defer pinned.dir.close(io);
+    // **배타 생성이 실패하면 「그 사이에 생겼다」다** — 그 사실을 `ExternalConflict` 로 올린다(그 낱말이
+    // 뜻하는 것이 바로 「내가 보지 않은 변화가 디스크에 있다」이고, 덮어쓰기 CAS 가 같은 이름을 쓴다).
+    var file = pinned.dir.createFile(io, pinned.basename, .{ .exclusive = true }) catch |e| switch (e) {
+        error.PathAlreadyExists => return error.ExternalConflict,
+        else => return error.WriteFailed,
+    };
+    defer file.close(io);
+    var write_buf: [64 * 1024]u8 = undefined;
+    var w = file.writer(io, &write_buf);
+    w.interface.writeAll(bytes) catch return error.WriteFailed;
+    w.interface.flush() catch return error.WriteFailed;
 }

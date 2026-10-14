@@ -1,6 +1,6 @@
 # 이름 있는 문서의 Save As — 검토안
 
-상태: 후속 저장 순서·취소 정책 승인, 순수 상태 전이 기반 구현. 제품 UI·새 대상 파일 쓰기는 미연결.
+상태: 후속 저장 순서·취소 정책 승인, 순수 상태 전이 기반 구현. 새 대상 writer·모델 경로 전환 기반 추가. 제품 UI·저장 접수 조정은 미연결.
 기준: main `eac3677dd3370e87be9cd6aa1c39b65c503cf796`.
 
 ## 현재 코드에서 확인한 범위
@@ -107,3 +107,36 @@ enqueue/apply를 새 경로에 그대로 재사용하면 목적지 검증·완�
 검증한 기반: Debug와 ReleaseFast의 순수 상태 전이 테스트 5개.
 `python3 tools/test-editor-save-as-policy.py`는 조기 라우팅·원본/입력 장벽 누락·
 실패를 성공으로 게시·접수 뒤 취소·조기 성공의 실행 단언 실패와 정상/복원 대조군을 검사한다.
+
+## 새 대상 writer·모델 전환 기반
+
+`save/destination.zig::Prepared`는 원본 Target(문서 신원·경로·epoch)과 목적지
+write path를 따로 소유한다. 목적지가 없으면 기존 첫 저장과 공유하는 배타 생성,
+있으면 목적지의 명시적 raw hash로 CAS 쓰기를 한다. 원본 disk hash로 목적지를
+검증하지 않는다. 같은 문자열 경로는 일반 저장으로 보내도록 준비를 거절한다.
+
+작업 자료는 기존 `save/worker.zig::Service`에 넘길 수 있다. 넘긴 동안 caller의
+`work`를 null로 비우고, 실제 Completion이 돌아온 뒤에만 되돌려 놓는다. actor가
+문서 lease와 자료 수명을 보존해야 한다. 기존 전역 큐의 일반 저장 접수 경로에
+이 자료를 그대로 넣는 구현은 아니다.
+
+`adopt`는 실제 written, 미정산 상태, 원본 Target을 재검증한다. 필수 binding
+메모리를 준비 때 확보하여 성공 경계에서는 할당하지 않고 경로·epoch·logical saved
+hash와 raw disk hash를 갱신한다. 추가 편집과 Undo는 건드리지 않는다. 문서 모델과
+자료의 allocator는 같아야 한다. caller는 올바른 모델 allocator를 전달해야 하며
+서로 다른 자료 allocator로 adopt하는 호출은 거절한다.
+
+아직 AppSession 저장 진입점에는 연결하지 않는다. 같은 실제 파일 별칭·앱 전체
+목적지 예약·선행/후속 저장 조정·공유 뷰 entry/syntax·백업/LSP 갱신이 필요하다.
+모델의 path가 바뀌었다는 테스트만으로 앱 전체 경로 전환 완료를 주장하지 않는다.
+새 파일 생성의 I/O 실패 때 이미 생성한 일부 파일이 남을 수 있는 기존 첫 저장
+계약은 바꾸지 않는다. 생성한 파일의 자동 삭제·전원 손실 복구를 보장하지 않는다.
+
+`test-editor-save-as-write`는 실제 blocked worker와 디스크 bytes를 대조한다.
+조기/중복 전환, 추가 편집/Undo 보존, 배타 생성 경쟁, 목적지 CAS 실패,
+BOM/CRLF 보존, epoch 변경, 다른 문서 lease, 준비 할당 실패를 검사한다.
+`test-editor-local-save`와 `test-editor-untitled`는 공용 writer로 옮긴 기존 경로의 회귀다.
+
+격리 사본의 결함 주입 검증은 조기 전환·원본 Target/epoch 무시·목적지 CAS 무시·
+배타 생성 무시·현재 본문을 잘못 clean으로 게시하는 변이를 실제 실행 단언으로 검출한다.
+정상·복원 대조군은 10개(의미 테스트 6개와 공용 모듈 테스트 4개)를 모두 실행한다.

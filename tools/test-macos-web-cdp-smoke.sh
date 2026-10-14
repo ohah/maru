@@ -68,7 +68,11 @@
 #                   리뷰 2 회차 F2) 뒤 처음 읽으면 A 의 줄이 보이지 않고, 곧 C 로 옮긴 뒤(빠른 사슬 — 2 회차 F1) 다시 읽어도 C 에 늦게 온 A 의
 #                   unload 줄은 보이지 않는다 — 대조: 앞 사이트에서 먼저 읽은 탭은 그 unload 줄을 이동 뒤에도 본다(줄은 와 있었다). 에이전트가
 #                   연 탭은 태어날 때 묶인다(3 회차 F1): 오류를 남기고 곧 다른 사이트로 옮기는 페이지의 그 오류가 첫 읽기에 있다. 떠날 때 300 줄을
-#                   남기는 페이지를 떠나면 앞 문서 양동이를 넘은 줄은 「from pages or origins this tab had just left」 표지로 남는다(4 회차 A)
+#                   남기는 페이지를 떠나면 앞 문서 양동이를 넘은 줄은 「from pages or origins this tab had just left」 표지로 남는다(4 회차 A).
+#                   그 탭을 읽은 적 없는 쪽(둘째 pane — 처음 연 새 탭의 셸, 5 회차 변이 K02–K04): 다른 사이트의 문서에서 접속이 안 되는 주소로
+#                   옮겨 오류 페이지가 되면 처음 읽어도 앞 사이트의 줄이 없다(대조: 연 pane 은 그 줄을 봤다), 쏟고 곧 옮긴 문서의 버린 수가 옮겨
+#                   간 문서의 표지로 보이지 않는다(대조: 연 pane 은 표지를 봤다), A → B(처음 읽어 묶임) → C 의 빠른 사슬에서 C 가 A·B 출처로
+#                   300 줄씩 남겨 둘 다 버려지면 B 에 묶인 쪽에게 B 의 표지가 있다(A 의 줄은 두 문서 앞으로 숨는다 — 사슬이 1 초 창 안이었다는 증거)
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -201,6 +205,17 @@ printf '<!doctype html><title>late</title><script>console.log("con-late-token");
 printf '<!doctype html><title>f</title>f' > "$root/www/f.html"
 # W9c① 적대 리뷰 4 회차 A: 떠날 때(pagehide) 300 줄을 남기는 문서 — 앞 문서 양동이(버스트 80)를 넘는 줄은 버려지고 그 수가 표지로 남는다.
 printf '<!doctype html><title>unflood</title><script>console.log("con-unflood-head");addEventListener("pagehide",function(){for(var i=0;i<300;i++)console.log("con-unflood-"+i)})</script>unflood' > "$root/www/unflood.html"
+# W9c① 5 회차 변이 K03: 400 줄을 쏟고(탭의 그 밖 양동이 버스트 200 을 넘는다) 곧 옮기는 문서 — 버린 수는 옮기기 전 문서의 것이다. 옮겨 간
+# 문서는 경고 한 줄만(오류·경고 양동이는 쏟아짐이 쓰지 않았다 — 그 문서 자신은 버리지 않는다).
+printf '<!doctype html><title>k3a</title><script>for(var i=0;i<400;i++)console.log("k3-flood-"+i);location.replace("/k3b.html")</script>k3a' > "$root/www/k3a.html"
+printf '<!doctype html><title>k3b</title><script>console.warn("k3-quiet")</script>k3b' > "$root/www/k3b.html"
+# K02: A(localhost) → B(127.0.0.1) → C(포트 +1) 의 문서. C 는 A 의 출처와 B 의 출처에서 스크립트를 불러, 두 출처가 300 줄씩 남긴다 — 줄의 출처는
+# 그 스크립트 주소라 sidecar 는 A 의 것을 두 문서 앞, B 의 것을 한 문서 앞의 줄로 본다(떠난 지 1 초 창 안).
+printf '<!doctype html><title>k2a</title><script>console.log("k2-a-head")</script>k2a' > "$root/www/k2a.html"
+printf '<!doctype html><title>k2b</title><script>console.log("k2-b-head")</script>k2b' > "$root/www/k2b.html"
+printf '<!doctype html><title>k2c</title><script>console.log("k2-c-head")</script><script src="http://localhost:%s/k2fa.js"></script><script src="http://127.0.0.1:%s/k2fb.js"></script>k2c' "$port" "$port" > "$root/www/k2c.html"
+printf 'for(var i=0;i<300;i++)console.log("k2-old-a-"+i)' > "$root/www/k2fa.js"
+printf 'for(var i=0;i<300;i++)console.log("k2-old-b-"+i)' > "$root/www/k2fb.js"
 printf '<!doctype html><title>con3</title><script>console.log("con3-head")</script><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe><iframe src="http://127.0.0.1:%s/f.html"></iframe>' "$((port + 1))" "$((port + 2))" "$((port + 3))" > "$root/www/con3.html"
 # W9f: `maru mcp`·`maru browser repl` 이 움직이는 페이지.
 printf '<!doctype html><title>mcp</title><button id=mb style="position:absolute;left:30px;top:30px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?mb-&#39;+event.isTrusted">Mcp go</button><input id=mt aria-label=Query style="position:absolute;left:30px;top:100px" oninput="new Image().src=&#39;/hit?mt-&#39;+event.isTrusted+&#39;-&#39;+encodeURIComponent(this.value)"><button id=rb style="position:absolute;left:30px;top:160px;width:120px;height:40px" onclick="new Image().src=&#39;/hit?rb2-&#39;+event.isTrusted">Repl go</button>' > "$root/www/mcp.html"
@@ -334,11 +349,36 @@ url="http://127.0.0.1:$port/a.html"
 cat > "$root/pane.sh" <<PANE
 #!/bin/sh
 [ -n "\${MARU_SMOKE_HOME:-}" ] && [ -n "\${MARU_SMOKE_OUT:-}" ] || exec sleep 600
-# 대본의 「action new_tab」(숨은 탭 경우)이 연 새 탭의 셸도 이 대본이다 — 한 번만 돈다.
-mkdir "\$MARU_SMOKE_OUT/pane-once" 2>/dev/null || exec sleep 600
 export HOME="\$MARU_SMOKE_HOME" XDG_CACHE_HOME="\$MARU_SMOKE_HOME/.cache"
 out="\$MARU_SMOKE_OUT"
 cli="$cli"
+# 대본의 「action new_tab」(숨은 탭 경우)이 연 새 탭의 셸도 이 대본이다 — 한 번만 돈다. 처음 연 새 탭의 pane 은 둘째 읽는 쪽이다(W9c① 5 회차
+# 변이 K02·K03·K04 — 그 탭을 읽은 적 없는 pane 의 grant): 첫 pane 이 p2-go 를 만들면 그 탭들을 읽고(K02 는 이동 사슬도 이 pane 이 몬다)
+# p2-done 을 만든다. 둘째 새 탭의 pane 은 아무것도 하지 않는다.
+if ! mkdir "\$out/pane-once" 2>/dev/null; then
+    mkdir "\$out/pane-two" 2>/dev/null || exec sleep 600
+    n=0
+    while [ ! -f "\$out/p2-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
+    [ -f "\$out/p2-go" ] || exec sleep 600
+    ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+    ep=\$(cat "\$out/p2-ep"); k3=\$(cat "\$out/p2-k3"); k2=\$(cat "\$out/p2-k2")
+    # K04: 오류 페이지로 바뀐 탭을 처음 읽는다 — 앞 사이트(secret)의 줄이 없어야 한다.
+    "\$cli" browser console --surface "\$ep" > "\$out/cn-ep-fresh" 2>&1; echo "rc=\$?" >> "\$out/cn-ep-fresh"
+    # K03: 쏟아진 뒤 곧 옮긴 탭을 처음 읽는다 — 앞 문서의 버린 수가 지금 문서의 표지로 오지 않아야 한다.
+    "\$cli" browser console --surface "\$k3" > "\$out/cn-k3-fresh" 2>&1; echo "rc=\$?" >> "\$out/cn-k3-fresh"
+    # K02: A(localhost) 에 있는 탭을 B(127.0.0.1) 로 옮겨 처음 읽어 B 에 묶이고, 곧 C(포트 +1) 로 — C 는 A 와 B 의 출처 스크립트를 불러
+    # 두 출처가 300 줄씩 남긴다(1 초 창 안이라 A 의 것은 두 문서 앞, B 의 것은 한 문서 앞 — 앞 문서 양동이를 넘어 둘 다 버려진다).
+    t0=\$(ms)
+    "\$cli" browser navigate --surface "\$k2" "http://127.0.0.1:$port/k2b.html" > "\$out/cn-k2-navb" 2>&1
+    "\$cli" browser console --surface "\$k2" > "\$out/cn-k2-b" 2>&1; echo "rc=\$?" >> "\$out/cn-k2-b"
+    "\$cli" browser navigate --surface "\$k2" "http://127.0.0.1:$((port + 1))/k2c.html" > "\$out/cn-k2-navc" 2>&1
+    t1=\$(ms)
+    echo "\$((t1 - t0))" > "\$out/cn-k2-ms"
+    sleep 1.5
+    "\$cli" browser console --surface "\$k2" > "\$out/cn-k2-c" 2>&1; echo "rc=\$?" >> "\$out/cn-k2-c"
+    touch "\$out/p2-done"
+    exec sleep 600
+fi
 # 주소가 \$1 로 끝날 때까지(최대 10 초) — 목록 줄의 주소 칸으로 본다.
 url_is() {
     n=0
@@ -879,6 +919,30 @@ sleep 1
 "\$cli" browser dialog --surface "\$cn" > "\$out/cn-al-list" 2>&1
 "\$cli" browser handle-dialog --surface "\$cn" --accept > /dev/null 2>&1 || true
 "\$cli" browser close --surface "\$cn" > /dev/null 2>&1 || true
+# W9c① 5 회차 변이 K02·K03·K04(CEF 처리기 접착 — 차이는 그 탭을 처음 읽는 쪽에게만 보인다): 이 pane 이 탭을 준비하고(이 pane 은 연 탭에
+# 태어날 때 묶여 대조로 읽는다), 둘째 pane(처음 연 새 탭의 셸)이 처음 읽는다.
+# K04: 다른 사이트(localhost)의 secret 문서 → 접속이 안 되는 주소(오류 페이지 — on_load_start 가 없다).
+"\$cli" browser open --url "http://localhost:$port/secret.html?ep" > "\$out/cn-ep-open" 2>&1
+ep=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-ep-open")
+sleep 1
+"\$cli" browser console --surface "\$ep" > "\$out/cn-ep-ctl" 2>&1; echo "rc=\$?" >> "\$out/cn-ep-ctl"
+"\$cli" browser navigate --surface "\$ep" "http://127.0.0.1:1/" > "\$out/cn-ep-nav" 2>&1; echo "rc=\$?" >> "\$out/cn-ep-nav"
+sleep 1.5
+# K03: 조용한 문서에서 연 탭을 쏟고 곧 옮기는 문서로 — 대조(태어날 때 묶인 이 pane)는 버린 수의 표지를 본다.
+"\$cli" browser open --url "http://127.0.0.1:$port/f.html?k3" > "\$out/cn-k3-open" 2>&1
+k3=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-k3-open")
+sleep 1
+"\$cli" browser navigate --surface "\$k3" "http://127.0.0.1:$port/k3a.html" > "\$out/cn-k3-nav" 2>&1
+sleep 1.5
+"\$cli" browser console --surface "\$k3" > "\$out/cn-k3-ctl" 2>&1; echo "rc=\$?" >> "\$out/cn-k3-ctl"
+# K02: A 에서 연 탭 — 사슬은 둘째 pane 이 몬다.
+"\$cli" browser open --url "http://localhost:$port/k2a.html" > "\$out/cn-k2-open" 2>&1
+k2=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/cn-k2-open")
+sleep 1
+echo "\$ep" > "\$out/p2-ep"; echo "\$k3" > "\$out/p2-k3"; echo "\$k2" > "\$out/p2-k2"
+touch "\$out/p2-go"
+n=0; while [ ! -f "\$out/p2-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+for t in "\$ep" "\$k3" "\$k2"; do "\$cli" browser close --surface "\$t" > /dev/null 2>&1 || true; done
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -1117,6 +1181,21 @@ flood_dropped=$(sed -n 's/^\[maru\] \([0-9]*\) console messages were dropped.*/\
 [ $((flood_lines + flood_dropped)) -eq 3000 ] || fail "a flood of 3000 lines kept $flood_lines lines and counted $flood_dropped dropped — the rest went without a count (the drop-only frame after the flood did not come)"
 grep -q '^\[error\] Uncaught Error: con-uncaught (http://127.0.0.1:[0-9]*/con.html?b:[0-9]*)$' "$out/cn-uncaught" || fail "an uncaught error did not come with its source and line ($(grep -i 'uncaught' "$out/cn-uncaught" | tr '\n' ' '))"
 grep -q '^rc=0$' "$out/cn-alert" && grep -qxF '[log] con-before-alert' "$out/cn-alert" && grep -q '^alert ' "$out/cn-al-list" || fail "console did not answer while the page showed an alert ($(tr '\n' ' ' < "$out/cn-alert" | cut -c1-300) · $(tr '\n' ' ' < "$out/cn-al-list"))"
+# W9c① 5 회차 변이 K02·K03·K04 — 둘째 pane(그 탭을 읽은 적 없는 쪽)이 읽은 것. 처리기 접착부를 빼도 묶인 쪽에게는 차이가 없어 위 검사는 몰랐다.
+[ -f "$out/p2-done" ] || fail "the second pane (a reader that never read those tabs) did not finish — the first-read checks would prove nothing ($(ls "$out" | grep -E '^(p2-|pane-|cn-ep|cn-k)' | tr '\n' ' '))"
+# K04: 오류 페이지로의 이동도 새 문서다(sidecar 의 error_page) — 없으면 처음 읽는 쪽에게 앞 사이트의 줄이 지금 문서의 줄로 보였다.
+grep -q '^rc=0$' "$out/cn-ep-ctl" && grep -qxF '[log] con-secret-token' "$out/cn-ep-ctl" || fail "control: the pane that opened the secret page did not see its line — the error-page check would prove nothing ($(tr '\n' ' ' < "$out/cn-ep-ctl"))"
+grep -q '^rc=0$' "$out/cn-ep-fresh" && ! grep -q 'con-secret' "$out/cn-ep-fresh" || fail "after a failed navigation put an error page in the tab, a pane that never read the tab saw the previous site's lines ($(tr '\n' ' ' < "$out/cn-ep-fresh" | cut -c1-300) · nav $(tr '\n' ' ' < "$out/cn-ep-nav"))"
+# K03: 옮기기 전 문서의 버린 수는 page_started 앞에 보낸다 — 아니면 옮겨 간 문서의 표지가 되어 처음 읽는 쪽에게 앞 문서의 양이 보였다.
+k3_lines=$(grep -c '^\[log\] k3-flood-' "$out/cn-k3-ctl" || true)
+grep -q '^rc=0$' "$out/cn-k3-ctl" && grep -q '^\[maru\] [0-9]* console messages were dropped' "$out/cn-k3-ctl" && [ "$k3_lines" -ge 100 ] || fail "control: the pane that opened the flooding page did not see its lines and a dropped marker — the check would prove nothing ($k3_lines lines · $(grep -v '^\[log\] k3-flood-' "$out/cn-k3-ctl" | tr '\n' ' ' | cut -c1-300))"
+grep -q '^rc=0$' "$out/cn-k3-fresh" && grep -qxF '[warn] k3-quiet' "$out/cn-k3-fresh" && ! grep -q '^\[maru\]' "$out/cn-k3-fresh" && ! grep -q 'k3-flood' "$out/cn-k3-fresh" || fail "a pane that never read the tab saw, on the page it moved to, the dropped count of the page that flooded just before ($(tr '\n' ' ' < "$out/cn-k3-fresh" | cut -c1-300))"
+# K02: 두 문서의 앞 문서 줄을 버리면 표지도 문서마다(splitOld) — 합치면 B 의 것이 A 의 표지로 가 B 에 묶인 쪽에게 표지가 없었다.
+grep -q 'GET /k2fa.js' "$root/http.log" && grep -q 'GET /k2fb.js' "$root/http.log" || fail "C did not load the scripts of A's and B's origins — the chain check would prove nothing"
+grep -q '^rc=0$' "$out/cn-k2-b" && grep -qxF '[log] k2-b-head' "$out/cn-k2-b" && ! grep -q 'k2-a-head' "$out/cn-k2-b" || fail "the second pane's first read of the chain tab was not on B — the chain check would prove nothing ($(tr '\n' ' ' < "$out/cn-k2-b") · nav $(tr '\n' ' ' < "$out/cn-k2-navb"))"
+grep -q '^rc=0$' "$out/cn-k2-c" && grep -qxF '[log] k2-c-head' "$out/cn-k2-c" && ! grep -q 'k2-old-a-' "$out/cn-k2-c" || fail "A's lines logged on C were not taken as lines of two documents back (the chain took $(cat "$out/cn-k2-ms") ms — past the 1 s window?) — the chain check would prove nothing ($(grep -v '^\[log\] k2-old-' "$out/cn-k2-c" | tr '\n' ' ' | cut -c1-300))"
+grep -q '^\[maru\] [0-9]* console messages from pages or origins this tab had just left were dropped' "$out/cn-k2-c" || fail "a reader latched on B did not see the dropped marker of B's lines in a fast A → B → C chain — they went into A's marker ($(grep -v '^\[log\] k2-old-' "$out/cn-k2-c" | tr '\n' ' ' | cut -c1-300) · $(grep -c '^\[log\] k2-old-b-' "$out/cn-k2-c" || true) of B's lines kept · chain $(cat "$out/cn-k2-ms") ms)"
+echo "PASS w9c-console-first-reader: after a failed navigation to an error page a pane that never read the tab sees none of the previous site's lines (control: the opener saw the line), the dropped count of a page that flooded and moved on is not a marker of the next page for it (control: the opener saw the marker), and a reader latched on B in a fast A → B → C chain sees B's own old-line dropped marker (chain $(cat "$out/cn-k2-ms") ms)"
 echo "PASS w9c-console: levels (info as log), a click's line is in the next read, lines are kept across navigation after the first read, --clear empties, a 3000-line flood keeps $flood_lines lines and counts the other $flood_dropped in a dropped marker, an uncaught error carries source:line, console answers during an alert, on a user's tab the first read after A, B with three cross-origin iframes shows none of A's lines, nor does a read after a fast move on to C (control: the old page's unload line did arrive), on a tab the agent opened the first read keeps the error of a page that moved to another site, and 300 lines a page logged while leaving keep $uf_lines lines with a previous-page dropped marker"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"

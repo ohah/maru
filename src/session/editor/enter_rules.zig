@@ -46,7 +46,8 @@ pub fn contextFor(grammar: language.Grammar, brackets: []const u8, unit: indent_
 }
 
 /// 트리가 답한 그 줄의 문맥(계획 editor-typing-rules TR4) — caret 의 문맥과 caret 앞 줄 조각의 **코드만 남긴 사본**(문자열·주석 byte 를
-/// 공백으로 — `literals.blank`, `before` 와 길이가 같다), caret 을 품은 주석이 **그 줄에서** 시작했으면 그 자리(`before` 안 byte).
+/// 공백으로 — `literals.blank`, `before` 와 길이가 같다), caret 을 품은 **주석의 그 줄 표식 자리**(`before` 안 byte — 주석이 그 줄에서
+/// 시작했으면 그 머리, 위 줄부터 이어진 줄 주석이면 그 줄의 첫 글자; caret 이 주석 밖이거나 위에서 이어진 블록 주석이면 `null`).
 pub const Tree = struct { caret: literals.Literal, code: []const u8, comment_at: ?usize = null };
 
 pub const Indent = enum {
@@ -135,9 +136,8 @@ fn lineCommentContinue(ctx: Context, before: []const u8, after: []const u8, tree
     const lc = ctx.line_comment orelse return null;
     if (!std.mem.eql(u8, lc, "//")) return null;
     if (std.mem.trim(u8, after, " \t").len == 0) return null; // 줄 끝 — 잇지 않는다
-    // 트리가 답했으면 그 줄에서 시작한 줄 주석 안이어야 한다(표식 자리는 트리의 것 — 줄 스캐너는 정규식·`'"'` 를 모른다). 없으면 줄 스캐너.
+    // 트리가 답했으면 caret 이 줄 주석 안이어야 한다(표식 자리는 트리의 것 — 줄 스캐너는 정규식·`'"'` 를 모른다). 없으면 줄 스캐너.
     const at = if (tree) |tr| blk: {
-        if (tr.caret != .comment) return null;
         const a = tr.comment_at orelse return null;
         if (!std.mem.startsWith(u8, before[a..], lc)) return null; // 블록 주석 안(`/* see http://x | y */`)
         break :blk a;
@@ -482,6 +482,6 @@ test "INDF1 트리가 답하면 줄 주석 이어쓰기는 caret 이 그 줄의 
     // 블록 주석 안의 `//`(URL)는 줄 주석이 아니다 — 줄 스캐너는 잇는다.
     try testing.expect(sameAction(decide(ts, "x(); /* see http://x ", "y */", null), .{ .append = "// " }));
     try testing.expect(sameAction(decideWith(ts, "x(); /* see http://x ", "y */", null, .{ .caret = .comment, .code = "x();                 ", .comment_at = 5 }), .{}));
-    // 주석이 그 줄에서 시작하지 않았다(위 줄부터 이어진 블록 주석 안) — 줄 주석 이어쓰기가 아니다.
+    // 표식 자리가 없다(위 줄부터 이어진 블록 주석 안) — 줄 주석 이어쓰기가 아니다.
     try testing.expect(sameAction(decideWith(ts, "a // b ", "c", null, .{ .caret = .comment, .code = "" }), .{}));
 }

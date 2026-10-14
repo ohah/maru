@@ -388,3 +388,29 @@ test "HL18 번들 언어 확대 BL1 의 grammar(YAML·TOML·XML·DTD·Lua·Docke
     try std.testing.expectEqual(Role.property, roleFor("markup.link").?);
     for ([_][]const u8{ "text.danger", "text.warning", "text.note" }) |n| try std.testing.expectEqual(Role.comment, roleFor(n).?);
 }
+
+test "HL19 번들 언어 확대 BL2 의 Swift 가 내는 캡처도 전부 표에 있고, 새 규약 갈래가 뿌리의 색을 받는다" {
+    // HL18 과 같은 방법으로 뽑았다(`queries/highlights.scm`, 따옴표 안·주석은 뺀다).
+    const swift_captures = [_][]const u8{
+        "attribute",           "boolean",                     "character.special", "comment",            "comment.documentation", "constant.builtin",
+        "constant.macro",      "constructor",                 "function.call",     "function.macro",     "function.method",       "keyword",
+        "keyword.conditional", "keyword.conditional.ternary", "keyword.coroutine", "keyword.directive",  "keyword.exception",     "keyword.function",
+        "keyword.import",      "keyword.modifier",            "keyword.operator",  "keyword.repeat",     "keyword.return",        "keyword.type",
+        "label",               "number",                      "number.float",      "operator",           "punctuation.bracket",   "punctuation.delimiter",
+        "punctuation.special", "spell",                       "string",            "string.escape",      "string.regexp",         "type",
+        "variable",            "variable.builtin",            "variable.member",   "variable.parameter",
+    };
+    for (swift_captures) |cap| {
+        if (lookup(cap) == null) {
+            std.debug.print("표에 없는 grammar 캡처: {s}\n", .{cap});
+            return error.UnmappedCapture;
+        }
+    }
+    // 점 갈래는 뿌리의 색이다 — `#if`(지시)·`async`(코루틴)는 키워드, `#selector`(매크로)는 함수, 정규식 리터럴은 문자열.
+    try std.testing.expectEqual(Role.keyword, roleFor("keyword.directive").?);
+    try std.testing.expectEqual(Role.keyword, roleFor("keyword.coroutine").?);
+    try std.testing.expectEqual(Role.function, roleFor("function.macro").?);
+    try std.testing.expectEqual(Role.string, roleFor("string.regexp").?);
+    try std.testing.expectEqual(Role.property, roleFor("variable.member").?);
+    try std.testing.expect(roleFor("variable.parameter") == null); // 매개변수는 변수처럼 무색
+}

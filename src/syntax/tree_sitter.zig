@@ -53,6 +53,7 @@ extern fn tree_sitter_dtd() *const c.TSLanguage;
 extern fn tree_sitter_lua() *const c.TSLanguage;
 extern fn tree_sitter_dockerfile() *const c.TSLanguage;
 extern fn tree_sitter_make() *const c.TSLanguage;
+extern fn tree_sitter_swift() *const c.TSLanguage;
 
 /// 하이라이트 쿼리 — **grammar가 소유한다**(빌드가 익명 import로 꽂는다. `build.zig`의 grammar 표가
 /// 같은 이름을 쓴다 — 둘이 갈리면 컴파일이 죽는다).
@@ -81,6 +82,7 @@ const dtd_highlights = @embedFile("dtd_highlights_scm");
 const lua_highlights = @embedFile("lua_highlights_scm");
 const dockerfile_highlights = @embedFile("dockerfile_highlights_scm");
 const make_highlights = @embedFile("make_highlights_scm");
+const swift_highlights = @embedFile("swift_highlights_scm");
 
 /// **파싱 상한**(§5.3 — "파싱 대상 크기·시간 상한"). 이 크기를 넘는 문서는 무색이다.
 ///
@@ -102,7 +104,7 @@ pub const Span = struct {
 
 /// `session/editor/language.zig`의 열거와 **같은 축**을 쓰되, 이 모듈은 maru를 못 들여오므로
 /// (모듈이 다르다) 필요한 것만 다시 적는다. 그 열거를 이 축으로 옮기는 것은 아래 `languageFor` 하나다.
-pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, yaml, toml, xml, dtd, lua, dockerfile, make, other };
+pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, yaml, toml, xml, dtd, lua, dockerfile, make, swift, other };
 
 /// 같은 이름의 태그(`session/editor/language.zig` 의 `Grammar`)를 이 축으로 옮긴다 — **호스트가 다시 적지 않는다**
 /// ([layering-and-portability.md](../../docs/layering-and-portability.md) §3.5). 예전에는 macOS(`app_session/editor/syntax.zig` 의
@@ -223,6 +225,9 @@ const grammar_table = [_]GrammarEntry{
     .{ .lang = .lua, .get = tree_sitter_lua, .scm = lua_highlights, .fold_kinds = &.{ "function_declaration", "function_definition", "if_statement", "for_statement", "while_statement", "repeat_statement", "do_statement", "table_constructor", "arguments", "parameters" }, .symbol_kinds = &.{"function_declaration"} },
     .{ .lang = .dockerfile, .get = tree_sitter_dockerfile, .scm = dockerfile_highlights, .fold_kinds = &.{ "run_instruction", "heredoc_block", "env_instruction", "label_instruction", "cmd_instruction", "entrypoint_instruction", "copy_instruction" }, .symbol_kinds = &.{} },
     .{ .lang = .make, .get = tree_sitter_make, .scm = make_highlights, .fold_kinds = &.{ "rule", "conditional", "define_directive" }, .symbol_kinds = &.{"define_directive"} },
+    // BL2. 접힘은 grammar 저장소의 `folds.scm` 에서 형 자리(`type_parameters`·`tuple_type` …)와 `import` 묶음을 뺀 것이다 — 형은 한 줄이
+    // 보통이고, 연속 `import` 를 하나로 묶는 것은 노드 하나의 범위가 아니다. Swift 의 `if`·`for` 는 중괄호 블록 노드가 따로 없어 문장째 접는다.
+    .{ .lang = .swift, .get = tree_sitter_swift, .scm = swift_highlights, .fold_kinds = &.{ "class_body", "protocol_body", "enum_class_body", "function_body", "computed_property", "computed_getter", "computed_setter", "do_statement", "if_statement", "for_statement", "while_statement", "guard_statement", "switch_statement", "switch_entry", "call_expression", "tuple_expression", "array_literal", "dictionary_literal", "lambda_literal", "willset_didset_block", "willset_clause", "didset_clause" }, .symbol_kinds = &.{ "class_declaration", "protocol_declaration", "function_declaration", "init_declaration", "protocol_function_declaration" } },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -2365,6 +2370,7 @@ test "SYN18 번들한 grammar 가 전부 실제로 색을 낸다" {
         .{ .lang = .lua, .src = "local x = \"a\" -- c\n" },
         .{ .lang = .dockerfile, .src = "FROM node:20\n# c\nRUN echo \"hi\"\n" },
         .{ .lang = .make, .src = "a: b\n\techo $(X) # c\n" },
+        .{ .lang = .swift, .src = "let x = \"a\" // c\n" },
     };
     // 표에 든 언어 수와 샘플 수가 같아야 한다 — grammar를 늘리고 샘플을 안 더하면 그 언어가 안 돈다.
     try std.testing.expectEqual(grammar_table.len, samples.len);
@@ -2558,6 +2564,7 @@ test "SYN21 언어마다 접을 것이 있는 표본에서 범위가 나온다 �
         .{ .lang = .lua, .src = "function f()\n  local a = 1\n  return a\nend\n" },
         .{ .lang = .dockerfile, .src = "FROM a\nRUN echo 1 && \\\n    echo 2\n" },
         .{ .lang = .make, .src = "a: b\n\techo 1\n\techo 2\n" },
+        .{ .lang = .swift, .src = "func f() -> Int {\n    let a = 1\n    return a\n}\n" },
     };
     try std.testing.expectEqual(grammar_table.len, samples.len);
 
@@ -2750,6 +2757,7 @@ test "SYN25 심볼 종류 목록이 실재하는 노드 이름이다 — 언어�
         .{ .lang = .bash, .src = "f() {\n  echo 1\n}\n", .want = "f" },
         .{ .lang = .lua, .src = "function f() end\n", .want = "f" },
         .{ .lang = .make, .src = "define F\n\techo\nendef\n", .want = "F" },
+        .{ .lang = .swift, .src = "struct S {\n    func f() {}\n}\n", .want = "S" },
     };
     // **표본이 없는 언어는 종류를 선언할 수 없다.** 이것이 없으면 "종류는 적어 뒀는데 목록은 늘
     // 비는" 상태가 조용히 산다 — markdown 의 `section` 이 정확히 그랬다(이름 노드가 없다). 뮤테이션에서
@@ -3302,6 +3310,16 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
             .{ .start = 27, .open = true, .close_kind = 2, .open_kind = 2 },
             .{ .start = 28, .open = false, .close_kind = 2, .open_kind = 2 },
         } },
+        // Swift(BL2) — 문자열 글자 속 괄호는 없고, 보간 `\(…)` 은 괄호다(Kotlin `${` 와 같다). 각괄호(`<T>`·`Array<Int>`)는 괄호가 아니다 —
+        // VS Code swift 설정의 `brackets` 도 `{}`·`[]`·`()` 셋뿐이다.
+        .{ .lang = .swift, .src = "let s = \"n (\\(n))\"\nfunc g<T>(a: Array<Int>) {}\n", .want = &.{
+            .{ .start = 13, .open = true, .close_kind = 0 },
+            .{ .start = 15, .open = false, .close_kind = 0 },
+            .{ .start = 28, .open = true, .close_kind = 0 },
+            .{ .start = 42, .open = false, .close_kind = 0 },
+            .{ .start = 44, .open = true, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 45, .open = false, .close_kind = 2, .open_kind = 2 },
+        } },
         .{ .lang = .c, .src = "#define M(x) (f(x) + \"(\") /* ( */\n", .want = &.{
             .{ .start = 9, .open = true, .close_kind = 0 },
             .{ .start = 11, .open = false, .close_kind = 0 },
@@ -3370,6 +3388,9 @@ test "PRD3 술어를 평가한다 — Python·Ruby·Lua 의 소문자 식별자�
         .{ .lang = .zig, .src = "const x = 1;\n", .text = "x", .cap = "constant", .want = false },
         .{ .lang = .zig, .src = "const X_Y = 1;\n", .text = "X_Y", .cap = "constant", .want = true },
         // `#any-of?` — 목록 안 글자만 붙는다(목록 밖까지 붙으면 `@This` 가 import 색).
+        // Swift(BL2) — 문서 주석(`///`·`/** */`)만 `comment.documentation` 이다(`#match? "^///[^/]"` 등).
+        .{ .lang = .swift, .src = "/// doc\n// plain\n", .text = "/// doc", .cap = "comment.documentation", .want = true },
+        .{ .lang = .swift, .src = "/// doc\n// plain\n", .text = "// plain", .cap = "comment.documentation", .want = false },
         .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@import", .cap = "keyword.import", .want = true },
         .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@This", .cap = "keyword.import", .want = false },
         .{ .lang = .xml, .src = "<a>&amp;&foo;</a>\n", .text = "&amp;", .cap = "constant.builtin", .want = true },

@@ -434,6 +434,8 @@ pub fn build(b: *std.Build) void {
         .{ .dep = "tree_sitter_lua", .src = "src", .scanner = "scanner.c", .import = "lua_highlights_scm", .license = "LICENSE.md" },
         .{ .dep = "tree_sitter_dockerfile", .src = "src", .scanner = "scanner.c", .import = "dockerfile_highlights_scm" },
         .{ .dep = "tree_sitter_make", .src = "src", .import = "make_highlights_scm" },
+        // BL2. 생성 파서가 든 태그(`build.zig.zon`) — 기본 태그에는 `parser.c` 가 없다.
+        .{ .dep = "tree_sitter_swift", .src = "src", .scanner = "scanner.c", .import = "swift_highlights_scm" },
     };
     for (grammars) |g| {
         if (b.lazyDependency(g.dep, .{})) |dep| {

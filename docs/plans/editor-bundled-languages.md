@@ -1,6 +1,6 @@
 # 번들 언어 확대 계획
 
-상태: BL1(작은 여섯)·BLP(쿼리 술어 평가) 완료, BL2~BL4 계획(2026-10-14 사용자 결정 — 후보 열둘 전부). 번들 언어 목록·크기는 [네이티브 계획](native-editor.md)의 「번들 언어 목록」이, 라이선스 동봉은 [제3자 라이선스](../third-party-licenses.md)가 소유한다. 이 문서는 후보 실측·결정·배선 설계·조각·검증을 소유한다.
+상태: BL1(작은 여섯)·BLP(쿼리 술어 평가)·BL2(Swift) 완료, BL3·BL4 계획(2026-10-14 사용자 결정 — 후보 열둘 전부). 번들 언어 목록·크기는 [네이티브 계획](native-editor.md)의 「번들 언어 목록」이, 라이선스 동봉은 [제3자 라이선스](../third-party-licenses.md)가 소유한다. 이 문서는 후보 실측·결정·배선 설계·조각·검증을 소유한다.
 
 ## 왜
 
@@ -74,7 +74,7 @@
 | Lua | `lua` | `--` | — | `"'` | 예 | `function`·`then`·`do`·`repeat`·`else` 뒤, 줄 끝 `{` 뒤 한 단계(VS Code `increaseIndentPattern`) | `end`·`else`·`elseif`·`until`(VS Code `decreaseIndentPattern`) | — |
 | Dockerfile | `Dockerfile` `Containerfile` `*.dockerfile` | `#` | — | `"'` | 아니오 | — (VS Code 설정은 YAML 것을 베낀 꼴이라 Dockerfile 에 맞지 않는다 — 「의도한 차이」) | — | — |
 | Make | `Makefile` `GNUmakefile` `makefile` `*.mk` | `#` | — | 없음 | 아니오 | — | — | 탭(지금처럼 — 경로 대신 문법으로) |
-| Swift | `swift` | `//` | 예 | `"` | 예 | `case …:`·`default:` 뒤 | — | — |
+| Swift | `swift` | `//` | 예 | `"` | 아니오(VS Code swift 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | `case …:`·`default:` 뒤(C 계열과 같은 「의도한 차이」) | — | — |
 | SQL | `sql` | `--` | 예 | `'"` | 예 | — | — | offSide(VS Code `folding.offSide`) |
 | Dart | `dart` | `//` | 예 | `"'` | 예 | `case …:`·`default:` 뒤 | — | — |
 | C# | `cs` `csx` | `//`(+ `///` 문서 주석은 `/// ` 로 잇는다 — VS Code csharp `onEnterRules`) | 예 | `"'` | 예 | `case …:`·`default:` 뒤 | — | — |
@@ -91,7 +91,7 @@
 | --- | --- | --- |
 | BL1 | 배선 기반과 작은 여섯을 함께 싣는다. <br>· 기반: 라이선스 경로 필드, 파일 이름 판정, 한 저장소 두 grammar(XML·DTD), 새 capture 의 색 역할, Kotlin 크기 행 정정. <br>· 언어: YAML·TOML·XML·DTD·Lua·Dockerfile·Make — 규칙 표·VS Code 대조·판정자까지. | 완료 |
 | BLP | **쿼리 술어 평가** — `#eq?`·`#any-of?`·`#match?`·`#lua-match?`(와 `not-` 갈래)를 평가해 조건이 안 맞는 캡처를 버린다(아래 「BL1 이 드러낸 것」) | 완료 |
-| BL2 | Swift(생성 파일 태그) | 계획 |
+| BL2 | Swift(생성 파일 태그) — 색·접힘·심볼·괄호(보간 `\(…)` 은 괄호, 각괄호는 아니다)·블록 주석·`case` 규칙·VS Code 대조 | 완료 |
 | BL3 | SQL(release asset)·Dart(커밋 고정) | 계획 |
 | BL4 | C#(`///` 이어쓰기)·Objective-C(C 쿼리 상속)·Scala | 계획 |
 

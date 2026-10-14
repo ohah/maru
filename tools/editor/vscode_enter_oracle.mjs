@@ -88,6 +88,12 @@ const corpus = {
   dockerfile: ['docker', [['FROM node', '', ''], ['RUN echo a:', '', ''], ['RUN [', ']', ''], ['# c', '', '']]],
   make: ['make', [['all: build', '', ''], ['all:', '', ''], ['$(foo', ')', ''], ['\techo $(X)', '', '']]],
   xml: ['xml', [['<a>', '</a>', ''], ['<a>', '', ''], ['<a/>', '', ''], ['<?xml version="1.0"?>', '', ''], ['<!-- c -->', '', ''], ['<a b="c">', '</a>', '']]],
+  // BL2 — Swift. VS Code swift 설정엔 `indentationRules` 가 없고 `onEnterRules` 는 줄 주석 이어쓰기 하나다.
+  swift: ['swift', [
+    ['func f() {', '}', ''], ['if x {', '', ''], ['foo(a, ', '', ''], ['let a = [', ']', ''], ['foo(a', ')', ''], ['let s = "{"', '', ''],
+    ['// note', 'more', ''], ['// note', '', ''], ['x = 1 // a', 'b', ''], ['case .a:', '', ''], ['default:', '', ''], ['/**', '', ''],
+    [' * a', '', '/**'], ['guard let x = y else {', '}', ''], ['/// doc', 'more', ''], ['/// doc', '', ''],
+  ]],
 };
 
 const zs = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\t/g, '\\t').replace(/\n/g, '\\n') + '"';

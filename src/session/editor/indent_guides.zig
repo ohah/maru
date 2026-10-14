@@ -71,17 +71,17 @@ pub fn visualColumn(head: []const u8, tab_width: u16) u32 {
     return col;
 }
 
-/// 추정의 **언어 기본**(동률·들여쓴 줄이 없을 때) — 공백이면 참. VS Code 는 몇 언어의 `insertSpaces` 기본을 바꾼다(`configurationDefaults` —
-/// 확장 `package.json` 원문): `[go]`·`[makefile]` 은 탭. Makefile 은 문법이 없어 경로(`Makefile`·`GNUmakefile`·`makefile`·`*.mk`)로 본다 —
-/// 레시피 줄은 탭이어야 하므로 공백을 넣으면 빌드가 깨진다(계획 editor-typing-rules TR1).
-pub fn defaultSpacesMode(grammar: language.Grammar, path: ?[]const u8) bool {
-    if (grammar == .go) return false;
-    if (path) |p| {
-        const name = std.fs.path.basename(p);
-        for ([_][]const u8{ "Makefile", "GNUmakefile", "makefile" }) |m| if (std.mem.eql(u8, name, m)) return false;
-        if (std.mem.endsWith(u8, name, ".mk") and name.len > 3) return false;
-    }
-    return true;
+/// 추정의 **언어 기본**(동률·들여쓴 줄이 없을 때). VS Code 는 몇 언어의 기본을 바꾼다(`configurationDefaults` — 확장 `package.json` 원문):
+/// `[go]`·`[makefile]` 은 탭(Make 레시피 줄은 탭이어야 한다 — 공백을 넣으면 빌드가 깨진다, 계획 editor-typing-rules TR1), `[yaml]` 은 공백·폭 2.
+/// `tab_size` 가 없으면 설정의 탭 폭이다. Makefile 은 처음에 문법이 없어 경로로 봤다 — 번들 언어 확대 BL1 이 Make 문법을 실어 문법 하나로 판다.
+pub const LanguageDefault = struct { spaces: bool = true, tab_size: ?u16 = null };
+
+pub fn languageDefault(grammar: language.Grammar) LanguageDefault {
+    return switch (grammar) {
+        .go, .make => .{ .spaces = false },
+        .yaml => .{ .tab_size = 2 },
+        else => .{},
+    };
 }
 
 /// **파일의 들여쓰기를 추정한다** — VS Code `guessIndentation` 의 규칙 그대로(§5.1c). 앞 10,000 줄에서 탭으로 들여쓴 줄과 공백으로 들여쓴
@@ -95,8 +95,8 @@ pub fn guess(src: anytype, default_tab: u16) Guess {
 }
 
 /// `guess` 에 **언어별 기본**을 준다 — VS Code 는 몇 언어의 `insertSpaces` 기본을 바꾼다(`configurationDefaults`: `[go]` 거짓 · `[makefile]` 거짓 ·
-/// `[yaml]` 참·폭 2 — 확장 `package.json` 원문). 그 기본이 **동률**(탭 줄 = 공백 줄)과 **정렬 예외**를 가른다. 우리 번들 grammar 중 해당하는 것은
-/// Go 하나고, Makefile 은 grammar 가 없어 경로로 가른다(`defaultSpacesMode`). YAML 은 언어를 모른다(§5.1c).
+/// `[yaml]` 참·폭 2 — 확장 `package.json` 원문). 그 기본이 **동률**(탭 줄 = 공백 줄)과 **정렬 예외**를 가른다 — 언어마다의 값은
+/// `languageDefault`(Go·Make·YAML).
 pub fn guessWith(src: anytype, default_tab: u16, default_spaces_mode: bool) Guess {
     const n = @min(src.count(), guess_line_limit);
     var tab_lines: usize = 0;
@@ -777,10 +777,14 @@ test "IG11 편집 단위 — 감지 결과를 그대로(탭·공백 폭), 다음
     try testing.expectEqual(@as(u8, 1), (Guess{ .tabs = true, .spaces = 0 }).editUnit(0).width);
 }
 
-test "IG12 언어 기본 — Go·Makefile 은 탭, 그 밖은 공백 (VS Code `[go]`·`[makefile]` 의 insertSpaces, 계획 editor-typing-rules TR1)" {
-    try testing.expect(!defaultSpacesMode(.go, "/r/a.go"));
-    try testing.expect(!defaultSpacesMode(.go, null));
-    for ([_][]const u8{ "/r/Makefile", "/r/GNUmakefile", "/r/makefile", "/r/rules.mk" }) |p| try testing.expect(!defaultSpacesMode(.none, p));
-    for ([_][]const u8{ "/r/a.ts", "/r/a.py", "/r/notes.txt", "/r/.mk", "/r/Makefile.bak" }) |p| try testing.expect(defaultSpacesMode(language.grammarForPath(p), p));
-    try testing.expect(defaultSpacesMode(.none, null));
+test "IG12 언어 기본 — Go·Makefile 은 탭, YAML 은 공백 2, 그 밖은 공백·설정 폭 (VS Code `[go]`·`[makefile]`·`[yaml]`, 계획 editor-typing-rules TR1·번들 언어 확대 BL1)" {
+    try testing.expect(!languageDefault(.go).spaces);
+    for ([_][]const u8{ "/r/Makefile", "/r/GNUmakefile", "/r/makefile", "/r/rules.mk" }) |p| try testing.expect(!languageDefault(language.grammarForPath(p)).spaces);
+    for ([_][]const u8{ "/r/a.ts", "/r/a.py", "/r/notes.txt", "/r/Makefile.bak" }) |p| {
+        const d = languageDefault(language.grammarForPath(p));
+        try testing.expect(d.spaces and d.tab_size == null);
+    }
+    const y = languageDefault(language.grammarForPath("/r/ci.yml"));
+    try testing.expect(y.spaces and y.tab_size.? == 2);
+    try testing.expect(languageDefault(.none).spaces);
 }

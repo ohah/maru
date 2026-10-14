@@ -1097,9 +1097,11 @@ LSP `TextEdit[]` → `Delta` 변환(정렬·겹침 거부)과 revision 검증이
   - **줄 주석**(`//` 문법 — 표식은 문법의 것, `Grammar.lineComment`): 주석 **가운데**서 Enter 면 `// ` 로 잇는다(줄 끝이면 잇지 않는다).
   - **Python**: 제어문(`def`·`class`·`if`·`elif`·`else`·`for`·`while`·`try`·`except`·`finally`·`with`·`async`·`match`·`case`)이 `:` 로
     끝나면(줄 끝 주석은 떼고) 한 단계. **C 계열**: `case X:`·`default:` 뒤 한 단계. **Ruby**: 블록을 여는 줄(`def`·`class`·`if`·… ·`do`)
-    뒤 한 단계 — 한 줄로 닫힌 것·후위 조건·문자열 안 `do` 는 아니다. **HTML**: 여는 태그 뒤 한 단계, 그 닫는 짝이 caret 뒤에
-    바로 오면 가운데 줄(void 요소는 아님).
-  - **낱말 내어쓰기**: Ruby `end`·`else`·`elsif`·`ensure`·`rescue`·`when `, Python `else:`·`elif …:`·`except …:`·`finally:` 를 줄 끝에서
+    뒤 한 단계 — 한 줄로 닫힌 것·후위 조건·문자열 안 `do` 는 아니다. **HTML·XML**: 여는 태그 뒤 한 단계, 그 닫는 짝이 caret 뒤에
+    바로 오면 가운데 줄(void 요소는 아님). **YAML**: `key:`·목록 머리 `-`·앵커만 붙은 `key: &a`·블록 스칼라 머리 `key: |` 뒤 한 단계.
+    **Lua**: 블록을 여는 낱말(`function`·`then`·`do`·`repeat`·`else`)이 닫는 낱말(`end`·`until`) 없이 남은 줄 뒤 한 단계(번들 언어
+    확대 BL1 — [계획](plans/editor-bundled-languages.md)).
+  - **낱말 내어쓰기**: Ruby `end`·`else`·`elsif`·`ensure`·`rescue`·`when `, Lua `end`·`else`·`elseif`·`until`, Python `else:`·`elif …:`·`except …:`·`finally:` 를 줄 끝에서
     다 치면 그 줄을 한 단계 내어쓴다 — 그 줄의 들여쓰기가 위쪽 내용 줄 이상일 때만(이미 맞췄으면 그대로 — 거슬러 가는 줄 수 상한
     `typing_ops.keyword_scan_lines`). caret 이 줄바꿈 안(CRLF 의 `\r`·`\n` 사이)이면 하지 않는다.
   - VS Code 규칙(핀 고정 커밋)을 원래 의미로 돌린 말뭉치와 대조한다 — 갈리는 것은 문자열·주석 안 괄호 등 이유를 적은 「의도한

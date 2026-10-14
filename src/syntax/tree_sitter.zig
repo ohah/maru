@@ -45,6 +45,13 @@ extern fn tree_sitter_kotlin() *const c.TSLanguage;
 extern fn tree_sitter_bash() *const c.TSLanguage;
 extern fn tree_sitter_css() *const c.TSLanguage;
 extern fn tree_sitter_html() *const c.TSLanguage;
+extern fn tree_sitter_yaml() *const c.TSLanguage;
+extern fn tree_sitter_toml() *const c.TSLanguage;
+extern fn tree_sitter_xml() *const c.TSLanguage;
+extern fn tree_sitter_dtd() *const c.TSLanguage;
+extern fn tree_sitter_lua() *const c.TSLanguage;
+extern fn tree_sitter_dockerfile() *const c.TSLanguage;
+extern fn tree_sitter_make() *const c.TSLanguage;
 
 /// 하이라이트 쿼리 — **grammar가 소유한다**(빌드가 익명 import로 꽂는다. `build.zig`의 grammar 표가
 /// 같은 이름을 쓴다 — 둘이 갈리면 컴파일이 죽는다).
@@ -66,6 +73,13 @@ const kotlin_highlights = @embedFile("kotlin_highlights_scm");
 const bash_highlights = @embedFile("bash_highlights_scm");
 const css_highlights = @embedFile("css_highlights_scm");
 const html_highlights = @embedFile("html_highlights_scm");
+const yaml_highlights = @embedFile("yaml_highlights_scm");
+const toml_highlights = @embedFile("toml_highlights_scm");
+const xml_highlights = @embedFile("xml_highlights_scm");
+const dtd_highlights = @embedFile("dtd_highlights_scm");
+const lua_highlights = @embedFile("lua_highlights_scm");
+const dockerfile_highlights = @embedFile("dockerfile_highlights_scm");
+const make_highlights = @embedFile("make_highlights_scm");
 
 /// **파싱 상한**(§5.3 — "파싱 대상 크기·시간 상한"). 이 크기를 넘는 문서는 무색이다.
 ///
@@ -87,7 +101,7 @@ pub const Span = struct {
 
 /// `session/editor/language.zig`의 열거와 **같은 축**을 쓰되, 이 모듈은 maru를 못 들여오므로
 /// (모듈이 다르다) 필요한 것만 다시 적는다. 그 열거를 이 축으로 옮기는 것은 아래 `languageFor` 하나다.
-pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, other };
+pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, yaml, toml, xml, dtd, lua, dockerfile, make, other };
 
 /// 같은 이름의 태그(`session/editor/language.zig` 의 `Grammar`)를 이 축으로 옮긴다 — **호스트가 다시 적지 않는다**
 /// ([layering-and-portability.md](../../docs/layering-and-portability.md) §3.5). 예전에는 macOS(`app_session/editor/syntax.zig` 의
@@ -199,6 +213,15 @@ const grammar_table = [_]GrammarEntry{
     .{ .lang = .bash, .get = tree_sitter_bash, .scm = bash_highlights, .fold_kinds = &.{ "compound_statement", "do_group", "if_statement", "case_statement", "function_definition", "subshell" }, .symbol_kinds = &.{"function_definition"} },
     .{ .lang = .css, .get = tree_sitter_css, .scm = css_highlights, .fold_kinds = &.{ "block", "keyframe_block_list", "declaration" }, .symbol_kinds = &.{} },
     .{ .lang = .html, .get = tree_sitter_html, .scm = html_highlights, .fold_kinds = &.{ "element", "script_element", "style_element" }, .symbol_kinds = &.{} },
+    // 번들 언어 확대 BL1(docs/plans/editor-bundled-languages.md). YAML 은 키 줄에서 그 아래를 접는다(`block_mapping_pair` — VS Code 는
+    // offSide 들여쓰기로 같은 자리를 접는다). 설정 파일 셋(YAML·TOML·Dockerfile)과 XML·DTD 는 심볼 목록이 없다(이름 노드가 없다).
+    .{ .lang = .yaml, .get = tree_sitter_yaml, .scm = yaml_highlights, .fold_kinds = &.{ "block_mapping_pair", "block_sequence_item", "flow_mapping", "flow_sequence", "block_scalar" }, .symbol_kinds = &.{} },
+    .{ .lang = .toml, .get = tree_sitter_toml, .scm = toml_highlights, .fold_kinds = &.{ "table", "table_array_element", "array", "inline_table" }, .symbol_kinds = &.{} },
+    .{ .lang = .xml, .get = tree_sitter_xml, .scm = xml_highlights, .fold_kinds = &.{ "element", "CDSect", "Comment", "doctypedecl" }, .symbol_kinds = &.{} },
+    .{ .lang = .dtd, .get = tree_sitter_dtd, .scm = dtd_highlights, .fold_kinds = &.{ "conditionalSect", "AttlistDecl", "elementdecl", "Comment" }, .symbol_kinds = &.{} },
+    .{ .lang = .lua, .get = tree_sitter_lua, .scm = lua_highlights, .fold_kinds = &.{ "function_declaration", "function_definition", "if_statement", "for_statement", "while_statement", "repeat_statement", "do_statement", "table_constructor", "arguments", "parameters" }, .symbol_kinds = &.{"function_declaration"} },
+    .{ .lang = .dockerfile, .get = tree_sitter_dockerfile, .scm = dockerfile_highlights, .fold_kinds = &.{ "run_instruction", "heredoc_block", "env_instruction", "label_instruction", "cmd_instruction", "entrypoint_instruction", "copy_instruction" }, .symbol_kinds = &.{} },
+    .{ .lang = .make, .get = tree_sitter_make, .scm = make_highlights, .fold_kinds = &.{ "rule", "conditional", "define_directive" }, .symbol_kinds = &.{"define_directive"} },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -1502,6 +1525,8 @@ pub fn bracketRuleFor(lang: Language) BracketRule {
         .cpp => .{ .text_kinds = &.{"preproc_arg"}, .text_skip_directives = &.{ "error", "warning" }, .text_c_lexer = true, .skip_kinds = &.{"raw_string_literal"} },
         .python => .{ .text_kinds = &.{"escape_interpolation"} },
         .html => .{ .colorize = false, .text_kinds = &.{ "text", "attribute_name", "attribute_value" }, .chars = "(){}" },
+        // XML·DTD 는 HTML 과 같다 — 괄호 색을 안 칠하고(VS Code 의 xml 도 괄호 쌍 색이 없다), 본문 글자 속 괄호도 센다.
+        .xml, .dtd => .{ .colorize = false, .text_kinds = &.{ "CharData", "AttValue" }, .chars = "(){}" },
         .json => .{ .chars = "[]{}" },
         .css => .{ .css_url_strings = true },
         .markdown => .{ .paint = false, .colorize = false },
@@ -2230,7 +2255,7 @@ test "SYN17 예산 0은 안 끊는다 — 기존 동기 경로가 그대로다" 
     try std.testing.expect(spans.items.len > 0);
 }
 
-test "SYN18 번들한 grammar 열여덟이 전부 실제로 색을 낸다" {
+test "SYN18 번들한 grammar 가 전부 실제로 색을 낸다" {
     // **링크만 되고 파싱이 안 되면 그 언어만 조용히 무색이다.** grammar 진입점 이름이 틀렸거나
     // 쿼리가 grammar와 안 맞으면(버전 어긋남) 정확히 그렇게 된다 — 화면에만 나타난다.
     // 표에 든 **모든** 언어를 한 줄씩 태워 그 자리를 막는다.
@@ -2254,6 +2279,13 @@ test "SYN18 번들한 grammar 열여덟이 전부 실제로 색을 낸다" {
         .{ .lang = .bash, .src = "x=\"a\" # c\necho $x\n" },
         .{ .lang = .css, .src = "a { color: #fff; } /* c */\n" },
         .{ .lang = .html, .src = "<div class=\"a\">t</div>\n" },
+        .{ .lang = .yaml, .src = "a: 1 # c\nb: \"s\"\n" },
+        .{ .lang = .toml, .src = "[t]\na = \"s\" # c\n" },
+        .{ .lang = .xml, .src = "<a b=\"c\">t</a>\n" },
+        .{ .lang = .dtd, .src = "<!ELEMENT a (#PCDATA)>\n" },
+        .{ .lang = .lua, .src = "local x = \"a\" -- c\n" },
+        .{ .lang = .dockerfile, .src = "FROM node:20\n# c\nRUN echo \"hi\"\n" },
+        .{ .lang = .make, .src = "a: b\n\techo $(X) # c\n" },
     };
     // 표에 든 언어 수와 샘플 수가 같아야 한다 — grammar를 늘리고 샘플을 안 더하면 그 언어가 안 돈다.
     try std.testing.expectEqual(grammar_table.len, samples.len);
@@ -2440,6 +2472,13 @@ test "SYN21 언어마다 접을 것이 있는 표본에서 범위가 나온다 �
         .{ .lang = .bash, .src = "f() {\n  a=1\n  echo $a\n}\n" },
         .{ .lang = .css, .src = "a {\n  color: red;\n  display: block;\n}\n" },
         .{ .lang = .html, .src = "<div>\n  <p>t</p>\n</div>\n" },
+        .{ .lang = .yaml, .src = "a:\n  b: 1\n  c: 2\nd: 3\n" },
+        .{ .lang = .toml, .src = "[t]\na = 1\nb = 2\n" },
+        .{ .lang = .xml, .src = "<a>\n  <b>t</b>\n</a>\n" },
+        .{ .lang = .dtd, .src = "<!ATTLIST a\n  b CDATA #IMPLIED\n  c CDATA #IMPLIED>\n" },
+        .{ .lang = .lua, .src = "function f()\n  local a = 1\n  return a\nend\n" },
+        .{ .lang = .dockerfile, .src = "FROM a\nRUN echo 1 && \\\n    echo 2\n" },
+        .{ .lang = .make, .src = "a: b\n\techo 1\n\techo 2\n" },
     };
     try std.testing.expectEqual(grammar_table.len, samples.len);
 
@@ -2630,6 +2669,8 @@ test "SYN25 심볼 종류 목록이 실재하는 노드 이름이다 — 언어�
         .{ .lang = .php, .src = "<?php\nfunction f() {}\n", .want = "f" },
         .{ .lang = .kotlin, .src = "fun f() {}\n", .want = "f" },
         .{ .lang = .bash, .src = "f() {\n  echo 1\n}\n", .want = "f" },
+        .{ .lang = .lua, .src = "function f() end\n", .want = "f" },
+        .{ .lang = .make, .src = "define F\n\techo\nendef\n", .want = "F" },
     };
     // **표본이 없는 언어는 종류를 선언할 수 없다.** 이것이 없으면 "종류는 적어 뒀는데 목록은 늘
     // 비는" 상태가 조용히 산다 — markdown 의 `section` 이 정확히 그랬다(이름 노드가 없다). 뮤테이션에서

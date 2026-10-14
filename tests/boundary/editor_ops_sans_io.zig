@@ -27,6 +27,7 @@ const ops_dir = "src/session/editor/ops";
 const pure_std = [_]struct { name: []const u8, why: []const u8 }{
     .{ .name = "mem", .why = "바이트 비교·자르기·정렬 헬퍼. OS 없음." },
     .{ .name = "math", .why = "정수 한계·포화 연산. OS 없음." },
+    .{ .name = "meta", .why = "타입 정보와 값 비교(eql). 메모리의 값만 비교하며 OS 호출 없음." },
     .{ .name = "fmt", .why = "할당자에 문자열 조립(`allocPrint`). 출력이 아니다." },
     .{ .name = "testing", .why = "단언 헬퍼. test 블록에서만 쓰이고 OS 를 안 부른다." },
     .{ .name = "ArrayList", .why = "동적 배열. 할당자는 인자로 받는다." },
@@ -254,6 +255,7 @@ test "판정자는 허용한 import·순수한 std·주석을 오탐하지 않�
         \\const case = @import("../../../terminal/selection.zig");
         \\const term = @import("../../../terminal.zig");
         \\const sib = @import("other.zig");
+        \\_ = std.meta.eql(a, b);
         \\var list: std.ArrayList(u8) = .empty;
         \\std.mem.sort(usize, xs, {}, std.sort.asc(usize));
         \\var v = std.unicode.Utf8View.init(s) catch unreachable;

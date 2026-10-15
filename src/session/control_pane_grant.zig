@@ -152,8 +152,9 @@ pub const PaneGrantStore = struct {
         return if (birth) births < max_grants else self.len - births < max_grants;
     }
 
-    /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 그 탭을 몰았다 — 그 탭의 어느 호스트든 grant 를
-    /// 그때의 사이트(`host`)에 묶는다. 다른 사이트는 다시 묻는다. 번호는 그대로다(새 동의가 아니라 좁힘 — 더 숨기는 쪽). 바꿨으면 참.
+    /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 그 탭을 몰았다(2 회차 N3 — 켜진 동안 몰았고 이제
+    /// 꺼졌다) — 그 탭의 어느 호스트든 grant 를 몰기 전의 사이트(`host`)에 묶는다. 다른 사이트는 다시 묻는다. 번호는 그대로다(새 동의가
+    /// 아니라 좁힘 — 더 숨기는 쪽). 바꿨으면 참.
     pub fn narrowAnyHost(self: *PaneGrantStore, target: u64, host: GrantHost) bool {
         var changed = false;
         for (self.grants[0..self.len]) |*e| if (e.target == target and e.scope == .browser_network and e.any_host) {

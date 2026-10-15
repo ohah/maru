@@ -6,8 +6,9 @@
 //! −27 % 처리량). 그래서 **글로 바꾸기 전에** 탭마다(100/s·버스트 500)·전체(2000/s)의 양동이와 동시에 쥔 요청 수(512)를 보고, 넘치면
 //! 그 요청은 적지 않고 수만 센다(`dropped` — UI 스레드가 `net_dropped` 로 보낸다). 넘긴 바이트(IO → UI 상자)도 상한이 있다.
 //!
-//! 시험이 증명하는 것: 양동이(버스트·채움·탭이 다른 탭을 굶기지 않음·전체가 거절하면 탭 몫을 되돌림), 동시 요청 상한, 지켜보는 표(브라우저
-//! 번호·켬·서비스 워커 출처 맞추기), 요청 표(같은 번호를 다시 쓰지 않음·꽉 차면 거절), 넘김 상자의 상한.
+//! 시험이 증명하는 것: 양동이(버스트·채움·탭이 다른 탭을 굶기지 않음·전체가 거절하면 탭 몫을 되돌림), 동시 요청 상한(전체 512·탭마다 128 —
+//! 끝나지 않는 요청을 쥔 탭 하나가 다른 탭을 굶기지 않는다), 서비스 워커 길의 문(글로 바꾸기 전), 지켜보는 표(브라우저 번호·켬·서비스 워커
+//! 출처 맞추기), 요청 표(같은 번호를 다시 쓰지 않음·꽉 차면 거절), 넘김 상자의 상한.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -21,6 +22,9 @@ pub const global_rate: f64 = 2000;
 pub const global_burst: f64 = 2000;
 /// 동시에 쥐는(시작했고 끝나지 않은) 요청 수 상한.
 pub const max_in_flight: usize = 512;
+/// 탭 하나가 쥘 수 있는 몫(W9d① 적대 리뷰 1 회차 F9 — 끝나지 않는 요청을 쏟는 탭 하나가 512 를 다 쥐면 다른 지켜보는 탭과 서비스 워커
+/// 요청이 아무것도 적히지 않았다). 넷이 모여야 전체가 찬다.
+pub const max_in_flight_per_tab: usize = 128;
 /// IO → UI 넘김 상자의 상한 — 개수와 바이트. 넘치면 그 기록은 버리고 수를 센다.
 pub const max_queue_events: usize = 4096;
 pub const max_queue_bytes: usize = 8 * 1024 * 1024;
@@ -64,6 +68,8 @@ pub const Watch = struct {
     top_origin: [max_origin_bytes]u8 = undefined,
     top_len: usize = 0,
     bucket: Bucket = .{ .tokens = tab_burst },
+    /// 이 탭 몫으로 쥔 요청 수(`max_in_flight_per_tab`).
+    in_flight: u16 = 0,
     /// 문에서 넘긴 수(UI 스레드가 `net_dropped` 로 보내고 비운다).
     dropped: u32 = 0,
 
@@ -79,6 +85,8 @@ pub const Watch = struct {
 /// 시작한 요청 하나(번호 — 리다이렉트·인증 재시도에도 같다).
 pub const Track = struct {
     request: u64 = 0,
+    /// 이 요청을 몫으로 센 탭(문을 지날 때의 탭 — 서비스 워커 요청은 첫 대상). 끝나면 그 탭의 몫을 돌려준다.
+    owner: BrowserId = 0,
     targets: [max_targets]BrowserId = @splat(0),
     target_count: u8 = 0,
     service_worker: bool = false,
@@ -103,6 +111,8 @@ pub const State = struct {
     /// 켜진 지켜보기 수 — 0 이면 처리기가 아무것도 보지 않고 곧 null 을 돌려준다(가장 흔한 길).
     watching: usize = 0,
     global: Bucket = .{ .tokens = global_burst },
+    /// 서비스 워커 길의 문 — 붙일 탭을 고르려면 initiator 를 글로 바꿔야 해서, 그 **앞에** 이 양동이를 본다(되돌리지 않는다).
+    sw_path: Bucket = .{ .tokens = global_burst },
     tracks: [max_in_flight]Track = @splat(.{}),
     in_flight: usize = 0,
     queue_events: usize = 0,
@@ -191,9 +201,9 @@ pub const State = struct {
 
     // ── 문(IO 스레드) ───────────────────────────────────────────────────────────────────────────────────────
 
-    /// 새 요청을 받을 수 있는가 — 탭 양동이, 그다음 전체 양동이, 동시 요청 수. 넘치면 그 탭의 넘긴 수를 센다.
+    /// 새 요청을 받을 수 있는가 — 동시 요청 수(전체·이 탭의 몫), 탭 양동이, 그다음 전체 양동이. 넘치면 그 탭의 넘긴 수를 센다.
     pub fn admit(self: *State, w: *Watch, now_us: i64) bool {
-        if (self.in_flight >= max_in_flight) {
+        if (self.in_flight >= max_in_flight or w.in_flight >= max_in_flight_per_tab) {
             w.dropped +|= 1;
             return false;
         }
@@ -209,13 +219,21 @@ pub const State = struct {
         return true;
     }
 
-    /// 요청 표에 자리를 잡는다(이미 있으면 그것 — 리다이렉트의 다음 홉은 문을 다시 지나지 않는다). 꽉 찼으면 null.
-    pub fn track(self: *State, request: u64) ?*Track {
+    /// 서비스 워커 길의 문(IO 스레드) — initiator 를 글로 바꾸기 **전에** 본다(적대 리뷰 1 회차 곁가지: 바꾼 뒤에 문을 봤다). 동시 요청이
+    /// 다 찼거나 이 길의 양동이가 비면 거짓 — 붙일 탭을 아직 모르니 넘긴 수는 세지 않는다.
+    pub fn admitServiceWorkerPath(self: *State, now_us: i64) bool {
+        if (self.in_flight >= max_in_flight) return false;
+        return self.sw_path.take(global_rate, global_burst, now_us);
+    }
+
+    /// 요청 표에 자리를 잡는다(이미 있으면 그것 — 리다이렉트의 다음 홉은 문을 다시 지나지 않는다). `owner` 의 몫으로 센다. 꽉 찼으면 null.
+    pub fn track(self: *State, request: u64, owner: *Watch) ?*Track {
         if (self.find(request)) |t| return t;
-        if (self.in_flight >= max_in_flight) return null;
+        if (self.in_flight >= max_in_flight or owner.in_flight >= max_in_flight_per_tab) return null;
         for (&self.tracks) |*t| if (t.request == 0) {
-            t.* = .{ .request = request };
+            t.* = .{ .request = request, .owner = owner.browser };
             self.in_flight += 1;
+            owner.in_flight += 1;
             return t;
         };
         return null;
@@ -227,9 +245,10 @@ pub const State = struct {
         return null;
     }
 
-    /// 요청이 끝났다 — 자리를 비운다.
+    /// 요청이 끝났다 — 자리를 비우고 그 탭의 몫을 돌려준다(그사이 지켜보기가 꺼졌다 다시 켜졌으면 0 아래로 가지 않는다).
     pub fn untrack(self: *State, t: *Track) void {
         if (t.request == 0) return;
+        if (self.watchOf(t.owner)) |w| w.in_flight -|= 1;
         t.* = .{};
         self.in_flight -= 1;
     }
@@ -290,12 +309,15 @@ test "W9d①: 전체 양동이 2000 — 넘으면 탭의 몫은 되돌리고 넘
     // 동시 요청.
     var t: State = .{};
     try testing.expect(t.setWatch(1, 11, true, true, &.{}));
-    for (1..max_in_flight + 1) |r| try testing.expect(t.track(r) != null);
-    try testing.expect(t.track(max_in_flight + 5) == null);
-    try testing.expect(!t.admit(t.watchByCef(11).?, 1));
-    try testing.expect(t.track(3) != null); // 이미 있는 번호는 그 자리(리다이렉트의 다음 홉)
+    // 탭 넷이 몫(128)씩 쥐면 전체(512)가 찬다.
+    for (0..4) |i| try testing.expect(t.setWatch(@intCast(i + 1), @intCast(i + 11), true, true, &.{}));
+    for (1..max_in_flight + 1) |r| try testing.expect(t.track(r, t.watchByCef(@intCast(11 + (r - 1) / max_in_flight_per_tab)).?) != null);
+    const w1 = t.watchByCef(11).?;
+    try testing.expect(t.track(max_in_flight + 5, w1) == null);
+    try testing.expect(!t.admit(w1, 1));
+    try testing.expect(t.track(3, w1) != null); // 이미 있는 번호는 그 자리(리다이렉트의 다음 홉)
     t.untrack(t.find(3).?);
-    try testing.expect(t.track(max_in_flight + 5) != null);
+    try testing.expect(t.track(max_in_flight + 5, w1) != null);
     try testing.expect(t.find(3) == null);
 }
 
@@ -337,4 +359,50 @@ test "W9d①: 넘김 상자 — 개수·바이트 상한, 꺼낸 만큼 돌려�
     try testing.expect(!s.reserveQueue(1));
     s.releaseQueue(1);
     try testing.expect(s.reserveQueue(1));
+}
+
+// ── W9d① 적대 리뷰 1 회차 재현(리뷰가 남긴 R9d1-G1 — 붙여 실패를 본 뒤 고쳤다) ──
+
+test "W9d① 적대 리뷰 1 회차 재현 G1: 한 탭이 끝나지 않는 요청을 쏟아도 그 탭은 128 까지만 쥔다 — 다른 지켜보는 탭과 서비스 워커 요청은 계속 적힌다" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, &.{}));
+    try testing.expect(s.setWatch(2, 12, true, true, &.{}));
+    const hostile = s.watchByCef(11).?;
+    // 적대 페이지가 끝나지 않는 요청을 연다(예: CEF 154 가 끝내지 않는 401 + WWW-Authenticate 하위 자원, 답하지 않는 서버). 채움 시간이 있어
+    // 몇 초에 걸쳐 문을 지난다 — 그 탭의 몫에서 멈춘다.
+    var now: i64 = 1_000_000;
+    var r: u64 = 1;
+    for (0..10_000) |_| {
+        if (s.admit(hostile, now)) {
+            _ = s.track(r, hostile).?;
+            r += 1;
+        }
+        now += 10_000;
+    }
+    try testing.expectEqual(max_in_flight_per_tab, s.in_flight);
+    try testing.expectEqual(@as(u16, max_in_flight_per_tab), hostile.in_flight);
+    const victim = s.watchByCef(12).?;
+    try testing.expect(s.admit(victim, now + 60 * 1_000_000)); // 1 분 뒤 다른 탭의 첫 요청
+    _ = s.track(r, victim).?;
+    try testing.expect(s.admitServiceWorkerPath(now + 60 * 1_000_000)); // 서비스 워커 길도 열려 있다
+    // 끝나면 그 탭의 몫이 돌아온다 — 지켜보기를 껐다 켠 뒤에 끝난 옛 요청은 0 아래로 내리지 않는다.
+    s.untrack(s.find(1).?);
+    try testing.expectEqual(@as(u16, max_in_flight_per_tab - 1), hostile.in_flight);
+    try testing.expect(s.setWatch(1, 11, false, false, &.{}));
+    try testing.expect(s.setWatch(1, 11, true, true, &.{}));
+    const again = s.watchByCef(11).?;
+    s.untrack(s.find(2).?);
+    try testing.expectEqual(@as(u16, 0), again.in_flight);
+}
+
+test "W9d① 적대 리뷰 1 회차 곁가지: 서비스 워커 길의 문은 initiator 를 글로 바꾸기 전에 — 버스트 뒤로는 초당 2000, 동시 요청이 차면 닫힌다" {
+    var s: State = .{};
+    var ok: usize = 0;
+    for (0..2500) |_| {
+        if (s.admitServiceWorkerPath(1_000_000)) ok += 1;
+    }
+    try testing.expectEqual(@as(usize, @intFromFloat(global_burst)), ok);
+    try testing.expect(s.admitServiceWorkerPath(1_001_000)); // 1 ms 뒤 두 개가 찬다
+    s.in_flight = max_in_flight;
+    try testing.expect(!s.admitServiceWorkerPath(5_000_000));
 }

@@ -14,6 +14,12 @@
 //!                     `service_worker` 로 붙는다
 //!   net-flood         3000 요청을 쏟으면 문이 대부분을 넘기고(`net_dropped`) 적은 수는 버스트 근처다
 //!   net-watch-off     지켜보기를 끄면 그 뒤 요청은 오지 않는다
+//! W9d① 적대 리뷰 1 회차(리뷰가 더한 판정 — 이름 `R9d1-*`):
+//!   R9d1-sw-cross-tab-on   설정 켬: 지켜보지 않는 탭(사용자의 grant 없는 탭)이 같은 출처에서 보낸 서비스 워커 fetch 도 지켜보는 탭에
+//!                          `service_worker` 로 붙는다 — 사용자 결정(2026-10-15 「다 보여 줌」)
+//!   R9d1-sw-cross-tab-off  설정 끔: 같은 fetch 가 붙어도 `Authorization` 값은 브라우저 프로세스를 나가지 않는다(이름만) — 수만 세는 것은
+//!                          maru 의 몫(grant 없는 탭이 같은 출처를 보인다 — L2·web_osr 시험)
+//!   R9d1-inflight-*        끝나지 않는 요청을 쏟는 탭이 있어도 다른 지켜보는 탭이 적히고(탭마다 128), 떠나거나 닫으면 자리가 돌아온다
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -124,6 +130,24 @@ fn serveOne(conn: c_int) void {
         "fetch('/n/sw-fetch?'+Date.now()).then(function(){document.title='sw-done'})})</script>");
     if (std.mem.eql(u8, path, "/n/sw.js")) return reply(conn, "200 OK", "application/javascript", "", "self.addEventListener('install',function(e){self.skipWaiting()});" ++
         "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim())});self.addEventListener('fetch',function(e){e.respondWith(fetch(e.request))});");
+    // R9d1(리뷰): 다른(지켜보지 않는) 탭에서 서비스 워커가 다스리는 페이지와 그 탭만의 fetch, 끝나지 않는 끝점과 그것을 많이 여는 페이지.
+    if (std.mem.eql(u8, path, "/n/sw-other")) return reply(conn, "200 OK", html, "", "<!doctype html><title>other</title><script>" ++
+        "fetch('/n/user-secret?'+Date.now(),{headers:{'Authorization':'Bearer user-only'}}).then(function(){document.title='other-done'})</script>");
+    if (std.mem.eql(u8, path, "/n/hang")) {
+        os.sleepMs(40_000);
+        return reply(conn, "200 OK", "text/plain", "", "late");
+    }
+    if (std.mem.eql(u8, path, "/n/hang-page")) return reply(conn, "200 OK", html, "", "<!doctype html><title>hang</title><script>" ++
+        "for(var i=0;i<480;i++)fetch('/n/hang?a'+i).catch(function(){});" ++
+        "setTimeout(function(){for(var i=0;i<200;i++)fetch('/n/hang?b'+i).catch(function(){})},1500)</script>");
+    if (std.mem.eql(u8, path, "/v/page")) return reply(conn, "200 OK", html, "", "<!doctype html><title>v</title><script>for(var i=0;i<40;i++)fetch('/v/f?'+i)</script>");
+    if (std.mem.eql(u8, path, "/n/slow")) {
+        os.sleepMs(2_000);
+        return reply(conn, "200 OK", "text/plain", "", "slow");
+    }
+    // 사용자가 곧 떠나는 바쁜 보통 페이지 — 떠날 때 요청 100 개가 아직 진행 중이다
+    if (std.mem.eql(u8, path, "/n/slow-page")) return reply(conn, "200 OK", html, "", "<!doctype html><title>slow</title><script>" ++
+        "for(var i=0;i<100;i++)fetch('/n/slow?'+Math.random()).catch(function(){});setTimeout(function(){location.href='/n/blank?left'},300)</script>");
     if (std.mem.eql(u8, path, "/n/flood")) return reply(conn, "200 OK", html, "", "<!doctype html><title>flood</title><script>for(var i=0;i<3000;i++)fetch('/n/f?'+i).catch(function(){})</script>");
     if (std.mem.eql(u8, path, "/n/f")) {
         _ = flood_served.fetchAdd(1, .monotonic);
@@ -403,6 +427,73 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const served = flood_served.load(.monotonic);
         report(dropped > 1000 and begins <= 800 and begins >= 100, "net-flood", std.fmt.bufPrint(&detail, "서버가 받은 {d} · 적은 요청 {d} · 넘긴 수 {d}", .{ served, begins, dropped }) catch "");
     }
+    // ── R9d1(리뷰): 탭을 건너는 서비스 워커 요청 — 켬·끔 ──
+    // 지켜보는 탭은 127.0.0.1 에 있고 /n/sw-page 의 서비스 워커가 /n/ 을 다스린다. 지켜보지 않는 탭(사용자의 grant 없는 탭)이 그 범위의
+    // 페이지를 열어 그 탭만의 fetch(`Authorization`)를 보낸다 — 지켜보는 탭에 붙는가, 끄면 값이 나가는가.
+    {
+        try r.navigate(watched, url(&u, "/n/blank?sw-host"));
+        r.pump(1000);
+        for ([_]bool{ true, false }) |full| {
+            try r.watch(true, full);
+            r.pump(300);
+            at = r.mark();
+            var pb: [64]u8 = undefined;
+            try r.navigate(unwatched, url(&u, try std.fmt.bufPrint(&pb, "/n/sw-other?full={}", .{full})));
+            r.pump(4000);
+            const leak = r.begin(at, watched, "/n/user-secret");
+            const nav = r.begin(at, watched, "/n/sw-other");
+            const auth: []const u8 = if (leak) |l| l.header("Authorization") orelse "" else "";
+            const sw = if (leak) |l| l.flags.service_worker else false;
+            // 켬: 사용자 결정대로 붙는다(서비스 워커 표시와 값까지). 끔: 붙어도 값은 비었다(이름만 — `stripped`).
+            const ok = if (full)
+                sw and std.mem.eql(u8, auth, "Bearer user-only")
+            else if (leak) |l| sw and l.flags.stripped and auth.len == 0 else true;
+            report(ok, if (full) "R9d1-sw-cross-tab-on" else "R9d1-sw-cross-tab-off", std.fmt.bufPrint(&detail, "지켜보지 않는 탭의 fetch 가 지켜보는 탭에 {} (서비스 워커 {} · Authorization 「{s}」) · 그 탭의 이동 {}", .{ leak != null, sw, auth, nav != null }) catch "");
+        }
+        try r.watch(true, true);
+        r.pump(300);
+    }
+    // ── R9d1(리뷰): 끝나지 않는 요청을 쥔 지켜보는 탭 대 다른 지켜보는 탭 ──
+    // 피해 탭의 페이지는 http://127.0.0.1:<포트>/v/page — 서비스 워커의 /n/ 범위 밖이고 끝나지 않는 요청(localhost:<포트>)과 다른 호스트라
+    // Chromium 자신의 호스트별 연결 줄이 막지 않는다.
+    {
+        const second: u64 = unwatched;
+        var w2: msg.NetWatch = .{ .browser = second, .on = true, .full = true, .host_count = 1 };
+        w2.hosts[0] = "127.0.0.1";
+        var lb: [512]u8 = undefined;
+        try r.host.send(.{ .net_watch = w2 });
+        r.pump(300);
+        const Victim = struct {
+            fn load(rr: *Run, tag: []const u8) !struct { begins: usize, dropped: u64 } {
+                var b: [512]u8 = undefined;
+                const from = rr.mark();
+                try rr.navigate(unwatched, try std.fmt.bufPrint(&b, "http://127.0.0.1:{d}/v/page?{s}", .{ server_port, tag }));
+                rr.pump(2500);
+                var n: usize = 0;
+                var d: u64 = 0;
+                for (rr.recs.items[from..]) |rec| if (rec.browser == unwatched) {
+                    if (rec.tag == .net_begin) n += 1;
+                    if (rec.tag == .net_dropped) d += rec.count;
+                };
+                return .{ .begins = n, .dropped = d };
+            }
+        };
+        const base = try Victim.load(&r, "baseline");
+        try r.navigate(watched, try std.fmt.bufPrint(&lb, "http://localhost:{d}/n/hang-page", .{server_port}));
+        r.pump(5000);
+        const starved = try Victim.load(&r, "victim");
+        report(starved.begins > 0, "R9d1-inflight-starve", std.fmt.bufPrint(&detail, "다른 지켜보는 탭: 기준 시작 {d} · 첫 탭이 끝나지 않는 요청을 쥔 동안 시작 {d} 넘김 {d}", .{ base.begins, starved.begins, starved.dropped }) catch "");
+        // 그 탭이 떠난다 — 끝나지 않던 fetch 가 취소된다. 자리가 돌아오는가?
+        try r.navigate(watched, url(&u, "/n/blank?leave"));
+        r.pump(3000);
+        const after = try Victim.load(&r, "after");
+        report(after.begins > 0, "R9d1-inflight-recover", std.fmt.bufPrint(&detail, "끝나지 않는 요청의 탭이 떠나고 3 초 뒤: 시작 {d} 넘김 {d}", .{ after.begins, after.dropped }) catch "");
+        r.pump(45_000);
+        const late = try Victim.load(&r, "late");
+        report(late.begins > 0, "R9d1-inflight-recover-late", std.fmt.bufPrint(&detail, "48 초 뒤(서버의 40 초 답 뒤): 시작 {d} 넘김 {d}", .{ late.begins, late.dropped }) catch "");
+        try r.host.send(.{ .net_watch = .{ .browser = second, .on = false, .full = false } });
+        r.pump(200);
+    }
     // ── 끄기 ──
     {
         try r.watch(false, false);
@@ -415,5 +506,56 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             any += 1;
         };
         report(any == 0, "net-watch-off", std.fmt.bufPrint(&detail, "끈 뒤의 알림 {d}", .{any}) catch "");
+    }
+    // ── R9d1(리뷰): 바쁜 페이지를 떠나 취소된 요청 — 그 자리가 풀리는가 ──
+    {
+        var w2: msg.NetWatch = .{ .browser = unwatched, .on = true, .full = true, .host_count = 1 };
+        w2.hosts[0] = "127.0.0.1";
+        try r.host.send(.{ .net_watch = w2 });
+        try r.watch(true, true);
+        r.pump(300);
+        var lb: [512]u8 = undefined;
+        var round: usize = 0;
+        const Probe = struct {
+            fn victim(rr: *Run, tag: []const u8, port: u16) !struct { n: usize, d: u64 } {
+                var b: [512]u8 = undefined;
+                const from = rr.mark();
+                try rr.navigate(unwatched, try std.fmt.bufPrint(&b, "http://127.0.0.1:{d}/v/page?{s}", .{ port, tag }));
+                rr.pump(3000);
+                var n: usize = 0;
+                var d: u64 = 0;
+                for (rr.recs.items[from..]) |rec| if (rec.browser == unwatched) {
+                    if (rec.tag == .net_begin) n += 1;
+                    if (rec.tag == .net_dropped) d += rec.count;
+                };
+                return .{ .n = n, .d = d };
+            }
+        };
+        const before = try Probe.victim(&r, "leak-before", server_port);
+        while (round < 8) : (round += 1) {
+            try r.navigate(watched, try std.fmt.bufPrint(&lb, "http://localhost:{d}/n/slow-page?r{d}", .{ server_port, round }));
+            r.pump(1500);
+        }
+        r.pump(15_000); // /n/slow 의 답(2 초)은 다 끝났다 — 취소된 것은 끝내 오지 않는다
+        const after = try Probe.victim(&r, "leak-after", server_port);
+        report(after.d == 0, "R9d1-inflight-leak-on-leave", std.fmt.bufPrint(&detail, "피해 탭 전: 시작 {d} 넘김 {d} · 지켜보는 탭이 바쁜 페이지를 8 번 떠난 뒤(+15 초): 시작 {d} 넘김 {d}", .{ before.n, before.d, after.n, after.d }) catch "");
+    }
+    // ── R9d1(리뷰): 끝나지 않는 요청을 쥔 탭을 닫는다 — 자리가 돌아오는가 ──
+    {
+        var w2: msg.NetWatch = .{ .browser = unwatched, .on = true, .full = true, .host_count = 1 };
+        w2.hosts[0] = "127.0.0.1";
+        try r.host.send(.{ .net_watch = w2 });
+        try r.host.send(.{ .destroy_browser = watched });
+        r.pump(5000);
+        const from = r.mark();
+        try r.navigate(unwatched, url(&u, "/v/page?closed"));
+        r.pump(3000);
+        var n: usize = 0;
+        var d: u64 = 0;
+        for (r.recs.items[from..]) |rec| if (rec.browser == unwatched) {
+            if (rec.tag == .net_begin) n += 1;
+            if (rec.tag == .net_dropped) d += rec.count;
+        };
+        report(d == 0, "R9d1-inflight-after-close", std.fmt.bufPrint(&detail, "끝나지 않는 요청의 탭을 닫고 5 초 뒤: 시작 {d} 넘김 {d}(페이지는 요청 42 개)", .{ n, d }) catch "");
     }
 }

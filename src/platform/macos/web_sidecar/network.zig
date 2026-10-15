@@ -4,7 +4,7 @@
 //! 아니다). 여기서는 IO 스레드에서 쓰기(maru 로 가는 관)·로그를 하지 않는다 — 동기 쓰기 하나가 요청 처리량을 27 % 깎고 다른 탭의 불러오기를
 //! 60 % 늦췄다(M6). 대신:
 //!   ① `get_resource_request_handler`: 지켜보는 탭이 없으면 곧 null(가장 흔한 길). 있으면 **글로 바꾸기 전에** 문(`net_gate` — 탭·전체 양동이,
-//!      동시 요청 512)을 지나야 처리기를 돌려준다. 넘치면 수만 센다.
+//!      동시 요청 512·탭마다 128)을 지나야 처리기를 돌려준다. 넘치면 수만 센다.
 //!   ② 처리기 콜백: 주소(2 KiB)·메서드·헤더(64 개·8 KiB)의 앞부분만 바꿔 기록 하나(`Event`)를 만들고 뮤텍스 아래 넘김 상자(개수·바이트 상한)에
 //!      넣는다. UI 스레드의 task 하나가 모아서 보낸다(`flush` — 이미 올렸으면 다시 올리지 않는다).
 //! 요청은 CEF 요청 번호로 묶는다(리다이렉트·인증 재시도에도 같다 — M7·M5). 다운로드(번호 0)는 W10 의 몫이라 적지 않는다.
@@ -179,7 +179,7 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
         return &rrh;
     }
     const admitted = state.admit(w, nowUs()) and blk: {
-        const t = state.track(id) orelse {
+        const t = state.track(id, w) orelse {
             w.dropped +|= 1;
             break :blk false;
         };
@@ -214,22 +214,26 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
     doLock();
     const any = state.watching != 0;
     doUnlock();
-    if (!any) return null;
+    if (!any) return null; // 가장 흔한 길 — 지켜보는 탭이 없다
+    const id = request.*.get_identifier.?(request);
+    if (id == 0) return null;
+    doLock();
+    // 리다이렉트의 다음 홉은 문을 다시 지나지 않는다. 새 요청은 initiator 를 글로 바꾸기 **전에** 이 길의 문을 본다(적대 리뷰 1 회차 곁가지).
+    const known = state.find(id) != null;
+    const admitted_path = !known and state.admitServiceWorkerPath(nowUs());
+    doUnlock();
+    if (known) return &rrh;
+    if (!admitted_path) return null;
     var ib: [gate.max_origin_bytes]u8 = undefined;
     const init_text = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib).text;
-    const id = request.*.get_identifier.?(request);
-    if (id == 0 or init_text.len == 0) return null;
+    if (init_text.len == 0) return null;
     doLock();
-    if (state.find(id) != null) {
-        doUnlock();
-        return &rrh;
-    }
     var targets: [gate.max_targets]BrowserId = undefined;
     const n = state.serviceWorkerTargets(init_text, &targets);
     const admitted = n != 0 and blk: {
         const w = state.watchOf(targets[0]) orelse break :blk false;
         if (!state.admit(w, nowUs())) break :blk false;
-        const t = state.track(id) orelse {
+        const t = state.track(id, w) orelse {
             w.dropped +|= 1;
             break :blk false;
         };

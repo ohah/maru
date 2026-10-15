@@ -116,6 +116,7 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.InvalidUrlFilter => "--url-contains must be 1-2048 bytes",
         error.MissingRequestId => "network-request needs --req <n> (a req number from maru browser network)",
         error.InvalidRequestId => "--req must be a req number from maru browser network (a positive integer)",
+        error.InvalidBeforeReq => "--before-req must be the next_before_req of the previous page (a positive integer)",
     };
 }
 

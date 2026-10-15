@@ -3641,6 +3641,11 @@ test "SYN58 다음 줄 머리(열 0)에서 끝나는 노드는 그 줄을 접지
         .{ .lang = .markdown, .src = "# A\nx\ny\n# B\nz\n", .want = &.{ .{ .start_row = 0, .end_row = 2 }, .{ .start_row = 3, .end_row = 4 } } },
         // `object M:` 는 두 def 를 숨기고 `val z`(3 줄)는 남는다.
         .{ .lang = .scala, .src = "object M:\n  def f = 1\n  def g = 2\nval z = 3\n", .want = &.{.{ .start_row = 0, .end_row = 2 }} },
+        // 적대적 7회차 — 실제 파일에서 이 규칙이 바꾼 언어 넷(전엔 다음 키·표·`case` 줄까지 숨었다).
+        .{ .lang = .yaml, .src = "a:\n  b: 1\n  c: 2\nd: 3\n", .want = &.{.{ .start_row = 0, .end_row = 2 }} },
+        .{ .lang = .toml, .src = "[a]\nx = 1\ny = 2\n\n[b]\nz = 3\n", .want = &.{ .{ .start_row = 0, .end_row = 3 }, .{ .start_row = 4, .end_row = 5 } } },
+        .{ .lang = .html, .src = "<ul>\n<li>a\n<li>b\n</ul>\n<p>x\n", .want = &.{.{ .start_row = 0, .end_row = 3 }} },
+        .{ .lang = .swift, .src = "switch x {\ncase 1:\n  f()\n  g()\ncase 2:\n  h()\n}\n", .want = &.{ .{ .start_row = 0, .end_row = 6 }, .{ .start_row = 1, .end_row = 3 }, .{ .start_row = 4, .end_row = 5 } } },
         // 닫는 글자에서 끝나는 노드는 그대로다(대조군).
         .{ .lang = .lua, .src = "function f()\n  a()\nend\nb()\n", .want = &.{.{ .start_row = 0, .end_row = 2 }} },
     };

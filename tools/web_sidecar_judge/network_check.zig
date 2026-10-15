@@ -35,6 +35,8 @@
 //!                                 기록을 끝낸다)
 //! W9d① 적대 리뷰 4 회차(이름 `R9d4-*` — `network_host_check.zig`): 문법이 이상한 주소들로 옮기거나 불러 sidecar 의 호스트 칸·app 이 주소 알림에서
 //!   읽는 호스트를 서버가 받은 `Host` 와 맞춘다(`R9d4-host-*`), C3 의 전제(새 문서는 `page_started` 뒤 `url_changed`, 32 KiB 넘는 주소는 알림 없음)를 본다.
+//! W9d① 적대 리뷰 5 회차(이름 `R9d5-*` — `network_r9d5_check.zig`, `--network` 가 이 판정 뒤에 따로 띄운 sidecar 로 돈다): 떠난 문서의 iframe 비콘,
+//!   탭 든 `Location` 의 사용자 정보, 새 문서마다 `url_changed` 가 오는가(관측).
 
 const array_repeat = @import("array_repeat");
 

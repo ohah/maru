@@ -1754,13 +1754,13 @@ accept*, sec-fetch-*, access-control-*, user-agent; Referer 는 출처만, Locat
   덮이는지 가를 호스트(요청·홉·첫 사이트)와 서비스 워커를 붙일 출처는 **자르기 전의 온 주소**에서 읽고, 2 KiB 로 자르는 주소는 사용자 정보를 빼고 자른다(3 회차 T1).
 - **wire 21**: `net_watch`(134 — `{browser, on, full, any_host, hosts ≤4}`), `net_begin`(69)·`net_redirect`(70)(요청·옮겨 갈 주소의 호스트 칸 `host` —
   sidecar 가 온 주소에서 읽는다, 잘린 주소에는 사용자 정보가 없다 — 3 회차 T1)·`net_response`(71)·`net_end`(72)·`net_dropped`(73).
-  닫힌 칸(요청 번호 0·짝이 맞지 않는 프레임 표시·모르는 종류 18/21+·결과·상한·토큰이 아닌 메서드·헤더 이름·개수와 바이트가 어긋난 헤더 덩어리·꺼진 watch 의 호스트)은
+  닫힌 칸(요청 번호 0·짝이 맞지 않는 프레임 표시(하위 프레임이 아닌 앞 문서 표시 — 5 회차 B1)·모르는 종류 18/21+·결과·상한·토큰이 아닌 메서드·헤더 이름·개수와 바이트가 어긋난 헤더 덩어리·꺼진 watch 의 호스트)은
   encode·decode 가 같은 검사(`net_fields`)를 지난다.
 - **maru**: `web_osr` 의 탭이 L2 `web_osr_network.Ring`(요약 512 KiB·자세한 것 1 MiB — 넘으면 자세한 것부터, 앱 전체 32 MiB — 이 탭의 것만 버린다)을 쥐고,
   `browser_network` grant 가 있는 동안만 적는다(`syncNetworkWatch` — grant 를 바꾸는 자리마다: 모달 승인·에이전트 탭·하나 철회·모두 철회·탭 닫힘). 마지막 grant 가
-  사라지면 sidecar 에 끄라고 하고 **기록을 지운다**. 읽는 쪽(콘솔과 같은 값 — grant 번호·cap 해시)마다 시작점: 모달로 허락한 쪽은 그 grant 뒤(그 전 기록은
-  `hidden_before_grant` 수만), 에이전트 탭의 태어날 때 grant 는 처음부터(첫 읽기 전에 사용자가 그 탭을 몰면 — 콘솔과 같은 신호 — 첫 읽기 때부터), 모르는 쪽(cap)은
-  처음 읽을 때부터. `clear` 는 그 읽는 쪽의 시작점만 지금으로. 투영은 읽을 때 읽는 쪽의 grant 호스트로(없으면 탭의 지금 호스트) — 거르기(`status`·`url_contains`)도
+  사라지면 sidecar 에 끄라고 하고 **기록을 지운다**. 읽는 쪽(콘솔과 같은 값 — grant 번호, `browser_network` 는 cap 으로 발급하지 않는다)마다 시작점: 모달로 허락한 쪽은 그 grant 뒤(그 전 기록은
+  `hidden_before_grant` 수만), 에이전트 탭의 태어날 때 grant 는 처음부터(첫 읽기 전에 사용자가 그 탭을 몰면 — 콘솔과 같은 신호 — 첫 읽기 때부터), grant 를
+  거치지 않은 모르는 쪽(방어 — 오지 않는다, 5 회차 N2)은 처음 읽을 때부터. `clear` 는 그 읽는 쪽의 시작점만 지금으로. 투영은 읽을 때 읽는 쪽의 grant 호스트로(없으면 탭의 지금 호스트) — 거르기(`status`·`url_contains`)도
   투영된 값으로만 한다(숨긴 상태를 거르기로 떠보지 못하게). 목록은 새것부터, 한 쪽 50(최대 200), 다음 쪽은 `before_req` 커서(`next_before_req`)나 `next_page`.
 - **op**: `pushBrowserOp` 가 곧 답한다(DevTools·op 줄 없음 — 콘솔과 같다). `browser.networkRequest` 의 모르는·버려진 번호는 handleDialog 의 모르는 번호와 같은 코드
   (-32603)에 `data.reason`(`unknown_request`·`evicted`). WebKit 탭·파일 패널은 확인 모달 전에 `-32008`. 본문은 `body_state: "not_recorded"`(②).
@@ -1934,3 +1934,32 @@ W9d① 적대 리뷰: 4 회차(2026-10-15 — 리뷰는 코드 읽기에서 후�
   grant 가 덮지 않는다(덮지 않는 쪽). 253 바이트를 넘는 호스트는 칸이 비고(덮이지 않음) Chromium 도 붙지 않았다.
 - **검증**: L2(주소 헤더의 사용자 정보 켬·쿠키 권한별, 끔의 덜어 내기, 다시 뜬 sidecar 뒤 버리기), 순수 정책(가리기의 꼴 20 가지·주소마다의 쿠키 권한), web_osr(긴
   주소 뒤 iframe 요청·다시 온 주소, 끔의 서비스 워커·옛 주소 탭, 몬 에이전트 탭의 빈 좁히기). 판정자 `--network`(실제 CEF 154) — `R9d4-host-*`·`R9d4-c1-*`·관측 둘을 더했다.
+
+W9d① 적대 리뷰: 5 회차(2026-10-15 — 리뷰가 재현 시험(「W9d① 적대 리뷰 5 회차 재현 …」 — 순수 정책 둘·L2 하나·web_osr 하나)과 실제 CEF 154 판정 항목을
+남겼다. 판정은 `--network` 끝에 따로 띄운 sidecar 로 돈다 — `network_r9d5_check.zig`):
+- **B1(MED — 1 회차 F2 의 틈) 떠난 문서의 iframe 비콘**: 덮이지 않는 페이지(은행)의 다른 사이트 iframe 이 `pagehide` 에 보낸 비콘·keepalive fetch 는 다음
+  페이지의 `page_started`·`url_changed` **뒤에** maru 에 온다(실제 CEF — 판정 `R9d5-f2-old-iframe-beacon-after-nav` 가 고치기 전 셋 중 둘을 보였다). 첫 사이트가
+  비어 오므로 맨 위 문서 호스트를 탭의 지금(새) 주소로 쳐, 다음 페이지가 덮이는 사이트면 그 사이트에 묶인 읽는 쪽이 은행 페이지의 추적 iframe 요청(질의째 주소·
+  자격 증명이 아닌 헤더·상태·응답 헤더)을 봤다. 고침: sidecar 가 iframe 마다 그 프레임이 문서를 연 때의 주 문서 세대를 기억하고(`net_gate.DocFrames` — UI
+  스레드의 `on_load_start`·오류 페이지에서, 브라우저마다 64 개), **보낼 때** 그 세대가 지금 주 문서보다 앞이면 `net_begin` 에 `previous_document` 를 세운다(wire
+  21 의 남던 비트 — 하위 프레임에만, codec 이 본다). 보낼 때 비교하는 까닭: maru 가 받는 차례가 보낸 차례이므로 새 문서의 `page_started` 뒤에 가는 앞 문서 iframe 의
+  요청은 늘 표시가 선다(IO 스레드에서는 `on_load_start` 와의 앞뒤를 모른다). maru 는 표시된 요청의 맨 위 문서 호스트를 빈 글로 둔다(`topHostOf` — 덮지 않는 쪽).
+  IO 스레드의 프레임 주소는 비거나 낡아(M4) 프레임 번호로 가른다. 대조 판정 `R9d5-f2-current-iframe-not-flagged`: 지금 문서의 iframe 문서·그 안 fetch 에는 서지
+  않는다. 남는 틈(문서로 둔다 — 모두 더 숨기는 쪽이거나 드물다): 문서를 열기 전(`on_load_start` 전)에 떠난 iframe 의 요청은 표시가 없고, 64 개를 넘겨 잊힌
+  iframe 도 그렇다. bfcache 로 되살아난 문서·prerender 로 미리 연 문서의 iframe 은 앞 세대로 남아 그 요청이 숨는다(덮지 않는 쪽).
+- **B2(LOW — 4 회차 C1 의 틈) 탭 뒤에 숨긴 사용자 정보**: GURL 은 파싱 전에 ASCII 탭·LF·CR 을 지운다 — `Location: /<탭>/u:p@b` 는 스킴 상대, `ht<탭>tps:u:p@b`
+  는 https 주소다(실제 CEF 의 홉 주소가 그랬다). 가리기(`maskHeaderUserinfo`)는 그 글자째 봐서 놓쳤고, 끔이면 사용자 정보가 브라우저 프로세스를 나갔다(판정
+  `R9d5-c1-tab-*` 가 고치기 전 실패), 켬이면 홉 주소 칸은 지웠는데 그 값은 쿠키 권한 없는 읽는 쪽에게 보였다. 이제 가리기와 주소 칸 지우기(`stripUserinfo`)는
+  URL 파서가 읽는 꼴(`parserView` — 탭·줄바꿈을 뺀 것)에서 찾고, 지웠으면 그 꼴로 싣는다(`Location`·`Refresh`·`Link` 의 다섯 꼴).
+- **N1(nit) 긴 스킴**: 스킴이 32 바이트를 넘으면 권한 자리를 찾지 않아 사용자 정보가 남았다(GURL 은 어느 길이든 받는다 — CEF 가 그런 주소로 처리기를 부르는지는
+  재지 않았다). 이제 `authoritySpan`·`authority16`·가리기 모두 길이를 보지 않는다. sidecar 는 스킴이 자르는 길이(2 KiB)를 넘는 잘릴 주소를 싣지 않는다.
+- **N2(nit) 닿지 않던 cap 갈래**: `browser_network` 는 상속 fd 로 발급하지 않아(`issueForFd` 가 거절) 이 scope 를 쥔 cap 이 없다. `answerNetworkOp` 의 cap 읽는
+  쪽 갈래와 문서의 「cap 은 처음 읽을 때부터」·「cap 으로 읽으면 이름만」 을 걷어 냈다 — pane grant 가 없으면 그 읽기는 실패한다.
+- **N3(nit) 문서**: configuration.md 의 끔 허용 목록에 `Location`(덮이는 호스트의 응답에만 — 사용자 정보를 지운 주소)과 자격 증명 `Proxy-Authorization` 을,
+  control-plane-browser.md 의 결과 모양에 `url_truncated`·`engine_restarted`(·자세히의 `cross_site_iframe`)를 넣었다.
+- **N4(nit) 표지의 자리**: `Ring.begin` 이 이 기록의 자리만 낸 뒤 적지 못한 수의 표지를 넣어(표지는 제 자리를 따로 냈다) 탭·앱 상한을 표지 하나(160 B)만큼 넘을 수
+  있었다. 이제 표지가 들어갈 것이면 그 자리도 함께 낸다.
+- **검증**: 순수 정책(탭·줄바꿈 다섯 꼴과 주소 칸, 긴 스킴의 세 자리), 순수 문(앞 문서 세대 — 모르는 프레임·다시 연 프레임·64 개 넘침), L2(켬의 탭 든 `Location`,
+  표지와 앱 상한), codec(앞 문서 표시의 닫힌 칸), web_osr(떠난 문서 iframe 비콘·새 iframe 의 요청은 보인다). 판정자 `--network`(실제 CEF 154) — `R9d5-*`
+  17 항목(관측 13: 처음 about:blank·bfcache 뒤로·`javascript:` 주소·같은 문서·204·오류 페이지·스크립트 다시 불러오기·prerender 활성화·같은 주소
+  `location.replace`·같은 주소 form POST·meta refresh·`document.open` 에서 `page_started` 마다 `url_changed` 가 뒤따른다 — `url_stale` 이 남지 않는다).

@@ -2,7 +2,7 @@
 //!
 //! 시험이 증명하는 것: 탭마다 요청을 오래된 것부터 버리며(요약 512 KiB·자세한 것 1 MiB, 앱 전체 32 MiB) 쥐고, 리다이렉트는 한 요청의
 //! 홉으로, 401 재시도의 두 응답은 뒤의 것으로, sidecar 가 넘긴 요청은 표지로 남긴다. 누가 무엇을 보나 — 읽는 쪽(`Authorizer` — 확인
-//! grant 면 grant 번호, cap 이면 nonce 해시)마다 시작점이 있다: 사용자 탭은 그 grant 를 넣은 때부터(「그 전의 N 개는 숨김」), 에이전트가 연
+//! grant 의 grant 번호 — `browser_network` 는 cap 으로 발급하지 않는다)마다 시작점이 있다: 사용자 탭은 그 grant 를 넣은 때부터(「그 전의 N 개는 숨김」), 에이전트가 연
 //! 탭은 태어날 때부터(사용자가 첫 읽기 전에 그 탭을 몰면 첫 읽기 때부터 — 콘솔과 같은 풀림), 모르는 쪽은 처음 읽을 때부터. 설정
 //! `browser.agent-network-full` 이 꺼져 있으면 읽는 쪽의 grant 호스트로 투영한다(`net_policy` — 덮이지 않는 호스트는 페이지가 고른 칸만,
 //! 다른 사이트 iframe 의 요청은 수만, 헤더 값은 허용 목록만, 주소의 사용자 정보는 지운다). 거르기(`url_contains`·`status`)도 투영된 값으로만
@@ -168,19 +168,19 @@ const Reader = struct {
     deferred: bool = false,
     /// 마지막으로 쓴 차례(잊을 쪽을 고른다).
     used: u64 = 0,
-    /// grant 로 들어온 쪽(`noteReader`) — `syncReaders` 가 grant 가 사라지면 뺀다. 처음 읽을 때 생긴 쪽(cap 등)은 아니다.
+    /// grant 로 들어온 쪽(`noteReader`) — `syncReaders` 가 grant 가 사라지면 뺀다. 처음 읽을 때 생긴 쪽(모르는 쪽 — 방어)은 아니다.
     granted: bool = false,
 };
 
 /// app 이 아는 그 탭의 `browser_network` grant 하나(`syncReaders`).
 pub const Desired = struct { who: Authorizer, birth: bool = false };
 
-/// 읽기의 관점 — 설정과 읽는 쪽의 grant 호스트(cap 이면 탭의 지금 호스트).
+/// 읽기의 관점 — 설정과 읽는 쪽의 grant 호스트(어느 호스트든 grant 면 탭의 지금 호스트).
 pub const View = struct {
     full: bool = true,
     grant_host: []const u8 = "",
     /// 읽는 쪽의 grant 가 `grant_host` 에 묶였다(모달로 받은 grant·좁힌 태어날 때 grant) — 탭의 맨 위 문서가 그 사이트가 아닐 때의 요청은
-    /// 숨긴다(F2). 어느 호스트든 grant(에이전트 탭)·cap 은 거짓.
+    /// 숨긴다(F2). 어느 호스트든 grant(에이전트 탭)는 거짓.
     top_bound: bool = false,
     /// 설정이 꺼졌을 때 이 읽는 쪽에게 허락되지 않은 다른 탭이 지금 보이는 출처들(`scheme://host[:port]`) — 그 출처의 서비스 워커 요청은
     /// 수만(F4·N6).
@@ -192,7 +192,7 @@ pub const View = struct {
     reader_tabs: []const u64 = &.{},
     /// 이 읽는 쪽이 이 탭에 쥔 `browser_storage` grant 의 호스트(W9d① 적대 리뷰 3 회차 D1 — 쿠키 권한). 자격 증명 헤더 값과 주소의 사용자 정보는
     /// 그 헤더를 보내거나 받은 호스트를 이것이 덮을 때만 보인다 — 설정이 켜져 있어도(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」), 어느
-    /// 호스트든 grant(에이전트 탭)여도. 비면 아무것도(cap 으로 읽는 쪽도 — 사이트가 없다).
+    /// 호스트든 grant(에이전트 탭)여도. 비면 아무것도.
     cookie_host: []const u8 = "",
 
     fn readerHas(self: View, tab: u64) bool {
@@ -245,8 +245,12 @@ pub const BeginContext = struct {
 /// (`site` — 렌더러가 요청마다 정한다: CEF 는 등록 도메인 꼴로 준다)와 app 이 아는 탭의 주소(`app_top`)를 맞춰 본다 — 같은 사이트면 더 좁은
 /// app 의 호스트, 다르면 첫 사이트(이동과 엇갈려 app 의 주소가 옛 것이거나 이미 새 것이다 — 요청이 스스로 말한 쪽을 믿는다), 첫 사이트가
 /// 비었으면(다른 사이트 iframe 안 — 실측) app 의 호스트. 남는 틈: 같은 등록 도메인의 다른 호스트로 옮기는 순간의 요청(문서에 적었다).
+/// 떠난 문서의 iframe 이 보낸 요청(`previous_document` — W9d① 적대 리뷰 5 회차 B1)은 빈 호스트다: 그 iframe 의 `pagehide` 비콘은 새 문서의
+/// `url_changed` 뒤에 와서(실측) app 의 호스트가 이미 새 사이트다 — 그 사이트의 것으로 치면 덮이지 않던 은행 페이지의 추적 iframe 요청이
+/// 새 사이트에 묶인 읽는 쪽에게 보였다. 앞 문서의 맨 위 호스트는 모르므로 덮지 않는 쪽으로.
 pub fn topHostOf(v: msg.NetBegin, app_top: []const u8) []const u8 {
     if (v.flags.main_frame and v.resource_type == 0) return v.host; // sidecar 의 칸(3 회차 T1 — 잘린 주소에서 다시 읽지 않는다)
+    if (v.flags.previous_document) return "";
     if (v.site.len == 0) return app_top;
     if (app_top.len != 0 and policy.sameSite(app_top, v.site)) return app_top;
     return v.site;
@@ -338,7 +342,7 @@ pub const Ring = struct {
     }
 
     /// app 이 아는 grant 목록에 맞춘다 — 사라진 grant 의 읽는 쪽은 빼고(철회), 새 grant 는 지금부터(태어날 때의 것이면 처음부터) 넣는다.
-    /// 처음 읽을 때 생긴 쪽(cap)은 그대로 둔다.
+    /// 처음 읽을 때 생긴 쪽(grant 없이 읽은 모르는 쪽 — 방어)은 그대로 둔다.
     pub fn syncReaders(self: *Ring, desired: []const Desired) void {
         var i: usize = 0;
         while (i < self.reader_count) {
@@ -420,7 +424,10 @@ pub const Ring = struct {
         const top = topHostOf(v, ctx.top_host);
         const summary = entry_overhead + v.method.len + v.url.len + v.host.len + v.initiator.len + v.site.len + top.len;
         const detail_len = v.headers.bytes.len;
-        if (!self.makeRoom(gpa, budget, summary, detail_len)) {
+        // 적지 못한 수가 있으면 그 표지(`flushUnrecorded`)가 이 기록 앞에 들어간다 — 자리도 함께 낸다(5 회차 N4: 표지가 제 자리를 낸 뒤 이 기록을
+        // 다시 보지 않고 넣어 탭·앱 상한을 표지 하나만큼 넘었다). 마지막이 표지라 더하기만 해도 넉넉히 잡는다.
+        const marker: usize = if (self.unrecorded != 0) entry_overhead else 0;
+        if (!self.makeRoom(gpa, budget, summary + marker, detail_len)) {
             self.unrecorded +|= 1;
             return;
         }
@@ -1128,7 +1135,7 @@ test "W9d①: 읽는 쪽마다 시작점 — 사용자 탭은 grant 뒤만(그 �
         defer p.deinit();
         try testing.expectEqual(@as(i64, 2), p.value.object.get("hidden_before_grant").?.integer);
     }
-    // cap 같은 모르는 쪽(9) — 처음 읽을 때부터: 아무것도 없고, 그 뒤의 것은 본다.
+    // 모르는 쪽(9 — grant 를 거치지 않은 읽기, 방어) — 처음 읽을 때부터: 아무것도 없고, 그 뒤의 것은 본다.
     try expectReqs(&t, 9, .{}, &.{});
     try t.begin(4, "https://a.test/4", .{});
     try expectReqs(&t, 9, .{}, &.{4});
@@ -1228,12 +1235,12 @@ test "W9d①: 상한 — 요약이 넘치면 오래된 요청부터 버리고(�
     try testing.expectEqual(@as(i64, 1), p.value.object.get("dropped").?.integer);
 }
 
-test "W9d①: syncReaders — 사라진 grant 의 읽는 쪽은 빠지고(다시 들어오면 그때부터), 새 grant 는 지금부터·태어날 때의 것은 처음부터, cap 처럼 읽어서 생긴 쪽은 남는다" {
+test "W9d①: syncReaders — 사라진 grant 의 읽는 쪽은 빠지고(다시 들어오면 그때부터), 새 grant 는 지금부터·태어날 때의 것은 처음부터, 읽어서 생긴 모르는 쪽은 남는다" {
     var t: T = .{};
     defer t.deinit();
     t.ring.syncReaders(&.{.{ .who = 7, .birth = true }});
     try t.begin(1, "https://a.test/1", .{});
-    try expectReqs(&t, 9, .{}, &.{}); // cap 처럼 처음 읽어 생긴 쪽
+    try expectReqs(&t, 9, .{}, &.{}); // 처음 읽어 생긴 모르는 쪽
     try t.begin(2, "https://a.test/2", .{});
     t.ring.syncReaders(&.{ .{ .who = 7, .birth = true }, .{ .who = 8 } });
     try t.begin(3, "https://a.test/3", .{});
@@ -1520,7 +1527,7 @@ test "W9d① 적대 리뷰 1 회차 F2: 사이트에 묶인 읽는 쪽은 탭이
         try testing.expectEqual(@as(i64, 4), p.value.object.get("hidden_other_site_pages").?.integer);
         for ([_]u64{ 3, 4, 5, 8 }) |req| try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, req));
     }
-    // 어느 호스트든(에이전트 탭의 태어날 때 grant·cap) — 다 보이고 그 수 칸도 없다.
+    // 어느 호스트든(에이전트 탭의 태어날 때 grant) — 다 보이고 그 수 칸도 없다.
     try expectReqs(&t, 7, .{ .full = true }, &.{ 8, 7, 6, 5, 4, 3, 2, 1 });
     const any = try t.listJson(7, .{ .full = true }, .{});
     defer any.deinit();
@@ -1597,7 +1604,7 @@ test "W9d① 적대 리뷰 2 회차 재현 L1: 덮이지 않는 사이트(은행
         try testing.expectEqual(@as(i64, 5), p.value.object.get("hidden_other_site_pages").?.integer);
         for ([_]u64{ 1, 2, 3, 4, 5 }) |req| try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, req));
     }
-    // 어느 호스트든 읽는 쪽(에이전트 탭의 태어날 때 grant·cap)은 여전히 다 본다(사용자 결정 「다 보여 줌」).
+    // 어느 호스트든 읽는 쪽(에이전트 탭의 태어날 때 grant)은 여전히 다 본다(사용자 결정 「다 보여 줌」).
     try expectReqs(&t, 7, .{ .full = true }, &.{ 6, 5, 4, 3, 2, 1 });
     // 자세한 것을 버려 가운데 홉을 모르면: 리다이렉트 하나(처음 주소·마지막 주소만 있다)는 둘로 가르고, 둘 이상이면 숨긴다.
     t.ring.entryBySeq(6).?.detail_evicted = true;
@@ -1810,4 +1817,95 @@ test "W9d① 적대 리뷰 4 회차 재현 C2: 오래된 기록을 버릴 때 �
     const e = t.ring.entryBySeq(2).?;
     try testing.expectEqual(@as(u16, 200), e.status);
     try testing.expectEqual(State.done, e.state);
+}
+
+// ── W9d① 적대 리뷰 5 회차 재현 ──
+
+test "W9d① 적대 리뷰 5 회차 재현 B2(켬): 쿠키 권한이 없는 읽는 쪽에게 탭으로 감춘 Location 의 사용자 정보(`/<탭>/u:p@b.test`)가 보인다 — 홉 주소 칸은 지웠는데" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    var hop_h: net_fields.HeaderBuilder = .{};
+    _ = hop_h.add("Location", "/\t/u:p@b.test/next");
+    try t.begin(1, "https://a.test/start", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test" });
+    try t.redirect(1, 302, "https://u:p@b.test/next", .{ .headers = hop_h.block() });
+    try t.respond(1, 200, .{});
+    const p = try detailJson(&t, 7, .{ .full = true }, 1);
+    defer p.deinit();
+    const hops = p.value.object.get("redirects").?.array.items;
+    try testing.expectEqualStrings("https://b.test/next", hops[0].object.get("url").?.string); // 주소 칸은 지웠다(대조)
+    const v = headerOf(hops[0].object.get("headers").?.array.items, "Location").?.get("value").?.string;
+    try testing.expect(std.mem.indexOf(u8, v, "u:p@") == null);
+}
+
+test "W9d① 적대 리뷰 5 회차 재현 N4: 적지 못한 수의 표지가 새 기록 앞에 들어가도 앱 상한을 넘지 않는다 — 표지의 자리도 함께 낸다" {
+    var g: T = .{ .budget = .{ .cap = 4096, .bytes = 0 } };
+    defer g.deinit();
+    g.ring.noteReader(7, true);
+    const url = "https://a.test/x";
+    const summary = entry_overhead + "GET".len + url.len + "a.test".len;
+    try g.begin(1, url, .{}); // 표지가 아닌 기록 하나
+    g.ring.unrecorded = 2; // 앞서 앱 예산이 모자라 적지 못한 둘
+    const others = g.budget.cap - summary - g.budget.bytes; // 다른 탭들이 이 기록 하나 몫만 남기고 썼다
+    g.budget.bytes += others;
+    try g.begin(2, "https://a.test/y", .{}); // 같은 길이
+    try testing.expect(g.budget.bytes <= g.budget.cap); // 고치기 전: 표지 하나(160 B)만큼 넘었다
+    const p = try g.listJson(7, .{}, .{});
+    defer p.deinit();
+    try testing.expectEqual(@as(i64, 2), p.value.object.get("dropped").?.integer);
+    const arr = p.value.object.get("requests").?.array.items;
+    try testing.expectEqual(@as(usize, 1), arr.len); // 새 기록은 들어갔다(오래된 것을 버려 자리를 냈다)
+    try testing.expectEqualStrings("https://a.test/y", arr[0].object.get("url").?.string);
+    g.budget.bytes -= others;
+}
+
+// ── W9d① 변이 생존(5 회차 뒤 기능 전체 변이) ──
+
+test "W9d① 변이 생존 L03: 설정이 꺼진 동안 sidecar 가 덜어 낸 덩어리는 켠 뒤 읽어도 이름만이다 — 빈 값을 그 헤더의 값으로 보이지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    // 꺼진 동안 적은 요청 — sidecar 가 허용 목록 밖 값과 쿠키 값을 비워 보냈다(`stripped`).
+    var req_h: net_fields.HeaderBuilder = .{};
+    _ = req_h.add("Cookie", "");
+    _ = req_h.add("X-Trace", "");
+    _ = req_h.add("Accept", "*/*");
+    try t.begin(1, "https://a.test/api", .{ .flags = .{ .stripped = true }, .site = "a.test", .headers = req_h.block() });
+    try t.respond(1, 200, .{});
+    // 켠 뒤, 쿠키 권한까지 쥔 읽는 쪽 — 그래도 덜어 낸 값은 없는 값이다.
+    const p = try detailJson(&t, 7, .{ .full = true, .cookie_host = "a.test" }, 1);
+    defer p.deinit();
+    const hs = p.value.object.get("request_headers").?.array.items;
+    for ([_][]const u8{ "Cookie", "X-Trace" }) |n| {
+        const h = headerOf(hs, n).?;
+        try testing.expect(h.get("value") == null);
+        try testing.expect(h.get("redacted").?.bool);
+    }
+    try testing.expectEqualStrings("*/*", headerOf(hs, "Accept").?.get("value").?.string); // 허용 목록 값은 남았다
+}
+
+test "W9d① 변이 생존 L05: 설정이 꺼졌을 때 덮이지 않는 요청은 리다이렉트 수를 보이지 않는다 — 덮이는 곳을 지나는 사슬이어도, 자세한 것을 버렸어도" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    const off: View = .{ .full = false, .grant_host = "a.test" };
+    // 덮이지 않는 곳(other.test)의 요청이 덮이는 곳(a.test)으로, 거기서 다시 한 번 옮긴다 — 둘째 홉은 덮이는 곳이 보냈다.
+    try t.begin(1, "https://other.test/go", .{ .site = "a.test" });
+    try t.redirect(1, 302, "https://a.test/mid", .{});
+    try t.redirect(1, 302, "https://a.test/end", .{});
+    try t.respond(1, 200, .{});
+    {
+        const p = try t.listJson(7, off, .{});
+        defer p.deinit();
+        try testing.expect(p.value.object.get("requests").?.array.items[0].object.get("redirects") == null);
+    }
+    // 자세한 것을 버렸다(홉을 모른다) — 그래도 칸째 없다.
+    t.ring.entries.atPtr(0).freeDetail(testing.allocator);
+    t.budget.bytes -= t.ring.entries.atPtr(0).detail_bytes;
+    t.ring.detail_bytes -= t.ring.entries.atPtr(0).detail_bytes;
+    t.ring.entries.atPtr(0).detail_bytes = 0;
+    t.ring.entries.atPtr(0).detail_evicted = true;
+    const p = try t.listJson(7, off, .{});
+    defer p.deinit();
+    try testing.expect(p.value.object.get("requests").?.array.items[0].object.get("redirects") == null);
 }

@@ -215,8 +215,9 @@ fn checkRequest(request: u64) Error!void {
 
 pub fn checkBegin(v: message.NetBegin) Error!void {
     try checkRequest(v.request);
-    if (v.flags._reserved != 0) return error.InvalidNetwork;
     if (v.flags.main_frame and v.flags.subframe) return error.InvalidNetwork;
+    // 앞 문서 표시는 하위 프레임의 것만(5 회차 B1 — sidecar 는 iframe 의 프레임 번호로만 가른다).
+    if (v.flags.previous_document and !v.flags.subframe) return error.InvalidNetwork;
     // 서비스 워커가 대신 보낸 요청에는 CEF 의 프레임이 없다.
     if (v.flags.service_worker and (v.flags.main_frame or v.flags.subframe)) return error.InvalidNetwork;
     if (v.resource_type > message.max_net_resource_type or v.resource_type == 18) return error.InvalidNetwork;
@@ -243,12 +244,13 @@ fn checkUrlCut(url: []const u8, truncated: bool) Error!void {
     if (std.mem.indexOfScalar(u8, url[a.start..a.end], '@') != null) return error.InvalidNetwork;
 }
 
-/// 주소의 권한 부분 `[start, end)`(`scheme://` 뒤 첫 `/`·`?`·`#` 까지) — 스킴(글자·숫자·`+`·`-`·`.`, 32 바이트까지)이 첫 `:` 앞이고 그 뒤가
-/// `//` 일 때만. 아니면 null(`data:`·`blob:`·`about:` — 그 안의 `://` 는 권한이 아니다). sidecar 가 온 주소(UTF-16)에서 쓰는 규칙
-/// (`net_policy.authority16`)과 같다 — 사용자 정보를 지우는 쪽과 빼는 쪽이 같은 곳을 본다.
+/// 주소의 권한 부분 `[start, end)`(`scheme://` 뒤 첫 `/`·`?`·`#` 까지) — 스킴(글자·숫자·`+`·`-`·`.`)이 첫 `:` 앞이고 그 뒤가 `//` 일 때만.
+/// 아니면 null(`data:`·`blob:`·`about:` — 그 안의 `://` 는 권한이 아니다). 스킴 길이는 보지 않는다(GURL 은 어느 길이든 받는다 — W9d① 적대
+/// 리뷰 5 회차 N1: 32 바이트에서 멈추면 긴 스킴의 사용자 정보가 남았다). sidecar 가 온 주소(UTF-16)에서 쓰는 규칙(`net_policy.authority16`)과
+/// 같다 — 사용자 정보를 지우는 쪽과 빼는 쪽이 같은 곳을 본다.
 pub fn authoritySpan(url: []const u8) ?struct { start: usize, end: usize } {
     const colon = std.mem.indexOfScalar(u8, url, ':') orelse return null;
-    if (colon == 0 or colon > 32) return null;
+    if (colon == 0) return null;
     for (url[0..colon]) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '+' and ch != '-' and ch != '.') return null;
     if (!std.mem.startsWith(u8, url[colon + 1 ..], "//")) return null;
     const start = colon + 3;

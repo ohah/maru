@@ -1646,6 +1646,7 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .net_watch = .{ .browser = 3, .on = true, .any_host = true, .host_count = 1, .hosts = .{ "b.test", "", "", "" } } },
         .{ .net_watch = .{ .browser = 3, .on = false } },
         .{ .net_begin = .{ .browser = 3, .request = 5, .flags = .{ .subframe = true, .navigation = true }, .resource_type = 1, .time_ms = 9, .method = "GET", .url = "https://a.test/한", .initiator = "https://b.test", .site = "a.test", .host = "a.test", .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x03s=1" } } },
+        .{ .net_begin = .{ .browser = 3, .request = 6, .flags = .{ .subframe = true, .previous_document = true }, .resource_type = 14, .url = "https://t.test/b", .host = "t.test" } },
         .{ .net_redirect = .{ .browser = 3, .request = 5, .status = 307, .flags = .{ .hsts = true }, .url = "https://a.test/x", .host = "a.test", .headers = .{ .count = 1, .bytes = "\x01a\x00\x00" } } },
         .{ .net_response = .{ .browser = 3, .request = 5, .status = 200, .mime = "text/html", .headers = .{} } },
         .{ .net_end = .{ .browser = 3, .request = 5, .outcome = .failed, .error_code = -3, .received = 12, .time_ms = 1 } },
@@ -2182,6 +2183,9 @@ test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .method = "G T" },
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .flags = .{ .main_frame = true, .subframe = true } },
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .flags = .{ .service_worker = true, .main_frame = true } },
+        // 5 회차 B1: 앞 문서 표시는 하위 프레임의 것만.
+        .{ .browser = 1, .request = 2, .url = "https://a.test/", .flags = .{ .main_frame = true, .previous_document = true } },
+        .{ .browser = 1, .request = 2, .url = "https://a.test/", .flags = .{ .service_worker = true, .previous_document = true } },
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .resource_type = 18 },
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .resource_type = 21 },
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .initiator = array_repeat.repeat("x", (message_mod.max_net_origin_bytes + 1)) },
@@ -2213,7 +2217,7 @@ test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청
     const body = prefix_len + common_len;
     var len = try encode(.{ .net_begin = ok_begin }, &buf);
     var bad = buf;
-    bad[body + 16] = 0x80; // flags 의 쓰지 않는 비트
+    bad[body + 16] = 0x80; // flags 의 앞 문서 표시만 — 하위 프레임 없이(5 회차 B1)
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
     bad = buf;
     bad[body + 17] = 18; // 비은 자원 종류

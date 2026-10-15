@@ -7911,6 +7911,9 @@ const CdpRun = struct {
     /// W9c③ 적대 리뷰 1 회차: 업로드 모달을 처음 띄운 창 — 그 창이 아직 있으면 거기에 둔다(탭이 다른 창으로 옮겨 가도 두 창에 같은 모달을
     /// 띄우지 않는다). 비교만 한다 — 이번 drain 의 창 목록에 있을 때만 쓴다(닫힌 창의 포인터를 따라가지 않는다).
     upload_window: ?*AppSession = null,
+    /// W9c③ 적대 리뷰 3 회차 nit: 모달의 파일 줄(경로·엿보기 — 소유). 모달이 떠 있는 동안(최대 120 초) 매 drain 마다 다시 만들었다 — 처음 띄울 때
+    /// 한 번 만든다(파일은 모달 전에 열어 두었고 바뀌지 않는다).
+    upload_lines: ?[][]u8 = null,
 };
 
 /// 실행 중이거나 기다리는 Chromium op(도착 순).
@@ -8447,7 +8450,15 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
             // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
-            const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
+            // W9c③ 적대 리뷰 3 회차: 업로드의 듣는 이 떼기는 대화상자가 떠 있으면 사라진 뒤 보낸다(곧 거절되면 듣는 이가 남았다 — op 에는 그대로
+            // 「대화상자」 라 놓기로 간다. 놓기도 web_osr 가 미룬다).
+            const sent = if (next.after_dialog)
+                session_mod.web_osr.devtoolsCallAfterDialog(gpa, run.surface_id, next.method, next.params, sink)
+            else
+                session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
+            if (sent) |call| {
+                if (run.op.uploadVerifying()) uploadBudgetVerify(run, call);
+            } else |_| {}
             // W9a②: evaluate 가 실제로 나갔다 — 시한·철회에 terminate 를 보낼 수 있다(보내지 않은 것에 보내면 페이지의 다음 스크립트를 죽인다).
             if (sent) |_| {
                 if (run.op.exec) |*e| if (e.stage == .evaluate or e.stage == .value or e.stage == .diagnose) {
@@ -8536,6 +8547,7 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
     }
     if (run.upload_origin) |o| allocator.free(o);
     run.upload_origin = null;
+    uploadFreeLines(run);
     uploadForgetRun(run);
     // W9a②: exec 의 끝은 넷 — 엄격 JSON 결과(inline/조각)·진단 payload(-32006)·너무 큼(-32005)·보통(실패·시한).
     const exec_delivery: web_cdp_ops.web_cdp_exec.Delivery = if (run.op.exec) |*e| e.delivery else .plain;
@@ -8777,8 +8789,10 @@ const UploadJob = struct {
 };
 
 fn uploadPrepareAll(job: *UploadJob) void {
+    // 내용 해시(적대 리뷰 3 회차 M1)는 이 호출의 파일들이 함께 1 GiB 까지 — 모달 전에 이 스레드가 읽는다(모달이 그만큼 늦게 뜬다).
+    var hash_budget: u64 = web_upload_stage.hash_cap_per_call;
     for (job.paths, 0..) |path, i| {
-        const r = web_upload_stage.prepare(allocator, path) catch {
+        const r = web_upload_stage.prepareWith(allocator, path, &hash_budget) catch {
             job.out_of_memory = true;
             return;
         };
@@ -9009,6 +9023,59 @@ fn uploadResume(run: *CdpRun) void {
     cdpAdvance(run, step);
 }
 
+/// W9c③ 적대 리뷰 3 회차 T1: 넣은 뒤 읽기를 보냈다 — 그 호출은 `verify_wait_ms` 만 기다리고, 요청 시한은 그 뒤(`upload_verify_slack_ns`)로 둔다.
+/// 읽기가 붙잡히면(change 처리기가 응답이 아주 늦은 주소로 옮겼다 — 실측 35 초) 읽기의 시한이 먼저 와 op 이 「넣었다」(성공에 navigated)로 답한다.
+/// 고치기 전에는 요청 시한(승인 뒤 30 초)이 DevTools 시한(30 초)보다 먼저 와 맨 `-32004` 였고, 에이전트는 다시 올렸다. 읽기가 늦게 보내졌어도(넣기가
+/// 오래 붙잡혔다) 요청 시한을 다시 잡으므로 그 뒤에 온다.
+fn uploadBudgetVerify(run: *CdpRun, call: u32) void {
+    session_mod.web_osr.devtoolsLimitWait(run.surface_id, call, web_cdp_ops.web_cdp_upload.verify_wait_ms);
+    if (!control_server_active) return;
+    const now_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    _ = control_server_storage.updateInFlightDeadline(run.async_id, now_ns + uploadVerifyDeadlineNs());
+}
+
+/// 읽기를 보낸 때부터 요청 시한까지 — 읽기의 시한(10 초)에 놓기와 tick 의 틈을 더한다.
+const upload_verify_slack_ns: i128 = 5 * std.time.ns_per_s;
+fn uploadVerifyDeadlineNs() i128 {
+    return @as(i128, web_cdp_ops.web_cdp_upload.verify_wait_ms) * std.time.ns_per_ms + upload_verify_slack_ns;
+}
+
+comptime {
+    // 읽기의 시한은 요청 시한(30 초)보다 짧아야 「넣었다」 가 먼저 닿는다.
+    std.debug.assert(uploadVerifyDeadlineNs() <= browser_op_timeout_ns);
+}
+
+fn uploadFreeLines(run: *CdpRun) void {
+    const lines = run.upload_lines orelse return;
+    for (lines) |l| allocator.free(l);
+    allocator.free(lines);
+    run.upload_lines = null;
+}
+
+/// 모달의 파일 줄(파일마다 둘 — 경로, 엿보기)을 한 번 만든다(소유 — `run.upload_lines`). 메모리가 없으면 null.
+fn uploadModalLines(run: *CdpRun, job: *const UploadJob) ?[][]u8 {
+    if (run.upload_lines) |l| return l;
+    const lines = allocator.alloc([]u8, 2 * job.prepared.items.len) catch return null;
+    var count: usize = 0;
+    const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
+    for (job.prepared.items, 0..) |*p, i| {
+        const two = maru.session.web_upload_display.fileLines(allocator, i, p.info(), home) catch {
+            for (lines[0..count]) |l| allocator.free(l);
+            allocator.free(lines);
+            return null;
+        };
+        lines[count] = two[0];
+        lines[count + 1] = two[1];
+        count += 2;
+    }
+    run.upload_lines = lines;
+    if (builtin.is_test) upload_lines_built_for_test += 1;
+    return lines;
+}
+
+/// 시험만 — 모달의 파일 줄을 만든 횟수(한 번만 만드는지 본다 — 주소 비교는 할당기가 같은 자리를 다시 줄 수 있어 증명이 못 된다).
+var upload_lines_built_for_test: usize = 0;
+
 fn uploadDismiss(refs: []const ControlSessionRef, async_id: u64) void {
     for (refs) |ref| if (ref.app_session) |app| app.dismissUploadConfirm(async_id);
 }
@@ -9077,17 +9144,8 @@ fn pollUploadRun(refs: []const ControlSessionRef, run: *CdpRun) void {
     // 아직 답이 없다 — 띄운다(이미 보이는 중이면 그대로, 다른 모달이 열려 있으면 다음 tick).
     var msg_buf: [768]u8 = undefined;
     const message = uploadPromptMessage(&msg_buf, job.prepared.items.len, run.upload_origin orelse "");
-    var lines: [2 * web_cdp_ops.web_cdp_upload.max_files][]u8 = undefined;
-    var count: usize = 0;
-    defer for (lines[0..count]) |l| allocator.free(l);
-    const home: []const u8 = if (std.c.getenv("HOME")) |h| std.mem.span(h) else "";
-    for (job.prepared.items, 0..) |*p, i| {
-        const two = maru.session.web_upload_display.fileLines(allocator, i, p.info(), home) catch return finishCdp(run, .failed, "out of memory");
-        lines[count] = two[0];
-        lines[count + 1] = two[1];
-        count += 2;
-    }
-    if (app.showUploadConfirm(message, @ptrCast(lines[0..count]), run.async_id) catch return finishCdp(run, .failed, "out of memory")) run.upload_window = app;
+    const lines = uploadModalLines(run, job) orelse return finishCdp(run, .failed, "out of memory");
+    if (app.showUploadConfirm(message, @ptrCast(lines), run.async_id) catch return finishCdp(run, .failed, "out of memory")) run.upload_window = app;
 }
 
 /// W9c③ 적대 리뷰 1 회차: 이 업로드를 받으면 모달·파일 열기를 기다리는 업로드가 너무 많아지는가 — 부른 쪽(같은 pane 의 grant·같은 cap)마다
@@ -14885,4 +14943,59 @@ test "W9c③ 적대 리뷰 1 회차 재현 R16: op 의 사본 폴더를 지우�
     var zb: [std.fs.max_path_bytes]u8 = undefined;
     const tab_dir = try std.fmt.bufPrintZ(&zb, "{s}/70", .{root});
     try std.testing.expect(std.c.open(tab_dir.ptr, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0)) < 0);
+}
+
+// W9c③ 적대 리뷰 3 회차 T1: 넣은 뒤 읽기가 붙잡히면(change 처리기가 응답이 늦은 주소로 옮긴다 — 실측 35 초) 요청 시한(승인 뒤 30 초)이 DevTools 시한
+// (30 초)보다 먼저 와 맨 -32004 였다. 읽기를 보내면 요청 시한을 「읽기의 시한(10 초) + 틈」 으로 다시 잡는다 — op 의 「넣었다」(성공에 navigated)가
+// 먼저 닿는다. 읽기의 시한을 줄이는 것은 web_osr 의 시험(`devtoolsLimitWait`)이, 시한 뒤의 답은 web_cdp_ops 의 T1 이 본다.
+// nit: 모달의 파일 줄은 한 번 만든다(모달이 떠 있는 동안 매 drain 마다 만들었다).
+test "W9c③ 적대 리뷰 3 회차 재현 T1a: 읽기를 보내면 요청 시한이 읽기의 시한 뒤로 다시 잡힌다 — 모달의 파일 줄은 한 번 만든다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(null);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
+    try w9c3Write(tmp.dir, "a.txt", "hello upload\n");
+    const session = try w9b3Session(ta);
+    defer w9b3Cleanup(ta, session);
+    const refs = [_]ControlSessionRef{.{ .app_session = session, .window_id = 1, .window_kind = 0 }};
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 84, .scope = .browser });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const files = try std.fmt.bufPrint(&path_buf, "[\"{s}/a.txt\"]", .{base});
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"browser.upload\",\"params\":{\"id\":84,\"selector\":\"#f\",\"files\":[\"/x\"]}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const run = try w9c3Start(&p, req, 84, files);
+    const built_before = upload_lines_built_for_test;
+    pollUploadRuns(&refs);
+    try std.testing.expect(session.pending_confirm == .upload);
+    const lines = run.upload_lines orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), lines.len);
+    pollUploadRuns(&refs);
+    pollUploadRuns(&refs);
+    try std.testing.expectEqual(built_before + 1, upload_lines_built_for_test); // 다시 만들지 않았다
+    // 읽기를 보냈다(엔진이 없어 호출 번호는 흉내 — 시한 줄이기는 없는 호출이면 그대로 지나간다).
+    const before_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    uploadBudgetVerify(run, 4242);
+    const after_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    var deadline: ?i128 = null;
+    for (control_server_storage.in_flight.items) |e| if (e.id == run.async_id) {
+        deadline = e.deadline_ns;
+    };
+    try std.testing.expect(deadline.? >= before_ns + uploadVerifyDeadlineNs() and deadline.? <= after_ns + uploadVerifyDeadlineNs());
+    // 읽기의 시한(10 초)보다 늦고 요청 시한(30 초)보다 이르다.
+    try std.testing.expect(uploadVerifyDeadlineNs() > @as(i128, web_cdp_ops.web_cdp_upload.verify_wait_ms) * std.time.ns_per_ms);
+    try std.testing.expect(uploadVerifyDeadlineNs() <= browser_op_timeout_ns);
+    w9c3Keys(session, false);
+    pollUploadRuns(&refs);
+    const msg = try w9c3Message(&p);
+    defer ta.free(msg);
+    try std.testing.expectEqualStrings("-32002 " ++ upload_declined_reason, msg);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
 }

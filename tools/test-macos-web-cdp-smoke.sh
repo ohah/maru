@@ -79,7 +79,10 @@
 #                   받은 뒤 change 에서 칸을 비우는 칸·칸을 새 것으로 바꿔 끼우는 칸은 성공에 kept:false(다시 올리지 말라는 안내 — 적대 리뷰 1 회차) ·
 #                   꺼진 칸·한 파일 칸에 둘은 모달 전에 거절 · 거부는 -32002 · 사본은 프로필의 upload-staging/<탭>/ 아래 0400 ·
 #                   모달 동안 페이지가 옮겨 가면 「page changed」 이고 새 문서는 아무것도 받지 않는다 · change 처리기가 곧 같은 출처로 옮기는 칸은
-#                   성공에 navigated:true(「try again」 없음 — 적대 리뷰 2 회차) · 탭을 닫으면 그 탭의 사본 폴더가 사라진다
+#                   성공에 navigated:true(「try again」 없음 — 적대 리뷰 2 회차) · change 처리기가 alert 를 띄우는 칸은 성공에 dialog:true(「try
+#                   again」 없음 — 적대 리뷰 3 회차), 그 alert 는 에이전트 것(cause=agent)이라 handle-dialog 로 답하면 페이지가 내용을 한 번 받는다 ·
+#                   change 처리기가 응답이 40 초 걸리는 주소로 옮기는 칸도 요청 시한 전에 성공에 navigated:true(3 회차 T1) ·
+#                   탭을 닫으면 그 탭의 사본 폴더가 사라진다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -237,6 +240,8 @@ for(var i=0;i<n;i++)(function(f){var r=new FileReader();r.onload=function(){part
 <input type=file id=clr onchange="rep(this,event);this.value=''">
 <input type=file id=rr onchange="rep(this,event);this.replaceWith(this.cloneNode())">
 <input type=file id=nav onchange="var f=this.files[0];location.href='/up3.html?nav-'+this.files.length+'-'+event.isTrusted+'-'+encodeURIComponent(f.name+':'+f.size)">
+<input type=file id=dlg onchange="rep(this,event);alert('got '+this.files.length)">
+<input type=file id=slow onchange="var f=this.files[0];location.href='/upslow?'+this.files.length+'-'+event.isTrusted+'-'+encodeURIComponent(f.name+':'+f.size)">
 <button id=later style="position:absolute;left:30px;top:200px;width:120px;height:40px" onclick="setTimeout(function(){location='up2.html'},1200)">Later</button>
 HTML
 done
@@ -344,6 +349,11 @@ class H(http.server.SimpleHTTPRequestHandler):
             # W9a 적대 리뷰 4 회차: 6 초 뒤에 답하는 문서 — 그동안(확정되지 않은 이동) 보낸 exec 은 곧 거절돼야 한다.
             time.sleep(6)
             self.path = "/a.html"
+        if self.path.startswith("/upslow"):
+            # W9c③ 적대 리뷰 3 회차: 40 초 뒤에 답하는 문서 — change 처리기가 이리로 옮기면 넣은 뒤 읽기가 확정까지 붙잡힌다(실측 35 초).
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()  # 받은 때 적는다(보통 기록은 40 초 뒤 응답 뒤라 늦다)
+            time.sleep(40)
+            self.path = "/up3.html"
         if self.path.startswith("/csp.html"):
             # W9a②: 엄격 CSP(script-src 'self') — exec 자체는 돌고 그 안의 new Function 은 EvalError(WebKit 과 같다).
             body = b"<!doctype html><title>csp</title><p id=p>csp</p>"
@@ -1000,11 +1010,31 @@ echo approve-after-ms:3000 > "$root/updecision"
 "\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/b.txt" > "\$out/up-moved" 2>&1; echo "rc=\$?" >> "\$out/up-moved"
 sleep 1
 grep -c 'GET /hit?up2-' "$root/http.log" > "\$out/up2-hits" || true
+# 적대 리뷰 3 회차: 넣자 change 처리기가 alert 를 띄운다(탭은 지금 up2) — 넣기의 답은 대화상자가 답해질 때까지 붙잡힌다. 받았다는 성공(dialog:true)이어야
+# 한다(실패면 에이전트가 답한 뒤 다시 올려 모달이 또 뜨고 두 번 올라간다). 그 alert 는 에이전트 것이다(넣기 바로 앞에 에이전트 시각을 적었다) — 답하면
+# 처리기가 이어 내용을 읽어 보낸다(FileReader 는 alert 뒤에 돈다). 한 번만.
+"\$cli" browser upload --surface "\$up" --selector '#dlg' "$root/files/a.txt" > "\$out/up-dlg" 2>&1; echo "rc=\$?" >> "\$out/up-dlg"
+"\$cli" browser dialog --surface "\$up" > "\$out/up-dlg-list" 2>&1; echo "rc=\$?" >> "\$out/up-dlg-list"
+"\$cli" browser handle-dialog --surface "\$up" --accept > "\$out/up-dlg-answer" 2>&1; echo "rc=\$?" >> "\$out/up-dlg-answer"
+hit_seen 'up2-dlg-1-true-a.txt%3A6%3Aalpha' && echo yes > "\$out/up-dlg-hit" || echo no > "\$out/up-dlg-hit"
+sleep 0.5
+grep -c 'GET /hit?up2-dlg-' "$root/http.log" > "\$out/up-dlg-hits" || true
 # 적대 리뷰 2 회차: 넣자 change 처리기가 같은 출처로 옮겨 간다 — 넣은 뒤 읽기는 문서가 사라져 못 한다. 받았다는 성공(navigated:true)이어야 한다
 # (실패·「then try again」 이면 에이전트가 다시 불러 모달이 또 뜨고 두 번 올라간다). 이 호출 하나뿐이다 — 옮겨 간 문서의 요청 수로 두 번 넣지 않았음을 본다.
 "\$cli" browser upload --surface "\$up" --selector '#nav' "$root/files/a.txt" > "\$out/up-nav" 2>&1; echo "rc=\$?" >> "\$out/up-nav"
 sleep 1
 grep -c 'GET /up3.html?nav-1-true-a.txt%3A6' "$root/http.log" > "\$out/up-nav-loads" || true
+# 적대 리뷰 3 회차 T1: 넣자 change 처리기가 응답이 40 초 걸리는 주소로 옮긴다(새 탭 — 그 탭은 한동안 옮겨 가는 중이다). 읽기가 붙잡히면 그 시한(10 초)이
+# 요청 시한보다 먼저 와 성공에 navigated:true 여야 한다(고치기 전에는 30 초 뒤 맨 -32004). 앱이 이동을 먼저 보면 읽기를 보내지 않고 곧 같은 답이다 — 걸린 초를 적는다
+# (2026-10-15 실측 4 초 — 그 길이었다. 10 초 넘게 걸리면 읽기가 붙잡혀 시한으로 답한 길이다).
+"\$cli" browser open --url "http://127.0.0.1:$port/up.html?slow" > "\$out/up-slow-open" 2>&1
+ups=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/up-slow-open")
+s0=\$(date +%s)
+"\$cli" browser upload --surface "\$ups" --selector '#slow' "$root/files/a.txt" > "\$out/up-slow" 2>&1; echo "rc=\$?" >> "\$out/up-slow"
+s1=\$(date +%s)
+echo "\$((s1 - s0))" > "\$out/up-slow-secs"
+grep -c 'GET /upslow?1-true-a.txt%3A6' "$root/http.log" > "\$out/up-slow-loads" || true
+"\$cli" browser close --surface "\$ups" > /dev/null 2>&1 || true
 echo approve > "$root/updecision"
 "\$cli" browser close --surface "\$up" > "\$out/up-close" 2>&1
 sleep 0.5
@@ -1283,8 +1313,18 @@ grep -q '^rc=1$' "$out/up-moved" && grep -q 'page changed' "$out/up-moved" || fa
 grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-nav" && grep -q '^rc=0$' "$out/up-nav" && grep -q 'navigated: true' "$out/up-nav" && ! grep -q 'try again' "$out/up-nav" \
     && [ "$(cat "$out/up-nav-loads")" = 1 ] \
     || fail "an input whose change handler navigated right away was not reported as received with navigated:true, or the agent was told to try again ($(tr '\n' ' ' < "$out/up-nav") · loads $(cat "$out/up-nav-loads") · $(grep 'GET /up3' "$root/http.log" | tr '\n' ' '))"
+grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-dlg" && grep -q '^rc=0$' "$out/up-dlg" && grep -q 'dialog: true' "$out/up-dlg" && grep -q 'handle-dialog' "$out/up-dlg" && ! grep -q 'try again' "$out/up-dlg" \
+    || fail "an input whose change handler showed an alert was not reported as received with dialog:true, or the agent was told to try again ($(tr '\n' ' ' < "$out/up-dlg"))"
+grep -q '^alert tab=[0-9]* token=[0-9]* cause=agent may_answer=yes' "$out/up-dlg-list" && grep -q '^  message: "got 1"$' "$out/up-dlg-list" \
+    || fail "the alert the change handler showed after an upload was not listed as the agent's with the handler's text ($(tr '\n' ' ' < "$out/up-dlg-list"))"
+# 없는 경로(/hit)의 요청은 http.log 에 두 줄이다(404 — send_error 의 log_error 와 log_request 가 둘 다 log_message 로 온다). 한 번이면 둘, 두 번이면 넷.
+grep -q '^answered alert$' "$out/up-dlg-answer" && grep -q '^rc=0$' "$out/up-dlg-answer" && [ "$(cat "$out/up-dlg-hit")" = yes ] && [ "$(cat "$out/up-dlg-hits")" -le 2 ] \
+    || fail "answering the upload's alert did not let the page read the file once ($(tr '\n' ' ' < "$out/up-dlg-answer") · hit $(cat "$out/up-dlg-hit") · $(grep 'GET /hit?up2-dlg' "$root/http.log" | tr '\n' ' '))"
+grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-slow" && grep -q '^rc=0$' "$out/up-slow" && grep -q 'navigated: true' "$out/up-slow" && ! grep -q 'try again' "$out/up-slow" \
+    && [ "$(cat "$out/up-slow-secs")" -le 25 ] && [ "$(cat "$out/up-slow-loads")" = 1 ] \
+    || fail "an input whose change handler navigated to a server that answers after 40 s was not reported as received with navigated:true before the request deadline ($(tr '\n' ' ' < "$out/up-slow") · $(cat "$out/up-slow-secs")s · loads $(cat "$out/up-slow-loads"))"
 [ ! -s "$out/up-after-close" ] || fail "closing the tab did not remove its upload-staging folder ($(tr '\n' ' ' < "$out/up-after-close"))"
-echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input and two files into a single-file input are refused before the dialog, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), closing the tab removes its copies"
+echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input and two files into a single-file input are refused before the dialog, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

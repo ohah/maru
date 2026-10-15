@@ -81,7 +81,9 @@ pub const loading_reason = "the tab is loading a new page — wait for it (wait 
 pub const Step = union(enum) {
     /// `kick` — 바로 뒤에 작은 스크린샷을 함께 보낸다(`web_osr.devtoolsCallKick` 이 이 값을 그대로 받는다 — 숨은 탭의 접근성 질의·포인터 이동·rAF 가 그래야 돈다,
     /// W9b②-3). `Kick` 참고.
-    call: struct { method: []const u8, params: []u8, kick: Kick = .none },
+    /// `after_dialog`(W9c③ 적대 리뷰 3 회차) — 그 탭에 JS 대화상자가 떠 있으면 버리지 않고 사라진 뒤 보낸다(답은 버린다 — 부른 쪽에는 그대로
+    /// 「대화상자」). 업로드의 듣는 이 떼기만 쓴다: 넣자 뜬 대화상자의 길에서 곧 거절돼 듣는 이가 문서가 죽을 때까지 남았다.
+    call: struct { method: []const u8, params: []u8, kick: Kick = .none, after_dialog: bool = false },
     done: struct { status: Status, result: []u8 },
     /// 이만큼(ms) 뒤에 `wake` 로 다시 부른다(wait 의 확인 간격 — 페이지 타이머를 쓰지 않는다: 숨긴 탭은 그것을 늦춘다).
     sleep: u32,
@@ -246,7 +248,7 @@ pub const Op = struct {
     upload: ?web_cdp_upload.Op = null,
     /// W9c③ 적대 리뷰 1 회차: 업로드가 마지막으로 낸 호출(params 소유). 승인 뒤 그 호출을 자리 없음(`busy_reason`)으로 못 보냈으면 잠깐 뒤
     /// 그대로 다시 보낸다 — 사용자가 승인한 업로드를 「retry shortly」 로 버리면 에이전트가 다시 불러 모달이 또 뜬다(click·type 의 kick 재시도와 같은 간격·횟수).
-    up_last: ?struct { method: []const u8, params: []u8, kick: Kick } = null,
+    up_last: ?struct { method: []const u8, params: []u8, kick: Kick, after_dialog: bool = false } = null,
     up_resend: bool = false,
     up_busy_retries: u8 = 0,
 
@@ -470,7 +472,7 @@ pub const Op = struct {
         if (self.up_resend) {
             self.up_resend = false;
             const l = self.up_last.?;
-            return .{ .call = .{ .method = l.method, .params = try gpa.dupe(u8, l.params), .kick = l.kick } };
+            return .{ .call = .{ .method = l.method, .params = try gpa.dupe(u8, l.params), .kick = l.kick, .after_dialog = l.after_dialog } };
         }
         return self.uploadRemember(gpa, try self.uploadFix(gpa, try self.wakeInner(gpa)));
     }
@@ -511,7 +513,7 @@ pub const Op = struct {
                     return e;
                 };
                 if (self.up_last) |l| gpa.free(l.params);
-                self.up_last = .{ .method = c.method, .params = copy, .kick = c.kick };
+                self.up_last = .{ .method = c.method, .params = copy, .kick = c.kick, .after_dialog = c.after_dialog }; // 다시 보내도 미룰 수 있게(3 회차)
             },
             else => {},
         }
@@ -579,6 +581,12 @@ pub const Op = struct {
     /// W9c③: 곧 보낼 호출이 업로드의 넣기인가 — 앱이 그 앞에서 에이전트 시각을 적는다.
     pub fn uploadSetting(self: *const Op) bool {
         return self.stage == .upload and self.upload.?.setting();
+    }
+
+    /// W9c③ 적대 리뷰 3 회차: 업로드가 넣은 뒤 읽기를 보내려 한다 — 앱이 그 호출의 시한을 `web_cdp_upload.verify_wait_ms` 로 줄이고 요청 시한을 그
+    /// 뒤로 둔다(읽기가 붙잡히면 요청 시한이 먼저 와 맨 `-32004` 였다).
+    pub fn uploadVerifying(self: *const Op) bool {
+        return self.stage == .upload and self.upload.?.verifying();
     }
 
     fn startInner(self: *Op, gpa: std.mem.Allocator) !Step {
@@ -1766,6 +1774,8 @@ const Trail = struct {
     kicked: std.ArrayList(usize) = .empty,
     /// 그 가운데 `required`.
     required: std.ArrayList(usize) = .empty,
+    /// 대화상자가 사라진 뒤로 미뤄도 되는 호출의 수(`after_dialog` — W9c③ 적대 리뷰 3 회차).
+    after_dialog: usize = 0,
 
     fn deinit(self: *Trail) void {
         for (self.params.items) |p| testing.allocator.free(p);
@@ -3921,6 +3931,7 @@ fn driveUpload(op: *Op, first: Step, trail: *Trail) !Step {
         .call => |c| {
             try trail.methods.append(testing.allocator, c.method);
             try trail.params.append(testing.allocator, c.params);
+            if (c.after_dialog) trail.after_dialog += 1;
             step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
         },
         .done, .confirm => return step,
@@ -3950,7 +3961,7 @@ test "W9c③: 업로드 — 찾기 → 프레임 트리·격리 world·노드·�
     const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, &up_staged), &trail);
     defer testing.allocator.free(end.done.result);
     try testing.expectEqual(Status.success, end.done.status);
-    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5}],\"kept\":true,\"navigated\":false}", end.done.result);
+    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3},{\"name\":\"b.txt\",\"size\":5}],\"kept\":true,\"navigated\":false,\"dialog\":false}", end.done.result);
     const post = [_][]const u8{ "DOM.getDocument", "DOM.querySelector", "DOM.describeNode", "Page.getFrameTree", "Page.createIsolatedWorld", "DOM.resolveNode", "Runtime.callFunctionOn", "Page.getFrameTree", "DOM.setFileInputFiles", "Runtime.callFunctionOn", "Runtime.releaseObjectGroup" };
     try testing.expectEqual(post.len, trail.methods.items.len);
     for (post, trail.methods.items) |w, g| try testing.expectEqualStrings(w, g);
@@ -4107,6 +4118,7 @@ fn driveUploadSleeping(op: *Op, first: Step, trail: *Trail, sleeps: *usize) !Ste
         .call => |c| {
             try trail.methods.append(testing.allocator, c.method);
             try trail.params.append(testing.allocator, c.params);
+            if (c.after_dialog) trail.after_dialog += 1;
             step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
         },
         .sleep => |ms| {
@@ -4121,8 +4133,8 @@ fn driveUploadSleeping(op: *Op, first: Step, trail: *Trail, sleeps: *usize) !Ste
 test "W9c③ 적대 리뷰 1 회차 재현 R9: 페이지가 change 에서 칸을 비워도(받은 뒤 지운다) 넣을 때 본 목록이 맞으면 성공 — kept:false, 승인 뒤 확인은 maru 의 격리 world 에 듣는 이를 단다" {
     const Case = struct { verify: []const u8, status: Status, want: []const u8 };
     for ([_]Case{
-        .{ .verify = "dropped", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}" },
-        .{ .verify = "ok", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true,\"navigated\":false}" },
+        .{ .verify = "dropped", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false,\"dialog\":false}" },
+        .{ .verify = "ok", .status = .success, .want = "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true,\"navigated\":false,\"dialog\":false}" },
         .{ .verify = "unseen", .status = .failed, .want = web_cdp_upload.unseen_reason },
     }) |c| {
         UpPage.reset();
@@ -4204,7 +4216,7 @@ test "W9c③ 적대 리뷰 2 회차 재현 V1: 넣은 뒤 페이지가 곧 옮�
         try testing.expect(std.mem.indexOf(u8, end.done.result, "Cannot find context") == null);
         try testing.expect(std.mem.indexOf(u8, end.done.result, "try again") == null);
         try testing.expectEqual(Status.success, end.done.status);
-        try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true}", end.done.result);
+        try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true,\"dialog\":false}", end.done.result);
         // 승인 뒤 callFunctionOn 은 확인·읽기 둘뿐(떼는 호출 없음), 그리고 놓기.
         try testing.expectEqual(@as(usize, 2), trail.count("Runtime.callFunctionOn"));
         try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
@@ -4231,7 +4243,7 @@ test "W9c③ 적대 리뷰 2 회차 재현 E1: 읽기를 못 한 끝(넣기 오�
     const Case = struct { set_reply: ?Reply = null, verify_reply: ?Reply = null, loader_again: []const u8 = "L1", check: []const u8 = "ok", disarm: bool, status: Status };
     for ([_]Case{
         .{ .set_reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"boom\"}" }, .disarm = true, .status = .failed },
-        .{ .verify_reply = .{ .not_sent = dialog_reason }, .disarm = true, .status = .failed },
+        .{ .verify_reply = .{ .not_sent = dialog_reason }, .disarm = true, .status = .success }, // 3 회차 D1: 넣기는 갔다 — 성공에 dialog:true
         .{ .verify_reply = .{ .cdp_error = "{\"code\":-32000,\"message\":\"boom\"}" }, .disarm = true, .status = .failed },
         .{ .set_reply = .{ .timed_out = "DevTools did not answer in time" }, .disarm = false, .status = .timeout },
         .{ .set_reply = .{ .failed = "the tab closed or its page crashed" }, .disarm = false, .status = .failed },
@@ -4265,4 +4277,100 @@ test "W9c③ 적대 리뷰 2 회차 재현 E1: 읽기를 못 한 끝(넣기 오�
         // 떼기 뒤에 놓는다 — 놓기가 마지막.
         try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
     }
+}
+
+// ── W9c③ 적대 리뷰 3 회차 ──
+// 실측(CEF 154 판정자 탐침 review_w9c3_r3/probe d_a·d_c·d_p·d_ac·bu·dt2, 3/3 씩): change 처리기가 alert·confirm·prompt 를 띄우거나(같은 차례) 떠나기
+// 확인이 뜨면 `DOM.setFileInputFiles` 의 답은 대화상자가 답해질 때까지 붙잡힌다 — 처리기는 그 전에 파일을 받았다(`got 1`). 앱은 대화상자가 오는
+// 순간 그 탭의 호출을 `.failed = dialog_reason` 으로 끝낸다(web_osr `failDevtools(.dialog)`). 고치기 전에는 업로드가 「실패」 로 답했고, 에이전트는
+// 대화상자에 답한 뒤 다시 올렸다(모달이 또 뜨고 두 번 올라간다 — 2 회차 MED-A 와 같은 갈래). change 처리기가 `setTimeout(alert)` 이면 넣기의 답(`{}`)
+// 뒤 곧 보낸 읽기가 붙잡혀 같은 실패였다(dt2). 넣기를 보낸 뒤의 대화상자는 성공에 `dialog:true` — 듣는 이 떼기는 대화상자가 사라진 뒤로 미룬다.
+// 이미 떠 있어 넣기를 **보내지 못한** 것은 그대로 실패다(W9b③ 4 회차의 교훈 — 보내지 않은 것을 「갔다」 고 하지 않는다).
+test "W9c③ 적대 리뷰 3 회차 재현 D1: 넣기·읽기가 대화상자로 끝나거나 대화상자로 읽기를 못 보내면(페이지는 파일을 받았다) 성공에 kept:false·dialog:true — 넣기를 못 보낸 것은 실패" {
+    const Case = struct { set_reply: ?Reply = null, verify_reply: ?Reply = null, status: Status, given: bool };
+    for ([_]Case{
+        .{ .set_reply = .{ .failed = dialog_reason }, .status = .success, .given = true }, // change 처리기의 alert — 넣기의 답이 붙잡혔다
+        .{ .verify_reply = .{ .failed = dialog_reason }, .status = .success, .given = true }, // change 처리기의 setTimeout(alert) — 읽기가 붙잡혔다
+        .{ .verify_reply = .{ .not_sent = dialog_reason }, .status = .success, .given = true }, // 넣기 뒤 대화상자가 먼저 와 읽기를 못 보냈다
+        .{ .set_reply = .{ .not_sent = dialog_reason }, .status = .failed, .given = false }, // 이미 떠 있어 넣기를 보내지 못했다 — 아무것도 안 갔다
+    }) |c| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+        defer op.deinit(testing.allocator);
+        const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+        testing.allocator.free(paused.confirm.origin);
+        trail.reset();
+        UpPage.post = true;
+        UpPage.set_reply = c.set_reply;
+        UpPage.verify_reply = c.verify_reply;
+        const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+        defer testing.allocator.free(end.done.result);
+        try testing.expectEqual(c.given, op.upload.?.given); // 갔으면 사본은 앱이 남긴다
+        if (end.done.status != c.status) std.debug.print("D1: upload answered {s}: {s}\n", .{ @tagName(end.done.status), end.done.result });
+        try testing.expectEqual(c.status, end.done.status);
+        if (c.status == .success)
+            try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false,\"dialog\":true}", end.done.result)
+        else
+            try testing.expectEqualStrings(dialog_reason, end.done.result);
+        // 듣는 이는 뗀다 — 대화상자가 사라진 뒤로 미뤄도 되는 호출로(그 하나만). 놓기가 마지막(web_osr 가 미룬다).
+        try testing.expectEqual(@as(usize, 1), trail.after_dialog);
+        var disarms: usize = 0;
+        for (trail.methods.items, trail.params.items) |m, prm| if (std.mem.eql(u8, m, "Runtime.callFunctionOn") and std.mem.indexOf(u8, prm, "function(key)") != null) {
+            disarms += 1;
+        };
+        try testing.expectEqual(@as(usize, 1), disarms);
+        try testing.expectEqualStrings("Runtime.releaseObjectGroup", trail.methods.items[trail.methods.items.len - 1]);
+    }
+}
+
+// 실측(slow_sl): change 처리기가 응답이 40 초 걸리는 주소로 옮기면 넣기는 `{}`, 곧 보낸 읽기는 확정까지 붙잡혀 35 초에 host 가 버렸다(expired) — 앱에서는
+// 그 전에 요청 시한(승인 뒤 30 초 — `uploadResume`)이나 DevTools 시한(30 초)이 먼저 와 맨 `timeout` 이었다(given 참 — 받았는데 실패, 2 회차가 남긴 틈).
+// 업로드 차례 몫: 넣기가 `{}` 로 끝난 뒤 읽기가 시한이면 성공에 kept:false·navigated:true — 놓기는 보내지 않는다(그것도 붙잡혀 요청 시한을 넘긴다).
+// 읽기의 시한을 줄이고 요청 시한을 그 뒤로 두는 앱 몫은 app_host_abi 의 시험이 본다.
+test "W9c③ 적대 리뷰 3 회차 재현 T1: 넣기가 끝난 뒤 읽기가 시한이면 성공에 kept:false·navigated:true — 맨 timeout(다시 하라는 뜻)이 아니고, 붙잡힐 놓기를 보내지 않는다" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    trail.reset();
+    UpPage.post = true;
+    UpPage.verify_reply = .{ .timed_out = "DevTools did not answer in time" };
+    const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expect(op.upload.?.given);
+    if (end.done.status != .success) std.debug.print("T1: upload answered {s}: {s}\n", .{ @tagName(end.done.status), end.done.result });
+    try testing.expectEqual(Status.success, end.done.status);
+    try testing.expectEqualStrings("{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true,\"dialog\":false}", end.done.result);
+    // 읽기가 마지막 호출이다 — 답하지 않는 페이지에 떼기·놓기를 더 보내지 않는다.
+    try testing.expectEqualStrings("Runtime.callFunctionOn", trail.methods.items[trail.methods.items.len - 1]);
+    try testing.expect(std.mem.indexOf(u8, trail.params.items[trail.params.items.len - 1], "function(names") != null);
+}
+
+test "W9c③ 적대 리뷰 3 회차: uploadVerifying 은 넣은 뒤 읽기를 보내기 직전에만 참이다(앱이 그 호출의 시한을 줄인다)" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 42);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    UpPage.post = true;
+    var step = try op.resumeUpload(testing.allocator, up_staged[0..1]);
+    var verifying: usize = 0;
+    while (step == .call) {
+        const c = step.call;
+        defer testing.allocator.free(c.params);
+        const is_verify = std.mem.eql(u8, c.method, "Runtime.callFunctionOn") and std.mem.indexOf(u8, c.params, "function(names") != null;
+        try testing.expectEqual(is_verify, op.uploadVerifying());
+        if (is_verify) verifying += 1;
+        step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
+    }
+    defer testing.allocator.free(step.done.result);
+    try testing.expectEqual(@as(usize, 1), verifying);
+    try testing.expectEqual(Status.success, step.done.status);
 }

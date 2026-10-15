@@ -141,7 +141,7 @@ pub const BrowserMethod = enum {
     /// 그 탭 자신의 대화상자, 있으면 grant 가 있는 가족 탭의 그 대화상자. 답해도 되는지(`may_answer`)는 앱이 본다. 파일 선택은 닫기만.
     /// op.arg=`{accept, text?, dialog?}`. **op_kind=26 고정**.
     handle_dialog,
-    /// `browser.upload {id, selector|ref|locator, files:[절대 경로]}`(W9c③ — Chromium 전용) → `{origin, files:[{name,size}], kept, navigated}`. 로케이터가 가리킨
+    /// `browser.upload {id, selector|ref|locator, files:[절대 경로]}`(W9c③ — Chromium 전용) → `{origin, files:[{name,size}], kept, navigated, dialog}`. 로케이터가 가리킨
     /// `<input type=file>` 에 파일을 넣는다. **부를 때마다 확인 모달**(grant·cap 이 있어도 — 기억하지 않는다)이 파일을 모두 보이고, 앱이 파일을 열어
     /// 승인 뒤에 사본을 만들어 그 사본을 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」). op.arg=`{선택자 필드, files:[…]}`. **op_kind=27 고정**.
     upload,
@@ -2233,12 +2233,15 @@ fn serializeDialogResult(gpa: std.mem.Allocator, id: cp.Id, method: BrowserMetho
     return aw.toOwnedSlice();
 }
 
-/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …],"kept":<bool>,"navigated":<bool>}`(파일 1..10 개). 다른 키는 버리고,
-/// 모양이 틀리면 거절.
+/// W9c③ 결과 — `{"origin":<str>,"files":[{"name":<str>,"size":<u64>}, …],"kept":<bool>,"navigated":<bool>,"dialog":<bool>}`(파일 1..10 개). 다른 키는
+/// 버리고, 모양이 틀리면 거절.
 /// `kept`(적대 리뷰 1 회차): 넣을 때 페이지가 그 목록을 받았고(성공의 조건), 그 뒤에도 칸이 그 목록을 쥐고 있나 — 거짓이면 페이지 스스로 비우거나
 /// 다시 그렸다(다시 올리면 두 번 올라간다).
 /// `navigated`(적대 리뷰 2 회차): 넣은 뒤 읽기 전에 페이지가 새 문서로 옮겨 갔다(change 처리기의 `location.href=` 등) — 처리기는 파일을 받고
-/// 돌았지만 받은 목록은 읽을 수 없다. 이때 `kept` 는 거짓이다. 다시 올리면 모달이 또 뜨고 두 번 올라간다.
+/// 돌았지만 받은 목록은 읽을 수 없다. 이때 `kept` 는 거짓이다. 다시 올리면 모달이 또 뜨고 두 번 올라간다. 넣은 뒤 읽기가 시한 안에 답하지 않은
+/// 것도 이것이다(3 회차 — 옮겨 가는 중이라 붙잡혔다).
+/// `dialog`(적대 리뷰 3 회차): 넣기를 보낸 뒤 페이지(또는 그 팝업 가족)가 대화상자를 띄웠다(change 처리기의 alert 등) — 넣기는 갔고 받은 목록은
+/// 읽을 수 없다(`kept` 거짓). 에이전트는 대화상자에 답하고(`handle-dialog`) 페이지를 본다 — 다시 올리지 않는다. 셋 다 늘 싣는다(빠지면 거절).
 fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8) (std.mem.Allocator.Error || error{InvalidUploadPayload})![]u8 {
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, payload, .{}) catch |e| return switch (e) {
         error.OutOfMemory => error.OutOfMemory,
@@ -2250,7 +2253,8 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
     const files = parsed.value.object.get("files") orelse return error.InvalidUploadPayload;
     const kept = parsed.value.object.get("kept") orelse return error.InvalidUploadPayload;
     const navigated = parsed.value.object.get("navigated") orelse return error.InvalidUploadPayload;
-    if (origin != .string or files != .array or kept != .bool or navigated != .bool) return error.InvalidUploadPayload;
+    const dialog = parsed.value.object.get("dialog") orelse return error.InvalidUploadPayload;
+    if (origin != .string or files != .array or kept != .bool or navigated != .bool or dialog != .bool) return error.InvalidUploadPayload;
     if (files.array.items.len == 0 or files.array.items.len > max_upload_files) return error.InvalidUploadPayload;
     for (files.array.items) |f| {
         if (f != .object) return error.InvalidUploadPayload;
@@ -2280,6 +2284,8 @@ fn serializeUploadResult(gpa: std.mem.Allocator, id: cp.Id, payload: []const u8)
         s.write(kept.bool) catch |e| break :blk e;
         s.objectField("navigated") catch |e| break :blk e;
         s.write(navigated.bool) catch |e| break :blk e;
+        s.objectField("dialog") catch |e| break :blk e;
+        s.write(dialog.bool) catch |e| break :blk e;
         endResult(&s) catch |e| break :blk e;
     }) catch return error.OutOfMemory;
     return aw.toOwnedSlice();
@@ -5237,9 +5243,9 @@ test "W9c③: uploadPathOk·lexicalPath — 절대·UTF-8·제어 문자 없음,
 test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀리면 internal_error, 거부는 -32002 와 그 글(철회의 unauthorized 는 균일 글)" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}";
     {
-        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3,\"x\":1}],\"kept\":true,\"navigated\":false,\"y\":2}");
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3,\"x\":1}],\"kept\":true,\"navigated\":false,\"dialog\":false,\"y\":2}");
         defer testing.allocator.free(w);
-        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true,\"navigated\":false}") != null);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":true,\"navigated\":false,\"dialog\":false}") != null);
     }
     for ([_][]const u8{
         "{}",
@@ -5270,24 +5276,33 @@ test "W9c③: upload 결과는 origin·files(name·size) 만 — 모양이 틀�
     }
 }
 
-test "W9c③ 적대 리뷰 1 회차 재현 R9b: upload 결과는 kept(페이지가 넣은 목록을 그대로 두었나)·navigated(2 회차 — 넣고 곧 옮겨 갔다)를 싣는다 — 빠지거나 bool 이 아니면 internal_error" {
+test "W9c③ 적대 리뷰 1 회차 재현 R9b: upload 결과는 kept(페이지가 넣은 목록을 그대로 두었나)·navigated(2 회차 — 넣고 곧 옮겨 갔다)·dialog(3 회차 — 넣자 대화상자가 떴다)를 싣는다 — 빠지거나 bool 이 아니면 internal_error" {
     const req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"browser.upload\",\"params\":{\"id\":12,\"selector\":\"#f\",\"files\":[\"/tmp/a\"]}}";
     {
-        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}");
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false,\"dialog\":false}");
         defer testing.allocator.free(w);
-        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}") != null);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false,\"dialog\":false}") != null);
     }
     {
         // 2 회차: 넣은 뒤 곧 옮겨 갔다 — navigated 를 그대로 싣는다.
-        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true}");
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true,\"dialog\":false}");
         defer testing.allocator.free(w);
-        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true}") != null);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":true,\"dialog\":false}") != null);
+    }
+    {
+        // 3 회차: 넣자 대화상자가 떴다 — dialog 를 그대로 싣는다.
+        const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false,\"dialog\":true}");
+        defer testing.allocator.free(w);
+        try testing.expect(std.mem.indexOf(u8, w, "\"result\":{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false,\"dialog\":true}") != null);
     }
     for ([_][]const u8{
         "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}]}",
         "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":1,\"navigated\":false}",
         "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false}",
-        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":\"yes\"}",
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":\"yes\",\"dialog\":false}",
+        // 3 회차: dialog 가 빠지거나 bool 이 아니다.
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false}",
+        "{\"origin\":\"https://a.test\",\"files\":[{\"name\":\"a.txt\",\"size\":3}],\"kept\":false,\"navigated\":false,\"dialog\":1}",
     }) |payload| {
         const w = try serializeBrowserResponseStatus(testing.allocator, req, .success, payload);
         defer testing.allocator.free(w);

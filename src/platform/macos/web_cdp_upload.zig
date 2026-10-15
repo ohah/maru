@@ -24,9 +24,18 @@
 //!   앱이 이동을 먼저 보았으면 읽기를 보내지 않고 「…then try again」 이었다. 둘 다 실패로 답하면 에이전트가 다시 불러 모달이 또 뜨고 두 번
 //!   올라간다 — 넣기가 끝난 뒤 문서가 사라진 읽기는 성공에 `kept:false`·`navigated:true`(받았는지는 읽을 수 없다 — CLI·MCP 는 「페이지를 보라,
 //!   다시 올리지 마라」).
-//! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다. 승인 뒤 확인이 단 듣는 이는 읽기가 떼고, 읽기를 못 한 끝
-//!   (철회·넣기 오류·읽기를 못 보냄)은 놓기 앞에서 뗀다(적대 리뷰 2 회차 — 문서가 죽을 때까지 격리 world 에 남았다). 페이지가 답하지 않는 끝(시한)·
-//!   탭이 사라진 끝은 떼지 않는다(그 호출도 30 초를 붙잡힌다).
+//! - **넣자 뜬 대화상자**(적대 리뷰 3 회차): change 처리기가 alert·confirm·prompt 를 띄우거나 떠나기 확인이 뜨면 넣기의 답은 대화상자가 답해질
+//!   때까지 붙잡히고, 앱은 그 순간 호출을 「대화상자」 로 끝낸다 — 처리기는 그 전에 파일을 받았다(실측 CEF 154 3/3: alert 글이 「got 1」).
+//!   `setTimeout` 의 대화상자면 넣기는 `{}` 이고 곧 보낸 읽기가 붙잡힌다. 실패로 답하면 에이전트가 대화상자에 답한 뒤 다시 올려 모달이 또 뜨고 두 번
+//!   올라갔다 — 넣기를 **보낸 뒤**의 대화상자(넣기·읽기가 대화상자로 끝남, 대화상자 때문에 읽기를 못 보냄)는 성공에 `kept:false`·`dialog:true`
+//!   (CLI·MCP 는 「대화상자에 답하고 페이지를 보라, 다시 올리지 마라」). 이미 떠 있어 넣기를 **보내지 못한** 것은 그대로 실패다(아무것도 안 갔다).
+//! - **넣은 뒤 답하지 않는 읽기**(적대 리뷰 3 회차): change 처리기가 응답이 아주 늦은 주소로 옮기면 읽기는 확정까지 붙잡힌다(실측 35 초). 읽기는
+//!   `verify_wait_ms` 만 기다리고(앱이 그 호출의 시한을 줄이고 요청 시한을 그 뒤로 미룬다), 넘으면 성공에 `kept:false`·`navigated:true` 다 — 넣기는
+//!   `{}` 로 끝났다(처리기는 파일을 받았다). 놓기는 보내지 않는다(그 호출도 붙잡혀 요청 시한을 넘긴다 — 묶음은 문서와 함께 사라진다).
+//! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다(위의 읽기 시한만 빼고). 승인 뒤 확인이 단 듣는 이는 읽기가 떼고,
+//!   읽기를 못 한 끝(철회·넣기 오류·읽기를 못 보냄·대화상자)은 놓기 앞에서 뗀다(적대 리뷰 2 회차 — 문서가 죽을 때까지 격리 world 에 남았다). 대화상자가
+//!   떠 있으면 떼기·놓기는 그것이 사라진 뒤로 미룬다(`after_dialog` — 3 회차). 페이지가 답하지 않는 끝(시한)·탭이 사라진 끝은 떼지 않는다(그 호출도
+//!   30 초를 붙잡힌다).
 //! - 남는 틈(문서로 받아들인 것): 확인과 넣기 사이에 페이지가 같은 문서 안에서 노드를 바꾸면 파일은 떨어진 노드로 간다 — 같은 출처(사용자가
 //!   승인한 그 문서)이고, 확인이 「removed」 로 실패를 알린다.
 
@@ -53,6 +62,11 @@ pub const removed_after_reason = "the file input was removed from the page befor
 pub const mismatch_reason = "the page did not get the files as approved (the file input held a different list when they were set) — check the page before trying again";
 pub const check_failed_reason = "could not check the file input";
 pub const unseen_reason = "maru did not see the page receive the files (no input or change event reached the file input) and the input does not hold them now — check the page before trying again";
+
+/// 넣은 뒤 읽기의 시한(적대 리뷰 3 회차) — 보통은 곧 답한다. 붙잡혔다면 페이지가 옮겨 가는 중이고(실측: 응답이 늦은 주소로의 이동) 더 기다려도
+/// 알 것이 없다. 앱(`cdpAdvance`)이 그 호출의 DevTools 시한을 이만큼으로 줄이고 요청 시한을 그 뒤로 둔다 — 요청 시한(승인 뒤 30 초)이 먼저 오면
+/// 에이전트는 맨 `-32004` 를 받고 다시 올렸다.
+pub const verify_wait_ms: i64 = 10_000;
 
 /// 격리 world 이름 — 확인마다 새로 만든다(옛 문서의 context 를 쓰지 않게).
 const world_name = "maru-w9c-upload";
@@ -178,6 +192,11 @@ pub const Op = struct {
         return self.stage == .set;
     }
 
+    /// 넣은 뒤 읽기를 보내기 직전인가 — 앱이 그 호출의 시한을 `verify_wait_ms` 로 줄이고 요청 시한을 그 뒤로 둔다(적대 리뷰 3 회차).
+    pub fn verifying(self: *const Op) bool {
+        return self.stage == .verify;
+    }
+
     /// 철회 — 원격 객체를 쥐었으면 놓은 뒤 끝낸다. 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
         return switch (self.stage) {
@@ -210,7 +229,10 @@ pub const Op = struct {
             self.stage = .disarm;
             var key_buf: [snapshot_key.len + 20]u8 = undefined;
             const key = std.fmt.bufPrint(&key_buf, snapshot_key ++ "{d}", .{self.id}) catch unreachable;
-            return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{f}}}]}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(disarm_js, .{}), std.json.fmt(key, .{}) });
+            var step = try call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{f}}}]}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(disarm_js, .{}), std.json.fmt(key, .{}) });
+            // 대화상자가 떠 있으면 그것이 사라진 뒤 보낸다(놓기와 같은 줄 — 떼기가 먼저 간다). 곧 거절되면 듣는 이가 남았다(3 회차 nit).
+            step.call.after_dialog = true;
+            return step;
         }
         return self.releaseCall(gpa, .release);
     }
@@ -248,11 +270,15 @@ pub const Op = struct {
             .ok => |b| b,
             .cdp_error => |e| return self.cdpError(gpa, e, holds),
             .timed_out => |why| {
+                // 넣기가 `{}` 로 끝난 뒤 읽기가 시한 — 받았다(3 회차 T1). 맨 timeout 은 다시 올리게 했다.
+                if (self.stage == .verify) return self.verifyLate(gpa);
                 if (self.stage == .set) self.given = true; // 갔는지 모른다 — 사본을 남긴다
                 self.armed = false; // 페이지가 답하지 않는다 — 떼기도 붙잡힌다(놓기만)
                 return if (holds) self.releaseThen(gpa, .timeout, why) else done(gpa, .timeout, why);
             },
             .failed => |why| {
+                // 보낸 넣기·읽기가 대화상자로 끝났다 — 넣기는 갔다(붙잡힌 넣기도 대화상자가 답해지면 마저 돈다, 3 회차 D1).
+                if ((self.stage == .set or self.stage == .verify) and std.mem.eql(u8, why, ops.dialog_reason)) return self.dialogShown(gpa);
                 if (self.stage == .set) self.given = true;
                 self.armed = false; // 탭이 닫혔거나 엔진이 멈췄거나 대화상자가 떴다 — 뗄 곳이 없거나 거절된다
                 return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
@@ -260,6 +286,8 @@ pub const Op = struct {
             .not_sent => |why| {
                 // 넣은 뒤 읽기를 이동 중이라 보내지 않았다 — 넣기가 이동을 걸었다(2 회차: 「then try again」 이 다시 올리게 했다).
                 if (self.stage == .verify and std.mem.eql(u8, why, ops.loading_reason)) return self.navigated(gpa);
+                // 넣은 뒤 대화상자가 떠 읽기를 못 보냈다 — 넣기는 `{}` 로 끝났다(3 회차 D1). 넣기 자체를 못 보낸 것은 아래의 실패 그대로(갔다가 아니다).
+                if (self.stage == .verify and std.mem.eql(u8, why, ops.dialog_reason)) return self.dialogShown(gpa);
                 return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
             },
         };
@@ -321,7 +349,7 @@ pub const Op = struct {
                 // 넣을 때 받은 목록이 맞으면 성공 — 그 뒤 페이지가 비웠으면 kept:false(다시 올리면 두 번 올라간다).
                 const kept = std.mem.eql(u8, verdict, "ok");
                 if (!kept and !std.mem.eql(u8, verdict, "dropped")) return self.releaseThen(gpa, .failed, mismatch_reason);
-                const result = try self.successJson(gpa, kept, false);
+                const result = try self.successJson(gpa, kept, false, false);
                 defer gpa.free(result);
                 return self.releaseThen(gpa, .success, result);
             },
@@ -401,14 +429,35 @@ pub const Op = struct {
     /// 듣는 이는 문서와 함께 사라졌다(떼지 않는다).
     fn navigated(self: *Op, gpa: std.mem.Allocator) !Step {
         self.armed = false;
-        const result = try self.successJson(gpa, false, true);
+        const result = try self.successJson(gpa, false, true, false);
         defer gpa.free(result);
         return self.releaseThen(gpa, .success, result);
     }
 
-    /// 성공 답 — `{"origin","files":[{"name","size"}],"kept","navigated"}`(L2 `serializeUploadResult` 가 검사한다). `kept` 거짓 = 넣을 때
-    /// 받았지만 그 뒤 페이지가 칸을 비우거나 바꿨다, 또는 곧 옮겨 가 읽을 수 없었다(`navigated` 참 — 2 회차).
-    fn successJson(self: *const Op, gpa: std.mem.Allocator, kept: bool, moved: bool) ![]u8 {
+    /// 넣기가 `{}` 로 끝난 뒤 읽기가 `verify_wait_ms` 안에 답하지 않았다(3 회차 T1 — 실측: change 처리기가 응답이 늦은 주소로 옮겨 읽기가 확정까지
+    /// 붙잡혔다). 처리기는 파일을 받았다 — 성공에 `kept:false`·`navigated:true`(작성자 선택: 「넣었지만 확인 못 함」 실패 대신 2 회차와 같은 답 —
+    /// 둘 다 「페이지를 보라, 다시 올리지 마라」 다). 이동이 아니라 페이지가 멈춘 것이어도 같은 답이다(문서의 남는 틈). 떼기·놓기는 보내지 않는다 —
+    /// 답하지 않는 페이지에 보내면 그것도 붙잡혀 요청 시한을 넘긴다(묶음·듣는 이는 문서와 함께 사라진다).
+    fn verifyLate(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.armed = false;
+        const result = try self.successJson(gpa, false, true, false);
+        return .{ .done = .{ .status = .success, .result = result } };
+    }
+
+    /// 넣기를 보낸 뒤 페이지(또는 그 팝업 가족)가 대화상자를 띄웠다(3 회차 D1) — 넣기는 갔다(처리기의 alert 면 이미 받았고, 붙잡힌 넣기는 대화상자가
+    /// 답해지면 마저 돈다). 읽을 수 없다: 성공에 `kept:false`·`dialog:true`. 실패로 답하면 에이전트가 대화상자에 답한 뒤 다시 올렸다(모달 둘째·두 번
+    /// 올라감). 듣는 이는 떼고 묶음은 놓는다 — 둘 다 대화상자가 사라진 뒤로 미뤄진다(`after_dialog`·web_osr 의 미룬 놓기).
+    fn dialogShown(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.given = true;
+        const result = try self.successJson(gpa, false, false, true);
+        defer gpa.free(result);
+        return self.releaseThen(gpa, .success, result);
+    }
+
+    /// 성공 답 — `{"origin","files":[{"name","size"}],"kept","navigated","dialog"}`(L2 `serializeUploadResult` 가 검사한다). `kept` 거짓 = 넣을 때
+    /// 받았지만 그 뒤 페이지가 칸을 비우거나 바꿨다, 곧 옮겨 가 읽을 수 없었다(`navigated` 참 — 2 회차, 읽기가 시한 — 3 회차), 또는 넣자 대화상자가
+    /// 떠 읽을 수 없었다(`dialog` 참 — 3 회차).
+    fn successJson(self: *const Op, gpa: std.mem.Allocator, kept: bool, moved: bool, dialog: bool) ![]u8 {
         var aw: std.Io.Writer.Allocating = .init(gpa);
         defer aw.deinit();
         var s: std.json.Stringify = .{ .writer = &aw.writer, .options = .{} };
@@ -431,6 +480,8 @@ pub const Op = struct {
             s.write(kept) catch |e| break :blk e;
             s.objectField("navigated") catch |e| break :blk e;
             s.write(moved) catch |e| break :blk e;
+            s.objectField("dialog") catch |e| break :blk e;
+            s.write(dialog) catch |e| break :blk e;
             s.endObject() catch |e| break :blk e;
         }) catch return error.OutOfMemory;
         return aw.toOwnedSlice();

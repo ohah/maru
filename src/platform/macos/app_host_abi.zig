@@ -8450,14 +8450,11 @@ fn cdpAdvance(run: *CdpRun, step: web_cdp_ops.Step) void {
             // kick — 바로 뒤에 작은 스크린샷(숨은 탭의 접근성 질의·포인터 이동이 그래야 답한다, W9b②-3). 둘 다 들어갈 자리가 없으면
             // required 는 Busy, best_effort 는 주 호출만(`web_cdp_kick.Kick` — web_osr 가 그대로 받는다).
             const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = run, .done = &cdpDone };
-            // W9c③ 적대 리뷰 3 회차: 업로드의 듣는 이 떼기는 대화상자가 떠 있으면 사라진 뒤 보낸다(곧 거절되면 듣는 이가 남았다 — op 에는 그대로
-            // 「대화상자」 라 놓기로 간다. 놓기도 web_osr 가 미룬다).
-            const sent = if (next.after_dialog)
-                session_mod.web_osr.devtoolsCallAfterDialog(gpa, run.surface_id, next.method, next.params, sink)
-            else
-                session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
+            const sent = session_mod.web_osr.devtoolsCallKick(gpa, run.surface_id, next.method, next.params, sink, next.kick);
             if (sent) |call| {
                 if (run.op.uploadVerifying()) uploadBudgetVerify(run, call);
+                // W9c③ 적대 리뷰 4 회차 L1: 넣기가 실제로 나갔다 — 그 뒤 요청 시한이 오면 맨 시한이 아니라 「넣었다」(`uploadLateSuccess`).
+                run.op.uploadSent();
             } else |_| {}
             // W9a②: evaluate 가 실제로 나갔다 — 시한·철회에 terminate 를 보낼 수 있다(보내지 않은 것에 보내면 페이지의 다음 스크립트를 죽인다).
             if (sent) |_| {
@@ -8549,6 +8546,7 @@ fn finishCdp(run: *CdpRun, status: web_cdp_ops.Status, result: []const u8) void 
     run.upload_origin = null;
     uploadFreeLines(run);
     uploadForgetRun(run);
+    uploadSendCleanup(run);
     // W9a②: exec 의 끝은 넷 — 엄격 JSON 결과(inline/조각)·진단 payload(-32006)·너무 큼(-32005)·보통(실패·시한).
     const exec_delivery: web_cdp_ops.web_cdp_exec.Delivery = if (run.op.exec) |*e| e.delivery else .plain;
     const exec_max: usize = if (run.op.exec) |*e| e.max_result_bytes else 0;
@@ -8724,7 +8722,8 @@ const upload_files_refused_reason = "cannot upload these files — each must be 
 /// W9c③ 적대 리뷰 1 회차: 승인 뒤 부른 프로세스가 더는 그 pane 의 foreground 가 아니다(grant 재처리의 `recheckSelfOrigin` 과 같은 다시 보기).
 const upload_caller_gone_reason = "the program that asked is no longer in the foreground of its pane — nothing was uploaded";
 /// W9c③ 적대 리뷰 1 회차: 모달·파일 열기를 기다리는 업로드는 실행 자리(전체 8)를 사람의 답(최대 120 초)에 묶는다 — 부른 쪽(pane·cap)마다
-/// 하나, 모두 합쳐 넷까지만 받는다(나머지 넷은 다른 op 의 자리). 넘으면 `resource_busy`(다시 해도 된다).
+/// 하나, 모두 합쳐 넷까지만 받는다(나머지 넷은 다른 op 의 자리). 넘으면 `resource_busy`(다시 해도 된다). 모두 합친 넷에는 요청이 끝났는데 아직 도는
+/// 파일 작업 스레드도 든다(적대 리뷰 4 회차 N4 — `upload_orphan_workers`).
 const upload_waiting_per_caller: usize = 1;
 const upload_waiting_total: usize = 4;
 const upload_no_window_reason = "no maru window is open to ask the user — nothing was uploaded";
@@ -8847,12 +8846,22 @@ fn uploadWorker(job: *UploadJob) void {
         .prepare => uploadPrepareAll(job),
         .stage => uploadStageAll(job),
     }
-    // 메인이 이미 놓았다 — 스스로 치운다(사본도).
+    uploadWorkerExit(job);
+}
+
+/// 작업 스레드가 끝난다 — 메인이 이미 놓았으면(state 2) 스스로 치우고(사본도) 「남은 작업 스레드」 셈에서 뺀다(적대 리뷰 4 회차 N4).
+fn uploadWorkerExit(job: *UploadJob) void {
     if (job.state.cmpxchgStrong(0, 1, .acq_rel, .acquire) != null) {
         if (job.phase == .stage) job.removeOpDir();
         job.destroy();
+        _ = upload_orphan_workers.fetchSub(1, .acq_rel);
     }
 }
+
+/// W9c③ 적대 리뷰 4 회차 N4: 요청은 끝났는데(시한·철회·취소 — 메인이 놓았다) 아직 도는 파일 작업 스레드 수. 업로드 상한(`uploadWaitingFull`)에
+/// 센다 — 상한은 실행 목록만 셌으므로 요청이 끝나면 자리가 풀렸고, 죽은 망 마운트의 `open` 에 매달리거나 1 GiB 를 해시·복사하는 스레드가 상한 밖에서
+/// 끝없이 늘 수 있었다(같은 경로를 다시 부를 때마다 하나). 이제 그 스레드가 실제로 끝날 때까지 자리를 쥔다.
+var upload_orphan_workers: std.atomic.Value(usize) = .init(0);
 
 /// 작업 스레드를 띄운다(시험은 그 자리에서 — 결과가 곧 보이고 판정자보다 오래 사는 스레드가 없다).
 fn uploadSpawn(job: *UploadJob, phase: @TypeOf(@as(UploadJob, undefined).phase)) bool {
@@ -8870,9 +8879,12 @@ fn uploadSpawn(job: *UploadJob, phase: @TypeOf(@as(UploadJob, undefined).phase))
     return true;
 }
 
-/// 메인이 작업을 놓는다 — 작업 중이면 작업 스레드가 끝나며 치우고, 아니면 곧 치운다.
+/// 메인이 작업을 놓는다 — 작업 중이면 작업 스레드가 끝나며 치우고(그때까지 업로드 상한에 센다 — N4), 아니면 곧 치운다. 셈은 놓기 **전에** 올린다:
+/// 놓자마자 스레드가 끝나 빼면 0 밑으로 내려가지 않게.
 fn uploadRelease(job: *UploadJob) void {
+    _ = upload_orphan_workers.fetchAdd(1, .acq_rel);
     if (job.state.cmpxchgStrong(0, 2, .acq_rel, .acquire) == null) return;
+    _ = upload_orphan_workers.fetchSub(1, .acq_rel);
     job.destroy();
 }
 
@@ -9034,7 +9046,34 @@ fn uploadBudgetVerify(run: *CdpRun, call: u32) void {
     _ = control_server_storage.updateInFlightDeadline(run.async_id, now_ns + uploadVerifyDeadlineNs());
 }
 
-/// 읽기를 보낸 때부터 요청 시한까지 — 읽기의 시한(10 초)에 놓기와 tick 의 틈을 더한다.
+/// W9c③ 적대 리뷰 4 회차 L1: 요청 시한이 왔다 — 그 요청이 넣기를 이미 보낸 업로드면(넣기나 읽기가 아직 답하지 않았다 — 답이 정해졌으면 곧 답했다)
+/// 맨 `-32004` 가 아니라 「넣었다」(성공에 `kept:false`·`navigated:true`)로 답한다. 실측(CEF 154): change 처리기가 30 초 넘게 동기로 돌면 넣기 자체가
+/// 붙잡히고(처리기는 파일을 받았다), 맨 시한을 받은 에이전트는 다시 올려 모달이 또 뜨고 두 번 올라갔다. 실행 자리는 시한과 같이 tombstone 으로 남기고
+/// (`abandon` — run 이 끝날 때 거둔다), run 은 남은 호출(넣기의 답·읽기)을 마저 한다 — 그 뒤의 답은 이미 끝난 요청이라 버려진다.
+fn uploadLateSuccess(server: *control_server_mod.ControlServer, async_id: u64) bool {
+    const run = for (cdp_runs.items) |r| {
+        if (r.async_id == async_id) break r;
+    } else return false;
+    const result = (run.op.uploadLateSuccess(allocator) catch return false) orelse return false;
+    defer allocator.free(result);
+    const pending = server.inFlightPending(async_id) orelse return false;
+    const resp = control_browser.serializeBrowserResponseStatus(server.cross_gpa, pending.request_bytes, .success, result) catch return false;
+    _ = server.completeInFlight(async_id, resp);
+    active_browser_executions.abandon(async_id);
+    return true;
+}
+
+/// W9c③ 적대 리뷰 4 회차 L1: 끝난 업로드가 남긴 정리(듣는 이 떼기·묶음 놓기)를 그 탭의 미룬 줄로 보낸다 — 요청과 묶지 않는다(답은 이 run 이 곧
+/// 낸다). 놓기를 기다리면 바쁜 페이지가 정해진 성공을 맨 시한으로 바꿨다(실측: 읽기가 「ok」 로 답한 뒤 놓기가 15 초 넘게 붙잡혔다).
+fn uploadSendCleanup(run: *CdpRun) void {
+    const gpa = session_mod.web_osr.gpaRef();
+    while (run.op.takeUploadCleanup(allocator) catch null) |step| {
+        defer allocator.free(step.call.params);
+        if (gpa) |g| session_mod.web_osr.devtoolsCleanup(g, run.surface_id, step.call.method, step.call.params);
+    }
+}
+
+/// 읽기를 보낸 때부터 요청 시한까지 — 읽기의 시한(10 초)에 tick 의 틈을 더한다.
 const upload_verify_slack_ns: i128 = 5 * std.time.ns_per_s;
 fn uploadVerifyDeadlineNs() i128 {
     return @as(i128, web_cdp_ops.web_cdp_upload.verify_wait_ms) * std.time.ns_per_ms + upload_verify_slack_ns;
@@ -9151,7 +9190,8 @@ fn pollUploadRun(refs: []const ControlSessionRef, run: *CdpRun) void {
 /// W9c③ 적대 리뷰 1 회차: 이 업로드를 받으면 모달·파일 열기를 기다리는 업로드가 너무 많아지는가 — 부른 쪽(같은 pane 의 grant·같은 cap)마다
 /// `upload_waiting_per_caller`, 모두 합쳐 `upload_waiting_total`. 실행 자리(8)가 사람의 답(최대 120 초)에 다 묶이면 다른 에이전트의 click 까지 막혔다.
 fn uploadWaitingFull(provenance: ExecutionProvenance) bool {
-    var total: usize = 0;
+    // 끝난 요청의 아직 도는 작업 스레드도 센다(적대 리뷰 4 회차 N4) — 부른 쪽은 이미 떠났으므로 전체에만.
+    var total: usize = upload_orphan_workers.load(.acquire);
     var same: usize = 0;
     for (active_browser_executions.items.items) |e| {
         if (e.method != .upload or e.phase == .abandoned) continue;
@@ -9248,6 +9288,8 @@ fn expireActiveBrowserExecutions(server: *control_server_mod.ControlServer, now_
     const expired = server.expiredInFlightIds(now_ns, &expired_ids);
     for (expired_ids[0..expired]) |id| {
         if (active_browser_executions.get(id) == null) continue;
+        // W9c③ 적대 리뷰 4 회차 L1: 넣기를 이미 보낸 업로드 — 맨 시한이 아니라 「넣었다」 로 답한다(그 run 은 남은 호출을 마저 한다).
+        if (uploadLateSuccess(server, id)) continue;
         // queued timeout도 close/revoke와 같은 공통 취소 경로를 써서 client terminal뿐 아니라 물리 queue entry와 arg를
         // 같은 tick에 회수한다. running/transfer는 기존대로 backend terminal까지 tombstone/예약을 유지한다.
         cancelActiveBrowserExecution(server, id, .timeout);
@@ -14998,4 +15040,363 @@ test "W9c③ 적대 리뷰 3 회차 재현 T1a: 읽기를 보내면 요청 시�
     defer ta.free(msg);
     try std.testing.expectEqualStrings("-32002 " ++ upload_declined_reason, msg);
     try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+}
+
+// ── W9c③ 적대 리뷰 4 회차 ──
+// 3 회차 변이 생존 T1c: `cdpAdvance` 의 `uploadBudgetVerify` 호출을 지워도 어느 시험도 실패하지 않았다 — 엔진이 있는 앱 시험이 넣은 뒤 읽기를 실제로
+// 보낸 적이 없다(T1a 는 `uploadBudgetVerify` 를 직접 불렀다). 실측 CEF 154(review_w9c3_r4/probe busyv·busyv_gap): change 처리기가
+// `setTimeout(바쁜 15 초, 0)` 을 걸면 넣기는 `{}` 로 곧 끝나고 곧 보낸 읽기는 15 초 붙잡힌다(이동 없음). 고친 길에서는 읽기의 DevTools 시한이 10 초,
+// 요청 시한이 그 뒤 15 초로 다시 잡혀 op 이 「넣었다」(navigated:true)로 답한다 — 이 시험은 그 길을 `cdpAdvance` 로(web_osr 의 실제 자리·시한으로) 본다.
+// 자리가 차(Busy) 잠깐 뒤 다시 보낸 읽기도 같은 시한을 받는다.
+fn r4UploadAtVerify(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64) !struct { run: *CdpRun, verify: web_cdp_ops.Step } {
+    pending.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = tab, .method = .upload, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = tab, .scope = .browser } } });
+    _ = active_browser_executions.markRunning(id);
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/x/a.txt\"]}", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    var step = try run.op.start(allocator);
+    while (step == .call) {
+        const cl = step.call;
+        defer allocator.free(cl.params);
+        step = try run.op.feed(allocator, w9c3Answer(cl.method, cl.params));
+    }
+    try std.testing.expect(step == .confirm);
+    allocator.free(step.confirm.origin);
+    const staged = [_]web_cdp_ops.web_cdp_upload.Staged{.{ .path = "/staging/70/1/0/a.txt", .name = "a.txt", .size = 3 }};
+    step = try run.op.resumeUpload(allocator, &staged);
+    // 승인 뒤 차례를 넣기의 `{}` 까지 흉내 답으로 — 다음 호출이 읽기다. 넣기는 `cdpAdvance` 처럼 「보냈다」 고 적는다.
+    while (step == .call and !run.op.uploadVerifying()) {
+        const cl = step.call;
+        defer allocator.free(cl.params);
+        run.op.uploadSent();
+        step = try run.op.feed(allocator, w9c3Answer(cl.method, cl.params));
+    }
+    try std.testing.expect(step == .call and run.op.uploadVerifying());
+    try std.testing.expectEqualStrings("Runtime.callFunctionOn", step.call.method);
+    return .{ .run = run, .verify = step };
+}
+
+fn r4InFlightDeadline(async_id: u64) ?i128 {
+    for (control_server_storage.in_flight.items) |e| if (e.id == async_id) return e.deadline_ns;
+    return null;
+}
+
+test "W9c③ 적대 리뷰 4 회차 재현 V1: cdpAdvance 가 넣은 뒤 읽기를 보내면 그 호출의 DevTools 시한은 10 초·요청 시한은 15 초로 — 붙잡힌 읽기는 10 초에 navigated 성공(놓기 없음)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const tab: u64 = 70;
+    try session_mod.web_osr.testHold(ta, tab);
+    defer {
+        session_mod.web_osr.destroy(ta, tab);
+        session_mod.web_osr.testDevtoolsReset(ta);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(tab);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = tab, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"browser.upload\",\"params\":{\"id\":70,\"selector\":\"#f\",\"files\":[\"/x/a.txt\"]}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const at = try r4UploadAtVerify(&p, req, tab);
+    const run = at.run;
+    const before_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    cdpAdvance(run, at.verify); // 실제 web_osr 로 보낸다(sidecar 없음 — 보낸 바이트는 버려진다)
+    const after_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const waiting = session_mod.web_osr.testDevtoolsWaiting(tab) orelse return error.VerifyNotSent;
+    if (waiting.left_ms > web_cdp_ops.web_cdp_upload.verify_wait_ms) {
+        std.debug.print("V1: the verify's DevTools deadline is {d} ms away (want <= {d}) — cdpAdvance did not shorten it\n", .{ waiting.left_ms, web_cdp_ops.web_cdp_upload.verify_wait_ms });
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(waiting.left_ms > web_cdp_ops.web_cdp_upload.verify_wait_ms - 2_000);
+    const deadline = r4InFlightDeadline(run.async_id) orelse return error.TestUnexpectedResult;
+    if (deadline > after_ns + uploadVerifyDeadlineNs()) {
+        std.debug.print("V1: the request deadline was not moved behind the verify (still {d} s away)\n", .{@divTrunc(deadline - after_ns, std.time.ns_per_s)});
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expect(deadline >= before_ns + uploadVerifyDeadlineNs());
+    // 9 초 — 아직 기다린다.
+    session_mod.web_osr.testExpireDevtoolsAfter(ta, web_cdp_ops.web_cdp_upload.verify_wait_ms - 1_000);
+    session_mod.web_osr.pump(ta, 0);
+    try std.testing.expect(p.response == null);
+    try std.testing.expectEqual(@as(usize, 1), cdp_runs.items.len);
+    // 10 초가 지났다 — 읽기의 시한: op 이 「넣었다」(navigated:true)로 곧 끝낸다(떼기·놓기는 보내지 않는다 — 붙잡힌다).
+    session_mod.web_osr.testExpireDevtoolsAfter(ta, web_cdp_ops.web_cdp_upload.verify_wait_ms + 500);
+    session_mod.web_osr.pump(ta, 0);
+    {
+        const r = try w9b3Result(&p);
+        defer r.deinit();
+        const res = r.value.object.get("result").?.object;
+        try std.testing.expect(res.get("navigated").?.bool);
+        try std.testing.expect(!res.get("kept").?.bool);
+        try std.testing.expect(!res.get("dialog").?.bool);
+    }
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    try std.testing.expect(session_mod.web_osr.testDevtoolsWaiting(tab) == null); // 놓기를 보내지 않았다
+    try std.testing.expectEqual(@as(usize, 1), session_mod.web_osr.testDevtoolsSlots(tab)); // 버린 읽기 자리만(sidecar 의 답까지)
+    session_mod.web_osr.testDevtoolsAnswer(ta, tab, waiting.call, .expired);
+    try std.testing.expectEqual(@as(usize, 0), session_mod.web_osr.testDevtoolsSlots(tab));
+}
+
+var r4_dummy_ctx: u8 = 0;
+fn r4DummyDone(_: *anyopaque, _: u32, _: session_mod.web_osr.DevtoolsOutcome, _: []const u8) void {}
+
+test "W9c③ 적대 리뷰 4 회차 재현 V2: 자리가 차 잠깐 뒤 다시 보낸 넣은 뒤 읽기도 DevTools 시한 10 초·요청 시한 15 초를 받는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const tab: u64 = 71;
+    try session_mod.web_osr.testHold(ta, tab);
+    defer {
+        session_mod.web_osr.destroy(ta, tab);
+        session_mod.web_osr.testDevtoolsReset(ta);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(tab);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = tab, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"browser.upload\",\"params\":{\"id\":71,\"selector\":\"#f\",\"files\":[\"/x/a.txt\"]}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const at = try r4UploadAtVerify(&p, req, tab);
+    const run = at.run;
+    // 그 탭의 자리 둘을 다른 호출이 쥐었다 — 읽기는 Busy 로 못 가고 잠든다.
+    const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = &r4_dummy_ctx, .done = &r4DummyDone };
+    const d1 = try session_mod.web_osr.devtoolsCall(ta, tab, "Runtime.evaluate", "{}", sink);
+    const d2 = try session_mod.web_osr.devtoolsCall(ta, tab, "Runtime.evaluate", "{}", sink);
+    cdpAdvance(run, at.verify);
+    try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len);
+    try std.testing.expectEqual(@as(?i128, std.math.maxInt(i128)), r4InFlightDeadline(run.async_id)); // 아직 보내지 않았다
+    session_mod.web_osr.testDevtoolsAnswer(ta, tab, d1, .ok);
+    session_mod.web_osr.testDevtoolsAnswer(ta, tab, d2, .ok);
+    session_mod.web_osr.pump(ta, 0);
+    w9aWakeNow(); // 다시 보낸다
+    const after_ns = std.Io.Clock.awake.now(appHostIo()).nanoseconds;
+    const waiting = session_mod.web_osr.testDevtoolsWaiting(tab) orelse return error.VerifyNotResent;
+    try std.testing.expect(waiting.left_ms <= web_cdp_ops.web_cdp_upload.verify_wait_ms);
+    try std.testing.expect((r4InFlightDeadline(run.async_id) orelse return error.TestUnexpectedResult) <= after_ns + uploadVerifyDeadlineNs());
+    // 정리 — 읽기가 곧 답한다(ok) → 놓기 → 끝.
+    session_mod.web_osr.testDevtoolsAnswer(ta, tab, waiting.call, .expired);
+    session_mod.web_osr.pump(ta, 0);
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    {
+        const r = try w9b3Result(&p);
+        r.deinit();
+    }
+}
+
+// 4 회차 L1: 읽기가 「ok」 로 답해 성공이 정해진 뒤에도 요청은 놓기(`Runtime.releaseObjectGroup`)의 답을 기다렸다. 놓기도 페이지의 주 스레드에서
+// 돌아 페이지가 그 순간 바쁘면 붙잡힌다(실측 probe bb: 처리기의 둘째 바쁜 타이머 — 읽기는 9.5 초에 답하고 놓기는 15 초 넘게 답이 없다). 요청 시한은
+// 3 회차부터 읽기를 보낸 때 + 15 초라, 놓기가 그 안에 오지 않으면 정해진 성공 대신 맨 -32004(시한)가 갔다 — 에이전트는 다시 올리고 모달이 또 뜬다.
+// 고친 길: 답이 정해지면 곧 답하고, 놓기는 그 탭의 미룬 줄(web_osr `devtoolsCleanup`)로 — 요청·run 과 묶이지 않고, 자리는 sidecar 가 답할 때까지 센다.
+test "W9c③ 적대 리뷰 4 회차 재현 L1: 읽기가 ok 로 성공을 정한 뒤 놓기가 붙잡혀 요청 시한이 오면 맨 시한(-32004)이 아니라 그 성공이어야 한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const tab: u64 = 72;
+    try session_mod.web_osr.testHold(ta, tab);
+    defer {
+        session_mod.web_osr.destroy(ta, tab);
+        session_mod.web_osr.testDevtoolsReset(ta);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(tab);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = tab, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    const req = "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"browser.upload\",\"params\":{\"id\":72,\"selector\":\"#f\",\"files\":[\"/x/a.txt\"]}}";
+    var p: control_server_mod.PendingRequest = undefined;
+    const at = try r4UploadAtVerify(&p, req, tab);
+    const run = at.run;
+    const async_id = run.async_id;
+    cdpAdvance(run, at.verify);
+    const verify = session_mod.web_osr.testDevtoolsWaiting(tab) orelse return error.VerifyNotSent;
+    // 읽기가 답했다 — 넣을 때 받았고 지금도 쥐고 있다(ok): 성공이 정해졌다. 놓기를 기다리지 않고 곧 답한다.
+    session_mod.web_osr.testDevtoolsAnswerOk(ta, tab, verify.call, "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}");
+    session_mod.web_osr.pump(ta, 0);
+    {
+        const response = p.response orelse {
+            std.debug.print("L1: the verify settled success (kept) but the request is still waiting for the release\n", .{});
+            return error.TestUnexpectedResult;
+        };
+        if (std.mem.indexOf(u8, response, "\"error\"") != null) {
+            std.debug.print("L1: the verify had settled success (kept), but the request answered: {s}\n", .{response});
+            return error.TestUnexpectedResult;
+        }
+        const r = try w9b3Result(&p);
+        defer r.deinit();
+        const res = r.value.object.get("result").?.object;
+        try std.testing.expect(res.get("kept").?.bool);
+        try std.testing.expect(!res.get("navigated").?.bool);
+        try std.testing.expect(!res.get("dialog").?.bool);
+    }
+    try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len); // run 은 끝났다 — 그 탭의 다음 op 이 곧 시작한다
+    try std.testing.expect(active_browser_executions.get(async_id) == null);
+    // 놓기는 그 탭의 미룬 줄에 섰다(읽기가 듣는 이를 뗐다 — 떼기는 없다). 다음 tick 에 나가고 답은 버린다.
+    try std.testing.expectEqual(@as(usize, 1), session_mod.web_osr.testDeferredCalls(tab));
+    try std.testing.expectEqual(@as(usize, 0), session_mod.web_osr.testDevtoolsSlots(tab));
+    session_mod.web_osr.testFlushDeferredCalls(ta);
+    try std.testing.expectEqual(@as(usize, 0), session_mod.web_osr.testDeferredCalls(tab));
+    const release = session_mod.web_osr.testDevtoolsWaiting(tab) orelse return error.ReleaseNotSent;
+    try std.testing.expect(release.call != verify.call);
+    try std.testing.expectEqual(@as(usize, 1), session_mod.web_osr.testDevtoolsSlots(tab)); // 자리는 sidecar 가 답할 때까지 센다
+    // 페이지가 바빠 놓기가 답하지 않는다 — 옛 요청 시한이 와도 아무 일도 없다(이미 답했다).
+    expireActiveBrowserExecutions(&control_server_storage, std.math.maxInt(i128) - 1);
+    session_mod.web_osr.testExpireDevtoolsAfter(ta, session_mod.web_osr.devtools_timeout_ms + 1);
+    session_mod.web_osr.pump(ta, 0);
+    try std.testing.expectEqual(@as(usize, 1), session_mod.web_osr.testDevtoolsSlots(tab)); // 버린 자리 — sidecar 의 답까지
+    session_mod.web_osr.testDevtoolsAnswer(ta, tab, release.call, .expired);
+    try std.testing.expectEqual(@as(usize, 0), session_mod.web_osr.testDevtoolsSlots(tab));
+}
+
+/// 업로드 하나를 승인 뒤 넣기 직전까지 몬다(넣기 Step 을 돌려준다 — 부른 쪽이 `cdpAdvance` 로 보낸다).
+fn r4UploadAtSet(pending: *control_server_mod.PendingRequest, request: []const u8, tab: u64) !struct { run: *CdpRun, set: web_cdp_ops.Step } {
+    pending.* = .{ .request_bytes = request, .selector = null, .io = std.testing.io };
+    const id = try control_server_storage.deferRequest(pending, std.math.maxInt(i128));
+    try active_browser_executions.admit(allocator, .{ .async_id = id, .surface_id = tab, .method = .upload, .reserved_bytes = 0, .provenance = .{ .pane_grant = .{ .pane = 5, .target = tab, .scope = .browser } } });
+    _ = active_browser_executions.markRunning(id);
+    const run = try allocator.create(CdpRun);
+    run.* = .{ .async_id = id, .surface_id = tab, .op = try web_cdp_ops.Op.init(allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/x/a.txt\"]}", id), .started = true };
+    try cdp_runs.append(allocator, run);
+    var step = try run.op.start(allocator);
+    while (step == .call) {
+        const cl = step.call;
+        defer allocator.free(cl.params);
+        step = try run.op.feed(allocator, w9c3Answer(cl.method, cl.params));
+    }
+    try std.testing.expect(step == .confirm);
+    allocator.free(step.confirm.origin);
+    const staged = [_]web_cdp_ops.web_cdp_upload.Staged{.{ .path = "/staging/73/1/0/a.txt", .name = "a.txt", .size = 3 }};
+    step = try run.op.resumeUpload(allocator, &staged);
+    while (step == .call and !run.op.uploadSetting()) {
+        const cl = step.call;
+        defer allocator.free(cl.params);
+        step = try run.op.feed(allocator, w9c3Answer(cl.method, cl.params));
+    }
+    try std.testing.expect(step == .call and run.op.uploadSetting());
+    try std.testing.expectEqualStrings("DOM.setFileInputFiles", step.call.method);
+    return .{ .run = run, .set = step };
+}
+
+// 4 회차 L1(같은 갈래, 더 오래된 것): change 처리기가 30 초 넘게 동기로 돌면 넣기 자체가 붙잡힌다(실측 probe busyset — 처리기는 파일을 받았다).
+// 요청 시한(승인 뒤 30 초)이 먼저 와 맨 -32004 였다. 넣기를 **보낸 뒤**의 요청 시한은 「넣었다」(navigated:true)이고, 보내지 못한 넣기(자리 없음으로
+// 잠들었다)의 시한은 그대로 맨 시한이다(아무것도 안 갔다).
+test "W9c③ 적대 리뷰 4 회차 재현 L1b: 보낸 넣기가 붙잡혀 요청 시한이 오면 「넣었다」(navigated:true) — 보내지 못한 넣기는 맨 시한" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    const tab: u64 = 73;
+    try session_mod.web_osr.testHold(ta, tab);
+    defer {
+        session_mod.web_osr.destroy(ta, tab);
+        session_mod.web_osr.testDevtoolsReset(ta);
+        session_mod.web_osr.testForget(ta);
+    }
+    session_mod.web_osr.testRunning(tab);
+    const saved_gpa = session_mod.web_osr.setGpaRefForTest(ta);
+    defer _ = session_mod.web_osr.setGpaRefForTest(saved_gpa);
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = tab, .scope = .browser });
+    defer control_pane_grant_store.clearAll();
+    // ① 보낸 넣기가 붙잡혔다.
+    {
+        const req = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"browser.upload\",\"params\":{\"id\":73,\"selector\":\"#f\",\"files\":[\"/x/a.txt\"]}}";
+        var p: control_server_mod.PendingRequest = undefined;
+        const at = try r4UploadAtSet(&p, req, tab);
+        const run = at.run;
+        const async_id = run.async_id;
+        cdpAdvance(run, at.set);
+        const set = session_mod.web_osr.testDevtoolsWaiting(tab) orelse return error.SetNotSent;
+        try std.testing.expect(control_server_storage.updateInFlightDeadline(async_id, 1)); // 요청 시한(승인 뒤 30 초)이 왔다
+        expireActiveBrowserExecutions(&control_server_storage, 2);
+        {
+            const response = p.response orelse return error.ExpectedResponse;
+            if (std.mem.indexOf(u8, response, "\"error\"") != null) {
+                std.debug.print("L1b: the set was sent and is held by the page, but the request deadline answered: {s}\n", .{response});
+                return error.TestUnexpectedResult;
+            }
+            const r = try w9b3Result(&p);
+            defer r.deinit();
+            const res = r.value.object.get("result").?.object;
+            try std.testing.expect(res.get("navigated").?.bool);
+            try std.testing.expect(!res.get("kept").?.bool);
+            try std.testing.expect(!res.get("dialog").?.bool);
+        }
+        // run 은 남아 넣기의 답을 기다린다(실행 자리는 tombstone). 넣기가 끝내 `{}` 로 답하면 읽기를 보내고, 그 답으로 끝난다 — 둘째 답은 없다.
+        try std.testing.expectEqual(@as(usize, 1), cdp_runs.items.len);
+        session_mod.web_osr.testDevtoolsAnswerOk(ta, tab, set.call, "{}");
+        session_mod.web_osr.pump(ta, 0);
+        const verify = session_mod.web_osr.testDevtoolsWaiting(tab) orelse return error.VerifyNotSent;
+        session_mod.web_osr.testDevtoolsAnswerOk(ta, tab, verify.call, "{\"result\":{\"type\":\"string\",\"value\":\"ok\"}}");
+        session_mod.web_osr.pump(ta, 0);
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+        try std.testing.expect(active_browser_executions.get(async_id) == null);
+        try std.testing.expect(p.response == null); // w9b3Result 가 가져갔다 — 다시 채워지지 않았다
+        session_mod.web_osr.testDevtoolsReset(ta);
+    }
+    // ② 자리가 다 차 넣기를 보내지 못하고 잠들었다 — 그 사이 요청 시한은 맨 시한이다(아무것도 안 갔다).
+    {
+        const req = "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"browser.upload\",\"params\":{\"id\":73,\"selector\":\"#f\",\"files\":[\"/x/a.txt\"]}}";
+        var p: control_server_mod.PendingRequest = undefined;
+        const at = try r4UploadAtSet(&p, req, tab);
+        const run = at.run;
+        const sink: session_mod.web_osr.DevtoolsSink = .{ .ctx = &r4_dummy_ctx, .done = &r4DummyDone };
+        _ = try session_mod.web_osr.devtoolsCall(ta, tab, "Runtime.evaluate", "{}", sink);
+        _ = try session_mod.web_osr.devtoolsCall(ta, tab, "Runtime.evaluate", "{}", sink);
+        cdpAdvance(run, at.set);
+        try std.testing.expectEqual(@as(usize, 1), cdp_sleepers.items.len);
+        try std.testing.expect(control_server_storage.updateInFlightDeadline(run.async_id, 1));
+        expireActiveBrowserExecutions(&control_server_storage, 2);
+        const response = p.response orelse return error.ExpectedResponse;
+        defer allocator.free(response);
+        p.response = null;
+        try std.testing.expect(std.mem.indexOf(u8, response, "\"code\":-32004") != null);
+        // 깨어나면 철회된 것을 보고 넣지 않고 끝낸다(넣기는 committed 가 아니다).
+        session_mod.web_osr.testDevtoolsReset(ta);
+        w9aWakeNow();
+        try std.testing.expectEqual(@as(usize, 0), cdp_runs.items.len);
+    }
+}
+
+test "W9c③ 적대 리뷰 4 회차 재현 N4: 요청이 끝났는데 아직 도는 파일 작업 스레드는 업로드 상한(넷)에 센다 — 스레드가 끝나면 푼다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    try std.testing.expectEqual(@as(usize, 0), upload_orphan_workers.load(.acquire));
+    const who: ExecutionProvenance = .{ .pane_grant = .{ .pane = 9, .target = 80, .scope = .browser } };
+    try std.testing.expect(!uploadWaitingFull(who));
+    // 요청 넷이 끝났는데(시한·철회) 그 작업 스레드는 아직 돈다(죽은 망 마운트의 `open` 에 매달렸다 — state 0). 메인이 놓는다.
+    var jobs: [4]*UploadJob = undefined;
+    for (&jobs, 0..) |*j, i| {
+        j.* = try UploadJob.fromArg("{\"files\":[\"/x/a.txt\"]}", 80, i + 1);
+        j.*.state.store(0, .release);
+        uploadRelease(j.*);
+    }
+    if (!uploadWaitingFull(who)) {
+        std.debug.print("N4: four detached workers are still running, yet a new upload was admitted\n", .{});
+        for (jobs) |j| uploadWorkerExit(j);
+        return error.TestUnexpectedResult;
+    }
+    uploadWorkerExit(jobs[0]); // 한 스레드가 끝났다 — 스스로 치우고 자리를 놓는다
+    try std.testing.expect(!uploadWaitingFull(who));
+    for (jobs[1..]) |j| uploadWorkerExit(j);
+    try std.testing.expectEqual(@as(usize, 0), upload_orphan_workers.load(.acquire));
+    // 작업 스레드가 이미 끝난 작업을 놓으면 셈은 그대로다(메인이 곧 치운다).
+    const done_job = try UploadJob.fromArg("{\"files\":[\"/x/a.txt\"]}", 80, 9);
+    uploadRelease(done_job);
+    try std.testing.expectEqual(@as(usize, 0), upload_orphan_workers.load(.acquire));
 }

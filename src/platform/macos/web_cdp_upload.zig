@@ -31,11 +31,18 @@
 //!   (CLI·MCP 는 「대화상자에 답하고 페이지를 보라, 다시 올리지 마라」). 이미 떠 있어 넣기를 **보내지 못한** 것은 그대로 실패다(아무것도 안 갔다).
 //! - **넣은 뒤 답하지 않는 읽기**(적대 리뷰 3 회차): change 처리기가 응답이 아주 늦은 주소로 옮기면 읽기는 확정까지 붙잡힌다(실측 35 초). 읽기는
 //!   `verify_wait_ms` 만 기다리고(앱이 그 호출의 시한을 줄이고 요청 시한을 그 뒤로 미룬다), 넘으면 성공에 `kept:false`·`navigated:true` 다 — 넣기는
-//!   `{}` 로 끝났다(처리기는 파일을 받았다). 놓기는 보내지 않는다(그 호출도 붙잡혀 요청 시한을 넘긴다 — 묶음은 문서와 함께 사라진다).
-//! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다(위의 읽기 시한만 빼고). 승인 뒤 확인이 단 듣는 이는 읽기가 떼고,
-//!   읽기를 못 한 끝(철회·넣기 오류·읽기를 못 보냄·대화상자)은 놓기 앞에서 뗀다(적대 리뷰 2 회차 — 문서가 죽을 때까지 격리 world 에 남았다). 대화상자가
-//!   떠 있으면 떼기·놓기는 그것이 사라진 뒤로 미룬다(`after_dialog` — 3 회차). 페이지가 답하지 않는 끝(시한)·탭이 사라진 끝은 떼지 않는다(그 호출도
-//!   30 초를 붙잡힌다).
+//!   `{}` 로 끝났다(처리기는 파일을 받았다). 이동이 없어도 페이지가 바쁘면 같다(4 회차 실측: change 처리기의 15 초 바쁜 타이머). 놓기는 보내지 않는다
+//!   (그 호출도 붙잡혀 그 탭의 DevTools 자리를 쥔다 — 묶음은 문서와 함께 사라진다).
+//! - 원격 객체는 요청마다 다른 묶음(`maru-w9b-<id>`)이고 끝나는 모든 길에서 놓는다(위의 읽기 시한·아래의 넣기 시한만 빼고). 승인 뒤 확인이 단 듣는
+//!   이는 읽기가 떼고, 읽기를 못 한 끝(철회·넣기 오류·읽기를 못 보냄·대화상자)은 놓기 앞에서 뗀다(적대 리뷰 2 회차 — 문서가 죽을 때까지 격리 world 에
+//!   남았다). 페이지가 답하지 않는 끝(시한)·탭이 사라진 끝은 떼지 않는다(그 호출도 30 초를 붙잡힌다).
+//! - **답이 정해지면 곧 답한다**(적대 리뷰 4 회차 L1): 떼기·놓기는 답을 낸 **뒤**의 정리다 — 차례는 곧 `done` 을 내고 정리는 `takeCleanup` 으로
+//!   넘겨, 앱이 요청과 묶지 않고 그 탭의 미룬 줄(web_osr `devtoolsCleanup` — 대화상자·확정되지 않은 이동이 없고 자리가 날 때, 탭마다 하나씩)로 보낸다.
+//!   놓기도 페이지의 주 스레드에서 돈다 — 읽기가 「ok」 로 답한 뒤 페이지가 바쁘면 놓기가 붙잡혀(실측 CEF 154: 15 초 넘게) 요청 시한이 정해진 성공 대신
+//!   맨 `-32004` 를 냈고, 에이전트는 다시 올렸다.
+//! - **넣기를 보낸 뒤 답하지 않는 페이지**(적대 리뷰 4 회차 L1): change 처리기가 30 초 넘게 동기로 돌면 넣기 자체가 붙잡힌다(실측 — 처리기는 파일을
+//!   받았다). 넣기를 **보낸 뒤**(`set_sent`)의 시한 — 넣기의 DevTools 시한이든 요청 시한(앱이 `lateSuccessJson` 으로 답한다)이든 — 은 읽기 시한과 같은
+//!   성공에 `kept:false`·`navigated:true` 다. 보내지 못한 넣기는 그대로 실패다.
 //! - 남는 틈(문서로 받아들인 것): 확인과 넣기 사이에 페이지가 같은 문서 안에서 노드를 바꾸면 파일은 떨어진 노드로 간다 — 같은 출처(사용자가
 //!   승인한 그 문서)이고, 확인이 「removed」 로 실패를 알린다.
 
@@ -108,7 +115,7 @@ const verify_js =
     "if(s&&s.seen.length){for(var j=0;j<s.seen.length;j++)if(same(s.seen[j]))return 'dropped';return 'mismatch'}" ++
     "return now===null?'removed':'unseen'}";
 
-const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify, disarm, release };
+const Stage = enum { tree, world, resolve, check, release_pre, tree_again, set, verify };
 
 pub const Phase = enum { pre, post };
 
@@ -131,8 +138,10 @@ pub const Op = struct {
     context: i64 = 0,
     object: ?[]u8 = null,
     staged: std.ArrayList(OwnedStaged) = .empty,
-    /// 놓은 뒤에 낼 답(소유).
-    then: ?struct { status: Status, result: []u8 } = null,
+    /// 답을 낸 뒤 보낼 정리(적대 리뷰 4 회차 L1) — 앱이 `takeCleanup` 으로 꺼내 요청과 묶지 않고 보낸다(떼기가 먼저).
+    cleanup: struct { disarm: bool = false, release: bool = false } = .{},
+    /// 넣기(`setFileInputFiles`)를 실제로 보냈다(앱이 보낸 직후 적는다 — `markSetSent`). 그 뒤의 시한은 「넣었다」 다(4 회차 L1).
+    set_sent: bool = false,
     /// `setFileInputFiles` 를 보냈고 그 답이 「안 했다」(오류·못 보냄)가 아니었다 — 사본이 페이지에 갔을 수 있다(앱이 실패여도 사본을 남긴다).
     given: bool = false,
     /// 승인 뒤 확인이 그 칸에 듣는 이를 달았고 아직 떼지 않았다 — 읽기를 못 하고 끝나면 놓기 앞에서 뗀다(`disarm_js`).
@@ -149,7 +158,6 @@ pub const Op = struct {
         if (self.object) |s| gpa.free(s);
         self.freeStaged(gpa);
         self.staged.deinit(gpa);
-        if (self.then) |t| gpa.free(t.result);
         self.* = undefined;
     }
 
@@ -177,13 +185,40 @@ pub const Op = struct {
         self.object = null;
     }
 
-    /// 철회돼도 보낼 호출인가 — `stage` 는 **곧 보낼** 호출이다. 넣기를 보낸 뒤의 확인(`verify`)과 놓기는 끝까지 보낸다. 넣기(`set`) 자체는
-    /// 아니다 — 승인 뒤라도 그 사이 철회·탭 닫힘·시한이면 넣지 않는다(`cancel` 이 놓고 끝낸다).
+    /// 철회돼도 보낼 호출인가 — `stage` 는 **곧 보낼** 호출이다. 넣기를 보낸 뒤의 확인(`verify`)과 모달 앞의 놓기는 끝까지 보낸다. 넣기(`set`)
+    /// 자체는 아니다 — 승인 뒤라도 그 사이 철회·탭 닫힘·시한이면 넣지 않는다(`cancel` 이 놓고 끝낸다). 답을 낸 뒤의 떼기·놓기는 차례 밖이다(`takeCleanup`).
     pub fn committed(self: *const Op) bool {
         return switch (self.stage) {
-            .release_pre, .verify, .disarm, .release => true,
+            .release_pre, .verify => true,
             else => false,
         };
+    }
+
+    /// 앱이 넣기를 실제로 보냈다(DevTools 가 받았다 — 자리가 없어 못 보낸 것은 아니다).
+    pub fn markSetSent(self: *Op) void {
+        if (self.stage == .set) self.set_sent = true;
+    }
+
+    /// 요청 시한이 왔을 때 낼 업로드의 답(적대 리뷰 4 회차 L1) — 넣기를 보냈으면 성공에 `kept:false`·`navigated:true`(소유), 아니면 null(맨 시한).
+    /// 넣기를 보낸 뒤 답이 정해지면 차례가 곧 답하므로(위) 이것이 불리는 때는 넣기나 읽기가 아직 답하지 않은 때뿐이다.
+    pub fn lateSuccessJson(self: *const Op, gpa: std.mem.Allocator) !?[]u8 {
+        if (!self.set_sent) return null;
+        return try self.successJson(gpa, false, true, false);
+    }
+
+    /// 답을 낸 뒤 보낼 정리 호출을 하나씩 꺼낸다(떼기 → 놓기 — `params` 소유). 없으면 null. 앱이 그 탭의 미룬 줄로 보낸다(답은 버린다).
+    pub fn takeCleanup(self: *Op, gpa: std.mem.Allocator) !?Step {
+        if (self.cleanup.disarm) {
+            self.cleanup.disarm = false;
+            var key_buf: [snapshot_key.len + 20]u8 = undefined;
+            const key = std.fmt.bufPrint(&key_buf, snapshot_key ++ "{d}", .{self.id}) catch unreachable;
+            return try call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{f}}}]}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(disarm_js, .{}), std.json.fmt(key, .{}) });
+        }
+        if (self.cleanup.release) {
+            self.cleanup.release = false;
+            return try call(gpa, "Runtime.releaseObjectGroup", "{{\"objectGroup\":\"maru-w9b-{d}\"}}", .{self.id});
+        }
+        return null;
     }
 
     /// `setFileInputFiles` 를 보내기 직전인가 — 앱이 그 호출 앞에서 에이전트 시각을 적는다(페이지의 change 처리기가 띄운 대화상자가 에이전트 것이
@@ -220,21 +255,12 @@ pub const Op = struct {
         return call(gpa, "Page.getFrameTree", "", .{});
     }
 
-    /// 답을 정해 두고 놓는다 — 듣는 이가 달려 있으면 먼저 뗀다(그 답은 무엇이든 놓기로 간다).
+    /// 답이 정해졌다 — 곧 답하고, 쥔 것(듣는 이가 달려 있으면 떼기, 그리고 묶음 놓기)은 답 **뒤**의 정리로 넘긴다(`takeCleanup` — 적대 리뷰 4 회차
+    /// L1: 놓기를 기다리면 바쁜 페이지가 정해진 답을 맨 시한으로 바꿨다). 대화상자가 떠 있으면 web_osr 의 미룬 줄이 그것이 사라진 뒤 보낸다(3 회차 nit).
     fn releaseThen(self: *Op, gpa: std.mem.Allocator, status: Status, msg: []const u8) !Step {
-        if (self.then) |t| gpa.free(t.result);
-        self.then = .{ .status = status, .result = try gpa.dupe(u8, msg) };
-        if (self.armed) {
-            self.armed = false;
-            self.stage = .disarm;
-            var key_buf: [snapshot_key.len + 20]u8 = undefined;
-            const key = std.fmt.bufPrint(&key_buf, snapshot_key ++ "{d}", .{self.id}) catch unreachable;
-            var step = try call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{f}}}]}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(disarm_js, .{}), std.json.fmt(key, .{}) });
-            // 대화상자가 떠 있으면 그것이 사라진 뒤 보낸다(놓기와 같은 줄 — 떼기가 먼저 간다). 곧 거절되면 듣는 이가 남았다(3 회차 nit).
-            step.call.after_dialog = true;
-            return step;
-        }
-        return self.releaseCall(gpa, .release);
+        self.cleanup = .{ .disarm = self.armed, .release = true };
+        self.armed = false;
+        return done(gpa, status, msg);
     }
 
     fn releaseCall(self: *Op, gpa: std.mem.Allocator, stage: Stage) !Step {
@@ -254,14 +280,7 @@ pub const Op = struct {
     }
 
     pub fn feed(self: *Op, gpa: std.mem.Allocator, reply: Reply) !Step {
-        // 놓기의 답(무엇이든) — 정해 둔 답으로.
-        if (self.stage == .release) {
-            const t = self.then orelse return done(gpa, .failed, "internal upload state");
-            self.then = null;
-            return .{ .done = .{ .status = t.status, .result = t.result } };
-        }
         if (self.stage == .release_pre) return self.confirmStep(gpa);
-        if (self.stage == .disarm) return self.releaseCall(gpa, .release); // 떼기는 best effort — 답이 무엇이든 놓는다
         const holds = switch (self.stage) {
             .check, .tree_again, .set, .verify => true,
             else => false,
@@ -270,9 +289,9 @@ pub const Op = struct {
             .ok => |b| b,
             .cdp_error => |e| return self.cdpError(gpa, e, holds),
             .timed_out => |why| {
-                // 넣기가 `{}` 로 끝난 뒤 읽기가 시한 — 받았다(3 회차 T1). 맨 timeout 은 다시 올리게 했다.
-                if (self.stage == .verify) return self.verifyLate(gpa);
-                if (self.stage == .set) self.given = true; // 갔는지 모른다 — 사본을 남긴다
+                // 넣기가 `{}` 로 끝난 뒤 읽기가 시한 — 받았다(3 회차 T1). 보낸 넣기 자체가 시한 — 처리기가 30 초 넘게 돈다(4 회차 L1, 실측: 처리기는
+                // 파일을 받았다). 맨 timeout 은 다시 올리게 했다.
+                if (self.stage == .verify or self.stage == .set) return self.verifyLate(gpa);
                 self.armed = false; // 페이지가 답하지 않는다 — 떼기도 붙잡힌다(놓기만)
                 return if (holds) self.releaseThen(gpa, .timeout, why) else done(gpa, .timeout, why);
             },
@@ -353,7 +372,7 @@ pub const Op = struct {
                 defer gpa.free(result);
                 return self.releaseThen(gpa, .success, result);
             },
-            .release, .release_pre, .disarm => unreachable, // 위에서
+            .release_pre => unreachable, // 위에서
         }
     }
 
@@ -435,10 +454,12 @@ pub const Op = struct {
     }
 
     /// 넣기가 `{}` 로 끝난 뒤 읽기가 `verify_wait_ms` 안에 답하지 않았다(3 회차 T1 — 실측: change 처리기가 응답이 늦은 주소로 옮겨 읽기가 확정까지
-    /// 붙잡혔다). 처리기는 파일을 받았다 — 성공에 `kept:false`·`navigated:true`(작성자 선택: 「넣었지만 확인 못 함」 실패 대신 2 회차와 같은 답 —
-    /// 둘 다 「페이지를 보라, 다시 올리지 마라」 다). 이동이 아니라 페이지가 멈춘 것이어도 같은 답이다(문서의 남는 틈). 떼기·놓기는 보내지 않는다 —
-    /// 답하지 않는 페이지에 보내면 그것도 붙잡혀 요청 시한을 넘긴다(묶음·듣는 이는 문서와 함께 사라진다).
+    /// 붙잡혔다), 또는 보낸 넣기 자체가 시한이다(4 회차 L1 — 처리기가 30 초 넘게 동기로 돈다). 처리기는 파일을 받았다 — 성공에 `kept:false`·
+    /// `navigated:true`(작성자 선택: 「넣었지만 확인 못 함」 실패 대신 2 회차와 같은 답 — 둘 다 「페이지를 보라, 다시 올리지 마라」 다). 이동이 아니라
+    /// 페이지가 바쁘거나 멈춘 것이어도 같은 답이다(실측: 바쁜 타이머 — 이동 없이도). 떼기·놓기는 보내지 않는다 — 답하지 않는 페이지에 보내면 그것도
+    /// 붙잡혀 그 탭의 DevTools 자리를 쥔다(묶음·듣는 이는 문서와 함께 사라진다).
     fn verifyLate(self: *Op, gpa: std.mem.Allocator) !Step {
+        self.given = true;
         self.armed = false;
         const result = try self.successJson(gpa, false, true, false);
         return .{ .done = .{ .status = .success, .result = result } };
@@ -446,7 +467,7 @@ pub const Op = struct {
 
     /// 넣기를 보낸 뒤 페이지(또는 그 팝업 가족)가 대화상자를 띄웠다(3 회차 D1) — 넣기는 갔다(처리기의 alert 면 이미 받았고, 붙잡힌 넣기는 대화상자가
     /// 답해지면 마저 돈다). 읽을 수 없다: 성공에 `kept:false`·`dialog:true`. 실패로 답하면 에이전트가 대화상자에 답한 뒤 다시 올렸다(모달 둘째·두 번
-    /// 올라감). 듣는 이는 떼고 묶음은 놓는다 — 둘 다 대화상자가 사라진 뒤로 미뤄진다(`after_dialog`·web_osr 의 미룬 놓기).
+    /// 올라감). 듣는 이는 떼고 묶음은 놓는다 — 둘 다 답 뒤의 정리로, 대화상자가 사라진 뒤에 간다(web_osr 의 미룬 줄).
     fn dialogShown(self: *Op, gpa: std.mem.Allocator) !Step {
         self.given = true;
         const result = try self.successJson(gpa, false, false, true);

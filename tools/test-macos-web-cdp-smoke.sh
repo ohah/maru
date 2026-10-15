@@ -88,8 +88,9 @@
 #                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히에 `Cookie`·`Authorization` 값(설정 켬이 기본) ·
 #                   서비스 워커가 다스리는 페이지의 fetch 는 `[service worker of <출처>]` · 둘째 pane(첫 pane 이 연 탭은 그에게 사용자의 탭과 같다 —
 #                   확인 모달, 자동 승인)에게 grant 전에 간 페이지는 보이지 않고(숨김 수로만) 그 뒤 페이지는 보인다 · 그 탭이 다른 사이트(localhost)에
-#                   갔다 돌아오면 다른 사이트에 있던 동안의 요청은 숨김 수로만(W9d① 적대 리뷰 1 회차 F2 — 실제 CEF 의 첫 사이트로 가른다) · 모든 grant 를
-#                   철회하면(앱 대본 `revokegrants`) 다시 허락받은 읽기에 앞 요청이 없다
+#                   갔다 돌아오면 다른 사이트에 있던 동안의 요청은 숨김 수로만(W9d① 적대 리뷰 1 회차 F2 — 실제 CEF 의 첫 사이트로 가른다) · 첫 pane 이
+#                   그 탭을 다른 사이트의 리다이렉트(localhost 의 302 → 127.0.0.1, 쿠키를 심는다)로 옮겨도 그 이동은 숨김 수로만(2 회차 N1 — 처음
+#                   주소가 덮이지 않는다) · 모든 grant 를 철회하면(앱 대본 `revokegrants`) 다시 허락받은 읽기에 앞 요청이 없다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -374,6 +375,10 @@ class H(http.server.SimpleHTTPRequestHandler):
             body = b"<!doctype html><title>setck</title><script>location.replace('/net.html')</script>"
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
             self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Set-Cookie", "smk=cookie-secret; Path=/"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/netredir"):
+            # W9d① 적대 리뷰 2 회차 N1: 다른 사이트(localhost)의 열린 리다이렉트 — 쿠키를 심고 덮이는 사이트(127.0.0.1)로 302.
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.send_response(302); self.send_header("Set-Cookie", "redir=redir-secret; Path=/; HttpOnly"); self.send_header("Location", "http://127.0.0.1:%s/net-cb.html" % sys.argv[1]); self.send_header("Content-Length", "0"); self.end_headers(); return
         if self.path.startswith("/nocontent"):
             # W9a①: 문서가 없는 응답 — navigate 는 곧 loaded:false 로 끝나야 한다.
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
@@ -407,6 +412,7 @@ printf '<!doctype html><title>before</title>before' > "$root/www/net-before.html
 printf '<!doctype html><title>after</title>after' > "$root/www/net-after.html"
 printf '<!doctype html><title>away</title><script>fetch("/netapi.json?away",{headers:{"Authorization":"Bearer away-token"}})</script>away' > "$root/www/net-away.html"
 printf '<!doctype html><title>back</title>back' > "$root/www/net-back.html"
+printf '<!doctype html><title>cb</title>cb' > "$root/www/net-cb.html"
 mkdir -p "$root/www/nsw"
 printf '<!doctype html><title>nsw</title><script>navigator.serviceWorker.register("/nsw/sw.js",{scope:"/nsw/"}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}fetch("/nsw/data.json?"+Date.now())})</script>nsw' > "$root/www/nsw/page.html"
 printf 'self.addEventListener("install",function(e){self.skipWaiting()});self.addEventListener("activate",function(e){e.waitUntil(self.clients.claim())});self.addEventListener("fetch",function(e){e.respondWith(fetch(e.request))});' > "$root/www/nsw/sw.js"
@@ -1143,6 +1149,9 @@ n=0; while [ ! -f "\$out/p2-net-read2" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$
 sleep 0.5
 "\$cli" browser navigate --surface "\$ux" "http://127.0.0.1:$port/net-back.html" > "\$out/nw-u-back-nav" 2>&1
 sleep 0.5
+# 적대 리뷰 2 회차 N1: 그 탭을 다른 사이트(localhost)의 열린 리다이렉트로 옮긴다 — 302 로 127.0.0.1 에 돌아오지만 처음 주소가 덮이지 않는다.
+"\$cli" browser navigate --surface "\$ux" "http://localhost:$port/netredir?next=cb" > "\$out/nw-u-redir-nav" 2>&1
+sleep 0.5
 touch "\$out/p2-net-away"
 n=0; while [ ! -f "\$out/p2-net-read3" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
 touch "\$out/net-revoke-now"
@@ -1463,8 +1472,11 @@ grep -qx 'ok' "$out/nw-u-away-nav" && grep -qx 'ok' "$out/nw-u-back-nav" || fail
 grep -q '^rc=0$' "$out/nw-u-away" && grep -q 'net-back.html' "$out/nw-u-away" && ! grep -q 'away' "$out/nw-u-away" \
     && grep -q '^([0-9]* requests\{0,1\} hidden — made while the tab showed a site your permission does not cover)$' "$out/nw-u-away" \
     || fail "after the tab went to another site and back, the second reader saw that site's requests or no hidden count ($(tr '\n' ' ' < "$out/nw-u-away"))"
+grep -qx 'ok' "$out/nw-u-redir-nav" && grep -q 'GET /netredir' "$root/http.log" || fail "the tab for the second reader did not take the other site's redirect back ($(tr '\n' ' ' < "$out/nw-u-redir-nav"))"
+! grep -q 'netredir' "$out/nw-u-away" && ! grep -q 'net-cb' "$out/nw-u-away" \
+    || fail "a navigation that started on another site and was redirected back was shown to the second reader ($(tr '\n' ' ' < "$out/nw-u-away"))"
 grep -q '^rc=0$' "$out/nw-u-revoked" && ! grep -q 'net-after' "$out/nw-u-revoked" || fail "after revoking the grants the record was not wiped ($(tr '\n' ' ' < "$out/nw-u-revoked"))"
-echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back), and revoking all grants wiped the record"
+echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back) nor a navigation that started on another site and was redirected back, and revoking all grants wiped the record"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

@@ -2030,10 +2030,6 @@ fn renderNetworkRequest(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *
                 .object => |oo| oo,
                 else => continue,
             };
-            if (boolField(o.get("other_site")) and o.get("url") == null) {
-                try w.writeAll("  (a redirect by another site — hidden)\n");
-                continue;
-            }
             try w.print("  {d} → ", .{intField(o.get("status")) orelse 0});
             try writePageText(gpa, w, strField(o.get("url")), false);
             if (boolField(o.get("hsts"))) try w.writeAll(" (HSTS upgrade inside the browser)");
@@ -4314,11 +4310,11 @@ test "W9d①: network 결과 — 줄마다 번호·메서드·상태·종류·�
     try testing.expectEqualStrings("(no requests)\n", out.written());
 }
 
-test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈으로 다음 헤더를 흉내 내지 못한다), 숨긴 값은 이름만, 다른 사이트의 홉은 숨김, 본문은 기록하지 않음" {
+test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈으로 다음 헤더를 흉내 내지 못한다), 숨긴 값은 이름만, 본문은 기록하지 않음(다른 사이트가 보낸 홉은 앱이 싣지 않는다 — 적대 리뷰 2 회차 N7)" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"POST\",\"url\":\"https://a.test/login\",\"type\":\"document\",\"state\":\"done\",\"start_ms\":1,\"duration_ms\":30,\"initiator\":\"https://a.test\",\"frame\":\"main\",\"status\":200,\"mime\":\"text/html\",\"size\":9," ++
-        "\"redirects\":[{\"status\":302,\"url\":\"https://sso.test/x\",\"headers\":[]},{\"other_site\":true}]," ++
+        "\"redirects\":[{\"status\":302,\"url\":\"https://sso.test/x\",\"headers\":[]}]," ++
         "\"request_headers\":[{\"name\":\"Cookie\",\"redacted\":true},{\"name\":\"X-Evil\",\"value\":\"a\\nSet-Cookie: x\"}],\"response_headers\":[{\"name\":\"Content-Type\",\"value\":\"text/html\"}],\"body_state\":\"not_recorded\"}}";
     try testing.expect(try renderResponse(testing.allocator, resp, .network_request, &out.writer));
     try testing.expectEqualStrings("#5 POST https://a.test/login\n" ++
@@ -4326,7 +4322,6 @@ test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈�
         "initiator https://a.test · frame main\n" ++
         "redirects:\n" ++
         "  302 → https://sso.test/x\n" ++
-        "  (a redirect by another site — hidden)\n" ++
         "request headers:\n" ++
         "  Cookie: (hidden — browser.agent-network-full is off)\n" ++
         "  X-Evil: aSet-Cookie: x\n" ++

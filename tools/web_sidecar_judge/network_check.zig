@@ -20,6 +20,12 @@
 //!   R9d1-sw-cross-tab-off  설정 끔: 같은 fetch 가 붙어도 `Authorization` 값은 브라우저 프로세스를 나가지 않는다(이름만) — 수만 세는 것은
 //!                          maru 의 몫(grant 없는 탭이 같은 출처를 보인다 — L2·web_osr 시험)
 //!   R9d1-inflight-*        끝나지 않는 요청을 쏟는 탭이 있어도 다른 지켜보는 탭이 적히고(탭마다 128), 떠나거나 닫으면 자리가 돌아온다
+//! W9d① 적대 리뷰 2 회차(리뷰가 더한 판정 — 이름 `R9d2-*`, 고친 뒤에는 maru 의 규칙이 그 이동을 숨기는지 실제 CEF 의 알림으로 본다):
+//!   R9d2-redirect-back            덮이지 않는 사이트(localhost — 「은행」)의 페이지가 POST 한 이동이 302 로 덮이는 사이트(127.0.0.1)에 돌아온다:
+//!                                 한 요청 번호에 처음 주소는 localhost, 홉은 127.0.0.1 — 은행의 Cookie·Set-Cookie 가 실린 채 maru 에 오지만(설정 켬)
+//!                                 maru 의 규칙(`net_policy.navigationCovered` — 처음 주소와 홉의 대상이 모두 덮일 때만)은 127.0.0.1 grant 에게 숨긴다
+//!   R9d2-redirect-back-agent-nav  에이전트가 그 탭을 은행의 열린 리다이렉트로 곧장 옮긴다(브라우저가 시작한 이동 — initiator 「null」): 같은 모양,
+//!                                 HttpOnly 쿠키까지 실린다 — 규칙은 initiator 를 보지 않고 숨긴다
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -149,6 +155,14 @@ fn serveOne(conn: c_int) void {
     if (std.mem.eql(u8, path, "/n/slow-page")) return reply(conn, "200 OK", html, "", "<!doctype html><title>slow</title><script>" ++
         "for(var i=0;i<100;i++)fetch('/n/slow?'+Math.random()).catch(function(){});setTimeout(function(){location.href='/n/blank?left'},300)</script>");
     if (std.mem.eql(u8, path, "/n/flood")) return reply(conn, "200 OK", html, "", "<!doctype html><title>flood</title><script>for(var i=0;i<3000;i++)fetch('/n/f?'+i).catch(function(){})</script>");
+    // R9d2(적대 리뷰 2 회차): 「은행」(localhost)이 쿠키를 심고, 제 페이지가 로그인 양식을 POST 하면 새 세션 쿠키와 함께 302 로 덮이는
+    // 사이트(127.0.0.1)에 돌려보낸다 — OAuth·결제의 돌아오기.
+    if (std.mem.eql(u8, path, "/b/home")) return reply(conn, "200 OK", html, "Set-Cookie: bank=SECRET1; Path=/\r\n", "<!doctype html><title>bank</title>bank");
+    if (std.mem.eql(u8, path, "/b/form")) return reply(conn, "200 OK", html, "", "<!doctype html><title>bank-form</title><form method=post action=/b/login><input name=user value=alice></form><script>document.forms[0].submit()</script>");
+    if (std.mem.eql(u8, path, "/b/login")) {
+        const loc = std.fmt.bufPrint(&xb, "Set-Cookie: bank_sid=NEWSECRET; Path=/; HttpOnly\r\nLocation: http://127.0.0.1:{d}/n/blank?callback=1\r\n", .{p}) catch return;
+        return reply(conn, "302 Found", "text/plain", loc, "");
+    }
     if (std.mem.eql(u8, path, "/n/f")) {
         _ = flood_served.fetchAdd(1, .monotonic);
         return reply(conn, "204 No Content", "text/plain", "", "");
@@ -265,6 +279,22 @@ const Run = struct {
         return null;
     }
 
+    /// 주 프레임 이동 하나(`l`)의 리다이렉트 모양 — `from` 뒤의 같은 요청 번호 알림으로 본다(R9d2).
+    fn redirectBack(self: *const Run, from: usize, l: *const Rec) RedirectBack {
+        var hops: [20][]const u8 = undefined;
+        var n: usize = 0;
+        var out: RedirectBack = .{ .begins = self.countFor(from, .net_begin, l.browser, l.request) };
+        for (self.recs.items[from..]) |*rec| if (rec.tag == .net_redirect and rec.browser == l.browser and rec.request == l.request and n < hops.len) {
+            hops[n] = rec.url;
+            n += 1;
+        };
+        out.starts_uncovered = std.mem.indexOf(u8, l.url, "://localhost:") != null;
+        out.back_to_covered = n > 0 and std.mem.indexOf(u8, hops[n - 1], "://127.0.0.1:") != null;
+        // maru 가 읽을 때 쓰는 바로 그 규칙(`web_osr_network.navigationCovered` 가 부른다).
+        out.hidden = !protocol.net_policy.navigationCovered("127.0.0.1", l.url, hops[0..n]);
+        return out;
+    }
+
     fn navigate(self: *Run, browser: u64, to: []const u8) !void {
         try self.host.send(.{ .navigate = .{ .browser = browser, .url = to } });
     }
@@ -276,6 +306,18 @@ const Run = struct {
             w.hosts[0] = "127.0.0.1";
         }
         try self.host.send(.{ .net_watch = w });
+    }
+};
+
+/// R9d2: 덮이지 않는 곳에서 시작해 덮이는 곳으로 돌아온 이동의 모양.
+const RedirectBack = struct {
+    begins: usize = 0,
+    starts_uncovered: bool = false,
+    back_to_covered: bool = false,
+    hidden: bool = false,
+
+    fn ok(self: RedirectBack) bool {
+        return self.begins == 1 and self.starts_uncovered and self.back_to_covered and self.hidden;
     }
 };
 
@@ -352,6 +394,41 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             ends = r.countFor(at, .net_end, watched, b.request);
         }
         report(redir != null and hops == 2 and second_to_other and final_ok and ends == 1, "net-redirect", std.fmt.bufPrint(&detail, "시작 {} · 홉 {d} · 둘째 302 → 다른 사이트 {} · 마지막 200 {} · 끝 {d}", .{ redir != null, hops, second_to_other, final_ok, ends }) catch "");
+    }
+    // ── R9d2(적대 리뷰 2 회차 N1): 덮이지 않는 사이트에서 시작해 덮이는 사이트로 리다이렉트돼 돌아온 이동 ──
+    {
+        var bu: [512]u8 = undefined;
+        try r.navigate(watched, try std.fmt.bufPrint(&bu, "http://localhost:{d}/b/home", .{server_port}));
+        r.pump(1500);
+        at = r.mark();
+        try r.navigate(watched, try std.fmt.bufPrint(&bu, "http://localhost:{d}/b/form", .{server_port}));
+        r.pump(3000);
+        const login = r.begin(at, watched, "/b/login");
+        const cookie: []const u8 = if (login) |l| l.header("Cookie") orelse "" else "";
+        var hop_set_cookie: []const u8 = "";
+        var final_status: u16 = 0;
+        var main_doc = false;
+        var shape = RedirectBack{};
+        if (login) |l| {
+            main_doc = l.flags.main_frame and l.flags.navigation and l.resource_type == 0;
+            shape = r.redirectBack(at, l);
+            if (r.first(at, .net_redirect, watched, l.request)) |h| hop_set_cookie = h.header("Set-Cookie") orelse "";
+            if (r.first(at, .net_response, watched, l.request)) |resp| final_status = resp.status;
+        }
+        // 고친 뒤의 기대: 한 요청 번호(begin 하나)·처음 주소는 localhost·홉은 127.0.0.1 — 그래서 maru 의 규칙이 127.0.0.1 grant 에게 숨긴다.
+        report(main_doc and shape.ok(), "R9d2-redirect-back", std.fmt.bufPrint(&detail, "은행 POST /b/login: 주 프레임 문서 {} · begin {d} · 처음 주소 localhost {} · 홉 → 127.0.0.1 {} · 127.0.0.1 grant 에게 숨김 {} · (실린 것: Cookie 「{s}」 · 홉 Set-Cookie 「{s}」 · 마지막 {d})", .{ main_doc, shape.begins, shape.starts_uncovered, shape.back_to_covered, shape.hidden, cookie, hop_set_cookie, final_status }) catch "");
+        // 에이전트가 이 탭(제어 grant 는 사이트에 묶이지 않는다)을 은행의 열린 리다이렉트(SSO·logout?next=)로 곧장 옮긴다 — 브라우저가 시작한 GET.
+        try r.navigate(watched, url(&u, "/n/blank?covered-again"));
+        r.pump(1000);
+        const at2 = r.mark();
+        try r.navigate(watched, try std.fmt.bufPrint(&bu, "http://localhost:{d}/b/login?agent=1", .{server_port}));
+        r.pump(2500);
+        const nav = r.begin(at2, watched, "/b/login?agent=1");
+        const c2: []const u8 = if (nav) |l| l.header("Cookie") orelse "" else "";
+        var shape2 = RedirectBack{};
+        if (nav) |l| shape2 = r.redirectBack(at2, l);
+        const doc2 = if (nav) |l| l.flags.main_frame and l.resource_type == 0 else false;
+        report(doc2 and shape2.ok(), "R9d2-redirect-back-agent-nav", std.fmt.bufPrint(&detail, "navigate → localhost/b/login?agent=1: 주 프레임 문서 {} · initiator 「{s}」 · begin {d} · 처음 주소 localhost {} · 홉 → 127.0.0.1 {} · 127.0.0.1 grant 에게 숨김 {} · (실린 Cookie 「{s}」)", .{ doc2, if (nav) |l| l.initiator else "-", shape2.begins, shape2.starts_uncovered, shape2.back_to_covered, shape2.hidden, c2 }) catch "");
     }
     // 지켜보지 않는 탭.
     {

@@ -218,21 +218,21 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
     const id = request.*.get_identifier.?(request);
     if (id == 0) return null;
     doLock();
-    // 리다이렉트의 다음 홉은 문을 다시 지나지 않는다. 새 요청은 initiator 를 글로 바꾸기 **전에** 이 길의 문을 본다(적대 리뷰 1 회차 곁가지).
+    // 리다이렉트의 다음 홉은 문을 다시 지나지 않는다.
     const known = state.find(id) != null;
-    const admitted_path = !known and state.admitServiceWorkerPath(nowUs());
     doUnlock();
     if (known) return &rrh;
-    if (!admitted_path) return null;
+    // 출처는 앞부분만(상한 있는) 바꾼다 — 지켜보는 출처가 아니면 양동이를 쓰지 않고 곧 null(적대 리뷰 2 회차 N5: 출처를 맞추기 전에 이 길의
+    // 양동이를 썼더니 지켜보지 않는 출처의 쏟아짐이 지켜보는 탭의 요청을 세지도 않고 막았다). 지켜보는 출처의 거절은 붙일 탭들의 넘긴 수다.
     var ib: [gate.max_origin_bytes]u8 = undefined;
     const init_text = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib).text;
     if (init_text.len == 0) return null;
     doLock();
     var targets: [gate.max_targets]BrowserId = undefined;
-    const n = state.serviceWorkerTargets(init_text, &targets);
-    const admitted = n != 0 and blk: {
+    const gate_answer = state.admitServiceWorker(init_text, nowUs(), &targets);
+    const n = gate_answer.targets;
+    const admitted = gate_answer.admitted and blk: {
         const w = state.watchOf(targets[0]) orelse break :blk false;
-        if (!state.admit(w, nowUs())) break :blk false;
         const t = state.track(id, w) orelse {
             w.dropped +|= 1;
             break :blk false;

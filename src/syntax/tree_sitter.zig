@@ -1072,7 +1072,10 @@ pub const Provider = struct {
         while (true) {
             const node = c.ts_tree_cursor_current_node(&cursor);
             const sp = c.ts_node_start_point(node);
-            const ep = c.ts_node_end_point(node);
+            var ep = c.ts_node_end_point(node);
+            // **열 0 에서 끝나는 노드는 그 줄을 갖지 않는다** — 끝이 다음 줄 머리인 노드(Markdown `section`·Scala 3 들여쓰기 블록)를 그대로
+            // 쓰면 접을 때 **다음 제목·다음 선언 줄까지** 숨었다(번들 언어 확대 BL4 적대적 4회차 — Markdown 은 그 전부터 그랬다).
+            if (ep.column == 0 and ep.row > sp.row) ep.row -= 1;
             if (ep.row > sp.row and hasKind(kinds, c.ts_node_type(node))) {
                 const gop = try best.getOrPut(allocator, sp.row);
                 // **비교를 지우고 「첫 후보만」으로 바꾼 변이는 살아남는 것이 정상이다**
@@ -3626,6 +3629,27 @@ test "SYN57 Objective-C 는 C 쿼리를 앞에 잇는다 — 주석·숫자·문
         try prov.foldSpans(allocator, &folds);
         try std.testing.expectEqual(@as(usize, 1), folds.items.len);
         try std.testing.expectEqual(Provider.FoldSpan{ .start_row = 1, .end_row = 4 }, folds.items[0]);
+    }
+}
+
+test "SYN58 다음 줄 머리(열 0)에서 끝나는 노드는 그 줄을 접지 않는다 — Markdown 섹션·Scala 3 들여쓰기 블록이 다음 제목·선언까지 숨기던 결함 (BL4 적대적 4회차)" {
+    const allocator = std.testing.allocator;
+    var folds: std.ArrayList(Provider.FoldSpan) = .empty;
+    defer folds.deinit(allocator);
+    const cases = [_]struct { lang: Language, src: []const u8, want: []const Provider.FoldSpan }{
+        // `# A` 섹션은 1~2 줄을 숨기고 `# B`(3 줄)는 남는다. 끝 섹션도 빈 줄 없이 끝난다.
+        .{ .lang = .markdown, .src = "# A\nx\ny\n# B\nz\n", .want = &.{ .{ .start_row = 0, .end_row = 2 }, .{ .start_row = 3, .end_row = 4 } } },
+        // `object M:` 는 두 def 를 숨기고 `val z`(3 줄)는 남는다.
+        .{ .lang = .scala, .src = "object M:\n  def f = 1\n  def g = 2\nval z = 3\n", .want = &.{.{ .start_row = 0, .end_row = 2 }} },
+        // 닫는 글자에서 끝나는 노드는 그대로다(대조군).
+        .{ .lang = .lua, .src = "function f()\n  a()\nend\nb()\n", .want = &.{.{ .start_row = 0, .end_row = 2 }} },
+    };
+    for (cases) |k| {
+        var prov = Provider.init(k.src, k.lang, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        try prov.foldSpans(allocator, &folds);
+        errdefer for (folds.items) |f| std.debug.print("SYN58 {s} {d}-{d}\n", .{ @tagName(k.lang), f.start_row, f.end_row });
+        try std.testing.expectEqualSlices(Provider.FoldSpan, k.want, folds.items);
     }
 }
 

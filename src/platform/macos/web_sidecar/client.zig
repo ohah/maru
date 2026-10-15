@@ -331,10 +331,12 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
     defer object.releaseArg(frame);
     if (frame == null or frame.*.is_main.?(frame) == 0) return;
     const entry = entryOf(browser) orelse return;
+    // W9d①: 서비스 워커 요청을 붙일 출처 — 온 주소(UTF-16)에서, 길이와 무관하게(적대 리뷰 4 회차 C3: 32 KiB 를 넘는 주소는 아래에서 알리지 않아
+    // 옛 출처가 남았다 — 그 출처의 서비스 워커 요청이 다른 사이트를 보이는 이 탭에 붙었다).
+    network.mainFrameAddress(entry.id, url);
     var buf: [protocol.wire.max_url_bytes]u8 = undefined;
     const text = library.readString(browsers.state.api, url, &buf);
-    if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다)
-    network.mainFrameAddress(entry.id, text); // W9d①: 서비스 워커 요청을 붙일 출처
+    if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다 — maru 는 page_started 로 옛 주소임을 안다)
     browsers.state.writer.send(.{ .url_changed = .{ .browser = entry.id, .url = text } }) catch {};
 }
 

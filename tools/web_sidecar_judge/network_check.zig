@@ -33,12 +33,17 @@
 //!                                 (빈 목록은 아무것도 덮지 않는다 — 전에는 `invalid` 를 실어야 했다)
 //!   R9d3-request-ids(obs)         이 sidecar 프로세스의 처음 요청 번호들(두 번 돌리면 이동 요청 번호가 같다 — maru 는 다시 뜬 브라우저의 진행 중
 //!                                 기록을 끝낸다)
+//! W9d① 적대 리뷰 4 회차(이름 `R9d4-*` — `network_host_check.zig`): 문법이 이상한 주소들로 옮기거나 불러 sidecar 의 호스트 칸·app 이 주소 알림에서
+//!   읽는 호스트를 서버가 받은 `Host` 와 맞춘다(`R9d4-host-*`), C3 의 전제(새 문서는 `page_started` 뒤 `url_changed`, 32 KiB 넘는 주소는 알림 없음)를 본다.
+
+const array_repeat = @import("array_repeat");
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const os = @import("os.zig");
 const Host = @import("host.zig").Host;
 const browsers_check = @import("browsers_check.zig");
+const network_host_check = @import("network_host_check.zig");
 
 const msg = protocol.message;
 const net_fields = protocol.net_fields;
@@ -169,6 +174,20 @@ fn serveOne(conn: c_int) void {
     if (std.mem.eql(u8, path, "/b/login")) {
         const loc = std.fmt.bufPrint(&xb, "Set-Cookie: bank_sid=NEWSECRET; Path=/; HttpOnly\r\nLocation: http://127.0.0.1:{d}/n/blank?callback=1\r\n", .{p}) catch return;
         return reply(conn, "302 Found", "text/plain", loc, "");
+    }
+    // R9d4 C1(적대 리뷰 4 회차): 덮이는 호스트의 리다이렉트가 주소를 싣는 헤더 넷에 사용자 정보(자리표시)를 싣는다.
+    if (std.mem.eql(u8, path, "/n/loc-userinfo")) {
+        const loc = std.fmt.bufPrint(&xb, "Location: http://u:p@127.0.0.1:{d}/n/blank?loc\r\nRefresh: 0; url=http://u:p@127.0.0.1:{d}/r\r\n" ++
+            "Content-Location: http://u:p@127.0.0.1:{d}/c\r\nLink: <http://u:p@127.0.0.1:{d}/l>; rel=preload\r\n", .{ p, p, p, p }) catch return;
+        return reply(conn, "302 Found", "text/plain", loc, "");
+    }
+    // R9d4(작성자 공격): 덩어리 상한(8 KiB)을 거의 채우는 헤더 뒤의 Location — 그 값이 사용자 정보 안에서 잘리게. CEF 의 헤더 다발은 이름 차례라
+    // 채우는 헤더는 `A-` 로 앞에 둔다(처음엔 `X-Fill` 이 Location 뒤로 가 잘리지 않았다 — 실측).
+    if (std.mem.eql(u8, path, "/n/loc-cut")) {
+        var big: [12 * 1024]u8 = undefined;
+        const head = std.fmt.bufPrint(&big, "HTTP/1.1 302 Found\r\nContent-Length: 0\r\nA-Fill: {s}\r\nLocation: http://{s}:SECRETPW@127.0.0.1:{d}/n/blank?cut\r\nConnection: close\r\n\r\n", .{ array_repeat.repeat("f", 7800), array_repeat.repeat("u", 1000), p }) catch return;
+        _ = std.c.write(conn, head.ptr, head.len);
+        return;
     }
     if (std.mem.eql(u8, path, "/n/f")) {
         _ = flood_served.fetchAdd(1, .monotonic);
@@ -535,6 +554,50 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const b = r.begin(at, watched, "cred-full");
         report(if (b) |x| std.mem.indexOf(u8, x.url, "judge:pw@") != null else false, "net-userinfo-full", std.fmt.bufPrint(&detail, "주소 「{s}」", .{if (b) |x| x.url else "-"}) catch "");
     }
+    // ── R9d4(적대 리뷰 4 회차): 호스트 해석의 일치 — 지켜보는 탭(설정 켬)을 이상한 주소들로 옮긴다(그 판정이 알림을 직접 모은다) ──
+    try network_host_check.run(report, &host, watched, url(&u, "/n/blank?host-check"));
+    // ── R9d4 C1(적대 리뷰 4 회차): 덮이는 호스트(127.0.0.1)가 보낸 리다이렉트의 Location·Refresh·Content-Location·Link 에 든 사용자 정보 ──
+    // 켬: sidecar 는 그대로 싣는다(관측 — maru 가 읽는 쪽의 쿠키 권한으로 지운다, L2·web_osr 시험). 끔: 브라우저 프로세스를 나가지 않는다 —
+    // Location 은 사용자 정보만 지운 값, 나머지 셋은 이름만(허용 목록 밖).
+    for ([_]bool{ true, false }) |full| {
+        try r.watch(true, full);
+        r.pump(100);
+        const at5 = r.mark();
+        try r.navigate(watched, url(&u, if (full) "/n/loc-userinfo?full" else "/n/loc-userinfo?off"));
+        r.pump(1500);
+        var vals: [4][]const u8 = .{ "-", "-", "-", "-" };
+        const names = [_][]const u8{ "Location", "Refresh", "Content-Location", "Link" };
+        if (r.begin(at5, watched, "/n/loc-userinfo")) |b| if (r.first(at5, .net_redirect, watched, b.request)) |h| {
+            for (names, &vals) |n, *v| v.* = h.header(n) orelse "-";
+        };
+        var with_userinfo: usize = 0;
+        for (vals) |v| with_userinfo += @intFromBool(std.mem.indexOf(u8, v, "u:p@") != null);
+        const ok = if (full)
+            with_userinfo == 4
+        else
+            with_userinfo == 0 and std.mem.indexOf(u8, vals[0], "127.0.0.1") != null and vals[1].len == 0 and vals[2].len == 0 and vals[3].len == 0;
+        report(ok, if (full) "R9d4-c1-url-headers-full(obs)" else "R9d4-c1-url-headers-off", std.fmt.bufPrint(&detail, "홉 헤더: Location 「{s}」 · Refresh 「{s}」 · Content-Location 「{s}」 · Link 「{s}」 · 사용자 정보가 실린 값 {d}", .{ vals[0], vals[1], vals[2], vals[3], with_userinfo }) catch "");
+    }
+    // R9d4(작성자 공격): 8 KiB 덩어리 상한에서 잘리는 Location — 사용자 정보 안에서 끊기면 `@` 가 없어 가리기가 사용자 정보로 알아보지
+    // 못한다. 켬·끔 모두 sidecar 가 그 값을 싣지 않아야 한다(주소를 싣는 헤더는 자르지 않고 비운다 — 잘림 표시는 남는다).
+    for ([_]bool{ true, false }) |full| {
+        try r.watch(true, full);
+        r.pump(100);
+        const at6 = r.mark();
+        try r.navigate(watched, url(&u, if (full) "/n/loc-cut?full" else "/n/loc-cut?off"));
+        r.pump(1500);
+        var loc: ?[]const u8 = null;
+        var trunc = false;
+        if (r.begin(at6, watched, "/n/loc-cut")) |b| if (r.first(at6, .net_redirect, watched, b.request)) |h| {
+            loc = h.header("Location");
+            trunc = h.hop.headers_truncated;
+        };
+        // 새는 꼴: 사용자 정보 조각이 `@` 없이 실렸다(켬이면 `@` 째 실린 값은 maru 가 읽는 쪽마다 지운다 — 그것은 새는 것이 아니다).
+        const leaked = if (loc) |l| std.mem.indexOf(u8, l, "uuuuuuuu") != null and std.mem.indexOfScalar(u8, l, '@') == null else false;
+        report(loc != null and !leaked and trunc, if (full) "R9d4-cut-location-full" else "R9d4-cut-location-off", std.fmt.bufPrint(&detail, "홉의 Location {s}(길이 {d}) 「{s}」 · 사용자 정보 조각이 실렸다 {} · 잘림 표시 {}", .{ if (loc != null) "있음" else "없음", if (loc) |l| l.len else 0, if (loc) |l| l[0..@min(l.len, 48)] else "-", leaked, trunc }) catch "");
+    }
+    try r.watch(true, true);
+    r.pump(100);
     // ── 끔: 덜어 낸 값 ──
     {
         try r.watch(true, false);

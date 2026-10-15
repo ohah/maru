@@ -3593,6 +3593,42 @@ test "SYN56 C#·Objective-C·Scala 심볼 — C# 이름공간은 점 이름(`App
     }
 }
 
+test "SYN57 Objective-C 는 C 쿼리를 앞에 잇는다 — 주석·숫자·문자열·`return`·`int` 는 C 몫에서만 색을 받는다, C# 은 클래스·이름공간 본문이 접힌다 (번들 언어 확대 BL4 변이 C12·C13)" {
+    const allocator = std.testing.allocator;
+    var spans: std.ArrayList(Span) = .empty;
+    defer spans.deinit(allocator);
+    // Objective-C 자체 쿼리는 이것들을 하나도 칠하지 않는다 — 잇기를 빼면 전부 무색이 된다(변이 C12 가 살아남았다).
+    {
+        const src = "int f(void) {\n  return 1; // c\n}\nNSString *s = @\"a\";\n";
+        highlights(allocator, .objc, src, &spans);
+        const Want = struct { text: []const u8, cap: []const u8 };
+        for ([_]Want{
+            .{ .text = "// c", .cap = "comment" },
+            .{ .text = "1", .cap = "number" },
+            .{ .text = "return", .cap = "keyword" },
+            .{ .text = "int", .cap = "type" },
+        }) |w| {
+            var found = false;
+            for (spans.items) |sp| {
+                if (std.mem.eql(u8, src[sp.start..sp.end], w.text) and std.mem.startsWith(u8, sp.capture, w.cap)) found = true;
+            }
+            errdefer std.debug.print("SYN57 objc '{s}' @{s} 없음\n", .{ w.text, w.cap });
+            try std.testing.expect(found);
+        }
+    }
+    // C# — 클래스 본문(`declaration_list`)이 접힌다. 함수 하나뿐인 `SYN21` 표본은 그것을 안 쟀다(변이 C13 이 살아남았다).
+    {
+        var folds: std.ArrayList(Provider.FoldSpan) = .empty;
+        defer folds.deinit(allocator);
+        const src = "class A\n{\n    int X;\n    int Y;\n}\n";
+        var prov = Provider.init(src, .csharp, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        try prov.foldSpans(allocator, &folds);
+        try std.testing.expectEqual(@as(usize, 1), folds.items.len);
+        try std.testing.expectEqual(Provider.FoldSpan{ .start_row = 1, .end_row = 4 }, folds.items[0]);
+    }
+}
+
 test "SYN53 Swift grammar 의 한계 — 정상 Swift 가 구문 오류를 낸다(빈 튜플·본문 없는 함수·지역 `nonisolated(unsafe)`·` ; `·`$` 정규식), 쓰는 꼴은 깨끗하다" {
     // 계획 editor-bundled-languages.md 「한계」와 짝이다. grammar 를 올려 하나라도 깨끗해지면 이 판정자가 깨진다 — 그때 한계 절을 고친다.
     const allocator = std.testing.allocator;

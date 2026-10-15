@@ -25,6 +25,7 @@ pub const max_header_count = message.max_net_header_count;
 pub const max_headers_bytes = message.max_net_headers_bytes;
 pub const max_header_name_bytes = message.max_net_header_name_bytes;
 pub const max_watch_hosts = message.max_net_watch_hosts;
+pub const max_host_bytes = message.max_net_host_bytes;
 
 /// 헤더 덩어리의 바이트 상한 — 이름·값 합(`max_headers_bytes`)에 헤더마다 길이 칸 셋.
 pub const max_header_block_bytes: usize = max_headers_bytes + max_header_count * 3;
@@ -63,7 +64,7 @@ pub fn checkHeaderValue(value: []const u8) Error!void {
 
 /// 호스트(grant 호스트 — `net_watch`) — 비고 253 바이트를 넘지 않으며 소문자 글자·숫자·`-`·`.`·`:`·`[`·`]` 만(IPv6 포함).
 pub fn checkHost(host: []const u8) Error!void {
-    if (host.len == 0 or host.len > 253) return error.InvalidNetwork;
+    if (host.len == 0 or host.len > max_host_bytes) return error.InvalidNetwork;
     for (host) |c| {
         const ok = (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '-' or c == '.' or c == ':' or c == '[' or c == ']' or c == '_';
         if (!ok) return error.InvalidNetwork;
@@ -215,7 +216,35 @@ pub fn checkBegin(v: message.NetBegin) Error!void {
     try checkLine(v.url, max_url_bytes);
     try checkLine(v.initiator, max_origin_bytes);
     try checkLine(v.site, max_origin_bytes);
+    try checkHostField(v.host);
+    try checkUrlCut(v.url, v.flags.url_truncated);
     try checkHeaders(v.headers);
+}
+
+/// 요청·홉 주소의 호스트 칸(W9d① 적대 리뷰 3 회차 T1) — 빈 글(http(s) 가 아니거나 모른다 — 덮이지 않는다)이거나 `checkHost` 를 지나는 소문자 호스트.
+fn checkHostField(host: []const u8) Error!void {
+    if (host.len != 0) try checkHost(host);
+}
+
+/// 잘린 주소에는 사용자 정보가 없다(W9d① 적대 리뷰 3 회차 T1 — sidecar 가 자르기 전에 뺀다). 잘린 글의 권한 부분에 `@` 가 있으면 그 글만으로는
+/// 사용자 정보가 어디서 끝나는지 모른다 — 보일 때 지우지 못한다.
+fn checkUrlCut(url: []const u8, truncated: bool) Error!void {
+    if (!truncated) return;
+    const a = authoritySpan(url) orelse return;
+    if (std.mem.indexOfScalar(u8, url[a.start..a.end], '@') != null) return error.InvalidNetwork;
+}
+
+/// 주소의 권한 부분 `[start, end)`(`scheme://` 뒤 첫 `/`·`?`·`#` 까지) — 스킴(글자·숫자·`+`·`-`·`.`, 32 바이트까지)이 첫 `:` 앞이고 그 뒤가
+/// `//` 일 때만. 아니면 null(`data:`·`blob:`·`about:` — 그 안의 `://` 는 권한이 아니다). sidecar 가 온 주소(UTF-16)에서 쓰는 규칙
+/// (`net_policy.authority16`)과 같다 — 사용자 정보를 지우는 쪽과 빼는 쪽이 같은 곳을 본다.
+pub fn authoritySpan(url: []const u8) ?struct { start: usize, end: usize } {
+    const colon = std.mem.indexOfScalar(u8, url, ':') orelse return null;
+    if (colon == 0 or colon > 32) return null;
+    for (url[0..colon]) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '+' and ch != '-' and ch != '.') return null;
+    if (!std.mem.startsWith(u8, url[colon + 1 ..], "//")) return null;
+    const start = colon + 3;
+    const end = start + (std.mem.indexOfAny(u8, url[start..], "/?#") orelse url.len - start);
+    return .{ .start = start, .end = end };
 }
 
 pub fn writeBegin(cursor: *Cursor, v: message.NetBegin) Error!void {
@@ -229,6 +258,7 @@ pub fn writeBegin(cursor: *Cursor, v: message.NetBegin) Error!void {
     try writeLine(cursor, v.url);
     try writeLine(cursor, v.initiator);
     try writeLine(cursor, v.site);
+    try writeLine(cursor, v.host);
     try writeHeaders(cursor, v.headers);
 }
 
@@ -243,6 +273,7 @@ pub fn readBegin(cursor: *ReadCursor) Error!message.NetBegin {
         .url = try readLine(cursor, max_url_bytes),
         .initiator = try readLine(cursor, max_origin_bytes),
         .site = try readLine(cursor, max_origin_bytes),
+        .host = try readLine(cursor, max_host_bytes),
         .headers = try readHeaders(cursor),
     };
     try checkBegin(v);
@@ -261,6 +292,8 @@ pub fn checkRedirect(v: message.NetRedirect) Error!void {
     if (v.status < 100 or v.status > 599) return error.InvalidNetwork;
     if (v.url.len == 0) return error.InvalidNetwork;
     try checkLine(v.url, max_url_bytes);
+    try checkHostField(v.host);
+    try checkUrlCut(v.url, v.flags.url_truncated);
     try checkHeaders(v.headers);
 }
 
@@ -272,6 +305,7 @@ pub fn writeRedirect(cursor: *Cursor, v: message.NetRedirect) Error!void {
     try cursor.writeByte(@bitCast(v.flags));
     try cursor.writeU64(v.time_ms);
     try writeLine(cursor, v.url);
+    try writeLine(cursor, v.host);
     try writeHeaders(cursor, v.headers);
 }
 
@@ -283,6 +317,7 @@ pub fn readRedirect(cursor: *ReadCursor) Error!message.NetRedirect {
         .flags = @bitCast(try cursor.readByte()),
         .time_ms = try cursor.readU64(),
         .url = try readLine(cursor, max_url_bytes),
+        .host = try readLine(cursor, max_host_bytes),
         .headers = try readHeaders(cursor),
     };
     try checkRedirect(v);
@@ -374,7 +409,7 @@ pub fn readDropped(cursor: *ReadCursor) Error!message.NetDropped {
 
 pub fn checkWatch(v: message.NetWatch) Error!void {
     if (v.host_count > max_watch_hosts) return error.InvalidNetwork;
-    if (!v.on and (v.full or v.host_count != 0)) return error.InvalidNetwork;
+    if (!v.on and (v.full or v.any_host or v.host_count != 0)) return error.InvalidNetwork;
     for (v.hosts[0..v.host_count]) |h| try checkHost(h);
 }
 
@@ -383,6 +418,7 @@ pub fn writeWatch(cursor: *Cursor, v: message.NetWatch) Error!void {
     try fields.writeBrowser(cursor, v.browser);
     try cursor.writeByte(@intFromBool(v.on));
     try cursor.writeByte(@intFromBool(v.full));
+    try cursor.writeByte(@intFromBool(v.any_host));
     try cursor.writeByte(v.host_count);
     for (v.hosts[0..v.host_count]) |h| {
         try cursor.writeByte(@intCast(h.len));
@@ -395,6 +431,7 @@ pub fn readWatch(cursor: *ReadCursor) Error!message.NetWatch {
         .browser = try fields.readBrowser(cursor),
         .on = try fields.readBool(cursor),
         .full = try fields.readBool(cursor),
+        .any_host = try fields.readBool(cursor),
         .host_count = try cursor.readByte(),
     };
     if (v.host_count > max_watch_hosts) return error.InvalidNetwork;
@@ -408,7 +445,7 @@ pub fn readWatch(cursor: *ReadCursor) Error!message.NetWatch {
 
 // 가장 큰 네트워크 frame(net_begin: 머리 + 고정 칸 + 글 넷의 상한 + 헤더 덩어리 상한)이 frame 상한 안에 든다.
 comptime {
-    const begin = wire.prefix_len + wire.common_len + 8 + 8 + 1 + 1 + 8 + (2 + max_method_bytes) + (2 + max_url_bytes) + 2 * (2 + max_origin_bytes) + 3 + max_header_block_bytes;
+    const begin = wire.prefix_len + wire.common_len + 8 + 8 + 1 + 1 + 8 + (2 + max_method_bytes) + (2 + max_url_bytes) + 2 * (2 + max_origin_bytes) + (2 + max_host_bytes) + 3 + max_header_block_bytes;
     std.debug.assert(begin <= wire.max_frame_bytes);
     std.debug.assert(max_header_block_bytes <= std.math.maxInt(u16));
     std.debug.assert(max_header_count <= std.math.maxInt(u8));

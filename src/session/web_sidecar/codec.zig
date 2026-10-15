@@ -1643,9 +1643,10 @@ test "every single-byte corruption of input frames decodes to valid fields or er
         .{ .devtools_result = .{ .browser = 3, .call = 5, .status = .detached, .size = 0 } },
         // W9d① 네트워크.
         .{ .net_watch = .{ .browser = 3, .on = true, .full = true, .host_count = 2, .hosts = .{ "a.test", "[::1]", "", "" } } },
+        .{ .net_watch = .{ .browser = 3, .on = true, .any_host = true, .host_count = 1, .hosts = .{ "b.test", "", "", "" } } },
         .{ .net_watch = .{ .browser = 3, .on = false } },
-        .{ .net_begin = .{ .browser = 3, .request = 5, .flags = .{ .subframe = true, .navigation = true }, .resource_type = 1, .time_ms = 9, .method = "GET", .url = "https://a.test/한", .initiator = "https://b.test", .site = "a.test", .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x03s=1" } } },
-        .{ .net_redirect = .{ .browser = 3, .request = 5, .status = 307, .flags = .{ .hsts = true }, .url = "https://a.test/x", .headers = .{ .count = 1, .bytes = "\x01a\x00\x00" } } },
+        .{ .net_begin = .{ .browser = 3, .request = 5, .flags = .{ .subframe = true, .navigation = true }, .resource_type = 1, .time_ms = 9, .method = "GET", .url = "https://a.test/한", .initiator = "https://b.test", .site = "a.test", .host = "a.test", .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x03s=1" } } },
+        .{ .net_redirect = .{ .browser = 3, .request = 5, .status = 307, .flags = .{ .hsts = true }, .url = "https://a.test/x", .host = "a.test", .headers = .{ .count = 1, .bytes = "\x01a\x00\x00" } } },
         .{ .net_response = .{ .browser = 3, .request = 5, .status = 200, .mime = "text/html", .headers = .{} } },
         .{ .net_end = .{ .browser = 3, .request = 5, .outcome = .failed, .error_code = -3, .received = 12, .time_ms = 1 } },
         .{ .net_dropped = .{ .browser = 3, .count = 7 } },
@@ -2136,17 +2137,21 @@ fn testHeaders(b: *net_fields_mod.HeaderBuilder) message_mod.NetHeaderBlock {
 test "W9d①: 네트워크 메시지 여섯이 왕복하고 방향이 맞다 — 헤더 덩어리·표시·종류·결과·시각" {
     var hb: net_fields_mod.HeaderBuilder = .{};
     const headers = testHeaders(&hb);
-    const begin = (try roundTrip(.{ .net_begin = .{ .browser = 7, .request = std.math.maxInt(u64) - 1, .flags = .{ .main_frame = true, .navigation = true, .url_truncated = true }, .resource_type = 0, .time_ms = 1_760_000_000_123, .method = "POST", .url = "https://u:p@a.test/로그인?x=1", .initiator = "https://a.test", .site = "a.test", .headers = headers } })).net_begin;
+    const begin = (try roundTrip(.{ .net_begin = .{ .browser = 7, .request = std.math.maxInt(u64) - 1, .flags = .{ .main_frame = true, .navigation = true, .url_truncated = true }, .resource_type = 0, .time_ms = 1_760_000_000_123, .method = "POST", .url = "https://a.test/로그인?x=1", .initiator = "https://a.test", .site = "a.test", .host = "a.test", .headers = headers } })).net_begin;
     try std.testing.expectEqual(@as(u64, std.math.maxInt(u64) - 1), begin.request);
     try std.testing.expect(begin.flags.main_frame and begin.flags.navigation and begin.flags.url_truncated and !begin.flags.subframe);
     try std.testing.expectEqualStrings("POST", begin.method);
-    try std.testing.expectEqualStrings("https://u:p@a.test/로그인?x=1", begin.url);
+    try std.testing.expectEqualStrings("https://a.test/로그인?x=1", begin.url);
+    try std.testing.expectEqualStrings("a.test", begin.host); // W9d① 적대 리뷰 3 회차 T1: 자르기 전의 온 주소에서 읽은 호스트
+    // 잘리지 않은 주소는 사용자 정보를 실을 수 있다(설정 켬 — maru 가 읽는 쪽마다 지운다).
+    try std.testing.expectEqualStrings("https://u:p@a.test/", (try roundTrip(.{ .net_begin = .{ .browser = 7, .request = 1, .url = "https://u:p@a.test/", .host = "a.test" } })).net_begin.url);
     try std.testing.expectEqual(@as(u64, 1_760_000_000_123), begin.time_ms);
     var it = net_fields_mod.HeaderIterator.init(begin.headers);
     try std.testing.expectEqualStrings("sid=abc; theme=dark", it.next().?.value);
     try std.testing.expectEqualStrings("Accept", it.next().?.name);
-    const redirect = (try roundTrip(.{ .net_redirect = .{ .browser = 7, .request = 1, .status = 307, .flags = .{ .hsts = true }, .time_ms = 5, .url = "https://a.test/" } })).net_redirect;
+    const redirect = (try roundTrip(.{ .net_redirect = .{ .browser = 7, .request = 1, .status = 307, .flags = .{ .hsts = true }, .time_ms = 5, .url = "https://b.test/", .host = "b.test" } })).net_redirect;
     try std.testing.expect(redirect.flags.hsts);
+    try std.testing.expectEqualStrings("b.test", redirect.host);
     try std.testing.expectEqual(@as(u16, 307), redirect.status);
     const response = (try roundTrip(.{ .net_response = .{ .browser = 7, .request = 1, .status = 0, .mime = "", .flags = .{ .stripped = true } } })).net_response;
     try std.testing.expect(response.flags.stripped);
@@ -2156,13 +2161,16 @@ test "W9d①: 네트워크 메시지 여섯이 왕복하고 방향이 맞다 —
     try std.testing.expectEqual(@as(u64, 1 << 40), e.received);
     try std.testing.expectEqual(@as(u32, 9), (try roundTrip(.{ .net_dropped = .{ .browser = 7, .count = 9 } })).net_dropped.count);
     const watch = (try roundTrip(.{ .net_watch = .{ .browser = 7, .on = true, .full = false, .host_count = 4, .hosts = .{ "a.test", "b.test", "127.0.0.1", "localhost" } } })).net_watch;
-    try std.testing.expect(watch.on and !watch.full);
+    try std.testing.expect(watch.on and !watch.full and !watch.any_host);
+    // W9d① 적대 리뷰 3 회차: 어느 호스트든 grant 는 제 칸으로 — 사이트에 묶인 호스트와 함께 온다.
+    const both = (try roundTrip(.{ .net_watch = .{ .browser = 7, .on = true, .any_host = true, .host_count = 1, .hosts = .{ "a.test", "", "", "" } } })).net_watch;
+    try std.testing.expect(both.any_host and both.host_count == 1);
     try std.testing.expectEqualStrings("localhost", watch.hosts[3]);
     try std.testing.expectEqual(message_mod.Direction.to_sidecar, Tag.net_watch.direction());
     inline for (.{ Tag.net_begin, Tag.net_redirect, Tag.net_response, Tag.net_end, Tag.net_dropped }) |t| try std.testing.expectEqual(message_mod.Direction.to_maru, t.direction());
 }
 
-test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청 0, 짝이 맞지 않는 표시, 모르는 종류·결과, 상한, 꺼진 watch 의 호스트" {
+test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청 0, 짝이 맞지 않는 표시, 모르는 종류·결과, 상한, 꺼진 watch 의 호스트, 호스트 칸·잘린 주소의 사용자 정보(3 회차)" {
     var buf: [max_frame_bytes]u8 = undefined;
     const ok_begin: message_mod.NetBegin = .{ .browser = 1, .request = 2, .url = "https://a.test/" };
     _ = try encode(.{ .net_begin = ok_begin }, &buf);
@@ -2178,6 +2186,11 @@ test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .resource_type = 21 },
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .initiator = array_repeat.repeat("x", (message_mod.max_net_origin_bytes + 1)) },
         .{ .browser = 1, .request = 2, .url = "https://a.test/", .headers = .{ .count = 2, .bytes = "\x01a\x00\x00" } },
+        // W9d① 적대 리뷰 3 회차 T1: 호스트 칸은 소문자 호스트이거나 빈 글, 잘린 주소의 권한 부분에 사용자 정보가 없다.
+        .{ .browser = 1, .request = 2, .url = "https://a.test/", .host = "A.test" },
+        .{ .browser = 1, .request = 2, .url = "https://a.test/", .host = "a.test/x" },
+        .{ .browser = 1, .request = 2, .url = "https://a.test/", .host = array_repeat.repeat("h", (message_mod.max_net_host_bytes + 1)) },
+        .{ .browser = 1, .request = 2, .url = "https://u:p@a.test/long", .host = "a.test", .flags = .{ .url_truncated = true } },
     };
     for (bad_begins) |b| try std.testing.expect(std.meta.isError(encode(.{ .net_begin = b }, &buf)));
     try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_redirect = .{ .browser = 1, .request = 2, .status = 99, .url = "https://a/" } }, &buf));
@@ -2188,6 +2201,13 @@ test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청
     try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_dropped = .{ .browser = 1, .count = 0 } }, &buf));
     try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_watch = .{ .browser = 1, .on = false, .host_count = 1, .hosts = .{ "a.test", "", "", "" } } }, &buf));
     try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_watch = .{ .browser = 1, .on = false, .full = true } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_watch = .{ .browser = 1, .on = false, .any_host = true } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_redirect = .{ .browser = 1, .request = 2, .status = 302, .url = "https://b/", .host = "B" } }, &buf));
+    try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_redirect = .{ .browser = 1, .request = 2, .status = 302, .url = "https://u@b/x", .host = "b", .flags = .{ .url_truncated = true } } }, &buf));
+    _ = try encode(.{ .net_redirect = .{ .browser = 1, .request = 2, .status = 302, .url = "https://b/x", .host = "b", .flags = .{ .url_truncated = true } } }, &buf);
+    // 권한이 없는 주소(`data:` 안의 `://`)는 잘려도 사용자 정보가 아니다 — 받는다.
+    _ = try encode(.{ .net_begin = .{ .browser = 1, .request = 2, .url = "data:text/plain,mailto://a@b", .flags = .{ .url_truncated = true } } }, &buf);
+    _ = try encode(.{ .net_begin = .{ .browser = 1, .request = 2, .url = "news:abc@x.test", .flags = .{ .url_truncated = true } } }, &buf);
     try std.testing.expectError(error.InvalidNetwork, encode(.{ .net_watch = .{ .browser = 1, .on = true, .host_count = 1, .hosts = .{ "A.test", "", "", "" } } }, &buf));
     // decode 쪽: 쓰지 않는 비트·모르는 결과·헤더 개수 어긋남.
     const body = prefix_len + common_len;
@@ -2207,11 +2227,11 @@ test "W9d①: 네트워크의 닫힌 칸은 양쪽에서 거절한다 — 요청
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
     len = try encode(.{ .net_watch = .{ .browser = 1, .on = true, .host_count = 1, .hosts = .{ "a.test", "", "", "" } } }, &buf);
     bad = buf;
-    bad[body + 10] = 5; // 호스트 수가 상한을 넘는다
+    bad[body + 11] = 5; // 호스트 수가 상한을 넘는다(켬·설정·어느 호스트든 다음 칸)
     try std.testing.expectError(error.InvalidNetwork, decodeExact(bad[0..len]));
 }
 
-test "W9d①: 가장 큰 net_begin(주소 2 KiB·헤더 64 개 8 KiB·출처 상한)도 frame 상한 안에서 왕복한다" {
+test "W9d①: 가장 큰 net_begin(주소 2 KiB·헤더 64 개 8 KiB·출처·호스트 상한)도 frame 상한 안에서 왕복한다" {
     var hb: net_fields_mod.HeaderBuilder = .{};
     var i: usize = 0;
     while (hb.count < message_mod.max_net_header_count) : (i += 1) {
@@ -2221,7 +2241,7 @@ test "W9d①: 가장 큰 net_begin(주소 2 KiB·헤더 64 개 8 KiB·출처 상
     try std.testing.expectEqual(@as(u8, message_mod.max_net_header_count), hb.count);
     const url = "https://a.test/" ++ array_repeat.repeat("u", (message_mod.max_net_url_bytes - 15));
     const o = "https://" ++ array_repeat.repeat("o", (message_mod.max_net_origin_bytes - 8));
-    const got = (try roundTrip(.{ .net_begin = .{ .browser = 1, .request = 1, .method = array_repeat.repeat("x", message_mod.max_net_method_bytes), .url = url, .initiator = o, .site = array_repeat.repeat("s", message_mod.max_net_origin_bytes), .headers = hb.block() } })).net_begin;
+    const got = (try roundTrip(.{ .net_begin = .{ .browser = 1, .request = 1, .method = array_repeat.repeat("x", message_mod.max_net_method_bytes), .url = url, .initiator = o, .site = array_repeat.repeat("s", message_mod.max_net_origin_bytes), .host = array_repeat.repeat("h", message_mod.max_net_host_bytes), .headers = hb.block() } })).net_begin;
     try std.testing.expectEqual(message_mod.max_net_url_bytes, got.url.len);
     try std.testing.expectEqual(@as(u8, message_mod.max_net_header_count), got.headers.count);
 }
@@ -2232,12 +2252,13 @@ test "W9d①: 네트워크 프레임을 무작위로 망가뜨려도 풀기는 �
     var hb: net_fields_mod.HeaderBuilder = .{};
     const headers = testHeaders(&hb);
     const seeds = [_]Message{
-        .{ .net_begin = .{ .browser = 3, .request = 9, .flags = .{ .subframe = true }, .resource_type = 13, .method = "GET", .url = "https://a.test/x", .initiator = "https://b.test", .site = "a.test", .headers = headers } },
-        .{ .net_redirect = .{ .browser = 3, .request = 9, .status = 302, .url = "https://c.test/", .headers = headers } },
+        .{ .net_begin = .{ .browser = 3, .request = 9, .flags = .{ .subframe = true }, .resource_type = 13, .method = "GET", .url = "https://a.test/x", .initiator = "https://b.test", .site = "a.test", .host = "a.test", .headers = headers } },
+        .{ .net_redirect = .{ .browser = 3, .request = 9, .status = 302, .url = "https://c.test/", .host = "c.test", .headers = headers } },
         .{ .net_response = .{ .browser = 3, .request = 9, .status = 200, .mime = "application/json", .headers = headers } },
         .{ .net_end = .{ .browser = 3, .request = 9, .outcome = .failed, .error_code = -105, .received = 3 } },
         .{ .net_dropped = .{ .browser = 3, .count = 1 } },
         .{ .net_watch = .{ .browser = 3, .on = true, .full = true, .host_count = 1, .hosts = .{ "a.test", "", "", "" } } },
+        .{ .net_watch = .{ .browser = 3, .on = true, .any_host = true } },
     };
     var buf: [max_frame_bytes]u8 = undefined;
     var ok: usize = 0;

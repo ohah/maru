@@ -2850,8 +2850,9 @@ pub fn takeWebAddrNavigate(self: *AppSession) ?WebNavigateRequest {
         const url = self.addr_navigate_url_buf[0..self.addr_navigate_url_len];
         // OSR 탭은 Swift 에 WKWebView 가 없다 — sidecar 로 보낸다(W3b).
         if (isOsrSurface(sid)) {
-            web_osr.navigate(self.allocator, sid, url);
-            web_osr.noteUserNavigation(sid); // W10a: 주소창에 친 파일 주소는 사용자가 시작한 다운로드
+            // 사용자의 몰기를 먼저 적고 이동을 보낸다(`userNavigate` — W10a: 주소창에 친 파일 주소는 사용자가 시작한 다운로드, W9d① 적대 리뷰
+            // 3 회차 W2: 설정이 꺼졌으면 좁힌 네트워크 지켜보기가 이동보다 먼저 sidecar 에 간다).
+            web_osr.userNavigate(self.allocator, sid, url);
             return takeRestoredBrowserNavigate(self);
         }
         return .{ .surface_id = sid, .url = url };

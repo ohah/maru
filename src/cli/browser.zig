@@ -1938,6 +1938,7 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
             try w.writeAll("]");
         }
         if (intField(o.get("redirects"))) |n| try w.print(" [{d} redirect{s}]", .{ n, if (n == 1) "" else "s" });
+        if (boolField(o.get("engine_restarted"))) try w.writeAll(" [engine restarted]"); // W9d① 적대 리뷰 3 회차 T2
         if (boolField(o.get("other_site"))) try w.writeAll(" [other site]");
         if (boolField(o.get("cross_site_iframe"))) try w.writeAll(" [cross-site iframe]");
         const sw = strField(o.get("service_worker"));
@@ -1974,7 +1975,13 @@ fn renderNetworkHeaders(gpa: std.mem.Allocator, w: *std.Io.Writer, title: []cons
         try w.writeAll("  ");
         try writePageText(gpa, w, strField(o.get("name")), false);
         try w.writeAll(": ");
-        if (boolField(o.get("redacted"))) try w.writeAll("(hidden — browser.agent-network-full is off)") else try writeHeaderValue(gpa, w, strField(o.get("value")));
+        // W9d① 적대 리뷰 3 회차 D1: 자격 증명 값은 그 사이트의 쿠키 권한이 있어야 한다(설정이 켜져 있어도) — 까닭이 다르면 안내도 다르다.
+        if (boolField(o.get("needs_cookie_permission")))
+            try w.writeAll("(hidden — needs this site's cookie permission: maru browser get-cookies asks for it)")
+        else if (boolField(o.get("redacted")))
+            try w.writeAll("(hidden — browser.agent-network-full is off)")
+        else
+            try writeHeaderValue(gpa, w, strField(o.get("value")));
         try w.writeAll("\n");
     }
     if (truncated) try w.writeAll("  … (more headers were not recorded)\n");
@@ -2008,6 +2015,7 @@ fn renderNetworkRequest(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *
     if (intField(result.get("size"))) |sz| try w.print(" · {d} bytes", .{sz});
     if (intField(result.get("duration_ms"))) |d| try w.print(" · {d} ms", .{d});
     if (intField(result.get("error_code"))) |e| try w.print(" · net error {d}", .{e});
+    if (boolField(result.get("engine_restarted"))) try w.writeAll(" · ended when the Chromium engine restarted");
     try w.writeAll("\n");
     try w.writeAll("initiator ");
     const initiator = strField(result.get("initiator"));
@@ -4308,14 +4316,18 @@ test "W9d①: network 결과 — 줄마다 번호·메서드·상태·종류·�
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
     try testing.expectEqualStrings("(no requests)\n", out.written());
+    // W9d① 적대 리뷰 3 회차 T2: 엔진이 다시 떠 끝을 받지 못한 요청.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":4,\"method\":\"GET\",\"url\":\"https://a.test/poll\",\"type\":\"xhr\",\"state\":\"canceled\",\"start_ms\":1,\"error_code\":-3,\"engine_restarted\":true}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
+    try testing.expectEqualStrings("#4 GET - xhr https://a.test/poll [canceled -3] [engine restarted]\n", out.written());
 }
 
-test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈으로 다음 헤더를 흉내 내지 못한다), 숨긴 값은 이름만, 본문은 기록하지 않음(다른 사이트가 보낸 홉은 앱이 싣지 않는다 — 적대 리뷰 2 회차 N7)" {
+test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈으로 다음 헤더를 흉내 내지 못한다), 숨긴 값은 이름만(설정 끔과 쿠키 권한 없음은 안내가 다르다 — 3 회차 D1), 본문은 기록하지 않음(다른 사이트가 보낸 홉은 앱이 싣지 않는다 — 적대 리뷰 2 회차 N7)" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"POST\",\"url\":\"https://a.test/login\",\"type\":\"document\",\"state\":\"done\",\"start_ms\":1,\"duration_ms\":30,\"initiator\":\"https://a.test\",\"frame\":\"main\",\"status\":200,\"mime\":\"text/html\",\"size\":9," ++
         "\"redirects\":[{\"status\":302,\"url\":\"https://sso.test/x\",\"headers\":[]}]," ++
-        "\"request_headers\":[{\"name\":\"Cookie\",\"redacted\":true},{\"name\":\"X-Evil\",\"value\":\"a\\nSet-Cookie: x\"}],\"response_headers\":[{\"name\":\"Content-Type\",\"value\":\"text/html\"}],\"body_state\":\"not_recorded\"}}";
+        "\"request_headers\":[{\"name\":\"Cookie\",\"redacted\":true},{\"name\":\"Authorization\",\"redacted\":true,\"needs_cookie_permission\":true},{\"name\":\"X-Evil\",\"value\":\"a\\nSet-Cookie: x\"}],\"response_headers\":[{\"name\":\"Content-Type\",\"value\":\"text/html\"}],\"body_state\":\"not_recorded\"}}";
     try testing.expect(try renderResponse(testing.allocator, resp, .network_request, &out.writer));
     try testing.expectEqualStrings("#5 POST https://a.test/login\n" ++
         "document · done · status 200 · text/html · 9 bytes · 30 ms\n" ++
@@ -4324,6 +4336,7 @@ test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈�
         "  302 → https://sso.test/x\n" ++
         "request headers:\n" ++
         "  Cookie: (hidden — browser.agent-network-full is off)\n" ++
+        "  Authorization: (hidden — needs this site's cookie permission: maru browser get-cookies asks for it)\n" ++
         "  X-Evil: aSet-Cookie: x\n" ++
         "response headers:\n" ++
         "  Content-Type: text/html\n" ++

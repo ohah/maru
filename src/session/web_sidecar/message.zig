@@ -169,7 +169,8 @@ pub const Tag = enum(u8) {
     new_tab_credit = 133,
     /// 그 탭의 네트워크를 지켜보기 시작하거나 그만둔다(W9d① — maru 가 `browser_network` grant 를 넣거나 에이전트 탭이 태어날 때 켜고, 마지막
     /// grant 가 사라지거나 탭이 닫히면 끈다). `full` 은 설정 `browser.agent-network-full` — 거짓이면 sidecar 가 보내기 전에 헤더 값·주소의
-    /// 사용자 정보를 덜어 낸다(`net_policy`). `hosts` 는 그 탭의 grant 호스트(넷까지 — 덮이는 호스트의 응답만 그 값들이 남는다).
+    /// 사용자 정보를 덜어 낸다(`net_policy`). `any_host` 는 어느 호스트든 grant(에이전트 탭 — 요청의 첫 사이트로 덮는다), `hosts` 는 사이트에
+    /// 묶인 grant 호스트(넷까지 — 둘은 합친다). 둘 다 없으면 아무것도 덮지 않는다.
     net_watch = 134,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
@@ -1168,8 +1169,11 @@ pub const max_net_header_count: usize = 64;
 pub const max_net_headers_bytes: usize = 8 * 1024;
 /// 헤더 이름 하나의 상한(헤더 덩어리 안에서 u8 길이).
 pub const max_net_header_name_bytes: usize = 255;
-/// `net_watch` 가 싣는 grant 호스트 수 상한.
+/// `net_watch` 가 싣는 grant 호스트 수 상한 — 넘는 호스트는 maru 가 싣지 않는다(덮이지 않는 것으로 — 덜어 내는 쪽, 넓히지 않는다). 한 탭에
+/// 다른 사이트로 묶인 grant 가 다섯 pane 넘게 있는 일은 드물어 늘리지 않았다(W9d① 적대 리뷰 3 회차 P1a).
 pub const max_net_watch_hosts: usize = 4;
+/// 호스트 칸(`net_begin.host`·`net_redirect.host`) 상한 — DNS 이름 상한(RFC 1035).
+pub const max_net_host_bytes: usize = 253;
 /// CEF `cef_resource_type_t` 의 마지막 값(RT_NAVIGATION_PRELOAD_SUB_FRAME). 18 은 비었다(CEF 154 헤더).
 pub const max_net_resource_type: u8 = 20;
 
@@ -1217,6 +1221,10 @@ pub const NetBegin = struct {
     initiator: []const u8 = "",
     /// 첫 사이트(쿠키의 첫 사이트 주소)의 호스트 — 없으면 빈 글.
     site: []const u8 = "",
+    /// 요청 주소의 호스트(소문자 — http(s) 가 아니거나 모르면 빈 글). sidecar 가 **자르기 전의 온 주소**에서 읽는다(W9d① 적대 리뷰 3 회차 T1 —
+    /// 2 KiB 에서 자른 주소는 긴 사용자 정보 안에서 끊겨 `https://yyy…a.test` 꼴이 되고, 그 호스트가 덮이는 사이트로 읽혀 은행의 쿠키가 보였다).
+    /// 덮이는지는 이 칸으로만 가른다 — 주소(`url`)에서 호스트를 다시 읽지 않는다.
+    host: []const u8 = "",
     headers: NetHeaderBlock = .{},
 };
 
@@ -1229,6 +1237,8 @@ pub const NetRedirect = struct {
     time_ms: u64 = 0,
     /// 옮겨 갈 주소.
     url: []const u8,
+    /// 옮겨 갈 주소의 호스트(`NetBegin.host` 와 같은 규칙 — 자르기 전의 온 주소에서).
+    host: []const u8 = "",
     /// 리다이렉트 응답의 헤더.
     headers: NetHeaderBlock = .{},
 };
@@ -1273,6 +1283,10 @@ pub const NetWatch = struct {
     on: bool,
     /// 설정 `browser.agent-network-full`(켜짐이 기본). `on` 이 거짓이면 거짓.
     full: bool = false,
+    /// 어느 호스트든 grant 가 있다(에이전트가 연 탭의 태어날 때 grant — 요청의 첫 사이트로 덮는다). `on` 이 거짓이면 거짓. 사이트에 묶인
+    /// `hosts` 와 함께 올 수 있다(둘을 합친다 — 덮는 쪽을 덜지 않게, maru 가 읽는 쪽마다 다시 투영한다). 이 칸 없이는 「호스트 없음」 을
+    /// 「어느 사이트든」 으로 읽어 빈 사이트로 좁힌 grant 에 `invalid` 를 실었다(W9d① 적대 리뷰 3 회차 — 이제 빈 목록은 아무것도 덮지 않는다).
+    any_host: bool = false,
     host_count: u8 = 0,
     /// 앞 `host_count` 개만 쓴다(소문자 호스트 — `on` 이 거짓이면 0 개).
     hosts: [max_net_watch_hosts][]const u8 = @splat(""),

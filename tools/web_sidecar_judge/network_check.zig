@@ -26,6 +26,13 @@
 //!                                 maru 의 규칙(`net_policy.navigationCovered` — 처음 주소와 홉의 대상이 모두 덮일 때만)은 127.0.0.1 grant 에게 숨긴다
 //!   R9d2-redirect-back-agent-nav  에이전트가 그 탭을 은행의 열린 리다이렉트로 곧장 옮긴다(브라우저가 시작한 이동 — initiator 「null」): 같은 모양,
 //!                                 HttpOnly 쿠키까지 실린다 — 규칙은 initiator 를 보지 않고 숨긴다
+//! W9d① 적대 리뷰 3 회차(리뷰가 더한 판정 — 이름 `R9d3-*`, 고친 뒤에는 sidecar 가 온 주소에서 읽어 싣는 호스트 칸으로 maru 의 규칙을 본다):
+//!   R9d3-userinfo-truncated-full·-off  사용자 정보가 2 KiB 를 넘는 주소(`http://y…y.127.0.0.1z…@localhost/…`)로 옮긴다 — 호스트 칸은 실제 호스트
+//!                                 (localhost)이고, 실린 주소에는 사용자 정보가 없으며, 127.0.0.1 grant 에게 덮이지 않는다. 끔이면 sidecar 가 헤더를 싣지 않는다
+//!   R9d3-empty-watch-off          설정 끔에 묶인 호스트도 어느 호스트든도 없는 지켜보기(빈 사이트로 좁힌 grant) — 어떤 요청의 헤더도 싣지 않는다
+//!                                 (빈 목록은 아무것도 덮지 않는다 — 전에는 `invalid` 를 실어야 했다)
+//!   R9d3-request-ids(obs)         이 sidecar 프로세스의 처음 요청 번호들(두 번 돌리면 이동 요청 번호가 같다 — maru 는 다시 뜬 브라우저의 진행 중
+//!                                 기록을 끝낸다)
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -181,6 +188,8 @@ const Rec = struct {
     resource_type: u8 = 0,
     status: u16 = 0,
     url: []u8 = &.{},
+    /// 호스트 칸(begin — 요청 주소, redirect — 옮겨 갈 주소 — sidecar 가 온 주소에서 읽었다, W9d① 적대 리뷰 3 회차 T1).
+    host: []u8 = &.{},
     initiator: []u8 = &.{},
     site: []u8 = &.{},
     headers: []u8 = &.{},
@@ -212,8 +221,8 @@ const Run = struct {
 
     fn take(self: *Run, m: msg.Message) void {
         const r: ?Rec = switch (m) {
-            .net_begin => |v| .{ .tag = .net_begin, .browser = v.browser, .request = v.request, .flags = v.flags, .resource_type = v.resource_type, .url = self.dupe(v.url), .initiator = self.dupe(v.initiator), .site = self.dupe(v.site), .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
-            .net_redirect => |v| .{ .tag = .net_redirect, .browser = v.browser, .request = v.request, .hop = v.flags, .status = v.status, .url = self.dupe(v.url), .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
+            .net_begin => |v| .{ .tag = .net_begin, .browser = v.browser, .request = v.request, .flags = v.flags, .resource_type = v.resource_type, .url = self.dupe(v.url), .host = self.dupe(v.host), .initiator = self.dupe(v.initiator), .site = self.dupe(v.site), .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
+            .net_redirect => |v| .{ .tag = .net_redirect, .browser = v.browser, .request = v.request, .hop = v.flags, .status = v.status, .url = self.dupe(v.url), .host = self.dupe(v.host), .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
             .net_response => |v| .{ .tag = .net_response, .browser = v.browser, .request = v.request, .hop = v.flags, .status = v.status, .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
             .net_end => |v| .{ .tag = .net_end, .browser = v.browser, .request = v.request, .outcome = v.outcome },
             .net_dropped => |v| .{ .tag = .net_dropped, .browser = v.browser, .request = 0, .count = v.count },
@@ -285,13 +294,13 @@ const Run = struct {
         var n: usize = 0;
         var out: RedirectBack = .{ .begins = self.countFor(from, .net_begin, l.browser, l.request) };
         for (self.recs.items[from..]) |*rec| if (rec.tag == .net_redirect and rec.browser == l.browser and rec.request == l.request and n < hops.len) {
-            hops[n] = rec.url;
+            hops[n] = rec.host;
             n += 1;
         };
-        out.starts_uncovered = std.mem.indexOf(u8, l.url, "://localhost:") != null;
-        out.back_to_covered = n > 0 and std.mem.indexOf(u8, hops[n - 1], "://127.0.0.1:") != null;
-        // maru 가 읽을 때 쓰는 바로 그 규칙(`web_osr_network.navigationCovered` 가 부른다).
-        out.hidden = !protocol.net_policy.navigationCovered("127.0.0.1", l.url, hops[0..n]);
+        out.starts_uncovered = std.mem.eql(u8, l.host, "localhost");
+        out.back_to_covered = n > 0 and std.mem.eql(u8, hops[n - 1], "127.0.0.1");
+        // maru 가 읽을 때 쓰는 바로 그 규칙(`web_osr_network.navigationCovered` 가 부른다 — sidecar 가 실은 호스트 칸으로, 3 회차 T1).
+        out.hidden = !protocol.net_policy.navigationCovered("127.0.0.1", l.host, hops[0..n]);
         return out;
     }
 
@@ -306,6 +315,11 @@ const Run = struct {
             w.hosts[0] = "127.0.0.1";
         }
         try self.host.send(.{ .net_watch = w });
+    }
+
+    /// W9d① 적대 리뷰 3 회차: 묶인 호스트도 어느 호스트든도 없는 지켜보기(빈 사이트로 좁힌 grant 꼴).
+    fn watchNothing(self: *Run) !void {
+        try self.host.send(.{ .net_watch = .{ .browser = watched, .on = true, .full = false } });
     }
 };
 
@@ -357,9 +371,9 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         const worker = r.begin(at, watched, "/n/from-worker");
         const doc_ok = if (doc) |d| d.flags.main_frame and d.flags.navigation and d.resource_type == 0 else false;
         // iframe 문서를 부르는 요청은 부모가 일으키지만 CEF 154 는 initiator 를 「null」 로 준다(실측) — 프레임과 종류로 본다.
-        const iframe_ok = if (iframe) |d| d.flags.subframe and d.resource_type == 1 and protocol.net_policy.crossSiteIframe(d.flags, d.resource_type, d.url, d.initiator, d.site) else false;
+        const iframe_ok = if (iframe) |d| d.flags.subframe and d.resource_type == 1 and protocol.net_policy.crossSiteIframe(d.flags, d.resource_type, d.host, d.initiator, d.site) else false;
         // 다른 사이트 iframe 안의 요청: initiator 는 iframe 출처, 쿠키의 첫 사이트는 비었다(다른 사이트 문맥 — 실측).
-        const inner_ok = if (inner) |d| d.flags.subframe and std.mem.indexOf(u8, d.initiator, "localhost") != null and protocol.net_policy.crossSiteIframe(d.flags, d.resource_type, d.url, d.initiator, d.site) else false;
+        const inner_ok = if (inner) |d| d.flags.subframe and std.mem.indexOf(u8, d.initiator, "localhost") != null and protocol.net_policy.crossSiteIframe(d.flags, d.resource_type, d.host, d.initiator, d.site) else false;
         const worker_ok = if (worker) |d| !d.flags.service_worker and std.mem.indexOf(u8, d.initiator, "127.0.0.1") != null else false;
         report(doc_ok and iframe_ok and inner_ok and worker_ok, "net-attribution", std.fmt.bufPrint(&detail, "문서 {}(site {s}) · iframe 문서 {}(initiator {s} · site {s} · rt {d}) · iframe 안 {}(initiator {s} · site 「{s}」) · worker {}({s} · rt {d} · main {})", .{
             doc_ok,                                        if (doc) |d| d.site else "-",
@@ -370,6 +384,18 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             if (worker) |d| d.initiator else "-",          if (worker) |d| d.resource_type else 99,
             if (worker) |d| d.flags.main_frame else false,
         }) catch "");
+        // R9d3(관측): 이 sidecar 프로세스의 처음 요청 번호들 — 판정을 두 번 돌려 같으면 다시 뜬 sidecar 는 같은 번호를 다시 쓴다(maru 의 `live` 와 겹친다).
+        {
+            var ids_buf: [600]u8 = undefined;
+            var ids_len: usize = 0;
+            var shown: usize = 0;
+            for (r.recs.items) |rec| if (rec.tag == .net_begin and shown < 12) {
+                const part = std.fmt.bufPrint(ids_buf[ids_len..], "{d} ", .{rec.request}) catch break;
+                ids_len += part.len;
+                shown += 1;
+            };
+            report(true, "R9d3-request-ids(obs)", ids_buf[0..ids_len]);
+        }
         const api = r.begin(at, watched, "/n/api");
         const auth = if (api) |a| a.header("Authorization") orelse "" else "";
         const cookie = if (api) |a| a.header("Cookie") orelse "" else "";
@@ -429,6 +455,64 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
         if (nav) |l| shape2 = r.redirectBack(at2, l);
         const doc2 = if (nav) |l| l.flags.main_frame and l.resource_type == 0 else false;
         report(doc2 and shape2.ok(), "R9d2-redirect-back-agent-nav", std.fmt.bufPrint(&detail, "navigate → localhost/b/login?agent=1: 주 프레임 문서 {} · initiator 「{s}」 · begin {d} · 처음 주소 localhost {} · 홉 → 127.0.0.1 {} · 127.0.0.1 grant 에게 숨김 {} · (실린 Cookie 「{s}」)", .{ doc2, if (nav) |l| l.initiator else "-", shape2.begins, shape2.starts_uncovered, shape2.back_to_covered, shape2.hidden, c2 }) catch "");
+    }
+    // ── R9d3(적대 리뷰 3 회차): 사용자 정보가 긴 주소 — sidecar 가 2 KiB 앞부분만 싣는다. 앞부분이 「…y.127.0.0.1」 에서 끊기면 그 글의
+    // 호스트는 덮이는 호스트(127.0.0.1 의 하위 도메인 꼴)로 읽히고, 실제 호스트(localhost — 「은행」)는 잘려 나간다. ──
+    {
+        var lu: [2300]u8 = undefined;
+        const pad_len = msg.max_net_url_bytes - "http://".len - ".127.0.0.1".len;
+        var pad: [msg.max_net_url_bytes]u8 = undefined;
+        @memset(pad[0..pad_len], 'y');
+        const long = try std.fmt.bufPrint(&lu, "http://{s}.127.0.0.1zzzzzzzz@localhost:{d}/b/home?r9d3", .{ pad[0..pad_len], server_port });
+        for ([_]bool{ true, false }) |full| {
+            try r.watch(true, full);
+            r.pump(100);
+            const at3 = r.mark();
+            try r.navigate(watched, long);
+            r.pump(2500);
+            var doc: ?*const Rec = null;
+            for (r.recs.items[at3..]) |*rec| if (rec.tag == .net_begin and rec.browser == watched and rec.flags.main_frame and rec.resource_type == 0) {
+                doc = rec;
+                break;
+            };
+            var hops: [20][]const u8 = undefined;
+            var nh: usize = 0;
+            var set_cookie: []const u8 = "";
+            if (doc) |d| {
+                for (r.recs.items[at3..]) |*rec| if (rec.tag == .net_redirect and rec.request == d.request and nh < hops.len) {
+                    hops[nh] = rec.host;
+                    nh += 1;
+                };
+                if (r.first(at3, .net_response, watched, d.request)) |resp| set_cookie = resp.header("Set-Cookie") orelse "";
+            }
+            const shown_url: []const u8 = if (doc) |d| d.url else "";
+            const host_field: []const u8 = if (doc) |d| d.host else "-";
+            const truncated = if (doc) |d| d.flags.url_truncated else false;
+            const userinfo_shipped = protocol.net_policy.hasUserinfo(shown_url) or std.mem.indexOf(u8, shown_url, "yyyy") != null;
+            // 고친 뒤의 규칙 — maru 는 sidecar 가 실은 호스트 칸으로만 가른다.
+            const covered = doc != null and protocol.net_policy.navigationCovered("127.0.0.1", host_field, hops[0..nh]);
+            const cookie: []const u8 = if (doc) |d| d.header("Cookie") orelse "" else "";
+            const nhdr: u8 = if (doc) |d| d.header_count else 0;
+            const off_ok = full or nhdr == 0; // 끔: 덮이지 않는 요청은 헤더를 싣지 않는다
+            report(doc != null and !covered and std.mem.eql(u8, host_field, "localhost") and !userinfo_shipped and off_ok, if (full) "R9d3-userinfo-truncated-full" else "R9d3-userinfo-truncated-off", std.fmt.bufPrint(&detail, "주 프레임 문서 {} · 호스트 칸 「{s}」 · 실린 주소 「{s}」(url_truncated {}) · 사용자 정보가 실렸다 {} · 127.0.0.1 grant 에게 덮임(보인다) {} · 실린 Cookie 「{s}」 · 응답 Set-Cookie 「{s}」 · sidecar 가 실은 헤더 수 {d}", .{ doc != null, host_field, shown_url[0..@min(shown_url.len, 80)], truncated, userinfo_shipped, covered, cookie, set_cookie, nhdr }) catch "");
+        }
+        // 빈 지켜보기(묶인 호스트도 어느 호스트든도 없다) — 끔에서 어떤 요청의 헤더도 싣지 않는다.
+        try r.watchNothing();
+        r.pump(100);
+        const at4 = r.mark();
+        try r.navigate(watched, url(&u, "/n/main?nothing"));
+        r.pump(2500);
+        var begins: usize = 0;
+        var with_headers: usize = 0;
+        var unstripped: usize = 0;
+        for (r.recs.items[at4..]) |rec| if (rec.browser == watched and (rec.tag == .net_begin or rec.tag == .net_redirect or rec.tag == .net_response)) {
+            if (rec.tag == .net_begin) begins += 1;
+            if (rec.header_count != 0) with_headers += 1;
+            if (!(if (rec.tag == .net_begin) rec.flags.stripped else rec.hop.stripped)) unstripped += 1;
+        };
+        report(begins >= 3 and with_headers == 0 and unstripped == 0, "R9d3-empty-watch-off", std.fmt.bufPrint(&detail, "요청 {d} · 헤더를 실은 알림 {d} · 덜어 냈다는 표시가 없는 알림 {d}", .{ begins, with_headers, unstripped }) catch "");
+        try r.watch(true, true);
+        r.pump(100);
     }
     // 지켜보지 않는 탭.
     {

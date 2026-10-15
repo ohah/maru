@@ -392,6 +392,54 @@ pub const State = struct {
     }
 };
 
+// ── 떠난 문서의 iframe(W9d① 적대 리뷰 5 회차 B1) ─────────────────────────────────────────────────────────────
+
+/// 브라우저 하나가 기억하는 iframe 수 — 넘으면 가장 먼저 적은 것부터 잊는다(잊힌 iframe 의 요청은 표시 없이 간다 — 떠난 문서의 비콘은
+/// 새 문서가 iframe 을 64 개 열기 전, 떠나는 그 순간에 온다).
+pub const max_doc_frames: usize = 64;
+
+/// 하위 프레임마다 그 프레임이 문서를 연 때의 주 문서 세대(UI 스레드만 — `on_load_start`·보내는 task). 왜: 떠난 문서의 다른 사이트 iframe 이
+/// `pagehide` 에 보낸 비콘·keepalive fetch 는 새 문서의 `page_started`·`url_changed` 뒤에 maru 에 온다(실측 — 판정
+/// `R9d5-f2-old-iframe-beacon-after-nav`). 첫 사이트가 비어 오므로 maru 는 탭의 지금(새) 주소로 맨 위 문서를 정했고, 덮이지 않던 은행 페이지의
+/// 추적 iframe 요청이 새 사이트에 묶인 읽는 쪽에게 보였다. IO 스레드의 프레임 주소는 비거나 낡아(M4) 번호로 가른다. 세대는 보낼 때 비교한다 —
+/// 보낸 순서가 maru 가 받는 순서이므로, 새 문서의 `page_started` 뒤에 보내는 앞 문서 iframe 의 요청은 늘 표시가 선다(IO 스레드에서 비교하면
+/// 그 요청을 받은 때와 `on_load_start` 의 앞뒤를 알 수 없다). 모르는 프레임(아직 문서를 열지 않은 새 iframe 의 문서 요청)은 표시하지 않는다.
+/// 주 프레임은 가르지 않는다 — 같은 사이트 이동은 같은 프레임 번호를 다시 쓰고, 주 프레임 요청은 첫 사이트가 비어 오지 않는다.
+pub const DocFrames = struct {
+    /// 주 프레임의 지금 문서 세대 — 새 문서(`on_load_start`·오류 페이지)마다 올린다.
+    generation: u32 = 0,
+    ids: [max_doc_frames]u64 = @splat(0),
+    gens: [max_doc_frames]u32 = @splat(0),
+    len: usize = 0,
+    /// 다음에 덮어쓸 자리(가득 차면 가장 먼저 적은 것).
+    next: usize = 0,
+
+    /// 주 프레임에 새 문서가 시작됐다.
+    pub fn mainDocument(self: *DocFrames) void {
+        self.generation +%= 1;
+    }
+
+    /// 하위 프레임 `frame`(프레임 번호의 해시 — 0 은 모른다)이 지금 세대에서 문서를 열었다.
+    pub fn subframeDocument(self: *DocFrames, frame: u64) void {
+        if (frame == 0) return;
+        for (self.ids[0..self.len], 0..) |id, i| if (id == frame) {
+            self.gens[i] = self.generation;
+            return;
+        };
+        self.ids[self.next] = frame;
+        self.gens[self.next] = self.generation;
+        self.next = (self.next + 1) % max_doc_frames;
+        if (self.len < max_doc_frames) self.len += 1;
+    }
+
+    /// 그 하위 프레임이 앞 문서의 것인가(모르면 거짓).
+    pub fn previous(self: *const DocFrames, frame: u64) bool {
+        if (frame == 0) return false;
+        for (self.ids[0..self.len], 0..) |id, i| if (id == frame) return self.gens[i] != self.generation;
+        return false;
+    }
+};
+
 // ── 시험 ────────────────────────────────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
@@ -690,4 +738,32 @@ test "W9d① 적대 리뷰 3 회차 S1: 거절한 요청은 몫을 쓰지 않는
     try testing.expectEqual(global_before, t.global.tokens);
     try testing.expectEqual(@as(u32, 2), w1.dropped);
     try testing.expectEqual(@as(u32, 1), t.watchByCef(12).?.dropped);
+}
+
+test "W9d① 적대 리뷰 5 회차 B1: 떠난 문서의 iframe — 프레임이 문서를 연 세대가 지금 주 문서보다 앞이면 앞 문서의 것, 모르는 프레임·지금 문서의 프레임은 아니다, 64 개를 넘으면 먼저 적은 것부터 잊는다" {
+    var d: DocFrames = .{};
+    d.mainDocument(); // 은행 페이지
+    d.subframeDocument(0xA1); // 그 안의 추적 iframe
+    try testing.expect(!d.previous(0xA1)); // 지금 문서의 iframe
+    d.mainDocument(); // 새 문서 — 은행을 떠났다
+    try testing.expect(d.previous(0xA1)); // 떠난 문서의 iframe 이 보낸 비콘
+    try testing.expect(!d.previous(0xB2)); // 모르는 프레임(새 문서의 iframe 이 문서를 열기 전 — 그 문서 요청)
+    try testing.expect(!d.previous(0)); // 번호를 모른다
+    d.subframeDocument(0xB2);
+    try testing.expect(!d.previous(0xB2));
+    d.subframeDocument(0); // 번호 없는 프레임은 적지 않는다
+    try testing.expectEqual(@as(usize, 2), d.len);
+    // 같은 프레임이 다시 문서를 열면 그 세대로 고친다(자리를 늘리지 않는다).
+    d.subframeDocument(0xA1);
+    try testing.expect(!d.previous(0xA1));
+    try testing.expectEqual(@as(usize, 2), d.len);
+    // 가득 차면 가장 먼저 적은 것(0xA1)부터 잊는다 — 잊힌 프레임은 모르는 프레임이다.
+    d.mainDocument();
+    for (0..max_doc_frames - 2) |i| d.subframeDocument(0x1000 + i); // 남은 자리를 다 채운다
+    try testing.expect(d.previous(0xA1) and d.previous(0xB2)); // 아직 기억한다(앞 세대)
+    d.subframeDocument(0x9999);
+    try testing.expectEqual(max_doc_frames, d.len);
+    try testing.expect(!d.previous(0xA1)); // 잊었다
+    try testing.expect(d.previous(0xB2));
+    try testing.expect(!d.previous(0x9999));
 }

@@ -1179,6 +1179,9 @@ pub const max_net_resource_type: u8 = 20;
 
 /// 요청의 출처(W9d①). `main_frame`·`subframe` 은 CEF 가 준 프레임(없으면 둘 다 거짓 — worker 등), `service_worker` 는 CEF 의 브라우저가
 /// 없는 요청(서비스·공유 워커가 대신 보냈다 — initiator 출처로 탭에 붙였다). `stripped` — 설정이 꺼져 sidecar 가 값을 덜었다.
+/// `previous_document`(W9d① 적대 리뷰 5 회차 B1) — 주 프레임에 새 문서가 시작되기 **전**의 문서에 속한 iframe 이 보낸 요청이다(sidecar 가
+/// 프레임마다 그 프레임이 문서를 연 때의 주 문서 세대를 기억한다 — 떠난 문서의 iframe 이 `pagehide` 에 보낸 비콘이 새 문서의 `page_started`·
+/// `url_changed` 뒤에 온다, 실측). 하위 프레임에만 선다. maru 는 그 요청의 맨 위 문서 호스트를 모른다로 친다(덮지 않는 쪽).
 pub const NetFlags = packed struct(u8) {
     navigation: bool = false,
     main_frame: bool = false,
@@ -1187,7 +1190,7 @@ pub const NetFlags = packed struct(u8) {
     url_truncated: bool = false,
     headers_truncated: bool = false,
     stripped: bool = false,
-    _reserved: u1 = 0,
+    previous_document: bool = false,
 };
 
 /// 리다이렉트·응답의 표시(W9d①). `hsts` — `Non-Authoritative-Reason: HSTS` 인 내부 이동(서버가 보낸 것이 아니다).

@@ -91,28 +91,47 @@ pub fn hasUserinfo(url: []const u8) bool {
     return std.mem.indexOfScalar(u8, url[a.start..a.end], '@') != null;
 }
 
-/// 사용자 정보를 지운 주소(`out` 에 쓴다 — 없으면 `url` 그대로). 경로·질의의 `@` 는 건드리지 않는다.
+/// 사용자 정보를 지운 주소(`out` 에 쓴다 — 없으면 `url` 그대로). 경로·질의의 `@` 는 건드리지 않는다. URL 파서가 읽는 꼴(`parserView` — 탭·
+/// 줄바꿈을 뺀 것)에서 찾고, 지웠으면 그 꼴로 돌려준다(W9d① 적대 리뷰 5 회차 B2 — CEF 가 준 주소는 정규화돼 탭이 없지만 같은 규칙으로).
+/// `out` 이 모자라면 빈 글.
 pub fn stripUserinfo(url: []const u8, out: []u8) []const u8 {
-    const a = authority(url) orelse return url;
-    const at = std.mem.lastIndexOfScalar(u8, url[a.start..a.end], '@') orelse return url;
+    const src = parserView(url, out) orelse return url[0..0];
+    const a = authority(src) orelse return url;
+    const at = std.mem.lastIndexOfScalar(u8, src[a.start..a.end], '@') orelse return url;
     const cut_end = a.start + at + 1;
-    const len = url.len - (cut_end - a.start);
+    const len = src.len - (cut_end - a.start);
     if (len > out.len) return url[0..0];
-    @memcpy(out[0..a.start], url[0..a.start]);
-    @memcpy(out[a.start..len], url[cut_end..]);
+    // `src` 가 `out` 일 수 있다(탭을 뺐다) — 앞으로만 옮긴다.
+    std.mem.copyForwards(u8, out[0..a.start], src[0..a.start]);
+    std.mem.copyForwards(u8, out[a.start..len], src[cut_end..]);
     return out[0..len];
+}
+
+/// URL 파서가 읽는 꼴 — Chromium(GURL)·WHATWG URL 은 파싱 전에 ASCII 탭·LF·CR 을 모두 지운다(`ht<탭>tps:` 는 `https:`, `/<탭>/` 는 `//`).
+/// 사용자 정보를 찾는 쪽이 그 글자째 보면 브라우저가 권한으로 읽는 자리를 놓친다(W9d① 적대 리뷰 5 회차 B2). 그 글자가 없으면 `value`
+/// 그대로, 있으면 뺀 것을 `out` 에 써서 돌려준다(모자라면 null).
+fn parserView(value: []const u8, out: []u8) ?[]const u8 {
+    if (std.mem.indexOfAny(u8, value, "\t\n\r") == null) return value;
+    var n: usize = 0;
+    for (value) |ch| {
+        if (ch == '\t' or ch == '\n' or ch == '\r') continue;
+        if (n == out.len) return null;
+        out[n] = ch;
+        n += 1;
+    }
+    return out[0..n];
 }
 
 // ── 자르기 전의 온 주소(UTF-16 — sidecar 가 CEF 의 글에서, W9d① 적대 리뷰 3 회차 T1) ─────────────────────────────────────────
 
 /// 온 주소의 권한 부분 자리(UTF-16 단위) — `start` 는 `scheme://` 뒤, `host_start` 는 사용자 정보 뒤(없으면 `start`), `end` 는 첫 `/`·`?`·`#`
-/// (없으면 끝). 스킴(글자·숫자·`+`·`-`·`.`, 32 단위까지) 뒤에 `//` 가 없으면 null(`data:`·`blob:`·`about:` — 호스트가 없다). 사용자 정보의
-/// `@` 는 Chromium 이 퍼센트로 바꿔 두므로 권한 안의 마지막 `@` 가 경계다.
+/// (없으면 끝). 스킴(글자·숫자·`+`·`-`·`.` — 길이는 보지 않는다: GURL 은 어느 길이든 받는다, 5 회차 N1) 뒤에 `//` 가 없으면 null(`data:`·
+/// `blob:`·`about:` — 호스트가 없다). 사용자 정보의 `@` 는 Chromium 이 퍼센트로 바꿔 두므로 권한 안의 마지막 `@` 가 경계다.
 pub const Authority16 = struct { start: usize, host_start: usize, end: usize };
 
 pub fn authority16(units: []const u16) ?Authority16 {
     var i: usize = 0;
-    while (i < units.len and i <= 32) : (i += 1) {
+    while (i < units.len) : (i += 1) {
         const ch = units[i];
         if (ch == ':') break;
         const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '+' or ch == '-' or ch == '.';
@@ -252,30 +271,31 @@ fn schemeChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '+' or ch == '-' or ch == '.';
 }
 
-/// `value[at..]` 에서 시작하는 권한의 시작 자리와 `\` 가 권한을 끝내는지 — 아니면 null. 두 갈래:
-///   - `스킴:` 뒤 — 특별한 스킴이면 `/`·`\` 가 몇 개든(없어도 — `http:u:p@x`), 아니면 `//` 둘 이상일 때만.
+/// `value[at..]` 에서 시작하는 권한의 시작 자리와 `\` 가 권한을 끝내는지 — 아니면 null. `value` 는 URL 파서가 읽는 꼴이다(탭·줄바꿈을 뺐다 —
+/// `parserView`). 두 갈래:
+///   - `스킴:` 뒤 — 특별한 스킴이면 `/`·`\` 가 몇 개든(없어도 — `http:u:p@x`), 아니면 `//` 둘 이상일 때만. 스킴 길이는 보지 않는다(GURL 은
+///     어느 길이든 받는다 — 5 회차 N1: 33 바이트가 넘는 스킴에서 찾기를 멈춰 사용자 정보가 남았다).
 ///   - 스킴 없는 `//`(·`\\`) — 값의 처음이거나 구분 글자(공백·`<`·`"`·`'`·`=`·`,`·`;`·`(`) 뒤일 때(문서의 바탕 주소는 http(s) — 특별하다).
-/// `/`·`\` 사이의 공백·탭도 건너뛴다 — URL 파서는 탭·줄바꿈을 지우는데 헤더 값에는 탭이 그대로 오고 줄바꿈은 sidecar 가 공백으로 바꿔 싣는다
-/// (`http:/<탭>/u:p@x`).
+/// `/`·`\` 사이의 공백도 건너뛴다(더 지우는 쪽 — 판정은 GURL 이 그 꼴을 권한으로 읽지 않음을 보지 않았다).
 fn authorityStart(value: []const u8, at: usize) ?struct { start: usize, special: bool } {
     const ch = value[at];
     if (std.ascii.isAlphabetic(ch) and (at == 0 or !schemeChar(value[at - 1]))) {
         var j = at;
-        while (j < value.len and schemeChar(value[j]) and j - at <= 32) j += 1;
+        while (j < value.len and schemeChar(value[j])) j += 1;
         if (j >= value.len or value[j] != ':') return null;
         const special = specialScheme(value[at..j]);
         var k = j + 1;
         var slashes: usize = 0;
-        while (k < value.len and (value[k] == '/' or value[k] == '\\' or value[k] == ' ' or value[k] == '\t')) : (k += 1) {
+        while (k < value.len and (value[k] == '/' or value[k] == '\\' or value[k] == ' ')) : (k += 1) {
             if (value[k] != ' ') slashes += 1;
         }
         if (special or slashes >= 2) return .{ .start = k, .special = special };
         return null;
     }
     if ((ch == '/' or ch == '\\') and at + 1 < value.len and (value[at + 1] == '/' or value[at + 1] == '\\')) {
-        if (at != 0 and std.mem.indexOfScalar(u8, " \t<\"'=,;(", value[at - 1]) == null) return null;
+        if (at != 0 and std.mem.indexOfScalar(u8, " <\"'=,;(", value[at - 1]) == null) return null;
         var k = at;
-        while (k < value.len and (value[k] == '/' or value[k] == '\\' or value[k] == ' ' or value[k] == '\t')) k += 1;
+        while (k < value.len and (value[k] == '/' or value[k] == '\\' or value[k] == ' ')) k += 1;
         return .{ .start = k, .special = true };
     }
     return null;
@@ -294,32 +314,35 @@ fn hostAfterUserinfo(host_port: []const u8) []const u8 {
 /// `browser_storage` grant 호스트, 비면 아무것도)가 덮으면 둔다(D1 의 주소 규칙과 같다). 다른 헤더·사용자 정보 없는 값은 `value` 그대로,
 /// 지웠으면 `out` 에 쓴 것. 서버가 고른 글이라 GURL 보다 너그럽게 찾는다(더 지우는 쪽): 권한은 `/`·`?`·`#`(특별한 스킴이면 `\` 도,
 /// `Link` 의 `<…>` 안이면 `>` 도)까지이고 그 안의 마지막 `@` 까지가 사용자 정보다 — 공백·`,` 에서 멈추지 않는다(사용자 정보 안의 공백은
-/// GURL 이 퍼센트로 바꿔 받아들인다). `out` 이 모자라면(오지 않는다 — 덩어리 상한과 같다) 빈 값.
+/// GURL 이 퍼센트로 바꿔 받아들인다). 찾기는 URL 파서가 읽는 꼴에서 한다(`parserView` — 5 회차 B2: 헤더 값에는 탭이 그대로 오는데 GURL 은
+/// 탭을 지우고 읽어 `/<탭>/u:p@b` 는 스킴 상대, `ht<탭>tps:u:p@b` 는 https 주소였다 — 끔에서는 사용자 정보가 브라우저 프로세스를 나갔다).
+/// 지웠으면 그 꼴(탭 없이)로 돌려준다. `out` 이 모자라면(오지 않는다 — 덩어리 상한과 같다) 빈 값.
 pub fn maskHeaderUserinfo(name: []const u8, value: []const u8, cookie_host: []const u8, out: []u8) []const u8 {
     if (!urlHeader(name) or std.mem.indexOfScalar(u8, value, '@') == null) return value;
+    const src = parserView(value, out) orelse return out[0..0];
     const link = std.ascii.eqlIgnoreCase(name, "link");
     var w: usize = 0; // `out` 에 쓴 길이
-    var copied: usize = 0; // `value` 에서 옮긴 데까지
+    var copied: usize = 0; // `src` 에서 옮긴 데까지
     var changed = false;
     var i: usize = 0;
-    while (i < value.len) {
-        const a = authorityStart(value, i) orelse {
+    while (i < src.len) {
+        const a = authorityStart(src, i) orelse {
             i += 1;
             continue;
         };
         var end = a.start;
-        while (end < value.len) : (end += 1) {
-            const ch = value[end];
+        while (end < src.len) : (end += 1) {
+            const ch = src[end];
             if (ch == '/' or ch == '?' or ch == '#') break;
             if (ch == '\\' and a.special) break;
             if (ch == '>' and link) break;
         }
-        if (std.mem.lastIndexOfScalar(u8, value[a.start..end], '@')) |at_rel| {
+        if (std.mem.lastIndexOfScalar(u8, src[a.start..end], '@')) |at_rel| {
             const at = a.start + at_rel;
-            if (!hostCovers(cookie_host, hostAfterUserinfo(value[at + 1 .. end]))) {
-                const keep = value[copied..a.start];
+            if (!hostCovers(cookie_host, hostAfterUserinfo(src[at + 1 .. end]))) {
+                const keep = src[copied..a.start];
                 if (w + keep.len > out.len) return out[0..0];
-                @memcpy(out[w..][0..keep.len], keep);
+                std.mem.copyForwards(u8, out[w..][0..keep.len], keep); // `src` 가 `out` 일 수 있다(w ≤ copied — 앞으로만 옮긴다)
                 w += keep.len;
                 copied = at + 1;
                 changed = true;
@@ -328,9 +351,9 @@ pub fn maskHeaderUserinfo(name: []const u8, value: []const u8, cookie_host: []co
         i = @max(end, i + 1);
     }
     if (!changed) return value;
-    const rest = value[copied..];
+    const rest = src[copied..];
     if (w + rest.len > out.len) return out[0..0];
-    @memcpy(out[w..][0..rest.len], rest);
+    std.mem.copyForwards(u8, out[w..][0..rest.len], rest);
     return out[0 .. w + rest.len];
 }
 
@@ -523,7 +546,7 @@ test "W9d① 적대 리뷰 4 회차 C1: 주소를 싣는 헤더의 사용자 정
         .{ .name = "Location", .in = "https:\\\\u:p@b.test\\x", .want = "https:\\\\b.test\\x" },
         .{ .name = "Location", .in = "http:u:p@b.test/x", .want = "http:b.test/x" },
         .{ .name = "Location", .in = "http:/ /u:p@b.test/", .want = "http:/ /b.test/" }, // sidecar 가 줄바꿈을 공백으로 바꿨다
-        .{ .name = "Location", .in = "http:/\t/u:p@b.test/", .want = "http:/\t/b.test/" }, // 탭은 그대로 온다(URL 파서는 지운다)
+        .{ .name = "Location", .in = "http:/\t/u:p@b.test/", .want = "http://b.test/" }, // 탭은 그대로 온다 — URL 파서처럼 지우고 본다(5 회차 B2)
         .{ .name = "Location", .in = "https://u@v@b.test/", .want = "https://b.test/" }, // 마지막 @ 까지
         .{ .name = "Location", .in = "https://us er:p w@b.test/", .want = "https://b.test/" }, // 사용자 정보 안의 공백
         .{ .name = "Location", .in = "https://[::1]@b.test/", .want = "https://b.test/" },
@@ -581,4 +604,52 @@ test "W9d①: 자원 종류 이름 — CEF 의 0..20 을 덮고, 필터 이름 �
     try testing.expect(knownTypeName("xhr"));
     try testing.expect(knownTypeName("iframe"));
     try testing.expect(!knownTypeName("fetch"));
+}
+
+// ── W9d① 적대 리뷰 5 회차 재현(B2 — 주소를 싣는 헤더 값의 URL 문법 안 탭) ──
+
+test "W9d① 적대 리뷰 5 회차 재현 B2: 주소를 싣는 헤더의 탭 — GURL 은 탭을 지우고 읽는다(`/<탭>/u:p@b` 는 스킴 상대, `ht<탭>tps:u:p@b` 는 https), 가리기도 지워야 한다(켬 maru·끔 sidecar)" {
+    var b: [512]u8 = undefined;
+    var leaks: usize = 0;
+    for ([_][2][]const u8{
+        .{ "Location", "/\t/u:p@b.test/x" }, // 실제 CEF 154: 홉 주소 http://u:p@a.localhost/…(판정 R9d5-c1-tab-scheme-relative-off)
+        .{ "Location", "ht\ttps:u:p@b.test/x" }, // 실제 CEF 154: 홉 주소 https://u:p@a.localhost/…(판정 R9d5-c1-tab-in-scheme-off)
+        .{ "Location", "https\t://u:p@b.test/x" },
+        .{ "Refresh", "0;url=/\t/u:p@b.test/x" },
+        .{ "Link", "</\t/u:p@b.test/x>; rel=preload" },
+    }) |c| {
+        const shown = maskHeaderUserinfo(c[0], c[1], "", &b);
+        if (std.mem.indexOf(u8, shown, "u:p@") != null) {
+            std.debug.print("B2 leak: {s}: {f}\n", .{ c[0], std.zig.fmtString(shown) });
+            leaks += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 0), leaks);
+    // 줄바꿈도 GURL 은 지운다(헤더 값에는 오지 않는다 — sidecar 의 덩어리가 공백으로 바꾼다 — 같은 규칙으로 본다). 쿠키 권한이 그 호스트를
+    // 덮으면 둔다, 주소 칸(`stripUserinfo`)도 같은 꼴에서 찾는다.
+    try testing.expectEqualStrings("//b.test/x", maskHeaderUserinfo("Location", "/\n/u:p@b.test/x", "", &b));
+    try testing.expectEqualStrings("https:b.test/x", maskHeaderUserinfo("Location", "ht\rtps:u:p@b.test/x", "", &b));
+    try testing.expectEqualStrings("/\t/u:p@b.test/x", maskHeaderUserinfo("Location", "/\t/u:p@b.test/x", "b.test", &b)); // 지운 것이 없으면 값 그대로
+    try testing.expectEqualStrings("https://b.test/x", stripUserinfo("ht\ttps://u:p@b.test/x", &b));
+    try testing.expectEqualStrings("https://b.test/x", stripUserinfo("https:/\t/u:\np@b.test/x", &b));
+    // 끔: sidecar 가 보내기 전에(덮이는 호스트의 응답 — Location 은 값이 실린다).
+    var src: net_fields.HeaderBuilder = .{};
+    _ = src.add("Location", "/\t/u:p@b.test/x");
+    var off: net_fields.HeaderBuilder = .{};
+    stripHeaders(src.block(), true, &off);
+    var it = net_fields.HeaderIterator.init(off.block());
+    try testing.expect(std.mem.indexOf(u8, it.next().?.value, "u:p@") == null);
+}
+
+test "W9d① 적대 리뷰 5 회차 재현 N1: 33 바이트를 넘는 스킴 — 권한 자리를 찾지 않아 사용자 정보가 남는다(stripUserinfo·maskHeaderUserinfo; Chromium 이 그런 주소로 처리기를 부르는지는 재지 않았다)" {
+    var b: [512]u8 = undefined;
+    const url = "web+averyveryveryverylongcustomscheme://u:p@b.test/x";
+    try testing.expect(std.mem.indexOf(u8, stripUserinfo(url, &b), "u:p@") == null);
+    try testing.expect(std.mem.indexOf(u8, maskHeaderUserinfo("Location", url, "", &b), "u:p@") == null);
+    // 온 주소(UTF-16)의 권한 자리도, codec 의 잘린 주소 검사도 같은 규칙이다.
+    const u16s = units16(url);
+    const a = authority16(&u16s).?;
+    try testing.expectEqual(std.mem.indexOf(u8, url, "b.test").?, a.host_start);
+    try testing.expect(hasUserinfo(url));
+    try testing.expectError(error.InvalidNetwork, net_fields.checkBegin(.{ .browser = 1, .request = 1, .url = url, .flags = .{ .url_truncated = true } }));
 }

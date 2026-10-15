@@ -144,6 +144,30 @@ pub fn mainFrameAddress(id: BrowserId, url: [*c]const c.cef_string_t) void {
     doUnlock();
 }
 
+/// 주 프레임에 새 문서가 시작됐다(UI 스레드 `on_load_start`·오류 페이지 — `page_started`·`error_page` 를 보내기 전에). 그 뒤에 보내는 앞 문서
+/// iframe 의 요청에는 `previous_document` 가 선다(W9d① 적대 리뷰 5 회차 B1 — `net_gate.DocFrames`).
+pub fn documentStarted(id: BrowserId) void {
+    const entry = browsers.state.registry.byId(id) orelse return;
+    entry.net_docs.mainDocument();
+}
+
+/// 하위 프레임에 문서가 시작됐다(UI 스레드 `on_load_start`) — 그 프레임이 지금 문서의 것임을 적는다.
+pub fn subframeDocument(id: BrowserId, frame: [*c]c.cef_frame_t) void {
+    const entry = browsers.state.registry.byId(id) orelse return;
+    entry.net_docs.subframeDocument(frameKey(frame));
+}
+
+/// 프레임 번호(CEF 154 — 글)의 해시. 모르면 0(`DocFrames` 가 적지도 표시하지도 않는다). 어느 스레드에서나 부를 수 있다.
+fn frameKey(frame: [*c]c.cef_frame_t) u64 {
+    if (frame == null) return 0;
+    const id = frame.*.get_identifier.?(frame);
+    if (id == null) return 0;
+    defer api().string_userfree_utf16_free(id);
+    const u = units(id);
+    if (u.len == 0) return 0;
+    return @max(1, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(u)));
+}
+
 fn currentOrigin(handle: *anyopaque, buf: []u8) []const u8 {
     const browser: [*c]c.cef_browser_t = @ptrCast(@alignCast(handle));
     const frame = browser.*.get_main_frame.?(browser);
@@ -174,6 +198,8 @@ fn readUrl(value: [*c]const c.cef_string_t, buf: *[msg.max_net_url_bytes]u8, hos
     if (!whole.truncated) return .{ .text = whole.text, .truncated = false, .host = host };
     const a = net_policy.authority16(all) orelse return .{ .text = whole.text, .truncated = true, .host = host };
     if (a.host_start == a.start) return .{ .text = whole.text, .truncated = true, .host = host }; // 사용자 정보가 없다
+    // 스킴이 자르는 길이를 넘는다(5 회차 N1 — 스킴 길이는 보지 않는다): 앞부분에 사용자 정보만 남을 수 있어 싣지 않는다(그 요청·홉은 적지 않는다).
+    if (a.start >= buf.len) return .{ .text = buf[0..0], .truncated = true, .host = host };
     // `scheme://`(스킴은 ASCII 글자 — `authority16` 이 봤다) + 호스트부터의 앞부분.
     for (all[0..a.start], buf[0..a.start]) |ch, *o| o.* = @intCast(ch);
     const rest: c.cef_string_t = .{ .str = value.*.str + a.host_start, .length = value.*.length - a.host_start, .dtor = null };
@@ -296,6 +322,8 @@ const Event = struct {
     received: u64 = 0,
     time_ms: u64 = 0,
     header_count: u8 = 0,
+    /// 요청을 보낸 하위 프레임의 번호 해시(begin — 5 회차 B1: 보낼 때 그 프레임이 앞 문서의 것인지 본다). 모르면 0.
+    frame: u64 = 0,
     /// 적을 때 찍은 덜어 내기(대상마다 — 3 회차 P1c).
     stamp: gate.Stamp = .{},
     /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 지금 주소) — 온 주소에서 읽었다(3 회차 T1).
@@ -468,6 +496,7 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     if (frame != null and !e.flags.service_worker) {
         if (frame.*.is_main.?(frame) != 0) e.flags.main_frame = true else e.flags.subframe = true;
     }
+    if (e.flags.subframe) e.frame = frameKey(frame); // 5 회차 B1 — 보낼 때 앞 문서의 iframe 인지 본다
     e.resource_type = @intCast(@min(@as(c_uint, @intCast(request.*.get_resource_type.?(request))), msg.max_net_resource_type));
     if (e.resource_type == 18) e.resource_type = 6;
     e.time_ms = wallMs();
@@ -649,6 +678,10 @@ fn send(e: *const Event, browser: BrowserId, index: usize) void {
     const message: msg.Message = switch (e.kind) {
         .begin => blk: {
             var flags = e.flags;
+            // 5 회차 B1: 새 문서가 시작된 뒤 보내는 앞 문서 iframe 의 요청 — maru 는 그 맨 위 문서를 모른다로 친다(덮지 않는 쪽).
+            if (flags.subframe) if (browsers.state.registry.byId(browser)) |entry| {
+                flags.previous_document = entry.net_docs.previous(e.frame);
+            };
             if (!d.full) {
                 flags.stripped = true;
                 flags.headers_truncated = flags.headers_truncated or stripped.truncated;

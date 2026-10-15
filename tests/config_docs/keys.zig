@@ -131,6 +131,34 @@ test "config 문서 정합성 A: configuration.md 표의 모든 키가 실재한
     try std.testing.expectEqual(@as(usize, 0), missing);
 }
 
+test "config 문서 정합성 C: `editor.formatter.<언어>` 행의 언어 이름이 `formatter_languages` 와 같은 집합이다" {
+    // 문법이 늘 때마다 이 목록이 낡았다 — 번들 언어 확대 BL1~BL4 의 열둘이 「… 등」 뒤에 숨어 사용자가 `objc`·`csharp` 를 알 길이 없었다
+    // (적대적 6회차). 행 안의 「편집기 문법 이름이다 —」 뒤 첫 괄호 앞까지의 백틱 이름을 센다.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "docs/configuration.md", arena, .limited(4 * 1024 * 1024));
+    const row_at = std.mem.indexOf(u8, text, "| `editor.formatter.<언어>` |") orelse return error.NoFormatterRow;
+    const row = text[row_at .. std.mem.indexOfScalarPos(u8, text, row_at, '\n') orelse text.len];
+    const marker = "편집기 문법 이름이다 — ";
+    const list_at = (std.mem.indexOf(u8, row, marker) orelse return error.NoLanguageList) + marker.len;
+    const list = row[list_at .. std.mem.indexOfScalarPos(u8, row, list_at, '(') orelse row.len];
+    var documented: usize = 0;
+    var it = std.mem.splitSequence(u8, list, "·");
+    while (it.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " `");
+        if (name.len == 0) continue;
+        documented += 1;
+        var known = false;
+        for (maru.config.theme.formatter_languages) |n| if (std.mem.eql(u8, n, name)) {
+            known = true;
+        };
+        if (!known) std.debug.print("configuration.md: 포매터 언어 '{s}' 는 formatter_languages 에 없다\n", .{name});
+        try std.testing.expect(known);
+    }
+    try std.testing.expectEqual(maru.config.theme.formatter_languages.len, documented);
+}
+
 test "config 문서 정합성 B: 설계 문서의 config 키 선언은 실재하거나 미구현 표시가 있다" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();

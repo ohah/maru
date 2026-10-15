@@ -21,6 +21,7 @@
 
 const std = @import("std");
 const capmod = @import("control_capability.zig");
+const net_policy = @import("web_sidecar/net_policy.zig");
 
 /// DNS 이름 상한(RFC 1035 — 점 포함 253 바이트).
 pub const max_host_bytes: usize = 253;
@@ -48,26 +49,17 @@ pub const GrantHost = struct {
     }
 };
 
-/// `current` 가 `granted` 이거나 그 하위 도메인인가(대소문자 무시). `github.com` 은 `gist.github.com` 을 덮지만
-/// `evilgithub.com` 은 덮지 않는다(점 경계). 거꾸로 하위 도메인 grant 는 부모·형제를 덮지 않는다. 어느 쪽이든 비면 false.
-pub fn hostCovers(granted: []const u8, current: []const u8) bool {
-    if (granted.len == 0 or current.len == 0) return false;
-    if (current.len == granted.len) return std.ascii.eqlIgnoreCase(current, granted);
-    if (current.len < granted.len + 1) return false;
-    const tail = current[current.len - granted.len ..];
-    return current[current.len - granted.len - 1] == '.' and std.ascii.eqlIgnoreCase(tail, granted);
-}
+/// `current` 가 `granted` 이거나 그 하위 도메인인가(대소문자 무시, 점 경계). 규칙의 단일 출처는 `web_sidecar/net_policy.zig` 다 —
+/// W9d① 의 sidecar 가 같은 규칙으로 「덮이는 호스트」 를 가른다(같은 파일을 쓴다).
+pub const hostCovers = net_policy.hostCovers;
 
-/// http(s) URL 의 호스트. 다른 스킴(data:·about:·file: — 쿠키가 없다)이나 호스트 없는 URL 은 null.
-pub fn hostOfUrl(url: []const u8) ?[]const u8 {
-    const uri = std.Uri.parse(url) catch return null;
-    if (!std.ascii.eqlIgnoreCase(uri.scheme, "http") and !std.ascii.eqlIgnoreCase(uri.scheme, "https")) return null;
-    const host = uri.host orelse return null;
-    const raw = switch (host) {
-        .raw => |r| r,
-        .percent_encoded => |p| p,
-    };
-    return if (raw.len == 0) null else raw;
+/// http(s) URL 의 호스트(다른 스킴·호스트 없는 URL 은 null) — 단일 출처는 `net_policy.hostOfUrl`.
+pub const hostOfUrl = net_policy.hostOfUrl;
+
+/// 사이트에 묶이는 scope 인가 — 쿠키(`browser_storage`)와 네트워크 기록(`browser_network` — W9d①: 요청 헤더에 그 사이트의 로그인 쿠키가
+/// 들어 있다)는 모달이 보인 호스트와 그 하위 도메인에서만 인가한다. `browser` 는 호스트를 보지 않는다.
+pub fn hostBound(scope: capmod.ScopeClass) bool {
+    return scope == .browser_storage or scope == .browser_network;
 }
 
 /// 확인된 grant 한 건: pane P의 에이전트 → target web surface W, scope S.
@@ -76,10 +68,13 @@ pub const PaneGrant = struct {
     pane: u64,
     /// 제어 대상 web surface_id.
     target: u64,
-    /// `browser` | `browser_storage`(§9.4 D5). 각 scope는 **별도 grant**(별도 확인).
+    /// `browser` | `browser_storage` | `browser_network`(§9.4 D5). 각 scope는 **별도 grant**(별도 확인).
     scope: capmod.ScopeClass,
-    /// `browser_storage` 가 묶인 호스트(모달이 보인 URL 의 호스트). `browser` 는 보지 않는다.
+    /// `browser_storage`·`browser_network` 가 묶인 호스트(모달이 보인 URL 의 호스트 — `hostBound`). `browser` 는 보지 않는다.
     host: GrantHost = .{},
+    /// 어느 호스트든 인가한다(W9d① — 에이전트가 연 탭의 태어날 때 `browser_network` grant: 사용자 결정 2026-10-15 「에이전트가 연 탭은 묻지
+    /// 않는다」 — 에이전트가 그 탭을 어디로 옮기든 다시 묻지 않는다). 모달로 받은 grant 는 늘 거짓.
+    any_host: bool = false,
     /// 저장소가 새 자리를 기록할 때 매기는 번호(W9c① — 1 부터, 다시 쓰지 않는다). 같은 자리를 다시 허용하면 그대로이고, 철회 뒤 다시
     /// 허용하면 새 번호다. 넘긴 값은 쓰지 않는다. 자리 비교(`eql`)·인가에는 쓰지 않는다.
     id: u64 = 0,
@@ -118,6 +113,7 @@ pub const PaneGrantStore = struct {
     pub fn grant(self: *PaneGrantStore, g: PaneGrant) error{Full}!void {
         if (self.find(g)) |existing| {
             existing.host = g.host;
+            existing.any_host = g.any_host;
             return;
         }
         if (self.len >= max_grants) return error.Full;
@@ -136,7 +132,7 @@ pub const PaneGrantStore = struct {
     /// 호스트이거나 그 하위 도메인이어야 한다. browser authz 합성(control_browser)과 확인 dedup 이 호출한다.
     pub fn authorizes(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass, current_host: ?[]const u8) bool {
         const g = self.findConst(pane, target, scope) orelse return false;
-        if (scope != .browser_storage) return true;
+        if (!hostBound(scope) or g.any_host) return true;
         return hostCovers(g.host.slice(), current_host orelse return false);
     }
 
@@ -144,7 +140,7 @@ pub const PaneGrantStore = struct {
     /// 허용됐으면 옛 호스트로 시작한 op 는 권한을 잃는다). `browser` 는 호스트를 보지 않는다.
     pub fn stillGrants(self: *const PaneGrantStore, pane: u64, target: u64, scope: capmod.ScopeClass, host: *const GrantHost) bool {
         const g = self.findConst(pane, target, scope) orelse return false;
-        return scope != .browser_storage or g.host.eql(host);
+        return !hostBound(scope) or g.host.eql(host);
     }
 
     /// (pane, target, scope) grant 의 번호(없으면 null) — W9c①: 콘솔이 「같은 허락으로 읽는 쪽인가」 를 가른다.
@@ -324,6 +320,27 @@ test "다시 허용하면 호스트가 바뀌고, 옛 호스트로 시작한 op 
     try testing.expect(store.stillGrants(5, 11, .browser_storage, &new));
     store.revoke(5, 11, .browser_storage);
     try testing.expect(!store.stillGrants(5, 11, .browser_storage, &new));
+}
+
+test "W9d①: browser_network grant 도 사이트에 묶인다 — 쿠키와 같은 호스트 규칙, browser 를 함의하지도 받지도 않는다" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network, .host = GrantHost.init("app.test") });
+    try testing.expect(store.authorizes(5, 11, .browser_network, "app.test"));
+    try testing.expect(store.authorizes(5, 11, .browser_network, "api.app.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser_network, "bank.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser_network, null));
+    try testing.expect(!store.authorizes(5, 11, .browser, "app.test")); // 따로 묻는다
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser });
+    try testing.expect(!store.authorizes(5, 11, .browser_storage, "app.test"));
+    const h = GrantHost.init("app.test");
+    try testing.expect(store.stillGrants(5, 11, .browser_network, &h));
+    const other = GrantHost.init("bank.test");
+    try testing.expect(!store.stillGrants(5, 11, .browser_network, &other));
+    try testing.expect(hostBound(.browser_network) and hostBound(.browser_storage) and !hostBound(.browser));
+    // 에이전트가 연 탭의 태어날 때 grant 는 어느 호스트든(문서가 없어도) 인가한다.
+    try store.grant(.{ .pane = 6, .target = 12, .scope = .browser_network, .any_host = true });
+    try testing.expect(store.authorizes(6, 12, .browser_network, "bank.test"));
+    try testing.expect(store.authorizes(6, 12, .browser_network, null));
 }
 
 test "hostOfUrl: http(s) 호스트만 — 다른 스킴과 호스트 없는 URL 은 null" {

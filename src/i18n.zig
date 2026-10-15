@@ -771,6 +771,7 @@ const Table = struct {
     cfg_browser_engine: [:0]const u8,
     cfg_browser_search_url: [:0]const u8,
     cfg_browser_download_ask: [:0]const u8,
+    cfg_browser_agent_network_full: [:0]const u8,
     cfg_shell_command: [:0]const u8,
     cfg_shell_windows_shell: [:0]const u8,
     cfg_workspace_tab_inherit_cwd: [:0]const u8,
@@ -1276,6 +1277,10 @@ const Table = struct {
     // **로그인 토큰 접근을 묻는 문장이다.** 영어 UI 아래 한국어 동의문이 뜨면 사용자가 무엇을
     // 허용하는지 못 읽는다 — 버튼(`btn_allow`/`btn_deny`)은 이미 번역돼 있어 더 어긋나 보였다.
     grant_scope_storage: [:0]const u8,
+    // W9d①: 네트워크 기록 읽기(`browser_network`)를 묻는 동의문 — 설정 `browser.agent-network-full` 이 켜졌을 때(기본: 쿠키·인증 헤더 값과
+    // 다른 사이트의 요청까지 보인다)와 꺼졌을 때(이 사이트의 요청만 자세히, 헤더 값은 허용 목록만).
+    grant_scope_network: [:0]const u8,
+    grant_scope_network_limited: [:0]const u8,
     web_osr_gpu_unavailable: [:0]const u8,
     web_osr_profile_in_use: [:0]const u8,
     web_osr_start_failed: [:0]const u8,
@@ -2072,6 +2077,8 @@ const en: Table = .{
     .status_viewport_narrowed = "phone {0} cols",
     .ws_checkpoint_write_failed = "Workspace checkpoint save failed",
     .grant_scope_storage = "read and write this site's cookies and storage, including its subdomains and login tokens",
+    .grant_scope_network = "read this tab's network requests from now on, with all headers (cookies, login tokens) and other sites' requests",
+    .grant_scope_network_limited = "read this tab's network requests from now on (details for this site only, no cookie or login values)",
     .web_osr_gpu_unavailable = "The Chromium engine can't draw on this Mac (no GPU path). Use the built-in engine for this page.",
     .web_osr_profile_in_use = "Another maru is using the Chromium browser profile. Chromium tabs stay empty in this window.",
     .web_osr_start_failed = "The Chromium engine could not start. Reinstall it with brew reinstall ohah/maru/maru-chromium, then restart maru.",
@@ -2516,6 +2523,7 @@ const en: Table = .{
     .cfg_browser_engine = "Web browser tab engine (applies after restarting maru)",
     .cfg_browser_search_url = "Search address for \u{201C}Search … for\u{201D} in the Chromium tab context menu (%s is the selected text)",
     .cfg_browser_download_ask = "Ask where to save each file downloaded in a Chromium tab (off: save to ~/Downloads)",
+    .cfg_browser_agent_network_full = "Agents allowed to read a Chromium tab's network requests see all details: every header value (cookies, login tokens), URL passwords, other-site and iframe requests (off: only the allowed site in detail, safe headers only)",
     .cfg_shell_command = "Shell executable path (absolute, empty = automatic)",
     .cfg_shell_windows_shell = "Default Windows shell (when shell.command is empty)",
     .cfg_workspace_tab_inherit_cwd = "New tabs/terms inherit the focused cwd",
@@ -3148,6 +3156,8 @@ const ko: Table = .{
     .status_viewport_narrowed = "폰 {0}열",
     .ws_checkpoint_write_failed = "작업 공간 체크포인트 저장에 실패했습니다",
     .grant_scope_storage = "이 사이트(하위 도메인 포함)의 쿠키·스토리지(로그인 토큰 포함)를 읽고 쓰려",
+    .grant_scope_network = "이 탭의 네트워크 요청을 지금부터 모든 헤더(쿠키·로그인 토큰)와 다른 사이트 것까지 읽으려",
+    .grant_scope_network_limited = "이 탭의 네트워크 요청을 지금부터 읽으려(이 사이트만 자세히, 쿠키·로그인 값 없이)",
     .web_osr_gpu_unavailable = "이 Mac 에서는 Chromium 엔진으로 그릴 수 없습니다(GPU 경로 없음). 이 페이지는 내장 엔진을 쓰세요.",
     .web_osr_profile_in_use = "다른 maru 가 Chromium 브라우저 프로필을 쓰고 있습니다. 이 창의 Chromium 탭은 비어 있습니다.",
     .web_osr_start_failed = "Chromium 엔진을 시작하지 못했습니다. brew reinstall ohah/maru/maru-chromium 으로 다시 설치한 뒤 maru 를 다시 켜 주세요.",
@@ -3617,6 +3627,7 @@ const ko: Table = .{
     .cfg_browser_engine = "웹 브라우저 탭 엔진(maru 를 다시 시작하면 적용)",
     .cfg_browser_search_url = "Chromium 탭 우클릭 메뉴 「…에서 검색」의 검색 주소(%s 자리에 선택한 글)",
     .cfg_browser_download_ask = "Chromium 탭에서 받는 파일마다 저장할 곳을 묻는다(끄면 ~/Downloads 에 받는다)",
+    .cfg_browser_agent_network_full = "Chromium 탭의 네트워크 기록을 읽도록 허락받은 에이전트가 모든 것을 본다 — 헤더 값(쿠키·로그인 토큰)·주소의 비밀번호·다른 사이트와 iframe 의 요청(끄면 허락한 사이트만 자세히, 안전한 헤더만)",
     .cfg_shell_command = "셸 실행 파일 경로(절대경로, 빈 값=자동)",
     .cfg_shell_windows_shell = "Windows 기본 셸 종류(shell.command가 비었을 때)",
     .cfg_workspace_tab_inherit_cwd = "새 탭/Term이 포커스 cwd 상속",

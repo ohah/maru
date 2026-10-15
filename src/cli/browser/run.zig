@@ -107,6 +107,13 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.InvalidDialogToken => "--dialog must be a dialog token from `maru browser dialog` (a positive integer)",
         error.MissingFiles => "upload needs at least one file",
         error.TooManyFiles => "upload takes at most 10 files per call",
+        error.InvalidNetworkType => "--type takes request types separated by commas (document, iframe, stylesheet, script, image, font, xhr, media, worker, ...; at most 20)",
+        error.InvalidMethod => "--method must be an HTTP method name like GET or POST",
+        error.InvalidStatus => "--status must be a status code (100-599) or a class like 4xx",
+        error.InvalidPage => "--page must be 0-10000 and --page-size 1-200",
+        error.InvalidUrlFilter => "--url-contains must be 1-2048 bytes",
+        error.MissingRequestId => "network-request needs --req <n> (a req number from maru browser network)",
+        error.InvalidRequestId => "--req must be a req number from maru browser network (a positive integer)",
     };
 }
 

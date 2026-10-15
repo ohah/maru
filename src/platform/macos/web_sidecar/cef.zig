@@ -22,6 +22,10 @@ pub const c = @cImport({
     @cInclude("include/capi/cef_render_process_handler_capi.h"); // W5c — helper 의 웹 알림 대리 스크립트
     @cInclude("include/capi/cef_v8_capi.h");
     @cInclude("include/capi/cef_process_message_capi.h");
+    @cInclude("include/capi/cef_resource_request_handler_capi.h"); // W9d① — 네트워크 기록
+    @cInclude("include/capi/cef_request_context_handler_capi.h");
+    @cInclude("include/capi/cef_request_context_capi.h");
+    @cInclude("include/internal/cef_string_multimap.h");
 });
 
 pub const api_version: c_int = 15400;

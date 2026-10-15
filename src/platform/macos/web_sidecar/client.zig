@@ -30,6 +30,7 @@ const drag = @import("drag.zig");
 const notifications = @import("notifications.zig");
 const new_tab = @import("new_tab.zig");
 const console = @import("console.zig");
+const network = @import("network.zig");
 
 var client_obj: c.cef_client_t = undefined;
 var life_span: c.cef_life_span_handler_t = undefined;
@@ -117,6 +118,9 @@ pub fn get() *c.cef_client_t {
         request.on_render_process_terminated = &onRenderProcessTerminated;
         request.on_open_urlfrom_tab = &new_tab.onOpenUrlFromTab;
         request.on_before_browse = &onBeforeBrowse; // W9a 적대 리뷰 5 회차
+        // W9d①: 지켜보는 탭(maru 의 `net_watch`)의 요청 — IO 스레드에서 불린다. 지켜보는 탭이 없으면 곧 null.
+        network.init();
+        request.get_resource_request_handler = &network.resourceRequestHandler;
         jsdialog.on_jsdialog = &dialogs.onJsDialog;
         jsdialog.on_before_unload_dialog = &dialogs.onBeforeUnloadDialog;
         jsdialog.on_reset_dialog_state = &dialogs.onResetDialogState;
@@ -330,6 +334,7 @@ fn onAddressChange(_: [*c]c.cef_display_handler_t, browser: [*c]c.cef_browser_t,
     var buf: [protocol.wire.max_url_bytes]u8 = undefined;
     const text = library.readString(browsers.state.api, url, &buf);
     if (text.len == 0 or text.len == buf.len) return; // 비었거나 잘렸다(잘린 주소는 다른 주소다)
+    network.mainFrameAddress(entry.id, text); // W9d①: 서비스 워커 요청을 붙일 출처
     browsers.state.writer.send(.{ .url_changed = .{ .browser = entry.id, .url = text } }) catch {};
 }
 

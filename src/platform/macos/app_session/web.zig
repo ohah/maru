@@ -409,6 +409,9 @@ pub fn isOsrSurface(surface_id: u64) bool {
 /// W10b: 「매번 묻기」를 다운로드 목록(앱 전역 하나)에 알린다 — 설정을 읽을 때·다시 읽을 때·설정 화면에서 바꿀 때만(마지막으로 읽은
 /// 창이 이긴다). tick 마다 덮으면 창마다 설정이 다를 때(한 창만 다시 읽었다) 다운로드마다 묻기가 켜졌다 꺼졌다 했다(4 회차).
 pub fn applyDownloadAsk(self: *AppSession, force: bool) void {
+    // W9d①: 설정 `browser.agent-network-full` 도 같은 자리에서(읽을 때·다시 읽을 때·설정 화면·초기화) — 앱 전역 하나라 마지막으로 읽은 창이
+    // 이긴다(같은 값이면 아무것도 하지 않는다).
+    web_osr.setNetworkFull(self.loaded_config.config.browser.agent_network_full);
     const value = self.loaded_config.config.browser.download_ask;
     // `force` — 이 창에서 직접 바꿨다(다시 읽기·초기화·설정 화면의 이 키): 다른 창이 바꾼 전역을 이 창의 값으로 되돌린다(6 회차 —
     // 이 창의 적용값이 같다는 이유로 건너뛰어 설정 화면은 「꺼짐」인데 계속 물었다). 외관 전환 같은 관계없는 재적용은 건너뛴다.

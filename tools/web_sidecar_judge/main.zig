@@ -12,7 +12,8 @@
 //! W1c 판정은 `browsers_check.zig`, W2 판정은 `frames_check.zig`, W4 입력 판정은 `input_check.zig`, W5a 대화상자·파일 선택
 //! 판정은 `dialogs_check.zig`, W5b 권한 판정은 `permissions_check.zig` 가 든다. 하나라도 틀리면 exit 1.
 //! `maru-web-judge --input <설치 디렉터리> <프로필 뿌리>` 는 입력 판정만, `--dialogs` 는 대화상자 판정만, `--permissions` 는 권한
-//! 판정만 돈다. `--upload` 는 W9c③ 업로드가 기대는 Chromium 의 성질(`upload_check.zig`)만 본다.
+//! 판정만 돈다. `--upload` 는 W9c③ 업로드가 기대는 Chromium 의 성질(`upload_check.zig`)만 본다. `--network` 는 W9d① 네트워크 기록
+//! (`network_check.zig` — 지켜보는 탭의 갈래·헤더·리다이렉트·서비스 워커·쏟아짐·설정 끔)만 본다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -37,6 +38,7 @@ const datalist_check = @import("datalist_check.zig");
 const download_check = @import("download_check.zig");
 const devtools_check = @import("devtools_check.zig");
 const upload_check = @import("upload_check.zig"); // W9c③
+const network_check = @import("network_check.zig"); // W9d①
 const attacks = @import("attacks.zig");
 
 const helper_wait_ms = 20_000;
@@ -125,6 +127,16 @@ pub fn main(init: std.process.Init.Minimal) u8 {
         const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
         warmUp(host, std.mem.span(argv[3]));
         uploadChecks(host, std.mem.span(argv[3]));
+        return if (failures == 0) 0 else 1;
+    }
+    if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--network")) {
+        _ = signal(13, 1);
+        var host_buf: [1024]u8 = undefined;
+        const host = std.fmt.bufPrintSentinel(&host_buf, "{s}/maru-web-host", .{std.mem.span(argv[2])}, 0) catch return 2;
+        warmUp(host, std.mem.span(argv[3]));
+        var profile_buf: [1024]u8 = undefined;
+        const profile = std.fmt.bufPrintSentinel(&profile_buf, "--profile-dir={s}/net", .{std.mem.span(argv[3])}, 0) catch return 2;
+        network_check.run(&reportText, host, profile) catch |err| report(false, "network", "{s}", .{@errorName(err)});
         return if (failures == 0) 0 else 1;
     }
     if (argv.len == 4 and std.mem.eql(u8, std.mem.span(argv[1]), "--closeask")) {

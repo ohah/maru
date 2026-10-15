@@ -242,6 +242,8 @@ for(var i=0;i<n;i++)(function(f){var r=new FileReader();r.onload=function(){part
 <input type=file id=nav onchange="var f=this.files[0];location.href='/up3.html?nav-'+this.files.length+'-'+event.isTrusted+'-'+encodeURIComponent(f.name+':'+f.size)">
 <input type=file id=dlg onchange="rep(this,event);alert('got '+this.files.length)">
 <input type=file id=slow onchange="var f=this.files[0];location.href='/upslow?'+this.files.length+'-'+event.isTrusted+'-'+encodeURIComponent(f.name+':'+f.size)">
+<input type=file id=busy onchange="rep(this,event);setTimeout(function(){var t=Date.now();while(Date.now()-t<15000){}},0)">
+<input type=file id=busy2 onchange="setTimeout(function(){var t=Date.now();while(Date.now()-t<7000){}setTimeout(function(){var u=Date.now();while(Date.now()-u<12000){}},0)},0)">
 <button id=later style="position:absolute;left:30px;top:200px;width:120px;height:40px" onclick="setTimeout(function(){location='up2.html'},1200)">Later</button>
 HTML
 done
@@ -1035,6 +1037,28 @@ s1=\$(date +%s)
 echo "\$((s1 - s0))" > "\$out/up-slow-secs"
 grep -c 'GET /upslow?1-true-a.txt%3A6' "$root/http.log" > "\$out/up-slow-loads" || true
 "\$cli" browser close --surface "\$ups" > /dev/null 2>&1 || true
+# 적대 리뷰 4 회차(3 회차 변이 생존 T1c — 읽기 시한의 호출 자리): change 처리기가 바쁜 15 초를 타이머로 건다 — 넣기는 곧 {} 이고 곧 보낸 읽기가 15 초
+# 붙잡힌다(이동은 없다 — 앱이 먼저 보고 읽기를 건너뛸 길이 없다; 실측 CEF 154 review_w9c3_r4/probe busyv). 읽기의 시한(10 초)이 와 navigated:true 여야 한다
+# (그 호출 자리를 지우면 15 초 뒤 kept 로 답한다).
+"\$cli" browser open --url "http://127.0.0.1:$port/up.html?busy" > "\$out/up-busy-open" 2>&1
+upb=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/up-busy-open")
+b0=\$(date +%s)
+"\$cli" browser upload --surface "\$upb" --selector '#busy' "$root/files/a.txt" > "\$out/up-busy" 2>&1; echo "rc=\$?" >> "\$out/up-busy"
+b1=\$(date +%s)
+echo "\$((b1 - b0))" > "\$out/up-busy-secs"
+sleep 6
+hit_seen 'up-busy-1-true-a.txt%3A6%3Aalpha' && echo yes > "\$out/up-busy-hit" || echo no > "\$out/up-busy-hit"
+"\$cli" browser close --surface "\$upb" > /dev/null 2>&1 || true
+# 적대 리뷰 4 회차 L1: 바쁜 7 초 뒤 읽기가 「ok」 로 답하고, 그 끝에 건 바쁜 12 초가 놓기를 붙잡는다(실측 probe bb). 고치기 전에는 요청이 놓기를 기다려
+# 읽기를 보낸 때 + 15 초에 맨 -32004 였다 — 이제 읽기의 답으로 곧 성공(kept)이고 놓기는 요청과 묶이지 않는다. 페이지가 풀린 뒤 닫는다.
+"\$cli" browser open --url "http://127.0.0.1:$port/up.html?busy2" > "\$out/up-busy2-open" 2>&1
+upb2=\$(sed -n 's/^opened \([0-9]*\).*/\1/p' "\$out/up-busy2-open")
+b0=\$(date +%s)
+"\$cli" browser upload --surface "\$upb2" --selector '#busy2' "$root/files/a.txt" > "\$out/up-busy2" 2>&1; echo "rc=\$?" >> "\$out/up-busy2"
+b1=\$(date +%s)
+echo "\$((b1 - b0))" > "\$out/up-busy2-secs"
+sleep 14
+"\$cli" browser close --surface "\$upb2" > /dev/null 2>&1 || true
 echo approve > "$root/updecision"
 "\$cli" browser close --surface "\$up" > "\$out/up-close" 2>&1
 sleep 0.5
@@ -1323,6 +1347,13 @@ grep -q '^answered alert$' "$out/up-dlg-answer" && grep -q '^rc=0$' "$out/up-dlg
 grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-slow" && grep -q '^rc=0$' "$out/up-slow" && grep -q 'navigated: true' "$out/up-slow" && ! grep -q 'try again' "$out/up-slow" \
     && [ "$(cat "$out/up-slow-secs")" -le 25 ] && [ "$(cat "$out/up-slow-loads")" = 1 ] \
     || fail "an input whose change handler navigated to a server that answers after 40 s was not reported as received with navigated:true before the request deadline ($(tr '\n' ' ' < "$out/up-slow") · $(cat "$out/up-slow-secs")s · loads $(cat "$out/up-slow-loads"))"
+grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-busy" && grep -q '^rc=0$' "$out/up-busy" && grep -q 'navigated: true' "$out/up-busy" \
+    && [ "$(cat "$out/up-busy-secs")" -ge 9 ] && [ "$(cat "$out/up-busy-secs")" -le 15 ] && [ "$(cat "$out/up-busy-hit")" = yes ] \
+    || fail "an input whose change handler queued 15 s of busy work (the verify is held, no navigation) was not answered by the 10 s verify limit with navigated:true ($(tr '\n' ' ' < "$out/up-busy") · $(cat "$out/up-busy-secs")s · hit $(cat "$out/up-busy-hit"))"
+grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-busy2" && grep -q '^rc=0$' "$out/up-busy2" && ! grep -q '^note:' "$out/up-busy2" \
+    && [ "$(cat "$out/up-busy2-secs")" -le 14 ] \
+    || fail "an upload whose verify answered ok after 7 s of page work, while 12 more seconds of page work held the release, was not answered at once as kept ($(tr '\n' ' ' < "$out/up-busy2") · $(cat "$out/up-busy2-secs")s)"
+echo "PASS w9c-upload-busy: a verify held by 15 s of page work ends at the 10 s limit as navigated:true ($(cat "$out/up-busy-secs")s), and a verify that answers ok while the page then stays busy is answered at once as kept, not held by the release ($(cat "$out/up-busy2-secs")s)"
 [ ! -s "$out/up-after-close" ] || fail "closing the tab did not remove its upload-staging folder ($(tr '\n' ' ' < "$out/up-after-close"))"
 echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input and two files into a single-file input are refused before the dialog, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"

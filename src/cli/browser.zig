@@ -54,7 +54,7 @@ pub const browser_help =
     \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
     \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
     \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site)
+    \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
     \\  network-request --surface <id> --req <n>  show one request in detail: headers and redirects (Chromium tabs)
     \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
     \\
@@ -166,6 +166,8 @@ pub const NetworkCmd = struct {
     status: ?u16 = null,
     status_class: ?u8 = null,
     url_contains: ?[]const u8 = null,
+    /// 이 번호보다 오래된 요청만(앞 쪽 결과의 `next_before_req` — 새 요청이 와도 다음 쪽이 밀리지 않는다, W9d① 적대 리뷰 1 회차 F7).
+    before_req: ?u64 = null,
     clear: bool = false,
 
     pub fn typeNames(self: *const NetworkCmd) []const []const u8 {
@@ -306,6 +308,7 @@ pub const ParseError = error{
     InvalidUrlFilter, // `network --url-contains` 가 비었거나 2048 바이트 넘게
     MissingRequestId, // `network-request` 에 `--req` 없음
     InvalidRequestId, // `--req` 가 1..2^53-1 정수가 아님
+    InvalidBeforeReq, // `network --before-req` 가 1..2^53-1 정수가 아님
 };
 
 /// `--dialog` 번호의 상한 — JSON 수로 잃지 않고 오가는 가장 큰 정수(번호는 maru 가 1 부터 매긴다).
@@ -999,7 +1002,7 @@ const ActArgs = struct {
 };
 const ActExtras = struct { text: bool = false, key: bool = false };
 
-/// `network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--page n] [--page-size n] [--clear]`(W9d①).
+/// `network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]`(W9d①).
 /// `--type` 은 쉼표로 여럿, 되풀이해도 된다. 값은 서버가 다시 본다 — 여기서도 보는 것은 틀린 인자를 연결 전에 알리려고다.
 fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
     var surface: ?u64 = null;
@@ -1038,6 +1041,10 @@ fn parseNetworkArgs(rest: []const []const u8) ParseError!NetworkCmd {
             const v = try optValue(rest, &i, "--url-contains");
             if (v.len == 0 or v.len > 2048) return error.InvalidUrlFilter;
             cmd.url_contains = v;
+        } else if (matchOpt(a, "--before-req")) {
+            const n = std.fmt.parseInt(u64, try optValue(rest, &i, "--before-req"), 10) catch return error.InvalidBeforeReq;
+            if (n == 0 or n > max_dialog_token) return error.InvalidBeforeReq;
+            cmd.before_req = n;
         } else if (matchOpt(a, "--page")) {
             const n = std.fmt.parseInt(u32, try optValue(rest, &i, "--page"), 10) catch return error.InvalidPage;
             if (n > max_network_page) return error.InvalidPage;
@@ -1405,6 +1412,7 @@ pub fn buildRequestBytes(gpa: std.mem.Allocator, req: Request, id: cp.Id) (std.m
                 try obj.put(gpa, "status", .{ .string = &class_buf });
             }
             if (n.url_contains) |u| try obj.put(gpa, "url_contains", .{ .string = u });
+            if (n.before_req) |b| try obj.put(gpa, "before_req", .{ .integer = @intCast(b) });
             if (n.clear) try obj.put(gpa, "clear", .{ .bool = true });
             return cp.serializeMessage(gpa, .{ .request = .{ .id = id, .method = "browser.network", .params = .{ .object = obj } } });
         },
@@ -1941,9 +1949,14 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
         try w.writeAll("\n");
     }
     if (intField(result.get("hidden_before_grant"))) |n| if (n > 0) try w.print("({d} earlier request{s} hidden — made before your permission)\n", .{ n, if (n == 1) "" else "s" });
+    if (intField(result.get("hidden_other_site_pages"))) |n| if (n > 0) try w.print("({d} request{s} hidden — made while the tab showed a site your permission does not cover)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("dropped"))) |n| if (n > 0) try w.print("({d} request{s} not recorded — the page made them faster than maru keeps)\n", .{ n, if (n == 1) "" else "s" });
     if (intField(result.get("cross_site_iframe_hidden"))) |n| if (n > 0) try w.print("({d} request{s} from cross-site iframes hidden — browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
-    if (intField(result.get("next_page"))) |p| try w.print("more: --page {d}\n", .{p});
+    if (intField(result.get("service_worker_shared_hidden"))) |n| if (n > 0) try w.print("({d} service-worker request{s} hidden — a tab without permission shows the same site and browser.agent-network-full is off)\n", .{ n, if (n == 1) "" else "s" });
+    // 커서가 있으면 그것을 권한다 — 새 요청이 와도 다음 쪽이 밀리지 않는다(F7).
+    if (intField(result.get("next_before_req"))) |b| {
+        try w.print("more: --before-req {d}\n", .{b});
+    } else if (intField(result.get("next_page"))) |p| try w.print("more: --page {d}\n", .{p});
     return true;
 }
 
@@ -1961,10 +1974,19 @@ fn renderNetworkHeaders(gpa: std.mem.Allocator, w: *std.Io.Writer, title: []cons
         try w.writeAll("  ");
         try writePageText(gpa, w, strField(o.get("name")), false);
         try w.writeAll(": ");
-        if (boolField(o.get("redacted"))) try w.writeAll("(hidden — browser.agent-network-full is off)") else try writePageText(gpa, w, strField(o.get("value")), false);
+        if (boolField(o.get("redacted"))) try w.writeAll("(hidden — browser.agent-network-full is off)") else try writeHeaderValue(gpa, w, strField(o.get("value")));
         try w.writeAll("\n");
     }
     if (truncated) try w.writeAll("  … (more headers were not recorded)\n");
+}
+
+/// 헤더 값 — 탭은 빈칸으로 보이게 바꾼 뒤 걸러 낸다(`displaySafe` 는 탭을 지워 낱말이 붙었다 — W9d① 적대 리뷰 1 회차 곁가지,
+/// `writeLinesText` 와 같다). 헤더 값에는 줄바꿈이 오지 않는다(wire 가 거절한다) — 와도 지운다.
+fn writeHeaderValue(gpa: std.mem.Allocator, w: *std.Io.Writer, value: []const u8) !void {
+    const tmp = gpa.dupe(u8, value) catch return w.writeAll("…");
+    defer gpa.free(tmp);
+    std.mem.replaceScalar(u8, tmp, '\t', ' ');
+    try writePageText(gpa, w, tmp, false);
 }
 
 /// 한 요청의 자세한 것 — 머리 줄, 상태 줄, 리다이렉트, 요청·응답 헤더, 본문 상태.
@@ -3252,7 +3274,7 @@ test "browser --help 스냅샷: wait 포함 구현 명령만 정확히 공개" {
         \\  dialog  --surface <id>                     show the JS dialogs (alert, confirm, prompt, leave-page question) or file chooser blocking this tab or its popups (Chromium tabs)
         \\  handle-dialog --surface <id> (--accept | --dismiss) [--text <t>] [--dialog <token>]   answer one (only dialogs the agent may answer; --dialog picks one from `dialog`; Chromium tabs)
         \\  upload  --surface <id> (--selector <css> | --ref <ref> | --by-label <t> ...) [--] <file>...   put up to 10 files into a file input (Chromium tabs; every call asks the user, listing each file; relative paths are from this directory)
-        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site)
+        \\  network --surface <id> [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]   list the tab's network requests, newest first (Chromium tabs; separate permission per site; --before-req takes the next_before_req of the previous page)
         \\  network-request --surface <id> --req <n>  show one request in detail: headers and redirects (Chromium tabs)
         \\  repl    [--surface <id>]                   read one command per line; `use <id>` (or `open`) picks the tab so --surface can be left out
         \\
@@ -4315,4 +4337,29 @@ test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈�
     out.clearRetainingCapacity();
     try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"this request was dropped\",\"data\":{\"reason\":\"evicted\"}}}", .network_request, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "this request was dropped") != null);
+}
+
+test "W9d① 적대 리뷰 1 회차: network --before-req 커서(1..2^53-1)는 요청에 실리고, 결과의 next_before_req 를 권한다 — 숨김 수 두 가지, 헤더 값의 탭은 빈칸" {
+    const cmd = (try parse(&.{ "network", "--surface", "9", "--before-req", "11" })).request;
+    try testing.expectEqual(@as(?u64, 11), cmd.network.before_req);
+    const bytes = try buildRequestBytes(testing.allocator, cmd, .{ .number = 1 });
+    defer testing.allocator.free(bytes);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"before_req\":11") != null);
+    try testing.expectError(error.InvalidBeforeReq, parse(&.{ "network", "--surface", "9", "--before-req", "0" }));
+    try testing.expectError(error.InvalidBeforeReq, parse(&.{ "network", "--surface", "9", "--before-req", "9007199254740992" }));
+    try testing.expectError(error.InvalidBeforeReq, parse(&.{ "network", "--surface", "9", "--before-req", "x" }));
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const resp = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":12,\"method\":\"GET\",\"url\":\"https://a.test/\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1}]," ++
+        "\"hidden_before_grant\":0,\"hidden_other_site_pages\":3,\"dropped\":0,\"cross_site_iframe_hidden\":0,\"service_worker_shared_hidden\":1,\"full_details\":false,\"next_page\":1,\"next_before_req\":12}}";
+    try testing.expect(try renderResponse(testing.allocator, resp, .network, &out.writer));
+    try testing.expectEqualStrings("#12 GET - xhr https://a.test/\n" ++
+        "(3 requests hidden — made while the tab showed a site your permission does not cover)\n" ++
+        "(1 service-worker request hidden — a tab without permission shows the same site and browser.agent-network-full is off)\n" ++
+        "more: --before-req 12\n", out.written());
+    out.clearRetainingCapacity();
+    const detail = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://a.test/\",\"type\":\"xhr\",\"state\":\"done\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\"," ++
+        "\"request_headers\":[{\"name\":\"X-Pair\",\"value\":\"left\\tright\"}],\"body_state\":\"not_recorded\"}}";
+    try testing.expect(try renderResponse(testing.allocator, detail, .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "  X-Pair: left right\n") != null);
 }

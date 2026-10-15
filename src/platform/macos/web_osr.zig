@@ -1808,7 +1808,8 @@ fn sendsDuringDialog(gpa: std.mem.Allocator, method: []const u8, params: []const
 /// 탭마다 미뤄 둘 호출의 상한 — 넘으면 오래된 것부터 버린다(그 묶음·듣는 이는 이동 때 사라진다).
 const max_deferred_calls = 16;
 
-/// 대화상자가 사라진 뒤 보낼 호출 하나(인자 소유). 메서드는 미뤄도 되는 둘뿐이다 — 답을 버려도 되는 정리 호출.
+/// 미뤄 둔 정리 호출 하나(인자 소유) — 대화상자가 없고, 확정되지 않은 이동 중이 아니고, 이 줄에서 앞서 보낸 것이 자리를 놓았을 때 보낸다
+/// (`flushDeferredCalls`). 메서드는 미뤄도 되는 둘뿐이다 — 답을 버려도 되는 정리 호출(대화상자 중의 놓기, 업로드가 답한 뒤의 떼기·놓기).
 const DeferredCall = struct {
     method: DeferredMethod,
     params: []u8,
@@ -2467,7 +2468,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     expireContextMenus(gpa, now_ms);
     expireDragOuts(gpa, now_ms);
     expireDevtools(gpa, now_ms);
-    flushDeferredCalls(gpa); // 대화상자가 다른 길(이동·닫힘)로 사라졌을 때도(3 회차)
+    flushDeferredCalls(gpa); // 미룬 정리 — 대화상자가 사라졌거나(다른 길 — 이동·닫힘 포함, 3 회차) 이동이 확정됐거나 앞 것이 자리를 놓았을 때(4 회차)
     expireNewTabs(gpa, now_ms);
     receiveRings();
     closeOrphanPopups(gpa);
@@ -2778,9 +2779,14 @@ pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: 
         s.close_ask = if (accept) .asking else .stayed;
         s.close_ask_since_ms = monotonicNow();
     }
+    // W9c③ 적대 리뷰 5 회차 N3b: 떠나기 확인에 「떠나기」 — 이동은 이제 시작된다. 그것을 알리는 `main_frame_navigating`(CEF `on_before_browse`)은 이
+    // 답 **뒤에** 온다(실측 `t_bu_leave`: 답 → 1 ms 뒤 navigating → 8 ms 뒤 page_started) — 그 전에 아래 flush 가 미룬 정리를 보내면 확정까지 붙잡혀
+    // 그 탭의 DevTools 자리를 쥐었다(4 회차 N3 가 막으려던 모양). 지금 「확정되지 않은 이동」 으로 적는다 — 확정·불러오기 끝이 늘 그렇듯 푼다(이동이
+    // 시작되지 않아도 불러오기의 끝(`nav_state` 의 「불러오는 중 아님」)이나 탭 닫힘이 푼다).
+    if (d.kind == .before_unload and accept) s.nav_uncommitted = true;
     removeDialog(gpa, s, token);
     if (s.created) send(gpa, .{ .dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .text = buf[0..clamped.len], .suppress = suppress } });
-    flushDeferredCalls(gpa); // 답 뒤에 — 페이지가 풀린 다음 놓는다(3 회차)
+    flushDeferredCalls(gpa); // 답 뒤에 — 대화상자가 풀린 다음 미룬 정리를 보낸다(3 회차 — 「떠나기」 면 위에서 확정까지 둔다)
 }
 
 // ── W9c②: 에이전트가 대화상자를 보고 답한다 ────────────────────────────────────────────────────────────────────────
@@ -6589,6 +6595,75 @@ test "W9c③ 적대 리뷰 4 회차 재현 N3: 확정되지 않은 이동 중에
     flushDeferredCalls(gpa);
     try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
     try std.testing.expectEqualStrings("Runtime.callFunctionOn", methods[0]);
+}
+
+// ── W9c③ 적대 리뷰 5 회차 ──
+// N3 의 고침은 `nav_uncommitted` 를 보지만, 그 값을 켜는 `main_frame_navigating`(CEF `on_before_browse`)은 떠나기 확인에 답한 **뒤에** 온다 — 실측
+// review_w9c3_r4/probe/out/t_bu_leave.out: `reply 1 last 1` 6721 ms → `main_frame_navigating` 6722 ms → `page_started` 6729 ms. `replyDialog` 는 답을
+// 보낸 그 자리에서 `flushDeferredCalls` 를 부르므로 미룬 줄의 첫 호출(떼기)은 이동이 「확정되지 않은」 것으로 적히기 전에 나가 확정까지 붙잡힌다
+// (W9a 4·5 회차 실측). 업로드의 change 처리기가 떠나기 확인을 띄운 경우(D1 의 dialog:true)에는 대화상자로 끝낸 넣기의 자리(sidecar 가 답할 때까지)와
+// 이 떼기가 그 탭의 자리 둘을 함께 쥔다 — 4 회차 N3 가 막으려던 그 모양이다.
+test "W9c③ 적대 리뷰 5 회차 재현 N3b: 떠나기 확인에 「떠나기」 로 답한 순간의 flush 는 main_frame_navigating 보다 먼저다 — 미룬 정리를 확정 전에 보내지 않아야 한다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    // change 처리기가 떠나기 확인을 띄운 업로드 — dialog:true 로 답하고 떼기·놓기를 정리로 넘겼다(대화상자 동안 미룬다).
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
+    devtoolsCleanup(gpa, 7, "Runtime.callFunctionOn", "{\"objectId\":\"o-1\"}");
+    devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-42\"}");
+    outbox_pending.clearRetainingCapacity();
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 「떠나기」 — 이동은 이제 시작된다
+    applyD(gpa, .{ .main_frame_navigating = 7 }); // 실측: 답 뒤 1 ms
+    var methods: [4][]const u8 = undefined;
+    const sent = sentDevtoolsMethods(&methods);
+    if (sent != 0) {
+        std.debug.print("N3b: the leave answer flushed {d} deferred call(s) ({s}) before the navigation was marked uncommitted — it is held until commit and holds {d} DevTools slot(s) of the tab\n", .{ sent, methods[0], devtoolsUsed() });
+        return error.TestUnexpectedResult;
+    }
+    // 확정(새 문서) 뒤에는 떼기부터 나간다.
+    applyD(gpa, .{ .page_started = 7 });
+    flushDeferredCalls(gpa);
+    try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
+    try std.testing.expectEqualStrings("Runtime.callFunctionOn", methods[0]);
+}
+
+test "W9c③ 적대 리뷰 5 회차 N3b: 「머물기」 답 뒤에는 미룬 정리를 곧 보낸다 — 「떠나기」 뒤 주 프레임 이동이 오지 않아도(하위 프레임의 떠나기 확인 등) 불러오기의 끝이 푼다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    var methods: [4][]const u8 = undefined;
+    // 머물기 — 이동이 없다. 답한 그 자리에서 보낸다.
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .before_unload, .origin = "", .message = "" } });
+    devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-41\"}");
+    outbox_pending.clearRetainingCapacity();
+    replyDialog(gpa, 7, testDialogToken(7).?, false, "", false);
+    try std.testing.expect(!navigationUncommitted(7));
+    try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = surfaces.getPtr(7).?.deferred_in_flight, .status = .ok, .size = 0 } });
+    // 떠나기가 아닌 대화상자(alert)의 「확인」 도 이동이 아니다.
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 2, .kind = .alert, .origin = "", .message = "" } });
+    devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-42\"}");
+    outbox_pending.clearRetainingCapacity();
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false);
+    try std.testing.expect(!navigationUncommitted(7));
+    try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
+    applyD(gpa, .{ .devtools_result = .{ .browser = 7, .call = surfaces.getPtr(7).?.deferred_in_flight, .status = .ok, .size = 0 } });
+    // 떠나기 — 주 프레임 이동이 오지 않고 불러오기만 시작했다 끝났다. 끝(「불러오는 중 아님」)이 풀어 보낸다.
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 3, .kind = .before_unload, .origin = "", .message = "" } });
+    devtoolsCleanup(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-43\"}");
+    outbox_pending.clearRetainingCapacity();
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false);
+    try std.testing.expect(navigationUncommitted(7));
+    flushDeferredCalls(gpa);
+    try std.testing.expectEqual(@as(usize, 0), sentDevtoolsMethods(&methods));
+    applyD(gpa, .{ .nav_state = .{ .browser = 7, .can_go_back = false, .can_go_forward = false, .loading = true } });
+    applyD(gpa, .{ .nav_state = .{ .browser = 7, .can_go_back = false, .can_go_forward = false, .loading = false } });
+    try std.testing.expect(!navigationUncommitted(7));
+    flushDeferredCalls(gpa);
+    try std.testing.expectEqual(@as(usize, 1), sentDevtoolsMethods(&methods));
+    try std.testing.expectEqualStrings("Runtime.releaseObjectGroup", methods[0]);
 }
 
 test "W9c③ 적대 리뷰 3 회차: devtoolsLimitWait 는 보낸 호출의 시한을 줄인다(늘리지 않는다) — 그 시각이 지나면 timeout" {

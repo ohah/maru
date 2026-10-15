@@ -199,6 +199,12 @@ pub const Op = struct {
         if (self.stage == .set) self.set_sent = true;
     }
 
+    /// 보낸 넣기를 sidecar 가 자리 없음(`busy` — 확실히 페이지에 가지 않았다)으로 돌려줬다(적대 리뷰 5 회차 S1). 다시 보낼 때까지(앱이 그때
+    /// `markSetSent` 로 다시 적는다) 요청 시한은 「넣었다」 가 아니라 맨 시한이다 — 넣기는 페이지에 간 적이 없다.
+    pub fn markSetRefused(self: *Op) void {
+        if (self.stage == .set) self.set_sent = false;
+    }
+
     /// 요청 시한이 왔을 때 낼 업로드의 답(적대 리뷰 4 회차 L1) — 넣기를 보냈으면 성공에 `kept:false`·`navigated:true`(소유), 아니면 null(맨 시한).
     /// 넣기를 보낸 뒤 답이 정해지면 차례가 곧 답하므로(위) 이것이 불리는 때는 넣기나 읽기가 아직 답하지 않은 때뿐이다.
     pub fn lateSuccessJson(self: *const Op, gpa: std.mem.Allocator) !?[]u8 {
@@ -232,10 +238,11 @@ pub const Op = struct {
         return self.stage == .verify;
     }
 
-    /// 철회 — 원격 객체를 쥐었으면 놓은 뒤 끝낸다. 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
+    /// 철회 — 원격 객체를 쥐었으면 곧 실패로 끝내고 떼기·놓기는 답 뒤의 정리로 넘긴다(`doneThenCleanup` — 4 회차 L1 부터 놓기를 기다리지 않는다).
+    /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
         return switch (self.stage) {
-            .check, .tree_again, .set => try self.releaseThen(gpa, .failed, "the request was cancelled"),
+            .check, .tree_again, .set => try self.doneThenCleanup(gpa, .failed, "the request was cancelled"),
             else => null,
         };
     }
@@ -257,7 +264,7 @@ pub const Op = struct {
 
     /// 답이 정해졌다 — 곧 답하고, 쥔 것(듣는 이가 달려 있으면 떼기, 그리고 묶음 놓기)은 답 **뒤**의 정리로 넘긴다(`takeCleanup` — 적대 리뷰 4 회차
     /// L1: 놓기를 기다리면 바쁜 페이지가 정해진 답을 맨 시한으로 바꿨다). 대화상자가 떠 있으면 web_osr 의 미룬 줄이 그것이 사라진 뒤 보낸다(3 회차 nit).
-    fn releaseThen(self: *Op, gpa: std.mem.Allocator, status: Status, msg: []const u8) !Step {
+    fn doneThenCleanup(self: *Op, gpa: std.mem.Allocator, status: Status, msg: []const u8) !Step {
         self.cleanup = .{ .disarm = self.armed, .release = true };
         self.armed = false;
         return done(gpa, status, msg);
@@ -293,25 +300,25 @@ pub const Op = struct {
                 // 파일을 받았다). 맨 timeout 은 다시 올리게 했다.
                 if (self.stage == .verify or self.stage == .set) return self.verifyLate(gpa);
                 self.armed = false; // 페이지가 답하지 않는다 — 떼기도 붙잡힌다(놓기만)
-                return if (holds) self.releaseThen(gpa, .timeout, why) else done(gpa, .timeout, why);
+                return if (holds) self.doneThenCleanup(gpa, .timeout, why) else done(gpa, .timeout, why);
             },
             .failed => |why| {
                 // 보낸 넣기·읽기가 대화상자로 끝났다 — 넣기는 갔다(붙잡힌 넣기도 대화상자가 답해지면 마저 돈다, 3 회차 D1).
                 if ((self.stage == .set or self.stage == .verify) and std.mem.eql(u8, why, ops.dialog_reason)) return self.dialogShown(gpa);
                 if (self.stage == .set) self.given = true;
                 self.armed = false; // 탭이 닫혔거나 엔진이 멈췄거나 대화상자가 떴다 — 뗄 곳이 없거나 거절된다
-                return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
+                return if (holds) self.doneThenCleanup(gpa, .failed, why) else done(gpa, .failed, why);
             },
             .not_sent => |why| {
                 // 넣은 뒤 읽기를 이동 중이라 보내지 않았다 — 넣기가 이동을 걸었다(2 회차: 「then try again」 이 다시 올리게 했다).
                 if (self.stage == .verify and std.mem.eql(u8, why, ops.loading_reason)) return self.navigated(gpa);
                 // 넣은 뒤 대화상자가 떠 읽기를 못 보냈다 — 넣기는 `{}` 로 끝났다(3 회차 D1). 넣기 자체를 못 보낸 것은 아래의 실패 그대로(갔다가 아니다).
                 if (self.stage == .verify and std.mem.eql(u8, why, ops.dialog_reason)) return self.dialogShown(gpa);
-                return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
+                return if (holds) self.doneThenCleanup(gpa, .failed, why) else done(gpa, .failed, why);
             },
         };
         const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch
-            return if (holds) self.releaseThen(gpa, .failed, "malformed DevTools result") else done(gpa, .failed, "malformed DevTools result");
+            return if (holds) self.doneThenCleanup(gpa, .failed, "malformed DevTools result") else done(gpa, .failed, "malformed DevTools result");
         defer parsed.deinit();
         const v = parsed.value;
         switch (self.stage) {
@@ -347,9 +354,9 @@ pub const Op = struct {
                 return call(gpa, "Runtime.callFunctionOn", "{{\"objectId\":{f},\"functionDeclaration\":{f},\"arguments\":[{{\"value\":{d}}}],\"returnByValue\":true}}", .{ std.json.fmt(self.object.?, .{}), std.json.fmt(check_js, .{}), self.count });
             },
             .check => {
-                if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .failed, check_failed_reason);
-                const verdict = stringAt(v, &.{ "result", "value" }) orelse return self.releaseThen(gpa, .failed, check_failed_reason);
-                if (self.checkReason(verdict)) |why| return self.releaseThen(gpa, .failed, why);
+                if (at(v, &.{"exceptionDetails"}) != null) return self.doneThenCleanup(gpa, .failed, check_failed_reason);
+                const verdict = stringAt(v, &.{ "result", "value" }) orelse return self.doneThenCleanup(gpa, .failed, check_failed_reason);
+                if (self.checkReason(verdict)) |why| return self.doneThenCleanup(gpa, .failed, why);
                 if (self.phase == .post) self.armed = true; // 통과한 확인은 듣는 이를 달았다
                 // 모달 전: 놓고 멈춘다(모달). 승인 뒤: 확인과 넣기 사이의 이동을 한 번 더 본다.
                 if (self.phase == .pre) return self.releaseCall(gpa, .release_pre);
@@ -361,16 +368,16 @@ pub const Op = struct {
             },
             .verify => {
                 self.armed = false; // 읽기가 돌았다 — 처음에 듣는 이를 뗐다
-                if (at(v, &.{"exceptionDetails"}) != null) return self.releaseThen(gpa, .failed, mismatch_reason);
+                if (at(v, &.{"exceptionDetails"}) != null) return self.doneThenCleanup(gpa, .failed, mismatch_reason);
                 const verdict = stringAt(v, &.{ "result", "value" }) orelse "";
-                if (std.mem.eql(u8, verdict, "removed")) return self.releaseThen(gpa, .failed, removed_after_reason);
-                if (std.mem.eql(u8, verdict, "unseen")) return self.releaseThen(gpa, .failed, unseen_reason);
+                if (std.mem.eql(u8, verdict, "removed")) return self.doneThenCleanup(gpa, .failed, removed_after_reason);
+                if (std.mem.eql(u8, verdict, "unseen")) return self.doneThenCleanup(gpa, .failed, unseen_reason);
                 // 넣을 때 받은 목록이 맞으면 성공 — 그 뒤 페이지가 비웠으면 kept:false(다시 올리면 두 번 올라간다).
                 const kept = std.mem.eql(u8, verdict, "ok");
-                if (!kept and !std.mem.eql(u8, verdict, "dropped")) return self.releaseThen(gpa, .failed, mismatch_reason);
+                if (!kept and !std.mem.eql(u8, verdict, "dropped")) return self.doneThenCleanup(gpa, .failed, mismatch_reason);
                 const result = try self.successJson(gpa, kept, false, false);
                 defer gpa.free(result);
-                return self.releaseThen(gpa, .success, result);
+                return self.doneThenCleanup(gpa, .success, result);
             },
             .release_pre => unreachable, // 위에서
         }
@@ -378,7 +385,7 @@ pub const Op = struct {
 
     /// 쥔 객체가 있으면 놓고, 없으면 곧 실패.
     fn failHolding(self: *Op, gpa: std.mem.Allocator, why: []const u8) !Step {
-        if (self.stage == .tree_again) return self.releaseThen(gpa, .failed, why);
+        if (self.stage == .tree_again) return self.doneThenCleanup(gpa, .failed, why);
         return done(gpa, .failed, why);
     }
 
@@ -450,7 +457,7 @@ pub const Op = struct {
         self.armed = false;
         const result = try self.successJson(gpa, false, true, false);
         defer gpa.free(result);
-        return self.releaseThen(gpa, .success, result);
+        return self.doneThenCleanup(gpa, .success, result);
     }
 
     /// 넣기가 `{}` 로 끝난 뒤 읽기가 `verify_wait_ms` 안에 답하지 않았다(3 회차 T1 — 실측: change 처리기가 응답이 늦은 주소로 옮겨 읽기가 확정까지
@@ -472,7 +479,7 @@ pub const Op = struct {
         self.given = true;
         const result = try self.successJson(gpa, false, false, true);
         defer gpa.free(result);
-        return self.releaseThen(gpa, .success, result);
+        return self.doneThenCleanup(gpa, .success, result);
     }
 
     /// 성공 답 — `{"origin","files":[{"name","size"}],"kept","navigated","dialog"}`(L2 `serializeUploadResult` 가 검사한다). `kept` 거짓 = 넣을 때
@@ -527,7 +534,7 @@ pub const Op = struct {
             .world, .resolve, .check, .tree, .tree_again => if (gone) (if (self.phase == .post) page_changed_reason else detached_reason) else message,
             else => message,
         };
-        return if (holds) self.releaseThen(gpa, .failed, why) else done(gpa, .failed, why);
+        return if (holds) self.doneThenCleanup(gpa, .failed, why) else done(gpa, .failed, why);
     }
 };
 

@@ -473,3 +473,11 @@ test "W9c③ 적대 리뷰 1 회차 재현 R8: 엿보기는 첫 줄 앞의 공�
     defer freeLines(bw);
     try testing.expect(std.mem.indexOf(u8, bw[1], "no visible text at the start") != null);
 }
+
+// W9c③ 적대 리뷰 5 회차 변이 DSPnul: 시험의 NUL 은 매직 뒤(WEBP·SQLite)에만 있어, NUL 검사를 지운 변이가 살아남았다 — 글이 대부분인 앞부분에 NUL
+// 하나가 섞이면 제어 문자 비율(1/20)로는 글로 남는다. NUL 이 있으면 글 파일이 아니다(엿보기 줄을 만들지 않는다 — 「바이너리, N 바이트」).
+test "W9c③ 적대 리뷰 5 회차 변이 DSPnul: 글이 대부분이어도 앞부분에 NUL 이 하나 있으면 바이너리다" {
+    const head = "Quarterly report: all numbers are final and approved\x00 by the board of directors.\n";
+    try testing.expect(classify(head, 1000) == .binary);
+    try testing.expect(classify(head, 1000).binary == .unknown);
+}

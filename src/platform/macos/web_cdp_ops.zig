@@ -447,7 +447,7 @@ pub const Op = struct {
     }
 
     /// 철회됐다(부른 쪽이 다음 호출을 보내기 전에 본다) — 문서·후보 원격 객체를 쥐었으면 놓은 뒤 끝낸다(1 회차 — 그냥 끝내 페이지에 남았다).
-    /// 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
+    /// 업로드는 곧 끝내고 떼기·놓기를 답 뒤의 정리로 넘긴다(`takeUploadCleanup` — W9c③ 적대 리뷰 4 회차 L1). 쥔 것이 없으면 null(부른 쪽이 곧 끝낸다).
     pub fn cancel(self: *Op, gpa: std.mem.Allocator) !?Step {
         self.up_resend = false;
         if (self.stage == .upload) return if (try self.upload.?.cancel(gpa)) |st| try self.uploadRemember(gpa, st) else null;
@@ -527,6 +527,9 @@ pub const Op = struct {
             self.up_busy_retries = 0;
             return false;
         }
+        // 적대 리뷰 5 회차 S1: 보낸 넣기를 sidecar 가 자리 없음으로 돌려줬다 — 넣기는 가지 않았다. 다시 보낼 때까지 요청 시한은 「넣었다」 가 아니다
+        // (다시 보내면 앱이 `uploadSent` 로 다시 적는다).
+        u.markSetRefused();
         if (self.up_last == null or self.up_busy_retries >= max_kick_retries) return false;
         self.up_busy_retries += 1;
         self.up_resend = true;
@@ -4471,4 +4474,121 @@ test "W9c③ 적대 리뷰 4 회차 L1: 읽기가 ok 면 곧 성공(놓기는 �
     try testing.expect(op2.upload.?.given);
     try testing.expectEqual(@as(usize, 0), trail.cleanup);
     try testing.expectEqualStrings("DOM.setFileInputFiles", trail.methods.items[trail.methods.items.len - 1]);
+}
+
+// ── W9c③ 적대 리뷰 5 회차 ──
+// `set_sent` 는 앱이 넣기를 sidecar 로 보낸 직후 켜고 다시 끄지 않는다. sidecar 가 그 호출을 `busy` 로 돌려주면(`cdpReply` — `.busy` 는 「확실히 보내지
+// 않았다」 의 `busy_reason`) 업로드는 잠깐 뒤 그대로 다시 보내는데(1 회차 LOW-7), 그 사이(최대 45×100 ms) 요청 시한이 오면 `uploadLateSuccess` 가
+// 「넣었다」(navigated:true)로 답한다 — 넣기는 페이지에 간 적이 없다. 다시 보내기도 끝내 자리가 없으면 op 은 `given` 거짓으로 실패해 사본까지 지운다.
+// (sidecar 와 앱의 자리 상한이 같고 앱이 버린 자리를 더 오래 세므로 보통은 오지 않는 답이다 — nit.)
+test "W9c③ 적대 리뷰 5 회차 재현 S1: sidecar 가 보낸 넣기를 busy 로 돌려주면(확실히 안 갔다) 요청 시한의 답은 「넣었다」 가 아니어야 한다" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 44);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    UpPage.post = true;
+    var step = try op.resumeUpload(testing.allocator, up_staged[0..1]);
+    while (!op.uploadSetting()) {
+        const c = step.call;
+        defer testing.allocator.free(c.params);
+        step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
+    }
+    op.uploadSent(); // 앱이 넣기를 sidecar 로 보냈다
+    testing.allocator.free(step.call.params);
+    step = try op.feed(testing.allocator, .{ .not_sent = busy_reason }); // sidecar 가 busy 로 돌려줬다 — 넣기는 가지 않았다
+    try testing.expect(step == .sleep);
+    const late = try op.uploadLateSuccess(testing.allocator);
+    defer if (late) |l| testing.allocator.free(l);
+    // 다시 보내도 끝내 자리가 없다(앱 쪽 Busy — 앱은 `uploadSent` 를 부르지 않는다) — 실패하고 사본은 「안 갔다」 로 지워진다.
+    var rounds: usize = 0;
+    while (step == .sleep and rounds < 100) : (rounds += 1) {
+        const again = try op.wake(testing.allocator);
+        testing.allocator.free(again.call.params);
+        step = try op.feed(testing.allocator, .{ .not_sent = busy_reason });
+    }
+    defer if (step == .done) testing.allocator.free(step.done.result);
+    try testing.expect(step == .done and step.done.status == .failed);
+    try testing.expect(!op.upload.?.given);
+    if (late) |l| {
+        std.debug.print("S1: the set was refused by the sidecar (busy) and then never sent, but a request deadline in between would answer {s}\n", .{l});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "W9c③ 적대 리뷰 5 회차 S1: busy 로 돌아온 넣기를 다시 보내면(앱이 다시 적는다) 그 뒤의 요청 시한은 다시 「넣었다」 다" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"ref\":\"n9\",\"files\":[\"/a.txt\"]}", 45);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    UpPage.post = true;
+    var step = try op.resumeUpload(testing.allocator, up_staged[0..1]);
+    while (!op.uploadSetting()) {
+        const c = step.call;
+        defer testing.allocator.free(c.params);
+        step = try op.feed(testing.allocator, UpPage.answer(c.method, c.params));
+    }
+    op.uploadSent();
+    testing.allocator.free(step.call.params);
+    step = try op.feed(testing.allocator, .{ .not_sent = busy_reason });
+    try testing.expect(step == .sleep);
+    try testing.expect((try op.uploadLateSuccess(testing.allocator)) == null);
+    // 잠깐 뒤 같은 넣기를 다시 — 이번에는 나갔다.
+    const again = try op.wake(testing.allocator);
+    defer testing.allocator.free(again.call.params);
+    try testing.expectEqualStrings("DOM.setFileInputFiles", again.call.method);
+    try testing.expect(op.uploadSetting());
+    op.uploadSent();
+    const late = (try op.uploadLateSuccess(testing.allocator)) orelse return error.TestExpectedLateSuccess;
+    defer testing.allocator.free(late);
+    try testing.expect(std.mem.indexOf(u8, late, "\"navigated\":true") != null);
+}
+
+// ── W9c③ 적대 리뷰 5 회차 변이(전 기능) — 살아남은 변이를 잡는 시험 ──
+// OPworld: 시험 페이지는 `DOM.resolveNode` 의 인자를 보지 않아, 칸의 objectId 를 주 world(context 0 — 페이지가 그 칸의 getter·듣는 이를 고칠 수
+// 있는 곳)에서 잡는 변이가 살아남았다.
+test "W9c③ 적대 리뷰 5 회차 변이 OPworld: 칸의 objectId 는 maru 의 격리 world 에서 잡는다 — 모달 전·승인 뒤의 DOM.resolveNode 가 createIsolatedWorld 가 준 context 를 싣는다" {
+    UpPage.reset();
+    var trail: Trail = .{};
+    defer trail.deinit();
+    var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 47);
+    defer op.deinit(testing.allocator);
+    const paused = try driveUpload(&op, try op.start(testing.allocator), &trail);
+    testing.allocator.free(paused.confirm.origin);
+    UpPage.post = true;
+    const end = try driveUpload(&op, try op.resumeUpload(testing.allocator, up_staged[0..1]), &trail);
+    defer testing.allocator.free(end.done.result);
+    try testing.expectEqual(Status.success, end.done.status);
+    var resolves: usize = 0;
+    for (trail.methods.items, trail.params.items) |m, prm| if (std.mem.eql(u8, m, "DOM.resolveNode")) {
+        resolves += 1;
+        try testing.expect(std.mem.indexOf(u8, prm, "\"executionContextId\":7") != null); // happyPage 의 createIsolatedWorld 가 준 번호
+    };
+    try testing.expectEqual(@as(usize, 2), resolves);
+}
+
+// OPbusypre: 승인 뒤의 「자리 없음」 은 잠깐 뒤 다시 보내지만(1 회차 R10) 모달 전은 그대로 실패다(아직 아무도 승인하지 않았다 — 에이전트가 다시
+// 부르면 된다). 그 갈림을 보는 시험이 없어 모달 전에도 다시 보내는 변이가 살아남았다.
+test "W9c③ 적대 리뷰 5 회차 변이 OPbusypre: 모달 전에 자리가 없어 못 보낸 업로드 호출은 다시 보내지 않고 「retry shortly」 로 곧 끝낸다" {
+    for ([_][]const u8{ "Page.createIsolatedWorld", "DOM.resolveNode" }) |busy_method| {
+        UpPage.reset();
+        var trail: Trail = .{};
+        defer trail.deinit();
+        var op = try Op.init(testing.allocator, .upload, "{\"selector\":\"#f\",\"files\":[\"/a.txt\"]}", 48);
+        defer op.deinit(testing.allocator);
+        UpPage.busy_once = busy_method;
+        var sleeps: usize = 0;
+        const end = try driveUploadSleeping(&op, try op.start(testing.allocator), &trail, &sleeps);
+        defer if (end == .done) testing.allocator.free(end.done.result);
+        try testing.expect(end == .done);
+        try testing.expectEqual(@as(usize, 0), sleeps);
+        try testing.expectEqual(Status.failed, end.done.status);
+        try testing.expectEqualStrings(busy_reason, end.done.result);
+        try testing.expectEqual(@as(usize, 1), trail.count(busy_method));
+    }
 }

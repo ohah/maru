@@ -2706,6 +2706,12 @@ pub fn browserOpFromRequest(
 
 /// 실행 전 aggregate 예산 부족. 정확한 사용량은 load oracle이 되므로 노출하지 않는다.
 pub fn serializeResourceBusy(gpa: std.mem.Allocator, request_bytes: []const u8, resource: []const u8) std.mem.Allocator.Error![]u8 {
+    return serializeResourceBusyMessage(gpa, request_bytes, resource, cp.ErrorCode.resource_busy.defaultMessage());
+}
+
+/// `serializeResourceBusy` 에 까닭을 말하는 메시지를 단 판(W9c③ 적대 리뷰 5 회차 — 앞선 업로드의 파일 읽기가 멈춰 새 업로드를 받지 않을 때: 다시
+/// 해도 그 읽기가 풀릴 때까지 같고 maru 를 다시 띄워야 풀릴 수 있다는 것을 말하지 않으면 에이전트가 하염없이 다시 부른다). 코드·data 꼴은 같다.
+pub fn serializeResourceBusyMessage(gpa: std.mem.Allocator, request_bytes: []const u8, resource: []const u8, message: []const u8) std.mem.Allocator.Error![]u8 {
     var pm = cp.parseMessage(gpa, request_bytes) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return errorResponse(gpa, .null, .internal_error),
@@ -2719,7 +2725,7 @@ pub fn serializeResourceBusy(gpa: std.mem.Allocator, request_bytes: []const u8, 
     defer data.deinit(gpa);
     try data.put(gpa, "resource", .{ .string = resource });
     try data.put(gpa, "retryable", .{ .bool = true });
-    return cp.serializeError(gpa, req.id, .resource_busy, cp.ErrorCode.resource_busy.defaultMessage(), .{ .object = data });
+    return cp.serializeError(gpa, req.id, .resource_busy, message, .{ .object = data });
 }
 
 /// 인가 실패한 **valid**(유효 메서드·존재 web surface) browser 요청의 최종 판정(1e-confirm-1c). `pane_selector`가 있으면

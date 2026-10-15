@@ -188,16 +188,18 @@ pub fn boxRect(state: *const State, rows: []const Row, p: props.ChromeProps) ?dr
 /// 화면에 **보이는** 패널 — `boxRect` 를 `panelPadding` 만큼 키운 것. 포인터가 이 안이면 목록의 것이다(테두리를 누르면 닫지 않고 삼킨다).
 pub fn visibleRect(state: *const State, rows: []const Row, p: props.ChromeProps) ?draw.Rect {
     const r = boxRect(state, rows, p) orelse return null;
-    const pad = panelPadding(p);
-    return r.outset(.{ .left = pad, .right = pad, .top = pad, .bottom = pad });
+    return panelQuad(r, p).visibleRectIn(p.shape.modal_padding_px, independent_panel); // 그리는 quad·이 draw 가 싣는 값과 같다
+}
+
+/// 목록의 패널 quad — `view` 가 첫 op 로 내고 `visibleRect` 가 그 quad 로 잰다. 직각이고 패딩은 테두리 폭(`panelPadding`).
+fn panelQuad(rect: draw.Rect, p: props.ChromeProps) draw.Op.Quad {
+    const bw = p.shape.border_width_px;
+    return .{ .rect = rect, .fill_role = .surface_bg, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent, .panel_padding_px = panelPadding(p) };
 }
 
 pub fn contains(state: *const State, rows: []const Row, p: props.ChromeProps, x_px: f64, y_px: f64) bool {
-    if (!std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
     const r = visibleRect(state, rows, p) orelse return false;
-    const x0: f64 = @floatFromInt(r.x);
-    const y0: f64 = @floatFromInt(r.y);
-    return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(r.w)) and y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(r.h));
+    return r.containsPx(x_px, y_px);
 }
 
 /// 창에 보이는 행들 — `[scroll, scroll+rows)`.
@@ -213,10 +215,8 @@ pub fn view(state: *const State, rows: []const Row, p: props.ChromeProps, _: *co
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
     const box_cols: u32 = rect.w / cw;
-    const bw = p.shape.border_width_px;
-    const pad = panelPadding(p);
     // 패널 — 이 draw 의 첫 quad(직각, `independent_panel`)라 lowering 이 패딩(테두리 폭)·그림자를 단다.
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent, .panel_padding_px = pad } });
+    try out.append(arena, .{ .quad = panelQuad(rect, p) });
     const start = @min(state.scroll, rows.len -| sz.rows);
     const shown = visible(state, rows);
     for (shown, 0..) |r, i| {

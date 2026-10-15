@@ -55,10 +55,8 @@ pub fn boxRect(state: *const State, lines: []const Line, beside: draw.Rect, p: p
 /// 포인터가 **보이는** 패널(패딩 포함) 안인가 — 패딩을 누르면 패널의 것이다(목록 `suggest_box.contains` 와 같은 규율).
 pub fn contains(state: *const State, lines: []const Line, beside: draw.Rect, p: props.ChromeProps, x_px: f64, y_px: f64) bool {
     const rect = boxRect(state, lines, beside, p) orelse return false;
-    const pad = p.shape.modal_padding_px;
-    const r = rect.outset(.{ .left = pad, .right = pad, .top = pad, .bottom = pad });
-    return x_px >= @as(f64, @floatFromInt(r.x)) and x_px < @as(f64, @floatFromInt(r.x)) + @as(f64, @floatFromInt(r.w)) and
-        y_px >= @as(f64, @floatFromInt(r.y)) and y_px < @as(f64, @floatFromInt(r.y)) + @as(f64, @floatFromInt(r.h));
+    // 그리는 패널은 호버 상자와 같은 quad 다(`hover_box.viewAt`) — 보이는 사각형도 그 quad 로 잰다.
+    return hover_box.panelQuad(rect, p).visibleRect(p.shape.modal_padding_px).containsPx(x_px, y_px);
 }
 
 pub fn view(state: *const State, lines: []const Line, beside: draw.Rect, p: props.ChromeProps, arena: std.mem.Allocator, out: *std.ArrayList(draw.Op)) !void {
@@ -80,6 +78,7 @@ test "SGD2 패딩 — 문서 패널과 목록은 둘 다 사방 패딩만큼 커
     var p = testProps();
     p.shape.modal_padding_px = 12;
     p.shape.border_width_px = 1; // 목록 패딩 = 테두리 폭(`suggest_box.panelPadding`), 문서 패널 패딩 = 12
+    p.shape.corner_radius_px = 8; // 제품 모양(둥근 패널) — 모서리 0 이면 lowering 이 셀 배경으로 칠해 키우지 않는다(`Quad.drawsAsPanel`, ML-VIS)
     const lines = [_]Line{.{ .text = "fn lazy() -> i32" }};
     var st = State{};
     st.toggle();

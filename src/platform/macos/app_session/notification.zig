@@ -815,17 +815,16 @@ pub fn appendNotificationCaret(self: *AppSession, items: []const chrome.componen
     if (cols < maru.cell_text.sidebar_header_min_cols) return; // 벨이 안 그려지는 폭 — caret도 생략(buildSidebarHeaderDrawList 와 같은 상수)
     const panel = chrome.components.notifications.panelRect(&self.chrome_host.notifications, items, props) orelse return;
     if (panel.y < self.chrome_host.notifications.anchor_y) return; // 세로 clamp로 위로 밀림 — 벨과 어긋나니 생략
+    // caret 은 **보이는** 패널 경계에 붙어야 닿는다 — 컴포넌트가 그 사각형을 준다(lowering 이 그리는 것과 같은 `Quad.visibleRect`).
+    const shown = chrome.components.notifications.visiblePanelRect(&self.chrome_host.notifications, items, props) orelse return;
     const cw_f: f32 = @floatFromInt(cw);
     // 벨 중심 = 그려진 종 글리프 중심. 예전엔 `(cols-11.5)·cw` 로 따로 셈했다 — 렌더러가 2칸 종을 반 칸 왼쪽으로 밀던 옛
     // nudge 를 전제한 값이라, nudge 가 없어진 뒤(`.m` 1377) 꼬리가 반 칸 왼쪽으로 치우쳤다.
     const bell_cx: f32 = sidebar_ops.headerIconCenterXPx(self, .notifications) orelse return;
-    // panelRect는 content rect(셀 격자)다. rich 모달 배경 quad는 lowering이 사방 modal_padding_px만큼 outset하므로
-    // **보이는** 패널 경계는 content rect를 mp만큼 키운 것 — caret은 그 보이는 경계 기준으로 맞춰야 패널과 닿는다.
-    const mp: f32 = @floatFromInt(tk.space.modal_padding_px);
-    const px: f32 = @as(f32, @floatFromInt(panel.x)) - mp; // 보이는 패널 좌단
-    const pw: f32 = @as(f32, @floatFromInt(panel.w)) + 2 * mp; // 보이는 패널 폭
+    const px: f32 = @floatFromInt(shown.x); // 보이는 패널 좌단
+    const pw: f32 = @floatFromInt(shown.w); // 보이는 패널 폭
     if (bell_cx < px or bell_cx > px + pw) return; // 벨이 (보이는) 패널 가로 밖 — 생략
-    const panel_top: f32 = @as(f32, @floatFromInt(panel.y)) - mp; // 보이는 패널 상단(content top − outset)
+    const panel_top: f32 = @floatFromInt(shown.y); // 보이는 패널 상단
     const caret_w: f32 = cw_f * 1.6; // ~1.6칸 폭(말풍선 꼭지)
     const caret_h: f32 = notificationCaretHeightPx(ch); // ~반 줄 높이 — 패널 상단(expandedPanelVisibleTopPx)과 같은 함수
     const overlap: f32 = 2.0; // 밑변을 패널 안으로 — 상단 테두리 seam 덮기

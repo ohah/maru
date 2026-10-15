@@ -99,20 +99,25 @@ pub fn boxRect(state: *const State, lines: []const Line, p: props.ChromeProps) ?
     return .{ .x = placed.rect.x, .y = placed.rect.y, .w = box_w, .h = box_h };
 }
 
-/// 화면에 **보이는** 상자 — `boxRect` 를 모달 padding 만큼 키운 것. sticky 판정·휠 라우팅은 보이는 것을 기준으로 한다.
+/// 화면에 **보이는** 상자 — 그리는 패널 quad(`panelQuad`)를 lowering 이 패딩만큼 키운 것(`Quad.visibleRect`). sticky 판정·휠 라우팅은
+/// 보이는 것을 기준으로 한다. 예전에는 `boxRect` 를 모서리와 상관없이 손으로 키워, 모서리 0 이면(셀 배경 — 안 키운다) 그림과 갈렸다.
 pub fn visibleRect(state: *const State, lines: []const Line, p: props.ChromeProps) ?draw.Rect {
     const r = boxRect(state, lines, p) orelse return null;
-    const pad = p.shape.modal_padding_px;
-    return r.outset(.{ .left = pad, .right = pad, .top = pad, .bottom = pad });
+    return panelQuad(r, p).visibleRect(p.shape.modal_padding_px);
+}
+
+/// 줄 상자의 패널 quad — `viewAt` 이 첫 op 로 내고, 보이는 사각형(`visibleRect`·`suggest_docs.contains`)이 그 quad 로 잰다.
+pub fn panelQuad(rect: draw.Rect, p: props.ChromeProps) draw.Op.Quad {
+    const bg_r = p.shape.corner_radius_px;
+    const bw = p.shape.border_width_px;
+    return .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent };
 }
 
 /// 포인터가 상자 안인가 — sticky 판정(§8.2b 「상자 위는 남는다」)과 휠 라우팅이 쓴다.
 pub fn contains(state: *const State, lines: []const Line, p: props.ChromeProps, x_px: f64, y_px: f64) bool {
-    if (!state.open or !std.math.isFinite(x_px) or !std.math.isFinite(y_px)) return false;
+    if (!state.open) return false;
     const rect = visibleRect(state, lines, p) orelse return false;
-    const x0: f64 = @floatFromInt(rect.x);
-    const y0: f64 = @floatFromInt(rect.y);
-    return x_px >= x0 and x_px < x0 + @as(f64, @floatFromInt(rect.w)) and y_px >= y0 and y_px < y0 + @as(f64, @floatFromInt(rect.h));
+    return rect.containsPx(x_px, y_px);
 }
 
 /// 상한 폭에 맞춰 자른 줄(EAW 표시폭 기준, 글자 경계에서). 자를 것이 없으면 그대로.
@@ -152,9 +157,7 @@ pub fn viewAt(rect: draw.Rect, lines: []const Line, scroll_rows: u32, p: props.C
     if (lines.len == 0) return;
     const cw = @max(p.metrics.cell_width_px, 1);
     const ch = @max(p.metrics.cell_height_px, 1);
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    try out.append(arena, .{ .quad = panelQuad(rect, p) });
     const visible: usize = @min(lines.len, max_rows);
     const first: usize = @min(scroll_rows, lines.len - visible);
     const inner_cols: u32 = @intCast(@max(rect.w / cw, 2 * pad_cols) - 2 * pad_cols);
@@ -222,6 +225,7 @@ test "HOVX5 구석 — 보이는 상자(패딩만큼 키운 것)가 workspace �
     const lines = [_]Line{.{ .text = "fn very_long_signature_name(a: i32) i32" }};
     var p = testProps();
     p.shape.modal_padding_px = 12;
+    p.shape.corner_radius_px = 8; // 제품 모양(둥근 패널) — 모서리 0 이면 lowering 이 셀 배경으로 칠해 키우지 않는다(`Quad.drawsAsPanel`, ML-VIS)
     const v = visibleRect(&st, &lines, p).?;
     try testing.expectEqual(@as(i32, 1200 - 10), v.x + @as(i32, @intCast(v.w)));
     try testing.expectEqual(@as(i32, 790), v.y + @as(i32, @intCast(v.h))); // 위로 뒤집혀 보이는 하단이 앵커 줄 위에 닿는다(HOVX2 와 같은 간격 계약)
@@ -244,6 +248,7 @@ test "HOVX2 스크롤 — 넘치는 만큼만, 보이는 줄은 scroll_rows 부�
     try testing.expect(!st.scrollBy(1, two.len)); // 안 넘치면 안 움직인다
     var p = testProps();
     p.shape.modal_padding_px = 12;
+    p.shape.corner_radius_px = 8; // 제품 모양(둥근 패널) — 모서리 0 이면 lowering 이 셀 배경으로 칠해 키우지 않는다(`Quad.drawsAsPanel`, ML-VIS)
     const rect = boxRect(&st, &many, p).?;
     try testing.expectEqual(@as(u32, 12 * 20), rect.h);
     try testing.expectEqual(@as(i32, 120 + 12), rect.y); // 앵커(100, h 20) 아래 + 모달 padding — 보이는 상자가 앵커 줄에 닿지 않는다

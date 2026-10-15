@@ -141,9 +141,28 @@ fn layout(state: *const State, p: props.ChromeProps) ?overlay_input.PanelLayout 
 /// Drawing, pointer routing and IME use the same layout within the owning column.
 pub fn contains(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool {
     if (!state.open) return false;
-    const lay = layout(state, p) orelse return false;
-    return x >= @as(f64, @floatFromInt(lay.x)) and x < @as(f64, @floatFromInt(lay.x + @as(i32, @intCast(lay.panel_cols * lay.cw)))) and
-        y >= @as(f64, @floatFromInt(lay.y)) and y < @as(f64, @floatFromInt(lay.y + @as(i32, @intCast(lay.ch * @as(u32, if (state.replaceActive()) 2 else 1)))));
+    const rect = contentRect(state, p) orelse return false;
+    return rect.containsPx(x, y);
+}
+
+/// 입력 줄(바꾸기가 열리면 두 줄)을 덮는 상자 — `view` 의 패널 quad 와 같은 rect 다.
+fn contentRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
+    const lay = layout(state, p) orelse return null;
+    return .{ .x = lay.x, .y = lay.y, .w = lay.panel_cols * lay.cw, .h = lay.ch * @as(u32, if (state.replaceActive()) 2 else 1) };
+}
+
+/// 막대 배경 quad — `view` 가 첫 op 로 내고 `visibleContains` 가 그 quad 로 잰다.
+fn panelQuad(rect: draw.Rect, p: props.ChromeProps) draw.Op.Quad {
+    const bg_r = p.shape.corner_radius_px;
+    const bw = p.shape.border_width_px;
+    return .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent };
+}
+
+/// 이 막대의 draw 가 독립 패널인가(`ChromeDraw.independent_panel` — 모서리 0 이어도 GPU 패널). 비교 뷰의 두 막대(열 `scope` 가 선다)가
+/// 그렇다. host 가 draw 에 싣는 값과 포인터 판정(`visibleContains`)이 **이 하나**를 본다 — `scope` 와 `diff_find_source` 는 함께 서고
+/// 함께 비워진다(세우는 곳 `find_ops.syncDiffFind`, 비우는 곳 `clearAllFindMatches`·`diff.release`).
+pub fn independentPanel(state: *const State) bool {
+    return state.scope != null;
 }
 
 /// 막대 위 한 점이 어느 입력 줄인가 — 바꾸기 줄이 살아 있고(`replaceActive`) 그 점이 둘째 줄 높이 이하면 `.replace`, 아니면 `.find`
@@ -154,17 +173,12 @@ pub fn focusAt(state: *const State, p: props.ChromeProps, y: f64) Focus {
     return if (y >= @as(f64, @floatFromInt(lay.y + @as(i32, @intCast(lay.ch))))) .replace else .find;
 }
 
-/// **보이는 패널**(사방 `modal_padding_px` 만큼 키운 것 — rich lowering 이 그렇게 그린다) 안인가. 막대 위 클릭의 주인 판정
+/// **보이는 패널**(그리는 quad 가 패널이면 — 둥글거나 비교 뷰 열의 독립 패널 — 사방 패딩만큼 키운 것, `Quad.visibleRectIn`) 안인가. 막대 위 클릭의 주인 판정
 /// (`find_ops.diffFindPointer`·`unfocusedFindPointer`)과, 패널이 **가린 자리**를 묻는 쪽(그 아래 편집기 낱말의 호버)이 쓴다. 입력 줄만은 `contains`.
 pub fn visibleContains(state: *const State, p: props.ChromeProps, x: f64, y: f64) bool {
     if (!state.open) return false;
-    const lay = layout(state, p) orelse return false;
-    const pad: f64 = @floatFromInt(p.shape.modal_padding_px);
-    const x0: f64 = @floatFromInt(lay.x);
-    const y0: f64 = @floatFromInt(lay.y);
-    const w: f64 = @floatFromInt(lay.panel_cols * lay.cw);
-    const h: f64 = @floatFromInt(lay.ch * @as(u32, if (state.replaceActive()) 2 else 1));
-    return x >= x0 - pad and x < x0 + w + pad and y >= y0 - pad and y < y0 + h + pad;
+    const rect = contentRect(state, p) orelse return false;
+    return panelQuad(rect, p).visibleRectIn(p.shape.modal_padding_px, independentPanel(state)).containsPx(x, y);
 }
 
 fn regexButtonRect(state: *const State, p: props.ChromeProps) ?draw.Rect {
@@ -438,10 +452,8 @@ pub fn view(
     const rows: u32 = if (state.replaceActive()) 2 else 1;
     const rect = draw.Rect{ .x = x, .y = y, .w = panel_w, .h = lay.ch * rows };
 
-    const bg_r = p.shape.corner_radius_px;
-    const bw = p.shape.border_width_px;
     // C4b 모달: 배경을 quad로(둥근+테두리) — base(0)면 셀 배경(무변화), rich(>0)면 둥근 quad + 테두리(focus_accent).
-    try out.append(arena, .{ .quad = .{ .rect = rect, .fill_role = .surface_bg, .corner_radii = .{ bg_r, bg_r, bg_r, bg_r }, .border_widths = .{ bw, bw, bw, bw }, .border_role = .focus_accent } });
+    try out.append(arena, .{ .quad = panelQuad(rect, p) });
 
     // "Find: " + (…?) + query(창) + preedit(조합 중) (한 text op). prefix는 ASCII라 칸 수=바이트 수. 조합 글자는
     // query 뒤에 같은 색으로 붙여 입력 가시성을 준다(IME 조합 상태가 오버레이에 즉시 보인다). 검색어가 텍스트 영역을
@@ -1141,6 +1153,7 @@ test "visibleContains — 보이는 패널은 입력 줄보다 사방 패딩만�
     s.show();
     var p = props.ChromeProps{ .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 800, .backing_height_px = 600 } };
     p.shape.modal_padding_px = 12;
+    p.shape.corner_radius_px = 8; // 제품 모양(둥근 패널) — 모서리 0 이면 lowering 이 셀 배경으로 칠해 키우지 않는다(`Quad.drawsAsPanel`, ML-VIS)
     const lay = layout(&s, p).?;
     const x0: f64 = @floatFromInt(lay.x);
     const y0: f64 = @floatFromInt(lay.y);

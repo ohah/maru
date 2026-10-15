@@ -35,6 +35,19 @@ pub fn view(
     return viewCaretAt(rect, text, editing, disabled, overlay_input.displayCols(text), cw, ch, corner_radius_px, border_width_px, arena, out);
 }
 
+/// 입력 상자의 테두리 박스 quad — `viewCaretAt` 이 첫 op 로 내고, 이 상자가 오버레이의 패널일 때(이름 바꾸기 상자) 보이는 사각형을
+/// 그 quad 로 잰다(`rename_box.visibleRect` — `Quad.visibleRect`). 편집 중이면 focus_accent 로 강조해 "지금 입력 중"을 보인다(옛 tui
+/// 룩[2026-08-19 제거]의 border 0 → 텍스트만 갈래는 지웠다 — 제품 호출자는 rich shape[border 1]를 넘긴다).
+pub fn boxQuad(rect: draw.Rect, editing: bool, corner_radius_px: u16, border_width_px: u16) draw.Op.Quad {
+    return .{
+        .rect = rect,
+        .fill_role = .surface_bg,
+        .corner_radii = .{ corner_radius_px, corner_radius_px, corner_radius_px, corner_radius_px },
+        .border_widths = .{ border_width_px, border_width_px, border_width_px, border_width_px },
+        .border_role = if (editing) .focus_accent else .muted_fg,
+    };
+}
+
 /// `view` 와 같되 caret 을 **글 안의 칸**(`caret_cols` — 좌패딩 뒤 표시폭 기준)에 그린다. 끝-caret 전용이던 이
 /// 위젯을 caret 을 옮길 수 있는 편집기(인라인 rename 상자 — `rename_box`)가 쓰기 위한 자리다. 글보다 뒤면 끝에 둔다.
 pub fn viewCaretAt(
@@ -51,16 +64,7 @@ pub fn viewCaretAt(
     out: *std.ArrayList(draw.Op),
 ) !void {
     if (rect.w == 0 or rect.h == 0) return;
-    // 테두리 박스 — 편집 중이면 focus_accent로 강조해 "지금 입력 중"을 보인다(옛 tui 룩[2026-08-19 제거]의 border 0 →
-    // 텍스트만 갈래는 지웠다 — 제품 호출자는 rich shape[border 1]를 넘긴다).
-    const border_role: tokens.ColorRole = if (editing) .focus_accent else .muted_fg;
-    try out.append(arena, .{ .quad = .{
-        .rect = rect,
-        .fill_role = .surface_bg,
-        .corner_radii = .{ corner_radius_px, corner_radius_px, corner_radius_px, corner_radius_px },
-        .border_widths = .{ border_width_px, border_width_px, border_width_px, border_width_px },
-        .border_role = border_role,
-    } });
+    try out.append(arena, .{ .quad = boxQuad(rect, editing, corner_radius_px, border_width_px) });
     const tx = rect.x + @as(i32, @intCast(cw)); // 좌패딩 1칸
     if (text.len > 0) {
         const role: tokens.ColorRole = if (editing) .accent_bar else if (disabled) .muted_fg else .surface_fg;

@@ -99,6 +99,16 @@ const corpus = {
     ['CREATE TABLE t (', ')', ''], ['CREATE TABLE t (', '', ''], ['SELECT f(a, ', '', ''], ['WHERE id IN (', ')', ''], ['SELECT a', '', ''],
     ['-- note', 'more', ''], ['-- (', '', ''], ["SELECT '('", '', ''], ['BEGIN', '', ''], ['CASE', '', ''], ['/**', '', ''], [' * a', '', '/**'],
   ]],
+  // BL4 — C#·Objective-C. 둘 다 `indentationRules` 가 없다(괄호 기본 규칙뿐) — C 계열이라 우리는 「어디든」이다(2026-10-15 사용자 결정).
+  // C# 은 `///` 문서 주석을 줄 끝에서도 잇는다. Scala 는 VS Code 내장이 없어 대조하지 않는다.
+  csharp: ['csharp', [
+    ['public void F() {', '}', ''], ['foo(a, ', '', ''], ['if (x) {', '', ''], ['/// <summary>', '', ''], ['    /// doc', 'more', ''], ['///', '', ''],
+    ['// note', 'more', ''], ['// note', '', ''], ['case 1:', '', ''], ['default:', '', ''], ['/**', '', ''], [' * a', '', '/**'], ['var s = "{";', '', ''],
+  ]],
+  objc: ['objective-c', [
+    ['- (void)f {', '}', ''], ['[self f:a, ', '', ''], ['if (x) {', '', ''], ['// note', 'more', ''], ['/// doc', 'more', ''], ['case 1:', '', ''],
+    ['/**', '', ''], [' * a', '', '/**'], ['NSString *s = @"{";', '', ''],
+  ]],
 };
 
 const zs = (s) => '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\t/g, '\\t').replace(/\n/g, '\\n') + '"';

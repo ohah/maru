@@ -421,6 +421,36 @@ test "HL19 번들 언어 확대 BL2 의 Swift 가 내는 캡처도 전부 표에
     try std.testing.expect(roleFor("variable.parameter") == null); // 매개변수는 변수처럼 무색
 }
 
+test "HL22 번들 언어 확대 BL4 의 C#·Objective-C(C 쿼리를 앞에 잇는다)·Scala 가 내는 캡처도 전부 표에 있고, 갈래가 뿌리의 색을 받는다" {
+    // HL18 과 같은 방법으로 뽑았다(`queries/highlights.scm`, 따옴표 안·주석은 뺀다). Objective-C 의 C 몫은 HL17 이 이미 잰다.
+    const bl4_captures = [_][]const u8{
+        // C#
+        "attribute",    "comment",           "constant.builtin",  "constructor",         "function",            "keyword",
+        "module",       "number",            "operator",          "property.definition", "punctuation.bracket", "punctuation.delimiter",
+        "string",       "string.escape",     "type",              "type.builtin",        "variable",            "variable.parameter",
+        // Objective-C
+        "constant",     "constant.macro",    "exception",         "function.builtin",    "function.macro",      "function.macro.builtin",
+        "include",      "keyword.coroutine", "keyword.function",  "keyword.operator",    "method",              "method.call",
+        "namespace",    "parameter",         "parameter.builtin", "preproc",             "property",            "punctuation.special",
+        "storageclass", "string.special",    "text.uri",          "type.qualifier",      "variable.builtin",
+        // Scala
+           "boolean",
+        "conditional",  "float",             "function.call",     "keyword.directive",   "keyword.return",      "none",
+        "repeat",       "spell",             "tag",               "tag.attribute",       "type.definition",
+    };
+    for (bl4_captures) |cap| {
+        if (lookup(cap) == null) {
+            std.debug.print("표에 없는 grammar 캡처: {s}\n", .{cap});
+            return error.UnmappedCapture;
+        }
+    }
+    try std.testing.expectEqual(Role.property, roleFor("property.definition").?); // C# 속성 선언
+    try std.testing.expectEqual(Role.type_name, roleFor("module").?); // C# 이름공간
+    try std.testing.expectEqual(Role.function, roleFor("function.macro.builtin").?); // Objective-C `NSLog` 류
+    try std.testing.expectEqual(Role.type_name, roleFor("type.definition").?); // Scala `type X =`
+    try std.testing.expect(roleFor("parameter.builtin") == null and lookup("parameter.builtin") != null); // Objective-C `_cmd` 류 — 매개변수처럼 무색
+}
+
 test "HL21 번들 언어 확대 BL3 의 SQL·Dart 가 내는 캡처도 전부 표에 있고, 옛 규약·Dart 고유 갈래가 맞는 색을 받는다" {
     // HL18 과 같은 방법으로 뽑았다(`queries/highlights.scm`, 따옴표 안·주석은 뺀다).
     const bl3_captures = [_][]const u8{

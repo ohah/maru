@@ -1,6 +1,6 @@
 # 번들 언어 확대 계획
 
-상태: BL1(작은 여섯)·BLP(쿼리 술어 평가)·BL2(Swift)·BL3(SQL·Dart) 완료, BL4 계획(2026-10-14 사용자 결정 — 후보 열둘 전부). 번들 언어 목록·크기는 [네이티브 계획](native-editor.md)의 「번들 언어 목록」이, 라이선스 동봉은 [제3자 라이선스](../third-party-licenses.md)가 소유한다. 이 문서는 후보 실측·결정·배선 설계·조각·검증을 소유한다.
+상태: BL1(작은 여섯)·BLP(쿼리 술어 평가)·BL2(Swift)·BL3(SQL·Dart)·BL4(C#·Objective-C·Scala) 완료 — 후보 열둘 전부(2026-10-14 사용자 결정). 번들 언어 목록·크기는 [네이티브 계획](native-editor.md)의 「번들 언어 목록」이, 라이선스 동봉은 [제3자 라이선스](../third-party-licenses.md)가 소유한다. 이 문서는 후보 실측·결정·배선 설계·조각·검증을 소유한다.
 
 ## 왜
 
@@ -44,6 +44,9 @@
 ## 결정 (2026-10-14 사용자)
 
 - **후보 열둘을 다 싣는다**(작은 여섯 · Swift · SQL·Dart · C#·Objective-C·Scala) — 크기 표를 보고 정했다.
+- **C 계열은 괄호 Enter 가 「어디든」이다**(2026-10-15 사용자 결정) — VS Code 설정에 들여쓰기 규칙이 없어도(C#·Objective-C·Swift) TR 계획의 원칙
+  (Java·C++ 처럼)을 따른다. VS Code 와 갈리는 것은 「의도한 차이」로 적는다. BL2 는 처음에 VS Code swift 설정을 따라 Swift 를 「끝만」으로 뒀다가
+  BL4 에서 되돌렸다. SQL 은 C 계열이 아니라 「끝만」이다.
 - 고정은 기존과 같이 tarball URL + hash(`build.zig.zon`)다. 생성 파서가 기본 태그에 없는 판(Swift·SQL)은 생성 파일이 든 태그·release asset 을 쓴다. 태그가 없는 판(Dart)은 커밋 archive 를 쓴다.
 
 ## 설계
@@ -74,12 +77,12 @@
 | Lua | `lua` | `--` | — | `"'` | 예 | `function`·`then`·`do`·`repeat`·`else` 뒤, 줄 끝 `{` 뒤 한 단계(VS Code `increaseIndentPattern`) | `end`·`else`·`elseif`·`until`(VS Code `decreaseIndentPattern`) | — |
 | Dockerfile | `Dockerfile` `Containerfile` `*.dockerfile` | `#` | — | `"'` | 아니오 | — (VS Code 설정은 YAML 것을 베낀 꼴이라 Dockerfile 에 맞지 않는다 — 「의도한 차이」) | — | — |
 | Make | `Makefile` `GNUmakefile` `makefile` `*.mk` | `#` | — | 없음 | 아니오 | — | — | 탭(지금처럼 — 경로 대신 문법으로) |
-| Swift | `swift` | `//` | 예 | `"` | 아니오(VS Code swift 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | `case …:`·`default:` 뒤(C 계열과 같은 「의도한 차이」) | — | — |
+| Swift | `swift` | `//` | 예 | `"` | 예(C 계열 — 위 「결정」. VS Code swift 설정엔 들여쓰기 규칙이 없다: 「의도한 차이」) | `case …:`·`default:` 뒤(C 계열과 같은 「의도한 차이」) | — | — |
 | SQL(구문 오류 진단은 끈다 — 아래 「한계」) | `sql` | `--`(이어 쓰지 않는다 — VS Code sql 엔 `onEnterRules` 가 없다) | 예(VS Code 엔 규칙이 없다 — C 계열과 같은 「의도한 차이」) | `'"` | 아니오(VS Code sql 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | — | — | offSide(VS Code `folding.offSide`) |
 | Dart | `dart` | `//` | 예 | `"'` | 예(VS Code 내장 설정이 없어 Java·Kotlin 과 같이) | `case …:`·`default:` 뒤 | — | — |
-| C# | `cs` `csx` | `//`(+ `///` 문서 주석은 `/// ` 로 잇는다 — VS Code csharp `onEnterRules`) | 예 | `"'` | 예 | `case …:`·`default:` 뒤 | — | — |
-| Objective-C | `m` | `//` | 예 | `"'` | 예 | `case …:`·`default:` 뒤 | — | — |
-| Scala | `scala` `sc` `sbt` | `//` | 예 | `"'` | 예 | — | — | — |
+| C# | `cs` `csx` | `//`(+ `///` 문서 주석은 줄 끝에서도 `/// ` 로 잇는다 — VS Code csharp `onEnterRules`) | 예 | `"'` | 예(C 계열 — VS Code 설정엔 들여쓰기 규칙이 없다: 「의도한 차이」) | `case …:`·`default:` 뒤 | — | — |
+| Objective-C | `m`(`.h` 는 C, `.mm` 은 문법 없음) | `//` | 예 | `"'` | 예(C 계열 — 같은 「의도한 차이」) | `case …:`·`default:` 뒤 | — | — |
+| Scala | `scala` `sc` `sbt` | `//` | 예 | `"'` | 예(VS Code 내장 설정이 없어 Kotlin·Dart 와 같이) | — (`case x =>` 꼴이라 규칙이 없다) | — | — |
 
 - **자동 닫기의 문맥 제외**는 기존 규칙 하나다. 따옴표는 문자열 안이면 닫지 않고, `'`·`` ` `` 는 주석 안에서도 닫지 않는다([들여쓰기·자동 닫기](editor-typing-rules.md) TR4). 새 언어도 따로 두지 않는다.
 - `.mm`(Objective-C++)은 싣지 않는다 — objc grammar 는 C++ 를 모른다. `.h` 는 지금처럼 C 다(확장자로 못 가른다).
@@ -93,7 +96,7 @@
 | BLP | **쿼리 술어 평가** — `#eq?`·`#any-of?`·`#match?`·`#lua-match?`(와 `not-` 갈래)를 평가해 조건이 안 맞는 캡처를 버린다(아래 「BL1 이 드러낸 것」) | 완료 |
 | BL2 | Swift(생성 파일 태그) — 색·접힘·심볼·괄호(보간 `\(…)`·raw 보간 `\#(…)` 은 괄호, 각괄호는 아니다)·블록 주석·`case` 규칙·VS Code 대조 | 완료 |
 | BL3 | SQL(release asset)·Dart(커밋 고정) — 색·접힘·심볼(SQL `CREATE` 문은 스키마까지 이름, Dart 는 본문이 다음 형제라 범위를 본문 끝까지)·괄호·블록 주석·`case`(Dart)·offSide(SQL)·VS Code 대조(SQL) | 완료 |
-| BL4 | C#(`///` 이어쓰기)·Objective-C(C 쿼리 상속)·Scala | 계획 |
+| BL4 | C#(`///` 이어쓰기)·Objective-C(C 쿼리 상속)·Scala — 색·접힘·심볼·괄호·블록 주석·`case`(C#·Objective-C)·VS Code 대조(C#·Objective-C). 「C 계열은 어디든」 결정으로 Swift 도 되돌렸다 | 완료 |
 
 조각마다 같은 완료 조건이다.
 - 쿼리가 실제 `ts_query_new` 를 통과한다.

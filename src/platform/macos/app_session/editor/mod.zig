@@ -41784,7 +41784,7 @@ test "BLX1 번들 언어 확대 BL1 — 실제 키로: YAML `key:` 뒤 Enter 는
     try testing.expectEqual(G.dockerfile, dk.rt.editor_grammar);
 }
 
-test "BLX2 번들 언어 확대 BL2 — 실제 키로: Swift `case .a:` 뒤 Enter 는 한 단계(C 계열과 같다), 줄 가운데 짝 없는 `(` 뒤 Enter 는 그대로(VS Code swift 는 괄호 규칙이 기본뿐), 블록 주석 이어쓰기, `.swift` 에 트리가 선다 (docs/plans/editor-bundled-languages.md)" {
+test "BLX2 번들 언어 확대 BL2 — 실제 키로: Swift `case .a:` 뒤 Enter 는 한 단계(C 계열과 같다), 줄 가운데 짝 없는 `(` 뒤 Enter 도 한 단계(C 계열은 어디든 — 2026-10-15 사용자 결정), 블록 주석 이어쓰기, `.swift` 에 트리가 선다 (docs/plans/editor-bundled-languages.md)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -41813,11 +41813,11 @@ test "BLX2 번들 언어 확대 BL2 — 실제 키로: Swift `case .a:` 뒤 Ente
     sw.rt.editor_selection = editor_selection.Selection.at(19);
     try pressKey(&fx, .enter, .{});
     try testing.expectEqualStrings("switch x {\ncase .a:\n    \n}\n", content(sw));
-    // ⑵ 줄 끝이 아닌 짝 없는 `(` — 그대로(TS 라면 한 단계다 — 「어디든」).
+    // ⑵ 줄 끝이 아닌 짝 없는 `(` — 한 단계(C 계열은 VS Code 설정과 달리 「어디든」 — 2026-10-15 사용자 결정. BL2 는 처음에 그대로였다).
     const call = try open(&fx, allocator, "Call.swift", "foo(a,\n");
     call.rt.editor_selection = editor_selection.Selection.at(6);
     try pressKey(&fx, .enter, .{});
-    try testing.expectEqualStrings("foo(a,\n\n", content(call));
+    try testing.expectEqualStrings("foo(a,\n    \n", content(call));
     // ⑶ 블록 주석 `/**` 뒤 — ` * ` 로 잇는다(C 계열과 같다 — VS Code swift 는 규칙이 없다: 「의도한 차이」).
     const doc = try open(&fx, allocator, "Doc.swift", "/**\n");
     doc.rt.editor_selection = editor_selection.Selection.at(3);
@@ -41887,6 +41887,76 @@ test "BLX3 번들 언어 확대 BL3 — 실제 키로: SQL 은 줄 가운데 짝
     doc.rt.editor_selection = editor_selection.Selection.at(3);
     try pressKey(&fx, .enter, .{});
     try testing.expectEqualStrings("/**\n * \n", content(doc));
+}
+
+test "BLX4 번들 언어 확대 BL4 — 실제 키로: C# `///` 는 줄 끝에서도 `/// ` 로 잇고(VS Code csharp) 줄 가운데 `(` 는 한 단계(C 계열), Objective-C `case 1:` 뒤 한 단계·블록 주석 이어쓰기, Scala 블록 주석·`case` 는 그대로(`=>` 꼴이라 규칙이 없다) (docs/plans/editor-bundled-languages.md)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var fx = try PaneFixture.init(allocator);
+    defer fx.deinit(allocator);
+    const content = struct {
+        fn g(t: *Term) []const u8 {
+            return t.rt.editorDocument().opened.?.file.content;
+        }
+    }.g;
+    const open = struct {
+        fn f(fx_: *PaneFixture, a: std.mem.Allocator, name: []const u8, src: []const u8) !*Term {
+            const t = try undoFixture(fx_, a, name, src);
+            t.rt.editor_tab_width = 4;
+            const d = t.rt.editorDocument().opened orelse return error.NoDoc;
+            t.rt.editor_syntax.deinit(a);
+            t.rt.editor_syntax = syntax_color.openParsedBudgeted(d.file.content, t.rt.editor_grammar, 0);
+            if (t.rt.editor_syntax.provider == null or t.rt.editor_syntax.pending) return error.NoTree;
+            return t;
+        }
+    }.f;
+    const G = maru.session.editor.language.Grammar;
+    // ── C# ──
+    // ⑴ `///` 줄 끝 — `/// ` 로 잇는다(일반 `//` 는 줄 끝이면 안 잇는다).
+    const doc = try open(&fx, allocator, "A.cs", "/// <summary>\n");
+    try testing.expectEqual(G.csharp, doc.rt.editor_grammar);
+    try testing.expectEqualStrings("C#", doc.rt.editor_grammar.displayName().?);
+    doc.rt.editor_selection = editor_selection.Selection.at(13);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/// <summary>\n/// \n", content(doc));
+    // ⑵ 들여쓴 `///` 가운데 — 들여쓰기를 잇고 `/// `.
+    const mid = try open(&fx, allocator, "B.cs", "    /// a b\n");
+    mid.rt.editor_selection = editor_selection.Selection.at(9);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("    /// a\n    ///  b\n", content(mid));
+    // ⑶ 줄 가운데 짝 없는 `(` — 한 단계.
+    const call = try open(&fx, allocator, "C.cs", "Foo(a,\n");
+    call.rt.editor_selection = editor_selection.Selection.at(6);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("Foo(a,\n    \n", content(call));
+    // ── Objective-C ──
+    // ⑷ `case 1:` 뒤 — 한 단계.
+    const sw = try open(&fx, allocator, "S.m", "switch (x) {\ncase 1:\n}\n");
+    try testing.expectEqual(G.objc, sw.rt.editor_grammar);
+    sw.rt.editor_selection = editor_selection.Selection.at(20);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("switch (x) {\ncase 1:\n    \n}\n", content(sw));
+    // ⑸ 블록 주석 `/**` 뒤 — ` * `.
+    const bc = try open(&fx, allocator, "D.m", "/**\n");
+    bc.rt.editor_selection = editor_selection.Selection.at(3);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/**\n * \n", content(bc));
+    // ── Scala ──
+    // ⑹ 블록 주석(Scaladoc) 이어쓰기, `///` 는 C# 만이다 — Scala 의 `/// a` 줄 끝은 잇지 않는다.
+    const sd = try open(&fx, allocator, "E.scala", "/**\n/// a\n");
+    try testing.expectEqual(G.scala, sd.rt.editor_grammar);
+    sd.rt.editor_selection = editor_selection.Selection.at(3);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/**\n * \n/// a\n", content(sd));
+    const tr = try open(&fx, allocator, "F.scala", "/// a\n");
+    tr.rt.editor_selection = editor_selection.Selection.at(5);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("/// a\n\n", content(tr));
+    // ⑺ `case x =>` 뒤 — 규칙 없음(앞 공백만 잇는다).
+    const cs = try open(&fx, allocator, "G.scala", "  case 1 => a\n");
+    cs.rt.editor_selection = editor_selection.Selection.at(13);
+    try pressKey(&fx, .enter, .{});
+    try testing.expectEqualStrings("  case 1 => a\n  \n", content(cs));
 }
 
 test "INDR5 언어 규칙 — 실제 키로: Python `:` 뒤 Enter·`else:` 내어쓰기, TS 블록 주석 이어쓰기·줄 주석 가운데 Enter, Ruby `def`·`end`, HTML 태그 사이 (§3.9a, 계획 editor-typing-rules TR3)" {

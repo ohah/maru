@@ -56,6 +56,9 @@ extern fn tree_sitter_make() *const c.TSLanguage;
 extern fn tree_sitter_swift() *const c.TSLanguage;
 extern fn tree_sitter_sql() *const c.TSLanguage;
 extern fn tree_sitter_dart() *const c.TSLanguage;
+extern fn tree_sitter_c_sharp() *const c.TSLanguage;
+extern fn tree_sitter_objc() *const c.TSLanguage;
+extern fn tree_sitter_scala() *const c.TSLanguage;
 
 /// 하이라이트 쿼리 — **grammar가 소유한다**(빌드가 익명 import로 꽂는다. `build.zig`의 grammar 표가
 /// 같은 이름을 쓴다 — 둘이 갈리면 컴파일이 죽는다).
@@ -87,6 +90,9 @@ const make_highlights = @embedFile("make_highlights_scm");
 const swift_highlights = @embedFile("swift_highlights_scm");
 const sql_highlights = @embedFile("sql_highlights_scm");
 const dart_highlights = @embedFile("dart_highlights_scm");
+const c_sharp_highlights = @embedFile("c_sharp_highlights_scm");
+const objc_highlights = @embedFile("objc_highlights_scm");
+const scala_highlights = @embedFile("scala_highlights_scm");
 
 /// **파싱 상한**(§5.3 — "파싱 대상 크기·시간 상한"). 이 크기를 넘는 문서는 무색이다.
 ///
@@ -108,7 +114,7 @@ pub const Span = struct {
 
 /// `session/editor/language.zig`의 열거와 **같은 축**을 쓰되, 이 모듈은 maru를 못 들여오므로
 /// (모듈이 다르다) 필요한 것만 다시 적는다. 그 열거를 이 축으로 옮기는 것은 아래 `languageFor` 하나다.
-pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, yaml, toml, xml, dtd, lua, dockerfile, make, swift, sql, dart, other };
+pub const Language = enum { zig, json, markdown, javascript, typescript, tsx, c, cpp, python, go, rust, java, ruby, php, kotlin, bash, css, html, yaml, toml, xml, dtd, lua, dockerfile, make, swift, sql, dart, csharp, objc, scala, other };
 
 /// 같은 이름의 태그(`session/editor/language.zig` 의 `Grammar`)를 이 축으로 옮긴다 — **호스트가 다시 적지 않는다**
 /// ([layering-and-portability.md](../../docs/layering-and-portability.md) §3.5). 예전에는 macOS(`app_session/editor/syntax.zig` 의
@@ -124,7 +130,7 @@ pub fn languageFor(tag: anytype) Language {
             const name = @tagName(t);
             if (comptime std.mem.eql(u8, name, "none")) return .other;
             const out = comptime blk: {
-                @setEvalBranchQuota(20_000); // 이름 표를 comptime 에 짓는다(기본 1000 을 넘는다)
+                @setEvalBranchQuota(100_000); // 이름 표를 comptime 에 짓는다(기본 1000 을 넘는다). 정렬 비용이 문법 수의 제곱이라 서른을 넘자 20000 도 모자랐다(BL4)
                 break :blk std.meta.stringToEnum(Language, name) orelse @compileError("syntax.Language 에 없는 문법 이름: " ++ name);
             };
             return out;
@@ -237,6 +243,12 @@ const grammar_table = [_]GrammarEntry{
     .{ .lang = .sql, .get = tree_sitter_sql, .scm = sql_highlights, .fold_kinds = &.{ "statement", "column_definitions", "subquery", "cte", "function_body", "list", "case", "block", "transaction" }, .symbol_kinds = &.{ "create_table", "create_view", "create_materialized_view", "create_function", "create_index", "create_type", "create_trigger", "create_schema", "create_sequence" } },
     // Dart 도 `folds.scm` 이 없다. 함수 본문(`function_body`)은 시그니처의 **다음 형제**라 심볼 범위는 `symbolEnd` 가 본문 끝까지 넓힌다.
     .{ .lang = .dart, .get = tree_sitter_dart, .scm = dart_highlights, .fold_kinds = &.{ "class_body", "enum_body", "extension_body", "block", "switch_block", "switch_statement_case", "switch_statement_default", "switch_expression", "list_literal", "set_or_map_literal", "record_literal", "arguments", "formal_parameter_list" }, .symbol_kinds = &.{ "class_definition", "mixin_declaration", "extension_declaration", "enum_declaration", "function_signature", "getter_signature", "setter_signature", "constructor_signature", "factory_constructor_signature", "constant_constructor_signature", "redirecting_factory_constructor_signature" } },
+    // BL4. C#·Scala 는 grammar 저장소에 `folds.scm` 이 없어 트리를 보고 골랐다. C# 이름공간은 `qualified_name`(`App.Core`)이 이름이다.
+    .{ .lang = .csharp, .get = tree_sitter_c_sharp, .scm = c_sharp_highlights, .fold_kinds = &.{ "declaration_list", "block", "accessor_list", "switch_body", "switch_section", "switch_expression", "enum_member_declaration_list", "argument_list", "initializer_expression" }, .symbol_kinds = &.{ "namespace_declaration", "file_scoped_namespace_declaration", "class_declaration", "interface_declaration", "struct_declaration", "enum_declaration", "record_declaration", "delegate_declaration", "method_declaration", "constructor_declaration", "property_declaration", "local_function_statement" } },
+    // Objective-C 쿼리는 C 를 상속한다(`; inherits: c` — C++ 와 같이 우리가 잇는다). 접힘은 저장소 `folds.scm` 의 목록에서 한 줄짜리가 보통인
+    // 선언(`property_declaration`·`method_declaration`·`struct_declarator`)을 빼고 C 의 본문 블록을 더했다. `.h` 는 C 로 남는다(`grammarForPath`).
+    .{ .lang = .objc, .get = tree_sitter_objc, .scm = c_highlights ++ "\n" ++ objc_highlights, .fold_kinds = &.{ "compound_statement", "class_interface", "class_implementation", "protocol_declaration", "block_literal", "dictionary_literal", "array_literal", "initializer_list", "try_statement", "catch_clause", "finally_clause" }, .symbol_kinds = &.{ "class_interface", "class_implementation", "protocol_declaration", "method_declaration", "method_definition", "function_definition" } },
+    .{ .lang = .scala, .get = tree_sitter_scala, .scm = scala_highlights, .fold_kinds = &.{ "template_body", "block", "indented_block", "case_block", "enum_body", "arguments", "class_parameters" }, .symbol_kinds = &.{ "object_definition", "class_definition", "trait_definition", "enum_definition", "function_definition", "function_declaration", "given_definition", "extension_definition" } },
 };
 
 /// 쿼리 캐시 칸 — 표와 **같은 색인**이다. 언어마다 하나이고 프로세스 수명이다(아래 `queryFor`).
@@ -2415,6 +2427,9 @@ test "SYN18 번들한 grammar 가 전부 실제로 색을 낸다" {
         .{ .lang = .swift, .src = "let x = \"a\" // c\n" },
         .{ .lang = .sql, .src = "SELECT 'a' FROM t; -- c\n" },
         .{ .lang = .dart, .src = "var x = 'a'; // c\n" },
+        .{ .lang = .csharp, .src = "var x = \"a\"; // c\n" },
+        .{ .lang = .objc, .src = "NSString *x = @\"a\"; // c\n" },
+        .{ .lang = .scala, .src = "val x = \"a\" // c\n" },
     };
     // 표에 든 언어 수와 샘플 수가 같아야 한다 — grammar를 늘리고 샘플을 안 더하면 그 언어가 안 돈다.
     try std.testing.expectEqual(grammar_table.len, samples.len);
@@ -2611,6 +2626,9 @@ test "SYN21 언어마다 접을 것이 있는 표본에서 범위가 나온다 �
         .{ .lang = .swift, .src = "func f() -> Int {\n    let a = 1\n    return a\n}\n" },
         .{ .lang = .sql, .src = "CREATE TABLE t (\n    id INT,\n    name TEXT\n);\n" },
         .{ .lang = .dart, .src = "int f() {\n  var a = 1;\n  return a;\n}\n" },
+        .{ .lang = .csharp, .src = "int F() {\n    var a = 1;\n    return a;\n}\n" },
+        .{ .lang = .objc, .src = "- (int)f {\n    int a = 1;\n    return a;\n}\n" },
+        .{ .lang = .scala, .src = "def f(): Int = {\n  val a = 1\n  a\n}\n" },
     };
     try std.testing.expectEqual(grammar_table.len, samples.len);
 
@@ -2806,6 +2824,9 @@ test "SYN25 심볼 종류 목록이 실재하는 노드 이름이다 — 언어�
         .{ .lang = .swift, .src = "struct S {\n    func f() {}\n}\n", .want = "S" },
         .{ .lang = .sql, .src = "CREATE TABLE users (id INT);\n", .want = "users" },
         .{ .lang = .dart, .src = "class A {\n  void f() {}\n}\n", .want = "A" },
+        .{ .lang = .csharp, .src = "class A {\n    void F() {}\n}\n", .want = "A" },
+        .{ .lang = .objc, .src = "@interface A : NSObject\n- (void)f;\n@end\n", .want = "A" },
+        .{ .lang = .scala, .src = "object A {\n  def f(): Unit = ()\n}\n", .want = "A" },
     };
     // **표본이 없는 언어는 종류를 선언할 수 없다.** 이것이 없으면 "종류는 적어 뒀는데 목록은 늘
     // 비는" 상태가 조용히 산다 — markdown 의 `section` 이 정확히 그랬다(이름 노드가 없다). 뮤테이션에서
@@ -3393,6 +3414,31 @@ test "SYN52 공통 괄호 목록 — 마크다운·HTML 속성 이름을 보존�
             .{ .start = 44, .open = true, .close_kind = 1, .open_kind = 1 },
             .{ .start = 46, .open = false, .close_kind = 1, .open_kind = 1 },
         } },
+        // C#(BL4) — 제네릭 `<>` 는 괄호가 아니고, 보간 문자열 `$"{x}"` 의 중괄호는 grammar 가 이름 있는 잎으로 내 글자로 남는다(Kotlin `${}` 와 같은 쪽).
+        .{ .lang = .csharp, .src = "void F(List<int> x) { var s = $\"a {x} (\"; }\n", .want = &.{
+            .{ .start = 6, .open = true, .close_kind = 0 },
+            .{ .start = 18, .open = false, .close_kind = 0 },
+            .{ .start = 20, .open = true, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 42, .open = false, .close_kind = 2, .open_kind = 2 },
+        } },
+        // Objective-C(BL4) — 메시지 `[…]`·배열 `@[…]`·사전 `@{…}` 가 괄호다.
+        .{ .lang = .objc, .src = "id a = [self f:@[x, @{@\"k\": y}]];\n", .want = &.{
+            .{ .start = 7, .open = true, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 16, .open = true, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 21, .open = true, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 29, .open = false, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 30, .open = false, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 31, .open = false, .close_kind = 1, .open_kind = 1 },
+        } },
+        // Scala(BL4) — 형 인자 `[T]` 와 보간 `${…}` 은 괄호이고, 문자열 글자 속 `(` 는 아니다.
+        .{ .lang = .scala, .src = "def f[T](y: T) = s\"a ${y} (\"\n", .want = &.{
+            .{ .start = 5, .open = true, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 7, .open = false, .close_kind = 1, .open_kind = 1 },
+            .{ .start = 8, .open = true, .close_kind = 0 },
+            .{ .start = 13, .open = false, .close_kind = 0 },
+            .{ .start = 22, .open = true, .close_kind = 2, .open_kind = 2 },
+            .{ .start = 24, .open = false, .close_kind = 2, .open_kind = 2 },
+        } },
         .{ .lang = .c, .src = "#define M(x) (f(x) + \"(\") /* ( */\n", .want = &.{
             .{ .start = 9, .open = true, .close_kind = 0 },
             .{ .start = 11, .open = false, .close_kind = 0 },
@@ -3518,6 +3564,35 @@ test "SYN55 SQL 은 괄호 없는 여러 줄 문장도 문장째 접힌다 — `
     try std.testing.expectEqual(Provider.FoldSpan{ .start_row = 0, .end_row = 2 }, folds.items[0]);
 }
 
+test "SYN56 C#·Objective-C·Scala 심볼 — C# 이름공간은 점 이름(`App.Core`)까지, 속성·생성자·메서드가 깊이를 갖고, Objective-C 는 클래스·메서드·C 함수, Scala 는 object·class·trait·enum·def (번들 언어 확대 BL4)" {
+    const allocator = std.testing.allocator;
+    var syms: std.ArrayList(Provider.Symbol) = .empty;
+    defer syms.deinit(allocator);
+    const Want = struct { name: []const u8, depth: u16 };
+    const cases = [_]struct { lang: Language, src: []const u8, want: []const Want }{
+        .{ .lang = .csharp, .src = "namespace App.Core {\n  class A {\n    public int P { get; set; }\n    public A() {}\n    void F() {}\n  }\n  interface I {}\n  record R(int X);\n}\n", .want = &.{
+            .{ .name = "App.Core", .depth = 0 }, .{ .name = "A", .depth = 1 }, .{ .name = "P", .depth = 2 }, .{ .name = "A", .depth = 2 }, .{ .name = "F", .depth = 2 }, .{ .name = "I", .depth = 1 }, .{ .name = "R", .depth = 1 },
+        } },
+        .{ .lang = .objc, .src = "@interface A : NSObject\n- (void)g;\n@end\n@implementation A\n- (void)g {\n}\n@end\n@protocol P\n@end\nint h(void) {\n  return 0;\n}\n", .want = &.{
+            .{ .name = "A", .depth = 0 }, .{ .name = "g", .depth = 1 }, .{ .name = "A", .depth = 0 }, .{ .name = "g", .depth = 1 }, .{ .name = "P", .depth = 0 }, .{ .name = "h", .depth = 0 },
+        } },
+        .{ .lang = .scala, .src = "object M {\n  def f(): Unit = {\n  }\n}\nclass C[T](x: Int) {\n  def g: Int = 1\n}\ntrait S { def h: Int }\nenum E { case A }\n", .want = &.{
+            .{ .name = "M", .depth = 0 }, .{ .name = "f", .depth = 1 }, .{ .name = "C", .depth = 0 }, .{ .name = "g", .depth = 1 }, .{ .name = "S", .depth = 0 }, .{ .name = "h", .depth = 1 }, .{ .name = "E", .depth = 0 },
+        } },
+    };
+    for (cases) |k| {
+        var prov = Provider.init(k.src, k.lang, 0) orelse return error.NoProvider;
+        defer prov.deinit();
+        prov.symbols(allocator, &syms);
+        errdefer for (syms.items) |sy| std.debug.print("SYN56 {s} {s} '{s}' d={d}\n", .{ @tagName(k.lang), sy.kind, k.src[sy.name_start..sy.name_end], sy.depth });
+        try std.testing.expectEqual(k.want.len, syms.items.len);
+        for (k.want, syms.items) |w, sy| {
+            try std.testing.expectEqualStrings(w.name, k.src[sy.name_start..sy.name_end]);
+            try std.testing.expectEqual(w.depth, sy.depth);
+        }
+    }
+}
+
 test "SYN53 Swift grammar 의 한계 — 정상 Swift 가 구문 오류를 낸다(빈 튜플·본문 없는 함수·지역 `nonisolated(unsafe)`·` ; `·`$` 정규식), 쓰는 꼴은 깨끗하다" {
     // 계획 editor-bundled-languages.md 「한계」와 짝이다. grammar 를 올려 하나라도 깨끗해지면 이 판정자가 깨진다 — 그때 한계 절을 고친다.
     const allocator = std.testing.allocator;
@@ -3591,6 +3666,11 @@ test "PRD3 술어를 평가한다 — Python·Ruby·Lua 의 소문자 식별자�
         // 안 맞는다 — tree-sitter 의 Rust 하이라이터도 같다. 그래서 숫자 리터럴은 문자열 색이다(계획 「한계」). upstream 이 고치면 이 행이 깨진다.
         .{ .lang = .sql, .src = "SELECT 1, 'a';\n", .text = "1", .cap = "number", .want = false },
         .{ .lang = .sql, .src = "SELECT 1, 'a';\n", .text = "1", .cap = "string", .want = true },
+        // BL4 — Scala `this`·`super` 만 내장 변수·함수(`#match? "^this$"`), Objective-C `self`·`super` 만 내장 변수(`#any-of?`).
+        .{ .lang = .scala, .src = "val a = this.x\nval b = thisx.y\n", .text = "this", .cap = "variable.builtin", .want = true },
+        .{ .lang = .scala, .src = "val a = this.x\nval b = thisx.y\n", .text = "thisx", .cap = "variable.builtin", .want = false },
+        .{ .lang = .objc, .src = "void f(void) { [self g]; [selfish g]; }\n", .text = "self", .cap = "variable.builtin", .want = true },
+        .{ .lang = .objc, .src = "void f(void) { [self g]; [selfish g]; }\n", .text = "selfish", .cap = "variable.builtin", .want = false },
         .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@import", .cap = "keyword.import", .want = true },
         .{ .lang = .zig, .src = "const a = @import(\"std\");\nconst b = @This();\n", .text = "@This", .cap = "keyword.import", .want = false },
         .{ .lang = .xml, .src = "<a>&amp;&foo;</a>\n", .text = "&amp;", .cap = "constant.builtin", .want = true },

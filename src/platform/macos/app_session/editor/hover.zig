@@ -269,12 +269,11 @@ fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOf
             return @intFromEnum(a.severity) > @intFromEnum(b.severity);
         }
     }.f);
-    var buf: [512]u8 = undefined;
     for (covering[0..n]) |d| {
-        try appendLine(self, diagnosticText(d, &buf), .surface_fg);
+        try appendLine(self, diagnosticText(d), .surface_fg);
         // 진단이 든 서버 이름 — 한 문서에 서버가 여럿이면(보조 서버 §8.2u) 그 진단을 낸 서버다(문법의 주 서버 이름이면 ruff 의 진단이
         // 「pyright」로 보인다). 이름이 없는 진단(판정자가 직접 채운 목록)만 문법의 주 서버 이름으로 물러선다.
-        const source: []const u8 = if (d.source == .syntax) "" else if (d.server.len > 0) d.server else server_name;
+        const source: []const u8 = if (d.server.len > 0) d.server else server_name;
         if (source.len == 0 and d.code.len == 0) continue;
         var src_buf: [256]u8 = undefined;
         const src_line = if (source.len > 0 and d.code.len > 0)
@@ -289,32 +288,9 @@ fn buildDiagnosticLines(self: *AppSession, term: *Term, offset: u32) error{OutOf
     }
 }
 
-/// 진단 한 개의 호버 문장(메시지 줄). 구문 오류는 i18n 문장 — 기대 토큰이 있으면(tree-sitter MISSING) `diag_missing`
-/// 에 끼우고, 없으면(ERROR) 고정 문장. 서버·린트 진단은 메시지 첫 줄 그대로.
-fn diagnosticText(d: diagnostic.Diagnostic, buf: []u8) []const u8 {
-    return switch (d.source) {
-        .syntax => if (d.message.len > 0)
-            maru.i18n.format(buf, maru.i18n.t(.diag_missing), &.{.{ .s = d.message }})
-        else
-            maru.i18n.t(.diag_syntax_error),
-        .lsp, .lint => firstLine(d.message),
-    };
-}
-
-// 구문 오류의 MISSING 진단 호버는 **기대 토큰을 실제로 보인다** — 틀이 `{s}` 였을 때 `format` 이 자리표시자로 안 봐
-// 「빠짐: {s}」가 그대로 떴다. 제품 호버 판정자(HOVB2)는 픽스처가 ERROR(메시지 없음)를 내 이 갈래를 타지 않았다.
-test "diagnosticText: 구문 오류 MISSING 은 기대 토큰을 끼운 i18n 문장이다 — 원문 자리표시자가 남지 않는다" {
-    var buf: [512]u8 = undefined;
-    inline for (.{ maru.i18n.Lang.en, maru.i18n.Lang.ko }) |lang| {
-        const saved = maru.i18n.lang();
-        maru.i18n.setLang(lang);
-        defer maru.i18n.setLang(saved);
-        const missing = diagnosticText(.{ .start = 0, .end = 1, .severity = .@"error", .source = .syntax, .message = ")" }, &buf);
-        try std.testing.expect(std.mem.indexOf(u8, missing, ")") != null);
-        try std.testing.expect(std.mem.indexOfScalar(u8, missing, '{') == null);
-        const err = diagnosticText(.{ .start = 0, .end = 1, .severity = .@"error", .source = .syntax, .message = "" }, &buf);
-        try std.testing.expectEqualStrings(maru.i18n.t(.diag_syntax_error), err);
-    }
+/// 진단 한 개의 호버 문장(메시지 줄) — 메시지 첫 줄 그대로(서버·린트가 낸 문장이다).
+fn diagnosticText(d: diagnostic.Diagnostic) []const u8 {
+    return firstLine(d.message);
 }
 
 /// 진단 message 의 첫 줄만 — 서버가 여러 줄을 보내면(clangd 의 note 나열) 첫 줄이 요지다.

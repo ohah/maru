@@ -732,9 +732,7 @@ const Table = struct {
     cfg_editor_format_on_save: [:0]const u8,
     cfg_editor_code_actions_on_save: [:0]const u8,
     /// 호버 박스의 구문 오류 문장(visual-mapping §5.4 「메시지는 재료」 — 문장은 표시 자리가 만든다).
-    diag_syntax_error: [:0]const u8,
     /// `{0}` = 기대 토큰. (`{s}` 로 두었더니 `format` 이 자리표시자로 안 봐 호버에 「빠짐: {s}」가 그대로 떴다.)
-    diag_missing: [:0]const u8,
     cfg_editor_cursor_shape: [:0]const u8,
     cfg_statusbar_show: [:0]const u8,
     cfg_quick_height_fraction: [:0]const u8,
@@ -2480,8 +2478,6 @@ const en: Table = .{
     .cfg_editor_quick_suggestions = "Quick suggestions (completion list while typing)",
     .cfg_editor_format_on_save = "Format on save (language server)",
     .cfg_editor_code_actions_on_save = "Code actions on save (kinds, comma-separated — e.g. source.organizeImports)",
-    .diag_syntax_error = "Syntax error",
-    .diag_missing = "Missing: {0}",
     .cfg_editor_cursor_shape = "Caret shape",
     .cfg_statusbar_show = "Show the bottom status bar",
     .cfg_quick_height_fraction = "Thickness ratio (of the screen)",
@@ -3583,8 +3579,6 @@ const ko: Table = .{
     .cfg_editor_quick_suggestions = "자동완성(타이핑하면 완성 목록)",
     .cfg_editor_format_on_save = "저장 시 포맷(언어 서버)",
     .cfg_editor_code_actions_on_save = "저장 시 코드 액션(kind 를 쉼표로 — 예: source.organizeImports)",
-    .diag_syntax_error = "구문 오류",
-    .diag_missing = "빠짐: {0}",
     .cfg_editor_cursor_shape = "커서 모양",
     .cfg_statusbar_show = "하단 상태표시줄 표시",
     .cfg_quick_height_fraction = "두께 비율(화면 대비)",

@@ -2,8 +2,8 @@
 //!
 //! 진단은 **범위 + severity + 출처 + 메시지**이고, 출처가 여럿이어도 목록은 하나다(§5 「출처가 여럿이어도 층은 하나」).
 //! 이 모듈은 그 목록 위의 규칙만 든다 — **범위를 줄로 접는 규칙**(gutter 마커는 시작 줄에 하나, severity 최고), **줄마다의
-//! 밑줄 조각**(여러 줄에 걸친 진단은 줄마다 그 줄에 걸친 부분), **다음/이전 이동**(caret 줄 기준, 감김). 트리에서 진단을
-//! 뽑는 것은 `syntax.Provider.syntaxErrors` 가, 그리기·키는 위층이 한다.
+//! 밑줄 조각**(여러 줄에 걸친 진단은 줄마다 그 줄에 걸친 부분), **다음/이전 이동**(caret 줄 기준, 감김). 진단은 언어 서버(와 린트)가
+//! 낸다 — tree-sitter 의 구문 오류는 출처가 아니다(2026-10-15 사용자 결정, §5.4). 그리기·키는 위층이 한다.
 
 const std = @import("std");
 
@@ -20,14 +20,15 @@ pub const Severity = enum(u8) {
 };
 
 /// 어느 층이 냈나 — 표시가 아니라 메타데이터다(§5). LSP·린트는 같은 목록에 합쳐질 때 이 값으로 자기 것을 걷어 낸다.
-pub const Source = enum(u8) { syntax, lsp, lint };
+/// tree-sitter 의 구문 오류는 출처가 아니다 — 전처리기·방언을 모르는 파서라 정상 코드에 거짓 오류가 흔했다(§5.4, 2026-10-15 사용자 결정).
+pub const Source = enum(u8) { lsp, lint };
 
 pub const Diagnostic = struct {
-    /// 문서 절대 byte(§3.1). `end` 는 반열림. `MISSING` 처럼 폭이 없는 것도 **1 byte 는 준다**(§5.4) — 폭 0 은 그릴 수 없다.
+    /// 문서 절대 byte(§3.1). `end` 는 반열림. 폭이 없는 범위도 **1 byte 는 준다**(§5.4) — 폭 0 은 그릴 수 없다.
     start: u32,
     end: u32,
     severity: Severity,
-    source: Source = .syntax,
+    source: Source = .lsp,
     /// 정적 문자열 또는 출처가 소유하는 메모리 — 이 모듈은 소유하지 않는다.
     message: []const u8 = "",
     /// 출처의 코드(LSP `Diagnostic.code` — 문자열이든 정수든 글자로). 호버 박스가 `출처(코드)` 로 낸다(tooling §8.2b). 없으면 빈 문자열.

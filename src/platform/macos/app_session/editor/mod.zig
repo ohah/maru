@@ -926,14 +926,12 @@ fn minimapScrollTo(self: *AppSession, term: *Term, y_px: f64) void {
     self.metal_dirty = true;
 }
 
-/// 진단 표(§5.4). 트리가 있으면 이 프레임에 목록을 다시 채운다(구문 오류 — 편집 직후 증분 트리도 그 프레임에 반영된다, 지연
-/// 없음). 파싱이 끊긴 프레임은 직전 목록을 유지한다. 설정으로 껐거나 문서가 없으면 `null`.
+/// 진단 표(§5.4). 서버 목록이 바뀌었으면 이 프레임에 합친다(출처는 언어 서버·보조 서버뿐이다). 설정으로 껐거나 문서가 없으면 `null`.
 fn diagnosticViews(self: *AppSession, term: *Term, visible_len: usize) ?diagnostics.Views {
     if (!self.loaded_config.config.editor.diagnostics) return null;
     const doc = term.rt.editorDocument().opened orelse return null;
     const st = &term.rt.editor_diagnostics;
-    const prov: ?*syntax_color.syntax.Provider = if (term.rt.editor_syntax.provider) |*p| p else null;
-    _ = diagnostics.refreshFromSyntax(st, self.allocator, prov, term.rt.editor_grammar.syntaxDiagnostics());
+    _ = diagnostics.refresh(st, self.allocator);
     return diagnostics.buildViews(st, self.allocator, doc.file.lines, term.rt.editor_visible_numbers, visible_len);
 }
 
@@ -13470,48 +13468,14 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     term.rt.editor_wrap = false;
 }
 
-test "DGP2 SQL 은 구문 오류를 진단으로 안 낸다 — 방언을 못 가리는 grammar 의 거짓 오류(BL3 사용자 결정), 같은 프레임에서 Dart 의 구문 오류는 선다 (제품 경계, §5.4)" {
+test "DGP1 진단 층 — 서버 진단이 gutter 글리프·지그재그 밑줄·막대 마커·미니맵 행으로 서고, F8/⇧F8 이 감기며, 서버가 비우면 사라지고, 끄면 넷 다 없다 (제품 경계, §5.4)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
     defer fx.deinit(allocator);
     var dir = testing.tmpDir(.{});
     defer dir.cleanup();
-    // 둘 다 진짜로 깨진 원문이다 — SQL 은 SQLite 의 `AUTOINCREMENT`(grammar 가 모른다), Dart 는 닫는 괄호가 없다.
-    try dir.dir.writeFile(testing.io, .{ .sub_path = "m.sql", .data = "CREATE TABLE t (\n    id INTEGER PRIMARY KEY AUTOINCREMENT\n);\n" });
-    try dir.dir.writeFile(testing.io, .{ .sub_path = "m.dart", .data = "void f() {\n  g(1;\n}\n" });
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
-    fx.session.surface_initialized = true;
-    fx.session.backing_width_px = 1200;
-    fx.session.backing_height_px = 800;
-    inline for (.{ .{ "m.sql", false }, .{ "m.dart", true } }) |k| {
-        const path = try std.fs.path.join(allocator, &.{ root, k[0] });
-        defer allocator.free(path);
-        const term = try openPathInActivePane(fx.session, path);
-        var rounds: usize = 0;
-        while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
-        // 트리에는 오류가 있다 — 끄는 것은 진단 출처지 파싱이 아니다.
-        var raw: std.ArrayList(syntax_color.syntax.Provider.SyntaxError) = .empty;
-        defer raw.deinit(allocator);
-        try testing.expect(try term.rt.editor_syntax.provider.?.syntaxErrors(allocator, &raw));
-        try testing.expect(raw.items.len >= 1);
-        const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
-        fx.session.gpu_quads.clearRetainingCapacity();
-        var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
-        d.dl.deinit(allocator);
-        try testing.expectEqual(k[1], term.rt.editor_diagnostics.list.items.len >= 1);
-    }
-}
-
-test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄·막대 마커·미니맵 행으로 서고, F8/⇧F8 이 감기며, 고치면 사라지고, 끄면 넷 다 없다 (제품 경계, §5.4)" {
-    if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const allocator = testing.allocator;
-    var fx = try PaneFixture.init(allocator);
-    defer fx.deinit(allocator);
-    var dir = testing.tmpDir(.{});
-    defer dir.cleanup();
-    // 둘째 줄에 닫는 괄호가 빠졌다(MISSING). 뒤에 멀쩡한 코드 200 줄 — 막대가 서고 스트립이 다 담는다.
+    // 원문 200 여 줄 — 막대가 서고 스트립이 다 담는다. 진단은 서버가 게시한 목록을 넣는다(아래 `publish`).
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     try buf.appendSlice(allocator, "pub fn f() void {\n    const a = (1 + 2;\n    _ = a;\n}\n");
@@ -13564,22 +13528,35 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
         }
     }.f;
 
+    // 서버가 게시한 목록을 넣는다 — 출처는 언어 서버뿐이다(§5.4, 2026-10-15 사용자 결정. 전엔 이 원문의 구문 오류를 썼다). 실제 게시
+    // 경로(`onPublishDiagnostics`)와 같은 두 걸음: 서버 칸을 갈아 끼우고 `lsp_dirty` 를 세운다.
+    const publish = struct {
+        fn f(t: *Term, a: std.mem.Allocator, starts: []const u32) !void {
+            const st = &t.rt.editor_diagnostics;
+            st.lsp.clearRetainingCapacity();
+            for (starts) |s0| try st.lsp.append(a, .{ .start = s0, .end = s0 + 3, .severity = .@"error", .message = "boom", .server = "zls" });
+            st.lsp_dirty = true;
+        }
+    }.f;
+    const content0 = term.rt.editorDocument().opened.?.file.content;
+    const err1: u32 = @intCast(std.mem.indexOf(u8, content0, "(1 + 2;") orelse return error.NoAnchor); // 둘째 줄
+
     // ⑴ 넷이 선다.
+    try publish(term, allocator, &.{err1});
     fx.session.gpu_quads.clearRetainingCapacity();
     var d0 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
     const f0 = scan(fx.session, d0.dl, term, cw);
     d0.dl.deinit(allocator);
-    try testing.expect(term.rt.editor_diagnostics.list.items.len >= 1);
-    // 출처는 메타데이터라 화면에 안 보이지만 **LSP 가 합쳐질 때 자기 것을 걷어 내는 열쇠**다(§5) — 전부 `.syntax`·error 다(5회차 E7·E8).
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_diagnostics.list.items.len);
     for (term.rt.editor_diagnostics.list.items) |d| {
-        try testing.expectEqual(maru.session.editor.diagnostic.Source.syntax, d.source);
+        try testing.expectEqual(maru.session.editor.diagnostic.Source.lsp, d.source);
         try testing.expectEqual(maru.session.editor.diagnostic.Severity.@"error", d.severity);
     }
     try testing.expect(f0.glyph);
-    try testing.expect(f0.zigzag >= chrome_editor.frame.zigzag_pieces_per_cell); // 적어도 한 셀(MISSING 은 1 byte)
+    try testing.expect(f0.zigzag >= chrome_editor.frame.zigzag_pieces_per_cell); // 적어도 한 셀
     try testing.expect(f0.bar >= 1);
     try testing.expect(f0.mm >= 1);
-    // 밑줄은 둘째 줄(오류가 있는 줄)의 행에 있고, 글리프도 그 행이다.
+    // 밑줄은 둘째 줄(진단이 있는 줄)의 행에 있고, 글리프도 그 행이다.
     const body = editorBodyRect(fx.session, leaf, term);
     const inset = chrome_editor.frame.content_inset_px;
     const ch: u32 = fx.session.cell_height_px;
@@ -13593,12 +13570,10 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     }
     try testing.expectEqual(@as(?u32, 1), zig_row);
 
-    // ⑴ʹ **파싱이 끊긴 프레임은 직전 목록을 유지한다**(§5.4 갱신 시점) — 트리를 지우고 예산 0 으로 다시 시작해 트리가 없는 상태를
-    //    만든 뒤 한 프레임: 목록도 글리프도 그대로다(적대적 2회차 B3: 트리가 없을 때 목록을 비우는 변이).
+    // ⑴ʹ **서버 목록이 안 바뀐 프레임은 직전 목록을 그대로 쓴다** — 편집·파싱이 진단을 건드리지 않는다(트리는 출처가 아니다). 트리를 떼어
+    //    「파싱이 끊긴 프레임」을 만들어도 목록도 글리프도 그대로다.
     {
-        const before = term.rt.editor_diagnostics.list.items.len;
         const prov = &term.rt.editor_syntax.provider.?;
-        // 트리를 잠시 떼어 「파싱이 끊긴 프레임」을 만든다(예산 0 으로도 이 크기의 문서는 첫 진행 콜백 전에 끝나 버린다 — 실측).
         const saved_tree = prov.tree;
         prov.tree = null;
         fx.session.gpu_quads.clearRetainingCapacity();
@@ -13606,7 +13581,7 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
         const fp = scan(fx.session, dp.dl, term, cw);
         dp.dl.deinit(allocator);
         prov.tree = saved_tree;
-        try testing.expectEqual(before, term.rt.editor_diagnostics.list.items.len);
+        try testing.expectEqual(@as(usize, 1), term.rt.editor_diagnostics.list.items.len);
         try testing.expect(fp.glyph and fp.zigzag > 0);
     }
 
@@ -13618,7 +13593,7 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     try testing.expect(gotoDiagnosticActive(fx.session, .prev)); // 감김
     try testing.expectEqual(@as(usize, first.start), term.rt.editor_selection.?.focus);
     // caret 줄의 **개행 byte 에서 시작하는** 진단은 「같은 줄」이라 건너뛴다 — 줄 끝을 개행 제외로 재면 그것이 「다음」이 된다
-    // (적대적 6회차 F7). 합성 진단을 목록에 끼워 본다(다음 프레임이 트리에서 다시 채운다).
+    // (적대적 6회차 F7). 합성 진단을 목록에 끼워 본다.
     {
         const doc = term.rt.editorDocument().opened.?;
         const cur = doc.file.lines.lineAt(first.start);
@@ -13632,12 +13607,8 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
         _ = term.rt.editor_diagnostics.list.pop();
     }
 
-    // ⑶ 고치면 사라진다 — 닫는 괄호를 넣고 다음 프레임.
-    const fix_at = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "2;") orelse return error.NoAnchor;
-    term.rt.editor_selection = .{ .anchor_start = fix_at + 1, .anchor_end = fix_at + 1, .focus = fix_at + 1 };
-    try testing.expect(insertText(fx.session, term, ")"));
-    rounds = 0;
-    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
+    // ⑶ 서버가 빈 목록을 게시하면 사라진다(고친 뒤 서버가 하는 일).
+    try publish(term, allocator, &.{});
     fx.session.gpu_quads.clearRetainingCapacity();
     var d1 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
     const f1 = scan(fx.session, d1.dl, term, cw);
@@ -13647,33 +13618,24 @@ test "DGP1 진단 층 — 구문 오류가 gutter 글리프·지그재그 밑줄
     try testing.expectEqual(@as(usize, 0), f1.zigzag);
     try testing.expect(!gotoDiagnosticActive(fx.session, .next)); // 없으면 무동작
 
-    // ⑷ 다시 깨뜨리고 끄면 넷 다 없다(목록은 비고, 이동도 무동작).
-    try testing.expect(insertText(fx.session, term, "@@@"));
-    rounds = 0;
-    while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
+    // ⑷ 다시 둘을 게시하고 끄면 넷 다 없다(목록은 비고, 이동도 무동작).
+    const k5: u32 = @intCast(std.mem.indexOf(u8, content0, "const k5 ") orelse return error.NoAnchor);
+    try publish(term, allocator, &.{ k5, err1 }); // 서버 순서는 문서 순이 아니다 — 합칠 때 정렬된다
     fx.session.gpu_quads.clearRetainingCapacity();
     var d2 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
     const f2 = scan(fx.session, d2.dl, term, cw);
     d2.dl.deinit(allocator);
     try testing.expect(f2.glyph and f2.zigzag > 0 and f2.bar >= 1 and f2.mm >= 1);
-    // 이동의 기준은 **focus** 다(선택이 걸쳐 있을 때 anchor 가 아니라) — 오류를 하나 더 만들어(뒤쪽 줄) anchor 는 문서 앞, focus 는
-    // 뒤 오류에 두고 ⇧F8: focus 기준이면 앞 오류로, anchor 기준이면 감겨 뒤 오류 그대로다(적대적 6회차 F6).
+    // 이동의 기준은 **focus** 다(선택이 걸쳐 있을 때 anchor 가 아니라) — anchor 는 문서 앞, focus 는 뒤 진단에 두고 ⇧F8: focus 기준이면
+    // 앞 진단으로, anchor 기준이면 감겨 뒤 진단 그대로다(적대적 6회차 F6).
     {
-        const k5 = std.mem.indexOf(u8, term.rt.editorDocument().opened.?.file.content, "const k5 ") orelse return error.NoAnchor;
-        term.rt.editor_selection = .{ .anchor_start = k5, .anchor_end = k5, .focus = k5 };
-        try testing.expect(insertText(fx.session, term, "@@@ "));
-        rounds = 0;
-        while (term.rt.editor_syntax.pending and rounds < 100_000) : (rounds += 1) _ = syntax_color.resumeParse(&term.rt.editor_syntax, term.rt.editorDocument().opened.?.file.content);
-        var d2b = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
-        d2b.dl.deinit(allocator);
         const items = term.rt.editor_diagnostics.list.items;
-        try testing.expect(items.len >= 2);
-        const first_start = items[0].start;
+        try testing.expectEqual(@as(usize, 2), items.len);
+        try testing.expectEqual(err1, items[0].start); // 정렬됐다
         const last_start = items[items.len - 1].start;
-        try testing.expect(last_start > first_start);
         term.rt.editor_selection = .{ .anchor_start = 0, .anchor_end = 0, .focus = last_start };
         try testing.expect(gotoDiagnosticActive(fx.session, .prev));
-        try testing.expect(term.rt.editor_selection.?.focus < last_start); // 앞 오류로 갔다(anchor 기준이면 감겨 last 그대로)
+        try testing.expect(term.rt.editor_selection.?.focus < last_start); // 앞 진단으로 갔다(anchor 기준이면 감겨 last 그대로)
     }
     fx.session.loaded_config.config.editor.diagnostics = false;
     fx.session.gpu_quads.clearRetainingCapacity();
@@ -19886,7 +19848,7 @@ test "HOVB1 호버 박스 — 포인터가 낱말에 머물면 지연 뒤 요청
     hover_client.hide(fx.session);
 }
 
-test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18n 문장); `show_hover` 는 caret 자리에서 연다(끄도 온다); 끄면 포인터로는 안 열린다; 글자 없는 자리는 안 연다 (제품 경계, §8.2b)" {
+test "HOVB2 호버 박스 — 진단 자리에 머물면 서버에 묻지 않고 진단 문장(메시지 첫 줄 + 흐린 `서버(코드)`)으로 열린다; `show_hover` 는 caret 자리에서 연다(끄도 온다); 끄면 포인터로는 안 열린다; 글자 없는 자리는 안 연다 (제품 경계, §8.2b)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -19895,9 +19857,8 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     defer _ = unsetenv("MARU_LSP_SERVER_OVERRIDE");
     var dir = testing.tmpDir(.{});
     defer dir.cleanup();
-    // `fn f(` — 닫는 괄호가 없는 구문 오류. tree-sitter 는 여기서 MISSING 이 아니라 **ERROR**(메시지 없음)를 낸다 —
-    // 그래서 호버는 「구문 오류」 문장이다(MISSING 의 「빠짐: ‹토큰›」은 `hover.diagnosticText` 판정자가 직접 잰다). 뒤 줄은 멀쩡하다.
-    try dir.dir.writeFile(testing.io, .{ .sub_path = "e.zig", .data = "fn f( void {}\nconst ok = 1;\n" });
+    // 서버가 게시한 진단을 넣는다(출처는 언어 서버뿐이다 — §5.4). 서버 실행 파일은 없는 경로라 hover 요청은 안 간다.
+    try dir.dir.writeFile(testing.io, .{ .sub_path = "e.zig", .data = "fn f() void {}\nconst ok = 1;\n" });
     var root_buf: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buf[0..try dir.dir.realPath(testing.io, &root_buf)];
     const path = try std.fs.path.join(allocator, &.{ root, "e.zig" });
@@ -19908,15 +19869,18 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     fx.session.backing_height_px = 800;
     const leaf = activeLeafRectForTest(fx.session) orelse return error.SkipZigTest;
     {
+        const st = &term.rt.editor_diagnostics;
+        try st.lsp.append(allocator, .{ .start = 3, .end = 6, .severity = .@"error", .message = "expected ')'\nnote: second line", .code = "E1", .server = "zls" });
+        st.lsp_dirty = true;
         var d = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
     }
-    try testing.expect(term.rt.editor_diagnostics.list.items.len >= 1);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_diagnostics.list.items.len);
     const first = term.rt.editor_diagnostics.list.items[0];
-    try testing.expectEqual(maru.session.editor.diagnostic.Source.syntax, first.source);
+    try testing.expectEqual(maru.session.editor.diagnostic.Source.lsp, first.source);
     const Ctx = struct { fx: *PaneFixture };
     const ctx: Ctx = .{ .fx = &fx };
-    // ⑴ 진단 자리에 머물면 서버 없이도 열린다 — 문장은 i18n(이 픽스처에선 「구문 오류」).
+    // ⑴ 진단 자리에 머물면 서버에 묻지 않고도 열린다 — 메시지 첫 줄과 흐린 `서버(코드)` 줄.
     const pd = pointerAtOffset(term, first.start) orelse return error.NoPointer;
     _ = fx.session.hoverCursor(pd.x, pd.y, 0);
     try testing.expect(pumpHoverUntil(&fx, 3000, ctx, struct {
@@ -19927,18 +19891,11 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     try testing.expectEqual(@as(u64, 0), fx.session.editor_lsp.sent_hovers);
     {
         const lines = hover_client.lines(fx.session);
-        try testing.expectEqual(@as(usize, 1), lines.len); // 구문 오류는 출처 줄이 없다(우리가 낸 것)
-        var want_buf: [256]u8 = undefined;
-        const want: []const u8 = if (first.message.len > 0)
-            maru.i18n.format(&want_buf, maru.i18n.t(.diag_missing), &.{.{ .s = first.message }})
-        else
-            maru.i18n.t(.diag_syntax_error);
-        try testing.expectEqualStrings(want, lines[0].text); // 평문 — 아이콘·꼬리표 없음
-        // 기대값을 같은 `format` 으로 지으면 틀이 틀려도 같이 틀린다 — 기대 토큰이 **실제로 들어갔는지** 따로 본다
-        // (틀이 `{s}` 였을 때 「빠짐: {s}」가 그대로 떴고 위 비교는 통과했다).
-        // 이 픽스처는 ERROR(메시지 없음)를 낸다 — MISSING 의 기대 토큰 문장은 `hover.diagnosticText` 판정자가 직접 잰다.
-        try testing.expect(std.mem.indexOf(u8, lines[0].text, "{0}") == null and std.mem.indexOf(u8, lines[0].text, "{s}") == null);
+        try testing.expectEqual(@as(usize, 2), lines.len);
+        try testing.expectEqualStrings("expected ')'", lines[0].text); // 첫 줄만 — 평문, 아이콘·꼬리표 없음
         try testing.expectEqual(maru.chrome.tokens.ColorRole.surface_fg, lines[0].role);
+        try testing.expectEqualStrings(" zls(E1)", lines[1].text); // 그 진단을 낸 서버와 코드
+        try testing.expectEqual(maru.chrome.tokens.ColorRole.muted_fg, lines[1].role);
     }
     hover_client.hide(fx.session);
     // ⑵ 글자 없는 자리(둘째 줄 끝 뒤)는 안 연다 — 진단도 없는 자리(`ok`)도 안 연다(서버가 없다).
@@ -19950,7 +19907,7 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
             return c.fx.session.chrome_host.hover_box.open;
         }
     }.f));
-    // 진단이 덮지 않는 글자(둘째 줄에서 찾는다 — tree-sitter 의 복구 범위는 파일마다 달라 자리를 못 박지 않는다).
+    // 진단이 덮지 않는 글자(둘째 줄에서 찾는다).
     const uncovered: ?usize = blk: {
         var o: usize = line2.start;
         while (o < line2.contentEnd()) : (o += 1) {
@@ -19984,7 +19941,7 @@ test "HOVB2 호버 박스 — 서버 없이 구문 오류만으로 열린다(i18
     term.rt.editor_selection = .{ .anchor_start = first.start, .anchor_end = first.start, .focus = first.start };
     fx.session.dispatchAppAction(.show_hover);
     try testing.expect(fx.session.chrome_host.hover_box.open);
-    try testing.expectEqual(@as(usize, 1), hover_client.lines(fx.session).len);
+    try testing.expectEqual(@as(usize, 2), hover_client.lines(fx.session).len);
     // 다음 프레임에도 산다(앵커 갱신) — 그리고 `Esc` 는 닫는다(소비하지 않는다).
     try testing.expect(hover_client.refresh(fx.session));
     try pressKey(&fx, .escape, .{});
@@ -45433,12 +45390,10 @@ test "ES37 여는 경로가 예산을 건다 — 프레임 하나를 통째로 �
     try testing.expectEqual(syntax_color.frame_parse_budget_ns, prov.budget_ns);
 }
 
-test "ES41 여는 파싱이 끊긴 채 편집이 오면 처음부터 다시 판다 — 거짓 구문 오류가 안 서고 이어 팔 것도 안 남는다 (§2.1a)" {
-    // **제품 경계에서 잰다**(`SYN41` 은 층): 편집은 `insertText` → `refreshAfterEdit` → `onEditSpan` 을 타고, 진단은
-    // 프레임(`appendPaneFrame` 의 `diagnosticViews`)이 채운다. 그 프레임에서 진단이 **`syntaxColors` 보다 먼저** 트리를
-    // 읽으므로(끊긴 파싱을 이어 파는 자리가 `syntaxColors` 다) 틀린 트리의 오류가 목록에 들어가고, 이어 파는 동안에는
-    // 「트리가 없으면 직전 목록 유지」 규칙 때문에 **파싱이 끝날 때까지 남는다**. 제품에서 이 순서를 밟는 것은 백업
-    // 복원이다 — 여는 파싱(4ms 예산)이 끊긴 채로 곧바로 문서 전체를 갈아 끼운다.
+test "ES41 여는 파싱이 끊긴 채 편집이 오면 처음부터 다시 판다 — 트리가 새로 판 것과 같고 이어 팔 것도 안 남는다 (§2.1a)" {
+    // **제품 경계에서 잰다**(`SYN41` 은 층): 편집은 `insertText` → `refreshAfterEdit` → `onEditSpan` 을 탄다. 끊긴 파싱의 낡은 트리를
+    // 이어 쓰면 색·접힘·심볼이 한 줄씩 어긋난다(전엔 그 트리의 거짓 구문 오류로 쟀다 — 구문 오류는 이제 진단 출처가 아니다, §5.4).
+    // 제품에서 이 순서를 밟는 것은 백업 복원이다 — 여는 파싱(4ms 예산)이 끊긴 채로 곧바로 문서 전체를 갈아 끼운다.
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -45461,13 +45416,33 @@ test "ES41 여는 파싱이 끊긴 채 편집이 오면 처음부터 다시 판�
     try testing.expect(!fx.term.rt.editor_syntax.pending);
     try testing.expect(fx.term.rt.editor_syntax.provider.?.tree != null);
 
-    // ⑵ **거짓 구문 오류가 없다** — 문서는 올바른 Zig 다. 프레임 하나를 돌려 진단을 채운다.
-    var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse return error.NoFrame;
-    d.dl.deinit(allocator);
-    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diagnostics.raw.items.len);
+    // ⑵ **트리가 맞다** — 같은 본문을 새로 판 트리와 심볼이 같다(낡은 트리면 앞에 넣은 한 줄만큼 어긋난다).
+    try expectTreeMatchesFresh(allocator, fx.term);
 }
 
-test "ES42 여는 파싱이 끊긴 채 범위를 모르는 편집이 오면 — 통째로 다시 파는 입구(`reparse`)도 처음부터 파고 이어 팔 것을 안 남긴다 (§2.1a)" {
+/// 지금 트리가 같은 본문을 새로 판 트리와 같은 심볼(byte 범위·행)을 내는가(ES41·ES42) — 낡은 트리를 이어 쓰면 앞에 넣은 글자만큼
+/// 어긋난다. 픽스처는 한 줄짜리 함수 200 개라 접힘은 없고 심볼은 200 개다.
+fn expectTreeMatchesFresh(allocator: std.mem.Allocator, term: *Term) !void {
+    const content = term.rt.editorDocument().opened.?.file.content;
+    var got: std.ArrayList(syntax_color.syntax.Provider.Symbol) = .empty;
+    defer got.deinit(allocator);
+    term.rt.editor_syntax.provider.?.symbols(allocator, &got);
+    var fresh = syntax_color.syntax.Provider.init(content, .zig, 0) orelse return error.NoProvider;
+    defer fresh.deinit();
+    var want: std.ArrayList(syntax_color.syntax.Provider.Symbol) = .empty;
+    defer want.deinit(allocator);
+    fresh.symbols(allocator, &want);
+    try testing.expect(want.items.len >= 200);
+    try testing.expectEqual(want.items.len, got.items.len);
+    for (want.items, got.items) |w, g| {
+        try testing.expectEqual(w.start, g.start);
+        try testing.expectEqual(w.end, g.end);
+        try testing.expectEqual(w.start_row, g.start_row);
+        try testing.expectEqual(w.name_start, g.name_start);
+    }
+}
+
+test "ES42 여는 파싱이 끊긴 채 범위를 모르는 편집이 오면 — 통째로 다시 파는 입구(`reparse`)도 처음부터 파서 트리가 새로 판 것과 같고 이어 팔 것을 안 남긴다 (§2.1a)" {
     // `ES41` 의 짝 — `refreshAfterEdit` 는 편집 범위가 `null` 이면 `onEditSpan` 이 아니라 **`reparse`**(`setSource`)로 간다.
     // 입구가 다르므로 reset 과 `pending` 내리기도 따로 잰다. **undo 로는 여기 안 닿는다**(적대적 3회차: 처음엔 undo 로 쟀는데
     // `reparse` 변이가 살았다 — undo 도 `undoGroupSpan` 으로 범위를 만든다). `null` 은 `spanFromInverse` 의 방어 갈래(역연산이
@@ -45496,9 +45471,7 @@ test "ES42 여는 파싱이 끊긴 채 범위를 모르는 편집이 오면 — 
 
     try testing.expect(!fx.term.rt.editor_syntax.pending);
     try testing.expect(fx.term.rt.editor_syntax.provider.?.tree != null);
-    var d = appendPaneFrame(fx.session, .{ .x = 100, .y = 50, .w = 800, .h = 600 }, fx.term) orelse return error.NoFrame;
-    d.dl.deinit(allocator);
-    try testing.expectEqual(@as(usize, 0), fx.term.rt.editor_diagnostics.raw.items.len);
+    try expectTreeMatchesFresh(allocator, fx.term);
 }
 
 test "ES24 문서와 줄 배열이 갈리면 승격하지 않는다 — 엉뚱한 줄이 접힌다" {

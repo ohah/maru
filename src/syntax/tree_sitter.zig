@@ -994,59 +994,6 @@ pub const Provider = struct {
     /// 빈 목록을 「접을 것이 없다」로 읽고 **다시 세지 않도록 래치**하므로, 일시적 실패가 그 문서의
     /// 구문 접힘을 **영영** 없앤다(적대적 검증 2026-09-10 — 첫 할당을 실패시켜 실측했다).
     /// 그래서 이 함수의 빈 목록은 **언제나 「접을 것이 없다」**이고, 못 센 것은 오류로 나온다.
-    /// 트리의 구문 오류 하나(§5.4 첫 출처). `missing` 이면 `end == start + 1`(없는 토큰은 폭이 없어 한 byte 를 준다) 이고
-    /// `expected` 가 그 토큰의 이름이다(문법이 소유하는 정적 문자열).
-    pub const SyntaxError = struct {
-        start: u32,
-        end: u32,
-        missing: bool,
-        expected: []const u8,
-    };
-
-    /// 구문 오류 상한(§5.4) — 통째로 깨진 파일이 수천 개를 내면 그 뒤는 뜻이 없다.
-    pub const max_syntax_errors: usize = 512;
-
-    /// **구문 오류를 뽑는다**(§5.4): `ERROR` 노드(가장 바깥 것 하나 — 안쪽은 접는다)와 `MISSING` 노드. 트리가 없으면(파싱이 끊긴
-    /// 프레임) 아무것도 안 하고 `false` — 호출자는 직전 목록을 유지한다. 순서는 문서 순(트리 순회가 그렇다).
-    pub fn syntaxErrors(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(SyntaxError)) error{OutOfMemory}!bool {
-        // 트리가 없을 때 `out` 을 **건드리지 않는다** — 그래서 반환값이 `true` 여도 호출자가 보는 목록은 같다(적대적 1회차 A11,
-        // 등가). `false` 를 주는 이유는 뜻이다: 「이 프레임은 새로 센 것이 아니다」.
-        const tree = self.tree orelse return false;
-        out.clearRetainingCapacity();
-        const root = c.ts_tree_root_node(tree);
-        if (!c.ts_node_has_error(root)) return true; // 오류 없는 트리는 순회할 것도 없다 — 결과에는 등가(5회차 E6), 비용의 길
-
-        var cursor = c.ts_tree_cursor_new(root);
-        defer c.ts_tree_cursor_delete(&cursor);
-        while (true) {
-            const node = c.ts_tree_cursor_current_node(&cursor);
-            var descend = true;
-            // **뿌리는 진단이 아니다.** 문서가 통째로 안 풀리면 tree-sitter 는 뿌리 자체를 `ERROR` 로 낸다 — 그것을 하나로 접으면
-            // 파일 전체에 밑줄이 간다(제품 캡처에서 실측: 함수 셋 중 하나가 깨졌는데 스무 줄이 전부 빨갰다). 뿌리는 늘 내려간다.
-            const is_root = c.ts_node_eq(node, root);
-            if (is_root) {
-                // 아래로
-            } else if (c.ts_node_is_missing(node)) {
-                const sb = c.ts_node_start_byte(node);
-                try out.append(allocator, .{ .start = sb, .end = sb + 1, .missing = true, .expected = std.mem.span(c.ts_node_type(node)) });
-                descend = false;
-            } else if (c.ts_node_is_error(node)) {
-                try out.append(allocator, .{ .start = c.ts_node_start_byte(node), .end = c.ts_node_end_byte(node), .missing = false, .expected = "" });
-                descend = false; // 안쪽 오류는 바깥 것에 접는다
-            } else if (!c.ts_node_has_error(node)) {
-                // 아래에 오류가 없는 가지는 안 내려간다 — 큰 파일에서 순회 비용을 오류 근처로 좁힌다. **결과에는 등가**다(적대적
-                // 5회차 E2: 내려가도 오류가 없어 아무것도 안 더한다) — 걸음 수만 다르다.
-                descend = false;
-            }
-            if (out.items.len >= max_syntax_errors) return true;
-            if (descend and c.ts_tree_cursor_goto_first_child(&cursor)) continue;
-            while (true) {
-                if (c.ts_tree_cursor_goto_next_sibling(&cursor)) break;
-                if (!c.ts_tree_cursor_goto_parent(&cursor)) return true;
-            }
-        }
-    }
-
     pub fn foldSpans(self: *Provider, allocator: std.mem.Allocator, out: *std.ArrayList(FoldSpan)) error{OutOfMemory}!void {
         out.clearRetainingCapacity();
         const tree = self.tree orelse return;
@@ -2174,91 +2121,6 @@ test "SYN13 onEdit 이 옛 트리를 실제로 재사용한다 — 전체 재파
     const incremental = total_allocs;
 
     try std.testing.expect(incremental * 4 < full);
-}
-
-test "SYN40 구문 오류 — ERROR 는 가장 바깥 것 하나, MISSING 은 1 byte 와 기대 토큰, 깨끗한 트리는 0 (§5.4)" {
-    const allocator = std.testing.allocator;
-    var out: std.ArrayList(Provider.SyntaxError) = .empty;
-    defer out.deinit(allocator);
-
-    // 깨끗한 소스 — 아무것도 없다.
-    {
-        var prov = Provider.init("const a = 1;\npub fn f() void {}\n", .zig, 0) orelse return error.NoProvider;
-        defer prov.deinit();
-        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
-        try std.testing.expectEqual(@as(usize, 0), out.items.len);
-    }
-    // 닫는 괄호가 없다 — MISSING 하나(1 byte, 기대 토큰이 온다).
-    {
-        const src = "pub fn f() void {\n    const a = (1 + 2;\n    _ = a;\n}\n";
-        var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
-        defer prov.deinit();
-        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
-        try std.testing.expect(out.items.len >= 1);
-        var missing: ?Provider.SyntaxError = null;
-        for (out.items) |e| if (e.missing) {
-            missing = e;
-        };
-        const m = missing orelse return error.NoMissing;
-        try std.testing.expectEqual(m.start + 1, m.end);
-        try std.testing.expect(m.expected.len > 0);
-        try std.testing.expect(m.start <= src.len);
-    }
-    // 쓰레기 토큰 — ERROR 노드. 그 안에 무엇이 있든 **하나**다(안쪽은 접는다).
-    {
-        const src = "pub fn f() void {\n    @@@ ((( !!! ))) @@@\n}\n";
-        var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
-        defer prov.deinit();
-        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
-        var errors: usize = 0;
-        var covers = false;
-        for (out.items) |e| {
-            if (e.missing) continue;
-            errors += 1;
-            try std.testing.expect(e.end > e.start);
-            const at = std.mem.indexOf(u8, src, "@@@") orelse unreachable;
-            if (e.start <= at and e.end > at) covers = true;
-        }
-        try std.testing.expect(errors >= 1);
-        try std.testing.expect(covers);
-        // 순서는 문서 순.
-        var prev: u32 = 0;
-        for (out.items) |e| {
-            try std.testing.expect(e.start >= prev);
-            prev = e.start;
-        }
-    }
-    // **안쪽 ERROR 는 접힌다** — 이 소스는 ERROR 안에 ERROR 가 둘 더 겹친다(안 접으면 [0,35)·[19,33)·[28,32) 셋, 실측). 가장
-    // 바깥 하나만이고 어떤 두 항목도 겹치지 않는다(적대적 1회차 A9: 위 두 픽스처는 중첩이 없어 안 보였다).
-    {
-        const src = "fn f( void { const a = (1 + ; @@@ }\n";
-        var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
-        defer prov.deinit();
-        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
-        var errors: usize = 0;
-        for (out.items) |e| {
-            if (!e.missing) errors += 1;
-        }
-        try std.testing.expectEqual(@as(usize, 1), errors);
-        for (out.items, 0..) |a, i| {
-            for (out.items[i + 1 ..]) |b| try std.testing.expect(a.end <= b.start or b.end <= a.start);
-        }
-    }
-    // **뿌리가 ERROR 여도 파일 전체가 진단이 되지 않는다** — 함수 셋 중 하나가 깨진 문서에서 tree-sitter 는 뿌리를 ERROR 로 낸다.
-    // 제품 캡처에서 스무 줄이 전부 빨갰다(2026-09-17 실측). 뿌리는 늘 내려가고, 남는 것은 안쪽의 작은 범위들이다.
-    {
-        const src = "const std = @import(\"std\");\n\npub fn ok(a: u32) u32 {\n    return a + 1;\n}\n\npub fn broken(a: u32) u32 {\n    const b = (a + 2;\n    return b;\n}\n\npub fn garbage() void {\n    @@@ ((( !!!\n}\n\npub fn tail() void {\n    return;\n}\n";
-        var prov = Provider.init(src, .zig, 0) orelse return error.NoProvider;
-        defer prov.deinit();
-        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
-        try std.testing.expect(out.items.len >= 2); // MISSING `)` 와 쓰레기 토큰
-        for (out.items) |e| try std.testing.expect(e.end - e.start < 16); // 어느 것도 문서를 통째로 덮지 않는다
-        var has_missing = false;
-        for (out.items) |e| if (e.missing) {
-            has_missing = true;
-        };
-        try std.testing.expect(has_missing);
-    }
 }
 
 test "SYN14 편집 뒤 색이 새 내용을 따른다 — 통지 없이는 옛 트리가 그대로 살아남는다" {
@@ -3655,41 +3517,6 @@ test "SYN58 다음 줄 머리(열 0)에서 끝나는 노드는 그 줄을 접지
         try prov.foldSpans(allocator, &folds);
         errdefer for (folds.items) |f| std.debug.print("SYN58 {s} {d}-{d}\n", .{ @tagName(k.lang), f.start_row, f.end_row });
         try std.testing.expectEqualSlices(Provider.FoldSpan, k.want, folds.items);
-    }
-}
-
-test "SYN53 Swift grammar 의 한계 — 정상 Swift 가 구문 오류를 낸다(빈 튜플·본문 없는 함수·지역 `nonisolated(unsafe)`·` ; `·`$` 정규식), 쓰는 꼴은 깨끗하다" {
-    // 계획 editor-bundled-languages.md 「한계」와 짝이다. grammar 를 올려 하나라도 깨끗해지면 이 판정자가 깨진다 — 그때 한계 절을 고친다.
-    const allocator = std.testing.allocator;
-    var out: std.ArrayList(Provider.SyntaxError) = .empty;
-    defer out.deinit(allocator);
-    const limited = [_][]const u8{
-        "func f() {\n    c.yield(())\n}\n", // 빈 튜플 값 — upstream alex-pinkus/tree-sitter-swift#633
-        "func f() {\n    let x = ()\n}\n",
-        "@_silgen_name(\"X\")\nfunc X() -> Int\n\nclass A {\n    func g() {}\n}\n",
-        "func f() {\n    nonisolated(unsafe) var x = 0\n}\n",
-        "func f() {\n    guard a() else { b() ; return }\n}\n",
-        "let r = /^a$/\n",
-    };
-    for (limited) |src| {
-        var prov = Provider.init(src, .swift, 0) orelse return error.NoProvider;
-        defer prov.deinit();
-        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
-        try std.testing.expect(out.items.len >= 1);
-    }
-    // 대조군 — 이웃한 꼴은 깨끗하다(판정자가 「Swift 는 늘 오류」로 통과하지 않게).
-    const clean = [_][]const u8{
-        "func f() {\n    c.yield(1)\n}\n",
-        "nonisolated(unsafe) var x = 0\n",
-        "func f() {\n    guard a() else { b(); return }\n}\n",
-        "let r = /a+/\n",
-        "func f() {\n    guard let self else { return }\n}\n",
-    };
-    for (clean) |src| {
-        var prov = Provider.init(src, .swift, 0) orelse return error.NoProvider;
-        defer prov.deinit();
-        try std.testing.expect(try prov.syntaxErrors(allocator, &out));
-        try std.testing.expectEqual(@as(usize, 0), out.items.len);
     }
 }
 

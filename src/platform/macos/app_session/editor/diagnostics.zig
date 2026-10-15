@@ -1,4 +1,4 @@
-//! 진단 층의 제품 쪽(docs/native-editor-visual-mapping.md §5.4) — 목록을 채우고(첫 출처: 트리의 구문 오류), 렌더가 받는 세 표
+//! 진단 층의 제품 쪽(docs/native-editor-visual-mapping.md §5.4) — 목록을 채우고(출처: 언어 서버·보조 서버), 렌더가 받는 세 표
 //! (줄마다의 밑줄 조각 · 줄마다의 gutter severity · 마커 줄)로 편다. 규칙은 `session.editor.diagnostic` 이, 그리기는 chrome 이 든다.
 //!
 //! **저장소는 Term 이 들고 프레임마다 재사용한다** — 검색 마크(`editor_find_marks`)와 같은 관례. 세 표는 **보이는 줄 축**이다
@@ -6,7 +6,6 @@
 //! 머리에 오류 표식을 얹는 규칙은 §5 가 검색 마커에만 정했다).
 
 const std = @import("std");
-const syntax = @import("syntax");
 const maru = @import("maru");
 const diagnostic = maru.session.editor.diagnostic;
 const chrome_diag = maru.chrome.components.editor_view.diagnostic;
@@ -24,8 +23,6 @@ comptime {
 pub const State = struct {
     /// 정렬된 목록(§5.4 모델). 출처가 여럿이어도 하나다.
     list: std.ArrayList(Diagnostic) = .empty,
-    /// 트리에서 뽑은 원본 — 매 프레임 재사용.
-    raw: std.ArrayList(syntax.Provider.SyntaxError) = .empty,
     /// 언어 서버가 준 목록(§8.2a) — `publishDiagnostics` 마다 통째로 갈아 끼운다. 메시지는 `lsp_messages` 안의 조각.
     lsp: std.ArrayList(Diagnostic) = .empty,
     lsp_messages: std.ArrayList(u8) = .empty,
@@ -59,7 +56,6 @@ pub const State = struct {
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         self.list.deinit(allocator);
-        self.raw.deinit(allocator);
         self.lsp.deinit(allocator);
         self.lsp_messages.deinit(allocator);
         for (&self.aux) |*set| {
@@ -74,38 +70,16 @@ pub const State = struct {
     }
 };
 
-// 구문 오류 출처의 `message` 는 **표시 문장이 아니라 재료**다: `MISSING` 이면 기대 토큰 이름(문법이 소유하는 정적 문자열),
-// `ERROR` 면 빈 문자열. 사람이 읽는 문장(「구문 오류」·「빠짐: ‹토큰›」)은 표시 자리(§8.3 호버)가 i18n 키로 만든다 — 여기
-// 한국어를 박으면 영어 화면에 한국어가 섞인다(i18n 계약 §7).
-
-/// **트리에서 목록을 다시 채운다**(§5.4 갱신 시점: 트리가 있을 때마다). 트리가 없으면(파싱이 끊긴 프레임) 직전 목록을 유지하고
-/// `false`. 다른 출처(LSP·린트)가 생기면 여기서 `.syntax` 항목만 갈아 끼운다 — 지금은 목록이 곧 구문 오류다. `syntax_errors` 가 거짓이면
-/// (문법이 구문 오류를 진단으로 안 낸다 — `Grammar.syntaxDiagnostics`, SQL) 구문 출처를 비우고 다른 출처만 합친다.
-pub fn refreshFromSyntax(self: *State, allocator: std.mem.Allocator, provider: ?*syntax.Provider, syntax_errors: bool) bool {
-    const had_tree = if (provider) |prov| blk: {
-        if (!syntax_errors) {
-            self.raw.clearRetainingCapacity();
-            break :blk true;
-        }
-        break :blk prov.syntaxErrors(allocator, &self.raw) catch false;
-    } else false;
-    // 트리가 없어도 서버 목록이 바뀌었으면 합친다(§8.2a — 두 출처가 한 목록).
-    if (!had_tree and !self.lsp_dirty) return false;
+/// **서버 목록을 합친다**(§5.4 — 출처는 언어 서버·보조 서버뿐이다). 서버 목록이 바뀌었을 때만 다시 만들고 `true`, 아니면 그대로 `false`.
+/// tree-sitter 의 구문 오류는 출처가 아니다(2026-10-15 사용자 결정) — 전처리기·방언을 모르는 파서라 정상 코드에 거짓 오류가 흔했고(Objective-C
+/// `.m` 676 개 중 255 개, SQL 57 개 중 12 개 — 계획 editor-bundled-languages 「한계」), 다른 편집기도 그것을 진단으로 내지 않는다.
+pub fn refresh(self: *State, allocator: std.mem.Allocator) bool {
+    if (!self.lsp_dirty) return false;
     self.lsp_dirty = false;
     self.list.clearRetainingCapacity();
     for (self.lsp.items) |d| self.list.append(allocator, d) catch break;
     for (&self.aux) |*set| for (set.list.items) |d| self.list.append(allocator, d) catch break;
-    for (self.raw.items) |e| {
-        self.list.append(allocator, .{
-            .start = e.start,
-            .end = @max(e.end, e.start + 1), // 출처가 이미 1 byte 를 준다(`syntaxErrors`) — 여기 clamp 는 등가(적대적 2회차 B1), 규칙을 두 층이 함께 든다
-            .severity = .@"error",
-            .source = .syntax,
-            .message = if (e.missing) e.expected else "",
-        }) catch break; // 모자라면 앞부분만 — 목록은 이미 문서 순이라 「앞쪽」이 남는다
-    }
-    // 트리 순회(전위)가 이미 문서 순이라 오늘은 등가다(적대적 2회차 B2). 남기는 이유는 두 번째 출처다 — LSP 목록은 서버 순서라
-    // 합치는 순간 이 정렬이 규칙이 된다.
+    // 서버 목록은 서버 순서라 합치면 이 정렬이 규칙이 된다(이동·줄 접기의 전제).
     diagnostic.sort(self.list.items);
     return true;
 }

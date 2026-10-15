@@ -77,7 +77,8 @@
 #                   `-Dweb-upload-test-decision=true` 로 만든다, `MARU_TEST_UPLOAD_DECISION` 이 가리키는 파일을 호출마다 바꾼다): 한 파일 —
 #                   페이지가 진짜 change(isTrusted)로 받아 내용을 읽어 보낸다 · 상대 경로 둘을 multiple 칸에(CLI 의 현재 폴더로 붙인다) ·
 #                   받은 뒤 change 에서 칸을 비우는 칸·칸을 새 것으로 바꿔 끼우는 칸은 성공에 kept:false(다시 올리지 말라는 안내 — 적대 리뷰 1 회차) ·
-#                   꺼진 칸·한 파일 칸에 둘은 모달 전에 거절 · 거부는 -32002 · 사본은 프로필의 upload-staging/<탭>/ 아래 0400 ·
+#                   꺼진 칸·한 파일 칸에 둘·폴더 칸(webkitdirectory)은 모달 전에 거절 · 거부는 -32002 · 사본은 프로필의 upload-staging/<탭>/ 아래 0400 ·
+#                   지난 실행이 남긴 사본은 이 실행이 처음 프로필을 잡을 때 지운다(적대 리뷰 5 회차) ·
 #                   모달 동안 페이지가 옮겨 가면 「page changed」 이고 새 문서는 아무것도 받지 않는다 · change 처리기가 곧 같은 출처로 옮기는 칸은
 #                   성공에 navigated:true(「try again」 없음 — 적대 리뷰 2 회차) · change 처리기가 alert 를 띄우는 칸은 성공에 dialog:true(「try
 #                   again」 없음 — 적대 리뷰 3 회차), 그 alert 는 에이전트 것(cause=agent)이라 handle-dialog 로 답하면 페이지가 내용을 한 번 받는다 ·
@@ -237,6 +238,7 @@ for(var i=0;i<n;i++)(function(f){var r=new FileReader();r.onload=function(){part
 <input type=file id=one onchange="rep(this,event)">
 <input type=file id=multi multiple onchange="rep(this,event)">
 <input type=file id=dis disabled onchange="rep(this,event)">
+<input type=file id=dir webkitdirectory onchange="rep(this,event)">
 <input type=file id=clr onchange="rep(this,event);this.value=''">
 <input type=file id=rr onchange="rep(this,event);this.replaceWith(this.cloneNode())">
 <input type=file id=nav onchange="var f=this.files[0];location.href='/up3.html?nav-'+this.files.length+'-'+event.isTrusted+'-'+encodeURIComponent(f.name+':'+f.size)">
@@ -1003,6 +1005,8 @@ hit_seen 'up-rr-1-true-b.txt%3A6%3Abravo' && echo yes > "\$out/up-rr-hit" || ech
 # 모달 전 거절 — 꺼진 칸, 한 파일 칸에 둘.
 "\$cli" browser upload --surface "\$up" --selector '#dis' "$root/files/a.txt" > "\$out/up-dis" 2>&1; echo "rc=\$?" >> "\$out/up-dis"
 "\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/a.txt" "$root/files/b.txt" > "\$out/up-single" 2>&1; echo "rc=\$?" >> "\$out/up-single"
+# 폴더 칸(webkitdirectory) — Chromium 은 그 칸에 파일을 조용히 넣지 않았다(실측 i): 모달 전에 그 이유로 거절(그 검사는 페이지의 JS 라 단위 시험이 못 본다 — 5 회차 변이 JSdir 를 덮는 단계가 없었다).
+"\$cli" browser upload --surface "\$up" --selector '#dir' "$root/files/a.txt" > "\$out/up-dir" 2>&1; echo "rc=\$?" >> "\$out/up-dir"
 # 거부.
 echo deny > "$root/updecision"
 "\$cli" browser upload --surface "\$up" --selector '#one' "$root/files/b.txt" > "\$out/up-deny" 2>&1; echo "rc=\$?" >> "\$out/up-deny"
@@ -1070,6 +1074,11 @@ chmod +x "$root/pane.sh"
 
 out="$root/out"
 mkdir -p "$out" "$root/home"
+# W9c③: 지난 실행이 남긴 업로드 사본 — 이 실행이 처음 프로필을 잡을 때 지운다(`sweepUploadStaging` — 단위 시험은 실제 프로필을 건드리지 않아
+# 이 배선을 못 본다 — 5 회차 변이 APPwipe 를 덮는 단계가 없었다). 앱이 쓸 프로필(번들 id — 실행 파일에 박힌 Info.plist)에 하나 놓아 둔다.
+up_bid=$(grep -a -A1 '<key>CFBundleIdentifier</key>' "$app" | sed -n 's/.*<string>\(.*\)<\/string>.*/\1/p' | head -1)
+up_stale="$root/home/Library/Application Support/maru/web/${up_bid:-dev.maru.apphost}/profile/upload-staging/424242"
+(umask 077 && mkdir -p "$up_stale/1/0" && printf 'stale\n' > "$up_stale/1/0/old.txt")
 # 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
 printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
@@ -1330,6 +1339,8 @@ for w in clr rr; do
 done
 grep -q '^rc=1$' "$out/up-dis" && grep -q 'disabled' "$out/up-dis" || fail "a disabled file input was not refused ($(tr '\n' ' ' < "$out/up-dis"))"
 grep -q '^rc=1$' "$out/up-single" && grep -q 'takes one file' "$out/up-single" || fail "two files into a single-file input were not refused ($(tr '\n' ' ' < "$out/up-single"))"
+grep -q '^rc=1$' "$out/up-dir" && grep -q 'takes a folder' "$out/up-dir" || fail "a folder (webkitdirectory) file input was not refused before the dialog ($(tr '\n' ' ' < "$out/up-dir"))"
+[ ! -e "$up_stale" ] || fail "an upload copy left by an earlier run was not wiped when this run first held the profile ($up_stale)"
 grep -q '^rc=1$' "$out/up-deny" && grep -q 'declined.*(-32002)' "$out/up-deny" || fail "a declined upload did not fail with -32002 ($(tr '\n' ' ' < "$out/up-deny"))"
 ! grep -q 'GET /hit?up-one-1-true-b.txt' "$root/http.log" || fail "a declined or moved upload still reached the page ($(grep 'GET /hit?up' "$root/http.log" | tr '\n' ' '))"
 grep -q '^rc=1$' "$out/up-moved" && grep -q 'page changed' "$out/up-moved" || fail "an upload whose page moved during the dialog did not fail with page changed ($(tr '\n' ' ' < "$out/up-moved"))"
@@ -1355,7 +1366,7 @@ grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-busy2" && grep -q '^rc=
     || fail "an upload whose verify answered ok after 7 s of page work, while 12 more seconds of page work held the release, was not answered at once as kept ($(tr '\n' ' ' < "$out/up-busy2") · $(cat "$out/up-busy2-secs")s)"
 echo "PASS w9c-upload-busy: a verify held by 15 s of page work ends at the 10 s limit as navigated:true ($(cat "$out/up-busy-secs")s), and a verify that answers ok while the page then stays busy is answered at once as kept, not held by the release ($(cat "$out/up-busy2-secs")s)"
 [ ! -s "$out/up-after-close" ] || fail "closing the tab did not remove its upload-staging folder ($(tr '\n' ' ' < "$out/up-after-close"))"
-echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input and two files into a single-file input are refused before the dialog, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
+echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input, two files into a single-file input and a folder (webkitdirectory) input are refused before the dialog, a copy left by an earlier run is wiped when the profile is first held, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

@@ -142,6 +142,8 @@ pub fn prepareWith(gpa: std.mem.Allocator, path: []const u8, hash_budget: *u64) 
         const e = std.c._errno().*;
         return .{ .refused = if (e == @intFromEnum(std.c.E.NOENT) or e == @intFromEnum(std.c.E.NOTDIR)) .not_found else .unreadable };
     };
+    if (builtin.is_test) if (test_after_realpath) |hook| hook(real);
+    // 정규 경로를 정한 뒤 열기 전에 그 자리가 링크로 바뀌면(남이 바꿔치기) 따라가지 않는다 — 「바뀌었다」(`swapped`).
     const fd = std.c.open(real, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, @as(std.c.mode_t, 0));
     if (fd < 0) {
         const e = std.c._errno().*;
@@ -209,6 +211,8 @@ const Snapshot = struct { st: std.c.Stat, head: []u8, digest: [Sha256.digest_len
 
 /// 시험만 — 엿보기를 읽은 뒤·다시 stat 하기 전에 부른다(그 사이에 파일이 바뀌는 것을 흉내 낸다).
 var test_after_peek: ?*const fn (fd: c_int) void = null;
+/// 시험만 — 정규 경로를 정한 뒤·열기 전에 부른다(그 사이 그 자리를 링크로 바꿔치는 것을 흉내 낸다 — 5 회차 변이).
+var test_after_realpath: ?*const fn (real: [*:0]const u8) void = null;
 
 /// 두 stat 이 같은 파일의 같은 상태인가 — 사본 뒤 비교(`stageFileWith`)와 같은 항목(장치·inode·크기·mtime·ctime).
 fn sameState(a: std.c.Stat, b: std.c.Stat) bool {
@@ -1028,4 +1032,61 @@ test "W9c③ 적대 리뷰 3 회차: 내용 해시는 호출의 예산(1 GiB) �
         const r = try stageFileWith(testing.allocator, root, 5, 2, 0, &p1, &copy_budget, true);
         try testing.expectEqual(StageError.changed, r.failed);
     }
+}
+
+// ── W9c③ 적대 리뷰 5 회차 변이(전 기능) — 살아남은 변이를 잡는 시험 ──
+// PRnofollow: 정규 경로(`realpath`)는 링크를 다 푼 뒤의 경로라 보통은 `O_NOFOLLOW` 가 할 일이 없다 — 그것이 지키는 것은 정한 뒤·열기 전에 그 자리가
+// 링크로 바뀌는 경쟁뿐이고, 그 경쟁을 만드는 시험이 없어 `O_NOFOLLOW` 를 지운 변이가 살아남았다.
+var swap_target_buf: [std.fs.max_path_bytes]u8 = undefined;
+var swap_target: [:0]const u8 = "";
+
+const RealpathSwapper = struct {
+    fn hook(real: [*:0]const u8) void {
+        _ = std.c.unlink(real);
+        _ = std.c.symlink(swap_target.ptr, real);
+    }
+};
+
+test "W9c③ 적대 리뷰 5 회차 변이 PRnofollow: 정규 경로를 정한 뒤 열기 전에 그 자리가 다른 파일을 가리키는 링크로 바뀌면 따라가지 않고 거절한다(swapped)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    try t.write("a.txt", "cat picture\n");
+    try t.write("secret.txt", "-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const target = t.join(&b1, "secret.txt");
+    @memcpy(swap_target_buf[0..target.len], target);
+    swap_target_buf[target.len] = 0;
+    swap_target = swap_target_buf[0..target.len :0];
+    test_after_realpath = &RealpathSwapper.hook;
+    defer test_after_realpath = null;
+    var b2: [std.fs.max_path_bytes]u8 = undefined;
+    try expectRefused(try prepare(testing.allocator, t.join(&b2, "a.txt")), .swapped);
+}
+
+// PRctime: 같은 길이로 바꿔 쓰고 mtime 을 되돌린 것(1 회차 R1)은 이제 내용 해시(3 회차 M1)도 잡아, 승인 뒤 비교에서 ctime 을 지운 변이가 살아남았다.
+// ctime 만 잡는 자리는 해시 예산 밖이다 — 호출의 1 GiB 를 넘은 뒤쪽(또는 예산을 다 쓴 뒤의 파일)은 엿보기만큼만 해시한다(남는 틈으로 적은 것).
+test "W9c③ 적대 리뷰 5 회차 변이 PRctime: 해시 예산 밖의 바이트를 같은 길이로 바꿔 쓰고 mtime 을 되돌려도 ctime 이 잡는다(changed)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    const body = "x" ** (2 * display.head_bytes);
+    try t.write("big.txt", body);
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    var hash_budget: u64 = 0; // 이 호출의 예산을 앞 파일들이 다 썼다 — 엿보기(앞 4 KiB)만 해시한다
+    var p = (try prepareWith(testing.allocator, t.join(&b1, "big.txt"), &hash_budget)).ok;
+    defer p.deinit(testing.allocator);
+    try testing.expectEqual(@as(u64, display.head_bytes), p.hashed);
+    const fd = std.c.open(t.join(&b1, "big.txt").ptr, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    try testing.expect(fd >= 0);
+    defer _ = std.c.close(fd);
+    try testing.expectEqual(@as(isize, 6), std.c.pwrite(fd, "SECRET", 6, display.head_bytes + 100));
+    const times = [2]std.c.timespec{ .{ .sec = p.mtime_sec, .nsec = p.mtime_nsec }, .{ .sec = p.mtime_sec, .nsec = p.mtime_nsec } };
+    try testing.expectEqual(@as(c_int, 0), futimens(fd, &times));
+    var budget: u64 = copy_cap_per_call;
+    const r = try stageFile(testing.allocator, root, 1, 2, 0, &p, &budget);
+    if (r == .ok) testing.allocator.free(r.ok);
+    try testing.expect(r == .failed and r.failed == .changed);
 }

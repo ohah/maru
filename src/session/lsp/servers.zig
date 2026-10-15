@@ -41,13 +41,16 @@ pub fn candidatesFor(g: language.Grammar) []const Server {
         .zig => &[_]Server{.{ .exe = "zls", .args = &none, .language_id = "zig", .install = "brew install zls" }},
         .c => &[_]Server{.{ .exe = "clangd", .args = &none, .language_id = "c", .install = "brew install llvm" }},
         .cpp => &[_]Server{.{ .exe = "clangd", .args = &none, .language_id = "cpp", .install = "brew install llvm" }},
+        // Objective-C 도 clangd 다(같은 실행 파일 — LSP 언어 ID 는 `objective-c`). 진단의 출처가 언어 서버뿐이 되며(§5.4, 2026-10-15 사용자 결정)
+        // 매크로를 펼치는 진짜 진단이 여기서 온다 — tree-sitter 는 전처리기를 몰라 정상 코드에 거짓 오류를 냈다.
+        .objc => &[_]Server{.{ .exe = "clangd", .args = &none, .language_id = "objective-c", .install = "brew install llvm" }},
         .typescript => &ts_candidates,
         .tsx => &tsx_candidates,
         .javascript => &js_candidates,
         .rust => &[_]Server{.{ .exe = "rust-analyzer", .args = &none, .language_id = "rust", .install = "rustup component add rust-analyzer" }},
         .python => &[_]Server{.{ .exe = "pyright-langserver", .args = &stdio, .language_id = "python", .install = "npm i -g pyright" }},
         .go => &[_]Server{.{ .exe = "gopls", .args = &none, .language_id = "go", .install = "go install golang.org/x/tools/gopls@latest" }},
-        .none, .json, .markdown, .java, .ruby, .php, .kotlin, .bash, .css, .html, .yaml, .toml, .xml, .dtd, .lua, .dockerfile, .make, .swift, .sql, .dart, .csharp, .objc, .scala => &.{},
+        .none, .json, .markdown, .java, .ruby, .php, .kotlin, .bash, .css, .html, .yaml, .toml, .xml, .dtd, .lua, .dockerfile, .make, .swift, .sql, .dart, .csharp, .scala => &.{},
     };
 }
 
@@ -89,12 +92,16 @@ pub fn processKey(s: Server) []const u8 {
 
 const testing = std.testing;
 
-test "LSI1 이름표 — zig·c·cpp·ts·tsx·js·rust·python·go 는 서버가 있고 나머지는 없다; ts 계열은 --stdio, 같은 서버는 같은 키 (§8.2a)" {
+test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 는 서버가 있고 나머지는 없다; ts 계열은 --stdio, 같은 서버는 같은 키 (§8.2a)" {
     try testing.expectEqualStrings("zls", forGrammar(.zig).?.exe);
     try testing.expectEqualStrings("clangd", forGrammar(.c).?.exe);
     try testing.expectEqualStrings("clangd", forGrammar(.cpp).?.exe);
     try testing.expectEqualStrings("cpp", forGrammar(.cpp).?.language_id);
     try testing.expectEqualStrings(processKey(forGrammar(.c).?), processKey(forGrammar(.cpp).?));
+    // Objective-C 도 clangd — 언어 ID 만 다르고 같은 서버 프로세스다(2026-10-15, 진단은 언어 서버로만).
+    try testing.expectEqualStrings("clangd", forGrammar(.objc).?.exe);
+    try testing.expectEqualStrings("objective-c", forGrammar(.objc).?.language_id);
+    try testing.expectEqualStrings(processKey(forGrammar(.c).?), processKey(forGrammar(.objc).?));
     const ts = forGrammar(.typescript).?; // 첫 후보 = tsgo
     try testing.expectEqualStrings("tsgo", ts.exe);
     try testing.expectEqual(@as(usize, 2), ts.args.len);

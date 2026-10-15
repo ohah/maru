@@ -13468,7 +13468,7 @@ test "MPN20 가로는 Result 의 것이다 — 휠이 Result 열에서 듣고, �
     term.rt.editor_wrap = false;
 }
 
-test "DGP1 진단 층 — 서버 진단이 gutter 글리프·지그재그 밑줄·막대 마커·미니맵 행으로 서고, F8/⇧F8 이 감기며, 서버가 비우면 사라지고, 끄면 넷 다 없다 (제품 경계, §5.4)" {
+test "DGP1 진단 층 — 서버 진단이 gutter 글리프·지그재그 밑줄·막대 마커·미니맵 행으로 서고, F8/⇧F8 이 감기며, 서버가 비우면 사라지고, 끄면 넷 다 없고 끈 동안 온 게시는 켜면 선다 (제품 경계, §5.4)" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var fx = try PaneFixture.init(allocator);
@@ -13647,7 +13647,21 @@ test "DGP1 진단 층 — 서버 진단이 gutter 글리프·지그재그 밑줄
     try testing.expectEqual(@as(usize, 0), f3.bar);
     try testing.expectEqual(@as(usize, 0), f3.mm);
     try testing.expect(!gotoDiagnosticActive(fx.session, .next));
+    // ⑸ **끈 동안 온 게시는 다시 켜면 선다** — 끈 프레임은 합치지 않지만(`diagnosticViews` 가 먼저 돌아간다) 서버 칸과 `lsp_dirty` 는 남아,
+    //    켠 첫 프레임이 합친다. 게시가 한 번뿐인 서버(바뀌지 않는 파일)에서 끄고 켠 뒤 밑줄이 영영 안 서면 안 된다.
+    try publish(term, allocator, &.{err1});
+    {
+        var dq = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+        dq.dl.deinit(allocator);
+    }
     fx.session.loaded_config.config.editor.diagnostics = true;
+    fx.session.gpu_quads.clearRetainingCapacity();
+    var d4 = appendPaneFrame(fx.session, leaf, term) orelse return error.EditorPaneDidNotDraw;
+    const f4 = scan(fx.session, d4.dl, term, cw);
+    d4.dl.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), term.rt.editor_diagnostics.list.items.len);
+    try testing.expectEqual(err1, term.rt.editor_diagnostics.list.items[0].start);
+    try testing.expect(f4.glyph and f4.zigzag > 0);
 }
 
 /// LSP 판정자 공용: 가짜 서버 경로. `zig-out/bin/maru-fake-lsp` — `test-editor` 가 설치 단계에 의존한다(cwd 는 저장소 루트).

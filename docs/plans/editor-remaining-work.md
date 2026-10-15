@@ -66,7 +66,7 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | 비교 뷰 wrap 조각 정렬 | 알려진 제한, 기존 보류 | 네이티브 계획 N1.5의 알려진 구멍과 `editor_diff` 판정자. wrap off/독립 가로 스크롤은 이미 완화책 | 사용자 결정 전 자동으로 재개하지 않는다 |
 | Split in Group | 계약 없는 후속 | 여러 뷰 원장 §3~§4. pane 분할 공유 편집과 별도 기능 | pane 기반 공유 뷰 이후 필요성·배치·입력 라우팅 계약 |
 | 병합 고르기 상태 모델·스마트 결합 | 기존 보류 | 병합 계약 §7 ⑦: 사용자 결정은 현재 마커 모델 | 실제 필요가 확인되면 별도 승인/계약. 현재 기본 병합 기능의 미완료로 세지 않는다 |
-| 번들 언어 확대 | 사용자 결정(2026-10-14 — 후보 열둘 전부), [계획](editor-bundled-languages.md) BL1(YAML·TOML·XML·DTD·Lua·Dockerfile·Make)·BLP(쿼리 술어 평가)·BL2(Swift)·BL3(SQL·Dart) 완료 | 네이티브 후속 표, third-party 라이선스 규칙 | BL4(C#·Objective-C·Scala) |
+| 번들 언어 확대 | 사용자 결정(2026-10-14 — 후보 열둘 전부), [계획](editor-bundled-languages.md) BL1(YAML·TOML·XML·DTD·Lua·Dockerfile·Make)·BLP(쿼리 술어 평가)·BL2(Swift)·BL3(SQL·Dart)·BL4(C#·Objective-C·Scala) 완료 — 후보 열둘 전부 | 네이티브 후속 표, third-party 라이선스 규칙 | — |
 | 편집기 본문 접근성 | 앱 전체 후속 | 네이티브 후속 표와 chrome interaction 전략 | chrome 접근성 구현을 본문 텍스트/선택/편집의 VoiceOver 완료로 오인하지 말고 별도 계약·제품 검증 |
 
 코드에서 찾지 못했다는 판정은 `src/` 전체 식별자/소비처 검색과 관련 host·UI·명령 카탈로그 대조에 기반한다.

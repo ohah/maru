@@ -94,6 +94,7 @@ pub fn forPath(path: []const u8) Language {
         "c",    "h",  "cc",    "cpp", "cxx", "hpp", "hh",    "m",    "mm",
         "java", "js", "jsx",   "mjs", "cjs", "ts",  "tsx",   "mts",  "cts",
         "go",   "rs", "swift", "kt",  "kts", "cs",  "scala", "dart", "php",
+        "csx",  "sc", "sbt",
     })) return .c_like;
     if (anyIgnoreCase(ext, &.{
         "sh",         "bash", "zsh",  "fish", "py",   "rb",  "pl",  "r",
@@ -144,6 +145,9 @@ pub const Grammar = enum {
     swift, // BL2
     sql, // BL3
     dart, // BL3
+    csharp, // BL4
+    objc, // BL4
+    scala, // BL4
 
     /// 상태바에 적는 이름. `none`이면 **적지 않는다** — `"Plain Text"`라고 쓰면 강조가 없는 이유를
     /// 설명하는 대신 가린다(`status-bar.md` 「언어 항목」).
@@ -186,6 +190,9 @@ pub const Grammar = enum {
             .swift => "Swift",
             .sql => "SQL",
             .dart => "Dart",
+            .csharp => "C#",
+            .objc => "Objective-C",
+            .scala => "Scala",
         };
     }
 
@@ -193,13 +200,13 @@ pub const Grammar = enum {
     /// 따른다(계획 editor-typing-rules TR2 — 동작만): C 계열·Rust·Go·JSON·CSS·Zig 는 `increaseIndentPattern`·`onEnterRules` 가 「줄에 닫히지
     /// 않은 여는 괄호」라 어디든이고, Python·Ruby·Bash·Markdown·HTML 은 괄호 규칙이 기본(여는 괄호가 끝에 있을 때)뿐이다 — Markdown 산문의
     /// `see [the docs|]` 에서 Enter 가 링크를 들여쓰며 쪼개지 않게. 번들 언어 확대 BL1: YAML·Dockerfile·Make 는 VS Code 도 괄호 규칙이 기본뿐이고
-    /// (Dockerfile 의 `increaseIndentPattern` 은 YAML 것을 베낀 꼴 — 「의도한 차이」), XML·DTD 는 HTML 과 같다. TOML·Lua 는 어디든이다. BL2: Swift 는 끝만이다
-    /// (VS Code swift 설정에 `indentationRules` 가 없고 `onEnterRules` 는 줄 주석 이어쓰기 하나뿐이다 — 괄호는 기본 규칙만 남는다). BL3: SQL 도 같은
-    /// 까닭으로 끝만이다(VS Code sql 설정엔 들여쓰기 규칙도 `onEnterRules` 도 없다). Dart 는 VS Code 에 내장 설정이 없어 같은 C 계열인 Java·Kotlin 과
-    /// 같이 둔다(어디든).
+    /// (Dockerfile 의 `increaseIndentPattern` 은 YAML 것을 베낀 꼴 — 「의도한 차이」), XML·DTD 는 HTML 과 같다. TOML·Lua 는 어디든이다. **C 계열은 VS Code 설정에 들여쓰기 규칙이
+    /// 없어도 어디든이다**(TR 계획 — Java·C++ 처럼; 2026-10-15 사용자 결정으로 번들 언어 확대의 Swift(BL2)·Dart(BL3)·C#·Objective-C·Scala(BL4)도
+    /// 같다 — BL2 는 처음에 VS Code swift 설정을 따라 끝만으로 뒀다가 되돌렸다). SQL(BL3)은 C 계열이 아니고 VS Code sql 설정도 괄호 기본 규칙뿐이라
+    /// 끝만이다.
     pub fn bracketEnterAnywhere(self: Grammar) bool {
         return switch (self) {
-            .python, .ruby, .bash, .markdown, .html, .none, .yaml, .xml, .dtd, .dockerfile, .make, .swift, .sql => false,
+            .python, .ruby, .bash, .markdown, .html, .none, .yaml, .xml, .dtd, .dockerfile, .make, .sql => false,
             else => true,
         };
     }
@@ -233,7 +240,7 @@ pub const Grammar = enum {
             .python, .ruby, .bash, .yaml, .toml, .dockerfile, .make => "#",
             .lua, .sql => "--",
             .html, .css, .json, .markdown, .none, .xml, .dtd => null,
-            .zig, .javascript, .typescript, .tsx, .c, .cpp, .go, .rust, .java, .php, .kotlin, .swift, .dart => "//",
+            .zig, .javascript, .typescript, .tsx, .c, .cpp, .go, .rust, .java, .php, .kotlin, .swift, .dart, .csharp, .objc, .scala => "//",
         };
     }
 };
@@ -279,6 +286,10 @@ pub fn grammarForPath(path: []const u8) Grammar {
     if (eqlIgnoreCase(ext, "swift")) return .swift;
     if (eqlIgnoreCase(ext, "sql")) return .sql;
     if (eqlIgnoreCase(ext, "dart")) return .dart;
+    if (anyIgnoreCase(ext, &.{ "cs", "csx" })) return .csharp;
+    // `.m` 만 Objective-C 다 — `.h` 는 C 로 남고(위), `.mm`(Objective-C++)은 번들에 문법이 없다.
+    if (eqlIgnoreCase(ext, "m")) return .objc;
+    if (anyIgnoreCase(ext, &.{ "scala", "sc", "sbt" })) return .scala;
     return .none;
 }
 
@@ -404,6 +415,18 @@ test "LANG10 확장자가 grammar를 정한다 — 번들 목록과 1:1" {
     try testing.expectEqual(Grammar.dart, grammarForPath("lib/main.dart")); // BL3
     try std.testing.expectEqualStrings("SQL", grammarForPath("a.SQL").displayName().?);
     try std.testing.expectEqualStrings("Dart", grammarForPath("a.dart").displayName().?);
+    // BL4 — `.h` 는 C 로 남는다(Objective-C 는 `.m` 만), `.mm` 은 문법이 없다.
+    try testing.expectEqual(Grammar.csharp, grammarForPath("src/Program.cs"));
+    try testing.expectEqual(Grammar.csharp, grammarForPath("build.csx"));
+    try testing.expectEqual(Grammar.objc, grammarForPath("App/AppDelegate.m"));
+    try testing.expectEqual(Grammar.c, grammarForPath("App/AppDelegate.h"));
+    try testing.expectEqual(Grammar.none, grammarForPath("App/View.mm"));
+    try testing.expectEqual(Grammar.scala, grammarForPath("src/main/scala/Main.scala"));
+    try testing.expectEqual(Grammar.scala, grammarForPath("script.sc"));
+    try testing.expectEqual(Grammar.scala, grammarForPath("build.sbt"));
+    try std.testing.expectEqualStrings("C#", grammarForPath("a.cs").displayName().?);
+    try std.testing.expectEqualStrings("Objective-C", grammarForPath("a.m").displayName().?);
+    try std.testing.expectEqualStrings("Scala", grammarForPath("a.scala").displayName().?);
     try testing.expectEqual(Grammar.make, grammarForPath("GNUmakefile"));
     try testing.expectEqual(Grammar.make, grammarForPath("rules.mk"));
     // 이름이 비슷할 뿐인 것은 아니다 — `Dockerfiles` 는 폴더 이름 같은 것이고 `MakefileX` 도 아니다.
@@ -460,10 +483,10 @@ test "LANG8 문자열 따옴표 — 괄호 Enter 가 건너뛸 따옴표, 아포
     try std.testing.expectEqualStrings("\"", Grammar.swift.stringQuotes());
     try std.testing.expectEqualStrings("\"'", Grammar.python.stringQuotes());
     for ([_]Grammar{ .none, .markdown, .html, .xml, .dtd, .make }) |g| try std.testing.expectEqualStrings("", g.stringQuotes());
-    for ([_]Grammar{ .yaml, .toml, .lua, .dockerfile, .sql, .dart }) |g| try std.testing.expectEqualStrings("\"'", g.stringQuotes());
+    for ([_]Grammar{ .yaml, .toml, .lua, .dockerfile, .sql, .dart, .csharp, .objc, .scala }) |g| try std.testing.expectEqualStrings("\"'", g.stringQuotes());
     // 괄호 Enter 의 범위 — 산문·괄호 규칙이 기본뿐인 문법은 끝의 여는 괄호만.
-    for ([_]Grammar{ .typescript, .tsx, .javascript, .c, .cpp, .rust, .go, .java, .json, .css, .zig, .php, .kotlin, .toml, .lua, .dart }) |g| try std.testing.expect(g.bracketEnterAnywhere());
-    for ([_]Grammar{ .python, .ruby, .bash, .markdown, .html, .yaml, .xml, .dtd, .dockerfile, .make, .swift, .sql }) |g| try std.testing.expect(!g.bracketEnterAnywhere());
+    for ([_]Grammar{ .typescript, .tsx, .javascript, .c, .cpp, .rust, .go, .java, .json, .css, .zig, .php, .kotlin, .toml, .lua, .dart, .swift, .csharp, .objc, .scala }) |g| try std.testing.expect(g.bracketEnterAnywhere());
+    for ([_]Grammar{ .python, .ruby, .bash, .markdown, .html, .yaml, .xml, .dtd, .dockerfile, .make, .sql }) |g| try std.testing.expect(!g.bracketEnterAnywhere());
 }
 
 test "LANG11 구문 오류 진단은 SQL 만 끈다 — 방언을 못 가리는 grammar 의 거짓 오류(계획 editor-bundled-languages BL3)" {
@@ -486,7 +509,9 @@ test "LANG9 문법의 줄 주석 표식 — 경로로 정한 주석 토글의 �
         .{ .path = "Dockerfile", .g = .dockerfile },    .{ .path = "Dockerfile.dev", .g = .dockerfile }, .{ .path = "a.dockerfile", .g = .dockerfile },
         .{ .path = "Containerfile", .g = .dockerfile }, .{ .path = "Makefile", .g = .make },             .{ .path = "GNUmakefile", .g = .make },
         .{ .path = "a.mk", .g = .make },                .{ .path = "a.swift", .g = .swift },             .{ .path = "a.sql", .g = .sql },
-        .{ .path = "a.dart", .g = .dart },
+        .{ .path = "a.dart", .g = .dart },              .{ .path = "a.cs", .g = .csharp },               .{ .path = "a.csx", .g = .csharp },
+        .{ .path = "a.m", .g = .objc },                 .{ .path = "a.scala", .g = .scala },             .{ .path = "a.sc", .g = .scala },
+        .{ .path = "a.sbt", .g = .scala },
     };
     for (cases) |c| {
         try std.testing.expectEqual(c.g, grammarForPath(c.path));

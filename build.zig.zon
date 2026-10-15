@@ -123,6 +123,19 @@
             .url = "https://github.com/UserNobody14/tree-sitter-dart/archive/3f0c7a8309d89927e7cc6bef39569c815fddb2e5.tar.gz",
             .hash = "N-V-__8AAJdClAAuiEgcUgfCIGJW_1fFJYzwMuObl2mctCR7",
         },
+        // BL4 — C#·Objective-C·Scala(계획 editor-bundled-languages). 셋 다 태그 tarball 에 생성 파서가 든다.
+        .tree_sitter_c_sharp = .{
+            .url = "https://github.com/tree-sitter/tree-sitter-c-sharp/archive/refs/tags/v0.23.5.tar.gz",
+            .hash = "N-V-__8AAGpz0wEahQ1XcAPswpnWM9etD4V5CeiVedJF7jBu",
+        },
+        .tree_sitter_objc = .{
+            .url = "https://github.com/tree-sitter-grammars/tree-sitter-objc/archive/refs/tags/v3.0.2.tar.gz",
+            .hash = "N-V-__8AAOjbuwGMMXb2Wt1wuahN_sNBXqAyLUFPNfIsQxzJ",
+        },
+        .tree_sitter_scala = .{
+            .url = "https://github.com/tree-sitter/tree-sitter-scala/archive/refs/tags/v0.26.2.tar.gz",
+            .hash = "N-V-__8AAPW2rAFzrUH5r3cCx17GeKwjtJhjQCfpB0egXMJd",
+        },
         .wuffs = .{
             .url = "https://github.com/google/wuffs/archive/refs/tags/v0.4.0-alpha.10.tar.gz",
             .hash = "N-V-__8AABIA4AF2JRGKJvP_rNz61IYJiWeHLsermvYzO6cR",

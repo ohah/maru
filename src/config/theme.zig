@@ -1094,7 +1094,7 @@ pub const RenderWhitespace = enum { none, boundary, selection, trailing, all };
 
 /// 외부 포매터 설정 `editor.formatter.<언어>` 의 언어 이름 — 편집기 문법 이름(`session/editor/language.Grammar` 에서 `none` 을 뺀 것;
 /// 판정자 EXF4 가 둘을 맞춘다).
-pub const formatter_languages = [_][]const u8{ "zig", "json", "markdown", "javascript", "typescript", "tsx", "c", "cpp", "python", "go", "rust", "java", "ruby", "php", "kotlin", "bash", "css", "html", "yaml", "toml", "xml", "dtd", "lua", "dockerfile", "make", "swift", "sql", "dart" };
+pub const formatter_languages = [_][]const u8{ "zig", "json", "markdown", "javascript", "typescript", "tsx", "c", "cpp", "python", "go", "rust", "java", "ruby", "php", "kotlin", "bash", "css", "html", "yaml", "toml", "xml", "dtd", "lua", "dockerfile", "make", "swift", "sql", "dart", "csharp", "objc", "scala" };
 
 /// `editor.formatter.<언어>` 의 값(tooling §8.2t). `auto` 는 저장소 설정 감지, `lsp` 는 언어 서버만, `off` 는 포맷 안 함, 나머지는 그 포매터,
 /// `command` 는 사용자 명령(`command: ‹argv›` — 문자열은 `FormatterSetting.command`).

@@ -439,6 +439,10 @@ pub fn build(b: *std.Build) void {
         // BL3. SQL 은 release asset(생성 파서가 든 판), Dart 는 커밋 archive(`build.zig.zon`).
         .{ .dep = "tree_sitter_sql", .src = "src", .scanner = "scanner.c", .import = "sql_highlights_scm" },
         .{ .dep = "tree_sitter_dart", .src = "src", .scanner = "scanner.c", .import = "dart_highlights_scm" },
+        // BL4. Objective-C 는 scanner 가 없고 쿼리가 C 를 상속한다(`; inherits: c` — 잇는 것은 `tree_sitter.zig` 의 표다).
+        .{ .dep = "tree_sitter_c_sharp", .src = "src", .scanner = "scanner.c", .import = "c_sharp_highlights_scm" },
+        .{ .dep = "tree_sitter_objc", .src = "src", .import = "objc_highlights_scm" },
+        .{ .dep = "tree_sitter_scala", .src = "src", .scanner = "scanner.c", .import = "scala_highlights_scm" },
     };
     for (grammars) |g| {
         if (b.lazyDependency(g.dep, .{})) |dep| {

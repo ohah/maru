@@ -85,6 +85,7 @@ pub fn decide(ctx: Context, before: []const u8, after: []const u8, prev: ?[]cons
 pub fn decideWith(ctx: Context, before: []const u8, after: []const u8, prev: ?[]const u8, tree: ?Tree) Action {
     if (tree) |t| if (t.caret == .string) return .{};
     if (blockComment(ctx.grammar, before, after, prev)) |a| return a;
+    if (docCommentContinue(ctx, before, tree)) |a| return a;
     if (lineCommentContinue(ctx, before, after, tree)) |a| return a;
     var c = ctx;
     var code = before;
@@ -104,10 +105,11 @@ pub fn decideWith(ctx: Context, before: []const u8, after: []const u8, prev: ?[]
 
 /// `/* */` 블록 주석을 쓰는 문법(C 계열·CSS) — 이어쓰기(` * `)를 한다. VS Code 는 TS·JS·Java·PHP 에만 규칙을 두고 C·C++·Go·Rust 에는 두지 않는다 —
 /// 같은 주석 문법이라 우리는 함께 한다(계획의 「의도한 차이」). Swift(번들 언어 확대 BL2)도 같다 — VS Code swift 에는 블록 주석 규칙이 없다.
-/// BL3 의 SQL 도 같은 `/* */` 라 함께 한다(VS Code sql 에도 규칙이 없다), Dart 는 VS Code 내장 설정이 없어 C 계열과 같이 둔다.
+/// BL3 의 SQL 도 같은 `/* */` 라 함께 한다(VS Code sql 에도 규칙이 없다), Dart 는 VS Code 내장 설정이 없어 C 계열과 같이 둔다. BL4 의
+/// C#·Objective-C(VS Code 설정에 블록 주석 규칙이 없다)·Scala(내장 설정이 없다 — Scaladoc 이 `/** */`)도 같다.
 fn hasBlockComment(g: language.Grammar) bool {
     return switch (g) {
-        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .rust, .php, .kotlin, .css, .swift, .sql, .dart => true,
+        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .rust, .php, .kotlin, .css, .swift, .sql, .dart, .csharp, .objc, .scala => true,
         else => false,
     };
 }
@@ -132,6 +134,19 @@ fn blockComment(g: language.Grammar, before: []const u8, after: []const u8, prev
 }
 
 // ── 줄 주석 ─────────────────────────────────────────────────────────────────────
+
+/// C# 문서 주석 — 그 줄이 `///` 로 시작하면 Enter 는 `/// ` 로 잇는다. **줄 끝이어도 잇는다**(VS Code csharp `onEnterRules` 의 첫 규칙
+/// `^\s*///` — 아래 줄 주석 규칙은 가운데만이다; 계획 editor-bundled-languages BL4). 트리가 답했으면 caret 이 그 `///` 주석 안이어야 한다.
+fn docCommentContinue(ctx: Context, before: []const u8, tree: ?Tree) ?Action {
+    if (ctx.grammar != .csharp) return null;
+    const head = std.mem.trimStart(u8, before, " \t");
+    if (!std.mem.startsWith(u8, head, "///")) return null;
+    if (tree) |t| {
+        const at = t.comment_at orelse return null;
+        if (!std.mem.startsWith(u8, before[at..], "///")) return null;
+    }
+    return .{ .append = "/// " };
+}
 
 /// 줄 주석 **가운데**에서 Enter 면 그 표식으로 잇는다(VS Code: `// …|…` → `// ` — 줄 끝이면 잇지 않는다). `//` 를 쓰는 문법만.
 fn lineCommentContinue(ctx: Context, before: []const u8, after: []const u8, tree: ?Tree) ?Action {
@@ -234,7 +249,7 @@ fn indentRule(ctx: Context, before: []const u8, after: []const u8) bool {
     return switch (ctx.grammar) {
         .python => pythonBlock(before, ctx.quotes),
         .ruby => rubyBlock(before),
-        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .php, .swift, .dart => caseLabel(before),
+        .c, .cpp, .java, .javascript, .typescript, .tsx, .go, .php, .swift, .dart, .csharp, .objc => caseLabel(before),
         .yaml => yamlBlock(before, ctx.quotes),
         .lua => luaBlock(before, ctx.quotes),
         else => false,
@@ -442,6 +457,20 @@ const intended = [_]Intended{
     .{ .grammar = .sql, .before = "/**" }, // C 계열과 같은 블록 주석이라 이어 쓴다
     .{ .grammar = .sql, .before = " * a" }, // 같은 이유
     .{ .grammar = .sql, .before = "-- (" }, // 줄 주석 안 괄호(TypeScript `// {` 와 같다)
+    // 2026-10-15 사용자 결정 — C 계열은 VS Code 설정에 들여쓰기 규칙이 없어도 줄 어디서든 짝 없는 괄호를 본다(Java·C++ 와 같이). Swift 는 BL2 에서
+    // 끝만으로 뒀다가 이 결정으로 되돌렸다.
+    .{ .grammar = .swift, .before = "foo(a, " }, // 줄 가운데 짝 없는 `(` — 어디든
+    .{ .grammar = .swift, .before = "foo(a" }, // caret 뒤가 `)` — 짝 없는 `(` 사이라 한 단계 들이고 `)` 를 아래 줄로(어디든)
+    // BL4 — C#·Objective-C 는 C 계열과 같은 판단이다(VS Code 의 두 설정엔 들여쓰기·블록 주석 규칙이 없다).
+    .{ .grammar = .csharp, .before = "foo(a, " }, // 어디든
+    .{ .grammar = .csharp, .before = "case 1:" }, // switch 를 쓰는 C 계열 전부와 같다
+    .{ .grammar = .csharp, .before = "default:" }, // 같은 이유
+    .{ .grammar = .csharp, .before = "/**" }, // C 계열과 같은 블록 주석이라 이어 쓴다
+    .{ .grammar = .csharp, .before = " * a" }, // 같은 이유
+    .{ .grammar = .objc, .before = "[self f:a, " }, // 어디든
+    .{ .grammar = .objc, .before = "case 1:" }, // switch 를 쓰는 C 계열 전부와 같다
+    .{ .grammar = .objc, .before = "/**" }, // C 계열과 같은 블록 주석이라 이어 쓴다
+    .{ .grammar = .objc, .before = " * a" }, // 같은 이유
 };
 
 fn intendedDiff(g: language.Grammar, before: []const u8) ?usize {

@@ -1085,20 +1085,21 @@ LSP `TextEdit[]` → `Delta` 변환(정렬·겹침 거부)과 revision 검증이
   `indentOutdent`). 선택이 여러 줄이면 caret 뒤는 **선택 끝 줄**의 나머지다(VS Code `getEnterAction`).
   - 괄호 쌍은 **괄호 색칠의 규칙**(시각 매핑 §5.1b `bracketRuleFor`)과 같은 집합이다. 줄을 읽을 때 그 문법의 문자열(따옴표 안)과
     줄 주석 뒤의 괄호는 세지 않는다(트리가 없을 때 — 있으면 아래 구문 트리 문맥).
-  - C 계열(C·C++·Java·JS·TS·TSX·Go·Rust·Zig·PHP·Kotlin·Dart)·JSON·CSS·TOML·Lua 는 짝 없는 괄호를 **줄 어디서든** 보고, Python·Ruby·Bash·Markdown·
-    HTML·YAML·XML·DTD·Dockerfile·Make·Swift·SQL 은 caret 앞이 **그 괄호로 끝날 때만** 본다(VS Code 언어 설정의 갈래 — Markdown 산문
-    `see [the docs|]` 의 Enter 가 링크를 쪼개지 않게. Swift·SQL 은 VS Code 설정에 들여쓰기 규칙이 없어 괄호가 기본 규칙뿐이다. Dart 는 VS Code 에
-    내장 설정이 없어 Java·Kotlin 과 같이 둔다).
+  - C 계열(C·C++·Java·JS·TS·TSX·Go·Rust·Zig·PHP·Kotlin·Swift·Dart·C#·Objective-C·Scala)·JSON·CSS·TOML·Lua 는 짝 없는 괄호를 **줄 어디서든**
+    보고, Python·Ruby·Bash·Markdown·HTML·YAML·XML·DTD·Dockerfile·Make·SQL 은 caret 앞이 **그 괄호로 끝날 때만** 본다(VS Code 언어 설정의 갈래 —
+    Markdown 산문 `see [the docs|]` 의 Enter 가 링크를 쪼개지 않게). **C 계열은 VS Code 설정에 들여쓰기 규칙이 없어도 어디든이다**(Java·Swift·
+    C#·Objective-C — 2026-10-15 사용자 결정, 「의도한 차이」). SQL 은 C 계열이 아니고 VS Code 설정도 괄호 기본 규칙뿐이다.
 - **닫는 괄호 내어쓰기**: caret 앞이 그 줄의 공백뿐일 때 닫는 괄호를 치면 그 줄을 **짝 여는 괄호가 있는 줄의 들여쓰기**로 맞춘다
   (짝은 같은 종류의 괄호 깊이로 거슬러 찾는다 — 상한 `typing_ops.reindent_scan_limit`(64 KiB), 못 찾으면 그대로). 같은 공백 줄에 커서가
   여럿이면 앞 커서만 맞추고, 앞 커서가 그 줄 머리(0 열)에 있으면 맞추지 않는다(앞 커서의 입력 뒤 공백을 지우지 않게).
 - **언어 규칙**(2026-10-13 — [계획](plans/editor-typing-rules.md) TR3, 정규식 엔진 없이 문법마다 Zig 표): Enter 의 갈래는
   `enter_rules.decide` 한 함수가 정한다 — 순서는 VS Code 와 같다(언어 규칙 → 괄호 → 들여쓰기 규칙).
-  - **블록 주석**(C 계열·CSS·Swift·SQL·Dart): `/**`·`/*` 뒤 Enter 는 ` * `(caret 뒤가 `*/` 면 그것은 아래 줄로), 주석 안의 ` * …` 줄 뒤는 `* `(앞 줄이
+  - **블록 주석**(C 계열·CSS·Swift·SQL·Dart·C#·Objective-C·Scala): `/**`·`/*` 뒤 Enter 는 ` * `(caret 뒤가 `*/` 면 그것은 아래 줄로), 주석 안의 ` * …` 줄 뒤는 `* `(앞 줄이
     주석 안일 때만 — 곱셈 이어 쓰기와 가른다), ` */` 로 끝난 줄 뒤는 정렬 공백 하나를 뺀다.
   - **줄 주석**(`//` 문법 — 표식은 문법의 것, `Grammar.lineComment`): 주석 **가운데**서 Enter 면 `// ` 로 잇는다(줄 끝이면 잇지 않는다).
+    **C# 문서 주석**: `///` 로 시작하는 줄은 줄 끝이어도 `/// ` 로 잇는다(VS Code csharp).
   - **Python**: 제어문(`def`·`class`·`if`·`elif`·`else`·`for`·`while`·`try`·`except`·`finally`·`with`·`async`·`match`·`case`)이 `:` 로
-    끝나면(줄 끝 주석은 떼고) 한 단계. **C 계열·Swift·Dart**: `case X:`·`default:` 뒤 한 단계. **Ruby**: 블록을 여는 줄(`def`·`class`·`if`·… ·`do`)
+    끝나면(줄 끝 주석은 떼고) 한 단계. **C 계열·Swift·Dart·C#·Objective-C**: `case X:`·`default:` 뒤 한 단계. **Ruby**: 블록을 여는 줄(`def`·`class`·`if`·… ·`do`)
     뒤 한 단계 — 한 줄로 닫힌 것·후위 조건·문자열 안 `do` 는 아니다. **HTML·XML**: 여는 태그 뒤 한 단계, 그 닫는 짝이 caret 뒤에
     바로 오면 가운데 줄(void 요소는 아님). **YAML**: `key:`·목록 머리 `-`·앵커만 붙은 `key: &a`·블록 스칼라 머리 `key: |` 뒤 한 단계.
     **Lua**: 블록을 여는 낱말(`function`·`then`·`do`·`repeat`·`else`)이 닫는 낱말(`end`·`until`) 없이 남은 줄 뒤 한 단계(번들 언어

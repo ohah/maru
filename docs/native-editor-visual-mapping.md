@@ -2595,6 +2595,7 @@ highlightActiveIndentation: true, bracketPairs: false }`.
 | JSON | `[]` `{}` | 설정에 `()` 가 없다 |
 | XML · DTD | HTML 과 같다 — **`()` `{}`만**, 짝 없는 것만 칠한다 | 번들 언어 확대 BL1. VS Code xml 설정도 `colorizedBracketPairs: []` 다. 본문 글(`CharData`)·속성값(`AttValue`)이 대상. **다른 점** — VS Code xml 은 `brackets` 에 `<>` 도 있어 태그 꺾쇠를 점프·강조하지만, 여기선 HTML 과 같이 세지 않는다 |
 | YAML · TOML · Lua · Dockerfile · Makefile · Swift · SQL · Dart | `()` `[]` `{}` | 번들 언어 확대 BL1~BL3 — 위 오라클 말뭉치 대조 **밖**이다. VS Code 언어 설정의 `brackets` 가 이 셋이다(TOML 은 내장 설정이 없어 기본). Swift 의 문자열 보간 `\(…)` 과 raw 문자열 보간 `\#(…)` 은 짝이고, raw 문자열 속 `\(x)` 는 글자다. 제네릭 `<>` 는 괄호가 아니다(`colorizedBracketPairs` 가 없다). SQL 의 문자열·달러 인용(`$$ … $$`)·줄 주석 속은 글자다. Dart 의 보간 `${…}` 은 짝이고(Dart 는 VS Code 내장 설정이 없어 C 계열과 같은 셋), 제네릭 `<>` 는 아니다. VS Code 설정(sql)도 셋이다. 판정자 `SYN52` |
+| C# · Objective-C · Scala | `()` `[]` `{}` | 번들 언어 확대 BL4 — 오라클 말뭉치 대조 **밖**이다. VS Code 설정(csharp·objective-c)의 `brackets` 가 이 셋이다(Scala 는 내장 설정이 없다). 제네릭 `<>` 는 괄호가 아니다. C# 보간 문자열 `$"{x}"` 의 중괄호는 grammar 가 이름 있는 잎으로 내 글자로 남는다(Kotlin 과 같은 쪽). Objective-C 메시지 `[…]`·`@[…]`·`@{…}` 와 Scala 형 인자 `[T]`·보간 `${…}` 은 괄호다. 판정자 `SYN52` |
 | Markdown | **색 없음**, 점프·강조용 괄호는 인식 | 블록 grammar의 괄호 토큰을 공통 목록에 넣되 색 출력은 무효 괄호까지 전부 끈다. 기존 점프·강조를 보존한다(2026-09-26 사용자 결정). 아래 다른 점 ② |
 | grammar 없음 | 없음 | plaintext 와 같다(설정이 없다 — monaco 실측) |
 | 모든 언어 | **20,000 자(UTF-16) 이상인 줄은 없음** | VS Code는 그 줄을 토큰화하지 않는다(`editor.maxTokenizationLineLength` · `TokenizationSupportWithLineLimit`). 공통 목록에서 제외하므로 트리를 쓰는 점프·강조도 같은 제한을 따른다 |

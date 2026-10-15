@@ -16,8 +16,12 @@
 //! 탭이 없으면 곧 null 이다. 붙일 탭이 있으면 그 탭들 모두에 「service worker of <출처>」 로 붙는다.
 //!
 //! 설정 `browser.agent-network-full` 이 꺼진 탭(`net_watch.full` 거짓)은 UI 스레드가 보내기 전에 덜어 낸다(`net_policy` — 주소의 사용자 정보,
-//! 덮이지 않는 호스트의 헤더, 허용 목록 밖 헤더 값). 보이지 않는 것(`docs/plans/web-osr-backend.md`): CORS preflight·WebSocket·`data:`·
-//! `blob:`·서비스 워커 스크립트·서비스 워커가 만든 응답.
+//! 덮이지 않는 호스트의 헤더, 허용 목록 밖 헤더 값). 덜어 낼지는 **적을 때** 탭마다 찍고(`net_gate.State.stamp`) 보낼 때의 지켜보기와 겹쳐
+//! 더 덜어 내는 쪽으로 정한다(W9d① 적대 리뷰 3 회차 P1c — 꺼진 동안 적은 것은 켠 뒤 보내도 덜어 낸다). 보이지 않는 것
+//! (`docs/plans/web-osr-backend.md`): CORS preflight·WebSocket·`data:`·`blob:`·서비스 워커 스크립트·서비스 워커가 만든 응답.
+//! 호스트(W9d① 적대 리뷰 3 회차 T1): 덮이는지 가를 호스트(요청·홉·첫 사이트)와 서비스 워커를 붙일 출처는 **자르기 전의 온 주소**(CEF 의 UTF-16)
+//! 에서 읽고(`net_policy.hostOfUrl16`), 요청·홉의 호스트는 제 칸(`host`)으로 싣는다. 2 KiB 로 자르는 주소는 사용자 정보를 빼고 자른다 — 긴
+//! 사용자 정보 안에서 끊긴 앞부분(`https://yyy…a.test`)이 덮이는 사이트로 읽혀 은행의 쿠키가 보였다. 앞부분이 잘린 initiator 는 싣지 않는다.
 
 const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
@@ -118,7 +122,7 @@ pub fn watch(v: msg.NetWatch) void {
     var origin_buf: [gate.max_origin_bytes]u8 = undefined;
     const origin = if (v.on) currentOrigin(entry.handle, &origin_buf) else "";
     doLock();
-    _ = state.setWatch(v.browser, entry.cef_id, v.on, v.full, hosts[0..v.host_count]);
+    _ = state.setWatch(v.browser, entry.cef_id, v.on, v.full, v.any_host, hosts[0..v.host_count]);
     if (v.on) state.setTopOrigin(v.browser, origin);
     doUnlock();
 }
@@ -147,9 +151,41 @@ fn currentOrigin(handle: *anyopaque, buf: []u8) []const u8 {
     const url = frame.*.get_url.?(frame);
     if (url == null) return "";
     defer api().string_userfree_utf16_free(url);
-    var ub: [msg.max_net_url_bytes]u8 = undefined;
-    const text = library.readPrefix(api(), url, msg.max_net_url_bytes, &ub).text;
-    return net_policy.originOf(text, buf);
+    return net_policy.originOfUrl16(units(url), buf); // 온 주소에서(3 회차 T1 — 사용자 정보 너머의 출처)
+}
+
+/// CEF 문자열의 UTF-16 단위들(비었으면 빈 조각).
+fn units(value: [*c]const c.cef_string_t) []const u16 {
+    if (value == null or value.*.str == null) return &.{};
+    return @ptrCast(value.*.str[0..value.*.length]);
+}
+
+/// 주소를 싣는 꼴(W9d① 적대 리뷰 3 회차 T1) — 앞부분(2 KiB)과 온 주소에서 읽은 호스트. 잘릴 주소는 사용자 정보를 빼고 자른다(잘린 글에 사용자
+/// 정보가 남으면 maru 가 보일 때 어디까지가 사용자 정보인지 모른다 — codec 이 거절한다). 잘리지 않는 주소는 그대로(설정이 켜져 있으면 maru 가
+/// 읽는 쪽마다 지운다 — D1).
+const UrlText = struct { text: []const u8, truncated: bool, host: []const u8 };
+
+fn readUrl(value: [*c]const c.cef_string_t, buf: *[msg.max_net_url_bytes]u8, host_buf: *[msg.max_net_host_bytes]u8) UrlText {
+    const all = units(value);
+    const host = net_policy.hostOfUrl16(all, host_buf);
+    const whole = library.readPrefix(api(), value, msg.max_net_url_bytes, buf);
+    protocol.text.replaceControl(whole.text);
+    if (!whole.truncated) return .{ .text = whole.text, .truncated = false, .host = host };
+    const a = net_policy.authority16(all) orelse return .{ .text = whole.text, .truncated = true, .host = host };
+    if (a.host_start == a.start) return .{ .text = whole.text, .truncated = true, .host = host }; // 사용자 정보가 없다
+    // `scheme://`(스킴은 ASCII 글자 — `authority16` 이 봤다) + 호스트부터의 앞부분.
+    for (all[0..a.start], buf[0..a.start]) |ch, *o| o.* = @intCast(ch);
+    const rest: c.cef_string_t = .{ .str = value.*.str + a.host_start, .length = value.*.length - a.host_start, .dtor = null };
+    const tail = library.readPrefix(api(), &rest, msg.max_net_url_bytes - a.start, buf[a.start..]);
+    protocol.text.replaceControl(tail.text);
+    return .{ .text = buf[0 .. a.start + tail.text.len], .truncated = tail.truncated, .host = host };
+}
+
+/// CEF 가 넘긴 주소 글(사용자가 풀어야 하는 것)의 호스트 — 온 주소에서 읽고 푼다.
+fn userfreeHost(s: c.cef_string_userfree_t, host_buf: *[msg.max_net_host_bytes]u8) []const u8 {
+    if (s == null) return "";
+    defer api().string_userfree_utf16_free(s);
+    return net_policy.hostOfUrl16(units(s), host_buf);
 }
 
 // ── IO 스레드: 처리기를 고른다 ─────────────────────────────────────────────────────────────────────────
@@ -178,24 +214,20 @@ pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef
         doUnlock();
         return &rrh;
     }
-    const admitted = state.admit(w, nowUs()) and blk: {
-        const t = state.track(id, w) orelse {
-            w.dropped +|= 1;
-            break :blk false;
-        };
-        t.targets[0] = w.browser;
-        t.target_count = 1;
+    const admitted = if (state.startTab(w, id, nowUs())) |t| blk: {
         t.navigation = is_navigation != 0;
         break :blk true;
-    };
+    } else false;
     doUnlock();
     if (!admitted) {
         postFlush();
         return null;
     }
-    // 문을 지난 뒤에만 initiator 를 바꾼다(앞부분만).
+    // 문을 지난 뒤에만 initiator 를 바꾼다(앞부분만). 잘린 출처는 싣지 않는다(3 회차 T1 — 앞부분의 호스트는 다른 호스트일 수 있다: 빈
+    // initiator 는 다른 사이트로 친다).
     var ib: [gate.max_origin_bytes]u8 = undefined;
-    const init_text = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib).text;
+    const init_read = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
+    const init_text = if (init_read.truncated) ib[0..0] else init_read.text;
     doLock();
     if (state.find(id)) |t| {
         @memcpy(t.initiator[0..init_text.len], init_text);
@@ -225,26 +257,20 @@ fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser
     // 출처는 앞부분만(상한 있는) 바꾼다 — 지켜보는 출처가 아니면 양동이를 쓰지 않고 곧 null(적대 리뷰 2 회차 N5: 출처를 맞추기 전에 이 길의
     // 양동이를 썼더니 지켜보지 않는 출처의 쏟아짐이 지켜보는 탭의 요청을 세지도 않고 막았다). 지켜보는 출처의 거절은 붙일 탭들의 넘긴 수다.
     var ib: [gate.max_origin_bytes]u8 = undefined;
-    const init_text = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib).text;
+    const init_read = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib);
+    if (init_read.truncated) return null; // 잘린 출처로는 붙일 탭을 고르지 않는다(3 회차 T1 — 다른 출처와 앞부분이 같을 수 있다)
+    const init_text = init_read.text;
     if (init_text.len == 0) return null;
     doLock();
     var targets: [gate.max_targets]BrowserId = undefined;
-    const gate_answer = state.admitServiceWorker(init_text, nowUs(), &targets);
+    const gate_answer = state.startServiceWorker(init_text, id, nowUs(), &targets);
     const n = gate_answer.targets;
-    const admitted = gate_answer.admitted and blk: {
-        const w = state.watchOf(targets[0]) orelse break :blk false;
-        const t = state.track(id, w) orelse {
-            w.dropped +|= 1;
-            break :blk false;
-        };
-        @memcpy(t.targets[0..n], targets[0..n]);
-        t.target_count = @intCast(n);
-        t.service_worker = true;
+    const admitted = if (gate_answer.track) |t| blk: {
         t.navigation = is_navigation != 0;
         @memcpy(t.initiator[0..init_text.len], init_text);
         t.initiator_len = init_text.len;
         break :blk true;
-    };
+    } else false;
     doUnlock();
     if (n != 0 and !admitted) postFlush();
     return if (admitted) &rrh else null;
@@ -269,8 +295,12 @@ const Event = struct {
     received: u64 = 0,
     time_ms: u64 = 0,
     header_count: u8 = 0,
-    /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 마지막 주소)·첫 사이트 호스트.
+    /// 적을 때 찍은 덜어 내기(대상마다 — 3 회차 P1c).
+    stamp: gate.Stamp = .{},
+    /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 지금 주소) — 온 주소에서 읽었다(3 회차 T1).
     host: []const u8 = "",
+    /// 싣는 주소의 호스트(begin — 요청 주소, redirect — 옮겨 갈 주소 — wire 의 `host` 칸).
+    url_host: []const u8 = "",
     url: []const u8 = "",
     method: []const u8 = "",
     initiator: []const u8 = "",
@@ -287,6 +317,7 @@ const Event = struct {
 /// 기록의 글을 하나로 모은다(앞부분이 이미 잘린 것들).
 const Parts = struct {
     host: []const u8 = "",
+    url_host: []const u8 = "",
     url: []const u8 = "",
     method: []const u8 = "",
     initiator: []const u8 = "",
@@ -296,7 +327,7 @@ const Parts = struct {
 };
 
 fn makeEvent(template: Event, parts: Parts) ?*Event {
-    const total = parts.host.len + parts.url.len + parts.method.len + parts.initiator.len + parts.site.len + parts.mime.len + parts.headers.len;
+    const total = parts.host.len + parts.url_host.len + parts.url.len + parts.method.len + parts.initiator.len + parts.site.len + parts.mime.len + parts.headers.len;
     const a = std.heap.c_allocator;
     const e = a.create(Event) catch return null;
     const data = a.alloc(u8, total) catch {
@@ -307,6 +338,7 @@ fn makeEvent(template: Event, parts: Parts) ?*Event {
     e.data = data;
     var at: usize = 0;
     e.host = place(data, &at, parts.host);
+    e.url_host = place(data, &at, parts.url_host);
     e.url = place(data, &at, parts.url);
     e.method = place(data, &at, parts.method);
     e.initiator = place(data, &at, parts.initiator);
@@ -329,9 +361,10 @@ fn freeEvent(e: *Event) void {
     std.heap.c_allocator.destroy(e);
 }
 
-/// 넘김 상자에 넣는다 — 넘치면 버리고 그 탭들의 넘긴 수를 센다.
+/// 넘김 상자에 넣는다 — 넘치면 버리고 그 탭들의 넘긴 수를 센다. 넣기 전에 대상마다 덜어 내기를 찍는다(3 회차 P1c — 적을 때의 설정·호스트).
 fn enqueue(e: *Event) void {
     doLock();
+    e.stamp = state.stamp(e.targets[0..e.target_count], e.host, e.site);
     const ok = state.reserveQueue(e.bytes()) and blk: {
         queue.append(std.heap.c_allocator, e) catch {
             state.releaseQueue(e.bytes());
@@ -408,10 +441,6 @@ fn readHeaders(map: c.cef_string_multimap_t, b: *net_fields.HeaderBuilder, hsts:
     }
 }
 
-fn hostOf(url: []const u8) []const u8 {
-    return net_policy.hostOfUrl(url) orelse "";
-}
-
 fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, callback: [*c]c.cef_callback_t) callconv(.c) c.cef_return_value_t {
     defer object.releaseArg(browser);
     defer object.releaseArg(frame);
@@ -442,7 +471,10 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     if (e.resource_type == 18) e.resource_type = 6;
     e.time_ms = wallMs();
     var ub: [msg.max_net_url_bytes]u8 = undefined;
-    const url = userfreeText(request.*.get_url.?(request), msg.max_net_url_bytes, &ub);
+    var uh: [msg.max_net_host_bytes]u8 = undefined;
+    const raw_url = request.*.get_url.?(request);
+    defer if (raw_url != null) api().string_userfree_utf16_free(raw_url);
+    const url = readUrl(raw_url, &ub, &uh);
     if (url.text.len == 0) return c.RV_CONTINUE;
     e.flags.url_truncated = url.truncated;
     var mb: [msg.max_net_method_bytes]u8 = undefined;
@@ -450,9 +482,8 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     net_fields.checkMethod(method) catch {
         method = "GET";
     };
-    var fb: [msg.max_net_url_bytes]u8 = undefined;
-    const first_party = userfreeText(request.*.get_first_party_for_cookies.?(request), msg.max_net_url_bytes, &fb).text;
-    const site = hostOf(first_party);
+    var sb: [msg.max_net_host_bytes]u8 = undefined;
+    const site = userfreeHost(request.*.get_first_party_for_cookies.?(request), &sb); // 온 주소에서(3 회차 T1)
     var hb: net_fields.HeaderBuilder = .{};
     const map = api().string_multimap_alloc();
     if (map != null) {
@@ -464,7 +495,7 @@ fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.
     e.header_count = hb.count;
     const initiator = initiator_buf[0..initiator_len];
     protocol.text.replaceControl(initiator_buf[0..initiator_len]);
-    const ev = makeEvent(e, .{ .host = hostOf(url.text), .url = url.text, .method = method, .initiator = initiator, .site = site[0..@min(site.len, msg.max_net_origin_bytes)], .headers = hb.block().bytes }) orelse return c.RV_CONTINUE;
+    const ev = makeEvent(e, .{ .host = url.host, .url_host = url.host, .url = url.text, .method = method, .initiator = initiator, .site = site, .headers = hb.block().bytes }) orelse return c.RV_CONTINUE;
     enqueue(ev);
     return c.RV_CONTINUE;
 }
@@ -480,12 +511,12 @@ fn onResourceRedirect(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     e.status = @intCast(std.math.clamp(response.*.get_status.?(response), 100, 599));
     e.time_ms = wallMs();
     var nb: [msg.max_net_url_bytes]u8 = undefined;
-    const next = library.readPrefix(api(), new_url, msg.max_net_url_bytes, &nb);
-    protocol.text.replaceControl(next.text);
+    var nh: [msg.max_net_host_bytes]u8 = undefined;
+    const next = readUrl(new_url, &nb, &nh);
     if (next.text.len == 0) return;
     e.hop.url_truncated = next.truncated;
-    var ub: [msg.max_net_url_bytes]u8 = undefined;
-    const from = userfreeText(request.*.get_url.?(request), msg.max_net_url_bytes, &ub).text;
+    var fh: [msg.max_net_host_bytes]u8 = undefined;
+    const from_host = userfreeHost(request.*.get_url.?(request), &fh); // 그 홉을 보낸 곳(온 주소에서)
     var hb: net_fields.HeaderBuilder = .{};
     var hsts = false;
     const map = api().string_multimap_alloc();
@@ -497,7 +528,7 @@ fn onResourceRedirect(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     e.hop.hsts = hsts;
     e.hop.headers_truncated = hb.truncated;
     e.header_count = hb.count;
-    const ev = makeEvent(e, .{ .host = hostOf(from), .url = next.text, .headers = hb.block().bytes }) orelse return;
+    const ev = makeEvent(e, .{ .host = from_host, .url_host = next.host, .url = next.text, .headers = hb.block().bytes }) orelse return;
     enqueue(ev);
 }
 
@@ -513,8 +544,8 @@ fn onResourceResponse(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     e.time_ms = wallMs();
     var mb: [msg.max_net_mime_bytes]u8 = undefined;
     const mime = userfreeText(response.*.get_mime_type.?(response), msg.max_net_mime_bytes, &mb).text;
-    var ub: [msg.max_net_url_bytes]u8 = undefined;
-    const url = userfreeText(request.*.get_url.?(request), msg.max_net_url_bytes, &ub).text;
+    var rh: [msg.max_net_host_bytes]u8 = undefined;
+    const resp_host = userfreeHost(request.*.get_url.?(request), &rh); // 응답을 보낸 곳(온 주소에서)
     var hb: net_fields.HeaderBuilder = .{};
     var hsts = false;
     const map = api().string_multimap_alloc();
@@ -526,7 +557,7 @@ fn onResourceResponse(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.ce
     e.hop.hsts = hsts;
     e.hop.headers_truncated = hb.truncated;
     e.header_count = hb.count;
-    const ev = makeEvent(e, .{ .host = hostOf(url), .mime = mime, .headers = hb.block().bytes }) orelse return 0;
+    const ev = makeEvent(e, .{ .host = resp_host, .mime = mime, .headers = hb.block().bytes }) orelse return 0;
     enqueue(ev);
     return 0;
 }
@@ -566,25 +597,12 @@ fn onResourceLoadComplete(_: [*c]c.cef_resource_request_handler_t, browser: [*c]
 
 // ── UI 스레드: 모아서 보낸다 ────────────────────────────────────────────────────────────────────────────
 
-const WatchView = struct {
-    full: bool,
-    host_count: usize,
-    hosts: [msg.max_net_watch_hosts][253]u8,
-    host_lens: [msg.max_net_watch_hosts]u8,
-
-    fn covers(self: *const WatchView, host: []const u8, site: []const u8) bool {
-        if (host.len == 0) return false;
-        if (self.host_count == 0) return site.len != 0 and net_policy.sameSite(site, host); // 에이전트 탭(어느 사이트든) — 첫 사이트로
-        for (0..self.host_count) |i| if (net_policy.hostCovers(self.hosts[i][0..self.host_lens[i]], host)) return true;
-        return false;
-    }
-};
-
-fn watchView(browser: BrowserId) ?WatchView {
+/// 보낼 때의 지켜보기(잠금 밖에서 쓰는 사본 — 덮기 규칙은 `net_gate.Watch.covers`).
+fn watchView(browser: BrowserId) ?gate.Watch {
     doLock();
     defer doUnlock();
     const w = state.watchOf(browser) orelse return null;
-    return .{ .full = w.full, .host_count = w.host_count, .hosts = w.hosts, .host_lens = w.host_lens };
+    return w.*;
 }
 
 fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
@@ -603,7 +621,7 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     defer taken.deinit(std.heap.c_allocator);
     for (drops[0..drop_count]) |d| browsers.state.writer.send(.{ .net_dropped = .{ .browser = d.browser, .count = d.count } }) catch {};
     for (taken.items) |e| {
-        for (e.targets[0..e.target_count]) |b| send(e, b);
+        for (e.targets[0..e.target_count], 0..) |b, i| send(e, b, i);
         doLock();
         state.releaseQueue(e.bytes());
         doUnlock();
@@ -611,40 +629,42 @@ fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
     }
 }
 
-/// 기록 하나를 그 탭에(설정이 꺼졌으면 덜어 내고) 보낸다.
-fn send(e: *const Event, browser: BrowserId) void {
+/// 기록 하나를 그 탭(대상 `index`)에 보낸다 — 적을 때 찍은 것과 지금의 지켜보기 중 더 덜어 내는 쪽으로(3 회차 P1c).
+fn send(e: *const Event, browser: BrowserId, index: usize) void {
     const view = watchView(browser) orelse return; // 그사이 지켜보기가 꺼졌다
+    const bit: u8 = @as(u8, 1) << @intCast(index);
+    const d = view.decide(e.stamp.full & bit != 0, e.stamp.covered & bit != 0, e.host, e.site);
     var ub: [msg.max_net_url_bytes]u8 = undefined;
     var stripped: net_fields.HeaderBuilder = .{};
     const raw: msg.NetHeaderBlock = .{ .count = e.header_count, .bytes = e.headers };
     var headers = raw;
     var url = e.url;
-    if (!view.full) {
+    if (!d.full) {
         url = net_policy.stripUserinfo(e.url, &ub);
         if (url.len == 0) url = e.url[0..0];
-        net_policy.stripHeaders(raw, view.covers(e.host, e.site), &stripped);
+        net_policy.stripHeaders(raw, d.covered, &stripped);
         headers = stripped.block();
     }
     const message: msg.Message = switch (e.kind) {
         .begin => blk: {
             var flags = e.flags;
-            if (!view.full) {
+            if (!d.full) {
                 flags.stripped = true;
                 flags.headers_truncated = flags.headers_truncated or stripped.truncated;
             }
             if (url.len == 0) return;
-            break :blk .{ .net_begin = .{ .browser = browser, .request = e.request, .flags = flags, .resource_type = e.resource_type, .time_ms = e.time_ms, .method = e.method, .url = url, .initiator = e.initiator, .site = e.site, .headers = headers } };
+            break :blk .{ .net_begin = .{ .browser = browser, .request = e.request, .flags = flags, .resource_type = e.resource_type, .time_ms = e.time_ms, .method = e.method, .url = url, .initiator = e.initiator, .site = e.site, .host = e.url_host, .headers = headers } };
         },
         .redirect => blk: {
             var hop = e.hop;
-            if (!view.full) hop.stripped = true;
+            if (!d.full) hop.stripped = true;
             if (url.len == 0) return;
-            break :blk .{ .net_redirect = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .url = url, .headers = headers } };
+            break :blk .{ .net_redirect = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .url = url, .host = e.url_host, .headers = headers } };
         },
         .response => blk: {
             var hop = e.hop;
             hop.url_truncated = false;
-            if (!view.full) hop.stripped = true;
+            if (!d.full) hop.stripped = true;
             break :blk .{ .net_response = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .mime = e.mime, .headers = headers } };
         },
         .end => .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms } },

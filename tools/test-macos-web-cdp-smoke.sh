@@ -85,7 +85,8 @@
 #                   change 처리기가 응답이 40 초 걸리는 주소로 옮기는 칸도 요청 시한 전에 성공에 navigated:true(3 회차 T1) ·
 #                   탭을 닫으면 그 탭의 사본 폴더가 사라진다
 #   w9d-network     (W9d①) Chromium 탭의 네트워크 기록: 에이전트가 연 탭은 묻지 않고 태어날 때부터 적는다 — 쿠키를 심고 옮겨 간 첫 페이지,
-#                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히에 `Cookie`·`Authorization` 값(설정 켬이 기본) ·
+#                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히는 쿠키 권한 전에는 `Cookie`·`Authorization` 이 이름만
+#                   (적대 리뷰 3 회차 D1 — 설정 켬이어도), get-cookies 로 그 사이트를 허락받은 뒤(확인 모달, 자동 승인)에는 값 ·
 #                   서비스 워커가 다스리는 페이지의 fetch 는 `[service worker of <출처>]` · 둘째 pane(첫 pane 이 연 탭은 그에게 사용자의 탭과 같다 —
 #                   확인 모달, 자동 승인)에게 grant 전에 간 페이지는 보이지 않고(숨김 수로만) 그 뒤 페이지는 보인다 · 그 탭이 다른 사이트(localhost)에
 #                   갔다 돌아오면 다른 사이트에 있던 동안의 요청은 숨김 수로만(W9d① 적대 리뷰 1 회차 F2 — 실제 CEF 의 첫 사이트로 가른다) · 첫 pane 이
@@ -1125,6 +1126,9 @@ n=0; while [ \$n -lt 40 ]; do
 done
 api=\$(sed -n 's/^#\([0-9]*\) GET [0-9-]* xhr .*netapi\.json.*/\1/p' "\$out/nw-agent" | head -1)
 "\$cli" browser network-request --surface "\$nw" --req "\$api" > "\$out/nw-api" 2>&1; echo "rc=\$?" >> "\$out/nw-api"
+# 적대 리뷰 3 회차 D1: 쿠키 권한 전에는 자격 증명 값이 이름만이다(위). get-cookies 가 그 사이트의 쿠키 권한을 묻고(확인 모달, 자동 승인) 그 뒤 같은 요청의 값이 보인다.
+"\$cli" browser get-cookies --surface "\$nw" > "\$out/nw-ck" 2>&1; echo "rc=\$?" >> "\$out/nw-ck"
+"\$cli" browser network-request --surface "\$nw" --req "\$api" > "\$out/nw-api2" 2>&1; echo "rc=\$?" >> "\$out/nw-api2"
 # 서비스 워커가 다스리는 페이지의 fetch — 브라우저가 없는 요청으로 와서 그 출처를 연 이 탭에 붙는다.
 "\$cli" browser navigate --surface "\$nw" "http://127.0.0.1:$port/nsw/page.html" > "\$out/nw-sw-nav" 2>&1
 n=0; while [ \$n -lt 60 ]; do
@@ -1461,8 +1465,11 @@ echo "PASS w9c-upload: one file reaches the page as a trusted change with its co
 grep -q '^rc=0$' "$out/nw-agent" && grep -q ' xhr http://127.0.0.1:[0-9]*/netapi.json?a' "$out/nw-agent" && grep -q 'http://127.0.0.1:[0-9]*/setck' "$out/nw-agent" \
     && grep -q 'netf-api.json.*\[cross-site iframe\]' "$out/nw-agent" \
     || fail "the agent's tab did not record its requests from birth with the cross-site iframe mark ($(tr '\n' ' ' < "$out/nw-agent"))"
-grep -q '^  Cookie: smk=cookie-secret$' "$out/nw-api" && grep -q '^  Authorization: Bearer smoke-token$' "$out/nw-api" && grep -q '^body: not recorded$' "$out/nw-api" \
-    || fail "the request detail did not show the Cookie and Authorization values (switch on by default) ($(tr '\n' ' ' < "$out/nw-api"))"
+grep -q "^  Cookie: (hidden — needs this site's cookie permission" "$out/nw-api" && grep -q "^  Authorization: (hidden — needs this site's cookie permission" "$out/nw-api" \
+    && ! grep -q 'cookie-secret' "$out/nw-api" && ! grep -q 'smoke-token' "$out/nw-api" && grep -q '^body: not recorded$' "$out/nw-api" \
+    || fail "before the cookie permission the agent's own tab showed Cookie or Authorization values (W9d① round 3 D1) ($(tr '\n' ' ' < "$out/nw-api"))"
+grep -q '^rc=0$' "$out/nw-ck" && grep -q '^  Cookie: smk=cookie-secret$' "$out/nw-api2" && grep -q '^  Authorization: Bearer smoke-token$' "$out/nw-api2" \
+    || fail "after get-cookies allowed the site the request detail did not show the Cookie and Authorization values ($(tr '\n' ' ' < "$out/nw-ck") · $(tr '\n' ' ' < "$out/nw-api2"))"
 grep -q 'nsw/data.json.*\[service worker of http://127.0.0.1:[0-9]*\]' "$out/nw-sw" || fail "a fetch of a service-worker page was not labelled as the service worker's ($(tr '\n' ' ' < "$out/nw-sw"))"
 grep -qx 'ok' "$out/nw-u-nav2" || fail "the tab for the second reader did not move ($(tr '\n' ' ' < "$out/nw-u-nav2"))"
 grep -q '^rc=0$' "$out/nw-u-first" && ! grep -q 'net-before' "$out/nw-u-first" && grep -q '^([0-9]* earlier requests\{0,1\} hidden' "$out/nw-u-first" \
@@ -1476,7 +1483,7 @@ grep -qx 'ok' "$out/nw-u-redir-nav" && grep -q 'GET /netredir' "$root/http.log" 
 ! grep -q 'netredir' "$out/nw-u-away" && ! grep -q 'net-cb' "$out/nw-u-away" \
     || fail "a navigation that started on another site and was redirected back was shown to the second reader ($(tr '\n' ' ' < "$out/nw-u-away"))"
 grep -q '^rc=0$' "$out/nw-u-revoked" && ! grep -q 'net-after' "$out/nw-u-revoked" || fail "after revoking the grants the record was not wiped ($(tr '\n' ' ' < "$out/nw-u-revoked"))"
-echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back) nor a navigation that started on another site and was redirected back, and revoking all grants wiped the record"
+echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization by name only until get-cookies allowed the site and then their values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back) nor a navigation that started on another site and was redirected back, and revoking all grants wiped the record"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

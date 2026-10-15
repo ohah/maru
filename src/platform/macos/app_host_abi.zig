@@ -7826,6 +7826,14 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
         current = if (now.any_host) .{} else now.host;
         break :blk current.slice();
     } else "";
+    // 적대 리뷰 3 회차 D1(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」): 그 pane 이 이 탭에 쥔 쿠키 권한(`browser_storage` — 늘 사이트에
+    // 묶인다)의 호스트. 자격 증명 헤더 값·주소의 사용자 정보는 그것이 덮는 호스트의 것만 보인다 — 설정과 무관, 어느 호스트든 grant 여도. cap 으로
+    // 읽는 쪽은 쥔 사이트가 없어 보이지 않는다(작성자 — 더 숨기는 쪽).
+    var cookie: control_pane_grant.GrantHost = .{};
+    if (op.pane_grant) |g| if (control_pane_grant_store.get(g.pane, op.surface_id, .browser_storage)) |sg| {
+        if (!sg.any_host) cookie = sg.host;
+    };
+    const reader: session_mod.web_osr.NetReader = .{ .who = who, .pane = reader_pane, .grant_host = grant_host, .host_bound = host_bound, .cookie_host = cookie.slice() };
     switch (op.method) {
         .network => {
             const parsed = std.json.parseFromSlice(struct {
@@ -7841,7 +7849,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
             }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
             defer parsed.deinit();
             const a = parsed.value;
-            const json = session_mod.web_osr.networkList(allocator, op.surface_id, who, reader_pane, grant_host, host_bound, .{
+            const json = session_mod.web_osr.networkList(allocator, op.surface_id, reader, .{
                 .page = a.page,
                 .page_size = a.page_size,
                 .types = a.types,
@@ -7858,7 +7866,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
         .network_request => {
             const parsed = std.json.parseFromSlice(struct { req: u64 }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
             defer parsed.deinit();
-            const json = session_mod.web_osr.networkDetail(allocator, op.surface_id, who, reader_pane, grant_host, host_bound, parsed.value.req) catch |e| {
+            const json = session_mod.web_osr.networkDetail(allocator, op.surface_id, reader, parsed.value.req) catch |e| {
                 var buf: [512]u8 = undefined;
                 const reason = switch (e) {
                     error.UnknownRequest => std.fmt.bufPrint(&buf, "{{\"reason\":\"unknown_request\",\"message\":\"{s}\"}}", .{network_unknown_reason}),
@@ -7889,7 +7897,7 @@ fn syncNetworkWatch() void {
             .who = consoleAuthorizer(.{ .pane_grant = .{ .pane = g.pane, .target = g.target, .scope = g.scope, .id = g.id } }),
             .host = if (g.any_host) "" else g.host.slice(),
             .birth = g.any_host and agentNetworkBirth(g.pane, g.target, g.id),
-            .bound_empty = !g.any_host and g.host.len == 0,
+            .any_host = g.any_host,
             .pane = g.pane,
         };
         n += 1;
@@ -7905,12 +7913,17 @@ fn applyNetworkNarrows() void {
     if (takeNetworkNarrowsIntoStore()) syncNetworkWatch();
 }
 
-/// 남긴 좁히기를 grant 표에 옮긴다 — 바뀐 것이 있으면 참.
+/// 남긴 좁히기를 grant 표에 옮긴다 — 바뀐 것이 있으면 참. 빌 때까지 가져간다(적대 리뷰 3 회차 P1d — 한 번에 64 를 넘게 남았어도 잃지 않는다:
+/// 다 옮기기 전에 동기화가 web_osr 의 사본을 옛 「어느 호스트든」 으로 덮지 않게).
 fn takeNetworkNarrowsIntoStore() bool {
     var buf: [control_pane_grant.max_grants]session_mod.web_osr.NetworkNarrow = undefined;
     var changed = false;
-    for (session_mod.web_osr.takeNetworkNarrows(&buf)) |nw| {
-        if (control_pane_grant_store.narrowAnyHost(nw.tab, nw.host)) changed = true;
+    while (true) {
+        const got = session_mod.web_osr.takeNetworkNarrows(&buf);
+        for (got) |nw| {
+            if (control_pane_grant_store.narrowAnyHost(nw.tab, nw.host)) changed = true;
+        }
+        if (got.len < buf.len) break;
     }
     return changed;
 }
@@ -14657,7 +14670,8 @@ fn w9d1Count(tab: u64, grant: control_browser.GrantProvenance) !usize {
 }
 
 fn w9d1Begin(tab: u64, request: u64, url: []const u8) void {
-    session_mod.web_osr.testApply(std.testing.allocator, .{ .net_begin = .{ .browser = tab, .request = request, .url = url, .site = "a.test", .flags = .{ .main_frame = true }, .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x0asid=secret" } } });
+    // 호스트 칸은 sidecar 가 온 주소에서 읽어 싣는다(적대 리뷰 3 회차 T1) — 시험은 주소에서 흉내 낸다.
+    session_mod.web_osr.testApply(std.testing.allocator, .{ .net_begin = .{ .browser = tab, .request = request, .url = url, .host = control_pane_grant.hostOfUrl(url) orelse "", .site = "a.test", .flags = .{ .main_frame = true }, .headers = .{ .count = 1, .bytes = "\x06Cookie\x00\x0asid=secret" } } });
 }
 
 test "W9d①: browser.network 은 DevTools·op 줄 없이 곧 답한다 — grant 뒤의 요청만, 철회하면 지켜보기를 끄고 지운다(다시 허락해도 옛 요청은 없다)" {
@@ -14799,7 +14813,16 @@ test "W9d①: networkRequest — 있으면 자세히(헤더·body_state not_reco
         defer p.deinit();
         const r = p.value.object.get("result").?.object;
         try std.testing.expectEqualStrings("not_recorded", r.get("body_state").?.string);
-        try std.testing.expectEqualStrings("sid=secret", r.get("request_headers").?.array.items[0].object.get("value").?.string); // 설정이 켜져 있다(기본)
+        // 설정이 켜져 있어도(기본) 쿠키 값은 이 사이트의 쿠키 권한이 있어야 한다(적대 리뷰 3 회차 D1) — 이름만과 그 까닭.
+        const cookie = r.get("request_headers").?.array.items[0].object;
+        try std.testing.expect(cookie.get("value") == null and cookie.get("needs_cookie_permission").?.bool);
+    }
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 96, .scope = .browser_storage, .host = control_pane_grant.GrantHost.init("a.test") });
+    {
+        var pending = try Detail.call(96, 1);
+        const p = try w9b3Result(&pending);
+        defer p.deinit();
+        try std.testing.expectEqualStrings("sid=secret", p.value.object.get("result").?.object.get("request_headers").?.array.items[0].object.get("value").?.string);
     }
     // 링을 넘치게 — 1 번은 버려진다.
     const long = "https://a.test/" ++ "p" ** 2000;
@@ -14822,7 +14845,7 @@ const r9d1_cookie_a = "\x06Cookie\x00\x0asid=secret";
 const r9d1_cookie_bank = "\x06Cookie\x00\x0cbank=SECRET1";
 
 fn r9d1Begin(tab: u64, request: u64, url: []const u8, site: []const u8, hdr: []const u8) void {
-    session_mod.web_osr.testApply(std.testing.allocator, .{ .net_begin = .{ .browser = tab, .request = request, .url = url, .site = site, .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = hdr } } });
+    session_mod.web_osr.testApply(std.testing.allocator, .{ .net_begin = .{ .browser = tab, .request = request, .url = url, .host = control_pane_grant.hostOfUrl(url) orelse "", .site = site, .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = hdr } } });
 }
 
 /// 읽는 쪽이 보는 주소들(첫 쪽, 200 개까지) — 빈칸으로 잇는다.
@@ -14978,7 +15001,8 @@ test "W9d① 적대 리뷰 1 회차 재현 A5(사용자 결정 「그대로 둠�
     try std.testing.expectEqual(@as(usize, 1), try w9d1Count(194, w9d1Grant(5, 194))); // 첫 읽기
     session_mod.web_osr.noteUserNavigation(194); // 사용자가 이 탭의 주소창에 은행을 친다
     r9d1Begin(194, 2, "https://bank.test/login", "bank.test", r9d1_cookie_bank);
-    try std.testing.expect(try r9d1DetailHas(194, w9d1Grant(5, 194), 2, "bank=SECRET1"));
+    try std.testing.expect(try r9d1DetailHas(194, w9d1Grant(5, 194), 2, "https://bank.test/login")); // 그 요청이 보인다
+    try std.testing.expect(!try r9d1DetailHas(194, w9d1Grant(5, 194), 2, "bank=SECRET1")); // 쿠키 값은 은행의 쿠키 권한이 있어야(3 회차 D1)
     try std.testing.expect(control_pane_grant_store.authorizes(5, 194, .browser_network, "bank.test"));
 }
 
@@ -15030,8 +15054,8 @@ test "W9d① 적대 리뷰 2 회차 재현 A1: 사용자 탭의 제어와 a.test
     try std.testing.expect(!control_pane_grant_store.authorizes(5, 195, .browser_network, "bank.test"));
     // browser.navigate → https://bank.test/sso?return=https://a.test/cb(열린 리다이렉트·조용한 SSO). 최상위 이동이라 은행의 세션 쿠키가
     // 실린다(SameSite=Lax·HttpOnly 도). 은행은 302 로 a.test 에 돌려보낸다.
-    session_mod.web_osr.testApply(ta, .{ .net_begin = .{ .browser = 195, .request = 77, .url = "https://bank.test/sso?return=https://a.test/cb", .site = "bank.test", .initiator = "null", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = r9d1_cookie_bank } } });
-    session_mod.web_osr.testApply(ta, .{ .net_redirect = .{ .browser = 195, .request = 77, .status = 302, .url = "https://a.test/cb?code=1", .headers = .{ .count = 1, .bytes = "\x0aSet-Cookie\x00\x12bank_sid=NEWSECRET" } } });
+    session_mod.web_osr.testApply(ta, .{ .net_begin = .{ .browser = 195, .request = 77, .url = "https://bank.test/sso?return=https://a.test/cb", .host = "bank.test", .site = "bank.test", .initiator = "null", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = r9d1_cookie_bank } } });
+    session_mod.web_osr.testApply(ta, .{ .net_redirect = .{ .browser = 195, .request = 77, .status = 302, .url = "https://a.test/cb?code=1", .host = "a.test", .headers = .{ .count = 1, .bytes = "\x0aSet-Cookie\x00\x12bank_sid=NEWSECRET" } } });
     session_mod.web_osr.testApply(ta, .{ .net_response = .{ .browser = 195, .request = 77, .status = 200, .mime = "text/html" } });
     session_mod.web_osr.testApply(ta, .{ .net_end = .{ .browser = 195, .request = 77, .received = 10 } });
     session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 195, .url = "https://a.test/cb?code=1" } });
@@ -15081,6 +15105,69 @@ test "W9d① 적대 리뷰 2 회차 N2·N3: 설정 끔에서 몬 탭의 좁히�
     applyNetworkNarrows();
     try std.testing.expect(control_pane_grant_store.authorizes(6, 197, .browser_network, "agent2.test"));
     try std.testing.expect(!control_pane_grant_store.authorizes(6, 197, .browser_network, "bank.test"));
+}
+
+// ── W9d① 적대 리뷰 3 회차 재현(리뷰가 남긴 R9d3-A1 — 붙여 실패를 본 뒤 고쳤다. obs 였던 A2 는 사용자 결정 D1 을 단언한다) ──
+
+test "W9d① 적대 리뷰 3 회차 재현 A1: 사용자 탭의 제어와 a.test 네트워크 grant 를 쥔 에이전트가 그 탭을 긴 사용자 정보의 은행 주소(2 KiB 에서 사용자 정보 안에서 잘린다)로 옮겨도 그 이동은 a.test 의 것으로 보이지 않는다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{198});
+    defer w9c2Forget(ta, &.{198});
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 198, .url = "https://a.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 198, .scope = .browser });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 198, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("a.test") });
+    // 쿠키 권한(D1)과 떼어 본다 — 이 시험은 덮기만 본다: 은행의 쿠키 권한이 있어도 a.test 의 네트워크 grant 로는 그 이동이 보이지 않아야 한다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 198, .scope = .browser_storage, .host = control_pane_grant.GrantHost.init("bank.test") });
+    syncNetworkWatch();
+    // browser.navigate → https://yyy…y.a.test<…>@bank.test/ — 앞 2 KiB 는 `.a.test` 에서 끝난다. sidecar 는 온 주소에서 읽은 호스트(bank.test)를
+    // 제 칸으로 싣는다(고친 sidecar 는 사용자 정보도 빼고 자르지만, 잘린 글이 그렇게 생겼어도 maru 는 그 칸으로만 가른다).
+    const pad = "y" ** (2048 - "https://".len - ".a.test".len);
+    const truncated = "https://" ++ pad ++ ".a.test";
+    session_mod.web_osr.testApply(ta, .{ .net_begin = .{ .browser = 198, .request = 91, .url = truncated, .host = "bank.test", .site = "bank.test", .initiator = "null", .flags = .{ .main_frame = true, .navigation = true, .url_truncated = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = r9d1_cookie_bank } } });
+    session_mod.web_osr.testApply(ta, .{ .net_response = .{ .browser = 198, .request = 91, .status = 200, .mime = "text/html", .headers = .{ .count = 1, .bytes = "\x0aSet-Cookie\x00\x12bank_sid=NEWSECRET" } } });
+    session_mod.web_osr.testApply(ta, .{ .net_end = .{ .browser = 198, .request = 91, .received = 10 } });
+    try std.testing.expect(!try r9d1DetailHas(198, w9d1Grant(5, 198), 1, "bank=SECRET1"));
+    try std.testing.expect(!try r9d1DetailHas(198, w9d1Grant(5, 198), 1, "NEWSECRET"));
+    const p = try w9d1List(198, w9d1Grant(5, 198), "{\"page\":0,\"page_size\":50,\"types\":[],\"clear\":false}");
+    defer p.deinit();
+    const r = p.value.object.get("result").?.object;
+    try std.testing.expectEqual(@as(usize, 0), r.get("requests").?.array.items.len);
+    try std.testing.expectEqual(@as(i64, 1), r.get("hidden_other_site_pages").?.integer);
+}
+
+test "W9d① 적대 리뷰 3 회차 D1(사용자 결정 「쿠키 권한 있을 때만 보임」): 에이전트가 연 탭(묻지 않는 어느 호스트든 grant)이 은행을 열면 요청은 보이지만 Cookie 는 이름만 — 은행의 쿠키 권한(browser_storage)을 받으면 값" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{199});
+    defer w9c2Forget(ta, &.{199});
+    try std.testing.expect(adoptAgentTab(5, 199)); // browser.open https://bank.test/ — 모달 없음
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 199, .url = "https://bank.test/" } });
+    r9d1Begin(199, 92, "https://bank.test/", "bank.test", r9d1_cookie_bank);
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 199, .browser_storage, "bank.test"));
+    try std.testing.expect(try r9d1DetailHas(199, w9d1Grant(5, 199), 1, "https://bank.test/")); // 요청은 보인다(어느 호스트든 grant)
+    try std.testing.expect(!try r9d1DetailHas(199, w9d1Grant(5, 199), 1, "bank=SECRET1")); // 설정이 켜져 있어도(기본) 이름만
+    try std.testing.expect(try r9d1DetailHas(199, w9d1Grant(5, 199), 1, "{\"name\":\"Cookie\",\"redacted\":true,\"needs_cookie_permission\":true}"));
+    // 다른 사이트의 쿠키 권한은 은행의 값을 열지 않는다.
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 199, .scope = .browser_storage, .host = control_pane_grant.GrantHost.init("a.test") });
+    try std.testing.expect(!try r9d1DetailHas(199, w9d1Grant(5, 199), 1, "bank=SECRET1"));
+    // 에이전트가 getCookies 로 묻고 사용자가 은행에 허용한다(resolveGrantPrompt 가 넣는 그것 — 다시 허용하면 호스트가 바뀐다).
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 199, .scope = .browser_storage, .host = control_pane_grant.GrantHost.init("bank.test") });
+    try std.testing.expect(try r9d1DetailHas(199, w9d1Grant(5, 199), 1, "bank=SECRET1"));
+    // 다른 pane 의 쿠키 권한은 이 읽는 쪽의 것이 아니다.
+    try control_pane_grant_store.grant(.{ .pane = 6, .target = 199, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("bank.test") });
+    syncNetworkWatch();
+    r9d1Begin(199, 93, "https://bank.test/next", "bank.test", r9d1_cookie_bank);
+    try std.testing.expect(!try r9d1DetailHas(199, w9d1Grant(6, 199), 2, "bank=SECRET1"));
+    try std.testing.expect(try r9d1DetailHas(199, w9d1Grant(6, 199), 2, "https://bank.test/next"));
 }
 
 // ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 앱 쪽: 모달 전 파일 열기·매번 모달·결정·사본·이어가기·정리 ────────────────────────

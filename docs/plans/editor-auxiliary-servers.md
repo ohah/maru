@@ -48,7 +48,7 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 ### 진단
 
 - 문서의 서버 진단을 **서버마다 따로** 든다(`editor_diagnostics` 의 서버 칸 여럿 — 열쇠는 그 클라이언트의 exe). `publishDiagnostics` 는 그 서버의 칸만 갈아 끼우고, 서버를 내릴 때도 그 칸만 걷는다(지금은 한 칸이라 두 번째 서버가 첫 서버의 것을 지운다).
-- 합친 목록(`list`)은 서버 칸 전부 + 구문 오류를 정렬한 것이다(§5.4 — 지금 규칙 그대로).
+- 합친 목록(`list`)은 서버 칸 전부를 정렬한 것이다(§5.4 — 구문 오류는 2026-10-15 출처에서 걷혔다).
 - 진단마다 **어느 서버의 것인지**를 든다. 호버의 진단 줄(§8.3)은 지금 문법의 주 서버 이름을 붙이는데, 그러면 ruff 의 진단이 「pyright」로 보인다 — 진단이 든 서버 이름을 쓴다.
 - code action 요청의 문맥 진단(`context.diagnostics`)은 **그 서버의 진단만** 싣는다 — 서버는 자기가 낸 진단의 `data` 로 fix 를 만든다.
 - pull 진단(AS3): `diagnosticProvider` 가 있고 push 를 안 하는 서버(ESLint)에는 보조 클라이언트의 `initialize` 에 `textDocument.diagnostic` 능력을 알리고, 문서를 보낼 때마다(didOpen·didChange 뒤, 같은 묶음 규칙) `textDocument/diagnostic`(id 칸 `20e8` — `17e8`~`19e8` 은 그 사이 심볼·강조·선택 확장이 썼다; i32 안의 마지막 칸)을 묻는다. 응답의 `kind: full` 은 그 서버 칸을 갈아 끼우고 `unchanged` 는 그대로 둔다. 물은 뒤 문서가 바뀌었으면 버린다. 주 서버에는 알리지 않는다(tsgo 등이 push 에서 pull 로 바꾸면 지금 동작이 바뀐다).

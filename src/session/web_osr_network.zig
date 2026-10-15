@@ -183,6 +183,8 @@ pub const View = struct {
     /// 설정이 꺼졌을 때 이 읽는 쪽에게 허락되지 않은 다른 탭이 지금 보이는 출처들(`scheme://host[:port]`) — 그 출처의 서비스 워커 요청은
     /// 수만(F4·N6).
     shared_sw_origins: []const []const u8 = &.{},
+    /// 설정이 꺼졌을 때 그런 탭 중 지금 출처를 모르는 것이 있다(주소가 옛 것 — 4 회차 C3) — 서비스 워커 요청은 모두 수만.
+    shared_sw_unknown: bool = false,
     /// 이 읽는 쪽이 `browser_network` grant 를 쥔 탭들(읽는 탭은 늘 든 것으로 친다) — 서비스 워커 요청이 날 때 같은 출처를 보이던 탭이 여기
     /// 없으면 수만(N6 — 「허락 없는 탭」 은 이 읽는 쪽에게 허락되지 않은 탭이다).
     reader_tabs: []const u64 = &.{},
@@ -591,7 +593,11 @@ pub const Ring = struct {
         }
         for (0..drop) |_| {
             const e = self.entries.frontPtr().?;
-            if (e.request != 0) _ = self.live.remove(e.request);
+            // 번호 표에서는 이 기록을 가리킬 때만 뺀다(4 회차 C2) — sidecar 가 다시 뜨면 새 프로세스가 같은 CEF 번호를 새 요청에 준다(`abandonLive`):
+            // 옛 기록을 버리며 그 번호를 빼면 새 요청의 리다이렉트·응답·끝이 버려졌다.
+            if (e.request != 0) if (self.live.get(e.request)) |seq| if (seq == e.seq) {
+                _ = self.live.remove(e.request);
+            };
             self.summary_bytes -= e.summary_bytes;
             self.detail_bytes -= e.detail_bytes;
             budget.bytes -|= e.summary_bytes + e.detail_bytes;
@@ -640,7 +646,7 @@ pub const Ring = struct {
     /// 요청이 날 때 그런 탭이 있었거나(`sw_tabs` — 그 탭의 grant 는 지금 것으로 본다) 지금 있다.
     fn sharedServiceWorker(view: View, e: *const Entry) bool {
         if (view.full or !e.flags.service_worker) return false;
-        if (e.sw_tabs_overflow) return true;
+        if (e.sw_tabs_overflow or view.shared_sw_unknown) return true;
         for (e.sw_tabs[0..e.sw_tab_count]) |t| if (!view.readerHas(t)) return true;
         var ob: [msg.max_net_origin_bytes]u8 = undefined;
         const origin = policy.originOf(e.initiator, &ob);
@@ -874,13 +880,18 @@ fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []
 
 /// 헤더 목록 — 설정이 켜졌으면 그대로, 꺼졌으면 규칙대로(이름만인 것은 `redacted:true`). 자격 증명 헤더(`net_policy.credentialHeader`)는 이 읽는
 /// 쪽의 쿠키 권한이 그 헤더를 보내거나 받은 호스트(`host`)를 덮을 때만 값 — 아니면 켜져 있어도 이름만이고 `needs_cookie_permission:true`(3 회차 D1).
+/// 주소를 싣는 헤더(`Location`·`Refresh`·`Content-Location`·`Link`·`Referer`)의 값은 그 안 주소의 사용자 정보를 지운다 — 이 읽는 쪽의 쿠키
+/// 권한이 **그 주소의 호스트**를 덮을 때만 둔다(4 회차 C1 — 주소 칸 `shownUrl` 과 같은 규칙, 끔이면 늘 지운다).
 /// 보이지 않는 곳의 헤더는 이 함수를 부르지 않는다.
 fn writeHeaders(s: *std.json.Stringify, h: Headers, view: View, host: []const u8) !void {
     try s.beginArray();
     var it = net_fields.HeaderIterator.init(h.block());
     var ob: [msg.max_net_url_bytes]u8 = undefined;
+    var mb: [msg.max_net_headers_bytes]u8 = undefined;
     const full = view.full and !h.stripped;
     const creds = full and view.credentials(host);
+    // 주소의 사용자 정보를 둘 수 있는 쿠키 권한 — 끔·덜어 낸 덩어리면 없다(`View.credentials` 와 같은 조건).
+    const url_cookie_host = if (full) view.cookie_host else "";
     while (it.next()) |hd| {
         try s.beginObject();
         try s.objectField("name");
@@ -890,7 +901,7 @@ fn writeHeaders(s: *std.json.Stringify, h: Headers, view: View, host: []const u8
         switch (rule) {
             .value, .covered_only => {
                 try s.objectField("value");
-                try s.write(hd.value);
+                try s.write(policy.maskHeaderUserinfo(hd.name, hd.value, url_cookie_host, &mb));
             },
             .origin_only => {
                 try s.objectField("value");
@@ -1723,4 +1734,76 @@ test "W9d① 적대 리뷰 3 회차 T2: 브라우저가 다시 만들어지면 �
     defer done.deinit();
     try testing.expectEqualStrings("done", done.value.object.get("state").?.string); // 끝난 요청은 그대로
     try testing.expectEqual(@as(usize, 3), t.ring.entries.len); // 새 요청은 제 기록(#3)으로
+}
+
+// ── W9d① 적대 리뷰 4 회차 재현(리뷰 후보 C1·C2 — 코드 읽기에서 나온 것을 붙여 실패를 본 뒤 고친다) ──
+
+test "W9d① 적대 리뷰 4 회차 재현 C1: 주소를 싣는 헤더(Location·Refresh·Content-Location·Link)의 사용자 정보는 그 주소의 호스트를 덮는 쿠키 권한이 있을 때만 — 설정 켬은 maru 가, 끔은 sidecar(stripHeaders)가 지운다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true); // 에이전트가 연 탭(어느 호스트든 grant)
+    var hop_h: net_fields.HeaderBuilder = .{};
+    _ = hop_h.add("Location", "https://u:p@b.test/next");
+    _ = hop_h.add("Refresh", "0; url=https://u:p@b.test/r");
+    _ = hop_h.add("Content-Location", "https://u:p@b.test/c");
+    _ = hop_h.add("Link", "<https://u:p@b.test/l>; rel=preload");
+    try t.begin(1, "https://a.test/start", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test" });
+    try t.redirect(1, 302, "https://u:p@b.test/next", .{ .headers = hop_h.block() });
+    try t.respond(1, 200, .{});
+    const Case = struct { cookie_host: []const u8, shown: bool };
+    for ([_]Case{
+        .{ .cookie_host = "", .shown = false }, // 쿠키 권한 없음
+        .{ .cookie_host = "a.test", .shown = false }, // 홉을 보낸 곳(a.test)의 권한 — 주소의 호스트(b.test)가 아니다
+        .{ .cookie_host = "b.test", .shown = true }, // 그 주소의 호스트를 덮는다
+    }) |c| {
+        const p = try detailJson(&t, 7, .{ .full = true, .cookie_host = c.cookie_host }, 1);
+        defer p.deinit();
+        const hops = p.value.object.get("redirects").?.array.items;
+        try testing.expectEqual(@as(usize, 1), hops.len);
+        try testing.expectEqualStrings(if (c.shown) "https://u:p@b.test/next" else "https://b.test/next", hops[0].object.get("url").?.string); // 홉 주소 칸은 3 회차부터 이미 이렇다
+        for ([_][]const u8{ "Location", "Refresh", "Content-Location", "Link" }) |name| {
+            const v = headerOf(hops[0].object.get("headers").?.array.items, name).?.get("value").?.string;
+            try testing.expectEqual(c.shown, std.mem.indexOf(u8, v, "u:p@") != null);
+            try testing.expect(std.mem.indexOf(u8, v, "b.test/") != null); // 사용자 정보만 지운다 — 주소는 남는다
+        }
+    }
+    // 켠 동안 적고(덜어 내지 않은 덩어리) 끈 뒤 읽으면 — 쿠키 권한이 있어도 지운다(끔에서는 자격 증명이 보이지 않는다 — D1·C1).
+    {
+        const p = try detailJson(&t, 7, .{ .full = false, .grant_host = "a.test", .cookie_host = "b.test" }, 1);
+        defer p.deinit();
+        const hops = p.value.object.get("redirects").?.array.items;
+        const v = headerOf(hops[0].object.get("headers").?.array.items, "Location").?.get("value").?.string;
+        try testing.expectEqualStrings("https://b.test/next", v);
+    }
+}
+
+test "W9d① 적대 리뷰 4 회차 재현 C1(끔): 설정이 꺼졌으면 sidecar 가 보내기 전에 덜어 낸다 — 덮이는 호스트의 응답이어도 Location 의 사용자 정보는 브라우저 프로세스를 나가지 않는다" {
+    var hop_h: net_fields.HeaderBuilder = .{};
+    _ = hop_h.add("Location", "https://u:p@b.test/next");
+    var off: net_fields.HeaderBuilder = .{};
+    policy.stripHeaders(hop_h.block(), true, &off);
+    var it = net_fields.HeaderIterator.init(off.block());
+    const loc = it.next().?;
+    try testing.expectEqualStrings("Location", loc.name);
+    try testing.expectEqualStrings("https://b.test/next", loc.value);
+}
+
+test "W9d① 적대 리뷰 4 회차 재현 C2: 오래된 기록을 버릴 때 번호 표에서는 그 기록을 가리키는 것만 뺀다 — sidecar 가 다시 떠 같은 CEF 번호를 새 요청에 줘도 새 요청의 응답·끝이 붙는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    // 옛 프로세스의 이동 요청(번호 5) — 진행 중에 sidecar 가 죽었다(취소로 끝난다).
+    const long = "https://a.test/" ++ "x" ** 1900;
+    try t.begin(5, long ++ "?old", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0 });
+    t.ring.abandonLive();
+    // 새 프로세스가 같은 번호 5 를 새 이동에 준다.
+    try t.begin(5, "https://a.test/new", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0 });
+    // 그 이동이 끝나기 전에 다른 요청이 쌓여 상한이 옛 기록(#1)을 버린다 — 새 기록(#2)은 남는다.
+    var n: u64 = 100;
+    while (t.ring.entryBySeq(1) != null) : (n += 1) try t.begin(n, long, .{});
+    try testing.expect(t.ring.entryBySeq(2) != null);
+    try t.respond(5, 200, .{});
+    const e = t.ring.entryBySeq(2).?;
+    try testing.expectEqual(@as(u16, 200), e.status);
+    try testing.expectEqual(State.done, e.state);
 }

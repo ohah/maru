@@ -15,6 +15,9 @@
 //! 자격 증명(W9d① 적대 리뷰 3 회차 D1 — 사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」): `Cookie`·`Set-Cookie`·`Authorization`(과 같은
 //! 갈래의 `Proxy-Authorization`) 값과 주소의 사용자 정보는 설정과 무관하게 읽는 쪽이 그 요청의 호스트를 덮는 `browser_storage` grant 를 쥘 때만
 //! 보인다(`credentialHeader` — 투영은 maru 가 한다, 꺼져 있으면 sidecar 가 늘 덜어 낸다).
+//! 주소를 싣는 헤더(W9d① 적대 리뷰 4 회차 C1): `Location`·`Refresh`·`Content-Location`·`Link`(와 `Referer`) 값 안 주소의 사용자 정보도 주소
+//! 칸과 같은 규칙이다 — 켬이면 읽는 쪽의 쿠키 권한이 **그 주소의 호스트**를 덮을 때만 보이고(maru), 끔이면 sidecar 가 늘 지운다
+//! (`maskHeaderUserinfo` — 서버가 고른 글이라 GURL 보다 너그럽게 찾는다: 더 지우는 쪽).
 //! 호스트(W9d① 적대 리뷰 3 회차 T1): 덮이는지는 sidecar 가 **자르기 전의 온 주소**에서 읽어 따로 싣는 호스트 칸으로만 가른다
 //! (`hostOfUrl16` — 2 KiB 에서 자른 주소는 긴 사용자 정보 안에서 끊겨 `https://yyy…a.test` 가 덮이는 사이트로 읽혔다).
 //!
@@ -218,13 +221,117 @@ pub fn stripHeaders(src: message.NetHeaderBlock, covered: bool, out: *net_fields
     if (!covered) return;
     var it = net_fields.HeaderIterator.init(src);
     var ob: [message.max_net_url_bytes]u8 = undefined;
+    var mb: [message.max_net_headers_bytes]u8 = undefined;
     while (it.next()) |h| {
         _ = switch (headerRule(h.name)) {
-            .value, .covered_only => out.add(h.name, h.value),
+            // 끔: 주소를 싣는 헤더(`Location`)의 사용자 정보는 쿠키 권한과 무관하게 지운다(4 회차 C1 — 주소 칸과 같다).
+            .value, .covered_only => out.add(h.name, maskHeaderUserinfo(h.name, h.value, "", &mb)),
             .origin_only => out.add(h.name, originOf(h.value, &ob)),
             .name_only => out.add(h.name, ""),
         };
     }
+}
+
+// ── 주소를 싣는 헤더의 사용자 정보(W9d① 적대 리뷰 4 회차 C1) ─────────────────────────────────────────────────────
+
+/// 값에 주소(들)를 싣는 헤더인가(대소문자 무시 — 목록은 `net_fields.urlValueHeader`: 덩어리를 만들 때 그 값을 자르지 않는 쪽과 같은 곳). 사용자가
+/// 이름을 댄 것은 `Location`·`Refresh`·`Content-Location`·`Link` 이고, 요청의 `Referer` 도 넣었다(작성자 — Chromium 은 사용자 정보를 싣지 않지만 같은
+/// 갈래라 같은 규칙으로). 그 밖의 헤더 값은 서버가 무엇이든 실을 수 있지만 주소 자리가 정해져 있지 않다 — 설정 켬의 「헤더 값은 다 보임」(사용자
+/// 결정) 그대로다(문서에 남은 틈으로 적었다).
+pub fn urlHeader(name: []const u8) bool {
+    return net_fields.urlValueHeader(name);
+}
+
+/// Chromium(GURL·WHATWG URL)이 `\` 를 `/` 로 읽고 `//` 없이도 권한으로 읽는 「특별한」 스킴.
+fn specialScheme(scheme: []const u8) bool {
+    for ([_][]const u8{ "http", "https", "ws", "wss", "ftp", "file" }) |sp| if (std.ascii.eqlIgnoreCase(scheme, sp)) return true;
+    return false;
+}
+
+fn schemeChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '+' or ch == '-' or ch == '.';
+}
+
+/// `value[at..]` 에서 시작하는 권한의 시작 자리와 `\` 가 권한을 끝내는지 — 아니면 null. 두 갈래:
+///   - `스킴:` 뒤 — 특별한 스킴이면 `/`·`\` 가 몇 개든(없어도 — `http:u:p@x`), 아니면 `//` 둘 이상일 때만.
+///   - 스킴 없는 `//`(·`\\`) — 값의 처음이거나 구분 글자(공백·`<`·`"`·`'`·`=`·`,`·`;`·`(`) 뒤일 때(문서의 바탕 주소는 http(s) — 특별하다).
+/// `/`·`\` 사이의 공백·탭도 건너뛴다 — URL 파서는 탭·줄바꿈을 지우는데 헤더 값에는 탭이 그대로 오고 줄바꿈은 sidecar 가 공백으로 바꿔 싣는다
+/// (`http:/<탭>/u:p@x`).
+fn authorityStart(value: []const u8, at: usize) ?struct { start: usize, special: bool } {
+    const ch = value[at];
+    if (std.ascii.isAlphabetic(ch) and (at == 0 or !schemeChar(value[at - 1]))) {
+        var j = at;
+        while (j < value.len and schemeChar(value[j]) and j - at <= 32) j += 1;
+        if (j >= value.len or value[j] != ':') return null;
+        const special = specialScheme(value[at..j]);
+        var k = j + 1;
+        var slashes: usize = 0;
+        while (k < value.len and (value[k] == '/' or value[k] == '\\' or value[k] == ' ' or value[k] == '\t')) : (k += 1) {
+            if (value[k] != ' ') slashes += 1;
+        }
+        if (special or slashes >= 2) return .{ .start = k, .special = special };
+        return null;
+    }
+    if ((ch == '/' or ch == '\\') and at + 1 < value.len and (value[at + 1] == '/' or value[at + 1] == '\\')) {
+        if (at != 0 and std.mem.indexOfScalar(u8, " \t<\"'=,;(", value[at - 1]) == null) return null;
+        var k = at;
+        while (k < value.len and (value[k] == '/' or value[k] == '\\' or value[k] == ' ' or value[k] == '\t')) k += 1;
+        return .{ .start = k, .special = true };
+    }
+    return null;
+}
+
+/// 사용자 정보 뒤 호스트(포트 없이 — IPv6 는 `[...]` 째).
+fn hostAfterUserinfo(host_port: []const u8) []const u8 {
+    if (host_port.len > 0 and host_port[0] == '[') {
+        const e = std.mem.indexOfScalar(u8, host_port, ']') orelse return host_port;
+        return host_port[0 .. e + 1];
+    }
+    return host_port[0 .. std.mem.indexOfScalar(u8, host_port, ':') orelse host_port.len];
+}
+
+/// 주소를 싣는 헤더(`urlHeader`) 값 안 주소들의 사용자 정보(`user:pass@`)를 지운다 — 그 주소의 호스트를 `cookie_host`(읽는 쪽의
+/// `browser_storage` grant 호스트, 비면 아무것도)가 덮으면 둔다(D1 의 주소 규칙과 같다). 다른 헤더·사용자 정보 없는 값은 `value` 그대로,
+/// 지웠으면 `out` 에 쓴 것. 서버가 고른 글이라 GURL 보다 너그럽게 찾는다(더 지우는 쪽): 권한은 `/`·`?`·`#`(특별한 스킴이면 `\` 도,
+/// `Link` 의 `<…>` 안이면 `>` 도)까지이고 그 안의 마지막 `@` 까지가 사용자 정보다 — 공백·`,` 에서 멈추지 않는다(사용자 정보 안의 공백은
+/// GURL 이 퍼센트로 바꿔 받아들인다). `out` 이 모자라면(오지 않는다 — 덩어리 상한과 같다) 빈 값.
+pub fn maskHeaderUserinfo(name: []const u8, value: []const u8, cookie_host: []const u8, out: []u8) []const u8 {
+    if (!urlHeader(name) or std.mem.indexOfScalar(u8, value, '@') == null) return value;
+    const link = std.ascii.eqlIgnoreCase(name, "link");
+    var w: usize = 0; // `out` 에 쓴 길이
+    var copied: usize = 0; // `value` 에서 옮긴 데까지
+    var changed = false;
+    var i: usize = 0;
+    while (i < value.len) {
+        const a = authorityStart(value, i) orelse {
+            i += 1;
+            continue;
+        };
+        var end = a.start;
+        while (end < value.len) : (end += 1) {
+            const ch = value[end];
+            if (ch == '/' or ch == '?' or ch == '#') break;
+            if (ch == '\\' and a.special) break;
+            if (ch == '>' and link) break;
+        }
+        if (std.mem.lastIndexOfScalar(u8, value[a.start..end], '@')) |at_rel| {
+            const at = a.start + at_rel;
+            if (!hostCovers(cookie_host, hostAfterUserinfo(value[at + 1 .. end]))) {
+                const keep = value[copied..a.start];
+                if (w + keep.len > out.len) return out[0..0];
+                @memcpy(out[w..][0..keep.len], keep);
+                w += keep.len;
+                copied = at + 1;
+                changed = true;
+            }
+        }
+        i = @max(end, i + 1);
+    }
+    if (!changed) return value;
+    const rest = value[copied..];
+    if (w + rest.len > out.len) return out[0..0];
+    @memcpy(out[w..][0..rest.len], rest);
+    return out[0 .. w + rest.len];
 }
 
 // ── 자원 종류 ────────────────────────────────────────────────────────────────────────────────────────────
@@ -404,6 +511,68 @@ test "W9d①: 다른 사이트 iframe — 하위 프레임이고 그 프레임(�
     try testing.expect(!crossSiteIframe(.{ .main_frame = true }, 13, "x", "http://localhost:3000", "127.0.0.1"));
     try testing.expect(crossSiteIframe(sub, 13, "x", "null", "a.test")); // 불투명 출처
     try testing.expect(!crossSiteIframe(.{}, 13, "x", "http://x.test", "a.test")); // worker — 프레임 없음
+}
+
+test "W9d① 적대 리뷰 4 회차 C1: 주소를 싣는 헤더의 사용자 정보 지우기 — 그 주소의 호스트를 쿠키 권한이 덮으면 둔다, GURL 이 권한으로 읽는 꼴(대소문자·역슬래시·스킴 상대·슬래시 없는 특별한 스킴·탭 자리 공백)도, 경로·질의의 @ 는 그대로" {
+    var b: [512]u8 = undefined;
+    const Case = struct { name: []const u8, in: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .name = "Location", .in = "https://u:p@b.test/next", .want = "https://b.test/next" },
+        .{ .name = "location", .in = "HTTPS://u:p@B.Test:8443/x?y=1", .want = "HTTPS://B.Test:8443/x?y=1" },
+        .{ .name = "Location", .in = "//u:p@b.test/x", .want = "//b.test/x" },
+        .{ .name = "Location", .in = "https:\\\\u:p@b.test\\x", .want = "https:\\\\b.test\\x" },
+        .{ .name = "Location", .in = "http:u:p@b.test/x", .want = "http:b.test/x" },
+        .{ .name = "Location", .in = "http:/ /u:p@b.test/", .want = "http:/ /b.test/" }, // sidecar 가 줄바꿈을 공백으로 바꿨다
+        .{ .name = "Location", .in = "http:/\t/u:p@b.test/", .want = "http:/\t/b.test/" }, // 탭은 그대로 온다(URL 파서는 지운다)
+        .{ .name = "Location", .in = "https://u@v@b.test/", .want = "https://b.test/" }, // 마지막 @ 까지
+        .{ .name = "Location", .in = "https://us er:p w@b.test/", .want = "https://b.test/" }, // 사용자 정보 안의 공백
+        .{ .name = "Location", .in = "https://[::1]@b.test/", .want = "https://b.test/" },
+        .{ .name = "Location", .in = "ftp+x://u:p@b.test/", .want = "ftp+x://b.test/" }, // 특별하지 않은 스킴도 // 면
+        .{ .name = "Refresh", .in = "0; url=https://u:p@b.test/r", .want = "0; url=https://b.test/r" },
+        .{ .name = "Refresh", .in = "5;URL='//u:p@b.test/r'", .want = "5;URL='//b.test/r'" },
+        .{ .name = "Content-Location", .in = "https://u:p@b.test/c", .want = "https://b.test/c" },
+        .{ .name = "Link", .in = "<https://u:p@b.test>; rel=preload, <https://a@c.test/2>; rel=next", .want = "<https://b.test>; rel=preload, <https://c.test/2>; rel=next" },
+        .{ .name = "Referer", .in = "https://u:p@b.test/", .want = "https://b.test/" },
+        // 그대로 두는 것: 경로·질의의 @, 권한 없는 스킴, 사용자 정보 없는 값, 주소를 싣지 않는 헤더.
+        .{ .name = "Location", .in = "https://b.test/@user?to=a@b.test#x@y", .want = "https://b.test/@user?to=a@b.test#x@y" },
+        .{ .name = "Location", .in = "/path/@me", .want = "/path/@me" },
+        .{ .name = "Location", .in = "mailto:a@b.test", .want = "mailto:a@b.test" },
+        .{ .name = "Link", .in = "</@scope/pkg.js>; rel=preload", .want = "</@scope/pkg.js>; rel=preload" },
+        .{ .name = "X-Note", .in = "https://u:p@b.test/", .want = "https://u:p@b.test/" },
+    }) |c| try testing.expectEqualStrings(c.want, maskHeaderUserinfo(c.name, c.in, "", &b));
+    // 쿠키 권한이 그 주소의 호스트를 덮으면 둔다 — 덮지 않는 주소의 것만 지운다(한 값 안에서도 주소마다).
+    try testing.expectEqualStrings("https://u:p@b.test/", maskHeaderUserinfo("Location", "https://u:p@b.test/", "b.test", &b));
+    try testing.expectEqualStrings("https://u:p@www.b.test/", maskHeaderUserinfo("Location", "https://u:p@www.b.test/", "b.test", &b));
+    try testing.expectEqualStrings("https://b.test./", maskHeaderUserinfo("Location", "https://u:p@b.test./", "b.test", &b)); // 끝의 점 — 덮지 않는 쪽으로
+    try testing.expectEqualStrings("https://a.test/", maskHeaderUserinfo("Location", "https://u:p@a.test/", "b.test", &b));
+    try testing.expectEqualStrings("<https://u@b.test/1>, <https://c.test/2>", maskHeaderUserinfo("Link", "<https://u@b.test/1>, <https://v@c.test/2>", "b.test", &b));
+    // 끔(stripHeaders): Location 은 사용자 정보만 지운 값, 그 밖의 주소 헤더는 허용 목록 밖이라 이름만.
+    var src: net_fields.HeaderBuilder = .{};
+    _ = src.add("Location", "https://u:p@b.test/next");
+    _ = src.add("Link", "<https://u:p@b.test/l>");
+    var off: net_fields.HeaderBuilder = .{};
+    stripHeaders(src.block(), true, &off);
+    var it = net_fields.HeaderIterator.init(off.block());
+    try testing.expectEqualStrings("https://b.test/next", it.next().?.value);
+    try testing.expectEqualStrings("", it.next().?.value);
+}
+
+test "W9d① 적대 리뷰 4 회차 재현 C1(잘림): 덩어리 상한(8 KiB)에서 잘리는 주소 헤더는 앞부분을 싣지 않는다 — 사용자 정보 안에서 끊기면 `@` 가 없어 가리기가 알아보지 못한다" {
+    var b: net_fields.HeaderBuilder = .{};
+    _ = b.add("X-Fill", "f" ** 7800);
+    _ = b.add("Location", "http://" ++ "u" ** 1000 ++ ":SECRETPW@b.test/");
+    _ = b.add("X-Other", "o" ** 1000);
+    try testing.expect(b.truncated);
+    try net_fields.checkHeaders(b.block());
+    var it = net_fields.HeaderIterator.init(b.block());
+    _ = it.next().?;
+    const loc = it.next().?;
+    try testing.expectEqualStrings("Location", loc.name);
+    var mb: [message.max_net_headers_bytes]u8 = undefined;
+    const shown = maskHeaderUserinfo("Location", loc.value, "", &mb);
+    try testing.expect(std.mem.indexOf(u8, shown, "uuuu") == null); // 사용자 정보 조각이 남지 않는다
+    // 주소를 싣지 않는 헤더는 그대로 앞부분만(「…」).
+    if (it.next()) |o| try testing.expect(std.mem.startsWith(u8, o.value, "ooo"));
 }
 
 test "W9d①: 자원 종류 이름 — CEF 의 0..20 을 덮고, 필터 이름 검사" {

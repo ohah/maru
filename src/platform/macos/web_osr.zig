@@ -79,6 +79,10 @@ const Surface = struct {
     /// 마지막으로 이동시킨 주소 — sidecar 가 다시 뜨면 이 주소로 되살린다. 이동을 CEF 가 끝내면 `url` 이 된다.
     last_url: ?[]u8 = null,
     url: ?[]u8 = null,
+    /// `url` 이 옛 것이다(W9d① 적대 리뷰 4 회차 C3) — 주 프레임에 새 문서가 섰는데(`page_started`) 그 주소가 아직 오지 않았다. CEF 는 새 문서마다
+    /// `page_started` 뒤 `url_changed` 를 보내지만(판정 `R9d4-nav-order(obs)`) 32 KiB 를 넘는 주소는 `url_changed` 가 없다(sidecar 가 자른 주소를
+    /// 보내지 않는다 — `R9d4-long-url-no-url-changed(obs)`). 네트워크 판정은 옛 주소의 호스트를 쓰지 않는다(`netKnownUrl` — 덮지 않는 쪽으로).
+    url_stale: bool = false,
     can_go_back: bool = false,
     can_go_forward: bool = false,
     /// Chromium 이 이 탭을 불러오는 중인가(`nav_state.loading` — 이동이 막 시작된 것도 참이다, W9b①b 의 wait --load).
@@ -3069,9 +3073,10 @@ pub const NetReader = struct {
 /// 보이는 출처(F4·2 회차 N6 — 다른 pane 에게만 허락된 탭도 이 읽는 쪽에게는 허락되지 않은 탭이다)를 `shared` 에 담아 싣는다(`origin_buf` 에 쓴다).
 fn netView(s: ?*const Surface, read_tab: u64, reader: NetReader, lists: *NetViewLists, origin_buf: []u8, gpa: std.mem.Allocator) std.mem.Allocator.Error!net_ring.View {
     var host = reader.grant_host;
-    if (!reader.host_bound and host.len == 0) if (s) |sp| if (sp.url) |u| {
+    if (!reader.host_bound and host.len == 0) if (s) |sp| if (netKnownUrl(sp)) |u| {
         host = maru.session.control_pane_grant.hostOfUrl(u) orelse "";
     };
+    var shared_unknown = false;
     if (!net_full) {
         try lists.tabs.append(gpa, read_tab);
         if (reader.pane) |pane| for (net_grants[0..net_grant_count]) |g| if (g.pane == pane and std.mem.indexOfScalar(u64, lists.tabs.items, g.tab) == null) {
@@ -3080,8 +3085,10 @@ fn netView(s: ?*const Surface, read_tab: u64, reader: NetReader, lists: *NetView
         var at: usize = 0;
         var it = surfaces.iterator();
         while (it.next()) |e| {
-            const u = e.value_ptr.url orelse continue;
             if (std.mem.indexOfScalar(u64, lists.tabs.items, e.key_ptr.*) != null) continue;
+            // 4 회차 C3: 주소가 옛 것인 탭은 지금 어느 출처인지 모른다 — 어느 출처든 보일 수 있다고 친다(서비스 워커 요청은 수만).
+            if (e.value_ptr.url_stale) shared_unknown = true;
+            const u = netKnownUrl(e.value_ptr) orelse continue;
             if (at + ws.message.max_net_origin_bytes > origin_buf.len) break; // 넘치면 그 뒤 탭은 요청 때의 표지(`sw_tabs`)만 본다
             const o = ws.net_policy.originOf(u, origin_buf[at..][0..ws.message.max_net_origin_bytes]);
             if (o.len == 0) continue;
@@ -3089,7 +3096,14 @@ fn netView(s: ?*const Surface, read_tab: u64, reader: NetReader, lists: *NetView
             at += o.len;
         }
     }
-    return .{ .full = net_full, .grant_host = host, .top_bound = reader.host_bound, .shared_sw_origins = lists.shared.items, .reader_tabs = lists.tabs.items, .cookie_host = reader.cookie_host };
+    return .{ .full = net_full, .grant_host = host, .top_bound = reader.host_bound, .shared_sw_origins = lists.shared.items, .shared_sw_unknown = shared_unknown, .reader_tabs = lists.tabs.items, .cookie_host = reader.cookie_host };
+}
+
+/// W9d① 적대 리뷰 4 회차 C3: 네트워크 판정에 쓸 탭의 지금 주소 — 새 문서의 주소가 아직 오지 않았으면(`url_stale` — 32 KiB 를 넘는 주소는 끝내
+/// 오지 않는다) null. 옛 주소의 호스트로 다른 사이트 iframe 안 요청(첫 사이트가 비어 온다)을 그 사이트의 것으로 치면 묶인 읽는 쪽에게 보였다.
+fn netKnownUrl(s: *const Surface) ?[]const u8 {
+    if (s.url_stale) return null;
+    return s.url;
 }
 
 /// `netView` 가 채우는 목록 둘(읽는 동안만).
@@ -3132,7 +3146,7 @@ pub fn networkDetail(out: std.mem.Allocator, surface_id: u64, reader: NetReader,
 /// W9d① 적대 리뷰 1 회차 F2·F4: 요청이 들어올 때 app 이 아는 그 탭의 것 — 맨 위 문서 호스트(지금 주소), 서비스 워커 요청이면 같은 출처를
 /// 보이는 다른 탭들(그 탭이 보낸 요청일 수 있다 — 읽을 때 읽는 쪽에게 허락된 탭인지 본다, 2 회차 N6). `tabs_buf` 에 쓴다.
 fn netBeginContext(s: *const Surface, v: ws.message.NetBegin, tabs_buf: *[net_ring.max_sw_tabs + 1]u64) net_ring.BeginContext {
-    const top = if (s.url) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else "";
+    const top = if (netKnownUrl(s)) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else ""; // 옛 주소면 모른다(4 회차 C3)
     return .{ .top_host = top, .sw_tabs = if (v.flags.service_worker) tabsShowing(v.initiator, v.browser, tabs_buf) else &.{} };
 }
 
@@ -3144,8 +3158,11 @@ fn tabsShowing(origin: []const u8, except: u64, out: []u64) []const u64 {
     var it = surfaces.iterator();
     while (it.next()) |e| {
         if (e.key_ptr.* == except or n == out.len) continue;
-        const u = e.value_ptr.url orelse continue;
-        if (!std.ascii.eqlIgnoreCase(ws.net_policy.originOf(u, &ob), origin)) continue;
+        // 주소가 옛 것인 탭(4 회차 C3)은 지금 그 출처일 수 있다 — 든 것으로 친다(더 숨기는 쪽).
+        if (!e.value_ptr.url_stale) {
+            const u = e.value_ptr.url orelse continue;
+            if (!std.ascii.eqlIgnoreCase(ws.net_policy.originOf(u, &ob), origin)) continue;
+        }
         out[n] = e.key_ptr.*;
         n += 1;
     }
@@ -3161,7 +3178,7 @@ fn networkUserDrove(id: u64, s: *Surface) void {
         if (g.tab == id and g.any_host) break true;
     } else false;
     if (!any_host) return;
-    if (s.net_drove_host == null) s.net_drove_host = .init(if (s.url) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else "");
+    if (s.net_drove_host == null) s.net_drove_host = .init(if (netKnownUrl(s)) |u| maru.session.control_pane_grant.hostOfUrl(u) orelse "" else ""); // 옛 주소면 빈 사이트로(4 회차 C3)
     if (net_full) return;
     narrowNetwork(id, s, s.net_drove_host.?);
 }
@@ -5017,6 +5034,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
             const owned = gpa.dupe(u8, v.url) catch return;
             if (s.url) |old| gpa.free(old);
             s.url = owned;
+            s.url_stale = false;
             s.nav_dirty = true;
             // 다른 사이트로 옮기면 Chromium 이 렌더러를 바꾸고 새 렌더러는 포커스를 모른다 — 키는 닿아도 페이지 `focus`
             // 가 안 오고 입력기 조합이 버려졌다(W4c 실측). 포커스를 줘야 하는 탭이면 다시 준다.
@@ -5034,6 +5052,7 @@ fn apply(gpa: std.mem.Allocator, message: Message, now_ms: i64) void {
         } else if (!parked.contains(id)) send(gpa, .{ .destroy_browser = id }),
         .page_started => |id| if (surfaces.getPtr(id)) |s| {
             s.last_nav_ms = monotonicNow();
+            s.url_stale = true; // 4 회차 C3: 이 문서의 주소가 오기 전까지(32 KiB 를 넘으면 오지 않는다)
             s.console.newDocument(); // W9c①: 묶이지 않은 쪽은 이 문서의 줄부터 본다
             s.nav_uncommitted = false;
             // W9a: 만들어진 직후의 about:blank 문서는 에이전트 이동의 문서가 아니다.
@@ -8392,4 +8411,86 @@ test "W9d① 적대 리뷰 3 회차 D1: 읽는 쪽의 쿠키 권한(NetReader.co
     const d = try networkDetail(gpa, 92, .{ .who = 7, .cookie_host = "bank.test" }, 1);
     defer gpa.free(d);
     try std.testing.expect(std.mem.indexOf(u8, d, "bank=SECRET1") != null);
+}
+
+// ── W9d① 적대 리뷰 4 회차 재현(리뷰 후보 C3 — 붙여 실패를 본 뒤 고친다) ──
+
+test "W9d① 적대 리뷰 4 회차 재현 C3: 32 KiB 를 넘는 주소로 옮긴 탭(url_changed 가 오지 않는다)의 다른 사이트 iframe 안 요청은 옛 주소의 호스트로 치지 않는다 — 묶인 읽는 쪽에게 숨는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{95});
+    apply(gpa, .{ .page_started = 95 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 95, .url = "https://a.test/" } }, 0);
+    networkSync(&.{.{ .tab = 95, .who = 7, .host = "a.test" }});
+    const reader: NetReader = .{ .who = 7, .grant_host = "a.test", .host_bound = true };
+    // a.test 문서의 요청 하나와 그 문서 안 다른 사이트 iframe 의 요청 — 보인다(대조: 주소가 온 뒤에는 app 의 호스트를 쓴다).
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 1, .url = "https://a.test/api", .host = "a.test", .site = "a.test", .flags = .{ .main_frame = true }, .resource_type = 13, .time_ms = 1 } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 9, .url = "https://tracker.test/a", .host = "tracker.test", .site = "", .initiator = "https://tracker.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 1 } }, 0);
+    // 페이지가 스스로 32 KiB 넘는 주소(evil.test)로 옮긴다 — 새 문서가 시작됐지만(page_started) sidecar 는 주소를 알리지 않는다.
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 2, .url = "https://evil.test/" ++ "q" ** 64, .host = "evil.test", .site = "evil.test", .flags = .{ .main_frame = true, .navigation = true, .url_truncated = true }, .resource_type = 0, .time_ms = 2 } }, 0);
+    apply(gpa, .{ .page_started = 95 }, 0);
+    // 그 문서 안 다른 사이트 iframe 의 요청 — 쿠키의 첫 사이트가 비어 온다(실측). app 의 주소는 아직 a.test 다.
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 3, .url = "https://tracker.test/p", .host = "tracker.test", .site = "", .initiator = "https://tracker.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 3, .headers = .{ .count = 1, .bytes = "\x07X-Track\x00\x05TRACK" } } }, 0);
+    const json = try networkList(gpa, 95, reader, .{ .page_size = 200 });
+    defer gpa.free(json);
+    const p = try std.json.parseFromSlice(std.json.Value, gpa, json, .{});
+    defer p.deinit();
+    const arr = p.value.object.get("requests").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), arr.len); // a.test 문서 때의 요청(#2·#1)만
+    try std.testing.expectEqual(@as(i64, 2), arr[0].object.get("req").?.integer);
+    try std.testing.expectEqual(@as(i64, 1), arr[1].object.get("req").?.integer);
+    try std.testing.expectError(error.UnknownRequest, networkDetail(gpa, 95, reader, 4));
+    // 그 뒤 보통 주소가 오면(url_changed) 다시 그 호스트를 쓴다.
+    apply(gpa, .{ .page_started = 95 }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 95, .url = "https://a.test/again" } }, 0);
+    apply(gpa, .{ .net_begin = .{ .browser = 95, .request = 4, .url = "https://tracker.test/b", .host = "tracker.test", .site = "", .initiator = "https://tracker.test", .flags = .{ .subframe = true }, .resource_type = 13, .time_ms = 4 } }, 0);
+    try expectNetReqsAs(95, 7, null, &.{ 5, 4, 3, 2, 1 }); // 어느 호스트든 읽는 쪽(묶이지 않음)은 다 본다
+    const again = try networkDetail(gpa, 95, reader, 5);
+    gpa.free(again);
+}
+
+test "W9d① 적대 리뷰 4 회차 C3: 설정이 꺼졌을 때 주소가 옛 것인 다른 탭(32 KiB 넘는 주소)은 지금 어느 출처든 보일 수 있다고 친다 — 그 서비스 워커 요청은 수만(요청 때·읽을 때)" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{ 96, 97 });
+    apply(gpa, .{ .url_changed = .{ .browser = 96, .url = "https://mail.test/inbox" } }, 0);
+    apply(gpa, .{ .url_changed = .{ .browser = 97, .url = "https://other.test/" } }, 0);
+    networkSync(&.{.{ .tab = 96, .who = 7, .host = "mail.test" }});
+    setNetworkFull(false);
+    defer setNetworkFull(true);
+    const sw = struct {
+        fn begin(request: u64) Message {
+            return .{ .net_begin = .{ .browser = 96, .request = request, .flags = .{ .service_worker = true }, .url = "https://mail.test/api", .host = "mail.test", .initiator = "https://mail.test", .site = "mail.test", .time_ms = 1 } };
+        }
+    };
+    apply(gpa, sw.begin(1), 0); // 97 은 다른 출처를 보인다 — 보인다
+    try expectNetReqs(96, 7, &.{1});
+    // 사용자의 grant 없는 탭 97 이 32 KiB 넘는 주소로 옮긴다(그 출처를 maru 는 모른다 — mail.test 일 수 있다).
+    apply(gpa, .{ .page_started = 97 }, 0);
+    apply(gpa, sw.begin(2), 0);
+    try expectNetReqs(96, 7, &.{}); // 지금 97 의 출처를 모른다 — 서비스 워커 요청은 모두 수만
+    apply(gpa, .{ .url_changed = .{ .browser = 97, .url = "https://other.test/" } }, 0);
+    try expectNetReqs(96, 7, &.{1}); // 2 가 날 때 97 은 출처를 몰랐다 — 그 요청은 여전히 수만
+}
+
+test "W9d① 적대 리뷰 4 회차 C3: 설정이 꺼졌을 때 사용자가 주소가 옛 것인 에이전트 탭을 몰면 빈 사이트로 좁힌다 — 옛 주소의 사이트로 좁히지 않는다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer testTeardown(gpa);
+    gpa_ref = gpa;
+    try testSurfaces(gpa, &.{98});
+    apply(gpa, .{ .url_changed = .{ .browser = 98, .url = "https://agent.test/a" } }, 0);
+    networkSync(&.{.{ .tab = 98, .who = 7, .birth = true, .any_host = true }});
+    setNetworkFull(false);
+    defer setNetworkFull(true);
+    apply(gpa, .{ .page_started = 98 }, 0); // 페이지가 32 KiB 넘는 주소로 옮겼다
+    noteUserNavigation(98);
+    var buf: [8]NetworkNarrow = undefined;
+    const got = takeNetworkNarrows(&buf);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("", got[0].host.slice());
 }

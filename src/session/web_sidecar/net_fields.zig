@@ -112,6 +112,13 @@ pub fn checkHeaders(block: message.NetHeaderBlock) Error!void {
     if (payload > max_headers_bytes) return error.InvalidNetwork;
 }
 
+/// 값에 주소(들)를 싣는 헤더인가(대소문자 무시 — W9d① 적대 리뷰 4 회차 C1, 단일 출처: `net_policy.urlHeader` 가 이것을 쓴다). 사용자가 이름을 댄
+/// 것은 `Location`·`Refresh`·`Content-Location`·`Link` 이고, 요청의 `Referer` 도 넣었다(작성자 — 같은 갈래).
+pub fn urlValueHeader(name: []const u8) bool {
+    for ([_][]const u8{ "location", "content-location", "refresh", "link", "referer" }) |n| if (std.ascii.eqlIgnoreCase(name, n)) return true;
+    return false;
+}
+
 /// 덩어리를 만든다(sidecar 가 CEF 헤더에서, 시험이 손으로). 이름이 토큰 글자가 아니면 그 헤더를 빼고, 값의 제어 문자는 공백으로
 /// 바꾼다. 개수·바이트 상한을 넘는 헤더는 싣지 않고 `truncated` 를 세운다(값이 길면 그 헤더는 앞부분만 — 끝에 「…」).
 pub const HeaderBuilder = struct {
@@ -143,9 +150,11 @@ pub const HeaderBuilder = struct {
         var shown = value;
         var cut = false;
         if (name.len + value.len > room) {
-            // 남은 자리에 「…」 을 붙일 만큼만 — 글자 경계에서.
+            // 남은 자리에 「…」 을 붙일 만큼만 — 글자 경계에서. 주소를 싣는 헤더는 앞부분을 싣지 않는다(W9d① 적대 리뷰 4 회차 — 사용자 정보 안에서
+            // 끊긴 앞부분 `http://user:pa…` 에는 `@` 가 없어 가리기(`net_policy.maskHeaderUserinfo`)가 사용자 정보로 알아보지 못했다. 실제 CEF:
+            // 켬·끔 모두 348 바이트 조각이 나갔다 — 판정 `R9d4-cut-location-*`. 잘릴 주소를 사용자 정보째 싣지 않는 3 회차 T1 과 같은 까닭).
             const keep = room - name.len -| 3;
-            shown = @import("text.zig").clampUtf8(value, keep);
+            shown = if (urlValueHeader(name)) "" else @import("text.zig").clampUtf8(value, keep);
             cut = true;
         }
         if (!std.unicode.utf8ValidateSlice(shown)) shown = "";

@@ -134,10 +134,11 @@ pub fn browserClosed(id: BrowserId) void {
     doUnlock();
 }
 
-/// 주 프레임 주소가 바뀌었다(UI 스레드 `on_address_change`) — 서비스 워커 요청을 붙일 출처.
-pub fn mainFrameAddress(id: BrowserId, url: []const u8) void {
+/// 주 프레임 주소가 바뀌었다(UI 스레드 `on_address_change`) — 서비스 워커 요청을 붙일 출처. CEF 의 온 주소(UTF-16)에서 읽는다 — 32 KiB 를
+/// 넘어 maru 에 알리지 않는 주소도(W9d① 적대 리뷰 4 회차 C3), 긴 사용자 정보 너머의 출처도(3 회차 T1). 모르면 빈 출처(붙이지 않는다).
+pub fn mainFrameAddress(id: BrowserId, url: [*c]const c.cef_string_t) void {
     var ob: [gate.max_origin_bytes]u8 = undefined;
-    const origin = net_policy.originOf(url, &ob);
+    const origin = net_policy.originOfUrl16(units(url), &ob);
     doLock();
     state.setTopOrigin(id, origin);
     doUnlock();

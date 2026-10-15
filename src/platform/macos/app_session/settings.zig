@@ -702,7 +702,7 @@ pub fn toggleSelectedSetting(self: *AppSession) void {
         const f = cf.bools[sel];
         const new_value = !f.value;
         if (config_mod.schema.setBool(&self.loaded_config.config, f.key, new_value)) {
-            if (std.mem.eql(u8, f.key, "browser.download-ask")) web_ops.applyDownloadAsk(self, true); // W10b — 이 창에서 바꿨다
+            if (std.mem.eql(u8, f.key, "browser.download-ask") or std.mem.eql(u8, f.key, "browser.agent-network-full")) web_ops.applyDownloadAsk(self, true); // W10b·W9d① — 이 창에서 바꿨다
             // daemon-owned notification snapshot 갱신이 실패했는데 GUI 값만 저장하면 이후 GUI 0에서도 host가 이전
             // 정책으로 동작한다. 따라서 live runtime 전부가 새 generation을 확인하기 전에는 config commit을 열지 않고,
             // 실패 시 이전 값으로 보상 갱신한 뒤 UI/config도 되돌린다.

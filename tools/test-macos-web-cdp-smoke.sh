@@ -84,6 +84,11 @@
 #                   again」 없음 — 적대 리뷰 3 회차), 그 alert 는 에이전트 것(cause=agent)이라 handle-dialog 로 답하면 페이지가 내용을 한 번 받는다 ·
 #                   change 처리기가 응답이 40 초 걸리는 주소로 옮기는 칸도 요청 시한 전에 성공에 navigated:true(3 회차 T1) ·
 #                   탭을 닫으면 그 탭의 사본 폴더가 사라진다
+#   w9d-network     (W9d①) Chromium 탭의 네트워크 기록: 에이전트가 연 탭은 묻지 않고 태어날 때부터 적는다 — 쿠키를 심고 옮겨 간 첫 페이지,
+#                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히에 `Cookie`·`Authorization` 값(설정 켬이 기본) ·
+#                   서비스 워커가 다스리는 페이지의 fetch 는 `[service worker of <출처>]` · 둘째 pane(첫 pane 이 연 탭은 그에게 사용자의 탭과 같다 —
+#                   확인 모달, 자동 승인)에게 grant 전에 간 페이지는 보이지 않고(숨김 수로만) 그 뒤 페이지는 보인다 · 모든 grant 를 철회하면(앱 대본
+#                   `revokegrants`) 다시 허락받은 읽기에 앞 요청이 없다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -363,6 +368,11 @@ class H(http.server.SimpleHTTPRequestHandler):
             body = b"<!doctype html><title>csp</title><p id=p>csp</p>"
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
             self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Content-Security-Policy", "script-src 'self'"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
+        if self.path.startswith("/setck"):
+            # W9d①: 쿠키를 심고 곧 다음 페이지로 — 그 뒤 요청에 `Cookie` 가 실린다.
+            body = b"<!doctype html><title>setck</title><script>location.replace('/net.html')</script>"
+            sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.send_header("Set-Cookie", "smk=cookie-secret; Path=/"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path.startswith("/nocontent"):
             # W9a①: 문서가 없는 응답 — navigate 는 곧 loaded:false 로 끝나야 한다.
             sys.stderr.write("GET %s\n" % self.path); sys.stderr.flush()
@@ -387,6 +397,17 @@ for k in 1 2 3; do
     iframe_pids="$iframe_pids $!"
 done
 url="http://127.0.0.1:$port/a.html"
+# W9d①: 네트워크 기록 — 다른 사이트(localhost) iframe 과 인증 헤더 fetch, 서비스 워커 페이지(범위 /nsw/ — 다른 단계의 페이지를 다스리지 않게).
+printf '<!doctype html><title>net</title><iframe src="http://localhost:%s/netf.html"></iframe><script>fetch("/netapi.json?a",{headers:{"Authorization":"Bearer smoke-token"}})</script>net' "$port" > "$root/www/net.html"
+printf '<!doctype html><title>netf</title><script>fetch("/netf-api.json")</script>netf' > "$root/www/netf.html"
+printf '{"ok":1}' > "$root/www/netapi.json"
+printf '{"frame":1}' > "$root/www/netf-api.json"
+printf '<!doctype html><title>before</title>before' > "$root/www/net-before.html"
+printf '<!doctype html><title>after</title>after' > "$root/www/net-after.html"
+mkdir -p "$root/www/nsw"
+printf '<!doctype html><title>nsw</title><script>navigator.serviceWorker.register("/nsw/sw.js",{scope:"/nsw/"}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}fetch("/nsw/data.json?"+Date.now())})</script>nsw' > "$root/www/nsw/page.html"
+printf 'self.addEventListener("install",function(e){self.skipWaiting()});self.addEventListener("activate",function(e){e.waitUntil(self.clients.claim())});self.addEventListener("fetch",function(e){e.respondWith(fetch(e.request))});' > "$root/www/nsw/sw.js"
+printf '{"sw":1}' > "$root/www/nsw/data.json"
 
 # pane 셸 자리에 들어갈 대본 — login(1)이 HOME 을 실제 홈으로 되돌리므로 시험 홈을 직접 세운다(없으면 아무것도 하지 않는다).
 cat > "$root/pane.sh" <<PANE
@@ -420,6 +441,19 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     sleep 1.5
     "\$cli" browser console --surface "\$k2" > "\$out/cn-k2-c" 2>&1; echo "rc=\$?" >> "\$out/cn-k2-c"
     touch "\$out/p2-done"
+    # W9d①: 둘째 읽는 쪽 — 첫 pane 이 연 탭(이 pane 에게는 사용자의 탭과 같다 — 확인 모달, 자동 승인)의 네트워크 기록. 허락 전 요청은 보이지 않고
+    # 숨김 수로만, 허락 뒤 요청은 보인다, 모든 grant 를 철회한 뒤 다시 허락받은 읽기에는 지운 요청이 없다.
+    n=0; while [ ! -f "\$out/p2-net-go" ] && [ \$n -lt 2400 ]; do sleep 0.25; n=\$((n + 1)); done
+    [ -f "\$out/p2-net-go" ] || exec sleep 600
+    ux=\$(cat "\$out/p2-net-go")
+    "\$cli" browser network --surface "\$ux" > "\$out/nw-u-first" 2>&1; echo "rc=\$?" >> "\$out/nw-u-first"
+    touch "\$out/p2-net-read1"
+    n=0; while [ ! -f "\$out/p2-net-after" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+    "\$cli" browser network --surface "\$ux" > "\$out/nw-u-second" 2>&1; echo "rc=\$?" >> "\$out/nw-u-second"
+    touch "\$out/p2-net-read2"
+    n=0; while [ ! -f "\$out/p2-net-revoked" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+    "\$cli" browser network --surface "\$ux" > "\$out/nw-u-revoked" 2>&1; echo "rc=\$?" >> "\$out/nw-u-revoked"
+    touch "\$out/p2-net-done"
     exec sleep 600
 fi
 # 주소가 \$1 로 끝날 때까지(최대 10 초) — 목록 줄의 주소 칸으로 본다.
@@ -1067,6 +1101,39 @@ echo approve > "$root/updecision"
 "\$cli" browser close --surface "\$up" > "\$out/up-close" 2>&1
 sleep 0.5
 find "\$HOME/Library/Application Support/maru/web" -path "*upload-staging/\$up" > "\$out/up-after-close" 2>&1
+# ── W9d①: 네트워크 기록 ──
+# 에이전트가 연 탭 — 묻지 않고 태어날 때부터 적는다(쿠키를 심는 첫 페이지 /setck 도). 다른 사이트 iframe 안의 요청은 표시가 붙는다.
+"\$cli" browser open --url "http://127.0.0.1:$port/setck" > "\$out/nw-open" 2>&1
+nw=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/nw-open")
+n=0; while [ \$n -lt 40 ]; do
+    "\$cli" browser network --surface "\$nw" --page-size 200 > "\$out/nw-agent" 2>&1; echo "rc=\$?" >> "\$out/nw-agent"
+    grep -q 'netf-api.json' "\$out/nw-agent" && grep -q 'netapi.json' "\$out/nw-agent" && break
+    sleep 0.25; n=\$((n + 1))
+done
+api=\$(sed -n 's/^#\([0-9]*\) GET [0-9-]* xhr .*netapi\.json.*/\1/p' "\$out/nw-agent" | head -1)
+"\$cli" browser network-request --surface "\$nw" --req "\$api" > "\$out/nw-api" 2>&1; echo "rc=\$?" >> "\$out/nw-api"
+# 서비스 워커가 다스리는 페이지의 fetch — 브라우저가 없는 요청으로 와서 그 출처를 연 이 탭에 붙는다.
+"\$cli" browser navigate --surface "\$nw" "http://127.0.0.1:$port/nsw/page.html" > "\$out/nw-sw-nav" 2>&1
+n=0; while [ \$n -lt 60 ]; do
+    "\$cli" browser network --surface "\$nw" --url-contains /nsw/data.json > "\$out/nw-sw" 2>&1
+    grep -q 'service worker of' "\$out/nw-sw" && break
+    sleep 0.25; n=\$((n + 1))
+done
+"\$cli" browser close --surface "\$nw" > "\$out/nw-close" 2>&1
+# 둘째 pane 에게는 사용자의 탭과 같은 탭(이 pane 이 연 탭 — 둘째 pane 은 확인 모달로 허락받는다): 둘째 pane 이 허락받기 전에 간 페이지는 그에게
+# 보이지 않고(숨김 수로만), 그 뒤에 간 페이지는 보인다. 그다음 모든 grant 를 철회한다(앱 대본 `revokegrants`) — 지켜보기를 끄고 적은 것을 지운다.
+"\$cli" browser open --url "http://127.0.0.1:$port/net-before.html" > "\$out/nw-u-open" 2>&1
+ux=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/nw-u-open")
+echo "\$ux" > "\$out/p2-net-go.tmp" && mv "\$out/p2-net-go.tmp" "\$out/p2-net-go"
+n=0; while [ ! -f "\$out/p2-net-read1" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+"\$cli" browser navigate --surface "\$ux" "http://127.0.0.1:$port/net-after.html" > "\$out/nw-u-nav2" 2>&1
+sleep 0.5
+touch "\$out/p2-net-after"
+n=0; while [ ! -f "\$out/p2-net-read2" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+touch "\$out/net-revoke-now"
+sleep 1.5
+touch "\$out/p2-net-revoked"
+n=0; while [ ! -f "\$out/p2-net-done" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
 touch "\$out/done"
 exec sleep 600
 PANE
@@ -1080,7 +1147,7 @@ up_bid=$(grep -a -A1 '<key>CFBundleIdentifier</key>' "$app" | sed -n 's/.*<strin
 up_stale="$root/home/Library/Application Support/maru/web/${up_bid:-dev.maru.apphost}/profile/upload-staging/424242"
 (umask 077 && mkdir -p "$up_stale/1/0" && printf 'stale\n' > "$up_stale/1/0/old.txt")
 # 숨은 탭 경우(W9b②-3) — pane 대본이 hide-now 를 만들면 새 탭으로 Chromium 탭을 숨기고, show-now 면 돌아온다.
-printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" > "$root/hide.txt"
+printf 'waitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\naction new_tab\nwaitfile %s\naction previous_tab\nwaitfile %s\nrevokegrants\n' "$out/hide-now" "$out/show-now" "$out/hide2-now" "$out/show2-now" "$out/net-revoke-now" > "$root/hide.txt"
 printf 'ui.language = ko\nshell.command = %s\nshell.args =\nsession.keep-alive-after-quit = false\n' "$root/pane.sh" > "$root/maru.conf"
 env HOME="$root/home" CFFIXED_USER_HOME="$root/home" XDG_CACHE_HOME="$root/home/.cache" MARU_SESSION_HOST_ROOT="$root/session-host" \
     MARU_CONFIG="$root/maru.conf" MARU_WEB_PANEL=1 MARU_WEB_OSR_DIR="$sidecar_dir" MARU_WEB_OSR_TEST_URL="$url" \
@@ -1367,6 +1434,18 @@ grep -q '^uploaded 1 file to http://127.0.0.1:' "$out/up-busy2" && grep -q '^rc=
 echo "PASS w9c-upload-busy: a verify held by 15 s of page work ends at the 10 s limit as navigated:true ($(cat "$out/up-busy-secs")s), and a verify that answers ok while the page then stays busy is answered at once as kept, not held by the release ($(cat "$out/up-busy2-secs")s)"
 [ ! -s "$out/up-after-close" ] || fail "closing the tab did not remove its upload-staging folder ($(tr '\n' ' ' < "$out/up-after-close"))"
 echo "PASS w9c-upload: one file reaches the page as a trusted change with its content, the staged copy is 0400 under the profile's upload-staging/<tab>, two relative paths reach a multiple input, an input the page clears or replaces in its change handler is a success with kept:false, a disabled input, two files into a single-file input and a folder (webkitdirectory) input are refused before the dialog, a copy left by an earlier run is wiped when the profile is first held, a declined dialog is -32002, a page that moved during the dialog gets nothing (page changed), an input whose change handler shows an alert is a success with dialog:true (no try again) and the agent answers that alert (cause agent) so the page reads the file once, an input whose change handler navigates right away is a success with navigated:true (no try again, one navigation), and so is one whose handler navigates to a server that answers after 40 s (answered in $(cat "$out/up-slow-secs")s, before the request deadline), closing the tab removes its copies"
+grep -q '^rc=0$' "$out/nw-agent" && grep -q ' xhr http://127.0.0.1:[0-9]*/netapi.json?a' "$out/nw-agent" && grep -q 'http://127.0.0.1:[0-9]*/setck' "$out/nw-agent" \
+    && grep -q 'netf-api.json.*\[cross-site iframe\]' "$out/nw-agent" \
+    || fail "the agent's tab did not record its requests from birth with the cross-site iframe mark ($(tr '\n' ' ' < "$out/nw-agent"))"
+grep -q '^  Cookie: smk=cookie-secret$' "$out/nw-api" && grep -q '^  Authorization: Bearer smoke-token$' "$out/nw-api" && grep -q '^body: not recorded$' "$out/nw-api" \
+    || fail "the request detail did not show the Cookie and Authorization values (switch on by default) ($(tr '\n' ' ' < "$out/nw-api"))"
+grep -q 'nsw/data.json.*\[service worker of http://127.0.0.1:[0-9]*\]' "$out/nw-sw" || fail "a fetch of a service-worker page was not labelled as the service worker's ($(tr '\n' ' ' < "$out/nw-sw"))"
+grep -qx 'ok' "$out/nw-u-nav2" || fail "the tab for the second reader did not move ($(tr '\n' ' ' < "$out/nw-u-nav2"))"
+grep -q '^rc=0$' "$out/nw-u-first" && ! grep -q 'net-before' "$out/nw-u-first" && grep -q '^([0-9]* earlier requests\{0,1\} hidden' "$out/nw-u-first" \
+    || fail "the second reader's first read showed a request from before its permission, or no hidden count ($(tr '\n' ' ' < "$out/nw-u-first"))"
+grep -q 'net-after.html' "$out/nw-u-second" && ! grep -q 'net-before' "$out/nw-u-second" || fail "the second reader did not see the request after its permission ($(tr '\n' ' ' < "$out/nw-u-second"))"
+grep -q '^rc=0$' "$out/nw-u-revoked" && ! grep -q 'net-after' "$out/nw-u-revoked" || fail "after revoking the grants the record was not wiped ($(tr '\n' ' ' < "$out/nw-u-revoked"))"
+echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden), and revoking all grants wiped the record"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

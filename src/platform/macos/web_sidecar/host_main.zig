@@ -24,6 +24,7 @@ const profile = @import("profile.zig");
 const browsers = @import("browsers.zig");
 const preferences = @import("preferences.zig");
 const watchdog = @import("watchdog.zig");
+const network = @import("network.zig");
 
 /// 종료 코드. maru 는 이 값으로 알림을 못 받은 실패(채널이 없거나 닫힌 뒤)를 가른다.
 pub const ExitCode = enum(u8) {
@@ -113,6 +114,8 @@ fn run(init: std.process.Init) ExitCode {
     };
     const unset = preferences.apply(&g_api, staging);
     if (unset != 0) std.debug.print("maru-web-host: {d} product preference(s) not applied\n", .{unset});
+    // W9d①: 서비스 워커 요청을 보는 context 하나 — 첫 서비스 워커가 뜨기 전에(브라우저 전) 만들어 끝까지 쥔다. 브라우저는 전역 context 그대로.
+    network.createSharedContext();
 
     g_inbox = .{ .io = init.io };
     g_task = object.zeroed(c.cef_task_t);
@@ -129,6 +132,7 @@ fn run(init: std.process.Init) ExitCode {
 
     g_api.run_message_loop();
     g_accepting.store(false, .release);
+    network.releaseSharedContext();
     g_api.shutdown();
     return .ok;
 }

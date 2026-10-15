@@ -41,6 +41,13 @@ pub const Api = struct {
     drag_data_create: *const @TypeOf(c.cef_drag_data_create),
     // 이미지 끌기의 파일 내용(W6d③) — drag data 가 쓰는 곳.
     stream_writer_create_for_handler: *const @TypeOf(c.cef_stream_writer_create_for_handler),
+    // 네트워크 기록(W9d①) — 헤더 다발과 서비스 워커 요청을 보는 공유 request context.
+    string_multimap_alloc: *const @TypeOf(c.cef_string_multimap_alloc),
+    string_multimap_size: *const @TypeOf(c.cef_string_multimap_size),
+    string_multimap_key: *const @TypeOf(c.cef_string_multimap_key),
+    string_multimap_value: *const @TypeOf(c.cef_string_multimap_value),
+    string_multimap_free: *const @TypeOf(c.cef_string_multimap_free),
+    request_context_create_shared: *const @TypeOf(c.cef_request_context_cef_create_context_shared),
 };
 
 pub const LoadError = error{ FrameworkOpenFailed, SymbolMissing };
@@ -77,6 +84,12 @@ pub fn load(framework_binary: [*:0]const u8) LoadError!Api {
         .process_message_create = try find(handle, "cef_process_message_create", @TypeOf(c.cef_process_message_create)),
         .drag_data_create = try find(handle, "cef_drag_data_create", @TypeOf(c.cef_drag_data_create)),
         .stream_writer_create_for_handler = try find(handle, "cef_stream_writer_create_for_handler", @TypeOf(c.cef_stream_writer_create_for_handler)),
+        .string_multimap_alloc = try find(handle, "cef_string_multimap_alloc", @TypeOf(c.cef_string_multimap_alloc)),
+        .string_multimap_size = try find(handle, "cef_string_multimap_size", @TypeOf(c.cef_string_multimap_size)),
+        .string_multimap_key = try find(handle, "cef_string_multimap_key", @TypeOf(c.cef_string_multimap_key)),
+        .string_multimap_value = try find(handle, "cef_string_multimap_value", @TypeOf(c.cef_string_multimap_value)),
+        .string_multimap_free = try find(handle, "cef_string_multimap_free", @TypeOf(c.cef_string_multimap_free)),
+        .request_context_create_shared = try find(handle, "cef_request_context_cef_create_context_shared", @TypeOf(c.cef_request_context_cef_create_context_shared)),
     };
 }
 

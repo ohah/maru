@@ -1,0 +1,649 @@
+//! 지켜보는 탭의 네트워크 요청(W9d① — CEF 자원 요청 처리기, docs/plans/web-osr-backend.md 「W9d① 결정」).
+//!
+//! 스레드: CEF 는 `get_resource_request_handler` 와 그 처리기의 콜백을 브라우저 프로세스의 **IO 스레드**에서 부른다(W9d-0 실측 — UI 스레드가
+//! 아니다). 여기서는 IO 스레드에서 쓰기(maru 로 가는 관)·로그를 하지 않는다 — 동기 쓰기 하나가 요청 처리량을 27 % 깎고 다른 탭의 불러오기를
+//! 60 % 늦췄다(M6). 대신:
+//!   ① `get_resource_request_handler`: 지켜보는 탭이 없으면 곧 null(가장 흔한 길). 있으면 **글로 바꾸기 전에** 문(`net_gate` — 탭·전체 양동이,
+//!      동시 요청 512)을 지나야 처리기를 돌려준다. 넘치면 수만 센다.
+//!   ② 처리기 콜백: 주소(2 KiB)·메서드·헤더(64 개·8 KiB)의 앞부분만 바꿔 기록 하나(`Event`)를 만들고 뮤텍스 아래 넘김 상자(개수·바이트 상한)에
+//!      넣는다. UI 스레드의 task 하나가 모아서 보낸다(`flush` — 이미 올렸으면 다시 올리지 않는다).
+//! 요청은 CEF 요청 번호로 묶는다(리다이렉트·인증 재시도에도 같다 — M7·M5). 다운로드(번호 0)는 W10 의 몫이라 적지 않는다.
+//! 출처는 브라우저 번호 + initiator 로 가른다(프레임 주소는 IO 스레드에서 비거나 낡았다 — M4).
+//!
+//! 서비스 워커: 서비스 워커가 다스리는 페이지의 요청은 탭의 처리기를 지나지 않고(브라우저가 없다), 전역 request context 와 저장소를 나눈
+//! context 의 처리기에만 온다(M4·Q2). `host_main` 이 처음에 그 context 하나를 만들고(`createSharedContext`) 끝까지 쥔다 — 브라우저는 전역
+//! context 에 그대로 둔다(권한·환경설정·다운로드가 그대로임을 Q2 가 쟀다). 그 처리기는 브라우저가 없는 요청만 보고, initiator 출처를 연 지켜보는
+//! 탭이 없으면 곧 null 이다. 붙일 탭이 있으면 그 탭들 모두에 「service worker of <출처>」 로 붙는다.
+//!
+//! 설정 `browser.agent-network-full` 이 꺼진 탭(`net_watch.full` 거짓)은 UI 스레드가 보내기 전에 덜어 낸다(`net_policy` — 주소의 사용자 정보,
+//! 덮이지 않는 호스트의 헤더, 허용 목록 밖 헤더 값). 보이지 않는 것(`docs/plans/web-osr-backend.md`): CORS preflight·WebSocket·`data:`·
+//! `blob:`·서비스 워커 스크립트·서비스 워커가 만든 응답.
+
+const std = @import("std");
+const protocol = @import("web_sidecar_protocol");
+const c = @import("cef.zig").c;
+const object = @import("object.zig");
+const library = @import("library.zig");
+const browsers = @import("browsers.zig");
+const gate = @import("net_gate.zig");
+
+const msg = protocol.message;
+const net_fields = protocol.net_fields;
+const net_policy = protocol.net_policy;
+const BrowserId = msg.BrowserId;
+
+var lock: std.c.pthread_mutex_t = std.c.PTHREAD_MUTEX_INITIALIZER;
+/// 뮤텍스 아래에서만 만진다.
+var state: gate.State = .{};
+var queue: std.ArrayList(*Event) = .empty;
+
+var rrh: c.cef_resource_request_handler_t = undefined;
+var ctx_handler: c.cef_request_context_handler_t = undefined;
+var shared_ctx: [*c]c.cef_request_context_t = null;
+var flush_task: c.cef_task_t = undefined;
+var flush_posted = std.atomic.Value(bool).init(false);
+var ready = false;
+
+/// 모은 기록을 보내기까지(UI 스레드 task 하나 — 쏟아질 때 여러 기록을 한 번에).
+const flush_delay_ms: i64 = 10;
+
+fn api() *const library.Api {
+    return browsers.state.api;
+}
+
+fn doLock() void {
+    _ = std.c.pthread_mutex_lock(&lock);
+}
+
+fn doUnlock() void {
+    _ = std.c.pthread_mutex_unlock(&lock);
+}
+
+fn nowUs() i64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i64, ts.sec) * 1_000_000 + @divTrunc(@as(i64, ts.nsec), 1000);
+}
+
+/// 유닉스 ms(요청의 시각 — 에이전트가 읽는다).
+fn wallMs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.REALTIME, &ts);
+    return @as(u64, @intCast(@max(0, ts.sec))) * 1000 + @as(u64, @intCast(@divTrunc(@max(0, ts.nsec), 1_000_000)));
+}
+
+/// 처리기 구조체를 채운다(UI 스레드 — `client.get` 이 처음 부를 때).
+pub fn init() void {
+    if (ready) return;
+    ready = true;
+    rrh = object.zeroed(c.cef_resource_request_handler_t);
+    object.staticRefCounted(&rrh.base);
+    rrh.on_before_resource_load = &onBeforeResourceLoad;
+    rrh.on_resource_redirect = &onResourceRedirect;
+    rrh.on_resource_response = &onResourceResponse;
+    rrh.on_resource_load_complete = &onResourceLoadComplete;
+    ctx_handler = object.zeroed(c.cef_request_context_handler_t);
+    object.staticRefCounted(&ctx_handler.base);
+    ctx_handler.get_resource_request_handler = &contextResourceRequestHandler;
+    flush_task = object.zeroed(c.cef_task_t);
+    object.staticRefCounted(&flush_task.base);
+    flush_task.execute = &flush;
+}
+
+/// 서비스 워커 요청을 보는 context 하나를 만든다(UI 스레드 — `cef_initialize`·환경설정 뒤, 첫 브라우저 전). 전역 context 와 저장소를 나눈다.
+/// 만들지 못하면 서비스 워커 요청만 보이지 않는다(나머지는 그대로).
+pub fn createSharedContext() void {
+    init();
+    const global = api().request_context_get_global_context();
+    if (global == null) return;
+    // 넘긴 인자의 참조는 CEF 로 옮겨 간다(`object.release_callback_args`) — 전역 context 는 그대로 넘긴다(받은 참조를 넘긴다).
+    shared_ctx = api().request_context_create_shared(global, &ctx_handler);
+}
+
+/// CEF 를 내리기 전에 놓는다.
+pub fn releaseSharedContext() void {
+    // request context 의 참조 세기는 환경설정 관리자(`base`) 아래의 `base` 에 있다.
+    if (shared_ctx != null) _ = shared_ctx.*.base.base.release.?(&shared_ctx.*.base.base);
+    shared_ctx = null;
+}
+
+// ── UI 스레드: maru 의 명령·주소 바뀜·닫힘 ─────────────────────────────────────────────────────────────
+
+/// `net_watch`(maru) — 그 탭을 지켜보기 시작하거나 그만둔다.
+pub fn watch(v: msg.NetWatch) void {
+    init();
+    const entry = browsers.state.registry.byId(v.browser) orelse return;
+    var hosts: [msg.max_net_watch_hosts][]const u8 = undefined;
+    for (v.hosts[0..v.host_count], 0..) |h, i| hosts[i] = h;
+    var origin_buf: [gate.max_origin_bytes]u8 = undefined;
+    const origin = if (v.on) currentOrigin(entry.handle, &origin_buf) else "";
+    doLock();
+    _ = state.setWatch(v.browser, entry.cef_id, v.on, v.full, hosts[0..v.host_count]);
+    if (v.on) state.setTopOrigin(v.browser, origin);
+    doUnlock();
+}
+
+/// 브라우저가 닫혔다.
+pub fn browserClosed(id: BrowserId) void {
+    doLock();
+    state.forget(id);
+    doUnlock();
+}
+
+/// 주 프레임 주소가 바뀌었다(UI 스레드 `on_address_change`) — 서비스 워커 요청을 붙일 출처.
+pub fn mainFrameAddress(id: BrowserId, url: []const u8) void {
+    var ob: [gate.max_origin_bytes]u8 = undefined;
+    const origin = net_policy.originOf(url, &ob);
+    doLock();
+    state.setTopOrigin(id, origin);
+    doUnlock();
+}
+
+fn currentOrigin(handle: *anyopaque, buf: []u8) []const u8 {
+    const browser: [*c]c.cef_browser_t = @ptrCast(@alignCast(handle));
+    const frame = browser.*.get_main_frame.?(browser);
+    if (frame == null) return "";
+    defer object.release(frame);
+    const url = frame.*.get_url.?(frame);
+    if (url == null) return "";
+    defer api().string_userfree_utf16_free(url);
+    var ub: [msg.max_net_url_bytes]u8 = undefined;
+    const text = library.readPrefix(api(), url, msg.max_net_url_bytes, &ub).text;
+    return net_policy.originOf(text, buf);
+}
+
+// ── IO 스레드: 처리기를 고른다 ─────────────────────────────────────────────────────────────────────────
+
+/// 탭의 처리기 고르기(`cef_request_handler_t.get_resource_request_handler`).
+pub fn resourceRequestHandler(_: [*c]c.cef_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int, is_download: c_int, initiator: [*c]const c.cef_string_t, _: [*c]c_int) callconv(.c) [*c]c.cef_resource_request_handler_t {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(request);
+    if (browser == null or request == null or is_download != 0) return null;
+    doLock();
+    if (state.watching == 0) {
+        doUnlock();
+        return null;
+    }
+    const w = state.watchByCef(browser.*.get_identifier.?(browser)) orelse {
+        doUnlock();
+        return null;
+    };
+    const id = request.*.get_identifier.?(request);
+    if (id == 0) {
+        doUnlock();
+        return null;
+    }
+    if (state.find(id) != null) { // 리다이렉트의 다음 홉 — 문을 다시 지나지 않는다
+        doUnlock();
+        return &rrh;
+    }
+    const admitted = state.admit(w, nowUs()) and blk: {
+        const t = state.track(id) orelse {
+            w.dropped +|= 1;
+            break :blk false;
+        };
+        t.targets[0] = w.browser;
+        t.target_count = 1;
+        t.navigation = is_navigation != 0;
+        break :blk true;
+    };
+    doUnlock();
+    if (!admitted) {
+        postFlush();
+        return null;
+    }
+    // 문을 지난 뒤에만 initiator 를 바꾼다(앞부분만).
+    var ib: [gate.max_origin_bytes]u8 = undefined;
+    const init_text = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib).text;
+    doLock();
+    if (state.find(id)) |t| {
+        @memcpy(t.initiator[0..init_text.len], init_text);
+        t.initiator_len = init_text.len;
+    }
+    doUnlock();
+    return &rrh;
+}
+
+/// 공유 context 의 처리기 고르기 — 브라우저가 없는 요청(서비스·공유 워커가 대신 보냈다)만.
+fn contextResourceRequestHandler(_: [*c]c.cef_request_context_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, is_navigation: c_int, is_download: c_int, initiator: [*c]const c.cef_string_t, _: [*c]c_int) callconv(.c) [*c]c.cef_resource_request_handler_t {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(request);
+    if (browser != null or request == null or is_download != 0) return null; // 브라우저가 있는 요청은 탭의 처리기가 본다
+    doLock();
+    const any = state.watching != 0;
+    doUnlock();
+    if (!any) return null;
+    var ib: [gate.max_origin_bytes]u8 = undefined;
+    const init_text = library.readPrefix(api(), initiator, gate.max_origin_bytes, &ib).text;
+    const id = request.*.get_identifier.?(request);
+    if (id == 0 or init_text.len == 0) return null;
+    doLock();
+    if (state.find(id) != null) {
+        doUnlock();
+        return &rrh;
+    }
+    var targets: [gate.max_targets]BrowserId = undefined;
+    const n = state.serviceWorkerTargets(init_text, &targets);
+    const admitted = n != 0 and blk: {
+        const w = state.watchOf(targets[0]) orelse break :blk false;
+        if (!state.admit(w, nowUs())) break :blk false;
+        const t = state.track(id) orelse {
+            w.dropped +|= 1;
+            break :blk false;
+        };
+        @memcpy(t.targets[0..n], targets[0..n]);
+        t.target_count = @intCast(n);
+        t.service_worker = true;
+        t.navigation = is_navigation != 0;
+        @memcpy(t.initiator[0..init_text.len], init_text);
+        t.initiator_len = init_text.len;
+        break :blk true;
+    };
+    doUnlock();
+    if (n != 0 and !admitted) postFlush();
+    return if (admitted) &rrh else null;
+}
+
+// ── IO 스레드: 처리기 콜백 → 기록 ─────────────────────────────────────────────────────────────────────
+
+const Kind = enum { begin, redirect, response, end };
+
+/// IO → UI 로 넘기는 기록 하나(c_allocator — 글은 `data` 안에 이어 붙였다).
+const Event = struct {
+    kind: Kind,
+    request: u64,
+    targets: [gate.max_targets]BrowserId = @splat(0),
+    target_count: u8 = 0,
+    flags: msg.NetFlags = .{},
+    hop: msg.NetHopFlags = .{},
+    resource_type: u8 = 0,
+    status: u16 = 0,
+    outcome: msg.NetOutcome = .success,
+    error_code: i32 = 0,
+    received: u64 = 0,
+    time_ms: u64 = 0,
+    header_count: u8 = 0,
+    /// 덮이는지 가를 호스트(begin — 요청 주소, redirect — 옮기기 전 주소, response — 마지막 주소)·첫 사이트 호스트.
+    host: []const u8 = "",
+    url: []const u8 = "",
+    method: []const u8 = "",
+    initiator: []const u8 = "",
+    site: []const u8 = "",
+    mime: []const u8 = "",
+    headers: []const u8 = "",
+    data: []u8 = &.{},
+
+    fn bytes(self: *const Event) usize {
+        return @sizeOf(Event) + self.data.len;
+    }
+};
+
+/// 기록의 글을 하나로 모은다(앞부분이 이미 잘린 것들).
+const Parts = struct {
+    host: []const u8 = "",
+    url: []const u8 = "",
+    method: []const u8 = "",
+    initiator: []const u8 = "",
+    site: []const u8 = "",
+    mime: []const u8 = "",
+    headers: []const u8 = "",
+};
+
+fn makeEvent(template: Event, parts: Parts) ?*Event {
+    const total = parts.host.len + parts.url.len + parts.method.len + parts.initiator.len + parts.site.len + parts.mime.len + parts.headers.len;
+    const a = std.heap.c_allocator;
+    const e = a.create(Event) catch return null;
+    const data = a.alloc(u8, total) catch {
+        a.destroy(e);
+        return null;
+    };
+    e.* = template;
+    e.data = data;
+    var at: usize = 0;
+    e.host = place(data, &at, parts.host);
+    e.url = place(data, &at, parts.url);
+    e.method = place(data, &at, parts.method);
+    e.initiator = place(data, &at, parts.initiator);
+    e.site = place(data, &at, parts.site);
+    e.mime = place(data, &at, parts.mime);
+    e.headers = place(data, &at, parts.headers);
+    return e;
+}
+
+/// `src` 를 `data[at..]` 에 옮기고 그 자리를 돌려준다.
+fn place(data: []u8, at: *usize, src: []const u8) []const u8 {
+    @memcpy(data[at.*..][0..src.len], src);
+    const out = data[at.*..][0..src.len];
+    at.* += src.len;
+    return out;
+}
+
+fn freeEvent(e: *Event) void {
+    std.heap.c_allocator.free(e.data);
+    std.heap.c_allocator.destroy(e);
+}
+
+/// 넘김 상자에 넣는다 — 넘치면 버리고 그 탭들의 넘긴 수를 센다.
+fn enqueue(e: *Event) void {
+    doLock();
+    const ok = state.reserveQueue(e.bytes()) and blk: {
+        queue.append(std.heap.c_allocator, e) catch {
+            state.releaseQueue(e.bytes());
+            break :blk false;
+        };
+        break :blk true;
+    };
+    if (!ok and e.kind == .begin) {
+        for (e.targets[0..e.target_count]) |b| if (state.watchOf(b)) |w| {
+            w.dropped +|= 1;
+        };
+    }
+    doUnlock();
+    if (!ok) freeEvent(e);
+    postFlush();
+}
+
+fn postFlush() void {
+    if (flush_posted.swap(true, .acq_rel)) return;
+    if (api().post_delayed_task(c.TID_UI, &flush_task, flush_delay_ms) == 0) flush_posted.store(false, .release);
+}
+
+/// 요청 번호로 그 요청을 찾아 붙일 탭들을 복사한다(시작했는지도). 없으면 null.
+fn lookup(request: [*c]c.cef_request_t, out: *Event) ?bool {
+    if (request == null) return null;
+    const id = request.*.get_identifier.?(request);
+    doLock();
+    defer doUnlock();
+    const t = state.find(id) orelse return null;
+    out.request = id;
+    out.targets = t.targets;
+    out.target_count = t.target_count;
+    return t.begun;
+}
+
+fn userfreeText(s: c.cef_string_userfree_t, max: usize, out: []u8) struct { text: []const u8, truncated: bool } {
+    if (s == null) return .{ .text = "", .truncated = false };
+    defer api().string_userfree_utf16_free(s);
+    const p = library.readPrefix(api(), s, max, out);
+    protocol.text.replaceControl(p.text);
+    return .{ .text = p.text, .truncated = p.truncated };
+}
+
+/// 헤더 다발을 덩어리로(이름 64 개·8 KiB — 넘는 것은 싣지 않고 `truncated`). `hsts` 에 HSTS 내부 이동 표시를 적는다.
+fn readHeaders(map: c.cef_string_multimap_t, b: *net_fields.HeaderBuilder, hsts: ?*bool) void {
+    const a = api();
+    const n = a.string_multimap_size(map);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        if (b.count >= msg.max_net_header_count or b.payload >= msg.max_net_headers_bytes) {
+            b.truncated = true;
+            break;
+        }
+        var k = std.mem.zeroes(c.cef_string_t);
+        var v = std.mem.zeroes(c.cef_string_t);
+        _ = a.string_multimap_key(map, i, &k);
+        _ = a.string_multimap_value(map, i, &v);
+        defer a.string_utf16_clear(&k);
+        defer a.string_utf16_clear(&v);
+        var kb: [msg.max_net_header_name_bytes]u8 = undefined;
+        var vb: [msg.max_net_headers_bytes]u8 = undefined;
+        const name = library.readPrefix(a, &k, msg.max_net_header_name_bytes, &kb);
+        const room = msg.max_net_headers_bytes -| b.payload;
+        const value = library.readPrefix(a, &v, @min(room, vb.len), &vb);
+        if (name.truncated) {
+            b.truncated = true;
+            continue;
+        }
+        if (hsts) |h| if (std.ascii.eqlIgnoreCase(name.text, "non-authoritative-reason") and std.ascii.eqlIgnoreCase(value.text, "hsts")) {
+            h.* = true;
+        };
+        _ = b.add(name.text, value.text);
+        if (value.truncated) b.truncated = true;
+    }
+}
+
+fn hostOf(url: []const u8) []const u8 {
+    return net_policy.hostOfUrl(url) orelse "";
+}
+
+fn onBeforeResourceLoad(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, callback: [*c]c.cef_callback_t) callconv(.c) c.cef_return_value_t {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(request);
+    defer object.releaseArg(callback);
+    var e: Event = .{ .kind = .begin, .request = 0 };
+    const id = if (request != null) request.*.get_identifier.?(request) else return c.RV_CONTINUE;
+    var initiator_buf: [gate.max_origin_bytes]u8 = undefined;
+    var initiator_len: usize = 0;
+    {
+        doLock();
+        defer doUnlock();
+        const t = state.find(id) orelse return c.RV_CONTINUE;
+        if (t.begun) return c.RV_CONTINUE; // 인증 재시도·다음 홉 — 시작은 한 번만 보낸다
+        t.begun = true;
+        e.request = id;
+        e.targets = t.targets;
+        e.target_count = t.target_count;
+        e.flags.service_worker = t.service_worker;
+        e.flags.navigation = t.navigation;
+        initiator_len = t.initiator_len;
+        @memcpy(initiator_buf[0..initiator_len], t.initiator[0..initiator_len]);
+    }
+    if (frame != null and !e.flags.service_worker) {
+        if (frame.*.is_main.?(frame) != 0) e.flags.main_frame = true else e.flags.subframe = true;
+    }
+    e.resource_type = @intCast(@min(@as(c_uint, @intCast(request.*.get_resource_type.?(request))), msg.max_net_resource_type));
+    if (e.resource_type == 18) e.resource_type = 6;
+    e.time_ms = wallMs();
+    var ub: [msg.max_net_url_bytes]u8 = undefined;
+    const url = userfreeText(request.*.get_url.?(request), msg.max_net_url_bytes, &ub);
+    if (url.text.len == 0) return c.RV_CONTINUE;
+    e.flags.url_truncated = url.truncated;
+    var mb: [msg.max_net_method_bytes]u8 = undefined;
+    var method = userfreeText(request.*.get_method.?(request), msg.max_net_method_bytes, &mb).text;
+    net_fields.checkMethod(method) catch {
+        method = "GET";
+    };
+    var fb: [msg.max_net_url_bytes]u8 = undefined;
+    const first_party = userfreeText(request.*.get_first_party_for_cookies.?(request), msg.max_net_url_bytes, &fb).text;
+    const site = hostOf(first_party);
+    var hb: net_fields.HeaderBuilder = .{};
+    const map = api().string_multimap_alloc();
+    if (map != null) {
+        defer api().string_multimap_free(map);
+        request.*.get_header_map.?(request, map);
+        readHeaders(map, &hb, null);
+    }
+    e.flags.headers_truncated = hb.truncated;
+    e.header_count = hb.count;
+    const initiator = initiator_buf[0..initiator_len];
+    protocol.text.replaceControl(initiator_buf[0..initiator_len]);
+    const ev = makeEvent(e, .{ .host = hostOf(url.text), .url = url.text, .method = method, .initiator = initiator, .site = site[0..@min(site.len, msg.max_net_origin_bytes)], .headers = hb.block().bytes }) orelse return c.RV_CONTINUE;
+    enqueue(ev);
+    return c.RV_CONTINUE;
+}
+
+fn onResourceRedirect(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, response: [*c]c.cef_response_t, new_url: [*c]c.cef_string_t) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(request);
+    defer object.releaseArg(response);
+    var e: Event = .{ .kind = .redirect, .request = 0 };
+    if (!(lookup(request, &e) orelse return)) return;
+    if (response == null) return;
+    e.status = @intCast(std.math.clamp(response.*.get_status.?(response), 100, 599));
+    e.time_ms = wallMs();
+    var nb: [msg.max_net_url_bytes]u8 = undefined;
+    const next = library.readPrefix(api(), new_url, msg.max_net_url_bytes, &nb);
+    protocol.text.replaceControl(next.text);
+    if (next.text.len == 0) return;
+    e.hop.url_truncated = next.truncated;
+    var ub: [msg.max_net_url_bytes]u8 = undefined;
+    const from = userfreeText(request.*.get_url.?(request), msg.max_net_url_bytes, &ub).text;
+    var hb: net_fields.HeaderBuilder = .{};
+    var hsts = false;
+    const map = api().string_multimap_alloc();
+    if (map != null) {
+        defer api().string_multimap_free(map);
+        response.*.get_header_map.?(response, map);
+        readHeaders(map, &hb, &hsts);
+    }
+    e.hop.hsts = hsts;
+    e.hop.headers_truncated = hb.truncated;
+    e.header_count = hb.count;
+    const ev = makeEvent(e, .{ .host = hostOf(from), .url = next.text, .headers = hb.block().bytes }) orelse return;
+    enqueue(ev);
+}
+
+fn onResourceResponse(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, response: [*c]c.cef_response_t) callconv(.c) c_int {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(request);
+    defer object.releaseArg(response);
+    var e: Event = .{ .kind = .response, .request = 0 };
+    if (!(lookup(request, &e) orelse return 0)) return 0;
+    if (response == null) return 0;
+    e.status = @intCast(std.math.clamp(response.*.get_status.?(response), 0, 999));
+    e.time_ms = wallMs();
+    var mb: [msg.max_net_mime_bytes]u8 = undefined;
+    const mime = userfreeText(response.*.get_mime_type.?(response), msg.max_net_mime_bytes, &mb).text;
+    var ub: [msg.max_net_url_bytes]u8 = undefined;
+    const url = userfreeText(request.*.get_url.?(request), msg.max_net_url_bytes, &ub).text;
+    var hb: net_fields.HeaderBuilder = .{};
+    var hsts = false;
+    const map = api().string_multimap_alloc();
+    if (map != null) {
+        defer api().string_multimap_free(map);
+        response.*.get_header_map.?(response, map);
+        readHeaders(map, &hb, &hsts);
+    }
+    e.hop.hsts = hsts;
+    e.hop.headers_truncated = hb.truncated;
+    e.header_count = hb.count;
+    const ev = makeEvent(e, .{ .host = hostOf(url), .mime = mime, .headers = hb.block().bytes }) orelse return 0;
+    enqueue(ev);
+    return 0;
+}
+
+fn onResourceLoadComplete(_: [*c]c.cef_resource_request_handler_t, browser: [*c]c.cef_browser_t, frame: [*c]c.cef_frame_t, request: [*c]c.cef_request_t, response: [*c]c.cef_response_t, status: c.cef_urlrequest_status_t, received: i64) callconv(.c) void {
+    defer object.releaseArg(browser);
+    defer object.releaseArg(frame);
+    defer object.releaseArg(request);
+    defer object.releaseArg(response);
+    if (request == null) return;
+    var e: Event = .{ .kind = .end, .request = 0 };
+    const id = request.*.get_identifier.?(request);
+    var begun = false;
+    {
+        doLock();
+        defer doUnlock();
+        const t = state.find(id) orelse return;
+        begun = t.begun;
+        e.request = id;
+        e.targets = t.targets;
+        e.target_count = t.target_count;
+        state.untrack(t);
+    }
+    if (!begun) return;
+    e.outcome = switch (status) {
+        c.UR_SUCCESS => .success,
+        c.UR_CANCELED => .canceled,
+        else => .failed,
+    };
+    const err: i32 = if (response != null) @intCast(response.*.get_error.?(response)) else 0;
+    e.error_code = if (e.outcome == .success or err > 0) 0 else err;
+    e.received = @intCast(@max(received, 0));
+    e.time_ms = wallMs();
+    const ev = makeEvent(e, .{}) orelse return;
+    enqueue(ev);
+}
+
+// ── UI 스레드: 모아서 보낸다 ────────────────────────────────────────────────────────────────────────────
+
+const WatchView = struct {
+    full: bool,
+    host_count: usize,
+    hosts: [msg.max_net_watch_hosts][253]u8,
+    host_lens: [msg.max_net_watch_hosts]u8,
+
+    fn covers(self: *const WatchView, host: []const u8, site: []const u8) bool {
+        if (host.len == 0) return false;
+        if (self.host_count == 0) return site.len != 0 and net_policy.sameSite(site, host); // 에이전트 탭(어느 사이트든) — 첫 사이트로
+        for (0..self.host_count) |i| if (net_policy.hostCovers(self.hosts[i][0..self.host_lens[i]], host)) return true;
+        return false;
+    }
+};
+
+fn watchView(browser: BrowserId) ?WatchView {
+    doLock();
+    defer doUnlock();
+    const w = state.watchOf(browser) orelse return null;
+    return .{ .full = w.full, .host_count = w.host_count, .hosts = w.hosts, .host_lens = w.host_lens };
+}
+
+fn flush(_: [*c]c.cef_task_t) callconv(.c) void {
+    flush_posted.store(false, .release);
+    var taken: std.ArrayList(*Event) = .empty;
+    var drops: [gate.capacity]struct { browser: BrowserId, count: u32 } = undefined;
+    var drop_count: usize = 0;
+    doLock();
+    std.mem.swap(std.ArrayList(*Event), &queue, &taken);
+    for (&state.watches) |*w| if (w.on and w.dropped != 0) {
+        drops[drop_count] = .{ .browser = w.browser, .count = w.dropped };
+        drop_count += 1;
+        w.dropped = 0;
+    };
+    doUnlock();
+    defer taken.deinit(std.heap.c_allocator);
+    for (drops[0..drop_count]) |d| browsers.state.writer.send(.{ .net_dropped = .{ .browser = d.browser, .count = d.count } }) catch {};
+    for (taken.items) |e| {
+        for (e.targets[0..e.target_count]) |b| send(e, b);
+        doLock();
+        state.releaseQueue(e.bytes());
+        doUnlock();
+        freeEvent(e);
+    }
+}
+
+/// 기록 하나를 그 탭에(설정이 꺼졌으면 덜어 내고) 보낸다.
+fn send(e: *const Event, browser: BrowserId) void {
+    const view = watchView(browser) orelse return; // 그사이 지켜보기가 꺼졌다
+    var ub: [msg.max_net_url_bytes]u8 = undefined;
+    var stripped: net_fields.HeaderBuilder = .{};
+    const raw: msg.NetHeaderBlock = .{ .count = e.header_count, .bytes = e.headers };
+    var headers = raw;
+    var url = e.url;
+    if (!view.full) {
+        url = net_policy.stripUserinfo(e.url, &ub);
+        if (url.len == 0) url = e.url[0..0];
+        net_policy.stripHeaders(raw, view.covers(e.host, e.site), &stripped);
+        headers = stripped.block();
+    }
+    const message: msg.Message = switch (e.kind) {
+        .begin => blk: {
+            var flags = e.flags;
+            if (!view.full) {
+                flags.stripped = true;
+                flags.headers_truncated = flags.headers_truncated or stripped.truncated;
+            }
+            if (url.len == 0) return;
+            break :blk .{ .net_begin = .{ .browser = browser, .request = e.request, .flags = flags, .resource_type = e.resource_type, .time_ms = e.time_ms, .method = e.method, .url = url, .initiator = e.initiator, .site = e.site, .headers = headers } };
+        },
+        .redirect => blk: {
+            var hop = e.hop;
+            if (!view.full) hop.stripped = true;
+            if (url.len == 0) return;
+            break :blk .{ .net_redirect = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .url = url, .headers = headers } };
+        },
+        .response => blk: {
+            var hop = e.hop;
+            hop.url_truncated = false;
+            if (!view.full) hop.stripped = true;
+            break :blk .{ .net_response = .{ .browser = browser, .request = e.request, .status = e.status, .flags = hop, .time_ms = e.time_ms, .mime = e.mime, .headers = headers } };
+        },
+        .end => .{ .net_end = .{ .browser = browser, .request = e.request, .outcome = e.outcome, .error_code = e.error_code, .received = e.received, .time_ms = e.time_ms } },
+    };
+    browsers.state.writer.send(message) catch {};
+}

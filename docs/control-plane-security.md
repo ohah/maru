@@ -53,6 +53,13 @@ Phase 5 두 번째 슬라이스. §8.1 브리지 게이트를 **구현**한다: 
   건너뛰지 못하고 결정은 기억하지 않는다. **관문은 그 모달뿐이다**: 앱(같은 uid, 샌드박스 없음)이 파일을 읽으므로 샌드박스에 갇힌 에이전트가 자기는 못 읽는 파일을
   올리자고 물을 수 있다(confused deputy — 사용자 결정 2026-10-15 로 경로 방식을 택했다; CLI 가 에이전트 권한으로 연 fd 를 넘기는 방식은 뒤로 미뤘다). 시험의
   자동 결정은 `-Dweb-upload-test-decision=true` 로 만든 빌드에만 있다(배포본은 comptime 으로 없다). 상세는 [웹 OSR 계획 「W9c③ 결정」](plans/web-osr-backend.md).
+- **`browser_network`(W9d① — `browser.network`·`browser.networkRequest`)는 `browser` 와 따로 묻는 peer scope 다**(§9.4 D5 — `browser_storage` 와
+  같은 성격: 요청 헤더에 그 사이트의 로그인 쿠키·인증 토큰이 그대로 실린다). 상속 fd 로 발급하지 않고(`allowedViaInheritedFd` 거짓), 확인 grant 는 모달이 보인
+  호스트와 그 하위 도메인에 묶인다(`control_pane_grant.hostBound`). 예외는 하나 — 에이전트가 `browser.open` 으로 연 탭(그 탭의 페이지가 연 탭 포함)은 `browser` 와
+  함께 **어느 호스트든** 인가하는 grant 를 묻지 않고 받는다(사용자 결정 2026-10-15 — 에이전트가 연 탭에는 사용자가 지나온 사이트가 없다; 첫 읽기 전에 사용자가
+  그 탭을 몰면 그 읽기는 그때부터다). 설정 `browser.agent-network-full`(기본 켬)이면 헤더 값(`Cookie`·`Set-Cookie`·`Authorization`)·주소의 사용자 정보·다른
+  사이트와 다른 사이트 iframe 의 요청까지 보인다 — 사용자 결정이다. 끄면 허용 목록 투영이고 sidecar 가 보내기 전에 덜어 낸다. 어느 쪽이든 앱 로그에 주소·헤더를
+  쓰지 않는다. 철회(하나·모두)·탭 닫힘으로 그 탭의 마지막 grant 가 사라지면 지켜보기를 끄고 기록을 지운다. 상세는 [웹 OSR 계획 「W9d① 결정·구현」](plans/web-osr-backend.md).
 - `capture`·`subscribeOutput`은 비밀(스크롤백·실시간 출력)을 노출하므로 `read-output` capability가 필요하다. `capture`가 처음 노출되는 Phase 1 안에서 capability fd 발급·auth·거부 테스트까지 함께 구현한다. "read-only라 토큰은 나중"으로 미루지 않는다.
 
 ### 8.4 self-origin metadata 증명(일반 login shell)

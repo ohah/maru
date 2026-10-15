@@ -23,9 +23,9 @@ pub const Context = struct {
     maru_version: []const u8,
 };
 
-/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 8 + console_gate 16 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
+/// ① 의 시험 수(inbox 2 + dispatch 8 + registry 2 + title_gate 2 + ring_receiver 9 + ring_producer 3 + input_map 2 + dialog_table 3 + unsandboxed_policy 4 + datalist_page 3 + devtools_table 8 + console_gate 16 + net_gate 4 + 입구 파일의 `test {}` 블록 1). 시험을 더하거나 빼면 같이 고친다 —
 /// 조용히 빠지는 것을 러너가 잡는다.
-const pure_test_count = 63;
+const pure_test_count = 67;
 
 pub fn register(b: *std.Build, ctx: Context) void {
     const protocol_mod = b.createModule(.{
@@ -214,6 +214,10 @@ fn sidecarExe(
         \\#include "include/capi/cef_render_process_handler_capi.h"
         \\#include "include/capi/cef_v8_capi.h"
         \\#include "include/capi/cef_process_message_capi.h"
+        \\#include "include/capi/cef_resource_request_handler_capi.h"
+        \\#include "include/capi/cef_request_context_handler_capi.h"
+        \\#include "include/capi/cef_request_context_capi.h"
+        \\#include "include/internal/cef_string_multimap.h"
         \\
     );
     const target = exe.root_module.resolved_target.?;

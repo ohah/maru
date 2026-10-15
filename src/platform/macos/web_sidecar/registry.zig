@@ -5,6 +5,7 @@ const std = @import("std");
 const protocol = @import("web_sidecar_protocol");
 const TitleGate = @import("title_gate.zig").TitleGate;
 const ConsoleGate = @import("console_gate.zig").Gate;
+const DocFrames = @import("net_gate.zig").DocFrames;
 
 const BrowserId = protocol.message.BrowserId;
 const ViewSize = protocol.message.ViewSize;
@@ -25,6 +26,8 @@ pub const Entry = struct {
     title: TitleGate = .{},
     /// 콘솔 줄 조절과 방금 떠난 출처들(W9c① — `console_gate`).
     console: ConsoleGate = .{},
+    /// iframe 마다 그 문서를 연 주 문서 세대(W9d① 적대 리뷰 5 회차 B1 — 떠난 문서의 iframe 이 보낸 요청에 표시, `net_gate.DocFrames`).
+    net_docs: DocFrames = .{},
     /// D9 — CPU 경로로 그렸다고 이미 알렸다(한 번만).
     gpu_unavailable_sent: bool = false,
     /// 이 브라우저의 픽셀 링 생산자(W2 — `ring_producer.Producer`). 목록은 CEF·mach 를 몰라 불투명하게 든다.

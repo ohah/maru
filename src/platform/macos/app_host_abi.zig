@@ -7934,19 +7934,15 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
     defer server.cross_gpa.free(op.arg);
     applyNetworkNarrows();
     syncNetworkWatch(); // 방어 — grant 가 바뀐 자리를 놓쳤어도 읽기 전에 맞춘다
-    const who: u64 = if (op.pane_grant) |g|
-        consoleAuthorizer(.{ .pane_grant = g })
-    else if (op.capability_nonce) |nonce|
-        consoleAuthorizer(.{ .capability = .{ .nonce = nonce, .generation = op.capability_generation orelse 0 } })
-    else
-        0;
-    // 설정이 꺼졌을 때 서비스 워커 요청을 가르는 읽는 쪽(적대 리뷰 2 회차 N6 — 그 pane 에게 허락되지 않은 탭). cap 은 그 탭만.
-    const reader_pane: ?u64 = if (op.pane_grant) |g| g.pane else null;
-    // grant 호스트는 표의 지금 값으로(좁혀졌으면 좁힌 사이트 — F5). 어느 호스트든 grant(에이전트 탭)·cap 은 묶이지 않는다. 묶인 grant 는 그
+    // 읽는 쪽은 늘 pane grant 다 — `browser_network` 는 상속 fd 로 발급하지 않아(`CapabilityStore.issueForFd` 가 거절한다) 이 scope 를 쥔 cap 이
+    // 없다(W9d① 적대 리뷰 5 회차 N2 — 닿지 않던 cap 갈래를 걷어 냈다). 그래도 오면 아무것도 보이지 않는다(덮지 않는 쪽).
+    const g = op.pane_grant orelse return completeTabStatus(async_id, .failed, "network reads need a browser_network grant");
+    const who = consoleAuthorizer(.{ .pane_grant = g });
+    // grant 호스트는 표의 지금 값으로(좁혀졌으면 좁힌 사이트 — F5). 어느 호스트든 grant(에이전트 탭)는 묶이지 않는다. 묶인 grant 는 그
     // 사이트가 아닐 때의 요청을 숨긴다(F2 — `web_osr.netView`).
     var current: control_pane_grant.GrantHost = .{};
     var host_bound = false;
-    const grant_host: []const u8 = if (op.pane_grant) |g| blk: {
+    const grant_host: []const u8 = blk: {
         const now = control_pane_grant_store.get(g.pane, g.target, .browser_network) orelse {
             host_bound = true; // 그사이 철회됐다 — 빈 호스트에 묶어 아무것도 보이지 않게
             break :blk "";
@@ -7954,15 +7950,15 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
         host_bound = !now.any_host;
         current = if (now.any_host) .{} else now.host;
         break :blk current.slice();
-    } else "";
-    // 적대 리뷰 3 회차 D1(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」): 그 pane 이 이 탭에 쥔 쿠키 권한(`browser_storage` — 늘 사이트에
-    // 묶인다)의 호스트. 자격 증명 헤더 값·주소의 사용자 정보는 그것이 덮는 호스트의 것만 보인다 — 설정과 무관, 어느 호스트든 grant 여도. cap 으로
-    // 읽는 쪽은 쥔 사이트가 없어 보이지 않는다(작성자 — 더 숨기는 쪽).
-    var cookie: control_pane_grant.GrantHost = .{};
-    if (op.pane_grant) |g| if (control_pane_grant_store.get(g.pane, op.surface_id, .browser_storage)) |sg| {
-        if (!sg.any_host) cookie = sg.host;
     };
-    const reader: session_mod.web_osr.NetReader = .{ .who = who, .pane = reader_pane, .grant_host = grant_host, .host_bound = host_bound, .cookie_host = cookie.slice() };
+    // 적대 리뷰 3 회차 D1(사용자 결정 2026-10-15 「쿠키 권한 있을 때만 보임」): 그 pane 이 이 탭에 쥔 쿠키 권한(`browser_storage` — 늘 사이트에
+    // 묶인다)의 호스트. 자격 증명 헤더 값·주소의 사용자 정보는 그것이 덮는 호스트의 것만 보인다 — 설정과 무관, 어느 호스트든 grant 여도.
+    var cookie: control_pane_grant.GrantHost = .{};
+    if (control_pane_grant_store.get(g.pane, op.surface_id, .browser_storage)) |sg| {
+        if (!sg.any_host) cookie = sg.host;
+    }
+    // 설정이 꺼졌을 때 서비스 워커 요청을 가르는 읽는 쪽(적대 리뷰 2 회차 N6 — 그 pane 에게 허락되지 않은 탭).
+    const reader: session_mod.web_osr.NetReader = .{ .who = who, .pane = g.pane, .grant_host = grant_host, .host_bound = host_bound, .cookie_host = cookie.slice() };
     switch (op.method) {
         .network => {
             const parsed = std.json.parseFromSlice(struct {

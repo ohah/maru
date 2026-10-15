@@ -1077,6 +1077,18 @@ test "W9c③: browser_upload — 파일은 절대 경로 배열(1..10)로 `--` �
     return error.TestUnexpectedResult;
 }
 
+test "W9d① 변이 생존 MC1: 네트워크 도구의 번호·크기 인자는 스키마 최솟값도 1 이다 — CLI 파서가 0 을 거절하는 범위와 같게(에이전트가 스키마를 믿고 0 을 보내 실패하지 않게)" {
+    var seen: usize = 0;
+    for ([_][]const u8{ "browser_network_requests", "browser_network_request" }) |name| {
+        for (findTool(name).?.args) |a| if (std.mem.eql(u8, a.key, "req") or std.mem.eql(u8, a.key, "before_req") or std.mem.eql(u8, a.key, "page_size")) {
+            try testing.expectEqual(@as(i64, 1), a.min);
+            seen += 1;
+        };
+    }
+    try testing.expectEqual(@as(usize, 3), seen);
+    try testing.expectError(error.InvalidRequestId, browser.parse(&.{ "network-request", "--surface", "4", "--req", "0" }));
+}
+
 test "W9d①: browser_network_requests·browser_network_request — 인자가 CLI 의 network·network-request 로, 범위는 파서와 같고, 안내는 권한·보이는 범위를 말한다" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

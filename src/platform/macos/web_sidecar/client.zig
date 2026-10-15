@@ -361,6 +361,8 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
             @import("datalist.zig").reset(entry.id); // W6m①: 옛 문서의 제안 목록
             // W9c①: 앞 문서의 버린 수를 먼저 보내고 떠나는 출처를 기억한다(콘솔의 문서 경계 — maru 는 `page_started` 로 가른다).
             console.mainFrameStarted(entry, frame);
+            // W9d① 적대 리뷰 5 회차 B1: 새 문서의 세대 — 이 뒤에 보내는 앞 문서 iframe 의 요청에 표시가 선다(`page_started` 보다 먼저).
+            network.documentStarted(entry.id);
             // W10a: 새 문서 — 그 전의 누름은 이 문서의 사용자 동작이 아니다(maru 가 다운로드의 「사용자가 시작함」을 가른다).
             browsers.state.writer.send(.{ .page_started = entry.id }) catch {};
         }
@@ -368,6 +370,7 @@ fn onLoadStart(handler: [*c]c.cef_load_handler_t, browser: [*c]c.cef_browser_t, 
         if (entryOf(browser)) |entry| {
             @import("datalist.zig").closeFrame(entry.id, frame); // W6m③: iframe 의 옛 문서의 목록
             console.subframeStarted(entry, frame); // W9c①: 이 문서가 떠날 때 그 iframe 출처도 기억한다
+            network.subframeDocument(entry.id, frame); // W9d① 5 회차 B1: 이 iframe 은 지금 문서의 것
         }
     }
     dialogs.onLoadStart(handler, browser, frame, transition);

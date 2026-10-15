@@ -87,8 +87,9 @@
 #   w9d-network     (W9d①) Chromium 탭의 네트워크 기록: 에이전트가 연 탭은 묻지 않고 태어날 때부터 적는다 — 쿠키를 심고 옮겨 간 첫 페이지,
 #                   다른 사이트 iframe 안의 요청(`[cross-site iframe]`), 인증 헤더 fetch 의 자세히에 `Cookie`·`Authorization` 값(설정 켬이 기본) ·
 #                   서비스 워커가 다스리는 페이지의 fetch 는 `[service worker of <출처>]` · 둘째 pane(첫 pane 이 연 탭은 그에게 사용자의 탭과 같다 —
-#                   확인 모달, 자동 승인)에게 grant 전에 간 페이지는 보이지 않고(숨김 수로만) 그 뒤 페이지는 보인다 · 모든 grant 를 철회하면(앱 대본
-#                   `revokegrants`) 다시 허락받은 읽기에 앞 요청이 없다
+#                   확인 모달, 자동 승인)에게 grant 전에 간 페이지는 보이지 않고(숨김 수로만) 그 뒤 페이지는 보인다 · 그 탭이 다른 사이트(localhost)에
+#                   갔다 돌아오면 다른 사이트에 있던 동안의 요청은 숨김 수로만(W9d① 적대 리뷰 1 회차 F2 — 실제 CEF 의 첫 사이트로 가른다) · 모든 grant 를
+#                   철회하면(앱 대본 `revokegrants`) 다시 허락받은 읽기에 앞 요청이 없다
 #
 # 앱이 화면에 창을 띄운다. 끝나면 이 대본이 띄운 앱·셸·서버만 끈다.
 set -eu
@@ -404,6 +405,8 @@ printf '{"ok":1}' > "$root/www/netapi.json"
 printf '{"frame":1}' > "$root/www/netf-api.json"
 printf '<!doctype html><title>before</title>before' > "$root/www/net-before.html"
 printf '<!doctype html><title>after</title>after' > "$root/www/net-after.html"
+printf '<!doctype html><title>away</title><script>fetch("/netapi.json?away",{headers:{"Authorization":"Bearer away-token"}})</script>away' > "$root/www/net-away.html"
+printf '<!doctype html><title>back</title>back' > "$root/www/net-back.html"
 mkdir -p "$root/www/nsw"
 printf '<!doctype html><title>nsw</title><script>navigator.serviceWorker.register("/nsw/sw.js",{scope:"/nsw/"}).then(function(){return navigator.serviceWorker.ready}).then(function(){if(!navigator.serviceWorker.controller){setTimeout(function(){location.reload()},300);return}fetch("/nsw/data.json?"+Date.now())})</script>nsw' > "$root/www/nsw/page.html"
 printf 'self.addEventListener("install",function(e){self.skipWaiting()});self.addEventListener("activate",function(e){e.waitUntil(self.clients.claim())});self.addEventListener("fetch",function(e){e.respondWith(fetch(e.request))});' > "$root/www/nsw/sw.js"
@@ -451,6 +454,10 @@ if ! mkdir "\$out/pane-once" 2>/dev/null; then
     n=0; while [ ! -f "\$out/p2-net-after" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
     "\$cli" browser network --surface "\$ux" > "\$out/nw-u-second" 2>&1; echo "rc=\$?" >> "\$out/nw-u-second"
     touch "\$out/p2-net-read2"
+    # 적대 리뷰 1 회차 F2: 그 탭이 다른 사이트(localhost)에 갔다 127.0.0.1 로 돌아온 뒤의 읽기.
+    n=0; while [ ! -f "\$out/p2-net-away" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+    "\$cli" browser network --surface "\$ux" > "\$out/nw-u-away" 2>&1; echo "rc=\$?" >> "\$out/nw-u-away"
+    touch "\$out/p2-net-read3"
     n=0; while [ ! -f "\$out/p2-net-revoked" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
     "\$cli" browser network --surface "\$ux" > "\$out/nw-u-revoked" 2>&1; echo "rc=\$?" >> "\$out/nw-u-revoked"
     touch "\$out/p2-net-done"
@@ -1121,7 +1128,7 @@ n=0; while [ \$n -lt 60 ]; do
 done
 "\$cli" browser close --surface "\$nw" > "\$out/nw-close" 2>&1
 # 둘째 pane 에게는 사용자의 탭과 같은 탭(이 pane 이 연 탭 — 둘째 pane 은 확인 모달로 허락받는다): 둘째 pane 이 허락받기 전에 간 페이지는 그에게
-# 보이지 않고(숨김 수로만), 그 뒤에 간 페이지는 보인다. 그다음 모든 grant 를 철회한다(앱 대본 `revokegrants`) — 지켜보기를 끄고 적은 것을 지운다.
+# 보이지 않고(숨김 수로만), 그 뒤에 간 페이지는 보인다. 그다음 모든 grant 를 철회한다(앱 대본 「revokegrants」) — 지켜보기를 끄고 적은 것을 지운다.
 "\$cli" browser open --url "http://127.0.0.1:$port/net-before.html" > "\$out/nw-u-open" 2>&1
 ux=\$(sed -n 's/^opened \([0-9]*\) .*/\1/p' "\$out/nw-u-open")
 echo "\$ux" > "\$out/p2-net-go.tmp" && mv "\$out/p2-net-go.tmp" "\$out/p2-net-go"
@@ -1130,6 +1137,14 @@ n=0; while [ ! -f "\$out/p2-net-read1" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$
 sleep 0.5
 touch "\$out/p2-net-after"
 n=0; while [ ! -f "\$out/p2-net-read2" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
+# 적대 리뷰 1 회차 F2: 이 pane(제어 grant — 사이트에 묶이지 않는다)이 그 탭을 다른 사이트로 옮겼다 되돌린다. 둘째 pane 의 127.0.0.1 grant 는
+# localhost 에 있던 동안의 요청(인증 헤더 fetch)을 돌아온 뒤에도 보지 못한다.
+"\$cli" browser navigate --surface "\$ux" "http://localhost:$port/net-away.html" > "\$out/nw-u-away-nav" 2>&1
+sleep 0.5
+"\$cli" browser navigate --surface "\$ux" "http://127.0.0.1:$port/net-back.html" > "\$out/nw-u-back-nav" 2>&1
+sleep 0.5
+touch "\$out/p2-net-away"
+n=0; while [ ! -f "\$out/p2-net-read3" ] && [ \$n -lt 240 ]; do sleep 0.25; n=\$((n + 1)); done
 touch "\$out/net-revoke-now"
 sleep 1.5
 touch "\$out/p2-net-revoked"
@@ -1444,8 +1459,12 @@ grep -qx 'ok' "$out/nw-u-nav2" || fail "the tab for the second reader did not mo
 grep -q '^rc=0$' "$out/nw-u-first" && ! grep -q 'net-before' "$out/nw-u-first" && grep -q '^([0-9]* earlier requests\{0,1\} hidden' "$out/nw-u-first" \
     || fail "the second reader's first read showed a request from before its permission, or no hidden count ($(tr '\n' ' ' < "$out/nw-u-first"))"
 grep -q 'net-after.html' "$out/nw-u-second" && ! grep -q 'net-before' "$out/nw-u-second" || fail "the second reader did not see the request after its permission ($(tr '\n' ' ' < "$out/nw-u-second"))"
+grep -qx 'ok' "$out/nw-u-away-nav" && grep -qx 'ok' "$out/nw-u-back-nav" || fail "the tab for the second reader did not go to the other site and back ($(tr '\n' ' ' < "$out/nw-u-away-nav") · $(tr '\n' ' ' < "$out/nw-u-back-nav"))"
+grep -q '^rc=0$' "$out/nw-u-away" && grep -q 'net-back.html' "$out/nw-u-away" && ! grep -q 'away' "$out/nw-u-away" \
+    && grep -q '^([0-9]* requests\{0,1\} hidden — made while the tab showed a site your permission does not cover)$' "$out/nw-u-away" \
+    || fail "after the tab went to another site and back, the second reader saw that site's requests or no hidden count ($(tr '\n' ' ' < "$out/nw-u-away"))"
 grep -q '^rc=0$' "$out/nw-u-revoked" && ! grep -q 'net-after' "$out/nw-u-revoked" || fail "after revoking the grants the record was not wiped ($(tr '\n' ' ' < "$out/nw-u-revoked"))"
-echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden), and revoking all grants wiped the record"
+echo "PASS w9d-network: the agent's tab recorded from its birth (cookie-setting first page, cross-site iframe request marked), the detail showed Cookie and Authorization values, a service-worker page's fetch was labelled, a second pane allowed by the dialog saw only requests after its permission (earlier ones counted as hidden) and not the requests made while the tab was on another site (counted as hidden after it came back), and revoking all grants wiped the record"
 echo "PASS w9c-dialog: a blocked op points at handle-dialog, dialog lists the agent's alert (cause, line break shown), alert/prompt text/confirm dismiss/chained alert/timer alert are answered and the page goes on, an unknown token is refused, a popup's alert is answered from its opener by token, leaving answers the agent's own close (the tab closes) and navigate (it goes on), an unattributed alert on a user's tab is refused"
 echo "PASS agent-keys-dialogs: Enter on a new hidden tab submits (on the element and where the focus is), a key whose submit opens an alert is answered as delivered with a warning, a same-origin popup's alert ends the opener's op at once ($(cat "$out/r3-fam-secs")s)"
 # W9f

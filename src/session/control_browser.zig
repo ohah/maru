@@ -148,8 +148,9 @@ pub const BrowserMethod = enum {
     /// `<input type=file>` 에 파일을 넣는다. **부를 때마다 확인 모달**(grant·cap 이 있어도 — 기억하지 않는다)이 파일을 모두 보이고, 앱이 파일을 열어
     /// 승인 뒤에 사본을 만들어 그 사본을 넣는다(docs/plans/web-osr-backend.md 「W9c③ 결정」). op.arg=`{선택자 필드, files:[…]}`. **op_kind=27 고정**.
     upload,
-    /// `browser.network {id, page?, page_size?, types?, method?, status?, url_contains?, clear?}`(W9d① — Chromium 전용) →
-    /// `{requests:[…], hidden_before_grant, dropped, full_details, cross_site_iframe_hidden?, next_page?}`. sidecar 가 CEF 의 자원 요청
+    /// `browser.network {id, page?, page_size?, types?, method?, status?, url_contains?, before_req?, clear?}`(W9d① — Chromium 전용) →
+    /// `{requests:[…], hidden_before_grant, hidden_other_site_pages?, dropped, full_details, cross_site_iframe_hidden?,
+    /// service_worker_shared_hidden?, next_page?, next_before_req?}`. sidecar 가 CEF 의 자원 요청
     /// 처리기로 적은 요청 목록(새것부터) — DevTools 를 부르지 않아 앱이 곧 답한다. **`browser_network` scope**(사이트에 묶인 grant — 요청
     /// 헤더에 로그인 쿠키가 있다). op.arg=거르기 JSON. **op_kind=28 고정**.
     network,
@@ -519,7 +520,8 @@ pub const ScreenshotOptParams = struct { rect: ?ScreenshotRect = null, scale: ?f
 pub const SnapshotParams = struct { interactive_only: bool = false, max_depth: ?u32 = null, selector: ?[]const u8 = null };
 
 /// W9d①: `browser.network` 의 거르기 — 모두 선택. `types` 는 `net_policy.resourceTypeName` 의 이름(넷까지가 아니라 종류 수만큼), `status` 는
-/// 정수(100..599) 또는 `"4xx"` 꼴의 범주, `page` 는 0 부터(새것부터 센 쪽), `page_size` 는 1..200(기본 50).
+/// 정수(100..599) 또는 `"4xx"` 꼴의 범주, `page` 는 0 부터(새것부터 센 쪽), `page_size` 는 1..200(기본 50), `before_req` 는 그보다 오래된 요청만
+/// (앞 쪽의 `next_before_req` — 적대 리뷰 1 회차 F7: 새 요청이 와도 다음 쪽이 밀리지 않는다).
 pub const max_network_types: usize = 20;
 pub const max_network_url_filter_bytes: usize = 2048;
 pub const max_network_page: u32 = 10_000;
@@ -532,6 +534,7 @@ pub const NetworkParams = struct {
     status: ?u16 = null,
     status_class: ?u8 = null,
     url_contains: ?[]const u8 = null,
+    before_req: ?u64 = null,
     clear: bool = false,
 
     pub fn typeNames(self: *const NetworkParams) []const []const u8 {
@@ -778,7 +781,7 @@ fn onlyKeys(obj: std.json.ObjectMap, allowed: []const []const u8) ParamError!voi
 /// W9d①: `browser.network` params — 새 메서드라 키를 엄격히 본다.
 pub fn parseNetworkParams(params: ?std.json.Value) ParamError!NetworkParams {
     const obj = try paramsObject(params);
-    try onlyKeys(obj, &.{ "id", "page", "page_size", "types", "method", "status", "url_contains", "clear" });
+    try onlyKeys(obj, &.{ "id", "page", "page_size", "types", "method", "status", "url_contains", "before_req", "clear" });
     var p: NetworkParams = .{};
     if (try optU32FromObj(obj, "page")) |v| {
         if (v > max_network_page) return error.InvalidParams;
@@ -824,6 +827,14 @@ pub fn parseNetworkParams(params: ?std.json.Value) ParamError!NetworkParams {
         if (u.len == 0 or u.len > max_network_url_filter_bytes) return error.InvalidParams;
         p.url_contains = u;
     }
+    if (obj.get("before_req")) |v| switch (v) {
+        .null => {},
+        .integer => |i| {
+            if (i < 1 or i > 9_007_199_254_740_991) return error.InvalidParams;
+            p.before_req = @intCast(i);
+        },
+        else => return error.InvalidParams,
+    };
     p.clear = try optBoolFromObj(obj, "clear", false);
     return p;
 }
@@ -856,6 +867,10 @@ pub fn serializeNetworkArg(gpa: std.mem.Allocator, p: NetworkParams) std.mem.All
         if (p.url_contains) |u| {
             s.objectField("url_contains") catch |e| break :blk e;
             s.write(u) catch |e| break :blk e;
+        }
+        if (p.before_req) |b| {
+            s.objectField("before_req") catch |e| break :blk e;
+            s.write(b) catch |e| break :blk e;
         }
         s.objectField("clear") catch |e| break :blk e;
         s.write(p.clear) catch |e| break :blk e;
@@ -5601,7 +5616,19 @@ test "W9d①: network 거르기 params — 쪽·크기(1..200)·종류 이름·�
     const b = try P.parse("{\"id\":1,\"status\":404}");
     try testing.expectEqual(@as(?u16, 404), b.status);
     try testing.expectEqual(@as(u32, 50), b.page_size);
+    try testing.expectEqual(@as(?u64, null), b.before_req);
+    // W9d① 적대 리뷰 1 회차 F7: 커서 — 1..2^53-1, op.arg 에 그대로 실린다.
+    const c = try P.parse("{\"id\":1,\"before_req\":9007199254740991}");
+    try testing.expectEqual(@as(?u64, 9_007_199_254_740_991), c.before_req);
+    {
+        const arg = try serializeNetworkArg(testing.allocator, .{ .before_req = 11 });
+        defer testing.allocator.free(arg);
+        try testing.expectEqualStrings("{\"page\":0,\"page_size\":50,\"types\":[],\"before_req\":11,\"clear\":false}", arg);
+    }
     for ([_][]const u8{
+        "{\"id\":1,\"before_req\":0}",
+        "{\"id\":1,\"before_req\":9007199254740992}",
+        "{\"id\":1,\"before_req\":\"11\"}",
         "{\"id\":1,\"page_size\":0}",
         "{\"id\":1,\"page_size\":201}",
         "{\"id\":1,\"page\":-1}",

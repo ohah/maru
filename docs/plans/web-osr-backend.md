@@ -1720,7 +1720,7 @@ accept*, sec-fetch-*, access-control-*, user-agent; Referer 는 출처만, Locat
 - 엔진은 CEF 자원 요청 처리기(`get_resource_request_handler` — 브라우저 프로세스의 IO 스레드). CDP `Network.enable` 은 쏟아질 때 요청마다 이벤트 여섯(30 k/s,
   +38 % CPU)이고 DevTools 붙음이 페이지에 드러날 수 있어 목록에는 쓰지 않는다. 처리기 자체는 요청마다 수십 µs(M1), Resource Timing·bfcache·HTTP/2·3·스트리밍·
   Range 는 그대로였다. **IO 스레드의 동기 쓰기가 위험**하다 — 요청마다 stderr 네 줄이 처리량 −27 %, 다른 탭의 불러오기 +60 %(M6). 그래서 IO 스레드는 쓰지도
-  로그하지도 않고, **글로 바꾸기 전에** 문(탭 100/s·버스트 500, 전체 2000/s, 동시 512)을 지난 요청만 앞부분(주소 2 KiB, 헤더 64 개·8 KiB)을 바꿔 넘김 상자
+  로그하지도 않고, **글로 바꾸기 전에** 문(탭 100/s·버스트 500, 전체 2000/s, 동시 512·탭마다 128 — 적대 리뷰 1 회차 F9)을 지난 요청만 앞부분(주소 2 KiB, 헤더 64 개·8 KiB)을 바꿔 넘김 상자
   (4096 개·8 MiB)에 넣고, UI 스레드의 task 하나가 모아서 보낸다(10 ms — 이미 올렸으면 다시 올리지 않는다).
 - 요청 번호(CEF `get_identifier`)는 리다이렉트·401 재시도에도 같다(M5·M7) — 리다이렉트는 한 요청의 홉, 재시도의 둘째 응답은 첫째를 덮는다. 다운로드는 번호가 0 이라
   적지 않는다(W10 의 몫). 이동 요청의 번호는 2^64 근처라 에이전트에게는 maru 가 탭마다 매긴 `req` 번호를 준다.
@@ -1743,7 +1743,7 @@ accept*, sec-fetch-*, access-control-*, user-agent; Referer 는 출처만, Locat
 - **권한**: 새 peer scope `browser_network`(`ScopeClass` — `browser` 가 함의하지 않고 상속 fd 로 발급하지 않는다, `browser.network`·`browser.networkRequest`).
   grant 는 쿠키처럼 (pane, 탭, 호스트)에 묶인다(`control_pane_grant.hostBound` — 다른 사이트로 옮긴 탭은 다시 묻는다; 모달 문구는 설정에 따라 둘). 에이전트가
   연 탭(`adoptAgentTab` — 그 탭의 페이지가 연 탭도)은 `browser` 와 함께 **어느 호스트든**(`any_host`) 인가하는 `browser_network` grant 를 묻지 않고 받는다 —
-  그래서 에이전트 탭 하나가 grant 표의 두 자리를 쓴다. 메뉴의 grant 철회 목록에 `network requests` 로 보인다(wire scope 2).
+  그 grant 는 표의 64 자리 상한 밖에서 센다(`birth` — 적대 리뷰 1 회차 F6). 메뉴의 grant 철회 목록에 `network requests` 로 보인다(wire scope 2).
 - **sidecar**(`web_sidecar/network.zig` — CEF 처리기·서비스 워커 context, `net_gate.zig` — CEF 를 모르는 문·표·상자, 순수 시험): 지켜보는 탭이 없으면 처리기는
   곧 null. 설정이 꺼진 탭은 UI 스레드가 보내기 전에 같은 규칙(`net_policy`)으로 덜어 낸다 — 헤더 값·주소의 사용자 정보가 브라우저 프로세스 밖으로 나가지 않게
   (grant 호스트 넷까지; 넷이 넘으면 다섯째부터는 덮이지 않는 것으로 — 더 숨기는 쪽, 에이전트 탭은 grant 호스트가 없어 그 요청의 첫 사이트로).
@@ -1755,10 +1755,10 @@ accept*, sec-fetch-*, access-control-*, user-agent; Referer 는 출처만, Locat
   사라지면 sidecar 에 끄라고 하고 **기록을 지운다**. 읽는 쪽(콘솔과 같은 값 — grant 번호·cap 해시)마다 시작점: 모달로 허락한 쪽은 그 grant 뒤(그 전 기록은
   `hidden_before_grant` 수만), 에이전트 탭의 태어날 때 grant 는 처음부터(첫 읽기 전에 사용자가 그 탭을 몰면 — 콘솔과 같은 신호 — 첫 읽기 때부터), 모르는 쪽(cap)은
   처음 읽을 때부터. `clear` 는 그 읽는 쪽의 시작점만 지금으로. 투영은 읽을 때 읽는 쪽의 grant 호스트로(없으면 탭의 지금 호스트) — 거르기(`status`·`url_contains`)도
-  투영된 값으로만 한다(숨긴 상태를 거르기로 떠보지 못하게). 목록은 새것부터, 한 쪽 50(최대 200), `next_page`.
+  투영된 값으로만 한다(숨긴 상태를 거르기로 떠보지 못하게). 목록은 새것부터, 한 쪽 50(최대 200), 다음 쪽은 `before_req` 커서(`next_before_req`)나 `next_page`.
 - **op**: `pushBrowserOp` 가 곧 답한다(DevTools·op 줄 없음 — 콘솔과 같다). `browser.networkRequest` 의 모르는·버려진 번호는 handleDialog 의 모르는 번호와 같은 코드
   (-32603)에 `data.reason`(`unknown_request`·`evicted`). WebKit 탭·파일 패널은 확인 모달 전에 `-32008`. 본문은 `body_state: "not_recorded"`(②).
-- **CLI·MCP**: `maru browser network [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--page n] [--page-size n] [--clear]`,
+- **CLI·MCP**: `maru browser network [--type t,..] [--method m] [--status n|4xx] [--url-contains s] [--before-req n] [--page n] [--page-size n] [--clear]`,
   `maru browser network-request --req <n>`; MCP `browser_network_requests`·`browser_network_request`. 주소·헤더 값·MIME 은 표시 안전하게(C0·C1·DEL·양방향·줄 구분 글자를 뺀다).
 
 W9d① 검증: L2(링 — 차례·홉·재시도·상한과 버림·표지·읽는 쪽의 시작점과 태어날 때의 풀림·grant 맞추기·설정 켬/끔 × 덮임/다른 사이트 × iframe × 서비스 워커의 보이는
@@ -1766,3 +1766,41 @@ W9d① 검증: L2(링 — 차례·홉·재시도·상한과 버림·표지·읽�
 가장 큰 frame·무작위 망가뜨리기 20 만 번·골든 v21), scope·grant(`browser_network`·`hostBound`·`any_host`), control_browser(모달 전 -32008·needs_grant·인자·결과·오류),
 web_osr(지켜보기 보내기·다시 보내기·끄면 지움·태어날 때), app_host_abi(곧 답함·모달 승인 뒤 적기·에이전트 탭·철회와 지움·모르는/버려진 번호), CLI·MCP,
 판정자 `--network`(실제 CEF 154 — 갈래·헤더 켬/끔·리다이렉트·지켜보지 않는 탭·사용자 정보·서비스 워커·쏟아짐·끄기 9/9), cdp 스모크 `w9d-network`.
+
+W9d① 적대 리뷰: 1 회차(2026-10-15 — 리뷰가 재현 시험(`R9d1-*` — L2 셋·순수 문 하나·앱 다섯)과 실제 CEF 154 판정 항목을 남겼다. 그것을 붙여 A1·A2·A3·L1·L2·G1 이
+실패하는 것을 본 뒤 고쳤고, 이름은 「W9d① 적대 리뷰 1 회차 재현 …」 으로 바꿨다. obs 였던 A4·A5·L3 은 정한 동작을 단언한다):
+- **F1(HIGH) 다른 사이트로 다시 허용**: 사용자 탭의 `browser_network` grant 를 다른 사이트로 다시 허용해도 같은 번호라 읽는 쪽의 시작점이 그대로였고, 그 사이트의
+  허락 **전** 요청(은행 로그인의 `Cookie`)이 보였다 — 「사용자 탭의 첫 읽기는 grant 뒤의 요청만」 결정과 어긋난다. 저장소가 `browser_network` 의 호스트가 바뀌면
+  **새 번호**를 준다(새 동의 — 같은 호스트로 다시 허용하면 그대로, 쿠키 grant 는 그대로). 읽는 쪽은 번호로 가리므로 옛 쪽은 빠지고 새 쪽은 지금부터 시작한다.
+- **F2(HIGH) 덮이지 않는 사이트에서의 요청**: 탭이 grant 가 덮지 않는 사이트를 보이는 동안 적힌 요청이 덮이는 사이트로 돌아온 뒤 보였다(에이전트는 `browser.navigate`
+  로 되돌릴 수 있다 — `browser` 는 사이트에 묶이지 않는다). 요청마다 **그때의 맨 위 문서 호스트**를 적고(`web_osr_network.topHostOf`), 사이트에 묶인 grant 로 읽으면
+  그 호스트를 덮지 않는 요청은 `hidden_other_site_pages` 수만이다 — **설정과 무관**(설정이 가르는 것은 덮이는 페이지가 보낸 다른 사이트 요청이지 덮이지 않는 사이트에서의
+  브라우징이 아니다). 맨 위 호스트: 주 프레임 문서 요청은 그 요청이 끝내 연 주소(리다이렉트 뒤 — a.test 에서 시작해 은행으로 간 이동은 은행이다), 그 밖은 렌더러가
+  요청마다 정한 쿠키의 첫 사이트(CEF 는 등록 도메인 꼴 — `http://127.0.0.1/` 실측)와 app 이 아는 탭 주소를 맞춰 본다: 같은 사이트면 더 좁은 app 의 호스트, 다르면
+  첫 사이트(이동과 엇갈려 app 의 주소가 낡았거나 이미 새것이다 — 요청이 스스로 말한 쪽), 첫 사이트가 비었으면(다른 사이트 iframe 안 — 실측) app 의 호스트. 남는 틈:
+  같은 등록 도메인의 다른 호스트로 옮기는 순간(10 ms 의 넘김 상자 안)에 난 요청은 옆 호스트로 적힐 수 있다. 어느 호스트든 grant(에이전트 탭)·cap 은 다 본다.
+- **F3(MED-HIGH) 제어 grant 철회**: 에이전트 탭의 제어 grant 를 철회하면(W9b③ — 사람의 탭이 된다) 어느 호스트든 네트워크 grant 가 남아 그 뒤 사용자의 은행까지
+  읽었다. 그 탭과 함께 넣은 네트워크 grant(번호가 같은 것 — 사용자가 모달로 따로 허락한 것은 남긴다)를 함께 거두고 지켜보기를 맞춘다(다른 읽는 쪽이 없으면 끄고
+  지운다). 모두 철회·탭 닫힘·pane 닫힘은 이미 둘 다 지운다.
+- **F4 서비스 워커 요청을 다른 탭과 나눌 때 — 사용자 결정(2026-10-15 「다 보여 줌」)**: grant 없는 탭이 같은 출처를 보이면 그 탭의 서비스 워커 fetch(`Authorization`
+  포함)와 이동도 지켜보는 탭에 붙는다 — 켜져 있으면 그대로 둔다. **설정이 꺼져 있으면**(작성자): 요청이 날 때 grant 없는 탭이 그 출처를 보였거나(`sw_shared`) 읽을
+  때 보이면 그 출처의 서비스 워커 요청은 `service_worker_shared_hidden` 수만이다. sidecar 는 꺼져 있으면 그 값을 보내기 전에 덜어 낸다(판정 `R9d1-sw-cross-tab-off`).
+- **F5 첫 읽기 뒤 사용자가 모는 에이전트 탭 — 사용자 결정(2026-10-15 「그대로 둠」)**: 켜져 있으면 어느 호스트든 grant 를 그대로 둔다(에이전트는 그 탭에서의 사용자
+  브라우징을 본다). **설정이 꺼져 있으면**(작성자): 사용자가 그 탭을 몰 때(콘솔과 같은 신호 — 누름·키·주소창·뒤로·끌어 놓기·닫힌 팝업 되살리기) 그 grant 를 **그때의
+  사이트로 좁힌다**(`narrowAnyHost` — 번호는 그대로, 다른 사이트는 다시 묻는다). web_osr 가 몰기마다 남기고(탭마다 처음 것 — 몰기 전의 사이트) app 이 인가 앞(control
+  요청·모달 뒤 재처리·네트워크 읽기)에서 grant 표에 적용한다. 그 뒤의 다른 사이트 요청은 F2 로 숨는다.
+- **F6 grant 표**: 에이전트 탭마다 두 자리라 pane 넷 × 탭 여덟이면 64 자리가 차, 사용자가 「허용」 한 모달이 저장되지 못하고 -32002 로 끝났다. 태어날 때 네트워크 grant
+  는 상한 밖에서 따로 센다(`PaneGrant.birth` — 표는 128 자리, 상한 안 64·태어날 때 64; 태어날 때 grant 는 제어 grant 와 짝이라 64 를 넘지 않는다).
+- **F7 쪽이 밀림**: 새것부터 센 `page` 는 읽는 사이 새 요청이 오면 밀려 다음 쪽이 앞 쪽 꼬리를 되풀이했다. `before_req` 커서(그 번호보다 오래된 것만 — 숨김·버림 수는
+  커서와 무관)와 결과의 `next_before_req` 를 더했다. `page` 는 호환으로 남긴다. CLI `--before-req`·MCP `before_req`, CLI 는 커서를 권한다.
+- **F8 리다이렉트 수**: 설정이 꺼졌을 때 덮이지 않는 요청의 리다이렉트 수(서버가 고른 것)가 목록과 자세히의 홉 표지로 보였다 — 덮이지 않는 요청이면 `redirects` 칸째 없다.
+  상태(`state:"failed"`)는 그대로 둔다(시각처럼 페이지가 본 결과 — 리뷰 메모의 곁가지, 지시 범위 밖).
+- **F9 동시 요청 몫**: 끝나지 않는 요청을 쏟는 탭 하나가 512 자리를 다 쥐면 다른 지켜보는 탭과 서비스 워커 요청이 적히지 않았다(순수 모델). 탭마다 128 까지(`Watch.in_flight`
+  — 요청 표가 `owner` 를 적고 끝나면 돌려준다, 지켜보기를 껐다 켠 뒤 끝난 옛 요청은 0 아래로 내리지 않는다).
+- **F10 앞에서 버리기**: 상한에 닿은 탭은 begin 마다 배열 전체를 밀었다(2700 줄 — ReleaseFast +17 µs). `std.Deque` 로 바꿔 앞에서 O(1) 로 버린다(시험은 버린 뒤에도 남은
+  요청이 제자리인지 본다).
+- **곁가지**: CLI 의 헤더 값은 탭을 빈칸으로 보인다(`writeLinesText` 처럼 — 지우면 낱말이 붙었다). 서비스 워커 길은 initiator 를 글로 바꾸기 **전에** 문을 본다(그 길의
+  양동이 2000/s — 붙일 탭을 아직 모르니 넘긴 수는 세지 않는다).
+- **검증**: 판정자 `--network`(실제 CEF 154) 16/16 — 리뷰 항목 `R9d1-sw-cross-tab-on`(붙고 값까지 — 결정)·`-off`(붙어도 `Authorization` 값은 비었다)·
+  `R9d1-inflight-*`(끝나지 않는 요청 680 개를 쥔 탭 옆에서 다른 탭 42/42, 떠난 뒤·닫은 뒤에도 42/42). cdp 스모크 `w9d-network` 에 F2 단계를 더했다 — 에이전트
+  pane 이 그 탭을 다른 사이트(localhost)로 옮겼다 되돌리면 둘째 pane(127.0.0.1 grant)의 읽기에 그 사이트의 요청은 없고 숨김 수 줄이 있다(실제 CEF 의 첫 사이트로).

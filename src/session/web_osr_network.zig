@@ -7,6 +7,10 @@
 //! `browser.agent-network-full` 이 꺼져 있으면 읽는 쪽의 grant 호스트로 투영한다(`net_policy` — 덮이지 않는 호스트는 페이지가 고른 칸만,
 //! 다른 사이트 iframe 의 요청은 수만, 헤더 값은 허용 목록만, 주소의 사용자 정보는 지운다). 거르기(`url_contains`·`status`)도 투영된 값으로만
 //! 한다 — 숨긴 상태 코드를 거르기로 떠보지 못하게.
+//! W9d① 적대 리뷰 1 회차: 요청마다 그때 탭의 맨 위 문서 호스트를 적고(`topHostOf`), 사이트에 묶인 grant 로 읽는 쪽에게는 그 grant 가 덮지 않는
+//! 사이트에 있을 때의 요청을 숨긴다(F2 — 설정과 무관). 설정이 꺼졌으면 지켜보지 않는 탭과 같은 출처의 서비스 워커 요청은 수만 센다(F4), 덮이지
+//! 않는 요청의 리다이렉트 수·홉도 숨긴다(F8). 목록은 `before_req` 커서로 새 요청이 와도 밀리지 않게 넘긴다(F7). 오래된 것은 앞에서 O(1) 로
+//! 버린다(`std.Deque` — F10).
 //! 브라우저 탭에서 중요한 이유: 요청 헤더에는 그 사이트의 로그인 쿠키·인증 토큰이 그대로 있고, 사용자가 허락 전에 그 탭으로 간 곳의 요청이
 //! 허락 뒤의 첫 읽기에 보이면 안 된다.
 
@@ -79,6 +83,10 @@ pub const Entry = struct {
     url: []u8 = &.{},
     initiator: []u8 = &.{},
     site: []u8 = &.{},
+    /// 요청이 났을 때 탭의 맨 위 문서 호스트(`topHostOf` — F2). 주 프레임 문서 요청은 쓰지 않는다(그 요청이 만든 문서의 주소로 가른다).
+    top_host: []u8 = &.{},
+    /// 서비스 워커 요청인데, 그때 grant 없는 탭이 같은 출처를 보이고 있었다(F4 — 그 탭의 요청일 수 있다).
+    sw_shared: bool = false,
     mime: []u8 = &.{},
     start_ms: u64 = 0,
     end_ms: u64 = 0,
@@ -122,6 +130,7 @@ pub const Entry = struct {
         gpa.free(self.url);
         gpa.free(self.initiator);
         gpa.free(self.site);
+        gpa.free(self.top_host);
         gpa.free(self.mime);
         gpa.free(self.final_url);
     }
@@ -146,6 +155,11 @@ pub const Desired = struct { who: Authorizer, birth: bool = false };
 pub const View = struct {
     full: bool = true,
     grant_host: []const u8 = "",
+    /// 읽는 쪽의 grant 가 `grant_host` 에 묶였다(모달로 받은 grant·좁힌 태어날 때 grant) — 탭의 맨 위 문서가 그 사이트가 아닐 때의 요청은
+    /// 숨긴다(F2). 어느 호스트든 grant(에이전트 탭)·cap 은 거짓.
+    top_bound: bool = false,
+    /// 설정이 꺼졌을 때 grant 없는 탭이 지금 보이는 출처들(`scheme://host[:port]`) — 그 출처의 서비스 워커 요청은 수만(F4).
+    shared_sw_origins: []const []const u8 = &.{},
 
     fn covers(self: View, url: []const u8) bool {
         if (self.full) return true;
@@ -170,13 +184,35 @@ pub const Query = struct {
     status: ?u16 = null,
     status_class: ?u8 = null,
     url_contains: ?[]const u8 = null,
+    /// 이 번호보다 오래된 요청만(F7 — 앞 쪽의 마지막 `req`, 결과의 `next_before_req`). 새 요청이 와도 쪽이 밀리지 않는다.
+    before_req: ?u64 = null,
     clear: bool = false,
 };
+
+/// 요청이 들어올 때 app 이 아는 것(`Ring.begin`).
+pub const BeginContext = struct {
+    /// 그때 탭의 맨 위 문서 호스트(app 의 주소 — 모르면 빈 글).
+    top_host: []const u8 = "",
+    /// 서비스 워커 요청인데 grant 없는 탭이 같은 출처를 보이고 있다(F4).
+    sw_shared: bool = false,
+};
+
+/// F2: 그 요청이 났을 때 탭의 맨 위 문서 호스트. 주 프레임 문서 요청은 그 주소의 호스트(그 요청이 문서를 바꾼다). 그 밖은 쿠키의 첫 사이트
+/// (`site` — 렌더러가 요청마다 정한다: CEF 는 등록 도메인 꼴로 준다)와 app 이 아는 탭의 주소(`app_top`)를 맞춰 본다 — 같은 사이트면 더 좁은
+/// app 의 호스트, 다르면 첫 사이트(이동과 엇갈려 app 의 주소가 옛 것이거나 이미 새 것이다 — 요청이 스스로 말한 쪽을 믿는다), 첫 사이트가
+/// 비었으면(다른 사이트 iframe 안 — 실측) app 의 호스트. 남는 틈: 같은 등록 도메인의 다른 호스트로 옮기는 순간의 요청(문서에 적었다).
+pub fn topHostOf(v: msg.NetBegin, app_top: []const u8) []const u8 {
+    if (v.flags.main_frame and v.resource_type == 0) return policy.hostOfUrl(v.url) orelse "";
+    if (v.site.len == 0) return app_top;
+    if (app_top.len != 0 and policy.sameSite(app_top, v.site)) return app_top;
+    return v.site;
+}
 
 pub const DetailError = error{ UnknownRequest, Evicted, OutOfMemory };
 
 pub const Ring = struct {
-    entries: std.ArrayList(Entry) = .empty,
+    /// 오래된 것부터(번호 차례). 상한에서 앞을 버리는 일이 요청마다 있어 배열을 밀지 않는 deque 다(F10 — 밀면 2700 줄을 요청마다 옮겼다).
+    entries: std.Deque(Entry) = .empty,
     /// CEF 요청 번호 → 번호(진행 중인 것만 — 끝나면 뺀다).
     live: std.AutoHashMapUnmanaged(u64, u64) = .empty,
     next_seq: u64 = 1,
@@ -201,8 +237,10 @@ pub const Ring = struct {
     /// 지켜보기가 끝났다(마지막 `browser_network` grant 가 사라졌다) — 요청·읽는 쪽을 모두 지운다. 번호는 이어 간다(다시 허락한 뒤의 옛
     /// 번호가 새 요청을 가리키지 않게).
     pub fn wipe(self: *Ring, gpa: std.mem.Allocator, budget: *Budget) void {
-        for (self.entries.items) |*e| e.deinit(gpa);
-        self.entries.clearRetainingCapacity();
+        var it = self.entries.iterator();
+        while (it.nextPtr()) |e| e.deinit(gpa);
+        self.entries.head = 0;
+        self.entries.len = 0;
         self.live.clearRetainingCapacity();
         budget.bytes -|= self.summary_bytes + self.detail_bytes;
         self.summary_bytes = 0;
@@ -236,8 +274,9 @@ pub const Ring = struct {
         return &self.readers[self.reader_count - 1];
     }
 
-    /// 그 탭에 `browser_network` grant 가 들어왔다 — 읽는 쪽 `who` 의 시작점을 지금으로(이미 있으면 그대로 — 같은 허락을 다른 사이트로
-    /// 다시 허용한 것은 이어진다). `at_birth` — 에이전트가 연 탭이라 grant 가 탭과 함께 생겼다: 처음부터 본다.
+    /// 그 탭에 `browser_network` grant 가 들어왔다 — 읽는 쪽 `who` 의 시작점을 지금으로(이미 있으면 그대로 — 같은 grant 번호다). 다른
+    /// 사이트로 다시 허용한 것은 저장소가 새 번호를 주므로 새 읽는 쪽으로 지금부터 시작한다(W9d① 적대 리뷰 1 회차 F1 — 그 사이트의 허락 전
+    /// 요청이 보였다). `at_birth` — 에이전트가 연 탭이라 grant 가 탭과 함께 생겼다: 처음부터 본다.
     pub fn noteReader(self: *Ring, who: Authorizer, at_birth: bool) void {
         if (who == 0) return;
         if (self.findReader(who)) |r| {
@@ -311,10 +350,10 @@ pub const Ring = struct {
 
     fn indexOfSeq(self: *const Ring, seq: u64) ?usize {
         var lo: usize = 0;
-        var hi: usize = self.entries.items.len;
+        var hi: usize = self.entries.len;
         while (lo < hi) {
             const mid = (lo + hi) / 2;
-            const s = self.entries.items[mid].seq;
+            const s = self.entries.atPtr(mid).seq;
             if (s == seq) return mid;
             if (s < seq) lo = mid + 1 else hi = mid;
         }
@@ -324,17 +363,18 @@ pub const Ring = struct {
     fn liveEntry(self: *Ring, request: u64) ?*Entry {
         const seq = self.live.get(request) orelse return null;
         const i = self.indexOfSeq(seq) orelse return null;
-        return &self.entries.items[i];
+        return self.entries.atPtr(i);
     }
 
     fn dupeHeaders(gpa: std.mem.Allocator, block: msg.NetHeaderBlock, truncated: bool, stripped: bool) !Headers {
         return .{ .count = block.count, .bytes = try gpa.dupe(u8, block.bytes), .truncated = truncated, .stripped = stripped };
     }
 
-    /// 새 요청(같은 CEF 번호가 이미 있으면 버린다 — sidecar 는 한 번만 보낸다).
-    pub fn begin(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetBegin) std.mem.Allocator.Error!void {
+    /// 새 요청(같은 CEF 번호가 이미 있으면 버린다 — sidecar 는 한 번만 보낸다). `ctx` 는 그때 app 이 아는 탭의 것(F2·F4).
+    pub fn begin(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetBegin, ctx: BeginContext) std.mem.Allocator.Error!void {
         if (self.live.contains(v.request)) return;
-        const summary = entry_overhead + v.method.len + v.url.len + v.initiator.len + v.site.len;
+        const top = topHostOf(v, ctx.top_host);
+        const summary = entry_overhead + v.method.len + v.url.len + v.initiator.len + v.site.len + top.len;
         const detail_len = v.headers.bytes.len;
         if (!self.makeRoom(gpa, budget, summary, detail_len)) {
             self.unrecorded +|= 1;
@@ -347,10 +387,12 @@ pub const Ring = struct {
         e.url = try gpa.dupe(u8, v.url);
         e.initiator = try gpa.dupe(u8, v.initiator);
         e.site = try gpa.dupe(u8, v.site);
+        e.top_host = try gpa.dupe(u8, top);
+        e.sw_shared = ctx.sw_shared and v.flags.service_worker;
         e.request_headers = try dupeHeaders(gpa, v.headers, v.flags.headers_truncated, v.flags.stripped);
         try self.live.put(gpa, v.request, e.seq);
         errdefer _ = self.live.remove(v.request);
-        try self.entries.append(gpa, e);
+        try self.entries.pushBack(gpa, e);
         self.next_seq += 1;
         self.charge(budget, summary, detail_len);
     }
@@ -427,8 +469,7 @@ pub const Ring = struct {
     /// sidecar 가 넘긴 요청 수 — 마지막이 표지면 거기에 더한다(쏟아질 때 표지가 요청을 밀어내지 않게).
     pub fn addDropped(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, count: u32) std.mem.Allocator.Error!void {
         if (count == 0) return;
-        if (self.entries.items.len > 0) {
-            const last = &self.entries.items[self.entries.items.len - 1];
+        if (self.entries.backPtr()) |last| {
             if (last.dropped != 0) {
                 last.dropped +|= count;
                 return;
@@ -438,7 +479,7 @@ pub const Ring = struct {
             self.unrecorded +|= count;
             return;
         }
-        try self.entries.append(gpa, .{ .seq = self.next_seq, .dropped = count, .summary_bytes = entry_overhead });
+        try self.entries.pushBack(gpa, .{ .seq = self.next_seq, .dropped = count, .summary_bytes = entry_overhead });
         self.next_seq += 1;
         self.charge(budget, entry_overhead, 0);
     }
@@ -452,7 +493,7 @@ pub const Ring = struct {
 
     fn entryBySeq(self: *Ring, seq: u64) ?*Entry {
         const i = self.indexOfSeq(seq) orelse return null;
-        return &self.entries.items[i];
+        return self.entries.atPtr(i);
     }
 
     fn charge(self: *Ring, budget: *Budget, summary: usize, detail_len: usize) void {
@@ -466,8 +507,8 @@ pub const Ring = struct {
     fn makeRoom(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, summary: usize, detail_len: usize) bool {
         const total = summary + detail_len;
         var i: usize = 0;
-        while ((self.detail_bytes + detail_len > max_detail_bytes or budget.bytes + total > budget.cap) and i < self.entries.items.len) : (i += 1) {
-            const e = &self.entries.items[i];
+        while ((self.detail_bytes + detail_len > max_detail_bytes or budget.bytes + total > budget.cap) and i < self.entries.len) : (i += 1) {
+            const e = self.entries.atPtr(i);
             if (e.detail_bytes == 0) continue;
             self.detail_bytes -= e.detail_bytes;
             budget.bytes -|= e.detail_bytes;
@@ -478,20 +519,19 @@ pub const Ring = struct {
         var drop: usize = 0;
         var freed_summary: usize = 0;
         var freed_all: usize = 0;
-        while (drop < self.entries.items.len and (self.summary_bytes - freed_summary + summary > max_summary_bytes or budget.bytes -| freed_all + total > budget.cap)) : (drop += 1) {
-            const e = &self.entries.items[drop];
+        while (drop < self.entries.len and (self.summary_bytes - freed_summary + summary > max_summary_bytes or budget.bytes -| freed_all + total > budget.cap)) : (drop += 1) {
+            const e = self.entries.atPtr(drop);
             freed_summary += e.summary_bytes;
             freed_all += e.summary_bytes + e.detail_bytes;
         }
-        if (drop > 0) {
-            for (self.entries.items[0..drop]) |*e| {
-                if (e.request != 0) _ = self.live.remove(e.request);
-                self.summary_bytes -= e.summary_bytes;
-                self.detail_bytes -= e.detail_bytes;
-                budget.bytes -|= e.summary_bytes + e.detail_bytes;
-                e.deinit(gpa);
-            }
-            self.entries.replaceRangeAssumeCapacity(0, drop, &.{});
+        for (0..drop) |_| {
+            const e = self.entries.frontPtr().?;
+            if (e.request != 0) _ = self.live.remove(e.request);
+            self.summary_bytes -= e.summary_bytes;
+            self.detail_bytes -= e.detail_bytes;
+            budget.bytes -|= e.summary_bytes + e.detail_bytes;
+            e.deinit(gpa);
+            _ = self.entries.popFront(); // 앞에서 O(1) — 나머지를 옮기지 않는다
         }
         return budget.bytes + total <= budget.cap and self.summary_bytes + summary <= max_summary_bytes and self.detail_bytes + detail_len <= max_detail_bytes;
     }
@@ -501,6 +541,25 @@ pub const Ring = struct {
     /// 이 읽는 쪽에게 보이는가(목록·자세히 공통) — 시작점 뒤이고, 설정이 꺼졌으면 다른 사이트 iframe 의 것이 아니다.
     fn hiddenIframe(view: View, e: *const Entry) bool {
         return !view.full and policy.crossSiteIframe(e.flags, e.resource_type, e.url, e.initiator, e.site);
+    }
+
+    /// F2: 그 요청이 났을 때 탭의 맨 위 문서가 읽는 쪽의 grant 가 덮는 사이트였나 — 아니면 숨긴다(설정과 무관: 설정이 가르는 것은 덮이는 페이지가
+    /// 보낸 다른 사이트 요청이지, 덮이지 않는 사이트에서의 브라우징이 아니다). 주 프레임 문서 요청은 그 요청이 끝내 연 주소(리다이렉트 뒤)로.
+    fn topCovered(view: View, e: *const Entry) bool {
+        if (!view.top_bound) return true;
+        const top = if (e.flags.main_frame and e.resource_type == 0) (policy.hostOfUrl(e.finalUrl()) orelse "") else e.top_host;
+        return policy.hostCovers(view.grant_host, top);
+    }
+
+    /// F4(설정이 꺼졌을 때): grant 없는 탭이 같은 출처를 보이는 서비스 워커 요청 — 그 탭의 것일 수 있어 수만 센다. 요청이 날 때 그런 탭이
+    /// 있었거나(`sw_shared`) 지금 있다.
+    fn sharedServiceWorker(view: View, e: *const Entry) bool {
+        if (view.full or !e.flags.service_worker) return false;
+        if (e.sw_shared) return true;
+        var ob: [msg.max_net_origin_bytes]u8 = undefined;
+        const origin = policy.originOf(e.initiator, &ob);
+        for (view.shared_sw_origins) |o| if (std.ascii.eqlIgnoreCase(o, if (origin.len > 0) origin else e.initiator)) return true;
+        return false;
     }
 
     /// `browser.network` 의 결과 JSON(`out` 소유). 새것부터, 한 쪽 `page_size` 줄.
@@ -520,7 +579,7 @@ pub const Ring = struct {
         const start = self.startFor(who);
         if (seq == 0 or seq >= self.next_seq or seq < start) return error.UnknownRequest;
         const e = self.entryBySeq(seq) orelse return error.Evicted;
-        if (e.dropped != 0 or hiddenIframe(view, e)) return error.UnknownRequest;
+        if (e.dropped != 0 or !topCovered(view, e) or hiddenIframe(view, e) or sharedServiceWorker(view, e)) return error.UnknownRequest;
         var aw: std.Io.Writer.Allocating = .init(out);
         defer aw.deinit();
         writeDetail(&aw.writer, e, view) catch return error.OutOfMemory;
@@ -582,18 +641,21 @@ fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query) !
     var hidden_before: usize = 0;
     var dropped: u64 = 0;
     var iframes_hidden: usize = 0;
+    var other_top_hidden: usize = 0;
+    var sw_hidden: usize = 0;
     var url_buf: [msg.max_net_url_bytes]u8 = undefined;
     const page_size = @min(@max(q.page_size, 1), max_page_size);
     const skip = q.page * page_size;
     var matched: usize = 0;
     var written: usize = 0;
+    var last_written: u64 = 0;
     try s.beginObject();
     try s.objectField("requests");
     try s.beginArray();
-    var i = ring.entries.items.len;
+    var i = ring.entries.len;
     while (i > 0) {
         i -= 1;
-        const e = &ring.entries.items[i];
+        const e = ring.entries.atPtr(i);
         if (e.seq < start) {
             if (e.dropped == 0) hidden_before += 1;
             continue;
@@ -602,30 +664,52 @@ fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query) !
             dropped += e.dropped;
             continue;
         }
+        if (!Ring.topCovered(view, e)) {
+            other_top_hidden += 1;
+            continue;
+        }
         if (Ring.hiddenIframe(view, e)) {
             iframes_hidden += 1;
             continue;
         }
+        if (Ring.sharedServiceWorker(view, e)) {
+            sw_hidden += 1;
+            continue;
+        }
         if (!Matcher.matches(e, view, q, &url_buf)) continue;
+        // 커서는 줄을 고를 때만 — 숨김·버림 수는 쪽마다 같다.
+        if (q.before_req) |b| if (e.seq >= b) continue;
         matched += 1;
         if (matched <= skip or written >= page_size) continue;
         written += 1;
+        last_written = e.seq;
         try writeSummary(&s, e, view, &url_buf);
     }
     try s.endArray();
     try s.objectField("hidden_before_grant");
     try s.write(hidden_before);
+    if (view.top_bound) {
+        try s.objectField("hidden_other_site_pages");
+        try s.write(other_top_hidden);
+    }
     try s.objectField("dropped");
     try s.write(dropped);
     if (!view.full) {
         try s.objectField("cross_site_iframe_hidden");
         try s.write(iframes_hidden);
+        try s.objectField("service_worker_shared_hidden");
+        try s.write(sw_hidden);
     }
     try s.objectField("full_details");
     try s.write(view.full);
     if (matched > skip + written) {
         try s.objectField("next_page");
         try s.write(q.page + 1);
+        // 커서 — 새 요청이 와도 다음 쪽이 밀리지 않는다(F7).
+        if (written > 0) {
+            try s.objectField("next_before_req");
+            try s.write(last_written);
+        }
     }
     try s.endObject();
 }
@@ -687,7 +771,8 @@ fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []
             try s.write(e.error_code);
         }
     }
-    if (e.redirects > 0) {
+    // 리다이렉트 수는 서버가 고른 것이다 — 설정이 꺼졌으면 덮이는 요청에만(F8).
+    if (e.redirects > 0 and view.covers(e.url)) {
         try s.objectField("redirects");
         try s.write(e.redirects);
     }
@@ -719,6 +804,34 @@ fn writeHeaders(s: *std.json.Stringify, h: Headers, view: View) !void {
             },
         }
         try s.endObject();
+    }
+    try s.endArray();
+}
+
+/// 리다이렉트 홉 배열(`redirects`) — 덮이는 요청의 자세히에만(`writeDetail`).
+fn writeHops(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u8) !void {
+    try s.objectField("redirects");
+    try s.beginArray();
+    var from: []const u8 = e.url;
+    for (e.hops.items) |h| {
+        try s.beginObject();
+        if (view.covers(from)) {
+            try s.objectField("status");
+            try s.write(h.status);
+            try s.objectField("url");
+            try s.write(shownUrl(view, h.url, url_buf));
+            if (h.hsts) {
+                try s.objectField("hsts");
+                try s.write(true);
+            }
+            try s.objectField("headers");
+            try writeHeaders(s, h.headers, view);
+        } else {
+            try s.objectField("other_site");
+            try s.write(true);
+        }
+        try s.endObject();
+        from = h.url;
     }
     try s.endArray();
 }
@@ -761,31 +874,8 @@ fn writeDetail(w: *std.Io.Writer, e: *const Entry, view: View) !void {
         try s.objectField("detail_evicted");
         try s.write(true);
     } else {
-        // 리다이렉트 홉 — 그 홉을 보낸 곳(앞 주소)이 덮일 때만 상태·대상·헤더.
-        try s.objectField("redirects");
-        try s.beginArray();
-        var from: []const u8 = e.url;
-        for (e.hops.items) |h| {
-            try s.beginObject();
-            if (view.covers(from)) {
-                try s.objectField("status");
-                try s.write(h.status);
-                try s.objectField("url");
-                try s.write(shownUrl(view, h.url, &url_buf));
-                if (h.hsts) {
-                    try s.objectField("hsts");
-                    try s.write(true);
-                }
-                try s.objectField("headers");
-                try writeHeaders(&s, h.headers, view);
-            } else {
-                try s.objectField("other_site");
-                try s.write(true);
-            }
-            try s.endObject();
-            from = h.url;
-        }
-        try s.endArray();
+        // 리다이렉트 홉 — 그 홉을 보낸 곳(앞 주소)이 덮일 때만 상태·대상·헤더. 덮이지 않는 요청이면 홉 수도 서버가 고른 것이라 칸째 없다(F8).
+        if (view.covers(e.url)) try writeHops(&s, e, view, &url_buf);
         // 요청 헤더는 그 요청의 주소가 덮일 때만(다른 사이트에 보낸 쿠키다).
         if (view.covers(e.url)) {
             try s.objectField("request_headers");
@@ -821,8 +911,8 @@ const T = struct {
         self.ring.deinit(testing.allocator, &self.budget);
     }
 
-    fn begin(self: *T, request: u64, url: []const u8, opts: struct { flags: msg.NetFlags = .{}, rt: u8 = 13, initiator: []const u8 = "", site: []const u8 = "", headers: msg.NetHeaderBlock = .{} }) !void {
-        try self.ring.begin(testing.allocator, &self.budget, .{ .browser = 1, .request = request, .flags = opts.flags, .resource_type = opts.rt, .time_ms = 1000 + request, .url = url, .initiator = opts.initiator, .site = opts.site, .headers = opts.headers });
+    fn begin(self: *T, request: u64, url: []const u8, opts: struct { flags: msg.NetFlags = .{}, rt: u8 = 13, initiator: []const u8 = "", site: []const u8 = "", headers: msg.NetHeaderBlock = .{}, top: []const u8 = "", sw_shared: bool = false }) !void {
+        try self.ring.begin(testing.allocator, &self.budget, .{ .browser = 1, .request = request, .flags = opts.flags, .resource_type = opts.rt, .time_ms = 1000 + request, .url = url, .initiator = opts.initiator, .site = opts.site, .headers = opts.headers }, .{ .top_host = opts.top, .sw_shared = opts.sw_shared });
     }
 
     fn respond(self: *T, request: u64, status: u16, headers: msg.NetHeaderBlock) !void {
@@ -986,7 +1076,8 @@ test "W9d①: 상한 — 요약이 넘치면 오래된 요청부터 버리고(�
     defer testing.allocator.free(j);
     try testing.expect(std.mem.indexOf(u8, j, "\"detail_evicted\":true") != null);
     var sum: usize = 0;
-    for (d.ring.entries.items) |e| sum += e.summary_bytes + e.detail_bytes;
+    var it = d.ring.entries.iterator();
+    while (it.nextPtr()) |e| sum += e.summary_bytes + e.detail_bytes;
     try testing.expectEqual(sum, d.budget.bytes);
     // 앱 예산 — 다른 탭이 다 쓰면 이 탭은 제 것을 버려 자리를 내고, 낼 것이 없으면 적지 못한 수를 표지로 남긴다.
     var g: T = .{ .budget = .{ .cap = 4096, .bytes = 0 } };
@@ -994,7 +1085,7 @@ test "W9d①: 상한 — 요약이 넘치면 오래된 요청부터 버리고(�
     g.ring.noteReader(7, true);
     g.budget.bytes = 4096; // 다른 탭이 다 썼다
     try g.begin(1, "https://a.test/", .{});
-    try testing.expectEqual(@as(usize, 0), g.ring.entries.items.len);
+    try testing.expectEqual(@as(usize, 0), g.ring.entries.len);
     g.budget.bytes = 0;
     try g.begin(2, "https://a.test/2", .{});
     const p = try g.listJson(7, .{}, .{});
@@ -1163,4 +1254,158 @@ test "W9d①: 쪽 나누기 — 기본 50, 최대 200, next_page, 종류·메서
     const u = try t.listJson(7, .{}, .{ .url_contains = "ITEM/7", .method = "get" });
     defer u.deinit();
     try testing.expectEqual(@as(usize, 11), u.value.object.get("requests").?.array.items.len); // 7, 70..79
+}
+
+// ── W9d① 적대 리뷰 1 회차 재현(리뷰가 남긴 R9d1-L* 를 붙여 실패를 본 뒤 고쳤다 — obs 였던 것은 정한 동작을 단언한다) ──────────────────────
+
+test "W9d① 적대 리뷰 1 회차 재현 L1: 쪽을 읽는 사이 새 요청이 와도 before_req 커서로 넘긴 다음 쪽은 앞 쪽과 겹치지 않는다(page 번호는 밀린다)" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    for (1..61) |i| try t.begin(i, "https://a.test/x", .{});
+    var seen = std.AutoHashMap(u64, void).init(testing.allocator);
+    defer seen.deinit();
+    var cursor: u64 = 0;
+    {
+        const p = try t.listJson(7, .{}, .{ .page = 0, .page_size = 50 });
+        defer p.deinit();
+        for (p.value.object.get("requests").?.array.items) |r| try seen.put(@intCast(r.object.get("req").?.integer), {});
+        try testing.expectEqual(@as(i64, 1), p.value.object.get("next_page").?.integer);
+        cursor = @intCast(p.value.object.get("next_before_req").?.integer);
+        try testing.expectEqual(@as(u64, 11), cursor); // 60..11 을 보였다
+    }
+    // 에이전트가 앞 쪽을 읽는 사이 폴링 페이지가 열 개를 더 보냈다
+    for (61..71) |i| try t.begin(i, "https://a.test/poll", .{});
+    var dup: usize = 0;
+    var got: usize = 0;
+    {
+        const p = try t.listJson(7, .{}, .{ .before_req = cursor, .page_size = 50 });
+        defer p.deinit();
+        for (p.value.object.get("requests").?.array.items) |r| {
+            got += 1;
+            if (seen.contains(@intCast(r.object.get("req").?.integer))) dup += 1;
+        }
+        try testing.expect(p.value.object.get("next_before_req") == null); // 끝까지 읽었다
+        try testing.expect(p.value.object.get("next_page") == null);
+        try testing.expectEqual(@as(i64, 0), p.value.object.get("hidden_before_grant").?.integer); // 수는 커서와 무관
+    }
+    try testing.expectEqual(@as(usize, 10), got); // 10..1
+    try testing.expectEqual(@as(usize, 0), dup);
+    // page 번호로 읽으면 여전히 밀린다(호환으로 남긴다 — 문서가 커서를 권한다).
+    const p1 = try t.listJson(7, .{}, .{ .page = 1, .page_size = 50 });
+    defer p1.deinit();
+    try testing.expectEqual(@as(usize, 20), p1.value.object.get("requests").?.array.items.len);
+}
+
+test "W9d① 적대 리뷰 1 회차 재현 L2: 설정이 꺼졌으면 덮이지 않는 요청의 리다이렉트 수(서버가 고른 것)를 목록에도 자세히의 홉 표지로도 보이지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    try t.begin(1, "https://other.test/a", .{ .flags = .{ .main_frame = true }, .site = "app.test", .initiator = "https://app.test" });
+    try t.ring.redirect(testing.allocator, &t.budget, .{ .browser = 1, .request = 1, .status = 302, .url = "https://other.test/login" });
+    try t.ring.redirect(testing.allocator, &t.budget, .{ .browser = 1, .request = 1, .status = 302, .url = "https://other.test/denied" });
+    try t.respond(1, 200, .{});
+    const off: View = .{ .full = false, .grant_host = "app.test" };
+    const p = try t.listJson(7, off, .{});
+    defer p.deinit();
+    const row = p.value.object.get("requests").?.array.items[0].object;
+    try testing.expect(row.get("redirects") == null);
+    const d = try t.ring.detail(testing.allocator, 7, off, 1);
+    defer testing.allocator.free(d);
+    try testing.expect(std.mem.indexOf(u8, d, "\"redirects\"") == null);
+    try testing.expect(std.mem.indexOf(u8, d, "other_site\":true}") == null); // 홉 표지 없음(요청 자체의 other_site 만)
+    // 켜져 있으면 그대로 둘.
+    const on = try t.listJson(7, .{ .full = true, .grant_host = "app.test" }, .{});
+    defer on.deinit();
+    try testing.expectEqual(@as(i64, 2), on.value.object.get("requests").?.array.items[0].object.get("redirects").?.integer);
+}
+
+test "W9d① 적대 리뷰 1 회차 재현 L3: 상한에 닿은 탭에서 오래된 요청을 버려도 남은 요청은 제자리다(배열을 밀지 않는다 — deque)" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    var i: u64 = 1;
+    while (t.ring.summary_bytes + 300 < max_summary_bytes) : (i += 1) try t.begin(i, "https://a.test/api/poll?x=1", .{});
+    // 상한에 닿을 때까지 몇 번 더 — 그 뒤로는 begin 마다 앞의 것을 버린다.
+    for (0..50) |_| {
+        try t.begin(i, "https://a.test/api/poll?x=1", .{});
+        i += 1;
+    }
+    const n_at_cap = t.ring.entries.len;
+    const newest = t.ring.entries.backPtr().?;
+    const newest_seq = newest.seq;
+    var k: u64 = 0;
+    while (k < 2_000) : (k += 1) try t.begin(i + k, "https://a.test/api/poll?x=1", .{});
+    try testing.expectEqual(n_at_cap, t.ring.entries.len); // 상한에서 하나 넣고 하나 버린다
+    // 앞을 2000 번 버린 뒤에도 그 요청은 같은 자리에 있다 — 앞에서 밀었으면 자리가 옮겨졌다.
+    try testing.expectEqual(newest, t.ring.entryBySeq(newest_seq).?);
+}
+
+test "W9d① 적대 리뷰 1 회차 F2: 맨 위 문서 호스트 — 주 프레임 문서는 그 주소, 그 밖은 첫 사이트와 app 의 주소를 맞춰 본다" {
+    const nav: msg.NetBegin = .{ .browser = 1, .request = 1, .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .url = "https://bank.test/login", .site = "bank.test" };
+    try testing.expectEqualStrings("bank.test", topHostOf(nav, "a.test")); // 이동 요청은 그것이 여는 문서
+    const sub: msg.NetBegin = .{ .browser = 1, .request = 2, .flags = .{ .main_frame = true }, .resource_type = 13, .url = "https://api.bank.test/x", .site = "bank.test" };
+    try testing.expectEqualStrings("www.bank.test", topHostOf(sub, "www.bank.test")); // 같은 사이트 — 더 좁은 app 의 호스트
+    try testing.expectEqualStrings("bank.test", topHostOf(sub, "a.test")); // 엇갈림 — 요청이 말한 사이트
+    try testing.expectEqualStrings("bank.test", topHostOf(sub, "")); // app 이 아직 모른다
+    const iframe: msg.NetBegin = .{ .browser = 1, .request = 3, .flags = .{ .subframe = true }, .resource_type = 13, .url = "https://ads.test/p", .site = "" };
+    try testing.expectEqualStrings("a.test", topHostOf(iframe, "a.test")); // 다른 사이트 iframe 안 — 첫 사이트가 비어 온다
+}
+
+test "W9d① 적대 리뷰 1 회차 F2: 사이트에 묶인 읽는 쪽은 탭이 그 사이트가 아닐 때의 요청을 못 본다(설정과 무관 — 수만), 어느 호스트든 읽는 쪽은 다 본다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    var bank_h: net_fields.HeaderBuilder = .{};
+    _ = bank_h.add("Cookie", "bank=SECRET1");
+    try t.begin(1, "https://a.test/", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test", .top = "" });
+    try t.begin(2, "https://a.test/api", .{ .flags = .{ .main_frame = true }, .site = "a.test", .top = "a.test" });
+    // 사용자가 그 탭으로 은행에 갔다 — 이동과 그 문서의 요청(그 문서 안의 a.test 이미지도 은행 문서에서 났다).
+    try t.begin(3, "https://bank.test/login", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "bank.test", .top = "a.test", .headers = bank_h.block() });
+    try t.begin(4, "https://bank.test/api", .{ .flags = .{ .main_frame = true }, .site = "bank.test", .top = "bank.test", .headers = bank_h.block() });
+    try t.begin(5, "https://a.test/pixel.png", .{ .flags = .{ .main_frame = true }, .rt = 4, .site = "bank.test", .top = "bank.test" });
+    // a.test 로 돌아왔다.
+    try t.begin(6, "https://a.test/back", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test", .top = "bank.test" });
+    try t.begin(7, "https://bank.test/widget.js", .{ .flags = .{ .main_frame = true }, .rt = 3, .site = "a.test", .top = "a.test" }); // a.test 문서가 보낸 다른 사이트 요청
+    // a.test 에서 시작했지만 은행으로 리다이렉트된 이동 — 그 문서는 은행이다.
+    try t.begin(8, "https://a.test/sso", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test", .top = "a.test" });
+    try t.ring.redirect(testing.allocator, &t.budget, .{ .browser = 1, .request = 8, .status = 302, .url = "https://bank.test/sso" });
+    for ([_]bool{ true, false }) |full| {
+        const bound: View = .{ .full = full, .grant_host = "a.test", .top_bound = true };
+        try expectReqs(&t, 7, bound, &.{ 7, 6, 2, 1 });
+        const p = try t.listJson(7, bound, .{});
+        defer p.deinit();
+        try testing.expectEqual(@as(i64, 4), p.value.object.get("hidden_other_site_pages").?.integer);
+        for ([_]u64{ 3, 4, 5, 8 }) |req| try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, req));
+    }
+    // 어느 호스트든(에이전트 탭의 태어날 때 grant·cap) — 다 보이고 그 수 칸도 없다.
+    try expectReqs(&t, 7, .{ .full = true }, &.{ 8, 7, 6, 5, 4, 3, 2, 1 });
+    const any = try t.listJson(7, .{ .full = true }, .{});
+    defer any.deinit();
+    try testing.expect(any.value.object.get("hidden_other_site_pages") == null);
+    // 은행에 묶인 읽는 쪽에게는 거꾸로.
+    try expectReqs(&t, 7, .{ .full = true, .grant_host = "bank.test", .top_bound = true }, &.{ 8, 5, 4, 3 });
+}
+
+test "W9d① 적대 리뷰 1 회차 F4: 설정이 꺼졌으면 grant 없는 탭과 같은 출처의 서비스 워커 요청은 수만 — 그때 있었거나 지금 있으면, 켜져 있으면 다 보인다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    const sw: msg.NetFlags = .{ .service_worker = true };
+    try t.begin(1, "https://mail.test/inbox", .{ .flags = sw, .initiator = "https://mail.test", .site = "mail.test", .top = "mail.test", .sw_shared = true });
+    try t.begin(2, "https://mail.test/api", .{ .flags = sw, .initiator = "https://mail.test", .site = "mail.test", .top = "mail.test" });
+    try t.begin(3, "https://mail.test/app.js", .{ .flags = .{ .main_frame = true }, .rt = 3, .initiator = "https://mail.test", .site = "mail.test", .top = "mail.test" });
+    const on: View = .{ .full = true, .grant_host = "mail.test" };
+    try expectReqs(&t, 7, on, &.{ 3, 2, 1 }); // 사용자 결정 — 다 보인다
+    const off: View = .{ .full = false, .grant_host = "mail.test" };
+    try expectReqs(&t, 7, off, &.{ 3, 2 }); // 1 은 그때 grant 없는 탭이 같은 출처였다
+    const now_shared = [_][]const u8{"https://MAIL.test"};
+    const off_now: View = .{ .full = false, .grant_host = "mail.test", .shared_sw_origins = &now_shared };
+    try expectReqs(&t, 7, off_now, &.{3}); // 지금 그런 탭이 있다 — 서비스 워커 요청은 모두 수만
+    const p = try t.listJson(7, off_now, .{});
+    defer p.deinit();
+    try testing.expectEqual(@as(i64, 2), p.value.object.get("service_worker_shared_hidden").?.integer);
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, off_now, 2));
+    const d = try t.ring.detail(testing.allocator, 7, on, 1);
+    testing.allocator.free(d);
 }

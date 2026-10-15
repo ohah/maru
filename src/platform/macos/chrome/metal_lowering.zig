@@ -295,8 +295,8 @@ pub fn lower(
             .rule => {},
             .clip => |rect| g.clip_rect = rect,
             .quad => |q| {
-                const rounded = q.corner_radii[0] != 0 or q.corner_radii[1] != 0 or q.corner_radii[2] != 0 or q.corner_radii[3] != 0;
-                if (!rounded and (!d.independent_panel or background_seen.*)) {
+                // 패널인가는 `Quad.drawsAsPanel` 하나가 정한다 — 포인터 판정(`Quad.visibleRectIn`)과 같은 사본이다. 독립 패널 몫은 첫 quad 만.
+                if (!q.drawsAsPanel(d.independent_panel and !background_seen.*)) {
                     paintRectBg(g, who, cw, ch, q.rect, .{ .rgb = tk.get(q.fill_role) }, null);
                 } else if (background_seen.*) {
                     appendWidgetQuad(&gpu_quads, allocator, q, tk);
@@ -567,6 +567,246 @@ test "Lab lowering carries the component clip and drops a quad whose clip has ze
     const widget = raster.gpu_quads.items[1];
     try std.testing.expectEqual(@as(f32, 160), widget.clip_w);
     try std.testing.expectEqual(@as(f32, 24), widget.clip_h);
+}
+
+// **그린 패널 = 누르는 패널**(2026-10-15). 「첫 quad 가 패널이면 패딩만큼 커 보인다」는 규칙을 lowering(`Quad.drawsAsPanel`)과 포인터
+// 판정(`Quad.visibleRectIn`)이 한 사본으로 쓴다 — 예전에는 판정 자리마다 패딩을 손으로 더해, 모서리·독립 패널 여부에 따라 그림과
+// 갈렸다(#4465·#4471 의 「보이는 패널 안쪽 가장자리를 눌러도 닫힌다」가 그 결과다). host 의 `collect*Draws` 를 거쳐 그 draw 가 싣는
+// `independent_panel` 까지 함께 재고, 제품 lowering 이 **실제로 그린** 사각형의 네 변 안팎 한 점씩을 컴포넌트의 판정에 묻는다.
+// **두 모양으로 돈다** — 제품(둥긂)과 모서리 0. 모서리 0 이면 독립 패널만 패널로 키우고 나머지는 셀 배경(첫 quad 사각형 그대로)이라,
+// 판정이 모서리와 상관없이 손으로 키우던 옛 사본은 여기서 갈린다(둥근 모양만 재면 그 사본도 초록이다).
+test "ML-VIS 오버레이마다 제품 lowering 이 그린 사각형과 컴포넌트의 포인터 판정이 같은 사각형이다 — 둥긂·모서리 0·직각 독립 패널·비교 뷰 막대" {
+    const theme = std.mem.zeroes(chrome.tokens.ThemeColors);
+    const tk = chrome.Tokens.rich(theme);
+    const rich: chrome.ChromeProps = .{
+        .metrics = .{ .cell_width_px = 8, .cell_height_px = 16, .sidebar_width_px = 0, .backing_width_px = 1200, .backing_height_px = 800 },
+        .shape = .fromTokens(&tk),
+    };
+    try std.testing.expect(rich.shape.modal_padding_px > 0 and rich.shape.corner_radius_px > 0); // 전제: 제품 모양
+    var flat = rich;
+    flat.shape.corner_radius_px = 0; // 패딩은 둔다 — 모서리만 0 이어야 「키우나」 분기를 잰다
+    var misses: usize = 0;
+    try mlVisCase(rich, &tk, &misses);
+    try mlVisCase(flat, &tk, &misses);
+    try std.testing.expectEqual(@as(usize, 0), misses); // 갈린 것은 위에 모양·이름으로 찍혔다
+}
+
+const MlVis = struct {
+    const R = chrome.draw.Rect;
+    /// 제품 lowering 이 그 draw 의 첫 quad 로 **그린** 사각형 — 패널이면 GPU quad(키운 것), 아니면 셀 배경(첫 quad 사각형 그대로).
+    fn drawnRect(d: chrome.ChromeDraw, t: *const chrome.Tokens) !R {
+        var raster = try lower(std.testing.allocator, &.{d}, t, 8, 16, false);
+        defer raster.deinit(std.testing.allocator);
+        const first: chrome.draw.Op.Quad = for (d.ops) |op| switch (op) {
+            .quad => |q| break q,
+            else => {},
+        } else return error.NoQuad;
+        if (!first.drawsAsPanel(d.independent_panel)) {
+            // 셀 배경 — 키운 패널 사각형의 GPU quad 가 없어야 한다(있으면 lowering 과 술어가 갈렸다).
+            const pr = first.panelRect(t.space.modal_padding_px);
+            for (raster.gpu_quads.items) |g| {
+                if (g.x == @as(f32, @floatFromInt(pr.x)) and g.y == @as(f32, @floatFromInt(pr.y)) and
+                    g.w == @as(f32, @floatFromInt(pr.w)) and g.h == @as(f32, @floatFromInt(pr.h))) return error.UnexpectedPanel;
+            }
+            return first.rect;
+        }
+        if (raster.gpu_quads.items.len == 0) return error.NoPanelQuad;
+        const g = raster.gpu_quads.items[0];
+        return .{ .x = @intFromFloat(g.x), .y = @intFromFloat(g.y), .w = @intFromFloat(g.w), .h = @intFromFloat(g.h) };
+    }
+    /// 판정 `ctx.hit` 이 그 draw 의 그린 사각형과 같은가 — 네 변 바로 안은 참, 바로 밖은 거짓. **멈추지 않고 센다**(`miss`) — 하나가
+    /// 틀려도 나머지를 다 재서 무엇이 갈렸는지 한 번에 이름으로 보인다.
+    fn check(miss: *usize, shape: []const u8, name: []const u8, d: chrome.ChromeDraw, t: *const chrome.Tokens, ctx: anytype) void {
+        const r = drawnRect(d, t) catch |e| {
+            std.debug.print("ML-VIS {s} {s}: no drawn rect ({s})\n", .{ shape, name, @errorName(e) });
+            miss.* += 1;
+            return;
+        };
+        const x0: f64 = @floatFromInt(r.x);
+        const y0: f64 = @floatFromInt(r.y);
+        const x1 = x0 + @as(f64, @floatFromInt(r.w));
+        const y1 = y0 + @as(f64, @floatFromInt(r.h));
+        const mx = (x0 + x1) / 2;
+        const my = (y0 + y1) / 2;
+        for ([_][2]f64{ .{ x0, my }, .{ x1 - 0.5, my }, .{ mx, y0 }, .{ mx, y1 - 0.5 } }) |pt| if (!ctx.hit(pt[0], pt[1])) {
+            std.debug.print("ML-VIS {s} {s}: hit says outside at ({d},{d}) inside the drawn rect {any}\n", .{ shape, name, pt[0], pt[1], r });
+            miss.* += 1;
+            return;
+        };
+        for ([_][2]f64{ .{ x0 - 0.5, my }, .{ x1, my }, .{ mx, y0 - 0.5 }, .{ mx, y1 } }) |pt| if (ctx.hit(pt[0], pt[1])) {
+            std.debug.print("ML-VIS {s} {s}: hit says inside at ({d},{d}) outside the drawn rect {any}\n", .{ shape, name, pt[0], pt[1], r });
+            miss.* += 1;
+            return;
+        };
+    }
+    fn one(draws: []const chrome.ChromeDraw) !chrome.ChromeDraw {
+        if (draws.len != 1) return error.UnexpectedDrawCount;
+        return draws[0];
+    }
+};
+
+fn mlVisCase(p: chrome.ChromeProps, tk: *const chrome.Tokens, miss: *usize) !void {
+    const shape: []const u8 = if (p.shape.corner_radius_px == 0) "corner0" else "rich";
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var host: chrome.ChromeHost = .{};
+    defer host.deinit(std.testing.allocator);
+    const C = chrome.components;
+    // 우클릭 메뉴.
+    {
+        const items = [_][]const u8{ "Rename", "Close" };
+        host.context_menu.show(300, 200, items.len);
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectContextMenuDraws(&items, p, tk, arena, &draws);
+        const Ctx = struct {
+            h: *const chrome.ChromeHost,
+            it: []const []const u8,
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                return C.context_menu.contains(&c.h.context_menu, c.it, c.p, x, y);
+            }
+        };
+        MlVis.check(miss, shape, "context_menu", try MlVis.one(draws.items), tk, Ctx{ .h = &host, .it = &items, .p = p });
+        host.context_menu.hide();
+    }
+    // 팔레트(피커 셋이 빌려 그린다).
+    {
+        const rows = [_]C.palette.Row{ .{ .title = "a", .binding = "", .selected = false }, .{ .title = "b", .binding = "", .selected = false } };
+        host.palette.show();
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectPaletteDraws(&rows, p, tk, arena, &draws);
+        const Ctx = struct {
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                return (C.palette.panelHit(c.p, 2, x, y) orelse .outside) != .outside;
+            }
+        };
+        MlVis.check(miss, shape, "palette", try MlVis.one(draws.items), tk, Ctx{ .p = p });
+        host.palette.hide();
+    }
+    // 알림 패널 — 말풍선 꼬리가 붙는 경계(`visiblePanelRect`)도 같은 사각형이다.
+    {
+        const items = [_]C.notifications.Item{.{ .title = "maru", .body = "done", .relative_time = "1m", .is_read = false, .is_alive = true }};
+        host.notifications.show(100, 50, items.len);
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectNotificationsDraws(&items, p, tk, arena, &draws);
+        const d = try MlVis.one(draws.items);
+        const Ctx = struct {
+            h: *const chrome.ChromeHost,
+            it: []const C.notifications.Item,
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                return C.notifications.hitTest(&c.h.notifications, c.it, c.p, x, y) != null;
+            }
+        };
+        MlVis.check(miss, shape, "notifications", d, tk, Ctx{ .h = &host, .it = &items, .p = p });
+        const Edge = struct {
+            h: *const chrome.ChromeHost,
+            it: []const C.notifications.Item,
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                const r = C.notifications.visiblePanelRect(&c.h.notifications, c.it, c.p) orelse return false;
+                return r.containsPx(x, y);
+            }
+        };
+        MlVis.check(miss, shape, "notifications.visiblePanelRect", d, tk, Edge{ .h = &host, .it = &items, .p = p });
+        host.notifications.hide();
+    }
+    // 호버 상자.
+    {
+        const lines = [_]C.hover_box.Line{.{ .text = "fn foo() void" }};
+        host.hover_box.show(300, 300, 16);
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectHoverBoxDraws(&lines, p, tk, arena, &draws);
+        const Ctx = struct {
+            h: *const chrome.ChromeHost,
+            l: []const C.hover_box.Line,
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                return C.hover_box.contains(&c.h.hover_box, c.l, c.p, x, y);
+            }
+        };
+        MlVis.check(miss, shape, "hover_box", try MlVis.one(draws.items), tk, Ctx{ .h = &host, .l = &lines, .p = p });
+        host.hover_box.hide();
+    }
+    // 이름 바꾸기 상자(입력 상자 quad 가 패널).
+    {
+        host.rename_box.show(300, 300, 16);
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectRenameBoxDraws("name", 4, p, tk, arena, &draws);
+        const Ctx = struct {
+            h: *const chrome.ChromeHost,
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                const r = C.rename_box.visibleRect(&c.h.rename_box, "name", c.p) orelse return false;
+                return r.containsPx(x, y);
+            }
+        };
+        MlVis.check(miss, shape, "rename_box", try MlVis.one(draws.items), tk, Ctx{ .h = &host, .p = p });
+        host.rename_box.hide();
+    }
+    // 자동완성 목록(직각 · 독립 패널 · 패딩 = 테두리 폭)과 그 옆 문서 패널 — draw 둘.
+    {
+        const rows = [_]C.suggest_box.Row{ .{ .label = "foo" }, .{ .label = "foobar" } };
+        const docs = [_]C.suggest_docs.Line{.{ .text = "docs line" }};
+        host.suggest_box.show(300, 300, 16);
+        host.suggest_docs.expanded = true;
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectSuggestBoxDraws(&rows, &docs, p, tk, arena, &draws);
+        if (draws.items.len != 2) return error.UnexpectedDrawCount;
+        const List = struct {
+            h: *const chrome.ChromeHost,
+            r: []const C.suggest_box.Row,
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                return C.suggest_box.contains(&c.h.suggest_box, c.r, c.p, x, y);
+            }
+        };
+        MlVis.check(miss, shape, "suggest_box", draws.items[0], tk, List{ .h = &host, .r = &rows, .p = p });
+        const beside = C.suggest_box.boxRect(&host.suggest_box, &rows, p) orelse return error.NoSuggestBox;
+        const Docs = struct {
+            h: *const chrome.ChromeHost,
+            d: []const C.suggest_docs.Line,
+            b: MlVis.R,
+            p: chrome.ChromeProps,
+            fn hit(c: @This(), x: f64, y: f64) bool {
+                return C.suggest_docs.contains(&c.h.suggest_docs, c.d, c.b, c.p, x, y);
+            }
+        };
+        MlVis.check(miss, shape, "suggest_docs", draws.items[1], tk, Docs{ .h = &host, .d = &docs, .b = beside, .p = p });
+        host.suggest_box.hide();
+        host.suggest_docs.expanded = false;
+    }
+    // 찾기 막대 — 일반 · 비교 뷰 열(열 `scope` 가 서면 독립 패널 — 모서리 0 이어도 패널).
+    const FindCtx = struct {
+        h: *const chrome.ChromeHost,
+        p: chrome.ChromeProps,
+        fn hit(c: @This(), x: f64, y: f64) bool {
+            return C.find.visibleContains(&c.h.find, c.p, x, y);
+        }
+    };
+    host.find.show();
+    {
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectDraws(p, tk, arena, &draws);
+        MlVis.check(miss, shape, "find", try MlVis.one(draws.items), tk, FindCtx{ .h = &host, .p = p });
+    }
+    {
+        host.find.scope = .{ .x = 600, .y = 0, .w = 600, .h = 400 };
+        host.diff_find_source = 1;
+        var draws: std.ArrayList(chrome.ChromeDraw) = .empty;
+        try host.collectDraws(p, tk, arena, &draws);
+        const d = try MlVis.one(draws.items);
+        if (!d.independent_panel) {
+            std.debug.print("ML-VIS {s} find(diff column): host did not mark the draw independent_panel\n", .{shape});
+            miss.* += 1;
+        }
+        MlVis.check(miss, shape, "find(diff column)", d, tk, FindCtx{ .h = &host, .p = p });
+        host.find.scope = null;
+        host.diff_find_source = 0;
+    }
+    host.find.hide();
 }
 
 test "EF31 independent find panels each retain their background and shadow" {

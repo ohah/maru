@@ -415,6 +415,13 @@ pub fn panelRect(state: *const State, items: []const Item, p: props.ChromeProps)
     return l.rect;
 }
 
+/// 패널이 화면에 **보이는** 사각형 — rich lowering 이 배경 quad 를 패딩만큼 키워 그린다(`Quad.visibleRect`). 바깥 판정(`hitTest`)과
+/// 그 경계에 붙는 장식(사이드바 종 아래 말풍선 꼬리)이 이것을 쓴다 — 패딩을 손으로 더하면 규칙이 바뀔 때 한쪽만 남는다.
+pub fn visiblePanelRect(state: *const State, items: []const Item, p: props.ChromeProps) ?draw.Rect {
+    const l = layout(state, items, p) orelse return null;
+    return panelQuad(l.rect, p).visibleRect(p.shape.modal_padding_px);
+}
+
 /// 카드 목록의 스크롤 창과 뷰포트 rect(SV5a-2) — host가 스크롤바를 발행하는 데 쓴다.
 ///
 /// **컴포넌트는 막대를 그리지 않는다.** 예전에는 여기서 2px 직사각 `.fill`을 손수 그렸는데, 그 복제본
@@ -473,7 +480,7 @@ pub fn hitTest(state: *const State, items: []const Item, p: props.ChromeProps, x
     // 「밖」은 **보이는** 패널 밖이다(`Quad.visibleRect` — rich lowering 이 배경 quad 를 패딩만큼 키워 그린다). 그 안이지만
     // 상자 밖인 패딩 띠는 패널 배경(background)이다 — 키우기 전 rect 로 재면 띠를 눌러도 패널이 닫혔다(2026-10-15).
     if (!rect.containsPx(x_px, y_px)) {
-        return if (panelQuad(rect, p).visibleRect(p.shape.modal_padding_px).containsPx(x_px, y_px)) .background else null;
+        return if (panelQuad(rect, p).visibleRect(p.shape.modal_padding_px).containsPx(x_px, y_px)) .background else null; // `visiblePanelRect` 와 같은 사각형
     }
     const x0: f64 = @floatFromInt(rect.x);
     const y0: f64 = @floatFromInt(rect.y);

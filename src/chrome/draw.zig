@@ -233,14 +233,25 @@ pub const Op = union(enum) {
             return self.rect.outset(.{ .left = p, .right = p, .top = p, .bottom = p });
         }
 
-        /// 이 quad 가 (독립 패널이 아닌) draw 의 **첫 quad** 일 때 화면에 **보이는** 사각형 — 둥글면 패널이라 `panelRect`,
-        /// 모서리 0 이면 셀 배경으로 칠해져 `rect` 그대로다. macOS `metal_lowering`(첫 둥근 quad → `appendModalQuad`)·
-        /// Windows `solid_rects.flattenModal` 과 같은 규칙이다. **바깥 클릭 판정은 이것으로 한다** — `rect` 로 하면 보이는
-        /// 패널 안쪽 가장자리 띠(패딩)를 눌러도 「바깥」이 되어 패널이 닫혔다(2026-10-14·15 적대적 검증).
-        pub fn visibleRect(self: Quad, default_padding_px: u16) Rect {
+        /// draw 의 **첫 quad** 가 패널로 그려지는가 — 둥글거나, draw 가 독립 패널(`ChromeDraw.independent_panel` — 모서리 0 이어도
+        /// GPU 패널)이면 그렇다. 아니면 셀 배경으로 칠해져 키우지 않는다. **이 규칙의 유일한 사본이다** — macOS `metal_lowering` 의
+        /// 패널 분기와 포인터 판정(`visibleRectIn`)이 이것을 부른다. 둘이 각자 적으면 「그린 패널」과 「누르는 패널」이 갈린다.
+        pub fn drawsAsPanel(self: Quad, independent_panel: bool) bool {
             const r = self.corner_radii;
-            if (r[0] == 0 and r[1] == 0 and r[2] == 0 and r[3] == 0) return self.rect;
+            return independent_panel or r[0] != 0 or r[1] != 0 or r[2] != 0 or r[3] != 0;
+        }
+
+        /// 이 quad 가 draw 의 **첫 quad** 일 때 화면에 **보이는** 사각형 — 패널이면(`drawsAsPanel`) `panelRect`, 아니면 `rect` 그대로다.
+        /// **바깥 클릭 판정은 이것으로 한다** — `rect` 로 하면 보이는 패널 안쪽 가장자리 띠(패딩)를 눌러도 「바깥」이 되어 패널이 닫혔다
+        /// (2026-10-14·15 적대적 검증). `independent_panel` 은 그 draw 가 싣는 값과 같아야 한다.
+        pub fn visibleRectIn(self: Quad, default_padding_px: u16, independent_panel: bool) Rect {
+            if (!self.drawsAsPanel(independent_panel)) return self.rect;
             return self.panelRect(default_padding_px);
+        }
+
+        /// 독립 패널이 아닌 draw 의 첫 quad 가 보이는 사각형(`visibleRectIn(…, false)`) — 모달·메뉴·피커·호버처럼 둥근 패널.
+        pub fn visibleRect(self: Quad, default_padding_px: u16) Rect {
+            return self.visibleRectIn(default_padding_px, false);
         }
     };
     pub const GradientKind = enum(u8) { solid = 0, vertical = 1, horizontal = 2 };
@@ -273,6 +284,12 @@ test "Quad.visibleRect: 둥근 quad 는 패널 사각형, 모서리 0 은 rect �
     try testing.expectEqual(Rect{ .x = 88, .y = 38, .w = 224, .h = 104 }, round.visibleRect(12));
     round.panel_padding_px = 1;
     try testing.expectEqual(Rect{ .x = 99, .y = 49, .w = 202, .h = 82 }, round.visibleRect(12));
+    // 독립 패널이면 모서리 0 도 패널이다(직각 완성 목록·비교 뷰의 찾기 막대) — 패널 패딩이 있으면 그것.
+    try testing.expect(!square.drawsAsPanel(false) and square.drawsAsPanel(true));
+    try testing.expectEqual(Rect{ .x = 88, .y = 38, .w = 224, .h = 104 }, square.visibleRectIn(12, true));
+    var tight = square;
+    tight.panel_padding_px = 1;
+    try testing.expectEqual(Rect{ .x = 99, .y = 49, .w = 202, .h = 82 }, tight.visibleRectIn(12, true));
 }
 
 test "Rect.containsPx: 왼쪽·위는 안, 오른쪽·아래는 밖, NaN 은 밖" {

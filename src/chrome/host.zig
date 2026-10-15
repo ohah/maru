@@ -172,11 +172,13 @@ pub const ChromeHost = struct {
         {
             var ops: std.ArrayList(draw.Op) = .empty;
             try find.view(&self.find, p, tk, arena, &ops);
-            if (ops.items.len > 0) try out.append(arena, .{ .layer = find.layer, .ops = ops.items, .independent_panel = self.diff_find_source != 0 });
+            // 독립 패널인가는 컴포넌트가 정한다(`find.independentPanel`) — 포인터 판정(`find.visibleContains`)과 같은 값이어야 그린 막대와
+            // 누르는 막대가 같다.
+            if (ops.items.len > 0) try out.append(arena, .{ .layer = find.layer, .ops = ops.items, .independent_panel = find.independentPanel(&self.find) });
             if (self.diff_find_source != 0) {
                 var secondary_ops: std.ArrayList(draw.Op) = .empty;
                 try find.view(&self.find_secondary, p, tk, arena, &secondary_ops);
-                if (secondary_ops.items.len > 0) try out.append(arena, .{ .layer = find.layer, .ops = secondary_ops.items, .independent_panel = true });
+                if (secondary_ops.items.len > 0) try out.append(arena, .{ .layer = find.layer, .ops = secondary_ops.items, .independent_panel = find.independentPanel(&self.find_secondary) });
             }
         }
     }

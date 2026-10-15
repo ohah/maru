@@ -62,6 +62,13 @@ pub fn boxRect(state: *const State, text: []const u8, p: props.ChromeProps) ?dra
     return .{ .x = placed.rect.x, .y = placed.rect.y, .w = box_w, .h = ch };
 }
 
+/// 상자가 화면에 **보이는** 사각형 — 이 draw 의 첫 quad(`input_box.boxQuad`)를 lowering 이 패딩만큼 키워 그린다(`Quad.visibleRect`).
+/// 포인터가 상자 위인가(`rename.boxContains` — 상자 안 누름을 클릭-어웨이로 읽지 않게)는 이것으로 잰다.
+pub fn visibleRect(state: *const State, text: []const u8, p: props.ChromeProps) ?draw.Rect {
+    const rect = boxRect(state, text, p) orelse return null;
+    return input_box.boxQuad(rect, true, p.shape.corner_radius_px, p.shape.border_width_px).visibleRect(p.shape.modal_padding_px);
+}
+
 /// 상자를 그린다 — 닫혔거나 자리가 없으면 무동작. 글이 상한을 넘으면 꼬리를 보인다(입력줄 규율).
 /// `caret_cols` 는 글 앞에서부터 caret 까지의 표시폭이다 — 편집기(`TextField`)가 caret 을 글 안으로 옮길 수
 /// 있어서 끝에 고정해 그리면 타이핑이 들어가는 자리와 caret 이 어긋난다. 꼬리를 자르면 잘린 만큼 당긴다.

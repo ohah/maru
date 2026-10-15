@@ -1594,7 +1594,8 @@ pub const BrowserConfig = struct {
     /// `~/Downloads` 에 묻지 않고 받는다(같은 이름이면 번호).
     download_ask: bool = false,
     /// W9d①(사용자 결정 2026-10-15 — 「설정으로 켜고 끄게, 기본은 켜진 것으로」): `browser_network` 를 허락받은 에이전트가 Chromium 탭의
-    /// 네트워크 기록을 다 본다 — 모든 헤더 값(쿠키·Set-Cookie·Authorization), 주소의 사용자 정보, 다른 사이트·다른 사이트 iframe 의 요청까지.
+    /// 네트워크 기록을 다 본다 — 헤더 값, 다른 사이트·다른 사이트 iframe 의 요청까지. 쿠키·Set-Cookie·Authorization 값과 주소의 사용자 정보는
+    /// 그 사이트의 쿠키 권한(`browser_storage`)도 받은 에이전트에게만(적대 리뷰 3 회차 D1 — 사용자 결정 「쿠키 권한 있을 때만 보임」).
     /// 끄면 보수적인 투영(docs/plans/web-osr-backend.md 「W9d① 결정」 — 허락한 사이트만 자세히, 헤더 값은 허용 목록만). 앱 로그에는 어느
     /// 쪽이든 주소·헤더를 쓰지 않는다.
     agent_network_full: bool = true,

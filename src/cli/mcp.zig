@@ -103,7 +103,7 @@ pub const tools = [_]Tool{
         .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
     .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — allow up to 2 minutes for the answer); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
-    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests. Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on such a site (even when redirected back). Request bodies are not recorded. WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
+    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests. Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded. WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
         .{ .key = "types", .kind = .string, .flag = "--type", .description = "request types separated by commas: document, iframe, stylesheet, script, image, font, xhr (fetch and XHR), media, worker, shared_worker, service_worker, prefetch, favicon, ping, csp_report, object, plugin, preload, other" },
         .{ .key = "method", .kind = .string, .flag = "--method", .description = "HTTP method, like GET or POST" },
         .{ .key = "status", .kind = .string, .flag = "--status", .description = "status code (100-599) or a class like 4xx" },
@@ -113,7 +113,7 @@ pub const tools = [_]Tool{
         .{ .key = "page_size", .kind = .int, .flag = "--page-size", .description = "requests per page (1-200, default 50)", .min = 1, .max = 200 },
         .{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "after this read, show you only newer requests" },
     }) },
-    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers (cookies and login tokens included unless the user turned browser.agent-network-full off), redirects, timing and size. The body is not recorded.", .args = withSurface(&.{
+    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers, redirects, timing and size. Cookie, Set-Cookie and Authorization values (and passwords in addresses) are shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies on that site), even in tabs you opened; otherwise only their names. With browser.agent-network-full off they are never shown. The body is not recorded.", .args = withSurface(&.{
         .{ .key = "req", .kind = .int, .flag = "--req", .description = "req number from browser_network_requests", .required = true, .min = 1, .max = 9_007_199_254_740_991 },
     }) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
@@ -417,7 +417,9 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "(not folders) you mean to send, and expect it to wait for the user's answer. " ++
             "browser_network_requests and browser_network_request (Chromium tabs) need their own permission for the site the tab shows " ++
             "(asked once per site; tabs you opened need none); you see requests made after that permission (tabs you opened: since they were created, " ++
-            "unless the user clicked, typed or navigated in that tab before your first read). Headers include cookies and login tokens unless the " ++
+            "unless the user clicked, typed or navigated in that tab before your first read). Cookie, Set-Cookie and Authorization values are " ++
+            "shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies " ++
+            "on that site), and never when the " ++
             "user turned browser.agent-network-full off; request bodies are not recorded.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
@@ -1099,4 +1101,8 @@ test "W9d①: browser_network_requests·browser_network_request — 인자가 CL
     try testing.expect(std.mem.indexOf(u8, r, "browser_network_requests") != null);
     try testing.expect(std.mem.indexOf(u8, r, "browser.agent-network-full") != null);
     try testing.expect(std.mem.indexOf(u8, r, "request bodies are not recorded") != null);
+    // W9d① 적대 리뷰 3 회차 D1·M1: 자격 증명 값은 쿠키 권한이 있을 때만, 숨긴 이동은 덮이지 않는 사이트에서 시작했거나 지나간 것.
+    try testing.expect(std.mem.indexOf(u8, r, "cookie permission") != null);
+    try testing.expect(std.mem.indexOf(u8, list.description, "started on or passed through such a site") != null);
+    try testing.expect(std.mem.indexOf(u8, one.description, "cookie permission") != null);
 }

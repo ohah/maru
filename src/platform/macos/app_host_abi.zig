@@ -7811,6 +7811,8 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
         consoleAuthorizer(.{ .capability = .{ .nonce = nonce, .generation = op.capability_generation orelse 0 } })
     else
         0;
+    // 설정이 꺼졌을 때 서비스 워커 요청을 가르는 읽는 쪽(적대 리뷰 2 회차 N6 — 그 pane 에게 허락되지 않은 탭). cap 은 그 탭만.
+    const reader_pane: ?u64 = if (op.pane_grant) |g| g.pane else null;
     // grant 호스트는 표의 지금 값으로(좁혀졌으면 좁힌 사이트 — F5). 어느 호스트든 grant(에이전트 탭)·cap 은 묶이지 않는다. 묶인 grant 는 그
     // 사이트가 아닐 때의 요청을 숨긴다(F2 — `web_osr.netView`).
     var current: control_pane_grant.GrantHost = .{};
@@ -7839,7 +7841,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
             }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
             defer parsed.deinit();
             const a = parsed.value;
-            const json = session_mod.web_osr.networkList(allocator, op.surface_id, who, grant_host, host_bound, .{
+            const json = session_mod.web_osr.networkList(allocator, op.surface_id, who, reader_pane, grant_host, host_bound, .{
                 .page = a.page,
                 .page_size = a.page_size,
                 .types = a.types,
@@ -7856,7 +7858,7 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
         .network_request => {
             const parsed = std.json.parseFromSlice(struct { req: u64 }, allocator, op.arg, .{}) catch return completeTabStatus(async_id, .failed, "invalid arguments");
             defer parsed.deinit();
-            const json = session_mod.web_osr.networkDetail(allocator, op.surface_id, who, grant_host, host_bound, parsed.value.req) catch |e| {
+            const json = session_mod.web_osr.networkDetail(allocator, op.surface_id, who, reader_pane, grant_host, host_bound, parsed.value.req) catch |e| {
                 var buf: [512]u8 = undefined;
                 const reason = switch (e) {
                     error.UnknownRequest => std.fmt.bufPrint(&buf, "{{\"reason\":\"unknown_request\",\"message\":\"{s}\"}}", .{network_unknown_reason}),
@@ -7874,7 +7876,10 @@ fn answerNetworkOp(server: *control_server_mod.ControlServer, async_id: u64, op:
 
 /// W9d①: grant 표의 `browser_network` grant 를 web_osr 에 알린다 — 탭마다 지켜보기를 켜고 끄며(sidecar `net_watch`), 사라진 grant 의 읽는
 /// 쪽을 빼고, 마지막 grant 가 사라진 탭의 기록을 지운다. grant 를 바꾸는 자리(모달 승인·에이전트 탭·철회·모두 철회·탭 닫힘)마다 부른다.
+/// 먼저 web_osr 가 남긴 좁히기를 grant 표에 옮긴다(적대 리뷰 2 회차 N2 — web_osr 는 몰 때 제 사본과 지켜보기를 이미 좁혔다. 옮기지 않고
+/// 알리면 옛 「어느 호스트든」 으로 되돌렸다).
 fn syncNetworkWatch() void {
+    _ = takeNetworkNarrowsIntoStore();
     var list: [control_pane_grant.capacity]session_mod.web_osr.NetworkGrant = undefined;
     var n: usize = 0;
     for (control_pane_grant_store.grants[0..control_pane_grant_store.len]) |*g| {
@@ -7884,6 +7889,8 @@ fn syncNetworkWatch() void {
             .who = consoleAuthorizer(.{ .pane_grant = .{ .pane = g.pane, .target = g.target, .scope = g.scope, .id = g.id } }),
             .host = if (g.any_host) "" else g.host.slice(),
             .birth = g.any_host and agentNetworkBirth(g.pane, g.target, g.id),
+            .bound_empty = !g.any_host and g.host.len == 0,
+            .pane = g.pane,
         };
         n += 1;
     }
@@ -7891,15 +7898,21 @@ fn syncNetworkWatch() void {
 }
 
 /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 몬 에이전트 탭의 어느 호스트든 `browser_network` grant 를
-/// 그때의 사이트로 좁힌다 — 다른 사이트는 다시 묻는다. web_osr 가 몰기마다 남긴 것을 인가 앞(control 요청·모달 뒤 재처리·네트워크 읽기)에서
-/// 가져온다. 켜져 있으면 남기지 않는다(사용자 결정 2026-10-15 「그대로 둠」).
+/// 몰기 전의 사이트로 좁힌다 — 다른 사이트는 다시 묻는다. web_osr 가 몰 때(2 회차 N2 — 지켜보기는 그때 곧 좁혔다)·설정이 꺼질 때(N3) 남긴
+/// 것을 인가 앞(control 요청·모달 뒤 재처리·네트워크 읽기)과 grant 동기화 앞에서 가져온다. 켜져 있으면 남기지 않는다(사용자 결정 2026-10-15
+/// 「그대로 둠」).
 fn applyNetworkNarrows() void {
+    if (takeNetworkNarrowsIntoStore()) syncNetworkWatch();
+}
+
+/// 남긴 좁히기를 grant 표에 옮긴다 — 바뀐 것이 있으면 참.
+fn takeNetworkNarrowsIntoStore() bool {
     var buf: [control_pane_grant.max_grants]session_mod.web_osr.NetworkNarrow = undefined;
     var changed = false;
     for (session_mod.web_osr.takeNetworkNarrows(&buf)) |nw| {
         if (control_pane_grant_store.narrowAnyHost(nw.tab, nw.host)) changed = true;
     }
-    if (changed) syncNetworkWatch();
+    return changed;
 }
 
 // ── W9c②: 에이전트가 JS 대화상자를 보고 답한다(`browser.dialog`·`browser.handleDialog`) ─────────────────────────────────────
@@ -14997,6 +15010,77 @@ test "W9d① 적대 리뷰 1 회차 재현 A5(설정 끔): 사용자가 에이�
     var ub: [1024]u8 = undefined;
     const urls = try r9d1Urls(&ub, 194, w9d1Grant(5, 194));
     try std.testing.expectEqualStrings("https://agent.test/ ", urls);
+}
+
+// ── W9d① 적대 리뷰 2 회차 재현(리뷰가 남긴 R9d2-A1 — 붙여 실패를 본 뒤 고쳤다) ──
+
+test "W9d① 적대 리뷰 2 회차 재현 A1: 사용자 탭의 제어와 a.test 네트워크 grant 를 쥔 에이전트가 그 탭을 은행의 SSO(a.test 로 돌려보낸다)로 옮겨도 은행의 세션 Cookie·Set-Cookie 를 읽지 못한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{195});
+    defer w9c2Forget(ta, &.{195});
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 195, .url = "https://a.test/" } });
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 195, .scope = .browser }); // 제어(사이트에 묶이지 않는다)
+    try control_pane_grant_store.grant(.{ .pane = 5, .target = 195, .scope = .browser_network, .host = control_pane_grant.GrantHost.init("a.test") });
+    syncNetworkWatch();
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 195, .browser_network, "bank.test"));
+    // browser.navigate → https://bank.test/sso?return=https://a.test/cb(열린 리다이렉트·조용한 SSO). 최상위 이동이라 은행의 세션 쿠키가
+    // 실린다(SameSite=Lax·HttpOnly 도). 은행은 302 로 a.test 에 돌려보낸다.
+    session_mod.web_osr.testApply(ta, .{ .net_begin = .{ .browser = 195, .request = 77, .url = "https://bank.test/sso?return=https://a.test/cb", .site = "bank.test", .initiator = "null", .flags = .{ .main_frame = true, .navigation = true }, .resource_type = 0, .headers = .{ .count = 1, .bytes = r9d1_cookie_bank } } });
+    session_mod.web_osr.testApply(ta, .{ .net_redirect = .{ .browser = 195, .request = 77, .status = 302, .url = "https://a.test/cb?code=1", .headers = .{ .count = 1, .bytes = "\x0aSet-Cookie\x00\x12bank_sid=NEWSECRET" } } });
+    session_mod.web_osr.testApply(ta, .{ .net_response = .{ .browser = 195, .request = 77, .status = 200, .mime = "text/html" } });
+    session_mod.web_osr.testApply(ta, .{ .net_end = .{ .browser = 195, .request = 77, .received = 10 } });
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 195, .url = "https://a.test/cb?code=1" } });
+    // 돌아온 a.test 문서의 요청은 보인다.
+    r9d1Begin(195, 78, "https://a.test/cb-api", "a.test", r9d1_cookie_a);
+    for ([_]bool{ true, false }) |full| {
+        session_mod.web_osr.setNetworkFull(full);
+        defer session_mod.web_osr.setNetworkFull(true);
+        var ub: [1024]u8 = undefined;
+        try std.testing.expectEqualStrings("https://a.test/cb-api ", try r9d1Urls(&ub, 195, w9d1Grant(5, 195)));
+        try std.testing.expect(!try r9d1DetailHas(195, w9d1Grant(5, 195), 1, "bank=SECRET1"));
+        try std.testing.expect(!try r9d1DetailHas(195, w9d1Grant(5, 195), 1, "NEWSECRET"));
+        const p = try w9d1List(195, w9d1Grant(5, 195), "{\"page\":0,\"page_size\":50,\"types\":[],\"clear\":false}");
+        defer p.deinit();
+        try std.testing.expectEqual(@as(i64, 1), p.value.object.get("result").?.object.get("hidden_other_site_pages").?.integer);
+    }
+}
+
+test "W9d① 적대 리뷰 2 회차 N2·N3: 설정 끔에서 몬 탭의 좁히기는 다른 grant 동기화가 먼저 와도 grant 표에 옮긴 뒤 알린다, 켜진 동안 몬 탭은 설정이 꺼지면 에이전트의 사이트로" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const globals = LifecycleTestGlobalsGuard.install();
+    defer globals.restore();
+    installTransferTestServer();
+    defer uninstallTransferTestServer();
+    const ta = std.testing.allocator;
+    try w9c2Hold(ta, &.{ 196, 197 });
+    defer w9c2Forget(ta, &.{ 196, 197 });
+    defer session_mod.web_osr.setNetworkFull(true);
+    // N2: 끔에서 몰았다 — control 요청이 오기 전에 다른 탭의 grant 가 바뀌어 동기화가 돈다. 옛 「어느 호스트든」 으로 되돌리지 않는다.
+    session_mod.web_osr.setNetworkFull(false);
+    try std.testing.expect(adoptAgentTab(5, 196));
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 196, .url = "https://agent.test/" } });
+    session_mod.web_osr.noteUserNavigation(196);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 196, .url = "https://bank.test/" } });
+    try std.testing.expect(adoptAgentTab(6, 197)); // 다른 pane 의 새 에이전트 탭 — grant 동기화
+    try std.testing.expect(control_pane_grant_store.authorizes(5, 196, .browser_network, "agent.test"));
+    try std.testing.expect(!control_pane_grant_store.authorizes(5, 196, .browser_network, "bank.test"));
+    try std.testing.expect(control_pane_grant_store.authorizes(6, 197, .browser_network, "bank.test")); // 몰지 않은 탭은 그대로
+    // N3: 켜진 동안 몬 탭(197) — 설정이 꺼지면 처음 몰기 전의 사이트로.
+    session_mod.web_osr.setNetworkFull(true);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 197, .url = "https://agent2.test/" } });
+    session_mod.web_osr.noteUserNavigation(197);
+    session_mod.web_osr.testApply(ta, .{ .url_changed = .{ .browser = 197, .url = "https://bank.test/" } });
+    applyNetworkNarrows();
+    try std.testing.expect(control_pane_grant_store.authorizes(6, 197, .browser_network, "bank.test")); // 켬 — 사용자 결정 「그대로 둠」
+    session_mod.web_osr.setNetworkFull(false);
+    applyNetworkNarrows();
+    try std.testing.expect(control_pane_grant_store.authorizes(6, 197, .browser_network, "agent2.test"));
+    try std.testing.expect(!control_pane_grant_store.authorizes(6, 197, .browser_network, "bank.test"));
 }
 
 // ── W9c③: 에이전트의 파일 올리기(`browser.upload`) — 앱 쪽: 모달 전 파일 열기·매번 모달·결정·사본·이어가기·정리 ────────────────────────

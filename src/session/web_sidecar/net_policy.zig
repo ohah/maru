@@ -58,6 +58,16 @@ pub fn anyCovers(hosts: []const []const u8, url: []const u8) bool {
     return false;
 }
 
+/// 사이트에 묶인 grant(`granted`)로 주 프레임 이동 하나를 보여도 되는가(W9d① 적대 리뷰 2 회차 N1) — 처음 주소와 홉마다의 대상(다음 홉·마지막
+/// 응답을 보낸 곳)이 모두 덮일 때만. 마지막 주소만 보면 덮이지 않는 사이트에서 시작해 덮이는 사이트로 돌아오는 이동(OAuth·결제의 돌아오기,
+/// 열린 리다이렉트)이 그 사이트의 쿠키·Set-Cookie 째 보였다. initiator 는 쓰지 않는다 — 브라우저가 시작한 이동은 「null」 이다(실측).
+pub fn navigationCovered(granted: []const u8, first_url: []const u8, hop_urls: []const []const u8) bool {
+    const one = [_][]const u8{granted};
+    if (!anyCovers(&one, first_url)) return false;
+    for (hop_urls) |u| if (!anyCovers(&one, u)) return false;
+    return true;
+}
+
 // ── 주소 ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// `scheme://` 뒤 권한 부분의 `[start, end)` — 없으면 null.
@@ -207,6 +217,15 @@ test "W9d①: hostCovers 는 점 경계로 하위 도메인만 덮는다(grant �
     try testing.expect(!sameSite("www.a.com", "api.a.com"));
     try testing.expect(anyCovers(&.{ "x.test", "a.test" }, "https://www.a.test:8443/p"));
     try testing.expect(!anyCovers(&.{"a.test"}, "data:text/plain,a.test"));
+}
+
+test "W9d① 적대 리뷰 2 회차 N1: 주 프레임 이동은 처음 주소와 홉의 대상이 모두 덮일 때만 — 덮이지 않는 곳에서 시작해 돌아오는 이동은 아니다" {
+    try testing.expect(navigationCovered("a.test", "https://a.test/login", &.{}));
+    try testing.expect(navigationCovered("a.test", "https://a.test/go", &.{ "https://www.a.test/x", "https://a.test/cb" }));
+    try testing.expect(!navigationCovered("a.test", "https://bank.test/sso?return=https://a.test/cb", &.{"https://a.test/cb"}));
+    try testing.expect(!navigationCovered("a.test", "https://a.test/go", &.{ "https://idp.test/auth", "https://a.test/cb" }));
+    try testing.expect(!navigationCovered("a.test", "https://a.test/go", &.{"https://bank.test/"}));
+    try testing.expect(!navigationCovered("", "https://a.test/", &.{}));
 }
 
 test "W9d①: 사용자 정보 지우기 — 권한 안의 마지막 @ 까지, 경로의 @ 는 그대로, 출처는 사용자 정보 없이" {

@@ -78,7 +78,7 @@
 | Dockerfile | `Dockerfile` `Containerfile` `*.dockerfile` | `#` | — | `"'` | 아니오 | — (VS Code 설정은 YAML 것을 베낀 꼴이라 Dockerfile 에 맞지 않는다 — 「의도한 차이」) | — | — |
 | Make | `Makefile` `GNUmakefile` `makefile` `*.mk` | `#` | — | 없음 | 아니오 | — | — | 탭(지금처럼 — 경로 대신 문법으로) |
 | Swift | `swift` | `//` | 예 | `"` | 예(C 계열 — 위 「결정」. VS Code swift 설정엔 들여쓰기 규칙이 없다: 「의도한 차이」) | `case …:`·`default:` 뒤(C 계열과 같은 「의도한 차이」) | — | — |
-| SQL(구문 오류 진단은 끈다 — 아래 「한계」) | `sql` | `--`(이어 쓰지 않는다 — VS Code sql 엔 `onEnterRules` 가 없다) | 예(VS Code 엔 규칙이 없다 — C 계열과 같은 「의도한 차이」) | `'"` | 아니오(VS Code sql 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | — | — | offSide(VS Code `folding.offSide`) |
+| SQL | `sql` | `--`(이어 쓰지 않는다 — VS Code sql 엔 `onEnterRules` 가 없다) | 예(VS Code 엔 규칙이 없다 — C 계열과 같은 「의도한 차이」) | `'"` | 아니오(VS Code sql 설정엔 들여쓰기 규칙이 없다 — 괄호는 기본 규칙뿐) | — | — | offSide(VS Code `folding.offSide`) |
 | Dart | `dart` | `//` | 예 | `"'` | 예(VS Code 내장 설정이 없어 Java·Kotlin 과 같이) | `case …:`·`default:` 뒤 | — | — |
 | C# | `cs` `csx` | `//`(+ `///` 문서 주석은 줄 끝에서도 `/// ` 로 잇는다 — VS Code csharp `onEnterRules`) | 예 | `"'` | 예(C 계열 — VS Code 설정엔 들여쓰기 규칙이 없다: 「의도한 차이」) | `case …:`·`default:` 뒤 | — | — |
 | Objective-C | `m`(`.h` 는 C, `.mm` 은 문법 없음) | `//` | 예 | `"'` | 예(C 계열 — 같은 「의도한 차이」) | `case …:`·`default:` 뒤 | — | — |
@@ -144,19 +144,20 @@
 - 배포물이 커진다(위 크기 — object 합 약 2 배). 사용자 결정이다.
 - 술어 정규식은 번들 쿼리가 쓰는 부분집합만 안다(위 「BLP 설계」). 모르는 구문·모르는 술어 이름은 통과라 그 패턴은 종전처럼 조건 없이 걸린다 — grammar 를 더하면 `PRD5` 가 빠진 정규식을 대고, 생성기로 `PRD2` 표를 다시 뽑는다(`PRD2` 가 모르는 구문을 0 으로 잰다).
 - Dart 는 태그가 없어 커밋으로 고정한다 — 올리는 기준이 판 번호가 아니다.
-- Swift grammar(0.7.4, 최신 태그)는 정상 Swift 몇 꼴에 구문 오류를 낸다. 진단 물결 밑줄이 그 자리에 거짓으로 선다:
+- Swift grammar(0.7.4, 최신 태그)는 정상 Swift 몇 꼴에 오류 노드를 낸다(진단 출처가 아니라 밑줄은 서지 않는다 — 2026-10-15. 오류 복구가
+  뒤 선언을 먹으면 접힘·심볼이 빠질 수 있다):
   - 빈 튜플 값 `()` — `c.yield(())`·`.success(())`·`{ _ in () }`(upstream `alex-pinkus/tree-sitter-swift#633`, 열림)
   - 본문 없는 함수 선언(`@_silgen_name` 꼴) — 뒤 선언까지 오류 복구에 먹혀 접힘·심볼이 빠질 수 있다(실제 파일 하나에서 전부 빠졌다)
   - 함수 안 `nonisolated(unsafe) var`(맨 위는 된다)
   - 공백 뒤 `;`(`b() ; return`)
   - `$` 로 끝나는 정규식 리터럴(`/^a$/`)·`@convention(c)` 캐스트·정규식 속 `\/`
 
-  grammar 를 고치지 않고 받아들인다 — 쿼리·문법은 grammar 가 소유한다. `SYN53` 이 이 꼴들과 이웃한 깨끗한 대조군을 함께 박아,
-  grammar 를 올려 하나라도 고쳐지면 깨진다(그때 이 절을 고친다).
+  grammar 를 고치지 않고 받아들인다 — 쿼리·문법은 grammar 가 소유한다. (이 꼴들을 박던 `SYN53` 은 구문 오류를 진단 출처에서 걷으며 함께
+  걷었다 — 재는 API 가 없어졌다.)
 - SQL grammar(v0.3.11)는 일반 SQL(PostgreSQL 쪽)을 안다. 방언을 못 가린다:
   - SQLite(`AUTOINCREMENT`·`PRAGMA`·`WITHOUT ROWID`·`INSERT OR REPLACE`·SQLite 식 `CREATE TRIGGER`), MySQL(`ENGINE=…`), Perfetto 방언에 구문 오류가 선다.
-    실측: 실제 SQL 57 개 중 12 개, Perfetto 488 개 중 466 개. 그래서 **SQL 은 구문 오류를 진단으로 내지 않는다**(2026-10-15 사용자 결정 —
-    `Grammar.syntaxDiagnostics`, [시각 매핑](../native-editor-visual-mapping.md) §5.4). 진짜 오류도 안 보이는 대가가 있다.
+    실측: 실제 SQL 57 개 중 12 개, Perfetto 488 개 중 466 개. 처음엔 SQL 만 구문 진단을 껐다가(2026-10-15), 같은 날 **구문 오류를 진단
+    출처에서 통째로 걷었다**([시각 매핑](../native-editor-visual-mapping.md) §5.4 「출처 결정」).
   - 중첩 블록 주석(`/* a /* b */ c ( */` — PostgreSQL 은 받는다)을 모른다. 바깥 주석이 첫 `*/` 에서 끝나 뒤 글자가 코드가 되고, 그 안 괄호가 짝 없는
     괄호로 칠해질 수 있다.
   - **숫자가 문자열 색이다.** 쿼리의 숫자 패턴이 `#match?`(정규식)인데 Lua 식 `%d` 를 써서(`"^[-+]?%d+$"`) 어떤 정규식 엔진에서도 안 맞는다
@@ -169,7 +170,7 @@
   - 여러 줄 `#define` 본문 안의 `/* … */`: C grammar 도 같다.
 
   사용자 결정(2026-10-15)으로 **tree-sitter 구문 오류를 진단 출처에서 없애고 진단은 언어 서버로만 받는다**(다른 편집기 — VS Code·Zed·
-  Neovim·Helix — 도 tree-sitter 오류 노드를 진단으로 내지 않는다). 그 변경은 이 계획 밖의 별도 조각이다. 그때까지는 위 꼴에 거짓 밑줄이 선다.
+  Neovim·Helix — 도 tree-sitter 오류 노드를 진단으로 내지 않는다 — 시각 매핑 §5.4). Objective-C 의 언어 서버는 clangd 다.
 - C#(v0.23.5)은 protobuf 생성 코드처럼 `#if` 가 기본 목록 한가운데를 가르는 꼴을 못 푼다(그 밖의 실제 C# 은 0/19). `#region`·`#endregion` 은
   접지 않는다(VS Code 는 접힘 표식으로 접는다).
 - `.m` 은 Objective-C 로 본다 — MATLAB 파일도 `.m` 이라 Objective-C 로 칠해진다(VS Code 의 기본 연결도 같다). `.mm`(Objective-C++)은 문법이 없다.

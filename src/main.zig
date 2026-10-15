@@ -1927,7 +1927,7 @@ fn applyCoreConfig(
 
 // **판정 단계가 늘면 함께 올린다.** 상한을 넘긴 단계는 조용히 안 도는데, 그때 판정 값은 초기값
 // 그대로라 "기능이 죽었다" 로 읽힌다(실측 2026-08-26: 그룹 다시 펴기가  이었다).
-const smoke_spin_cap: usize = 1166;
+const smoke_spin_cap: usize = 1172;
 
 test "상태바 경로: 홈만 ~ 로 줄이고, 애매하면 원본을 둔다" {
     const t = std.testing;
@@ -5810,6 +5810,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var cancel_judgeable = false;
     var cancel_open_before = false;
     var cancel_open_after = true;
+    // 취소 갈래 **자기 구간**(926→930)의 취소 수 — 실행 끝 누계를 보면 뒤 판정자(`modal_blocks_gestures`)가 보탠 취소가 Esc 경로의
+    // 빈자리를 덮는다.
+    var cancel_count_before: usize = 0;
+    var cancel_count_after: usize = 0;
     var cancel_sessions_before: usize = 0;
     var cancel_sessions_after: usize = 0;
     var capmodal_judgeable = false;
@@ -6010,6 +6014,26 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
     var confirm_center_x: i64 = 0;
     var confirm_frame: ?maru.renderer.RenderFrame = null;
     defer if (confirm_frame) |*f| f.deinit(allocator);
+    // 모달이 떠 있는 동안 **새 제스처가 서지 않는가**(smoke 1166~1170) — 디바이더 잡기·도크 스크롤바 누름·도크 본문 누름이 마우스 루프의
+    // 삼킴보다 앞에 있었다. 셋을 눌러 끈 뒤 모달 밖에서 떼고, 세는 값과 도크 크기·키보드 주인이 그대로인지, 뗌이 「바깥 클릭 = 취소」로
+    // 모달을 닫았는지 본다(고치기 전에는 디바이더 드래그가 뗌을 가져가 모달이 열린 채 남았다).
+    var gate_judgeable = false;
+    var gate_bar_probed = false;
+    var gate_grabs_before: usize = 0;
+    var gate_moves_before: usize = 0;
+    var gate_track_before: usize = 0;
+    var gate_size_before: u32 = 0;
+    var gate_focus_moves_before: usize = 0;
+    var gate_cancels_before: usize = 0;
+    var gate_grabs_after: usize = 0;
+    var gate_moves_after: usize = 0;
+    var gate_track_after: usize = 0;
+    var gate_size_after: u32 = 0;
+    var gate_focus_moves_after: usize = 0;
+    var gate_bar_which: []const u8 = "none";
+    var gate_cancels_after: usize = 0;
+    var gate_open_after = true;
+    var gate_bar_drag_after = false;
     var next_session_id: usize = 0;
     var sessions: std.ArrayList(*WinSession) = .empty;
     defer {
@@ -8887,6 +8911,67 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             window.postSyntheticVirtualKey(win32_keys.vk_escape);
             cycle_closes += 1;
         }
+        // ── 모달이 떠 있으면 새 제스처가 안 선다 (2026-10-15) ─────────────────────────
+        //
+        // **자기 모달 주기를 연다**(§2m.80 의 교훈 — 앞선 판정과 같은 모달을 쓰면 서로의 기대를 깬다). 닫을 대상 없이
+        // 직접 띄운다(`pending_close_id = null` — 승낙돼도 아무것도 안 닫힌다). 디바이더를 눌러 끌고, 도크 스크롤바와
+        // 도크 본문을 누른 뒤 **모달 밖(터미널 왼쪽 위)에서 뗀다** — 한 spin 에 넣어 순서대로 돈다.
+        if (smoke and spins == 1166 and !confirm_state.open and geom.divider.w != 0) {
+            gate_judgeable = true;
+            pending_close_id = null;
+            confirm_state.show(maru.i18n.t(.app_close_running), .{
+                .confirm = maru.i18n.t(.btn_close),
+                .cancel = maru.i18n.t(.common_cancel),
+            });
+            confirm_shows += 1;
+            gate_grabs_before = divider_grabs;
+            gate_moves_before = divider_moves;
+            gate_track_before = bar_track_clicks;
+            gate_size_before = dock_size_pt;
+            gate_focus_moves_before = dock_key_focus_takes + dock_key_focus_releases;
+            gate_cancels_before = confirm_cancels;
+            const gx: i32 = @intCast(geom.divider.x + geom.divider.w / 2);
+            const gy: i32 = @intCast(geom.divider.y + geom.divider.h / 2);
+            window.postSyntheticMouse(.moved, gx, gy);
+            window.postSyntheticMouse(.left_down, gx, gy);
+            window.postSyntheticMouse(.moved, gx - 40, gy);
+            // 도크 막대는 explorer 뷰에서만 선다 — 없으면 사이드바 막대를 누른다(둘 다 같은 `left_down` 블록이 받는다).
+            if (dock_bar orelse sidebar_bar) |b| {
+                gate_bar_probed = true;
+                gate_bar_which = if (dock_bar != null) "dock" else "sidebar";
+                const bx: i32 = @intFromFloat(b.hit_x + b.hit_w / 2);
+                const by: i32 = @intFromFloat(b.track_y + b.track_h - 2);
+                window.postSyntheticMouse(.moved, bx, by);
+                window.postSyntheticMouse(.left_down, bx, by);
+            }
+            if (geom.tree_content.w != 0 and geom.tree_content.h != 0) {
+                const tx: i32 = @intCast(geom.tree_content.x + geom.tree_content.w / 2);
+                const ty: i32 = @intCast(geom.tree_content.y + geom.tree_content.h / 2);
+                window.postSyntheticMouse(.moved, tx, ty);
+                window.postSyntheticMouse(.left_down, tx, ty);
+            }
+            const ox: i32 = @intCast(geom.terminal.x + 4);
+            const oy: i32 = @intCast(geom.terminal.y + 4);
+            window.postSyntheticMouse(.moved, ox, oy);
+            window.postSyntheticMouse(.left_up, ox, oy);
+        }
+        if (smoke and spins == 1170 and gate_judgeable) {
+            gate_grabs_after = divider_grabs;
+            gate_moves_after = divider_moves;
+            gate_track_after = bar_track_clicks;
+            gate_size_after = dock_size_pt;
+            gate_focus_moves_after = dock_key_focus_takes + dock_key_focus_releases;
+            gate_cancels_after = confirm_cancels;
+            gate_open_after = confirm_state.open;
+            gate_bar_drag_after = bar_drag != null;
+            // 남은 것이 있으면 되돌린다 — 뒤따르는 판정이 모달·드래그를 물려받지 않게.
+            if (confirm_state.open) {
+                confirm_state.dismiss();
+                pending_close_id = null;
+            }
+            divider_drag = null;
+            bar_drag = null;
+        }
         // ── 목록이 밀려도 지목한 그것이 닫히나 (적대적 검증 3회차) ────────────────────
         //
         // 모달이 떠 있는 동안 **다른** 세션이 사라지면 보류한 대상이 무엇을 가리키나. 번호를 들면
@@ -8971,11 +9056,13 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
         }
         if (smoke and spins == 926 and cancel_judgeable) {
             cancel_open_before = confirm_state.open;
+            cancel_count_before = confirm_cancels;
             window.postSyntheticVirtualKey(win32_keys.vk_escape);
         }
         if (smoke and spins == 930 and cancel_judgeable) {
             cancel_open_after = confirm_state.open;
             cancel_sessions_after = sessions.items.len;
+            cancel_count_after = confirm_cancels;
         }
         if (smoke and spins == 910 and modal_judgeable) {
             modal_open_after_accept = confirm_state.open;
@@ -10240,6 +10327,14 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
                         continue;
                     }
                 }
+                // ── 모달이 떠 있으면 새 제스처를 시작하지 않는다 (W8.16b) ────────────────────
+                //
+                // **아래 `left_down` 처리 셋이 아래쪽 삼킴보다 앞이었다** — 스크롤바 트랙 누름·막대 잡기, 도크 키보드
+                // 주인 바꾸기, 디바이더 잡기. 그래서 확인 모달이 떠 있어도 디바이더를 잡아 도크 크기가 바뀌고, 그 드래그가
+                // 뗌을 가져가 「모달 밖 클릭 = 취소」도 안 됐다(2026-10-15 — macOS 는 모달이 모든 클릭을 먼저 받는다).
+                // 누름만 여기서 삼킨다: 캡션 버튼(위)은 OS 창 조작이라 살아 있고, **이미 시작한** 드래그의 이동·뗌(위의
+                // 이어짐 블록들)은 시작한 곳이 끝까지 가진다. 뗌·나머지는 아래 삼킴이 버튼 판정으로 받는다.
+                if (confirm_state.open and m.kind == .left_down) continue;
                 if (m.kind == .left_down) {
                     const py: f64 = @floatFromInt(m.y_px);
                     const on_dock = if (dock_bar) |b| barHit(b, m.x_px, m.y_px) else false;
@@ -12126,6 +12221,27 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             !shift_target_survived,
         });
     }
+    if (gate_judgeable) {
+        // 스크롤바 축은 막대가 있을 때만 잰다(`bar=none` 이면 그 축은 비었다 — 줄에 드러낸다).
+        try stdout.print("modal_blocks_gestures: grabs +{d} moves +{d} bar={s} track +{d} bar_drag={} dock_pt {d}->{d} key_focus_moves +{d} cancels +{d} open_after={} modal_blocks_gestures_ok={}\n", .{
+            gate_grabs_after - gate_grabs_before,
+            gate_moves_after - gate_moves_before,
+            gate_bar_which,
+            gate_track_after - gate_track_before,
+            gate_bar_drag_after,
+            gate_size_before,
+            gate_size_after,
+            gate_focus_moves_after - gate_focus_moves_before,
+            gate_cancels_after - gate_cancels_before,
+            gate_open_after,
+            gate_grabs_after == gate_grabs_before and gate_moves_after == gate_moves_before and
+                gate_track_after == gate_track_before and !gate_bar_drag_after and
+                gate_size_after == gate_size_before and gate_focus_moves_after == gate_focus_moves_before and
+                gate_cancels_after == gate_cancels_before + 1 and !gate_open_after,
+        });
+    } else {
+        try stdout.print("modal_blocks_gestures=unjudgeable reason=no_dock_divider_or_modal_already_open\n", .{});
+    }
     if (capmodal_judgeable) {
         try stdout.print("caption_while_modal: max {}->{} caption_alive={}\n", .{
             capmodal_before,
@@ -12139,10 +12255,10 @@ fn runWin32Terminal(io: std.Io, allocator: std.mem.Allocator, stdout: *std.Io.Wr
             cancel_open_after,
             cancel_sessions_before,
             cancel_sessions_after,
-            confirm_cancels,
+            cancel_count_after - cancel_count_before,
             cancel_open_before and !cancel_open_after and
                 cancel_sessions_after == cancel_sessions_before and
-                confirm_cancels > 0,
+                cancel_count_after > cancel_count_before,
         });
     } else {
         try stdout.print("confirm_cancel=unjudgeable reason=need_three_sessions\n", .{});
@@ -16533,6 +16649,31 @@ fn appendConfirmSolids(
     defer rects.deinit(a);
     try maru.chrome.solid_rects.flattenModal(a, ops, tk, &rects);
     try appendSolidRects(a, rects.items, client_w, client_h, 0, 0, out);
+}
+
+// 확인 모달이 떠 있으면 마우스 루프는 **새 제스처를 시작하지 않는다** — 그 삼킴이 디바이더 잡기·스크롤바 누름·도크 키보드 주인 바꾸기보다
+// 앞이어야 한다. 셋이 삼킴보다 앞에 있어 모달 뒤에서 디바이더가 잡히고 도크 크기가 바뀌었다(2026-10-15). 루프는 Windows 에서만 돌아
+// macOS CI 가 smoke(`modal_blocks_gestures`)를 못 미므로, **순서**를 소스로 잰다(순수 판정자가 원리상 못 보는 축 — 호출 자리를 센다).
+// 캡션 버튼은 삼킴 **앞**이어야 한다(OS 창 조작은 앱 모달의 대상이 아니다 — §2m.80 2회차 `caption_alive`).
+test "확인 모달(Windows): 마우스 루프의 모달 누름 삼킴은 캡션 버튼 뒤, 새 제스처(스크롤바·도크 포커스·디바이더) 앞에 선다" {
+    // `@embedFile` — exe_tests 러너는 cwd 를 고정하지 않는다(`run_exe_tests` 에 `setCwd` 가 없다).
+    const src: []const u8 = @embedFile("main.zig");
+    const Marks = struct {
+        fn one(text: []const u8, needle: []const u8) !usize {
+            const at = std.mem.indexOf(u8, text, needle) orelse return error.MarkMissing;
+            if (std.mem.indexOfPos(u8, text, at + needle.len, needle) != null) return error.MarkNotUnique; // 자리가 둘이면 순서가 무의미하다
+            return at;
+        }
+    };
+    const gate = try Marks.one(src, "if (confirm_state.open and m.kind == " ++ ".left_down) continue;");
+    const caption = try Marks.one(src, "caption_clicks += " ++ "1;");
+    const bar_track = try Marks.one(src, "bar_track_clicks += " ++ "1;");
+    const dock_focus = try Marks.one(src, "dock_key_focus = " ++ "want;");
+    const divider_grab = try Marks.one(src, "divider_grabs += " ++ "1;");
+    const swallow = try Marks.one(src, "confirm.buttonAtPoint(&confirm_state, confirmProps(client_w, " ++ "client_h");
+    try std.testing.expect(caption < gate); // 창 버튼은 모달이 떠도 산다
+    try std.testing.expect(gate < bar_track and gate < dock_focus and gate < divider_grab); // 새 제스처는 삼킴 뒤다
+    try std.testing.expect(gate < swallow); // 나머지(뗌 = 버튼 판정)는 원래 삼킴이 받는다
 }
 
 test "확인 모달(Windows): props 가 제품 토큰의 모양을 싣는다 — 빠뜨리면 직각·테두리 0·패딩 0 으로 그린다" {

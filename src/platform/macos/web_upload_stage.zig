@@ -7,7 +7,10 @@
 //! - **승인 뒤에 쥔 fd 에서 사본**(`stageFile`): `fclonefileat`(같은 볼륨 — 2 ms, 원본이 갈라질 때까지 공간을 쓰지 않는다), 안 되면 fd 에서
 //!   복사(다른 볼륨 — 상한 안에서만). 사본 뒤 fd 를 다시 `fstat` 해 (장치·inode·크기·mtime·ctime) 가 모달 때와 다르면 실패 — 「승인 뒤
 //!   파일이 바뀌었다」. ctime 은 사용자가 되돌릴 수 없다(적대 리뷰 1 회차 — 같은 길이로 제자리에서 바꿔 쓰고 `futimens` 로 mtime 을 되돌리면
-//!   mtime 만으로는 몰랐다). 복제는 원본의 파일 플래그(Finder 의 「잠금」 `uchg`)도 옮긴다 — 사본에서 푼다(못 풀면 0400 도, 지우기도 막혔다).
+//!   mtime 만으로는 몰랐다). **다만 공유 매핑(`mmap` MAP_SHARED)으로 쓴 것은 msync 전까지 mtime·ctime 을 움직이지 않는다**(적대 리뷰 3 회차 실측 —
+//!   복제·복사는 바뀐 바이트를 가져갔다). 그래서 내용으로도 본다: 모달 전에 앞부분을 읽는 그 읽기로 SHA-256 을 내고(`hash_cap_per_call` 까지 —
+//!   엿보기는 늘 그 안이다), 사본의 같은 앞부분을 다시 읽어 같지 않으면 `changed`. 복제는 그 순간 원본과 갈라지므로(CoW) 사본을 재면 페이지가
+//!   읽을 바이트를 잰다. 복제는 원본의 파일 플래그(Finder 의 「잠금」 `uchg`)도 옮긴다 — 사본에서 푼다(못 풀면 0400 도, 지우기도 막혔다).
 //!   페이지는 사본만 본다: 승인 뒤 원본을 바꾸거나 링크를 바꿔도 닿지 않는다(실측 k9c — 원본 경로를 넘기면 바뀐 대상을 읽었다).
 //! - **사본 자리**: `<프로필>/upload-staging/<탭>/<op>/<i>/<이름>` — 폴더 0700, 파일 0400. 탭이 닫힐 때 그 탭의 폴더를 지우고(방문 기록
 //!   뒤로가기가 그 파일을 새 문서에 되살린다 — 실측 l), 이 실행이 처음 프로필을 잡을 때 전부 지운다. 뿌리는 한 번 `realpath` 한
@@ -36,6 +39,16 @@ const darwin_eopnotsupp: c_int = 102;
 pub const copy_cap_per_call: u64 = 1 << 30;
 pub const copy_cap_per_tab: u64 = 4 << 30;
 
+/// 한 번의 호출이 내용 해시(적대 리뷰 3 회차 M1)로 읽는 바이트 — 복사 상한과 같은 1 GiB(작성자 선택). 파일마다 엿보기만큼은 늘 잰다(넘어도 —
+/// 파일 열 개면 40 KiB). 상한을 넘은 뒤쪽은 stat(크기·ctime)만 본다 — 공유 매핑으로 그 뒤쪽만 바꾸면 모른다(문서의 남는 틈). 실측(M4 Max,
+/// ReleaseFast, 따뜻한 캐시): 1 GiB 를 모달 전에 한 번 0.41 초(SHA-256 만 0.36 초), 승인 뒤 사본에서 한 번 더 0.43 초 — 모달이 그만큼 늦게 뜬다
+/// (작성자 선택: 「확인 중」 상태 없이 받아들인다 — 큰 파일만, 상한까지만).
+pub const hash_cap_per_call: u64 = 1 << 30;
+
+const Sha256 = std.crypto.hash.sha2.Sha256;
+/// 해시 읽기의 한 번 크기(작업 스레드의 힙).
+const hash_chunk_bytes = 1 << 20;
+
 /// 모달 전에 연 파일 하나. `fd` 는 승인 뒤 사본을 만들 때까지 쥔다(`deinit` 이 닫는다).
 pub const Prepared = struct {
     fd: c_int,
@@ -52,6 +65,9 @@ pub const Prepared = struct {
     ctime_nsec: i64,
     /// 앞부분(최대 `display.head_bytes`, 소유) — 엿보기.
     head: []u8,
+    /// 앞 `hashed` 바이트의 SHA-256 — `head` 를 읽은 그 읽기에서 낸다(적대 리뷰 3 회차 M1). 사본의 같은 앞부분과 견준다.
+    digest: [Sha256.digest_length]u8,
+    hashed: u64,
 
     pub fn deinit(self: *Prepared, gpa: std.mem.Allocator) void {
         if (self.fd >= 0) _ = std.c.close(self.fd);
@@ -106,8 +122,15 @@ fn statOf(fd: c_int) ?std.c.Stat {
     return st;
 }
 
-/// 경로 하나를 연다(모달 전). 상대 경로·제어 문자는 L2 가 거절했다. 작업 스레드에서 부른다.
+/// 경로 하나를 연다(모달 전) — 해시 예산은 이 파일 혼자(1 GiB). 시험이 쓴다.
 pub fn prepare(gpa: std.mem.Allocator, path: []const u8) !PrepareResult {
+    var budget: u64 = hash_cap_per_call;
+    return prepareWith(gpa, path, &budget);
+}
+
+/// 경로 하나를 연다(모달 전). 상대 경로·제어 문자는 L2 가 거절했다. 작업 스레드에서 부른다. `hash_budget` — 이 호출의 파일들이 함께 쓰는 내용
+/// 해시 예산(`hash_cap_per_call` 에서 시작, 잰 만큼 준다).
+pub fn prepareWith(gpa: std.mem.Allocator, path: []const u8, hash_budget: *u64) !PrepareResult {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path_z = std.fmt.bufPrintZ(&path_buf, "{s}", .{path}) catch return .{ .refused = .too_long };
     var real_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -142,20 +165,22 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8) !PrepareResult {
     // 파일(iCloud 「Mac 저장 공간 최적화」·Dropbox 온라인 전용 — dataless)은 읽는 순간 내려받아 채워지고 ctime 이 움직인다. 처음 적은 상태로는
     // 승인 뒤 사본의 비교가 늘 「changed」 라 사용자가 모달을 두 번 보았다(적대 리뷰 2 회차 LOW-C). 그래서 읽기 뒤 상태가 다르면 한 번 더 읽고
     // 두 번째 상태를 쓴다 — 그것도 다르면 계속 바뀌는 파일이니 거절(모달이 보일 것을 정할 수 없다).
+    // 내용 해시(3 회차 M1)도 같은 읽기에서 낸다 — 엿보기가 해시한 바이트의 앞부분이어야 사본의 해시가 같을 때 사본의 앞부분이 모달이 보인 그것이다.
     var attempt: u8 = 0;
     const snap: Snapshot = while (true) : (attempt += 1) {
         const before = statOf(fd) orelse return .{ .refused = .unreadable };
-        const head = (try readHead(gpa, fd, @intCast(@max(before.size, 0)))) orelse return .{ .refused = .unreadable };
+        const read = (try readHeadHashed(gpa, fd, @intCast(@max(before.size, 0)), hash_budget.*)) orelse return .{ .refused = .unreadable };
         if (builtin.is_test) if (test_after_peek) |hook| hook(fd);
         const after = statOf(fd) orelse {
-            gpa.free(head);
+            gpa.free(read.head);
             return .{ .refused = .unreadable };
         };
-        if (sameState(before, after)) break .{ .st = before, .head = head };
-        gpa.free(head);
+        if (sameState(before, after)) break .{ .st = before, .head = read.head, .digest = read.digest, .hashed = read.hashed };
+        gpa.free(read.head);
         if (attempt >= 1) return .{ .refused = .unsteady };
     };
     errdefer gpa.free(snap.head);
+    hash_budget.* -|= snap.hashed;
     const real_owned = try gpa.dupe(u8, got);
     keep = true;
     const st2 = snap.st;
@@ -171,10 +196,12 @@ pub fn prepare(gpa: std.mem.Allocator, path: []const u8) !PrepareResult {
         .ctime_sec = st2.ctimespec.sec,
         .ctime_nsec = st2.ctimespec.nsec,
         .head = snap.head,
+        .digest = snap.digest,
+        .hashed = snap.hashed,
     } };
 }
 
-const Snapshot = struct { st: std.c.Stat, head: []u8 };
+const Snapshot = struct { st: std.c.Stat, head: []u8, digest: [Sha256.digest_length]u8, hashed: u64 };
 
 /// 시험만 — 엿보기를 읽은 뒤·다시 stat 하기 전에 부른다(그 사이에 파일이 바뀌는 것을 흉내 낸다).
 var test_after_peek: ?*const fn (fd: c_int) void = null;
@@ -185,24 +212,73 @@ fn sameState(a: std.c.Stat, b: std.c.Stat) bool {
         a.ctimespec.sec == b.ctimespec.sec and a.ctimespec.nsec == b.ctimespec.nsec;
 }
 
-/// 앞부분(최대 `display.head_bytes`)을 읽는다(소유 — 파일이 짧아졌으면 읽은 만큼). 읽기 오류면 null.
-fn readHead(gpa: std.mem.Allocator, fd: c_int, size: u64) !?[]u8 {
-    const want: usize = @intCast(@min(size, display.head_bytes));
-    const head = try gpa.alloc(u8, want);
-    var have: usize = 0;
-    while (have < want) {
-        const n = std.c.pread(fd, head.ptr + have, want - have, @intCast(have));
+const HeadHashed = struct { head: []u8, digest: [Sha256.digest_length]u8, hashed: u64 };
+
+/// 앞부분(최대 `display.head_bytes` — 엿보기, 소유)을 읽고, 같은 읽기로 앞 `max(엿보기, min(크기, budget))` 바이트의 SHA-256 을 낸다(파일이
+/// 짧아졌으면 읽은 만큼 — 부른 쪽의 stat 비교가 다시 읽게 한다). 읽기 오류면 null.
+fn readHeadHashed(gpa: std.mem.Allocator, fd: c_int, size: u64, budget: u64) !?HeadHashed {
+    const want_head: usize = @intCast(@min(size, display.head_bytes));
+    const limit = @max(@as(u64, want_head), @min(size, budget));
+    const buf = try gpa.alloc(u8, @intCast(@min(limit, hash_chunk_bytes)));
+    defer gpa.free(buf);
+    var h = Sha256.init(.{});
+    var head = try gpa.alloc(u8, want_head);
+    errdefer gpa.free(head);
+    var have_head: usize = 0;
+    const got = hashFd(fd, limit, buf, &h, struct {
+        head: []u8,
+        have: *usize,
+        fn see(self: @This(), off: u64, bytes: []const u8) void {
+            if (off >= self.head.len) return;
+            const n = @min(bytes.len, self.head.len - @as(usize, @intCast(off)));
+            @memcpy(self.head[@intCast(off)..][0..n], bytes[0..n]);
+            self.have.* = @intCast(off + n);
+        }
+    }{ .head = head, .have = &have_head }) orelse {
+        gpa.free(head);
+        return null;
+    };
+    if (have_head < head.len) {
+        const short = try gpa.dupe(u8, head[0..have_head]);
+        gpa.free(head);
+        head = short;
+    }
+    return .{ .head = head, .digest = h.finalResult(), .hashed = got };
+}
+
+/// fd 의 앞 `limit` 바이트를 `buf` 단위로 읽어 `h` 에 넣는다(`sink.see(오프셋, 바이트)` 도 부른다). 읽은 바이트 수 — 끝에 닿으면 그만큼. 읽기
+/// 오류면 null.
+fn hashFd(fd: c_int, limit: u64, buf: []u8, h: *Sha256, sink: anytype) ?u64 {
+    var off: u64 = 0;
+    while (off < limit) {
+        const want: usize = @intCast(@min(limit - off, buf.len));
+        const n = std.c.pread(fd, buf.ptr, want, @intCast(off));
         if (n < 0) {
             if (std.c._errno().* == @intFromEnum(std.c.E.INTR)) continue;
-            gpa.free(head);
             return null;
         }
         if (n == 0) break;
-        have += @intCast(n);
+        const got = buf[0..@intCast(n)];
+        h.update(got);
+        sink.see(off, got);
+        off += got.len;
     }
-    if (have == want) return head;
-    defer gpa.free(head);
-    return try gpa.dupe(u8, head[0..have]);
+    return off;
+}
+
+const NoSink = struct {
+    fn see(_: NoSink, _: u64, _: []const u8) void {}
+};
+
+/// 사본의 앞 `p.hashed` 바이트가 모달 전에 잰 그것과 같은가(적대 리뷰 3 회차 M1). 읽기 오류면 null.
+fn sameContent(gpa: std.mem.Allocator, fd: c_int, p: *const Prepared) !?bool {
+    const buf = try gpa.alloc(u8, @intCast(@max(@as(u64, 1), @min(p.hashed, hash_chunk_bytes))));
+    defer gpa.free(buf);
+    var h = Sha256.init(.{});
+    const got = hashFd(fd, p.hashed, buf, &h, NoSink{}) orelse return null;
+    if (got != p.hashed) return false;
+    const digest = h.finalResult();
+    return std.mem.eql(u8, &digest, &p.digest);
 }
 
 /// 같은 파일을 두 번 적었는가(심링크·하드 링크로 다른 경로가 같은 파일 — 장치·inode). `files[i]` 와 앞의 것.
@@ -288,12 +364,14 @@ pub fn stageFileWith(gpa: std.mem.Allocator, root: []const u8, tab: u64, op: u64
     if (std.c.fchmod(out, 0o400) != 0) return .{ .failed = .io };
     const copied = statOf(out) orelse return .{ .failed = .io };
     // 원본이 모달 때와 같은가(장치·inode·크기·mtime·ctime) — 승인 뒤 바뀌었으면 사본이 모달과 다른 내용일 수 있다. ctime 은 같은 길이로 바꿔 쓰고
-    // mtime 을 되돌려도 움직인다(사용자가 정할 수 없다). 읽기(atime)는 ctime 을 움직이지 않는다.
+    // mtime 을 되돌려도 움직인다(사용자가 정할 수 없다). 읽기(atime)는 ctime 을 움직이지 않는다. 공유 매핑의 쓰기는 둘 다 안 움직인다 — 아래 내용 비교.
     const now = statOf(p.fd) orelse return .{ .failed = .io };
     if (now.dev != p.dev or now.ino != p.ino or now.size != @as(i64, @intCast(p.size)) or now.mtimespec.sec != p.mtime_sec or now.mtimespec.nsec != p.mtime_nsec or
         now.ctimespec.sec != p.ctime_sec or now.ctimespec.nsec != p.ctime_nsec)
         return .{ .failed = .changed };
     if (copied.size != @as(i64, @intCast(p.size))) return .{ .failed = .changed };
+    // 내용 — 공유 매핑으로 쓴 것은 stat 을 움직이지 않는다(3 회차 M1 실측). 사본(복제는 이제 원본과 갈라졌다)의 앞부분이 모달 전에 잰 해시와 같아야 한다.
+    if (!((try sameContent(gpa, out, p)) orelse return .{ .failed = .io })) return .{ .failed = .changed };
     made = true;
     return .{ .ok = try gpa.dupe(u8, dest) };
 }
@@ -850,4 +928,100 @@ test "W9c③ 적대 리뷰 2 회차 재현 P1: 엿보기 읽기 사이에 파일
     var q = (try prepare(testing.allocator, src)).ok;
     q.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), PeekChanger.calls);
+}
+
+// ── W9c③ 적대 리뷰 3 회차 ──
+// 1 회차 R1 의 ctime 비교는 `write`·`futimens` 를 잡지만 **공유 매핑(MAP_SHARED)으로 쓴 것**은 잡지 못한다: macOS 는 그 쓰기에 mtime·ctime 을
+// msync 전까지 움직이지 않고, 복제(`fclonefileat`)·복사(`pread`)는 바뀐 바이트를 가져간다(실측 review_w9c3_r3/exp/mm.c — 2 초 기다려도, 복제 뒤에도
+// ctime 그대로, 사본은 바뀐 내용). 같은 uid 의 에이전트가 모달이 뜬 뒤(엿보기를 읽은 뒤) 자기 파일을 그렇게 바꾸면 모달의 엿보기(첫 줄)와 페이지가
+// 받는 바이트가 달랐다 — 「모달이 보인 파일과 페이지가 받는 바이트가 같아야 한다」 가 깨졌다. 고친 뒤: 모달 전의 읽기로 낸 SHA-256 과 사본의 것이
+// 다르면 `changed`(복제·복사 둘 다).
+test "W9c③ 적대 리뷰 3 회차 재현 M1: 엿보기를 읽은 뒤 공유 매핑으로 같은 길이로 바꿔 써도(msync 없음 — ctime 그대로) 사본은 changed 다(복제·복사 둘 다)" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    const benign = "Quarterly report: all good.\n";
+    try t.write("report.txt", benign);
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    const src = t.join(&b1, "report.txt");
+    var p = (try prepare(testing.allocator, src)).ok;
+    defer p.deinit(testing.allocator);
+    try testing.expectEqualStrings(benign, p.head);
+    try testing.expectEqual(@as(u64, benign.len), p.hashed);
+    // 모달이 떠 있는 동안 — 같은 uid 의 다른 프로세스가 공유 매핑으로 바꿔 쓴다(크기 그대로, msync·futimens 없음).
+    const rw = std.c.open(src.ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    try testing.expect(rw >= 0);
+    defer _ = std.c.close(rw);
+    const m = try std.posix.mmap(null, benign.len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, rw, 0);
+    defer std.posix.munmap(m);
+    const secret = "-----BEGIN OPENSSH PRIVATE KEY-----\n";
+    @memset(m, 'X');
+    @memcpy(m[0..@min(secret.len, m.len)], secret[0..@min(secret.len, m.len)]);
+    // stat 은 그대로다(그래서 1 회차의 비교로는 몰랐다) — 이 시험이 보는 길이 아직 그 길인지 먼저 본다.
+    const st = statOf(p.fd).?;
+    try testing.expect(st.ctimespec.sec == p.ctime_sec and st.ctimespec.nsec == p.ctime_nsec and st.mtimespec.nsec == p.mtime_nsec);
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    for ([_]bool{ true, false }) |clone| {
+        var budget: u64 = copy_cap_per_call;
+        const r = try stageFileWith(testing.allocator, root, 1, if (clone) 1 else 2, 0, &p, &budget, clone);
+        if (r == .ok) {
+            defer testing.allocator.free(r.ok);
+            std.debug.print("M1 ({s}): staged ok although the file changed through a shared mapping\n", .{if (clone) "clone" else "copy"});
+            return error.TestUnexpectedResult;
+        }
+        try testing.expectEqual(StageError.changed, r.failed);
+        var db: [std.fs.max_path_bytes]u8 = undefined;
+        const d = try std.fmt.bufPrintZ(&db, "{s}/1/{d}/0/report.txt", .{ root, @as(u8, if (clone) 1 else 2) });
+        try testing.expect(statPath(d.ptr) == null); // 사본은 지웠다
+    }
+}
+
+test "W9c③ 적대 리뷰 3 회차: 내용 해시는 호출의 예산(1 GiB) 안에서 — 넘은 파일은 엿보기만큼 재고, 여러 조각의 파일도 바뀌지 않았으면 사본이 된다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var t = try Tmp.init();
+    defer t.deinit();
+    // 조각(1 MiB)보다 큰 파일 — 해시가 여러 번 읽어도 사본의 해시와 같다.
+    const big = try testing.allocator.alloc(u8, 3 * hash_chunk_bytes + 17);
+    defer testing.allocator.free(big);
+    for (big, 0..) |*b, i| b.* = @truncate(i *% 31 +% 7);
+    try t.write("big.bin", big);
+    try t.write("small.txt", "small file\n");
+    var b1: [std.fs.max_path_bytes]u8 = undefined;
+    var budget: u64 = 2 * hash_chunk_bytes; // 시험용 작은 예산
+    var p1 = (try prepareWith(testing.allocator, t.join(&b1, "big.bin"), &budget)).ok;
+    defer p1.deinit(testing.allocator);
+    try testing.expectEqual(@as(u64, 2 * hash_chunk_bytes), p1.hashed); // 예산만큼
+    try testing.expectEqual(@as(u64, 0), budget);
+    var p2 = (try prepareWith(testing.allocator, t.join(&b1, "small.txt"), &budget)).ok;
+    defer p2.deinit(testing.allocator);
+    try testing.expectEqual(@as(u64, 11), p2.hashed); // 예산이 없어도 엿보기만큼은 잰다
+    try testing.expectEqualStrings("small file\n", p2.head);
+    const root = try ensureRoot(testing.allocator, t.path);
+    defer testing.allocator.free(root);
+    for ([_]bool{ true, false }) |clone| {
+        var copy_budget: u64 = copy_cap_per_call;
+        const r = try stageFileWith(testing.allocator, root, 4, if (clone) 1 else 2, 0, &p1, &copy_budget, clone);
+        try testing.expect(r == .ok);
+        testing.allocator.free(r.ok);
+    }
+    // 예산 밖의 뒤쪽은 stat 만 본다 — 공유 매핑으로 그 뒤쪽만 바꾸면 모른다(문서의 남는 틈). 앞쪽(잰 곳)을 바꾸면 안다.
+    const rw = std.c.open(t.join(&b1, "big.bin").ptr, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, @as(std.c.mode_t, 0));
+    try testing.expect(rw >= 0);
+    defer _ = std.c.close(rw);
+    const m = try std.posix.mmap(null, big.len, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, rw, 0);
+    defer std.posix.munmap(m);
+    m[2 * hash_chunk_bytes + 5] ^= 0xff; // 잰 곳 밖
+    {
+        var copy_budget: u64 = copy_cap_per_call;
+        const r = try stageFileWith(testing.allocator, root, 5, 1, 0, &p1, &copy_budget, true);
+        try testing.expect(r == .ok);
+        testing.allocator.free(r.ok);
+    }
+    m[hash_chunk_bytes + 5] ^= 0xff; // 잰 곳 안(첫 조각 뒤 — 엿보기 밖)
+    {
+        var copy_budget: u64 = copy_cap_per_call;
+        const r = try stageFileWith(testing.allocator, root, 5, 2, 0, &p1, &copy_budget, true);
+        try testing.expectEqual(StageError.changed, r.failed);
+    }
 }

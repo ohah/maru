@@ -176,9 +176,10 @@ const Surface = struct {
     /// JS 대화상자가 다른 탭의 DevTools 호출까지 멈춘다(실측: 같은 출처 팝업의 alert 에 연 탭의 click 이 30 초 시한). 가운데 탭이 닫혀도
     /// 이어지게 만들 때 적어 둔다(`popup_opener` 사슬을 따라가지 않는다).
     popup_family: u64 = 0,
-    /// 대화상자가 떠 있어 보내지 못한 원격 객체 묶음 놓기(`Runtime.releaseObjectGroup` 의 인자) — 대화상자가 사라지면 보낸다(3 회차:
-    /// 그대로 버려 묶음이 이동 전까지 남았다. 실측: 대화상자 중 놓기는 답하지 않는다). `max_deferred_releases` 까지.
-    deferred_releases: std.ArrayList([]u8) = .empty,
+    /// 대화상자가 떠 있어 보내지 못한 원격 객체 묶음 놓기(`Runtime.releaseObjectGroup`) — 대화상자가 사라지면 보낸다(3 회차:
+    /// 그대로 버려 묶음이 이동 전까지 남았다. 실측: 대화상자 중 놓기는 답하지 않는다). W9c③ 적대 리뷰 3 회차: 업로드의 듣는 이 떼기
+    /// (`devtoolsCallAfterDialog`)도 같은 줄에 선다 — 들어온 차례대로 보내므로 떼기가 놓기보다 먼저 간다. `max_deferred_calls` 까지.
+    deferred_calls: std.ArrayList(DeferredCall) = .empty,
     /// 페이지가 그 브라우저를 닫았다(maru 가 닫지 않았다 — `window.close`) — 그 탭이 있는 창이 꺼내 가 탭을 닫는다(`takePageClosed`).
     page_closed: bool = false,
     /// 새 탭 한 장(W6e) — maru 가 이 탭에 보낸 누름·Esc 아닌 키 누름, 또는 메뉴의 「새 탭에서 링크 열기」·「새 탭에서 이미지 열기」(W6h①) 답이 준다. sidecar 의 `open_tab`
@@ -1740,20 +1741,47 @@ fn sendsDuringDialog(gpa: std.mem.Allocator, method: []const u8, params: []const
     return std.mem.eql(u8, t.string, if (key) "keyUp" else "mouseReleased");
 }
 
-/// 탭마다 미뤄 둘 놓기의 상한 — 넘으면 오래된 것부터 버린다(그 묶음은 이동 때 사라진다).
-const max_deferred_releases = 16;
+/// 탭마다 미뤄 둘 호출의 상한 — 넘으면 오래된 것부터 버린다(그 묶음·듣는 이는 이동 때 사라진다).
+const max_deferred_calls = 16;
 
-/// 대화상자가 사라진 탭의 미룬 놓기를 보낸다(답은 버린다). 자리가 없으면 다음 tick 에.
-fn flushDeferredReleases(gpa: std.mem.Allocator) void {
+/// 대화상자가 사라진 뒤 보낼 호출 하나(인자 소유). 메서드는 미뤄도 되는 둘뿐이다 — 답을 버려도 되는 정리 호출.
+const DeferredCall = struct {
+    method: DeferredMethod,
+    params: []u8,
+};
+
+const DeferredMethod = enum {
+    /// 원격 객체 묶음 놓기(W9b③ 3 회차).
+    release_object_group,
+    /// 업로드가 단 듣는 이 떼기(W9c③ 적대 리뷰 3 회차 — `devtoolsCallAfterDialog`).
+    call_function_on,
+
+    fn name(self: DeferredMethod) []const u8 {
+        return switch (self) {
+            .release_object_group => "Runtime.releaseObjectGroup",
+            .call_function_on => "Runtime.callFunctionOn",
+        };
+    }
+};
+
+/// 그 탭의 미룬 호출 줄에 넣는다(넘치면 오래된 것을 버린다). 메모리가 없으면 버린다(best effort — 문서가 죽을 때 함께 사라진다).
+fn deferCall(gpa: std.mem.Allocator, s: *Surface, method: DeferredMethod, params: []const u8) void {
+    if (s.deferred_calls.items.len >= max_deferred_calls) gpa.free(s.deferred_calls.orderedRemove(0).params);
+    const copy = gpa.dupe(u8, params) catch return;
+    s.deferred_calls.append(gpa, .{ .method = method, .params = copy }) catch gpa.free(copy);
+}
+
+/// 대화상자가 사라진 탭의 미룬 호출을 보낸다(답은 버린다). 자리가 없으면 다음 tick 에.
+fn flushDeferredCalls(gpa: std.mem.Allocator) void {
     for (surfaces.keys(), surfaces.values()) |id, *s| {
-        if (s.deferred_releases.items.len == 0 or jsDialogShowing(id)) continue;
+        if (s.deferred_calls.items.len == 0 or jsDialogShowing(id)) continue;
         // tick 마다 탭에 하나씩 — 몰아 보내면 탭의 DevTools 자리(2)를 차 다음 op 의 첫 호출이 Busy 를 받았다(4 회차).
-        const params = s.deferred_releases.items[0];
-        _ = devtoolsCall(gpa, id, "Runtime.releaseObjectGroup", params, discard_sink) catch |e| switch (e) {
+        const d = s.deferred_calls.items[0];
+        _ = devtoolsCall(gpa, id, d.method.name(), d.params, discard_sink) catch |e| switch (e) {
             error.Busy, error.DialogShowing => continue, // 다음 tick(대화상자는 위에서 걸렀다 — 여기서 다시 미루면 같은 것을 두 번 담는다)
             else => {}, // 보낼 수 없다(탭이 준비 안 됨 등) — 버린다
         };
-        gpa.free(s.deferred_releases.orderedRemove(0));
+        gpa.free(s.deferred_calls.orderedRemove(0).params);
     }
 }
 
@@ -1761,6 +1789,28 @@ var discard_ctx: u8 = 0;
 /// 답을 버리는 sink(미룬 놓기).
 const discard_sink: DevtoolsSink = .{ .ctx = &discard_ctx, .done = &discardDone };
 fn discardDone(_: *anyopaque, _: u32, _: DevtoolsOutcome, _: []const u8) void {}
+
+/// W9c③ 적대 리뷰 3 회차: `devtoolsCall` 과 같되, 그 탭에 JS 대화상자가 떠 있으면 `Runtime.callFunctionOn` 을 버리지 않고 대화상자가 사라진 뒤
+/// 보낸다(답은 버린다 — 부른 쪽에는 그대로 `DialogShowing`). 업로드가 넣기 앞에서 단 듣는 이 떼기만 이 길로 온다: 넣자 change 처리기가 대화상자를
+/// 띄우면 떼기는 곧 거절돼 듣는 이가 문서가 죽을 때까지 격리 world 에 남았다. 놓기보다 먼저 줄에 서므로 떼기가 먼저 간다.
+pub fn devtoolsCallAfterDialog(gpa: std.mem.Allocator, surface_id: u64, method: []const u8, params: []const u8, sink: DevtoolsSink) DevtoolsCallError!u32 {
+    if (std.mem.eql(u8, method, "Runtime.callFunctionOn") and jsDialogShowing(surface_id)) {
+        const s = surfaces.getPtr(surface_id) orelse return error.NotReady;
+        if (!s.created or state == .off or state == .failed) return error.NotReady;
+        deferCall(gpa, s, .call_function_on, params);
+        return error.DialogShowing;
+    }
+    return devtoolsCall(gpa, surface_id, method, params, sink);
+}
+
+/// W9c③ 적대 리뷰 3 회차: 보낸 호출의 시한을 지금부터 `wait_ms` 로 줄인다(늘리지 않는다). 업로드의 넣은 뒤 읽기 — 붙잡혀도(응답이 늦은 이동) 요청
+/// 시한보다 먼저 끝나 「넣었다」 로 답하게. 끝난 호출·버린 자리는 그대로.
+pub fn devtoolsLimitWait(surface_id: u64, call: u32, wait_ms: i64) void {
+    const i = devtoolsFind(surface_id, call) orelse return;
+    if (devtools_pending[i]) |*p| if (p.sink != null) {
+        p.deadline_ms = @min(p.deadline_ms, monotonicNow() + wait_ms);
+    };
+}
 
 /// W9a②: 답을 기다리지 않는 호출(`Runtime.terminateExecution` — 시한이 지난 executeScript 를 멈춘다). 대화상자 중에는 `DialogShowing`
 /// (보내지 않는다 — 답한 뒤 나머지 스크립트를 죽였다, 계획 공격 3 회차), 자리가 없으면 `Busy`(부른 쪽이 잠깐 뒤 다시).
@@ -2338,7 +2388,7 @@ pub fn pump(gpa: std.mem.Allocator, now_ms: i64) void {
     expireContextMenus(gpa, now_ms);
     expireDragOuts(gpa, now_ms);
     expireDevtools(gpa, now_ms);
-    flushDeferredReleases(gpa); // 대화상자가 다른 길(이동·닫힘)로 사라졌을 때도(3 회차)
+    flushDeferredCalls(gpa); // 대화상자가 다른 길(이동·닫힘)로 사라졌을 때도(3 회차)
     expireNewTabs(gpa, now_ms);
     receiveRings();
     closeOrphanPopups(gpa);
@@ -2651,7 +2701,7 @@ pub fn replyDialog(gpa: std.mem.Allocator, surface_id: u64, token: u64, accept: 
     }
     removeDialog(gpa, s, token);
     if (s.created) send(gpa, .{ .dialog_reply = .{ .browser = surface_id, .request = request, .accept = accept, .text = buf[0..clamped.len], .suppress = suppress } });
-    flushDeferredReleases(gpa); // 답 뒤에 — 페이지가 풀린 다음 놓는다(3 회차)
+    flushDeferredCalls(gpa); // 답 뒤에 — 페이지가 풀린 다음 놓는다(3 회차)
 }
 
 // ── W9c②: 에이전트가 대화상자를 보고 답한다 ────────────────────────────────────────────────────────────────────────
@@ -3525,7 +3575,7 @@ pub fn revivePageClosed(gpa: std.mem.Allocator, surface_id: u64, by_user: bool) 
     s.download_blank = false;
     s.composing = false; // 닫힌 페이지의 조합은 끝났다(창이 입력기 쪽을 버린다 — `osr_discard_marked`)
     dropDialogs(gpa, s);
-    dropDeferredReleases(gpa, s);
+    dropDeferredCalls(gpa, s);
     dropNotes(gpa, s);
     for (s.view.clear()) |ring| if (ring) |r| r.release();
     const blank = gpa.dupe(u8, "about:blank") catch null;
@@ -3665,8 +3715,8 @@ pub fn datalistDismiss(gpa: std.mem.Allocator, surface_id: u64) void {
 
 fn freeSurface(gpa: std.mem.Allocator, s: *Surface) void {
     forgetLocationSurface(gpa, s.record.surface_id);
-    dropDeferredReleases(gpa, s);
-    s.deferred_releases.deinit(gpa);
+    dropDeferredCalls(gpa, s);
+    s.deferred_calls.deinit(gpa);
     dropNewTabs(gpa, s);
     s.new_tabs.deinit(gpa);
     if (s.tooltip_text) |t| gpa.free(t);
@@ -3692,10 +3742,10 @@ fn dropDialogs(gpa: std.mem.Allocator, s: *Surface) void {
     s.dialogs.clearRetainingCapacity();
 }
 
-/// 미룬 놓기를 버린다 — 그 문서·렌더러가 사라졌다(sidecar 가 죽었다·페이지를 새로 띄운다).
-fn dropDeferredReleases(gpa: std.mem.Allocator, s: *Surface) void {
-    for (s.deferred_releases.items) |p| gpa.free(p);
-    s.deferred_releases.clearRetainingCapacity();
+/// 미룬 호출을 버린다 — 그 문서·렌더러가 사라졌다(sidecar 가 죽었다·페이지를 새로 띄운다).
+fn dropDeferredCalls(gpa: std.mem.Allocator, s: *Surface) void {
+    for (s.deferred_calls.items) |d| gpa.free(d.params);
+    s.deferred_calls.clearRetainingCapacity();
 }
 
 fn installDir() ?[]const u8 {
@@ -4095,11 +4145,7 @@ pub fn devtoolsCall(gpa: std.mem.Allocator, surface_id: u64, method: []const u8,
     // W9a 적대 리뷰 4 회차: 팝업 가족의 **다른** 탭이 대화상자를 띄웠으면 이 탭의 스크립트는 다른 렌더러에서 돈다 — 멈추기는 보낸다.
     const terminate_ok = std.mem.eql(u8, method, "Runtime.terminateExecution") and !dialogPausesScript(surface_id);
     if (jsDialogShowing(surface_id) and !terminate_ok and !sendsDuringDialog(gpa, method, params)) {
-        if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) {
-            if (s.deferred_releases.items.len >= max_deferred_releases) gpa.free(s.deferred_releases.orderedRemove(0));
-            const copy = gpa.dupe(u8, params) catch return error.DialogShowing;
-            s.deferred_releases.append(gpa, copy) catch gpa.free(copy);
-        }
+        if (std.mem.eql(u8, method, "Runtime.releaseObjectGroup")) deferCall(gpa, s, .release_object_group, params);
         return error.DialogShowing;
     }
     var of_surface: usize = 0;
@@ -4313,7 +4359,7 @@ fn forgetSidecar(gpa: std.mem.Allocator) void {
     for (surfaces.values()) |*s| {
         s.nav_uncommitted = false; // 그 이동은 새 sidecar 에서 다시 시작한다(그때 다시 알린다)
         dropDialogs(gpa, s);
-        dropDeferredReleases(gpa, s); // 그 렌더러의 묶음은 함께 사라졌다
+        dropDeferredCalls(gpa, s); // 그 렌더러의 묶음은 함께 사라졌다
         dropNotes(gpa, s);
         setTooltip(gpa, s, ""); // 죽은 sidecar 의 툴팁은 끝났다(W6b)
         dropDatalist(gpa, s); // 제안 목록도 — 고르기를 받을 문서가 없다(W6m②)
@@ -6349,10 +6395,10 @@ test "W9b③ 적대 리뷰 4 회차: 대화상자가 떠 있으면 미룬 놓기
     try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-5\"}", rec.sink()));
     var buf: [32]Message = undefined;
     const before = sentFrames(&buf);
-    flushDeferredReleases(gpa);
-    flushDeferredReleases(gpa);
+    flushDeferredCalls(gpa);
+    flushDeferredCalls(gpa);
     try std.testing.expectEqual(before, sentFrames(&buf));
-    try std.testing.expectEqual(@as(usize, 1), surfaces.getPtr(7).?.deferred_releases.items.len);
+    try std.testing.expectEqual(@as(usize, 1), surfaces.getPtr(7).?.deferred_calls.items.len);
     // 손주 — 7 이 연 100, 100 이 연 101. 101 의 alert 는 뿌리 7 의 호출도 막는다.
     try devtoolsTestSurface(8, true);
     surfaces.getPtr(8).?.new_tab_credits.grant(monotonicNow());
@@ -6391,7 +6437,63 @@ test "W9b③ 적대 리뷰 5 회차: 미룬 놓기는 tick 마다 탭에 하나�
     applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "hi" } });
     for (0..3) |_| try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"g\"}", rec.sink()));
     replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 하나 보낸다
-    try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(7).?.deferred_releases.items.len);
+    try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(7).?.deferred_calls.items.len);
+}
+
+test "W9c③ 적대 리뷰 3 회차: 대화상자 중의 업로드 듣는 이 떼기는 미뤘다가 놓기보다 먼저 보낸다 — 다른 메서드는 미루지 않고, 대화상자가 없으면 곧 보낸다" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    var rec: DevtoolsRecorder = .{};
+    // change 처리기의 alert — 업로드가 떼기를 보내고 놓는다(둘 다 곧 거절된다).
+    applyD(gpa, .{ .js_dialog = .{ .browser = 7, .request = 1, .kind = .alert, .origin = "", .message = "got 1" } });
+    try std.testing.expectError(error.DialogShowing, devtoolsCallAfterDialog(gpa, 7, "Runtime.callFunctionOn", "{\"objectId\":\"o-1\"}", rec.sink()));
+    try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.releaseObjectGroup", "{\"objectGroup\":\"maru-w9b-42\"}", rec.sink()));
+    try std.testing.expectError(error.DialogShowing, devtoolsCallAfterDialog(gpa, 7, "Runtime.evaluate", "{}", rec.sink())); // 떼기만 미룬다
+    try std.testing.expectError(error.DialogShowing, devtoolsCall(gpa, 7, "Runtime.callFunctionOn", "{\"objectId\":\"o-2\"}", rec.sink())); // 보통 길은 미루지 않는다
+    try std.testing.expectEqual(@as(usize, 2), surfaces.getPtr(7).?.deferred_calls.items.len);
+    outbox_pending.clearRetainingCapacity();
+    replyDialog(gpa, 7, testDialogToken(7).?, true, "", false); // 답 뒤에 하나(떼기)
+    flushDeferredCalls(gpa); // 다음 tick 에 놓기
+    var buf: [16]Message = undefined;
+    const n = sentFrames(&buf);
+    var methods: [2][]const u8 = undefined;
+    var calls: usize = 0;
+    for (buf[0..n]) |m| if (m == .devtools_call) {
+        try std.testing.expect(calls < methods.len);
+        methods[calls] = m.devtools_call.method;
+        calls += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), calls);
+    try std.testing.expectEqualStrings("Runtime.callFunctionOn", methods[0]);
+    try std.testing.expectEqualStrings("Runtime.releaseObjectGroup", methods[1]);
+    try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(7).?.deferred_calls.items.len);
+    // 대화상자가 없으면 곧 보낸다(미루지 않는다).
+    for (&devtools_pending) |*p| if (p.*) |*v| {
+        v.result.deinit(gpa);
+        p.* = null;
+    };
+    _ = try devtoolsCallAfterDialog(gpa, 7, "Runtime.callFunctionOn", "{\"objectId\":\"o-3\"}", rec.sink());
+    try std.testing.expectEqual(@as(usize, 0), surfaces.getPtr(7).?.deferred_calls.items.len);
+    try std.testing.expectEqual(@as(usize, 1), devtoolsUsed());
+}
+
+test "W9c③ 적대 리뷰 3 회차: devtoolsLimitWait 는 보낸 호출의 시한을 줄인다(늘리지 않는다) — 그 시각이 지나면 timeout" {
+    const gpa = std.testing.allocator;
+    state = .starting;
+    defer w9b3r3Cleanup(gpa);
+    try devtoolsTestSurface(7, true);
+    var rec: DevtoolsRecorder = .{};
+    const call = try devtoolsCall(gpa, 7, "Runtime.callFunctionOn", "{}", rec.sink());
+    const now = monotonicNow();
+    devtoolsLimitWait(7, call, 1_000);
+    devtoolsLimitWait(7, call, 60_000); // 늘리지 않는다
+    expireDevtoolsD(gpa, now + 500);
+    try std.testing.expectEqual(@as(usize, 0), rec.count);
+    expireDevtoolsD(gpa, now + 5_000); // 30 초 시한이면 아직이다
+    try std.testing.expectEqual(@as(usize, 1), rec.count);
+    try std.testing.expectEqual(DevtoolsOutcome.timeout, rec.outcome.?);
 }
 
 test "W9a: 에이전트 이동의 끝 — 계획 공격 3 회차에 잰 sidecar 의 차례대로(보통·앞 문서 끊김·실패·204·about:blank·떠나기 확인)" {

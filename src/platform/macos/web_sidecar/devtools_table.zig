@@ -52,7 +52,15 @@ pub const Call = struct {
     }
 };
 
-pub const BeginError = error{ Busy, Duplicate };
+pub const BeginError = error{ Busy, Duplicate, Forbidden };
+
+/// maru 를 거쳐 오는 호출이 부를 수 없는 메서드(W9d② — J4·J6·J13): `Network.enable`·`Network.disable` 은 본문 기록이 건 버퍼 상한을 바꾸거나
+/// (disable 뒤 enable {} 이면 12 MB 본문이 돌아왔다 — J4-D) 기록을 말없이 끈다(J6). `Fetch.*` 는 요청을 가로채 바꾼다(막기·가짜 응답은 따로
+/// 묻는 W9d③·④ 의 몫이다). 세션이 하나라 이 호출과 sidecar 의 기록이 같은 Network 도메인을 쓴다.
+pub fn forbiddenMethod(method: []const u8) bool {
+    if (std.mem.eql(u8, method, "Network.enable") or std.mem.eql(u8, method, "Network.disable")) return true;
+    return std.mem.startsWith(u8, method, "Fetch.");
+}
 pub const AddResult = union(enum) {
     /// 모르는 호출 — 버린다(이미 실패로 답했다).
     unknown,
@@ -88,6 +96,7 @@ pub const Table = struct {
 
     /// 새 호출의 자리를 잡는다. 메서드 이름·크기는 wire 가 검사했다.
     pub fn begin(self: *Table, value: message.DevtoolsCall, now_ms: i64) BeginError!*Call {
+        if (forbiddenMethod(value.method)) return error.Forbidden;
         if (self.find(value.browser, value.call) != null) return error.Duplicate;
         var of_browser: usize = 0;
         for (self.slots) |s| if (s) |v| if (v.browser == value.browser) {
@@ -311,4 +320,15 @@ test "인자 중첩이 깊으면 보내지 않는다(CDP 가 번호 없이 오�
     const c = try t.begin(callOf(3, 1, "A.b", deep.len), 0);
     _ = t.addData(testing.allocator, .{ .browser = 3, .call = 1, .bytes = deep });
     try testing.expectError(error.InvalidParams, t.buildMessage(testing.allocator, c));
+}
+
+test "W9d②: Network.enable·Network.disable·Fetch.* 는 보내지 않는다(본문 기록의 상한을 바꾸거나 기록을 끈다) — 다른 Network 메서드는 받는다" {
+    var t: Table = .{};
+    defer t.deinit(std.testing.allocator);
+    for ([_][]const u8{ "Network.enable", "Network.disable", "Fetch.enable", "Fetch.continueRequest" }) |m| {
+        try std.testing.expectError(error.Forbidden, t.begin(.{ .browser = 1, .call = 1, .method = m, .params_size = 0 }, 0));
+    }
+    _ = try t.begin(.{ .browser = 1, .call = 2, .method = "Network.getCookies", .params_size = 0 }, 0);
+    try std.testing.expect(!forbiddenMethod("Network.enableX"));
+    try std.testing.expect(!forbiddenMethod("NetworkX.enable"));
 }

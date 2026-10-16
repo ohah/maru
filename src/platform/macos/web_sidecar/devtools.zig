@@ -86,6 +86,7 @@ fn begin(v: message.DevtoolsCall) void {
     const call = table.begin(v, nowMs()) catch |e| return answer(v.browser, v.call, switch (e) {
         error.Busy => .busy,
         error.Duplicate => .invalid_request,
+        error.Forbidden => .invalid_request, // W9d②: Network.enable·disable·Fetch.* — 본문 기록과 같은 도메인을 쓴다
     });
     ensureSweep();
     if (call.complete()) dispatchCall(call);

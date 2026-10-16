@@ -414,7 +414,88 @@ pub fn crossSiteIframe(flags: message.NetFlags, resource_type: u8, url_host: []c
 
 // ── 시험 ────────────────────────────────────────────────────────────────────────────────────────────────
 
+// ── 응답 본문(W9d②) ───────────────────────────────────────────────────────────────────────────────────────
+
+/// 그 읽는 쪽에게 본문이 보이는가(W9d② — 헤더와 같은 투영 위에 본문의 몫을 더한다). 순서가 뜻이다:
+///   ① 본문 권한(`browser_network_body` grant)이 없으면 `needs_body_permission` — 그 탭의 기록을 켜는 확인 모달이 묻는다.
+///   ② 응답이 보이지 않으면(설정 끔에 덮이지 않는 호스트 — 상태·헤더도 숨는다) `hidden`.
+///   ③ 본문 권한이 묶인 사이트가 아닌 페이지에서 난 요청이면 `hidden`(그 사이트로 받은 동의가 덮지 않는다 — 헤더의 F2 와 같은 규칙).
+///   ④ 그 권한을 받기 전에 시작한 요청이면 `before_body_permission`(사용자 탭은 허락 뒤의 것만 — 사용자 결정 U7 과 같은 갈래).
+///   ⑤ UB1(사용자 결정 2026-10-15 「적용」): 쿠키나 인증 헤더가 실제로 실린 응답(`credentialed`)이 본문 권한이 덮지 않는 호스트에서 왔으면 그
+///      호스트를 덮는 쿠키 권한(`browser_storage`)이 있어야 한다 — 없으면 `needs_cookie_permission`. 다른 사이트의 로그인 쿠키로 받은 개인
+///      본문이다(스크립트·스타일도 — J13: 다른 사이트의 `<script>`·`<link>` 는 쿠키로 만든 본문도 받혔다). 기록한 사이트 제 응답과 자격 증명이
+///      실리지 않은 응답은 그대로 보인다.
+pub const BodyAccess = enum { visible, needs_body_permission, hidden, before_body_permission, needs_cookie_permission };
+
+pub const BodyFacts = struct {
+    has_body_grant: bool,
+    /// 응답 쪽이 이 읽는 쪽에게 보인다(헤더의 투영 — 설정 켬이거나 응답 호스트가 덮인다).
+    response_visible: bool,
+    /// 요청이 난 페이지가 본문 권한이 덮는 사이트였다(어느 호스트든 권한이면 늘 참).
+    page_covered: bool,
+    /// 본문 권한을 받은 뒤에 시작한 요청이다.
+    after_grant: bool,
+    /// 본문 권한이 덮는 호스트(어느 호스트든 권한이면 그 요청이 난 페이지의 호스트).
+    body_host: []const u8,
+    /// 응답을 보낸 호스트(리다이렉트 뒤).
+    final_host: []const u8,
+    credentialed: bool,
+    /// 이 읽는 쪽이 그 탭에 쥔 쿠키 권한의 호스트(없으면 빈 글).
+    cookie_host: []const u8 = "",
+};
+
+pub fn bodyAccess(f: BodyFacts) BodyAccess {
+    if (!f.has_body_grant) return .needs_body_permission;
+    if (!f.response_visible or !f.page_covered) return .hidden;
+    if (!f.after_grant) return .before_body_permission;
+    if (f.credentialed and !hostCovers(f.body_host, f.final_host) and !hostCovers(f.cookie_host, f.final_host)) return .needs_cookie_permission;
+    return .visible;
+}
+
 const testing = std.testing;
+
+test "W9d②: 본문이 보이는가의 판 — 본문 권한·응답 투영·묶인 사이트·허락 뒤·자격 증명(UB1)과 쿠키 권한" {
+    const base: BodyFacts = .{ .has_body_grant = true, .response_visible = true, .page_covered = true, .after_grant = true, .body_host = "app.test", .final_host = "app.test", .credentialed = true };
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(base)); // 기록한 사이트 제 응답 — 실렸어도 보인다
+    var f = base;
+    f.has_body_grant = false;
+    try testing.expectEqual(BodyAccess.needs_body_permission, bodyAccess(f));
+    f = base;
+    f.response_visible = false;
+    try testing.expectEqual(BodyAccess.hidden, bodyAccess(f));
+    f = base;
+    f.page_covered = false;
+    try testing.expectEqual(BodyAccess.hidden, bodyAccess(f));
+    f = base;
+    f.after_grant = false;
+    try testing.expectEqual(BodyAccess.before_body_permission, bodyAccess(f));
+    // 다른 사이트(은행)에서 쿠키가 실린 응답 — 그 사이트의 쿠키 권한이 있어야.
+    f = base;
+    f.final_host = "bank.test";
+    try testing.expectEqual(BodyAccess.needs_cookie_permission, bodyAccess(f));
+    f.cookie_host = "bank.test";
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(f));
+    f.cookie_host = "app.test"; // 다른 사이트의 쿠키 권한은 덮지 않는다
+    try testing.expectEqual(BodyAccess.needs_cookie_permission, bodyAccess(f));
+    // 실리지 않은 다른 사이트 응답은 그대로 보인다(설정 켬 — 「다 보여 줌」).
+    f.credentialed = false;
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(f));
+    // 하위 도메인은 본문 권한이 덮는다(grant 와 같은 규칙).
+    f = base;
+    f.final_host = "api.app.test";
+    try testing.expectEqual(BodyAccess.visible, bodyAccess(f));
+    f.final_host = "evilapp.test";
+    try testing.expectEqual(BodyAccess.needs_cookie_permission, bodyAccess(f));
+    // 앞 갈래가 이긴다 — 권한이 없으면 숨김보다 먼저 권한을 말한다, 숨긴 응답은 허락 전인지 말하지 않는다.
+    f = base;
+    f.has_body_grant = false;
+    f.response_visible = false;
+    try testing.expectEqual(BodyAccess.needs_body_permission, bodyAccess(f));
+    f = base;
+    f.response_visible = false;
+    f.after_grant = false;
+    try testing.expectEqual(BodyAccess.hidden, bodyAccess(f));
+}
 
 test "W9d①: hostCovers 는 점 경계로 하위 도메인만 덮는다(grant 와 같은 규칙), sameSite 는 어느 쪽이든 덮으면" {
     try testing.expect(hostCovers("github.com", "gist.github.com"));

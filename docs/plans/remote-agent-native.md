@@ -425,7 +425,7 @@ daemon의 진단은 CLI의 별도 host 로그가 아니라 상속한 stderr의 �
    동안 code를 읽을 수 있다. 따라서 typed-reject payload를 새로 보존하거나 receipt ABI를 넓힐 필요는 없다.
    observer candidate가 정리되기 전에 positive missing만 구분하고 일반 거부는 기존 결과로 남긴다.
    **분류 구현 완료**: `ObserverRuntimeNotFound`를 별도 반환한다. 같은 실제 socket 회귀 검사에서
-   정확한 부재·unauthorized·비슷한 문자열의 미지 code·손상 JSON·EOF를 구분하고 candidate 정리,
+   정확한 부재와 동등한 JSON 표기·일반 거부·미지 code·중복/혼합 envelope·손상 JSON·잘못된 응답 ID·잘린 프레임·EOF를 구분하고 candidate 정리,
    기존 shell·게시 Client·connection generation·cleanup pin 보존을 Debug/ReleaseFast로 확인했다.
    이 분류 슬라이스의 backend는 아직 기존 rejection 정산을 유지하며 sibling 복구 완료를 뜻하지 않는다.
 2. canonical job에 종료 확정 상태를 seal하고 해당 active row만 gone_positive/ended/closed로 전진한다.

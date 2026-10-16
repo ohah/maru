@@ -75,7 +75,8 @@ test "CR5b-2b 경계는 all-runtime terminal 뒤 shared Client exact once public
     }{
         // CR5c adds one host-failure no-fail commit and its terminal-state validation.
         .{ .id = "commitHostWideRetirementNoFail", .backend = 2, .runtime = 3 },
-        .{ .id = "hostWideRetirementCommittedExact", .backend = 4, .runtime = 3 },
+        // Positive absence also requires exact committed retirement evidence.
+        .{ .id = "hostWideRetirementCommittedExact", .backend = 4, .runtime = 4 },
         .{ .id = "commitHostRetirementNoFail", .runtime = 1, .attachment = 1 },
         .{ .id = "hostRetirementCommittedExact", .runtime = 1, .attachment = 1 },
         .{ .id = "commitPreparedUnavailableNoFail", .runtime = 1, .screen = 1 },

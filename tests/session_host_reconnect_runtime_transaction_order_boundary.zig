@@ -92,9 +92,11 @@ test "CR5b-2c 경계는 shared Client 아래 ordered runtime transaction과 term
 
     const cursor_inventory = [_]struct { id: []const u8, contract: usize, backend: usize }{
         // CR5c adds one cursor setup publication before terminalizing the shared Client.
-        .{ .id = "commitPublishedNew", .contract = 5, .backend = 1 },
+        // Ended-prefix scenarios exercise successful and ended commits together.
+        .{ .id = "commitPublishedNew", .contract = 6, .backend = 1 },
+        .{ .id = "commitEnded", .contract = 4, .backend = 1 },
         .{ .id = "failAndResolveRemaining", .contract = 4, .backend = 1 },
-        .{ .id = "finishSuccess", .contract = 3, .backend = 1 },
+        .{ .id = "finishSuccess", .contract = 4, .backend = 1 },
     };
     for (cursor_inventory) |entry| {
         try std.testing.expectEqual(entry.contract, countIdentifier(contract, entry.id));

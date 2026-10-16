@@ -18,7 +18,7 @@ fn read(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
 
 test "P4 E3c client idle pump owns actual generation-backed scale evidence" {
     const allocator = std.testing.allocator;
-    const backend = try read(allocator, "src/platform/macos/session_host/remote_term_backend.zig", 512 * 1024);
+    const backend = try read(allocator, "src/platform/macos/session_host/remote_term_backend.zig", 1024 * 1024);
     defer allocator.free(backend);
     const runtime = try read(allocator, "src/platform/macos/session_host/remote_runtime.zig", 1200 * 1024);
     defer allocator.free(runtime);

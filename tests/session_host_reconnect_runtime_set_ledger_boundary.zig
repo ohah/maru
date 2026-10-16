@@ -50,7 +50,7 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
         &.{"platform/macos/session_host/host_reconnect_runtime_ledger.zig"},
     ));
     // CR5c adds the all-row terminal-connection summary consumer to the same cursor contract.
-    try std.testing.expectEqual(@as(usize, 3), countIdentifier(transaction, "summarizeTerminalRows"));
+    try std.testing.expectEqual(@as(usize, 4), countIdentifier(transaction, "summarizeTerminalRows"));
     try std.testing.expectEqual(@as(usize, 2), countIdentifier(backend, "validateCanonicalRows"));
     // CR5c validates its retained all-row terminal summary against the same canonical ledger.
     // CR5d-2 also recomputes the surviving terminal summary after one Window abandons its row.
@@ -60,7 +60,7 @@ test "CR5a 경계는 CR2e enum을 재사용한 canonical runtime-set contract와
     // 36 번째는 terminal summary 진단이 쓰는 타입 참조 하나다 — 원장을 **소유하지 않고** 이미 만들어진
     // 요약을 읽어 로그로 흘릴 뿐이라 이 경계가 지키려는 owner 집합은 그대로다.
     // The runtime-ended frame regression checks the canonical closed mutation state.
-    try std.testing.expectEqual(@as(usize, 37), countIdentifier(backend, "host_reconnect_runtime_ledger"));
+    try std.testing.expectEqual(@as(usize, 43), countIdentifier(backend, "host_reconnect_runtime_ledger"));
     inline for (.{ "validateCanonicalRows", "host_reconnect_runtime_ledger.zig" }) |identifier|
         try std.testing.expectEqual(
             @as(usize, 0),

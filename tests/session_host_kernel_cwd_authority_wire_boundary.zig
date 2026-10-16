@@ -23,7 +23,7 @@ test "K1 cwd authority remains the sole paired wire foundation" {
     const allocator = std.testing.allocator;
     const manager = try read(allocator, "src/platform/macos/session_host/runtime_manager.zig", 512 * 1024);
     defer allocator.free(manager);
-    const remote_backend = try read(allocator, "src/platform/macos/session_host/remote_term_backend.zig", 512 * 1024);
+    const remote_backend = try read(allocator, "src/platform/macos/session_host/remote_term_backend.zig", 1024 * 1024);
     defer allocator.free(remote_backend);
     const plan = try read(allocator, "docs/plans/session-host-kernel-cwd.md", 64 * 1024);
     defer allocator.free(plan);

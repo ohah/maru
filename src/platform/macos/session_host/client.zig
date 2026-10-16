@@ -8985,6 +8985,21 @@ pub const Client = struct {
         });
     }
 
+    /// Retirement keeps bounded catchup backing owned until normal Client destruction.
+    /// Validate its complete allocation graph and destination disjointness without requiring
+    /// a fresh adoption source's zero-capacity catchup state.
+    pub fn preflightRetirementDestination(
+        self: *const Client,
+        destination: *const anyopaque,
+        destination_len: usize,
+    ) ExternalAdoptionInspectError!void {
+        try validateExternalAdoptionStructure(self, .allow_bounded);
+        _ = try validateExternalOwnerRangesAgainst(self, .{
+            .start = @intFromPtr(destination),
+            .len = destination_len,
+        });
+    }
+
     /// Allocation-free destination proof for c3b preparation. The source scratch is already part
     /// of the fold contract, so using it avoids an allocator callback before scalar winners.
     pub fn preflightExternalAdoptionDestinationWithScratch(
@@ -24384,6 +24399,19 @@ test "external adoption owner alias validation stays n log n at every queue cap"
         });
     }
     try client.pending_catchup_barriers.ensureTotalCapacityPrecise(allocator, 1);
+
+    // A second reconnect retires a used Client with empty, still-owned catchup backing.
+    // Adoption must remain strict, while retirement must still reject backing aliases.
+    var retirement_destination: u8 = 0;
+    try std.testing.expectError(error.InvalidClientState, client.preflightExternalAdoptionDestination(
+        &retirement_destination,
+        @sizeOf(u8),
+    ));
+    try client.preflightRetirementDestination(&retirement_destination, @sizeOf(u8));
+    try std.testing.expectError(error.InvalidAlias, client.preflightRetirementDestination(
+        client.pending_catchup_barriers.items.ptr,
+        @sizeOf(u8),
+    ));
 
     switch (client.io_mode) {
         .blocking => return error.TestUnexpectedResult,

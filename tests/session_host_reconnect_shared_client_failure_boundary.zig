@@ -42,14 +42,15 @@ test "CR5c 경계는 shared Client terminal 뒤 all-runtime unavailable 전이 �
     const inventory = [_]struct { id: []const u8, contract: usize, backend: usize }{
         .{
             .id = "failAllForTerminalConnection",
-            .contract = 3,
+            .contract = 4,
             .backend = 1,
         },
         .{
             .id = "failHostReconnectRuntimeTransactionsAfterSharedClientTerminal",
             .contract = 0,
             // CR6e-c3b2b adds the reviewed one-state frame driver caller.
-            .backend = 5,
+            // Ended-prefix regression adds one explicit shared-terminal call.
+            .backend = 6,
         },
     };
     for (inventory) |entry| {

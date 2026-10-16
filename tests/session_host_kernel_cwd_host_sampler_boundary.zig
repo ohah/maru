@@ -24,7 +24,7 @@ test "K2 kernel cwd sampler is host-owned bounded and metadata-visible" {
     defer allocator.free(manager);
     const handoff = try read(allocator, "src/platform/macos/session_host/handoff_inventory.zig", 128 * 1024);
     defer allocator.free(handoff);
-    const remote_backend = try read(allocator, "src/platform/macos/session_host/remote_term_backend.zig", 512 * 1024);
+    const remote_backend = try read(allocator, "src/platform/macos/session_host/remote_term_backend.zig", 1024 * 1024);
     defer allocator.free(remote_backend);
     const metadata_wire = try read(allocator, "src/platform/macos/session_host/runtime_metadata_wire.zig", 256 * 1024);
     defer allocator.free(metadata_wire);

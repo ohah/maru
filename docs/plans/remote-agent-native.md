@@ -427,13 +427,25 @@ daemon의 진단은 CLI의 별도 host 로그가 아니라 상속한 stderr의 �
    **분류 구현 완료**: `ObserverRuntimeNotFound`를 별도 반환한다. 같은 실제 socket 회귀 검사에서
    정확한 부재와 동등한 JSON 표기·일반 거부·미지 code·중복/혼합 envelope·손상 JSON·잘못된 응답 ID·잘린 프레임·EOF를 구분하고 candidate 정리,
    기존 shell·게시 Client·connection generation·cleanup pin 보존을 Debug/ReleaseFast로 확인했다.
-   이 분류 슬라이스의 backend는 아직 기존 rejection 정산을 유지하며 sibling 복구 완료를 뜻하지 않는다.
+   분류만으로 sibling 복구 완료를 뜻하지 않으며, 아래 active-row 정산과 실제 GUI 검증을 별도로 둔다.
 2. canonical job에 종료 확정 상태를 seal하고 해당 active row만 gone_positive/ended/closed로 전진한다.
    이미 게시한 sibling과 아직 시작하지 않은 suffix는 바꾸지 않는다. 공유 retired Client는 모든 row
    정산 뒤 정확히 한 번 회수한다. 추가 검토에서 종료 row는 candidate publication이 없어 old payload가
    retiring이 아니라 current인 상태임을 확인했다. 단순히 retiring reclaim을 부르는 구현은 피한다.
    종료된 current payload·화면/종료 projection의 수명, 다음 incident의 canonical row 수집과 membership
-   count에서 종료 항목을 제외하는 일관성을 먼저 설계·검증해야 한다. 아직 이 정책 배선은 미구현이다.
+   count에서 종료 항목을 제외하는 일관성을 먼저 설계·검증해야 한다. 구현은 reducer의 별도
+   observer 부재 event로 healthy/old_valid에서 gone_positive/ended/closed를 기록한다. 이는 takeover
+   이후 부재 event와 구분한다. admission과 resident charge는 all-row 정산까지 유지하고 old current
+   payload는 Term 종료 시 기존 owner가 회수한다. 현재 job의 ended row는 membership에 남기되 이전
+   job에서 정산된 ended runtime은 다음 admission·snapshot·row 수집에서 제외한다. shared transport가
+   나중에 실패해도 앞서 확정한 ended row를 frozen으로 되돌리지 않는다.
+   **정책 배선 구현, 실제 GUI 미검증**: 실제 daemon의 첫째·중간·마지막 종료, 모두 종료,
+   종료 뒤 shared transport 실패, 정상 sibling 입력·화면 텍스트, 두 번째 재접속을 검증한다.
+   다음 재접속에서 사용한 Client의 빈 catchup buffer가 capacity를 유지하는 정상 소유 상태를
+   adoption용 zero-capacity 검사로 거부하는 결함도 재현했다. retirement 전용 검사는 bounded
+   backing과 전체 allocation graph·destination 비중첩을 검증하고, 기존 adoption 검사는 유지한다.
+   ended current payload는 canonical gone proof와 정확한 shell generation이 있을 때만 후속
+   connection generation 이후에도 정상 teardown할 수 있다. pump_ended만으로 이 경로를 열지 않는다.
 3. 없는 runtime과 일반 거부·잘못된 신원·손상 응답·EOF를 구분하는 실제 socket 검사를 둔다.
    세 runtime에서 처음·중간·마지막 종료를 공격하여 앞선 성공과 뒤 sibling 입력을 보존하는지 확인한다.
    continuation을 무력화하거나 일반 거부를 종료로 바꾸는 변이가 실패해야 한다.

@@ -168,8 +168,8 @@ test "CR2e-a reducer는 closed inventory와 forged summary를 전수 거부한�
     try std.testing.expectEqual(@as(usize, 5), @typeInfo(reducer.MutationState).@"enum".fields.len);
     try std.testing.expectEqual(@as(usize, 4), @typeInfo(reducer.CloseTag).@"enum".fields.len);
     try std.testing.expectEqual(@as(usize, 4), @typeInfo(reducer.CloseState).@"union".fields.len);
-    try std.testing.expectEqual(@as(usize, 26), @typeInfo(reducer.EventTag).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 26), @typeInfo(reducer.Event).@"union".fields.len);
+    try std.testing.expectEqual(@as(usize, 27), @typeInfo(reducer.EventTag).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 27), @typeInfo(reducer.Event).@"union".fields.len);
     try std.testing.expectEqual(@as(usize, 31), @typeInfo(reducer.Decision).@"enum".fields.len);
 
     var wrong_shell_work = work;
@@ -187,20 +187,40 @@ test "CR2e-a reducer는 closed inventory와 forged summary를 전수 거부한�
 
     var legal_initial_events: usize = 0;
     const events = [_]reducer.Event{
-        .{ .begin_prepare = work },                                                                                                                                                       .observer_staged,                                                             .begin_mutation_seal,                                   .seal_clean,
-        .seal_ambiguous,                                                                                                                                                                  .precommit_failed_clean,                                                      .precommit_failed_ambiguous_usable,                     .{ .precommit_failed_ambiguous_unusable = retryReservation(7) },
-        .begin_authority_commit,                                                                                                                                                          .takeover_sent_unknown,                                                       .controller_evidenced,                                  .authority_conflict,
-        .gone_positive,                                                                                                                                                                   .{ .begin_retry_wait_release = .{ .work = work, .runtime_id = .{1} ** 16 } }, .retry_direct_granted,                                  .{ .retry_expired = .{ .now_ns = 100 } },
-        .begin_publish,                                                                                                                                                                   .publish_new,                                                                 .{ .freeze_with_reserved_retry = retryReservation(7) }, .end_runtime,
-        .{ .prepare_unavailable = .{ .job_generation = 3, .shell_generation = 7, .last_attempt = 1, .last_candidate_connection_generation = 2, .retry_at_ns = 50, .deadline_ns = 100 } }, .{ .retry_unavailable = .{ .work = work, .clock = .{ .now_ns = 50 } } },      .{ .close_requested = close_intent },                   .{ .reconnect_quiesced_for_close = .{ .old_transport_usable = true, .retry = null } },
-        .{ .close_timed_out = .{ .now_ns = 300 } },                                                                                                                                       .abandon_to_inventory,
+        .observer_gone_positive,
+        .{ .begin_prepare = work },
+        .observer_staged,
+        .begin_mutation_seal,
+        .seal_clean,
+        .seal_ambiguous,
+        .precommit_failed_clean,
+        .precommit_failed_ambiguous_usable,
+        .{ .precommit_failed_ambiguous_unusable = retryReservation(7) },
+        .begin_authority_commit,
+        .takeover_sent_unknown,
+        .controller_evidenced,
+        .authority_conflict,
+        .gone_positive,
+        .{ .begin_retry_wait_release = .{ .work = work, .runtime_id = .{1} ** 16 } },
+        .retry_direct_granted,
+        .{ .retry_expired = .{ .now_ns = 100 } },
+        .begin_publish,
+        .publish_new,
+        .{ .freeze_with_reserved_retry = retryReservation(7) },
+        .end_runtime,
+        .{ .prepare_unavailable = .{ .job_generation = 3, .shell_generation = 7, .last_attempt = 1, .last_candidate_connection_generation = 2, .retry_at_ns = 50, .deadline_ns = 100 } },
+        .{ .retry_unavailable = .{ .work = work, .clock = .{ .now_ns = 50 } } },
+        .{ .close_requested = close_intent },
+        .{ .reconnect_quiesced_for_close = .{ .old_transport_usable = true, .retry = null } },
+        .{ .close_timed_out = .{ .now_ns = 300 } },
+        .abandon_to_inventory,
     };
     for (events) |event| {
         if (reducer.reduce(reducer.State.initial(3, 7), event)) |_| {
             legal_initial_events += 1;
         } else |err| try std.testing.expectEqual(error.IllegalTransition, err);
     }
-    try std.testing.expectEqual(@as(usize, 2), legal_initial_events);
+    try std.testing.expectEqual(@as(usize, 3), legal_initial_events);
 
     var forged = reducer.State.initial(3, 7);
     forged.retry = retryReservation(7);
@@ -299,7 +319,15 @@ test "CR2e-a reducer는 closed inventory와 forged summary를 전수 거부한�
 
 test "CR2e-a reducer는 canonical authority prefix의 legal event 집합을 exact 고정한다" {
     const initial = reducer.State.initial(3, 7);
-    try expectAllowed(initial, &.{ .begin_prepare, .close_requested });
+    try expectAllowed(initial, &.{ .begin_prepare, .close_requested, .observer_gone_positive });
+    const gone = try reducer.reduce(initial, .observer_gone_positive);
+    try std.testing.expectEqual(reducer.Decision.retain_gone_evidence, gone.decision);
+    try std.testing.expectEqual(reducer.LocalState.ended, gone.state.local);
+    try std.testing.expectEqual(reducer.RuntimeLedger.gone_positive, gone.state.ledger);
+    try std.testing.expectEqual(reducer.MutationState.closed, gone.state.mutation);
+    try std.testing.expectEqual(initial.shell_generation, gone.state.shell_generation);
+    try std.testing.expectError(error.IllegalTransition, reducer.reduce(gone.state, .observer_gone_positive));
+    try std.testing.expectError(error.IllegalTransition, reducer.reduce(gone.state, .{ .begin_prepare = work }));
 
     const preparing = (try reducer.reduce(initial, .{ .begin_prepare = work })).state;
     try expectAllowed(preparing, &.{ .observer_staged, .prepare_unavailable, .close_requested });
@@ -403,6 +431,7 @@ fn canonicalEvent(tag: reducer.EventTag) reducer.Event {
         },
         .close_timed_out => .{ .close_timed_out = .{ .now_ns = 300 } },
         .abandon_to_inventory => .abandon_to_inventory,
+        .observer_gone_positive => .observer_gone_positive,
     };
 }
 

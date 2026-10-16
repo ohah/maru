@@ -172,6 +172,12 @@ pub const Tag = enum(u8) {
     /// 사용자 정보를 덜어 낸다(`net_policy`). `any_host` 는 어느 호스트든 grant(에이전트 탭 — 요청의 첫 사이트로 덮는다), `hosts` 는 사이트에
     /// 묶인 grant 호스트(넷까지 — 둘은 합친다). 둘 다 없으면 아무것도 덮지 않는다.
     net_watch = 134,
+    /// 그 탭의 응답 본문 기록을 켜거나 끈다(W9d② — maru 가 `browser.networkRecord` 를 받아 `browser_network_body` grant 가 있을 때).
+    /// 켜면 sidecar 는 그 탭에만 CDP `Network.enable`(버퍼 2 MiB·8 MiB, postData 1 바이트)을 걸고, CEF 요청과 CDP 요청을 맞춰(`net_body_table`)
+    /// 글 응답의 본문을 `getResponseBody` 로 받아 `net_body_data`·`net_body_end` 로 보낸다. 끄면 `Network.disable` 이고 기다리던 본문은
+    /// `recording_stopped` 로 끝난다. `session` 은 maru 가 켤 때마다 매기는 0 아닌 번호(끄면 0) — 돌아오는 본문 frame 이 그것을 싣는다(늦게 온
+    /// 옛 기록의 본문을 새 기록에 붙이지 않게).
+    net_record = 135,
 
     /// 주 프레임의 이동이 시작된다(W9a 적대 리뷰 5 회차 — CEF `on_before_browse`, 리다이렉트마다도). 확정(`page_started`)·끝(`load_finished`)·
     /// 불러오기 끝까지 그 탭은 「확정되지 않은 이동 중」 이다 — 그동안 보낸 DevTools 의 페이지 호출은 Chromium 이 붙잡았다가 새 문서에서 돌렸다.
@@ -195,6 +201,13 @@ pub const Tag = enum(u8) {
     net_end = 72,
     /// sidecar 가 그 탭의 요청을 적지 않고 넘긴 수(W9d① — 양동이·동시 요청·넘김 상자 상한).
     net_dropped = 73,
+    /// 기록하는 탭(W9d② — `net_record`)의 응답 본문 한 조각 — `net_body_end` 앞에 차례로 온다(오프셋이 이어진다). 글이면 UTF-8, 바이너리면
+    /// 받은 그대로(`net_body_end.flags.binary`).
+    net_body_data = 74,
+    /// 그 요청의 본문 끝(W9d②) — `body_expected` 로 시작한 요청마다 **꼭 하나**(잡았든 못 잡았든 — `NetBodyState`).
+    net_body_end = 75,
+    /// 그 탭의 기록 상태(W9d② — 켜짐·꺼짐·쏟아짐으로 멈춤·켜지 못함).
+    net_record_state = 76,
 
     /// `devtools_call` 결과의 한 조각(W9-0b) — `devtools_result` 앞에 온다. 결과는 CDP 가 준 JSON(`result` 또는 `error` 객체)이다.
     devtools_result_data = 64,
@@ -1209,11 +1222,20 @@ pub const NetHeaderBlock = struct {
     bytes: []const u8 = "",
 };
 
+/// 요청 시작의 둘째 표시(W9d② — `NetFlags` 가 찼다). `body_expected` — 그 탭이 본문을 기록하는 중에 시작한 요청이다: sidecar 가 이 요청의
+/// `net_body_end` 를 꼭 하나 보낸다(본문을 잡지 못한 까닭이라도 — 맞는 CDP 요청이 없으면 `unmatched`).
+pub const NetFlags2 = packed struct(u8) {
+    body_expected: bool = false,
+    _reserved: u7 = 0,
+};
+
 pub const NetBegin = struct {
     browser: BrowserId,
     /// CEF 요청 번호(0 아님 — 다운로드의 0 은 sidecar 가 적지 않는다). 프로세스 안에서 유일하고 리다이렉트·인증 재시도에도 같다.
     request: u64,
     flags: NetFlags = .{},
+    /// W9d②: 둘째 표시(`body_expected`).
+    flags2: NetFlags2 = .{},
     /// `cef_resource_type_t`(0..20, 18 제외).
     resource_type: u8 = 0,
     /// 시작 시각(유닉스 ms).
@@ -1293,6 +1315,104 @@ pub const NetWatch = struct {
     host_count: u8 = 0,
     /// 앞 `host_count` 개만 쓴다(소문자 호스트 — `on` 이 거짓이면 0 개).
     hosts: [max_net_watch_hosts][]const u8 = @splat(""),
+};
+
+// ── 응답 본문 기록(W9d②) ────────────────────────────────────────────────────────────────────────────────
+
+/// 본문 조각 상한 — DevTools 결과 조각과 같다(frame 상한 32 KiB 안).
+pub const net_body_chunk_bytes: usize = 16 * 1024;
+/// 본문 하나의 상한(maru 의 `BodyStore` 와 같다) — sidecar 는 CDP `dataReceived` 의 합(풀어 낸 크기)이 이것을 넘으면 받지 않고 `over_cap`.
+pub const max_net_body_bytes: u32 = 1024 * 1024;
+
+/// 본문을 잡았는가, 못 잡았으면 왜(W9d② — 닫힌 enum, 모르는 값은 거절한다).
+pub const NetBodyState = enum(u8) {
+    /// 잡았다 — 앞서 보낸 조각이 본문 전부다.
+    captured = 0,
+    /// 풀어 낸 크기가 `max_net_body_bytes` 를 넘었다(받지 않았다).
+    over_cap = 1,
+    /// 글이 아닌 종류(이미지·영상·글꼴·octet-stream …) — 받지 않았다.
+    not_text = 2,
+    /// 본문이 없다(204·HEAD·빈 응답).
+    no_body = 3,
+    /// 응답이 오다가 끊겼다(일부 바이트가 온 뒤 실패·취소) — Chromium 은 그런 본문을 남기지 않는다.
+    partial = 4,
+    /// 응답 바이트가 오기 전에 실패했다.
+    request_failed = 5,
+    /// Chromium 이 본문을 주지 않았다(다음 문서로 옮겨 버렸다·캐시에서 밀렸다·스트림).
+    unavailable = 6,
+    /// 이 CEF 요청과 맞는 CDP 요청이 없다(다른 프로세스 iframe·worker·서비스 워커만의 요청 — 기록하는 탭의 DevTools 가 보지 못한다).
+    unmatched = 7,
+    /// sidecar 의 상한(동시·초당·보내는 줄)에 걸려 받지 않았다.
+    busy = 8,
+    /// 그 사이 기록을 껐다.
+    recording_stopped = 9,
+    /// DevTools 가 떨어졌다(렌더러 죽음·탭 닫힘).
+    detached = 10,
+    /// 같은 주소의 다른 요청과 가를 수 없어(sidecar 가 그 탭의 요청을 넘긴 창 안·보이는 규칙이 다른 둘) 본문을 붙이지 않았다.
+    ambiguous = 11,
+    /// 설정 `browser.agent-network-full` 이 꺼졌고 그 응답의 호스트가 지켜보기 호스트에 덮이지 않는다(받지 않았다 — 작성자 결정).
+    not_covered = 12,
+    /// Chromium 이 이 요청을 같은 CEF 번호로 다시 시작했다(W9d① 적대 리뷰 후 — `Critical-CH`) — 이 끝은 앞 시도의 것이고 다음 시도는 새
+    /// `net_begin` 이다. sidecar 는 이 끝을 새 시작보다 먼저 보낸다(같은 번호의 본문 frame 은 그 뒤로 새 시도의 것).
+    restarted = 13,
+};
+
+pub const NetBodyFlags = packed struct(u8) {
+    /// 바이트가 글(UTF-8)이 아니다 — 받은 그대로.
+    binary: bool = false,
+    /// charset 없는 `text/*` 를 Chromium 이 windows-1252 로 풀어 깨진 글을 UTF-8 로 되돌렸다(J11).
+    redecoded: bool = false,
+    /// charset 없는 `text/*` 인데 되돌릴 수 없었다 — 글은 Chromium 이 푼 그대로다(페이지가 본 것과 다를 수 있다).
+    chromium_decoded: bool = false,
+    /// 그 요청에 쿠키나 인증 헤더가 실제로 실렸다(CDP `requestWillBeSentExtraInfo` — UB1: 덮이지 않는 호스트면 쿠키 권한이 있어야 보인다).
+    /// 모르면(ExtraInfo 가 없다) 실린 것으로 친다.
+    credentialed: bool = false,
+    _reserved: u4 = 0,
+};
+
+pub const NetRecord = struct {
+    browser: BrowserId,
+    on: bool,
+    /// 켤 때 0 이 아니다(maru 가 매긴다), 끌 때 0.
+    session: u32 = 0,
+};
+
+pub const NetBodyData = struct {
+    browser: BrowserId,
+    session: u32,
+    /// CEF 요청 번호(`net_begin.request`, 0 아님).
+    request: u64,
+    /// 이 조각의 시작(앞 조각의 끝과 같다).
+    offset: u32,
+    /// 비지 않고 `net_body_chunk_bytes` 안.
+    bytes: []const u8,
+};
+
+pub const NetBodyEnd = struct {
+    browser: BrowserId,
+    session: u32,
+    request: u64,
+    state: NetBodyState,
+    flags: NetBodyFlags = .{},
+    /// 보낸 조각의 합(잡았을 때만 0 이 아닐 수 있다 — `max_net_body_bytes` 안).
+    size: u32 = 0,
+    /// CDP `dataReceived` 의 합(풀어 낸 응답 크기 — `over_cap` 이 얼마였는지 알린다).
+    decoded: u64 = 0,
+};
+
+pub const NetRecordStatus = enum(u8) {
+    on = 0,
+    off = 1,
+    /// 이벤트가 쏟아져 sidecar 가 기록을 멈췄다(`Network.disable` — 다시 켜야 한다).
+    paused = 2,
+    /// 켜지 못했다(DevTools 가 답하지 않거나 거절했다).
+    failed = 3,
+};
+
+pub const NetRecordState = struct {
+    browser: BrowserId,
+    session: u32,
+    status: NetRecordStatus,
 };
 
 pub const DownloadAction = enum(u8) {
@@ -1387,6 +1507,7 @@ pub const Message = union(Tag) {
     devtools_call_data: DevtoolsData,
     new_tab_credit: BrowserId,
     net_watch: NetWatch,
+    net_record: NetRecord,
     main_frame_navigating: BrowserId,
     console_message: ConsoleMessage,
     error_page: BrowserId,
@@ -1395,6 +1516,9 @@ pub const Message = union(Tag) {
     net_response: NetResponse,
     net_end: NetEnd,
     net_dropped: NetDropped,
+    net_body_data: NetBodyData,
+    net_body_end: NetBodyEnd,
+    net_record_state: NetRecordState,
 
     devtools_result_data: DevtoolsData,
     devtools_result: DevtoolsResult,

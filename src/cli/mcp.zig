@@ -103,7 +103,7 @@ pub const tools = [_]Tool{
         .{ .key = "dialog", .kind = .int, .flag = "--dialog", .description = "dialog token from browser_dialog", .min = 1, .max = 9_007_199_254_740_991 },
     }) },
     .{ .name = "browser_upload", .subcommand = "upload", .description = "Put files into a file input (<input type=file>) on a Chromium tab. Every call asks the user in a dialog that lists each file with a peek of its content (never remembered — allow up to 2 minutes for the answer); a declined dialog is an error and nothing is uploaded. Give one locator (selector, ref, role, by_text or by_label) and absolute file paths (up to 10; folders are refused). The page gets a copy made when the user approves. The result's kept:false means the page received the files and then cleared or replaced the input itself; navigated:true means the page started loading a new page right after the files were set, or stopped answering (was busy) after they were set (its handler most likely received them); dialog:true means the page showed a dialog right after the files were set (answer it with browser_handle_dialog if you may, see browser_dialog) — in all these cases check the page and do not upload again.", .args = withSurface(&(locator_args ++ [_]Arg{.{ .key = "files", .kind = .path_list, .description = "absolute paths of the files to upload (1-10)", .required = true, .max_items = browser.max_upload_files }})) },
-    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests, and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded. WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
+    .{ .name = "browser_network_requests", .subcommand = "network", .description = "List a Chromium tab's network requests, newest first (50 per page, up to 200): req number, method, status, type, URL, time, size, and marks for other-site, cross-site iframe and service-worker requests, and for attempts Chromium restarted (the retry is a separate, newer req). Needs a separate permission per site (the user is asked once; tabs you opened with browser_open need none). You see requests from your permission on (tabs you opened: from their creation); earlier ones are counted as hidden, and so are requests made while the tab showed a site your permission does not cover and navigations that started on or passed through such a site (even when redirected back). Request bodies are not recorded; response bodies are recorded only while browser_network_record is on (each line then shows its body state). WebSocket, CORS preflight, data:/blob: and service-worker script requests are not shown. Use browser_network_request with a req number for headers and redirects.", .args = withSurface(&.{
         .{ .key = "types", .kind = .string, .flag = "--type", .description = "request types separated by commas: document, iframe, stylesheet, script, image, font, xhr (fetch and XHR), media, worker, shared_worker, service_worker, prefetch, favicon, ping, csp_report, object, plugin, preload, other" },
         .{ .key = "method", .kind = .string, .flag = "--method", .description = "HTTP method, like GET or POST" },
         .{ .key = "status", .kind = .string, .flag = "--status", .description = "status code (100-599) or a class like 4xx" },
@@ -113,8 +113,15 @@ pub const tools = [_]Tool{
         .{ .key = "page_size", .kind = .int, .flag = "--page-size", .description = "requests per page (1-200, default 50)", .min = 1, .max = 200 },
         .{ .key = "clear", .kind = .flag, .flag = "--clear", .description = "after this read, show you only newer requests" },
     }) },
-    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers, redirects, timing and size. Cookie, Set-Cookie and Authorization values (and passwords in addresses) are shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies on that site), even in tabs you opened; otherwise only their names. With browser.agent-network-full off they are never shown. The body is not recorded.", .args = withSurface(&.{
+    .{ .name = "browser_network_request", .subcommand = "network-request", .description = "Show one network request of a Chromium tab in detail: request and response headers, redirects, timing and size. Cookie, Set-Cookie and Authorization values (and passwords in addresses) are shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies on that site), even in tabs you opened; otherwise only their names. With browser.agent-network-full off they are never shown. With body:true it also prints one piece of the recorded response body (text only, at most 64 KiB per call — body_offset continues from the 'more: --offset' line; or out writes the whole body, also a binary one, to a new 0600 file). Bodies exist only for requests made while browser_network_record was on, at most 1 MiB each (8 MiB per tab, 32 MiB for all tabs, in memory only); a body sent with another site's cookies or login needs that site's cookie permission too. The body state says why there is none (needs_body_permission, over_cap, not_text, unmatched for cross-process iframes and workers, restarted when Chromium restarted the request and the retry is a newer req, …).", .args = withSurface(&.{
         .{ .key = "req", .kind = .int, .flag = "--req", .description = "req number from browser_network_requests", .required = true, .min = 1, .max = 9_007_199_254_740_991 },
+        .{ .key = "body", .kind = .flag, .flag = "--body", .description = "also print the recorded response body (one piece of up to body_max_bytes)" },
+        .{ .key = "body_offset", .kind = .int, .flag = "--offset", .description = "byte offset into the body (0-1048576) — from the 'more: --offset' line of the previous piece (implies body)", .max = 1024 * 1024 },
+        .{ .key = "body_max_bytes", .kind = .int, .flag = "--max-bytes", .description = "bytes per piece (1-65536, default 65536; implies body)", .min = 1, .max = 64 * 1024 },
+        .{ .key = "out", .kind = .string, .flag = "--out", .description = "absolute path of a new file for the whole body (written 0600; a binary body can only be read this way; implies body)" },
+    }) },
+    .{ .name = "browser_network_record", .subcommand = "network-record", .description = "Turn recording of a Chromium tab's response bodies on or off. While on, the tab title shows a red ◉ and maru keeps the text bodies (JSON, HTML, scripts, …) of the requests the tab makes, up to 1 MiB each, in memory only. Needs the tab's network permission first (browser_network_requests asks for it); on the user's tabs the user is asked once per site, tabs you opened need no permission. Turning it off, revoking the permission or closing the tab drops the recorded bodies. Requests from cross-process iframes and workers have no body (unmatched).", .args = withSurface(&.{
+        .{ .key = "on", .kind = .bool_choice, .flag = "--on", .flag_false = "--off", .description = "true to record, false to stop", .required = true },
     }) },
     .{ .name = "browser_navigate", .subcommand = "navigate", .description = "Navigate a tab to an address. On Chromium tabs only http, https and about:blank, and it waits up to 25 seconds for the first load (loaded:false when no page loaded — a download, an empty response, a same-page link, or the time ran out).", .args = withSurface(&.{.{ .key = "url", .kind = .positional, .description = "address", .required = true }}) },
     .{ .name = "browser_get_url", .subcommand = "get-url", .description = "Print the tab's current document address.", .args = withSurface(&.{}) },
@@ -420,7 +427,10 @@ fn initializeResult(gpa: std.mem.Allocator, id: cp.Id, params: ?std.json.Value) 
             "unless the user clicked, typed or navigated in that tab before your first read). Cookie, Set-Cookie and Authorization values are " ++
             "shown only for sites whose cookie permission you also hold on that tab (the user grants it when you run maru browser get-cookies " ++
             "on that site), and never when the " ++
-            "user turned browser.agent-network-full off; request bodies are not recorded.") catch |e| break :blk e;
+            "user turned browser.agent-network-full off; request bodies are not recorded. " ++
+            "browser_network_record turns recording of a tab's response bodies on (the tab title shows a red ◉; asked once per site on the user's tabs, " ++
+            "not on tabs you opened); read a body with browser_network_request body:true, 64 KiB per call (or out for the whole body). " ++
+            "A body sent with another site's cookies or login also needs that site's cookie permission.") catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
         s.endObject() catch |e| break :blk e;
     }) catch return error.OutOfMemory;
@@ -818,7 +828,7 @@ test "W9f 적대 리뷰 1 회차: 모든 도구의 선택 인자 하나하나가
             .number => .{ .float = 0.5 },
             .flag => .{ .bool = true },
             .json_array => try jsonOf(arena, "[1]"),
-            else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else if (std.mem.eql(u8, opt.key, "types")) "xhr,image" else if (std.mem.eql(u8, opt.key, "status")) "4xx" else "x" },
+            else => .{ .string = if (std.mem.eql(u8, opt.key, "rect")) "0,0,10,10" else if (std.mem.eql(u8, opt.key, "role")) "button" else if (std.mem.eql(u8, opt.key, "url")) "https://e.test/" else if (std.mem.eql(u8, opt.key, "types")) "xhr,image" else if (std.mem.eql(u8, opt.key, "status")) "4xx" else if (std.mem.eql(u8, opt.key, "out")) "/tmp/body" else "x" },
         });
         const a = try argv(arena, t, .{ .object = obj });
         _ = browser.parse(a) catch |err| {
@@ -1117,4 +1127,29 @@ test "W9d①: browser_network_requests·browser_network_request — 인자가 CL
     try testing.expect(std.mem.indexOf(u8, r, "cookie permission") != null);
     try testing.expect(std.mem.indexOf(u8, list.description, "started on or passed through such a site") != null);
     try testing.expect(std.mem.indexOf(u8, one.description, "cookie permission") != null);
+}
+
+test "W9d②: browser_network_record·browser_network_request 의 본문 인자 — CLI 의 network-record --on/--off·--body --offset --max-bytes --out 으로, 범위는 파서와 같고, 안내는 상한·권한을 말한다" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const rec = findTool("browser_network_record").?;
+    try testing.expect((try browser.parse(try argv(arena, rec, try jsonOf(arena, "{\"surface\":4,\"on\":true}")))).request.network_record.on);
+    try testing.expect(!(try browser.parse(try argv(arena, rec, try jsonOf(arena, "{\"surface\":4,\"on\":false}")))).request.network_record.on);
+    try testing.expectError(error.MissingArgument, argv(arena, rec, try jsonOf(arena, "{\"surface\":4}")));
+    const one = findTool("browser_network_request").?;
+    const d = (try browser.parse(try argv(arena, one, try jsonOf(arena, "{\"surface\":4,\"req\":2,\"body\":true,\"body_offset\":65536,\"body_max_bytes\":1000,\"out\":\"/tmp/b.bin\"}")))).request.network_request;
+    try testing.expect(d.body and d.offset.? == 65536 and d.max_bytes.? == 1000);
+    try testing.expectEqualStrings("/tmp/b.bin", d.out.?);
+    // 스키마 범위 = 파서 범위.
+    for (one.args) |a| {
+        if (std.mem.eql(u8, a.key, "body_max_bytes")) try testing.expect(a.min == 1 and a.max.? == browser.max_network_body_read);
+        if (std.mem.eql(u8, a.key, "body_offset")) try testing.expect(a.min == 0 and a.max.? == browser.max_network_body_bytes);
+    }
+    try testing.expect(std.mem.indexOf(u8, one.description, "64 KiB") != null);
+    try testing.expect(std.mem.indexOf(u8, one.description, "1 MiB") != null);
+    try testing.expect(std.mem.indexOf(u8, rec.description, "◉") != null);
+    const r = (try handleLine(testing.allocator, arena, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")).reply;
+    defer testing.allocator.free(r);
+    try testing.expect(std.mem.indexOf(u8, r, "browser_network_record") != null);
 }

@@ -1790,11 +1790,34 @@ pub fn tabTitleRunningMarker(title: []const u8) bool {
     return std.mem.startsWith(u8, title, agentFlagUtf8());
 }
 
+/// W9d②: 응답 본문을 기록하는 Chromium 탭의 표식 ◉(U+25C9) — `●`(에이전트 running)·`○`(저장 안 한 편집기)와 다른 글자다(겹치면 뜻을 가를
+/// 수 없다). `diffAwareLabel` 이 제목 앞에 붙이고, running 마커처럼 셀로 그려 **그 칸만** 빨갛게 칠한다(`recolorRecordingMarkCells`) — 제목
+/// 본문(measured)은 그대로 둔다. 사용자가 「지금 이 탭의 응답 본문이 기록된다」 를 탭 줄에서 바로 알게(사용자 결정 UB2 — 에이전트가 연 탭은
+/// 묻지 않으니 이 표식이 유일한 신호다).
+pub const recording_mark: u21 = 0x25C9;
+pub const recording_mark_utf8 = "\u{25C9}";
+/// 기록 표식의 빨강(녹화 표시의 관례 — 테마와 무관하게 고정, 에이전트 브랜드색처럼).
+pub const recording_mark_color: maru.color.Rgb = .{ .r = 0xE5, .g = 0x48, .b = 0x4D };
+
+/// 이 탭 제목이 셀로 그리는 마커(running `●` 또는 기록 `◉`)로 시작하면 그 마커(UTF-8).
+pub fn tabTitleMarker(title: []const u8) ?[]const u8 {
+    if (tabTitleRunningMarker(title)) return agentFlagUtf8();
+    if (std.mem.startsWith(u8, title, recording_mark_utf8)) return recording_mark_utf8;
+    return null;
+}
+
 /// 마커·구분 공백을 뗀 제목 본문. 마커가 없으면 원본 그대로.
 pub fn tabTitleBody(title: []const u8) []const u8 {
-    if (!tabTitleRunningMarker(title)) return title;
-    const rest = title[agentFlagUtf8().len..];
+    const marker = tabTitleMarker(title) orelse return title;
+    const rest = title[marker.len..];
     return if (std.mem.startsWith(u8, rest, " ")) rest[1..] else rest;
+}
+
+/// 셀에 그린 기록 표식(◉)만 빨갛게 — 탭마다 마커 칸 하나다(제목 글은 measured 라 셀에 없다).
+pub fn recolorRecordingMarkCells(cells: anytype) void {
+    for (cells) |*c| if (c.codepoint == recording_mark) {
+        c.style.foreground = .{ .rgb = recording_mark_color };
+    };
 }
 
 // --- `app_session.zig`에서 함께 옮겨 온 파일 레벨 헬퍼 ---

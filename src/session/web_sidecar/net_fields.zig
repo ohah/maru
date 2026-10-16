@@ -221,6 +221,7 @@ pub fn checkBegin(v: message.NetBegin) Error!void {
     // 서비스 워커가 대신 보낸 요청에는 CEF 의 프레임이 없다.
     if (v.flags.service_worker and (v.flags.main_frame or v.flags.subframe)) return error.InvalidNetwork;
     if (v.resource_type > message.max_net_resource_type or v.resource_type == 18) return error.InvalidNetwork;
+    if (v.flags2._reserved != 0) return error.InvalidNetwork; // W9d②: 둘째 표시의 쓰지 않는 비트
     try checkMethod(v.method);
     if (v.url.len == 0) return error.InvalidNetwork;
     try checkLine(v.url, max_url_bytes);
@@ -263,6 +264,7 @@ pub fn writeBegin(cursor: *Cursor, v: message.NetBegin) Error!void {
     try fields.writeBrowser(cursor, v.browser);
     try cursor.writeU64(v.request);
     try cursor.writeByte(@bitCast(v.flags));
+    try cursor.writeByte(@bitCast(v.flags2));
     try cursor.writeByte(v.resource_type);
     try cursor.writeU64(v.time_ms);
     try writeLine(cursor, v.method);
@@ -278,6 +280,7 @@ pub fn readBegin(cursor: *ReadCursor) Error!message.NetBegin {
         .browser = try fields.readBrowser(cursor),
         .request = try cursor.readU64(),
         .flags = @bitCast(try cursor.readByte()),
+        .flags2 = @bitCast(try cursor.readByte()),
         .resource_type = try cursor.readByte(),
         .time_ms = try cursor.readU64(),
         .method = try readLine(cursor, max_method_bytes),
@@ -454,9 +457,126 @@ pub fn readWatch(cursor: *ReadCursor) Error!message.NetWatch {
     return v;
 }
 
+// ── 응답 본문(W9d②) ───────────────────────────────────────────────────────────────────────────────────────
+
+/// `net_record` — 켜면 세션 번호가 0 이 아니고, 끄면 0.
+pub fn checkRecord(v: message.NetRecord) Error!void {
+    if (v.on != (v.session != 0)) return error.InvalidNetwork;
+}
+
+pub fn writeRecord(cursor: *Cursor, v: message.NetRecord) Error!void {
+    try checkRecord(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeByte(@intFromBool(v.on));
+    try cursor.writeU32(v.session);
+}
+
+pub fn readRecord(cursor: *ReadCursor) Error!message.NetRecord {
+    const v: message.NetRecord = .{ .browser = try fields.readBrowser(cursor), .on = try fields.readBool(cursor), .session = try cursor.readU32() };
+    try checkRecord(v);
+    return v;
+}
+
+/// `net_body_data` — 세션·요청 번호 0 아님, 비지 않은 조각이 상한 안, 조각의 끝이 본문 상한 안.
+pub fn checkBodyData(v: message.NetBodyData) Error!void {
+    if (v.session == 0) return error.InvalidNetwork;
+    try checkRequest(v.request);
+    if (v.bytes.len == 0 or v.bytes.len > message.net_body_chunk_bytes) return error.InvalidNetwork;
+    if (@as(u64, v.offset) + v.bytes.len > message.max_net_body_bytes) return error.InvalidNetwork;
+}
+
+pub fn writeBodyData(cursor: *Cursor, v: message.NetBodyData) Error!void {
+    try checkBodyData(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.session);
+    try cursor.writeU64(v.request);
+    try cursor.writeU32(v.offset);
+    try cursor.writeU16(@intCast(v.bytes.len));
+    try cursor.writeBytes(v.bytes);
+}
+
+pub fn readBodyData(cursor: *ReadCursor) Error!message.NetBodyData {
+    const browser = try fields.readBrowser(cursor);
+    const session = try cursor.readU32();
+    const request = try cursor.readU64();
+    const offset = try cursor.readU32();
+    const len = try cursor.readU16();
+    if (len > message.net_body_chunk_bytes) return error.InvalidNetwork;
+    const v: message.NetBodyData = .{ .browser = browser, .session = session, .request = request, .offset = offset, .bytes = try cursor.readBytes(len) };
+    try checkBodyData(v);
+    return v;
+}
+
+/// `net_body_end` — 세션·요청 번호 0 아님, 쓰지 않는 비트 없음, 크기는 잡았을 때만(본문 상한 안), 글 표시(되돌림·Chromium 이 푼 그대로)는 잡은 글에만
+/// 하나까지, 바이너리 표시는 잡았을 때만.
+pub fn checkBodyEnd(v: message.NetBodyEnd) Error!void {
+    if (v.session == 0) return error.InvalidNetwork;
+    try checkRequest(v.request);
+    if (v.flags._reserved != 0) return error.InvalidNetwork;
+    if (v.size > message.max_net_body_bytes) return error.InvalidNetwork;
+    if (v.state != .captured and (v.size != 0 or v.flags.binary or v.flags.redecoded or v.flags.chromium_decoded)) return error.InvalidNetwork;
+    if (v.flags.redecoded and v.flags.chromium_decoded) return error.InvalidNetwork;
+    if (v.flags.binary and (v.flags.redecoded or v.flags.chromium_decoded)) return error.InvalidNetwork;
+    if (v.decoded > std.math.maxInt(i64)) return error.InvalidNetwork;
+}
+
+pub fn writeBodyEnd(cursor: *Cursor, v: message.NetBodyEnd) Error!void {
+    try checkBodyEnd(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.session);
+    try cursor.writeU64(v.request);
+    try cursor.writeByte(@backingInt(v.state));
+    try cursor.writeByte(@bitCast(v.flags));
+    try cursor.writeU32(v.size);
+    try cursor.writeU64(v.decoded);
+}
+
+pub fn readBodyEnd(cursor: *ReadCursor) Error!message.NetBodyEnd {
+    const v: message.NetBodyEnd = .{
+        .browser = try fields.readBrowser(cursor),
+        .session = try cursor.readU32(),
+        .request = try cursor.readU64(),
+        .state = std.enums.fromInt(message.NetBodyState, try cursor.readByte()) orelse return error.InvalidNetwork,
+        .flags = @bitCast(try cursor.readByte()),
+        .size = try cursor.readU32(),
+        .decoded = try cursor.readU64(),
+    };
+    try checkBodyEnd(v);
+    return v;
+}
+
+/// `net_record_state` — 켜짐·멈춤·켜지 못함은 세션이 0 이 아니다(꺼짐은 어느 것이든).
+pub fn checkRecordState(v: message.NetRecordState) Error!void {
+    if (v.status != .off and v.session == 0) return error.InvalidNetwork;
+}
+
+pub fn writeRecordState(cursor: *Cursor, v: message.NetRecordState) Error!void {
+    try checkRecordState(v);
+    try fields.writeBrowser(cursor, v.browser);
+    try cursor.writeU32(v.session);
+    try cursor.writeByte(@backingInt(v.status));
+}
+
+pub fn readRecordState(cursor: *ReadCursor) Error!message.NetRecordState {
+    const v: message.NetRecordState = .{
+        .browser = try fields.readBrowser(cursor),
+        .session = try cursor.readU32(),
+        .status = std.enums.fromInt(message.NetRecordStatus, try cursor.readByte()) orelse return error.InvalidNetwork,
+    };
+    try checkRecordState(v);
+    return v;
+}
+
+// 가장 큰 본문 조각 frame 도 frame 상한 안에 든다.
+comptime {
+    const data = wire.prefix_len + wire.common_len + 8 + 4 + 8 + 4 + 2 + message.net_body_chunk_bytes;
+    std.debug.assert(data <= wire.max_frame_bytes);
+    std.debug.assert(message.net_body_chunk_bytes <= std.math.maxInt(u16));
+}
+
 // 가장 큰 네트워크 frame(net_begin: 머리 + 고정 칸 + 글 넷의 상한 + 헤더 덩어리 상한)이 frame 상한 안에 든다.
 comptime {
-    const begin = wire.prefix_len + wire.common_len + 8 + 8 + 1 + 1 + 8 + (2 + max_method_bytes) + (2 + max_url_bytes) + 2 * (2 + max_origin_bytes) + (2 + max_host_bytes) + 3 + max_header_block_bytes;
+    const begin = wire.prefix_len + wire.common_len + 8 + 8 + 1 + 1 + 1 + 8 + (2 + max_method_bytes) + (2 + max_url_bytes) + 2 * (2 + max_origin_bytes) + (2 + max_host_bytes) + 3 + max_header_block_bytes;
     std.debug.assert(begin <= wire.max_frame_bytes);
     std.debug.assert(max_header_block_bytes <= std.math.maxInt(u16));
     std.debug.assert(max_header_count <= std.math.maxInt(u8));

@@ -9,7 +9,7 @@ const std = @import("std");
 pub const magic = "MWEB".*;
 /// maru 와 sidecar 는 따로 설치된다(`maru` 와 `maru-chromium` formula — 따로 업그레이드된다). 그래서 Mermaid 처럼
 /// 「항상 같은 버전」을 전제하지 않고, 버전이 다르면 첫 frame(hello)에서 `UnsupportedVersion` 으로 드러난다. 메시지 tag 나
-/// 본문을 바꾸면 올린다(W7a1 — W5a·W5b·W5c 가 tag 와 본문을 늘려 2, W6a 가 `popup_changed` 로 3, W6b 가 `tooltip_changed` 로 4, W6c 가 우클릭 메뉴 셋으로 5, W6d① 이 끌어 놓기 셋으로 6, W6d② 가 끌어내기 셋과 `drag_target.source` 로 7, W6d③ 이 끌기 조각의 파일 이름·내용으로 8, W6e 가 `open_tab` 으로 9, W6f① 이 팝업 이어 받기 둘로 10, W6h① 이 우클릭 표지를 32 비트로·명령 둘·새 창 자리로 11, W6h② 가 미디어 표지·명령 넷으로 12, W6j 가 `close_asking` 으로 13, W6m① 이 제안 목록 셋과 maru → sidecar 둘째 구간으로 14, W10a 가 다운로드로 15, W10d 가 `page_close_kept` 로 16, W9-0b 가 DevTools 호출 넷으로 17, W9b③ 이 `new_tab_credit` 으로 18, W9a 가 `main_frame_navigating` 으로 19, W9c① 이 콘솔 줄과 `error_page` 로 20, W9d① 이 네트워크 여섯(`net_watch`·`net_begin`·`net_redirect`·`net_response`·`net_end`·`net_dropped`)으로 21).
+/// 본문을 바꾸면 올린다(W7a1 — W5a·W5b·W5c 가 tag 와 본문을 늘려 2, W6a 가 `popup_changed` 로 3, W6b 가 `tooltip_changed` 로 4, W6c 가 우클릭 메뉴 셋으로 5, W6d① 이 끌어 놓기 셋으로 6, W6d② 가 끌어내기 셋과 `drag_target.source` 로 7, W6d③ 이 끌기 조각의 파일 이름·내용으로 8, W6e 가 `open_tab` 으로 9, W6f① 이 팝업 이어 받기 둘로 10, W6h① 이 우클릭 표지를 32 비트로·명령 둘·새 창 자리로 11, W6h② 가 미디어 표지·명령 넷으로 12, W6j 가 `close_asking` 으로 13, W6m① 이 제안 목록 셋과 maru → sidecar 둘째 구간으로 14, W10a 가 다운로드로 15, W10d 가 `page_close_kept` 로 16, W9-0b 가 DevTools 호출 넷으로 17, W9b③ 이 `new_tab_credit` 으로 18, W9a 가 `main_frame_navigating` 으로 19, W9c① 이 콘솔 줄과 `error_page` 로 20, W9d① 이 네트워크 여섯(`net_watch`·`net_begin`·`net_redirect`·`net_response`·`net_end`·`net_dropped`)으로 21, W9d② 가 본문 기록 넷(`net_record`·`net_body_data`·`net_body_end`·`net_record_state`)과 `net_begin` 의 둘째 표시로 22).
 ///
 /// **버전이 바뀌어도 바꾸지 않는 것**(버전이 다른 쪽도 「버전 불일치」를 알아보게):
 /// - frame 머리 `[u32 길이][MWEB][u16 버전]` — decoder 는 길이·magic·버전을 tag·본문보다 먼저 본다(`codec.decodeExact`).
@@ -17,7 +17,7 @@ pub const magic = "MWEB".*;
 ///   버전 불일치 대신 `FrameTooLarge`(규칙 위반 — 재시작)로 보인다(W7a1 적대 검증).
 /// sidecar 는 다른 버전의 hello 를 받으면 제 버전으로 `hello_ack`(0·0) 하나를 보내고 끝내고(exit 18), maru 는 handshake 중
 /// 버전이 다른 frame 을 받으면 다시 띄우지 않고 안내한다(C2).
-pub const version: u16 = 21;
+pub const version: u16 = 22;
 
 /// maru 가 보내는 URL 상한. 사용자가 친 주소·링크를 싣는 자리라 이 크기면 넉넉하고, 고정 decoder 저장소를
 /// 작게 둔다. 이보다 긴 URL(큰 data: URL 등)은 maru 가 보내지 않는다.
@@ -98,7 +98,8 @@ pub const Error = error{
     /// 그 `docs_back` 중 하나만 0.
     InvalidConsole,
     /// 네트워크(W9d①)의 닫힌 필드 위반 — 요청 번호 0, 짝이 맞지 않는 표시·쓰지 않는 비트, 모르는 자원 종류·결과, 상한 초과(주소·메서드·
-    /// 출처·MIME·헤더 개수와 바이트), 토큰이 아닌 메서드·헤더 이름, 개수와 바이트가 어긋난 헤더 덩어리, 꺼진 `net_watch` 에 호스트.
+    /// 출처·MIME·헤더 개수와 바이트), 토큰이 아닌 메서드·헤더 이름, 개수와 바이트가 어긋난 헤더 덩어리, 꺼진 `net_watch` 에 호스트. W9d② 본문:
+    /// 세션·요청 0, 빈 조각·조각·본문 상한 초과, 모르는 본문 상태·기록 상태, 잡지 않은 본문에 크기·글 표시, 켬과 세션이 어긋남.
     InvalidNetwork,
     InvalidClickCount,
     InvalidRange,

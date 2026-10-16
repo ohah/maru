@@ -184,6 +184,9 @@ pub const WebMeta = struct {
     /// HTML 은 `panel_kind` 가 browser 라 그 칸만으로는 가를 수 없어 따로 싣는다. collector 가 `isBrowserTerm` 으로 채운다.
     /// **기본값이 없다** — 만드는 곳이 빠뜨리면 「제어 가능」으로 열리지 않고 컴파일이 멈춘다.
     controllable: bool,
+    /// W9d②: 이 탭의 응답 본문을 기록하는 중이다(탭 제목 앞의 ◉ 와 같은 신호 — `web_osr.networkRecording`). 에이전트가 「이 탭은 기록 중」 을
+    /// 목록에서 안다.
+    recording: bool = false,
 };
 
 /// kind에 따라 분기하는 전용 메타(tagged). terminal이면 web 필드를, web이면 terminal 필드를 **타입 수준에서**

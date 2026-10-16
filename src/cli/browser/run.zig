@@ -117,6 +117,9 @@ pub fn usageReason(err: browser.ParseError) []const u8 {
         error.MissingRequestId => "network-request needs --req <n> (a req number from maru browser network)",
         error.InvalidRequestId => "--req must be a req number from maru browser network (a positive integer)",
         error.InvalidBeforeReq => "--before-req must be the next_before_req of the previous page (a positive integer)",
+        error.MissingRecordSwitch => "network-record needs exactly one of --on or --off",
+        error.InvalidBodyBytes => "--max-bytes must be 1-65536",
+        error.InvalidBodyOffset => "--offset must be 0-1048576 (a byte offset into the body)",
     };
 }
 
@@ -153,7 +156,77 @@ fn runRequest(
         defer browser.freeUpload(allocator, abs);
         return runPlainRequest(io, allocator, .{ .upload = abs }, stdout, stderr);
     }
+    // W9d②: 본문 전부를 파일로 — 조각(64 KiB)을 이어 받아 다 모은 뒤 0600 으로 원자적으로 쓴다(바이너리 본문은 이 길로만).
+    if (req == .network_request and req.network_request.out != null) return runNetworkBodyOut(io, allocator, req.network_request, stdout, stderr);
     return runPlainRequest(io, allocator, req, stdout, stderr);
+}
+
+/// W9d②: `network-request --body --out <file>` — `browser.networkRequest` 를 `body_offset` 을 옮기며 되풀이해 본문을 모은다(글은 UTF-8 그대로,
+/// 바이너리는 base64 를 푼다). 다 모은 뒤에만 `publishResult`(0600·원자적)로 쓴다 — 중간에 실패하면 파일을 만들지 않는다. 받는 동안 본문이
+/// 바뀌면(크기가 다르다) 실패로 친다.
+fn runNetworkBodyOut(io: std.Io, allocator: std.mem.Allocator, cmd: browser.NetworkRequestCmd, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(allocator);
+    var offset: u32 = cmd.offset orelse 0;
+    var size: ?i64 = null;
+    var binary = false;
+    var rounds: usize = 0;
+    while (true) : (rounds += 1) {
+        if (rounds > (browser.max_network_body_bytes / 1024) + 4) return bodyOutError(stderr, "the body did not end");
+        var piece = cmd;
+        piece.offset = offset;
+        piece.out = null;
+        const request_bytes = try browser.buildRequestBytes(allocator, .{ .network_request = piece }, .{ .number = 1 });
+        defer allocator.free(request_bytes);
+        const resp = try control_client.fetchResponse(io, allocator, request_bytes, stderr);
+        defer allocator.free(resp);
+        var pm = cp.parseMessage(allocator, resp) catch return bodyOutError(stderr, "the server returned a malformed answer");
+        defer pm.deinit();
+        const result = switch (pm.message) {
+            .response => |r| r.result orelse {
+                // 서버의 오류(모르는 번호·권한) — 그 글 그대로.
+                _ = browser.renderResponse(allocator, resp, .network_request, stderr) catch false;
+                stderr.flush() catch {};
+                return error.UnknownCommand;
+            },
+            else => return bodyOutError(stderr, "the server returned a malformed answer"),
+        };
+        if (result != .object) return bodyOutError(stderr, "the server returned a malformed answer");
+        const o = result.object;
+        const state = if (o.get("body_state")) |v| (if (v == .string) v.string else "") else "";
+        if (!std.mem.eql(u8, state, "captured")) {
+            // 잡지 않았거나 보이지 않는다 — 자세히를 그대로 보여 까닭을 알린다(파일은 만들지 않는다).
+            _ = browser.renderResponse(allocator, resp, .network_request, stderr) catch false;
+            stderr.flush() catch {};
+            return error.UnknownCommand;
+        }
+        const total = if (o.get("body_size")) |v| (if (v == .integer) v.integer else -1) else -1;
+        if (size) |prev| if (prev != total) return bodyOutError(stderr, "the body changed while it was read");
+        size = total;
+        binary = if (o.get("body_encoding")) |v| v == .string and std.mem.eql(u8, v.string, "base64") else false;
+        const text = if (o.get("body")) |v| (if (v == .string) v.string else "") else "";
+        if (binary) {
+            const dec = std.base64.standard.Decoder;
+            const n = dec.calcSizeForSlice(text) catch return bodyOutError(stderr, "the server returned a malformed body piece");
+            const start = body.items.len;
+            try body.resize(allocator, start + n);
+            dec.decode(body.items[start..], text) catch return bodyOutError(stderr, "the server returned a malformed body piece");
+        } else try body.appendSlice(allocator, text);
+        const next = if (o.get("body_next_offset")) |v| (if (v == .integer) v.integer else -1) else -1;
+        if (next < 0) break;
+        if (next <= offset) return bodyOutError(stderr, "the body did not advance");
+        offset = @intCast(next);
+    }
+    const path = cmd.out.?;
+    publishResult(std.Io.Dir.cwd(), io, path, body.items) catch return bodyOutError(stderr, "cannot publish the output file atomically");
+    try stdout.print("body: {d} bytes{s} → {s}\n", .{ body.items.len, if (binary) " (binary)" else "", path });
+    try stdout.flush();
+}
+
+fn bodyOutError(stderr: *std.Io.Writer, msg: []const u8) error{UnknownCommand} {
+    stderr.print("maru browser network-request: {s}\n", .{msg}) catch {};
+    stderr.flush() catch {};
+    return error.UnknownCommand;
 }
 
 fn runPlainRequest(

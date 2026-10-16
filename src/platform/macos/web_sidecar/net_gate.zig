@@ -767,3 +767,35 @@ test "W9d① 적대 리뷰 5 회차 B1: 떠난 문서의 iframe — 프레임이
     try testing.expect(d.previous(0xB2));
     try testing.expect(!d.previous(0x9999));
 }
+
+test "W9d① 적대 리뷰 후 — 같은 번호 다시 시작: 진행 중인 번호가 다시 와도 자리는 하나(두 번 세지 않는다), 끝나면 한 번만 돌려주고, 끝난 뒤 같은 번호로 다시 시작하면 문을 새로 지나 새 자리다" {
+    var s: State = .{};
+    try testing.expect(s.setWatch(1, 11, true, true, false, &.{}));
+    const w = s.watchByCef(11).?;
+    const id: u64 = 18446744073709551571; // StackOverflow 실측의 주 프레임 번호
+    const t = s.startTab(w, id, 1_000_000).?;
+    t.begun = true;
+    // 끝 전에 같은 번호가 처리기 고르기에 다시 와도(`network.zig` 는 `find` 로 보고 문을 지나지 않는다) 표는 같은 자리를 준다.
+    try testing.expect(s.find(id) == t);
+    try testing.expect(s.track(id, w) == t);
+    try testing.expectEqual(@as(usize, 1), s.in_flight);
+    try testing.expectEqual(@as(u16, 1), w.in_flight);
+    // 앞 시도가 끝난다(CEF 154 실측 차례 — 끝이 먼저 온다): 한 번만 돌려준다.
+    s.untrack(s.find(id).?);
+    try testing.expectEqual(@as(usize, 0), s.in_flight);
+    try testing.expectEqual(@as(u16, 0), w.in_flight);
+    try testing.expect(s.find(id) == null);
+    // 같은 번호로 다시 시작 — 문을 새로 지나(양동이 하나) 새 자리, 아직 시작을 보내지 않았다.
+    const tokens = w.bucket.tokens;
+    const again = s.startTab(w, id, 1_000_000).?;
+    try testing.expect(!again.begun);
+    try testing.expectEqual(tokens - 1, w.bucket.tokens);
+    try testing.expectEqual(@as(usize, 1), s.in_flight);
+    try testing.expectEqual(@as(u16, 1), w.in_flight);
+    s.untrack(again);
+    try testing.expectEqual(@as(usize, 0), s.in_flight);
+    try testing.expectEqual(@as(u16, 0), w.in_flight);
+    var held: usize = 0;
+    for (s.tracks) |tr| held += @intFromBool(tr.request != 0);
+    try testing.expectEqual(@as(usize, 0), held);
+}

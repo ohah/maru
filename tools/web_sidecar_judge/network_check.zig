@@ -35,6 +35,9 @@
 //!                                 기록을 끝낸다)
 //! W9d① 적대 리뷰 4 회차(이름 `R9d4-*` — `network_host_check.zig`): 문법이 이상한 주소들로 옮기거나 불러 sidecar 의 호스트 칸·app 이 주소 알림에서
 //!   읽는 호스트를 서버가 받은 `Host` 와 맞춘다(`R9d4-host-*`), C3 의 전제(새 문서는 `page_started` 뒤 `url_changed`, 32 KiB 넘는 주소는 알림 없음)를 본다.
+//! W9d① 적대 리뷰 후(이름 `R9d6-*` — W9d② 측정이 StackOverflow 의 Cloudflare 확인 페이지에서 찾았다):
+//!   R9d6-restart-same-id   이동의 답에 `Critical-CH` 가 있으면 Chromium 은 그 힌트를 실어 같은 이동을 **같은 CEF 요청 번호로** 다시 시작한다 —
+//!                          시작·응답 403·끝·시작(힌트)·응답 200·끝. maru 는 앞 기록을 `restarted` 로 끝낸다(`web_osr_network` 시험 R1·R2)
 //! W9d① 적대 리뷰 5 회차(이름 `R9d5-*` — `network_r9d5_check.zig`, `--network` 가 이 판정 뒤에 따로 띄운 sidecar 로 돈다): 떠난 문서의 iframe 비콘,
 //!   탭 든 `Location` 의 사용자 정보, 새 문서마다 `url_changed` 가 오는가(관측).
 
@@ -77,6 +80,8 @@ const Timeval = extern struct { sec: i64, usec: i32 };
 
 var server_port: u16 = 0;
 pub var flood_served = std.atomic.Value(u32).init(0);
+/// 같은 번호 다시 시작(W9d① 적대 리뷰 후): `/n/cch` 를 받은 수.
+pub var cch_served = std.atomic.Value(u32).init(0);
 
 fn startServer() !u16 {
     const fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -191,6 +196,13 @@ fn serveOne(conn: c_int) void {
         _ = std.c.write(conn, head.ptr, head.len);
         return;
     }
+    // W9d① 적대 리뷰 후 — 같은 번호 다시 시작: Cloudflare 의 확인 페이지처럼 `Critical-CH` 로 답하면 Chromium 은 그 힌트를 실어 같은 이동을
+    // 다시 시작한다(같은 CEF 요청 번호 — MEASURE3 의 StackOverflow 실측과 같은 모양). 힌트가 실려 오면 보통 답.
+    if (std.mem.eql(u8, path, "/n/cch")) {
+        _ = cch_served.fetchAdd(1, .monotonic);
+        if (std.ascii.findIgnoreCase(req[0..@intCast(n)], "sec-ch-ua-arch:") != null) return reply(conn, "200 OK", html, "", "<!doctype html><title>cch-ok</title>ok");
+        return reply(conn, "403 Forbidden", html, "Accept-CH: Sec-CH-UA-Arch\r\nCritical-CH: Sec-CH-UA-Arch\r\nSet-Cookie: cch=1; Path=/\r\n", "<!doctype html><title>cch-challenge</title>challenge");
+    }
     if (std.mem.eql(u8, path, "/n/f")) {
         _ = flood_served.fetchAdd(1, .monotonic);
         return reply(conn, "204 No Content", "text/plain", "", "");
@@ -216,6 +228,7 @@ const Rec = struct {
     headers: []u8 = &.{},
     header_count: u8 = 0,
     outcome: msg.NetOutcome = .success,
+    error_code: i32 = 0,
     count: u32 = 0,
 
     fn header(self: *const Rec, name: []const u8) ?[]const u8 {
@@ -245,7 +258,7 @@ const Run = struct {
             .net_begin => |v| .{ .tag = .net_begin, .browser = v.browser, .request = v.request, .flags = v.flags, .resource_type = v.resource_type, .url = self.dupe(v.url), .host = self.dupe(v.host), .initiator = self.dupe(v.initiator), .site = self.dupe(v.site), .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
             .net_redirect => |v| .{ .tag = .net_redirect, .browser = v.browser, .request = v.request, .hop = v.flags, .status = v.status, .url = self.dupe(v.url), .host = self.dupe(v.host), .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
             .net_response => |v| .{ .tag = .net_response, .browser = v.browser, .request = v.request, .hop = v.flags, .status = v.status, .headers = self.dupe(v.headers.bytes), .header_count = v.headers.count },
-            .net_end => |v| .{ .tag = .net_end, .browser = v.browser, .request = v.request, .outcome = v.outcome },
+            .net_end => |v| .{ .tag = .net_end, .browser = v.browser, .request = v.request, .outcome = v.outcome, .error_code = v.error_code },
             .net_dropped => |v| .{ .tag = .net_dropped, .browser = v.browser, .request = 0, .count = v.count },
             .browser_created => |id| blk: {
                 if (slot(id)) |i| self.created[i] = true;
@@ -441,6 +454,45 @@ pub fn run(report: Report, host_path: [:0]const u8, profile_arg: [:0]const u8) !
             ends = r.countFor(at, .net_end, watched, b.request);
         }
         report(redir != null and hops == 2 and second_to_other and final_ok and ends == 1, "net-redirect", std.fmt.bufPrint(&detail, "시작 {} · 홉 {d} · 둘째 302 → 다른 사이트 {} · 마지막 200 {} · 끝 {d}", .{ redir != null, hops, second_to_other, final_ok, ends }) catch "");
+    }
+    // ── W9d① 적대 리뷰 후 — 같은 번호 다시 시작(Critical-CH): 한 이동의 처음 시도가 끝난 뒤 같은 CEF 번호로 다시 시작한다. maru 의 기록은 이
+    //    차례를 `web_osr_network` 의 시험 「적대 리뷰 후 재현 R2」 로 그대로 되풀이한다(앞 기록은 `restarted`) ──
+    {
+        at = r.mark();
+        const served0 = cch_served.load(.monotonic);
+        try r.navigate(watched, url(&u, "/n/cch?restart"));
+        _ = r.untilLoads(0, 3);
+        r.pump(1500);
+        const first_begin = r.begin(at, watched, "/n/cch?restart");
+        var seq_buf: [400]u8 = undefined;
+        var seq_len: usize = 0;
+        var begins: usize = 0;
+        var shape_ok = false;
+        var second_hint = false;
+        if (first_begin) |b| {
+            // 그 번호의 알림 차례: 시작·응답 403·끝·시작(힌트)·응답 200·끝(성공). 앞 시도의 끝은 CEF 154 에서 성공(오류 0)으로 온다(실측) — 결과는 보지 않는다.
+            const Want = struct { tag: msg.Tag, status: u16 = 0, success: bool = false };
+            const want = [_]Want{ .{ .tag = .net_begin }, .{ .tag = .net_response, .status = 403 }, .{ .tag = .net_end }, .{ .tag = .net_begin }, .{ .tag = .net_response, .status = 200 }, .{ .tag = .net_end, .success = true } };
+            var i: usize = 0;
+            var match = true;
+            for (r.recs.items[at..]) |*rec| if (rec.browser == watched and rec.request == b.request) {
+                const part = switch (rec.tag) {
+                    .net_response => std.fmt.bufPrint(seq_buf[seq_len..], "response {d} · ", .{rec.status}),
+                    .net_end => std.fmt.bufPrint(seq_buf[seq_len..], "end {s} {d} · ", .{ @tagName(rec.outcome), rec.error_code }),
+                    else => std.fmt.bufPrint(seq_buf[seq_len..], "{s} · ", .{@tagName(rec.tag)}),
+                } catch "";
+                seq_len += part.len;
+                if (rec.tag == .net_begin) {
+                    begins += 1;
+                    if (begins == 2) second_hint = rec.header("Sec-CH-UA-Arch") != null;
+                }
+                if (i >= want.len or rec.tag != want[i].tag or (rec.tag == .net_response and rec.status != want[i].status) or (want[i].success and rec.outcome != .success)) match = false;
+                i += 1;
+            };
+            shape_ok = match and i == want.len;
+        }
+        const served = cch_served.load(.monotonic) - served0;
+        report(shape_ok and begins == 2 and second_hint and served == 2, "R9d6-restart-same-id", std.fmt.bufPrint(&detail, "서버가 받은 {d} · 같은 번호의 시작 {d} · 둘째 시작에 힌트 {} · 차례 「{s}」", .{ served, begins, second_hint, seq_buf[0..seq_len] }) catch "");
     }
     // ── R9d2(적대 리뷰 2 회차 N1): 덮이지 않는 사이트에서 시작해 덮이는 사이트로 리다이렉트돼 돌아온 이동 ──
     {

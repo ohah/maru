@@ -62,7 +62,7 @@ pub fn hashNonce(nonce: Nonce) Hash {
 // ── scope 모델(§8.3) ──────────────────────────────────────────────────────────────────────────────────────
 /// capability scope 분류(§8.3). method↔scope 매핑(§6 line 111)이 이 category로 판정한다. metadata의 sub-scope
 /// (self|window|all)는 `Scope.metadata`가 `wm.MetadataScope`로 실어 나른다(1c/1d가 소비하는 그 타입).
-pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser, browser_storage, browser_network };
+pub const ScopeClass = enum { metadata, bind, read_output, write, lifecycle, browser, browser_storage, browser_network, browser_network_body };
 
 /// 단일 capability scope(§8.5 **single-scope 강제**: capability는 정확히 하나의 scope만 싣는다 — 이 union은 한
 /// 값이라 write+lifecycle 같은 복합 grant를 타입 수준에서 만들 수 없다). metadata는 `wm.MetadataScope`를 실어
@@ -88,6 +88,9 @@ pub const Scope = union(enum) {
     /// peer scope: 요청 헤더에는 그 사이트의 로그인 쿠키·인증 토큰이 그대로 실린다(설정 `browser.agent-network-full` 이 켜져 있으면 값까지 —
     /// 기본). `browser_storage` 처럼 상속 fd 로 발급하지 않는다.
     browser_network,
+    /// `browser-network-body`(W9d② — `browser.networkRecord` — **응답 본문 기록**). `browser_network` 와도 나뉜 peer scope: 본문에는 그
+    /// 사이트의 개인 자료(메일·계정·토큰)가 그대로 있다. 사이트에 묶이고(사용자 탭은 사이트마다 한 번 묻는다), 상속 fd 로 발급하지 않는다.
+    browser_network_body,
 
     pub fn class(self: Scope) ScopeClass {
         return switch (self) {
@@ -99,6 +102,7 @@ pub const Scope = union(enum) {
             .browser => .browser,
             .browser_storage => .browser_storage,
             .browser_network => .browser_network,
+            .browser_network_body => .browser_network_body,
         };
     }
 
@@ -109,7 +113,7 @@ pub const Scope = union(enum) {
     /// 쿠키=인증 토큰이라 상속 fd로 새면 same-uid untrusted 코드가 세션 자격증명을 탈취(write/lifecycle과 동급 위험).
     pub fn allowedViaInheritedFd(self: Scope) bool {
         return switch (self.class()) {
-            .write, .lifecycle, .browser_storage, .browser_network => false,
+            .write, .lifecycle, .browser_storage, .browser_network, .browser_network_body => false,
             .metadata, .read_output, .bind, .browser => true,
         };
     }
@@ -149,6 +153,8 @@ pub fn methodRequiredScope(method: []const u8) ?ScopeClass {
     // browser-network(W9d① — D3·D5): 요청·응답 기록 읽기. 요청 헤더에 로그인 쿠키·인증 토큰이 실려 쿠키만큼 민감하다 — generic
     // `browser.*` 보다 먼저.
     if (m.core == .browser and (eq(rest, "network") or eq(rest, "networkRequest"))) return .browser_network;
+    // browser-network-body(W9d②): 응답 본문 기록을 켜고 끈다 — 본문 읽기는 `networkRequest`(네트워크 grant)에 본문 grant 를 더해 본다(앱이).
+    if (m.core == .browser and eq(rest, "networkRecord")) return .browser_network_body;
     // browser.*(§6 line 111 와일드카드) — 나머지 페이지 조작/관찰.
     if (m.core == .browser) return .browser;
     return null;
@@ -549,6 +555,13 @@ test "fd 발급 정책: browser_storage는 상속 fd로 발급 금지(D5 쿠키=
     try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_storage, null));
 }
 
+test "W9d②: browser_network_body 도 상속 fd 로 발급하지 않는다(응답 본문에 개인 자료)" {
+    try testing.expect(!Scope.allowedViaInheritedFd(.browser_network_body));
+    try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_network_body, null));
+    try testing.expectEqual(ScopeClass.browser_network_body, (Scope{ .browser_network_body = {} }).class());
+    try testing.expectEqual(ScopeClass.browser_network_body, methodRequiredScope("browser.networkRecord").?);
+}
+
 test "W9d①: browser_network 도 상속 fd 로 발급하지 않는다(요청 헤더에 로그인 쿠키·인증 토큰)" {
     try testing.expect(!Scope.allowedViaInheritedFd(.browser_network));
     try testing.expectError(error.ScopeForbiddenViaInheritedFd, validateFdIssuance(.browser_network, null));
@@ -588,6 +601,7 @@ test "method↔scope 매핑: §6 line 111의 모든 메서드가 올바른 categ
         .{ .m = "browser.network", .want = .browser_network },
         .{ .m = "browser.networkRequest", .want = .browser_network },
         .{ .m = "browser.networkX", .want = .browser },
+        .{ .m = "browser.networkRecord", .want = .browser_network_body }, // W9d②
         // localStorage는 eval 백엔드=base browser(exec와 동일 도달, D5 laundering-hole 불변)
         .{ .m = "browser.getLocalStorage", .want = .browser },
         .{ .m = "browser.setLocalStorage", .want = .browser },

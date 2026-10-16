@@ -50,6 +50,7 @@ const panelKindForEntryKind = AppSession.panelKindForEntryKind;
 const restoreFailureDisposition = AppSession.restoreFailureDisposition;
 const scrollbarBarWidthPx = @import("scroll.zig").scrollbarBarWidthPx;
 const tabTitleBody = @import("tab.zig").tabTitleBody;
+const tabTitleMarker = @import("tab.zig").tabTitleMarker;
 const Model = app_session_mod.Model;
 const barMetrics = app_session_mod.barMetrics;
 const commandName = app_session_mod.commandName;
@@ -790,7 +791,7 @@ pub fn appendPaneTabTitles(
         if (body.len == 0) continue;
         const seg = m.segOf(i);
         if (seg.end_px <= seg.start_px) continue; // 우단에서 잘려 안 보이는 탭
-        const lead_cols: u32 = if (tabTitleRunningMarker(title)) 3 else 1; // 좌패딩 1 + 마커(2칸)
+        const lead_cols: u32 = if (tabTitleMarker(title) != null) 3 else 1; // 좌패딩 1 + 마커(2칸 — running ● 또는 기록 ◉)
         const trail_cols: u32 = if (seg.has_close) 3 else 1; // ✕ 좌여백·✕·우여백
         // `segOf`의 px는 `colPx`가 `bar_x`를 이미 더한 **절대 좌표**다 — 여기에 `pb.tabs.x`를 또 더하면
         // 제목이 탭 밖 오른쪽으로 밀린다(실제 캡처로 잡힌 회귀). 절대 좌표라 여러 pane의 op을 한 아티팩트에

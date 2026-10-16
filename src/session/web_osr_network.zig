@@ -19,8 +19,13 @@
 //! 값과 주소의 사용자 정보는 읽는 쪽이 그 헤더를 보내거나 받은 호스트를 덮는 `browser_storage` grant(`View.cookie_host`)를 쥘 때만 — 설정이
 //! 켜져 있어도(D1 — 사용자 결정 2026-10-15). sidecar 가 다시 뜨면(브라우저가 다시 만들어지면) 진행 중이던 요청은 끝난 것으로 치고 번호 표를
 //! 비운다(T2 — 새 프로세스는 이동 요청 번호를 같게 다시 쓴다).
+//! W9d②: 기록하는 탭(`browser.networkRecord`)의 응답 본문을 기록마다 쥔다(sidecar 의 `net_body_data`·`net_body_end` — 하나 1 MiB·탭 8 MiB·앱 32 MiB,
+//! 넘으면 이 탭의 오래된 본문부터 `evicted`, 메모리에만). 본문은 새것부터 찾아 붙인다(끝은 대개 그 요청의 `net_end` 뒤에 온다). 같은 번호로
+//! 다시 시작하면 앞 시도의 끝나지 않은 본문은 `restarted` 다(sidecar 는 앞 시도의 본문 끝을 새 시작보다 먼저 보낸다). 읽는 쪽 시작점은
+//! 네트워크와 본문이 따로다(`ReaderSet` 둘 — 본문은 `browser_network_body` grant 의 번호로). 보이는가는 헤더의 투영 위에 `net_policy.bodyAccess`
+//! (본문 권한·그 사이트의 페이지·허락 뒤·UB1 — 다른 사이트에서 쿠키가 실린 응답은 그 사이트의 쿠키 권한).
 //! 브라우저 탭에서 중요한 이유: 요청 헤더에는 그 사이트의 로그인 쿠키·인증 토큰이 그대로 있고, 사용자가 허락 전에 그 탭으로 간 곳의 요청이
-//! 허락 뒤의 첫 읽기에 보이면 안 된다.
+//! 허락 뒤의 첫 읽기에 보이면 안 된다. 응답 본문에는 그 사이트의 개인 자료가 그대로 있다.
 
 const array_repeat = @import("array_repeat");
 
@@ -50,6 +55,14 @@ pub const recent_end_slots: usize = 16;
 pub const default_page_size: usize = 50;
 pub const max_page_size: usize = 200;
 
+/// W9d②: 본문 상한 — 하나 1 MiB(sidecar 와 같다), 탭 8 MiB, 앱 32 MiB. 메모리에만 둔다(디스크에 쓰지 않는다).
+pub const max_body_bytes: usize = msg.max_net_body_bytes;
+pub const max_tab_body_bytes: usize = 8 * 1024 * 1024;
+pub const global_body_cap_bytes: usize = 32 * 1024 * 1024;
+/// 본문 한 번 읽기의 기본·최대 바이트(`browser.networkRequest` 의 `body_max_bytes`).
+pub const default_body_read_bytes: u32 = 64 * 1024;
+pub const max_body_read_bytes: u32 = 64 * 1024;
+
 /// 요약 한 줄의 고정 몫(글 밖의 칸) — 상한 계산용.
 const entry_overhead: usize = 160;
 const hop_overhead: usize = 48;
@@ -58,6 +71,53 @@ const hop_overhead: usize = 48;
 pub const Budget = struct {
     bytes: usize = 0,
     cap: usize = global_cap_bytes,
+    /// W9d②: 본문 바이트(요약·자세한 것과 따로 센다).
+    body_bytes: usize = 0,
+    body_cap: usize = global_body_cap_bytes,
+};
+
+/// 본문의 상태(W9d② — maru 쪽). `none` 은 기록하지 않은 요청, `pending` 은 끝을 기다린다. 가운데는 sidecar 의 `NetBodyState` 그대로,
+/// 뒤의 둘은 maru 가 정한다: `evicted` — 탭·앱 상한으로 버렸다, `discarded` — 본문 권한이 모두 사라졌거나 설정이 꺼져 지웠다.
+pub const BodyState = enum {
+    none,
+    pending,
+    captured,
+    over_cap,
+    not_text,
+    no_body,
+    partial,
+    request_failed,
+    unavailable,
+    unmatched,
+    busy,
+    recording_stopped,
+    detached,
+    ambiguous,
+    not_covered,
+    /// 같은 CEF 번호로 다시 시작해 버려진 앞 시도(W9d① 적대 리뷰 후 — sidecar 가 알리거나, 끝이 오기 전에 새 시작이 오면 maru 가 정한다).
+    restarted,
+    evicted,
+    discarded,
+
+    fn fromWire(s: msg.NetBodyState) BodyState {
+        // 이름으로 짝짓지 않고 하나씩 적는다 — 경계 시험이 반사(`@field`)를 막고, wire 에 상태가 늘면 여기서 컴파일이 멈춘다.
+        return switch (s) {
+            .captured => .captured,
+            .over_cap => .over_cap,
+            .not_text => .not_text,
+            .no_body => .no_body,
+            .partial => .partial,
+            .request_failed => .request_failed,
+            .unavailable => .unavailable,
+            .unmatched => .unmatched,
+            .busy => .busy,
+            .recording_stopped => .recording_stopped,
+            .detached => .detached,
+            .ambiguous => .ambiguous,
+            .not_covered => .not_covered,
+            .restarted => .restarted,
+        };
+    }
 };
 
 pub const State = enum { pending, done, failed, canceled };
@@ -132,6 +192,14 @@ pub const Entry = struct {
     detail_evicted: bool = false,
     summary_bytes: usize = 0,
     detail_bytes: usize = 0,
+    /// W9d②: 본문 — sidecar 가 `body_expected` 로 알린 요청만(끝은 꼭 하나 온다).
+    body_expected: bool = false,
+    body_state: BodyState = .none,
+    /// 받은 바이트(조각을 차례로 이어 붙인다 — 끝이 `captured` 면 본문 전부).
+    body: std.ArrayList(u8) = .empty,
+    body_flags: msg.NetBodyFlags = .{},
+    /// sidecar 가 센 풀어 낸 크기(`over_cap` 이 얼마였는지).
+    body_decoded: u64 = 0,
 
     /// 마지막 주소의 호스트(리다이렉트 뒤 — 응답을 보낸 곳).
     fn finalHost(self: *const Entry) []const u8 {
@@ -153,6 +221,7 @@ pub const Entry = struct {
 
     fn deinit(self: *Entry, gpa: std.mem.Allocator) void {
         self.freeDetail(gpa);
+        self.body.deinit(gpa);
         gpa.free(self.method);
         gpa.free(self.url);
         gpa.free(self.host);
@@ -175,6 +244,109 @@ const Reader = struct {
     used: u64 = 0,
     /// grant 로 들어온 쪽(`noteReader`) — `syncReaders` 가 grant 가 사라지면 뺀다. 처음 읽을 때 생긴 쪽(모르는 쪽 — 방어)은 아니다.
     granted: bool = false,
+};
+
+/// 읽는 쪽마다의 시작점 묶음 — 네트워크 기록(`browser_network` grant)과 본문(`browser_network_body` grant — W9d②)이 같은 규칙으로 하나씩 쥔다:
+/// 모달로 받은 grant 는 그때부터, 태어날 때의 grant 는 처음부터(사용자가 첫 읽기 전에 그 탭을 몰면 첫 읽기 때부터), 모르는 쪽은 처음 읽을 때부터.
+const ReaderSet = struct {
+    readers: [max_readers]Reader = undefined,
+    count: usize = 0,
+    clock: u64 = 0,
+    /// 태어날 때 묶인 읽는 쪽(에이전트가 연 탭) — 그쪽이 처음 읽기 전에 사용자가 몰면 그 시작점을 첫 읽기로 미룬다.
+    birth_who: Authorizer = 0,
+    birth_pending: bool = false,
+    birth_used: bool = false,
+
+    fn find(self: *ReaderSet, who: Authorizer) ?*Reader {
+        for (self.readers[0..self.count]) |*r| if (r.who == who) return r;
+        return null;
+    }
+
+    fn add(self: *ReaderSet, who: Authorizer, start: u64) *Reader {
+        self.clock += 1;
+        if (self.count == max_readers) {
+            // 가장 오래 쓰지 않은 쪽을 잊는다 — 잊힌 쪽의 다음 읽기는 그때부터(더 숨기는 쪽).
+            var victim: usize = 0;
+            for (self.readers[0..self.count], 0..) |r, i| if (r.used < self.readers[victim].used) {
+                victim = i;
+            };
+            self.readers[victim] = self.readers[self.count - 1];
+            self.count -= 1;
+        }
+        self.readers[self.count] = .{ .who = who, .start = start, .used = self.clock };
+        self.count += 1;
+        return &self.readers[self.count - 1];
+    }
+
+    fn note(self: *ReaderSet, who: Authorizer, at_birth: bool, next_seq: u64) void {
+        if (who == 0) return;
+        if (self.find(who)) |r| {
+            r.granted = true;
+            return;
+        }
+        // 태어날 때의 묶음은 탭마다 한 번 — 철회 뒤 다시 들어온 grant 는 지금부터다(다시 허락은 새 grant 번호지만 방어로).
+        const birth = at_birth and !self.birth_used;
+        self.add(who, if (birth) 0 else next_seq).granted = true;
+        if (birth) {
+            self.birth_used = true;
+            self.birth_who = who;
+            self.birth_pending = true;
+        }
+    }
+
+    fn sync(self: *ReaderSet, desired: []const Desired, next_seq: u64) void {
+        var i: usize = 0;
+        while (i < self.count) {
+            const r = self.readers[i];
+            const keep = !r.granted or for (desired) |d| {
+                if (d.who == r.who) break true;
+            } else false;
+            if (keep) {
+                i += 1;
+                continue;
+            }
+            self.remove(r.who);
+        }
+        for (desired) |d| self.note(d.who, d.birth, next_seq);
+    }
+
+    fn remove(self: *ReaderSet, who: Authorizer) void {
+        for (self.readers[0..self.count], 0..) |r, i| if (r.who == who) {
+            self.readers[i] = self.readers[self.count - 1];
+            self.count -= 1;
+            break;
+        };
+        if (self.birth_who == who) {
+            self.birth_who = 0;
+            self.birth_pending = false;
+        }
+    }
+
+    fn userDrove(self: *ReaderSet) void {
+        if (!self.birth_pending) return;
+        self.birth_pending = false;
+        if (self.find(self.birth_who)) |r| r.deferred = true;
+    }
+
+    fn startFor(self: *ReaderSet, who: Authorizer, next_seq: u64) u64 {
+        self.clock += 1;
+        if (who == self.birth_who) self.birth_pending = false;
+        if (who == 0) return next_seq;
+        const r = self.find(who) orelse self.add(who, next_seq);
+        if (r.deferred) {
+            r.deferred = false;
+            r.start = next_seq;
+        }
+        r.used = self.clock;
+        return r.start;
+    }
+
+    /// 모두 잊는다(기록을 지울 때) — 태어날 때의 묶음을 썼다는 것은 남긴다(다시 들어온 grant 는 지금부터).
+    fn clear(self: *ReaderSet) void {
+        self.count = 0;
+        self.birth_who = 0;
+        self.birth_pending = false;
+    }
 };
 
 /// app 이 아는 그 탭의 `browser_network` grant 하나(`syncReaders`).
@@ -271,13 +443,12 @@ pub const Ring = struct {
     next_seq: u64 = 1,
     summary_bytes: usize = 0,
     detail_bytes: usize = 0,
-    readers: [max_readers]Reader = undefined,
-    reader_count: usize = 0,
-    reader_clock: u64 = 0,
-    /// 태어날 때 묶인 읽는 쪽(에이전트가 연 탭) — 그쪽이 처음 읽기 전에 사용자가 몰면 그 시작점을 첫 읽기로 미룬다.
-    birth_who: Authorizer = 0,
-    birth_pending: bool = false,
-    birth_used: bool = false,
+    /// 네트워크 기록을 읽는 쪽들(`browser_network` grant).
+    net_readers: ReaderSet = .{},
+    /// 본문을 읽는 쪽들(W9d② — `browser_network_body` grant). 본문은 그 grant 뒤에 시작한 요청의 것만 보인다(사용자 탭 — U7 과 같은 갈래).
+    body_readers: ReaderSet = .{},
+    /// 이 탭이 쥔 본문 바이트(다 받은 것과 받는 중인 것 — `max_tab_body_bytes`).
+    body_bytes: usize = 0,
     /// 앱 예산이 모자라 적지 못한 요청 수 — 다음 표지에 싣는다.
     unrecorded: u32 = 0,
     /// 최근에 끝난 요청(CEF 번호 → 기록 번호, 돌려 쓰는 자리) — 같은 번호의 시작이 다시 오면 그 기록을 다시 시작으로 표시한다(W9d① 적대 리뷰 후).
@@ -301,107 +472,50 @@ pub const Ring = struct {
         self.entries.len = 0;
         self.live.clearRetainingCapacity();
         budget.bytes -|= self.summary_bytes + self.detail_bytes;
+        budget.body_bytes -|= self.body_bytes;
         self.summary_bytes = 0;
         self.detail_bytes = 0;
-        self.reader_count = 0;
-        self.birth_who = 0;
-        self.birth_pending = false;
+        self.body_bytes = 0;
+        self.net_readers.clear();
+        self.body_readers.clear();
         self.unrecorded = 0;
     }
 
     // ── 읽는 쪽 ──────────────────────────────────────────────────────────────────────────────────────────
 
-    fn findReader(self: *Ring, who: Authorizer) ?*Reader {
-        for (self.readers[0..self.reader_count]) |*r| if (r.who == who) return r;
-        return null;
-    }
-
-    fn addReader(self: *Ring, who: Authorizer, start: u64) *Reader {
-        self.reader_clock += 1;
-        if (self.reader_count == max_readers) {
-            // 가장 오래 쓰지 않은 쪽을 잊는다 — 잊힌 쪽의 다음 읽기는 그때부터(더 숨기는 쪽).
-            var victim: usize = 0;
-            for (self.readers[0..self.reader_count], 0..) |r, i| if (r.used < self.readers[victim].used) {
-                victim = i;
-            };
-            self.readers[victim] = self.readers[self.reader_count - 1];
-            self.reader_count -= 1;
-        }
-        self.readers[self.reader_count] = .{ .who = who, .start = start, .used = self.reader_clock };
-        self.reader_count += 1;
-        return &self.readers[self.reader_count - 1];
-    }
-
     /// 그 탭에 `browser_network` grant 가 들어왔다 — 읽는 쪽 `who` 의 시작점을 지금으로(이미 있으면 그대로 — 같은 grant 번호다). 다른
     /// 사이트로 다시 허용한 것은 저장소가 새 번호를 주므로 새 읽는 쪽으로 지금부터 시작한다(W9d① 적대 리뷰 1 회차 F1 — 그 사이트의 허락 전
     /// 요청이 보였다). `at_birth` — 에이전트가 연 탭이라 grant 가 탭과 함께 생겼다: 처음부터 본다.
     pub fn noteReader(self: *Ring, who: Authorizer, at_birth: bool) void {
-        if (who == 0) return;
-        if (self.findReader(who)) |r| {
-            r.granted = true;
-            return;
-        }
-        // 태어날 때의 묶음은 탭마다 한 번 — 철회 뒤 다시 들어온 grant 는 지금부터다(다시 허락은 새 grant 번호지만 방어로).
-        const birth = at_birth and !self.birth_used;
-        self.addReader(who, if (birth) 0 else self.next_seq).granted = true;
-        if (birth) {
-            self.birth_used = true;
-            self.birth_who = who;
-            self.birth_pending = true;
-        }
+        self.net_readers.note(who, at_birth, self.next_seq);
     }
 
     /// app 이 아는 grant 목록에 맞춘다 — 사라진 grant 의 읽는 쪽은 빼고(철회), 새 grant 는 지금부터(태어날 때의 것이면 처음부터) 넣는다.
     /// 처음 읽을 때 생긴 쪽(grant 없이 읽은 모르는 쪽 — 방어)은 그대로 둔다.
     pub fn syncReaders(self: *Ring, desired: []const Desired) void {
-        var i: usize = 0;
-        while (i < self.reader_count) {
-            const r = self.readers[i];
-            const keep = !r.granted or for (desired) |d| {
-                if (d.who == r.who) break true;
-            } else false;
-            if (keep) {
-                i += 1;
-                continue;
-            }
-            self.removeReader(r.who);
-        }
-        for (desired) |d| self.noteReader(d.who, d.birth);
+        self.net_readers.sync(desired, self.next_seq);
     }
 
     /// 그 읽는 쪽의 grant 가 사라졌다(철회).
     pub fn removeReader(self: *Ring, who: Authorizer) void {
-        for (self.readers[0..self.reader_count], 0..) |r, i| if (r.who == who) {
-            self.readers[i] = self.readers[self.reader_count - 1];
-            self.reader_count -= 1;
-            break;
-        };
-        if (self.birth_who == who) {
-            self.birth_who = 0;
-            self.birth_pending = false;
-        }
+        self.net_readers.remove(who);
+    }
+
+    /// W9d②: 본문 grant 목록에 맞춘다(`syncReaders` 와 같은 규칙 — 본문 읽는 쪽은 본문 grant 의 번호다).
+    pub fn syncBodyReaders(self: *Ring, desired: []const Desired) void {
+        self.body_readers.sync(desired, self.next_seq);
     }
 
     /// 사용자가 이 탭을 몰았다(누름·키·주소창·뒤로 — 콘솔과 같은 신호). 태어날 때 묶인 쪽이 아직 읽지 않았으면 그 시작점을 첫 읽기로
-    /// 미룬다 — 그 탭으로 사용자가 간 곳(은행 등)의 요청이 그 읽기에 보이지 않게.
+    /// 미룬다 — 그 탭으로 사용자가 간 곳(은행 등)의 요청이 그 읽기에 보이지 않게. 본문 읽는 쪽도 같다(W9d②).
     pub fn userDrove(self: *Ring) void {
-        if (!self.birth_pending) return;
-        self.birth_pending = false;
-        if (self.findReader(self.birth_who)) |r| r.deferred = true;
+        self.net_readers.userDrove();
+        self.body_readers.userDrove();
     }
 
     /// 읽기 직전 — 읽는 쪽의 시작점(모르는 쪽은 지금부터, 미룬 쪽은 지금으로 정한다).
     fn startFor(self: *Ring, who: Authorizer) u64 {
-        self.reader_clock += 1;
-        if (who == self.birth_who) self.birth_pending = false;
-        if (who == 0) return self.next_seq;
-        const r = self.findReader(who) orelse self.addReader(who, self.next_seq);
-        if (r.deferred) {
-            r.deferred = false;
-            r.start = self.next_seq;
-        }
-        r.used = self.reader_clock;
-        return r.start;
+        return self.net_readers.startFor(who, self.next_seq);
     }
 
     // ── 기록 ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -431,7 +545,7 @@ pub const Ring = struct {
     /// 새 요청. `ctx` 는 그때 app 이 아는 탭의 것(F2·F4). 같은 CEF 번호의 앞 시도가 있으면 먼저 다시 시작으로 끝낸다(`restartEarlier`) — 이
     /// 기록을 적지 못해도(상한) 앞 기록은 끝난다.
     pub fn begin(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetBegin, ctx: BeginContext) std.mem.Allocator.Error!void {
-        self.restartEarlier(v.request, v.time_ms);
+        self.restartEarlier(gpa, budget, v.request, v.time_ms);
         const top = topHostOf(v, ctx.top_host);
         const summary = entry_overhead + v.method.len + v.url.len + v.host.len + v.initiator.len + v.site.len + top.len;
         const detail_len = v.headers.bytes.len;
@@ -443,7 +557,7 @@ pub const Ring = struct {
             return;
         }
         try self.flushUnrecorded(gpa, budget);
-        var e: Entry = .{ .seq = self.next_seq, .request = v.request, .flags = v.flags, .resource_type = v.resource_type, .start_ms = v.time_ms, .summary_bytes = summary, .detail_bytes = detail_len };
+        var e: Entry = .{ .seq = self.next_seq, .request = v.request, .flags = v.flags, .resource_type = v.resource_type, .start_ms = v.time_ms, .summary_bytes = summary, .detail_bytes = detail_len, .body_expected = v.flags2.body_expected, .body_state = if (v.flags2.body_expected) .pending else .none };
         errdefer e.deinit(gpa);
         e.method = try gpa.dupe(u8, v.method);
         e.url = try gpa.dupe(u8, v.url);
@@ -554,7 +668,10 @@ pub const Ring = struct {
     /// 취소(−3 ERR_ABORTED — Chromium 이 버렸다)로 끝내고 `restarted` 를 세운다 — 받은 응답(Cloudflare 의 403)은 그대로 두되 마지막 답이 아님을
     /// 보인다. 두 차례 모두: 앞 시도가 아직 진행 중이면(끝이 넘김 상자에서 버려졌다 등 — 전에는 새 시작을 버려 새 시도의 응답·끝이 앞 기록에
     /// 붙었다) 번호 표에서 빼고 지금 끝낸다. 이미 끝났으면(CEF 154 실측 — 끝(성공)이 먼저 온다) 최근 끝에서 찾아 표시만 고친다.
-    fn restartEarlier(self: *Ring, request: u64, at_ms: u64) void {
+    /// W9d②: 앞 시도의 본문이 아직 끝나지 않았으면 `restarted` 로 끝내고 받던 바이트를 푼다 — 그 번호의 다음 본문 frame 은 새 시도의 것이다
+    /// (`pendingBody` 는 그 번호의 가장 새 기록을 본다; sidecar 는 앞 시도의 본문 끝을 새 시작보다 먼저 보내므로 이것은 방어다). 이미 받은 본문은
+    /// 남는다(앞 시도의 응답 머리처럼 — 페이지에 가지 않았지만 서버가 보낸 것이다).
+    fn restartEarlier(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, request: u64, at_ms: u64) void {
         const seq = if (self.live.fetchRemove(request)) |kv| kv.value else for (&self.recent_ends) |*r| {
             if (r.request != request) continue;
             const s = r.seq;
@@ -566,12 +683,13 @@ pub const Ring = struct {
         e.error_code = -3;
         e.restarted = true;
         if (e.end_ms == 0) e.end_ms = at_ms;
+        if (e.body_state == .pending) self.setBodyState(gpa, budget, e, .restarted);
     }
 
     /// 그 탭의 브라우저가 다시 만들어졌다(sidecar 가 다시 떴다 — W9d① 적대 리뷰 3 회차 T2). 진행 중이던 요청의 끝은 오지 않는다(옛 프로세스와
     /// 함께 사라졌다) — 취소로 끝내고 번호 표를 비운다. 새 프로세스는 이동 요청 번호(2^64-4·-5 …)를 같게 다시 쓴다(실측 — 판정 두 번):
     /// 비우지 않으면 새 요청의 시작은 「이미 있다」 로 버려지고 그 응답·끝이 옛 기록(다른 사이트의 덮인 주소)에 붙었다.
-    pub fn abandonLive(self: *Ring) void {
+    pub fn abandonLive(self: *Ring, gpa: std.mem.Allocator, budget: *Budget) void {
         var it = self.live.valueIterator();
         while (it.next()) |seq| if (self.entryBySeq(seq.*)) |e| {
             e.state = .canceled;
@@ -580,6 +698,9 @@ pub const Ring = struct {
         };
         self.live.clearRetainingCapacity();
         self.recent_ends = @splat(.{}); // 새 프로세스의 같은 번호는 다시 시작이 아니다
+        // W9d②: 끝나지 않은 본문의 끝도 오지 않는다(옛 sidecar 와 함께 사라졌다) — 받던 바이트는 버린다.
+        var bit = self.entries.iterator();
+        while (bit.nextPtr()) |e| if (e.body_state == .pending) self.setBodyState(gpa, budget, e, .detached);
     }
 
     /// sidecar 가 넘긴 요청 수 — 마지막이 표지면 거기에 더한다(쏟아질 때 표지가 요청을 밀어내지 않게).
@@ -650,10 +771,84 @@ pub const Ring = struct {
             self.summary_bytes -= e.summary_bytes;
             self.detail_bytes -= e.detail_bytes;
             budget.bytes -|= e.summary_bytes + e.detail_bytes;
+            self.body_bytes -|= e.body.items.len; // W9d②: 본문도 함께 버린다
+            budget.body_bytes -|= e.body.items.len;
             e.deinit(gpa);
             _ = self.entries.popFront(); // 앞에서 O(1) — 나머지를 옮기지 않는다
         }
         return budget.bytes + total <= budget.cap and self.summary_bytes + summary <= max_summary_bytes and self.detail_bytes + detail_len <= max_detail_bytes;
+    }
+
+    // ── 본문(W9d②) ────────────────────────────────────────────────────────────────────────────────────────
+
+    /// 본문 상태를 바꾸고, 다 받은 본문(`captured`)이 아니면 쥔 바이트를 푼다.
+    fn setBodyState(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, e: *Entry, state: BodyState) void {
+        e.body_state = state;
+        if (state != .captured) self.freeBody(gpa, budget, e);
+    }
+
+    fn freeBody(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, e: *Entry) void {
+        self.body_bytes -|= e.body.items.len;
+        budget.body_bytes -|= e.body.items.len;
+        e.body.clearAndFree(gpa);
+    }
+
+    /// 본문 frame 이 붙을 기록 — 새것부터 찾는다(끝은 대개 요청의 `net_end` 뒤에 온다 — `live` 에서 빠진 뒤다; sidecar 가 다시 떠 같은 CEF
+    /// 번호를 다시 쓰면 새 것이 먼저다). 끝을 기다리는 것만.
+    fn pendingBody(self: *Ring, request: u64) ?*Entry {
+        var i = self.entries.len;
+        while (i > 0) {
+            i -= 1;
+            const e = self.entries.atPtr(i);
+            if (e.request == request and e.body_expected) return if (e.body_state == .pending) e else null;
+        }
+        return null;
+    }
+
+    /// `need` 바이트를 더 쥘 자리를 낸다 — 이 탭의 다른 다 받은 본문을 오래된 것부터 버린다(`evicted`). 다른 탭의 본문은 이 탭이 버리지 않는다.
+    fn makeBodyRoom(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, keep: *const Entry, need: usize) bool {
+        var i: usize = 0;
+        while ((self.body_bytes + need > max_tab_body_bytes or budget.body_bytes + need > budget.body_cap) and i < self.entries.len) : (i += 1) {
+            const e = self.entries.atPtr(i);
+            if (e == keep or e.body.items.len == 0 or e.body_state != .captured) continue;
+            self.setBodyState(gpa, budget, e, .evicted);
+        }
+        return self.body_bytes + need <= max_tab_body_bytes and budget.body_bytes + need <= budget.body_cap;
+    }
+
+    /// 본문 한 조각(`net_body_data`) — 앞 조각에 이어지지 않거나(오프셋) 상한을 넘으면 그 본문은 받지 않는다.
+    pub fn bodyData(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetBodyData) std.mem.Allocator.Error!void {
+        const e = self.pendingBody(v.request) orelse return;
+        if (v.offset != e.body.items.len or e.body.items.len + v.bytes.len > max_body_bytes) {
+            self.setBodyState(gpa, budget, e, .unavailable);
+            return;
+        }
+        if (!self.makeBodyRoom(gpa, budget, e, v.bytes.len)) {
+            self.setBodyState(gpa, budget, e, .evicted);
+            return;
+        }
+        try e.body.appendSlice(gpa, v.bytes);
+        self.body_bytes += v.bytes.len;
+        budget.body_bytes += v.bytes.len;
+    }
+
+    /// 본문의 끝(`net_body_end`) — 잡았으면 받은 바이트가 알린 크기와 같아야 한다(아니면 `unavailable`).
+    pub fn bodyEnd(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetBodyEnd) void {
+        const e = self.pendingBody(v.request) orelse return;
+        e.body_flags = v.flags;
+        e.body_decoded = v.decoded;
+        if (v.state == .captured and e.body.items.len != v.size) return self.setBodyState(gpa, budget, e, .unavailable);
+        self.setBodyState(gpa, budget, e, BodyState.fromWire(v.state));
+        if (v.state == .captured) e.body.shrinkAndFree(gpa, e.body.items.len);
+    }
+
+    /// 다 받은 본문을 모두 지운다(`discarded` — 본문 권한이 모두 사라졌거나 설정이 꺼졌다). 끝을 기다리는 것은 그대로 둔다(그 끝은 온다 —
+    /// 기록을 끄면 `recording_stopped`) — 다만 받던 바이트는 버린다.
+    pub fn discardBodies(self: *Ring, gpa: std.mem.Allocator, budget: *Budget) void {
+        var it = self.entries.iterator();
+        while (it.nextPtr()) |e| {
+            if (e.body_state == .captured) self.setBodyState(gpa, budget, e, .discarded) else if (e.body.items.len > 0) self.freeBody(gpa, budget, e);
+        }
     }
 
     // ── 읽기 ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -703,30 +898,101 @@ pub const Ring = struct {
         return false;
     }
 
-    /// `browser.network` 의 결과 JSON(`out` 소유). 새것부터, 한 쪽 `page_size` 줄.
-    pub fn list(self: *Ring, out: std.mem.Allocator, who: Authorizer, view: View, q: Query) std.mem.Allocator.Error![]u8 {
+    /// `browser.network` 의 결과 JSON(`out` 소유). 새것부터, 한 쪽 `page_size` 줄. `bq` 는 이 읽는 쪽의 본문 권한(W9d② — 줄마다 본문 상태).
+    pub fn list(self: *Ring, out: std.mem.Allocator, who: Authorizer, view: View, q: Query, bq: BodyQuery) std.mem.Allocator.Error![]u8 {
         const start = self.startFor(who);
+        const body = self.bodyView(bq, view);
         var aw: std.Io.Writer.Allocating = .init(out);
         defer aw.deinit();
-        writeList(self, &aw.writer, start, view, q) catch return error.OutOfMemory;
+        writeList(self, &aw.writer, start, view, q, body) catch return error.OutOfMemory;
         if (q.clear) {
-            if (self.findReader(who)) |r| r.start = self.next_seq;
+            if (self.net_readers.find(who)) |r| r.start = self.next_seq;
         }
         return aw.toOwnedSlice();
     }
 
     /// `browser.networkRequest` 의 결과 JSON(`out` 소유) — 모르는 번호·이 쪽에게 보이지 않는 번호는 `UnknownRequest`, 버려진 번호는 `Evicted`.
-    pub fn detail(self: *Ring, out: std.mem.Allocator, who: Authorizer, view: View, seq: u64) DetailError![]u8 {
+    pub fn detail(self: *Ring, out: std.mem.Allocator, who: Authorizer, view: View, seq: u64, bq: BodyQuery) DetailError![]u8 {
         const start = self.startFor(who);
         if (seq == 0 or seq >= self.next_seq or seq < start) return error.UnknownRequest;
         const e = self.entryBySeq(seq) orelse return error.Evicted;
         if (e.dropped != 0 or !topCovered(view, e) or hiddenIframe(view, e) or sharedServiceWorker(view, e)) return error.UnknownRequest;
+        const body = self.bodyView(bq, view);
         var aw: std.Io.Writer.Allocating = .init(out);
         defer aw.deinit();
-        writeDetail(&aw.writer, e, view) catch return error.OutOfMemory;
+        writeDetail(&aw.writer, e, view, body) catch return error.OutOfMemory;
         return aw.toOwnedSlice() catch error.OutOfMemory;
     }
+
+    /// W9d②: 본문 읽기의 관점 — 본문 권한이 있으면 그 읽는 쪽의 본문 시작점을 정한다(읽을 때마다 — 미룬 시작점은 첫 읽기로).
+    fn bodyView(self: *Ring, bq: BodyQuery, view: View) BodyView {
+        const who = bq.who orelse return .{ .q = bq, .cookie_host = view.cookie_host };
+        return .{ .q = bq, .start = self.body_readers.startFor(who, self.next_seq), .cookie_host = view.cookie_host };
+    }
 };
+
+/// W9d②: 본문을 읽는 쪽 — 본문 권한(`browser_network_body` grant — 없으면 null)과 그 호스트, 바이트를 실을지·어디서부터·얼마나.
+pub const BodyQuery = struct {
+    /// 본문 grant 의 읽는 쪽 번호(`browser_network_body` grant — 네트워크 grant 와 다른 번호). 없으면 본문은 `needs_body_permission`.
+    who: ?Authorizer = null,
+    /// 본문 grant 가 묶인 호스트(어느 호스트든이면 무시 — 그 요청이 난 페이지의 호스트로).
+    host: []const u8 = "",
+    any_host: bool = false,
+    /// 본문 바이트를 싣는다(`browser.networkRequest` 의 `body`).
+    want: bool = false,
+    offset: u32 = 0,
+    max_bytes: u32 = default_body_read_bytes,
+};
+
+const BodyView = struct {
+    q: BodyQuery,
+    /// 이 번호 이상의 요청의 본문을 본다.
+    start: u64 = 0,
+    cookie_host: []const u8 = "",
+};
+
+/// 그 요청이 난 페이지의 호스트 — 주 프레임 문서면 그 주소, 아니면 그때 탭의 맨 위 문서(F2 — 모르면 빈 글).
+fn pageHost(e: *const Entry) []const u8 {
+    if (e.flags.main_frame and e.resource_type == 0) return e.host;
+    return e.top_host;
+}
+
+/// 본문 권한이 그 요청이 난 페이지를 덮는가 — 어느 호스트든이면 늘, 아니면 헤더의 F2·N1 과 같은 규칙(주 프레임 이동은 처음과 홉 모두).
+fn bodyPageCovered(e: *const Entry, bq: BodyQuery) bool {
+    if (bq.any_host) return true;
+    return Ring.topCovered(.{ .grant_host = bq.host, .top_bound = true }, e);
+}
+
+/// 이 읽는 쪽에게 이 요청의 본문이 어떻게 보이는가(`net_policy.bodyAccess` — 순수 판정에 이 기록의 사실을 준다).
+fn bodyAccessOf(e: *const Entry, view: View, body: BodyView) policy.BodyAccess {
+    const host = if (body.q.any_host) pageHost(e) else body.q.host;
+    return policy.bodyAccess(.{
+        .has_body_grant = body.q.who != null,
+        .response_visible = responseVisible(view, e),
+        .page_covered = bodyPageCovered(e, body.q),
+        .after_grant = e.seq >= body.start,
+        .body_host = host,
+        .final_host = e.finalHost(),
+        // 다 받은 바이트만 가른다 — 받지 않은 상태(크기 넘침·글 아님 …)는 이미 보이는 응답의 사실이다.
+        .credentialed = e.body_state == .captured and e.body_flags.credentialed,
+        .cookie_host = body.cookie_host,
+    });
+}
+
+/// 줄·자세히에 싣는 본문 상태의 이름 — 기록하지 않은 요청은 `not_recorded`, 보이지 않으면 그 까닭(`needs_body_permission` …), 아니면 상태.
+fn bodyStateName(e: *const Entry, view: View, body: BodyView) []const u8 {
+    if (!e.body_expected) return "not_recorded";
+    const access = bodyAccessOf(e, view, body);
+    if (access != .visible) return @tagName(access);
+    return @tagName(e.body_state);
+}
+
+/// UTF-8 글의 `i` 가 글자의 시작이 되게 앞으로 당긴다.
+fn charStart(text: []const u8, i_in: usize) usize {
+    var i = @min(i_in, text.len);
+    while (i > 0 and i < text.len and (text[i] & 0xC0) == 0x80) i -= 1;
+    return i;
+}
 
 // ── JSON ───────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -779,7 +1045,7 @@ const Matcher = struct {
     }
 };
 
-fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query) !void {
+fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query, body: BodyView) !void {
     var s: std.json.Stringify = .{ .writer = w, .options = .{} };
     var hidden_before: usize = 0;
     var dropped: u64 = 0;
@@ -826,7 +1092,7 @@ fn writeList(ring: *Ring, w: *std.Io.Writer, start: u64, view: View, q: Query) !
         if (matched <= skip or written >= page_size) continue;
         written += 1;
         last_written = e.seq;
-        try writeSummary(&s, e, view, &url_buf);
+        try writeSummary(&s, e, view, &url_buf, body);
     }
     try s.endArray();
     try s.objectField("hidden_before_grant");
@@ -899,7 +1165,7 @@ fn writeCommon(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u
     }
 }
 
-fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u8) !void {
+fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u8, body: BodyView) !void {
     try s.beginObject();
     try writeCommon(s, e, view, url_buf);
     if (responseVisible(view, e)) {
@@ -928,6 +1194,16 @@ fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []
     if (shown_hops > 0) {
         try s.objectField("redirects");
         try s.write(shown_hops);
+    }
+    // W9d②: 본문 — 기록한 요청만(상태와 보이면 크기).
+    if (e.body_expected) {
+        const state = bodyStateName(e, view, body);
+        try s.objectField("body_state");
+        try s.write(state);
+        if (e.body_state == .captured and std.mem.eql(u8, state, "captured")) {
+            try s.objectField("body_size");
+            try s.write(e.body.items.len);
+        }
     }
     try s.endObject();
 }
@@ -1016,7 +1292,7 @@ fn writeHops(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []u8)
     try s.endArray();
 }
 
-fn writeDetail(w: *std.Io.Writer, e: *const Entry, view: View) !void {
+fn writeDetail(w: *std.Io.Writer, e: *const Entry, view: View, body: BodyView) !void {
     var s: std.json.Stringify = .{ .writer = w, .options = .{} };
     var url_buf: [msg.max_net_url_bytes]u8 = undefined;
     try s.beginObject();
@@ -1079,9 +1355,65 @@ fn writeDetail(w: *std.Io.Writer, e: *const Entry, view: View) !void {
             }
         }
     }
-    try s.objectField("body_state");
-    try s.write("not_recorded");
+    try writeBody(&s, e, view, body);
     try s.endObject();
+}
+
+/// W9d②: 자세히의 본문 칸 — 상태(보이지 않으면 그 까닭), 보이고 다 받았으면 크기·글/바이너리·표시, 바이트를 청했으면 한 조각(64 KiB 까지 —
+/// 글은 글자 경계에서 자르고, 바이너리는 base64). 크기 넘침이면 풀어 낸 크기.
+fn writeBody(s: *std.json.Stringify, e: *const Entry, view: View, body: BodyView) !void {
+    const state = bodyStateName(e, view, body);
+    try s.objectField("body_state");
+    try s.write(state);
+    if (!e.body_expected or !std.mem.eql(u8, state, @tagName(e.body_state))) return; // 보이지 않는다 — 까닭만
+    if (e.body_state == .over_cap) {
+        try s.objectField("body_decoded_size");
+        try s.write(e.body_decoded);
+    }
+    if (e.body_state != .captured) return;
+    const bytes = e.body.items;
+    try s.objectField("body_size");
+    try s.write(bytes.len);
+    try s.objectField("body_encoding");
+    try s.write(if (e.body_flags.binary) "base64" else "utf-8");
+    if (e.body_flags.redecoded) {
+        try s.objectField("body_redecoded");
+        try s.write("windows-1252");
+    }
+    if (e.body_flags.chromium_decoded) {
+        try s.objectField("body_chromium_decoded");
+        try s.write(true);
+    }
+    if (e.body_flags.credentialed) {
+        try s.objectField("body_credentialed");
+        try s.write(true);
+    }
+    if (!body.q.want) return;
+    const max: usize = @min(@max(body.q.max_bytes, 1), max_body_read_bytes);
+    var start: usize = @min(body.q.offset, bytes.len);
+    var end: usize = @min(start + max, bytes.len);
+    if (!e.body_flags.binary) {
+        // 글은 글자 가운데서 자르지 않는다 — 시작은 그 글자의 처음으로, 끝은 다음 글자의 처음으로(한 글자보다 작은 상한이면 한 글자).
+        start = charStart(bytes, start);
+        end = charStart(bytes, @min(start + max, bytes.len));
+        if (end == start and start < bytes.len) {
+            end = start + 1;
+            while (end < bytes.len and (bytes[end] & 0xC0) == 0x80) end += 1;
+        }
+    }
+    try s.objectField("body_offset");
+    try s.write(start);
+    try s.objectField("body_returned");
+    try s.write(end - start);
+    if (end < bytes.len) {
+        try s.objectField("body_next_offset");
+        try s.write(end);
+    }
+    try s.objectField("body");
+    if (e.body_flags.binary) {
+        var b64: [std.base64.standard.Encoder.calcSize(max_body_read_bytes)]u8 = undefined;
+        try s.write(std.base64.standard.Encoder.encode(&b64, bytes[start..end]));
+    } else try s.write(bytes[start..end]);
 }
 
 // ── 시험 ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1113,7 +1445,7 @@ const T = struct {
     }
 
     fn listJson(self: *T, who: Authorizer, view: View, q: Query) !std.json.Parsed(std.json.Value) {
-        const json = try self.ring.list(testing.allocator, who, view, q);
+        const json = try self.ring.list(testing.allocator, who, view, q, .{});
         defer testing.allocator.free(json);
         return std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
     }
@@ -1157,7 +1489,7 @@ test "W9d①: 요청은 새것부터, 리다이렉트는 한 요청의 홉, 401 
     try testing.expectEqual(@as(i64, 1234), nav.get("size").?.integer);
     try testing.expectEqual(@as(i64, 39), nav.get("duration_ms").?.integer);
     try testing.expectEqualStrings("document", nav.get("type").?.string);
-    const d = try t.ring.detail(testing.allocator, 7, .{}, 1);
+    const d = try t.ring.detail(testing.allocator, 7, .{}, 1, .{});
     defer testing.allocator.free(d);
     const dp = try std.json.parseFromSlice(std.json.Value, testing.allocator, d, .{});
     defer dp.deinit();
@@ -1227,7 +1559,7 @@ test "W9d①: clear 는 그 읽는 쪽만 지금으로 옮긴다, 철회한 쪽�
     t.ring.noteReader(8, false);
     try t.begin(1, "https://a.test/1", .{});
     {
-        const j = try t.ring.list(testing.allocator, 7, .{}, .{ .clear = true });
+        const j = try t.ring.list(testing.allocator, 7, .{}, .{ .clear = true }, .{});
         testing.allocator.free(j);
     }
     try expectReqs(&t, 7, .{}, &.{});
@@ -1241,8 +1573,8 @@ test "W9d①: clear 는 그 읽는 쪽만 지금으로 옮긴다, 철회한 쪽�
     t.ring.noteReader(7, false);
     try t.begin(3, "https://a.test/3", .{});
     try expectReqs(&t, 7, .{}, &.{3}); // 번호는 3 — 지운 번호를 다시 쓰지 않는다
-    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, .{}, 1)); // 그 쪽에게 시작점 앞
-    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, .{}, 99));
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, .{}, 1, .{})); // 그 쪽에게 시작점 앞
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, .{}, 99, .{}));
 }
 
 test "W9d①: 상한 — 요약이 넘치면 오래된 요청부터 버리고(그 번호는 Evicted), 자세한 것이 넘치면 헤더·홉만 버린다, 앱 예산은 0 으로 돌아온다" {
@@ -1255,7 +1587,7 @@ test "W9d①: 상한 — 요약이 넘치면 오래된 요청부터 버리고(�
     try t.begin(n + 1, long, .{});
     try t.begin(n + 2, long, .{});
     try testing.expect(t.ring.summary_bytes <= max_summary_bytes);
-    try testing.expectError(error.Evicted, t.ring.detail(testing.allocator, 7, .{}, 1));
+    try testing.expectError(error.Evicted, t.ring.detail(testing.allocator, 7, .{}, 1, .{}));
     // 자세한 것: 8 KiB 헤더를 넘치게.
     var hb: net_fields.HeaderBuilder = .{};
     _ = hb.add("x-big", array_repeat.repeat("v", 8000));
@@ -1264,7 +1596,7 @@ test "W9d①: 상한 — 요약이 넘치면 오래된 요청부터 버리고(�
     d.ring.noteReader(7, true);
     for (1..200) |i| try d.begin(i, "https://a.test/", .{ .headers = hb.block() });
     try testing.expect(d.ring.detail_bytes <= max_detail_bytes);
-    const j = try d.ring.detail(testing.allocator, 7, .{}, 1);
+    const j = try d.ring.detail(testing.allocator, 7, .{}, 1, .{});
     defer testing.allocator.free(j);
     try testing.expect(std.mem.indexOf(u8, j, "\"detail_evicted\":true") != null);
     var sum: usize = 0;
@@ -1359,11 +1691,11 @@ test "W9d①: 보이는 칸의 판 — 설정 켬·끔 × 덮임·다른 사이�
         try testing.expect(arr[3].object.get("other_site").?.bool);
         try testing.expect(arr[2].object.get("cross_site_iframe").?.bool);
         try testing.expectEqualStrings("service worker of https://app.test", arr[1].object.get("service_worker").?.string);
-        const d = try t.ring.detail(testing.allocator, 7, on, 1);
+        const d = try t.ring.detail(testing.allocator, 7, on, 1, .{});
         defer testing.allocator.free(d);
         try testing.expect(std.mem.indexOf(u8, d, "\"value\":\"sid=secret\"") != null);
         try testing.expect(std.mem.indexOf(u8, d, "\"value\":\"sid=new\"") != null);
-        const d2 = try t.ring.detail(testing.allocator, 7, on, 2);
+        const d2 = try t.ring.detail(testing.allocator, 7, on, 2, .{});
         defer testing.allocator.free(d2);
         try testing.expect(std.mem.indexOf(u8, d2, "sid=secret") == null); // 다른 사이트에 보낸 쿠키는 그 사이트의 쿠키 권한이 있어야(3 회차 D1)
         try testing.expect(std.mem.indexOf(u8, d2, "{\"name\":\"Cookie\",\"redacted\":true,\"needs_cookie_permission\":true}") != null);
@@ -1386,7 +1718,7 @@ test "W9d①: 보이는 칸의 판 — 설정 켬·끔 × 덮임·다른 사이�
         try testing.expectEqualStrings("https://ads.test/pixel", ads.get("url").?.string);
         try testing.expectEqual(@as(i64, 5), arr[0].object.get("req").?.integer);
         try testing.expectEqual(@as(i64, 1), arr[0].object.get("redirects").?.integer); // sso.test 가 보낸 홉은 세지 않는다(적대 리뷰 2 회차 N7)
-        const d = try t.ring.detail(testing.allocator, 7, off, 1);
+        const d = try t.ring.detail(testing.allocator, 7, off, 1, .{});
         defer testing.allocator.free(d);
         try testing.expect(std.mem.indexOf(u8, d, "secret") == null);
         try testing.expect(std.mem.indexOf(u8, d, "sid=new") == null);
@@ -1394,13 +1726,13 @@ test "W9d①: 보이는 칸의 판 — 설정 켬·끔 × 덮임·다른 사이�
         try testing.expect(std.mem.indexOf(u8, d, "{\"name\":\"Referer\",\"value\":\"https://app.test\"}") != null);
         try testing.expect(std.mem.indexOf(u8, d, "{\"name\":\"Accept\",\"value\":\"text/html\"}") != null);
         try testing.expect(std.mem.indexOf(u8, d, "user:pw") == null);
-        const d2 = try t.ring.detail(testing.allocator, 7, off, 2);
+        const d2 = try t.ring.detail(testing.allocator, 7, off, 2, .{});
         defer testing.allocator.free(d2);
         try testing.expect(std.mem.indexOf(u8, d2, "request_headers") == null);
         try testing.expect(std.mem.indexOf(u8, d2, "response_headers") == null);
         try testing.expect(std.mem.indexOf(u8, d2, "\"status\"") == null);
-        try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, off, 3)); // 수만 — 자세히도 없다
-        const d5 = try t.ring.detail(testing.allocator, 7, off, 5);
+        try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, off, 3, .{})); // 수만 — 자세히도 없다
+        const d5 = try t.ring.detail(testing.allocator, 7, off, 5, .{});
         defer testing.allocator.free(d5);
         const dp = try std.json.parseFromSlice(std.json.Value, testing.allocator, d5, .{});
         defer dp.deinit();
@@ -1506,7 +1838,7 @@ test "W9d① 적대 리뷰 1 회차 재현 L2: 설정이 꺼졌으면 덮이지 
     defer p.deinit();
     const row = p.value.object.get("requests").?.array.items[0].object;
     try testing.expect(row.get("redirects") == null);
-    const d = try t.ring.detail(testing.allocator, 7, off, 1);
+    const d = try t.ring.detail(testing.allocator, 7, off, 1, .{});
     defer testing.allocator.free(d);
     try testing.expect(std.mem.indexOf(u8, d, "\"redirects\"") == null);
     try testing.expect(std.mem.indexOf(u8, d, "other_site\":true}") == null); // 홉 표지 없음(요청 자체의 other_site 만)
@@ -1575,7 +1907,7 @@ test "W9d① 적대 리뷰 1 회차 F2: 사이트에 묶인 읽는 쪽은 탭이
         const p = try t.listJson(7, bound, .{});
         defer p.deinit();
         try testing.expectEqual(@as(i64, 4), p.value.object.get("hidden_other_site_pages").?.integer);
-        for ([_]u64{ 3, 4, 5, 8 }) |req| try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, req));
+        for ([_]u64{ 3, 4, 5, 8 }) |req| try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, req, .{}));
     }
     // 어느 호스트든(에이전트 탭의 태어날 때 grant) — 다 보이고 그 수 칸도 없다.
     try expectReqs(&t, 7, .{ .full = true }, &.{ 8, 7, 6, 5, 4, 3, 2, 1 });
@@ -1609,9 +1941,9 @@ test "W9d① 적대 리뷰 1 회차 F4·2 회차 N6: 설정이 꺼졌으면 이 
     const p = try t.listJson(7, off_now, .{});
     defer p.deinit();
     try testing.expectEqual(@as(i64, 3), p.value.object.get("service_worker_shared_hidden").?.integer);
-    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, off_now, 2));
-    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, off_both, 4));
-    const d = try t.ring.detail(testing.allocator, 7, on, 1);
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, off_now, 2, .{}));
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, off_both, 4, .{}));
+    const d = try t.ring.detail(testing.allocator, 7, on, 1, .{});
     testing.allocator.free(d);
 }
 
@@ -1652,7 +1984,7 @@ test "W9d① 적대 리뷰 2 회차 재현 L1: 덮이지 않는 사이트(은행
         const p = try t.listJson(7, bound, .{});
         defer p.deinit();
         try testing.expectEqual(@as(i64, 5), p.value.object.get("hidden_other_site_pages").?.integer);
-        for ([_]u64{ 1, 2, 3, 4, 5 }) |req| try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, req));
+        for ([_]u64{ 1, 2, 3, 4, 5 }) |req| try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, req, .{}));
     }
     // 어느 호스트든 읽는 쪽(에이전트 탭의 태어날 때 grant)은 여전히 다 본다(사용자 결정 「다 보여 줌」).
     try expectReqs(&t, 7, .{ .full = true }, &.{ 6, 5, 4, 3, 2, 1 });
@@ -1685,20 +2017,20 @@ test "W9d① 적대 리뷰 3 회차 재현 L1: 긴 사용자 정보 안에서 �
     try t.begin(1, truncated, .{ .flags = .{ .main_frame = true, .navigation = true, .url_truncated = true }, .rt = 0, .initiator = "null", .site = "bank.test", .top = "a.test", .host = "bank.test", .headers = bank_req.block() });
     try t.respond(1, 200, bank_resp.block());
     const bound: View = .{ .full = true, .grant_host = "a.test", .top_bound = true };
-    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, 1));
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, 1, .{}));
     const p = try t.listJson(7, bound, .{});
     defer p.deinit();
     try testing.expectEqual(@as(usize, 0), p.value.object.get("requests").?.array.items.len);
     try testing.expectEqual(@as(i64, 1), p.value.object.get("hidden_other_site_pages").?.integer);
     // 호스트 칸이 비면(sidecar 가 못 읽었다) 덮이지 않는다 — 어느 쪽으로도 넓히지 않는다.
     try t.begin(2, "https://a.test/x", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "a.test", .host = "" });
-    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, 2));
+    try testing.expectError(error.UnknownRequest, t.ring.detail(testing.allocator, 7, bound, 2, .{}));
 }
 
 // ── W9d① 적대 리뷰 3 회차 ──
 
 fn detailJson(t: *T, who: Authorizer, view: View, req: u64) !std.json.Parsed(std.json.Value) {
-    const d = try t.ring.detail(testing.allocator, who, view, req);
+    const d = try t.ring.detail(testing.allocator, who, view, req, .{});
     defer testing.allocator.free(d);
     return std.json.parseFromSlice(std.json.Value, testing.allocator, d, .{});
 }
@@ -1778,7 +2110,7 @@ test "W9d① 적대 리뷰 3 회차 T2: 브라우저가 다시 만들어지면 �
     try t.begin(5, "https://a.test/longpoll", .{ .top = "a.test" });
     try t.begin(6, "https://a.test/done", .{ .top = "a.test" });
     try t.respond(6, 200, .{});
-    t.ring.abandonLive();
+    t.ring.abandonLive(testing.allocator, &t.budget);
     var bank: net_fields.HeaderBuilder = .{};
     _ = bank.add("Set-Cookie", "bank_sid=NEWSECRET");
     try t.begin(5, "https://bank.test/", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0 });
@@ -1856,7 +2188,7 @@ test "W9d① 적대 리뷰 4 회차 재현 C2: 오래된 기록을 버릴 때 �
     // 옛 프로세스의 이동 요청(번호 5) — 진행 중에 sidecar 가 죽었다(취소로 끝난다).
     const long = "https://a.test/" ++ array_repeat.repeat("x", 1900);
     try t.begin(5, long ++ "?old", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0 });
-    t.ring.abandonLive();
+    t.ring.abandonLive(testing.allocator, &t.budget);
     // 새 프로세스가 같은 번호 5 를 새 이동에 준다.
     try t.begin(5, "https://a.test/new", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0 });
     // 그 이동이 끝나기 전에 다른 요청이 쌓여 상한이 옛 기록(#1)을 버린다 — 새 기록(#2)은 남는다.
@@ -2048,7 +2380,7 @@ test "W9d① 적대 리뷰 후 R3: 다시 시작 표시의 경계 — 엔진이 
     t.ring.noteReader(7, true);
     try t.begin(5, "https://a.test/x", .{ .site = "a.test" });
     try t.respond(5, 200, .{});
-    t.ring.abandonLive(); // sidecar 가 다시 떴다 — 새 프로세스가 번호 5 를 다시 쓴다
+    t.ring.abandonLive(testing.allocator, &t.budget); // sidecar 가 다시 떴다 — 새 프로세스가 번호 5 를 다시 쓴다
     try t.begin(5, "https://a.test/y", .{ .site = "a.test" });
     try testing.expectEqual(State.done, t.ring.entryBySeq(1).?.state);
     try testing.expect(!t.ring.entryBySeq(1).?.restarted);
@@ -2105,4 +2437,392 @@ test "W9d① 적대 리뷰 후 R4: 다시 시작한 시도를 상한으로 적�
     try testing.expectEqual(@as(usize, 0), t.ring.entries.len);
     try testing.expectEqual(@as(u32, 1), t.ring.unrecorded);
     try testing.expectEqual(@as(usize, 0), t.budget.bytes);
+}
+
+// ── W9d②: 응답 본문 ─────────────────────────────────────────────────────────────────────────────────────
+// 시험이 증명하는 것: 본문을 조각으로 이어 받아(오프셋이 어긋나면 받지 않는다) 끝이 알린 크기와 같을 때만 쥐고, 하나 1 MiB·탭 8 MiB·앱 32 MiB
+// 상한은 이 탭의 오래된 본문부터 버리며(`evicted`), 기록이 버려지면 본문 바이트도 예산에서 빠진다. 누가 보나 — 본문 권한이 없으면
+// `needs_body_permission`, 권한 뒤에 시작한 요청만(사용자 탭), 묶인 사이트가 아닌 페이지의 요청은 숨김, 다른 사이트에서 쿠키가 실린 응답은
+// 쿠키 권한이 있어야(UB1). 읽기는 64 KiB 조각 — 글은 글자 경계에서, 바이너리는 base64. 브라우저 탭에서 중요한 이유 — 응답 본문에는 그
+// 사이트의 개인 자료(메일·계정·토큰)가 그대로 있다.
+
+fn bodyBegin(t: *T, request: u64, url: []const u8, top: []const u8) !void {
+    const host = policy.hostOfUrl(url) orelse "";
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = request, .flags2 = .{ .body_expected = true }, .resource_type = 13, .time_ms = 1000 + request, .url = url, .host = host, .site = top }, .{ .top_host = top });
+    try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = request, .status = 200, .mime = "application/json" });
+    t.ring.end(.{ .browser = 1, .request = request, .received = 10, .time_ms = 3000 + request });
+}
+
+fn bodyFeed(t: *T, request: u64, bytes: []const u8, flags: msg.NetBodyFlags) !void {
+    var off: usize = 0;
+    while (off < bytes.len) {
+        const k = @min(msg.net_body_chunk_bytes, bytes.len - off);
+        try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = request, .offset = @intCast(off), .bytes = bytes[off..][0..k] });
+        off += k;
+    }
+    t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = request, .state = .captured, .flags = flags, .size = @intCast(bytes.len), .decoded = bytes.len });
+}
+
+fn bodyDetail(t: *T, req: u64, bq: BodyQuery, cookie_host: []const u8) !std.json.Parsed(std.json.Value) {
+    const d = try t.ring.detail(testing.allocator, 7, .{ .cookie_host = cookie_host }, req, bq);
+    defer testing.allocator.free(d);
+    return std.json.parseFromSlice(std.json.Value, testing.allocator, d, .{});
+}
+
+fn bodyStateOf(t: *T, req: u64, bq: BodyQuery, cookie_host: []const u8) ![]const u8 {
+    const p = try bodyDetail(t, req, bq, cookie_host);
+    defer p.deinit();
+    const st = p.value.object.get("body_state").?.string;
+    inline for (@import("type_info_fields").fields(BodyState)) |f| if (std.mem.eql(u8, st, f.name)) return f.name;
+    inline for (@import("type_info_fields").fields(policy.BodyAccess)) |f| if (std.mem.eql(u8, st, f.name)) return f.name;
+    if (std.mem.eql(u8, st, "not_recorded")) return "not_recorded";
+    return error.UnknownState;
+}
+
+test "W9d②: 본문을 조각으로 이어 받고 끝의 크기와 같을 때만 쥔다 — 어긋난 오프셋·다른 크기는 unavailable, 끝은 기다리던 것에만, 받지 못한 상태는 바이트 없이" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true, .want = true };
+    try bodyBegin(&t, 1, "https://a.test/a.json", "a.test");
+    const json = "{\"x\":\"" ++ array_repeat.repeat("가", 9000) ++ "\"}"; // 27 KiB — 조각 둘
+    try bodyFeed(&t, 1, json, .{});
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqual(json.len, t.ring.body_bytes);
+    try testing.expectEqual(json.len, t.budget.body_bytes);
+    // 오프셋이 어긋난 조각.
+    try bodyBegin(&t, 2, "https://a.test/b.json", "a.test");
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 2, .offset = 5, .bytes = "abc" });
+    try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 2, bq, ""));
+    // 다른 크기를 알린 끝.
+    try bodyBegin(&t, 3, "https://a.test/c.json", "a.test");
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 3, .offset = 0, .bytes = "abc" });
+    t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 3, .state = .captured, .size = 4 });
+    try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 3, bq, ""));
+    // 받지 못한 상태 — 크기 넘침은 풀어 낸 크기를 싣는다.
+    try bodyBegin(&t, 4, "https://a.test/big.js", "a.test");
+    t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 4, .state = .over_cap, .decoded = 2_000_000 });
+    {
+        const p = try bodyDetail(&t, 4, bq, "");
+        defer p.deinit();
+        try testing.expectEqualStrings("over_cap", p.value.object.get("body_state").?.string);
+        try testing.expectEqual(@as(i64, 2_000_000), p.value.object.get("body_decoded_size").?.integer);
+        try testing.expect(p.value.object.get("body") == null);
+    }
+    // 두 번째 끝은 무시한다(끝은 하나).
+    t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 4, .state = .captured, .size = 0 });
+    try testing.expectEqualStrings("over_cap", try bodyStateOf(&t, 4, bq, ""));
+    // 기록하지 않은 요청.
+    try t.begin(5, "https://a.test/plain", .{});
+    try testing.expectEqualStrings("not_recorded", try bodyStateOf(&t, 5, bq, ""));
+    // 바이트는 다 받은 본문의 것만 남는다.
+    try testing.expectEqual(json.len, t.ring.body_bytes);
+}
+
+test "W9d②: 본문 읽기는 64 KiB 조각 — 글은 글자 경계에서 자르고 다음 오프셋을 준다, 바이너리는 base64, 표시(되돌림·자격 증명)를 싣는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    try bodyBegin(&t, 1, "https://a.test/t", "a.test");
+    try bodyFeed(&t, 1, "한글abc", .{ .redecoded = true });
+    {
+        const p = try bodyDetail(&t, 1, .{ .who = 70, .any_host = true, .want = true, .offset = 1, .max_bytes = 4 }, "");
+        defer p.deinit();
+        const o = p.value.object;
+        try testing.expectEqual(@as(i64, 0), o.get("body_offset").?.integer); // 글자 가운데의 1 → 0
+        try testing.expectEqualStrings("한", o.get("body").?.string); // 4 바이트 상한 — 둘째 글자에 걸치지 않는다
+        try testing.expectEqual(@as(i64, 3), o.get("body_next_offset").?.integer);
+        try testing.expectEqualStrings("windows-1252", o.get("body_redecoded").?.string);
+        try testing.expectEqualStrings("utf-8", o.get("body_encoding").?.string);
+        try testing.expectEqual(@as(i64, 9), o.get("body_size").?.integer);
+    }
+    {
+        // 한 글자보다 작은 상한이면 한 글자.
+        const p = try bodyDetail(&t, 1, .{ .who = 70, .any_host = true, .want = true, .offset = 3, .max_bytes = 1 }, "");
+        defer p.deinit();
+        try testing.expectEqualStrings("글", p.value.object.get("body").?.string);
+    }
+    {
+        // 끝까지 — 다음 오프셋 없음.
+        const p = try bodyDetail(&t, 1, .{ .who = 70, .any_host = true, .want = true, .offset = 6 }, "");
+        defer p.deinit();
+        try testing.expectEqualStrings("abc", p.value.object.get("body").?.string);
+        try testing.expect(p.value.object.get("body_next_offset") == null);
+    }
+    try bodyBegin(&t, 2, "https://a.test/bin", "a.test");
+    try bodyFeed(&t, 2, &.{ 0xff, 0x00, 0x7b }, .{ .binary = true, .credentialed = true });
+    {
+        const p = try bodyDetail(&t, 2, .{ .who = 70, .any_host = true, .want = true }, "");
+        defer p.deinit();
+        try testing.expectEqualStrings("base64", p.value.object.get("body_encoding").?.string);
+        try testing.expectEqualStrings("/wB7", p.value.object.get("body").?.string);
+        try testing.expect(p.value.object.get("body_credentialed").?.bool);
+    }
+    {
+        // 바이트를 청하지 않으면 상태와 크기만.
+        const p = try bodyDetail(&t, 2, .{ .who = 70, .any_host = true }, "");
+        defer p.deinit();
+        try testing.expect(p.value.object.get("body") == null);
+        try testing.expectEqual(@as(i64, 3), p.value.object.get("body_size").?.integer);
+    }
+}
+
+test "W9d②: 상한 — 탭 8 MiB 를 넘으면 이 탭의 오래된 본문부터 evicted, 앱 32 MiB 도 이 탭에서만 내고, 기록이 버려지면 본문 바이트도 예산에서 빠진다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const mib = try testing.allocator.alloc(u8, max_body_bytes);
+    defer testing.allocator.free(mib);
+    @memset(mib, 'm');
+    for (1..10) |i| {
+        try bodyBegin(&t, i, "https://a.test/m", "a.test");
+        try bodyFeed(&t, i, mib, .{});
+    }
+    try testing.expect(t.ring.body_bytes <= max_tab_body_bytes);
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    try testing.expectEqualStrings("evicted", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 9, bq, ""));
+    // 앱 상한 — 다른 탭(예산을 함께 쓰는)이 이미 거의 다 썼다: 이 탭은 제 것을 버려 자리를 낸다(남의 것은 건드리지 않는다).
+    var other: T = .{};
+    defer other.deinit();
+    t.budget.body_bytes += 30 * 1024 * 1024; // 남의 몫
+    try bodyBegin(&t, 10, "https://a.test/n", "a.test"); // 요청 번호 = 기록 번호(시험의 편의 — 차례로 하나씩)
+    try bodyFeed(&t, 10, mib, .{});
+    try testing.expect(t.budget.body_bytes <= t.budget.body_cap);
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 10, bq, ""));
+    t.budget.body_bytes -= 30 * 1024 * 1024;
+    // 하나보다 큰 본문은 받지 않는다(sidecar 가 보내지 않지만 — 방어).
+    try bodyBegin(&t, 11, "https://a.test/o", "a.test");
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 11, .offset = 0, .bytes = mib[0..msg.net_body_chunk_bytes] });
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 11, .offset = @intCast(max_body_bytes - 1), .bytes = "xx" });
+    try testing.expectEqualStrings("unavailable", try bodyStateOf(&t, 11, bq, ""));
+    // 지우기 — 다 받은 본문은 discarded, 예산은 0.
+    t.ring.discardBodies(testing.allocator, &t.budget);
+    try testing.expectEqualStrings("discarded", try bodyStateOf(&t, 10, bq, ""));
+    try testing.expectEqual(@as(usize, 0), t.ring.body_bytes);
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+    // 기록이 버려질 때(요약 상한)도 본문 바이트가 빠진다.
+    try bodyBegin(&t, 12, "https://a.test/p", "a.test");
+    try bodyFeed(&t, 12, "abc", .{});
+    t.ring.wipe(testing.allocator, &t.budget);
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+}
+
+test "W9d②: 누가 보나 — 본문 권한이 없으면 needs_body_permission, 사용자 탭은 권한 뒤의 요청만, 묶인 사이트가 아닌 페이지의 요청은 숨김, 다른 사이트에서 쿠키가 실린 응답은 쿠키 권한(UB1)" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, false);
+    try bodyBegin(&t, 1, "https://app.test/before", "app.test");
+    try bodyFeed(&t, 1, "before", .{});
+    // 사용자 탭 — 모달로 받은 본문 권한(지금부터).
+    t.ring.syncBodyReaders(&.{.{ .who = 71 }});
+    const bound: BodyQuery = .{ .who = 71, .host = "app.test", .want = true };
+    try bodyBegin(&t, 2, "https://app.test/after", "app.test");
+    try bodyFeed(&t, 2, "after", .{ .credentialed = true });
+    try bodyBegin(&t, 3, "https://bank.test/me", "app.test"); // app.test 페이지의 은행 요청 — 쿠키가 실렸다
+    try bodyFeed(&t, 3, "{\"balance\":1}", .{ .credentialed = true });
+    try bodyBegin(&t, 4, "https://cdn.test/lib.js", "app.test"); // 쿠키 없는 다른 사이트 — 보인다
+    try bodyFeed(&t, 4, "lib", .{});
+    try bodyBegin(&t, 5, "https://bank.test/other", "bank.test"); // 탭이 은행에 있을 때의 요청 — 묶인 사이트가 아니다
+    try bodyFeed(&t, 5, "x", .{});
+    try testing.expectEqualStrings("needs_body_permission", try bodyStateOf(&t, 2, .{}, ""));
+    try testing.expectEqualStrings("before_body_permission", try bodyStateOf(&t, 1, bound, ""));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 2, bound, "")); // 기록한 사이트 제 응답은 실렸어도
+    try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 3, bound, ""));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 3, bound, "bank.test"));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 4, bound, ""));
+    try testing.expectEqualStrings("hidden", try bodyStateOf(&t, 5, bound, "bank.test"));
+    {
+        // 보이지 않으면 바이트·크기를 싣지 않는다.
+        const p = try bodyDetail(&t, 3, bound, "");
+        defer p.deinit();
+        try testing.expect(p.value.object.get("body") == null and p.value.object.get("body_size") == null);
+    }
+    // 목록에도 같은 상태.
+    {
+        const json = try t.ring.list(testing.allocator, 7, .{}, .{ .page_size = max_page_size }, bound);
+        defer testing.allocator.free(json);
+        try testing.expect(std.mem.indexOf(u8, json, "\"body_state\":\"needs_cookie_permission\"") != null);
+        try testing.expect(std.mem.indexOf(u8, json, "\"body_state\":\"before_body_permission\"") != null);
+        try testing.expect(std.mem.indexOf(u8, json, "\"body_size\":5") != null);
+    }
+    // 설정 끔 — 덮이지 않는 호스트의 응답은 헤더처럼 본문도 숨는다.
+    try testing.expectEqualStrings("hidden", try bodyStateOf2(&t, 4, bound));
+    // 에이전트 탭(어느 호스트든) — 본문 권한은 그 요청이 난 페이지의 사이트로 덮는다: 그 페이지의 다른 사이트 쿠키 응답은 쿠키 권한.
+    const any: BodyQuery = .{ .who = 72, .any_host = true };
+    t.ring.syncBodyReaders(&.{ .{ .who = 71 }, .{ .who = 72, .birth = true } });
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 5, any, ""));
+    try testing.expectEqualStrings("needs_cookie_permission", try bodyStateOf(&t, 3, any, ""));
+    // 사용자가 첫 읽기 전에 몰면 태어날 때의 본문 시작점은 첫 읽기로 미뤄진다.
+    var u: T = .{};
+    defer u.deinit();
+    u.ring.noteReader(7, false); // 네트워크 읽는 쪽은 처음부터(시작점 1) — 본문의 미룸만 본다
+    u.ring.syncBodyReaders(&.{.{ .who = 80, .birth = true }});
+    try bodyBegin(&u, 1, "https://agent.test/a", "agent.test");
+    try bodyFeed(&u, 1, "a", .{});
+    u.ring.userDrove();
+    try bodyBegin(&u, 2, "https://bank.test/b", "bank.test");
+    try bodyFeed(&u, 2, "b", .{});
+    try testing.expectEqualStrings("before_body_permission", try bodyStateOf(&u, 2, .{ .who = 80, .any_host = true }, ""));
+}
+
+fn bodyStateOf2(t: *T, req: u64, bq: BodyQuery) ![]const u8 {
+    const d = try t.ring.detail(testing.allocator, 7, .{ .full = false, .grant_host = "app.test" }, req, bq);
+    defer testing.allocator.free(d);
+    const p = try std.json.parseFromSlice(std.json.Value, testing.allocator, d, .{});
+    defer p.deinit();
+    const st = p.value.object.get("body_state").?.string;
+    inline for (@import("type_info_fields").fields(policy.BodyAccess)) |f| if (std.mem.eql(u8, st, f.name)) return f.name;
+    inline for (@import("type_info_fields").fields(BodyState)) |f| if (std.mem.eql(u8, st, f.name)) return f.name;
+    return error.UnknownState;
+}
+
+test "W9d②: sidecar 가 다시 뜨면 끝을 기다리던 본문은 detached(받던 바이트는 버린다), 다 받은 것은 남는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    try bodyBegin(&t, 1, "https://a.test/a", "a.test");
+    try bodyFeed(&t, 1, "done", .{});
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = 2, .flags2 = .{ .body_expected = true }, .url = "https://a.test/b", .host = "a.test" }, .{ .top_host = "a.test" });
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 2, .offset = 0, .bytes = "par" });
+    t.ring.abandonLive(testing.allocator, &t.budget);
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    try testing.expectEqualStrings("detached", try bodyStateOf(&t, 2, bq, ""));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqual(@as(usize, 4), t.budget.body_bytes);
+}
+
+// ── W9d② × 같은 번호 다시 시작(W9d① 적대 리뷰 후) ───────────────────────────────────────────────────────
+// 시험이 증명하는 것: 한 CEF 번호에 기록이 둘이 되어도(다시 시작) 본문은 그 시도의 것에만 붙는다 — 다시 시작이 오면 앞 시도의 끝나지 않은 본문은
+// `restarted` 로 끝나고 받던 바이트는 예산에서 빠진다(그 번호의 다음 본문 frame 은 새 시도의 것이다 — sidecar 는 앞 시도의 끝을 새 시작보다 먼저
+// 보낸다), 앞 시도가 이미 받은 본문은 남는다, 새 시도를 적지 못했거나 새 시도가 본문을 기다리지 않으면 그 번호의 본문은 어디에도 붙지 않는다.
+// 브라우저 탭에서 중요한 이유 — Cloudflare 확인 페이지(403)의 본문과 다시 시작한 이동의 진짜 페이지 본문이 서로의 기록에 붙으면 에이전트가 다른
+// 응답을 그 요청의 것으로 읽는다.
+
+fn restartBegin(t: *T, request: u64, url: []const u8, expected: bool, time_ms: u64) !void {
+    const host = policy.hostOfUrl(url) orelse "";
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = request, .flags = .{ .main_frame = true, .navigation = true }, .flags2 = .{ .body_expected = expected }, .resource_type = 0, .time_ms = time_ms, .url = url, .host = host, .site = host }, .{ .top_host = host });
+}
+
+fn bodyText(t: *T, seq: u64) ![]u8 {
+    const p = try bodyDetail(t, seq, .{ .who = 70, .any_host = true, .want = true }, "");
+    defer p.deinit();
+    const b = p.value.object.get("body") orelse return testing.allocator.dupe(u8, "");
+    return testing.allocator.dupe(u8, b.string);
+}
+
+test "W9d② × 다시 시작 B1: 앞 시도의 본문이 끝나지 않은 채 같은 번호가 다시 시작하면 앞 본문은 restarted(받던 바이트는 예산에서 빠진다), 그 번호의 다음 본문은 새 시도에" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    try restartBegin(&t, 9, "https://so.test/q", true, 1000);
+    try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = 9, .status = 403, .mime = "text/html" });
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 9, .offset = 0, .bytes = "challe" });
+    try testing.expectEqual(@as(usize, 6), t.budget.body_bytes);
+    // 같은 번호 다시 시작(앞 시도의 본문 끝은 아직 — 방어: sidecar 는 앞 시도의 끝을 먼저 보낸다).
+    try restartBegin(&t, 9, "https://so.test/q", true, 1500);
+    try testing.expectEqualStrings("restarted", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqual(@as(usize, 0), t.ring.body_bytes);
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+    try testing.expectEqualStrings("pending", try bodyStateOf(&t, 2, bq, ""));
+    // 새 시도의 본문 — 오프셋 0 부터(앞 시도의 바이트에 잇지 않는다).
+    try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = 9, .status = 200, .mime = "text/html" });
+    t.ring.end(.{ .browser = 1, .request = 9, .received = 2, .time_ms = 1600 });
+    try bodyFeed(&t, 9, "ok", .{});
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 2, bq, ""));
+    const got = try bodyText(&t, 2);
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("ok", got);
+    try testing.expectEqualStrings("restarted", try bodyStateOf(&t, 1, bq, ""));
+    // 목록에도 시도마다.
+    const p = try t.ring.list(testing.allocator, 7, .{}, .{}, bq);
+    defer testing.allocator.free(p);
+    try testing.expect(std.mem.indexOf(u8, p, "\"body_state\":\"restarted\"") != null);
+    try testing.expect(std.mem.indexOf(u8, p, "\"body_size\":2") != null);
+    try testing.expectEqual(@as(usize, 2), t.budget.body_bytes);
+}
+
+test "W9d② × 다시 시작 B2: 실측 차례(앞 시도의 끝·본문 끝이 다시 시작보다 먼저) — 앞 시도가 받은 본문은 남고(restarted 기록), 새 시도는 제 본문" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    try restartBegin(&t, 9, "https://so.test/q", true, 1000);
+    try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = 9, .status = 403, .mime = "text/html" });
+    t.ring.end(.{ .browser = 1, .request = 9, .received = 9, .time_ms = 1200 });
+    try bodyFeed(&t, 9, "challenge", .{});
+    try restartBegin(&t, 9, "https://so.test/q", true, 1300);
+    try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = 9, .status = 200, .mime = "text/html" });
+    t.ring.end(.{ .browser = 1, .request = 9, .received = 2, .time_ms = 1400 });
+    try bodyFeed(&t, 9, "ok", .{});
+    try testing.expect(t.ring.entryBySeq(1).?.restarted);
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqualStrings("captured", try bodyStateOf(&t, 2, bq, ""));
+    const a = try bodyText(&t, 1);
+    defer testing.allocator.free(a);
+    const b = try bodyText(&t, 2);
+    defer testing.allocator.free(b);
+    try testing.expectEqualStrings("challenge", a);
+    try testing.expectEqualStrings("ok", b);
+    try testing.expectEqual(@as(usize, 11), t.budget.body_bytes);
+}
+
+test "W9d② × 다시 시작 B3: sidecar 가 앞 시도의 본문을 restarted 로 끝낸 뒤 새 시작 — 앞 기록은 restarted, 새 기록은 기다린다, 두 번째 끝은 새 기록에만" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    try restartBegin(&t, 9, "https://so.test/q", true, 1000);
+    t.ring.end(.{ .browser = 1, .request = 9, .received = 0, .time_ms = 1200 });
+    t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 9, .state = .restarted });
+    try restartBegin(&t, 9, "https://so.test/q", true, 1300);
+    try testing.expectEqualStrings("restarted", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqualStrings("pending", try bodyStateOf(&t, 2, bq, ""));
+    t.ring.bodyEnd(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 9, .state = .not_text });
+    try testing.expectEqualStrings("not_text", try bodyStateOf(&t, 2, bq, ""));
+    try testing.expectEqualStrings("restarted", try bodyStateOf(&t, 1, bq, ""));
+}
+
+test "W9d② × 다시 시작 B4: 새 시도를 적지 못했거나(상한) 새 시도가 본문을 기다리지 않으면 앞 시도의 본문은 restarted 로 끝나고 그 번호의 늦은 본문은 어디에도 붙지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    t.ring.syncBodyReaders(&.{.{ .who = 70, .birth = true }});
+    const bq: BodyQuery = .{ .who = 70, .any_host = true };
+    // 새 시도가 본문을 기다리지 않는다.
+    try restartBegin(&t, 9, "https://so.test/q", true, 1000);
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 9, .offset = 0, .bytes = "abc" });
+    try restartBegin(&t, 9, "https://so.test/q", false, 1100);
+    try testing.expectEqualStrings("restarted", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqualStrings("not_recorded", try bodyStateOf(&t, 2, bq, ""));
+    try bodyFeed(&t, 9, "late", .{});
+    try testing.expectEqualStrings("restarted", try bodyStateOf(&t, 1, bq, ""));
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+    // 새 시도를 적지 못한다(앱 상한) — 앞 시도는 그래도 끝난다.
+    try restartBegin(&t, 11, "https://so.test/r", true, 2000);
+    t.budget.bytes += global_cap_bytes;
+    try restartBegin(&t, 11, "https://so.test/r", true, 2100);
+    t.budget.bytes -= global_cap_bytes;
+    // 상한으로 이 탭의 기록이 모두 밀렸을 수 있다 — 남았다면 restarted, 어느 기록도 본문을 기다리지 않는다.
+    var it = t.ring.entries.iterator();
+    while (it.next()) |e| try testing.expect(e.body_state != .pending);
+    try bodyFeed(&t, 11, "late", .{});
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+    // 앞 시도가 끝났고(최근 끝에서 찾는다) 본문만 아직이면 — 그 본문도 restarted 로 끝나고 받던 바이트를 푼다.
+    try restartBegin(&t, 13, "https://so.test/s", true, 3000);
+    const s13 = t.ring.next_seq - 1;
+    try t.ring.bodyData(testing.allocator, &t.budget, .{ .browser = 1, .session = 1, .request = 13, .offset = 0, .bytes = "half" });
+    t.ring.end(.{ .browser = 1, .request = 13, .received = 4, .time_ms = 3100 });
+    try restartBegin(&t, 13, "https://so.test/s", true, 3200);
+    try testing.expectEqual(BodyState.restarted, t.ring.entryBySeq(s13).?.body_state);
+    try testing.expectEqual(@as(usize, 0), t.budget.body_bytes);
+    try testing.expectEqual(BodyState.pending, t.ring.entryBySeq(s13 + 1).?.body_state);
 }

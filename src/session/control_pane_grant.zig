@@ -59,7 +59,7 @@ pub const hostOfUrl = net_policy.hostOfUrl;
 /// 사이트에 묶이는 scope 인가 — 쿠키(`browser_storage`)와 네트워크 기록(`browser_network` — W9d①: 요청 헤더에 그 사이트의 로그인 쿠키가
 /// 들어 있다)는 모달이 보인 호스트와 그 하위 도메인에서만 인가한다. `browser` 는 호스트를 보지 않는다.
 pub fn hostBound(scope: capmod.ScopeClass) bool {
-    return scope == .browser_storage or scope == .browser_network;
+    return scope == .browser_storage or scope == .browser_network or scope == .browser_network_body;
 }
 
 /// 확인된 grant 한 건: pane P의 에이전트 → target web surface W, scope S.
@@ -94,8 +94,10 @@ pub const PaneGrant = struct {
 /// 초과=`error.Full`(호출자 방어 — 정상 사용선 도달 안 함). DoS-safe 고정 배열(allocator 불요). 에이전트 탭의 태어날 때 네트워크
 /// grant(`birth`)는 이 상한 밖에서 따로 센다 — 각각 그 탭의 제어 grant 와 짝이라 그 수도 `max_grants` 를 넘지 않는다.
 pub const max_grants: usize = 64;
+/// 태어날 때의 grant 수 상한 — 에이전트 탭 하나에 둘(네트워크 기록·본문 기록 — W9d② 사용자 결정 UB2)이라 상한 안 grant 의 두 배.
+pub const max_birth_grants: usize = 2 * max_grants;
 /// 표의 실제 자리 수 — 상한 안의 grant 와 태어날 때의 grant 를 함께 담는다.
-pub const capacity: usize = 2 * max_grants;
+pub const capacity: usize = max_grants + max_birth_grants;
 
 /// pane-bound grant 집합. 고정 배열(주소 안정 불필요·값 복사 안전). L4가 인스턴스 소유(메인 스레드 — §8.8).
 pub const PaneGrantStore = struct {
@@ -121,7 +123,7 @@ pub const PaneGrantStore = struct {
     /// 번호면 새로 시작한다). 새 자리는 새 번호를 받는다(`g.id` 는 쓰지 않는다). 신규가 상한 초과면 `error.Full`(`birth` 는 따로 센다).
     pub fn grant(self: *PaneGrantStore, g: PaneGrant) error{Full}!void {
         if (self.find(g)) |existing| {
-            const new_consent = g.scope == .browser_network and (!existing.host.eql(&g.host) or existing.any_host != g.any_host);
+            const new_consent = (g.scope == .browser_network or g.scope == .browser_network_body) and (!existing.host.eql(&g.host) or existing.any_host != g.any_host);
             existing.host = g.host;
             existing.any_host = g.any_host;
             existing.birth = existing.birth and g.birth;
@@ -149,7 +151,12 @@ pub const PaneGrantStore = struct {
     pub fn room(self: *const PaneGrantStore, birth: bool) bool {
         if (self.len >= capacity) return false;
         const births = self.birthCount();
-        return if (birth) births < max_grants else self.len - births < max_grants;
+        return if (birth) births < max_birth_grants else self.len - births < max_grants;
+    }
+
+    /// 태어날 때 grant `n` 개를 더 둘 자리가 있는가(W9d② — 에이전트 탭 하나가 둘을 쓴다: 네트워크·본문).
+    pub fn birthRoom(self: *const PaneGrantStore, n: usize) bool {
+        return self.len + n <= capacity and self.birthCount() + n <= max_birth_grants;
     }
 
     /// W9d① 적대 리뷰 1 회차 F5(설정 `browser.agent-network-full` 이 꺼졌을 때): 사용자가 그 탭을 몰았다(2 회차 N3 — 켜진 동안 몰았고 이제
@@ -157,7 +164,8 @@ pub const PaneGrantStore = struct {
     /// 아니라 좁힘 — 더 숨기는 쪽). 바꿨으면 참.
     pub fn narrowAnyHost(self: *PaneGrantStore, target: u64, host: GrantHost) bool {
         var changed = false;
-        for (self.grants[0..self.len]) |*e| if (e.target == target and e.scope == .browser_network and e.any_host) {
+        // W9d②: 본문 기록의 태어날 때 grant 도 같이 좁힌다(같은 몰기 — 설정이 꺼졌으면 다른 사이트의 본문도 다시 묻는다).
+        for (self.grants[0..self.len]) |*e| if (e.target == target and (e.scope == .browser_network or e.scope == .browser_network_body) and e.any_host) {
             e.any_host = false;
             e.host = host;
             changed = true;
@@ -417,9 +425,12 @@ test "W9d① 적대 리뷰 1 회차 재현 F1·F5: 네트워크 grant 를 다른
     try testing.expectEqualStrings("agent.test", store.hostOf(6, 12, .browser_network).?.slice());
 }
 
-test "W9d① 적대 리뷰 1 회차 재현 F6: 태어날 때 grant 는 64 자리 상한 밖에서 센다 — 보통 grant 64 개와 태어날 때 grant 64 개를 함께 담고, 그 넘어는 Full" {
+test "W9d① 적대 리뷰 1 회차 재현 F6: 태어날 때 grant 는 64 자리 상한 밖에서 센다 — 보통 grant 64 개와 태어날 때 grant(탭마다 둘 — W9d② 본문 기록) 128 개를 함께 담고, 그 넘어는 Full" {
     var store: PaneGrantStore = .{};
-    for (0..max_grants) |i| try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network, .any_host = true, .birth = true });
+    for (0..max_grants) |i| {
+        try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network, .any_host = true, .birth = true });
+        try store.grant(.{ .pane = 1, .target = 100 + i, .scope = .browser_network_body, .any_host = true, .birth = true });
+    }
     try testing.expect(store.room(false)); // 태어날 때 grant 가 다 차도 사용자의 모달은 저장된다
     try testing.expect(!store.room(true));
     try testing.expectError(error.Full, store.grant(.{ .pane = 1, .target = 999, .scope = .browser_network, .any_host = true, .birth = true }));
@@ -429,6 +440,24 @@ test "W9d① 적대 리뷰 1 회차 재현 F6: 태어날 때 grant 는 64 자리
     try testing.expectEqual(capacity, store.len);
     // 다시 허용(있는 자리)은 꽉 찼어도 된다.
     try store.grant(.{ .pane = 2, .target = 100, .scope = .browser });
+}
+
+test "W9d②: browser_network_body grant 도 사이트에 묶인다 — 다른 호스트로 다시 허용하면 새 번호(본문의 시작점도 새로), 좁히기는 네트워크와 함께" {
+    var store: PaneGrantStore = .{};
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_body, .host = GrantHost.init("app.test") });
+    try testing.expect(store.authorizes(5, 11, .browser_network_body, "api.app.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser_network_body, "bank.test"));
+    try testing.expect(!store.authorizes(5, 11, .browser_network, "app.test")); // 따로 묻는다
+    const first = store.idOf(5, 11, .browser_network_body).?;
+    try store.grant(.{ .pane = 5, .target = 11, .scope = .browser_network_body, .host = GrantHost.init("bank.test") });
+    try testing.expect(store.idOf(5, 11, .browser_network_body).? != first);
+    try store.grant(.{ .pane = 6, .target = 12, .scope = .browser_network, .any_host = true, .birth = true });
+    try store.grant(.{ .pane = 6, .target = 12, .scope = .browser_network_body, .any_host = true, .birth = true });
+    try testing.expect(store.authorizes(6, 12, .browser_network_body, null));
+    try testing.expect(store.narrowAnyHost(12, GrantHost.init("agent.test")));
+    try testing.expect(!store.authorizes(6, 12, .browser_network_body, "bank.test"));
+    try testing.expect(store.authorizes(6, 12, .browser_network_body, "agent.test"));
+    try testing.expect(hostBound(.browser_network_body));
 }
 
 test "hostOfUrl: http(s) 호스트만 — 다른 스킴과 호스트 없는 URL 은 null" {

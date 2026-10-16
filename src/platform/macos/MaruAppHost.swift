@@ -14008,7 +14008,7 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
     }
 
     /// grant 한 건의 메뉴 레이블. 대상 web 패널 URL host(있으면)로 "무엇을 제어 중"인지 보이고, scope를 사람 말로
-    /// (browser=제어·browser_storage=쿠키·스토리지·browser_network=네트워크 기록). pane은 요청 에이전트 pane surface_id(터미널이라 title 조회 없음=id).
+    /// (browser=제어·browser_storage=쿠키·스토리지·browser_network=네트워크 기록·browser_network_body=응답 본문 기록). pane은 요청 에이전트 pane surface_id(터미널이라 title 조회 없음=id).
     private func grantLabel(pane: UInt64, target: UInt64, scope: UInt8) -> String {
         let targetDesc: String
         if let host = surfaceOwning(byId: target)?.webPanels[target]?.webView.url?.host, !host.isEmpty {
@@ -14018,8 +14018,14 @@ final class MaruAppHostController: NSObject, NSApplicationDelegate, NSWindowDele
         }
         // **영어 고정**(계약 §2) — 메뉴바는 찾아서 실행하는 자리라 번역하지 않는다. 이 항목만 한국어면
         // 같은 메뉴 안에서 언어가 섞인다(다른 항목은 전부 영어다).
-        // W9d①: 2 = browser_network(네트워크 기록 읽기 — 에이전트가 연 탭은 탭과 함께 생긴다).
-        let scopeDesc = scope == 1 ? "cookies & storage" : (scope == 2 ? "network requests" : "control")
+        // W9d①: 2 = browser_network(네트워크 기록 읽기 — 에이전트가 연 탭은 탭과 함께 생긴다). W9d②: 3 = browser_network_body(응답 본문 기록).
+        let scopeDesc: String
+        switch scope {
+        case 1: scopeDesc = "cookies & storage"
+        case 2: scopeDesc = "network requests"
+        case 3: scopeDesc = "response bodies"
+        default: scopeDesc = "control"
+        }
         return "Revoke pane #\(pane) → \(targetDesc) · \(scopeDesc)"
     }
 

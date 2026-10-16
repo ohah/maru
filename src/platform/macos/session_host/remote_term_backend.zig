@@ -208,7 +208,9 @@ const CandidatePrepareFailure = union(enum) {
 
 fn classifyCandidatePrepareFailure(err: anyerror) CandidatePrepareFailure {
     return switch (err) {
-        error.ObserverAttachRejected => .rejected_usable,
+        // Preserve the existing forward-failure policy until the canonical ended-row
+        // continuation is installed. Positive absence is already distinct at the issuer boundary.
+        error.ObserverAttachRejected, error.ObserverRuntimeNotFound => .rejected_usable,
         error.OutOfMemory, error.ResourceExhausted => .{ .terminal = .local_resource_exhausted },
         error.DeadlineExceeded => .{ .terminal = .read_timeout },
         error.ObserverAttachProtocolFailed,

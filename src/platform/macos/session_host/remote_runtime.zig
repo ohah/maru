@@ -2775,7 +2775,12 @@ fn initObserverReconnectCandidate(
     };
     defer decoded.deinit();
     const accepted = switch (decoded) {
-        .wire_error => return error.ObserverAttachRejected,
+        // Decode while the correlated response owner is still live. Only this exact wire code
+        // proves absence; generic rejection, malformed payloads and EOF cannot prove termination.
+        .wire_error => |code| return switch (code) {
+            .runtime_not_found => error.ObserverRuntimeNotFound,
+            else => error.ObserverAttachRejected,
+        },
         .accepted => |*value| value,
     };
     const profile: maru.session.agent_log_profile.Profile = switch (accepted.agent_log_format) {
@@ -13294,7 +13299,7 @@ test "CR4a actual socket catchup hostile은 gap malformed cap plus one missing b
     }) |selected| try runCr4aCatchupStageCase(selected);
 }
 
-const Cr4aObserverFailure = enum { typed_reject, response_eof };
+const Cr4aObserverFailure = enum { typed_reject, unauthorized, unknown_error, malformed, response_eof };
 
 fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure) !void {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
@@ -13317,7 +13322,13 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
             const response = framing.encodeFrame(
                 std.heap.page_allocator,
                 .{ .kind = .response, .request_id = request.header.request_id },
-                "{\"error\":\"runtime_not_found\"}",
+                switch (mode) {
+                    .typed_reject => "{\"error\":\"runtime_not_found\"}",
+                    .unauthorized => "{\"error\":\"unauthorized\"}",
+                    .unknown_error => "{\"error\":\"runtime_not_found_suffix\"}",
+                    .malformed => "{\"error\":",
+                    .response_eof => unreachable,
+                },
             ) catch return;
             defer std.heap.page_allocator.free(response);
             socket_server.writeAll(fd, response) catch return;
@@ -13414,7 +13425,9 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
     const retired_count = adapter.slot.retiredClientCount();
     var prepared: PreparedReconnect = .{};
     try std.testing.expectError(switch (selected) {
-        .typed_reject => error.ObserverAttachRejected,
+        .typed_reject => error.ObserverRuntimeNotFound,
+        .unauthorized => error.ObserverAttachRejected,
+        .unknown_error, .malformed => error.ObserverAttachProtocolFailed,
         .response_eof => error.ObserverAttachConnectionFailed,
     }, runtime.prepareObserverReconnectCandidate(&adapter, &replacement, &prepared));
     try std.testing.expectEqual(@as(u8, 1), observer_seen.load(.acquire));
@@ -13427,7 +13440,7 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
     try std.testing.expectEqual(published_generation, adapter.connectionGeneration());
     try std.testing.expectEqual(retired_count, adapter.slot.retiredClientCount());
     switch (selected) {
-        .typed_reject => {
+        .typed_reject, .unauthorized, .unknown_error, .malformed => {
             try std.testing.expect(adapter.slot.current.client.fd >= 0);
             try std.testing.expect(!adapter.slot.current.client.unusable);
         },
@@ -13441,8 +13454,8 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
 }
 
 test "CR4a observer 실패는 typed reject와 EOF에서 unavailable shell과 새 Client를 보존한다" {
-    try runCr4aObserverFailurePreservesPublishedClient(.typed_reject);
-    try runCr4aObserverFailurePreservesPublishedClient(.response_eof);
+    for (std.meta.tags(Cr4aObserverFailure)) |mode|
+        try runCr4aObserverFailurePreservesPublishedClient(mode);
 }
 
 const ReconnectResidentLedger = if (builtin.is_test) struct {

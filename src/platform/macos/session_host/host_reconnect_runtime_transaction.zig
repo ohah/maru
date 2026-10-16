@@ -61,6 +61,9 @@ pub const Cursor = struct {
                 row.local_raw != @intFromEnum(ledger.LocalState.published_old) or
                 row.mutation_raw != @intFromEnum(ledger.MutationState.open)) return false;
         }
+        if (self.next_index != 0) {
+            _ = ledger.summarizeTerminalRows(self.job, rows[0..self.next_index]) catch return false;
+        }
         return true;
     }
 
@@ -79,6 +82,17 @@ pub const Cursor = struct {
             .published_new,
             .open,
         );
+        self.next_index += 1;
+        self.terminal_count += 1;
+    }
+
+    /// Positive absence settles only the active row. A completed sibling and untouched suffix
+    /// retain their exact provenance, so the next frame can continue the same host transaction.
+    pub fn commitEnded(self: *Cursor, rows: []ledger.RuntimeRow) !void {
+        if (!self.valid(rows) or self.failed().? or self.next_index == rows.len)
+            return error.InvalidRuntimeSet;
+        const index: usize = self.next_index;
+        rows[index] = ledger.RuntimeRow.init(rows[index].identity, .gone_positive, .ended, .closed);
         self.next_index += 1;
         self.terminal_count += 1;
     }
@@ -141,12 +155,15 @@ pub const Cursor = struct {
         if (!self.valid(rows) or self.failed().? or self.next_index == 0 or
             self.next_index == rows.len)
             return error.InvalidRuntimeSet;
-        for (rows, 0..) |*row, index| row.* = ledger.RuntimeRow.init(
-            row.identity,
-            if (index < self.next_index) .new_controller_evidenced else .old_valid,
-            .frozen_unavailable,
-            .closed,
-        );
+        for (rows, 0..) |*row, index| {
+            if (row.local_raw == @intFromEnum(ledger.LocalState.ended)) continue;
+            row.* = ledger.RuntimeRow.init(
+                row.identity,
+                if (index < self.next_index) .new_controller_evidenced else .old_valid,
+                .frozen_unavailable,
+                .closed,
+            );
+        }
         self.next_index = @intCast(rows.len);
         self.terminal_count = @intCast(rows.len);
         self.failed_raw = 1;
@@ -194,6 +211,29 @@ test "CR5b-2c cursor는 three-runtime success를 handle 순서와 terminal summa
     try std.testing.expectEqual(@as(u32, 3), summary.published_new);
     try std.testing.expectEqual(@as(u32, 0), summary.published_old);
     try std.testing.expectEqual(@as(u32, 0), summary.frozen_unavailable);
+    for (0..3) |ended_index| {
+        var mixed = testRows();
+        var next = try Cursor.initial(testJob(), &mixed);
+        for (0..3) |index| {
+            const before = mixed;
+            if (index == ended_index) try next.commitEnded(&mixed) else try next.commitPublishedNew(&mixed);
+            for (0..3) |other| if (other != index) try std.testing.expectEqual(before[other], mixed[other]);
+            try std.testing.expect(next.valid(&mixed));
+        }
+        const terminal = try next.finishSuccess(&mixed);
+        try std.testing.expectEqual(@as(u32, 2), terminal.published_new);
+        try std.testing.expectEqual(@as(u32, 1), terminal.ended);
+        try std.testing.expectEqual(@as(u32, 0), terminal.retry_reserved);
+        try std.testing.expectError(error.InvalidRuntimeSet, next.commitEnded(&mixed));
+    }
+    var failed = testRows();
+    var after_ended = try Cursor.initial(testJob(), &failed);
+    try after_ended.commitEnded(&failed);
+    const preserved = failed[0];
+    const failure = try after_ended.failAllForTerminalConnection(&failed);
+    try std.testing.expectEqual(preserved, failed[0]);
+    try std.testing.expectEqual(@as(u32, 1), failure.ended);
+    try std.testing.expectEqual(@as(u32, 2), failure.frozen_unavailable);
 }
 
 test "CR5b-2c cursor는 kth failure에서 앞선 success를 보존하고 suffix를 finite resolve한다" {

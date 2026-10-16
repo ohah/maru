@@ -695,7 +695,8 @@ test "CR2e-e1 경계는 current accessor와 backend facade만 generation을 읽�
         .{ "RemoteRuntime.backend_api.prepareFrameSummary(", 1 },
         // E3c stores the shared-connection probe and the remaining selected owners separately.
         .{ "RemoteRuntime.backend_api.storeFrameSummary(", 2 },
-        .{ "RemoteRuntime.backend_api.takeFrameSummary(", 1 },
+        // Includes the ended-summary exact-once regression assertions.
+        .{ "RemoteRuntime.backend_api.takeFrameSummary(", 3 },
         .{ "RemoteRuntime.backend_api.pumpEnded(", 1 },
         .{ "RemoteRuntime.backend_api.markPumpEnded(", 2 },
         .{ "RemoteRuntime.backend_api.foregroundProcessGroup(", 1 },
@@ -788,7 +789,7 @@ test "CR2e-e2b 경계는 reducer Decision과 actual generation effect parity를 
     }) |declaration| try std.testing.expectEqual(@as(usize, 1), count(executor, declaration));
     try std.testing.expectEqual(@as(usize, 1), count(executor, "try self.executeEffect("));
     try std.testing.expectEqual(@as(usize, 1), count(executor, "reconnectRetiringMatchesLocal("));
-    try std.testing.expectEqual(@as(usize, 3), count(executor, "self.state = result.state;"));
+    try std.testing.expectEqual(@as(usize, 4), count(executor, "self.state = result.state;"));
     const execute_effect = std.mem.indexOf(u8, executor, "try self.executeEffect(") orelse
         return error.TestUnexpectedResult;
     const first_state_publish = std.mem.indexOf(u8, executor, "self.state = result.state;") orelse

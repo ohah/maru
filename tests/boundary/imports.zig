@@ -444,6 +444,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
         .{ .name = "previewExternalAdoption", .receiver_type = immutable, .class = .construction },
         .{ .name = "inspectExternalAdoption", .receiver_type = immutable, .class = .construction },
         .{ .name = "preflightExternalAdoptionDestination", .receiver_type = immutable, .class = .construction },
+        .{ .name = "preflightRetirementDestination", .receiver_type = immutable, .class = .construction },
         .{ .name = "preflightExternalAdoptionDestinationWithScratch", .receiver_type = immutable, .class = .construction },
         .{ .name = "appendExternalOwnerRangesForTeardown", .receiver_type = immutable, .class = .construction },
         .{ .name = "prepareExternalOwnerRangeProof", .receiver_type = immutable, .class = .construction },
@@ -687,6 +688,9 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = pump_path, .enclosing_fn = "initInPlaceWithOptions", .count = 2 },
             .{ .path = pump_path, .enclosing_fn = "prepareAdoptionInner" },
             .{ .path = adoption_path, .enclosing_fn = "initInPlace" },
+        } },
+        // Used Client retirement permits bounded catchup backing, retaining destination proofs.
+        .{ .receiver = "preflightRetirementDestination", .kind = .generation_init, .uses = &.{
             .{ .path = slot_path, .enclosing_fn = "prepareRetirementCleanup", .count = 4 },
         } },
         .{ .receiver = "preflightExternalAdoptionDestinationWithScratch", .kind = .external_adoption, .uses = &.{
@@ -799,7 +803,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
             .{ .path = slot_path, .enclosing_container = "<root>", .enclosing_fn = "enterExternalMode" },
         },
     }};
-    var reviewed_manifest: [38]ClientReceiverSpec = undefined;
+    var reviewed_manifest: [39]ClientReceiverSpec = undefined;
     var reviewed_index: usize = 0;
     for (manifest) |entry| {
         if (entry.class != .construction) continue;
@@ -809,7 +813,7 @@ test "CR3a-2c2b3b B3b-S inventories every public Client receiver before policy c
     reviewed_manifest[reviewed_index] = external_mode_manifest[0];
     reviewed_index += 1;
     try std.testing.expectEqual(reviewed_manifest.len, reviewed_index);
-    var reviewed_proofs: [38]ClientConstructionProof = undefined;
+    var reviewed_proofs: [39]ClientConstructionProof = undefined;
     @memcpy(reviewed_proofs[0..construction.len], &construction);
     reviewed_proofs[construction.len] = external_mode_proof[0];
     try expectClientConstructionPolicies(allocator, &reviewed_manifest, &reviewed_proofs);
@@ -1300,6 +1304,8 @@ test "CR3a-2c2b3b declaration baseline admits only the doc-first owner delta" {
             .containers = &.{ "Client", "EndedPurgeScratch", "PreparedEndedPurgeInventory" },
             .optional_containers = &.{ "PreparedEndedPurgeCommit", "ClientOperationFence" },
             .allowed = &.{
+                // Retirement validates retained catchup backing separately from fresh adoption.
+                .{ .parent = "Client", .kind = "fn", .visibility = "pub", .modifier = "", .name = "preflightRetirementDestination" },
                 // 이미지 채널 앱 쪽 수립(IC2b, 2026-10-11): 채널 모듈 import, Client 의 채널 필드, hello_ack 뒤 수립·abandon 한 곳,
                 // 판정자용 가짜 host. 수립 로직 본체는 `client_image_channel.zig` 에 두어 이 파일의 선언을 넷으로 묶었다.
                 .{ .parent = "root", .kind = "const", .visibility = "private", .modifier = "", .name = "client_image_channel" },
@@ -10474,6 +10480,7 @@ fn clientConstructionCategoriesValid(proofs: []const ClientConstructionProof) bo
             "canMoveToGenerationNode",
             "canRetireFromGenerationNode",
             "retirementRangeAliasesOwnedBacking",
+            "preflightRetirementDestination",
             "moveToGenerationNode",
             "bindOperationFence",
             "bindGenerationAccountingLedger",
@@ -10499,7 +10506,7 @@ fn clientConstructionCategoriesValid(proofs: []const ClientConstructionProof) bo
         if (expected != proof.kind) return false;
         counts[@intFromEnum(proof.kind)] += 1;
     }
-    return std.mem.eql(usize, &.{ 6, 4, 22, 5 }, &counts);
+    return std.mem.eql(usize, &.{ 7, 4, 22, 5 }, &counts);
 }
 
 fn stringInSet(value: []const u8, set: []const []const u8) bool {

@@ -180,6 +180,7 @@ pub const EventTag = enum(u8) {
     reconnect_quiesced_for_close,
     close_timed_out,
     abandon_to_inventory,
+    observer_gone_positive,
 };
 
 pub const Event = union(EventTag) {
@@ -209,6 +210,7 @@ pub const Event = union(EventTag) {
     reconnect_quiesced_for_close: CloseQuiescence,
     close_timed_out: ClockEvidence,
     abandon_to_inventory: void,
+    observer_gone_positive: void,
 };
 
 pub const Decision = enum(u8) {
@@ -312,6 +314,17 @@ pub fn reduce(before: State, event: Event) Error!Result {
 
     var next = before;
     const decision: Decision = switch (event) {
+        .observer_gone_positive => blk: {
+            // Only the issuer of a correlated observer runtime_not_found may submit this event.
+            // No candidate/controller was published; keep the current shell and admission owner.
+            if (before.phaseTag() != .healthy or before.ledger != .old_valid or
+                before.local != .published_old or before.mutation != .open or before.retry != null)
+                return error.IllegalTransition;
+            next.ledger = .gone_positive;
+            next.local = .ended;
+            next.mutation = .closed;
+            break :blk .retain_gone_evidence;
+        },
         .begin_prepare => |work| blk: {
             const job_generation = switch (before.phase) {
                 .healthy => |generation| generation,

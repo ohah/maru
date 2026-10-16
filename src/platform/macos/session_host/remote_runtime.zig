@@ -980,6 +980,16 @@ const ReconnectProductExecutor = struct {
         self.* = .{};
     }
 
+    fn confirmObserverGone(self: *ReconnectProductExecutor, owner: *ReconnectGenerationOwner) !void {
+        try self.validate(owner);
+        if (!std.meta.eql(self.prepared, PreparedReconnect{})) return error.InvalidAuthority;
+        const result = try reconnect_reducer.reduce(self.state.?, .observer_gone_positive);
+        if (reconnectGenerationEffect(result.decision) != .retain) return error.InvalidAuthority;
+        // Keep the host admission/charge until all rows settle. The terminal current payload
+        // remains owned by this shell and is destroyed by normal Term teardown.
+        self.state = result.state;
+    }
+
     fn preflightExternalPublication(
         self: *ReconnectProductExecutor,
         owner: *ReconnectGenerationOwner,
@@ -2526,6 +2536,15 @@ pub const ReconnectGenerationOwner = struct {
     }
 
     pub fn deinit(self: *ReconnectGenerationOwner) !void {
+        try self.deinitWithEndedGeneration(null);
+    }
+
+    fn deinitConfirmedGone(self: *ReconnectGenerationOwner, generation: u64) !void {
+        if (generation == 0 or generation != try self.currentGeneration()) return error.InvalidAuthority;
+        try self.deinitWithEndedGeneration(generation);
+    }
+
+    fn deinitWithEndedGeneration(self: *ReconnectGenerationOwner, ended_generation: ?u64) !void {
         try self.validate();
         if (try self.slot.hasRetiring() or self.slot.candidate != null) return error.Busy;
         if (self.screen_published and self.screen_source.?.current.kind == .live) {
@@ -2566,8 +2585,14 @@ pub const ReconnectGenerationOwner = struct {
                                 adapter.connectionGeneration() == current.connection_generation and
                                 adapter.slot.retiredClientCount() != 0 and
                                 adapter.slot.attachmentConnectionFailureReason() != null;
+                            // The caller captured canonical reducer evidence before destroying its
+                            // executor. A confirmed-ended current payload can outlive several later
+                            // Client generations; it owns no attachment/retired-Client authority.
+                            const confirmed_ended = ended_generation != null and
+                                ended_generation.? == current_generation and current.pump_ended and
+                                adapter.connectionGeneration() > current.connection_generation;
                             if (!replacement_failed and !replacement_published and
-                                !published_current_failed)
+                                !published_current_failed and !confirmed_ended)
                                 return error.InvalidAuthority;
                         } else adapter.slot.validateRetirementPlaceholder(
                             self.screen_source.?.current.generation,
@@ -2970,6 +2995,28 @@ pub const RemoteRuntime = struct {
             published,
             forward_failed: anyerror,
         };
+
+        pub fn confirmedRuntimeGone(runtime: *RemoteRuntime) bool {
+            runtime.admitRuntimeOperation() catch return false;
+            runtime.reconnect_executor.validate(&runtime.generation_owner) catch return false;
+            const state = runtime.reconnect_executor.state.?;
+            return state.local == .ended and state.ledger == .gone_positive;
+        }
+
+        pub fn hasBoundReconnectAdmission(runtime: *RemoteRuntime) bool {
+            runtime.reconnect_executor.validate(&runtime.generation_owner) catch return false;
+            return runtime.reconnect_executor.admission != null;
+        }
+
+        pub fn confirmObserverRuntimeGone(runtime: *RemoteRuntime, adapter: *host_adapter_mod.HostAdapter) !void {
+            try runtime.admitRuntimeOperation();
+            if (!runtime.generation_owner.hostWideRetirementCommittedExact(adapter)) return error.InvalidAuthority;
+            try runtime.reconnect_executor.confirmObserverGone(&runtime.generation_owner);
+            const generation = runtime.currentGeneration();
+            generation.pump_ended = true;
+            generation.frame_summary.ended = .{ .exited = .{ .unknown = 0 } };
+            generation.frame_summary_ready = true;
+        }
 
         pub fn reconnectRuntimeSetIdentity(
             runtime: *RemoteRuntime,
@@ -4722,9 +4769,18 @@ pub const RemoteRuntime = struct {
     }
 
     fn deinitGenerationOwnerAndScreenSource(self: *RemoteRuntime) void {
+        // Retain only the exact shell generation authenticated by the canonical ended reducer
+        // state. Do not let pump_ended alone authorize post-reclaim payload destruction.
+        const ended_generation = if (backend_api.confirmedRuntimeGone(self))
+            self.generation_owner.currentGeneration() catch @panic("ended shell lost generation")
+        else
+            null;
         self.reconnect_executor.deinit(&self.generation_owner) catch
             @panic("runtime reconnect executor teardown lost final authority");
-        self.generation_owner.deinit() catch
+        (if (ended_generation) |generation|
+            self.generation_owner.deinitConfirmedGone(generation)
+        else
+            self.generation_owner.deinit()) catch
             @panic("runtime generation owner teardown lost final authority");
         self.screen_source.deinit();
         self.allocator.destroy(self.screen_source);

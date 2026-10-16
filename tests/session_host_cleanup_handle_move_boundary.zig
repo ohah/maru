@@ -155,7 +155,7 @@ test "CR3b R2b 경계는 final cleanup handle move와 gate 밖 exact once 정산
     );
     try std.testing.expectEqual(
         @as(usize, 4),
-        count(slot, "operation.node.client.preflightExternalAdoptionDestination("),
+        count(slot, "operation.node.client.preflightRetirementDestination("),
     );
     try std.testing.expectEqual(@as(usize, 1), count(slot, "cleanup.external_deinit_reserved_raw > 1"));
     try std.testing.expectEqual(@as(usize, 1), count(slot, "allocator.free(bytes[0..cleanup.pending_frame_len]);"));

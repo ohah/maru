@@ -13630,14 +13630,14 @@ pub const ClientSlot = struct {
                 operation.node.active_operation_generation != 0 or
                 operation.node.pin_owner.active_cleanup != 0)
                 return error.Busy;
-            operation.node.client.preflightExternalAdoptionDestination(
+            operation.node.client.preflightRetirementDestination(
                 out,
                 @sizeOf(PreparedRetirementCleanup),
             ) catch |err| return switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 else => error.InvalidOwner,
             };
-            operation.node.client.preflightExternalAdoptionDestination(
+            operation.node.client.preflightRetirementDestination(
                 permit,
                 @sizeOf(PreparedAdmissionClose),
             ) catch |err| return switch (err) {
@@ -13668,14 +13668,14 @@ pub const ClientSlot = struct {
             operation.node.active_operation_generation != 0 or
             operation.node.pin_owner.active_cleanup != 0)
             return error.Busy;
-        operation.node.client.preflightExternalAdoptionDestination(
+        operation.node.client.preflightRetirementDestination(
             out,
             @sizeOf(PreparedRetirementCleanup),
         ) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.InvalidOwner,
         };
-        operation.node.client.preflightExternalAdoptionDestination(
+        operation.node.client.preflightRetirementDestination(
             permit,
             @sizeOf(PreparedAdmissionClose),
         ) catch |err| return switch (err) {

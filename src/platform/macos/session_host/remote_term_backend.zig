@@ -183,6 +183,7 @@ const HostReconnectJobState = enum(u8) {
     runtime_transactions_complete = 17,
     host_failure_complete = 18,
     runtime_transactions_retained = 19,
+    candidate_ended = 20,
 };
 
 pub const HostReconnectStart = union(enum) {
@@ -203,14 +204,14 @@ pub const HostReconnectTerminalKind = enum(u8) { completed, retained_terminal };
 
 const CandidatePrepareFailure = union(enum) {
     rejected_usable,
+    confirmed_ended,
     terminal: @import("client_poison.zig").ConnectionReason,
 };
 
 fn classifyCandidatePrepareFailure(err: anyerror) CandidatePrepareFailure {
     return switch (err) {
-        // Preserve the existing forward-failure policy until the canonical ended-row
-        // continuation is installed. Positive absence is already distinct at the issuer boundary.
-        error.ObserverAttachRejected, error.ObserverRuntimeNotFound => .rejected_usable,
+        error.ObserverRuntimeNotFound => .confirmed_ended,
+        error.ObserverAttachRejected => .rejected_usable,
         error.OutOfMemory, error.ResourceExhausted => .{ .terminal = .local_resource_exhausted },
         error.DeadlineExceeded => .{ .terminal = .read_timeout },
         error.ObserverAttachProtocolFailed,
@@ -394,6 +395,7 @@ const HostReconnectJob = struct {
             @intFromEnum(HostReconnectJobState.candidate_staged),
             @intFromEnum(HostReconnectJobState.candidate_failed),
             @intFromEnum(HostReconnectJobState.candidate_rejected),
+            @intFromEnum(HostReconnectJobState.candidate_ended),
             @intFromEnum(HostReconnectJobState.mutation_sealed),
             @intFromEnum(HostReconnectJobState.controller_evidenced),
             @intFromEnum(HostReconnectJobState.authority_conflict),
@@ -674,7 +676,7 @@ const HostReconnectJob = struct {
                             entry.runtime,
                             adapter,
                         )) return false,
-                        .ended => {},
+                        .ended => if (!RemoteRuntime.backend_api.confirmedRuntimeGone(entry.runtime)) return false,
                     }
                 }
             },
@@ -865,7 +867,7 @@ const HostReconnectJob = struct {
                     )) return false;
                 }
             },
-            @intFromEnum(HostReconnectJobState.candidate_rejected) => {
+            @intFromEnum(HostReconnectJobState.candidate_rejected), @intFromEnum(HostReconnectJobState.candidate_ended) => {
                 if (self.client != null or self.runtime_handle == 0 or self.runtime_addr == 0 or
                     self.runtime_generation == 0 or self.replacementLifecycleRaw() !=
                     @intFromEnum(client_slot_mod.PreparedClientReplacement.Lifecycle.published) or
@@ -932,7 +934,7 @@ const HostReconnectJob = struct {
                         )) return false,
                         .frozen_unavailable => if (!RemoteRuntime.backend_api
                             .hostWideRetirementCommittedExact(entry.runtime, adapter)) return false,
-                        .ended => {},
+                        .ended => if (!RemoteRuntime.backend_api.confirmedRuntimeGone(entry.runtime)) return false,
                         .published_old => return false,
                     }
                 }
@@ -945,7 +947,6 @@ const HostReconnectJob = struct {
                     self.stage != null or !std.mem.allEqual(u8, &self.mutation_digest, 0) or
                     self.controller_generation != 0 or self.terminal_summary == null or
                     !self.terminal_summary.?.valid() or self.terminal_summary.?.published_new != 0 or
-                    self.terminal_summary.?.frozen_unavailable != self.runtime_row_count or
                     !self.runtime_cursor.valid(self.runtimeRowsSlice() orelse return false) or
                     self.runtime_cursor.next_index != self.runtime_row_count or
                     self.replacementLifecycleRaw() !=
@@ -975,10 +976,9 @@ const HostReconnectJob = struct {
                         entry.runtime,
                         row.identity.runtime_id,
                         expected_shell_generation,
-                    ) or !RemoteRuntime.backend_api.hostWideRetirementCommittedExact(
-                        entry.runtime,
-                        adapter,
                     )) return false;
+                    if (row.local_raw != @intFromEnum(host_reconnect_runtime_ledger.LocalState.ended) and
+                        !RemoteRuntime.backend_api.hostWideRetirementCommittedExact(entry.runtime, adapter)) return false;
                 }
             },
             else => return false,
@@ -1028,10 +1028,17 @@ const HostReconnectJob = struct {
             }
         }
         var same_host_count: usize = 0;
+        for (rows) |row| {
+            const runtime = backend.runtimes.get(row.identity.runtime_handle).?.runtime;
+            const ended = row.local_raw == @intFromEnum(host_reconnect_runtime_ledger.LocalState.ended);
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(runtime) != ended) return false;
+            if (ended) same_host_count += 1;
+        }
         var iterator = backend.runtimes.iterator();
         while (iterator.next()) |entry| {
             if (entry.value_ptr.host_id == self.host_id and
-                entry.value_ptr.host_adapter_generation == self.adapter_generation)
+                entry.value_ptr.host_adapter_generation == self.adapter_generation and
+                !RemoteRuntime.backend_api.confirmedRuntimeGone(entry.value_ptr.runtime))
                 same_host_count += 1;
         }
         return same_host_count == rows.len;
@@ -1075,6 +1082,7 @@ const HostReconnectJob = struct {
             const runtime_entry = entry.value_ptr.*;
             if (runtime_entry.host_id != host_id or
                 runtime_entry.host_adapter_generation != adapter_generation) continue;
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(runtime_entry.runtime)) continue;
             if (count >= self.runtime_rows.len) return error.InvalidAuthority;
             const projection = try RemoteRuntime.backend_api.reconnectRuntimeSetIdentity(runtime_entry.runtime);
             self.runtime_rows[count] = host_reconnect_runtime_ledger.RuntimeRow.init(.{
@@ -1726,6 +1734,7 @@ pub const RemoteTermBackend = struct {
             job.state_raw == @intFromEnum(HostReconnectJobState.runtime_transactions_retained) or
             job.state_raw == @intFromEnum(HostReconnectJobState.candidate_failed) or
             job.state_raw == @intFromEnum(HostReconnectJobState.candidate_rejected) or
+            job.state_raw == @intFromEnum(HostReconnectJobState.candidate_ended) or
             job.state_raw == @intFromEnum(HostReconnectJobState.authority_conflict) or
             job.state_raw == @intFromEnum(HostReconnectJobState.takeover_sent_unknown) or
             job.state_raw == @intFromEnum(HostReconnectJobState.pre_takeover_failed))
@@ -1881,6 +1890,8 @@ pub const RemoteTermBackend = struct {
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |entry| {
             if (entry.value_ptr.host_id != snapshot.host_id) continue;
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(entry.value_ptr.runtime) and
+                !RemoteRuntime.backend_api.hasBoundReconnectAdmission(entry.value_ptr.runtime)) continue;
             if (entry.value_ptr.host_adapter_generation != snapshot.pool_membership_generation or
                 !RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
                     entry.value_ptr.runtime,
@@ -2031,6 +2042,7 @@ pub const RemoteTermBackend = struct {
                 // Unsealed errors still reach the coordinator's integrity boundary.
                 if (job.valid(self) and
                     (job.state_raw == @intFromEnum(HostReconnectJobState.candidate_rejected) or
+                        job.state_raw == @intFromEnum(HostReconnectJobState.candidate_ended) or
                         job.state_raw == @intFromEnum(HostReconnectJobState.candidate_failed)))
                     return .advanced;
                 return err;
@@ -2047,6 +2059,7 @@ pub const RemoteTermBackend = struct {
                     return .advanced;
                 return err;
             },
+            .candidate_ended => try self.completeHostReconnectEndedRuntime(),
             .candidate_rejected, .authority_conflict, .takeover_sent_unknown, .pre_takeover_failed => {
                 logReconnectRuntimeFailure(state, job.runtime_cursor.next_index, job.runtime_handle);
                 _ = try self.failHostReconnectRuntimeTransactions();
@@ -2321,6 +2334,36 @@ pub const RemoteTermBackend = struct {
         return identity.runtime_handle;
     }
 
+    fn completeHostReconnectEndedRuntime(self: *RemoteTermBackend) !void {
+        try self.validateReconnectCoordinatorTarget();
+        if (self.host_reconnect_preparing) return error.Busy;
+        const job = self.host_reconnect_job orelse return error.InvalidHostReconnectJob;
+        if (!job.valid(self) or job.state_raw != @intFromEnum(HostReconnectJobState.candidate_ended))
+            return error.InvalidHostReconnectJob;
+        const rows = job.runtimeRowsSlice() orelse return error.InvalidHostReconnectJob;
+        const identity = job.runtime_cursor.activeRow(rows) orelse return error.InvalidHostReconnectJob;
+        if (identity.runtime_handle != job.runtime_handle) return error.InvalidHostReconnectJob;
+        const entry = self.runtimes.get(identity.runtime_handle) orelse return error.InvalidHostReconnectJob;
+        const pool = self.host_pool orelse return error.InvalidHostReconnectJob;
+        const adapter = pool.get(job.host_id) orelse return error.InvalidHostReconnectJob;
+        try RemoteRuntime.backend_api.confirmObserverRuntimeGone(entry.runtime, adapter);
+        job.runtime_cursor.commitEnded(job.runtime_rows[0..rows.len]) catch process_seal.fatalIntegrity(.proof_loss);
+        job.runtime_rows_digest = HostReconnectJob.runtimeRowsDigest(rows);
+        job.runtime_handle = 0;
+        job.runtime_addr = 0;
+        job.runtime_generation = 0;
+        job.request_nonce = 0;
+        job.candidate_failure_reason_raw = 0;
+        job.reconnect = .{};
+        job.stage = null;
+        job.mutation_digest = [_]u8{0} ** 32;
+        job.controller_generation = 0;
+        job.state_raw = @intFromEnum(HostReconnectJobState.shared_replacement_published);
+        job.seal = process_seal.hostReconnectJobSeal(job.pid, job.process_nonce, job.sealInput() orelse
+            process_seal.fatalIntegrity(.proof_loss)) catch process_seal.fatalIntegrity(.proof_loss);
+        if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+    }
+
     /// After every runtime has either published its new generation or been forward-resolved, the
     /// shared retired Client can be reclaimed exactly once. Failure paths first release the active
     /// and untouched suffix generations; successful rows already released theirs at publication.
@@ -2455,6 +2498,7 @@ pub const RemoteTermBackend = struct {
         const published_count: usize = job.runtime_cursor.next_index;
         var prepared_count: usize = 0;
         errdefer for (rows[0..prepared_count]) |row| {
+            if (row.local_raw == @intFromEnum(host_reconnect_runtime_ledger.LocalState.ended)) continue;
             const entry = self.runtimes.get(row.identity.runtime_handle) orelse
                 process_seal.fatalIntegrity(.proof_loss);
             RemoteRuntime.backend_api.abortHostWideRetirement(
@@ -2464,7 +2508,11 @@ pub const RemoteTermBackend = struct {
                 job.job_generation,
             ) catch process_seal.fatalIntegrity(.proof_loss);
         };
-        for (rows[0..published_count]) |row| {
+        for (rows[0..published_count], 0..) |row, index| {
+            if (row.local_raw == @intFromEnum(host_reconnect_runtime_ledger.LocalState.ended)) {
+                prepared_count = index + 1;
+                continue;
+            }
             const entry = self.runtimes.get(row.identity.runtime_handle) orelse
                 return error.InvalidHostReconnectJob;
             try RemoteRuntime.backend_api.prepareHostWideRetirement(
@@ -2473,9 +2521,10 @@ pub const RemoteTermBackend = struct {
                 @intFromPtr(job),
                 job.job_generation,
             );
-            prepared_count += 1;
+            prepared_count = index + 1;
         }
         for (rows[0..published_count]) |row| {
+            if (row.local_raw == @intFromEnum(host_reconnect_runtime_ledger.LocalState.ended)) continue;
             const entry = self.runtimes.get(row.identity.runtime_handle) orelse
                 process_seal.fatalIntegrity(.proof_loss);
             RemoteRuntime.backend_api.commitHostWideRetirementNoFail(
@@ -2610,6 +2659,13 @@ pub const RemoteTermBackend = struct {
         ) catch |err| {
             switch (classifyCandidatePrepareFailure(err)) {
                 .rejected_usable => self.sealHostReconnectCandidateRejected(job, adapter, request_nonce),
+                .confirmed_ended => {
+                    self.sealHostReconnectCandidateRejected(job, adapter, request_nonce);
+                    job.state_raw = @intFromEnum(HostReconnectJobState.candidate_ended);
+                    job.seal = process_seal.hostReconnectJobSeal(job.pid, job.process_nonce, job.sealInput() orelse
+                        process_seal.fatalIntegrity(.proof_loss)) catch process_seal.fatalIntegrity(.proof_loss);
+                    if (!job.valid(self)) process_seal.fatalIntegrity(.proof_loss);
+                },
                 .terminal => |reason| self.sealHostReconnectCandidateFailure(job, adapter, request_nonce, reason),
             }
             return err;
@@ -3510,6 +3566,7 @@ pub const RemoteTermBackend = struct {
             // 걸친 상태 기계라, 은퇴를 준비한 attachment 가 아직 `backend.runtimes` 에 남은 창이 있다.
             // 그 창에서 펌프하면 payload 접근이 abort 한다 — 판정 출처는 `GenerationAttachment.isLive`
             // 하나다(여기서 lifecycle 을 다시 보지 않는 이유).
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(row.value_ptr.runtime)) continue;
             if (!RemoteRuntime.backend_api.attachmentLive(row.value_ptr.runtime)) {
                 // **가장 작은 handle 을 고른다.** `runtimes` 는 `AutoHashMap` 이라 반복 순서가 규정돼
                 // 있지 않다 — 「처음 걸린 것」을 쓰면 건너뛴 런타임이 둘 이상일 때 매 틱 대상이 바뀌어
@@ -3664,6 +3721,7 @@ pub const RemoteTermBackend = struct {
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
             if (row.value_ptr.host_id != projection.host_id) continue;
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(row.value_ptr.runtime)) continue;
             if (row.value_ptr.host_adapter_generation != projection.host_adapter_generation or
                 !RemoteRuntime.backend_api.matchesReconnectAdmission(row.value_ptr.runtime, projection))
             {
@@ -3777,6 +3835,8 @@ pub const RemoteTermBackend = struct {
         var iterator = self.runtimes.iterator();
         while (iterator.next()) |row| {
             if (row.value_ptr.host_id != snapshot.host_id) continue;
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(row.value_ptr.runtime) and
+                !RemoteRuntime.backend_api.hasBoundReconnectAdmission(row.value_ptr.runtime)) continue;
             if (row.value_ptr.host_adapter_generation != snapshot.pool_membership_generation or
                 !RemoteRuntime.backend_api.matchesBoundReconnectIdentity(
                     row.value_ptr.runtime,
@@ -3808,6 +3868,8 @@ pub const RemoteTermBackend = struct {
         var preflight = self.runtimes.iterator();
         while (preflight.next()) |row| {
             if (row.value_ptr.host_id != snapshot.host_id) continue;
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(row.value_ptr.runtime) and
+                !RemoteRuntime.backend_api.hasBoundReconnectAdmission(row.value_ptr.runtime)) continue;
             if (row.value_ptr.host_adapter_generation != snapshot.pool_membership_generation)
                 return error.StaleAdmission;
             try RemoteRuntime.backend_api.preflightBoundReconnectSettlement(
@@ -3834,6 +3896,8 @@ pub const RemoteTermBackend = struct {
         var settle = self.runtimes.iterator();
         while (settle.next()) |row| {
             if (row.value_ptr.host_id != snapshot.host_id) continue;
+            if (RemoteRuntime.backend_api.confirmedRuntimeGone(row.value_ptr.runtime) and
+                !RemoteRuntime.backend_api.hasBoundReconnectAdmission(row.value_ptr.runtime)) continue;
             RemoteRuntime.backend_api.settleBoundReconnectAdmissionNoFail(row.value_ptr.runtime, budget);
         }
     }
@@ -7345,6 +7409,11 @@ const Cr4aActualIssuerCandidateCase = enum {
     controller_unknown_ledger,
     controller_pre_failed_ledger,
     multi_runtime_success,
+    multi_runtime_ended_1,
+    multi_runtime_ended_2,
+    multi_runtime_ended_3,
+    multi_runtime_all_ended,
+    multi_runtime_ended_then_terminal,
     driver_multi_runtime_success,
     driver_runtime_ended,
     driver_expired,
@@ -7354,6 +7423,15 @@ const Cr4aActualIssuerCandidateCase = enum {
     multi_runtime_conflict_3,
     multi_runtime_terminal_after_success,
 };
+
+fn cr5b2cEndedIndex(selected: Cr4aActualIssuerCandidateCase) ?usize {
+    return switch (selected) {
+        .multi_runtime_ended_1, .multi_runtime_ended_then_terminal => 0,
+        .multi_runtime_ended_2 => 1,
+        .multi_runtime_ended_3 => 2,
+        else => null,
+    };
+}
 
 fn cr5b2cFailureIndex(selected: Cr4aActualIssuerCandidateCase) ?usize {
     return switch (selected) {
@@ -7470,7 +7548,8 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
     const size = maru.terminal.Size{ .cols = 80, .rows = 24 };
     const multi_runtime = selected == .multi_runtime_success or
         selected == .driver_multi_runtime_success or selected == .coordinator_success or
-        cr5b2cFailureIndex(selected) != null;
+        cr5b2cFailureIndex(selected) != null or cr5b2cEndedIndex(selected) != null or
+        selected == .multi_runtime_all_ended;
     const runtime_count: usize = if (multi_runtime) 3 else 1;
     for (0..runtime_count) |index| _ = try backend_value.backend().spawn(.{
         .handle = @intCast(index + 1),
@@ -7491,6 +7570,44 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         });
         return;
     }
+    var ended_budget: reconnect_resident_budget.ReconnectAdmissionBudget = .{};
+    const charge_ended = cr5b2cEndedIndex(selected) != null or selected == .multi_runtime_all_ended;
+    const ended_snapshot: reconnect_worker_owner.Snapshot = .{
+        .host_id = host_id,
+        .pool_membership_generation = pool.adapterGeneration(host_id).?,
+        .connection_generation = initial_connection_generation,
+        .incident_app_instance_nonce = 123,
+        .incident_sequence = 1,
+        .absolute_deadline_ns = deadline_expires_at_ns,
+    };
+    if (charge_ended) {
+        const identity = HostAdapter.publicationProcessIdentity() orelse return error.TestUnexpectedResult;
+        try ended_budget.initInPlace(identity.process_nonce);
+        for (0..runtime_count) |index| {
+            const runtime = backend_value.runtimes.get(@intCast(index + 1)).?.runtime;
+            const projection: reconnect_admission_owner.Projection = .{
+                .slot_index = 0,
+                .slot_generation = 1,
+                .host_id = host_id,
+                .host_adapter_generation = ended_snapshot.pool_membership_generation,
+                .connection_generation = initial_connection_generation,
+                .incident_id = .{ .app_instance_nonce = 123, .sequence = 1 },
+            };
+            if (index == 0)
+                try RemoteRuntime.backend_api.bindReconnectAdmission(runtime, &ended_budget, projection, reconnect_resident_budget.max_entry_bytes)
+            else
+                try RemoteRuntime.backend_api.bindReconnectAdmissionIdentity(runtime, &ended_budget, projection);
+        }
+        try backend_value.validateBoundReconnectSnapshot(ended_snapshot);
+    }
+    defer if (charge_ended) {
+        var runtime_iter = backend_value.runtimes.valueIterator();
+        while (runtime_iter.next()) |entry| {
+            if (RemoteRuntime.backend_api.hasBoundReconnectAdmission(entry.runtime))
+                remote_runtime.testing_api.releaseBoundReconnectAdmission(entry.runtime, &ended_budget) catch unreachable;
+        }
+        ended_budget.deinit() catch unreachable;
+    };
     const phase = attach_phase_deadline.PhaseDeadline.fromAbsolute(
         .connect_hello,
         client_deadline.AbsoluteDeadline.fromInjected(
@@ -7560,6 +7677,34 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         for (0..runtime_count) |index| {
             const handle: RuntimeHandle = @intCast(index + 1);
             try testing.expectEqual(handle, try backend_value.beginNextHostReconnectRuntimeTransaction());
+            if (selected == .multi_runtime_all_ended or
+                (cr5b2cEndedIndex(selected) != null and cr5b2cEndedIndex(selected).? == index))
+            {
+                const ended_runtime = backend_value.runtimes.get(handle).?.runtime;
+                var params_buf: [96]u8 = undefined;
+                const params = try std.fmt.bufPrint(&params_buf, "{{\"runtime_id\":\"{s}\"}}", .{ended_runtime.runtime_id_hex});
+                const response = try host_adapter_mod.HostAdapter.testing.rawClient(pool.get(host_id).?).call("runtime.terminate", params);
+                defer allocator.free(response);
+                try testing.expect(std.mem.indexOf(u8, response, "terminated") != null);
+                try testing.expectError(error.ObserverRuntimeNotFound, backend_value.prepareHostReconnectObserverStage(handle));
+                const before: [3]host_reconnect_runtime_ledger.RuntimeRow = job.runtime_rows[0..3].*;
+                try testing.expectEqual(HostReconnectFrameProgress.advanced, try backend_value.progressHostReconnectOne());
+                for (0..runtime_count) |other| if (other != index)
+                    try testing.expectEqual(before[other], job.runtime_rows[other]);
+                try testing.expect(RemoteRuntime.backend_api.confirmedRuntimeGone(ended_runtime));
+                try testing.expect(job.valid(&backend_value));
+                continue;
+            }
+            if (selected == .multi_runtime_ended_then_terminal and index == 1) {
+                deadline_clock.now_ns = deadline_expires_at_ns;
+                try testing.expectError(error.DeadlineExceeded, backend_value.prepareHostReconnectObserverStage(handle));
+                const summary = try backend_value.failHostReconnectRuntimeTransactionsAfterSharedClientTerminal();
+                try testing.expectEqual(@as(u32, 1), summary.ended);
+                try testing.expectEqual(@as(u32, 2), summary.frozen_unavailable);
+                try testing.expect(job.valid(&backend_value));
+                try testing.expect(RemoteRuntime.backend_api.confirmedRuntimeGone(backend_value.runtimes.get(1).?.runtime));
+                return;
+            }
             if (failure_index != null and failure_index.? == index) {
                 if (selected == .multi_runtime_terminal_after_success) {
                     deadline_clock.now_ns = deadline_expires_at_ns;
@@ -7744,7 +7889,9 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
             try testing.expect(job.valid(&backend_value));
         }
         const summary = try backend_value.completeHostReconnectRuntimeTransactions();
-        try testing.expectEqual(@as(u32, 3), summary.published_new);
+        const ended_count: u32 = if (selected == .multi_runtime_all_ended) 3 else if (cr5b2cEndedIndex(selected) != null) 1 else 0;
+        try testing.expectEqual(@as(u32, 3) - ended_count, summary.published_new);
+        try testing.expectEqual(ended_count, summary.ended);
         try testing.expectEqual(@as(u32, 0), summary.published_old);
         try testing.expectEqual(@as(u32, 0), summary.frozen_unavailable);
         try testing.expectEqual(
@@ -7776,6 +7923,58 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
             error.InvalidHostReconnectJob,
             backend_value.completeHostReconnectRuntimeTransactions(),
         );
+        if (ended_count != 0) {
+            // Prove a recovered sibling can actually send input and project the PTY's echo.
+            for (0..runtime_count) |index| {
+                const runtime = backend_value.runtimes.get(@intCast(index + 1)).?.runtime;
+                if (RemoteRuntime.backend_api.confirmedRuntimeGone(runtime)) continue;
+                const marker = "CR5-SIBLING-CONTINUED";
+                try runtime.sendInput(marker ++ "\n");
+                var found = false;
+                var echo_attempts: usize = 0;
+                while (!found and echo_attempts < 200) : (echo_attempts += 1) {
+                    _ = try runtime.pumpDelta();
+                    runtime.surface.lockCore(io);
+                    const snapshot = runtime.surface.renderSnapshot();
+                    if (snapshot.cells.len >= marker.len) {
+                        for (0..snapshot.cells.len - marker.len + 1) |offset| {
+                            var matches = true;
+                            for (marker, 0..) |ch, column| if (snapshot.cells[offset + column].codepoint != ch) {
+                                matches = false;
+                                break;
+                            };
+                            if (matches) {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    runtime.surface.unlockCore(io);
+                    if (!found) _ = usleep(10 * 1000);
+                }
+                try testing.expect(found);
+            }
+            try testing.expectEqual(@as(u8, 1), (try ended_budget.snapshot()).live_entries);
+            try backend_value.preflightBoundReconnectSnapshotSettlement(ended_snapshot, &ended_budget);
+            try backend_value.settleBoundReconnectSnapshot(ended_snapshot, &ended_budget);
+            try testing.expectEqual(@as(u8, 0), (try ended_budget.snapshot()).live_entries);
+            backend_value.finalizeCompletedHostReconnectNoFail();
+            const next_start = backend_value.beginHostReconnectConnect(base, host_id, phase);
+            if (ended_count == 3) {
+                try testing.expectEqual(HostReconnectStart.invalid_authority, next_start);
+                try testing.expect(backend_value.host_reconnect_job == null);
+            } else {
+                try testing.expectEqual(HostReconnectStart.connected, next_start);
+                try testing.expectEqual(@as(u32, 2), backend_value.host_reconnect_job.?.runtime_row_count);
+                var turns: usize = 0;
+                while (turns < 64) : (turns += 1) {
+                    if (try backend_value.progressHostReconnectOne() == .completed_ready) break;
+                }
+                try testing.expect(turns < 64);
+                try testing.expectEqual(@as(u32, 2), backend_value.host_reconnect_job.?.terminal_summary.?.published_new);
+                backend_value.finalizeCompletedHostReconnectNoFail();
+            }
+        }
         return;
     }
     if (selected == .driver_runtime_ended or selected == .driver_expired) {
@@ -7794,7 +7993,7 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         }
         try testing.expectEqual(HostReconnectFrameProgress.advanced, try backend_value.progressHostReconnectOne());
         const expected: HostReconnectJobState = if (selected == .driver_runtime_ended)
-            .candidate_rejected
+            .candidate_ended
         else
             .candidate_failed;
         try testing.expectEqual(@intFromEnum(expected), job.state_raw);
@@ -7805,6 +8004,21 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         try testing.expectError(error.InvalidHostReconnectJob, backend_value.progressHostReconnectOne());
         job.seal = sealed;
         try testing.expect(job.valid(&backend_value));
+        if (selected == .driver_runtime_ended) {
+            try testing.expectEqual(HostReconnectFrameProgress.advanced, try backend_value.progressHostReconnectOne());
+            try testing.expectEqual(HostReconnectFrameProgress.advanced, try backend_value.progressHostReconnectOne());
+            try testing.expectEqual(HostReconnectFrameProgress.completed_ready, try backend_value.progressHostReconnectOne());
+            try testing.expectEqual(@as(u32, 1), job.terminal_summary.?.ended);
+            try testing.expectEqual(@as(u32, 0), job.terminal_summary.?.retry_reserved);
+            try testing.expectEqual(@as(usize, 0), pool.get(host_id).?.slot.retiredClientCount());
+            const ended_runtime = backend_value.runtimes.get(1).?.runtime;
+            try testing.expect(RemoteRuntime.backend_api.confirmedRuntimeGone(ended_runtime));
+            const summary = RemoteRuntime.backend_api.takeFrameSummary(ended_runtime).?;
+            try testing.expect(summary.ended != null);
+            try testing.expect(RemoteRuntime.backend_api.takeFrameSummary(ended_runtime) == null);
+            try testing.expectEqual(HostReconnectTerminalKind.completed, try backend_value.preflightHostReconnectTerminal());
+            return;
+        }
         try testing.expectEqual(HostReconnectFrameProgress.advanced, try backend_value.progressHostReconnectOne());
         try testing.expectEqual(HostReconnectFrameProgress.retained_terminal_ready, try backend_value.progressHostReconnectOne());
         try testing.expectEqual(HostReconnectTerminalKind.retained_terminal, try backend_value.preflightHostReconnectTerminal());
@@ -7878,7 +8092,7 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
         const request_nonce: u128 = 0x4352344152454A454354;
         switch (classifyCandidatePrepareFailure(error.ObserverAttachRejected)) {
             .rejected_usable => {},
-            .terminal => return error.TestUnexpectedResult,
+            .terminal, .confirmed_ended => return error.TestUnexpectedResult,
         }
         backend_value.sealHostReconnectCandidateRejected(job, pool.get(host_id).?, request_nonce);
         try testing.expect(job.valid(&backend_value));
@@ -8254,7 +8468,7 @@ test "CR4b actual host job은 conflict unknown pre failure를 frozen ledger로 �
 }
 
 test "CR5b-2c actual host job은 shared Client 하나로 three-runtime을 순서대로 게시한다" {
-    try runCr4aActualIssuerReplacementStage(.multi_runtime_success);
+    for ([_]Cr4aActualIssuerCandidateCase{ .multi_runtime_success, .multi_runtime_ended_1, .multi_runtime_ended_2, .multi_runtime_ended_3, .multi_runtime_all_ended, .multi_runtime_ended_then_terminal }) |selected| try runCr4aActualIssuerReplacementStage(selected);
 }
 
 test "CR6e-c3b2b frame driver는 actual shared Client job을 한 closed state씩 끝낸다" {
@@ -8492,7 +8706,7 @@ test "CR4a actual issuer job은 allocator fail-index 단계별 forward 경계와
                             try testing.expect(std.meta.eql(job.reconnect, remote_runtime.PreparedReconnect{}));
                             _ = switch (classifyCandidatePrepareFailure(err)) {
                                 .terminal => |reason| reason,
-                                .rejected_usable => return error.TestUnexpectedResult,
+                                .rejected_usable, .confirmed_ended => return error.TestUnexpectedResult,
                             };
                             const expected_reason = host_adapter_mod.HostAdapter.testing.rawClient(adapter)
                                 .firstPoisonReason() orelse return error.TestUnexpectedResult;

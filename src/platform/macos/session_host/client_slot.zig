@@ -1515,6 +1515,16 @@ test "CR3b R3 reclaim은 retired cap 2를 지키고 oldest node를 tick마다 �
     };
 
     var initial = try Fixture.source(host_id, &pairs, &pair_count);
+    // Model EOF in the middle of a snapshot, including a previously consumed header prefix.
+    // Replacement must dispose these unread bytes before the oldest node can be reclaimed.
+    const ping_header = (protocol.Header{ .kind = .ping }).encode();
+    const partial_header = (protocol.Header{ .kind = .snapshot_chunk, .stream_id = 11, .payload_len = 4096 }).encode();
+    try initial.parser.push(&ping_header);
+    try initial.parser.push(&partial_header);
+    try initial.parser.push("x");
+    const ping = (try initial.parser.next()).?;
+    ping.deinit(initial.allocator);
+    try std.testing.expectEqual(protocol.header_size + 1, initial.parser.bufferedBytes());
     var slot: ClientSlot = undefined;
     try ClientSlot.initInPlace(&slot, std.testing.allocator, &initial, host_id);
     pairs[0][0] = -1;
@@ -1524,12 +1534,27 @@ test "CR3b R3 reclaim은 retired cap 2를 지키고 oldest node를 tick마다 �
         if (slot.tryDeinit() != .cleaned) @panic("R3 cap fixture teardown failed");
     };
     const generation_one = slot.current;
+    try std.testing.expectEqual(protocol.header_size + 1, generation_one.client.parser.bufferedBytes());
+    const parser_capacity = generation_one.client.parser.residentBytes();
+    const parser_major = generation_one.client.parser.expected_major;
+
+    var aborted_admission: PreparedAdmissionClose = .{};
+    var aborted_cleanup: PreparedRetirementCleanup = .{};
+    try slot.prepareAdmissionClose(1, &aborted_admission);
+    try slot.prepareRetirementCleanup(&aborted_admission, 2, &aborted_cleanup);
+    try std.testing.expectEqual(protocol.header_size + 1, generation_one.client.parser.bufferedBytes());
+    try slot.abortRetirementCleanup(&aborted_cleanup);
+    try slot.cancelAdmissionClose(&aborted_admission);
+    try std.testing.expectEqual(protocol.header_size + 1, generation_one.client.parser.bufferedBytes());
 
     var second = try Fixture.source(host_id, &pairs, &pair_count);
     try testing.publishReplacementForGenerationForTest(&slot, 1, 2, &second);
     pairs[1][0] = -1;
     const generation_two = slot.current;
     try std.testing.expectEqual(generation_one, slot.retired[0].?);
+    try std.testing.expectEqual(@as(usize, 0), generation_one.client.parser.bufferedBytes());
+    try std.testing.expectEqual(parser_capacity, generation_one.client.parser.residentBytes());
+    try std.testing.expectEqual(parser_major, generation_one.client.parser.expected_major);
     try std.testing.expectEqual(@as(usize, 1), slot.retiredClientCount());
 
     var third = try Fixture.source(host_id, &pairs, &pair_count);
@@ -13808,6 +13833,14 @@ pub const ClientSlot = struct {
                 operation.node.client.fd != -1 or operation.node.client.pending_outbound != null or
                 !operation.node.client.unusable)
                 return error.InvalidOwner;
+            const parser = &operation.node.client.parser;
+            if (!parser.usesAllocator(operation.node.client.allocator) or
+                parser.head > parser.buf.items.len or parser.buf.items.len > parser.buf.capacity)
+                return error.InvalidOwner;
+            // Admission is closed and this exact generation is detached. No old stream may read
+            // these bytes again; a partial EOF frame would otherwise permanently block R3 reclaim.
+            // Retain the backing allocation for normal node teardown and avoid allocator reentry.
+            parser.discardBuffered();
             cleanup.lifecycle = .cleaning;
             cleanup.seal = self.retirementCleanupSeal(cleanup);
         }

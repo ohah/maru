@@ -10,6 +10,14 @@
   실제 Client/Slot의 slot identity·tracker identity·부분 전송·stream accounting 오류와 첫 close 보존,
   정상 runtime 종료 cleanup을 Debug·ReleaseFast에서 검증한다. 실제 GUI/원래 장애의 오류 원인 확인은 별도다.
 
+- PartialFrame 뒤 AppKit 종료 정산 진단(외부 소스 복사본, opt-in):
+  `python3 tools/remote-restart-app/prepare_partial.py --snapshot <새 절대경로> --dependency-root <동일 web/package.json·bun.lock의 node_modules 보유 checkout> --optimize Debug --nonvisual-diagnostic`
+  후 `python3 tools/remote-restart-app/run_partial.py --snapshot <동일 절대경로> --output <새 결과 디렉터리>`.
+  캡처를 생략하고 실제 daemon·PTY·AppKit 종료·동일 PID·자원 정리를 확인한다. 결과의
+  `normal_quit_verified`와 `validation_scope`를 함께 읽는다. GUI 검증은
+  `--nonvisual-diagnostic` 없이 별도 복사본을 준비하여 잠금 해제 상태에서 실행한다.
+  기존 결과를 보존한 재실행만 `--reuse-completed-fixture`를 명시한다.
+
 ## 에디터 CLI
 
 `maru editor open 'src/file 한글.zig' -l 42 -c 7`은 macOS 기본 Maru 앱에 파일을

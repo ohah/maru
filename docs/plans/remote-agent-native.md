@@ -385,6 +385,71 @@ integrity 보호를 끄거나 임의의 재접속 성공으로 처리하지 않�
 
 ### Runtime 종료·observer 거부 GUI 회귀 검증
 
+다음 GUI 검증은 기존 CR6e-c3c 실제 AppKit의 두 runtime 자동 재접속 검사를 대조군으로 쓴다.
+소스 복사본에서만 수신 스케줄을 제한하여 실제 snapshot 부분 전송을 만들고, 별도 admin
+connection으로 한 runtime을 종료한다. 실제 `ended_purge_tracker/PartialFrame` 로그가 없는
+회차는 해당 원인의 GUI 재현으로 세지 않는다. 살아 있는 sibling의 PID·controller 권한,
+포커스·AppKit keyDown 이후 화면 marker와 Metal frame, 정상 Quit·자원 정리를 확인한다.
+종료 대상의 reconnect row 순서도 구분하여 먼저 성공한 sibling과 아직 미정산인 sibling의
+처리가 달라지는지 관측한다. 기존 canonical failure/retained-terminal 정책과 다른 결과가
+필요하면 실제 증거를 먼저 보고하고 전략 변경을 논의하며 임의로 정책을 바꾸지 않는다.
+
+수신 지연 실험은 `tools/remote-restart-app/prepare_partial.py`가 만든 외부 소스 복사본에서
+실행한다. 두 runtime을 실제 sidebar 클릭으로 채택한 뒤 숨겨진 종료 대상의 PTY에 dense
+출력을 만들고, 제품 `requestResync`로 snapshot을 요청한다. 복사본의 화면 drain·maintenance
+수신과 같은 Client를 읽는 일반 RPC를 잠시 보류하고 실제 socket receive buffer를 제한한다. 별도 admin connection의
+`runtime.terminate` 뒤 실제 host의 `PartialFrame` 진단을 확인해야 성공 판정 경로로 수신을 재개한다.
+미재현·하네스 오류 시에는 실패를 보존한 채 수신 보류를 해제하여 소유한 앱의 정상 종료를 기다린다.
+`run_partial.py`는 정상 수신 대조군의 v2 artifact를 거부하고 별도 실험 schema에서 살아 있는
+runtime의 동일 PID·입력/화면 marker·Metal 제출·정상 Quit 정리를 확인한다. 이 실험에서 기존
+대조군의 sibling은 종료 대상이며, 활성 primary가 살아 있어야 하는 터미널이다. 최초 확인
+범위는 이 채택 순서 하나이며 반대 순서와 기존 연결의 모든 읽기 경로 차단 여부는 별도
+검증 경계로 남긴다. 실험 코드의 준비만으로 GUI 회귀 검증 완료를 표시하지 않는다.
+
+2026-10-15 실제 AppKit 실험에서는 628,615 byte dense snapshot과
+`ended_purge_tracker/PartialFrame`을 확인했다. 종료 대상이 첫 runtime handle인 순서에서
+`candidate_rejected next_index=0` → `retained_terminal`로 정산했고, 활성 primary의 자동 복구는
+완료되지 않았다. 제품 Quit 경로는 backend 정산 중 `proof_loss`(exit 86)로 실패했다. 이 종료
+실패는 당시 미해결로 기록했으며, 아래 2026-10-16 정산 수정과 일반 두-runtime 자동 재접속 대조군의 성공을 구분한다. in-process fixture
+daemon의 진단은 CLI의 별도 host 로그가 아니라 상속한 stderr의 통합 gate 로그에 기록된다.
+
+후속 정책 검토안은 서버가 정확한 host/runtime 신원으로 종료를 확정한 항목만 ended로 정산하고
+아직 시작하지 않은 형제 항목의 복구를 계속하는 것이다. 일반 attach 거부·권한 충돌·손상된 응답을
+종료 확정으로 취급하지 않는다. 이는 현 canonical forward-failure 정책 변경이므로 사용자와
+논의 중이며, 승인 전에는 기존 재접속 정책을 변경하지 않는다. 정상 Quit의 정산 오류 조사는
+이 정책 검토와 독립적으로 진행한다.
+
+잠금 상태의 종료 원인 추적에는 외부 복사본의 `prepare_partial.py --optimize Debug
+--nonvisual-diagnostic`을 사용한다. 이 복사본은 캡처 실패로 driver가 정지하는 부분만 건너뛰고,
+캡처 관측값은 false로 남긴다. manifest와 AppKit artifact schema를 GUI 실험과 구분하며 runner는
+`validation_scope=nonvisual_appkit_diagnostic`, `gui_continuity_verified=false`를 기록한다.
+이 경로의 성공·실패는 AppKit 구성과 정산 진단이며 실제 화면·포커스·Metal 제출의 GUI 검증을
+완료시키지 않는다. 잠금이 해제되면 원래 캡처를 수행하는 복사본으로 별도 검증한다.
+
+2026-10-16 종료 원인 진단과 수정: Debug AppKit 구성에서 retired node의 parser에 7,425 byte가
+남아 `prepareRetiredClientReclaim`이 거부되는 것을 확인했다. borrow·operation·RPC owner·cleanup
+pin과 stream/event/batch 소유권은 모두 비어 있었다. `finishRetirementCleanup`이 admission close와
+retirement detach 뒤 canonical operation 안에서 parser의 미소비 바이트만 버리도록 수정했다.
+할당·free 없이 backing과 protocol major를 보존하며 기존 reclaim의 parser-empty 조건은 유지한다.
+기존 R3 회귀 검사에 부분 snapshot과 소비된 header prefix, prepare/abort 보존을 추가했다.
+Debug·ReleaseFast에서 통과했고 discard를 무력화한 컴파일 가능한 변이는 `expected 0, found 33`으로
+실패했다. 수정한 Debug AppKit 구성은 실제 PartialFrame 뒤 정상 Quit, 동일 healthy child PID 유지,
+controller/observer 해제와 worker/job/lease/runtime/client/FD/child/socket 정리를 확인했다.
+
+nonvisual 진단은 현 정책의 `auto-reconnect-timeout`을 명시적으로 기록한 뒤 Quit을 정상 종료 코드로
+진행시켜 바깥 harness가 정산을 검증한다. 이 timeout을 자동 복구 성공으로 읽지 않으며 GUI 전용
+schema/판정자는 이 artifact를 거부한다. 실제 화면·입력 복구와 종료된 항목을 제외한 형제 복구 정책은
+아직 별도 검증·구현 경계다.
+
+같은 날 잠금 해제 뒤 최신 main 기반 실제 GUI 복사본에서도 628,615 byte snapshot의
+`PartialFrame`과 `candidate_rejected` → `retained_terminal`을 재현했다. 캡처를 생략하지 않았으며
+정상 sibling 자동 복구는 `auto-reconnect-timeout`으로 끝나 GUI gate는 exit 1이었다.
+따라서 GUI 연속성은 미통과다. 다만 제품 Quit에서는 기존 `proof_loss`가 재발하지 않았고,
+worker/job/completion/admission/lease/backend runtime 최종값이 모두 0,
+`quit_teardown_ms=1.2`, `quit_total_ms=81.4`였다. 별도 admin의 종료 후 조회에서도 healthy runtime은
+살아 있고 controller=false·observer_count=0이었다. 이 실제 GUI 종료 관측과 비시각 artifact의
+동일 PID·전체 정리 판정을 구분한다.
+
 `tools/test-runtime-end-pressure.py`는 격리된 실제 daemon과 PTY 두 개를 사용한다. 같은 MRSH connection에 종료 대상과
 유지할 sibling을 attach하고 출력 수신을 늦춘 뒤 별도 admin connection으로 대상만 종료한다.
 정상 수신 대조군과 느린 수신군을 비교하여 실제 close 로그의 site/err, sibling PID 유지,

@@ -370,6 +370,13 @@ pub const FrameParser = struct {
         return self.buf.items.len - self.head;
     }
 
+    /// A detached connection cannot complete its remaining frame. Keep its allocation owned by
+    /// this parser until ordinary teardown, so discarding unread bytes never runs a free callback.
+    pub fn discardBuffered(self: *FrameParser) void {
+        self.buf.clearRetainingCapacity();
+        self.head = 0;
+    }
+
     pub fn residentBytes(self: *const FrameParser) usize {
         return self.buf.capacity;
     }

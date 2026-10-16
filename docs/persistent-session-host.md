@@ -17326,7 +17326,7 @@ same-login-UID로 확정했다.
 Observer candidate의 `decodeAttachResponse`는 정확한 `runtime_not_found` wire code를
 `ObserverRuntimeNotFound`로 구분한다. `unauthorized` 같은 일반 wire 거부는
 `ObserverAttachRejected`, 모르는 code·손상 JSON은 `ObserverAttachProtocolFailed`,
-EOF는 `ObserverAttachConnectionFailed`다. 판정은 correlated response가 살아 있는
+응답 ID 불일치·잘린 프레임·EOF는 `ObserverAttachConnectionFailed`다. 판정은 correlated response가 살아 있는
 분기에서 끝나며 응답 payload나 receipt 수명은 늘리지 않는다.
 현재 backend는 positive absence도 기존 sealed rejection 정산으로 보낸다.
 해당 row만 종료로 전진시키고 sibling 복구를 계속하는 정책 배선은 후속 단계다.

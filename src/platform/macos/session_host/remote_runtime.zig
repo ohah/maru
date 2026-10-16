@@ -13299,7 +13299,26 @@ test "CR4a actual socket catchup hostile은 gap malformed cap plus one missing b
     }) |selected| try runCr4aCatchupStageCase(selected);
 }
 
-const Cr4aObserverFailure = enum { typed_reject, unauthorized, unknown_error, malformed, response_eof };
+const Cr4aObserverFailure = enum {
+    typed_reject,
+    whitespace,
+    escaped,
+    unauthorized,
+    stale_host,
+    unavailable,
+    unknown_error,
+    malformed,
+    duplicate_error,
+    mixed_envelope,
+    nonstring_error,
+    wrong_case,
+    nul_suffix,
+    trailing,
+    array_envelope,
+    wrong_response_id,
+    truncated_response,
+    response_eof,
+};
 
 fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure) !void {
     try host_adapter_mod.HostAdapter.initializeProcessRuntime();
@@ -13321,17 +13340,32 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
             if (!observed or mode == .response_eof) return;
             const response = framing.encodeFrame(
                 std.heap.page_allocator,
-                .{ .kind = .response, .request_id = request.header.request_id },
+                .{ .kind = .response, .request_id = request.header.request_id + @as(u64, @intFromBool(mode == .wrong_response_id)) },
                 switch (mode) {
-                    .typed_reject => "{\"error\":\"runtime_not_found\"}",
+                    .typed_reject, .wrong_response_id, .truncated_response => "{\"error\":\"runtime_not_found\"}",
+                    .whitespace => " \n { \"error\" : \"runtime_not_found\" } \t",
+                    .escaped => "{\"error\":\"runtime_\\u006eot_found\"}",
                     .unauthorized => "{\"error\":\"unauthorized\"}",
+                    .stale_host => "{\"error\":\"stale_host\"}",
+                    .unavailable => "{\"error\":\"host_unavailable\"}",
                     .unknown_error => "{\"error\":\"runtime_not_found_suffix\"}",
                     .malformed => "{\"error\":",
+                    .duplicate_error => "{\"error\":\"unauthorized\",\"error\":\"runtime_not_found\"}",
+                    .mixed_envelope => "{\"result\":{},\"error\":\"runtime_not_found\"}",
+                    .nonstring_error => "{\"error\":{\"runtime_not_found\":true}}",
+                    .wrong_case => "{\"error\":\"Runtime_not_found\"}",
+                    .nul_suffix => "{\"error\":\"runtime_not_found\\u0000\"}",
+                    .trailing => "{\"error\":\"runtime_not_found\"} {}",
+                    .array_envelope => "[{\"error\":\"runtime_not_found\"}]",
                     .response_eof => unreachable,
                 },
             ) catch return;
             defer std.heap.page_allocator.free(response);
-            socket_server.writeAll(fd, response) catch return;
+            const length = response.len - @as(usize, @intFromBool(mode == .truncated_response));
+            socket_server.writeAll(fd, response[0..length]) catch return;
+            // Close these deliberately broken conversations so failure cannot depend on a peer
+            // waiting for the test's release signal after a rejected/missing response.
+            if (mode == .wrong_response_id or mode == .truncated_response) return;
             const delay = c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
             while (release.load(.acquire) == 0) _ = c.nanosleep(&delay, null);
         }
@@ -13425,10 +13459,10 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
     const retired_count = adapter.slot.retiredClientCount();
     var prepared: PreparedReconnect = .{};
     try std.testing.expectError(switch (selected) {
-        .typed_reject => error.ObserverRuntimeNotFound,
-        .unauthorized => error.ObserverAttachRejected,
-        .unknown_error, .malformed => error.ObserverAttachProtocolFailed,
-        .response_eof => error.ObserverAttachConnectionFailed,
+        .typed_reject, .whitespace, .escaped => error.ObserverRuntimeNotFound,
+        .unauthorized, .stale_host, .unavailable => error.ObserverAttachRejected,
+        .unknown_error, .malformed, .duplicate_error, .mixed_envelope, .nonstring_error, .wrong_case, .nul_suffix, .trailing, .array_envelope => error.ObserverAttachProtocolFailed,
+        .wrong_response_id, .truncated_response, .response_eof => error.ObserverAttachConnectionFailed,
     }, runtime.prepareObserverReconnectCandidate(&adapter, &replacement, &prepared));
     try std.testing.expectEqual(@as(u8, 1), observer_seen.load(.acquire));
     try std.testing.expectEqual(PreparedReconnect{}, prepared);
@@ -13440,11 +13474,11 @@ fn runCr4aObserverFailurePreservesPublishedClient(selected: Cr4aObserverFailure)
     try std.testing.expectEqual(published_generation, adapter.connectionGeneration());
     try std.testing.expectEqual(retired_count, adapter.slot.retiredClientCount());
     switch (selected) {
-        .typed_reject, .unauthorized, .unknown_error, .malformed => {
+        .typed_reject, .whitespace, .escaped, .unauthorized, .stale_host, .unavailable, .unknown_error, .malformed, .duplicate_error, .mixed_envelope, .nonstring_error, .wrong_case, .nul_suffix, .trailing, .array_envelope => {
             try std.testing.expect(adapter.slot.current.client.fd >= 0);
             try std.testing.expect(!adapter.slot.current.client.unusable);
         },
-        .response_eof => {
+        .wrong_response_id, .truncated_response, .response_eof => {
             try std.testing.expectEqual(@as(c.fd_t, -1), adapter.slot.current.client.fd);
             try std.testing.expect(adapter.slot.current.client.unusable);
         },

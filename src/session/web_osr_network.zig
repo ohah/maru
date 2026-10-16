@@ -42,6 +42,8 @@ pub const max_readers: usize = 16;
 pub const max_hops: usize = 20;
 /// 서비스 워커 요청 하나에 적어 두는, 같은 출처를 보이던 다른 탭 수(넘치면 누구에게나 수만 — N6).
 pub const max_sw_tabs: usize = 4;
+/// 끝난 요청을 기억해 두는 수(같은 번호 다시 시작 — `Ring.recent_ends`). 다시 시작은 앞 시도의 끝 바로 뒤에 온다(실측 1.4 ms).
+pub const recent_end_slots: usize = 16;
 /// 목록 한 쪽의 기본·최대 줄 수.
 pub const default_page_size: usize = 50;
 pub const max_page_size: usize = 200;
@@ -121,6 +123,9 @@ pub const Entry = struct {
     final_host: []u8 = &.{},
     /// sidecar 가 다시 떠(브라우저가 다시 만들어졌다) 끝을 받지 못한 채 끝난 것으로 친 요청(3 회차 T2 — `Ring.abandonLive`).
     engine_restarted: bool = false,
+    /// Chromium 이 이 요청을 같은 CEF 번호로 다시 시작했다(W9d① 적대 리뷰 후 — `Ring.restartEarlier`). 이 기록은 버려진 앞 시도다(취소 −3) —
+    /// 받은 응답은 페이지에 가지 않았고, 다음 시도는 새 기록이다.
+    restarted: bool = false,
     /// 앱·탭 상한으로 자세한 것(헤더·홉)을 버렸다.
     detail_evicted: bool = false,
     summary_bytes: usize = 0,
@@ -273,6 +278,11 @@ pub const Ring = struct {
     birth_used: bool = false,
     /// 앱 예산이 모자라 적지 못한 요청 수 — 다음 표지에 싣는다.
     unrecorded: u32 = 0,
+    /// 최근에 끝난 요청(CEF 번호 → 기록 번호, 돌려 쓰는 자리) — 같은 번호의 시작이 다시 오면 그 기록을 다시 시작으로 표시한다(W9d① 적대 리뷰 후).
+    recent_ends: [recent_end_slots]RecentEnd = @splat(.{}),
+    recent_next: usize = 0,
+
+    const RecentEnd = struct { request: u64 = 0, seq: u64 = 0 };
 
     pub fn deinit(self: *Ring, gpa: std.mem.Allocator, budget: *Budget) void {
         self.wipe(gpa, budget);
@@ -416,9 +426,10 @@ pub const Ring = struct {
         return .{ .count = block.count, .bytes = try gpa.dupe(u8, block.bytes), .truncated = truncated, .stripped = stripped };
     }
 
-    /// 새 요청(같은 CEF 번호가 이미 있으면 버린다 — sidecar 는 한 번만 보낸다). `ctx` 는 그때 app 이 아는 탭의 것(F2·F4).
+    /// 새 요청. `ctx` 는 그때 app 이 아는 탭의 것(F2·F4). 같은 CEF 번호의 앞 시도가 있으면 먼저 다시 시작으로 끝낸다(`restartEarlier`) — 이
+    /// 기록을 적지 못해도(상한) 앞 기록은 끝난다.
     pub fn begin(self: *Ring, gpa: std.mem.Allocator, budget: *Budget, v: msg.NetBegin, ctx: BeginContext) std.mem.Allocator.Error!void {
-        if (self.live.contains(v.request)) return;
+        self.restartEarlier(v.request, v.time_ms);
         const top = topHostOf(v, ctx.top_host);
         const summary = entry_overhead + v.method.len + v.url.len + v.host.len + v.initiator.len + v.site.len + top.len;
         const detail_len = v.headers.bytes.len;
@@ -525,6 +536,34 @@ pub const Ring = struct {
         e.received = v.received;
         e.end_ms = v.time_ms;
         _ = self.live.remove(v.request);
+        self.noteEnded(v.request, e.seq);
+    }
+
+    /// 끝난 요청을 최근 끝에 적는다(가장 오래된 자리를 덮는다). 한 번호의 자리는 많아야 하나다 — 끝은 진행 중 기록에만 오고, 그 기록을 연
+    /// 시작이 앞 시도의 자리를 비웠다(`restartEarlier`).
+    fn noteEnded(self: *Ring, request: u64, seq: u64) void {
+        self.recent_ends[self.recent_next] = .{ .request = request, .seq = seq };
+        self.recent_next = (self.recent_next + 1) % recent_end_slots;
+    }
+
+    /// W9d① 적대 리뷰 후 — 같은 번호 다시 시작: Chromium 은 한 요청을 같은 CEF 번호로 다시 시작한다(실측 — StackOverflow 의 Cloudflare 확인
+    /// 페이지, 판정 `R9d6-restart-same-id`: 이동의 답에 `Critical-CH` 가 있으면 그 힌트를 실어 같은 이동을 다시 한다). CEF 번호는 한 브라우저
+    /// 프로세스 안에서 다른 요청에 다시 주지 않으므로(다시 뜬 프로세스는 `abandonLive` 가 가른다) 같은 번호의 시작은 다시 시작이다. 앞 시도는
+    /// 취소(−3 ERR_ABORTED — Chromium 이 버렸다)로 끝내고 `restarted` 를 세운다 — 받은 응답(Cloudflare 의 403)은 그대로 두되 마지막 답이 아님을
+    /// 보인다. 두 차례 모두: 앞 시도가 아직 진행 중이면(끝이 넘김 상자에서 버려졌다 등 — 전에는 새 시작을 버려 새 시도의 응답·끝이 앞 기록에
+    /// 붙었다) 번호 표에서 빼고 지금 끝낸다. 이미 끝났으면(CEF 154 실측 — 끝(성공)이 먼저 온다) 최근 끝에서 찾아 표시만 고친다.
+    fn restartEarlier(self: *Ring, request: u64, at_ms: u64) void {
+        const seq = if (self.live.fetchRemove(request)) |kv| kv.value else for (&self.recent_ends) |*r| {
+            if (r.request != request) continue;
+            const s = r.seq;
+            r.* = .{};
+            break s;
+        } else return;
+        const e = self.entryBySeq(seq) orelse return; // 상한으로 이미 버려졌다
+        e.state = .canceled;
+        e.error_code = -3;
+        e.restarted = true;
+        if (e.end_ms == 0) e.end_ms = at_ms;
     }
 
     /// 그 탭의 브라우저가 다시 만들어졌다(sidecar 가 다시 떴다 — W9d① 적대 리뷰 3 회차 T2). 진행 중이던 요청의 끝은 오지 않는다(옛 프로세스와
@@ -538,6 +577,7 @@ pub const Ring = struct {
             e.engine_restarted = true;
         };
         self.live.clearRetainingCapacity();
+        self.recent_ends = @splat(.{}); // 새 프로세스의 같은 번호는 다시 시작이 아니다
     }
 
     /// sidecar 가 넘긴 요청 수 — 마지막이 표지면 거기에 더한다(쏟아질 때 표지가 요청을 밀어내지 않게).
@@ -875,6 +915,11 @@ fn writeSummary(s: *std.json.Stringify, e: *const Entry, view: View, url_buf: []
             try s.objectField("error_code");
             try s.write(e.error_code);
         }
+        // 다시 시작은 서버의 답이 부른다(`Critical-CH`) — 리다이렉트 수처럼 응답을 보여도 될 때만(F8).
+        if (e.restarted) {
+            try s.objectField("restarted");
+            try s.write(true);
+        }
     }
     // 리다이렉트 수는 서버가 고른 것이다 — 설정이 꺼졌으면 덮이는 곳이 보낸 홉만 센다(F8·N7).
     const shown_hops = shownHopCount(e, view);
@@ -1001,6 +1046,11 @@ fn writeDetail(w: *std.Io.Writer, e: *const Entry, view: View) !void {
         if (e.state == .failed or e.state == .canceled) {
             try s.objectField("error_code");
             try s.write(e.error_code);
+        }
+        // 다시 시작은 서버의 답이 부른다(`Critical-CH`) — 리다이렉트 수처럼 응답을 보여도 될 때만(F8).
+        if (e.restarted) {
+            try s.objectField("restarted");
+            try s.write(true);
         }
     }
     if (e.detail_evicted) {
@@ -1904,4 +1954,151 @@ test "W9d① 변이 생존 L05: 설정이 꺼졌을 때 덮이지 않는 요청�
     const p = try t.listJson(7, off, .{});
     defer p.deinit();
     try testing.expect(p.value.object.get("requests").?.array.items[0].object.get("redirects") == null);
+}
+
+// ── W9d① 적대 리뷰 후 — 같은 번호 다시 시작(W9d② 측정이 찾았다: StackOverflow 의 Cloudflare 확인 페이지에서 한 CEF 번호의 시작이 두 번 왔다) ──
+
+/// 목록의 한 줄(번호로).
+fn rowOf(p: std.json.Parsed(std.json.Value), req: i64) ?std.json.ObjectMap {
+    for (p.value.object.get("requests").?.array.items) |r| if (r.object.get("req").?.integer == req) return r.object;
+    return null;
+}
+
+test "W9d① 적대 리뷰 후 재현 R1: 끝이 오기 전에 같은 CEF 번호의 시작이 다시 오면 앞 기록은 다시 시작으로 끝나고(취소 −3·restarted) 새 시도는 제 기록이다 — 새 시도의 응답·끝이 앞 기록에 붙지 않는다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    const nav: msg.NetFlags = .{ .main_frame = true, .navigation = true };
+    try t.begin(9, "https://so.test/q", .{ .flags = nav, .rt = 0, .site = "so.test" });
+    try t.ring.response(testing.allocator, &t.budget, .{ .browser = 1, .request = 9, .status = 403, .mime = "text/html" });
+    // 앞 시도의 끝은 오지 않았다(넘김 상자가 넘쳐 버렸다 등) — Chromium 이 같은 번호로 다시 시작한다(힌트·쿠키를 실어).
+    var again: net_fields.HeaderBuilder = .{};
+    _ = again.add("Cookie", "__cf_bm=x");
+    try t.ring.begin(testing.allocator, &t.budget, .{ .browser = 1, .request = 9, .flags = nav, .resource_type = 0, .time_ms = 1500, .url = "https://so.test/q?again", .host = "so.test", .site = "so.test", .headers = again.block() }, .{});
+    try t.respond(9, 200, .{});
+    try testing.expectEqual(@as(u64, 1500), t.ring.entryBySeq(1).?.end_ms); // 다시 시작을 안 때에 끝났다
+    try testing.expectEqual(@as(usize, 2), t.ring.entries.len);
+    try testing.expectEqual(@as(u32, 0), t.ring.live.count()); // 진행 중으로 남은 것이 없다
+    const p = try t.listJson(7, .{}, .{});
+    defer p.deinit();
+    const old = rowOf(p, 1).?;
+    try testing.expectEqualStrings("canceled", old.get("state").?.string);
+    try testing.expect(old.get("restarted") != null and old.get("restarted").?.bool);
+    try testing.expectEqual(@as(i64, -3), old.get("error_code").?.integer);
+    try testing.expectEqual(@as(i64, 403), old.get("status").?.integer); // 앞 시도의 응답은 그대로
+    const new = rowOf(p, 2).?;
+    try testing.expectEqualStrings("done", new.get("state").?.string);
+    try testing.expectEqual(@as(i64, 200), new.get("status").?.integer);
+    try testing.expectEqualStrings("https://so.test/q?again", new.get("url").?.string);
+    try testing.expect(new.get("restarted") == null);
+    const d = try detailJson(&t, 7, .{ .cookie_host = "so.test" }, 2);
+    defer d.deinit();
+    try testing.expectEqualStrings("__cf_bm=x", headerOf(d.value.object.get("request_headers").?.array.items, "Cookie").?.get("value").?.string);
+}
+
+test "W9d① 적대 리뷰 후 재현 R2: 실측 차례(CEF 154 — 앞 시도가 성공으로 끝난 뒤 같은 번호로 다시 시작) — 앞 기록은 다시 시작으로 표시하고 새 기록을 연다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    const nav: msg.NetFlags = .{ .main_frame = true, .navigation = true };
+    // 판정 R9d6-restart-same-id 가 본 차례: 시작·응답 403·끝(성공)·시작·응답 200·끝(성공).
+    try t.begin(9, "https://so.test/q", .{ .flags = nav, .rt = 0, .site = "so.test" });
+    try t.respond(9, 403, .{});
+    try t.begin(3, "https://so.test/other.js", .{ .site = "so.test" }); // 사이에 다른 요청이 와도
+    try t.begin(9, "https://so.test/q", .{ .flags = nav, .rt = 0, .site = "so.test" });
+    try t.respond(9, 200, .{});
+    const p = try t.listJson(7, .{}, .{});
+    defer p.deinit();
+    const old = rowOf(p, 1).?;
+    try testing.expectEqualStrings("canceled", old.get("state").?.string);
+    try testing.expect(old.get("restarted") != null and old.get("restarted").?.bool);
+    try testing.expectEqual(@as(i64, -3), old.get("error_code").?.integer);
+    try testing.expectEqual(@as(i64, 403), old.get("status").?.integer);
+    const new = rowOf(p, 3).?;
+    try testing.expectEqualStrings("done", new.get("state").?.string);
+    try testing.expectEqual(@as(i64, 200), new.get("status").?.integer);
+    try testing.expect(new.get("restarted") == null);
+    try testing.expect(rowOf(p, 2).?.get("restarted") == null);
+    try testing.expectEqual(@as(u64, 3009), t.ring.entryBySeq(1).?.end_ms); // 끝은 실제로 온 때 그대로
+    // 자세히에도.
+    const d = try detailJson(&t, 7, .{}, 1);
+    defer d.deinit();
+    try testing.expect(d.value.object.get("restarted").?.bool);
+    // 설정이 꺼졌고 덮이지 않는 사이트면 다시 시작도 보이지 않는다(서버의 답이 부른 것 — 상태·리다이렉트 수와 같다, F8).
+    const off: View = .{ .full = false, .grant_host = "other.test" };
+    const po = try t.listJson(7, off, .{});
+    defer po.deinit();
+    try testing.expect(rowOf(po, 1).?.get("restarted") == null and rowOf(po, 1).?.get("status") == null);
+    const dof = try detailJson(&t, 7, off, 1);
+    defer dof.deinit();
+    try testing.expect(dof.value.object.get("restarted") == null);
+    // 덮이면 꺼져 있어도 보인다.
+    const cov = try detailJson(&t, 7, .{ .full = false, .grant_host = "so.test" }, 1);
+    defer cov.deinit();
+    try testing.expect(cov.value.object.get("restarted").?.bool);
+}
+
+test "W9d① 적대 리뷰 후 R3: 다시 시작 표시의 경계 — 엔진이 다시 떠 같은 번호를 새 요청에 주면 다시 시작이 아니다, 거듭된 다시 시작은 늘 바로 앞 시도를 끝낸다, wipe 뒤도 아니다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    try t.begin(5, "https://a.test/x", .{ .site = "a.test" });
+    try t.respond(5, 200, .{});
+    t.ring.abandonLive(); // sidecar 가 다시 떴다 — 새 프로세스가 번호 5 를 다시 쓴다
+    try t.begin(5, "https://a.test/y", .{ .site = "a.test" });
+    try testing.expectEqual(State.done, t.ring.entryBySeq(1).?.state);
+    try testing.expect(!t.ring.entryBySeq(1).?.restarted);
+    // 끝난 뒤 다시 시작이 세 번 거듭된다(#2 → #3 → #4) — 늘 바로 앞 시도만.
+    try t.respond(5, 200, .{});
+    try t.begin(5, "https://a.test/y", .{ .site = "a.test" });
+    try testing.expect(t.ring.entryBySeq(2).?.restarted);
+    try t.respond(5, 200, .{});
+    try t.begin(5, "https://a.test/y", .{ .site = "a.test" });
+    try testing.expect(t.ring.entryBySeq(3).?.restarted);
+    try testing.expectEqual(State.pending, t.ring.entryBySeq(4).?.state);
+    try testing.expect(!t.ring.entryBySeq(1).?.restarted);
+    // 끝 전에 또 — #4 가 끝난다.
+    try t.begin(5, "https://a.test/y", .{ .site = "a.test" });
+    try testing.expect(t.ring.entryBySeq(4).?.restarted);
+    try testing.expectEqual(State.canceled, t.ring.entryBySeq(4).?.state);
+    try testing.expectEqual(State.pending, t.ring.entryBySeq(5).?.state);
+    try testing.expectEqual(@as(u32, 1), t.ring.live.count());
+    // 다른 번호가 끝나도(최근 끝 16 자리를 돌려 쓴다) 이 번호의 표시는 섞이지 않는다.
+    for (100..120) |n| {
+        try t.begin(n, "https://a.test/r", .{ .site = "a.test" });
+        try t.respond(n, 200, .{});
+    }
+    try testing.expect(!t.ring.entryBySeq(6).?.restarted);
+    // 두 요청이 엇갈려 끝나고 엇갈려 다시 시작한다 — 둘 다 제 앞 시도를 끝낸다.
+    try t.begin(201, "https://a.test/p", .{ .site = "a.test" });
+    try t.begin(202, "https://a.test/q", .{ .site = "a.test" });
+    try t.respond(201, 200, .{});
+    try t.respond(202, 200, .{});
+    const s201 = t.ring.next_seq - 2;
+    try t.begin(201, "https://a.test/p", .{ .site = "a.test" });
+    try t.begin(202, "https://a.test/q", .{ .site = "a.test" });
+    try testing.expect(t.ring.entryBySeq(s201).?.restarted and t.ring.entryBySeq(s201 + 1).?.restarted);
+    // wipe 뒤에도 다시 시작으로 치지 않는다(최근 끝의 옛 자리는 가리킬 기록이 없다 — 번호는 이어 간다).
+    try t.respond(5, 200, .{});
+    t.ring.wipe(testing.allocator, &t.budget);
+    t.ring.noteReader(8, false);
+    try t.begin(5, "https://a.test/z", .{ .site = "a.test" });
+    try testing.expectEqual(@as(usize, 1), t.ring.entries.len);
+    try testing.expect(!t.ring.entries.atPtr(0).restarted);
+}
+
+test "W9d① 적대 리뷰 후 R4: 다시 시작한 시도를 상한으로 적지 못해도 번호 표에 남는 것이 없다 — 새 시도의 응답·끝은 버려지고 적지 못한 수로 센다" {
+    var t: T = .{};
+    defer t.deinit();
+    t.ring.noteReader(7, true);
+    try t.begin(9, "https://so.test/q", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "so.test" });
+    // 다른 탭들이 앱 예산을 다 썼다 — 이 탭은 제 기록을 다 버려도 새 기록 하나를 적지 못한다(자리를 못 내면 제 기록은 이미 버렸다).
+    t.budget.bytes += global_cap_bytes;
+    try t.begin(9, "https://so.test/q", .{ .flags = .{ .main_frame = true, .navigation = true }, .rt = 0, .site = "so.test" });
+    try t.respond(9, 200, .{});
+    t.budget.bytes -= global_cap_bytes;
+    try testing.expectEqual(@as(u32, 0), t.ring.live.count());
+    try testing.expectEqual(@as(usize, 0), t.ring.entries.len);
+    try testing.expectEqual(@as(u32, 1), t.ring.unrecorded);
+    try testing.expectEqual(@as(usize, 0), t.budget.bytes);
 }

@@ -1939,6 +1939,7 @@ fn renderNetwork(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *std.Io.
         }
         if (intField(o.get("redirects"))) |n| try w.print(" [{d} redirect{s}]", .{ n, if (n == 1) "" else "s" });
         if (boolField(o.get("engine_restarted"))) try w.writeAll(" [engine restarted]"); // W9d① 적대 리뷰 3 회차 T2
+        if (boolField(o.get("restarted"))) try w.writeAll(" [restarted]"); // W9d① 적대 리뷰 후 — 같은 번호 다시 시작(다음 시도는 새 줄)
         if (boolField(o.get("other_site"))) try w.writeAll(" [other site]");
         if (boolField(o.get("cross_site_iframe"))) try w.writeAll(" [cross-site iframe]");
         const sw = strField(o.get("service_worker"));
@@ -2016,6 +2017,7 @@ fn renderNetworkRequest(gpa: std.mem.Allocator, result: std.json.ObjectMap, w: *
     if (intField(result.get("duration_ms"))) |d| try w.print(" · {d} ms", .{d});
     if (intField(result.get("error_code"))) |e| try w.print(" · net error {d}", .{e});
     if (boolField(result.get("engine_restarted"))) try w.writeAll(" · ended when the Chromium engine restarted");
+    if (boolField(result.get("restarted"))) try w.writeAll(" · Chromium restarted this request; the retry is a newer req");
     try w.writeAll("\n");
     try w.writeAll("initiator ");
     const initiator = strField(result.get("initiator"));
@@ -4320,6 +4322,10 @@ test "W9d①: network 결과 — 줄마다 번호·메서드·상태·종류·�
     out.clearRetainingCapacity();
     try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":4,\"method\":\"GET\",\"url\":\"https://a.test/poll\",\"type\":\"xhr\",\"state\":\"canceled\",\"start_ms\":1,\"error_code\":-3,\"engine_restarted\":true}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
     try testing.expectEqualStrings("#4 GET - xhr https://a.test/poll [canceled -3] [engine restarted]\n", out.written());
+    // W9d① 적대 리뷰 후 — 같은 번호 다시 시작: Chromium 이 버린 앞 시도(Cloudflare 확인 페이지의 403)와 새 시도.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"requests\":[{\"req\":6,\"method\":\"GET\",\"url\":\"https://so.test/q\",\"type\":\"document\",\"state\":\"done\",\"start_ms\":2,\"status\":200,\"mime\":\"text/html\",\"size\":9},{\"req\":5,\"method\":\"GET\",\"url\":\"https://so.test/q\",\"type\":\"document\",\"state\":\"canceled\",\"start_ms\":1,\"status\":403,\"mime\":\"text/html\",\"size\":0,\"error_code\":-3,\"restarted\":true}],\"hidden_before_grant\":0,\"dropped\":0,\"full_details\":true}}", .network, &out.writer));
+    try testing.expectEqualStrings("#6 GET 200 document https://so.test/q 9B\n#5 GET 403 document https://so.test/q 0B [canceled -3] [restarted]\n", out.written());
 }
 
 test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈으로 다음 헤더를 흉내 내지 못한다), 숨긴 값은 이름만(설정 끔과 쿠키 권한 없음은 안내가 다르다 — 3 회차 D1), 본문은 기록하지 않음(다른 사이트가 보낸 홉은 앱이 싣지 않는다 — 적대 리뷰 2 회차 N7)" {
@@ -4345,6 +4351,10 @@ test "W9d①: network-request 결과 — 헤더 값은 걸러 내고(줄바꿈�
     out.clearRetainingCapacity();
     try testing.expect(!try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"this request was dropped\",\"data\":{\"reason\":\"evicted\"}}}", .network_request, &out.writer));
     try testing.expect(std.mem.indexOf(u8, out.written(), "this request was dropped") != null);
+    // W9d① 적대 리뷰 후 — 같은 번호 다시 시작: Chromium 이 버린 앞 시도.
+    out.clearRetainingCapacity();
+    try testing.expect(try renderResponse(testing.allocator, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"req\":5,\"method\":\"GET\",\"url\":\"https://so.test/q\",\"type\":\"document\",\"state\":\"canceled\",\"start_ms\":1,\"initiator\":\"\",\"frame\":\"main\",\"status\":403,\"mime\":\"text/html\",\"size\":0,\"error_code\":-3,\"restarted\":true,\"body_state\":\"not_recorded\"}}", .network_request, &out.writer));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "document · canceled · status 403 · text/html · 0 bytes · net error -3 · Chromium restarted this request; the retry is a newer req\n") != null);
 }
 
 test "W9d① 적대 리뷰 1 회차: network --before-req 커서(1..2^53-1)는 요청에 실리고, 결과의 next_before_req 를 권한다 — 숨김 수 두 가지, 헤더 값의 탭은 빈칸" {

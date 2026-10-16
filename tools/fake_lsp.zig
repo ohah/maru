@@ -11,6 +11,7 @@
 //! - `didOpen`/`didChange` → 그 문서의 `publishDiagnostics` 하나: 첫 줄 0..3 에 error, message `fake: <version>`·code `E1`, `version` 은
 //!   문서 version. 본문에 `STALE` 이 있으면 version 을 **하나 낮춰**(클라이언트가 버려야 한다). `BOOM` 이 있으면 즉시 exit 1(재시작).
 //!   `WARN` 이 있으면 severity 2 를 하나 더(둘째 줄 0..2). `INFO` 가 있으면 severity 3 을 첫 줄 0..1 에 하나 더(message 두 줄).
+//!   `LANGID` 가 있으면 message 가 `fake: <version> <didOpen 의 languageId>` 다(문서마다 그 방언의 값인지 — `.scss`·`.less`, 계획 editor-lsp-servers-expand).
 //! - `HANG` 이 있으면 stdout 을 **닫고 살아 있는다**(진단도 exit 도 없다) — 클라이언트는 EOF 를 「끝」으로 보고 죽여 재시작해야 한다.
 //! - `textDocument/hover` → contents(markdown): 펜스 `int fake` · `fake hover L<line>:C<char>` · `**bold** here` · 항목 14개(`- item N`,
 //!   상자 높이 상한 12행을 넘긴다), range = 그 줄의 `character..character+3`(클라이언트가 앵커로 써야 한다). 본문에 `NOHOVER` 가
@@ -2008,7 +2009,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             if (std.mem.indexOf(u8, text, "AUXSPOOF") != null and std.mem.eql(u8, method, "textDocument/didChange"))
                 sendJson(allocator, .{ .jsonrpc = "2.0", .id = @as(i64, 100_000_001), .result = .{ .contents = .{ .kind = "markdown", .value = "aux: spoofed hover" } } });
             const pp = persona().?;
-            // Biome 꼴은 didOpen 의 languageId 도 붙인다 — 주 서버가 없는 JSON·CSS 에 그 문법의 값이 갔는지(AS5).
+            // Biome 꼴은 didOpen 의 languageId 도 붙인다 — JSON·CSS 에 그 문법의 값이 갔는지(AS5).
             const aux_msg = (if (biome_mode) std.fmt.bufPrint(&msg_buf, "{s}: {d} {s}", .{ pp.prefix, version, docLang(uri) }) else std.fmt.bufPrint(&msg_buf, "{s}: {d}", .{ pp.prefix, version })) catch "aux";
             // `data`(LSP 3.16)를 싣는다 — 클라이언트가 code action 문맥으로 그대로 되돌려야 quickfix 제목에 `(data aux-1)` 이 붙는다.
             const AuxDiag = struct { range: struct { start: struct { line: u32, character: u32 }, end: struct { line: u32, character: u32 } }, severity: u8, message: []const u8, code: []const u8, source: []const u8, data: struct { fix: []const u8 } };
@@ -2017,7 +2018,7 @@ fn handle(allocator: std.mem.Allocator, body: []const u8) void {
             sendJson(allocator, .{ .jsonrpc = "2.0", .method = "textDocument/publishDiagnostics", .params = .{ .uri = uri, .version = v, .diagnostics = if (quiet) one[0..0] else one[0..] } });
             return;
         }
-        const msg = std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version}) catch "fake";
+        const msg = (if (std.mem.indexOf(u8, text, "LANGID") != null) std.fmt.bufPrint(&msg_buf, "fake: {d} {s}", .{ version, docLang(uri) }) else std.fmt.bufPrint(&msg_buf, "fake: {d}", .{version})) catch "fake";
         var diags: [3]Diag = undefined;
         var count: usize = 1;
         diags[0] = .{ .range = .{ .start = .{ .line = 0, .character = 0 }, .end = .{ .line = 0, .character = 3 } }, .severity = 1, .message = msg, .code = "E1" };

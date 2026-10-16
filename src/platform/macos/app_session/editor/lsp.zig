@@ -1028,7 +1028,7 @@ pub fn showServerInfo(self: *AppSession) void {
     if (self.tabs.items.len == 0) return self.showNoticeKey(.lsp_info_unavailable);
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return self.showNoticeKey(.lsp_info_unavailable);
-    const server = serverFor(self, term.rt.editor_grammar) orelse return showAuxOnlyInfo(self, term);
+    const server = serverForTerm(self, term) orelse return self.showNoticeKey(.lsp_info_unavailable);
     const view = statusFor(self, term) orelse return self.showNoticeKey(.lsp_info_unavailable);
     const root = rootFor(self, term);
     const c: ?*Client = if (root) |r| clientFor(self, r, server) else null;
@@ -1095,26 +1095,6 @@ pub fn showServerInfo(self: *AppSession) void {
         printLine(&w, e.path_line);
     } else printLine(&w, maru.i18n.t(if (running == null and !tool_env.settled()) .lsp_info_exe_pending else .lsp_info_exe_missing));
     self.showNotice(w.buffered());
-}
-
-/// 주 서버 표가 없는 문서(JSON·CSS — §8.2u AS5)의 정보 명령: 보조 서버 줄만. 보조 서버도 없으면 「없음」.
-fn showAuxOnlyInfo(self: *AppSession, term: *Term) void {
-    const root = rootFor(self, term) orelse return self.showNoticeKey(.lsp_info_unavailable);
-    if (auxiliariesFor(self, term, root).count() == 0) return self.showNoticeKey(.lsp_info_unavailable);
-    var out: [status_text_cap + 3 * std.fs.max_path_bytes + 1024]u8 = undefined;
-    var w: std.Io.Writer = .fixed(&out);
-    printAuxLines(self, &w, term, root);
-    self.showNotice(std.mem.trimStart(u8, w.buffered(), "\n"));
-}
-
-/// 그 문서의 보조 서버 클라이언트 중 첫 것(표 순서) — 주 서버 표가 없는 문서의 신뢰 관리가 저장소의 결정을 찾는다(결정은 저장소 단위다).
-fn auxClientFor(self: *AppSession, term: *Term, root: []const u8) ?*Client {
-    const set = auxiliariesFor(self, term, root);
-    for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
-        if (!set.contains(aux.tool)) continue;
-        if (clientFor(self, root, aux.server)) |c| return c;
-    }
-    return null;
 }
 
 /// 정보 명령의 보조 서버 줄(§8.2u): 「보조 서버 ‹상태› — 설정 ‹루트 기준 경로› · ‹실행 파일›」. 떠 있으면 띄운 경로, 아니면 지금 찾아 낸 경로
@@ -1333,9 +1313,9 @@ pub fn manageCurrent(self: *AppSession, action: ManageAction) void {
     const term = pane_ops.activePane(self).activeTerm();
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return self.showNoticeKey(.lsp_trust_current_unavailable);
     const root = rootFor(self, term) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
-    // 주 서버 표가 없는 문서(JSON·CSS)는 보조 서버의 클라이언트로 — 신뢰는 저장소 단위라 어느 클라이언트의 열쇠든 같다(§8.2u AS5).
-    const c = (if (serverFor(self, term.rt.editor_grammar)) |server| clientFor(self, root, server) else auxClientFor(self, term, root)) orelse
-        return self.showNoticeKey(.lsp_trust_current_unavailable);
+    // 보조 서버가 있는 문서엔 늘 주 서버도 있다(`auxiliary` 의 `AUX6`) — 신뢰는 저장소 단위라 주 서버의 열쇠로 족하다.
+    const server = serverForTerm(self, term) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
+    const c = clientFor(self, root, server) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
     const key = trustKey(self, c) orelse return self.showNoticeKey(.lsp_trust_current_unavailable);
     const decision = trustOf(self, key) orelse return self.showNoticeKey(.lsp_trust_current_none);
     if (action == .revoke and decision != .allow) return self.showNoticeKey(.lsp_trust_current_not_allowed);
@@ -1522,6 +1502,14 @@ pub fn serverFor(self: *AppSession, g: maru.session.editor.language.Grammar) ?ls
     }.f) orelse return null;
     self.editor_lsp.resolved.set(g, picked);
     return picked;
+}
+
+/// 그 **문서**의 주 서버 — 문법의 서버(`serverFor`)이되 그 문서의 확장자를 다루지 않으면(`Server.serves` — Bash 서버의 `.zsh`) 없다. 문서를 보는
+/// 자리(붙이기·호버·정보·신뢰 관리·상태바)는 전부 이것을 부른다 — 한 자리라도 문법만 보면 「붙지 않는데 상태바엔 설치 안내」처럼 갈린다.
+pub fn serverForTerm(self: *AppSession, term: *Term) ?lsp.servers.Server {
+    const s = serverFor(self, term.rt.editor_grammar) orelse return null;
+    const path = termPath(term) orelse return s;
+    return if (s.serves(path)) s else null;
 }
 
 /// 「없음」인 클라이언트가 다른 후보의 설치를 볼 수 있게 — 다시 골라 달라졌으면 그 서버로 바꾼다(프로세스는 아직 없으니 이름만 바뀐다). 바뀌었으면 true.
@@ -2198,15 +2186,14 @@ fn syncDocuments(self: *AppSession, now_ms: u64) void {
         for (tab.panes.items) |pane| {
             for (pane.terms.items) |term| {
                 if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) continue;
-                // 주 서버 — 설치되지 않았어도 `serverFor` 는 첫 후보를 낸다(「없음」으로 선다). 주 서버 표가 없는 문법(JSON·CSS)은 보조 서버만
-                // (§8.2u AS5 — Biome).
-                const server = serverFor(self, term.rt.editor_grammar);
-                if (server == null and lsp.auxiliary.forGrammar(term.rt.editor_grammar).len == 0) continue;
+                // 주 서버 — 설치되지 않았어도 `serverFor` 는 첫 후보를 낸다(「없음」으로 선다). 주 서버가 없는 문서엔 보조 서버도 없다
+                // (`auxiliary` 의 `AUX6` — LS1 부터).
+                const server = serverForTerm(self, term) orelse continue;
                 const root = rootFor(self, term) orelse continue;
-                if (server) |sv| if (ensureClient(self, root, sv, term.rt.editor_grammar)) |c| {
+                if (ensureClient(self, root, server, term.rt.editor_grammar)) |c| {
                     seen.put(self.allocator, term.surfaceId(), {}) catch return;
                     attachDocument(self, c, term);
-                };
+                }
                 // 보조 서버(§8.2u) — 저장소 설정을 찾은 것마다 같은 길. 주 서버가 설치되지 않아도(「없음」) 뜬다.
                 const aux_set = auxiliariesFor(self, term, root);
                 for (lsp.auxiliary.forGrammar(term.rt.editor_grammar)) |aux| {
@@ -2384,7 +2371,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
         if (d.sent_version == version) return;
         if (mode == .coalesce and d.sent_version != 0) if (c.proc) |p| if (p.pending_out.items.len > 0) return; // 밀린 것이 빠진 뒤의 tick 에 최신 본문으로
         if (d.sent_version == 0) {
-            const msg = lsp.rpc.didOpen(self.allocator, d.uri, lsp.servers.languageIdFor(term.rt.editor_grammar) orelse c.server.language_id, @intCast(version), opened.file.content) catch return;
+            const msg = lsp.rpc.didOpen(self.allocator, d.uri, lsp.servers.languageIdForPath(term.rt.editor_grammar, termPath(term) orelse "") orelse c.server.language_id, @intCast(version), opened.file.content) catch return;
             defer self.allocator.free(msg);
             if (!send(self, c, msg)) return;
         } else {
@@ -2416,7 +2403,7 @@ fn syncOne(self: *AppSession, c: *Client, term: *Term, mode: SyncMode) void {
     defer if (!committed) {
         if (pin) |held| _ = @constCast(held.owner).release(held) catch false;
     };
-    const msg = lsp.rpc.didOpen(self.allocator, uri, lsp.servers.languageIdFor(term.rt.editor_grammar) orelse c.server.language_id, @intCast(v), opened.file.content) catch {
+    const msg = lsp.rpc.didOpen(self.allocator, uri, lsp.servers.languageIdForPath(term.rt.editor_grammar, termPath(term) orelse "") orelse c.server.language_id, @intCast(v), opened.file.content) catch {
         self.allocator.free(uri);
         return;
     };
@@ -2478,7 +2465,7 @@ pub const status_text_cap = 128;
 pub fn statusFor(self: *AppSession, term: *Term) ?StatusView {
     if (!self.loaded_config.config.lsp.enabled) return null;
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return null;
-    const server = serverFor(self, term.rt.editor_grammar) orelse return null;
+    const server = serverForTerm(self, term) orelse return null;
     const root = rootFor(self, term) orelse return null;
     // 다시 읽었는데도 못 읽었으면 다시 읽기를 더 권하지 않는다 — 클릭은 설치로 가되 문구는 셸 환경 실패를 그대로 말한다(설치 위치가
     // 셸 설정에만 있으면 설치해도 못 찾는다 — 원인을 지우면 사용자가 짐작할 길이 없다, 9회차).
@@ -2502,7 +2489,7 @@ fn flushDocument(self: *AppSession, c: *Client, term: *Term) void {
 pub fn readyClientFor(self: *AppSession, term: *Term) ?*Client {
     if (!self.loaded_config.config.lsp.enabled) return null;
     if (term.kind != .editor or term.rt.editorDocument().opened == null or term.rt.editor_diff != null) return null;
-    const server = serverFor(self, term.rt.editor_grammar) orelse return null;
+    const server = serverForTerm(self, term) orelse return null;
     const root = rootFor(self, term) orelse return null;
     const c = clientFor(self, root, server) orelse return null;
     if (c.phase != .ready or c.proc == null) return null;
@@ -2996,7 +2983,7 @@ pub fn activateStatus(self: *AppSession) void {
     if (pane.terms.items.len == 0) return;
     const term = pane.activeTerm();
     const view = statusFor(self, term) orelse return;
-    const server = serverFor(self, term.rt.editor_grammar) orelse return;
+    const server = serverForTerm(self, term) orelse return;
     switch (view.phase) {
         .missing => {
             // 셸 환경을 못 읽어 대신한 환경에서 못 찾았다 — 설치를 권하기 전에 다시 읽는다(셸 설정을 고쳤을 수 있다).

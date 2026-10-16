@@ -23892,7 +23892,7 @@ test "ASB6 보조 언어 서버 Biome·oxlint (tooling §8.2u) — 설정이 셋
     try testing.expect(std.mem.indexOf(u8, content(term), "ESL_FIXED BIO_FIXED OX_FIXED") != null);
 }
 
-test "ASB7 보조 언어 서버 — 주 서버 표가 없는 JSON·CSS 에 Biome 만 (tooling §8.2u) — 그 문법의 languageId 로 열어 진단·⌘.·저장 시 fixAll 이 돌고, .scss·.less 에는 붙지 않으며, 정보 명령·신뢰 관리도 그 서버로" {
+test "ASB7 보조 언어 서버 — JSON·CSS 에 주 서버(언어 서버 후보 확대 LS1)와 Biome 이 함께 (tooling §8.2u) — Biome 은 그 문법의 languageId 로 열어 진단·⌘.·저장 시 fixAll 이 돌고, .scss·.less 에는 Biome 이 안 붙고 주 서버만 붙으며, 정보 명령에 Biome 줄이 선다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;
     var f = (try SmtFixture.openRepo(allocator, "a.ts", "let a = 1;\n")) orelse return error.SkipZigTest;
@@ -23903,8 +23903,8 @@ test "ASB7 보조 언어 서버 — 주 서버 표가 없는 JSON·CSS 에 Biome
     try installFakeLspCopy(&f.fx, "node_modules/.bin/biome");
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "d.json", .data = "{\n  \"a\": 1\n}\nBIOFIX\n" });
     try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "s.css", .data = "a { color: red; }\n.b {}\n" });
-    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "t.scss", .data = "$c: red;\n.b {}\n" });
-    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "u.less", .data = "@c: red;\n.b {}\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "t.scss", .data = "$c: red;\n.b {}\n/* LANGID */\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "u.less", .data = "@c: red;\n.b {}\n/* LANGID */\n" });
     try testing.expect(f.ready());
     const root = f.root_buf[0..f.root_len];
     const bio = struct {
@@ -23927,15 +23927,20 @@ test "ASB7 보조 언어 서버 — 주 서버 표가 없는 JSON·CSS 에 Biome
             return bio.diag(t) != null;
         }
     };
-    // ⑴ JSON — 주 서버 없이 Biome 만 붙고, 그 문법의 languageId(`json`)로 연다.
+    // ⑴ JSON — 주 서버(`vscode-json-language-server` — 판정자에선 가짜 서버)와 Biome 이 함께 붙고, Biome 은 그 문법의 languageId(`json`)로 연다.
     const j = try bio.open(s, root, "d.json");
     try testing.expect(pumpLspUntil(&f.fx, 5000, j, HasDiag.g));
     var want_buf: [64]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "biome: {d} json", .{j.rt.editorDocument().notifications.lsp_version}), bio.diag(j).?.message);
+    var json_primary = false;
     for (s.editor_lsp.clients.items) |*c| {
-        if (c.role == .primary) try testing.expect(c.findDoc(j) == null);
+        if (c.role == .primary and c.findDoc(j) != null) {
+            try testing.expectEqualStrings("vscode-json-language-server", c.server.exe);
+            json_primary = true;
+        }
         if (std.mem.eql(u8, c.server.exe, "biome")) try testing.expect(c.findDoc(j) != null);
     }
+    try testing.expect(json_primary);
     // ⑵ CSS — 같은 Biome 클라이언트, languageId `css`.
     const c_term = try bio.open(s, root, "s.css");
     try testing.expect(pumpLspUntil(&f.fx, 5000, c_term, HasDiag.g));
@@ -23945,35 +23950,38 @@ test "ASB7 보조 언어 서버 — 주 서버 표가 없는 JSON·CSS 에 Biome
         n_biome += 1;
     };
     try testing.expectEqual(@as(usize, 1), n_biome);
-    // ⑶ `.scss`·`.less` 는 문법이 CSS 지만 Biome 이 다루지 않는다 — 붙지 않는다(감지 집합에도 없다).
-    for ([_][]const u8{ "t.scss", "u.less" }) |name| {
-        const t = try bio.open(s, root, name);
-        for (0..20) |_| {
-            lsp_client.pump(s);
-            _ = usleep(5_000);
+    // ⑶ `.scss`·`.less` 는 문법이 CSS 지만 Biome 이 다루지 않는다 — Biome 은 붙지 않고(감지 집합에도 없다) 주 서버(CSS 서버 — 셋을 다 안다)만
+    //    붙는다. 그 languageId 는 `scss`·`less` 다(`servers.languageIdForPath` — `LSI4` 가 잰다; `css` 로 보내면 거짓 오류가 셋씩 섰다).
+    const HasPrimaryDiag = struct {
+        fn g(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len > 0;
         }
+    };
+    for ([_][2][]const u8{ .{ "t.scss", "scss" }, .{ "u.less", "less" } }) |row| {
+        const t = try bio.open(s, root, row[0]);
+        try testing.expect(pumpLspUntil(&f.fx, 5000, t, HasPrimaryDiag.g));
+        try testing.expectEqualStrings(try std.fmt.bufPrint(&want_buf, "fake: {d} {s}", .{ t.rt.editorDocument().notifications.lsp_version, row[1] }), t.rt.editor_diagnostics.lsp.items[0].message);
         try testing.expect(t.rt.editor_lsp_aux != null and !t.rt.editor_lsp_aux.?.contains(.biome));
-        for (s.editor_lsp.clients.items) |*c| try testing.expect(c.findDoc(t) == null);
+        var primary_has = false;
+        for (s.editor_lsp.clients.items) |*c| {
+            if (std.mem.eql(u8, c.server.exe, "biome")) try testing.expect(c.findDoc(t) == null);
+            if (c.role == .primary and c.findDoc(t) != null) {
+                try testing.expectEqualStrings("vscode-css-language-server", c.server.exe);
+                primary_has = true;
+            }
+        }
+        try testing.expect(primary_has);
         try testing.expect(bio.diag(t) == null);
     }
-    // 붙지 않은 문서(마지막에 연 `.less` — 활성)는 정보 명령·신뢰 관리 모두 「언어 서버를 쓰지 않는 문서」다 — 같은 저장소에 Biome 클라이언트가
-    // 떠 있어도(위 JSON·CSS) 그 문서의 서버가 아니다.
     s.dismissMessageOverlays();
-    lsp_client.showServerInfo(s);
-    try testing.expectEqualStrings(maru.i18n.t(.lsp_info_unavailable), s.chrome_host.notice.message);
-    s.dismissMessageOverlays();
-    lsp_client.manageCurrent(s, .forget);
-    try testing.expect(s.pending_confirm == .none);
-    try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_current_unavailable), s.chrome_host.notice.message);
-    s.dismissMessageOverlays();
-    // ⑷ 정보 명령 — 주 서버가 없어도 Biome 줄이 선다(「없음」이 아니다).
+    // ⑷ 정보 명령 — 주 서버 줄 아래에 Biome 줄이 선다.
     try bio.activate(s, j);
     s.dismissMessageOverlays();
     lsp_client.showServerInfo(s);
     {
         var line_buf: [512]u8 = undefined;
         const want = maru.i18n.format(&line_buf, maru.i18n.t(.lsp_info_aux), &.{ .{ .s = "Biome" }, .{ .s = "biome.json" }, .{ .s = "node_modules/.bin/biome" } });
-        try testing.expectEqualStrings(want, s.chrome_host.notice.message);
+        try testing.expect(std.mem.indexOf(u8, s.chrome_host.notice.message, want) != null);
     }
     s.dismissMessageOverlays();
     // ⑸ 신뢰 관리 — 그 저장소의 결정을 보조 서버의 클라이언트로 찾아 상자를 띄운다.
@@ -23982,7 +23990,7 @@ test "ASB7 보조 언어 서버 — 주 서버 표가 없는 JSON·CSS 에 Biome
     s.chrome_host.confirm.dismiss(); // 제품 경로: 컴포넌트가 먼저 닫고 액션을 보낸다
     s.dispatchChromeAction(.confirm_cancel);
     try testing.expect(s.pending_confirm == .none);
-    // ⑹ ⌘. — Biome 의 항목만(주 서버 없음), 고르면 Biome 에 resolve. 저장 시 `source.fixAll` 도 Biome 이.
+    // ⑹ ⌘. — 두 서버의 항목이 함께 서고, Biome 의 항목을 고르면 Biome 에 resolve. 저장 시 `source.fixAll` 도 Biome 이.
     {
         var d = appendPaneFrame(s, f.leaf, j) orelse return error.EditorPaneDidNotDraw;
         d.dl.deinit(allocator);
@@ -24003,8 +24011,10 @@ test "ASB7 보조 언어 서버 — 주 서버 표가 없는 JSON·CSS 에 Biome
     try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
     {
         const titles = settings_ops.contextMenuItems(s);
-        try testing.expectEqual(@as(usize, 1), titles.len);
-        try testing.expectEqualStrings("biome: fix A1 (data aux-1)", titles[0]);
+        const at = for (titles, 0..) |t, i| {
+            if (std.mem.eql(u8, t, "biome: fix A1 (data aux-1)")) break i;
+        } else return error.NoBiomeItem;
+        for (0..at) |_| try pressKey(&f.fx, .arrow_down, .{});
     }
     try pressKey(&f.fx, .enter, .{});
     try testing.expect(pumpLspUntil(&f.fx, 3000, s, settled));
@@ -24020,6 +24030,49 @@ test "ASB7 보조 언어 서버 — 주 서버 표가 없는 JSON·CSS 에 Biome
     };
     try testing.expect(pumpLspUntil(&f.fx, 5000, s, Saved.g));
     try testing.expect(std.mem.indexOf(u8, content(j), "BIO_FIXED") != null);
+}
+
+test "LSI5 Bash 서버는 `.zsh` 를 안 다룬다 (계획 editor-lsp-servers-expand LS1) — 같은 저장소의 `.sh` 엔 붙고, `.zsh` 엔 붙지도 상태바에 서지도 않으며 정보·신뢰 관리는 「쓰지 않는 문서」다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const allocator = testing.allocator;
+    var f = (try SmtFixture.openRepo(allocator, "a.ts", "let a = 1;\n")) orelse return error.SkipZigTest;
+    defer f.close(allocator);
+    const s = f.fx.session;
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "a.sh", .data = "echo a\n" });
+    try f.fx.dir.dir.writeFile(testing.io, .{ .sub_path = "b.zsh", .data = "echo b\n" });
+    try testing.expect(f.ready());
+    const root = f.root_buf[0..f.root_len];
+    var pbuf: [std.fs.max_path_bytes]u8 = undefined;
+    const sh = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/a.sh", .{root}), .text)).term;
+    const HasDiag = struct {
+        fn g(t: *Term) bool {
+            return t.rt.editor_diagnostics.lsp.items.len > 0;
+        }
+    };
+    try testing.expect(pumpLspUntil(&f.fx, 5000, sh, HasDiag.g));
+    var sh_client = false;
+    for (s.editor_lsp.clients.items) |*c| if (c.findDoc(sh) != null) {
+        try testing.expectEqualStrings("bash-language-server", c.server.exe);
+        sh_client = true;
+    };
+    try testing.expect(sh_client);
+    const zsh = (try pane_ops.openFileTermInActivePane(s, try std.fmt.bufPrint(&pbuf, "{s}/b.zsh", .{root}), .text)).term;
+    try testing.expectEqual(maru.session.editor.language.Grammar.bash, zsh.rt.editor_grammar); // 색·접힘은 Bash 문법 그대로다
+    for (0..20) |_| {
+        lsp_client.pump(s);
+        _ = usleep(5_000);
+    }
+    for (s.editor_lsp.clients.items) |*c| try testing.expect(c.findDoc(zsh) == null);
+    try testing.expect(zsh.rt.editor_diagnostics.lsp.items.len == 0);
+    try testing.expect(lsp_client.statusFor(s, zsh) == null); // 상태바에 설치 안내도 「없음」도 안 선다
+    try testing.expect(lsp_client.statusFor(s, sh) != null);
+    s.dismissMessageOverlays();
+    lsp_client.showServerInfo(s);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_info_unavailable), s.chrome_host.notice.message);
+    s.dismissMessageOverlays();
+    lsp_client.manageCurrent(s, .forget);
+    try testing.expect(s.pending_confirm == .none);
+    try testing.expectEqualStrings(maru.i18n.t(.lsp_trust_current_unavailable), s.chrome_host.notice.message);
 }
 
 test "FOS1 저장 시 포맷 — ⌘S 가 포맷을 먼저 적용하고(되돌리기 하나) 저장하며 didSave 가 간다; 설정을 끄거나 서버가 포맷을 못 하면 곧바로 저장, 응답이 낡았거나 거부되면 포맷 없이 저장, 시한을 넘기면 포맷 없이 저장하고 알림, 기다리는 동안 같은 문서의 ⌘S·⇧⌥F 는 무동작, 다른 문서의 ⌘S 는 기다리던 것을 먼저 저장 (제품 경계, §8.2r)" {

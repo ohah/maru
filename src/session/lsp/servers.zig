@@ -13,11 +13,25 @@ pub const Server = struct {
     language_id: []const u8,
     /// 설치 명령(brew·npm·rustup·go). 사용자 환경이 다르면 2단의 override 가 맡는다.
     install: []const u8,
+    /// 그 문법인데도 **이 서버가 다루지 않는 확장자**(대소문자 무시, 점 없이). 그런 문서에는 주 서버가 없다 — Bash 서버는 `.zsh` 에
+    /// shellcheck 를 돌려 zsh shebang 파일마다 「ShellCheck only supports sh/bash…」 오류를 냈다(계획 editor-lsp-servers-expand LS1 실측).
+    skip_extensions: []const []const u8 = &.{},
+
+    /// 그 경로의 문서를 다루나(`skip_extensions`).
+    pub fn serves(self: Server, path: []const u8) bool {
+        const ext = std.fs.path.extension(path);
+        if (ext.len < 2) return true;
+        for (self.skip_extensions) |e| if (std.ascii.eqlIgnoreCase(ext[1..], e)) return false;
+        return true;
+    }
 };
 
 const stdio = [_][]const u8{"--stdio"};
 const lsp_stdio = [_][]const u8{ "--lsp", "--stdio" };
 const none = [_][]const u8{};
+const start = [_][]const u8{"start"}; // bash-language-server
+const taplo_lsp = [_][]const u8{ "lsp", "stdio" };
+const dart_lsp = [_][]const u8{ "language-server", "--protocol=lsp" };
 
 /// TS 계열의 후보 셋(§8.2a 「서버 찾기」, 2026-09-20 사용자 결정 「tsgo 도 되어야」) — 찾아지는 **첫** 것을 쓴다. `language_id` 는 문법마다
 /// 다르므로 `candidatesFor` 가 채워 낸다.
@@ -50,7 +64,28 @@ pub fn candidatesFor(g: language.Grammar) []const Server {
         .rust => &[_]Server{.{ .exe = "rust-analyzer", .args = &none, .language_id = "rust", .install = "rustup component add rust-analyzer" }},
         .python => &[_]Server{.{ .exe = "pyright-langserver", .args = &stdio, .language_id = "python", .install = "npm i -g pyright" }},
         .go => &[_]Server{.{ .exe = "gopls", .args = &none, .language_id = "go", .install = "go install golang.org/x/tools/gopls@latest" }},
-        .none, .json, .markdown, .java, .ruby, .php, .kotlin, .bash, .css, .html, .yaml, .toml, .xml, .dtd, .lua, .dockerfile, .make, .swift, .sql, .dart, .csharp, .scala => &.{},
+        // 언어 서버 후보 확대 LS1(계획 editor-lsp-servers-expand — 2026-10-16, maru 와 같은 능력으로 실측해 통과한 열다섯).
+        .swift => &[_]Server{.{ .exe = "sourcekit-lsp", .args = &none, .language_id = "swift", .install = "xcode-select --install" }},
+        .dart => &[_]Server{.{ .exe = "dart", .args = &dart_lsp, .language_id = "dart", .install = "brew install dart-sdk" }},
+        // `DOTNET_ROOT` 가 셸에 있어야 뜬다(brew .NET 의 caveat) — 서버 찾기는 사용자 셸의 환경을 그대로 쓴다(tooling §8.2a 「설치 안내」).
+        .csharp => &[_]Server{.{ .exe = "csharp-ls", .args = &none, .language_id = "csharp", .install = "dotnet tool install --global csharp-ls" }},
+        // metals 는 저장(`didSave`)에 컴파일한다 — 진단도 저장에 바뀐다. 첫 기동은 빌드 도구를 내려받는다(실측 79 s).
+        .scala => &[_]Server{.{ .exe = "metals", .args = &none, .language_id = "scala", .install = "brew install metals" }},
+        .java => &[_]Server{.{ .exe = "jdtls", .args = &none, .language_id = "java", .install = "brew install jdtls" }},
+        .kotlin => &[_]Server{.{ .exe = "kotlin-language-server", .args = &none, .language_id = "kotlin", .install = "brew install kotlin-language-server" }},
+        .php => &[_]Server{.{ .exe = "intelephense", .args = &stdio, .language_id = "php", .install = "npm i -g intelephense" }},
+        .lua => &[_]Server{.{ .exe = "lua-language-server", .args = &none, .language_id = "lua", .install = "brew install lua-language-server" }},
+        // 진단은 shellcheck 가 있을 때만 낸다(없으면 호버·완성만) — 설치 안내에 함께 적는다.
+        .bash => &[_]Server{.{ .exe = "bash-language-server", .args = &start, .language_id = "shellscript", .install = "npm i -g bash-language-server", .skip_extensions = &.{"zsh"} }},
+        .yaml => &[_]Server{.{ .exe = "yaml-language-server", .args = &stdio, .language_id = "yaml", .install = "npm i -g yaml-language-server" }},
+        .toml => &[_]Server{.{ .exe = "taplo", .args = &taplo_lsp, .language_id = "toml", .install = "brew install taplo" }},
+        .dockerfile => &[_]Server{.{ .exe = "docker-langserver", .args = &stdio, .language_id = "dockerfile", .install = "npm i -g dockerfile-language-server-nodejs" }},
+        // JSON·CSS 는 보조 서버 Biome(§8.2u AS5)와 함께 간다 — 칸이 따로라 서로의 진단을 지우지 않는다.
+        .json => &[_]Server{.{ .exe = "vscode-json-language-server", .args = &stdio, .language_id = "json", .install = "npm i -g vscode-langservers-extracted" }},
+        .css => &[_]Server{.{ .exe = "vscode-css-language-server", .args = &stdio, .language_id = "css", .install = "npm i -g vscode-langservers-extracted" }},
+        .html => &[_]Server{.{ .exe = "vscode-html-language-server", .args = &stdio, .language_id = "html", .install = "npm i -g vscode-langservers-extracted" }},
+        // 싣지 않는다(계획 「싣지 않는 것」 — 실측): Ruby 는 pull 진단만 내 LS2, SQL·Markdown·XML·DTD·Make 는 쓸 만한 서버가 없다.
+        .none, .markdown, .ruby, .xml, .dtd, .make, .sql => &.{},
     };
 }
 
@@ -70,16 +105,23 @@ pub fn resolve(g: language.Grammar, ctx: anytype, comptime installed: fn (@TypeO
 
 /// 그 문법의 LSP `languageId` — 문서마다 이것을 보낸다(`didOpen`). TS·TSX·JS 는 서버 하나(`(root, exe)` 열쇠)를 나눠 쓰므로 클라이언트를 세운
 /// 문서의 값(`Server.language_id`)을 그대로 쓰면 `.ts` 를 먼저 연 뒤의 `.tsx` 가 `typescript` 로 간다 — ESLint(보조 서버 tooling §8.2u)는
-/// 이 값으로 검사 여부를 가른다. 주 서버 표가 없어도 보조 서버가 붙는 JSON·CSS(Biome — §8.2u AS5)는 그 값을 낸다 — Biome 은 이 값으로
-/// 해석기를 고른다(CSS 를 `javascript` 로 보내면 JS 구문 오류, 2026-10-13 실측). 그 밖의 이름표 없는 문법은 `null`(호출자가 서버의 값을 쓴다).
+/// 이 값으로 검사 여부를 가른다. 보조 서버 Biome 은 이 값으로 해석기를 고른다(CSS 를 `javascript` 로 보내면 JS 구문 오류, 2026-10-13 실측) —
+/// JSON·CSS 는 이제 주 서버 표가 있어(LS1) 그 값이 곧 `json`·`css` 다. 이름표 없는 문법은 `null`(호출자가 서버의 값을 쓴다).
 pub fn languageIdFor(g: language.Grammar) ?[]const u8 {
     const c = candidatesFor(g);
-    if (c.len > 0) return c[0].language_id;
-    return switch (g) {
-        .json => "json",
-        .css => "css",
-        else => null,
-    };
+    return if (c.len > 0) c[0].language_id else null;
+}
+
+/// 그 **문서**의 `languageId` — 문법의 값이되, 한 문법이 방언을 덮는 확장자는 그 방언의 이름이다. CSS 문법은 `.scss`·`.less` 도 덮는데
+/// CSS 서버(vscode-css-language-server — 셋을 다 안다)에 `css` 로 보내면 `$c: red;`·`@c: red;` 에 거짓 오류가 셋씩 섰다(LS1 실측 —
+/// `scss`·`less` 로 보내면 0). 다른 문법은 `languageIdFor` 그대로다.
+pub fn languageIdForPath(g: language.Grammar, path: []const u8) ?[]const u8 {
+    if (g == .css) {
+        const ext = std.fs.path.extension(path);
+        if (std.ascii.eqlIgnoreCase(ext, ".scss")) return "scss";
+        if (std.ascii.eqlIgnoreCase(ext, ".less")) return "less";
+    }
+    return languageIdFor(g);
 }
 
 /// 서버 하나를 **여러 언어가 나눠 쓰는가** — c 와 cpp 는 같은 clangd, ts·tsx·js 는 같은 tsserver. 프로세스는 `(root, exe)` 마다
@@ -92,7 +134,7 @@ pub fn processKey(s: Server) []const u8 {
 
 const testing = std.testing;
 
-test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 는 서버가 있고 나머지는 없다; ts 계열은 --stdio, 같은 서버는 같은 키 (§8.2a)" {
+test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 와 LS1 의 열다섯은 서버가 있고, Ruby·SQL·Markdown·XML·DTD·Make·평문은 없다; ts 계열은 --stdio, 같은 서버는 같은 키 (§8.2a)" {
     try testing.expectEqualStrings("zls", forGrammar(.zig).?.exe);
     try testing.expectEqualStrings("clangd", forGrammar(.c).?.exe);
     try testing.expectEqualStrings("clangd", forGrammar(.cpp).?.exe);
@@ -109,7 +151,8 @@ test "LSI1 이름표 — zig·c·cpp·objc·ts·tsx·js·rust·python·go 는 �
     try testing.expectEqualStrings("--stdio", ts.args[1]);
     try testing.expectEqualStrings("typescriptreact", forGrammar(.tsx).?.language_id);
     try testing.expectEqual(@as(usize, 0), forGrammar(.zig).?.args.len);
-    try testing.expect(forGrammar(.none) == null and forGrammar(.markdown) == null and forGrammar(.json) == null);
+    // 싣지 않은 것(계획 editor-lsp-servers-expand 「싣지 않는 것」 — 실측). Ruby 는 pull 진단만 내 LS2 다.
+    inline for (.{ .none, .markdown, .ruby, .xml, .dtd, .make, .sql }) |g| try testing.expect(forGrammar(g) == null);
     // 설치 명령은 전부 있고 개행이 없다(한 줄을 입력한다).
     inline for (@import("type_info_fields").enumFields(language.Grammar)) |f| {
         const g: language.Grammar = @fromBackingInt(@intCast(f.value));
@@ -150,7 +193,51 @@ test "LSS1 문서의 languageId 는 그 문법의 값이다 — 서버를 나눠
     try std.testing.expectEqualStrings("typescriptreact", languageIdFor(.tsx).?);
     try std.testing.expectEqualStrings("javascript", languageIdFor(.javascript).?);
     try std.testing.expectEqualStrings("python", languageIdFor(.python).?);
-    try std.testing.expectEqualStrings("json", languageIdFor(.json).?); // 주 서버 표가 없어도 보조 서버(Biome)가 붙는다
+    try std.testing.expectEqualStrings("json", languageIdFor(.json).?); // 주 서버(LS1)와 보조 서버(Biome)가 같은 값을 받는다
     try std.testing.expectEqualStrings("css", languageIdFor(.css).?);
     try std.testing.expect(languageIdFor(.markdown) == null);
+}
+
+test "LSI3 언어 서버 후보 확대 LS1 — 열다섯의 실행 파일·인자·languageId·설치 명령이 실측한 그대로다 (계획 editor-lsp-servers-expand)" {
+    const Row = struct { g: language.Grammar, exe: []const u8, args: []const []const u8, id: []const u8, install: []const u8 };
+    const rows = [_]Row{
+        .{ .g = .swift, .exe = "sourcekit-lsp", .args = &.{}, .id = "swift", .install = "xcode-select --install" },
+        .{ .g = .dart, .exe = "dart", .args = &.{ "language-server", "--protocol=lsp" }, .id = "dart", .install = "brew install dart-sdk" },
+        .{ .g = .csharp, .exe = "csharp-ls", .args = &.{}, .id = "csharp", .install = "dotnet tool install --global csharp-ls" },
+        .{ .g = .scala, .exe = "metals", .args = &.{}, .id = "scala", .install = "brew install metals" },
+        .{ .g = .java, .exe = "jdtls", .args = &.{}, .id = "java", .install = "brew install jdtls" },
+        .{ .g = .kotlin, .exe = "kotlin-language-server", .args = &.{}, .id = "kotlin", .install = "brew install kotlin-language-server" },
+        .{ .g = .php, .exe = "intelephense", .args = &.{"--stdio"}, .id = "php", .install = "npm i -g intelephense" },
+        .{ .g = .lua, .exe = "lua-language-server", .args = &.{}, .id = "lua", .install = "brew install lua-language-server" },
+        .{ .g = .bash, .exe = "bash-language-server", .args = &.{"start"}, .id = "shellscript", .install = "npm i -g bash-language-server" },
+        .{ .g = .yaml, .exe = "yaml-language-server", .args = &.{"--stdio"}, .id = "yaml", .install = "npm i -g yaml-language-server" },
+        .{ .g = .toml, .exe = "taplo", .args = &.{ "lsp", "stdio" }, .id = "toml", .install = "brew install taplo" },
+        .{ .g = .dockerfile, .exe = "docker-langserver", .args = &.{"--stdio"}, .id = "dockerfile", .install = "npm i -g dockerfile-language-server-nodejs" },
+        .{ .g = .json, .exe = "vscode-json-language-server", .args = &.{"--stdio"}, .id = "json", .install = "npm i -g vscode-langservers-extracted" },
+        .{ .g = .css, .exe = "vscode-css-language-server", .args = &.{"--stdio"}, .id = "css", .install = "npm i -g vscode-langservers-extracted" },
+        .{ .g = .html, .exe = "vscode-html-language-server", .args = &.{"--stdio"}, .id = "html", .install = "npm i -g vscode-langservers-extracted" },
+    };
+    for (rows) |r| {
+        errdefer std.debug.print("LSI3 {s}\n", .{@tagName(r.g)});
+        const c = candidatesFor(r.g);
+        try testing.expectEqual(@as(usize, 1), c.len);
+        try testing.expectEqualStrings(r.exe, c[0].exe);
+        try testing.expectEqual(r.args.len, c[0].args.len);
+        for (r.args, c[0].args) |a, b| try testing.expectEqualStrings(a, b);
+        try testing.expectEqualStrings(r.id, c[0].language_id);
+        try testing.expectEqualStrings(r.id, languageIdFor(r.g).?);
+        try testing.expectEqualStrings(r.install, c[0].install);
+    }
+}
+
+test "LSI4 문서마다 — CSS 문법의 `.scss`·`.less` 는 그 방언의 languageId, Bash 서버는 `.zsh` 를 안 다룬다(LS1 실측) (계획 editor-lsp-servers-expand)" {
+    try testing.expectEqualStrings("css", languageIdForPath(.css, "/r/a.css").?);
+    try testing.expectEqualStrings("scss", languageIdForPath(.css, "/r/a.SCSS").?);
+    try testing.expectEqualStrings("less", languageIdForPath(.css, "/r/a.less").?);
+    try testing.expectEqualStrings("json", languageIdForPath(.json, "/r/a.scss").?); // 방언 이름은 CSS 문법에만
+    try testing.expect(languageIdForPath(.markdown, "/r/a.md") == null);
+    const sh = forGrammar(.bash).?;
+    try testing.expect(sh.serves("/r/a.sh") and sh.serves("/r/a.bash") and sh.serves("/r/script"));
+    try testing.expect(!sh.serves("/r/a.zsh") and !sh.serves("/r/a.ZSH"));
+    try testing.expect(forGrammar(.css).?.serves("/r/a.scss")); // CSS 서버는 셋을 다 안다
 }

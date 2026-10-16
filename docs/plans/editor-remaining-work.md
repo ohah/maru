@@ -73,7 +73,8 @@ SCM·원격 감시·앱 전체 접근성은 연결되는 경계만 다룬다. �
 | Split in Group | 계약 없는 후속 | 여러 뷰 원장 §3~§4. pane 분할 공유 편집과 별도 기능 | pane 기반 공유 뷰 이후 필요성·배치·입력 라우팅 계약 |
 | 병합 고르기 상태 모델·스마트 결합 | 기존 보류 | 병합 계약 §7 ⑦: 사용자 결정은 현재 마커 모델 | 실제 필요가 확인되면 별도 승인/계약. 현재 기본 병합 기능의 미완료로 세지 않는다 |
 | 번들 언어 확대 | 사용자 결정(2026-10-14 — 후보 열둘 전부), [계획](editor-bundled-languages.md) BL1(YAML·TOML·XML·DTD·Lua·Dockerfile·Make)·BLP(쿼리 술어 평가)·BL2(Swift)·BL3(SQL·Dart)·BL4(C#·Objective-C·Scala) 완료 — 후보 열둘 전부 | 네이티브 후속 표, third-party 라이선스 규칙 | — |
-| 진단 출처를 언어 서버로만 | 구현(2026-10-15 — 사용자 결정) | tree-sitter 구문 오류(`ERROR`·`MISSING`)를 진단 출처에서 걷었다 — `Provider.syntaxErrors`·호버의 구문 오류 문장·SQL 만 끄던 칸까지([시각 매핑](../native-editor-visual-mapping.md) §5.4 「출처 결정」). Objective-C 에 clangd 를 더했다 | Swift(sourcekit-lsp)·Dart(`dart language-server`)·C#·Scala(metals)·SQL 서버 후보는 설치·인자를 확인해 언어 서버 표로 — 서버가 없는 문법은 진단이 없다 |
+| 진단 출처를 언어 서버로만 | 구현(2026-10-15 — 사용자 결정) | tree-sitter 구문 오류(`ERROR`·`MISSING`)를 진단 출처에서 걷었다 — `Provider.syntaxErrors`·호버의 구문 오류 문장·SQL 만 끄던 칸까지([시각 매핑](../native-editor-visual-mapping.md) §5.4 「출처 결정」). Objective-C 에 clangd 를 더했다 | 언어 서버 후보 확대로 이었다(아래 행) |
+| 언어 서버 후보 확대 | 사용자 결정(2026-10-16), [계획](editor-lsp-servers-expand.md) LS1(Swift·Dart·C#·Scala·Java·Kotlin·PHP·Lua·Bash·YAML·TOML·Dockerfile·JSON·CSS·HTML — maru 와 같은 능력으로 실측) | 서버 표(`session/lsp/servers.zig`)·툴링 §8.2a 「서버 찾기」·「설치 안내」. 문서마다 languageId(`.scss`·`.less`)·다루지 않는 확장자(Bash 서버의 `.zsh`) | LS2 — 주 서버의 서버별 pull 진단 + Ruby(`ruby-lsp` — pull 만 낸다). SQL·Markdown·XML·DTD·Make 는 쓸 만한 서버가 없다(계획 「싣지 않는 것」) |
 | 하이라이트 쿼리 미리 데우기 | 결정 필요 — 번들 언어 확대가 드러낸 비용 | 쿼리는 그 언어로 처음 칠할 때 메인 스레드에서 한 번 컴파일된다(`tree_sitter.queryFor` — 프로세스 수명 캐시). 실측 Swift 84 ms·Objective-C 78 ms·Dart 46 ms([번들 언어 확대](editor-bundled-languages.md) 「한계」) | 다른 스레드에서 미리 만들지(경쟁하면 진 쪽이 버리는 캐시는 이미 그 모양이다), 언제(앱 시작·파일 열기 직전) 데울지 정하고 첫 프레임 시간을 판정자로 잰다 |
 | 편집기 본문 접근성 | 앱 전체 후속 | 네이티브 후속 표와 chrome interaction 전략 | chrome 접근성 구현을 본문 텍스트/선택/편집의 VoiceOver 완료로 오인하지 말고 별도 계약·제품 검증 |
 

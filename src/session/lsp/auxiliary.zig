@@ -73,7 +73,7 @@ const biome: Auxiliary = .{
     .server = .{ .exe = "biome", .args = &biome_args, .language_id = "javascript", .install = "npm i -D @biomejs/biome" },
     .bin_dirs = &.{"node_modules/.bin"},
 };
-// 주 서버 표가 없는 문법(AS5) — Biome 은 JSON·CSS 도 린트한다. CSS 는 `.css` 파일만(위 `extensions`).
+// Biome 은 JSON·CSS 도 린트한다(AS5 — 그때는 주 서버 표가 없었고, LS1 부터 주 서버와 함께 간다). CSS 는 `.css` 파일만(위 `extensions`).
 const biome_css: Auxiliary = .{ .tool = .biome, .server = biome.server, .bin_dirs = biome.bin_dirs, .extensions = &.{"css"} };
 const oxlint_args = [_][]const u8{"--lsp"};
 const oxlint: Auxiliary = .{
@@ -88,7 +88,6 @@ pub fn forGrammar(g: language.Grammar) []const Auxiliary {
     return switch (g) {
         .python => &[_]Auxiliary{ruff},
         .javascript, .typescript, .tsx => &[_]Auxiliary{ eslint, biome, oxlint },
-        // 주 서버 표가 없다 — 보조 서버만 뜬다(AS5).
         .json => &[_]Auxiliary{biome},
         .css => &[_]Auxiliary{biome_css},
         else => &.{},
@@ -239,13 +238,12 @@ test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(
     try testing.expectEqual(Tool.biome, byExe("biome").?.tool);
     try testing.expectEqual(Tool.oxlint, byExe("oxlint").?.tool);
     for ([_]language.Grammar{ .zig, .rust, .go, .c, .markdown, .html, .none }) |g| try testing.expectEqual(@as(usize, 0), forGrammar(g).len);
-    // 주 서버 표가 없는 JSON·CSS 에는 Biome 하나(AS5). CSS 는 `.css` 파일만 — `scss`·`less` 는 Biome 이 다루지 않는다.
+    // JSON·CSS 에는 Biome 하나(AS5). CSS 는 `.css` 파일만 — `scss`·`less` 는 Biome 이 다루지 않는다.
     for ([_]language.Grammar{ .json, .css }) |g| {
         const b = forGrammar(g);
         try testing.expectEqual(@as(usize, 1), b.len);
         try testing.expectEqual(Tool.biome, b[0].tool);
         try testing.expectEqualStrings("lsp-proxy", b[0].server.args[0]);
-        try testing.expectEqual(@as(usize, 0), servers.candidatesFor(g).len);
     }
     try testing.expect(forGrammar(.json)[0].appliesTo("/r/a.json"));
     try testing.expect(forGrammar(.css)[0].appliesTo("/r/s.css") and forGrammar(.css)[0].appliesTo("/r/S.CSS"));
@@ -255,6 +253,21 @@ test "AUX1 보조 서버 표 — Python 에 ruff server, JS·TS·TSX 에 ESLint(
     try testing.expect(byExe("pyright-langserver") == null);
     // 주 서버 표와 이름이 겹치면 `(root, exe)` 열쇠가 두 역할을 한 클라이언트로 합친다.
     for (std.enums.values(language.Grammar)) |g| for (servers.candidatesFor(g)) |s| try testing.expect(byExe(s.exe) == null);
+}
+
+test "AUX6 보조 서버가 있는 문법엔 주 서버도 있고, 그 주 서버는 보조 서버가 붙는 확장자를 다룬다 — 「보조 서버만」인 문서는 없다(LS1 부터; 계획 editor-lsp-servers-expand)" {
+    // 정보 명령·신뢰 관리·동기화가 이 불변식에 기대어 「보조 서버만」 갈래를 두지 않는다(`editor/lsp.zig`). 깨지면(주 서버 없는 문법에 보조 서버를
+    // 더하면) 그 갈래가 다시 필요하다 — 이 판정자가 먼저 깨진다.
+    for (std.enums.values(language.Grammar)) |g| {
+        const auxes = forGrammar(g);
+        if (auxes.len == 0) continue;
+        const primary = servers.forGrammar(g) orelse return error.AuxWithoutPrimary;
+        for (auxes) |a| for (a.extensions) |e| {
+            var buf: [32]u8 = undefined;
+            try testing.expect(primary.serves(try std.fmt.bufPrint(&buf, "/r/a.{s}", .{e})));
+        };
+        try testing.expectEqual(@as(usize, 0), primary.skip_extensions.len); // 다루지 않는 확장자가 생기면 위 갈래를 다시 본다
+    }
 }
 
 test "AUX2 ruff 감지 — 가장 가까운 ruff.toml·.ruff.toml·pyproject [tool.ruff…], 다른 표만 있으면 아님, 루트 밖은 안 봄 (tooling §8.2u)" {

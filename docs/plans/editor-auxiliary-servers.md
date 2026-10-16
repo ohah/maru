@@ -127,6 +127,7 @@ Python 문서에 pyright 와 ruff 를 함께 붙이지 못한다. 저장 시 cod
 - **languageId**: `servers.languageIdFor` 가 주 서버 표가 없는 JSON·CSS 에 `json`·`css` 를 낸다(없으면 서버 표의 값 `javascript` 가 가서 Biome 이 JS 로 읽는다).
 - **확장자 거름**: 문법 `.css` 는 `scss`·`less` 도 덮는다. Biome 은 그 둘을 다루지 않는다 — languageId `scss`·`less` 면 진단이 없고(빈 칸), `css` 면 `$c`·`@c` 에 거짓 구문 오류(실측). `Auxiliary.extensions` 로 `.css` 파일에만 붙인다(감지 단계 `auxiliariesFor` 에서 거른다 — 동기화·정보 줄이 모두 그 집합을 본다).
 - **주 서버를 전제한 자리**: 정보 명령(`showServerInfo`)은 주 서버가 없으면 「없음」이었다 → 보조 서버 줄만. 신뢰 관리(`manageCurrent`)는 주 서버의 클라이언트로 결정을 찾았다 → 보조 서버의 클라이언트로(신뢰는 저장소 단위라 어느 클라이언트의 열쇠든 같다). 상태바(`statusFor`)·호버·이동 등 주 서버의 기능은 그대로 주 서버만 — 그 문서엔 없다.
+- **LS1 이후(2026-10-16)**: JSON·CSS 에 주 서버(`vscode-json-language-server`·`vscode-css-language-server`)가 서서 「주 서버 없이 보조 서버만」인 문서가 없어졌다 — 위 두 갈래(정보 명령의 보조 서버 줄만·보조 서버 클라이언트로 신뢰 찾기)와 동기화의 「주 서버 없어도 보조 서버만」은 걷었다. 불변식은 `auxiliary` 의 `AUX6` 이 지킨다([계획](editor-lsp-servers-expand.md)).
 
 ## 조각
 

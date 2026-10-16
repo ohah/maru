@@ -413,11 +413,32 @@ runtime의 동일 PID·입력/화면 marker·Metal 제출·정상 Quit 정리를
 실패는 당시 미해결로 기록했으며, 아래 2026-10-16 정산 수정과 일반 두-runtime 자동 재접속 대조군의 성공을 구분한다. in-process fixture
 daemon의 진단은 CLI의 별도 host 로그가 아니라 상속한 stderr의 통합 gate 로그에 기록된다.
 
-후속 정책 검토안은 서버가 정확한 host/runtime 신원으로 종료를 확정한 항목만 ended로 정산하고
-아직 시작하지 않은 형제 항목의 복구를 계속하는 것이다. 일반 attach 거부·권한 충돌·손상된 응답을
-종료 확정으로 취급하지 않는다. 이는 현 canonical forward-failure 정책 변경이므로 사용자와
-논의 중이며, 승인 전에는 기존 재접속 정책을 변경하지 않는다. 정상 Quit의 정산 오류 조사는
-이 정책 검토와 독립적으로 진행한다.
+후속 정책은 서버가 정확한 host/runtime 요청에 종료를 확정한 항목만 ended로 정산하고
+아직 시작하지 않은 형제 항목의 복구를 계속하는 것이다. 일반 attach 거부·권한 충돌·손상된 응답은
+종료 확정으로 취급하지 않는다. 2026-10-16 사용자가 종료 정산 수정의 머지와 다음 작업 진행을
+요청하여 이 제한된 정책으로 진행한다. 일반 forward-failure와 shared transport 실패 처리는 유지한다.
+
+구현 순서와 판정 기준:
+
+1. 실제 wire error 분기에서 `runtime_not_found`를 구분한다. 재확인한 현재 제품 executor는 JSON error
+   응답도 accepted payload owner로 전달하며, `decodeAttachResponse`의 `wire_error`가 아직 살아 있는
+   동안 code를 읽을 수 있다. 따라서 typed-reject payload를 새로 보존하거나 receipt ABI를 넓힐 필요는 없다.
+   observer candidate가 정리되기 전에 positive missing만 구분하고 일반 거부는 기존 결과로 남긴다.
+   **분류 구현 완료**: `ObserverRuntimeNotFound`를 별도 반환한다. 같은 실제 socket 회귀 검사에서
+   정확한 부재·unauthorized·비슷한 문자열의 미지 code·손상 JSON·EOF를 구분하고 candidate 정리,
+   기존 shell·게시 Client·connection generation·cleanup pin 보존을 Debug/ReleaseFast로 확인했다.
+   이 분류 슬라이스의 backend는 아직 기존 rejection 정산을 유지하며 sibling 복구 완료를 뜻하지 않는다.
+2. canonical job에 종료 확정 상태를 seal하고 해당 active row만 gone_positive/ended/closed로 전진한다.
+   이미 게시한 sibling과 아직 시작하지 않은 suffix는 바꾸지 않는다. 공유 retired Client는 모든 row
+   정산 뒤 정확히 한 번 회수한다. 추가 검토에서 종료 row는 candidate publication이 없어 old payload가
+   retiring이 아니라 current인 상태임을 확인했다. 단순히 retiring reclaim을 부르는 구현은 피한다.
+   종료된 current payload·화면/종료 projection의 수명, 다음 incident의 canonical row 수집과 membership
+   count에서 종료 항목을 제외하는 일관성을 먼저 설계·검증해야 한다. 아직 이 정책 배선은 미구현이다.
+3. 없는 runtime과 일반 거부·잘못된 신원·손상 응답·EOF를 구분하는 실제 socket 검사를 둔다.
+   세 runtime에서 처음·중간·마지막 종료를 공격하여 앞선 성공과 뒤 sibling 입력을 보존하는지 확인한다.
+   continuation을 무력화하거나 일반 거부를 종료로 바꾸는 변이가 실패해야 한다.
+4. 실제 PartialFrame GUI 재현에서 target 종료와 healthy PID/controller·입력/복사/resize·Metal frame·Quit을
+   확인한다. 원래 두-runtime 대조군의 첫 입력 timeout도 별도 재현 경계로 유지하며 재실행 성공으로 덮지 않는다.
 
 잠금 상태의 종료 원인 추적에는 외부 복사본의 `prepare_partial.py --optimize Debug
 --nonvisual-diagnostic`을 사용한다. 이 복사본은 캡처 실패로 driver가 정지하는 부분만 건너뛰고,

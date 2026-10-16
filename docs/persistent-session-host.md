@@ -5757,6 +5757,12 @@ exclusive fence intrusion 0, stream/event/batch/partial/parser 잔여 0, prepare
 node의 final address, PID/process nonce/thread, slot/node incarnation, connection generation과 complete node digest를 caller-owned
 `PreparedRetiredClientReclaim`에 봉인한다. node backing은 operation fence 구간을 제외한 고정 bytes로, fence는 모든 atomic을 acquire-load한
 별도 semantic digest로 결속해 stale public-call intrusion과 raw-byte hash가 경쟁하지 않는다. copied/moved/stale handle과 readiness/digest drift는 destroy 0이다.
+
+admission이 닫히고 retirement detach가 완료된 Client의 `finishRetirementCleanup`은 해당 연결에서
+더 이상 완성될 수 없는 parser의 미소비 바이트를 버린다. 이 작업은 canonical node operation 안에서
+parser allocator·buffer 범위를 확인한 뒤 수행하며 callback·allocation·free는 없다. backing allocation과
+협상한 protocol major는 보존하고, allocation 회수는 기존 retired-node deinit이 소유한다. prepare·abort는
+parser를 변경하지 않으며, retired node에 남아 있는 parser 바이트는 계속 reclaim을 거부한다.
 prepared replacement/reclaim의 source·cleanup·destination은 두 retired node 본체뿐 아니라 각 Client가 소유한 parser/queue/build/lifecycle backing과도 겹칠 수 없다.
 `commitRetiredClientReclaimNoFail`만 tick-end owner turn에서 oldest node의 Client/cleanup registry/batch registry/accounting ledger를
 재검증·정산하고 allocator destroy한 뒤 inventory를 compact한다. commit은 오류를 반환하거나 allocation·callback을 수행하지 않고

@@ -5042,7 +5042,8 @@ pub fn replaceCurrentMatch(self: *AppSession, term: *Term) bool {
     const changes = plan.changes.items;
     const replaced = changes[0];
 
-    if (!applyEditAsOne(self, term, changes)) return false;
+    // 치환이 성공하면 반드시 한 번에 되돌릴 수 있도록 본문보다 Undo를 먼저 준비한다.
+    if (!applyEditAsOneWithUndo(self, term, changes)) return false;
 
     // **바꾼 자리 뒤의 첫 매치로 간다.** 목록은 방금 낡았으므로 다시 찾고, 그 안에서 고른다.
     const after = replaced.start + replaced.text.len;
@@ -5085,7 +5086,8 @@ pub fn replaceAllMatches(self: *AppSession, term: *Term) bool {
     defer plan.deinit(self.allocator);
     const changes = &plan.changes;
 
-    if (!applyEditAsOne(self, term, changes.items)) return false;
+    // 전체 치환도 기존 이력을 버리지 않고 새 Undo를 사전 준비한다.
+    if (!applyEditAsOneWithUndo(self, term, changes.items)) return false;
 
     // 다 바꿨으니 남은 매치는 **바꾼 문자열이 검색어를 품은 경우뿐**이다. 다시 찾아 카운터를 맞춘다.
     find_ops.recomputeEditorFindPublic(self, term);
@@ -60415,6 +60417,84 @@ test "EDREG5 빈 정규식 대안 치환은 삽입하고 Undo로 본문을 복�
         try testing.expectEqualStrings("Xfoo", term.rt.editorDocument().opened.?.file.content);
         try testing.expect(undoEdit(fx.session, term));
         try testing.expectEqualStrings("foo", term.rt.editorDocument().opened.?.file.content);
+    }
+}
+
+// 실패한 치환은 본문과 기존 이력을 함께 보존해야 한다.
+test "EDREG6 단일·전체 치환은 Undo 준비 실패 시 본문과 이력을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    for ([_]bool{ false, true }) |all| {
+        for (0..5) |mode| {
+            var complete = false;
+            for (0..256) |failure| {
+                var fx = try PaneFixture.init(a);
+                defer fx.deinit(a);
+                const term = try undoFixture(&fx, a, "replace-undo.txt", "foo foo");
+                term.rt.editor_selection = editor_selection.Selection.at(0);
+                try testing.expect(insertText(fx.session, term, "prior "));
+                breakUndoGroup(term);
+                try testing.expect(insertText(fx.session, term, "redo "));
+                try testing.expect(undoEdit(fx.session, term));
+                const peer = try openSharedViewInActivePane(fx.session, term);
+                try testing.expect(fx.session.activateSurfaceById(term.surfaceId()));
+                peer.rt.editor_selection = editor_selection.Selection.at(1);
+                fx.session.surface_initialized = true;
+                find_ops.toggleFind(fx.session);
+                fx.session.chrome_host.find.regex = mode == 1;
+                try fx.session.chrome_host.find.input.query.appendSlice(a, if (mode == 1) "(foo)" else "foo");
+                try fx.session.chrome_host.find.replace.query.appendSlice(a, if (mode == 1) "$1X" else "bar");
+                find_ops.recomputeFind(fx.session);
+                const state = term.rt.editorDocument();
+                if (mode == 2) state.history.next_id = std.math.maxInt(u64);
+                if (mode == 3) state.opened.?.file.read_only = true;
+                if (mode == 4) term.rt.editor_selection = null;
+                const before = try a.dupe(u8, state.opened.?.file.content);
+                defer a.free(before);
+                const selection = term.rt.editor_selection;
+                const revision = state.opened.?.file.revision;
+                state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+                const undo_len = state.history.undo_len;
+                const redo_len = state.history.redo_len;
+                const next_id = state.history.next_id;
+                const admission = mode == 2 or mode == 3;
+                var failing = testing.FailingAllocator.init(a, .{ .fail_index = if (admission) std.math.maxInt(usize) else failure, .resize_fail_index = 0 });
+                fx.session.allocator = failing.allocator();
+                state.opened.?.file.allocator = failing.allocator();
+                state.opened.?.file.buf.allocator = failing.allocator();
+                const applied = if (all) replaceAllMatches(fx.session, term) else replaceCurrentMatch(fx.session, term);
+                fx.session.allocator = a;
+                state.opened.?.file.allocator = a;
+                state.opened.?.file.buf.allocator = a;
+                if (!applied) {
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                    try testing.expectEqual(revision, state.opened.?.file.revision);
+                    try testing.expectEqual(undo_len, state.history.undo_len);
+                    try testing.expectEqual(redo_len, state.history.redo_len);
+                    try testing.expectEqual(next_id, state.history.next_id);
+                    try testing.expectEqual(@as(usize, 1), peer.rt.editor_selection.?.focus);
+                } else {
+                    try testing.expect(!admission);
+                    try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                    try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+                    try testing.expectEqualStrings(if (mode == 1) (if (all) "prior fooX fooX" else "prior fooX foo") else (if (all) "prior bar bar" else "prior bar foo"), state.opened.?.file.content);
+                    const after = try a.dupe(u8, state.opened.?.file.content);
+                    defer a.free(after);
+                    try testing.expect(undoEdit(fx.session, peer));
+                    try testing.expectEqualStrings(before, state.opened.?.file.content);
+                    try testing.expect(redoEdit(fx.session, term));
+                    try testing.expectEqualStrings(after, state.opened.?.file.content);
+                }
+                if (!failing.has_induced_failure) {
+                    // 항상 거절하는 구현도 통과하지 못하도록 정상 대조군의 성공을 요구한다.
+                    try testing.expectEqual(!admission, applied);
+                    complete = true;
+                    break;
+                }
+            }
+            try testing.expect(complete);
+        }
     }
 }
 

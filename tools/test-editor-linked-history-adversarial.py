@@ -30,8 +30,8 @@ original = (repo / "src/session/editor/history/forward.zig").read_text()
 cases = [
     ("control", original, True),
     ("skip-final-validation", original.replace("for (self.items.items) |item| {", "for (self.items.items[0..0]) |item| {", 1), False),
-    ("publish-A-before-B-prepared", original.replace("prepared.items.appendAssumeCapacity(try prepareOne(t));", "prepared.items.appendAssumeCapacity(try prepareOne(t));\n            if (i == 0 and targets.len > 1) try prepared.commit();", 1), False),
-    ("accept-noop-document", original.replace("if (std.mem.eql(u8, next.content, t.file.content))", "if (std.mem.eql(u8, next.content, t.file.content) and false)", 1), False),
+    ("publish-A-before-B-prepared", original.replace("for (targets) |t| prepared.items.appendAssumeCapacity(try prepareOne(t, allow_unchanged));", "for (targets, 0..) |t, i| {\n            prepared.items.appendAssumeCapacity(try prepareOne(t, allow_unchanged));\n            if (i == 0 and targets.len > 1) try prepared.commit();\n        }", 1), False),
+    ("accept-noop-document", original.replace("if (!allow_unchanged and std.mem.eql(u8, next.content, t.file.content))", "if (!allow_unchanged and std.mem.eql(u8, next.content, t.file.content) and false)", 1), False),
     ("discard-one-extra-history-entry", original.replace("history.stack_limit - 1", "history.stack_limit - 2", 1), False),
     ("skip-reserved-id-revalidation", original.replace("h.next_id != item.next_id or", "", 1), False),
     ("equivalent-control", original.replace("const drop = t.state.undo_len - keep;", "const drop = (t.state.undo_len - keep);", 1), True),

@@ -1563,8 +1563,8 @@ pub fn build(b: *std.Build) void {
         .filters = &.{ "RECID", "RECB" },
     });
     const run_recovery_codec = b.addRunArtifact(recovery_codec_tests);
-    run_recovery_codec.addArg("--maru-expect-tests=30");
-    run_recovery_codec.addArg("--maru-expect-passed=30");
+    run_recovery_codec.addArg("--maru-expect-tests=32");
+    run_recovery_codec.addArg("--maru-expect-passed=32");
     const recovery_codec_step = b.step("test-editor-recovery-codec", "Run recovery identity ownership and strict record codecs");
     recovery_codec_step.dependOn(&run_recovery_codec.step);
     recovery_codec_step.dependOn(&run_editor_restore_codec.step);
@@ -2206,10 +2206,12 @@ pub fn build(b: *std.Build) void {
     // 101 = 앞의 90(U1a~U1r 열여덟 + C0a~C0c 셋 + U2 일가 + SYNU1 + 부분 일치 + `test_0` 다섯 +
     //       C1a-1~C1a-11 열하나 + C1b-1~C1b-5 다섯 + U3-1~U3-8 여덟)에
     //       **U4a-1~U4a-13 열셋 + U4b-1~U4b-9 아홉 + U4c-1~U4c-5·U4c-8 여섯 + U4d-3~U4d-6 넷**을 더한 값이다(U4a 백업 · U4b 복원 · U4c 이름 없는 문서, §3.10).
-    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=142");
+    // U4b-19가 복원 준비 실패 행렬을 제품 판정자 하나로 추가한다.
+    run_macos_editor_untitled_tests.addArg("--maru-expect-tests=143");
     // ⚠️ **그리고 실제로 돌았는가** — 전부 macOS 가 아니면 `SkipZigTest` 다.
-    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=142");
+    run_macos_editor_untitled_tests.addArg("--maru-expect-passed=143");
     run_macos_editor_untitled_tests.setCwd(b.path("."));
+    if (builtin.os.tag == .macos and target.result.os.tag == .macos) run_macos_editor_untitled_tests.step.dependOn(&ripgrep_prepare.step);
     const untitled_step = b.step(
         "test-editor-untitled",
         "Run the untitled-document judges only (U1 filter) and the L2 naming rules (UT)",
@@ -5872,6 +5874,11 @@ pub fn build(b: *std.Build) void {
         run_save_pipeline.addArg("--maru-expect-passed=10");
         macos_only_test_step.dependOn(&run_save_pipeline.step);
     }
+    const backup_restore_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.U4b", ".test.U4c", ".test.U4d", "app_session.editor.recovery_store.test.editor recovery restore" } });
+    const run_backup_restore = b.addRunArtifact(backup_restore_tests);
+    run_backup_restore.setCwd(b.path("."));
+    run_backup_restore.addArg("--maru-expect-tests=40");
+    b.step("test-editor-backup-restore", "Run backup restore Undo and failure preservation regressions").dependOn(&run_backup_restore.step);
     const workspace_edit_tests = addProjectTest(b, .{ .root_module = editor_tests.root_module, .filters = &.{ ".test.RNM", ".test.WEOOM", ".test.SHVIEW18", ".test.CA1 ", ".test.CA2 " } });
     const run_workspace_edit = b.addRunArtifact(workspace_edit_tests);
     run_workspace_edit.setCwd(b.path("."));

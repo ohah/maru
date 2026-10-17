@@ -53298,6 +53298,111 @@ test "U4b-3 되돌리기가 디스크 내용을 되살린다 — 한 편집으�
     try testing.expect(!isDirty(t)); // 디스크와 같아졌으니 clean 이다
 }
 
+test "U4b-19 백업 복원 준비 실패는 선택·본문·이력·원본 백업을 보존한다" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const a = testing.allocator;
+    // 로컬 ID/기존 untitled × 선택 없음/기존 이력, 그리고 ID 고갈·읽기 전용 거절.
+    for (0..8) |mode| {
+        const modern = mode < 2 or mode == 4 or mode == 5;
+        const existing = mode % 2 == 1 or mode >= 4;
+        const admission = mode >= 4;
+        var complete = false;
+        for (0..256) |failure| {
+            var fx = try UntitledFixture.init(a, false, true);
+            defer fx.deinit(a);
+            var dir = testing.tmpDir(.{});
+            defer dir.cleanup();
+            var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const root = try pinBackupDir(&root_buf, &dir);
+            defer app_session_mod.editor_backup_ops.setDirForTest(null);
+            try dir.dir.writeFile(testing.io, .{ .sub_path = "restore.txt", .data = "disk\n" });
+            var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = try std.fmt.bufPrint(&path_buf, "{s}/restore.txt", .{root});
+            const term = if (modern) blk: {
+                try plantRecoveryBackup(a, root, .{ .path = .{ .path = path, .disk_hash = contentHash("disk\n") } }, "recovered\n");
+                const prepared = try prepareRecoveryPath(fx.session, path, fixtureRecoveryId(path));
+                const t = try createEditorTerm(fx.session);
+                finishAttach(fx.session, t, prepared);
+                try pane_ops.activePane(fx.session).terms.append(a, t);
+                break :blk t;
+            } else blk: {
+                const t = try openUntitledInActivePane(fx.session);
+                try plantBackup(a, root, .{ .untitled = t.rt.editorDocument().untitled.?.n }, "recovered\n");
+                break :blk t;
+            };
+            const legacy: backup_rules.Doc = .{ .untitled = if (modern) 0 else term.rt.editorDocument().untitled.?.n };
+            const backup_before = if (modern) try readRecovery(a, root, fixtureRecoveryId(path)) else try readBackup(a, root, legacy);
+            defer a.free(backup_before);
+            term.rt.editor_selection = editor_selection.Selection.at(0);
+            if (existing) {
+                try testing.expect(insertText(fx.session, term, "mine"));
+                breakUndoGroup(term);
+                try testing.expect(insertText(fx.session, term, "redo"));
+                try testing.expect(undoEdit(fx.session, term));
+            } else term.rt.editor_selection = null;
+            const peer = if (existing and modern) try openSharedViewInActivePane(fx.session, term) else null;
+            if (peer) |t| t.rt.editor_selection = editor_selection.Selection.at(1);
+            const state = term.rt.editorDocument();
+            if (mode == 4 or mode == 6) state.history.next_id = std.math.maxInt(u64);
+            if (mode == 5 or mode == 7) state.opened.?.file.read_only = true;
+            const before = try a.dupe(u8, state.opened.?.file.content);
+            defer a.free(before);
+            const selection = term.rt.editor_selection;
+            const revision = state.opened.?.file.revision;
+            const disk_hash = state.opened.?.disk_hash;
+            const needs_save = state.opened.?.needs_save;
+            const backup_on_disk = state.notifications.backup_on_disk;
+            state.history.undo = try a.realloc(state.history.undo, state.history.undo_len);
+            const undo_len = state.history.undo_len;
+            const redo_len = state.history.redo_len;
+            const next_id = state.history.next_id;
+            var failing = testing.FailingAllocator.init(a, .{ .fail_index = if (admission) std.math.maxInt(usize) else failure, .resize_fail_index = 0 });
+            fx.session.allocator = failing.allocator();
+            state.opened.?.file.allocator = failing.allocator();
+            state.opened.?.file.buf.allocator = failing.allocator();
+            var restore_error: ?anyerror = null;
+            const applied = if (modern) app_session_mod.editor_backup_ops.restoreRecovery(fx.session, term) catch |err| blk: {
+                restore_error = err;
+                break :blk false;
+            } else blk: {
+                app_session_mod.editor_backup_ops.restoreUntitled(fx.session, term);
+                break :blk !std.mem.eql(u8, before, state.opened.?.file.content);
+            };
+            fx.session.allocator = a;
+            state.opened.?.file.allocator = a;
+            state.opened.?.file.buf.allocator = a;
+            if (restore_error) |err| try testing.expectEqual(error.OutOfMemory, err);
+            const backup_after = if (modern) try readRecovery(a, root, fixtureRecoveryId(path)) else try readBackup(a, root, legacy);
+            defer a.free(backup_after);
+            try testing.expectEqualSlices(u8, backup_before, backup_after);
+            if (!applied) {
+                try testing.expectEqualStrings(before, state.opened.?.file.content);
+                try testing.expectEqualDeep(selection, term.rt.editor_selection);
+                try testing.expectEqual(revision, state.opened.?.file.revision);
+                try testing.expectEqual(disk_hash, state.opened.?.disk_hash);
+                try testing.expectEqual(needs_save, state.opened.?.needs_save);
+                try testing.expectEqual(backup_on_disk, state.notifications.backup_on_disk);
+                try testing.expectEqual(undo_len, state.history.undo_len);
+                try testing.expectEqual(redo_len, state.history.redo_len);
+                try testing.expectEqual(next_id, state.history.next_id);
+                if (peer) |t| try testing.expectEqual(@as(usize, 1), t.rt.editor_selection.?.focus);
+            } else {
+                try testing.expect(!admission);
+                try testing.expectEqualStrings("recovered\n", state.opened.?.file.content);
+                try testing.expectEqual(undo_len + 1, state.history.undo_len);
+                try testing.expectEqual(@as(usize, 0), state.history.redo_len);
+                try testing.expect(undoEdit(fx.session, peer orelse term));
+                try testing.expectEqualStrings(before, state.opened.?.file.content);
+            }
+            if (!failing.has_induced_failure) {
+                complete = true;
+                break;
+            }
+        }
+        try testing.expect(complete);
+    }
+}
+
 test "U4b-4 내용이 같으면 되살릴 것이 없다 — clean 이고 알림도 없고 레코드는 걷힌다" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
     const allocator = testing.allocator;

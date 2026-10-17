@@ -183,6 +183,7 @@
 |---|---|
 | `shell.command`·`shell.args`·`shell.windows-shell`·`shell-integration.ssh`·`session.keep-alive-after-quit`·`workspace.*` | **로컬 PTY 가 없다**([플랫폼 §1](mobile-platform.md)). 세션은 원격에서 받는다. `shell.windows-shell`은 그 위에 Windows 전용이기까지 하다 |
 | `quick-terminal.*`·`window.*`·`split.*`·`sidebar.*`·`status-bar.show`·`chrome.tab-style` | 데스크톱 창·크롬 개념이다. 폰에는 창이 하나고 배치가 다르다([UX §3](mobile-ux.md)) |
+| `file-panel.show-explorer-on-open` | 파일 탐색기 도크를 자동 표시하는 설정이다. 모바일 UX는 데스크톱 도크(파일 탐색기 포함)를 이식 대상에서 제외한다([UX §2.4](mobile-ux.md)) |
 | `input.option-as-meta`·`input.right-click`·`input.mouse-hide-while-typing`·`input.url-click-modifier` | 마우스와 맥 키보드 축이다 |
 | `keyhint.*`·`keybind` | 하드웨어 키보드 축이다. 폰의 기본 입력은 소프트 키보드와 보조 키바다 |
 | `font.family`·`font.family-bold`·`font.family-italic`·`font.fallback` | 폰트를 **번들이 정한다**. 시스템 폴백은 host 가 하고 사용자가 파일을 넣을 자리가 없다 |

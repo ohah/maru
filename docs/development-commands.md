@@ -126,10 +126,11 @@ sshd로 실제 SSH를 실행해 기존/새 프로세스, 환경 전달 차단, �
 혼합 CLI는 `maru agent-events --stdio --dir=<home>/.cache/maru --log-format=mixed`다.
 `--gui-runtime-ended --gui-app <maru-macos-app> --gui-output <새 디렉터리>`는 같은
 복사본 앱에서 실제 연결 단절 후 observer 준비를 잠깐 기다리게 하고, CLI로 runtime을
-종료하여 `candidate_ended`·`ended=1/retry_reserved=0` 정산·앱 생존·정상 Quit을 검사한다. `--gui-providers`와 동시에 쓰지 않는다.
+종료하여 `candidate_ended`·`ended=1/retry_reserved=0` 정산·시작 GUI 화면·마지막 창의 정상 자동 종료를 검사한다. `--gui-providers`와 동시에 쓰지 않는다.
 `python3 tools/remote-restart-app/test_ended_oracle.py --artifact <GUI artifact>`는 실제
-로그의 host/runtime·종료 확정·terminal·입력 닫힘·GUI 표시 증거를 변조해 판정을 검사한다.
-옛 frozen/retry 정산과 같은 host의 모순된 terminal summary도 거부한다.
+로그의 host/runtime·종료 확정·terminal·입력 닫힘·시작 GUI·동일 앱 PID의 정상 종료 증거를 변조해 판정을 검사한다.
+옛 frozen/retry 정산과 같은 host의 모순된 terminal summary도 거부한다. 단일 runtime 시나리오는
+`window.quit-after-last-window-closed=true`를 명시하고, 닫힌 창의 사후 frame을 기다리지 않는다.
 이 시나리오는 원래 host가 연결을 닫은 원인이나 PartialFrame 정책의 검증은 아니다.
 `python3 tools/remote-restart-app/test_ended_contract.py`와
 `python3 tools/shared-restore-app/test_gui_launch.py`는 화면 없이 판정의 신원·순서·늦은

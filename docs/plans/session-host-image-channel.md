@@ -680,3 +680,47 @@ IC6 머지 뒤 적대적 재검증(4 명, HIGH 0)이 남긴 MEDIUM 넷을 고친
 - IC7a 의 이유별 로그로 빈도를 본 뒤 정한다. 한다면 새 RPC 대신 token 재사용(입양 뒤에도 token 을 그 연결의 재수립 자격으로 남기고
   같은 채널 hello 를 다시 보낸다)이 첫 후보다. 전제: 세그먼트 id 연속(다시 묶을 때 원장의 id 를 1 로 되돌리지 않는다), `releaseAll`
   「연결당 한 번」 불변식 갱신, 상실과 입양 거부의 경합, 시도 상한과 안내 문구.
+- 실측(2026-10-15~17, main `9f3fa47da` 설치본 한 대, 업그레이드로 host 교체): 앱의 「이미지 채널 없음」 0, host 의 채널 상실·
+  세그먼트 생성 실패·재시도 0. 그 구간에 terminal-browser 로 이미지 약 1.8 만 장을 채널로 받았다. 채널 수립은 업그레이드 때 한
+  번뿐이라 앱 재시작의 새 연결 수립은 아직 재지 않았다 — 보류를 유지한다.
+
+### IC8 — 보이지 않는 탭의 이미지 투영 멈춤 (후보)
+
+IC7 실측에서 뒤에 있던 terminal-browser 탭이 5 초마다 이미지 60~70 장을 받으며 GPU 업로드는 0 이었다(`image flow` 의
+`complete` 와 `uploaded`). 그리기는 보이는 탭만 올리지만 host 의 투영·세그먼트·채널 전송과 앱의 해석은 탭이 보이든 말든 돈다.
+손실은 아니고 비용이다 — 다만 이미지 예산은 연결 하나(앱은 host 마다 주 연결 하나)의 32 세그먼트·64 MiB 를 탭이 함께 쓴다.
+
+**지금(코드로 확인, 2026-10-17)**
+
+- host: 연결의 모든 구독을 같은 20 ms cadence 로 투영한다(`beginProducerSweep` 가 `localStreams` 전부를 잡는다). 건너뛰는 조건은
+  화면 무변화·압력·예산·resync 뿐이고 가시성은 없다. 이미지는 `appendVisibleImages` 가 `kittyImageVisibleInViewport`(그 runtime
+  뷰포트 기준)로만 거른다.
+- 앱: Term 마다 생성·복원 때 `runtime.attach` 하고 detach 는 앱 종료·복원 되돌림·창 포기·닫기뿐이다. frame tick 은 모든 탭의 모든
+  Term 을 drain 한다(「백그라운드 탭도 출력을 받게」 — tabs-and-splits PR1d-2b). 보이는 탭은 `activeTab` 으로 알지만 redraw 판정에만
+  쓴다.
+- 가시성 신호는 없다. `runtime.declare_viewport` 는 `--stream` observer 의 열 수 협상 전용이고(controller 는 `NotObserver`),
+  `report_focus` 는 PTY 로 가는 포커스 보고다.
+- host 는 runtime 마다 터미널 core 의 kitty 저장소(320 MB, LRU)에 원본을 쥔다 — 앱은 캐시다.
+
+**방향 — 쌓지 않고 버리지도 않는다**
+
+- 터미널 이미지는 사건이 아니라 상태다. 보이지 않는 동안의 중간 프레임은 전송 단계에서 버리고, host 저장소의 원본은 건드리지
+  않으며, 다시 보이면 그때 상태만 받는다. 쌓아 두면 상한이 필요하고 다시 보일 때 낡은 프레임이 몰린다. host 원본까지 버리면 한 번
+  보내고 여러 번 배치하는 kitty 이미지를 다시 보였을 때 그릴 수 없다.
+- 기존 「그릴 수 있는 것만」 경로를 그대로 쓸 수 있어 보인다. delta 의 base 대역은 픽셀을 실은 이미지만 「client 가 가졌다」로
+  적고(`DrawableImages` — 2026-09-15 적대적 검증), placement 는 거른 목록끼리 full-set 교체다. 구독이 「이미지 숨김」이면
+  drawable 을 비게 두면 다시 보일 때 base 가 없는 이미지를 다음 delta 가 보낸다. host 저장소에서 지워진 이미지의 `image_remove`
+  는 지금처럼 나간다. 단 화면이 그대로면 delta 가 안 나가므로(`screen_changed`) 보임으로 바뀔 때 `image_wake` 처럼 투영을 강제해야
+  한다.
+
+**정할 것**
+
+- 신호: 구독(`stream_id`)마다 「이미지 숨김」을 켜고 끄는 새 메서드. host 가 모르면 보내지 않도록 hello 광고로 막는다. 기본값은
+  보임 — 업그레이드 handoff 로 넘어간 구독도 보임으로 시작한다(틀려도 지금과 같다).
+- 「보임」의 정의: 창마다 활성 탭의 보이는 pane·quick terminal. 최소화·가려진 창(occlusion)은 2 단계 후보.
+- 떨림: 숨김은 늦게(예: 1 초 뒤), 보임은 즉시. 다시 보일 때 다음 cadence 까지 빈 칸이 생기는지 실측.
+- 텍스트는 계속 받는다 — 뒤에 있는 탭의 상태·알림·에이전트 관측이 그대로여야 한다.
+- 원격(ssh) host 도 같은 메서드를 받는가, 외부 `--stream` observer 는 그대로인가.
+- host 의 kitty 애니메이션 진행(`advanceAnimations`)은 투영과 별개라 뒤에 있는 탭에서도 돈다 — 함께 멈출지는 따로 정한다.
+- 이득을 먼저 잰다: 뒤에 이미지가 많은 탭이 있을 때 보이는 탭의 미룸(`held`·「전송 불가」)과 host·앱 CPU. 이득이 작으면 만들지
+  않는다.

@@ -100,6 +100,13 @@ refresh 사이에 두어 새 행을 만들지 않는다 — 목록 높이를 뺏
 | Claude Code | `~/.claude/projects/*/*.jsonl`의 **직속** 파일만 | 직속 JSONL만; 하위 `subagents` 계층은 절대 재귀하지 않음 | `custom-title`, `ai-title`, first/last user message 순 |
 | Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | `session_meta`의 worker 판정(§3.1)이 사용자 세션일 것 | `session_index.jsonl` title(검증 가능한 경우), 없으면 user event |
 
+Codex 0.163.0의 실제 로컬 기록은 `event_msg.payload.type=item_completed` 안에
+`item.type=UserMessage|AgentMessage`와 text content 배열로 대화를 싣는다. 목록 parser는
+기존 `user_message|agent_message`와 이 completed message를 읽고, CommandExecution·reasoning·
+그 밖의 item은 메시지 수나 요약에 넣지 않는다. `response_item`은 목록의 제목 권위로
+승격하지 않는다. 상세는 기존 bounded response-item fallback을 유지하므로 동일 대화를
+completed event에서 한 번 더 추가하지 않는다.
+
 ### 3.1 Codex worker 판정
 
 `thread_source`는 최근 Codex가 추가한 필드다. 판정은 신호 순서로 한다.

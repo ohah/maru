@@ -371,6 +371,23 @@ OS 배너의 실제 표시는 이번 provider GUI gate에서도 별도다.
 
 ### 실제 실행에서 확인한 실패
 
+최신 main의 재검증에서는 provider가 실패해 foreground 명령이 끝나도 GUI 하네스가
+완료 표식을 기다리는 진단 공백을 확인했다. private fixture에 provider별 stdout/stderr와
+실패 종료 코드를 보존하고, GUI 대기는 실패 표식 또는 앱 종료를 즉시 거부한다.
+인증·provider 실행 실패를 제품의 성공으로 취급하지 않으며 원문은 저장소 밖 증거에만 둔다.
+계정 한도로 한 provider를 실행할 수 없으면 `--provider codex`처럼 실행 대상을 명시해
+다른 provider의 독립 검증을 이어간다. 기본값은 여전히 둘 다이며 결과에는 실제 실행한
+provider만 기록한다. 부분 실행을 두 provider 완료 증거로 쓰지 않는다.
+
+2026-10-17 재검증에서 Claude Code 2.1.299는 주간 사용량 한도로 실패했으며 정상 턴은
+미검증으로 남겼다. Codex CLI 0.163.0은 실제 `pwd` 턴의 native v2 원본 훅, 같은 session의
+live running/Stop 배지와 remote shell capture 봉인을 대조했다. 정상 Quit 뒤 동일 host/runtime을
+다른 앱 PID에서 재부착하고, 실제 Codex session의 다섯 이벤트가 replay로 각각 한 번 적용되는
+것을 확인했다. 복원 뒤 새 합성 v1/v2 이벤트도 live로 수신했다. provider별 복원 검사는
+합계만 세지 않고 session·event·state별 개수와 replay 출처를 비교하며, 원본/복원 trace의
+누락·중복·다른 session·live 오표시를 주입하면 실패한다. 이는 실제 provider 턴과 앱 복원의
+증거이며, 사용량 제한된 Claude 정상 턴이나 OS 배너·이력 도크 전체의 시각 검증은 아니다.
+
 Codex exec는 argv prompt가 있어도 pipe stdin을 추가 입력으로 읽는다. SSH `-T`의 열린
 stdin을 물려준 검증은 GUI 준비 뒤 EOF를 기다리다 timeout됐다. 비대화형 provider 실행은
 명시적 DEVNULL을 사용한다. provider 실행이 길어 preflight ControlMaster의 idle TTL이 끝난

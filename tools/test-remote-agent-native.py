@@ -277,13 +277,15 @@ def replay_boundary_probe(peer, remote, sshconfig, alias):
         proc.stdout.close(); proc.stderr.close(); reader.join(timeout=1)
 
 def main():
-    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--gui-providers',action='store_true');ap.add_argument('--gui-runtime-ended',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--gui-app');ap.add_argument('--gui-output');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');args=ap.parse_args()
+    ap=argparse.ArgumentParser();ap.add_argument('--cli',required=True);ap.add_argument('--old-cli');ap.add_argument('--providers',action='store_true');ap.add_argument('--gui-providers',action='store_true');ap.add_argument('--gui-runtime-ended',action='store_true');ap.add_argument('--frames-output');ap.add_argument('--automatic',action='store_true');ap.add_argument('--gui-test');ap.add_argument('--gui-app');ap.add_argument('--gui-output');ap.add_argument('--restart-test');ap.add_argument('--terminal-cancel',action='store_true');ap.add_argument("--provider", action="append", choices=["claude", "codex"], help="Limit actual provider execution; requires --providers");args=ap.parse_args()
     if bool(args.gui_app) != bool(args.gui_output): ap.error('--gui-app and --gui-output must be supplied together')
     if args.gui_providers and not (args.gui_app and args.providers): ap.error('--gui-providers requires --gui-app, --gui-output and --providers')
     if args.gui_runtime_ended and (not args.gui_app or args.gui_providers): ap.error('--gui-runtime-ended requires --gui-app/--gui-output and excludes --gui-providers')
+    if args.provider and not args.providers: ap.error("--provider requires --providers")
+    selected_providers = list(dict.fromkeys(args.provider or ["claude", "codex"]))
     cli=str(Path(args.cli).resolve());old=str(Path(args.old_cli).resolve()) if args.old_cli else None
     provider_paths=[shutil.which(name) or '' for name in ['claude','codex']] if args.providers else ['', '']
-    if args.providers:assert all(provider_paths),'installed Claude/Codex required'
+    if args.providers:assert all(path for name,path in zip(['claude','codex'],provider_paths) if name in selected_providers),'selected provider CLI required'
     source_home=str(Path.home())
     cases=[('allowed',True,cli),('denied',False,cli),('disabled',True,cli)]
     if old:cases.append(('old-peer',True,old))
@@ -315,12 +317,16 @@ def run_providers():
  if auth.is_file():shutil.copyfile(auth,root/".codex/auth.json");(root/".codex/auth.json").chmod(0o600)
  commands=[("claude",[sys.argv[3],"--print","--setting-sources","","--settings",str(root/".claude/settings.json"),"--no-session-persistence","--allowedTools","Bash(pwd)","--model","haiku","--max-budget-usd","0.20",prompt]),("codex",[sys.argv[4],"exec","--skip-git-repo-check","--ephemeral","--sandbox","read-only","-c","features.hooks=true","-c",'model_reasoning_effort="low"',prompt])]
  for provider,argv in commands:
+  if provider not in sys.argv[6].split(","):continue
   penv=dict(env,HOME=str(source)) if provider=="claude" else dict(env,CODEX_HOME=str(root/".codex"))
   penv["PATH"]=sys.argv[5]
   # SSH -T leaves a pipe open. Codex appends piped stdin even with an argv prompt;
   # this non-interactive fixture supplies its entire prompt in argv, so explicitly close stdin.
   result=subprocess.run(argv,cwd=project,env=penv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=60)
+  for suffix,data in [("stdout",result.stdout),("stderr",result.stderr)]:
+   output=root/("provider-"+provider+"."+suffix);output.write_bytes(data);output.chmod(0o600)
   if result.returncode:
+   (root/"provider-failure.json").write_text(json.dumps({"provider":provider,"exit_code":result.returncode}))
    Path("/tmp/remote-native-provider-failure.log").write_bytes(result.stderr);Path("/tmp/remote-native-provider-failure.log").chmod(0o600)
    raise RuntimeError("installed provider failed: "+provider)
   version=subprocess.run([argv[0],"--version"],env=penv,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5).stdout.decode().strip()
@@ -330,7 +336,7 @@ def run_providers():
   if (root/"provider-gui-mode").exists():
    import time
    time.sleep(.7) # Allow the real idle badge to render before the next provider starts.
-if len(sys.argv)>4 and sys.argv[3] and env.get("LC_MARU_LOG_FORMAT")=="2" and not (root/"provider-gui-mode").exists():
+if len(sys.argv)>4 and (sys.argv[3] or sys.argv[4]) and env.get("LC_MARU_LOG_FORMAT")=="2" and not (root/"provider-gui-mode").exists():
  run_providers()
 if (root/"gui-hold").exists():
  import time
@@ -357,7 +363,7 @@ if (root/"automatic-hold").exists():
   time.sleep(.02)
 
 ''')
-            force=root/'force.sh';force.write_text("#!/bin/sh\nexec "+shlex.join([sys.executable,str(worker),str(remote),source_home,*provider_paths,os.environ.get("PATH","/usr/bin:/bin")])+"\n");force.chmod(0o700)
+            force=root/'force.sh';force.write_text("#!/bin/sh\nexec "+shlex.join([sys.executable,str(worker),str(remote),source_home,*provider_paths,os.environ.get("PATH","/usr/bin:/bin"),",".join(selected_providers)])+"\n");force.chmod(0o700)
             proxy=bindir/'ssh';trace=root/'trace.jsonl'
             proxy.write_text(f'''#!{sys.executable}\nimport json,os,sys\na=sys.argv[1:];control=next((v.split("=",1)[1] for v in a if v.startswith("ControlPath=")),None)\nwith open({str(trace)!r},"a") as out:out.write(json.dumps({{"control":control,"format":os.environ.get("LC_MARU_LOG_FORMAT"),"prepare":any("agent-hooks" in v for v in a)}})+"\\n")\nos.execv("/usr/bin/ssh",["ssh","-F",{str(root / "ssh_config")!r}]+a)\n''');proxy.chmod(0o700)
             for name in ['hostkey','userkey']:run(['/usr/bin/ssh-keygen','-q','-t','ed25519','-N','','-f',str(root/name)])
@@ -406,7 +412,7 @@ if (root/"automatic-hold").exists():
                     spec = importlib.util.spec_from_file_location('remote_restart_gui', module_path)
                     gui = importlib.util.module_from_spec(spec); spec.loader.exec_module(gui)
                     assert args.gui_output, '--gui-output required for GUI evidence'
-                    gui.probe(args.gui_app, cli, root, remote, sshconfig, alias, env, emit_offline_hooks, args.gui_output, providers=args.gui_providers, runtime_ended=args.gui_runtime_ended)
+                    gui.probe(args.gui_app, cli, root, remote, sshconfig, alias, env, emit_offline_hooks, args.gui_output, providers=selected_providers if args.gui_providers else False, runtime_ended=args.gui_runtime_ended)
                 if args.automatic and tag == 'allowed':
                     automatic_wrapper_probe(cli, root, remote, sshconfig, alias, env, trace)
                 if args.terminal_cancel and tag == 'allowed':

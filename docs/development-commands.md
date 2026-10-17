@@ -1632,3 +1632,12 @@ CMP1~12 제품 판정자와 import 초기화 검사 4개(총 16개)를 실행한
 단일/여러 열린 문서·닫힌 파일 혼합, Undo/Redo·선택·revision 보존, 동일 본문 편집,
 선택 없는 뷰, 이력 ID 고갈, 공유 정본의 작업 되돌리기를 검사한다.
 물리 IME·실제 메모리 고갈·전원 손실의 검증을 대신하지 않는다.
+
+### 백업 복원 실패 시 본문·Undo 보존
+
+`mise exec -- zig build test-editor-backup-restore`와 `-Doptimize=ReleaseFast`는
+U4b/U4c/U4d 제품 회귀·백업 reader·복구 저장소와 U4b-19 실패 주입을 실행한다(초기화 검사 포함 총 40개).
+로컬 ID·기존 untitled의 선택 유무, Undo/Redo·공유 뷰 보존, 이력 ID 고갈·읽기 전용 거절,
+원본 백업 바이트와 정상 복원의 Undo를 검사한다. `test-editor-recovery-codec`와
+`test-editor-recovery-window`는 복구 포맷과 창 staging 회귀를 함께 확인한다.
+물리 IME·실제 전원 손실·OS 전체 메모리 고갈은 별도 검증이다.

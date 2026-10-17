@@ -404,6 +404,16 @@ pub fn restoreIfAny(self: *AppSession, term: *Term) void {
     restoreFromRecord(self, term, .{ .path = .{ .path = path } });
 }
 
+/// 복원용 임시 커서는 성공 때만 남긴다. 준비 실패는 원래 선택을 보존한다.
+fn applyRecovered(self: *AppSession, term: *Term, changes: []maru.session.editor.delta.Change) bool {
+    const before = term.rt.editor_selection;
+    term.rt.editor_selection = editor_selection.Selection.at(0);
+    // 복원 자체도 Undo 하나다. 이력 준비가 실패하면 본문과 기존 이력도 보존한다.
+    if (editor_ops.applyEditAsOneWithUndo(self, term, changes)) return true;
+    term.rt.editor_selection = before;
+    return false;
+}
+
 /// checkpoint가 명시한 ID만 복원한다. absence와 읽기/신원 실패를 분리해 창 staging이
 /// 실패를 성공으로 저장하지 않게 한다. dirty record는 다음 백업 전 종료에도 남는다.
 pub fn restoreRecovery(self: *AppSession, term: *Term) !bool {
@@ -419,9 +429,8 @@ pub fn restoreRecovery(self: *AppSession, term: *Term) !bool {
         owner.consume_on_publish = true;
         return false;
     }
-    term.rt.editor_selection = editor_selection.Selection.at(0);
     var changes = [_]maru.session.editor.delta.Change{.{ .start = 0, .end = opened.file.content.len, .text = record.parsed.content }};
-    if (!editor_ops.applyEditAsOne(self, term, &changes)) return error.OutOfMemory;
+    if (!applyRecovered(self, term, &changes)) return error.OutOfMemory;
     term.rt.editorDocument().opened.?.disk_hash = record.parsed.doc.disk_hash;
     term.rt.editorDocument().notifications.backup_on_disk = true;
     return true;
@@ -459,9 +468,7 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
         .apply => {},
     }
 
-    // **커서를 먼저 세운다** — 파일을 열 때 커서는 클릭이 세우므로(그 규칙은 `openPathInActivePane`
-    // 의 주석이 소유한다) 지금은 없고, 편집은 커서 없이 들어가지 않는다.
-    term.rt.editor_selection = editor_selection.Selection.at(0);
+    // 복원 편집의 임시 커서와 실패 시 선택 복원은 applyRecovered가 소유한다.
     var changes = [_]maru.session.editor.delta.Change{.{
         .start = 0,
         .end = doc.file.content.len,
@@ -469,7 +476,7 @@ fn restoreFromRecord(self: *AppSession, term: *Term, want: backup.Doc) void {
     }};
     // **한 편집이다** — 통짜로 문서를 갈아치우면 `⌘Z` 로 디스크 내용에 돌아갈 길이 없다(C1a 의
     // 「다시 로드」가 같은 이유로 편집이 됐다). 실패하면 **레코드를 남긴다**: 다음 기회에 또 시도한다.
-    if (!editor_ops.applyEditAsOne(self, term, &changes)) return;
+    if (!applyRecovered(self, term, &changes)) return;
     if (want == .untitled) term.rt.editorDocument().opened.?.needs_save = true;
 
     // **지문은 레코드의 것이다** — 「내가 마지막으로 본 디스크」. 지금 디스크의 지문으로 덮으면 첫

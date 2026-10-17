@@ -7878,7 +7878,12 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
                 else => return error.TestUnexpectedResult,
             }
             try backend_value.promoteHostReconnectControllerBinding(handle);
+            // Reproduce the old transport's latch independently of adoption order.
+            // Publication must reopen the shared routing gate for every surviving row.
+            const publishing_runtime = backend_value.runtimes.get(handle).?.runtime;
+            publishing_runtime.surface.process_state = .exited;
             try backend_value.publishHostReconnectGeneration(handle);
+            try testing.expectEqual(maru.session.ProcessState.running, publishing_runtime.surface.process_state);
             published_shell_generations[index] = (try RemoteRuntime.backend_api
                 .reconnectRuntimeSetIdentity(backend_value.runtimes.get(handle).?.runtime)).shell_generation;
             published_input_epochs[index] = backend_value.runtimes.get(handle).?.runtime.input_batches.epoch;
@@ -8224,7 +8229,9 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
                         B5TestState.cr4c_publication_drift = true;
                     remote_runtime.testing_api.armOrderedReconnectReclaimTrace();
                     defer remote_runtime.testing_api.disarmOrderedReconnectReclaimTrace();
+                    runtime.surface.process_state = .exited;
                     try backend_value.publishHostReconnectGeneration(1);
+                    try testing.expectEqual(maru.session.ProcessState.running, runtime.surface.process_state);
                     try testing.expectEqual(
                         [_]u8{ 1, 2 },
                         remote_runtime.testing_api.orderedReconnectReclaimTrace(),
@@ -8242,11 +8249,14 @@ fn runCr4aActualIssuerReplacementStage(selected: Cr4aActualIssuerCandidateCase) 
                     return;
                 }
                 if (selected == .controller_publish_expired) {
+                    const expired_runtime = backend_value.runtimes.get(1).?.runtime;
+                    expired_runtime.surface.process_state = .exited;
                     deadline_clock.now_ns = deadline_expires_at_ns;
                     try testing.expectError(
                         error.DeadlineExceeded,
                         backend_value.publishHostReconnectGeneration(1),
                     );
+                    try testing.expectEqual(maru.session.ProcessState.exited, expired_runtime.surface.process_state);
                     try testing.expect(job.valid(&backend_value));
                     try testing.expectEqual(
                         @intFromEnum(HostReconnectJobState.candidate_failed),

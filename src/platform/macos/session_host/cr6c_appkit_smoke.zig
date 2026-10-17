@@ -663,8 +663,10 @@ pub fn main(init: std.process.Init) !void {
     }
     var input_spawn_params: ?[]u8 = null;
     defer if (input_spawn_params) |params| allocator.free(params);
+    // The once-only marker must come from cat consuming the key input. PTY ECHO
+    // would print a second copy and make the GUI oracle depend on read timing.
     const spawn_params = if (auto_reconnect)
-        "{\"argv\":[\"/bin/sh\",\"-c\",\"(while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/c3c-after-disconnect-output\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/c3c-after-disconnect-output\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\nCR6E-C3C-AUTO-RECONNECTED\\n') & printf 'CR6C-RECOVERED-MARKER\\nCR6E-C3C-HISTORICAL-ONCE\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}"
+        "{\"argv\":[\"/bin/sh\",\"-c\",\"stty -echo; (while [ ! -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/c3c-after-disconnect-output\\\" ]; do sleep 0.05; done; rm -f \\\"$MARU_SESSION_HOST_CR6C_ARTIFACT_ROOT/c3c-after-disconnect-output\\\"; printf 'E3C-APPKIT-ASYNC-WAKE\\nCR6E-C3C-AUTO-RECONNECTED\\n') & printf 'CR6C-RECOVERED-MARKER\\nCR6E-C3C-HISTORICAL-ONCE\\n'; exec /bin/cat\"],\"cols\":80,\"rows\":24}"
     else if (input_continuity) blk: {
         const params = try writeInputContinuitySpawnParams(allocator, artifact_root);
         input_spawn_params = params;
